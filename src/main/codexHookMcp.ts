@@ -298,12 +298,11 @@ function pendingCallItems(tail: string): Array<Record<string, unknown>> {
 }
 
 /**
- * HEAVY-CPU-OPTIONS-191: the shell asked for by the current turn's pending exec_command with this
- * `cmd`. Returns its literal `shell` (a path or a name), null when it gave none (Codex's default
- * shell), or undefined when no such call is found or its shell is computed. The heavy job's join
- * line differs in cmd, which has no `;` separator.
+ * The literal `key` argument of the current turn's pending exec_command with this `cmd`: a
+ * string, null when the call gave none (Codex's default), or undefined when no such call is found
+ * or the value is computed.
  */
-export function pendingExecShell(tail: string, command: string): string | null | undefined {
+function pendingExecArg(tail: string, command: string, key: 'shell' | 'workdir'): string | null | undefined {
   for (const p of pendingCallItems(tail)) {
     if (p.name === 'exec' && typeof p.input === 'string') {
       const src = p.input;
@@ -313,15 +312,35 @@ export function pendingExecShell(tail: string, command: string): string | null |
       while ((m = re.exec(src))) {
         if (code[m.index] !== 't' || (m[1] ?? m[3]) === 'write_stdin') continue;
         const span = objectSpan(src, m.index + m[0].length);
-        if (span && literalProp(span, 'cmd') === command) return literalProp(span, 'shell');
+        if (span && literalProp(span, 'cmd') === command) return literalProp(span, key);
       }
     } else if (p.name === 'exec_command' && typeof p.arguments === 'string') {
-      let a: { cmd?: unknown; shell?: unknown } | null = null;
+      let a: Record<string, unknown> | null = null;
       try { a = JSON.parse(p.arguments); } catch { a = null; }
-      if (a?.cmd === command) return typeof a.shell === 'string' ? a.shell : a.shell === undefined || a.shell === null ? null : undefined;
+      if (a?.cmd === command) { const v = a[key]; return typeof v === 'string' ? v : v === undefined || v === null ? null : undefined; }
     }
   }
   return undefined;
+}
+
+/**
+ * HEAVY-CPU-OPTIONS-191: the shell asked for by the current turn's pending exec_command with this
+ * `cmd`. Returns its literal `shell` (a path or a name), null when it gave none (Codex's default
+ * shell), or undefined when no such call is found or its shell is computed. The heavy job's join
+ * line differs in cmd, which has no `;` separator.
+ */
+export function pendingExecShell(tail: string, command: string): string | null | undefined {
+  return pendingExecArg(tail, command, 'shell');
+}
+
+/**
+ * HEAVY-LOCK-SINGLE-FILE-DENIAL-198: the folder the pending exec_command with this `cmd` runs in,
+ * its literal `workdir` (null: none given, the session's folder; undefined: not found or computed).
+ * A Codex MCP hook carries no cwd, so without this the heavy lock read `test/x.test.cjs` against
+ * Guppy's own folder, found nothing, and queued a single test file as a provisional bench.
+ */
+export function pendingExecWorkdir(tail: string, command: string): string | null | undefined {
+  return pendingExecArg(tail, command, 'workdir');
 }
 
 /** HEAVY-CPU-OPTIONS-191: Windows cmd (`cmd`, `cmd.exe`, or a path to it). */
