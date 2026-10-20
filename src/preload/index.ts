@@ -4,7 +4,6 @@ import type { ProjectThemeId, ProjectThemeSeed } from '../shared/projectTheme';
 import type { ModelsCatalog, ModelsRefreshRow } from '../shared/modelCatalog';
 import type { ModelPinFields } from '../shared/modelPin';
 import type { InputOrigin } from '../shared/inputOrigin';
-import type { PtyInput } from '../shared/ptyInput';
 import type { LedgerUiAgentView, LedgerUiResult, LedgerUiSummary } from '../shared/claimsUi';
 import type { RendererErrorReport } from '../shared/rendererError';
 import type { GraphicsStatusView } from '../shared/graphicsMode';
@@ -760,8 +759,8 @@ const api = {
   /** `origin` is REQUIRED: every writer declares who is behind the bytes
    *  (`shared/inputOrigin.ts`). Main advances the PTY's human-input generation
    *  only for HUMAN, and refuses a write whose origin it does not recognise. */
-  writePty: (id: string, data: PtyInput, origin: InputOrigin): Promise<{ ok: boolean; error?: string }> =>
-    ipcRenderer.invoke('pty:write', id, data, origin),
+  writePty: (id: string, data: string, origin: InputOrigin, binary = false): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('pty:write', id, data, origin, binary),
   resizePty: (id: string, cols: number, rows: number): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('pty:resize', id, cols, rows),
   /** L0-FUSION stage 3: the renderer mirrors xterm's own provenance facts for one

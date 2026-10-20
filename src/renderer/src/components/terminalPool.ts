@@ -49,7 +49,6 @@ import {
   type TerminalAutomationBlock
 } from './terminalAutomation';
 import { sanitizeTerminalSelection } from './terminalSelection';
-import { binaryStringToBytes } from '@shared/ptyInput';
 import { codexReading, needleReading } from '@shared/screenReading';   // GTC M2: shared with main's mirror
 import '@xterm/xterm/css/xterm.css';
 
@@ -417,7 +416,7 @@ export function acquireTerminal(ptyId: string, theme?: ThemeMap, fontSize = 14):
     // arrives here on one callback with no origin attached. `classifyOutbound`
     // answers from the human window that `inputOrigin.ts` owns; nothing here
     // guesses from the bytes.
-    window.cth.writePty(ptyId, binary ? binaryStringToBytes(data) : data, classifyOutbound(ptyId, data));
+    window.cth.writePty(ptyId, data, classifyOutbound(ptyId, data), binary);
     // A lone Escape or Ctrl-C closes interactive pickers. Arrow-key escape
     // sequences must NOT clear the block while the user navigates a picker.
     if (data === '\x1b' || data === '\x03') {
@@ -464,8 +463,8 @@ export function acquireTerminal(ptyId: string, theme?: ThemeMap, fontSize = 14):
     reportPromptState(entry);
   };
   term.onData((data) => forwardTerminalInput(data));
-  // Legacy/X10 mouse reports are emitted on onBinary, not onData. Their code
-  // units are bytes, so preserve them as Uint8Array across Electron IPC.
+  // Legacy/X10 mouse reports are emitted on onBinary, not onData. Main chooses
+  // ConPTY's UTF-8 string path or POSIX's raw latin-1 bytes.
   term.onBinary((data) => forwardTerminalInput(data, true));
 
   pool.set(ptyId, entry);

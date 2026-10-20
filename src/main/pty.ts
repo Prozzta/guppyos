@@ -980,13 +980,15 @@ export class PtyManager {
     const s = this.sessions.get(id);
     if (!s) return { ok: false, error: `no pty: ${id}` };
     try {
-      s.proc.write(data);
+      // node-pty accepts Buffer at runtime for POSIX raw input; its bundled
+      // declaration only advertises string.
+      (s.proc.write as unknown as (input: string | Buffer) => void)(data);
       // GOD-TERMINAL-CONTROL (Jim MUST 1): god at the keyboard counts as a person, so a wake is
       // never staged or committed over god's typing.
       if (origin === 'HUMAN' || origin === 'GOD') { s.humanInputGeneration++; s.lastHumanInputAt = Date.now(); }
       if (origin === 'GOD') {
         s.godInputGeneration = (s.godInputGeneration ?? 0) + 1;
-        if (data.includes('\r')) s.godEnterAt = Date.now();
+        if (typeof data === 'string' && data.includes('\r')) s.godEnterAt = Date.now();
       }
       return { ok: true };
     } catch (e) {
