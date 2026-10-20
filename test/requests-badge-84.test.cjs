@@ -398,7 +398,7 @@ test('hive: the one-time replay runs B and C over every agent\'s outbox/.sent, a
 // ── wiring ───────────────────────────────────────────────────────────────────────────────────
 test('WIRING: routing runs B/C for direct mail; main gives the ledger the caller-bound close; the protocol says so', () => {
   const hiveSrc = codeOnly(readSource('src/main/hive.ts'), 'hive.ts');
-  assert.match(hiveSrc, /this\.mail\.markReplied\(msg\.from, msg\.in_reply_to, msg\.id, resolveTo\(msg\.to\)\);[\s\S]{0,900}if \(msg\.to !== 'broadcast'\) this\.closeAnsweredAsks\(msg, resolveTo\(msg\.to\)\);/);
+  assert.match(hiveSrc, /this\.mail\.markReplied\(msg\.from, msg\.in_reply_to, msg\.id, resolveTo\(msg\.to\), msg\.needs_human === true \? 'blocked' : msg\.act\);[\s\S]{0,900}if \(msg\.to !== 'broadcast'\) this\.closeAnsweredAsks\(msg, resolveTo\(msg\.to\)\);/);
   assert.match(hiveSrc, /answeredByMessage\(this\.mail\.ledger\(msg\.from\), to, m\), \.\.\.supersededByMessage\(this\.mail\.ledger\(to\), msg\.from, m\)/);
   const idx = codeOnly(readSource('src/main/index.ts'), 'index.ts');
   assert.match(idx, /askCloser: \(id\) => hive\.askCloser\(agentId, id\),\s*closeAsk: \(id, by, reason\) => hive\.closeAsk\(agentId, id, by, reason\)/);

@@ -29,7 +29,7 @@ import { homedir } from 'node:os';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { AppendFile, LOG_KEEP_ROTATED, rotatedFiles } from './appendLog';
 import { atomicWriteJson as atomicWriteJsonFile } from './atomicJson';
-import { ASK_BACKSTOP_MS, ASK_CLOSE_REASON_MAX, MailLedger, answeredByMessage, cardIdValue, freshMailId, isOpenObligation, isValidMailId, replyTracked, staleObligations, supersededByMessage, type CardEvidence, type MailLedgerDoc, type ReleaseRun, type StaleObligation } from './mailLedger';
+import { ASK_BACKSTOP_MS, ASK_CLOSE_REASON_MAX, MailLedger, answeredByMessage, cardIdValue, freshMailId, isValidMailId, owesWork, replyTracked, staleObligations, supersededByMessage, type CardEvidence, type MailLedgerDoc, type ReleaseRun, type StaleObligation } from './mailLedger';
 import { mailObligationsView, type MailObligationsAgent } from './mailReaders';
 import { UNDELIVERED_DIR, dropUndeliveredItems, mailMigrationDone, markUndeliveredSeen, readUndeliveredReport, restoreUndeliveredFiles, runMailMigration, setAsideUndelivered, type MailMigrationResult, type UndeliveredReport } from './mailMigration';
 import { mailChannelMode, mailPromptMode, type MailPromptMode } from './mailSurface';
@@ -3072,7 +3072,8 @@ export class HiveManager {
     // ZT-I1-MAIL §4.3 + §11.13(B): a reply from an agent closes the reply/outcome obligation it
     // answers in that agent's ledger (id or sender_id alias). Zero-token: tracking only, no wake.
     if (msg.in_reply_to) {
-      try { this.mail.markReplied(msg.from, msg.in_reply_to, msg.id, resolveTo(msg.to)); } catch (e) {
+      // HIVE-DWIGHT-BG-REINVOKE (A): the act decides whether the reply discharges the work.
+      try { this.mail.markReplied(msg.from, msg.in_reply_to, msg.id, resolveTo(msg.to), msg.needs_human === true ? 'blocked' : msg.act); } catch (e) {
         try { this.appendLog({ kind: 'mail-ledger-error', agentId: msg.from, id: msg.id, op: 'replied', error: String(e) }); } catch { /* noop */ }
       }
     }
@@ -4050,7 +4051,7 @@ export class HiveManager {
       } catch { return null; }
     };
     const own = ask(caller);
-    if (own && isOpenObligation(own)) return { by: 'owner', open: [caller] };
+    if (own && owesWork(own)) return { by: 'owner', open: [caller] };
     const reg = this.registry();
     let sent = false;
     const open: string[] = [];
@@ -4059,7 +4060,7 @@ export class HiveManager {
       const e = ask(a);
       if (e?.from !== caller) continue;
       sent = true;
-      if (isOpenObligation(e)) open.push(a);
+      if (owesWork(e)) open.push(a);
     }
     if (sent) return { by: 'requester', open };
     return own ? { by: 'owner', open: [] } : null;

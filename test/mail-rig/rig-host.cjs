@@ -109,7 +109,9 @@ async function buildFloor() {
   const { HiveManager } = loadTs('src/main/hive.ts');
   const { HookServer } = loadTs('src/main/hooks.ts');
   const { InboxWakeBridge } = loadTs('src/main/inboxWakeBridge.ts');
-  const { WorkerWakeWatchdog } = loadTs('src/main/workerWake.ts');
+  const { WorkerWakeWatchdog, WORKER_WAKE_HITL_REARM_MS } = loadTs('src/main/workerWake.ts');
+  const { OwedContinuation } = loadTs('src/main/owedContinuation.ts');
+  const { owesWork } = loadTs('src/main/mailLedger.ts');
   const { ControlRegistry } = loadTs('src/main/control.ts');
   const { PtyManager } = loadTs('src/main/pty.ts');
   const { AutomaticSubmitOwner } = loadTs('src/main/automaticSubmit.ts');
@@ -440,7 +442,47 @@ async function buildFloor() {
       } catch { /* the next beat retries */ }
     }
     inboxWake.reconcileAll(live);
+    runOwedContinuation(live);
     return live;
+  }
+
+  // index.ts runOwedContinuation (HIVE-DWIGHT-BG-REINVOKE). The rig has no heavy lock. The
+  // coordinator's Stop stamp is already on the simulated clock; the ledger keeps real time.
+  const owedContinuation = new OwedContinuation(Date.now(), () => hive.registry().godId ?? null);
+  function runOwedContinuation(live) {
+    try {
+      const now = clock.now();
+      const sent = new Map();
+      for (const owner of Object.keys(hive.registry().agents ?? {})) {
+        for (const e of Object.values(hive.mail.ledger(owner).entries)) {
+          if (!live.includes(e.from)) continue;
+          const list = sent.get(e.from) ?? [];
+          list.push({ id: e.id, to: owner, act: e.act, at: e.deliveredAt, open: owesWork(e) });
+          sent.set(e.from, list);
+        }
+      }
+      for (const agentId of live) {
+        const snap = control.snapshot(agentId);
+        const lf = workerWake.livenessFacts(agentId);
+        const d = owedContinuation.tick(agentId, {
+          now,
+          lifecycle: lf.lifecycle,
+          lastTurnEndAt: lf.lastTurnEndAt,
+          inFlight: !!workerWake.state(agentId).inFlight,
+          pendingMail: mailPendingIds(agentId).length,
+          paused: snap.paused,
+          halted: snap.halted,
+          autoDeliveryPaused: snap.autoDeliveryPaused,
+          hitl: lf.lastHumanNeedsAt > 0 && Date.now() - lf.lastHumanNeedsAt < WORKER_WAKE_HITL_REARM_MS,
+          heavyQueued: false,
+          entries: Object.values(hive.mail.ledger(agentId).entries),
+          sent: sent.get(agentId) ?? []
+        });
+        for (const row of d.rows) { try { hive.appendLog(row); } catch { /* logging only */ } }
+        if (d.nudge) { try { hive.send(d.nudge.message, 'system'); } catch { /* best effort */ } }
+        if (d.notice) { try { hive.send(d.notice.message, 'system'); } catch { /* best effort */ } }
+      }
+    } catch { /* best effort: the next beat retries */ }
   }
 
   // ——— the spawn path (index.ts spawnAgentCore, the steps a hive agent's spawn takes) ———

@@ -175,6 +175,10 @@ export interface MailEntry {
   requiresReply: boolean;
   repliedAt?: number | null;
   replyId?: string | null;
+  /** HIVE-DWIGHT-BG-REINVOKE (A): the act of the reply that set `repliedAt` ('blocked' for a
+   *  needs_human reply). An 'inform' or 'agree' reply keeps the work in progress (owedWork); absent
+   *  (a legacy entry) counts as discharged. */
+  replyAct?: string | null;
   /** §11.18 #1: an open obligation explicitly closed without a reply (closeObligation). */
   closedAt?: number | null;
   closeReason?: string | null;
@@ -313,6 +317,20 @@ export function replyTracked(e: MailEntry): boolean {
 /** §11.18 #1: an obligation still open (tracked, not replied, not explicitly closed). */
 export function isOpenObligation(e: MailEntry): boolean {
   return replyTracked(e) && !e.repliedAt && !e.closedAt;
+}
+
+/** HIVE-DWIGHT-BG-REINVOKE (god 7e4159): reply acts that keep the work in progress. Only done,
+ *  refuse, blocked (needs_human), dismiss or supersede discharge it. */
+export const INTERIM_REPLY_ACTS: ReadonlySet<string> = new Set(['inform', 'agree']);
+
+/** A tracked obligation answered only with an interim reply (inform/agree), not closed. */
+export function isInterimReplied(e: MailEntry): boolean {
+  return replyTracked(e) && !!e.repliedAt && !e.closedAt && INTERIM_REPLY_ACTS.has(e.replyAct ?? '');
+}
+
+/** The receiver still owes work on this obligation: not replied, or replied only in the interim. */
+export function owesWork(e: MailEntry): boolean {
+  return isOpenObligation(e) || isInterimReplied(e);
 }
 
 /**
@@ -648,16 +666,18 @@ export function applyCloseEpoch(doc: MailLedgerDoc, epoch: string, outcome: Epoc
  * sender is the reply's recipient; else the exact id; else the oldest alias match. The state is
  * not changed. Idempotent.
  */
-export function applyReplied(doc: MailLedgerDoc, ref: string, replyId: string, now: number, replyTo?: string | null): MailStep {
+export function applyReplied(doc: MailLedgerDoc, ref: string, replyId: string, now: number, replyTo?: string | null, replyAct?: string | null): MailStep {
   const exact = doc.entries[ref];
+  // HIVE-DWIGHT-BG-REINVOKE (A): a discharging reply also upgrades an interim-replied entry.
+  const discharging = !!replyAct && !INTERIM_REPLY_ACTS.has(replyAct);
   const candidates = [...(exact ? [exact] : []), ...Object.values(doc.entries).filter((e) => e.senderId === ref && e.id !== ref).sort(bySeq)]
-    .filter((e) => isOpenObligation(e));
+    .filter((e) => isOpenObligation(e) || (discharging && isInterimReplied(e)));
   const e = (replyTo ? candidates.find((c) => c.from === replyTo) : undefined) ?? candidates[0];
   if (!e) return unchanged(doc);
   const d = new Draft(doc, now);
-  const next: MailEntry = { ...e, repliedAt: now, replyId, updatedAt: now };
+  const next: MailEntry = { ...e, repliedAt: now, replyId, ...(replyAct ? { replyAct } : {}), updatedAt: now };
   d.put(next);
-  d.row({ kind: 'mail', stage: 'replied', id: e.id, replyId });
+  d.row({ kind: 'mail', stage: 'replied', id: e.id, replyId, ...(replyAct ? { replyAct } : {}) });
   d.event(next, 'replied', false);
   return d.step();
 }
@@ -667,9 +687,11 @@ export function applyReplied(doc: MailLedgerDoc, ref: string, replyId: string, n
  * names (the Human or god decides a request needs no answer). `ref` resolves like a reply (the
  * exact id, else sender_id aliases), and the oldest open match is closed. The state is not
  * changed; the entry becomes prunable. Idempotent. Not activity: no agent turn did it.
+ * HIVE-DWIGHT-BG-REINVOKE: an obligation answered only in the interim (inform/agree) closes too,
+ * so a dismiss or supersede discharges it (owesWork); the same in rules B and C below.
  */
 export function applyCloseObligation(doc: MailLedgerDoc, ref: string, now: number, reason: string): MailStep {
-  const e = resolveEntries(doc, ref).find((c) => isOpenObligation(c));
+  const e = resolveEntries(doc, ref).find((c) => owesWork(c));
   if (!e) return unchanged(doc);
   const d = new Draft(doc, now);
   const why = String(reason || 'closed').slice(0, 200);
@@ -979,7 +1001,7 @@ function cites(text: string, e: MailEntry): boolean {
  */
 export function answeredByMessage(ownerDoc: MailLedgerDoc, requester: string, m: RoutedMessageLike): StaleObligation[] {
   if (!CITE_ACTS.has(m.act)) return [];
-  const open = Object.values(ownerDoc.entries).filter((e) => e.from === requester && isOpenObligation(e) && e.deliveredAt < m.at).sort(bySeq);
+  const open = Object.values(ownerDoc.entries).filter((e) => e.from === requester && owesWork(e) && e.deliveredAt < m.at).sort(bySeq);
   const text = `${m.subject ?? ''}\n${m.body ?? ''}`;
   const out = new Map<string, string>();
   for (const e of open) {
@@ -1001,7 +1023,7 @@ export function supersededByMessage(recipientDoc: MailLedgerDoc, requester: stri
   const named = new Set(m.supersedes ?? []);
   if (!named.size) return [];
   return Object.values(recipientDoc.entries)
-    .filter((e) => e.from === requester && isOpenObligation(e) && e.deliveredAt < m.at && (named.has(e.id) || (!!e.senderId && named.has(e.senderId))))
+    .filter((e) => e.from === requester && owesWork(e) && e.deliveredAt < m.at && (named.has(e.id) || (!!e.senderId && named.has(e.senderId))))
     .sort(bySeq)
     .map((e) => ({ agentId: recipientDoc.agentId, id: e.id, reason: `auto:superseded:${m.id}` }));
 }
@@ -1098,7 +1120,7 @@ interface LogEvidence {
   surfaced: boolean;
   delivered?: Record<string, unknown>;
   workOrder?: Record<string, unknown> & { ts?: number };
-  replied?: { at: number; replyId: string | null };
+  replied?: { at: number; replyId: string | null; replyAct: string | null };
   lastTs: number;
 }
 
@@ -1131,7 +1153,7 @@ export function rebuildLedger(agentId: string, input: { inbox: DiskMessage[]; do
       if (r.stage === 'delivered') e.delivered = r;
       else if (r.stage === 'surfaced' || r.stage === 'redelivered') e.surfaced = true;
       else if (r.stage === 'acted' && r.via === 'work-order') e.workOrder = { ...r, ts };
-      else if (r.stage === 'replied') e.replied = { at: ts || now, replyId: typeof r.replyId === 'string' ? r.replyId : null };
+      else if (r.stage === 'replied') e.replied = { at: ts || now, replyId: typeof r.replyId === 'string' ? r.replyId : null, replyAct: typeof r.replyAct === 'string' ? r.replyAct : null };
     }
   }
   let doc = emptyLedger(agentId);
@@ -1157,7 +1179,7 @@ export function rebuildLedger(agentId: string, input: { inbox: DiskMessage[]; do
   }
   for (const [id, e] of ev) {
     const entry = doc.entries[id];
-    if (entry && e.replied) doc.entries[id] = { ...entry, repliedAt: e.replied.at, replyId: e.replied.replyId };
+    if (entry && e.replied) doc.entries[id] = { ...entry, repliedAt: e.replied.at, replyId: e.replied.replyId, ...(e.replied.replyAct ? { replyAct: e.replied.replyAct } : {}) };
   }
   const lastTs = Math.max(0, ...[...ev.values()].map((e) => e.lastTs));
   doc = { ...doc, lastActivityAt: lastTs || null };
@@ -1997,10 +2019,10 @@ export class MailLedger {
   }
 
   /** `agentId` routed a message with in_reply_to = `ref` to `replyTo`. No-op for a non-agent sender. */
-  markReplied(agentId: string, ref: string, replyId: string, replyTo?: string | null): string[] {
+  markReplied(agentId: string, ref: string, replyId: string, replyTo?: string | null, replyAct?: string | null): string[] {
     if (!ref || !this.hasAgent(agentId)) return [];
     const st = this.state(agentId);
-    return this.commit(st, applyReplied(st.doc, ref, replyId, this.now(), replyTo)).changed;
+    return this.commit(st, applyReplied(st.doc, ref, replyId, this.now(), replyTo, replyAct)).changed;
   }
 
   // — queries (load lazily; a non-agent has an empty ledger and none is created) —
