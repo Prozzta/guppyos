@@ -19,7 +19,9 @@ test('a variable command word delegates classification to a nameable command', (
     '$(which node) test/tools/run-tests.cjs',
     '`which node` test/tools/run-tests.cjs',
   ]) assert.equal(classifyCommand(cmd).kind, 'suite', cmd);
-  assert.equal(classifyCommand('eval "$CMD"').heavy, false, 'eval policy is out of scope');
+  const computedEval = classifyCommand('eval "$CMD"');
+  assert.equal(computedEval.heavy, true, 'WRAPPER-GAP-192 fails closed for an eval body the lock cannot read');
+  assert.equal(computedEval.provisional, true, 'WRAPPER-GAP-192 marks the computed eval classification provisional');
 });
 
 test('cmd /c bodies preserve heavy inner commands and commands chained after the wrapper', () => {
