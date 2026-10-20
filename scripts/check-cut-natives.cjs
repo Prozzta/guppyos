@@ -12,17 +12,20 @@ if (!electron || !modules) {
   console.error('usage: check-cut-natives.cjs <electron.exe> <unpacked node_modules>');
   process.exit(2);
 }
+const electronPath = path.resolve(electron);
+const modulesPath = path.resolve(modules);
+const archiveModules = path.join(path.dirname(path.dirname(modulesPath)), 'app.asar', 'node_modules');
 const probe = [
-  `const pty = require(${JSON.stringify(path.join(modules, 'node-pty'))});`,
-  `const Database = require(${JSON.stringify(path.join(modules, 'better-sqlite3'))});`,
+  `const pty = require(${JSON.stringify(path.join(archiveModules, 'node-pty'))});`,
+  `const Database = require(${JSON.stringify(path.join(archiveModules, 'better-sqlite3'))});`,
   "if (typeof pty.spawn !== 'function') throw new Error('node-pty did not load');",
   "const db = new Database(':memory:');",
   "if (db.prepare('select 42 as n').get().n !== 42) throw new Error('better-sqlite3 query failed');",
   "db.close(); console.log('CUT NATIVES OK: node-pty + better-sqlite3');"
 ].join('\n');
-const env = { ...process.env, ELECTRON_RUN_AS_NODE: '1' };
+const env = { ...process.env, ELECTRON_RUN_AS_NODE: '1', NODE_PATH: [archiveModules, process.env.NODE_PATH].filter(Boolean).join(path.delimiter) };
 delete env.NoDefaultCurrentDirectoryInExePath;
-const r = spawnSync(electron, ['-e', probe], { encoding: 'utf8', env, windowsHide: true });
+const r = spawnSync(electronPath, ['-e', probe], { encoding: 'utf8', env, windowsHide: true });
 if (r.error || r.status !== 0 || !r.stdout.includes('CUT NATIVES OK')) {
   console.error('CUT NATIVES FAILED');
   if (r.error) console.error(r.error.message);

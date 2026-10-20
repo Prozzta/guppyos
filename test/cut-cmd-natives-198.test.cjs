@@ -16,6 +16,8 @@ test('cut command scrubs cwd-search hardening for literal npm ci and the raw Win
   assert.equal(pkg.scripts['cut:win'], 'node scripts/cut-cmd-natives.cjs');
   assert.equal(pkg.scripts['dist:win'], 'node scripts/cut-cmd-natives.cjs --dist-only');
   assert.match(pkg.scripts['dist:win:raw'], /electron-builder --win/);
+  assert.match(cut, /--install-only/);
+  assert.match(cut, /shell: command === npm && process\.platform === 'win32'/);
   const r = spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'cut-cmd-natives.cjs'), '--print-plan'], {
     encoding: 'utf8', env: { ...process.env, NoDefaultCurrentDirectoryInExePath: '1' }
   });
@@ -29,5 +31,7 @@ test('post-cut probe runs Electron as Node and loads both native modules', () =>
   assert.match(check, /node-pty/);
   assert.match(check, /better-sqlite3/);
   assert.match(check, /select 42 as n/);
+  assert.match(check, /const modulesPath = path\.resolve\(modules\)/);
+  assert.match(check, /path\.dirname\(path\.dirname\(modulesPath\)\)/);
   assert.match(cut, /check-cut-natives\.cjs/);
 });

@@ -15,7 +15,9 @@ if (process.argv.includes('--print-plan')) {
   process.exit(0);
 }
 function run(command, args) {
-  const r = spawnSync(command, args, { cwd: root, env, stdio: 'inherit', windowsHide: true });
+  // npm.cmd is a batch shim; unlike the real Electron/node executables it
+  // needs cmd.exe mediation when spawned from Node on Windows.
+  const r = spawnSync(command, args, { cwd: root, env, stdio: 'inherit', windowsHide: true, shell: command === npm && process.platform === 'win32' });
   if (r.error) throw r.error;
   if (r.status !== 0) process.exit(r.status || 1);
 }
@@ -36,7 +38,10 @@ function check() {
     path.join('dist', 'win-unpacked', 'resources', 'app.asar.unpacked', 'node_modules')
   ]);
 }
-if (process.argv.includes('--dist-only')) {
+if (process.argv.includes('--install-only')) {
+  // Evidence/recovery mode: the same plain install the full cut starts with.
+  run(npm, ['ci']);
+} else if (process.argv.includes('--dist-only')) {
   run(npm, ['run', 'dist:win:raw']);
   check();
 } else {
