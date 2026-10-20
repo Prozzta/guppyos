@@ -331,6 +331,7 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
 
   // --- Slack integration ---
   const [slackEnabled, setSlackEnabled] = useState(config.slackEnabled ?? false);
+  const [inboundBindAllInterfaces, setInboundBindAllInterfaces] = useState(config.inboundBindAllInterfaces === true);
   const [slackSecret, setSlackSecret] = useState(config.slackSigningSecret ?? '');
   const [slackBotToken, setSlackBotToken] = useState(config.slackBotToken ?? '');
   const [slackChannel, setSlackChannel] = useState(config.slackChannelId ?? '');
@@ -493,6 +494,7 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
       setAgentBudget(cc.costCapTokens != null ? String(cc.costCapTokens) : '');
       setVelocityCeiling(cc.circuitBreaker?.tokenVelocityPerMin != null ? String(cc.circuitBreaker.tokenVelocityPerMin) : '');
       setSlackEnabled(cc.slackEnabled ?? false);
+      setInboundBindAllInterfaces((c as HarnessConfig).inboundBindAllInterfaces === true);
       setSlackSecret(cc.slackSigningSecret ?? '');
       setSlackBotToken(cc.slackBotToken ?? '');
       setSlackChannel(cc.slackChannelId ?? '');
@@ -544,7 +546,8 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
     channelId: slackChannel,
     port: Number(slackPort) || 3847,
     enabled,
-    proactivePosting: slackProactivePosting
+    proactivePosting: slackProactivePosting,
+    inboundBindAllInterfaces
   });
 
   const saveSlack = async () => {
@@ -1593,6 +1596,24 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
                                 {slackProactivePosting ? 'on' : 'off'}
                               </PixelButton>
                             </div>
+
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'space-between' }}>
+                              <span style={slackLabelStyle}>LAN/router forwarding (bind all interfaces)</span>
+                              <PixelButton
+                                variant={inboundBindAllInterfaces ? 'primary' : 'secondary'}
+                                size="sm"
+                                onClick={() => {
+                                  const next = !inboundBindAllInterfaces;
+                                  setInboundBindAllInterfaces(next);
+                                  void window.cth.updateConfig({ inboundBindAllInterfaces: next });
+                                }}
+                              >
+                                {inboundBindAllInterfaces ? 'on' : 'loopback only'}
+                              </PixelButton>
+                            </div>
+                            <span style={{ fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-500)' }}>
+                              Keep this off for tunnel forwarding. Turn it on only when intentionally forwarding a LAN or router port, then save or start.
+                            </span>
 
                             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                               {/* Start disabled once connected; Stop only when running. */}

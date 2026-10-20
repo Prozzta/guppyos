@@ -103,6 +103,8 @@ export interface HarnessConfig {
    *  Mirrors the main-process field (src/main/config.ts). */
   telemetryEnabled?: boolean;
   slackEnabled?: boolean;
+  /** Explicit opt-in for LAN/router forwarding of inbound webhook/Slack listeners. */
+  inboundBindAllInterfaces?: boolean;
   slackSigningSecret?: string;
   slackBotToken?: string;
   slackChannelId?: string;
