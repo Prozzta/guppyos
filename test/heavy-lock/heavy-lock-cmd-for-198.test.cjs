@@ -12,6 +12,8 @@
  *   - otherwise each value is classified with %f / %%f / %~f replaced (the live tag is read), as one
  *     iteration of a loop: a loop-made name the lock cannot read stays light (LIVE-FILE (B));
  *   - a /f set's `'command'` runs, so it is classified too.
+ * FOLLOWUPS-198 (Jim 87d044): an IF runs its body or its else, not its condition; a %NAME% is not the
+ * loop's %n; %~$PATH:n names the value; a line ending in an unescaped ^ goes on to the next one.
  *
  * Mutants that must die: MUTANT CENSUS at the bottom.
  */
@@ -34,6 +36,11 @@ const files = {
   'block.bat': '@echo off\r\nfor %%f in (live) do (\r\n  echo (%%f)\r\n  node --test test\\%%f.test.cjs\r\n)\r\necho done\r\n',
   'after.bat': '@echo off\r\nfor %%f in (a b) do echo %%f\r\nnpm test\r\n',
   'light.bat': '@echo off\r\nfor %%f in (a b) do (\r\n  echo %%f\r\n  node --test test\\%%f.test.cjs\r\n)\r\necho done\r\n',
+  // HEAVY-LOCK-CMD-FOR-FOLLOWUPS-198
+  'if.bat': '@echo off\r\nif exist test (\r\n  echo found\r\n) else (\r\n  npm test\r\n)\r\n',
+  'path.bat': '@echo off\r\nfor %%n in (node) do %%~$PATH:n --test test\\live.test.cjs\r\n',
+  'caret.bat': '@echo off\r\nfor /l %%i in (1,1,20) do ^\r\n  node --test test\\a.test.cjs\r\n',
+  'carets.bat': '@echo off\r\nfor /l %%i in (1,1,20) do echo ^^\r\n  node --test test\\a.test.cjs\r\n',
 };
 const norm = (p) => p.replace(/\\/g, '/').replace(/^\.\//, '');
 const ctx = { readScript: (p) => files[norm(p)] ?? null, missingAt: (p) => (files[norm(p)] === undefined ? p : null) };
@@ -44,6 +51,10 @@ const heavyAs = (M, cmd, kind, msg) => {
 const light = (M, cmd, msg) => {
   const r = M.classifyCommand(cmd, 0, ctx);
   assert.equal(r.heavy, false, `${msg}: ${cmd} -> ${JSON.stringify(r)}`);
+};
+const provisional = (M, cmd, msg) => {
+  const r = M.classifyCommand(cmd, 0, ctx);
+  assert.equal(r.heavy && r.provisional === true, true, `${msg}: ${cmd} -> ${JSON.stringify(r)}`);
 };
 
 const K = {};
@@ -100,6 +111,29 @@ K.light = (M = HJ) => {
   assert.equal(M.classifyCommand('do npm test', 0, { dialect: 'cmd' }).heavy, false, 'CMD KEEPS ITS FIRST WORD AS THE PROGRAM (SHELL-KEYWORD-196)');
 };
 
+// HEAVY-LOCK-CMD-FOR-FOLLOWUPS-198 (Jim 87d044 NITs): IF bodies, %f against %foo%, %~$PATH:f, ^ continuation.
+K.ifBodies = (M = HJ) => {
+  heavyAs(M, 'cmd /c "if exist x npm test"', 'suite', 'AN IF RUNS ITS BODY');
+  heavyAs(M, 'cmd /c "IF /I NOT %A%==b npm test"', 'suite', 'AN IF RUNS ITS BODY (/I NOT a==b)');
+  heavyAs(M, 'cmd /c "if %N% GEQ 3 node --test test\\live.test.cjs"', 'bench', 'AN IF RUNS ITS BODY (a OP b)');
+  heavyAs(M, 'cmd /c if.bat', 'suite', 'THE ELSE BODY IS CLASSIFIED');
+  heavyAs(M, 'cmd /c "if exist x (echo a) & npm test"', 'suite', 'WHAT FOLLOWS AN IF BLOCK IS CLASSIFIED');
+  heavyAs(M, 'cmd /c "for /l %i in (1,1,20) do if exist x node --test test\\a.test.cjs"', 'suite', 'AN IF IN A FOR BODY COUNTS ITS RUNS');
+  light(M, 'cmd /c "if exist x echo npm test"', 'THE CONDITION RUNS NOTHING (A LIGHT BODY STAYS LIGHT)');
+  light(M, 'cmd /c "if exist x echo a else npm test"', 'A BARE BODY RUNS TO THE END OF ITS LINE (ELSE IS JUST WORDS)');
+};
+
+K.names = (M = HJ) => {
+  provisional(M, 'cmd /c "for %f in (a) do node --test test\\%foo%.test.cjs"', 'A %NAME% VARIABLE IS NOT THE LOOP VARIABLE');
+  heavyAs(M, 'cmd /c "for %f in (live) do echo %foo% & node --test test\\%f.test.cjs"', 'bench', 'THE LOOP VARIABLE BESIDE A %NAME% IS STILL REPLACED');
+  heavyAs(M, 'cmd /c path.bat', 'bench', 'A %~$PATH: REF NAMES THE VALUE');
+};
+
+K.caret = (M = HJ) => {
+  heavyAs(M, 'cmd /c caret.bat', 'suite', 'A CARET CONTINUES THE LINE (do ^)');
+  light(M, 'cmd /c carets.bat', 'AN ESCAPED CARET (^^) ENDS THE LINE');
+};
+
 test('%f: a cmd FOR runs its body; each value is read (the live tag, %~f)', () => K.percentF());
 test('%%f in a .bat: the body, a block to its ), and the lines after the loop are classified', () => K.bat());
 test('nested FOR loops multiply their lists and read both values', () => K.nested());
@@ -107,6 +141,9 @@ test('a bare body with && and | runs to the end of the line', () => K.andPipe())
 test('open sets (a glob, /r, %VAR%, /f) are suites when the body runs node --test; a /f command runs', () => K.openSets());
 test('/l ranges, explicit lists and every node --test of the body count toward SUITE_MANY_FILES', () => K.counts());
 test('what stays light: named light files, a loop-made name it cannot read, echo, a short range, cmd `do`', () => K.light());
+test('an IF runs its body (or its else), not its condition; what follows a block is classified', () => K.ifBodies());
+test('a %NAME% variable is not the loop variable; %~$PATH:v names the value', () => K.names());
+test('a ^ at the end of a line continues it; an escaped ^^ does not', () => K.caret());
 
 // ─── MUTANT CENSUS ──────────────────────────────────────────────────────────────────────────
 
@@ -121,10 +158,10 @@ function mutateText(rel, edits, tag) {
 }
 
 const MUTANTS = [
-  { name: 'the FOR is not read', edits: [['if (segAt >= 0 && /^@?for$/i.test(', 'if (false && /^@?for$/i.test(']], killer: 'percentF', dies: /A CMD FOR RUNS ITS BODY/ },
-  { name: 'FOR is read in lower case only', edits: [['if (segAt >= 0 && /^@?for$/i.test(', 'if (segAt >= 0 && /^@?for$/.test(']], killer: 'percentF', dies: /ANY CASE/ },
+  { name: 'the FOR is not read', edits: [['if (/^@?(?:for|if)$/i.test(head)) {', 'if (/^@?(?:if)$/i.test(head)) {']], killer: 'percentF', dies: /A CMD FOR RUNS ITS BODY/ },
+  { name: 'FOR is read in lower case only', edits: [['if (/^@?(?:for|if)$/i.test(head)) {', 'if (/^@?(?:for|if)$/.test(head)) {']], killer: 'percentF', dies: /ANY CASE/ },
   { name: "a .bat's %%f is not a FOR variable", edits: [['(%%?)([A-Za-z])\\s+in', '(%)([A-Za-z])\\s+in']], killer: 'bat', dies: /A \.BAT FOR \(%%f\) RUNS ITS BODY/ },
-  { name: 'a bare body stops at the first & or |', edits: [["const nl = body.indexOf('\\n');", 'const nl = body.search(/[&|\\n]/);']], killer: 'andPipe', dies: /A BARE BODY RUNS TO THE END OF THE LINE/ },
+  { name: 'a bare body stops at the first & or |', edits: [["const nl = s.indexOf('\\n');", 'const nl = s.search(/[&|\\n]/);']], killer: 'andPipe', dies: /A BARE BODY RUNS TO THE END OF THE LINE/ },
   { name: 'a block ends at the first )', edits: [["if (c === ')' && --n === 0) break;", "if (c === ')') break;"]], killer: 'bat', dies: /A BLOCK BODY RUNS TO ITS OWN \)/ },
   { name: 'what follows the loop is dropped', edits: [['if (loop.rest.trim()) {', 'if (false) {']], killer: 'bat', dies: /THE LINES AFTER A FOR ARE CLASSIFIED/ },
   { name: 'a glob set is counted', edits: [['/[*?%!]/.test(v)', '/[%!]/.test(v)']], killer: 'openSets', dies: /A GLOB SET IS OPEN/ },
@@ -138,10 +175,24 @@ const MUTANTS = [
   { name: 'one run per body (its node --test segments are not counted)', edits: [["const tests = segments(body, 'cmd').filter(NODE_TEST).length;", "const tests = segments(body, 'cmd').some(NODE_TEST) ? 1 : 0;"]], killer: 'counts', dies: /EVERY NODE --TEST OF THE BODY COUNTS/ },
   { name: 'nested lists do not multiply', edits: [['const runs = count * (ctx.loopMult ?? 1);', 'const runs = count;']], killer: 'nested', dies: /NESTED LISTS MULTIPLY/ },
   { name: 'the variable is not replaced per value', edits: [['  const each = runs !== Infinity && !l && values.length && runs <= PLAN_CAP', '  const each = false']], killer: 'percentF', dies: /EACH VALUE IS READ/ },
-  { name: 'a %~ ref is not replaced', edits: [['${m[2]}(~[A-Za-z]*)?${m[3]}', '${m[2]}${m[3]}']], killer: 'percentF', dies: /A %~ REF IS REPLACED BY THE VALUE/ },
+  { name: 'a %~ ref is not replaced', edits: [['${m[2]}(?:~[A-Za-z]*', '${m[2]}(?:~~[A-Za-z]*']], killer: 'percentF', dies: /A %~ REF IS REPLACED BY THE VALUE/ },
   { name: 'a lone & in the body hides the FOR (the segment is not found)', edits: [["const own = seg.replace(/\\s+&$/, '');", 'const own = seg;']], killer: 'counts', dies: /EVERY NODE --TEST OF THE BODY COUNTS/ },
-  { name: 'the body is not one iteration of a loop (a loop-made name goes provisional)', edits: [['{ ...here, loopWord: true, loopMult:', '{ ...here, loopMult:']], killer: 'light', dies: /A LOOP-MADE NAME IT CANNOT READ STAYS LIGHT/ },
+  { name: 'the body is not one iteration of a loop (a loop-made name goes provisional)', edits: [['{ ...here, loopWord: !/', '{ ...here, loopWord: false && !/']], killer: 'light', dies: /A LOOP-MADE NAME IT CANNOT READ STAYS LIGHT/ },
   { name: 'any FOR with node --test is a suite (the count is not checked)', edits: [['if (tests && (runs === Infinity || runs * tests >= SUITE_MANY_FILES)) {', 'if (tests) {']], killer: 'light', dies: /NAMED LIGHT FILES STAY LIGHT/ },
+  // HEAVY-LOCK-CMD-FOR-FOLLOWUPS-198
+  { name: 'the IF is not read', edits: [['if (/^@?(?:for|if)$/i.test(head)) {', 'if (/^@?(?:for)$/i.test(head)) {']], killer: 'ifBodies', dies: /AN IF RUNS ITS BODY/ },
+  { name: 'IF /I and NOT are not read', edits: [['/^@?if\\s+(?:\\/i\\s+)?(?:not\\s+)?', '/^@?if\\s+']], killer: 'ifBodies', dies: /\/I NOT a==b/ },
+  { name: 'the a OP b condition is not read', edits: [['\\s+(?:equ|neq|lss|leq|gtr|geq)\\s+', '\\s+(?:equ|neq)\\s+']], killer: 'ifBodies', dies: /a OP b/ },
+  { name: 'the else body is dropped', edits: [['    bodies.push(other.body);\n', '']], killer: 'ifBodies', dies: /THE ELSE BODY IS CLASSIFIED/ },
+  { name: 'what follows an IF block is dropped', edits: [['  let rest = then.after;', "  let rest = '';"]], killer: 'ifBodies', dies: /WHAT FOLLOWS AN IF BLOCK IS CLASSIFIED/ },
+  { name: "the condition's operand is read as the program", edits: [['(?:exist|defined)\\s+(?:"[^"]*"|\\S+)|', '(?:exist|defined)|']], killer: 'ifBodies', dies: /^AN IF RUNS ITS BODY:/ },
+  { name: 'a bare IF body is split at else', edits: [["  const e = s.startsWith('(') ? /^\\s*else\\s+/i.exec(then.after) : null;", "  const e = s.startsWith('(') ? /^\\s*else\\s+/i.exec(then.after) : null;\n  if (!s.startsWith('(') && / else /i.test(then.body)) bodies.push(then.body.split(/ else /i)[1]);"]], killer: 'ifBodies', dies: /ELSE IS JUST WORDS/ },
+  { name: 'a %NAME% variable is replaced as the loop variable', edits: [['(x, name?: string) => name ? x : v', '() => v']], killer: 'names', dies: /A %NAME% VARIABLE IS NOT THE LOOP VARIABLE/ },
+  { name: 'a body holding a %NAME% is still all loop-made', edits: [['loopWord: !/%[A-Za-z_][A-Za-z0-9_]+%|', 'loopWord: true || !/%[A-Za-z_][A-Za-z0-9_]+%|']], killer: 'names', dies: /A %NAME% VARIABLE IS NOT THE LOOP VARIABLE/ },
+  { name: 'a one-letter %a% is read as a %NAME% variable', edits: [['(%[A-Za-z_][A-Za-z0-9_]+%)|', '(%[A-Za-z_][A-Za-z0-9_]*%)|']], killer: 'nested', dies: /A NESTED LOOP READS BOTH VALUES/ },
+  { name: 'a %~$PATH: ref is not replaced', edits: [['(?:\\\\$[A-Za-z_][A-Za-z0-9_]*:)?', '']], killer: 'names', dies: /A %~\$PATH: REF NAMES THE VALUE/ },
+  { name: 'a ^ does not continue the line', edits: [["\\^\\r?\\n/g, '$1$2'", "\\^\\r?\\n(?!)/g, '$1$2'"]], killer: 'caret', dies: /A CARET CONTINUES THE LINE/ },
+  { name: 'an escaped ^^ continues the line', edits: [["s.replace(/(^|[^^])((?:\\^\\^)*)\\^", "s.replace(/()()\\^"]], killer: 'caret', dies: /AN ESCAPED CARET \(\^\^\) ENDS THE LINE/ },
 ];
 
 test('MUTANT CENSUS: every mutant applies once and dies at the assertion that names its guarantee', { timeout: 30_000 }, async (t) => {
