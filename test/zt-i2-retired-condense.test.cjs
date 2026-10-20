@@ -80,6 +80,8 @@ test('ZT-I2 (3): no upkeep path in src/main or src/shared spawns claude in print
     ['src/main/providerModels.ts', "export const CLAUDE_LIST_ARGS = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'];"],
     // heavyJob.ts reads a command's node -e/-p argv to classify it (its one spawn is pinned below).
     ['src/main/heavyJob.ts', "const e = args.findIndex((a) => a === '-e' || a === '--eval' || a === '-p' || a === '--print');"],
+    // HEAVY-LOCK-OPAQUE-SCRIPT-196's processImage: `ps -p <pid>` names a process id, not claude's print mode.
+    ['src/main/heavyJob.ts', ": ['ps', ['-o', 'comm=', '-p', String(pid)]];"],
     // Copilot's visible worker session takes its brief this way: an agent the Human sees, not upkeep.
     ['src/shared/agentProvider.ts', "initialPromptFlag: '-p',"]
   ];
