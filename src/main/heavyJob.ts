@@ -360,6 +360,8 @@ function leading(ws: string[]): string[] {
     // HEAVY-LOCK-EXEC-POSITIONAL: `exec npm test` (`sh -c 'exec "$@"' _ npm test`) and `command npm test`
     // run what follows; `exec -a NAME` takes a value, `command -v`/`-V` only looks the name up.
     if (w === 'exec') { i++; while (i < ws.length && /^-/.test(ws[i])) { if (/^-[cl]*a$/.test(ws[i])) i++; i++; } continue; }
+    // Jim NIT (44024f): `builtin exec npm test` runs the exec builtin.
+    if (w === 'builtin') { i++; continue; }
     if (w === 'command') { i++; while (i < ws.length && /^-/.test(ws[i])) { if (/[vV]/.test(ws[i])) return []; i++; } continue; }
     if (w === 'cd' || w === 'pushd') return []; // `cd x` alone is its own segment
     break;
