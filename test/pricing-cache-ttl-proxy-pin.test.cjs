@@ -13,6 +13,9 @@ const hooksSource = readSource('src/main/hooks.ts');
 const shimSource = codeOnly(readSource('src/main/hive.ts'));
 const EMIT_5M = /cache_creation_5m:\s*cacheCreation5m/;
 const EMIT_1H = /cache_creation_1h:\s*cacheCreation1h/;
+const SUM_5M = /cacheCreation5m\s*\+=\s*u\.cache_creation\?\.ephemeral_5m_input_tokens\s*\|\|\s*0/g;
+const SUM_1H = /cacheCreation1h\s*\+=\s*u\.cache_creation\?\.ephemeral_1h_input_tokens\s*\|\|\s*0/g;
+const count = (text, expression) => [...text.matchAll(expression)].length;
 
 function server(HookServer) {
   const rows = [];
@@ -42,6 +45,13 @@ test('proxy shim emits both TTL fields, and deleting either emit field kills the
   assert.match(shimSource, EMIT_1H);
   assert.throws(() => assert.match(shimSource.replace('cache_creation_5m: cacheCreation5m, ', ''), EMIT_5M));
   assert.throws(() => assert.match(shimSource.replace(', cache_creation_1h: cacheCreation1h', ''), EMIT_1H));
+});
+
+test('proxy shim accumulates each TTL for both SSE and JSON response shapes', () => {
+  assert.equal(count(shimSource, SUM_5M), 2, '5m is accumulated for message_start and full JSON');
+  assert.equal(count(shimSource, SUM_1H), 2, '1h is accumulated for message_start and full JSON');
+  const missing5m = shimSource.replace('cacheCreation5m += u.cache_creation?.ephemeral_5m_input_tokens || 0;', '');
+  assert.throws(() => assert.equal(count(missing5m, SUM_5M), 2), 'dropping one 5m accumulator turns the pin red');
 });
 
 test('dropping the 5m HookServer handoff turns the mixed ledger pin red', () => {
