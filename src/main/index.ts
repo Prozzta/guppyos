@@ -608,6 +608,7 @@ const telemetry = new TelemetryCollector({
     const a = hive.registry().agents[agentId];
     return a ? (a.provider ?? 'claude') : undefined;
   },
+  resolveCodexHome: (agentId) => hive.codexHomeFor(agentId),
   // SESSION-CROSSWIRE: usage, spans and the sampled resume key follow the agent whose
   // own hooks reported a session, not the OTel agent.id label. Memoised for 1 s: OTLP
   // batches arrive every few seconds per agent and each would otherwise re-read the registry.
@@ -3035,7 +3036,12 @@ function runBreakerBeat(progressWindowMs: number): void {
     // (ptyToAgent is set at spawn), so their breaker behavior is unchanged.
     if (a.isAssistant) continue;
     if (id !== reg.godId && !ptyForAgent(id)) continue;
-    const sample = usageProvider.getAgentUsage(id);
+    const provider = a.provider ?? 'claude';
+    // A Codex rollout is thread-cumulative across resumes, unlike the live OTel
+    // process sample the breaker budgets. Keep rollout usage display-only until it
+    // has separate billing/session semantics; otherwise one old thread can trip a
+    // token cap on its first post-restart beat.
+    const sample = provider === 'codex' ? null : usageProvider.getAgentUsage(id);
     // #56: only append a ledger row for a LIVE session sample. A dead/orphaned
     // agent with a frozen transcript still yields a sample via the transcript
     // fallback, but with an EMPTY sessionId (aggregateLive returns null → no live
@@ -3137,7 +3143,11 @@ function writeFleetSnapshot(): void {
     const agents = Object.entries(reg.agents)
       .filter(([, a]) => !a.archived)
       .map(([id, a]) => {
-        const u = usageById.get(id);
+        // `snapshot()` contains pushed OTLP sessions only. Only Codex falls through
+        // to its bounded rollout: doing so for Claude turns an idle transcript
+        // fallback stamped `Date.now()` into false "active 0s ago" roster rows.
+        const provider = a.provider ?? 'claude';
+        const u = usageById.get(id) ?? (provider === 'codex' ? usageProvider.getAgentUsage(id) : null);
         const spans = snap.spans[id] ?? [];
         // GOD-STARTUP-TOKENS R3: `tokens` is the billed-equivalent figure (cache reads x0.1, writes
         // x1.25); the raw sum stays as `tokensRaw` (the token caps count raw).
@@ -3158,6 +3168,7 @@ function writeFleetSnapshot(): void {
           tokensRaw,
           usd: lifetime === null ? sessionUsd : Number(lifetime.toFixed(4)),
           sessionUsd,
+          costEstimated: !!u?.usdEstimated,
           lastTool: spans.length ? spans[spans.length - 1].tool : null,
           lastActiveSecAgo: u ? Math.round((now - u.ts) / 1000) : null,
           // CARD-IDLE-WHILE-WORKING: the tool call in progress (a long one fires no hooks).
@@ -6329,11 +6340,12 @@ ipcMain.handle('hive:agentUsage', (_evt, cwd: unknown) =>
 // (re)started session zeroes the gauge instead of leaving a stale value up.
 ipcMain.handle('hive:agentContext', (_evt, agentId: unknown) => {
   if (typeof agentId !== 'string') return null;
+  const a = hive.registry().agents[agentId];
+  const provider = a ? (a.provider ?? 'claude') : undefined;
+  if (provider === 'codex') return telemetry.getCodexContext(agentId);
   const tp = hookServer.transcriptPath(agentId);
   if (!tp) return null;
   // START-FIXES-163 (2): a non-Claude agent's gauge never reads a transcript.
-  const a = hive.registry().agents[agentId];
-  const provider = a ? (a.provider ?? 'claude') : undefined;
   if (!mayReadClaudeTranscripts(provider)) return null;
   return readContextTokens(tp, provider) ?? 0;
 });

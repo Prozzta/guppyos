@@ -30,6 +30,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { mayReadClaudeTranscripts, readAgentUsage } from './transcript';
 import type { AgentProvider } from '../shared/agentProvider';
 import { normalizeModel } from './pricing';
+import { CodexRolloutCapacitySource } from './codexRolloutCapacity';
 
 // ─── The locked cross-lane contract (do not change without re-agreeing) ───────
 
@@ -51,6 +52,8 @@ export interface AgentUsageSample {
   /** Normalized model id (`claude-opus-4-8`, no `[1m]` suffix). */
   model: string;
   usd: number;
+  /** The provider did not publish a billable figure; USD is intentionally only an estimate. */
+  usdEstimated?: boolean;
 }
 
 /** Breaker state, emitted by Lane A's policy on `control:breakerState` and
@@ -127,6 +130,8 @@ export interface TelemetryCollectorOptions {
   /** The agent's provider. The transcript fallback runs for 'claude' only; anything
    *  else, or no answer, reads nothing (START-FIXES-163 (2)). */
   resolveProvider?: (agentId: string) => AgentProvider | undefined;
+  /** Resolve the isolated CODEX_HOME used by a Codex worker's rollout. */
+  resolveCodexHome?: (agentId: string) => string | null;
   /** SESSION-CROSSWIRE: session id → the agent whose own hooks reported it (from the
    *  hive registry). When present it overrides the OTel `agent.id` label, which a
    *  Claude Code background job inherits from whichever agent's process hosts it. */
@@ -142,6 +147,11 @@ export class TelemetryCollector {
   private readonly resolveCwd?: (agentId: string) => string | null;
   private readonly resolveSessionId?: (agentId: string) => string | undefined;
   private readonly resolveProvider?: (agentId: string) => AgentProvider | undefined;
+  private readonly resolveCodexHome?: (agentId: string) => string | null;
+  private readonly codexRollouts = new CodexRolloutCapacitySource();
+  private readonly codexUsage = new Map<string, AgentUsageSample>();
+  private readonly codexContexts = new Map<string, number>();
+  private readonly codexUsageSession = new Map<string, string>();
   private readonly resolveSessionOwners?: () => ReadonlyMap<string, string>;
 
   /** sessionId → running accumulation. */
@@ -161,6 +171,7 @@ export class TelemetryCollector {
     this.resolveCwd = opts.resolveCwd;
     this.resolveSessionId = opts.resolveSessionId;
     this.resolveProvider = opts.resolveProvider;
+    this.resolveCodexHome = opts.resolveCodexHome;
     this.resolveSessionOwners = opts.resolveSessionOwners;
   }
 
@@ -198,6 +209,8 @@ export class TelemetryCollector {
   getAgentUsage(agentId: string): AgentUsageSample | null {
     const live = this.aggregateLive(agentId);
     if (live) return live;
+    const codex = this.codexRolloutFallback(agentId);
+    if (codex) return codex;
     return this.transcriptFallback(agentId);
   }
 
@@ -464,6 +477,40 @@ export class TelemetryCollector {
       model: u.model ?? '',
       usd: u.estimatedCostUsd
     };
+  }
+
+  /** Current context for providers whose source is a rollout rather than a Claude transcript. */
+  getCodexContext(agentId: string): number | null {
+    if (this.resolveProvider?.(agentId) !== 'codex') return null;
+    this.codexRolloutFallback(agentId);
+    return this.codexContexts.get(agentId) ?? null;
+  }
+
+  /** Codex has no OTLP stream. Its own rollout is bounded/cached per consumer, so
+   * a fleet tick stats an idle file and tails only on change. Telemetry deliberately
+   * owns this reader separately from HookServer: a shared changed-only reader could
+   * hand the second consumer no usage after the first consumed a rollout append. */
+  private codexRolloutFallback(agentId: string): AgentUsageSample | null {
+    if (this.resolveProvider?.(agentId) !== 'codex') return null;
+    const home = this.resolveCodexHome?.(agentId);
+    const sessionId = this.resolveSessionId?.(agentId);
+    if (!home || !sessionId) return null;
+    if (this.codexUsageSession.get(agentId) !== sessionId) {
+      this.codexUsage.delete(agentId);
+      this.codexContexts.delete(agentId);
+      this.codexUsageSession.set(agentId, sessionId);
+    }
+    const read = this.codexRollouts.observeRollout(home, { sessionId });
+    if (read.usage) {
+      const model = read.turnModel?.model ?? this.codexUsage.get(agentId)?.model ?? '';
+      // Codex rollouts have usage but no authoritative invoice/cost field. Keep the
+      // value explicitly estimated rather than pretending a made-up tariff is real.
+      this.codexUsage.set(agentId, { agentId, sessionId: '', ts: read.usage.observedAt,
+        input: read.usage.input, output: read.usage.output, cacheRead: read.usage.cacheRead,
+        cacheCreation: read.usage.cacheCreation, model, usd: 0, usdEstimated: true });
+      this.codexContexts.set(agentId, read.usage.contextTokens);
+    }
+    return this.codexUsage.get(agentId) ?? null;
   }
 
   private publishUsage(agentId: string, owners: ReadonlyMap<string, string>): void {
