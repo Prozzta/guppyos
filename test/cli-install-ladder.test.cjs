@@ -11,7 +11,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const loadTs = require('./load-ts.cjs');
 
-const { chooseInstallRung, buildMissingCliScript } = loadTs('src/main/cliInstall.ts');
+const { chooseInstallRung, buildMissingCliScript, quotePosixBanner } = loadTs('src/main/cliInstall.ts');
 const { installInfoForProvider } = loadTs('src/shared/agentProvider.ts');
 
 const script = (provider, npmAvailable, platform) =>
@@ -109,4 +109,9 @@ test('a hostile binary name cannot inject a command into the banner', () => {
   assert.equal(evil.length, out.length, 'no extra statements');
   assert.ok(evil.some((l) => l.includes('xrm-rf')), 'sanitized to a bare identifier');
   assert.ok(!evil.some((l) => /rm -rf \//.test(l)));
+});
+
+test('POSIX banner quoting preserves an apostrophe instead of ending the echo word', () => {
+  const value = "O'Brien \"quote\" `tick` $cash";
+  assert.equal(quotePosixBanner(value), `'O'"'"'Brien "quote" \`tick\` $cash'`);
 });

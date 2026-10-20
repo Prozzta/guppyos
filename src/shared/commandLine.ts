@@ -10,8 +10,29 @@
  *  spawn-request fix exists to prevent. */
 export function tokenizeCommand(command: string): string[] {
   const out: string[] = [];
-  const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(command)) !== null) out.push(m[1] ?? m[2] ?? m[3]);
+  let token = '';
+  let quote: '"' | "'" | null = null;
+  let started = false;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (quote === '"' && ch === '\\' && i + 1 < command.length && /["\\]/.test(command[i + 1])) {
+      token += command[++i];
+      started = true;
+    } else if (ch === quote) {
+      quote = null;
+      started = true;
+    } else if (!quote && (ch === '"' || ch === "'")) {
+      quote = ch;
+      started = true;
+    } else if (!quote && /\s/.test(ch)) {
+      if (started) out.push(token);
+      token = '';
+      started = false;
+    } else {
+      token += ch;
+      started = true;
+    }
+  }
+  if (started) out.push(token);
   return out;
 }
