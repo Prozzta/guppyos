@@ -51,8 +51,11 @@ test('ONBINARY-DROP: binary xterm input is wired to the platform handoff', () =>
   assert.match(pool, /term\.onData\(\(data\) => forwardTerminalInput\(data\)\);/);
   assert.match(pool, /term\.onBinary\(\(data\) => forwardTerminalInput\(data, true\)\);/,
     'removing the onBinary listener makes this mutant guard fail');
-  assert.match(pool, /writePtyBinary\(ptyId, data, origin\)/,
+  assert.match(pool, /writePtyBinary\(ptyId, data, classifyOutbound\(ptyId, data\)\)/,
     'the binary marker must reach main rather than be silently dropped');
+  const preload = readSource('src/preload/index.ts');
+  assert.match(preload, /writePtyBinary:[\s\S]*?sendPtyWrite\(id, data, origin, true\)/,
+    'the binary bridge must retain its true transport flag through preload');
 });
 
 test('ONBINARY-DROP: helper keeps a JS string for ConPTY and raw latin-1 bytes for POSIX', () => {
