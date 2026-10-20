@@ -333,6 +333,20 @@ test('A: shape errors are refused with the field named (unknown keys, no op, cre
   }
 });
 
+test('LEDGER-PARKED-FIELD: patch accepts only typed parked/install/fixVersion fields', () => {
+  const good = L.parseLedgerOp({ op: 'park-1', card: { id: 'A', patch: { parked: true, waitingFor: 'install', fixVersion: '1.1.96' } } });
+  assert.equal(good.ok, true);
+  assert.match(L.parseLedgerOp({ op: 'park-2', card: { id: 'A', patch: { parked: 'yes' } } }).error, /parked: true or false/);
+  assert.match(L.parseLedgerOp({ op: 'park-3', card: { id: 'A', patch: { waitingFor: 'shipped' } } }).error, /waitingFor/);
+  assert.match(L.parseLedgerOp({ op: 'park-4', card: { id: 'A', patch: { fixVersion: '1.1' } } }).error, /fixVersion/);
+  assert.match(L.parseLedgerOp({ op: 'park-5', card: { id: 'A', patch: { nope: true } } }).error, /unknown field/);
+  const f = ledgerFixture();
+  assert.equal(L.applyLedgerOp({ op: 'park-6', card: { id: 'READS-181', patch: { parked: true, waitingFor: 'install', fixVersion: '1.1.96' } } }, f.deps).status, 200);
+  assert.deepEqual(Object.fromEntries(['parked', 'waitingFor', 'fixVersion'].map((k) => [k, f.state.tasks[0][k]])), { parked: true, waitingFor: 'install', fixVersion: '1.1.96' });
+  assert.equal(L.applyLedgerOp({ op: 'park-7', card: { id: 'READS-181', patch: { waitingFor: null, fixVersion: null } } }, f.deps).status, 200);
+  assert.deepEqual([f.state.tasks[0].waitingFor, f.state.tasks[0].fixVersion], [null, null]);
+});
+
 test('A: create makes a new card (status todo by default); a lesson lands at the END of the standing lessons', () => {
   const f = ledgerFixture();
   const r = L.applyLedgerOp({ op: 'c1', card: { id: 'NEW-1', create: { title: 'New card', assignee: 'jim' } }, memory: { append: '- lesson two', lesson: true } }, f.deps);
