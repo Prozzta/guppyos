@@ -759,8 +759,11 @@ const api = {
   /** `origin` is REQUIRED: every writer declares who is behind the bytes
    *  (`shared/inputOrigin.ts`). Main advances the PTY's human-input generation
    *  only for HUMAN, and refuses a write whose origin it does not recognise. */
-  writePty: (id: string, data: string, origin: InputOrigin, binary = false): Promise<{ ok: boolean; error?: string }> =>
-    ipcRenderer.invoke('pty:write', id, data, origin, binary),
+  writePty: (id: string, data: string, origin: InputOrigin): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('pty:write', id, data, origin),
+  /** Binary xterm input keeps origin last, preserving the renderer-origin census. */
+  writePtyBinary: (id: string, data: string, origin: InputOrigin): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('pty:write', id, data, origin, true),
   resizePty: (id: string, cols: number, rows: number): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('pty:resize', id, cols, rows),
   /** L0-FUSION stage 3: the renderer mirrors xterm's own provenance facts for one

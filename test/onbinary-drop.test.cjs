@@ -51,7 +51,7 @@ test('ONBINARY-DROP: binary xterm input is wired to the platform handoff', () =>
   assert.match(pool, /term\.onData\(\(data\) => forwardTerminalInput\(data\)\);/);
   assert.match(pool, /term\.onBinary\(\(data\) => forwardTerminalInput\(data, true\)\);/,
     'removing the onBinary listener makes this mutant guard fail');
-  assert.match(pool, /writePty\(ptyId, data, classifyOutbound\(ptyId, data\), binary\)/,
+  assert.match(pool, /writePtyBinary\(ptyId, data, origin\)/,
     'the binary marker must reach main rather than be silently dropped');
 });
 

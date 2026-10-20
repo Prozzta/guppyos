@@ -980,9 +980,7 @@ export class PtyManager {
     const s = this.sessions.get(id);
     if (!s) return { ok: false, error: `no pty: ${id}` };
     try {
-      // node-pty accepts Buffer at runtime for POSIX raw input; its bundled
-      // declaration only advertises string.
-      (s.proc.write as unknown as (input: string | Buffer) => void)(data);
+      s.proc.write(data);
       // GOD-TERMINAL-CONTROL (Jim MUST 1): god at the keyboard counts as a person, so a wake is
       // never staged or committed over god's typing.
       if (origin === 'HUMAN' || origin === 'GOD') { s.humanInputGeneration++; s.lastHumanInputAt = Date.now(); }

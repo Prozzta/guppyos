@@ -416,7 +416,9 @@ export function acquireTerminal(ptyId: string, theme?: ThemeMap, fontSize = 14):
     // arrives here on one callback with no origin attached. `classifyOutbound`
     // answers from the human window that `inputOrigin.ts` owns; nothing here
     // guesses from the bytes.
-    window.cth.writePty(ptyId, data, classifyOutbound(ptyId, data), binary);
+    const origin = classifyOutbound(ptyId, data);
+    if (binary) window.cth.writePtyBinary(ptyId, data, origin);
+    else window.cth.writePty(ptyId, data, origin);
     // A lone Escape or Ctrl-C closes interactive pickers. Arrow-key escape
     // sequences must NOT clear the block while the user navigates a picker.
     if (data === '\x1b' || data === '\x03') {
