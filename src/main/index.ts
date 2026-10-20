@@ -111,7 +111,7 @@ import { createTerminalMirror, mirrorParseMs } from './terminalMirror';
 import { MirrorCostGuard, calibrationSample, mirrorOffNotice, mirrorOffWords } from './mirrorCost';
 import { ShadowDiff } from './termShadow';
 import { createScreenGate, screenGateSourceOf } from './screenGate';
-import { HeavyJobLock, heavyLimit, heavySlotFreeNotice, heavyWaitLapsedNotice, probeProcesses, processImage } from './heavyJob';
+import { HeavyJobLock, heavyLimit, heavySlotFreeNotice, heavyWaitLapsedNotice, heavyUnlimitedNotice, probeProcesses, processImage } from './heavyJob';
 import { HeavyJobs, approvesWithoutAsking, heavyCpuOptions } from './heavyCpu';
 import { tokenizeCommand } from '../shared/commandLine';
 import { heavyActivity, heavyFleetField, type HeavyLockView } from '../shared/activityView';
@@ -1285,6 +1285,7 @@ const heavyLock = new HeavyJobLock({
   // HEAVY-LOCK-SELF-WAIT: a queued agent is told when a slot is RESERVED for it, so it never polls.
   alive: (agentId) => [...ptyToAgent.values()].includes(agentId),
   notify: (agentId, kind, until) => notifyHeavySlotFree(agentId, kind, until),
+  notifyUnlimited: (agentId, kind) => notifyHeavyUnlimited(agentId, kind),
   notifyLapse: (agentId, kind, why) => notifyHeavyWaitLapsed(agentId, kind, why)
 });
 hookServer.setHeavyLock(heavyLock);
@@ -1329,6 +1330,11 @@ heavyLock.onChange(() => {
 /** HEAVY-LOCK-SELF-WAIT: send the "slot free" notice (heavyJob.heavySlotFreeNotice) on both rails. */
 function notifyHeavySlotFree(agentId: string, kind: string, until: number): void {
   const n = heavySlotFreeNotice(agentId, kind, until);
+  try { hive.send(n.message as Partial<HiveMessage>, n.from); } catch { /* best effort */ }
+  try { control.steer(agentId, n.steer); } catch { /* best effort */ }
+}
+function notifyHeavyUnlimited(agentId: string, kind: string): void {
+  const n = heavyUnlimitedNotice(agentId, kind);
   try { hive.send(n.message as Partial<HiveMessage>, n.from); } catch { /* best effort */ }
   try { control.steer(agentId, n.steer); } catch { /* best effort */ }
 }
@@ -5360,6 +5366,8 @@ ipcMain.handle('config:update', (_evt, patch: Partial<HarnessConfig>) => {
   // transition so ordinary config writes never re-enter it.
   const hiveWasEnabled = hive.enabled();
   const next = writeConfig(patch);
+  // HEAVY-LIMIT-REEVAL-192: capacity changes must wake queued agents now.
+  if (patch && 'heavyJobsAtOnce' in patch) heavyLock.limitChanged();
   // Live opt-in/out from Settings → Privacy (TELEMETRY.md).
   if (typeof patch?.telemetryEnabled === 'boolean') analytics.setEnabled(patch.telemetryEnabled);
   // Keep the hive's mirror of the spawn gate current. The queue itself reads

@@ -132,7 +132,7 @@ const MUTANTS = [
     killer: 'missingSaid', dies: /A FILE THE COMMAND WRITES IS NOT CALLED MISSING/ },
   { name: 'missingAt reports a file that is there', edits: [['      if (abs === null || read(abs)) return null;\n', '      if (abs === null) return null;\n']],
     killer: 'missingSaid', dies: /A FILE THAT IS THERE \(TOO BIG TO READ\) IS NOT CALLED MISSING/ },
-  { name: 'classifyCommand does not pass expand', edits: [['  let here: ClassifyCtx = { ...ctx, stdin: undefined, expand, ', '  let here: ClassifyCtx = { ...ctx, stdin: undefined, ']],
+  { name: 'classifyCommand does not pass expand', edits: [['  let here: ClassifyCtx = { ...ctx, dialect: d, stdin: undefined, expand, ', '  let here: ClassifyCtx = { ...ctx, dialect: d, stdin: undefined, ']],
     killer: 'varFile', dies: /A VARIABLE SET TO ONE FILE IS THAT FILE/ },
   { name: 'every $word is taken as a .js file (fails open)', edits: [["      if (files.some((f) => /[*?]/.test(f) || !/\\.[cm]?[jt]s$/.test(f))) return { heavy: true, kind: 'suite', why: 'node --test (a glob or a directory)' };", "      if (files.some((f) => !f.includes('$') && (/[*?]/.test(f) || !/\\.[cm]?[jt]s$/.test(f)))) return { heavy: true, kind: 'suite', why: 'node --test (a glob or a directory)' };"]],
     killer: 'failsClosed', dies: /A VARIABLE THE COMMAND DID NOT SET STAYS HEAVY/ }

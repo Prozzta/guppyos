@@ -114,6 +114,40 @@ test('a raised limit serves the queue before a newcomer; Off keeps no queue', ()
   assert.deepEqual(x.l.queueSnapshot(), { waiters: [], reserved: [] });
 });
 
+test('REGRESSION: raising the limit immediately reserves the new slot for the oldest queued agent', () => {
+  const x = rig();
+  x.l.acquire('a', H, 'npm ci', 'a1', false);
+  x.l.acquire('b', H, 'npm ci', 'b1', false);
+  x.l.acquire('c', H, 'npm ci', 'c1', false);
+  x.setLimit(2);
+  x.l.limitChanged();
+  assert.deepEqual(x.notes.map((n) => n.a), ['b'], 'the first queued agent is notified without a release');
+  assert.deepEqual(x.l.queueSnapshot(), {
+    waiters: [{ agentId: 'c', kind: 'suite', since: new Date(x.now()).toISOString(), position: 1 }],
+    reserved: [{ agentId: 'b', kind: 'suite', until: new Date(x.now() + HJ.HEAVY_RESERVE_MS).toISOString() }]
+  });
+});
+
+test('REGRESSION: switching the limit Off tells every queued agent to run', () => {
+  const notes = []; const x = rig(HJ, 1, { notifyUnlimited: (a, k) => notes.push([a, k]) });
+  x.l.acquire('a', H, 'npm ci', 'a1', false);
+  x.l.acquire('b', H, 'npm ci', 'b1', false);
+  x.l.acquire('c', H, 'npm ci', 'c1', false);
+  x.setLimit('off'); x.l.limitChanged();
+  assert.deepEqual(notes, [['b', 'suite'], ['c', 'suite']]);
+  assert.deepEqual(x.l.queueSnapshot(), { waiters: [], reserved: [] });
+});
+
+test('REGRESSION: switching the limit Off does not notify a gone waiter or reservation', () => {
+  const notes = []; const x = rig(HJ, 1, { notifyUnlimited: (a, k) => notes.push([a, k]) });
+  x.l.acquire('a', H, 'npm ci', 'a1', false);
+  x.l.acquire('b', H, 'npm ci', 'b1', false);
+  x.l.acquire('c', H, 'npm ci', 'c1', false);
+  x.gone.add('b'); x.setLimit('off'); x.l.limitChanged();
+  assert.deepEqual(notes, [['c', 'suite']], 'the gone reservation receives no impossible wake');
+  assert.deepEqual(x.l.queueSnapshot(), { waiters: [], reserved: [] });
+});
+
 test('the re-entrant holder is unchanged, and a holder is never queued', () => {
   const x = rig();
   x.l.acquire('a', H, 'npm ci', 'a1', false);
@@ -199,7 +233,8 @@ test('the hook reader: a real file in a temp dir, by a Git Bash /x/ path too; a 
 // ─── the wiring ──────────────────────────────────────────────────────────────────────────────
 
 K.wiring = (idx = readSource('src/main/index.ts'), hooks = readSource('src/main/hooks.ts')) => {
-  assert.match(idx, /alive: \(agentId\) => \[\.\.\.ptyToAgent\.values\(\)\]\.includes\(agentId\),\n  notify: \(agentId, kind, until\) => notifyHeavySlotFree\(agentId, kind, until\),\n  notifyLapse: \(agentId, kind, why\) => notifyHeavyWaitLapsed\(agentId, kind, why\)\n\}\);/);
+  assert.match(idx, /if \(patch && 'heavyJobsAtOnce' in patch\) heavyLock\.limitChanged\(\);/, 'A SETTINGS LIMIT CHANGE PROMOTES EXISTING WAITERS');
+  assert.match(idx, /alive: \(agentId\) => \[\.\.\.ptyToAgent\.values\(\)\]\.includes\(agentId\),\n  notify: \(agentId, kind, until\) => notifyHeavySlotFree\(agentId, kind, until\),\n  notifyUnlimited: \(agentId, kind\) => notifyHeavyUnlimited\(agentId, kind\),\n  notifyLapse: \(agentId, kind, why\) => notifyHeavyWaitLapsed\(agentId, kind, why\)\n\}\);/);
   assert.match(idx, /const n = heavySlotFreeNotice\(agentId, kind, until\);\n  try \{ hive\.send\(n\.message as Partial<HiveMessage>, n\.from\); \}/, 'THE NOTICE IS SENT AS BUILT (SYSTEM SENDER + WAKE NOW)');
   assert.match(idx, /try \{ control\.steer\(agentId, n\.steer\); \}/, 'AND REACHES A BUSY AGENT');
   assert.match(hooks, /const scripts = HookServer\.heavyScriptCtx\(p\.cwd\);\n(?:      \/\/[^\n]*\n)*      const own = p\.hook_tool_input;\n      const toolName = own \? 'Bash' : p\.tool_name;\n      const toolInput = own \?\? p\.tool_input;\n      let cls = classifyHeavy\(toolName, toolInput, scripts\);/, 'THE HOOK READS SCRIPTS AT PRETOOLUSE');
