@@ -79,7 +79,7 @@ import { codexMcpHookToml, MCP_HOOK_EVENTS, type McpHookEvent } from './codexHoo
 import { CANONICAL_PROMPT, canonicalPromptFingerprint, promptVariant, withSessionStamp } from './sessionRotation';
 import { godHandoffFit } from './godStartup';
 import { MAIL_JOINED_BUDGET } from './mailSurface';
-import { FLOOR_DIGEST_FILE, recordBackstopClosed } from './floorDigest';
+import { FLOOR_DIGEST_FILE, recordBackstopClosed, recordFlaggedForHuman } from './floorDigest';
 import { BOARD_STATUS_FILE } from './boardStatus';
 
 /** The subset of HarnessConfig the hive consumes for the default-MCP merge.
@@ -172,6 +172,8 @@ export interface HumanQA {
   askedAt?: string;
   answeredAt?: string;
   dismissedAt?: string;
+  /** NEEDS-HUMAN-NO-ESCALATE-192: why it was dismissed (`superseded by <msg id>`). */
+  dismissedReason?: string;
   /** ASKME-REVAMP (optional; a string-only entry still works): choices shown as buttons, */
   /** the index of the recommended one, whether several may be picked, and the indexes the */
   /** human picked (written with `a`, which carries the chosen labels and any note). */
@@ -179,6 +181,10 @@ export interface HumanQA {
   recommended?: number;
   multi?: boolean;
   chosen?: number[];
+  /** NEEDS-HUMAN-NO-ESCALATE-192: set when the router added the entry from an agent's needs_human
+   *  ask: the asker (the answer is mailed to it as well as god) and the message id. */
+  from?: string;
+  msgId?: string;
 }
 
 export interface HiveTask {
@@ -2772,6 +2778,116 @@ export class HiveManager {
   /** The bound on the ancestor lookup's parse (findDeliveredMessage). */
   static readonly SUPERSEDE_SCAN_MAX_BYTES = 64 * 1024;
 
+  /** NEEDS-HUMAN-NO-ESCALATE-192: called once per entry the router adds to ASK ME (index.ts shows a
+   *  desktop notice, behind the notifications setting). */
+  setNeedsHumanObserver(cb: ((e: { agentId: string; name: string; card: string; subject: string; id: string }) => void) | null): void {
+    this.needsHumanObserver = cb;
+  }
+  private needsHumanObserver: ((e: { agentId: string; name: string; card: string; subject: string; id: string }) => void) | null = null;
+  static readonly NEEDS_HUMAN_EXCERPT = 600;
+  static readonly NEEDS_HUMAN_ANCESTOR_HOPS = 10;
+
+  /** NEEDS-HUMAN-NO-ESCALATE-192 (god's D1-D3): an agent's ASK with needs_human becomes one ASK ME
+   *  entry on its card, the card's status untouched (the board is god's); no usable card, and the
+   *  sender is told (god still gets the message). An inform or done with needs_human is recorded
+   *  for god's floor digest. Only a registered agent surfaces; never throws into the router. */
+  private surfaceNeedsHuman(msg: HiveMessage, reg: Registry, to: string): void {
+    try {
+      const agent = Object.prototype.hasOwnProperty.call(reg.agents, msg.from) ? reg.agents[msg.from] : undefined;
+      if (!agent) return;
+      const name = agent.name || msg.from;
+      const asks = msg.requires_reply === true || ['request', 'query', 'propose'].includes(msg.act);
+      // A broadcast or unknown recipient has no ledger to read (and must not get one created).
+      const card = this.needsHumanCard(msg, Object.prototype.hasOwnProperty.call(reg.agents, to) ? to : msg.from);
+      const root = this.root();
+      if (!asks) {
+        if (root) recordFlaggedForHuman(root, [{ agentId: msg.from, name, card, id: msg.id, subject: String(msg.subject).slice(0, 200) }].map((x) => ({ ...x, at: Date.now() })), Date.now());
+        this.appendLog({ kind: 'needs-human-flagged', from: msg.from, id: msg.id, card });
+        return;
+      }
+      const ledger = this.tasksForMutation();
+      const tasks = Array.isArray(ledger?.tasks) ? ledger.tasks : [];
+      const task = card ? tasks.find((x) => x?.id === card) : undefined;
+      let why: string | null = null;
+      if (!card) why = 'it has no card (none on the message, on a message it answers, or in its conversation)';
+      else if (!task) why = `${card} is not a card on the board`;
+      else if (task.status === 'done') why = `${card} is done`;
+      if (task && !why) {
+        const qa = Array.isArray(task.humanQA) ? task.humanQA : [];
+        if (qa.some((e) => e?.msgId === msg.id)) return; // re-delivered: already on the card
+        const body = String(msg.body ?? '');
+        const cap = HiveManager.NEEDS_HUMAN_EXCERPT;
+        const excerpt = body.length > cap ? `${body.slice(0, cap)}\n\n(the rest is in the message ${msg.id})` : body;
+        const entry: HumanQA = { q: `${name} asks: ${msg.subject}${excerpt ? `\n\n${excerpt}` : ''}`, askedAt: new Date().toISOString(), from: msg.from, msgId: msg.id };
+        if (this.patchTask(task.id, { humanQA: [...qa, entry] }, 'needs-human')) {
+          this.appendLog({ kind: 'needs-human-surfaced', from: msg.from, id: msg.id, card: task.id });
+          try { this.needsHumanObserver?.({ agentId: msg.from, name, card: task.id, subject: msg.subject, id: msg.id }); } catch { /* a notice never blocks mail */ }
+          return;
+        }
+        why = `${card} could not be updated`;
+      }
+      this.appendLog({ kind: 'needs-human-not-surfaced', from: msg.from, id: msg.id, card, reason: why });
+      const notice = this.normalize({
+        to: msg.from, act: 'inform', in_reply_to: null, requires_reply: false,
+        subject: `[needs_human not surfaced] ${msg.subject}`.slice(0, 200),
+        body: `Your ${msg.act} "${msg.subject}" (${msg.id}) was sent to ${msg.to}, but it is not in front of the Human: ${why}. A needs_human ask reaches ASK ME only on a card that is not done: resend it with its card if the Human must answer it.`
+      }, 'system');
+      const notified = this.deliver(notice, msg.from);
+      this.emitMessage(notice, notified ? [msg.from] : []);
+    } catch (e) {
+      try { this.appendLog({ kind: 'needs-human-error', from: msg.from, id: msg.id, error: String(e) }); } catch { /* noop */ }
+    }
+  }
+
+  /** NEEDS-HUMAN-NO-ESCALATE-192 (Jim SHOULD-1): an agent that cancels or corrects its needs_human
+   *  ask with `supersedes` takes it off ASK ME: each open entry it put there for a named message is
+   *  dismissed (the history stays on the card), so the Human never answers a dead question. */
+  private dismissSupersededAsks(msg: HiveMessage, reg: Registry): void {
+    try {
+      if (!Object.prototype.hasOwnProperty.call(reg.agents, msg.from)) return;
+      const named = new Set(msg.supersedes ?? []);
+      const ledger = this.tasksForMutation();
+      const tasks = Array.isArray(ledger?.tasks) ? ledger.tasks : [];
+      for (const task of tasks) {
+        const qa = Array.isArray(task?.humanQA) ? task.humanQA : [];
+        const hit = (e: HumanQA | null | undefined): boolean => !!e && !e.a && !e.dismissedAt && e.from === msg.from && typeof e.msgId === 'string' && named.has(e.msgId);
+        if (!qa.some(hit)) continue;
+        const at = new Date().toISOString();
+        const next = qa.map((e) => (hit(e) ? { ...e, dismissedAt: at, dismissedReason: `superseded by ${msg.id}` } : e));
+        if (this.patchTask(task.id, { humanQA: next }, 'needs-human')) this.appendLog({ kind: 'needs-human-dismissed', from: msg.from, id: msg.id, card: task.id });
+      }
+    } catch (e) {
+      try { this.appendLog({ kind: 'needs-human-error', from: msg.from, id: msg.id, error: String(e) }); } catch { /* noop */ }
+    }
+  }
+
+  /** The card a needs_human message is about: its own, else the nearest ancestor's (in_reply_to),
+   *  else the first carded message in its conversation (sender's or recipient's ledger; R1). */
+  private needsHumanCard(msg: HiveMessage, to: string): string | null {
+    const own = cardIdValue(msg.card);
+    if (own) return own;
+    const seen = new Set<string>([msg.id]);
+    let cur = msg.in_reply_to;
+    for (let i = 0; cur && i < HiveManager.NEEDS_HUMAN_ANCESTOR_HOPS && !seen.has(cur); i++) {
+      seen.add(cur);
+      const parent = this.findDeliveredMessage(cur);
+      if (!parent) break;
+      const c = cardIdValue(parent.card);
+      if (c) return c;
+      cur = parent.in_reply_to ?? null;
+    }
+    if (typeof msg.conversation !== 'string' || !msg.conversation) return null;
+    let best: { at: number; card: string } | null = null;
+    for (const id of [msg.from, to]) {
+      let entries: MailLedgerDoc['entries'] = {};
+      try { entries = this.mail.ledger(id).entries; } catch { continue; }
+      for (const e of Object.values(entries)) {
+        if (e?.cardId && e.conversation === msg.conversation && (!best || e.deliveredAt < best.at)) best = { at: e.deliveredAt, card: e.cardId };
+      }
+    }
+    return best?.card ?? null;
+  }
+
   /** A delivered message by id: <id>.json in any agent's inbox or inbox/.done, or null. */
   private findDeliveredMessage(id: string): Partial<HiveMessage> | null {
     if (!/^[A-Za-z0-9._-]{1,200}$/.test(id)) return null;
@@ -2898,6 +3014,8 @@ export class HiveManager {
     // each agent's Claude Code session (and approvable remotely). A message aimed
     // at "human" is handled by the god/orchestrator, the human's proxy here.
     const resolveTo = (to: string): string => (to === 'human' || to === 'god' ? godId : to);
+    if (msg.supersedes?.length) this.dismissSupersededAsks(msg, reg);
+    if (msg.needs_human === true) this.surfaceNeedsHuman(msg, reg, resolveTo(msg.to));
     // ZT-I1-MAIL §4.3 + §11.13(B): a reply from an agent closes the reply/outcome obligation it
     // answers in that agent's ledger (id or sender_id alias). Zero-token: tracking only, no wake.
     if (msg.in_reply_to) {
@@ -5521,7 +5639,8 @@ Write one JSON file into \`outbox/\` (any filename ending in \`.json\`):
   "in_reply_to": "<message id you're replying to> (optional)",
   "supersedes": ["<id of an earlier message this one cancels or corrects>"] (optional),
   "card": "<the task card id this message is about, e.g. READS-181> (optional)",
-  "wake": "now" (optional: an inform or agree that must be read at once)
+  "wake": "now" (optional: an inform or agree that must be read at once),
+  "needs_human": true (optional: see "Asking the Human")
 }
 \`\`\`
 
@@ -5535,6 +5654,15 @@ the ledger command below: it sends at once and confirms with \`ok op=…\`.
 
 A message that answers a request its sender had already been sent a \`supersedes\` for, still
 unread, is delivered flagged: the harness sets \`superseded_by\` and prefixes the subject.
+
+## Asking the Human
+To put a question in front of the Human, send
+an ask (request, query or propose) to god with \`needs_human: true\` and its \`card\`: it appears
+at once on that card in ASK ME, and the Human's answer comes back to you and to god. Without a card (on the message, an earlier message it
+answers, or its conversation) it only reaches god, and you are told. To withdraw or correct
+such an ask, name it in \`supersedes\`: it leaves ASK ME.
+An inform or done with \`needs_human\` goes to god's floor digest, and god decides whether it is
+worth the Human's time.
 
 ## The ledger command
 One call that updates a task card, sends one message and notes memory (each part optional),

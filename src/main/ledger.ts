@@ -37,7 +37,7 @@ const TOP_KEYS = new Set(['op', 'card', 'message', 'close', 'memory']);
 const CARD_KEYS = new Set(['id', 'create', 'patch', 'appendResult', 'appendNote']);
 const CREATE_KEYS = new Set(['title', 'description', 'assignee', 'status', 'priority', 'dependsOn']);
 const PATCH_KEYS = new Set(['title', 'description', 'assignee', 'status', 'priority', 'dependsOn']);
-const MESSAGE_KEYS = new Set(['to', 'act', 'subject', 'body', 'conversation', 'in_reply_to', 'supersedes', 'card']);
+const MESSAGE_KEYS = new Set(['to', 'act', 'subject', 'body', 'conversation', 'in_reply_to', 'supersedes', 'card', 'needs_human']);
 const CLOSE_KEYS = new Set(['id', 'reason']);
 /** REQUESTS-BADGE-84 D/E: at most this many asks closed by one op. */
 export const LEDGER_CLOSE_MAX = 50;
@@ -59,7 +59,7 @@ export interface LedgerCard {
   appendResult?: string;
   appendNote?: string;
 }
-export interface LedgerMessage { to: string; act: string; subject: string; body: string; conversation?: string; in_reply_to?: string | null; supersedes?: string[]; card?: string }
+export interface LedgerMessage { to: string; act: string; subject: string; body: string; conversation?: string; in_reply_to?: string | null; supersedes?: string[]; card?: string; needs_human?: boolean }
 /** REQUESTS-BADGE-84 D/E: close an open ask by hand, with the reason it records. */
 export interface LedgerClose { id: string; reason: string }
 export interface LedgerMemory { append: string; lesson?: boolean; key?: string; supersedes?: string[]; separate?: string[]; reason?: 'changed' | 'corrected' | 'moved' }
@@ -173,6 +173,7 @@ export function parseLedgerOp(raw: unknown): { ok: true; op: LedgerOp } | { ok: 
       return { ok: false, error: 'message.supersedes: up to 10 message ids' };
     }
     if (m.card !== undefined && (typeof m.card !== 'string' || !CARD_ID_RE.test(m.card))) return { ok: false, error: 'message.card: a card id, e.g. "READS-181"' };
+    if (m.needs_human !== undefined && typeof m.needs_human !== 'boolean') return { ok: false, error: 'message.needs_human: true or false' };
     // REQUESTS-BADGE-84 A: the op's card is the message's card unless the message names one.
     const card = (m.card as string | undefined) ?? op.card?.id;
     // A request is tied to its card at send time, so closing the card closes the ask. Information
@@ -418,7 +419,8 @@ export function applyLedgerOp(raw: unknown, deps: LedgerDeps): LedgerReply | Pro
           ...(m.conversation !== undefined ? { conversation: m.conversation } : {}),
           ...(m.in_reply_to !== undefined ? { in_reply_to: m.in_reply_to } : {}),
           ...(m.supersedes !== undefined ? { supersedes: m.supersedes } : {}),
-          ...(m.card !== undefined ? { card: m.card } : {})
+          ...(m.card !== undefined ? { card: m.card } : {}),
+          ...(m.needs_human !== undefined ? { needs_human: m.needs_human } : {})
         };
         const tmp = join(outbox, `${file}.tmp-${process.pid}`);
         writeFileSync(tmp, JSON.stringify(msg, null, 2), 'utf8');
