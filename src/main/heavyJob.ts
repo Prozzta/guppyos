@@ -1530,7 +1530,9 @@ function cmdFor(text: string, depth: number, ctx: ClassifyCtx): { cls: HeavyClas
   const ref = new RegExp(`(%[A-Za-z_][A-Za-z0-9_]+%)|${m[2]}(?:~[A-Za-z]*(?:\\$[A-Za-z_][A-Za-z0-9_]*:)?)?${m[3]}`, 'g');
   const put = (b: string, v: string): string => b.replace(ref, (x, name?: string) => name ? x : v);
   // A body still holding a %NAME% / !NAME! is not all loop-made: it is read as it would be outside a loop.
-  const one = (b: string): HeavyClass => classifyCommand(b, depth, { ...here, loopWord: !/%[A-Za-z_][A-Za-z0-9_]+%|![A-Za-z_][A-Za-z0-9_]+!/.test(b), loopMult: runs === Infinity ? runs : Math.max(runs, 1) });
+  // Any length (Jim 36f8db): the loop's own letter is already replaced by then (nested %a%b reads l%b).
+  const unmade = /%[A-Za-z_][A-Za-z0-9_]*%|![^!\r\n]+!/;
+  const one = (b: string): HeavyClass => classifyCommand(b, depth, { ...here, loopWord: !unmade.test(b), loopMult: runs === Infinity ? runs : Math.max(runs, 1) });
   const each = runs !== Infinity && !l && values.length && runs <= PLAN_CAP
     ? values.map((v) => put(body, v))   // cmd's words drop a value's quotes, so %~f reads as %f
     : [l && runs !== Infinity ? put(body, String(set.split(/[\s,;=]+/).filter(Boolean)[0])) : body];

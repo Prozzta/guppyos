@@ -125,6 +125,8 @@ K.ifBodies = (M = HJ) => {
 
 K.names = (M = HJ) => {
   provisional(M, 'cmd /c "for %f in (a) do node --test test\\%foo%.test.cjs"', 'A %NAME% VARIABLE IS NOT THE LOOP VARIABLE');
+  provisional(M, 'cmd /c "for %f in (b) do node --test test\\%x%.test.cjs"', 'A ONE-LETTER %x% THAT IS NOT THE LOOP LETTER IS A VARIABLE');
+  provisional(M, "cmd /c 'for %f in (b) do node --test test\\!x!.test.cjs'", 'A !x! OF ANY LENGTH IS A VARIABLE');
   heavyAs(M, 'cmd /c "for %f in (live) do echo %foo% & node --test test\\%f.test.cjs"', 'bench', 'THE LOOP VARIABLE BESIDE A %NAME% IS STILL REPLACED');
   heavyAs(M, 'cmd /c path.bat', 'bench', 'A %~$PATH: REF NAMES THE VALUE');
 };
@@ -177,7 +179,7 @@ const MUTANTS = [
   { name: 'the variable is not replaced per value', edits: [['  const each = runs !== Infinity && !l && values.length && runs <= PLAN_CAP', '  const each = false']], killer: 'percentF', dies: /EACH VALUE IS READ/ },
   { name: 'a %~ ref is not replaced', edits: [['${m[2]}(?:~[A-Za-z]*', '${m[2]}(?:~~[A-Za-z]*']], killer: 'percentF', dies: /A %~ REF IS REPLACED BY THE VALUE/ },
   { name: 'a lone & in the body hides the FOR (the segment is not found)', edits: [["const own = seg.replace(/\\s+&$/, '');", 'const own = seg;']], killer: 'counts', dies: /EVERY NODE --TEST OF THE BODY COUNTS/ },
-  { name: 'the body is not one iteration of a loop (a loop-made name goes provisional)', edits: [['{ ...here, loopWord: !/', '{ ...here, loopWord: false && !/']], killer: 'light', dies: /A LOOP-MADE NAME IT CANNOT READ STAYS LIGHT/ },
+  { name: 'the body is not one iteration of a loop (a loop-made name goes provisional)', edits: [['loopWord: !unmade.test(b),', 'loopWord: false,']], killer: 'light', dies: /A LOOP-MADE NAME IT CANNOT READ STAYS LIGHT/ },
   { name: 'any FOR with node --test is a suite (the count is not checked)', edits: [['if (tests && (runs === Infinity || runs * tests >= SUITE_MANY_FILES)) {', 'if (tests) {']], killer: 'light', dies: /NAMED LIGHT FILES STAY LIGHT/ },
   // HEAVY-LOCK-CMD-FOR-FOLLOWUPS-198
   { name: 'the IF is not read', edits: [['if (/^@?(?:for|if)$/i.test(head)) {', 'if (/^@?(?:for)$/i.test(head)) {']], killer: 'ifBodies', dies: /AN IF RUNS ITS BODY/ },
@@ -188,7 +190,9 @@ const MUTANTS = [
   { name: "the condition's operand is read as the program", edits: [['(?:exist|defined)\\s+(?:"[^"]*"|\\S+)|', '(?:exist|defined)|']], killer: 'ifBodies', dies: /^AN IF RUNS ITS BODY:/ },
   { name: 'a bare IF body is split at else', edits: [["  const e = s.startsWith('(') ? /^\\s*else\\s+/i.exec(then.after) : null;", "  const e = s.startsWith('(') ? /^\\s*else\\s+/i.exec(then.after) : null;\n  if (!s.startsWith('(') && / else /i.test(then.body)) bodies.push(then.body.split(/ else /i)[1]);"]], killer: 'ifBodies', dies: /ELSE IS JUST WORDS/ },
   { name: 'a %NAME% variable is replaced as the loop variable', edits: [['(x, name?: string) => name ? x : v', '() => v']], killer: 'names', dies: /A %NAME% VARIABLE IS NOT THE LOOP VARIABLE/ },
-  { name: 'a body holding a %NAME% is still all loop-made', edits: [['loopWord: !/%[A-Za-z_][A-Za-z0-9_]+%|', 'loopWord: true || !/%[A-Za-z_][A-Za-z0-9_]+%|']], killer: 'names', dies: /A %NAME% VARIABLE IS NOT THE LOOP VARIABLE/ },
+  { name: 'a body holding a %NAME% is still all loop-made', edits: [['loopWord: !unmade.test(b),', 'loopWord: true,']], killer: 'names', dies: /A %NAME% VARIABLE IS NOT THE LOOP VARIABLE/ },
+  { name: 'a one-letter %x% is not a variable', edits: [['const unmade = /%[A-Za-z_][A-Za-z0-9_]*%|', 'const unmade = /%[A-Za-z_][A-Za-z0-9_]+%|']], killer: 'names', dies: /A ONE-LETTER %x% THAT IS NOT THE LOOP LETTER IS A VARIABLE/ },
+  { name: 'a !x! needs two letters', edits: [['|![^!\\r\\n]+!/;', '|![A-Za-z_][A-Za-z0-9_]+!/;']], killer: 'names', dies: /A !x! OF ANY LENGTH IS A VARIABLE/ },
   { name: 'a one-letter %a% is read as a %NAME% variable', edits: [['(%[A-Za-z_][A-Za-z0-9_]+%)|', '(%[A-Za-z_][A-Za-z0-9_]*%)|']], killer: 'nested', dies: /A NESTED LOOP READS BOTH VALUES/ },
   { name: 'a %~$PATH: ref is not replaced', edits: [['(?:\\\\$[A-Za-z_][A-Za-z0-9_]*:)?', '']], killer: 'names', dies: /A %~\$PATH: REF NAMES THE VALUE/ },
   { name: 'a ^ does not continue the line', edits: [["\\^\\r?\\n/g, '$1$2'", "\\^\\r?\\n(?!)/g, '$1$2'"]], killer: 'caret', dies: /A CARET CONTINUES THE LINE/ },
