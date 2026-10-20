@@ -62,6 +62,11 @@ export const STABLE_ENV_KEYS = [
   'HIVE_LEDGER_URL',
   // GOD-TERMINAL-CONTROL: Stable god's `term` endpoint (it drives Stable agents' terminals).
   'HIVE_TERM_URL',
+  // DEV-ISO-HOOK-TOKEN-198: the agent's named-pipe hook token (PIPE-HOOK-NO-TOKEN-192), a Stable
+  // credential; a dev spawn sets its own. And the wake incarnation Stable gave the agent's spawn,
+  // which the hook shim copies into every hook (codexScreenGuard): a dev agent would carry Stable's.
+  'HIVE_HOOK_TOKEN',
+  'MUNDER_WAKE_INCARNATION',
   'MUNDER_HIVE_ROOT',
   // Provider routing Stable injects per agent (Dwight M3 matrix): each would
   // point a dev-spawned agent at a Stable-owned home or endpoint.
