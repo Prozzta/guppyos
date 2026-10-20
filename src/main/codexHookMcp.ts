@@ -298,9 +298,91 @@ function pendingCallItems(tail: string): Array<Record<string, unknown>> {
 }
 
 /**
+ * CODEX-CMD-COMPUTED-SHELL-192: the value of the identifier `name` in the exec program `src`
+ * (`code` is its codeMask) when it can only be one string: ONE `const name = '<literal>'` and every
+ * other mention is a read inside a nested shell call's argument (`shell: name`, `{ shell }`), a
+ * member (`x.name`) or an object key. A second binding, an assignment, a parameter, any other
+ * use or a template that could touch it is not provable: undefined.
+ */
+function constString(src: string, code: string, name: string): string | undefined {
+  const word = new RegExp(`(?<![\\w$])${name.replace(/\$/g, '\\$')}(?![\\w$])`, 'g');
+  const decls: Array<{ at: number; end: number; value: string | undefined }> = [];
+  const dre = new RegExp(`(?<![\\w$.])const\\s+${name.replace(/\$/g, '\\$')}\\s*=\\s*`, 'g');
+  let m: RegExpExecArray | null;
+  while ((m = dre.exec(src))) {
+    if (code[m.index] !== 'c') continue;
+    const i = m.index + m[0].length;
+    const q = src[i];
+    let value: string | undefined;
+    let end = i;
+    if (q === '"' || q === "'" || q === '`') {
+      let j = i + 1;
+      while (j < src.length && src[j] !== q) { if (src[j] === '\\') j += 1; j += 1; }
+      end = j + 1;
+      // Then the statement ends: `;`, `,`, or a line break the next line cannot continue (a word
+      // can, if it is the operator `in` or `instanceof`: Jim NIT).
+      const after = /^[ \t]*(?:[;,]|\r?\n\s*(?:(?!(?:in|instanceof)(?![\w$]))[A-Za-z_$}]|$)|$)/.test(src.slice(end));
+      if (j < src.length && after && !(q === '`' && src.slice(i, j).includes('${'))) {
+        try { const v: unknown = JSON.parse(q === '"' ? src.slice(i, end) : asJsonString(src.slice(i + 1, j))); value = typeof v === 'string' ? v : undefined; } catch { value = undefined; }
+      }
+    }
+    decls.push({ at: m.index, end, value });
+  }
+  if (decls.length !== 1 || decls[0].value === undefined) return undefined;
+  // A template with a substitution is masked whole: it must not mention the name at all.
+  const tre = /`[^`]*`/g;
+  while ((m = tre.exec(code))) if (src.slice(m.index, m.index + m[0].length).includes('${') && new RegExp(word.source).test(src.slice(m.index, m.index + m[0].length))) return undefined;
+  const spans: Array<[number, number]> = [];
+  const cre = new RegExp(SHELL_INPUT_CALL.source, 'g');
+  while ((m = cre.exec(src))) {
+    if (code[m.index] !== 't') continue;
+    const s = objectSpan(src, m.index + m[0].length);
+    if (s) spans.push([m.index + m[0].length, m.index + m[0].length + s.length]);
+  }
+  const prev = (i: number) => { let k = i - 1; while (k >= 0 && /\s/.test(code[k])) k -= 1; return k >= 0 ? code[k] : ''; };
+  const next = (i: number) => { let k = i; while (k < code.length && /\s/.test(code[k])) k += 1; return k < code.length ? code[k] : ''; };
+  while ((m = word.exec(code))) {
+    const at = m.index;
+    const end = at + m[0].length;
+    if (decls.some((d) => at > d.at && at < d.end)) continue; // a declaration (one only, checked above)
+    const p = prev(at);
+    const n = next(end);
+    if (p === '.') continue; // a member, not this binding
+    if (n === ':' && (p === '{' || p === ',')) continue; // an object key
+    const inCall = spans.some(([s, e]) => at > s && end < e);
+    if (inCall && (p === ':' || p === '{' || p === ',') && (n === ',' || n === '}')) continue; // a read as a call's value
+    return undefined;
+  }
+  return decls[0].value;
+}
+
+/**
+ * CODEX-CMD-COMPUTED-SHELL-192: the `shell` of the call object `span` in `src`: its
+ * literal, or, when it names a const (`shell: sh`, or `{ shell }`), that const's one string.
+ */
+function shellProp(src: string, code: string, span: string): string | null | undefined {
+  const v = literalProp(span, 'shell');
+  if (v !== undefined) return v;
+  const sc = codeMask(span);
+  const re = /[{,]\s*(?:shell|"shell")\s*(?::\s*([A-Za-z_$][\w$]*)\s*)?(?=[,}])/g;
+  let m: RegExpExecArray | null;
+  let name: string | undefined;
+  while ((m = re.exec(span))) {
+    if (sc[m.index] !== span[m.index]) continue;
+    const pre = sc.slice(0, m.index + 1);
+    if ((pre.match(/\{/g) ?? []).length - (pre.match(/\}/g) ?? []).length !== 1) continue;
+    if (name !== undefined) return undefined; // the key twice
+    name = m[1] ?? (m[0].includes('"') ? undefined : 'shell');
+    if (name === undefined) return undefined; // `"shell"` alone is not shorthand
+  }
+  return name === undefined ? undefined : constString(src, code, name);
+}
+
+/**
  * The literal `key` argument of the current turn's pending exec_command with this `cmd`: a
  * string, null when the call gave none (Codex's default), or undefined when no such call is found
- * or the value is computed.
+ * or the value is computed. A `shell` that names a const of one string reads as that string
+ * (CODEX-CMD-COMPUTED-SHELL-192), so a const cmd gets cmd's exact join line like a literal one.
  */
 function pendingExecArg(tail: string, command: string, key: 'shell' | 'workdir'): string | null | undefined {
   const found: Array<string | null | undefined> = [];
@@ -313,7 +395,7 @@ function pendingExecArg(tail: string, command: string, key: 'shell' | 'workdir')
       while ((m = re.exec(src))) {
         if (code[m.index] !== 't' || (m[1] ?? m[3]) === 'write_stdin') continue;
         const span = objectSpan(src, m.index + m[0].length);
-        if (span && literalProp(span, 'cmd') === command) found.push(literalProp(span, key));
+        if (span && literalProp(span, 'cmd') === command) found.push(key === 'shell' ? shellProp(src, code, span) : literalProp(span, key));
       }
     } else if (p.name === 'exec_command' && typeof p.arguments === 'string') {
       let a: Record<string, unknown> | null = null;
