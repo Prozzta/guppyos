@@ -6238,7 +6238,7 @@ function parseAndEmit(bodyStr, isSse) {
   }
   if (!objs.length) { armStop(); return; }
 
-  let model = null, input = 0, output = 0, cacheRead = 0, cacheCreation = 0, sawUsage = false;
+  let model = null, input = 0, output = 0, cacheRead = 0, cacheCreation = 0, cacheCreation5m = 0, cacheCreation1h = 0, sawUsage = false;
   const toolCalls = [];
   const oaiTools = {}; // accumulate streaming openai tool_calls by index
 
@@ -6253,6 +6253,8 @@ function parseAndEmit(bodyStr, isSse) {
         input += u.input_tokens || 0;
         cacheRead += u.cache_read_input_tokens || 0;
         cacheCreation += u.cache_creation_input_tokens || 0;
+        cacheCreation5m += u.cache_creation?.ephemeral_5m_input_tokens || 0;
+        cacheCreation1h += u.cache_creation?.ephemeral_1h_input_tokens || 0;
         sawUsage = true;
       } else if (o.type === 'message_delta' && o.usage) {
         output += o.usage.output_tokens || 0;
@@ -6266,6 +6268,8 @@ function parseAndEmit(bodyStr, isSse) {
         output += u.output_tokens || 0;
         cacheRead += u.cache_read_input_tokens || 0;
         cacheCreation += u.cache_creation_input_tokens || 0;
+        cacheCreation5m += u.cache_creation?.ephemeral_5m_input_tokens || 0;
+        cacheCreation1h += u.cache_creation?.ephemeral_1h_input_tokens || 0;
         sawUsage = true;
       }
       if (Array.isArray(o.content)) {
@@ -6315,7 +6319,7 @@ function parseAndEmit(bodyStr, isSse) {
 
   if (sawUsage) {
     emit({ hook_event_name: 'Status', agent_id: AGENT_ID, context_window: { total_input_tokens: input + cacheRead + cacheCreation, context_window_size: ctxSize(model) } });
-    emit({ hook_event_name: 'CostSample', agent_id: AGENT_ID, session_id: SESSION, model: model, input: input, output: output, cache_read: cacheRead, cache_creation: cacheCreation });
+    emit({ hook_event_name: 'CostSample', agent_id: AGENT_ID, session_id: SESSION, model: model, input: input, output: output, cache_read: cacheRead, cache_creation: cacheCreation, cache_creation_5m: cacheCreation5m, cache_creation_1h: cacheCreation1h });
   }
   if (toolCalls.length) {
     cancelStop(); // a tool call means the turn continues

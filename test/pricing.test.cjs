@@ -29,7 +29,21 @@ test('pricing strips the accepted Opus 5.5 1M suffix before lookup', () => {
   assert.deepEqual(priceFor('claude-opus-5-5[1m]'), priceFor('claude-opus-5-5'));
 });
 
-test('pricing costs Claude Code cache writes at the recorded one-hour rate', () => {
+test('pricing costs a one-hour cache-write-only sample at the one-hour rate', () => {
+  assert.equal(estimateCostUsd('claude-opus-5-5', {
+    inputTokens: 0, outputTokens: 0, cacheReadTokens: 0,
+    cacheWriteTokens: 1_000_000, cacheWrite1hTokens: 1_000_000
+  }), 8);
+});
+
+test('pricing splits mixed cache writes across their published TTL rates', () => {
+  assert.equal(estimateCostUsd('claude-opus-5-5', {
+    inputTokens: 0, outputTokens: 0, cacheReadTokens: 0,
+    cacheWriteTokens: 1_000_000, cacheWrite5mTokens: 400_000, cacheWrite1hTokens: 600_000
+  }), 6.8);
+});
+
+test('pricing treats a summed-only cache write as one-hour fallback data', () => {
   assert.equal(estimateCostUsd('claude-opus-5-5', {
     inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 1_000_000
   }), 8);

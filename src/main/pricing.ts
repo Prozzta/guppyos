@@ -78,6 +78,8 @@ export interface TokenSplit {
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
+  cacheWrite5mTokens?: number;
+  cacheWrite1hTokens?: number;
 }
 
 /**
@@ -86,10 +88,19 @@ export interface TokenSplit {
  */
 export function estimateCostUsd(model: string | undefined | null, tokens: TokenSplit): number {
   const p = priceFor(model);
+  const cacheWrite5mTokens = tokens.cacheWrite5mTokens ?? 0;
+  const cacheWrite1hTokens = tokens.cacheWrite1hTokens ?? 0;
+  // Old transcripts and non-Claude CostSample producers provide only the summed
+  // count. Preserve the prior safe estimate: treat any unclassified write as 1h.
+  const unclassifiedCacheWriteTokens = Math.max(
+    0,
+    tokens.cacheWriteTokens - cacheWrite5mTokens - cacheWrite1hTokens
+  );
   return (
     (tokens.inputTokens / 1_000_000) * p.inputPerM +
     (tokens.outputTokens / 1_000_000) * p.outputPerM +
     (tokens.cacheReadTokens / 1_000_000) * p.cacheReadPerM +
-    (tokens.cacheWriteTokens / 1_000_000) * p.cacheWrite1hPerM
+    (cacheWrite5mTokens / 1_000_000) * p.cacheWrite5mPerM +
+    ((cacheWrite1hTokens + unclassifiedCacheWriteTokens) / 1_000_000) * p.cacheWrite1hPerM
   );
 }
