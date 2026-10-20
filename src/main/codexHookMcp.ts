@@ -343,7 +343,7 @@ function constString(src: string, code: string, name: string): string | undefine
   while ((m = word.exec(code))) {
     const at = m.index;
     const end = at + m[0].length;
-    if (at > decls[0].at && at < decls[0].end) continue; // the declaration itself
+    if (decls.some((d) => at > d.at && at < d.end)) continue; // a declaration (one only, checked above)
     const p = prev(at);
     const n = next(end);
     if (p === '.') continue; // a member, not this binding
