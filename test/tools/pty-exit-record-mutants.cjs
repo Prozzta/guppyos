@@ -31,6 +31,9 @@ const KEEP = at('X8: records go to <hive>/exits/<agent>/ and only the newest 20 
 const HUNG = at('X9: a hung or throwing screen read still disposes the mirror and still writes the record');
 const REDACT = at('X16: a secret-shaped child commandLine, screen row and raw tail come out [redacted] (Jim S1: <hive>/exits is floor-readable)');
 const NOISE = at('X17: noise Codex log rows (token_count, item_completed, token_usage) are skipped; the newest n others stay (Jim N1)');
+const HEADROW = at('X18: a raw tail pty.ts cut drops its partial head row, so a key cut at the head leaves no fragment (Jim N2)');
+const WRAPPED = at('X19: a key wrapped over screen rows leaves no fragment; the rows it spans are blanked, the others stay (Jim N3)');
+const TOPROW = at('X20: the top screen row may continue a key from above the viewport: its leading key-shaped run is redacted');
 const WIRE = at('X13/X14: main records only an unrequested, non-installer end, takes its facts synchronously and fires and forgets');
 
 const MUTANTS = [
@@ -50,7 +53,11 @@ const MUTANTS = [
   ['X14 main records an installer relaunch', INDEX, 'if (!e.explicit && e.evidence && !pendingInstallRelaunch.has(e.id)) {', 'if (!e.explicit && e.evidence) {', WIRE],
   ['X15 the last hook event is never stamped', INDEX, '    if (agentId && event) hookSeenEvent.set(agentId, event);', '', WIRE],
   ['X16 free text is clipped but not redacted', REC, "  const t = redactSecrets(typeof s === 'string' ? s : s === undefined ? '' : JSON.stringify(s) ?? '');", "  const t = (typeof s === 'string' ? s : s === undefined ? '' : JSON.stringify(s) ?? '');", REDACT],
-  ['X17 noise Codex log rows are kept', REC, "const signal = all.filter((r) => !CODEX_LOG_NOISE.test(`${r.target} ${r.body ?? ''}`));", 'const signal = all;', NOISE]
+  ['X17 noise Codex log rows are kept', REC, "const signal = all.filter((r) => !CODEX_LOG_NOISE.test(`${r.target} ${r.body ?? ''}`));", 'const signal = all;', NOISE],
+  ['X18 the head row of a cut tail is kept', REC, "if (raw.length >= PTY_RAW_TAIL_CHARS) { const nl = t.indexOf('\\n'); t = nl < 0 ? '' : t.slice(nl + 1); }", '', HEADROW],
+  ['X19 rows are redacted one by one only', REC, "  if (whole !== out.join('')) {\n", '  if (false) {\n', WRAPPED],
+  ['X20 the top row\'s leading key run is kept', REC, "  if (out.length) out[0] = out[0].replace(KEY_RUN_AT_START, '[redacted]');\n", '', TOPROW],
+  ['X21 a short row\'s boundary counts as a wrap', REC, 'const mayWrap = (l: string) => !cols || l.length >= cols || /[^\\x00-\\x7f]/.test(l);', 'const mayWrap = (l: string) => true;', WRAPPED]
 ];
 
 const run = () => spawnSync(process.execPath, ['--test', TEST], { cwd: ROOT, encoding: 'utf8', windowsHide: true, timeout: 300_000 });
