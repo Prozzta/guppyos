@@ -174,15 +174,18 @@ test('T2 onChange fires exactly once per acquire, background re-entry, deny, res
   clock.t += HEAVY_RESERVE_MS;
   step(() => lock.queueSnapshot(), 1, 'reserve-expired');
   assert.equal(rows.at(-1).action, 'reserve-expired');
-  // A waiter dropped as stale when a slot frees.
+  // A waiter an hour old when the slot frees keeps its place and is reserved (HEAVY-QUEUE-WAIT-DROPS: no drop by age).
   step(() => lock.acquire('a', SUITE, 'npm test', 'c7', false), 1, 'acquire');
   step(() => lock.acquire('c', SUITE, 'npm test', 'c8', false), 1, 'deny');
   clock.t += HEAVY_TTL_MS - 1;
   lock.acquire('a', SUITE, 'npm test', 'c9', false); // a re-entry keeps the holder fresh
   clock.t += 1;
   step(() => lock.callDone('a', 'c7'), 0, 'one of two calls done');
-  step(() => lock.callDone('a', 'c9'), 2, 'release, then the stale waiter dropped');
-  assert.deepEqual(rows.slice(-2).map((r) => [r.action, r.reason]), [['release', 'posttool'], ['queue-dropped', 'stale']]);
+  step(() => lock.callDone('a', 'c9'), 2, 'release, then the hour-old waiter reserved');
+  assert.deepEqual(rows.slice(-2).map((r) => [r.action, r.reason]), [['release', 'posttool'], ['reserve', undefined]]);
+  assert.ok(!rows.some((r) => r.action === 'queue-dropped'), 'no waiter dropped by age');
+  step(() => lock.acquire('c', SUITE, 'npm test', 'c8b', false), 1, 'c takes its reservation');
+  step(() => lock.callDone('c', 'c8b'), 1, 'release');
   // A gone agent: its queue place, its reservation.
   step(() => lock.acquire('a', SUITE, 'npm test', 'c10', false), 1, 'acquire');
   step(() => lock.acquire('d', SUITE, 'npm test', 'c11', false), 1, 'deny');

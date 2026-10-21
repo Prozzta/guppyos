@@ -172,16 +172,20 @@ const K = {
     assert.equal(r.l.queueSnapshot().waiters[0].agentId, 'w', 'w still waits');
   },
 
-  // Jim SHOULD 2: a stale exclusive head dropped by the TTL scan lets the waiter behind it in.
+  // Jim SHOULD 2: an exclusive head dropped by the scheduled sweep lets the waiter behind it in.
+  // HEAVY-QUEUE-WAIT-DROPS: the sweep reaps a GONE head (by liveness); a live one is never dropped by age.
   staleHead(M = HJ, N = 2) {
     const r = rig(M, N);
     r.take('b', BUILD);
     assert.equal(r.take('x', FULL).allow, false);
     assert.equal(r.take('y', BUILD).allow, false);
-    r.tick(M.HEAVY_TTL_MS - 1_000);
+    r.tick(M.HEAVY_TTL_MS / 2);
+    r.take('b', BUILD);                                   // the holder re-enters inside ITS TTL
+    r.tick(M.HEAVY_TTL_MS / 2 + 1_000);
     r.take('b', BUILD);
-    assert.equal(r.take('y', BUILD).allow, false, 'y asks again inside its TTL');
-    r.tick(2_000);
+    assert.deepEqual(r.l.queueSnapshot().waiters.map((w) => w.agentId), ['x', 'y'], 'an hour on, the live head still waits');
+    r.gone.add('x');
+    r.tick(1_000);
     assert.deepEqual(reserved(r), ['y'], `A STALE EXCLUSIVE HEAD LETS THE NEXT ONE IN (${N} slots)`);
   },
 

@@ -3,13 +3,16 @@
 /**
  * LOCK-WAIT-NOTICES-187 (1.1.87): the heavy-job lock left a waiting agent unaware in two places
  * (Jim's IDLE-MEANS-IDLE diagnosis, GAP 1 and GAP 2):
- *  - a waiter not denied again for HEAVY_TTL_MS is dropped from the queue as stale, silently. An
+ *  - a waiter not denied again for HEAVY_TTL_MS was dropped from the queue as stale, silently. An
  *    agent told "do not retry, you will be told" behind a long holder waited for a notice that
  *    never came;
  *  - a reservation left unused for HEAVY_RESERVE_MS lapses, and the agent was not told it had lost
  *    the slot and was no longer queued.
- * Both now send a notice, on the same two rails (mail + steer) as "HEAVY SLOT FREE". The lock's
- * semantics are unchanged: the same drops and lapses, at the same moments, in the same log rows.
+ * Both got a notice, on the same two rails (mail + steer) as "HEAVY SLOT FREE".
+ * HEAVY-QUEUE-WAIT-DROPS (1.1.98): the stale drop itself is GONE: it bounded the wait to 60 min
+ * while a stage bench holds the slot ~90 min, so a patient waiter fell out and re-queued at the
+ * back. A waiter now keeps its place until served, released, or its agent is gone; the only
+ * scheduled sweep is by liveness (reason 'gone', no notice: no PTY to tell). GAP 2 is as before.
  * Not told: the agent whose own heavy call is running (its deny or acquire says it all), and a
  * gone agent (no PTY to tell).
  */
@@ -40,7 +43,7 @@ function fakeLock(opts = {}) {
   return { lock, clock, rows, freed, lapsed };
 }
 
-test('GAP 1: a waiter dropped as stale is told it is no longer queued', () => {
+test('GAP 1 (HEAVY-QUEUE-WAIT-DROPS): a waiter silent past the hour is NOT dropped when the slot frees: it is reserved and told HEAVY SLOT FREE', () => {
   const { lock, clock, rows, freed, lapsed } = fakeLock();
   lock.acquire('holder', SUITE, 'npm test &', 'h1', true);
   assert.equal(lock.acquire('w', SUITE, 'npm test', 'w1', false).allow, false, 'queued #1');
@@ -48,44 +51,47 @@ test('GAP 1: a waiter dropped as stale is told it is no longer queued', () => {
   lock.acquire('holder', SUITE, 'npm test &', 'h2', true); // the holder's own re-entry keeps it fresh
   clock.t += 2 * MIN;
   lock.release('holder', 'process-exit');
-  assert.deepEqual(rows.slice(-2).map((r) => [r.action, r.agentId, r.reason]), [['release', 'holder', 'process-exit'], ['queue-dropped', 'w', 'stale']]);
-  assert.deepEqual(lapsed, [['w', 'suite', 'stale']]);
-  assert.deepEqual(freed, [], 'no slot was reserved for it');
-  assert.deepEqual(lock.queueSnapshot(), { waiters: [], reserved: [] }, 'the drop itself is unchanged');
+  assert.deepEqual(rows.slice(-2).map((r) => [r.action, r.agentId]), [['release', 'holder'], ['reserve', 'w']]);
+  assert.ok(!rows.some((r) => r.action === 'queue-dropped'), 'no drop by age');
+  assert.deepEqual(lapsed, [], 'nothing lapsed');
+  assert.deepEqual(freed.map((f) => f.slice(0, 2)), [['w', 'suite']], 'the slot is reserved for it');
+  assert.deepEqual(lock.queueSnapshot().reserved.map((r) => r.agentId), ['w']);
 });
 
-test('Jim NIT 1: a stale waiter leaves the queue ON SCHEDULE while the holder still runs, is told once, and no display says QUEUED any more', async () => {
+test('Jim NIT 1 (HEAVY-QUEUE-WAIT-DROPS): a GONE waiter leaves the queue ON SCHEDULE while the holder still runs, untold, and no display says QUEUED any more; a live one stays past the hour', async () => {
   const ACT = loadTs('src/shared/activityView.ts');
-  const { lock, clock, rows, lapsed } = fakeLock();
+  let gone = false;
+  const { lock, clock, rows, lapsed } = fakeLock({ alive: (id) => !(gone && id === 'w') });
   let changes = 0;
   lock.onChange(() => { changes++; });
   lock.acquire('holder', SUITE, 'npm test &', 'h1', true);
   lock.acquire('w', SUITE, 'npm test', 'w1', false);
+  lock.acquire('v', SUITE, 'npm test', 'v1', false);
   clock.t += HEAVY_TTL_MS / 2;
   lock.acquire('holder', SUITE, 'npm test &', 'h2', true); // the holder's re-entry keeps its own TTL fresh
-  clock.t += HEAVY_TTL_MS / 2 - 1;
-  assert.equal(lock.queueSnapshot().waiters.length, 1, 'not yet');
+  clock.t += HEAVY_TTL_MS / 2 + MIN;
+  await lock.scan(); // the watcher's tick an hour on: both still queued (no drop by age)
+  assert.deepEqual(lock.queueSnapshot().waiters.map((x) => x.agentId), ['w', 'v'], 'an hour on, both wait');
   assert.deepEqual(lapsed, []);
-  clock.t += 1;
+  gone = true;
   const before = changes;
   await lock.scan(); // the watcher's tick (armed while the slot is held); no slot frees
-  assert.deepEqual(rows.at(-1), { kind: 'heavy-lock', action: 'queue-dropped', agentId: 'w', reason: 'stale' });
+  assert.deepEqual(rows.at(-1), { kind: 'heavy-lock', action: 'queue-dropped', agentId: 'w', reason: 'gone' });
   assert.equal(changes - before, 1, 'one change: the displays repaint');
-  assert.deepEqual(lapsed, [['w', 'suite', 'stale']]);
+  assert.deepEqual(lapsed, [], 'a gone agent is not told (no PTY)');
   const view = { holders: lock.snapshot(), ...lock.queueSnapshot() };
-  assert.deepEqual(view.waiters, []);
-  assert.equal(ACT.heavyActivity('w', view), null, 'no QUEUED #n for an agent the lock will never serve');
+  assert.deepEqual(view.waiters.map((x) => [x.agentId, x.position]), [['v', 1]], 'v moves up');
+  assert.equal(ACT.heavyActivity('w', view), null, 'no QUEUED #n for an agent the lock can never serve');
   assert.equal(ACT.heavyActivity('holder', view).state, 'background', 'the holder is untouched');
-  lock.snapshot();
-  assert.equal(lapsed.length, 1, 'told once');
-  // A re-deny before the hour restarts it, as before: no drop.
-  lock.acquire('v', SUITE, 'npm test', 'v1', false);
-  clock.t += HEAVY_TTL_MS - MIN;
-  lock.acquire('v', SUITE, 'npm test', 'v2', false);
-  clock.t += 2 * MIN;
-  lock.queueSnapshot();
+  // v, never asking again, outlives a second hour in its place (the holder re-enters inside ITS TTL).
+  lock.acquire('holder', SUITE, 'npm test &', 'h3', true);
+  clock.t += HEAVY_TTL_MS / 2;
+  lock.acquire('holder', SUITE, 'npm test &', 'h4', true);
+  clock.t += HEAVY_TTL_MS / 2 + MIN;
+  await lock.scan();
+  assert.deepEqual(lock.snapshot().map((h) => h.agentId), ['holder'], 'the holder still holds');
   assert.ok(!rows.some((r) => r.action === 'queue-dropped' && r.agentId === 'v'), 'v is not dropped');
-  assert.deepEqual(lapsed.filter((l) => l[0] === 'v'), []);
+  assert.deepEqual(lapsed, []);
 });
 
 test('GAP 2: a reservation that lapses unused tells its agent it lost the slot', () => {
@@ -130,7 +136,7 @@ test('not told: the caller whose own call meets its lapse or its drop, and a gon
     assert.equal(d.allow, true, 'nobody else waits, so w takes the free slot');
     assert.deepEqual(lapsed.filter((l) => l[0] === 'w'), [], 'w is not told about its own lapse');
   }
-  // A stale waiter whose own acquire triggers the drop: its acquire answers it.
+  // A waiter silent past the hour whose own acquire meets a freed slot: it takes it (no drop, no notice).
   {
     let limit = 1;
     const rows = [];
@@ -141,9 +147,9 @@ test('not told: the caller whose own call meets its lapse or its drop, and a gon
     lock.acquire('w', SUITE, 'npm test', 'w1', false);
     clock.t += HEAVY_TTL_MS + MIN;
     limit = 2; // a raised limit frees a slot inside w's own acquire
-    lock.acquire('w', SUITE, 'npm test', 'w2', false);
-    assert.ok(rows.some((r) => r.action === 'queue-dropped' && r.agentId === 'w' && r.reason === 'stale'));
-    assert.deepEqual(lapsed, [], 'w is not told about its own drop');
+    assert.equal(lock.acquire('w', SUITE, 'npm test', 'w2', false).allow, true, 'w takes the slot an hour on');
+    assert.ok(!rows.some((r) => r.action === 'queue-dropped'), 'no drop by age');
+    assert.deepEqual(lapsed, []);
   }
   // A gone waiter: dropped as gone, no notice.
   {
@@ -155,19 +161,17 @@ test('not told: the caller whose own call meets its lapse or its drop, and a gon
   }
 });
 
-test('Dwight MUST: a gone agent is not told at the scheduled stale sweep, nor when a reservation issued while it lived lapses', () => {
-  // A gone waiter at the scheduled sweep: still dropped on the hour (as stale), but not told.
+test('Dwight MUST: a gone agent is not told at the scheduled liveness sweep, nor when a reservation issued while it lived lapses', () => {
+  // A gone waiter at the scheduled sweep: reaped at the next read or tick (as gone), not told.
   {
     let gone = false;
     const { lock, clock, rows, lapsed } = fakeLock({ alive: (id) => !(gone && id === 'w') });
     lock.acquire('holder', SUITE, 'npm test &', 'h1', true);
     lock.acquire('w', SUITE, 'npm test', 'w1', false);
-    clock.t += HEAVY_TTL_MS / 2;
-    lock.acquire('holder', SUITE, 'npm test &', 'h2', true);
-    clock.t += HEAVY_TTL_MS / 2;
+    clock.t += MIN;
     gone = true;
     lock.queueSnapshot();
-    assert.deepEqual(rows.at(-1), { kind: 'heavy-lock', action: 'queue-dropped', agentId: 'w', reason: 'stale' }, 'the drop itself is unchanged');
+    assert.deepEqual(rows.at(-1), { kind: 'heavy-lock', action: 'queue-dropped', agentId: 'w', reason: 'gone' }, 'reaped by liveness, not age');
     assert.deepEqual(lock.queueSnapshot().waiters, []);
     assert.deepEqual(lapsed, [], 'a gone agent is not told');
   }
