@@ -86,8 +86,28 @@ export const PTY_RAW_TAIL_CHARS = 4096;
  *  first; a cut tail with no line break at all is all one partial row and goes whole. */
 export function redactRawTail(raw: string): string {
   let t = stripAnsi(raw);
-  if (raw.length >= PTY_RAW_TAIL_CHARS) { const nl = t.indexOf('\n'); t = nl < 0 ? '' : t.slice(nl + 1); }
+  if (raw.length >= PTY_RAW_TAIL_CHARS) {
+    const nl = t.indexOf('\n'); t = nl < 0 ? '' : t.slice(nl + 1);
+    const rows = t.split('\n'); const n = orphanPemRows(rows);
+    if (n) t = ['[redacted]', ...rows.slice(n)].join('\n');
+  }
   return redactSecrets(t).slice(-EXIT_RAW_TAIL_CHARS);
+}
+
+const PEM_BEGIN = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/;
+const PEM_END = /-----END [A-Z0-9 ]*PRIVATE KEY-----/;
+const BASE64_ROW = /^[A-Za-z0-9+/=]{40,}$/;
+
+/** PURE: how many leading rows are the rest of a PEM key whose BEGIN was cut off above (Jim: the
+ *  battery's PEM rule needs header, body and footer in one string): every row up to an END with no
+ *  BEGIN before it, else the leading base64 rows. */
+export function orphanPemRows(rows: string[]): number {
+  const end = rows.findIndex((r) => PEM_END.test(r));
+  const begin = rows.findIndex((r) => PEM_BEGIN.test(r));
+  if (end >= 0 && (begin < 0 || begin > end)) return end + 1;
+  let n = 0;
+  while (n < rows.length && BASE64_ROW.test(rows[n].trim())) n++;
+  return n;
 }
 
 /** A row's leading run that may be the rest of a key wrapped from a row above the viewport. */
@@ -95,22 +115,26 @@ const KEY_RUN_AT_START = /^(?=[A-Za-z0-9_+/=.-]*\d)(?=[A-Za-z0-9_+/=.-]*[A-Za-z]
 
 /** PURE: screen rows, redacted. Each row alone, and then every row boundary a match crosses: a key
  *  wrapped over rows has no prefix after its first row (Jim N3: 55 chars kept), so every row a
- *  crossing match spans is blanked. A match crosses boundary b when the joined rows redact
- *  differently from their two sides. Only a full row (`cols` wide, or with a wide char) can wrap, so
- *  with `cols` known a short row's boundary is not one: a key's last row next to 'done' keeps 'done'.
- *  The top row may continue a row above the viewport, so its leading key-shaped run (16+, letters
- *  and digits) is redacted too. */
+ *  crossing match spans is blanked. The rows are joined with '' where a row can wrap (a full row,
+ *  `cols` wide or with a wide char; every row when `cols` is unknown) and with '\n' elsewhere, so a
+ *  key's last row does not run into the 'done' after it, while a PEM block (its rule spans lines)
+ *  still crosses its row breaks. A match crosses boundary b when the joined rows redact
+ *  differently from their two sides. Rows opening mid-PEM (orphanPemRows) are blanked, and the top
+ *  row's leading key-shaped run (16+, letters and digits) is redacted: it may continue a key from
+ *  above the viewport. */
 export function redactRows(lines: string[], cols?: number): string[] {
   const out = lines.map((l) => redactSecrets(l));
-  const all = lines.join('');
-  const whole = redactSecrets(all);
   const mayWrap = (l: string) => !cols || l.length >= cols || /[^\x00-\x7f]/.test(l);
-  if (whole !== out.join('')) {
-    for (let k = 0, at = 0; k + 1 < lines.length; k++) {
+  const sep = lines.map((l, k) => (k + 1 < lines.length && !mayWrap(l) ? '\n' : ''));
+  const all = lines.map((l, k) => l + sep[k]).join('');
+  const whole = redactSecrets(all);
+  if (whole !== out.map((l, k) => l + sep[k]).join('')) {
+    for (let k = 0, at = 0; k + 1 < lines.length; at += sep[k].length, k++) {
       at += lines[k].length;
-      if (mayWrap(lines[k]) && redactSecrets(all.slice(0, at)) + redactSecrets(all.slice(at)) !== whole) { out[k] = '[redacted]'; out[k + 1] = '[redacted]'; }
+      if (redactSecrets(all.slice(0, at)) + sep[k] + redactSecrets(all.slice(at + sep[k].length)) !== whole) { out[k] = '[redacted]'; out[k + 1] = '[redacted]'; }
     }
   }
+  for (let k = 0, n = orphanPemRows(lines); k < n; k++) out[k] = '[redacted]';
   if (out.length) out[0] = out[0].replace(KEY_RUN_AT_START, '[redacted]');
   return out;
 }

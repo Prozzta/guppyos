@@ -17,7 +17,12 @@
  *   X9  a hung screen read leaves the mirror    X10 the codex log error escapes
  *   X11 the window rule ignores the exit time   X12 signed NTSTATUS not decoded
  *   X13 main records a requested end            X14 main records an installer relaunch
- *   X15 the last hook event is never stamped
+ *   X15 the last hook event is never stamped    X16 free text clipped but not redacted
+ *   X17 noise Codex log rows are kept           X18 the head row of a cut raw tail is kept
+ *   X19 screen rows redacted one by one only    X20 the top row's leading key run is kept
+ *   X21 a short row's boundary joins as a wrap  X22 a short row's boundary is never checked (PEM)
+ *   X23 a cut tail keeps an orphaned PEM body   X24 screen rows opening mid-PEM are kept
+ *   X25 a wide-char row never wraps
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -282,6 +287,11 @@ test('X19: a key wrapped over screen rows leaves no fragment; the rows it spans 
   assert.equal(fragmentIn(r3.join('\n')), null, `a narrow pane: three rows (${r3.join(' | ')})`);
   assert.deepEqual([r3[0], r3[4]], ['$ env', 'next']);
   assert.equal(fragmentIn(X.redactRows(three).join('\n')), null, 'with no cols every boundary is checked');
+  // A wide-char row wraps while shorter than cols in JS chars (7 CJK chars are 14 cells).
+  const wide = ['$ env', `日本語テキスト KEY=${KEY115.slice(0, 41)}`, KEY115.slice(41, 101), KEY115.slice(101), 'next'];
+  const rw = X.redactRows(wide, 60);
+  assert.equal(fragmentIn(rw.join('\n')), null, `a wide-char row (${rw.join(' | ')})`);
+  assert.deepEqual([rw[0], rw[4]], ['$ env', 'next']);
   const rec = X.buildExitRecord(facts(), { screen: { lines: two, altScreen: false, cols: 60 }, children: [], transcript: null, codexLog: null });
   assert.equal(fragmentIn(rec.screen.rows.join('\n')), null, 'the record\'s screen rows');
 });
@@ -291,6 +301,39 @@ test('X20: the top screen row may continue a key from above the viewport: its le
   assert.equal(fragmentIn(r.join('\n')), null, r[0]);
   assert.equal(r[0], '[redacted] exported');
   assert.deepEqual(X.redactRows(['Downloading packages', 'done']), ['Downloading packages', 'done'], 'a word with no digit is not key-shaped');
+});
+
+// Jim's PEM probe: a header, 5 body rows of 64 base64 chars, a footer. A "fragment" is any body row's
+// 12 consecutive chars.
+const PEM_BODY = Array.from({ length: 5 }, (_, r) => Array.from({ length: 64 }, (_, i) => 'Qx7Lm2Pz9Rk4Tw+/'[(i * 7 + r * 3) % 16]).join(''));
+const PEM = ['-----BEGIN RSA PRIVATE KEY-----', ...PEM_BODY, '-----END RSA PRIVATE KEY-----'];
+const pemFragmentIn = (text) => { for (const row of PEM_BODY) for (let i = 0; i + 12 <= row.length; i++) if (text.includes(row.slice(i, i + 12))) return row.slice(i, i + 12); return null; };
+
+test('X22: a PEM key on screen leaves no body row, though each row is shorter than cols (Jim interim)', () => {
+  const rows = X.redactRows(['$ cat id_rsa', ...PEM, '$ next'], 120);
+  assert.equal(pemFragmentIn(rows.join('\n')), null, rows.join(' | '));
+  assert.deepEqual([rows[0], rows[rows.length - 1]], ['$ cat id_rsa', '$ next'], 'the rows around the block stay');
+});
+
+test('X23: a raw tail cut inside a PEM header drops the orphaned body up to its footer', () => {
+  const tailChars = X.PTY_RAW_TAIL_CHARS;
+  // Jim's cut 40 chars in (inside the first body row) and one inside the header itself.
+  for (const at of [40, 20]) {
+    const head = `${PEM.join('\r\n').slice(at)}\r\n$ next\r\n`;
+    const raw = head + 'y'.repeat(tailChars - head.length);
+    assert.equal(raw.length, tailChars);
+    const out = X.redactRawTail(raw);
+    assert.equal(pemFragmentIn(out), null, `cut ${at} in: ${out.slice(0, 160)}`);
+    assert.ok(out.includes('$ next'), 'the rows after the footer stay');
+  }
+  assert.equal(pemFragmentIn(X.redactRawTail(`${PEM.join('\r\n')}\r\nbye\r\n`)), null, 'an uncut PEM in the tail: the battery');
+  assert.equal(X.orphanPemRows(PEM_BODY.slice(2)), 3, 'a cut with no footer in view: the leading base64 rows');
+});
+
+test('X24: a screen that opens mid-PEM (BEGIN above the viewport) blanks every row up to the footer', () => {
+  const rows = X.redactRows([...PEM.slice(3), '$ next'], 120);
+  assert.equal(pemFragmentIn(rows.join('\n')), null, rows.join(' | '));
+  assert.equal(rows[rows.length - 1], '$ next');
 });
 
 const facts = (over = {}) => ({
