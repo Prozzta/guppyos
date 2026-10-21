@@ -123,6 +123,22 @@ export interface PtyEndEvent {
   explicit: boolean;
   exitCode: number | null;
   at: number;
+  /** ANDY-PTY-EXIT-2049: on an UNREQUESTED end only, what the session knew. `takeMirror` hands the
+   *  headless screen over during the observer call (the taker disposes it); untaken, it is disposed
+   *  right after, as on every other end. */
+  evidence?: PtyExitEvidence;
+}
+
+/** ANDY-PTY-EXIT-2049: the ended session's own facts, for the exit record. */
+export interface PtyExitEvidence {
+  pid: number | null;
+  signal: number | null;
+  spawnedAt: number | null;
+  command: string;
+  cwd: string;
+  /** The raw output tail (PTY_TAIL_CHARS). */
+  tail: string;
+  takeMirror(): TerminalMirror | undefined;
 }
 
 /** Process-wide, never reused, so two incarnations can never compare equal. */
@@ -520,13 +536,23 @@ export class PtyManager {
     this.endObserver = observer;
   }
 
-  private reportEnd(id: string, session: PtySession, exitCode: number | null | undefined): void {
-    try {
-      this.endObserver?.({ id, incarnation: session.incarnation, explicit: session.explicitTeardown === true, exitCode: typeof exitCode === 'number' ? exitCode : null, at: Date.now() });
-    } catch { /* an observer never breaks a kill or node-pty's exit callback */ }
-    // GOD-TERMINAL-CONTROL: every incarnation's end (exit and kill both come through here).
-    session.mirror?.dispose();
+  private reportEnd(id: string, session: PtySession, exitCode: number | null | undefined, signal?: number): void {
+    const explicit = session.explicitTeardown === true;
+    let mirror = session.mirror;
     session.mirror = undefined;
+    let evidence: PtyExitEvidence | undefined;
+    if (!explicit) {
+      let pid: number | null = null; try { pid = session.proc.pid; } catch { pid = null; }
+      evidence = { pid, signal: typeof signal === 'number' ? signal : null, spawnedAt: session.spawnedAt ?? null, command: session.command, cwd: session.cwd, tail: session.tail ?? '',
+        takeMirror: () => { const m = mirror; mirror = undefined; return m; } };
+    }
+    try {
+      this.endObserver?.({ id, incarnation: session.incarnation, explicit, exitCode: typeof exitCode === 'number' ? exitCode : null, at: Date.now(), ...(evidence ? { evidence } : {}) });
+    } catch { /* an observer never breaks a kill or node-pty's exit callback */ }
+    // GOD-TERMINAL-CONTROL: every incarnation's end (exit and kill both come through here). An
+    // unrequested end's mirror the observer took is disposed by it, after its last read.
+    mirror?.dispose();
+    mirror = undefined;
   }
 
   /** GOD-TERMINAL-CONTROL M1: makes each new session's headless screen; null = no mirror.
@@ -957,7 +983,7 @@ export class PtyManager {
         if (this.sessions.get(opts.id) !== session) return;
         session.out?.flush(); // every byte before the exit notice, as before batching
         this.safeSend(`pty:exit:${opts.id}`, { exitCode, signal }, session.owner);
-        this.reportEnd(opts.id, session, exitCode);   // ZERO-TOKEN-LIVENESS: before the session goes
+        this.reportEnd(opts.id, session, exitCode, signal);   // ZERO-TOKEN-LIVENESS: before the session goes
         this.sessions.delete(opts.id);
         // Natural exit must run the same lifecycle teardown as an explicit kill.
         // Guarded so a teardown error can never crash node-pty's exit callback.

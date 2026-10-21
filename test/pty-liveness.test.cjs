@@ -104,7 +104,7 @@ test('the natural-exit path reports before it deletes, after its stale-session g
   const src = codeOnly(readSource('src/main/pty.ts'));
   const onExit = src.slice(src.indexOf('proc.onExit('), src.indexOf('proc.onExit(') + 900);
   const guard = onExit.indexOf('if (this.sessions.get(opts.id) !== session) return;');
-  const report = onExit.indexOf('this.reportEnd(opts.id, session, exitCode)');
+  const report = onExit.indexOf('this.reportEnd(opts.id, session, exitCode, signal)');
   const del = onExit.indexOf('this.sessions.delete(opts.id)');
   assert.ok(guard >= 0 && report > guard && del > report, 'guard, then report, then delete');
   // kill(): mark, kill, report, delete.

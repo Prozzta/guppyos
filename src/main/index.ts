@@ -44,7 +44,7 @@ import { runMemorySmoke, smokeTarget } from './nativeMemory/smoke';
 import { benchTarget, runMemoryBenchHost } from './nativeMemory/bench';
 import { setLoginItem } from './loginItem';
 import { request as httpsRequest } from 'node:https';
-import { PtyManager, type SpawnOptions } from './pty';
+import { PtyManager, type PtyExitEvidence, type SpawnOptions } from './pty';
 import { ptyBinaryInput } from './ptyBinaryInput';
 import {
   DEV_ISOLATION, DEV_HIDDEN, FORCE_DEV_BUILD, DEV_ROOT_ENV, resolveDevDataRoot, fixedDevDataRoot, devPaths,
@@ -184,6 +184,8 @@ import { BootHookClock, startupSettled } from './bootSubmitEvidence';
 import { AgentLivenessMonitor, type LivenessFacts } from './agentLiveness';
 import { CODEX_ROTATE_MAX_ROLLOUT_BYTES, decideAgyRotation, decideThreadRotation, findAgyConversation, findCodexRollout, threadRotatedLogRow } from './codexThreadRotation';
 import { HistoryService } from './historyService';
+import { recordExit } from './ptyExitRecord';
+import Database from 'better-sqlite3';
 import { geminiHome } from './capacityScope';
 import { InboxWakeBridge } from './inboxWakeBridge';
 import { FloorWakeStallWatch, WakeStallWatch } from './wakeStall';
@@ -784,6 +786,7 @@ function withLivenessEdge(
   return (agentId, event, message, fullyIdle, turnId, source) => {
     observe(agentId, event, message, fullyIdle, turnId, source);
     noteBootHook(agentId, event);
+    if (agentId && event) hookSeenEvent.set(agentId, event);   // ANDY-PTY-EXIT-2049: the exit record's last hook
     if (event && LIVENESS_EDGE_HOOKS.has(event)) sampleLiveness(agentId);
   };
 }
@@ -872,6 +875,8 @@ const capacityStrip = new CapacityStripPresenter({ weeklyThreshold: capacityThre
 // PROBE-REISSUE (B): when each agent's hooks last reported anything, and the watch that logs a
 // post-reset probe which produced no turn (with the terminal's last visible line).
 const hookSeenAt = new Map<string, number>();
+/** ANDY-PTY-EXIT-2049: each agent's last hook event name, for the exit record. */
+const hookSeenEvent = new Map<string, string>();
 const capacityProbeWatch = new CapacityProbeWatch({
   now: () => Date.now(),
   setTimer: (fn, ms) => { const t = setTimeout(fn, ms); t.unref?.(); return t; },
@@ -2328,7 +2333,41 @@ ptyManager.setEndObserver((e) => {
   if (!agentId) return;
   try { agentLiveness.notePtyEnd(agentId, { ptyId: e.id, incarnation: e.incarnation, explicit: e.explicit, exitCode: e.exitCode, at: e.at }); }
   catch { /* observation never breaks a kill or an exit */ }
+  // ANDY-PTY-EXIT-2049: an unrequested end (never the missing-CLI installer's) leaves a record.
+  // The facts are taken NOW (the teardown clears the hook and tool maps); the rest is async.
+  if (!e.explicit && e.evidence && !pendingInstallRelaunch.has(e.id)) {
+    try { recordUnrequestedExit(agentId, e.id, e.incarnation, e.exitCode, e.at, e.evidence); }
+    catch { /* a record never breaks an exit */ }
+  }
 });
+function recordUnrequestedExit(agentId: string, ptyId: string, incarnation: number, exitCode: number | null, at: number, ev: PtyExitEvidence): void {
+  const root = hive.root();
+  const mirror = ev.takeMirror();
+  if (!root) { mirror?.dispose(); return; }
+  const tool = hookServer.runningTool(agentId);
+  const provider = ptyProvider.get(ptyId) ?? 'unknown';
+  const facts = {
+    agentId, ptyId, incarnation, provider: String(provider), exitCode, signal: ev.signal, at, pid: ev.pid, spawnedAt: ev.spawnedAt,
+    command: ev.command, cwd: ev.cwd, rawTail: ev.tail,
+    lastHookAt: hookSeenAt.get(agentId) ?? null, lastHookEvent: hookSeenEvent.get(agentId) ?? null,
+    runningTool: tool ? { name: tool.name, since: tool.since } : null,
+    heavyLock: heavyLock.snapshot().filter((h) => h.agentId === agentId)
+  };
+  const codexHome = provider === 'codex' ? hive.codexHomeFor(agentId) : null;
+  void recordExit(facts, {
+    hiveRoot: root,
+    readScreen: mirror ? () => mirror.read() : null,
+    disposeScreen: () => mirror?.dispose(),
+    listProcesses: probeProcesses,
+    transcript: () => {
+      const r = historyService.resolve(agentId);
+      return 'file' in r && (r.provider === 'codex' || r.provider === 'claude') ? { provider: r.provider, file: r.file } : null;
+    },
+    codexHome,
+    openSqlite: (file) => new Database(file, { readonly: true, fileMustExist: true, timeout: 0 }),
+    log: (row) => hive.appendLog(row)
+  });
+}
 ptyManager.setExitHandler((id, exitCode) => {
   const pending = pendingInstallRelaunch.get(id);
   if (pending) {
