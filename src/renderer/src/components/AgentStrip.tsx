@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, memo } from 'react';
 import { AgentCard } from './AgentCard';
 import { agentBadges, type AgentBadge, type BadgeFlag, type SilentTurnView } from '@shared/agentBadges';
 import { PixelButton } from './PixelButton';
@@ -13,7 +13,9 @@ export interface AgentStripProps {
   config?: HarnessConfig | null;
 }
 
-export function AgentStrip({ config }: AgentStripProps) {
+// APP-SHALLOW-SELECTOR: memo so an App render (roster change) does not re-render this
+// subtree; it subscribes to the store slices it needs itself.
+export const AgentStrip = memo(function AgentStrip({ config }: AgentStripProps) {
   const agents = useStore(s => s.agents);
   const restorableAgents = useStore(s => s.restorableAgents);
   const selectedId = useStore(s => s.selectedId);
@@ -348,4 +350,4 @@ export function AgentStrip({ config }: AgentStripProps) {
       )}
     </div>
   );
-}
+});

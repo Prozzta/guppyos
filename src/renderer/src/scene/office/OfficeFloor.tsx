@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, memo } from 'react';
 import { Application, Container, Graphics, Ticker, Texture } from 'pixi.js';
 import { applyFloorFrameBudget } from './floorFrameBudget';
 import { breakEligible, cafeEligible, startCoffeeRest, tickCoffeeRest } from './coffeeGap';
@@ -184,7 +184,9 @@ function firstWords(prompt: string | undefined, maxWords = 6, maxChars = 42): st
 /** The floor: Guppy's office scene, or a stations theme pack's scene when the
  *  active theme is one. A pack that cannot be used (invalid manifest, missing
  *  picture, malformed map, bad sprite sheet) shows the office with a note. */
-export function OfficeFloor() {
+// APP-SHALLOW-SELECTOR: memo so an App render (roster change) does not re-render this
+// subtree; it subscribes to the store slices it needs itself.
+export const OfficeFloor = memo(function OfficeFloor() {
   const officeTheme = useStore((s) => s.officeTheme);
   const wantsPack = isStationPack(officeTheme);
   const [state, setState] = useState<{ id: string; pack: LoadedPack | null; problem: string | null } | null>(null);
@@ -215,7 +217,7 @@ export function OfficeFloor() {
       )}
     </div>
   );
-}
+});
 
 /** Guppy's own office floor (unchanged; the pack dispatch above wraps it). */
 function OfficeScene() {

@@ -11,6 +11,7 @@
  * NO FIGURE (C2.12 rule 3): it names the state, the cause and the consequence, all in
  * main's words, and leaves the number to the strip row that is on screen with it.
  */
+import { memo } from 'react';
 import { useCapacityStrip, dismissCapacityNotice } from '../capacity/useCapacityStrip';
 import { selectLimitBanners } from '../capacity/capacityStrip';
 import { StateDot } from './CapacityStrip';
@@ -57,7 +58,9 @@ export function CapacityLimitBannerView({ items, onDismiss }: { items: readonly 
 }
 
 /** The connected banner. The dismissal is recorded in main; the banner clears on main's push. */
-export function CapacityLimitBanner() {
+// APP-SHALLOW-SELECTOR: memo so an App render (roster change) does not re-render this
+// subtree; it subscribes to the store slices it needs itself.
+export const CapacityLimitBanner = memo(function CapacityLimitBanner() {
   const items = selectLimitBanners(useCapacityStrip());
   return <CapacityLimitBannerView items={items} onDismiss={(id) => { void dismissCapacityNotice(id); }} />;
-}
+});

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, memo } from 'react';
 import { PixelPanel } from './PixelPanel';
 import { PixelButton } from './PixelButton';
 
@@ -25,7 +25,9 @@ const WHY: Record<string, string> = {
  * human-facing window into it. There is nothing to install and no model to pick: the engine
  * is built in.
  */
-export function MemoryPanel() {
+// APP-SHALLOW-SELECTOR: memo so an App render (roster change) does not re-render this
+// subtree; it subscribes to the store slices it needs itself.
+export const MemoryPanel = memo(function MemoryPanel() {
   const [open, setOpen] = useState(false);
   const [status, setStatus] = useState<MemoryStatus | null>(null);
   const [query, setQuery] = useState('');
@@ -162,4 +164,4 @@ export function MemoryPanel() {
       )}
     </div>
   );
-}
+});

@@ -12,14 +12,16 @@
  * src/shared/updateState.ts so it can be unit-tested without Electron; this file
  * is wiring and pixels.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, memo } from 'react';
 import { describeUpdate, manualDownloadUrl, manualInstallSteps, optionDownloadUrl, pendingVersion, reduceStatus, releaseChoices, type UpdateStatus } from '@shared/updateState';
 import { PixelButton } from './PixelButton';
 import { ReleasePicker } from './ReleasePicker';
 
 declare const __APP_VERSION__: string;
 
-export function UpdateBadge() {
+// APP-SHALLOW-SELECTOR: memo so an App render (roster change) does not re-render this
+// subtree; it subscribes to the store slices it needs itself.
+export const UpdateBadge = memo(function UpdateBadge() {
   const [status, setStatus] = useState<UpdateStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [hover, setHover] = useState(false);
@@ -219,4 +221,4 @@ export function UpdateBadge() {
     )}
     </span>
   );
-}
+});

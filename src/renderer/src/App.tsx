@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useStore, selectedAgent } from '@/store/store';
+import { useStore, selectedAgent, selectAgentCount, selectRosterPtyKey } from '@/store/store';
 import { loadModelCatalog } from '@/store/config';
 import { startMockLoop, stopMockLoop } from '@/store/mockEvents';
 import type { HarnessConfig } from '@/store/config';
@@ -49,8 +49,11 @@ declare const __APP_VERSION__: string;
 export function App() {
   const orchName = useOrchestratorName();
   const agent = useStore(selectedAgent);
-  const agents = useStore(s => s.agents);
-  const agentCount = agents.length;
+  // APP-SHALLOW-SELECTOR: never subscribe App to the whole `agents` array. Every real tick
+  // (status/action/progress/contextTokens) replaces that array, and a render here re-renders
+  // the entire tree. The primitives below only change when the roster itself changes.
+  const agentCount = useStore(selectAgentCount);
+  const rosterPtyKey = useStore(selectRosterPtyKey);
   const addAgentOpen = useStore(s => s.addAgentOpen);
   const setAddAgentOpen = useStore(s => s.setAddAgentOpen);
   const clearPendingHires = useStore(s => s.clearPendingHires);
@@ -243,8 +246,8 @@ export function App() {
   // buffered from spawn. Switching agents then re-attaches an already-rendered
   // terminal instantly (with full history) instead of building a blank one.
   useEffect(() => {
-    for (const a of agents) if (a.ptyId) acquireTerminal(a.ptyId);
-  }, [agents]);
+    for (const a of useStore.getState().agents) if (a.ptyId) acquireTerminal(a.ptyId);
+  }, [rosterPtyKey]);
 
   // Synthetic demo loop — CAGED (#5B). It must never animate alongside a live
   // hive (it would fire fake envelope handoffs and step seeded agents). Run it
@@ -289,7 +292,7 @@ export function App() {
   useEffect(() => {
     if (!config?.onboardingComplete) return;
     useStore.getState().restoreFocusMode();
-  }, [config?.onboardingComplete, agents]);
+  }, [config?.onboardingComplete, rosterPtyKey]);
 
   // Track viewport width for splitter clamping
   useEffect(() => {

@@ -1058,6 +1058,20 @@ export function selectedAgent(s: State): Agent | undefined {
   return s.agents.find(a => a.id === s.selectedId);
 }
 
+/** APP-SHALLOW-SELECTOR (ACTIVITY-LAG-151 fix 4): primitive selectors for App.tsx, which used
+ *  to subscribe to the whole `agents` array and so re-rendered (with every child) on every
+ *  real status/action/progress/context tick of any agent. These return primitives, so zustand
+ *  only notifies App when the roster itself changes. */
+export function selectAgentCount(s: State): number {
+  return s.agents.length;
+}
+
+/** One string that changes exactly when an agent is added, removed, reordered or gets a new
+ *  pty: the only roster facts App's effects (terminal pre-warm, focus-mode restore) read. */
+export function selectRosterPtyKey(s: State): string {
+  return s.agents.map(a => a.id + ':' + (a.ptyId ?? '')).join('|');
+}
+
 /** Whether the Command Center's Trigger History tab has anything to be about
  *  yet: an organisation key is set, or at least one webhook exists. Derived from
  *  the two mirrors rather than stored beside them, so it cannot fall out of step

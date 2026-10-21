@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, memo } from 'react';
 import { PixelPanel } from './PixelPanel';
 import { PixelBadge } from './PixelBadge';
 import { PixelButton } from './PixelButton';
@@ -47,7 +47,9 @@ export interface AgentDetailPanelProps {
   agent: Agent;
 }
 
-export function AgentDetailPanel({ agent }: AgentDetailPanelProps) {
+// APP-SHALLOW-SELECTOR: memo so an App render (roster change) does not re-render this
+// subtree; it subscribes to the store slices it needs itself.
+export const AgentDetailPanel = memo(function AgentDetailPanel({ agent }: AgentDetailPanelProps) {
   // CARD-IDLE-WHILE-WORKING: busy-or-not from liveness, plus the tool in progress.
   const activity = useActivity(agent.id, agent.status);
   const [openTerminalState, setOpenTerminalState] = useState<'idle' | 'opening' | 'ok' | 'error'>('idle');
@@ -364,7 +366,7 @@ export function AgentDetailPanel({ agent }: AgentDetailPanelProps) {
       )}
     </PixelPanel>
   );
-}
+});
 
 function EmptyTab({ title, children }: { title: string; children: React.ReactNode }) {
   return (

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, memo } from 'react';
 import { useStore } from '@/store/store';
 import { TaskDetail, parseTasks, type HiveTask } from './TasksKanban';
 
@@ -11,7 +11,9 @@ import { TaskDetail, parseTasks, type HiveTask } from './TasksKanban';
 
 const POLL_MS = 5000;
 
-export function TaskDetailOverlay() {
+// APP-SHALLOW-SELECTOR: memo so an App render (roster change) does not re-render this
+// subtree; it subscribes to the store slices it needs itself.
+export const TaskDetailOverlay = memo(function TaskDetailOverlay() {
   const taskDetailId = useStore((s) => s.taskDetailId);
   const closeTaskDetail = useStore((s) => s.closeTaskDetail);
   // CARDS-TAB-190: opened from CARDS (read-only), the detail gets no move or assign.
@@ -84,4 +86,4 @@ export function TaskDetailOverlay() {
       onClose={closeTaskDetail}
     />
   );
-}
+});

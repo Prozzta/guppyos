@@ -19,7 +19,7 @@
  * no clock (crit 15). It takes a pushed view only for the pool on show, and tells main when
  * the panel closes or switches so the re-push stops.
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useState, memo } from 'react';
 import type { ProviderCapacityDetailView } from '@shared/capacityDetail';
 import { PixelPanel } from './PixelPanel';
 import { PixelButton } from './PixelButton';
@@ -30,7 +30,9 @@ import { closeCapacityDetail, useOpenCapacityDetail } from '../capacity/detailSe
 import { useStore } from '@/store/store';
 
 /** The connected overlay. Renders nothing while closed. */
-export function CapacityDetailPanel() {
+// APP-SHALLOW-SELECTOR: memo so an App render (roster change) does not re-render this
+// subtree; it subscribes to the store slices it needs itself.
+export const CapacityDetailPanel = memo(function CapacityDetailPanel() {
   const poolId = useOpenCapacityDetail();
   const collection = useCapacityStrip();
   const agents = useStore((s) => s.agents);
@@ -71,4 +73,4 @@ export function CapacityDetailPanel() {
       </PixelPanel>
     </div>
   );
-}
+});
