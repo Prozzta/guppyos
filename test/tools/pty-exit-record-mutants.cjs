@@ -34,6 +34,9 @@ const NOISE = at('X17: noise Codex log rows (token_count, item_completed, token_
 const HEADROW = at('X18: a raw tail pty.ts cut drops its partial head row, so a key cut at the head leaves no fragment (Jim N2)');
 const WRAPPED = at('X19: a key wrapped over screen rows leaves no fragment; the rows it spans are blanked, the others stay (Jim N3)');
 const TOPROW = at('X20: the top screen row may continue a key from above the viewport: its leading key-shaped run is redacted');
+const PEMSCREEN = at('X22: a PEM key on screen leaves no body row, though each row is shorter than cols (Jim interim)');
+const PEMTAIL = at('X23: a raw tail cut inside a PEM header drops the orphaned body up to its footer');
+const PEMTOP = at('X24: a screen that opens mid-PEM (BEGIN above the viewport) blanks every row up to the footer');
 const WIRE = at('X13/X14: main records only an unrequested, non-installer end, takes its facts synchronously and fires and forgets');
 
 const MUTANTS = [
@@ -54,10 +57,14 @@ const MUTANTS = [
   ['X15 the last hook event is never stamped', INDEX, '    if (agentId && event) hookSeenEvent.set(agentId, event);', '', WIRE],
   ['X16 free text is clipped but not redacted', REC, "  const t = redactSecrets(typeof s === 'string' ? s : s === undefined ? '' : JSON.stringify(s) ?? '');", "  const t = (typeof s === 'string' ? s : s === undefined ? '' : JSON.stringify(s) ?? '');", REDACT],
   ['X17 noise Codex log rows are kept', REC, "const signal = all.filter((r) => !CODEX_LOG_NOISE.test(`${r.target} ${r.body ?? ''}`));", 'const signal = all;', NOISE],
-  ['X18 the head row of a cut tail is kept', REC, "if (raw.length >= PTY_RAW_TAIL_CHARS) { const nl = t.indexOf('\\n'); t = nl < 0 ? '' : t.slice(nl + 1); }", '', HEADROW],
-  ['X19 rows are redacted one by one only', REC, "  if (whole !== out.join('')) {\n", '  if (false) {\n', WRAPPED],
+  ['X18 the head row of a cut tail is kept', REC, "    const nl = t.indexOf('\\n'); t = nl < 0 ? '' : t.slice(nl + 1);\n", '', HEADROW],
+  ['X19 rows are redacted one by one only', REC, "  if (whole !== out.map((l, k) => l + sep[k]).join('')) {\n", '  if (false) {\n', WRAPPED],
   ['X20 the top row\'s leading key run is kept', REC, "  if (out.length) out[0] = out[0].replace(KEY_RUN_AT_START, '[redacted]');\n", '', TOPROW],
-  ['X21 a short row\'s boundary counts as a wrap', REC, 'const mayWrap = (l: string) => !cols || l.length >= cols || /[^\\x00-\\x7f]/.test(l);', 'const mayWrap = (l: string) => true;', WRAPPED]
+  ['X21 a short row\'s boundary counts as a wrap', REC, 'const mayWrap = (l: string) => !cols || l.length >= cols || /[^\\x00-\\x7f]/.test(l);', 'const mayWrap = (l: string) => true;', WRAPPED],
+  ['X22 a short row\'s boundary is never checked', REC, 'if (redactSecrets(all.slice(0, at)) + sep[k] + ', "if (sep[k] === '' && redactSecrets(all.slice(0, at)) + sep[k] + ", PEMSCREEN],
+  ['X23 a cut tail keeps an orphaned PEM body', REC, "    if (n) t = ['[redacted]', ...rows.slice(n)].join('\\n');\n", '', PEMTAIL],
+  ['X24 screen rows opening mid-PEM are kept', REC, "  for (let k = 0, n = orphanPemRows(lines); k < n; k++) out[k] = '[redacted]';\n", '', PEMTOP],
+  ['X25 a wide-char row never wraps', REC, 'const mayWrap = (l: string) => !cols || l.length >= cols || /[^\\x00-\\x7f]/.test(l);', 'const mayWrap = (l: string) => !cols || l.length >= cols;', WRAPPED]
 ];
 
 const run = () => spawnSync(process.execPath, ['--test', TEST], { cwd: ROOT, encoding: 'utf8', windowsHide: true, timeout: 300_000 });
