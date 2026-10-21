@@ -25,8 +25,14 @@ export function TaskDetailOverlay() {
     // parseTasks NORMALIZES (the ledger is a hand-written file; cards may lack
     // dependsOn/priority/etc.) — a raw card without dependsOn crashed the
     // detail once. Never feed TaskDetail unparsed ledger entries.
-    try { setTasks(parseTasks(await window.cth.hiveTasks())); } catch { /* keep last good */ }
-  }, []);
+    // TASKS-JSON-SPLIT: a card opened from the board's ARCHIVED view is not on hot tasks.json;
+    // only then is the archive read as well.
+    try {
+      let list = parseTasks(await window.cth.hiveTasks());
+      if (taskDetailId && !list.some((t) => t.id === taskDetailId)) list = parseTasks(await window.cth.hiveAllTasks());
+      setTasks(list);
+    } catch { /* keep last good */ }
+  }, [taskDetailId]);
 
   useEffect(() => {
     if (!taskDetailId) return;

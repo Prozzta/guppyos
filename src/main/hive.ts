@@ -66,6 +66,9 @@ import { normalizeWakeField } from '../shared/mailWakeClass';
 import { preferredAgentRole } from '../shared/agentRole';
 import { introducedErrors, mergeTaskLedger, validateLedger, type LedgerIssue } from '../shared/taskLedger';
 import { TaskLedgerGuard, type CardMeta, type TaskEditSource } from './taskLedgerGuard';
+import {
+  ARCHIVE_DIR, ARCHIVE_PASS_MS, appendArchived, appendRevived, archiveStamp, mergeHotCold, planArchive, readArchive
+} from './taskArchive';
 import { expandTilde } from './fs';
 import {
   AgyStatuslineOwner, PROCESS_STARTED_AT, buildStatuslineCommand, newOwnerToken, osLiveness,
@@ -216,6 +219,9 @@ export interface HiveTask {
   /** Free-text history god (and the harness's one auto-move, ZT-I3 §3.3) appends to.
    *  Typed for Jim C8; the raw patch path keeps every other untyped field. */
   notes?: string;
+  /** TASKS-JSON-SPLIT: when the card last came back from tasks-archive/; it restarts the
+   *  48 h keep window (taskArchive.doneTime). */
+  revivedAt?: string;
 }
 
 export interface AgentMeta {
@@ -773,11 +779,18 @@ export class HiveManager {
   /** Sources currently known corrupt. Kept separately from the fingerprint so
    * the renderer can make the safety stop visible to the human. */
   private readonly authorityIssues = new Map<string, HiveIntegrityIssue>();
+  /** TASKS-JSON-SPLIT: the hourly archive pass and the archive reader's cache. */
+  private archiveTimer: ReturnType<typeof setInterval> | null = null;
+  private archiveCache: { root: string; stamp: string; cards: Map<string, Record<string, unknown>> } | null = null;
   /** ZT-I3: watches tasks.json (never writes it) and keeps the per-card sidecar. */
   readonly ledgerGuard = new TaskLedgerGuard({
     root: () => this.root(),
     agentIds: () => {
       try { return new Set(Object.keys(this.registry().agents)); } catch { return new Set<string>(); }
+    },
+    archivedIds: () => {
+      const root = this.root();
+      try { return root ? new Set(this.archived(root).keys()) : new Set<string>(); } catch { return new Set<string>(); }
     },
     appendLog: (row) => this.appendLog(row)
   });
@@ -1070,18 +1083,31 @@ export class HiveManager {
     return this.writeCommandDir('heavy', script);
   }
 
-  /** `<root>/bin/<name>/` holding ONLY `<name>.cmd` + `<name>` (Windows) or `<name>` (POSIX). */
-  private writeCommandDir(name: string, script: string): string | null {
+  /** TASKS-JSON-SPLIT: `<root>/bin/tasks/`, the `tasks-all`, `tasks-revive` and `tasks-unsplit`
+   *  commands (resources/tasks-cli.cjs), each bound to this hive's root. On every hive agent's PATH. */
+  writeTasksCommands(script: string): string | null {
+    const root = this.root();
+    if (!root) return null;
+    return this.writeCommandDir('tasks', script, ['all', 'revive', 'unsplit'].map((sub) => [`tasks-${sub}`, [sub, '--root', root]]));
+  }
+
+  /** `<root>/bin/<name>/` holding ONLY `<cmd>.cmd` + `<cmd>` (Windows) or `<cmd>` (POSIX) for each
+   *  command, by default the one command `<name>`; a command's leading args come before the caller's. */
+  private writeCommandDir(name: string, script: string, commands: Array<[string, string[]]> = [[name, []]]): string | null {
     const root = this.root();
     if (!root) return null;
     const dir = join(root, 'bin', name);
     const exe = process.execPath;
-    const files: Array<[string, string, number]> = process.platform === 'win32'
-      ? [
-          [`${name}.cmd`, `@echo off\r\nset ELECTRON_RUN_AS_NODE=1\r\n"${exe}" "${script}" %*\r\n`, 0o644],
-          [name, `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec "${exe.replace(/\\/g, '/')}" "${script.replace(/\\/g, '/')}" "$@"\n`, 0o755]
-        ]
-      : [[name, `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec "${exe}" "${script}" "$@"\n`, 0o755]];
+    const files: Array<[string, string, number]> = commands.flatMap(([cmd, lead]): Array<[string, string, number]> => {
+      const winLead = lead.map((a) => ` "${a}"`).join('');
+      const shLead = lead.map((a) => ` "${a.replace(/\\/g, '/')}"`).join('');
+      return process.platform === 'win32'
+        ? [
+            [`${cmd}.cmd`, `@echo off\r\nset ELECTRON_RUN_AS_NODE=1\r\n"${exe}" "${script}"${winLead} %*\r\n`, 0o644],
+            [cmd, `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec "${exe.replace(/\\/g, '/')}" "${script.replace(/\\/g, '/')}"${shLead} "$@"\n`, 0o755]
+          ]
+        : [[cmd, `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec "${exe}" "${script}"${lead.map((a) => ` "${a}"`).join('')} "$@"\n`, 0o755]];
+    });
     try {
       mkdirSync(dir, { recursive: true });
       const keep = new Set(files.map(([f]) => f));
@@ -3836,6 +3862,9 @@ export class HiveManager {
     const ledger = this.tasksForMutation();
     const tasks = Array.isArray(ledger?.tasks) ? ledger.tasks : [];
     if (tasks.some((current) => current?.id === task.id)) return false;
+    // TASKS-JSON-SPLIT: ids stay unique across hot and the archive.
+    const root = this.root();
+    if (root && this.archived(root).has(task.id)) return false;
     this.writeTasks([...tasks, task], source);
     return true;
   }
@@ -3847,7 +3876,19 @@ export class HiveManager {
     const ledger = this.tasksForMutation();
     const tasks = Array.isArray(ledger?.tasks) ? ledger.tasks : [];
     const index = tasks.findIndex((task) => task?.id === id);
-    if (index < 0) return false;
+    if (index < 0) {
+      // TASKS-JSON-SPLIT: an archived card is revived: hot is written first, then the
+      // tombstone, so a crash in between leaves it in both (hot wins), never in neither.
+      const root = this.root();
+      const old = root ? this.archived(root).get(id) : undefined;
+      if (!root || !old) return false;
+      // revivedAt restarts the keep window, so the next pass does not move it straight back.
+      const now = Date.now();
+      this.writeTasks([...tasks, { ...(old as unknown as HiveTask), revivedAt: new Date(now).toISOString(), ...patch, id }], source);
+      appendRevived(root, id, now);
+      this.archiveCache = null;
+      return true;
+    }
     const next = tasks.slice();
     next[index] = { ...tasks[index], ...patch, id };
     this.writeTasks(next, source);
@@ -3870,9 +3911,76 @@ export class HiveManager {
   startLedgerGuard(): void {
     this.ledgerGuard.reset();
     this.ledgerGuard.start();
+    // TASKS-JSON-SPLIT: after the guard's first check (fresh statusSince), then hourly.
+    this.stopArchivePass();
+    try { this.archivePass(); } catch (e) { try { this.appendLog({ kind: 'task-archive-failed', error: String(e) }); } catch { /* noop */ } }
+    this.archiveTimer = setInterval(() => {
+      try { this.archivePass(); } catch (e) { try { this.appendLog({ kind: 'task-archive-failed', error: String(e) }); } catch { /* noop */ } }
+    }, ARCHIVE_PASS_MS);
+    this.archiveTimer.unref?.();
   }
   stopLedgerGuard(): void {
     this.ledgerGuard.reset();
+    this.stopArchivePass();
+  }
+  private stopArchivePass(): void {
+    if (this.archiveTimer) { clearInterval(this.archiveTimer); this.archiveTimer = null; }
+  }
+
+  /**
+   * TASKS-JSON-SPLIT: move old done cards from hot tasks.json to the append-only archive.
+   * Append first, then rewrite hot without them (a crash leaves a card in both; hot wins).
+   * The first pass that moves anything on a hive without tasks-archive/ is the migration:
+   * it copies tasks.json to tasks.pre-split-<ts>.json first. Returns the ids moved.
+   */
+  archivePass(now: number = Date.now()): string[] {
+    const root = this.root();
+    if (!root || !existsSync(join(root, 'tasks.json'))) return [];
+    const hot = this.tasksForMutation();
+    const tasks = Array.isArray(hot?.tasks) ? hot.tasks : [];
+    let meta: Record<string, CardMeta> = {};
+    try { meta = this.ledgerGuard.taskMeta().cards ?? {}; } catch { /* doneAt only */ }
+    const ids = new Set(planArchive(tasks, meta, now));
+    if (ids.size === 0) return [];
+    if (!existsSync(join(root, ARCHIVE_DIR))) {
+      const backup = `tasks.pre-split-${now}.json`;
+      copyFileSync(join(root, 'tasks.json'), join(root, backup));
+      this.appendLog({ kind: 'task-archive-migrate', backup, cards: tasks.length });
+    }
+    const moving = tasks.filter((t) => ids.has(t.id));
+    appendArchived(root, moving, now);
+    this.archiveCache = null;
+    // Only a card that reads back from the archive exactly as it was leaves hot: an append
+    // that did not land whole (torn, partial, unreadable) keeps the card hot (Jim MUST).
+    const back = readArchive(root);
+    const landed = new Set(moving.filter((t) => JSON.stringify(back.get(t.id)) === JSON.stringify(t)).map((t) => t.id));
+    if (landed.size > 0) this.writeTasks(tasks.filter((t) => !landed.has(t.id)), 'archive');
+    this.appendLog({ kind: 'task-archive', moved: landed.size, ...(landed.size < ids.size ? { kept: [...ids].filter((id) => !landed.has(id)) } : {}) });
+    return [...landed];
+  }
+
+  /** The archived cards, cached by the archive's file stamp (it changes about once an hour). */
+  private archived(root: string): Map<string, Record<string, unknown>> {
+    const stamp = archiveStamp(root);
+    if (this.archiveCache && this.archiveCache.root === root && this.archiveCache.stamp === stamp) return this.archiveCache.cards;
+    const cards = readArchive(root);
+    this.archiveCache = { root, stamp, cards };
+    return cards;
+  }
+
+  /** TASKS-JSON-SPLIT: hot plus archive (hot wins), for readers that need any card ever made:
+   *  id uniqueness, the ledger route, claim/webhook status, search, the archived board view. */
+  allTasks(): { tasks: unknown[] } {
+    const root = this.root();
+    const hot = (this.tasks() as { tasks?: unknown } | null)?.tasks;
+    const list = Array.isArray(hot) ? hot : [];
+    if (!root) return { tasks: list };
+    return { tasks: mergeHotCold(list, this.archived(root)) };
+  }
+
+  /** tasks-revive: move one archived card back to hot unchanged. False when it is not archived. */
+  reviveTask(id: string, source: TaskEditSource = 'ipc'): boolean {
+    return this.patchTask(id, {}, source);
   }
   memory(id: string): string {
     const p = join(this.agentDir(id), 'memory.md');
@@ -4119,7 +4227,7 @@ export class HiveManager {
     for (const id of Object.keys(reg.agents ?? {})) {
       if (Object.prototype.hasOwnProperty.call(reg.agents, id)) docs[id] = this.mail.ledger(id);
     }
-    const list = (this.tasks() as { tasks?: unknown } | null)?.tasks;
+    const list = this.allTasks().tasks;
     let meta: Record<string, CardMeta> = {};
     try { meta = this.ledgerGuard.taskMeta().cards ?? {}; } catch { /* no harness record: card fields only */ }
     const cards = new Map<string, CardEvidence>();

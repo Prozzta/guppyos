@@ -182,8 +182,9 @@ function listOf(ledger: unknown): unknown[] {
  * errors; everything else is a warning, which never blocks a write.
  *
  * `agentIds` is the registry's agent ids; when it is omitted the assignee check is skipped.
+ * `archivedIds` (TASKS-JSON-SPLIT) are cards in tasks-archive/: a dependency on one is met.
  */
-export function validateLedger(ledger: unknown, agentIds?: ReadonlySet<string>): LedgerIssue[] {
+export function validateLedger(ledger: unknown, agentIds?: ReadonlySet<string>, archivedIds?: ReadonlySet<string>): LedgerIssue[] {
   const list = listOf(ledger);
   const issues: LedgerIssue[] = [];
   const ids = new Set<string>();
@@ -215,7 +216,7 @@ export function validateLedger(ledger: unknown, agentIds?: ReadonlySet<string>):
     const deps = card.dependsOn ?? card.deps;
     if (Array.isArray(deps)) {
       for (const dep of deps) {
-        if (typeof dep === 'string' && dep && !ids.has(dep)) {
+        if (typeof dep === 'string' && dep && !ids.has(dep) && !archivedIds?.has(dep)) {
           issues.push({ key: `dep:${id}:${dep}`, level: 'warning', cardId: id, message: `card ${id} depends on ${dep}, which is not on the board` });
         }
       }
