@@ -182,7 +182,8 @@ function parseFailures(out, file) {
 function sameOnBase(tip, base) {
   if (base.rc === 0) return false;
   const tf = tip.failed || [], bf = base.failed || [];
-  if (tf.length === 0 && bf.length === 0) return (tip.firstError || '') === (base.firstError || '');
+  // No names on either side (a crash at load, a timeout): the same rc and the same, non-empty, first error.
+  if (tf.length === 0 && bf.length === 0) return tip.rc === base.rc && !!tip.firstError && tip.firstError === base.firstError;
   return tf.length > 0 && tf.every((n) => bf.includes(n));
 }
 
