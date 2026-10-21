@@ -2185,11 +2185,11 @@ function teardownPty(id: string, archiveReason: ArchiveReason = 'explicit'): voi
     if (leftProvider === 'antigravity' && ![...ptyToAgent.values()].includes(agentId)) {
       try { hive.removeAgyAgent(agentId); } catch (e) { console.error('[hive] removeAgyAgent failed:', e); }
     }
+    // WAKE-STUCK-REFUSAL-ESCALATE (Jim SHOULD1): its refused-wake run, if any, ends with the PTY.
+    try { refusedSettles.forget(agentId); } catch { /* best-effort */ }
     // Drop watchdog state so a dead agent can't get nudged or leak its grace.
     try { workerWake.forget(agentId, id); } catch { /* best-effort */ }
     try { forgetWakeRows(wakeRows, agentId); } catch { /* best-effort */ }
-    // WAKE-STUCK-REFUSAL-ESCALATE (Jim SHOULD1): its refused-wake run, if any, ends with the PTY.
-    try { refusedSettles.forget(agentId); } catch { /* best-effort */ }
     // ZT-I1-MAIL §1.1: the PTY exited (or crashed): its open mail epoch ends abnormally. Not when
     // another PTY of the same agent is alive (a restart in place spawns the new one first).
     if (![...ptyToAgent.values()].includes(agentId)) { try { hookServer.abortMailTurn(agentId, 'pty-exit'); } catch { /* best-effort */ } }
