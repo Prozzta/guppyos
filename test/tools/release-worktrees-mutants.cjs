@@ -38,7 +38,6 @@ const MUTANTS = [
   ['R7 a reenter alone does not hold', SRC, "if (h) h.ts = r.ts; else held.set(r.agentId, { agentId: r.agentId, kind: r.heavyKind, command: String(r.command || ''), ts: r.ts });", 'if (h) h.ts = r.ts;', FREES],
   ['R8 the prune\'s own hold is a cut', SRC, '!SELF_COMMAND.test(h.command)\n', 'true\n', SELF],
   ['R9 this process is a cut', SRC, 'p.pid !== selfPid && ', '', PROCS],
-  ['R10 a prune process is a cut', SRC, ' && !SELF_COMMAND.test(p.commandLine)', '', PROCS],
   ['R11 an unverified tree is reaped', SRC, '    if (!v.ok) return { ...r, action: \'keep\', reason: `unverified: ${v.why}` };\n', '', OVERLAY],
   ['R12 a non-worktree is reaped', SRC, "    if (r.kind !== 'worktree') return { ...r, action: 'keep', reason: 'not-a-worktree' };\n", '', OVERLAY],
   ['R13 the own tree is reaped', SRC, "    if (own.some((p) => inside(p, r.path))) return { ...r, action: 'keep', reason: 'own-tree' };\n", '', OVERLAY],

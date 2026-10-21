@@ -177,6 +177,11 @@ test('main dry run: prunes only verified, older cut trees; prints the cache; rem
   assert.ok(lines.some((l) => l === `MODEL CACHE\tNOT VERIFIED\t${fx.cache}\tonnx/model.onnx: missing`), lines.join('\n'));
   assert.ok(!fs.existsSync(fx.cache), 'a dry run writes no cache');
   assert.ok(lines.at(-1).endsWith(`MUNDER_MODEL_CACHE=${fx.cache}`));
+  // --seed-cache fills and verifies the cache; still a dry run with nothing in its way
+  const seeded = P.main([...fx.args, '--seed-cache'], () => {}, fx.deps);
+  assert.equal(seeded.cache.ok, true); assert.equal(P.verifyModel(fx.cache, MANIFEST).ok, true);
+  assert.equal(seeded.refused, null); assert.equal(seeded.results, null);
+  for (const n of ['cut194', 'cut195']) assert.ok(fs.existsSync(path.join(fx.work, n, 'dist')), n);
 });
 
 test('main: gh that cannot answer keeps every tree (fail closed)', () => {

@@ -130,7 +130,7 @@ function processes() {
 
 /** PURE: the running cut processes (not this one). */
 function cutProcesses(procs, selfPid = process.pid) {
-  return procs.filter((p) => p.pid !== selfPid && CUT_PROCESS.test(p.commandLine) && !SELF_COMMAND.test(p.commandLine));
+  return procs.filter((p) => p.pid !== selfPid && CUT_PROCESS.test(p.commandLine));
 }
 
 // ─── Model cache ────────────────────────────────────────────────────────────
