@@ -143,6 +143,16 @@ function runChecks(M) {
 test('fixture: the related set and its lanes on a real repo', () => { setChecks(REAL); });
 test('--run: reds are re-run at base (same on base, BRANCH RED, new); the hive env is stripped; the base worktree is removed', () => { runChecks(REAL); });
 
+test('--run: the base re-run keeps the caller\'s NODE_PATH after the tip\'s node_modules', () => {
+  const seen = [];
+  const { dir, base } = repo();
+  const saved = process.env.NODE_PATH;
+  process.env.NODE_PATH = path.join(dir, 'callers-modules');
+  try { REAL.runLight({ repo: dir, base, light: ['test/c.test.cjs'], run: (cwd, f, env = {}) => { seen.push(env.NODE_PATH); return { rc: 1, pass: 0, fail: 1 }; } }); }
+  finally { if (saved === undefined) delete process.env.NODE_PATH; else process.env.NODE_PATH = saved; }
+  assert.deepEqual(seen, [undefined, [path.join(dir, 'node_modules'), path.join(dir, 'callers-modules')].join(path.delimiter)]);
+});
+
 test('CLI: --json prints the set and the summary line; --run exits 1 on a branch red', () => {
   const { dir, base, tip } = repo();
   const out = execFileSync(process.execPath, [SRC, '--base', base, '--tip', tip, '--repo', dir, '--json'], { encoding: 'utf8', windowsHide: true });

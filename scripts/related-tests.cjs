@@ -160,7 +160,9 @@ function runLight({ repo, base, light, run = runFile, log = () => {} }) {
         }
         if (!fs.existsSync(path.join(baseTree, f))) row.base = 'new';
         else {
-          const b = run(baseTree, f, { NODE_PATH: path.join(repo, 'node_modules') });
+          // The tip's node_modules first, then the caller's NODE_PATH (an audit tree with none of its own).
+          const nodePath = [path.join(repo, 'node_modules'), process.env.NODE_PATH].filter(Boolean).join(path.delimiter);
+          const b = run(baseTree, f, { NODE_PATH: nodePath });
           row.base = b.rc === r.rc && b.fail === r.fail ? 'same on base' : b.rc === 0 ? 'BRANCH RED' : `base rc ${b.rc} fail ${b.fail}`;
         }
       }
