@@ -560,3 +560,60 @@ test('HOTFIX-192 (b): a wake held before the fix is recovered by the held rechec
   assert.equal(again.kind, 'COMMITTED', `re-offer delivered (got ${JSON.stringify(again)})`);
   assert.equal(r.writes.at(-1), '\r');
 });
+
+// WAKE-STRANDED-IN-COMPOSER: under a notice above the box, both TUIs drew our staged wake line
+// inside the rules WITHOUT the prompt glyph (REAL readings from god's `term keys`, 2026-10-21).
+// Every COMMIT and every held recheck read UNKNOWN:no-composer: Creed stranded 20 min, Phyllis 25.8 h.
+const GLYPHLESS = [
+  ['claude', 'claude-idle-120x40', 'claude-wake-glyphless-autoupdate', 'You have new hive mail (delivered in context below): 2026-10-21T06-31-25-171Z-f2b5f0.'],
+  ['antigravity', 'agy127-boot', 'agy-wake-glyphless-notice', 'You have new hive mail (delivered in context below): 2026-10-20T05-01-40-917Z-5ac37b.']
+];
+const editRows = (fx, fn) => ({ ...fx, lines: fn([...fx.lines]), cursorRow: fn([...fx.lines]).length - 1 });
+
+test('WAKE-STRANDED-IN-COMPOSER (a): our own wake line without the glyph (Claude auto-update banner, agy esc-to-dismiss notice) is ours at COMMIT, never at STAGE', () => {
+  for (const [prov, , name, wake] of GLYPHLESS) {
+    const fx = fixture(name);
+    const f = facts(fx);
+    assert.equal(TUI.tuiComposerBox(prov, f.tail), null, `${name}: no glyph, so no box`);
+    assert.deepEqual(TUI.classifyTuiComposer(prov, f, wake), { cls: 'READY_OWN_DRAFT', reason: 'own-draft-glyphless' }, `${name}: our wake line`);
+    assert.notEqual(TUI.classifyTuiComposer(prov, f).cls, 'READY', `${name}: STAGE never takes it as an empty composer`);
+    assert.notEqual(TUI.classifyTuiComposer(prov, f, wake.replace(/.{6}\.$/, 'zzzzzz.')).cls, 'READY_OWN_DRAFT', `${name}: another message id is not ours`);
+    const row = fx.lines.findIndex((l) => /hive mail|ive mail/.test(l));
+    const short = editRows(fx, (ls) => { ls[row] = wake.slice(-30); return ls; });
+    assert.notEqual(TUI.classifyTuiComposer(prov, facts(short), wake).cls, 'READY_OWN_DRAFT', `${name}: a short suffix proves nothing`);
+    const dialog = editRows(fx, (ls) => { ls.splice(row, 0, 'Do you want to proceed?'); return ls; });
+    assert.notEqual(TUI.classifyTuiComposer(prov, facts(dialog), wake).cls, 'READY_OWN_DRAFT', `${name}: a dialog row between the rules is never ours`);
+    const popup = editRows(fx, (ls) => [...ls, '  @src/']);
+    assert.notEqual(TUI.classifyTuiComposer(prov, facts(popup), wake).cls, 'READY_OWN_DRAFT', `${name}: a completion row under the box owns Enter`);
+    const list = editRows(fx, (ls) => [...ls, '  ❯ 1. Yes, continue']);
+    assert.notEqual(TUI.classifyTuiComposer(prov, facts(list), wake).cls, 'READY_OWN_DRAFT', `${name}: a select list under the box owns Enter`);
+  }
+});
+
+test('WAKE-STRANDED-IN-COMPOSER (b): the real owner delivers onto both glyphless screens (text, then Enter), never no-composer', async () => {
+  for (const [prov, screen, name, wake] of GLYPHLESS) {
+    const r = rig({ provider: prov, screen, afterStage: name });
+    const out = await r.settle(r.owner.submit({ requestId: 'w1', agentId: 'jim', admissionClass: 'CAPACITY_GATED', text: wake }));
+    assert.equal(out.kind, 'COMMITTED', `${name}: delivered (got ${JSON.stringify(out)})`);
+    assert.deepEqual(r.writes, [wake, '\r'], `${name}: exactly the text and one Enter`);
+    assert.ok(!r.guard.some((g) => /no-composer/.test(String(g.reason))), `${name}: never no-composer`);
+  }
+});
+
+test('WAKE-STRANDED-IN-COMPOSER (b): a wake already held is recovered by the held recheck on the glyphless screen, then delivered', async () => {
+  for (const [prov, screen, name, wake] of GLYPHLESS) {
+    const r = rig({ provider: prov, screen, afterStage: prov === 'claude' ? 'claude-rate-limit' : 'agy-settings-error', forceOnPromptRow: true });
+    const send = (id) => r.settle(r.owner.submit({ requestId: id, agentId: 'jim', admissionClass: 'CAPACITY_GATED', text: wake }));
+    const held = await send('w1');
+    assert.equal(held.kind, 'INTERFERED', `${name}: held first (got ${JSON.stringify(held)})`);
+    r.afterStage = name; r.forceOnPromptRow = false;
+    const out = await r.settle(r.owner.recheckHeld('pty-jim', 'w1'));
+    assert.notEqual(out.kind, 'HELD', `${name}: the hold ends (got ${JSON.stringify(out)}); before the fix it stayed UNKNOWN:no-composer`);
+    assert.equal(r.owner.inhibition('pty-jim'), null, `${name}: no hold remains`);
+    if (out.kind === 'ERASED') {
+      const again = await send('w2');
+      assert.equal(again.kind, 'COMMITTED', `${name}: re-offer delivered (got ${JSON.stringify(again)})`);
+    }
+    assert.equal(r.writes.at(-1), '\r', `${name}: the wake was submitted`);
+  }
+});

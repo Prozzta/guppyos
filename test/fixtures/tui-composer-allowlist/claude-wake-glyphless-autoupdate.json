@@ -1,0 +1,15 @@
+{
+ "source": "REAL screen reading of Creed's terminal (claude) logged by god's `term keys enter` at 2026-10-21T06:52:23Z: the staged wake line sits between the rules WITHOUT the ❯ glyph under a `✘ Auto-update failed` notice (WAKE-STRANDED-IN-COMPOSER). Only the bottom rows of the logged reading are kept.",
+ "cols": 196,
+ "rows": 7,
+ "cursorRow": 6,
+ "lines": [
+  "✻ Sautéed for 48s · done 8:29",
+  "                                                                               ✘ Auto-update failed: claude.exe in use (close other Claude Code sessions, including VS Code) · Run claude doctor",
+  "──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+  "You have new hive mail (delivered in context below): 2026-10-21T06-31-25-171Z-f2b5f0.",
+  "──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+  "  ctx 108k/1000k (11%)",
+  "  ⏵⏵ bypass permissions on (shift+tab to cycle)"
+ ]
+}

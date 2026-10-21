@@ -1,0 +1,20 @@
+{
+ "source": "REAL screen reading of Phyllis's terminal (antigravity) logged by god's `term keys enter` at 2026-10-21T06:52:49Z: only the tail of the staged wake line sits between the rules, no > glyph, under a `Verbosity now defaults to medium … esc to dismiss` notice (WAKE-STRANDED-IN-COMPOSER).",
+ "cols": 196,
+ "rows": 12,
+ "cursorRow": 11,
+ "lines": [
+  "    ▀▀▀▀▀▀▀▀      Claude Sonnet 5.5 (Medium)",
+  "   ▄▀▀    ▀▀▄     C:/PrzEdit",
+  "  ▄▀▀      ▀▀▄",
+  "",
+  "",
+  " ┃ Verbosity now defaults to medium",
+  " ┃ Verbosity is now medium by default, so tool calls and thoughts roll up into summaries. You can change your preferred verbosity anytime in /config > Verbosity.",
+  " ┃ esc to dismiss",
+  "──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+  "ive mail (delivered in context below): 2026-10-20T05-01-40-917Z-5ac37b.",
+  "──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+  "                                                                                                                                     munder-phyllis-mu11xldm (Claude Sonnet 5.5 · medium)  /agents"
+ ]
+}
