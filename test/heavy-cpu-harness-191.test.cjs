@@ -90,6 +90,37 @@ test('the test runner asks once and passes the answer to every test file', () =>
   }
 });
 
+// HALFCORES-SUITE-198: node's availableParallelism ignores affinity on Windows (32 inside a 16-CPU
+// job), so a FULL in the half job ran 31 files on 16 processors. The runner sizes from the mask.
+test('the test runner sizes its concurrency and start slots from the mask; no mask leaves both unchanged', () => {
+  const { run, maskCpus, startSlots } = require('./tools/run-tests.cjs');
+  assert.equal(maskCpus('65535'), 16);
+  assert.equal(maskCpus('1'), 1);
+  assert.equal(maskCpus(String(0xaaaan)), 8);
+  assert.equal(maskCpus(String((1n << 64n) - 1n)), 64);
+  for (const none of ['', undefined, '0', 'x', '-1', '0x10']) assert.equal(maskCpus(none), null, String(none));
+  const dir = mkdtempSync(join(tmpdir(), 'hcpu-size-'));
+  const saved = { mask: process.env.HARNESS_CPU_MASK, slots: process.env.GUPPY_START_SLOTS };
+  try {
+    writeFileSync(join(dir, 'a.test.cjs'), '');
+    delete process.env.GUPPY_START_SLOTS;
+    for (const [mask, conc, slots] of [[0xffffn, ['--test-concurrency=15'], 4], [1n, ['--test-concurrency=1'], 2], [null, [], startSlots({})]]) {
+      delete process.env.HARNESS_CPU_MASK;
+      let args = null;
+      let gateSlots = null;
+      run({ testDir: dir, cwd: dir, spawn: (a) => { args = a; return { status: 0 }; }, startGate: (o) => { gateSlots = o.slots; return null; },
+        watchdog: () => ({ stop() {} }), log() {}, err() {}, cpuMask: () => mask });
+      assert.deepEqual(args.filter((a) => a.startsWith('--test-concurrency')), conc, `mask ${mask}`);
+      assert.equal(gateSlots, slots, `mask ${mask}: start slots`);
+    }
+  } finally {
+    for (const [k, v] of [['HARNESS_CPU_MASK', saved.mask], ['GUPPY_START_SLOTS', saved.slots]]) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('CENSUS: every Electron a test starts comes from harnessElectron, never require(\'electron\') directly', () => {
   const bad = [];
   const walk = (d) => {
@@ -135,13 +166,17 @@ const { harnessCpuMask } = require(${JSON.stringify(join(root, 'test', 'electron
   const atStart = process.env.HARNESS_CPU_MASK;
   fs.writeFileSync(process.argv[2], 'ready');
   while (!fs.existsSync(process.argv[3])) await new Promise((r) => setTimeout(r, 100));
-  const limited = harnessCpuMask({}) !== null;
+  const after = String(harnessCpuMask({}) ?? '');
   const r = await runScenario(${JSON.stringify(join(root, 'test', 'electron-harness', 'scenarios', 'app-recovery.tsx'))}, { timeoutMs: 90_000 });
-  process.stdout.write('HCPU ' + JSON.stringify({ atStart, limited, ok: r.ok, error: r.error || null, picker: r.normal && r.normal.picker }) + '\\n');
+  process.stdout.write('HCPU ' + JSON.stringify({ atStart, after, ok: r.ok, error: r.error || null, picker: r.normal && r.normal.picker }) + '\\n');
 })().catch((e) => { process.stdout.write('HCPU ' + JSON.stringify({ ok: false, error: String(e && e.message || e).slice(0, 2000) }) + '\\n'); });
 `;
 
-test('RENDERED (real App), live flip: a suite started with no limit, half then turned on for its job, then a scenario starts: it does not stall (Jim MUST-1)',
+// HALFCORES-SUITE-198: the suite itself may run inside a heavy job (the shipped half-processors option
+// on a FULL), and Windows ANDs the affinity of every job a process is nested in. So the child starts
+// with this file's own mask (not necessarily none), the flip ends at that mask AND half, and the
+// flip of THIS job is proven on the job's own limits (the helper's query), which no outer job hides.
+test('RENDERED (real App), live flip: a suite started with its own job unlimited, half then turned on for that job, then a scenario starts: it does not stall (Jim MUST-1)',
   { skip: process.platform !== 'win32' ? 'heavy jobs are Windows-only' : !existsSync(CSC) ? `no in-box csc at ${CSC}` : false, timeout: 600_000 },
   async () => {
     const dir = mkdtempSync(join(tmpdir(), 'hcpu-flip-'));
@@ -160,7 +195,12 @@ test('RENDERED (real App), live flip: a suite started with no limit, half then t
       // Guppy's side: the job is made with no limit and held by serve, as begin() does.
       serve = spawn(exe, ['serve'], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
       const ask = (line) => new Promise((r) => { serve.stdout.once('data', (d) => r(String(d))); serve.stdin.write(`${line}\n`); });
+      const json = async (line) => { const j = JSON.parse(await ask(line)); assert.equal(j.ok, true, `${line}: ${JSON.stringify(j)}`); return j; };
+      const { logical } = await json('cpus');
+      const ambient = harnessCpuMask({}); // this file's own processors, fresh (null = all of them)
+      const all = logical >= 64 ? (1n << 64n) - 1n : (1n << BigInt(logical)) - 1n;
       assert.match(await ask(`create ${id} 0 0`), /"ok":true/);
+      assert.deepEqual(await json(`query ${id}`), { ok: true, background: false, half: false, mask: null }, 'the job starts with no limit of its own');
       child = spawn(exe, ['join', id, '0', '0;', process.execPath, script, ready, go], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
       bornMs = Date.now();
       let out = '';
@@ -173,14 +213,15 @@ test('RENDERED (real App), live flip: a suite started with no limit, half then t
       assert.ok(existsSync(ready), `the child never got ready.\n${out}\n${err}`);
       // Settings, option 2 turned on while the suite runs: the job the child is in gets the half limit.
       assert.match(await ask(`set ${id} 0 1`), /"ok":true/);
+      assert.deepEqual(await json(`query ${id}`), { ok: true, background: false, half: true, mask: String(halfCpuMask(logical)) }, 'the flip set THIS job\'s half limit');
       const started = Date.now();
       writeFileSync(go, '');
       const code = await closed;
       const at = out.lastIndexOf('HCPU ');
       assert.ok(at >= 0, `no result (exit ${code}).\n${out}\n${err}`);
       const r = JSON.parse(out.slice(at + 5).split('\n')[0]);
-      assert.equal(r.atStart, '', 'the suite started with no limit');
-      assert.equal(r.limited, true, 'the scenario ran inside the half-processor limit');
+      assert.equal(r.atStart, String(ambient ?? ''), 'the child started with this file\'s own processors: its job added no limit');
+      assert.equal(r.after, String((ambient ?? all) & halfCpuMask(logical)), 'after the flip: this file\'s processors AND half');
       assert.equal(r.ok, true, r.error);
       assert.equal(r.picker, true, 'the App rendered its launch picker');
       assert.ok(Date.now() - started < 90_000, `took ${Date.now() - started} ms`);
