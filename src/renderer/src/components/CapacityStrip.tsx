@@ -24,7 +24,7 @@
  * NEVER REFLOWS THE CHROME. One fixed 36px line: overflow scrolls sideways inside it, so
  * a capacity change can never resize the office canvas below.
  */
-import { useEffect, useLayoutEffect, useReducer, useRef } from 'react';
+import { useEffect, useLayoutEffect, useReducer, useRef, memo } from 'react';
 import type { CapacityState } from '@shared/providerCapacity';
 import { CAPACITY_EMPTY_TEXT } from '@shared/capacityStrip';
 import { ProviderLogo } from './ProviderLogo';
@@ -308,7 +308,9 @@ export function CapacityStripView({ pools, emptyText }: { pools: readonly Presen
  * poll). It measures its own overflow and sets the marquee's travel and duration; the
  * CSS does the moving.
  */
-export function CapacityStrip() {
+// APP-SHALLOW-SELECTOR: memo so an App render (roster change) does not re-render this
+// subtree; it subscribes to the store slices it needs itself.
+export const CapacityStrip = memo(function CapacityStrip() {
   const collection = useCapacityStrip();
   const host = useRef<HTMLDivElement>(null);
   const [, rerender] = useReducer((n: number) => n + 1, 0);
@@ -359,4 +361,4 @@ export function CapacityStrip() {
       <CapacityStripView pools={pools} emptyText={collection?.emptyText ?? CAPACITY_EMPTY_TEXT} />
     </div>
   );
-}
+});

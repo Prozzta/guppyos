@@ -1058,6 +1058,38 @@ export function selectedAgent(s: State): Agent | undefined {
   return s.agents.find(a => a.id === s.selectedId);
 }
 
+/** APP-SHALLOW-SELECTOR (ACTIVITY-LAG-151 fix 4): primitive selectors for App.tsx, which used
+ *  to subscribe to the whole `agents` array and so re-rendered (with every child) on every
+ *  real status/action/progress/context tick of any agent. These return primitives, so zustand
+ *  only notifies App when the roster itself changes. */
+export function selectAgentCount(s: State): number {
+  return s.agents.length;
+}
+
+/** One string that changes exactly when an agent is added, removed, reordered or gets a new
+ *  pty: the only roster facts App's effects (terminal pre-warm, focus-mode restore) read. */
+export function selectRosterPtyKey(s: State): string {
+  return s.agents.map(a => a.id + ':' + (a.ptyId ?? '')).join('|');
+}
+
+/** PERF-151-NITS: the roster's ids in order, for a list that renders one subscribed entry per
+ *  agent (AgentStrip). A status/action/progress/context tick on any agent leaves it unchanged. */
+export function selectAgentIdKey(s: State): string {
+  return s.agents.map(a => a.id).join('|');
+}
+
+/** PERF-151-NITS: ids and display names, for a component that only turns an id into a name
+ *  (CapacityDetailPanel, TaskDetailOverlay). Read the name with `agentNameOf` at render time. */
+export function selectAgentNameKey(s: State): string {
+  return s.agents.map(a => a.id + ':' + a.name).join('|');
+}
+
+/** The current display name of a roster agent, for a component subscribed to
+ *  `selectAgentNameKey` (which re-renders it whenever an answer here would change). */
+export function agentNameOf(id: string): string | undefined {
+  return useStore.getState().agents.find(a => a.id === id)?.name;
+}
+
 /** Whether the Command Center's Trigger History tab has anything to be about
  *  yet: an organisation key is set, or at least one webhook exists. Derived from
  *  the two mirrors rather than stored beside them, so it cannot fall out of step

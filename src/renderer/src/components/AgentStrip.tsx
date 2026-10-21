@@ -1,11 +1,19 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, memo, type ReactNode } from 'react';
 import { AgentCard } from './AgentCard';
 import { agentBadges, type AgentBadge, type BadgeFlag, type SilentTurnView } from '@shared/agentBadges';
 import { PixelButton } from './PixelButton';
 import { Icon } from './Icon';
-import { useStore, type Agent } from '@/store/store';
+import { useStore, selectAgentIdKey, type Agent } from '@/store/store';
 import { type HarnessConfig } from '@/store/config';
 import { useRestoreTeam } from '@/hooks/useRestoreTeam';
+
+/** PERF-151-NITS: one card's own store subscription. `find` hands back the SAME object until
+ *  updateAgent replaces this agent's, so only the ticked agent's entry re-renders. The render
+ *  prop is rebuilt whenever the strip itself renders, so it never closes over stale strip state. */
+function StripAgent({ id, children }: { id: string; children: (a: Agent) => ReactNode }) {
+  const a = useStore(s => s.agents.find(x => x.id === id));
+  return a ? <>{children(a)}</> : null;
+}
 
 export interface AgentStripProps {
   /** Needed to rebuild a spawn command when a restorable agent predates the
@@ -13,8 +21,13 @@ export interface AgentStripProps {
   config?: HarnessConfig | null;
 }
 
-export function AgentStrip({ config }: AgentStripProps) {
-  const agents = useStore(s => s.agents);
+// APP-SHALLOW-SELECTOR: memo so an App render (roster change) does not re-render this
+// subtree; it subscribes to the store slices it needs itself.
+export const AgentStrip = memo(function AgentStrip({ config }: AgentStripProps) {
+  // PERF-151-NITS: the strip keys on the roster's ids only; each card entry subscribes to its
+  // own agent (StripAgent), so a tick on one agent re-renders that entry, not the strip.
+  const agentIdKey = useStore(selectAgentIdKey);
+  const agentIds = agentIdKey ? agentIdKey.split('|') : [];
   const restorableAgents = useStore(s => s.restorableAgents);
   const selectedId = useStore(s => s.selectedId);
   const select = useStore(s => s.select);
@@ -102,12 +115,11 @@ export function AgentStrip({ config }: AgentStripProps) {
       minHeight: 112,
       alignItems: 'center'
     }}>
-      {agents.map(a => (
+      {agentIds.map(id => <StripAgent key={id} id={id}>{(a) => (
         // Draggable wrapper: reorder the roster by dragging one card onto another.
         // Native HTML5 DnD (no dep). A plain click still selects — a drag only
         // starts on movement — so AgentCard's onClick is unaffected.
         <div
-          key={a.id}
           ref={(el) => { cardRefs.current[a.id] = el; }}
           draggable
           onDragStart={(e) => { setDragId(a.id); e.dataTransfer.effectAllowed = 'move'; }}
@@ -242,7 +254,7 @@ export function AgentStrip({ config }: AgentStripProps) {
             );
           })()}
         </div>
-      ))}
+      )}</StripAgent>)}
       <PixelButton
         variant="secondary"
         size="lg"
@@ -348,4 +360,4 @@ export function AgentStrip({ config }: AgentStripProps) {
       )}
     </div>
   );
-}
+});

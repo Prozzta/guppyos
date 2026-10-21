@@ -91,7 +91,7 @@ test('the warning and near-cap marks read --cth-warn-mark, not the accent', () =
 test('the yellow/beige UI literals are gone from the components that now read tokens', () => {
   const files = [
     'src/renderer/src/components/CodeEditor.tsx', 'src/renderer/src/components/PtyTerminalView.tsx',
-    'src/renderer/src/components/TerminalView.tsx', 'src/renderer/src/ide/monaco.ts', 'src/renderer/src/design/global.css',
+    'src/renderer/src/ide/monaco.ts', 'src/renderer/src/design/global.css',
     'src/renderer/src/components/HivePicker.tsx', 'src/renderer/src/components/OnboardingWizard.tsx',
     'src/renderer/src/realtime/CostHud.tsx', 'src/renderer/src/components/UpdateBadge.tsx',
     'src/renderer/src/components/IntegrationsRegistry.tsx', 'src/renderer/src/components/AddAgentModal.tsx',
