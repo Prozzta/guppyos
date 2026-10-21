@@ -221,6 +221,7 @@ test('WIRING: index.ts supplies the predicate, and it is the ONLY place that doe
     "const seed = join(homedir(), '.codex', 'config.toml');", // codexSeedEffort (1.1.79 M2): READS the seed's effort, never writes
     "const dir = join(homedir(), '.gemini', 'config', 'agents');", // sweepAgyAgents - gated above
     "return join(homedir(), '.gemini', 'config', 'agents', HiveManager.agyAgentName(agentId));", // agyAgentDir: only installAgyAgent/removeAgyAgent, both gated above
+    'const home = homedir();',                            // scanForeignHooks (RULE-FIX-HOOK-NO-MODEL): READS the CLIs' hook files, never writes
     "const gem = join(homedir(), '.gemini');",           // installAgyHooks - gated above
     "const userHome = join(homedir(), '.codex');",       // Codex READS the credential (F1 policy)
     "const hookDir = join(homedir(), '.grok', 'hooks');" // installGrokHooks - gated above
