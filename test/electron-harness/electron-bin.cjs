@@ -66,24 +66,39 @@ function linkTree(from, to) {
   }
 }
 
+/**
+ * ELECTRON-VIEW-SELF-HEAL: a view is ready only when its .complete marker AND its executable are there.
+ * On 2026-10-21 the shared view lost electron.exe alone while .complete stayed, and every Electron test
+ * on the machine failed ENOENT until the view was renamed aside by hand.
+ */
+function viewReady(dir, name) {
+  return fs.existsSync(join(dir, '.complete')) && fs.existsSync(join(dir, name));
+}
+
 /** The view of the dist folder for this mask, made once and shared (under the temp folder). */
 function swiftShaderView(exe, mask, tmp = require('../tools/shared-temp.cjs').sharedTemp()) {
   const version = require('electron/package.json').version;
   const sm = swiftShaderMask(mask);
   const dir = join(tmp, 'guppy-electron-view', `${version}-${sm.toString(16)}`);
-  const done = join(dir, '.complete');
-  if (!fs.existsSync(done)) {
+  const name = basename(exe);
+  if (!viewReady(dir, name)) {
     const part = `${dir}.part-${process.pid}`;
     linkTree(dirname(exe), part);
     fs.writeFileSync(join(part, 'SwiftShader.ini'), `[Processor]\nAffinityMask=${sm}\n`);
     fs.writeFileSync(join(part, '.complete'), '');
+    if (fs.existsSync(dir) && !viewReady(dir, name)) {
+      // A broken view is moved aside, then removed; another test may have moved or rebuilt it first.
+      const stale = `${dir}.stale-${process.pid}-${Date.now()}`;
+      try { fs.renameSync(dir, stale); } catch { /* moved by another test */ }
+      try { fs.rmSync(stale, { recursive: true, force: true }); } catch { /* a file still held: left behind */ }
+    }
     try { fs.renameSync(part, dir); } catch (e) {
       // Another test made it first: use that one. The part holds only links and plain files.
-      if (!fs.existsSync(done)) throw e;
+      if (!viewReady(dir, name)) throw e;
       fs.rmSync(part, { recursive: true, force: true });
     }
   }
-  return join(dir, basename(exe));
+  return join(dir, name);
 }
 
 /**
