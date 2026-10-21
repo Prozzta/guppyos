@@ -78,6 +78,43 @@ export function stripAnsi(s: string): string {
     .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '');
 }
 
+/** pty.ts PTY_TAIL_CHARS (pinned equal): a raw tail this long was cut at its head by pty.ts. */
+export const PTY_RAW_TAIL_CHARS = 4096;
+
+/** PURE: the raw tail as text, redacted. A tail pty.ts cut starts mid-row, and a key cut there has
+ *  lost the prefix the battery matches (Jim N2: 85 of 115 chars kept), so the partial head row goes
+ *  first; a cut tail with no line break at all is all one partial row and goes whole. */
+export function redactRawTail(raw: string): string {
+  let t = stripAnsi(raw);
+  if (raw.length >= PTY_RAW_TAIL_CHARS) { const nl = t.indexOf('\n'); t = nl < 0 ? '' : t.slice(nl + 1); }
+  return redactSecrets(t).slice(-EXIT_RAW_TAIL_CHARS);
+}
+
+/** A row's leading run that may be the rest of a key wrapped from a row above the viewport. */
+const KEY_RUN_AT_START = /^(?=[A-Za-z0-9_+/=.-]*\d)(?=[A-Za-z0-9_+/=.-]*[A-Za-z])[A-Za-z0-9_+/=.-]{16,}/;
+
+/** PURE: screen rows, redacted. Each row alone, and then every row boundary a match crosses: a key
+ *  wrapped over rows has no prefix after its first row (Jim N3: 55 chars kept), so every row a
+ *  crossing match spans is blanked. A match crosses boundary b when the joined rows redact
+ *  differently from their two sides. Only a full row (`cols` wide, or with a wide char) can wrap, so
+ *  with `cols` known a short row's boundary is not one: a key's last row next to 'done' keeps 'done'.
+ *  The top row may continue a row above the viewport, so its leading key-shaped run (16+, letters
+ *  and digits) is redacted too. */
+export function redactRows(lines: string[], cols?: number): string[] {
+  const out = lines.map((l) => redactSecrets(l));
+  const all = lines.join('');
+  const whole = redactSecrets(all);
+  const mayWrap = (l: string) => !cols || l.length >= cols || /[^\x00-\x7f]/.test(l);
+  if (whole !== out.join('')) {
+    for (let k = 0, at = 0; k + 1 < lines.length; k++) {
+      at += lines[k].length;
+      if (mayWrap(lines[k]) && redactSecrets(all.slice(0, at)) + redactSecrets(all.slice(at)) !== whole) { out[k] = '[redacted]'; out[k + 1] = '[redacted]'; }
+    }
+  }
+  if (out.length) out[0] = out[0].replace(KEY_RUN_AT_START, '[redacted]');
+  return out;
+}
+
 export interface TranscriptRow { at: string | null; type: string; kind: string; name?: string; text: string }
 export interface TranscriptCall { at: string | null; name: string; args: string; hasOutput: boolean }
 export interface TranscriptTail {
@@ -236,7 +273,7 @@ export interface ExitParts {
 
 /** PURE: the record, every part bounded; `truncated` names what the size cap cut. */
 export function buildExitRecord(f: ExitFacts, p: ExitParts, maxBytes = EXIT_RECORD_MAX_BYTES): Record<string, unknown> {
-  const screenRows = p.screen ? (() => { const l = [...p.screen.lines]; while (l.length && !l[l.length - 1].trim()) l.pop(); return l.slice(-EXIT_SCREEN_ROWS).map((x) => clip(x, 240)); })() : [];
+  const screenRows = p.screen ? (() => { const l = [...p.screen.lines]; while (l.length && !l[l.length - 1].trim()) l.pop(); return redactRows(l, p.screen.cols).slice(-EXIT_SCREEN_ROWS).map((x) => clip(x, 240)); })() : [];
   const rec: Record<string, any> = {
     kind: 'pty-exit-record',
     agentId: f.agentId, ptyId: f.ptyId, incarnation: f.incarnation, provider: f.provider,
@@ -251,7 +288,7 @@ export function buildExitRecord(f: ExitFacts, p: ExitParts, maxBytes = EXIT_RECO
     },
     heavyLock: f.heavyLock,
     screen: { rows: screenRows, altScreen: p.screen?.altScreen ?? null, ...(p.screenError ? { error: p.screenError } : !p.screen ? { error: 'no mirror' } : {}) },
-    rawTail: redactSecrets(stripAnsi(f.rawTail)).slice(-EXIT_RAW_TAIL_CHARS),
+    rawTail: redactRawTail(f.rawTail),
     stderr: 'through ConPTY the CLI\'s stderr is the terminal stream: see screen and rawTail',
     children: p.children ?? [], ...(p.childrenError ? { childrenError: p.childrenError } : {}),
     transcript: p.transcript, codexLog: p.codexLog,

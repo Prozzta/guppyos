@@ -252,6 +252,47 @@ test('X17: noise Codex log rows (token_count, item_completed, token_usage) are s
   assert.equal(t.noiseSkipped, 40);
 });
 
+// Jim's probe key: 115 chars, sk-ant shaped. A "fragment" is any 12 consecutive chars of it.
+const KEY115 = 'sk-ant-api03-' + Array.from({ length: 102 }, (_, i) => 'Ab3Cd7Ef_9Gh-2Jk'[i % 16]).join('');
+const fragmentIn = (text) => { for (let i = 0; i + 12 <= KEY115.length; i++) if (text.includes(KEY115.slice(i, i + 12))) return KEY115.slice(i, i + 12); return null; };
+
+test('X18: a raw tail pty.ts cut drops its partial head row, so a key cut at the head leaves no fragment (Jim N2)', () => {
+  assert.equal(KEY115.length, 115);
+  const tailChars = Number(/export const PTY_TAIL_CHARS = (\d+);/.exec(readSource('src/main/pty.ts'))[1]);
+  assert.equal(X.PTY_RAW_TAIL_CHARS, tailChars, 'the record knows pty.ts\'s cut length');
+  const body = '\r\nok: suite 12/12\r\n';
+  const cut = KEY115.slice(30) + body + 'x'.repeat(tailChars - KEY115.slice(30).length - body.length);
+  assert.equal(cut.length, tailChars);
+  const rec = X.buildExitRecord(facts({ rawTail: cut }), { screen: null, children: [], transcript: null, codexLog: null });
+  assert.equal(fragmentIn(rec.rawTail), null, `no fragment of the key: ${rec.rawTail.slice(0, 80)}`);
+  assert.ok(rec.rawTail.startsWith('ok: suite 12/12\n'), 'the rows after the head row stay');
+  assert.equal(X.redactRawTail('q'.repeat(tailChars)), '', 'a cut tail with no line break is one partial row: dropped');
+  assert.equal(X.redactRawTail('first row\r\nbye\r\n'), 'first row\nbye\n', 'an uncut tail keeps its first row');
+});
+
+test('X19: a key wrapped over screen rows leaves no fragment; the rows it spans are blanked, the others stay (Jim N3)', () => {
+  // Jim's probe: 60 columns, the key wraps at col 60.
+  const two = ['$ npm test', `export KEY=${KEY115.slice(0, 49)}`, KEY115.slice(49, 109), KEY115.slice(109), 'done'];
+  assert.deepEqual([two[1].length, two[2].length], [60, 60]);
+  const r2 = X.redactRows(two, 60);
+  assert.equal(fragmentIn(r2.join('\n')), null, r2.join(' | '));
+  assert.deepEqual([r2[0], r2[4]], ['$ npm test', 'done'], 'rows the key does not span stay');
+  const three = ['$ env', KEY115.slice(0, 40), KEY115.slice(40, 80), KEY115.slice(80), 'next'];
+  const r3 = X.redactRows(three, 40);
+  assert.equal(fragmentIn(r3.join('\n')), null, `a narrow pane: three rows (${r3.join(' | ')})`);
+  assert.deepEqual([r3[0], r3[4]], ['$ env', 'next']);
+  assert.equal(fragmentIn(X.redactRows(three).join('\n')), null, 'with no cols every boundary is checked');
+  const rec = X.buildExitRecord(facts(), { screen: { lines: two, altScreen: false, cols: 60 }, children: [], transcript: null, codexLog: null });
+  assert.equal(fragmentIn(rec.screen.rows.join('\n')), null, 'the record\'s screen rows');
+});
+
+test('X20: the top screen row may continue a key from above the viewport: its leading key-shaped run is redacted', () => {
+  const r = X.redactRows([`${KEY115.slice(60)} exported`, 'done']);
+  assert.equal(fragmentIn(r.join('\n')), null, r[0]);
+  assert.equal(r[0], '[redacted] exported');
+  assert.deepEqual(X.redactRows(['Downloading packages', 'done']), ['Downloading packages', 'done'], 'a word with no digit is not key-shaped');
+});
+
 const facts = (over = {}) => ({
   agentId: 'dwight-mu32ztys', ptyId: 'p', incarnation: 7, provider: 'codex', exitCode: 0, signal: null, at: EXIT, pid: 4242, spawnedAt: EXIT - 3_600_000,
   command: 'codex --yolo', cwd: 'C:/w', rawTail: '\x1b[2Kbye\r\n', lastHookAt: EXIT - 26_000, lastHookEvent: 'PostToolUse',
@@ -279,11 +320,11 @@ test('X7: a huge record is cut under 64 KB, each cut named', () => {
     transcript: { file: 'f', mtimeMs: 1, bytes: 1, lastRowAt: null, lastCall: null, rows: Array.from({ length: 20 }, () => ({ at: null, type: 't', kind: 'k', text: big })) },
     codexLog: { file: 'f', process: 'p', match: 'pid', rows: Array.from({ length: 30 }, () => ({ ts: 1, level: 'I', target: 't', body: big })) }
   };
-  const rec = X.buildExitRecord(facts({ rawTail: 'z'.repeat(4096) }), parts);
+  const rec = X.buildExitRecord(facts({ rawTail: '\n' + 'z'.repeat(4095) }), parts);
   assert.ok(Buffer.byteLength(JSON.stringify(rec)) <= X.EXIT_RECORD_MAX_BYTES, 'under the cap');
   assert.deepEqual(rec.truncated, ['rawTail', 'children']);
   assert.equal(rec.children.length, 10);
-  const tiny = X.buildExitRecord(facts({ rawTail: 'z'.repeat(4096) }), parts, 2048);
+  const tiny = X.buildExitRecord(facts({ rawTail: '\n' + 'z'.repeat(4095) }), parts, 2048);
   assert.deepEqual(tiny.truncated, ['rawTail', 'children', 'codexLog', 'transcript', 'screen', 'all']);
 });
 
