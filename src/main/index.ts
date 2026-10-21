@@ -807,6 +807,9 @@ function withLivenessEdge(
 ): typeof observe {
   return (agentId, event, message, fullyIdle, turnId, source) => {
     observe(agentId, event, message, fullyIdle, turnId, source);
+    // Never change a terminal from the hook response stack. Stop is merely the
+    // earliest useful signal; the queued evaluation takes a fresh safety snapshot.
+    if (agentId && event === 'Stop') setImmediate(() => considerCodexLiveRotation(agentId));
     noteBootHook(agentId, event);
     if (agentId && event) hookSeenEvent.set(agentId, event);   // ANDY-PTY-EXIT-2049: the exit record's last hook
     if (event && LIVENESS_EDGE_HOOKS.has(event)) sampleLiveness(agentId);
@@ -1298,13 +1301,7 @@ const hookServer = new HookServer(
   // Observed BEFORE the hook response; the bridge defers any retry with setImmediate, so
   // the Stop reply is never blocked and no turn is manufactured inside the hook.
   // ZERO-TOKEN-LIVENESS: after the bridge saw the hook, a turn boundary re-samples liveness.
-  withLivenessEdge((agentId, event, message, fullyIdle, turnId, source) => {
-    if (agentId) hookSeenAt.set(agentId, Date.now());
-    inboxWake?.onHook(agentId, event, message, fullyIdle, turnId, source);
-    // Never change a terminal from the hook response stack.  Stop is merely the
-    // earliest useful signal; the queued evaluation takes a fresh safety snapshot.
-    if (agentId && event === 'Stop') setImmediate(() => considerCodexLiveRotation(agentId));
-  }),
+  withLivenessEdge((agentId, event, message, fullyIdle, turnId, source) => { if (agentId) hookSeenAt.set(agentId, Date.now()); inboxWake?.onHook(agentId, event, message, fullyIdle, turnId, source); }),
   (agentId, obs) => { providerCapacity.ingest(agentId, obs); capacityStore.scheduleSave(); },
   // AGY 1.1.48 — ONE validated statusline tick, routed to its two consumers. Capacity
   // first: the allowance pair is a provider fact and is true for the account whether or
