@@ -807,6 +807,7 @@ function withLivenessEdge(
 ): typeof observe {
   return (agentId, event, message, fullyIdle, turnId, source) => {
     observe(agentId, event, message, fullyIdle, turnId, source);
+    noteBootHook(agentId, event);
     // Never change a terminal from the hook response stack. Stop is merely the
     // earliest useful signal; the queued evaluation takes a fresh safety snapshot.
     if (agentId && event === 'Stop') setImmediate(() => considerCodexLiveRotation(agentId));
@@ -2525,7 +2526,8 @@ ptyManager.setExitHandler((id, exitCode) => {
     if (exitCode === 0) {
       // Unlike an installer, this was a live agent.  Retire all old-incarnation
       // wake/liveness/lock bindings before the fresh PTY takes its place.
-      teardownPty(id, 'pty-exit');
+      const naturalExitReason: ArchiveReason = 'pty-exit';
+      teardownPty(id, naturalExitReason);
       try { liveWebContents()?.send(`pty:relaunch:${id}`); } catch { /* window gone */ }
       void spawnAgentCore(rotating.opts, rotating.owner);
       return;
