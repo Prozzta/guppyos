@@ -21,6 +21,7 @@ import { firstOccurrenceById, type LedgerIssue } from '../shared/taskLedger';
 import { ageText } from '../shared/agentBadges';
 import { floorHoldWords, type FloorHold } from './floorHold';
 import type { SilentTurn } from './silentTurn';
+import { refusedStallLine, type RefusedStall } from './refusedSettleWatch';
 
 export interface FloorDigestConfig {
   enabled: boolean;
@@ -60,6 +61,8 @@ export interface DigestQuietStall { agentId: string; name?: string; count: numbe
 /** WAKE-OWNER-HOLD-ORPHAN (1.1.91): any wake stall (wakeStall.ts) past WAKE_STALL_AFTER_MS, whatever
  *  guard refuses (`owner-inhibited` included), so no stall is only a log row. */
 export interface DigestWakeStall { agentId: string; name?: string; why: string; inboxIds: number; since: number }
+/** WAKE-STUCK-REFUSAL-ESCALATE: a run of identical refused settles on one terminal incarnation (refusedSettleWatch.ts). */
+export interface DigestRefusedSettle extends RefusedStall { name?: string }
 
 /** REQUESTS-AUTO-190: an ask the backstop closed (hive.autoCloseStaleObligations writes them). */
 export interface DigestBackstopClosed { agentId: string; from: string; id: string; subject: string; at: number }
@@ -114,6 +117,7 @@ export interface FloorDigestInput {
   silentTurns?: SilentTurn[];
   quietStalls?: DigestQuietStall[];
   wakeStalls?: DigestWakeStall[];
+  refusedSettles?: DigestRefusedSettle[];
   mirrorOff?: DigestMirrorOff | null;
   messageBox?: DigestMessageBox[];
   floorStall?: DigestFloorStall | null;
@@ -135,7 +139,7 @@ export { ageText };
 /** The decision items: decision flags, plus every ledger ERROR (a duplicate id, an unknown
  *  status), which only god can fix by hand. A STALE item's id carries the day, so it
  *  re-arms once a day while the card stays stale. */
-export function decisionItems(flags: readonly BoardFlag[], ledgerIssues: readonly LedgerIssue[], now: number, heldWakes: readonly DigestHeldWake[] = [], silentTurns: readonly SilentTurn[] = [], quietStalls: readonly DigestQuietStall[] = [], wakeStalls: readonly DigestWakeStall[] = []): DecisionItem[] {
+export function decisionItems(flags: readonly BoardFlag[], ledgerIssues: readonly LedgerIssue[], now: number, heldWakes: readonly DigestHeldWake[] = [], silentTurns: readonly SilentTurn[] = [], quietStalls: readonly DigestQuietStall[] = [], wakeStalls: readonly DigestWakeStall[] = [], refusedSettles: readonly DigestRefusedSettle[] = []): DecisionItem[] {
   const items: DecisionItem[] = [];
   // One item per stall run (its id carries when the run began). A hold or a never-quiet terminal
   // already has its own item below, with what to do about it: one decision per agent, not two.
@@ -146,6 +150,17 @@ export function decisionItems(flags: readonly BoardFlag[], ledgerIssues: readonl
     items.push({
       id: `wake-stall:${s.agentId}:${s.since}`, cardId: null,
       line: `${who}: ${s.inboxIds} message(s) undrained for ${ageText(now - s.since)}, every automatic wake refused as "${s.why}" - look at ${who}'s terminal and chat box`
+    });
+  }
+  // WAKE-STUCK-REFUSAL-ESCALATE: one item per run of identical refused settles on one incarnation
+  // (its id carries the incarnation and when the run began: one wake of god per run). An agent
+  // with a hold, a never-quiet terminal or a wake stall already has its item: one decision, not two.
+  const stalled = new Set(wakeStalls.map((s) => s.agentId));
+  for (const r of refusedSettles) {
+    if (covered.has(r.agentId) || stalled.has(r.agentId)) continue;
+    items.push({
+      id: `wake-refusal-stuck:${r.agentId}:${r.incarnation}:${r.since}`, cardId: null,
+      line: refusedStallLine(r, r.name ?? r.agentId, now)
     });
   }
   // One item per run of refusals (its id carries when the run began).
@@ -274,7 +289,7 @@ export function buildFloorDigest(input: FloorDigestInput): { markdown: string; d
     const raw = Array.isArray(t) ? t : (t && typeof t === 'object' && Array.isArray((t as { tasks?: unknown }).tasks)) ? (t as { tasks: unknown[] }).tasks : [];
     return firstOccurrenceById(raw.filter((c): c is Card => !!c && typeof c === 'object' && typeof (c as { id?: unknown }).id === 'string'), (c) => c.id);
   })();
-  const items = decisionItems(input.flags, input.ledgerIssues, now, input.heldWakes ?? [], input.silentTurns ?? [], input.quietStalls ?? [], input.wakeStalls ?? []);
+  const items = decisionItems(input.flags, input.ledgerIssues, now, input.heldWakes ?? [], input.silentTurns ?? [], input.quietStalls ?? [], input.wakeStalls ?? [], input.refusedSettles ?? []);
   if (input.floorStall) items.unshift(floorStallItem(input.floorStall, now));
   if (input.mirrorOff) items.unshift(mirrorOffItem(input.mirrorOff, now));
   for (const m of input.messageBox ?? []) items.push(messageBoxItem(m, now));
@@ -413,6 +428,8 @@ export interface FloorDigestHost {
   quietStalls?(): DigestQuietStall[];
   /** WAKE-OWNER-HOLD-ORPHAN: every announced wake stall. Optional. */
   wakeStalls?(): DigestWakeStall[];
+  /** WAKE-STUCK-REFUSAL-ESCALATE: runs of identical refused settles. Optional. */
+  refusedSettles?(): DigestRefusedSettle[];
   /** MIRROR-STARTUP-196: the terminal mirrors' auto-off, while it lasts. Optional. */
   mirrorOff?(): DigestMirrorOff | null;
   /** GTC M3: the Human's message-box sends that need a look (the last hour). Optional. */
@@ -466,6 +483,7 @@ export class FloorDigest {
       silentTurns: (() => { try { return this.host.silentTurns?.() ?? []; } catch { return []; } })(),
       quietStalls: (() => { try { return this.host.quietStalls?.() ?? []; } catch { return []; } })(),
       wakeStalls: (() => { try { return this.host.wakeStalls?.() ?? []; } catch { return []; } })(),
+      refusedSettles: (() => { try { return this.host.refusedSettles?.() ?? []; } catch { return []; } })(),
       mirrorOff: (() => { try { return this.host.mirrorOff?.() ?? null; } catch { return null; } })(),
       messageBox: (() => { try { return this.host.messageBox?.() ?? []; } catch { return []; } })(),
       floorStall: (() => { try { return this.host.floorStall?.() ?? null; } catch { return null; } })(),

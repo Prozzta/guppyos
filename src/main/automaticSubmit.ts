@@ -815,6 +815,8 @@ export interface OutcomeRecord {
   admissionClass: AdmissionClass;
   outcome: SubmitOutcome;
   at: number;
+  /** WAKE-STUCK-REFUSAL-ESCALATE: the live PTY's incarnation (deps.incarnation); undefined with no PTY. */
+  incarnation: unknown;
 }
 
 /** START-FIXES-163 (3): one automatic Enter write, for the boot-submit rows. */
@@ -1229,7 +1231,8 @@ export class AutomaticSubmitOwner {
       try {
         this.deps.onOutcome?.({
           requestId: req.requestId, agentId: req.agentId, ptyId,
-          admissionClass: req.admissionClass, outcome, at: settled.at
+          admissionClass: req.admissionClass, outcome, at: settled.at,
+          incarnation: ptyId ? this.deps.incarnation(ptyId) : undefined
         });
       } catch { /* diagnostics never decide */ }
       return outcome;
@@ -1282,7 +1285,7 @@ export class AutomaticSubmitOwner {
       const outcome: SubmitOutcome = { kind: 'HUMAN_HANDLED' };
       this.known.set(held.requestId, { binding: held.binding, promise: Promise.resolve(outcome), settled: { at } });
       try {
-        this.deps.onOutcome?.({ requestId: held.requestId, agentId: held.agentId, ptyId, admissionClass: held.admissionClass, outcome, at });
+        this.deps.onOutcome?.({ requestId: held.requestId, agentId: held.agentId, ptyId, admissionClass: held.admissionClass, outcome, at, incarnation: this.deps.incarnation(ptyId) });
       } catch { /* diagnostics never decide */ }
     }
     return true;
@@ -1308,7 +1311,7 @@ export class AutomaticSubmitOwner {
       });
     } catch { /* diagnostics never decide */ }
     try {
-      this.deps.onOutcome?.({ requestId: req.requestId, agentId: req.agentId, ptyId, admissionClass: req.admissionClass, outcome: { kind: 'INTERFERED', reason, detail }, at: now });
+      this.deps.onOutcome?.({ requestId: req.requestId, agentId: req.agentId, ptyId, admissionClass: req.admissionClass, outcome: { kind: 'INTERFERED', reason, detail }, at: now, incarnation: this.deps.incarnation(ptyId) });
     } catch { /* diagnostics never decide */ }
   }
 
@@ -1905,7 +1908,7 @@ export class AutomaticSubmitOwner {
     const outcome: SubmitOutcome = { kind: 'COMMITTED' };
     this.known.set(requestId, { binding: held.binding, promise: Promise.resolve(outcome), settled: { at } });
     try {
-      deps.onOutcome?.({ requestId, agentId: held.agentId, ptyId, admissionClass: held.admissionClass, outcome, at });
+      deps.onOutcome?.({ requestId, agentId: held.agentId, ptyId, admissionClass: held.admissionClass, outcome, at, incarnation: deps.incarnation(ptyId) });
     } catch { /* diagnostics never decide */ }
     return { kind: 'SUBMITTED', screen: this.lastScreen.get(ptyId)?.facts ?? null };
   }
