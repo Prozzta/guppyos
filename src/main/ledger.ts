@@ -86,6 +86,12 @@ export interface LedgerDeps {
   readTasks(): HiveTask[];
   addTask(task: HiveTask): boolean;
   patchTask(id: string, patch: Partial<HiveTask>): boolean;
+  /**
+   * CARD-AUTODONE-ON-BUILD: true when the caller is god. Only god marks a card done (a card is
+   * done when its sha lands in an INT on origin); anyone else's `status: done` is dropped from the
+   * op (the rest of it still lands) and the reply says `status kept`. Absent = not god.
+   */
+  isGod?: boolean;
   now(): Date;
   /**
    * CLAIM-LEDGER W6 (G6.6): the caller's claim ledger, when it is wired. At level 'writer' the memory
@@ -380,13 +386,17 @@ export function applyLedgerOp(raw: unknown, deps: LedgerDeps): LedgerReply | Pro
     return { status: 500, body: { ok: false, line: `partial: ${done.length ? done.join(' ') + '; ' : ''}${part} failed (${String(e).slice(0, 160)}). Run the same op again to finish it.` } };
   };
 
-  // 2) The card.
+  // 2) The card. CARD-AUTODONE-ON-BUILD: a builder's or auditor's `done` is dropped (god alone
+  // marks done); the reply line names the status the op SET, or the current one marked unchanged,
+  // so an echo never reads as a flip.
+  const askedStatus = card?.patch?.status ?? card?.create?.status;
+  const doneKept = askedStatus === 'done' && !deps.isGod;
   if (card) {
     if (!rec.card) {
       try {
         if (card.create) {
           const t: HiveTask = {
-            id: card.id, title: card.create.title, status: card.create.status ?? 'todo',
+            id: card.id, title: card.create.title, status: doneKept ? 'todo' : (card.create.status ?? 'todo'),
             dependsOn: card.create.dependsOn ?? [], priority: card.create.priority ?? 0, createdAt: now.toISOString(),
             ...(card.create.description !== undefined ? { description: card.create.description } : {}),
             ...(card.create.assignee !== undefined ? { assignee: card.create.assignee } : {}),
@@ -399,6 +409,7 @@ export function applyLedgerOp(raw: unknown, deps: LedgerDeps): LedgerReply | Pro
           if (!cur) throw new Error(`card ${card.id} disappeared meanwhile`);
           // The assignee is kept unless the patch names one (a patch never touches other fields).
           const patch: Partial<HiveTask> = { ...(card.patch ?? {}) };
+          if (doneKept) delete patch.status;
           if (card.appendResult) patch.result = appended(cur.result, card.appendResult, now);
           if (card.appendNote) patch.notes = appended(cur.notes, card.appendNote, now);
           if (!deps.patchTask(card.id, patch)) throw new Error(`card ${card.id} could not be patched`);
@@ -407,8 +418,10 @@ export function applyLedgerOp(raw: unknown, deps: LedgerDeps): LedgerReply | Pro
         save();
       } catch (e) { return fail(`card ${card.id}`, e); }
     }
-    const status = card.patch?.status ?? card.create?.status ?? (deps.readTasks().find((t) => t?.id === card.id)?.status ?? '?');
-    done.push(`card=${card.id}:${status}`);
+    const current = (): string => deps.readTasks().find((t) => t?.id === card.id)?.status ?? '?';
+    done.push(doneKept ? `card=${card.id}:${current()} (status kept: done is god's)`
+      : askedStatus ? `card=${card.id}:${askedStatus}`
+      : `card=${card.id}:${current()} (unchanged)`);
   }
 
   // 3) The message: one file in the caller's outbox, written whole (temp + rename).

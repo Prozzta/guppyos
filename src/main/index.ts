@@ -1809,6 +1809,7 @@ hookServer.setLedgerHandler((agentId, body) => ledgerQueue(agentId, () => {
     },
     addTask: (task) => hive.addTask(task, 'ledger'),
     patchTask: (id, patch) => hive.patchTask(id, patch, 'ledger'),
+    isGod: hive.isGod(agentId),
     now: () => new Date(),
     memoryClaim: ledgerMemoryClaim(agentId),
     // REQUESTS-BADGE-84 D/E: the owner closes, or the requester withdraws, an open ask by hand.
