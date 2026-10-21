@@ -276,8 +276,12 @@ test('t9 wiring: fed from the owner\'s onOutcome (not wakeDiag), the watch canno
   const diagAt = idx.indexOf("} else if (stage === 'settle') {");
   assert.ok(diagAt > 0);
   assert.ok(!idx.slice(diagAt, diagAt + 800).includes('refusedSettles'), 'the folded wakeDiag hook does not feed it');
-  assert.ok(idx.includes('refusedSettles: () => refusedSettles.stalls()'), 'the digest host reads its stalls');
-  assert.equal(idx.split('...refusedSettles.flags(Date.now(), agentDisplayName)').length - 1, 2, 'board-status and the digest both get its flags');
+  assert.ok(idx.includes('refusedSettles: () => refusedSettles.stalls(refusedLive)'), 'the digest host reads its stalls, pruned by the live floor');
+  assert.equal(idx.split('...refusedSettles.flags(Date.now(), agentDisplayName, refusedLive)').length - 1, 2, 'board-status and the digest both get its flags, pruned too');
+  assert.ok(idx.includes('pending: (agentId: string) => mailPendingIds(agentId).length'), 'live pending = the same pending-mail count the feed uses');
+  assert.ok(idx.includes('return p ? ptyManager.incarnation(p) : undefined;'), 'live incarnation = the PTY manager\'s, as the owner records it');
+  const forgetAt = idx.indexOf('try { refusedSettles.forget(agentId); } catch');
+  assert.ok(forgetAt > 0 && Math.abs(forgetAt - idx.indexOf('try { workerWake.forget(agentId, id); } catch')) < 300, 'teardownPty forgets the run beside the other watches');
 
   const watch = readSource(WATCH).replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
   const banned = watch.match(/\b(write|submit|term|send|pty|requeue)\b/gi);
@@ -297,6 +301,55 @@ test('t9 wiring: fed from the owner\'s onOutcome (not wakeDiag), the watch canno
   assert.ok(readSource('src/shared/boardStale.ts').includes("| 'wake-refusal-stuck';"), 'the flag kind is pinned (cardId stays a string: the flag uses \'-\')');
 });
 
+// ---------------------------------------------------------------- t10-t12 the clear path (Jim SHOULD1)
+function raisedRig(mod) {
+  const r = rig(mod);
+  r.feed(HEADER, T0); r.feed(HEADER, T0 + MIN); r.feed(HEADER, T0 + 2 * MIN);
+  assert.equal(r.raised().length, 1);
+  return r;
+}
+const live = (pending, incarnation = INC6) => ({ pending: () => pending, incarnation: () => incarnation });
+
+function t10(mod) {
+  const r = raisedRig(mod);
+  r.watch.forget('other');
+  assert.equal(r.watch.stalls().length, 1, 'another agent\'s teardown is not Dwight\'s');
+  r.watch.forget('dwight');
+  assert.deepEqual(r.watch.stalls(), [], 'the PTY went: the run went with it');
+  assert.equal(r.cleared().length, 1);
+  assert.equal(r.cleared()[0].reason, 'forget');
+  r.watch.forget('dwight');
+  assert.equal(r.rows.length, 2, 'a second forget writes nothing');
+}
+test('t10 forget: teardown ends the run with one cleared row', () => t10(W));
+
+function t11(mod) {
+  const r = raisedRig(mod);
+  const two = T0 + 120 * MIN;
+  assert.equal(r.watch.stalls(live(2)).length, 1, 'mail still waiting on the same incarnation: the item stays');
+  assert.equal(r.watch.flags(two, undefined, live(2)).length, 1);
+  assert.equal(r.rows.length, 1);
+  assert.deepEqual(r.watch.flags(two, undefined, live(0)), [], 'a person typed, the agent read its mail, no outcome ever came: the flag drops');
+  assert.equal(r.cleared().length, 1);
+  assert.equal(r.cleared()[0].reason, 'drained');
+  assert.deepEqual(r.watch.stalls(live(0)), [], 'and stays down');
+  assert.equal(r.rows.length, 2, 'one cleared row');
+}
+test('t11 read-time prune: no mail pending clears a raised run without an outcome', () => t11(W));
+
+function t12(mod) {
+  const r = raisedRig(mod);
+  assert.equal(r.watch.stalls(live(2, INC6)).length, 1);
+  assert.deepEqual(r.watch.stalls(live(2, INC7)), [], 'the PTY was relaunched: incarnation 7 is not the run\'s');
+  assert.equal(r.cleared()[0].reason, 'incarnation');
+  const r2 = raisedRig(mod);
+  assert.deepEqual(r2.watch.stalls({ pending: () => 2, incarnation: () => undefined }), [], 'no live PTY at all: the run cannot be re-asked');
+  assert.equal(r2.cleared()[0].reason, 'incarnation');
+  const r3 = raisedRig(mod);
+  assert.equal(r3.watch.stalls().length, 1, 'a read with no live probe prunes nothing (the tests above)');
+}
+test('t12 read-time prune: a live incarnation that is not the run\'s clears it', () => t12(W));
+
 // ---------------------------------------------------------------- mutants
 const MUTANTS = [
   { name: 'M1 threshold 3 -> 1', file: WATCH, from: 'export const REFUSED_SETTLE_ALERT_AFTER = 3;', to: 'export const REFUSED_SETTLE_ALERT_AFTER = 1;', killers: { t1, t3 } },
@@ -306,7 +359,10 @@ const MUTANTS = [
   { name: 'M5 time path ignores its guard', file: WATCH, from: 'const byTime = cur.count >= 2 && at - cur.since >= REFUSED_SETTLE_ALERT_MS;', to: 'const byTime = cur.count >= 2;', killers: { t2 } },
   { name: 'M6 COMMITTED reset removed', file: WATCH, from: "if (outcome.kind === 'COMMITTED') { if (cur) this.end(cur, 'committed'); return; }", to: "if (outcome.kind === 'COMMITTED') return;", killers: { t5 } },
   { name: 'M7 cap removed', file: WATCH, from: 'if (recent.length >= REFUSED_SETTLE_RAISE_CAP) {', to: 'if (false) {', killers: { t6 } },
-  { name: 'M8 digest id without since', file: DIGEST, from: 'id: `wake-refusal-stuck:${r.agentId}:${r.incarnation}:${r.since}`', to: 'id: `wake-refusal-stuck:${r.agentId}:${r.incarnation}`', killers: { t7 } }
+  { name: 'M8 digest id without since', file: DIGEST, from: 'id: `wake-refusal-stuck:${r.agentId}:${r.incarnation}:${r.since}`', to: 'id: `wake-refusal-stuck:${r.agentId}:${r.incarnation}`', killers: { t7 } },
+  { name: 'M9 forget is a no-op', file: WATCH, from: "if (cur) this.end(cur, 'forget');", to: 'void cur;', killers: { t10 } },
+  { name: 'M10 prune ignores pending mail', file: WATCH, from: "if (live.pending(run.agentId) <= 0) { this.end(run, 'drained'); continue; }", to: '', killers: { t11 } },
+  { name: 'M11 prune ignores the live incarnation', file: WATCH, from: "if (incarnationKey(live.incarnation(run.agentId)) !== run.incarnation) this.end(run, 'incarnation');", to: '', killers: { t12 } }
 ];
 
 for (const m of MUTANTS) {

@@ -637,7 +637,8 @@ const MUTANTS = [
     edits: [["      if (!keys.has(`${agentId}|${requestId}`)) this.lift(agentId);", '      void agentId; void requestId;']],
     killer: 'noticeLiftsWhenHoldEnds', dies: /THE NOTICE LIFTS WHEN THE HOLD ENDS/ },
   { name: 'fix 2: the digest leaves held wakes out', file: 'src/main/floorDigest.ts', real: DIGEST,
-    edits: [['  const items = decisionItems(input.flags, input.ledgerIssues, now, input.heldWakes ?? [], input.silentTurns ?? [], input.quietStalls ?? [], input.wakeStalls ?? []);', '  const items = decisionItems(input.flags, input.ledgerIssues, now, [], input.silentTurns ?? [], input.quietStalls ?? [], input.wakeStalls ?? []);'],
+    // WAKE-STUCK-REFUSAL-ESCALATE added the last argument.
+    edits: [['  const items = decisionItems(input.flags, input.ledgerIssues, now, input.heldWakes ?? [], input.silentTurns ?? [], input.quietStalls ?? [], input.wakeStalls ?? [], input.refusedSettles ?? []);', '  const items = decisionItems(input.flags, input.ledgerIssues, now, [], input.silentTurns ?? [], input.quietStalls ?? [], input.wakeStalls ?? [], input.refusedSettles ?? []);'],
       ['  for (const h of heldWakes) {', '  for (const h of heldWakes.slice(0, 0)) {']],
     killer: 'digestListsHeldWake', dies: /A HELD WAKE IS A DECISION FOR GOD/ },
   { name: 'fix 3: no quiet window (the 20:27:41 race)', file: 'src/main/automaticSubmit.ts', real: OWNER,

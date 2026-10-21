@@ -51,6 +51,18 @@ export interface RefusedStall {
 
 interface Run extends RefusedStall { raised: boolean }
 
+/**
+ * What the floor knows at read time (Jim SHOULD1): a raised run clears only on the agent's next
+ * owner outcome, and after a person types there may never be one. So each read drops a run whose
+ * agent has no mail pending any more, or whose live incarnation is not the run's.
+ */
+export interface RefusedSettleLive {
+  pending(agentId: string): number;
+  incarnation(agentId: string): unknown;
+}
+
+const incarnationKey = (v: unknown): string => (v === undefined || v === null ? '' : String(v));
+
 export class RefusedSettleWatch {
   private runs = new Map<string, Run>();
   /** Raise times per agent#incarnation, for the cap. */
@@ -62,7 +74,7 @@ export class RefusedSettleWatch {
   /** Every settled automatic-submit outcome (the owner's onOutcome), with the mail still pending. */
   outcome(rec: RefusedSettleRecord): void {
     const { agentId, outcome, at } = rec;
-    const incarnation = rec.incarnation === undefined || rec.incarnation === null ? '' : String(rec.incarnation);
+    const incarnation = incarnationKey(rec.incarnation);
     let cur = this.runs.get(agentId);
     if (cur && cur.incarnation !== incarnation) { this.end(cur, 'incarnation'); cur = undefined; }
     if (outcome.kind === 'COMMITTED') { if (cur) this.end(cur, 'committed'); return; }
@@ -100,6 +112,20 @@ export class RefusedSettleWatch {
     this.log(this.row('raised', run));
   }
 
+  /** The agent's PTY was torn down (teardownPty): nothing will ever end its run otherwise. */
+  forget(agentId: string): void {
+    const cur = this.runs.get(agentId);
+    if (cur) this.end(cur, 'forget');
+  }
+
+  private prune(live?: RefusedSettleLive): void {
+    if (!live) return;
+    for (const run of [...this.runs.values()]) {
+      if (live.pending(run.agentId) <= 0) { this.end(run, 'drained'); continue; }
+      if (incarnationKey(live.incarnation(run.agentId)) !== run.incarnation) this.end(run, 'incarnation');
+    }
+  }
+
   private end(run: Run, reason: string): void {
     this.runs.delete(run.agentId);
     if (run.raised) this.log({ ...this.row('cleared', run), reason });
@@ -113,15 +139,16 @@ export class RefusedSettleWatch {
   }
 
   /** The runs that have reached the alert, for the floor digest. */
-  stalls(): RefusedStall[] {
+  stalls(live?: RefusedSettleLive): RefusedStall[] {
+    this.prune(live);
     return [...this.runs.values()].filter((r) => r.raised).map((r) => ({
       agentId: r.agentId, incarnation: r.incarnation, why: r.why, count: r.count, since: r.since, inboxIds: r.inboxIds, requestId: r.requestId
     }));
   }
 
   /** The same runs as board-status '## Flags' lines (kind wake-refusal-stuck, no card). */
-  flags(now: number, name: (agentId: string) => string = (id) => id): BoardFlag[] {
-    return this.stalls().map((s) => ({
+  flags(now: number, name: (agentId: string) => string = (id) => id, live?: RefusedSettleLive): BoardFlag[] {
+    return this.stalls(live).map((s) => ({
       cardId: '-', kind: 'wake-refusal-stuck', agentId: s.agentId, since: s.since, decision: false,
       evidence: refusedStallLine(s, name(s.agentId), now)
     }));

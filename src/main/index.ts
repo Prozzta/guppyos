@@ -545,7 +545,7 @@ const boardStatus = new BoardStatusWriter({
   tasks: () => hive.tasks(),
   taskMeta: () => hive.ledgerGuard.taskMeta().cards,
   // WAKE-STUCK-REFUSAL-ESCALATE: plus the runs of identical refused wakes (kind wake-refusal-stuck).
-  flags: () => [...boardMonitor.flags(), ...refusedSettles.flags(Date.now(), agentDisplayName)]
+  flags: () => [...boardMonitor.flags(), ...refusedSettles.flags(Date.now(), agentDisplayName, refusedLive)]
 });
 /** WAKE-STALL-INTERFERED-192: wakes refused in a row because the terminal never went quiet. */
 const quietRefusals = new QuietRefusalWatch((row) => { try { hive.appendLog(row); } catch { /* logging only */ } });
@@ -553,6 +553,11 @@ const quietRefusals = new QuietRefusalWatch((row) => { try { hive.appendLog(row)
  *  mail waiting (a stale header or popup the reconcile re-asks for ever). Rows go to the log
  *  directly, so breadcrumb folding cannot swallow them. Observation only. */
 const refusedSettles = new RefusedSettleWatch((row) => { try { hive.appendLog(row); } catch { /* logging only */ } });
+/** Jim SHOULD1: a run clears at read time once the mail is gone or the PTY is another incarnation. */
+const refusedLive = {
+  pending: (agentId: string) => mailPendingIds(agentId).length,
+  incarnation: (agentId: string) => { const p = ptyForAgent(agentId); return p ? ptyManager.incarnation(p) : undefined; }
+};
 /** MIRROR-STARTUP-196: the armed mirror cost guard (null before arming, or with the mirror off by
  *  config). Declared before the digest, which reads it. */
 let mirrorGuard: MirrorCostGuard | null = null;
@@ -565,7 +570,7 @@ const floorDigest = new FloorDigest({
   root: () => hive.root(),
   tasks: () => hive.tasks(),
   taskMeta: () => hive.ledgerGuard.taskMeta().cards,
-  flags: () => [...boardMonitor.flags(), ...refusedSettles.flags(Date.now(), agentDisplayName)],
+  flags: () => [...boardMonitor.flags(), ...refusedSettles.flags(Date.now(), agentDisplayName, refusedLive)],
   ledgerIssues: () => hive.ledgerGuard.issues(),
   // DWIGHT-HELD-INTERFERED fix 2: a held wake the Human was told about is a decision for god.
   heldWakes: () => (heldInterference?.noticed() ?? []).map((h) => ({ agentId: h.agentId, name: agentDisplayName(h.agentId), messages: h.messages, since: h.since })),
@@ -573,7 +578,7 @@ const floorDigest = new FloorDigest({
   silentTurns: () => findSilentTurns(silentTurnFacts(), Date.now()),
   quietStalls: () => quietRefusals.stalls().map((q) => ({ ...q, name: agentDisplayName(q.agentId) })),
   wakeStalls: () => wakeStalls.stalls().map((s) => ({ ...s, name: agentDisplayName(s.agentId) })),
-  refusedSettles: () => refusedSettles.stalls().map((s) => ({ ...s, name: agentDisplayName(s.agentId) })),
+  refusedSettles: () => refusedSettles.stalls(refusedLive).map((s) => ({ ...s, name: agentDisplayName(s.agentId) })),
   // GTC M3: the Human's message-box items that need a look (never retried by the box).
   messageBox: () => (messageBox?.attentionItems() ?? []).map((m) => ({ ...m, name: agentDisplayName(m.agentId) })),
   // RULE-FIX-HOOK-NO-MODEL: model-invoking hooks in files Guppy does not own (warn only).
@@ -2182,6 +2187,8 @@ function teardownPty(id: string, archiveReason: ArchiveReason = 'explicit'): voi
     }
     // Drop watchdog state so a dead agent can't get nudged or leak its grace.
     try { workerWake.forget(agentId, id); } catch { /* best-effort */ }
+    // WAKE-STUCK-REFUSAL-ESCALATE (Jim SHOULD1): its refused-wake run, if any, ends with the PTY.
+    try { refusedSettles.forget(agentId); } catch { /* best-effort */ }
     try { forgetWakeRows(wakeRows, agentId); } catch { /* best-effort */ }
     // ZT-I1-MAIL §1.1: the PTY exited (or crashed): its open mail epoch ends abnormally. Not when
     // another PTY of the same agent is alive (a restart in place spawns the new one first).

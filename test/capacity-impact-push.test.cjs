@@ -64,7 +64,7 @@ test('main pushes on every event that can move the string', () => {
   assert.match(main, /onAdmission: \(\) => pushAgentImpact\(\)/, 'admission-ledger move');
   // The COMMITTED branch may do more before it returns (REMOTE-PROMPT logs a BOOT_SEQUENCE commit);
   // what is pinned is that the push comes FIRST, before any early return.
-  assert.match(main, /onOutcome: \(r\) => \{\s*pushAgentImpact\(\);\s*(?:quietRefusals\.outcome\(r\.agentId, r\.outcome, r\.at\);\s*)?if \(r\.outcome\.kind === 'COMMITTED'\) (?:return;|\{[\s\S]*?return;\s*\})/,'every submit outcome, before the COMMITTED early return');
+  assert.match(main, /onOutcome: \(r\) => \{\s*pushAgentImpact\(\);\s*(?:quietRefusals\.outcome\(r\.agentId, r\.outcome, r\.at\);\s*)?(?:refusedSettles\.outcome\(\{[^}]*\}\);\s*)?if \(r\.outcome\.kind === 'COMMITTED'\) (?:return;|\{[\s\S]*?return;\s*\})/,'every submit outcome, before the COMMITTED early return');
   assert.match(main, /ptyProvider\.delete\(id\);[\s\S]{0,120}?pushAgentUsage\(\);\s*pushAgentImpact\(\);/, 'agent leave');
   assert.match(main, /ptyProvider\.set\(opts\.id, provider\);[\s\S]{0,120}?pushAgentUsage\(\);\s*pushAgentImpact\(\);/, 'agent spawn');
   assert.match(main, /writeConfig\(\{ autoDeliveryPausedAgents: Array\.from\(current\)\.sort\(\) \}\);\s*pushAgentImpact\(\);/, 'the floor switch');
