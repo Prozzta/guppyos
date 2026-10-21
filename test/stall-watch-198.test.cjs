@@ -428,6 +428,65 @@ test('REAL block: a 300 ms spawnSync on the real clock is a main-stall row; chil
   assert.doesNotMatch(code(MAIN), /childProcess|execSync|execFileSync|spawnSync/, 'stallWatch.ts wraps no child_process API');
 });
 
+// Dwight/god 10-21: main calls fs through NAMED imports (readFileSync, appendFileSync), and index.ts
+// wraps the default import. In true ESM the named bindings would not see the patch, so what reaches
+// the wrap is what the bundle compiles to. This bundles a fixture with main's own pipeline (this
+// repo's electron-vite, main build, externalized deps) and proves on the BUILT code: a named import
+// compiles to a live read of the default object's property, so a real 300 ms readFileSync through
+// it is an 'fs' slice. A namespace import compiles to a frozen copy of live getters, so it sees the
+// wrap too.
+test('BUILT bundle: a real 300 ms readFileSync through a named import is an fs slice; a namespace import sees the wrap', async () => {
+  const dir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'stallwatch-bundle-'));
+  let srv;
+  try {
+    fs.mkdirSync(path.join(dir, 'src', 'main'), { recursive: true });
+    const ev = require('node:url').pathToFileURL(path.join(ROOT, 'node_modules', 'electron-vite', 'dist', 'index.mjs')).href;
+    fs.writeFileSync(path.join(dir, 'package.json'), '{"name":"stallwatch-bundle","version":"1.0.0","main":"out/main/index.js"}');
+    fs.writeFileSync(path.join(dir, 'electron.vite.config.mjs'), `import { defineConfig, externalizeDepsPlugin } from ${JSON.stringify(ev)};\nexport default defineConfig({ main: { plugins: [externalizeDepsPlugin()] } });\n`);
+    fs.writeFileSync(path.join(dir, 'src', 'main', 'reader.ts'), "import { readFileSync } from 'node:fs';\nexport const readNamed = (p: string): string => readFileSync(p, 'utf8');\n");
+    fs.writeFileSync(path.join(dir, 'src', 'main', 'ns.ts'), "import * as nodeFs from 'node:fs';\nexport const nsFs = nodeFs;\n");
+    fs.writeFileSync(path.join(dir, 'src', 'main', 'index.ts'), "import fsModule from 'node:fs';\nimport { readNamed } from './reader';\nimport { nsFs } from './ns';\nexport const fsTarget = fsModule as unknown as Record<string, unknown>;\nexport { readNamed, nsFs };\n");
+    const b = childProcess.spawnSync(process.execPath, [path.join(ROOT, 'node_modules', 'electron-vite', 'bin', 'electron-vite.js'), 'build'], { cwd: dir, encoding: 'utf8', windowsHide: true, timeout: 120_000 });
+    assert.equal(b.status, 0, `electron-vite build: ${b.stdout}${b.stderr}`);
+    const outFile = path.join(dir, 'out', 'main', 'index.js');
+    const out = fs.readFileSync(outFile, 'utf8');
+    const v = /const (\w+) = require\("node:fs"\);/.exec(out)?.[1];
+    assert.ok(v, 'the bundle requires node:fs once');
+    assert.match(out, new RegExp(`${v}\\.readFileSync\\(p, "utf8"\\)`), 'the named call is a live property read');
+    assert.match(out, new RegExp(`fsTarget = ${v};`), 'the default import is that same object');
+    assert.match(out, new RegExp(`_interopNamespaceDefault\\(${v}\\)`), 'the namespace import is an interop copy');
+    assert.match(out, /get: \(\) => e\[k\]/, 'whose properties are live getters');
+    const bundle = require(outFile);
+    assert.equal(bundle.fsTarget, fs, 'the bundle default import is the real node:fs');
+
+    const pipe = '\\\\.\\pipe\\stallwatch-198-' + process.pid;
+    srv = childProcess.spawn(process.execPath, ['-e', "require('net').createServer((c) => setTimeout(() => c.end('slow'), 350)).listen(process.argv[1], () => process.stdout.write('ready'))", pipe], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    await new Promise((resolve, reject) => { srv.stdout.once('data', resolve); srv.once('exit', () => reject(new Error('pipe server exited'))); });
+
+    const rows = [];
+    const w = new M.StallWatch({ now: () => performance.now(), origin: performance.timeOrigin, log: (r) => rows.push(r), setInterval: () => 'I', clearInterval: () => {} });
+    const orig = fs.readFileSync;
+    w.start({ fs: bundle.fsTarget });
+    try {
+      assert.notEqual(fs.readFileSync, orig, 'the real default object is wrapped');
+      assert.equal(bundle.nsFs.readFileSync, fs.readFileSync, 'the namespace copy reads the wrapped function');
+      assert.equal(bundle.readNamed(pipe), 'slow');
+      w.beat();
+    } finally { w.stop(); }
+    assert.equal(fs.readFileSync, orig, 'stop() restores');
+    const s = rows.filter((r) => r.kind === 'main-stall');
+    assert.equal(s.length, 1);
+    assert.ok(s[0].ms >= 250, `blocked ${s[0].ms} ms`);
+    assert.equal(s[0].slices.length, 1, JSON.stringify(s[0].slices));
+    assert.equal(s[0].slices[0].k, 'fs');
+    assert.match(s[0].slices[0].name, /^readFileSync:/);
+    assert.ok(s[0].slices[0].ms >= 250, `slice ${s[0].slices[0].ms} ms`);
+  } finally {
+    srv?.kill();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('wiring: armed before the first ipcMain registration, config-gated, the profiler only on profile, the renderer channel', () => {
   const idx = code('src/main/index.ts');
   const start = idx.indexOf('stallWatch.start(');
