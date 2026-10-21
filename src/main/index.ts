@@ -186,8 +186,9 @@ import { CodexRolloutLifecycleSource, threadSettingsAppliedSince } from './codex
 import { CodexRolloutCapacitySource, codexUserMessageMatches } from './codexRolloutCapacity';
 import { BootHookClock, startupSettled } from './bootSubmitEvidence';
 import { AgentLivenessMonitor, type LivenessFacts } from './agentLiveness';
-import { CODEX_ROTATE_MAX_ROLLOUT_BYTES, decideAgyRotation, decideThreadRotation, findAgyConversation, findCodexRollout, threadRotatedLogRow } from './codexThreadRotation';
+import { CODEX_ROTATE_MAX_ROLLOUT_BYTES, decideAgyRotation, decideThreadRotation, findAgyConversation, findCachedCodexRollout, threadRotatedLogRow, type CodexRolloutCacheEntry } from './codexThreadRotation';
 import { decideCodexLiveRotation, liveRotationEscalationId } from './codexLiveRotation';
+import { mapCodexLiveRotationFacts, shouldArmCodexLiveRotationExit } from './codexLiveRotationWiring';
 import { HistoryService } from './historyService';
 import { recordExit } from './ptyExitRecord';
 import Database from 'better-sqlite3';
@@ -517,6 +518,7 @@ const pendingCodexLiveRotation = new Map<string, { opts: AgentSpawnOptions; owne
 const pendingCodexLiveRotationDeadline = new Map<string, ReturnType<typeof setTimeout>>();
 const liveSpawnOptions = new Map<string, { opts: AgentSpawnOptions; owner: Electron.WebContents | null }>();
 const liveRotationLast = new Map<string, string>();
+const liveCodexRollouts = new Map<string, CodexRolloutCacheEntry>();
 const hive = new HiveManager(
   () => readConfig().harnessHome,
   (channel, payload) => {
@@ -1379,15 +1381,16 @@ function codexLiveRotationFacts(agentId: string): { facts: Parameters<typeof dec
   const ws = workerWake.state(agentId);
   const q = heavyLock.queueSnapshot();
   const holders = heavyLock.snapshot();
-  const info = sessionId ? findCodexRollout(hive.codexHomeFor(agentId) ?? '', sessionId) : null;
+  const info = sessionId ? findCachedCodexRollout(liveCodexRollouts, hive.codexHomeFor(agentId) ?? '', sessionId) : null;
   const mail = fleetMail(agentId);
   const humanAt = ptyId ? (ptyManager.lastHumanInputAt(ptyId) ?? 0) : 0;
   return {
     ptyId, sessionId,
-    facts: {
+    facts: mapCodexLiveRotationFacts({
       bytes: info?.bytes ?? null,
-      stopSeen: wf.lastTurnEndAt > 0,
-      turnOpen: wf.openTurnId !== null || wf.lifecycle === 'active',
+      lastTurnEndAt: wf.lastTurnEndAt,
+      openTurn: wf.openTurnId !== null,
+      active: wf.lifecycle === 'active',
       toolRunning: hookServer.runningTool(agentId) !== null,
       owed: (mail.awaitingReply?.length ?? 0) > 0 || (mail.openRequests?.length ?? 0) > 0,
       wakePending: ws.pending.length > 0 || ws.announced.length > 0,
@@ -1396,11 +1399,11 @@ function codexLiveRotationFacts(agentId: string): { facts: Parameters<typeof dec
       heavy: holders.some((x) => x.agentId === agentId) || q.waiters.some((x) => x.agentId === agentId) || q.reserved.some((x) => x.agentId === agentId),
       floorHeld: parseFloorHold(readConfig().floorHold) !== null,
       inputPending: !!ptyId && automaticSubmit.inhibition(ptyId) !== null,
-      humanTyping: humanAt > wf.lastTurnEndAt,
+      lastHumanInputAt: humanAt,
       // Rotation teardown must never remove/recreate an isolated worktree or
       // revoke an ephemeral worker's lifetime ownership.
       workspaceIsolated: !!ptyId && (worktreePaths.has(ptyId) || liveWorkers.has(ptyId))
-    }
+    })
   };
 }
 
@@ -1456,7 +1459,7 @@ function considerCodexLiveRotation(agentId: string): void {
   pendingCodexLiveRotation.set(a.ptyId!, { agentId, owner: spawn.owner, opts: { ...spawn.opts, resume: false, requireResume: false, resumeSessionId: undefined, startFresh: true } });
   // The submit owner proves an empty, non-human composer and uses Codex's paste gap.
   void automaticSubmit.submit({ requestId: `codex-live-rotate:${agentId}:${a.sessionId}`, agentId, admissionClass: 'CAPACITY_GATED', text: '/exit' }).then((outcome) => {
-    if (!ptyManager.list().some((p) => p.id === a.ptyId)) return;
+    const ptyStillLive = ptyManager.list().some((p) => p.id === a.ptyId);
     if (outcome.kind === 'REFUSED') {
       pendingCodexLiveRotation.delete(a.ptyId!);
       noteCodexLiveRotation(agentId, a.sessionId, 'defer', `owner-refused:${outcome.reason}`, again.bytes);
@@ -1464,9 +1467,9 @@ function considerCodexLiveRotation(agentId: string): void {
     }
     // COMMITTED, INTERFERED and uncertain outcomes may have put /exit into the TUI;
     // retain the arm through a grace period so its natural exit still relaunches.
-    armCodexLiveRotationExitDeadline(a.ptyId!, incarnation, agentId, a.sessionId, again.bytes);
+    if (shouldArmCodexLiveRotationExit(outcome.kind, ptyStillLive)) armCodexLiveRotationExitDeadline(a.ptyId!, incarnation, agentId, a.sessionId, again.bytes);
   }).catch(() => {
-    if (ptyManager.list().some((p) => p.id === a.ptyId)) armCodexLiveRotationExitDeadline(a.ptyId!, incarnation, agentId, a.sessionId, again.bytes);
+    if (shouldArmCodexLiveRotationExit('UNKNOWN', ptyManager.list().some((p) => p.id === a.ptyId))) armCodexLiveRotationExitDeadline(a.ptyId!, incarnation, agentId, a.sessionId, again.bytes);
   });
 }
 // IDLE-MEANS-IDLE: an agent running a heavy job in the background, queued for the lock or holding a

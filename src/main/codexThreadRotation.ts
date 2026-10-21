@@ -33,6 +33,15 @@ export interface ThreadFileInfo {
   startedAt: number;
 }
 
+/** A session-bound rollout location.  The hot path stats this known file instead
+ * of repeatedly walking the whole sessions tree; a missing/replaced file falls
+ * back to discovery and refreshes the entry. */
+export interface CodexRolloutCacheEntry {
+  codexHome: string;
+  path: string;
+  startedAt: number;
+}
+
 export interface ThreadRotationDecision {
   rotate: boolean;
   reason: ThreadRotationReason | null;
@@ -106,6 +115,24 @@ export function findCodexRollout(codexHome: string, sessionId: string): ThreadFi
     }
   }
   return null;
+}
+
+/** Read a rollout through a caller-owned cache keyed by session id.  A cache hit
+ * performs one stat so growth is observed promptly; it never trusts old bytes. */
+export function findCachedCodexRollout(
+  cache: Map<string, CodexRolloutCacheEntry>, codexHome: string, sessionId: string
+): ThreadFileInfo | null {
+  const cached = cache.get(sessionId);
+  if (cached && cached.codexHome === codexHome) {
+    try {
+      const st = statSync(cached.path);
+      if (st.isFile()) return { path: cached.path, bytes: st.size, startedAt: cached.startedAt };
+    } catch { /* stale path: rediscover below */ }
+    cache.delete(sessionId);
+  }
+  const found = findCodexRollout(codexHome, sessionId);
+  if (found) cache.set(sessionId, { codexHome, path: found.path, startedAt: found.startedAt });
+  return found;
 }
 
 /** An Antigravity conversation db, `<geminiHome>/antigravity-cli/conversations/<id>.db`, or null.
