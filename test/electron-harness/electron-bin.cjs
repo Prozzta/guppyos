@@ -66,24 +66,42 @@ function linkTree(from, to) {
   }
 }
 
+/**
+ * ELECTRON-VIEW-SELF-HEAL: a view is ready only when its .complete marker AND every top-level name of
+ * the dist folder are there. On 2026-10-21 the shared view lost electron.exe alone while .complete
+ * stayed, and every Electron test on the machine failed ENOENT until the view was renamed aside by hand.
+ * What deleted it is not named, so a lost DLL or .pak counts too (Jim NIT 1).
+ */
+function viewReady(dir, from) {
+  if (!fs.existsSync(join(dir, '.complete'))) return false;
+  try { return fs.readdirSync(from).every((n) => fs.existsSync(join(dir, n))); } catch { return false; }
+}
+
 /** The view of the dist folder for this mask, made once and shared (under the temp folder). */
 function swiftShaderView(exe, mask, tmp = require('../tools/shared-temp.cjs').sharedTemp()) {
   const version = require('electron/package.json').version;
   const sm = swiftShaderMask(mask);
   const dir = join(tmp, 'guppy-electron-view', `${version}-${sm.toString(16)}`);
-  const done = join(dir, '.complete');
-  if (!fs.existsSync(done)) {
+  const name = basename(exe);
+  const from = dirname(exe);
+  if (!viewReady(dir, from)) {
     const part = `${dir}.part-${process.pid}`;
-    linkTree(dirname(exe), part);
+    linkTree(from, part);
     fs.writeFileSync(join(part, 'SwiftShader.ini'), `[Processor]\nAffinityMask=${sm}\n`);
     fs.writeFileSync(join(part, '.complete'), '');
+    if (fs.existsSync(dir) && !viewReady(dir, from)) {
+      // A broken view is moved aside, then removed; another test may have moved or rebuilt it first.
+      const stale = `${dir}.stale-${process.pid}-${Date.now()}`;
+      try { fs.renameSync(dir, stale); } catch { /* moved by another test */ }
+      try { fs.rmSync(stale, { recursive: true, force: true }); } catch { /* a file still held: left behind */ }
+    }
     try { fs.renameSync(part, dir); } catch (e) {
       // Another test made it first: use that one. The part holds only links and plain files.
-      if (!fs.existsSync(done)) throw e;
+      if (!viewReady(dir, from)) throw e;
       fs.rmSync(part, { recursive: true, force: true });
     }
   }
-  return join(dir, basename(exe));
+  return join(dir, name);
 }
 
 /**
