@@ -383,7 +383,8 @@ test('PIN: against the REAL test directory discovery is root tests plus only fol
   // 1.1.98 stage 11: + 1 (hook-type-guard-198).
   // 1.1.98 stage 12: + 1 (electron-view-self-heal-198), + 1 (tasks-json-split-198), + 1 (release-worktrees-198).
   // ANDY-PTY-EXIT-2049: + 1 (pty-exit-record-198).
-  assert.equal(files.length, 491, `the focused suite must retain its pre-fold file count, got ${files.length}`);
+  // BRANCH-RELATED-PINS-RUN: + 1 (related-tests-198).
+  assert.equal(files.length, 492, `the focused suite must retain its pre-fold file count, got ${files.length}`);
   assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
   assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');
   assert.ok(files.includes(path.join('start-fixes-163', 'start-fixes-163-boot-submit.test.cjs')), 'the start-fixes feature folder is included');
