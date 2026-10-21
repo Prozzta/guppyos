@@ -6,7 +6,9 @@
  *   tasks-all                 print every card ever made as one { "tasks": [...] } (hot wins)
  *   tasks-revive <CARD-ID>    move one archived card back to hot (through the app's ledger route)
  *   tasks-unsplit --yes       rollback: write hot + archive back into one tasks.json and set the
- *                             archive aside (tasks-archive.unsplit-<ts>). Run with Guppy closed,
+ *                             archive aside (tasks-archive.unsplit-<ts>). Refused while Guppy is
+ *                             live (it bypasses the app's merged write); a split build re-splits
+ *                             at its next start, so roll the build back first. Run with Guppy closed,
  *                             or just before starting an older build: a running new build splits
  *                             again on its next hourly pass.
  *
@@ -20,6 +22,8 @@ const { Readable } = require('stream');
 
 const EXIT = { ok: 0, refused: 1, usage: 2, unavailable: 3 };
 const ARCHIVE_DIR = 'tasks-archive';
+/** The app rewrites fleet.json every few seconds while it runs. */
+const LIVE_FLEET_MS = 60_000;
 const USAGE = 'usage: tasks-all | tasks-revive <CARD-ID> | tasks-unsplit --yes   [--root <hive>]\n';
 
 const idOf = (c) => (c && typeof c === 'object' && typeof c.id === 'string' && c.id ? c.id : null);
@@ -43,6 +47,17 @@ function readArchive(root) {
     }
   }
   return out;
+}
+
+/** Why the app looks live (unsplit must not race its writes), or null. An agent shell always
+ *  has HIVE_LEDGER_URL, and the running app keeps fleet.json fresh. */
+function appLive(root, env, now = Date.now()) {
+  if (env.HIVE_LEDGER_URL) return 'HIVE_LEDGER_URL is set (this shell belongs to a running Guppy)';
+  try {
+    const age = now - fs.statSync(path.join(root, 'fleet.json')).mtimeMs;
+    if (age < LIVE_FLEET_MS) return `fleet.json was written ${Math.max(0, Math.round(age / 1000))} s ago (Guppy is running)`;
+  } catch { /* no fleet.json: not live */ }
+  return null;
 }
 
 function readHot(root) {
@@ -93,6 +108,8 @@ async function main(argv, env, io = { out: (s) => process.stdout.write(s), err: 
 
   if (a.cmd === 'unsplit') {
     if (!a.yes) { io.err('tasks: unsplit rewrites tasks.json; run it with Guppy closed and pass --yes\n'); return EXIT.usage; }
+    const live = appLive(root, env);
+    if (live) { io.err(`tasks: unsplit refused: ${live}. Close Guppy, then run it from a plain shell.\n`); return EXIT.refused; }
     const archived = readArchive(root);
     const dir = path.join(root, ARCHIVE_DIR);
     if (!fs.existsSync(dir)) { io.out('nothing to unsplit (no tasks-archive/)\n'); return EXIT.ok; }
@@ -119,4 +136,4 @@ if (require.main === module) {
   main(process.argv.slice(2), process.env).then((code) => { process.exitCode = code; }, (e) => { process.stderr.write(`tasks: ${e && e.stack ? e.stack : e}\n`); process.exitCode = EXIT.unavailable; });
 }
 
-module.exports = { main, parseArgs, readArchive, EXIT };
+module.exports = { appLive, LIVE_FLEET_MS, main, parseArgs, readArchive, EXIT };

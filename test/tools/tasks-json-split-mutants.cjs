@@ -15,6 +15,8 @@ const TEST = 'test/tasks-json-split-198.test.cjs';
 const ARCH = 'src/main/taskArchive.ts';
 const HIVE = 'src/main/hive.ts';
 const INDEX = 'src/main/index.ts';
+const CLI = 'resources/tasks-cli.cjs';
+const LEDGER = 'src/shared/taskLedger.ts';
 const at = (title) => new RegExp(`not ok \\d+ - ${title.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}`);
 
 const MUTANTS = [
@@ -24,15 +26,15 @@ const MUTANTS = [
   ['A4 a done card with an open ask moves', ARCH, '    if (hasOpenAsk(card)) continue;\n', '', at('planArchive')],
   ['A5 a duplicate id moves', ARCH, 'if (!id || count.get(id) !== 1) continue;', 'if (!id) continue;', at('planArchive')],
   ['A6 hot is rewritten before the archive append', HIVE,
-    "    appendArchived(root, tasks.filter((t) => ids.has(t.id)), now);\n    this.writeTasks(tasks.filter((t) => !ids.has(t.id)), 'archive');\n",
-    "    this.writeTasks(tasks.filter((t) => !ids.has(t.id)), 'archive');\n    appendArchived(root, tasks.filter((t) => ids.has(t.id)), now);\n",
+    "    appendArchived(root, moving, now);\n",
+    "    this.writeTasks(tasks.filter((t) => !ids.has(t.id)), 'archive');\n    appendArchived(root, moving, now);\n",
     at('a failed archive append')],
   ['A7 the migration backup is skipped', HIVE, "      copyFileSync(join(root, 'tasks.json'), join(root, backup));\n", '', at('the archive pass:')],
   ['A8 addTask ignores the archive', HIVE, '    if (root && this.archived(root).has(task.id)) return false;\n', '', at('a patch of an archived card')],
   ['A9 an archived patch does not revive', HIVE, 'if (!root || !old) return false;', 'return false;', at('a patch of an archived card')],
   ['A10 the tombstone is written before hot', HIVE,
-    '      this.writeTasks([...tasks, { ...(old as unknown as HiveTask), ...patch, id }], source);\n      appendRevived(root, id, Date.now());\n',
-    '      appendRevived(root, id, Date.now());\n      this.writeTasks([...tasks, { ...(old as unknown as HiveTask), ...patch, id }], source);\n',
+    '      this.writeTasks([...tasks, { ...(old as unknown as HiveTask), revivedAt: new Date(now).toISOString(), ...patch, id }], source);\n      appendRevived(root, id, now);\n',
+    '      appendRevived(root, id, now);\n      this.writeTasks([...tasks, { ...(old as unknown as HiveTask), revivedAt: new Date(now).toISOString(), ...patch, id }], source);\n',
     at('a failed tombstone append')],
   ['A11 allTasks lets the archive copy win', ARCH,
     'const out: unknown[] = hot.slice();\n  for (const [id, card] of archived) if (!inHot.has(id)) out.push(card);\n',
@@ -40,9 +42,18 @@ const MUTANTS = [
     at('crash between')],
   ['A12 a tombstone is ignored on read', ARCH, "if (typeof r.revived === 'string') { out.delete(r.revived); continue; }", "if (typeof r.revived === 'string') continue;", at('a patch of an archived card')],
   ['A13 the ledger route reads hot only', INDEX, 'const t = hive.allTasks().tasks;', 'const t = (hive.tasks() as { tasks: unknown[] }).tasks;', at('readers that need')],
-  ['A14 statusSince of a non-done status counts', ARCH, "if (meta && meta.status === 'done' && typeof meta.statusSince", 'if (meta && typeof meta.statusSince', at('planArchive')],
+  ['A14 statusSince of a non-done status counts', ARCH, "if (at === null && meta && meta.status === 'done' && typeof meta.statusSince", 'if (at === null && meta && typeof meta.statusSince', at('planArchive')],
   ['A15 a torn archive line is fatal', ARCH, 'try { row = JSON.parse(line); } catch { continue; }', 'row = JSON.parse(line);', at('a torn last archive line')],
-  ['A16 the reader cache ignores a new archive file', HIVE, ' && this.archiveCache.stamp === stamp)', ')', at('a torn last archive line')]
+  ['A16 the reader cache ignores a new archive file', HIVE, ' && this.archiveCache.stamp === stamp)', ')', at('a torn last archive line')],
+  ['A17 a torn tail is not ended before an append', ARCH, "writeSync(fd, (torn ? '\\n' : '') + lines", 'writeSync(fd, lines', at('Jim MUST: a torn archive tail')],
+  ['A18 the pass drops cards that never read back', HIVE,
+    'const landed = new Set(moving.filter((t) => JSON.stringify(back.get(t.id)) === JSON.stringify(t)).map((t) => t.id));',
+    'const landed = new Set(moving.map((t) => t.id));',
+    at('Jim MUST: the pass drops from hot only')],
+  ['A19 doneTime ignores revivedAt', ARCH, 'return Number.isFinite(r) && r > at ? r : at;', 'return at;', at('a patch of an archived card')],
+  ['A20 a revive stamps no revivedAt', HIVE, 'revivedAt: new Date(now).toISOString(), ', '', at('a patch of an archived card')],
+  ['A21 unsplit runs while Guppy is live', CLI, '    if (live) {', '    if (false) {', at('tasks-all prints hot')],
+  ['A22 a dependency on an archived card warns', LEDGER, ' && !archivedIds?.has(dep)', '', at('Jim NIT:')]
 ];
 
 const run = () => spawnSync(process.execPath, ['--test', TEST], { cwd: ROOT, encoding: 'utf8', windowsHide: true, timeout: 300_000 });

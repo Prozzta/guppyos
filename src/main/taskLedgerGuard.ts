@@ -58,6 +58,8 @@ export interface TaskLedgerChange {
 export interface TaskLedgerGuardOptions {
   root: () => string | null;
   agentIds: () => ReadonlySet<string>;
+  /** TASKS-JSON-SPLIT: ids in tasks-archive/, so a dependency on an archived card is no warning. */
+  archivedIds?: () => ReadonlySet<string>;
   appendLog: (row: Record<string, unknown>) => void;
   now?: () => number;
   /** Called after every applied change (a file edit or an API write). */
@@ -236,7 +238,7 @@ export class TaskLedgerGuard {
   }
 
   private validate(tasks: unknown[], by: string): void {
-    this.currentIssues = validateLedger(tasks, this.opts.agentIds());
+    this.currentIssues = validateLedger(tasks, this.opts.agentIds(), this.opts.archivedIds?.());
     const errors = this.currentIssues.filter((i) => i.level === 'error');
     const keys = new Set(errors.map((e) => e.key));
     const fresh = errors.filter((e) => !this.errorKeys.has(e.key));

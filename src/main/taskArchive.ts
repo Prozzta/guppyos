@@ -16,7 +16,7 @@
  * then appends the tombstone. A card in both files is therefore never lost, and the hot copy
  * always wins (`mergeHotCold`).
  */
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, writeSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, statSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 
 export const ARCHIVE_DIR = 'tasks-archive';
@@ -42,12 +42,15 @@ export function hasOpenAsk(card: Card): boolean {
 /** When the card became done: its own doneAt, else the guard's statusSince while done. Not
  *  hive.ts cardDoneAt: that one wants a LOWER bound (closing asks) and falls back to the
  *  earliest result stamp; archiving wants the opposite, and statusSince (exact or bounded)
- *  is never earlier than the real done, so a card can only move late, never early. */
+ *  is never earlier than the real done, so a card can only move late, never early.
+ *  A revive (revivedAt) restarts the clock: a revived card stays hot for the keep window. */
 export function doneTime(card: Card, meta?: { status?: string; statusSince?: number }): number | null {
   const d = typeof card.doneAt === 'string' ? Date.parse(card.doneAt) : NaN;
-  if (Number.isFinite(d)) return d;
-  if (meta && meta.status === 'done' && typeof meta.statusSince === 'number' && Number.isFinite(meta.statusSince)) return meta.statusSince;
-  return null;
+  let at: number | null = Number.isFinite(d) ? d : null;
+  if (at === null && meta && meta.status === 'done' && typeof meta.statusSince === 'number' && Number.isFinite(meta.statusSince)) at = meta.statusSince;
+  if (at === null) return null;
+  const r = typeof card.revivedAt === 'string' ? Date.parse(card.revivedAt) : NaN;
+  return Number.isFinite(r) && r > at ? r : at;
 }
 
 /**
@@ -93,9 +96,14 @@ function appendLines(root: string, lines: readonly unknown[], now: number): void
   if (lines.length === 0) return;
   const dir = join(root, ARCHIVE_DIR);
   mkdirSync(dir, { recursive: true });
-  const fd = openSync(join(dir, monthFile(now)), 'a');
+  const fd = openSync(join(dir, monthFile(now)), 'a+');
   try {
-    writeSync(fd, lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+    // A torn tail (a crash, AV or a full disk mid-append) has no newline: end it first, or the
+    // first new line would be glued onto it and read back as one unparsable line (Jim MUST).
+    const size = fstatSync(fd).size;
+    const last = Buffer.alloc(1);
+    const torn = size > 0 && readSync(fd, last, 0, 1, size - 1) === 1 && last[0] !== 0x0a;
+    writeSync(fd, (torn ? '\n' : '') + lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
     fsyncSync(fd);
   } finally { closeSync(fd); }
 }

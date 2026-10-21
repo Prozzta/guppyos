@@ -219,6 +219,9 @@ export interface HiveTask {
   /** Free-text history god (and the harness's one auto-move, ZT-I3 §3.3) appends to.
    *  Typed for Jim C8; the raw patch path keeps every other untyped field. */
   notes?: string;
+  /** TASKS-JSON-SPLIT: when the card last came back from tasks-archive/; it restarts the
+   *  48 h keep window (taskArchive.doneTime). */
+  revivedAt?: string;
 }
 
 export interface AgentMeta {
@@ -784,6 +787,10 @@ export class HiveManager {
     root: () => this.root(),
     agentIds: () => {
       try { return new Set(Object.keys(this.registry().agents)); } catch { return new Set<string>(); }
+    },
+    archivedIds: () => {
+      const root = this.root();
+      try { return root ? new Set(this.archived(root).keys()) : new Set<string>(); } catch { return new Set<string>(); }
     },
     appendLog: (row) => this.appendLog(row)
   });
@@ -3875,8 +3882,10 @@ export class HiveManager {
       const root = this.root();
       const old = root ? this.archived(root).get(id) : undefined;
       if (!root || !old) return false;
-      this.writeTasks([...tasks, { ...(old as unknown as HiveTask), ...patch, id }], source);
-      appendRevived(root, id, Date.now());
+      // revivedAt restarts the keep window, so the next pass does not move it straight back.
+      const now = Date.now();
+      this.writeTasks([...tasks, { ...(old as unknown as HiveTask), revivedAt: new Date(now).toISOString(), ...patch, id }], source);
+      appendRevived(root, id, now);
       this.archiveCache = null;
       return true;
     }
@@ -3938,11 +3947,16 @@ export class HiveManager {
       copyFileSync(join(root, 'tasks.json'), join(root, backup));
       this.appendLog({ kind: 'task-archive-migrate', backup, cards: tasks.length });
     }
-    appendArchived(root, tasks.filter((t) => ids.has(t.id)), now);
-    this.writeTasks(tasks.filter((t) => !ids.has(t.id)), 'archive');
+    const moving = tasks.filter((t) => ids.has(t.id));
+    appendArchived(root, moving, now);
     this.archiveCache = null;
-    this.appendLog({ kind: 'task-archive', moved: ids.size });
-    return [...ids];
+    // Only a card that reads back from the archive exactly as it was leaves hot: an append
+    // that did not land whole (torn, partial, unreadable) keeps the card hot (Jim MUST).
+    const back = readArchive(root);
+    const landed = new Set(moving.filter((t) => JSON.stringify(back.get(t.id)) === JSON.stringify(t)).map((t) => t.id));
+    if (landed.size > 0) this.writeTasks(tasks.filter((t) => !landed.has(t.id)), 'archive');
+    this.appendLog({ kind: 'task-archive', moved: landed.size, ...(landed.size < ids.size ? { kept: [...ids].filter((id) => !landed.has(id)) } : {}) });
+    return [...landed];
   }
 
   /** The archived cards, cached by the archive's file stamp (it changes about once an hour). */

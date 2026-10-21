@@ -12,6 +12,10 @@
  *   A9 an archived patch does not revive          A10 the tombstone is written before hot
  *   A11 allTasks lets the archive copy win        A12 a tombstone is ignored on read
  *   A13 the ledger route reads hot only           A14 statusSince of a non-done status counts
+ *   A15 a torn archive line is fatal              A16 the reader cache ignores a new archive file
+ *   A17 a torn tail is not ended before an append A18 the pass drops cards that never read back
+ *   A19 doneTime ignores revivedAt                A20 a revive stamps no revivedAt
+ *   A21 unsplit runs while Guppy is live          A22 a dependency on an archived card warns
  */
 
 const test = require('node:test');
@@ -122,9 +126,53 @@ test('a patch of an archived card revives it (hot first, then the tombstone); ad
   assert.equal(A.readArchive(r.root).has('OLD1'), false);
   assert.equal(r.hive.allTasks().tasks.filter((c) => c.id === 'OLD1').length, 1);
   assert.equal(r.hive.patchTask('NEVER', { notes: 'x' }), false, 'an unknown id is still refused');
-  // done long ago: the next pass moves it back, carrying the note
-  assert.deepEqual(r.hive.archivePass(NOW), ['OLD1']);
+  // Jim SHOULD 1: revivedAt restarts the 48 h window; the next pass leaves it hot ...
+  const revivedAt = Date.parse(revived.revivedAt);
+  assert.ok(Math.abs(revivedAt - Date.now()) < 60_000, 'revivedAt is stamped at the revive');
+  assert.deepEqual(r.hive.archivePass(revivedAt + H), []);
+  assert.deepEqual(r.hive.archivePass(revivedAt + 47 * H), []);
+  // ... and after the window it moves back, carrying the note
+  assert.deepEqual(r.hive.archivePass(revivedAt + 49 * H), ['OLD1']);
   assert.equal(A.readArchive(r.root).get('OLD1').notes, 'a late note');
+});
+
+test('Jim MUST: a torn archive tail does not swallow the next append (exact fixture)', (t) => {
+  const r = rig(t, [card('LIVE')]);
+  A.appendArchived(r.root, [old('A-1')], NOW);
+  fs.appendFileSync(path.join(r.root, 'tasks-archive', '2026-10.jsonl'), '{"v":1,"at":"x","card":{"id":"TORN-1"');
+  A.appendArchived(r.root, [old('B-2'), old('C-3')], NOW);
+  assert.deepEqual([...A.readArchive(r.root).keys()], ['A-1', 'B-2', 'C-3']);
+});
+
+test('Jim MUST: the pass drops from hot only cards that read back from the archive whole', (t) => {
+  const r = rig(t, [old('W1'), old('W2'), card('LIVE')]);
+  const realWrite = fs.writeSync;
+  let cut = true;
+  fs.writeSync = function (fd, data, ...rest) {
+    // one short append: the archive gets W1's line and half of W2's (a crash or a full disk)
+    if (cut && typeof data === 'string' && data.includes('"W2"')) { cut = false; data = data.slice(0, data.indexOf('"W2"') + 10); }
+    return realWrite.call(this, fd, data, ...rest);
+  };
+  let moved;
+  try { moved = r.hive.archivePass(NOW); } finally { fs.writeSync = realWrite; }
+  assert.deepEqual(moved, ['W1']);
+  assert.deepEqual(r.ids(r.hot()), ['LIVE', 'W2'], 'W2 stays hot: its line never landed whole');
+  assert.deepEqual(r.ids(r.hive.allTasks().tasks), ['LIVE', 'W1', 'W2']);
+  // the next pass ends the torn line first, then moves W2
+  assert.deepEqual(r.hive.archivePass(NOW), ['W2']);
+  assert.deepEqual(r.ids(r.hive.allTasks().tasks), ['LIVE', 'W1', 'W2']);
+  assert.deepEqual(r.ids(r.hot()), ['LIVE']);
+});
+
+test('Jim NIT: a live card that depends on an archived card is no dep warning', (t) => {
+  const r = rig(t, [old('D1'), card('LIVE')]);
+  r.hive.archivePass(NOW);
+  const hot = r.hot();
+  hot.find((c) => c.id === 'LIVE').dependsOn = ['D1', 'GONE'];
+  fs.writeFileSync(r.hotPath, JSON.stringify({ tasks: hot }, null, 2));
+  r.hive.ledgerGuard.check();
+  const deps = r.hive.ledgerGuard.issues().filter((i) => i.key.startsWith('dep:')).map((i) => i.key);
+  assert.deepEqual(deps, ['dep:LIVE:GONE']);
 });
 
 test('a failed archive append leaves hot untouched (A6: append first, then rewrite hot)', (t) => {
@@ -196,6 +244,16 @@ test('tasks-all prints hot + archive; tasks-unsplit --yes restores one tasks.jso
   assert.deepEqual(JSON.parse(out).tasks, r.hive.allTasks().tasks);
   out = '';
   assert.equal(await cli.main(['unsplit', '--root', r.root], {}, io), 2, 'refused without --yes');
+  // Jim SHOULD 2: never while Guppy is live (an agent shell, or a fresh fleet.json)
+  assert.equal(await cli.main(['unsplit', '--yes', '--root', r.root], { HIVE_LEDGER_URL: 'http://127.0.0.1:1/x' }, io), 1);
+  assert.match(out, /unsplit refused: HIVE_LEDGER_URL/);
+  const fleet = path.join(r.root, 'fleet.json');
+  fs.writeFileSync(fleet, '{}');
+  assert.equal(await cli.main(['unsplit', '--yes', '--root', r.root], {}, io), 1);
+  assert.match(out, /unsplit refused: fleet\.json was written/);
+  const stale = (Date.now() - 2 * cli.LIVE_FLEET_MS) / 1000;
+  fs.utimesSync(fleet, stale, stale);
+  assert.ok(fs.existsSync(path.join(r.root, 'tasks-archive')), 'nothing changed while refused');
   assert.equal(await cli.main(['unsplit', '--yes', '--root', r.root], {}, io), 0, out);
   const back = r.hot();
   const byId = (list) => Object.fromEntries(list.map((c) => [c.id, c]));
