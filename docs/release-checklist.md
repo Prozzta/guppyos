@@ -16,6 +16,9 @@ A release has one path: the verified local cut. The Release workflow
      tag's workflows from the tagged commit, so a release branch made before this fix still
      carries the publishing workflow.
 5. **Cut** in a fresh worktree at the tag's commit, with a scrubbed env and `npm ci`:
+   - Provision the model from the verified cache, never from an older cut tree (step 8 prunes those):
+     `MUNDER_MODEL_CACHE=<root>/release-cache/models/all-MiniLM-L6-v2 node scripts/fetch-memory-model.cjs`.
+     `npm run cut:prune` prints the cache path, and `-- --seed-cache` fills it.
    - `node scripts/release-markers.cjs` on the source tree and again on the build. It must print
      `ALL 12 MARKERS OK`.
    - The packaged CHANGELOG and no-seams checks, and the code markers for the release's
@@ -35,3 +38,10 @@ A release has one path: the verified local cut. The Release workflow
    - Do this after every workflow the tag push started has finished. In 1.1.91, a
      tag-triggered run replaced the verified installer with its own build, which had no
      embedding model.
+8. **Prune the old cut trees** (each is about 2.7 GB): `npm run cut:prune -- --root <root> --repo <the
+   cuts' clone> --repo <the main repo> --hive <hive>` is a dry run; read it, then add `--apply`. It keeps the
+   current and previous releases' trees, anything newer or changed in 24 h, and every tree whose
+   dist is not byte-equal to its published release.
+   It refuses while a cut holds the heavy lock or runs, with no hive known, or while the model
+   cache is unverified. It keeps the target of every link under `<root>` (an audit tree's
+   `node_modules` junction into a cut tree's), and never removes through a `node_modules` junction.

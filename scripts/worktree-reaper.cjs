@@ -172,13 +172,16 @@ function walk(p) {
   return { newestMs, links, nestedGit };
 }
 
-function collectFacts({ root, repos, now = Date.now(), shipped: named = null, exes = runningExes() }) {
+/** `only(name, path)`, when given, limits the entries to the folders it accepts (release-worktrees.cjs:
+ *  the cut trees only), so nothing else under `root` is walked or judged. */
+function collectFacts({ root, repos, now = Date.now(), shipped: named = null, exes = runningExes(), only = null }) {
   const repoSet = repos.map((r) => path.resolve(r).toLowerCase());
   const shipped = named ? [...named].sort((a, b) => b - a) : shippedVersions(repos.length ? shippedTags(repos[0]) : []);
   const latestTag = shipped.length ? `v1.1.${shipped[0]}` : null;
   const entries = [];
   for (const name of fs.readdirSync(root)) {
     const p = path.join(root, name);
+    if (only && !only(name, p)) continue;
     const st = fs.lstatSync(p);
     if (st.isSymbolicLink()) {   // its target is protected like any kept entry's link target
       let target = null; try { target = path.resolve(root, fs.readlinkSync(p)); } catch { /* unreadable */ }

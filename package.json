@@ -28,6 +28,7 @@
     "dist:win:raw": "npm run build && electron-builder --win",
     "dist:win": "node scripts/cut-cmd-natives.cjs --dist-only",
     "cut:win": "node scripts/cut-cmd-natives.cjs",
+    "cut:prune": "node scripts/release-worktrees.cjs",
     "dist:linux": "npm run build && electron-builder --linux"
   },
   "dependencies": {

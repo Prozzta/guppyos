@@ -381,8 +381,8 @@ test('PIN: against the REAL test directory discovery is root tests plus only fol
   // HIVE-DWIGHT-BG-REINVOKE: + 2 (owed-continuation-198, owed-continuation-rig-198).
   // 1.1.98 stage 10: + 1 (cut-cmd-natives-198), + 1 (fleet-codex-activity), with REINVOKE above.
   // 1.1.98 stage 11: + 1 (hook-type-guard-198).
-  // 1.1.98 stage 12: + 1 (electron-view-self-heal-198), + 1 (tasks-json-split-198).
-  assert.equal(files.length, 489, `the focused suite must retain its pre-fold file count, got ${files.length}`);
+  // 1.1.98 stage 12: + 1 (electron-view-self-heal-198), + 1 (tasks-json-split-198), + 1 (release-worktrees-198).
+  assert.equal(files.length, 490, `the focused suite must retain its pre-fold file count, got ${files.length}`);
   assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
   assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');
   assert.ok(files.includes(path.join('start-fixes-163', 'start-fixes-163-boot-submit.test.cjs')), 'the start-fixes feature folder is included');
