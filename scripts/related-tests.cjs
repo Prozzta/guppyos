@@ -11,11 +11,15 @@
  *   node scripts/related-tests.cjs --base <sha> --tip <sha> [--repo <dir>] [--run] [--json]
  *
  * Changed set: `git diff --name-only --diff-filter=d base..tip` (deleted files have nothing to pin).
+ * --base must be an ancestor of --tip (else the base side's own changes would count as changed).
  * A suite test file (run-tests' discoverTestFiles) or a test/tools/*.cjs runner is RELATED when:
  *   - the branch changed it itself, or
  *   - it names a changed file by its repo path: 'src/main/x.ts', '../src/main/x' (a require without
  *     the extension), path segments 'src', 'main', 'x.ts', or, for a changed file under test/, its
  *     './x' form. The PATH is matched, never the basename: 'index.ts' alone would match half the tree.
+ *   - it names the changed file's directory (two segments or more: src/main, not src) AND either
+ *     quotes the file's basename ('x.ts' or 'x', a dir + name list) or walks a directory
+ *     (readdirSync, walk*()): the floor-wide bans over src/main must see a brand-new module there.
  *   - package.json: only when the test names package.json AND a top-level key the diff changed
  *     ('scripts' counts only through a changed script's name). The bare name matched 20+ files.
  * Lanes:
@@ -23,11 +27,15 @@
  *   HEAVY    the file carries `// @heavy-lock`: it runs under the heavy slot;
  *   ELECTRON the file uses the electron harness (runScenario): a second Electron needs god's OK, so
  *            --run never starts it;
- *   CENSUS   test/tools/*.cjs runners naming a changed path (mutant censuses): always heavy.
+ *   CENSUS   test/tools/*-mutants.cjs naming a changed path (mutant censuses): always heavy;
+ *   TOOLS    any other test/tools/*.cjs naming one (probes, helpers): listed, never run.
  * --run runs the LIGHT lane in --repo (tip checked out, node_modules installed), HIVE_LEDGER_URL,
  * HIVE_ROOT and AGENT_ID stripped. Every red file is run again at --base (a detached temp worktree,
- * the tip's node_modules on NODE_PATH): "same on base" is the environment, "BRANCH RED" is the
- * branch, "new" means the file does not exist at base. Exit 1 when a file is BRANCH RED or new and red.
+ * the tip's node_modules on NODE_PATH). "same on base" only when every test failing at the tip also
+ * fails at base, by NAME (counts can match while different tests fail); a file that failed before
+ * any test ran compares its first error line instead. Otherwise "BRANCH RED" (base green) or
+ * "base differs", both counted as branch. "new" means the file does not exist at base. Exit 1 when
+ * any red is not same on base.
  */
 const fs = require('fs');
 const os = require('os');
@@ -57,9 +65,26 @@ function pathPatterns(p) {
   return out;
 }
 
+const WALKS = /\breaddirSync\s*\(|\bwalk\w*\s*\(/;
+
+/** `text` names p's directory and quotes p's basename, or names p's directory or an ancestor of it
+ *  (a walk recurses) and walks a dir. Directories of two segments or more only. */
+function namesViaDir(text, p) {
+  const dir = path.posix.dirname(p);
+  const base = path.posix.basename(p);
+  const q = `['"\`]`;
+  const walks = WALKS.test(text);
+  for (let d = dir; d.split('/').length >= 2; d = path.posix.dirname(d)) {
+    if (!pathPatterns(d).some((re) => re.test(text))) continue;
+    if (walks) return true;
+    if (d === dir && new RegExp(`${q}${esc(noExt(base))}(${esc(base.slice(noExt(base).length))})?${q}`).test(text)) return true;
+  }
+  return false;
+}
+
 /** The changed paths `text` names (package.json handled by packageNamed). */
 function namedPaths(text, changed) {
-  return changed.filter((p) => p !== 'package.json' && pathPatterns(p).some((re) => re.test(text)));
+  return changed.filter((p) => p !== 'package.json' && (pathPatterns(p).some((re) => re.test(text)) || namesViaDir(text, p)));
 }
 
 /** Top-level package.json keys whose value differs, and for 'scripts' the script names. */
@@ -84,7 +109,7 @@ function packageNamed(text, diff) {
 }
 
 function laneOf(file, text) {
-  if (!file.endsWith(TEST_SUFFIX)) return 'census';
+  if (!file.endsWith(TEST_SUFFIX)) return /-mutants\.cjs$/.test(file) ? 'census' : 'tools';
   // A require of the harness, not a mention: icon-speck and ps-modcache-leak only read its files.
   if (/require\(\s*['"`][^'"`]*electron-harness/.test(text)) return 'electron';
   if (/^\s*\/\/\s*@heavy-lock\b/m.test(text)) return 'heavy';
@@ -101,9 +126,9 @@ function candidateFiles(repo) {
   return [...suite, ...tools].map((f) => `test/${f.split(path.sep).join('/')}`);
 }
 
-/** { changed, lanes: {light, heavy, electron, census}, why } for files read by `read`. */
+/** { changed, lanes: {light, heavy, electron, census, tools}, why } for files read by `read`. */
 function relatedSet({ changed, files, read, pkg }) {
-  const lanes = { light: [], heavy: [], electron: [], census: [] };
+  const lanes = { light: [], heavy: [], electron: [], census: [], tools: [] };
   const why = {};
   for (const f of files) {
     const text = read(f);
@@ -119,7 +144,7 @@ function relatedSet({ changed, files, read, pkg }) {
 
 function summary(set, base, tip) {
   const l = set.lanes;
-  return `related: ${l.light.length} light, ${l.heavy.length} heavy, ${l.electron.length} electron, ${l.census.length} census for ${set.changed.length} changed files (${base.slice(0, 8)}..${tip.slice(0, 8)})`;
+  return `related: ${l.light.length} light, ${l.heavy.length} heavy, ${l.electron.length} electron, ${l.census.length} census, ${l.tools.length} tools for ${set.changed.length} changed files (${base.slice(0, 8)}..${tip.slice(0, 8)})`;
 }
 
 /** pass/fail counts from node --test output; null when it printed none. */
@@ -135,8 +160,30 @@ function runFile(cwd, file, extraEnv = {}) {
   // instead of printing totals and exiting with its own rc.
   delete env.NODE_TEST_CONTEXT;
   const r = spawnSync(process.execPath, ['--test', file], { cwd, env, encoding: 'utf8', timeout: FILE_TIMEOUT_MS, windowsHide: true, maxBuffer: 64 << 20 });
-  const counts = parseCounts(`${r.stdout || ''}\n${r.stderr || ''}`);
-  return { rc: r.status === null ? 'timeout' : r.status, ...(counts || { pass: 0, fail: 0 }) };
+  const out = `${r.stdout || ''}\n${r.stderr || ''}`;
+  const counts = parseCounts(out);
+  return { rc: r.status === null ? 'timeout' : r.status, ...(counts || { pass: 0, fail: 0 }), ...parseFailures(out, file) };
+}
+
+/** Absolute paths differ between the tip and the base worktree; compare without them. */
+const unpath = (s) => s.replace(/[A-Za-z]:(\\\\|\\|\/)[^\s'"`)]*/g, '<path>').trim();
+
+/** The names of the failing tests ('not ok N - name', any depth; the file-level row itself
+ *  excluded) and the first error line, for comparing a red at tip with the same file at base. */
+function parseFailures(out, file) {
+  const own = path.basename(file);
+  const failed = [...new Set([...out.matchAll(/^\s*not ok \d+ - (.+?)\s*(#.*)?$/gm)].filter((m) => !/#\s*TODO/i.test(m[2] || '')).map((m) => m[1])
+    .filter((n) => !n.endsWith(own)).map(unpath))];
+  const err = /^.*\b(\w*Error|Cannot find module|failed)\b.*$/m.exec(out);
+  return { failed, firstError: err ? unpath(err[0]) : '' };
+}
+
+/** A tip red is the environment only when every test failing at tip fails at base too. */
+function sameOnBase(tip, base) {
+  if (base.rc === 0) return false;
+  const tf = tip.failed || [], bf = base.failed || [];
+  if (tf.length === 0 && bf.length === 0) return (tip.firstError || '') === (base.firstError || '');
+  return tf.length > 0 && tf.every((n) => bf.includes(n));
 }
 
 const git = (repo, args) => {
@@ -163,7 +210,7 @@ function runLight({ repo, base, light, run = runFile, log = () => {} }) {
           // The tip's node_modules first, then the caller's NODE_PATH (an audit tree with none of its own).
           const nodePath = [path.join(repo, 'node_modules'), process.env.NODE_PATH].filter(Boolean).join(path.delimiter);
           const b = run(baseTree, f, { NODE_PATH: nodePath });
-          row.base = b.rc === r.rc && b.fail === r.fail ? 'same on base' : b.rc === 0 ? 'BRANCH RED' : `base rc ${b.rc} fail ${b.fail}`;
+          row.base = sameOnBase(r, b) ? 'same on base' : b.rc === 0 ? 'BRANCH RED' : `base differs: rc ${b.rc} fail ${b.fail}`;
         }
       }
       rows.push(row);
@@ -197,6 +244,8 @@ function parseArgs(argv) {
 function main(argv) {
   const o = parseArgs(argv);
   const repo = path.resolve(o.repo);
+  const anc = spawnSync('git', ['-C', repo, 'merge-base', '--is-ancestor', o.base, o.tip], { windowsHide: true });
+  if (anc.status !== 0) throw new Error(`--base ${o.base} is not an ancestor of --tip ${o.tip}: pass the branch's base (git merge-base ${o.base} ${o.tip})`);
   const changed = git(repo, ['diff', '--name-only', '--diff-filter=d', `${o.base}..${o.tip}`]).split('\n').map((s) => s.trim()).filter(Boolean);
   const show = (rev) => { try { return git(repo, ['show', `${rev}:package.json`]); } catch { return ''; } };
   const pkg = changed.includes('package.json') ? packageDiff(show(o.base), show(o.tip)) : null;
@@ -207,7 +256,7 @@ function main(argv) {
   if (o.run) Object.assign(result, runLight({ repo, base: o.base, light: set.lanes.light, log: o.json ? () => {} : (s) => console.log(s) }));
   if (o.json) console.log(JSON.stringify(result, null, 2));
   else {
-    for (const lane of ['light', 'heavy', 'electron', 'census']) {
+    for (const lane of ['light', 'heavy', 'electron', 'census', 'tools']) {
       if (set.lanes[lane].length) console.log(`${lane.toUpperCase()}: ${set.lanes[lane].join(' ')}`);
     }
     console.log(line);
@@ -216,7 +265,7 @@ function main(argv) {
   return o.run ? result.rc : 0;
 }
 
-module.exports = { pathPatterns, namedPaths, packageDiff, packageNamed, laneOf, candidateFiles, relatedSet, summary, parseCounts, runFile, runLight };
+module.exports = { pathPatterns, namesViaDir, namedPaths, parseFailures, sameOnBase, packageDiff, packageNamed, laneOf, candidateFiles, relatedSet, summary, parseCounts, runFile, runLight, main };
 
 if (require.main === module) {
   try { process.exitCode = main(process.argv.slice(2)); } catch (e) { console.error(String(e.message || e)); process.exitCode = 2; }
