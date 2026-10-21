@@ -14,8 +14,8 @@
  *   N2. control strip: a control call that THROWS shows a wrapped error that stays until its
  *       dismiss is clicked; a confirmation is still one line that clears itself. Composer: a
  *       Free Flow error wraps and has a dismiss.
- *   N3. at the splitter minimum (320 px) with a 2-deep queue, every control in the composer's
- *       fixed header row lies inside the row (nothing clipped on the right).
+ *   N3. at the splitter minimum (320 px) with a 2-deep queue and a long display name, the status
+ *       clips inside the row and every control ("clear all" included) lies inside the row.
  */
 import { renderCounts, resetRenderCounts } from './render-counter';
 import { createRoot } from 'react-dom/client';
@@ -34,6 +34,7 @@ declare global {
 (globalThis as unknown as { __APP_VERSION__: string }).__APP_VERSION__ = '0.0.0-harness';
 const config = { onboardingComplete: true, harnessHome: 'C:/harness-test-home', recentHomes: [] };
 const LONG_ERROR = 'the control socket for this agent closed before the request was acknowledged (ECONNRESET after 3 retries over 12 s); the agent is still running and can be stopped from its terminal';
+const LONG_NAME = 'Agent With A Display Name Long Enough To Overflow The Composer Row';
 let haltMode: 'ok' | 'throw' = 'ok';
 (window as unknown as { cth: unknown }).cth = new Proxy({}, {
   get: (_t, name: string) => {
@@ -170,13 +171,19 @@ window.__harnessRun = async () => {
     await settle(100);
     const ffAfterDismiss = !!q('[data-ff-hint]');
 
-    // N3: the splitter minimum with a 2-deep queue (count chip + status + "clear all").
+    // N3: the splitter minimum with a 2-deep queue (count chip + status + "clear all"), and a
+    // display name long enough that the status ("sending to <name> ...") runs past the row: the
+    // status must clip (ellipsis), never push "clear all" out of the row.
+    await act(async () => { useStore.getState().updateAgent('a1', { name: LONG_NAME }); });
     await act(async () => { useStore.getState().setSidebarWidth(320); });
     await act(async () => { useStore.getState().enqueueMessage('a1', 'first queued message'); useStore.getState().enqueueMessage('a1', 'second queued message'); });
     await settle(500);
     const row = q<HTMLElement>('[data-fixed-row]');
     const rowRect = row ? rect(row) : null;
-    const rowChildren = row ? Array.from(row.children).map((el) => ({ tag: el.tagName, text: (el.textContent ?? '').slice(0, 40), ...rect(el) })) : [];
+    const rowChildren = row ? Array.from(row.children).map((el) => ({
+      tag: el.tagName, text: (el.textContent ?? '').slice(0, 40), isStatus: (el.textContent ?? '').includes(LONG_NAME),
+      scrollWidth: el.scrollWidth, clientWidth: el.clientWidth, overflowX: getComputedStyle(el).overflowX, textOverflow: getComputedStyle(el).textOverflow, ...rect(el)
+    })) : [];
     const sidebarWidth = useStore.getState().sidebarWidth;
 
     await act(async () => { root.unmount(); });

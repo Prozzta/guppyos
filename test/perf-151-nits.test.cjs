@@ -11,8 +11,9 @@
  *   N2        control strip: a thrown control shows a wrapped, dismissable error that does not
  *             self-clear; a confirmation still clears itself. Composer: a Free Flow error wraps
  *             and dismisses.
- *   N3        at the 320 px splitter minimum with a 2-deep queue, every control in the composer's
- *             fixed header row lies within the row.
+ *   N3        at the 320 px splitter minimum with a 2-deep queue and a long display name, the
+ *             status clips (scrollWidth > clientWidth) and every control, "clear all" included,
+ *             lies within the row.
  *   STATIC    selectors in store.ts; no whole-array subscription in the three files;
  *             TerminalView.tsx absent; recorder exports clearError; the strip keeps 'ok' flashes
  *             on a timer only and carries the dismiss button.
@@ -91,18 +92,29 @@ test('N2 (composer): a Free Flow error wraps and dismisses', async () => {
   assert.equal(n.ffAfterDismiss, false, 'dismiss clears the recorder error and the hint');
 });
 
-test('N3: at the 320 px splitter minimum every control of the fixed header row lies inside the row', async () => {
+test('N3: at the 320 px splitter minimum a long status clips inside the row and "clear all" stays inside it', async () => {
   const r = await result();
   assert.equal(r.ok, true, r.error);
   const n = r.n3;
   assert.equal(n.sidebarWidth, 320);
   assert.ok(n.rowRect && n.rowRect.width > 0, 'the composer fixed row is mounted');
   assert.ok(n.rowChildren.length >= 4, `expected the label, the count, the status and "clear all" (got ${JSON.stringify(n.rowChildren)})`);
-  assert.ok(n.rowChildren.some((c) => /clear all/.test(c.text)), 'the 2-deep queue shows "clear all"');
+  const status = n.rowChildren.find((c) => c.isStatus);
+  const clearAll = n.rowChildren.find((c) => /clear all/.test(c.text));
+  assert.ok(status, `the status names the agent (got ${JSON.stringify(n.rowChildren)})`);
+  assert.ok(clearAll, 'the 2-deep queue shows "clear all"');
+  // The long name makes the status wider than the space it gets: it must be the element that
+  // gives (clipped with an ellipsis), which is what minWidth: 0 on it and on the row buys.
+  assert.ok(status.scrollWidth > status.clientWidth, `the status must be clipped, not laid out at full width (scrollWidth ${status.scrollWidth}, clientWidth ${status.clientWidth}; ${JSON.stringify(n)})`);
+  // A shrunk box with visible overflow would paint the name over "clear all": the clipping must
+  // be real (overflow hidden, ellipsis), not just a narrow box.
+  assert.equal(status.overflowX, 'hidden', `the status must clip its overflow (${JSON.stringify(status)})`);
+  assert.equal(status.textOverflow, 'ellipsis', `the clipped status must show an ellipsis (${JSON.stringify(status)})`);
   for (const c of n.rowChildren) {
     assert.ok(c.width > 0, `${c.tag} "${c.text}" collapsed to zero width (${JSON.stringify(n)})`);
     assert.ok(c.left >= n.rowRect.left - 0.5 && c.right <= n.rowRect.right + 0.5, `${c.tag} "${c.text}" spills past the row (${JSON.stringify(c)} vs ${JSON.stringify(n.rowRect)})`);
   }
+  assert.ok(clearAll.right <= n.rowRect.right + 0.5 && clearAll.width > 0, '"clear all" stays inside the row');
 });
 
 test('STATIC: the selectors live in store.ts and the three components no longer subscribe to the whole array', () => {
