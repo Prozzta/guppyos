@@ -1072,6 +1072,24 @@ export function selectRosterPtyKey(s: State): string {
   return s.agents.map(a => a.id + ':' + (a.ptyId ?? '')).join('|');
 }
 
+/** PERF-151-NITS: the roster's ids in order, for a list that renders one subscribed entry per
+ *  agent (AgentStrip). A status/action/progress/context tick on any agent leaves it unchanged. */
+export function selectAgentIdKey(s: State): string {
+  return s.agents.map(a => a.id).join('|');
+}
+
+/** PERF-151-NITS: ids and display names, for a component that only turns an id into a name
+ *  (CapacityDetailPanel, TaskDetailOverlay). Read the name with `agentNameOf` at render time. */
+export function selectAgentNameKey(s: State): string {
+  return s.agents.map(a => a.id + ':' + a.name).join('|');
+}
+
+/** The current display name of a roster agent, for a component subscribed to
+ *  `selectAgentNameKey` (which re-renders it whenever an answer here would change). */
+export function agentNameOf(id: string): string | undefined {
+  return useStore.getState().agents.find(a => a.id === id)?.name;
+}
+
 /** Whether the Command Center's Trigger History tab has anything to be about
  *  yet: an organisation key is set, or at least one webhook exists. Derived from
  *  the two mirrors rather than stored beside them, so it cannot fall out of step

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, memo } from 'react';
-import { useStore } from '@/store/store';
+import { useStore, selectAgentNameKey, agentNameOf } from '@/store/store';
 import { TaskDetail, parseTasks, type HiveTask } from './TasksKanban';
 
 /**
@@ -18,7 +18,9 @@ export const TaskDetailOverlay = memo(function TaskDetailOverlay() {
   const closeTaskDetail = useStore((s) => s.closeTaskDetail);
   // CARDS-TAB-190: opened from CARDS (read-only), the detail gets no move or assign.
   const readOnly = useStore((s) => s.taskDetailReadOnly);
-  const agents = useStore((s) => s.agents);
+  // PERF-151-NITS: only names are read here, and only while a detail is open; a status/progress
+  // tick on any agent (or anything at all while closed) no longer re-renders the overlay.
+  useStore((s) => (taskDetailId ? selectAgentNameKey(s) : ''));
   const restorable = useStore((s) => s.restorableAgents);
   const [tasks, setTasks] = useState<HiveTask[]>([]);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -48,7 +50,7 @@ export const TaskDetailOverlay = memo(function TaskDetailOverlay() {
   if (!task) return null;
 
   const nameFor = (id?: string): string | undefined =>
-    id ? (agents.find((a) => a.id === id)?.name ?? restorable.find((a) => a.id === id)?.name ?? id) : undefined;
+    id ? (agentNameOf(id) ?? restorable.find((a) => a.id === id)?.name ?? id) : undefined;
 
   // Moving a card writes ONE field. Operate on the RAW ledger (the same pattern
   // as TasksKanban.dismissTask), never on the display-parsed state: parseTasks

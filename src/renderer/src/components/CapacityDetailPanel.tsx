@@ -27,7 +27,7 @@ import { CapacityDetailBody } from './CapacityDetailBody';
 import { useCapacityStrip } from '../capacity/useCapacityStrip';
 import { selectPool } from '../capacity/capacityStrip';
 import { closeCapacityDetail, useOpenCapacityDetail } from '../capacity/detailSelection';
-import { useStore } from '@/store/store';
+import { useStore, selectAgentNameKey, agentNameOf } from '@/store/store';
 
 /** The connected overlay. Renders nothing while closed. */
 // APP-SHALLOW-SELECTOR: memo so an App render (roster change) does not re-render this
@@ -35,7 +35,9 @@ import { useStore } from '@/store/store';
 export const CapacityDetailPanel = memo(function CapacityDetailPanel() {
   const poolId = useOpenCapacityDetail();
   const collection = useCapacityStrip();
-  const agents = useStore((s) => s.agents);
+  // PERF-151-NITS: only names are read here, and only while open; a status/progress tick on
+  // any agent (or anything at all while closed) no longer re-renders the panel.
+  useStore((s) => (poolId === null ? '' : selectAgentNameKey(s)));
   const [view, setView] = useState<ProviderCapacityDetailView | null>(null);
   const revision = collection?.collectionRevision ?? null;
   // A pool that left the collection cannot keep a panel open (crit 17).
@@ -60,7 +62,7 @@ export const CapacityDetailPanel = memo(function CapacityDetailPanel() {
   }, [poolId]);
 
   if (poolId === null || gone) return null;
-  const nameOf = (id: string): string => agents.find((a) => a.id === id)?.name ?? id;
+  const nameOf = (id: string): string => agentNameOf(id) ?? id;
   return (
     <div data-cap-detail-panel="" style={{ position: 'absolute', top: 12, right: 12, width: 340, zIndex: 45 }}>
       <PixelPanel variant="dialog" title={view ? `${view.poolLabel.toUpperCase()} · PROVIDER DETAILS` : 'PROVIDER DETAILS'} noPadding>

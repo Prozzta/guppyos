@@ -40,7 +40,10 @@ interface Snapshot {
 export function AgentControlStrip({ agentId }: { agentId: string }) {
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [steer, setSteer] = useState('');
-  const [note, setNote] = useState('');
+  // PERF-151-NITS (Jim N2): a confirmation is one ellipsised line for 1.8 s; an error (main
+  // threw on the control call) wraps in full and stays until dismissed, since an ellipsised
+  // error floating over the terminal could not be read and vanished before it could be.
+  const [note, setNote] = useState<{ text: string; kind: 'ok' | 'error' } | null>(null);
   const noteTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -49,29 +52,38 @@ export function AgentControlStrip({ agentId }: { agentId: string }) {
     return () => { alive = false; };
   }, [agentId]);
 
-  const flash = (m: string) => {
-    setNote(m);
+  const flash = (text: string, kind: 'ok' | 'error' = 'ok') => {
+    setNote({ text, kind });
     if (noteTimer.current) clearTimeout(noteTimer.current);
-    noteTimer.current = setTimeout(() => setNote(''), 1800);
+    noteTimer.current = kind === 'ok' ? setTimeout(() => setNote(null), 1800) : null;
   };
+  const failed = (what: string, e: unknown) =>
+    flash(`${what} failed: ${e instanceof Error ? e.message : String(e)}`, 'error');
 
   const togglePause = async () => {
-    const s = snap?.paused ? await window.cth.controlResume(agentId) : await window.cth.controlPause(agentId, true);
-    if (s) setSnap(s);
-    flash(snap?.paused ? 'tools allowed again' : 'tools blocked from the next call on');
+    const allow = !!snap?.paused;
+    try {
+      const s = allow ? await window.cth.controlResume(agentId) : await window.cth.controlPause(agentId, true);
+      if (s) setSnap(s);
+      flash(allow ? 'tools allowed again' : 'tools blocked from the next call on');
+    } catch (e) { failed(allow ? 'allowing tools' : 'blocking tools', e); }
   };
   const halt = async () => {
-    const s = await window.cth.controlHalt(agentId);
-    if (s) setSnap(s);
-    flash('will stop after the current step');
+    try {
+      const s = await window.cth.controlHalt(agentId);
+      if (s) setSnap(s);
+      flash('will stop after the current step');
+    } catch (e) { failed('stop after this step', e); }
   };
   const sendSteer = async () => {
     const t = steer.trim();
     if (!t) return;
-    const s = await window.cth.controlSteer(agentId, t);
-    if (s) setSnap(s);
-    setSteer('');
-    flash('note queued, arrives on its next turn');
+    try {
+      const s = await window.cth.controlSteer(agentId, t);
+      if (s) setSnap(s);
+      setSteer('');
+      flash('note queued, arrives on its next turn');
+    } catch (e) { failed('sending the note', e); }
   };
 
   return (
@@ -148,12 +160,32 @@ export function AgentControlStrip({ agentId }: { agentId: string }) {
           anchor that is always present and floats over the top of what follows. */}
       <div data-transient-anchor style={{ position: 'relative', height: 0 }}>
         {note && (
-          <span role="status" style={{
+          <span role={note.kind === 'error' ? 'alert' : 'status'} data-control-flash={note.kind} style={{
             position: 'absolute', top: 0, right: 0, zIndex: 20, maxWidth: '100%',
             ...STATUS_TEXT, padding: '2px 6px', pointerEvents: 'none',
             color: 'var(--cth-ink-700)', background: 'var(--cth-paper-100)',
-            boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)'
-          }}>{note}</span>
+            boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)',
+            // An error wraps in full (still floating over what follows, never growing the
+            // strip) and carries the only thing here that takes the pointer: its dismiss.
+            ...(note.kind === 'error' ? {
+              whiteSpace: 'normal', overflowWrap: 'anywhere', display: 'flex', gap: 6, alignItems: 'flex-start',
+              color: 'var(--cth-coral)', background: 'var(--cth-coral-light)', boxShadow: 'inset 0 0 0 1px var(--cth-coral)'
+            } as const : {})
+          }}>
+            {note.text}
+            {note.kind === 'error' && (
+              <button
+                type="button"
+                aria-label="Dismiss this error"
+                onClick={() => setNote(null)}
+                style={{
+                  pointerEvents: 'auto', flexShrink: 0, marginLeft: 'auto', cursor: 'pointer',
+                  border: 'none', background: 'transparent', padding: 0, lineHeight: '14px',
+                  fontSize: 11, color: 'inherit'
+                }}
+              >✕</button>
+            )}
+          </span>
         )}
       </div>
     </div>

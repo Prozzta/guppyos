@@ -61,6 +61,9 @@ export function MessageQueueComposer({ agent }: MessageQueueComposerProps) {
     : ff.error && (ffMine || ff.targetAgentId === null)
     ? `voice: ${ff.error}`
     : null;
+  // PERF-151-NITS (Jim N2): the error form wraps in full and stays until dismissed (or the next
+  // capture clears it); the progress forms stay one ellipsised line and cycle on their own.
+  const ffIsError = !!ff.error && !(ffMine && ff.status !== 'idle');
 
   // The draft box is the terminal's twin — it should read at the same size the
   // agent's output does, at every zoom level.
@@ -345,13 +348,27 @@ export function MessageQueueComposer({ agent }: MessageQueueComposerProps) {
           is always present instead of adding and removing a line under the terminal. */}
       <div data-transient-anchor style={{ position: 'relative', height: 0 }}>
         {ffHint && (
-          <span role="status" style={{
+          <span role={ffIsError ? 'alert' : 'status'} data-ff-hint={ffIsError ? 'error' : 'progress'} style={{
             position: 'absolute', top: 0, right: 0, zIndex: 20, maxWidth: '100%', pointerEvents: 'none',
             padding: '0 6px', background: 'var(--cth-cream-100)',
             fontSize: 12, lineHeight: '16px',
-            color: ff.error && !(ffMine && ff.status !== 'idle') ? 'var(--cth-coral)' : 'var(--cth-ink-500)',
-            whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
-          }}>{ffHint}</span>
+            color: ffIsError ? 'var(--cth-coral)' : 'var(--cth-ink-500)',
+            whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+            ...(ffIsError ? { whiteSpace: 'normal', overflowWrap: 'anywhere', display: 'flex', gap: 6, alignItems: 'flex-start' } as const : {})
+          }}>
+            {ffHint}
+            {ffIsError && (
+              <button
+                type="button"
+                aria-label="Dismiss this voice error"
+                onClick={() => freeflowRecorder.clearError()}
+                style={{
+                  pointerEvents: 'auto', flexShrink: 0, marginLeft: 'auto', cursor: 'pointer',
+                  border: 'none', background: 'transparent', padding: 0, lineHeight: '16px', fontSize: 11, color: 'inherit'
+                }}
+              >✕</button>
+            )}
+          </span>
         )}
       </div>
 

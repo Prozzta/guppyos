@@ -186,7 +186,10 @@ function isBusy(): boolean {
   return state.status !== 'idle' || opening;
 }
 
-export const freeflowRecorder = { start, stop, toggle, isBusy, subscribe, getSnapshot };
+/** PERF-151-NITS (Jim N2): the composer's error hint stays until the user dismisses it. */
+function clearError(): void { setState({ error: null }); }
+
+export const freeflowRecorder = { start, stop, toggle, isBusy, subscribe, getSnapshot, clearError };
 
 /** React hook: subscribe to the shared recorder state. */
 export function useFreeflow(): FreeflowState {
