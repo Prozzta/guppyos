@@ -93,7 +93,9 @@ export function scanCodexToml(text: string): HookFinding[] | null {
 }
 
 const HEADER = /^[ \t]*\[(\[)?[ \t]*([A-Za-z0-9_.\-"' ]+?)[ \t]*\]\]?[ \t]*(?:#.*)?$/;
-const TYPE_LINE = /^[ \t]*type[ \t]*=[ \t]*(?:"([^"]*)"|'([^']*)')/m;
+// The key may be bare or quoted (`"type" = ...` is legal TOML; Jim NIT 2).
+const TYPE_LINE = /^[ \t]*(?:type|"type"|'type')[ \t]*=[ \t]*(?:"([^"]*)"|'([^']*)')/m;
+const INLINE_TYPE = /(?:"type"|'type'|\btype)[ \t]*=[ \t]*(?:"([^"]*)"|'([^']*)')/g;
 
 /**
  * Our copy of the Codex seed without its model hooks. Each `[[hooks.<Event>.hooks]]` table whose
@@ -129,17 +131,22 @@ export function stripCodexModelHooks(text: string): { text: string; stripped: Ho
       if (open && open.dropped > 0 && open.kept === 0 && !open.inline) kept.splice(kept.indexOf(open.block), 1);
       open = null;
     };
+    // A dropped handler's sub-tables go with it (kept, they would re-parent onto the handler
+    // before it; Jim NIT 1).
+    let droppedHandler: string | null = null;
     for (const b of blocks) {
+      if (droppedHandler && b.name?.startsWith(`hooks.${droppedHandler}.hooks.`)) continue;
+      droppedHandler = null;
       const handler = b.name ? /^hooks\.([^.]+)\.hooks$/.exec(b.name) : null;
       const group = b.name ? /^hooks\.([^.]+)$/.exec(b.name) : null;
       if (!(handler && open && open.event === handler[1])) close();
       if (handler) {
         const t = typeOf(b) ?? '(none)';
-        if (!ALLOWED_HOOK_TYPES.has(t)) { stripped.push({ event: handler[1], type: t }); if (open) open.dropped++; continue; }
+        if (!ALLOWED_HOOK_TYPES.has(t)) { stripped.push({ event: handler[1], type: t }); if (open) open.dropped++; droppedHandler = handler[1]; continue; }
         if (open) open.kept++;
       } else if (group) {
         const body = b.lines.slice(1).join('\n');
-        const inline = [...body.matchAll(/type[ \t]*=[ \t]*(?:"([^"]*)"|'([^']*)')/g)].map((m) => m[1] ?? m[2]);
+        const inline = [...body.matchAll(INLINE_TYPE)].map((m) => m[1] ?? m[2]);
         const bad = inline.filter((t) => !ALLOWED_HOOK_TYPES.has(t));
         // (Valid TOML cannot add handler tables to a group whose `hooks` is inline.)
         if (bad.length) { for (const t of bad) stripped.push({ event: group[1], type: t }); continue; }

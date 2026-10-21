@@ -113,6 +113,21 @@ test('Codex seed: a group keeps its allowed handler tables when one of them is d
   assert.equal(r.allHooksDropped, false);
 });
 
+test('Codex seed: a dropped handler takes its sub-tables (they would re-parent onto the kept one; Jim NIT 1)', () => {
+  const seed = '[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = "command"\ncommand = "c"\n[[hooks.Stop.hooks]]\ntype = "prompt"\n[hooks.Stop.hooks.extra]\nx = 1\n[tui]\ny = 2\n';
+  const r = G.stripCodexModelHooks(seed);
+  assert.equal(r.text, '[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = "command"\ncommand = "c"\n[tui]\ny = 2\n');
+  assert.equal(r.allHooksDropped, false);
+});
+
+test('Codex seed: a quoted type key is read like a bare one (Jim NIT 2)', () => {
+  const seed = '[[hooks.Stop]]\n[[hooks.Stop.hooks]]\n"type" = "command"\ncommand = "c"\n[[hooks.Stop.hooks]]\n\'type\' = "prompt"\n[[hooks.Pre]]\nhooks = [{ "type" = "agent" }]\n[[hooks.Post]]\nhooks = [{ "type" = "http", url = "u" }]\n';
+  const r = G.stripCodexModelHooks(seed);
+  assert.equal(r.text, '[[hooks.Stop]]\n[[hooks.Stop.hooks]]\n"type" = "command"\ncommand = "c"\n[[hooks.Post]]\nhooks = [{ "type" = "http", url = "u" }]\n');
+  assert.deepEqual(r.stripped, [{ event: 'Stop', type: 'prompt' }, { event: 'Pre', type: 'agent' }]);
+  assert.equal(r.allHooksDropped, false);
+});
+
 test('Codex seed: a shape the table splitter cannot place falls back to dropping every hooks table; CRLF is kept', () => {
   const seed = 'a = 1\r\n[hooks]\r\nStop = [{ hooks = [{ type = "agent", prompt = "x" }] }]\r\n[tui]\r\nx = 1\r\n';
   const r = G.stripCodexModelHooks(seed);
