@@ -184,6 +184,19 @@ test('main dry run: prunes only verified, older cut trees; prints the cache; rem
   for (const n of ['cut194', 'cut195']) assert.ok(fs.existsSync(path.join(fx.work, n, 'dist')), n);
 });
 
+test("main: a cut tree of a second --repo (the cuts' clone) is judged only when named", () => {
+  const fx = fixture('repos');
+  const clone = path.join(path.dirname(fx.repo), 'clone');
+  git(path.dirname(fx.repo), 'clone', '-q', fx.repo, clone);
+  const p = path.join(fx.work, 'clone-cut194');
+  git(clone, 'worktree', 'add', '-q', '--detach', p, 'v1.1.94');
+  write(path.join(p, 'dist', 'G-1.1.94-setup.exe'), 'EXE94'); write(path.join(p, 'dist', 'G-1.1.94-setup.exe.blockmap'), 'MAP94'); write(path.join(p, 'dist', 'latest.yml'), 'YML94');
+  assert.equal(rowsOf(P.main(fx.args, () => {}, fx.deps))['clone-cut194'][1], 'not-a-candidate');
+  const both = rowsOf(P.main([...fx.args, '--repo', clone], () => {}, fx.deps));
+  assert.deepEqual(both['clone-cut194'][0], 'reap');
+  assert.deepEqual(both.cut195[0], 'reap');
+});
+
 test('main: gh that cannot answer keeps every tree (fail closed)', () => {
   const fx = fixture('gh');
   const r = P.main(fx.args, () => {}, { ...fx.deps, gh: () => { throw new Error('HTTP 401: Bad credentials'); } });

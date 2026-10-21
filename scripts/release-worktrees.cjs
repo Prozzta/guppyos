@@ -7,10 +7,10 @@
  * about 50 GB, by 1.1.97. This is step 8 of docs/release-checklist.md: after step 7's digest check,
  *
  *   npm run cut:prune -- --root C:/Dunder/_work [--apply] [--seed-cache] [--keep <name>]...
- *        [--repo <repo>] [--release-repo <owner>/<repo>] [--model-cache <dir>] [--hive <dir>] [--json]
+ *        [--repo <repo>]... [--release-repo <owner>/<repo>] [--model-cache <dir>] [--hive <dir>] [--json]
  *
  * A DRY RUN is the default. Only CUT TREES are judged: a top-level folder of --root with
- * dist/*-setup.exe. scripts/worktree-reaper.cjs decides first (git worktree of --repo, clean,
+ * dist/*-setup.exe. scripts/worktree-reaper.cjs decides first (git worktree of a --repo, clean,
  * shipped; keeps the newest two shipped, anything newer, anything changed in 24 h, a running exe,
  * a junction target, --keep), and its apply removes (rename to a tombstone, links removed AS links,
  * never through them, then `git worktree prune`). On top of it, a tree it would reap is KEPT when:
@@ -187,11 +187,11 @@ function planCutPrune(rows, { verify, own = [] }) {
 // ─── CLI ────────────────────────────────────────────────────────────────────
 
 function parseArgs(argv) {
-  const o = { root: null, repo: null, releaseRepo: null, modelCache: null, hive: process.env.HIVE_ROOT || null, keep: [], apply: false, seed: false, json: false, now: Date.now() };
+  const o = { root: null, repos: [], releaseRepo: null, modelCache: null, hive: process.env.HIVE_ROOT || null, keep: [], apply: false, seed: false, json: false, now: Date.now() };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--root') o.root = argv[++i];
-    else if (a === '--repo') o.repo = argv[++i];
+    else if (a === '--repo') o.repos.push(argv[++i]);   // the cuts' clone (_work/guppyos-repo) and the main repo
     else if (a === '--release-repo') o.releaseRepo = argv[++i];
     else if (a === '--model-cache') o.modelCache = argv[++i];
     else if (a === '--hive') o.hive = argv[++i];
@@ -202,7 +202,7 @@ function parseArgs(argv) {
     else if (a === '--now') o.now = Number(argv[++i]);   // tests: judge ages against another clock
     else throw new Error(`unknown argument: ${a}`);
   }
-  if (!o.root) throw new Error('usage: release-worktrees.cjs --root <dir of the cut trees> [--apply] [--seed-cache] [--keep <name>]... [--repo <repo>] [--release-repo <owner>/<repo>] [--model-cache <dir>] [--hive <dir>] [--json]');
+  if (!o.root) throw new Error('usage: release-worktrees.cjs --root <dir of the cut trees> [--apply] [--seed-cache] [--keep <name>]... [--repo <repo>]... [--release-repo <owner>/<repo>] [--model-cache <dir>] [--hive <dir>] [--json]');
   return o;
 }
 
@@ -223,15 +223,15 @@ function originSlug(repo) {
 function main(argv, out = (s) => process.stdout.write(s + '\n'), deps = {}) {
   const o = parseArgs(argv);
   const root = path.resolve(o.root);
-  const repo = o.repo ? path.resolve(o.repo) : mainRepo(process.cwd());
-  const releaseRepo = o.releaseRepo || originSlug(repo);
+  const repos = o.repos.length ? o.repos.map((r) => path.resolve(r)) : [mainRepo(process.cwd())];
+  const releaseRepo = o.releaseRepo || originSlug(repos[0]);
   const manifest = JSON.parse(fs.readFileSync(deps.manifest || path.join(__dirname, '..', 'resources', 'models', 'native-memory-manifest.json'), 'utf8'));
   const cacheDir = path.join(o.modelCache ? path.resolve(o.modelCache) : path.join(root, 'release-cache', 'models'), manifest.model.dir);
   const gh = deps.gh || ((tag) => ghAssets(releaseRepo, tag));
 
   // The cut trees, judged by the reaper first.
   const versions = new Map();
-  const facts = reaper.collectFacts({ root, repos: [repo], now: o.now, ...(deps.exes ? { exes: deps.exes() } : {}),
+  const facts = reaper.collectFacts({ root, repos, now: o.now, ...(deps.exes ? { exes: deps.exes() } : {}),
     only: (name, p) => { const v = cutVersion(p); if (v === null) return false; versions.set(name, v); return true; } });
   for (const e of facts.entries) { const v = reaper.parseVersion(versions.get(e.name) || ''); if (v !== null) e.version = v; }
   const base = reaper.planReap(facts, { keep: o.keep });
@@ -267,7 +267,7 @@ function main(argv, out = (s) => process.stdout.write(s + '\n'), deps = {}) {
   if (o.apply) {
     if (blocking.length) refused = `a cut is in progress: ${blocking.join('; ')}`;
     else if (!cache.ok) refused = `model cache ${cacheDir} not verified: ${cache.why}`;
-    else results = reaper.applyReap(plan, { root, repos: [repo], now: o.now, ...(deps.exes ? { exes: deps.exes } : {}) });
+    else results = reaper.applyReap(plan, { root, repos, now: o.now, ...(deps.exes ? { exes: deps.exes } : {}) });
   }
 
   const reap = plan.filter((r) => r.action === 'reap');

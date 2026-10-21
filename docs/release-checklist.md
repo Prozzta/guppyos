@@ -38,8 +38,9 @@ A release has one path: the verified local cut. The Release workflow
    - Do this after every workflow the tag push started has finished. In 1.1.91, a
      tag-triggered run replaced the verified installer with its own build, which had no
      embedding model.
-8. **Prune the old cut trees** (each is about 2.7 GB): `npm run cut:prune -- --root <root>` is a dry
-   run; read it, then add `--apply`. It keeps the current and previous releases' trees, anything
-   newer or changed in 24 h, and every tree whose dist is not byte-equal to its published release.
+8. **Prune the old cut trees** (each is about 2.7 GB): `npm run cut:prune -- --root <root> --repo <the
+   cuts' clone> --repo <the main repo>` is a dry run; read it, then add `--apply`. It keeps the
+   current and previous releases' trees, anything newer or changed in 24 h, and every tree whose
+   dist is not byte-equal to its published release.
    It refuses while a cut holds the heavy lock or runs, or while the model cache is unverified.
    It never removes through a `node_modules` junction.

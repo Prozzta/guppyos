@@ -23,6 +23,7 @@ const OVERLAY = at('planCutPrune: a reaped tree stays only if verified; kept row
 const DIST = at('verifyTree: every setup.exe, blockmap and latest.yml must equal the release digest');
 const MODEL = at('verifyModel / seedModel: a bad source is skipped, the copy is verified');
 const DRY = at('main dry run: prunes only verified, older cut trees; prints the cache; removes nothing');
+const REPOS = at("main: a cut tree of a second --repo (the cuts' clone) is judged only when named");
 const GH = at('main: gh that cannot answer keeps every tree (fail closed)');
 const HELD = at('main --apply refuses while a cut holds the heavy lock, or a cut process runs, or no hive log');
 const NOCACHE = at('main --apply refuses when the model cache cannot be verified');
@@ -57,6 +58,7 @@ const MUTANTS = [
   ['R27 the folder name beats package.json', SRC, 'if (v !== null) e.version = v;', '', DRY],
   ['R28 gh failure verifies', SRC, '    if (g.error) return { ok: false, why: `gh release ${tag}: ${g.error}` };\n', '', GH],
   ['R29 the reaper judges every folder', REAPER, '    if (only && !only(name, p)) continue;\n', '', DRY],
+  ['R31 only the last --repo counts', SRC, "o.repos.push(argv[++i]);", 'o.repos = [argv[++i]];', REPOS],
   ['R30 a dry run applies', SRC, '  if (o.apply) {\n', '  if (true) {\n', DRY]
 ];
 
