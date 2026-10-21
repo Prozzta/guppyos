@@ -17,6 +17,7 @@
  *   R5 the hive env reaches the child      R6 the base worktree is left behind
  *   R7 same on base by counts              R8 no dir rule (a new module in src/main)
  *   R9 a non-ancestor base accepted        R10 every test/tools runner is a census
+ *   R11 nameless reds by the first line alone (no rc, an empty line matches)
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -105,6 +106,8 @@ function failureChecks(M) {
   assert.equal(M.sameOnBase(row(1, ['env']), row(1, ['env', 'other'])), true, 'every tip failure fails at base');
   assert.equal(M.sameOnBase(row(1, [], 'Error: A'), row(1, [], 'Error: B')), false, 'both crash at load for different reasons');
   assert.equal(M.sameOnBase(row(1, [], 'Error: A'), row(1, [], 'Error: A')), true, 'the same load crash');
+  assert.equal(M.sameOnBase(row(1, []), row(1, [])), false, 'no names and no error line on either side: nothing to compare');
+  assert.equal(M.sameOnBase(row(1, [], 'Error: A'), row(7, [], 'Error: A')), false, 'the same first line, a different rc');
   assert.equal(M.sameOnBase(row(1, ['x']), { rc: 0, fail: 0, failed: [], firstError: '' }), false, 'green at base');
 }
 
@@ -238,10 +241,11 @@ const MUTANTS = [
   ['R8 no dir rule', ' || namesViaDir(text, p)', '', dirChecks],
   ['R9 a non-ancestor base accepted', 'if (anc.status !== 0) throw', 'if (false) throw', ancestorChecks],
   ['R10 every test/tools runner is a census', "? 'census' : 'tools'", "? 'census' : 'census'", laneChecks],
+  ['R11 nameless reds by the first line alone', "return tip.rc === base.rc && !!tip.firstError && tip.firstError === base.firstError;", "return (tip.firstError || '') === (base.firstError || '');", failureChecks],
   ['R6 the base worktree is left behind', "try { git(repo, ['worktree', 'remove', '--force', baseTree]); } catch { fs.rmSync(baseTree, { recursive: true, force: true }); }", '', runChecks]
 ];
 
-test('MUTANT CENSUS RELATED-TESTS: R1-R10 each apply once and die at their named check', () => {
+test('MUTANT CENSUS RELATED-TESTS: R1-R11 each apply once and die at their named check', () => {
   const text = fs.readFileSync(SRC, 'utf8');
   for (const [name, from, to, check] of MUTANTS) {
     assert.equal(text.split(from).length, 2, `${name}: its anchor is in the script exactly once`);
