@@ -29,6 +29,10 @@ import { CLAIM_LEDGER_CLAMP_ROW, CLAIMS_ALERT_KEY_MISSING, effectiveLevel, IMPLE
 import { CodexVersionLog, codexNoDaemonGate, readCodexVersion } from './codexCli';
 import { codexLayerOptInKey, type CodexLayerNotice } from './codexProjectLayers';
 import { StartupTiming } from './startupTiming';
+import { StallWatch, stallWatchMode } from './stallWatch';
+import fsModule from 'node:fs';
+import childProcessModule from 'node:child_process';
+import { Session as InspectorSession } from 'node:inspector';
 import type { WorkerHandle } from './nativeMemory/service';
 import { spawn, execFile } from 'node:child_process';
 import {
@@ -1422,6 +1426,17 @@ const startupTiming = new StartupTiming({
   log: (row) => hive.appendLog(row),
   histogram: () => monitorEventLoopDelay({ resolution: 10 })
 });
+// STALL-WATCH-198: main-stall / input-delay / renderer-longtask rows (UI-CRAWL-HALFCORES-197). Armed here,
+// before the first ipcMain registration below, so every handler's sync part is timed. Config
+// `stallWatch: false` = off, `{ profile: true }` = the sampling profiler too (default off). Read at startup.
+const stallMode = stallWatchMode(readConfig().stallWatch);
+const stallWatch = new StallWatch({
+  now: () => performance.now(),
+  origin: performance.timeOrigin,
+  log: (row) => hive.appendLog(row),
+  profiler: stallMode.profile ? () => { const s = new InspectorSession(); s.connect(); return s; } : null
+});
+if (stallMode.on) stallWatch.start({ ipcMain, fs: fsModule as unknown as Record<string, unknown>, childProcess: childProcessModule as unknown as Record<string, unknown> });
 // CLAIM-LEDGER W1: the ledger store, made on first use per hive root. Its MAC key lives in user-data,
 // encrypted with safeStorage (never in a hive file or an agent's env). The verbs write only at the
 // effective level 'writer' (settings clamped to what this build implements; a clamp is logged once).
@@ -5335,6 +5350,8 @@ ipcMain.handle('app:copyToClipboard', (_evt, text: unknown) => {
 });
 // STARTUP-TIMING-162: the renderer's long tasks and first-redraw marks (validated in startupTiming).
 ipcMain.on('startup:timing', (_evt, batch: unknown) => startupTiming.fromRenderer(batch));
+// STALL-WATCH-198: the renderer's slow input and long tasks (validated and rate-capped in stallWatch).
+ipcMain.on('stall:watch', (_evt, batch: unknown) => stallWatch.fromRenderer(batch));
 ipcMain.handle('app:readClipboard', () => {
   try { return clipboard.readText(); } catch { return ''; }
 });
