@@ -29,6 +29,8 @@ const KIDS = at('X6: children at exit follow the own-procs rule: a recycled pare
 const CAP = at('X7: a huge record is cut under 64 KB, each cut named');
 const KEEP = at('X8: records go to <hive>/exits/<agent>/ and only the newest 20 stay; a path-like agent id is refused');
 const HUNG = at('X9: a hung or throwing screen read still disposes the mirror and still writes the record');
+const REDACT = at('X16: a secret-shaped child commandLine, screen row and raw tail come out [redacted] (Jim S1: <hive>/exits is floor-readable)');
+const NOISE = at('X17: noise Codex log rows (token_count, item_completed, token_usage) are skipped; the newest n others stay (Jim N1)');
 const WIRE = at('X13/X14: main records only an unrequested, non-installer end, takes its facts synchronously and fires and forgets');
 
 const MUTANTS = [
@@ -46,7 +48,9 @@ const MUTANTS = [
   ['X12 signed NTSTATUS not decoded', REC, 'const u = code >>> 0;', 'const u = code;', DECODE],
   ['X13 main records a requested end', INDEX, 'if (!e.explicit && e.evidence && !pendingInstallRelaunch.has(e.id)) {', 'if (e.evidence && !pendingInstallRelaunch.has(e.id)) {', WIRE],
   ['X14 main records an installer relaunch', INDEX, 'if (!e.explicit && e.evidence && !pendingInstallRelaunch.has(e.id)) {', 'if (!e.explicit && e.evidence) {', WIRE],
-  ['X15 the last hook event is never stamped', INDEX, '    if (agentId && event) hookSeenEvent.set(agentId, event);', '', WIRE]
+  ['X15 the last hook event is never stamped', INDEX, '    if (agentId && event) hookSeenEvent.set(agentId, event);', '', WIRE],
+  ['X16 free text is clipped but not redacted', REC, "  const t = redactSecrets(typeof s === 'string' ? s : s === undefined ? '' : JSON.stringify(s) ?? '');", "  const t = (typeof s === 'string' ? s : s === undefined ? '' : JSON.stringify(s) ?? '');", REDACT],
+  ['X17 noise Codex log rows are kept', REC, "const signal = all.filter((r) => !CODEX_LOG_NOISE.test(`${r.target} ${r.body ?? ''}`));", 'const signal = all;', NOISE]
 ];
 
 const run = () => spawnSync(process.execPath, ['--test', TEST], { cwd: ROOT, encoding: 'utf8', windowsHide: true, timeout: 300_000 });

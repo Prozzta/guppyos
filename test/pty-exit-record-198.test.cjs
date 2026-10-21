@@ -230,6 +230,28 @@ test('X6: children at exit follow the own-procs rule: a recycled parent pid neve
   assert.deepEqual(kids.map((k) => k.pid).sort(), [10, 11]);
 });
 
+test('X16: a secret-shaped child commandLine, screen row and raw tail come out [redacted] (Jim S1: <hive>/exits is floor-readable)', () => {
+  const KEY = 'sk-ant-api03-AbCdEfGhIjKlMnOpQrStUv';
+  const kids = X.childrenAtExit([{ pid: 10, parentPid: 4242, commandLine: `curl -H "Authorization: Bearer ${KEY}" https://x`, createdMs: T0 + 1000 }], 4242, T0);
+  assert.equal(kids.length, 1);
+  assert.ok(!kids[0].commandLine.includes(KEY) && kids[0].commandLine.includes('[redacted]'), kids[0].commandLine);
+  const rec = X.buildExitRecord(facts({ command: `codex --api-key=${KEY}`, rawTail: `export ANTHROPIC_API_KEY=${KEY}\r\n` }),
+    { screen: { lines: [`token: ${KEY}`], altScreen: false }, children: kids, transcript: null, codexLog: null });
+  const text = JSON.stringify(rec);
+  assert.ok(!text.includes(KEY), 'no field of the record carries the key');
+  assert.match(rec.command, /\[redacted\]/);
+  assert.match(rec.rawTail, /\[redacted\]/);
+  assert.match(rec.screen.rows[0], /\[redacted\]/);
+});
+
+test('X17: noise Codex log rows (token_count, item_completed, token_usage) are skipped; the newest n others stay (Jim N1)', () => {
+  const rows = [{ p: 'pid:4242:aaa', ts: S(EXIT) - 60, ts_nanos: 0, level: 'INFO', target: 'codex_core', body: 'exec: npm test' }];
+  for (let i = 0; i < 40; i++) rows.push({ p: 'pid:4242:aaa', ts: S(EXIT) - 50 + i, ts_nanos: 0, level: 'INFO', target: i % 2 ? 'codex_otel' : 'codex_core', body: i % 2 ? 'token_usage_record in=1' : 'event: token_count' });
+  const t = X.readCodexLogTail('C:/ch', [4242], EXIT - 3_600_000, EXIT, 30, () => fakeDb(rows));
+  assert.deepEqual(t.rows.map((r) => r.body), ['exec: npm test'], 'the lead-up survives a burst of 40 noise rows');
+  assert.equal(t.noiseSkipped, 40);
+});
+
 const facts = (over = {}) => ({
   agentId: 'dwight-mu32ztys', ptyId: 'p', incarnation: 7, provider: 'codex', exitCode: 0, signal: null, at: EXIT, pid: 4242, spawnedAt: EXIT - 3_600_000,
   command: 'codex --yolo', cwd: 'C:/w', rawTail: '\x1b[2Kbye\r\n', lastHookAt: EXIT - 26_000, lastHookEvent: 'PostToolUse',

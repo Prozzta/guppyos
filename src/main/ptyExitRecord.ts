@@ -23,6 +23,7 @@ import { closeSync, mkdirSync, openSync, readdirSync, readSync, rmSync, statSync
 import { join } from 'node:path';
 import type { MirrorReading } from './terminalMirror';
 import type { ProcRow } from './heavyJob';
+import { redactSecrets } from './hive';
 
 export const EXIT_RECORD_MAX_BYTES = 64 * 1024;
 export const EXIT_RECORDS_KEPT = 20;
@@ -32,13 +33,18 @@ export const EXIT_FIELD_CHARS = 200;
 export const EXIT_CODEX_ROLLOUT_ROWS = 20;
 export const EXIT_CLAUDE_TRANSCRIPT_ROWS = 10;
 export const EXIT_CODEX_LOG_ROWS = 30;
+/** Codex log rows that say nothing about why a process ended (Jim N1: half the tail on Dwight's db). */
+export const CODEX_LOG_NOISE = /token_count|item_completed|token_usage/;
 export const EXIT_MIRROR_READ_MS = 1500;
 export const EXIT_PROCESS_LIST_MS = 3000;
 /** How much of a transcript's end is read for its last rows (a row can be a long tool output). */
 export const EXIT_TRANSCRIPT_READ_BYTES = 512 * 1024;
 
+/** Every free-text field of a record: secrets redacted (Jim S1: <hive>/exits is readable by every
+ *  agent; a child's argv or a screen echo can carry a key), THEN clipped, so a cut never leaves half
+ *  a key unmatched. */
 const clip = (s: unknown, n = EXIT_FIELD_CHARS): string => {
-  const t = typeof s === 'string' ? s : s === undefined ? '' : JSON.stringify(s) ?? '';
+  const t = redactSecrets(typeof s === 'string' ? s : s === undefined ? '' : JSON.stringify(s) ?? '');
   return t.length > n ? `${t.slice(0, n)}…` : t;
 };
 
@@ -141,7 +147,7 @@ export function readTranscriptTail(file: string, provider: 'codex' | 'claude', n
 }
 
 export interface CodexLogRow { ts: number; level: string; target: string; body: string }
-export interface CodexLogTail { file: string; process: string | null; match: 'pid' | 'window' | 'none'; rows: CodexLogRow[]; error?: string }
+export interface CodexLogTail { file: string; process: string | null; match: 'pid' | 'window' | 'none'; rows: CodexLogRow[]; noiseSkipped?: number; error?: string }
 /** The slice of better-sqlite3 used here (injected: tests use a fake, main the real driver). */
 export interface SqliteLike { prepare(sql: string): { all(...args: unknown[]): unknown[] }; close(): void }
 
@@ -165,10 +171,12 @@ export function readCodexLogTail(codexHome: string, pids: number[], spawnedAt: n
       if (inLife.length) { pick = inLife[0]; match = 'window'; }
     }
     if (!pick) return { file, process: null, match, rows: [] };
-    const rows = (db.prepare('SELECT ts, level, target, substr(feedback_log_body, 1, 400) AS body FROM logs WHERE process_uuid = ? ORDER BY ts DESC, ts_nanos DESC LIMIT ?')
-      .all(pick.p, n) as Array<{ ts: number; level: string; target: string; body: string | null }>)
-      .reverse().map((r) => ({ ts: r.ts, level: String(r.level), target: clip(r.target, 80), body: clip(r.body ?? '') }));
-    return { file, process: pick.p, match, rows };
+    // The newest n rows that are not noise (5n read, so a burst of token counts cannot hide the lead-up).
+    const all = (db.prepare('SELECT ts, level, target, substr(feedback_log_body, 1, 400) AS body FROM logs WHERE process_uuid = ? ORDER BY ts DESC, ts_nanos DESC LIMIT ?')
+      .all(pick.p, n * 5) as Array<{ ts: number; level: string; target: string; body: string | null }>);
+    const signal = all.filter((r) => !CODEX_LOG_NOISE.test(`${r.target} ${r.body ?? ''}`));
+    const rows = signal.slice(0, n).reverse().map((r) => ({ ts: r.ts, level: String(r.level), target: clip(r.target, 80), body: clip(r.body ?? '') }));
+    return { file, process: pick.p, match, rows, noiseSkipped: all.length - signal.length };
   } catch (e) {
     return { file, process: null, match: 'none', rows: [], error: clip(e instanceof Error ? e.message : String(e)) };
   } finally {
@@ -243,7 +251,7 @@ export function buildExitRecord(f: ExitFacts, p: ExitParts, maxBytes = EXIT_RECO
     },
     heavyLock: f.heavyLock,
     screen: { rows: screenRows, altScreen: p.screen?.altScreen ?? null, ...(p.screenError ? { error: p.screenError } : !p.screen ? { error: 'no mirror' } : {}) },
-    rawTail: stripAnsi(f.rawTail).slice(-EXIT_RAW_TAIL_CHARS),
+    rawTail: redactSecrets(stripAnsi(f.rawTail)).slice(-EXIT_RAW_TAIL_CHARS),
     stderr: 'through ConPTY the CLI\'s stderr is the terminal stream: see screen and rawTail',
     children: p.children ?? [], ...(p.childrenError ? { childrenError: p.childrenError } : {}),
     transcript: p.transcript, codexLog: p.codexLog,
