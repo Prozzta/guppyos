@@ -1,9 +1,10 @@
 'use strict';
 /**
  * ELECTRON-VIEW-SELF-HEAL: the shared Electron view (electron-bin.cjs swiftShaderView) is ready only when
- * its .complete marker AND its executable are there. On 2026-10-21 the view lost electron.exe alone, kept
- * .complete, and was never rebuilt: every Electron test on the machine failed ENOENT. A view missing either
- * is rebuilt into a fresh part folder and swapped in; a ready view is used as it is.
+ * its .complete marker AND every top-level name of its dist are there. On 2026-10-21 the view lost
+ * electron.exe alone, kept .complete, and was never rebuilt: every Electron test on the machine failed
+ * ENOENT. A view missing any of them is rebuilt into a fresh part folder and swapped in; a ready view is
+ * used as it is.
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -39,6 +40,19 @@ test('a view that lost its executable but kept .complete is rebuilt, at the same
     if (process.platform === 'win32') assert.equal(statSync(exe).nlink, 2, 'a hard link to the dist, not a copy');
     assert.equal(readFileSync(join(view, 'SwiftShader.ini'), 'utf8'), '[Processor]\nAffinityMask=65535\n');
     assert.equal(readFileSync(join(view, 'locales', 'en-US.pak'), 'utf8'), 'pak');
+    assert.deepEqual(readdirSync(join(tmp, 'guppy-electron-view')), [view.split(/[\\/]/).pop()], 'no part or stale folder left');
+  });
+});
+
+test('a view that lost another top-level file of the dist (a DLL, a .pak, the snapshot) is rebuilt too (Jim NIT 1)', () => {
+  withTemp((dir) => {
+    const src = fakeDist(dir);
+    const tmp = join(dir, 'tmp');
+    const exe = swiftShaderView(src, 0xffffn, tmp);
+    const view = join(exe, '..');
+    unlinkSync(join(view, 'v8_context_snapshot.bin'));
+    assert.equal(swiftShaderView(src, 0xffffn, tmp), exe);
+    assert.equal(readFileSync(join(view, 'v8_context_snapshot.bin'), 'utf8'), 'snap', 'the lost file is back');
     assert.deepEqual(readdirSync(join(tmp, 'guppy-electron-view')), [view.split(/[\\/]/).pop()], 'no part or stale folder left');
   });
 });
