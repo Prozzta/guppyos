@@ -4786,12 +4786,12 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
       // MUNDER_LEDGER_URL the Claude spawn sets; elsewhere it says it is unavailable).
       const ledgerDir = hive.writeLedgerCommand(LEDGER_CLI);
       if (ledgerDir) opts.pathPrepend = [...(opts.pathPrepend ?? []), ledgerDir];
-      // HEAVY-LOCK-RESERVATION-RELEASE: `heavy` on every hive agent's PATH (same URL, token and reach).
-      const heavyDir = hive.writeHeavyCommand(HEAVY_CLI);
-      if (heavyDir) opts.pathPrepend = [...(opts.pathPrepend ?? []), heavyDir];
       // TASKS-JSON-SPLIT: tasks-all (pass-sweep, old cards), tasks-revive, tasks-unsplit on every hive agent's PATH.
       const tasksDir = hive.writeTasksCommands(TASKS_CLI);
       if (tasksDir) opts.pathPrepend = [...(opts.pathPrepend ?? []), tasksDir];
+      // HEAVY-LOCK-RESERVATION-RELEASE: `heavy` on every hive agent's PATH (same URL, token and reach).
+      const heavyDir = hive.writeHeavyCommand(HEAVY_CLI);
+      if (heavyDir) opts.pathPrepend = [...(opts.pathPrepend ?? []), heavyDir];
       // GOD-TERMINAL-CONTROL: `term` on god's PATH only (the broker refuses any other caller anyway).
       if (opts.hive.isGod) {
         const termDir = hive.writeTermCommand(TERM_CLI);
