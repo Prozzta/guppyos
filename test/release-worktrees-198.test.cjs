@@ -204,16 +204,31 @@ test('main: gh that cannot answer keeps every tree (fail closed)', () => {
   assert.match(rowsOf(r).cut195[1], /^unverified: gh release v1\.1\.95: HTTP 401/);
 });
 
-test('main --apply refuses while a cut holds the heavy lock, or a cut process runs, or no hive log', () => {
+test('main --apply refuses while a cut holds the heavy lock (log or newest rotated log), a cut process runs, or no hive is known', () => {
   const fx = fixture('held');
-  fs.writeFileSync(path.join(fx.hive, 'log.jsonl'), JSON.stringify({ ts: Number(fx.args[fx.args.indexOf('--now') + 1]) - 60_000, kind: 'heavy-lock', action: 'acquire', agentId: 'creed', heavyKind: 'install', command: 'npm ci' }) + '\n');
+  const at = Number(fx.args[fx.args.indexOf('--now') + 1]) - 60_000;
+  const held = (agentId) => JSON.stringify({ ts: at, kind: 'heavy-lock', action: 'acquire', agentId, heavyKind: 'install', command: 'npm ci' }) + '\n';
+  fs.writeFileSync(path.join(fx.hive, 'log.jsonl'), held('creed'));
   const lines = [];
   const r = P.main([...fx.args, '--apply'], (s) => lines.push(s), fx.deps);
-  assert.match(r.refused, /a cut is in progress: heavy lock held by creed \(install: npm ci\)/);
+  assert.match(r.refused, /a cut may be in progress: heavy lock held by creed \(install: npm ci\)/);
   assert.equal(r.results, null);
   assert.ok(fs.existsSync(path.join(fx.work, 'cut195')));
   assert.ok(lines.some((l) => l.startsWith('REFUSED\t')));
+  assert.ok(!fs.existsSync(fx.cache), 'a refused apply seeds no cache (cut197 has the model)');
+  // the acquire was before the 8 MB rotation: only the NEWEST rotated log is replayed
   fs.writeFileSync(path.join(fx.hive, 'log.jsonl'), '');
+  fs.writeFileSync(path.join(fx.hive, 'log.900.jsonl'), held('stale'));
+  fs.writeFileSync(path.join(fx.hive, 'log.1000.jsonl'), held('creed'));
+  const rot = P.main([...fx.args, '--apply'], () => {}, fx.deps);
+  assert.match(rot.refused, /heavy lock held by creed/); assert.doesNotMatch(rot.refused, /stale/);
+  for (const n of ['log.900.jsonl', 'log.1000.jsonl']) fs.rmSync(path.join(fx.hive, n));
+  // no --hive and no HIVE_ROOT: the lock cannot be checked, so --apply refuses and the dry run says so
+  const noHive = fx.args.filter((a, i, all) => a !== '--hive' && all[i - 1] !== '--hive');
+  const out = [];
+  assert.equal(P.main(noHive, (s) => out.push(s), fx.deps).refused, null);
+  assert.ok(out.includes('HEAVY\tCUT MAY BE IN PROGRESS: no hive known (--hive <hive> or HIVE_ROOT): heavy lock unknown'), out.join('\n'));
+  assert.match(P.main([...noHive, '--apply'], () => {}, fx.deps).refused, /no hive known/);
   const p = P.main([...fx.args, '--apply'], () => {}, { ...fx.deps, procs: () => [{ pid: 42, commandLine: 'node node_modules/electron-builder/cli.js --win' }] });
   assert.match(p.refused, /cut process 42/);
   const noLog = P.main([...fx.args.filter((a, i, all) => a !== '--hive' && all[i - 1] !== '--hive'), '--hive', path.join(fx.hive, 'missing'), '--apply'], () => {}, fx.deps);
@@ -221,6 +236,23 @@ test('main --apply refuses while a cut holds the heavy lock, or a cut process ru
   const ps = P.main([...fx.args, '--apply'], () => {}, { ...fx.deps, procs: () => { throw new Error('WMI down'); } });
   assert.match(ps.refused, /cannot list processes: WMI down/);
   assert.ok(fs.existsSync(path.join(fx.work, 'cut195')));
+});
+
+test('main: every link under --root outside the cut trees protects its target (audit-tree junctions, top-level links, --protect)', () => {
+  const fx = fixture('links');
+  write(path.join(fx.work, 'cut195', 'node_modules', 'dep', 'index.js'), 'CUT195 DEPS');
+  assert.deepEqual(rowsOf(P.main([...fx.args, '--protect', path.join(fx.work, 'cut195', 'dist')], () => {}, fx.deps)).cut195, ['keep', 'junction-target']);
+  // fix-195 (a worktree, not a cut) borrows cut195's node_modules; a top-level alias links to cut194
+  link(path.join(fx.work, 'cut195', 'node_modules'), path.join(fx.work, 'fix-195', 'node_modules'));
+  link(path.join(fx.work, 'cut194'), path.join(fx.work, 'alias194'));
+  const rows = rowsOf(P.main(fx.args, () => {}, fx.deps));
+  assert.deepEqual(rows.cut195, ['keep', 'junction-target']); assert.deepEqual(rows.cut194, ['keep', 'junction-target']);
+  assert.equal(rows.alias194, undefined);   // a link is never a cut tree
+  const r = P.main([...fx.args, '--apply'], () => {}, fx.deps);
+  assert.equal(r.refused, null);
+  assert.deepEqual(r.results.filter((x) => x.name !== '(git worktree prune)'), []);
+  assert.equal(fs.readFileSync(path.join(fx.work, 'fix-195', 'node_modules', 'dep', 'index.js'), 'utf8'), 'CUT195 DEPS');
+  assert.ok(fs.existsSync(path.join(fx.work, 'alias194', 'dist')));
 });
 
 test('main --apply refuses when the model cache cannot be verified', () => {

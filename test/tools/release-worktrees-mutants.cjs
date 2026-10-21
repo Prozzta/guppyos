@@ -25,7 +25,8 @@ const MODEL = at('verifyModel / seedModel: a bad source is skipped, the copy is 
 const DRY = at('main dry run: prunes only verified, older cut trees; prints the cache; removes nothing');
 const REPOS = at("main: a cut tree of a second --repo (the cuts' clone) is judged only when named");
 const GH = at('main: gh that cannot answer keeps every tree (fail closed)');
-const HELD = at('main --apply refuses while a cut holds the heavy lock, or a cut process runs, or no hive log');
+const HELD = at('main --apply refuses while a cut holds the heavy lock (log or newest rotated log), a cut process runs, or no hive is known');
+const LINKS = at('main: every link under --root outside the cut trees protects its target (audit-tree junctions, top-level links, --protect)');
 const NOCACHE = at('main --apply refuses when the model cache cannot be verified');
 const APPLY = at('main --apply: seeds the cache, removes verified old trees, never through a junction');
 
@@ -51,15 +52,24 @@ const MUTANTS = [
   ['R20 the model is not hashed', SRC, 'if (sha(p) !== want) return', 'if (false) return', MODEL],
   ['R21 a seed source is not verified', SRC, '    if (!verifyModel(src, manifest).ok) continue;\n', '', MODEL],
   ['R22 apply ignores a cut in progress', SRC, 'if (blocking.length) refused =', 'if (false) refused =', HELD],
-  ['R23 a process list failure does not block', SRC, 'catch (e) { holds.push(`cannot list processes: ${e.message}`); }', 'catch (e) { }', HELD],
+  ['R23 a process list failure does not block', SRC, 'catch (e) { blocking.push(`cannot list processes: ${e.message}`); }', 'catch (e) { }', HELD],
   ['R24 apply ignores the model cache', SRC, 'else if (!cache.ok) refused =', 'else if (false) refused =', NOCACHE],
-  ['R25 a dry run seeds the cache', SRC, 'if (!cache.ok && o.seed)', 'if (!cache.ok)', DRY],
+  ['R25 a dry run seeds the cache', SRC, 'if (!cache.ok && o.seed && !blocking.length)', 'if (!cache.ok && !blocking.length)', DRY],
   ['R26 --apply does not seed', SRC, "else if (a === '--apply') { o.apply = true; o.seed = true; }", "else if (a === '--apply') o.apply = true;", APPLY],
   ['R27 the folder name beats package.json', SRC, 'if (v !== null) e.version = v;', '', DRY],
   ['R28 gh failure verifies', SRC, '    if (g.error) return { ok: false, why: `gh release ${tag}: ${g.error}` };\n', '', GH],
   ['R29 the reaper judges every folder', REAPER, '    if (only && !only(name, p)) continue;\n', '', DRY],
   ['R31 only the last --repo counts', SRC, "o.repos.push(argv[++i]);", 'o.repos = [argv[++i]];', REPOS],
-  ['R30 a dry run applies', SRC, '  if (o.apply) {\n', '  if (true) {\n', DRY]
+  ['R30 a dry run applies', SRC, '  if (o.apply) {\n', '  if (true) {\n', DRY],
+  // Jim's NOT YET 1/2/1 on 00207dfe
+  ['R32 links outside the cut trees protect nothing', SRC, 'protect: [...o.protect, ...outside.targets]', 'protect: [...o.protect]', LINKS],
+  ['R33 a top-level link is not seen', SRC, 'if (st.isSymbolicLink()) { note(root, p); continue; }', 'if (st.isSymbolicLink()) continue;', LINKS],
+  ['R34 a link inside a non-cut folder is not seen', SRC, 'if (s.isSymbolicLink()) note(d, c);', 'if (false) note(d, c);', LINKS],
+  ['R35 --protect is ignored', SRC, "o.protect.push(path.resolve(argv[++i]));   // a link INTO root", "void argv[++i];   // a link INTO root", LINKS],
+  ['R36 no hive known does not refuse', SRC, "if (!o.hive) blocking.push(", 'if (false) blocking.push(', HELD],
+  ['R37 the rotated log is not replayed', SRC, 'if (newest) rotated =', 'if (false) rotated =', HELD],
+  ['R38 the oldest rotated log is replayed', SRC, '.sort((a, b) => Number(b[1]) - Number(a[1]))[0]', '.sort((a, b) => Number(a[1]) - Number(b[1]))[0]', HELD],
+  ['R39 a refused apply still seeds', SRC, 'if (!cache.ok && o.seed && !blocking.length)', 'if (!cache.ok && o.seed)', HELD]
 ];
 
 const run = () => spawnSync(process.execPath, ['--test', TEST], { cwd: ROOT, encoding: 'utf8', windowsHide: true, timeout: 300_000 });

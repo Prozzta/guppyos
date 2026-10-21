@@ -7,13 +7,15 @@
  * about 50 GB, by 1.1.97. This is step 8 of docs/release-checklist.md: after step 7's digest check,
  *
  *   npm run cut:prune -- --root C:/Dunder/_work [--apply] [--seed-cache] [--keep <name>]...
- *        [--repo <repo>]... [--release-repo <owner>/<repo>] [--model-cache <dir>] [--hive <dir>] [--json]
+ *        [--repo <repo>]... [--release-repo <owner>/<repo>] [--model-cache <dir>] [--hive <dir>] [--protect <path>]... [--json]
  *
  * A DRY RUN is the default. Only CUT TREES are judged: a top-level folder of --root with
  * dist/*-setup.exe. scripts/worktree-reaper.cjs decides first (git worktree of a --repo, clean,
  * shipped; keeps the newest two shipped, anything newer, anything changed in 24 h, a running exe,
  * a junction target, --keep), and its apply removes (rename to a tombstone, links removed AS links,
- * never through them, then `git worktree prune`). On top of it, a tree it would reap is KEPT when:
+ * never through them, then `git worktree prune`). Every link under --root outside the cut trees
+ * (an audit tree's node_modules junction, a top-level link) and --protect protect their targets.
+ * On top of it, a tree it would reap is KEPT when:
  *   - unverified: its dist setup.exe, blockmap and latest.yml are not ALL byte-equal (sha256) to the
  *     GitHub release v<package.json version> (an abandoned recut, a branch build, gh unreachable);
  *   - own-tree: the tree this tool or its caller runs in.
@@ -21,6 +23,7 @@
  *   - a cut holds the heavy lock (the hive log: an install/build holder, other than this prune) or a
  *     cut process runs (npm ci, electron-builder, cut-cmd-natives, ...): a tree mid-cut has no
  *     verified digest yet, and a running cut may depend on a tree being pruned;
+ *   - no hive is known (no --hive, no HIVE_ROOT), or a link under --root cannot be read;
  *   - the model cache is not verified. The cut recipe copied the model from an old cut tree
  *     (--from andy-cut191); the cache (<root>/release-cache/models/<dir>, every file against
  *     resources/models/native-memory-manifest.json) replaces it: MUNDER_MODEL_CACHE=<that dir>.
@@ -107,12 +110,52 @@ function cutHolds(rows, now) {
     && (CUT_KINDS.has(h.kind) || CUT_COMMAND.test(h.command)));
 }
 
-/** The hive log's rows (log.jsonl), or null when there is no hive log. */
+/**
+ * The hive log's rows, oldest first, or null when there is no hive log. The log rotates at 8 MB
+ * (log.<ms>.jsonl): a cut that acquired before the rotation and has not re-entered since is only in
+ * the newest rotated file, so that one is replayed first (Jim SHOULD 2).
+ */
 function readHiveLog(hive) {
   let text; try { text = fs.readFileSync(path.join(hive, 'log.jsonl'), 'utf8'); } catch { return null; }
+  let rotated = '';
+  try {
+    const newest = fs.readdirSync(hive).map((n) => /^log\.(\d+)\.jsonl$/.exec(n)).filter(Boolean).sort((a, b) => Number(b[1]) - Number(a[1]))[0];
+    if (newest) rotated = fs.readFileSync(path.join(hive, newest[0]), 'utf8');
+  } catch { rotated = ''; }
   const rows = [];
-  for (const line of text.split('\n')) { if (!line.trim()) continue; try { rows.push(JSON.parse(line)); } catch { /* torn line */ } }
+  for (const line of `${rotated}\n${text}`.split('\n')) { if (!line.trim()) continue; try { rows.push(JSON.parse(line)); } catch { /* torn line */ } }
   return rows;
+}
+
+/**
+ * Every link under `root` that is NOT inside a cut tree: a top-level link, and the links inside the
+ * other folders (an audit tree's node_modules junction into a cut tree's). The reaper keeps a target
+ * only when a kept ENTRY links into it, and `only` makes no entry of these folders (Jim MUST), so
+ * their targets go to its protect list. A real node_modules or .git is not descended: a junction
+ * sits at the top of a tree, and node_modules holds ~100k files. An unreadable link is returned in
+ * `unreadable` (its target cannot be protected: --apply refuses).
+ */
+function outsideLinks(root, isCut) {
+  const targets = []; const unreadable = [];
+  const note = (dir, c) => { try { targets.push(path.resolve(dir, fs.readlinkSync(c))); } catch { unreadable.push(c); } };
+  for (const name of fs.readdirSync(root)) {
+    const p = path.join(root, name);
+    let st; try { st = fs.lstatSync(p); } catch { continue; }
+    if (st.isSymbolicLink()) { note(root, p); continue; }
+    if (!st.isDirectory() || isCut(name)) continue;
+    const stack = [p];
+    while (stack.length) {
+      const d = stack.pop();
+      let names = []; try { names = fs.readdirSync(d); } catch { continue; }
+      for (const n of names) {
+        const c = path.join(d, n);
+        let s; try { s = fs.lstatSync(c); } catch { continue; }
+        if (s.isSymbolicLink()) note(d, c);
+        else if (s.isDirectory() && n !== 'node_modules' && n !== '.git') stack.push(c);
+      }
+    }
+  }
+  return { targets, unreadable };
 }
 
 /** Every running process { pid, commandLine } (Windows: Win32_Process). Throws when it cannot list them. */
@@ -187,7 +230,7 @@ function planCutPrune(rows, { verify, own = [] }) {
 // ─── CLI ────────────────────────────────────────────────────────────────────
 
 function parseArgs(argv) {
-  const o = { root: null, repos: [], releaseRepo: null, modelCache: null, hive: process.env.HIVE_ROOT || null, keep: [], apply: false, seed: false, json: false, now: Date.now() };
+  const o = { root: null, repos: [], releaseRepo: null, modelCache: null, hive: process.env.HIVE_ROOT || null, keep: [], protect: [], apply: false, seed: false, json: false, now: Date.now() };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--root') o.root = argv[++i];
@@ -196,13 +239,14 @@ function parseArgs(argv) {
     else if (a === '--model-cache') o.modelCache = argv[++i];
     else if (a === '--hive') o.hive = argv[++i];
     else if (a === '--keep') o.keep.push(argv[++i]);
+    else if (a === '--protect') o.protect.push(path.resolve(argv[++i]));   // a link INTO root from outside it
     else if (a === '--apply') { o.apply = true; o.seed = true; }
     else if (a === '--seed-cache') o.seed = true;
     else if (a === '--json') o.json = true;
     else if (a === '--now') o.now = Number(argv[++i]);   // tests: judge ages against another clock
     else throw new Error(`unknown argument: ${a}`);
   }
-  if (!o.root) throw new Error('usage: release-worktrees.cjs --root <dir of the cut trees> [--apply] [--seed-cache] [--keep <name>]... [--repo <repo>]... [--release-repo <owner>/<repo>] [--model-cache <dir>] [--hive <dir>] [--json]');
+  if (!o.root) throw new Error('usage: release-worktrees.cjs --root <dir of the cut trees> [--apply] [--seed-cache] [--keep <name>]... [--repo <repo>]... [--release-repo <owner>/<repo>] [--model-cache <dir>] [--hive <dir>] [--protect <path>]... [--json]');
   return o;
 }
 
@@ -229,12 +273,18 @@ function main(argv, out = (s) => process.stdout.write(s + '\n'), deps = {}) {
   const cacheDir = path.join(o.modelCache ? path.resolve(o.modelCache) : path.join(root, 'release-cache', 'models'), manifest.model.dir);
   const gh = deps.gh || ((tag) => ghAssets(releaseRepo, tag));
 
-  // The cut trees, judged by the reaper first.
+  // The cut trees, judged by the reaper first; every link outside them protects its target.
   const versions = new Map();
-  const facts = reaper.collectFacts({ root, repos, now: o.now, ...(deps.exes ? { exes: deps.exes() } : {}),
-    only: (name, p) => { const v = cutVersion(p); if (v === null) return false; versions.set(name, v); return true; } });
+  for (const name of fs.readdirSync(root)) {
+    const p = path.join(root, name);
+    let link = false; try { link = fs.lstatSync(p).isSymbolicLink(); } catch { continue; }
+    const v = link ? null : cutVersion(p);
+    if (v !== null) versions.set(name, v);
+  }
+  const outside = outsideLinks(root, (name) => versions.has(name));
+  const facts = reaper.collectFacts({ root, repos, now: o.now, ...(deps.exes ? { exes: deps.exes() } : {}), only: (name) => versions.has(name) });
   for (const e of facts.entries) { const v = reaper.parseVersion(versions.get(e.name) || ''); if (v !== null) e.version = v; }
-  const base = reaper.planReap(facts, { keep: o.keep });
+  const base = reaper.planReap(facts, { keep: o.keep, protect: [...o.protect, ...outside.targets] });
 
   const ghCache = new Map();
   const verify = (r) => {
@@ -248,24 +298,27 @@ function main(argv, out = (s) => process.stdout.write(s + '\n'), deps = {}) {
   const own = [process.cwd(), __dirname].map((p) => path.resolve(p));
   const plan = planCutPrune(base, { verify, own });
 
-  // Refusals: a cut in progress (heavy lock or process), an unverified model cache.
-  const holds = [];
-  const logRows = readHiveLog(o.hive || '');
-  if (logRows === null) holds.push(o.hive ? `no hive log under ${o.hive}: heavy lock unknown` : null);
-  else for (const h of cutHolds(logRows, o.now)) holds.push(`heavy lock held by ${h.agentId} (${h.kind}: ${h.command.slice(0, 80)})`);
-  try { for (const p of cutProcesses((deps.procs || processes)())) holds.push(`cut process ${p.pid}: ${p.commandLine.slice(0, 100)}`); }
-  catch (e) { holds.push(`cannot list processes: ${e.message}`); }
-  const blocking = holds.filter(Boolean);
+  // Refusals: a cut in progress (heavy lock or process), a link whose target is unknown, an
+  // unverified model cache. No hive known (no --hive, no HIVE_ROOT) is no lock check: it refuses.
+  const blocking = [];
+  const logRows = o.hive ? readHiveLog(o.hive) : null;
+  if (!o.hive) blocking.push('no hive known (--hive <hive> or HIVE_ROOT): heavy lock unknown');
+  else if (logRows === null) blocking.push(`no hive log under ${o.hive}: heavy lock unknown`);
+  else for (const h of cutHolds(logRows, o.now)) blocking.push(`heavy lock held by ${h.agentId} (${h.kind}: ${h.command.slice(0, 80)})`);
+  try { for (const p of cutProcesses((deps.procs || processes)())) blocking.push(`cut process ${p.pid}: ${p.commandLine.slice(0, 100)}`); }
+  catch (e) { blocking.push(`cannot list processes: ${e.message}`); }
+  for (const l of outside.unreadable) blocking.push(`unreadable link ${l}: its target cannot be protected`);
 
+  // Seeded only when nothing blocks (Jim NIT): during a cut the cache is not touched.
   let cache = verifyModel(cacheDir, manifest);
-  if (!cache.ok && o.seed) {
+  if (!cache.ok && o.seed && !blocking.length) {
     const sources = plan.filter((r) => r.action === 'keep').map((r) => path.join(r.path, 'resources', 'models', manifest.model.dir));
     cache = seedModel(cacheDir, manifest, sources);
   }
 
   let results = null; let refused = null;
   if (o.apply) {
-    if (blocking.length) refused = `a cut is in progress: ${blocking.join('; ')}`;
+    if (blocking.length) refused = `a cut may be in progress: ${blocking.join('; ')}`;
     else if (!cache.ok) refused = `model cache ${cacheDir} not verified: ${cache.why}`;
     else results = reaper.applyReap(plan, { root, repos, now: o.now, ...(deps.exes ? { exes: deps.exes } : {}) });
   }
@@ -277,7 +330,7 @@ function main(argv, out = (s) => process.stdout.write(s + '\n'), deps = {}) {
   } else {
     out(`${o.apply ? 'APPLY' : 'DRY RUN (nothing deleted; --apply to prune)'}: ${releaseRepo}, shipped ${facts.shipped.slice(0, 2).map((v) => '1.1.' + v).join(', ')}`);
     out(`MODEL CACHE\t${cache.ok ? 'verified' : 'NOT VERIFIED'}\t${cacheDir}\t${cache.why}`);
-    out(`HEAVY\t${blocking.length ? 'CUT IN PROGRESS: ' + blocking.join('; ') : 'no cut in progress'}`);
+    out(`HEAVY\t${blocking.length ? 'CUT MAY BE IN PROGRESS: ' + blocking.join('; ') : 'no cut in progress'}`);
     for (const r of plan) out(`${r.action.toUpperCase()}\t${versions.get(r.name) || '?'}\t${r.name}\t${r.reason}`);
     if (refused) out(`REFUSED\t${refused}`);
     if (results) for (const r of results) out(`RESULT\t${r.result}\t${r.name}${r.error ? '\t' + r.error : ''}`);
