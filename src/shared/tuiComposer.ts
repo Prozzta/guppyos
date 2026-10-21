@@ -127,6 +127,30 @@ function ownClippedDraft(tail: readonly string[], expectedText: string): boolean
   return seen.length >= OWN_TAIL_MIN_CHARS && compact(expectedText).endsWith(seen);
 }
 
+/** WAKE-STRANDED-IN-COMPOSER: under a notice above the box both TUIs were seen drawing our staged
+ *  wake line inside the two rules WITHOUT the prompt glyph. Claude, under `✘ Auto-update failed`,
+ *  drew it from column 0 (`You have new hive mail …`). agy, under `esc to dismiss`, drew only its
+ *  tail (`ive mail (delivered …): <id>.`). With no glyph there was no box, every COMMIT and every
+ *  recheck read UNKNOWN:no-composer, and the wake sat unsent for 20 min (Creed) and 25.8 h
+ *  (Phyllis). It still counts as ours when the rows between the rules hold no dialog row, the
+ *  footer is an allowed one, and together they are a suffix of exactly what we typed. The suffix
+ *  must be at least this long, so it carries the message id at the end of the wake line. Only
+ *  ever for COMMIT/REENTER (expected text). */
+const OWN_GLYPHLESS_MIN_CHARS = 40;
+function ownGlyphlessDraft(tail: readonly string[], expectedText: string): boolean {
+  const bottom = bottomRule(tail);
+  if (bottom < 2) return false;
+  let top = -1;
+  for (let i = bottom - 1; i >= Math.max(0, bottom - 1 - COMPOSER_MAX_ROWS); i -= 1) if (RULE.test(tail[i])) { top = i; break; }
+  if (top < 0 || bottom - top < 2) return false;
+  const rows = tail.slice(top + 1, bottom);
+  const footer = tail.slice(bottom + 1);
+  if (dialogRow(rows) !== null || dialogRow(footer) !== null || strangeFooterRow(footer) !== null) return false;
+  const seen = compact(rows.join(''));
+  const want = compact(expectedText);
+  return seen.length >= Math.min(OWN_GLYPHLESS_MIN_CHARS, want.length) && want.endsWith(seen);
+}
+
 /**
  * Condition 2 for Claude and agy. STAGE wants READY (the empty composer, or Claude's placeholder);
  * COMMIT and REENTER want READY_OWN_DRAFT (the composer holds exactly `expectedText`, compared
@@ -137,6 +161,7 @@ export function classifyTuiComposer(provider: TuiGuardProvider, f: CodexScreenFa
   if (!Array.isArray(tail) || tail.length === 0) return { cls: 'UNKNOWN', reason: 'no-tail' };
   const box = tuiComposerBox(provider, tail);
   if (!box && expectedText !== undefined && ownClippedDraft(tail, expectedText)) return { cls: 'READY_OWN_DRAFT', reason: 'own-draft-clipped' };
+  if (!box && expectedText !== undefined && expectedText.trim() !== '' && ownGlyphlessDraft(tail, expectedText)) return { cls: 'READY_OWN_DRAFT', reason: 'own-draft-glyphless' };
   if (!box) {
     const scan = tail.slice(-DIALOG_SCAN_ROWS);
     const hit = dialogRow(scan);
