@@ -100,7 +100,7 @@ import {
 } from './git';
 import { BoardMonitor } from './boardMonitor';
 import { BoardStatusWriter } from './boardStatus';
-import { FloorDigest, FLOOR_DIGEST_DEFAULTS, FLOOR_DIGEST_FILE } from './floorDigest';
+import { FloorDigest, FLOOR_DIGEST_DEFAULTS, FLOOR_DIGEST_FILE, readFlaggedForHuman, recordFlaggedForHuman } from './floorDigest';
 import { HiveManager, archivedForMail, type AgentMeta, type ArchiveReason, type HiveMessage, type HiveTask } from './hive';
 import { applyLedgerOp, perAgentQueue, type LedgerDeps } from './ledger';
 import { cardKeyRefusal, handleClaimVerb } from './claims/endpoint';
@@ -187,6 +187,7 @@ import { CodexRolloutCapacitySource, codexUserMessageMatches } from './codexRoll
 import { BootHookClock, startupSettled } from './bootSubmitEvidence';
 import { AgentLivenessMonitor, type LivenessFacts } from './agentLiveness';
 import { CODEX_ROTATE_MAX_ROLLOUT_BYTES, decideAgyRotation, decideThreadRotation, findAgyConversation, findCodexRollout, threadRotatedLogRow } from './codexThreadRotation';
+import { decideCodexLiveRotation, liveRotationEscalationId } from './codexLiveRotation';
 import { HistoryService } from './historyService';
 import { recordExit } from './ptyExitRecord';
 import Database from 'better-sqlite3';
@@ -510,6 +511,12 @@ const bootHooks = new BootHookClock();
  *  install disabled) so the freshly-installed CLI launches in the SAME pty/window —
  *  no user click. Cleared the moment it's consumed, so it can never loop installs. */
 const pendingInstallRelaunch = new Map<string, { opts: AgentSpawnOptions; owner: Electron.WebContents | null; bin: string }>();
+/** A deliberately graceful live session rotation.  It is populated only after the
+ * final idle recheck and consumed by the natural PTY exit handler. */
+const pendingCodexLiveRotation = new Map<string, { opts: AgentSpawnOptions; owner: Electron.WebContents | null; agentId: string }>();
+const pendingCodexLiveRotationDeadline = new Map<string, ReturnType<typeof setTimeout>>();
+const liveSpawnOptions = new Map<string, { opts: AgentSpawnOptions; owner: Electron.WebContents | null }>();
+const liveRotationLast = new Map<string, string>();
 const hive = new HiveManager(
   () => readConfig().harnessHome,
   (channel, payload) => {
@@ -1291,7 +1298,13 @@ const hookServer = new HookServer(
   // Observed BEFORE the hook response; the bridge defers any retry with setImmediate, so
   // the Stop reply is never blocked and no turn is manufactured inside the hook.
   // ZERO-TOKEN-LIVENESS: after the bridge saw the hook, a turn boundary re-samples liveness.
-  withLivenessEdge((agentId, event, message, fullyIdle, turnId, source) => { if (agentId) hookSeenAt.set(agentId, Date.now()); inboxWake?.onHook(agentId, event, message, fullyIdle, turnId, source); }),
+  withLivenessEdge((agentId, event, message, fullyIdle, turnId, source) => {
+    if (agentId) hookSeenAt.set(agentId, Date.now());
+    inboxWake?.onHook(agentId, event, message, fullyIdle, turnId, source);
+    // Never change a terminal from the hook response stack.  Stop is merely the
+    // earliest useful signal; the queued evaluation takes a fresh safety snapshot.
+    if (agentId && event === 'Stop') setImmediate(() => considerCodexLiveRotation(agentId));
+  }),
   (agentId, obs) => { providerCapacity.ingest(agentId, obs); capacityStore.scheduleSave(); },
   // AGY 1.1.48 — ONE validated statusline tick, routed to its two consumers. Capacity
   // first: the allowance pair is a provider fact and is true for the account whether or
@@ -1357,6 +1370,106 @@ hookServer.setHeavyAutoApproves((agentId) => heavyAutoApprove.get(agentId) === t
 /** IDLE-MEANS-IDLE: the lock as the displays read it (who holds, waits for, or has a slot reserved). */
 function heavyLockView(): HeavyLockView {
   return { holders: heavyLock.snapshot(), ...heavyLock.queueSnapshot() };
+}
+
+/** CODEX-ROLLOUT-SIZE: read all safety facts at the point of decision.  A caller
+ * never retains this snapshot across an asynchronous boundary. */
+function codexLiveRotationFacts(agentId: string): { facts: Parameters<typeof decideCodexLiveRotation>[0]; ptyId: string | undefined; sessionId: string | undefined } {
+  const ptyId = ptyForAgent(agentId);
+  const sessionId = hive.lastSession(agentId);
+  const wf = workerWake.livenessFacts(agentId);
+  const ws = workerWake.state(agentId);
+  const q = heavyLock.queueSnapshot();
+  const holders = heavyLock.snapshot();
+  const info = sessionId ? findCodexRollout(hive.codexHomeFor(agentId) ?? '', sessionId) : null;
+  const mail = fleetMail(agentId);
+  const humanAt = ptyId ? (ptyManager.lastHumanInputAt(ptyId) ?? 0) : 0;
+  return {
+    ptyId, sessionId,
+    facts: {
+      bytes: info?.bytes ?? null,
+      stopSeen: wf.lastTurnEndAt > 0,
+      turnOpen: wf.openTurnId !== null || wf.lifecycle === 'active',
+      toolRunning: hookServer.runningTool(agentId) !== null,
+      owed: (mail.awaitingReply?.length ?? 0) > 0 || (mail.openRequests?.length ?? 0) > 0,
+      wakePending: ws.pending.length > 0 || ws.announced.length > 0,
+      wakeInFlight: ws.inFlight !== null,
+      wakeHeld: ws.held !== null,
+      heavy: holders.some((x) => x.agentId === agentId) || q.waiters.some((x) => x.agentId === agentId) || q.reserved.some((x) => x.agentId === agentId),
+      floorHeld: parseFloorHold(readConfig().floorHold) !== null,
+      inputPending: !!ptyId && automaticSubmit.inhibition(ptyId) !== null,
+      humanTyping: humanAt > wf.lastTurnEndAt,
+      // Rotation teardown must never remove/recreate an isolated worktree or
+      // revoke an ephemeral worker's lifetime ownership.
+      workspaceIsolated: !!ptyId && (worktreePaths.has(ptyId) || liveWorkers.has(ptyId))
+    }
+  };
+}
+
+/** Log every reason transition (including KEEP), and only one identical row per PTY/session. */
+function noteCodexLiveRotation(agentId: string, sessionId: string | undefined, action: string, reason: string, bytes: number | null): void {
+  const k = `${sessionId ?? 'none'}:${action}:${reason}`;
+  if (liveRotationLast.get(agentId) === k) return;
+  liveRotationLast.set(agentId, k);
+  try { hive.appendLog({ kind: 'codex-live-rotation', agentId, sessionId: sessionId ?? null, action, reason, bytes }); } catch { /* observability must not affect safety */ }
+}
+
+/** The exit grace starts only after the submit owner settles: its quiet/commit gates
+ * may legitimately take longer than the grace itself. */
+function armCodexLiveRotationExitDeadline(ptyId: string, incarnation: number | undefined, agentId: string, sessionId: string | undefined, bytes: number | null): void {
+  const prior = pendingCodexLiveRotationDeadline.get(ptyId);
+  if (prior) clearTimeout(prior);
+  const timer = setTimeout(() => {
+    // A late owner result can arrive after this PTY id has been relaunched. Its
+    // grace belongs to the old process, so it must not delete or log for the new one.
+    if (ptyManager.incarnation(ptyId) !== incarnation) {
+      if (pendingCodexLiveRotationDeadline.get(ptyId) === timer) pendingCodexLiveRotationDeadline.delete(ptyId);
+      return;
+    }
+    pendingCodexLiveRotation.delete(ptyId);
+    pendingCodexLiveRotationDeadline.delete(ptyId);
+    noteCodexLiveRotation(agentId, sessionId, 'defer', 'exit-not-observed', bytes);
+  }, 10_000);
+  pendingCodexLiveRotationDeadline.set(ptyId, timer);
+}
+
+function considerCodexLiveRotation(agentId: string): void {
+  if (ptyProvider.get(ptyForAgent(agentId) ?? '') !== 'codex' || pendingCodexLiveRotation.has(ptyForAgent(agentId) ?? '')) return;
+  const a = codexLiveRotationFacts(agentId);
+  const d = decideCodexLiveRotation(a.facts);
+  noteCodexLiveRotation(agentId, a.sessionId, d.action, d.reason, d.bytes);
+  if (d.escalate && a.sessionId && hive.root()) {
+    try {
+      const root = hive.root()!;
+      const id = liveRotationEscalationId(agentId, a.sessionId, d.reason);
+      if (!readFlaggedForHuman(root).some((x) => x.id === id)) recordFlaggedForHuman(root, [{ agentId, card: 'CODEX-ROLLOUT-SIZE', id, subject: `Codex rollout ${d.bytes} bytes deferred: ${d.reason}`, at: Date.now() }], Date.now());
+    } catch { /* next beat retries */ }
+  }
+  if (d.action !== 'rotate' || !a.ptyId) return;
+  // A second complete read closes the gap between the Stop callback and the only write.
+  const b = codexLiveRotationFacts(agentId);
+  const again = decideCodexLiveRotation(b.facts);
+  if (again.action !== 'rotate' || b.ptyId !== a.ptyId || b.sessionId !== a.sessionId) { noteCodexLiveRotation(agentId, b.sessionId, again.action, again.reason, again.bytes); return; }
+  const spawn = liveSpawnOptions.get(a.ptyId);
+  if (!spawn) { noteCodexLiveRotation(agentId, a.sessionId, 'defer', 'owner-refused:no-live-spawn', again.bytes); return; }
+  // Arm before the guarded owner writes: Codex handles /exit without a rollout
+  // user row and can naturally exit before the owner's completion promise settles.
+  const incarnation = ptyManager.incarnation(a.ptyId!);
+  pendingCodexLiveRotation.set(a.ptyId!, { agentId, owner: spawn.owner, opts: { ...spawn.opts, resume: false, requireResume: false, resumeSessionId: undefined, startFresh: true } });
+  // The submit owner proves an empty, non-human composer and uses Codex's paste gap.
+  void automaticSubmit.submit({ requestId: `codex-live-rotate:${agentId}:${a.sessionId}`, agentId, admissionClass: 'CAPACITY_GATED', text: '/exit' }).then((outcome) => {
+    if (!ptyManager.list().some((p) => p.id === a.ptyId)) return;
+    if (outcome.kind === 'REFUSED') {
+      pendingCodexLiveRotation.delete(a.ptyId!);
+      noteCodexLiveRotation(agentId, a.sessionId, 'defer', `owner-refused:${outcome.reason}`, again.bytes);
+      return;
+    }
+    // COMMITTED, INTERFERED and uncertain outcomes may have put /exit into the TUI;
+    // retain the arm through a grace period so its natural exit still relaunches.
+    armCodexLiveRotationExitDeadline(a.ptyId!, incarnation, agentId, a.sessionId, again.bytes);
+  }).catch(() => {
+    if (ptyManager.list().some((p) => p.id === a.ptyId)) armCodexLiveRotationExitDeadline(a.ptyId!, incarnation, agentId, a.sessionId, again.bytes);
+  });
 }
 // IDLE-MEANS-IDLE: an agent running a heavy job in the background, queued for the lock or holding a
 // reservation has ended its turn, so liveness says IDLE; the renderer overlays the lock's view on it.
@@ -2164,6 +2277,10 @@ const preservedWorktrees = new Map<string, PreservedWorktree>();
  * handler or node-pty's onExit).
  */
 function teardownPty(id: string, archiveReason: ArchiveReason = 'explicit'): void {
+  liveSpawnOptions.delete(id);
+  pendingCodexLiveRotation.delete(id);
+  const rotationDeadline = pendingCodexLiveRotationDeadline.get(id); if (rotationDeadline) clearTimeout(rotationDeadline);
+  pendingCodexLiveRotationDeadline.delete(id);
   // Ephemeral-worker flag, read BEFORE the cleanup below deletes the entry. All
   // worker deaths (done-release, idle/token reap, manual stop, crash) funnel
   // through here, so this is the one place their floor card gets archived
@@ -2400,6 +2517,23 @@ function recordUnrequestedExit(agentId: string, ptyId: string, incarnation: numb
   });
 }
 ptyManager.setExitHandler((id, exitCode) => {
+  const rotating = pendingCodexLiveRotation.get(id);
+  if (rotating) {
+    pendingCodexLiveRotation.delete(id);
+    const rotationDeadline = pendingCodexLiveRotationDeadline.get(id); if (rotationDeadline) clearTimeout(rotationDeadline);
+    pendingCodexLiveRotationDeadline.delete(id);
+    liveSpawnOptions.delete(id);
+    // `/exit` is the only live-rotation action.  A non-zero exit is still not
+    // replaced: never turn a failed graceful shutdown into a forced restart.
+    if (exitCode === 0) {
+      // Unlike an installer, this was a live agent.  Retire all old-incarnation
+      // wake/liveness/lock bindings before the fresh PTY takes its place.
+      teardownPty(id, 'pty-exit');
+      try { liveWebContents()?.send(`pty:relaunch:${id}`); } catch { /* window gone */ }
+      void spawnAgentCore(rotating.opts, rotating.owner);
+      return;
+    }
+  }
   const pending = pendingInstallRelaunch.get(id);
   if (pending) {
     pendingInstallRelaunch.delete(id);
@@ -4614,6 +4748,9 @@ ipcMain.handle('pty:spawn', async (evt, opts: AgentSpawnOptions) => {
  *  no renderer `evt`). `owner` is the window that should receive this PTY's output
  *  (null → the primary window). Behavior-identical to the prior inline handler. */
 async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebContents | null): Promise<{ ok: boolean; error?: string; codexLayerOptIn?: string; cwd?: string; worktreePath?: string; resumeNotFound?: boolean; resumed?: boolean; seedPrompt?: string; orientationOnArgv?: boolean; installer?: boolean }> {
+  // Preserve the caller contract before this routine provisions and shapes argv/env.
+  // Live rotation must restart from this, never a resume/injection-mutated copy.
+  const callerSpawnOpts: AgentSpawnOptions = { ...opts, args: [...(opts.args ?? [])], env: { ...(opts.env ?? {}) }, pathPrepend: [...(opts.pathPrepend ?? [])], nodeRequire: [...(opts.nodeRequire ?? [])] };
   // ── cwd INGESTION — expand `~` exactly once, here ───────────────────────────
   // This is the single door every agent spawn comes through (`pty:spawn` IPC and
   // the god-triggered ephemeral-worker watcher), so it is where a user-typed
@@ -5268,6 +5405,11 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
   const wakeToken = provider === 'codex' && opts.hive?.id ? WakeIncarnationTokens.mint() : null;
   if (wakeToken) opts.env = { ...(opts.env ?? {}), [WAKE_INCARNATION_ENV]: wakeToken };
   const res = await ptyManager.spawn(opts, owner);
+  if (res.ok && provider === 'codex' && opts.hive?.id) {
+    // Keep only a clone: later resume/startup shaping must never mutate the
+    // saved fresh-launch contract used by the graceful live rotation.
+    liveSpawnOptions.set(opts.id, { owner, opts: callerSpawnOpts });
+  }
   if (res.ok && opts.hive?.id) heavyAutoApprove.set(opts.hive.id, approvesWithoutAsking(provider, [...tokenizeCommand(opts.command), ...(opts.args ?? [])]));
   if (res.ok && opts.hive?.id) logTermModes(opts.hive.id, opts.id, provider, didResume);
   if (res.ok) fsSpawnedCwds.add(opts.cwd);
@@ -8173,6 +8315,8 @@ function runWorkerWakeBeat(): void {
   runOwedContinuation(live);
   // ZERO-TOKEN-LIVENESS: after the WWR ran (it records its own STUCK edges first), every agent.
   sampleLivenessAll();
+  // A missed Stop cannot leave a completed oversized Codex session unobserved.
+  for (const agentId of live) considerCodexLiveRotation(agentId);
 }
 
 /** (Re)arm the always-on beats (decoupled from the optional heartbeat): the live
