@@ -19,8 +19,12 @@
 //       limit leaves a process where the limit put it): priority NORMAL, affinity the system mask.
 //   guppy-heavyjob list <jobName>
 //       One JSON line per process in the job: pid, name, priorityClass, cpus, mask, createdMs.
+//   guppy-heavyjob query <jobName>
+//       HALFCORES-SUITE-198: read-only, the job's OWN limits as one JSON line:
+//       {"background":bool,"half":bool,"mask":"<decimal>"|null}. A process's affinity is the AND of
+//       every job it is nested in, so its mask cannot tell this job's limit apart from an outer one's.
 //   guppy-heavyjob serve
-//       Guppy's own channel (stdin/stdout, one JSON line per request): create, set, list and close
+//       Guppy's own channel (stdin/stdout, one JSON line per request): create, set, list, query and close
 //       <job>. It holds the handle of every job Guppy made, so a job keeps its name (a live change and
 //       the join line find it) until Guppy lets it go.
 //       HEAVY-LOCK-RELEASE-LAG-197: every job it creates is tied to one completion port; a process of
@@ -87,10 +91,11 @@ static class HeavyJob
             if (a.Length >= 4 && a[0] == "join") return Join(JobName(a[1]), a[2] == "1", a[3].TrimEnd(';') == "1", a.Length > 4 || a[3].EndsWith(";") ? CmdRest() : null);
             if (a.Length == 4 && a[0] == "set") return Set(JobName(a[1]), a[2] == "1", a[3] == "1");
             if (a.Length == 2 && a[0] == "list") return List(JobName(a[1]));
+            if (a.Length == 2 && a[0] == "query") return Query(JobName(a[1]));
             if (a.Length == 1 && a[0] == "serve") return Serve();
         }
         catch (Exception e) { Console.Error.WriteLine("[guppy] heavy-job limits not applied: " + e.Message); return a.Length > 0 && a[0] == "join" ? 0 : 3; }
-        Console.Error.WriteLine("usage: guppy-heavyjob join|set <job> <background 0|1> <half 0|1> | list <job> | serve");
+        Console.Error.WriteLine("usage: guppy-heavyjob join|set <job> <background 0|1> <half 0|1> | list <job> | query <job> | serve");
         return 2;
     }
 
@@ -266,6 +271,31 @@ static class HeavyJob
         return r;
     }
 
+    static int Query(string name)
+    {
+        IntPtr job = OpenJobObjectW(JOB_ALL, false, name);
+        if (job == IntPtr.Zero) { Console.Error.WriteLine("no job " + name); return 1; }
+        try { Console.Out.Write(QueryJob(job) + "\n"); } finally { CloseHandle(job); }
+        return 0;
+    }
+
+    // The job's own JobObjectBasicLimitInformation (class 2): its priority and affinity limits only.
+    static string QueryJob(IntPtr job)
+    {
+        int size = Marshal.SizeOf(typeof(BASIC_LIMIT)); IntPtr buf = Marshal.AllocHGlobal(size);
+        try
+        {
+            if (!QueryInformationJobObject(job, 2, buf, size, IntPtr.Zero))
+                throw new Exception("QueryInformationJobObject failed (" + Marshal.GetLastWin32Error() + ")");
+            var b = (BASIC_LIMIT)Marshal.PtrToStructure(buf, typeof(BASIC_LIMIT));
+            bool background = (b.LimitFlags & LIMIT_PRIORITY_CLASS) != 0 && b.PriorityClass == BELOW_NORMAL;
+            bool half = (b.LimitFlags & LIMIT_AFFINITY) != 0;
+            return "{\"background\":" + (background ? "true" : "false") + ",\"half\":" + (half ? "true" : "false")
+                + ",\"mask\":" + (half ? "\"" + b.Affinity.ToUInt64() + "\"" : "null") + "}";
+        }
+        finally { Marshal.FreeHGlobal(buf); }
+    }
+
     static int List(string name)
     {
         IntPtr job = OpenJobObjectW(JOB_ALL, false, name);
@@ -375,6 +405,12 @@ static class HeavyJob
                 {
                     if (!jobs.TryGetValue(w[1], out job)) throw new Exception("no job " + w[1]);
                     reply = "{\"ok\":true,\"rows\":[" + ListJob(job, ",") + "]}";
+                }
+                else if (w.Length == 2 && w[0] == "query")
+                {
+                    if (!jobs.TryGetValue(w[1], out job)) throw new Exception("no job " + w[1]);
+                    string q = QueryJob(job);
+                    reply = "{\"ok\":true," + q.Substring(1);
                 }
                 else if (w.Length == 2 && w[0] == "close")
                 {

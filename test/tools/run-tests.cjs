@@ -106,6 +106,13 @@ const startSlots = (env = process.env, cores = os.availableParallelism()) => {
   const n = Number(env.GUPPY_START_SLOTS);
   return env.GUPPY_START_SLOTS !== undefined && env.GUPPY_START_SLOTS !== '' && Number.isInteger(n) && n >= 0 ? n : Math.max(2, Math.ceil(cores / 4));
 };
+/** HALFCORES-SUITE-198: the processor count in a HARNESS_CPU_MASK (decimal); null = no limit ('' or not a mask). */
+const maskCpus = (mask) => {
+  if (typeof mask !== 'string' || !/^[1-9]\d*$/.test(mask)) return null;
+  let n = 0;
+  for (let m = BigInt(mask); m; m >>= 1n) n += Number(m & 1n);
+  return n;
+};
 /**
  * TEST-TEMP-HYGIENE: every test-file process gets a temp folder of its own under one run folder
  * (temp-jail-preload.cjs), so a leak is named by its file and other processes' use of the shared
@@ -267,9 +274,13 @@ function run({
   const env = require('./ps-env.cjs').psEnv(process.env);
   delete env.NODE_TEST_CONTEXT;
   if (env.HARNESS_CPU_MASK === undefined) env.HARNESS_CPU_MASK = String(cpuMask() ?? '');
+  // HALFCORES-SUITE-198: on Windows node's availableParallelism ignores affinity, so inside a
+  // CPU-limited heavy job the default concurrency and start slots are sized from the mask instead.
+  const cpus = maskCpus(env.HARNESS_CPU_MASK);
+  if (cpus !== null) log(`[test-runner] ${cpus} processors in this run's mask: ${Math.max(1, cpus - 1)} files at once (HALFCORES-SUITE-198)`);
   // LOAD-BURST-196: the gate loads first, so a file's job join below is inside its start slot too.
   let gate = null;
-  try { gate = startGate(); } catch (e) { err(`[test-runner] no start gate (${String(e)}): every file loads at once (LOAD-BURST-196)`); }
+  try { gate = startGate({ slots: startSlots(env, cpus ?? os.availableParallelism()) }); } catch (e) { err(`[test-runner] no start gate (${String(e)}): every file loads at once (LOAD-BURST-196)`); }
   if (gate) {
     const opt = `--require "${START_GATE_PRELOAD.split(path.sep).join('/')}"`;
     env.NODE_OPTIONS = [env.NODE_OPTIONS, opt].filter(Boolean).join(' ');
@@ -285,7 +296,7 @@ function run({
     env.GUPPY_TEMP_JAIL_OPT = opt;
   }
   try {
-    return runGated({ filters, rel, env, gate, jail, spawn, cwd, timeoutMs, isTTY, eventsFile, readFile, removeFile, failureFile, writeFailureFile, watchdog, fileJob, log, err, perfDir, readdir });
+    return runGated({ filters, rel, env, cpus, gate, jail, spawn, cwd, timeoutMs, isTTY, eventsFile, readFile, removeFile, failureFile, writeFailureFile, watchdog, fileJob, log, err, perfDir, readdir });
   } finally {
     if (gate) { try { fs.rmSync(gate.dir, { recursive: true, force: true }); } catch { /* best effort */ } }
     if (jail) { try { removeJail(jail.root); } catch (e) { err(`[test-runner] the run's temp folders could not be removed (${e.code || e.message}; a child still holds a file): ${jail.root} (TEST-TEMP-HYGIENE)`); } }
@@ -303,7 +314,7 @@ function burstLine(text, slots) {
 }
 
 /** run() from the per-file jobs on, with the start gate in place (LOAD-BURST-196). */
-function runGated({ rel, env, gate, jail = null, spawn, cwd, timeoutMs, isTTY, eventsFile, readFile, removeFile, failureFile, writeFailureFile, watchdog, fileJob, log, err, perfDir, filters, readdir }) {
+function runGated({ rel, env, cpus = null, gate, jail = null, spawn, cwd, timeoutMs, isTTY, eventsFile, readFile, removeFile, failureFile, writeFailureFile, watchdog, fileJob, log, err, perfDir, filters, readdir }) {
   const job = fileJob();
   if (job.exe) {
     const opt = `--require "${FILE_JOB_PRELOAD.split(path.sep).join('/')}"`;
@@ -315,7 +326,7 @@ function runGated({ rel, env, gate, jail = null, spawn, cwd, timeoutMs, isTTY, e
     err(`[test-runner] per-file jobs are unavailable (${job.why}): a hung file is killed from a process snapshot, which can miss a process born just before the kill (LOAD-FLAKES-178)`);
   }
   const fx = { spawn, cwd, timeoutMs, isTTY, env, readFile, removeFile, watchdog, jobExe: job.exe, err };
-  const main = runNodeTest({ ...fx, rel, eventsFile, label: '' });
+  const main = runNodeTest({ ...fx, rel, eventsFile, label: '', extraArgs: cpus === null ? [] : [`--test-concurrency=${Math.max(1, cpus - 1)}`] });
   if (gate) log(burstLine(readFile(path.join(gate.dir, 'starts.jsonl')), gate.slots));
   // A child that never started, or was killed by a signal (status null), is a failure, not a pass.
   if (spawnFailed(main.res, '', err)) return totals(1, main.counts, 'not run', log, main.failures, { failureFile, writeFailureFile });
@@ -453,7 +464,7 @@ function totals(code, counts, laneState, log, failures = [], {
   return code;
 }
 
-module.exports = { prepareFileJob, FILE_JOB_PRELOAD, prepareTempJail, TEMP_JAIL_PRELOAD, tempLeaks, reportTempLeaks,prepareStartGate, startSlots, START_GATE_PRELOAD, burstLine, selectTestFiles, discoverTestFiles, FEATURE_TEST_DIRS, run, runPerfLane, runCounts, failingTests, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
+module.exports = { prepareFileJob, FILE_JOB_PRELOAD, prepareTempJail, TEMP_JAIL_PRELOAD, tempLeaks, reportTempLeaks,prepareStartGate, startSlots, maskCpus, START_GATE_PRELOAD, burstLine, selectTestFiles, discoverTestFiles, FEATURE_TEST_DIRS, run, runPerfLane, runCounts, failingTests, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
 
 if (require.main === module) {
   const repoRoot = path.resolve(__dirname, '..', '..');
