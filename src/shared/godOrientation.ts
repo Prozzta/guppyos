@@ -31,7 +31,7 @@ const ORIENTATION_STEPS = [
   // GOD-STARTUP-TOKENS R2: the harness keeps the board summarised (floor-digest.md, board-status.md, a
   // few KB); board.md and tasks.json are megabytes, and a god that reads them whole at every start
   // re-sends them at every later step.
-  '2. Read floor-digest.md and board-status.md (hive root) and the current roster of agents (active vs archived). Open board.md or tasks.json only for a named card, with grep or jq; never read them whole.',
+  '2. Read floor-digest.md and board-status.md (hive root) and the current roster of agents (active vs archived). Open board.md or tasks.json only for a named card, with grep or jq; never read them whole. A done card older than 48 h is in tasks-archive/*.jsonl, one card per line.',
   '3. Check fleet health: read fleet.json in the hive root for every agent\'s live tokens, cost, status, breaker level, and inbox backlog (`claude agents` will NOT show your hive\'s agents). Flag anyone stalled, over-budget, or breaker-armed.',
   '4. Skim COMMANDS.md (hive root) for the Claude Code commands you can use — and run `memory wake-up` for a memory digest (the built-in memory engine; skip it if semantic memory is off).',
   'Then begin orchestrating: triage requests, delegate work to the team, and keep everyone unblocked. You are fully autonomous — there is no approval queue, so handle tool-permission prompts in this session yourself (the human can approve them remotely from their phone).'

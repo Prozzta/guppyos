@@ -33,6 +33,8 @@ export interface HiveTask {
   dependsOn: string[];
   priority: number;
   createdAt: string;
+  /** What was done (appendResult lines); shown on archived cards (TASKS-JSON-SPLIT). */
+  result?: string;
   /** First-class human feedback: the god appends {q} when a card needs the
    *  human; the ASK ME view fills in {a}. Full history stays on the card. */
   humanQA?: HumanQA[];
@@ -99,6 +101,7 @@ export function parseTasks(raw: unknown): HiveTask[] {
       dependsOn: Array.isArray(t.dependsOn) ? t.dependsOn.filter((d): d is string => typeof d === 'string') : [],
       priority: typeof t.priority === 'number' ? t.priority : 3,
       createdAt: typeof t.createdAt === 'string' ? t.createdAt : new Date().toISOString(),
+      result: typeof t.result === 'string' ? t.result : undefined,
       humanQA: Array.isArray(t.humanQA)
         // F3 (Jim): the entry is kept AS STORED (options, recommended, multi, chosen and any
         // other field, uncapped), so writing a card back never rewrites its questions; only
@@ -175,6 +178,14 @@ export function TasksKanban() {
   const { tasks, setTasks, flags, meta, refresh } = useHiveTasks();
   // ZT-I4: the Floor panel (the harness's floor digest) in place of the columns.
   const [showFloor, setShowFloor] = useState(false);
+  // TASKS-JSON-SPLIT: hot tasks.json holds done cards for 48 h; older ones are in the archive,
+  // loaded once each time the human turns 'ARCHIVED' on (never polled).
+  const [archived, setArchived] = useState<HiveTask[] | null>(null);
+  const toggleArchived = useCallback(async () => {
+    if (archived) { setArchived(null); return; }
+    try { setArchived(parseTasks(await window.cth.hiveAllTasks()).filter((t) => t.status === 'done')); }
+    catch { setArchived([]); }
+  }, [archived]);
 
   // Dismiss a card off the board (human-initiated). The kanban is otherwise the
   // god's to write, but a person can clear a card they no longer want tracked.
@@ -226,6 +237,18 @@ export function TasksKanban() {
             boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)'
           }}
         >FLOOR</button>
+        <button
+          onClick={() => { void toggleArchived(); }}
+          title="also show done cards older than 48 h (the task archive)"
+          aria-pressed={!!archived}
+          style={{
+            border: 'none', cursor: 'pointer', padding: '2px 6px',
+            fontFamily: 'var(--cth-font-display)', fontSize: 9,
+            background: archived ? 'var(--cth-ink-900)' : 'var(--cth-cream-200)',
+            color: archived ? 'var(--cth-cream-50)' : 'var(--cth-ink-900)',
+            boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)'
+          }}
+        >ARCHIVED</button>
       </div>
       {showFloor && <FloorDigestPanel />}
 
@@ -234,7 +257,11 @@ export function TasksKanban() {
         flex: 1, minHeight: 0, display: 'flex', gap: 8, padding: 10, overflowX: 'auto'
       }}>
         {COLUMNS.map((col) => {
-          const cards = tasks.filter((t) => t.status === col.key);
+          const live = tasks.filter((t) => t.status === col.key);
+          const hotIds = new Set(tasks.map((t) => t.id));
+          const old = col.key === 'done' && archived ? archived.filter((t) => !hotIds.has(t.id)) : [];
+          const cards = [...live, ...old];
+          const isOld = new Set(old.map((t) => t.id));
           return (
             <div key={col.key} style={{
               flex: '1 1 0', minWidth: 170, display: 'flex', flexDirection: 'column',
@@ -260,8 +287,9 @@ export function TasksKanban() {
                     assigneeName={nameFor(t.assignee)}
                     flags={flags.filter((f) => f.cardId === t.id)}
                     age={t.status === 'done' ? '' : statusAgeText(meta[t.id], Date.now())}
+                    excerpt={isOld.has(t.id) ? resultExcerpt(t.result) : undefined}
                     onOpen={() => openTaskDetail(t.id)}
-                    onDismiss={() => dismissTask(t.id)}
+                    onDismiss={isOld.has(t.id) ? undefined : () => dismissTask(t.id)}
                   />
                 ))}
               </div>
@@ -278,7 +306,15 @@ export function TasksKanban() {
 // assignee. Everything else (the full contract, deps, controls) lives in the
 // detail view a click away: a kanban card can carry a title at most.
 
-function TaskCard({ task, accent, assigneeName, flags = [], age = '', onOpen, onDismiss }: {
+/** TASKS-JSON-SPLIT: the newest result line, without its [ISO] stamp, for an archived card's face. */
+export function resultExcerpt(result?: string): string | undefined {
+  if (!result) return undefined;
+  const lines = result.split('\n').map((l) => l.replace(/^\[\d{4}-\d\d-\d\dT[^\]]*\]\s*/, '').trim()).filter(Boolean);
+  const last = lines[lines.length - 1];
+  return last ? (last.length > 140 ? `${last.slice(0, 139)}…` : last) : undefined;
+}
+
+function TaskCard({ task, accent, assigneeName, flags = [], age = '', excerpt, onOpen, onDismiss }: {
   task: HiveTask;
   accent: string;
   assigneeName?: string;
@@ -286,8 +322,11 @@ function TaskCard({ task, accent, assigneeName, flags = [], age = '', onOpen, on
   flags?: CardFlag[];
   /** ZT-I3: how long the card has been in its status (from the guard's sidecar). */
   age?: string;
+  /** TASKS-JSON-SPLIT: an archived card shows what was done (its result). */
+  excerpt?: string;
   onOpen: () => void;
-  onDismiss: () => void;
+  /** Absent for an archived card: it is not on hot tasks.json, so there is nothing to dismiss. */
+  onDismiss?: () => void;
 }) {
   return (
     <div style={{ position: 'relative', display: 'flex' }}>
@@ -314,6 +353,12 @@ function TaskCard({ task, accent, assigneeName, flags = [], age = '', onOpen, on
               {[assigneeName?.toUpperCase(), age].filter(Boolean).join(' · ')}
             </span>
           )}
+          {excerpt && (
+            <span data-excerpt="result" style={{
+              fontSize: 11, lineHeight: '14px', color: 'var(--cth-ink-700)',
+              display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden'
+            }}>{excerpt}</span>
+          )}
         </span>
         {flags.length > 0 && (
           <span data-flag="card" title={flags.map((f) => `${f.kind}: ${f.evidence}${f.decision ? ' (god decides)' : ''}`).join('\n')} style={{
@@ -333,7 +378,7 @@ function TaskCard({ task, accent, assigneeName, flags = [], age = '', onOpen, on
         )}
       </button>
       {/* Dismiss — sibling button (not nested) so it never triggers onOpen. */}
-      <button
+      {onDismiss && <button
         onClick={(e) => { e.stopPropagation(); onDismiss(); }}
         title="dismiss this task (removes it from the board)"
         aria-label="dismiss task"
@@ -345,7 +390,7 @@ function TaskCard({ task, accent, assigneeName, flags = [], age = '', onOpen, on
         }}
         onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--cth-coral)'; }}
         onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--cth-ink-500)'; }}
-      >✕</button>
+      >✕</button>}
     </div>
   );
 }

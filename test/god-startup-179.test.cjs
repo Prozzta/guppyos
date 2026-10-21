@@ -299,7 +299,7 @@ test('R2: the fresh god\'s orientation reads the digest and the board status, an
   const src = fs.readFileSync(path.join(__dirname, '..', 'src/shared/godOrientation.ts'), 'utf8');
   const prompt = src.slice(src.indexOf('const ORIENTATION_STEPS = ['), src.indexOf("].join('\\n');", src.indexOf('const ORIENTATION_STEPS = [')));
   assert.ok(prompt.length > 200, 'the orientation was found in the shared module');
-  assert.match(prompt, /'2\. Read floor-digest\.md and board-status\.md \(hive root\) and the current roster of agents \(active vs archived\)\. Open board\.md or tasks\.json only for a named card, with grep or jq; never read them whole\.'/);
+  assert.match(prompt, /'2\. Read floor-digest\.md and board-status\.md \(hive root\) and the current roster of agents \(active vs archived\)\. Open board\.md or tasks\.json only for a named card, with grep or jq; never read them whole\. A done card older than 48 h is in tasks-archive\/\*\.jsonl, one card per line\.'/);
   assert.doesNotMatch(prompt, /Review board\.md \+ tasks\.json/);
 });
 

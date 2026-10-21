@@ -1053,6 +1053,8 @@ const api = {
     ipcRenderer.invoke('hive:setAgentHold', id, hold),
   hiveBoard: (): Promise<string> => ipcRenderer.invoke('hive:board'),
   hiveTasks: (): Promise<unknown> => ipcRenderer.invoke('hive:tasks'),
+  /** TASKS-JSON-SPLIT: hot plus the archive, for the board's 'Show archived' and an archived card's detail. */
+  hiveAllTasks: (): Promise<unknown> => ipcRenderer.invoke('hive:allTasks'),
   /** ZT-I3: the board monitor's flags (BoardFlag[]). */
   hiveBoardFlags: (): Promise<unknown> => ipcRenderer.invoke('hive:boardFlags'),
   /** CARD-BADGE-AMBIGUOUS: the board flags + each agent's messages waiting, for the card badges. */

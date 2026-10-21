@@ -1489,7 +1489,7 @@ function claimExport(): ClaimExport {
       // The complete rendering marks statuses from the state; world evidence unknown here is neutral.
       view: (_agentId, records, state) => buildClaimsWorldView(state, records, [], {
         now: new Date().toISOString(),
-        taskStatus: (id) => ((hive.tasks() as { tasks?: Array<{ id: string; status: string }> }).tasks ?? []).find((t) => t.id === id)?.status ?? null,
+        taskStatus: (id) => ((hive.allTasks() as { tasks?: Array<{ id: string; status: string }> }).tasks ?? []).find((t) => t.id === id)?.status ?? null,
         fileExists: () => true, commitExists: () => true, fileChangedSince: () => false, cardOutcomes: {},
       }),
       log: (row) => hive.appendLog(row),
@@ -1526,7 +1526,7 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
         headAnchor: new FileHeadAnchorStore(join(app.getPath('userData'), HEAD_ANCHOR_FILE)),
         log: (row) => hive.appendLog(row),
         // R1 (Jim R-2): a claim whose task TTL has ended is not live for an exact-duplicate sighting.
-        taskStatus: (id) => ((hive.tasks() as { tasks?: Array<{ id: string; status: string }> }).tasks ?? []).find((t) => t.id === id)?.status ?? null,
+        taskStatus: (id) => ((hive.allTasks() as { tasks?: Array<{ id: string; status: string }> }).tasks ?? []).find((t) => t.id === id)?.status ?? null,
         onAppend: (agentId, id, rec) => {
           // CL-READERWATCHER: a first claim of an unimported reader or writer starts its import now.
           try { const at = hive.root(); if (at && memoryMdReplaced(claimLevel(agentId)) && !importSettled(at, agentId)) void claimsImportReady().then(() => readerWatchers.ensureImported(agentId)); } catch (e) { hive.appendLog({ kind: 'claims-watch-error', agentId, error: String(e).slice(0, 160) }); }
@@ -1734,7 +1734,7 @@ const claimDelivery = createClaimDelivery({
   derive: deriveClaims,
   worldView: buildClaimsWorldView,
   agentCwd: (agentId) => hive.registry().agents[agentId]?.cwd ?? null,
-  tasks: () => (hive.tasks() as { tasks?: TaskRow[] }).tasks ?? [],
+  tasks: () => (hive.allTasks() as { tasks?: TaskRow[] }).tasks ?? [],
   usage: (agentId) => {
     try { return readFileSync((claimsEndpoint() as ClaimsEndpointDeps).store.usageFile(agentId), 'utf8').split('\n').filter(Boolean).flatMap((line) => { try { return [JSON.parse(line) as UsageRec]; } catch { return []; } }); } catch { return []; }
   },
@@ -1799,7 +1799,7 @@ hookServer.setLedgerHandler((agentId, body) => ledgerQueue(agentId, () => {
     agentDir,
     isRecipient: (to) => to === 'god' || to === 'broadcast' || !!hive.registry().agents[to],
     readTasks: () => {
-      const t = (hive.tasks() as { tasks?: unknown }).tasks;
+      const t = hive.allTasks().tasks;
       return Array.isArray(t) ? (t as HiveTask[]) : [];
     },
     addTask: (task) => hive.addTask(task, 'ledger'),
@@ -1835,6 +1835,8 @@ const HEAVY_PRELOAD = join(app.isPackaged ? process.resourcesPath : join(app.get
 const LEDGER_CLI = join(app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'resources'), 'ledger-cli.cjs');
 // HEAVY-LOCK-RESERVATION-RELEASE: the `heavy` command (status; give up a reserved slot), shipped the same way.
 const HEAVY_CLI = join(app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'resources'), 'heavy-cli.cjs');
+// TASKS-JSON-SPLIT: tasks-all / tasks-revive / tasks-unsplit (the archive's reader, revive, rollback).
+const TASKS_CLI = join(app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'resources'), 'tasks-cli.cjs');
 // GOD-TERMINAL-CONTROL M1: god's `term` command (read the live screen, type, keys, send) on the same
 // broker and per-spawn token as `ledger`. The god check is made HERE, per request, against the
 // registry's god now (termControl.ts); the env URL being god-only is hygiene, not the boundary.
@@ -3841,7 +3843,7 @@ function lookupWebhookStatus(token: string): WebhookTaskStatus | null {
   const wanted = Buffer.from(hash);
   let tasks: HiveTask[];
   try {
-    const ledger = hive.tasks() as { tasks?: HiveTask[] };
+    const ledger = hive.allTasks() as { tasks?: HiveTask[] };
     tasks = Array.isArray(ledger?.tasks) ? ledger.tasks : [];
   } catch { return null; }
   for (const t of tasks) {
@@ -4787,6 +4789,9 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
       // HEAVY-LOCK-RESERVATION-RELEASE: `heavy` on every hive agent's PATH (same URL, token and reach).
       const heavyDir = hive.writeHeavyCommand(HEAVY_CLI);
       if (heavyDir) opts.pathPrepend = [...(opts.pathPrepend ?? []), heavyDir];
+      // TASKS-JSON-SPLIT: tasks-all (pass-sweep, old cards), tasks-revive, tasks-unsplit on every hive agent's PATH.
+      const tasksDir = hive.writeTasksCommands(TASKS_CLI);
+      if (tasksDir) opts.pathPrepend = [...(opts.pathPrepend ?? []), tasksDir];
       // GOD-TERMINAL-CONTROL: `term` on god's PATH only (the broker refuses any other caller anyway).
       if (opts.hive.isGod) {
         const termDir = hive.writeTermCommand(TERM_CLI);
@@ -5835,6 +5840,8 @@ ipcMain.handle('hive:setAgentHold', (_evt, id: unknown, hold: unknown) => {
 });
 ipcMain.handle('hive:board', () => hive.board());
 ipcMain.handle('hive:tasks', () => hive.tasks());
+// TASKS-JSON-SPLIT: hot plus archive, loaded once when the board's 'Show archived' is pressed.
+ipcMain.handle('hive:allTasks', () => hive.allTasks());
 // ZT-I3: the board monitor's current flags (stale, archived, down, stuck, ask-answered).
 ipcMain.handle('hive:boardFlags', () => boardMonitor.flags());
 // CARD-BADGE-AMBIGUOUS: what the player cards need: the flags, and each active agent's
@@ -6867,6 +6874,12 @@ ipcMain.handle('hive:textSearch', (_evt, query: unknown) => {
     { path: join(root, 'board.md'), source: 'board.md' },
     { path: join(root, 'tasks.json'), source: 'tasks.json' }
   ];
+  const archiveDir = join(root, 'tasks-archive');
+  if (existsSync(archiveDir)) {
+    for (const f of readdirSync(archiveDir).filter((n) => n.endsWith('.jsonl')).sort()) {
+      targets.push({ path: join(archiveDir, f), source: `tasks-archive/${f}` });
+    }
+  }
   const agentsDir = join(root, 'agents');
   if (existsSync(agentsDir)) {
     for (const id of readdirSync(agentsDir)) {
