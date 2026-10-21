@@ -273,6 +273,10 @@ test('t9 wiring: fed from the owner\'s onOutcome (not wakeDiag), the watch canno
   const onOutcomeAt = idx.lastIndexOf('onOutcome: (r) => {', callAt);
   assert.ok(onOutcomeAt > 0 && callAt - onOutcomeAt < 600, 'inside the owner onOutcome handler');
   assert.ok(idx.indexOf('quietRefusals.outcome(', onOutcomeAt) < callAt, 'next to the quiet-refusal watch');
+  // Jim P1/P2: the call sits above the COMMITTED branch, with no early return before it, so the
+  // watch sees every refusal AND every COMMITTED (which ends a run).
+  const before = idx.slice(onOutcomeAt, callAt);
+  assert.ok(!before.includes('COMMITTED') && !before.includes('return'), `fed before the COMMITTED branch and any return: ${before}`);
   const diagAt = idx.indexOf("} else if (stage === 'settle') {");
   assert.ok(diagAt > 0);
   assert.ok(!idx.slice(diagAt, diagAt + 800).includes('refusedSettles'), 'the folded wakeDiag hook does not feed it');
