@@ -7,7 +7,7 @@
  *   kind 'main-stall'          the heartbeat (a 25 ms unref'd interval) came back late by >= 100 ms:
  *                              ms, at (epoch ms of the late window's start), eld (the beat's whole
  *                              gap), slices (the sync calls of >= 16 ms that overlap the window:
- *                              {k: 'ipc' | 'fs' | 'exec', name, ms}). No slice = native code, a GC or
+ *                              {k: 'ipc' | 'fs', name, ms}). No slice = native code, a GC or
  *                              an Electron-internal wait (only part 5 can name those)
  *   kind 'input-delay'         (renderer, Event Timing) a keydown/keypress/beforeinput/input/
  *                              pointerdown that took >= 100 ms: ev, inputMs, procMs, presMs, target
@@ -17,10 +17,10 @@
  *                              self-time frames of a 30 s sampling window that held a >= 500 ms stall
  *
  * SLICES: ipcMain.handle/on listeners (once goes through on) are wrapped as they register (the synchronous part of a
- * handler is timed, so an async handler's awaits are not counted), and the sync fs and child_process
- * calls are wrapped once on the module objects. A call costs two performance.now() reads; only a call
- * of >= 16 ms is kept (a 200-entry ring), and only then is its name worked out: the channel, the fs
- * function plus the path's basename, or the command's basename. Never arguments or contents.
+ * handler is timed, so an async handler's awaits are not counted), and the sync fs calls are wrapped
+ * once on the module object. A call costs two performance.now() reads; only a call of >= 16 ms is
+ * kept (a 200-entry ring), and only then is its name worked out: the channel, or the fs function plus
+ * the path's basename. Never arguments or contents. (No child_process: main makes no sync child call.)
  *
  * RATE CAP: one row per kind per 5 s. A row inside the window is folded: the window's worst one is
  * written when the window ends, with `folded` = how many were folded into it.
@@ -46,9 +46,8 @@ export const PROFILE_TOP = 12;
 
 export const INPUT_EVENTS: ReadonlySet<string> = new Set(['keydown', 'keypress', 'beforeinput', 'input', 'pointerdown']);
 export const SYNC_FS_FNS = ['readFileSync', 'writeFileSync', 'appendFileSync', 'renameSync', 'readdirSync', 'statSync'] as const;
-export const SYNC_EXEC_FNS = ['execSync', 'execFileSync', 'spawnSync'] as const;
 
-export type SliceKind = 'ipc' | 'fs' | 'exec';
+export type SliceKind = 'ipc' | 'fs';
 export type StallRowKind = 'main-stall' | 'input-delay' | 'renderer-longtask';
 
 /** Config `stallWatch`: unset = on; false = off; { profile: true } = on with part 5. Read at startup. */
@@ -76,11 +75,14 @@ export interface StallWatchDeps {
   clearInterval?: (h: unknown) => void;
 }
 
-/** The objects whose functions are wrapped (main passes ipcMain, node:fs and node:child_process). */
+/**
+ * The objects whose functions are wrapped (main passes ipcMain and node:fs). No child_process: main
+ * makes no synchronous child call at all (SYNC-CHILD CENSUS, sync-child-calls-173, allowlist empty),
+ * and handing main the module as a value is the very shape that census refuses.
+ */
 export interface StallTargets {
   ipcMain?: { handle: Function; on: Function; removeListener: Function; off?: Function };
   fs?: Record<string, unknown>;
-  childProcess?: Record<string, unknown>;
 }
 
 /** What the renderer sends (validated in fromRenderer). */
@@ -102,14 +104,6 @@ export function baseName(p: unknown): string {
   if (typeof p !== 'string') return '#';
   const parts = p.split(/[\\/]+/);
   return (parts[parts.length - 1] || parts[parts.length - 2] || '').slice(0, 64);
-}
-
-/** A command's program name only: the first token's basename (quotes stripped), at most 32 chars. */
-export function commandName(cmd: unknown): string {
-  if (typeof cmd !== 'string') return '#';
-  const t = cmd.trim();
-  const first = t.startsWith('"') ? t.slice(1, Math.max(1, t.indexOf('"', 1))) : t.split(/\s+/)[0];
-  return baseName(first).slice(0, 32);
 }
 
 export class StallWatch {
@@ -139,12 +133,6 @@ export class StallWatch {
     (this.beatTimer as { unref?: () => void })?.unref?.();
     if (targets.ipcMain) this.wrapIpc(targets.ipcMain);
     if (targets.fs) for (const fn of SYNC_FS_FNS) this.wrapFn(targets.fs, fn, 'fs', (a) => `${fn}:${baseName(a[0])}`);
-    if (targets.childProcess) {
-      // execSync takes a command line; execFileSync/spawnSync a file (which may hold spaces).
-      for (const fn of SYNC_EXEC_FNS) {
-        this.wrapFn(targets.childProcess, fn, 'exec', (a) => (fn === 'execSync' ? commandName(a[0]) : baseName(a[0]).slice(0, 32)));
-      }
-    }
     if (this.d.profiler) this.startProfile();
   }
 
@@ -223,7 +211,7 @@ export class StallWatch {
     }
   }
 
-  private write(kind: string, row: Record<string, unknown>, folded = 0): void {
+  private logRow(kind: string, row: Record<string, unknown>, folded = 0): void {
     try { this.d.log({ kind, ...row, ...(folded ? { folded } : {}) }); } catch { /* best-effort */ }
   }
 
@@ -232,7 +220,7 @@ export class StallWatch {
     this.flushDue(t);
     const c = this.caps.get(kind);
     if (!c || t >= c.until) {
-      this.write(kind, row);
+      this.logRow(kind, row);
       this.caps.set(kind, { until: t + ROW_CAP_MS, folded: 0, worst: null, worstMs: 0 });
       return;
     }
@@ -244,7 +232,7 @@ export class StallWatch {
   private flushDue(t: number): void {
     for (const [kind, c] of this.caps) {
       if (!c.worst || t < c.until) continue;
-      this.write(kind, c.worst, c.folded);
+      this.logRow(kind, c.worst, c.folded);
       const at = Number.isFinite(t) ? t : c.until;
       this.caps.set(kind, { until: at + ROW_CAP_MS, folded: 0, worst: null, worstMs: 0 });
     }
@@ -325,7 +313,7 @@ export class StallWatch {
       s.post('Profiler.stop', undefined, (err, res) => {
         if (!err && worst >= PROFILE_KEEP_MS) {
           const top = topFrames((res as { profile?: unknown } | undefined)?.profile);
-          this.write('main-stall-profile', { worstMs: ms0(worst), windowMs: PROFILE_WINDOW_MS, top });
+          this.logRow('main-stall-profile', { worstMs: ms0(worst), windowMs: PROFILE_WINDOW_MS, top });
         }
         if (this.on && this.session === s) { try { s.post('Profiler.start'); } catch { /* gone */ } }
       });

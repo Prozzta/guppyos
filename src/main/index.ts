@@ -31,7 +31,6 @@ import { codexLayerOptInKey, type CodexLayerNotice } from './codexProjectLayers'
 import { StartupTiming } from './startupTiming';
 import { StallWatch, stallWatchMode } from './stallWatch';
 import fsModule from 'node:fs';
-import childProcessModule from 'node:child_process';
 import { Session as InspectorSession } from 'node:inspector';
 import type { WorkerHandle } from './nativeMemory/service';
 import { spawn, execFile } from 'node:child_process';
@@ -1436,7 +1435,7 @@ const stallWatch = new StallWatch({
   log: (row) => hive.appendLog(row),
   profiler: stallMode.profile ? () => { const s = new InspectorSession(); s.connect(); return s; } : null
 });
-if (stallMode.on) stallWatch.start({ ipcMain, fs: fsModule as unknown as Record<string, unknown>, childProcess: childProcessModule as unknown as Record<string, unknown> });
+if (stallMode.on) stallWatch.start({ ipcMain, fs: fsModule as unknown as Record<string, unknown> });
 // CLAIM-LEDGER W1: the ledger store, made on first use per hive root. Its MAC key lives in user-data,
 // encrypted with safeStorage (never in a hive file or an agent's env). The verbs write only at the
 // effective level 'writer' (settings clamped to what this build implements; a clamp is logged once).

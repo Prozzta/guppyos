@@ -2,14 +2,14 @@
 
 /**
  * STALL-WATCH-198 (god, UI-CRAWL-HALFCORES-197): main-stall / input-delay / renderer-longtask rows
- * in log.jsonl, from a 25 ms heartbeat and timed sync calls (ipc handlers, sync fs, sync exec),
+ * in log.jsonl, from a 25 ms heartbeat and timed sync calls (ipc handlers, sync fs),
  * plus the renderer's Event Timing and long tasks. Rate-capped (1 row per kind per 5 s, the rest
  * folded), config `stallWatch` default on, part 5 (the profiler) default OFF. Never typed text.
  *
  * Each check is a killer in K (it throws when the module misbehaves); the tests run them on the
  * real source and the census at the end runs them on mutated source (loadTs.fromText, nothing
- * written to disk). One real block too: a spawnSync of a 300 ms busy node child, on the real
- * child_process module and the real clock (restored after).
+ * written to disk). One real block too: a spawnSync of a 300 ms busy node child on the real clock
+ * is a row with no slice (child_process is never wrapped: main makes no sync child call).
  * No hive, no HOME: nothing here builds hive objects.
  */
 
@@ -97,40 +97,36 @@ const K = {
     assert.equal(r.stalls().length, 0);
   },
 
-  /** A sync fs call and a sync exec that block main are named in the stall's row (basenames only). */
-  namesFsAndExec(mod = M) {
+  /** Sync fs calls that block main are named in the stall's row (basenames only, longest first). */
+  namesFs(mod = M) {
     const r = rig(mod);
-    const fsT = slowObj(r, ['readFileSync', 'writeFileSync', 'appendFileSync', 'renameSync', 'readdirSync', 'statSync', 'existsSync'], 300);
-    const cpT = slowObj(r, ['execSync', 'execFileSync', 'spawnSync', 'spawn'], 200);
-    r.w.start({ fs: fsT, childProcess: cpT });
+    const fsT = { ...slowObj(r, ['readFileSync', 'appendFileSync', 'renameSync', 'readdirSync', 'statSync', 'existsSync'], 300), ...slowObj(r, ['writeFileSync'], 200) };
+    r.w.start({ fs: fsT });
     const ret = fsT.readFileSync('C:\\Users\\x\\hive\\agents\\a1\\inbox\\secret-body.json', 'utf8');
     assert.equal(ret.self, fsT, 'the original runs with its own this');
     assert.deepEqual(ret.args, ['C:\\Users\\x\\hive\\agents\\a1\\inbox\\secret-body.json', 'utf8'], 'and its own arguments');
-    cpT.execSync('"C:\\Program Files\\Git\\cmd\\git.exe" commit -m "typed words"');
+    fsT.writeFileSync('C:\\Program Files\\notes dir\\draft notes.txt', 'typed words');
     r.w.beat();
     const s = r.stalls();
     assert.equal(s.length, 1);
     assert.deepEqual(s[0].slices, [
       { k: 'fs', name: 'readFileSync:secret-body.json', ms: 300 },
-      { k: 'exec', name: 'git.exe', ms: 200 }
-    ], 'the longest first; the fs path basename and the program name only');
-    assert.doesNotMatch(JSON.stringify(s[0]), /typed words|commit|Users/, 'no arguments, no directories');
-    // every listed sync fn is wrapped; an unlisted one (existsSync, spawn) is not
+      { k: 'fs', name: 'writeFileSync:draft notes.txt', ms: 200 }
+    ], 'the longest first; the path basename only (its spaces kept)');
+    assert.doesNotMatch(JSON.stringify(s[0]), /typed words|notes dir|Users/, 'no contents, no directories');
     r.w.stop();
     assert.equal(fsT.readFileSync.toString().includes('advance'), true, 'stop() puts the originals back');
-    // every listed sync fn is wrapped (a file path keeps its spaces); an unlisted one (existsSync, spawn) is not
-    const one = (obj, n, arg, want) => {
+    // every listed sync fn is wrapped; an unlisted one (existsSync) is not
+    const one = (n, arg, want) => {
       const q = rig(mod);
       const t = slowObj(q, [n], 300);
-      q.w.start(obj === 'fs' ? { fs: t } : { childProcess: t });
+      q.w.start({ fs: t });
       t[n](arg, ['secret']);
       q.w.beat();
       assert.deepEqual(q.stalls()[0].slices, want, n);
     };
-    for (const n of ['writeFileSync', 'appendFileSync', 'renameSync', 'readdirSync', 'statSync']) one('fs', n, '/tmp/f.txt', [{ k: 'fs', name: `${n}:f.txt`, ms: 300 }]);
-    for (const n of ['execFileSync', 'spawnSync']) one('cp', n, 'C:\\Program Files\\nodejs\\node.exe', [{ k: 'exec', name: 'node.exe', ms: 300 }]);
-    one('fs', 'existsSync', '/tmp/f.txt', []);
-    one('cp', 'spawn', '/usr/bin/tool', []);
+    for (const n of ['writeFileSync', 'appendFileSync', 'renameSync', 'readdirSync', 'statSync']) one(n, '/tmp/f.txt', [{ k: 'fs', name: `${n}:f.txt`, ms: 300 }]);
+    one('existsSync', '/tmp/f.txt', []);
   },
 
   /** ipcMain handlers are timed by channel as they register; removeListener finds the wrapper. */
@@ -395,7 +391,7 @@ const KR = {
 test('config stallWatch: unset/true = on, false = off, the profiler only with { profile: true }', () => K.mode());
 test('main-stall: a beat late by >= 100 ms is a row (99 is not); no overlapping call = slices []', () => K.threshold());
 test('main-stall: a suspend-sized gap is not a stall', () => K.suspend());
-test('main-stall names the blocking sync fs call and sync exec (basenames only, longest first)', () => K.namesFsAndExec());
+test('main-stall names the blocking sync fs calls (basenames only, longest first)', () => K.namesFs());
 test('ipcMain handlers are timed by channel; results, this and removeListener still work', () => K.ipc());
 test('ipcMain.once: timed once, removable by its original', () => K.ipcOnce());
 test('slices: kept at >= 16 ms, named only then', () => K.sliceFloor());
@@ -412,24 +408,24 @@ test('part 5: only a window with a >= 500 ms stall keeps its top frames', () => 
 test('renderer: a slow keydown becomes an input-delay entry with a test id, never the text', () => KR.rendererInput());
 test('renderer: targetName is a test id, id or tag', () => KR.targetName());
 
-test('REAL block: a 300 ms spawnSync on the real child_process module and clock is named in the row', () => {
+// No child_process wrapping: main makes no sync child call (SYNC-CHILD CENSUS, sync-child-calls-173),
+// so a real block of that kind (here, in this test process) is a row with no slice, as native code is.
+test('REAL block: a 300 ms spawnSync on the real clock is a main-stall row; child_process is never wrapped', () => {
   const rows = [];
   const w = new M.StallWatch({ now: () => performance.now(), origin: performance.timeOrigin, log: (r) => rows.push(r), setInterval: () => 'I', clearInterval: () => {} });
   const orig = childProcess.spawnSync;
-  w.start({ childProcess });
+  w.start({ fs });
   try {
-    assert.notEqual(childProcess.spawnSync, orig);
+    assert.equal(childProcess.spawnSync, orig);
     const res = childProcess.spawnSync(process.execPath, ['-e', 'const t = Date.now(); while (Date.now() - t < 300);'], { windowsHide: true });
     assert.equal(res.status, 0);
     w.beat();
   } finally { w.stop(); }
-  assert.equal(childProcess.spawnSync, orig, 'stop() restored the real function');
   const s = rows.filter((r) => r.kind === 'main-stall');
   assert.equal(s.length, 1);
   assert.ok(s[0].ms >= 250, `blocked ${s[0].ms} ms`);
-  assert.equal(s[0].slices[0].k, 'exec');
-  assert.equal(s[0].slices[0].name, path.basename(process.execPath));
-  assert.ok(s[0].slices[0].ms >= 280);
+  assert.deepEqual(s[0].slices, []);
+  assert.doesNotMatch(code(MAIN), /childProcess|execSync|execFileSync|spawnSync/, 'stallWatch.ts wraps no child_process API');
 });
 
 test('wiring: armed before the first ipcMain registration, config-gated, the profiler only on profile, the renderer channel', () => {
@@ -441,10 +437,10 @@ test('wiring: armed before the first ipcMain registration, config-gated, the pro
     if (m) assert.ok(m.index > start, `${re} registers before stallWatch.start`);
   }
   assert.match(idx, /const stallMode = stallWatchMode\(readConfig\(\)\.stallWatch\);/);
-  assert.match(idx, /if \(stallMode\.on\) stallWatch\.start\(\{ ipcMain, fs: fsModule [^\n]*childProcess: childProcessModule/);
+  assert.match(idx, /if \(stallMode\.on\) stallWatch\.start\(\{ ipcMain, fs: fsModule as unknown as Record<string, unknown> \}\);/);
   assert.match(idx, /profiler: stallMode\.profile \? \(\) => \{[^\n]*\} : null/);
   assert.match(idx, /import fsModule from 'node:fs';/, 'a default import: the real module object, not a namespace copy');
-  assert.match(idx, /import childProcessModule from 'node:child_process';/);
+  assert.doesNotMatch(idx, /childProcessModule/, 'main hands stallWatch no child_process (SYNC-CHILD CENSUS)');
   assert.match(idx, /ipcMain\.on\('stall:watch', \(_evt, batch: unknown\) => stallWatch\.fromRenderer\(batch\)\);/);
   assert.match(code('src/preload/index.ts'), /stallWatch: \([^\n]*\): void =>\s*ipcRenderer\.send\('stall:watch', batch\)/);
   assert.match(code('src/renderer/src/main.tsx'), /\nstartRendererStallWatch\(\);/);
@@ -460,14 +456,12 @@ const MUTANTS = [
   { name: 'heartbeat 50 ms', file: MAIN, from: 'STALL_BEAT_MS = 25;', to: 'STALL_BEAT_MS = 50;', k: K.threshold },
   { name: 'no suspend skip', file: MAIN, from: ' && gap < STALL_MAX_MS', to: '', k: K.suspend },
   { name: 'slice floor <=', file: MAIN, from: 'if (end - start < SLICE_MIN_MS) return;', to: 'if (end - start <= SLICE_MIN_MS) return;', k: K.sliceFloor },
-  { name: 'timed skips the slice', file: MAIN, from: 'if (t1 - t0 >= SLICE_MIN_MS) self.slice(', to: 'if (t1 - t0 >= SLICE_MIN_MS * 1e9) self.slice(', k: K.namesFsAndExec },
+  { name: 'timed skips the slice', file: MAIN, from: 'if (t1 - t0 >= SLICE_MIN_MS) self.slice(', to: 'if (t1 - t0 >= SLICE_MIN_MS * 1e9) self.slice(', k: K.namesFs },
   { name: 'ipc not wrapped', file: MAIN, from: 'return orig.call(this, channel, listener(channel, fn), ...rest);', to: 'return orig.call(this, channel, fn, ...rest);', k: K.ipc },
   { name: 'once wrapped twice', file: MAIN, from: "for (const m of ['handle', 'on'] as const)", to: "for (const m of ['handle', 'on', 'once'] as const)", k: K.ipcOnce },
   { name: 'once listener not carried', file: MAIN, from: "if ('listener' in fn) (w", to: "if (false) (w", k: K.ipcOnce },
   { name: 'removeListener not mapped', file: MAIN, from: '(typeof fn === \'function\' && map.get(fn)) || fn', to: 'fn', k: K.ipc },
-  { name: 'fs path not basenamed', file: MAIN, from: '(a) => `${fn}:${baseName(a[0])}`', to: '(a) => `${fn}:${String(a[0])}`', k: K.namesFsAndExec },
-  { name: 'exec name = whole command', file: MAIN, from: "(fn === 'execSync' ? commandName(a[0]) :", to: "(fn === 'execSync' ? String(a[0]) :", k: K.namesFsAndExec },
-  { name: 'exec file split on spaces', file: MAIN, from: ": baseName(a[0]).slice(0, 32))", to: ": commandName(a[0]))", k: K.namesFsAndExec },
+  { name: 'fs path not basenamed', file: MAIN, from: '(a) => `${fn}:${baseName(a[0])}`', to: '(a) => `${fn}:${String(a[0])}`', k: K.namesFs },
   { name: 'overlap end >=', file: MAIN, from: 's.end > from', to: 's.end >= from', k: K.overlap },
   { name: 'overlap start <=', file: MAIN, from: 's.start < to', to: 's.start <= to', k: K.overlap },
   { name: 'overlap not sorted', file: MAIN, from: 'hits.sort((a, b) => (b.end - b.start) - (a.end - a.start));', to: '', k: K.overlap },
