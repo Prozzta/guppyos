@@ -28,10 +28,10 @@ import { basename, join, dirname, isAbsolute, win32, posix } from 'node:path';
 import { homedir } from 'node:os';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { AppendFile, LOG_KEEP_ROTATED, rotatedFiles } from './appendLog';
-import { atomicWriteJson as atomicWriteJsonFile } from './atomicJson';
+import { atomicWriteJson as atomicWriteJsonFile, atomicWriteJsonAsync } from './atomicJson';
 import { ASK_BACKSTOP_MS, ASK_CLOSE_REASON_MAX, MailLedger, answeredByMessage, cardIdValue, freshMailId, isValidMailId, owesWork, replyTracked, staleObligations, supersededByMessage, type CardEvidence, type MailLedgerDoc, type ReleaseRun, type StaleObligation } from './mailLedger';
 import { mailObligationsView, type MailObligationsAgent } from './mailReaders';
-import { UNDELIVERED_DIR, dropUndeliveredItems, mailMigrationDone, markUndeliveredSeen, readUndeliveredReport, restoreUndeliveredFiles, runMailMigration, setAsideUndelivered, type MailMigrationResult, type UndeliveredReport } from './mailMigration';
+import { UNDELIVERED_DIR, dropUndeliveredItems, mailMigrationDone, markUndeliveredSeen, readUndeliveredReport, readUndeliveredReportAsync, restoreUndeliveredFiles, runMailMigration, setAsideUndelivered, type MailMigrationResult, type UndeliveredReport } from './mailMigration';
 import { mailChannelMode, mailPromptMode, type MailPromptMode } from './mailSurface';
 import { rolloverMemory, seedPinnedSection, pinnedOverCapDue, PINNED_SEED, PINNED_SOFT_CAP_BYTES, MEMORY_STOP_ROLLOVER_BYTES, type RolloverResult } from './memoryRollover';
 import { shouldSeedCodexTrust, withAgentTrust, codexProjectLayerRiskKeys } from './codexTrustSeed';
@@ -4115,6 +4115,7 @@ export class HiveManager {
     const root = this.root();
     return root ? readUndeliveredReport(root) : null;
   }
+  async undeliveredReportAsync(): Promise<UndeliveredReport | null> { const root = this.root(); return root ? readUndeliveredReportAsync(root) : null; }
 
   /** The Human dismissed the undelivered report (shown once; persisted). */
   markUndeliveredSeen(): boolean {
@@ -5461,10 +5462,31 @@ export class HiveManager {
   /** Write the live fleet snapshot Michael reads (`fleet.json`, gitignored).
    *  Best-effort — called from a timer, must never throw. ZERO-TOKEN-LIVENESS (Jim L6): atomic
    *  (temp file + rename), so a reader (god, a CLI, ZT-I3) never sees a torn file. */
+  private fleetSnapshot: unknown = null;
+  private fleetWriting = false;
+  private fleetDirty = false;
+  /** In-process readers use this rather than synchronously opening fleet.json. */
+  fleetSnapshotView(): unknown { return this.fleetSnapshot; }
   writeFleetSnapshot(snapshot: unknown): void {
     const root = this.root();
     if (!root) return;
-    try { this.atomicWriteJson(join(root, 'fleet.json'), snapshot); } catch { /* noop */ }
+    this.fleetSnapshot = snapshot;
+    if (this.fleetWriting) { this.fleetDirty = true; return; }
+    this.fleetWriting = true;
+    // Let the caller finish its synchronous turn; readers use fleetSnapshot above immediately.
+    // This is a timer path itself, so yielding one turn costs no freshness but avoids coupling
+    // publication to a caller's temporary-root lifetime.
+    const flush = setTimeout(() => { void this.flushFleetSnapshot(root); }, 0);
+    flush.unref?.();
+  }
+
+  /** One writer per target; changes arriving mid-write collapse to the latest snapshot. */
+  private async flushFleetSnapshot(root: string): Promise<void> {
+    do {
+      this.fleetDirty = false;
+      try { await atomicWriteJsonAsync(join(root, 'fleet.json'), this.fleetSnapshot); } catch { /* noop */ }
+    } while (this.fleetDirty);
+    this.fleetWriting = false;
   }
 
   /** Is this agent the hive's god/orchestrator? */
@@ -5540,10 +5562,9 @@ export class HiveManager {
     ctxOf?: (agentId: string) => { tokens: number; limit: number } | undefined
   ): string | null {
     const root = this.root();
-    if (!root) return null;
+    if (!root || !this.fleetSnapshot) return null;
     try {
-      const raw = readFileSync(join(root, 'fleet.json'), 'utf8');
-      const snap = JSON.parse(raw) as {
+      const snap = this.fleetSnapshot as {
         ts?: number;
         agents?: Array<{
           id: string; name?: string; role?: string; isGod?: boolean;

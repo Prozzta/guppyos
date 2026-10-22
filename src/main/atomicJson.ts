@@ -4,6 +4,7 @@
  * `HiveManager` unchanged so a second authority can use it without a second copy.
  */
 import { renameSync, rmSync, writeFileSync } from 'node:fs';
+import { rename, rm, writeFile } from 'node:fs/promises';
 import { basename } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
@@ -38,3 +39,23 @@ export function atomicWriteJson(p: string, data: unknown): void {
     throw error;
   }
 }
+
+/** Async sibling for timer/IPC persistence paths; preserves atomic temp+rename semantics. */
+export async function atomicWriteTextAsync(p: string, text: string): Promise<void> {
+  const tmp = `${p}.tmp-${randomBytes(3).toString('hex')}`;
+  let last: unknown;
+  try {
+    await writeFile(tmp, text, 'utf8');
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try { await rename(tmp, p); return; } catch (error) {
+        last = error;
+        const code = (error as NodeJS.ErrnoException).code;
+        if ((code !== 'EPERM' && code !== 'EBUSY') || attempt === 4) break;
+        await new Promise<void>((resolve) => setTimeout(resolve, 20 * (attempt + 1)));
+      }
+    }
+    throw new Error(`Could not atomically publish ${basename(p)} after Windows rename retries: ${last instanceof Error ? last.message : String(last)}`);
+  } catch (error) { try { await rm(tmp, { force: true }); } catch { /* preserve publish error */ } throw error; }
+}
+
+export function atomicWriteJsonAsync(p: string, data: unknown): Promise<void> { return atomicWriteTextAsync(p, JSON.stringify(data, null, 2)); }

@@ -42,6 +42,7 @@
  * holds without this module knowing anything about it.
  */
 import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { atomicWriteTextAsync } from './atomicJson';
 import { join } from 'node:path';
 import type { CapacityObservation, CapacityWindow } from '../shared/providerCapacity';
 import {
@@ -376,6 +377,13 @@ export function saveCapacityStore(
   return { written, omitted };
 }
 
+/** Timer path uses the shared async atomic publisher so disk latency cannot stall main. */
+export async function saveCapacityStoreAsync(file: string, tracker: ProviderCapacityTracker, savedAt: number): Promise<{ written: number; omitted: number }> {
+  const { text, written, omitted } = serializeCapacityStore(tracker, savedAt);
+  await atomicWriteTextAsync(file, text);
+  return { written, omitted };
+}
+
 /**
  * Re-admit a loaded store through the tracker's normal ingestion boundary.
  *
@@ -406,6 +414,7 @@ export function restoreCapacityStore(
  */
 export class CapacityStore {
   private timer: NodeJS.Timeout | null = null;
+  private writing: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly file: string,
@@ -424,7 +433,7 @@ export class CapacityStore {
     if (this.timer) return;
     this.timer = setTimeout(() => {
       this.timer = null;
-      this.saveNow();
+      void this.saveAsync().catch(() => undefined);
     }, this.coalesceMs);
     if (typeof this.timer.unref === 'function') this.timer.unref();
   }
@@ -436,5 +445,15 @@ export class CapacityStore {
       this.timer = null;
     }
     return saveCapacityStore(this.file, this.tracker, this.now());
+  }
+
+  async saveAsync(): Promise<{ written: number; omitted: number }> {
+    if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+    let result: { written: number; omitted: number } | undefined;
+    this.writing = this.writing.catch(() => undefined).then(async () => {
+      result = await saveCapacityStoreAsync(this.file, this.tracker, this.now());
+    });
+    await this.writing;
+    return result!;
   }
 }
