@@ -135,7 +135,7 @@ test('index.ts live-rotation wiring retains all 17 safety call sites', () => {
     [rotation, "mayConsiderCodexLiveRotation(ptyProvider.get(ptyForAgent(agentId) ?? ''), pendingCodexLiveRotation.has(ptyForAgent(agentId) ?? ''))"],
     [rotation, 'const b = codexLiveRotationFacts(agentId);'], [rotation, 'sameCodexLiveRotationTarget('],
     [rotation, 'freshCodexLiveRotationSpawn(spawn.opts)'], [rotation, "text: '/exit'"],
-    [rotation, "if (outcome.kind === 'REFUSED') {\n      pendingCodexLiveRotation.delete(a.ptyId!)"],
+    [rotation, "if (outcome.kind === 'REFUSED')"],
     [rotation, 'shouldArmCodexLiveRotationExit(outcome.kind, ptyStillLive)'],
     [arm, 'isCurrentCodexLiveRotationIncarnation(incarnation, ptyManager.incarnation(ptyId))'],
     [exit, 'shouldRelaunchCodexLiveRotation(exitCode)'], [exit, 'teardownPty(id, naturalExitReason);'],
@@ -143,6 +143,7 @@ test('index.ts live-rotation wiring retains all 17 safety call sites', () => {
     [indexSource, 'if (agentId && event === \'Stop\') setImmediate(() => considerCodexLiveRotation(agentId));']
   ];
   for (const [text, call] of required) assert.ok(text.includes(call), `missing live-rotation safety call: ${call}`);
+  assert.match(rotation, /if \(outcome\.kind === 'REFUSED'\) \{\s+pendingCodexLiveRotation\.delete\(a\.ptyId!\)/, 'a refused owner must clear its pending rotation');
   assert.ok(rotation.indexOf('const b = codexLiveRotationFacts(agentId);') < rotation.indexOf("text: '/exit'"), 'fresh read must precede /exit');
   assert.ok(exit.indexOf('shouldRelaunchCodexLiveRotation(exitCode)') < exit.indexOf('void spawnAgentCore(rotating.opts, rotating.owner);'), 'exit gate must precede relaunch');
 });
