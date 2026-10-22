@@ -6488,6 +6488,8 @@ function teardownAndQuit(): void {
 
 /** Upper bound on the async quit work (tree kills + daemon stop) that will-quit waits for. */
 const QUIT_WORK_CAP_MS = 5_500;
+/** Upper bound on the will-quit wait for an in-flight async capacity write (INT 1.1.99 fixup 4). */
+const CAPACITY_QUIT_JOIN_MS = 1_000;
 let quitWork: Promise<QuitReport> | null = null;
 /** QUIT-HANG: start the slow teardown once (idempotent) and hand back its bounded report.
  *  killAllAsync forgets its state synchronously, so a second quit
@@ -8944,6 +8946,9 @@ app.on('will-quit', (e) => {
       new Promise<void>((r) => setTimeout(r, 1200))
     ]),
     // NATIVE-MEMORY: drain in-flight memory requests, then stop the worker (bounded).
-    nativeMemory.shutdown().catch(() => undefined)
+    nativeMemory.shutdown().catch(() => undefined),
+    // INT 1.1.99 fixup 4: an async capacity rename already in flight at saveNow lands first, then the
+    // quit snapshot is written again (bounded), so an older snapshot never sits over the quit write.
+    capacityStore.settleQuit(CAPACITY_QUIT_JOIN_MS).catch(() => undefined)
   ]).then(finish, finish);
 });

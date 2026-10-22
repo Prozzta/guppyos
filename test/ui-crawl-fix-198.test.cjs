@@ -225,6 +225,94 @@ const K = {
     } finally { fsp.writeFile = real; rm(d); }
   },
 
+  /** q (INT 1.1.99 fixup 4): a rename already past its commit check when will-quit's saveNow runs
+   *  lands after it; settleQuit waits for it (bounded) and writes the quit snapshot again. */
+  async quitJoin(mod = C) {
+    const d = tmp('qjoin');
+    const real = fsp.rename;
+    let release = null;
+    try {
+      const file = path.join(d, 'capacity.json');
+      let now = 1;
+      const store = new mod.CapacityStore(file, tracker, 5_000, () => now);
+      assert.equal(await store.settleQuit(1_000), false, 'NOTHING IN FLIGHT: NO REWRITE');
+      assert.equal(fs.existsSync(file), false, 'and nothing is written');
+      // The OS has taken the rename (the temp has left its `.tmp-*` name, so saveNow's sweep cannot
+      // catch it) but it lands only on release: the window the commit check cannot close.
+      const parked = new Promise((atRename) => {
+        fsp.rename = function (from, to) {
+          fsp.rename = real;
+          const taken = `${to}.taken`;
+          fs.renameSync(from, taken);
+          return new Promise((res, rej) => { release = () => real(taken, to).then(res, rej); atRename(); });
+        };
+      });
+      const pending = store.saveAsync();   // passes its commit check, then parks inside rename
+      await parked;
+      now = 2;
+      store.saveNow();                     // will-quit
+      assert.equal(savedAt(file), 2);
+      const t1 = Date.now();
+      const join = store.settleQuit(5_000);
+      release();
+      await pending;
+      assert.equal(await join, true, 'AN IN-FLIGHT WRITE IS JOINED');
+      assert.ok(Date.now() - t1 < 2_500, 'THE JOIN ENDS WHEN THE WRITE LANDS, not at its bound');
+      assert.equal(savedAt(file), 2, 'THE QUIT SNAPSHOT IS WRITTEN AGAIN AFTER THE LATE RENAME');
+      assert.deepEqual(temps(file), [], 'no temp file is left');
+      // bounded: a rename that never lands does not hold the quit
+      now = 3;
+      const stuck = new Promise((atRename) => { fsp.rename = () => { atRename(); return new Promise(() => {}); }; });
+      void store.saveAsync();
+      await stuck;
+      fsp.rename = real;
+      now = 4;
+      store.saveNow();
+      const hung = await Promise.race([store.settleQuit(50), new Promise((r) => setTimeout(() => r('HUNG'), 1_500))]);
+      assert.equal(hung, true, 'THE JOIN IS BOUNDED: a rename that never lands does not hold the quit');
+      assert.equal(savedAt(file), 4);
+    } finally { fsp.rename = real; rm(d); }
+  },
+
+  /** q (Jim's U2): a rename that fails EPERM and retries re-asks the commit check, so a saveNow that ran
+   *  during the backoff wins over the retry. */
+  async retryRecheck(mod = A) {
+    const d = tmp('qretry');
+    const real = fsp.rename;
+    try {
+      const file = path.join(d, 'capacity.json');
+      let newest = true;
+      fsp.rename = async () => {
+        fsp.rename = real;
+        fs.writeFileSync(file, 'quit');    // will-quit's saveNow lands between the attempts
+        newest = false;
+        const e = new Error('EPERM: operation not permitted, rename'); e.code = 'EPERM';
+        throw e;
+      };
+      assert.equal(await mod.atomicWriteTextAsync(file, 'older', () => newest), false, 'A RETRY AFTER A NEWER WRITE WITHDRAWS');
+      assert.equal(fs.readFileSync(file, 'utf8'), 'quit', 'THE RETRY RE-CHECKS THE COMMIT: the quit write stays the last word');
+      assert.deepEqual(fs.readdirSync(d), ['capacity.json'], 'the withdrawn retry removed its temp file');
+    } finally { fsp.rename = real; rm(d); }
+  },
+
+  /** U5: patchFleetAgent publishes a clone; a snapshot already handed out keeps its row as it was. */
+  async cloneRow(mod = H) {
+    const f = await floor(mod);
+    try {
+      f.publish();
+      const before = f.hive.fleetSnapshotView();
+      const jim = before.agents.find((a) => a.id === 'jim-1');
+      f.hive.setAgentHold('jim-1', true);
+      f.hive.renameAgent('jim-1', 'Kevin');
+      assert.equal(jim.onHold, undefined, 'A HANDED-OUT SNAPSHOT ROW IS NOT MUTATED BY A HOLD');
+      assert.equal(jim.name, 'Jim', 'NOR BY A RENAME');
+      const after = f.hive.fleetSnapshotView().agents.find((a) => a.id === 'jim-1');
+      assert.notEqual(after, jim);
+      assert.deepEqual([after.onHold, after.name], [true, 'Kevin']);
+      await f.hive.fleetFlushed();
+    } finally { f.done(); }
+  },
+
   /** q: atomicWriteTextAsync's commit check: false withdraws the write, true publishes it. */
   async commitGate(mod = A) {
     const d = tmp('aj');
@@ -288,12 +376,15 @@ const K = {
   },
 
   /** b: index.ts supplies the snapshot to the board-status writer; will-quit still flushes capacity sync. */
-  indexWiring() {
-    const INDEX = codeOnly(readSource('src/main/index.ts'));
+  indexWiring(index = readSource('src/main/index.ts')) {
+    const INDEX = codeOnly(index);
     const ctor = between(INDEX, 'const boardStatus = new BoardStatusWriter({', '});');
     assert.match(ctor, /fleetSnapshot: \(\) => hive\.fleetSnapshotView\(\),/, 'THE BOARD STATUS WRITER GETS THE SNAPSHOT');
     const quit = between(INDEX, "app.on('will-quit', () => {", '\n});');
     assert.match(quit, /capacityStore\.saveNow\(\);/, 'will-quit flushes the capacity store synchronously');
+    const join = between(INDEX, 'let analyticsFlushed = false;', ']).then(finish, finish);');
+    assert.match(join, /capacityStore\.settleQuit\(CAPACITY_QUIT_JOIN_MS\)\.catch\(\(\) => undefined\)/, 'WILL-QUIT JOINS AN IN-FLIGHT CAPACITY WRITE');
+    assert.match(INDEX, /const CAPACITY_QUIT_JOIN_MS = 1_000;/);
     const timer = between(codeOnly(readSource(CAP)), 'scheduleSave(): void {', '\n  }');
     assert.match(timer, /void this\.saveAsync\(\)/, 'the timer path is the async writer');
   }
@@ -307,6 +398,9 @@ test('M1/M16: fleetFlushed settles once the latest publish is on disk', () => K.
 test('M2: a failed async capacity write is logged like the sync one', () => K.warnOnFail());
 test('quit race: saveNow is the last word over an in-flight async write, and sweeps stray temp files', () => K.quitRace());
 test('quit race: atomicWriteTextAsync withdraws on commit false', () => K.commitGate());
+test('quit race (fixup 4): settleQuit joins a rename that lands after saveNow and writes the quit snapshot again, bounded', () => K.quitJoin());
+test('quit race (U2): an EPERM retry re-asks the commit check', () => K.retryRecheck());
+test('U5: patchFleetAgent publishes a clone, never the live row', () => K.cloneRow());
 test('STALL-WATCH: the sync counter map is bounded, pruned by the minute, folded; a row carries 12', () => K.syncBounded());
 test('board-status: the roster comes from the in-process snapshot', () => K.boardSnapshot());
 test('wiring: index.ts feeds the snapshot to the board-status writer; will-quit flushes capacity', () => K.indexWiring());
@@ -322,6 +416,13 @@ const MUTANTS = [
   { name: 'q the async write ignores the generation', file: CAP, from: '() => mine === this.seq)', to: '() => true)', k: K.quitRace },
   { name: 'q saveNow does not move the generation', file: CAP, from: '    this.seq++;\n    const out = saveCapacityStore(', to: '    const out = saveCapacityStore(', k: K.quitRace },
   { name: 'q saveNow leaves stray temp files', file: CAP, from: '    removeCapacityTemps(this.file);\n', to: '', k: K.quitRace },
+  { name: 'q4 settleQuit never rewrites', file: CAP, from: '    clearTimeout(timer);\n    this.saveNow();\n', to: '    clearTimeout(timer);\n', k: K.quitJoin },
+  { name: 'q4 settleQuit does not wait for the write', file: CAP, from: '      this.writing.catch(() => undefined),\n', to: '', k: K.quitJoin },
+  { name: 'q4 in-flight writes are not counted', file: CAP, from: '    this.inFlight++;\n', to: '', k: K.quitJoin },
+  { name: 'q4 the join is unbounded', file: CAP, from: 'timer = setTimeout(resolve, capMs);', to: 'timer = setTimeout(() => undefined, capMs);', k: K.quitJoin },
+  { name: 'q4 will-quit does not join', file: 'src/main/index.ts', from: '    capacityStore.settleQuit(CAPACITY_QUIT_JOIN_MS).catch(() => undefined)\n', to: '', k: K.indexWiring, text: true },
+  { name: 'U2 the commit is checked on the first attempt only', file: AJ, from: 'if (commit && !commit()) { await rm(tmp, { force: true }); return false; }', to: 'if (attempt === 0 && commit && !commit()) { await rm(tmp, { force: true }); return false; }', k: K.retryRecheck },
+  { name: 'U5 patchFleetAgent mutates the live row', file: HIVE, from: '      const next = { ...row };\n', to: '      const next = row;\n', k: K.cloneRow },
   { name: 'q the commit check is skipped', file: AJ, from: 'if (commit && !commit()) { await rm(tmp, { force: true }); return false; }', to: '', k: K.commitGate },
   { name: 's the map is not capped', file: SW, from: 'this.sync.size < SYNC_TARGETS_MAX ? key', to: 'true ? key', k: K.syncBounded },
   { name: 's old minutes are kept', file: SW, from: 'if (minute !== this.syncMinute) { this.sync.clear(); this.syncMinute = minute; }', to: 'this.syncMinute = minute;', k: K.syncBounded },
@@ -334,7 +435,7 @@ test('mutant census: every mutant is applied once and dies by its killer', async
   for (const m of MUTANTS) {
     const src = readSource(m.file);
     assert.equal(src.split(m.from).length - 1, 1, `${m.name}: the mutation site must match exactly once`);
-    const mod = loadTs.fromText(m.file, src.replace(m.from, m.to));
+    const mod = m.text ? src.replace(m.from, m.to) : loadTs.fromText(m.file, src.replace(m.from, m.to));
     let died = null;
     try { await m.k(mod); } catch (e) { died = e; }
     assert.ok(died, `${m.name}: the mutant SURVIVED`);

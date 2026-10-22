@@ -441,6 +441,8 @@ export class CapacityStore {
   /** The write generation: an async write publishes only while it is still the newest write
    *  (UI-CRAWL fix, quit race: saveNow at will-quit must not be overwritten by an older async rename). */
   private seq = 0;
+  /** Async writes started and not yet settled (INT 1.1.99 fixup 4: settleQuit joins them). */
+  private inFlight = 0;
 
   constructor(
     private readonly file: string,
@@ -483,10 +485,29 @@ export class CapacityStore {
     if (this.timer) { clearTimeout(this.timer); this.timer = null; }
     const mine = ++this.seq;
     let result: { written: number; omitted: number } | undefined;
+    this.inFlight++;
     this.writing = this.writing.catch(() => undefined).then(async () => {
-      result = await saveCapacityStoreAsync(this.file, this.tracker, this.now(), () => mine === this.seq);
+      try { result = await saveCapacityStoreAsync(this.file, this.tracker, this.now(), () => mine === this.seq); }
+      finally { this.inFlight--; }
     });
     await this.writing;
     return result!;
+  }
+
+  /** The will-quit join (INT 1.1.99 fixup 4, Jim's quit-race minor). The commit check cannot recall
+   *  a rename already handed to the threadpool, so one that lands after saveNow would put an older
+   *  snapshot over the quit write. When an async write is in flight, wait for it (at most capMs) and
+   *  write the quit snapshot again, which also sweeps any temp file it left. Resolves true when it
+   *  rewrote, false when nothing was in flight. */
+  async settleQuit(capMs: number): Promise<boolean> {
+    if (this.inFlight === 0) return false;
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([
+      this.writing.catch(() => undefined),
+      new Promise<void>((resolve) => { timer = setTimeout(resolve, capMs); })
+    ]);
+    clearTimeout(timer);
+    this.saveNow();
+    return true;
   }
 }
