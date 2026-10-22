@@ -187,7 +187,7 @@ export function decisionItems(flags: readonly BoardFlag[], ledgerIssues: readonl
     const who = h.name ?? h.agentId;
     items.push({
       id: `held-interfered:${h.agentId}:${h.since}`, cardId: null,
-      line: `${who}: ${h.messages} message(s) held for ${ageText(now - h.since)} after an interrupted automatic message - look at ${who}'s chat box (the banner says how), or rule it in ${who}'s message box`
+      line: `${who}: ${h.messages} message(s) held for ${ageText(now - h.since)} after an interrupted automatic message - look at ${who}'s chat box (the banner says how), or rule it in ${who}'s message box (god: term read ${h.agentId}, then term rule ${h.agentId} send-again|already-handled)`
     });
   }
   for (const f of flags) {

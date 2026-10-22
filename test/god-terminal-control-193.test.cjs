@@ -579,6 +579,98 @@ test('CLI end to end against a real broker and TermControl: read, send (stdin, o
   assert.match(forbidden.err, /god-only/);
 });
 
+// ─── GTC term rule: god rules on a held-interfered latch (only the UI could; Creed sat
+// owner-inhibited 80 min, WAKE-FALSE-INTERFERED-RESTART) ──────────────────────────────────
+
+function heldRig() {
+  const r = rig();
+  r.held = { a1: { requestId: 'inbox-wake:a1:x:0', reason: 'WAKE_TYPED_NOT_SENT', since: 1_000 - 19 * 60_000 } };
+  r.rulings = [];
+  r.deps.heldOf = (a) => r.held[a] ?? null;
+  r.deps.resolveHeld = (a, how) => { r.rulings.push([a, how]); if (!r.held[a] || r.racing) return false; delete r.held[a]; return true; };
+  r.tc = new T.TermControl(r.deps);
+  return r;
+}
+
+function ruleChecks() {
+  return (async () => {
+    const r = heldRig();
+    const read = await r.tc.handle('god', { action: 'read', agent: 'a1' });
+    assert.equal(read.status, 200);
+    assert.equal(read.body.line, 'a1: cursor 2,1  80x3  paste2004=on\nHELD since 19 min (WAKE_TYPED_NOT_SENT, inbox-wake:a1:x:0): wakes are refused until a ruling - term rule a1 send-again|already-handled', 'term read shows the latch');
+    assert.equal(read.body.header, 'cursor 2,1  80x3  paste2004=on', 'the header itself is unchanged');
+    const plain = await r.tc.handle('god', { action: 'read', agent: 'a2' });
+    assert.equal(plain.body.line, 'a2: cursor 2,1  80x3  paste2004=on', 'nothing held: the line is as before');
+
+    const bare = await r.tc.handle('god', { action: 'rule', agent: 'a1' });
+    assert.equal(bare.status, 400, 'no default ruling');
+    assert.match(bare.body.line, /there is no default/);
+    assert.equal((await r.tc.handle('god', { action: 'rule', agent: 'a1', how: 'resolved' })).status, 400);
+    assert.equal((await r.tc.handle('a2', { action: 'rule', agent: 'a1', how: 'SEND_AGAIN' })).status, 403, 'god-only');
+    assert.deepEqual(r.rulings, [], 'no refused request reached the ruling path');
+
+    r.racing = true;
+    const raced = await r.tc.handle('god', { action: 'rule', agent: 'a1', how: 'SEND_AGAIN' });
+    assert.equal(raced.status, 409, 'the ruling path said no: refused, never reported as done');
+    r.racing = false;
+
+    const ok = await r.tc.handle('god', { action: 'rule', agent: 'a1', how: 'ALREADY_HANDLED' });
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body.line, 'a1: ruled ALREADY_HANDLED on inbox-wake:a1:x:0 (WAKE_TYPED_NOT_SENT, held 19 min): it is never typed again');
+    assert.deepEqual(r.rulings, [['a1', 'SEND_AGAIN'], ['a1', 'ALREADY_HANDLED']]);
+    const row = r.logs.filter((l) => l.action === 'rule' && l.ok).pop();
+    assert.deepEqual(row, { kind: 'term', by: 'god', agent: 'a1', action: 'rule', how: 'ALREADY_HANDLED', requestId: 'inbox-wake:a1:x:0', reason: 'WAKE_TYPED_NOT_SENT', heldMs: 19 * 60_000, ok: true });
+
+    const none = await r.tc.handle('god', { action: 'rule', agent: 'a1', how: 'SEND_AGAIN' });
+    assert.equal(none.status, 409);
+    assert.match(none.body.line, /a1 has nothing held/);
+    assert.equal(r.rulings.length, 2, 'nothing held: the ruling path is not called');
+    assert.deepEqual(r.writes, [], 'a ruling types nothing');
+
+    r.held.a1 = { requestId: 'inbox-wake:a1:y:0', reason: 'INTERFERED', since: 1_000 };
+    const again = await r.tc.handle('god', { action: 'rule', agent: 'a1', how: 'SEND_AGAIN' });
+    assert.match(again.body.line, /^a1: ruled SEND_AGAIN on inbox-wake:a1:y:0 .*delivered again through every guard$/);
+  })();
+}
+test('term rule: god rules SEND_AGAIN or ALREADY_HANDLED through the ruling path, no default, 409 when nothing is held or it changed; term read shows the latch', () => ruleChecks());
+
+test('term rule: an app without the ruling deps refuses it (503) and read is unchanged', async () => {
+  const r = rig();
+  const out = await r.tc.handle('god', { action: 'rule', agent: 'a1', how: 'SEND_AGAIN' });
+  assert.equal(out.status, 503);
+  assert.equal((await r.tc.handle('god', { action: 'read', agent: 'a1' })).body.line, 'a1: cursor 2,1  80x3  paste2004=on');
+});
+
+test('term rule wiring: index.ts gives TermControl the owner\'s inhibition and the ONE ruling function the IPC uses', () => {
+  const idx = src('src/main/index.ts');
+  assert.match(idx, /const h = p \? automaticSubmit\.inhibition\(p\) : null;\n\s+return h \? \{ requestId: h\.requestId, reason: h\.reason, since: h\.at \} : null;/);
+  assert.match(idx, /resolveHeld: \(agentId, how\) => resolveHeldInterference\(agentId, how\),/);
+  assert.match(idx, /ipcMain\.handle\('autoSubmit:resolveInterference'[\s\S]{0,400}return resolveHeldInterference\(agentId, how as InterferenceResolution\);\n\}\);/);
+  const fn = idx.slice(idx.indexOf('function resolveHeldInterference('));
+  assert.match(fn, /^function resolveHeldInterference\(agentId: string, how: InterferenceResolution\): boolean \{\n  const ptyId = ptyForAgent\(agentId\);\n  const resolved = ptyId \? automaticSubmit\.resolveInterference\(ptyId, how as InterferenceResolution\) : false;\n  pushAgentImpact\(\);\n[\s\S]{0,200}?  if \(resolved\) inboxWake\?\.onInterferenceResolved\(agentId, how as InterferenceResolution\);\n  return resolved;\n\}/);
+  assert.equal(idx.split('automaticSubmit.resolveInterference(').length, 2, 'one caller of the owner\'s resolve');
+  // The floor digest's held line tells god the term way, not only the Human's message box.
+  assert.match(src('src/main/floorDigest.ts'), /or rule it in \$\{who\}'s message box \(god: term read \$\{h\.agentId\}, then term rule \$\{h\.agentId\} send-again\|already-handled\)`/);
+});
+
+test('CLI: term rule <agent> send-again|already-handled; a bare or unknown ruling is a usage error', async (t) => {
+  assert.equal((await run(['rule', 'a1'])).code, 2, 'no default');
+  assert.equal((await run(['rule', 'a1', 'resolved'])).code, 2);
+  assert.equal((await run(['rule', 'a1', 'send-again', 'x'])).code, 2);
+  assert.equal((await run(['rule', 'a1', 'constructor'])).code, 2, 'only the two names, never an inherited key');
+  const s = await broker(t);
+  const r = heldRig();
+  s.setTermHandler((agentId, body) => r.tc.handle(agentId, body));
+  const env = { HIVE_TERM_URL: s.hookUrl('god').replace('/hook/', '/term/') };
+  const ok = await run(['rule', 'a1', 'send-again'], { env });
+  assert.equal(ok.code, 0, ok.err);
+  assert.match(ok.out, /^a1: ruled SEND_AGAIN on inbox-wake:a1:x:0/);
+  const none = await run(['rule', 'a1', 'already-handled'], { env });
+  assert.equal(none.code, 1);
+  assert.match(none.err, /a1 has nothing held/);
+  assert.deepEqual(r.rulings, [['a1', 'SEND_AGAIN']]);
+});
+
 test('CLI argument rules: no text from arguments, bad flags, no URL', async () => {
   assert.equal((await run(['send', 'a1', 'hello there'])).code, 2, 'text in arguments is refused');
   assert.equal((await run(['type'])).code, 2);
