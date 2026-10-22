@@ -84,7 +84,8 @@ export function mirrorParseMs(): number | null {
  * guard then cannot blame the mirror for lag (test/mirror-startup-196 pins the method on the
  * installed xterm, so an upgrade that drops it fails there).
  */
-export function timeParse(t: unknown, add: (ms: number) => void, now: () => number = performance.now): boolean {
+// Keep the receiver: Node's Performance.now is not safely callable when passed as an unbound method.
+export function timeParse(t: unknown, add: (ms: number) => void, now: () => number = () => performance.now()): boolean {
   const wb = (t as { _core?: { _writeBuffer?: Record<string, unknown> } })?._core?._writeBuffer;
   const inner = wb?._innerWrite;
   if (!wb || typeof inner !== 'function') return false;
