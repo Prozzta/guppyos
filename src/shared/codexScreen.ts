@@ -204,9 +204,21 @@ function isSpawnCwdShown(part: string, spawnCwd: string, home?: string | null): 
 
 export interface CodexVerdict { open: boolean; reason: string }
 
-/** CONDITION 1 (V1): is this Codex process past its startup phase? */
-export function codexPastStartup(f: CodexScreenFacts, spawnCwd: string | null | undefined, home?: string | null): CodexVerdict {
-  if (f.header === 'LOADING') return { open: false, reason: 'header-loading' };
+/**
+ * CONDITION 1 (V1): is this Codex process past its startup phase?
+ *
+ * WAKE-LIFECYCLE-UNKNOWN-197: after a resume, the startup draft's `model: loading` box can stay the
+ * NEWEST header in the buffer while the live chat widget is up (empty composer and the status line
+ * `<model> <effort> · <cwd> · <thread>`). No startup draft draws the status line, so a LOADING header
+ * with no Resuming/Forking line under it, the agent's own status line in the footer AND the owner's
+ * post-handoff latch for this incarnation (`latched`) is a stale header, not a startup. Unlatched it
+ * is refused as before, so it can never CREATE the latch.
+ */
+export function codexPastStartup(f: CodexScreenFacts, spawnCwd: string | null | undefined, home?: string | null, latched = false): CodexVerdict {
+  if (f.header === 'LOADING') {
+    if (latched && !f.startingAfterHeader && f.footer.some((row) => isCodexStatusLine(row, spawnCwd, home))) return { open: true, reason: 'status-line-over-loading' };
+    return { open: false, reason: 'header-loading' };
+  }
   if (f.header !== 'NONE' && f.startingAfterHeader) return { open: false, reason: 'session-starting' };
   if (f.header === 'MODEL') return { open: true, reason: 'header-model' };
   if (f.header === 'NONE' && f.footer.some((row) => isCodexStatusLine(row, spawnCwd, home))) return { open: true, reason: 'status-line' };

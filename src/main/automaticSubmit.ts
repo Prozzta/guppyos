@@ -1649,7 +1649,7 @@ export class AutomaticSubmitOwner {
       const tui = this.tuiProvider(ptyId);
       const comp = tui ? classifyTuiComposer(tui, r.facts, expectedTail)
         : classifyCodexComposer(r.facts, expectedTail === undefined ? undefined : r.promptTailMatches);
-      const seenPast = tui ? tuiPastStartup(comp) : codexPastStartup(r.facts, deps.spawnCwd?.(ptyId), deps.homeDir?.());
+      const seenPast = tui ? tuiPastStartup(comp) : codexPastStartup(r.facts, deps.spawnCwd?.(ptyId), deps.homeDir?.(), this.postHandoff.get(ptyId) === incarnation);
       // STARTUP-LATCH-QUIET-193 (d): a TUI composer seen while its session is still settling
       // (the resume replay) does not latch.
       const past = seenPast.open && !this.latchSettled(ptyId, tui) ? { open: false, reason: 'session-settling' } : seenPast;
@@ -1846,7 +1846,7 @@ export class AutomaticSubmitOwner {
       return { kind: 'NONE' };
     }
     if (seen.screenCount > 0) return stay('own-text-on-screen', screen);
-    const past = tui ? tuiPastStartup(modal) : codexPastStartup(g.facts, deps.spawnCwd?.(ptyId), deps.homeDir?.());
+    const past = tui ? tuiPastStartup(modal) : codexPastStartup(g.facts, deps.spawnCwd?.(ptyId), deps.homeDir?.(), this.postHandoff.get(ptyId) === held.incarnation);
     if (this.postHandoff.get(ptyId) !== held.incarnation || (!past.open && (past.reason === 'header-loading' || past.reason === 'session-starting'))) {
       return stay(`startup:${past.reason}`, screen);
     }
