@@ -38,9 +38,13 @@ export interface ThreadFileInfo {
  * back to discovery and refreshes the entry. */
 export interface CodexRolloutCacheEntry {
   codexHome: string;
-  path: string;
-  startedAt: number;
+  path: string | null;
+  startedAt: number | null;
+  /** A short-lived miss prevents a sessions-tree walk on every main-process beat. */
+  checkedAt: number;
 }
+
+export const CODEX_ROLLOUT_MISS_TTL_MS = 5_000;
 
 export interface ThreadRotationDecision {
   rotate: boolean;
@@ -120,19 +124,29 @@ export function findCodexRollout(codexHome: string, sessionId: string): ThreadFi
 /** Read a rollout through a caller-owned cache keyed by session id.  A cache hit
  * performs one stat so growth is observed promptly; it never trusts old bytes. */
 export function findCachedCodexRollout(
-  cache: Map<string, CodexRolloutCacheEntry>, codexHome: string, sessionId: string
+  cache: Map<string, CodexRolloutCacheEntry>, codexHome: string, sessionId: string, now: number = Date.now()
 ): ThreadFileInfo | null {
   const cached = cache.get(sessionId);
   if (cached && cached.codexHome === codexHome) {
+    if (cached.path === null && now - cached.checkedAt < CODEX_ROLLOUT_MISS_TTL_MS) return null;
     try {
-      const st = statSync(cached.path);
-      if (st.isFile()) return { path: cached.path, bytes: st.size, startedAt: cached.startedAt };
+      if (cached.path !== null && cached.startedAt !== null) {
+        const st = statSync(cached.path);
+        if (st.isFile()) return { path: cached.path, bytes: st.size, startedAt: cached.startedAt };
+      }
     } catch { /* stale path: rediscover below */ }
     cache.delete(sessionId);
   }
   const found = findCodexRollout(codexHome, sessionId);
-  if (found) cache.set(sessionId, { codexHome, path: found.path, startedAt: found.startedAt });
+  cache.set(sessionId, found
+    ? { codexHome, path: found.path, startedAt: found.startedAt, checkedAt: now }
+    : { codexHome, path: null, startedAt: null, checkedAt: now });
   return found;
+}
+
+/** Live sessions are the cache's ownership boundary; discard ended-session entries. */
+export function pruneCachedCodexRollouts(cache: Map<string, CodexRolloutCacheEntry>, activeSessionIds: ReadonlySet<string>): void {
+  for (const sessionId of cache.keys()) if (!activeSessionIds.has(sessionId)) cache.delete(sessionId);
 }
 
 /** An Antigravity conversation db, `<geminiHome>/antigravity-cli/conversations/<id>.db`, or null.

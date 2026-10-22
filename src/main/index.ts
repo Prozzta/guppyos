@@ -186,7 +186,7 @@ import { CodexRolloutLifecycleSource, threadSettingsAppliedSince } from './codex
 import { CodexRolloutCapacitySource, codexUserMessageMatches } from './codexRolloutCapacity';
 import { BootHookClock, startupSettled } from './bootSubmitEvidence';
 import { AgentLivenessMonitor, type LivenessFacts } from './agentLiveness';
-import { CODEX_ROTATE_MAX_ROLLOUT_BYTES, decideAgyRotation, decideThreadRotation, findAgyConversation, findCachedCodexRollout, findCodexRollout, threadRotatedLogRow, type CodexRolloutCacheEntry } from './codexThreadRotation';
+import { CODEX_ROTATE_MAX_ROLLOUT_BYTES, decideAgyRotation, decideThreadRotation, findAgyConversation, findCachedCodexRollout, findCodexRollout, pruneCachedCodexRollouts, threadRotatedLogRow, type CodexRolloutCacheEntry } from './codexThreadRotation';
 import { decideCodexLiveRotation, liveRotationEscalationId } from './codexLiveRotation';
 import { freshCodexLiveRotationSpawn, isCurrentCodexLiveRotationIncarnation, mapCodexLiveRotationFacts, mayConsiderCodexLiveRotation, sameCodexLiveRotationTarget, shouldArmCodexLiveRotationExit, shouldRelaunchCodexLiveRotation, sweepCodexLiveRotations } from './codexLiveRotationWiring';
 import { HistoryService } from './historyService';
@@ -8316,6 +8316,7 @@ function runWorkerWakeBeat(): void {
   runOwedContinuation(live);
   // ZERO-TOKEN-LIVENESS: after the WWR ran (it records its own STUCK edges first), every agent.
   sampleLivenessAll();
+  pruneCachedCodexRollouts(liveCodexRollouts, new Set(live.map((agentId) => hive.lastSession(agentId)).filter((id): id is string => !!id)));
   // A missed Stop cannot leave a completed oversized Codex session unobserved.
   sweepCodexLiveRotations(live, considerCodexLiveRotation);
 }

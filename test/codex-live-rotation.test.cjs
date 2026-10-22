@@ -143,6 +143,15 @@ test('index.ts live-rotation wiring retains all 17 safety call sites', () => {
     [indexSource, 'if (agentId && event === \'Stop\') setImmediate(() => considerCodexLiveRotation(agentId));']
   ];
   for (const [text, call] of required) assert.ok(text.includes(call), `missing live-rotation safety call: ${call}`);
+  assert.match(facts, /toolRunning:\s*hookServer\.runningTool\(agentId\)\s*!==\s*null,/, 'running tool fact must feed the policy');
+  assert.match(facts, /heavy:\s*holders\.some\(\(x\)\s*=>\s*x\.agentId\s*===\s*agentId\)\s*\|\|\s*q\.waiters\.some/, 'heavy holder fact must feed the policy');
+  assert.match(facts, /floorHeld:\s*parseFloorHold\(readConfig\(\)\.floorHold\)\s*!==\s*null,/, 'floor hold fact must feed the policy');
+  assert.match(facts, /owed:\s*\(mail\.awaitingReply\?\.length\s*\?\?\s*0\)\s*>\s*0\s*\|\|\s*\(mail\.openRequests\?\.length\s*\?\?\s*0\)\s*>\s*0,/, 'owed fact must feed the policy');
+  assert.match(facts, /workspaceIsolated:\s*!!ptyId\s*&&\s*\(worktreePaths\.has\(ptyId\)\s*\|\|\s*liveWorkers\.has\(ptyId\)\)/, 'workspace isolation fact must feed the policy');
+  assert.match(rotation, /^function considerCodexLiveRotation\(agentId: string\): void \{\s*if \(!mayConsiderCodexLiveRotation\(/, 'rotation gate must be the first statement');
+  assert.match(rotation, /if \(!sameCodexLiveRotationTarget\(/, 'fresh target mismatch must return before /exit');
+  assert.match(indexSource, /liveSpawnOptions\.set\(opts\.id, \{ owner, opts: callerSpawnOpts \}\);/, 'rotation must save the caller spawn clone');
+  assert.match(beat, /sampleLivenessAll\(\);\s*pruneCachedCodexRollouts\([\s\S]*?\);\s*\/\/ A missed Stop[^\r\n]*(?:\r?\n)\s*sweepCodexLiveRotations\(live, considerCodexLiveRotation\);/, 'beat sweep must be unconditional after liveness sampling');
   assert.match(rotation, /if \(outcome\.kind === 'REFUSED'\) \{\s+pendingCodexLiveRotation\.delete\(a\.ptyId!\)/, 'a refused owner must clear its pending rotation');
   assert.ok(rotation.indexOf('const b = codexLiveRotationFacts(agentId);') < rotation.indexOf("text: '/exit'"), 'fresh read must precede /exit');
   assert.ok(exit.indexOf('shouldRelaunchCodexLiveRotation(exitCode)') < exit.indexOf('void spawnAgentCore(rotating.opts, rotating.owner);'), 'exit gate must precede relaunch');
@@ -160,4 +169,24 @@ test('per-session rollout cache stats the known file without another sessions wa
     fs.appendFileSync(file, '56');
     assert.equal(T.findCachedCodexRollout(cache, home, session).bytes, 6, 'cached path still observes growth');
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+test('per-session rollout cache negative-caches a miss briefly, then retries', () => {
+  const fs = require('node:fs'); const os = require('node:os'); const path = require('node:path');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-live-negative-cache-'));
+  const session = '22222222-2222-2222-2222-222222222222'; const cache = new Map();
+  try {
+    assert.equal(T.findCachedCodexRollout(cache, home, session, 1), null);
+    const dir = path.join(home, 'sessions', '2026', '10', '22'); fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, `rollout-2026-10-22T16-00-00-${session}.jsonl`), 'x');
+    assert.equal(T.findCachedCodexRollout(cache, home, session, 2), null, 'short-TTL miss avoids another walk');
+    assert.equal(T.findCachedCodexRollout(cache, home, session, 1 + T.CODEX_ROLLOUT_MISS_TTL_MS).bytes, 1, 'expired miss is rediscovered');
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+test('per-session rollout cache evicts sessions that are no longer live', () => {
+  const cache = new Map([
+    ['live', { codexHome: 'h', path: 'p', startedAt: 1, checkedAt: 1 }],
+    ['ended', { codexHome: 'h', path: null, startedAt: null, checkedAt: 1 }]
+  ]);
+  T.pruneCachedCodexRollouts(cache, new Set(['live']));
+  assert.deepEqual([...cache.keys()], ['live']);
 });
