@@ -1890,10 +1890,13 @@ export interface HeavyLockDeps {
   notify?: (agentId: string, kind: HeavyKind, until: number) => void;
   /** A limit switched to Off releases every queued/reserved agent without a reservation. */
   notifyUnlimited?: (agentId: string, kind: HeavyKind) => void;
-  /** LOCK-WAIT-NOTICES: tell an agent it has left the queue: dropped as stale, or its reservation
-   *  lapsed unused. Not called for the agent whose own heavy call is running, nor for a gone one. */
+  /** LOCK-WAIT-NOTICES: tell an agent its reservation lapsed unused ('expired'), so it has left the
+   *  queue. Not called for the agent whose own heavy call is running, nor for a gone one.
+   *  HEAVY-QUEUE-WAIT-DROPS: the lock no longer drops a waiter by age, so it never sends 'stale'
+   *  (the value stays for main's notice function). */
   notifyLapse?: (agentId: string, kind: HeavyKind, why: 'stale' | 'expired') => void;
-  /** Is this agent still live (a PTY)? A gone waiter is skipped. Absent = every agent is live. */
+  /** Is this agent still live (a PTY)? A gone waiter is reaped: skipped at a grant and swept at
+   *  every watcher tick (HEAVY-QUEUE-WAIT-DROPS: by liveness, never by age). Absent = every agent is live. */
   alive?: (agentId: string) => boolean;
   /** HEAVY-LOCK-OPAQUE-SCRIPT-196: the image name of a process (a test process's parent: is it the
    *  call's shell?), or null. Absent = unknown, so no test process is VISIBLE. */
@@ -1952,8 +1955,13 @@ const normFile = (f: string): string => f.replace(/\\/g, '/').replace(/^(\.\/)+/
 
 export const HEAVY_TTL_MS = 60 * 60_000;
 /** HEAVY-LOCK-SELF-WAIT: how long a freed slot is kept for the queued agent it was offered to.
- *  A waiter stays queued until it is offered a slot, acquires, its PTY is gone, or it was last
- *  denied HEAVY_TTL_MS ago (Andy N2: dropped as stale). */
+ *  A waiter stays queued until it is offered a slot, acquires, gives its place up (`heavy release`)
+ *  or its PTY is gone. HEAVY-QUEUE-WAIT-DROPS: NOT until a timer runs out. The old "not denied
+ *  again for HEAVY_TTL_MS" drop (Andy N2) was shorter than a normal hold: a stage bench holds the
+ *  slot ~90 min, and an agent told "do not retry, you will be told" never asks again, so it fell
+ *  out of the queue at 60 min and re-queued at the back (Andy, 3x on 2026-10-21). HEAVY_TTL_MS is
+ *  the HOLDER's TTL only. A waiter that moved on takes a reservation that lapses in
+ *  HEAVY_RESERVE_MS and passes on; a dead one is reaped by liveness (`alive`). */
 export const HEAVY_RESERVE_MS = 5 * 60_000;
 export const HEAVY_SCAN_MS = 20_000;
 export const HEAVY_SCAN_MISSES = 2;
@@ -1977,9 +1985,10 @@ export function heavySlotFreeNotice(agentId: string, kind: string, until: number
 
 /**
  * LOCK-WAIT-NOTICES (1.1.87): the notice for an agent that has left the queue without a slot: a
- * waiter not denied again for HEAVY_TTL_MS is dropped as stale, and a reservation not used within
- * HEAVY_RESERVE_MS passes on. Either way the agent is no longer queued, and it was told to wait for
- * a notice, so it gets one. Same rails and wake as heavySlotFreeNotice. Pure: main sends it.
+ * reservation not used within HEAVY_RESERVE_MS passes on, so the agent is no longer queued, and it
+ * was told to wait for a notice, so it gets one. Same rails and wake as heavySlotFreeNotice. Pure:
+ * main sends it. The 'stale' text is kept for callers, but since HEAVY-QUEUE-WAIT-DROPS the lock
+ * never drops a waiter by age, so it never asks for it.
  */
 export function heavyWaitLapsedNotice(agentId: string, kind: string, why: 'stale' | 'expired'): {
   message: { to: string; act: 'inform'; requires_reply: false; subject: string; body: string; wake: 'now' };
@@ -2187,7 +2196,8 @@ export class HeavyJobLock {
   /** Queue a denied agent once (FIFO); its 1-based position. */
   private enqueue(agentId: string, kind: HeavyKind, hooked = true, exclusive = false): number {
     const i = this.waiters.findIndex((w) => w.agentId === agentId);
-    // A re-deny keeps its place and shows the agent still wants the slot (the waiter TTL restarts).
+    // A re-deny keeps its place; `since` is its latest ask (the reserve row's waitedMs). No TTL
+    // runs on it (HEAVY-QUEUE-WAIT-DROPS).
     if (hooked) this.leaseOnly.delete(agentId);
     if (i >= 0 && hooked) this.waiters[i].hooked = true;
     if (i >= 0) { this.waiters[i].since = this.now(); this.waiters[i].exclusive ||= exclusive; return i + 1; }
@@ -2216,10 +2226,9 @@ export class HeavyJobLock {
     // and the waiters behind it wait with it.
     while (this.waiters.length && this.fits(this.waiters[0].agentId, this.waiters[0].exclusive, limit)) {
       const w = this.waiters.shift()!;
-      if (this.d.alive && !this.d.alive(w.agentId)) { this.log({ kind: 'heavy-lock', action: 'queue-dropped', agentId: w.agentId, reason: 'gone' }); this.changed(); continue; }
-      // Andy N2: a waiter not denied again within HEAVY_TTL_MS has most likely moved on; a slot
-      // reserved for it would sit unused for HEAVY_RESERVE_MS.
-      if (this.now() - w.since >= HEAVY_TTL_MS) { this.log({ kind: 'heavy-lock', action: 'queue-dropped', agentId: w.agentId, reason: 'stale' }); this.changed(); this.lapse(w.agentId, w.kind, 'stale'); continue; }
+      if (!this.alive(w.agentId)) { this.log({ kind: 'heavy-lock', action: 'queue-dropped', agentId: w.agentId, reason: 'gone' }); this.changed(); continue; }
+      // HEAVY-QUEUE-WAIT-DROPS: no drop by age here (the old Andy N2 "stale" drop). A waiter that
+      // moved on takes this reservation, which lapses in HEAVY_RESERVE_MS and passes on.
       const until = this.now() + HEAVY_RESERVE_MS;
       this.reservations.set(w.agentId, { kind: w.kind, until, procs: w.procs, hooked: w.hooked, exclusive: w.exclusive });
       this.log({ kind: 'heavy-lock', action: 'reserve', agentId: w.agentId, heavyKind: w.kind, until: new Date(until).toISOString(), waitedMs: this.now() - w.since, ...(w.exclusive ? { exclusive: true } : {}) });
@@ -2453,8 +2462,8 @@ export class HeavyJobLock {
   }
 
   /** LOCK-WAIT-NOTICES: tell an agent it left the queue: not the one whose own call is running, and
-   *  not a gone one (no PTY to tell; Dwight MUST: the stale sweep and a lapsed reservation reach here
-   *  without grant()'s gone check). */
+   *  not a gone one (no PTY to tell; Dwight MUST: a lapsed reservation reaches here without grant()'s
+   *  gone check). */
   private lapse(agentId: string, kind: HeavyKind, why: 'stale' | 'expired'): void {
     if (agentId === this.calling) return;
     // HEAVY-LOCK-OPAQUE-SCRIPT-196: an agent queued only by a waiting test process was never told
@@ -2466,25 +2475,34 @@ export class HeavyJobLock {
     } catch { /* best effort: the lock goes on */ }
   }
 
+  /** `alive` as grant() and the sweep read it: an alive check that throws counts as live (never breaks
+   *  the lock). An agent briefly without a PTY (restarting) is gone at that moment and loses its
+   *  place on purpose: it asks again when it is back and queues anew. */
+  private alive(agentId: string): boolean {
+    try { return !this.d.alive || this.d.alive(agentId); } catch { return true; }
+  }
+
   private expire(): void {
     const t = this.now();
-    // LOCK-WAIT-NOTICES (Jim NIT 1): a waiter not denied again for HEAVY_TTL_MS leaves the queue on
-    // schedule, not only when a slot next frees (grant() keeps its own check): until then fleet.json
-    // and the displays said QUEUED #n for an agent the lock would never serve. It is told.
+    // HEAVY-QUEUE-WAIT-DROPS: a waiter keeps its place until it is served or leaves on purpose; the
+    // only sweep is by LIVENESS: a waiter whose agent is gone (no PTY) leaves the queue on schedule,
+    // not only when a slot next frees (grant() keeps its own gone check): until then fleet.json and
+    // the displays said QUEUED #n for an agent the lock could never serve. Not told (no PTY). Never
+    // by age: a live waiter outlives any hold (the Jim NIT 1 "stale" sweep bounded the wait to
+    // HEAVY_TTL_MS, shorter than a ~90 min stage bench).
     // HEAVY-SLOT-EXCLUSIVE-192: a dropped waiter may have held back the ones behind it (an exclusive
     // head waits for the empty machine), so the queue is offered the free slots again.
     let left = false;
     for (const w of [...this.waiters]) {
-      if (t - w.since < HEAVY_TTL_MS) continue;
+      if (!this.d.alive || this.alive(w.agentId)) continue;
       this.dequeue(w.agentId);
-      this.log({ kind: 'heavy-lock', action: 'queue-dropped', agentId: w.agentId, reason: 'stale' });
+      this.log({ kind: 'heavy-lock', action: 'queue-dropped', agentId: w.agentId, reason: 'gone' });
       this.changed();
-      this.lapse(w.agentId, w.kind, 'stale');
       left = true;
     }
     // Jim N5: a TTL expiry while the watcher last SAW the job running is logged distinctly.
     for (const h of [...this.holders.values()]) if (t - h.touched >= HEAVY_TTL_MS) this.release(h.agentId, h.seenRunning ? 'expired-still-running' : 'ttl');
-    // HEAVY-LOCK-SELF-WAIT: an unused reservation passes on; a waiter never offered a slot in time is dropped.
+    // HEAVY-LOCK-SELF-WAIT: an unused reservation passes on (the agent that took it is told).
     let passed = false;
     for (const [agentId, r] of [...this.reservations.entries()]) {
       if (t < r.until) continue;
