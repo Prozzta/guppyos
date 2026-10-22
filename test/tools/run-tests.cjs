@@ -106,13 +106,6 @@ const startSlots = (env = process.env, cores = os.availableParallelism()) => {
   const n = Number(env.GUPPY_START_SLOTS);
   return env.GUPPY_START_SLOTS !== undefined && env.GUPPY_START_SLOTS !== '' && Number.isInteger(n) && n >= 0 ? n : Math.max(2, Math.ceil(cores / 4));
 };
-/** HALFCORES-SUITE-198: the processor count in a HARNESS_CPU_MASK (decimal); null = no limit ('' or not a mask). */
-const maskCpus = (mask) => {
-  if (typeof mask !== 'string' || !/^[1-9]\d*$/.test(mask)) return null;
-  let n = 0;
-  for (let m = BigInt(mask); m; m >>= 1n) n += Number(m & 1n);
-  return n;
-};
 /**
  * TEST-TEMP-HYGIENE: every test-file process gets a temp folder of its own under one run folder
  * (temp-jail-preload.cjs), so a leak is named by its file and other processes' use of the shared
@@ -457,7 +450,7 @@ function totals(code, counts, laneState, log, failures = [], {
   return code;
 }
 
-module.exports = { prepareFileJob, FILE_JOB_PRELOAD, prepareTempJail, TEMP_JAIL_PRELOAD, tempLeaks, reportTempLeaks,prepareStartGate, startSlots, maskCpus, START_GATE_PRELOAD, burstLine, selectTestFiles, discoverTestFiles, FEATURE_TEST_DIRS, run, runPerfLane, runCounts, failingTests, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
+module.exports = { prepareFileJob, FILE_JOB_PRELOAD, prepareTempJail, TEMP_JAIL_PRELOAD, tempLeaks, reportTempLeaks,prepareStartGate, startSlots, START_GATE_PRELOAD, burstLine, selectTestFiles, discoverTestFiles, FEATURE_TEST_DIRS, run, runPerfLane, runCounts, failingTests, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
 
 if (require.main === module) {
   const repoRoot = path.resolve(__dirname, '..', '..');
