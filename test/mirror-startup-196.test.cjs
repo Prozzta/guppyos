@@ -78,13 +78,15 @@ test('the parse is MEASURED on the installed xterm: the WriteBuffer slice method
   assert.ok(spent > 0, `parse time was measured (${spent.toFixed(1)} ms)`);
 });
 
-test('timeParse: injected slice clock measures actual parse time, never capped-job descheduling; only the outermost slice is timed', () => {
+test('CENSUS MUTANT: injected slice clock measures one parse, never capped-job descheduling; only the outermost slice is timed', () => {
   const calls = [];
   let now = 100;
   const wb = { n: 0, _innerWrite() { this.n += 1; now += 17; if (this.n === 1) this._innerWrite(); return 'r'; } };
   assert.equal(M.timeParse({ _core: { _writeBuffer: wb } }, (ms) => calls.push(ms), () => now), true);
   assert.equal(wb._innerWrite(), 'r', 'the result passes through');
-  assert.equal(wb.n, 2, 'the nested call still runs');
+  // A `f(); return f()` parse-twice mutant makes n=4 and the injected total 68, so
+  // this is a behavioral census rather than a source spelling pin.
+  assert.equal(wb.n, 2, 'the nested call still runs exactly once; duplicate parse mutant fails here');
   assert.deepEqual(calls, [34], 'the actual parse work is measured exactly once (M8: add(0) fails)');
   const thrower = { _innerWrite() { throw new Error('boom'); } };
   M.timeParse({ _core: { _writeBuffer: thrower } }, (ms) => calls.push(ms), () => now);
@@ -94,6 +96,18 @@ test('timeParse: injected slice clock measures actual parse time, never capped-j
   assert.equal(M.timeParse({}, () => {}), false);
   assert.equal(M.timeParse({ _core: { _writeBuffer: {} } }, () => {}), false);
   assert.equal(M.timeParse(null, () => {}), false);
+});
+
+test('timeParse: the app default clock counts a real non-CPU parse stall (wall-clock mutant)', () => {
+  const calls = [];
+  const word = new Int32Array(new SharedArrayBuffer(4));
+  const wb = { _innerWrite() { Atomics.wait(word, 0, 0, 60); } };
+  assert.equal(M.timeParse({ _core: { _writeBuffer: wb } }, (ms) => calls.push(ms)), true);
+  wb._innerWrite();
+  assert.equal(calls.length, 1);
+  // process.cpuUsage() sees essentially none of Atomics.wait; the production clock must
+  // still charge the whole slice.  A little scheduler slack is deliberately tolerated.
+  assert.ok(calls[0] >= 40, `wall stall was not timed: ${calls[0]} ms`);
 });
 
 // ─── 2. the replay of the 1.1.95 startup ───────────────────────────────────────────────────
