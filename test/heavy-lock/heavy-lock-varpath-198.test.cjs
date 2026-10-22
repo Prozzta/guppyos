@@ -172,6 +172,26 @@ K.readerDir = (M = HJ) => {
 };
 test('scriptReaderFor: isDir reports what the reader marks dir; readScript/missingAt treat it as present, no text', () => K.readerDir());
 
+// Andy's audit of e66b4134: PowerShell runs `./tool` and `.\tool` as tool.cmd when a folder `tool` sits
+// beside it (measured: RAN twice), so a folder with a runnable sibling is not "a directory, light".
+K.runnableSibling = (M = HJ) => {
+  const read = (abs) => {
+    const k = abs.replace(/\\/g, '/').replace(/\/\.\//g, '/').toLowerCase();
+    if (k === 'c:/dunder/hive/bin/tool' || k === 'c:/dunder/hive/bin/term') return { size: 0, text: () => '', dir: true };
+    if (k === 'c:/dunder/hive/bin/tool.cmd') return { size: 8, text: () => 'npm test' };
+    return null;
+  };
+  const r = M.scriptReaderFor('C:/Dunder/hive/bin', read);
+  assert.equal(r.isDir('./term'), true, 'A FOLDER ALONE IS A DIRECTORY');
+  for (const p of ['./tool', '.\\tool', 'C:/Dunder/hive/bin/tool']) {
+    assert.equal(r.isDir(p), false, `A FOLDER WITH A RUNNABLE SIBLING IS NOT A DIRECTORY: ${p}`);
+  }
+  for (const cmd of ['./tool', '.\\tool', 'cd C:/Dunder/hive/bin; ./tool --help']) {
+    assert.equal(M.classifyCommand(cmd, 0, r).heavy, true, `A FOLDER WITH A RUNNABLE SIBLING IS NOT A DIRECTORY: ${cmd}`);
+  }
+};
+test('required mutant: a folder with a runnable sibling (tool + tool.cmd) is not a directory: PowerShell runs the sibling', () => K.runnableSibling());
+
 K.hookReader = (M = HJ, H = loadTs(HKF)) => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'md-varpath-'));
   try {
@@ -221,8 +241,10 @@ const MUTANTS = [
     killer: 'missingStays', dies: /A MISSING PATH STAYS PROVISIONAL/ },
   { name: 'classifyCommand drops isDir from the ctx', edits: [['...(isDir ? { isDir } : {}), ', '']],
     killer: 'directory', dies: /A DIRECTORY IS NOT A PROGRAM/ },
-  { name: 'the reader never reports a directory', edits: [['      return abs !== null && read(abs)?.dir === true;', '      return false;']],
+  { name: 'the reader never reports a directory', edits: [['abs !== null && read(abs)?.dir === true && ', 'false && ']],
     killer: 'readerDir', dies: /THE READER REPORTS A DIRECTORY/ },
+  { name: 'a runnable sibling is ignored', edits: [[' && !RUNNABLE_EXTS.some((e) => read(`${abs}${e}`) !== null);', ';']],
+    killer: 'runnableSibling', dies: /A FOLDER WITH A RUNNABLE SIBLING IS NOT A DIRECTORY/ },
   { name: 'a directory reads as an empty script', edits: [['      if (!f || f.dir || f.size > HEAVY_SCRIPT_MAX_BYTES) return null;   // a directory has no text', '      if (!f || f.size > HEAVY_SCRIPT_MAX_BYTES) return null;']],
     killer: 'readerDir', dies: /THE READER REPORTS A DIRECTORY: a directory has no script text/ },
   { name: 'the hook reader calls a real directory missing', file: HKF, edits: [["          return st.isDirectory() ? { size: 0, text: () => '', dir: true } : null;", '          return null;']],

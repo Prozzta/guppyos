@@ -1834,6 +1834,9 @@ export function classifyHeavy(toolName: string | undefined, input: unknown, ctx:
 /** HEAVY-LOCK-SCRIPT-WRAPPER: the largest script file the classifier reads. */
 export const HEAVY_SCRIPT_MAX_BYTES = 256 * 1024;
 
+/** HEAVY-LOCK-VARPATH-READ: what PowerShell and cmd try after a bare name (`./tool` runs tool.cmd). */
+const RUNNABLE_EXTS = ['.exe', '.cmd', '.bat', '.com', '.ps1'];
+
 /** A ClassifyCtx reading scripts relative to `cwd` (the tool call's), size-capped; null on any failure. */
 export function scriptReaderFor(cwd: string | null | undefined, read: (absPath: string) => { size: number; text: () => string; dir?: boolean } | null): ClassifyCtx {
   const resolve = (p: string, cd?: string): string | null => {
@@ -1844,10 +1847,11 @@ export function scriptReaderFor(cwd: string | null | undefined, read: (absPath: 
     return isAbs(raw) || !base ? raw : `${base.replace(/[\\/]+$/, '')}/${raw}`;
   };
   return {
-    // HEAVY-LOCK-VARPATH-READ: a path that is there and is a directory (the reader says `dir`).
+    // HEAVY-LOCK-VARPATH-READ: a path that is there and is a directory (the reader says `dir`), with no
+    // runnable sibling: PowerShell runs `./tool` as tool.cmd when both are there (Andy's audit).
     isDir: (p: string, cd?: string): boolean => {
       const abs = resolve(p, cd);
-      return abs !== null && read(abs)?.dir === true;
+      return abs !== null && read(abs)?.dir === true && !RUNNABLE_EXTS.some((e) => read(`${abs}${e}`) !== null);
     },
     missingAt: (p: string, cd?: string): string | null => {
       const abs = resolve(p, cd);
