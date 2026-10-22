@@ -373,7 +373,8 @@ test('A: idempotent by op: a repeat is a no-op, and a retry after a failed part 
   fs.writeFileSync(path.join(g.agentDir, 'outbox'), 'a file where the outbox dir should be');
   const r1 = L.applyLedgerOp(op, g.deps);
   assert.equal(r1.status, 500);
-  assert.match(r1.body.line, /^partial: card=READS-181:done; message failed .*Run the same op again/);
+  // CARD-AUTODONE-ON-BUILD: creed is not god, so the done is kept off the card and the line says so.
+  assert.match(r1.body.line, /^partial: card=READS-181:todo \(status kept: done is god's\); message failed .*Run the same op again/);
   fs.rmSync(path.join(g.agentDir, 'outbox'));
   const r2 = L.applyLedgerOp(op, g.deps);
   assert.equal(r2.status, 200, r2.body.line);

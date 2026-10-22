@@ -5958,7 +5958,7 @@ a file or on stdin:
 \`\`\`bash
 ledger <<'EOF'
 { "op": "creed-181-3",
-  "card":    { "id": "READS-181", "patch": { "status": "done" }, "appendResult": "built; Jim audits" },
+  "card":    { "id": "READS-181", "appendResult": "built @ <sha>; Jim audits" },
   "message": { "to": "god", "act": "done", "subject": "READS-181 built", "body": "...", "in_reply_to": "<id>" },
   "memory":  { "append": "- 2026-10-03 READS-181 built ...", "lesson": false } }
 EOF
@@ -5968,7 +5968,10 @@ EOF
   never repeats a part, so a failed or timed-out call is safe to retry.
 - \`card\`: \`create\` (title required; refused if the id exists) or \`patch\` (refused if it does
   not); \`appendResult\` / \`appendNote\` add a timestamped line. A patch changes only the fields it
-  names, so the assignee is kept unless you give one.
+  names, so the assignee is kept unless you give one. Only god sets \`status: done\` (a card is
+  done when its sha lands in an INT on origin): a builder's or auditor's \`done\` is dropped, the
+  rest of the op still lands and the reply says \`status kept\`. \`doing\` / \`blocked\` are yours.
+  When the op sets no status the reply shows the current one as \`(unchanged)\`.
 - \`message\`: the schema above; \`to\` must be a registered agent, \`god\` or \`broadcast\`.
   A \`request\` must name its card (\`message.card\`, or the op's \`card\`): the ask closes when that
   card is done. Information that needs no answer goes as \`inform\`, never as \`request\`.
