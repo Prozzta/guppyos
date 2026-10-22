@@ -371,10 +371,17 @@ export function buildFloorDigest(input: FloorDigestInput): { markdown: string; d
  *  Same precedence as BoardMonitor. */
 export function readFleetAgents(root: string): DigestAgent[] {
   try {
-    const snap = JSON.parse(readFileSync(join(root, 'fleet.json'), 'utf8')) as { agents?: DigestAgent[]; liveness?: Array<{ agentId?: string; classification?: string; reason?: string }> };
+    return fleetAgentsFromSnapshot(JSON.parse(readFileSync(join(root, 'fleet.json'), 'utf8')));
+  } catch { return []; }
+}
+
+/** Parse an already-loaded snapshot for timer consumers. */
+export function fleetAgentsFromSnapshot(value: unknown): DigestAgent[] {
+  try {
+    const snap = value as { agents?: DigestAgent[]; liveness?: Array<{ agentId?: string; classification?: string; reason?: string }> };
     const byId = new Map<string, { classification?: string; reason?: string }>();
-    for (const r of Array.isArray(snap.liveness) ? snap.liveness : []) if (r && typeof r.agentId === 'string') byId.set(r.agentId, r);
-    return (Array.isArray(snap.agents) ? snap.agents : [])
+    for (const r of Array.isArray(snap?.liveness) ? snap.liveness : []) if (r && typeof r.agentId === 'string') byId.set(r.agentId, r);
+    return (Array.isArray(snap?.agents) ? snap.agents : [])
       .filter((a) => a && typeof a.id === 'string')
       .map((a) => (byId.has(a.id) ? { ...a, liveness: byId.get(a.id) } : a));
   } catch { return []; }
@@ -416,6 +423,8 @@ export function wakeBody(items: readonly DecisionItem[], digestPath: string): st
 /** What the scheduler needs from the app (narrow, so tests drive it without Electron). */
 export interface FloorDigestHost {
   root(): string | null;
+  /** In-process fleet snapshot, avoiding a synchronous timer read. */
+  fleetSnapshot?(): unknown;
   tasks(): unknown;
   taskMeta(): Record<string, { statusSince: number; statusSinceExact?: boolean } | undefined>;
   flags(): BoardFlag[];
@@ -461,7 +470,9 @@ export class FloorDigest {
     private readonly now: () => number = Date.now
   ) {}
 
-  private agents(root: string): DigestAgent[] { return readFleetAgents(root); }
+  private agents(root: string): DigestAgent[] {
+    return this.host.fleetSnapshot ? fleetAgentsFromSnapshot(this.host.fleetSnapshot()) : readFleetAgents(root);
+  }
 
   private loadState(root: string): WakeState {
     try {

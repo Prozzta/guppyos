@@ -113,6 +113,10 @@ const K = {
       { k: 'fs', name: 'readFileSync:secret-body.json', ms: 300 },
       { k: 'fs', name: 'writeFileSync:draft notes.txt', ms: 200 }
     ], 'the longest first; the path basename only (its spaces kept)');
+    assert.deepEqual(s[0].sync, [
+      { target: 'readFileSync:secret-body.json', callsPerMin: 1, bytes: 0 },
+      { target: 'writeFileSync:draft notes.txt', callsPerMin: 1, bytes: 11 }
+    ], 'per-target current-minute calls and bytes, with no contents or directories');
     assert.doesNotMatch(JSON.stringify(s[0]), /typed words|notes dir|Users/, 'no contents, no directories');
     r.w.stop();
     assert.equal(fsT.readFileSync.toString().includes('advance'), true, 'stop() puts the originals back');

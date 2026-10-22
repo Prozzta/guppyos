@@ -41,8 +41,9 @@
  * repointed at the Dev-isolated root by the time anything here runs, so F1 isolation
  * holds without this module knowing anything about it.
  */
-import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { atomicWriteTextAsync } from './atomicJson';
+import { basename, dirname, join } from 'node:path';
 import type { CapacityObservation, CapacityWindow } from '../shared/providerCapacity';
 import {
   OBSERVATION_SOURCES, PROVIDER_IDS, WINDOW_APPLICABILITIES, WINDOW_KINDS
@@ -371,9 +372,39 @@ export function saveCapacityStore(
     renameSync(tmp, file);
   } catch (e) {
     console.warn('[capacity] could not write the durable store:', e);
-    try { if (existsSync(tmp)) unlinkSync(tmp); } catch { /* nothing further to do */ }
+    removeCapacityTemps(file, tmp);
   }
   return { written, omitted };
+}
+
+/** Timer path uses the shared async atomic publisher so disk latency cannot stall main.
+ *  Same contract as saveCapacityStore: a failed write is LOGGED (UI-CRAWL fix, Andy M2: the branch
+ *  had made it silent) and swallowed; `commit` false withdraws the write (see atomicWriteTextAsync). */
+export async function saveCapacityStoreAsync(file: string, tracker: ProviderCapacityTracker, savedAt: number, commit?: () => boolean): Promise<{ written: number; omitted: number }> {
+  const { text, written, omitted } = serializeCapacityStore(tracker, savedAt);
+  try {
+    await atomicWriteTextAsync(file, text, commit);
+  } catch (e) {
+    console.warn('[capacity] could not write the durable store:', e);
+  }
+  return { written, omitted };
+}
+
+/** The module's one clean-up of temp files: the sync writer's own `<file>.tmp` (`own`, after a
+ *  failed write) and, UI-CRAWL fix (quit race), the async writer's `<file>.tmp-<hex>` siblings.
+ *  At will-quit the process ends before an in-flight async write can clean up after itself, so
+ *  the sync quit write sweeps them; one still open is left to its writer (it removes it). */
+function removeCapacityTemps(file: string, own?: string): void {
+  const stale: string[] = [];
+  if (own && existsSync(own)) stale.push(own);
+  try {
+    const dir = dirname(file);
+    const prefix = `${basename(file)}.tmp-`;
+    for (const name of readdirSync(dir)) if (name.startsWith(prefix)) stale.push(join(dir, name));
+  } catch { /* nothing to sweep */ }
+  for (const p of stale) {
+    try { unlinkSync(p); } catch { /* still open: its writer removes it */ }
+  }
 }
 
 /**
@@ -406,6 +437,10 @@ export function restoreCapacityStore(
  */
 export class CapacityStore {
   private timer: NodeJS.Timeout | null = null;
+  private writing: Promise<void> = Promise.resolve();
+  /** The write generation: an async write publishes only while it is still the newest write
+   *  (UI-CRAWL fix, quit race: saveNow at will-quit must not be overwritten by an older async rename). */
+  private seq = 0;
 
   constructor(
     private readonly file: string,
@@ -424,7 +459,7 @@ export class CapacityStore {
     if (this.timer) return;
     this.timer = setTimeout(() => {
       this.timer = null;
-      this.saveNow();
+      void this.saveAsync().catch(() => undefined);
     }, this.coalesceMs);
     if (typeof this.timer.unref === 'function') this.timer.unref();
   }
@@ -435,6 +470,23 @@ export class CapacityStore {
       clearTimeout(this.timer);
       this.timer = null;
     }
-    return saveCapacityStore(this.file, this.tracker, this.now());
+    // Any async write still in flight is now stale: it withdraws at its rename (atomicWriteTextAsync's
+    // commit check), so this sync write stays the last word. Its temp file, if the process ends
+    // before it gets there, is swept here.
+    this.seq++;
+    const out = saveCapacityStore(this.file, this.tracker, this.now());
+    removeCapacityTemps(this.file);
+    return out;
+  }
+
+  async saveAsync(): Promise<{ written: number; omitted: number }> {
+    if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+    const mine = ++this.seq;
+    let result: { written: number; omitted: number } | undefined;
+    this.writing = this.writing.catch(() => undefined).then(async () => {
+      result = await saveCapacityStoreAsync(this.file, this.tracker, this.now(), () => mine === this.seq);
+    });
+    await this.writing;
+    return result!;
   }
 }

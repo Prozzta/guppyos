@@ -131,6 +131,10 @@ test('renaming changes only the display name and reaches god immediately', async
   assert.equal(fs.existsSync(agentDir), true, 'the id-derived agent directory must not move');
   assert.match(hive.rosterContext(), /jim-1 "Kevin"/);
   assert.doesNotMatch(hive.rosterContext(), /jim-1 "Jim"/);
+  // UI-CRAWL fix: the same snapshot is republished, so a CLI reader of fleet.json follows.
+  await hive.fleetFlushed();
+  const fleet = JSON.parse(fs.readFileSync(path.join(home, 'hive', 'fleet.json'), 'utf8'));
+  assert.equal(fleet.agents.find((a) => a.id === 'jim-1').name, 'Kevin', 'the published file follows');
 });
 
 test('rename rejects empty and unknown agents without changing the registry', async (t) => {
@@ -166,14 +170,19 @@ test('a queued operator steer is not swallowed by the roster', async (t) => {
   assert.ok(ctx.includes(steer), 'only one additionalContext exists — the two must merge, not race');
 });
 
-test('a corrupt fleet.json degrades to no injection instead of throwing into a hook', async (t) => {
+// UI-CRAWL (d41157ff): the roster is injected from the in-memory snapshot, never read back from
+// fleet.json (a sync read on every god prompt). So a corrupt file on disk no longer costs god the
+// roster, and nothing is thrown into a hook; before anything is published there is no roster.
+test('a corrupt fleet.json on disk never reaches god: the roster is injected from memory, nothing throws into a hook', async (t) => {
   const { home, hive, fire } = await floor(t);
+  assert.equal(hive.rosterContext(), null, 'nothing published yet: no roster, and no read of the file');
   snapshot(hive);
+  await hive.fleetFlushed();
   fs.writeFileSync(path.join(home, 'hive', 'fleet.json'), '{ not json');
 
-  assert.equal(hive.rosterContext(), null);
+  assert.match(hive.rosterContext(), /LIVE ROSTER/);
   const res = await fire('god-1', 'SessionStart');
-  assert.doesNotMatch(context(res), /LIVE ROSTER/);
+  assert.match(context(res), /LIVE ROSTER/);
 });
 
 // --- 1:1 hold ---------------------------------------------------------------
@@ -200,11 +209,18 @@ test('a held agent is marked in the roster and Michael is told to route around i
 test('the hold reaches Michael without waiting for the next fleet snapshot', async (t) => {
   const { home, hive } = await floor(t);
   snapshot(hive);
+  await hive.fleetFlushed();
+  const fleetPath = path.join(home, 'hive', 'fleet.json');
+  const onDisk = () => JSON.parse(fs.readFileSync(fleetPath, 'utf8')).agents.find((a) => a.id === 'jim-1').onHold;
   hive.setAgentHold('jim-1', true);
-  // The registry is the record, but the roster is injected from fleet.json, and
-  // the periodic writer is 8s away. One more dispatch fits in 8s.
-  const fleet = JSON.parse(fs.readFileSync(path.join(home, 'hive', 'fleet.json'), 'utf8'));
-  assert.equal(fleet.agents.find((a) => a.id === 'jim-1').onHold, true);
+  // The registry is the record, but the roster is injected from the in-memory snapshot, and
+  // the periodic writer is 8s away. One more dispatch fits in 8s: the snapshot is patched at once.
+  assert.match(hive.rosterContext(), /jim-1 "Jim" \([^)]*ON HOLD/, 'the roster says so in the same turn');
+  // UI-CRAWL fix (Andy M1): the patch is published through the async writer, never by a sync
+  // read-modify-write of the file in the hook's turn (that stalled main and raced the publish).
+  assert.equal(onDisk(), undefined, 'no sync write of fleet.json in the same turn');
+  await hive.fleetFlushed();
+  assert.equal(onDisk(), true, 'and the published file carries the hold for CLI readers');
 });
 
 test('releasing clears the mark and the whole instruction block', async (t) => {

@@ -11,7 +11,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { BoardFlag } from '../shared/boardStale';
 import { firstOccurrenceById } from '../shared/taskLedger';
-import { ageText, readFleetAgents, writeTextAtomic, type DigestAgent } from './floorDigest';
+import { ageText, fleetAgentsFromSnapshot, readFleetAgents, writeTextAtomic, type DigestAgent } from './floorDigest';
 
 export const BOARD_STATUS_FILE = 'board-status.md';
 export const BOARD_STATUS_MIN_INTERVAL_MS = 10_000;
@@ -122,6 +122,8 @@ export function renderBoardStatus(input: BoardStatusInput): string {
 /** What the writer needs from the app (narrow, so tests drive it without Electron). */
 export interface BoardStatusHost {
   root(): string | null;
+  /** In-process fleet snapshot (UI-CRAWL fix: production supplies it, so a write never sync-reads fleet.json). */
+  fleetSnapshot?(): unknown;
   tasks(): unknown;
   taskMeta(): BoardStatusInput['meta'];
   flags(): BoardFlag[];
@@ -142,7 +144,7 @@ export class BoardStatusWriter {
   write(): string | null {
     const root = this.host.root();
     if (!root) return null;
-    const agents: DigestAgent[] = readFleetAgents(root);
+    const agents: DigestAgent[] = this.host.fleetSnapshot ? fleetAgentsFromSnapshot(this.host.fleetSnapshot()) : readFleetAgents(root);
     const now = this.now();
     if (this.appStart?.root !== root) {
       const value = readAppStart(root);

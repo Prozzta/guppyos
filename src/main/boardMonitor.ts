@@ -35,6 +35,8 @@ export interface BoardMonitorHive {
 
 export interface BoardMonitorOptions {
   hive: BoardMonitorHive;
+  /** In-process fleet snapshot. Production supplies this so a tick never sync-reads it. */
+  fleetSnapshot?: () => unknown;
   /** Dwight's in-process getLiveness. When it is absent, or has no record for an agent, the
    *  fleet.json records are used: the top-level liveness[] first, then agents[].liveness. */
   getLiveness?: (agentId: string) => LivenessV1 | undefined;
@@ -75,7 +77,8 @@ export class BoardMonitor {
     const fleet = new Map<string, FleetFacts>();
     const liveness = new Map<string, LivenessV1>();
     try {
-      const snap = JSON.parse(readFileSync(join(root, 'fleet.json'), 'utf8')) as { ts?: number; agents?: Array<Record<string, unknown>>; liveness?: unknown[] };
+      const cached = this.opts.fleetSnapshot?.();
+      const snap = (this.opts.fleetSnapshot ? cached : JSON.parse(readFileSync(join(root, 'fleet.json'), 'utf8'))) as { ts?: number; agents?: Array<Record<string, unknown>>; liveness?: unknown[] };
       const ts = typeof snap.ts === 'number' ? snap.ts : this.now();
       // fix/177-liveness publishes the records as a TOP-LEVEL liveness[] (agentLiveness
       // fleetRecords), keyed by agentId; agents[].liveness is read too, as a second source.

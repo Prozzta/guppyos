@@ -19,6 +19,7 @@
  * the undelivered report merges by agent + id, the lesson report is rewritten).
  */
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { atomicWriteJson, renameWithRetry } from './atomicJson';
 import { isValidMailId, type MailLedgerDoc } from './mailLedger';
@@ -137,6 +138,11 @@ function validUndeliveredReport(x: unknown): x is UndeliveredReport {
 export function readUndeliveredReport(root: string): UndeliveredReport | null {
   const r = readJson<unknown>(join(root, MAIL_UNDELIVERED_REPORT));
   return validUndeliveredReport(r) ? r : null;
+}
+
+export async function readUndeliveredReportAsync(root: string): Promise<UndeliveredReport | null> {
+  try { const r = JSON.parse(await readFile(join(root, MAIL_UNDELIVERED_REPORT), 'utf8')) as unknown; return validUndeliveredReport(r) ? r : null; }
+  catch { return null; }
 }
 
 /** The Human dismissed the report: persisted, so it is shown once. Returns true on change. */

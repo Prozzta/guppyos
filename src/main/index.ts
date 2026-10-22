@@ -537,6 +537,7 @@ const hive = new HiveManager(
  *  re-runs on every applied ledger change, and on its own 60 s tick. */
 const boardMonitor = new BoardMonitor({
   hive,
+  fleetSnapshot: () => hive.fleetSnapshotView(),
   // The liveness join (Jim, god ab966e): the monitor reads Dwight's records in process.
   // agentLiveness is declared below; this runs only when the monitor ticks, after start.
   getLiveness: (id) => agentLiveness.getLiveness(id),
@@ -554,6 +555,7 @@ const boardMonitor = new BoardMonitor({
 /** ZT-I3 §3.5: hive/board-status.md, rendered (never hand-kept). */
 const boardStatus = new BoardStatusWriter({
   root: () => hive.root(),
+  fleetSnapshot: () => hive.fleetSnapshotView(),
   tasks: () => hive.tasks(),
   taskMeta: () => hive.ledgerGuard.taskMeta().cards,
   // WAKE-STUCK-REFUSAL-ESCALATE: plus the runs of identical refused wakes (kind wake-refusal-stuck).
@@ -580,6 +582,7 @@ let wakeSender: WakeSender | null = null;
 /** ZT-I4: the floor digest (hive/floor-digest.md) and the decision-only wake of god. */
 const floorDigest = new FloorDigest({
   root: () => hive.root(),
+  fleetSnapshot: () => hive.fleetSnapshotView(),
   tasks: () => hive.tasks(),
   taskMeta: () => hive.ledgerGuard.taskMeta().cards,
   flags: () => [...boardMonitor.flags(), ...refusedSettles.flags(Date.now(), agentDisplayName, refusedLive)],
@@ -6117,12 +6120,12 @@ ipcMain.handle('hive:inbox', (_evt, id: unknown) => {
 ipcMain.handle('hive:mailPending', (_evt, id: unknown) => (typeof id === 'string' && id ? mailPendingIds(id) : []));
 // ZT-I1-MAIL §4.3 / §11.13 option B: the Command Center's open-request list (badge + list) and
 // the §7.1 step-2 undelivered report (shown once). Data only: nothing here wakes an agent.
-ipcMain.handle('hive:mailObligations', () => {
+ipcMain.handle('hive:mailObligations', async () => {
   if (!hive.enabled()) return { agents: [], undelivered: null };
   let agents: ReturnType<typeof hive.mailObligations> = [];
   try { agents = hive.mailObligations(); } catch { /* ledger trouble: the banner says so */ }
-  let undelivered: ReturnType<typeof hive.undeliveredReport> = null;
-  try { undelivered = hive.undeliveredReport(); } catch { /* no report */ }
+  let undelivered: Awaited<ReturnType<typeof hive.undeliveredReportAsync>> = null;
+  try { undelivered = await hive.undeliveredReportAsync(); } catch { /* no report */ }
   return { agents, undelivered };
 });
 // §11.18 #1: the Human's explicit close. The ONLY caller of closeObligation.
