@@ -1923,16 +1923,19 @@ export class HiveManager {
    * The registry key, agent directory, session id, and every mailbox path remain
    * keyed by `id`; only the human-facing name is updated.
    *
-   * `fleet.json` is patched in the same operation so god's next prompt receives
-   * the new name immediately rather than waiting for the periodic fleet refresh.
+   * The in-memory fleet snapshot (the one god's roster is injected from) is patched
+   * in the same operation and republished, so god's next prompt receives the new
+   * name immediately rather than waiting for the periodic fleet refresh.
    */
   /**
    * Put an agent on hold, or take it off, and tell Michael immediately.
    *
-   * `fleet.json` is patched in the same operation for the same reason
-   * `renameAgent` does it: god's roster is injected from that file on its next
-   * prompt, and waiting up to 8s for the periodic refresh means one more
-   * dispatch can still land on someone the human has just claimed.
+   * The in-memory fleet snapshot is patched in the same operation (and republished)
+   * for the same reason `renameAgent` does it: god's roster is injected from that
+   * snapshot on its next prompt, and waiting up to 8s for the periodic refresh means
+   * one more dispatch can still land on someone the human has just claimed.
+   * UI-CRAWL fix (Andy M1): never a read-modify-write of fleet.json on disk: the
+   * roster no longer reads the file, and a sync RMW raced the async publish.
    */
   setAgentHold(id: string, hold: boolean): { ok: boolean; onHold?: boolean; error?: string } {
     const root = this.root();
@@ -1945,17 +1948,7 @@ export class HiveManager {
 
       agent.onHold = hold;
       this.writeJson(join(root, 'registry.json'), reg);
-
-      const fleetPath = join(root, 'fleet.json');
-      if (existsSync(fleetPath)) {
-        try {
-          const fleet = this.readJson<{ agents?: Array<{ id?: string; onHold?: boolean }> }>(fleetPath, {});
-          if (Array.isArray(fleet.agents)) {
-            const row = fleet.agents.find((candidate) => candidate.id === id);
-            if (row) { row.onHold = hold; this.writeJson(fleetPath, fleet); }
-          }
-        } catch { /* fleet is a cache — the registry above is the record */ }
-      }
+      this.patchFleetAgent(id, (row) => { row.onHold = hold; });
       this.appendLog({ kind: 'agent-hold', id, onHold: hold });
       return { ok: true, onHold: hold };
     } catch (e) {
@@ -1980,21 +1973,10 @@ export class HiveManager {
       agent.name = nextName;
       this.writeJson(join(root, 'registry.json'), reg);
 
-      // fleet.json is ephemeral and may not exist yet. When it does, keep its
-      // display name in lockstep with the registry so rosterContext() is fresh.
-      const fleetPath = join(root, 'fleet.json');
-      if (existsSync(fleetPath)) {
-        try {
-          const fleet = this.readJson<{ agents?: Array<{ id?: string; name?: string }> }>(fleetPath, {});
-          if (Array.isArray(fleet.agents)) {
-            const row = fleet.agents.find((candidate) => candidate.id === id);
-            if (row) {
-              row.name = nextName;
-              this.writeJson(fleetPath, fleet);
-            }
-          }
-        } catch { /* periodic snapshot will repair a malformed/stale fleet file */ }
-      }
+      // The snapshot may not exist yet (nothing published): the first periodic publish
+      // then carries the registry's name. When it does, keep its display name in
+      // lockstep with the registry so rosterContext() is fresh.
+      this.patchFleetAgent(id, (row) => { row.name = nextName; });
 
       this.appendLog({ kind: 'rename', agentId: id, previousName, name: nextName });
       return { ok: true, name: nextName };
@@ -5465,8 +5447,12 @@ export class HiveManager {
   private fleetSnapshot: unknown = null;
   private fleetWriting = false;
   private fleetDirty = false;
+  /** Settles when every snapshot handed to writeFleetSnapshot so far is on disk (the pending
+   *  deferred flush included). A file reader that must see the latest publish awaits it. */
+  private fleetSettled: Promise<void> = Promise.resolve();
   /** In-process readers use this rather than synchronously opening fleet.json. */
   fleetSnapshotView(): unknown { return this.fleetSnapshot; }
+  fleetFlushed(): Promise<void> { return this.fleetSettled; }
   writeFleetSnapshot(snapshot: unknown): void {
     const root = this.root();
     if (!root) return;
@@ -5476,8 +5462,30 @@ export class HiveManager {
     // Let the caller finish its synchronous turn; readers use fleetSnapshot above immediately.
     // This is a timer path itself, so yielding one turn costs no freshness but avoids coupling
     // publication to a caller's temporary-root lifetime.
-    const flush = setTimeout(() => { void this.flushFleetSnapshot(root); }, 0);
-    flush.unref?.();
+    // The 0 ms timer is NOT unref'd: a snapshot handed over is a publish owed, and an unref'd
+    // timer lets the loop drain before it fires (a test awaiting fleetFlushed() hung on exactly that).
+    this.fleetSettled = new Promise<void>((settled) => {
+      setTimeout(() => { void this.flushFleetSnapshot(root).finally(settled); }, 0);
+    });
+  }
+
+  /** UI-CRAWL fix (Andy M1): a hold or a rename patches ONE agent's row of the in-memory snapshot
+   *  and publishes the result through writeFleetSnapshot, so the roster (read from memory) and the
+   *  file (read by CLIs) change together, with no read-modify-write of fleet.json on disk: that
+   *  sync RMW stalled main and could interleave with the async publish and lose the patch. No
+   *  snapshot yet (nothing published) = nothing to patch: the first publish carries the registry. */
+  private patchFleetAgent(id: string, patch: (row: Record<string, unknown>) => void): void {
+    const snap = this.fleetSnapshot as { agents?: Array<Record<string, unknown> | null> } | null;
+    if (!snap || typeof snap !== 'object' || !Array.isArray(snap.agents)) return;
+    let hit = false;
+    const agents = snap.agents.map((row) => {
+      if (!row || typeof row !== 'object' || row.id !== id) return row;
+      hit = true;
+      const next = { ...row };
+      patch(next);
+      return next;
+    });
+    if (hit) this.writeFleetSnapshot({ ...snap, agents });
   }
 
   /** One writer per target; changes arriving mid-write collapse to the latest snapshot. */

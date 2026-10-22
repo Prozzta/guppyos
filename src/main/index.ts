@@ -546,6 +546,7 @@ const boardMonitor = new BoardMonitor({
 /** ZT-I3 §3.5: hive/board-status.md, rendered (never hand-kept). */
 const boardStatus = new BoardStatusWriter({
   root: () => hive.root(),
+  fleetSnapshot: () => hive.fleetSnapshotView(),
   tasks: () => hive.tasks(),
   taskMeta: () => hive.ledgerGuard.taskMeta().cards,
   // WAKE-STUCK-REFUSAL-ESCALATE: plus the runs of identical refused wakes (kind wake-refusal-stuck).

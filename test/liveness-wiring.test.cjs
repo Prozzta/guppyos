@@ -162,7 +162,7 @@ test('fleet.json carries the records: every LIVE one, recent non-LIVE ones', () 
   assert.match(fleet, /liveness: agentLiveness\.fleetRecords\(now\)/);
 });
 
-test('M16: fleet.json is written atomically (temp file, then rename): a reader never sees it half-written', (t) => {
+test('M16: fleet.json is written atomically (temp file, then rename): a reader never sees it half-written', async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'liveness-fleet-'));
   const realHome = process.env.HOME; const realProfile = process.env.USERPROFILE;
   process.env.HOME = home; process.env.USERPROFILE = home;
@@ -178,16 +178,22 @@ test('M16: fleet.json is written atomically (temp file, then rename): a reader n
   const hive = new HiveManager(() => hiveHome);
   t.after(() => hive.dispose());
   const fleetPath = path.join(hiveHome, 'hive', 'fleet.json');
+  // UI-CRAWL (d41157ff): the publish is deferred off the caller's turn and goes through the async
+  // temp+rename (fs/promises); the pin awaits the flush rather than reverting the deferral.
+  const fsp = require('node:fs/promises');
   const writes = [];
   const renames = [];
-  const realWrite = fs.writeFileSync; const realRename = fs.renameSync;
-  fs.writeFileSync = function (p, ...rest) { writes.push(String(p)); return realWrite.call(this, p, ...rest); };
-  fs.renameSync = function (a, b, ...rest) { renames.push([String(a), String(b)]); return realRename.call(this, a, b, ...rest); };
+  const realWrite = fsp.writeFile; const realRename = fsp.rename;
+  fsp.writeFile = function (p, ...rest) { writes.push(String(p)); return realWrite.call(this, p, ...rest); };
+  fsp.rename = function (a, b, ...rest) { renames.push([String(a), String(b)]); return realRename.call(this, a, b, ...rest); };
   try {
     hive.writeFleetSnapshot({ ts: 1, agents: [], liveness: [{ agentId: 'a1' }] });
+    assert.equal(fs.existsSync(fleetPath), false, 'nothing written in the caller\'s own turn');
+    await hive.fleetFlushed();
   } finally {
-    fs.writeFileSync = realWrite; fs.renameSync = realRename;
+    fsp.writeFile = realWrite; fsp.rename = realRename;
   }
+  assert.ok(writes.length > 0, 'the temp file is written through fs/promises');
   assert.ok(!writes.some((p) => path.resolve(p) === path.resolve(fleetPath)), `never written in place: ${JSON.stringify(writes)}`);
   assert.ok(renames.some(([, to]) => path.resolve(to) === path.resolve(fleetPath)), 'renamed into place');
   assert.deepEqual(JSON.parse(fs.readFileSync(fleetPath, 'utf8')).liveness, [{ agentId: 'a1' }]);

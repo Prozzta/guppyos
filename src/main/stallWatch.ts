@@ -93,7 +93,18 @@ export interface RendererStallBatch {
 
 type Slice = { k: SliceKind; name: string; start: number; end: number };
 type Cap = { until: number; folded: number; worst: Record<string, unknown> | null; worstMs: number };
-type SyncCounter = { minute: number; calls: number; bytes: number };
+type SyncCounter = { calls: number; bytes: number };
+/** UI-CRAWL fix (Andy minor): the sync counter map is BOUNDED. Keys are fn:basename, so a temp file
+ *  (`x.json.tmp-a1b2c3`) or a mail id would be a new key per call: those are folded to one key,
+ *  the map holds the current minute only (reset when the minute turns) and at most this many
+ *  targets (the rest count under `other`), and a row carries the busiest STALL_ROW_SYNC. */
+export const SYNC_TARGETS_MAX = 64;
+export const STALL_ROW_SYNC = 12;
+function syncKey(target: string): string {
+  return target
+    .replace(/\.tmp-[0-9a-f]+$/i, '.tmp-*')
+    .replace(/\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-[0-9a-f]{6}/, '<id>');
+}
 
 const ID_RE = /^[A-Za-z0-9._:-]{1,64}$/;
 const TOKEN_RE = /^[a-z][a-z-]{0,23}$/;
@@ -119,8 +130,9 @@ export class StallWatch {
   private session: ProfilerSession | null = null;
   private profileTimer: unknown = null;
   private windowWorst = 0;
-  /** Current calendar-minute sync I/O totals, keyed by function and basename. */
+  /** Current calendar-minute sync I/O totals, keyed by function and basename (see syncKey). */
   private sync = new Map<string, SyncCounter>();
+  private syncMinute = -1;
 
   constructor(private readonly d: StallWatchDeps) {}
 
@@ -241,22 +253,28 @@ export class StallWatch {
     }
   }
 
-  /** Compact, bounded diagnostics for the targets that are still synchronous. */
+  /** Compact, bounded diagnostics for the targets that are still synchronous: the current minute's
+   *  busiest STALL_ROW_SYNC targets, most calls first. */
   syncStats(t = this.d.now()): Array<{ target: string; callsPerMin: number; bytes: number }> {
-    const minute = Math.floor(t / 60_000);
-    return [...this.sync].flatMap(([target, c]) => c.minute === minute ? [{ target, callsPerMin: c.calls, bytes: c.bytes }] : []);
+    if (Math.floor(t / 60_000) !== this.syncMinute) return [];
+    return [...this.sync]
+      .map(([target, c]) => ({ target, callsPerMin: c.calls, bytes: c.bytes }))
+      .sort((a, b) => b.callsPerMin - a.callsPerMin)
+      .slice(0, STALL_ROW_SYNC);
   }
 
   private recordSync(target: string, args: unknown[], result: unknown, t: number): void {
     const minute = Math.floor(t / 60_000);
-    const prev = this.sync.get(target);
-    const c = prev?.minute === minute ? prev : { minute, calls: 0, bytes: 0 };
+    if (minute !== this.syncMinute) { this.sync.clear(); this.syncMinute = minute; }
+    const key = syncKey(target);
+    const bounded = this.sync.has(key) || this.sync.size < SYNC_TARGETS_MAX ? key : 'other';
+    const c = this.sync.get(bounded) ?? { calls: 0, bytes: 0 };
     c.calls++;
     const data = /^(writeFileSync|appendFileSync):/.test(target) ? args[1] : result;
     if (typeof data === 'string') c.bytes += Buffer.byteLength(data, 'utf8');
     else if (Buffer.isBuffer(data)) c.bytes += data.length;
     else if (ArrayBuffer.isView(data)) c.bytes += data.byteLength;
-    this.sync.set(target, c);
+    this.sync.set(bounded, c);
   }
 
   private timed<F extends Function>(orig: F, k: SliceKind, name: (args: unknown[]) => string): F {
