@@ -271,7 +271,8 @@ function run({
   // nested `node --test` into a reporting child (no real run, no reporters). It is a run of its own.
   // TEST-PS-MODCACHE-LEAK: one PowerShell module-cache path in a temp folder for every file, so a
   // PowerShell that a test or the product under test starts never writes it under the repo root.
-  const env = require('./ps-env.cjs').psEnv(process.env);
+  // PS-POLICY-TEMP-LEAK: not the PowerShell temp folder; the files' temp jail sets theirs.
+  const env = require('./ps-env.cjs').psEnv(process.env, { temp: false });
   delete env.NODE_TEST_CONTEXT;
   if (env.HARNESS_CPU_MASK === undefined) env.HARNESS_CPU_MASK = String(cpuMask() ?? '');
   // HALFCORES-SUITE-198: on Windows node's availableParallelism ignores affinity, so inside a
