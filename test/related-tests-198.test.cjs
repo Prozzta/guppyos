@@ -23,13 +23,18 @@
  *   R14 the runner's feature dirs read as [] (a test/heavy-lock/ file never counts; Andy SHOULD)
  *   R15 a test/perf/*.perf.cjs is not an inventory change (Andy NIT1)
  *   R16 an unreadable runner is silent (no WARN on the summary)
+ * DWIGHT-LONG-RUN-KILLED: --run keeps a status file in the tree's git dir and is single per tree.
+ *   R17 a live run is not refused          R18 a dead pid still holds the tree
+ *   R19 a silent run holds it forever      R20 no final state (rc, line)
+ *   R21 no per-file progress
+ *   J3 a thrown light run leaves the status running    J6 stale bound grows unreasonably
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const Module = require('node:module');
-const { execFileSync } = require('node:child_process');
+const { execFileSync, spawnSync } = require('node:child_process');
 const { tempDir } = require('./tools/test-temp.cjs');
 
 const SRC = path.join(__dirname, '..', 'scripts', 'related-tests.cjs');
@@ -228,6 +233,96 @@ function ancestorChecks(M) {
 }
 test('--base must be an ancestor of --tip (a moved INT head would count its own changes)', () => ancestorChecks(REAL));
 
+// ── DWIGHT-LONG-RUN-KILLED: the --run status file and the single-run guard ──────────────────────
+function quiet(fn) {
+  const l = console.log, e = console.error;
+  console.log = () => {}; console.error = () => {};
+  try { return fn(); } finally { console.log = l; console.error = e; }
+}
+const deadPid = () => spawnSync(process.execPath, ['-e', ''], { windowsHide: true }).pid;
+
+function sidecarChecks(M) {
+  const { dir, base, tip } = repo();
+  const file = M.runStatusPath(dir);
+  assert.equal(file, path.join(dir, '.git', 'related-run.json'), 'in the git dir, never in git status');
+  // Deliberately use rev syntax: the sidecar must remain useful after refs move.
+  const args = ['--base', base.slice(0, 12), '--tip', 'HEAD', '--repo', dir, '--run'];
+  const read = () => JSON.parse(fs.readFileSync(file, 'utf8'));
+  const put = (st) => fs.writeFileSync(file, JSON.stringify(st));
+  try {
+    fs.rmSync(file, { force: true });
+    assert.equal(quiet(() => M.main(args)), 1);
+    const st = read();
+    assert.equal(st.state, 'done', 'finalised');
+    assert.equal(st.rc, 1);
+    assert.equal(st.line, 'light run: 2 pass, 4 red (1 same on base, 3 branch)');
+    assert.match(st.summary, /^related: 6 light, 0 heavy, 1 electron, 1 census, 1 tools/);
+    assert.deepEqual([st.pid, st.base, st.tip, st.total, st.done, st.reds, st.current], [process.pid, base, tip, 6, 6, 4, null], 'progress after every file');
+    assert.ok(st.finishedMs >= st.startedMs && st.updatedMs >= st.startedMs);
+    assert.deepEqual([st.base, st.tip], [base, tip], 'status records immutable rev-parse SHAs, not input refs');
+    assert.equal(git(dir, 'status', '--porcelain'), '', 'the status file never dirties the tree');
+
+    assert.equal(M.RUN_STALE_MS, 2 * M.FILE_TIMEOUT_MS + 60_000, 'a silent live pid is reclaimable within two file timeouts plus grace');
+    const at = 1_000_000;
+    const clocked = { state: 'running', pid: 42, updatedMs: at };
+    assert.equal(M.liveRun(clocked, at + M.RUN_STALE_MS - 1, () => true), true, 'one millisecond before the bound remains live');
+    assert.equal(M.liveRun(clocked, at + M.RUN_STALE_MS, () => true), false, 'at the bound, a silent run is stale');
+
+    assert.throws(() => quiet(() => M.main(args, { runLightFn: () => { throw new Error('injected light failure'); } })), /injected light failure/);
+    assert.deepEqual([read().state, read().error], ['failed', 'injected light failure'], 'a thrown light run leaves a failed status and its first error line');
+
+    const statusErrors = [];
+    assert.equal(quiet(() => M.main(args, {
+      writeStatusFn: () => { const e = new Error('status lock'); e.code = 'EBUSY'; throw e; },
+      statusError: (line) => statusErrors.push(line)
+    })), 1, 'a transient diagnostic status-write failure does not abort the run');
+    assert.ok(statusErrors.some((line) => /could not update status .*status lock/.test(line)), 'the status-write failure is logged');
+
+    const live = { state: 'running', pid: process.pid, startedMs: Date.now(), updatedMs: Date.now(), done: 2, total: 6, current: 'test/c.test.cjs' };
+    put(live);
+    assert.throws(() => quiet(() => M.main(args)), /^Error: refused: another related-tests --run is live in this tree \(pid \d+, started [\d-]+T[\d:.]+Z, 2\/6 files, now test\/c\.test\.cjs\)\. Wait for it; its status is /);
+    assert.deepEqual(read(), live, 'a refused run leaves the live status alone');
+    quiet(() => M.main(['--base', base, '--tip', tip, '--repo', dir, '--json']));
+    assert.deepEqual(read(), live, 'the set alone (no --run) neither refuses nor touches it');
+
+    for (const [why, prev] of [['a dead pid', { ...live, pid: deadPid() }], ['silent past RUN_STALE_MS', { ...live, updatedMs: Date.now() - M.RUN_STALE_MS - 1000 }], ['finished', { ...live, state: 'done' }]]) {
+      put(prev);
+      const got = M.acquireRun(file, { base, tip, total: 1 });
+      assert.deepEqual(got.tookOver, { pid: prev.pid, state: prev.state, updatedMs: prev.updatedMs }, `${why}: taken over`);
+      assert.deepEqual([read().state, read().pid], ['running', process.pid], why);
+    }
+    fs.writeFileSync(file, '{"state":');
+    assert.equal(M.acquireRun(file, { total: 1 }).tookOver, 'unreadable');
+  } finally { fs.rmSync(file, { force: true }); }
+}
+test('--run status file: done/total and the current file, then done with rc and lines; a live run refuses a second (exit 2 from the CLI); dead, silent, finished or unreadable is taken over', () => sidecarChecks(REAL));
+
+test('--run status file: a linked worktree has its own; the CLI refusal exits 2 and runs nothing', () => {
+  const { dir, base, tip } = repo();
+  const wt = tempDir('related-wt-');
+  fs.rmSync(wt, { recursive: true, force: true });
+  git(dir, 'worktree', 'add', '-q', '--detach', wt, tip);
+  try {
+    const own = REAL.runStatusPath(wt);
+    assert.notEqual(own, REAL.runStatusPath(dir));
+    assert.ok(own.startsWith(path.join(dir, '.git', 'worktrees') + path.sep), own);
+  } finally { git(dir, 'worktree', 'remove', '--force', wt); }
+  const file = REAL.runStatusPath(dir);
+  fs.writeFileSync(file, JSON.stringify({ state: 'running', pid: process.pid, startedMs: Date.now(), updatedMs: Date.now(), done: 0, total: 6, current: null }));
+  try {
+    const r = spawnSync(process.execPath, [SRC, '--base', base, '--tip', tip, '--repo', dir, '--run'], { encoding: 'utf8', windowsHide: true });
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /refused: another related-tests --run is live in this tree/);
+    assert.doesNotMatch(r.stdout, /^(ok|RED) /m, 'no file ran');
+  } finally { fs.rmSync(file, { force: true }); }
+});
+
+test('runLight reports each file before and after it runs', () => {
+  const seen = [];
+  REAL.runLight({ repo: '.', base: 'x', light: ['a', 'b'], run: () => ({ rc: 0, pass: 1, fail: 0 }), onStatus: (s) => seen.push(s) });
+  assert.deepEqual(seen, [{ current: 'a' }, { current: null, done: 1, reds: 0 }, { current: 'b' }, { current: null, done: 2, reds: 0 }]);
+});
+
 // RELATED-TEST-INVENTORY-198: 60dba590 added 2 test files and RELATED never ran the glob pin (493).
 let invFixture = null;
 function invRepo() {
@@ -333,10 +428,17 @@ const MUTANTS = [
   ['R14 the feature dirs read as []', 'return { dirs: [...d], warning: null };', 'return { dirs: [], warning: null };', inventoryChecks],
   ['R15 a perf file is no inventory change', '      else if (perfPath(p)) out.perf.push(p);', '', inventoryChecks],
   ['R16 an unreadable runner is silent', "const warn = (set.warnings || []).map((w) => `; WARN ${w}`).join('');", "const warn = '';", inventoryChecks],
+  ['R17 a live run is not refused', 'if (liveRun(prev, now, alive)) {', 'if (false) {', sidecarChecks],
+  ['R18 a dead pid still holds the tree', 'Number.isInteger(st.pid) && alive(st.pid) &&', 'Number.isInteger(st.pid) &&', sidecarChecks],
+  ['R19 a silent run holds it forever', ' && now - st.updatedMs < RUN_STALE_MS', '', sidecarChecks],
+  ['R20 no final state', "update({ state: 'done', rc: result.rc, line: result.line, finishedMs: Date.now() });", '', sidecarChecks],
+  ['R21 no per-file progress', 'onStatus({ current: null, done: rows.length, reds: rows.filter((x) => x.red).length });', '', sidecarChecks],
+  ['J3 a thrown light run never marks failed', "update({ state: 'failed', error: String(e.message || e).split('\\n')[0], finishedMs: Date.now() });", '', sidecarChecks],
+  ['J6 silent-run stale bound grows', 'const RUN_STALE_MS = 2 * FILE_TIMEOUT_MS + 60_000;', 'const RUN_STALE_MS = 20 * FILE_TIMEOUT_MS + 60_000;', sidecarChecks],
   ['R6 the base worktree is left behind', "try { git(repo, ['worktree', 'remove', '--force', baseTree]); } catch { fs.rmSync(baseTree, { recursive: true, force: true }); }", '', runChecks]
 ];
 
-test('MUTANT CENSUS RELATED-TESTS: R1-R16 each apply once and die at their named check', () => {
+test('MUTANT CENSUS RELATED-TESTS: R1-R21 each apply once and die at their named check', () => {
   const text = fs.readFileSync(SRC, 'utf8');
   for (const [name, from, to, check] of MUTANTS) {
     assert.equal(text.split(from).length, 2, `${name}: its anchor is in the script exactly once`);
