@@ -44,22 +44,30 @@ const cacheOf = (roster, home) => ({
   'cth.archivedAgents': JSON.stringify(roster.archived),
   'cth.restorableAgents': JSON.stringify(roster.restorable),
   'cth.selectedId': roster.agents[0]?.id ?? '',
-  'cth.messageQueues': '{}',
+  // A parked message the user wrote on the old floor: it must not reach the new one.
+  'cth.messageQueues': JSON.stringify(roster.agents[0] ? { [roster.agents[0].id]: [{ id: 'q-old', text: 'old floor note' }] } : {}),
   'cth.theme': 'night',
   ...(home ? { 'cth.rosterHome': home } : {})
 });
 const fileOf = (roster) => ({ version: 1, savedAt: '2026-10-22T10:00:00.000Z', queues: {}, selectedId: null, ...roster });
 
+const { RosterStore, rosterBackupDir } = loadTs('src/main/roster.ts');
+
 let run = 0;
-/** Boot the real store module once, as a renderer would at load, against a stubbed window. */
+/** Boot the real store module once, as a renderer would at load, against a stubbed window. The
+ *  foreign-cache backup goes through main's real RosterStore into a temp home of its own:
+ *  `backups` is what landed in its roster-backups/ (parsed), keyed by file name. */
 function bootStore({ storage, home, file }) {
   const writes = [];
+  const backupHome = fs.mkdtempSync(path.join(os.tmpdir(), 'md-nfcs-bk-'));
+  const store = new RosterStore(() => backupHome);
   const saved = Object.getOwnPropertyDescriptor(globalThis, 'window');
   globalThis.window = {
     localStorage: storage,
     cth: {
       rosterReadSync: () => file ?? null,
       rosterHomeSync: () => home,
+      rosterBackupForeignSync: (snap) => store.backupSnapshot(JSON.parse(JSON.stringify(snap)), 'foreign-cache'),
       rosterWrite: async (snap) => { writes.push(snap); return { ok: true }; }
     },
     addEventListener() {}
@@ -69,8 +77,13 @@ function bootStore({ storage, home, file }) {
     const { useStore, flushRosterNow } = loadTs.fromText('src/renderer/src/store/store.ts', src);
     const s = useStore.getState();
     flushRosterNow();
-    return { agents: s.agents.map((a) => a.id), archived: s.archivedAgents.map((a) => a.id), restorable: s.restorableAgents.map((a) => a.id), writes };
+    const dir = rosterBackupDir(backupHome);
+    const backups = fs.existsSync(dir)
+      ? fs.readdirSync(dir).map((f) => ({ file: f, body: JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')) }))
+      : [];
+    return { agents: s.agents.map((a) => a.id), archived: s.archivedAgents.map((a) => a.id), restorable: s.restorableAgents.map((a) => a.id), writes, backups };
   } finally {
+    fs.rmSync(backupHome, { recursive: true, force: true });
     if (saved) Object.defineProperty(globalThis, 'window', saved); else delete globalThis.window;
   }
 }
@@ -101,15 +114,72 @@ test('a new floor (no roster.json) does not start from the last floor\'s cache',
   assert.deepEqual([r.agents, r.archived, r.restorable], [[], [], []], 'nothing to restore or register on the new floor');
   assert.equal(r.writes.length, 1, 'one flush');
   assert.deepEqual([r.writes[0].agents, r.writes[0].archived, r.writes[0].restorable], [[], [], []], 'its roster.json starts empty');
+  assert.deepEqual(r.writes[0].queues, {}, 'NFCS QUEUES: the old floor\'s parked messages do not reach the new floor');
+  assert.equal(storage.getItem('cth.messageQueues'), '{}', 'NFCS QUEUES: nor its cache');
+  assertKept(r.backups, OLD_HOME);
   // The cache now belongs to the new floor, and no slice of the old one outlives the switch.
   assert.equal(storage.getItem('cth.rosterHome'), NEW_HOME);
   for (const k of ['cth.agents', 'cth.archivedAgents', 'cth.restorableAgents']) assert.equal(storage.getItem(k), '[]', k);
   assert.equal(storage.getItem('cth.theme'), 'night', 'user settings stay');
 });
 
-test('an unstamped (pre-fix) cache does not seed a new floor either', () => {
+/** NFCS BACKUP: exactly one foreign-cache backup, holding the whole cache it replaced. */
+function assertKept(backups, cacheHome) {
+  assert.equal(backups.length, 1, 'NFCS BACKUP: the cleared cache is kept in roster-backups/');
+  assert.match(backups[0].file, /^roster-.+-foreign-cache\.json$/, 'NFCS BACKUP: named for its reason');
+  const b = backups[0].body;
+  assert.deepEqual([b.agents.map((a) => a.id), b.archived.map((a) => a.id), b.restorable.map((a) => a.id)],
+    [['god-d'], ['old-dwight'], ['jim', 'creed']], 'NFCS BACKUP: it holds the old entries');
+  assert.deepEqual(b.queues, { 'god-d': [{ id: 'q-old', text: 'old floor note' }] }, 'NFCS BACKUP: and its parked messages');
+  assert.equal(b.cacheHome, cacheHome, 'NFCS BACKUP: and the home it was written for');
+}
+
+test('an unstamped (pre-fix) cache does not seed a new floor either, and is kept', () => {
   const r = bootStore({ storage: fakeStorage(cacheOf(DUNDER, null)), home: NEW_HOME, file: null });
   assert.deepEqual([r.agents, r.archived, r.restorable], [[], [], []]);
+  assertKept(r.backups, null);
+});
+
+test('U1 upgrade from 1.1.98: an unstamped cache on the same floor with a populated roster.json restores in full', () => {
+  const storage = fakeStorage(cacheOf(DUNDER, null));
+  const r = bootStore({ storage, home: OLD_HOME, file: fileOf(DUNDER) });
+  assert.deepEqual([r.agents, r.archived, r.restorable], [['god-d'], ['old-dwight'], ['jim', 'creed']], 'NFCS U1: nothing lost');
+  assert.equal(storage.getItem('cth.rosterHome'), OLD_HOME, 'NFCS U1: stamped from now on');
+  assert.deepEqual(JSON.parse(storage.getItem('cth.restorableAgents')).map((a) => a.id), ['jim', 'creed'], 'NFCS U1: the cache mirrors the file');
+});
+
+test('U2/U3 upgrade from 1.1.98: an unstamped cache on the same floor with a missing or blank roster.json starts empty but is kept', () => {
+  for (const file of [null, fileOf({ agents: [], archived: [], restorable: [] })]) {
+    const storage = fakeStorage(cacheOf(DUNDER, null));
+    const r = bootStore({ storage, home: OLD_HOME, file });
+    assert.deepEqual([r.agents, r.archived, r.restorable], [[], [], []], 'NFCS U2/U3: an unstamped cache cannot be told from another home\'s');
+    assertKept(r.backups, null);
+    assert.equal(storage.getItem('cth.restorableAgents'), '[]', 'NFCS U2/U3: cleared only after the backup');
+  }
+});
+
+test('this floor\'s own cache is never backed up: a normal launch writes no foreign-cache file', () => {
+  const r = bootStore({ storage: fakeStorage(cacheOf(DUNDER, OLD_HOME)), home: OLD_HOME, file: fileOf(DUNDER) });
+  assert.deepEqual(r.restorable, ['jim', 'creed']);
+  assert.deepEqual(r.backups, [], 'NFCS BACKUP: one per launch would fill roster-backups/');
+  const empty = bootStore({ storage: fakeStorage(), home: NEW_HOME, file: null });
+  assert.deepEqual(empty.backups, [], 'NFCS BACKUP: an empty cache holds nothing to keep');
+});
+
+test('RosterStore.backupSnapshot: writes a snapshot into roster-backups/ under its reason; refuses no home and a non-roster', (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'md-nfcs-rs-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const rs = new RosterStore(() => home);
+  const snap = { ...fileOf(DUNDER), cacheHome: null };
+  assert.deepEqual(rs.backupSnapshot(snap, 'foreign-cache'), { ok: true });
+  assert.deepEqual(rs.backupSnapshot(snap, 'foreign-cache'), { ok: true });
+  const files = fs.readdirSync(rosterBackupDir(home));
+  assert.equal(files.length, 2, 'NFCS BACKUP: two in one millisecond do not collide');
+  assert.deepEqual(files.map((f) => /-(\d+)-foreign-cache\.json$/.exec(f)?.[1]).sort(), ['1', '2'], 'NFCS BACKUP: each carries the store\'s sequence number');
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(rosterBackupDir(home), files[0]), 'utf8')), snap);
+  assert.equal(fs.existsSync(path.join(home, 'roster.json')), false, 'NFCS BACKUP: the live roster is not touched');
+  assert.equal(rs.backupSnapshot({ agents: 'x' }, 'foreign-cache').ok, false);
+  assert.equal(new RosterStore(() => null).backupSnapshot(snap, 'foreign-cache').ok, false);
 });
 
 test('an existing floor is untouched: its roster.json restores its agents and stamps the cache', () => {
@@ -148,6 +218,9 @@ test('both fresh-home paths clear the roster cache with the one helper', () => {
   for (const k of C.ROSTER_CACHE_KEYS) assert.ok(read('src/renderer/src/store/store.ts').includes(`'${k}'`) || k === C.ROSTER_CACHE_HOME_KEY, `${k} is a store key`);
   assert.match(read('src/main/index.ts'), /ipcMain\.on\('roster:homeSync', \(evt\) => \{ evt\.returnValue = readConfig\(\)\.harnessHome \?\? null; \}\);/);
   assert.match(read('src/main/index.ts'), /const roster = new RosterStore\(\(\) => readConfig\(\)\.harnessHome\);/, 'the same home the roster file is read from');
+  // The reason is main's, not the renderer's; the preload answers synchronously so the copy is on disk first.
+  assert.match(read('src/main/index.ts'), /ipcMain\.on\('roster:backupForeignSync', \(evt, snap: unknown\) => \{ evt\.returnValue = roster\.backupSnapshot\(snap, 'foreign-cache'\); \}\);/, 'NFCS BACKUP: main wiring');
+  assert.match(read('src/preload/index.ts'), /ipcRenderer\.sendSync\('roster:backupForeignSync', snap\)/, 'NFCS BACKUP: preload wiring');
 });
 
 test('main seeds a new floor with no agents and the floor docs, and leaves the existing floor alone', (t) => {

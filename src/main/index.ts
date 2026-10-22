@@ -5872,6 +5872,8 @@ ipcMain.on('roster:readSync', (evt) => { evt.returnValue = roster.read(); });
 // NEW-FLOOR-CLEAN-SLATE: the home that roster belongs to, so the renderer uses its localStorage
 // cache only for the home that cache was written for (shared/rosterCacheHome.ts).
 ipcMain.on('roster:homeSync', (evt) => { evt.returnValue = readConfig().harnessHome ?? null; });
+// ...and the cache it will not use, kept in this home's roster-backups/ before the renderer clears it.
+ipcMain.on('roster:backupForeignSync', (evt, snap: unknown) => { evt.returnValue = roster.backupSnapshot(snap, 'foreign-cache'); });
 ipcMain.handle('roster:read', () => roster.read());
 ipcMain.handle('roster:write', (_evt, snap: unknown) => roster.write(snap));
 

@@ -1776,6 +1776,11 @@ const api = {
   rosterHomeSync: (): string | null => {
     try { const h = ipcRenderer.sendSync('roster:homeSync'); return typeof h === 'string' && h ? h : null; } catch { return null; }
   },
+  /** Keep a roster cache written for another home (or unstamped) in this home's roster-backups/
+   *  before the store clears it. SYNCHRONOUS: the copy is on disk before the cache is gone. */
+  rosterBackupForeignSync: (snap: RosterSnapshot & { cacheHome: string | null }): { ok: boolean; error?: string } => {
+    try { return ipcRenderer.sendSync('roster:backupForeignSync', snap) ?? { ok: false }; } catch (e) { return { ok: false, error: String(e) }; }
+  },
   /** Mirror the roster to disk. Debounced by the caller; main keeps the previous
    *  contents as a backup and refuses a first write that would empty a full file. */
   rosterWrite: (snap: RosterSnapshot): Promise<{ ok: boolean; skipped?: string; error?: string }> =>

@@ -14,7 +14,7 @@ import {
   type HireReviewQueue
 } from '@shared/hireQueue';
 import { DEFAULT_ORG_TRIGGER, type OrgTriggerConfig, type WebhookTrigger } from '@shared/triggers';
-import { ROSTER_CACHE_HOME_KEY, clearRosterCache, rosterSource } from '@shared/rosterCacheHome';
+import { ROSTER_CACHE_HOME_KEY, clearRosterCache, rosterCacheCopy, rosterSource, sameHome } from '@shared/rosterCacheHome';
 import { isCompactionCommand } from '@shared/providerAutomation';
 import type { RunningTool } from '@shared/activityView';
 import type { LivenessV1 } from '@shared/livenessV1';
@@ -693,7 +693,16 @@ if (useCacheRoster && rosterMirror.agents.length + rosterMirror.archived.length 
 // NEW-FLOOR-CLEAN-SLATE: from here on the cache is THIS home's. When it was not
 // (another home's, unstamped, or none), rewrite every slice from what was just
 // loaded and stamp it, so no slice another home wrote outlives the switch.
+// Another home's (or an unstamped) cache that holds entries is a roster, so it goes to this
+// home's roster-backups/ first. This home's own cache is only refreshed from its file.
 if (!useCacheRoster) {
+  try {
+    const foreign = sameHome(rosterHome, rosterCacheHome) ? null : rosterCacheCopy(window.localStorage);
+    if (foreign) {
+      const kept = window.cth?.rosterBackupForeignSync?.(foreign);
+      if (!kept?.ok) console.warn('[roster] could not back up the other home\'s roster cache:', kept?.error);
+    }
+  } catch { /* the backup must never block a clean start */ }
   try {
     clearRosterCache(window.localStorage);
     window.localStorage.setItem(LS_AGENTS, JSON.stringify(rosterMirror.agents));

@@ -52,6 +52,48 @@ export function clearRosterCache(storage: Pick<Storage, 'removeItem'> | null | u
   }
 }
 
+export interface RosterCacheCopy {
+  version: 1;
+  savedAt: string;
+  agents: unknown[];
+  archived: unknown[];
+  restorable: unknown[];
+  queues: Record<string, unknown[]>;
+  selectedId: string | null;
+  /** The home the cache was stamped for (null = unstamped). */
+  cacheHome: string | null;
+}
+
+/** The roster cache as it stands, for a backup before it is cleared; null when it holds no
+ *  agents, archived or restorable entries (nothing worth keeping) or cannot be read. */
+export function rosterCacheCopy(storage: Pick<Storage, 'getItem'> | null | undefined, now = new Date()): RosterCacheCopy | null {
+  if (!storage) return null;
+  try {
+    const list = (k: string): unknown[] => {
+      try { const v: unknown = JSON.parse(storage.getItem(k) ?? 'null'); return Array.isArray(v) ? v : []; } catch { return []; }
+    };
+    const agents = list('cth.agents'), archived = list('cth.archivedAgents'), restorable = list('cth.restorableAgents');
+    if (agents.length + archived.length + restorable.length === 0) return null;
+    let queues: Record<string, unknown[]> = {};
+    try {
+      const q: unknown = JSON.parse(storage.getItem('cth.messageQueues') ?? 'null');
+      if (q && typeof q === 'object' && !Array.isArray(q)) queues = q as Record<string, unknown[]>;
+    } catch { /* unreadable queues: keep the entries */ }
+    return {
+      version: 1,
+      savedAt: now.toISOString(),
+      agents,
+      archived,
+      restorable,
+      queues,
+      selectedId: storage.getItem('cth.selectedId') || null,
+      cacheHome: storage.getItem(ROSTER_CACHE_HOME_KEY)
+    };
+  } catch {
+    return null;
+  }
+}
+
 function isWin32(): boolean {
   try {
     const nav = (globalThis as { navigator?: { platform?: string; userAgent?: string } }).navigator;
