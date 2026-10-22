@@ -55,7 +55,7 @@ const IDLE = { lifecycle: 'idle', activeSince: 0, turnStartAt: 10, lastTurnEndAt
 function sender(M, over = {}) {
   const w = {
     now: 1_000_000, gen: 0, prompt: '', transcript: '', readings: 0, paintAfter: Infinity, offPrompt: false, noCount: false,
-    keyAtReading: null, writes: [], entered: 0, owner: [], grants: [], grantSeq: 0, holds: [], rows: [], ...over
+    nullReading: false, keyAtReading: null, writes: [], entered: 0, owner: [], grants: [], grantSeq: 0, holds: [], rows: [], ...over
   };
   const d = {
     ptyOf: () => 'pty-creed', providerOf: () => 'claude', idleFacts: () => ({ ...IDLE }), spawnedAt: () => 1,
@@ -63,6 +63,7 @@ function sender(M, over = {}) {
     mirrorNeedle: async (_p, needle) => {
       w.readings += 1;
       if (w.keyAtReading === w.readings) w.gen += 1;
+      if (w.nullReading && w.readings > 1) return { reading: null }; // null AFTER the pre-type probe (a null probe is the owner's before any write)
       if (w.readings <= w.paintAfter) return { reading: w.noCount ? { onPromptRow: false } : { onPromptRow: false, screenCount: 0 } };
       const onPromptRow = w.prompt.includes(needle);
       const screenCount = (onPromptRow ? 1 : 0) + (w.transcript.includes(needle) ? 1 : 0);
@@ -143,6 +144,36 @@ K.humanKeyWhileLooking = async (M = WS) => {
   assert.equal(w.entered, 0);
 };
 test('fix 1: a person\'s key while the sender is still looking holds HUMAN_TYPED (the human generation is re-read each step)', () => K.humanKeyWhileLooking());
+
+/** Jim's WFI audit MAJOR 1 (his wfir-probe shapes): the mirror is blank for two readings, then paints
+ *  our text on the prompt row. A person's key that lands at reading 2 (still blank) or at reading 3
+ *  (the reading that shows our text) must give HUMAN_TYPED: Enter is never pressed on a person's key. */
+K.humanKeyBeforePaint = async (M = WS) => {
+  for (const [label, keyAtReading] of [['before the paint (reading 2)', 2], ['at the painted reading (reading 3)', 3]]) {
+    const w = sender(M, { paintAfter: 2, keyAtReading });
+    const o = await w.ws.submit(reqFor([ID_A]));
+    assert.equal(w.entered, 0, `A PERSON'S KEY ${label.toUpperCase()} WINS OVER A LATER ON_PROMPT READING: no Enter (got ${JSON.stringify(o)})`);
+    assert.deepEqual([o.kind, o.detail], ['INTERFERED', 'HUMAN_TYPED'], `held HUMAN_TYPED, key ${label}`);
+    assert.equal(w.owner.length, 0, `never handed to the owner over a person's key (${label})`);
+    assert.deepEqual(w.grants, [['cancel', 1]], `the grant is cancelled (${label})`);
+  }
+};
+test('fix 1 (Jim MAJOR 1): a person\'s key during the blank window beats a later on-prompt reading: HUMAN_TYPED, no Enter', () => K.humanKeyBeforePaint());
+
+/** An older mirror whose reading is null on EVERY needle after the write (the pre-type probe read it; a
+ *  null probe is the owner's before anything is typed): 1.1.97 held it as TYPED_NOT_SENT ("not in the
+ *  composer"); now it is UNKNOWN for the confirm window and then the owner's (wake-unconfirmed). */
+K.nullReadingIsUnknown = async (M = WS) => {
+  const w = sender(M, { nullReading: true });
+  const o = await w.ws.submit(reqFor([ID_A]));
+  assert.equal(o.kind, 'COMMITTED', `A NULL READING IS UNKNOWN, THEN THE OWNER'S (got ${JSON.stringify(o)})`);
+  assert.equal(w.owner.length, 1, `A NULL READING IS UNKNOWN, THEN THE OWNER'S: handed to the owner (got ${JSON.stringify(o)})`);
+  assert.deepEqual(w.holds, [], 'nothing is held on a reading that shows nothing');
+  assert.ok(w.now - 1_000_000 >= M.WAKE_TYPED_CONFIRM_MS, 'the whole confirm window was spent first');
+  assert.equal(w.entered, 0);
+  assert.equal(w.rows.find((r) => r.kind === 'wake-send').why, 'wake-unconfirmed');
+};
+test('fix 1: a null reading on every needle (older mirror) is UNKNOWN, then the owner\'s: not TYPED_NOT_SENT as in 1.1.97', () => K.nullReadingIsUnknown());
 
 K.olderMirrorNoCount = async (M = WS) => {
   const w = sender(M, { noCount: true });
@@ -397,6 +428,12 @@ const MUTANTS = [
     edits: [['      await d.sleep(WAKE_TYPED_CONFIRM_STEP_MS);', "      return 'UNKNOWN';"]] },
   { name: 'the human generation is not re-read during the look', file: WSF, killer: 'humanKeyWhileLooking', dies: /A PERSON'S KEY DURING THE LOOK/,
     edits: [["      if (d.humanGeneration(ptyId) !== gen0) return 'HUMAN_TYPED';", '']] },
+  { name: 'ON_PROMPT is answered inside the reading pass, before the generation check (Jim MAJOR 1)', file: WSF, killer: 'humanKeyBeforePaint', dies: /WINS OVER A LATER ON_PROMPT READING/,
+    edits: [["if (r.onPromptRow || r.promptTailMatches === true) { onPrompt = true; break; }", "if (r.onPromptRow || r.promptTailMatches === true) return 'ON_PROMPT';"]] },
+  { name: 'the generation is checked after ON_PROMPT (Jim MAJOR 1, reading 3)', file: WSF, killer: 'humanKeyBeforePaint', dies: /WINS OVER A LATER ON_PROMPT READING/,
+    edits: [["      if (d.humanGeneration(ptyId) !== gen0) return 'HUMAN_TYPED';\n      if (onPrompt) return 'ON_PROMPT';", "      if (onPrompt) return 'ON_PROMPT';\n      if (d.humanGeneration(ptyId) !== gen0) return 'HUMAN_TYPED';"]] },
+  { name: 'a null reading is held as 1.1.97 did (not in the composer)', file: WSF, killer: 'nullReadingIsUnknown', dies: /A NULL READING IS UNKNOWN, THEN THE OWNER'S/,
+    edits: [["          if (!r) continue;", "          if (!r) { offPrompt = true; continue; }"]] },
   { name: 'the grant is not handed back before the owner', file: WSF, killer: 'restartReplay', dies: /handed back before the owner/,
     edits: [["        const why = kind === 'boot' ? 'boot-not-in-composer' : 'wake-unconfirmed';\n        this.cancel(decision);", "        const why = kind === 'boot' ? 'boot-not-in-composer' : 'wake-unconfirmed';"]] },
   { name: 'a real off-prompt reading no longer holds', file: WSF, killer: 'offPromptStillHeld', dies: /OUR TEXT SEEN OFF THE PROMPT ROW: HELD/,

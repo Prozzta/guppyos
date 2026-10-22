@@ -87,7 +87,7 @@ const MUTANTS = [
   // — the WakeSender: the send —
   ['t a person\'s key in the gap is Entered anyway', SEND,
     'if (gen0 === undefined || gen1 !== gen0) return this.typedNotSent', 'if (gen0 === undefined) return this.typedNotSent'],
-  ['t no composer check before the Enter', SEND, '    if (!onPrompt) {\n', '    if (false) {\n'],
+  ['t no composer check before the Enter', SEND, "    if (typed !== 'ON_PROMPT') {\n", '    if (false) {\n'],
   ['t the gates do not run again inside the slot', SEND,
     "    const again = this.gates(req, kind, ptyId, provider, kind === 'boot');", '    const again = null;'],
   ['t the grant is never confirmed after the Enter', SEND,
@@ -115,7 +115,7 @@ const MUTANTS = [
   ['k no ready event never falls back to the owner', SEND,
     "    if (now - spawned >= WAKE_BOOT_READY_MS) return { ready: false, at: 0, owner: 'boot-no-ready-event' };\n", ''],
   ['k a boot not in the composer is held as a person\'s', SEND,
-    '      if (kind === \'boot\') {\n        // Our text may be on the screen', '      if (false) {\n        // Our text may be on the screen'],
+    "      if (kind === 'boot' || typed === 'UNKNOWN') {\n        // Our text may be on the screen", "      if (typed === 'UNKNOWN') {\n        // Our text may be on the screen"],
   ['k a handed boot is typed here again', SEND,
     '    if (handed) return this.d.ownerSubmit(handed.req);\n', ''],
   // — the Stop claim (guards 3 and 6, the flags) —
@@ -131,7 +131,7 @@ const MUTANTS = [
     'binding: { agentId: req.agentId, admissionClass: req.admissionClass, payload: payloadIdentity(req.text) },\n      decision: null',
     "binding: { agentId: req.agentId, admissionClass: req.admissionClass, payload: '' },\n      decision: null"],
   ['o the recheck erases our typed text', OWNER,
-    "    if (held.reason === 'WAKE_TYPED_NOT_SENT') return stay('typed-not-sent');\n", '']
+    "      if (this.turnEnded(held.agentId, held.at) !== true) return stay('typed-not-sent');\n", '']
 ];
 
 // THE BASELINE MUST BE GREEN.

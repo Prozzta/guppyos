@@ -395,25 +395,34 @@ export class WakeSender {
    *   UNKNOWN      no reading, or none that shows our text at all (an unpainted mirror right after a
    *                restart, a slow echo): read again every WAKE_TYPED_CONFIRM_STEP_MS until
    *                WAKE_TYPED_CONFIRM_MS is spent; still unknown = the caller hands it to the owner.
-   *   HUMAN_TYPED  the human generation moved while we looked: a person's key, as before.
+   *   HUMAN_TYPED  the human generation moved while we looked: a person's key, as before. It is
+   *                checked after EVERY reading pass and before any other answer: a key that lands
+   *                while the mirror is still blank, followed by a reading that shows our text on the
+   *                prompt row, is HUMAN_TYPED, never ON_PROMPT (Jim's WFI audit MAJOR 1: the window
+   *                widened from one read to 3 s, so Enter must never follow a person's key).
    * A reading without `screenCount` (an older mirror) counts as showing the text when it is not on
-   * the prompt row, so that path is exactly the 1.1.97 one.
+   * the prompt row, so that path is exactly the 1.1.97 one. A reading that is null on every needle
+   * (an older mirror that returns nothing) is UNKNOWN: in 1.1.97 it was "not in the composer" and
+   * held as TYPED_NOT_SENT; now it is re-read for the window, then the owner's (wake-unconfirmed).
    */
   private async confirmTyped(ptyId: string, text: string, needles: string[], gen0: number | undefined): Promise<'ON_PROMPT' | 'OFF_PROMPT' | 'UNKNOWN' | 'HUMAN_TYPED'> {
     const d = this.d;
     const started = d.now();
     // Bounded by the clock AND by a step count (a clock that stands still never spins here).
     for (let step = 0; step <= WAKE_TYPED_CONFIRM_MS / WAKE_TYPED_CONFIRM_STEP_MS; step++) {
+      let onPrompt = false;
       let offPrompt = false;
       for (const n of composerNeedles(text, needles)) {
         try {
           const r = (await d.mirrorNeedle(ptyId, n, text)).reading;
           if (!r) continue;
-          if (r.onPromptRow || r.promptTailMatches === true) return 'ON_PROMPT';
+          if (r.onPromptRow || r.promptTailMatches === true) { onPrompt = true; break; }
           if (r.screenCount === undefined || r.screenCount >= 1) offPrompt = true;
         } catch { /* not evidence */ }
       }
+      // A person's key wins over whatever this pass read: checked FIRST, before ON_PROMPT.
       if (d.humanGeneration(ptyId) !== gen0) return 'HUMAN_TYPED';
+      if (onPrompt) return 'ON_PROMPT';
       if (offPrompt) return 'OFF_PROMPT';
       if (d.now() - started >= WAKE_TYPED_CONFIRM_MS) return 'UNKNOWN';
       await d.sleep(WAKE_TYPED_CONFIRM_STEP_MS);
