@@ -2226,7 +2226,7 @@ export class HeavyJobLock {
     // and the waiters behind it wait with it.
     while (this.waiters.length && this.fits(this.waiters[0].agentId, this.waiters[0].exclusive, limit)) {
       const w = this.waiters.shift()!;
-      if (this.d.alive && !this.d.alive(w.agentId)) { this.log({ kind: 'heavy-lock', action: 'queue-dropped', agentId: w.agentId, reason: 'gone' }); this.changed(); continue; }
+      if (!this.alive(w.agentId)) { this.log({ kind: 'heavy-lock', action: 'queue-dropped', agentId: w.agentId, reason: 'gone' }); this.changed(); continue; }
       // HEAVY-QUEUE-WAIT-DROPS: no drop by age here (the old Andy N2 "stale" drop). A waiter that
       // moved on takes this reservation, which lapses in HEAVY_RESERVE_MS and passes on.
       const until = this.now() + HEAVY_RESERVE_MS;
@@ -2475,7 +2475,9 @@ export class HeavyJobLock {
     } catch { /* best effort: the lock goes on */ }
   }
 
-  /** `alive` as the sweep reads it: an alive check that throws counts as live (never breaks the lock). */
+  /** `alive` as grant() and the sweep read it: an alive check that throws counts as live (never breaks
+   *  the lock). An agent briefly without a PTY (restarting) is gone at that moment and loses its
+   *  place on purpose: it asks again when it is back and queues anew. */
   private alive(agentId: string): boolean {
     try { return !this.d.alive || this.d.alive(agentId); } catch { return true; }
   }

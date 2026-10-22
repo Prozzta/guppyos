@@ -334,6 +334,34 @@ K.deadWaiterReaped = (M = HJ) => {
 };
 test('HEAVY-QUEUE-WAIT-DROPS: a dead waiter is reaped at the watcher tick (reason gone, no notice); the others keep their order', () => K.deadWaiterReaped());
 
+K.aliveThrowsKeepsPlace = (M = HJ) => {
+  const x = rig(M, 1, { alive: (a) => { if (a === 'b') throw new Error('ptyToAgent read failed'); return true; } });
+  x.l.acquire('a', H, 'npm ci', 'a1', true);
+  x.l.acquire('b', H, 'npm ci', 'b1', false);
+  x.l.acquire('c', H, 'npm ci', 'c1', false);
+  x.tick(60_000);
+  x.l.queueSnapshot();                                      // the watcher's tick: the sweep asks alive, which throws for b
+  assert.deepEqual(x.l.queueSnapshot().waiters.map((w) => [w.agentId, w.position]), [['b', 1], ['c', 2]], 'A THROWING ALIVE CHECK COUNTS AS LIVE: THE WAITER KEEPS ITS PLACE');
+  assert.ok(!x.logs.some((r) => r.action === 'queue-dropped'), 'A THROWING ALIVE CHECK COUNTS AS LIVE: THE WAITER KEEPS ITS PLACE');
+};
+test('HEAVY-QUEUE-WAIT-DROPS (Andy SHOULD1): an alive check that throws never reaps the waiter; it keeps its place across a tick', () => K.aliveThrowsKeepsPlace());
+
+K.grantAliveThrows = (M = HJ) => {
+  const D = 'A THROWING ALIVE CHECK IN GRANT BREAKS NOTHING';
+  for (const end of ['release', 'callDone']) {
+    const x = rig(M, 1, { alive: () => { throw new Error('ptyToAgent read failed'); } });
+    x.l.acquire('a', H, 'npm ci', 'a1', false);
+    x.l.acquire('b', H, 'npm ci', 'b1', false);
+    x.tick(60_000);
+    assert.doesNotThrow(() => (end === 'release' ? x.l.release('a', 'process-exit') : x.l.callDone('a', 'a1')), `${D} (${end})`);
+    assert.deepEqual(x.l.queueSnapshot().reserved.map((r) => r.agentId), ['b'], `${D}: ${end}: b is reserved, not dropped`);
+    assert.deepEqual(x.logs.filter((r) => r.action === 'queue-dropped'), [], `${D}: ${end}: no drop`);
+    assert.deepEqual(x.notes.map((n) => n.a), ['b'], `${D}: ${end}: b is told`);
+    assert.equal(x.l.acquire('b', H, 'npm ci', 'b2', false).allow, true, `${D}: ${end}: b takes the slot`);
+  }
+};
+test('HEAVY-QUEUE-WAIT-DROPS (Andy SHOULD2): an alive check that throws inside grant() breaks neither release nor callDone; the waiter is reserved', () => K.grantAliveThrows());
+
 test('HEAVY-QUEUE-WAIT-DROPS: a re-deny keeps the place, and a waiter that never asks again is still served in order', () => {
   const x = rig();
   x.l.acquire('a', H, 'npm ci', 'a1', false);
@@ -414,7 +442,7 @@ const MUTANTS = [
     edits: [['      if (t < r.until) continue;', '      if (t < r.until || r.until > 0) continue;']],
     killer: 'reservationExpires', dies: /AN UNUSED RESERVATION PASSES ON/ },
   { name: 'a gone waiter is reserved anyway', file: HJF, module: true,
-    edits: [["      if (this.d.alive && !this.d.alive(w.agentId)) { this.log({ kind: 'heavy-lock', action: 'queue-dropped', agentId: w.agentId, reason: 'gone' }); this.changed(); continue; }\n", '']],
+    edits: [["      if (!this.alive(w.agentId)) { this.log({ kind: 'heavy-lock', action: 'queue-dropped', agentId: w.agentId, reason: 'gone' }); this.changed(); continue; }\n", '']],
     killer: 'goneWaiterSkipped', dies: /A GONE WAITER IS SKIPPED/ },
   { name: 'env $(...) ends the option run (as 1.1.80)', file: HJF, module: true,
     edits: [["(ws[i].startsWith('-') || ws[i].startsWith('$(') || /^", "(ws[i].startsWith('-') || /^"]],
@@ -443,6 +471,12 @@ const MUTANTS = [
   { name: 'HEAVY-QUEUE-WAIT-DROPS: the sweep reaps the wrong waiter (order lost)', file: HJF, module: true,
     edits: [["      this.log({ kind: 'heavy-lock', action: 'queue-dropped', agentId: w.agentId, reason: 'gone' });\n      this.changed();\n      left = true;", "      this.log({ kind: 'heavy-lock', action: 'queue-dropped', agentId: w.agentId, reason: 'gone' });\n      this.changed();\n      left = true;\n      this.waiters.push(this.waiters.shift()!);"]],
     killer: 'deadWaiterReaped', dies: /A DEAD WAITER IS REAPED BY LIVENESS; THE ORDER IS KEPT/ },
+  { name: 'HEAVY-QUEUE-WAIT-DROPS (Andy M3): a throwing alive check counts as gone', file: HJF, module: true,
+    edits: [['    try { return !this.d.alive || this.d.alive(agentId); } catch { return true; }\n', '    try { return !this.d.alive || this.d.alive(agentId); } catch { return false; }\n']],
+    killer: 'aliveThrowsKeepsPlace', dies: /A THROWING ALIVE CHECK COUNTS AS LIVE: THE WAITER KEEPS ITS PLACE/ },
+  { name: 'HEAVY-QUEUE-WAIT-DROPS (Andy SHOULD2): grant() reads the raw alive again', file: HJF, module: true,
+    edits: [["      if (!this.alive(w.agentId)) { this.log({ kind: 'heavy-lock', action: 'queue-dropped'", "      if (this.d.alive && !this.d.alive(w.agentId)) { this.log({ kind: 'heavy-lock', action: 'queue-dropped'"]],
+    killer: 'grantAliveThrows', dies: /A THROWING ALIVE CHECK IN GRANT BREAKS NOTHING/ },
   { name: 'N3 off: the caller is told about its own slot', file: HJF, module: true,
     edits: [['      if (w.agentId === caller) continue;\n', '']],
     killer: 'noSelfNotify', dies: /THE CALLER IS NOT TOLD ABOUT THE SLOT IT IS TAKING/ }
