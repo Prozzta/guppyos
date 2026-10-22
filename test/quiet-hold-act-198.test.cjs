@@ -137,8 +137,12 @@ K.ledgerFlags = (L = real.ledger, t) => {
     const e = (msg) => { ml.markDelivered('andy-1', { from: 'god', act: 'inform', subject: 's', body: 'b', ...msg }); return ml.ledger('andy-1').entries[msg.id]; };
     assert.equal(e({ id: 'b1', to: 'broadcast', subject: 'Floor paused by the Human' }).broadcast, true, 'A BROADCAST COPY IS FLAGGED');
     assert.equal('broadcast' in e({ id: 'b2', to: 'andy-1' }), false, 'an addressed copy carries no flag');
-    assert.equal(e({ id: 'h1', body: "The Human's rule, which is absolute" }).humanRelay, true, 'A HUMAN RELAY IS FLAGGED');
-    assert.equal(e({ id: 'h2', subject: 'RAYB-6 spec correction from the Human', body: 'narrows the tap rules' }).humanRelay, true, 'the subject counts too');
+    // A Human relay is the Human in the SUBJECT, or a broadcast with the Human in the body. An addressed
+    // cc that only quotes the Human in its body is a routine cc (0f1baba7 woke every such cc).
+    assert.equal('humanRelay' in e({ id: 'h1', body: "The Human's rule, which is absolute" }), false, 'A BODY-ONLY HUMAN CC STAYS A ROUTINE CC');
+    assert.equal(e({ id: 'h2', subject: 'RAYB-6 spec correction from the Human', body: 'narrows the tap rules' }).humanRelay, true, 'A HUMAN RELAY IS FLAGGED: THE SUBJECT NAMES THE HUMAN');
+    assert.equal(e({ id: 'h5', to: 'broadcast', subject: 'RAYB hard rule: never fall back to Meta AI', body: "The Human's rule, which is absolute" }).humanRelay, true, 'A BROADCAST WITH THE HUMAN IN THE BODY IS A RELAY');
+    assert.equal('humanRelay' in e({ id: 'h6', to: 'broadcast', subject: 'Floor paused', body: 'until god announces a resume' }), false, 'a broadcast without the Human is no relay (the hold notice is rule b\'s other half)');
     assert.equal('humanRelay' in e({ id: 'h3', subject: 'weekly status', body: 'humane, inhumanly fast' }), false, 'whole word only: no flag');
     assert.equal('humanRelay' in e({ id: 'h4', body: { not: 'a string' } }), false, 'a non-string body is not read');
   } finally { if (!t) cleanup(); }
@@ -199,7 +203,7 @@ test('main: quietUntil asks solicitedQuietMail over every ledger (the asks this 
   assert.match(index, /const ledgers = \{ entries: \(holder: string\) => Object\.values\(hive\.mail\.ledger\(holder\)\.entries\) \};\n      return quietHolds\(ids\.map\(\(id\) => entries\[id\]\)\.filter\(\(e\) => !!e\), hookServer\.mailChannel\(agentId\)\.mode, holdMs, now,\n        \(e\) => solicitedQuietMail\(e, agentId, ledgers\)\);/);
   const ledger = readSource(LEDGER);
   assert.match(ledger, /\.\.\.\(msg\.to === 'broadcast' \? \{ broadcast: true \} : \{\}\),/);
-  assert.match(ledger, /\.\.\.\(HUMAN_RELAY_RE\.test\(`\$\{msg\.subject \?\? ''\}\\n\$\{typeof msg\.body === 'string' \? msg\.body : ''\}`\) \? \{ humanRelay: true \} : \{\}\),/);
+  assert.match(ledger, /\.\.\.\(HUMAN_RELAY_RE\.test\(String\(msg\.subject \?\? ''\)\) \|\| \(msg\.to === 'broadcast' && typeof msg\.body === 'string' && HUMAN_RELAY_RE\.test\(msg\.body\)\) \? \{ humanRelay: true \} : \{\}\),/);
   // The rig host carries the same dep, so mail-rig-quiet-198 exercises the product wiring.
   const host = readSource('test/mail-rig/rig-host.cjs');
   assert.match(host, /\(e\) => wakeClass\.solicitedQuietMail\(e, agentId, ledgers\)\);/);
@@ -272,9 +276,15 @@ const MUTANTS = [
   { name: 'ledger: the Human relay flag is never set', file: LEDGER,
     edits: [["? { humanRelay: true } : {}),", '? {} : {}),']],
     killer: 'ledgerFlags', dies: /A HUMAN RELAY IS FLAGGED/ },
-  { name: 'ledger: the relay flag reads the body only', file: LEDGER,
-    edits: [["HUMAN_RELAY_RE.test(`${msg.subject ?? ''}\\n${typeof msg.body === 'string' ? msg.body : ''}`)", "HUMAN_RELAY_RE.test(`${typeof msg.body === 'string' ? msg.body : ''}`)"]],
-    killer: 'ledgerFlags', dies: /the subject counts too/ }
+  { name: 'ledger: the subject is not read', file: LEDGER,
+    edits: [["HUMAN_RELAY_RE.test(String(msg.subject ?? '')) ||", "false ||"]],
+    killer: 'ledgerFlags', dies: /A HUMAN RELAY IS FLAGGED: THE SUBJECT NAMES THE HUMAN/ },
+  { name: 'ledger: an addressed cc with the Human in its body is a relay again (0f1baba7)', file: LEDGER,
+    edits: [["HUMAN_RELAY_RE.test(String(msg.subject ?? '')) || (msg.to === 'broadcast' && typeof msg.body === 'string' && HUMAN_RELAY_RE.test(msg.body))", "HUMAN_RELAY_RE.test(`${msg.subject ?? ''}\\n${typeof msg.body === 'string' ? msg.body : ''}`)"]],
+    killer: 'ledgerFlags', dies: /A BODY-ONLY HUMAN CC STAYS A ROUTINE CC/ },
+  { name: "ledger: a broadcast's body is not read", file: LEDGER,
+    edits: [["(msg.to === 'broadcast' && typeof msg.body === 'string' && HUMAN_RELAY_RE.test(msg.body))", "false"]],
+    killer: 'ledgerFlags', dies: /A BROADCAST WITH THE HUMAN IN THE BODY IS A RELAY/ }
 ];
 
 test('MUTANT CENSUS: every mutant applies once and dies at the assertion that names its guarantee', async (t) => {

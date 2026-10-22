@@ -64,7 +64,7 @@ export interface MailWakeFacts {
   subject?: string;
   /** Sent to every agent (`to: "broadcast"`, MailEntry.broadcast). */
   broadcast?: boolean;
-  /** The subject or body names the Human (MailEntry.humanRelay, HUMAN_RELAY_RE at delivery). */
+  /** The subject names the Human, or a broadcast's body does (MailEntry.humanRelay, HUMAN_RELAY_RE at delivery). */
   humanRelay?: boolean;
 }
 
@@ -102,7 +102,8 @@ export interface LedgerEntryLike {
 /** The received mail of any agent, by id (main: hive.mail.ledger(id).entries; unknown = empty). */
 export interface WakeLedgers { entries(agentId: string): readonly LedgerEntryLike[] }
 
-/** The subject or body relays the Human ("the Human's rule", "spec correction from the Human"). */
+/** The subject relays the Human ("spec correction from the Human"), or a broadcast's body does ("the
+ *  Human's rule"); an addressed cc that merely quotes the Human in its body is not a relay. */
 export const HUMAN_RELAY_RE = /\bhuman\b/i;
 /** A broadcast that holds or pauses the floor ("Floor paused by the Human", "hold all pushes"). */
 export const HOLD_NOTICE_RE = /\b(?:paused?|hold|halt(?:ed)?|freeze|frozen|stop|resumed?)\b/i;
@@ -125,7 +126,8 @@ function stillOwed(x: LedgerEntryLike): boolean {
  *   (a2) it names the card, or sits in the conversation, of an open ask the recipient is WORKING
  *        (an ask in the recipient's own ledger it still owes): the Human's spec correction to Speck
  *        mid-RAYB-6, the Pixel/Android facts added to McCey's open RAYB-9;
- *   (b)  it relays the Human (humanRelay), or is a broadcast that holds or pauses the floor;
+ *   (b)  it relays the Human (humanRelay: Human in the subject, or a broadcast with Human in the
+ *        body), or is a broadcast that holds or pauses the floor;
  *   (c)  the recipient has an open ask to the SENDER (in the sender's ledger) and this message does
  *        not name some other card: it is the result, however it was labelled (McCey's "RAYB-9 done"
  *        sent as inform to god). A message naming a card that matches none of them is about other

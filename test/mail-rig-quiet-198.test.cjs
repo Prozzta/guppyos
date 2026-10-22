@@ -63,14 +63,19 @@ test('META REPLAY 2026-10-22: answers, Human relays, hold broadcasts, facts on o
 
   // The control: a routine FYI nobody asked for is still held, and released at the bound as one wake.
   const fyi = await rig.call('send', { to: 'sp-1', act: 'inform', subject: 'quiet time on', body: 'status only' });
+  // A second control (Andy's audit of 0f1baba7): an addressed cc that only QUOTES the Human in its
+  // body is a routine cc, not a relay (rule b is Human in the subject, or a broadcast with Human in the body).
+  const cc = await rig.call('send', { to: 'sp-1', act: 'inform', subject: 'cc: RAYB-3 wording', body: "For your file: the Human's wording of the rule, as sent to McCey." });
   await rig.beat();
   await rig.beatUntil(async () => (await heldRows(rig, 'sp-1', fyi.id)).length > 0, { what: 'the FYI is held', stepMs: 1_000, tries: 10 });
   assert.equal(await acted(rig, 'sp-1', fyi.id), false, 'the FYI started no turn');
+  assert.ok((await heldRows(rig, 'sp-1', cc.id)).length > 0, 'A BODY-ONLY HUMAN CC IS HELD LIKE ANY FYI');
+  assert.equal(await acted(rig, 'sp-1', cc.id), false, 'the cc started no turn');
   const promptsBefore = rig.prompts('sp-1').length;
   await rig.call('advance', { ms: 31 * 60_000 });
-  await rig.beatUntil(() => acted(rig, 'sp-1', fyi.id), { what: 'the FYI released at the 30 min bound', stepMs: 5_000, tries: 20 });
+  await rig.beatUntil(async () => (await acted(rig, 'sp-1', fyi.id)) && acted(rig, 'sp-1', cc.id), { what: 'the FYI and the cc released at the 30 min bound', stepMs: 5_000, tries: 20 });
   const released = (await rig.call('diags')).find((d) => d.stage === 'hold-released' && d.agentId === 'sp-1' && (d.idList ?? []).includes(fyi.id));
   assert.ok(released, 'a hold-released row for the FYI');
   assert.equal(released.reason, 'max-delay');
-  assert.equal(rig.prompts('sp-1').length, promptsBefore + 1, 'one wake carried it');
+  assert.equal(rig.prompts('sp-1').length, promptsBefore + 1, 'one wake carried both');
 });
