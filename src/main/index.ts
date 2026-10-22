@@ -576,7 +576,7 @@ const floorDigest = new FloorDigest({
   flags: () => [...boardMonitor.flags(), ...refusedSettles.flags(Date.now(), agentDisplayName, refusedLive)],
   ledgerIssues: () => hive.ledgerGuard.issues(),
   // DWIGHT-HELD-INTERFERED fix 2: a held wake the Human was told about is a decision for god.
-  heldWakes: () => (heldInterference?.noticed() ?? []).map((h) => ({ agentId: h.agentId, name: agentDisplayName(h.agentId), messages: h.messages, since: h.since })),
+  heldWakes: () => (heldInterference?.noticed() ?? []).map((h) => ({ agentId: h.agentId, name: agentDisplayName(h.agentId), messages: h.messages, since: h.since, requestId: h.requestId })),
   // FLEET-LIVENESS-BLIND: shown working with no hook or tool call (silentTurn.ts; alert only).
   silentTurns: () => findSilentTurns(silentTurnFacts(), Date.now()),
   quietStalls: () => quietRefusals.stalls().map((q) => ({ ...q, name: agentDisplayName(q.agentId) })),

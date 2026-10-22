@@ -52,7 +52,7 @@ export interface DigestAgent {
 
 /** DWIGHT-HELD-INTERFERED-2028 fix 2: an automatic wake held after it was interrupted, past the
  *  notice threshold (the Human has a banner; god gets a decision). */
-export interface DigestHeldWake { agentId: string; name?: string; messages: number; since: number }
+export interface DigestHeldWake { agentId: string; name?: string; messages: number; since: number; /** GTC-ID: the hold's requestId, what `term rule --id` needs. */ requestId?: string }
 
 /** WAKE-STALL-INTERFERED-192: automatic wakes refused in a row because the terminal never went
  *  quiet (quietRefusalWatch.ts): nothing typed, so nothing else alarms. */
@@ -187,7 +187,7 @@ export function decisionItems(flags: readonly BoardFlag[], ledgerIssues: readonl
     const who = h.name ?? h.agentId;
     items.push({
       id: `held-interfered:${h.agentId}:${h.since}`, cardId: null,
-      line: `${who}: ${h.messages} message(s) held for ${ageText(now - h.since)} after an interrupted automatic message - look at ${who}'s chat box (the banner says how), or rule it in ${who}'s message box (god: term read ${h.agentId}, then term rule ${h.agentId} send-again|already-handled)`
+      line: `${who}: ${h.messages} message(s) held for ${ageText(now - h.since)} after an interrupted automatic message - look at ${who}'s chat box (the banner says how), or rule it in ${who}'s message box (god: term read ${h.agentId}, then term rule ${h.agentId} send-again|already-handled --id ${h.requestId ?? '<requestId from term read>'})`
     });
   }
   for (const f of flags) {

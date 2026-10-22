@@ -547,9 +547,9 @@ test('broker: /term/<agent>/<token> reaches the handler with the token-proved id
 });
 
 const CLI = path.join(ROOT, 'resources', 'term-cli.cjs');
-function run(args, { input, env } = {}) {
+function run(args, { input, env, cli = CLI } = {}) {
   return new Promise((resolve) => {
-    const c = spawn(process.execPath, [CLI, ...args], { env: { ...process.env, HIVE_TERM_URL: '', ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
+    const c = spawn(process.execPath, [cli, ...args], { env: { ...process.env, HIVE_TERM_URL: '', ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
     let out = ''; let err = '';
     c.stdout.on('data', (d) => { out += d; }); c.stderr.on('data', (d) => { err += d; });
     c.on('close', (code) => resolve({ code, out, err }));
@@ -582,22 +582,22 @@ test('CLI end to end against a real broker and TermControl: read, send (stdin, o
 // ─── GTC term rule: god rules on a held-interfered latch (only the UI could; Creed sat
 // owner-inhibited 80 min, WAKE-FALSE-INTERFERED-RESTART) ──────────────────────────────────
 
-function heldRig() {
+function heldRig(TC = T.TermControl) {
   const r = rig();
   r.held = { a1: { requestId: 'inbox-wake:a1:x:0', reason: 'WAKE_TYPED_NOT_SENT', since: 1_000 - 19 * 60_000 } };
   r.rulings = [];
   r.deps.heldOf = (a) => r.held[a] ?? null;
   r.deps.resolveHeld = (a, how) => { r.rulings.push([a, how]); if (!r.held[a] || r.racing) return false; delete r.held[a]; return true; };
-  r.tc = new T.TermControl(r.deps);
+  r.tc = new TC(r.deps);
   return r;
 }
 
-function ruleChecks() {
+function ruleChecks(TC = T.TermControl) {
   return (async () => {
-    const r = heldRig();
+    const r = heldRig(TC);
     const read = await r.tc.handle('god', { action: 'read', agent: 'a1' });
     assert.equal(read.status, 200);
-    assert.equal(read.body.line, 'a1: cursor 2,1  80x3  paste2004=on\nHELD since 19 min (WAKE_TYPED_NOT_SENT, inbox-wake:a1:x:0): wakes are refused until a ruling - term rule a1 send-again|already-handled', 'term read shows the latch');
+    assert.equal(read.body.line, 'a1: cursor 2,1  80x3  paste2004=on\nHELD since 19 min (WAKE_TYPED_NOT_SENT, inbox-wake:a1:x:0): wakes are refused until a ruling - term rule a1 send-again|already-handled --id inbox-wake:a1:x:0', 'TERM READ SHOWS THE LATCH AND ITS ID');
     assert.equal(read.body.header, 'cursor 2,1  80x3  paste2004=on', 'the header itself is unchanged');
     const plain = await r.tc.handle('god', { action: 'read', agent: 'a2' });
     assert.equal(plain.body.line, 'a2: cursor 2,1  80x3  paste2004=on', 'nothing held: the line is as before');
@@ -605,34 +605,77 @@ function ruleChecks() {
     const bare = await r.tc.handle('god', { action: 'rule', agent: 'a1' });
     assert.equal(bare.status, 400, 'no default ruling');
     assert.match(bare.body.line, /there is no default/);
-    assert.equal((await r.tc.handle('god', { action: 'rule', agent: 'a1', how: 'resolved' })).status, 400);
-    assert.equal((await r.tc.handle('a2', { action: 'rule', agent: 'a1', how: 'SEND_AGAIN' })).status, 403, 'god-only');
+    assert.equal((await r.tc.handle('god', { action: 'rule', agent: 'a1', how: 'resolved', id: 'inbox-wake:a1:x:0' })).status, 400);
+    assert.equal((await r.tc.handle('a2', { action: 'rule', agent: 'a1', how: 'SEND_AGAIN', id: 'inbox-wake:a1:x:0' })).status, 403, 'god-only');
+    // GTC-ID: the ruling is bound to the hold god read. No id: refused before the hold is even looked at.
+    const noId = await r.tc.handle('god', { action: 'rule', agent: 'a1', how: 'SEND_AGAIN' });
+    assert.equal(noId.status, 400, 'NO --ID: REFUSED 400, THE RULING IS ON THE HOLD GOD READ');
+    assert.match(noId.body.line, /--id <requestId> is required \(term read a1 prints it\)/);
+    assert.equal((await r.tc.handle('god', { action: 'rule', agent: 'a1', how: 'SEND_AGAIN', id: '  ' })).status, 400, 'a blank id is no id');
+    // A different hold than the one read (a newer wake replaced it): 409 names the hold that is there NOW.
+    const stale = await r.tc.handle('god', { action: 'rule', agent: 'a1', how: 'SEND_AGAIN', id: 'inbox-wake:a1:old:0' });
+    assert.equal(stale.status, 409, 'WRONG --ID: REFUSED 409, NEVER RULED ON THE HOLD GOD DID NOT READ');
+    assert.equal(stale.body.line, 'refused: the hold on a1 is now inbox-wake:a1:x:0; read it again');
     assert.deepEqual(r.rulings, [], 'no refused request reached the ruling path');
+    const staleRow = r.logs.filter((l) => l.action === 'rule').pop();
+    assert.deepEqual([staleRow.id, staleRow.requestId, staleRow.ok], ['inbox-wake:a1:old:0', 'inbox-wake:a1:x:0', false], 'the row carries the id ruled on and the id held');
 
     r.racing = true;
-    const raced = await r.tc.handle('god', { action: 'rule', agent: 'a1', how: 'SEND_AGAIN' });
+    const raced = await r.tc.handle('god', { action: 'rule', agent: 'a1', how: 'SEND_AGAIN', id: 'inbox-wake:a1:x:0' });
     assert.equal(raced.status, 409, 'the ruling path said no: refused, never reported as done');
+    assert.match(raced.body.line, /^refused: the hold on a1 is now inbox-wake:a1:x:0; read it again$/, 'the refusal names the hold that is there now');
     r.racing = false;
 
-    const ok = await r.tc.handle('god', { action: 'rule', agent: 'a1', how: 'ALREADY_HANDLED' });
-    assert.equal(ok.status, 200);
+    const ok = await r.tc.handle('god', { action: 'rule', agent: 'a1', how: 'ALREADY_HANDLED', id: 'inbox-wake:a1:x:0' });
+    assert.equal(ok.status, 200, 'THE RIGHT --ID RESOLVES');
     assert.equal(ok.body.line, 'a1: ruled ALREADY_HANDLED on inbox-wake:a1:x:0 (WAKE_TYPED_NOT_SENT, held 19 min): it is never typed again');
     assert.deepEqual(r.rulings, [['a1', 'SEND_AGAIN'], ['a1', 'ALREADY_HANDLED']]);
     const row = r.logs.filter((l) => l.action === 'rule' && l.ok).pop();
-    assert.deepEqual(row, { kind: 'term', by: 'god', agent: 'a1', action: 'rule', how: 'ALREADY_HANDLED', requestId: 'inbox-wake:a1:x:0', reason: 'WAKE_TYPED_NOT_SENT', heldMs: 19 * 60_000, ok: true });
+    assert.deepEqual(row, { kind: 'term', by: 'god', agent: 'a1', action: 'rule', how: 'ALREADY_HANDLED', id: 'inbox-wake:a1:x:0', requestId: 'inbox-wake:a1:x:0', reason: 'WAKE_TYPED_NOT_SENT', heldMs: 19 * 60_000, ok: true });
 
-    const none = await r.tc.handle('god', { action: 'rule', agent: 'a1', how: 'SEND_AGAIN' });
+    const none = await r.tc.handle('god', { action: 'rule', agent: 'a1', how: 'SEND_AGAIN', id: 'inbox-wake:a1:x:0' });
     assert.equal(none.status, 409);
     assert.match(none.body.line, /a1 has nothing held/);
     assert.equal(r.rulings.length, 2, 'nothing held: the ruling path is not called');
     assert.deepEqual(r.writes, [], 'a ruling types nothing');
 
     r.held.a1 = { requestId: 'inbox-wake:a1:y:0', reason: 'INTERFERED', since: 1_000 };
-    const again = await r.tc.handle('god', { action: 'rule', agent: 'a1', how: 'SEND_AGAIN' });
+    const old = await r.tc.handle('god', { action: 'rule', agent: 'a1', how: 'SEND_AGAIN', id: 'inbox-wake:a1:x:0' });
+    assert.equal(old.body.line, 'refused: the hold on a1 is now inbox-wake:a1:y:0; read it again', 'the id god read earlier is not the hold now: read it again');
+    const again = await r.tc.handle('god', { action: 'rule', agent: 'a1', how: 'SEND_AGAIN', id: 'inbox-wake:a1:y:0' });
     assert.match(again.body.line, /^a1: ruled SEND_AGAIN on inbox-wake:a1:y:0 .*delivered again through every guard$/);
   })();
 }
-test('term rule: god rules SEND_AGAIN or ALREADY_HANDLED through the ruling path, no default, 409 when nothing is held or it changed; term read shows the latch', () => ruleChecks());
+test('term rule: god rules SEND_AGAIN or ALREADY_HANDLED through the ruling path, no default, --id required and bound to the hold read (409 names the hold now); term read shows the latch and its id', () => ruleChecks());
+
+// GTC-ID mutants: each injects ONE defect into termControl.ts (loaded from text, the file untouched)
+// and must turn ruleChecks RED on the named assert.
+function mutateText(rel, edits, tag) {
+  let text = src(rel);
+  for (const [from, to] of edits) {
+    const hits = text.split(from).length - 1;
+    assert.equal(hits, 1, `mutant ${tag}: edit target must match EXACTLY ONCE, matched ${hits}: ${JSON.stringify(from.slice(0, 80))}`);
+    text = text.replace(from, () => to);
+  }
+  return text;
+}
+const ID_MUTANTS = [
+  { name: '--id not required: a bare ruling lands on whatever is held', dies: /NO --ID: REFUSED 400/,
+    edits: [['    if (!id) return no(400, `rule: --id <requestId> is required', '    if (id === undefined) return no(400, `rule: --id <requestId> is required']] },
+  { name: 'the id is not compared: a replaced hold is ruled on unseen', dies: /WRONG --ID: REFUSED 409/,
+    edits: [['    if (h.requestId !== id) return no(409,', '    if (false && h.requestId !== id) return no(409,']] },
+  { name: 'term read hides the id god must pass', dies: /TERM READ SHOWS THE LATCH AND ITS ID/,
+    edits: [['send-again|already-handled --id ${h.requestId}`;', 'send-again|already-handled`;']] },
+  { name: 'the right id is refused too (compare inverted: the wrong one passes, the right one is refused)', dies: /WRONG --ID: REFUSED 409|THE RIGHT --ID RESOLVES/,
+    edits: [['    if (h.requestId !== id) return no(409,', '    if (h.requestId === id) return no(409,']] },
+];
+for (const m of ID_MUTANTS) {
+  test(`GTC-ID mutant: ${m.name}`, async () => {
+    const text = mutateText('src/main/termControl.ts', m.edits, m.name);
+    const MT = loadTs.fromText('src/main/termControl.ts', text);
+    await assert.rejects(ruleChecks(MT.TermControl), (e) => m.dies.test(String(e && e.message)) || (() => { throw new Error(`mutant "${m.name}" died elsewhere: ${e && e.message}`); })());
+  });
+}
 
 test('term rule: an app without the ruling deps refuses it (503) and read is unchanged', async () => {
   const r = rig();
@@ -650,26 +693,63 @@ test('term rule wiring: index.ts gives TermControl the owner\'s inhibition and t
   assert.match(fn, /^function resolveHeldInterference\(agentId: string, how: InterferenceResolution\): boolean \{\n  const ptyId = ptyForAgent\(agentId\);\n  const resolved = ptyId \? automaticSubmit\.resolveInterference\(ptyId, how as InterferenceResolution\) : false;\n  pushAgentImpact\(\);\n[\s\S]{0,200}?  if \(resolved\) inboxWake\?\.onInterferenceResolved\(agentId, how as InterferenceResolution\);\n  return resolved;\n\}/);
   assert.equal(idx.split('automaticSubmit.resolveInterference(').length, 2, 'one caller of the owner\'s resolve');
   // The floor digest's held line tells god the term way, not only the Human's message box.
-  assert.match(src('src/main/floorDigest.ts'), /or rule it in \$\{who\}'s message box \(god: term read \$\{h\.agentId\}, then term rule \$\{h\.agentId\} send-again\|already-handled\)`/);
+  // GTC-ID: the hint carries the id the ruling must name, and index.ts hands the digest that id.
+  assert.match(src('src/main/floorDigest.ts'), /or rule it in \$\{who\}'s message box \(god: term read \$\{h\.agentId\}, then term rule \$\{h\.agentId\} send-again\|already-handled --id \$\{h\.requestId \?\? '<requestId from term read>'\}\)`/, 'THE DIGEST HINT NAMES THE ID');
+  assert.match(idx, /heldWakes: \(\) => \(heldInterference\?\.noticed\(\) \?\? \[\]\)\.map\(\(h\) => \(\{ agentId: h\.agentId, name: agentDisplayName\(h\.agentId\), messages: h\.messages, since: h\.since, requestId: h\.requestId \}\)\),/, 'the digest gets the requestId');
 });
 
-test('CLI: term rule <agent> send-again|already-handled; a bare or unknown ruling is a usage error', async (t) => {
-  assert.equal((await run(['rule', 'a1'])).code, 2, 'no default');
-  assert.equal((await run(['rule', 'a1', 'resolved'])).code, 2);
-  assert.equal((await run(['rule', 'a1', 'send-again', 'x'])).code, 2);
-  assert.equal((await run(['rule', 'a1', 'constructor'])).code, 2, 'only the two names, never an inherited key');
+test('GTC-ID mutant: the digest hint drops the id', () => {
+  const text = mutateText('src/main/floorDigest.ts', [["send-again|already-handled --id ${h.requestId ?? '<requestId from term read>'})", 'send-again|already-handled)']], 'digest');
+  assert.doesNotMatch(text, /then term rule \$\{h\.agentId\} send-again\|already-handled --id/);
+});
+
+async function cliRuleChecks(t, cli = CLI) {
+  const go = (args, o) => run(args, { ...o, cli });
+  assert.equal((await go(['rule', 'a1'])).code, 2, 'no default');
+  assert.equal((await go(['rule', 'a1', 'resolved', '--id', 'inbox-wake:a1:x:0'])).code, 2);
+  assert.equal((await go(['rule', 'a1', 'send-again', 'x'])).code, 2);
+  assert.equal((await go(['rule', 'a1', 'constructor', '--id', 'inbox-wake:a1:x:0'])).code, 2, 'only the two names, never an inherited key');
+  // GTC-ID: --id is required at the CLI too (usage, exit 2), before any request is made.
+  const noId = await go(['rule', 'a1', 'send-again']);
+  assert.equal(noId.code, 2, 'CLI: NO --ID IS A USAGE ERROR');
+  assert.match(noId.err, /--id <requestId> is required/);
+  assert.equal((await go(['rule', 'a1', 'send-again', '--id'])).code, 2, '--id with no value');
+  assert.equal((await go(['rule', 'a1', 'send-again', '--id', '--raw'])).code, 2, 'a flag is not an id');
+  assert.equal((await go(['rule', 'a1', 'send-again', '--id', 'inbox-wake:a1:x:0', 'x'])).code, 2, 'nothing after the id');
+  assert.match((await go(['-h'])).out, /term rule <agent> send-again\|already-handled --id <requestId>/, 'usage names --id');
   const s = await broker(t);
   const r = heldRig();
   s.setTermHandler((agentId, body) => r.tc.handle(agentId, body));
   const env = { HIVE_TERM_URL: s.hookUrl('god').replace('/hook/', '/term/') };
-  const ok = await run(['rule', 'a1', 'send-again'], { env });
+  const wrong = await go(['rule', 'a1', 'already-handled', '--id', 'inbox-wake:a1:old:0'], { env });
+  assert.equal(wrong.code, 1, 'CLI: THE WRONG ID IS REFUSED (409)');
+  assert.match(wrong.err, /the hold on a1 is now inbox-wake:a1:x:0; read it again/);
+  assert.deepEqual(r.rulings, [], 'the wrong id never reached the ruling path');
+  const ok = await go(['rule', 'a1', 'send-again', '--id', 'inbox-wake:a1:x:0'], { env });
   assert.equal(ok.code, 0, ok.err);
   assert.match(ok.out, /^a1: ruled SEND_AGAIN on inbox-wake:a1:x:0/);
-  const none = await run(['rule', 'a1', 'already-handled'], { env });
+  const none = await go(['rule', 'a1', 'already-handled', '--id', 'inbox-wake:a1:x:0'], { env });
   assert.equal(none.code, 1);
   assert.match(none.err, /a1 has nothing held/);
   assert.deepEqual(r.rulings, [['a1', 'SEND_AGAIN']]);
-});
+}
+test('CLI: term rule <agent> send-again|already-handled --id <requestId>; a bare or unknown ruling or a missing --id is a usage error; the wrong id is refused', (t) => cliRuleChecks(t));
+
+const CLI_ID_MUTANTS = [
+  { name: 'CLI: --id optional (a bare ruling is sent)', dies: /CLI: NO --ID IS A USAGE ERROR/,
+    edits: [["    if (!how) throw new Error('rule: send-again or already-handled (there is no default)');\n",
+             "    if (!how) throw new Error('rule: send-again or already-handled (there is no default)');\n    if (rest.length === 1) return { body: { action, agent, how, id: 'inbox-wake:a1:x:0' } };\n"]] },
+  { name: 'CLI: the id typed is not the id sent', dies: /CLI: THE WRONG ID IS REFUSED/,
+    edits: [["    return { body: { action, agent, how, id: rest[2] } };", "    return { body: { action, agent, how, id: 'inbox-wake:a1:x:0' } };"]] },
+];
+for (const m of CLI_ID_MUTANTS) {
+  test(`GTC-ID mutant: ${m.name}`, async (t) => {
+    const text = mutateText('resources/term-cli.cjs', m.edits, m.name);
+    const mutated = path.join(JAIL, `term-cli-mutant-${CLI_ID_MUTANTS.indexOf(m)}.cjs`);
+    fs.writeFileSync(mutated, text);
+    await assert.rejects(cliRuleChecks(t, mutated), (e) => m.dies.test(String(e && e.message)) || (() => { throw new Error(`mutant "${m.name}" died elsewhere: ${e && e.message}`); })());
+  });
+}
 
 test('CLI argument rules: no text from arguments, bad flags, no URL', async () => {
   assert.equal((await run(['send', 'a1', 'hello there'])).code, 2, 'text in arguments is refused');
