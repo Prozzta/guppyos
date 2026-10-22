@@ -11,6 +11,55 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/guppyos/releases).
 
+## [1.1.98] — 2026-10-22
+
+**Agent mail arrives without anyone typing, heavy jobs share the machine fairly, and cost figures are right.**
+Rollback: 1.1.97 (reinstall).
+
+### Added
+
+- **A stall watcher records every app freeze (STALL-WATCH).** Each time the window stalls, the app
+  writes down how long and what it was doing, so the typing lag can be traced to its real cause.
+- **An alert when an agent's wakes keep being refused (WAKE-REFUSAL-STUCK).** Mail that cannot be
+  delivered for a long time now raises a notice instead of waiting in silence.
+- **Unexpected agent exits are logged (PTY-EXIT).** The exit record keeps the last screen lines,
+  with tokens, keys and PEM blocks blanked out.
+- **A crashed app window recovers by itself (ELECTRON-VIEW-SELF-HEAL).**
+
+### Changed
+
+- **Heavy jobs take turns in a real queue.** A finished job frees its slot at once (it used to stay
+  locked for 30 to 40 seconds or until a timeout), waiting jobs are no longer dropped after an
+  hour, and short commands are no longer mistaken for heavy ones.
+- **The task board is split into smaller files (TASKS-JSON-SPLIT).** A small change no longer
+  rewrites one 1.45 MB file.
+- **Fewer redraws.** Parts of the window no longer redraw when nothing changed.
+- **Hooks never call a paid model.** The hidden background memory tidy-up (about $0.30 to $0.70 a
+  day) is gone, and the app enforces that hooks run without a model.
+- **Old release work folders are pruned (`npm run cut:prune`),** and test runs remove their
+  temporary files. The folders had grown by about 21 GB a day.
+- **Only the coordinator marks a card done**, and only once its work is merged.
+- **Installer builds run through one script (`npm run cut:win`)** that installs, builds and checks
+  the native modules the same way every time.
+
+### Fixed
+
+- **Wakes typed but never sent.** A wake left sitting in an agent's message box is now sent or
+  cleared.
+- **Mail held behind a stale "loading" label.** A resumed Codex agent whose screen kept an old
+  `model: loading` header now takes mail once its own status line shows.
+- **Dwight stopping mid-task** after sending an in-between update.
+- **Cost figures.** Missing price rows made some costs about 3 times wrong, and the fleet view's
+  dollar totals read too low.
+- **The Slack and webhook listeners listen only on this PC**, no longer on the whole network, and
+  internal hooks no longer carry access tokens they do not need.
+- **Codex agents** no longer drop typed messages or mouse clicks, and show their activity on the
+  fleet view.
+- **Messages with a blank subject, wakes sent to the wrong group, and a loop guard that did not
+  count.**
+- **A cancelled test run always restores the code it changed**, and the suite passes with the
+  half-cores setting.
+
 ## [1.1.97] — 2026-10-19
 
 **Your message box types into the agent's terminal when the agent is ready; agent wakes can too.**
