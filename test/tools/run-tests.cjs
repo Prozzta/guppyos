@@ -282,7 +282,7 @@ function run({
     env.GUPPY_TEMP_JAIL_OPT = opt;
   }
   try {
-    return runGated({ filters, rel, env, cpus, gate, jail, spawn, cwd, timeoutMs, isTTY, eventsFile, readFile, removeFile, failureFile, writeFailureFile, watchdog, fileJob, log, err, perfDir, readdir });
+    return runGated({ filters, rel, env, gate, jail, spawn, cwd, timeoutMs, isTTY, eventsFile, readFile, removeFile, failureFile, writeFailureFile, watchdog, fileJob, log, err, perfDir, readdir });
   } finally {
     if (gate) { try { fs.rmSync(gate.dir, { recursive: true, force: true }); } catch { /* best effort */ } }
     if (jail) { try { removeJail(jail.root); } catch (e) { err(`[test-runner] the run's temp folders could not be removed (${e.code || e.message}; a child still holds a file): ${jail.root} (TEST-TEMP-HYGIENE)`); } }
@@ -300,7 +300,7 @@ function burstLine(text, slots) {
 }
 
 /** run() from the per-file jobs on, with the start gate in place (LOAD-BURST-196). */
-function runGated({ rel, env, cpus = null, gate, jail = null, spawn, cwd, timeoutMs, isTTY, eventsFile, readFile, removeFile, failureFile, writeFailureFile, watchdog, fileJob, log, err, perfDir, filters, readdir }) {
+function runGated({ rel, env, gate, jail = null, spawn, cwd, timeoutMs, isTTY, eventsFile, readFile, removeFile, failureFile, writeFailureFile, watchdog, fileJob, log, err, perfDir, filters, readdir }) {
   const job = fileJob();
   if (job.exe) {
     const opt = `--require "${FILE_JOB_PRELOAD.split(path.sep).join('/')}"`;
@@ -312,7 +312,7 @@ function runGated({ rel, env, cpus = null, gate, jail = null, spawn, cwd, timeou
     err(`[test-runner] per-file jobs are unavailable (${job.why}): a hung file is killed from a process snapshot, which can miss a process born just before the kill (LOAD-FLAKES-178)`);
   }
   const fx = { spawn, cwd, timeoutMs, isTTY, env, readFile, removeFile, watchdog, jobExe: job.exe, err };
-  const main = runNodeTest({ ...fx, rel, eventsFile, label: '', extraArgs: cpus === null ? [] : [`--test-concurrency=${Math.max(1, cpus - 1)}`] });
+  const main = runNodeTest({ ...fx, rel, eventsFile, label: '', extraArgs: [] });
   if (gate) log(burstLine(readFile(path.join(gate.dir, 'starts.jsonl')), gate.slots));
   // A child that never started, or was killed by a signal (status null), is a failure, not a pass.
   if (spawnFailed(main.res, '', err)) return totals(1, main.counts, 'not run', log, main.failures, { failureFile, writeFailureFile });
