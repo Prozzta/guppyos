@@ -186,9 +186,9 @@ import { CodexRolloutLifecycleSource, threadSettingsAppliedSince } from './codex
 import { CodexRolloutCapacitySource, codexUserMessageMatches } from './codexRolloutCapacity';
 import { BootHookClock, startupSettled } from './bootSubmitEvidence';
 import { AgentLivenessMonitor, type LivenessFacts } from './agentLiveness';
-import { CODEX_ROTATE_MAX_ROLLOUT_BYTES, decideAgyRotation, decideThreadRotation, findAgyConversation, findCachedCodexRollout, threadRotatedLogRow, type CodexRolloutCacheEntry } from './codexThreadRotation';
+import { CODEX_ROTATE_MAX_ROLLOUT_BYTES, decideAgyRotation, decideThreadRotation, findAgyConversation, findCachedCodexRollout, findCodexRollout, threadRotatedLogRow, type CodexRolloutCacheEntry } from './codexThreadRotation';
 import { decideCodexLiveRotation, liveRotationEscalationId } from './codexLiveRotation';
-import { mapCodexLiveRotationFacts, shouldArmCodexLiveRotationExit } from './codexLiveRotationWiring';
+import { freshCodexLiveRotationSpawn, isCurrentCodexLiveRotationIncarnation, mapCodexLiveRotationFacts, mayConsiderCodexLiveRotation, sameCodexLiveRotationTarget, shouldArmCodexLiveRotationExit, shouldRelaunchCodexLiveRotation, sweepCodexLiveRotations } from './codexLiveRotationWiring';
 import { HistoryService } from './historyService';
 import { recordExit } from './ptyExitRecord';
 import Database from 'better-sqlite3';
@@ -1423,7 +1423,7 @@ function armCodexLiveRotationExitDeadline(ptyId: string, incarnation: number | u
   const timer = setTimeout(() => {
     // A late owner result can arrive after this PTY id has been relaunched. Its
     // grace belongs to the old process, so it must not delete or log for the new one.
-    if (ptyManager.incarnation(ptyId) !== incarnation) {
+    if (!isCurrentCodexLiveRotationIncarnation(incarnation, ptyManager.incarnation(ptyId))) {
       if (pendingCodexLiveRotationDeadline.get(ptyId) === timer) pendingCodexLiveRotationDeadline.delete(ptyId);
       return;
     }
@@ -1435,7 +1435,7 @@ function armCodexLiveRotationExitDeadline(ptyId: string, incarnation: number | u
 }
 
 function considerCodexLiveRotation(agentId: string): void {
-  if (ptyProvider.get(ptyForAgent(agentId) ?? '') !== 'codex' || pendingCodexLiveRotation.has(ptyForAgent(agentId) ?? '')) return;
+  if (!mayConsiderCodexLiveRotation(ptyProvider.get(ptyForAgent(agentId) ?? ''), pendingCodexLiveRotation.has(ptyForAgent(agentId) ?? ''))) return;
   const a = codexLiveRotationFacts(agentId);
   const d = decideCodexLiveRotation(a.facts);
   noteCodexLiveRotation(agentId, a.sessionId, d.action, d.reason, d.bytes);
@@ -1450,13 +1450,13 @@ function considerCodexLiveRotation(agentId: string): void {
   // A second complete read closes the gap between the Stop callback and the only write.
   const b = codexLiveRotationFacts(agentId);
   const again = decideCodexLiveRotation(b.facts);
-  if (again.action !== 'rotate' || b.ptyId !== a.ptyId || b.sessionId !== a.sessionId) { noteCodexLiveRotation(agentId, b.sessionId, again.action, again.reason, again.bytes); return; }
+  if (!sameCodexLiveRotationTarget({ ptyId: a.ptyId, sessionId: a.sessionId, action: d.action }, { ptyId: b.ptyId, sessionId: b.sessionId, action: again.action })) { noteCodexLiveRotation(agentId, b.sessionId, again.action, again.reason, again.bytes); return; }
   const spawn = liveSpawnOptions.get(a.ptyId);
   if (!spawn) { noteCodexLiveRotation(agentId, a.sessionId, 'defer', 'owner-refused:no-live-spawn', again.bytes); return; }
   // Arm before the guarded owner writes: Codex handles /exit without a rollout
   // user row and can naturally exit before the owner's completion promise settles.
   const incarnation = ptyManager.incarnation(a.ptyId!);
-  pendingCodexLiveRotation.set(a.ptyId!, { agentId, owner: spawn.owner, opts: { ...spawn.opts, resume: false, requireResume: false, resumeSessionId: undefined, startFresh: true } });
+  pendingCodexLiveRotation.set(a.ptyId!, { agentId, owner: spawn.owner, opts: freshCodexLiveRotationSpawn(spawn.opts) });
   // The submit owner proves an empty, non-human composer and uses Codex's paste gap.
   void automaticSubmit.submit({ requestId: `codex-live-rotate:${agentId}:${a.sessionId}`, agentId, admissionClass: 'CAPACITY_GATED', text: '/exit' }).then((outcome) => {
     const ptyStillLive = ptyManager.list().some((p) => p.id === a.ptyId);
@@ -2526,7 +2526,7 @@ ptyManager.setExitHandler((id, exitCode) => {
     liveSpawnOptions.delete(id);
     // `/exit` is the only live-rotation action.  A non-zero exit is still not
     // replaced: never turn a failed graceful shutdown into a forced restart.
-    if (exitCode === 0) {
+    if (shouldRelaunchCodexLiveRotation(exitCode)) {
       // Unlike an installer, this was a live agent.  Retire all old-incarnation
       // wake/liveness/lock bindings before the fresh PTY takes its place.
       const naturalExitReason: ArchiveReason = 'pty-exit';
@@ -5407,12 +5407,12 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
   const wakeToken = provider === 'codex' && opts.hive?.id ? WakeIncarnationTokens.mint() : null;
   if (wakeToken) opts.env = { ...(opts.env ?? {}), [WAKE_INCARNATION_ENV]: wakeToken };
   const res = await ptyManager.spawn(opts, owner);
+  if (res.ok && opts.hive?.id) heavyAutoApprove.set(opts.hive.id, approvesWithoutAsking(provider, [...tokenizeCommand(opts.command), ...(opts.args ?? [])]));
   if (res.ok && provider === 'codex' && opts.hive?.id) {
     // Keep only a clone: later resume/startup shaping must never mutate the
     // saved fresh-launch contract used by the graceful live rotation.
     liveSpawnOptions.set(opts.id, { owner, opts: callerSpawnOpts });
   }
-  if (res.ok && opts.hive?.id) heavyAutoApprove.set(opts.hive.id, approvesWithoutAsking(provider, [...tokenizeCommand(opts.command), ...(opts.args ?? [])]));
   if (res.ok && opts.hive?.id) logTermModes(opts.hive.id, opts.id, provider, didResume);
   if (res.ok) fsSpawnedCwds.add(opts.cwd);
   if (wakeToken && res.ok && opts.hive?.id) {
@@ -8318,7 +8318,7 @@ function runWorkerWakeBeat(): void {
   // ZERO-TOKEN-LIVENESS: after the WWR ran (it records its own STUCK edges first), every agent.
   sampleLivenessAll();
   // A missed Stop cannot leave a completed oversized Codex session unobserved.
-  for (const agentId of live) considerCodexLiveRotation(agentId);
+  sweepCodexLiveRotations(live, considerCodexLiveRotation);
 }
 
 /** (Re)arm the always-on beats (decoupled from the optional heartbeat): the live
