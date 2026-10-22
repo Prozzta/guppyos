@@ -391,6 +391,7 @@ test('PIN: against the REAL test directory discovery is root tests plus only fol
   // WAKE-LIFECYCLE-UNKNOWN-197: + 1 (wake-stale-loading-header-197).
   // PS-POLICY-TEMP-LEAK: + 1 (ps-policy-temp-leak-198).
   // NEW-FLOOR-KNOWHOW: + 1 (new-floor-knowhow).
+  // CODEX-ROLLOUT-SIZE: + 1 (codex-live-rotation).
   assert.equal(files.length, 500, `the focused suite must retain its pre-fold file count, got ${files.length}`);
   assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
   assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');
