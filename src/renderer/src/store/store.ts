@@ -14,7 +14,7 @@ import {
   type HireReviewQueue
 } from '@shared/hireQueue';
 import { DEFAULT_ORG_TRIGGER, type OrgTriggerConfig, type WebhookTrigger } from '@shared/triggers';
-import { ROSTER_CACHE_HOME_KEY, clearRosterCache, rosterCacheCopy, rosterSource, sameHome } from '@shared/rosterCacheHome';
+import { ROSTER_CACHE_HOME_KEY, ROSTER_CACHE_KEPT_KEY, clearRosterCache, rosterCacheCopy, rosterSource, sameHome } from '@shared/rosterCacheHome';
 import { isCompactionCommand } from '@shared/providerAutomation';
 import type { RunningTool } from '@shared/activityView';
 import type { LivenessV1 } from '@shared/livenessV1';
@@ -695,13 +695,16 @@ if (useCacheRoster && rosterMirror.agents.length + rosterMirror.archived.length 
 // loaded and stamp it, so no slice another home wrote outlives the switch.
 // Another home's (or an unstamped) cache that holds entries is a roster, so it goes to this
 // home's roster-backups/ first. This home's own cache is only refreshed from its file.
-if (!useCacheRoster) {
+if (!useCacheRoster && rosterHome) {
   try {
     const foreign = sameHome(rosterHome, rosterCacheHome) ? null : rosterCacheCopy(window.localStorage);
     if (foreign) {
       const kept = window.cth?.rosterBackupForeignSync?.(foreign);
       if (!kept?.ok) console.warn('[roster] could not back up the other home\'s roster cache:', kept?.error);
     }
+    // A copy set aside on a boot with no home (below) goes the same way, once.
+    const held = window.localStorage.getItem(ROSTER_CACHE_KEPT_KEY);
+    if (held && window.cth?.rosterBackupForeignSync?.(JSON.parse(held))?.ok) window.localStorage.removeItem(ROSTER_CACHE_KEPT_KEY);
   } catch { /* the backup must never block a clean start */ }
   try {
     clearRosterCache(window.localStorage);
@@ -710,8 +713,19 @@ if (!useCacheRoster) {
     window.localStorage.setItem(LS_RESTORABLE, JSON.stringify(rosterMirror.restorable));
     window.localStorage.setItem(LS_QUEUES, JSON.stringify(rosterMirror.queues));
     window.localStorage.setItem(LS_SELECTED, rosterMirror.selectedId ?? '');
-    if (rosterHome) window.localStorage.setItem(ROSTER_CACHE_HOME_KEY, rosterHome);
+    window.localStorage.setItem(ROSTER_CACHE_HOME_KEY, rosterHome);
   } catch { /* no localStorage: the file is the only copy */ }
+}
+
+// No home (a legacy config without harnessHome; onboarding sets one without a relaunch): main can
+// neither stamp nor back up, so the cache is not read, cleared or stamped. Its entries are set
+// aside once, because the first agent onboarding spawns overwrites the slices; the next boot with
+// a home hands that copy to its roster-backups/ (above).
+if (!useCacheRoster && !rosterHome) {
+  try {
+    const held = rosterCacheCopy(window.localStorage);
+    if (held && !window.localStorage.getItem(ROSTER_CACHE_KEPT_KEY)) window.localStorage.setItem(ROSTER_CACHE_KEPT_KEY, JSON.stringify(held));
+  } catch { /* nothing to set aside */ }
 }
 
 let queuedSeq = 0;

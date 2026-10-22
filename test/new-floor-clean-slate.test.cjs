@@ -158,6 +158,32 @@ test('U2/U3 upgrade from 1.1.98: an unstamped cache on the same floor with a mis
   }
 });
 
+test('no home (legacy config): the cache is not loaded, cleared or stamped; it is set aside once and kept on the next boot with a home', () => {
+  const storage = fakeStorage(cacheOf(DUNDER, null));
+  const before = new Map(storage.map);
+  const r = bootStore({ storage, home: null, file: null });
+  assert.deepEqual([r.agents, r.archived, r.restorable], [[], [], []], 'NFCS NO HOME: onboarding must not inherit it');
+  for (const [k, v] of before) assert.equal(storage.getItem(k), v, `NFCS NO HOME: ${k} is left as it was`);
+  assert.equal(storage.getItem('cth.rosterHome'), null, 'NFCS NO HOME: nothing to stamp');
+  assert.deepEqual(r.backups, [], 'NFCS NO HOME: main has no home to back up into');
+  const held = JSON.parse(storage.getItem('cth.rosterCacheKept'));
+  assert.deepEqual(held.restorable.map((a) => a.id), ['jim', 'creed'], 'NFCS NO HOME: the entries are set aside');
+
+  // Onboarding's first spawn overwrites a slice; a second boot with no home keeps the first copy.
+  storage.setItem('cth.agents', JSON.stringify([agent('god-new', NEW_HOME)]));
+  bootStore({ storage, home: null, file: null });
+  assert.deepEqual(JSON.parse(storage.getItem('cth.rosterCacheKept')).agents.map((a) => a.id), ['god-d'], 'NFCS NO HOME: set aside once, never overwritten');
+
+  // The next boot with a home keeps the set-aside copy in roster-backups/ and drops it.
+  const next = bootStore({ storage, home: NEW_HOME, file: fileOf({ agents: [agent('god-new', NEW_HOME)], archived: [], restorable: [] }) });
+  assert.deepEqual(next.agents, ['god-new']);
+  const kept = next.backups.filter((b) => b.body.agents.some((a) => a.id === 'god-d'));
+  assert.equal(kept.length, 1, 'NFCS NO HOME: the set-aside copy lands in roster-backups/');
+  assert.deepEqual(kept[0].body.restorable.map((a) => a.id), ['jim', 'creed']);
+  assert.equal(storage.getItem('cth.rosterCacheKept'), null, 'NFCS NO HOME: and is dropped once kept');
+  assert.equal(storage.getItem('cth.rosterHome'), NEW_HOME);
+});
+
 test('this floor\'s own cache is never backed up: a normal launch writes no foreign-cache file', () => {
   const r = bootStore({ storage: fakeStorage(cacheOf(DUNDER, OLD_HOME)), home: OLD_HOME, file: fileOf(DUNDER) });
   assert.deepEqual(r.restorable, ['jim', 'creed']);
@@ -221,6 +247,9 @@ test('both fresh-home paths clear the roster cache with the one helper', () => {
   // The reason is main's, not the renderer's; the preload answers synchronously so the copy is on disk first.
   assert.match(read('src/main/index.ts'), /ipcMain\.on\('roster:backupForeignSync', \(evt, snap: unknown\) => \{ evt\.returnValue = roster\.backupSnapshot\(snap, 'foreign-cache'\); \}\);/, 'NFCS BACKUP: main wiring');
   assert.match(read('src/preload/index.ts'), /ipcRenderer\.sendSync\('roster:backupForeignSync', snap\)/, 'NFCS BACKUP: preload wiring');
+  // The bridge the same-home fallback rests on: a broken one reads as "no home" on every boot.
+  assert.match(read('src/preload/index.ts'), /rosterHomeSync: \(\): string \| null => \{\n\s+try \{ const h = ipcRenderer\.sendSync\('roster:homeSync'\); return typeof h === 'string' && h \? h : null; \} catch \{ return null; \}/, 'NFCS HOME BRIDGE: preload sends roster:homeSync and returns the string');
+  assert.match(read('src/renderer/src/store/store.ts'), /try \{ return window\.cth\?\.rosterHomeSync\?\.\(\) \?\? null; \} catch \{ return null; \}/, 'NFCS HOME BRIDGE: the store reads it');
 });
 
 test('main seeds a new floor with no agents and the floor docs, and leaves the existing floor alone', (t) => {

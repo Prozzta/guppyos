@@ -15,6 +15,10 @@
 /** localStorage key holding the harness home the roster cache was written for. */
 export const ROSTER_CACHE_HOME_KEY = 'cth.rosterHome';
 
+/** localStorage key holding a roster cache set aside on a boot with no home (a RosterCacheCopy),
+ *  until a boot with a home keeps it in roster-backups/. Not a cache key: a clear leaves it. */
+export const ROSTER_CACHE_KEPT_KEY = 'cth.rosterCacheKept';
+
 /** The localStorage keys that hold the roster cache, the stamp included. */
 export const ROSTER_CACHE_KEYS = [
   'cth.agents',
