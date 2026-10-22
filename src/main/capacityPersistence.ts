@@ -372,7 +372,7 @@ export function saveCapacityStore(
     renameSync(tmp, file);
   } catch (e) {
     console.warn('[capacity] could not write the durable store:', e);
-    try { if (existsSync(tmp)) unlinkSync(tmp); } catch { /* nothing further to do */ }
+    removeCapacityTemps(file, tmp);
   }
   return { written, omitted };
 }
@@ -390,18 +390,21 @@ export async function saveCapacityStoreAsync(file: string, tracker: ProviderCapa
   return { written, omitted };
 }
 
-/** UI-CRAWL fix (quit race): the async writer's temp files (`<file>.tmp-<hex>`) left beside the
- *  store. At will-quit the process ends before an in-flight async write can clean up after itself,
- *  so the sync quit write sweeps them; one still open is left to its writer (it removes it). */
-function sweepCapacityTemps(file: string): void {
+/** The module's one clean-up of temp files: the sync writer's own `<file>.tmp` (`own`, after a
+ *  failed write) and, UI-CRAWL fix (quit race), the async writer's `<file>.tmp-<hex>` siblings.
+ *  At will-quit the process ends before an in-flight async write can clean up after itself, so
+ *  the sync quit write sweeps them; one still open is left to its writer (it removes it). */
+function removeCapacityTemps(file: string, own?: string): void {
+  const stale: string[] = [];
+  if (own && existsSync(own)) stale.push(own);
   try {
     const dir = dirname(file);
     const prefix = `${basename(file)}.tmp-`;
-    for (const name of readdirSync(dir)) {
-      if (!name.startsWith(prefix)) continue;
-      try { unlinkSync(join(dir, name)); } catch { /* still open: its writer removes it */ }
-    }
+    for (const name of readdirSync(dir)) if (name.startsWith(prefix)) stale.push(join(dir, name));
   } catch { /* nothing to sweep */ }
+  for (const p of stale) {
+    try { unlinkSync(p); } catch { /* still open: its writer removes it */ }
+  }
 }
 
 /**
@@ -472,7 +475,7 @@ export class CapacityStore {
     // before it gets there, is swept here.
     this.seq++;
     const out = saveCapacityStore(this.file, this.tracker, this.now());
-    sweepCapacityTemps(this.file);
+    removeCapacityTemps(this.file);
     return out;
   }
 

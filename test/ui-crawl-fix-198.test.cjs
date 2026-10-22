@@ -321,7 +321,7 @@ const MUTANTS = [
   { name: 'M2 the failed async write is silent', file: CAP, from: "console.warn('[capacity] could not write the durable store:', e);\n  }\n  return { written, omitted };", to: '}\n  return { written, omitted };', k: K.warnOnFail },
   { name: 'q the async write ignores the generation', file: CAP, from: '() => mine === this.seq)', to: '() => true)', k: K.quitRace },
   { name: 'q saveNow does not move the generation', file: CAP, from: '    this.seq++;\n    const out = saveCapacityStore(', to: '    const out = saveCapacityStore(', k: K.quitRace },
-  { name: 'q saveNow leaves stray temp files', file: CAP, from: '    sweepCapacityTemps(this.file);\n', to: '', k: K.quitRace },
+  { name: 'q saveNow leaves stray temp files', file: CAP, from: '    removeCapacityTemps(this.file);\n', to: '', k: K.quitRace },
   { name: 'q the commit check is skipped', file: AJ, from: 'if (commit && !commit()) { await rm(tmp, { force: true }); return false; }', to: '', k: K.commitGate },
   { name: 's the map is not capped', file: SW, from: 'this.sync.size < SYNC_TARGETS_MAX ? key', to: 'true ? key', k: K.syncBounded },
   { name: 's old minutes are kept', file: SW, from: 'if (minute !== this.syncMinute) { this.sync.clear(); this.syncMinute = minute; }', to: 'this.syncMinute = minute;', k: K.syncBounded },
