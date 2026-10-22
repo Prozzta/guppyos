@@ -1772,6 +1772,10 @@ const api = {
   rosterReadSync: (): RosterSnapshot | null => {
     try { return ipcRenderer.sendSync('roster:readSync') ?? null; } catch { return null; }
   },
+  /** The harness home rosterReadSync reads (null = none). SYNCHRONOUS for the same reason. */
+  rosterHomeSync: (): string | null => {
+    try { const h = ipcRenderer.sendSync('roster:homeSync'); return typeof h === 'string' && h ? h : null; } catch { return null; }
+  },
   /** Mirror the roster to disk. Debounced by the caller; main keeps the previous
    *  contents as a backup and refuses a first write that would empty a full file. */
   rosterWrite: (snap: RosterSnapshot): Promise<{ ok: boolean; skipped?: string; error?: string }> =>

@@ -14,6 +14,7 @@ import {
   type HireReviewQueue
 } from '@shared/hireQueue';
 import { DEFAULT_ORG_TRIGGER, type OrgTriggerConfig, type WebhookTrigger } from '@shared/triggers';
+import { ROSTER_CACHE_HOME_KEY, clearRosterCache, rosterSource } from '@shared/rosterCacheHome';
 import { isCompactionCommand } from '@shared/providerAutomation';
 import type { RunningTool } from '@shared/activityView';
 import type { LivenessV1 } from '@shared/livenessV1';
@@ -398,12 +399,28 @@ const fileRoster = (() => {
   try { return window.cth?.rosterReadSync?.() ?? null; } catch { return null; }
 })();
 
+/** The home that file belongs to, and the home the localStorage cache was written for. */
+const rosterHome = (() => {
+  try { return window.cth?.rosterHomeSync?.() ?? null; } catch { return null; }
+})();
+const rosterCacheHome = (() => {
+  try { return window.localStorage.getItem(ROSTER_CACHE_HOME_KEY); } catch { return null; }
+})();
+
 /** Prefer the shared file, but only when it actually holds a roster. An empty
  *  file must never win over a populated localStorage — that is exactly the
  *  "opened the build once and my floor went blank" failure this is here to
- *  prevent. A genuine delete-all clears both stores, so nothing resurrects. */
-const useFileRoster = !!fileRoster
-  && fileRoster.agents.length + fileRoster.archived.length + fileRoster.restorable.length > 0;
+ *  prevent. A genuine delete-all clears both stores, so nothing resurrects.
+ *  NEW-FLOOR-CLEAN-SLATE: localStorage is one cache for every home, so it stands in
+ *  only for the home it was written for; a new floor starts with no agents but the
+ *  god its hive bootstrap spawns (shared/rosterCacheHome.ts). */
+const rosterStart = rosterSource({
+  fileEntries: fileRoster ? fileRoster.agents.length + fileRoster.archived.length + fileRoster.restorable.length : 0,
+  home: rosterHome,
+  cacheHome: rosterCacheHome
+});
+const useFileRoster = rosterStart === 'file';
+const useCacheRoster = rosterStart === 'cache';
 
 /** The renderer's running copy of what should be on disk. Kept as a mutable
  *  mirror updated slice-by-slice rather than read back out of the store, because
@@ -441,6 +458,8 @@ export function flushRosterNow(): void {
 /** Coalesce a burst of persist* calls into one disk write. Agent edits arrive in
  *  clusters (spawn writes agents + selection + queues in the same tick). */
 function scheduleRosterFlush(): void {
+  // Every persist lands here: keep the cache stamped with its home (NEW-FLOOR-CLEAN-SLATE).
+  try { if (rosterHome) window.localStorage.setItem(ROSTER_CACHE_HOME_KEY, rosterHome); } catch { /* noop */ }
   if (rosterFlush) return;
   rosterFlush = setTimeout(flushRosterNow, 500);
 }
@@ -491,6 +510,7 @@ function persistedSlice(
   fromFile: unknown[] | undefined
 ): PersistedAgent[] {
   if (useFileRoster) return Array.isArray(fromFile) ? (fromFile as PersistedAgent[]) : [];
+  if (!useCacheRoster) return [];
   try {
     const raw = window.localStorage.getItem(key);
     if (!raw) return [];
@@ -593,7 +613,9 @@ function loadPersistedQueues(): Record<string, QueuedMessage[]> {
   try {
     const parsed = useFileRoster
       ? (fileRoster?.queues as Record<string, QueuedMessage[]> | undefined)
-      : JSON.parse(window.localStorage.getItem(LS_QUEUES) ?? 'null') as Record<string, QueuedMessage[]> | null;
+      : useCacheRoster
+        ? JSON.parse(window.localStorage.getItem(LS_QUEUES) ?? 'null') as Record<string, QueuedMessage[]> | null
+        : null;
     if (!parsed || typeof parsed !== 'object') return {};
     // Defensively keep only well-formed entries.
     const out: Record<string, QueuedMessage[]> = {};
@@ -610,7 +632,7 @@ function loadPersistedQueues(): Record<string, QueuedMessage[]> {
 
 function loadPersistedSelectedId(agents: Agent[]): string | null {
   try {
-    const id = useFileRoster ? fileRoster?.selectedId : window.localStorage.getItem(LS_SELECTED);
+    const id = useFileRoster ? fileRoster?.selectedId : useCacheRoster ? window.localStorage.getItem(LS_SELECTED) : null;
     return id && agents.some((a) => a.id === id) ? id : (agents[0]?.id ?? null);
   } catch {
     return agents[0]?.id ?? null;
@@ -664,8 +686,23 @@ rosterMirror.selectedId = initialSelectedId;
 // First run with the file: seed it from this origin's localStorage. Only when
 // there is something to seed — writing an empty file here would hand a blank
 // roster to the other side, which is precisely the outcome being designed out.
-if (!useFileRoster && rosterMirror.agents.length + rosterMirror.archived.length + rosterMirror.restorable.length > 0) {
+if (useCacheRoster && rosterMirror.agents.length + rosterMirror.archived.length + rosterMirror.restorable.length > 0) {
   scheduleRosterFlush();
+}
+
+// NEW-FLOOR-CLEAN-SLATE: from here on the cache is THIS home's. When it was not
+// (another home's, unstamped, or none), rewrite every slice from what was just
+// loaded and stamp it, so no slice another home wrote outlives the switch.
+if (!useCacheRoster) {
+  try {
+    clearRosterCache(window.localStorage);
+    window.localStorage.setItem(LS_AGENTS, JSON.stringify(rosterMirror.agents));
+    window.localStorage.setItem(LS_ARCHIVED, JSON.stringify(rosterMirror.archived));
+    window.localStorage.setItem(LS_RESTORABLE, JSON.stringify(rosterMirror.restorable));
+    window.localStorage.setItem(LS_QUEUES, JSON.stringify(rosterMirror.queues));
+    window.localStorage.setItem(LS_SELECTED, rosterMirror.selectedId ?? '');
+    if (rosterHome) window.localStorage.setItem(ROSTER_CACHE_HOME_KEY, rosterHome);
+  } catch { /* no localStorage: the file is the only copy */ }
 }
 
 let queuedSeq = 0;
