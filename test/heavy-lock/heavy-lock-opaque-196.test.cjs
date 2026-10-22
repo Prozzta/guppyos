@@ -441,7 +441,7 @@ test('E2E SHOULD 1: a broker the preload cannot reach fails open, with one hive 
 
 K.e2eCrashAndDeadWaiter = async (t, M = HJ, preload = PRELOAD) => {
   if (process.platform !== 'win32') { t.skip('the process listing is Windows-only'); return; }
-  const b = await broker(t, M, { probe: M.probeProcesses, roots: () => [] });
+  const b = await broker(t, M, { probe: () => M.probeProcesses(require('../tools/ps-env.cjs').psEnv()), roots: () => [] });
   // A crashed lease holder: killed outright, so its exit handler never runs.
   const run = start([process.execPath, '--test', 'sleeper.test.cjs'], { url: b.url('a'), preload });
   await until(() => b.lock.snapshot().length === 1, 15_000, 'the lease');

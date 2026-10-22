@@ -45,7 +45,8 @@ test('psEnv: adds PSModuleAnalysisCachePath inside a temp folder; keeps one alre
   const env = psEnv({ A: '1' });
   assert.equal(env.A, '1', 'PS MODCACHE: the base env is kept');
   assert.equal(env[KEY], path.join(psCacheDir(), 'ModuleAnalysisCache'), 'PS MODCACHE: the cache path is in this process\'s temp folder');
-  assert.ok(path.resolve(env[KEY]).startsWith(path.resolve(os.tmpdir()) + path.sep), `PS MODCACHE: under the temp folder: ${env[KEY]}`);
+  // PS-POLICY-PRODUCT-TEMP: the real temp folder (sharedTemp), not the file's temp jail.
+  assert.ok(path.resolve(env[KEY]).startsWith(path.resolve(require('./tools/shared-temp.cjs').sharedTemp()) + path.sep), `PS MODCACHE: under the temp folder: ${env[KEY]}`);
   assert.equal(psEnv({ PSMODULEANALYSISCACHEPATH: 'x' }).PSMODULEANALYSISCACHEPATH, 'x', 'PS MODCACHE: a caller\'s own value is kept');
   assert.equal(Object.keys(psEnv({ PSMODULEANALYSISCACHEPATH: 'x' })).filter((k) => k.toUpperCase() === KEY.toUpperCase()).length, 1, 'PS MODCACHE: no second key beside it');
   const base = { B: '2' };

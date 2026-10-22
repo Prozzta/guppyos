@@ -15,16 +15,19 @@
 // runs leaves its folder there: the folder carries the pid, and the next psTempDir() and the end of
 // a run-tests run remove the folders of dead pids (sweepPsTempDirs).
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 
 const KEY = 'PSModuleAnalysisCachePath';
 let dir = null;
 
-/** This process's cache folder (made on first use, removed at exit). */
+/** This process's cache folder: guppy-psmac-<pid>-*, under the real temp folder like psTempDir
+ *  (PS-POLICY-PRODUCT-TEMP: in os.tmpdir() it sat in the file's temp jail, and a killed process left
+ *  it there), made on first use (sweeping dead processes' folders first), removed at exit. */
 function psCacheDir() {
   if (!dir) {
-    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'guppy-psmac-'));
+    const root = require('./shared-temp.cjs').sharedTemp();
+    sweepPsTempDirs(root);
+    dir = fs.mkdtempSync(path.join(root, `guppy-psmac-${process.pid}-`));
     const made = dir;
     process.on('exit', () => { try { fs.rmSync(made, { recursive: true, force: true }); } catch { /* still in use: temp */ } });
   }
@@ -33,13 +36,13 @@ function psCacheDir() {
 
 let tempDir = null;
 const TEMP_KEYS = ['TEMP', 'TMP', 'TMPDIR'];
-const PS_TEMP_RE = /^guppy-pstemp-(\d+)-/;
+const PS_TEMP_RE = /^guppy-ps(?:temp|mac)-(\d+)-/;
 
 function pidAlive(pid) {
   try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
 }
 
-/** Removes the guppy-pstemp-<pid>-* folders in `root` whose process is gone: a test process killed
+/** Removes the guppy-pstemp-<pid>-* and guppy-psmac-<pid>-* folders in `root` whose process is gone: a test process killed
  *  before its exit handler ran (run-tests ending a hung file) leaves its folder in the real temp
  *  folder, where no temp jail looks. Returns the names removed. */
 function sweepPsTempDirs(root = require('./shared-temp.cjs').sharedTemp(), { alive = pidAlive } = {}) {
