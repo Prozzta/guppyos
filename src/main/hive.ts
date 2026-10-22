@@ -2710,7 +2710,7 @@ export class HiveManager {
       : '';
     const godLine = meta.isGod
       ? 'You are the GOD / ORCHESTRATOR of this hive — your job is to ORCHESTRATE, not to implement: maintain live situational awareness and delegate the work. (1) AWARENESS — always know what is going on: keep an accurate picture of every agent (active vs archived/idle), the task board, and all in-flight work; handle the mail delivered to you and triage every other agent\'s requests, answering clarifications so the team runs autonomously. (2) DELEGATE — decompose work and fan it out to the hive agents via their inboxes (route messages and assign owners; do not do their jobs); do NOT take on grunt implementation yourself. Stay aware of who is already on the floor and delegate OPPORTUNISTICALLY: BEFORE you spawn anything, CHECK THE LIVE ROSTER (active agents in registry.json + their state in fleet.json) and prefer routing to an EXISTING agent that fits — above all when the request names one ("ask Pam to…", "have Jim…"), route to that agent instead of reflexively creating a new one. Reuse an idle or already-running agent whose role matches; only spawn a fresh agent when no existing one is a sensible fit, and say that you checked. One capable owner beats a duplicate. (3) OWN ONLY THE IMPORTANT, high-leverage things — task decomposition, dispatch decisions, sign-offs, conflict resolution, branch integration, and final QA — and remain the sole scribe of board.md. You are otherwise fully autonomous — there is NO separate approval queue. For the genuinely critical (destructive actions, spending real money, scope changes, unresolvable conflicts), ask the human directly in your own session and let the tool-permission prompt gate the action; the human approves natively, including remotely from their phone via /remote-control. Keep the team unblocked. When you DISPATCH a task, write it as a 4-part contract so the agent can run autonomously: (1) OBJECTIVE — the concrete goal; (2) OUTPUT — the expected deliverable/format; (3) TOOLS — what to use or avoid, and any references to read instead of re-deriving; (4) BOUNDARIES — scope limits + the definition of done. Pass references (file paths, message ids, board sections), not pasted content — keep dispatches short.'
-        + ` The harness keeps ${inRoot('board-status.md')} and ${inRoot('floor-digest.md')} current (in-flight work and its age, blocked and ask-me cards, stale and archived-assignee flags, the roster) and wakes you with a "Floor: N decision(s)" message only when it needs a decision: act on those, and do not poll for stalled agents. For detail read ${inRoot('fleet.json')} (live per-agent tokens, cost, status, last tool, breaker level, inbox backlog) and ${inRoot('registry.json')} — note that running 'claude agents' will NOT list your hive's sibling agents. A full Claude Code command reference is at ${inRoot('COMMANDS.md')} (slash commands act ONLY on your own session; CLI commands run in your shell and can target the fleet). The harness stamps each card's status age itself (state/task-meta.json), moves a doing card back to todo when its assignee is explicitly archived (assignee kept, a line in its notes), reminds you once of a blocked card whose human answer is waiting (set "parked": true on a card you are deliberately holding; on a card whose fix has shipped but is not installed yet, set "waitingFor": "install" and "fixVersion": "<x.y.z>": it is never flagged stale while it waits, and the digest tells you once when that version is running, so you can verify and close it), and refuses an API write that would add a duplicate id; you keep board.md's narrative and the cards' content accurate. In tasks.json, ALWAYS set each task's "assignee" to the worker's agent id the moment you dispatch it, and NEVER clear it on status changes — a done card must still say who did the work (the human reads the board by who-did-what). HUMAN FEEDBACK is first-class in the ledger: when a task can only proceed with the human's input — a QUESTION to answer OR an ACTION only the human can perform (create an account, approve a purchase, provide credentials/screenshots, test on their device) — set its status to "blocked" and append the concrete ask to the card's "humanQA" array (push {"q":"...","askedAt":"<iso>"}; write q as a short first-line headline, then a body with blank-line paragraphs and "- " bullets (markdown: **bold**, inline code, https links); when the human should pick between concrete choices add "options":[{"label":"...","detail":"..."}] (plus optional "recommended":<index> and "multi":true) — the ASK ME card shows them as buttons and still accepts a free-text note; phrase actions as clear to-dos; keep every past entry — the history documents the card's decisions). The harness surfaces open questions on the office floor's ASK ME board; the human's answer lands in the same entry ("a") AND arrives as a hive message to you — act on it and unblock the card so work continues. Do NOT park human questions in separate files (no HumanQuestion.md) and never sit waiting on the human in your own session. Steward the token budget.`
+        + ` The harness keeps ${inRoot('board-status.md')} and ${inRoot('floor-digest.md')} current (in-flight work and its age, blocked and ask-me cards, stale and archived-assignee flags, the roster) and wakes you with a "Floor: N decision(s)" message only when it needs a decision: act on those, and do not poll for stalled agents. For detail read ${inRoot('fleet.json')} (live per-agent tokens, cost, status, last tool, breaker level, inbox backlog) and ${inRoot('registry.json')} — note that running 'claude agents' will NOT list your hive's sibling agents. A full Claude Code command reference is at ${inRoot('COMMANDS.md')} (slash commands act ONLY on your own session; CLI commands run in your shell and can target the fleet); its FLOOR COMMANDS and FLEET SETTINGS sections give the term, heavy, memory and tasks syntax and the per-agent compaction window. The harness stamps each card's status age itself (state/task-meta.json), moves a doing card back to todo when its assignee is explicitly archived (assignee kept, a line in its notes), reminds you once of a blocked card whose human answer is waiting (set "parked": true on a card you are deliberately holding; on a card whose fix has shipped but is not installed yet, set "waitingFor": "install" and "fixVersion": "<x.y.z>": it is never flagged stale while it waits, and the digest tells you once when that version is running, so you can verify and close it), and refuses an API write that would add a duplicate id; you keep board.md's narrative and the cards' content accurate. In tasks.json, ALWAYS set each task's "assignee" to the worker's agent id the moment you dispatch it, and NEVER clear it on status changes — a done card must still say who did the work (the human reads the board by who-did-what). HUMAN FEEDBACK is first-class in the ledger: when a task can only proceed with the human's input — a QUESTION to answer OR an ACTION only the human can perform (create an account, approve a purchase, provide credentials/screenshots, test on their device) — set its status to "blocked" and append the concrete ask to the card's "humanQA" array (push {"q":"...","askedAt":"<iso>"}; write q as a short first-line headline, then a body with blank-line paragraphs and "- " bullets (markdown: **bold**, inline code, https links); when the human should pick between concrete choices add "options":[{"label":"...","detail":"..."}] (plus optional "recommended":<index> and "multi":true) — the ASK ME card shows them as buttons and still accepts a free-text note; phrase actions as clear to-dos; keep every past entry — the history documents the card's decisions). The harness surfaces open questions on the office floor's ASK ME board; the human's answer lands in the same entry ("a") AND arrives as a hive message to you — act on it and unblock the card so work continues. Do NOT park human questions in separate files (no HumanQuestion.md) and never sit waiting on the human in your own session. Steward the token budget.`
       : meta.isAssistant
       ? 'You are Michael\'s PREP ASSISTANT. You will be handed short, possibly vague instructions (each begins with "ENRICH TASK:"). For each one: (1) figure out which project it concerns and cd into the most relevant repo — you start in Michael\'s home directory; (2) gather concrete context READ-ONLY (exact file paths, current state, relevant code, conventions, active branch, gotchas) — NEVER modify, create, or delete files; (3) rewrite the instruction into ONE clear, self-contained prompt that Michael can execute autonomously, preserving the user\'s original intent without inventing scope. Then deliver it: write ONE message JSON into your outbox with "to":"god", "act":"request", a short subject, and the finished prompt as the body. Do NOT perform the task yourself — your only output is the improved prompt sent to Michael.'
       : 'For anything ambiguous, cross-cutting, or needing sign-off, address a message to "god".';
@@ -5872,8 +5872,31 @@ function renderCommandsMd(): string {
     }
     lines.push('');
   }
+  lines.push(...FLOOR_COMMANDS_MD);
   return lines.join('\n');
 }
+
+/** NEW-FLOOR-KNOWHOW: the hive's own commands (hive/bin), which a fresh floor otherwise learns only
+ *  from older agents' memory. Syntax mirrors resources/*-cli.cjs and src/main/ledger.ts. */
+const FLOOR_COMMANDS_MD = [
+  '## FLOOR COMMANDS (the hive\'s own, in hive/bin)',
+  '',
+  '- `memory search "<query>"` — by meaning across the hive. `--wing <agent>`, `--results N`, `--since ISO` / `--before ISO`, `--kind K`, `--key card.<id>`, `--history`.',
+  '- `memory wake-up` — your current claims and standing lessons; `memory status` — the engine\'s state.',
+  '- `memory note [--kind fact|decision|lesson|preference|procedure|pointer|todo] [--key card.<id>] TEXT` — one durable claim (claim ledger on). When related claims exist the note waits for your choice: `--supersedes ID --reason changed|corrected|moved` (replace), `--separate ID[,ID]` (both stay true) or `--cancel`.',
+  '- `memory retract ID... --why TEXT`, `memory reconcile A B --answer keep-both|supersedes|retract`, `memory used ID --op helped|hurt`.',
+  '- `ledger --file op.json` (or JSON on stdin) — one card update, one message and one memory note; fields in PROTOCOL.md.',
+  '- `heavy status` — who holds the heavy slot, who waits, who has it reserved. `heavy release [--to <agent>]` — give up your reservation and queue place (to that agent first). A held slot frees when its job ends.',
+  '- `tasks-all` — every card, hot tasks.json plus tasks-archive/ (old done cards move there). `tasks-revive <CARD-ID>` brings one back; `tasks-unsplit --yes` only with Guppy closed.',
+  '- god only: `term read <agent> [--rows N]` (its live screen), `term type <agent>` / `term send <agent>` (text on stdin or `--file`, never in arguments; send presses Enter once the echo settles; `--raw` lets a lone `?` or a leading `!` or `/` through), `term keys <agent> <key>...` (`enter esc tab shift-tab backspace space ctrl-c ctrl-u up down y n 0-9` and more), `term hold on [reason]` / `term hold off` (the floor hold). After a timeout, `term read` before you repeat a type or send.',
+  '',
+  '## FLEET SETTINGS (god)',
+  '',
+  '- Compaction window: registry.json `agents.<id>.autoCompactWindow` (tokens, 100000-1000000, or `"off"`) wins over config `claudeAutoCompactWindow` (every Claude agent, default 150000) and `godAutoCompactWindow`. It is passed at spawn, so it applies from the agent\'s next spawn or restore. Codex agents use `codexAutoCompactTokenLimit`.',
+  '- Cards: `parked: true` holds a card on purpose; `waitingFor: "install"` with `fixVersion: "x.y.z"` keeps a shipped-but-not-installed card from going stale until that version runs.',
+  '- ASK ME shows humanQA only on a `blocked` card. The ledger does not write humanQA: an agent asks with `needs_human: true` and a card; god adds `options` entries in tasks.json itself.',
+  ''
+];
 const COMMANDS_MD = renderCommandsMd();
 
 const PROTOCOL_MD = `# Hive protocol
@@ -5972,14 +5995,20 @@ EOF
   done when its sha lands in an INT on origin): a builder's or auditor's \`done\` is dropped, the
   rest of the op still lands and the reply says \`status kept\`. \`doing\` / \`blocked\` are yours.
   When the op sets no status the reply shows the current one as \`(unchanged)\`.
-- \`message\`: the schema above; \`to\` must be a registered agent, \`god\` or \`broadcast\`.
+  \`create\` takes \`title\`, \`description\`, \`assignee\`, \`status\`, \`priority\` (a number) and
+  \`dependsOn\`; \`patch\` also takes \`parked\` (true/false), \`waitingFor\` (\`"install"\`) and
+  \`fixVersion\` (\`"x.y.z"\`), and \`null\` clears one. Neither takes \`humanQA\` or tags.
+- \`message\`: the schema above, without \`wake\` (for \`"wake": "now"\` write an outbox file);
+  \`to\` must be a registered agent, \`god\` or \`broadcast\`.
   A \`request\` must name its card (\`message.card\`, or the op's \`card\`): the ask closes when that
   card is done. Information that needs no answer goes as \`inform\`, never as \`request\`.
 - \`close\`: \`[{ "id": "<ask message id>", "reason": "why it is no longer open" }]\` closes open
   asks by hand: one you owe (recorded \`owner:<reason>\`) or one you sent and withdraw
   (\`withdrawn:<reason>\`). A reason is required; nobody else's asks.
 - \`memory\`: \`append\` goes at the end of your memory.md; \`"lesson": true\` puts it at the end of
-  your standing lessons instead (no \`## \` headings).
+  your standing lessons instead (no \`## \` headings). With the claim ledger on, it is a claim:
+  \`key\` (\`card.<card-id>\`, lower case), and \`supersedes\` (your claim ids \`c-…\`) with \`reason\`
+  (\`changed\` / \`corrected\` / \`moved\`), or \`separate\` when both stay true.
 In PowerShell: \`@' {...} '@ | ledger\`. Or write the JSON with your file tool and run
 \`ledger --file op.json\`.
 
@@ -6087,7 +6116,16 @@ memory and you have the \`memory\` command, served by the app's memory engine:
 - \`memory wake-up\` — a short digest of what matters, good at the start of a task.
 
 Your \`memory.md\` is indexed automatically, so the durable facts you write there
-become searchable by every agent. There is no \`mine\` step.
+become searchable by every agent. There is no \`mine\` step. When your start-up instructions
+say the claim ledger is on for you, record facts with \`memory note\` instead (full syntax in
+\`COMMANDS.md\`, under Floor commands).
+
+## The heavy slot
+The machine runs one heavy job at a time (installs, builds, full suites, benches). A command
+the hook denies means you are QUEUED: do not retry it or a variant, and do not poll; carry on
+with light work (single test files, reads, edits). "HEAVY SLOT FREE" reserves the slot for you
+for 5 minutes. An opt-in bench takes \`GUPPY_BENCH=1\` as the command's FIRST token (not inside
+a subshell). \`heavy status\` shows the queue; \`heavy release\` gives up your reservation.
 `;
 
 // ─── cth-hook shim (written to <hive>/bin/cth-hook.cjs) ──────────────────────
