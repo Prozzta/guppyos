@@ -117,8 +117,9 @@ test('Jim B1: an agree or inform answering the recipient\'s OWN ask wakes it; FY
 
 test('Jim B1 wiring: main looks the original up in the answering agent\'s ledger (id or sender_id)', () => {
   const index = readSource('src/main/index.ts');
-  assert.match(index, /const lookup = \(holder: string, id: string\) => \{\n        const es = hive\.mail\.ledger\(holder\)\.entries;\n        return es\[id\] \?\? Object\.values\(es\)\.find\(\(x\) => x\.senderId === id\);\n      \};/);
-  assert.match(index, /\(e\) => answersOwnAsk\(e, agentId, lookup\)\);/);
+  // QUIET-HOLD-ACT-ONLY (1.1.98): the lookup became a reader over every ledger (solicitedQuietMail resolves the id or sender_id alias itself).
+  assert.match(index, /const ledgers = \{ entries: \(holder: string\) => Object\.values\(hive\.mail\.ledger\(holder\)\.entries\) \};/);
+  assert.match(index, /\(e\) => solicitedQuietMail\(e, agentId, ledgers\)\);/);   // QUIET-HOLD-ACT-ONLY widened B1
 });
 
 test('Jim B1 behaviour on real ledgers: jim proposes to god, god agrees: the agree wakes jim', (t) => {
@@ -462,7 +463,7 @@ test('bridge: Human and breaker mail wake an idle agent at once', () => {
 test('main: quietUntil reads the ledger, the mail mode and the config (cached), through quietHolds', () => {
   const index = readSource('src/main/index.ts');
   assert.match(index, /quietUntil: \(agentId, ids, now\) => \{\n      const holdMs = quietHoldMsCached\(now\);\n      if \(!\(holdMs > 0\)\) return new Map\(\);\n      const entries = hive\.mail\.ledger\(agentId\)\.entries;\n/);
-  assert.match(index, /return quietHolds\(ids\.map\(\(id\) => entries\[id\]\)\.filter\(\(e\) => !!e\), hookServer\.mailChannel\(agentId\)\.mode, holdMs, now,\n        \(e\) => answersOwnAsk\(e, agentId, lookup\)\);\n    \}/);
+  assert.match(index, /return quietHolds\(ids\.map\(\(id\) => entries\[id\]\)\.filter\(\(e\) => !!e\), hookServer\.mailChannel\(agentId\)\.mode, holdMs, now,\n        \(e\) => solicitedQuietMail\(e, agentId, ledgers\)\);\n    \}/);
   assert.match(index, /quietHoldMemo = \{ ms: quietMailHoldMs\(min\), at: now \};/);
   assert.match(index, /min = readConfig\(\)\.quietMailHoldMin;/);
 });

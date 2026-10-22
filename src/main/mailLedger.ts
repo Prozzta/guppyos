@@ -25,6 +25,7 @@
  * back-edge (`redelivered`) is an at-least-once anomaly and adds one row per occurrence.
  */
 import { createHash, randomBytes } from 'node:crypto';
+import { HUMAN_RELAY_RE } from '../shared/mailWakeClass';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { atomicWriteJson, renameWithRetry } from './atomicJson';
@@ -107,6 +108,8 @@ export interface MailMessageLike {
   card?: unknown;
   /** REQUESTS-AUTO-190: the sender's `needs_human`; such an ask is never closed by the backstop. */
   needs_human?: unknown;
+  /** QUIET-HOLD-ACT-ONLY (1.1.98): the recipient as routed; `"broadcast"` marks a floor-wide copy. */
+  to?: unknown;
 }
 
 export interface MailEntry {
@@ -128,6 +131,13 @@ export interface MailEntry {
   cardId?: string;
   /** REQUESTS-AUTO-190: sent with `needs_human: true`. Absent = not (and every entry before 1.1.91). */
   needsHuman?: boolean;
+  /** QUIET-HOLD-ACT-ONLY (1.1.98): a copy of a `to: "broadcast"` message. Absent = addressed. */
+  broadcast?: boolean;
+  /** QUIET-HOLD-ACT-ONLY (1.1.98): the SUBJECT names the Human, or a broadcast copy's body does
+   *  (shared HUMAN_RELAY_RE), so the quiet hold never keeps it (the body is not kept, so this is
+   *  decided at delivery). An addressed cc that only quotes the Human in its body is a routine
+   *  cc, not a relay (Andy's audit of 0f1baba7: that woke every cc'd agent). */
+  humanRelay?: boolean;
   /** sha256 of the body; null for a work order confirmed after a restart (Q14: body unknown). */
   bodyHash: string | null;
   /** The §4.1 duplicate key, hash(subject + body) (§11.18 #3). Null when the body is unknown. */
@@ -294,6 +304,8 @@ function entryFromMessage(msg: MailMessageLike, seq: number, now: number, via: M
     ...(msg.wake === 'now' ? { wakeNow: true } : {}),
     ...(cardIdValue(msg.card) ? { cardId: cardIdValue(msg.card)! } : {}),
     ...(msg.needs_human === true ? { needsHuman: true } : {}),
+    ...(msg.to === 'broadcast' ? { broadcast: true } : {}),
+    ...(HUMAN_RELAY_RE.test(String(msg.subject ?? '')) || (msg.to === 'broadcast' && typeof msg.body === 'string' && HUMAN_RELAY_RE.test(msg.body)) ? { humanRelay: true } : {}),
     bodyHash: mailBodyHash(msg.body ?? ''),
     contentHash: mailContentHash(msg.subject ?? '', msg.body ?? ''),
     via,
