@@ -18,6 +18,11 @@
  *   R7 same on base by counts              R8 no dir rule (a new module in src/main)
  *   R9 a non-ancestor base accepted        R10 every test/tools runner is a census
  *   R11 nameless reds by the first line alone (no rc, an empty line matches)
+ *   R12 no inventory rule (RELATED-TEST-INVENTORY-198: an added test file never selects the glob pin)
+ *   R13 a deleted test file is not an inventory change
+ *   R14 the runner's feature dirs read as [] (a test/heavy-lock/ file never counts; Andy SHOULD)
+ *   R15 a test/perf/*.perf.cjs is not an inventory change (Andy NIT1)
+ *   R16 an unreadable runner is silent (no WARN on the summary)
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -223,6 +228,87 @@ function ancestorChecks(M) {
 }
 test('--base must be an ancestor of --tip (a moved INT head would count its own changes)', () => ancestorChecks(REAL));
 
+// RELATED-TEST-INVENTORY-198: 60dba590 added 2 test files and RELATED never ran the glob pin (493).
+let invFixture = null;
+function invRepo() {
+  if (invFixture) return invFixture;
+  const dir = tempDir('related-inventory-');
+  fs.mkdirSync(path.join(dir, 'src'));
+  fs.mkdirSync(path.join(dir, 'test', 'tools'), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'test', 'fixtures'));
+  const write = (f, s) => fs.writeFileSync(path.join(dir, f), s);
+  const commit = (m) => { git(dir, 'add', '-A'); git(dir, 'commit', '-q', '-m', m); return git(dir, 'rev-parse', 'HEAD').trim(); };
+  git(dir, 'init', '-q');
+  git(dir, 'config', 'user.email', 'fixture@example.invalid');
+  git(dir, 'config', 'user.name', 'fixture');
+  fs.mkdirSync(path.join(dir, 'test', 'heavy-lock'));
+  fs.mkdirSync(path.join(dir, 'test', 'perf'));
+  write('src/a.ts', 'export const v = "v1";\n');
+  write('test/test-runner-glob.test.cjs', PASS);
+  write('test/test-runner-perf-lane.test.cjs', PASS);
+  write('test/d.test.cjs', PASS);
+  write('test/heavy-lock/h.test.cjs', PASS);
+  write('test/perf/p.perf.cjs', PASS);
+  // The runner as run-tests.cjs exports it: its feature dirs and its discovery.
+  write('test/tools/run-tests.cjs', "const fs = require('fs'), path = require('path');\n" +
+    "const FEATURE_TEST_DIRS = Object.freeze(['heavy-lock']);\n" +
+    "function discoverTestFiles(d) { const out = fs.readdirSync(d).filter((f) => f.endsWith('.test.cjs'));\n" +
+    "  for (const f of fs.readdirSync(path.join(d, 'heavy-lock'))) if (f.endsWith('.test.cjs')) out.push(path.join('heavy-lock', f));\n" +
+    '  return out; }\nmodule.exports = { FEATURE_TEST_DIRS, discoverTestFiles };\n');
+  const base = commit('base');
+  const at = (name, change) => { git(dir, 'checkout', '-q', '--detach', base); change(); return commit(name); };
+  invFixture = {
+    dir, base,
+    add: at('add', () => write('test/new.test.cjs', PASS)),
+    del: at('del', () => fs.rmSync(path.join(dir, 'test', 'd.test.cjs'))),
+    ren: at('ren', () => git(dir, 'mv', 'test/d.test.cjs', 'test/e.test.cjs')),
+    feat: at('feat', () => write('test/heavy-lock/z.test.cjs', PASS)),
+    perf: at('perf', () => write('test/perf/q.perf.cjs', PASS)),
+    src: at('src', () => write('src/a.ts', 'export const v = "v2";\n')),
+    fixture: at('fixture', () => write('test/fixtures/y.test.cjs', PASS))
+  };
+  return invFixture;
+}
+
+function cliSet(M, dir, base, tip) {
+  const lines = [];
+  const log = console.log;
+  console.log = (s) => lines.push(s);
+  try { M.main(['--base', base, '--tip', tip, '--repo', dir, '--json']); } finally { console.log = log; }
+  return JSON.parse(lines.join('\n'));
+}
+
+const INV = ['test/test-runner-glob.test.cjs', 'test/test-runner-perf-lane.test.cjs'];
+function inventoryChecks(M) {
+  const r = invRepo();
+  for (const kind of ['add', 'del', 'ren', 'feat']) {
+    const j = cliSet(M, r.dir, r.base, r[kind]);
+    for (const f of INV) {
+      assert.ok(j.lanes.light.includes(f), `A TEST FILE ${kind.toUpperCase()} SELECTS ${f}`);
+      assert.deepEqual(j.why[f], ['(test inventory changed)'], `${kind}: ${f} is there for the inventory`);
+    }
+    assert.ok(!/WARN/.test(j.summary), `${kind}: the fixture's runner is readable, so no warning: ${j.summary}`);
+  }
+  const p = cliSet(M, r.dir, r.base, r.perf);
+  assert.ok(p.lanes.light.includes('test/test-runner-perf-lane.test.cjs'), 'A PERF FILE ADD SELECTS test-runner-perf-lane');
+  assert.ok(!p.lanes.light.includes('test/test-runner-glob.test.cjs'), 'a perf file is not in the glob count');
+  for (const kind of ['src', 'fixture']) {
+    const j = cliSet(M, r.dir, r.base, r[kind]);
+    for (const f of INV) assert.ok(!j.lanes.light.includes(f), `${kind}: no collected test file added or removed, so no ${f}`);
+  }
+  // The main fixture has no test/tools/run-tests.cjs: its feature dirs are unknown, and the summary says so.
+  const { dir, base, tip } = repo();
+  assert.match(cliSet(M, dir, base, tip).summary, /; WARN inventory: test\/tools\/run-tests\.cjs unreadable \(.+\): feature-dir test files are not seen$/, 'AN UNREADABLE RUNNER WARNS ON THE SUMMARY');
+  assert.equal(M.collectedPath('test/heavy-lock/x.test.cjs', ['heavy-lock']), true, 'a feature dir file is collected');
+  assert.equal(M.collectedPath('test/fixtures/x.test.cjs', ['heavy-lock']), false, 'a nested non-feature dir is not');
+  assert.equal(M.collectedPath('test/tools/x-mutants.cjs', []), false, 'a census runner is not a suite file');
+  assert.equal(M.perfPath('test/perf/x/y.perf.cjs'), false, 'the perf lane reads its dir flat');
+  // -z: a path with a tab or a newline stays one path.
+  assert.deepEqual(M.inventoryPaths(['M', 'test/a.test.cjs', 'A', 'src/b.ts', 'R100', 'test/d.test.cjs', 'test/heavy-lock/d.test.cjs', 'A', 'test/t\tab.test.cjs', 'D', 'test/perf/p.perf.cjs', ''].join('\0'), ['heavy-lock']),
+    { suite: ['test/d.test.cjs', 'test/heavy-lock/d.test.cjs', 'test/t\tab.test.cjs'], perf: ['test/perf/p.perf.cjs'] }, 'a modify is no inventory change; a rename counts on both sides');
+}
+test('inventory: a branch that adds, deletes or renames a collected test file (feature dirs from the runner) selects test-runner-glob and test-runner-perf-lane; a perf file selects the perf lane; src or fixture-only does not; an unreadable runner warns', () => inventoryChecks(REAL));
+
 // ── mutant census ──────────────────────────────────────────────────────────────────────────────
 function compile(text) {
   const m = new Module(SRC, module);
@@ -242,10 +328,15 @@ const MUTANTS = [
   ['R9 a non-ancestor base accepted', 'if (anc.status !== 0) throw', 'if (false) throw', ancestorChecks],
   ['R10 every test/tools runner is a census', "? 'census' : 'tools'", "? 'census' : 'census'", laneChecks],
   ['R11 nameless reds by the first line alone', "return tip.rc === base.rc && !!tip.firstError && tip.firstError === base.firstError;", "return (tip.firstError || '') === (base.firstError || '');", failureChecks],
+  ['R12 no inventory rule', "    if ((INVENTORY_TESTS[f] || []).some((k) => inventory[k].length)) hits.push('(test inventory changed)');", '', inventoryChecks],
+  ['R13 a deleted test file is not an inventory change', 'if (!/^[ADR]/.test(status)) continue;', 'if (!/^[AR]/.test(status)) continue;', inventoryChecks],
+  ['R14 the feature dirs read as []', 'return { dirs: [...d], warning: null };', 'return { dirs: [], warning: null };', inventoryChecks],
+  ['R15 a perf file is no inventory change', '      else if (perfPath(p)) out.perf.push(p);', '', inventoryChecks],
+  ['R16 an unreadable runner is silent', "const warn = (set.warnings || []).map((w) => `; WARN ${w}`).join('');", "const warn = '';", inventoryChecks],
   ['R6 the base worktree is left behind', "try { git(repo, ['worktree', 'remove', '--force', baseTree]); } catch { fs.rmSync(baseTree, { recursive: true, force: true }); }", '', runChecks]
 ];
 
-test('MUTANT CENSUS RELATED-TESTS: R1-R11 each apply once and die at their named check', () => {
+test('MUTANT CENSUS RELATED-TESTS: R1-R16 each apply once and die at their named check', () => {
   const text = fs.readFileSync(SRC, 'utf8');
   for (const [name, from, to, check] of MUTANTS) {
     assert.equal(text.split(from).length, 2, `${name}: its anchor is in the script exactly once`);

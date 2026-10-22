@@ -22,6 +22,13 @@
  *     (readdirSync, walk*()): the floor-wide bans over src/main must see a brand-new module there.
  *   - package.json: only when the test names package.json AND a top-level key the diff changed
  *     ('scripts' counts only through a changed script's name). The bare name matched 20+ files.
+ *   - RELATED-TEST-INVENTORY-198: it is one of INVENTORY_TESTS (they pin the suite's file list, not
+ *     a named file) AND the branch added, deleted or renamed a file the runner collects. 60dba590
+ *     added 2 test files, the glob pin stayed 493, and stage 18 went red on 'got 495'. The A/D/R
+ *     paths come from `git diff --name-status -M -z`, so a deleted test counts too. A suite file
+ *     (test/x.test.cjs, or under run-tests' FEATURE_TEST_DIRS) selects both; a test/perf/*.perf.cjs
+ *     selects test-runner-perf-lane. A runner whose feature dirs cannot be read puts a WARN on the
+ *     summary line (feature-dir files are then not seen), never a silent empty list.
  * Lanes:
  *   LIGHT    run serially, one file per process (never a parallel node --test: the Human's CPU);
  *   HEAVY    the file carries `// @heavy-lock`: it runs under the heavy slot;
@@ -116,6 +123,48 @@ function laneOf(file, text) {
   return 'light';
 }
 
+/** The tests over the suite's file list as a whole, and which inventory moves each one. */
+const INVENTORY_TESTS = { 'test/test-runner-glob.test.cjs': ['suite'], 'test/test-runner-perf-lane.test.cjs': ['suite', 'perf'] };
+const PERF_SUFFIX = '.perf.cjs';
+
+/** Does repo path `p` have the shape run-tests collects: test/x.test.cjs, or under a feature dir. */
+function collectedPath(p, featureDirs) {
+  if (!p.startsWith('test/') || !p.endsWith(TEST_SUFFIX)) return false;
+  const rest = p.slice('test/'.length).split('/');
+  return rest.length === 1 || featureDirs.includes(rest[0]);
+}
+
+/** A perf-lane file: test/perf/x.perf.cjs (run-tests reads that dir flat). */
+const perfPath = (p) => p.startsWith('test/perf/') && p.endsWith(PERF_SUFFIX) && !p.slice('test/perf/'.length).includes('/');
+
+/** { suite, perf }: the paths a `git diff --name-status -M -z` output adds, deletes or renames (both sides). */
+function inventoryPaths(nameStatusZ, featureDirs) {
+  const out = { suite: [], perf: [] };
+  const t = nameStatusZ.split('\0');
+  for (let i = 0; i < t.length;) {
+    const status = t[i++];
+    if (!status) continue;
+    const paths = t.slice(i, i += /^[RC]/.test(status) ? 2 : 1);
+    if (!/^[ADR]/.test(status)) continue;
+    for (const p of paths) {
+      if (collectedPath(p, featureDirs)) out.suite.push(p);
+      else if (perfPath(p)) out.perf.push(p);
+    }
+  }
+  return out;
+}
+
+/** run-tests' feature dirs, read from the repo's own runner; a runner that cannot say is a warning. */
+function featureDirsOf(repo) {
+  try {
+    const d = require(path.join(repo, 'test', 'tools', 'run-tests.cjs')).FEATURE_TEST_DIRS;
+    if (!Array.isArray(d)) throw new Error('no FEATURE_TEST_DIRS export');
+    return { dirs: [...d], warning: null };
+  } catch (e) {
+    return { dirs: [], warning: `inventory: test/tools/run-tests.cjs unreadable (${String(e.message || e).split('\n')[0]}): feature-dir test files are not seen` };
+  }
+}
+
 /** The suite test files (repo-relative) plus the test/tools runners. */
 function candidateFiles(repo) {
   const testDir = path.join(repo, 'test');
@@ -127,7 +176,7 @@ function candidateFiles(repo) {
 }
 
 /** { changed, lanes: {light, heavy, electron, census, tools}, why } for files read by `read`. */
-function relatedSet({ changed, files, read, pkg }) {
+function relatedSet({ changed, files, read, pkg, inventory = { suite: [], perf: [] }, warnings = [] }) {
   const lanes = { light: [], heavy: [], electron: [], census: [], tools: [] };
   const why = {};
   for (const f of files) {
@@ -135,16 +184,18 @@ function relatedSet({ changed, files, read, pkg }) {
     if (text === null) continue;
     const hits = changed.includes(f) ? ['(changed)'] : namedPaths(text, changed);
     if (pkg && changed.includes('package.json') && packageNamed(text, pkg)) hits.push('package.json');
+    if ((INVENTORY_TESTS[f] || []).some((k) => inventory[k].length)) hits.push('(test inventory changed)');
     if (hits.length === 0) continue;
     why[f] = hits;
     lanes[laneOf(f, text)].push(f);
   }
-  return { changed, lanes, why };
+  return { changed, lanes, why, warnings };
 }
 
 function summary(set, base, tip) {
   const l = set.lanes;
-  return `related: ${l.light.length} light, ${l.heavy.length} heavy, ${l.electron.length} electron, ${l.census.length} census, ${l.tools.length} tools for ${set.changed.length} changed files (${base.slice(0, 8)}..${tip.slice(0, 8)})`;
+  const warn = (set.warnings || []).map((w) => `; WARN ${w}`).join('');
+  return `related: ${l.light.length} light, ${l.heavy.length} heavy, ${l.electron.length} electron, ${l.census.length} census, ${l.tools.length} tools for ${set.changed.length} changed files (${base.slice(0, 8)}..${tip.slice(0, 8)})${warn}`;
 }
 
 /** pass/fail counts from node --test output; null when it printed none. */
@@ -251,7 +302,9 @@ function main(argv) {
   const show = (rev) => { try { return git(repo, ['show', `${rev}:package.json`]); } catch { return ''; } };
   const pkg = changed.includes('package.json') ? packageDiff(show(o.base), show(o.tip)) : null;
   const read = (f) => { try { return fs.readFileSync(path.join(repo, f), 'utf8'); } catch { return null; } };
-  const set = relatedSet({ changed, files: candidateFiles(repo), read, pkg });
+  const fd = featureDirsOf(repo);
+  const inventory = inventoryPaths(git(repo, ['diff', '--name-status', '-M', '-z', `${o.base}..${o.tip}`]), fd.dirs);
+  const set = relatedSet({ changed, files: candidateFiles(repo), read, pkg, inventory, warnings: fd.warning ? [fd.warning] : [] });
   const line = summary(set, o.base, o.tip);
   const result = { base: o.base, tip: o.tip, ...set, summary: line };
   if (o.run) Object.assign(result, runLight({ repo, base: o.base, light: set.lanes.light, log: o.json ? () => {} : (s) => console.log(s) }));
@@ -266,7 +319,7 @@ function main(argv) {
   return o.run ? result.rc : 0;
 }
 
-module.exports = { pathPatterns, namesViaDir, namedPaths, parseFailures, sameOnBase, packageDiff, packageNamed, laneOf, candidateFiles, relatedSet, summary, parseCounts, runFile, runLight, main };
+module.exports = { pathPatterns, namesViaDir, namedPaths, parseFailures, sameOnBase, packageDiff, packageNamed, laneOf, INVENTORY_TESTS, collectedPath, perfPath, inventoryPaths, featureDirsOf, candidateFiles, relatedSet, summary, parseCounts, runFile, runLight, main };
 
 if (require.main === module) {
   try { process.exitCode = main(process.argv.slice(2)); } catch (e) { console.error(String(e.message || e)); process.exitCode = 2; }
