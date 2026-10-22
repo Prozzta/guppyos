@@ -448,6 +448,7 @@ test('WIRING: the default 50% cap, migration, Settings row and live apply are co
   assert.match(cfg, /heavyJobsCpuCap\?: boolean;/);
   assert.match(cfg, /heavyJobsBackgroundPriority: false,\s+heavyJobsCpuCap: true,/);
   assert.match(cfg, /migrateHeavyJobsCpuCap/);
+  assert.match(cfg, /next\.heavyJobsHalfCores === true/, 'M7: only an explicit legacy ON may carry into the new default-on cap');
   const ui = read('src/renderer/src/components/SettingsModal.tsx');
   const at = ui.indexOf('Heavy jobs at once\n') >= 0 ? ui.indexOf('Heavy jobs at once\n') : ui.indexOf('Heavy jobs at once\r\n');
   assert.ok(at > 0 && ui.indexOf('Heavy jobs at background priority') > at && ui.indexOf('Heavy jobs CPU cap') > at, 'the two rows follow "Heavy jobs at once"');

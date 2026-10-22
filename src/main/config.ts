@@ -897,12 +897,13 @@ export function readConfig(): HarnessConfig {
 }
 
 /** 1.1.98: processor affinity under-sized neither Node nor other tool runtimes on Windows.
- *  Preserve an explicit old choice on the first read, but retire the old key from all returned
- *  and subsequently written config. A missing old key gets the new 50% cap default. */
+ * Only an old ON is meaningful: the former default was false and writeConfig persisted defaults,
+ * so false cannot distinguish an explicit choice from every upgraded install. Retire the old key;
+ * missing or false therefore gets the Human's new default-on 50% cap. */
 function migrateHeavyJobsCpuCap(parsed: unknown): Record<string, unknown> {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return parsed as Record<string, unknown>;
   const next = { ...(parsed as Record<string, unknown>) };
-  if (!('heavyJobsCpuCap' in next) && typeof next.heavyJobsHalfCores === 'boolean') next.heavyJobsCpuCap = next.heavyJobsHalfCores;
+  if (!('heavyJobsCpuCap' in next) && next.heavyJobsHalfCores === true) next.heavyJobsCpuCap = true;
   delete next.heavyJobsHalfCores;
   return next;
 }

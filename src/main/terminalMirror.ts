@@ -77,25 +77,24 @@ export function mirrorParseMs(): number | null {
 
 /**
  * MIRROR-STARTUP-196: times the real parse. @xterm/headless queues write() and parses in
- * WriteBuffer._innerWrite slices (setTimeout, about 12 ms each), so the CPU time of that one
- * method IS the mirror's main-thread cost. Wall time is deliberately not used: a Windows job's
- * hard CPU cap can suspend this process mid-slice, and that wait is not mirror work. Only the outermost call is timed (it can call itself
+ * WriteBuffer._innerWrite slices (setTimeout, about 12 ms each), so wall time around that
+ * synchronous method is the mirror's main-thread cost. Guppy itself is not run in a capped job;
+ * tests inject this clock when their test process is capped. Only the outermost call is timed (it can call itself
  * directly when a handler resumes). An xterm without the method is reported, never guessed: the
  * guard then cannot blame the mirror for lag (test/mirror-startup-196 pins the method on the
  * installed xterm, so an upgrade that drops it fails there).
  */
-export function timeParse(t: unknown, add: (ms: number) => void): boolean {
+export function timeParse(t: unknown, add: (ms: number) => void, now: () => number = performance.now): boolean {
   const wb = (t as { _core?: { _writeBuffer?: Record<string, unknown> } })?._core?._writeBuffer;
   const inner = wb?._innerWrite;
   if (!wb || typeof inner !== 'function') return false;
   let depth = 0;
   wb._innerWrite = function timed(this: unknown, ...a: unknown[]): unknown {
     if (depth++ > 0) { try { return inner.apply(this, a); } finally { depth--; } }
-    const cpu0 = process.cpuUsage();
+    const t0 = now();
     try { return inner.apply(this, a); } finally {
       depth--;
-      const cpu = process.cpuUsage(cpu0);
-      add((cpu.user + cpu.system) / 1000);
+      add(now() - t0);
     }
   };
   return true;
