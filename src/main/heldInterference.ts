@@ -127,6 +127,13 @@ export class HeldInterferenceWatch {
     }
   }
 
+  /** WAKE-FALSE-INTERFERED-RESTART (2): a hook of this agent arrived (a prompt submitted, a turn
+   *  ended): its holds are looked at on the next tick, not after the per-hold minute. */
+  poke(agentId: string): void {
+    for (const h of this.current) if (h.agentId === agentId) this.lastCheck.set(keyOf(h), Number.NEGATIVE_INFINITY);
+    for (const k of [...this.lastCheck.keys()]) if (k.startsWith(`${agentId}|`)) this.lastCheck.set(k, Number.NEGATIVE_INFINITY);
+  }
+
   /** The holds the Human has been told about, for the floor digest's decisions. */
   noticed(): HeldWake[] {
     return this.current.filter((h) => this.raised.get(h.agentId) === h.requestId);

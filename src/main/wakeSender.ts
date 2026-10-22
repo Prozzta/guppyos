@@ -16,8 +16,11 @@
  *   capacity  admitted before typing; the grant is confirmed at the Enter, cancelled otherwise;
  *   exclusive the owner's one chain for the PTY, then TermControl's slot; the gates again inside;
  *   write     origin PROGRAMMATIC: the human generation must not move during the send at all;
- *   composer  our text on the prompt row, or no Enter (TYPED_NOT_SENT: held for a person, nothing
- *             erased; a boot not in the composer goes to the owner instead, Jim SHOULD 1);
+ *   composer  our text on the prompt row, or no Enter: seen OFF the prompt row = TYPED_NOT_SENT (held
+ *             for a person, nothing erased); seen NOWHERE = re-read for WAKE_TYPED_CONFIRM_MS, then
+ *             the owner's with our text as prior text ('wake-unconfirmed': WAKE-FALSE-INTERFERED-
+ *             RESTART, a mirror unpainted after an app start); a boot not in the composer goes to
+ *             the owner instead, Jim SHOULD 1);
  *   confirm   Claude: the whole nudge in a UserPromptSubmit (Jim MUST 1: the 64-character M3
  *             fingerprint is not a send id); Codex: the sentinel, by-writer (Jim SHOULD 2); AGY: a
  *             PreInvocation, correlated. Nothing is ever retried here.
@@ -53,6 +56,13 @@ export function stopContinueOn(path: WakePath, v: unknown, provider: AgentProvid
   return (v as Record<string, unknown>)[provider] === true;
 }
 
+/** WAKE-FALSE-INTERFERED-RESTART (1): after the write, a reading that shows our text NOWHERE on the
+ *  screen (an unpainted mirror 40 s after an app start, 2026-10-22 12:18:50Z) is UNKNOWN, not "not in
+ *  the composer": it is read again every WAKE_TYPED_CONFIRM_STEP_MS for up to WAKE_TYPED_CONFIRM_MS.
+ *  Still unknown = the owner's, our text named as prior text (the boot rule): never INTERFERED
+ *  without a real screen that shows our text off the prompt row. */
+export const WAKE_TYPED_CONFIRM_MS = 3_000;
+export const WAKE_TYPED_CONFIRM_STEP_MS = 250;
 /** DELIVERED must arrive within this (15.4); AGY's PreInvocation is given longer. */
 export const WAKE_CONFIRM_MS = 10_000;
 export const WAKE_CONFIRM_AGY_MS = 15_000;
@@ -104,7 +114,8 @@ export interface WakeSenderDeps {
   humanGeneration(ptyId: string): number | undefined;
   /** The owner holds this PTY (an INTERFERED wake waits for a person). */
   inhibited(ptyId: string): boolean;
-  mirrorNeedle(ptyId: string, needle: string, expectedTail: string): Promise<{ reading: { onPromptRow: boolean; promptTailMatches?: boolean } | null; reason?: string }>;
+  /** `screenCount`: how often the needle is on the screen at all (0 on an unpainted mirror). */
+  mirrorNeedle(ptyId: string, needle: string, expectedTail: string): Promise<{ reading: { onPromptRow: boolean; promptTailMatches?: boolean; screenCount?: number } | null; reason?: string }>;
   exclusive<T>(ptyId: string, fn: () => Promise<T>, startMs: number): Promise<{ ran: true; value: T } | { ran: false }>;
   slot<T>(agentId: string, fn: () => Promise<T>): Promise<T>;
   settle(ptyId: string): Promise<void>;
@@ -349,23 +360,22 @@ export class WakeSender {
     // Our write is PROGRAMMATIC: ANY move of the human generation is a person's (or god's) key.
     const gen1 = d.humanGeneration(ptyId);
     if (gen0 === undefined || gen1 !== gen0) return this.typedNotSent(req, kind, ptyId, 'HUMAN_TYPED', decision, ready, screen);
-    let onPrompt = false;
-    for (const n of composerNeedles(req.text, needles)) {
-      try {
-        const r = (await d.mirrorNeedle(ptyId, n, req.text)).reading;
-        if (r && (r.onPromptRow || r.promptTailMatches === true)) { onPrompt = true; break; }
-      } catch { /* not evidence */ }
-    }
-    if (!onPrompt) {
+    const typed = await this.confirmTyped(ptyId, req.text, needles, gen0);
+    if (typed === 'HUMAN_TYPED') return this.typedNotSent(req, kind, ptyId, 'HUMAN_TYPED', decision, ready, screen);
+    if (typed !== 'ON_PROMPT') {
       // Jim SHOULD 1: a boot prompt that did not reach the composer, with no person's key, is the
       // owner's (its readiness gate and erase oracle, our text named as prior text).
-      if (kind === 'boot') {
+      // WAKE-FALSE-INTERFERED-RESTART (1): so is ANY wake whose text no reading could place (the
+      // mirror shows it nowhere): there is no screen to hold a person to, so nothing is held.
+      if (kind === 'boot' || typed === 'UNKNOWN') {
         // Our text may be on the screen: every retry of this id is the owner's from now on, so it
         // is never typed a second time here.
+        const why = kind === 'boot' ? 'boot-not-in-composer' : 'wake-unconfirmed';
+        this.cancel(decision);
         const handed = { ...req, priorText: req.text };
         this.handed.set(req.requestId, { req: handed, at: d.now() });
-        this.shadowRow(req.agentId, provider, req.requestId, kind, ready.by, screen, 'OWNER', 'boot-not-in-composer');
-        return this.viaOwner(handed, kind, 'boot-not-in-composer');
+        this.shadowRow(req.agentId, provider, req.requestId, kind, ready.by, screen, 'OWNER', why);
+        return this.viaOwner(handed, kind, why);
       }
       return this.typedNotSent(req, kind, ptyId, 'NOT_IN_COMPOSER', decision, ready, screen);
     }
@@ -375,6 +385,49 @@ export class WakeSender {
     this.row({ kind: 'wake-send', agentId: req.agentId, requestId: req.requestId, wake: kind, provider, outcome: 'COMMITTED', len: req.text.length, gapMs, hook: ready.by });
     this.arm(req.agentId, { requestId: req.requestId, kind, provider, text: req.text, sentAt: d.now(), hook: ready.by, screen, decision: null, done: false });
     return { kind: 'COMMITTED', via: 'term' };
+  }
+
+  /**
+   * WAKE-FALSE-INTERFERED-RESTART (1): where did our typed text land? Three answers, never a guess:
+   *   ON_PROMPT    a reading shows it on the prompt row (or the composer's tail is our text): Enter;
+   *   OFF_PROMPT   a reading shows it on the screen (screenCount >= 1) but NOT on the prompt row:
+   *                the one state a person is held to (NOT_IN_COMPOSER);
+   *   UNKNOWN      no reading, or none that shows our text at all (an unpainted mirror right after a
+   *                restart, a slow echo): read again every WAKE_TYPED_CONFIRM_STEP_MS until
+   *                WAKE_TYPED_CONFIRM_MS is spent; still unknown = the caller hands it to the owner.
+   *   HUMAN_TYPED  the human generation moved while we looked: a person's key, as before. It is
+   *                checked after EVERY reading pass and before any other answer: a key that lands
+   *                while the mirror is still blank, followed by a reading that shows our text on the
+   *                prompt row, is HUMAN_TYPED, never ON_PROMPT (Jim's WFI audit MAJOR 1: the window
+   *                widened from one read to 3 s, so Enter must never follow a person's key).
+   * A reading without `screenCount` (an older mirror) counts as showing the text when it is not on
+   * the prompt row, so that path is exactly the 1.1.97 one. A reading that is null on every needle
+   * (an older mirror that returns nothing) is UNKNOWN: in 1.1.97 it was "not in the composer" and
+   * held as TYPED_NOT_SENT; now it is re-read for the window, then the owner's (wake-unconfirmed).
+   */
+  private async confirmTyped(ptyId: string, text: string, needles: string[], gen0: number | undefined): Promise<'ON_PROMPT' | 'OFF_PROMPT' | 'UNKNOWN' | 'HUMAN_TYPED'> {
+    const d = this.d;
+    const started = d.now();
+    // Bounded by the clock AND by a step count (a clock that stands still never spins here).
+    for (let step = 0; step <= WAKE_TYPED_CONFIRM_MS / WAKE_TYPED_CONFIRM_STEP_MS; step++) {
+      let onPrompt = false;
+      let offPrompt = false;
+      for (const n of composerNeedles(text, needles)) {
+        try {
+          const r = (await d.mirrorNeedle(ptyId, n, text)).reading;
+          if (!r) continue;
+          if (r.onPromptRow || r.promptTailMatches === true) { onPrompt = true; break; }
+          if (r.screenCount === undefined || r.screenCount >= 1) offPrompt = true;
+        } catch { /* not evidence */ }
+      }
+      // A person's key wins over whatever this pass read: checked FIRST, before ON_PROMPT.
+      if (d.humanGeneration(ptyId) !== gen0) return 'HUMAN_TYPED';
+      if (onPrompt) return 'ON_PROMPT';
+      if (offPrompt) return 'OFF_PROMPT';
+      if (d.now() - started >= WAKE_TYPED_CONFIRM_MS) return 'UNKNOWN';
+      await d.sleep(WAKE_TYPED_CONFIRM_STEP_MS);
+    }
+    return 'UNKNOWN';
   }
 
   /** Typed, never Entered: held for a person (Q4: the grant is cancelled and nothing is erased). */

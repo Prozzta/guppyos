@@ -77,7 +77,10 @@ export function planWakeRow(state: WakeRowState, stage: string, fields: Record<s
       if (agent) {
         let seen = state.lastRefusal.get(agent);
         if (!seen) { seen = new Set(); state.lastRefusal.set(agent, seen); }
-        if (seen.has(why)) return fold();
+        // WAKE-FALSE-INTERFERED-RESTART: a DELIVERED message's refusal is always a row (god's
+        // 15:24:40Z request to Creed had none: 'owner-inhibited' was already logged at 14:55Z and no
+        // claim came between). Beat and hook refusals still fold after their first.
+        if (seen.has(why) && fields.cause !== 'delivery') return fold();
         seen.add(why);
       }
       const facts = agent ? state.lastFacts.get(agent) : undefined;

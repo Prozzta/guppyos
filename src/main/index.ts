@@ -815,6 +815,8 @@ function withLivenessEdge(
     if (agentId && event === 'Stop') setImmediate(() => considerCodexLiveRotation(agentId));
     if (agentId && event) hookSeenEvent.set(agentId, event);   // ANDY-PTY-EXIT-2049: the exit record's last hook
     if (event && LIVENESS_EDGE_HOOKS.has(event)) sampleLiveness(agentId);
+    // WAKE-FALSE-INTERFERED-RESTART (2): a submit or a turn end is a held wake's proof of delivery: looked at on the next tick.
+    if (agentId && (event === 'UserPromptSubmit' || event === 'Stop')) heldInterference?.poke(agentId);
   };
 }
 /** GOD-STARTUP-WAITS-ENTER G1/G2: record the boot evidence (SessionStart, UserPromptSubmit); a
@@ -1065,6 +1067,17 @@ const automaticSubmit = new AutomaticSubmitOwner(buildOwnerDeps({
   submittedSince: (ptyId, agentId, since) => (ptyProvider.get(ptyId) === 'claude'
     ? bootHooks.submittedSince(agentId, ptyManager.livenessFacts(ptyId)?.spawnedAt ?? 0, since)
     : undefined),
+  // WAKE-FALSE-INTERFERED-RESTART (2): a held typed wake's proof of delivery. Its ids surfaced or
+  // acted by a hook since the hold (the mail ledger), or a main-session turn ended since it.
+  wakeSurfacedSince: (agentId, ids, since) => {
+    const entries = hive.mail.ledger(agentId).entries;
+    return ids.every((id) => {
+      const e = entries[id];
+      if (!e || (e.state !== 'surfaced' && e.state !== 'acted')) return false;
+      return Math.max(e.surfacedAt ?? 0, e.actedAt ?? 0) >= since;
+    });
+  },
+  turnEndedSince: (agentId, since) => { const t = workerWake.livenessFacts(agentId).lastTurnEndAt; return t > 0 && t >= since; },
   wakeSubmitted: (ptyId, agentId, since, text) => {
     if (ptyProvider.get(ptyId) !== 'codex') return undefined;
     const home = hive.codexHomeFor(agentId);
@@ -2054,9 +2067,10 @@ wakeSender = new WakeSender({
   lastHumanInputAt: (ptyId) => ptyManager.lastHumanInputAt(ptyId),
   humanGeneration: (ptyId) => ptyManager.humanInputGeneration(ptyId),
   inhibited: (ptyId) => automaticSubmit.inhibition(ptyId) !== null,
+  // WAKE-FALSE-INTERFERED-RESTART (1): screenCount too, so "our text nowhere" reads as UNKNOWN.
   mirrorNeedle: async (ptyId, needle, expectedTail) => {
     const r = await ptyManager.mirrorGateReading(ptyId, 'needle', needle, expectedTail);
-    return { reading: r.reading as { onPromptRow: boolean; promptTailMatches?: boolean } | null, reason: r.reason };
+    return { reading: r.reading as { onPromptRow: boolean; promptTailMatches?: boolean; screenCount?: number } | null, reason: r.reason };
   },
   exclusive: (ptyId, fn, startMs) => automaticSubmit.exclusive(ptyId, fn, startMs),
   slot: (agentId, fn) => termControl.slot(agentId, fn),
