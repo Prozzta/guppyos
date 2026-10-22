@@ -60,6 +60,7 @@ function fakes(w) {
     humanGeneration: () => w.gen,
     inhibited: () => w.inhibited(),
     mirrorNeedle: async (_p, needle) => {
+      w.reads = (w.reads ?? 0) + 1;
       if (w.mirror !== 'on') return { reading: null, reason: w.mirror };
       return { reading: { onPromptRow: w.prompt.includes(needle) } };
     },
@@ -217,6 +218,9 @@ test('Q4 TYPED_NOT_SENT: a person\'s key in the gap = INTERFERED, no Enter, gran
   const o = await w.ws.submit(reqFor([ID_A]));
   assert.deepEqual(o, { kind: 'INTERFERED', reason: 'WAKE_TYPED_NOT_SENT', detail: 'HUMAN_TYPED', via: 'term' });
   assert.equal(w.entered, 0, 'never an Enter');
+  // The gap check answers before the confirm look: the pre-type probe is the only mirror read
+  // (WAKE-FALSE-INTERFERED-RESTART widened the look to 3 s; a key already seen never starts it).
+  assert.equal(w.reads, 1, 'a key in the gap is answered before any look at the screen');
   assert.deepEqual(w.grants, [['cancel', 1]]);
   assert.deepEqual(w.holds, [{ ptyId: 'pty-a1', requestId: reqFor([ID_A]).requestId, reason: 'WAKE_TYPED_NOT_SENT', detail: 'HUMAN_TYPED' }]);
   let held = true;
