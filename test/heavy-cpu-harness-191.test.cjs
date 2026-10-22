@@ -81,7 +81,7 @@ runScenario(scenario, { timeoutMs: 90_000 }).then((r) => {
 /** Runs the real hidden App through the shipped helper, inside its named Job Object. */
 async function renderedJob(exe, ask, id, cap, { flip = false } = {}) {
   assert.deepEqual(await ask(`create ${id} 0 ${cap}`), { ok: true });
-  const child = spawn(exe, ['join', id, '0', String(cap), ';', process.execPath, '-e', RECOVERY_CHILD], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(exe, ['join', id, '0', `${cap};`, process.execPath, '-e', RECOVERY_CHILD], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = ''; let err = '';
   child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
   child.stdout.on('data', (data) => { out += data; }); child.stderr.on('data', (data) => { err += data; });
@@ -154,7 +154,7 @@ test('LIVE: sixteen busy threads get about half their available throughput when 
       const run = async (cap) => {
         const id = `rate-${process.pid}-${Date.now().toString(36)}-${cap}`;
         assert.deepEqual(await ask(`create ${id} 0 ${cap}`), { ok: true });
-        const child = spawn(exe, ['join', id, '0', String(cap), ';', process.execPath, '-e', busy], { encoding: 'utf8', windowsHide: true });
+        const child = spawn(exe, ['join', id, '0', `${cap};`, process.execPath, '-e', busy], { encoding: 'utf8', windowsHide: true });
         let out = ''; child.stdout.on('data', (d) => { out += d; });
         await new Promise((resolve) => child.once('exit', resolve));
         assert.deepEqual(await ask(`close ${id}`), { ok: true });
