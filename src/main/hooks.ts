@@ -2004,7 +2004,9 @@ export class HookServer {
         const path = abs.replace(/^\/([A-Za-z])\//, (_m, d: string) => `${d.toUpperCase()}:/`);
         try {
           const st = statSync(path);
-          return st.isFile() ? { size: st.size, text: () => readFileSync(path, 'utf8') } : null;
+          if (st.isFile()) return { size: st.size, text: () => readFileSync(path, 'utf8') };
+          // HEAVY-LOCK-VARPATH-READ: a directory is reported as one (not a program), not as missing.
+          return st.isDirectory() ? { size: 0, text: () => '', dir: true } : null;
         } catch { return null; }
       }),
       env: HookServer.heavyEnv(),
