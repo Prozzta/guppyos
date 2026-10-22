@@ -180,6 +180,7 @@ import { owesWork } from './mailLedger';
 import { HeldInterferenceWatch, HELD_TICK_MS, heldWakesOf } from './heldInterference';
 import { findSilentTurns, type SilentTurnFacts } from './silentTurn';
 import { QuietRefusalWatch } from './quietRefusalWatch';
+import { RefusedSettleWatch } from './refusedSettleWatch';
 import type { SilentTurnView } from '../shared/agentBadges';
 import { CodexRolloutLifecycleSource, threadSettingsAppliedSince } from './codexRolloutLifecycle';
 import { CodexRolloutCapacitySource, codexUserMessageMatches } from './codexRolloutCapacity';
@@ -546,10 +547,20 @@ const boardStatus = new BoardStatusWriter({
   root: () => hive.root(),
   tasks: () => hive.tasks(),
   taskMeta: () => hive.ledgerGuard.taskMeta().cards,
-  flags: () => boardMonitor.flags()
+  // WAKE-STUCK-REFUSAL-ESCALATE: plus the runs of identical refused wakes (kind wake-refusal-stuck).
+  flags: () => [...boardMonitor.flags(), ...refusedSettles.flags(Date.now(), agentDisplayName, refusedLive)]
 });
 /** WAKE-STALL-INTERFERED-192: wakes refused in a row because the terminal never went quiet. */
 const quietRefusals = new QuietRefusalWatch((row) => { try { hive.appendLog(row); } catch { /* logging only */ } });
+/** WAKE-STUCK-REFUSAL-ESCALATE: identical refused settles in a row on one terminal incarnation, with
+ *  mail waiting (a stale header or popup the reconcile re-asks for ever). Rows go to the log
+ *  directly, so breadcrumb folding cannot swallow them. Observation only. */
+const refusedSettles = new RefusedSettleWatch((row) => { try { hive.appendLog(row); } catch { /* logging only */ } });
+/** Jim SHOULD1: a run clears at read time once the mail is gone or the PTY is another incarnation. */
+const refusedLive = {
+  pending: (agentId: string) => mailPendingIds(agentId).length,
+  incarnation: (agentId: string) => { const p = ptyForAgent(agentId); return p ? ptyManager.incarnation(p) : undefined; }
+};
 /** MIRROR-STARTUP-196: the armed mirror cost guard (null before arming, or with the mirror off by
  *  config). Declared before the digest, which reads it. */
 let mirrorGuard: MirrorCostGuard | null = null;
@@ -562,7 +573,7 @@ const floorDigest = new FloorDigest({
   root: () => hive.root(),
   tasks: () => hive.tasks(),
   taskMeta: () => hive.ledgerGuard.taskMeta().cards,
-  flags: () => boardMonitor.flags(),
+  flags: () => [...boardMonitor.flags(), ...refusedSettles.flags(Date.now(), agentDisplayName, refusedLive)],
   ledgerIssues: () => hive.ledgerGuard.issues(),
   // DWIGHT-HELD-INTERFERED fix 2: a held wake the Human was told about is a decision for god.
   heldWakes: () => (heldInterference?.noticed() ?? []).map((h) => ({ agentId: h.agentId, name: agentDisplayName(h.agentId), messages: h.messages, since: h.since })),
@@ -570,6 +581,7 @@ const floorDigest = new FloorDigest({
   silentTurns: () => findSilentTurns(silentTurnFacts(), Date.now()),
   quietStalls: () => quietRefusals.stalls().map((q) => ({ ...q, name: agentDisplayName(q.agentId) })),
   wakeStalls: () => wakeStalls.stalls().map((s) => ({ ...s, name: agentDisplayName(s.agentId) })),
+  refusedSettles: () => refusedSettles.stalls(refusedLive).map((s) => ({ ...s, name: agentDisplayName(s.agentId) })),
   // GTC M3: the Human's message-box items that need a look (never retried by the box).
   messageBox: () => (messageBox?.attentionItems() ?? []).map((m) => ({ ...m, name: agentDisplayName(m.agentId) })),
   // RULE-FIX-HOOK-NO-MODEL: model-invoking hooks in files Guppy does not own (warn only).
@@ -1064,6 +1076,8 @@ const automaticSubmit = new AutomaticSubmitOwner(buildOwnerDeps({
     // An outcome can raise an INTERFERED hold or settle one: the impact string moves.
     pushAgentImpact();
     quietRefusals.outcome(r.agentId, r.outcome, r.at);
+    // WAKE-STUCK-REFUSAL-ESCALATE: counted here, before the breadcrumb folds the diag rows.
+    refusedSettles.outcome({ agentId: r.agentId, incarnation: r.incarnation, outcome: r.outcome, at: r.at, requestId: r.requestId, inboxIds: mailPendingIds(r.agentId).length });
     if (r.outcome.kind === 'COMMITTED') {
       if (r.admissionClass === 'BOOT_SEQUENCE') {
         console.log(`[boot-sequence] ${r.agentId} on ${r.ptyId ?? '-'}: COMMITTED`);
@@ -2186,6 +2200,8 @@ function teardownPty(id: string, archiveReason: ArchiveReason = 'explicit'): voi
     if (leftProvider === 'antigravity' && ![...ptyToAgent.values()].includes(agentId)) {
       try { hive.removeAgyAgent(agentId); } catch (e) { console.error('[hive] removeAgyAgent failed:', e); }
     }
+    // WAKE-STUCK-REFUSAL-ESCALATE (Jim SHOULD1): its refused-wake run, if any, ends with the PTY.
+    try { refusedSettles.forget(agentId); } catch { /* best-effort */ }
     // Drop watchdog state so a dead agent can't get nudged or leak its grace.
     try { workerWake.forget(agentId, id); } catch { /* best-effort */ }
     try { forgetWakeRows(wakeRows, agentId); } catch { /* best-effort */ }

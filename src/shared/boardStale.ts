@@ -15,7 +15,9 @@ import { parseVersion } from './updateState';
 
 export type FlagKind =
   | 'ASSIGNEE_ARCHIVED' | 'ASSIGNEE_UNKNOWN' | 'ASSIGNEE_DOWN' | 'ASSIGNEE_STUCK'
-  | 'STALE' | 'DOING_MANY' | 'ASK_ANSWERED_IDLE' | 'SHIPPED_INSTALLED';
+  | 'STALE' | 'DOING_MANY' | 'ASK_ANSWERED_IDLE' | 'SHIPPED_INSTALLED'
+  // WAKE-STUCK-REFUSAL-ESCALATE: a run of identical refused wakes (refusedSettleWatch.ts; cardId '-').
+  | 'wake-refusal-stuck';
 
 export interface BoardFlag {
   cardId: string;
