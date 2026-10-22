@@ -576,7 +576,7 @@ const floorDigest = new FloorDigest({
   flags: () => [...boardMonitor.flags(), ...refusedSettles.flags(Date.now(), agentDisplayName, refusedLive)],
   ledgerIssues: () => hive.ledgerGuard.issues(),
   // DWIGHT-HELD-INTERFERED fix 2: a held wake the Human was told about is a decision for god.
-  heldWakes: () => (heldInterference?.noticed() ?? []).map((h) => ({ agentId: h.agentId, name: agentDisplayName(h.agentId), messages: h.messages, since: h.since })),
+  heldWakes: () => (heldInterference?.noticed() ?? []).map((h) => ({ agentId: h.agentId, name: agentDisplayName(h.agentId), messages: h.messages, since: h.since, requestId: h.requestId })),
   // FLEET-LIVENESS-BLIND: shown working with no hook or tool call (silentTurn.ts; alert only).
   silentTurns: () => findSilentTurns(silentTurnFacts(), Date.now()),
   quietStalls: () => quietRefusals.stalls().map((q) => ({ ...q, name: agentDisplayName(q.agentId) })),
@@ -1887,6 +1887,12 @@ const termControl = new TermControl({
   outputGeneration: (ptyId) => ptyManager.outputGeneration(ptyId),
   log: (row) => hive.appendLog(row),
   floorHold: { get: () => parseFloorHold(readConfig().floorHold), set: (h) => { writeConfig({ floorHold: h }); } },
+  heldOf: (agentId) => {
+    const p = ptyForAgent(agentId);
+    const h = p ? automaticSubmit.inhibition(p) : null;
+    return h ? { requestId: h.requestId, reason: h.reason, since: h.at } : null;
+  },
+  resolveHeld: (agentId, how) => resolveHeldInterference(agentId, how),
   now: Date.now,
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 });
@@ -6870,6 +6876,12 @@ ipcMain.on('autoSubmit:bootSubmitThrew', (_evt, agentId: unknown, message: unkno
 ipcMain.handle('autoSubmit:resolveInterference', (_evt, agentId: unknown, how: unknown) => {
   if (typeof agentId !== 'string' || !agentId) return false;
   if (typeof how !== 'string' || !(INTERFERENCE_RESOLUTIONS as readonly string[]).includes(how)) return false;
+  return resolveHeldInterference(agentId, how as InterferenceResolution);
+});
+
+/** The one ruling path: the Human's click above and god's `term rule` (GOD-TERMINAL-CONTROL:
+ *  only the UI could clear a held-interfered latch, so Creed sat `owner-inhibited` for 80 min). */
+function resolveHeldInterference(agentId: string, how: InterferenceResolution): boolean {
   const ptyId = ptyForAgent(agentId);
   const resolved = ptyId ? automaticSubmit.resolveInterference(ptyId, how as InterferenceResolution) : false;
   pushAgentImpact();
@@ -6877,7 +6889,7 @@ ipcMain.handle('autoSubmit:resolveInterference', (_evt, agentId: unknown, how: u
   // resolves the ids with no further submit.
   if (resolved) inboxWake?.onInterferenceResolved(agentId, how as InterferenceResolution);
   return resolved;
-});
+}
 
 // ─── IPC: scheduled missions (recurring auto-dispatch) ──────────────────────
 ipcMain.handle('missions:list', () => readConfig().missions ?? []);

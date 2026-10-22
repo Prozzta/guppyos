@@ -36,8 +36,13 @@ export const TERM_AFTER_READ_MS = 400;
 export const TERM_LOG_TEXT_MAX = 4 * 1024;
 export const TERM_LOG_TAIL_ROWS = 12;
 
-export type TermAction = 'read' | 'type' | 'keys' | 'send';
-const ACTIONS: readonly TermAction[] = ['read', 'type', 'keys', 'send'];
+export type TermAction = 'read' | 'type' | 'keys' | 'send' | 'rule';
+const ACTIONS: readonly TermAction[] = ['read', 'type', 'keys', 'send', 'rule'];
+
+/** A held-interfered latch as god sees it (the owner's inhibition on the agent's PTY). */
+export interface TermHeld { requestId: string; reason: string; since: number }
+export type TermRuling = 'SEND_AGAIN' | 'ALREADY_HANDLED';
+const RULINGS: readonly TermRuling[] = ['SEND_AGAIN', 'ALREADY_HANDLED'];
 
 export interface TermDeps {
   /** The registry's god id NOW (null: no god registered). */
@@ -54,6 +59,10 @@ export interface TermDeps {
   log(row: Record<string, unknown>): void;
   /** HIVE-DWIGHT-BG-REINVOKE: the persisted floor hold (floorHold.ts); absent = `term hold` refused. */
   floorHold?: { get(): FloorHold | null; set(h: FloorHold | null): void };
+  /** GTC: the agent's held-interfered latch, or null. Absent = `term rule` refused. */
+  heldOf?(agentId: string): TermHeld | null;
+  /** GTC: the Human's ruling path (autoSubmit:resolveInterference); true = a hold was resolved. */
+  resolveHeld?(agentId: string, how: TermRuling): boolean;
   now(): number;
   sleep(ms: number): Promise<void>;
 }
@@ -190,18 +199,58 @@ export class TermControl {
     try { this.deps.log({ kind: 'term', ...row }); } catch { /* logging never changes an outcome */ }
   }
 
+  /** The latch, or null; a failing lookup reads as none (it only informs). */
+  private held(agent: string): TermHeld | null {
+    try { return this.deps.heldOf?.(agent) ?? null; } catch { return null; }
+  }
+
+  private heldWords(agent: string, h: TermHeld): string {
+    return `HELD since ${Math.round((this.deps.now() - h.since) / 60_000)} min (${h.reason}, ${h.requestId}): wakes are refused until a ruling - term rule ${agent} send-again|already-handled --id ${h.requestId}`;
+  }
+
+  /** GTC: god rules on a held-interfered latch, as the Human's click does: the same call, the same
+   *  two answers and no default. It types nothing; SEND_AGAIN re-admits the ids through every guard.
+   *  GTC-ID: the ruling is BOUND to the hold god read: `id` (the requestId `term read` printed) is
+   *  required, and a hold that is not that one (a newer wake replaced it) is refused 409 naming the
+   *  hold that is there now. The compare and the resolve run back to back inside the agent's slot
+   *  (handle() -> slot -> run), so no other term request can swap the hold between them. */
+  private rule(by: string, agent: string, b: Record<string, unknown>): TermReply {
+    const how = typeof b.how === 'string' && (RULINGS as readonly string[]).includes(b.how) ? b.how as TermRuling : null;
+    const id = typeof b.id === 'string' && b.id.trim() ? b.id.trim() : null;
+    const no = (status: number, error: string, extra: Record<string, unknown> = {}): TermReply => {
+      this.logRow({ by, agent, action: 'rule', how: how ?? b.how ?? null, id, ...extra, ok: false, error });
+      return { status, body: { ok: false, line: `refused: ${error}` } };
+    };
+    if (!this.deps.resolveHeld || !this.deps.heldOf) return no(503, 'rule: this app cannot rule on a hold');
+    if (!how) return no(400, 'rule: say how - send-again (not handled: it is delivered again through every guard) or already-handled (never typed again); there is no default');
+    if (!id) return no(400, `rule: --id <requestId> is required (term read ${agent} prints it): a ruling is on the hold you read, never on whatever is held now`);
+    const h = this.held(agent);
+    if (!h) return no(409, `${agent} has nothing held (no ruling to make)`);
+    if (h.requestId !== id) return no(409, `the hold on ${agent} is now ${h.requestId}; read it again`, { requestId: h.requestId, reason: h.reason });
+    const facts = { requestId: h.requestId, reason: h.reason, heldMs: this.deps.now() - h.since };
+    if (!this.deps.resolveHeld(agent, how)) {
+      const now = this.held(agent);
+      return no(409, `the hold on ${agent} is now ${now?.requestId ?? 'gone'}; read it again`, facts);
+    }
+    this.logRow({ by, agent, action: 'rule', how, id, ...facts, ok: true });
+    return { status: 200, body: { ok: true, line: `${agent}: ruled ${how} on ${h.requestId} (${h.reason}, held ${Math.round(facts.heldMs / 60_000)} min)${how === 'SEND_AGAIN' ? ': it is delivered again through every guard' : ': it is never typed again'}` } };
+  }
+
   private async run(by: string, agent: string, ptyId: string, action: TermAction, b: Record<string, unknown>): Promise<TermReply> {
     const provider = this.deps.providerOf(agent);
+    if (action === 'rule') return this.rule(by, agent, b);
     if (action === 'read') {
       const rows = Number.isInteger(b.rows) && (b.rows as number) > 0 ? Math.min(b.rows as number, TERM_ROWS_MAX) : undefined;
       const r = await this.deps.readScreen(ptyId, rows);
+      const h = this.held(agent);
+      const heldLine = h ? `\n${this.heldWords(agent, h)}` : '';
       if (!r) {
         const off = (() => { try { return this.deps.mirrorOff?.() ?? null; } catch { return null; } })();
-        this.logRow({ by, agent, action, ok: false, error: 'no screen mirror' });
-        return { status: 503, body: { ok: false, line: `refused: no screen mirror for ${agent} (${off ?? 'the mirror is off or failed'})` } };
+        this.logRow({ by, agent, action, ok: false, error: 'no screen mirror', ...(h ? { held: h.requestId } : {}) });
+        return { status: 503, body: { ok: false, line: `refused: no screen mirror for ${agent} (${off ?? 'the mirror is off or failed'})${heldLine}` } };
       }
-      this.logRow({ by, agent, action, ok: true, rows: r.lines.length, mode2004: r.bracketedPaste });
-      return { status: 200, body: { ok: true, line: `${agent}: ${header(r)}`, header: header(r), screen: r.lines } };
+      this.logRow({ by, agent, action, ok: true, rows: r.lines.length, mode2004: r.bracketedPaste, ...(h ? { held: h.requestId } : {}) });
+      return { status: 200, body: { ok: true, line: `${agent}: ${header(r)}${heldLine}`, header: header(r), screen: r.lines } };
     }
 
     let writes: Array<{ data: string; gapBeforeMs: number }>;

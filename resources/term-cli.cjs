@@ -10,6 +10,9 @@
  *   term keys <agent> <key> [<key>...]     enter esc tab shift-tab backspace space ctrl-c ctrl-d
  *                                          ctrl-l ctrl-u up down left right home end pgup pgdn y n 0-9
  *   term hold on [reason] | term hold off  the floor hold (a Human pause): no owed-work continuations
+ *   term rule <agent> send-again|already-handled --id <requestId>
+ *                                          rule on a held-interfered latch (term read shows it), as
+ *                                          the Human's message box does; it types nothing
  *
  * Text is NEVER taken from arguments: a shell string gets its backticks and $(...) executed
  * (MSG-COMPOSE-SHELL-INJECTION). The one exception is the `hold on` reason, a short label god
@@ -29,7 +32,8 @@ const EXIT = { ok: 0, refused: 1, usage: 2, unavailable: 3, timeout: 4 };
 const REQUEST_TIMEOUT_MS = 60000;
 const INPUT_MAX = 16 * 1024;
 const ROWS_MAX = 200;
-const USAGE = 'usage: term read <agent> [--rows N] | term type|send <agent> [--raw] [--file <path>] (text on stdin) | term keys <agent> <key>... | term hold on [reason] | term hold off\n';
+const USAGE = 'usage: term read <agent> [--rows N] | term type|send <agent> [--raw] [--file <path>] (text on stdin) | term keys <agent> <key>... | term hold on [reason] | term hold off | term rule <agent> send-again|already-handled --id <requestId>\n';
+const RULINGS = { 'send-again': 'SEND_AGAIN', 'already-handled': 'ALREADY_HANDLED' };
 
 /** The request body, or throws with the reason. `needsText` = the text still has to be read. */
 function parseArgs(argv) {
@@ -41,8 +45,17 @@ function parseArgs(argv) {
     if (agent === 'on') return { body: { action, state: 'on', reason: rest.join(' ') } };
     throw new Error('hold: on [reason] or off');
   }
-  if (!['read', 'type', 'send', 'keys'].includes(action)) throw new Error('the first argument is read, type, send, keys or hold');
+  if (!['read', 'type', 'send', 'keys', 'rule'].includes(action)) throw new Error('the first argument is read, type, send, keys, hold or rule');
   if (!agent || agent.startsWith('-')) throw new Error('an agent id is required');
+  if (action === 'rule') {
+    // No default: a bare `term rule <agent>` is refused, as the message box refuses a bare "resolved".
+    // GTC-ID: --id <requestId> (what `term read` printed) is required: god rules on the hold it
+    // read, never on whatever is held by the time the command lands (the app answers 409 then).
+    const how = rest.length > 0 && Object.prototype.hasOwnProperty.call(RULINGS, rest[0]) ? RULINGS[rest[0]] : null;
+    if (!how) throw new Error('rule: send-again or already-handled (there is no default)');
+    if (rest.length !== 3 || rest[1] !== '--id' || !rest[2] || rest[2].startsWith('-')) throw new Error('rule: --id <requestId> is required (term read <agent> prints it)');
+    return { body: { action, agent, how, id: rest[2] } };
+  }
   if (action === 'keys') {
     if (rest.length === 0) throw new Error('keys: name at least one key');
     return { body: { action, agent, keys: rest } };

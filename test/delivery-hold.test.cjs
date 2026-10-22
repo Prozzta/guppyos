@@ -357,7 +357,14 @@ test('main: the snapshot REPORTS the owner’s inhibition, and only a dedicated 
   assert.ok(factsAt > 0);
   assert.match(facts, /automaticSubmit\.inhibition\(heldPty\)/, 'read from the ONE owner, not kept anywhere else');
   assert.ok(!/resolveInterference/.test(snapshot + facts), 'a read of the state never resolves it');
-  const resolve = handlerBody(index, 'autoSubmit:resolveInterference');
+  // GOD-TERMINAL-CONTROL: the handler passes the answer to resolveHeldInterference, the ONE ruling
+  // function it shares with god's `term rule` (a god command, never a timer).
+  const handler = handlerBody(index, 'autoSubmit:resolveInterference');
+  assert.match(handler, /return resolveHeldInterference\(agentId, how as InterferenceResolution\);$/, 'the handler delegates the person\u2019s answer');
+  const fnAt = index.indexOf('function resolveHeldInterference(');
+  const resolve = handler + index.slice(fnAt, index.indexOf('\n}\n', fnAt));
+  assert.equal(index.split('resolveHeldInterference(').length - 1, 3, 'the function, the click\u2019s handler and the term ruling dep: no other caller');
+  assert.match(index, /resolveHeld: \(agentId, how\) => resolveHeldInterference\(agentId, how\),/, 'the third is god\u2019s term rule');
   assert.match(resolve, /automaticSubmit\.resolveInterference\(ptyId, how as InterferenceResolution\)/, 'the person\u2019s answer is passed through');
   assert.match(resolve, /if \(typeof how !== 'string' \|\| !\(INTERFERENCE_RESOLUTIONS as readonly string\[\]\)\.includes\(how\)\) return false;/,
     'THERE IS NO DEFAULT: a call that does not name one of the two resolutions is refused before the owner is touched');
