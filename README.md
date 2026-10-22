@@ -25,7 +25,7 @@ and unattended.
 
 <p>
   <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-F4D35E.svg?style=flat-square&labelColor=6E1423"></a>
-  <img alt="Version: 1.1.98" src="https://img.shields.io/badge/version-1.1.98-F4D35E.svg?style=flat-square&labelColor=6E1423">
+  <img alt="Version: 1.1.99" src="https://img.shields.io/badge/version-1.1.99-F4D35E.svg?style=flat-square&labelColor=6E1423">
   <img alt="Fork of chaitanyagiri/munder-difflin" src="https://img.shields.io/badge/fork%20of-chaitanyagiri%2Fmunder--difflin-F4F1EA.svg?style=flat-square&labelColor=6E1423">
 </p>
 
@@ -303,10 +303,14 @@ wholesale merges. The shape of the line, as evidence for the three ideas above:
   box sends straight into the agent's terminal once its own hooks say it is idle, and agent wakes
   can do the same (opt-in); test runs start without a load burst, and installers no longer carry
   native build leftovers.
-- **Mail that arrives, a fair heavy queue, honest costs** (1.1.98, the current release) — agent
+- **Mail that arrives, a fair heavy queue, honest costs** (1.1.98) — agent
   wakes are no longer typed and left unsent or held behind a stale "loading" label, heavy jobs take
   turns in a queue that frees at once, wrong cost figures are corrected, the network listeners
   stay on this PC, and a stall watcher records every app freeze.
+- **A smoother window, floors that know their tools** (1.1.99, the current release) — saving
+  agent activity no longer freezes the window, a new floor ships with the floor tools written down,
+  god can settle a typed-over wake without you, agents are no longer wrongly shown as typed over,
+  Codex session files stay small, and quiet mail waits until it matters.
 
 Every milestone carries a dated human acceptance and evidence tag in the fork's
 internal mission ledger; this README keeps only the shape.

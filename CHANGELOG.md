@@ -11,7 +11,46 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/guppyos/releases).
 
-## [1.1.98] — 2026-10-22
+## [1.1.99] — 2026-10-22
+
+**The window stays smooth while agents work, a new floor knows its tools, and fewer wakes get stuck.**
+Rollback: 1.1.98 (reinstall).
+
+### Added
+
+- **A new floor knows the floor tools (NEW-FLOOR-KNOWHOW).** The per-agent compaction window, the
+  claims ledger, the fleet settings and the floor commands are now written into what Guppy ships
+  (the protocol, the command list and the coordinator's start-up notes), so a fresh floor no longer
+  depends on what older agents happen to remember.
+- **God can settle a typed-over wake (GTC term rule).** When an agent is held because a wake may
+  have been typed over, the coordinating agent can now rule "send again" or "already handled" from
+  the terminal, instead of the agent waiting until you click. The ruling names the exact hold it
+  answers, so it cannot settle a newer one by mistake.
+- **A test run started by a Codex agent cannot be started twice.** The related-tests runner keeps a
+  status file and refuses a second copy while the first is alive, and Codex agents are told that
+  their 30-second command limit does not mean the run was killed.
+
+### Changed
+
+- **Saving agent activity no longer freezes the window (UI-CRAWL).** The activity and capacity
+  records are written in the background instead of on the window's own thread, and closing the app
+  still saves the latest copy.
+- **Quiet mail waits until it matters (QUIET-HOLD-ACT).** Only unsolicited notes are held back; a
+  reply someone asked for, or a message that relays your words, wakes the agent at once.
+- **Codex session files stay small (CODEX-ROLLOUT-SIZE).** A long Codex session's log file is rotated
+  safely instead of growing past 100 MB, which also stops the antivirus rescanning it on every
+  line.
+
+### Fixed
+
+- **Agents wrongly shown as typed over.** A wake sent right after the app starts is no longer judged
+  typed over when there was no screen to look at, the hold clears once the mail is delivered, and a
+  key you press always wins over the app's own check.
+- **Read-only log scans no longer wait behind a heavy job.** A path held in a shell variable, or a
+  plain folder, is no longer mistaken for a program that needs the heavy slot.
+- **Test runs leave no PowerShell files behind.** PowerShell started by a test gets a temp folder of
+  its own, and folders left by a killed run are cleaned up later.
+
 
 **Agent mail arrives without anyone typing, heavy jobs share the machine fairly, and cost figures are right.**
 Rollback: 1.1.97 (reinstall).
