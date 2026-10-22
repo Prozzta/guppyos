@@ -77,6 +77,18 @@ const pick = (c: Record<string, number>) => ({
   total: Object.values(c).reduce((a, b) => a + b, 0)
 });
 
+/** The harness starts App and its bridge asynchronously. Wait for that work to quiesce before
+ * starting a render census: under a Job Object hard cap, a render scheduled before the census can
+ * otherwise land after resetRenderCounts() and be falsely charged to the first tick. */
+async function settleRenderCensus(): Promise<void> {
+  for (let i = 0; i < 20; i += 1) {
+    resetRenderCounts();
+    await settle(50);
+    if (Object.keys(renderCounts()).length === 0) return;
+  }
+  throw new Error(`render census never settled: ${JSON.stringify(renderCounts())}`);
+}
+
 function selectorPins() {
   const s = (agents: Agent[]) => ({ ...useStore.getState(), agents });
   const base = [mk('god', { isGod: true }), mk('a1'), mk('a2')];
@@ -114,6 +126,7 @@ window.__harnessRun = async () => {
     const floorMounted = !!host.querySelector('canvas');
 
     // A. ticks on a non-selected agent.
+    await settleRenderCensus();
     resetRenderCounts();
     await tick('a2');
     const a = renderCounts();

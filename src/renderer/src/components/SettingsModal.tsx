@@ -240,23 +240,20 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
     try { await window.cth.updateConfig({ heavyJobsAtOnce: next } as Partial<HarnessConfig>); }
     catch { setHeavyAtOnce(prev); }
   };
-  // HEAVY-CPU-OPTIONS-191 (Windows): two independent options for every heavy job, applied live by
-  // main to the jobs already running too. Half = floor(n/2) logical processors, at least 1.
+  // HALFCORES-OVERSUBSCRIBE (Windows): both options apply live to every running heavy job.
   const [heavyBackground, setHeavyBackground] = useState<boolean>(cfgX.heavyJobsBackgroundPriority === true);
-  const [heavyHalf, setHeavyHalf] = useState<boolean>(cfgX.heavyJobsHalfCores === true);
-  const logicalCpus = Math.max(1, navigator.hardwareConcurrency || 1);
-  const halfCpus = Math.max(1, Math.floor(logicalCpus / 2));
+  const [heavyCpuCap, setHeavyCpuCap] = useState<boolean>(cfgX.heavyJobsCpuCap !== false);
   const toggleHeavyBackground = async () => {
     const next = !heavyBackground;
     setHeavyBackground(next);
     try { await window.cth.updateConfig({ heavyJobsBackgroundPriority: next } as Partial<HarnessConfig>); }
     catch { setHeavyBackground(!next); }
   };
-  const toggleHeavyHalf = async () => {
-    const next = !heavyHalf;
-    setHeavyHalf(next);
-    try { await window.cth.updateConfig({ heavyJobsHalfCores: next } as Partial<HarnessConfig>); }
-    catch { setHeavyHalf(!next); }
+  const toggleHeavyCpuCap = async () => {
+    const next = !heavyCpuCap;
+    setHeavyCpuCap(next);
+    try { await window.cth.updateConfig({ heavyJobsCpuCap: next } as Partial<HarnessConfig>); }
+    catch { setHeavyCpuCap(!next); }
   };
   // MODEL-DEFAULT-CLI: unset = "CLI default" (no --model); that entry is shown
   // selected, and picking it clears defaultModel (undefined crosses the IPC, and
@@ -1281,16 +1278,16 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
                           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
                             <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                               <span style={{ fontSize: 13, lineHeight: '20px', color: 'var(--cth-ink-900)' }}>
-                                Heavy jobs on half the processors
+                                Heavy jobs CPU cap
                               </span>
                               <span style={{ fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-500)' }}>
-                                {heavyHalf
-                                  ? `Every heavy job runs on ${halfCpus} of this PC's ${logicalCpus} logical processors; the rest stay free for you. Applies at once, to running jobs too. They are always the lowest-numbered ${halfCpus}, so on a CPU with two threads per core that can be fewer than ${halfCpus} physical cores.`
-                                  : `Heavy jobs may use all ${logicalCpus} logical processors.`}
+                                {heavyCpuCap
+                                  ? 'Every heavy job is hard-capped at 50% of this PC\'s total CPU. All processors remain available, and the cap applies at once to running jobs too.'
+                                  : 'Heavy jobs may use 100% of this PC\'s total CPU.'}
                               </span>
                             </div>
-                            <PixelButton title="Heavy jobs on half the processors" variant={heavyHalf ? 'primary' : 'secondary'} size="sm" onClick={() => { void toggleHeavyHalf(); }}>
-                              {heavyHalf ? 'on' : 'off'}
+                            <PixelButton title="Heavy jobs CPU cap" variant={heavyCpuCap ? 'primary' : 'secondary'} size="sm" onClick={() => { void toggleHeavyCpuCap(); }}>
+                              {heavyCpuCap ? 'on' : 'off'}
                             </PixelButton>
                           </div>
                           <span style={{ fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-500)' }}>

@@ -284,7 +284,7 @@ wholesale merges. The shape of the line, as evidence for the three ideas above:
   on the capacity bar.
 - **Guppy keeps its hands off your draft** (1.1.91) — automatic typing
   goes only into an empty prompt it recognises, a stalled wake is brought to the floor, heavy
-  jobs can run at background priority or on half the processors, and Antigravity wakes are
+  jobs can run at background priority or under a hard CPU cap, and Antigravity wakes are
   confirmed.
 - **Wakes reach Claude agents again** (1.1.92) — a hotfix: the prompt
   check recognises Guppy's own context line under the Claude prompt, so messages are delivered.

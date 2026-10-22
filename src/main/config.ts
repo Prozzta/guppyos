@@ -242,9 +242,9 @@ export interface HarnessConfig {
    *  run every heavy job at background CPU priority (BELOW_NORMAL), every process of it. Independent
    *  of the limit above (Off included). Default off. Applied live, to running jobs too. */
   heavyJobsBackgroundPriority?: boolean;
-  /** HEAVY-CPU-OPTIONS-191, Windows: limit every heavy job to half the logical processors
-   *  (floor(n/2), at least 1). Independent of the other two. Default off. Applied live. */
-  heavyJobsHalfCores?: boolean;
+  /** HALFCORES-OVERSUBSCRIBE, Windows: hard-cap every heavy job at 50% of the whole
+   *  machine's CPU rate (all processors remain visible). Default on. Applied live. */
+  heavyJobsCpuCap?: boolean;
   /** CODEX-BLOAT-165 fix 2 (Settings → Agents & Models, "Codex tool output cap"): the
    *  `tool_output_token_limit` written into each hive Codex agent's OWN config.toml, in Codex's
    *  estimated tokens (1000-10000), or 'off' (no key written). Default 4000. Never written to the
@@ -565,7 +565,7 @@ const DEFAULTS: HarnessConfig = {
   orchestratorMaySpawn: false,
   heavyJobsAtOnce: 1,
   heavyJobsBackgroundPriority: false,
-  heavyJobsHalfCores: false,
+  heavyJobsCpuCap: true,
   codexToolOutputTokenLimit: CODEX_TOOL_OUTPUT_LIMIT_DEFAULT,
   codexInheritPlugins: false,
   defaultCommand: 'claude',
@@ -881,7 +881,7 @@ export function readConfig(): HarnessConfig {
   let raw: string | undefined;
   try {
     raw = readFileSync(p, 'utf8');
-    const parsed = JSON.parse(raw);
+    const parsed = migrateHeavyJobsCpuCap(JSON.parse(raw));
     for (const k of RETIRED_CONFIG_KEYS) delete parsed[k];
     configIntegrity = null;
     configCorruptFingerprint = null;
@@ -894,6 +894,17 @@ export function readConfig(): HarnessConfig {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return configDefaults();
     throw new Error(`config.json could not be read: ${error instanceof Error ? error.message : String(error)}`);
   }
+}
+
+/** 1.1.98: processor affinity under-sized neither Node nor other tool runtimes on Windows.
+ *  Preserve an explicit old choice on the first read, but retire the old key from all returned
+ *  and subsequently written config. A missing old key gets the new 50% cap default. */
+function migrateHeavyJobsCpuCap(parsed: unknown): Record<string, unknown> {
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return parsed as Record<string, unknown>;
+  const next = { ...(parsed as Record<string, unknown>) };
+  if (!('heavyJobsCpuCap' in next) && typeof next.heavyJobsHalfCores === 'boolean') next.heavyJobsCpuCap = next.heavyJobsHalfCores;
+  delete next.heavyJobsHalfCores;
+  return next;
 }
 
 /** (#140, the upgrade path) A config.json persisted BEFORE `writeConfig`
