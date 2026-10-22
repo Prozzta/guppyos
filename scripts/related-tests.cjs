@@ -43,6 +43,13 @@
  * any test ran compares its first error line instead. Otherwise "BRANCH RED" (base green) or
  * "base differs", both counted as branch. "new" means the file does not exist at base. Exit 1 when
  * any red is not same on base.
+ * DWIGHT-LONG-RUN-KILLED: --run is self-describing and single per tree. It keeps a status file at
+ * `git rev-parse --git-path related-run.json` (inside the tree's git dir, so never in git status):
+ * pid, base/tip, done/total, the current file, then state 'done' with rc and both summary lines
+ * (or 'failed' with the error). A checker reads it; no long tool call or process walk is needed.
+ * A second --run in the same tree is refused (exit 2) while the file says 'running', its pid is
+ * alive and it was updated within RUN_STALE_MS. A dead, finished or silent one is taken over. Two
+ * runs in one tree interfere (held-interfered-178 removes a shared dir), so neither red is trusted.
  */
 const fs = require('fs');
 const os = require('os');
@@ -52,6 +59,9 @@ const { spawnSync } = require('child_process');
 const TEST_SUFFIX = '.test.cjs';
 const STRIP_ENV = ['HIVE_LEDGER_URL', 'HIVE_ROOT', 'AGENT_ID'];
 const FILE_TIMEOUT_MS = 300_000;
+// A live run updates its status after every file: a tip run plus a base re-run, each capped.
+const RUN_STALE_MS = 2 * FILE_TIMEOUT_MS + 60_000;
+const RUN_STATUS = 'related-run.json';
 
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const noExt = (p) => p.replace(/\.(tsx?|[cm]?js)$/, '');
@@ -244,12 +254,50 @@ const git = (repo, args) => {
   return r.stdout;
 };
 
+/** The tree's own status file (a linked worktree has its own git dir). */
+function runStatusPath(repo) {
+  return path.resolve(repo, git(repo, ['rev-parse', '--git-path', RUN_STATUS]).trim());
+}
+
+function pidAlive(pid) {
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
+}
+
+/** A status that still owns the tree: running, its pid alive, updated recently. */
+function liveRun(st, now = Date.now(), alive = pidAlive) {
+  return !!st && st.state === 'running' && Number.isInteger(st.pid) && alive(st.pid) && now - st.updatedMs < RUN_STALE_MS;
+}
+
+function writeStatus(file, st) {
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(st, null, 2));
+  fs.renameSync(tmp, file);
+}
+
+/** Claims the tree for this run, or throws while another live run holds it. Returns the status. */
+function acquireRun(file, info, { now = Date.now(), alive = pidAlive } = {}) {
+  const st = { state: 'running', pid: process.pid, startedMs: now, updatedMs: now, ...info, done: 0, reds: 0, current: null };
+  for (let i = 0; i < 2; i++) {
+    try { fs.writeFileSync(file, JSON.stringify(st, null, 2), { flag: 'wx' }); return st; }
+    catch (e) { if (e.code !== 'EEXIST') throw e; }
+    let prev = null;
+    try { prev = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* unreadable: taken over */ }
+    if (liveRun(prev, now, alive)) {
+      throw new Error(`refused: another related-tests --run is live in this tree (pid ${prev.pid}, started ${new Date(prev.startedMs).toISOString()}, ${prev.done}/${prev.total} files, now ${prev.current || '-'}). Wait for it; its status is ${file}`);
+    }
+    st.tookOver = prev ? { pid: prev.pid, state: prev.state, updatedMs: prev.updatedMs } : 'unreadable';
+    fs.rmSync(file, { force: true });
+  }
+  throw new Error(`could not claim ${file}`);
+}
+
 /** Runs the LIGHT lane; reds are re-run at base. Returns { rows, line, rc }. */
-function runLight({ repo, base, light, run = runFile, log = () => {} }) {
+function runLight({ repo, base, light, run = runFile, log = () => {}, onStatus = () => {} }) {
   const rows = [];
   let baseTree = null;
   try {
     for (const f of light) {
+      onStatus({ current: f });
       const r = run(repo, f);
       const row = { file: f, ...r, red: r.rc !== 0 };
       if (row.red) {
@@ -266,6 +314,7 @@ function runLight({ repo, base, light, run = runFile, log = () => {} }) {
         }
       }
       rows.push(row);
+      onStatus({ current: null, done: rows.length, reds: rows.filter((x) => x.red).length });
       log(`${row.red ? 'RED ' : 'ok  '} ${f} ${row.pass}/${row.fail}${row.base ? ` (${row.base})` : ''}`);
     }
   } finally {
@@ -307,7 +356,19 @@ function main(argv) {
   const set = relatedSet({ changed, files: candidateFiles(repo), read, pkg, inventory, warnings: fd.warning ? [fd.warning] : [] });
   const line = summary(set, o.base, o.tip);
   const result = { base: o.base, tip: o.tip, ...set, summary: line };
-  if (o.run) Object.assign(result, runLight({ repo, base: o.base, light: set.lanes.light, log: o.json ? () => {} : (s) => console.log(s) }));
+  if (o.run) {
+    const file = runStatusPath(repo);
+    const st = acquireRun(file, { base: o.base, tip: o.tip, total: set.lanes.light.length, summary: line });
+    console.error(`related-tests: status ${file}`);
+    const update = (patch) => { Object.assign(st, patch, { updatedMs: Date.now() }); writeStatus(file, st); };
+    try {
+      Object.assign(result, runLight({ repo, base: o.base, light: set.lanes.light, log: o.json ? () => {} : (s) => console.log(s), onStatus: update }));
+      update({ state: 'done', rc: result.rc, line: result.line, finishedMs: Date.now() });
+    } catch (e) {
+      update({ state: 'failed', error: String(e.message || e).split('\n')[0], finishedMs: Date.now() });
+      throw e;
+    }
+  }
   if (o.json) console.log(JSON.stringify(result, null, 2));
   else {
     for (const lane of ['light', 'heavy', 'electron', 'census', 'tools']) {
@@ -319,7 +380,7 @@ function main(argv) {
   return o.run ? result.rc : 0;
 }
 
-module.exports = { pathPatterns, namesViaDir, namedPaths, parseFailures, sameOnBase, packageDiff, packageNamed, laneOf, INVENTORY_TESTS, collectedPath, perfPath, inventoryPaths, featureDirsOf, candidateFiles, relatedSet, summary, parseCounts, runFile, runLight, main };
+module.exports = { pathPatterns, namesViaDir, namedPaths, parseFailures, sameOnBase, packageDiff, packageNamed, laneOf, INVENTORY_TESTS, collectedPath, perfPath, inventoryPaths, featureDirsOf, candidateFiles, relatedSet, summary, parseCounts, runFile, runLight, RUN_STALE_MS, runStatusPath, pidAlive, liveRun, acquireRun, main };
 
 if (require.main === module) {
   try { process.exitCode = main(process.argv.slice(2)); } catch (e) { console.error(String(e.message || e)); process.exitCode = 2; }

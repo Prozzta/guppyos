@@ -2739,6 +2739,8 @@ export class HiveManager {
       // CODEX-BLOAT-165 fix 7: Codex keeps every tool output in the thread and re-sends it on
       // every later request (81% of Dwight's tool-output text came from outputs over 10K chars).
       meta.provider === 'codex' ? CODEX_OUTPUT_HYGIENE_LINE : '',
+      // DWIGHT-LONG-RUN-KILLED: a capped exec call returned empty output, and a live run read as killed.
+      meta.provider === 'codex' ? CODEX_EXEC_CAP_LINE : '',
       meta.provider === 'codex'
         ? (mailMode === 'inject'
           ? 'Codex mail wake: the automatic inbox-check prompt is a wake sentinel. Its hook delivers your new mail into this turn as a <hive-mail> block; handle it from there.'
@@ -5817,6 +5819,12 @@ export class HiveManager {
 /** CODEX-BLOAT-165 fix 7: the output-hygiene rule in a Codex agent's developer_instructions.
  *  Stable text (no volatile values), so the instructions stay prompt-cache-stable. */
 export const CODEX_OUTPUT_HYGIENE_LINE = 'OUTPUT HYGIENE (every tool output stays in your context and is re-sent with every later request): never print a whole file, log or CSV. Read what you need: a line range or head/tail (Get-Content -TotalCount N / -Tail N, head, tail, sed -n), or matches (rg, Select-String). Cap command output (| Select-Object -First 50, | head -50). Write large results to a file and report a short summary plus its path. Make big edits with small apply_patch hunks or by writing a file; never echo a whole file back.';
+
+/** DWIGHT-LONG-RUN-KILLED: the Codex exec tool returns after about 30 s whatever yield_time_ms
+ *  asks (max Wall time 30.2 s measured), with EMPTY output while the command runs on. A live
+ *  related-tests run read as "killed" and a second run was started in the same tree.
+ *  Stable text, like the hygiene line. */
+export const CODEX_EXEC_CAP_LINE = 'LONG COMMANDS: an exec_command call returns after about 30 seconds, whatever yield_time_ms you pass. If the command is still running, the output can be EMPTY and the result carries a session_id: the command did NOT die. Check it with write_stdin({session_id, chars: ""}), or by a quick read of its log file and process. Never check with a command that sleeps 30 seconds or more (it hits the same cap and returns empty). Report exit_code or session_id, not only the output. Never start a second copy of a run that may still be alive.';
 
 /** ZT-I1-MAIL §11.12(c): part of P1 for every agent, so a lesson recorded under an older build
  *  cannot override the current mail rules after an upgrade or a rollback. */

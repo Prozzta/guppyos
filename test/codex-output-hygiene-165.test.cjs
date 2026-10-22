@@ -56,3 +56,28 @@ test('a Claude agent does not (its prompt is unchanged by fix 7)', async (t) => 
   const prompt = inj.args[inj.args.indexOf('--append-system-prompt') + 1];
   assert.ok(!prompt.includes('OUTPUT HYGIENE'));
 });
+
+// DWIGHT-LONG-RUN-KILLED: the exec-cap facts ride in the same developer_instructions.
+const { CODEX_EXEC_CAP_LINE } = loadTs('src/main/hive.ts');
+
+test('the exec-cap line says: ~30 s cap, empty output is not death, poll by session_id, no 30 s sleeps, no second run; ASCII and volatile-free', () => {
+  assert.match(CODEX_EXEC_CAP_LINE, /returns after about 30 seconds, whatever yield_time_ms you pass/);
+  assert.match(CODEX_EXEC_CAP_LINE, /output can be EMPTY/);
+  assert.match(CODEX_EXEC_CAP_LINE, /the command did NOT die/);
+  assert.match(CODEX_EXEC_CAP_LINE, /write_stdin\(\{session_id, chars: ""\}\)/);
+  assert.match(CODEX_EXEC_CAP_LINE, /Never check with a command that sleeps 30 seconds or more/);
+  assert.match(CODEX_EXEC_CAP_LINE, /Report exit_code or session_id/);
+  assert.match(CODEX_EXEC_CAP_LINE, /Never start a second copy of a run that may still be alive/);
+  assert.match(CODEX_EXEC_CAP_LINE, /^[\x20-\x7e]+$/);
+  assert.doesNotMatch(CODEX_EXEC_CAP_LINE, /\d{4}-\d{2}-\d{2}/);
+});
+
+test('a Codex agent gets the exec-cap line in its developer_instructions; a Claude agent does not', async (t) => {
+  const s = sandbox(t);
+  const inj = await s.hive.ensureAgent({ id: 'dw-2', name: 'Dwight', provider: 'codex', cwd: s.home });
+  const cfg = toml.parse(fs.readFileSync(path.join(inj.env.CODEX_HOME, 'config.toml'), 'utf8'));
+  assert.ok(cfg.developer_instructions.includes(CODEX_EXEC_CAP_LINE));
+  const c = await s.hive.ensureAgent({ id: 'jim-2', name: 'Jim', provider: 'claude', cwd: s.home });
+  const prompt = c.args[c.args.indexOf('--append-system-prompt') + 1];
+  assert.ok(!prompt.includes('LONG COMMANDS:'));
+});
