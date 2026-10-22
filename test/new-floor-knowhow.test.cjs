@@ -53,9 +53,12 @@ test('the heavy, term and tasks lines match their CLIs', () => {
   const term = read('resources/term-cli.cjs');
   for (const a of ['read', 'type', 'send', 'keys']) assert.ok(FLOOR.includes(`\`term ${a} <agent>`), `term ${a}`);
   assert.ok(FLOOR.includes('`term hold on [reason]`') && FLOOR.includes('`term hold off`'));
-  // GTC-TERM-RULING (Andy): documented for god now; once its term-cli lands, the usage must match.
-  assert.ok(FLOOR.includes('`term rule <agent> send-again|already-handled`'), 'term rule');
-  if (/\['read', 'type', 'send', 'keys', 'rule'\]/.test(term)) assert.match(term, /\| term rule <agent> send-again\|already-handled/);
+  // GTC-TERM-RULING-ID (INT 1.1.99): the FLOOR line is the CLI's whole `term rule` usage, `--id` included:
+  // the usage segment runs to the next ` | ` or the end of USAGE, so a prefix of it does not pass.
+  const rule = /\| (term rule [^\n]*?)(?: \| |\\n')/.exec(term);
+  assert.ok(rule, 'term-cli USAGE has a term rule segment');
+  assert.equal(rule[1], 'term rule <agent> send-again|already-handled --id <requestId>', 'the CLI usage of term rule');
+  assert.ok(FLOOR.includes(`\`${rule[1]}\``), `term rule: FLOOR must carry the full CLI usage \`${rule[1]}\``);
   assert.match(term, /if \(action === 'read'\)[\s\S]*?rest\[0\] === '--rows'/, 'term read takes --rows');
   for (const k of ['enter', 'esc', 'tab', 'shift-tab', 'ctrl-c', 'ctrl-u']) assert.match(term, new RegExp(` ${k} `), `term key ${k}`);
   assert.match(term, /refuses a lone "\?" and a leading "!" or "\/" \(they act as keys\) unless --raw/);

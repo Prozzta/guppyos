@@ -293,6 +293,16 @@ function sidecarChecks(M) {
     }
     fs.writeFileSync(file, '{"state":');
     assert.equal(M.acquireRun(file, { total: 1 }).tookOver, 'unreadable');
+
+    // INT 1.1.99: a live run that claims the file between the stale removal and the retry wins; the
+    // retry says it was taken over (i > 0), not the first-look refusal.
+    put({ ...live, pid: deadPid() });
+    const rm = fs.rmSync;
+    fs.rmSync = (p, o) => { rm(p, o); if (p === file) put(live); };
+    try {
+      assert.throws(() => M.acquireRun(file, { total: 1 }), /^Error: this related-tests --run was taken over by pid \d+ \(started [\d-]+T[\d:.]+Z, 2\/6 files, now test\/c\.test\.cjs\)\. Wait for it; its status is /);
+    } finally { fs.rmSync = rm; }
+    assert.deepEqual(read(), live, 'the run that took over keeps its status');
   } finally { fs.rmSync(file, { force: true }); }
 }
 test('--run status file: done/total and the current file, then done with rc and lines; a live run refuses a second (exit 2 from the CLI); dead, silent, finished or unreadable is taken over', () => sidecarChecks(REAL));
@@ -435,10 +445,11 @@ const MUTANTS = [
   ['R21 no per-file progress', 'onStatus({ current: null, done: rows.length, reds: rows.filter((x) => x.red).length });', '', sidecarChecks],
   ['J3 a thrown light run never marks failed', "update({ state: 'failed', error: String(e.message || e).split('\\n')[0], finishedMs: Date.now() });", '', sidecarChecks],
   ['J6 silent-run stale bound grows', 'const RUN_STALE_MS = 2 * FILE_TIMEOUT_MS + 60_000;', 'const RUN_STALE_MS = 20 * FILE_TIMEOUT_MS + 60_000;', sidecarChecks],
+  ['R22 a lost retry reads as the first-look refusal', 'if (i > 0) throw new Error(`this related-tests --run was taken over', 'if (false) throw new Error(`this related-tests --run was taken over', sidecarChecks],
   ['R6 the base worktree is left behind', "try { git(repo, ['worktree', 'remove', '--force', baseTree]); } catch { fs.rmSync(baseTree, { recursive: true, force: true }); }", '', runChecks]
 ];
 
-test('MUTANT CENSUS RELATED-TESTS: R1-R21 each apply once and die at their named check', () => {
+test('MUTANT CENSUS RELATED-TESTS: R1-R22 each apply once and die at their named check', () => {
   const text = fs.readFileSync(SRC, 'utf8');
   for (const [name, from, to, check] of MUTANTS) {
     assert.equal(text.split(from).length, 2, `${name}: its anchor is in the script exactly once`);

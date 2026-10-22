@@ -123,6 +123,16 @@ test('W6 mutant: a new incarnation cannot inherit an old rotation arm', () => {
   const M = loadTs.fromText('src/main/codexLiveRotationWiring.ts', wiring.replace('return current === armed;', 'return true;'));
   assert.equal(M.isCurrentCodexLiveRotationIncarnation(4, 5), true, 'the stale-incarnation mutant is observable');
 });
+// INT 1.1.99 (UHera minor): a reserved heavy slot is heavy too, so the fact pins all three clauses.
+const HEAVY_FACT = /heavy:\s*holders\.some\(\(x\)\s*=>\s*x\.agentId\s*===\s*agentId\)\s*\|\|\s*q\.waiters\.some\(\(x\)\s*=>\s*x\.agentId\s*===\s*agentId\)\s*\|\|\s*q\.reserved\.some\(\(x\)\s*=>\s*x\.agentId\s*===\s*agentId\),/;
+const factsOf = (src) => src.slice(src.indexOf('function codexLiveRotationFacts'), src.indexOf('/** Log every reason transition'));
+test('mutant: dropping only the reserved-slot clause from the heavy fact is caught', () => {
+  const clause = ' || q.reserved.some((x) => x.agentId === agentId)';
+  const facts = factsOf(indexSource);
+  assert.equal(facts.split(clause).length, 2, 'the reserved clause occurs exactly once in codexLiveRotationFacts');
+  assert.match(facts, HEAVY_FACT);
+  assert.doesNotMatch(facts.replace(clause, ''), HEAVY_FACT, 'the drop-reserved mutant must fail the heavy fact pin');
+});
 test('index.ts live-rotation wiring retains all 17 safety call sites', () => {
   const facts = indexSource.slice(indexSource.indexOf('function codexLiveRotationFacts'), indexSource.indexOf('/** Log every reason transition'));
   const rotation = indexSource.slice(indexSource.indexOf('function considerCodexLiveRotation'), indexSource.indexOf('// IDLE-MEANS-IDLE:', indexSource.indexOf('function considerCodexLiveRotation')));
@@ -144,7 +154,7 @@ test('index.ts live-rotation wiring retains all 17 safety call sites', () => {
   ];
   for (const [text, call] of required) assert.ok(text.includes(call), `missing live-rotation safety call: ${call}`);
   assert.match(facts, /toolRunning:\s*hookServer\.runningTool\(agentId\)\s*!==\s*null,/, 'running tool fact must feed the policy');
-  assert.match(facts, /heavy:\s*holders\.some\(\(x\)\s*=>\s*x\.agentId\s*===\s*agentId\)\s*\|\|\s*q\.waiters\.some/, 'heavy holder fact must feed the policy');
+  assert.match(facts, HEAVY_FACT, 'heavy holder fact must feed the policy');
   assert.match(facts, /floorHeld:\s*parseFloorHold\(readConfig\(\)\.floorHold\)\s*!==\s*null,/, 'floor hold fact must feed the policy');
   assert.match(facts, /owed:\s*\(mail\.awaitingReply\?\.length\s*\?\?\s*0\)\s*>\s*0\s*\|\|\s*\(mail\.openRequests\?\.length\s*\?\?\s*0\)\s*>\s*0,/, 'owed fact must feed the policy');
   assert.match(facts, /workspaceIsolated:\s*!!ptyId\s*&&\s*\(worktreePaths\.has\(ptyId\)\s*\|\|\s*liveWorkers\.has\(ptyId\)\)/, 'workspace isolation fact must feed the policy');

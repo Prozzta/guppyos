@@ -389,12 +389,14 @@ test('PIN: against the REAL test directory discovery is root tests plus only fol
   // 1.1.98 stage 19: + 1 (card-autodone). Stage 20: + 1 (stall-watch-198).
   // 1.1.98 stage 21: + 1 (wake-refusal-stuck).
   // WAKE-LIFECYCLE-UNKNOWN-197: + 1 (wake-stale-loading-header-197).
+  // INT 1.1.99 (re-pinned once for the merged tree, 499 + 8):
+  // QUIET-HOLD-ACT-ONLY: + 1 (quiet-hold-act-198), + 1 (mail-rig-quiet-198).
   // PS-POLICY-TEMP-LEAK: + 1 (ps-policy-temp-leak-198).
   // NEW-FLOOR-KNOWHOW: + 1 (new-floor-knowhow).
   // CODEX-ROLLOUT-SIZE: + 1 (codex-live-rotation).
-  assert.equal(files.length, 500, `the focused suite must retain its pre-fold file count, got ${files.length}`);
   // WAKE-FALSE-INTERFERED-RESTART: + 1 (wake-false-interfered-198), + 1 (mail-rig-held-198).
-  // HEAVY-LOCK-VARPATH-READ: + 1 (heavy-lock-varpath-198).
+  // HEAVY-LOCK-VARPATH-READ: + 1 (heavy-lock/heavy-lock-varpath-198).
+  assert.equal(files.length, 507, `the focused suite must retain its pre-fold file count, got ${files.length}`);
   assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
   assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');
   assert.ok(files.includes(path.join('start-fixes-163', 'start-fixes-163-boot-submit.test.cjs')), 'the start-fixes feature folder is included');
