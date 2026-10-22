@@ -546,7 +546,10 @@ export type HeldRecheck =
   | { kind: 'SUBMITTED'; screen: GuardScreenFacts | null;
       /** GOD-TERMINAL-CONTROL: a turn god's `term` keys started, not our own Enter. 'god-send' is
        *  CORRELATED (a submit reported at or after god's Enter), not proven god's. */
-      how?: 'god-turn' | 'god-send' }
+      how?: 'god-turn' | 'god-send'
+      /** WAKE-FALSE-INTERFERED-RESTART (2): the held wake's own mail ids were surfaced by a hook
+       *  since the hold: delivered, whoever pressed Enter. */
+      | 'surfaced' }
   | { kind: 'HELD'; why: string; screen: GuardScreenFacts | null };
 
 /** WAKE-SCREEN-GUARD: the pause between post-echo readings after a stage write. */
@@ -703,6 +706,13 @@ export interface OwnerDeps {
    *  a re-Enter is COMMITTED on. `undefined` = no such report: an own draft is kept only until its
    *  re-Enter, as before. */
   submittedSince?: (ptyId: string, agentId: string, since: number) => boolean | undefined;
+  /** WAKE-FALSE-INTERFERED-RESTART (2): proof that a held wake's mail was delivered anyway. True when
+   *  EVERY one of `ids` (the mail ids the held text names, `wakeIdsIn`) was surfaced or acted by
+   *  a hook at or after `since` (the mail ledger). `undefined` = no such ledger here. */
+  wakeSurfacedSince?: (agentId: string, ids: readonly string[], since: number) => boolean | undefined;
+  /** (2): has a MAIN-session turn of this agent ended (Stop) at or after `since`? A held typed wake
+   *  is then looked at like any hold: an empty composer releases it, our text on it keeps it. */
+  turnEndedSince?: (agentId: string, since: number) => boolean | undefined;
   /** CODEX-REPLAY-SWALLOWS-INPUT: Codex rollout proof that an automatic wake actually
    * reached its conversation. Undefined leaves non-Codex wake behaviour unchanged. */
   wakeSubmitted?: (ptyId: string, agentId: string, since: number, text: string) => boolean | undefined;
@@ -959,6 +969,16 @@ export function needleFor(text: string): string | null {
  * boundary inside the longer tail still leaves the short one whole on the cursor's row.
  * (Residual: a boundary inside the last few characters is not seen.)
  */
+/**
+ * WAKE-FALSE-INTERFERED-RESTART (2): the mail ids a wake text names. A Claude nudge lists them bare
+ * ("You have new hive mail ...: <id>, <id>."; the first INBOX_NUDGE_MAX_IDS of a bigger batch, so a
+ * hold's proof is the ids it NAMED); the Codex sentinel names none (its proof is the Stop). The
+ * request id is a digest of the ids, so the text is the only place they are readable.
+ */
+export function wakeIdsIn(text: string): string[] {
+  return [...new Set(String(text ?? '').match(/\b\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-[0-9a-f]{6}\b/g) ?? [])];
+}
+
 export function priorTextNeedles(text: string): string[] {
   const t = text.trimEnd();
   if (t.length < MIN_NEEDLE) return [];
@@ -1798,9 +1818,22 @@ export class AutomaticSubmitOwner {
     const stay = (why: string, screen: GuardScreenFacts | null = null): HeldRecheck => ({ kind: 'HELD', why, screen });
     if (held.admissionClass !== 'CAPACITY_GATED') return stay('not-automatic');
     // GTC M4: a term-path wake's typed text is a person's to rule (Jim Q4): never erased or re-Entered.
-    if (held.reason === 'WAKE_TYPED_NOT_SENT') return stay('typed-not-sent');
+    // WAKE-FALSE-INTERFERED-RESTART (2): but proof of delivery ends the hold without a ruling. The
+    // wake's own ids surfaced by a hook since the hold = delivered, whoever pressed Enter
+    // (SUBMITTED 'surfaced'; Creed 2026-10-22 12:20:10Z, latched 12:18:50Z). A turn ended since
+    // the hold = the composer is read below like any hold: empty releases it, our text still on
+    // the prompt keeps it (never erased). Neither proof = held, as before.
+    const typed = held.reason === 'WAKE_TYPED_NOT_SENT';
+    if (typed) {
+      const ids = wakeIdsIn(held.text);
+      if (ids.length > 0 && this.wakeSurfaced(held.agentId, ids, held.at) === true) {
+        this.resolveInterference(ptyId, 'ALREADY_HANDLED');
+        return { kind: 'SUBMITTED', screen: this.lastScreen.get(ptyId)?.facts ?? null, how: 'surfaced' };
+      }
+      if (this.turnEnded(held.agentId, held.at) !== true) return stay('typed-not-sent');
+    }
     // WAKE-STALL-INTERFERED-192 C: the held text is our own unsent draft: the app recovers it.
-    const own = await this.enterHeldOwnDraft(ptyId, requestId, held);
+    const own = typed ? null : await this.enterHeldOwnDraft(ptyId, requestId, held);
     if (own) return own;
     // GOD-TERMINAL-CONTROL (Jim MUST 1): god's own `term` keys since the hold do not keep it held
     // the way a person's do: a reported submit ends it as handled; otherwise the screen decides.
@@ -1829,6 +1862,9 @@ export class AutomaticSubmitOwner {
     if (seen.onPromptRow && seen.screenCount >= 1) {
       // GOD-TERMINAL-CONTROL: after god's keys the line may hold god's draft too: never erased here.
       if (by === 'GOD') return stay('god-draft-on-prompt', screen);
+      // WAKE-FALSE-INTERFERED-RESTART (2): a typed wake still on the prompt after a turn ended is a
+      // person's to rule (Jim Q4): never erased by the look.
+      if (typed) return stay('typed-not-sent:on-prompt', screen);
       // Our own text is on the prompt: the verified erase can run now (it needed to see it first).
       this.inhibited.delete(ptyId);
       const s: Staged = {
@@ -1953,6 +1989,14 @@ export class AutomaticSubmitOwner {
    *  on this PTY's live incarnation; `undefined` = this provider has no such report. */
   private submitReport(ptyId: string, agentId: string, since: number): boolean | undefined {
     try { return this.deps.submittedSince?.(ptyId, agentId, since); } catch { return undefined; }
+  }
+
+  /** WAKE-FALSE-INTERFERED-RESTART (2): the two proofs of delivery, fail-closed (a throw = no proof). */
+  private wakeSurfaced(agentId: string, ids: readonly string[], since: number): boolean | undefined {
+    try { return this.deps.wakeSurfacedSince?.(agentId, ids, since); } catch { return undefined; }
+  }
+  private turnEnded(agentId: string, since: number): boolean | undefined {
+    try { return this.deps.turnEndedSince?.(agentId, since); } catch { return undefined; }
   }
 
   /** B: our own draft on this PTY while it is still ours: the same live incarnation, and no

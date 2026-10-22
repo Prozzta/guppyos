@@ -244,6 +244,13 @@ async function buildFloor() {
     providerForPty: (ptyId) => ptyProvider.get(ptyId),
     requestScreenReading: readScreen,
     requestCodexScreen: readCodexScreen,
+    // WAKE-FALSE-INTERFERED-RESTART (2): index.ts wakeSurfacedSince / turnEndedSince, the same facts.
+    wakeSurfacedSince: (agentId, ids, since) => {
+      const entries = hive.mail.ledger(agentId).entries;
+      return ids.every((id) => { const e = entries[id]; return !!e && (e.state === 'surfaced' || e.state === 'acted') && Math.max(e.surfacedAt ?? 0, e.actedAt ?? 0) >= since; });
+    },
+    // The hooks' `at` is the simulated clock; the owner's hold time is real (index.ts: both Date.now).
+    turnEndedSince: (agentId, since) => { const t = workerWake.livenessFacts(agentId).lastTurnEndAt; return t > 0 && t >= clock.at(since); },
     onScreenGuard: (r) => { diags.push({ stage: 'screen-guard', agentId: r.agentId, why: r.phase + ':' + (r.ok ? 'ok' : 'NO') + ':' + r.reason + ':gen=' + r.observedGeneration + '/' + r.currentGeneration, at: clock.now() }); if (diags.length > 5000) diags.shift(); },
     onOutcome: (r) => { outcomes.push({ agentId: r.agentId, requestId: r.requestId, cls: r.admissionClass, outcome: r.outcome, at: r.at }); if (outcomes.length > 500) outcomes.shift(); }
   }));
@@ -591,6 +598,14 @@ async function main() {
     },
     resolveInterference: ({ id, how }) => { const ok = automaticSubmit.resolveInterference(ptyOf(id), how); if (ok) f.inboxWake.onInterferenceResolved(id, how); return ok; },
     inhibition: ({ id }) => automaticSubmit.inhibition(ptyOf(id)),
+    // WAKE-FALSE-INTERFERED-RESTART: the term-path WakeSender's latch (wakeSender.ts typedNotSent ->
+    // holdTyped), as 1.1.98 set it on Creed at 12:18:50Z: the wake text for `ids`, typed, never sent.
+    holdTyped: ({ id, ids, detail = 'NOT_IN_COMPOSER' }) => {
+      const p = ptyOf(id);
+      const text = loadTs('src/shared/hiveNudge.ts').inboxWakeTextForProvider(hive.registry().agents[id]?.provider, [...ids], f.wakeMailMode(id));
+      automaticSubmit.holdTyped(p, { requestId: `inbox-wake:${id}:${ids.join('+')}:1`, agentId: id, admissionClass: 'CAPACITY_GATED', text }, 'WAKE_TYPED_NOT_SENT', detail);
+      return automaticSubmit.inhibition(p);
+    },
     sendNow: ({ id }) => rig.sendNow(id),
     workOrders: ({ id }) => (rig.workOrders.get(id) || []).map((w) => w.payload.id),
     humanType: ({ id, text }) => { const p = ptyOf(id); const r = ptyManager.write(p, text, 'HUMAN'); if (/[^\r\x15\x03]/.test(text)) rig.humanDirty.add(p); return r; },
