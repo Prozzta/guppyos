@@ -66,7 +66,9 @@ async function tick(id: string): Promise<void> {
       useStore.getState().updateAgent(id, { status: i % 2 ? 'working' : 'idle', action: `tick ${i}`, progress: i, contextTokens: 1000 + i });
     });
   }
-  await settle(150);
+  // A post-render echo is still a tick cost even when it is deferred past the normal settle.
+  // Keep this beyond the mutation's 400 ms delay.
+  await settle(650);
 }
 /** esbuild renames a `memo(function X` inner function to `X2` when the export is also `X`. */
 const of = (c: Record<string, number>, name: string) =>
@@ -140,7 +142,7 @@ window.__harnessRun = async () => {
     const tOpenTicks = pick(renderCounts());
     resetRenderCounts();
     await act(async () => { useStore.getState().updateAgent('a2', { name: 'ZED' }); });
-    await settle(150);
+    await settle(650);
     const tRename = pick(renderCounts());
     await act(async () => { useStore.getState().closeTaskDetail(); });
     await settle(100);

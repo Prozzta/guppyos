@@ -38,7 +38,7 @@ test('a view that lost its executable but kept .complete is rebuilt, at the same
     assert.equal(swiftShaderView(src, 0xffffn, tmp), exe, 'the same view path');
     assert.equal(readFileSync(exe, 'utf8'), 'exe', 'the executable is back');
     if (process.platform === 'win32') assert.equal(statSync(exe).nlink, 2, 'a hard link to the dist, not a copy');
-    assert.equal(readFileSync(join(view, 'SwiftShader.ini'), 'utf8'), '[Processor]\nAffinityMask=65535\n');
+    assert.equal(existsSync(join(view, 'SwiftShader.ini')), false, 'the CPU-rate cap never writes a SwiftShader affinity mask');
     assert.equal(readFileSync(join(view, 'locales', 'en-US.pak'), 'utf8'), 'pak');
     assert.deepEqual(readdirSync(join(tmp, 'guppy-electron-view')), [view.split(/[\\/]/).pop()], 'no part or stale folder left');
   });

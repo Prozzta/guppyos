@@ -240,9 +240,6 @@ function run({
   err = (line) => process.stderr.write(`${line}\n`),
   // CLAIMS-PERF-LANE: the serial lane's folder (the CLI passes test/perf); absent = no lane.
   perfDir = null,
-  // HEAVY-CPU-OPTIONS-191: is this run in a CPU-limited heavy job? Asked once for the whole run and
-  // passed down in HARNESS_CPU_MASK, so each test file does not ask again (electron-bin.cjs).
-  cpuMask = () => require('../electron-harness/electron-bin.cjs').harnessCpuMask()
 } = {}) {
   let entries;
   try {
@@ -274,14 +271,9 @@ function run({
   // PS-POLICY-TEMP-LEAK: not the PowerShell temp folder; the files' temp jail sets theirs.
   const env = require('./ps-env.cjs').psEnv(process.env, { temp: false });
   delete env.NODE_TEST_CONTEXT;
-  if (env.HARNESS_CPU_MASK === undefined) env.HARNESS_CPU_MASK = String(cpuMask() ?? '');
-  // HALFCORES-SUITE-198: on Windows node's availableParallelism ignores affinity, so inside a
-  // CPU-limited heavy job the default concurrency and start slots are sized from the mask instead.
-  const cpus = maskCpus(env.HARNESS_CPU_MASK);
-  if (cpus !== null) log(`[test-runner] ${cpus} processors in this run's mask: ${Math.max(1, cpus - 1)} files at once (HALFCORES-SUITE-198)`);
   // LOAD-BURST-196: the gate loads first, so a file's job join below is inside its start slot too.
   let gate = null;
-  try { gate = startGate({ slots: startSlots(env, cpus ?? os.availableParallelism()) }); } catch (e) { err(`[test-runner] no start gate (${String(e)}): every file loads at once (LOAD-BURST-196)`); }
+  try { gate = startGate({ slots: startSlots(env, os.availableParallelism()) }); } catch (e) { err(`[test-runner] no start gate (${String(e)}): every file loads at once (LOAD-BURST-196)`); }
   if (gate) {
     const opt = `--require "${START_GATE_PRELOAD.split(path.sep).join('/')}"`;
     env.NODE_OPTIONS = [env.NODE_OPTIONS, opt].filter(Boolean).join(' ');

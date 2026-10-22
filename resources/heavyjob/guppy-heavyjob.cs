@@ -120,9 +120,25 @@ static class HeavyJob
         var x = Limits(background);
         if (!SetInformationJobObject(job, 9, ref x, Marshal.SizeOf(typeof(EXT_LIMIT))))
             throw new Exception("SetInformationJobObject failed (" + Marshal.GetLastWin32Error() + ")");
+        // A fresh job rejects class 15 with ControlFlags=0 (ERROR_INVALID_PARAMETER).  There is
+        // nothing to clear until a cap was enabled; after a live cap-on -> cap-off change, clear
+        // the rate explicitly so existing members are released from it.
+        if (!cap && !CpuRateEnabled(job)) return;
         var rate = new CPU_RATE { ControlFlags = cap ? CPU_RATE_ENABLE | CPU_RATE_HARD_CAP : 0, CpuRate = cap ? CPU_RATE_50_PERCENT : 0 };
         if (!SetInformationJobObject(job, 15, ref rate, Marshal.SizeOf(typeof(CPU_RATE))))
             throw new Exception("SetInformationJobObject CPU rate failed (" + Marshal.GetLastWin32Error() + ")");
+    }
+
+    static bool CpuRateEnabled(IntPtr job)
+    {
+        IntPtr p = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(CPU_RATE)));
+        try
+        {
+            if (!QueryInformationJobObject(job, 15, p, Marshal.SizeOf(typeof(CPU_RATE)), IntPtr.Zero)) return false;
+            var rate = (CPU_RATE)Marshal.PtrToStructure(p, typeof(CPU_RATE));
+            return (rate.ControlFlags & CPU_RATE_ENABLE) != 0;
+        }
+        finally { Marshal.FreeHGlobal(p); }
     }
 
     // cmd: what follows `<cap>;` on this process's own command line, as cmd passed it.

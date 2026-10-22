@@ -59,6 +59,7 @@ test('the native helper pins hard-cap mode and the exact 50% CPU rate (M1)', () 
   const native = read('resources/heavyjob/guppy-heavyjob.cs');
   assert.match(native, /CPU_RATE_ENABLE = 0x1, CPU_RATE_HARD_CAP = 0x4, CPU_RATE_50_PERCENT = 5000/);
   assert.match(native, /ControlFlags = cap \? CPU_RATE_ENABLE \| CPU_RATE_HARD_CAP : 0/);
+  assert.match(native, /if \(!cap && !CpuRateEnabled\(job\)\) return;/, 'M9: fresh cap-off jobs skip invalid class-15 zero flags; a live cap-off still clears it');
   assert.match(native, /var rate = new CPU_RATE \{ ControlFlags = cap \? CPU_RATE_ENABLE \| CPU_RATE_HARD_CAP : 0, CpuRate = cap \? CPU_RATE_50_PERCENT : 0 \}/);
   assert.doesNotMatch(native, /LIMIT_AFFINITY|SetProcessAffinityMask/);
 });
@@ -382,9 +383,7 @@ test('LIVE cmd: the `&` join line leaves the command exactly as cmd runs it (out
       const inside = run(joinLineFor(id) + `guppy-heavyjob list ${id}`);
       const rows = inside.stdout.trim().split(/\r?\n/).map((l) => JSON.parse(l)); // one JSON line per process
       assert.ok(rows.some((r) => /^cmd\.exe$/i.test(r.name)), `cmd is in the job: ${inside.stdout}`);
-      // A parent may already be constrained by the harness host.  The helper must preserve that
-      // inherited mask, not overwrite it; its own query (covered live above) reports no job affinity.
-      assert.ok(rows.every((r) => r.cpus > 0), `the helper preserves a usable inherited processor set: ${inside.stdout}`);
+      assert.ok(rows.every((r) => r.cpus === os.cpus().length), `CPU-rate control leaves every visible core available: ${inside.stdout}`);
       // A shell with its own console: its conhost.exe started with it, before the join line, and joins too.
       // (Start-Process makes a new console; without -Wait, which would put the shell in a job of its own.)
       const ownFile = path.join(dir, 'own.txt');

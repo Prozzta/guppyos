@@ -10,7 +10,7 @@ const { join } = require('node:path');
 const root = join(__dirname, '..');
 const CSC = join(process.env.WINDIR || 'C:\\Windows', 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe');
 
-test('LIVE: the helper queries 50% hard-cap mode, then applies an on/off/on change to the held job (M1/M8)',
+test('LIVE: a fresh cap-off job creates and joins, then cap on/off/on applies to the held job (M1/M8/M9)',
   { skip: process.platform !== 'win32' ? 'heavy jobs are Windows-only' : !existsSync(CSC) ? `no in-box csc at ${CSC}` : false, timeout: 120_000 },
   async () => {
     const dir = mkdtempSync(join(tmpdir(), 'hcpu-rate-'));
@@ -34,6 +34,12 @@ test('LIVE: the helper queries 50% hard-cap mode, then applies an on/off/on chan
       });
       const request = (line) => new Promise((resolve) => { replies.push(resolve); serve.stdin.write(`${line}\n`); }).then((line) => JSON.parse(line));
       const id = `rate-${process.pid}-${Date.now().toString(36)}`;
+      const offId = `${id}-off`;
+      assert.deepEqual(await request(`create ${offId} 0 0`), { ok: true }, 'fresh cap-off must not call class 15 with flags zero');
+      assert.deepEqual(await request(`query ${offId}`), { ok: true, background: false, cap: false, rate: 0, affinity: null });
+      const joinedOff = spawnSync(exe, ['join', offId, '0', '0'], { encoding: 'utf8', windowsHide: true });
+      assert.equal(joinedOff.status, 0, `fresh cap-off join: ${joinedOff.stdout}${joinedOff.stderr}`);
+      assert.deepEqual(await request(`close ${offId}`), { ok: true });
       assert.deepEqual(await request(`create ${id} 0 1`), { ok: true });
       assert.deepEqual(await request(`query ${id}`), { ok: true, background: false, cap: true, rate: 5000, affinity: null });
       assert.deepEqual(await request(`set ${id} 0 0`), { ok: true });

@@ -121,12 +121,18 @@ window.__harnessRun = async () => {
     let clock = 0;
     let nextTimer = 1;
     const timers = new Map<number, { due: number; fn: () => void }>();
-    globalThis.setTimeout = ((fn: () => void, ms = 0) => {
+    let captureDraftTimer = false;
+    globalThis.setTimeout = ((fn: () => void, ms = 0, ...args: any[]) => {
+      // Only the synchronous debounce armed by this scenario's input is virtual.  Timers from
+      // React, Electron, or another harness task remain on the real scheduler.
+      if (!captureDraftTimer) return realSetTimeout(fn, ms, ...args);
       const id = nextTimer++;
-      timers.set(id, { due: clock + Number(ms), fn });
+      timers.set(id, { due: clock + Number(ms), fn: () => fn(...args) });
       return id as unknown as ReturnType<typeof setTimeout>;
     }) as typeof setTimeout;
-    globalThis.clearTimeout = ((id: ReturnType<typeof setTimeout>) => { timers.delete(id as unknown as number); }) as typeof clearTimeout;
+    globalThis.clearTimeout = ((id: ReturnType<typeof setTimeout>) => {
+      if (!timers.delete(id as unknown as number)) realClearTimeout(id);
+    }) as typeof clearTimeout;
     const advance = (ms: number) => {
       clock += ms;
       for (;;) {
@@ -137,7 +143,12 @@ window.__harnessRun = async () => {
       }
     };
     try {
-      for (let i = 0; i < 22; i++) { slow += 's'; const v = slow; act(() => { setValue(area()!, v); }); advance(100); }
+      for (let i = 0; i < 22; i++) {
+        slow += 's'; const v = slow;
+        captureDraftTimer = true;
+        try { act(() => { setValue(area()!, v); }); } finally { captureDraftTimer = false; }
+        advance(100);
+      }
     } finally {
       globalThis.setTimeout = realSetTimeout;
       globalThis.clearTimeout = realClearTimeout;
