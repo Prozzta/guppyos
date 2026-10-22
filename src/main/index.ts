@@ -197,7 +197,7 @@ import { newBreadcrumbMemory, shouldLogBreadcrumb } from './wakeBreadcrumb';
 import { forgetWakeRows, newWakeRowState, planWakeRow, takeFolded } from './wakeRowPolicy';
 import { WakeTelemetry } from './wakeTelemetry';
 import { inboxWakeTextForProvider } from '../shared/hiveNudge';
-import { answersOwnAsk, quietHolds, quietMailHoldMs } from '../shared/mailWakeClass';
+import { quietHolds, quietMailHoldMs, solicitedQuietMail } from '../shared/mailWakeClass';
 import { mailNudgeMode, type MailNudgeMode } from './mailSurface';
 import { fetchHireManifest, readHireManifestFiles } from './hire';
 import { HIRE_LINK_SCHEMES, isHireLinkArg, parseHireDeepLink, type HireManifest } from '../shared/hire';
@@ -1159,14 +1159,12 @@ inboxWake = new InboxWakeBridge({
       const holdMs = quietHoldMsCached(now);
       if (!(holdMs > 0)) return new Map();
       const entries = hive.mail.ledger(agentId).entries;
-      // Jim B1: an answer to this agent's own ask wakes it. The original sits in the ledger of
-      // the agent that received it (the one answering now), under its id or its sender_id alias.
-      const lookup = (holder: string, id: string) => {
-        const es = hive.mail.ledger(holder).entries;
-        return es[id] ?? Object.values(es).find((x) => x.senderId === id);
-      };
+      // Jim B1 + QUIET-HOLD-ACT-ONLY (1.1.98): solicited mail wakes (solicitedQuietMail): a reply
+      // to anything this agent sent, a Human relay or hold broadcast, or an inform on a card or
+      // thread with an open ask between the two. The asks it sent sit in the RECEIVERS' ledgers.
+      const ledgers = { entries: (holder: string) => Object.values(hive.mail.ledger(holder).entries) };
       return quietHolds(ids.map((id) => entries[id]).filter((e) => !!e), hookServer.mailChannel(agentId).mode, holdMs, now,
-        (e) => answersOwnAsk(e, agentId, lookup));
+        (e) => solicitedQuietMail(e, agentId, ledgers));
     }
   },
   facts: (agentId) => {

@@ -112,6 +112,7 @@ async function buildFloor() {
   const { WorkerWakeWatchdog, WORKER_WAKE_HITL_REARM_MS } = loadTs('src/main/workerWake.ts');
   const { OwedContinuation } = loadTs('src/main/owedContinuation.ts');
   const { owesWork } = loadTs('src/main/mailLedger.ts');
+  const wakeClass = loadTs('src/shared/mailWakeClass.ts');
   const { ControlRegistry } = loadTs('src/main/control.ts');
   const { PtyManager } = loadTs('src/main/pty.ts');
   const { AutomaticSubmitOwner } = loadTs('src/main/automaticSubmit.ts');
@@ -136,7 +137,7 @@ async function buildFloor() {
   };
   const diags = [];
   const outcomes = [];
-  const rig = { clock, diags, outcomes, llm, bootSeen: new Set(), echoSeen: new Map(),stall: new Map(), interfere: new Map(), humanDirty: new Set(), capacityHold: false, holdArchives: false, settleDelay: new Map() };
+  const rig = { clock, diags, outcomes, llm, bootSeen: new Set(), echoSeen: new Map(),stall: new Map(), interfere: new Map(), humanDirty: new Set(), capacityHold: false, quietHoldMin: 0, holdArchives: false, settleDelay: new Map() };
 
   // index.ts:361 - the ONE hive; this sandbox's harness home is the "live" home of THIS instance,
   // so the per-provider global writers (AGY hooks.json, statusline) write into the jailed HOME.
@@ -334,7 +335,24 @@ async function buildFloor() {
       n1DueIds: (agentId) => hive.mail.n1Due(agentId),
       openIds: (agentId) => hive.mail.openNotDelivered(agentId),
       degrade: (agentId, reason, detail) => hive.mail.degradeChannel(agentId, reason, detail, { respawnToRestore: hive.registry().agents[agentId]?.provider === 'codex' }),
-      log: (row) => hive.appendLog(row)
+      log: (row) => hive.appendLog(row),
+      // index.ts quietUntil (READS-QUIET-NOREPLY + QUIET-HOLD-ACT-ONLY), with the `quietHold` call
+      // standing in for config.quietMailHoldMin (0 = off, the rig's default, as every test before
+      // 1.1.98 ran without a hold).
+      quietUntil: (agentId, ids, now) => {
+        const holdMs = wakeClass.quietMailHoldMs(rig.quietHoldMin);
+        if (!(holdMs > 0)) return new Map();
+        try {
+          const entries = hive.mail.ledger(agentId).entries;
+          const ledgers = { entries: (holder) => Object.values(hive.mail.ledger(holder).entries) };
+          return wakeClass.quietHolds(ids.map((id) => entries[id]).filter((e) => !!e), hookServer.mailChannel(agentId).mode, holdMs, now,
+            (e) => wakeClass.solicitedQuietMail(e, agentId, ledgers));
+        } catch (e) {
+          // The product's bridge swallows a throw (fail open: it wakes); the rig says why in its diags.
+          rig.diags.push({ stage: 'quiet-error', agentId, error: String(e && e.stack || e), at: clock.now() });
+          throw e;
+        }
+      }
     },
     facts: (agentId) => {
       const ptyId = ptyForAgent(agentId);
@@ -577,6 +595,8 @@ async function main() {
     resume: ({ id }) => { control.resume(id); return control.snapshot(id); },
     steer: ({ id, text }) => { control.steer(id, text); return true; },
     capacityHold: ({ on }) => { rig.capacityHold = on; if (!on) f.inboxWake.onCapacityChange(); return on; },
+    // QUIET-HOLD-ACT-ONLY: config.quietMailHoldMin for this rig (minutes; 0 = off).
+    quietHold: ({ min }) => { rig.quietHoldMin = Number(min) || 0; return rig.quietHoldMin; },
     armInterfere: ({ id, by = 'HUMAN' }) => { rig.interfere.set(id, by); return true; },
     // GOD-TERMINAL-CONTROL: god's `term` request, as the hook broker's /term/ route hands it over.
     term: ({ body, as = RIG_GOD }) => rig.termControl.handle(as, body),
