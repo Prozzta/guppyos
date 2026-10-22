@@ -6,6 +6,7 @@ const W = require('./load-ts.cjs')('src/main/codexLiveRotationWiring.ts');
 const T = require('./load-ts.cjs')('src/main/codexThreadRotation.ts');
 const loadTs = require('./load-ts.cjs');
 const source = fsRead('src/main/codexLiveRotation.ts');
+const indexSource = fsRead('src/main/index.ts');
 const base = () => ({ bytes: R.CODEX_LIVE_ROTATE_BYTES + 1, stopSeen: true, turnOpen: false, toolRunning: false, owed: false, wakePending: false, wakeInFlight: false, wakeHeld: false, heavy: false, floorHeld: false, inputPending: false, humanTyping: false, workspaceIsolated: false });
 function fsRead(p) { return require('node:fs').readFileSync(p, 'utf8'); }
 test('under cap is kept and exactly 20 MiB is not rotated', () => {
@@ -121,6 +122,29 @@ test('W6 mutant: a new incarnation cannot inherit an old rotation arm', () => {
   const wiring = fsRead('src/main/codexLiveRotationWiring.ts');
   const M = loadTs.fromText('src/main/codexLiveRotationWiring.ts', wiring.replace('return current === armed;', 'return true;'));
   assert.equal(M.isCurrentCodexLiveRotationIncarnation(4, 5), true, 'the stale-incarnation mutant is observable');
+});
+test('index.ts live-rotation wiring retains all 17 safety call sites', () => {
+  const facts = indexSource.slice(indexSource.indexOf('function codexLiveRotationFacts'), indexSource.indexOf('/** Log every reason transition'));
+  const rotation = indexSource.slice(indexSource.indexOf('function considerCodexLiveRotation'), indexSource.indexOf('// IDLE-MEANS-IDLE:', indexSource.indexOf('function considerCodexLiveRotation')));
+  const exit = indexSource.slice(indexSource.indexOf('ptyManager.setExitHandler'), indexSource.indexOf('const pending = pendingInstallRelaunch', indexSource.indexOf('ptyManager.setExitHandler')));
+  const beat = indexSource.slice(indexSource.indexOf('function runWorkerWakeBeat'), indexSource.indexOf('/** (Re)arm the always-on beats', indexSource.indexOf('function runWorkerWakeBeat')));
+  const arm = indexSource.slice(indexSource.indexOf('function armCodexLiveRotationExitDeadline'), indexSource.indexOf('function considerCodexLiveRotation'));
+  const required = [
+    [facts, 'findCachedCodexRollout(liveCodexRollouts'], [facts, 'owed: (mail.awaitingReply?.length ?? 0) > 0 || (mail.openRequests?.length ?? 0) > 0'],
+    [facts, 'lastHumanInputAt: humanAt'], [facts, 'workspaceIsolated: !!ptyId && (worktreePaths.has(ptyId) || liveWorkers.has(ptyId))'],
+    [rotation, "mayConsiderCodexLiveRotation(ptyProvider.get(ptyForAgent(agentId) ?? ''), pendingCodexLiveRotation.has(ptyForAgent(agentId) ?? ''))"],
+    [rotation, 'const b = codexLiveRotationFacts(agentId);'], [rotation, 'sameCodexLiveRotationTarget('],
+    [rotation, 'freshCodexLiveRotationSpawn(spawn.opts)'], [rotation, "text: '/exit'"],
+    [rotation, "if (outcome.kind === 'REFUSED') {\n      pendingCodexLiveRotation.delete(a.ptyId!)"],
+    [rotation, 'shouldArmCodexLiveRotationExit(outcome.kind, ptyStillLive)'],
+    [arm, 'isCurrentCodexLiveRotationIncarnation(incarnation, ptyManager.incarnation(ptyId))'],
+    [exit, 'shouldRelaunchCodexLiveRotation(exitCode)'], [exit, 'teardownPty(id, naturalExitReason);'],
+    [exit, 'void spawnAgentCore(rotating.opts, rotating.owner);'], [beat, 'sweepCodexLiveRotations(live, considerCodexLiveRotation);'],
+    [indexSource, 'if (agentId && event === \'Stop\') setImmediate(() => considerCodexLiveRotation(agentId));']
+  ];
+  for (const [text, call] of required) assert.ok(text.includes(call), `missing live-rotation safety call: ${call}`);
+  assert.ok(rotation.indexOf('const b = codexLiveRotationFacts(agentId);') < rotation.indexOf("text: '/exit'"), 'fresh read must precede /exit');
+  assert.ok(exit.indexOf('shouldRelaunchCodexLiveRotation(exitCode)') < exit.indexOf('void spawnAgentCore(rotating.opts, rotating.owner);'), 'exit gate must precede relaunch');
 });
 test('per-session rollout cache stats the known file without another sessions walk', () => {
   const fs = require('node:fs'); const os = require('node:os'); const path = require('node:path');

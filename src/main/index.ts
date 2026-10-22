@@ -813,7 +813,6 @@ function withLivenessEdge(
     // Never change a terminal from the hook response stack. Stop is merely the
     // earliest useful signal; the queued evaluation takes a fresh safety snapshot.
     if (agentId && event === 'Stop') setImmediate(() => considerCodexLiveRotation(agentId));
-    noteBootHook(agentId, event);
     if (agentId && event) hookSeenEvent.set(agentId, event);   // ANDY-PTY-EXIT-2049: the exit record's last hook
     if (event && LIVENESS_EDGE_HOOKS.has(event)) sampleLiveness(agentId);
   };
