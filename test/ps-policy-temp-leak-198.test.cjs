@@ -14,6 +14,12 @@
  * BEHAVIOUR: the real PowerShell, watched: with psEnv the policy files appear in psTempDir and
  * never in the jail; the control (no psEnv) writes them in the jail. RUNNER: the opt-out is the
  * runner's alone.
+ *
+ * Andy's audit (9a25ba89): a test process killed before its exit handler (run-tests ending a hung
+ * file) left its folder in the real temp folder, unseen. The folder is guppy-pstemp-<pid>-*, and
+ * sweepPsTempDirs removes dead pids' folders on the first psTempDir() and at the end of a run-tests
+ * run. SWEEP: dead removed, live kept. KILLED: Andy's probe, PowerShell killed on its first policy
+ * file and then its test process killed: the jail is clean and the left folder is swept.
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -21,7 +27,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
-const { psEnv, psTempDir, KEY, TEMP_KEYS } = require('./tools/ps-env.cjs');
+const { psEnv, psTempDir, sweepPsTempDirs, KEY, TEMP_KEYS } = require('./tools/ps-env.cjs');
 const { sharedTemp } = require('./tools/shared-temp.cjs');
 
 const WIN = process.platform === 'win32';
@@ -95,6 +101,86 @@ test('BEHAVIOUR: with psEnv the real PowerShell writes its policy test files in 
   assert.ok([...fixed.seen.ps].some((f) => POLICY.test(f)), `PS POLICY: with psEnv the policy files are written in psTempDir (${[...fixed.seen.ps]})`);
   assert.deepEqual([...fixed.seen.jail].filter((f) => POLICY.test(f)), [], 'PS POLICY: with psEnv no policy file is written in the jail');
   assert.deepEqual(fs.readdirSync(jail), [], 'PS POLICY: the jail is empty');
+});
+
+/** A dead pid: a node child that has exited (its pid is not reused within the test). */
+function deadPid() {
+  const r = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8', windowsHide: true, timeout: 30_000 });
+  return Number(r.stdout);
+}
+
+test('SWEEP: dead pids\' guppy-pstemp folders are removed, live ones and other names kept; the first psTempDir sweeps', () => {
+  const shared = path.join(tmpRoot, 'shared-sweep');
+  fs.mkdirSync(shared);
+  const dead = deadPid();
+  const names = {
+    dead: `guppy-pstemp-${dead}-aaaaaa`,
+    live: `guppy-pstemp-${process.ppid}-bbbbbb`,
+    own: `guppy-pstemp-${process.pid}-cccccc`,
+    other: 'guppy-psmac-dddddd',
+    // A pid this process may not signal (Windows' System, 4: EPERM) is alive, not swept.
+    ...(WIN ? { perm: 'guppy-pstemp-4-eeeeee' } : {})
+  };
+  const kept = Object.values(names).filter((n) => n !== names.dead).sort();
+  const make = () => { for (const n of Object.values(names)) { fs.mkdirSync(path.join(shared, n), { recursive: true }); fs.writeFileSync(path.join(shared, n, '__PSScriptPolicyTest_x.ps1'), ''); } };
+  make();
+  assert.deepEqual(sweepPsTempDirs(shared), [names.dead], 'PS POLICY sweep: only the dead pid\'s folder is removed');
+  assert.deepEqual(fs.readdirSync(shared).sort(), kept, 'PS POLICY sweep: live, own, unsignalable and other folders are kept');
+  assert.deepEqual(sweepPsTempDirs(path.join(tmpRoot, 'no-such')), [], 'PS POLICY sweep: a missing root is nothing to do');
+  // The first psTempDir() of a process sweeps (a child process: this one's psTempDir is made).
+  make();
+  const script = `const e = require(${JSON.stringify(path.join(__dirname, 'tools', 'ps-env.cjs'))}).psEnv(); process.stdout.write(require('path').basename(e.TEMP));`;
+  const r = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8', windowsHide: true, timeout: 60_000, env: { ...process.env, GUPPY_SHARED_TEMP: shared } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, new RegExp(`^guppy-pstemp-${r.pid}-`), 'PS POLICY sweep: the folder carries its process\'s pid');
+  assert.deepEqual(fs.readdirSync(shared).sort(), kept, 'PS POLICY sweep: the first psTempDir removed the dead pid\'s folder (and its own went at exit)');
+});
+
+/** Andy's probe: a test process (TEMP = jail) runs PowerShell through psEnv(..., { temp }), kills it the
+ *  moment a policy file shows in the temp it gave it, and is then itself killed (no exit handler). */
+function killedOnFirstFile(jail, shared, temp) {
+  const inner = path.join(tmpRoot, 'killed-inner.cjs');
+  fs.writeFileSync(inner, `
+const fs = require('fs'), { spawn } = require('child_process');
+const { psEnv } = require(${JSON.stringify(path.join(__dirname, 'tools', 'ps-env.cjs'))});
+const temp = process.argv[2] === 'on';
+const dir = psEnv(process.env, { temp }).TEMP;
+const c = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 20'], { env: psEnv(process.env, { temp }), windowsHide: true, stdio: 'ignore' });
+let killed = false;
+fs.watch(dir, (_e, f) => { if (!killed && /^__PSScriptPolicyTest_/.test(String(f))) { killed = true; c.kill(); process.stdout.write('killed ' + f + '\\n'); } });
+setTimeout(() => { c.kill(); process.stdout.write('timer\\n'); }, 30000);
+`);
+  return new Promise((resolve) => {
+    const env = { ...process.env, TEMP: jail, TMP: jail, TMPDIR: jail, GUPPY_SHARED_TEMP: shared, PSModuleAnalysisCachePath: path.join(tmpRoot, 'modcache', 'ModuleAnalysisCache') };
+    const p = spawn(process.execPath, [inner, temp ? 'on' : 'off'], { env, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    let out = '';
+    p.stdout.on('data', (d) => { out += d; if (/killed|timer/.test(out)) p.kill('SIGKILL'); });
+    p.on('close', () => setTimeout(() => resolve({ out, pid: p.pid }), 1000));
+  });
+}
+
+test('KILLED: PowerShell killed on its first policy file, then its test process killed: the jail stays clean, the left folder is swept', { skip: !WIN && 'Windows PowerShell only', timeout: 120_000 }, async () => {
+  const jail = path.join(tmpRoot, 'jail-killed');
+  const shared = path.join(tmpRoot, 'shared-killed');
+  fs.mkdirSync(jail);
+  fs.mkdirSync(shared);
+  // The control (the mutant "psEnv leaves the temp alone"): the cut-short PowerShell leaves its policy file in the jail.
+  const control = await killedOnFirstFile(jail, shared, false);
+  assert.match(control.out, /^killed __PSScriptPolicyTest_/, 'PS POLICY control: the PowerShell was killed on its first policy file');
+  assert.ok(fs.readdirSync(jail).some((f) => POLICY.test(f)), `PS POLICY control: without psEnv the killed PowerShell leaves its policy file in the jail (${fs.readdirSync(jail)})`);
+  for (const f of fs.readdirSync(jail)) fs.rmSync(path.join(jail, f), { recursive: true, force: true });
+  const fixed = await killedOnFirstFile(jail, shared, true);
+  assert.match(fixed.out, /^killed __PSScriptPolicyTest_/, 'PS POLICY: the PowerShell was killed on its first policy file');
+  assert.deepEqual(fs.readdirSync(jail), [], 'PS POLICY: with psEnv the killed PowerShell leaves nothing in the jail');
+  const left = fs.readdirSync(shared);
+  assert.deepEqual(left.map((n) => n.replace(/-[^-]+$/, '')), [`guppy-pstemp-${fixed.pid}`], `PS POLICY: the killed test process left its own folder in the real temp folder (${left})`);
+  assert.deepEqual(sweepPsTempDirs(shared), left, 'PS POLICY: the sweep removes the dead test process\'s folder');
+  assert.deepEqual(fs.readdirSync(shared), [], 'PS POLICY: the real temp folder is clean after the sweep');
+});
+
+test('RUNNER: run-tests sweeps dead pids\' folders at the end of a run', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'tools', 'run-tests.cjs'), 'utf8');
+  assert.match(src, /const code = run\(\{[\s\S]*?\}\);\s*(?:\/\/[^\n]*\n\s*)*require\('\.\/ps-env\.cjs'\)\.sweepPsTempDirs\(\);\s*process\.exit\(code\);/, 'PS POLICY runner: the sweep runs after run() and before the exit');
 });
 
 test('RUNNER: only run-tests opts out of the PowerShell temp folder, and its files keep their temp jail', () => {

@@ -11,7 +11,9 @@
 // (GetTempPath: TMP, then TEMP) at start-up and deletes them only if it gets that far; one killed or
 // cut short leaves them (test-runner-glob's temp jail, 1.1.98 final sweep). So a test PowerShell also
 // gets a temp folder of its own OUTSIDE the file's temp jail, under the real temp folder
-// (shared-temp.cjs), made per process and removed at exit.
+// (shared-temp.cjs), made per process and removed at exit. A process killed before its exit handler
+// runs leaves its folder there: the folder carries the pid, and the next psTempDir() and the end of
+// a run-tests run remove the folders of dead pids (sweepPsTempDirs).
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -31,11 +33,34 @@ function psCacheDir() {
 
 let tempDir = null;
 const TEMP_KEYS = ['TEMP', 'TMP', 'TMPDIR'];
+const PS_TEMP_RE = /^guppy-pstemp-(\d+)-/;
 
-/** This process's temp folder for its PowerShell children (made on first use, removed at exit). */
+function pidAlive(pid) {
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
+}
+
+/** Removes the guppy-pstemp-<pid>-* folders in `root` whose process is gone: a test process killed
+ *  before its exit handler ran (run-tests ending a hung file) leaves its folder in the real temp
+ *  folder, where no temp jail looks. Returns the names removed. */
+function sweepPsTempDirs(root = require('./shared-temp.cjs').sharedTemp(), { alive = pidAlive } = {}) {
+  const removed = [];
+  let names = [];
+  try { names = fs.readdirSync(root); } catch { return removed; }
+  for (const n of names) {
+    const m = PS_TEMP_RE.exec(n);
+    if (!m || Number(m[1]) === process.pid || alive(Number(m[1]))) continue;
+    try { fs.rmSync(path.join(root, n), { recursive: true, force: true }); removed.push(n); } catch { /* in use: next sweep */ }
+  }
+  return removed;
+}
+
+/** This process's temp folder for its PowerShell children: guppy-pstemp-<pid>-*, made on first use
+ *  (sweeping dead processes' folders first), removed at exit. */
 function psTempDir() {
   if (!tempDir) {
-    tempDir = fs.mkdtempSync(path.join(require('./shared-temp.cjs').sharedTemp(), 'guppy-pstemp-'));
+    const root = require('./shared-temp.cjs').sharedTemp();
+    sweepPsTempDirs(root);
+    tempDir = fs.mkdtempSync(path.join(root, `guppy-pstemp-${process.pid}-`));
     const made = tempDir;
     process.on('exit', () => { try { fs.rmSync(made, { recursive: true, force: true }); } catch { /* still in use: temp */ } });
   }
@@ -56,4 +81,4 @@ function psEnv(base = process.env, { temp = true } = {}) {
   return env;
 }
 
-module.exports = { psEnv, psCacheDir, psTempDir, KEY, TEMP_KEYS };
+module.exports = { psEnv, psCacheDir, psTempDir, sweepPsTempDirs, KEY, TEMP_KEYS };
