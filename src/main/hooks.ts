@@ -2006,6 +2006,9 @@ export class HookServer {
           const st = statSync(path);
           return st.isFile() ? { size: st.size, text: () => readFileSync(path, 'utf8') } : null;
         } catch { return null; }
+      }, (abs) => {
+        // HEAVY-LOCK-VARPATH-READ: `./term` where term is a folder runs nothing.
+        try { return statSync(abs.replace(/^\/([A-Za-z])\//, (_m, d: string) => `${d.toUpperCase()}:/`)).isDirectory(); } catch { return false; }
       }),
       env: HookServer.heavyEnv(),
     };

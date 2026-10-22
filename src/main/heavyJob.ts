@@ -471,6 +471,15 @@ export interface ClassifyCtx {
   expandKnown?: (text: string) => string;
   /** Raw current segment, retained solely to identify a single-quoted sh `-c` body. */
   segment?: string;
+  /** HEAVY-LOCK-VARPATH-READ: the variables this command assigned PowerShell's way (`$logs = ...`),
+   *  lower case. A bare one alone is a value PowerShell prints, not a program. */
+  psVars?: ReadonlySet<string>;
+  /** HEAVY-LOCK-VARPATH-READ: inside a PowerShell script block (`ForEach-Object { }`), where `$_` and
+   *  `$PSItem` are the pipeline's current object. */
+  psBlock?: boolean;
+  /** HEAVY-LOCK-VARPATH-READ (god): the path is a directory, with no runnable sibling the shell would
+   *  pick instead (`term.cmd`, `term.exe`). Absent = never. */
+  dirAt?: (path: string, cd?: string) => boolean;
 }
 
 /** HEAVY-LOCK-LIVE-FILE-192: a word still computed after expansion (a variable the command did not
@@ -488,6 +497,23 @@ function named(word: string, ctx: ClassifyCtx): string | null {
  *  heavy, provisional, as an unreadable script is. */
 function unnamed(what: string): HeavyClass {
   return { heavy: true, kind: 'bench', why: `${what} (a path the lock cannot name)`, provisional: true };
+}
+
+/** HEAVY-LOCK-VARPATH-READ: is this lone word a PowerShell value (`$logs | Select-Object`, `{ $_ }`)?
+ *  PowerShell prints a bare variable; only `& $x` / `. $x` run one. sh RUNS a bare `$cmd`, so (god,
+ *  narrow) only a variable this command assigned PowerShell's way (no sh assignment looks like
+ *  `$x = ...`), or `$_` / `$PSItem` inside a PowerShell script block. */
+function psValue(word: string, ctx: ClassifyCtx): boolean {
+  const m = /^\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))$/.exec(word);
+  if (!m) return false;
+  const name = (m[1] ?? m[2]).toLowerCase();
+  if (name === '_' || name === 'psitem') return ctx.psBlock === true;
+  return ctx.psVars?.has(name) === true;
+}
+
+/** HEAVY-LOCK-VARPATH-READ: ctx.dirAt, where a failing lookup reads as not a directory (fail closed). */
+function isDirAt(path: string, ctx: ClassifyCtx): boolean {
+  try { return ctx.dirAt?.(path, ctx.cd) === true; } catch { return false; }
 }
 
 /** HEAVY-LOCK-SHAPES-189: the nesting a classification follows (`bash -c "bash -c 'bash x.sh'"`, a
@@ -952,8 +978,8 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
     // `&` being sh's background operator here) is the program it names.
     const program = named(ws[0], ctx);
     if (program !== null && depth + 1 < MAX_DEPTH) return classifyWords([program, ...ws.slice(1)], depth + 1, ctx);
-    // An unnamed program alone is unknown (`& $exe`): heavy, provisional.
-    if (ws.length === 1) return unnamed(ws[0]);
+    // An unnamed program alone is unknown (`& $exe`): heavy, provisional. A PowerShell value is not one.
+    if (ws.length === 1) return psValue(ws[0], ctx) ? { heavy: false } : unnamed(ws[0]);
     if (ws.length > 1) {
       const next = ws[1].replace(/\\/g, '/').split('/').pop()!.toLowerCase().replace(/\.(exe|cmd)$/, '');
       if (/^(?:node|npm|pnpm|yarn|npx|electron-vite|electron-builder|electron-rebuild|vitest)$/.test(next)) return classifyWords(ws.slice(1), depth, ctx);
@@ -1086,8 +1112,10 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
   }
   // A { } script block runs: PowerShell's `Start-Job { npm test }`, `Invoke-Command -ScriptBlock {...}`,
   // `... | ForEach-Object { npm test }`, `& { ... }`, and sh's group `{ npm test; }`.
+  // HEAVY-LOCK-VARPATH-READ: inside a block, `$_` is the pipeline's current value (sh's group is split
+  // at its `;` first, so a lone `$_` there never gets here).
   const block = ws[0].startsWith('{') ? scriptBlock(ws) : PS_BLOCK_BIN.test(bin) ? scriptBlock(args) : null;
-  if (block !== null) return block ? nested(block, depth, ctx, `${bin} { }`) : { heavy: false };
+  if (block !== null) return block ? nested(block, depth, { ...ctx, psBlock: true }, `${bin} { }`) : { heavy: false };
   // A script run directly (`./suite.sh`, `scripts/gate.sh`; HEAVY-LOCK-SHAPES-189: `./x.ps1`).
   if (/\.(sh|bash|ps1)$/i.test(ws[0])) return classifyScript(ws[0], depth, ctx);
   // HEAVY-LOCK-LIVE-FILE-192 (b): a JS file run directly (`& $p K3` with `$p = '...\mut.cjs'`, a
@@ -1108,6 +1136,9 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
     const named = classifyWords([bin, ...args], depth, ctx);
     if (named.heavy) return named;
     const c = classifyScript(ws[0], depth, ctx);
+    // HEAVY-LOCK-VARPATH-READ (god): a directory is not a program (`./term` where term is a folder
+    // runs nothing); a path with nothing there stays unknown.
+    if (c.provisional && isDirAt(ws[0], ctx)) return { heavy: false };
     return c.provisional && !/^\.{1,2}[\\/]/.test(ws[0]) ? { heavy: false } : c;
   }
   const has = (...xs: string[]): boolean => xs.some((x) => args.includes(x));
@@ -1304,7 +1335,12 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
   const missingAt = where ? (p: string, cd?: string): string | null => virtual.has(key(p, cd)) ? null : where(expand(p), cd === undefined ? cd : expand(cd)) : undefined;
   // Carry the resolved default dialect too: wrapper classification needs to know that a cmd
   // body was supplied by an outer sh command, even when callers did not spell `dialect: 'sh'`.
-  let here: ClassifyCtx = { ...ctx, dialect: d, stdin: undefined, expand, ...(readScript ? { readScript } : {}), ...(missingAt ? { missingAt } : {}) };
+  // HEAVY-LOCK-VARPATH-READ: a folder named through this command's variables (`D=...; $D/term`).
+  const dirOf = ctx.dirAt;
+  const dirAt = dirOf ? (p: string, cd?: string): boolean => dirOf(expand(p), cd === undefined ? cd : expand(cd)) : undefined;
+  // HEAVY-LOCK-VARPATH-READ: the variables assigned PowerShell's way so far (an outer command's too).
+  const psVars = new Set<string>(ctx.psVars ?? []);
+  let here: ClassifyCtx = { ...ctx, dialect: d, stdin: undefined, expand, psVars, ...(dirAt ? { dirAt } : {}), ...(readScript ? { readScript } : {}), ...(missingAt ? { missingAt } : {}) };
   let body = 0;
   let maybe: HeavyClass | null = null;
   let cursor = 0;
@@ -1381,6 +1417,10 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
       const v = (ws.length === 1 ? psSet[2] : ws[2]).replace(/^["']|["']$/g, '');
       if (!/[$`(@[]/.test(v)) vars.set(psSet[1], v);
     }
+    // HEAVY-LOCK-VARPATH-READ: any value, computed too (`$logs = Get-ChildItem ...`): a later bare
+    // `$logs` is that value printed. Only this shape: sh has no `$x =` assignment.
+    const psName = /^\$([A-Za-z_][A-Za-z0-9_]*)=/.exec(ws[0]) ?? (ws[1] === '=' ? /^\$([A-Za-z_][A-Za-z0-9_]*)$/.exec(ws[0]) : null);
+    if (psName) psVars.add(psName[1].toLowerCase());
     // HEAVY-LOCK-SCRIPT-WRAPPER: `cd X && bash suite.sh` reads X/suite.sh.
     if ((ws[0] === 'cd' || ws[0] === 'pushd') && ws[1] && !ws[1].startsWith('-')) {
       const to = expand(ws[1]);   // B1: `cd X; S=/abs; cd $S` moves to /abs, not X/$S
@@ -1778,8 +1818,11 @@ export function classifyHeavy(toolName: string | undefined, input: unknown, ctx:
 /** HEAVY-LOCK-SCRIPT-WRAPPER: the largest script file the classifier reads. */
 export const HEAVY_SCRIPT_MAX_BYTES = 256 * 1024;
 
+/** HEAVY-LOCK-VARPATH-READ: the extensions a shell tries after a bare name (PATHEXT, and Git Bash's .exe). */
+const RUNNABLE_EXTS = ['.exe', '.com', '.cmd', '.bat', '.ps1', '.sh', '.js', '.cjs', '.mjs'];
+
 /** A ClassifyCtx reading scripts relative to `cwd` (the tool call's), size-capped; null on any failure. */
-export function scriptReaderFor(cwd: string | null | undefined, read: (absPath: string) => { size: number; text: () => string } | null): ClassifyCtx {
+export function scriptReaderFor(cwd: string | null | undefined, read: (absPath: string) => { size: number; text: () => string } | null, isDir?: (absPath: string) => boolean): ClassifyCtx {
   const resolve = (p: string, cd?: string): string | null => {
     const raw = p.replace(/^["']|["']$/g, '');
     if (!raw || raw.includes('$') || cd?.includes('$') || cd?.startsWith('~')) return null;
@@ -1793,6 +1836,14 @@ export function scriptReaderFor(cwd: string | null | undefined, read: (absPath: 
       if (abs === null || read(abs)) return null;
       return abs.replace(/\\/g, '/').replace(/^\/([A-Za-z])\//, (_m, d: string) => `${d.toUpperCase()}:/`);
     },
+    ...(isDir ? {
+      // HEAVY-LOCK-VARPATH-READ: a folder runs nothing, unless a sibling with an extension the shell
+      // tries (`./term` finds term.cmd) is there: that one runs.
+      dirAt: (p: string, cd?: string): boolean => {
+        const abs = resolve(p, cd);
+        return abs !== null && isDir(abs) && !RUNNABLE_EXTS.some((e) => read(`${abs}${e}`) !== null);
+      }
+    } : {}),
     readScript: (p: string, cd?: string): string | null => {
       const abs = resolve(p, cd);
       if (abs === null) return null;
