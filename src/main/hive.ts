@@ -5888,13 +5888,13 @@ const FLOOR_COMMANDS_MD = [
   '- `ledger --file op.json` (or JSON on stdin) — one card update, one message and one memory note; fields in PROTOCOL.md.',
   '- `heavy status` — who holds the heavy slot, who waits, who has it reserved. `heavy release [--to <agent>]` — give up your reservation and queue place (to that agent first). A held slot frees when its job ends.',
   '- `tasks-all` — every card, hot tasks.json plus tasks-archive/ (old done cards move there). `tasks-revive <CARD-ID>` brings one back; `tasks-unsplit --yes` only with Guppy closed.',
-  '- god only: `term read <agent> [--rows N]` (its live screen), `term type <agent>` / `term send <agent>` (text on stdin or `--file`, never in arguments; send presses Enter once the echo settles; `--raw` lets a lone `?` or a leading `!` or `/` through), `term keys <agent> <key>...` (`enter esc tab shift-tab backspace space ctrl-c ctrl-u up down y n 0-9` and more), `term hold on [reason]` / `term hold off` (the floor hold). After a timeout, `term read` before you repeat a type or send.',
+  '- god only: `term read <agent> [--rows N]` (its live screen), `term type <agent>` / `term send <agent>` (text on stdin or `--file`, never in arguments; send presses Enter once the echo settles; `--raw` lets a lone `?` or a leading `!` or `/` through), `term keys <agent> <key>...` (`enter esc tab shift-tab backspace space ctrl-c ctrl-u up down y n 0-9` and more), `term hold on [reason]` / `term hold off` (the floor hold), `term rule <agent> send-again|already-handled` (rules on a held-interfered latch, which `term read` shows, as the Human\'s message box does; it types nothing). After a timeout, `term read` before you repeat a type or send.',
   '',
   '## FLEET SETTINGS (god)',
   '',
-  '- Compaction window: registry.json `agents.<id>.autoCompactWindow` (tokens, 100000-1000000, or `"off"`) wins over config `claudeAutoCompactWindow` (every Claude agent, default 150000) and `godAutoCompactWindow`. It is passed at spawn, so it applies from the agent\'s next spawn or restore. Codex agents use `codexAutoCompactTokenLimit`.',
+  '- Compaction window, first match wins: registry.json `agents.<id>.autoCompactWindow` (tokens, 100000-1000000, or `"off"`); for god only, config `godAutoCompactWindow`; config `claudeAutoCompactWindow` (every Claude agent); else default 150000. The config keys live in the app\'s config.json, in its Electron userData folder. The window is passed at spawn, so a running agent keeps its old one until it is spawned again: the next app start respawns every agent. Codex agents use `codexAutoCompactTokenLimit`.',
   '- Cards: `parked: true` holds a card on purpose; `waitingFor: "install"` with `fixVersion: "x.y.z"` keeps a shipped-but-not-installed card from going stale until that version runs.',
-  '- ASK ME shows humanQA only on a `blocked` card. The ledger does not write humanQA: an agent asks with `needs_human: true` and a card; god adds `options` entries in tasks.json itself.',
+  '- ASK ME shows every not-done card with an open humanQA entry, whatever its status (a `blocked` one in coral); set a card `blocked` only when its work really waits on the Human. The ledger does not write humanQA: an agent asks with `needs_human: true` and a card (the card\'s status untouched); god adds `options` entries in tasks.json itself.',
   ''
 ];
 const COMMANDS_MD = renderCommandsMd();
@@ -5997,7 +5997,8 @@ EOF
   When the op sets no status the reply shows the current one as \`(unchanged)\`.
   \`create\` takes \`title\`, \`description\`, \`assignee\`, \`status\`, \`priority\` (a number) and
   \`dependsOn\`; \`patch\` also takes \`parked\` (true/false), \`waitingFor\` (\`"install"\`) and
-  \`fixVersion\` (\`"x.y.z"\`), and \`null\` clears one. Neither takes \`humanQA\` or tags.
+  \`fixVersion\` (\`"x.y.z"\`); \`null\` clears \`waitingFor\` / \`fixVersion\` and \`parked: false\`
+  un-parks. Neither takes \`humanQA\` or tags.
 - \`message\`: the schema above, without \`wake\` (for \`"wake": "now"\` write an outbox file);
   \`to\` must be a registered agent, \`god\` or \`broadcast\`.
   A \`request\` must name its card (\`message.card\`, or the op's \`card\`): the ask closes when that

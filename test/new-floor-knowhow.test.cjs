@@ -53,6 +53,9 @@ test('the heavy, term and tasks lines match their CLIs', () => {
   const term = read('resources/term-cli.cjs');
   for (const a of ['read', 'type', 'send', 'keys']) assert.ok(FLOOR.includes(`\`term ${a} <agent>`), `term ${a}`);
   assert.ok(FLOOR.includes('`term hold on [reason]`') && FLOOR.includes('`term hold off`'));
+  // GTC-TERM-RULING (Andy): documented for god now; once its term-cli lands, the usage must match.
+  assert.ok(FLOOR.includes('`term rule <agent> send-again|already-handled`'), 'term rule');
+  if (/\['read', 'type', 'send', 'keys', 'rule'\]/.test(term)) assert.match(term, /\| term rule <agent> send-again\|already-handled/);
   assert.match(term, /if \(action === 'read'\)[\s\S]*?rest\[0\] === '--rows'/, 'term read takes --rows');
   for (const k of ['enter', 'esc', 'tab', 'shift-tab', 'ctrl-c', 'ctrl-u']) assert.match(term, new RegExp(` ${k} `), `term key ${k}`);
   assert.match(term, /refuses a lone "\?" and a leading "!" or "\/" \(they act as keys\) unless --raw/);
@@ -70,6 +73,40 @@ test('the compaction window line names the registry key and config keys the app 
     assert.ok(FLOOR.includes(k), `FLEET SETTINGS names ${k}`);
   }
   assert.match(read('src/shared/autoCompactWindow.ts'), /AUTO_COMPACT_WINDOW_ENV = 'CLAUDE_CODE_AUTO_COMPACT_WINDOW'/);
+});
+
+test('the compaction line gives the resolver order and where config.json lives', () => {
+  const resolver = read('src/shared/autoCompactWindow.ts');
+  const body = between(resolver, 'export function autoCompactWindowFor(', '\n}');
+  const order = ['agent.autoCompactWindow', 'cfg?.godAutoCompactWindow', 'cfg?.claudeAutoCompactWindow', 'AUTO_COMPACT_WINDOW_DEFAULT'].map((k) => body.indexOf(k));
+  assert.ok(order.every((i, n) => i >= 0 && (n === 0 || i > order[n - 1])), 'resolver: own > god > floor > default');
+  assert.match(body, /if \(agent\.isGod === true\) \{\n\s+const god = normalizeAutoCompactWindow\(cfg\?\.godAutoCompactWindow\)/);
+  const line = FLOOR.split('\n').find((l) => l.includes('Compaction window'));
+  const named = ['`agents.<id>.autoCompactWindow`', 'for god only, config `godAutoCompactWindow`', 'config `claudeAutoCompactWindow`', 'default 150000'].map((k) => line.indexOf(k));
+  assert.ok(named.every((i, n) => i >= 0 && (n === 0 || i > named[n - 1])), 'FLEET SETTINGS lists them in the resolver order');
+  assert.match(line, /first match wins/);
+  assert.match(read('src/main/config.ts'), /return join\(app\.getPath\('userData'\), 'config\.json'\);/);
+  assert.match(line, /config\.json, in its Electron userData folder/);
+});
+
+test('the ASK ME line says what ASK ME lists (waitsOnHuman), not blocked cards only', () => {
+  const kanban = read('src/renderer/src/components/TasksKanban.tsx');
+  assert.match(kanban, /export function waitsOnHuman\(t: HiveTask\): boolean \{\n {2}return t\.status !== 'done' && !!openQuestion\(t\);\n\}/);
+  const ask = read('src/renderer/src/components/AskMeTab.tsx');
+  assert.match(ask, /tasks\.filter\(waitsOnHuman\)/);
+  assert.match(ask, /d\.status === 'blocked' \? 'var\(--cth-coral\)' : 'var\(--cth-sky\)'/);
+  assert.match(HIVE, /entry on its card, the card's status untouched/, 'surfaceNeedsHuman leaves the status alone');
+  const line = FLOOR.split('\n').find((l) => l.includes('ASK ME shows'));
+  assert.match(line, /ASK ME shows every not-done card with an open humanQA entry, whatever its status/);
+  assert.match(line, /needs_human: true` and a card \(the card\\'s status untouched\)/);
+  assert.doesNotMatch(FLOOR, /only on a `blocked` card/);
+});
+
+test('PROTOCOL.md says which patch fields null clears, as checkCardFields allows', () => {
+  assert.match(LEDGER, /o\.parked !== undefined && typeof o\.parked !== 'boolean'\) return `\$\{where\}\.parked: true or false`/);
+  assert.match(LEDGER, /\.waitingFor: "install" or null`/);
+  assert.match(LEDGER, /\.fixVersion: x\.y\.z or null`/);
+  assert.match(PROTOCOL, /\\`null\\` clears \\`waitingFor\\` \/ \\`fixVersion\\` and \\`parked: false\\`\n {2}un-parks\./);
 });
 
 test('PROTOCOL.md lists the ledger card, message and memory keys exactly as ledger.ts takes them', () => {
