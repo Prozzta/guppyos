@@ -274,6 +274,12 @@ function writeStatus(file, st) {
   fs.renameSync(tmp, file);
 }
 
+/** Status is diagnostic: an AV/EBUSY lock must not abandon the actual related run. */
+function safeWriteStatus(file, st, write = writeStatus, error = console.error) {
+  try { write(file, st); }
+  catch (e) { error(`related-tests: could not update status ${file}: ${String(e.message || e)}`); }
+}
+
 /** Claims the tree for this run, or throws while another live run holds it. Returns the status. */
 function acquireRun(file, info, { now = Date.now(), alive = pidAlive } = {}) {
   const st = { state: 'running', pid: process.pid, startedMs: now, updatedMs: now, ...info, done: 0, reds: 0, current: null };
@@ -283,6 +289,7 @@ function acquireRun(file, info, { now = Date.now(), alive = pidAlive } = {}) {
     let prev = null;
     try { prev = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* unreadable: taken over */ }
     if (liveRun(prev, now, alive)) {
+      if (i > 0) throw new Error(`this related-tests --run was taken over by pid ${prev.pid} (started ${new Date(prev.startedMs).toISOString()}, ${prev.done}/${prev.total} files, now ${prev.current || '-'}). Wait for it; its status is ${file}`);
       throw new Error(`refused: another related-tests --run is live in this tree (pid ${prev.pid}, started ${new Date(prev.startedMs).toISOString()}, ${prev.done}/${prev.total} files, now ${prev.current || '-'}). Wait for it; its status is ${file}`);
     }
     st.tookOver = prev ? { pid: prev.pid, state: prev.state, updatedMs: prev.updatedMs } : 'unreadable';
@@ -342,27 +349,29 @@ function parseArgs(argv) {
   return o;
 }
 
-function main(argv) {
+function main(argv, { runLightFn = runLight, writeStatusFn = writeStatus, statusError = console.error } = {}) {
   const o = parseArgs(argv);
   const repo = path.resolve(o.repo);
   const anc = spawnSync('git', ['-C', repo, 'merge-base', '--is-ancestor', o.base, o.tip], { windowsHide: true });
   if (anc.status !== 0) throw new Error(`--base ${o.base} is not an ancestor of --tip ${o.tip}: pass the branch's base (git merge-base ${o.base} ${o.tip})`);
-  const changed = git(repo, ['diff', '--name-only', '--diff-filter=d', `${o.base}..${o.tip}`]).split('\n').map((s) => s.trim()).filter(Boolean);
+  const base = git(repo, ['rev-parse', o.base]).trim();
+  const tip = git(repo, ['rev-parse', o.tip]).trim();
+  const changed = git(repo, ['diff', '--name-only', '--diff-filter=d', `${base}..${tip}`]).split('\n').map((s) => s.trim()).filter(Boolean);
   const show = (rev) => { try { return git(repo, ['show', `${rev}:package.json`]); } catch { return ''; } };
-  const pkg = changed.includes('package.json') ? packageDiff(show(o.base), show(o.tip)) : null;
+  const pkg = changed.includes('package.json') ? packageDiff(show(base), show(tip)) : null;
   const read = (f) => { try { return fs.readFileSync(path.join(repo, f), 'utf8'); } catch { return null; } };
   const fd = featureDirsOf(repo);
-  const inventory = inventoryPaths(git(repo, ['diff', '--name-status', '-M', '-z', `${o.base}..${o.tip}`]), fd.dirs);
+  const inventory = inventoryPaths(git(repo, ['diff', '--name-status', '-M', '-z', `${base}..${tip}`]), fd.dirs);
   const set = relatedSet({ changed, files: candidateFiles(repo), read, pkg, inventory, warnings: fd.warning ? [fd.warning] : [] });
-  const line = summary(set, o.base, o.tip);
-  const result = { base: o.base, tip: o.tip, ...set, summary: line };
+  const line = summary(set, base, tip);
+  const result = { base, tip, ...set, summary: line };
   if (o.run) {
     const file = runStatusPath(repo);
-    const st = acquireRun(file, { base: o.base, tip: o.tip, total: set.lanes.light.length, summary: line });
+    const st = acquireRun(file, { base, tip, total: set.lanes.light.length, summary: line });
     console.error(`related-tests: status ${file}`);
-    const update = (patch) => { Object.assign(st, patch, { updatedMs: Date.now() }); writeStatus(file, st); };
+    const update = (patch) => { Object.assign(st, patch, { updatedMs: Date.now() }); safeWriteStatus(file, st, writeStatusFn, statusError); };
     try {
-      Object.assign(result, runLight({ repo, base: o.base, light: set.lanes.light, log: o.json ? () => {} : (s) => console.log(s), onStatus: update }));
+      Object.assign(result, runLightFn({ repo, base, light: set.lanes.light, log: o.json ? () => {} : (s) => console.log(s), onStatus: update }));
       update({ state: 'done', rc: result.rc, line: result.line, finishedMs: Date.now() });
     } catch (e) {
       update({ state: 'failed', error: String(e.message || e).split('\n')[0], finishedMs: Date.now() });
@@ -380,7 +389,7 @@ function main(argv) {
   return o.run ? result.rc : 0;
 }
 
-module.exports = { pathPatterns, namesViaDir, namedPaths, parseFailures, sameOnBase, packageDiff, packageNamed, laneOf, INVENTORY_TESTS, collectedPath, perfPath, inventoryPaths, featureDirsOf, candidateFiles, relatedSet, summary, parseCounts, runFile, runLight, RUN_STALE_MS, runStatusPath, pidAlive, liveRun, acquireRun, main };
+module.exports = { pathPatterns, namesViaDir, namedPaths, parseFailures, sameOnBase, packageDiff, packageNamed, laneOf, INVENTORY_TESTS, collectedPath, perfPath, inventoryPaths, featureDirsOf, candidateFiles, relatedSet, summary, parseCounts, runFile, runLight, FILE_TIMEOUT_MS, RUN_STALE_MS, runStatusPath, pidAlive, liveRun, writeStatus, safeWriteStatus, acquireRun, main };
 
 if (require.main === module) {
   try { process.exitCode = main(process.argv.slice(2)); } catch (e) { console.error(String(e.message || e)); process.exitCode = 2; }
