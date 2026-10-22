@@ -18,6 +18,8 @@
  *   R7 same on base by counts              R8 no dir rule (a new module in src/main)
  *   R9 a non-ancestor base accepted        R10 every test/tools runner is a census
  *   R11 nameless reds by the first line alone (no rc, an empty line matches)
+ *   R12 no inventory rule (RELATED-TEST-INVENTORY-198: an added test file never selects the glob pin)
+ *   R13 a deleted test file is not an inventory change
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -223,6 +225,66 @@ function ancestorChecks(M) {
 }
 test('--base must be an ancestor of --tip (a moved INT head would count its own changes)', () => ancestorChecks(REAL));
 
+// RELATED-TEST-INVENTORY-198: 60dba590 added 2 test files and RELATED never ran the glob pin (493).
+let invFixture = null;
+function invRepo() {
+  if (invFixture) return invFixture;
+  const dir = tempDir('related-inventory-');
+  fs.mkdirSync(path.join(dir, 'src'));
+  fs.mkdirSync(path.join(dir, 'test', 'tools'), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'test', 'fixtures'));
+  const write = (f, s) => fs.writeFileSync(path.join(dir, f), s);
+  const commit = (m) => { git(dir, 'add', '-A'); git(dir, 'commit', '-q', '-m', m); return git(dir, 'rev-parse', 'HEAD').trim(); };
+  git(dir, 'init', '-q');
+  git(dir, 'config', 'user.email', 'fixture@example.invalid');
+  git(dir, 'config', 'user.name', 'fixture');
+  write('src/a.ts', 'export const v = "v1";\n');
+  write('test/test-runner-glob.test.cjs', PASS);
+  write('test/test-runner-perf-lane.test.cjs', PASS);
+  write('test/d.test.cjs', PASS);
+  const base = commit('base');
+  const at = (name, change) => { git(dir, 'checkout', '-q', '--detach', base); change(); return commit(name); };
+  invFixture = {
+    dir, base,
+    add: at('add', () => write('test/new.test.cjs', PASS)),
+    del: at('del', () => fs.rmSync(path.join(dir, 'test', 'd.test.cjs'))),
+    ren: at('ren', () => git(dir, 'mv', 'test/d.test.cjs', 'test/e.test.cjs')),
+    src: at('src', () => write('src/a.ts', 'export const v = "v2";\n')),
+    fixture: at('fixture', () => write('test/fixtures/y.test.cjs', PASS))
+  };
+  return invFixture;
+}
+
+function cliSet(M, dir, base, tip) {
+  const lines = [];
+  const log = console.log;
+  console.log = (s) => lines.push(s);
+  try { M.main(['--base', base, '--tip', tip, '--repo', dir, '--json']); } finally { console.log = log; }
+  return JSON.parse(lines.join('\n'));
+}
+
+const INV = ['test/test-runner-glob.test.cjs', 'test/test-runner-perf-lane.test.cjs'];
+function inventoryChecks(M) {
+  const r = invRepo();
+  for (const kind of ['add', 'del', 'ren']) {
+    const j = cliSet(M, r.dir, r.base, r[kind]);
+    for (const f of INV) {
+      assert.ok(j.lanes.light.includes(f), `A TEST FILE ${kind.toUpperCase()} SELECTS ${f}`);
+      assert.deepEqual(j.why[f], ['(test inventory changed)'], `${kind}: ${f} is there for the inventory`);
+    }
+  }
+  for (const kind of ['src', 'fixture']) {
+    const j = cliSet(M, r.dir, r.base, r[kind]);
+    for (const f of INV) assert.ok(!j.lanes.light.includes(f), `${kind}: no collected test file added or removed, so no ${f}`);
+  }
+  assert.equal(M.collectedPath('test/heavy-lock/x.test.cjs', ['heavy-lock']), true, 'a feature dir file is collected');
+  assert.equal(M.collectedPath('test/fixtures/x.test.cjs', ['heavy-lock']), false, 'a nested non-feature dir is not');
+  assert.equal(M.collectedPath('test/tools/x-mutants.cjs', []), false, 'a census runner is not a suite file');
+  assert.deepEqual(M.inventoryPaths('M\ttest/a.test.cjs\nA\tsrc/b.ts\nR100\ttest/d.test.cjs\ttest/heavy-lock/d.test.cjs\n', ['heavy-lock']),
+    ['test/d.test.cjs', 'test/heavy-lock/d.test.cjs'], 'a modify is no inventory change; a rename counts on both sides');
+}
+test('inventory: a branch that adds, deletes or renames a collected test file selects test-runner-glob and test-runner-perf-lane; a src or fixture-only change does not', () => inventoryChecks(REAL));
+
 // ── mutant census ──────────────────────────────────────────────────────────────────────────────
 function compile(text) {
   const m = new Module(SRC, module);
@@ -242,10 +304,12 @@ const MUTANTS = [
   ['R9 a non-ancestor base accepted', 'if (anc.status !== 0) throw', 'if (false) throw', ancestorChecks],
   ['R10 every test/tools runner is a census', "? 'census' : 'tools'", "? 'census' : 'census'", laneChecks],
   ['R11 nameless reds by the first line alone', "return tip.rc === base.rc && !!tip.firstError && tip.firstError === base.firstError;", "return (tip.firstError || '') === (base.firstError || '');", failureChecks],
+  ['R12 no inventory rule', "    if (inventory.length && INVENTORY_TESTS.includes(f)) hits.push('(test inventory changed)');", '', inventoryChecks],
+  ['R13 a deleted test file is not an inventory change', 'if (!status || !/^[ADR]/.test(status)) continue;', 'if (!status || !/^[AR]/.test(status)) continue;', inventoryChecks],
   ['R6 the base worktree is left behind', "try { git(repo, ['worktree', 'remove', '--force', baseTree]); } catch { fs.rmSync(baseTree, { recursive: true, force: true }); }", '', runChecks]
 ];
 
-test('MUTANT CENSUS RELATED-TESTS: R1-R11 each apply once and die at their named check', () => {
+test('MUTANT CENSUS RELATED-TESTS: R1-R13 each apply once and die at their named check', () => {
   const text = fs.readFileSync(SRC, 'utf8');
   for (const [name, from, to, check] of MUTANTS) {
     assert.equal(text.split(from).length, 2, `${name}: its anchor is in the script exactly once`);
