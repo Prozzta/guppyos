@@ -159,6 +159,9 @@ static class HeavyJob
         // every ^ & | < > outside quotes is escaped, and delayed expansion is off.
         var psi = new System.Diagnostics.ProcessStartInfo(Environment.GetEnvironmentVariable("ComSpec") ?? "cmd.exe", "/d /v:off /s /c \"" + EscapeRest(cmdRest) + "\"") { UseShellExecute = false };
         psi.EnvironmentVariables["GUPPY_HEAVYJOB_PCT"] = "%";
+        // Job CPU rate does not alter GetActiveProcessorCount/availableParallelism.  Children use
+        // this explicit state to size their worker pools to the capped CPU share.
+        psi.EnvironmentVariables["GUPPY_HEAVY_CPU_CAP"] = cap ? "1" : "0";
         using (var p = System.Diagnostics.Process.Start(psi)) { p.WaitForExit(); return p.ExitCode; }
     }
 

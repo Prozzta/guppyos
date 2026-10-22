@@ -102,6 +102,10 @@ function prepareFileJob({ csc = CSC, src = FILE_JOB_SRC, dir = require('./shared
  * (0 = record only, no cap: the before measurement). { slots, dir } with a fresh gate folder.
  */
 const START_GATE_PRELOAD = path.join(__dirname, 'file-start-gate.cjs');
+// HALFCORES-OVERSUBSCRIBE: a Job Object cap reduces CPU time, not the processor count
+// Node sees.  Keep node --test and the start gate within the share the heavy helper gave it.
+const cappedCores = (env = process.env, cores = os.availableParallelism()) =>
+  env.GUPPY_HEAVY_CPU_CAP === '1' ? Math.max(1, Math.floor(cores / 2)) : cores;
 const startSlots = (env = process.env, cores = os.availableParallelism()) => {
   const n = Number(env.GUPPY_START_SLOTS);
   return env.GUPPY_START_SLOTS !== undefined && env.GUPPY_START_SLOTS !== '' && Number.isInteger(n) && n >= 0 ? n : Math.max(2, Math.ceil(cores / 4));
@@ -233,6 +237,9 @@ function run({
   err = (line) => process.stderr.write(`${line}\n`),
   // CLAIMS-PERF-LANE: the serial lane's folder (the CLI passes test/perf); absent = no lane.
   perfDir = null,
+  // Injected by the runner contract tests; production uses the OS-visible count.
+  cores = os.availableParallelism(),
+  processEnv = process.env,
 } = {}) {
   let entries;
   try {
@@ -262,11 +269,13 @@ function run({
   // TEST-PS-MODCACHE-LEAK: one PowerShell module-cache path in a temp folder for every file, so a
   // PowerShell that a test or the product under test starts never writes it under the repo root.
   // PS-POLICY-TEMP-LEAK: not the PowerShell temp folder; the files' temp jail sets theirs.
-  const env = require('./ps-env.cjs').psEnv(process.env, { temp: false });
+  const env = require('./ps-env.cjs').psEnv(processEnv, { temp: false });
   delete env.NODE_TEST_CONTEXT;
+  const concurrency = cappedCores(env, cores);
+  if (env.GUPPY_HEAVY_CPU_CAP === '1') log(`[test-runner] heavy CPU cap: node concurrency ${concurrency} of ${cores} visible cores`);
   // LOAD-BURST-196: the gate loads first, so a file's job join below is inside its start slot too.
   let gate = null;
-  try { gate = startGate({ slots: startSlots(env, os.availableParallelism()) }); } catch (e) { err(`[test-runner] no start gate (${String(e)}): every file loads at once (LOAD-BURST-196)`); }
+  try { gate = startGate({ slots: startSlots(env, concurrency) }); } catch (e) { err(`[test-runner] no start gate (${String(e)}): every file loads at once (LOAD-BURST-196)`); }
   if (gate) {
     const opt = `--require "${START_GATE_PRELOAD.split(path.sep).join('/')}"`;
     env.NODE_OPTIONS = [env.NODE_OPTIONS, opt].filter(Boolean).join(' ');
@@ -282,7 +291,7 @@ function run({
     env.GUPPY_TEMP_JAIL_OPT = opt;
   }
   try {
-    return runGated({ filters, rel, env, gate, jail, spawn, cwd, timeoutMs, isTTY, eventsFile, readFile, removeFile, failureFile, writeFailureFile, watchdog, fileJob, log, err, perfDir, readdir });
+    return runGated({ filters, rel, env, gate, jail, spawn, cwd, timeoutMs, isTTY, eventsFile, readFile, removeFile, failureFile, writeFailureFile, watchdog, fileJob, log, err, perfDir, readdir, concurrency, cores });
   } finally {
     if (gate) { try { fs.rmSync(gate.dir, { recursive: true, force: true }); } catch { /* best effort */ } }
     if (jail) { try { removeJail(jail.root); } catch (e) { err(`[test-runner] the run's temp folders could not be removed (${e.code || e.message}; a child still holds a file): ${jail.root} (TEST-TEMP-HYGIENE)`); } }
@@ -300,7 +309,7 @@ function burstLine(text, slots) {
 }
 
 /** run() from the per-file jobs on, with the start gate in place (LOAD-BURST-196). */
-function runGated({ rel, env, gate, jail = null, spawn, cwd, timeoutMs, isTTY, eventsFile, readFile, removeFile, failureFile, writeFailureFile, watchdog, fileJob, log, err, perfDir, filters, readdir }) {
+function runGated({ rel, env, gate, jail = null, spawn, cwd, timeoutMs, isTTY, eventsFile, readFile, removeFile, failureFile, writeFailureFile, watchdog, fileJob, log, err, perfDir, filters, readdir, concurrency, cores }) {
   const job = fileJob();
   if (job.exe) {
     const opt = `--require "${FILE_JOB_PRELOAD.split(path.sep).join('/')}"`;
@@ -312,7 +321,7 @@ function runGated({ rel, env, gate, jail = null, spawn, cwd, timeoutMs, isTTY, e
     err(`[test-runner] per-file jobs are unavailable (${job.why}): a hung file is killed from a process snapshot, which can miss a process born just before the kill (LOAD-FLAKES-178)`);
   }
   const fx = { spawn, cwd, timeoutMs, isTTY, env, readFile, removeFile, watchdog, jobExe: job.exe, err };
-  const main = runNodeTest({ ...fx, rel, eventsFile, label: '', extraArgs: [] });
+  const main = runNodeTest({ ...fx, rel, eventsFile, label: '', extraArgs: concurrency < cores ? [`--test-concurrency=${concurrency}`] : [] });
   if (gate) log(burstLine(readFile(path.join(gate.dir, 'starts.jsonl')), gate.slots));
   // A child that never started, or was killed by a signal (status null), is a failure, not a pass.
   if (spawnFailed(main.res, '', err)) return totals(1, main.counts, 'not run', log, main.failures, { failureFile, writeFailureFile });
@@ -450,7 +459,7 @@ function totals(code, counts, laneState, log, failures = [], {
   return code;
 }
 
-module.exports = { prepareFileJob, FILE_JOB_PRELOAD, prepareTempJail, TEMP_JAIL_PRELOAD, tempLeaks, reportTempLeaks,prepareStartGate, startSlots, START_GATE_PRELOAD, burstLine, selectTestFiles, discoverTestFiles, FEATURE_TEST_DIRS, run, runPerfLane, runCounts, failingTests, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
+module.exports = { prepareFileJob, FILE_JOB_PRELOAD, prepareTempJail, TEMP_JAIL_PRELOAD, tempLeaks, reportTempLeaks,prepareStartGate, startSlots, cappedCores, START_GATE_PRELOAD, burstLine, selectTestFiles, discoverTestFiles, FEATURE_TEST_DIRS, run, runPerfLane, runCounts, failingTests, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
 
 if (require.main === module) {
   const repoRoot = path.resolve(__dirname, '..', '..');

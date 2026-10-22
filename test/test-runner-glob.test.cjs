@@ -99,6 +99,22 @@ test('the expanded file list is passed to node --test - no glob character surviv
   assert.deepStrictEqual(fileArgs.map((a) => path.basename(a)), ['a.test.cjs', 'b.test.cjs']);
 });
 
+test('a hard-capped heavy job halves node test concurrency and its startup gate', () => {
+  const { spawn, calls } = fakeSpawn({ status: 0 });
+  const gates = [];
+  const logs = sink();
+  const code = run({
+    testDir: 'test', readdir: () => ['a.test.cjs'], spawn, log: logs.write,
+    processEnv: { GUPPY_HEAVY_CPU_CAP: '1' }, cores: 32,
+    startGate: ({ slots }) => { gates.push(slots); return null; },
+  });
+  assert.strictEqual(code, 0);
+  assert.deepStrictEqual(gates, [4], 'the gate uses the 16-core capped share');
+  assert.ok(calls[0].args.includes('--test-concurrency=16'), calls[0].args.join(' '));
+  assert.match(logs.lines.join('\n'), /node concurrency 16 of 32 visible cores/);
+  assert.strictEqual(runner.cappedCores({ GUPPY_HEAVY_CPU_CAP: '1' }, 1), 1, 'one visible core remains one');
+});
+
 // ── TEST-RUNNER-FILE-TIMEOUT (1.1.76): a file that never finishes is a NAMED failure ──────────
 
 test('every run carries the per-file wall-clock limit, the normal reporter, and the timeout reporter', () => {
