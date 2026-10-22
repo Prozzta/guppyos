@@ -2,8 +2,8 @@
 // bench an agent runs) into a named Job Object with the user's limits. Built from this source with the
 // in-box .NET Framework compiler at build time (tools/build-heavyjob.cjs); never committed as a binary.
 //
-//   guppy-heavyjob join <jobName> <background 0|1> <half 0|1>
-//       Guppy writes it as `guppy-heavyjob join <job> <b> <h>; <the command>`, one line that every
+//   guppy-heavyjob join <jobName> <background 0|1> <cap 0|1>
+//       Guppy writes it as `guppy-heavyjob join <job> <b> <c>; <the command>`, one line that every
 //       shell reads: bash, sh and PowerShell run the two statements in turn; cmd has no `;`
 //       separator and hands this helper the rest of the line, which it then runs itself under
 //       `cmd /d /s /c` (exit code passed through).
@@ -14,15 +14,16 @@
 //       KILL_ON_JOB_CLOSE: the job lives as long as any process in it (a backgrounded job outlives
 //       the tool call). Always exits 0 so the command after it keeps its own exit code; a failure is
 //       one line on stderr.
-//   guppy-heavyjob set <jobName> <background 0|1> <half 0|1>
+//   guppy-heavyjob set <jobName> <background 0|1> <cap 0|1>
 //       Live apply: replaces the job's limits. A limit turned off also resets the members (removing a
-//       limit leaves a process where the limit put it): priority NORMAL, affinity the system mask.
+//       limit leaves a process where the limit put it): priority NORMAL, CPU rate disabled; affinity
+//       is never changed by this helper.
 //   guppy-heavyjob list <jobName>
 //       One JSON line per process in the job: pid, name, priorityClass, cpus, mask, createdMs.
 //   guppy-heavyjob query <jobName>
-//       HALFCORES-SUITE-198: read-only, the job's OWN limits as one JSON line:
-//       {"background":bool,"half":bool,"mask":"<decimal>"|null}. A process's affinity is the AND of
-//       every job it is nested in, so its mask cannot tell this job's limit apart from an outer one's.
+//       HALFCORES-OVERSUBSCRIBE: read-only, the job's OWN limits as one JSON line:
+//       {"background":bool,"cap":bool,"rate":5000|0}. The cap is JobObjectCpuRateControlInformation
+//       (class 15), hard-capped at 50% of the whole machine; it never changes affinity.
 //   guppy-heavyjob serve
 //       Guppy's own channel (stdin/stdout, one JSON line per request): create, set, list, query and close
 //       <job>. It holds the handle of every job Guppy made, so a job keeps its name (a live change and
@@ -32,8 +33,8 @@
 //       line {"event":"exit","job":<id>,"msg":<n>,"pid":<pid>}, between replies, never inside one.
 //       Windows does not guarantee these messages, so Guppy's own checks stay as the fallback.
 //
-// background = PriorityClass BELOW_NORMAL (CPU priority only). half = affinity of floor(n/2) logical
-// processors (at least 1), n = the active logical processors of the machine.
+// background = PriorityClass BELOW_NORMAL (CPU priority only). cap = 50.00% CPU rate of the whole
+// machine, via ENABLE|HARD_CAP, with all logical processors still visible.
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
@@ -49,6 +50,7 @@ static class HeavyJob
         public UIntPtr Affinity; public uint PriorityClass, SchedulingClass;
     }
     [StructLayout(LayoutKind.Sequential)] struct IO_COUNTERS { public ulong a, b, c, d, e, f; }
+    [StructLayout(LayoutKind.Sequential)] struct CPU_RATE { public uint ControlFlags, CpuRate; }
     [StructLayout(LayoutKind.Sequential)]
     struct EXT_LIMIT { public BASIC_LIMIT Basic; public IO_COUNTERS Io; public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed; }
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -57,6 +59,7 @@ static class HeavyJob
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr CreateJobObjectW(IntPtr sa, string name);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr OpenJobObjectW(uint access, bool inherit, string name);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetInformationJobObject(IntPtr job, int cls, ref EXT_LIMIT info, int len);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetInformationJobObject(IntPtr job, int cls, ref CPU_RATE info, int len);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool QueryInformationJobObject(IntPtr job, int cls, IntPtr info, int len, IntPtr ret);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr proc);
     [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
@@ -64,9 +67,7 @@ static class HeavyJob
     [DllImport("kernel32.dll")] static extern uint GetPriorityClass(IntPtr h);
     [DllImport("kernel32.dll")] static extern bool SetPriorityClass(IntPtr h, uint cls);
     [DllImport("kernel32.dll")] static extern bool GetProcessAffinityMask(IntPtr h, out UIntPtr proc, out UIntPtr sys);
-    [DllImport("kernel32.dll")] static extern bool SetProcessAffinityMask(IntPtr h, UIntPtr mask);
     [DllImport("kernel32.dll")] static extern bool GetProcessTimes(IntPtr h, out long create, out long exit, out long kernel, out long user);
-    [DllImport("kernel32.dll")] static extern uint GetActiveProcessorCount(ushort group);
     [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
     [DllImport("kernel32.dll")] static extern int GetCurrentProcessId();
     [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint pid);
@@ -77,8 +78,9 @@ static class HeavyJob
     [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr CreateIoCompletionPort(IntPtr file, IntPtr port, UIntPtr key, uint threads);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetQueuedCompletionStatus(IntPtr port, out uint bytes, out UIntPtr key, out IntPtr overlapped, uint ms);
 
-    const uint LIMIT_AFFINITY = 0x10, LIMIT_PRIORITY_CLASS = 0x20;
+    const uint LIMIT_PRIORITY_CLASS = 0x20;
     const uint BELOW_NORMAL = 0x4000, NORMAL = 0x20;
+    const uint CPU_RATE_ENABLE = 0x1, CPU_RATE_HARD_CAP = 0x4, CPU_RATE_50_PERCENT = 5000;
     const uint JOB_ALL = 0x1F001F;
     const uint PROC_SET_QUOTA_TERMINATE_QUERY = 0x0100 | 0x0001 | 0x0400 | 0x0200; // SET_QUOTA|TERMINATE|QUERY_INFORMATION|SET_INFORMATION
     static readonly HashSet<string> Shells = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -95,7 +97,7 @@ static class HeavyJob
             if (a.Length == 1 && a[0] == "serve") return Serve();
         }
         catch (Exception e) { Console.Error.WriteLine("[guppy] heavy-job limits not applied: " + e.Message); return a.Length > 0 && a[0] == "join" ? 0 : 3; }
-        Console.Error.WriteLine("usage: guppy-heavyjob join|set <job> <background 0|1> <half 0|1> | list <job> | query <job> | serve");
+        Console.Error.WriteLine("usage: guppy-heavyjob join|set <job> <background 0|1> <cap 0|1> | list <job> | query <job> | serve");
         return 2;
     }
 
@@ -106,35 +108,34 @@ static class HeavyJob
         return "Local\\guppy-heavy-" + id;
     }
 
-    static uint HalfCount() { uint n = GetActiveProcessorCount(0xFFFF); if (n > 64) n = 64; return Math.Max(1u, n / 2); }
-    static ulong HalfMask() { uint k = HalfCount(); return k >= 64 ? ulong.MaxValue : (1UL << (int)k) - 1; }
-
-    static EXT_LIMIT Limits(bool background, bool half)
+    static EXT_LIMIT Limits(bool background)
     {
         var x = new EXT_LIMIT();
         if (background) { x.Basic.LimitFlags |= LIMIT_PRIORITY_CLASS; x.Basic.PriorityClass = BELOW_NORMAL; }
-        if (half) { x.Basic.LimitFlags |= LIMIT_AFFINITY; x.Basic.Affinity = (UIntPtr)HalfMask(); }
         return x;
     }
 
-    static void Apply(IntPtr job, bool background, bool half)
+    static void Apply(IntPtr job, bool background, bool cap)
     {
-        var x = Limits(background, half);
+        var x = Limits(background);
         if (!SetInformationJobObject(job, 9, ref x, Marshal.SizeOf(typeof(EXT_LIMIT))))
             throw new Exception("SetInformationJobObject failed (" + Marshal.GetLastWin32Error() + ")");
+        var rate = new CPU_RATE { ControlFlags = cap ? CPU_RATE_ENABLE | CPU_RATE_HARD_CAP : 0, CpuRate = cap ? CPU_RATE_50_PERCENT : 0 };
+        if (!SetInformationJobObject(job, 15, ref rate, Marshal.SizeOf(typeof(CPU_RATE))))
+            throw new Exception("SetInformationJobObject CPU rate failed (" + Marshal.GetLastWin32Error() + ")");
     }
 
-    // cmd: what follows `<half>;` on this process's own command line, as cmd passed it.
+    // cmd: what follows `<cap>;` on this process's own command line, as cmd passed it.
     static string CmdRest()
     {
         var m = System.Text.RegularExpressions.Regex.Match(Environment.CommandLine, @"\bjoin\s+[A-Za-z0-9_-]+\s+[01]\s+[01];");
         return m.Success ? Environment.CommandLine.Substring(m.Index + m.Length).TrimStart() : ""; // a trailing space can be the command's own
     }
 
-    static int Join(string name, bool background, bool half, string cmdRest)
+    static int Join(string name, bool background, bool cap, string cmdRest)
     {
         // The command always runs: a failed join is one line on stderr, never a lost command.
-        try { JoinChain(name, background, half, cmdRest != null); }
+        try { JoinChain(name, background, cap, cmdRest != null); }
         catch (Exception e) { Console.Error.WriteLine("[guppy] heavy-job limits not applied: " + e.Message); }
         if (string.IsNullOrEmpty(cmdRest)) return 0;
         // CODEX-CMD-COMPUTED-SHELL-192: cmd already parsed the rest once (carets taken, %VAR%
@@ -161,7 +162,7 @@ static class HeavyJob
         return sb.ToString();
     }
 
-    static int JoinChain(string name, bool background, bool half, bool self)
+    static int JoinChain(string name, bool background, bool cap, bool self)
     {
         List<int> hosts;
         List<int> chain = ShellChain(out hosts);
@@ -174,7 +175,7 @@ static class HeavyJob
         {
             job = CreateJobObjectW(IntPtr.Zero, name);
             if (job == IntPtr.Zero) throw new Exception("CreateJobObject failed (" + Marshal.GetLastWin32Error() + ")");
-            Apply(job, background, half);
+            Apply(job, background, cap);
         }
         // Top of the chain first: the shell that will start the command's processes joins before the
         // fork stub below it exits.
@@ -236,23 +237,22 @@ static class HeavyJob
         return ok ? c : 0;
     }
 
-    static int Set(string name, bool background, bool half)
+    static int Set(string name, bool background, bool cap)
     {
         IntPtr job = OpenJobObjectW(JOB_ALL, false, name);
         if (job == IntPtr.Zero) { Console.Error.WriteLine("no job " + name); return 1; }
-        try { SetJob(job, background, half); } finally { CloseHandle(job); }
+        try { SetJob(job, background, cap); } finally { CloseHandle(job); }
         return 0;
     }
 
-    static void SetJob(IntPtr job, bool background, bool half)
+    static void SetJob(IntPtr job, bool background, bool cap)
     {
-        Apply(job, background, half);
+        Apply(job, background, cap);
         foreach (int pid in Members(job))
         {
             IntPtr h = OpenProcess(0x0200 | 0x0400, false, pid); // SET_INFORMATION | QUERY_INFORMATION
             if (h == IntPtr.Zero) continue;
             if (!background && GetPriorityClass(h) == BELOW_NORMAL) SetPriorityClass(h, NORMAL);
-            if (!half) { UIntPtr pm, sm; if (GetProcessAffinityMask(h, out pm, out sm) && pm != sm) SetProcessAffinityMask(h, sm); }
             CloseHandle(h);
         }
     }
@@ -279,7 +279,7 @@ static class HeavyJob
         return 0;
     }
 
-    // The job's own JobObjectBasicLimitInformation (class 2): its priority and affinity limits only.
+    // The job's own priority and CPU-rate limits. A hard cap never sets an affinity limit.
     static string QueryJob(IntPtr job)
     {
         int size = Marshal.SizeOf(typeof(BASIC_LIMIT)); IntPtr buf = Marshal.AllocHGlobal(size);
@@ -289,9 +289,13 @@ static class HeavyJob
                 throw new Exception("QueryInformationJobObject failed (" + Marshal.GetLastWin32Error() + ")");
             var b = (BASIC_LIMIT)Marshal.PtrToStructure(buf, typeof(BASIC_LIMIT));
             bool background = (b.LimitFlags & LIMIT_PRIORITY_CLASS) != 0 && b.PriorityClass == BELOW_NORMAL;
-            bool half = (b.LimitFlags & LIMIT_AFFINITY) != 0;
-            return "{\"background\":" + (background ? "true" : "false") + ",\"half\":" + (half ? "true" : "false")
-                + ",\"mask\":" + (half ? "\"" + b.Affinity.ToUInt64() + "\"" : "null") + "}";
+            int rsize = Marshal.SizeOf(typeof(CPU_RATE)); IntPtr rbuf = Marshal.AllocHGlobal(rsize);
+            try {
+                if (!QueryInformationJobObject(job, 15, rbuf, rsize, IntPtr.Zero)) throw new Exception("QueryInformationJobObject CPU rate failed (" + Marshal.GetLastWin32Error() + ")");
+                var rate = (CPU_RATE)Marshal.PtrToStructure(rbuf, typeof(CPU_RATE));
+                bool cap = (rate.ControlFlags & (CPU_RATE_ENABLE | CPU_RATE_HARD_CAP)) == (CPU_RATE_ENABLE | CPU_RATE_HARD_CAP) && rate.CpuRate == CPU_RATE_50_PERCENT;
+                return "{\"background\":" + (background ? "true" : "false") + ",\"cap\":" + (cap ? "true" : "false") + ",\"rate\":" + (cap ? CPU_RATE_50_PERCENT : 0) + ",\"affinity\":null}";
+            } finally { Marshal.FreeHGlobal(rbuf); }
         }
         finally { Marshal.FreeHGlobal(buf); }
     }
@@ -417,7 +421,6 @@ static class HeavyJob
                     if (jobs.TryGetValue(w[1], out job)) { CloseHandle(job); jobs.Remove(w[1]); long k; if (keys.TryGetValue(w[1], out k)) { lock (PortKeys) PortKeys.Remove(k); keys.Remove(w[1]); } }
                     reply = "{\"ok\":true}";
                 }
-                else if (w.Length == 1 && w[0] == "cpus") reply = "{\"ok\":true,\"logical\":" + GetActiveProcessorCount(0xFFFF) + ",\"half\":" + HalfCount() + "}";
                 else throw new Exception("bad request");
             }
             catch (Exception e) { reply = "{\"ok\":false,\"error\":\"" + e.Message.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"}"; }

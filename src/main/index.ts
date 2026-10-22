@@ -1333,8 +1333,8 @@ const heavyLock = new HeavyJobLock({
   notifyLapse: (agentId, kind, why) => notifyHeavyWaitLapsed(agentId, kind, why)
 });
 hookServer.setHeavyLock(heavyLock);
-// HEAVY-CPU-OPTIONS-191: the job every heavy call runs in (Settings: background priority, half the
-// processors; read live). The helper is compiled from source at build (tools/build-heavyjob.cjs).
+// HALFCORES-OVERSUBSCRIBE: every heavy call runs in this job (Settings: background priority, hard
+// 50% CPU-rate cap; read live). The helper is compiled from source at build (tools/build-heavyjob.cjs).
 const heavyJobDir = (): string => app.isPackaged ? join(process.resourcesPath, 'heavyjob') : join(app.getAppPath(), 'resources', 'heavyjob', 'bin');
 const heavyJobExe = (): string | null => {
   const exe = join(heavyJobDir(), 'guppy-heavyjob.exe');
@@ -5509,7 +5509,7 @@ ipcMain.handle('config:update', (_evt, patch: Partial<HarnessConfig>) => {
   // built per spawn, so flipping the toggle reaches god the next time he starts.
   if (typeof patch?.orchestratorMaySpawn === 'boolean') hive.setOrchestratorMaySpawn(patch.orchestratorMaySpawn);
   // HEAVY-CPU-OPTIONS-191: a changed option reaches the heavy jobs already running.
-  if (patch && ('heavyJobsBackgroundPriority' in patch || 'heavyJobsHalfCores' in patch)) void heavyJobs.applyLive().catch(() => { /* logged per job */ });
+  if (patch && ('heavyJobsBackgroundPriority' in patch || 'heavyJobsCpuCap' in patch)) void heavyJobs.applyLive().catch(() => { /* logged per job */ });
   // CLAIM-LEDGER W7: a running memory worker follows a changed ledger level at once (W3-1).
   if (patch && 'claimLedger' in patch) void nativeMemory.claimLedgerChanged()?.catch((e) => hive.appendLog({ kind: 'claims-ui-level-push-failed', error: String(e).slice(0, 160) }));
   if (!hiveWasEnabled && hive.enabled()) {

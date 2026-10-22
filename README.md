@@ -284,7 +284,7 @@ wholesale merges. The shape of the line, as evidence for the three ideas above:
   on the capacity bar.
 - **Guppy keeps its hands off your draft** (1.1.91) — automatic typing
   goes only into an empty prompt it recognises, a stalled wake is brought to the floor, heavy
-  jobs can run at background priority or on half the processors, and Antigravity wakes are
+  jobs can run at background priority or under a hard CPU cap, and Antigravity wakes are
   confirmed.
 - **Wakes reach Claude agents again** (1.1.92) — a hotfix: the prompt
   check recognises Guppy's own context line under the Claude prompt, so messages are delivered.
@@ -307,6 +307,11 @@ wholesale merges. The shape of the line, as evidence for the three ideas above:
   wakes are no longer typed and left unsent or held behind a stale "loading" label, heavy jobs take
   turns in a queue that frees at once, wrong cost figures are corrected, the network listeners
   stay on this PC, and a stall watcher records every app freeze.
+- **Heavy jobs hard-capped, without hiding processors** (1.1.98) — heavy jobs default to a
+  Windows Job Object hard CPU-rate cap of 50% of the whole machine (rate 5000); all processors
+  remain visible to Node and other tools. The former `heavyJobsHalfCores` preference migrates to
+  `heavyJobsCpuCap` on read and is retired on the next config write. The setting applies live to
+  running heavy jobs.
 
 Every milestone carries a dated human acceptance and evidence tag in the fork's
 internal mission ledger; this README keeps only the shape.
