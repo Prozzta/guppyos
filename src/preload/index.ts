@@ -1107,6 +1107,9 @@ const api = {
   /** STARTUP-TIMING-162: the renderer's first-60-s long tasks and first-redraw marks (fire and forget). */
   startupTiming: (batch: { longtasks?: Array<{ at: number; ms: number; name?: string; attr?: string }>; marks?: Array<{ name: string; at: number; id?: string }> }): void =>
     ipcRenderer.send('startup:timing', batch),
+  /** STALL-WATCH-198: slow input (timings and a target name, never text) and long tasks (fire and forget). */
+  stallWatch: (batch: { inputs?: Array<{ ev: string; at: number; inputMs: number; procMs: number; presMs: number; target?: string }>; longtasks?: Array<{ at: number; ms: number; name?: string; attr?: string }> }): void =>
+    ipcRenderer.send('stall:watch', batch),
   /** Which external tools (git, each agent engine) are actually
    *  present on this machine, with a platform-resolved install command each. */
   toolsStatus: (): Promise<ToolStatus[]> => ipcRenderer.invoke('tools:status'),

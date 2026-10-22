@@ -4,6 +4,7 @@ import { App } from './App';
 import brandLogo from '@brand/logo.png?url';
 import './design/global.css';
 import { startRendererStartupTiming } from './startupTiming';
+import { startRendererStallWatch } from './stallWatch';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { installRendererErrorForwarder } from './rendererErrors';
 import { listThemes } from './scene/themes/themeCatalog';
@@ -17,6 +18,9 @@ installRendererErrorForwarder();
 
 // STARTUP-TIMING-162: long tasks and first redraws of the first 60 s (then it stops).
 startRendererStartupTiming();
+
+// STALL-WATCH-198: slow input and long tasks for the whole run (never the typed text).
+startRendererStallWatch();
 
 const favicon = document.createElement('link');
 favicon.rel = 'icon';

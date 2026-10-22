@@ -336,6 +336,9 @@ export interface HarnessConfig {
   /** GOD-TERMINAL-CONTROL M1: false turns off main's headless screen mirror per PTY (and with it
    *  `term read`). Unset = on; the cost sampler turns it off by itself past its bar. Read at startup. */
   terminalMirror?: boolean;
+  /** STALL-WATCH-198: the main-stall / input-delay / renderer-longtask rows. Unset = on; false = off;
+   *  `{ profile: true }` adds the sampling profiler (default OFF; on only with god's OK). Read at startup. */
+  stallWatch?: boolean | { profile?: boolean };
   /** GTC M2: which host answers the screen gate's readings. Unset or 'renderer' = the renderer's
    *  xterm (the shadow diff compares the mirror); 'mirror' = main's headless mirror, falling back
    *  to the renderer whenever the mirror has no reading. Read at every request (screenGate.ts). */

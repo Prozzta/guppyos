@@ -386,7 +386,8 @@ test('PIN: against the REAL test directory discovery is root tests plus only fol
   // BRANCH-RELATED-PINS-RUN: + 1 (related-tests-198).
   // WORK-JUNCTION-DEBT step 3: + 1 (no-nm-junction-198).
   // 1.1.98 stage 18: + 1 (app-shallow-selector), + 1 (perf-151-nits).
-  assert.equal(files.length, 495, `the focused suite must retain its pre-fold file count, got ${files.length}`);
+  // 1.1.98 stage 19: + 1 (card-autodone). Stage 20: + 1 (stall-watch-198).
+  assert.equal(files.length, 497, `the focused suite must retain its pre-fold file count, got ${files.length}`);
   assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
   assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');
   assert.ok(files.includes(path.join('start-fixes-163', 'start-fixes-163-boot-submit.test.cjs')), 'the start-fixes feature folder is included');
