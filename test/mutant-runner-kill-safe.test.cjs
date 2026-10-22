@@ -27,7 +27,7 @@ test('MUTANT RUNNER KILL SAFE: hard-killed runner restores its source before the
   const journal = path.join(sandbox, '.mutant-runner-recovery.json');
   fs.mkdirSync(path.dirname(runner), { recursive: true });
   fs.mkdirSync(path.dirname(source), { recursive: true });
-  for (const rel of ['test/tools/agy-mutants.cjs', 'test/tools/mutant-runner-helper.cjs', 'test/tools/ps-env.cjs', 'src/main/capacityNormalize.ts']) {
+  for (const rel of ['test/tools/agy-mutants.cjs', 'test/tools/mutant-runner-helper.cjs', 'test/tools/ps-env.cjs', 'test/tools/shared-temp.cjs', 'src/main/capacityNormalize.ts']) {
     fs.copyFileSync(path.join(ROOT, rel), path.join(sandbox, rel));
   }
   const original = fs.readFileSync(source, 'utf8');
@@ -63,7 +63,7 @@ const HELPER = 'test/tools/mutant-runner-helper.cjs';
 
 function sandboxed(helperText) {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'mutant-runner-owner-'));
-  for (const rel of ['test/tools/agy-mutants.cjs', HELPER, 'test/tools/ps-env.cjs', 'src/main/capacityNormalize.ts']) {
+  for (const rel of ['test/tools/agy-mutants.cjs', HELPER, 'test/tools/ps-env.cjs', 'test/tools/shared-temp.cjs', 'src/main/capacityNormalize.ts']) {
     fs.mkdirSync(path.dirname(path.join(sandbox, rel)), { recursive: true });
     fs.copyFileSync(path.join(ROOT, rel), path.join(sandbox, rel));
   }
