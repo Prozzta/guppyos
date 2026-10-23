@@ -668,11 +668,11 @@ function writeConfigAtomically(p: string, data: unknown): void {
     try { rmSync(tmp, { force: true }); } catch { /* preserve the publish error */ }
     throw error;
   }
-  // Our own write replaces the cache in-process: the next read builds from the text just
-  // published (the same text a disk read would get), with no disk read.
+  // Our own write drops the cache: the next read stats and reads the disk once (one read per write).
+  // Never a write-through entry: our text cannot be paired with a stat key, because a stat after
+  // the rename could carry an outside write's key and serve our text forever (Jim P1).
   configWriteGen++;
-  const st = statOrNull(p);
-  configCache = st ? { path: p, key: statKey(st), raw: text, value: null, checkedAt: configNow() } : null;
+  configCache = null;
 }
 
 /**
@@ -680,7 +680,8 @@ function writeConfigAtomically(p: string, data: unknown): void {
  * the migrations on every call, ~2,900 calls/min on main under a heavy run (112 call sites in
  * index.ts, many of them getters called per tick). It now serves one parsed, DEEP-FROZEN config
  * from memory:
- *   - writeConfigAtomically (every in-process write) replaces the cache with the text it published;
+ *   - writeConfigAtomically (every in-process write) drops the cache, so the next read stats and
+ *     reads the disk once; this module's read-modify-writes read fresh (no window);
  *   - an external edit is picked up by fs.watch on the folder (it marks the cache dirty), and the
  *     authority is a stat revalidate (mtime, ctime, size, ino) at most CONFIG_REVALIDATE_MS after
  *     the last check, because fs.watch on Windows misses events;
@@ -689,7 +690,7 @@ function writeConfigAtomically(p: string, data: unknown): void {
  * needs a changed config spreads it into a new object (writeConfig's `{ ...current, ...patch }`).
  */
 export const CONFIG_REVALIDATE_MS = 1_000;
-type ConfigCache = { path: string; key: string; raw: string | null; value: HarnessConfig | null; checkedAt: number };
+type ConfigCache = { path: string; key: string; value: HarnessConfig; checkedAt: number };
 let configCache: ConfigCache | null = null;
 /** Bumped by every write, so a read whose migration wrote mid-build does not cache a stale value. */
 let configWriteGen = 0;
@@ -759,7 +760,7 @@ function noteCorruptConfig(p: string, raw: string, error: unknown): void {
 
 /** Reads enough to surface a persisted config problem to the renderer banner. */
 export function configIntegrityIssue(): ConfigIntegrityIssue | null {
-  readConfig();
+  readConfigCached(true);
   return configIntegrity;
 }
 
@@ -935,10 +936,16 @@ export function pruneRetiredConfigKeys(): string[] {
 }
 
 export function readConfig(): HarnessConfig {
+  return readConfigCached(false);
+}
+
+/** `fresh` (this module's read-modify-writes and integrity checks): skip the window, so a merge
+ *  never builds on a value another process has replaced; the stat decides. */
+function readConfigCached(fresh: boolean): HarnessConfig {
   const p = configPath();
   const now = configNow();
   const c = configCache;
-  if (c && c.value && c.path === p && now - c.checkedAt >= 0 && now - c.checkedAt < CONFIG_REVALIDATE_MS) return c.value;
+  if (c && !fresh && c.path === p && now - c.checkedAt >= 0 && now - c.checkedAt < CONFIG_REVALIDATE_MS) return c.value;
   const st = statOrNull(p);
   // No file yet = a first run with nothing to migrate; the defaults ARE the
   // post-migration shape. Deliberately does not persist — a bare read must not
@@ -951,17 +958,17 @@ export function readConfig(): HarnessConfig {
     configCorruptFingerprint = null;
     return configDefaults();
   }
+  // The key is taken BEFORE the read: a change between the two re-reads at the next revalidate.
   const key = statKey(st);
   if (c && c.path === p && c.key === key) {
     c.checkedAt = now;
-    if (c.value) return c.value;
+    return c.value;
   }
-  const pending = c && c.path === p && c.key === key ? c.raw : null;
   const gen = configWriteGen;
   let raw: string | undefined;
   let built: HarnessConfig;
   try {
-    raw = pending ?? readFileSync(p, 'utf8');
+    raw = readFileSync(p, 'utf8');
     const parsed = JSON.parse(raw);
     for (const k of RETIRED_CONFIG_KEYS) delete parsed[k];
     configIntegrity = null;
@@ -978,8 +985,8 @@ export function readConfig(): HarnessConfig {
   }
   // A clone, so freezing never reaches the DEFAULTS objects a shallow merge shares.
   const value = deepFreeze(structuredClone(built));
-  // A migration that persisted mid-build left the cache holding its own text: keep that.
-  if (gen === configWriteGen) configCache = { path: p, key, raw: null, value, checkedAt: now };
+  // A migration that persisted mid-build changed the file after the stat: leave it uncached.
+  if (gen === configWriteGen) configCache = { path: p, key, value, checkedAt: now };
   watchConfig(p);
   return value;
 }
@@ -1049,7 +1056,7 @@ export function resolveProjectThemeForHome(config: HarnessConfig, harnessHome?: 
 export function setProjectThemeForHome(harnessHome: string, theme: unknown): HarnessConfig {
   if (!isProjectThemeId(theme)) throw new Error('invalid project theme');
   const home = projectThemeHomeKey(expandTilde(harnessHome));
-  const current = readConfig();
+  const current = readConfigCached(true);
   return writeConfig({ officeThemeByHive: { ...(current.officeThemeByHive ?? {}), [home]: theme } });
 }
 
@@ -1066,7 +1073,7 @@ function persistConfig(next: HarnessConfig): HarnessConfig {
 }
 
 export function writeConfig(patch: Partial<HarnessConfig>): HarnessConfig {
-  const current = readConfig();
+  const current = readConfigCached(true);
   const next: HarnessConfig = { ...current, ...patch };
   // CODEX-BLOAT-165 fix 2: 'off' or a number, clamped to 1000-10000. Anything else is refused
   // and changes nothing (the renderer reverts its control on the rejection).
@@ -1138,7 +1145,7 @@ export function setAgentTokenCap(agentId: unknown, tokenCap: unknown): HarnessCo
     )
   ) throw new Error('invalid agent token cap');
 
-  const current = readConfig();
+  const current = readConfigCached(true);
   const agentTokenCaps = { ...(current.agentTokenCaps ?? {}) };
   if (tokenCap === undefined) delete agentTokenCaps[agentId];
   else agentTokenCaps[agentId] = tokenCap;
@@ -1159,7 +1166,7 @@ export function setAgentUsageDisplay(agentId: unknown, display: unknown): Harnes
   if (typeof agentId !== 'string' || agentId.trim().length === 0 || !isAgentUsageDisplay(display)) {
     throw new Error('invalid agent usage display');
   }
-  const current = readConfig();
+  const current = readConfigCached(true);
   const agentUsageDisplay = { ...(current.agentUsageDisplay ?? {}) };
   if (display === 'budget') delete agentUsageDisplay[agentId];
   else agentUsageDisplay[agentId] = display;
@@ -1171,7 +1178,7 @@ export function setAgentUsageDisplay(agentId: unknown, display: unknown): Harnes
 export function setCapacityDisplayThreshold(value: unknown): HarnessConfig {
   const t = parseCapacityDisplayThreshold(value);
   if (t === null) throw new Error('invalid capacity display threshold');
-  return persistConfig({ ...readConfig(), capacityWeeklyDisplayThreshold: t });
+  return persistConfig({ ...readConfigCached(true), capacityWeeklyDisplayThreshold: t });
 }
 
 /** GPU-SETTING-188: save the Graphics mode. Anything but 'auto' | 'gpu' | 'cpu' is REFUSED and the
@@ -1179,14 +1186,14 @@ export function setCapacityDisplayThreshold(value: unknown): HarnessConfig {
 export function setGraphicsMode(value: unknown): HarnessConfig {
   const mode = parseGraphicsMode(value);
   if (mode === null) throw new Error('invalid graphics mode');
-  return persistConfig({ ...readConfig(), graphicsMode: mode });
+  return persistConfig({ ...readConfigCached(true), graphicsMode: mode });
 }
 
 /** Wipe the persisted config back to first-run defaults so the app boots into
  *  onboarding again. Used by the "reset & start over" flow. */
 export function resetConfig(): HarnessConfig {
   const p = configPath();
-  readConfig();
+  readConfigCached(true);
   assertConfigWritable();
   mkdirSync(dirname(p), { recursive: true });
   // A reset is a fresh install: nothing to clear, so the default-model flag is done.

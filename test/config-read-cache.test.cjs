@@ -3,9 +3,10 @@
 /**
  * MAIN-SYNC-LOG-LEDGER (config): readConfig was a disk read + parse + migrations on every call
  * (~2,900 calls/min on Guppy main under a heavy run on 1.1.99). It now serves one deep-frozen
- * parsed config from memory. Our own writes replace it in-process; an external edit is picked up by
- * fs.watch or, as the authority, by a stat revalidate at most CONFIG_REVALIDATE_MS (1 s) after the
- * last check. The missing, corrupt and unreadable paths are not cached and behave as before.
+ * parsed config from memory. Our own writes drop it (one disk read per write: Jim P1), and this
+ * module's read-modify-writes read fresh; an external edit is picked up by fs.watch or, as the
+ * authority, by a stat revalidate at most CONFIG_REVALIDATE_MS (1 s) after the last check. The
+ * missing, corrupt and unreadable paths are not cached and behave as before.
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -68,12 +69,12 @@ test('freezing never reaches the shared DEFAULTS: a missing file still gives mut
   assert.deepEqual([again.reads, again.stats], [0, 1], 'missing is not cached: one stat per call, as existsSync was');
 });
 
-test('writeConfig then readConfig sees the write at once with no disk read; the file matches', () => {
+test('writeConfig then readConfig sees the write at once with one disk read; the file matches', () => {
   fresh({ onboardingComplete: false, recentHives: [] });
   readConfig();
   writeConfig({ onboardingComplete: true, toolOutputCap: 1234 });
   const r = io(() => readConfig());
-  assert.equal(r.reads, 0, 'built from the text just published');
+  assert.deepEqual([r.reads, r.stats], [1, 1], 'a write drops the cache: one read per write (Jim P1)');
   assert.equal(r.result.onboardingComplete, true);
   assert.equal(r.result.toolOutputCap, 1234);
   assert.ok(Object.isFrozen(r.result));
@@ -84,6 +85,49 @@ test('writeConfig then readConfig sees the write at once with no disk read; the 
   writeConfig({ toolOutputCap: 1 });
   writeConfig({ notifications: true });
   assert.deepEqual([readConfig().toolOutputCap, readConfig().notifications], [1, true]);
+  const cached = io(() => readConfig());
+  assert.deepEqual([cached.reads, cached.stats], [0, 0], 'then cached again');
+  tick(CONFIG_REVALIDATE_MS);
+  assert.deepEqual([io(() => readConfig()).reads, io(() => readConfig()).stats], [0, 0], 'keyed by the stat taken before its read');
+});
+
+test('Jim P1: an outside write that lands between our rename and the next read is seen within the window, and the next write keeps it', () => {
+  fresh({ toolOutputCap: 10 });
+  readConfig();
+  const { renameSync } = fs;
+  fs.renameSync = function (from, to, ...rest) {
+    const r = renameSync.call(this, from, to, ...rest);
+    if (String(to) === file) fs.writeFileSync(file, JSON.stringify({ ...MIGRATED, toolOutputCap: 777, notifications: false }), 'utf8');
+    return r;
+  };
+  try { writeConfig({ toolOutputCap: 11 }); } finally { fs.renameSync = renameSync; }
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).toolOutputCap, 777, 'disk = EXTERNAL');
+  // A merge never builds on the unverified entry: it reads the disk.
+  writeConfig({ notifications: true });
+  const disk = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.deepEqual([disk.toolOutputCap, disk.notifications], [777, true], 'no lost update');
+  assert.equal(readConfig().toolOutputCap, 777);
+  // Without the follow-up write: EXTERNAL is what the next read shows, and it stays.
+  fresh({ toolOutputCap: 20 });
+  readConfig();
+  fs.renameSync = function (from, to, ...rest) {
+    const r = renameSync.call(this, from, to, ...rest);
+    if (String(to) === file) fs.writeFileSync(file, JSON.stringify({ ...MIGRATED, toolOutputCap: 888 }), 'utf8');
+    return r;
+  };
+  try { writeConfig({ toolOutputCap: 21 }); } finally { fs.renameSync = renameSync; }
+  assert.equal(readConfig().toolOutputCap, 888, 'EXTERNAL at once, so within 1 s');
+  for (let i = 0; i < 3; i++) { tick(CONFIG_REVALIDATE_MS); assert.equal(readConfig().toolOutputCap, 888); }
+});
+
+test('a read-modify-write inside the window builds on an outside edit, not on the cached value', () => {
+  fresh({ toolOutputCap: 30, notifications: false });
+  readConfig();
+  handEdit({ toolOutputCap: 31, notifications: false });
+  assert.equal(readConfig().toolOutputCap, 30, 'readers may lag by up to the window');
+  writeConfig({ notifications: true });
+  const disk = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.deepEqual([disk.toolOutputCap, disk.notifications], [31, true], 'the outside edit survives our write');
 });
 
 test('an external edit is invisible inside the window and picked up by the stat revalidate at CONFIG_REVALIDATE_MS', () => {
@@ -101,6 +145,9 @@ test('an external edit is invisible inside the window and picked up by the stat 
   const same = io(() => readConfig());
   assert.deepEqual([same.reads, same.stats], [0, 1], 'unchanged on disk: a stat, no read');
   assert.equal(same.result, r.result);
+  tick(CONFIG_REVALIDATE_MS - 1);
+  const renewed = io(() => readConfig());
+  assert.deepEqual([renewed.reads, renewed.stats], [0, 0], 'a key match renews the window: one stat per window, not per call');
   clock -= 10 * CONFIG_REVALIDATE_MS;
   assert.equal(io(() => readConfig()).stats, 1, 'a clock that went back revalidates');
 });
@@ -108,7 +155,15 @@ test('an external edit is invisible inside the window and picked up by the stat 
 test('fs.watch marks the cache dirty: an external edit is seen before the window ends', async () => {
   fresh({ toolOutputCap: 300 });
   assert.equal(readConfig().toolOutputCap, 300);
-  await new Promise((r) => setTimeout(r, 100));
+  // Let fresh()'s own config.json events land (a watcher from an earlier test may already exist),
+  // then re-arm the window: a key match renews it.
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(readConfig().toolOutputCap, 300);
+  // Churn on another file in the folder does not mark the cache dirty (the name filter).
+  fs.writeFileSync(path.join(userData, 'other.json'), '{}', 'utf8');
+  fs.writeFileSync(path.join(userData, 'other.json'), '{"a":1}', 'utf8');
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(io(() => readConfig()).stats, 0, 'another file\'s events leave the window alone');
   handEdit({ toolOutputCap: 301 });
   const until = Date.now() + 5000;
   while (readConfig().toolOutputCap !== 301 && Date.now() < until) await new Promise((r) => setTimeout(r, 25));
@@ -161,21 +216,25 @@ test('a read whose migration persists caches the persisted text, not the pre-mig
   assert.equal(first.webhookTriggers[0].id, 'legacy');
   assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).triggersMigratedV1, true, 'persisted');
   const second = io(() => readConfig());
-  assert.equal(second.reads, 0, 'built from the migration\'s own write');
+  assert.deepEqual([second.reads, second.stats], [1, 1], 'the pre-migration build (keyed to the old file) was not cached: the persisted file is read once');
   assert.deepEqual(second.result, first);
   tick(CONFIG_REVALIDATE_MS);
   const later = io(() => readConfig());
-  assert.deepEqual([later.reads, later.stats], [0, 1], 'the cache is keyed to the file the migration wrote, so the revalidate finds it unchanged');
+  assert.deepEqual([later.reads, later.stats], [0, 1], 'then keyed to the file the migration wrote');
 });
 
 test('wiring: readConfig serves the cache before any disk call; every write goes through writeConfigAtomically', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'config.ts'), 'utf8').replace(/\r\n/g, '\n');
-  const body = src.slice(src.indexOf('export function readConfig(): HarnessConfig {'), src.indexOf('\n}\n', src.indexOf('export function readConfig(): HarnessConfig {')));
+  const body = src.slice(src.indexOf('function readConfigCached(fresh: boolean): HarnessConfig {'), src.indexOf('\n}\n', src.indexOf('function readConfigCached(fresh: boolean): HarnessConfig {')));
   assert.ok(body.indexOf('return c.value;') < body.indexOf('statOrNull(p)'), 'the window check comes before the stat');
   assert.ok(!/existsSync\(p\)/.test(body), 'no per-call existsSync');
+  // Every read-modify-write and integrity check in this module reads fresh; readConfig() is only defined here.
+  assert.equal((src.match(/readConfigCached\(true\)/g) || []).length, 8);
+  assert.equal((src.match(/readConfig\(\)/g) || []).length, 1);
   // config.json is only ever published by writeConfigAtomically (which replaces the cache).
   assert.equal((src.match(/writeConfigAtomically\(p, /g) || []).length, 3, 'persistConfig, pruneRetiredConfigKeys and resetConfig');
   const atomic = src.slice(src.indexOf('function writeConfigAtomically('), src.indexOf('\n}\n', src.indexOf('function writeConfigAtomically(')));
-  assert.ok(atomic.includes('configCache = st ? { path: p, key: statKey(st), raw: text'), 'a write replaces the cache');
-  assert.ok(atomic.includes('configCache = null;'), 'a failed write drops it');
+  assert.equal((atomic.match(/configCache = null;/g) || []).length, 2, 'a write drops the cache, failed or not');
+  assert.ok(atomic.endsWith('  configWriteGen++;\n  configCache = null;'), 'the success path');
+  assert.ok(!/statOrNull|statSync|configCache = \{/.test(atomic), 'no write-through entry, no stat after the rename (Jim P1)');
 });
