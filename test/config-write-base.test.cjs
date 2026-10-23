@@ -121,8 +121,10 @@ test('every read-modify-write of config.json in main builds on readConfigForWrit
   }
 });
 
-// The rule for new code: a writeConfig() whose block reads readConfig() above it must be one of the
-// read-only uses below (a scalar decision, a compare, a deps read), never a base.
+// The rule for new code: a writeConfig() whose block reads a cached source above it must be one of
+// the read-only uses below (a scalar decision, a compare, a deps read), never a base. It covers every
+// src/main file that imports writeConfig (Jim C7), and a cached source is readConfig() or any function
+// that returns a readConfig()-derived value (Jim C3: a helper base), found by the scan below.
 const READ_ONLY = [
   /savedLevel: \(\) => readConfig\(\)\.claimLedger,/,
   /readMission: \(\) => \(readConfig\(\)\.missions/,
@@ -131,20 +133,112 @@ const READ_ONLY = [
   /^listMissions: \(\) => readConfig\(\)\.missions \?\? \[\],$/,
   /^getConfigValue: \(key\) => \(readConfig\(\)/,
   /^if \(readConfig\(\)\.realtimeVoiceEnabled\) writeConfig\(\{ realtimeVoiceEnabled: false \}\);$/,
-  /^const cfgHome = readConfig\(\)\.harnessHome \?\? '';$/
+  /^const cfgHome = readConfig\(\)\.harnessHome \?\? '';$/,
+  /^emitContextTrigger\('compact', contextRule\('compact'\)\);$/ // the scheduler's compact emit reads the rule, it is no base
 ];
-test('no writeConfig() in main builds on the cached readConfig() (the rule for new code)', () => {
+const ts = require('typescript');
+const MAIN = 'src/main';
+const mainFiles = () => fs.readdirSync(path.join(__dirname, '..', MAIN), { recursive: true })
+  .map((f) => String(f).replace(/\\/g, '/'))
+  .filter((f) => f.endsWith('.ts') && f !== 'config.ts')
+  .map((f) => ({ rel: `${MAIN}/${f}`, text: readSource(`${MAIN}/${f}`) }));
+const parse = ({ rel, text }) => ts.createSourceFile(rel, text, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
+const importsWriteConfig = (sf) => sf.statements.some((s) => ts.isImportDeclaration(s)
+  && /^\.\.?\/(.*\/)?config$/.test(s.moduleSpecifier.text)
+  && s.importClause?.namedBindings && ts.isNamedImports(s.importClause.namedBindings)
+  && s.importClause.namedBindings.elements.some((e) => (e.propertyName ?? e.name).text === 'writeConfig'));
+// A function's name: a declaration, a const bound to it, or the property holding it (a deps entry).
+const fnName = (fn) => {
+  if ((ts.isFunctionDeclaration(fn) || ts.isMethodDeclaration(fn)) && fn.name) return fn.name.getText();
+  const p = fn.parent;
+  if ((ts.isVariableDeclaration(p) || ts.isPropertyAssignment(p)) && p.initializer === fn) return p.name.getText();
+  return undefined;
+};
+const calledName = (call) => ts.isIdentifier(call.expression) ? call.expression.text
+  : ts.isPropertyAccessExpression(call.expression) ? call.expression.name.text : undefined;
+// The values a function returns: its return statements (not those of nested functions) or an arrow's body.
+const returned = (fn) => {
+  if (!fn.body) return [];
+  if (!ts.isBlock(fn.body)) return [fn.body];
+  const out = [];
+  const walk = (n) => { if (ts.isFunctionLike(n)) return; if (ts.isReturnStatement(n) && n.expression) out.push(n.expression); ts.forEachChild(n, walk); };
+  ts.forEachChild(fn.body, walk);
+  return out;
+};
+const callsAny = (node, names) => {
+  let hit = false;
+  // A closure in the value is not a read of it: createLedgerUi() returns functions that read config.
+  const walk = (n) => { if (hit || ts.isFunctionLike(n)) return; if (ts.isCallExpression(n) && names.has(calledName(n))) hit = true; else ts.forEachChild(n, walk); };
+  walk(node);
+  return hit;
+};
+// Every named function in main that returns a cached value, to a fixed point (a helper over a helper).
+function cachedSources(files) {
+  const fns = [];
+  for (const f of files) {
+    const walk = (n) => { if (ts.isFunctionLike(n) && fnName(n)) fns.push(n); ts.forEachChild(n, walk); };
+    walk(parse(f));
+  }
+  const names = new Set(['readConfig']);
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const fn of fns) {
+      const name = fnName(fn);
+      if (!names.has(name) && returned(fn).some((e) => callsAny(e, names))) { names.add(name); grew = true; }
+    }
+  }
+  return names;
+}
+function staleBases(files, sources = cachedSources(files)) {
+  // A source is called bare (a function or const) or through a deps object (a deps entry); a member
+  // call on anything else (hive.enabled(), ipcMain.handle()) is another function with the same name.
+  const esc = [...sources].map((s) => s.replace(/[$]/g, '\\$')).join('|');
+  const src = new RegExp(`(?:(?<![\\w$.])|(?<=\\.\\.\\.)|(?<=\\bdeps\\.))(${esc})\\(`);
   const bad = [];
-  for (const rel of Object.keys(BASES)) {
-    const lines = readSource(rel).split(/\r?\n/);
+  for (const f of files) {
+    if (!importsWriteConfig(parse(f))) continue;
+    const lines = f.text.split(/\r?\n/);
     lines.forEach((l, i) => {
       if (!/\bwriteConfig\(/.test(l)) return;
       for (let j = i; j >= Math.max(0, i - 30); j--) {
         const t = lines[j];
-        if (/\breadConfig\(\)/.test(t) && !READ_ONLY.some((re) => re.test(t.trim()))) bad.push(`${rel}:${j + 1} (for the write at ${i + 1}): ${t.trim()}`);
+        if (/^\s*(\/\/|\*)/.test(t)) continue;
+        if (src.test(t) && !READ_ONLY.some((re) => re.test(t.trim()))) bad.push(`${f.rel}:${j + 1} (for the write at ${i + 1}): ${t.trim()}`);
         if (j < i && /^(ipcMain\.handle|function |export function |async function |const \w+ = \(|\}\);?$|\};?$)/.test(t)) break;
       }
     });
   }
-  assert.deepEqual(bad, []);
+  return bad;
+}
+test('the cached-source scan finds the helpers that return readConfig() values', () => {
+  const sources = cachedSources(mainFiles());
+  for (const name of ['readConfig', 'listRecords', 'getRecord', 'listMissions']) assert.ok(sources.has(name), name);
+  assert.equal(sources.has('readConfigForWrite'), false);
+});
+test('no writeConfig() in main builds on a cached read (the rule for new code)', () => {
+  const files = mainFiles();
+  assert.ok(files.filter((f) => importsWriteConfig(parse(f))).length >= 2, 'index.ts and integrations.ts import writeConfig');
+  assert.deepEqual(staleBases(files), []);
+});
+test('the rule refuses Jim C3 (a base read through a helper) and C7 (a stale merge in a file outside the census)', () => {
+  const files = mainFiles();
+  const index = files.find((f) => f.rel === `${MAIN}/index.ts`);
+  const c3 = [...files.filter((f) => f !== index), { rel: index.rel, text: `${index.text}
+function jimCachedHooks() { return readConfig().webhookTriggers ?? []; }
+ipcMain.handle('jim:c3', () => {
+  const cur = jimCachedHooks();
+  writeConfig({ webhookTriggers: [...cur] });
+});
+` }];
+  assert.deepEqual(staleBases(c3).map((b) => b.split(': ')[1]), ['const cur = jimCachedHooks();']);
+  const noKnowledge = files.filter((f) => f.rel !== `${MAIN}/knowledge.ts`);
+  const c7 = [...noKnowledge, { rel: `${MAIN}/knowledge.ts`, text: `import { readConfig, writeConfig } from './config';
+export function jimKnowledge(on: boolean): void {
+  writeConfig({ knowledgeGraph: { ...readConfig().knowledgeGraph, on } });
+}
+` }];
+  assert.deepEqual(staleBases(c7).map((b) => b.split(': ')[0]), [`${MAIN}/knowledge.ts:3 (for the write at 3)`]);
+  // The same merge through readConfigForWrite passes.
+  const ok = [...noKnowledge, { rel: `${MAIN}/knowledge.ts`, text: c7[c7.length - 1].text.replace('readConfig()', 'readConfigForWrite()') }];
+  assert.deepEqual(staleBases(ok), []);
 });
