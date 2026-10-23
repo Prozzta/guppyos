@@ -152,7 +152,7 @@ static class HeavyJob
     {
         // The command always runs: a failed join is one line on stderr, never a lost command.
         try { JoinChain(name, background, cap, cmdRest != null); }
-        catch (Exception e) { Console.Error.WriteLine("[guppy] heavy-job limits not applied: " + e.Message); }
+        catch (Exception e) { Console.Error.WriteLine(OuterJobDenial(e) ? "[guppy] unsupported outer job; cap not applied (ERROR_ACCESS_DENIED)" : "[guppy] heavy-job limits not applied: " + e.Message); }
         if (string.IsNullOrEmpty(cmdRest)) return 0;
         // CODEX-CMD-COMPUTED-SHELL-192: cmd already parsed the rest once (carets taken, %VAR%
         // expanded). The second cmd must take it as it is: every % is %GUPPY_HEAVYJOB_PCT% (one %),
@@ -164,6 +164,11 @@ static class HeavyJob
         psi.EnvironmentVariables["GUPPY_HEAVY_CPU_CAP"] = cap ? "1" : "0";
         using (var p = System.Diagnostics.Process.Start(psi)) { p.WaitForExit(); return p.ExitCode; }
     }
+
+    // Nested Job Object assignment may be refused by an outer job which did not opt into
+    // breakaway/silent-breakaway. We never alter that outer job; make this unsupported state
+    // unambiguous to the invoking terminal while still running the user's command.
+    static bool OuterJobDenial(Exception e) { return e.Message == "AssignProcessToJobObject failed (5)"; }
 
     // The rest as cmd's second parse gives it back unchanged. Parentheses stay: they are only
     // special at the start of a block, which the rest already was.

@@ -63,6 +63,12 @@ test('the native helper pins hard-cap mode and the exact 50% CPU rate (M1)', () 
   assert.match(native, /GUPPY_HEAVY_CPU_CAP.*cap \? "1" : "0"/, 'the joined command can size workers to the Job Object CPU share');
   assert.match(native, /var rate = new CPU_RATE \{ ControlFlags = cap \? CPU_RATE_ENABLE \| CPU_RATE_HARD_CAP : 0, CpuRate = cap \? CPU_RATE_50_PERCENT : 0 \}/);
   assert.doesNotMatch(native, /LIMIT_AFFINITY|SetProcessAffinityMask/);
+  assert.match(native, /return \"\{\\\"background\\\":\" \+ \(background \? \"true\" : \"false\"\) \+ \",\\\"cap\\\":\" \+ \(cap \? \"true\" : \"false\"\) \+ \",\\\"rate\\\":\" \+ \(cap \? CPU_RATE_50_PERCENT : 0\) \+ \",\\\"affinity\\\":null\}\"/,
+    'M1: capped queries must explicitly report no affinity limit');
+  assert.match(native, /unsupported outer job; cap not applied \(ERROR_ACCESS_DENIED\)/,
+    'an outer-job access denial is loud and distinguishable from an ordinary helper error');
+  assert.match(native, /static bool OuterJobDenial\(Exception e\) \{ return e\.Message == \"AssignProcessToJobObject failed \(5\)\"; \}/,
+    'only a failed assignment to Guppy\'s own job is classified as an unsupported outer job');
 });
 
 test('M6: AGY run_command CommandLine is read, so its heavy calls are classified', () => {
