@@ -125,7 +125,7 @@ const MUTANTS = [
     killer: 'todaysChain', dies: /TODAY'S LIGHT CHAIN IS LIGHT/ },
   { name: 'no split: a value is one word', edits: [['        if (e === a) files.push(a); else files.push(...e.split(/\\s+/).filter(Boolean));', '        files.push(e);']],
     killer: 'splitVar', dies: /A VALUE NAMING TWO FILES IS TWO FILES/ },
-  { name: 'the deny does not name the missing path', edits: [['  try { at = ctx?.missingAt?.(path, ctx.cd) ?? null; } catch { at = null; }\n', '']],
+  { name: 'the deny does not name the missing path', edits: [['  try { at = ctx?.missingAt?.(path, ctx.cd, lookupOf(ctx, ctx.dialect)) ?? null; } catch { at = null; }\n', '']],
     killer: 'missingSaid', dies: /A MISSING PATH IS NAMED IN THE DENY/ },
   { name: 'classifyCommand drops missingAt (no expand, no cd)', edits: [['...(missingAt ? { missingAt } : {}) };', '...(where ? { missingAt: where } : {}) };']],
     killer: 'missingSaid', dies: /A MISSING SCRIPT IS NAMED, THROUGH A VARIABLE/ },
