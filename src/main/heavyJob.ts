@@ -517,6 +517,8 @@ export interface ClassifyCtx {
  * is light only while its needles pick a few files: the runner selects every test file whose name
  * contains a needle (case-insensitive, union), so `run-tests.cjs test` or `npm test -- heavy` is the
  * suite in all but name. With no lister the old rule stands: a filtered run is light.
+ * HEAVY-ELECTRON-TAG: a pick of fewer files is judged as `node --test <those files>` is (what they
+ * load, their `@heavy-lock live` line): `npm test -- activity-lag` picks one Electron harness file.
  */
 function filteredSuite(what: string, needles: string[], ctx: ClassifyCtx, root?: string): HeavyClass {
   // Andy MINOR 2: the runner lists ITS OWN repo (path.resolve(__dirname, '..', '..')), not the caller's
@@ -524,20 +526,51 @@ function filteredSuite(what: string, needles: string[], ctx: ClassifyCtx, root?:
   const list = needles.length && ctx.testFiles ? ctx.testFiles(ctx.cd, root) : null;
   if (!list) return { heavy: false };
   const low = needles.map((n) => n.toLowerCase());
-  let n = 0;
-  for (const f of list) { const name = f.toLowerCase(); if (low.some((x) => name.includes(x))) n++; }
+  const picked = list.filter((f) => { const name = f.toLowerCase(); return low.some((x) => name.includes(x)); });
+  const n = picked.length;
   if (n >= SUITE_MANY_FILES) return { heavy: true, kind: 'suite', why: `${what} ${needles.join(' ')} (matches ${n} test files)` };
-  return { heavy: false };
+  if (!n || !ctx.readScript) return { heavy: false };
+  // The picked files as the runner names them (test/<name> of its repo, the lister's base). A file
+  // that is not there is not a program here (the lister saw it, it went); one that is there but does
+  // not read (over HEAVY_SCRIPT_MAX_BYTES, locked) is unknown, provisional heavy as `node --test` has it.
+  const base = root ? `${root.replace(/[\\/]+$/, '')}/test/` : 'test/';
+  const say = (c: HeavyClass): HeavyClass => ({ ...c, why: `${what} ${needles.join(' ')} (picks ${n} test file${n === 1 ? '' : 's'}: ${c.why})` });
+  let unknown: HeavyClass | null = null;
+  // UHera F1: each pick is judged on its own, with its own helper reads (at most 19 x 9 files): one
+  // budget for the run let eight helper-using light picks hide a ninth that launches through a helper.
+  for (const p of picked.map((f) => base + f)) {
+    let text: string | null = null;
+    try { text = ctx.readScript(p, ctx.cd); } catch { text = null; }
+    if (text === null) {
+      let gone = true;
+      try { gone = !ctx.missingAt || ctx.missingAt(p, ctx.cd, lookupOf(ctx, ctx.dialect)) !== null; } catch { gone = true; }
+      if (!gone && !unknown) unknown = unreadable(p, ctx);
+      continue;
+    }
+    const c = classifyNodeCode({ script: null, preloads: [p], inline: null, stdin: false }, { ...ctx, stdin: undefined }, false, 1 + HEAVY_JS_MAX_FILES);
+    if (c.heavy && !c.provisional) return say(c);
+    if (c.heavy && !unknown) unknown = c;
+  }
+  return unknown ? say(unknown) : { heavy: false };
 }
 
 /** Andy MINOR 2: the repo a suite runner script belongs to, as the runner resolves it (two folders
- *  above its own: `<root>/test/tools/run-tests.cjs`); undefined when the path has no such prefix
- *  (`test/tools/run-tests.cjs` is the call's own folder). Relative to the call's folder when relative. */
+ *  above its own: `<root>/test/tools/run-tests.cjs`); undefined when that is the call's own folder
+ *  (`test/tools/run-tests.cjs`). Relative to the call's folder when relative. UHera F2 and her NIT:
+ *  any path, so a runner called from inside the repo too: the script's folder, two folders up
+ *  (`tools/run-tests.cjs` from test/ is `..`, `../tools/run-tests.cjs` from test/heavy-lock/ is `../..`). */
 function runnerRoot(script: string): string | undefined {
   const parts = script.replace(/\\/g, '/').split('/');
-  if (parts.length < 4) return undefined;
-  const root = parts.slice(0, -3).join('/');
-  return root === '' ? '/' : root;
+  const abs = parts[0] === '' || /^[A-Za-z]:$/.test(parts[0]);
+  const out: string[] = [];
+  for (const s of [...parts.slice(0, -1), '..', '..']) {
+    if (s === '.' || (s === '' && out.length)) continue;
+    if (s === '..' && abs && out.length === 1) return undefined;   // above a drive's top
+    if (s === '..' && out.length && out[out.length - 1] !== '..') { out.pop(); continue; }
+    out.push(s);
+  }
+  if (!out.length) return undefined;
+  return out.length === 1 && out[0] === '' ? '/' : out.join('/');
 }
 
 /** HEAVY-LOCK-FALSE-NEGATIVES (item 1): the shell Codex's exec_command runs in when it names none

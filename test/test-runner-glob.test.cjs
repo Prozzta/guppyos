@@ -403,7 +403,8 @@ test('PIN: against the REAL test directory discovery is root tests plus only fol
   // HEAVY-HANDOFF-RACE: + 1 (heavy-lock/heavy-lock-handoff-race-199), + 1 (heavy-lock/heavy-lock-release-held-199).
   // HEAVY-LOCK-FALSE-NEGATIVES: + 5 (heavy-lock/heavy-lock-false-negatives-199, -false-negatives-rest-199,
   // -release-closed-199, -ttl-blind-199, -hhr-nits-199).
-  assert.equal(files.length, 518, `the focused suite must retain its pre-fold file count, got ${files.length}`);
+  // HEAVY-ELECTRON-TAG: + 1 (heavy-lock/heavy-lock-electron-tag-1101).
+  assert.equal(files.length, 519, `the focused suite must retain its pre-fold file count, got ${files.length}`);
   assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
   assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');
   assert.ok(files.includes(path.join('start-fixes-163', 'start-fixes-163-boot-submit.test.cjs')), 'the start-fixes feature folder is included');

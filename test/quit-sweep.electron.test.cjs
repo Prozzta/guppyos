@@ -1,4 +1,5 @@
 'use strict';
+// @heavy-lock live: it starts a real Electron (harnessElectron) through a variable the lock's scan cannot follow. HEAVY-ELECTRON-TAG: one run of this file takes the heavy slot.
 /**
  * Regression test for TWO Windows quit bugs, exercised through the app's real
  * quit flow (see test/fixtures/quit-sweep-main.cjs for the full story):
