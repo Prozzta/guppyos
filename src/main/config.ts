@@ -942,6 +942,14 @@ export function readConfig(): HarnessConfig {
   return readConfigCached(false);
 }
 
+/** The base for a read-modify-write outside this module (a list edited and written back with
+ *  writeConfig): it skips the window and the stat decides, so the patch never builds on a value
+ *  up to CONFIG_REVALIDATE_MS old and never drops a change another process made meanwhile.
+ *  Plain reads keep the cached read. */
+export function readConfigForWrite(): HarnessConfig {
+  return readConfigCached(true);
+}
+
 /** `fresh` (this module's read-modify-writes and integrity checks): skip the window, so a merge
  *  never builds on a value another process has replaced; the stat decides. */
 function readConfigCached(fresh: boolean): HarnessConfig {

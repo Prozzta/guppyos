@@ -62,7 +62,7 @@ import { initAutoUpdater, abortPendingRestart } from './updater';
 import { RealtimeFloorWatcher } from './realtimeFloorWatcher';
 import { ProviderModelStore, defaultAdapters } from './providerModels';
 import {
-  readConfig, writeConfig, pruneRetiredConfigKeys, setAgentTokenCap, setProjectThemeForHome, resolveProjectThemeForHome, setAgentUsageDisplay, setCapacityDisplayThreshold, setGraphicsMode, resetConfig, ensureHarnessHome, homeHasNoProject, ensureClaudePermissionsAccepted,
+  readConfig, readConfigForWrite, writeConfig, pruneRetiredConfigKeys, setAgentTokenCap, setProjectThemeForHome, resolveProjectThemeForHome, setAgentUsageDisplay, setCapacityDisplayThreshold, setGraphicsMode, resetConfig, ensureHarnessHome, homeHasNoProject, ensureClaudePermissionsAccepted,
   modelForHiveSpawn, takeClearedDefaultModel, configIntegrityIssue, OPS_STANDUP_MISSION, HEARTBEAT_MISSION, COMPACT_MAINTENANCE_MISSION, type HarnessConfig, type ScheduledMission
 } from './config';
 import { effectiveModel, modelFlagValue, resolveSpawnArgs } from '../shared/modelPin';
@@ -2015,7 +2015,7 @@ const termControl = new TermControl({
   write: (ptyId, data) => ptyManager.write(ptyId, data, 'GOD'),
   outputGeneration: (ptyId) => ptyManager.outputGeneration(ptyId),
   log: (row) => hive.appendLog(row),
-  floorHold: { get: () => parseFloorHold(readConfig().floorHold), set: (h) => { writeConfig({ floorHold: h }); } },
+  floorHold: { get: () => parseFloorHold(readConfigForWrite().floorHold), set: (h) => { writeConfig({ floorHold: h }); } },
   heldOf: (agentId) => {
     const p = ptyForAgent(agentId);
     const h = p ? automaticSubmit.inhibition(p) : null;
@@ -2770,7 +2770,7 @@ function syncMissions(): void {
               { to: m.to, act: 'request', subject: m.label, body: m.body }, 'scheduler'),
             recordSkip: (rec) => appendStandupSkip(rec),
             stamp: (patch) => {
-              const current = readConfig().missions ?? [];
+              const current = readConfigForWrite().missions ?? [];
               writeConfig({
                 missions: current.map((x) => (x.id === m.id ? { ...x, ...patch } : x))
               });
@@ -2801,7 +2801,7 @@ function syncMissions(): void {
         // dispatch mission while the hive is disabled.
         if (!gate) {
           const firedAt = Date.now();
-          const current = readConfig().missions ?? [];
+          const current = readConfigForWrite().missions ?? [];
           writeConfig({
             missions: current.map((x) => (x.id === m.id ? { ...x, lastFiredAt: firedAt } : x))
           });
@@ -2996,7 +2996,7 @@ function archiveOrphanedAgents(): void {
  *  first standup waits a full interval instead of firing (and compacting every
  *  terminal) immediately on launch. */
 function ensureDefaultMissions(): void {
-  const cfg = readConfig();
+  const cfg = readConfigForWrite();
   if (!cfg.opsStandupSeeded) {
     const missions = cfg.missions ?? [];
     const has = missions.some((m) => m.id === OPS_STANDUP_MISSION.id);
@@ -3008,7 +3008,7 @@ function ensureDefaultMissions(): void {
   // ZT-I4: the heartbeat (Lane A #1) is RETIRED; the floor digest replaces it. It is no
   // longer seeded, and a heartbeat mission an older build seeded is removed once, so the
   // SCHEDULES panel does not offer a switch that does nothing.
-  const cfg2 = readConfig();
+  const cfg2 = readConfigForWrite();
   if (!cfg2.heartbeatRetired) {
     const missions = cfg2.missions ?? [];
     writeConfig({
@@ -3023,7 +3023,7 @@ function ensureDefaultMissions(): void {
   // would ship to new installs only and the machines actually paying for
   // no-change standups would never get it. Runs at most once, and only fills a
   // gate that is absent: an operator who later turns it off stays off.
-  const cfgGate = readConfig();
+  const cfgGate = readConfigForWrite();
   if (!cfgGate.standupDeltaGateSeeded) {
     const missions = cfgGate.missions ?? [];
     writeConfig({
@@ -3049,7 +3049,7 @@ function ensureDefaultMissions(): void {
   // the trigger can never be clobbered. That keeps the `*Seeded` convention's
   // promise (exactly once, ever) without a config flag that would only ever be
   // read here; `compactMaintenanceSeeded` is left set so nothing re-seeds it.
-  const cfg3 = readConfig();
+  const cfg3 = readConfigForWrite();
   const missions3 = cfg3.missions ?? [];
   const retiring = missions3.find((m) => m.id === COMPACT_MAINTENANCE_MISSION.id);
   if (retiring) {
@@ -3091,7 +3091,7 @@ function ensureDefaultMissions(): void {
   // pressure gate, and it is what actually performed every one of these
   // compactions already — both paths have called emitContextTrigger since Triggers
   // landed. Idempotent, so it costs one no-op scan per boot once clean.
-  const cfg4 = readConfig();
+  const cfg4 = readConfigForWrite();
   const missions4 = cfg4.missions ?? [];
   if (missions4.some((m) => m.autoCompact)) {
     writeConfig({
@@ -5690,7 +5690,7 @@ ipcMain.handle('config:setAgentTokenCap', (_evt, agentId: unknown, tokenCap: unk
 ipcMain.handle('config:setProjectTheme', (_evt, theme: unknown) => chooseProjectTheme(theme));
 /** The current project's theme choice: the Settings picker's IPC, and voice (VOICE-THEME-185). */
 function chooseProjectTheme(theme: unknown): HarnessConfig {
-  const current = readConfig(), home = current.harnessHome;
+  const current = readConfigForWrite(), home = current.harnessHome;
   if (!home) throw new Error('no project home is configured');
   // Onboarding creates its home through config:ensureHome. When main saw that folder
   // blank, the first theme choice for it is the project's creation: the same
@@ -5850,7 +5850,7 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
   allowQuit = true;
   // The pure transaction enforces the creation-only seed boundary and migrates
   // both project-theme maps together on moves.
-  const maps = applyProjectHomeChange(readConfig(), {
+  const maps = applyProjectHomeChange(readConfigForWrite(), {
     mode,
     oldHome,
     newHome,
@@ -6734,7 +6734,7 @@ ipcMain.handle('codexLayer:notices', () => codexLayerNotices.slice());
 ipcMain.handle('codexLayer:allow', (_evt, optInKey: unknown) => {
   if (typeof optInKey !== 'string' || !optInKey) return { ok: false, error: 'no folder' };
   if (!codexLayerNotices.some((n) => n.action === 'refuse' && n.optInKey === optInKey)) return { ok: false, error: 'that folder was not refused' };
-  const cur = readConfig().codexLayerOptIns ?? [];
+  const cur = readConfigForWrite().codexLayerOptIns ?? [];
   writeConfig({ codexLayerOptIns: [...cur, optInKey] });
   for (let i = codexLayerNotices.length - 1; i >= 0; i--) if (codexLayerNotices[i].action === 'refuse' && codexLayerNotices[i].optInKey === optInKey) codexLayerNotices.splice(i, 1);
   hive.appendLog({ kind: 'codex-trust-layer-allowed', optInKey });
@@ -6750,7 +6750,7 @@ ipcMain.handle('codexLayer:dismiss', (_evt, at: unknown) => {
 ipcMain.handle('codexLayer:revoke', (_evt, key: unknown) => {
   if (typeof key !== 'string') return { ok: false };
   const k = codexLayerOptInKey(key);
-  writeConfig({ codexLayerOptIns: (readConfig().codexLayerOptIns ?? []).filter((x) => codexLayerOptInKey(x) !== k) });
+  writeConfig({ codexLayerOptIns: (readConfigForWrite().codexLayerOptIns ?? []).filter((x) => codexLayerOptInKey(x) !== k) });
   hive.appendLog({ kind: 'codex-trust-layer-revoked', optInKey: k });
   return { ok: true };
 });
@@ -6758,7 +6758,7 @@ ipcMain.handle('control:autoDelivery', (_evt, agentId: unknown, paused: unknown)
   if (typeof agentId !== 'string') return null;
   const on = paused === true;
   control.pauseAutoDelivery(agentId, on);
-  const current = new Set(readConfig().autoDeliveryPausedAgents ?? []);
+  const current = new Set(readConfigForWrite().autoDeliveryPausedAgents ?? []);
   if (on) current.add(agentId); else current.delete(agentId);
   writeConfig({ autoDeliveryPausedAgents: Array.from(current).sort() });
   pushAgentImpact();
@@ -7062,7 +7062,7 @@ ipcMain.handle('missions:save', (_evt, missions) => {
   // lastFiredAt (almost always the persisted one) so the UI can never erase it.
   const incoming = (Array.isArray(missions) ? missions : []) as ScheduledMission[];
   const persistedById = new Map(
-    (readConfig().missions ?? []).map((m) => [m.id, m] as const)
+    (readConfigForWrite().missions ?? []).map((m) => [m.id, m] as const)
   );
   const merged = incoming.map((m) => {
     const prev = persistedById.get(m.id);
@@ -7238,7 +7238,7 @@ ipcMain.handle('slack:setConfig', (_evt, patch: unknown) => {
 // ─── IPC: Triggers — context (auto-compact / auto-clear) ────────────────────
 ipcMain.handle('triggers:getContext', () => readConfig().contextTrigger ?? DEFAULT_CONTEXT_TRIGGER);
 ipcMain.handle('triggers:setContext', (_evt, arg: unknown) => {
-  const current = readConfig().contextTrigger ?? DEFAULT_CONTEXT_TRIGGER;
+  const current = readConfigForWrite().contextTrigger ?? DEFAULT_CONTEXT_TRIGGER;
   const p = (arg ?? {}) as Partial<ContextTriggerConfig>;
   const next: ContextTriggerConfig = {
     compact: sanitizeContextRule(p.compact, current.compact),
@@ -7272,7 +7272,7 @@ function sanitizeContextRule(patch: Partial<ContextRule> | undefined, current: C
 ipcMain.handle('webhooks:list', () => readConfig().webhookTriggers ?? []);
 ipcMain.handle('webhooks:save', (_evt, arg: unknown) => {
   const incoming = Array.isArray(arg) ? arg : [];
-  const existing = readConfig().webhookTriggers ?? [];
+  const existing = readConfigForWrite().webhookTriggers ?? [];
   const list: WebhookTrigger[] = [];
   const seen = new Set<string>();
   for (const raw of incoming) {
@@ -7287,7 +7287,7 @@ ipcMain.handle('webhooks:save', (_evt, arg: unknown) => {
 });
 ipcMain.handle('webhooks:delete', (_evt, arg: unknown) => {
   const id = typeof arg === 'string' ? arg : '';
-  const list = (readConfig().webhookTriggers ?? []).filter((t) => t.id !== id);
+  const list = (readConfigForWrite().webhookTriggers ?? []).filter((t) => t.id !== id);
   writeConfig({ webhookTriggers: list });
   // Revoking one endpoint must not disturb the others: the live server is
   // re-pointed, not restarted, so every remaining caller's URL keeps working.
@@ -7338,7 +7338,7 @@ function isTriggerMode(v: unknown): v is TriggerMode {
 // ─── IPC: Triggers — organisation (persistence only; no transport yet) ──────
 ipcMain.handle('org:getTrigger', () => readConfig().orgTrigger ?? DEFAULT_ORG_TRIGGER);
 ipcMain.handle('org:setTrigger', (_evt, arg: unknown) => {
-  const current = readConfig().orgTrigger ?? DEFAULT_ORG_TRIGGER;
+  const current = readConfigForWrite().orgTrigger ?? DEFAULT_ORG_TRIGGER;
   const p = (arg ?? {}) as Partial<OrgTriggerConfig>;
   // PERSIST ONLY — the peer messaging service does not exist yet, so nothing
   // reads `apiKey` beyond the settings surface that shows it. Deliberately no
@@ -7447,7 +7447,7 @@ ipcMain.handle('webhook:setConfig', (_evt, patch: unknown) => {
  *  enabled endpoint without a secret would be an open door, so a bare "enable"
  *  against a never-configured webhook is deliberately a no-op. */
 function upsertLegacyWebhookTrigger(patch: { secret?: string; enabled?: boolean }): void {
-  const list = readConfig().webhookTriggers ?? [];
+  const list = readConfigForWrite().webhookTriggers ?? [];
   const prior = list.find((t) => t.id === 'legacy');
   const secret = patch.secret !== undefined ? patch.secret : prior?.secret ?? '';
   if (!secret) return;
@@ -7590,9 +7590,9 @@ registerRealtimeActionIpc({
     return res;
   },
   listMissions: () => readConfig().missions ?? [],
-  // The spec carries lastFiredAt through from listMissions(), so a wholesale write
-  // preserves the scheduler's stamps; edit_schedule is deliberate + rare.
-  saveMissions: (missions) => { writeConfig({ missions }); },
+  // The edit runs on a fresh read (not the cached listMissions()), so it keeps the scheduler's
+  // lastFiredAt stamps and any mission another writer changed meanwhile.
+  editMissions: (edit) => { writeConfig({ missions: edit(readConfigForWrite().missions ?? []) }); },
   // rt-12: register each voice dispatch so the watcher can detect its completion.
   trackDispatch: (d) => { try { completionWatcher.track({ ...d, kind: 'dispatch' }); } catch { /* watcher unavailable */ } },
   // ── v0.3.4 full-control extensions ──

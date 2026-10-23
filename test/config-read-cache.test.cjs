@@ -232,7 +232,8 @@ test('wiring: readConfig serves the cache before any disk call; every write goes
   assert.ok(body.indexOf('return c.value;') < body.indexOf('statOrNull(p)'), 'the window check comes before the stat');
   assert.ok(!/existsSync\(p\)/.test(body), 'no per-call existsSync');
   // Every read-modify-write and integrity check in this module reads fresh; readConfig() is only defined here.
-  assert.equal((src.match(/readConfigCached\(true\)/g) || []).length, 8);
+  // 8 in this module, + readConfigForWrite (the base for the read-modify-writes outside it).
+  assert.equal((src.match(/readConfigCached\(true\)/g) || []).length, 9);
   assert.equal((src.match(/readConfig\(\)/g) || []).length, 1);
   // config.json is only ever published by writeConfigAtomically (which replaces the cache).
   assert.equal((src.match(/writeConfigAtomically\(p, /g) || []).length, 3, 'persistConfig, pruneRetiredConfigKeys and resetConfig');

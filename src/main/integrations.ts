@@ -25,7 +25,7 @@ import {
   authTypeNeedsSecret,
   secretRefFor
 } from '../shared/integrations';
-import { readConfig, writeConfig } from './config';
+import { readConfig, readConfigForWrite, writeConfig } from './config';
 
 // ─── Registry (config-backed) ────────────────────────────────────────────────
 
@@ -54,13 +54,16 @@ export function upsertRecord(input: unknown): { ok: true; record: IntegrationRec
   const v = validateIntegrationRecord(input);
   if (!v.ok) return v;
   const now = Date.now();
-  const existing = getRecord(v.value.id);
+  // The write builds on a fresh read, never the cached one (it would drop a record another
+  // process added inside the cache window).
+  const current = readConfigForWrite().integrations ?? [];
+  const existing = current.find((r) => r.id === v.value.id);
   const record: IntegrationRecord = {
     ...v.value,
     createdAt: existing?.createdAt ?? now,
     updatedAt: now
   };
-  const next = listRecords().filter((r) => r.id !== record.id);
+  const next = current.filter((r) => r.id !== record.id);
   next.push(record);
   writeConfig({ integrations: next });
   return { ok: true, record };
@@ -68,7 +71,7 @@ export function upsertRecord(input: unknown): { ok: true; record: IntegrationRec
 
 /** Remove a record AND its stored secret. */
 export function removeRecord(id: string): { ok: boolean } {
-  const next = listRecords().filter((r) => r.id !== id);
+  const next = (readConfigForWrite().integrations ?? []).filter((r) => r.id !== id);
   writeConfig({ integrations: next });
   deleteSecret(secretRefFor(id));
   return { ok: true };

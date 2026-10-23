@@ -465,7 +465,8 @@ test('OWED FLOOR HOLD: the term CLI, fleet.json and the floor digest show it; in
   assert.ok(!D.buildFloorDigest(base).markdown.includes('FLOOR HOLD'));
 
   const src = fs.readFileSync(path.join(ROOT, 'src/main/index.ts'), 'utf8').replace(/\r\n/g, '\n');
-  assert.match(src, /floorHold: \{ get: \(\) => parseFloorHold\(readConfig\(\)\.floorHold\), set: \(h\) => \{ writeConfig\(\{ floorHold: h \}\); \} \},/);
+  // The term hold's store reads fresh: its get is the base of the hold's read-modify-write.
+  assert.match(src, /floorHold: \{ get: \(\) => parseFloorHold\(readConfigForWrite\(\)\.floorHold\), set: \(h\) => \{ writeConfig\(\{ floorHold: h \}\); \} \},/);
   assert.match(src, /liveness: agentLiveness\.fleetRecords\(now\), floorHold: hold \? \{ \.\.\.hold, line: floorHoldWords\(hold, now\) \} : null \}\);/);
   assert.match(src, /floorHold: \(\) => parseFloorHold\(readConfig\(\)\.floorHold\),\n  \/\/ MIRROR-STARTUP-196/);
 });
