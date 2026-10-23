@@ -2204,7 +2204,7 @@ export type HeavyStanding = { holding: boolean; reserved: string | null; positio
 /** HEAVY-HANDOFF-RACE (a): the answer to `heavy next <agent>`. `queued`: the agent was already queued (it
  *  is at the head now); else it goes to the head when it next asks. `refused`: the caller holds no slot,
  *  has none reserved and is not god ('not-a-holder'), or named itself ('self'): nothing changed. */
-export type HeavyNextAnswer = { state: 'next'; to: string; queued: boolean; refused?: 'not-a-holder' | 'self' };
+export type HeavyNextAnswer = { state: 'next'; to: string; queued: boolean; refused?: 'not-a-holder' | 'self' | 'unknown' };
 /** LOCK-WAIT-NOTICES / HEAVY-HANDOFF-RACE (c): why an agent is told about its wait: 'expired' (its unused
  *  reservation passed on and it is no longer queued), 'requeued' (it passed on and the agent is queued
  *  again, at the back, once), 'stale' (kept for main's notice function; never sent since HEAVY-QUEUE-WAIT-DROPS). */
@@ -2336,6 +2336,8 @@ export class HeavyJobLock {
    *  queue: moved to its head when queued, put there when it next asks. Cleared once it is reserved,
    *  holds a slot, or is gone. */
   private nextUp: string | null = null;
+  /** Jim HHR NIT 1: when the name was given; one nobody asks for expires after HEAVY_TTL_MS. */
+  private nextAt = 0;
   private readonly now: () => number;
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
   private readonly clearTimer: (t: unknown) => void;
@@ -2464,13 +2466,15 @@ export class HeavyJobLock {
     const excl = heavyExclusive(cls);
     const holders = [...this.holders.values()];
     const position = this.enqueue(agentId, kind, !callId.startsWith('lease:'), excl);
+    // Jim HHR NIT 3 (P3): an agent queued again after a lapse is told the truth: its next lapse drops it.
+    const lapsed = !!this.waiters.find((w) => w.agentId === agentId)?.lapsed;
     const who = holders.map((h) => `${h.agentId} (${h.kind}: ${h.command.slice(0, 80)}, since ${new Date(h.since).toISOString().slice(11, 19)}Z)`).join('; ');
     const others = [...this.reservations.entries()].map(([a, r]) => `reserved for ${a} until ${new Date(r.until).toISOString().slice(11, 19)}Z`).join('; ');
     const held = holders.length ? `${holders.length === 1 ? 'it is' : 'they are'} held by ${who}` : 'no job is running';
     // HEAVY-SLOT-EXCLUSIVE-192: with 2+ slots, say why a free slot is not yours (one slot is always alone).
     const alone = limit > 1 && (excl || holders.some((h) => h.exclusive) || [...this.reservations.values()].some((r) => r.exclusive) || this.waiters.some((w) => w.exclusive && w.agentId !== agentId))
       ? ' A whole test suite or a bench runs alone: it starts only when every slot is free, and nothing else starts beside it or ahead of it.' : '';
-    const reason = `Denied by HEAVY-JOB-LOCK: the machine allows ${limit} heavy job${limit === 1 ? '' : 's'} at once and ${held}${others ? ` (${others})` : ''}.${alone} You are QUEUED (position ${position}): when a slot frees it is reserved for you for ${Math.round(HEAVY_RESERVE_MS / 60_000)} min and you are told "HEAVY SLOT FREE". Do not retry this or a variant of it now, and do not poll for the slot: carry on with light work (single test files, reads, edits are not limited) until you are told. A reservation you leave unused for ${Math.round(HEAVY_RESERVE_MS / 60_000)} min passes on and queues you again at the back, once; \`heavy status\` shows your standing and \`heavy release\` leaves the queue.${cls.provisional ? ` This denial is PROVISIONAL (${cls.why}): if the command is in fact light, \`heavy release\` leaves the queue, and name the file so the lock can read it.` : ''}`;
+    const reason = `Denied by HEAVY-JOB-LOCK: the machine allows ${limit} heavy job${limit === 1 ? '' : 's'} at once and ${held}${others ? ` (${others})` : ''}.${alone} You are QUEUED (position ${position}): when a slot frees it is reserved for you for ${Math.round(HEAVY_RESERVE_MS / 60_000)} min and you are told "HEAVY SLOT FREE". Do not retry this or a variant of it now, and do not poll for the slot: carry on with light work (single test files, reads, edits are not limited) until you are told. A reservation you leave unused for ${Math.round(HEAVY_RESERVE_MS / 60_000)} min passes on and ${lapsed ? 'takes you out of the queue (you were queued again once already)' : 'queues you again at the back, once'}; \`heavy status\` shows your standing and \`heavy release\` leaves the queue.${cls.provisional ? ` This denial is PROVISIONAL (${cls.why}): if the command is in fact light, \`heavy release\` leaves the queue, and name the file so the lock can read it.` : ''}`;
     // Jim N3: the denied command's CLASS is logged, not the command itself.
     this.log({ kind: 'heavy-lock', action: 'deny', agentId, heavyKind: kind, why: cls.why ?? null, holders: holders.map((h) => ({ agentId: h.agentId, kind: h.kind, since: new Date(h.since).toISOString() })), limit, position, ...(excl ? { exclusive: true } : {}) });
     this.changed();
@@ -2774,11 +2778,15 @@ export class HeavyJobLock {
     to = to.slice(0, 80);
     const i = this.waiters.findIndex((w) => w.agentId === to);
     const queued = i >= 0;
+    // Jim HHR NIT 1 (P2: "creed-typo", named by god, stood 6 h and then went ahead of a waiter): a name
+    // must be an agent on the floor (one with a PTY, as the queue's liveness sweep counts it).
     const refused = to === agentId ? 'self' as const
-      : !(this.holders.has(agentId) || this.reservations.has(agentId) || this.isGod(agentId)) ? 'not-a-holder' as const : undefined;
+      : !(this.holders.has(agentId) || this.reservations.has(agentId) || this.isGod(agentId)) ? 'not-a-holder' as const
+        : !this.alive(to) ? 'unknown' as const : undefined;
     this.log({ kind: 'heavy-lock', action: 'next', agentId, to, queued, ...(refused ? { refused } : {}) });
     if (refused) return { state: 'next', to, queued, refused };
     this.nextUp = to;
+    this.nextAt = this.now();
     if (i > 0) { this.waiters.unshift(...this.waiters.splice(i, 1)); this.changed(); }
     // A slot free now (the named agent waited behind an exclusive head) goes to it at once.
     if (queued) this.grant();
@@ -2869,6 +2877,12 @@ export class HeavyJobLock {
     // HEAVY-SLOT-EXCLUSIVE-192: a dropped waiter may have held back the ones behind it (an exclusive
     // head waits for the empty machine), so the queue is offered the free slots again.
     let left = false;
+    // Jim HHR NIT 1: a standing name nobody asked for within HEAVY_TTL_MS is forgotten (logged).
+    if (this.nextUp && t - this.nextAt >= HEAVY_TTL_MS) {
+      this.log({ kind: 'heavy-lock', action: 'next-expired', to: this.nextUp, ageMs: t - this.nextAt });
+      this.nextUp = null;
+      this.changed();
+    }
     for (const w of [...this.waiters]) {
       if (!this.d.alive || this.alive(w.agentId)) continue;
       this.dequeue(w.agentId);

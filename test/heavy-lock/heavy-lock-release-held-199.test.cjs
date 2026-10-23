@@ -193,7 +193,7 @@ test('E2E: a holder\'s `heavy release` over the real hook broker route: refused 
   b.lock.acquire('creed', H, 'bash cut.sh', 'k1', false);
   await b.lock.scan();
   const no = await cli(['release'], { HIVE_LEDGER_URL: b.url('dwight') });
-  assert.equal(no.code, 0, no.err);
+  assert.equal(no.code, 1, no.err);   // Jim HHR NIT 2: a refusal exits non-zero
   assert.equal(no.out, 'heavy: refused: you hold the bench slot and its job still runs (call c1, pids 11); stop the job first, or it frees when the job ends\n', 'THE CLI REFUSES TRUTHFULLY OVER THE ROUTE');
   assert.match((await cli(['status'], { HIVE_LEDGER_URL: b.url('dwight') })).out, /^held: dwight; reserved: none; queue: creed\nyou: holding a slot/);
   b.st.running = false;
