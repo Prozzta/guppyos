@@ -1,5 +1,5 @@
 import { app } from 'electron';
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, watch, writeFileSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
 import { DEV_ISOLATION, devDataRoot, devHarnessHome } from './devIsolation';
 import { basename, dirname, join } from 'node:path';
@@ -658,16 +658,84 @@ function renameWithRetry(tmp: string, target: string): void {
 
 function writeConfigAtomically(p: string, data: unknown): void {
   const tmp = `${p}.tmp-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const text = JSON.stringify(data, null, 2);
   try {
-    writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
+    writeFileSync(tmp, text, 'utf8');
     renameWithRetry(tmp, p);
   } catch (error) {
+    // The file may or may not have changed: the next read goes to disk.
+    configCache = null;
     try { rmSync(tmp, { force: true }); } catch { /* preserve the publish error */ }
     throw error;
   }
+  // Our own write replaces the cache in-process: the next read builds from the text just
+  // published (the same text a disk read would get), with no disk read.
+  configWriteGen++;
+  const st = statOrNull(p);
+  configCache = st ? { path: p, key: statKey(st), raw: text, value: null, checkedAt: configNow() } : null;
+}
+
+/**
+ * MAIN-SYNC-LOG-LEDGER (config, the #1 main-sync cost): readConfig was a disk read, a parse and
+ * the migrations on every call, ~2,900 calls/min on main under a heavy run (112 call sites in
+ * index.ts, many of them getters called per tick). It now serves one parsed, DEEP-FROZEN config
+ * from memory:
+ *   - writeConfigAtomically (every in-process write) replaces the cache with the text it published;
+ *   - an external edit is picked up by fs.watch on the folder (it marks the cache dirty), and the
+ *     authority is a stat revalidate (mtime, ctime, size, ino) at most CONFIG_REVALIDATE_MS after
+ *     the last check, because fs.watch on Windows misses events;
+ *   - the missing, corrupt and unreadable paths are not cached: they behave exactly as before.
+ * The value is frozen, never cloned per call (that would bring the cost back): a caller that
+ * needs a changed config spreads it into a new object (writeConfig's `{ ...current, ...patch }`).
+ */
+export const CONFIG_REVALIDATE_MS = 1_000;
+type ConfigCache = { path: string; key: string; raw: string | null; value: HarnessConfig | null; checkedAt: number };
+let configCache: ConfigCache | null = null;
+/** Bumped by every write, so a read whose migration wrote mid-build does not cache a stale value. */
+let configWriteGen = 0;
+let configNow = (): number => Date.now();
+let configWatcher: { path: string; close: () => void } | null = null;
+
+function statOrNull(p: string): ReturnType<typeof statSync> | null {
+  // As existsSync: any error (ENOENT, EACCES, ...) is "no file".
+  try { return statSync(p); } catch { return null; }
+}
+
+function statKey(st: NonNullable<ReturnType<typeof statSync>>): string {
+  return `${st.mtimeMs}:${st.ctimeMs}:${st.size}:${st.ino}`;
+}
+
+function deepFreeze<T>(v: T): T {
+  if (v && typeof v === 'object' && !Object.isFrozen(v)) {
+    Object.freeze(v);
+    for (const k of Object.keys(v as object)) deepFreeze((v as Record<string, unknown>)[k]);
+  }
+  return v;
+}
+
+/** fs.watch on the config folder marks the cache dirty (the next read stats). Best-effort: the
+ *  stat revalidate is the authority, so a watcher that fails to start or dies changes nothing. */
+function watchConfig(p: string): void {
+  if (configWatcher?.path === p) return;
+  configWatcher?.close();
+  configWatcher = null;
+  try {
+    const w = watch(dirname(p), { persistent: false }, (_event, name) => {
+      if (!name || String(name) === basename(p)) { if (configCache?.path === p) configCache.checkedAt = -Infinity; }
+    });
+    w.on('error', () => { w.close(); if (configWatcher?.path === p) configWatcher = null; });
+    configWatcher = { path: p, close: () => w.close() };
+  } catch { /* no watcher: the stat revalidate still bounds the staleness */ }
+}
+
+/** Tests: drop the cache (the next read goes to disk), and/or drive the revalidate clock. */
+export function __resetConfigCacheForTests(now?: () => number): void {
+  configCache = null;
+  if (now) configNow = now;
 }
 
 function noteCorruptConfig(p: string, raw: string, error: unknown): void {
+  configCache = null;
   const fingerprint = createHash('sha256').update(raw).digest('hex');
   let quarantine: string | null = configIntegrity?.quarantine ?? null;
   if (configCorruptFingerprint !== fingerprint) {
@@ -868,25 +936,39 @@ export function pruneRetiredConfigKeys(): string[] {
 
 export function readConfig(): HarnessConfig {
   const p = configPath();
+  const now = configNow();
+  const c = configCache;
+  if (c && c.value && c.path === p && now - c.checkedAt >= 0 && now - c.checkedAt < CONFIG_REVALIDATE_MS) return c.value;
+  const st = statOrNull(p);
   // No file yet = a first run with nothing to migrate; the defaults ARE the
   // post-migration shape. Deliberately does not persist — a bare read must not
   // conjure a config.json before onboarding has written one. A fresh install has
   // nothing to clear, so its first write records the default-model flag as done
   // (otherwise a default the user picks before that write would be cleared).
-  if (!existsSync(p)) {
+  if (!st) {
+    configCache = null;
     configIntegrity = null;
     configCorruptFingerprint = null;
     return configDefaults();
   }
+  const key = statKey(st);
+  if (c && c.path === p && c.key === key) {
+    c.checkedAt = now;
+    if (c.value) return c.value;
+  }
+  const pending = c && c.path === p && c.key === key ? c.raw : null;
+  const gen = configWriteGen;
   let raw: string | undefined;
+  let built: HarnessConfig;
   try {
-    raw = readFileSync(p, 'utf8');
+    raw = pending ?? readFileSync(p, 'utf8');
     const parsed = JSON.parse(raw);
     for (const k of RETIRED_CONFIG_KEYS) delete parsed[k];
     configIntegrity = null;
     configCorruptFingerprint = null;
-    return normalizeStoredHomes(migrateDefaultModelCliV1(migrateTriggersV1(withTriggerDefaults({ ...DEFAULTS, ...parsed }))));
+    built = normalizeStoredHomes(migrateDefaultModelCliV1(migrateTriggersV1(withTriggerDefaults({ ...DEFAULTS, ...parsed }))));
   } catch (error) {
+    configCache = null;
     if (typeof raw === 'string') {
       noteCorruptConfig(p, raw, error);
       return configDefaults();
@@ -894,6 +976,12 @@ export function readConfig(): HarnessConfig {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return configDefaults();
     throw new Error(`config.json could not be read: ${error instanceof Error ? error.message : String(error)}`);
   }
+  // A clone, so freezing never reaches the DEFAULTS objects a shallow merge shares.
+  const value = deepFreeze(structuredClone(built));
+  // A migration that persisted mid-build left the cache holding its own text: keep that.
+  if (gen === configWriteGen) configCache = { path: p, key, raw: null, value, checkedAt: now };
+  watchConfig(p);
+  return value;
 }
 
 /** (#140, the upgrade path) A config.json persisted BEFORE `writeConfig`
