@@ -130,28 +130,38 @@ test('every read-modify-write of config.json in main builds on readConfigForWrit
 //   another object's method of the same name does not (hive.enabled()), and a declaration is no call.
 // - Write sites: every writeConfig() call, plus every call of a wrapper whose writeConfig patch uses
 //   one of its own parameters as a value (Jim R1: saveHooks(list) on a cached list). A parameter
-//   applied to a fresh read (editMissions' edit(...)) does not make a wrapper.
+//   applied to a fresh read (editMissions' edit(...)) does not make a wrapper. A parameter counts
+//   through a local (Jim W1: const copy = list) and through destructuring (Jim W2: save({ list })).
+// - A read counts when ANY function around it also holds the write (Jim N1-N3: a read in a callback,
+//   an IIFE or a promise chain feeds the handler around it). A closure inside a RETURNED value is
+//   still no read when deciding what is a source.
 // Known limits (a text window, not data flow; the census above and the audits prove the current tree):
-// - R2: a source imported under another name (import { readConfig as rc }) is not followed.
 // - R4: a cached read more than 30 lines above the write in the same block is not seen.
+// - A template string in a returned value is not followed (a spoken or logged text is no base), so a
+//   helper returning `${readConfig().x}` is not a source.
+// - A local is followed one name at a time, through its initializer only: a later reassignment
+//   (let x = fresh; x = cached) is not seen.
+// - A read-only entry exempts its exact text in its own function (or ipcMain.handle channel) only;
+//   a second, stale use of that same text in that same function would be exempt too.
 // - R5: a module-level snapshot (let snap = readConfig()) used later as a base is not seen.
 // - A cached base captured by an edit callback (const base = deps.listMissions(); deps.editMissions(() =>
 //   [...base, m])) is not seen; the voice create_schedule test above catches that shape at run time.
+// Each entry is keyed to its file and the function or ipcMain.handle channel it sits in (Jim X1), so
+// the same text elsewhere is not exempt; the real-tree test asserts every entry is still used.
 const READ_ONLY = [
-  /savedLevel: \(\) => readConfig\(\)\.claimLedger,/,
-  /readMission: \(\) => \(readConfig\(\)\.missions/,
-  /^const cfg = readConfig\(\);$/, // changeHome recovery: restarts the slack server, writes nothing
-  /^const previousBindAllInterfaces = readConfig\(\)\.inboundBindAllInterfaces === true;$/,
-  /^listMissions: \(\) => readConfig\(\)\.missions \?\? \[\],$/,
-  /^getConfigValue: \(key\) => \(readConfig\(\)/,
-  /^if \(readConfig\(\)\.realtimeVoiceEnabled\) writeConfig\(\{ realtimeVoiceEnabled: false \}\);$/,
-  /^const cfgHome = readConfig\(\)\.harnessHome \?\? '';$/,
-  /^emitContextTrigger\('compact', contextRule\('compact'\)\);$/, // the scheduler's compact emit reads the rule, it is no base
-  /^const m = deps\.readMission\(\);$/, // the standup gate decides on the mission; stamp()'s patch carries only new values
-  /^const oldValue = deps\.getConfigValue\(key\);$/, // voice set_config: a scalar compare and the spoken undo
-  /^const themes = offeredProjectThemes\(deps\.getConfigValue\('tvShowOffices'\) === true\);$/, // the voice theme offer list
-  /^const old = deps\.getProjectTheme\(\);$/, // the voice theme compare and its spoken label
-  /^gate = runStandupTick\(m\.id, \{$/ // the gate decision; the stamp inside writes only new values on a fresh read
+  ['src/main/index.ts', 'readMission', /readMission: \(\) => \(readConfig\(\)\.missions/, 'the standup gate input'],
+  ['src/main/index.ts', 'ipc:config:changeHome', /^const cfg = readConfig\(\);$/, 'changeHome recovery: restarts the slack server, writes nothing'],
+  ['src/main/index.ts', ['ipc:slack:setConfig', 'ipc:webhook:setConfig'], /^const previousBindAllInterfaces = readConfig\(\)\.inboundBindAllInterfaces === true;$/, 'a scalar compare'],
+  ['src/main/index.ts', '<module>', /^if \(readConfig\(\)\.realtimeVoiceEnabled\) writeConfig\(\{ realtimeVoiceEnabled: false \}\);$/, 'a scalar decision'],
+  ['src/main/index.ts', '<module>', /^const cfgHome = readConfig\(\)\.harnessHome \?\? '';$/, 'a scalar compare'],
+  ['src/main/index.ts', 'fire', /^emitContextTrigger\('compact', contextRule\('compact'\)\);$/, "the scheduler's compact emit reads the rule, it is no base"],
+  ['src/main/standupDelta.ts', 'runStandupTick', /^const m = deps\.readMission\(\);$/, "the standup gate decides on the mission; stamp()'s patch carries only new values"],
+  ['src/main/realtimeActions.ts', 'proposeDestructive', /^const oldValue = deps\.getConfigValue\(key\);$/, 'voice set_config: a scalar compare and the spoken undo'],
+  ['src/main/realtimeActions.ts', 'setThemeByVoice', /^const themes = offeredProjectThemes\(deps\.getConfigValue\('tvShowOffices'\) === true\);$/, 'the voice theme offer list'],
+  ['src/main/realtimeActions.ts', 'setThemeByVoice', /^const old = deps\.getProjectTheme\(\);$/, 'the voice theme compare and its spoken label'],
+  ['src/main/index.ts', 'fire', /^gate = runStandupTick\(m\.id, \{$/, 'the gate decision; the stamp inside writes only new values on a fresh read'],
+  ['src/main/index.ts', 'rearm', /^const persisted = \(readConfig\(\)\.missions \?\? \[\]\)\.find\(\(x\) => x\.id === m\.id\)\?\.lastFiredAt \?\? 0;$/, 'the weekly re-arm delay, a scalar'],
+  ['src/main/claims/ledgerUi.ts', 'setLevel', /^const writers = d\.store\(\) \? d\.agents\(\)\.filter\(\(a\) => d\.level\(a\) === 'writer'\) : \[\];$/, 'who holds writer, for the confirm text']
 ];
 const ts = require('typescript');
 const MAIN = 'src/main';
@@ -226,7 +236,7 @@ function analyse(files) {
     let hit = false;
     const seen = new Set();
     const walk = (n) => {
-      if (hit || ts.isFunctionLike(n)) return;
+      if (hit || ts.isFunctionLike(n) || ts.isTemplateExpression(n)) return; // a spoken or logged string is no base
       if (ts.isCallExpression(n) && declsOf(n).some((d) => set.has(d))) { hit = true; return; }
       // A local holding a source's value: const c = readConfig(); return f(c).
       if (ts.isIdentifier(n)) { const d = checker.getSymbolAtLocation(n)?.declarations?.[0]; if (d && ts.isVariableDeclaration(d) && d.initializer && !seen.has(d)) { seen.add(d); walk(d.initializer); } return; }
@@ -245,12 +255,24 @@ function analyse(files) {
   }
   // Wrappers: a function whose writeConfig() (or wrapper) argument uses one of its own parameters as a value.
   const writers = new Set([writeConfigDecl]);
+  // A parameter, or a name destructured out of one (Jim W2: function save({ list })).
+  const paramOf = (d, fn) => {
+    while (d && (ts.isBindingElement(d) || ts.isObjectBindingPattern(d) || ts.isArrayBindingPattern(d))) d = d.parent;
+    return !!d && ts.isParameter(d) && d.parent === fn;
+  };
   const usesParamAsValue = (arg, fn) => {
     let hit = false;
+    const seen = new Set();
     const walk = (n) => {
       if (hit) return;
       if (ts.isCallExpression(n)) { n.arguments.forEach(walk); if (!ts.isIdentifier(n.expression)) walk(n.expression); return; }
-      if (ts.isIdentifier(n)) { const d = checker.getSymbolAtLocation(n)?.declarations?.[0]; if (d && ts.isParameter(d) && d.parent === fn) hit = true; return; }
+      if (ts.isIdentifier(n)) {
+        const d = checker.getSymbolAtLocation(n)?.declarations?.[0];
+        if (paramOf(d, fn)) hit = true;
+        // A local holding a parameter's value (Jim W1: const copy = list).
+        else if (d && ts.isVariableDeclaration(d) && d.initializer && !seen.has(d)) { seen.add(d); walk(d.initializer); }
+        return;
+      }
       ts.forEachChild(n, walk);
     };
     walk(arg);
@@ -266,7 +288,20 @@ function analyse(files) {
       if (wraps) { for (const d of withSignatures(h)) writers.add(d); grew = true; }
     }
   }
-  const scopeOf = (n) => { let p = n.parent; while (p && !ts.isFunctionLike(p) && !ts.isSourceFile(p)) p = p.parent; return p; };
+  // Every function around a read (Jim N1-N3: a read inside a callback or an IIFE still feeds the
+  // handler around it); a module-level read has only its file.
+  const scopesOf = (n) => { const out = []; for (let p = n.parent; p; p = p.parent) if (ts.isFunctionLike(p)) out.push(p); return out.length ? out : [n.getSourceFile()]; };
+  // Where a read sits, for the read-only list: the nearest named function or ipcMain.handle channel.
+  const contextOf = (n) => {
+    for (let p = n.parent; p; p = p.parent) {
+      if (!ts.isFunctionLike(p)) continue;
+      const h = holderOf(p);
+      if (h?.name) return h.name.getText();
+      const c = p.parent;
+      if (ts.isCallExpression(c) && c.expression.getText() === 'ipcMain.handle' && c.arguments[0] && ts.isStringLiteral(c.arguments[0])) return `ipc:${c.arguments[0].text}`;
+    }
+    return '<module>';
+  };
   const lineOf = (sf, n) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line;
   const sourceLines = new Map();
   const writeSites = [];
@@ -276,14 +311,14 @@ function analyse(files) {
     walkAll(sf, (n) => {
       if (!ts.isCallExpression(n)) return;
       const decls = declsOf(n);
-      if (decls.some((d) => sources.has(d))) { const l = lineOf(sf, n.expression.name ?? n.expression); lines.set(l, [...(lines.get(l) ?? []), scopeOf(n)]); }
+      if (decls.some((d) => sources.has(d))) { const l = lineOf(sf, n.expression.name ?? n.expression); lines.set(l, [...(lines.get(l) ?? []), { scopes: scopesOf(n), context: contextOf(n) }]); }
       if (decls.some((d) => writers.has(d))) writeSites.push({ rel, line: lineOf(sf, n.expression.name ?? n.expression), call: n });
     });
     sourceLines.set(rel, lines);
   }
   return { sources: named([...sources]), writers: named([...writers]), sourceLines, writeSites };
 }
-function staleBases(files) {
+function staleBases(files, used) {
   const { sourceLines, writeSites } = analyse(files);
   const text = new Map(files.map((f) => [f.rel, f.text.split(/\r?\n/)]));
   const bad = new Set();
@@ -292,8 +327,13 @@ function staleBases(files) {
     const reads = sourceLines.get(rel);
     for (let j = i; j >= Math.max(0, i - 30); j--) {
       const t = lines[j];
-      const holds = (reads.get(j) ?? []).some((sc) => sc.pos <= call.pos && call.end <= sc.end);
-      if (holds && !READ_ONLY.some((re) => re.test(t.trim()))) bad.add(`${rel}:${j + 1} (for the write at ${i + 1}): ${t.trim()}`);
+      for (const read of reads.get(j) ?? []) {
+        if (!read.scopes.some((sc) => sc.pos <= call.pos && call.end <= sc.end)) continue;
+        const allowed = READ_ONLY.find(([file, context, re]) => file === rel && [context].flat().includes(read.context) && re.test(t.trim()));
+        if (allowed) { used?.add(allowed); continue; }
+        if (process.env.CWB_DEBUG) console.log('HIT', rel, read.context, t.trim());
+        bad.add(`${rel}:${j + 1} (for the write at ${i + 1}): ${t.trim()}`);
+      }
       if (j < i && /^(ipcMain\.handle|function |export function |async function |const \w+ = \(|\}\);?$|\};?$)/.test(t)) break;
     }
   }
@@ -309,7 +349,10 @@ test('the cached-source scan finds the helpers that return readConfig() values, 
   assert.equal(writers.has('editMissions'), false, 'edit(...) on a fresh read is not a wrapper');
 });
 test('no config write in main builds on a cached read (the rule for new code)', () => {
-  assert.deepEqual(staleBases(mainFiles()), []);
+  const used = new Set();
+  assert.deepEqual(staleBases(mainFiles(), used), []);
+  // Every read-only entry still matches a real read in its own file and function (none is stale).
+  assert.deepEqual(READ_ONLY.filter((e) => !used.has(e)).map(([file, context, re]) => `${file} ${context} ${re}`), []);
 });
 test('the rule refuses Jim C3 (a base read through a helper) and C7 (a stale merge in a file outside the census)', () => {
   const files = mainFiles();
@@ -369,4 +412,52 @@ export class JimKnowledge {
   const { sources } = analyse(c7f);
   assert.ok(sources.has('active'), 'control: active() is a source');
   assert.deepEqual(staleBases(c7f), []);
+});
+test('the rule refuses a read in a callback, an IIFE or a promise chain (Jim N1-N3)', () => {
+  const files = mainFiles();
+  const stale = (body) => staleBases(appendTo(files, `${MAIN}/index.ts`, `
+ipcMain.handle('jim:n', () => {
+${body}
+});
+`)).map((b) => b.split(': ')[1]);
+  assert.deepEqual(stale(`  const cur = [0].flatMap(() => readConfig().webhookTriggers ?? []);
+  writeConfig({ webhookTriggers: [...cur] });`), ['const cur = [0].flatMap(() => readConfig().webhookTriggers ?? []);'], 'N1');
+  assert.deepEqual(stale(`  const cur = (() => readConfig().webhookTriggers ?? [])();
+  writeConfig({ webhookTriggers: [...cur] });`), ['const cur = (() => readConfig().webhookTriggers ?? [])();'], 'N2');
+  assert.deepEqual(stale(`  Promise.resolve().then(() => readConfig().webhookTriggers ?? [])
+    .then((cur) => { writeConfig({ webhookTriggers: [...cur] }); });`), ['Promise.resolve().then(() => readConfig().webhookTriggers ?? [])'], 'N3');
+  assert.deepEqual(stale(`  const cur = [0].flatMap(() => readConfigForWrite().webhookTriggers ?? []);
+  writeConfig({ webhookTriggers: [...cur] });`), [], 'the same callback on a fresh read passes');
+});
+test('the rule refuses a wrapper that passes its parameter through a local or destructuring (Jim W1, W2), and an aliased read', () => {
+  const files = mainFiles();
+  const stale = (extra) => staleBases(appendTo(files, `${MAIN}/index.ts`, extra)).map((b) => b.slice(b.indexOf("): ") + 3));
+  assert.deepEqual(stale(`
+function jimSaveHooks2(list) { const copy = list; writeConfig({ webhookTriggers: copy }); }
+ipcMain.handle('jim:w1', () => {
+  jimSaveHooks2([...(readConfig().webhookTriggers ?? [])]);
+});
+`), ['jimSaveHooks2([...(readConfig().webhookTriggers ?? [])]);'], 'W1');
+  assert.deepEqual(stale(`
+function jimSaveHooks3({ list }) { writeConfig({ webhookTriggers: list }); }
+ipcMain.handle('jim:w2', () => {
+  jimSaveHooks3({ list: [...(readConfig().webhookTriggers ?? [])] });
+});
+`), ['jimSaveHooks3({ list: [...(readConfig().webhookTriggers ?? [])] });'], 'W2');
+  // The checker follows an import alias (Jim R2), so this is caught, not a limit.
+  const aliased = withFile(files, `${MAIN}/knowledge.ts`, `import { readConfig as jimRc, writeConfig } from './config';
+export function jimKnowledge(on: boolean): void {
+  writeConfig({ knowledgeGraph: { ...jimRc().knowledgeGraph, on } });
+}
+`);
+  assert.deepEqual(staleBases(aliased).map((b) => b.split(': ')[0]), [`${MAIN}/knowledge.ts:3 (for the write at 3)`], 'R2');
+});
+test('a read-only entry exempts its text only in its own function (Jim X1)', () => {
+  const x1 = appendTo(mainFiles(), `${MAIN}/index.ts`, `
+ipcMain.handle('jim:x1', () => {
+  const cfg = readConfig();
+  writeConfig({ webhookTriggers: [...(cfg.webhookTriggers ?? [])] });
+});
+`);
+  assert.deepEqual(staleBases(x1).map((b) => b.split(': ')[1]), ['const cfg = readConfig();']);
 });
