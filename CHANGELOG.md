@@ -51,6 +51,7 @@ Rollback: 1.1.98 (reinstall).
 - **Test runs leave no PowerShell files behind.** PowerShell started by a test gets a temp folder of
   its own, and folders left by a killed run are cleaned up later.
 
+## [1.1.98] — 2026-10-22
 
 **Agent mail arrives without anyone typing, heavy jobs share the machine fairly, and cost figures are right.**
 Rollback: 1.1.97 (reinstall).
