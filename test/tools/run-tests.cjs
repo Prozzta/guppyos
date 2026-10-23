@@ -106,6 +106,9 @@ const START_GATE_PRELOAD = path.join(__dirname, 'file-start-gate.cjs');
 // Node sees.  Keep node --test and the start gate within the share the heavy helper gave it.
 const CPU_RATE_UNITS = 10_000;
 const CPU_RATE_50_PERCENT = 5_000;
+// Do not use PATH: Stable's installed helper can predate self-query while this branch
+// has built it. The build places the branch-local helper exactly here.
+const HEAVYJOB_HELPER = path.join(__dirname, '..', '..', 'resources', 'heavyjob', 'bin', 'guppy-heavyjob.exe');
 // HALFCORES-OVERSUBSCRIBE: rendered tests launch a multiprocess Electron tree.  Under a
 // job-wide hard cap they must not compete with the ordinary node-test burst; classify by
 // the harness the file actually imports, rather than maintaining a filename allowlist.
@@ -119,11 +122,20 @@ function selfJobRate({ spawnSyncFn = spawnSync, env = process.env, platform = pr
   // The explicit variable is retained for the cmd re-exec path and controlled test launches.
   if (env.GUPPY_HEAVY_CPU_CAP === '1') return CPU_RATE_50_PERCENT;
   if (env.GUPPY_HEAVY_CPU_CAP === '0' || platform !== 'win32') return 0;
-  try {
-    const r = spawnSyncFn('guppy-heavyjob', ['self-query'], { encoding: 'utf8', windowsHide: true, env });
-    const rate = JSON.parse(String(r.stdout || '')).rate;
-    return Number.isInteger(rate) && rate > 0 && rate <= CPU_RATE_UNITS ? rate : 0;
-  } catch { return 0; }
+  let r;
+  try { r = spawnSyncFn(HEAVYJOB_HELPER, ['self-query'], { encoding: 'utf8', windowsHide: true, env }); }
+  catch (e) { throw new Error(`heavy-job self-query could not start (${HEAVYJOB_HELPER}): ${String(e)}`); }
+  if (r.error || r.status !== 0) {
+    throw new Error(`heavy-job self-query is unavailable (${HEAVYJOB_HELPER}; status ${r.status}): ${String(r.stderr || r.error || '').trim()}`);
+  }
+  let reply;
+  try { reply = JSON.parse(String(r.stdout || '')); }
+  catch (e) { throw new Error(`heavy-job self-query returned invalid JSON (${HEAVYJOB_HELPER}): ${String(e)}`); }
+  const rate = reply?.rate;
+  if (!Number.isInteger(rate) || rate < 0 || rate > CPU_RATE_UNITS) {
+    throw new Error(`heavy-job self-query returned invalid rate (${HEAVYJOB_HELPER}): ${String(rate)}`);
+  }
+  return rate;
 }
 const cappedCores = (env = process.env, cores = os.availableParallelism(), rate = selfJobRate({ env })) =>
   rate > 0 ? Math.max(1, Math.floor(cores * rate / CPU_RATE_UNITS)) : cores;
@@ -293,7 +305,12 @@ function run({
   const env = require('./ps-env.cjs').psEnv(processEnv, { temp: false });
   delete env.NODE_TEST_CONTEXT;
   // Re-query after psEnv cloning: it preserves the process's job membership and explicit overrides.
-  const rateNow = jobRate({ env });
+  let rateNow;
+  try { rateNow = jobRate({ env }); }
+  catch (e) {
+    err(`[test-runner] cannot query heavy CPU cap: ${String(e)}`);
+    return 1;
+  }
   const concurrency = cappedCores(env, cores, rateNow);
   const renderFiles = rateNow > 0 ? renderLaneFiles(files, { testDir }) : [];
   const normalFiles = renderFiles.length ? files.filter((file) => !renderFiles.includes(file)) : files;
@@ -490,7 +507,7 @@ function totals(code, counts, laneState, log, failures = [], {
   return code;
 }
 
-module.exports = { prepareFileJob, FILE_JOB_PRELOAD, prepareTempJail, TEMP_JAIL_PRELOAD, tempLeaks, reportTempLeaks,prepareStartGate, startSlots, cappedCores, selfJobRate, CPU_RATE_50_PERCENT, START_GATE_PRELOAD, burstLine, selectTestFiles, discoverTestFiles, renderLaneFiles, FEATURE_TEST_DIRS, run, runPerfLane, runCounts, failingTests, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
+module.exports = { prepareFileJob, FILE_JOB_PRELOAD, prepareTempJail, TEMP_JAIL_PRELOAD, tempLeaks, reportTempLeaks,prepareStartGate, startSlots, cappedCores, selfJobRate, HEAVYJOB_HELPER, CPU_RATE_50_PERCENT, START_GATE_PRELOAD, burstLine, selectTestFiles, discoverTestFiles, renderLaneFiles, FEATURE_TEST_DIRS, run, runPerfLane, runCounts, failingTests, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
 
 if (require.main === module) {
   const repoRoot = path.resolve(__dirname, '..', '..');

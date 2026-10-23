@@ -113,8 +113,23 @@ test('a self-queried hard-capped heavy job scales node test concurrency and its 
   assert.ok(calls[0].args.includes('--test-concurrency=16'), calls[0].args.join(' '));
   assert.match(logs.lines.join('\n'), /heavy CPU rate 5000: node concurrency 16 of 32 visible cores/);
   assert.strictEqual(runner.cappedCores({}, 1, 5000), 1, 'one visible core remains one');
-  assert.equal(runner.selfJobRate({ env: {}, platform: 'win32', spawnSyncFn: () => ({ stdout: '{"rate":5000}' }) }), 5000, 'self-query makes Bash and PowerShell joins cap-aware');
+  let helperCall;
+  assert.equal(runner.selfJobRate({ env: {}, platform: 'win32', spawnSyncFn: (...args) => { helperCall = args; return { status: 0, stdout: '{"rate":5000}' }; } }), 5000, 'self-query makes Bash and PowerShell joins cap-aware');
+  assert.equal(helperCall[0], runner.HEAVYJOB_HELPER, 'self-query uses this branch\'s built helper, not PATH');
+  assert.deepEqual(helperCall[1], ['self-query']);
+  assert.throws(
+    () => runner.selfJobRate({ env: {}, platform: 'win32', spawnSyncFn: () => ({ status: 2, stderr: 'usage: guppy-heavyjob join ...' }) }),
+    /self-query is unavailable/,
+    'an old helper without self-query is a named failure, never an uncapped zero'
+  );
   assert.equal(runner.selfJobRate({ env: { GUPPY_HEAVY_CPU_CAP: '0' }, platform: 'win32', spawnSyncFn: () => ({ stdout: '{"rate":5000}' }) }), 0, 'an explicit cap-off override wins');
+
+  const queryFailure = sink();
+  assert.equal(run({
+    testDir: 'test', readdir: () => ['a.test.cjs'], spawn: fakeSpawn({ status: 0 }).spawn,
+    log: () => {}, err: queryFailure.write, jobRate: () => { throw new Error('self-query unsupported'); }
+  }), 1);
+  assert.match(queryFailure.lines.join('\n'), /cannot query heavy CPU cap: Error: self-query unsupported/);
 
   const open = fakeSpawn({ status: 0 });
   const openGates = [];
