@@ -506,7 +506,9 @@ Two data planes feed one renderer:
   `PostToolUse` / `PostToolUseFailure`, by a watcher that runs only while a slot is held
   (one hidden process listing every 20 s: the job counts as running while the agent's
   terminal has a process started after the slot was taken; a failed listing never frees a
-  slot), by the terminal's exit, or after 60 minutes.
+  slot), by the terminal's exit, or after 60 minutes. A node script is judged by what it
+  spawns, one hop deep: `node e.js` whose e.js runs `execSync('npm test')` is the suite, but a
+  command spawned by a script that e.js spawns is not followed.
 - **Talk** (1.1.55 only; **removed in 1.1.56**, to return as a separate build). The main app
   runs no Talk code. The private history 1.1.55 wrote under the app's data folder
   (`threads`) is left on disk untouched.

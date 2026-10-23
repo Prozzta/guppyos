@@ -271,13 +271,15 @@ K.wiring = (idx = readSource('src/main/index.ts'), hooks = readSource('src/main/
   assert.match(idx, /alive: \(agentId\) => \[\.\.\.ptyToAgent\.values\(\)\]\.includes\(agentId\),\n  notify: \(agentId, kind, until\) => notifyHeavySlotFree\(agentId, kind, until\),\n  notifyUnlimited: \(agentId, kind\) => notifyHeavyUnlimited\(agentId, kind\),\n  notifyLapse: \(agentId, kind, why\) => notifyHeavyWaitLapsed\(agentId, kind, why\)\n\}\);/);
   assert.match(idx, /const n = heavySlotFreeNotice\(agentId, kind, until\);\n  try \{ hive\.send\(n\.message as Partial<HiveMessage>, n\.from\); \}/, 'THE NOTICE IS SENT AS BUILT (SYSTEM SENDER + WAKE NOW)');
   assert.match(idx, /try \{ control\.steer\(agentId, n\.steer\); \}/, 'AND REACHES A BUSY AGENT');
-  assert.match(hooks, /const scripts = HookServer\.heavyScriptCtx\(p\.cwd\);\n(?:      \/\/[^\n]*\n)*      const own = p\.hook_tool_input;\n      const toolName = own \? 'Bash' : p\.tool_name;\n      const toolInput = own \?\? p\.tool_input;\n      let cls = classifyHeavy\(toolName, toolInput, scripts\);/, 'THE HOOK READS SCRIPTS AT PRETOOLUSE');
+  assert.match(hooks, /const scripts = HookServer\.heavyCtxOf\(p\);\n(?:      \/\/[^\n]*\n)*      const own = p\.hook_tool_input;\n      const toolName = own \? 'Bash' : p\.tool_name;\n      const toolInput = own \?\? p\.tool_input;\n      let cls = classifyHeavy\(toolName, toolInput, scripts\);/, 'THE HOOK READS SCRIPTS AT PRETOOLUSE');
   assert.match(hooks, /const k = classifyCommand\(c, 0, scripts\);/);
   // Andy N1: Post frees by the held call id, never by classifying again.
   // HEAVY-LOCK-BG-LAPSE-189: a call held only for an unreadable script is classified again
   // (settle), every other one is freed by its call id alone.
-  assert.match(hooks, /if \(\(event === 'PostToolUse' \|\| event === 'PostToolUseFailure'\) && agentId && this\.heavyLock\) \{\n(?:      \/\/.*\n)*      this\.heavyLock\.settle\(agentId, HookServer\.heavyCallId\(p\), \(\) => classifyHeavy\(p\.tool_name, p\.tool_input, HookServer\.heavyScriptCtx\(p\.cwd\)\)\);\n      this\.heavyLock\.callDone\(agentId, HookServer\.heavyCallId\(p\)\);/, 'POST SETTLES A PROVISIONAL CALL, THEN FREES BY THE HELD CALL');
-  assert.equal(hooks.split('heavyScriptCtx(p.cwd)').length - 1, 2, 'the script is read at PreToolUse, and at Post only by settle');
+  assert.match(hooks, /if \(\(event === 'PostToolUse' \|\| event === 'PostToolUseFailure'\) && agentId && this\.heavyLock\) \{\n(?:      \/\/.*\n)*      this\.heavyLock\.settle\(agentId, HookServer\.heavyCallId\(p\), \(\) => classifyHeavy\(p\.tool_name, p\.tool_input, HookServer\.heavyCtxOf\(p\)\)\);\n      this\.heavyLock\.callDone\(agentId, HookServer\.heavyCallId\(p\)\);/, 'POST SETTLES A PROVISIONAL CALL, THEN FREES BY THE HELD CALL');
+  // HEAVY-LOCK-FALSE-NEGATIVES (P1, 6b592d62): the call's context (its folder and its named shell) is heavyCtxOf(p).
+  assert.equal(hooks.split('heavyCtxOf(p)').length - 1, 2, 'the script is read at PreToolUse, and at Post only by settle');
+  assert.equal(hooks.split('heavyScriptCtx(p.cwd)').length - 1, 1, 'and heavyCtxOf is the one reader of the folder');
 };
 test('wiring: the notice on both rails (wake-proof mail + steer); scripts read at Pre; Post frees by the held call id', () => K.wiring());
 
@@ -457,7 +459,7 @@ const MUTANTS = [
     edits: [['  const n = heavySlotFreeNotice(agentId, kind, until);\n  try { hive.send(n.message as Partial<HiveMessage>, n.from); }', '  const n = heavySlotFreeNotice(agentId, kind, until);\n  try { hive.send({ ...n.message, wake: undefined } as Partial<HiveMessage>, agentId); }']],
     killer: 'wiring', dies: /THE NOTICE IS SENT AS BUILT \(SYSTEM SENDER \+ WAKE NOW\)/ },
   { name: 'Post re-classifies before freeing (as 130d276c; a changed script keeps the slot)', file: 'src/main/hooks.ts', hooks: true,
-    edits: [["if ((event === 'PostToolUse' || event === 'PostToolUseFailure') && agentId && this.heavyLock) {", "if ((event === 'PostToolUse' || event === 'PostToolUseFailure') && agentId && this.heavyLock && classifyHeavy(p.tool_name, p.tool_input, HookServer.heavyScriptCtx(p.cwd)).heavy) {"]],
+    edits: [["if ((event === 'PostToolUse' || event === 'PostToolUseFailure') && agentId && this.heavyLock) {", "if ((event === 'PostToolUse' || event === 'PostToolUseFailure') && agentId && this.heavyLock && classifyHeavy(p.tool_name, p.tool_input, HookServer.heavyCtxOf(p)).heavy) {"]],
     killer: 'wiring', dies: /POST SETTLES A PROVISIONAL CALL, THEN FREES BY THE HELD CALL/ },
   { name: 'HEAVY-QUEUE-WAIT-DROPS: the sweep drops by age again (the old stale drop)', file: HJF, module: true,
     edits: [['      if (!this.d.alive || this.alive(w.agentId)) continue;\n', '      if ((!this.d.alive || this.alive(w.agentId)) && t - w.since < HEAVY_TTL_MS) continue;\n']],

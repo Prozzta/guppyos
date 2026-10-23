@@ -378,7 +378,7 @@ test('E2E: `heavy next` and the status standing over the real hook broker route 
   b.lock.acquire('andy', H, 'npm test', 'a1', false);
   b.lock.acquire('creed', H, 'npm test', 'c1', false);
   const no = await cli(['next', 'creed'], { HIVE_LEDGER_URL: b.url('andy') });
-  assert.equal(no.code, 0, no.err);
+  assert.equal(no.code, 1, no.err);   // Jim HHR NIT 2: a refusal exits non-zero
   assert.equal(no.out, 'heavy: refused: only a holder, an agent with a slot reserved, or god may name the next holder\n', 'THE TOKEN NAMES THE CALLER: a queued agent is refused');
   const ok = await cli(['next', 'creed'], { HIVE_LEDGER_URL: b.url('jim') });
   assert.equal(ok.code, 0, ok.err);
@@ -413,7 +413,7 @@ const MUTANTS = [
     killer: 'nextAhead', dies: /THE NAMED AGENT GOES TO THE HEAD WHEN IT ASKS/ },
   { name: 'the name is not kept', edits: [['    this.nextUp = to;\n', '']],
     killer: 'nextAhead', dies: /THE NAMED AGENT GOES TO THE HEAD WHEN IT ASKS/ },
-  { name: 'anyone may name the next holder', edits: [["      : !(this.holders.has(agentId) || this.reservations.has(agentId) || this.isGod(agentId)) ? 'not-a-holder' as const : undefined;", '      : undefined;']],
+  { name: 'anyone may name the next holder', edits: [["      : !(this.holders.has(agentId) || this.reservations.has(agentId) || this.isGod(agentId)) ? 'not-a-holder' as const", "      : false ? 'not-a-holder' as const"]],
     killer: 'nextWho', dies: /ONLY A HOLDER, A RESERVED AGENT OR GOD MAY NAME THE NEXT HOLDER/ },
   { name: 'god may not', edits: [['|| this.reservations.has(agentId) || this.isGod(agentId))', '|| this.reservations.has(agentId))']],
     killer: 'nextWho', dies: /GOD MAY NAME THE NEXT HOLDER WITHOUT HOLDING A SLOT/ },
@@ -426,9 +426,9 @@ const MUTANTS = [
   { name: 'a gone named agent is kept', edits: [['    if (this.nextUp === agentId) this.nextUp = null;\n    if (queued || had) this.changed();', '    if (queued || had) this.changed();']],
     killer: 'nextWho', dies: /A GONE AGENT IS FORGOTTEN/ },
   // (b)
-  { name: 'the TTL frees a hold seen running (as before)', edits: [["      if (!h.seenRunning) { this.release(h.agentId, 'ttl'); continue; }", "      this.release(h.agentId, 'ttl'); continue;"]],
+  { name: 'the TTL frees a hold seen running (as before)', edits: [["      if (!h.seenRunning || h.seenAt === null || h.seenAt < h.touched) {", "      if (true) {"]],
     killer: 'ttlRenewed', dies: /A HOLD SEEN RUNNING IS RENEWED AT THE HOUR/ },
-  { name: 'every hold is renewed (required: one never seen running expires)', edits: [['      if (!h.seenRunning) { this.release', '      if (false) { this.release']],
+  { name: 'every hold is renewed (required: one never seen running expires)', edits: [["      if (!h.seenRunning || h.seenAt === null || h.seenAt < h.touched) {", "      if (false) {"]],
     killer: 'ttlNeverSeen', dies: /A HOLD NEVER SEEN RUNNING STILL EXPIRES/ },
   { name: 'the renewal does not restart the hour', edits: [['      h.touched = t;\n      this.log({ kind: \'heavy-lock\', action: \'ttl-renewed\'', '      this.log({ kind: \'heavy-lock\', action: \'ttl-renewed\'']],
     killer: 'ttlRenewed', dies: /RENEWED ONCE PER HOUR/ },
@@ -453,7 +453,7 @@ const MUTANTS = [
     killer: 'requeueOnce', dies: /THE OWNER IS QUEUED AGAIN AT THE BACK AND TOLD SO/ },
   { name: 'heavy status hides the queue place', edits: [['position: at >= 0 ? at + 1 : null };', 'position: null };']],
     killer: 'requeueOnce', dies: /heavy status AGREES WITH WHAT IT WAS TOLD/ },
-  { name: 'the deny text is silent about the lapse', edits: [[' A reservation you leave unused for ${Math.round(HEAVY_RESERVE_MS / 60_000)} min passes on and queues you again at the back, once;', '']],
+  { name: 'the deny text is silent about the lapse', edits: [[" A reservation you leave unused for ${Math.round(HEAVY_RESERVE_MS / 60_000)} min passes on and ${lapsed ? 'takes you out of the queue (you were queued again once already)' : 'queues you again at the back, once'};", '']],
     killer: 'wordsAgree', dies: /THE DENY TEXT SAYS A LAPSE QUEUES AGAIN ONCE/ },
   { name: 'the requeued notice says nothing of once', edits: [['You are QUEUED AGAIN, at the back, once: when a slot frees', 'You are QUEUED AGAIN, at the back: when a slot frees']],
     killer: 'wordsAgree', dies: /THE REQUEUED NOTICE SAYS ONCE/ },

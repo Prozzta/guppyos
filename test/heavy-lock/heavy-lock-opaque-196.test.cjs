@@ -538,7 +538,7 @@ const MUTANTS = [
     edits: [['    this.callDone(agentId, id);\n  }', '  }']],
     killer: 'releaseOp', dies: /A RELEASED LEASE FREES THE SLOT/ },
   { name: 'a suite runner is always heavy (a filtered run too)', file: HJF, module: true,
-    edits: [['      if (!classifyCommand(argv).heavy) {', '      if (false) {']],
+    edits: [['      if (!classifyCommand(argv, 0, ctx).heavy) {', '      if (false) {']],
     killer: 'runner', dies: /A FILTERED SUITE RUNNER IS LIGHT/ },
   { name: 'the preload REPLACES NODE_OPTIONS', file: 'src/main/ptyEnv.ts', env: true,
     edits: [['[baseOptions.trim(), ...requires]', '[...requires]']],

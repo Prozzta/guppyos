@@ -193,7 +193,7 @@ test('E2E: a holder\'s `heavy release` over the real hook broker route: refused 
   b.lock.acquire('creed', H, 'bash cut.sh', 'k1', false);
   await b.lock.scan();
   const no = await cli(['release'], { HIVE_LEDGER_URL: b.url('dwight') });
-  assert.equal(no.code, 0, no.err);
+  assert.equal(no.code, 1, no.err);   // Jim HHR NIT 2: a refusal exits non-zero
   assert.equal(no.out, 'heavy: refused: you hold the bench slot and its job still runs (call c1, pids 11); stop the job first, or it frees when the job ends\n', 'THE CLI REFUSES TRUTHFULLY OVER THE ROUTE');
   assert.match((await cli(['status'], { HIVE_LEDGER_URL: b.url('dwight') })).out, /^held: dwight; reserved: none; queue: creed\nyou: holding a slot/);
   b.st.running = false;
@@ -220,13 +220,13 @@ const MUTANTS = [
     killer: 'dropsHeld', dies: /A HOLDER'S RELEASE DROPS ITS HELD CALL AND GRANTS THE NEXT AGENT AT ONCE/ },
   { name: 'a running job is dropped', edits: [["      else { checked = 'ok'; running = probed.busy.has(agentId); }", "      else { checked = 'ok'; }"]],
     killer: 'refusesRunning', dies: /A LIVE JOB: REFUSED, NAMING THE OPEN CALL AND ITS PIDS|A LIVE JOB: THE SLOT STAYS HELD/ },
-  { name: 'a failed listing counts as idle', edits: [["    if (running || checked === 'failed') {", '    if (running) {']],
+  { name: 'a failed listing counts as idle', edits: [["    if (running || checked === 'failed' || checked === 'unseen' || arrived.length) {", "    if (running || checked === 'unseen' || arrived.length) {"]],
     killer: 'refusesRunning', dies: /A FAILED LISTING: REFUSED/ },
   { name: 'the process check is skipped', edits: [['    if (this.d.probe && this.d.roots) {\n      const probed = await this.heavyAgents();', '    if (false) {\n      const probed = await this.heavyAgents();']],
     killer: 'refusesRunning', dies: /A LIVE JOB: REFUSED, NAMING THE OPEN CALL AND ITS PIDS/ },
   { name: 'the pids are not named', edits: [['    const pids = [...cur.attributed.keys()].sort((a, b) => a - b);', '    const pids = [];']],
     killer: 'refusesRunning', dies: /A LIVE JOB: REFUSED, NAMING THE OPEN CALL AND ITS PIDS/ },
-  { name: 'the refusal is not logged', edits: [["      this.log({ kind: 'heavy-lock', action: 'release-refused', agentId, heavyKind: cur.kind, calls, pids, checked });\n", '']],
+  { name: 'the refusal is not logged', edits: [["      this.log({ kind: 'heavy-lock', action: 'release-refused', agentId, heavyKind: cur.kind, calls: open, pids, checked, ...(arrived.length ? { arrived } : {}) });\n", '']],
     killer: 'refusesRunning', dies: /THE REFUSAL IS LOGGED/ },
   { name: 'the held release is not logged', edits: [["    this.log({ kind: 'heavy-lock', action: 'held-released', agentId, heavyKind: cur.kind, calls, checked, ...(to ? { to } : {}) });\n", '']],
     killer: 'dropsHeld', dies: /THE HELD RELEASE IS LOGGED/ },
@@ -236,7 +236,7 @@ const MUTANTS = [
     killer: 'dropsHeld', dies: /HAND THE HELD SLOT TO A NAMED QUEUED AGENT/ },
   { name: 'a missed --to not said', edits: [["    return { state: 'unreserved', reserved: false, queued: false, next, ...(missed ? { to: 'not-queued' as const } : {}), held:", "    return { state: 'unreserved', reserved: false, queued: false, next, held:"]],
     killer: 'dropsHeld', dies: /A NAMED AGENT NOT QUEUED IS SAID/ },
-  { name: 'no watcher: refused forever', edits: [["    let checked: 'ok' | 'failed' | 'none' = 'none';", "    let checked: 'ok' | 'failed' | 'none' = 'failed';"]],
+  { name: 'no watcher: refused forever', edits: [["    let checked: HeavyHeldRelease['checked'] = 'none';", "    let checked: HeavyHeldRelease['checked'] = 'failed';"]],
     killer: 'noWatcher', dies: /NO WATCHER: DROPPED/ },
 ];
 

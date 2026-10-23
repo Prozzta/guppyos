@@ -31,9 +31,13 @@ export interface HeavyClass { heavy: boolean; kind?: HeavyKind; why?: string; pr
  * As for every BENCH_ENV gate (pre-existing behaviour): the marker counts only as a prefix of the
  * same command (`export X=1; npm run build` and `$env:X=1; ...` still share), and a gate word inside
  * a longer name counts too (`NON_EXCLUSIVE=1 node --test x` is a bench: it fails closed).
+ * HEAVY-LOCK-FALSE-NEGATIVES (UHera, Andy; the queue item): a PROVISIONAL class is heavy only because
+ * the lock could not read the command (its kind 'bench' is a placeholder); it is not known to be a suite
+ * or a bench, so it never runs alone or waits for the empty machine: it takes a shared slot, and is
+ * queued as a shared waiter. A command that IS a bench says so readably, or with the marker.
  */
 export function heavyExclusive(cls: HeavyClass): boolean {
-  return cls.heavy && (cls.exclusive === true || cls.kind === 'suite' || cls.kind === 'bench');
+  return cls.heavy && !cls.provisional && (cls.exclusive === true || cls.kind === 'suite' || cls.kind === 'bench');
 }
 
 /** Command-shaped tool input (the same reading as DESKTOP-LAUNCH-GUARD's). `CommandLine`: AGY's
@@ -270,7 +274,9 @@ function stripRedirects(ws: string[]): string[] {
     // HEAVY-LOCK-CODEX-EXEC: PowerShell's all-streams redirect `*>` / `*>>` (`*>&1`, `*> x.log`)
     // too; left behind, `*>` and its file read as a suite runner's FILTER, so Dwight's Codex
     // `node test/tools/run-tests.cjs *> full.log` (shell powershell) ran light, unlocked.
-    const m = /^(\d*(?:>>?|<<?-?|<>)|&>>?|\*>>?)(&?)(.*)$/.exec(w);
+    // HEAVY-LOCK-FALSE-NEGATIVES: sh's clobber `>|` / `1>|` is one operator (as words() and segments()
+    // read it); as `>` with the target `|`, its file stayed behind as an argument of the program.
+    const m = /^(\d*(?:>\||>>?|<<?-?|<>)|&>>?|\*>>?)(&?)(.*)$/.exec(w);
     if (!m) { out.push(w); continue; }
     // Operator with its target attached (`>x.log`, `2>&1`, `<<EOF`): drop just this word.
     // A bare operator (`>`, `2>`, `<<`): its target is the next word; drop both.
@@ -307,7 +313,9 @@ function segments(cmd: string, d: ShellDialect = 'sh'): string[] {
     if (d === 'sh' && c === '|' && cmd[i - 1] === '>') { cur += c; continue; }
     // HEAVY-LOCK-LIVE-FILE-192 (b): a lone `&` that starts a command backgrounds nothing; it is
     // PowerShell's call operator (`& "$p" K3`), kept as a word so the program it calls is classified.
-    if (c === '&' && !cur.trim() && cmd[i + 1] !== '&') { cur += '& '; continue; }
+    // HEAVY-LOCK-FALSE-NEGATIVES (Andy): so is one that opens a block or a group (`foreach (...) { & $s }`,
+    // `( & $x )`): it read as a background `&`, which cut the block before the call it makes.
+    if (c === '&' && (!cur.trim() || /[{(]\s*$/.test(cur)) && cmd[i + 1] !== '&') { cur += '& '; continue; }
     if (c === ';' || c === '\n' || c === '|' || c === '&') {
       if (c === '&' && cmd[i + 1] !== '&' && cmd[i - 1] !== '&') { cur += ' &'; out.push(cur); cur = ''; continue; } // a lone & = background
       out.push(cur); cur = '';
@@ -490,6 +498,63 @@ export interface ClassifyCtx {
    *  or the wrapper (`bash -c`, `powershell -Command`, `bash x.sh`, `-File x.ps1`). Absent = unknown:
    *  PowerShell's value rules apply (as for a bare classifyCommand). */
   shell?: ShellKind;
+  /** HEAVY-LOCK-FALSE-NEGATIVES (god, 13:46Z: Dwight's `node test/tools/run-tests.cjs <needle>` ran
+   *  while Jim held): the test files the suite runner would pick from, as the runner lists them
+   *  (names relative to test/), for this call's folder; null when it cannot be listed. A FILTER that
+   *  matches SUITE_MANY_FILES of them or more is the suite, not a focused run. Absent = not counted. */
+  testFiles?: (cd?: string, root?: string) => string[] | null;
+  /** HEAVY-LOCK-FALSE-NEGATIVES (item 2): how many scripts deep this text is a command a node script
+   *  spawns (`execSync('npm test')`); a spawned command's own spawns are not followed. */
+  spawnDepth?: number;
+  /** HEAVY-LOCK-FALSE-NEGATIVES (Andy), set by classifyCommand: the literal values a PowerShell `foreach
+   *  ($s in ...)` of this command loops over (lower-cased name), null when its list is not literal; for
+   *  the `& $s` of its block, which CALLS each value. Absent = no loop. */
+  psLoop?: ReadonlyMap<string, readonly string[] | null>;
+}
+
+/**
+ * HEAVY-LOCK-FALSE-NEGATIVES: a FILTERED suite run (`run-tests.cjs <needle>`, `npm test -- <needle>`)
+ * is light only while its needles pick a few files: the runner selects every test file whose name
+ * contains a needle (case-insensitive, union), so `run-tests.cjs test` or `npm test -- heavy` is the
+ * suite in all but name. With no lister the old rule stands: a filtered run is light.
+ */
+function filteredSuite(what: string, needles: string[], ctx: ClassifyCtx, root?: string): HeavyClass {
+  // Andy MINOR 2: the runner lists ITS OWN repo (path.resolve(__dirname, '..', '..')), not the caller's
+  // folder: `node C:/other/test/tools/run-tests.cjs heavy` from elsewhere, `npm --prefix C:/other test`.
+  const list = needles.length && ctx.testFiles ? ctx.testFiles(ctx.cd, root) : null;
+  if (!list) return { heavy: false };
+  const low = needles.map((n) => n.toLowerCase());
+  let n = 0;
+  for (const f of list) { const name = f.toLowerCase(); if (low.some((x) => name.includes(x))) n++; }
+  if (n >= SUITE_MANY_FILES) return { heavy: true, kind: 'suite', why: `${what} ${needles.join(' ')} (matches ${n} test files)` };
+  return { heavy: false };
+}
+
+/** Andy MINOR 2: the repo a suite runner script belongs to, as the runner resolves it (two folders
+ *  above its own: `<root>/test/tools/run-tests.cjs`); undefined when the path has no such prefix
+ *  (`test/tools/run-tests.cjs` is the call's own folder). Relative to the call's folder when relative. */
+function runnerRoot(script: string): string | undefined {
+  const parts = script.replace(/\\/g, '/').split('/');
+  if (parts.length < 4) return undefined;
+  const root = parts.slice(0, -3).join('/');
+  return root === '' ? '/' : root;
+}
+
+/** HEAVY-LOCK-FALSE-NEGATIVES (item 1): the shell Codex's exec_command runs in when it names none
+ *  (and what write_stdin writes to): PowerShell on Windows, else bash. */
+export function codexDefaultShell(platform: string = process.platform): ShellKind {
+  return platform === 'win32' ? 'powershell' : 'bash';
+}
+
+/** HEAVY-LOCK-FALSE-NEGATIVES (item 1): the shell kind of a Codex exec_command's `shell` (a name or
+ *  a path): null (none given) is Codex's default; cmd and an unknown or computed one stay unknown. */
+export function codexShellKind(shell: string | null | undefined, platform: string = process.platform): ShellKind | undefined {
+  if (shell === null) return codexDefaultShell(platform);
+  if (typeof shell !== 'string') return undefined;
+  const base = shell.trim().replace(/\\/g, '/').split('/').pop()?.toLowerCase().replace(/\.exe$/, '') ?? '';
+  if (/^(bash|sh|zsh|dash)$/.test(base)) return 'bash';
+  if (/^(powershell|pwsh)$/.test(base)) return 'powershell';
+  return undefined;
 }
 
 /** Where a script named in `ctx` under `dialect` is looked for (see PathLookup). */
@@ -679,10 +744,13 @@ function normPath(p: string): string {
 }
 
 /** What a script's text loads: the first heavy marker (or null) and the helper paths to read next. */
-function scanJs(text: string): { marker: string | null; helpers: string[]; tests?: string[] } {
+function scanJs(text: string): { marker: string | null; helpers: string[]; tests?: string[]; spawns?: string[] } {
   const ts = jsTokens(text);
   const helpers: string[] = [];
   const tests: string[] = [];
+  /** HEAVY-LOCK-FALSE-NEGATIVES (item 2): the command lines this script spawns, as far as they are
+   *  literal: `execSync('npm test')`, `spawn('npm', ['test'])`, `spawn(process.execPath, [...])`. */
+  const spawns: string[] = [];
   const consts = new Map<string, string>();
   const requires = new Set(['require', 'loadTs']);
   // `const s = '…'` (string constants a spawn may name) and `const req = createRequire(…)`.
@@ -744,6 +812,8 @@ function scanJs(text: string): { marker: string | null; helpers: string[]; tests
       const owner = dotted ? ts[k - 2]?.v ?? '' : '';
       if (x.v === 'exec' && dotted && !/^(child_process|cp|childProcess)$/.test(owner)) continue;   // RegExp#exec
       const args = call(k + 1).all.map((a) => (a.t === 'id' && consts.has(a.v) ? { t: 'str' as const, v: consts.get(a.v)! } : a));
+      const sp = spawnedLine(x.v, args);
+      if (sp) spawns.push(sp);
       for (let j = 0; j < args.length; j++) {
         const a = args[j];
         if (a.t !== 'str') continue;
@@ -777,7 +847,65 @@ function scanJs(text: string): { marker: string | null; helpers: string[]; tests
       }
     }
   }
-  return { marker: null, helpers, tests };
+  return { marker: null, helpers, tests, spawns };
+}
+
+/** The top-level comma-separated elements of a token list (an argument list or an array literal's body). */
+function jsElements(toks: JsTok[]): JsTok[][] {
+  const els: JsTok[][] = [[]];
+  for (let d = 0, i = 0; i < toks.length; i++) {
+    const b = toks[i];
+    if (b.t === 'p' && '([{'.includes(b.v)) d++;
+    if (b.t === 'p' && ')]}'.includes(b.v) && --d < 0) break;
+    if (d === 0 && b.t === 'p' && b.v === ',') els.push([]); else els[els.length - 1].push(b);
+  }
+  return els.filter((e) => e.length);
+}
+
+/**
+ * HEAVY-LOCK-FALSE-NEGATIVES (item 2): the command line a child_process call runs, from its literal
+ * arguments: a string first argument (`exec('npm test')`), or a program (a string, or
+ * `process.execPath` = node) plus a string array (`spawn('npm', ['test'])`; a fork's module is
+ * judged as the script it is). An argument the lock cannot read (a variable, a spread) is
+ * `$computed`, so the line is judged on what is literal. Andy NIT 2: a string program with no
+ * array (`spawn('npm test', { shell: true })`) is a line, as exec's is. Andy NIT 1: a `node --test`
+ * list is a line too (`spawn(process.execPath, ['--test'])` is the suite); its named files are
+ * still followed for their own tag by the live-file rule (scanJs's tests).
+ */
+function spawnedLine(fn: string, args: JsTok[]): string | null {
+  const els = jsElements(args);
+  const first = els[0];
+  if (!first) return null;
+  // exec / execSync run their string through a shell: it is the line itself.
+  if (fn === 'exec' || fn === 'execSync') return first.length === 1 && first[0].t === 'str' ? first[0].v : null;
+  let prog: string | null = null;
+  if (first.length === 1 && first[0].t === 'str') prog = first[0].v;
+  else if (first.length === 3 && first[0].v === 'process' && first[1].v === '.' && first[2].v === 'execPath') prog = 'node';
+  if (!prog) return null;
+  const words = [prog];
+  const list = els[1];
+  if (!(list && list[0]?.t === 'p' && list[0].v === '[')) return prog;
+  for (const e of jsElements(list.slice(1))) {
+    if (e.length === 1 && e[0].t === 'str') words.push(e[0].v);
+    else words.push('$computed');
+  }
+  return words.map((w) => (/^[\w./:@=-]+$/.test(w) || w === '$computed' ? w : `'${w.replace(/'/g, "'\\''")}'`)).join(' ');
+}
+
+/**
+ * HEAVY-LOCK-FALSE-NEGATIVES (item 2): a node script that spawns a heavy command line IS that
+ * command (`node C:/w/h.js` whose h.js runs execSync('npm test')). Judged with the same reader and
+ * folder, as a sh line (no shell is known); only a sure heavy counts (a provisional one, such as a
+ * path the lock cannot read, would turn every script with a computed spawn into a bench).
+ */
+function spawnedHeavy(spawns: string[] | undefined, ctx: ClassifyCtx): string | null {
+  const depth = ctx.spawnDepth ?? 0;
+  if (!spawns?.length || depth >= 1) return null;
+  for (const line of spawns) {
+    const g = classifyCommand(line, 0, { ...ctx, shell: undefined, dialect: 'sh', stdin: undefined, segment: undefined, spawnDepth: depth + 1 });
+    if (g.heavy && !g.provisional) return g.why ?? line;
+  }
+  return null;
 }
 
 /** HEAVY-LOCK-ADHOC-NODE: the program `node …` will run (script, preloads, inline or stdin code). */
@@ -848,11 +976,21 @@ function classifyNodeCode(prog0: NodeProgram, ctx: ClassifyCtx, anyName = false,
       if (t !== null) { prog = { ...prog, script: p }; anyName = true; break; }
     }
   }
-  if (prog.inline !== null) { const m = scanJs(prog.inline).marker; return m ? hit(m, '-e') : { heavy: false }; }
+  if (prog.inline !== null) {
+    const s = scanJs(prog.inline);
+    if (s.marker) return hit(s.marker, '-e');
+    const sp = spawnedHeavy(s.spawns, ctx);
+    return sp ? hit(`spawns ${sp}`, '-e') : { heavy: false };
+  }
   // A script read from stdin: a heredoc body or a `< file` the classifier could read is checked;
   // stdin it cannot see (`node -` from a pipe, an unreadable `< file`) is an unknown program: heavy.
   if (!prog.script && (prog.stdin || ctx.stdin !== undefined)) {
-    if (typeof ctx.stdin === 'string') { const m = scanJs(ctx.stdin).marker; if (m) return hit(m, '(stdin script)'); }
+    if (typeof ctx.stdin === 'string') {
+      const s = scanJs(ctx.stdin);
+      if (s.marker) return hit(s.marker, '(stdin script)');
+      const sp = spawnedHeavy(s.spawns, ctx);
+      if (sp) return hit(`spawns ${sp}`, '(stdin script)');
+    }
     else return { heavy: true, kind: 'bench', why: 'node (a stdin script the lock cannot read)' };
   }
   if (!ctx.readScript) return { heavy: false };
@@ -882,7 +1020,10 @@ function classifyNodeCode(prog0: NodeProgram, ctx: ClassifyCtx, anyName = false,
       if (LIVE_TAG.test(text.slice(0, LIVE_TAG_CHARS))) return { heavy: true, kind: 'bench', why: `node ${base} (declares @heavy-lock live)` };
     }
     const s = scanJs(text);
-    if (s.marker) return hit(s.marker, hop === 0 && roots.length === 1 ? name : `${name} via ${key.split('/').pop()}`);
+    const where = hop === 0 && roots.length === 1 ? name : `${name} via ${key.split('/').pop()}`;
+    if (s.marker) return hit(s.marker, where);
+    const sp = spawnedHeavy(s.spawns, ctx);
+    if (sp) return hit(`spawns ${sp}`, where);
     // A test file it spawns is named from the working directory, and its own tag counts.
     for (const t of s.tests ?? []) queue.push({ path: t, hop: hop + 1, test: true });
     if (hop >= 2) continue;
@@ -989,6 +1130,10 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
   const hasUnclosed = raw.some((w) => w.startsWith('__HEAVY_UNCLOSED_QUOTE__'));
   const ws = raw.map((w) => w.replace(/^__HEAVY_UNCLOSED_QUOTE__/, ''));
   if (!ws.length) return { heavy: false };
+  // HEAVY-LOCK-FALSE-NEGATIVES (Andy): `[void](npm test)`, `$(npm test)` as a word: a pipeline wrapped as
+  // a value runs; its words are the command. (A segment's own `(npm test)` is stripKeywords' subshell.)
+  const cast = /^(?:\[[A-Za-z0-9.]+(?:\[\])?\])+\(|^\$\(/.test(ws[0]) ? unwrapped(ws) : null;
+  if (cast && depth + 1 < MAX_DEPTH) return classifyWords(cast, depth + 1, ctx);
   // HEAVY-LOCK-SHAPES-189: a PowerShell assignment runs its right-hand side (`$suite = Start-Process
   // npm.cmd test`, `$r=npm test`); it read as a dynamic command word or a variable.
   const psAssign = /^\$[A-Za-z_][A-Za-z0-9_:]*=(.*)$/.exec(ws[0]);
@@ -999,7 +1144,10 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
   // (`$r = npm test`, `$r = & $exe`, `$r = $cmd args`) is still classified as that command.
   // Andy NIT 1: in bash `$a = $b` runs $a (unknown: provisional, as before); the rule is PowerShell's.
   if (rhs && rhs.length === 1 && PS_VALUE.test(rhs[0]) && ctx.shell !== 'bash') return { heavy: false };
-  if (rhs) return classifyWords(rhs, depth, ctx);
+  // HEAVY-LOCK-FALSE-NEGATIVES (Andy): `$r = (npm test)`, `$null = (npm test)`: the parentheses around
+  // the right-hand side are not a subshell on the segment's first word, so they were not stripped, and the
+  // pipeline inside read as the program `(npm`: it runs.
+  if (rhs) { const inner = depth + 1 < MAX_DEPTH ? unwrapped(rhs) : null; return classifyWords(inner ?? rhs, inner ? depth + 1 : depth, ctx); }
   // A dynamic command word is unnameable, but its arguments still identify common heavy runners.
   // Handle variable wrappers (`$CR node ...`), variable Node (`$NODE test/tools/run-tests.cjs`),
   // PowerShell environment variables, and the conventional `$(which node)` form.
@@ -1009,7 +1157,15 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
     // HEAVY-LOCK-LIVE-FILE-192 (b): a program this command named (`p=.../mut.cjs; & $p K3`, PowerShell's
     // `&` being sh's background operator here) is the program it names.
     const program = named(ws[0], ctx);
-    if (program !== null && depth + 1 < MAX_DEPTH) return classifyWords([program, ...ws.slice(1)], depth + 1, ctx);
+    if (program !== null && depth + 1 < MAX_DEPTH) {
+      // HEAVY-LOCK-FALSE-NEGATIVES (Andy: `true="npm test"; $true`): sh splits an unquoted `$x` on
+      // whitespace, so a value that is a command LINE runs as that line. PowerShell's `& $p` keeps a
+      // path with spaces whole, and so does a quoted `"$x"`.
+      const name = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)/.exec(ws[0])?.[1];
+      const quoted = !!name && !!ctx.segment && new RegExp(`"\\$\\{?${name}\\}?"`).test(ctx.segment);
+      const line = ctx.shell === 'bash' && !quoted && /\s/.test(program) ? program.split(/\s+/) : [program];
+      return classifyWords([...line, ...ws.slice(1)], depth + 1, ctx);
+    }
     // An unnamed program alone is unknown (`& $exe`): heavy, provisional.
     // HEAVY-LOCK-VARPATH-READ (Dwight, 2026-10-22; Andy's design, god's narrow approval): a bare value
     // expression runs nothing. `$logs | ForEach-Object {...}` after `$logs = Get-ChildItem ...` in the
@@ -1149,6 +1305,22 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
   // `& "C:\...\node.exe" --test x`); it read as the program `&`. A name still computed after the
   // command's own assignments (`& $exe`, `& (Join-Path $d x.ps1)`) is unknown: heavy, provisional.
   if (bin === '&' && args.length && !args[0].startsWith('{')) {
+    // HEAVY-LOCK-FALSE-NEGATIVES (Andy): `foreach ($s in $suites) { & $s }` CALLS each value of the list
+    // (the bare `$s` of a block is a value; `& $s` is not). Each literal value runs with the words after it
+    // (`foreach ($s in @("npm")) { & $s test }` is npm test; a value with spaces is read as the line it
+    // is, as `iex` would run it: fails closed); a list the lock cannot read is unknown: heavy, provisional.
+    const lv = /^\$([A-Za-z_][A-Za-z0-9_]*)$/.exec(args[0]);
+    const items = lv && ctx.psLoop?.has(lv[1].toLowerCase()) ? ctx.psLoop.get(lv[1].toLowerCase()) : undefined;
+    if (items !== undefined && depth + 1 < MAX_DEPTH) {
+      if (items === null) return unnamed(`& ${args[0]}`);
+      let maybe: HeavyClass | null = null;
+      for (const it of items) {
+        const c = classifyWords([...it.split(/\s+/), ...args.slice(1)], depth + 1, ctx);
+        if (c.heavy && !c.provisional) return c;
+        if (c.heavy && !maybe) maybe = c;
+      }
+      return maybe ?? { heavy: false };
+    }
     const target = args[0].startsWith('(') ? null : named(args[0], ctx);
     if (target === null) {
       // A variable program's arguments may still name the runner (`& $node test/tools/run-tests.cjs`).
@@ -1185,6 +1357,16 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
   }
   const has = (...xs: string[]): boolean => xs.some((x) => args.includes(x));
   if (bin === 'npm' || bin === 'pnpm' || bin === 'yarn') {
+    // Andy MINOR 2: `npm --prefix <repo> test -- x` (`-C <repo>`, `--prefix=<repo>`) runs that repo's
+    // suite: its test files are the ones counted, and the folder is not the subcommand.
+    let prefix: string | undefined;
+    const own = args.filter((a, i) => {
+      const eq = /^(?:--prefix|-C)=(.+)$/.exec(a);
+      if (eq) { prefix = eq[1]; return false; }
+      if (a === '--prefix' || a === '-C') { prefix = args[i + 1]; return false; }
+      return !(args[i - 1] === '--prefix' || args[i - 1] === '-C');
+    });
+    args = own;
     const sub = args.find((a) => !a.startsWith('-')) ?? (bin === 'yarn' ? 'install' : '');
     if (sub === 'ci' || sub === 'rebuild') return { heavy: true, kind: 'install', why: `${bin} ${sub}` };
     if (sub === 'install' || sub === 'i' || sub === 'add') {
@@ -1194,11 +1376,15 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
     // Jim MF2: a test run with a FILTER after `--` (npm run test:focused -- wake) is a focused run:
     // light. Without one it is the suite: heavy.
     const filtered = args.includes('--') && args.indexOf('--') < args.length - 1;
-    if (sub === 'test' || sub === 't') return filtered ? { heavy: false } : { heavy: true, kind: 'suite', why: `${bin} test` };
+    // HEAVY-LOCK-FALSE-NEGATIVES: a filter that picks most of the suite is the suite.
+    // Andy MINOR 1: EVERY argument after `--` is a needle, as the runner takes them (process.argv.slice(2),
+    // a plain substring): `npm test -- -` picks the whole suite, `-19` seventy files.
+    const needles = filtered ? args.slice(args.indexOf('--') + 1) : [];
+    if (sub === 'test' || sub === 't') return filtered ? filteredSuite(`${bin} test --`, needles, ctx, prefix) : { heavy: true, kind: 'suite', why: `${bin} test` };
     if (sub === 'run' || sub === 'run-script') {
       const script = args.slice(args.indexOf(sub) + 1).find((a) => !a.startsWith('-')) ?? '';
       if (/^(build|dist)(:.*)?$/.test(script)) return { heavy: true, kind: 'build', why: `${bin} run ${script}` };
-      if (/^test(:.*)?$/.test(script)) return filtered ? { heavy: false } : { heavy: true, kind: 'suite', why: `${bin} run ${script}` };
+      if (/^test(:.*)?$/.test(script)) return filtered ? filteredSuite(`${bin} run ${script} --`, needles, ctx, prefix) : { heavy: true, kind: 'suite', why: `${bin} run ${script}` };
     }
     return { heavy: false };
   }
@@ -1288,8 +1474,14 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
     if (script && BENCH_SCRIPT.test(script)) return { heavy: true, kind: 'bench', why: `node ${script.replace(/\\/g, '/').split('/').pop()}` };
     // Jim MF2: a whole-suite runner script with no filter argument is the suite.
     if (script && SUITE_RUNNER.test(script)) {
-      const rest = args.slice(at + 1).filter((a) => !a.startsWith('-'));
-      if (!rest.length) return { heavy: true, kind: 'suite', why: `node ${script.replace(/\\/g, '/').split('/').pop()} (no filter)` };
+      // Andy MINOR 1: every argument is a needle, as the runner takes them (`run-tests.cjs fp-199 -`
+      // picks the whole suite); "no filter" is exactly no argument.
+      const rest = args.slice(at + 1);
+      const base = script.replace(/\\/g, '/').split('/').pop();
+      if (!rest.length) return { heavy: true, kind: 'suite', why: `node ${base} (no filter)` };
+      // HEAVY-LOCK-FALSE-NEGATIVES: `run-tests.cjs test` picks every file: the suite under a filter.
+      const many = filteredSuite(`node ${base}`, rest, ctx, runnerRoot(script));
+      if (many.heavy) return many;
     }
     // HEAVY-JOB-LOCK-FAILOPEN (Andy 42b671): a wrapper SCRIPT that runs the command after it
     // (`node clean-run.cjs node test/tools/run-tests.cjs`): that command is classified too.
@@ -1304,7 +1496,9 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
   return { heavy: false };
 }
 
-/** The inner text of every top-level `$(...)` outside single quotes (each one RUNS its command). */
+/** The inner text of every top-level `$(...)` outside single quotes (each one RUNS its command).
+ *  HEAVY-LOCK-FALSE-NEGATIVES (Andy): and of every backtick span (`` r=`npm test` ``, sh's older
+ *  substitution; PowerShell's `` $r = `npm test` `` is the escaped word npm, so that pipeline runs too). */
 function substitutions(cmd: string): string[] {
   const out: string[] = [];
   let q: string | null = null;
@@ -1313,6 +1507,7 @@ function substitutions(cmd: string): string[] {
     if (q === "'") { if (c === "'") q = null; continue; }
     if (c === '\\') { i++; continue; }
     if (c === '$' && cmd[i + 1] === '(' && cmd[i + 2] !== '(') { const e = substEnd(cmd, i); out.push(cmd.slice(i + 2, Math.max(i + 2, e - 1))); i = e - 1; continue; }
+    if (c === '`') { const e = cmd.indexOf('`', i + 1); if (e > i) { out.push(cmd.slice(i + 1, e)); i = e; } continue; }
     if (c === '"') q = q === '"' ? null : '"';
     else if (c === "'" && q === null) q = "'";
   }
@@ -1383,12 +1578,17 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
   // HEAVY-LOCK-VARPATH-READ: the variables this command assigns in PowerShell's form (any value, computed
   // or not: `$logs = Get-ChildItem ...`), for a later bare `$logs` segment; shared with nested bodies.
   const psVars = new Set<string>(ctx.psVars ?? []);
+  // HEAVY-LOCK-FALSE-NEGATIVES (Andy): the literal lists this command assigns (`$suites = @("npm test")`),
+  // and the values each `foreach ($s in ...)` loops over (shared with its block, which classifyWords nests).
+  const psLists = new Map<string, string[] | null>();
+  const psLoop = new Map<string, readonly string[] | null>(ctx.psLoop ?? []);
   // HEAVY-LOCK-VARPATH-READ: the `{ }` nesting at each segment: segments() splits a block's body on
   // `;` and `|`, so `ForEach-Object { Write-Host $_; $_ | Out-Null }` puts `$_` in its own segment.
   let braces = ctx.inBlock ? 1 : 0;
   // Carry the resolved default dialect too: wrapper classification needs to know that a cmd
   // body was supplied by an outer sh command, even when callers did not spell `dialect: 'sh'`.
   let here: ClassifyCtx = { ...ctx, dialect: d, stdin: undefined, expand, psVars, ...(readScript ? { readScript } : {}), ...(isDir ? { isDir } : {}), ...(missingAt ? { missingAt } : {}) };
+  here = { ...here, psLoop };
   let body = 0;
   let maybe: HeavyClass | null = null;
   let cursor = 0;
@@ -1400,7 +1600,15 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
     const own = seg.replace(/\s+&$/, '');   // segments() marks a lone `&` (background) with ` &`
     // HEAVY-LOCK-FALSE-POSITIVE (god, 08:28Z): `foreach ($c in $t) { $c | ConvertTo-Json ... }` assigns $c
     // each round, as `$c = ...` would; `$c` alone in the block was "$c (a path the lock cannot name)".
-    for (const m of own.matchAll(/\bforeach\s*\(\s*\$([A-Za-z_][A-Za-z0-9_]*)\s+in\b/gi)) psVars.add(m[1].toLowerCase());
+    for (const m of own.matchAll(/\bforeach\s*\(\s*\$([A-Za-z_][A-Za-z0-9_]*)\s+in\s+/gi)) {
+      psVars.add(m[1].toLowerCase());
+      const name = m[1].toLowerCase();
+      // HEAVY-LOCK-FALSE-NEGATIVES (Andy): its values, for a `& $s` in its block: a literal list, a variable
+      // this command assigned a literal list (`$suites = @("npm test")`), else unknown (null).
+      const list = parenRest(own, m.index! + m[0].length);
+      const v = /^\$([A-Za-z_][A-Za-z0-9_]*)$/.exec(list.trim());
+      psLoop.set(name, v ? psLists.get(v[1].toLowerCase()) ?? null : psList(list));
+    }
     const inBlock = braces > 0;
     braces = Math.max(0, braces + braceDelta(own));
     const segAt = d === 'cmd' ? text.indexOf(own, cursor) : -1;
@@ -1470,6 +1678,10 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
       const v = (ws.length === 1 ? psSet[2] : ws[2]).replace(/^["']|["']$/g, '');
       if (!/[$`(@[]/.test(v)) vars.set(psSet[1], v);
     }
+    // HEAVY-LOCK-FALSE-NEGATIVES (Andy): a PowerShell list assigned literally (`$suites = @("npm test", "x")`,
+    // `$s = 'npm'`), for a later `foreach ($x in $suites) { & $x }`; a computed one is unknown (null).
+    const psAssigned = /^\s*\$([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)\s*([\s\S]+)$/.exec(own);
+    if (psAssigned) psLists.set(psAssigned[1].toLowerCase(), psList(psAssigned[2]));
     // HEAVY-LOCK-VARPATH-READ: the name is assigned whatever its value (`$logs = Get-ChildItem x`,
     // `$r = (npm test)`; the right-hand side is still classified as it runs).
     const psName = ws.length >= 2 && ws[1] === '=' ? /^\$([A-Za-z_][A-Za-z0-9_]*)$/.exec(ws[0]) : null;
@@ -1488,7 +1700,7 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
     const c = classifyWords(ws, depth, { ...(stdin === undefined ? at : { ...at, stdin }), expandKnown: expand, segment: seg });
     if (c.heavy && !c.provisional) return c;
     if (c.heavy && !maybe) maybe = c;
-    const wrote = mine.length === 1 ? heredocWrite(raw, ws, mine[0], here, virtual, key, rewritten) : new Set<string>();
+    const wrote = mine.length === 1 ? heredocWrite(raw, ws, mine[0], here, virtual, key, rewritten) : literalWrite(raw, ws, here, virtual, key, rewritten);
     for (const f of writeTargets(raw, ws)) {
       const k = key(f, here.cd);
       if (wrote.has(k)) continue;
@@ -1753,6 +1965,125 @@ function cmdFor(text: string, depth: number, ctx: ClassifyCtx): { cls: HeavyClas
 }
 
 /** HEAVY-LOCK-BG-LAPSE-189: `cat > f <<EOF` / `cat <<EOF >> f` / `tee [-a] f <<EOF` write the body to f. */
+/** HEAVY-LOCK-FALSE-NEGATIVES (Andy): the words of a pipeline wrapped as a value, `(npm test)`,
+ *  `[void](npm test)` (a cast, then parentheses), `$(npm test)` as one word; null when `ws` is not one. */
+function unwrapped(ws: string[]): string[] | null {
+  if (!ws.length) return null;
+  const out = [...ws];
+  out[0] = out[0].replace(/^(?:\[[A-Za-z0-9.]+(?:\[\])?\])+(?=\$?\()/, '');
+  const n = out.length - 1;
+  // stripKeywords has already taken a closing `)` off the last word (`$r = (npm test)` reached here as
+  // `$r = (npm test`), so a missing close is one it removed: a `)` left anywhere else is not this pair's.
+  if (!/^\$?\(/.test(out[0]) || !(out[n].endsWith(')') || !out.some((w) => w.includes(')')))) return null;
+  out[0] = out[0].replace(/^\$?\(/, '');
+  out[n] = out[n].replace(/\)$/, '');
+  const inner = out.filter(Boolean);
+  if (!inner.length) return null;
+  return inner.length === 1 && /\s/.test(inner[0]) ? inner[0].trim().split(/\s+/) : inner;
+}
+
+/** The text from `from` (just inside an open parenthesis) to the `)` that closes it, quotes respected. */
+function parenRest(s: string, from: number): string {
+  let depth = 1; let q: string | null = null;
+  for (let i = from; i < s.length; i++) {
+    const c = s[i];
+    if (q) { if (c === q) q = null; continue; }
+    if (c === '"' || c === "'") { q = c; continue; }
+    if (c === '(') depth++;
+    else if (c === ')' && --depth === 0) return s.slice(from, i);
+  }
+  return s.slice(from);
+}
+
+/** HEAVY-LOCK-FALSE-NEGATIVES (Andy): the items of a literal PowerShell list, `@("npm test", 'x')`,
+ *  `"a","b"`, `'npm'`, each one quoted (or a number); null when an item is bare or computed (`Get-ChildItem`,
+ *  `$x`, `@($a, "b")`), or the text is not a list. */
+function psList(text: string): string[] | null {
+  let s = text.trim();
+  const arr = /^@\(([\s\S]*)\)$/.exec(s);
+  if (arr) s = arr[1];
+  const items: string[] = []; const bare: string[] = [];
+  let cur = ''; let q: string | null = null; let quoted = false;
+  const end = (): void => { const w = cur.trim(); if (w || quoted) { items.push(w); if (!quoted && !/^\d+$/.test(w)) bare.push(w); } cur = ''; quoted = false; };
+  for (const c of s) {
+    if (q) { if (c === q) q = null; else cur += c; continue; }
+    if (c === '"' || c === "'") { q = c; quoted = true; continue; }
+    if (c === ',') { end(); continue; }
+    cur += c;
+  }
+  if (q) return null;
+  end();
+  return items.length && !bare.length && !items.some((w) => COMPUTED.test(w)) ? items : null;
+}
+
+/**
+ * HEAVY-LOCK-FALSE-NEGATIVES (Andy NIT 2, live 12:20Z: `git show > base.ts && sed ... > probe.cjs && node
+ * probe.cjs` was denied "no such file at .../probe.cjs"; the card: `echo "npm test" > w.ps1; & w.ps1` was
+ * "a script the lock cannot read yet"): a file a segment writes with a `>` / `>>` / `>|` / `&>` redirect,
+ * with tee, or with Set-Content / Add-Content / Out-File, is a file this command makes, so it is never "no
+ * such file". Its text is known when a literal wrote it: `echo` / `Write-Output` words, a `printf` format
+ * with no %, a `-Value`; then the script is read from that text (`echo "npm test" > w.ps1; & w.ps1` is the
+ * suite, definitely). Any other writer (git show, sed, a pipe into tee or Set-Content) leaves it unknown:
+ * heavy, provisional, "cannot read yet". Returns the keys written (heredocWrite's contract).
+ */
+function literalWrite(raw: string[], ws: string[], here: ClassifyCtx, virtual: Map<string, string | null>, vkey: (p: string, cd?: string) => string, rewritten: ReadonlySet<string>): Set<string> {
+  const wrote = new Set<string>();
+  const lead = leading(ws);
+  const bin = (lead[0] ?? '').replace(/\\/g, '/').split('/').pop()!.toLowerCase().replace(/\.exe$/, '');
+  const args = lead.slice(1);
+  const targets: Array<{ f: string; append: boolean }> = [];
+  for (let i = 0; i < raw.length; i++) {
+    const m = /^(?:\d*|&)(>\||>>?)(?![&>])(.*)$/.exec(raw[i]);
+    if (m) { const f = m[2] || raw[i + 1]; if (f && !/^\/dev\//.test(f)) targets.push({ f, append: m[1] === '>>' }); }
+  }
+  const unescape = (t: string): string => t.replace(/\\([nt\\])/g, (_, c: string) => (c === 'n' ? '\n' : c === 't' ? '\t' : '\\'));
+  let text: string | null = null;
+  if (targets.length) {
+    if (bin === 'echo' || bin === 'write-output') {
+      let k = 0;
+      let esc = false;
+      while (k < args.length && /^-[neE]+$/.test(args[k])) { esc ||= args[k].includes('e'); k++; }
+      const body = args.slice(k).join(' ');
+      text = COMPUTED.test(body) ? null : esc ? unescape(body) : body;
+    } else if (bin === 'printf') {
+      const fmt = args[0];
+      text = fmt === undefined || COMPUTED.test(fmt) || /%/.test(fmt) ? null : unescape(fmt);
+    }
+  } else if (bin === 'tee') {
+    const a = args.some((w) => /^-[a-z]*a|^--append$/.test(w));
+    for (const f of args.filter((w) => !w.startsWith('-'))) targets.push({ f, append: a });
+  } else if (/^(?:set-content|add-content|out-file|sc|ac)$/.test(bin)) {
+    const pos: string[] = [];
+    let value: string | undefined; let file: string | undefined; let append = bin === 'add-content' || bin === 'ac';
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i];
+      if (/^-p(?:a(?:t(?:h)?)?)?$/i.test(a) || PS_FILE_PARAM.test(a)) { file = args[++i]; continue; }
+      if (/^-v(?:a(?:l(?:u(?:e)?)?)?)?$/i.test(a) || /^-inputobject$/i.test(a)) { value = args[++i]; continue; }
+      if (/^-ap(?:p(?:e(?:n(?:d)?)?)?)?$/i.test(a)) { append = true; continue; }
+      if (/^-(?:encoding|filter|include|exclude|stream|width|credential)/i.test(a)) { i++; continue; }
+      if (a.startsWith('-')) continue;
+      pos.push(a);
+    }
+    file ??= pos.shift();
+    if (bin !== 'out-file') value ??= pos.shift();
+    if (file) targets.push({ f: file, append });
+    text = value === undefined || COMPUTED.test(value) ? null : value;
+  }
+  for (const { f, append } of targets) {
+    const k = vkey(f, here.cd);
+    wrote.add(k);
+    if (text === null) { virtual.set(k, null); continue; }
+    let old: string | null = null;
+    if (append) {
+      // S1: an append to a file rewritten by other means is unknown too (the disk holds the old text).
+      if (virtual.get(k) === null || (!virtual.has(k) && rewritten.has(k))) { virtual.set(k, null); continue; }
+      try { old = here.readScript ? here.readScript(f, here.cd) : null; } catch { old = null; }
+    }
+    virtual.set(k, `${append ? old ?? '' : ''}${text}\n`);
+  }
+  return wrote;
+}
+
 function heredocWrite(raw: string[], ws: string[], body: string, here: ClassifyCtx, virtual: Map<string, string | null>, vkey: (p: string, cd?: string) => string, rewritten: ReadonlySet<string>): Set<string> {
   const bin = (ws[0] ?? '').replace(/\\/g, '/').split('/').pop()!.toLowerCase().replace(/\.exe$/, '');
   const text = `${body}\n`;
@@ -1967,6 +2298,9 @@ export interface HeavyHolder {
   misses: number;
   /** The last watcher scan saw a heavy process of this holder (for a TTL expiry's log). */
   seenRunning: boolean;
+  /** Jim HHR MINOR 3: when a scan last saw a process of its job (null: never). The hour's renewal needs a
+   *  sighting since the last renewal (or the acquire / re-entry that moved `touched`). */
+  seenAt: number | null;
   /** pid -> createdMs of this holder's job processes seen on earlier scans (Jim: orphans stay attributed). */
   attributed: Map<number, number>;
   /** HEAVY-JOB-LOCK-FAILOPEN (b): when each heavy CALL ran (PreToolUse to PostToolUse; end null =
@@ -2035,6 +2369,10 @@ export interface HeavyLockDeps {
   pidAlive?: (pid: number) => boolean;
   /** How long one lease request waits for a queued agent's slot before answering 'wait'. */
   leasePollMs?: number;
+  /** HEAVY-LOCK-FALSE-NEGATIVES: the classifier's context for a leasing process's folder (its
+   *  script reader and test-file lister), so a runner's argv is judged as PreToolUse judges a
+   *  command. Absent = the argv alone (a filtered runner is light). */
+  classifyCtx?: (cwd?: string) => ClassifyCtx;
 }
 
 /**
@@ -2058,6 +2396,8 @@ export interface HeavyLeaseRequest {
   suite?: boolean;
   /** A suite runner's argv after node (argv[1] is run-tests.cjs): classified as PreToolUse would. */
   runner?: string[];
+  /** HEAVY-LOCK-FALSE-NEGATIVES: the runner's working folder (its test files are listed there). */
+  cwd?: string;
   /** GUPPY_TEST_RUN as the process inherited it: '<pid>:<createdMs>' of an enclosing classified run. */
   parentRun?: string;
   /** release: the lease an acquire answered. */
@@ -2073,7 +2413,7 @@ export type HeavyStanding = { holding: boolean; reserved: string | null; positio
 /** HEAVY-HANDOFF-RACE (a): the answer to `heavy next <agent>`. `queued`: the agent was already queued (it
  *  is at the head now); else it goes to the head when it next asks. `refused`: the caller holds no slot,
  *  has none reserved and is not god ('not-a-holder'), or named itself ('self'): nothing changed. */
-export type HeavyNextAnswer = { state: 'next'; to: string; queued: boolean; refused?: 'not-a-holder' | 'self' };
+export type HeavyNextAnswer = { state: 'next'; to: string; queued: boolean; refused?: 'not-a-holder' | 'self' | 'unknown' };
 /** LOCK-WAIT-NOTICES / HEAVY-HANDOFF-RACE (c): why an agent is told about its wait: 'expired' (its unused
  *  reservation passed on and it is no longer queued), 'requeued' (it passed on and the agent is queued
  *  again, at the back, once), 'stale' (kept for main's notice function; never sent since HEAVY-QUEUE-WAIT-DROPS). */
@@ -2092,8 +2432,11 @@ export type HeavyLeaseAnswer =
 export type HeavyUnreserveAnswer = { state: 'unreserved'; reserved: boolean; queued: boolean; next: string | null; to?: 'not-queued'; waiting?: true; held?: HeavyHeldRelease };
 /** HEAVY-HANDOFF-RACE (e): `heavy release` from a HOLDER. `dropped`: its held call(s) were dropped and the
  *  slot passed on; else refused, with the open calls and the pids of its job still running (`checked`:
- *  'ok' a listing was read, 'failed' the listing failed (unknown, kept), 'none' no watcher on this build). */
-export type HeavyHeldRelease = { kind: HeavyKind; calls: string[]; pids: number[]; dropped: boolean; checked: 'ok' | 'failed' | 'none' };
+ *  'ok' a listing was read, 'failed' the listing failed (unknown, kept), 'unseen' the listing lacked the
+ *  holder's own terminal (Jim HHR MINOR 1: unknown, kept, as the watcher counts it), 'none' no watcher on
+ *  this build). `arrived` (Jim HHR MINOR 2): heavy calls of the holder that began while the listing was
+ *  read, so it says nothing about them: kept. */
+export type HeavyHeldRelease = { kind: HeavyKind; calls: string[]; pids: number[]; dropped: boolean; checked: 'ok' | 'failed' | 'unseen' | 'none'; arrived?: string[] };
 /** How long one lease request may wait (a long poll; the preload asks again). */
 export const HEAVY_LEASE_POLL_MS = 25_000;
 /** A test process is the call's OWN node when its parent is the call's shell (or a pass-through
@@ -2202,6 +2545,8 @@ export class HeavyJobLock {
    *  queue: moved to its head when queued, put there when it next asks. Cleared once it is reserved,
    *  holds a slot, or is gone. */
   private nextUp: string | null = null;
+  /** Jim HHR NIT 1: when the name was given; one nobody asks for expires after HEAVY_TTL_MS. */
+  private nextAt = 0;
   private readonly now: () => number;
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
   private readonly clearTimer: (t: unknown) => void;
@@ -2297,7 +2642,7 @@ export class HeavyJobLock {
     this.dequeue(agentId);
     this.leaseOnly.delete(agentId);
     if (this.nextUp === agentId) this.nextUp = null;
-    this.holders.set(agentId, { agentId, kind: cls.kind, command: command.slice(0, 200), since: this.now(), touched: this.now(), calls: new Set([callId]), background, provisional: new Set(cls.provisional ? [callId] : []), definite: !cls.provisional, misses: 0, seenRunning: false, attributed: new Map(), windows: [{ callId, start: this.now(), end: null }], lastProbe: null, jobs: new Map(), exclusive: excl });
+    this.holders.set(agentId, { agentId, kind: cls.kind, command: command.slice(0, 200), since: this.now(), touched: this.now(), calls: new Set([callId]), background, provisional: new Set(cls.provisional ? [callId] : []), definite: !cls.provisional, misses: 0, seenRunning: false, seenAt: null, attributed: new Map(), windows: [{ callId, start: this.now(), end: null }], lastProbe: null, jobs: new Map(), exclusive: excl });
     this.log({ kind: 'heavy-lock', action: 'acquire', agentId, heavyKind: cls.kind, command: command.slice(0, 200), background, limit, ...(reserved ? { reserved: true } : {}), ...(excl ? { exclusive: true } : {}) });
     this.changed();
     this.arm();
@@ -2330,13 +2675,15 @@ export class HeavyJobLock {
     const excl = heavyExclusive(cls);
     const holders = [...this.holders.values()];
     const position = this.enqueue(agentId, kind, !callId.startsWith('lease:'), excl);
+    // Jim HHR NIT 3 (P3): an agent queued again after a lapse is told the truth: its next lapse drops it.
+    const lapsed = !!this.waiters.find((w) => w.agentId === agentId)?.lapsed;
     const who = holders.map((h) => `${h.agentId} (${h.kind}: ${h.command.slice(0, 80)}, since ${new Date(h.since).toISOString().slice(11, 19)}Z)`).join('; ');
     const others = [...this.reservations.entries()].map(([a, r]) => `reserved for ${a} until ${new Date(r.until).toISOString().slice(11, 19)}Z`).join('; ');
     const held = holders.length ? `${holders.length === 1 ? 'it is' : 'they are'} held by ${who}` : 'no job is running';
     // HEAVY-SLOT-EXCLUSIVE-192: with 2+ slots, say why a free slot is not yours (one slot is always alone).
     const alone = limit > 1 && (excl || holders.some((h) => h.exclusive) || [...this.reservations.values()].some((r) => r.exclusive) || this.waiters.some((w) => w.exclusive && w.agentId !== agentId))
       ? ' A whole test suite or a bench runs alone: it starts only when every slot is free, and nothing else starts beside it or ahead of it.' : '';
-    const reason = `Denied by HEAVY-JOB-LOCK: the machine allows ${limit} heavy job${limit === 1 ? '' : 's'} at once and ${held}${others ? ` (${others})` : ''}.${alone} You are QUEUED (position ${position}): when a slot frees it is reserved for you for ${Math.round(HEAVY_RESERVE_MS / 60_000)} min and you are told "HEAVY SLOT FREE". Do not retry this or a variant of it now, and do not poll for the slot: carry on with light work (single test files, reads, edits are not limited) until you are told. A reservation you leave unused for ${Math.round(HEAVY_RESERVE_MS / 60_000)} min passes on and queues you again at the back, once; \`heavy status\` shows your standing and \`heavy release\` leaves the queue.${cls.provisional ? ` This denial is PROVISIONAL (${cls.why}): if the command is in fact light, \`heavy release\` leaves the queue, and name the file so the lock can read it.` : ''}`;
+    const reason = `Denied by HEAVY-JOB-LOCK: the machine allows ${limit} heavy job${limit === 1 ? '' : 's'} at once and ${held}${others ? ` (${others})` : ''}.${alone} You are QUEUED (position ${position}): when a slot frees it is reserved for you for ${Math.round(HEAVY_RESERVE_MS / 60_000)} min and you are told "HEAVY SLOT FREE". Do not retry this or a variant of it now, and do not poll for the slot: carry on with light work (single test files, reads, edits are not limited) until you are told. A reservation you leave unused for ${Math.round(HEAVY_RESERVE_MS / 60_000)} min passes on and ${lapsed ? 'takes you out of the queue (you were queued again once already)' : 'queues you again at the back, once'}; \`heavy status\` shows your standing and \`heavy release\` leaves the queue.${cls.provisional ? ` This denial is PROVISIONAL (${cls.why}): if the command is in fact light, \`heavy release\` leaves the queue, and name the file so the lock can read it.` : ''}`;
     // Jim N3: the denied command's CLASS is logged, not the command itself.
     this.log({ kind: 'heavy-lock', action: 'deny', agentId, heavyKind: kind, why: cls.why ?? null, holders: holders.map((h) => ({ agentId: h.agentId, kind: h.kind, since: new Date(h.since).toISOString() })), limit, position, ...(excl ? { exclusive: true } : {}) });
     this.changed();
@@ -2442,7 +2789,7 @@ export class HeavyJobLock {
       void this.heavyAgents().then((busy) => {
         const cur = this.holders.get(agentId);
         if (!cur || cur.calls.size || cur.background) return;
-        if (busy?.busy.has(agentId)) { cur.background = true; cur.seenRunning = true; this.log({ kind: 'heavy-lock', action: 'orphan-kept', agentId, heavyKind: cur.kind }); this.changed(); this.arm(); return; }
+        if (busy?.busy.has(agentId)) { cur.background = true; cur.seenRunning = true; cur.seenAt = this.now(); this.log({ kind: 'heavy-lock', action: 'orphan-kept', agentId, heavyKind: cur.kind }); this.changed(); this.arm(); return; }
         // (a) FAIL CLOSED: a failed listing says nothing about the job (most likely a TIMEOUT on a
         // loaded machine, i.e. exactly when a second heavy job hurts most). Keep the slot as a
         // background holder; the watcher frees it on two clean scans without it, or the TTL.
@@ -2588,24 +2935,32 @@ export class HeavyJobLock {
    *  later, when the watcher saw the job gone). A holder's release DROPS its held call(s) (a bench whose
    *  PostToolUse never came, a background job) and grants the next agent at once, unless a process of its
    *  job still runs: then it is refused truthfully, naming the open calls and the pids. A failed listing
-   *  is unknown, not idle: refused too (fail closed, like callDone). No watcher on this build: dropped. */
+   *  is unknown, not idle: refused too (fail closed, like callDone). No watcher on this build: dropped.
+   *  Jim HHR MINOR 1 (P5, P7): as conservative as the watcher: a listing without the holder's own PTY root
+   *  is unknown too ('unseen', kept), and a job Guppy itself holds (HeavyJobs) that has not exited runs,
+   *  whatever the listing shows. MINOR 2 (P6): a heavy call of the holder that began while the listing
+   *  was read (two tool calls in one response) is not covered by it: the hold is kept and the call named. */
   private async releaseHeld(agentId: string, to?: string): Promise<HeavyUnreserveAnswer> {
     const was = this.holders.get(agentId)!;
     const calls = [...was.calls];
-    let checked: 'ok' | 'failed' | 'none' = 'none';
+    let checked: HeavyHeldRelease['checked'] = 'none';
     let running = false;
     if (this.d.probe && this.d.roots) {
       const probed = await this.heavyAgents();
       if (!probed) checked = 'failed';
+      else if (!probed.seen.has(agentId)) checked = 'unseen';
       else { checked = 'ok'; running = probed.busy.has(agentId); }
     }
     const cur = this.holders.get(agentId);
     // Freed during the listing (its job ended, or the watcher saw it gone): nothing is held any more.
     if (!cur) return { state: 'unreserved', reserved: false, queued: false, next: null, held: { kind: was.kind, calls, pids: [], dropped: true, checked } };
+    if ([...cur.jobs.values()].some((js) => [...js.values()].some((exited) => !exited))) running = true;
+    const arrived = [...cur.calls].filter((c) => !calls.includes(c));
     const pids = [...cur.attributed.keys()].sort((a, b) => a - b);
-    if (running || checked === 'failed') {
-      this.log({ kind: 'heavy-lock', action: 'release-refused', agentId, heavyKind: cur.kind, calls, pids, checked });
-      return { state: 'unreserved', reserved: false, queued: false, next: null, held: { kind: cur.kind, calls, pids, dropped: false, checked } };
+    if (running || checked === 'failed' || checked === 'unseen' || arrived.length) {
+      const open = [...cur.calls];
+      this.log({ kind: 'heavy-lock', action: 'release-refused', agentId, heavyKind: cur.kind, calls: open, pids, checked, ...(arrived.length ? { arrived } : {}) });
+      return { state: 'unreserved', reserved: false, queued: false, next: null, held: { kind: cur.kind, calls: open, pids, dropped: false, checked, ...(arrived.length ? { arrived } : {}) } };
     }
     let missed = false;
     if (to !== undefined && to !== agentId) {
@@ -2632,11 +2987,15 @@ export class HeavyJobLock {
     to = to.slice(0, 80);
     const i = this.waiters.findIndex((w) => w.agentId === to);
     const queued = i >= 0;
+    // Jim HHR NIT 1 (P2: "creed-typo", named by god, stood 6 h and then went ahead of a waiter): a name
+    // must be an agent on the floor (one with a PTY, as the queue's liveness sweep counts it).
     const refused = to === agentId ? 'self' as const
-      : !(this.holders.has(agentId) || this.reservations.has(agentId) || this.isGod(agentId)) ? 'not-a-holder' as const : undefined;
+      : !(this.holders.has(agentId) || this.reservations.has(agentId) || this.isGod(agentId)) ? 'not-a-holder' as const
+        : !this.alive(to) ? 'unknown' as const : undefined;
     this.log({ kind: 'heavy-lock', action: 'next', agentId, to, queued, ...(refused ? { refused } : {}) });
     if (refused) return { state: 'next', to, queued, refused };
     this.nextUp = to;
+    this.nextAt = this.now();
     if (i > 0) { this.waiters.unshift(...this.waiters.splice(i, 1)); this.changed(); }
     // A slot free now (the named agent waited behind an exclusive head) goes to it at once.
     if (queued) this.grant();
@@ -2727,6 +3086,12 @@ export class HeavyJobLock {
     // HEAVY-SLOT-EXCLUSIVE-192: a dropped waiter may have held back the ones behind it (an exclusive
     // head waits for the empty machine), so the queue is offered the free slots again.
     let left = false;
+    // Jim HHR NIT 1: a standing name nobody asked for within HEAVY_TTL_MS is forgotten (logged).
+    if (this.nextUp && t - this.nextAt >= HEAVY_TTL_MS) {
+      this.log({ kind: 'heavy-lock', action: 'next-expired', to: this.nextUp, ageMs: t - this.nextAt });
+      this.nextUp = null;
+      this.changed();
+    }
     for (const w of [...this.waiters]) {
       if (!this.d.alive || this.alive(w.agentId)) continue;
       this.dequeue(w.agentId);
@@ -2740,9 +3105,18 @@ export class HeavyJobLock {
     // HEAVY_TTL_MS (logged, so a day-long hold stays visible) and its process exit frees it. Only a hold
     // never seen running expires ('ttl': no watcher, or a job the listing never showed). The renewal
     // moves `touched`, so the scan right after it does not count a miss (one interval of slack).
+    // Jim HHR MINOR 3 (P1, P1b): only a sighting SINCE the last renewal (or the acquire / re-entry that
+    // moved `touched`) renews. A watcher gone blind after one sighting (every listing failed, or none
+    // showed the holder's PTY root) renewed a hold for 24 h: now at most one hour passes blind after the
+    // last sighting's renewal, logged loudly ('ttl-blind', with the last probe state and how long the job
+    // has been unseen), and the hold expires as one never seen running; its job-exit, posttool and
+    // pty-exit still free it earlier.
     for (const h of [...this.holders.values()]) {
       if (t - h.touched < HEAVY_TTL_MS) continue;
-      if (!h.seenRunning) { this.release(h.agentId, 'ttl'); continue; }
+      if (!h.seenRunning || h.seenAt === null || h.seenAt < h.touched) {
+        if (h.seenRunning) this.log({ kind: 'heavy-lock', action: 'ttl-blind', agentId: h.agentId, heavyKind: h.kind, heldMs: t - h.since, lastProbe: h.lastProbe, unseenMs: t - (h.seenAt ?? h.since) });
+        this.release(h.agentId, 'ttl'); continue;
+      }
       h.touched = t;
       this.log({ kind: 'heavy-lock', action: 'ttl-renewed', agentId: h.agentId, heavyKind: h.kind, heldMs: t - h.since });
     }
@@ -2799,7 +3173,7 @@ export class HeavyJobLock {
     const t = this.now();
     for (const h of held) {
       if (!this.holders.has(h.agentId)) continue;
-      if (busy.has(h.agentId)) { h.misses = 0; h.seenRunning = true; continue; }
+      if (busy.has(h.agentId)) { h.misses = 0; h.seenRunning = true; h.seenAt = t; continue; }
       if (!seen.has(h.agentId)) continue;   // its PTY root is not in the listing: unknown, not a miss
       h.seenRunning = false;
       if (t - h.touched < HEAVY_SCAN_MS) continue;
@@ -2877,7 +3251,9 @@ export class HeavyJobLock {
     let suite = r.suite === true;
     if (Array.isArray(r.runner)) {
       const argv = ['node', ...r.runner.map(String)].map((a) => `"${a.replace(/["\\$`]/g, '\\$&')}"`).join(' ');
-      if (!classifyCommand(argv).heavy) {
+      // HEAVY-LOCK-FALSE-NEGATIVES: with the process's folder, so a broad filter counts as the suite.
+      const ctx = this.d.classifyCtx?.(typeof r.cwd === 'string' ? r.cwd : undefined) ?? {};
+      if (!classifyCommand(argv, 0, ctx).heavy) {
         this.runs.set(run, { agentId, held: this.holders.has(agentId) });
         return { state: 'light', run, why: 'a filtered suite runner' };
       }

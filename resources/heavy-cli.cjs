@@ -16,7 +16,8 @@
 'use strict';
 const http = require('http');
 
-const EXIT = { ok: 0, usage: 2, unavailable: 3, timeout: 4 };
+// Jim HHR NIT 2: a refusal (heavy next, or a holder's heavy release) is not success: a pack's last line can tell.
+const EXIT = { ok: 0, refused: 1, usage: 2, unavailable: 3, timeout: 4 };
 const REQUEST_TIMEOUT_MS = 15000;
 const USAGE = 'usage: heavy status | heavy release [--to <agent>] | heavy next <agent>\n  release: give up my reserved slot, or my place in the queue (a denial queued me), or the slot I hold (once its job is over)\n  next: the next freed slot goes to that agent first (a holder, a reserved agent, or god may say so)\n';
 const AGENT = /^[A-Za-z0-9._-]{1,80}$/;
@@ -75,6 +76,7 @@ function describe(b) {
   }
   if (b.state === 'next') {
     if (b.refused === 'self') return 'heavy: name another agent, not yourself\n';
+    if (b.refused === 'unknown') return `heavy: refused: no agent ${b.to} is on the floor (heavy status lists the queue; an agent id is like creed-mukyiphw)\n`;
     if (b.refused) return 'heavy: refused: only a holder, an agent with a slot reserved, or god may name the next holder\n';
     return `heavy: the next freed slot goes to ${b.to} ${b.queued ? '(queued: now at the head of the queue)' : '(not queued yet: it goes to the head when it next asks)'}\n`;
   }
@@ -84,9 +86,13 @@ function describe(b) {
     const calls = b.held.calls.length ? `call ${b.held.calls.join(', ')}` : 'no open call';
     if (!b.held.dropped) {
       const pids = b.held.pids.length ? `, pids ${b.held.pids.join(', ')}` : '';
+      // Jim HHR MINOR 1 and 2: each refusal says what was not known.
+      if (b.held.arrived && b.held.arrived.length) return `heavy: refused: you hold the ${b.held.kind} slot and a heavy call of yours began during the check (call ${b.held.arrived.join(', ')}); it frees when your job ends, or run heavy release again once that call is over\n`;
       return b.held.checked === 'failed'
         ? `heavy: refused: you hold the ${b.held.kind} slot and the process check failed, so its job may still run (${calls}); it frees when the job ends, or run heavy release again\n`
-        : `heavy: refused: you hold the ${b.held.kind} slot and its job still runs (${calls}${pids}); stop the job first, or it frees when the job ends\n`;
+        : b.held.checked === 'unseen'
+          ? `heavy: refused: you hold the ${b.held.kind} slot and the process listing did not show your terminal, so its job may still run (${calls}); it frees when the job ends, or run heavy release again\n`
+          : `heavy: refused: you hold the ${b.held.kind} slot and its job still runs (${calls}${pids}); stop the job first, or it frees when the job ends\n`;
     }
     const idle = b.held.checked === 'ok' ? ': no process of its job runs' : '';
     return `heavy: released your held ${b.held.kind} slot (${calls} dropped${idle}); it is now ${b.next ? `reserved for ${b.next}` : 'free (no one is queued)'}${to}\n`;
@@ -118,6 +124,7 @@ async function main(argv, env, io = { out: (s) => process.stdout.write(s), err: 
     return EXIT.unavailable;
   }
   io.out(describe(b));
+  if ((b.state === 'next' && b.refused) || (b.held && !b.held.dropped)) return EXIT.refused;
   return EXIT.ok;
 }
 

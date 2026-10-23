@@ -316,7 +316,7 @@ const MUTANTS = [
     edits: [['      if (excl && !mine.exclusive && !reserved && !this.fits(agentId, true, limit)) return this.deny(agentId, cls, limit, callId);\n', '']],
     killer: 'reentry', dies: /AN EXCLUSIVE RE-ENTRY WAITS FOR THE OTHER HOLDERS/ },
   { name: 'the classifier marks nothing exclusive',
-    edits: [["  return cls.heavy && (cls.exclusive === true || cls.kind === 'suite' || cls.kind === 'bench');", '  return cls.heavy && cls.exclusive === true;']],
+    edits: [["  return cls.heavy && !cls.provisional && (cls.exclusive === true || cls.kind === 'suite' || cls.kind === 'bench');", '  return cls.heavy && cls.exclusive === true;']],
     killer: 'classes', dies: /A FULL, A BENCH, A MUTANT RUNNER OR THE MARKER RUNS ALONE/ },
   { name: 'no explicit marker',
     edits: [['(SCALE|BENCH|STRESS|SOAK|EXCLUSIVE)', '(SCALE|BENCH|STRESS|SOAK)']],
