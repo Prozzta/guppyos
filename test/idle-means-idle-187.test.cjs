@@ -172,7 +172,11 @@ test('T2 onChange fires exactly once per acquire, background re-entry, deny, res
   step(() => lock.release('a', 'process-exit'), 2, 'release, then the reserve it grants: one each');
   assert.deepEqual(rows.slice(-2).map((r) => r.action), ['release', 'reserve']);
   clock.t += HEAVY_RESERVE_MS;
-  step(() => lock.queueSnapshot(), 1, 'reserve-expired');
+  // HEAVY-HANDOFF-RACE (c): the lapsed owner is queued again (once) and, the slot being free, reserved again: three changes.
+  step(() => lock.queueSnapshot(), 3, 'reserve-expired, queue-again, reserve');
+  assert.deepEqual(rows.slice(-3).map((r) => r.action), ['reserve-expired', 'queue-again', 'reserve']);
+  clock.t += HEAVY_RESERVE_MS;
+  step(() => lock.queueSnapshot(), 1, 'the second lapse drops it: one change');
   assert.equal(rows.at(-1).action, 'reserve-expired');
   // A waiter an hour old when the slot frees keeps its place and is reserved (HEAVY-QUEUE-WAIT-DROPS: no drop by age).
   step(() => lock.acquire('a', SUITE, 'npm test', 'c7', false), 1, 'acquire');

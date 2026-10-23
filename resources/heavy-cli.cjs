@@ -6,6 +6,8 @@
  *   heavy status                 who holds the slot, who waits, who has a slot reserved
  *   heavy release                give up my reserved slot, or my place in the queue: it passes on at once
  *   heavy release --to <agent>   ... to that queued agent first (else to the oldest waiter)
+ *   heavy next <agent>           HEAVY-HANDOFF-RACE: the next freed slot goes to that agent, ahead of the
+ *                                queue (a holder, an agent with a slot reserved, or god may say so)
  *
  * A held slot is not released here: it frees when its job ends.
  * Exit codes: 0 ok, 2 bad arguments, 3 app unavailable, 4 timeout.
@@ -15,13 +17,17 @@ const http = require('http');
 
 const EXIT = { ok: 0, usage: 2, unavailable: 3, timeout: 4 };
 const REQUEST_TIMEOUT_MS = 15000;
-const USAGE = 'usage: heavy status | heavy release [--to <agent>]\n  release: give up my reserved slot, or my place in the queue (a denial queued me)\n';
+const USAGE = 'usage: heavy status | heavy release [--to <agent>] | heavy next <agent>\n  release: give up my reserved slot, or my place in the queue (a denial queued me)\n  next: the next freed slot goes to that agent first (a holder, a reserved agent, or god may say so)\n';
 const AGENT = /^[A-Za-z0-9._-]{1,80}$/;
 
-/** { op: 'status' } | { op: 'unreserve', to? } | { help: true }, or throws. */
+/** { op: 'status' } | { op: 'unreserve', to? } | { op: 'next', to } | { help: true }, or throws. */
 function parseArgs(argv) {
   if (argv.length === 1 && (argv[0] === '-h' || argv[0] === '--help')) return { help: true };
   if (argv.length === 1 && argv[0] === 'status') return { op: 'status' };
+  if (argv.length === 2 && argv[0] === 'next') {
+    if (!AGENT.test(argv[1])) throw new Error(`not an agent id: ${JSON.stringify(argv[1]).slice(0, 90)}`);
+    return { op: 'next', to: argv[1] };
+  }
   if (argv.length === 1 && argv[0] === 'release') return { op: 'unreserve' };
   if (argv.length === 3 && argv[0] === 'release' && argv[1] === '--to') {
     if (!AGENT.test(argv[2])) throw new Error(`not an agent id: ${JSON.stringify(argv[2]).slice(0, 90)}`);
@@ -56,7 +62,20 @@ function post(urlText, data, timeoutMs) {
 function describe(b) {
   if (b.state === 'status') {
     const reserved = b.reserved.map((r) => `${r.agentId} until ${String(r.until).slice(11, 19)}Z`);
-    return `held: ${b.holders.join(', ') || 'none'}; reserved: ${reserved.join(', ') || 'none'}; queue: ${b.waiters.join(', ') || 'empty'}\n`;
+    const next = b.next ? `; next: ${b.next}` : '';
+    // HEAVY-HANDOFF-RACE (c): the caller's own standing, in the words the deny and the notices use.
+    const y = b.you;
+    const you = !y ? ''
+      : y.holding ? 'you: holding a slot (it frees when your job ends)\n'
+        : y.reserved ? `you: the slot is reserved for you until ${String(y.reserved).slice(11, 19)}Z (run your job now, or \`heavy release\`)\n`
+          : y.position ? `you: queued #${y.position} (you are told "HEAVY SLOT FREE" when it is yours)\n`
+            : 'you: not queued, nothing reserved, nothing held\n';
+    return `held: ${b.holders.join(', ') || 'none'}; reserved: ${reserved.join(', ') || 'none'}; queue: ${b.waiters.join(', ') || 'empty'}${next}\n${you}`;
+  }
+  if (b.state === 'next') {
+    if (b.refused === 'self') return 'heavy: name another agent, not yourself\n';
+    if (b.refused) return 'heavy: refused: only a holder, an agent with a slot reserved, or god may name the next holder\n';
+    return `heavy: the next freed slot goes to ${b.to} ${b.queued ? '(queued: now at the head of the queue)' : '(not queued yet: it goes to the head when it next asks)'}\n`;
   }
   if (!b.reserved && !b.queued) return 'heavy: nothing to release: no slot is reserved for you and you are not queued (a slot you hold frees when its job ends)\n';
   const gave = b.reserved ? 'released your reserved slot' : 'left the queue';
@@ -80,7 +99,7 @@ async function main(argv, env, io = { out: (s) => process.stdout.write(s), err: 
   if (r.status === 0) { io.err(`heavy: the app is unavailable (${r.error})\n`); return EXIT.unavailable; }
   if (r.status === 403) { io.err('heavy: not authorized (a stale HIVE_LEDGER_URL: this agent was respawned)\n'); return EXIT.unavailable; }
   const b = r.body;
-  if (r.status !== 200 || !b || (b.state !== 'status' && b.state !== 'unreserved')) {
+  if (r.status !== 200 || !b || (b.state !== 'status' && b.state !== 'unreserved' && b.state !== 'next')) {
     // An older app has no such op: it answers as if a lease were asked (or 400/404).
     io.err(`heavy: unavailable (this app build has no \`heavy ${argv[0]}\`: HTTP ${r.status}${b && b.line ? `, ${b.line}` : ''})\n`);
     return EXIT.unavailable;

@@ -94,7 +94,10 @@ test('Jim NIT 1 (HEAVY-QUEUE-WAIT-DROPS): a GONE waiter leaves the queue ON SCHE
   assert.deepEqual(lapsed, []);
 });
 
-test('GAP 2: a reservation that lapses unused tells its agent it lost the slot', () => {
+// HEAVY-HANDOFF-RACE (c): a lapsed reservation no longer drops its owner at once: it is queued again at
+// the back, once (here no one else waits, so the slot is reserved for it again and it is told HEAVY SLOT
+// FREE again); the SECOND unused reservation drops it, told 'expired'.
+test('GAP 2: a reservation that lapses unused queues its agent again once; the second lapse tells it it lost the slot', () => {
   const { lock, clock, rows, freed, lapsed } = fakeLock();
   lock.acquire('holder', SUITE, 'npm test &', 'h1', true);
   lock.acquire('w', SUITE, 'npm test', 'w1', false);
@@ -102,13 +105,19 @@ test('GAP 2: a reservation that lapses unused tells its agent it lost the slot',
   assert.equal(freed.length, 1, 'HEAVY SLOT FREE as before');
   clock.t += HEAVY_RESERVE_MS;
   lock.queueSnapshot(); // the watcher (or any read) expires it
-  assert.equal(rows.at(-1).action, 'reserve-expired');
-  assert.deepEqual(lapsed, [['w', 'suite', 'expired']]);
+  assert.deepEqual(rows.slice(-3).map((r) => r.action), ['reserve-expired', 'queue-again', 'reserve'], 'queued again, and the free slot is its again');
+  assert.deepEqual(lapsed, [], 'told HEAVY SLOT FREE again instead');
+  assert.equal(freed.length, 2);
+  clock.t += HEAVY_RESERVE_MS;
+  lock.queueSnapshot();
+  assert.deepEqual(rows.at(-1), { kind: 'heavy-lock', action: 'reserve-expired', agentId: 'w', heavyKind: 'suite', again: true });
+  assert.deepEqual(lapsed, [['w', 'suite', 'expired']], 'the second lapse drops it, told plainly');
   // Once only: a later read does not re-tell it.
   lock.snapshot();
   clock.t += MIN;
   lock.queueSnapshot();
   assert.equal(lapsed.length, 1);
+  assert.deepEqual(lock.queueSnapshot().waiters, [], 'and it is out');
 });
 
 test('the lapse passes the slot on as before: the next waiter is reserved and told HEAVY SLOT FREE', () => {
@@ -119,9 +128,11 @@ test('the lapse passes the slot on as before: the next waiter is reserved and to
   lock.release('holder', 'process-exit');
   clock.t += HEAVY_RESERVE_MS;
   lock.queueSnapshot();
-  assert.deepEqual(lapsed, [['a', 'suite', 'expired']]);
+  // HEAVY-HANDOFF-RACE (c): a is queued again behind b and told so ('requeued'), not dropped.
+  assert.deepEqual(lapsed, [['a', 'suite', 'requeued']]);
   assert.deepEqual(freed.map((f) => f[0]), ['a', 'b']);
   assert.deepEqual(lock.queueSnapshot().reserved.map((r) => r.agentId), ['b']);
+  assert.deepEqual(lock.queueSnapshot().waiters.map((w) => w.agentId), ['a']);
 });
 
 test('not told: the caller whose own call meets its lapse or its drop, and a gone agent', () => {
@@ -199,6 +210,10 @@ test('Dwight MUST: a gone agent is not told at the scheduled liveness sweep, nor
     lock.release('holder', 'process-exit');
     clock.t += HEAVY_RESERVE_MS;
     lock.queueSnapshot();
+    // HEAVY-HANDOFF-RACE (c): queued again and reserved again at once (told HEAVY SLOT FREE); the second lapse tells it.
+    assert.deepEqual(lapsed, []);
+    clock.t += HEAVY_RESERVE_MS;
+    lock.queueSnapshot();
     assert.deepEqual(lapsed, [['a', 'suite', 'expired']]);
   }
 });
@@ -244,5 +259,5 @@ test('the notice: a system inform that wakes, says why, and says how to queue ag
 test('main sends the lapse notice on both rails, like HEAVY SLOT FREE', () => {
   const idx = readSource('src/main/index.ts');
   assert.match(idx, /notifyLapse: \(agentId, kind, why\) => notifyHeavyWaitLapsed\(agentId, kind, why\)/);
-  assert.match(idx, /function notifyHeavyWaitLapsed\(agentId: string, kind: string, why: 'stale' \| 'expired'\): void \{\s*const n = heavyWaitLapsedNotice\(agentId, kind, why\);\s*try \{ hive\.send\(n\.message as Partial<HiveMessage>, n\.from\); \} catch \{ \/\* best effort \*\/ \}\s*try \{ control\.steer\(agentId, n\.steer\); \} catch \{ \/\* best effort \*\/ \}\s*\}/);
+  assert.match(idx, /function notifyHeavyWaitLapsed\(agentId: string, kind: string, why: 'stale' \| 'expired' \| 'requeued'\): void \{\s*const n = heavyWaitLapsedNotice\(agentId, kind, why\);\s*try \{ hive\.send\(n\.message as Partial<HiveMessage>, n\.from\); \} catch \{ \/\* best effort \*\/ \}\s*try \{ control\.steer\(agentId, n\.steer\); \} catch \{ \/\* best effort \*\/ \}\s*\}/);
 });

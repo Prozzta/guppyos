@@ -336,13 +336,17 @@ test('Jim N2: a foreground call whose heavy job outlives it (a detached child) K
   assert.equal(y.logs.at(-1).reason, 'posttool');
 });
 
-test('Jim N5: a TTL expiry while the watcher last SAW the job running logs expired-still-running (not a silent ttl)', async () => {
+// Was Jim N5 (a TTL expiry while the watcher last SAW the job running logged 'expired-still-running'):
+// HEAVY-HANDOFF-RACE (b) keeps such a hold instead (Creed's cut, 2026-10-23T03:25Z, was freed at the
+// hour while its pack ran). heavy-lock-handoff-race-199 pins the renewal, the exit and the mutants.
+test('HEAVY-HANDOFF-RACE (b): a hold the watcher last SAW running is RENEWED at the hour (logged ttl-renewed), not freed', async () => {
   const x = lock(1, { roots: () => [{ agentId: 'a', pid: 10 }], probe: async () => [{ pid: 11, parentPid: 10, commandLine: 'node --test test/*.test.cjs', createdMs: 1_000_100 }] });
   x.l.acquire('a', H, 'node --test test/*.test.cjs', '1', true);
   await x.l.scan();
   x.tick(HEAVY_TTL_MS);
-  x.l.snapshot();
-  assert.equal(x.logs.at(-1).reason, 'expired-still-running');
+  assert.equal(x.l.snapshot().length, 1, 'still held at the hour');
+  assert.deepEqual(x.logs.at(-1), { kind: 'heavy-lock', action: 'ttl-renewed', agentId: 'a', heavyKind: 'suite', heldMs: HEAVY_TTL_MS });
+  assert.ok(!x.logs.some((r) => r.action === 'release'), 'never freed on age alone');
 });
 
 test('Jim N1 (HOOK): a CODEX (mcp) heavy call is left for the watcher (its PostToolUse may not pair back); a DEGRADED call with no input is allowed and logged', async (t) => {
