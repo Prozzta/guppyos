@@ -52,4 +52,9 @@ if (process.argv.includes('--install-only')) {
   run(npm, ['ci']);
   run(npm, ['run', 'dist:win:raw']);
   check();
+  // CHANGELOG-HEADINGS-GATE: a cut keeps every released CHANGELOG section of the last release.
+  run(process.execPath, [
+    path.join('scripts', 'verify-changelog-history.cjs'),
+    path.join('dist', 'win-unpacked', 'resources', 'app.asar')
+  ]);
 }

@@ -21,6 +21,10 @@ A release has one path: the verified local cut. The Release workflow
      `npm run cut:prune` prints the cache path, and `-- --seed-cache` fills it.
    - `node scripts/release-markers.cjs` on the source tree and again on the build. It must print
      `ALL 12 MARKERS OK`.
+   - `npm run cut:win` ends with `node scripts/verify-changelog-history.cjs` on the built asar: every
+     released `## [x.y.z]` section of the last release's CHANGELOG (the newest `v*` tag behind HEAD
+     other than this version's) is still there with its heading unchanged, in order, with no line
+     removed. It must print `CHANGELOG HISTORY OK`. Fetch the tags first: no base is a failure.
    - The packaged CHANGELOG and no-seams checks, and the code markers for the release's
      fixes. Run the code markers against the installed previous release too, as a control:
      that run must FAIL every new marker.
