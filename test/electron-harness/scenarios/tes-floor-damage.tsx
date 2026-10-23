@@ -22,7 +22,7 @@ import { BOX, RESIZES, SELECTS, CREW, LOSE_AT, LAST, AFTER, LOOKS, LOOKS_FROM, E
 declare global {
   interface Window {
     __harnessRun: () => Promise<void>;
-    harness: { report: (payload: unknown) => void };
+    harness: { report: (payload: unknown) => void; progress: (payload: unknown) => void };
   }
 }
 
@@ -70,6 +70,8 @@ const out = {
   errors: [] as string[]
 };
 let renders = 0;
+let progressPhase = 'startup', progressStep = 'awaiting first render';
+const reportProgress = () => window.harness.progress({ frames: out.frames, renders, phase: progressPhase, step: progressStep });
 let done: (() => void) | null = null;
 let hostBox: HTMLDivElement | null = null;
 let lastApp: unknown = null;
@@ -95,6 +97,8 @@ proto.render = function (this: any) {
   try {
     const gl = app.renderer?.gl as WebGL2RenderingContext | undefined;
     if (S && gl && !gl.isContextLost()) {
+      progressPhase = 'render';
+      progressStep = 'drawing frame';
       if (app !== lastApp) { lastApp = app; out.apps++; }
       if (out.lost) out.afterRebuild++;
       out.frames++;
@@ -140,9 +144,9 @@ proto.render = function (this: any) {
     }
   } catch (e) { out.errors.push(e instanceof Error ? e.message : String(e)); }
   const rz = RESIZES.find((q) => q.at === renders);
-  if (rz && hostBox) { hostBox.style.width = rz.w + 'px'; hostBox.style.height = rz.h + 'px'; }
+  if (rz && hostBox) { progressStep = `resize ${rz.w}x${rz.h}`; hostBox.style.width = rz.w + 'px'; hostBox.style.height = rz.h + 'px'; }
   const sel = SELECTS.find((q) => q.at === renders);
-  if (sel) useStore.setState({ selectedId: sel.id } as never);
+  if (sel) { progressStep = `select ${sel.id}`; useStore.setState({ selectedId: sel.id } as never); }
   const cr = CREW.find((q) => q.at === renders);
   if (cr) {
     if (cr.leave) agentsNow = agentsNow.filter((a) => a.id !== cr.leave);
@@ -233,10 +237,12 @@ proto.render = function (this: any) {
     }
   }
   if (renders === LOSE_AT) {
+    progressStep = 'lose WebGL context';
     const gl = this.renderer?.gl as WebGL2RenderingContext | undefined;
     const ext = gl?.getExtension('WEBGL_lose_context');
     if (ext) { out.lost = true; ext.loseContext(); }
   }
+  if (out.frames === 1 || out.frames % 60 === 0) reportProgress();
   // The rebuild waits out glRecovery's delay (real time) while the synthetic clock runs on; the
   // run ends once the rebuilt floor has drawn a while too.
   if (renders >= LAST && (!out.lost || out.afterRebuild >= AFTER) && done) { done(); done = null; }
@@ -252,6 +258,7 @@ const agents = [
 
 window.__harnessRun = async () => {
   try {
+    progressPhase = 'pack'; progressStep = 'loading TES pack'; reportProgress();
     const loaded = await loadStationPack('tes');
     if (!loaded.pack) throw new Error(`tes did not load: ${JSON.stringify(loaded.diagnostics)}`);
     const box = document.createElement('div');
@@ -262,7 +269,9 @@ window.__harnessRun = async () => {
     const root = createRoot(box);
     const finished = new Promise<void>((r) => { done = r; });
     agentsNow = agents;
+    progressPhase = 'mount'; progressStep = 'mounting OfficeFloor'; reportProgress();
     await act(async () => { useStore.setState({ officeTheme: 'tes', agents, messageQueues: {} } as never); root.render(<OfficeFloor />); });
+    progressPhase = 'render'; progressStep = 'awaiting first render'; reportProgress();
     await finished;
     await act(async () => { root.unmount(); });
     window.harness.report({ ok: true, dpr: window.devicePixelRatio, renders, ...out });

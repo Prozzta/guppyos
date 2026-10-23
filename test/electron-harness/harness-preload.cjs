@@ -17,6 +17,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('harness', {
   report: (payload) => ipcRenderer.send('harness:result', payload),
+  progress: (payload) => ipcRenderer.send('harness:progress', payload),
   resize: (width, height) => ipcRenderer.invoke('harness:resize', { width, height }),
   axTree: () => ipcRenderer.invoke('harness:axtree'),
   // A trusted click at window coordinates, through Chromium's input pipeline.
