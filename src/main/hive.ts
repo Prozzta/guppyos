@@ -806,7 +806,15 @@ export class HiveManager {
       const root = this.root();
       try { return root ? new Set(this.archived(root).keys()) : new Set<string>(); } catch { return new Set<string>(); }
     },
-    appendLog: (row) => this.appendLog(row)
+    appendLog: (row) => this.appendLog(row),
+    // MAIN-SYNC: the guard just read a tasks.json whose cards changed. Its listeners (the board
+    // tick, board status, the ASSIGNEE_ARCHIVED auto-move) call tasks(), so drop the cached entry
+    // first: they see at least what the guard saw, never the value from before the change.
+    // opts.onChange runs before every onChange() listener.
+    onChange: () => {
+      const root = this.root();
+      if (root) this.authorityCache.delete(join(root, 'tasks.json'));
+    }
   });
   /** At most one queued scan; hints arriving in the same turn coalesce into it. */
   private routeQueued = false;

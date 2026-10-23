@@ -90,5 +90,9 @@ test('a hand-made twin is never rewritten by an unrelated write; patch and delet
 
 test('the voice path writes with source "voice" (J15)', () => {
   const { readSource } = require('./read-source.cjs');
-  assert.match(readSource('src/main/index.ts'), /hiveWriteTasks: \(tasks\) => hive\.writeTasks\(tasks, 'voice'\)/);
+  // MAIN-SYNC: voice writes go through the by-id mutators (they read fresh), not a whole list.
+  const index = readSource('src/main/index.ts');
+  assert.match(index, /hiveAddTask: \(task\) => hive\.addTask\(task, 'voice'\)/);
+  assert.match(index, /hivePatchTask: \(id, patch\) => hive\.patchTask\(id, patch, 'voice'\)/);
+  assert.match(index, /hiveDeleteTask: \(id\) => hive\.deleteTask\(id, 'voice'\)/);
 });
