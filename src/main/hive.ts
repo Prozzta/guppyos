@@ -3780,11 +3780,13 @@ export class HiveManager {
     const root = this.root();
     return root && existsSync(join(root, 'board.md')) ? readFileSync(join(root, 'board.md'), 'utf8') : '';
   }
-  tasks(): unknown {
+  /** The task ledger for readers: a shared, deep-frozen object (read-only; mutate through
+   *  tasksForMutation / writeTasks). `fresh` skips the revalidate window (a stat still decides). */
+  tasks(fresh = false): unknown {
     const root = this.root();
     if (!root) return { tasks: [] };
     try {
-      return this.readAuthoritativeJson(join(root, 'tasks.json'), () => ({ tasks: [] }));
+      return this.readAuthoritativeJsonCached(join(root, 'tasks.json'), () => ({ tasks: [] }), fresh);
     } catch (error) {
       if (error instanceof HiveAuthorityCorruptError) return { tasks: [] };
       throw error;
@@ -3794,7 +3796,7 @@ export class HiveManager {
   /** Force a fresh integrity scan for the small set of UI-readable authorities. */
   integrityIssues(): HiveIntegrityIssue[] {
     this.registry(true);
-    this.tasks();
+    this.tasks(true);
     // ZT-I3: a ledger error (duplicate id, unknown status) is a NOTICE: nothing is paused,
     // the file is not reverted, god fixes it by hand. Jim S1: the CACHED result; the banner
     // polls every 2 s and the guard already re-checks on watch, its poll and every API write.
@@ -5853,8 +5855,9 @@ export class HiveManager {
     }
   }
   /**
-   * MAIN-SYNC-LOG-LEDGER (registry): registry() was a disk read + parse on every call (~430
-   * calls/min on Guppy main under a heavy run on 1.1.99). It now serves one parsed, deep-frozen
+   * MAIN-SYNC-LOG-LEDGER (registry, tasks): registry() and tasks() were a disk read + parse on
+   * every call (~430 and ~40 calls/min on Guppy main under a heavy run on 1.1.99; tasks.json is
+   * the large one, ~13 MB/min). Each now serves one parsed, deep-frozen
    * value per file. Our own writes (atomicWriteJson) drop it, so the next read sees them. A write
    * by another process is picked up by fs.watch on the folder or, as the authority, by a stat
    * revalidate at most AUTHORITY_REVALIDATE_MS after the last check. A value read within
