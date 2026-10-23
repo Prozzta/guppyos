@@ -165,6 +165,27 @@ K.short = async ({ HJ: M, HK: H }) => {
   assert.deepEqual(cls(M, 'cd test && node tools/run-tests.cjs update-feed-owner', ctx), { heavy: false }, 'SHORT RUNNER PATH: A LIGHT PICK STAYS LIGHT');
 };
 
+/** Jim's NIT: a UNC runner path lists the share's repo (//srv/share), forward and backslash forms. */
+K.unc = async ({ HJ: M, HK: H }) => {
+  const base = H.HookServer.heavyScriptCtx(AWAY);
+  const shapes = [
+    ['Bash', 'node //srv/share/test/tools/run-tests.cjs het-electron', '//srv/share'],
+    ['Bash', "node '\\\\srv\\share\\test\\tools\\run-tests.cjs' het-electron", '//srv/share'],
+    ['PowerShell', 'node \\\\srv\\share\\test\\tools\\run-tests.cjs het-electron', '//srv/share'],
+    ['Bash', 'node //srv/share/proj/test/tools/run-tests.cjs het-electron', '//srv/share/proj'],
+    ['PowerShell', 'node \\\\srv\\share\\proj\\test\\tools\\run-tests.cjs het-electron', '//srv/share/proj'],
+  ];
+  for (const [tool, cmd, want] of shapes) {
+    const seen = [];
+    cls(M, cmd, { ...base, testFiles: (cd, repo) => { seen.push(repo); return null; } }, tool);
+    assert.deepEqual(seen, [want], `UNC RUNNER PATH: THE SHARE IS ITS REPO (${tool}: ${cmd}): ${JSON.stringify(seen)}`);
+  }
+  // Above the share's top there is no repo (the drive-top guard, for a share).
+  const seen = [];
+  cls(M, 'node //srv/share/tools/run-tests.cjs het-electron', { ...base, testFiles: (cd, repo) => { seen.push(repo); return null; } });
+  assert.deepEqual(seen, [undefined], `UNC RUNNER PATH: ABOVE THE SHARE IS NO REPO: ${JSON.stringify(seen)}`);
+};
+
 /** The lease judges a runner's argv the same way, in the process's own folder. */
 K.lease = async ({ HJ: M, HK: H }) => {
   const lock = new M.HeavyJobLock({ limit: () => 1, setTimer: () => ({}), clearTimer: () => {}, leasePollMs: 1, classifyCtx: (cwd) => H.HookServer.heavyScriptCtx(cwd) });
@@ -211,6 +232,7 @@ test('the lease judges a runner\'s picks the same way', (t) => K.lease({ HJ, HK 
 test('UHera F1: each pick has its own helper reads (ten picks, the tenth launches through a helper)', (t) => K.budget({ HJ, HK }, t));
 test('UHera F3: an oversized pick is provisional heavy, as under node --test', (t) => K.size({ HJ, HK }, t));
 test('UHera F2: a short runner path from inside test/ or test/tools/ (Bash and PowerShell)', (t) => K.short({ HJ, HK }, t));
+test('Jim NIT: a UNC runner path (//srv/share, forward and backslash) lists the share\'s repo', (t) => K.unc({ HJ, HK }, t));
 test('CENSUS: every test file that starts Electron is heavy alone; the read-only harness files stay light', (t) => K.census({ HJ, HK }, t));
 
 // ─── MUTANT CENSUS ───────────────────────────────────────────────────────────────────────────
@@ -247,10 +269,12 @@ const MUTANTS = [
     killer: 'size', dies: /A DEFINITE PICK BEATS AN UNREADABLE ONE \(npm test --\)/ },
   { file: HJF, name: 'the why does not name the pick', edits: [['const say = (c: HeavyClass): HeavyClass => ({ ...c, why: ', 'const say = (c: HeavyClass): HeavyClass => ({ ...c, w0: ']],
     killer: 'pick', dies: /THE WHY NAMES THE PICKED FILE/ },
-  { file: HJF, name: 'a short runner path has no root (UHera F2)', edits: [["  for (const s of [...parts.slice(0, -1), '..', '..']) {", "  if (parts.length < 4) return undefined;\n  for (const s of [...parts.slice(0, -1), '..', '..']) {"]],
+  { file: HJF, name: 'a short runner path has no root (UHera F2)', edits: [["  for (const s of [...parts.slice(unc ? 2 : 0, -1), '..', '..']) {", "  if (parts.length < 4) return undefined;\n  for (const s of [...parts.slice(unc ? 2 : 0, -1), '..', '..']) {"]],
     killer: 'short', dies: /SHORT RUNNER PATH: ITS REPO'S PICKS ARE READ \(Bash: cd test && node tools\/run-tests\.cjs activity-lag\)/ },
-  { file: HJF, name: 'the part-count rule (d4ecf6ad, UHera NIT)', edits: [["  for (const s of [...parts.slice(0, -1), '..', '..']) {", "  const q = parts.filter((p, i) => !(p === '.' && parts.slice(0, i).every((x) => x === '.')));\n  if (q.length < 4) return q.length === 1 ? '../..' : q.length === 2 ? (q[0] === '..' ? '../../..' : '..') : undefined;\n  for (const s of [...parts.slice(0, -1), '..', '..']) {"]],
+  { file: HJF, name: 'the part-count rule (d4ecf6ad, UHera NIT)', edits: [["  for (const s of [...parts.slice(unc ? 2 : 0, -1), '..', '..']) {", "  const q = parts.filter((p, i) => !(p === '.' && parts.slice(0, i).every((x) => x === '.')));\n  if (q.length < 4) return q.length === 1 ? '../..' : q.length === 2 ? (q[0] === '..' ? '../../..' : '..') : undefined;\n  for (const s of [...parts.slice(unc ? 2 : 0, -1), '..', '..']) {"]],
     killer: 'short', dies: /SHORT RUNNER PATH: ITS REPO'S PICKS ARE READ \(Bash: cd test\/heavy-lock && node \.\.\/tools\/run-tests\.cjs activity-lag\)/ },
+  { file: HJF, name: 'a UNC runner path loses its leading pair (Jim NIT)', edits: [["  const unc = parts[0] === '' && parts[1] === '';", '  const unc = false;']],
+    killer: 'unc', dies: /UNC RUNNER PATH: THE SHARE IS ITS REPO \(Bash: node \/\/srv\/share\/test\/tools\/run-tests\.cjs het-electron\)/ },
   { file: HJF, name: 'the 20-file suite rule is gone (every pick judged by file)', edits: [["  if (n >= SUITE_MANY_FILES) return { heavy: true, kind: 'suite'", "  if (false) return { heavy: true, kind: 'suite'"]],
     killer: 'boundary', dies: /BOUNDARY: 20 PICKS ARE THE SUITE/ },
   { file: HJF, name: 'a test file\'s tag is not read at hop 0', edits: [['    if (hop === 0 || test) {\n      if (LIVE_TAG.test(', '    if (test) {\n      if (LIVE_TAG.test(']],

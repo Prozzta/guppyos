@@ -562,10 +562,12 @@ function filteredSuite(what: string, needles: string[], ctx: ClassifyCtx, root?:
 function runnerRoot(script: string): string | undefined {
   const parts = script.replace(/\\/g, '/').split('/');
   const abs = parts[0] === '' || /^[A-Za-z]:$/.test(parts[0]);
-  const out: string[] = [];
-  for (const s of [...parts.slice(0, -1), '..', '..']) {
+  // Jim's NIT: a UNC path (//srv/share/...) keeps its leading pair; its top is the share.
+  const unc = parts[0] === '' && parts[1] === '';
+  const out: string[] = unc ? ['', ''] : [];
+  for (const s of [...parts.slice(unc ? 2 : 0, -1), '..', '..']) {
     if (s === '.' || (s === '' && out.length)) continue;
-    if (s === '..' && abs && out.length === 1) return undefined;   // above a drive's top
+    if (s === '..' && abs && out.length === (unc ? 4 : 1)) return undefined;   // above a drive's (or share's) top
     if (s === '..' && out.length && out[out.length - 1] !== '..') { out.pop(); continue; }
     out.push(s);
   }
