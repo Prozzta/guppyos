@@ -84,9 +84,13 @@ function describe(b) {
     const calls = b.held.calls.length ? `call ${b.held.calls.join(', ')}` : 'no open call';
     if (!b.held.dropped) {
       const pids = b.held.pids.length ? `, pids ${b.held.pids.join(', ')}` : '';
+      // Jim HHR MINOR 1 and 2: each refusal says what was not known.
+      if (b.held.arrived && b.held.arrived.length) return `heavy: refused: you hold the ${b.held.kind} slot and a heavy call of yours began during the check (call ${b.held.arrived.join(', ')}); it frees when your job ends, or run heavy release again once that call is over\n`;
       return b.held.checked === 'failed'
         ? `heavy: refused: you hold the ${b.held.kind} slot and the process check failed, so its job may still run (${calls}); it frees when the job ends, or run heavy release again\n`
-        : `heavy: refused: you hold the ${b.held.kind} slot and its job still runs (${calls}${pids}); stop the job first, or it frees when the job ends\n`;
+        : b.held.checked === 'unseen'
+          ? `heavy: refused: you hold the ${b.held.kind} slot and the process listing did not show your terminal, so its job may still run (${calls}); it frees when the job ends, or run heavy release again\n`
+          : `heavy: refused: you hold the ${b.held.kind} slot and its job still runs (${calls}${pids}); stop the job first, or it frees when the job ends\n`;
     }
     const idle = b.held.checked === 'ok' ? ': no process of its job runs' : '';
     return `heavy: released your held ${b.held.kind} slot (${calls} dropped${idle}); it is now ${b.next ? `reserved for ${b.next}` : 'free (no one is queued)'}${to}\n`;

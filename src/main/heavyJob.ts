@@ -2220,8 +2220,11 @@ export type HeavyLeaseAnswer =
 export type HeavyUnreserveAnswer = { state: 'unreserved'; reserved: boolean; queued: boolean; next: string | null; to?: 'not-queued'; waiting?: true; held?: HeavyHeldRelease };
 /** HEAVY-HANDOFF-RACE (e): `heavy release` from a HOLDER. `dropped`: its held call(s) were dropped and the
  *  slot passed on; else refused, with the open calls and the pids of its job still running (`checked`:
- *  'ok' a listing was read, 'failed' the listing failed (unknown, kept), 'none' no watcher on this build). */
-export type HeavyHeldRelease = { kind: HeavyKind; calls: string[]; pids: number[]; dropped: boolean; checked: 'ok' | 'failed' | 'none' };
+ *  'ok' a listing was read, 'failed' the listing failed (unknown, kept), 'unseen' the listing lacked the
+ *  holder's own terminal (Jim HHR MINOR 1: unknown, kept, as the watcher counts it), 'none' no watcher on
+ *  this build). `arrived` (Jim HHR MINOR 2): heavy calls of the holder that began while the listing was
+ *  read, so it says nothing about them: kept. */
+export type HeavyHeldRelease = { kind: HeavyKind; calls: string[]; pids: number[]; dropped: boolean; checked: 'ok' | 'failed' | 'unseen' | 'none'; arrived?: string[] };
 /** How long one lease request may wait (a long poll; the preload asks again). */
 export const HEAVY_LEASE_POLL_MS = 25_000;
 /** A test process is the call's OWN node when its parent is the call's shell (or a pass-through
@@ -2716,24 +2719,32 @@ export class HeavyJobLock {
    *  later, when the watcher saw the job gone). A holder's release DROPS its held call(s) (a bench whose
    *  PostToolUse never came, a background job) and grants the next agent at once, unless a process of its
    *  job still runs: then it is refused truthfully, naming the open calls and the pids. A failed listing
-   *  is unknown, not idle: refused too (fail closed, like callDone). No watcher on this build: dropped. */
+   *  is unknown, not idle: refused too (fail closed, like callDone). No watcher on this build: dropped.
+   *  Jim HHR MINOR 1 (P5, P7): as conservative as the watcher: a listing without the holder's own PTY root
+   *  is unknown too ('unseen', kept), and a job Guppy itself holds (HeavyJobs) that has not exited runs,
+   *  whatever the listing shows. MINOR 2 (P6): a heavy call of the holder that began while the listing
+   *  was read (two tool calls in one response) is not covered by it: the hold is kept and the call named. */
   private async releaseHeld(agentId: string, to?: string): Promise<HeavyUnreserveAnswer> {
     const was = this.holders.get(agentId)!;
     const calls = [...was.calls];
-    let checked: 'ok' | 'failed' | 'none' = 'none';
+    let checked: HeavyHeldRelease['checked'] = 'none';
     let running = false;
     if (this.d.probe && this.d.roots) {
       const probed = await this.heavyAgents();
       if (!probed) checked = 'failed';
+      else if (!probed.seen.has(agentId)) checked = 'unseen';
       else { checked = 'ok'; running = probed.busy.has(agentId); }
     }
     const cur = this.holders.get(agentId);
     // Freed during the listing (its job ended, or the watcher saw it gone): nothing is held any more.
     if (!cur) return { state: 'unreserved', reserved: false, queued: false, next: null, held: { kind: was.kind, calls, pids: [], dropped: true, checked } };
+    if ([...cur.jobs.values()].some((js) => [...js.values()].some((exited) => !exited))) running = true;
+    const arrived = [...cur.calls].filter((c) => !calls.includes(c));
     const pids = [...cur.attributed.keys()].sort((a, b) => a - b);
-    if (running || checked === 'failed') {
-      this.log({ kind: 'heavy-lock', action: 'release-refused', agentId, heavyKind: cur.kind, calls, pids, checked });
-      return { state: 'unreserved', reserved: false, queued: false, next: null, held: { kind: cur.kind, calls, pids, dropped: false, checked } };
+    if (running || checked === 'failed' || checked === 'unseen' || arrived.length) {
+      const open = [...cur.calls];
+      this.log({ kind: 'heavy-lock', action: 'release-refused', agentId, heavyKind: cur.kind, calls: open, pids, checked, ...(arrived.length ? { arrived } : {}) });
+      return { state: 'unreserved', reserved: false, queued: false, next: null, held: { kind: cur.kind, calls: open, pids, dropped: false, checked, ...(arrived.length ? { arrived } : {}) } };
     }
     let missed = false;
     if (to !== undefined && to !== agentId) {
