@@ -453,6 +453,22 @@ function stamp(): string {
   return new Date().toISOString().replace(/[:.]/g, '-');
 }
 
+/** MAIN-SYNC-LOG-LEDGER: the stat of a cached authority file (null when it cannot be stat'ed). */
+function authorityStat(p: string): ReturnType<typeof statSync> | null {
+  try { return statSync(p); } catch { return null; }
+}
+/** An atomic replace changes ino and ctime; an in-place edit changes mtime/size. */
+function authorityStatKey(st: NonNullable<ReturnType<typeof statSync>>): string {
+  return `${st.mtimeMs}:${st.ctimeMs}:${st.size}:${st.ino}`;
+}
+function authorityDeepFreeze<T>(value: T): T {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const v of Object.values(value as Record<string, unknown>)) authorityDeepFreeze(v);
+  }
+  return value;
+}
+
 function shortRand(): string {
   return randomBytes(3).toString('hex');
 }
@@ -745,6 +761,7 @@ export class HiveManager {
     // ZT-I1-MAIL: the coalesced ledger writes land before the log closes (quit, home change).
     try { this.mail.dispose(); } catch (e) { try { this.appendLog({ kind: 'mail-ledger-write-failed', error: String(e) }); } catch { /* noop */ } }
     this.closeAppendFiles();
+    this.closeAuthorityWatchers();
   }
   setHookBroker(broker: HookBroker | null): void {
     this.hookBroker = broker;
@@ -3750,11 +3767,13 @@ export class HiveManager {
 
   // — read helpers (for IPC / UI) —
 
-  registry(): Registry {
+  /** The roster for readers: a shared, deep-frozen object (read-only; mutate through
+   *  registryForMutation). `fresh` skips the revalidate window (a stat still decides). */
+  registry(fresh = false): Registry {
     const root = this.root();
     if (!root) return this.emptyRegistry();
     try {
-      return this.readAuthoritativeJson(join(root, 'registry.json'), () => this.emptyRegistry());
+      return this.readAuthoritativeJsonCached(join(root, 'registry.json'), () => this.emptyRegistry(), fresh);
     } catch (error) {
       if (error instanceof HiveAuthorityCorruptError) return this.emptyRegistry();
       throw error;
@@ -3777,7 +3796,7 @@ export class HiveManager {
 
   /** Force a fresh integrity scan for the small set of UI-readable authorities. */
   integrityIssues(): HiveIntegrityIssue[] {
-    this.registry();
+    this.registry(true);
     this.tasks();
     // ZT-I3: a ledger error (duplicate id, unknown status) is a NOTICE: nothing is paused,
     // the file is not reverted, god fixes it by hand. Jim S1: the CACHED result; the banner
@@ -5836,11 +5855,60 @@ export class HiveManager {
       throw new HiveAuthorityCorruptError(issue);
     }
   }
+  /**
+   * MAIN-SYNC-LOG-LEDGER (registry): registry() was a disk read + parse on every call (~430
+   * calls/min on Guppy main under a heavy run on 1.1.99). It now serves one parsed, deep-frozen
+   * value per file. Our own writes (atomicWriteJson) drop it, so the next read sees them. A write
+   * by another process is picked up by fs.watch on the folder or, as the authority, by a stat
+   * revalidate at most AUTHORITY_REVALIDATE_MS after the last check. Missing, corrupt and
+   * unreadable files are never cached: readAuthoritativeJson handles them as before.
+   */
+  static readonly AUTHORITY_REVALIDATE_MS = 1_000;
+  private readonly authorityCache = new Map<string, { key: string; value: unknown; checkedAt: number }>();
+  private readonly authorityWatchers = new Map<string, FSWatcher>();
+  private authorityNow: () => number = () => Date.now();
+  /** Tests: drop every cached authority and (optionally) drive the revalidate clock. */
+  __resetAuthorityCacheForTests(now?: () => number): void {
+    this.authorityCache.clear();
+    if (now) this.authorityNow = now;
+  }
+  private readAuthoritativeJsonCached<T>(p: string, onMissing: () => T, fresh = false): T {
+    const now = this.authorityNow();
+    const c = this.authorityCache.get(p);
+    if (c && !fresh && now - c.checkedAt >= 0 && now - c.checkedAt < HiveManager.AUTHORITY_REVALIDATE_MS) return c.value as T;
+    const st = authorityStat(p);
+    if (st && c && c.key === authorityStatKey(st)) { c.checkedAt = now; return c.value as T; }
+    this.authorityCache.delete(p);
+    // The key is taken BEFORE the read: a change between the two re-reads at the next revalidate.
+    const value = this.readAuthoritativeJson<T>(p, onMissing);
+    if (!st) return value;
+    const frozen = authorityDeepFreeze(value);
+    this.authorityCache.set(p, { key: authorityStatKey(st), value: frozen, checkedAt: now });
+    this.watchAuthority(p);
+    return frozen;
+  }
+  private watchAuthority(p: string): void {
+    const dir = dirname(p);
+    if (this.authorityWatchers.has(dir)) return;
+    try {
+      const w = watch(dir, { persistent: false }, (_event, name) => {
+        const full = name ? join(dir, String(name)) : null;
+        for (const [file, entry] of this.authorityCache) if (dirname(file) === dir && (!full || full === file)) entry.checkedAt = -Infinity;
+      });
+      w.on('error', () => { w.close(); this.authorityWatchers.delete(dir); });
+      this.authorityWatchers.set(dir, w);
+    } catch { /* the stat revalidate is the authority */ }
+  }
+  private closeAuthorityWatchers(): void {
+    for (const w of this.authorityWatchers.values()) { try { w.close(); } catch { /* noop */ } }
+    this.authorityWatchers.clear();
+  }
   private writeJson(p: string, data: unknown): void {
     this.atomicWriteJson(p, data);
   }
   private atomicWriteJson(p: string, data: unknown): void {
-    atomicWriteJsonFile(p, data);
+    // Dropped on success AND on failure: the file may or may not have changed.
+    try { atomicWriteJsonFile(p, data); } finally { this.authorityCache.delete(p); }
   }
 
 }

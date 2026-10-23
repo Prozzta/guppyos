@@ -291,7 +291,7 @@ async function floor(t, { providers = {}, steer = null, emit, claimWorkingSet } 
   await hive.ensureAgent({ id: 'god-1', name: 'Michael', provider: 'claude', cwd: home, isGod: true });
   for (const id of Object.keys(providers)) await hive.ensureAgent({ id, name: id, provider: 'claude', cwd: home });
   const reg = hive.registry.bind(hive);
-  hive.registry = () => { const r = reg(); for (const [id, p] of Object.entries(providers)) r.agents[id] = { ...r.agents[id], provider: p }; return r; };
+  hive.registry = () => { const r0 = reg(); const r = { ...r0, agents: { ...r0.agents } }; /* registry() is shared and frozen: edit a copy */ for (const [id, p] of Object.entries(providers)) r.agents[id] = { ...r.agents[id], provider: p }; return r; };
   const hookEvents = [];
   const control = { takeSteer: () => steer, shouldHalt: () => false, toolDecision: () => ({ deny: false }) };
   const s = new HookServer(hive, () => null, () => ({ notifications: false }), control, undefined, undefined, (...a) => hookEvents.push(a));

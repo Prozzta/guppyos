@@ -408,7 +408,7 @@ async function floor(t, { provider = 'claude', stop = { claude: true, codex: tru
   await hive.ensureAgent({ id: 'god-1', name: 'Michael', provider: 'claude', cwd: home, isGod: true });
   await hive.ensureAgent({ id: 'a1', name: 'a1', provider: 'claude', cwd: home });
   const reg = hive.registry.bind(hive);
-  hive.registry = () => { const r = reg(); r.agents.a1 = { ...r.agents.a1, provider }; return r; };
+  hive.registry = () => { const r0 = reg(); const r = { ...r0, agents: { ...r0.agents } }; /* registry() is shared and frozen: edit a copy */ r.agents.a1 = { ...r.agents.a1, provider }; return r; };
   const coordinator = new WorkerWakeWatchdog();
   const pending = (a) => coordinatorPendingIds(a, {
     mode: (x) => server.mailChannel(x).mode, pending: (x) => hive.mail.pending(x), skipped: (x) => server.mailSkippedIds(x), files: (x) => hive.inbox(x).map((m) => m.id)

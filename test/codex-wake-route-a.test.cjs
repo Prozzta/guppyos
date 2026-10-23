@@ -43,7 +43,7 @@ async function floor(t) {
   await hive.ensureAgent({ id: 'codex-1', name: 'Dwight', provider: 'claude', cwd: home });
   await hive.ensureAgent({ id: 'claude-1', name: 'Jim', provider: 'claude', cwd: home });
   const reg = hive.registry.bind(hive);
-  hive.registry = () => { const r = reg(); r.agents['codex-1'] = { ...r.agents['codex-1'], provider: 'codex' }; return r; };
+  hive.registry = () => { const r0 = reg(); const r = { ...r0, agents: { ...r0.agents } }; /* registry() is shared and frozen: edit a copy */ r.agents['codex-1'] = { ...r.agents['codex-1'], provider: 'codex' }; return r; };
   const server = new HookServer(hive, () => null, () => ({ notifications: false }));
   return { hive, server };
 }
