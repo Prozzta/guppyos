@@ -538,7 +538,8 @@ export function buildMailBlock(input: MailBlockInput): MailBlock {
 /**
  * Ids whose marker appears in a DELIVERY record of `text` (JSONL):
  *  - Claude: a record whose `attachment.type` is `hook_additional_context`;
- *  - Codex: a `response_item` whose payload is a developer-role message.
+ *  - Codex: a `response_item` whose payload is a developer-role message, or a user-role message
+ *    that is one whole Stop hook prompt (a stop-continue reason).
  * Only lines holding a marker are parsed; a partial last line is ignored (retried next scan).
  */
 export function mailEvidenceIn(text: string, ids: Iterable<string>, kind: MailEvidenceKind): Set<string> {
@@ -568,7 +569,20 @@ function isDeliveryRecord(rec: unknown, kind: MailEvidenceKind): boolean {
     return !!a && typeof a === 'object' && a.type === 'hook_additional_context';
   }
   const p = r.payload as Record<string, unknown> | undefined;
-  return r.type === 'response_item' && !!p && typeof p === 'object' && p.role === 'developer';
+  if (r.type !== 'response_item' || !p || typeof p !== 'object') return false;
+  if (p.role === 'developer') return true;
+  // GTC stop-continue: Codex keeps a Stop block's reason as a user message wrapped whole in
+  // <hook_prompt hook_run_id="stop:...">. Without it the stop-surfaced id was back-edged
+  // unconfirmed and typed again (Dwight 10-23 08:39Z, a duplicate turn).
+  return p.role === 'user' && Array.isArray(p.content) && p.content.length === 1 && isStopHookPrompt(p.content[0]);
+}
+
+const CODEX_STOP_HOOK_PROMPT_OPEN = '<hook_prompt hook_run_id="stop:';
+const CODEX_HOOK_PROMPT_CLOSE = '</hook_prompt>';
+
+function isStopHookPrompt(item: unknown): boolean {
+  const text = item && typeof item === 'object' ? (item as Record<string, unknown>).text : undefined;
+  return typeof text === 'string' && text.startsWith(CODEX_STOP_HOOK_PROMPT_OPEN) && text.endsWith(CODEX_HOOK_PROMPT_CLOSE);
 }
 
 /** Read up to `maxBytes` of `file` from `from` (bounded; null on any error). */
