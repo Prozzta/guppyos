@@ -117,7 +117,7 @@ test('creation identity is fallback-only; persisted name and appearance win afte
   assert.deepEqual(resolveGodIdentity(undefined, undefined), { name: 'Michael', appearance: undefined });
   assert.match(main, /Choose an empty folder for a new project/);
   // Guppy: main applies the map transaction to the config it is about to write.
-  assert.match(main, /applyProjectHomeChange\(readConfig\(\), \{/);
+  assert.match(main, /applyProjectHomeChange\(readConfigForWrite\(\), \{/);
   assert.match(hive, /resolveGodIdentity\(reg\?\.agents\?\.\[GOD_ID\], creationSeed\)/);
   assert.match(hive, /appearance: godAppearance/);
   assert.doesNotMatch(hive, /projectTheme\(resolveProjectTheme/);

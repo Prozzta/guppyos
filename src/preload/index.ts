@@ -905,6 +905,11 @@ const api = {
   /** Set or clear one per-agent token ceiling against main's latest config. */
   setAgentTokenCap: (agentId: string, tokenCap?: number): Promise<HarnessConfig> =>
     ipcRenderer.invoke('config:setAgentTokenCap', agentId, tokenCap),
+  /** RENDERER-CONFIG-RMW: one project quick-pick in (front by default) or out, merged in main. */
+  registerRepo: (repo: string, front = true): Promise<HarnessConfig> =>
+    ipcRenderer.invoke('config:registerRepo', repo, front),
+  unregisterRepo: (repo: string): Promise<HarnessConfig> =>
+    ipcRenderer.invoke('config:unregisterRepo', repo),
   /** Set this project's theme, merged against main's latest config. */
   setProjectTheme: (theme: ProjectThemeId): Promise<HarnessConfig> =>
     ipcRenderer.invoke('config:setProjectTheme', theme),
@@ -1487,6 +1492,9 @@ const api = {
   listMissions: (): Promise<ScheduledMission[]> => ipcRenderer.invoke('missions:list'),
   saveMissions: (missions: ScheduledMission[]): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke('missions:save', missions),
+  /** RENDERER-CONFIG-RMW: one mission's fields, merged in main against the list on disk. */
+  patchMission: (id: string, fields: Partial<ScheduledMission>): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('missions:patch', id, fields),
   /** TE0: dispatch this mission NOW, past its delta gate. */
   runMissionNow: (missionId: string): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('missions:runNow', missionId),

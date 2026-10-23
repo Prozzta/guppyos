@@ -77,8 +77,13 @@ export function SchedulesSection({ onSummary }: { onSummary?: (s: string) => voi
     setMissions(next);
     void window.cth.saveMissions(next).catch(() => { /* noop */ });
   };
-  const patch = (id: string, fields: Partial<ScheduledMission>) =>
-    persist(missions.map((m) => (m.id === id ? { ...m, ...fields } : m)));
+  // RENDERER-CONFIG-RMW: a row edit sends only its fields; main merges them into the list on disk
+  // (a Settings toggle or a scheduler stamp made since this list loaded is kept) and announces
+  // missions:updated, which reloads this list.
+  const patch = (id: string, fields: Partial<ScheduledMission>) => {
+    setMissions(missions.map((m) => (m.id === id ? { ...m, ...fields } : m)));
+    void window.cth.patchMission(id, fields).catch(() => { /* noop */ });
+  };
   // The backend merge in missions:save keeps only what the renderer sends back,
   // so deleting is "save the list without it".
   const remove = (id: string) => persist(missions.filter((m) => m.id !== id));

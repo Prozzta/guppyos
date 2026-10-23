@@ -1,5 +1,5 @@
 import { app } from 'electron';
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, watch, writeFileSync, type Stats } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
 import { DEV_ISOLATION, devDataRoot, devHarnessHome } from './devIsolation';
 import { basename, dirname, join } from 'node:path';
@@ -19,6 +19,7 @@ import { parseCapacityDisplayThreshold } from '../shared/capacityThreshold';
 import { parseGraphicsMode, type GraphicsMode } from '../shared/graphicsMode';
 import { CODEX_TOOL_OUTPUT_LIMIT_DEFAULT, normalizeCodexToolOutputLimit } from '../shared/codexToolOutputLimit';
 import { expandTilde, normalizeHiveHome } from './fs';
+import { provenStatKey, statKey } from './statCacheKey';
 import { isProjectThemeId, isProjectThemeSeed, isStoredProjectThemeId, projectThemeHomeKey, resolveProjectTheme, type ProjectThemeId, type ProjectThemeSeed } from '../shared/projectTheme';
 import type { IntegrationRecord } from '../shared/integrations';
 import {
@@ -658,16 +659,87 @@ function renameWithRetry(tmp: string, target: string): void {
 
 function writeConfigAtomically(p: string, data: unknown): void {
   const tmp = `${p}.tmp-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const text = JSON.stringify(data, null, 2);
   try {
-    writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
+    writeFileSync(tmp, text, 'utf8');
     renameWithRetry(tmp, p);
   } catch (error) {
+    // The file may or may not have changed: the next read goes to disk.
+    configCache = null;
     try { rmSync(tmp, { force: true }); } catch { /* preserve the publish error */ }
     throw error;
   }
+  // Our own write drops the cache: the next read stats and reads the disk once (one read per write).
+  // Never a write-through entry: our text cannot be paired with a stat key, because a stat after
+  // the rename could carry an outside write's key and serve our text forever (Jim P1).
+  configWriteGen++;
+  configCache = null;
+}
+
+/**
+ * MAIN-SYNC-LOG-LEDGER (config, the #1 main-sync cost): readConfig was a disk read, a parse and
+ * the migrations on every call, ~2,900 calls/min on main under a heavy run (112 call sites in
+ * index.ts, many of them getters called per tick). It now serves one parsed, DEEP-FROZEN config
+ * from memory:
+ *   - writeConfigAtomically (every in-process write) drops the cache, so the next read stats and
+ *     reads the disk once; this module's read-modify-writes read fresh (no window);
+ *   - an external edit is picked up by fs.watch on the folder (it marks the cache dirty), and the
+ *     authority is a stat revalidate (mtime, ctime, size, ino) at most CONFIG_REVALIDATE_MS after
+ *     the last check, because fs.watch on Windows misses events; a value read within
+ *     STAT_RACY_MS of the file's last change is cached unproven (key null), so that revalidate
+ *     reads the disk once (statCacheKey.ts: same-size writes inside one tick share a key);
+ *   - the missing, corrupt and unreadable paths are not cached: they behave exactly as before.
+ * The value is frozen, never cloned per call (that would bring the cost back): a caller that
+ * needs a changed config spreads it into a new object (writeConfig's `{ ...current, ...patch }`).
+ */
+export const CONFIG_REVALIDATE_MS = 1_000;
+type ConfigCache = { path: string; key: string | null; value: HarnessConfig; checkedAt: number };
+let configCache: ConfigCache | null = null;
+/** Bumped by every write, so a read whose migration wrote mid-build does not cache a stale value. */
+let configWriteGen = 0;
+let configNow = (): number => Date.now();
+/** The wall clock the racy rule compares with file times (configNow is only the window's clock). */
+let configWall = (): number => Date.now();
+let configWatcher: { path: string; close: () => void } | null = null;
+
+function statOrNull(p: string): Stats | null {
+  // As existsSync: any error (ENOENT, EACCES, ...) is "no file".
+  try { return statSync(p); } catch { return null; }
+}
+
+function deepFreeze<T>(v: T): T {
+  if (v && typeof v === 'object' && !Object.isFrozen(v)) {
+    Object.freeze(v);
+    for (const k of Object.keys(v as object)) deepFreeze((v as Record<string, unknown>)[k]);
+  }
+  return v;
+}
+
+/** fs.watch on the config folder marks the cache dirty (the next read stats). Best-effort: the
+ *  stat revalidate is the authority, so a watcher that fails to start or dies changes nothing. */
+function watchConfig(p: string): void {
+  if (configWatcher?.path === p) return;
+  configWatcher?.close();
+  configWatcher = null;
+  try {
+    const w = watch(dirname(p), { persistent: false }, (_event, name) => {
+      if (!name || String(name) === basename(p)) { if (configCache?.path === p) configCache.checkedAt = -Infinity; }
+    });
+    w.on('error', () => { w.close(); if (configWatcher?.path === p) configWatcher = null; });
+    configWatcher = { path: p, close: () => w.close() };
+  } catch { /* no watcher: the stat revalidate still bounds the staleness */ }
+}
+
+/** Tests: drop the cache (the next read goes to disk), and/or drive the revalidate clock and the
+ *  racy rule's wall clock. */
+export function __resetConfigCacheForTests(now?: () => number, wall?: () => number): void {
+  configCache = null;
+  if (now) configNow = now;
+  if (wall) configWall = wall;
 }
 
 function noteCorruptConfig(p: string, raw: string, error: unknown): void {
+  configCache = null;
   const fingerprint = createHash('sha256').update(raw).digest('hex');
   let quarantine: string | null = configIntegrity?.quarantine ?? null;
   if (configCorruptFingerprint !== fingerprint) {
@@ -691,7 +763,7 @@ function noteCorruptConfig(p: string, raw: string, error: unknown): void {
 
 /** Reads enough to surface a persisted config problem to the renderer banner. */
 export function configIntegrityIssue(): ConfigIntegrityIssue | null {
-  readConfig();
+  readConfigCached(true);
   return configIntegrity;
 }
 
@@ -867,26 +939,54 @@ export function pruneRetiredConfigKeys(): string[] {
 }
 
 export function readConfig(): HarnessConfig {
+  return readConfigCached(false);
+}
+
+/** The base for a read-modify-write outside this module (a list edited and written back with
+ *  writeConfig): it skips the window and the stat decides, so the patch never builds on a value
+ *  up to CONFIG_REVALIDATE_MS old and never drops a change another process made meanwhile.
+ *  Plain reads keep the cached read. */
+export function readConfigForWrite(): HarnessConfig {
+  return readConfigCached(true);
+}
+
+/** `fresh` (this module's read-modify-writes and integrity checks): skip the window, so a merge
+ *  never builds on a value another process has replaced; the stat decides. */
+function readConfigCached(fresh: boolean): HarnessConfig {
   const p = configPath();
+  const now = configNow();
+  const c = configCache;
+  if (c && !fresh && c.path === p && now - c.checkedAt >= 0 && now - c.checkedAt < CONFIG_REVALIDATE_MS) return c.value;
+  const st = statOrNull(p);
   // No file yet = a first run with nothing to migrate; the defaults ARE the
   // post-migration shape. Deliberately does not persist — a bare read must not
   // conjure a config.json before onboarding has written one. A fresh install has
   // nothing to clear, so its first write records the default-model flag as done
   // (otherwise a default the user picks before that write would be cleared).
-  if (!existsSync(p)) {
+  if (!st) {
+    configCache = null;
     configIntegrity = null;
     configCorruptFingerprint = null;
     return configDefaults();
   }
+  // The key is taken BEFORE the read: a change between the two re-reads at the next revalidate.
+  const key = statKey(st);
+  if (c && c.path === p && c.key === key) {
+    c.checkedAt = now;
+    return c.value;
+  }
+  const gen = configWriteGen;
   let raw: string | undefined;
+  let built: HarnessConfig;
   try {
     raw = readFileSync(p, 'utf8');
     const parsed = JSON.parse(raw);
     for (const k of RETIRED_CONFIG_KEYS) delete parsed[k];
     configIntegrity = null;
     configCorruptFingerprint = null;
-    return normalizeStoredHomes(migrateDefaultModelCliV1(migrateTriggersV1(withTriggerDefaults({ ...DEFAULTS, ...parsed }))));
+    built = normalizeStoredHomes(migrateDefaultModelCliV1(migrateTriggersV1(withTriggerDefaults({ ...DEFAULTS, ...parsed }))));
   } catch (error) {
+    configCache = null;
     if (typeof raw === 'string') {
       noteCorruptConfig(p, raw, error);
       return configDefaults();
@@ -894,6 +994,13 @@ export function readConfig(): HarnessConfig {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return configDefaults();
     throw new Error(`config.json could not be read: ${error instanceof Error ? error.message : String(error)}`);
   }
+  // A clone, so freezing never reaches the DEFAULTS objects a shallow merge shares.
+  const value = deepFreeze(structuredClone(built));
+  // A migration that persisted mid-build changed the file after the stat: leave it uncached.
+  // Racy-git rule: a change within STAT_RACY_MS of now may share this key with a later write.
+  if (gen === configWriteGen) configCache = { path: p, key: provenStatKey(st, configWall()), value, checkedAt: now };
+  watchConfig(p);
+  return value;
 }
 
 /** (#140, the upgrade path) A config.json persisted BEFORE `writeConfig`
@@ -961,7 +1068,7 @@ export function resolveProjectThemeForHome(config: HarnessConfig, harnessHome?: 
 export function setProjectThemeForHome(harnessHome: string, theme: unknown): HarnessConfig {
   if (!isProjectThemeId(theme)) throw new Error('invalid project theme');
   const home = projectThemeHomeKey(expandTilde(harnessHome));
-  const current = readConfig();
+  const current = readConfigCached(true);
   return writeConfig({ officeThemeByHive: { ...(current.officeThemeByHive ?? {}), [home]: theme } });
 }
 
@@ -977,9 +1084,30 @@ function persistConfig(next: HarnessConfig): HarnessConfig {
   return next;
 }
 
+/** RENDERER-CONFIG-RMW: the map keys a renderer edits one entry at a time. writeConfig merges
+ *  them one level deep on the fresh read, so a caller holding a stale snapshot sends only the
+ *  entry it changed and never writes the other entries back (the second MCP toggle of a Settings
+ *  visit used to revert the first; a knowledge-graph toggle used to drop rootPath). An entry sent
+ *  as undefined is removed. A list key is still replaced whole: see registerRepo/patchMission. */
+export const CONFIG_MERGE_KEYS = ['mcpDefaults', 'providerBaseUrls', 'providerDefaultModels', 'knowledgeGraph', 'circuitBreaker'] as const;
+
+function mergeMapKeys(current: HarnessConfig, patch: Partial<HarnessConfig>, next: HarnessConfig): void {
+  for (const k of CONFIG_MERGE_KEYS) {
+    const p = patch[k] as Record<string, unknown> | undefined;
+    if (!p || typeof p !== 'object' || Array.isArray(p)) continue;
+    const merged: Record<string, unknown> = { ...((current[k] as Record<string, unknown> | undefined) ?? {}) };
+    for (const [e, v] of Object.entries(p)) {
+      if (v === undefined) delete merged[e];
+      else merged[e] = v;
+    }
+    (next as unknown as Record<string, unknown>)[k] = merged;
+  }
+}
+
 export function writeConfig(patch: Partial<HarnessConfig>): HarnessConfig {
-  const current = readConfig();
+  const current = readConfigCached(true);
   const next: HarnessConfig = { ...current, ...patch };
+  mergeMapKeys(current, patch, next);
   // CODEX-BLOAT-165 fix 2: 'off' or a number, clamped to 1000-10000. Anything else is refused
   // and changes nothing (the renderer reverts its control on the rejection).
   if (patch && Object.prototype.hasOwnProperty.call(patch, 'codexToolOutputTokenLimit')) {
@@ -1050,7 +1178,7 @@ export function setAgentTokenCap(agentId: unknown, tokenCap: unknown): HarnessCo
     )
   ) throw new Error('invalid agent token cap');
 
-  const current = readConfig();
+  const current = readConfigCached(true);
   const agentTokenCaps = { ...(current.agentTokenCaps ?? {}) };
   if (tokenCap === undefined) delete agentTokenCaps[agentId];
   else agentTokenCaps[agentId] = tokenCap;
@@ -1058,6 +1186,46 @@ export function setAgentTokenCap(agentId: unknown, tokenCap: unknown): HarnessCo
     ...current,
     agentTokenCaps
   });
+}
+
+function repoKey(repo: unknown): string {
+  if (typeof repo !== 'string' || !repo.trim()) throw new Error('invalid repo path');
+  return expandTilde(repo.trim());
+}
+
+/** RENDERER-CONFIG-RMW: one project quick-pick in (deduped to the front, or the back) against
+ *  the latest list on disk. The Add Agent modal used to send its whole mount-time list back,
+ *  which erased any repo registered elsewhere meanwhile. writeConfig's expandTilde + dedupe
+ *  still applies to the list it is handed. */
+export function registerRepo(repo: unknown, front: boolean = true): HarnessConfig {
+  const p = repoKey(repo);
+  const rest = (readConfigForWrite().registeredRepos ?? []).filter((r) => expandTilde(r) !== p);
+  return writeConfig({ registeredRepos: front ? [p, ...rest] : [...rest, p] });
+}
+
+/** One project quick-pick out, against the latest list on disk; the folder itself is untouched.
+ *  Entries are compared normalised, so a hand-written `C:/x` or `~/x` entry matches its picked form. */
+export function unregisterRepo(repo: unknown): HarnessConfig {
+  const p = repoKey(repo);
+  return writeConfig({ registeredRepos: (readConfigForWrite().registeredRepos ?? []).filter((r) => expandTilde(r) !== p) });
+}
+
+/** The scheduler's own mission fields (and the key): a renderer patch never sets them, exactly as
+ *  missions:save keeps them from the persisted record. */
+const MISSION_SCHEDULER_FIELDS = ['id', 'lastFiredAt', 'lastDeltaFingerprint', 'lastDispatchAt'] as const;
+
+/** RENDERER-CONFIG-RMW: one mission's fields against the latest list on disk. The Settings
+ *  auto-compact toggle and the Schedules panel used to each send a whole list built from their
+ *  own copy, so one surface's `enabled` flip was undone by the other's next save, and a scheduler
+ *  stamp landing between the renderer's read and its write was lost. Throws for an unknown id,
+ *  so the caller's control reverts instead of a silent no-op. */
+export function patchMission(id: unknown, fields: unknown): HarnessConfig {
+  if (typeof id !== 'string' || !id || !fields || typeof fields !== 'object' || Array.isArray(fields)) throw new Error('invalid mission patch');
+  const own = { ...(fields as Record<string, unknown>) };
+  for (const k of MISSION_SCHEDULER_FIELDS) delete own[k];
+  const current = readConfigForWrite().missions ?? [];
+  if (!current.some((m) => m.id === id)) throw new Error(`unknown mission ${id}`);
+  return writeConfig({ missions: current.map((m) => (m.id === id ? { ...m, ...own } as ScheduledMission : m)) });
 }
 
 /** Set one agent's Monitor line (Budget / 5H / Weekly) against the latest config on disk.
@@ -1071,7 +1239,7 @@ export function setAgentUsageDisplay(agentId: unknown, display: unknown): Harnes
   if (typeof agentId !== 'string' || agentId.trim().length === 0 || !isAgentUsageDisplay(display)) {
     throw new Error('invalid agent usage display');
   }
-  const current = readConfig();
+  const current = readConfigCached(true);
   const agentUsageDisplay = { ...(current.agentUsageDisplay ?? {}) };
   if (display === 'budget') delete agentUsageDisplay[agentId];
   else agentUsageDisplay[agentId] = display;
@@ -1083,7 +1251,7 @@ export function setAgentUsageDisplay(agentId: unknown, display: unknown): Harnes
 export function setCapacityDisplayThreshold(value: unknown): HarnessConfig {
   const t = parseCapacityDisplayThreshold(value);
   if (t === null) throw new Error('invalid capacity display threshold');
-  return persistConfig({ ...readConfig(), capacityWeeklyDisplayThreshold: t });
+  return persistConfig({ ...readConfigCached(true), capacityWeeklyDisplayThreshold: t });
 }
 
 /** GPU-SETTING-188: save the Graphics mode. Anything but 'auto' | 'gpu' | 'cpu' is REFUSED and the
@@ -1091,14 +1259,14 @@ export function setCapacityDisplayThreshold(value: unknown): HarnessConfig {
 export function setGraphicsMode(value: unknown): HarnessConfig {
   const mode = parseGraphicsMode(value);
   if (mode === null) throw new Error('invalid graphics mode');
-  return persistConfig({ ...readConfig(), graphicsMode: mode });
+  return persistConfig({ ...readConfigCached(true), graphicsMode: mode });
 }
 
 /** Wipe the persisted config back to first-run defaults so the app boots into
  *  onboarding again. Used by the "reset & start over" flow. */
 export function resetConfig(): HarnessConfig {
   const p = configPath();
-  readConfig();
+  readConfigCached(true);
   assertConfigWritable();
   mkdirSync(dirname(p), { recursive: true });
   // A reset is a fresh install: nothing to clear, so the default-model flag is done.

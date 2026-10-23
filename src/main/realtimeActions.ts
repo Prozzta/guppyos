@@ -68,8 +68,10 @@ export interface RealtimeActionDeps {
   controlSnapshot(agentId: string): { paused?: boolean; halted?: boolean } | null;
   killAgent(agentId: string): { ok: boolean; error?: string };
   spawnAgent(opts: RealtimeSpawnSpec): Promise<{ ok: boolean; error?: string }>;
+  /** A read for matching and listing: it may be the cached config, up to a second old. */
   listMissions(): ScheduledMission[];
-  saveMissions(missions: ScheduledMission[]): void;
+  /** Write the missions list as `edit` returns it, applied to a FRESH read of config.json. */
+  editMissions(edit: (missions: readonly ScheduledMission[]) => ScheduledMission[]): void;
   /** rt-12: register a voice dispatch with the completion watcher so the engine can
    *  detect it finishing and speak the notice. Optional — wired in index.ts. */
   trackDispatch?(d: { correlationId: string; targetAgentId: string; objective?: string; dispatchedAt: number; dispatchMessageId?: string }): void;
@@ -588,11 +590,9 @@ function buildEditSchedule(
   action: 'enable' | 'disable' | 'delete'
 ): () => Promise<string> {
   return async () => {
-    const all = deps.listMissions();
-    let next: ScheduledMission[];
-    if (action === 'delete') next = all.filter((m) => m.id !== mission.id);
-    else next = all.map((m) => (m.id === mission.id ? { ...m, enabled: action === 'enable' } : m));
-    deps.saveMissions(next);
+    deps.editMissions((all) => action === 'delete'
+      ? all.filter((m) => m.id !== mission.id)
+      : all.map((m) => (m.id === mission.id ? { ...m, enabled: action === 'enable' } : m)));
     attribute(deps, 'edit_schedule', mission.id, { action });
     return `${action === 'delete' ? 'Deleted' : action === 'enable' ? 'Enabled' : 'Disabled'} the "${mission.label}" schedule.`;
   };
@@ -709,7 +709,7 @@ function proposeDestructive(deps: RealtimeActionDeps, verb: string, a: Record<st
     pending = {
       verb, confirmWord: 'schedule', targetLabel: label, createdAt: Date.now(),
       commit: async () => {
-        deps.saveMissions([...deps.listMissions(), mission]);
+        deps.editMissions((all) => [...all, mission]);
         attribute(deps, 'create_schedule', mission.id, { title: label.slice(0, 120) });
         return `Created the "${label}" schedule — every ${minutes} minutes to ${targetId}.`;
       }
