@@ -110,13 +110,17 @@ K.nothingAndHolder = async (M = HJ) => {
   x.l.acquire('b', H, 'npm ci', 'b1', false);
   const rows = x.logs.length; const ch = x.changes();
   assert.deepEqual(await x.l.lease('z', { op: 'unreserve' }), { state: 'unreserved', reserved: false, queued: false, next: null });
-  assert.deepEqual(await x.l.lease('a', { op: 'unreserve' }), { state: 'unreserved', reserved: false, queued: false, next: null }, 'A HELD SLOT IS NOT RELEASED BY heavy release');
   assert.deepEqual(x.l.snapshot().map((h) => h.agentId), ['a']);
   assert.equal(x.logs.length, rows, 'no row for a no-op');
   assert.equal(x.changes(), ch, 'no change for a no-op');
   assert.deepEqual(x.l.queueSnapshot().waiters.map((w) => w.agentId), ['b']);
+  // HEAVY-HANDOFF-RACE (e): the holder's release drops its held call (no watcher here: unchecked) and
+  // passes the slot on; it never hears "nothing to release" (heavy-lock-release-held-199 has the rest).
+  assert.deepEqual(await x.l.lease('a', { op: 'unreserve' }), { state: 'unreserved', reserved: false, queued: false, next: 'b', held: { kind: 'suite', calls: ['a1'], pids: [], dropped: true, checked: 'none' } }, 'A HELD SLOT IS RELEASED BY heavy release (e)');
+  assert.deepEqual(x.l.snapshot(), []);
+  assert.deepEqual(x.l.queueSnapshot().reserved.map((r) => r.agentId), ['b']);
 };
-test('heavy release with nothing reserved or queued, or by the holder, changes nothing', () => K.nothingAndHolder());
+test('heavy release with nothing reserved or queued changes nothing; by the holder it releases the held slot (e)', () => K.nothingAndHolder());
 
 K.waitingProcSaid = async (M = HJ) => {
   // Queued by a waiting test process (a lease), then released: that process re-queues on its next poll.
@@ -145,7 +149,8 @@ test("unreserve caps 'to' at 80 characters on the route, not only in the CLI (Ji
 K.status = async (M = HJ) => {
   const x = reserved(M, ['b', 'c']);
   const s = await x.l.lease('c', { op: 'status' });
-  assert.deepEqual(s, { state: 'status', holders: [], waiters: ['c'], reserved: [{ agentId: 'b', until: new Date(x.now() + M.HEAVY_RESERVE_MS).toISOString() }] }, 'heavy status reads the lock');
+  // HEAVY-HANDOFF-RACE: `next` (the named next holder) and `you` (the caller's own standing: c is queued #1).
+  assert.deepEqual(s, { state: 'status', holders: [], waiters: ['c'], reserved: [{ agentId: 'b', until: new Date(x.now() + M.HEAVY_RESERVE_MS).toISOString() }], next: null, you: { holding: false, reserved: null, position: 1 } }, 'heavy status reads the lock');
   assert.equal(x.logs.filter((r) => r.action === 'deny').length, 2, 'status is not an acquire (no deny row)');
 };
 test('heavy status: holders, the queue and the reservations', () => K.status());
@@ -192,7 +197,8 @@ K.cliE2E = async (t, M = HJ) => {
   const jim = b.url('jim');
   const st = await cli(['status'], { HIVE_LEDGER_URL: jim });
   assert.equal(st.code, 0, st.err);
-  assert.match(st.out, /^held: none; reserved: jim until \d\d:\d\d:\d\dZ; queue: creed, dwight\n$/);
+  // HEAVY-HANDOFF-RACE (c): a second line says the caller's own standing.
+  assert.match(st.out, /^held: none; reserved: jim until \d\d:\d\d:\d\dZ; queue: creed, dwight\nyou: the slot is reserved for you until \d\d:\d\d:\d\dZ \(run your job now, or `heavy release`\)\n$/);
   const r = await cli(['release', '--to', 'dwight'], { HIVE_LEDGER_URL: jim });
   assert.equal(r.code, 0, r.err);
   assert.equal(r.out, 'heavy: released your reserved slot; it is now reserved for dwight\n', 'THE CLI RELEASES OVER THE /heavy ROUTE');

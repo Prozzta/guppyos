@@ -48,8 +48,8 @@ test('every memory verb and flag named is one memory-cli accepts', () => {
 
 test('the heavy, term and tasks lines match their CLIs', () => {
   const heavy = read('resources/heavy-cli.cjs');
-  assert.match(heavy, /'usage: heavy status \| heavy release \[--to <agent>\]\\n'/);
-  assert.ok(FLOOR.includes('`heavy status`') && FLOOR.includes('`heavy release [--to <agent>]`'));
+  assert.match(heavy, /'usage: heavy status \| heavy release \[--to <agent>\] \| heavy next <agent>\\n/);
+  assert.ok(FLOOR.includes('`heavy status`') && FLOOR.includes('`heavy release [--to <agent>]`') && FLOOR.includes('`heavy next <agent>`'));
   const term = read('resources/term-cli.cjs');
   for (const a of ['read', 'type', 'send', 'keys']) assert.ok(FLOOR.includes(`\`term ${a} <agent>`), `term ${a}`);
   assert.ok(FLOOR.includes('`term hold on [reason]`') && FLOOR.includes('`term hold off`'));

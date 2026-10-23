@@ -1352,6 +1352,8 @@ const heavyLock = new HeavyJobLock({
   log: (row) => { try { hive.appendLog(row); } catch { /* best effort */ } },
   // HEAVY-LOCK-OPAQUE-SCRIPT-196: is a test process the call's own node (its parent the call's shell)?
   parentImage: processImage,
+  // HEAVY-HANDOFF-RACE (a): god may name the next holder (`heavy next`) without holding a slot.
+  isGod: (agentId) => hive.isGod(agentId),
   // HEAVY-LOCK-SELF-WAIT: a queued agent is told when a slot is RESERVED for it, so it never polls.
   alive: (agentId) => [...ptyToAgent.values()].includes(agentId),
   notify: (agentId, kind, until) => notifyHeavySlotFree(agentId, kind, until),
@@ -1509,8 +1511,9 @@ function notifyHeavyUnlimited(agentId: string, kind: string): void {
   try { hive.send(n.message as Partial<HiveMessage>, n.from); } catch { /* best effort */ }
   try { control.steer(agentId, n.steer); } catch { /* best effort */ }
 }
-/** LOCK-WAIT-NOTICES: an agent left the heavy queue without a slot (stale, or its reservation lapsed). */
-function notifyHeavyWaitLapsed(agentId: string, kind: string, why: 'stale' | 'expired'): void {
+/** LOCK-WAIT-NOTICES: an agent left the heavy queue without a slot (stale, or its reservation lapsed);
+ *  HEAVY-HANDOFF-RACE (c): or its reservation lapsed and it is queued again ('requeued'). */
+function notifyHeavyWaitLapsed(agentId: string, kind: string, why: 'stale' | 'expired' | 'requeued'): void {
   const n = heavyWaitLapsedNotice(agentId, kind, why);
   try { hive.send(n.message as Partial<HiveMessage>, n.from); } catch { /* best effort */ }
   try { control.steer(agentId, n.steer); } catch { /* best effort */ }

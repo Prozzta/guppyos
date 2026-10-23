@@ -268,8 +268,9 @@ K.denyHint = (M = HJ) => {
   assert.match(p.reason, /Do not retry this or a variant of it now/, 'the standing text is kept');
   const d = x.l.acquire('jim', { heavy: true, kind: 'install', why: 'npm ci' }, 'npm ci', 'j1', false);
   assert.equal(d.allow, false);
-  assert.doesNotMatch(d.reason, /PROVISIONAL|heavy release/, 'A DEFINITE DENIAL HAS NO PROVISIONAL HINT');
-  assert.match(d.reason, /until you are told\.$/);
+  assert.doesNotMatch(d.reason, /PROVISIONAL|name the file/, 'A DEFINITE DENIAL HAS NO PROVISIONAL HINT');
+  // HEAVY-HANDOFF-RACE (c): the standing sentence follows (heavy-lock-handoff-race-199 pins its words).
+  assert.match(d.reason, /until you are told\. A reservation you leave unused for 5 min passes on and queues you again at the back, once; `heavy status` shows your standing and `heavy release` leaves the queue\.$/);
 };
 test('a provisional denial tells the agent that `heavy release` leaves the queue; a definite one does not', () => K.denyHint());
 
@@ -277,7 +278,7 @@ test('the heavy CLI says that release also leaves the queue', async () => {
   let err = '';
   const code = await CLI.main(['leave'], {}, { out: () => {}, err: (s) => { err += s; } });
   assert.equal(code, 2);
-  assert.match(err, /usage: heavy status \| heavy release \[--to <agent>\]\n {2}release: give up my reserved slot, or my place in the queue/);
+  assert.match(err, /usage: heavy status \| heavy release \[--to <agent>\] \| heavy next <agent>\n {2}release: give up my reserved slot, or my place in the queue/);
   assert.equal(CLI.describe({ state: 'unreserved', reserved: false, queued: true, next: null }), 'heavy: left the queue\n');
 });
 
