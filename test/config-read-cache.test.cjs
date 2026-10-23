@@ -35,7 +35,10 @@ function io(fn) {
   return n;
 }
 const handEdit = (obj) => fs.writeFileSync(file, JSON.stringify({ ...MIGRATED, ...obj }), 'utf8');
-const fresh = (obj) => { handEdit(obj); __resetConfigCacheForTests(() => clock); };
+// The racy rule's wall clock: a minute ahead, so the files these tests just wrote count as old
+// (proven) writes; the racy tests below drive it themselves.
+const OLD = () => Date.now() + 60_000;
+const fresh = (obj) => { handEdit(obj); __resetConfigCacheForTests(() => clock, OLD); };
 
 test.after(() => fs.rmSync(userData, { recursive: true, force: true }));
 
@@ -210,7 +213,7 @@ test('a failed write drops the cache: the next read goes to disk and returns wha
 
 test('a read whose migration persists caches the persisted text, not the pre-migration build', () => {
   fs.writeFileSync(file, JSON.stringify({ defaultModelCliMigratedV1: true, triggersMigratedV1: false, webhookSecret: 's3cret', webhookEnabled: true }), 'utf8');
-  __resetConfigCacheForTests(() => clock);
+  __resetConfigCacheForTests(() => clock, OLD);
   const first = readConfig();
   assert.equal(first.triggersMigratedV1, true);
   assert.equal(first.webhookTriggers[0].id, 'legacy');
@@ -237,4 +240,79 @@ test('wiring: readConfig serves the cache before any disk call; every write goes
   assert.equal((atomic.match(/configCache = null;/g) || []).length, 2, 'a write drops the cache, failed or not');
   assert.ok(atomic.endsWith('  configWriteGen++;\n  configCache = null;'), 'the success path');
   assert.ok(!/statOrNull|statSync|configCache = \{/.test(atomic), 'no write-through entry, no stat after the rename (Jim P1)');
+});
+
+/** statSync for config.json reports `over` on top of the real stat: one key for different texts. */
+function fakeStat(over, fn) {
+  const { statSync } = fs;
+  fs.statSync = function (p, ...rest) { const st = statSync.call(this, p, ...rest); return String(p) === file ? { ...st, ...over } : st; };
+  try { return fn(); } finally { fs.statSync = statSync; }
+}
+const T = 4_000_000_000_000;
+const KEY = { mtimeMs: T, ctimeMs: T, size: 999, ino: 7 };
+
+test('racy-git rule (Jim): two same-size texts under one stat key; a read within STAT_RACY_MS of the change is cached unproven, so the next revalidate reads the disk', () => {
+  const { STAT_RACY_MS } = loadTs('src/main/statCacheKey.ts');
+  assert.ok(STAT_RACY_MS >= 16 && STAT_RACY_MS <= 1000, 'covers the 15.6 ms Windows tick, below the window');
+  fresh({ toolOutputCap: 1111 });
+  let wall = T + 40; // the read lands 40 ms after the change
+  __resetConfigCacheForTests(() => clock, () => wall);
+  try {
+    fakeStat(KEY, () => {
+      assert.equal(readConfig().toolOutputCap, 1111);
+      handEdit({ toolOutputCap: 2222 }); // same size, same key: a second write inside the tick
+      tick(CONFIG_REVALIDATE_MS);
+      const r = io(() => readConfig());
+      assert.deepEqual([r.reads, r.stats], [1, 1], 'unproven: the revalidate reads the disk once');
+      assert.equal(r.result.toolOutputCap, 2222);
+      wall = T + STAT_RACY_MS - 1; tick(CONFIG_REVALIDATE_MS);
+      assert.equal(io(() => readConfig()).reads, 1, 'still inside the margin: unproven again');
+      wall = T + STAT_RACY_MS; tick(CONFIG_REVALIDATE_MS);
+      assert.equal(io(() => readConfig()).reads, 1, 'this read proves the key');
+      // A proven key is trusted (the idle path); only this fake stat can pin a later text to it,
+      // since a real write more than a tick later moves the stamp.
+      handEdit({ toolOutputCap: 3333 });
+      tick(CONFIG_REVALIDATE_MS);
+      const idle = io(() => readConfig());
+      assert.deepEqual([idle.reads, idle.stats], [0, 1]);
+      assert.equal(idle.result.toolOutputCap, 2222);
+    });
+  } finally { __resetConfigCacheForTests(() => clock, OLD); }
+});
+
+test('racy-git rule: a value read right after a write to an old-stamped file is unproven too (ctime counts), and a far-future stamp is proven', () => {
+  const { provenStatKey, statKey, STAT_RACY_MS } = loadTs('src/main/statCacheKey.ts');
+  assert.equal(provenStatKey(KEY, T + STAT_RACY_MS - 1), null);
+  assert.equal(provenStatKey(KEY, T + STAT_RACY_MS), statKey(KEY));
+  assert.equal(provenStatKey(KEY, T - STAT_RACY_MS + 1), null, 'a stamp just ahead of the clock is racy too');
+  assert.equal(provenStatKey(KEY, T - STAT_RACY_MS), statKey(KEY), 'a clock that went back far: proven');
+  assert.equal(provenStatKey({ ...KEY, mtimeMs: T - 3_600_000 }, T + 1), null, 'mtime restored to an old time, ctime now: racy');
+  assert.equal(statKey(KEY), `${T}:${T}:999:7`);
+});
+
+test('K1/K2: ctime and ino are in the key: a change of either one alone re-reads (and an unchanged key does not)', () => {
+  for (const [name, change, want] of [['none', {}, 1111], ['ctime', { ctimeMs: T + 1 }, 2222], ['ino', { ino: 8 }, 2222], ['mtime', { mtimeMs: T + 1 }, 2222], ['size', { size: 1000 }, 2222]]) {
+    fresh({ toolOutputCap: 1111 });
+    fakeStat(KEY, () => readConfig());
+    handEdit({ toolOutputCap: 2222 });
+    tick(CONFIG_REVALIDATE_MS);
+    const r = fakeStat({ ...KEY, ...change }, () => io(() => readConfig()));
+    assert.equal(r.result.toolOutputCap, want, name);
+    assert.equal(r.reads, want === 2222 ? 1 : 0, name);
+  }
+});
+
+test('idle cost: a simulated minute on an unchanged file is 1 read and 60 stats; a minute that starts right after a change costs one more read', () => {
+  fresh({ onboardingComplete: true });
+  const minute = io(() => { for (let i = 0; i < 60; i++) { readConfig(); readConfig(); tick(CONFIG_REVALIDATE_MS); } });
+  assert.deepEqual([minute.reads, minute.stats], [1, 60]);
+  const { STAT_RACY_MS } = loadTs('src/main/statCacheKey.ts');
+  fresh({ onboardingComplete: true });
+  const at = fs.statSync(file).mtimeMs;
+  let wall = at + 1;
+  __resetConfigCacheForTests(() => clock, () => wall);
+  try {
+    const racy = io(() => { for (let i = 0; i < 60; i++) { readConfig(); tick(CONFIG_REVALIDATE_MS); wall = at + STAT_RACY_MS + i; } });
+    assert.deepEqual([racy.reads, racy.stats], [2, 60]);
+  } finally { __resetConfigCacheForTests(() => clock, OLD); }
 });

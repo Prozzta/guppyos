@@ -1,5 +1,5 @@
 import { app } from 'electron';
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, watch, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, watch, writeFileSync, type Stats } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
 import { DEV_ISOLATION, devDataRoot, devHarnessHome } from './devIsolation';
 import { basename, dirname, join } from 'node:path';
@@ -19,6 +19,7 @@ import { parseCapacityDisplayThreshold } from '../shared/capacityThreshold';
 import { parseGraphicsMode, type GraphicsMode } from '../shared/graphicsMode';
 import { CODEX_TOOL_OUTPUT_LIMIT_DEFAULT, normalizeCodexToolOutputLimit } from '../shared/codexToolOutputLimit';
 import { expandTilde, normalizeHiveHome } from './fs';
+import { provenStatKey, statKey } from './statCacheKey';
 import { isProjectThemeId, isProjectThemeSeed, isStoredProjectThemeId, projectThemeHomeKey, resolveProjectTheme, type ProjectThemeId, type ProjectThemeSeed } from '../shared/projectTheme';
 import type { IntegrationRecord } from '../shared/integrations';
 import {
@@ -684,26 +685,26 @@ function writeConfigAtomically(p: string, data: unknown): void {
  *     reads the disk once; this module's read-modify-writes read fresh (no window);
  *   - an external edit is picked up by fs.watch on the folder (it marks the cache dirty), and the
  *     authority is a stat revalidate (mtime, ctime, size, ino) at most CONFIG_REVALIDATE_MS after
- *     the last check, because fs.watch on Windows misses events;
+ *     the last check, because fs.watch on Windows misses events; a value read within
+ *     STAT_RACY_MS of the file's last change is cached unproven (key null), so that revalidate
+ *     reads the disk once (statCacheKey.ts: same-size writes inside one tick share a key);
  *   - the missing, corrupt and unreadable paths are not cached: they behave exactly as before.
  * The value is frozen, never cloned per call (that would bring the cost back): a caller that
  * needs a changed config spreads it into a new object (writeConfig's `{ ...current, ...patch }`).
  */
 export const CONFIG_REVALIDATE_MS = 1_000;
-type ConfigCache = { path: string; key: string; value: HarnessConfig; checkedAt: number };
+type ConfigCache = { path: string; key: string | null; value: HarnessConfig; checkedAt: number };
 let configCache: ConfigCache | null = null;
 /** Bumped by every write, so a read whose migration wrote mid-build does not cache a stale value. */
 let configWriteGen = 0;
 let configNow = (): number => Date.now();
+/** The wall clock the racy rule compares with file times (configNow is only the window's clock). */
+let configWall = (): number => Date.now();
 let configWatcher: { path: string; close: () => void } | null = null;
 
-function statOrNull(p: string): ReturnType<typeof statSync> | null {
+function statOrNull(p: string): Stats | null {
   // As existsSync: any error (ENOENT, EACCES, ...) is "no file".
   try { return statSync(p); } catch { return null; }
-}
-
-function statKey(st: NonNullable<ReturnType<typeof statSync>>): string {
-  return `${st.mtimeMs}:${st.ctimeMs}:${st.size}:${st.ino}`;
 }
 
 function deepFreeze<T>(v: T): T {
@@ -729,10 +730,12 @@ function watchConfig(p: string): void {
   } catch { /* no watcher: the stat revalidate still bounds the staleness */ }
 }
 
-/** Tests: drop the cache (the next read goes to disk), and/or drive the revalidate clock. */
-export function __resetConfigCacheForTests(now?: () => number): void {
+/** Tests: drop the cache (the next read goes to disk), and/or drive the revalidate clock and the
+ *  racy rule's wall clock. */
+export function __resetConfigCacheForTests(now?: () => number, wall?: () => number): void {
   configCache = null;
   if (now) configNow = now;
+  if (wall) configWall = wall;
 }
 
 function noteCorruptConfig(p: string, raw: string, error: unknown): void {
@@ -986,7 +989,8 @@ function readConfigCached(fresh: boolean): HarnessConfig {
   // A clone, so freezing never reaches the DEFAULTS objects a shallow merge shares.
   const value = deepFreeze(structuredClone(built));
   // A migration that persisted mid-build changed the file after the stat: leave it uncached.
-  if (gen === configWriteGen) configCache = { path: p, key, value, checkedAt: now };
+  // Racy-git rule: a change within STAT_RACY_MS of now may share this key with a later write.
+  if (gen === configWriteGen) configCache = { path: p, key: provenStatKey(st, configWall()), value, checkedAt: now };
   watchConfig(p);
   return value;
 }
