@@ -493,9 +493,10 @@ test('MF4 LIVE (Windows): the real hidden listing returns this node process with
   // re-runs the SAME argv (pinned to the product's) without the box. A fast null still fails.
   const PROBE_BOX_MS = 10_000;
   const hj = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'heavyJob.ts'), 'utf8');
-  assert.match(hj, /execFile\('powershell\.exe', \['-NoProfile', '-NonInteractive', '-Command', PROCESS_LISTING_SCRIPT\], \{ windowsHide: true, timeout: 10_000, maxBuffer: 16 \* 1024 \* 1024 \}/, 'the argv and box this test re-runs are the product\'s');
+  assert.match(hj, /execFile\('powershell\.exe', \['-NoProfile', '-NonInteractive', '-Command', PROCESS_LISTING_SCRIPT\], \{ windowsHide: true, timeout: 10_000, maxBuffer: 16 \* 1024 \* 1024, env \}/, 'the argv and box this test re-runs are the product\'s');
   const t0 = performance.now();
-  let rows = await probeProcesses();
+  // PS-POLICY-PRODUCT-TEMP: the product's PowerShell gets psEnv, so a boxed one leaves nothing in this file's jail.
+  let rows = await probeProcesses(require('./tools/ps-env.cjs').psEnv());
   const ms = performance.now() - t0;
   if (rows === null && ms >= PROBE_BOX_MS - 10) {
     t.diagnostic(`probeProcesses hit its ${PROBE_BOX_MS} ms box after ${Math.round(ms)} ms (load); re-running the same listing with a 60 s hang box`);

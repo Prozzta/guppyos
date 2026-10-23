@@ -201,3 +201,201 @@ test('RUNNER: only run-tests opts out of the PowerShell temp folder, and its fil
   const jail = /process\.env\.TEMP = dir;/;
   assert.match(fs.readFileSync(path.join(__dirname, 'tools', 'temp-jail-preload.cjs'), 'utf8'), jail, 'PS POLICY runner: the preload still gives each file its own temp');
 });
+
+// ── PS-POLICY-PRODUCT-TEMP (UHera's audit of 9a25ba89: minor 1, nits 1 and 2) ──────────────────────
+// The product's own PowerShell (heavyJob probeProcesses) inherited the test file's jail as TEMP, and
+// psCacheDir (guppy-psmac-*) was made in os.tmpdir(), the jail. Now probeProcesses takes the env for
+// its PowerShell (tests pass psEnv), and psCacheDir is pid-named under the real temp folder, swept
+// with the pstemp folders. Each killer below takes the code under test, so the census can mutate it.
+const loadTs = require('./load-ts.cjs');
+const HJ_FILE = 'src/main/heavyJob.ts';
+const PS_ENV = path.join(__dirname, 'tools', 'ps-env.cjs');
+
+/** `env` without any spelling of the cache key. Under run-tests this file's own env carries the
+ *  RUNNER's PSModuleAnalysisCachePath (psEnv(process.env, { temp: false })), and psEnv keeps an
+ *  inherited key by design, so a child checking its own psCacheDir must not inherit one (UHera,
+ *  MAJOR 1 on 8a8937df: 12/13 under the runner, 13/13 alone). */
+function withoutCacheKey(env) {
+  const out = {};
+  for (const [k, v] of Object.entries(env)) if (k.toUpperCase() !== 'PSMODULEANALYSISCACHEPATH') out[k] = v;
+  return out;
+}
+
+/** A copy of ps-env.cjs (with `text`) beside a copy of shared-temp.cjs, so a mutant can be required. */
+function psEnvCopy(text) {
+  const d = fs.mkdtempSync(path.join(tmpRoot, 'psenv-'));
+  fs.writeFileSync(path.join(d, 'ps-env.cjs'), text);
+  fs.copyFileSync(path.join(__dirname, 'tools', 'shared-temp.cjs'), path.join(d, 'shared-temp.cjs'));
+  return path.join(d, 'ps-env.cjs');
+}
+
+/** Test code that hands the product's process listing a PowerShell without psEnv: a call with no
+ *  psEnv argument, or the bare function as a probe. */
+function unguardedProbes(src) {
+  const out = [];
+  for (const raw of src.split(/\r?\n/)) {
+    if (/^\s*(\/\/|\*|\/\*)/.test(raw)) continue;                                  // comments
+    const line = raw.replace(/'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`/g, "''")         // strings: a pin's text
+      .replace(/\/(?:\\.|[^/\n\\])*probeProcesses(?:\\.|[^/\n\\])*\//g, '//');     // a regex pin
+    if (/^\s*const \{[^}]*\} = /.test(line)) continue;                              // an import
+    for (const m of line.matchAll(/\bprobeProcesses\b/g)) {
+      if (/^\s*\(\s*(?:require\(''\)\.)?psEnv\(/.test(line.slice(m.index + 'probeProcesses'.length))) continue;
+      out.push(raw.trim());
+    }
+  }
+  return out;
+}
+
+const PK = {
+  /** The product passes its env to the PowerShell: the policy files go to the temp psEnv gave it. */
+  async product(M) {
+    const dir = psTempDir();
+    const seen = new Set();
+    const w = fs.watch(dir, (_e, f) => { if (f) seen.add(String(f)); });
+    try {
+      await M.probeProcesses(psEnv());
+      await new Promise((r) => setTimeout(r, 500));
+    } finally { w.close(); }
+    assert.ok([...seen].some((f) => POLICY.test(f)), `PS POLICY PRODUCT: probeProcesses' PowerShell writes its policy files in the temp it is given (${[...seen]})`);
+  },
+
+  /** psCacheDir is pid-named under the real temp folder, never in the jail, and removed at exit. */
+  psmac(envPath = PS_ENV) {
+    const jail = fs.mkdtempSync(path.join(tmpRoot, 'jail-mac-'));
+    const shared = fs.mkdtempSync(path.join(tmpRoot, 'shared-mac-'));
+    const script = `const m = require(${JSON.stringify(envPath)}); const e = m.psEnv(); process.stdout.write(JSON.stringify({ dir: m.psCacheDir(), key: e[m.KEY], made: require('fs').existsSync(m.psCacheDir()) }));`;
+    const r = spawnSync(process.execPath, ['-e', script], {
+      encoding: 'utf8', windowsHide: true, timeout: 60_000,
+      env: { ...withoutCacheKey(process.env), TEMP: jail, TMP: jail, TMPDIR: jail, GUPPY_SHARED_TEMP: shared }
+    });
+    assert.equal(r.status, 0, r.stderr);
+    const o = JSON.parse(r.stdout);
+    assert.ok(o.made, 'PS POLICY PSMAC: psCacheDir is made on first use');
+    assert.ok(!under(o.dir, jail), `PS POLICY PSMAC: psCacheDir is not in the jail (${o.dir})`);
+    assert.ok(under(o.dir, shared), `PS POLICY PSMAC: psCacheDir is under the real temp folder (${o.dir})`);
+    assert.match(path.basename(o.dir), new RegExp(`^guppy-psmac-${r.pid}-`), 'PS POLICY PSMAC: the folder carries its process\'s pid');
+    assert.equal(o.key, path.join(o.dir, 'ModuleAnalysisCache'));
+    assert.ok(!fs.existsSync(o.dir), 'PS POLICY PSMAC: psCacheDir is removed when the process exits');
+    assert.deepEqual(fs.readdirSync(jail), [], 'PS POLICY PSMAC: nothing was written in the jail');
+  },
+
+  /** A dead pid's guppy-psmac folder is swept like its guppy-pstemp folder; a live or unnamed one is kept. */
+  sweepMac(envPath = PS_ENV) {
+    const m = require(envPath);
+    const shared = fs.mkdtempSync(path.join(tmpRoot, 'shared-sweep-mac-'));
+    const dead = deadPid();
+    const names = { dead: `guppy-psmac-${dead}-aaaaaa`, live: `guppy-psmac-${process.ppid}-bbbbbb`, legacy: 'guppy-psmac-cccccc' };
+    for (const n of Object.values(names)) fs.mkdirSync(path.join(shared, n, 'ModuleAnalysisCache'), { recursive: true });
+    assert.deepEqual(m.sweepPsTempDirs(shared), [names.dead], 'PS POLICY PSMAC SWEEP: the dead pid\'s guppy-psmac folder is removed');
+    assert.deepEqual(fs.readdirSync(shared).sort(), [names.legacy, names.live].sort(), 'PS POLICY PSMAC SWEEP: live and fresh unnamed folders are kept');
+  },
+
+  /** Older than a day goes, whatever the name says: the legacy unnamed folders (UHera minor 1) and a
+   *  folder whose pid a live process reuses (nit 1). A fresh one of each, and other names, stay. */
+  sweepStale(envPath = PS_ENV) {
+    const m = require(envPath);
+    const shared = fs.mkdtempSync(path.join(tmpRoot, 'shared-sweep-stale-'));
+    const old = (Date.now() - m.PS_STALE_MS - 60_000) / 1000;
+    const names = {
+      oldMac: 'guppy-psmac-AbC123', oldTemp: 'guppy-pstemp-x9y8z7', oldReused: `guppy-pstemp-${process.ppid}-oldold`,
+      freshMac: 'guppy-psmac-dEf456', freshReused: `guppy-psmac-${process.ppid}-newnew`, oldOther: 'guppy-psmacs-AbC123', oldOwn: `guppy-psmac-${process.pid}-ownown`
+    };
+    for (const n of Object.values(names)) fs.mkdirSync(path.join(shared, n, 'x'), { recursive: true });
+    for (const n of [names.oldMac, names.oldTemp, names.oldReused, names.oldOther, names.oldOwn]) fs.utimesSync(path.join(shared, n), old, old);
+    assert.deepEqual(m.sweepPsTempDirs(shared).sort(), [names.oldMac, names.oldTemp, names.oldReused].sort(), 'PS POLICY STALE SWEEP: legacy and pid-reused folders older than a day are removed');
+    assert.deepEqual(fs.readdirSync(shared).sort(), [names.freshMac, names.freshReused, names.oldOther, names.oldOwn].sort(), 'PS POLICY STALE SWEEP: fresh, own and other names are kept');
+  },
+
+  /** The child that checks its own psCacheDir never inherits a cache key, in any spelling. */
+  strip() {
+    const env = withoutCacheKey({ PSModuleAnalysisCachePath: 'a', psmoduleanalysiscachepath: 'b', PSMODULEANALYSISCACHEPATH: 'c', KEEP: 'k' });
+    assert.deepEqual(env, { KEEP: 'k' }, 'PS POLICY PSMAC ENV: every spelling of the cache key is dropped');
+    // And psEnv still keeps an inherited key (by design): which is why the child must not get one.
+    const m = require(PS_ENV);
+    assert.equal(m.psEnv({ psmoduleanalysiscachepath: 'C:/x' }, { temp: false }).psmoduleanalysiscachepath, 'C:/x', 'PS POLICY PSMAC ENV: psEnv keeps an inherited key');
+  },
+
+  /** Every test call of the product listing passes psEnv (heavy-job-lock MF4 LIVE, opaque-196 E2E). */
+  census() {
+    const files = [];
+    const walk = (d) => {
+      for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+        const p = path.join(d, e.name);
+        if (e.isDirectory()) { if (e.name !== 'node_modules' && !e.name.startsWith('.')) walk(p); continue; }
+        if (/\.cjs$/.test(e.name) && e.name !== 'ps-policy-temp-leak-198.test.cjs') files.push(p);
+      }
+    };
+    walk(__dirname);
+    const callers = [];
+    const bad = [];
+    for (const f of files) {
+      const src = fs.readFileSync(f, 'utf8');
+      if (!/probeProcesses/.test(src)) continue;
+      callers.push(path.relative(__dirname, f).split(path.sep).join('/'));
+      for (const u of unguardedProbes(src)) bad.push(`${path.basename(f)}: ${u}`);
+    }
+    assert.ok(callers.includes('heavy-job-lock.test.cjs') && callers.includes('heavy-lock/heavy-lock-opaque-196.test.cjs'), `the census sees the callers (${callers})`);
+    assert.deepEqual(bad, [], 'PS POLICY PRODUCT CENSUS: every test call of probeProcesses passes psEnv');
+  }
+};
+
+test('PRODUCT: probeProcesses gives its PowerShell the env it is passed (tests pass psEnv)', { skip: !WIN && 'Windows PowerShell only', timeout: 120_000 }, () => PK.product(loadTs(HJ_FILE)));
+test('PRODUCT: probeProcesses defaults to the app\'s own env; index.ts passes no env', () => {
+  const hj = fs.readFileSync(path.join(__dirname, '..', HJ_FILE), 'utf8');
+  assert.match(hj, /export function probeProcesses\(env: NodeJS\.ProcessEnv = process\.env\): Promise<ProcRow\[\] \| null>/);
+  const idx = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'index.ts'), 'utf8');
+  assert.match(idx, /probe: probeProcesses,/);
+  assert.match(idx, /listProcesses: probeProcesses,/);
+});
+test('PSMAC: psCacheDir is pid-named under the real temp folder, not the jail, and removed at exit', () => PK.psmac());
+test('PSMAC: a dead pid\'s guppy-psmac folder is swept with the pstemp folders', () => PK.sweepMac());
+test('PSMAC: the psCacheDir child gets no inherited cache key (green under run-tests, not only alone)', () => {
+  PK.strip();
+  // Under the runner this file inherits a key; alone it may not. Either way the killer must pass:
+  // run it once more with a decoy key in this process's env, as run-tests gives one.
+  const had = Object.prototype.hasOwnProperty.call(process.env, 'PSModuleAnalysisCachePath');
+  const prev = process.env.PSModuleAnalysisCachePath;
+  process.env.PSModuleAnalysisCachePath = path.join(tmpRoot, 'decoy-runner-cache', 'ModuleAnalysisCache');
+  try { PK.psmac(); } finally { if (had) process.env.PSModuleAnalysisCachePath = prev; else delete process.env.PSModuleAnalysisCachePath; }
+});
+test('SWEEP: folders older than a day go (legacy unnamed, pid reused); fresh, own and other names stay', () => PK.sweepStale());
+test('CENSUS: every test call of probeProcesses passes psEnv', () => {
+  PK.census();
+  const sample = [
+    'let rows = await probeProcesses();',                                             // unguarded
+    'const b = await broker(t, M, { probe: M.probeProcesses, roots: () => [] });',     // unguarded
+    'let ok = await probeProcesses(psEnv());',
+    "const c = { probe: () => M.probeProcesses(require('../tools/ps-env.cjs').psEnv()) };",
+    "const { parseProcessListing, probeProcesses } = loadTs('src/main/heavyJob.ts');",
+    'assert.match(idx, /probe: probeProcesses,/);',
+    "for (const t of ['listProcesses: probeProcesses']) {}",
+    '  // the product\'s own 10 s box (probeProcesses) can fire'
+  ].join('\n');
+  assert.deepEqual(unguardedProbes(sample), ['let rows = await probeProcesses();', 'const b = await broker(t, M, { probe: M.probeProcesses, roots: () => [] });'], 'PS POLICY PRODUCT CENSUS: calls and bare probes are caught; guarded calls, imports, pins and comments are not');
+});
+
+const PS_MUTANTS = [
+  { name: 'P1 the product drops the env', file: HJ_FILE, from: 'maxBuffer: 16 * 1024 * 1024, env }', to: 'maxBuffer: 16 * 1024 * 1024 }', k: (src) => PK.product(loadTs.fromText(HJ_FILE, src)), win: true },
+  { name: 'P2 psCacheDir in the jail', file: PS_ENV, from: 'path.join(root, `guppy-psmac-', to: "path.join(require('os').tmpdir(), `guppy-psmac-", k: (src) => PK.psmac(psEnvCopy(src)) },
+  { name: 'P3 the sweep skips guppy-psmac', file: PS_ENV, from: '/^guppy-ps(?:temp|mac)-(\\d+)-/', to: '/^guppy-pstemp-(\\d+)-/', k: (src) => PK.sweepMac(psEnvCopy(src)) },
+  { name: 'P6 legacy unnamed folders are never swept', file: PS_ENV, from: "} else if (!PS_LEGACY_RE.test(n) || !stale(n)) continue;", to: '} else continue;', k: (src) => PK.sweepStale(psEnvCopy(src)) },
+  { name: 'P7 a live pid keeps its folder however old', file: PS_ENV, from: '(alive(Number(m[1])) && !stale(n))', to: 'alive(Number(m[1]))', k: (src) => PK.sweepStale(psEnvCopy(src)) },
+  { name: 'P8 the legacy name matches any guppy-ps folder', file: PS_ENV, from: 'const PS_LEGACY_RE = /^guppy-ps(?:temp|mac)-[^-]{6}$/;', to: 'const PS_LEGACY_RE = /^guppy-ps/;', k: (src) => PK.sweepStale(psEnvCopy(src)) },
+  { name: 'P4 a test probes without psEnv', file: path.join(__dirname, 'heavy-job-lock.test.cjs'), from: "probeProcesses(require('./tools/ps-env.cjs').psEnv())", to: 'probeProcesses()', k: (src) => assert.equal(unguardedProbes(src).length, 1, 'PS POLICY PRODUCT CENSUS mutant: the census catches it'), census: true },
+  { name: 'P5 a test passes the bare listing as its probe', file: path.join(__dirname, 'heavy-lock', 'heavy-lock-opaque-196.test.cjs'), from: "probe: () => M.probeProcesses(require('../tools/ps-env.cjs').psEnv()),", to: 'probe: M.probeProcesses,', k: (src) => assert.equal(unguardedProbes(src).length, 1, 'PS POLICY PRODUCT CENSUS mutant: the census catches it'), census: true }
+];
+
+test('MUTANT CENSUS PS-POLICY-PRODUCT-TEMP: each mutant applies once and dies', { timeout: 300_000 }, async () => {
+  for (const m of PS_MUTANTS) {
+    if (m.win && !WIN) continue;
+    const abs = path.isAbsolute(m.file) ? m.file : path.join(__dirname, '..', m.file);
+    const src = fs.readFileSync(abs, 'utf8').replace(/\r\n/g, '\n');
+    assert.equal(src.split(m.from).length, 2, `${m.name}: the anchor is in the source exactly once`);
+    const mutated = src.replace(m.from, m.to);
+    if (m.census) { m.k(mutated); continue; }
+    let died = null;
+    try { await m.k(mutated); } catch (e) { died = e; }
+    assert.ok(died, `${m.name}: the mutant SURVIVED`);
+    assert.match(String(died.message), /PS POLICY/, `${m.name}: died, but not by a named check: ${died.message}`);
+  }
+});

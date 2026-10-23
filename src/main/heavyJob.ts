@@ -2829,10 +2829,13 @@ export function parseProcessListing(stdout: string): ProcRow[] | null {
   return out.length && out.some((p) => typeof p.createdMs === 'number') ? out : null;
 }
 
-/** The default process listing (Windows only; null when it fails or times out). */
-export function probeProcesses(): Promise<ProcRow[] | null> {
+/** The default process listing (Windows only; null when it fails or times out).
+ *  PS-POLICY-PRODUCT-TEMP: `env` is the PowerShell's environment (the app's own by default). A test
+ *  passes psEnv(): PowerShell writes __PSScriptPolicyTest_* to the TEMP it inherits, and one cut short
+ *  by the 10 s box would otherwise leave them in the test file's temp jail. */
+export function probeProcesses(env: NodeJS.ProcessEnv = process.env): Promise<ProcRow[] | null> {
   if (process.platform !== 'win32') return Promise.resolve(null);
-  return new Promise((resolve) => execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', PROCESS_LISTING_SCRIPT], { windowsHide: true, timeout: 10_000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
+  return new Promise((resolve) => execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', PROCESS_LISTING_SCRIPT], { windowsHide: true, timeout: 10_000, maxBuffer: 16 * 1024 * 1024, env }, (err, stdout) => {
     resolve(err ? null : parseProcessListing(String(stdout)));
   }));
 }
