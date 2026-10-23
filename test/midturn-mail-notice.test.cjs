@@ -44,7 +44,7 @@ async function floor(t, { steer, provider } = {}) {
   if (provider) {
     // The provider the HookServer sees (no provider-specific install touches this jail).
     const reg = hive.registry.bind(hive);
-    hive.registry = () => { const r = reg(); r.agents['andy-1'] = { ...r.agents['andy-1'], provider }; return r; };
+    hive.registry = () => { const r0 = reg(); const r = { ...r0, agents: { ...r0.agents } }; /* registry() is shared and frozen: edit a copy */ r.agents['andy-1'] = { ...r.agents['andy-1'], provider }; return r; };
   }
   const control = { takeSteer: (id) => (id === 'andy-1' ? (steer ?? null) : null), shouldHalt: () => false, toolDecision: () => ({ deny: false }) };
   const server = new HookServer(hive, () => null, () => ({ notifications: false }), control, undefined);

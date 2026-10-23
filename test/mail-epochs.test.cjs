@@ -50,7 +50,7 @@ async function world(t, { providers = {}, confirms = () => true, probe = null, g
   await hive.ensureAgent({ id: 'god-1', name: 'Michael', provider: 'claude', cwd: home, isGod: true });
   for (const id of Object.keys(providers)) await hive.ensureAgent({ id, name: id, provider: 'claude', cwd: home });
   const reg = hive.registry.bind(hive);
-  hive.registry = () => { const r = reg(); for (const [id, p] of Object.entries(providers)) r.agents[id] = { ...r.agents[id], provider: p }; return r; };
+  hive.registry = () => { const r0 = reg(); const r = { ...r0, agents: { ...r0.agents } }; /* registry() is shared and frozen: edit a copy */ for (const [id, p] of Object.entries(providers)) r.agents[id] = { ...r.agents[id], provider: p }; return r; };
   const coordinator = new WorkerWakeWatchdog();
   // The REAL pending rule index.ts wires (mailReaders.coordinatorPendingIds), with the same deps
   // (mutant K13: a copy here let a broken skip filter in main survive).
@@ -824,7 +824,7 @@ test('Jim LOW gap D2: stop() CLEARS the provider cache: nothing cached survives 
   // A provider change that no provisioning event announces (the server is unsubscribed now):
   // the very next read must see it, inside the 5 s window.
   const reg = hive.registry.bind(hive);
-  hive.registry = () => { const r = reg(); r.agents['sw-1'] = { ...r.agents['sw-1'], provider: 'codex' }; return r; };
+  hive.registry = () => { const r0 = reg(); const r = { ...r0, agents: { ...r0.agents } }; /* registry() is shared and frozen: edit a copy */ r.agents['sw-1'] = { ...r.agents['sw-1'], provider: 'codex' }; return r; };
   assert.equal(server.mailChannel('sw-1').provider, 'codex', 'read fresh after stop()');
 });
 

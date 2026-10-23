@@ -159,7 +159,7 @@ async function floor(t, cfg = {}) {
   await hive.ensureAgent({ id: 'cl-1', name: 'cl-1', provider: 'claude', cwd: home });
   const own = {};
   const reg = hive.registry.bind(hive);
-  hive.registry = () => { const r = reg(); for (const [id, v] of Object.entries(own)) r.agents[id] = { ...r.agents[id], mailCapChars: v }; return r; };
+  hive.registry = () => { const r0 = reg(); const r = { ...r0, agents: { ...r0.agents } }; /* registry() is shared and frozen: edit a copy */ for (const [id, v] of Object.entries(own)) r.agents[id] = { ...r.agents[id], mailCapChars: v }; return r; };
   const control = { takeSteer: () => null, shouldHalt: () => false, toolDecision: () => ({ deny: false }) };
   const s = new HookServer(hive, () => null, () => ({ notifications: false, ...cfg }), control, undefined, undefined, () => {});
   server.current = s;
