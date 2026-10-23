@@ -22,7 +22,7 @@ import {
   readdirSync, statSync, rmSync, appendFileSync, symlinkSync, copyFileSync, chmodSync,
   lstatSync, readlinkSync, unlinkSync,
   openSync, readSync, closeSync,
-  watch, type FSWatcher
+  watch, type FSWatcher, type Stats
 } from 'node:fs';
 import { basename, join, dirname, isAbsolute, win32, posix } from 'node:path';
 import { homedir } from 'node:os';
@@ -70,6 +70,7 @@ import {
   ARCHIVE_DIR, ARCHIVE_PASS_MS, appendArchived, appendRevived, archiveStamp, mergeHotCold, planArchive, readArchive
 } from './taskArchive';
 import { expandTilde } from './fs';
+import { provenStatKey, statKey } from './statCacheKey';
 import {
   AgyStatuslineOwner, PROCESS_STARTED_AT, buildStatuslineCommand, newOwnerToken, osLiveness,
   recoverStatuslineLeftovers, removeStatuslineLocator, writeStatuslineLocator, type StatuslineEnv
@@ -454,12 +455,8 @@ function stamp(): string {
 }
 
 /** MAIN-SYNC-LOG-LEDGER: the stat of a cached authority file (null when it cannot be stat'ed). */
-function authorityStat(p: string): ReturnType<typeof statSync> | null {
+function authorityStat(p: string): Stats | null {
   try { return statSync(p); } catch { return null; }
-}
-/** An atomic replace changes ino and ctime; an in-place edit changes mtime/size. */
-function authorityStatKey(st: NonNullable<ReturnType<typeof statSync>>): string {
-  return `${st.mtimeMs}:${st.ctimeMs}:${st.size}:${st.ino}`;
 }
 function authorityDeepFreeze<T>(value: T): T {
   if (value && typeof value === 'object' && !Object.isFrozen(value)) {
@@ -5860,30 +5857,37 @@ export class HiveManager {
    * calls/min on Guppy main under a heavy run on 1.1.99). It now serves one parsed, deep-frozen
    * value per file. Our own writes (atomicWriteJson) drop it, so the next read sees them. A write
    * by another process is picked up by fs.watch on the folder or, as the authority, by a stat
-   * revalidate at most AUTHORITY_REVALIDATE_MS after the last check. Missing, corrupt and
-   * unreadable files are never cached: readAuthoritativeJson handles them as before.
+   * revalidate at most AUTHORITY_REVALIDATE_MS after the last check. A value read within
+   * STAT_RACY_MS of the file's last change is cached unproven (key null), so that revalidate reads
+   * the disk once (statCacheKey.ts: same-size writes inside one tick share a key). Missing, corrupt
+   * and unreadable files are never cached: readAuthoritativeJson handles them as before.
    */
   static readonly AUTHORITY_REVALIDATE_MS = 1_000;
-  private readonly authorityCache = new Map<string, { key: string; value: unknown; checkedAt: number }>();
+  private readonly authorityCache = new Map<string, { key: string | null; value: unknown; checkedAt: number }>();
   private readonly authorityWatchers = new Map<string, FSWatcher>();
   private authorityNow: () => number = () => Date.now();
-  /** Tests: drop every cached authority and (optionally) drive the revalidate clock. */
-  __resetAuthorityCacheForTests(now?: () => number): void {
+  /** The wall clock the racy rule compares with file times (authorityNow is only the window's). */
+  private authorityWall: () => number = () => Date.now();
+  /** Tests: drop every cached authority and (optionally) drive the revalidate clock and the racy
+   *  rule's wall clock. */
+  __resetAuthorityCacheForTests(now?: () => number, wall?: () => number): void {
     this.authorityCache.clear();
     if (now) this.authorityNow = now;
+    if (wall) this.authorityWall = wall;
   }
   private readAuthoritativeJsonCached<T>(p: string, onMissing: () => T, fresh = false): T {
     const now = this.authorityNow();
     const c = this.authorityCache.get(p);
     if (c && !fresh && now - c.checkedAt >= 0 && now - c.checkedAt < HiveManager.AUTHORITY_REVALIDATE_MS) return c.value as T;
     const st = authorityStat(p);
-    if (st && c && c.key === authorityStatKey(st)) { c.checkedAt = now; return c.value as T; }
+    if (st && c && c.key === statKey(st)) { c.checkedAt = now; return c.value as T; }
     this.authorityCache.delete(p);
     // The key is taken BEFORE the read: a change between the two re-reads at the next revalidate.
     const value = this.readAuthoritativeJson<T>(p, onMissing);
     if (!st) return value;
     const frozen = authorityDeepFreeze(value);
-    this.authorityCache.set(p, { key: authorityStatKey(st), value: frozen, checkedAt: now });
+    // Racy-git rule: a change within STAT_RACY_MS of now may share this key with a later write.
+    this.authorityCache.set(p, { key: provenStatKey(st, this.authorityWall()), value: frozen, checkedAt: now });
     this.watchAuthority(p);
     return frozen;
   }

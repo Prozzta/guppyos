@@ -29,7 +29,9 @@ function floor(t, agents = { a1: agent('a1') }) {
   const file = path.join(hive.root(), 'registry.json');
   const handEdit = (reg) => fs.writeFileSync(file, JSON.stringify(reg), 'utf8');
   handEdit({ godId: null, agents });
-  hive.__resetAuthorityCacheForTests(() => clock);
+  // The racy rule's wall clock: a minute ahead, so files just written here count as old (proven)
+  // writes; the racy tests drive it themselves.
+  hive.__resetAuthorityCacheForTests(() => clock, () => Date.now() + 60_000);
   return { hive, file, handEdit };
 }
 /** Count the registry.json disk reads and stats inside fn. */
@@ -163,4 +165,74 @@ test('wiring: readers use the cache, mutations read the file, every registry wri
   const direct = src.split('\n').filter((l) => /registry\.json/.test(l) && /writeFileSync|renameSync|atomicWriteJsonFile\(/.test(l));
   assert.deepEqual(direct, []);
   assert.match(body('  dispose(): void {'), /this\.closeAuthorityWatchers\(\);/);
+});
+
+/** statSync for `file` reports `over` on top of the real stat: one key for different texts. */
+function fakeStat(file, over, fn) {
+  const { statSync } = fs;
+  fs.statSync = function (p, ...rest) { const st = statSync.call(this, p, ...rest); return String(p) === file ? { ...st, ...over } : st; };
+  try { return fn(); } finally { fs.statSync = statSync; }
+}
+const T = 4_000_000_000_000;
+const KEY = { mtimeMs: T, ctimeMs: T, size: 999, ino: 7 };
+
+test('racy-git rule (Jim): two same-size rosters under one stat key; a read within STAT_RACY_MS of the change is cached unproven, so the next revalidate reads the disk', (t) => {
+  const { STAT_RACY_MS } = loadTs('src/main/statCacheKey.ts');
+  const { hive, file, handEdit } = floor(t, { a1: agent('a1') });
+  let wall = T + 40; // the read lands 40 ms after the change
+  hive.__resetAuthorityCacheForTests(() => clock, () => wall);
+  fakeStat(file, KEY, () => {
+    assert.ok(hive.registry().agents.a1);
+    handEdit({ godId: null, agents: { a2: agent('a2') } }); // same size, same key: a second write inside the tick
+    tick(WINDOW);
+    const r = io(file, () => hive.registry());
+    assert.deepEqual([r.reads, r.stats], [1, 1], 'unproven: the revalidate reads the disk once');
+    assert.ok(r.result.agents.a2);
+    wall = T + STAT_RACY_MS - 1; tick(WINDOW);
+    assert.equal(io(file, () => hive.registry()).reads, 1, 'still inside the margin: unproven again');
+    wall = T + STAT_RACY_MS; tick(WINDOW);
+    assert.equal(io(file, () => hive.registry()).reads, 1, 'this read proves the key');
+    tick(WINDOW);
+    const idle = io(file, () => hive.registry());
+    assert.deepEqual([idle.reads, idle.stats], [0, 1], 'proven: a stat, no read');
+  });
+});
+
+test('K1/K2: ctime and ino are in the key: a change of either one alone re-reads (and an unchanged key does not)', (t) => {
+  for (const [name, change, want] of [['none', {}, 'a1'], ['ctime', { ctimeMs: T + 1 }, 'a2'], ['ino', { ino: 8 }, 'a2'], ['mtime', { mtimeMs: T + 1 }, 'a2'], ['size', { size: 1000 }, 'a2']]) {
+    const { hive, file, handEdit } = floor(t, { a1: agent('a1') });
+    fakeStat(file, KEY, () => hive.registry());
+    handEdit({ godId: null, agents: { a2: agent('a2') } });
+    tick(WINDOW);
+    const r = fakeStat(file, { ...KEY, ...change }, () => io(file, () => hive.registry()));
+    assert.deepEqual(Object.keys(r.result.agents), [want], name);
+    assert.equal(r.reads, want === 'a2' ? 1 : 0, name);
+  }
+});
+
+test('idle cost: a simulated minute on an unchanged roster is 1 read and 60 stats; a minute that starts right after a change costs one more read', (t) => {
+  const { STAT_RACY_MS } = loadTs('src/main/statCacheKey.ts');
+  const { hive, file } = floor(t);
+  const minute = io(file, () => { for (let i = 0; i < 60; i++) { hive.registry(); hive.registry(); tick(WINDOW); } });
+  assert.deepEqual([minute.reads, minute.stats], [1, 60]);
+  const at = fs.statSync(file).mtimeMs;
+  let wall = at + 1;
+  hive.__resetAuthorityCacheForTests(() => clock, () => wall);
+  const racy = io(file, () => { for (let i = 0; i < 60; i++) { hive.registry(); tick(WINDOW); wall = at + STAT_RACY_MS + i; } });
+  assert.deepEqual([racy.reads, racy.stats], [2, 60]);
+});
+
+test('racy-git rule: a recent ctime makes the key unproven even when mtime was restored to an old time (copy tools, utimes)', (t) => {
+  const { hive, file, handEdit } = floor(t, { a1: agent('a1') });
+  const wall = T + 40;
+  hive.__resetAuthorityCacheForTests(() => clock, () => wall);
+  const restored = { ...KEY, mtimeMs: T - 3_600_000 };
+  fakeStat(file, restored, () => {
+    assert.ok(hive.registry().agents.a1);
+    handEdit({ godId: null, agents: { a2: agent('a2') } });
+    tick(WINDOW);
+    const r = io(file, () => hive.registry());
+    assert.equal(r.reads, 1, 'ctime 40 ms old: unproven, re-read');
+    assert.ok(r.result.agents.a2);
+  });
 });
