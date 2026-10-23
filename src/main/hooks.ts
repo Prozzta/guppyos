@@ -1999,6 +1999,8 @@ export class HookServer {
   /** HEAVY-LOCK-SCRIPT-WRAPPER: the classifier may read a script the call runs (`bash suite.sh`),
    *  resolved against the hook's cwd, Git Bash `/c/...` paths included, size-capped by heavyJob. */
   static heavyScriptCtx(cwd: unknown): ClassifyCtx {
+    // HEAVY-LOCK-FALSE-POSITIVE: the env places Git Bash's /tmp (TEMP) for the reader too.
+    const env = HookServer.heavyEnv();
     return {
       ...scriptReaderFor(typeof cwd === 'string' ? cwd : null, (abs) => {
         const path = abs.replace(/^\/([A-Za-z])\//, (_m, d: string) => `${d.toUpperCase()}:/`);
@@ -2008,8 +2010,8 @@ export class HookServer {
           // HEAVY-LOCK-VARPATH-READ: a directory is reported as one (not a program), not as missing.
           return st.isDirectory() ? { size: 0, text: () => '', dir: true } : null;
         } catch { return null; }
-      }),
-      env: HookServer.heavyEnv(),
+      }, env),
+      env,
     };
   }
 
