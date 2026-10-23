@@ -11,6 +11,48 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/guppyos/releases).
 
+## [1.1.100] — 2026-10-23
+
+**The heavy-job lock judges commands correctly, heavy jobs hand over cleanly, and a new floor starts empty.**
+Rollback: 1.1.99 (reinstall).
+
+### Added
+
+- **Name the next heavy-job holder (`heavy next <agent>`).** The agent holding the heavy slot, an
+  agent with the slot reserved, or god can say who goes next, and the slot passes to that agent
+  when the job ends.
+
+### Changed
+
+- **A broad test filter counts as the full test suite.** A test run filtered by a word that matches
+  20 or more test files now waits for the heavy slot. This applies whether the filter is given to
+  `npm test` (including with `--prefix`) or to the test runner directly, and from any folder.
+  Before, a broad filter ran light next to another agent's suite.
+- **The lock sees through more ways of starting a heavy command.** It now catches a node script
+  that starts the suite, a PowerShell loop over a list of commands, and a command wrapped in
+  brackets or backticks. It also catches a command kept in a variable and a script written just
+  before it runs. It knows the shell a Codex agent's command runs in.
+- **A running heavy job keeps its slot.** A job the app last saw running is renewed at the hour
+  instead of being freed while it still runs. A reserved slot that lapses puts its owner back in
+  the queue once. `heavy status` says where the asking agent stands.
+- **`heavy release` from the holder works.** When the held job has ended, the slot is freed and
+  the next agent is let in at once. While the job still runs, the release is refused and the job
+  is named. Before, it answered "nothing to release" while the slot showed as held.
+- **A release keeps every earlier release's notes.** Building a release now fails if a released
+  section of this changelog was dropped or edited, as happened to the 1.1.98 heading in the first
+  1.1.99 build.
+
+### Fixed
+
+- **A new floor starts with only its own god.** A new floor no longer brings back the last floor's
+  agents. Any agents it set aside are saved in the new floor's `roster-backups/` folder. A fresh
+  home from Settings now keeps your display preferences, such as theme and terminal font.
+- **Light commands are no longer held as heavy.** A script under `/tmp` in Git Bash, a PowerShell
+  line that only sets a variable, and a loop variable in a PowerShell `foreach` no longer wait for
+  the heavy slot. A command that runs a single test file, or adds a git worktree, stays light.
+- **No duplicate turn after a Codex stop.** A message a Codex agent was shown when it stopped now
+  counts as delivered, so it is not typed into the agent a second time.
+
 ## [1.1.99] — 2026-10-22
 
 **The window stays smooth while agents work, a new floor knows its tools, and fewer wakes get stuck.**
