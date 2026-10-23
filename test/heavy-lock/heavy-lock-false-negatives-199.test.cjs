@@ -342,7 +342,7 @@ const MUTANTS = [
     killer: 'needle', dies: /A DASH NEEDLE COUNTS \(runner\)/ },
   { file: HJF, name: 'the runner lists the caller\'s folder (today)', edits: [['filteredSuite(`node ${base}`, rest, ctx, runnerRoot(script))', 'filteredSuite(`node ${base}`, rest, ctx)']],
     killer: 'needle', dies: /THE RUNNER LISTS ITS OWN REPO: \{/ },
-  { file: HJF, name: 'a relative runner path is not its repo', edits: [["  const root = parts.slice(0, -3).join('/');\n  return root === '' ? '/' : root;", "  const root = parts.slice(0, -3).join('/');\n  return root === '' || !/^([A-Za-z]:)?\\//.test(root) ? undefined : root;"]],
+  { file: HJF, name: 'a relative runner path is not its repo', edits: [["  return out.length === 1 && out[0] === '' ? '/' : out.join('/');", "  return out.length === 1 && out[0] === '' ? '/' : !abs ? undefined : out.join('/');"]],
     killer: 'needle', dies: /A RELATIVE RUNNER PATH LISTS ITS REPO/ },
   { file: HJF, name: 'npm --prefix is the subcommand (today)', edits: [['    args = own;\n', '']],
     killer: 'needle', dies: /THE PREFIX FOLDER IS NOT THE SUBCOMMAND/ },

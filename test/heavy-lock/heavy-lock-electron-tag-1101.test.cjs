@@ -152,6 +152,10 @@ K.short = async ({ HJ: M, HK: H }) => {
     ['Bash', 'cd test/tools && node ./run-tests.cjs activity-lag'],
     ['PowerShell', 'cd test; node tools\\run-tests.cjs activity-lag'],
     ['PowerShell', 'cd test\\tools; node .\\run-tests.cjs activity-lag'],
+    // UHera's NIT: any runner path, so from a deeper folder of the repo too (the script's folder, two up).
+    ['Bash', 'cd test/heavy-lock && node ../tools/run-tests.cjs activity-lag'],
+    ['PowerShell', 'cd test\\heavy-lock; node ..\\tools\\run-tests.cjs activity-lag'],
+    ['Bash', 'cd src/main && node ../../test/tools/run-tests.cjs activity-lag'],
   ];
   for (const [tool, cmd] of shapes) {
     const g = cls(M, cmd, ctx, tool);
@@ -243,8 +247,10 @@ const MUTANTS = [
     killer: 'size', dies: /A DEFINITE PICK BEATS AN UNREADABLE ONE \(npm test --\)/ },
   { file: HJF, name: 'the why does not name the pick', edits: [['const say = (c: HeavyClass): HeavyClass => ({ ...c, why: ', 'const say = (c: HeavyClass): HeavyClass => ({ ...c, w0: ']],
     killer: 'pick', dies: /THE WHY NAMES THE PICKED FILE/ },
-  { file: HJF, name: 'a short runner path has no root (UHera F2)', edits: [["  if (parts.length === 1) return '../..';\n  if (parts.length === 2) return parts[0] === '..' ? '../../..' : '..';\n", '']],
+  { file: HJF, name: 'a short runner path has no root (UHera F2)', edits: [["  for (const s of [...parts.slice(0, -1), '..', '..']) {", "  if (parts.length < 4) return undefined;\n  for (const s of [...parts.slice(0, -1), '..', '..']) {"]],
     killer: 'short', dies: /SHORT RUNNER PATH: ITS REPO'S PICKS ARE READ \(Bash: cd test && node tools\/run-tests\.cjs activity-lag\)/ },
+  { file: HJF, name: 'the part-count rule (d4ecf6ad, UHera NIT)', edits: [["  for (const s of [...parts.slice(0, -1), '..', '..']) {", "  const q = parts.filter((p, i) => !(p === '.' && parts.slice(0, i).every((x) => x === '.')));\n  if (q.length < 4) return q.length === 1 ? '../..' : q.length === 2 ? (q[0] === '..' ? '../../..' : '..') : undefined;\n  for (const s of [...parts.slice(0, -1), '..', '..']) {"]],
+    killer: 'short', dies: /SHORT RUNNER PATH: ITS REPO'S PICKS ARE READ \(Bash: cd test\/heavy-lock && node \.\.\/tools\/run-tests\.cjs activity-lag\)/ },
   { file: HJF, name: 'the 20-file suite rule is gone (every pick judged by file)', edits: [["  if (n >= SUITE_MANY_FILES) return { heavy: true, kind: 'suite'", "  if (false) return { heavy: true, kind: 'suite'"]],
     killer: 'boundary', dies: /BOUNDARY: 20 PICKS ARE THE SUITE/ },
   { file: HJF, name: 'a test file\'s tag is not read at hop 0', edits: [['    if (hop === 0 || test) {\n      if (LIVE_TAG.test(', '    if (test) {\n      if (LIVE_TAG.test(']],

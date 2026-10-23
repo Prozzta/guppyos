@@ -556,17 +556,21 @@ function filteredSuite(what: string, needles: string[], ctx: ClassifyCtx, root?:
 
 /** Andy MINOR 2: the repo a suite runner script belongs to, as the runner resolves it (two folders
  *  above its own: `<root>/test/tools/run-tests.cjs`); undefined when that is the call's own folder
- *  (`test/tools/run-tests.cjs`). Relative to the call's folder when relative. UHera F2: a shorter path
- *  is called from inside the repo: `tools/run-tests.cjs` (from test/) is `..`, `run-tests.cjs` (from
- *  test/tools/) is `../..`. */
+ *  (`test/tools/run-tests.cjs`). Relative to the call's folder when relative. UHera F2 and her NIT:
+ *  any path, so a runner called from inside the repo too: the script's folder, two folders up
+ *  (`tools/run-tests.cjs` from test/ is `..`, `../tools/run-tests.cjs` from test/heavy-lock/ is `../..`). */
 function runnerRoot(script: string): string | undefined {
-  const parts = script.replace(/\\/g, '/').replace(/^(\.\/)+/, '').split('/');
-  if (parts.length < 4 && (parts[0] === '' || /^[A-Za-z]:$/.test(parts[0]))) return undefined;   // at a drive's top
-  if (parts.length === 1) return '../..';
-  if (parts.length === 2) return parts[0] === '..' ? '../../..' : '..';
-  if (parts.length < 4) return undefined;
-  const root = parts.slice(0, -3).join('/');
-  return root === '' ? '/' : root;
+  const parts = script.replace(/\\/g, '/').split('/');
+  const abs = parts[0] === '' || /^[A-Za-z]:$/.test(parts[0]);
+  const out: string[] = [];
+  for (const s of [...parts.slice(0, -1), '..', '..']) {
+    if (s === '.' || (s === '' && out.length)) continue;
+    if (s === '..' && abs && out.length === 1) return undefined;   // above a drive's top
+    if (s === '..' && out.length && out[out.length - 1] !== '..') { out.pop(); continue; }
+    out.push(s);
+  }
+  if (!out.length) return undefined;
+  return out.length === 1 && out[0] === '' ? '/' : out.join('/');
 }
 
 /** HEAVY-LOCK-FALSE-NEGATIVES (item 1): the shell Codex's exec_command runs in when it names none
