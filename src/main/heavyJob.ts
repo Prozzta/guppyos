@@ -502,7 +502,7 @@ export interface ClassifyCtx {
    *  while Jim held): the test files the suite runner would pick from, as the runner lists them
    *  (names relative to test/), for this call's folder; null when it cannot be listed. A FILTER that
    *  matches SUITE_MANY_FILES of them or more is the suite, not a focused run. Absent = not counted. */
-  testFiles?: (cd?: string) => string[] | null;
+  testFiles?: (cd?: string, root?: string) => string[] | null;
   /** HEAVY-LOCK-FALSE-NEGATIVES (item 2): how many scripts deep this text is a command a node script
    *  spawns (`execSync('npm test')`); a spawned command's own spawns are not followed. */
   spawnDepth?: number;
@@ -518,14 +518,26 @@ export interface ClassifyCtx {
  * contains a needle (case-insensitive, union), so `run-tests.cjs test` or `npm test -- heavy` is the
  * suite in all but name. With no lister the old rule stands: a filtered run is light.
  */
-function filteredSuite(what: string, needles: string[], ctx: ClassifyCtx): HeavyClass {
-  const list = needles.length && ctx.testFiles ? ctx.testFiles(ctx.cd) : null;
+function filteredSuite(what: string, needles: string[], ctx: ClassifyCtx, root?: string): HeavyClass {
+  // Andy MINOR 2: the runner lists ITS OWN repo (path.resolve(__dirname, '..', '..')), not the caller's
+  // folder: `node C:/other/test/tools/run-tests.cjs heavy` from elsewhere, `npm --prefix C:/other test`.
+  const list = needles.length && ctx.testFiles ? ctx.testFiles(ctx.cd, root) : null;
   if (!list) return { heavy: false };
   const low = needles.map((n) => n.toLowerCase());
   let n = 0;
   for (const f of list) { const name = f.toLowerCase(); if (low.some((x) => name.includes(x))) n++; }
   if (n >= SUITE_MANY_FILES) return { heavy: true, kind: 'suite', why: `${what} ${needles.join(' ')} (matches ${n} test files)` };
   return { heavy: false };
+}
+
+/** Andy MINOR 2: the repo a suite runner script belongs to, as the runner resolves it (two folders
+ *  above its own: `<root>/test/tools/run-tests.cjs`); undefined when the path has no such prefix
+ *  (`test/tools/run-tests.cjs` is the call's own folder). Relative to the call's folder when relative. */
+function runnerRoot(script: string): string | undefined {
+  const parts = script.replace(/\\/g, '/').split('/');
+  if (parts.length < 4) return undefined;
+  const root = parts.slice(0, -3).join('/');
+  return root === '' ? '/' : root;
 }
 
 /** HEAVY-LOCK-FALSE-NEGATIVES (item 1): the shell Codex's exec_command runs in when it names none
@@ -855,8 +867,10 @@ function jsElements(toks: JsTok[]): JsTok[][] {
  * arguments: a string first argument (`exec('npm test')`), or a program (a string, or
  * `process.execPath` = node) plus a string array (`spawn('npm', ['test'])`; a fork's module is
  * judged as the script it is). An argument the lock cannot read (a variable, a spread) is
- * `$computed`, so the line is judged on what is literal. A `node --test` list is the live-file
- * rule's (scanJs's tests), not a line.
+ * `$computed`, so the line is judged on what is literal. Andy NIT 2: a string program with no
+ * array (`spawn('npm test', { shell: true })`) is a line, as exec's is. Andy NIT 1: a `node --test`
+ * list is a line too (`spawn(process.execPath, ['--test'])` is the suite); its named files are
+ * still followed for their own tag by the live-file rule (scanJs's tests).
  */
 function spawnedLine(fn: string, args: JsTok[]): string | null {
   const els = jsElements(args);
@@ -870,11 +884,10 @@ function spawnedLine(fn: string, args: JsTok[]): string | null {
   if (!prog) return null;
   const words = [prog];
   const list = els[1];
-  if (list && list[0]?.t === 'p' && list[0].v === '[') {
-    for (const e of jsElements(list.slice(1))) {
-      if (e.length === 1 && e[0].t === 'str') { if (e[0].v === '--test') return null; words.push(e[0].v); }
-      else words.push('$computed');
-    }
+  if (!(list && list[0]?.t === 'p' && list[0].v === '[')) return prog;
+  for (const e of jsElements(list.slice(1))) {
+    if (e.length === 1 && e[0].t === 'str') words.push(e[0].v);
+    else words.push('$computed');
   }
   return words.map((w) => (/^[\w./:@=-]+$/.test(w) || w === '$computed' ? w : `'${w.replace(/'/g, "'\\''")}'`)).join(' ');
 }
@@ -1344,6 +1357,16 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
   }
   const has = (...xs: string[]): boolean => xs.some((x) => args.includes(x));
   if (bin === 'npm' || bin === 'pnpm' || bin === 'yarn') {
+    // Andy MINOR 2: `npm --prefix <repo> test -- x` (`-C <repo>`, `--prefix=<repo>`) runs that repo's
+    // suite: its test files are the ones counted, and the folder is not the subcommand.
+    let prefix: string | undefined;
+    const own = args.filter((a, i) => {
+      const eq = /^(?:--prefix|-C)=(.+)$/.exec(a);
+      if (eq) { prefix = eq[1]; return false; }
+      if (a === '--prefix' || a === '-C') { prefix = args[i + 1]; return false; }
+      return !(args[i - 1] === '--prefix' || args[i - 1] === '-C');
+    });
+    args = own;
     const sub = args.find((a) => !a.startsWith('-')) ?? (bin === 'yarn' ? 'install' : '');
     if (sub === 'ci' || sub === 'rebuild') return { heavy: true, kind: 'install', why: `${bin} ${sub}` };
     if (sub === 'install' || sub === 'i' || sub === 'add') {
@@ -1354,12 +1377,14 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
     // light. Without one it is the suite: heavy.
     const filtered = args.includes('--') && args.indexOf('--') < args.length - 1;
     // HEAVY-LOCK-FALSE-NEGATIVES: a filter that picks most of the suite is the suite.
-    const needles = filtered ? args.slice(args.indexOf('--') + 1).filter((a) => !a.startsWith('-')) : [];
-    if (sub === 'test' || sub === 't') return filtered ? filteredSuite(`${bin} test --`, needles, ctx) : { heavy: true, kind: 'suite', why: `${bin} test` };
+    // Andy MINOR 1: EVERY argument after `--` is a needle, as the runner takes them (process.argv.slice(2),
+    // a plain substring): `npm test -- -` picks the whole suite, `-19` seventy files.
+    const needles = filtered ? args.slice(args.indexOf('--') + 1) : [];
+    if (sub === 'test' || sub === 't') return filtered ? filteredSuite(`${bin} test --`, needles, ctx, prefix) : { heavy: true, kind: 'suite', why: `${bin} test` };
     if (sub === 'run' || sub === 'run-script') {
       const script = args.slice(args.indexOf(sub) + 1).find((a) => !a.startsWith('-')) ?? '';
       if (/^(build|dist)(:.*)?$/.test(script)) return { heavy: true, kind: 'build', why: `${bin} run ${script}` };
-      if (/^test(:.*)?$/.test(script)) return filtered ? filteredSuite(`${bin} run ${script} --`, needles, ctx) : { heavy: true, kind: 'suite', why: `${bin} run ${script}` };
+      if (/^test(:.*)?$/.test(script)) return filtered ? filteredSuite(`${bin} run ${script} --`, needles, ctx, prefix) : { heavy: true, kind: 'suite', why: `${bin} run ${script}` };
     }
     return { heavy: false };
   }
@@ -1449,11 +1474,13 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
     if (script && BENCH_SCRIPT.test(script)) return { heavy: true, kind: 'bench', why: `node ${script.replace(/\\/g, '/').split('/').pop()}` };
     // Jim MF2: a whole-suite runner script with no filter argument is the suite.
     if (script && SUITE_RUNNER.test(script)) {
-      const rest = args.slice(at + 1).filter((a) => !a.startsWith('-'));
+      // Andy MINOR 1: every argument is a needle, as the runner takes them (`run-tests.cjs fp-199 -`
+      // picks the whole suite); "no filter" is exactly no argument.
+      const rest = args.slice(at + 1);
       const base = script.replace(/\\/g, '/').split('/').pop();
       if (!rest.length) return { heavy: true, kind: 'suite', why: `node ${base} (no filter)` };
       // HEAVY-LOCK-FALSE-NEGATIVES: `run-tests.cjs test` picks every file: the suite under a filter.
-      const many = filteredSuite(`node ${base}`, rest, ctx);
+      const many = filteredSuite(`node ${base}`, rest, ctx, runnerRoot(script));
       if (many.heavy) return many;
     }
     // HEAVY-JOB-LOCK-FAILOPEN (Andy 42b671): a wrapper SCRIPT that runs the command after it

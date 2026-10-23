@@ -2023,10 +2023,15 @@ export class HookServer {
 
   /** HEAVY-LOCK-FALSE-NEGATIVES: the test files under `<folder>/test` as the suite runner would find
    *  them (every `*.test.cjs`, any depth, names relative to test/); null when there is no such folder. */
-  static listTestFiles(cwd: string | null, cd?: string): string[] | null {
-    if (!cwd && !(cd && isAbsolute(cd))) return null;
-    const base = cd ? (isAbsolute(cd) ? cd : join(cwd!, cd)) : cwd!;
-    const root = join(base.replace(/^\/([A-Za-z])\//, (_m, d: string) => `${d.toUpperCase()}:/`), 'test');
+  static listTestFiles(cwd: string | null, cd?: string, repo?: string): string[] | null {
+    // Andy MINOR 2: `repo` is the runner's own repo (from its path, or npm --prefix), relative to the
+    // call's folder when relative; the call's folder (after its cd) otherwise.
+    const drive = (p: string): string => p.replace(/^\/([A-Za-z])\//, (_m, d: string) => `${d.toUpperCase()}:/`);
+    const abs = (p: string): boolean => isAbsolute(p) || /^\/[A-Za-z]\//.test(p);
+    if (!cwd && !(cd && abs(cd)) && !(repo && abs(repo))) return null;
+    const folder = cd ? (abs(cd) ? drive(cd) : join(cwd!, cd)) : cwd;
+    const base = repo ? (abs(repo) ? drive(repo) : join(folder!, repo)) : folder!;
+    const root = join(drive(base), 'test');
     const out: string[] = [];
     const walk = (dir: string, rel: string, depth: number): void => {
       let entries: Dirent[];
@@ -2046,7 +2051,7 @@ export class HookServer {
     const env = HookServer.heavyEnv();
     const folder = typeof cwd === 'string' ? cwd : null;
     return {
-      testFiles: (cd) => HookServer.listTestFiles(folder, cd),
+      testFiles: (cd, repo) => HookServer.listTestFiles(folder, cd, repo),
       ...scriptReaderFor(typeof cwd === 'string' ? cwd : null, (abs) => {
         const path = abs.replace(/^\/([A-Za-z])\//, (_m, d: string) => `${d.toUpperCase()}:/`);
         try {

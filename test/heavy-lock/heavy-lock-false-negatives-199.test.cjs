@@ -59,7 +59,12 @@ const SCRIPTS = {
   'prov.js': `require('child_process').execSync('node nothere.js');\n`,
   'a.js': `require('child_process').execSync('node b.js');\n`,
   'b.js': `require('child_process').execSync('${NT}');\n`,
+  // Andy NIT 2: a one-string program with shell:true is a line. NIT 1: a `node --test` list is a line.
+  'shell.js': `require('child_process').spawn('${NT}', { shell: true, stdio: 'inherit' });\n`,
+  'tlist.js': `require('child_process').spawn(process.execPath, ['--test'], { stdio: 'inherit' });\n`,
+  'tmany.js': `require('child_process').spawn(process.execPath, ['--test', ${Array.from({ length: 20 }, (_, i) => `'x-${i}.test.cjs'`).join(', ')}]);\n`,
 };
+const AGENTP = AGENT.replace(/\\/g, '/');
 for (const [n, t] of Object.entries(SCRIPTS)) fs.writeFileSync(path.join(SP, n), t);
 
 const cls = (M, cmd, ctx, toolName = 'Bash') => M.classifyHeavy(toolName, toolName === 'write_stdin' ? { chars: `${cmd}\n` } : toolName === 'Bash' ? { command: cmd } : { cmd }, ctx);
@@ -88,11 +93,36 @@ K.needle = async ({ HJ: M, HK: H }) => {
   assert.equal(cls(M, `node ${RUNNER} fn-MANY`, ctx).heavy, true, 'THE NEEDLE IS CASE-INSENSITIVE, AS THE RUNNER MATCHES IT');
   // Two needles are a union: each file counted once.
   assert.equal(cls(M, `node ${RUNNER} fn-many many-1`, ctx).why, `node run-tests.cjs fn-many many-1 (matches ${MANY} test files)`, 'NEEDLES ARE A UNION');
-  // The threshold is the suite's own SUITE_MANY_FILES (node --test with that many files is a suite too).
+  assert.equal(cls(M, `${NT} -- fn-many many-1`, ctx).why, `npm test -- fn-many many-1 (matches ${MANY} test files)`, 'NPM NEEDLES ARE A UNION');
+  // Andy MINOR 1: EVERY argument is a needle, as the runner takes them (process.argv.slice(2), a plain
+  // substring): `-` picks every file; a flag that matches nothing is a filter, not "no filter".
+  assert.equal(cls(M, `node ${RUNNER} -`, ctx).why, `node run-tests.cjs - (matches ${MANY + 1} test files)`, 'A DASH NEEDLE COUNTS (runner)');
+  assert.equal(cls(M, `node ${RUNNER} fn-only-one -`, ctx).why, `node run-tests.cjs fn-only-one - (matches ${MANY + 1} test files)`, 'A DASH NEEDLE COUNTS (runner, after a narrow one)');
+  assert.equal(cls(M, `${NT} -- -`, ctx).why, `npm test -- - (matches ${MANY + 1} test files)`, 'A DASH NEEDLE COUNTS (npm)');
+  assert.deepEqual(cls(M, `node ${RUNNER} --nothing-named-so`, ctx), { heavy: false }, 'A FLAG THAT MATCHES NOTHING IS A FILTER, NOT "no filter"');
+  // The threshold is the suite's own SUITE_MANY_FILES (node --test with that many files is a suite too):
+  // 20, pinned as a number (Andy NIT 1: a threshold of 21 survived the symbolic pin).
   const names = (n) => Array.from({ length: n }, (_, i) => `x-${i}.test.cjs`);
   const at = (n) => cls(M, `node ${RUNNER} x-`, { ...ctx, testFiles: () => names(n) });
-  assert.equal(at(M.SUITE_MANY_FILES - 1).heavy, false, 'THRESHOLD: ONE FEWER IS LIGHT');
-  assert.equal(at(M.SUITE_MANY_FILES).heavy, true, 'THRESHOLD: SUITE_MANY_FILES MATCHES IS THE SUITE');
+  assert.equal(at(19).heavy, false, 'THRESHOLD: 19 MATCHES IS LIGHT');
+  assert.equal(at(20).heavy, true, 'THRESHOLD: 20 MATCHES IS THE SUITE');
+  assert.equal(M.SUITE_MANY_FILES, 20, 'THRESHOLD IS 20');
+  // Andy MINOR 2: the runner lists ITS OWN repo (two folders above its file), not the caller's folder:
+  // from a folder with no test/ at all, and relative to the caller's folder.
+  const away = H.HookServer.heavyScriptCtx(SP);
+  assert.equal(away.testFiles(), null, 'the caller\'s folder has no test/ to list');
+  const far = cls(M, `node ${AGENTP}/${RUNNER} fn-many`, away);
+  assert.equal(sure(far) && far.kind, 'suite', `THE RUNNER LISTS ITS OWN REPO: ${JSON.stringify(far)}`);
+  assert.equal(far.why, `node run-tests.cjs fn-many (matches ${MANY} test files)`);
+  assert.equal(cls(M, `node ${AGENTP}/${RUNNER} fn-only-one`, away).heavy, false, 'THE RUNNER LISTS ITS OWN REPO: one file is light');
+  const rel = cls(M, `node agent/${RUNNER} fn-many`, H.HookServer.heavyScriptCtx(JAIL));
+  assert.equal(sure(rel) && rel.kind, 'suite', `A RELATIVE RUNNER PATH LISTS ITS REPO: ${JSON.stringify(rel)}`);
+  // npm --prefix <repo> (also -C, --prefix=): that repo's suite; the folder is not the subcommand.
+  assert.deepEqual(cls(M, `npm --prefix ${AGENTP} test`, away), { heavy: true, kind: 'suite', why: 'npm test' }, 'THE PREFIX FOLDER IS NOT THE SUBCOMMAND');
+  const pre = cls(M, `npm --prefix ${AGENTP} test -- fn-many`, away);
+  assert.equal(sure(pre) && pre.kind, 'suite', `NPM --prefix LISTS THAT REPO: ${JSON.stringify(pre)}`);
+  assert.equal(cls(M, `npm -C ${AGENTP} run test:focused -- fn-many`, away).heavy, true, 'NPM -C LISTS THAT REPO (run test:focused)');
+  assert.equal(cls(M, `npm --prefix=${AGENTP} test -- fn-only-one`, away).heavy, false, 'NPM --prefix= ONE FILE IS LIGHT');
   // Without a lister (a bare classifyCommand), the old rule stands: a filtered run is light.
   const { testFiles: _t, ...bare } = ctx;
   assert.equal(cls(M, `node ${RUNNER} fn-many`, bare).heavy, false, 'NO LISTER: A FILTERED RUN IS LIGHT AS BEFORE');
@@ -108,6 +138,9 @@ K.lease = async ({ HJ: M, HK: H }) => {
   assert.equal(one.why, 'a filtered suite runner');
   const many = await lock.lease('cx', { op: 'acquire', pid: 4242, createdMs: Date.now(), runner: [runner, 'fn-many'], cwd: AGENT });
   assert.notEqual(many.state, 'light', `THE LEASE COUNTS THE NEEDLE: ${JSON.stringify(many)}`);
+  // Andy MINOR 2: the preload's argv[1] is the runner's own path; its repo is listed, not process.cwd().
+  const away = await lock.lease('cx', { op: 'acquire', pid: 4243, createdMs: Date.now(), runner: [runner, 'fn-many'], cwd: SP });
+  assert.notEqual(away.state, 'light', `THE LEASE LISTS THE RUNNER'S OWN REPO: ${JSON.stringify(away)}`);
 };
 
 /** A node script that spawns a heavy command line is that command. */
@@ -120,6 +153,9 @@ K.spawn = async ({ HJ: M, HK: H }) => {
   assert.equal(at('node arr.js').why, 'node arr.js (spawns npm ci)', 'A PROGRAM PLUS ARRAY IS A LINE');
   assert.equal(at('node exe.js').why, 'node exe.js (spawns node go-bench.cjs)', 'PROCESS.EXECPATH IS NODE');
   assert.equal(at('node fork.js').why, 'node fork.js (spawns node run-tests.cjs (no filter))', 'A FORKED MODULE IS THE SCRIPT IT NAMES');
+  assert.equal(at('node shell.js').why, `node shell.js (spawns ${NT})`, 'A ONE-STRING PROGRAM WITH shell:true IS A LINE');
+  assert.equal(at('node tlist.js').why, 'node tlist.js (spawns node --test (all))', 'A SPAWNED node --test LIST IS A LINE');
+  assert.equal(at('node tmany.js').why, 'node tmany.js (spawns node --test (20 files))', 'A SPAWNED node --test LIST IS A LINE (20 files)');
   assert.equal(at(`node -e "require('child_process').execSync('${NT}')"`).why, `node -e (spawns ${NT})`, 'INLINE CODE SPAWNS NPM TEST');
   assert.deepEqual(at('node light.js'), { heavy: false }, 'A LIGHT SPAWN STAYS LIGHT');
   assert.deepEqual(at('node computed.js'), { heavy: false }, 'A COMPUTED SPAWN IS NOT GUESSED');
@@ -297,12 +333,32 @@ const MUTANTS = [
   { file: HJF, name: 'the file count is not applied', edits: [["  if (n >= SUITE_MANY_FILES) return { heavy: true, kind: 'suite'", "  if (false) return { heavy: true, kind: 'suite'"]],
     killer: 'needle', dies: /A BROAD NEEDLE IS THE SUITE \(Bash\)/ },
   { file: HJF, name: 'threshold off by one', edits: [['  if (n >= SUITE_MANY_FILES) return', '  if (n > SUITE_MANY_FILES) return']],
-    killer: 'needle', dies: /THRESHOLD: SUITE_MANY_FILES MATCHES IS THE SUITE/ },
+    killer: 'needle', dies: /THRESHOLD: 20 MATCHES IS THE SUITE/ },
+  { file: HJF, name: 'threshold 21 (Andy NIT 1)', edits: [['export const SUITE_MANY_FILES = 20;', 'export const SUITE_MANY_FILES = 21;']],
+    killer: 'needle', dies: /THRESHOLD: 20 MATCHES IS THE SUITE/ },
+  { file: HJF, name: 'npm needles drop a dash argument (today)', edits: [["    const needles = filtered ? args.slice(args.indexOf('--') + 1) : [];", "    const needles = filtered ? args.slice(args.indexOf('--') + 1).filter((a) => !a.startsWith('-')) : [];"]],
+    killer: 'needle', dies: /A DASH NEEDLE COUNTS \(npm\)/ },
+  { file: HJF, name: 'runner needles drop a dash argument (today)', edits: [['      const rest = args.slice(at + 1);\n', "      const rest = args.slice(at + 1).filter((a) => !a.startsWith('-'));\n"]],
+    killer: 'needle', dies: /A DASH NEEDLE COUNTS \(runner\)/ },
+  { file: HJF, name: 'the runner lists the caller\'s folder (today)', edits: [['filteredSuite(`node ${base}`, rest, ctx, runnerRoot(script))', 'filteredSuite(`node ${base}`, rest, ctx)']],
+    killer: 'needle', dies: /THE RUNNER LISTS ITS OWN REPO: \{/ },
+  { file: HJF, name: 'a relative runner path is not its repo', edits: [["  const root = parts.slice(0, -3).join('/');\n  return root === '' ? '/' : root;", "  const root = parts.slice(0, -3).join('/');\n  return root === '' || !/^([A-Za-z]:)?\\//.test(root) ? undefined : root;"]],
+    killer: 'needle', dies: /A RELATIVE RUNNER PATH LISTS ITS REPO/ },
+  { file: HJF, name: 'npm --prefix is the subcommand (today)', edits: [['    args = own;\n', '']],
+    killer: 'needle', dies: /THE PREFIX FOLDER IS NOT THE SUBCOMMAND/ },
+  { file: HJF, name: 'npm --prefix is not the repo listed', edits: [['filteredSuite(`${bin} test --`, needles, ctx, prefix)', 'filteredSuite(`${bin} test --`, needles, ctx)']],
+    killer: 'needle', dies: /NPM --prefix LISTS THAT REPO/ },
+  { file: HJF, name: 'npm run test* ignores the prefix', edits: [['filteredSuite(`${bin} run ${script} --`, needles, ctx, prefix)', 'filteredSuite(`${bin} run ${script} --`, needles, ctx)']],
+    killer: 'needle', dies: /NPM -C LISTS THAT REPO/ },
+  { file: HKF, name: 'the lister ignores the repo', edits: [['    const base = repo ? (abs(repo) ? drive(repo) : join(folder!, repo)) : folder!;', '    const base = folder!;']],
+    killer: 'needle', dies: /THE RUNNER LISTS ITS OWN REPO: \{/ },
+  { file: HJF, name: 'a spawned node --test list is not a line (the old rule)', edits: [["    if (e.length === 1 && e[0].t === 'str') words.push(e[0].v);", "    if (e.length === 1 && e[0].t === 'str') { if (e[0].v === '--test') return null; words.push(e[0].v); }"]],
+    killer: 'spawn', dies: /A SPAWNED node --test LIST IS A LINE/ },
   { file: HJF, name: 'the match is case-sensitive', edits: [['  for (const f of list) { const name = f.toLowerCase();', '  for (const f of list) { const name = f;']],
     killer: 'needle', dies: /A BROAD NEEDLE IS THE SUITE \(Bash\)/ },
-  { file: HJF, name: 'npm test -- <needle> is always light (today)', edits: [['filteredSuite(`${bin} test --`, needles, ctx)', '{ heavy: false }']],
+  { file: HJF, name: 'npm test -- <needle> is always light (today)', edits: [['filteredSuite(`${bin} test --`, needles, ctx, prefix)', '{ heavy: false }']],
     killer: 'needle', dies: /NPM TEST WITH A BROAD NEEDLE IS THE SUITE \(Bash\)/ },
-  { file: HJF, name: 'npm run test* -- <needle> is always light (today)', edits: [['filteredSuite(`${bin} run ${script} --`, needles, ctx)', '{ heavy: false }']],
+  { file: HJF, name: 'npm run test* -- <needle> is always light (today)', edits: [['filteredSuite(`${bin} run ${script} --`, needles, ctx, prefix)', '{ heavy: false }']],
     killer: 'needle', dies: /NPM RUN TEST WITH A BROAD NEEDLE IS THE SUITE/ },
   { file: HJF, name: 'node run-tests.cjs <needle> is always light (today)', edits: [['      if (many.heavy) return many;\n', '']],
     killer: 'needle', dies: /A BROAD NEEDLE IS THE SUITE \(Bash\)/ },
@@ -310,8 +366,8 @@ const MUTANTS = [
     killer: 'lease', dies: /THE LEASE COUNTS THE NEEDLE/ },
   { file: HJF, name: 'spawned lines are not collected', edits: [['      const sp = spawnedLine(x.v, args);\n      if (sp) spawns.push(sp);\n', '']],
     killer: 'spawn', dies: /A SCRIPT SPAWNS NPM TEST/ },
-  { file: HJF, name: 'an exec string is quoted as a program name', edits: [["  if (fn === 'exec' || fn === 'execSync') return first.length === 1 && first[0].t === 'str' ? first[0].v : null;\n", '']],
-    killer: 'spawn', dies: /A SCRIPT SPAWNS NPM TEST/ },
+  { file: HJF, name: 'a one-string program with a space is not a line (Andy NIT 2)', edits: [["  if (!(list && list[0]?.t === 'p' && list[0].v === '[')) return prog;", "  if (!(list && list[0]?.t === 'p' && list[0].v === '[')) return /\\s/.test(prog) ? null : prog;"]],
+    killer: 'spawn', dies: /A ONE-STRING PROGRAM WITH shell:true IS A LINE/ },
   { file: HJF, name: 'process.execPath is not node', edits: [["  else if (first.length === 3 && first[0].v === 'process' && first[1].v === '.' && first[2].v === 'execPath') prog = 'node';\n", '']],
     killer: 'spawn', dies: /PROCESS.EXECPATH IS NODE/ },
   { file: HJF, name: 'a provisional spawn counts', edits: [['    if (g.heavy && !g.provisional) return g.why ?? line;', '    if (g.heavy) return g.why ?? line;']],
@@ -334,7 +390,7 @@ const MUTANTS = [
     killer: 'codexShell', dies: /THE HOOK NAMES THE SHELL \(a plain exec_command with a bash path\)/ },
   { file: HKF, name: 'PreToolUse classifies without the named shell', edits: [['      const scripts = HookServer.heavyCtxOf(p);', '      const scripts = HookServer.heavyScriptCtx(p.cwd);']],
     killer: 'codexShell', dies: /A BASH \$true IS A PATH THE LOCK CANNOT NAME/ },
-  { file: HKF, name: 'the hook context lists no test files (today)', edits: [['      testFiles: (cd) => HookServer.listTestFiles(folder, cd),\n', '']],
+  { file: HKF, name: 'the hook context lists no test files (today)', edits: [['      testFiles: (cd, repo) => HookServer.listTestFiles(folder, cd, repo),\n', '']],
     killer: 'codexDenied', dies: /A CODEX exec_command node run-tests.cjs WITH A BROAD NEEDLE IS DENIED/ },
   { file: HKF, name: 'the lister stops at test/ (feature folders not walked)', edits: [["if (depth < 3 && e.name !== 'node_modules') walk(", "if (false) walk("]],
     killer: 'needle', dies: /the lister finds every \*\.test\.cjs under test\/, any depth/ },
