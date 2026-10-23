@@ -14,11 +14,11 @@ import { toolEnded, toolStarted, UNKNOWN_TOOL, type RunningTool } from '../share
 import { createServer, type Server } from 'node:net';
 import { createServer as createHttpServer, type Server as HttpServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, writeFileSync, type Dirent } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { Notification, type WebContents } from 'electron';
 import type { HiveManager } from './hive';
-import { classifyCommand, classifyHeavy, commandFromToolInput, heavyCommandOf, isBackground, scriptReaderFor, type ClassifyCtx, type HeavyJobLock, type HeavyLeaseRequest } from './heavyJob';
+import { classifyCommand, classifyHeavy, codexDefaultShell, codexShellKind, commandFromToolInput, heavyCommandOf, isBackground, scriptReaderFor, type ClassifyCtx, type HeavyJobLock, type HeavyLeaseRequest, type ShellKind } from './heavyJob';
 import { compactCarryText, readPathOf, type CarryCard, type CarryObligation, type CompactHealthWatch } from './compactHealth';
 import { modelForHiveSpawn, type HarnessConfig } from './config';
 import { TOOL_OUTPUT_CAP_READ, capForCommand, commandOf, condenseOutput, effectiveCap, isReadCommand, outputText, shouldCondense, type BashLikeResponse } from './toolOutputCondense';
@@ -172,6 +172,10 @@ interface HookPayload {
   /** HEAVY-CPU-OPTIONS-191: that call asked for Windows cmd as its shell (its literal `shell` in the
    *  rollout), so its join line takes cmd's own separator. */
   hook_cmd_shell?: boolean;
+  /** HEAVY-LOCK-FALSE-NEGATIVES (Andy, item 1): the shell a Codex call's text runs in, for the heavy
+   *  classifier: its exec_command's literal `shell`, else Codex's default (PowerShell on Windows);
+   *  a write_stdin writes to that default shell. Absent = unknown (cmd, computed, or not found). */
+  hook_shell?: ShellKind;
 }
 
 export type HookTransport = 'http' | 'pipe' | 'mcp' | 'pipe-oneway';
@@ -1061,11 +1065,22 @@ export class HookServer {
     // HEAVY-LOCK-SINGLE-FILE-DENIAL-198: a Codex hook carries no cwd. The heavy lock reads a
     // relative script against the folder the call runs in: its workdir, else the turn's cwd as
     // Codex records it, else the agent's folder.
-    const runs = typeof ti?.command === 'string' ? ti.command : commandFromToolInput(rebuilt.toolName === 'Bash' ? rebuilt.toolInput : undefined);
+    const runs = typeof ti?.command === 'string' ? ti.command : commandFromToolInput(rebuilt.toolName === 'Bash' || rebuilt.toolName === 'exec_command' ? rebuilt.toolInput : undefined);
     const workdir = event === 'PreToolUse' && tail && runs ? pendingExecWorkdir(tail, runs) : undefined;
+    // HEAVY-LOCK-FALSE-NEGATIVES (item 1): a Codex tool name says nothing about the shell (a Claude
+    // tool's does), so the classifier applied PowerShell's value rules to a bash `$true` and bash's
+    // to a PowerShell `& $x`: the call's own `shell`, else Codex's default, names it.
+    if (event === 'PreToolUse') {
+      const shell = rebuilt.toolName === 'write_stdin' ? codexDefaultShell() : tail && runs ? codexShellKind(pendingExecShell(tail, runs)) : undefined;
+      if (shell) p.hook_shell = shell;
+    }
     const folder = (workdir !== undefined ? turnCwd(tail) : null) ?? this.hive.registry().agents[agentId]?.cwd;
     if (typeof workdir === 'string' && (isAbsolute(workdir) || folder)) p.cwd = isAbsolute(workdir) ? workdir : join(folder as string, workdir);
     else if (workdir === null && folder) p.cwd = folder;
+    // HEAVY-LOCK-FALSE-NEGATIVES: a write_stdin names no folder (its shell session's is not recorded):
+    // the turn's cwd, else the agent's folder, is where its test files are listed. A wrong guess
+    // lists nothing, and the old rule (a filtered run is light) stands.
+    else if (workdir === undefined && rebuilt.toolName === 'write_stdin') { const f = (tail ? turnCwd(tail) : null) ?? this.hive.registry().agents[agentId]?.cwd; if (f) p.cwd = f; }
     // HEAVY-JOB-LOCK-FAILOPEN (c): a still-degraded PreToolUse carries the pending shell commands,
     // so the heavy-job lock can classify what is about to run (gates still see it as degraded).
     if (rebuilt.degraded && event === 'PreToolUse' && tail) {
@@ -1998,10 +2013,40 @@ export class HookServer {
 
   /** HEAVY-LOCK-SCRIPT-WRAPPER: the classifier may read a script the call runs (`bash suite.sh`),
    *  resolved against the hook's cwd, Git Bash `/c/...` paths included, size-capped by heavyJob. */
+  /** HEAVY-LOCK-FALSE-NEGATIVES: the classifier's context for a hook payload: its folder's reader
+   *  and test-file lister, and the shell its text runs in when the payload names one. */
+  static heavyCtxOf(p: Pick<HookPayload, 'cwd' | 'hook_shell'>): ClassifyCtx {
+    const ctx = HookServer.heavyScriptCtx(p.cwd);
+    if (p.hook_shell) ctx.shell = p.hook_shell;
+    return ctx;
+  }
+
+  /** HEAVY-LOCK-FALSE-NEGATIVES: the test files under `<folder>/test` as the suite runner would find
+   *  them (every `*.test.cjs`, any depth, names relative to test/); null when there is no such folder. */
+  static listTestFiles(cwd: string | null, cd?: string): string[] | null {
+    if (!cwd && !(cd && isAbsolute(cd))) return null;
+    const base = cd ? (isAbsolute(cd) ? cd : join(cwd!, cd)) : cwd!;
+    const root = join(base.replace(/^\/([A-Za-z])\//, (_m, d: string) => `${d.toUpperCase()}:/`), 'test');
+    const out: string[] = [];
+    const walk = (dir: string, rel: string, depth: number): void => {
+      let entries: Dirent[];
+      try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+      for (const e of entries) {
+        if (e.isDirectory()) { if (depth < 3 && e.name !== 'node_modules') walk(join(dir, e.name), `${rel}${e.name}/`, depth + 1); }
+        else if (e.isFile() && e.name.endsWith('.test.cjs')) out.push(`${rel}${e.name}`);
+      }
+    };
+    try { if (!statSync(root).isDirectory()) return null; } catch { return null; }
+    walk(root, '', 0);
+    return out;
+  }
+
   static heavyScriptCtx(cwd: unknown): ClassifyCtx {
     // HEAVY-LOCK-FALSE-POSITIVE: the env places Git Bash's /tmp (TEMP) for the reader too.
     const env = HookServer.heavyEnv();
+    const folder = typeof cwd === 'string' ? cwd : null;
     return {
+      testFiles: (cd) => HookServer.listTestFiles(folder, cd),
       ...scriptReaderFor(typeof cwd === 'string' ? cwd : null, (abs) => {
         const path = abs.replace(/^\/([A-Za-z])\//, (_m, d: string) => `${d.toUpperCase()}:/`);
         try {
@@ -2477,7 +2522,7 @@ export class HookServer {
     if (event === 'PreToolUse' && agentId && this.heavyLock) {
       // Jim N1: a DEGRADED Codex hook (rebuilt from the rollout tail) may carry no tool input:
       // it cannot be classified, so it is allowed and logged.
-      const scripts = HookServer.heavyScriptCtx(p.cwd);
+      const scripts = HookServer.heavyCtxOf(p);
       // HEAVY-CPU-OPTIONS-191: a Codex hook that carries its own call's input (the hook template) is
       // classified on that: the nested exec_command itself, not a rebuild from the rollout.
       const own = p.hook_tool_input;
@@ -2535,7 +2580,7 @@ export class HookServer {
     if ((event === 'PostToolUse' || event === 'PostToolUseFailure') && agentId && this.heavyLock) {
       // HEAVY-LOCK-BG-LAPSE-189: a call held only because its script was unreadable at PreToolUse is
       // classified again now that the script exists, and freed at once if it is light.
-      this.heavyLock.settle(agentId, HookServer.heavyCallId(p), () => classifyHeavy(p.tool_name, p.tool_input, HookServer.heavyScriptCtx(p.cwd)));
+      this.heavyLock.settle(agentId, HookServer.heavyCallId(p), () => classifyHeavy(p.tool_name, p.tool_input, HookServer.heavyCtxOf(p)));
       this.heavyLock.callDone(agentId, HookServer.heavyCallId(p));
       this.heavyLock.noteCallEnd(agentId, HookServer.heavyCallId(p));
     }

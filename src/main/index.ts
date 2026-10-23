@@ -1349,6 +1349,8 @@ const heavyLock = new HeavyJobLock({
   limit: () => heavyLimit(readConfig().heavyJobsAtOnce),
   roots: () => ptyManager.list().flatMap((s) => { const a = ptyToAgent.get(s.id); return a && s.pid > 0 ? [{ agentId: a, pid: s.pid }] : []; }),
   probe: probeProcesses,
+  // HEAVY-LOCK-FALSE-NEGATIVES: a leasing suite runner's argv is judged in its own folder.
+  classifyCtx: (cwd) => HookServer.heavyScriptCtx(cwd),
   log: (row) => { try { hive.appendLog(row); } catch { /* best effort */ } },
   // HEAVY-LOCK-OPAQUE-SCRIPT-196: is a test process the call's own node (its parent the call's shell)?
   parentImage: processImage,

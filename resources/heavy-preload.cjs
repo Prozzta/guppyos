@@ -74,7 +74,7 @@ const req = {
   ppid: process.ppid,
   files,
   suite: testRun && files.length === 0,
-  ...(testRun ? {} : { runner: process.argv.slice(1) }),
+  ...(testRun ? {} : { runner: process.argv.slice(1), cwd: process.cwd() }),
   ...(process.env.GUPPY_TEST_RUN ? { parentRun: process.env.GUPPY_TEST_RUN } : {})
 };
 let told = false;

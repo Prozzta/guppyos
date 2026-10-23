@@ -490,6 +490,47 @@ export interface ClassifyCtx {
    *  or the wrapper (`bash -c`, `powershell -Command`, `bash x.sh`, `-File x.ps1`). Absent = unknown:
    *  PowerShell's value rules apply (as for a bare classifyCommand). */
   shell?: ShellKind;
+  /** HEAVY-LOCK-FALSE-NEGATIVES (god, 13:46Z: Dwight's `node test/tools/run-tests.cjs <needle>` ran
+   *  while Jim held): the test files the suite runner would pick from, as the runner lists them
+   *  (names relative to test/), for this call's folder; null when it cannot be listed. A FILTER that
+   *  matches SUITE_MANY_FILES of them or more is the suite, not a focused run. Absent = not counted. */
+  testFiles?: (cd?: string) => string[] | null;
+  /** HEAVY-LOCK-FALSE-NEGATIVES (item 2): how many scripts deep this text is a command a node script
+   *  spawns (`execSync('npm test')`); a spawned command's own spawns are not followed. */
+  spawnDepth?: number;
+}
+
+/**
+ * HEAVY-LOCK-FALSE-NEGATIVES: a FILTERED suite run (`run-tests.cjs <needle>`, `npm test -- <needle>`)
+ * is light only while its needles pick a few files: the runner selects every test file whose name
+ * contains a needle (case-insensitive, union), so `run-tests.cjs test` or `npm test -- heavy` is the
+ * suite in all but name. With no lister the old rule stands: a filtered run is light.
+ */
+function filteredSuite(what: string, needles: string[], ctx: ClassifyCtx): HeavyClass {
+  const list = needles.length && ctx.testFiles ? ctx.testFiles(ctx.cd) : null;
+  if (!list) return { heavy: false };
+  const low = needles.map((n) => n.toLowerCase());
+  let n = 0;
+  for (const f of list) { const name = f.toLowerCase(); if (low.some((x) => name.includes(x))) n++; }
+  if (n >= SUITE_MANY_FILES) return { heavy: true, kind: 'suite', why: `${what} ${needles.join(' ')} (matches ${n} test files)` };
+  return { heavy: false };
+}
+
+/** HEAVY-LOCK-FALSE-NEGATIVES (item 1): the shell Codex's exec_command runs in when it names none
+ *  (and what write_stdin writes to): PowerShell on Windows, else bash. */
+export function codexDefaultShell(platform: string = process.platform): ShellKind {
+  return platform === 'win32' ? 'powershell' : 'bash';
+}
+
+/** HEAVY-LOCK-FALSE-NEGATIVES (item 1): the shell kind of a Codex exec_command's `shell` (a name or
+ *  a path): null (none given) is Codex's default; cmd and an unknown or computed one stay unknown. */
+export function codexShellKind(shell: string | null | undefined, platform: string = process.platform): ShellKind | undefined {
+  if (shell === null) return codexDefaultShell(platform);
+  if (typeof shell !== 'string') return undefined;
+  const base = shell.trim().replace(/\\/g, '/').split('/').pop()?.toLowerCase().replace(/\.exe$/, '') ?? '';
+  if (/^(bash|sh|zsh|dash)$/.test(base)) return 'bash';
+  if (/^(powershell|pwsh)$/.test(base)) return 'powershell';
+  return undefined;
 }
 
 /** Where a script named in `ctx` under `dialect` is looked for (see PathLookup). */
@@ -679,10 +720,13 @@ function normPath(p: string): string {
 }
 
 /** What a script's text loads: the first heavy marker (or null) and the helper paths to read next. */
-function scanJs(text: string): { marker: string | null; helpers: string[]; tests?: string[] } {
+function scanJs(text: string): { marker: string | null; helpers: string[]; tests?: string[]; spawns?: string[] } {
   const ts = jsTokens(text);
   const helpers: string[] = [];
   const tests: string[] = [];
+  /** HEAVY-LOCK-FALSE-NEGATIVES (item 2): the command lines this script spawns, as far as they are
+   *  literal: `execSync('npm test')`, `spawn('npm', ['test'])`, `spawn(process.execPath, [...])`. */
+  const spawns: string[] = [];
   const consts = new Map<string, string>();
   const requires = new Set(['require', 'loadTs']);
   // `const s = '…'` (string constants a spawn may name) and `const req = createRequire(…)`.
@@ -744,6 +788,8 @@ function scanJs(text: string): { marker: string | null; helpers: string[]; tests
       const owner = dotted ? ts[k - 2]?.v ?? '' : '';
       if (x.v === 'exec' && dotted && !/^(child_process|cp|childProcess)$/.test(owner)) continue;   // RegExp#exec
       const args = call(k + 1).all.map((a) => (a.t === 'id' && consts.has(a.v) ? { t: 'str' as const, v: consts.get(a.v)! } : a));
+      const sp = spawnedLine(x.v, args);
+      if (sp) spawns.push(sp);
       for (let j = 0; j < args.length; j++) {
         const a = args[j];
         if (a.t !== 'str') continue;
@@ -777,7 +823,64 @@ function scanJs(text: string): { marker: string | null; helpers: string[]; tests
       }
     }
   }
-  return { marker: null, helpers, tests };
+  return { marker: null, helpers, tests, spawns };
+}
+
+/** The top-level comma-separated elements of a token list (an argument list or an array literal's body). */
+function jsElements(toks: JsTok[]): JsTok[][] {
+  const els: JsTok[][] = [[]];
+  for (let d = 0, i = 0; i < toks.length; i++) {
+    const b = toks[i];
+    if (b.t === 'p' && '([{'.includes(b.v)) d++;
+    if (b.t === 'p' && ')]}'.includes(b.v) && --d < 0) break;
+    if (d === 0 && b.t === 'p' && b.v === ',') els.push([]); else els[els.length - 1].push(b);
+  }
+  return els.filter((e) => e.length);
+}
+
+/**
+ * HEAVY-LOCK-FALSE-NEGATIVES (item 2): the command line a child_process call runs, from its literal
+ * arguments: a string first argument (`exec('npm test')`), or a program (a string, or
+ * `process.execPath` = node) plus a string array (`spawn('npm', ['test'])`; a fork's module is
+ * judged as the script it is). An argument the lock cannot read (a variable, a spread) is
+ * `$computed`, so the line is judged on what is literal. A `node --test` list is the live-file
+ * rule's (scanJs's tests), not a line.
+ */
+function spawnedLine(fn: string, args: JsTok[]): string | null {
+  const els = jsElements(args);
+  const first = els[0];
+  if (!first) return null;
+  // exec / execSync run their string through a shell: it is the line itself.
+  if (fn === 'exec' || fn === 'execSync') return first.length === 1 && first[0].t === 'str' ? first[0].v : null;
+  let prog: string | null = null;
+  if (first.length === 1 && first[0].t === 'str') prog = first[0].v;
+  else if (first.length === 3 && first[0].v === 'process' && first[1].v === '.' && first[2].v === 'execPath') prog = 'node';
+  if (!prog) return null;
+  const words = [prog];
+  const list = els[1];
+  if (list && list[0]?.t === 'p' && list[0].v === '[') {
+    for (const e of jsElements(list.slice(1))) {
+      if (e.length === 1 && e[0].t === 'str') { if (e[0].v === '--test') return null; words.push(e[0].v); }
+      else words.push('$computed');
+    }
+  }
+  return words.map((w) => (/^[\w./:@=-]+$/.test(w) || w === '$computed' ? w : `'${w.replace(/'/g, "'\\''")}'`)).join(' ');
+}
+
+/**
+ * HEAVY-LOCK-FALSE-NEGATIVES (item 2): a node script that spawns a heavy command line IS that
+ * command (`node C:/w/h.js` whose h.js runs execSync('npm test')). Judged with the same reader and
+ * folder, as a sh line (no shell is known); only a sure heavy counts (a provisional one, such as a
+ * path the lock cannot read, would turn every script with a computed spawn into a bench).
+ */
+function spawnedHeavy(spawns: string[] | undefined, ctx: ClassifyCtx): string | null {
+  const depth = ctx.spawnDepth ?? 0;
+  if (!spawns?.length || depth >= 1) return null;
+  for (const line of spawns) {
+    const g = classifyCommand(line, 0, { ...ctx, shell: undefined, dialect: 'sh', stdin: undefined, segment: undefined, spawnDepth: depth + 1 });
+    if (g.heavy && !g.provisional) return g.why ?? line;
+  }
+  return null;
 }
 
 /** HEAVY-LOCK-ADHOC-NODE: the program `node …` will run (script, preloads, inline or stdin code). */
@@ -848,11 +951,21 @@ function classifyNodeCode(prog0: NodeProgram, ctx: ClassifyCtx, anyName = false,
       if (t !== null) { prog = { ...prog, script: p }; anyName = true; break; }
     }
   }
-  if (prog.inline !== null) { const m = scanJs(prog.inline).marker; return m ? hit(m, '-e') : { heavy: false }; }
+  if (prog.inline !== null) {
+    const s = scanJs(prog.inline);
+    if (s.marker) return hit(s.marker, '-e');
+    const sp = spawnedHeavy(s.spawns, ctx);
+    return sp ? hit(`spawns ${sp}`, '-e') : { heavy: false };
+  }
   // A script read from stdin: a heredoc body or a `< file` the classifier could read is checked;
   // stdin it cannot see (`node -` from a pipe, an unreadable `< file`) is an unknown program: heavy.
   if (!prog.script && (prog.stdin || ctx.stdin !== undefined)) {
-    if (typeof ctx.stdin === 'string') { const m = scanJs(ctx.stdin).marker; if (m) return hit(m, '(stdin script)'); }
+    if (typeof ctx.stdin === 'string') {
+      const s = scanJs(ctx.stdin);
+      if (s.marker) return hit(s.marker, '(stdin script)');
+      const sp = spawnedHeavy(s.spawns, ctx);
+      if (sp) return hit(`spawns ${sp}`, '(stdin script)');
+    }
     else return { heavy: true, kind: 'bench', why: 'node (a stdin script the lock cannot read)' };
   }
   if (!ctx.readScript) return { heavy: false };
@@ -882,7 +995,10 @@ function classifyNodeCode(prog0: NodeProgram, ctx: ClassifyCtx, anyName = false,
       if (LIVE_TAG.test(text.slice(0, LIVE_TAG_CHARS))) return { heavy: true, kind: 'bench', why: `node ${base} (declares @heavy-lock live)` };
     }
     const s = scanJs(text);
-    if (s.marker) return hit(s.marker, hop === 0 && roots.length === 1 ? name : `${name} via ${key.split('/').pop()}`);
+    const where = hop === 0 && roots.length === 1 ? name : `${name} via ${key.split('/').pop()}`;
+    if (s.marker) return hit(s.marker, where);
+    const sp = spawnedHeavy(s.spawns, ctx);
+    if (sp) return hit(`spawns ${sp}`, where);
     // A test file it spawns is named from the working directory, and its own tag counts.
     for (const t of s.tests ?? []) queue.push({ path: t, hop: hop + 1, test: true });
     if (hop >= 2) continue;
@@ -1194,11 +1310,13 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
     // Jim MF2: a test run with a FILTER after `--` (npm run test:focused -- wake) is a focused run:
     // light. Without one it is the suite: heavy.
     const filtered = args.includes('--') && args.indexOf('--') < args.length - 1;
-    if (sub === 'test' || sub === 't') return filtered ? { heavy: false } : { heavy: true, kind: 'suite', why: `${bin} test` };
+    // HEAVY-LOCK-FALSE-NEGATIVES: a filter that picks most of the suite is the suite.
+    const needles = filtered ? args.slice(args.indexOf('--') + 1).filter((a) => !a.startsWith('-')) : [];
+    if (sub === 'test' || sub === 't') return filtered ? filteredSuite(`${bin} test --`, needles, ctx) : { heavy: true, kind: 'suite', why: `${bin} test` };
     if (sub === 'run' || sub === 'run-script') {
       const script = args.slice(args.indexOf(sub) + 1).find((a) => !a.startsWith('-')) ?? '';
       if (/^(build|dist)(:.*)?$/.test(script)) return { heavy: true, kind: 'build', why: `${bin} run ${script}` };
-      if (/^test(:.*)?$/.test(script)) return filtered ? { heavy: false } : { heavy: true, kind: 'suite', why: `${bin} run ${script}` };
+      if (/^test(:.*)?$/.test(script)) return filtered ? filteredSuite(`${bin} run ${script} --`, needles, ctx) : { heavy: true, kind: 'suite', why: `${bin} run ${script}` };
     }
     return { heavy: false };
   }
@@ -1289,7 +1407,11 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
     // Jim MF2: a whole-suite runner script with no filter argument is the suite.
     if (script && SUITE_RUNNER.test(script)) {
       const rest = args.slice(at + 1).filter((a) => !a.startsWith('-'));
-      if (!rest.length) return { heavy: true, kind: 'suite', why: `node ${script.replace(/\\/g, '/').split('/').pop()} (no filter)` };
+      const base = script.replace(/\\/g, '/').split('/').pop();
+      if (!rest.length) return { heavy: true, kind: 'suite', why: `node ${base} (no filter)` };
+      // HEAVY-LOCK-FALSE-NEGATIVES: `run-tests.cjs test` picks every file: the suite under a filter.
+      const many = filteredSuite(`node ${base}`, rest, ctx);
+      if (many.heavy) return many;
     }
     // HEAVY-JOB-LOCK-FAILOPEN (Andy 42b671): a wrapper SCRIPT that runs the command after it
     // (`node clean-run.cjs node test/tools/run-tests.cjs`): that command is classified too.
@@ -2035,6 +2157,10 @@ export interface HeavyLockDeps {
   pidAlive?: (pid: number) => boolean;
   /** How long one lease request waits for a queued agent's slot before answering 'wait'. */
   leasePollMs?: number;
+  /** HEAVY-LOCK-FALSE-NEGATIVES: the classifier's context for a leasing process's folder (its
+   *  script reader and test-file lister), so a runner's argv is judged as PreToolUse judges a
+   *  command. Absent = the argv alone (a filtered runner is light). */
+  classifyCtx?: (cwd?: string) => ClassifyCtx;
 }
 
 /**
@@ -2058,6 +2184,8 @@ export interface HeavyLeaseRequest {
   suite?: boolean;
   /** A suite runner's argv after node (argv[1] is run-tests.cjs): classified as PreToolUse would. */
   runner?: string[];
+  /** HEAVY-LOCK-FALSE-NEGATIVES: the runner's working folder (its test files are listed there). */
+  cwd?: string;
   /** GUPPY_TEST_RUN as the process inherited it: '<pid>:<createdMs>' of an enclosing classified run. */
   parentRun?: string;
   /** release: the lease an acquire answered. */
@@ -2877,7 +3005,9 @@ export class HeavyJobLock {
     let suite = r.suite === true;
     if (Array.isArray(r.runner)) {
       const argv = ['node', ...r.runner.map(String)].map((a) => `"${a.replace(/["\\$`]/g, '\\$&')}"`).join(' ');
-      if (!classifyCommand(argv).heavy) {
+      // HEAVY-LOCK-FALSE-NEGATIVES: with the process's folder, so a broad filter counts as the suite.
+      const ctx = this.d.classifyCtx?.(typeof r.cwd === 'string' ? r.cwd : undefined) ?? {};
+      if (!classifyCommand(argv, 0, ctx).heavy) {
         this.runs.set(run, { agentId, held: this.holders.has(agentId) });
         return { state: 'light', run, why: 'a filtered suite runner' };
       }
