@@ -517,6 +517,8 @@ export interface ClassifyCtx {
  * is light only while its needles pick a few files: the runner selects every test file whose name
  * contains a needle (case-insensitive, union), so `run-tests.cjs test` or `npm test -- heavy` is the
  * suite in all but name. With no lister the old rule stands: a filtered run is light.
+ * HEAVY-ELECTRON-TAG: a pick of fewer files is judged as `node --test <those files>` is (what they
+ * load, their `@heavy-lock live` line): `npm test -- activity-lag` picks one Electron harness file.
  */
 function filteredSuite(what: string, needles: string[], ctx: ClassifyCtx, root?: string): HeavyClass {
   // Andy MINOR 2: the runner lists ITS OWN repo (path.resolve(__dirname, '..', '..')), not the caller's
@@ -524,10 +526,19 @@ function filteredSuite(what: string, needles: string[], ctx: ClassifyCtx, root?:
   const list = needles.length && ctx.testFiles ? ctx.testFiles(ctx.cd, root) : null;
   if (!list) return { heavy: false };
   const low = needles.map((n) => n.toLowerCase());
-  let n = 0;
-  for (const f of list) { const name = f.toLowerCase(); if (low.some((x) => name.includes(x))) n++; }
+  const picked = list.filter((f) => { const name = f.toLowerCase(); return low.some((x) => name.includes(x)); });
+  const n = picked.length;
   if (n >= SUITE_MANY_FILES) return { heavy: true, kind: 'suite', why: `${what} ${needles.join(' ')} (matches ${n} test files)` };
-  return { heavy: false };
+  if (!n || !ctx.readScript) return { heavy: false };
+  // The picked files as the runner names them (test/<name> of its repo, the lister's base). Only the
+  // files that read are judged: the lister saw them, so one that does not read is not a program here.
+  const base = root ? `${root.replace(/[\\/]+$/, '')}/test/` : 'test/';
+  const readable = picked.map((f) => base + f).filter((p) => {
+    try { return ctx.readScript!(p, ctx.cd) !== null; } catch { return false; }
+  });
+  if (!readable.length) return { heavy: false };
+  const c = classifyNodeCode({ script: null, preloads: readable, inline: null, stdin: false }, { ...ctx, stdin: undefined }, false, readable.length + HEAVY_JS_MAX_FILES);
+  return c.heavy ? { ...c, why: `${what} ${needles.join(' ')} (picks ${n} test file${n === 1 ? '' : 's'}: ${c.why})` } : { heavy: false };
 }
 
 /** Andy MINOR 2: the repo a suite runner script belongs to, as the runner resolves it (two folders

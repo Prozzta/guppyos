@@ -354,7 +354,7 @@ const MUTANTS = [
     killer: 'needle', dies: /THE RUNNER LISTS ITS OWN REPO: \{/ },
   { file: HJF, name: 'a spawned node --test list is not a line (the old rule)', edits: [["    if (e.length === 1 && e[0].t === 'str') words.push(e[0].v);", "    if (e.length === 1 && e[0].t === 'str') { if (e[0].v === '--test') return null; words.push(e[0].v); }"]],
     killer: 'spawn', dies: /A SPAWNED node --test LIST IS A LINE/ },
-  { file: HJF, name: 'the match is case-sensitive', edits: [['  for (const f of list) { const name = f.toLowerCase();', '  for (const f of list) { const name = f;']],
+  { file: HJF, name: 'the match is case-sensitive', edits: [['  const picked = list.filter((f) => { const name = f.toLowerCase();', '  const picked = list.filter((f) => { const name = f;']],
     killer: 'needle', dies: /A BROAD NEEDLE IS THE SUITE \(Bash\)/ },
   { file: HJF, name: 'npm test -- <needle> is always light (today)', edits: [['filteredSuite(`${bin} test --`, needles, ctx, prefix)', '{ heavy: false }']],
     killer: 'needle', dies: /NPM TEST WITH A BROAD NEEDLE IS THE SUITE \(Bash\)/ },
