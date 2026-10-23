@@ -11,6 +11,37 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/guppyos/releases).
 
+## [1.1.101] — 2026-10-24
+
+**Settings changes no longer undo each other, the main process reads its files far less, and test runs that open windows wait their turn.**
+Rollback: 1.1.100 (reinstall).
+
+### Changed
+
+- **Config, registry and task reads are served from memory.** The app kept re-reading
+  `config.json`, the agent registry and `tasks.json` from disk many times a minute (about 2,900
+  config reads a minute during a heavy run). Each is now read once and kept until the file
+  changes: the app's own writes refresh it at once, and an edit from outside the app is picked up
+  within a second. Every change that reads, edits and writes a file still reads it fresh, so an
+  edit made meanwhile is kept.
+- **A filtered test run that opens app windows waits for the heavy slot.** A test run filtered to
+  a few files is now judged by the files it picks, as running those files directly is. If any of
+  them starts the app's test window (directly or through a helper), the run waits for the heavy
+  slot. Before, only a filter matching 20 or more files did. This applies to `npm test`,
+  `npm run test*` and the test runner itself, called by any path, including a network share.
+
+### Fixed
+
+- **Turning on a second MCP server no longer turns off the first.** In one visit to the settings
+  panel, enabling a second MCP server reverted the first one. Each toggle now changes only its
+  own server.
+- **Toggling the knowledge graph keeps its folder.** Turning the knowledge graph on or off no
+  longer erases its root folder setting.
+- **The auto-compact toggle and Schedules no longer undo each other.** Changing auto-compact in
+  Settings, or a schedule in Schedules, could put back the other's earlier state, or a schedule's
+  last-run time. Each now changes only its own schedule. Registering or removing a project
+  likewise changes only that project, so a project added meanwhile is kept.
+
 ## [1.1.100] — 2026-10-23
 
 **The heavy-job lock judges commands correctly, heavy jobs hand over cleanly, and a new floor starts empty.**

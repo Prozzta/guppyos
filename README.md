@@ -25,7 +25,7 @@ and unattended.
 
 <p>
   <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-F4D35E.svg?style=flat-square&labelColor=6E1423"></a>
-  <img alt="Version: 1.1.100" src="https://img.shields.io/badge/version-1.1.100-F4D35E.svg?style=flat-square&labelColor=6E1423">
+  <img alt="Version: 1.1.101" src="https://img.shields.io/badge/version-1.1.101-F4D35E.svg?style=flat-square&labelColor=6E1423">
   <img alt="Fork of chaitanyagiri/munder-difflin" src="https://img.shields.io/badge/fork%20of-chaitanyagiri%2Fmunder--difflin-F4F1EA.svg?style=flat-square&labelColor=6E1423">
 </p>
 
@@ -311,10 +311,14 @@ wholesale merges. The shape of the line, as evidence for the three ideas above:
   agent activity no longer freezes the window, a new floor ships with the floor tools written down,
   god can settle a typed-over wake without you, agents are no longer wrongly shown as typed over,
   Codex session files stay small, and quiet mail waits until it matters.
-- **A heavy lock that judges commands right** (1.1.100, the current release) — a broad test filter
+- **A heavy lock that judges commands right** (1.1.100) — a broad test filter
   waits for the heavy slot like the full suite, light commands are no longer held, heavy jobs hand
   the slot over cleanly, a new floor starts with only its own god, and a release can no longer drop
   an earlier release's notes.
+- **Settings that keep each other's changes** (1.1.101, the current release) — turning on one MCP
+  server no longer turns off another, the knowledge-graph toggle keeps its folder, auto-compact and
+  Schedules no longer undo each other, the app reads its config, registry and task files from
+  memory, and a test run that opens app windows waits for the heavy slot.
 
 Every milestone carries a dated human acceptance and evidence tag in the fork's
 internal mission ledger; this README keeps only the shape.
