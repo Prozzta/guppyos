@@ -52,6 +52,17 @@ const FILES = {
   'bnd/bnd-zz-electron.test.cjs': `require('../${HARNESS_RUN}').run('b');\n`,
 };
 for (let i = 0; i < 18; i++) FILES[`bnd/bnd-${String(i).padStart(2, '0')}.test.cjs`] = `require('node:assert').equal(${i}, ${i});\n`;
+// UHera F1: test/f1/: nine light files, each through its own light helper, and a tenth (sorts last)
+// that launches through its helper. One read budget for the run ran out on the nine helpers.
+fs.mkdirSync(path.join(T, 'f1', 'f1h'), { recursive: true });
+for (const c of 'abcdefghi') {
+  FILES[`f1/f1-${c}.test.cjs`] = `const h = require('./f1h/${c}.cjs');\nrequire('node:assert').ok(h);\n`;
+  FILES[`f1/f1h/${c}.cjs`] = `module.exports = '${c}';\n`;
+}
+FILES['f1/f1-z.test.cjs'] = `const h = require('./f1h/z.cjs');\nh();\n`;
+FILES['f1/f1h/z.cjs'] = `module.exports = () => require('../../${HARNESS_RUN}').run('z');\n`;
+// UHera F3: an Electron file over HEAVY_SCRIPT_MAX_BYTES: there, but the lock cannot read it.
+FILES['het-big.test.cjs'] = `require('./${HARNESS_RUN}').run('big');\n` + `// ${'x'.repeat(120)}\n`.repeat(3000);
 for (const [n, t] of Object.entries(FILES)) fs.writeFileSync(path.join(T, n), t);
 const RUNNER = ['test', 'tools', 'run-tests.cjs'].join('/');
 fs.copyFileSync(path.resolve(__dirname, '..', 'tools', 'run-tests.cjs'), path.join(AGENT, RUNNER));
@@ -60,7 +71,7 @@ const AGENTP = AGENT.replace(/\\/g, '/');
 const AWAY = path.join(JAIL, 'away');
 fs.mkdirSync(AWAY);
 
-const cls = (M, cmd, ctx) => M.classifyHeavy('Bash', { command: cmd }, ctx);
+const cls = (M, cmd, ctx, tool = 'Bash') => M.classifyHeavy(tool, { command: cmd }, ctx);
 const sure = (g) => g.heavy && !g.provisional;
 
 // ─── KILLERS (named assertions; the census checks each mutant dies at the right one) ─────────
@@ -108,6 +119,48 @@ K.boundary = async ({ HJ: M, HK: H }) => {
   assert.equal(M.SUITE_MANY_FILES, 20, 'THRESHOLD IS 20');
 };
 
+/** UHera F1: each pick has its own helper reads; nine helper-using light picks do not hide a tenth. */
+K.budget = async ({ HJ: M, HK: H }) => {
+  const ctx = H.HookServer.heavyScriptCtx(AGENT);
+  assert.ok(sure(cls(M, 'node --test test/f1/f1-z.test.cjs', ctx)), 'the tenth is heavy alone (through its helper)');
+  assert.deepEqual(cls(M, `${NT} -- f1-a f1-b f1-c f1-d f1-e f1-f f1-g f1-h f1-i`, ctx), { heavy: false }, 'the nine light picks are light');
+  const ten = cls(M, `${NT} -- f1-`, ctx);
+  assert.ok(sure(ten), `TEN PICKS: THE ONE LAUNCHING THROUGH A HELPER IS HEAVY: ${JSON.stringify(ten)}`);
+  assert.match(ten.why, /^npm test -- f1- \(picks 10 test files: node f1-z\.test\.cjs via z\.cjs \(loads electron-harness\/run/, `TEN PICKS: THE WHY NAMES IT: ${ten.why}`);
+};
+
+/** UHera F3: a pick that is there but does not read (oversized) is unknown, as under `node --test`. */
+K.size = async ({ HJ: M, HK: H }) => {
+  const ctx = H.HookServer.heavyScriptCtx(AGENT);
+  assert.ok(fs.statSync(path.join(T, 'het-big.test.cjs')).size > M.HEAVY_SCRIPT_MAX_BYTES, 'the fixture is over the read cap');
+  const alone = cls(M, 'node --test test/het-big.test.cjs', ctx);
+  assert.ok(alone.heavy && alone.provisional, `node --test: an oversized file is provisional heavy: ${JSON.stringify(alone)}`);
+  for (const run of [`${NT} --`, `node ${RUNNER}`]) {
+    const big = cls(M, `${run} het-big`, ctx);
+    assert.ok(big.heavy && big.provisional, `AN OVERSIZED PICK IS PROVISIONAL HEAVY (${run}): ${JSON.stringify(big)}`);
+    assert.match(big.why, /\(picks 1 test file: het-big\.test\.cjs \(a script the lock cannot read yet\)\)$/, `AN OVERSIZED PICK: THE WHY SAYS SO (${run}): ${big.why}`);
+    assert.ok(sure(cls(M, `${run} het-big het-electron`, ctx)), `A DEFINITE PICK BEATS AN UNREADABLE ONE (${run})`);
+  }
+};
+
+/** UHera F2: the runner called by a short path from inside its repo (test/ or test/tools/) lists that repo. */
+K.short = async ({ HJ: M, HK: H }) => {
+  const ctx = H.HookServer.heavyScriptCtx(REPO);
+  const shapes = [
+    ['Bash', 'cd test && node tools/run-tests.cjs activity-lag'],
+    ['Bash', 'cd test/tools && node run-tests.cjs activity-lag'],
+    ['Bash', 'cd test/tools && node ./run-tests.cjs activity-lag'],
+    ['PowerShell', 'cd test; node tools\\run-tests.cjs activity-lag'],
+    ['PowerShell', 'cd test\\tools; node .\\run-tests.cjs activity-lag'],
+  ];
+  for (const [tool, cmd] of shapes) {
+    const g = cls(M, cmd, ctx, tool);
+    assert.ok(sure(g) && /activity-lag-151\.test\.cjs/.test(g.why), `SHORT RUNNER PATH: ITS REPO'S PICKS ARE READ (${tool}: ${cmd}): ${JSON.stringify(g)}`);
+  }
+  assert.ok(sure(cls(M, 'node tools/run-tests.cjs activity-lag', H.HookServer.heavyScriptCtx(path.join(REPO, 'test')))), 'SHORT RUNNER PATH: FROM A PROCESS IN test/');
+  assert.deepEqual(cls(M, 'cd test && node tools/run-tests.cjs update-feed-owner', ctx), { heavy: false }, 'SHORT RUNNER PATH: A LIGHT PICK STAYS LIGHT');
+};
+
 /** The lease judges a runner's argv the same way, in the process's own folder. */
 K.lease = async ({ HJ: M, HK: H }) => {
   const lock = new M.HeavyJobLock({ limit: () => 1, setTimer: () => ({}), clearTimer: () => {}, leasePollMs: 1, classifyCtx: (cwd) => H.HookServer.heavyScriptCtx(cwd) });
@@ -143,11 +196,17 @@ K.census = async ({ HJ: M, HK: H }, _t, strip) => {
     assert.ok(tracked.includes(f), `${f} is tracked`);
     assert.deepEqual(cls(M, `node --test ${f}`, ctx), { heavy: false }, `CENSUS: A READ-ONLY HARNESS FILE STAYS LIGHT ALONE: ${f}`);
   }
+  // UHera F1 on the real tree: eight helper-using light picks before one that launches through a helper.
+  const nine = cls(M, `${NT} -- heavy-lock/heavy-lock-adhoc-node.test.cjs tes-bubbles-188.test.cjs layer-b-codex-argv.test.cjs heavy-lock/heavy-lock-electron-tag-1101.test.cjs related-tests-198.test.cjs test-runner-glob.test.cjs ps-policy-temp-leak-198.test.cjs layer-b-git-env.test.cjs load-flakes-followups`, ctx);
+  assert.ok(sure(nine) && /picks 9 test files: .*load-flakes-followups/.test(nine.why), `CENSUS: UHERA'S 9-PICK LIST IS HEAVY BY load-flakes-followups: ${JSON.stringify(nine)}`);
 };
 
 test('a filtered run is judged by the files it picks (npm test, npm run test*, the runner from anywhere)', (t) => K.pick({ HJ, HK }, t));
 test('the 19/20 boundary: 19 picks are read to the last one, 20 are the suite', (t) => K.boundary({ HJ, HK }, t));
 test('the lease judges a runner\'s picks the same way', (t) => K.lease({ HJ, HK }, t));
+test('UHera F1: each pick has its own helper reads (ten picks, the tenth launches through a helper)', (t) => K.budget({ HJ, HK }, t));
+test('UHera F3: an oversized pick is provisional heavy, as under node --test', (t) => K.size({ HJ, HK }, t));
+test('UHera F2: a short runner path from inside test/ or test/tools/ (Bash and PowerShell)', (t) => K.short({ HJ, HK }, t));
 test('CENSUS: every test file that starts Electron is heavy alone; the read-only harness files stay light', (t) => K.census({ HJ, HK }, t));
 
 // ─── MUTANT CENSUS ───────────────────────────────────────────────────────────────────────────
@@ -165,16 +224,27 @@ function mutateText(rel, edits, tag) {
 const MUTANTS = [
   { file: HJF, name: 'few picks are not judged (1.1.100)', edits: [['  if (!n || !ctx.readScript) return { heavy: false };', '  if (true) return { heavy: false };']],
     killer: 'pick', dies: /ONE ELECTRON FILE PICKED IS HEAVY \(npm test --\)/ },
-  { file: HJF, name: 'only the first picked file is judged', edits: [['  if (!readable.length) return { heavy: false };\n  const c = classifyNodeCode({ script: null, preloads: readable,', '  if (!readable.length) return { heavy: false };\n  const c = classifyNodeCode({ script: null, preloads: readable.slice(0, 1),']],
+  { file: HJF, name: 'only the first picked file is judged', edits: [['  for (const p of picked.map((f) => base + f)) {', '  for (const p of picked.map((f) => base + f).slice(0, 1)) {']],
     killer: 'pick', dies: /EVERY PICKED FILE IS JUDGED/ },
-  { file: HJF, name: 'the read budget is the one-script budget', edits: [['false, readable.length + HEAVY_JS_MAX_FILES);\n  return c.heavy', 'false, HEAVY_JS_MAX_FILES);\n  return c.heavy']],
-    killer: 'boundary', dies: /BOUNDARY: 19 PICKS ARE READ TO THE LAST ONE/ },
+  { file: HJF, name: 'one shared read budget for all the picks (2abfc3bb, UHera F1)', edits: [
+    ['  let unknown: HeavyClass | null = null;', '  let unknown: HeavyClass | null = null; const all: string[] = [];'],
+    ['    const c = classifyNodeCode({ script: null, preloads: [p], inline: null, stdin: false }, { ...ctx, stdin: undefined }, false, 1 + HEAVY_JS_MAX_FILES);\n    if (c.heavy && !c.provisional) return say(c);\n    if (c.heavy && !unknown) unknown = c;\n  }',
+      '    all.push(p);\n  }\n  const c = classifyNodeCode({ script: null, preloads: all, inline: null, stdin: false }, { ...ctx, stdin: undefined }, false, all.length + HEAVY_JS_MAX_FILES);\n  if (c.heavy && !c.provisional) return say(c);\n  if (c.heavy && !unknown) unknown = c;']],
+    killer: 'budget', dies: /TEN PICKS: THE ONE LAUNCHING THROUGH A HELPER IS HEAVY/ },
+  { file: HJF, name: 'a pick reads no helpers', edits: [['false, 1 + HEAVY_JS_MAX_FILES);', 'false, 1);']],
+    killer: 'pick', dies: /AN ELECTRON FILE THROUGH A HELPER IS HEAVY \(npm test --\)/ },
   { file: HJF, name: 'the picks are read from the caller\'s folder, not the runner\'s repo', edits: [["  const base = root ? `${root.replace(/[\\\\/]+$/, '')}/test/` : 'test/';", "  const base = 'test/';"]],
     killer: 'pick', dies: /FROM ANOTHER FOLDER: THE RUNNER'S OWN FILES ARE READ \(absolute runner\)/ },
-  { file: HJF, name: 'a picked file that does not read is still judged (provisional heavy)', edits: [['    try { return ctx.readScript!(p, ctx.cd) !== null; } catch { return false; }', '    return true;']],
+  { file: HJF, name: 'a missing pick is judged (provisional heavy)', edits: [['      if (!gone && !unknown) unknown = unreadable(p, ctx);', '      if (!unknown) unknown = unreadable(p, ctx);']],
     killer: 'pick', dies: /A PICKED FILE THAT DOES NOT READ IS NOT A PROGRAM/ },
-  { file: HJF, name: 'the why does not name the pick', edits: [['  return c.heavy ? { ...c, why: `${what} ${needles.join(\' \')} (picks ${n} test file${n === 1 ? \'\' : \'s\'}: ${c.why})` } : { heavy: false };', '  return c.heavy ? c : { heavy: false };']],
+  { file: HJF, name: 'an oversized pick is dropped (UHera F3)', edits: [['      if (!gone && !unknown) unknown = unreadable(p, ctx);', '']],
+    killer: 'size', dies: /AN OVERSIZED PICK IS PROVISIONAL HEAVY \(npm test --\)/ },
+  { file: HJF, name: 'an unreadable pick ends the judging (a later definite pick unseen)', edits: [['      if (!gone && !unknown) unknown = unreadable(p, ctx);', '      if (!gone) return say(unreadable(p, ctx));']],
+    killer: 'size', dies: /A DEFINITE PICK BEATS AN UNREADABLE ONE \(npm test --\)/ },
+  { file: HJF, name: 'the why does not name the pick', edits: [['const say = (c: HeavyClass): HeavyClass => ({ ...c, why: ', 'const say = (c: HeavyClass): HeavyClass => ({ ...c, w0: ']],
     killer: 'pick', dies: /THE WHY NAMES THE PICKED FILE/ },
+  { file: HJF, name: 'a short runner path has no root (UHera F2)', edits: [["  if (parts.length === 1) return '../..';\n  if (parts.length === 2) return parts[0] === '..' ? '../../..' : '..';\n", '']],
+    killer: 'short', dies: /SHORT RUNNER PATH: ITS REPO'S PICKS ARE READ \(Bash: cd test && node tools\/run-tests\.cjs activity-lag\)/ },
   { file: HJF, name: 'the 20-file suite rule is gone (every pick judged by file)', edits: [["  if (n >= SUITE_MANY_FILES) return { heavy: true, kind: 'suite'", "  if (false) return { heavy: true, kind: 'suite'"]],
     killer: 'boundary', dies: /BOUNDARY: 20 PICKS ARE THE SUITE/ },
   { file: HJF, name: 'a test file\'s tag is not read at hop 0', edits: [['    if (hop === 0 || test) {\n      if (LIVE_TAG.test(', '    if (test) {\n      if (LIVE_TAG.test(']],
