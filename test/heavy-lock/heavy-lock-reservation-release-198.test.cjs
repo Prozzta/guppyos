@@ -110,13 +110,17 @@ K.nothingAndHolder = async (M = HJ) => {
   x.l.acquire('b', H, 'npm ci', 'b1', false);
   const rows = x.logs.length; const ch = x.changes();
   assert.deepEqual(await x.l.lease('z', { op: 'unreserve' }), { state: 'unreserved', reserved: false, queued: false, next: null });
-  assert.deepEqual(await x.l.lease('a', { op: 'unreserve' }), { state: 'unreserved', reserved: false, queued: false, next: null }, 'A HELD SLOT IS NOT RELEASED BY heavy release');
   assert.deepEqual(x.l.snapshot().map((h) => h.agentId), ['a']);
   assert.equal(x.logs.length, rows, 'no row for a no-op');
   assert.equal(x.changes(), ch, 'no change for a no-op');
   assert.deepEqual(x.l.queueSnapshot().waiters.map((w) => w.agentId), ['b']);
+  // HEAVY-HANDOFF-RACE (e): the holder's release drops its held call (no watcher here: unchecked) and
+  // passes the slot on; it never hears "nothing to release" (heavy-lock-release-held-199 has the rest).
+  assert.deepEqual(await x.l.lease('a', { op: 'unreserve' }), { state: 'unreserved', reserved: false, queued: false, next: 'b', held: { kind: 'suite', calls: ['a1'], pids: [], dropped: true, checked: 'none' } }, 'A HELD SLOT IS RELEASED BY heavy release (e)');
+  assert.deepEqual(x.l.snapshot(), []);
+  assert.deepEqual(x.l.queueSnapshot().reserved.map((r) => r.agentId), ['b']);
 };
-test('heavy release with nothing reserved or queued, or by the holder, changes nothing', () => K.nothingAndHolder());
+test('heavy release with nothing reserved or queued changes nothing; by the holder it releases the held slot (e)', () => K.nothingAndHolder());
 
 K.waitingProcSaid = async (M = HJ) => {
   // Queued by a waiting test process (a lease), then released: that process re-queues on its next poll.

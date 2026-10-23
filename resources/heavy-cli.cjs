@@ -9,7 +9,8 @@
  *   heavy next <agent>           HEAVY-HANDOFF-RACE: the next freed slot goes to that agent, ahead of the
  *                                queue (a holder, an agent with a slot reserved, or god may say so)
  *
- * A held slot is not released here: it frees when its job ends.
+ * A held slot (HEAVY-HANDOFF-RACE (e)) is released here only when no process of its job runs any more;
+ * else the release is refused, naming the open call and the pids.
  * Exit codes: 0 ok, 2 bad arguments, 3 app unavailable, 4 timeout.
  */
 'use strict';
@@ -17,7 +18,7 @@ const http = require('http');
 
 const EXIT = { ok: 0, usage: 2, unavailable: 3, timeout: 4 };
 const REQUEST_TIMEOUT_MS = 15000;
-const USAGE = 'usage: heavy status | heavy release [--to <agent>] | heavy next <agent>\n  release: give up my reserved slot, or my place in the queue (a denial queued me)\n  next: the next freed slot goes to that agent first (a holder, a reserved agent, or god may say so)\n';
+const USAGE = 'usage: heavy status | heavy release [--to <agent>] | heavy next <agent>\n  release: give up my reserved slot, or my place in the queue (a denial queued me), or the slot I hold (once its job is over)\n  next: the next freed slot goes to that agent first (a holder, a reserved agent, or god may say so)\n';
 const AGENT = /^[A-Za-z0-9._-]{1,80}$/;
 
 /** { op: 'status' } | { op: 'unreserve', to? } | { op: 'next', to } | { help: true }, or throws. */
@@ -77,9 +78,21 @@ function describe(b) {
     if (b.refused) return 'heavy: refused: only a holder, an agent with a slot reserved, or god may name the next holder\n';
     return `heavy: the next freed slot goes to ${b.to} ${b.queued ? '(queued: now at the head of the queue)' : '(not queued yet: it goes to the head when it next asks)'}\n`;
   }
+  const to = b.to === 'not-queued' ? ' (the agent you named is not queued, so it went in queue order)' : '';
+  // HEAVY-HANDOFF-RACE (e): a holder's release never says "nothing".
+  if (b.held) {
+    const calls = b.held.calls.length ? `call ${b.held.calls.join(', ')}` : 'no open call';
+    if (!b.held.dropped) {
+      const pids = b.held.pids.length ? `, pids ${b.held.pids.join(', ')}` : '';
+      return b.held.checked === 'failed'
+        ? `heavy: refused: you hold the ${b.held.kind} slot and the process check failed, so its job may still run (${calls}); it frees when the job ends, or run heavy release again\n`
+        : `heavy: refused: you hold the ${b.held.kind} slot and its job still runs (${calls}${pids}); stop the job first, or it frees when the job ends\n`;
+    }
+    const idle = b.held.checked === 'ok' ? ': no process of its job runs' : '';
+    return `heavy: released your held ${b.held.kind} slot (${calls} dropped${idle}); it is now ${b.next ? `reserved for ${b.next}` : 'free (no one is queued)'}${to}\n`;
+  }
   if (!b.reserved && !b.queued) return 'heavy: nothing to release: no slot is reserved for you and you are not queued (a slot you hold frees when its job ends)\n';
   const gave = b.reserved ? 'released your reserved slot' : 'left the queue';
-  const to = b.to === 'not-queued' ? ' (the agent you named is not queued, so it went in queue order)' : '';
   const next = b.reserved ? `; it is now ${b.next ? `reserved for ${b.next}` : 'free (no one is queued)'}${to}` : '';
   const waiting = b.waiting ? '\nheavy: a test process of yours is still waiting for the slot; within 25 s it asks again and queues you again (at the back). Stop it if you do not need it.' : '';
   return `heavy: ${gave}${next}${waiting}\n`;

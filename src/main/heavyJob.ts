@@ -2089,7 +2089,11 @@ export type HeavyLeaseAnswer =
 /** `reserved`/`queued`: what the caller gave up; `next`: who the slot is now reserved for (null: no
  *  one waits, so it is free); `to`: the asked-for agent was not queued, so it went in FIFO order;
  *  `waiting`: a test process of the caller's still waits in a lease and will queue it again. */
-export type HeavyUnreserveAnswer = { state: 'unreserved'; reserved: boolean; queued: boolean; next: string | null; to?: 'not-queued'; waiting?: true };
+export type HeavyUnreserveAnswer = { state: 'unreserved'; reserved: boolean; queued: boolean; next: string | null; to?: 'not-queued'; waiting?: true; held?: HeavyHeldRelease };
+/** HEAVY-HANDOFF-RACE (e): `heavy release` from a HOLDER. `dropped`: its held call(s) were dropped and the
+ *  slot passed on; else refused, with the open calls and the pids of its job still running (`checked`:
+ *  'ok' a listing was read, 'failed' the listing failed (unknown, kept), 'none' no watcher on this build). */
+export type HeavyHeldRelease = { kind: HeavyKind; calls: string[]; pids: number[]; dropped: boolean; checked: 'ok' | 'failed' | 'none' };
 /** How long one lease request may wait (a long poll; the preload asks again). */
 export const HEAVY_LEASE_POLL_MS = 25_000;
 /** A test process is the call's OWN node when its parent is the call's shell (or a pass-through
@@ -2548,9 +2552,11 @@ export class HeavyJobLock {
    *  Creed and could only let it idle for 5 min). The agent gives up its unused reservation and its
    *  queue place (`heavy release`): the slot passes on at once, to `to` first when that agent is
    *  queued, else to the oldest waiter. A held slot is not touched: it frees when its job ends. */
-  unreserve(agentId: string, to?: string): HeavyUnreserveAnswer {
+  unreserve(agentId: string, to?: string): HeavyUnreserveAnswer | Promise<HeavyUnreserveAnswer> {
     // Jim INFO 3: the route takes any string; an agent id is short, and `to` is logged verbatim.
     if (to !== undefined) to = to.slice(0, 80);
+    // HEAVY-HANDOFF-RACE (e): a HOLDER's release is a release of its held slot, never "nothing".
+    if (this.holders.has(agentId)) return this.releaseHeld(agentId, to);
     const own = this.waiters.find((w) => w.agentId === agentId);
     const queued = !!own;
     // Jim INFO 1: a test process of the caller's still waiting in a lease asks again within
@@ -2575,6 +2581,44 @@ export class HeavyJobLock {
     const next = [...this.reservations.keys()].find((a) => !before.has(a)) ?? null;
     if (!this.watching() && this.timer) { this.clearTimer(this.timer); this.timer = null; }
     return { state: 'unreserved', reserved, queued, next, ...(missed ? { to: 'not-queued' as const } : {}), ...(waiting ? { waiting: true as const } : {}) };
+  }
+
+  /** HEAVY-HANDOFF-RACE (e) (2026-10-23T13:15Z: Dwight stopped his bench holder and `heavy release` answered
+   *  "nothing to release" while `heavy status` showed "held: dwight"; the slot freed by itself a minute
+   *  later, when the watcher saw the job gone). A holder's release DROPS its held call(s) (a bench whose
+   *  PostToolUse never came, a background job) and grants the next agent at once, unless a process of its
+   *  job still runs: then it is refused truthfully, naming the open calls and the pids. A failed listing
+   *  is unknown, not idle: refused too (fail closed, like callDone). No watcher on this build: dropped. */
+  private async releaseHeld(agentId: string, to?: string): Promise<HeavyUnreserveAnswer> {
+    const was = this.holders.get(agentId)!;
+    const calls = [...was.calls];
+    let checked: 'ok' | 'failed' | 'none' = 'none';
+    let running = false;
+    if (this.d.probe && this.d.roots) {
+      const probed = await this.heavyAgents();
+      if (!probed) checked = 'failed';
+      else { checked = 'ok'; running = probed.busy.has(agentId); }
+    }
+    const cur = this.holders.get(agentId);
+    // Freed during the listing (its job ended, or the watcher saw it gone): nothing is held any more.
+    if (!cur) return { state: 'unreserved', reserved: false, queued: false, next: null, held: { kind: was.kind, calls, pids: [], dropped: true, checked } };
+    const pids = [...cur.attributed.keys()].sort((a, b) => a - b);
+    if (running || checked === 'failed') {
+      this.log({ kind: 'heavy-lock', action: 'release-refused', agentId, heavyKind: cur.kind, calls, pids, checked });
+      return { state: 'unreserved', reserved: false, queued: false, next: null, held: { kind: cur.kind, calls, pids, dropped: false, checked } };
+    }
+    let missed = false;
+    if (to !== undefined && to !== agentId) {
+      const i = this.waiters.findIndex((w) => w.agentId === to);
+      if (i > 0) this.waiters.unshift(...this.waiters.splice(i, 1));   // (e): to the head, as unreserve does
+      missed = i === -1;
+    }
+    this.log({ kind: 'heavy-lock', action: 'held-released', agentId, heavyKind: cur.kind, calls, checked, ...(to ? { to } : {}) });
+    cur.calls.clear();
+    const before = new Set(this.reservations.keys());
+    this.release(agentId, 'released');
+    const next = [...this.reservations.keys()].find((a) => !before.has(a)) ?? null;
+    return { state: 'unreserved', reserved: false, queued: false, next, ...(missed ? { to: 'not-queued' as const } : {}), held: { kind: cur.kind, calls, pids, dropped: true, checked } };
   }
 
   /** HEAVY-HANDOFF-RACE (a) (2026-10-22T22:22Z: Jim's background pack ended, the auto-release reserved the
@@ -2634,7 +2678,7 @@ export class HeavyJobLock {
     return [...js.values()].every((exited) => exited);
   }
 
-  private release(agentId: string, reason: 'posttool' | 'process-exit' | 'job-exit' | 'pty-exit' | 'ttl' | 'settled-light'): void {
+  private release(agentId: string, reason: 'posttool' | 'process-exit' | 'job-exit' | 'pty-exit' | 'ttl' | 'settled-light' | 'released'): void {
     const h = this.holders.get(agentId);
     if (!h) return;
     this.holders.delete(agentId);
