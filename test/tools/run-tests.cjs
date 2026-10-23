@@ -106,6 +106,15 @@ const START_GATE_PRELOAD = path.join(__dirname, 'file-start-gate.cjs');
 // Node sees.  Keep node --test and the start gate within the share the heavy helper gave it.
 const CPU_RATE_UNITS = 10_000;
 const CPU_RATE_50_PERCENT = 5_000;
+// HALFCORES-OVERSUBSCRIBE: rendered tests launch a multiprocess Electron tree.  Under a
+// job-wide hard cap they must not compete with the ordinary node-test burst; classify by
+// the harness the file actually imports, rather than maintaining a filename allowlist.
+const RENDER_HARNESS_IMPORT = /(?:require\s*\(\s*['"][^'"]*electron-harness[\\/]run\.cjs|from\s+['"][^'"]*electron-harness[\\/]run\.cjs)/;
+function renderLaneFiles(files, { testDir, readSource = (file) => fs.readFileSync(file, 'utf8') } = {}) {
+  return files.filter((file) => {
+    try { return RENDER_HARNESS_IMPORT.test(readSource(path.join(testDir, file))); } catch { return false; }
+  });
+}
 function selfJobRate({ spawnSyncFn = spawnSync, env = process.env, platform = process.platform } = {}) {
   // The explicit variable is retained for the cmd re-exec path and controlled test launches.
   if (env.GUPPY_HEAVY_CPU_CAP === '1') return CPU_RATE_50_PERCENT;
@@ -275,7 +284,6 @@ function run({
     return 1;
   }
 
-  const rel = files.map((n) => path.join(path.relative(cwd, testDir) || '.', n));
   log(`[test-runner] running ${files.length}${filters.length ? ` of ${total}` : ''} test files via node --test (per-file limit ${timeoutMs} ms)`);
   // A runner started from inside a node:test file inherits NODE_TEST_CONTEXT, which turns the
   // nested `node --test` into a reporting child (no real run, no reporters). It is a run of its own.
@@ -284,9 +292,15 @@ function run({
   // PS-POLICY-TEMP-LEAK: not the PowerShell temp folder; the files' temp jail sets theirs.
   const env = require('./ps-env.cjs').psEnv(processEnv, { temp: false });
   delete env.NODE_TEST_CONTEXT;
-  const rate = jobRate({ env });
-  const concurrency = cappedCores(env, cores, rate);
-  if (rate > 0) log(`[test-runner] heavy CPU rate ${rate}: node concurrency ${concurrency} of ${cores} visible cores`);
+  // Re-query after psEnv cloning: it preserves the process's job membership and explicit overrides.
+  const rateNow = jobRate({ env });
+  const concurrency = cappedCores(env, cores, rateNow);
+  const renderFiles = rateNow > 0 ? renderLaneFiles(files, { testDir }) : [];
+  const normalFiles = renderFiles.length ? files.filter((file) => !renderFiles.includes(file)) : files;
+  const rel = normalFiles.map((n) => path.join(path.relative(cwd, testDir) || '.', n));
+  const renderRel = renderFiles.map((n) => path.join(path.relative(cwd, testDir) || '.', n));
+  if (rateNow > 0) log(`[test-runner] heavy CPU rate ${rateNow}: node concurrency ${concurrency} of ${cores} visible cores`);
+  if (renderRel.length) log(`[test-runner] capped render lane: ${renderRel.length} Electron-harness files run exclusive and serial after ordinary files`);
   // LOAD-BURST-196: the gate loads first, so a file's job join below is inside its start slot too.
   let gate = null;
   try { gate = startGate({ slots: startSlots(env, concurrency) }); } catch (e) { err(`[test-runner] no start gate (${String(e)}): every file loads at once (LOAD-BURST-196)`); }
@@ -305,7 +319,7 @@ function run({
     env.GUPPY_TEMP_JAIL_OPT = opt;
   }
   try {
-    return runGated({ filters, rel, env, gate, jail, spawn, cwd, timeoutMs, isTTY, eventsFile, readFile, removeFile, failureFile, writeFailureFile, watchdog, fileJob, log, err, perfDir, readdir, concurrency, cores });
+    return runGated({ filters, rel, renderRel, env, gate, jail, spawn, cwd, timeoutMs, isTTY, eventsFile, readFile, removeFile, failureFile, writeFailureFile, watchdog, fileJob, log, err, perfDir, readdir, concurrency, cores });
   } finally {
     if (gate) { try { fs.rmSync(gate.dir, { recursive: true, force: true }); } catch { /* best effort */ } }
     if (jail) { try { removeJail(jail.root); } catch (e) { err(`[test-runner] the run's temp folders could not be removed (${e.code || e.message}; a child still holds a file): ${jail.root} (TEST-TEMP-HYGIENE)`); } }
@@ -323,7 +337,7 @@ function burstLine(text, slots) {
 }
 
 /** run() from the per-file jobs on, with the start gate in place (LOAD-BURST-196). */
-function runGated({ rel, env, gate, jail = null, spawn, cwd, timeoutMs, isTTY, eventsFile, readFile, removeFile, failureFile, writeFailureFile, watchdog, fileJob, log, err, perfDir, filters, readdir, concurrency, cores }) {
+function runGated({ rel, renderRel = [], env, gate, jail = null, spawn, cwd, timeoutMs, isTTY, eventsFile, readFile, removeFile, failureFile, writeFailureFile, watchdog, fileJob, log, err, perfDir, filters, readdir, concurrency, cores }) {
   const job = fileJob();
   if (job.exe) {
     const opt = `--require "${FILE_JOB_PRELOAD.split(path.sep).join('/')}"`;
@@ -335,21 +349,24 @@ function runGated({ rel, env, gate, jail = null, spawn, cwd, timeoutMs, isTTY, e
     err(`[test-runner] per-file jobs are unavailable (${job.why}): a hung file is killed from a process snapshot, which can miss a process born just before the kill (LOAD-FLAKES-178)`);
   }
   const fx = { spawn, cwd, timeoutMs, isTTY, env, readFile, removeFile, watchdog, jobExe: job.exe, err };
-  const main = runNodeTest({ ...fx, rel, eventsFile, label: '', extraArgs: concurrency < cores ? [`--test-concurrency=${concurrency}`] : [] });
+  const main = rel.length ? runNodeTest({ ...fx, rel, eventsFile, label: '', extraArgs: concurrency < cores ? [`--test-concurrency=${concurrency}`] : [] }) : { res: { status: 0 }, counts: ZERO_COUNTS, failures: [], hung: [] };
+  const render = renderRel.length ? runNodeTest({ ...fx, rel: renderRel, eventsFile: `${eventsFile}.render`, label: 'render lane: ', extraArgs: ['--test-concurrency=1'] }) : { res: { status: 0 }, counts: ZERO_COUNTS, failures: [], hung: [] };
   if (gate) log(burstLine(readFile(path.join(gate.dir, 'starts.jsonl')), gate.slots));
   // A child that never started, or was killed by a signal (status null), is a failure, not a pass.
-  if (spawnFailed(main.res, '', err)) return totals(1, main.counts, 'not run', log, main.failures, { failureFile, writeFailureFile });
+  if (spawnFailed(main.res, '', err) || spawnFailed(render.res, 'render lane: ', err)) return totals(1, sumCounts(main.counts, render.counts), 'not run', log, [...main.failures, ...render.failures], { failureFile, writeFailureFile });
   // A timed-out file fails the run whatever node's own exit code says.
   // TEST-TEMP-HYGIENE: a file that left anything in its temp folder fails the run, as a timed-out one does.
   const leaked = () => (jail ? reportTempLeaks(tempLeaks(jail.root), err) : 0);
-  const hungCode = main.hung.length && main.res.status === 0 ? 1 : main.res.status;
+  const mergedCounts = sumCounts(main.counts, render.counts);
+  const mergedFailures = [...main.failures, ...render.failures];
+  const hungCode = (main.hung.length || render.hung.length) && main.res.status === 0 && render.res.status === 0 ? 1 : (main.res.status || render.res.status);
   if (!perfDir) {
     const n = leaked();
-    return totals(n && hungCode === 0 ? 1 : hungCode, main.counts, 'off', log, main.failures, { failureFile, writeFailureFile });
+    return totals(n && hungCode === 0 ? 1 : hungCode, mergedCounts, 'off', log, mergedFailures, { failureFile, writeFailureFile });
   }
   const lane = runPerfLane({ perfDir, filters, readdir, ...fx, eventsFile: `${eventsFile}.perf`, log });
   const mainCode = leaked() && hungCode === 0 ? 1 : hungCode;
-  return totals(mainCode !== 0 ? mainCode : lane.code, sumCounts(main.counts, lane.counts), lane.state, log, [...main.failures, ...lane.failures], { failureFile, writeFailureFile });
+  return totals(mainCode !== 0 ? mainCode : lane.code, sumCounts(mergedCounts, lane.counts), lane.state, log, [...mergedFailures, ...lane.failures], { failureFile, writeFailureFile });
 }
 
 /**
@@ -473,7 +490,7 @@ function totals(code, counts, laneState, log, failures = [], {
   return code;
 }
 
-module.exports = { prepareFileJob, FILE_JOB_PRELOAD, prepareTempJail, TEMP_JAIL_PRELOAD, tempLeaks, reportTempLeaks,prepareStartGate, startSlots, cappedCores, selfJobRate, CPU_RATE_50_PERCENT, START_GATE_PRELOAD, burstLine, selectTestFiles, discoverTestFiles, FEATURE_TEST_DIRS, run, runPerfLane, runCounts, failingTests, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
+module.exports = { prepareFileJob, FILE_JOB_PRELOAD, prepareTempJail, TEMP_JAIL_PRELOAD, tempLeaks, reportTempLeaks,prepareStartGate, startSlots, cappedCores, selfJobRate, CPU_RATE_50_PERCENT, START_GATE_PRELOAD, burstLine, selectTestFiles, discoverTestFiles, renderLaneFiles, FEATURE_TEST_DIRS, run, runPerfLane, runCounts, failingTests, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
 
 if (require.main === module) {
   const repoRoot = path.resolve(__dirname, '..', '..');
