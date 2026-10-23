@@ -146,31 +146,136 @@ test('registerRepo merges against the list on disk (a repo registered meanwhile 
 test('unregisterRepo removes one entry from the list on disk', () => K.unregisterFresh(cfg));
 test('patchMission patches one mission on disk, keeps scheduler stamps and the other surface\'s edit', () => K.patchMission(cfg));
 
-test('the wiring: handlers, preload, and the renderer callers no longer send whole lists or maps', () => {
-  const main = readSource('src/main/index.ts');
-  for (const ch of ['config:registerRepo', 'config:unregisterRepo', 'missions:patch']) assert.match(main, new RegExp(`ipcMain\\.handle\\('${ch}'`), `${ch} handler`);
-  assert.match(main, /ipcMain\.handle\('missions:patch'[\s\S]{0,400}syncMissions\(\);[\s\S]{0,200}'missions:updated'/, 'missions:patch re-syncs and announces missions:updated');
-  const pre = readSource('src/preload/index.ts');
-  for (const ch of ['config:registerRepo', 'config:unregisterRepo', 'missions:patch']) assert.match(pre, new RegExp(`ipcRenderer\\.invoke\\('${ch}'`), `${ch} preload`);
-  const mcp = readSource('src/renderer/src/components/McpDefaultsSettings.tsx');
-  assert.doesNotMatch(mcp, /\.\.\.config\.mcpDefaults/, 'McpDefaultsSettings no longer spreads the snapshot map');
-  assert.match(mcp, /mcpDefaults: \{ \[id\]: \{ enabled: next \} \}/, 'McpDefaultsSettings sends one entry');
-  assert.match(mcp, /setDefaults\(saved\.mcpDefaults/, 'McpDefaultsSettings mirrors what main saved');
-  const ai = readSource('src/renderer/src/components/AiEnginesSettings.tsx');
-  assert.match(ai, /providerBaseUrls: \{ \[id\]: next\[id\] \}/, 'AiEnginesSettings sends one base URL');
-  assert.match(ai, /providerDefaultModels: \{ \[id\]: next\[id\] \}/, 'AiEnginesSettings sends one model');
-  const settings = readSource('src/renderer/src/components/SettingsModal.tsx');
-  assert.doesNotMatch(settings, /\.\.\.\(breakerCfg\.circuitBreaker/, 'saveBudget no longer spreads the snapshot breaker');
-  assert.doesNotMatch(settings, /updateConfig\(\{\s*missions/, 'the auto-compact toggle no longer writes a whole missions list');
-  assert.match(settings, /patchMission\('compact-maintenance', \{ enabled: next \}\)/, 'the auto-compact toggle patches one mission');
-  const add = readSource('src/renderer/src/components/AddAgentModal.tsx');
-  assert.doesNotMatch(add, /updateConfig\(\{\s*registeredRepos/, 'AddAgentModal no longer writes a whole registeredRepos list');
-  assert.match(add, /window\.cth\.registerRepo\(/, 'AddAgentModal registers one repo');
-  assert.match(add, /window\.cth\.unregisterRepo\(/, 'AddAgentModal unregisters one repo');
-  const sched = readSource('src/renderer/src/components/triggers/SchedulesSection.tsx');
-  assert.match(sched, /window\.cth\.patchMission\(id, fields\)/, 'a Schedules row edit patches one mission');
-  assert.match(sched, /onMissionsUpdated/, 'the Schedules panel reloads on missions:updated');
-});
+// ─── WIRING, driven: the handlers and the preload run for real; the renderer callers by rule ─
+const IX = 'src/main/index.ts', PRE = 'src/preload/index.ts';
+const MCP = 'src/renderer/src/components/McpDefaultsSettings.tsx', SM = 'src/renderer/src/components/SettingsModal.tsx';
+const AI = 'src/renderer/src/components/AiEnginesSettings.tsx', ADD = 'src/renderer/src/components/AddAgentModal.tsx';
+const SCHED = 'src/renderer/src/components/triggers/SchedulesSection.tsx';
+const RENDERER = [MCP, SM, AI, ADD, SCHED];
+
+/** The balanced `open...close` span that starts at the first `open` at or after `from`. */
+function spanAt(src, from, open, close, tag) {
+  const start = src.indexOf(open, from);
+  assert.ok(start >= 0, `${tag}: no ${open} found`);
+  let depth = 0;
+  for (let i = start; i < src.length; i++) {
+    if (src[i] === open) depth++;
+    else if (src[i] === close && --depth === 0) return src.slice(start, i + 1);
+  }
+  return assert.fail(`${tag}: unbalanced ${open}`);
+}
+const HANDLER_CHANNELS = ['config:registerRepo', 'config:unregisterRepo', 'missions:patch'];
+/** The three handler registrations exactly as index.ts writes them, run against the real config.ts
+ *  (the same cached module as `cfg`) with a capturing ipcMain, syncMissions and liveWebContents. */
+function handlersFrom(main) {
+  const statements = HANDLER_CHANNELS.map((ch) => {
+    const at = main.indexOf(`ipcMain.handle('${ch}'`);
+    assert.ok(at >= 0, `${ch} IS REGISTERED in src/main/index.ts`);
+    return `ipcMain.handle${spanAt(main, at, '(', ')', ch)};`;
+  });
+  const text = [
+    "import { registerRepo, unregisterRepo, patchMission } from './config';",
+    'export const calls: string[] = [];',
+    'export const handlers: Record<string, (...a: unknown[]) => unknown> = {};',
+    'const ipcMain = { handle: (ch: string, fn: (...a: unknown[]) => unknown) => { handlers[ch] = fn; } };',
+    "const syncMissions = () => { calls.push('syncMissions'); };",
+    'const liveWebContents = () => ({ send: (ch: string) => { calls.push(`send:${ch}`); } });',
+    ...statements
+  ].join('\n');
+  return loadTs.fromText('src/main/renderer-config-rmw-handlers.ts', text);
+}
+const API_ENTRIES = ['registerRepo', 'unregisterRepo', 'patchMission'];
+/** The three preload entries exactly as index.ts writes them, over a capturing ipcRenderer. */
+function apiFrom(pre) {
+  const entries = API_ENTRIES.map((name) => {
+    const at = pre.indexOf(`\n  ${name}: (`);
+    assert.ok(at >= 0, `${name} IS ON THE PRELOAD API`);
+    const inv = pre.indexOf('ipcRenderer.invoke', at);
+    assert.ok(inv >= 0 && inv - at < 400, `${name} invokes ipcRenderer`);
+    return pre.slice(at + 1, inv) + 'ipcRenderer.invoke' + spanAt(pre, inv, '(', ')', name);
+  });
+  const text = [
+    'export const invoked: unknown[][] = [];',
+    'const ipcRenderer = { invoke: (...a: unknown[]): Promise<unknown> => { invoked.push(a); return Promise.resolve(undefined); } };',
+    'type HarnessConfig = unknown; type ScheduledMission = Record<string, unknown>;',
+    'export const api = {',
+    entries.join(',\n'),
+    '};'
+  ].join('\n');
+  return loadTs.fromText('src/preload/renderer-config-rmw-api.ts', text);
+}
+/** Every `updateConfig(<arg>)` in src whose argument carries `key:`. */
+function updateConfigArgs(src, key) {
+  const out = [];
+  for (let at = src.indexOf('updateConfig('); at >= 0; at = src.indexOf('updateConfig(', at + 1)) {
+    const arg = spanAt(src, at, '(', ')', key);
+    if (new RegExp(`\\b${key}:`).test(arg)) out.push(arg);
+  }
+  return out;
+}
+
+K.wiringHandlers = (M, main = readSource(IX)) => {
+  const { handlers, calls } = handlersFrom(main);
+  for (const ch of HANDLER_CHANNELS) assert.equal(typeof handlers[ch], 'function', `${ch} IS REGISTERED`);
+  const [A, B, C] = N('C:/repos/a', 'C:/repos/b', 'C:/repos/c');
+  start(M, { registeredRepos: [A] });
+  handEdit({ registeredRepos: [A, B] }); // registered by another window meanwhile, inside the cache window
+  handlers['config:registerRepo'](null, 'C:/repos/c');
+  assert.deepEqual(onDisk().registeredRepos, [C, A, B], 'REGISTER PUTS THE PICK IN FRONT of the list on disk');
+  handlers['config:registerRepo'](null, 'C:/repos/c', false);
+  assert.deepEqual(onDisk().registeredRepos, [A, B, C], 'REGISTER WITH front=false PUTS THE PICK AT THE BACK');
+  handlers['config:unregisterRepo'](null, 'C:/repos/a');
+  assert.deepEqual(onDisk().registeredRepos, [B, C], 'UNREGISTER REMOVES THE ENTRY');
+  start(M, { missions: [mission('m1', { lastFiredAt: 5 }), mission('m2')] });
+  calls.length = 0;
+  const r = handlers['missions:patch'](null, 'm1', { enabled: false });
+  assert.deepEqual(r, { ok: true });
+  const [m1, m2] = onDisk().missions;
+  assert.equal(m1.enabled, false, 'MISSIONS:PATCH LANDS ON DISK');
+  assert.equal(m1.lastFiredAt, 5, 'the scheduler stamp is kept');
+  assert.equal(m2.enabled, true, 'the other mission is untouched');
+  assert.deepEqual(calls, ['syncMissions', 'send:missions:updated'], 'MISSIONS:PATCH RE-SYNCS AND ANNOUNCES');
+  assert.throws(() => handlers['missions:patch'](null, 'nope', { enabled: false }), /unknown mission/);
+};
+K.wiringPreload = (pre) => {
+  const { api, invoked } = apiFrom(typeof pre === 'string' ? pre : readSource(PRE));
+  invoked.length = 0; // loadTs caches a module per text
+  void api.registerRepo('C:/x'); void api.registerRepo('C:/x', false); void api.unregisterRepo('C:/x'); void api.patchMission('m1', { enabled: false });
+  assert.deepEqual(invoked, [
+    ['config:registerRepo', 'C:/x', true], ['config:registerRepo', 'C:/x', false], ['config:unregisterRepo', 'C:/x'], ['missions:patch', 'm1', { enabled: false }]
+  ], 'THE PRELOAD PASSES EVERY ARGUMENT through unchanged');
+};
+K.wiringRenderer = (over = {}) => {
+  const src = Object.fromEntries(RENDERER.map((rel) => [rel, over[rel] ?? readSource(rel)]));
+  // Each merged-map patch carries one entry or the form's own fields and NO spread of any kind.
+  for (const [rel, key, shape] of [
+    [MCP, 'mcpDefaults', /mcpDefaults:\s*\{\s*\[id\]:\s*\{\s*enabled:\s*next\s*\}\s*\}/],
+    [SM, 'knowledgeGraph', /knowledgeGraph:\s*\{\s*enabled:\s*next\s*\}/],
+    [SM, 'circuitBreaker', /circuitBreaker:\s*\{\s*enabled:\s*brkEnabled,/],
+    [AI, 'providerBaseUrls', /providerBaseUrls:\s*\{\s*\[id\]:\s*next\[id\]\s*\}/],
+    [AI, 'providerDefaultModels', /providerDefaultModels:\s*\{\s*\[id\]:\s*next\[id\]\s*\}/]
+  ]) {
+    const args = updateConfigArgs(src[rel], key);
+    assert.equal(args.length, 1, `${path.basename(rel)} sends ${key} from exactly one updateConfig call`);
+    assert.doesNotMatch(args[0], /\.\.\./, `NO SPREAD INSIDE THE ${key} PATCH (${path.basename(rel)})`);
+    assert.match(args[0], shape, `THE ${key} PATCH IS ONE ENTRY (${path.basename(rel)})`);
+  }
+  const enabledFor = src[MCP].slice(src[MCP].indexOf('const enabledFor'), src[MCP].indexOf(';', src[MCP].indexOf('const enabledFor')));
+  assert.match(enabledFor, /defaults\[id\]/, 'ENABLEDFOR READS THE MIRROR of what main saved');
+  assert.doesNotMatch(enabledFor, /\bconfig\b/, 'ENABLEDFOR READS THE MIRROR, never the Settings-open snapshot');
+  assert.match(src[MCP], /setDefaults\(saved\.mcpDefaults/, 'McpDefaultsSettings mirrors what main saved');
+  assert.doesNotMatch(src[SM], /updateConfig\(\{\s*missions/, 'the auto-compact toggle no longer writes a whole missions list');
+  assert.match(src[SM], /patchMission\('compact-maintenance', \{ enabled: next \}\)/, 'the auto-compact toggle patches one mission');
+  assert.doesNotMatch(src[ADD], /updateConfig\(\{\s*registeredRepos/, 'AddAgentModal no longer writes a whole registeredRepos list');
+  assert.match(src[ADD], /window\.cth\.registerRepo\(/, 'AddAgentModal registers one repo');
+  assert.match(src[ADD], /window\.cth\.unregisterRepo\(/, 'AddAgentModal unregisters one repo');
+  assert.match(src[SCHED], /window\.cth\.patchMission\(id, fields\)/, 'a Schedules row edit patches one mission');
+  assert.match(src[SCHED], /onMissionsUpdated/, 'the Schedules panel reloads on missions:updated');
+};
+
+test('the three handlers, driven with the real config.ts: register in front or at the back, unregister, patch one mission and announce', () => K.wiringHandlers(cfg));
+test('the preload passes every argument of registerRepo, unregisterRepo and patchMission through', () => K.wiringPreload());
+test('the renderer callers send one entry with no spread of any kind, and the MCP rows read the mirrored map', () => K.wiringRenderer());
 
 // ─── CENSUS: each rule's mutant dies at its killer ──────────────────────────────────────────
 function mutateText(rel, edits, tag) {
@@ -207,6 +312,36 @@ const MUTANTS = [
     edits: [['  if (!current.some((m) => m.id === id)) throw new Error(`unknown mission ${id}`);', '']] },
 ];
 
+/** Jim's seven survivors of 8c9c3ae8 (wiring guarded by text only); each now dies at a driven killer. */
+const WIRING_MUTANTS = [
+  { name: 'A3 missions:patch never calls patchMission (every toggle silently does nothing)', file: IX, killer: 'handlers', dies: /MISSIONS:PATCH LANDS ON DISK/,
+    edits: [['  patchMission(id, fields);\n  syncMissions();', '  void id; void fields;\n  syncMissions();']] },
+  { name: 'A4 config:registerRepo always appends to the back (a pick is no longer the default cwd)', file: IX, killer: 'handlers', dies: /REGISTER PUTS THE PICK IN FRONT/,
+    edits: [['registerRepo(repo, front !== false));', 'registerRepo(repo, false));']] },
+  { name: 'A5 config:unregisterRepo registers instead', file: IX, killer: 'handlers', dies: /UNREGISTER REMOVES THE ENTRY/,
+    edits: [['(_evt, repo: unknown) => unregisterRepo(repo));', '(_evt, repo: unknown) => registerRepo(repo, true));']] },
+  { name: 'A8 preload patchMission drops the fields', file: PRE, killer: 'preload', dies: /THE PRELOAD PASSES EVERY ARGUMENT/,
+    edits: [["ipcRenderer.invoke('missions:patch', id, fields),", "ipcRenderer.invoke('missions:patch', id, {}),"]] },
+  { name: 'A1 McpDefaults row state reads the stale config prop again (bug 7 on screen)', file: MCP, killer: 'renderer', dies: /ENABLEDFOR READS THE MIRROR/,
+    edits: [['    defaults[id]?.enabled ?? MCP_CATALOG', '    config.mcpDefaults?.[id]?.enabled ?? MCP_CATALOG']] },
+  { name: 'A14 the kg toggle spreads the stale snapshot map again (bug 9 in the renderer)', file: SM, killer: 'renderer', dies: /NO SPREAD INSIDE THE knowledgeGraph PATCH/,
+    edits: [['await window.cth.updateConfig({ knowledgeGraph: { enabled: next } });', 'await window.cth.updateConfig({ knowledgeGraph: { ...(config.knowledgeGraph ?? {}), enabled: next } });']] },
+  { name: 'A16 saveBudget spreads the stale breaker again, without parens', file: SM, killer: 'renderer', dies: /NO SPREAD INSIDE THE circuitBreaker PATCH/,
+    edits: [['      circuitBreaker: {\n        enabled: brkEnabled,', '      circuitBreaker: {\n        ...breakerCfg.circuitBreaker,\n        enabled: brkEnabled,']] },
+  // Jim's three controls (killed at 8c9c3ae8 already) stay in the set so his 10 run as one census.
+  { name: 'C1 saveBudget spreads the stale breaker again, with parens', file: SM, killer: 'renderer', dies: /NO SPREAD INSIDE THE circuitBreaker PATCH/,
+    edits: [['      circuitBreaker: {\n        enabled: brkEnabled,', '      circuitBreaker: {\n        ...(breakerCfg.circuitBreaker ?? {}),\n        enabled: brkEnabled,']] },
+  { name: 'C2 AiEngines sends the whole base-URL map', file: AI, killer: 'renderer', dies: /THE providerBaseUrls PATCH IS ONE ENTRY/,
+    edits: [['providerBaseUrls: { [id]: next[id] }', 'providerBaseUrls: next']] },
+  { name: 'C3 McpDefaults spreads the mirrored map', file: MCP, killer: 'renderer', dies: /NO SPREAD INSIDE THE mcpDefaults PATCH/,
+    edits: [['mcpDefaults: { [id]: { enabled: next } }', 'mcpDefaults: { ...defaults, [id]: { enabled: next } }']] },
+];
+const WIRING_KILLERS = {
+  handlers: (file, text) => K.wiringHandlers(cfg, text),
+  preload: (file, text) => K.wiringPreload(text),
+  renderer: (file, text) => K.wiringRenderer({ [file]: text })
+};
+
 test('census: every mutant dies at its killer, and the real module passes every killer', () => {
   for (const k of Object.keys(K)) K[k](cfg);
   for (const m of MUTANTS) {
@@ -214,5 +349,9 @@ test('census: every mutant dies at its killer, and the real module passes every 
     const M = loadTs.fromText(CFG, text);
     assert.throws(() => K[m.killer](M), (e) => m.dies.test(String(e && e.message)), `mutant "${m.name}" must die at ${m.dies}`);
   }
-  assert.equal(MUTANTS.length, 11);
+  for (const m of WIRING_MUTANTS) {
+    const text = mutateText(m.file, m.edits, m.name);
+    assert.throws(() => WIRING_KILLERS[m.killer](m.file, text), (e) => m.dies.test(String(e && e.message)), `mutant "${m.name}" must die at ${m.dies}`);
+  }
+  assert.equal(MUTANTS.length + WIRING_MUTANTS.length, 21, "11 config.ts mutants + Jim's 10");
 });
