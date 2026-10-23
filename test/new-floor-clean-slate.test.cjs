@@ -57,7 +57,7 @@ let run = 0;
 /** Boot the real store module once, as a renderer would at load, against a stubbed window. The
  *  foreign-cache backup goes through main's real RosterStore into a temp home of its own:
  *  `backups` is what landed in its roster-backups/ (parsed), keyed by file name. */
-function bootStore({ storage, home, file }) {
+function bootStore({ storage, home, file, backupFails = false }) {
   const writes = [];
   const backupHome = fs.mkdtempSync(path.join(os.tmpdir(), 'md-nfcs-bk-'));
   const store = new RosterStore(() => backupHome);
@@ -67,7 +67,9 @@ function bootStore({ storage, home, file }) {
     cth: {
       rosterReadSync: () => file ?? null,
       rosterHomeSync: () => home,
-      rosterBackupForeignSync: (snap) => store.backupSnapshot(JSON.parse(JSON.stringify(snap)), 'foreign-cache'),
+      rosterBackupForeignSync: (snap) => (backupFails
+        ? { ok: false, error: 'disk full' }
+        : store.backupSnapshot(JSON.parse(JSON.stringify(snap)), 'foreign-cache')),
       rosterWrite: async (snap) => { writes.push(snap); return { ok: true }; }
     },
     addEventListener() {}
@@ -182,6 +184,26 @@ test('no home (legacy config): the cache is not loaded, cleared or stamped; it i
   assert.deepEqual(kept[0].body.restorable.map((a) => a.id), ['jim', 'creed']);
   assert.equal(storage.getItem('cth.rosterCacheKept'), null, 'NFCS NO HOME: and is dropped once kept');
   assert.equal(storage.getItem('cth.rosterHome'), NEW_HOME);
+});
+
+test('no home, then a home whose backup FAILS: the set-aside copy is kept for the next try', () => {
+  const storage = fakeStorage(cacheOf(DUNDER, null));
+  bootStore({ storage, home: null, file: null });
+  const held = storage.getItem('cth.rosterCacheKept');
+  assert.ok(held, 'set aside on the no-home boot');
+  const r = bootStore({ storage, home: NEW_HOME, file: null, backupFails: true });
+  assert.deepEqual(r.backups, []);
+  assert.equal(storage.getItem('cth.rosterCacheKept'), held, 'NFCS NO HOME: a failed backup does not drop the only copy');
+});
+
+test('a cache holding only archived or only restorable entries is a roster too: it is kept before the clear', () => {
+  for (const only of [{ archived: [agent('old-dwight', 'C:/PrzEdit')] }, { restorable: [agent('jim', 'C:/PrzEdit')] }]) {
+    const roster = { agents: [], archived: [], restorable: [], ...only };
+    const r = bootStore({ storage: fakeStorage(cacheOf(roster, OLD_HOME)), home: NEW_HOME, file: null });
+    assert.equal(r.backups.length, 1, `NFCS BACKUP: ${Object.keys(only)[0]}-only cache is backed up`);
+    const b = r.backups[0].body;
+    assert.deepEqual([b.archived.map((a) => a.id), b.restorable.map((a) => a.id)], [roster.archived.map((a) => a.id), roster.restorable.map((a) => a.id)]);
+  }
 });
 
 test('this floor\'s own cache is never backed up: a normal launch writes no foreign-cache file', () => {
