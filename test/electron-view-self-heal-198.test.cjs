@@ -11,7 +11,7 @@ const assert = require('node:assert/strict');
 const { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
-const { swiftShaderView } = require('./electron-harness/electron-bin.cjs');
+const { cappedHeavyJob, halfCpuMask, swiftShaderMaskForHeavyJob, swiftShaderView } = require('./electron-harness/electron-bin.cjs');
 
 function fakeDist(dir) {
   const dist = join(dir, 'dist');
@@ -38,9 +38,25 @@ test('a view that lost its executable but kept .complete is rebuilt, at the same
     assert.equal(swiftShaderView(src, 0xffffn, tmp), exe, 'the same view path');
     assert.equal(readFileSync(exe, 'utf8'), 'exe', 'the executable is back');
     if (process.platform === 'win32') assert.equal(statSync(exe).nlink, 2, 'a hard link to the dist, not a copy');
-    assert.equal(existsSync(join(view, 'SwiftShader.ini')), false, 'the CPU-rate cap never writes a SwiftShader affinity mask');
+    assert.equal(existsSync(join(view, 'SwiftShader.ini')), true, 'the supplied capped mask writes an affinity view');
     assert.equal(readFileSync(join(view, 'locales', 'en-US.pak'), 'utf8'), 'pak');
     assert.deepEqual(readdirSync(join(tmp, 'guppy-electron-view')), [view.split(/[\\/]/).pop()], 'no part or stale folder left');
+  });
+});
+
+test('a capped job uses a SwiftShader view no wider than its CPU share; an uncapped job remains plain', () => {
+  withTemp((dir) => {
+    const src = fakeDist(dir);
+    const tmp = join(dir, 'tmp');
+    assert.equal(cappedHeavyJob({ GUPPY_HEAVY_CPU_CAP: '1' }), true);
+    assert.equal(cappedHeavyJob({ GUPPY_HEAVY_CPU_CAP: '0' }), false);
+    const mask = swiftShaderMaskForHeavyJob({ GUPPY_HEAVY_CPU_CAP: '1' }, 8);
+    assert.equal(mask, 15n, 'four processors in the capped view');
+    assert.equal(swiftShaderMaskForHeavyJob({ GUPPY_HEAVY_CPU_CAP: '0' }, 8), null, 'uncapped is c1e8c5e7 plain behavior');
+    const capped = swiftShaderView(src, mask, tmp);
+    assert.match(readFileSync(join(capped, '..', 'SwiftShader.ini'), 'utf8'), /AffinityMask=15/);
+    const plain = swiftShaderView(src, null, tmp);
+    assert.equal(existsSync(join(plain, '..', 'SwiftShader.ini')), false);
   });
 });
 
