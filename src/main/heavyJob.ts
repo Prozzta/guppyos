@@ -485,6 +485,11 @@ export interface ClassifyCtx {
  *  set, `$(...)`, a backtick, a PowerShell subexpression). */
 const COMPUTED = /[$`]/;
 
+/** HEAVY-LOCK-FALSE-POSITIVE: a PowerShell word that is one variable or constant (`$true`, `$y`, `$env:TEMP`). */
+const PS_VALUE = /^\$(?:[A-Za-z_][A-Za-z0-9_]*|env:[A-Za-z_][A-Za-z0-9_]*)$/;
+/** HEAVY-LOCK-FALSE-POSITIVE: PowerShell's automatic constants: values, never a program. */
+const PS_CONST = /^(?:true|false|null)$/i;
+
 /** HEAVY-LOCK-LIVE-FILE-192: what `word` names, expanded; null when that is still computed. */
 function named(word: string, ctx: ClassifyCtx): string | null {
   const w = word.replace(/^["']|["']$/g, '');
@@ -968,8 +973,13 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
   // HEAVY-LOCK-SHAPES-189: a PowerShell assignment runs its right-hand side (`$suite = Start-Process
   // npm.cmd test`, `$r=npm test`); it read as a dynamic command word or a variable.
   const psAssign = /^\$[A-Za-z_][A-Za-z0-9_:]*=(.*)$/.exec(ws[0]);
-  if (psAssign) return classifyWords([...(psAssign[1] ? [psAssign[1]] : []), ...ws.slice(1)], depth, ctx);
-  if (/^\$[A-Za-z_][A-Za-z0-9_:]*$/.test(ws[0]) && ws[1] === '=') return classifyWords(ws.slice(2), depth, ctx);
+  const rhs = psAssign ? [...(psAssign[1] ? [psAssign[1]] : []), ...ws.slice(1)] : /^\$[A-Za-z_][A-Za-z0-9_:]*$/.test(ws[0]) && ws[1] === '=' ? ws.slice(2) : null;
+  // HEAVY-LOCK-FALSE-POSITIVE (god, 2026-10-23 08:28Z: `$ok=$true` was denied as "$true (a path the lock
+  // cannot name)"): a right-hand side that is ONE variable or constant (`$ok=$true`, `$x = $y`, `$r = $null`,
+  // `$t = $env:TEMP`) runs nothing: `$a=$b` never invokes $b (only `& $b` does). One that runs a command
+  // (`$r = npm test`, `$r = & $exe`, `$r = $cmd args`) is still classified as that command.
+  if (rhs && rhs.length === 1 && PS_VALUE.test(rhs[0])) return { heavy: false };
+  if (rhs) return classifyWords(rhs, depth, ctx);
   // A dynamic command word is unnameable, but its arguments still identify common heavy runners.
   // Handle variable wrappers (`$CR node ...`), variable Node (`$NODE test/tools/run-tests.cjs`),
   // PowerShell environment variables, and the conventional `$(which node)` form.
@@ -990,6 +1000,8 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
       const v = /^\$([A-Za-z_][A-Za-z0-9_]*)$/.exec(ws[0]);
       if (v && ctx.inBlock && /^(?:_|PSItem)$/i.test(v[1])) return { heavy: false };
       if (v && ctx.psVars?.has(v[1].toLowerCase())) return { heavy: false };
+      // HEAVY-LOCK-FALSE-POSITIVE: PowerShell's constants are values wherever they stand (`...; $true`).
+      if (v && PS_CONST.test(v[1])) return { heavy: false };
       return unnamed(ws[0]);
     }
     if (ws.length > 1) {
@@ -1362,6 +1374,9 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
     // HEAVY-LOCK-CMD-FOR-198: a cmd FOR runs its body (to the end of the line, `&`/`|` included, or to
     // its block's `)`), so the loop is classified from where it starts in the text, not by segment.
     const own = seg.replace(/\s+&$/, '');   // segments() marks a lone `&` (background) with ` &`
+    // HEAVY-LOCK-FALSE-POSITIVE (god, 08:28Z): `foreach ($c in $t) { $c | ConvertTo-Json ... }` assigns $c
+    // each round, as `$c = ...` would; `$c` alone in the block was "$c (a path the lock cannot name)".
+    for (const m of own.matchAll(/\bforeach\s*\(\s*\$([A-Za-z_][A-Za-z0-9_]*)\s+in\b/gi)) psVars.add(m[1].toLowerCase());
     const inBlock = braces > 0;
     braces = Math.max(0, braces + braceDelta(own));
     const segAt = d === 'cmd' ? text.indexOf(own, cursor) : -1;
@@ -1837,8 +1852,18 @@ export const HEAVY_SCRIPT_MAX_BYTES = 256 * 1024;
 /** HEAVY-LOCK-VARPATH-READ: what PowerShell and cmd try after a bare name (`./tool` runs tool.cmd). */
 const RUNNABLE_EXTS = ['.exe', '.cmd', '.bat', '.com', '.ps1'];
 
-/** A ClassifyCtx reading scripts relative to `cwd` (the tool call's), size-capped; null on any failure. */
-export function scriptReaderFor(cwd: string | null | undefined, read: (absPath: string) => { size: number; text: () => string; dir?: boolean } | null): ClassifyCtx {
+/** HEAVY-LOCK-FALSE-POSITIVE (god, 2026-10-23 02:51Z: `node /tmp/g80.js` after a `sed -i` on it was
+ *  "a script the lock cannot read yet: no such file at /tmp/g80.js"): Git Bash mounts /tmp on the Windows
+ *  temp folder (%TEMP%: `cd /tmp && pwd -W`), so a path under /tmp is looked for there too. */
+export function msysTemp(abs: string, env?: Readonly<Record<string, string>>): string | null {
+  const temp = env?.TEMP || env?.TMP;
+  const m = /^\/tmp(\/.*)?$/.exec(abs.replace(/\\/g, '/'));
+  return temp && m ? `${temp.replace(/[\\/]+$/, '')}${m[1] ?? ''}` : null;
+}
+
+/** A ClassifyCtx reading scripts relative to `cwd` (the tool call's), size-capped; null on any failure.
+ *  `env` (TEMP / TMP, the agent's) places Git Bash's /tmp. */
+export function scriptReaderFor(cwd: string | null | undefined, read: (absPath: string) => { size: number; text: () => string; dir?: boolean } | null, env?: Readonly<Record<string, string>>): ClassifyCtx {
   const resolve = (p: string, cd?: string): string | null => {
     const raw = p.replace(/^["']|["']$/g, '');
     if (!raw || raw.includes('$') || cd?.includes('$') || cd?.startsWith('~')) return null;
@@ -1846,20 +1871,30 @@ export function scriptReaderFor(cwd: string | null | undefined, read: (absPath: 
     const base = cd ? (isAbs(cd) || !cwd ? cd : `${cwd.replace(/[\\/]+$/, '')}/${cd}`) : cwd;
     return isAbs(raw) || !base ? raw : `${base.replace(/[\\/]+$/, '')}/${raw}`;
   };
+  /** The places `p` may be, in the order they are tried: as written, then Git Bash's /tmp on %TEMP%. */
+  const places = (p: string, cd?: string): string[] => {
+    const abs = resolve(p, cd);
+    if (abs === null) return [];
+    const t = msysTemp(abs, env);
+    return t ? [abs, t] : [abs];
+  };
+  /** The first of those places that is there, or null. */
+  const find = (p: string, cd?: string): string | null => places(p, cd).find((abs) => read(abs) !== null) ?? null;
   return {
     // HEAVY-LOCK-VARPATH-READ: a path that is there and is a directory (the reader says `dir`), with no
     // runnable sibling: PowerShell runs `./tool` as tool.cmd when both are there (Andy's audit).
     isDir: (p: string, cd?: string): boolean => {
-      const abs = resolve(p, cd);
+      const abs = find(p, cd);
       return abs !== null && read(abs)?.dir === true && !RUNNABLE_EXTS.some((e) => read(`${abs}${e}`) !== null);
     },
     missingAt: (p: string, cd?: string): string | null => {
-      const abs = resolve(p, cd);
-      if (abs === null || read(abs)) return null;
-      return abs.replace(/\\/g, '/').replace(/^\/([A-Za-z])\//, (_m, d: string) => `${d.toUpperCase()}:/`);
+      const at = places(p, cd);
+      if (!at.length || find(p, cd) !== null) return null;
+      // Git Bash's /tmp is where the agent's command looks, so that is the place named.
+      return at[at.length - 1].replace(/\\/g, '/').replace(/^\/([A-Za-z])\//, (_m, d: string) => `${d.toUpperCase()}:/`);
     },
     readScript: (p: string, cd?: string): string | null => {
-      const abs = resolve(p, cd);
+      const abs = find(p, cd);
       if (abs === null) return null;
       const f = read(abs);
       if (!f || f.dir || f.size > HEAVY_SCRIPT_MAX_BYTES) return null;   // a directory has no text
@@ -2241,7 +2276,7 @@ export class HeavyJobLock {
     // HEAVY-SLOT-EXCLUSIVE-192: with 2+ slots, say why a free slot is not yours (one slot is always alone).
     const alone = limit > 1 && (excl || holders.some((h) => h.exclusive) || [...this.reservations.values()].some((r) => r.exclusive) || this.waiters.some((w) => w.exclusive && w.agentId !== agentId))
       ? ' A whole test suite or a bench runs alone: it starts only when every slot is free, and nothing else starts beside it or ahead of it.' : '';
-    const reason = `Denied by HEAVY-JOB-LOCK: the machine allows ${limit} heavy job${limit === 1 ? '' : 's'} at once and ${held}${others ? ` (${others})` : ''}.${alone} You are QUEUED (position ${position}): when a slot frees it is reserved for you for ${Math.round(HEAVY_RESERVE_MS / 60_000)} min and you are told "HEAVY SLOT FREE". Do not retry this or a variant of it now, and do not poll for the slot: carry on with light work (single test files, reads, edits are not limited) until you are told.`;
+    const reason = `Denied by HEAVY-JOB-LOCK: the machine allows ${limit} heavy job${limit === 1 ? '' : 's'} at once and ${held}${others ? ` (${others})` : ''}.${alone} You are QUEUED (position ${position}): when a slot frees it is reserved for you for ${Math.round(HEAVY_RESERVE_MS / 60_000)} min and you are told "HEAVY SLOT FREE". Do not retry this or a variant of it now, and do not poll for the slot: carry on with light work (single test files, reads, edits are not limited) until you are told.${cls.provisional ? ` This denial is PROVISIONAL (${cls.why}): if the command is in fact light, \`heavy release\` leaves the queue, and name the file so the lock can read it.` : ''}`;
     // Jim N3: the denied command's CLASS is logged, not the command itself.
     this.log({ kind: 'heavy-lock', action: 'deny', agentId, heavyKind: kind, why: cls.why ?? null, holders: holders.map((h) => ({ agentId: h.agentId, kind: h.kind, since: new Date(h.since).toISOString() })), limit, position, ...(excl ? { exclusive: true } : {}) });
     this.changed();

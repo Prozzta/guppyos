@@ -4,7 +4,7 @@
  * (the per-spawn token the heavy preload uses; HIVE_LEDGER_URL with /ledger/ made /heavy/).
  *
  *   heavy status                 who holds the slot, who waits, who has a slot reserved
- *   heavy release                give up my reserved slot (and my queue place): it passes on at once
+ *   heavy release                give up my reserved slot, or my place in the queue: it passes on at once
  *   heavy release --to <agent>   ... to that queued agent first (else to the oldest waiter)
  *
  * A held slot is not released here: it frees when its job ends.
@@ -15,7 +15,7 @@ const http = require('http');
 
 const EXIT = { ok: 0, usage: 2, unavailable: 3, timeout: 4 };
 const REQUEST_TIMEOUT_MS = 15000;
-const USAGE = 'usage: heavy status | heavy release [--to <agent>]\n';
+const USAGE = 'usage: heavy status | heavy release [--to <agent>]\n  release: give up my reserved slot, or my place in the queue (a denial queued me)\n';
 const AGENT = /^[A-Za-z0-9._-]{1,80}$/;
 
 /** { op: 'status' } | { op: 'unreserve', to? } | { help: true }, or throws. */

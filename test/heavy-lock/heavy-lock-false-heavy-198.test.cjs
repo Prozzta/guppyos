@@ -131,7 +131,7 @@ const MUTANTS = [
     killer: 'missingSaid', dies: /A MISSING SCRIPT IS NAMED, THROUGH A VARIABLE/ },
   { name: 'a file the command writes is called missing', edits: [['virtual.has(key(p, cd)) ? null : where(', 'false ? null : where(']],
     killer: 'missingSaid', dies: /A FILE THE COMMAND WRITES IS NOT CALLED MISSING/ },
-  { name: 'missingAt reports a file that is there', edits: [['      if (abs === null || read(abs)) return null;\n', '      if (abs === null) return null;\n']],
+  { name: 'missingAt reports a file that is there', edits: [['      if (!at.length || find(p, cd) !== null) return null;\n', '      if (!at.length) return null;\n']],
     killer: 'missingSaid', dies: /A FILE THAT IS THERE \(TOO BIG TO READ\) IS NOT CALLED MISSING/ },
   { name: 'classifyCommand does not pass expand', edits: [['  let here: ClassifyCtx = { ...ctx, dialect: d, stdin: undefined, expand, ', '  let here: ClassifyCtx = { ...ctx, dialect: d, stdin: undefined, ']],
     killer: 'varFile', dies: /A VARIABLE SET TO ONE FILE IS THAT FILE/ },
