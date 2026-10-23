@@ -536,6 +536,11 @@ for (const [run, kept] of [['stop', true], ['user_prompt_submit', false]]) {
     } else {
       assert.notEqual(e.state, 'acted', 'not confirmed: returned to be surfaced again');
       assert.equal(e.unconfirmedSurfacings, 1);
+      // The duplicate turn seen live (Dwight 08:39Z): a second try of the same ids is typed.
+      assert.equal(w.reqs.length, 1, 'the mail is typed again');
+      assert.equal(w.reqs[0].text, '[hive] check inbox');
+      assert.match(w.reqs[0].requestId, /^inbox-wake:a1:[0-9a-f]+:1$/, 'the same ids, a second try');
+      assert.equal(e.state, 'delivered', 'back to delivered: the typed wake surfaces it again');
     }
   });
 }
