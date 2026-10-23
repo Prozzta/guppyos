@@ -61,6 +61,8 @@ test('the native helper pins hard-cap mode and the exact 50% CPU rate (M1)', () 
   assert.match(native, /ControlFlags = cap \? CPU_RATE_ENABLE \| CPU_RATE_HARD_CAP : 0/);
   assert.match(native, /if \(!cap && !CpuRateEnabled\(job\)\) return;/, 'M9: fresh cap-off jobs skip invalid class-15 zero flags; a live cap-off still clears it');
   assert.match(native, /GUPPY_HEAVY_CPU_CAP.*cap \? "1" : "0"/, 'the joined command can size workers to the Job Object CPU share');
+  assert.match(native, /self-query/, 'a joined Bash or PowerShell command can query its own Job Object rate');
+  assert.match(native, /QueryJob\(IntPtr\.Zero\)/, 'self-query asks Windows for the current process Job Object');
   assert.match(native, /var rate = new CPU_RATE \{ ControlFlags = cap \? CPU_RATE_ENABLE \| CPU_RATE_HARD_CAP : 0, CpuRate = cap \? CPU_RATE_50_PERCENT : 0 \}/);
   assert.doesNotMatch(native, /LIMIT_AFFINITY|SetProcessAffinityMask/);
   assert.match(native, /return \"\{\\\"background\\\":\" \+ \(background \? \"true\" : \"false\"\) \+ \",\\\"cap\\\":\" \+ \(cap \? \"true\" : \"false\"\) \+ \",\\\"rate\\\":\" \+ \(cap \? CPU_RATE_50_PERCENT : 0\) \+ \",\\\"affinity\\\":null\}\"/,

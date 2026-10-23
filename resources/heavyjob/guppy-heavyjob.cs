@@ -94,10 +94,11 @@ static class HeavyJob
             if (a.Length == 4 && a[0] == "set") return Set(JobName(a[1]), a[2] == "1", a[3] == "1");
             if (a.Length == 2 && a[0] == "list") return List(JobName(a[1]));
             if (a.Length == 2 && a[0] == "query") return Query(JobName(a[1]));
+            if (a.Length == 1 && a[0] == "self-query") return SelfQuery();
             if (a.Length == 1 && a[0] == "serve") return Serve();
         }
         catch (Exception e) { Console.Error.WriteLine("[guppy] heavy-job limits not applied: " + e.Message); return a.Length > 0 && a[0] == "join" ? 0 : 3; }
-        Console.Error.WriteLine("usage: guppy-heavyjob join|set <job> <background 0|1> <cap 0|1> | list <job> | query <job> | serve");
+        Console.Error.WriteLine("usage: guppy-heavyjob join|set <job> <background 0|1> <cap 0|1> | list <job> | query <job> | self-query | serve");
         return 2;
     }
 
@@ -301,6 +302,15 @@ static class HeavyJob
         if (job == IntPtr.Zero) { Console.Error.WriteLine("no job " + name); return 1; }
         try { Console.Out.Write(QueryJob(job) + "\n"); } finally { CloseHandle(job); }
         return 0;
+    }
+
+    // NULL asks Windows for the Job Object containing this helper.  This lets a child such as the
+    // test runner learn a CPU-rate cap even when a Bash/PowerShell `join; command` cannot inherit
+    // an environment variable from the short-lived join helper.
+    static int SelfQuery()
+    {
+        try { Console.Out.Write(QueryJob(IntPtr.Zero) + "\n"); return 0; }
+        catch { Console.Out.Write("{\"background\":false,\"cap\":false,\"rate\":0,\"affinity\":null}\n"); return 0; }
     }
 
     // The job's own priority and CPU-rate limits. A hard cap never sets an affinity limit.

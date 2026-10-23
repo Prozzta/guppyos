@@ -99,20 +99,32 @@ test('the expanded file list is passed to node --test - no glob character surviv
   assert.deepStrictEqual(fileArgs.map((a) => path.basename(a)), ['a.test.cjs', 'b.test.cjs']);
 });
 
-test('a hard-capped heavy job halves node test concurrency and its startup gate', () => {
+test('a self-queried hard-capped heavy job scales node test concurrency and its startup gate', () => {
   const { spawn, calls } = fakeSpawn({ status: 0 });
   const gates = [];
   const logs = sink();
   const code = run({
     testDir: 'test', readdir: () => ['a.test.cjs'], spawn, log: logs.write,
-    processEnv: { GUPPY_HEAVY_CPU_CAP: '1' }, cores: 32,
+    processEnv: {}, cores: 32, jobRate: () => 5000,
     startGate: ({ slots }) => { gates.push(slots); return null; },
   });
   assert.strictEqual(code, 0);
   assert.deepStrictEqual(gates, [4], 'the gate uses the 16-core capped share');
   assert.ok(calls[0].args.includes('--test-concurrency=16'), calls[0].args.join(' '));
-  assert.match(logs.lines.join('\n'), /node concurrency 16 of 32 visible cores/);
-  assert.strictEqual(runner.cappedCores({ GUPPY_HEAVY_CPU_CAP: '1' }, 1), 1, 'one visible core remains one');
+  assert.match(logs.lines.join('\n'), /heavy CPU rate 5000: node concurrency 16 of 32 visible cores/);
+  assert.strictEqual(runner.cappedCores({}, 1, 5000), 1, 'one visible core remains one');
+  assert.equal(runner.selfJobRate({ env: {}, platform: 'win32', spawnSyncFn: () => ({ stdout: '{"rate":5000}' }) }), 5000, 'self-query makes Bash and PowerShell joins cap-aware');
+  assert.equal(runner.selfJobRate({ env: { GUPPY_HEAVY_CPU_CAP: '0' }, platform: 'win32', spawnSyncFn: () => ({ stdout: '{"rate":5000}' }) }), 0, 'an explicit cap-off override wins');
+
+  const open = fakeSpawn({ status: 0 });
+  const openGates = [];
+  assert.strictEqual(run({
+    testDir: 'test', readdir: () => ['a.test.cjs'], spawn: open.spawn, log: () => {},
+    processEnv: {}, cores: 32, jobRate: () => 0,
+    startGate: ({ slots }) => { openGates.push(slots); return null; },
+  }), 0);
+  assert.deepStrictEqual(openGates, [8], 'cap-off preserves the 32-core startup gate');
+  assert.ok(!open.calls[0].args.some((arg) => arg.startsWith('--test-concurrency=')), 'the uncapped 32-core default is not artificially restricted');
 });
 
 // ── TEST-RUNNER-FILE-TIMEOUT (1.1.76): a file that never finishes is a NAMED failure ──────────

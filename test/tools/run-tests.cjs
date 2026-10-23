@@ -104,8 +104,20 @@ function prepareFileJob({ csc = CSC, src = FILE_JOB_SRC, dir = require('./shared
 const START_GATE_PRELOAD = path.join(__dirname, 'file-start-gate.cjs');
 // HALFCORES-OVERSUBSCRIBE: a Job Object cap reduces CPU time, not the processor count
 // Node sees.  Keep node --test and the start gate within the share the heavy helper gave it.
-const cappedCores = (env = process.env, cores = os.availableParallelism()) =>
-  env.GUPPY_HEAVY_CPU_CAP === '1' ? Math.max(1, Math.floor(cores / 2)) : cores;
+const CPU_RATE_UNITS = 10_000;
+const CPU_RATE_50_PERCENT = 5_000;
+function selfJobRate({ spawnSyncFn = spawnSync, env = process.env, platform = process.platform } = {}) {
+  // The explicit variable is retained for the cmd re-exec path and controlled test launches.
+  if (env.GUPPY_HEAVY_CPU_CAP === '1') return CPU_RATE_50_PERCENT;
+  if (env.GUPPY_HEAVY_CPU_CAP === '0' || platform !== 'win32') return 0;
+  try {
+    const r = spawnSyncFn('guppy-heavyjob', ['self-query'], { encoding: 'utf8', windowsHide: true, env });
+    const rate = JSON.parse(String(r.stdout || '')).rate;
+    return Number.isInteger(rate) && rate > 0 && rate <= CPU_RATE_UNITS ? rate : 0;
+  } catch { return 0; }
+}
+const cappedCores = (env = process.env, cores = os.availableParallelism(), rate = selfJobRate({ env })) =>
+  rate > 0 ? Math.max(1, Math.floor(cores * rate / CPU_RATE_UNITS)) : cores;
 const startSlots = (env = process.env, cores = os.availableParallelism()) => {
   const n = Number(env.GUPPY_START_SLOTS);
   return env.GUPPY_START_SLOTS !== undefined && env.GUPPY_START_SLOTS !== '' && Number.isInteger(n) && n >= 0 ? n : Math.max(2, Math.ceil(cores / 4));
@@ -240,6 +252,7 @@ function run({
   // Injected by the runner contract tests; production uses the OS-visible count.
   cores = os.availableParallelism(),
   processEnv = process.env,
+  jobRate = selfJobRate,
 } = {}) {
   let entries;
   try {
@@ -271,8 +284,9 @@ function run({
   // PS-POLICY-TEMP-LEAK: not the PowerShell temp folder; the files' temp jail sets theirs.
   const env = require('./ps-env.cjs').psEnv(processEnv, { temp: false });
   delete env.NODE_TEST_CONTEXT;
-  const concurrency = cappedCores(env, cores);
-  if (env.GUPPY_HEAVY_CPU_CAP === '1') log(`[test-runner] heavy CPU cap: node concurrency ${concurrency} of ${cores} visible cores`);
+  const rate = jobRate({ env });
+  const concurrency = cappedCores(env, cores, rate);
+  if (rate > 0) log(`[test-runner] heavy CPU rate ${rate}: node concurrency ${concurrency} of ${cores} visible cores`);
   // LOAD-BURST-196: the gate loads first, so a file's job join below is inside its start slot too.
   let gate = null;
   try { gate = startGate({ slots: startSlots(env, concurrency) }); } catch (e) { err(`[test-runner] no start gate (${String(e)}): every file loads at once (LOAD-BURST-196)`); }
@@ -459,7 +473,7 @@ function totals(code, counts, laneState, log, failures = [], {
   return code;
 }
 
-module.exports = { prepareFileJob, FILE_JOB_PRELOAD, prepareTempJail, TEMP_JAIL_PRELOAD, tempLeaks, reportTempLeaks,prepareStartGate, startSlots, cappedCores, START_GATE_PRELOAD, burstLine, selectTestFiles, discoverTestFiles, FEATURE_TEST_DIRS, run, runPerfLane, runCounts, failingTests, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
+module.exports = { prepareFileJob, FILE_JOB_PRELOAD, prepareTempJail, TEMP_JAIL_PRELOAD, tempLeaks, reportTempLeaks,prepareStartGate, startSlots, cappedCores, selfJobRate, CPU_RATE_50_PERCENT, START_GATE_PRELOAD, burstLine, selectTestFiles, discoverTestFiles, FEATURE_TEST_DIRS, run, runPerfLane, runCounts, failingTests, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
 
 if (require.main === module) {
   const repoRoot = path.resolve(__dirname, '..', '..');
