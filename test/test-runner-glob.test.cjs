@@ -14,7 +14,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const runner = require('./tools/run-tests.cjs');
-const { selectTestFiles, run } = runner;
+const { selectTestFiles } = runner;
+// These runner-behaviour tests are not process-job integration tests. Pin their
+// concurrency to the uncapped branch so a fresh npm-ci tree need not have bin/.
+const run = (options) => runner.run({ jobRate: () => 0, ...options });
 
 const REPO = path.resolve(__dirname, '..');
 const TEST_DIR = path.join(REPO, 'test');
@@ -122,6 +125,13 @@ test('a self-queried hard-capped heavy job scales node test concurrency and its 
     /self-query is unavailable/,
     'an old helper without self-query is a named failure, never an uncapped zero'
   );
+  const notices = sink();
+  assert.equal(
+    runner.selfJobRate({ env: {}, platform: 'win32', notice: notices.write, spawnSyncFn: () => ({ error: Object.assign(new Error('not found'), { code: 'ENOENT' }) }) }),
+    0,
+    'a fresh npm-ci tree has no helper and therefore no cap information'
+  );
+  assert.match(notices.lines.join('\n'), /helper is not built .*CPU cap unknown/);
   assert.equal(runner.selfJobRate({ env: { GUPPY_HEAVY_CPU_CAP: '0' }, platform: 'win32', spawnSyncFn: () => ({ stdout: '{"rate":5000}' }) }), 0, 'an explicit cap-off override wins');
 
   const queryFailure = sink();

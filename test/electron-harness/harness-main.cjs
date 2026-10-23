@@ -68,12 +68,13 @@ isolateAppPaths(app, sandboxRoot);
 let finished = false;
 // The scenario may stall in the renderer without ever returning a result. Keep its
 // last checkpoint in main so the timeout names the frame and operation that stopped.
-let latestProgress = { frames: 0, phase: 'setup', step: 'bundle', at: new Date().toISOString() };
+let latestProgress = { frames: 0, renders: 0, phase: 'setup', step: 'bundle', at: new Date().toISOString() };
 let progressTimer = null;
 function noteProgress(payload) {
   if (!payload || typeof payload !== 'object') return;
-  const { frames, phase, step } = payload;
+  const { frames, renders, phase, step } = payload;
   if (Number.isFinite(frames) && frames >= 0) latestProgress.frames = Math.floor(frames);
+  if (Number.isFinite(renders) && renders >= 0) latestProgress.renders = Math.floor(renders);
   if (typeof phase === 'string' && phase) latestProgress.phase = phase;
   if (typeof step === 'string' && step) latestProgress.step = step;
   latestProgress.at = new Date().toISOString();
@@ -359,7 +360,7 @@ app.whenReady().then(async () => {
     clearTimeout(setupTimer);
     const setupMs = Date.now() - setupStart;
     process.stderr.write(`[harness] setup ${setupMs} ms (bundle ${code.length} bytes)\n`);
-    noteProgress({ phase: 'scenario', step: 'awaiting scenario start', frames: 0 });
+    noteProgress({ phase: 'scenario', step: 'awaiting scenario start', frames: 0, renders: 0 });
     logProgress();
     progressTimer = setInterval(logProgress, 10_000);
     progressTimer.unref?.();

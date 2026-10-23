@@ -118,13 +118,20 @@ function renderLaneFiles(files, { testDir, readSource = (file) => fs.readFileSyn
     try { return RENDER_HARNESS_IMPORT.test(readSource(path.join(testDir, file))); } catch { return false; }
   });
 }
-function selfJobRate({ spawnSyncFn = spawnSync, env = process.env, platform = process.platform } = {}) {
+function selfJobRate({ spawnSyncFn = spawnSync, env = process.env, platform = process.platform, notice = (line) => process.stderr.write(`${line}\n`) } = {}) {
   // The explicit variable is retained for the cmd re-exec path and controlled test launches.
   if (env.GUPPY_HEAVY_CPU_CAP === '1') return CPU_RATE_50_PERCENT;
   if (env.GUPPY_HEAVY_CPU_CAP === '0' || platform !== 'win32') return 0;
   let r;
   try { r = spawnSyncFn(HEAVYJOB_HELPER, ['self-query'], { encoding: 'utf8', windowsHide: true, env }); }
   catch (e) { throw new Error(`heavy-job self-query could not start (${HEAVYJOB_HELPER}): ${String(e)}`); }
+  // `bin/` is deliberately a build output. A fresh npm-ci audit tree has no helper
+  // yet, so it cannot know its job cap; do not make the focused suite unusable there.
+  // A helper that does exist but does not support self-query remains a loud failure.
+  if (r.error?.code === 'ENOENT') {
+    notice(`[test-runner] heavy-job helper is not built (${HEAVYJOB_HELPER}); CPU cap unknown, using visible-core concurrency`);
+    return 0;
+  }
   if (r.error || r.status !== 0) {
     throw new Error(`heavy-job self-query is unavailable (${HEAVYJOB_HELPER}; status ${r.status}): ${String(r.stderr || r.error || '').trim()}`);
   }
