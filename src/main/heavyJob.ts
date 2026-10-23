@@ -81,6 +81,13 @@ function substEnd(s: string, i: number): number {
  *    `cmd /c "echo don't & npm test"` RUNS npm test; `^` escapes; `;` separates nothing; no `#`.
  */
 export type ShellDialect = 'sh' | 'cmd';
+/** HEAVY-LOCK-FALSE-POSITIVE (Andy MINOR 1): where a path is looked for. 'msys' is Git Bash's view, where
+ *  /tmp is %TEMP% (tried first; C:\tmp, which exists on the Human's machine, only as a fallback); 'win' is
+ *  PowerShell's and cmd's, where /tmp is C:\tmp (as written first). */
+export type PathLookup = 'msys' | 'win';
+/** HEAVY-LOCK-FALSE-POSITIVE (Andy NIT 1): the shell a text runs in: PowerShell's value rules (`$a = $b`
+ *  runs nothing, `$true` is a value) hold in PowerShell only; in bash `$a = $b` runs $a. */
+export type ShellKind = 'bash' | 'powershell';
 
 /**
  * Does the quote character at `i` OPEN a quote (outside quotes)? Not when the dialect has no such
@@ -446,7 +453,7 @@ export interface ClassifyCtx {
   loopMult?: number;
   /** The text of a script file the command runs (`bash suite.sh`, `./gate.sh`), resolved against the
    *  call's cwd and size-capped by the caller; null when unreadable. Absent = scripts are not read. */
-  readScript?: (path: string, cd?: string) => string | null;
+  readScript?: (path: string, cd?: string, look?: PathLookup) => string | null;
   /** The directory an earlier `cd X` segment of the same command moved to (relative paths then resolve there). */
   cd?: string;
   /** HEAVY-LOCK-ADHOC-NODE, set per segment by classifyCommand: the segment reads stdin from a heredoc
@@ -465,7 +472,7 @@ export interface ClassifyCtx {
   /** HEAVY-LOCK-FALSE-HEAVY-198 (Jim, god 2d273e): where a path readScript resolves to has no file,
    *  that absolute path (for the deny text: "no such file at ..."); null when one is there, or when
    *  the path is not resolvable. Absent = the reason stays "cannot read yet". */
-  missingAt?: (path: string, cd?: string) => string | null;
+  missingAt?: (path: string, cd?: string, look?: PathLookup) => string | null;
   /** Command-local literal assignments expanded before a nested wrapper is classified. Computed
    * values remain visibly computed, so the wrapper still fails closed. */
   expandKnown?: (text: string) => string;
@@ -478,7 +485,16 @@ export interface ClassifyCtx {
   /** HEAVY-LOCK-VARPATH-READ: this text runs inside a `{ }` script block (a pipeline's `$_` is a value there). */
   inBlock?: boolean;
   /** HEAVY-LOCK-VARPATH-READ: the path names a DIRECTORY (not a program: light). Absent = never. */
-  isDir?: (path: string, cd?: string) => boolean;
+  isDir?: (path: string, cd?: string, look?: PathLookup) => boolean;
+  /** HEAVY-LOCK-FALSE-POSITIVE (Andy NIT 1): the shell this text runs in, from the tool (Bash, PowerShell)
+   *  or the wrapper (`bash -c`, `powershell -Command`, `bash x.sh`, `-File x.ps1`). Absent = unknown:
+   *  PowerShell's value rules apply (as for a bare classifyCommand). */
+  shell?: ShellKind;
+}
+
+/** Where a script named in `ctx` under `dialect` is looked for (see PathLookup). */
+function lookupOf(ctx: ClassifyCtx | undefined, dialect: ShellDialect | undefined): PathLookup {
+  return dialect === 'cmd' || ctx?.shell === 'powershell' ? 'win' : 'msys';
 }
 
 /** HEAVY-LOCK-LIVE-FILE-192: a word still computed after expansion (a variable the command did not
@@ -511,7 +527,7 @@ const MAX_DEPTH = 4;
 function unreadable(path: string, ctx?: ClassifyCtx): HeavyClass {
   // HEAVY-LOCK-FALSE-HEAVY-198 (Jim): a mistyped path says so, so the agent fixes it rather than waits.
   let at: string | null = null;
-  try { at = ctx?.missingAt?.(path, ctx.cd) ?? null; } catch { at = null; }
+  try { at = ctx?.missingAt?.(path, ctx.cd, lookupOf(ctx, ctx.dialect)) ?? null; } catch { at = null; }
   return { heavy: true, kind: 'bench', why: `${path.replace(/\\/g, '/').split('/').pop()} (a script the lock cannot read yet${at ? `: no such file at ${at}` : ''})`, provisional: true };
 }
 
@@ -535,15 +551,18 @@ function classifyScript(path: string, depth: number, ctx: ClassifyCtx, dialect: 
   if (!ctx.readScript) return { heavy: false };
   if (depth >= MAX_DEPTH) return capped(name);
   let text: string | null = null;
-  try { text = ctx.readScript(path, ctx.cd); } catch { text = null; }
+  // Andy MINOR 1: the script is read where the shell that runs it looks (`bash /tmp/x.sh` from a
+  // PowerShell tool still reads %TEMP%: bash runs it).
+  const look = lookupOf(ctx, dialect);
+  try { text = ctx.readScript(path, ctx.cd, look); } catch { text = null; }
   // HEAVY-LOCK-BG-LAPSE-189: a script the lock cannot read (not created yet, too big, a computed
   // path) is an unknown program: heavy, as an unreadable stdin script already is (FAILOPEN).
   // HEAVY-LOCK-VARPATH-READ (god, Andy's design): a path that resolves to a DIRECTORY is not a program
   // (`./term --help` from hive/bin, where `term` is a folder, was "a script the lock cannot read yet").
   // A path that is not there at all stays unreadable: heavy, provisional.
   let dir = false;
-  try { dir = ctx.isDir?.(path, ctx.cd) === true; } catch { dir = false; }
-  if (text === null) return dir ? { heavy: false } : unreadable(path, ctx);
+  try { dir = ctx.isDir?.(path, ctx.cd, look) === true; } catch { dir = false; }
+  if (text === null) return dir ? { heavy: false } : unreadable(path, { ...ctx, dialect });
   // HEAVY-LOCK-SHAPES-189 (Jim MUST 2): PowerShell 5.1's Out-File and `>` write UTF-16LE with a BOM,
   // so a .ps1 holds a NUL beside every ASCII character. Decoded first (a command is ASCII, so the
   // NULs go), and a named script (x.ps1, x.sh, x.bat) with NULs and no BOM is UTF-16 too.
@@ -978,7 +997,8 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
   // cannot name)"): a right-hand side that is ONE variable or constant (`$ok=$true`, `$x = $y`, `$r = $null`,
   // `$t = $env:TEMP`) runs nothing: `$a=$b` never invokes $b (only `& $b` does). One that runs a command
   // (`$r = npm test`, `$r = & $exe`, `$r = $cmd args`) is still classified as that command.
-  if (rhs && rhs.length === 1 && PS_VALUE.test(rhs[0])) return { heavy: false };
+  // Andy NIT 1: in bash `$a = $b` runs $a (unknown: provisional, as before); the rule is PowerShell's.
+  if (rhs && rhs.length === 1 && PS_VALUE.test(rhs[0]) && ctx.shell !== 'bash') return { heavy: false };
   if (rhs) return classifyWords(rhs, depth, ctx);
   // A dynamic command word is unnameable, but its arguments still identify common heavy runners.
   // Handle variable wrappers (`$CR node ...`), variable Node (`$NODE test/tools/run-tests.cjs`),
@@ -1001,7 +1021,7 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
       if (v && ctx.inBlock && /^(?:_|PSItem)$/i.test(v[1])) return { heavy: false };
       if (v && ctx.psVars?.has(v[1].toLowerCase())) return { heavy: false };
       // HEAVY-LOCK-FALSE-POSITIVE: PowerShell's constants are values wherever they stand (`...; $true`).
-      if (v && PS_CONST.test(v[1])) return { heavy: false };
+      if (v && PS_CONST.test(v[1]) && ctx.shell !== 'bash') return { heavy: false };
       return unnamed(ws[0]);
     }
     if (ws.length > 1) {
@@ -1050,6 +1070,9 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
     if (k >= 0) {
       const from = sh ? sh.body : k + 1;
       const body = (ctx.expandKnown ?? ((text: string) => text))(args.slice(from).join(' '));
+      // Andy NIT 1: the body runs in the wrapper's shell (a cmd body keeps the outer shell's rules: none apply).
+      const shell = SH_BINS.has(bin) ? 'bash' as const : /^(powershell|pwsh)$/.test(bin) ? 'powershell' as const : ctx.shell;
+      if (shell) ctx = { ...ctx, shell };
       // A command string expanded by a shell is not inspectable after expansion. This covers
       // generated cmd paths (`$B`, `${B}`, `$(cygpath ...)`), shell `$C` indirection, `eval $C`,
       // and `bash`/`dash`/`zsh`/busybox-sh `-c "$(cat run.sh)"`. Deliberately conservative:
@@ -1079,13 +1102,13 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
           : nested(code, depth, ctx, `${bin} ${args[e]}`);
       }
       const f = args.findIndex((a) => /^-(f|file)$/i.test(a));
-      return f >= 0 && args[f + 1] ? classifyScript(args[f + 1], depth, ctx) : { heavy: false };
+      return f >= 0 && args[f + 1] ? classifyScript(args[f + 1], depth, { ...ctx, shell: 'powershell' }) : { heavy: false };
     }
     // HEAVY-LOCK-SCRIPT-WRAPPER: `bash suite.sh` / `sh ./gate.sh`: the script's own text decides.
     // HEAVY-LOCK-EXEC-POSITIONAL (Jim NIT 1): the script is the first operand after the options, so
     // `bash -O extglob suite.sh` runs suite.sh, not "extglob".
     const script = sh ? args[sh.body] : undefined;
-    return script ? classifyScript(script, depth, ctx) : { heavy: false };
+    return script ? classifyScript(script, depth, { ...ctx, shell: 'bash' }) : { heavy: false };
   }
   // `eval` runs its argument as sh code. A variable/backtick-derived body is unknowable before
   // expansion, while literal text can use the same nested classification as a shell `-c` body.
@@ -1345,17 +1368,18 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
   };
   const key = (p: string, cd?: string): string => vkey(expand(p), cd === undefined ? cd : expand(cd));
   const base = ctx.readScript;
-  const readScript = base ? (p: string, cd?: string): string | null => {
+  const look = lookupOf(ctx, d);
+  const readScript = base ? (p: string, cd?: string, dl?: PathLookup): string | null => {
     const k = key(p, cd);
-    return virtual.has(k) ? virtual.get(k)! : base(expand(p), cd === undefined ? cd : expand(cd));
+    return virtual.has(k) ? virtual.get(k)! : base(expand(p), cd === undefined ? cd : expand(cd), dl ?? look);
   } : undefined;
   // A file this command writes (a heredoc's target, even one rewritten since) is not "no such file".
   const where = ctx.missingAt;
-  const missingAt = where ? (p: string, cd?: string): string | null => virtual.has(key(p, cd)) ? null : where(expand(p), cd === undefined ? cd : expand(cd)) : undefined;
+  const missingAt = where ? (p: string, cd?: string, dl?: PathLookup): string | null => virtual.has(key(p, cd)) ? null : where(expand(p), cd === undefined ? cd : expand(cd), dl ?? look) : undefined;
   // HEAVY-LOCK-VARPATH-READ: a directory is asked about the path as expanded (`$d = C:\\x; ./$d`); a
   // file this command writes is a file.
   const dirBase = ctx.isDir;
-  const isDir = dirBase ? (p: string, cd?: string): boolean => !virtual.has(key(p, cd)) && dirBase(expand(p), cd === undefined ? cd : expand(cd)) : undefined;
+  const isDir = dirBase ? (p: string, cd?: string, dl?: PathLookup): boolean => !virtual.has(key(p, cd)) && dirBase(expand(p), cd === undefined ? cd : expand(cd), dl ?? look) : undefined;
   // HEAVY-LOCK-VARPATH-READ: the variables this command assigns in PowerShell's form (any value, computed
   // or not: `$logs = Get-ChildItem ...`), for a later bare `$logs` segment; shared with nested bodies.
   const psVars = new Set<string>(ctx.psVars ?? []);
@@ -1843,7 +1867,9 @@ export function heavyCommandOf(toolName: string | undefined, input: unknown): st
 
 export function classifyHeavy(toolName: string | undefined, input: unknown, ctx: ClassifyCtx = {}): HeavyClass {
   const cmd = heavyCommandOf(toolName, input);
-  return cmd ? classifyCommand(cmd, 0, ctx) : { heavy: false };
+  // Andy NIT 1: the tool says which shell runs the text (Claude Code's Bash and PowerShell tools).
+  const shell: ShellKind | undefined = /^bash$/i.test(toolName ?? '') ? 'bash' : /^powershell$/i.test(toolName ?? '') ? 'powershell' : undefined;
+  return cmd ? classifyCommand(cmd, 0, shell && !ctx.shell ? { ...ctx, shell } : ctx) : { heavy: false };
 }
 
 /** HEAVY-LOCK-SCRIPT-WRAPPER: the largest script file the classifier reads. */
@@ -1871,30 +1897,31 @@ export function scriptReaderFor(cwd: string | null | undefined, read: (absPath: 
     const base = cd ? (isAbs(cd) || !cwd ? cd : `${cwd.replace(/[\\/]+$/, '')}/${cd}`) : cwd;
     return isAbs(raw) || !base ? raw : `${base.replace(/[\\/]+$/, '')}/${raw}`;
   };
-  /** The places `p` may be, in the order they are tried: as written, then Git Bash's /tmp on %TEMP%. */
-  const places = (p: string, cd?: string): string[] => {
+  /** The places `p` may be, in the order they are tried (Andy MINOR 1: the place the shell looks first:
+   *  Git Bash runs %TEMP%\x for /tmp/x even when C:\tmp\x exists; PowerShell and cmd run C:\tmp\x). */
+  const places = (p: string, cd?: string, look: PathLookup = 'msys'): string[] => {
     const abs = resolve(p, cd);
     if (abs === null) return [];
     const t = msysTemp(abs, env);
-    return t ? [abs, t] : [abs];
+    return t ? (look === 'win' ? [abs, t] : [t, abs]) : [abs];
   };
   /** The first of those places that is there, or null. */
-  const find = (p: string, cd?: string): string | null => places(p, cd).find((abs) => read(abs) !== null) ?? null;
+  const find = (p: string, cd?: string, look?: PathLookup): string | null => places(p, cd, look).find((abs) => read(abs) !== null) ?? null;
   return {
     // HEAVY-LOCK-VARPATH-READ: a path that is there and is a directory (the reader says `dir`), with no
     // runnable sibling: PowerShell runs `./tool` as tool.cmd when both are there (Andy's audit).
-    isDir: (p: string, cd?: string): boolean => {
-      const abs = find(p, cd);
+    isDir: (p: string, cd?: string, look?: PathLookup): boolean => {
+      const abs = find(p, cd, look);
       return abs !== null && read(abs)?.dir === true && !RUNNABLE_EXTS.some((e) => read(`${abs}${e}`) !== null);
     },
-    missingAt: (p: string, cd?: string): string | null => {
-      const at = places(p, cd);
+    missingAt: (p: string, cd?: string, look?: PathLookup): string | null => {
+      const at = places(p, cd, look);
       if (!at.length || find(p, cd) !== null) return null;
-      // Git Bash's /tmp is where the agent's command looks, so that is the place named.
-      return at[at.length - 1].replace(/\\/g, '/').replace(/^\/([A-Za-z])\//, (_m, d: string) => `${d.toUpperCase()}:/`);
+      // The place the shell looks first (Git Bash: %TEMP%) is the place named.
+      return at[0].replace(/\\/g, '/').replace(/^\/([A-Za-z])\//, (_m, d: string) => `${d.toUpperCase()}:/`);
     },
-    readScript: (p: string, cd?: string): string | null => {
-      const abs = find(p, cd);
+    readScript: (p: string, cd?: string, look?: PathLookup): string | null => {
+      const abs = find(p, cd, look);
       if (abs === null) return null;
       const f = read(abs);
       if (!f || f.dir || f.size > HEAVY_SCRIPT_MAX_BYTES) return null;   // a directory has no text

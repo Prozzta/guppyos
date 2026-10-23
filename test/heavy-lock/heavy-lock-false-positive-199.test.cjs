@@ -39,11 +39,17 @@ const CLI = require('../../resources/heavy-cli.cjs');
 const TEMP = 'C:/Users/x/AppData/Local/Temp';
 const FILES = {
   '/tmp/lit.sh': 'echo literal',
+  // Andy MINOR 1: C:\tmp really exists on this machine; a light twin there must not hide the %TEMP% script bash runs.
+  '/tmp/suite.sh': 'echo a light twin under C:/tmp',
+  [`${TEMP}/twin.sh`]: 'npm test',
+  '/tmp/twin.sh': 'echo light',
+  // Andy NIT 3: a directory under %TEMP% named through /tmp.
+  [`${TEMP}/dir`]: { dir: true },
   [`${TEMP}/g80.js`]: "const fs = require('fs'); fs.writeFileSync('C:/Dunder/hive/h1.json', '{}');",
   [`${TEMP}/suite.sh`]: 'node test/tools/run-tests.cjs',
   'C:/w/test/tools/run-tests.cjs': '// the runner',
 };
-const read = (abs) => { const k = abs.replace(/\\/g, '/'); return k in FILES ? { size: FILES[k].length, text: () => FILES[k] } : null; };
+const read = (abs) => { const k = abs.replace(/\\/g, '/'); return k in FILES ? (FILES[k].dir ? { size: 0, dir: true, text: () => '' } : { size: FILES[k].length, text: () => FILES[k] }) : null; };
 const ctxOf = (M = HJ, env = { TEMP }) => M.scriptReaderFor('C:/w', read, env);
 const c = (cmd, M = HJ, ctx = ctxOf(M)) => M.classifyCommand(cmd, 0, ctx);
 
@@ -68,10 +74,24 @@ K.tmpMapped = (M = HJ) => {
 };
 test("root cause 1: `node /tmp/g80.js` reads the script under the agent's TEMP, as Git Bash does", () => K.tmpMapped());
 
-K.literalFirst = (M = HJ) => {
-  // a path that IS there as written (a real C:\tmp, or a non-Windows /tmp) is read there first.
-  assert.deepEqual(c('bash /tmp/lit.sh', M), { heavy: false }, 'A /tmp PATH THAT IS THERE AS WRITTEN IS READ AS WRITTEN');
+K.tempFirst = (M = HJ) => {
+  // Andy MINOR 1: C:\tmp exists on this machine. Git Bash runs %TEMP%\suite.sh for /tmp/suite.sh, so the
+  // %TEMP% place is read FIRST in sh; the light twin at C:\tmp\suite.sh must not make the suite light.
+  assert.deepEqual(c('bash /tmp/suite.sh', M), { heavy: true, kind: 'suite', why: 'node run-tests.cjs (no filter) (in suite.sh)' }, 'IN SH, /tmp IS %TEMP% FIRST: the heavy %TEMP% script wins over a light C:\\tmp twin');
+  assert.deepEqual(c('bash /tmp/suite.sh', M, { ...ctxOf(M), shell: 'powershell' }), { heavy: true, kind: 'suite', why: 'node run-tests.cjs (no filter) (in suite.sh)' }, 'IN SH, /tmp IS %TEMP% FIRST: bash run from the PowerShell tool still reads what bash runs');
+  assert.deepEqual(c('bash /tmp/twin.sh', M), { heavy: true, kind: 'suite', why: 'npm test (in twin.sh)' }, 'IN SH, /tmp IS %TEMP% FIRST: twin.sh');
+  assert.equal(ctxOf(M).readScript('/tmp/twin.sh'), 'npm test', 'IN SH, /tmp IS %TEMP% FIRST: readScript');
+  assert.equal(ctxOf(M).readScript('/tmp/twin.sh', undefined, 'msys'), 'npm test');
+  // a path that is in one place only is read wherever it is (a real C:\tmp file, or a non-Windows /tmp).
+  assert.deepEqual(c('bash /tmp/lit.sh', M), { heavy: false }, 'A /tmp PATH THAT IS THERE AS WRITTEN ONLY IS READ THERE');
   assert.equal(ctxOf(M).readScript('/tmp/lit.sh'), 'echo literal');
+  // PowerShell and cmd run C:\tmp\twin.sh for /tmp/twin.sh: as written first there.
+  assert.equal(ctxOf(M).readScript('/tmp/twin.sh', undefined, 'win'), 'echo light', 'IN WIN, /tmp IS AS WRITTEN FIRST');
+  assert.deepEqual(c('cmd /c "bash /tmp/twin.sh"', M), { heavy: true, kind: 'suite', why: 'npm test (in twin.sh)' }, 'a bash inside a cmd body still runs the %TEMP% script');
+  assert.deepEqual(c('/tmp/twin.sh', M, { ...ctxOf(M), shell: 'powershell' }), { heavy: false }, 'IN WIN, /tmp IS AS WRITTEN FIRST: the PowerShell tool runs C:\\tmp\\twin.sh (light)');
+  assert.deepEqual(M.classifyHeavy('PowerShell', { command: '/tmp/twin.sh' }, ctxOf(M)), { heavy: false }, 'THE POWERSHELL TOOL LOOKS AS WRITTEN FIRST');
+  assert.deepEqual(M.classifyHeavy('PowerShell', { command: 'cmd /c /tmp/twin.sh' }, ctxOf(M)), { heavy: false }, 'A CMD BODY LOOKS AS WRITTEN FIRST');
+  assert.deepEqual(M.classifyHeavy('Bash', { command: '/tmp/twin.sh' }, ctxOf(M)), { heavy: true, kind: 'suite', why: 'npm test (in twin.sh)' }, 'THE BASH TOOL LOOKS AT %TEMP% FIRST');
   // msysTemp maps only /tmp itself and what is under it.
   assert.equal(M.msysTemp('/tmp/a/b.sh', { TEMP }), `${TEMP}/a/b.sh`);
   assert.equal(M.msysTemp('/tmp', { TEMP: `${TEMP}/` }), TEMP);
@@ -79,14 +99,44 @@ K.literalFirst = (M = HJ) => {
   assert.equal(M.msysTemp('C:/tmp/b.sh', { TEMP }), null);
   assert.equal(M.msysTemp('/tmp/b.sh', {}), null);
 };
-test('root cause 1: a /tmp path that exists as written is read as written; msysTemp maps only /tmp', () => K.literalFirst());
+test('Andy MINOR 1: in sh, /tmp is %TEMP% first (a light C:\\tmp twin does not hide the suite); as written first for PowerShell and cmd', () => K.tempFirst());
+
+/** Andy NIT 3: a /tmp directory under %TEMP% is a directory (light), not a missing program. */
+K.tmpDir = (M = HJ) => {
+  assert.equal(ctxOf(M).isDir('/tmp/dir'), true, 'A /tmp DIRECTORY UNDER %TEMP% IS A DIRECTORY');
+  assert.deepEqual(c('/tmp/dir --help', M), { heavy: false }, 'A /tmp DIRECTORY UNDER %TEMP% IS A DIRECTORY: running it is light');
+  assert.equal(ctxOf(M).missingAt('/tmp/dir'), null, 'A /tmp DIRECTORY UNDER %TEMP% IS A DIRECTORY: not missing');
+  assert.equal(ctxOf(M).isDir('/tmp/g80.js'), false, 'a file is not a directory');
+  assert.equal(ctxOf(M).isDir('/tmp/nodir'), false, 'a missing path is not a directory');
+};
+test('Andy NIT 3: a /tmp directory under %TEMP% is a directory', () => K.tmpDir());
+
+/** Andy NIT 1: PowerShell's value rules hold in PowerShell only; in bash `$a = $b` runs $a. */
+K.bashValues = (M = HJ) => {
+  for (const cmd of ['$ok=$true', '$x = $y', '$true', 'echo hi; $null']) {
+    const b = M.classifyHeavy('Bash', { command: cmd }, ctxOf(M));
+    assert.equal(b.provisional, true, `IN BASH, A POWERSHELL VALUE IS A PROGRAM (unknown, provisional): ${cmd}`);
+    assert.match(b.why, /a path the lock cannot name/, `IN BASH, A POWERSHELL VALUE IS A PROGRAM: ${cmd}`);
+    assert.deepEqual(M.classifyHeavy('PowerShell', { command: cmd }, ctxOf(M)), { heavy: false }, `IN POWERSHELL IT IS A VALUE: ${cmd}`);
+    assert.deepEqual(c(cmd, M), { heavy: false }, `WITH NO SHELL KNOWN IT IS A VALUE (as before): ${cmd}`);
+  }
+  // the shell follows the wrapper, not the tool: a bash body inside PowerShell, a PowerShell body inside bash.
+  assert.equal(M.classifyHeavy('PowerShell', { command: "bash -c '$x = $y'" }, ctxOf(M)).provisional, true, 'A BASH -c BODY RUNS IN BASH');
+  assert.deepEqual(M.classifyHeavy('Bash', { command: "powershell -Command '$x = $y'" }, ctxOf(M)), { heavy: false }, 'A POWERSHELL -Command BODY RUNS IN POWERSHELL');
+  assert.deepEqual(M.classifyHeavy('Bash', { command: 'powershell -c "$ok=$true; npm test"' }, ctxOf(M)), { heavy: true, kind: 'suite', why: 'npm test' }, 'and a heavy body is still heavy');
+};
+test('Andy NIT 1: PS_VALUE / PS_CONST apply in PowerShell only; in bash `$a = $b` runs $a', () => K.bashValues());
 
 K.missingNames = (M = HJ) => {
   // a script that is in neither place stays provisional and the deny names the place Git Bash would look.
   const miss = c('node /tmp/g99.js', M);
   assert.equal(miss.provisional, true, 'A MISSING /tmp SCRIPT STAYS PROVISIONAL');
   assert.equal(miss.why, `g99.js (a script the lock cannot read yet: no such file at ${TEMP}/g99.js)`, 'THE DENY NAMES THE %TEMP% PLACE');
-  assert.equal(ctxOf(M).missingAt('/tmp/g99.js'), `${TEMP}/g99.js`);
+  assert.equal(ctxOf(M).missingAt('/tmp/g99.js'), `${TEMP}/g99.js`, 'THE DENY NAMES THE %TEMP% PLACE: missingAt');
+  // Andy MINOR 1: missingAt agrees with the lookup order: the first place tried is named.
+  assert.equal(ctxOf(M).missingAt('/tmp/g99.js', undefined, 'win'), '/tmp/g99.js', 'IN WIN THE DENY NAMES THE PATH AS WRITTEN');
+  const ps = M.classifyHeavy('PowerShell', { command: 'node /tmp/g99.js' }, ctxOf(M));
+  assert.equal(ps.why, 'g99.js (a script the lock cannot read yet: no such file at /tmp/g99.js)', 'IN WIN THE DENY NAMES THE PATH AS WRITTEN: the PowerShell tool');
   assert.equal(ctxOf(M).missingAt('/tmp/g80.js'), null, 'a script that is there is not missing');
   assert.equal(ctxOf(M).missingAt('/tmp/lit.sh'), null);
 };
@@ -245,19 +295,33 @@ function mutateText(rel, edits, tag) {
 const MUTANTS = [
   { name: '/tmp is not placed on TEMP', edits: [['  const temp = env?.TEMP || env?.TMP;', "  const temp = '';"]],
     killer: 'tmpMapped', dies: /GIT BASH \/tmp IS %TEMP%/ },
-  { name: 'only the mapped place is tried (required: as written first)', edits: [['    return t ? [abs, t] : [abs];', '    return t ? [t] : [abs];']],
-    killer: 'literalFirst', dies: /A \/tmp PATH THAT IS THERE AS WRITTEN IS READ AS WRITTEN/ },
+  { name: 'the place as written is tried first in sh (Andy MINOR 1: a light C:\\tmp twin hid the suite)', edits: [["    return t ? (look === 'win' ? [abs, t] : [t, abs]) : [abs];", '    return t ? [abs, t] : [abs];']],
+    killer: 'tempFirst', dies: /IN SH, \/tmp IS %TEMP% FIRST/ },
+  { name: 'only the mapped place is tried (required: as written when it is there alone)', edits: [["    return t ? (look === 'win' ? [abs, t] : [t, abs]) : [abs];", '    return t ? [t] : [abs];']],
+    killer: 'tempFirst', dies: /A \/tmp PATH THAT IS THERE AS WRITTEN ONLY IS READ THERE/ },
+  { name: 'the lookup ignores the shell (required: PowerShell and cmd look as written first)', edits: [["    return t ? (look === 'win' ? [abs, t] : [t, abs]) : [abs];", '    return t ? [t, abs] : [abs];']],
+    killer: 'tempFirst', dies: /IN WIN, \/tmp IS AS WRITTEN FIRST/ },
+  { name: 'the tool name does not set the shell', edits: [['  return cmd ? classifyCommand(cmd, 0, shell && !ctx.shell ? { ...ctx, shell } : ctx) : { heavy: false };', '  return cmd ? classifyCommand(cmd, 0, ctx) : { heavy: false };']],
+    killer: 'tempFirst', dies: /THE POWERSHELL TOOL LOOKS AS WRITTEN FIRST/ },
+  { name: 'a script is read where the outer shell looks, not where its own shell looks', edits: [['  const look = lookupOf(ctx, dialect);\n  try { text = ctx.readScript(path, ctx.cd, look); }', '  const look = lookupOf(ctx, dialect);\n  try { text = ctx.readScript(path, ctx.cd); }']],
+    killer: 'tempFirst', dies: /bash run from the PowerShell tool still reads what bash runs/ },
+  { name: 'isDir looks only as written (Andy NIT 3)', edits: [['      const abs = find(p, cd, look);\n      return abs !== null && read(abs)?.dir === true', '      const abs = resolve(p, cd);\n      return abs !== null && read(abs)?.dir === true']],
+    killer: 'tmpDir', dies: /A \/tmp DIRECTORY UNDER %TEMP% IS A DIRECTORY/ },
+  { name: 'the PowerShell value rules hold in bash too (Andy NIT 1)', edits: [["PS_VALUE.test(rhs[0]) && ctx.shell !== 'bash')", 'PS_VALUE.test(rhs[0]))'], ["PS_CONST.test(v[1]) && ctx.shell !== 'bash')", 'PS_CONST.test(v[1]))']],
+    killer: 'bashValues', dies: /IN BASH, A POWERSHELL VALUE IS A PROGRAM/ },
+  { name: 'a wrapper body keeps the tool shell', edits: [["      const shell = SH_BINS.has(bin) ? 'bash' as const : /^(powershell|pwsh)$/.test(bin) ? 'powershell' as const : ctx.shell;", '      const shell = ctx.shell;']],
+    killer: 'bashValues', dies: /A BASH -c BODY RUNS IN BASH|A POWERSHELL -Command BODY RUNS IN POWERSHELL/ },
   { name: 'a missing /tmp script is light (required: provisional)', edits: [['      if (!at.length || find(p, cd) !== null) return null;', '      return null;']],
     killer: 'missingNames', dies: /A MISSING \/tmp SCRIPT STAYS PROVISIONAL|THE DENY NAMES/ },
-  { name: 'the deny names the literal place', edits: [['      return at[at.length - 1].replace(', '      return at[0].replace(']],
-    killer: 'missingNames', dies: /THE DENY NAMES THE %TEMP% PLACE/ },
+  { name: 'the deny names the place tried last', edits: [['      return at[0].replace(', '      return at[at.length - 1].replace(']],
+    killer: 'missingNames', dies: /THE DENY NAMES THE %TEMP% PLACE|IN WIN THE DENY NAMES THE PATH AS WRITTEN/ },
   { name: 'the hook passes no env to the reader', file: HKF, edits: [['      }, env),\n      env,\n', '      }),\n      env,\n']],
     killer: 'hookReader', dies: /GIT BASH \/tmp IS %TEMP% \(THE HOOK READER\)/ },
-  { name: 'a one-value right-hand side is classified as a program', edits: [['  if (rhs && rhs.length === 1 && PS_VALUE.test(rhs[0])) return { heavy: false };\n', '']],
+  { name: 'a one-value right-hand side is classified as a program', edits: [["  if (rhs && rhs.length === 1 && PS_VALUE.test(rhs[0]) && ctx.shell !== 'bash') return { heavy: false };\n", '']],
     killer: 'psAssignValue', dies: /A ONE-VARIABLE RIGHT-HAND SIDE RUNS NOTHING/ },
   { name: 'any right-hand side starting with a variable is light (required: `$r = $cmd <runner>` runs)', edits: [['rhs && rhs.length === 1 && PS_VALUE.test(rhs[0])', 'rhs && rhs.length >= 1 && PS_VALUE.test(rhs[0])']],
     killer: 'psAssignRuns', dies: /A RIGHT-HAND SIDE THAT RUNS A COMMAND IS STILL THAT COMMAND: \$r = \$(?:NODE|cmd) <runner>/ },
-  { name: 'a lone constant is a program', edits: [['      if (v && PS_CONST.test(v[1])) return { heavy: false };\n', '']],
+  { name: 'a lone constant is a program', edits: [["      if (v && PS_CONST.test(v[1]) && ctx.shell !== 'bash') return { heavy: false };\n", '']],
     killer: 'psConst', dies: /A POWERSHELL CONSTANT IS A VALUE/ },
   { name: 'every lone variable is a value (required: only the constants)', edits: [['const PS_CONST = /^(?:true|false|null)$/i;', 'const PS_CONST = /^/;']],
     killer: 'psConstOnly', dies: /ONLY THE CONSTANTS ARE VALUES/ },
