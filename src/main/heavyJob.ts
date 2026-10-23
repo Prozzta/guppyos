@@ -31,9 +31,13 @@ export interface HeavyClass { heavy: boolean; kind?: HeavyKind; why?: string; pr
  * As for every BENCH_ENV gate (pre-existing behaviour): the marker counts only as a prefix of the
  * same command (`export X=1; npm run build` and `$env:X=1; ...` still share), and a gate word inside
  * a longer name counts too (`NON_EXCLUSIVE=1 node --test x` is a bench: it fails closed).
+ * HEAVY-LOCK-FALSE-NEGATIVES (UHera, Andy; the queue item): a PROVISIONAL class is heavy only because
+ * the lock could not read the command (its kind 'bench' is a placeholder); it is not known to be a suite
+ * or a bench, so it never runs alone or waits for the empty machine: it takes a shared slot, and is
+ * queued as a shared waiter. A command that IS a bench says so readably, or with the marker.
  */
 export function heavyExclusive(cls: HeavyClass): boolean {
-  return cls.heavy && (cls.exclusive === true || cls.kind === 'suite' || cls.kind === 'bench');
+  return cls.heavy && !cls.provisional && (cls.exclusive === true || cls.kind === 'suite' || cls.kind === 'bench');
 }
 
 /** Command-shaped tool input (the same reading as DESKTOP-LAUNCH-GUARD's). `CommandLine`: AGY's
@@ -270,7 +274,9 @@ function stripRedirects(ws: string[]): string[] {
     // HEAVY-LOCK-CODEX-EXEC: PowerShell's all-streams redirect `*>` / `*>>` (`*>&1`, `*> x.log`)
     // too; left behind, `*>` and its file read as a suite runner's FILTER, so Dwight's Codex
     // `node test/tools/run-tests.cjs *> full.log` (shell powershell) ran light, unlocked.
-    const m = /^(\d*(?:>>?|<<?-?|<>)|&>>?|\*>>?)(&?)(.*)$/.exec(w);
+    // HEAVY-LOCK-FALSE-NEGATIVES: sh's clobber `>|` / `1>|` is one operator (as words() and segments()
+    // read it); as `>` with the target `|`, its file stayed behind as an argument of the program.
+    const m = /^(\d*(?:>\||>>?|<<?-?|<>)|&>>?|\*>>?)(&?)(.*)$/.exec(w);
     if (!m) { out.push(w); continue; }
     // Operator with its target attached (`>x.log`, `2>&1`, `<<EOF`): drop just this word.
     // A bare operator (`>`, `2>`, `<<`): its target is the next word; drop both.
@@ -307,7 +313,9 @@ function segments(cmd: string, d: ShellDialect = 'sh'): string[] {
     if (d === 'sh' && c === '|' && cmd[i - 1] === '>') { cur += c; continue; }
     // HEAVY-LOCK-LIVE-FILE-192 (b): a lone `&` that starts a command backgrounds nothing; it is
     // PowerShell's call operator (`& "$p" K3`), kept as a word so the program it calls is classified.
-    if (c === '&' && !cur.trim() && cmd[i + 1] !== '&') { cur += '& '; continue; }
+    // HEAVY-LOCK-FALSE-NEGATIVES (Andy): so is one that opens a block or a group (`foreach (...) { & $s }`,
+    // `( & $x )`): it read as a background `&`, which cut the block before the call it makes.
+    if (c === '&' && (!cur.trim() || /[{(]\s*$/.test(cur)) && cmd[i + 1] !== '&') { cur += '& '; continue; }
     if (c === ';' || c === '\n' || c === '|' || c === '&') {
       if (c === '&' && cmd[i + 1] !== '&' && cmd[i - 1] !== '&') { cur += ' &'; out.push(cur); cur = ''; continue; } // a lone & = background
       out.push(cur); cur = '';
@@ -498,6 +506,10 @@ export interface ClassifyCtx {
   /** HEAVY-LOCK-FALSE-NEGATIVES (item 2): how many scripts deep this text is a command a node script
    *  spawns (`execSync('npm test')`); a spawned command's own spawns are not followed. */
   spawnDepth?: number;
+  /** HEAVY-LOCK-FALSE-NEGATIVES (Andy), set by classifyCommand: the literal values a PowerShell `foreach
+   *  ($s in ...)` of this command loops over (lower-cased name), null when its list is not literal; for
+   *  the `& $s` of its block, which CALLS each value. Absent = no loop. */
+  psLoop?: ReadonlyMap<string, readonly string[] | null>;
 }
 
 /**
@@ -1105,6 +1117,10 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
   const hasUnclosed = raw.some((w) => w.startsWith('__HEAVY_UNCLOSED_QUOTE__'));
   const ws = raw.map((w) => w.replace(/^__HEAVY_UNCLOSED_QUOTE__/, ''));
   if (!ws.length) return { heavy: false };
+  // HEAVY-LOCK-FALSE-NEGATIVES (Andy): `[void](npm test)`, `$(npm test)` as a word: a pipeline wrapped as
+  // a value runs; its words are the command. (A segment's own `(npm test)` is stripKeywords' subshell.)
+  const cast = /^(?:\[[A-Za-z0-9.]+(?:\[\])?\])+\(|^\$\(/.test(ws[0]) ? unwrapped(ws) : null;
+  if (cast && depth + 1 < MAX_DEPTH) return classifyWords(cast, depth + 1, ctx);
   // HEAVY-LOCK-SHAPES-189: a PowerShell assignment runs its right-hand side (`$suite = Start-Process
   // npm.cmd test`, `$r=npm test`); it read as a dynamic command word or a variable.
   const psAssign = /^\$[A-Za-z_][A-Za-z0-9_:]*=(.*)$/.exec(ws[0]);
@@ -1115,7 +1131,10 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
   // (`$r = npm test`, `$r = & $exe`, `$r = $cmd args`) is still classified as that command.
   // Andy NIT 1: in bash `$a = $b` runs $a (unknown: provisional, as before); the rule is PowerShell's.
   if (rhs && rhs.length === 1 && PS_VALUE.test(rhs[0]) && ctx.shell !== 'bash') return { heavy: false };
-  if (rhs) return classifyWords(rhs, depth, ctx);
+  // HEAVY-LOCK-FALSE-NEGATIVES (Andy): `$r = (npm test)`, `$null = (npm test)`: the parentheses around
+  // the right-hand side are not a subshell on the segment's first word, so they were not stripped, and the
+  // pipeline inside read as the program `(npm`: it runs.
+  if (rhs) { const inner = depth + 1 < MAX_DEPTH ? unwrapped(rhs) : null; return classifyWords(inner ?? rhs, inner ? depth + 1 : depth, ctx); }
   // A dynamic command word is unnameable, but its arguments still identify common heavy runners.
   // Handle variable wrappers (`$CR node ...`), variable Node (`$NODE test/tools/run-tests.cjs`),
   // PowerShell environment variables, and the conventional `$(which node)` form.
@@ -1125,7 +1144,15 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
     // HEAVY-LOCK-LIVE-FILE-192 (b): a program this command named (`p=.../mut.cjs; & $p K3`, PowerShell's
     // `&` being sh's background operator here) is the program it names.
     const program = named(ws[0], ctx);
-    if (program !== null && depth + 1 < MAX_DEPTH) return classifyWords([program, ...ws.slice(1)], depth + 1, ctx);
+    if (program !== null && depth + 1 < MAX_DEPTH) {
+      // HEAVY-LOCK-FALSE-NEGATIVES (Andy: `true="npm test"; $true`): sh splits an unquoted `$x` on
+      // whitespace, so a value that is a command LINE runs as that line. PowerShell's `& $p` keeps a
+      // path with spaces whole, and so does a quoted `"$x"`.
+      const name = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)/.exec(ws[0])?.[1];
+      const quoted = !!name && !!ctx.segment && new RegExp(`"\\$\\{?${name}\\}?"`).test(ctx.segment);
+      const line = ctx.shell === 'bash' && !quoted && /\s/.test(program) ? program.split(/\s+/) : [program];
+      return classifyWords([...line, ...ws.slice(1)], depth + 1, ctx);
+    }
     // An unnamed program alone is unknown (`& $exe`): heavy, provisional.
     // HEAVY-LOCK-VARPATH-READ (Dwight, 2026-10-22; Andy's design, god's narrow approval): a bare value
     // expression runs nothing. `$logs | ForEach-Object {...}` after `$logs = Get-ChildItem ...` in the
@@ -1265,6 +1292,22 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
   // `& "C:\...\node.exe" --test x`); it read as the program `&`. A name still computed after the
   // command's own assignments (`& $exe`, `& (Join-Path $d x.ps1)`) is unknown: heavy, provisional.
   if (bin === '&' && args.length && !args[0].startsWith('{')) {
+    // HEAVY-LOCK-FALSE-NEGATIVES (Andy): `foreach ($s in $suites) { & $s }` CALLS each value of the list
+    // (the bare `$s` of a block is a value; `& $s` is not). Each literal value runs with the words after it
+    // (`foreach ($s in @("npm")) { & $s test }` is npm test; a value with spaces is read as the line it
+    // is, as `iex` would run it: fails closed); a list the lock cannot read is unknown: heavy, provisional.
+    const lv = /^\$([A-Za-z_][A-Za-z0-9_]*)$/.exec(args[0]);
+    const items = lv && ctx.psLoop?.has(lv[1].toLowerCase()) ? ctx.psLoop.get(lv[1].toLowerCase()) : undefined;
+    if (items !== undefined && depth + 1 < MAX_DEPTH) {
+      if (items === null) return unnamed(`& ${args[0]}`);
+      let maybe: HeavyClass | null = null;
+      for (const it of items) {
+        const c = classifyWords([...it.split(/\s+/), ...args.slice(1)], depth + 1, ctx);
+        if (c.heavy && !c.provisional) return c;
+        if (c.heavy && !maybe) maybe = c;
+      }
+      return maybe ?? { heavy: false };
+    }
     const target = args[0].startsWith('(') ? null : named(args[0], ctx);
     if (target === null) {
       // A variable program's arguments may still name the runner (`& $node test/tools/run-tests.cjs`).
@@ -1426,7 +1469,9 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
   return { heavy: false };
 }
 
-/** The inner text of every top-level `$(...)` outside single quotes (each one RUNS its command). */
+/** The inner text of every top-level `$(...)` outside single quotes (each one RUNS its command).
+ *  HEAVY-LOCK-FALSE-NEGATIVES (Andy): and of every backtick span (`` r=`npm test` ``, sh's older
+ *  substitution; PowerShell's `` $r = `npm test` `` is the escaped word npm, so that pipeline runs too). */
 function substitutions(cmd: string): string[] {
   const out: string[] = [];
   let q: string | null = null;
@@ -1435,6 +1480,7 @@ function substitutions(cmd: string): string[] {
     if (q === "'") { if (c === "'") q = null; continue; }
     if (c === '\\') { i++; continue; }
     if (c === '$' && cmd[i + 1] === '(' && cmd[i + 2] !== '(') { const e = substEnd(cmd, i); out.push(cmd.slice(i + 2, Math.max(i + 2, e - 1))); i = e - 1; continue; }
+    if (c === '`') { const e = cmd.indexOf('`', i + 1); if (e > i) { out.push(cmd.slice(i + 1, e)); i = e; } continue; }
     if (c === '"') q = q === '"' ? null : '"';
     else if (c === "'" && q === null) q = "'";
   }
@@ -1505,12 +1551,17 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
   // HEAVY-LOCK-VARPATH-READ: the variables this command assigns in PowerShell's form (any value, computed
   // or not: `$logs = Get-ChildItem ...`), for a later bare `$logs` segment; shared with nested bodies.
   const psVars = new Set<string>(ctx.psVars ?? []);
+  // HEAVY-LOCK-FALSE-NEGATIVES (Andy): the literal lists this command assigns (`$suites = @("npm test")`),
+  // and the values each `foreach ($s in ...)` loops over (shared with its block, which classifyWords nests).
+  const psLists = new Map<string, string[] | null>();
+  const psLoop = new Map<string, readonly string[] | null>(ctx.psLoop ?? []);
   // HEAVY-LOCK-VARPATH-READ: the `{ }` nesting at each segment: segments() splits a block's body on
   // `;` and `|`, so `ForEach-Object { Write-Host $_; $_ | Out-Null }` puts `$_` in its own segment.
   let braces = ctx.inBlock ? 1 : 0;
   // Carry the resolved default dialect too: wrapper classification needs to know that a cmd
   // body was supplied by an outer sh command, even when callers did not spell `dialect: 'sh'`.
   let here: ClassifyCtx = { ...ctx, dialect: d, stdin: undefined, expand, psVars, ...(readScript ? { readScript } : {}), ...(isDir ? { isDir } : {}), ...(missingAt ? { missingAt } : {}) };
+  here = { ...here, psLoop };
   let body = 0;
   let maybe: HeavyClass | null = null;
   let cursor = 0;
@@ -1522,7 +1573,15 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
     const own = seg.replace(/\s+&$/, '');   // segments() marks a lone `&` (background) with ` &`
     // HEAVY-LOCK-FALSE-POSITIVE (god, 08:28Z): `foreach ($c in $t) { $c | ConvertTo-Json ... }` assigns $c
     // each round, as `$c = ...` would; `$c` alone in the block was "$c (a path the lock cannot name)".
-    for (const m of own.matchAll(/\bforeach\s*\(\s*\$([A-Za-z_][A-Za-z0-9_]*)\s+in\b/gi)) psVars.add(m[1].toLowerCase());
+    for (const m of own.matchAll(/\bforeach\s*\(\s*\$([A-Za-z_][A-Za-z0-9_]*)\s+in\s+/gi)) {
+      psVars.add(m[1].toLowerCase());
+      const name = m[1].toLowerCase();
+      // HEAVY-LOCK-FALSE-NEGATIVES (Andy): its values, for a `& $s` in its block: a literal list, a variable
+      // this command assigned a literal list (`$suites = @("npm test")`), else unknown (null).
+      const list = parenRest(own, m.index! + m[0].length);
+      const v = /^\$([A-Za-z_][A-Za-z0-9_]*)$/.exec(list.trim());
+      psLoop.set(name, v ? psLists.get(v[1].toLowerCase()) ?? null : psList(list));
+    }
     const inBlock = braces > 0;
     braces = Math.max(0, braces + braceDelta(own));
     const segAt = d === 'cmd' ? text.indexOf(own, cursor) : -1;
@@ -1592,6 +1651,10 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
       const v = (ws.length === 1 ? psSet[2] : ws[2]).replace(/^["']|["']$/g, '');
       if (!/[$`(@[]/.test(v)) vars.set(psSet[1], v);
     }
+    // HEAVY-LOCK-FALSE-NEGATIVES (Andy): a PowerShell list assigned literally (`$suites = @("npm test", "x")`,
+    // `$s = 'npm'`), for a later `foreach ($x in $suites) { & $x }`; a computed one is unknown (null).
+    const psAssigned = /^\s*\$([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)\s*([\s\S]+)$/.exec(own);
+    if (psAssigned) psLists.set(psAssigned[1].toLowerCase(), psList(psAssigned[2]));
     // HEAVY-LOCK-VARPATH-READ: the name is assigned whatever its value (`$logs = Get-ChildItem x`,
     // `$r = (npm test)`; the right-hand side is still classified as it runs).
     const psName = ws.length >= 2 && ws[1] === '=' ? /^\$([A-Za-z_][A-Za-z0-9_]*)$/.exec(ws[0]) : null;
@@ -1610,7 +1673,7 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
     const c = classifyWords(ws, depth, { ...(stdin === undefined ? at : { ...at, stdin }), expandKnown: expand, segment: seg });
     if (c.heavy && !c.provisional) return c;
     if (c.heavy && !maybe) maybe = c;
-    const wrote = mine.length === 1 ? heredocWrite(raw, ws, mine[0], here, virtual, key, rewritten) : new Set<string>();
+    const wrote = mine.length === 1 ? heredocWrite(raw, ws, mine[0], here, virtual, key, rewritten) : literalWrite(raw, ws, here, virtual, key, rewritten);
     for (const f of writeTargets(raw, ws)) {
       const k = key(f, here.cd);
       if (wrote.has(k)) continue;
@@ -1875,6 +1938,125 @@ function cmdFor(text: string, depth: number, ctx: ClassifyCtx): { cls: HeavyClas
 }
 
 /** HEAVY-LOCK-BG-LAPSE-189: `cat > f <<EOF` / `cat <<EOF >> f` / `tee [-a] f <<EOF` write the body to f. */
+/** HEAVY-LOCK-FALSE-NEGATIVES (Andy): the words of a pipeline wrapped as a value, `(npm test)`,
+ *  `[void](npm test)` (a cast, then parentheses), `$(npm test)` as one word; null when `ws` is not one. */
+function unwrapped(ws: string[]): string[] | null {
+  if (!ws.length) return null;
+  const out = [...ws];
+  out[0] = out[0].replace(/^(?:\[[A-Za-z0-9.]+(?:\[\])?\])+(?=\$?\()/, '');
+  const n = out.length - 1;
+  // stripKeywords has already taken a closing `)` off the last word (`$r = (npm test)` reached here as
+  // `$r = (npm test`), so a missing close is one it removed: a `)` left anywhere else is not this pair's.
+  if (!/^\$?\(/.test(out[0]) || !(out[n].endsWith(')') || !out.some((w) => w.includes(')')))) return null;
+  out[0] = out[0].replace(/^\$?\(/, '');
+  out[n] = out[n].replace(/\)$/, '');
+  const inner = out.filter(Boolean);
+  if (!inner.length) return null;
+  return inner.length === 1 && /\s/.test(inner[0]) ? inner[0].trim().split(/\s+/) : inner;
+}
+
+/** The text from `from` (just inside an open parenthesis) to the `)` that closes it, quotes respected. */
+function parenRest(s: string, from: number): string {
+  let depth = 1; let q: string | null = null;
+  for (let i = from; i < s.length; i++) {
+    const c = s[i];
+    if (q) { if (c === q) q = null; continue; }
+    if (c === '"' || c === "'") { q = c; continue; }
+    if (c === '(') depth++;
+    else if (c === ')' && --depth === 0) return s.slice(from, i);
+  }
+  return s.slice(from);
+}
+
+/** HEAVY-LOCK-FALSE-NEGATIVES (Andy): the items of a literal PowerShell list, `@("npm test", 'x')`,
+ *  `"a","b"`, `'npm'`, each one quoted (or a number); null when an item is bare or computed (`Get-ChildItem`,
+ *  `$x`, `@($a, "b")`), or the text is not a list. */
+function psList(text: string): string[] | null {
+  let s = text.trim();
+  const arr = /^@\(([\s\S]*)\)$/.exec(s);
+  if (arr) s = arr[1];
+  const items: string[] = []; const bare: string[] = [];
+  let cur = ''; let q: string | null = null; let quoted = false;
+  const end = (): void => { const w = cur.trim(); if (w || quoted) { items.push(w); if (!quoted && !/^\d+$/.test(w)) bare.push(w); } cur = ''; quoted = false; };
+  for (const c of s) {
+    if (q) { if (c === q) q = null; else cur += c; continue; }
+    if (c === '"' || c === "'") { q = c; quoted = true; continue; }
+    if (c === ',') { end(); continue; }
+    cur += c;
+  }
+  if (q) return null;
+  end();
+  return items.length && !bare.length && !items.some((w) => COMPUTED.test(w)) ? items : null;
+}
+
+/**
+ * HEAVY-LOCK-FALSE-NEGATIVES (Andy NIT 2, live 12:20Z: `git show > base.ts && sed ... > probe.cjs && node
+ * probe.cjs` was denied "no such file at .../probe.cjs"; the card: `echo "npm test" > w.ps1; & w.ps1` was
+ * "a script the lock cannot read yet"): a file a segment writes with a `>` / `>>` / `>|` / `&>` redirect,
+ * with tee, or with Set-Content / Add-Content / Out-File, is a file this command makes, so it is never "no
+ * such file". Its text is known when a literal wrote it: `echo` / `Write-Output` words, a `printf` format
+ * with no %, a `-Value`; then the script is read from that text (`echo "npm test" > w.ps1; & w.ps1` is the
+ * suite, definitely). Any other writer (git show, sed, a pipe into tee or Set-Content) leaves it unknown:
+ * heavy, provisional, "cannot read yet". Returns the keys written (heredocWrite's contract).
+ */
+function literalWrite(raw: string[], ws: string[], here: ClassifyCtx, virtual: Map<string, string | null>, vkey: (p: string, cd?: string) => string, rewritten: ReadonlySet<string>): Set<string> {
+  const wrote = new Set<string>();
+  const lead = leading(ws);
+  const bin = (lead[0] ?? '').replace(/\\/g, '/').split('/').pop()!.toLowerCase().replace(/\.exe$/, '');
+  const args = lead.slice(1);
+  const targets: Array<{ f: string; append: boolean }> = [];
+  for (let i = 0; i < raw.length; i++) {
+    const m = /^(?:\d*|&)(>\||>>?)(?![&>])(.*)$/.exec(raw[i]);
+    if (m) { const f = m[2] || raw[i + 1]; if (f && !/^\/dev\//.test(f)) targets.push({ f, append: m[1] === '>>' }); }
+  }
+  const unescape = (t: string): string => t.replace(/\\([nt\\])/g, (_, c: string) => (c === 'n' ? '\n' : c === 't' ? '\t' : '\\'));
+  let text: string | null = null;
+  if (targets.length) {
+    if (bin === 'echo' || bin === 'write-output') {
+      let k = 0;
+      let esc = false;
+      while (k < args.length && /^-[neE]+$/.test(args[k])) { esc ||= args[k].includes('e'); k++; }
+      const body = args.slice(k).join(' ');
+      text = COMPUTED.test(body) ? null : esc ? unescape(body) : body;
+    } else if (bin === 'printf') {
+      const fmt = args[0];
+      text = fmt === undefined || COMPUTED.test(fmt) || /%/.test(fmt) ? null : unescape(fmt);
+    }
+  } else if (bin === 'tee') {
+    const a = args.some((w) => /^-[a-z]*a|^--append$/.test(w));
+    for (const f of args.filter((w) => !w.startsWith('-'))) targets.push({ f, append: a });
+  } else if (/^(?:set-content|add-content|out-file|sc|ac)$/.test(bin)) {
+    const pos: string[] = [];
+    let value: string | undefined; let file: string | undefined; let append = bin === 'add-content' || bin === 'ac';
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i];
+      if (/^-p(?:a(?:t(?:h)?)?)?$/i.test(a) || PS_FILE_PARAM.test(a)) { file = args[++i]; continue; }
+      if (/^-v(?:a(?:l(?:u(?:e)?)?)?)?$/i.test(a) || /^-inputobject$/i.test(a)) { value = args[++i]; continue; }
+      if (/^-ap(?:p(?:e(?:n(?:d)?)?)?)?$/i.test(a)) { append = true; continue; }
+      if (/^-(?:encoding|filter|include|exclude|stream|width|credential)/i.test(a)) { i++; continue; }
+      if (a.startsWith('-')) continue;
+      pos.push(a);
+    }
+    file ??= pos.shift();
+    if (bin !== 'out-file') value ??= pos.shift();
+    if (file) targets.push({ f: file, append });
+    text = value === undefined || COMPUTED.test(value) ? null : value;
+  }
+  for (const { f, append } of targets) {
+    const k = vkey(f, here.cd);
+    wrote.add(k);
+    if (text === null) { virtual.set(k, null); continue; }
+    let old: string | null = null;
+    if (append) {
+      // S1: an append to a file rewritten by other means is unknown too (the disk holds the old text).
+      if (virtual.get(k) === null || (!virtual.has(k) && rewritten.has(k))) { virtual.set(k, null); continue; }
+      try { old = here.readScript ? here.readScript(f, here.cd) : null; } catch { old = null; }
+    }
+    virtual.set(k, `${append ? old ?? '' : ''}${text}\n`);
+  }
+  return wrote;
+}
+
 function heredocWrite(raw: string[], ws: string[], body: string, here: ClassifyCtx, virtual: Map<string, string | null>, vkey: (p: string, cd?: string) => string, rewritten: ReadonlySet<string>): Set<string> {
   const bin = (ws[0] ?? '').replace(/\\/g, '/').split('/').pop()!.toLowerCase().replace(/\.exe$/, '');
   const text = `${body}\n`;
