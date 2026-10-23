@@ -148,6 +148,50 @@ const { harnessCpuMask } = require(${JSON.stringify(join(root, 'test', 'electron
 })().catch((e) => { process.stdout.write('HCPU ' + JSON.stringify({ ok: false, error: String(e && e.message || e).slice(0, 2000) }) + '\\n'); });
 `;
 
+/** The serve helper's reply channel, read as src/main/heavyCpu.ts reads it: stdout split into lines,
+ *  an unsolicited {"event":...} line (a job exiting, written between replies) never taken as a reply,
+ *  replies matched to requests in order. Taking the first stdout chunk read an exit event as the
+ *  answer to `set` (1.1.99 FINAL, the flip test). */
+function serveChannel(stdout, write) {
+  let buf = '';
+  const queue = [];
+  stdout.setEncoding('utf8');
+  stdout.on('data', (d) => {
+    buf += d;
+    let i;
+    while ((i = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, i).trim();
+      buf = buf.slice(i + 1);
+      if (!line) continue;
+      let r = null;
+      try { r = JSON.parse(line); } catch { r = null; }
+      if (r && typeof r.event === 'string') continue;
+      queue.shift()?.(line);
+    }
+  });
+  return (line) => new Promise((resolve) => { queue.push(resolve); write(`${line}\n`); });
+}
+
+test('the serve channel skips event lines and answers each request with its own reply (1.1.99 FINAL flake)', async () => {
+  const { PassThrough } = require('node:stream');
+  const out = new PassThrough();
+  const sent = [];
+  const replies = [
+    // An exit event alone in a chunk before the reply: the chunk the old helper took as the answer.
+    ['{"event":"exit","job":"j","msg":7,"pid":1}\r\n{"event":"exit","job":"j","msg":7,"pid":2}\r\n', '{"ok":true}\r\n'],
+    // An event and the reply in one chunk, and a reply split across chunks.
+    ['{"event":"exit","job":"j","msg":4,"pid":3}\r\n{"ok":true,"half":', 'true}\r\n'],
+  ];
+  const ask = serveChannel(out, (line) => {
+    sent.push(line);
+    const chunks = replies.shift();
+    setImmediate(function next() { const c = chunks.shift(); if (c === undefined) return; out.write(c); setImmediate(next); });
+  });
+  assert.equal(await ask('set j 0 1'), '{"ok":true}');
+  assert.equal(await ask('query j'), '{"ok":true,"half":true}');
+  assert.deepEqual(sent, ['set j 0 1\n', 'query j\n']);
+});
+
 /** The helper Guppy ships, compiled here with the in-box csc. */
 function buildHelper(dir) {
   const exe = join(dir, 'guppy-heavyjob.exe');
@@ -194,7 +238,7 @@ test('RENDERED (real App), live flip: a suite started with its own job unlimited
       const id = `hcpu-flip-${process.pid}-${Date.now().toString(36)}`;
       // Guppy's side: the job is made with no limit and held by serve, as begin() does.
       serve = spawn(exe, ['serve'], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
-      const ask = (line) => new Promise((r) => { serve.stdout.once('data', (d) => r(String(d))); serve.stdin.write(`${line}\n`); });
+      const ask = serveChannel(serve.stdout, (s) => serve.stdin.write(s));
       const json = async (line) => { const j = JSON.parse(await ask(line)); assert.equal(j.ok, true, `${line}: ${JSON.stringify(j)}`); return j; };
       const { logical } = await json('cpus');
       const ambient = harnessCpuMask({}); // this file's own processors, fresh (null = all of them)
