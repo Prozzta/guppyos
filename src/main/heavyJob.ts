@@ -2089,6 +2089,9 @@ export interface HeavyHolder {
   misses: number;
   /** The last watcher scan saw a heavy process of this holder (for a TTL expiry's log). */
   seenRunning: boolean;
+  /** Jim HHR MINOR 3: when a scan last saw a process of its job (null: never). The hour's renewal needs a
+   *  sighting since the last renewal (or the acquire / re-entry that moved `touched`). */
+  seenAt: number | null;
   /** pid -> createdMs of this holder's job processes seen on earlier scans (Jim: orphans stay attributed). */
   attributed: Map<number, number>;
   /** HEAVY-JOB-LOCK-FAILOPEN (b): when each heavy CALL ran (PreToolUse to PostToolUse; end null =
@@ -2428,7 +2431,7 @@ export class HeavyJobLock {
     this.dequeue(agentId);
     this.leaseOnly.delete(agentId);
     if (this.nextUp === agentId) this.nextUp = null;
-    this.holders.set(agentId, { agentId, kind: cls.kind, command: command.slice(0, 200), since: this.now(), touched: this.now(), calls: new Set([callId]), background, provisional: new Set(cls.provisional ? [callId] : []), definite: !cls.provisional, misses: 0, seenRunning: false, attributed: new Map(), windows: [{ callId, start: this.now(), end: null }], lastProbe: null, jobs: new Map(), exclusive: excl });
+    this.holders.set(agentId, { agentId, kind: cls.kind, command: command.slice(0, 200), since: this.now(), touched: this.now(), calls: new Set([callId]), background, provisional: new Set(cls.provisional ? [callId] : []), definite: !cls.provisional, misses: 0, seenRunning: false, seenAt: null, attributed: new Map(), windows: [{ callId, start: this.now(), end: null }], lastProbe: null, jobs: new Map(), exclusive: excl });
     this.log({ kind: 'heavy-lock', action: 'acquire', agentId, heavyKind: cls.kind, command: command.slice(0, 200), background, limit, ...(reserved ? { reserved: true } : {}), ...(excl ? { exclusive: true } : {}) });
     this.changed();
     this.arm();
@@ -2573,7 +2576,7 @@ export class HeavyJobLock {
       void this.heavyAgents().then((busy) => {
         const cur = this.holders.get(agentId);
         if (!cur || cur.calls.size || cur.background) return;
-        if (busy?.busy.has(agentId)) { cur.background = true; cur.seenRunning = true; this.log({ kind: 'heavy-lock', action: 'orphan-kept', agentId, heavyKind: cur.kind }); this.changed(); this.arm(); return; }
+        if (busy?.busy.has(agentId)) { cur.background = true; cur.seenRunning = true; cur.seenAt = this.now(); this.log({ kind: 'heavy-lock', action: 'orphan-kept', agentId, heavyKind: cur.kind }); this.changed(); this.arm(); return; }
         // (a) FAIL CLOSED: a failed listing says nothing about the job (most likely a TIMEOUT on a
         // loaded machine, i.e. exactly when a second heavy job hurts most). Keep the slot as a
         // background holder; the watcher frees it on two clean scans without it, or the TTL.
@@ -2879,9 +2882,18 @@ export class HeavyJobLock {
     // HEAVY_TTL_MS (logged, so a day-long hold stays visible) and its process exit frees it. Only a hold
     // never seen running expires ('ttl': no watcher, or a job the listing never showed). The renewal
     // moves `touched`, so the scan right after it does not count a miss (one interval of slack).
+    // Jim HHR MINOR 3 (P1, P1b): only a sighting SINCE the last renewal (or the acquire / re-entry that
+    // moved `touched`) renews. A watcher gone blind after one sighting (every listing failed, or none
+    // showed the holder's PTY root) renewed a hold for 24 h: now at most one hour passes blind after the
+    // last sighting's renewal, logged loudly ('ttl-blind', with the last probe state and how long the job
+    // has been unseen), and the hold expires as one never seen running; its job-exit, posttool and
+    // pty-exit still free it earlier.
     for (const h of [...this.holders.values()]) {
       if (t - h.touched < HEAVY_TTL_MS) continue;
-      if (!h.seenRunning) { this.release(h.agentId, 'ttl'); continue; }
+      if (!h.seenRunning || h.seenAt === null || h.seenAt < h.touched) {
+        if (h.seenRunning) this.log({ kind: 'heavy-lock', action: 'ttl-blind', agentId: h.agentId, heavyKind: h.kind, heldMs: t - h.since, lastProbe: h.lastProbe, unseenMs: t - (h.seenAt ?? h.since) });
+        this.release(h.agentId, 'ttl'); continue;
+      }
       h.touched = t;
       this.log({ kind: 'heavy-lock', action: 'ttl-renewed', agentId: h.agentId, heavyKind: h.kind, heldMs: t - h.since });
     }
@@ -2938,7 +2950,7 @@ export class HeavyJobLock {
     const t = this.now();
     for (const h of held) {
       if (!this.holders.has(h.agentId)) continue;
-      if (busy.has(h.agentId)) { h.misses = 0; h.seenRunning = true; continue; }
+      if (busy.has(h.agentId)) { h.misses = 0; h.seenRunning = true; h.seenAt = t; continue; }
       if (!seen.has(h.agentId)) continue;   // its PTY root is not in the listing: unknown, not a miss
       h.seenRunning = false;
       if (t - h.touched < HEAVY_SCAN_MS) continue;

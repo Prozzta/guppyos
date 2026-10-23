@@ -426,9 +426,9 @@ const MUTANTS = [
   { name: 'a gone named agent is kept', edits: [['    if (this.nextUp === agentId) this.nextUp = null;\n    if (queued || had) this.changed();', '    if (queued || had) this.changed();']],
     killer: 'nextWho', dies: /A GONE AGENT IS FORGOTTEN/ },
   // (b)
-  { name: 'the TTL frees a hold seen running (as before)', edits: [["      if (!h.seenRunning) { this.release(h.agentId, 'ttl'); continue; }", "      this.release(h.agentId, 'ttl'); continue;"]],
+  { name: 'the TTL frees a hold seen running (as before)', edits: [["      if (!h.seenRunning || h.seenAt === null || h.seenAt < h.touched) {", "      if (true) {"]],
     killer: 'ttlRenewed', dies: /A HOLD SEEN RUNNING IS RENEWED AT THE HOUR/ },
-  { name: 'every hold is renewed (required: one never seen running expires)', edits: [['      if (!h.seenRunning) { this.release', '      if (false) { this.release']],
+  { name: 'every hold is renewed (required: one never seen running expires)', edits: [["      if (!h.seenRunning || h.seenAt === null || h.seenAt < h.touched) {", "      if (false) {"]],
     killer: 'ttlNeverSeen', dies: /A HOLD NEVER SEEN RUNNING STILL EXPIRES/ },
   { name: 'the renewal does not restart the hour', edits: [['      h.touched = t;\n      this.log({ kind: \'heavy-lock\', action: \'ttl-renewed\'', '      this.log({ kind: \'heavy-lock\', action: \'ttl-renewed\'']],
     killer: 'ttlRenewed', dies: /RENEWED ONCE PER HOUR/ },
