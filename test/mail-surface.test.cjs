@@ -280,6 +280,35 @@ test('evidence: a Claude hook_additional_context attachment or a Codex developer
   assert.equal(S.mailEvidenceIn(claude, ['a1'], 'latency').size, 0);
 });
 
+test('evidence: a Codex Stop block reason (one whole user-role stop hook_prompt) confirms; a non-stop hook_prompt or a quoted tag does not', () => {
+  // The exact rollout line of Dwight's stop-continue (codex 0.157.1, 10-23 08:38:58Z): user role, escaped &lt;hive-mail&gt;.
+  const live = fs.readFileSync(path.join(__dirname, 'fixtures', 'codex-stop-hook-prompt-0.157.1.jsonl'), 'utf8').trim();
+  const id = '2026-10-23T08-38-51-756Z-f2e833';
+  assert.deepEqual([...S.mailEvidenceIn(live, [id], 'codex-rollout')], [id], 'a stop-continue reason is the delivery record');
+  assert.equal(S.mailEvidenceIn(live, [id], 'claude-transcript').size, 0, 'Codex evidence only');
+  const user = (...texts) => JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: texts.map((text) => ({ type: 'input_text', text })) } });
+  const stop = (body) => `<hook_prompt hook_run_id="stop:7:C:\\x\\config.toml">&lt;hive-mail&gt;\n${body}\n&lt;/hive-mail&gt;</hook_prompt>`;
+  const lines = [
+    user(stop('[hive-mail:s1] from: god')),
+    user('<hook_prompt hook_run_id="user_prompt_submit:3:C:\\x\\config.toml">[hive-mail:n1]</hook_prompt>'),
+    user(`please look at this: ${stop('[hive-mail:q1]')}`),
+    user(`${stop('[hive-mail:q2]')} and this is me typing after it`),
+    user(stop('[hive-mail:m1]'), 'a second item'),
+    user('a first item', stop('[hive-mail:m2]')),
+    user('<hook_prompt hook_run_id="session_start:1:C:\\x\\config.toml">[hive-mail:r1]</hook_prompt>'),
+    user('<hook_prompt hook_run_id="stopx:7:C:\\x\\config.toml">[hive-mail:r2]</hook_prompt>'),
+    user(` ${stop('[hive-mail:w1]')}`),
+    user(`${stop('[hive-mail:w2]')}\n`),
+    user(`${stop('[hive-mail:t1]').replace(/<\/hook_prompt>$/, '</hook_promptx>')}`),
+    JSON.stringify({ type: 'event_msg', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: stop('[hive-mail:e1]') }] } }),
+    JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: stop('[hive-mail:a1]') }] } }),
+    ...['system', 'tool'].map((role) => JSON.stringify({ type: 'response_item', payload: { type: 'message', role, content: [{ type: 'input_text', text: stop(`[hive-mail:o-${role}]`) }] } }))
+  ].join('\n');
+  const ids = ['s1', 'n1', 'q1', 'q2', 'm1', 'm2', 'r1', 'r2', 'w1', 'w2', 't1', 'e1', 'a1', 'o-system', 'o-tool'];
+  assert.deepEqual([...S.mailEvidenceIn(lines, ids, 'codex-rollout')], ['s1'],
+    'only a whole stop hook_prompt, alone, in a user response_item: not another run id (user_prompt_submit, session_start, stopx), a quote, whitespace or text around it, another item before or after, a wrong close tag, an event_msg, or the assistant/system/tool roles');
+});
+
 // ————————————————————————————————————————————————————————————— hooks (real hive, jailed)
 
 async function floor(t, { providers = {}, steer = null, emit, claimWorkingSet } = {}) {

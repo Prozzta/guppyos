@@ -506,6 +506,45 @@ test('MUST 2: the Stop block carries the <hive-mail> block itself, claimed in TH
   assert.equal(w.ws.counters().claude?.doubleSubmit, undefined);
 });
 
+/** Codex keeps a Stop block's reason in its rollout as one user message, wrapped and escaped
+ *  (the live shape: test/fixtures/codex-stop-hook-prompt-0.157.1.jsonl). */
+function codexHookPromptLine(run, reason) {
+  const text = `<hook_prompt hook_run_id="${run}:7:C:\\x\\.codex\\config.toml">${reason.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</hook_prompt>`;
+  return `${JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] } })}\n`;
+}
+
+for (const [run, kept] of [['stop', true], ['user_prompt_submit', false]]) {
+  test(`GTC stop-continue (Codex): the rollout's ${run} hook_prompt ${kept ? 'confirms the Stop-surfaced id; it is acted and never typed again' : 'is not evidence: the id goes back unconfirmed and is typed again'}`, async (t) => {
+    const w = await floor(t, { provider: 'codex' });
+    const dir = fs.mkdtempSync(path.join(JAIL, 'rollout-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const ro = path.join(dir, 'rollout.jsonl');
+    fs.writeFileSync(ro, '');
+    const m1 = await turnWithMail(w, { turn_id: 'T1', transcript_path: ro });
+    const res = w.fire('Stop', { turn_id: 'T1', transcript_path: ro });
+    assert.equal(res.decision, 'block');
+    assert.deepEqual(markersIn(res.reason), [m1.id]);
+    w.server.takeMailClaims();
+    fs.appendFileSync(ro, codexHookPromptLine(run, res.reason));
+    w.fire('Stop', { turn_id: 'T1', transcript_path: ro, stop_hook_active: true });
+    w.hive.mail.flushAll();
+    await w.flush();
+    const e = w.entry(m1.id);
+    if (kept) {
+      assert.deepEqual({ state: e.state, method: e.confirmMethod }, { state: 'acted', method: 'evidence' });
+      assert.deepEqual(w.reqs, [], 'no duplicate turn');
+    } else {
+      assert.notEqual(e.state, 'acted', 'not confirmed: returned to be surfaced again');
+      assert.equal(e.unconfirmedSurfacings, 1);
+      // The duplicate turn seen live (Dwight 08:39Z): a second try of the same ids is typed.
+      assert.equal(w.reqs.length, 1, 'the mail is typed again');
+      assert.equal(w.reqs[0].text, '[hive] check inbox');
+      assert.match(w.reqs[0].requestId, /^inbox-wake:a1:[0-9a-f]+:1$/, 'the same ids, a second try');
+      assert.equal(e.state, 'delivered', 'back to delivered: the typed wake surfaces it again');
+    }
+  });
+}
+
 test('MUST 2: a ledger error at the claim = no block; the ids go back and the Stop edge wakes as today', async (t) => {
   const w = await floor(t);
   const m1 = await turnWithMail(w);
