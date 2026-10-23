@@ -33,7 +33,7 @@ test.after(() => { for (const [k, v] of Object.entries(realEnv)) { if (v === und
 
 const { HookServer } = loadTs('src/main/hooks.ts');
 const mcp = loadTs('src/main/codexHookMcp.ts');
-const { HeavyJobLock } = loadTs('src/main/heavyJob.ts');
+const { HeavyJobLock, classifyHeavy } = loadTs('src/main/heavyJob.ts');
 
 const THREAD = '01a0a169-b0e4-71f0-970a-4a8033ccaae4';
 const TURN = '01a0a169-b0e4-71f0-970a-4a8033cc0001';
@@ -172,4 +172,30 @@ test('turnCwd: the newest turn_context\'s cwd, null when it has none (W8)', () =
   assert.equal(mcp.turnCwd([turnAt('C:\\old'), turnAt('C:\\new'), call('x')].join('\n')), 'C:\\new');
   assert.equal(mcp.turnCwd([turnAt('C:\\old'), turnAt(undefined)].join('\n')), null);
   assert.equal(mcp.turnCwd(call('x')), null);
+});
+
+// HEAVY-LOCK-FALSE-NEGATIVES follow-up (god, 2026-10-23 15:13Z): under installed 1.1.99 the lock denied
+// `cd <tree> && node --test test/harness-progress-199.test.cjs` (one file, after a cd) and a
+// `git worktree add`, while the deny text says single test files are not limited. Pinned here at the
+// classifier with the real context builder: both are light, in bash and in PowerShell, whether the
+// one file is named after a `cd` into the tree or against the call's own folder.
+test('one test file after a cd, and git worktree add, are light (god 15:13Z)', () => {
+  const ONE_FILE = 'test/harness-progress-199.test.cjs';
+  fs.writeFileSync(path.join(WT, ONE_FILE), "require('node:test')('x', () => {});\n");
+  const posix = WT.replace(/\\/g, '/');
+  const light = (tool, cmd, cwd) => {
+    const ctx = { ...HookServer.heavyScriptCtx(cwd), shell: tool === 'Bash' ? 'bash' : 'powershell' };
+    const c = classifyHeavy(tool, { command: cmd }, ctx);
+    assert.equal(c.heavy, false, `${tool}: ${cmd} must be light, got ${JSON.stringify(c)}`);
+  };
+  for (const tool of ['Bash', 'PowerShell']) {
+    light(tool, `cd ${posix} && node --test ${ONE_FILE}`, AGENT);
+    light(tool, `cd "${WT}" && node --test ${ONE_FILE}`, AGENT);
+    light(tool, `node --test ${ONE_FILE}`, WT);
+    light(tool, `git worktree add ${posix}-next origin/main`, AGENT);
+    light(tool, `git -C ${posix} worktree add C:/x/y 06d360d5 && git worktree list`, AGENT);
+  }
+  // The single-file rule is the file's count, not its name: a glob after the cd is still the suite.
+  const ctx = { ...HookServer.heavyScriptCtx(AGENT), shell: 'bash' };
+  assert.equal(classifyHeavy('Bash', { command: `cd ${posix} && node --test test/*.test.cjs` }, ctx).heavy, true, 'a glob after cd stays heavy');
 });
