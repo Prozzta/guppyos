@@ -137,7 +137,7 @@ async function buildFloor() {
   };
   const diags = [];
   const outcomes = [];
-  const rig = { clock, diags, outcomes, llm, bootSeen: new Set(), echoSeen: new Map(),stall: new Map(), interfere: new Map(), humanDirty: new Set(), capacityHold: false, quietHoldMin: 0, holdArchives: false, settleDelay: new Map() };
+  const rig = { clock, diags, outcomes, llm, bootSeen: new Set(), echoSeen: new Map(), stall: new Map(), interfere: new Map(), humanDirty: new Set(), capacityHold: false, quietHoldMin: 0, holdArchives: false, settleDelay: new Map(), heldProviderStatus: new Map() };
 
   // index.ts:361 - the ONE hive; this sandbox's harness home is the "live" home of THIS instance,
   // so the per-provider global writers (AGY hooks.json, statusline) write into the jailed HOME.
@@ -376,6 +376,13 @@ async function buildFloor() {
     diag: (stage, fields) => { diags.push({ stage, ...fields, at: clock.now() }); if (diags.length > 5000) diags.shift(); }
   });
 
+  // The statusline process is one-way: its exit proves only that it handed bytes to the
+  // transport, not that main has processed them. The hold is a rig-only seam for the exact
+  // scheduling window F11 exercises; the production callback below stays unchanged.
+  const deliverProviderStatus = (agentId, tick) => {
+    inboxWake?.onProviderStatus(agentId, tick.lifecycle, tick.sessionId, clock.at(tick.readAt));
+  };
+
   // index.ts:698
   hookServer = new HookServer(
     hive, () => null, () => ({ notifications: false }), control, undefined, () => null,
@@ -388,7 +395,12 @@ async function buildFloor() {
     },
     undefined,
     // index.ts:716 - one AGY statusline tick: the lifecycle half (capacity is the stand-in above).
-    (agentId, tick) => { if (agentId) inboxWake?.onProviderStatus(agentId, tick.lifecycle, tick.sessionId, clock.at(tick.readAt)); }
+    (agentId, tick) => {
+      if (!agentId) return;
+      const held = rig.heldProviderStatus.get(agentId);
+      if (held) { held.push(tick); return; }
+      deliverProviderStatus(agentId, tick);
+    }
   );
   // index.ts:743
   hookServer.setMailCoordination({
@@ -559,7 +571,7 @@ async function buildFloor() {
     return { ok: true, ptyId, provider, argCount: args.length, settings: args.includes('--settings') };
   }
 
-  return { teardownPty, hive, hookServer, inboxWake, workerWake, control, ptyManager, automaticSubmit, ptyToAgent, ptyProvider, ptyForAgent, rig, beat, spawnAgent, migration, readers, mailPendingIds, wakeMailMode };
+  return { teardownPty, hive, hookServer, inboxWake, workerWake, control, ptyManager, automaticSubmit, ptyToAgent, ptyProvider, ptyForAgent, rig, beat, spawnAgent, migration, readers, mailPendingIds, wakeMailMode, deliverProviderStatus };
 }
 
 // ————————————————————————————————————————————————————————————— the control port
@@ -636,6 +648,13 @@ async function main() {
     // writes at boot)? The driver moves the simulated clock only after it has (Rig.settleBoot).
     bootSeen: ({ id }) => { const p = f.ptyForAgent(id); return !!p && rig.bootSeen.has(p); },
     stallNextHook: ({ id, ms, event }) => { rig.stall.set(id, { ms, event }); return true; },
+    holdProviderStatus: ({ id }) => { rig.heldProviderStatus.set(id, []); return true; },
+    releaseProviderStatus: ({ id }) => {
+      const held = rig.heldProviderStatus.get(id) || [];
+      rig.heldProviderStatus.delete(id);
+      for (const tick of held) f.deliverProviderStatus(id, tick);
+      return { released: held.length };
+    },
     delaySettle: ({ id, ms }) => { if (ms) rig.settleDelay.set(id, ms); else rig.settleDelay.delete(id); return true; },
     // C1 (deterministic lateness): the NEXT mail-claim settle of this agent is measured as if its
     // response had flushed `ms` after the hook arrived. The response itself leaves at once, so it
