@@ -36,15 +36,15 @@ test('cap render lane runs ordinary files first, then the Electron harness seria
     };
     assert.equal(R.run(common), 0);
     assert.equal(capped.length, 2, 'the capped lane is exclusive: one node invocation per lane');
-    assert.deepEqual(capped[0].filter((a) => a.endsWith('.test.cjs')).map(path.basename), ['ordinary.test.cjs']);
+    assert.deepEqual(capped[0].filter((a) => a.endsWith('.test.cjs')).map((file) => path.basename(file)), ['ordinary.test.cjs']);
     assert.ok(capped[0].includes('--test-concurrency=16'), 'ordinary cap lane retains its half-core concurrency');
-    assert.deepEqual(capped[1].filter((a) => a.endsWith('.test.cjs')).map(path.basename), ['renamed-render.test.cjs']);
+    assert.deepEqual(capped[1].filter((a) => a.endsWith('.test.cjs')).map((file) => path.basename(file)), ['renamed-render.test.cjs']);
     assert.ok(capped[1].includes('--test-concurrency=1'), 'Electron harness lane is serial');
 
     const open = [];
     assert.equal(R.run({ ...common, spawn: (args) => { open.push(args); return { status: 0 }; }, jobRate: () => 0 }), 0);
     assert.equal(open.length, 1, 'cap-off retains the pre-lane single invocation');
-    assert.deepEqual(open[0].filter((a) => a.endsWith('.test.cjs')).map(path.basename), ['ordinary.test.cjs', 'renamed-render.test.cjs']);
+    assert.deepEqual(open[0].filter((a) => a.endsWith('.test.cjs')).map((file) => path.basename(file)), ['ordinary.test.cjs', 'renamed-render.test.cjs']);
     assert.ok(!open[0].some((a) => a.startsWith('--test-concurrency=')), 'cap-off remains at Node default concurrency');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });

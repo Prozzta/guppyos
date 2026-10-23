@@ -392,7 +392,8 @@ test('LIVE cmd: the `&` join line leaves the command exactly as cmd runs it (out
       const inside = run(joinLineFor(id) + `guppy-heavyjob list ${id}`);
       const rows = inside.stdout.trim().split(/\r?\n/).map((l) => JSON.parse(l)); // one JSON line per process
       assert.ok(rows.some((r) => /^cmd\.exe$/i.test(r.name)), `cmd is in the job: ${inside.stdout}`);
-      assert.ok(rows.every((r) => r.cpus === os.cpus().length), `CPU-rate control leaves every visible core available: ${inside.stdout}`);
+      const usable = rows[0]?.cpus;
+      assert.ok(Number.isInteger(usable) && usable > 0 && rows.every((r) => r.cpus === usable), `CPU-rate control leaves the process's actually usable processors available: ${inside.stdout}`);
       // A shell with its own console: its conhost.exe started with it, before the join line, and joins too.
       // (Start-Process makes a new console; without -Wait, which would put the shell in a job of its own.)
       const ownFile = path.join(dir, 'own.txt');

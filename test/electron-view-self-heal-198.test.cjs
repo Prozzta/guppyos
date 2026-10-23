@@ -44,7 +44,7 @@ test('a view that lost its executable but kept .complete is rebuilt, at the same
   });
 });
 
-test('a capped job uses a SwiftShader view no wider than its CPU share; an uncapped job remains plain', () => {
+test('every job uses a bounded SwiftShader view, intersected with a non-contiguous outer affinity', () => {
   withTemp((dir) => {
     const src = fakeDist(dir);
     const tmp = join(dir, 'tmp');
@@ -52,11 +52,11 @@ test('a capped job uses a SwiftShader view no wider than its CPU share; an uncap
     assert.equal(cappedHeavyJob({ GUPPY_HEAVY_CPU_CAP: '0' }), false);
     const mask = swiftShaderMaskForHeavyJob({ GUPPY_HEAVY_CPU_CAP: '1' }, 8);
     assert.equal(mask, 15n, 'four processors in the capped view');
-    assert.equal(swiftShaderMaskForHeavyJob({ GUPPY_HEAVY_CPU_CAP: '0' }, 8), null, 'uncapped is c1e8c5e7 plain behavior');
+    assert.equal(swiftShaderMaskForHeavyJob({ GUPPY_HEAVY_CPU_CAP: '0' }, 8), 15n, 'cap-off remains bounded: a plain view can stall');
+    assert.equal(swiftShaderMaskForHeavyJob({ HARNESS_CPU_MASK: '170' }, 8), 10n, 'the half view intersects a non-contiguous outer affinity');
+    assert.equal(swiftShaderMaskForHeavyJob({ HARNESS_CPU_MASK: '160' }, 8), 160n, 'when the intersection is empty, retain the outer affinity');
     const capped = swiftShaderView(src, mask, tmp);
     assert.match(readFileSync(join(capped, '..', 'SwiftShader.ini'), 'utf8'), /AffinityMask=15/);
-    const plain = swiftShaderView(src, null, tmp);
-    assert.equal(existsSync(join(plain, '..', 'SwiftShader.ini')), false);
   });
 });
 

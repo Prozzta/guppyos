@@ -37,6 +37,7 @@
 // machine, via ENABLE|HARD_CAP, with all logical processors still visible.
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -222,8 +223,31 @@ static class HeavyJob
             AssignProcessToJobObject(job, h);
             CloseHandle(h);
         }
+        // A `join; command` shell cannot inherit an environment update from this short-lived
+        // helper.  Leave a pid+creation-time keyed breadcrumb for descendants instead.  `self-query`
+        // follows its parent chain to this shell and opens the named outer job, rather than asking
+        // only libuv's nested job (which has no CPU-rate limit).
+        foreach (int pid in chain) try { File.WriteAllText(CapMarker(pid), name); } catch { }
         CloseHandle(job);
         return 0;
+    }
+
+    static string CapMarker(int pid) { return Path.Combine(Path.GetTempPath(), "guppy-heavy-job-" + pid + "-" + Created(pid)); }
+
+    static string AncestorMarkedJob()
+    {
+        var parent = new Dictionary<int, int>();
+        IntPtr snap = CreateToolhelp32Snapshot(0x2, 0);
+        var e = new PROCESSENTRY32 { dwSize = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32)) };
+        if (Process32FirstW(snap, ref e)) do { parent[(int)e.th32ProcessID] = (int)e.th32ParentProcessID; } while (Process32NextW(snap, ref e));
+        CloseHandle(snap);
+        int pid = GetCurrentProcessId();
+        while (pid != 0)
+        {
+            try { if (File.Exists(CapMarker(pid))) return File.ReadAllText(CapMarker(pid)).Trim(); } catch { }
+            if (!parent.TryGetValue(pid, out pid)) break;
+        }
+        return null;
     }
 
     // The consecutive shell ancestors of this process, nearest first, each created before its child
@@ -309,7 +333,16 @@ static class HeavyJob
     // an environment variable from the short-lived join helper.
     static int SelfQuery()
     {
-        try { Console.Out.Write(QueryJob(IntPtr.Zero) + "\n"); return 0; }
+        try
+        {
+            string outer = AncestorMarkedJob();
+            if (!string.IsNullOrEmpty(outer))
+            {
+                IntPtr job = OpenJobObjectW(JOB_ALL, false, outer);
+                if (job != IntPtr.Zero) try { Console.Out.Write(QueryJob(job) + "\n"); return 0; } finally { CloseHandle(job); }
+            }
+            Console.Out.Write(QueryJob(IntPtr.Zero) + "\n"); return 0;
+        }
         catch { Console.Out.Write("{\"background\":false,\"cap\":false,\"rate\":0,\"affinity\":null}\n"); return 0; }
     }
 
