@@ -40,21 +40,25 @@ function check() {
     path.join('dist', 'win-unpacked', 'resources', 'app.asar.unpacked', 'node_modules')
   ]);
 }
+// CHANGELOG-HEADINGS-GATE: a cut keeps every released CHANGELOG section of the last release.
+function gate() {
+  run(process.execPath, [
+    path.join('scripts', 'verify-changelog-history.cjs'),
+    path.join('dist', 'win-unpacked', 'resources', 'app.asar')
+  ]);
+}
 if (process.argv.includes('--install-only')) {
   // Evidence/recovery mode: the same plain install the full cut starts with.
   run(npm, ['ci']);
 } else if (process.argv.includes('--dist-only')) {
   run(npm, ['run', 'dist:win:raw']);
   check();
+  gate();
 } else {
   // Keep this literal plain npm ci: --ignore-scripts makes a deceptively
   // successful cut that omits the better-sqlite3 rebuild.
   run(npm, ['ci']);
   run(npm, ['run', 'dist:win:raw']);
   check();
-  // CHANGELOG-HEADINGS-GATE: a cut keeps every released CHANGELOG section of the last release.
-  run(process.execPath, [
-    path.join('scripts', 'verify-changelog-history.cjs'),
-    path.join('dist', 'win-unpacked', 'resources', 'app.asar')
-  ]);
+  gate();
 }

@@ -101,7 +101,7 @@ if (require.main === module) {
   const ref = bi >= 0 ? args[bi + 1] : baseRef(root, version);
   let problems;
   let added = [];
-  if (!ref) problems = [`no base: no v* tag behind HEAD other than v${version} (fetch the tags, or pass --base <ref>)`];
+  if (!ref) problems = [`no base: no v* tag behind HEAD other than v${version} (fetch the tags (unshallow a shallow clone), or pass --base <ref>)`];
   else {
     let baseText = null;
     try { baseText = execFileSync('git', ['-C', root, 'show', `${ref}:CHANGELOG.md`], { encoding: 'utf8', maxBuffer: 64 << 20, stdio: ['ignore', 'pipe', 'ignore'] }); } catch { /* reported below */ }

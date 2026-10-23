@@ -56,6 +56,7 @@ test('an edited heading, a removed line, a reorder, a new section below a releas
   assert.match(one(GOOD.replace(s98, '') + s98), /released sections out of order: 1\.1\.97, 1\.1\.98/);
   assert.match(one(BASE + '\r\n' + NEW), /new section \[1\.1\.99\] sits below a released one/);
   assert.match(one(GOOD.replace('## [1.1.97]', '## [1.1.98] — 2026-10-22\r\n\r\n- again\r\n\r\n## [1.1.97]')), /\[1\.1\.98\] appears twice/);
+  assert.match(one(GOOD.replace('- Messages typed where the agent can take them.\r\n', '')), /\[1\.1\.97\] lost 1 line\(s\), first: "- Messages typed where the agent can take them\."/, 'an older section loses a line too');
   assert.match(one(GOOD.replace(/## \[1\.1\.97\][^]*$/, '')), /released heading dropped: "## \[1\.1\.97\] — 2026-10-19"/, 'a dropped older section');
 });
 
@@ -115,6 +116,17 @@ test('the CLI reads an app.asar\'s CHANGELOG, and exits 1 on a dropped heading, 
   const none = cli(kept, '--base', 'no-such-ref-for-this-test');
   assert.equal(none.status, 1, 'an unreadable base fails');
   assert.match(none.stderr, /cannot read no-such-ref-for-this-test:CHANGELOG\.md/);
+  // A target the gate cannot read fails; it never passes with nothing checked.
+  const bare = path.join(dir, 'bare');
+  fs.mkdirSync(bare);
+  fs.writeFileSync(path.join(bare, 'package.json'), '{}');
+  await asar.createPackage(bare, path.join(dir, 'bare.asar'));
+  for (const target of [path.join(dir, 'missing.asar'), path.join(dir, 'bare.asar')]) {
+    const r = cli(target, '--base', 'HEAD');
+    assert.equal(r.status, 1, `${path.basename(target)} fails`);
+    assert.match(r.stderr, /cannot read the CHANGELOG of /);
+    assert.doesNotMatch(r.stdout, /CHANGELOG HISTORY OK/);
+  }
 });
 
 test('the base is the newest v* tag behind HEAD other than this version\'s; with none, the CLI FAILS', async (t) => {
@@ -148,12 +160,15 @@ test('the base is the newest v* tag behind HEAD other than this version\'s; with
   assert.match(ok.stdout, /CHANGELOG HISTORY OK \(base v1\.1\.98; new: \[1\.1\.99\]\)/);
 });
 
-test('wiring: the full cut:win ends with the gate on the built asar; the checklist names it', () => {
-  const cut = read('scripts/cut-cmd-natives.cjs');
+test('wiring: cut:win and dist:win both end with the gate on the built asar, through run(; the checklist names it', () => {
+  const cut = nl(read('scripts/cut-cmd-natives.cjs'));
+  assert.ok(cut.includes("function gate() {\n  run(process.execPath, [\n    path.join('scripts', 'verify-changelog-history.cjs'),\n    path.join('dist', 'win-unpacked', 'resources', 'app.asar')\n  ]);\n}"),
+    'gate() runs the script on the built asar through run(, which exits on a non-zero rc');
+  const dist = cut.slice(cut.indexOf("} else if (process.argv.includes('--dist-only')) {"), cut.lastIndexOf('} else {'));
   const full = cut.slice(cut.lastIndexOf('} else {'));
-  assert.ok(full.includes("path.join('scripts', 'verify-changelog-history.cjs'),"), 'the full cut runs the gate');
-  assert.ok(full.includes("path.join('dist', 'win-unpacked', 'resources', 'app.asar')"), 'on the built asar');
-  assert.ok(full.indexOf('verify-changelog-history') > full.indexOf('check();'), 'after the build and the native checks');
+  for (const [name, branch] of [['--dist-only', dist], ['the full cut', full]]) {
+    assert.match(branch, /check\(\);\n\s*gate\(\);/, `${name} runs the gate right after the build and the native checks`);
+  }
   assert.match(read('docs/release-checklist.md'), /node scripts\/verify-changelog-history\.cjs[^]*CHANGELOG HISTORY OK/);
   assert.match(read('scripts/verify-changelog-history.cjs'), /'--exclude', `v\$\{version\}`/, 'a cut at its own tag compares with the release before');
 });
