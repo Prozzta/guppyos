@@ -4,6 +4,7 @@ import { PixelButton } from './PixelButton';
 import { Icon } from './Icon';
 import type { HarnessConfig } from '@/store/config';
 import { isPackProjectTheme, projectThemes, type ProjectThemeId } from '@shared/projectTheme';
+import { clearRosterCache } from '@shared/rosterCacheHome';
 
 export interface HivePickerProps {
   config: HarnessConfig;
@@ -46,6 +47,9 @@ export function HivePicker({ config, onOpenCurrent }: HivePickerProps) {
     setError(undefined);
     setBusy(path);
     try {
+      // A 'fresh' switch: this home's roster cache must not reach the next one
+      // (NEW-FLOOR-CLEAN-SLATE; the same helper as Settings' fresh home).
+      try { clearRosterCache(window.localStorage); } catch { /* no localStorage */ }
       window.localStorage.setItem(SKIP_KEY, '1');
       const res = await window.cth.changeHome(path, 'fresh', projectTheme);
       // Success never returns (the process relaunches). A return means an error.

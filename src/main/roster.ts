@@ -185,6 +185,31 @@ export class RosterStore {
     } catch { /* a reset must never fail on this */ }
   }
 
+  /**
+   * Keep a roster cache the renderer is about to clear as a backup.
+   *
+   * NEW-FLOOR-CLEAN-SLATE: the renderer's localStorage cache serves every home, and one written
+   * for another home (or before the cache was stamped) must not seed this floor. It is cleared at
+   * start-up, but a cache that holds entries is a roster, and a roster is never destroyed, only
+   * superseded: so it lands in this home's `roster-backups/` first. The reason is fixed by the
+   * caller in main, never by the renderer.
+   */
+  backupSnapshot(snap: unknown, reason: string): RosterWriteResult {
+    const home = this.home();
+    if (!home) return { ok: false, error: 'no harnessHome' };
+    if (!isSnapshot(snap)) return { ok: false, error: 'invalid snapshot' };
+    try {
+      const dir = rosterBackupDir(home);
+      mkdirSync(dir, { recursive: true });
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      this.backupSeq += 1;
+      writeFileSync(join(dir, `roster-${stamp}-${this.backupSeq}-${reason}.json`), JSON.stringify(snap, null, 2), 'utf8');
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
   /** Copy the current roster into the append-only backup folder. Never prunes:
    *  these files are the last line of defence, and a few KB per write is a price
    *  worth paying for that. */

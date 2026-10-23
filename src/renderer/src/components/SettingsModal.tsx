@@ -2,6 +2,7 @@ import { useState, useEffect, type CSSProperties } from 'react';
 import { useModelsForProvider, type HarnessConfig } from '@/store/config';
 import { ModelsRefreshPanel } from './ModelsRefreshPanel';
 import { useStore } from '@/store/store';
+import { clearRosterCache } from '@shared/rosterCacheHome';
 import {
   CLONE_NODE_BLURB,
   DEFAULT_TRIGGER_MODE,
@@ -742,8 +743,9 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
     setChangeBusy(true); setChangeErr('');
     // Moving copies the hive (incl. its .git), so the new home owns the
     // same renderer-side roster - keep localStorage. A 'fresh' home starts empty,
-    // so clear the renderer cache to match.
-    if (changeMode === 'fresh') clearLocalState();
+    // so clear the roster cache to match (the same helper as the hive picker's
+    // switch; theme and terminal settings are the user's, not the home's).
+    if (changeMode === 'fresh') { try { clearRosterCache(window.localStorage); } catch { /* no localStorage */ } }
     try {
       const res = await window.cth.changeHome(changeHome, changeMode);
       if (!res.ok) { setChangeErr(res.error ?? 'Could not change the home folder.'); setChangeBusy(false); }
