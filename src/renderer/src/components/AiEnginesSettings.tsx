@@ -114,12 +114,13 @@ export function AiEnginesSettings({ config }: { config: HarnessConfig }) {
   const saveBaseUrl = async (id: AgentProvider, value: string) => {
     const next = { ...baseUrls, [id]: value.trim() || undefined };
     setBaseUrls(next);
-    try { await window.cth.updateConfig({ providerBaseUrls: next }); } catch { /* noop */ }
+    // RENDERER-CONFIG-RMW: one entry; main merges it into the map on disk (undefined clears it).
+    try { await window.cth.updateConfig({ providerBaseUrls: { [id]: next[id] } }); } catch { /* noop */ }
   };
   const saveModel = async (id: AgentProvider, value: string) => {
     const next = { ...models, [id]: value.trim() || undefined };
     setModels(next);
-    try { await window.cth.updateConfig({ providerDefaultModels: next }); } catch { /* noop */ }
+    try { await window.cth.updateConfig({ providerDefaultModels: { [id]: next[id] } }); } catch { /* noop */ }
   };
 
   return (

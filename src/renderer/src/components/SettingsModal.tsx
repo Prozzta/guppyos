@@ -306,10 +306,11 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
     const vel = velocityCeiling.trim() === '' ? undefined : Number(velocityCeiling);
     const rep = brkRepeated.trim() === '' ? undefined : Number(brkRepeated);
     const storm = brkErrStorm.trim() === '' ? undefined : Number(brkErrStorm);
+    // RENDERER-CONFIG-RMW: only the five fields this form owns; main merges them into the
+    // breaker map on disk, so a field edited elsewhere since Settings opened is kept.
     await window.cth.updateConfig({
       costCapTokens: Number.isFinite(tokens as number) ? (tokens as number) : undefined,
       circuitBreaker: {
-        ...(breakerCfg.circuitBreaker ?? {}),
         enabled: brkEnabled,
         hardStop: brkHardStop,
         tokenVelocityPerMin: Number.isFinite(vel as number) ? (vel as number) : undefined,
@@ -389,6 +390,7 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
     const next = !kgEnabled;
     setKgEnabled(next);
     try {
+      // RENDERER-CONFIG-RMW: main merges this into the knowledgeGraph map, so rootPath survives.
       await window.cth.updateConfig({ knowledgeGraph: { enabled: next } });
       if (next) await refreshKgStatus();
     } catch { setKgEnabled(!next); }
@@ -417,11 +419,9 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
     const next = !autoCompactOn;
     setAutoCompactOn(next);
     try {
-      const cfg = await window.cth.getConfig();
-      const missions = (cfg.missions ?? []).map((m) =>
-        m.id === 'compact-maintenance' ? { ...m, enabled: next } : m
-      );
-      await window.cth.updateConfig({ missions });
+      // RENDERER-CONFIG-RMW: one mission's field, merged in main against the list on disk, so a
+      // Schedules-panel edit or a scheduler stamp made meanwhile is kept (and the panel reloads).
+      await window.cth.patchMission('compact-maintenance', { enabled: next });
     } catch { setAutoCompactOn(!next); }
   };
 

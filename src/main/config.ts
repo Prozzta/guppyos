@@ -1084,9 +1084,30 @@ function persistConfig(next: HarnessConfig): HarnessConfig {
   return next;
 }
 
+/** RENDERER-CONFIG-RMW: the map keys a renderer edits one entry at a time. writeConfig merges
+ *  them one level deep on the fresh read, so a caller holding a stale snapshot sends only the
+ *  entry it changed and never writes the other entries back (the second MCP toggle of a Settings
+ *  visit used to revert the first; a knowledge-graph toggle used to drop rootPath). An entry sent
+ *  as undefined is removed. A list key is still replaced whole: see registerRepo/patchMission. */
+export const CONFIG_MERGE_KEYS = ['mcpDefaults', 'providerBaseUrls', 'providerDefaultModels', 'knowledgeGraph', 'circuitBreaker'] as const;
+
+function mergeMapKeys(current: HarnessConfig, patch: Partial<HarnessConfig>, next: HarnessConfig): void {
+  for (const k of CONFIG_MERGE_KEYS) {
+    const p = patch[k] as Record<string, unknown> | undefined;
+    if (!p || typeof p !== 'object' || Array.isArray(p)) continue;
+    const merged: Record<string, unknown> = { ...((current[k] as Record<string, unknown> | undefined) ?? {}) };
+    for (const [e, v] of Object.entries(p)) {
+      if (v === undefined) delete merged[e];
+      else merged[e] = v;
+    }
+    (next as unknown as Record<string, unknown>)[k] = merged;
+  }
+}
+
 export function writeConfig(patch: Partial<HarnessConfig>): HarnessConfig {
   const current = readConfigCached(true);
   const next: HarnessConfig = { ...current, ...patch };
+  mergeMapKeys(current, patch, next);
   // CODEX-BLOAT-165 fix 2: 'off' or a number, clamped to 1000-10000. Anything else is refused
   // and changes nothing (the renderer reverts its control on the rejection).
   if (patch && Object.prototype.hasOwnProperty.call(patch, 'codexToolOutputTokenLimit')) {
@@ -1165,6 +1186,46 @@ export function setAgentTokenCap(agentId: unknown, tokenCap: unknown): HarnessCo
     ...current,
     agentTokenCaps
   });
+}
+
+function repoKey(repo: unknown): string {
+  if (typeof repo !== 'string' || !repo.trim()) throw new Error('invalid repo path');
+  return expandTilde(repo.trim());
+}
+
+/** RENDERER-CONFIG-RMW: one project quick-pick in (deduped to the front, or the back) against
+ *  the latest list on disk. The Add Agent modal used to send its whole mount-time list back,
+ *  which erased any repo registered elsewhere meanwhile. writeConfig's expandTilde + dedupe
+ *  still applies to the list it is handed. */
+export function registerRepo(repo: unknown, front: boolean = true): HarnessConfig {
+  const p = repoKey(repo);
+  const rest = (readConfigForWrite().registeredRepos ?? []).filter((r) => expandTilde(r) !== p);
+  return writeConfig({ registeredRepos: front ? [p, ...rest] : [...rest, p] });
+}
+
+/** One project quick-pick out, against the latest list on disk; the folder itself is untouched.
+ *  Entries are compared normalised, so a hand-written `C:/x` or `~/x` entry matches its picked form. */
+export function unregisterRepo(repo: unknown): HarnessConfig {
+  const p = repoKey(repo);
+  return writeConfig({ registeredRepos: (readConfigForWrite().registeredRepos ?? []).filter((r) => expandTilde(r) !== p) });
+}
+
+/** The scheduler's own mission fields (and the key): a renderer patch never sets them, exactly as
+ *  missions:save keeps them from the persisted record. */
+const MISSION_SCHEDULER_FIELDS = ['id', 'lastFiredAt', 'lastDeltaFingerprint', 'lastDispatchAt'] as const;
+
+/** RENDERER-CONFIG-RMW: one mission's fields against the latest list on disk. The Settings
+ *  auto-compact toggle and the Schedules panel used to each send a whole list built from their
+ *  own copy, so one surface's `enabled` flip was undone by the other's next save, and a scheduler
+ *  stamp landing between the renderer's read and its write was lost. Throws for an unknown id,
+ *  so the caller's control reverts instead of a silent no-op. */
+export function patchMission(id: unknown, fields: unknown): HarnessConfig {
+  if (typeof id !== 'string' || !id || !fields || typeof fields !== 'object' || Array.isArray(fields)) throw new Error('invalid mission patch');
+  const own = { ...(fields as Record<string, unknown>) };
+  for (const k of MISSION_SCHEDULER_FIELDS) delete own[k];
+  const current = readConfigForWrite().missions ?? [];
+  if (!current.some((m) => m.id === id)) throw new Error(`unknown mission ${id}`);
+  return writeConfig({ missions: current.map((m) => (m.id === id ? { ...m, ...own } as ScheduledMission : m)) });
 }
 
 /** Set one agent's Monitor line (Budget / 5H / Weekly) against the latest config on disk.

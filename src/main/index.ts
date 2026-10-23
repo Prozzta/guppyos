@@ -62,7 +62,7 @@ import { initAutoUpdater, abortPendingRestart } from './updater';
 import { RealtimeFloorWatcher } from './realtimeFloorWatcher';
 import { ProviderModelStore, defaultAdapters } from './providerModels';
 import {
-  readConfig, readConfigForWrite, writeConfig, pruneRetiredConfigKeys, setAgentTokenCap, setProjectThemeForHome, resolveProjectThemeForHome, setAgentUsageDisplay, setCapacityDisplayThreshold, setGraphicsMode, resetConfig, ensureHarnessHome, homeHasNoProject, ensureClaudePermissionsAccepted,
+  readConfig, readConfigForWrite, writeConfig, pruneRetiredConfigKeys, setAgentTokenCap, registerRepo, unregisterRepo, patchMission, setProjectThemeForHome, resolveProjectThemeForHome, setAgentUsageDisplay, setCapacityDisplayThreshold, setGraphicsMode, resetConfig, ensureHarnessHome, homeHasNoProject, ensureClaudePermissionsAccepted,
   modelForHiveSpawn, takeClearedDefaultModel, configIntegrityIssue, OPS_STANDUP_MISSION, HEARTBEAT_MISSION, COMPACT_MAINTENANCE_MISSION, type HarnessConfig, type ScheduledMission
 } from './config';
 import { effectiveModel, modelFlagValue, resolveSpawnArgs } from '../shared/modelPin';
@@ -5685,6 +5685,10 @@ ipcMain.handle('config:update', (_evt, patch: Partial<HarnessConfig>) => {
 ipcMain.handle('config:setAgentTokenCap', (_evt, agentId: unknown, tokenCap: unknown) =>
   setAgentTokenCap(agentId, tokenCap)
 );
+// RENDERER-CONFIG-RMW: one project quick-pick in or out, merged in main against the list on disk
+// (the modal's own list is a mount-time snapshot).
+ipcMain.handle('config:registerRepo', (_evt, repo: unknown, front: unknown) => registerRepo(repo, front !== false));
+ipcMain.handle('config:unregisterRepo', (_evt, repo: unknown) => unregisterRepo(repo));
 /** Renderer config is a snapshot. Keep the project-map read/merge/write in main
  *  so choices made by two windows cannot erase each other. */
 ipcMain.handle('config:setProjectTheme', (_evt, theme: unknown) => chooseProjectTheme(theme));
@@ -7083,6 +7087,14 @@ ipcMain.handle('missions:save', (_evt, missions) => {
   });
   writeConfig({ missions: merged });
   syncMissions();
+  return { ok: true };
+});
+// RENDERER-CONFIG-RMW: one mission's fields, merged in main against the list on disk (the
+// Settings auto-compact toggle, a Schedules row edit); the window reloads on missions:updated.
+ipcMain.handle('missions:patch', (_evt, id: unknown, fields: unknown) => {
+  patchMission(id, fields);
+  syncMissions();
+  try { liveWebContents()?.send('missions:updated'); } catch { /* window gone */ }
   return { ok: true };
 });
 /** TE0's force path: run a mission NOW, past the delta gate.

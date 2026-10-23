@@ -28,16 +28,19 @@ const labelStyle: React.CSSProperties = {
 
 export function McpDefaultsSettings({ config }: McpDefaultsSettingsProps) {
   const [note, setNote] = useState('');
+  // RENDERER-CONFIG-RMW: `config` is the Settings-open snapshot and never moves. The map on screen
+  // mirrors what main saved, so the second toggle of a visit builds on the first.
+  const [defaults, setDefaults] = useState<NonNullable<HarnessConfig['mcpDefaults']>>(config.mcpDefaults ?? {});
 
   const enabledFor = (id: string): boolean =>
-    config.mcpDefaults?.[id]?.enabled ?? MCP_CATALOG.find((e) => e.id === id)?.defaultEnabled ?? false;
+    defaults[id]?.enabled ?? MCP_CATALOG.find((e) => e.id === id)?.defaultEnabled ?? false;
 
   const toggle = async (id: string) => {
     const next = !enabledFor(id);
     try {
-      await window.cth.updateConfig({
-        mcpDefaults: { ...(config.mcpDefaults ?? {}), [id]: { enabled: next } }
-      });
+      // One entry only: main merges it into the latest map on disk (writeConfig's map keys).
+      const saved = await window.cth.updateConfig({ mcpDefaults: { [id]: { enabled: next } } });
+      setDefaults(saved.mcpDefaults ?? {});
       setNote(`${id}: ${next ? 'enabled' : 'disabled'}`);
       setTimeout(() => setNote(''), 1800);
     } catch {

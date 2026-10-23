@@ -320,7 +320,9 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
     setRepos(next);
     setCwd(p);
     try {
-      const updated = await window.cth.updateConfig({ registeredRepos: next });
+      // RENDERER-CONFIG-RMW: one repo in, merged in main against the list on disk (`repos` is a
+      // mount-time snapshot, so a whole list from it erased repos registered meanwhile).
+      const updated = await window.cth.registerRepo(p);
       // Main expands `~` when it persists registeredRepos, so adopt the stored
       // (absolute) list — otherwise a typed "~/dev/foo" stays literal in this
       // modal's state and rides along into the spawn.
@@ -340,7 +342,7 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
     const next = repos.filter((r) => r !== path);
     setRepos(next);
     try {
-      const updated = await window.cth.updateConfig({ registeredRepos: next });
+      const updated = await window.cth.unregisterRepo(path);
       setRepos(updated.registeredRepos ?? next);
       onConfigChange?.(updated);
     } catch { /* best-effort persist */ }
@@ -508,9 +510,10 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
     // registeredRepos quick-picks (the modal's default cwd) so back-to-back
     // hires land in the same project without re-picking.
     if (projectCwd && repos[0] !== projectCwd) {
-      const nextRepos = [projectCwd, ...repos.filter((r) => r !== projectCwd && r !== cwd)];
+      // RENDERER-CONFIG-RMW: promoted in main against the list on disk; main's expandTilde +
+      // dedupe covers the typed form of `cwd` the old filter dropped by hand.
       try {
-        const updated = await window.cth.updateConfig({ registeredRepos: nextRepos });
+        const updated = await window.cth.registerRepo(projectCwd);
         onConfigChange?.(updated);
       } catch { /* best-effort */ }
     }
