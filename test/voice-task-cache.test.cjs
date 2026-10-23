@@ -113,6 +113,27 @@ test('an edit made inside the window is kept by a voice update of another card',
   assert.deepEqual(disk().map((c) => [c.id, c.status, c.notes]), [['alpha-route', 'todo', 'by hand'], ['beta-sync', 'blocked', undefined]]);
 });
 
+test('an edit made inside the window to the SAME card is kept by a voice update and assign of it', async (t) => {
+  // Jim T5: a patch built from the cached card ({ ...card }) would write its old notes back.
+  const { hive, handEdit, disk } = floor(t, [card('alpha-route', { notes: 'old' }), card('beta-sync')]);
+  hive.tasks();
+  handEdit([card('alpha-route', { notes: 'by hand' }), card('beta-sync')]);
+  assert.equal(hive.tasks().tasks[0].notes, 'old', 'control: the cache still serves the old card');
+  const u = await say('update_task', { task: 'alpha route', status: 'doing' });
+  assert.equal(u.ok, true, u.spoken);
+  assert.deepEqual(disk()[0], card('alpha-route', { notes: 'by hand', status: 'doing' }), 'the update keeps the hand edit');
+  // A second window for the assign: the update's own write dropped the cache.
+  hive.tasks();
+  handEdit([card('alpha-route', { notes: 'by hand again', status: 'doing' }), card('beta-sync')]);
+  assert.equal(hive.tasks().tasks[0].notes, 'by hand', 'control: the cache serves the card before the second edit');
+  const a = await say('assign_task', { task: 'alpha route', assignee: 'jim-1' });
+  assert.equal(a.ok, true, a.spoken);
+  assert.deepEqual(disk().map((c) => [c.id, c.status, c.assignee, c.notes]), [
+    ['alpha-route', 'doing', 'jim-1', 'by hand again'],
+    ['beta-sync', 'todo', undefined, undefined]
+  ]);
+});
+
 test('a card deleted elsewhere inside the window is not brought back by a voice assign, update or delete', async (t) => {
   const { hive, handEdit, disk } = floor(t, [card('alpha-route'), card('beta-sync')]);
   hive.tasks();
