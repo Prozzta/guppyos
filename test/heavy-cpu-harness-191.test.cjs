@@ -9,7 +9,19 @@ const { join, relative } = require('node:path');
 
 const root = join(__dirname, '..');
 const CSC = join(process.env.WINDIR || 'C:\\Windows', 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe');
-test.after(() => rmSync(join(process.env.LOCALAPPDATA || tmpdir(), 'Munder Difflin'), { recursive: true, force: true }));
+const jailedEnv = (dir) => ({ ...process.env, LOCALAPPDATA: join(dir, 'localappdata') });
+
+test('SAFE CLEANUP: a plain node --test run leaves a LocalAppData sentinel intact', () => {
+  const sandbox = mkdtempSync(join(tmpdir(), 'hcpu-sentinel-'));
+  const sentinel = join(sandbox, 'Munder Difflin', 'Guppy', 'keep-me.txt');
+  try {
+    require('node:fs').mkdirSync(join(sandbox, 'Munder Difflin', 'Guppy'), { recursive: true });
+    writeFileSync(sentinel, 'keep');
+    const r = spawnSync(process.execPath, ['--test', '--test-name-pattern', '^never-match$', __filename], { encoding: 'utf8', windowsHide: true, env: { ...process.env, LOCALAPPDATA: sandbox } });
+    assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+    assert.equal(existsSync(sentinel), true, 'a direct test run must not sweep LocalAppData');
+  } finally { rmSync(sandbox, { recursive: true, force: true }); }
+});
 
 function serveChannel(stdout, write) {
   let buf = '';
@@ -69,7 +81,8 @@ test('REGRESSIONS: cmd receives a child script path, and M10 normalises CPU core
   assert.match(source, /writeFileSync\(childPath, RECOVERY_CHILD\)/, 'the multi-line recovery program is materialised as a script');
   assert.match(source, /process\.execPath, childPath\]/, 'cmd join receives the script path, not a multi-line -e argument');
   assert.match(source, /const processors = availableParallelism\(\)/, 'M10 saturates the processors available to this process');
-  assert.match(source, /const ratio = \(r\) => r\.cpu \/ r\.wall \/ processors/, 'M10 reports core-seconds as a fraction of available capacity');
+  assert.match(source, /const capRate = Math\.max\(100, Math\.floor\(open\.cpu \/ open\.wall \/ processors \* 5000\)\)/, 'M10 caps below the measured open ceiling');
+  assert.match(source, /open\.work \/ capped\.work >= 1\.5/, 'M10 proves the cap changes completed work');
 });
 
 test('LIVE: a fresh cap-off job creates and joins, then cap on/off/on applies to the held job (M1/M8/M9)',
@@ -81,14 +94,14 @@ test('LIVE: a fresh cap-off job creates and joins, then cap on/off/on applies to
       const exe = join(dir, 'guppy-heavyjob.exe');
       const compiled = spawnSync(CSC, ['-nologo', '-O', `-out:${exe}`, join(root, 'resources', 'heavyjob', 'guppy-heavyjob.cs')], { encoding: 'utf8', windowsHide: true });
       assert.equal(compiled.status, 0, `csc: ${compiled.stdout}${compiled.stderr}`);
-      serve = spawn(exe, ['serve'], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
+      serve = spawn(exe, ['serve'], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true, env: jailedEnv(dir) });
       const ask = serveChannel(serve.stdout, (line) => serve.stdin.write(line));
       const request = async (line) => JSON.parse(await ask(line));
       const id = `rate-${process.pid}-${Date.now().toString(36)}`;
       const offId = `${id}-off`;
       assert.deepEqual(await request(`create ${offId} 0 0`), { ok: true }, 'fresh cap-off must not call class 15 with flags zero');
       assert.deepEqual(await request(`query ${offId}`), { ok: true, background: false, cap: false, rate: 0, affinity: null });
-      const joinedOff = spawnSync(exe, ['join', offId, '0', '0'], { encoding: 'utf8', windowsHide: true });
+      const joinedOff = spawnSync(exe, ['join', offId, '0', '0'], { encoding: 'utf8', windowsHide: true, env: jailedEnv(dir) });
       assert.equal(joinedOff.status, 0, `fresh cap-off join: ${joinedOff.stdout}${joinedOff.stderr}`);
       assert.deepEqual(await request(`close ${offId}`), { ok: true });
       assert.deepEqual(await request(`create ${id} 0 1`), { ok: true });
@@ -119,7 +132,7 @@ async function renderedJob(exe, ask, dir, id, cap, { flip = false } = {}) {
   assert.deepEqual(await ask(`create ${id} 0 ${cap}`), { ok: true });
   const childPath = join(dir, 'child.cjs');
   writeFileSync(childPath, RECOVERY_CHILD);
-  const child = spawn(exe, ['join', id, '0', `${cap};`, process.execPath, childPath], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(exe, ['join', id, '0', `${cap};`, process.execPath, childPath], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: jailedEnv(dir) });
   let out = ''; let err = '';
   child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
   child.stdout.on('data', (data) => { out += data; }); child.stderr.on('data', (data) => { err += data; });
@@ -149,7 +162,7 @@ test('RENDERED: a real App scenario starts inside an initially capped job (MUST-
       const exe = join(dir, 'guppy-heavyjob.exe');
       const compiled = spawnSync(CSC, ['-nologo', '-O', `-out:${exe}`, join(root, 'resources', 'heavyjob', 'guppy-heavyjob.cs')], { encoding: 'utf8', windowsHide: true });
       assert.equal(compiled.status, 0, `csc: ${compiled.stdout}${compiled.stderr}`);
-      serve = spawn(exe, ['serve'], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
+      serve = spawn(exe, ['serve'], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true, env: jailedEnv(dir) });
       const askLine = serveChannel(serve.stdout, (line) => serve.stdin.write(line));
       const ask = async (line) => JSON.parse(await askLine(line));
       await renderedJob(exe, ask, dir, `rendered-${process.pid}-${Date.now().toString(36)}`, 1);
@@ -164,7 +177,7 @@ test('RENDERED: cap on/off/on flips while a real App job is alive (MUST-1)',
       const exe = join(dir, 'guppy-heavyjob.exe');
       const compiled = spawnSync(CSC, ['-nologo', '-O', `-out:${exe}`, join(root, 'resources', 'heavyjob', 'guppy-heavyjob.cs')], { encoding: 'utf8', windowsHide: true });
       assert.equal(compiled.status, 0, `csc: ${compiled.stdout}${compiled.stderr}`);
-      serve = spawn(exe, ['serve'], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
+      serve = spawn(exe, ['serve'], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true, env: jailedEnv(dir) });
       const askLine = serveChannel(serve.stdout, (line) => serve.stdin.write(line));
       const ask = async (line) => JSON.parse(await askLine(line));
       await renderedJob(exe, ask, dir, `flip-${process.pid}-${Date.now().toString(36)}`, 1, { flip: true });
@@ -180,29 +193,28 @@ test('LIVE: all available busy threads get about half their available throughput
       const exe = join(dir, 'guppy-heavyjob.exe');
       const compiled = spawnSync(CSC, ['-nologo', '-O', `-out:${exe}`, join(root, 'resources', 'heavyjob', 'guppy-heavyjob.cs')], { encoding: 'utf8', windowsHide: true });
       assert.equal(compiled.status, 0, `csc: ${compiled.stdout}${compiled.stderr}`);
-      serve = spawn(exe, ['serve'], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
+      serve = spawn(exe, ['serve'], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true, env: jailedEnv(dir) });
       const askLine = serveChannel(serve.stdout, (line) => serve.stdin.write(line));
       const ask = async (line) => JSON.parse(await askLine(line));
       const worker = "const {parentPort,workerData}=require('node:worker_threads');let n=0;while(Date.now()<workerData){n++;}parentPort.postMessage(n)";
       const processors = availableParallelism();
-      const busy = `const {Worker}=require('node:worker_threads');const source=${JSON.stringify(worker)},end=Date.now()+2500,w=Date.now(),c=process.cpuUsage();Promise.all(Array.from({length:${processors}},()=>new Promise(r=>new Worker(source,{eval:true,workerData:end}).once('message',r)))).then(()=>{const u=process.cpuUsage(c);console.log(JSON.stringify({wall:Date.now()-w,cpu:(u.user+u.system)/1000}))})`;
-      const run = async (cap) => {
+      const busy = `const {Worker}=require('node:worker_threads');const source=${JSON.stringify(worker)},end=Date.now()+4000,w=Date.now(),c=process.cpuUsage();Promise.all(Array.from({length:${processors}},()=>new Promise(r=>new Worker(source,{eval:true,workerData:end}).once('message',r)))).then((counts)=>{const u=process.cpuUsage(c);console.log(JSON.stringify({wall:Date.now()-w,cpu:(u.user+u.system)/1000,work:counts.reduce((a,n)=>a+n,0)}))})`;
+      const run = async (cap, rate = 5000) => {
         const id = `rate-${process.pid}-${Date.now().toString(36)}-${cap}`;
-        assert.deepEqual(await ask(`create ${id} 0 ${cap}`), { ok: true });
-        const child = spawn(exe, ['join', id, '0', `${cap};`, process.execPath, '-e', busy], { encoding: 'utf8', windowsHide: true });
+        assert.deepEqual(await ask(`create ${id} 0 ${cap}${cap ? ` ${rate}` : ''}`), { ok: true });
+        const child = spawn(exe, ['join', id, '0', `${cap};`, process.execPath, '-e', busy], { encoding: 'utf8', windowsHide: true, env: jailedEnv(dir) });
         let out = ''; child.stdout.on('data', (d) => { out += d; });
         await new Promise((resolve) => child.once('exit', resolve));
         assert.deepEqual(await ask(`close ${id}`), { ok: true });
         return JSON.parse(out.trim());
       };
-      const capped = await run(1); const open = await run(0);
-      // CPU rate is a percentage of all processors available to the child.  cpu/wall is in
-      // cores, so normalise it by the same available-parallelism worker count.
-      const ratio = (r) => r.cpu / r.wall / processors;
-      assert.ok(ratio(capped) > 0.25 && ratio(capped) < 0.70, `cap throughput ${ratio(capped).toFixed(2)} (expected ~0.50): ${JSON.stringify(capped)}`);
-      // Hyperthreaded Windows hosts can report 32 logical processors while sustained JS work
-      // reaches roughly their 16 physical cores; the uncapped control must still exceed 45%.
-      assert.ok(ratio(open) > 0.45, `uncapped throughput ${ratio(open).toFixed(2)} (expected >0.45): ${JSON.stringify(open)}`);
+      await run(0); // warm the worker source before measuring either side of the comparison
+      const open = await run(0);
+      // Windows can constrain this tree to one processor group.  Measure that open ceiling, then
+      // set a hard cap below it; CPU time is diagnostic, completed work is the proof of throttling.
+      const capRate = Math.max(100, Math.floor(open.cpu / open.wall / processors * 5000));
+      const capped = await run(1, capRate);
+      assert.ok(open.work / capped.work >= 1.5, `cap did not reduce work: open=${JSON.stringify(open)} capped=${JSON.stringify(capped)} rate=${capRate}`);
     } finally {
       try { serve?.stdin.end(); } catch { /* gone */ }
       if (serve?.exitCode === null) await new Promise((resolve) => serve.once('exit', resolve));

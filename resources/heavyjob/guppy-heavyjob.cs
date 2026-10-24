@@ -119,7 +119,7 @@ static class HeavyJob
         return x;
     }
 
-    static void Apply(IntPtr job, bool background, bool cap)
+    static void Apply(IntPtr job, bool background, bool cap, uint cpuRate = CPU_RATE_50_PERCENT)
     {
         var x = Limits(background);
         if (!SetInformationJobObject(job, 9, ref x, Marshal.SizeOf(typeof(EXT_LIMIT))))
@@ -128,7 +128,7 @@ static class HeavyJob
         // nothing to clear until a cap was enabled; after a live cap-on -> cap-off change, clear
         // the rate explicitly so existing members are released from it.
         if (!cap && !CpuRateEnabled(job)) return;
-        var rate = new CPU_RATE { ControlFlags = cap ? CPU_RATE_ENABLE | CPU_RATE_HARD_CAP : 0, CpuRate = cap ? CPU_RATE_50_PERCENT : 0 };
+        var rate = new CPU_RATE { ControlFlags = cap ? CPU_RATE_ENABLE | CPU_RATE_HARD_CAP : 0, CpuRate = cap ? cpuRate : 0 };
         if (!SetInformationJobObject(job, 15, ref rate, Marshal.SizeOf(typeof(CPU_RATE))))
             throw new Exception("SetInformationJobObject CPU rate failed (" + Marshal.GetLastWin32Error() + ")");
     }
@@ -243,7 +243,8 @@ static class HeavyJob
 
     // A marker belongs to the shell, not one query.  It therefore lives in Guppy's local app-data
     // until a later helper observes that its pid+creation-time owner is dead.  Honor a process-local
-    // LOCALAPPDATA jail before falling back to the Windows known folder.
+    // LOCALAPPDATA jail before falling back to the Windows known folder. A descendant that changes
+    // LOCALAPPDATA cannot see its joined shell's marker and therefore fails open (reports uncapped).
     static string MarkerRoot()
     {
         string local = Environment.GetEnvironmentVariable("LOCALAPPDATA");
@@ -524,7 +525,7 @@ static class HeavyJob
             try
             {
                 IntPtr job;
-                if (w.Length == 4 && w[0] == "create")
+                if ((w.Length == 4 || w.Length == 5) && w[0] == "create")
                 {
                     string name = JobName(w[1]);
                     if (!jobs.TryGetValue(w[1], out job))
@@ -534,7 +535,9 @@ static class HeavyJob
                         jobs[w[1]] = job;
                         keys[w[1]] = Watch(port, job, w[1], ref next);
                     }
-                    Apply(job, w[2] == "1", w[3] == "1");
+                    uint cpuRate = w.Length == 5 ? uint.Parse(w[4]) : CPU_RATE_50_PERCENT;
+                    if (cpuRate == 0 || cpuRate > 10000) throw new Exception("bad CPU rate");
+                    Apply(job, w[2] == "1", w[3] == "1", cpuRate);
                     reply = "{\"ok\":true}";
                 }
                 else if (w.Length == 4 && w[0] == "set")

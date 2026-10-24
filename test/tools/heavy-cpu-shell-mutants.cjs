@@ -11,6 +11,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const os = require('node:os');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const TEST = 'test/heavy-cpu-options-191.test.cjs';
@@ -36,7 +37,8 @@ const MUTANTS = [
   ['H3 percent left for the second parse', CS, 'if (c == \'%\') { sb.Append("%GUPPY_HEAVYJOB_PCT%"); continue; }', '', LIVE],
 ];
 
-const run = () => spawnSync(process.execPath, ['--test', TEST], { cwd: ROOT, encoding: 'utf8', windowsHide: true, timeout: 600_000 });
+const local = fs.mkdtempSync(path.join(os.tmpdir(), 'hcpu-shell-mutant-'));
+const run = () => spawnSync(process.execPath, ['--test', TEST], { cwd: ROOT, encoding: 'utf8', windowsHide: true, timeout: 600_000, env: { ...process.env, LOCALAPPDATA: local } });
 if (run().status !== 0) {
   console.log(`BASELINE RED: ${TEST} fails unmutated, so no mutant proves anything.`);
   process.exit(2);
@@ -68,4 +70,5 @@ for (const [name, file, from, to, dies] of MUTANTS) {
   console.log(`${killed ? 'KILLED' : r.status !== 0 ? 'KILLED ELSEWHERE' : 'SURVIVED'} ${name}`);
 }
 console.log(bad ? `${bad} of ${MUTANTS.length} not killed at their named test` : `all ${MUTANTS.length} killed`);
+fs.rmSync(local, { recursive: true, force: true });
 process.exitCode = bad ? 1 : 0;

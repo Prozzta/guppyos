@@ -15,6 +15,9 @@ if (root && opt && String(process.env.NODE_TEST_CONTEXT || '').startsWith('child
   const path = require('path');
   process.env.NODE_OPTIONS = String(process.env.NODE_OPTIONS || '').replace(opt, '').trim();
   if (!process.env.NODE_OPTIONS) delete process.env.NODE_OPTIONS;
+  // Keep the root for tests that must prove cleanup is confined to this runner-created jail,
+  // while removing the runner control variables from child environments.
+  process.env.GUPPY_TEMP_JAIL_ROOT = root;
   delete process.env.GUPPY_TEMP_JAIL;
   delete process.env.GUPPY_TEMP_JAIL_OPT;
   // The real temp folder, for the caches that are shared on purpose and kept between runs

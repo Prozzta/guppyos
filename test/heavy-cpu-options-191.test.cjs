@@ -36,10 +36,29 @@ const C = loadTs('src/main/heavyCpu.ts');
 const HJ = loadTs('src/main/heavyJob.ts');
 const M = loadTs('src/main/codexHookMcp.ts');
 const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
-const localMarkerOwner = path.join(process.env.LOCALAPPDATA || os.tmpdir(), 'Munder Difflin');
-// Several live helper cases use the per-file LocalAppData jail.  Keep their marker lifetime
-// realistic within this file, then leave the runner's jail empty for its leak gate.
-test.after(() => fs.rmSync(localMarkerOwner, { recursive: true, force: true }));
+function removeJailedMarkers() {
+  const jail = process.env.GUPPY_TEMP_JAIL_ROOT;
+  const local = process.env.LOCALAPPDATA;
+  if (!jail || !local || !path.resolve(local).startsWith(`${path.resolve(jail)}${path.sep}`)) return;
+  const markerRoot = path.join(local, 'Munder Difflin', 'Guppy', 'heavyjob-markers');
+  fs.rmSync(markerRoot, { recursive: true, force: true });
+  for (const dir of [path.dirname(markerRoot), path.dirname(path.dirname(markerRoot))]) {
+    try { if (fs.readdirSync(dir).length === 0) fs.rmdirSync(dir); } catch { /* absent or not ours */ }
+  }
+}
+test.after(removeJailedMarkers);
+
+test('SAFE CLEANUP: a plain node --test options run leaves a LocalAppData sentinel intact', () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'hcpu-options-sentinel-'));
+  const sentinel = path.join(sandbox, 'Munder Difflin', 'Guppy', 'keep-me.txt');
+  try {
+    fs.mkdirSync(path.dirname(sentinel), { recursive: true });
+    fs.writeFileSync(sentinel, 'keep');
+    const r = require('node:child_process').spawnSync(process.execPath, ['--test', '--test-name-pattern', '^never-match$', __filename], { cwd: path.join(__dirname, '..'), encoding: 'utf8', windowsHide: true, env: { ...process.env, LOCALAPPDATA: sandbox } });
+    assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+    assert.equal(fs.existsSync(sentinel), true, 'a direct options test run must not sweep LocalAppData');
+  } finally { fs.rmSync(sandbox, { recursive: true, force: true }); }
+});
 
 test('the options: each independent; the hard cap defaults to exactly 50% (M1)', () => {
   assert.deepEqual(C.heavyCpuOptions({}), { background: false, cap: true });
@@ -74,7 +93,7 @@ test('the native helper pins hard-cap mode and the exact 50% CPU rate (M1)', () 
   assert.match(native, /CleanMarkers\(\)/, 'dead pid+creation-time breadcrumbs are cleaned');
   assert.match(native, /inJob \|\| \(child != GetCurrentProcessId\(\) && Created\(child\) == childCreated && ownerInJob\)/, 'a marker is accepted only for the caller or its verified in-job ancestor');
   assert.doesNotMatch(native, /SoleLiveMarkedJob/, 'no shared-folder newest-marker fallback may cap an unrelated caller');
-  assert.match(native, /var rate = new CPU_RATE \{ ControlFlags = cap \? CPU_RATE_ENABLE \| CPU_RATE_HARD_CAP : 0, CpuRate = cap \? CPU_RATE_50_PERCENT : 0 \}/);
+  assert.match(native, /var rate = new CPU_RATE \{ ControlFlags = cap \? CPU_RATE_ENABLE \| CPU_RATE_HARD_CAP : 0, CpuRate = cap \? cpuRate : 0 \}/);
   assert.doesNotMatch(native, /LIMIT_AFFINITY|SetProcessAffinityMask/);
   assert.match(native, /return \"\{\\\"background\\\":\" \+ \(background \? \"true\" : \"false\"\) \+ \",\\\"cap\\\":\" \+ \(cap \? \"true\" : \"false\"\) \+ \",\\\"rate\\\":\" \+ \(cap \? CPU_RATE_50_PERCENT : 0\) \+ \",\\\"affinity\\\":null\}\"/,
     'M1: capped queries must explicitly report no affinity limit');
@@ -366,9 +385,14 @@ test('LIVE Bash join keeps its marker for repeated, sibling and background self-
     const bash = path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Git', 'bin', 'bash.exe');
     if (!fs.existsSync(bash)) return;
     const id = `hcpu-b1-${process.pid}`;
+    const markerJail = fs.mkdtempSync(path.join(os.tmpdir(), 'hcpu-markers-'));
+    const env = { ...process.env, LOCALAPPDATA: markerJail };
+    const knownLocal = spawnSync('powershell.exe', ['-NoProfile', '-Command', '[Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)'], { encoding: 'utf8', windowsHide: true }).stdout.trim();
+    const knownRoot = path.join(knownLocal, 'Munder Difflin', 'Guppy', 'heavyjob-markers');
+    const knownBefore = fs.existsSync(knownRoot) ? fs.readdirSync(knownRoot).sort() : [];
     const quote = (s) => `'${s.replace(/'/g, "'\\\"'\\\"'")}'`;
     const expected = { background: false, cap: true, rate: 5000, affinity: null };
-    const serve = spawn(exe, ['serve'], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
+    const serve = spawn(exe, ['serve'], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true, env });
     let buffer = ''; const replies = [];
     serve.stdout.setEncoding('utf8');
     serve.stdout.on('data', (chunk) => {
@@ -385,7 +409,7 @@ test('LIVE Bash join keeps its marker for repeated, sibling and background self-
       const name = `${id}-${count}`;
       assert.deepEqual(await ask(`create ${name} 0 1`), { ok: true });
       try {
-        const r = spawnSync(bash, ['-lc', `${quote(exe)} join ${name} 0 1; ${line}`], { encoding: 'utf8', windowsHide: true });
+        const r = spawnSync(bash, ['-lc', `${quote(exe)} join ${name} 0 1; ${line}`], { encoding: 'utf8', windowsHide: true, env });
         assert.equal(r.status, 0, r.stderr);
         const rows = r.stdout.trim().split(/\r?\n/).filter(Boolean).map(JSON.parse);
         assert.equal(rows.length, count, r.stdout);
@@ -405,7 +429,7 @@ test('LIVE Bash join keeps its marker for repeated, sibling and background self-
       const program = queryFile
         ? `echo READY; sleep 1; ${quote(exe)} self-query > ${quote(queryFile)}`
         : 'echo READY; sleep 2';
-      return spawn(bash, ['-lc', `${quote(exe)} join ${name} 0 ${cap ? 1 : 0}; ${program}`], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      return spawn(bash, ['-lc', `${quote(exe)} join ${name} 0 ${cap ? 1 : 0}; ${program}`], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env });
     };
     try {
       // The same shell, two separately spawned Node processes, and a background command all find
@@ -421,12 +445,12 @@ test('LIVE Bash join keeps its marker for repeated, sibling and background self-
        assert.deepEqual(await ask(`create ${capName} 0 1`), { ok: true });
        assert.deepEqual(await ask(`create ${uncappedName} 0 0`), { ok: true });
         let capped; let uncapped;
-        const markerRoot = path.join(process.env.LOCALAPPDATA || os.tmpdir(), 'Munder Difflin', 'Guppy', 'heavyjob-markers');
+        const markerRoot = path.join(markerJail, 'Munder Difflin', 'Guppy', 'heavyjob-markers');
        try {
          const queryFile = path.join(process.env.TEMP || os.tmpdir(), `${capName}.json`);
           capped = heldShell(capName, true, queryFile); await waitReady(capped);
           assert.ok(fs.existsSync(markerRoot), 'the held native helper writes markers inside this file\'s jailed LocalAppData');
-         const unrelated = JSON.parse(spawnSync(exe, ['self-query'], { encoding: 'utf8', windowsHide: true }).stdout.trim());
+         const unrelated = JSON.parse(spawnSync(exe, ['self-query'], { encoding: 'utf8', windowsHide: true, env }).stdout.trim());
          assert.equal(unrelated.cap, false, 'an unrelated process cannot take another shell\'s capped marker');
          uncapped = heldShell(uncappedName, false, false); await waitReady(uncapped);
          await waitExit(capped);
@@ -443,7 +467,9 @@ test('LIVE Bash join keeps its marker for repeated, sibling and background self-
      } finally {
        try { serve.stdin.end(); } catch { /* gone */ }
        if (serve.exitCode === null) await new Promise((resolve) => serve.once('exit', resolve));
-       fs.rmSync(path.join(process.env.LOCALAPPDATA || os.tmpdir(), 'Munder Difflin'), { recursive: true, force: true });
+       const knownAfter = fs.existsSync(knownRoot) ? fs.readdirSync(knownRoot).sort() : [];
+       assert.deepEqual(knownAfter, knownBefore, 'a jailed join must not create markers under Environment.GetFolderPath(LocalApplicationData)');
+       fs.rmSync(markerJail, { recursive: true, force: true });
      }
   });
 

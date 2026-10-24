@@ -9,7 +9,8 @@ const source = path.join(root, 'test', 'heavy-cpu-harness-191.test.cjs');
 const original = fs.readFileSync(source, 'utf8');
 const mutants = [
   ['broken-child-path', 'process.execPath, childPath]', "process.execPath, join(dir, 'missing-child.cjs')]"],
-  ['wrong-capacity-normaliser', 'const ratio = (r) => r.cpu / r.wall / processors;', 'const ratio = (r) => r.cpu / r.wall;'],
+  ['wrong-capacity-normaliser', 'open.cpu / open.wall / processors * 5000', '5000'],
+  ['control-replaced-by-second-cap', 'const capped = await run(1, capRate);', 'const capped = await run(0);'],
 ];
 for (const [name, from, to] of mutants) {
   if (original.indexOf(from) < 0 || original.indexOf(from) !== original.lastIndexOf(from)) throw new Error(`${name}: anchor missing or ambiguous`);
