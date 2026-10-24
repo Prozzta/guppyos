@@ -347,3 +347,214 @@ export function setCodexTuiKeys(config: string, entries: Readonly<Record<string,
 export function setCodexFeatureFlags(config: string, entries: Record<string, boolean>): string {
   return setCodexRootTableKeys(config, 'features', entries);
 }
+
+/** TOML string for a path: literal unless the path holds a single quote. */
+function tomlPathString(v: string): string {
+  return v.includes("'") ? `"${v.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"` : `'${v}'`;
+}
+
+/**
+ * CODEX-MCP-ISOLATION: the seed's values that name the user's real ~/.codex are moved to the
+ * agent's own home, in every build (before this only MUNDER_DEV sanitised them). The Human's
+ * seed carries a node_repl MCP server whose env sets CODEX_HOME, NODE_REPL_TRUSTED_CODE_PATHS and
+ * NODE_REPL_TRUSTED_SERVICES to paths in ~/.codex, and the bundled marketplace source is under
+ * ~/.codex/.tmp, so every agent's helper read and trusted the user's profile.
+ *  - every value whose key is CODEX_HOME (bare, quoted or dotted; at the root, in a table or in
+ *    an inline table) becomes the agent home, whatever it held: an absent key would let the
+ *    helper fall back to the user's ~/.codex;
+ *  - any other path at or under the real ~/.codex (or `~/.codex`) keeps its subpath under the
+ *    agent home, in the slash style it was written in, doubled separators included (JSON held
+ *    in a string). Codex fills its own home's plugin cache and bundled marketplace, so the
+ *    mapped paths are where this agent's copies live.
+ * Paths OUTSIDE ~/.codex (the installed Codex runtime under AppData, ~/.cache) are the shared
+ * read-only runtime and are kept. Only single-line string VALUES are rewritten: table headers
+ * and keys, comments, multi-line strings (prose such as developer_instructions) and basic
+ * strings with escapes other than \\ and \" are copied as written, and so is every byte between
+ * tokens, so line endings are kept and a seed with nothing to rewrite comes back identical.
+ * A small scanner rather than a TOML library, for the same reason as the line transforms above:
+ * a round-trip would reformat the user's file. It never throws; text it cannot read is copied.
+ */
+export function isolateCodexHomePaths(
+  config: string,
+  opts: { userCodexHome: string; agentCodexHome: string; win32?: boolean },
+): { text: string; rewritten: number } {
+  const win32 = opts.win32 ?? process.platform === 'win32';
+  // Same length as the input, so an index into the folded form is an index into the original.
+  const fold = (s: string): string => win32
+    ? Array.from(s, (c) => { const l = c === '\\' ? '/' : c.toLowerCase(); return l.length === c.length ? l : c; }).join('')
+    : s;
+  const absRoot = fold(opts.userCodexHome).replace(/[\\/]+$/, '');
+  const agentFwd = opts.agentCodexHome.replace(/\\/g, '/');
+  // [folded root, separators doubled, may follow a path character]. A doubled root is the
+  // same path inside an escaped string (JSON in a literal); `~` only starts a path at a value
+  // or list boundary, never after a `/` (https://h/~/.codex is a URL path, not the profile).
+  const roots: Array<[string, boolean, boolean]> = [[absRoot, false, true], ['~/.codex', false, false]];
+  if (win32) roots.push([absRoot.replace(/\//g, '//'), true, true], ['~//.codex', true, false]);
+  let rewritten = 0;
+  const mapPath = (v: string): string => {
+    const f = fold(v);
+    let out = '';
+    let from = 0;
+    for (let i = 0; i < v.length; i++) {
+      const prev = i === 0 ? '' : f.charAt(i - 1);
+      const root = roots.find(([r, , afterPath]) => f.startsWith(r, i)
+        && /^(|[\\/;,\s])$/.test(f.charAt(i + r.length))
+        && !(prev && (afterPath ? /[A-Za-z0-9._-]/ : /[A-Za-z0-9._\-\\/:~]/).test(prev)));
+      if (!root) continue;
+      const hit = v.slice(i, i + root[0].length);
+      const fwd = hit.includes('/') && !hit.includes('\\');
+      let home = fwd ? agentFwd : opts.agentCodexHome;
+      if (root[1]) home = fwd ? home.replace(/\//g, '//') : home.replace(/\\/g, '\\\\');
+      out += v.slice(from, i) + home;
+      from = i + root[0].length;
+      i = from - 1;
+      rewritten++;
+    }
+    return out + v.slice(from);
+  };
+
+  const s = config;
+  let i = 0;
+  let out = '';
+  const copyTo = (j: number): void => { out += s.slice(i, j); i = j; };
+  const skipBlank = (newlines: boolean): void => {
+    let j = i;
+    for (;;) {
+      while (j < s.length && (s[j] === ' ' || s[j] === '\t' || (newlines && (s[j] === '\n' || s[j] === '\r')))) j++;
+      if (newlines && s[j] === '#') { while (j < s.length && s[j] !== '\n') j++; continue; }
+      break;
+    }
+    copyTo(j);
+  };
+  /** End index of the string token at i, or -1 when s[i] opens none. Multi-line too. */
+  const stringEnd = (at: number): number => {
+    const q = s[at];
+    if (q !== '"' && q !== "'") return -1;
+    const multi = s.startsWith(q.repeat(3), at);
+    let j = at + (multi ? 3 : 1);
+    while (j < s.length) {
+      if (q === '"' && s[j] === '\\') { j += 2; continue; }
+      if (!multi && (s[j] === '\n' || s[j] === '\r')) return j;   // unterminated: stop at the line end
+      if (multi ? s.startsWith(q.repeat(3), j) : s[j] === q) {
+        // A body ending in one or two quotes closes early here; the quotes left over read as an
+        // empty string, which is copied, so the output is the same.
+        return j + (multi ? 3 : 1);
+      }
+      j++;
+    }
+    return s.length;
+  };
+  /** The decoded text of a single-line key token, for matching CODEX_HOME. */
+  const keyText = (tok: string): string => tok.startsWith("'") ? tok.slice(1, -1)
+    : tok.startsWith('"') ? tok.slice(1, -1).replace(/\\(["\\])/g, '$1') : tok;
+  /** A dotted key; returns the decoded last part. Copied as written. */
+  const key = (): string => {
+    let last = '';
+    for (;;) {
+      skipBlank(false);
+      const e = stringEnd(i);
+      if (e > 0) { last = keyText(s.slice(i, e)); copyTo(e); }
+      else {
+        let j = i;
+        while (j < s.length && /[A-Za-z0-9_-]/.test(s[j])) j++;
+        if (j === i) return last;
+        last = s.slice(i, j); copyTo(j);
+      }
+      skipBlank(false);
+      if (s[i] !== '.') return last;
+      copyTo(i + 1);
+    }
+  };
+  const stringValue = (e: number, isHome: boolean): void => {
+    const tok = s.slice(i, e);
+    const q = tok[0];
+    const triple = tok.startsWith(q.repeat(3));
+    // A single-line triple-quoted CODEX_HOME is still a home; a multi-line one is prose.
+    const closed = triple ? tok.length >= 6 && tok.endsWith(q.repeat(3)) && !/[\r\n]/.test(tok)
+      : tok.length >= 2 && tok[tok.length - 1] === q;
+    if (!closed || (triple && !isHome)) { copyTo(e); return; }
+    let next = tok;
+    if (isHome) {
+      next = tomlPathString(opts.agentCodexHome);
+      if (next !== tok) rewritten++;
+    } else if (q === "'") {
+      const v = mapPath(tok.slice(1, -1));
+      if (v !== tok.slice(1, -1)) next = tomlPathString(v);
+    } else {
+      const raw = tok.slice(1, -1);
+      if (!raw.replace(/\\["\\]/g, '').includes('\\')) {
+        const plain = raw.replace(/\\(["\\])/g, '$1');
+        const v = mapPath(plain);
+        if (v !== plain) next = `"${v.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+      }
+    }
+    out += next;
+    i = e;
+  };
+  /** One value with everything nested in it. A loop over an explicit stack of open arrays and
+   *  inline tables, not recursion, so no depth of nesting can overflow the stack. */
+  const value = (isHome: boolean): void => {
+    const open: string[] = [];   // the closer of each array or inline table still open
+    let home = isHome;
+    for (;;) {
+      // A string, a bare scalar, or the opener of an array or inline table.
+      skipBlank(false);
+      const at = i;
+      const e = stringEnd(i);
+      if (e > 0) stringValue(e, home);
+      else if (s[i] === '[' || s[i] === '{') { open.push(s[i] === '[' ? ']' : '}'); copyTo(i + 1); }
+      else {
+        let j = i;
+        while (j < s.length && !/[,\]}#\s]/.test(s[j])) j++;
+        copyTo(j);
+        // An array entry this scanner cannot read: step over one character.
+        if (i === at && open[open.length - 1] === ']') copyTo(i + 1);
+      }
+      home = false;
+      // Then on to the next value, closing what ends on the way.
+      for (;;) {
+        const closer = open[open.length - 1];
+        if (closer === undefined) return;
+        if (closer === ']') {
+          skipBlank(true);
+          if (i >= s.length) return;
+          if (s[i] === ']') { copyTo(i + 1); open.pop(); continue; }
+          if (s[i] === ',') { copyTo(i + 1); continue; }
+          break;
+        }
+        skipBlank(false);
+        if (i >= s.length || s[i] === '\n' || s[i] === '\r') { open.pop(); continue; }
+        if (s[i] === '}') { copyTo(i + 1); open.pop(); continue; }
+        if (s[i] === ',') { copyTo(i + 1); continue; }
+        const kat = i;
+        const k = key();
+        skipBlank(false);
+        if (s[i] === '=') { copyTo(i + 1); home = k === 'CODEX_HOME'; break; }
+        if (i === kat) copyTo(i + 1);
+      }
+    }
+  };
+  // A byte-order mark is not a key: copy it, so line 1 is still read.
+  if (s.charCodeAt(0) === 0xfeff) copyTo(1);
+  while (i < s.length) {
+    skipBlank(true);
+    if (i >= s.length) break;
+    // A table header is reached only here, at the top level (never inside an open array or a
+    // string). `[` starts no key, so the whole header line, quoted parts holding `]` included,
+    // goes to the copy below as written.
+    const at = i;
+    const k = key();
+    skipBlank(false);
+    if (s[i] === '=') { copyTo(i + 1); value(k === 'CODEX_HOME'); }
+    if (i === at) copyTo(i + 1);
+    // The rest of the line (a comment, or text this scanner cannot read) is copied as written.
+    let j = i;
+    while (j < s.length && s[j] !== '\n') {
+      if (s[j] === '#') { while (j < s.length && s[j] !== '\n') j++; break; }
+      const e = stringEnd(j);
+      j = e > 0 ? e : j + 1;
+    }
+    copyTo(j);
+  }
+  return { text: out, rewritten };
+}

@@ -37,7 +37,7 @@ import { rolloverMemory, seedPinnedSection, pinnedOverCapDue, PINNED_SEED, PINNE
 import { shouldSeedCodexTrust, withAgentTrust, codexProjectLayerRiskKeys } from './codexTrustSeed';
 import { codexProjectLayers, decideCodexLayers, type CodexLayerNotice, type CodexLayerReport } from './codexProjectLayers';
 import { AGY_OWN_KEY, GROK_OWN_FILE, findingsText, foreignHookFiles, scanCodexToml, scanForeignHookFile, stripCodexModelHooks, stripHookMap, stripSettingsHooks, type ForeignHookFile, type HookFinding, type HookFs, type HookProvider } from './hookTypeGuard';
-import { CODEX_TUI_KEYS, codexAutoCompactTokenLimitForAgent, disableCodexPlugins, isCodexAutoCompactTokenLimitOverride, codexTopLevelString, setCodexFeatureFlags, setCodexModel, setCodexReasoningEffort, setCodexRootTableKeys, setCodexTuiKeys } from './codexAgentConfig';
+import { CODEX_TUI_KEYS, codexAutoCompactTokenLimitForAgent, disableCodexPlugins, isCodexAutoCompactTokenLimitOverride, isolateCodexHomePaths, codexTopLevelString, setCodexFeatureFlags, setCodexModel, setCodexReasoningEffort, setCodexRootTableKeys, setCodexTuiKeys } from './codexAgentConfig';
 import { applyLiveModel, CODEX_EFFORT_KEY, normEffort, resolveSpawnModel, type ModelPinFields } from '../shared/modelPin';
 import { codexToolOutputLimitForConfig } from '../shared/codexToolOutputLimit';
 import { claudePromptTrimFor, withSkillOverrides } from '../shared/claudePromptTrim';
@@ -5164,6 +5164,14 @@ export class HiveManager {
       const shim = this.shimPath();
       let config = existsSync(join(userHome, 'config.toml'))
         ? readFileSync(join(userHome, 'config.toml'), 'utf8') : '';
+      // CODEX-MCP-ISOLATION: in EVERY build, no value in this copy may name the user's real
+      // ~/.codex. The seed's node_repl MCP env (CODEX_HOME, trusted code paths and services) and
+      // the bundled marketplace source point there; they move to this agent's own home.
+      if (config) {
+        const iso = isolateCodexHomePaths(config, { userCodexHome: userHome, agentCodexHome: home });
+        config = iso.text;
+        if (iso.rewritten) this.appendLog({ kind: 'codex-home-isolate', agentId: agentId ?? null, rewritten: iso.rewritten });
+      }
       // MUNDER_DEV=1: the global file carries a nested CODEX_HOME (pointing at
       // ~/.codex) and the user's global project-trust list — strip both so the
       // DEV agent's home inherits settings but not Stable/user identity.
