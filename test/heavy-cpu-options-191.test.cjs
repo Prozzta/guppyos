@@ -36,6 +36,10 @@ const C = loadTs('src/main/heavyCpu.ts');
 const HJ = loadTs('src/main/heavyJob.ts');
 const M = loadTs('src/main/codexHookMcp.ts');
 const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
+const localMarkerOwner = path.join(process.env.LOCALAPPDATA || os.tmpdir(), 'Munder Difflin');
+// Several live helper cases use the per-file LocalAppData jail.  Keep their marker lifetime
+// realistic within this file, then leave the runner's jail empty for its leak gate.
+test.after(() => fs.rmSync(localMarkerOwner, { recursive: true, force: true }));
 
 test('the options: each independent; the hard cap defaults to exactly 50% (M1)', () => {
   assert.deepEqual(C.heavyCpuOptions({}), { background: false, cap: true });
@@ -65,6 +69,7 @@ test('the native helper pins hard-cap mode and the exact 50% CPU rate (M1)', () 
   assert.match(native, /IsProcessInJob\(proc, job, out inJob\)/, 'a marker is trusted only while its process remains in the named job');
   assert.match(native, /created == 0 \|\| created > childCreated/, 'ancestor walk rejects a parent created after its child');
   assert.match(native, /MarkerRoot\(\).*?heavyjob-markers/s, 'breadcrumbs stay in a Guppy-owned folder');
+  assert.match(native, /GetEnvironmentVariable\("LOCALAPPDATA"\)/, 'native markers honor the runner\'s LocalAppData jail');
   assert.match(native, /SpecialFolder\.LocalApplicationData/, 'the runner redirects LocalAppData for each test file');
   assert.match(native, /CleanMarkers\(\)/, 'dead pid+creation-time breadcrumbs are cleaned');
   assert.match(native, /inJob \|\| \(child != GetCurrentProcessId\(\) && Created\(child\) == childCreated && ownerInJob\)/, 'a marker is accepted only for the caller or its verified in-job ancestor');
@@ -415,10 +420,12 @@ test('LIVE Bash join keeps its marker for repeated, sibling and background self-
        const capName = `${id}-live-cap`; const uncappedName = `${id}-live-uncapped`;
        assert.deepEqual(await ask(`create ${capName} 0 1`), { ok: true });
        assert.deepEqual(await ask(`create ${uncappedName} 0 0`), { ok: true });
-       let capped; let uncapped;
+        let capped; let uncapped;
+        const markerRoot = path.join(process.env.LOCALAPPDATA || os.tmpdir(), 'Munder Difflin', 'Guppy', 'heavyjob-markers');
        try {
          const queryFile = path.join(process.env.TEMP || os.tmpdir(), `${capName}.json`);
-         capped = heldShell(capName, true, queryFile); await waitReady(capped);
+          capped = heldShell(capName, true, queryFile); await waitReady(capped);
+          assert.ok(fs.existsSync(markerRoot), 'the held native helper writes markers inside this file\'s jailed LocalAppData');
          const unrelated = JSON.parse(spawnSync(exe, ['self-query'], { encoding: 'utf8', windowsHide: true }).stdout.trim());
          assert.equal(unrelated.cap, false, 'an unrelated process cannot take another shell\'s capped marker');
          uncapped = heldShell(uncappedName, false, false); await waitReady(uncapped);
@@ -433,12 +440,11 @@ test('LIVE Bash join keeps its marker for repeated, sibling and background self-
          assert.deepEqual(await ask(`close ${capName}`), { ok: true });
          assert.deepEqual(await ask(`close ${uncappedName}`), { ok: true });
        }
-       const root = path.join(process.env.LOCALAPPDATA || os.tmpdir(), 'Munder Difflin', 'Guppy', 'heavyjob-markers');
-       assert.ok(!fs.existsSync(root), 'marker bookkeeping is removed with the jailed LocalAppData directory');
-    } finally {
-      try { serve.stdin.end(); } catch { /* gone */ }
-      if (serve.exitCode === null) await new Promise((resolve) => serve.once('exit', resolve));
-    }
+     } finally {
+       try { serve.stdin.end(); } catch { /* gone */ }
+       if (serve.exitCode === null) await new Promise((resolve) => serve.once('exit', resolve));
+       fs.rmSync(path.join(process.env.LOCALAPPDATA || os.tmpdir(), 'Munder Difflin'), { recursive: true, force: true });
+     }
   });
 
 test('LIVE cmd: the `&` join line leaves the command exactly as cmd runs it (output and exit code), and its processes are in the job',

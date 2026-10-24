@@ -242,9 +242,14 @@ static class HeavyJob
     }
 
     // A marker belongs to the shell, not one query.  It therefore lives in Guppy's local app-data
-    // (never the caller's TEMP jail) until a later helper observes that its pid+creation-time owner
-    // is dead.  This keeps it available to foreground, background and sibling descendants.
-    static string MarkerRoot() { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Munder Difflin", "Guppy", "heavyjob-markers"); }
+    // until a later helper observes that its pid+creation-time owner is dead.  Honor a process-local
+    // LOCALAPPDATA jail before falling back to the Windows known folder.
+    static string MarkerRoot()
+    {
+        string local = Environment.GetEnvironmentVariable("LOCALAPPDATA");
+        if (string.IsNullOrEmpty(local)) local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        return Path.Combine(local, "Munder Difflin", "Guppy", "heavyjob-markers");
+    }
     static string CapMarker(int pid, long created) { return Path.Combine(MarkerRoot(), "guppy-heavy-job-" + pid + "-" + created + ".marker"); }
 
     static long MarkerCreatedFor(int pid)
