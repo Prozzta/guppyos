@@ -52,7 +52,7 @@ test('ordinal: case-folded code units first, raw code units as the tie-break', (
 
 test('wake-up rooms: memory first, then ordinal (notes-x before notes_x)', () => {
   const e = (room) => ({ wing: 'a1', room, source: `agents/a1/${room}.md`, content: `invented ${room}` });
-  const text = formatWakeUp(null, [e('notes_x'), e('notes-x'), e('memory'), e('b')]);
+  const text = formatWakeUp(null, [e('notes_x'), e('notes-x'), e('memory'), e('b')], null, { full: true });
   const order = [...text.matchAll(/^\[([^\]]+)\]$/gm)].map((m) => m[1]);
   assert.deepEqual(order, ['memory', 'b', 'notes-x', 'notes_x']);
 });

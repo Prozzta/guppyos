@@ -209,19 +209,19 @@ const ENTRIES = [{ wing: 'x', room: 'memory', source: 'agents/x/memory.md', cont
 
 test('wake-up: the section is printed verbatim as its own L0.5 block between IDENTITY and L1; L1 is unchanged', () => {
   const lessons = '1. Cite only URLs you fetched and opened.\n   - quote the page, with its link\n2. Commit only under the repo identity.';
-  const withPin = F.formatWakeUp('You are X.', ENTRIES, `## How I work (standing lessons)\n${lessons}\n\n`);
-  const without = F.formatWakeUp('You are X.', ENTRIES);
+  const withPin = F.formatWakeUp('You are X.', ENTRIES, `## How I work (standing lessons)\n${lessons}\n\n`, { full: true });
+  const without = F.formatWakeUp('You are X.', ENTRIES, null, { full: true });
   assert.ok(withPin.includes(`## L0 — IDENTITY\nYou are X.\n\n## L0.5 — HOW I WORK (standing lessons)\n${lessons}\n\n## L1 — ESSENTIAL STORY\n`), withPin);
   const l1 = (t) => t.slice(t.indexOf('## L1'));
   assert.equal(l1(withPin), l1(without), 'the L1 part is identical');
   assert.equal(F.WAKE_MAX_CHARS, 3200, 'the L1 budget is unchanged');
   assert.doesNotMatch(F.formatWakeUp('You are X.', ENTRIES, M.PINNED_SEED.replace(/\n_.*_\n$/, '\n')), /L0\.5/, 'an empty section prints no block');
-  assert.equal(F.formatWakeUp('You are X.', ENTRIES, ''), without);
+  assert.equal(F.formatWakeUp('You are X.', ENTRIES, '', { full: true }), without);
 });
 
 test('wake-up: the block has its own 6 KB budget: the first 6 KB (at a line break) plus a "read the rest in memory.md" note', () => {
   const big = Array.from({ length: 100 }, (_, i) => `${i + 1}. ${'w'.repeat(95)}`).join('\n'); // ~10 KB
-  const out = F.formatWakeUp('You are X.', ENTRIES, `## How I work (standing lessons)\n${big}\n`);
+  const out = F.formatWakeUp('You are X.', ENTRIES, `## How I work (standing lessons)\n${big}\n`, { full: true });
   const block = out.slice(out.indexOf('## L0.5'), out.indexOf('## L1'));
   const body = block.split('\n').slice(1).join('\n');
   assert.match(block, /… \(over 6 KB: read the rest in memory\.md\)\n\n$/);
@@ -240,9 +240,9 @@ test('wake-up (engine): the caller wing\'s memory.md section is read from the fi
   const store = { setMeta() {}, sourceShas: () => new Map(), removeSource() {}, planDiff: () => ({ keep: [], add: [], remove: [] }), applyDiff: () => true, wakeUp: () => ENTRIES, search: () => [] };
   const eng = new MemoryEngine({ hiveRoot: root, store, embedder: { loaded: true, embed: async (x) => x.map(() => new Float32Array(384)), unload: async () => {} },
     countTokens: (x) => x.split(/\s+/).length, mode: () => 'native', watch: null, setTimer: (fn, ms) => (ms === 0 ? setImmediate(fn) : { ms }), clearTimer: () => {} });
-  const r = await eng.wakeUp('ph');
+  const r = await eng.wakeUp('ph', true);
   assert.ok(r.text.includes('## L0.5 — HOW I WORK (standing lessons)\n1. Cite only URLs you fetched and opened.\n2. Commit only under the repo identity.\n\n## L1'), r.text);
-  const none = await eng.wakeUp('nobody');
+  const none = await eng.wakeUp('nobody', true);
   assert.doesNotMatch(none.text, /L0\.5/);
 });
 

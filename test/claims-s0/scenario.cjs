@@ -94,7 +94,7 @@ module.exports = async (drill) => {
     countTokens: () => (t) => Math.ceil(t.length / 4), git: async () => null,
     now: () => new Date('2026-10-08T12:00:00.000Z'), appendReceipt: () => {},
   });
-  const wake = [(await eng.wakeUp(A)).text ?? '', (await delivery.workingSet(A)) ?? ''].join('\n\n');
+  const wake = [(await eng.wakeUp(A, true)).text ?? '', (await delivery.workingSet(A)) ?? ''].join('\n\n');
   await eng.close(); idx.close(); store.close();
 
   return {

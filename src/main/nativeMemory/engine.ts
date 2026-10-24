@@ -101,6 +101,8 @@ export class QueueExpired extends Error {
 export interface SearchArgs { query: string; wing?: string | null; room?: string | null; results?: number; since?: string | null; before?: string | null;
   /** CLAIM-LEDGER read modes and claim filters (A5). */
   mode?: SearchMode; kind?: string | null; key?: string | null;
+  /** CLAIMS-90 M1: the verbose (whole-chunk) text; the default is the compact text. */
+  full?: boolean;
   /** The asking agent's own wing (from its MEMORY_TOKEN): never a filter, only a backfill hint. */
   caller?: string | null }
 export interface EngineReply { exit: number; text: string; json?: unknown }
@@ -251,7 +253,7 @@ export class MemoryEngine {
     }, o);
   }
 
-  async wakeUp(wing: string | null): Promise<EngineReply> {
+  async wakeUp(wing: string | null, full = false): Promise<EngineReply> {
     // (b) A wake-up is the caller's (or an explicit) wing: index it first.
     this.preferWing(wing);
     // N1: a task-start wake-up on a still-filling index waits (bounded) for ITS wing's sources,
@@ -266,7 +268,8 @@ export class MemoryEngine {
         try { pinned = pinnedSection(readFileSync(join(this.d.hiveRoot, 'agents', wing, 'memory.md'), 'utf8')); } catch { pinned = null; }
       }
       const entries = this.d.store.wakeUp(wing, WAKE_MAX_CHARS);
-      return { exit: 0, text: formatWakeUp(identity, entries, pinned) };
+      // CLAIMS-90 M1: compact by default (under the condenser cap); `--full` is the whole text.
+      return { exit: 0, text: formatWakeUp(identity, entries, pinned, { full }) };
     });
   }
 

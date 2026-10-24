@@ -92,7 +92,7 @@ test('M4a scores actual generated grouped view by claim id', () => {
 
 test('memory search visibly labels superseded hits as dated prior versions', () => {
   const { formatSearch } = loadTs('src/main/nativeMemory/format.ts');
-  const text = formatSearch('invented query', {}, [{ chunkId: 1, wing: 'a1', room: 'memory', source: 'claim', content: 'invented prior text', cosineSim: 0.5, bm25: -1, score: 1,
+  const text = formatSearch('invented query', { full: true }, [{ chunkId: 1, wing: 'a1', room: 'memory', source: 'claim', content: 'invented prior text', cosineSim: 0.5, bm25: -1, score: 1,
     claim: { id: 'c-prior00000001', status: 'superseded', kind: 'fact', key: 'invented-topic', at: '2026-09-01T00:00:00.000Z' } }]);
   assert.match(text, /Claim:  \[prior · fact · invented-topic · 2026-09-01/);
   assert.match(text, /Version: prior \(dated 2026-09-01\)/);
@@ -101,7 +101,7 @@ test('memory search visibly labels superseded hits as dated prior versions', () 
 
 test('memory search labels an UNCONFIRMED supersession (superseded?) as prior?, never as a certain prior', () => {
   const { formatSearch } = loadTs('src/main/nativeMemory/format.ts');
-  const text = formatSearch('invented query', {}, [{ chunkId: 1, wing: 'a1', room: 'memory', source: 'claim', content: 'invented maybe-prior text', cosineSim: 0.5, bm25: -1, score: 1,
+  const text = formatSearch('invented query', { full: true }, [{ chunkId: 1, wing: 'a1', room: 'memory', source: 'claim', content: 'invented maybe-prior text', cosineSim: 0.5, bm25: -1, score: 1,
     claim: { id: 'c-maybe0000001', status: 'superseded?', kind: 'fact', key: 'invented-topic', at: '2026-09-02T00:00:00.000Z' } }]);
   assert.match(text, /Claim:  \[prior\? · fact · invented-topic · 2026-09-02 · c-maybe0000001\]/);
   assert.match(text, /Version: possibly replaced \(unconfirmed, dated 2026-09-02\)/);

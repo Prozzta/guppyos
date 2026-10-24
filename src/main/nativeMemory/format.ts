@@ -13,6 +13,36 @@ export interface SearchFlags {
   room?: string | null;
   since?: string | null;
   before?: string | null;
+  /** CLAIMS-90 M1: `--full` prints the whole-chunk (verbose) text; the default is the compact text. */
+  full?: boolean;
+}
+
+/**
+ * CLAIMS-90 M1: the compact `search` / `wake-up` text fits UNDER the tool-output condenser's
+ * 1500-character default cap by construction (toolOutputCondense TOOL_OUTPUT_CAP_DEFAULT), so an
+ * agent reads the whole answer, current values first, instead of a head/tail cut of the verbose
+ * text. `--full` restores the verbose text (and `#full` on the command still skips the condenser).
+ */
+export const COMPACT_MAX_CHARS = 1400;
+/** One compact line stays under the condenser's LINE_MAX (160) so no line is ever clipped. */
+export const COMPACT_LINE_MAX = 158;
+/** The native part of a compact wake-up; the rest of COMPACT_MAX_CHARS is the claims working set's. */
+export const WAKE_COMPACT_MAX_CHARS = 700;
+/** A hit or an entry never gets less than this; what no longer fits goes behind `--results` / `--full`. */
+const COMPACT_MIN_HIT = 120;
+const COMPACT_MIN_ENTRY = 96;
+
+const oneLine = (s: string): string => s.replace(/\s+/g, ' ').trim();
+const clip = (s: string, n: number): string => (s.length <= n ? s : `${s.slice(0, Math.max(0, n - 1))}…`);
+
+/** The compact status word: a confirmed supersession is `prior`, an unconfirmed one `prior?` (never shown as fact). */
+function statusWord(status: string): string {
+  return status === 'live' ? 'current' : status === 'superseded' ? 'prior' : status === 'superseded?' ? 'prior?' : status;
+}
+/** Current values first: live claims, then plain chunks, then prior / prior? / retracted claims; rank order within each group. */
+export function currentFirst<T extends { claim?: SearchHit['claim'] }>(hits: T[]): T[] {
+  const group = (h: T): number => (!h.claim ? 1 : h.claim.status === 'live' ? 0 : 2);
+  return hits.map((h, i) => ({ h, i })).sort((a, b) => group(a.h) - group(b.h) || a.i - b.i).map((x) => x.h);
 }
 
 const base = (p: string): string => p.split('/').pop() ?? p;
@@ -25,6 +55,120 @@ function py(n: number): string {
 }
 
 export function formatSearch(query: string, flags: SearchFlags, hits: SearchHit[]): string {
+  if (!hits.length) return `\n  No results found for: "${query}"\n`;
+  return flags.full ? formatSearchFull(query, flags, hits) : formatSearchCompact(query, flags, hits);
+}
+
+/** The width of a compact content line (4 spaces of indent before it). */
+const CONTENT_WIDTH = COMPACT_LINE_MAX - 4;
+/** A hit may take up to this many even shares of what is left (the current values come first, so they get whole chunks). */
+const COMPACT_SHARES = 3;
+
+/** The query's content words (3+ characters), for the window of a clipped chunk. */
+function queryTerms(query: string): string[] {
+  return [...new Set(oneLine(query).toLowerCase().split(/[^\p{L}\p{N}._\-/@#]+/u).filter((t) => t.length >= 3))];
+}
+
+/**
+ * The content of one compact hit within `max` characters: the whole one-line content when it fits;
+ * else NOT the head but a window that holds the first query term found (the matched text), with
+ * `…` at each cut edge, so a value past the head is still read. A hit with no term in it keeps the head.
+ */
+export function windowContent(content: string, query: string, max: number): { text: string; clipped: boolean } {
+  const s = oneLine(content);
+  if (s.length <= max) return { text: s, clipped: false };
+  if (max < 8) return { text: clip(s, max), clipped: true };
+  const low = s.toLowerCase();
+  let at = -1;
+  for (const t of queryTerms(query)) { const i = low.indexOf(t); if (i >= 0 && (at < 0 || i < at)) at = i; }
+  // The head holds the term (with some text after it), or no term is in this chunk: the head.
+  if (at < 0 || at + 24 <= max - 1) return { text: clip(s, max), clipped: true };
+  // Else a window that starts a third before the term, on a word boundary, and runs to the budget.
+  let start = Math.max(0, at - Math.floor(max / 3));
+  const sp = s.indexOf(' ', start);
+  if (sp >= 0 && sp < at) start = sp + 1;
+  const body = max - 2;
+  const toEnd = start + body >= s.length;
+  return { text: `…${toEnd ? s.slice(start) : `${s.slice(start, start + body)}…`}`, clipped: true };
+}
+
+/** Word-wrap one line into lines of at most `width` characters (a word longer than the width is cut). */
+export function wrap(s: string, width: number): string[] {
+  const out: string[] = [];
+  let rest = s;
+  while (rest.length > width) {
+    let cut = rest.lastIndexOf(' ', width);
+    if (cut < Math.floor(width / 2)) cut = width;
+    out.push(rest.slice(0, cut).trimEnd());
+    rest = rest.slice(cut).trimStart();
+  }
+  if (rest) out.push(rest);
+  return out;
+}
+
+/** What a hit's lines cost: meta + newline, then per content line 4 spaces + text + newline. */
+const costOf = (meta: string, lines: string[]): number => meta.length + 1 + lines.reduce((n, l) => n + l.length + 5, 0);
+
+/**
+ * The compact text, <= COMPACT_MAX_CHARS by construction: a meta line and the content, wrapped on
+ * lines under the line max, per hit, current values first. A hit gets its WHOLE content when that
+ * fits its budget (up to COMPACT_SHARES even shares of what is left, never under the floor); else a
+ * window around the matched text, marked `…`, and the footer counts the clipped hits. Hits that no
+ * longer fit go behind a `more hits` pointer. `--full` prints every chunk whole.
+ */
+export function formatSearchCompact(query: string, flags: SearchFlags, hits: SearchHit[]): string {
+  const filters = [flags.wing && `wing=${flags.wing}`, flags.room && `room=${flags.room}`, flags.since && `since=${flags.since}`, flags.before && `before=${flags.before}`].filter(Boolean).join(' ');
+  // `Results for: "q"` is kept verbatim: the drill gates strip that line to compare bodies.
+  const header = clip(`Results for: "${oneLine(query)}" — ${hits.length} hit${hits.length === 1 ? '' : 's'}, current first${filters ? ` [${filters}]` : ''} (--full: whole chunks)`, COMPACT_LINE_MAX);
+  const ordered = currentFirst(hits);
+  const out: string[] = [header];
+  let used = header.length + 1;
+  const footer = (n: number): string => `… ${n} more hit${n === 1 ? '' : 's'} not shown (fewer --results, or --full)`;
+  const clipNote = (n: number): string => `… ${n} hit${n === 1 ? '' : 's'} clipped (--full shows whole chunks)`;
+  // The clipped-hits note is reserved the first time a hit is clipped (so it always fits), never before.
+  const clipReserve = clipNote(hits.length).length + 1;
+  let clipped = 0;
+  for (let i = 0; i < ordered.length; i++) {
+    const h = ordered[i];
+    const left = ordered.length - i;
+    const reserve = (left > 1 ? footer(left - 1).length + 1 : 0) + (clipped ? clipReserve : 0);
+    const remaining = COMPACT_MAX_CHARS - used - reserve;
+    // Up to COMPACT_SHARES even shares of what is left, leaving every later hit at least the floor;
+    // never under the floor itself; no fit ends the list.
+    const share = Math.floor(remaining / left);
+    let budget = share >= COMPACT_MIN_HIT ? Math.min(remaining - (left - 1) * COMPACT_MIN_HIT, COMPACT_SHARES * share) : Math.min(remaining, COMPACT_MIN_HIT);
+    if (budget < COMPACT_MIN_HIT) { out.push(footer(left)); break; }
+    const meta = clip(h.claim
+      ? `[${i + 1}] ${statusWord(h.claim.status)} · ${h.claim.kind} · ${h.claim.key ?? '-'} · ${h.claim.at.slice(0, 10)} · ${h.claim.id} · ${h.wing}/${h.room}`
+      : `[${i + 1}] ${h.wing}/${h.room} · ${base(h.source)}`, Math.min(COMPACT_LINE_MAX, budget - 16));
+    const whole = oneLine(h.content);
+    let lines = wrap(whole, CONTENT_WIDTH);
+    let cut = false;
+    if (costOf(meta, lines) > budget) {
+      // Clipped: reserve the note now (once), then fit a window of the content into what is left.
+      if (!clipped) {
+        const after = Math.min(budget, remaining - clipReserve);
+        if (after < meta.length + 14) { out.push(footer(left)); break; }
+        budget = after;
+      }
+      cut = true;
+      const avail = budget - meta.length - 1;
+      const w = windowContent(whole, query, Math.max(1, avail - 5 * Math.ceil(avail / CONTENT_WIDTH)));
+      lines = wrap(w.text, CONTENT_WIDTH);
+      // Word wrapping can add a line: drop from the end until the hit fits its budget (marked `…`).
+      while (lines.length > 1 && costOf(meta, lines) > budget) { lines.pop(); lines[lines.length - 1] = clip(`${lines[lines.length - 1]}…`, CONTENT_WIDTH); }
+      if (costOf(meta, lines) > budget) lines = [clip(lines[0] ?? '', Math.max(1, avail - 5))];
+    }
+    if (cut) clipped++;
+    out.push(meta, ...lines.map((l) => `    ${l}`));
+    used += costOf(meta, lines);
+  }
+  if (clipped) out.push(clipNote(clipped));
+  return out.join('\n') + '\n';
+}
+
+/** The verbose (whole-chunk) text: `--full`. */
+export function formatSearchFull(query: string, flags: SearchFlags, hits: SearchHit[]): string {
   if (!hits.length) return `\n  No results found for: "${query}"\n`;
   const L: string[] = [];
   L.push('', '='.repeat(60), `  Results for: "${query}"`);
@@ -79,7 +223,67 @@ function pinnedBlock(pinned: string): string {
   return `${buf.subarray(0, cut).toString('utf8')}\n… (over 6 KB: read the rest in memory.md)`;
 }
 
-export function formatWakeUp(identity: string | null, entries: WakeEntry[], pinned: string | null = null): string {
+export interface WakeOptions { full?: boolean }
+
+export function formatWakeUp(identity: string | null, entries: WakeEntry[], pinned: string | null = null, opts: WakeOptions = {}): string {
+  return opts.full ? formatWakeUpFull(identity, entries, pinned) : formatWakeUpCompact(identity, entries, pinned);
+}
+
+/** The pinned section's lesson count (its heading dropped) and byte size, for the compact pointer. */
+function pinnedSummary(pinned: string): { lessons: number; bytes: number } {
+  const body = pinned.replace(/\r\n/g, '\n').replace(/^[^\n]*\n?/, '');
+  const lessons = body.split('\n').filter((l) => /^(\s*[-*]\s|\s*\d+[.)]\s|###\s)/.test(l)).length;
+  return { lessons, bytes: Buffer.byteLength(body.replace(/\s+$/, ''), 'utf8') };
+}
+
+/** The compact wake-up: identity in one line, a pointer to the standing lessons, the newest entries one per line; <= WAKE_COMPACT_MAX_CHARS. */
+export function formatWakeUpCompact(identity: string | null, entries: WakeEntry[], pinned: string | null = null): string {
+  const out: string[] = ['Wake-up (compact; --full: the whole text):'];
+  out.push(clip(`L0 identity: ${identity && identity.trim() ? oneLine(identity) : 'none (agents/<id>/identity.md)'}`, COMPACT_LINE_MAX));
+  const p = pinned ? pinnedSummary(pinned) : null;
+  if (p && p.bytes > 0) { // an empty section (heading only) prints no block, as in the full text
+    out.push(clip(`L0.5 standing lessons: ${p.lessons} in memory.md "## How I work" (${p.bytes} B; read the section, or --full)`, COMPACT_LINE_MAX));
+  }
+  let used = out.join('\n').length + 1;
+  if (!entries.length) {
+    out.push('L1: no memories yet.');
+  } else {
+    const head = 'L1 newest first:';
+    out.push(head); used += head.length + 1;
+    const more = (n: number): string => `… ${n} more (--full)`;
+    for (let i = 0; i < entries.length; i++) {
+      const e = entries[i];
+      const left = entries.length - i;
+      const reserve = left > 1 ? more(left - 1).length + 1 : 0;
+      const budget = Math.min(COMPACT_LINE_MAX, Math.max(COMPACT_MIN_ENTRY, Math.floor((WAKE_COMPACT_MAX_CHARS - used - reserve) / left)));
+      if (used + budget + 1 + reserve > WAKE_COMPACT_MAX_CHARS) { out.push(more(left)); break; }
+      const tail = `  (${base(e.source)})`;
+      // An entry line is `- [room] ` + content + tail (+ its newline): never more than its budget.
+      const line = `- [${e.room}] ${clip(oneLine(e.content), Math.max(8, budget - tail.length - e.room.length - 6))}${tail}`;
+      out.push(line); used += line.length + 1;
+    }
+  }
+  return out.join('\n') + '\n';
+}
+
+/** Fit a block of lines (the claims working set) into `max` characters, whole lines only, with a pointer when cut. */
+export function fitLines(block: string, max: number): string {
+  if (block.length <= max) return block;
+  const more = (n: number): string => `… ${n} more line${n === 1 ? '' : 's'} (--full)`;
+  const lines = block.replace(/\s+$/, '').split('\n');
+  const out: string[] = [];
+  let used = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const left = lines.length - i;
+    const l = clip(lines[i], COMPACT_LINE_MAX);
+    if (used + l.length + 1 + more(left - 1).length + 1 > max) { if (used + more(left).length <= max) out.push(more(left)); break; }
+    out.push(l); used += l.length + 1;
+  }
+  return out.join('\n');
+}
+
+/** The verbose wake-up text (`--full`): the section-4 frame with L0 / L0.5 / L1. */
+export function formatWakeUpFull(identity: string | null, entries: WakeEntry[], pinned: string | null = null): string {
   const parts: string[] = [];
   parts.push(identity && identity.trim()
     ? `## L0 — IDENTITY\n${identity.trim().slice(0, 800)}`

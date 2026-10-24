@@ -476,8 +476,8 @@ module.exports = async (drill) => {
       filtered: claimHits(await eng.search({ query: 'orphanword quokka', results: 10, wing: 'a1' })).map((h) => h.claimId),
       history: claimHits(await eng.search({ query: 'orphanword quokka', results: 10, mode: 'history' })).map((h) => h.claimId),
     };
-    const wake = (await eng.wakeUp('a1')).text;
-    const wakeAll = (await eng.wakeUp(null)).text;
+    const wake = (await eng.wakeUp('a1', true)).text;
+    const wakeAll = (await eng.wakeUp(null, true)).text;
     await sync(eng, 'a1', []);
     const unsent = { claims: claimRows(store), all: claimHits(await eng.search({ query: 'wombat quokka', results: 10, mode: 'all' })).length, statuses: store.db.prepare('SELECT count(*) AS n FROM claim_status').get().n };
     await eng.close(); store.close();

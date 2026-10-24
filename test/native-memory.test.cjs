@@ -126,22 +126,23 @@ test('ALLOW-LIST: a Markdown file over the size cap is excluded by rule (a paste
 
 // ── text ──────────────────────────────────────────────────────────────────
 
-test('GOLDEN search text (the hybrid path), including the filter lines and the no-results line', () => {
+// CLAIMS-90 M1: the verbose text is `--full`; the compact default is pinned in claims90-m1-compact.test.cjs.
+test('GOLDEN search text (the hybrid path, --full), including the filter lines and the no-results line', () => {
   const hits = [{ chunkId: 1, wing: 'oscar-mu3300lb', room: 'general', source: 'agents/oscar-mu3300lb/UPSTREAM.md', content: 'line one\nline two\n', cosineSim: 0.4361, bm25: 1.3472, score: 1 }];
-  const text = formatSearch('log rotation', { wing: 'oscar-mu3300lb', since: '2026-09-01' }, hits);
+  const text = formatSearch('log rotation', { wing: 'oscar-mu3300lb', since: '2026-09-01', full: true }, hits);
   assert.equal(text, [
     '', '='.repeat(60), '  Results for: "log rotation"', '  Wing: oscar-mu3300lb', '  Since: 2026-09-01', '='.repeat(60), '',
     '  [1] oscar-mu3300lb / general', '      Source: UPSTREAM.md', '      Match:  cosine_sim=0.436  bm25=1.347', '',
     '      line one', '      line two', '', `  ${'-'.repeat(56)}`, '', ''
   ].join('\n'));
   assert.equal(formatSearch('nothing', {}, []), '\n  No results found for: "nothing"\n');
-  assert.match(formatSearch('q', {}, [{ ...hits[0], cosineSim: null, bm25: 2 }]), /cosine_sim=0\.0 {2}bm25=2\.0/);
+  assert.match(formatSearch('q', { full: true }, [{ ...hits[0], cosineSim: null, bm25: 2 }]), /cosine_sim=0\.0 {2}bm25=2\.0/);
 });
 
 test('WAKE-UP contract (section 4): L0 identity, then the newest memory entries first; bounded; the legacy frame', () => {
-  const t = formatWakeUp('You are X.', [{ wing: 'x', room: 'memory', source: 'agents/x/memory.md', content: '## d\n- newest' }, { wing: 'x', room: 'audit', source: 'agents/x/AUDIT.md', content: 'y'.repeat(900) }]);
+  const t = formatWakeUp('You are X.', [{ wing: 'x', room: 'memory', source: 'agents/x/memory.md', content: '## d\n- newest' }, { wing: 'x', room: 'audit', source: 'agents/x/AUDIT.md', content: 'y'.repeat(900) }], null, { full: true });
   assert.match(t, /^Wake-up text \(~\d+ tokens\):\n={50}\n## L0 — IDENTITY\nYou are X\.\n\n## L1 — ESSENTIAL STORY\n\n\[memory\]\n {2}- ## d - newest {2}\(memory\.md\)\n\n\[audit\]\n {2}- y{397}\.\.\. {2}\(AUDIT\.md\)\n$/);
-  assert.match(formatWakeUp(null, []), /No identity file[\s\S]*## L1 — No memories yet\./);
+  assert.match(formatWakeUp(null, [], null, { full: true }), /No identity file[\s\S]*## L1 — No memories yet\./);
 });
 
 test('FTS query + RRF + compaction policy (pure)', () => {
@@ -160,12 +161,12 @@ test('FTS query + RRF + compaction policy (pure)', () => {
 
 test('VALIDATION (section 6): ranges, ISO dates, wing names; wake-up without --wing is the CALLER\'s', () => {
   // NATIVE-WAKEUP (b): `caller` is the token's wing as a backfill hint; `wing` (the filter) stays null.
-  assert.deepEqual(validateRequest({ cmd: 'search', args: { query: 'x', results: 3 } }, 'a1'), { op: 'search', args: { query: 'x', wing: null, room: null, results: 3, since: null, before: null, caller: 'a1', mode: 'live', kind: null, key: null } });
+  assert.deepEqual(validateRequest({ cmd: 'search', args: { query: 'x', results: 3 } }, 'a1'), { op: 'search', args: { query: 'x', wing: null, room: null, results: 3, since: null, before: null, caller: 'a1', mode: 'live', kind: null, key: null, full: false } });
   for (const bad of [{ query: '' }, { query: 'x', results: 0 }, { query: 'x', results: 101 }, { query: 'x', results: 2.5 }, { query: 'x', wing: 'a b' }, { query: 'x', since: 'yesterday' }, { query: 'x'.repeat(2001) }]) {
     assert.equal(validateRequest({ cmd: 'search', args: bad }, 'a1').exit, EXIT.usage, JSON.stringify(bad));
   }
-  assert.deepEqual(validateRequest({ cmd: 'wake-up', args: {} }, 'andy'), { op: 'wake-up', args: { wing: 'andy' } });
-  assert.deepEqual(validateRequest({ cmd: 'wake-up', args: { wing: 'jim' } }, 'andy'), { op: 'wake-up', args: { wing: 'jim' } });
+  assert.deepEqual(validateRequest({ cmd: 'wake-up', args: {} }, 'andy'), { op: 'wake-up', args: { wing: 'andy', full: false } });
+  assert.deepEqual(validateRequest({ cmd: 'wake-up', args: { wing: 'jim' } }, 'andy'), { op: 'wake-up', args: { wing: 'jim', full: false } });
   assert.equal(validateRequest({ cmd: 'mine', args: {} }, 'a').exit, EXIT.usage);
   assert.equal(validateRequest({ cmd: 'shadow', args: { query: 'x' } }, 'a').exit, EXIT.usage, 'the shadow path is gone');
 });
@@ -296,8 +297,11 @@ test('G4.5: Codex memory wake-up appends the selected wing\'s claims view; ordin
   const env = w.spawnEnv('a1');
   w.run = async () => ({ ok: true, exit: 0, text: 'existing native-memory wake-up' });
   w.setClaimWakeupProvider((id) => `# Memory working set — ${id}`);
+  // CLAIMS-90 M1: the compact (default) wake-up leads with the claims working set; `--full` keeps the old order.
   const wake = await w.handle(env.env.MEMORY_TOKEN, { cmd: 'wake-up' });
-  assert.match(wake.body.text, /existing native-memory wake-up[\s\S]*# Memory working set — a1/);
+  assert.match(wake.body.text, /^# Memory working set — a1\n\nexisting native-memory wake-up$/);
+  const full = await w.handle(env.env.MEMORY_TOKEN, { cmd: 'wake-up', args: { full: true } });
+  assert.match(full.body.text, /^existing native-memory wake-up\n\n# Memory working set — a1$/);
   const selected = await w.handle(env.env.MEMORY_TOKEN, { cmd: 'wake-up', args: { wing: 'a2' } });
   assert.match(selected.body.text, /Memory working set.*a2/, 'a caller must receive the named wing\'s claims');
   assert.doesNotMatch(selected.body.text, /Memory working set.*a1/, 'MUTANT: caller claims must not replace --wing claims');
@@ -335,10 +339,10 @@ test('WIRING: query() serves the Memory panel / Command Center as caller `human`
   const seen = [];
   w.client.request = async (op, args) => { seen.push({ op, args }); return { ok: true, exit: 0, text: 'T\n' }; };
   assert.equal((await w.query('search', { query: 'log rotation', wing: 'jim' })).text, 'T\n');
-  assert.deepEqual(seen[0], { op: 'search', args: { query: 'log rotation', wing: 'jim', room: null, results: 5, since: null, before: null, caller: 'human', mode: 'live', kind: null, key: null } });
+  assert.deepEqual(seen[0], { op: 'search', args: { query: 'log rotation', wing: 'jim', room: null, results: 5, since: null, before: null, caller: 'human', mode: 'live', kind: null, key: null, full: false } });
   assert.equal((await w.query('search', { query: '' })).exit, EXIT.usage);
   await w.query('wake-up', { wing: 'andy' });
-  assert.deepEqual(seen[1], { op: 'wake-up', args: { wing: 'andy' } });
+  assert.deepEqual(seen[1], { op: 'wake-up', args: { wing: 'andy', full: false } });
   const hooks = fs.readFileSync(path.join(REPO, 'src', 'main', 'hooks.ts'), 'utf8');
   assert.doesNotMatch(hooks, /\.query\(/, 'the HookServer never calls query()');
 });

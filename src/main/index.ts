@@ -6350,11 +6350,13 @@ ipcMain.handle('hive:memoryStatus', async () => ({ enabled: readConfig().semanti
 ipcMain.handle('hive:searchMemory', async (_evt, query: unknown, wing: unknown) => {
   if (typeof query !== 'string' || !query.trim()) return { ok: false, output: '', error: 'empty query' };
   await claimsImportReady();
-  return memoryReply(await nativeMemory.query('search', { query, ...(typeof wing === 'string' && wing ? { wing } : {}) }));
+  // CLAIMS-90 M1: the UI (Memory panel, Command Center, voice tools) reads the whole text: no condenser
+  // applies to it, so it keeps the verbose (`full`) view; the compact view is for agents' tool calls.
+  return memoryReply(await nativeMemory.query('search', { query, full: true, ...(typeof wing === 'string' && wing ? { wing } : {}) }));
 });
 ipcMain.handle('hive:memoryWakeUp', async (_evt, wing: unknown) => {
   await claimsImportReady();
-  return memoryReply(await nativeMemory.query('wake-up', typeof wing === 'string' && wing ? { wing } : {}));
+  return memoryReply(await nativeMemory.query('wake-up', { full: true, ...(typeof wing === 'string' && wing ? { wing } : {}) }));
 });
 
 // ─── IPC: enterprise Knowledge Graph (multimodal context for agents) ─────────

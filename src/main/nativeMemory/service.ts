@@ -284,13 +284,14 @@ export function validateRequest(body: MemoryRequest, callerWing: string): { op: 
     const key = a.key === undefined || a.key === null ? null : a.key;
     if (key !== null && (typeof key !== 'string' || !/^[a-z0-9][a-z0-9_.-]{0,119}$/.test(key))) return { exit: EXIT.usage, error: 'bad --key' };
     // `caller` (the token's wing) is never a filter: only NATIVE-WAKEUP (b)'s backfill hint.
-    return { op: 'search', args: { query: q, wing, room, results: n, since: a.since ?? null, before: a.before ?? null, caller: callerWing, mode, kind, key } };
+    // CLAIMS-90 M1: `--full` = the verbose (whole-chunk) text; the default is the compact text.
+    return { op: 'search', args: { query: q, wing, room, results: n, since: a.since ?? null, before: a.before ?? null, caller: callerWing, mode, kind, key, full: a.full === true } };
   }
   if (cmd === 'wake-up') {
     const wing = optWing(a.wing);
     if (typeof wing === 'object' && wing) return { exit: EXIT.usage, error: 'bad --wing' };
     // Without --wing, wake-up is the CALLER's (Jim fix 3).
-    return { op: 'wake-up', args: { wing: wing ?? callerWing } };
+    return { op: 'wake-up', args: { wing: wing ?? callerWing, full: a.full === true } };
   }
   if (cmd === 'status') return { op: 'status', args: {} };
   return { exit: EXIT.usage, error: `unsupported command ${String(cmd)}` };

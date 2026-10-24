@@ -136,7 +136,7 @@ S.search = async () => {
   const hostile = ['"', 'kraken OR', 'NEAR(a b)', 'a* -b', "'); drop table chunks; --", 'col:val', '^', '((', ''];
   const hostileOk = hostile.every((q) => { try { store.search({ query: q, queryVec: null, k: 5 }); return true; } catch { return false; } });
   const stillThere = store.counts().chunks;
-  const r = await eng.search({ query: 'kraken', results: 2 });
+  const r = await eng.search({ query: 'kraken', results: 2, full: true });
   store.close();
   return { all: all.map((h) => `${h.wing}/${h.room}`), wingB: wingB.map((h) => h.wing), roomMem: roomMem.map((h) => h.room), future: future.length, hostileOk, stillThere, text: r.text, exit: r.exit, fts: ftsQuery('Hello, "world" NEAR x_y 7') };
 };
@@ -345,9 +345,9 @@ S.worker = async () => {
   });
   const ready = sent.some((m) => m.event === 'ready');
   const bf = await ask(1, 'backfill', {});
-  const t0 = Date.now(); const s1 = await ask(2, 'search', { query: 'log kept open rotation', results: 3 }); const cold = Date.now() - t0;
+  const t0 = Date.now(); const s1 = await ask(2, 'search', { query: 'log kept open rotation', results: 3, full: true }); const cold = Date.now() - t0;
   const t1 = Date.now(); const s2 = await ask(3, 'search', { query: 'gate passed append', results: 3 }); const warm = Date.now() - t1;
-  const wk = await ask(4, 'wake-up', { wing: 'andy' });
+  const wk = await ask(4, 'wake-up', { wing: 'andy', full: true });
   const st = await ask(5, 'status', {});
   const rep = await ask(6, 'report', {});
   const exp = await ask(7, 'status', {}, Date.now() - 1);

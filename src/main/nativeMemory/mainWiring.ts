@@ -15,6 +15,7 @@
  *   shutdown()    drain and stop the worker (quit, reset, home change)
  */
 import { createHash } from 'node:crypto';
+import { COMPACT_MAX_CHARS, fitLines } from './format';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { EXIT, MemoryTokens, NativeMemoryClient, validateRequest, WAKE_UP_DEADLINE_MS, type Reply, type WorkerHandle } from './service';
@@ -217,7 +218,14 @@ export class NativeMemoryWiring {
       // while --wing explicitly selects a different agent's wake-up.
       const v = validateRequest((body ?? {}) as Record<string, unknown>, agentId);
       const wing = !('exit' in v) && typeof v.args.wing === 'string' ? v.args.wing : agentId;
-      try { const claims = await this.claimWakeup?.(wing); if (claims) text = [text, claims].filter(Boolean).join('\n\n'); } catch { /* memory wake-up remains available */ }
+      const full = !('exit' in v) && v.args.full === true;
+      try {
+        const claims = await this.claimWakeup?.(wing);
+        // CLAIMS-90 M1: the compact wake-up leads with the claims working set (current values), fitted
+        // so that claims + native text stay under COMPACT_MAX_CHARS; `--full` keeps the verbose order.
+        if (claims && full) text = [text, claims].filter(Boolean).join('\n\n');
+        else if (claims) text = [fitLines(claims, Math.max(0, COMPACT_MAX_CHARS - String(text ?? '').length - 2)), text].filter(Boolean).join('\n\n');
+      } catch { /* memory wake-up remains available */ }
     }
     return { status: 200, body: { exit: r.exit, text, json: r.json, error: r.error } };
   }

@@ -13,7 +13,9 @@ const http = require('http');
 
 const EXIT = { ok: 0, usage: 2, unavailable: 3, degraded: 4, unauthorized: 5 };
 const REQUEST_TIMEOUT_MS = 10000;
-const USAGE = 'usage: memory {search QUERY [--wing W] [--room R] [--results N] [--since ISO] [--before ISO] [--history|--all] [--kind K] [--key K] | wake-up [--wing W] | status} [--format json]\n'
+const USAGE = 'usage: memory {search QUERY [--wing W] [--room R] [--results N] [--since ISO] [--before ISO] [--history|--all] [--kind K] [--key K] [--full] | wake-up [--wing W] [--full] | status} [--format json]\n'
+  + '  search and wake-up print a compact, current-first text that fits the tool-output cap; --full prints the whole chunks / the whole wake-up text\n'
+  + '  one memory command per tool call: the cap is per call, so two chained commands get condensed; raw (non-condensed) readers may prefer --full\n'
   + '  claim ledger (when it is on for you):\n'
   + '  memory note [--kind fact|decision|lesson|preference|procedure|pointer|todo] [--key K] [--ref TYPE:VALUE]... [--ttl 30d] [--supersedes ID --reason changed|corrected|moved [--reason-text TEXT]]... [--separate ID[,ID]|--cancel] [--pin] [--at ISO] [--from-mail MSGID] TEXT\n'
   + '    --supersedes may name any live claim in your own ledger, even if it was not offered as a candidate; use it when the prior fact changed, was corrected, or moved (the --reason). A recap cites the claim id; it does not restate the value.\n'
@@ -59,6 +61,8 @@ function parseArgs(argv) {
     if (flag === '--results') { out.args.results = Number(val()); i += step(); continue; }
     if (flag === '--format') { out.format = val(); i += step(); continue; }
     if (flag === '--help') { out.help = true; i += 1; continue; }
+    // CLAIMS-90 M1: --full on search / wake-up (the verbose text; compact is the default).
+    if (flag === '--full' && (out.cmd === 'search' || out.cmd === 'wake-up')) { out.args.full = true; i += 1; continue; }
     if (flag && out.cmd === 'search') {
       // CLAIM-LEDGER read modes and claim filters (spec amendment A5).
       if (flag === '--history' || flag === '--all') { out.args[flag.slice(2)] = true; i += 1; continue; }

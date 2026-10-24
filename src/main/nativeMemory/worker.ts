@@ -116,11 +116,11 @@ export async function runWorker(cfg: WorkerConfig, port: Port, deps: { Database:
     switch (m.op) {
       case 'search':
         guard(engine.search({ query: String(a.query ?? ''), wing: (a.wing as string) ?? null, room: (a.room as string) ?? null, results: Number(a.results ?? 5), since: (a.since as string) ?? null, before: (a.before as string) ?? null, caller: (a.caller as string) ?? null,
-          mode: a.mode === 'history' || a.mode === 'all' ? a.mode : 'live', kind: (a.kind as string) ?? null, key: (a.key as string) ?? null },
+          mode: a.mode === 'history' || a.mode === 'all' ? a.mode : 'live', kind: (a.kind as string) ?? null, key: (a.key as string) ?? null, full: a.full === true },
         { deadline: m.deadline, timing: (t) => { timing = t; } }), (r) => ({ exit: r.exit, text: r.text, json: r.json }));
         break;
       case 'wake-up':
-        guard(engine.wakeUp((a.wing as string) ?? null), (r) => ({ exit: r.exit, text: r.text }));
+        guard(engine.wakeUp((a.wing as string) ?? null, a.full === true), (r) => ({ exit: r.exit, text: r.text }));
         break;
       case 'status':
         guard(engine.status(), (r) => ({ exit: r.exit, text: r.text, json: r.json }));
