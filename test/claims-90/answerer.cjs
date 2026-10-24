@@ -28,6 +28,7 @@ const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { drillEnv } = require('../claims-drill/runner.cjs');
 const R = require('./run.cjs');
+const Condense = require('../load-ts.cjs')(path.join(__dirname, '..', '..', 'src', 'main', 'toolOutputCondense.ts'));
 
 const REPO = path.resolve(__dirname, '..', '..');
 const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
@@ -132,6 +133,17 @@ const LIVE_RES = () => {
   }
   return res;
 };
+
+/**
+ * Jim 19:03: a call that is not a bare `memory` command (a pipe, a redirection, a chain, #full,
+ * or a non-memory command) is a style deviation. It is counted, never dropped. Quoted text (the
+ * query) is ignored, so a query holding such characters is still bare.
+ */
+function styleDeviation(c) {
+  if (c.tool !== 'Bash' || typeof c.command !== 'string') return c.tool === 'Bash';
+  const unquoted = c.command.trim().replace(/"(?:[^"\\]|\\.)*"|'[^']*'/g, '""');
+  return !/^memory\s/.test(unquoted) || /[|<>;&`]|\$\(|#full/.test(unquoted);
+}
 
 const filesIn = (dir) => { try { return dir ? fs.readdirSync(dir, { recursive: true }).length : 0; } catch { return 0; } };
 
@@ -247,7 +259,8 @@ async function answerItem(o, v, addDir, item, key, shape, instruction, outDir) {
       const f = hookRows.find((x) => x.event === 'PostToolUseFailure' && x.toolUseId === c.id);
       const seen = c.result?.text ?? null;
       return {
-        tool: c.tool, command: c.command, file: c.file, event: h ? 'PostToolUse' : f ? 'PostToolUseFailure' : null, isError: c.result?.isError ?? null,
+        // god 19:02 ruling 1: read-type (a pipe through head, grep …: the read cap) or bare, per call.
+        tool: c.tool, command: c.command, file: c.file, readType: c.tool === 'Bash' && c.command ? Condense.isReadCommand(c.command) : null, styleDeviation: styleDeviation(c), event: h ? 'PostToolUse' : f ? 'PostToolUseFailure' : null, isError: c.result?.isError ?? null,
         seenChars: seen === null ? null : seen.length, seenSha256: seen === null ? null : sha256(seen),
         condensed: !!h?.hook, hookEqualsRunner: h && 'parity' in h ? h.parity : null, transcriptEqualsHook: h?.hook ? seen === h.hook : null,
         failureErrorEqualsTranscript: f?.failure?.errorSha256 && seen !== null ? f.failure.errorSha256 === sha256(seen) : null,
@@ -318,6 +331,9 @@ async function main(argv) {
     code: { head: R.git(o.tree, ['rev-parse', 'HEAD']), dirty: R.git(o.tree, ['status', '--porcelain', '--', 'src', 'resources/memory-cli.cjs', 'test/claims-90']) || '' },
     itemsSha256: sha256(fs.readFileSync(o.items)), items: items.length,
     invalid: rows.filter((r) => r.invalid).length,
+    calls: rows.reduce((n, r) => n + (r.calls?.length ?? 0), 0),
+    styleDeviations: rows.reduce((n, r) => n + (r.calls ?? []).filter((c) => c.styleDeviation).length, 0),
+    readTypeCalls: rows.reduce((n, r) => n + (r.calls ?? []).filter((c) => c.readType).length, 0),
     stateSha256: [...new Set(rows.map((r) => r.stateSha256))],
   };
   fs.writeFileSync(path.join(outDir, 'run.json'), JSON.stringify(run, null, 1));
@@ -331,4 +347,4 @@ if (require.main === module) {
   }, (e) => { console.error(`[claims-90] ${e.stack || e.message}`); process.exitCode = 2; });
 }
 
-module.exports = { parseArgs, parseItems, installedHookShape, settingsFor, childEnv, readTranscript, main };
+module.exports = { parseArgs, parseItems, installedHookShape, settingsFor, childEnv, readTranscript, styleDeviation, main };

@@ -121,11 +121,18 @@ test('PIN: the contained answerer reads what the tree\'s own hook gives it (M4, 
   assert.match(ans, /allow: \['Bash\(memory:\*\)', `Read\(/, 'Bash only for memory, Read only on its saved outputs');
   assert.match(ans, /if \(t\.leaks\.length\) row\.invalid = /, 'a leak makes the item INVALID');
   assert.match(ans, /const row = await answerItem\(/, 'one fresh sandbox and session per item');
+  assert.match(ans, /readType: c\.tool === 'Bash' && c\.command \? Condense\.isReadCommand\(c\.command\) : null,/, 'god ruling 1: read-type or bare, per call, by the product\'s own test');
   assert.match(ans, /R\.stageSandbox\(path\.resolve\(o\.snapshot\), v\.manifest, home\)/, 'each item starts from the T_s copy');
 });
 
 test('answerer: hook settings follow the installed shape; env and transcript checks', () => {
-  const { settingsFor, childEnv, readTranscript } = require('./claims-90/answerer.cjs');
+  const { settingsFor, childEnv, readTranscript, styleDeviation } = require('./claims-90/answerer.cjs');
+  const dev = (command) => styleDeviation({ tool: 'Bash', command });
+  assert.equal(dev('memory search "codex quota"'), false, 'bare');
+  assert.equal(dev('memory search --results 3 "a | b > c; d"'), false, 'quoted query text is not a pipe');
+  assert.equal(dev('memory wake-up'), false);
+  for (const c of ['memory search "q" | head -50', 'memory search "q" 2>&1', 'memory search q #full', 'memory search a; memory search b', 'memory search a && memory wake-up', 'cat x', 'echo $(memory search q)']) assert.equal(dev(c), true, c);
+  assert.equal(styleDeviation({ tool: 'Read', command: null }), false, 'a Read of a saved output is not a memory command');
   const shape = { matcher: '*', timeout: 30, events: ['PreToolUse', 'PostToolUse', 'PostToolUseFailure'] };
   const s = settingsFor(shape, 'http://127.0.0.1:1/hook/t', 'X:/b.txt', 'X:/jail/hive/agents/a/tool-output');
   for (const e of shape.events) assert.deepEqual(s.hooks[e], [{ matcher: '*', hooks: [{ type: 'http', url: 'http://127.0.0.1:1/hook/t', timeout: 30 }] }]);
