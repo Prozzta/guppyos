@@ -21,6 +21,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
+const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { createRequire } = require('node:module');
 
@@ -111,6 +112,7 @@ function inProcessFork(runWorker, deps) {
   const { WordPieceTokenizer, wordPieceConfigFromTokenizerJson } = L('src/main/nativeMemory/wordpiece.ts');
   const { effectiveLevel } = L('src/shared/claims.ts');
   const C = L('src/main/toolOutputCondense.ts');
+  const { normalizeAgentProvider } = L('src/shared/agentProvider.ts');
 
   const hive = spec.hive;
   const ud = spec.userData;
@@ -121,6 +123,19 @@ function inProcessFork(runWorker, deps) {
   const registry = () => { try { return loadRegistry(hive); } catch { return DEFAULT_KEY_REGISTRY; } };
   // index.ts claimLevel: the setting narrowed by memory-sources.json `ledger`.
   const claimLevel = (agentId) => effectiveLevel(config.claimLedger, readSourcesConfig(hive).ledger?.[agentId]).level;
+  const reg = JSON.parse(fs.readFileSync(path.join(hive, 'registry.json'), 'utf8'));
+  const world = JSON.parse(fs.readFileSync(spec.world, 'utf8'));
+  const worldCalls = { git: 0, fileExists: 0, unrecorded: [] };
+  const frozenGit = async (cwd, args) => {
+    worldCalls.git++;
+    if (world.cwds?.[cwd]?.git !== 'not-a-repository') worldCalls.unrecorded.push(`git ${args[0]} in ${cwd}`);
+    return null; // runGit's answer outside a repository (a non-zero exit)
+  };
+  const frozenFileExists = (abs) => {
+    worldCalls.fileExists++;
+    if (!Object.prototype.hasOwnProperty.call(world.files ?? {}, abs)) { worldCalls.unrecorded.push(`fileExists ${abs}`); return false; }
+    return world.files[abs];
+  };
 
   const store = new ClaimStore({
     hiveRoot: hive,
@@ -192,7 +207,10 @@ function inProcessFork(runWorker, deps) {
     registry: () => registry(),
     derive,
     worldView,
-    agentCwd: (agentId) => { try { return JSON.parse(fs.readFileSync(path.join(hive, 'registry.json'), 'utf8')).agents?.[agentId]?.cwd ?? null; } catch { return null; } },
+    agentCwd: (agentId) => reg.agents?.[agentId]?.cwd ?? null,
+    // M3: the world view answers from the addendum's world.json, recorded once, never the live disk.
+    git: frozenGit,
+    fileExists: frozenFileExists,
     tasks,
     usage: (agentId) => { try { return fs.readFileSync(store.usageFile(agentId), 'utf8').split('\n').filter(Boolean).flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } }); } catch { return []; } },
     countTokens: () => {
@@ -233,24 +251,53 @@ function inProcessFork(runWorker, deps) {
   const synced = workerReady ? await workerReady : null;
   const status1 = await nativeMemory.query('status');
 
-  const cap = C.effectiveCap(config.toolOutputCap);
   const cli = path.join(spec.tree, 'resources', 'memory-cli.cjs');
-  /** One `memory ...` call, exactly as an agent shell runs it: argv passed through unchanged. */
-  const runCli = (asker, argv) => new Promise((resolve) => {
+  /**
+   * What the asker READS from one call, as hooks.ts condensedToolOutput gives it (ruling G1):
+   * - Claude Code's Bash tool hands the hook stdout and stderr trimmed (identity check: the live
+   *   tool text is the CLI's output without its leading and trailing newlines);
+   * - only a claude-provider agent is condensed; god gets at least the read cap unless the registry
+   *   sets its own cap (M2);
+   * - a trailing `#full` is a shell comment: the CLI never sees it, the condenser skips (M1);
+   * - the full text is saved under the asker's jailed tool-output folder, and that real path is the
+   *   footer (m2). footerSensitive: the kept body would differ with a live-hive path of the
+   *   production length.
+   */
+  const viewOf = (asker, command, code, stdout, stderr, callId) => {
+    const meta = reg.agents?.[asker] ?? {};
+    const provider = normalizeAgentProvider(meta.provider);
+    const r = { stdout: stdout.trim(), stderr: stderr.trim(), interrupted: false };
+    const seenRaw = C.outputText(r);
+    if (provider && provider !== 'claude') return { provider, cap: 0, seen: seenRaw, condensed: null };
+    const own = meta.toolOutputCap;
+    const isGod = typeof own !== 'number' && (reg.godId === asker || !!meta.isGod);
+    const configured = C.effectiveCap(typeof own === 'number' ? own : config.toolOutputCap);
+    const cap = C.capForCommand(command, isGod && configured ? Math.max(configured, C.TOOL_OUTPUT_CAP_READ) : configured);
+    if (code !== 0 || !C.shouldCondense('Bash', { command }, r, cap)) return { provider: provider ?? null, cap, seen: seenRaw, condensed: null };
+    const id = `toolu_${crypto.createHash('sha256').update(callId).digest('base64url').replace(/[-_]/g, '').slice(0, 24)}`;
+    const dir = path.join(hive, 'agents', asker, 'tool-output');
+    fs.mkdirSync(dir, { recursive: true });
+    const saved = path.join(dir, `${id}.txt`);
+    fs.writeFileSync(saved, seenRaw, 'utf8');
+    const condensed = C.condenseOutput({ text: seenRaw, cap, path: saved });
+    const liveLength = C.condenseOutput({ text: seenRaw, cap, path: path.join('C:\\Dunder\\hive', 'agents', asker, 'tool-output', `${id}.txt`) });
+    const body = (t) => t.slice(0, t.lastIndexOf('\n[full output: '));
+    return { provider: provider ?? null, cap, seen: condensed, condensed, savedAs: path.relative(hive, saved), footerSensitive: body(condensed) !== body(liveLength) };
+  };
+  /** One `memory ...` call, exactly as an agent shell runs it: argv passed through unchanged (a
+   *  trailing `#full` is the shell comment, so it is not passed). */
+  const runCli = (asker, argv, callId) => new Promise((resolve) => {
+    const full = argv[argv.length - 1] === '#full';
+    const cliArgv = full ? argv.slice(0, -1) : argv;
     const env = { ELECTRON_RUN_AS_NODE: '1', MUNDER_HIVE_ROOT: hive, MUNDER_MEMORY_URL: baseUrl, MEMORY_TOKEN: nativeMemory.tokens.mint(asker) };
     for (const k of ['SystemRoot', 'SYSTEMROOT', 'windir', 'PATH', 'Path', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP']) if (process.env[k] !== undefined) env[k] = process.env[k];
-    const p = spawn(process.execPath, [cli, ...argv], { env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const p = spawn(process.execPath, [cli, ...cliArgv], { env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = ''; let stderr = '';
     p.stdout.setEncoding('utf8').on('data', (d) => { stdout += d; });
     p.stderr.setEncoding('utf8').on('data', (d) => { stderr += d; });
     p.on('close', (code) => {
-      const command = ['memory', ...argv.map((a) => (/[\s"']/.test(a) ? JSON.stringify(a) : a))].join(' ');
-      const c = C.capForCommand(command, cap);
-      const r = { stdout, stderr, interrupted: false };
-      const condensed = code === 0 && C.shouldCondense('Bash', { command }, r, c)
-        ? C.condenseOutput({ text: C.outputText(r), cap: c, path: '<tool-output>' })
-        : null;
-      resolve({ argv, command, exit: code, stdout, stderr, condensed });
+      const command = ['memory', ...cliArgv.map((a) => (/[\s"']/.test(a) ? JSON.stringify(a) : a))].join(' ') + (full ? ' #full' : '');
+      resolve({ argv, command, exit: code, stdout, stderr, ...viewOf(asker, command, code, stdout, stderr, callId) });
     });
   });
 
@@ -262,13 +309,13 @@ function inProcessFork(runWorker, deps) {
       const text = await claimDelivery.workingSet(item.asker, s, WORKING_SET_MAX_CHARS);
       briefing[s] = { text, chars: text ? text.length : 0 };
     }
-    const wakeUp = item.wakeUp === false ? null : await runCli(item.asker, ['wake-up']);
+    const wakeUp = item.wakeUp === false ? null : await runCli(item.asker, ['wake-up'], `${item.id}#w`);
     const searches = [];
-    for (const argv of item.searches || []) searches.push(await runCli(item.asker, argv));
+    for (const [i, argv] of (item.searches || []).entries()) searches.push(await runCli(item.asker, argv, `${item.id}#s${i + 1}`));
     emit({ id: item.id, asker: item.asker, briefing, wakeUp, searches });
     n++;
   }
-  emit({ summary: { ok: true, items: n, ledgers, synced, status0: status0.json ?? null, status1: status1.json ?? null, cap, logKinds: [...new Set(logRows.map((r) => r.kind))] } });
+  emit({ summary: { ok: worldCalls.unrecorded.length === 0, reason: worldCalls.unrecorded.length ? `the world view asked ${worldCalls.unrecorded.length} unrecorded question(s): ${worldCalls.unrecorded[0]}` : undefined, items: n, ledgers, synced, worldCalls, status0: status0.json ?? null, status1: status1.json ?? null, cap: C.effectiveCap(config.toolOutputCap), logKinds: [...new Set(logRows.map((r) => r.kind))] } });
   server.close();
   await nativeMemory.shutdown().catch(() => {});
   fs.closeSync(out);

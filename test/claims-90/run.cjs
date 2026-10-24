@@ -4,14 +4,16 @@
  * product's real retrieval paths at the tree's sha (answer-child.cjs), over a disposable copy of
  * the frozen snapshot, and records the returned text per item for blind scoring.
  *
- *   node test/claims-90/run.cjs --snapshot <snapshot dir> --items <items.jsonl> --out <dir>
- *        [--resources <installed app resources dir>] [--now <ISO>] [--keep]
+ *   node test/claims-90/run.cjs --snapshot <snapshot dir> --addendum <addendum dir> --items <items.jsonl>
+ *        --out <dir> [--resources <installed app resources dir>] [--now <ISO, default T_s>] [--keep]
  *
  * items.jsonl, one per line: { "id": "...", "asker": "<agent id>", "searches": [["search", "<q>"], ...],
  *                              "wakeUp": true }   (searches are `memory` argv, passed through unchanged)
  * Writes only under --out: answers.jsonl (one row per item, then a summary row) and run.json.
  *
- * Before any answer it stops on: a snapshot file whose sha256 differs from the manifest, a link or
+ * T_s is the manifest's takenFrom (spec v2 §5.1). The addendum (addendum.cjs) carries the world
+ * view the briefing reads, recorded once; it must name this snapshot's manifest sha.
+ * Before any answer it stops on: a snapshot or addendum file whose sha256 differs, a link or
  * junction anywhere in the snapshot, a model that is not the tree's (manifest digests), or a live
  * hive path in the sandbox. The snapshot is never used in place.
  */
@@ -30,10 +32,10 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--keep') o.keep = true;
-    else if (/^--(snapshot|items|out|resources|now|tree)$/.test(a)) o[a.slice(2)] = argv[++i];
+    else if (/^--(snapshot|addendum|items|out|resources|now|tree)$/.test(a)) o[a.slice(2)] = argv[++i];
     else throw new Error(`unknown argument ${a}`);
   }
-  for (const k of ['snapshot', 'items', 'out']) if (!o[k]) throw new Error(`--${k} is required`);
+  for (const k of ['snapshot', 'addendum', 'items', 'out']) if (!o[k]) throw new Error(`--${k} is required`);
   o.tree = path.resolve(o.tree || REPO);
   o.resources = path.resolve(o.resources || path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Munder Difflin', 'Guppy', 'resources'));
   return o;
@@ -64,6 +66,20 @@ function verifySnapshot(snap) {
     if (sha256(fs.readFileSync(p)) !== f.sha256) diffs.push(`changed ${f.path}`);
   }
   return { manifest, manifestSha256: sha256(mbuf), diffs };
+}
+
+/** Re-hash the addendum (spec v2 §5.3): it must name this snapshot's manifest, and every file must match. */
+function verifyAddendum(dir, manifestSha256) {
+  const abuf = fs.readFileSync(path.join(dir, 'addendum.json'));
+  const addendum = JSON.parse(abuf);
+  const diffs = [];
+  if (addendum.snapshotManifestSha256 !== manifestSha256) diffs.push('it names another snapshot');
+  for (const f of addendum.files) {
+    const p = path.join(dir, f.path);
+    if (!fs.existsSync(p)) diffs.push(`missing ${f.path}`);
+    else if (sha256(fs.readFileSync(p)) !== f.sha256) diffs.push(`changed ${f.path}`);
+  }
+  return { addendum, addendumSha256: sha256(abuf), diffs };
 }
 
 function parseItems(file) {
@@ -151,6 +167,11 @@ async function main(argv) {
   if (links.length) throw new Error(`the snapshot holds ${links.length} link(s) or junction(s): ${links[0]}`);
   const v = verifySnapshot(snap);
   if (v.diffs.length) throw new Error(`the snapshot differs from its manifest (${v.diffs.length}): ${v.diffs.slice(0, 3).join('; ')}`);
+  const addDir = path.resolve(o.addendum);
+  const addLinks = linksUnder(addDir);
+  if (addLinks.length) throw new Error(`the addendum holds a link or junction: ${addLinks[0]}`);
+  const a = verifyAddendum(addDir, v.manifestSha256);
+  if (a.diffs.length) throw new Error(`the addendum does not match (${a.diffs.length}): ${a.diffs.slice(0, 3).join('; ')}`);
   const items = parseItems(o.items);
   const treeModel = fs.readFileSync(path.join(o.tree, 'resources', 'models', 'native-memory-manifest.json'));
   const appModel = fs.readFileSync(path.join(o.resources, 'models', 'native-memory-manifest.json'));
@@ -159,14 +180,22 @@ async function main(argv) {
   fs.mkdirSync(o.out, { recursive: true });
   const home = fs.mkdtempSync(path.join(path.resolve(o.out), 'sandbox-'));
   for (const d of ['tmp', path.join('AppData', 'Local')]) fs.mkdirSync(path.join(home, d), { recursive: true });
-  const { hive, userData } = stageSandbox(snap, v.manifest, home);
+  const { hive, userData, hiveId } = stageSandbox(snap, v.manifest, home);
+  const world = path.join(home, 'world.json');
+  fs.copyFileSync(path.join(addDir, 'world.json'), world);
+  const indexFile = path.join(userData, 'memory', `${hiveId.to}-v2.sqlite`);
+  const index = { asCopied: sha256(fs.readFileSync(indexFile)), afterResync: null, walAfter: null };
+  const now = o.now || v.manifest.takenFrom;
   const answers = path.join(path.resolve(o.out), 'answers.jsonl');
   const specFile = path.join(home, 'answer-spec.json');
-  fs.writeFileSync(specFile, JSON.stringify({ tree: o.tree, hive, userData, home, resourcesDir: o.resources, now: o.now || v.manifest.takenTo, items, out: answers }));
+  fs.writeFileSync(specFile, JSON.stringify({ tree: o.tree, hive, userData, home, resourcesDir: o.resources, now, world, items, out: answers }));
   let child = null;
   try {
     const key = await unwrapKey(o.tree, userData, home);
     child = await runChild(o.tree, specFile, home, key, Math.max(10 * 60_000, items.length * 60_000));
+    // Spec C-S4: the index after main's re-sync (the child shut the worker down first).
+    index.afterResync = sha256(fs.readFileSync(indexFile));
+    index.walAfter = fs.existsSync(`${indexFile}-wal`) ? fs.statSync(`${indexFile}-wal`).size : null;
   } finally {
     if (!o.keep) {
       const inner = linksUnder(home);
@@ -178,7 +207,7 @@ async function main(argv) {
   const summary = rows.find((r) => r.summary)?.summary ?? { ok: false, reason: `the child left no summary (exit ${child?.code}): ${String(child?.stderr || '').slice(0, 600)}` };
   const run = {
     card: 'CLAIMS-90', startedAt: t0, finishedAt: new Date().toISOString(),
-    snapshot: path.basename(snap), manifestSha256: v.manifestSha256, now: o.now || v.manifest.takenTo,
+    snapshot: path.basename(snap), manifestSha256: v.manifestSha256, addendumSha256: a.addendumSha256, now, index,
     code: {
       head: git(o.tree, ['rev-parse', 'HEAD']),
       claimsTree: git(o.tree, ['rev-parse', 'HEAD:src/main/claims']),
@@ -201,4 +230,4 @@ if (require.main === module) {
   }, (e) => { console.error(`[claims-90] ${e.message}`); process.exitCode = 2; });
 }
 
-module.exports = { parseArgs, parseItems, verifySnapshot, linksUnder, stageSandbox, main };
+module.exports = { parseArgs, parseItems, verifySnapshot, verifyAddendum, linksUnder, stageSandbox, main };
