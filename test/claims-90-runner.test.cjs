@@ -136,6 +136,10 @@ test('answerer: hook settings follow the installed shape; env and transcript che
   assert.equal(dev('memory wake-up'), false);
   for (const c of ['memory search "q" | head -50', 'memory search "q" 2>&1', 'memory search q #full', 'memory search a; memory search b', 'memory search a && memory wake-up', 'cat x', 'echo $(memory search q)']) assert.equal(dev(c), true, c);
   assert.equal(styleDeviation({ tool: 'Read', command: null }), false, 'a Read of a saved output is not a memory command');
+  const answererSrc = codeOnly(readSource(path.join(__dirname, 'claims-90', 'answerer.cjs')));
+  assert.match(answererSrc, /const code0 = codeAt\(\);/, 'the code is recorded when the run starts');
+  assert.ok(answererSrc.indexOf('const code0 = codeAt();') < answererSrc.indexOf('await answerItem(o, v'), 'before the first item');
+  assert.match(answererSrc, /codeAtEnd:/, 'a change by the end is recorded');
   const { itemStyle } = require('./claims-90/answerer.cjs');
   const call = (command) => ({ tool: 'Bash', command, styleDeviation: dev(command), readType: /\|/.test(command) });
   assert.deepEqual(itemStyle([call('memory search "q"'), call('memory wake-up')]), { allBare: true, calls: 2, readTypeCalls: 0, fullCalls: 0, styleDeviations: 0 });
@@ -188,4 +192,46 @@ test('the addendum check names a changed file or another snapshot; refs at T_s c
   assert.equal(valueAt(log, 150), a);
   assert.equal(valueAt(log, 200), b, 'an entry at T_s counts');
   assert.equal(valueAt(`${log}\n${b} ${z} X <x> 300 +0000\tdelete`, 400), null, 'deleted before T_s');
+});
+
+test('C0b: a memory.md Read goes to the T_s copy, Read only; the leak check accepts a live path only when the hook rewrote it', () => {
+  const { memoryMdOf } = require('./claims-90/memory-md.cjs');
+  const { settingsFor, readTranscript } = require('./claims-90/answerer.cjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'c90-mmd-'));
+  const sbx = path.join(dir, 'hive');
+  fs.mkdirSync(path.join(sbx, 'agents', 'a'), { recursive: true });
+  fs.writeFileSync(path.join(sbx, 'agents', 'a', 'memory.md'), 'x');
+  const copy = path.join(sbx, 'agents', 'a', 'memory.md');
+  for (const live of ['C:/Dunder/hive/agents/a/memory.md', 'C:\\Dunder\\hive\\agents\\a\\memory.md', '/c/Dunder/hive/agents/a/memory.md']) {
+    assert.deepEqual(memoryMdOf(live, sbx), { kind: 'live', agent: 'a', target: copy }, live);
+  }
+  assert.deepEqual(memoryMdOf(copy, sbx), { kind: 'sandbox', agent: 'a', target: copy });
+  for (const no of ['C:/Dunder/hive/agents/b/memory.md', 'C:/Dunder/hive/agents/a/../a/memory.md', 'C:/Dunder/hive/agents/a/inbox/memory.md',
+    'C:/Dunder/hive/memory.md', 'C:/Dunder/hive/agents/a/memory.md.bak', path.join(sbx, 'agents', 'a', 'other.md'), null]) {
+    assert.equal(memoryMdOf(no, sbx), null, String(no));
+  }
+  const shape = { matcher: '*', timeout: 30, events: ['PreToolUse'] };
+  const st = settingsFor(shape, 'http://127.0.0.1:1/hook/t', 'X:/b.txt', 'X:/jail/hive/agents/a/tool-output', 'X:/jail/hive');
+  assert.ok(st.permissions.allow.includes('Read(//x/jail/hive/agents/*/memory.md)'), 'the sandbox copy is readable');
+  assert.ok(!st.permissions.allow.some((r) => /^Grep|Dunder\/hive/.test(r)), 'no Grep, nothing live');
+  assert.ok(!st.permissions.deny.includes('Read(//c/Dunder/hive/**)') && st.permissions.deny.includes('Edit(//c/Dunder/hive/**)'), 'a deny rule would beat the rewrite; Edit stays denied');
+  assert.ok(!st.permissions.allow.some((r) => /dunder\/hive/i.test(r)), 'and no allow rule reaches the live tree');
+  const t = path.join(dir, 't.jsonl');
+  const use = (id, name, input) => JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name, input }] } });
+  fs.writeFileSync(t, [
+    use('1', 'Read', { file_path: 'C:/Dunder/hive/agents/a/memory.md' }),
+    use('2', 'Read', { file_path: 'C:/Dunder/hive/agents/a/memory.md' }),
+    use('3', 'Read', { file_path: copy }),
+    use('4', 'Grep', { pattern: 'x', path: 'C:/Dunder/hive/agents/a/memory.md' }),
+    use('5', 'Bash', { command: 'grep x C:/Dunder/hive/agents/a/memory.md' }),
+  ].join('\n'));
+  const r = readTranscript(t, 'X:/jail/hive/agents/a/tool-output', [/[\\/]+Dunder[\\/]+hive/i], { sandboxHive: sbx, rewritten: new Set(['1']) });
+  assert.deepEqual(r.leaks.map((l) => l.id), ['2', '2', '4', '5'], 'not rewritten = a leak; Grep and Bash stay leaks');
+  assert.deepEqual(r.memoryMdReads.map((m) => [m.id, m.kind]), [['1', 'rewritten'], ['3', 'sandbox']]);
+  const child = fs.readFileSync(path.join(__dirname, 'claims-90', 'answer-child.cjs'), 'utf8');
+  assert.match(child, /p\.tool_name === 'Read' \? memoryMdOf\(/, 'the serve hook rewrites Read only');
+  assert.ok(child.indexOf("row.denied = 'call limit'") < child.indexOf('memoryMdOf(p.tool_input'), 'the 5-call limit comes first');
+  assert.match(child, /permissionDecision: 'allow', updatedInput: \{ \.\.\.p\.tool_input, file_path: m\.target \}/);
+  assert.ok(child.indexOf('memoryMdOf(p.tool_input') < child.indexOf("row.denied = 'live hive'"), 'any other live Read is denied by the hook');
+  fs.rmSync(dir, { recursive: true, force: true });
 });

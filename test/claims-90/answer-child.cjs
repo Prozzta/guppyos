@@ -24,6 +24,7 @@ const http = require('node:http');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { createRequire } = require('node:module');
+const { memoryMdOf } = require('./memory-md.cjs');
 
 const spec = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 const out = fs.openSync(spec.out, 'w');
@@ -376,6 +377,20 @@ function inProcessFork(runWorker, deps) {
           row.denied = 'call limit';
           fs.appendFileSync(spec.serve.hookLogFile, `${JSON.stringify(row)}\n`);
           return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: `The limit is ${spec.serve.maxCalls} tool calls.` } };
+        }
+        // C0b: a Read of an agent's memory.md goes to the sandbox's T_s copy (Read only).
+        const m = p.tool_name === 'Read' ? memoryMdOf(p.tool_input?.file_path, hive) : null;
+        if (m) {
+          row.memoryMd = { kind: m.kind === 'live' ? 'rewritten' : 'sandbox', agent: m.agent };
+          fs.appendFileSync(spec.serve.hookLogFile, `${JSON.stringify(row)}\n`);
+          if (m.kind === 'live') return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow', updatedInput: { ...p.tool_input, file_path: m.target } } };
+          return {};
+        }
+        // Any other Read of the live hive is refused here (the settings deny only Edit there; see settingsFor).
+        if (p.tool_name === 'Read' && /[\\/]+Dunder[\\/]+hive([\\/]|$)/i.test(String(p.tool_input?.file_path ?? ''))) {
+          row.denied = 'live hive';
+          fs.appendFileSync(spec.serve.hookLogFile, `${JSON.stringify(row)}\n`);
+          return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'The live hive is not readable here.' } };
         }
       } else if (event === 'PostToolUse') {
         try { updatedToolOutput = hooks.condensedToolOutput(asker, { ...p, transport: 'http' }); } catch { updatedToolOutput = null; }

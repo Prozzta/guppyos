@@ -28,6 +28,7 @@ const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { drillEnv } = require('../claims-drill/runner.cjs');
 const R = require('./run.cjs');
+const { memoryMdOf } = require('./memory-md.cjs');
 const Condense = require('../load-ts.cjs')(path.join(__dirname, '..', '..', 'src', 'main', 'toolOutputCondense.ts'));
 
 const REPO = path.resolve(__dirname, '..', '..');
@@ -97,7 +98,7 @@ function installMemoryShim(binDir) {
 
 const fwd = (p) => p.replace(/\\/g, '/');
 
-function settingsFor(shape, hookUrl, briefingFile, toolOutputDir) {
+function settingsFor(shape, hookUrl, briefingFile, toolOutputDir, sandboxHive) {
   const http = { matcher: shape.matcher, hooks: [{ type: 'http', url: hookUrl, timeout: shape.timeout }] };
   const hooks = {};
   for (const e of shape.events) hooks[e] = [http];
@@ -106,9 +107,14 @@ function settingsFor(shape, hookUrl, briefingFile, toolOutputDir) {
   return {
     hooks,
     permissions: {
-      allow: ['Bash(memory:*)', `Read(//${fwd(toolOutputDir).replace(/^([A-Za-z]):/, (_, d) => d.toLowerCase())}/**)`],
+      allow: ['Bash(memory:*)', `Read(//${fwd(toolOutputDir).replace(/^([A-Za-z]):/, (_, d) => d.toLowerCase())}/**)`,
+        // C0b (god 21:21): the claim-history pointer, on the T_s copy; the hook rewrites a live path to it.
+        ...(sandboxHive ? [`Read(//${fwd(sandboxHive).replace(/^([A-Za-z]):/, (_, d) => d.toLowerCase())}/agents/*/memory.md)`] : [])],
       deny: [
-        ...live.flatMap((p) => { const d = `//${p.replace(/^([A-Za-z]):/, (_, x) => x.toLowerCase())}/**`; return [`Read(${d})`, `Edit(${d})`]; }),
+        // A deny rule is matched on the path the model typed, before any PreToolUse hook runs (probed on CLI
+        // 2.1.310), so a Read deny on the live hive would refuse the memory.md Read the hook rewrites. With a
+        // sandbox, the live Read is left to the hook (rewrite or deny) and, behind it, to having no allow rule.
+        ...live.flatMap((p, i) => { const d = `//${p.replace(/^([A-Za-z]):/, (_, x) => x.toLowerCase())}/**`; return i === 0 && sandboxHive ? [`Edit(${d})`] : [`Read(${d})`, `Edit(${d})`]; }),
         'WebFetch', 'WebSearch',
       ],
       defaultMode: 'default',
@@ -164,7 +170,7 @@ function itemStyle(calls = []) {
 const filesIn = (dir) => { try { return dir ? fs.readdirSync(dir, { recursive: true }).length : 0; } catch { return 0; } };
 
 /** What the session did, from its stream-json transcript. Text stays local; the row holds counts. */
-function readTranscript(file, allowedRead, liveRes) {
+function readTranscript(file, allowedRead, liveRes, memoryMd = null) {
   const rows = fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } }) : [];
   const init = rows.find((r) => r.type === 'system' && r.subtype === 'init') || null;
   const result = rows.find((r) => r.type === 'result') || null;
@@ -177,7 +183,10 @@ function readTranscript(file, allowedRead, liveRes) {
     }
   }
   const leaks = [];
+  const memoryMdReads = [];
   for (const u of uses) {
+    const m = u.name === 'Read' && memoryMd ? memoryMdOf(u.input?.file_path, memoryMd.sandboxHive) : null;
+    if (m && (m.kind === 'sandbox' || memoryMd.rewritten.has(u.id))) { memoryMdReads.push({ id: u.id, kind: m.kind === 'live' ? 'rewritten' : 'sandbox', agent: m.agent }); continue; }
     const s = JSON.stringify(u.input);
     for (const re of liveRes) if (re.test(s)) leaks.push({ tool: u.name, id: u.id, pattern: String(re) });
     if (u.name === 'Read' && !String(u.input?.file_path || '').replace(/\\/g, '/').toLowerCase().startsWith(allowedRead.toLowerCase())) leaks.push({ tool: 'Read', id: u.id, pattern: 'outside the tool-output folder' });
@@ -194,6 +203,7 @@ function readTranscript(file, allowedRead, liveRes) {
     answer: result?.result ?? null,
     result: result ? { isError: !!result.is_error, subtype: result.subtype, turns: result.num_turns, costUsd: result.total_cost_usd, usage: result.usage, denials: (result.permission_denials || []).length } : null,
     leaks,
+    memoryMdReads,
   };
 }
 
@@ -246,7 +256,7 @@ async function answerItem(o, v, addDir, item, key, shape, instruction, outDir) {
     const jailBin = path.join(home, 'bin');
     row.memoryShim = installMemoryShim(jailBin);
     const settingsFile = path.join(home, 'claude-settings.json');
-    const settings = settingsFor(shape, a.hookUrl, a.briefing, a.toolOutputDir);
+    const settings = settingsFor(shape, a.hookUrl, a.briefing, a.toolOutputDir, hive);
     fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 1));
     row.settingsSha256 = sha256(JSON.stringify({ ...settings, hooks: { ...settings.hooks, SessionStart: '<briefing>' } }).replace(a.hookUrl, '<hook>').replace(/sandbox-[A-Za-z0-9]+/g, 'sandbox-*'));
     const prompt = instruction.replace(/\{asker\}/g, item.asker).replace(/\{today\}/g, v.manifest.takenFrom).replace(/\{question\}/g, item.question);
@@ -264,8 +274,8 @@ async function answerItem(o, v, addDir, item, key, shape, instruction, outDir) {
     row.ms = Date.now() - t0;
     fs.writeFileSync(serve.stopFile, '');
     await serverClosed;
-    const t = readTranscript(transcript, fwd(a.toolOutputDir), LIVE_RES());
     const hookRows = fs.existsSync(serve.hookLogFile) ? fs.readFileSync(serve.hookLogFile, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
+    const t = readTranscript(transcript, fwd(a.toolOutputDir), LIVE_RES(), { sandboxHive: hive, rewritten: new Set(hookRows.filter((x) => x.memoryMd?.kind === 'rewritten').map((x) => x.toolUseId)) });
     const memCalls = fs.existsSync(serve.callsFile) ? fs.readFileSync(serve.callsFile, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
     const serveRows = fs.existsSync(answers) ? fs.readFileSync(answers, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
     row.serve = serveRows.find((r) => r.summary)?.summary ?? { ok: false, reason: serverErr.slice(0, 300) };
@@ -285,6 +295,7 @@ async function answerItem(o, v, addDir, item, key, shape, instruction, outDir) {
     });
     row.memoryCalls = memCalls.map((m) => ({ cmd: m.cmd, args: m.args, exit: m.exit, chars: m.chars, textSha256: m.textSha256 }));
     row.denied = hookRows.filter((x) => x.denied).length;
+    row.memoryMdReads = t.memoryMdReads;
     row.init = t.init;
     row.result = t.result;
     row.answerSha256 = t.answer === null ? null : sha256(t.answer);
@@ -310,6 +321,14 @@ async function answerItem(o, v, addDir, item, key, shape, instruction, outDir) {
 async function main(argv) {
   const o = parseArgs(argv);
   const t0 = new Date().toISOString();
+  // The code is recorded when the run starts; a change by the end is recorded beside it (C0 lesson:
+  // a commit made during a long run used to be what run.json named).
+  const codeAt = () => ({
+    head: R.git(o.tree, ['rev-parse', 'HEAD']),
+    dirty: R.git(o.tree, ['status', '--porcelain', '--', 'src', 'resources/memory-cli.cjs', 'test/claims-90']) || '',
+    runnerSha256: sha256(['answerer.cjs', 'answer-child.cjs', 'run.cjs', 'briefing-hook.cjs'].map((f) => fs.readFileSync(path.join(__dirname, f), 'utf8')).join('\0')),
+  });
+  const code0 = codeAt();
   const snap = path.resolve(o.snapshot);
   if (R.linksUnder(snap).length) throw new Error('the snapshot holds a link or junction');
   const v = R.verifySnapshot(snap);
@@ -344,15 +363,18 @@ async function main(argv) {
     card: 'CLAIMS-90', mode: 'answerer', startedAt: t0, finishedAt: new Date().toISOString(),
     snapshot: path.basename(snap), manifestSha256: v.manifestSha256, addendumSha256: ad.addendumSha256, now: v.manifest.takenFrom,
     model: o.model, claudeExeSha256: sha256(fs.readFileSync(o.claude)), hookShape: shape, instructionSha256: sha256(instruction),
-    code: { head: R.git(o.tree, ['rev-parse', 'HEAD']), dirty: R.git(o.tree, ['status', '--porcelain', '--', 'src', 'resources/memory-cli.cjs', 'test/claims-90']) || '' },
+    code: code0,
+    codeAtEnd: (() => { const c = codeAt(); return JSON.stringify(c) === JSON.stringify(code0) ? 'unchanged' : c; })(),
     itemsSha256: sha256(fs.readFileSync(o.items)), items: items.length,
     invalid: rows.filter((r) => r.invalid).length,
     calls: rows.reduce((n, r) => n + (r.calls?.length ?? 0), 0),
     styleDeviations: rows.reduce((n, r) => n + (r.calls ?? []).filter((c) => c.styleDeviation).length, 0),
     readTypeCalls: rows.reduce((n, r) => n + (r.calls ?? []).filter((c) => c.readType).length, 0),
     allBareItems: rows.filter((r) => itemStyle(r.calls).allBare).length,
+    memoryMdReads: rows.reduce((n, r) => n + (r.memoryMdReads ?? []).length, 0),
+    memoryMdItems: rows.filter((r) => (r.memoryMdReads ?? []).length).length,
     stateSha256: [...new Set(rows.map((r) => r.stateSha256))],
-    perItem: rows.map((r) => ({ id: r.id, ...itemStyle(r.calls) })),
+    perItem: rows.map((r) => ({ id: r.id, ...itemStyle(r.calls), memoryMdReads: (r.memoryMdReads ?? []).length })),
   };
   fs.writeFileSync(path.join(outDir, 'run.json'), JSON.stringify(run, null, 1));
   return run;
