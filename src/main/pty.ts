@@ -495,14 +495,29 @@ export class PtyManager {
     for (const [id, s] of [...this.sessions.entries()]) {
       if (s.owner === wc) {
         s.explicitTeardown = true;   // its onExit is the harness's own close, not a crash
-        try {
-          const pid = s.proc.pid;
-          s.proc.kill();
-          ensureKilled(pid);
-        } catch { /* already gone */ }
+        try { this.closeTree(s); } catch { /* already gone */ }
         void id;
       }
     }
+  }
+
+  /** AGY-TEARDOWN: an explicit kill of ONE terminal and everything it started. On Windows the tree
+   *  is swept while it is still intact and the ConPTY is closed only after that sweep (or its cap),
+   *  killAllAsync's order. Closing first ended the root, so the sweep ensureKilled ran 4 s later was
+   *  `taskkill /T` on a dead pid and found nothing: every descendant off the pseudo-console (agy's
+   *  inner agy.exe on its own conhost, a detached daemon) lived on. node-pty's Windows kill already
+   *  terminates the console's processes outright, so no graceful close is lost. POSIX keeps the
+   *  polite SIGHUP and the group sweep after the grace. */
+  private closeTree(s: PtySession): void {
+    const pid = s.proc.pid;
+    if (process.platform !== 'win32') {
+      s.proc.kill();
+      ensureKilled(pid); // verify + sweep the process group so no PID leaks
+      return;
+    }
+    const close = (): void => { try { s.proc.kill(); } catch { /* already gone */ } };
+    if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) { close(); return; }
+    void killTreesAsync([pid]).then(close, close);
   }
 
   /** Register the natural-exit teardown callback. Invoked from inside node-pty's
@@ -1128,9 +1143,7 @@ export class PtyManager {
     try {
       s.explicitTeardown = true;   // ZERO-TOKEN-LIVENESS: marked BEFORE the kill
       s.out?.flush(); // what arrived before the kill still belongs on this pty's screen
-      const pid = s.proc.pid;
-      s.proc.kill();
-      ensureKilled(pid); // verify + sweep the process group so no PID leaks
+      this.closeTree(s);
       // kill() deletes the session now, so node-pty's later onExit is swallowed: report the end here.
       this.reportEnd(id, s, null);
       this.sessions.delete(id);
