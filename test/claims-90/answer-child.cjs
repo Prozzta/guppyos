@@ -231,17 +231,38 @@ function inProcessFork(runWorker, deps) {
 
   // The loopback route, as hooks.ts onMemory serves it: POST <base>/<token>, JSON in, {status, body} out.
   const server = http.createServer((req, res) => {
-    const m = /^\/memory\/([^/?]+)$/.exec(req.url || '');
     const reply = (status, body) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body ?? {})); };
+    const h = /^\/hook\/([^/?]+)$/.exec(req.url || '');
+    if (h && req.method === 'POST' && hookHandler) {
+      const chunks = [];
+      req.on('data', (d) => chunks.push(d));
+      req.on('end', () => {
+        let p = null;
+        try { p = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch { p = null; }
+        let r = {};
+        try { r = hookHandler(h[1], p) ?? {}; } catch (e) { r = {}; fs.appendFileSync(spec.serve.hookLogFile, `${JSON.stringify({ error: String(e).slice(0, 300) })}\n`); }
+        reply(200, r);
+      });
+      return;
+    }
+    const m = /^\/memory\/([^/?]+)$/.exec(req.url || '');
     if (!m || req.method !== 'POST') { req.resume(); reply(404, {}); return; }
     const chunks = [];
     req.on('data', (d) => chunks.push(d));
     req.on('end', () => {
       let body = null;
       try { body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch { body = null; }
-      nativeMemory.handle(m[1], body).then((r) => reply(r.status, r.body), () => reply(500, { exit: 4, error: 'memory handler failed' }));
+      const logCall = (status, b) => {
+        if (!spec.serve) return;
+        const text = typeof b?.text === 'string' ? b.text : '';
+        const row = { at: new Date().toISOString(), asker: askerOf.get(m[1]) ?? null, cmd: body?.cmd ?? null, args: body?.args ?? null, status, exit: b?.exit ?? null, chars: text.length, textSha256: crypto.createHash('sha256').update(text).digest('hex') };
+        fs.appendFileSync(spec.serve.callsFile, `${JSON.stringify(row)}\n`);
+      };
+      nativeMemory.handle(m[1], body).then((r) => { logCall(r.status, r.body); reply(r.status, r.body); }, () => { logCall(500, null); reply(500, { exit: 4, error: 'memory handler failed' }); });
     });
   });
+  const askerOf = new Map();
+  let hookHandler = null;
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const baseUrl = `http://127.0.0.1:${server.address().port}/memory`;
 
@@ -252,6 +273,18 @@ function inProcessFork(runWorker, deps) {
   const status1 = await nativeMemory.query('status');
 
   const cli = path.join(spec.tree, 'resources', 'memory-cli.cjs');
+  const CLAUDE_CODE_PERSIST_CHARS = 30_000;
+  const persistRisk = [];
+  // An unrecorded world question (M3) or an output Claude Code would have saved itself (S2) fails the run.
+  const verdict = () => {
+    if (worldCalls.unrecorded.length) return { ok: false, reason: `the world view asked ${worldCalls.unrecorded.length} unrecorded question(s): ${worldCalls.unrecorded[0]}` };
+    if (persistRisk.length) return { ok: false, reason: `${persistRisk.length} output(s) reached Claude Code's persist size (${CLAUDE_CODE_PERSIST_CHARS} chars): ${persistRisk[0]}` };
+    return { ok: true };
+  };
+  // Jim NIT: mailChannel falls back to codex for an agent with no provider; every asker must name one.
+  const askerIds = spec.serve ? spec.serve.askers : spec.items.map((it) => it.asker);
+  const noProvider = [...new Set(askerIds)].filter((a) => !normalizeAgentProvider(reg.agents?.[a]?.provider));
+  if (noProvider.length) { emit({ summary: { ok: false, reason: `asker(s) with no provider in the snapshot registry: ${noProvider.join(', ')}` } }); process.exit(3); }
   /**
    * What the asker READS from one call, as hooks.ts condensedToolOutput gives it (ruling G1):
    * - Claude Code's Bash tool hands the hook stdout and stderr trimmed (identity check: the live
@@ -263,18 +296,24 @@ function inProcessFork(runWorker, deps) {
    *   footer (m2). footerSensitive: the kept body would differ with a live-hive path of the
    *   production length.
    */
-  const viewOf = (asker, command, code, stdout, stderr, callId) => {
+  const viewOf = (asker, command, code, stdout, stderr, callId, toolUseId) => {
     const meta = reg.agents?.[asker] ?? {};
     const provider = normalizeAgentProvider(meta.provider);
     const r = { stdout: stdout.trim(), stderr: stderr.trim(), interrupted: false };
     const seenRaw = C.outputText(r);
+    // Jim S2: past this size Claude Code saves the output itself and the hook condenses a head and
+    // tail of that file, which the runner does not model: such a row fails the run.
+    if (seenRaw.length >= CLAUDE_CODE_PERSIST_CHARS) persistRisk.push(command);
     if (provider && provider !== 'claude') return { provider, cap: 0, seen: seenRaw, condensed: null };
     const own = meta.toolOutputCap;
     const isGod = typeof own !== 'number' && (reg.godId === asker || !!meta.isGod);
     const configured = C.effectiveCap(typeof own === 'number' ? own : config.toolOutputCap);
     const cap = C.capForCommand(command, isGod && configured ? Math.max(configured, C.TOOL_OUTPUT_CAP_READ) : configured);
-    if (code !== 0 || !C.shouldCondense('Bash', { command }, r, cap)) return { provider: provider ?? null, cap, seen: seenRaw, condensed: null };
-    const id = `toolu_${crypto.createHash('sha256').update(callId).digest('base64url').replace(/[-_]/g, '').slice(0, 24)}`;
+    // Jim S1, measured on Claude Code 2.1.310: a non-zero exit fires PostToolUseFailure with no
+    // tool_response, which condensedToolOutput never touches; the model reads "Exit code N" + output.
+    if (code !== 0) return { provider: provider ?? null, cap, seen: `Exit code ${code}\n${seenRaw}`, condensed: null };
+    if (!C.shouldCondense('Bash', { command }, r, cap)) return { provider: provider ?? null, cap, seen: seenRaw, condensed: null };
+    const id = toolUseId || `toolu_${crypto.createHash('sha256').update(callId).digest('base64url').replace(/[-_]/g, '').slice(0, 24)}`;
     const dir = path.join(hive, 'agents', asker, 'tool-output');
     fs.mkdirSync(dir, { recursive: true });
     const saved = path.join(dir, `${id}.txt`);
@@ -301,6 +340,80 @@ function inProcessFork(runWorker, deps) {
     });
   });
 
+  if (spec.serve) {
+    // M4 serve mode: the same wiring, kept up for a contained answerer session that makes its own
+    // `memory` calls (MUNDER_MEMORY_URL + its token). Its first context is the briefing written
+    // here (the compact render, as receipts show agents live in). Every call is logged; it stops
+    // when the stop file appears.
+    // The tool-output hook: the tree's own HookServer.condensedToolOutput decides and condenses
+    // (provider, registry cap, god's read cap, #full, the saved file). Only the HTTP accept and the
+    // token-to-agent lookup are stand-ins; the reply has the shape hooks.ts sends for PostToolUse.
+    // For each PostToolUse the runner's own view (viewOf) of the same output is logged beside it:
+    // gate 1 compares the two.
+    const { HookServer } = L('src/main/hooks.ts');
+    const hiveStub = {
+      registry: () => reg,
+      isGod: (id) => reg.godId === id || !!reg.agents?.[id]?.isGod,
+      toolOutputDir: (id) => (id ? path.join(hive, 'agents', id, 'tool-output') : null),
+      appendLog: (row) => log(row),
+    };
+    const hooks = new HookServer(hiveStub, () => null, () => config);
+    const hookTokens = new Map();
+    const preCalls = new Map();
+    hookHandler = (token, p) => {
+      const asker = hookTokens.get(token);
+      if (!asker || !p || typeof p !== 'object') return {};
+      const event = p.hook_event_name;
+      const command = typeof p.tool_input?.command === 'string' ? p.tool_input.command : null;
+      const row = { at: new Date().toISOString(), asker, event, tool: p.tool_name ?? null, toolUseId: p.tool_use_id ?? null, command };
+      let updatedToolOutput = null;
+      if (event === 'PreToolUse') {
+        // Spec 1b: at most 5 tool calls per item; a later call is refused, and logged.
+        const n = (preCalls.get(asker) ?? 0) + 1;
+        preCalls.set(asker, n);
+        row.call = n;
+        if (n > spec.serve.maxCalls) {
+          row.denied = 'call limit';
+          fs.appendFileSync(spec.serve.hookLogFile, `${JSON.stringify(row)}\n`);
+          return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: `The limit is ${spec.serve.maxCalls} tool calls.` } };
+        }
+      } else if (event === 'PostToolUse') {
+        try { updatedToolOutput = hooks.condensedToolOutput(asker, { ...p, transport: 'http' }); } catch { updatedToolOutput = null; }
+        const r = p.tool_response && typeof p.tool_response === 'object' ? p.tool_response : {};
+        row.response = { stdoutChars: typeof r.stdout === 'string' ? r.stdout.length : null, stderrChars: typeof r.stderr === 'string' ? r.stderr.length : null, persisted: !!r.persistedOutputPath, interrupted: r.interrupted === true };
+        row.hook = updatedToolOutput ? updatedToolOutput.stdout : null;
+        if (p.tool_name === 'Bash' && command && typeof r.stdout === 'string') {
+          const v = viewOf(asker, command, 0, r.stdout, typeof r.stderr === 'string' ? r.stderr : '', null, p.tool_use_id);
+          row.runner = v.condensed;
+          row.parity = row.hook === row.runner;
+        }
+      } else if (event === 'PostToolUseFailure') {
+        row.failure = { errorChars: typeof p.error === 'string' ? p.error.length : null, errorSha256: typeof p.error === 'string' ? crypto.createHash('sha256').update(p.error).digest('hex') : null, response: 'tool_response' in p };
+      }
+      fs.appendFileSync(spec.serve.hookLogFile, `${JSON.stringify(row)}\n`);
+      return updatedToolOutput ? { hookSpecificOutput: { hookEventName: 'PostToolUse', updatedToolOutput } } : {};
+    };
+    const askers = {};
+    for (const asker of spec.serve.askers) {
+      const hookToken = crypto.randomBytes(16).toString('hex');
+      hookTokens.set(hookToken, asker);
+      const token = nativeMemory.tokens.mint(asker);
+      askerOf.set(token, asker);
+      const text = await claimDelivery.workingSet(asker, 'compact', WORKING_SET_MAX_CHARS);
+      const file = path.join(path.dirname(spec.serve.connectFile), `briefing-${asker}.txt`);
+      fs.writeFileSync(file, text ?? '', 'utf8');
+      askers[asker] = { token, hookUrl: `${baseUrl.replace(/\/memory$/, '/hook')}/${hookToken}`, briefing: file, briefingChars: text ? text.length : 0, briefingSha256: crypto.createHash('sha256').update(text ?? '').digest('hex'), toolOutputDir: path.join(hive, 'agents', asker, 'tool-output') };
+    }
+    const connect = { url: baseUrl, hive, cli, askers, env: { MUNDER_HIVE_ROOT: hive, MUNDER_MEMORY_URL: baseUrl, MEMORY_TOKEN: '<askers[id].token>' }, calls: spec.serve.callsFile, stop: spec.serve.stopFile, ledgers, synced, worldCalls };
+    fs.writeFileSync(spec.serve.connectFile, JSON.stringify(connect, null, 1));
+    while (!fs.existsSync(spec.serve.stopFile)) await new Promise((r) => setTimeout(r, 500));
+    emit({ summary: { ...verdict(), persistRisk: persistRisk.length,served: Object.keys(askers), ledgers, synced, worldCalls } });
+    server.close();
+    await nativeMemory.shutdown().catch(() => {});
+    fs.closeSync(out);
+    process.exit(0);
+  }
+
   const sources = spec.briefingSources || ['compact', 'startup'];
   let n = 0;
   for (const item of spec.items) {
@@ -317,7 +430,7 @@ function inProcessFork(runWorker, deps) {
     emit({ id: item.id, asker: item.asker, briefing, wakeUp, searches });
     n++;
   }
-  emit({ summary: { ok: worldCalls.unrecorded.length === 0, reason: worldCalls.unrecorded.length ? `the world view asked ${worldCalls.unrecorded.length} unrecorded question(s): ${worldCalls.unrecorded[0]}` : undefined, items: n, ledgers, synced, worldCalls, status0: status0.json ?? null, status1: status1.json ?? null, cap: C.effectiveCap(config.toolOutputCap), logKinds: [...new Set(logRows.map((r) => r.kind))] } });
+  emit({ summary: { ...verdict(), persistRisk: persistRisk.length,items: n, ledgers, synced, worldCalls, status0: status0.json ?? null, status1: status1.json ?? null, cap: C.effectiveCap(config.toolOutputCap), logKinds: [...new Set(logRows.map((r) => r.kind))] } });
   server.close();
   await nativeMemory.shutdown().catch(() => {});
   fs.closeSync(out);

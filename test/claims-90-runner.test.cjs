@@ -98,10 +98,64 @@ test('PIN: the world view answers from the addendum, never the live disk (Jim M3
   const child = codeOnly(readSource('test/claims-90/answer-child.cjs'));
   assert.match(child, /git: frozenGit,\n\s*fileExists: frozenFileExists,/, 'delivery gets the frozen callbacks');
   assert.match(child, /if \(world\.cwds\?\.\[cwd\]\?\.git !== 'not-a-repository'\) worldCalls\.unrecorded\.push/, 'git is only answered for a cwd recorded as no repository');
-  assert.match(child, /summary: \{ ok: worldCalls\.unrecorded\.length === 0,/, 'an unrecorded world question fails the run');
+  assert.match(child, /if \(worldCalls\.unrecorded\.length\) return \{ ok: false,/, 'an unrecorded world question fails the run');
+  assert.match(child, /if \(persistRisk\.length\) return \{ ok: false,/, 'S2: an output Claude Code would save itself fails the run');
+  assert.equal((child.match(/summary: \{ \.\.\.verdict\(\),/g) || []).length, 2, 'both modes report the verdict');
   const run = codeOnly(readSource('test/claims-90/run.cjs'));
   assert.match(run, /const now = o\.now \|\| v\.manifest\.takenFrom;/, 'm1: now defaults to T_s (takenFrom)');
   assert.match(run, /index\.afterResync = sha256\(fs\.readFileSync\(indexFile\)\);/, 'm3: the index sha after the re-sync');
+});
+
+test('PIN: the contained answerer reads what the tree\'s own hook gives it (M4, Jim S1, S2, NIT)', () => {
+  const child = codeOnly(readSource('test/claims-90/answer-child.cjs'));
+  assert.match(child, /updatedToolOutput = hooks\.condensedToolOutput\(asker, \{ \.\.\.p, transport: 'http' \}\)/, 'the tree\'s HookServer decides and condenses');
+  assert.match(child, /return updatedToolOutput \? \{ hookSpecificOutput: \{ hookEventName: 'PostToolUse', updatedToolOutput \} \} : \{\};/, 'the reply shape hooks.ts sends');
+  assert.match(child, /const v = viewOf\(asker, command, 0, r\.stdout,[^\n]*p\.tool_use_id\);\n\s*row\.runner = v\.condensed;\n\s*row\.parity = row\.hook === row\.runner;/, 'gate 1: the runner\'s view of the same output beside it');
+  assert.match(child, /if \(n > spec\.serve\.maxCalls\) \{/, 'spec 1b: at most 5 tool calls');
+  assert.match(child, /if \(code !== 0\) return \{ provider: provider \?\? null, cap, seen: `Exit code \$\{code\}\\n\$\{seenRaw\}`, condensed: null \};/, 'S1: a failed call is read raw, after Claude Code\'s exit line');
+  assert.match(child, /if \(seenRaw\.length >= CLAUDE_CODE_PERSIST_CHARS\) persistRisk\.push\(command\);/, 'S2');
+  assert.match(child, /filter\(\(a\) => !normalizeAgentProvider\(reg\.agents\?\.\[a\]\?\.provider\)\)/, 'NIT: every asker names a provider');
+  const ans = codeOnly(readSource('test/claims-90/answerer.cjs'));
+  assert.match(ans, /'--setting-sources', 'project,local', '--strict-mcp-config', '--disable-slash-commands',/, 'no user settings, MCP servers, skills or commands');
+  assert.match(ans, /'--tools', 'Bash,Read'/, 'only the shim tools');
+  assert.match(ans, /allow: \['Bash\(memory:\*\)', `Read\(/, 'Bash only for memory, Read only on its saved outputs');
+  assert.match(ans, /if \(t\.leaks\.length\) row\.invalid = /, 'a leak makes the item INVALID');
+  assert.match(ans, /const row = await answerItem\(/, 'one fresh sandbox and session per item');
+  assert.match(ans, /R\.stageSandbox\(path\.resolve\(o\.snapshot\), v\.manifest, home\)/, 'each item starts from the T_s copy');
+});
+
+test('answerer: hook settings follow the installed shape; env and transcript checks', () => {
+  const { settingsFor, childEnv, readTranscript } = require('./claims-90/answerer.cjs');
+  const shape = { matcher: '*', timeout: 30, events: ['PreToolUse', 'PostToolUse', 'PostToolUseFailure'] };
+  const s = settingsFor(shape, 'http://127.0.0.1:1/hook/t', 'X:/b.txt', 'X:/jail/hive/agents/a/tool-output');
+  for (const e of shape.events) assert.deepEqual(s.hooks[e], [{ matcher: '*', hooks: [{ type: 'http', url: 'http://127.0.0.1:1/hook/t', timeout: 30 }] }]);
+  assert.deepEqual(Object.keys(s.hooks).sort(), ['PostToolUse', 'PostToolUseFailure', 'PreToolUse', 'SessionStart']);
+  assert.ok(s.permissions.deny.includes('Read(//c/Dunder/hive/**)'));
+  const saved = process.env.PATH;
+  process.env.PATH = ['C:\\Dunder\\hive\\bin\\memory', 'C:\\Windows'].join(path.delimiter);
+  process.env.HIVE_PROBE = 'x';
+  try {
+    const env = childEnv('J:/bin', { MEMORY_TOKEN: 't' });
+    assert.equal(env.PATH, ['J:/bin', 'C:\\Windows'].join(path.delimiter), 'no hive folder on PATH');
+    assert.equal(env.HIVE_PROBE, undefined, 'an allow-list: nothing of the hive passes');
+    assert.equal(env.MEMORY_TOKEN, 't');
+  } finally { process.env.PATH = saved; delete process.env.HIVE_PROBE; }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'c90-tr-'));
+  const f = path.join(dir, 't.jsonl');
+  const use = (id, name, input) => JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name, input }] } });
+  fs.writeFileSync(f, [
+    JSON.stringify({ type: 'system', subtype: 'init', tools: ['Bash', 'Read'], mcp_servers: [], plugins: [{ name: 'p', path: 'builtin' }] }),
+    use('1', 'Bash', { command: 'memory search x' }),
+    use('2', 'Bash', { command: 'cat C:/Dunder/hive/tasks.json' }),
+    use('3', 'Read', { file_path: 'X:/other/file.txt' }),
+    use('4', 'Read', { file_path: 'X:/jail/hive/agents/a/tool-output/toolu_1.txt' }),
+    JSON.stringify({ type: 'result', result: 'current: x', is_error: false }),
+  ].join('\n'));
+  const t = readTranscript(f, 'X:/jail/hive/agents/a/tool-output', [/[\\/]+Dunder[\\/]+hive/i]);
+  assert.deepEqual(t.leaks.map((l) => l.id), ['2', '3'], 'a live path and a Read outside the saved outputs');
+  assert.equal(t.init.otherPlugins, 0);
+  assert.equal(t.answer, 'current: x');
+  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 test('the addendum check names a changed file or another snapshot; refs at T_s come from the reflog', () => {

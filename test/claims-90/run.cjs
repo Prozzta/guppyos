@@ -230,4 +230,4 @@ if (require.main === module) {
   }, (e) => { console.error(`[claims-90] ${e.message}`); process.exitCode = 2; });
 }
 
-module.exports = { parseArgs, parseItems, verifySnapshot, verifyAddendum, linksUnder, stageSandbox, main };
+module.exports = { parseArgs, parseItems, verifySnapshot, verifyAddendum, linksUnder, stageSandbox, electronOf, unwrapKey, git, main };
