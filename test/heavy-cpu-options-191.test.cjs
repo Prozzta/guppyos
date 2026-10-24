@@ -95,7 +95,7 @@ test('the native helper pins hard-cap mode and the exact 50% CPU rate (M1)', () 
   assert.doesNotMatch(native, /SoleLiveMarkedJob/, 'no shared-folder newest-marker fallback may cap an unrelated caller');
   assert.match(native, /var rate = new CPU_RATE \{ ControlFlags = cap \? CPU_RATE_ENABLE \| CPU_RATE_HARD_CAP : 0, CpuRate = cap \? cpuRate : 0 \}/);
   assert.doesNotMatch(native, /LIMIT_AFFINITY|SetProcessAffinityMask/);
-  assert.match(native, /return \"\{\\\"background\\\":\" \+ \(background \? \"true\" : \"false\"\) \+ \",\\\"cap\\\":\" \+ \(cap \? \"true\" : \"false\"\) \+ \",\\\"rate\\\":\" \+ \(cap \? CPU_RATE_50_PERCENT : 0\) \+ \",\\\"affinity\\\":null\}\"/,
+  assert.match(native, /return \"\{\\\"background\\\":\" \+ \(background \? \"true\" : \"false\"\) \+ \",\\\"cap\\\":\" \+ \(cap \? \"true\" : \"false\"\) \+ \",\\\"rate\\\":\" \+ \(cap \? rate\.CpuRate : 0\) \+ \",\\\"affinity\\\":null\}\"/,
     'M1: capped queries must explicitly report no affinity limit');
   assert.match(native, /unsupported outer job; cap not applied \(ERROR_ACCESS_DENIED\)/,
     'an outer-job access denial is loud and distinguishable from an ordinary helper error');
@@ -389,7 +389,6 @@ test('LIVE Bash join keeps its marker for repeated, sibling and background self-
     const env = { ...process.env, LOCALAPPDATA: markerJail };
     const knownLocal = spawnSync('powershell.exe', ['-NoProfile', '-Command', '[Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)'], { encoding: 'utf8', windowsHide: true }).stdout.trim();
     const knownRoot = path.join(knownLocal, 'Munder Difflin', 'Guppy', 'heavyjob-markers');
-    const knownBefore = fs.existsSync(knownRoot) ? fs.readdirSync(knownRoot).sort() : [];
     const quote = (s) => `'${s.replace(/'/g, "'\\\"'\\\"'")}'`;
     const expected = { background: false, cap: true, rate: 5000, affinity: null };
     const serve = spawn(exe, ['serve'], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true, env });
@@ -431,6 +430,7 @@ test('LIVE Bash join keeps its marker for repeated, sibling and background self-
         : 'echo READY; sleep 2';
       return spawn(bash, ['-lc', `${quote(exe)} join ${name} 0 ${cap ? 1 : 0}; ${program}`], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env });
     };
+    let capName; let uncappedName; let capped; let uncapped;
     try {
       // The same shell, two separately spawned Node processes, and a background command all find
       // the still-live shell marker.  A marker is lifetime state, not a one-shot query token.
@@ -441,10 +441,9 @@ test('LIVE Bash join keeps its marker for repeated, sibling and background self-
        await assertQueries(`${quote(exe)} self-query; ${quote(exe)} self-query & wait`, 2);
        // A marker folder is shared by this Windows user, so only membership of the querying child
        // can select it.  Hold a cap live and prove an unrelated process does not borrow it.
-       const capName = `${id}-live-cap`; const uncappedName = `${id}-live-uncapped`;
+       capName = `${id}-live-cap`; uncappedName = `${id}-live-uncapped`;
        assert.deepEqual(await ask(`create ${capName} 0 1`), { ok: true });
        assert.deepEqual(await ask(`create ${uncappedName} 0 0`), { ok: true });
-        let capped; let uncapped;
         const markerRoot = path.join(markerJail, 'Munder Difflin', 'Guppy', 'heavyjob-markers');
        try {
          const queryFile = path.join(process.env.TEMP || os.tmpdir(), `${capName}.json`);
@@ -467,10 +466,15 @@ test('LIVE Bash join keeps its marker for repeated, sibling and background self-
      } finally {
        try { serve.stdin.end(); } catch { /* gone */ }
        if (serve.exitCode === null) await new Promise((resolve) => serve.once('exit', resolve));
-       const knownAfter = fs.existsSync(knownRoot) ? fs.readdirSync(knownRoot).sort() : [];
-       assert.deepEqual(knownAfter, knownBefore, 'a jailed join must not create markers under Environment.GetFolderPath(LocalApplicationData)');
        fs.rmSync(markerJail, { recursive: true, force: true });
      }
+    // Do not snapshot/diff another user's shared marker folder: only this test's identifiers matter.
+    const forbidden = [id, capName, uncappedName, capped?.pid, uncapped?.pid].filter(Boolean).map(String);
+    const knownFiles = fs.existsSync(knownRoot) ? fs.readdirSync(knownRoot) : [];
+    for (const file of knownFiles) {
+      const body = fs.readFileSync(path.join(knownRoot, file), 'utf8');
+      assert.ok(!forbidden.some((token) => file.includes(token) || body.includes(token)), `jailed B1 leaked marker ${file} into real LocalAppData`);
+    }
   });
 
 test('LIVE cmd: the `&` join line leaves the command exactly as cmd runs it (output and exit code), and its processes are in the job',

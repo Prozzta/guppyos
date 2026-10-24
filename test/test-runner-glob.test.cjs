@@ -117,7 +117,7 @@ test('a self-queried hard-capped heavy job scales node test concurrency and its 
   assert.match(logs.lines.join('\n'), /heavy CPU rate 5000: node concurrency 16 of 32 visible cores/);
   assert.strictEqual(runner.cappedCores({}, 1, 5000), 1, 'one visible core remains one');
   let helperCall;
-  assert.equal(runner.selfJobRate({ env: {}, platform: 'win32', spawnSyncFn: (...args) => { helperCall = args; return { status: 0, stdout: '{"rate":5000}' }; } }), 5000, 'self-query makes Bash and PowerShell joins cap-aware');
+  assert.equal(runner.selfJobRate({ env: {}, platform: 'win32', spawnSyncFn: (...args) => { helperCall = args; return { status: 0, stdout: '{"cap":true,"rate":5000}' }; } }), 5000, 'self-query makes Bash and PowerShell joins cap-aware');
   assert.equal(helperCall[0], runner.HEAVYJOB_HELPER, 'self-query uses this branch\'s built helper, not PATH');
   assert.deepEqual(helperCall[1], ['self-query']);
   assert.throws(
@@ -132,7 +132,8 @@ test('a self-queried hard-capped heavy job scales node test concurrency and its 
     'a fresh npm-ci tree has no helper and therefore no cap information'
   );
   assert.match(notices.lines.join('\n'), /helper is not built .*CPU cap unknown/);
-  assert.equal(runner.selfJobRate({ env: { GUPPY_HEAVY_CPU_CAP: '0' }, platform: 'win32', spawnSyncFn: () => ({ stdout: '{"rate":5000}' }) }), 0, 'an explicit cap-off override wins');
+  assert.equal(runner.selfJobRate({ env: { GUPPY_HEAVY_CPU_CAP: '0' }, platform: 'win32', spawnSyncFn: () => ({ stdout: '{"cap":true,"rate":5000}' }) }), 0, 'an explicit cap-off override wins');
+  assert.equal(runner.selfJobRate({ env: {}, platform: 'win32', spawnSyncFn: () => ({ status: 0, stdout: '{"cap":false,"rate":0}' }) }), 0, 'an uncapped job reports no usable rate');
 
   const queryFailure = sink();
   assert.equal(run({

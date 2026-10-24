@@ -17,7 +17,7 @@ function cappedHeavyJob(env = process.env) {
   if (env.GUPPY_HEAVY_CPU_CAP === '0' || process.platform !== 'win32') return false;
   try {
     const reply = JSON.parse(execFileSync(HEAVYJOB_HELPER, ['self-query'], { encoding: 'utf8', windowsHide: true, timeout: 15_000, env }));
-    return reply?.rate > 0;
+    return reply?.cap === true && Number.isInteger(reply?.rate) && reply.rate > 0;
   } catch { return false; } // a focused npm-ci tree may not have the helper built yet
 }
 

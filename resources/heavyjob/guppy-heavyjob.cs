@@ -432,8 +432,8 @@ static class HeavyJob
             try {
                 if (!QueryInformationJobObject(job, 15, rbuf, rsize, IntPtr.Zero)) throw new Exception("QueryInformationJobObject CPU rate failed (" + Marshal.GetLastWin32Error() + ")");
                 var rate = (CPU_RATE)Marshal.PtrToStructure(rbuf, typeof(CPU_RATE));
-                bool cap = (rate.ControlFlags & (CPU_RATE_ENABLE | CPU_RATE_HARD_CAP)) == (CPU_RATE_ENABLE | CPU_RATE_HARD_CAP) && rate.CpuRate == CPU_RATE_50_PERCENT;
-                return "{\"background\":" + (background ? "true" : "false") + ",\"cap\":" + (cap ? "true" : "false") + ",\"rate\":" + (cap ? CPU_RATE_50_PERCENT : 0) + ",\"affinity\":null}";
+                bool cap = (rate.ControlFlags & (CPU_RATE_ENABLE | CPU_RATE_HARD_CAP)) == (CPU_RATE_ENABLE | CPU_RATE_HARD_CAP);
+                return "{\"background\":" + (background ? "true" : "false") + ",\"cap\":" + (cap ? "true" : "false") + ",\"rate\":" + (cap ? rate.CpuRate : 0) + ",\"affinity\":null}";
             } finally { Marshal.FreeHGlobal(rbuf); }
         }
         finally { Marshal.FreeHGlobal(buf); }
@@ -527,6 +527,11 @@ static class HeavyJob
                 IntPtr job;
                 if ((w.Length == 4 || w.Length == 5) && w[0] == "create")
                 {
+                    // 5000 is 50% of all logical processors. Under the legacy heavyJobsHalfCores
+                    // affinity job that equals the affinity ceiling, so the rate cap adds nothing there;
+                    // with half-cores off it bites against the full set. Validate before holding a job.
+                    uint cpuRate = w.Length == 5 ? uint.Parse(w[4]) : CPU_RATE_50_PERCENT;
+                    if (cpuRate == 0 || cpuRate > 10000) throw new Exception("bad CPU rate");
                     string name = JobName(w[1]);
                     if (!jobs.TryGetValue(w[1], out job))
                     {
@@ -535,8 +540,6 @@ static class HeavyJob
                         jobs[w[1]] = job;
                         keys[w[1]] = Watch(port, job, w[1], ref next);
                     }
-                    uint cpuRate = w.Length == 5 ? uint.Parse(w[4]) : CPU_RATE_50_PERCENT;
-                    if (cpuRate == 0 || cpuRate > 10000) throw new Exception("bad CPU rate");
                     Apply(job, w[2] == "1", w[3] == "1", cpuRate);
                     reply = "{\"ok\":true}";
                 }

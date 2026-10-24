@@ -228,6 +228,9 @@ export class HeavyJobs {
     const id = heavyJobId(agentId, ++this.seq, start);
     const wrapped = wrapToolInput(toolInput, id, o, cmd);
     if (!wrapped) return null;
+    // 5000 means 50% of all logical processors. Under the legacy heavyJobsHalfCores affinity job
+    // that equals the affinity ceiling, so the rate cap adds nothing there; with half-cores off it
+    // bites against the full set. Keep the shipped half-machine rate unchanged.
     const r = await this.req(`create ${id} ${o.background ? 1 : 0} ${o.cap ? 1 : 0}`);
     // Not created: the join line still makes the job with these limits itself (the options hold);
     // only a later live change cannot reach it.

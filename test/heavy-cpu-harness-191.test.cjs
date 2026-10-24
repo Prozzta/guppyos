@@ -81,8 +81,10 @@ test('REGRESSIONS: cmd receives a child script path, and M10 normalises CPU core
   assert.match(source, /writeFileSync\(childPath, RECOVERY_CHILD\)/, 'the multi-line recovery program is materialised as a script');
   assert.match(source, /process\.execPath, childPath\]/, 'cmd join receives the script path, not a multi-line -e argument');
   assert.match(source, /const processors = availableParallelism\(\)/, 'M10 saturates the processors available to this process');
-  assert.match(source, /const capRate = Math\.max\(100, Math\.floor\(open\.cpu \/ open\.wall \/ processors \* 5000\)\)/, 'M10 caps below the measured open ceiling');
-  assert.match(source, /open\.work \/ capped\.work >= 1\.5/, 'M10 proves the cap changes completed work');
+      assert.match(source, /const capRate = Math\.max\(100, Math\.floor\(open\.cpu \/ open\.wall \/ processors \* 2500\)\)/, 'M10 caps near a quarter of the measured open ceiling');
+      assert.match(source, /Math\.round\(ceiling\.cpu \/ ceiling\.wall\)/, 'M10 sizes workers to the measured open ceiling');
+      assert.match(source, /cappedCpuRate <= openCpuRate \* 0\.6/, 'M10 proves the cap reduces CPU time per wall second');
+      assert.match(source, /cappedCpuRate <= targetCpuRate \* 1\.25/, 'M10 proves CPU time never exceeds the requested rate ceiling');
 });
 
 test('LIVE: a fresh cap-off job creates and joins, then cap on/off/on applies to the held job (M1/M8/M9)',
@@ -184,7 +186,7 @@ test('RENDERED: cap on/off/on flips while a real App job is alive (MUST-1)',
     } finally { try { serve?.stdin.end(); } catch {} if (serve?.exitCode === null) await new Promise((resolve) => serve.once('exit', resolve)); rmSync(dir, { recursive: true, force: true }); }
   });
 
-test('LIVE: all available busy threads get about half their available throughput when the job is capped, then recover uncapped (M10)',
+test('LIVE: a measured sub-ceiling cap reduces available busy throughput, then the job recovers uncapped (M10)',
   { skip: process.platform !== 'win32' ? 'heavy jobs are Windows-only' : !existsSync(CSC) ? `no in-box csc at ${CSC}` : false, timeout: 120_000 },
   async () => {
     const dir = mkdtempSync(join(tmpdir(), 'hcpu-throughput-'));
@@ -196,25 +198,40 @@ test('LIVE: all available busy threads get about half their available throughput
       serve = spawn(exe, ['serve'], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true, env: jailedEnv(dir) });
       const askLine = serveChannel(serve.stdout, (line) => serve.stdin.write(line));
       const ask = async (line) => JSON.parse(await askLine(line));
-      const worker = "const {parentPort,workerData}=require('node:worker_threads');let n=0;while(Date.now()<workerData){n++;}parentPort.postMessage(n)";
+      const worker = "const {parentPort,workerData}=require('node:worker_threads');const gate=new Int32Array(workerData.gate);parentPort.postMessage('ready');Atomics.wait(gate,0,0);const end=Date.now()+workerData.ms;let n=0;while(Date.now()<end){n++;}parentPort.postMessage(n)";
       const processors = availableParallelism();
-      const busy = `const {Worker}=require('node:worker_threads');const source=${JSON.stringify(worker)},end=Date.now()+4000,w=Date.now(),c=process.cpuUsage();Promise.all(Array.from({length:${processors}},()=>new Promise(r=>new Worker(source,{eval:true,workerData:end}).once('message',r)))).then((counts)=>{const u=process.cpuUsage(c);console.log(JSON.stringify({wall:Date.now()-w,cpu:(u.user+u.system)/1000,work:counts.reduce((a,n)=>a+n,0)}))})`;
-      const run = async (cap, rate = 5000) => {
+      const busy = (workers) => `const {Worker}=require('node:worker_threads');const source=${JSON.stringify(worker)},gate=new SharedArrayBuffer(4),list=Array.from({length:${workers}},()=>new Worker(source,{eval:true,workerData:{gate,ms:4000}}));let ready=0,counts=[],w,c;for(const x of list)x.on('message',(m)=>{if(m==='ready'){if(++ready===list.length){w=Date.now();c=process.cpuUsage();Atomics.store(new Int32Array(gate),0,1);Atomics.notify(new Int32Array(gate),0)}}else if(counts.push(m)===list.length){const u=process.cpuUsage(c);console.log(JSON.stringify({wall:Date.now()-w,cpu:(u.user+u.system)/1000,work:counts.reduce((a,n)=>a+n,0)}))}})`;
+      const run = async (cap, rate = 5000, workers = processors) => {
         const id = `rate-${process.pid}-${Date.now().toString(36)}-${cap}`;
         assert.deepEqual(await ask(`create ${id} 0 ${cap}${cap ? ` ${rate}` : ''}`), { ok: true });
-        const child = spawn(exe, ['join', id, '0', `${cap};`, process.execPath, '-e', busy], { encoding: 'utf8', windowsHide: true, env: jailedEnv(dir) });
+        const child = spawn(exe, ['join', id, '0', `${cap};`, process.execPath, '-e', busy(workers)], { encoding: 'utf8', windowsHide: true, env: jailedEnv(dir) });
         let out = ''; child.stdout.on('data', (d) => { out += d; });
         await new Promise((resolve) => child.once('exit', resolve));
         assert.deepEqual(await ask(`close ${id}`), { ok: true });
         return JSON.parse(out.trim());
       };
+      const quarterId = `query-rate-${process.pid}-${Date.now().toString(36)}`;
+      assert.deepEqual(await ask(`create ${quarterId} 0 1 2500`), { ok: true });
+      assert.deepEqual(await ask(`query ${quarterId}`), { ok: true, background: false, cap: true, rate: 2500, affinity: null });
+      assert.deepEqual(await ask(`close ${quarterId}`), { ok: true });
+      const badId = `${quarterId}-bad`;
+      assert.equal((await ask(`create ${badId} 0 1 nope`)).ok, false);
+      assert.equal((await ask(`query ${badId}`)).ok, false, 'a bad rate must not leave a held job');
       await run(0); // warm the worker source before measuring either side of the comparison
-      const open = await run(0);
-      // Windows can constrain this tree to one processor group.  Measure that open ceiling, then
-      // set a hard cap below it; CPU time is diagnostic, completed work is the proof of throttling.
-      const capRate = Math.max(100, Math.floor(open.cpu / open.wall / processors * 5000));
-      const capped = await run(1, capRate);
-      assert.ok(open.work / capped.work >= 1.5, `cap did not reduce work: open=${JSON.stringify(open)} capped=${JSON.stringify(capped)} rate=${capRate}`);
+      const ceiling = await run(0);
+      // The runner's own heavy job (legacy half-cores affinity or priority) can already bound this
+      // control; size the control to the measured ceiling, then set a hard cap near a quarter of it.
+      // Turbo makes loop work nonlinear, so CPU time per wall second is the assertion.
+      const workerCount = Math.max(1, Math.round(ceiling.cpu / ceiling.wall));
+      const open = await run(0, 5000, workerCount);
+      const capRate = Math.max(100, Math.floor(open.cpu / open.wall / processors * 2500));
+      const capped = await run(1, capRate, workerCount);
+      const openCpuRate = open.cpu / open.wall;
+      const cappedCpuRate = capped.cpu / capped.wall;
+      const targetCpuRate = processors * capRate / 10000;
+      assert.ok(cappedCpuRate <= openCpuRate * 0.6, `cap did not reduce CPU rate: open=${JSON.stringify(open)} capped=${JSON.stringify(capped)} rate=${capRate}`);
+      assert.ok(cappedCpuRate <= targetCpuRate * 1.25, `cap exceeded requested CPU rate: target=${targetCpuRate} open=${JSON.stringify(open)} capped=${JSON.stringify(capped)} rate=${capRate}`);
+      console.log(`M10 ratios work=${(open.work / capped.work).toFixed(3)} cpu=${(cappedCpuRate / openCpuRate).toFixed(3)} target=${targetCpuRate.toFixed(3)} actual=${cappedCpuRate.toFixed(3)} rate=${capRate} workers=${workerCount}`);
     } finally {
       try { serve?.stdin.end(); } catch { /* gone */ }
       if (serve?.exitCode === null) await new Promise((resolve) => serve.once('exit', resolve));

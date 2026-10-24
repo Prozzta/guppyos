@@ -138,7 +138,9 @@ function selfJobRate({ spawnSyncFn = spawnSync, env = process.env, platform = pr
   let reply;
   try { reply = JSON.parse(String(r.stdout || '')); }
   catch (e) { throw new Error(`heavy-job self-query returned invalid JSON (${HEAVYJOB_HELPER}): ${String(e)}`); }
-  const rate = reply?.rate;
+  if (reply?.cap === false) return 0;
+  if (reply?.cap !== true) throw new Error(`heavy-job self-query returned invalid cap (${HEAVYJOB_HELPER}): ${String(reply?.cap)}`);
+  const rate = reply.rate;
   if (!Number.isInteger(rate) || rate < 0 || rate > CPU_RATE_UNITS) {
     throw new Error(`heavy-job self-query returned invalid rate (${HEAVYJOB_HELPER}): ${String(rate)}`);
   }
