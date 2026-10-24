@@ -146,5 +146,6 @@ test('WIRING: every pty:data send goes through the batcher; exit and kill flush 
   assert.match(src, /session\.out = createPtyDataBatcher\(\(data\) => this\.safeSend\(`pty:data:\$\{opts\.id\}`, data, session\.owner\)\)/);
   assert.match(src, /proc\.onData\(\(data\) => this\.deliverData\(opts\.id, session, data\)\)/);
   assert.match(src, /session\.out\?\.flush\(\);\s*this\.safeSend\(`pty:exit:\$\{opts\.id\}`/, 'exit notice after the last bytes');
-  assert.match(src, /s\.out\?\.flush\(\);\s*const pid = s\.proc\.pid;\s*s\.proc\.kill\(\);/, 'kill flushes before the id can be reclaimed');
+  // AGY-TEARDOWN: the kill is closeTree (sweep the tree, then close the ConPTY).
+  assert.match(src, /s\.out\?\.flush\(\);[^\n]*\n\s*this\.closeTree\(s\);/, 'kill flushes before the id can be reclaimed');
 });
