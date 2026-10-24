@@ -530,7 +530,8 @@ static class HeavyJob
                     // 5000 is 50% of all logical processors. Under the legacy heavyJobsHalfCores
                     // affinity job that equals the affinity ceiling, so the rate cap adds nothing there;
                     // with half-cores off it bites against the full set. Validate before holding a job.
-                    uint cpuRate = w.Length == 5 ? uint.Parse(w[4]) : CPU_RATE_50_PERCENT;
+                    uint cpuRate = CPU_RATE_50_PERCENT;
+                    if (w.Length == 5 && !uint.TryParse(w[4], out cpuRate)) throw new Exception("bad CPU rate");
                     if (cpuRate == 0 || cpuRate > 10000) throw new Exception("bad CPU rate");
                     string name = JobName(w[1]);
                     if (!jobs.TryGetValue(w[1], out job))

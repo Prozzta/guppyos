@@ -9,15 +9,15 @@ const source = path.join(root, 'test', 'heavy-cpu-harness-191.test.cjs');
 const helper = path.join(root, 'resources', 'heavyjob', 'guppy-heavyjob.cs');
 const create = "create ${id} 0 ${cap}${cap ? ` ${rate}` : ''}";
 const mutants = [
-  ['broken-child-path', 'process.execPath, childPath]', "process.execPath, join(dir, 'missing-child.cjs')]"],
-  ['wrong-capacity-normaliser', source, 'open.cpu / open.wall / processors * 2500', '5000'],
-  ['control-replaced-by-second-cap', source, 'const capped = await run(1, capRate, workerCount);', 'const capped = await run(0, capRate, workerCount);'],
-  ['create-cap-off', source, create, 'create ${id} 0 0'],
-  ['rate-dropped', source, create, 'create ${id} 0 ${cap}'],
-  ['helper-ignores-rate', helper, 'CpuRate = cap ? cpuRate : 0', 'CpuRate = cap ? CPU_RATE_50_PERCENT : 0'],
+  ['broken-child-path', 'process.execPath, childPath]', "process.execPath, join(dir, 'missing-child.cjs')]", /rendered child reply missing/],
+  ['wrong-capacity-normaliser', source, 'open.cpu / open.wall / processors * 2500', '5000', /M10 caps near a quarter/],
+  ['control-replaced-by-second-cap', source, 'const capped = await run(1, capRate, workerCount);', 'const capped = await run(0, capRate, workerCount);', /cap (?:did not reduce|exceeded)/],
+  ['create-cap-off', source, create, 'create ${id} 0 0', /cap (?:did not reduce|exceeded)/],
+  ['rate-dropped', source, create, 'create ${id} 0 ${cap}', /cap (?:did not reduce|exceeded)/],
+  ['helper-ignores-rate', helper, 'CpuRate = cap ? cpuRate : 0', 'CpuRate = cap ? CPU_RATE_50_PERCENT : 0', /cap (?:did not reduce|exceeded)/],
 ];
 mutants[0].splice(1, 0, source);
-for (const [name, file, from, to] of mutants) {
+for (const [name, file, from, to, dies] of mutants) {
   const original = fs.readFileSync(file, 'utf8');
   if (original.indexOf(from) < 0 || original.indexOf(from) !== original.lastIndexOf(from)) throw new Error(`${name}: anchor missing or ambiguous`);
   const local = fs.mkdtempSync(path.join(os.tmpdir(), 'hcpu-harness-mutant-'));
@@ -28,7 +28,8 @@ for (const [name, file, from, to] of mutants) {
     if (queryOriginal) fs.writeFileSync(source, queryOriginal.replace('rate: 2500, affinity: null', 'rate: 5000, affinity: null'));
     fs.writeFileSync(file, original.replace(from, to));
     const r = spawnSync(process.execPath, ['--test', 'test/heavy-cpu-harness-191.test.cjs'], { cwd: root, encoding: 'utf8', windowsHide: true, env: { ...process.env, LOCALAPPDATA: local } });
-    if (r.status === 0) throw new Error(`SURVIVED ${name}: ${r.stdout}\n${r.stderr}`);
+    const output = `${r.stdout}\n${r.stderr}`;
+    if (r.status === 0 || !dies.test(output)) throw new Error(`SURVIVED OR DIED ELSEWHERE ${name}: ${output}`);
     console.log(`KILLED ${name}`);
   } finally { fs.writeFileSync(file, original); if (queryOriginal) fs.writeFileSync(source, queryOriginal); fs.rmSync(local, { recursive: true, force: true }); }
 }

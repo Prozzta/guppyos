@@ -215,7 +215,7 @@ test('LIVE: a measured sub-ceiling cap reduces available busy throughput, then t
       assert.deepEqual(await ask(`query ${quarterId}`), { ok: true, background: false, cap: true, rate: 2500, affinity: null });
       assert.deepEqual(await ask(`close ${quarterId}`), { ok: true });
       const badId = `${quarterId}-bad`;
-      assert.equal((await ask(`create ${badId} 0 1 nope`)).ok, false);
+      assert.deepEqual(await ask(`create ${badId} 0 1 nope`), { ok: false, error: 'bad CPU rate' });
       assert.equal((await ask(`query ${badId}`)).ok, false, 'a bad rate must not leave a held job');
       await run(0); // warm the worker source before measuring either side of the comparison
       const ceiling = await run(0);
