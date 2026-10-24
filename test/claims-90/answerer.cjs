@@ -147,6 +147,20 @@ function styleDeviation(c) {
   return !/^memory\s/.test(unquoted) || /[|<>;&`]|\$\(|#full/.test(unquoted);
 }
 
+/**
+ * Jim 19:32 (god 38046f): per item, whether every call was bare, plus the style counts. A Read of
+ * a saved output is not bare. A session with no calls is vacuously bare; `calls` shows it.
+ */
+function itemStyle(calls = []) {
+  return {
+    allBare: calls.every((c) => c.tool === 'Bash' && !c.styleDeviation),
+    calls: calls.length,
+    readTypeCalls: calls.filter((c) => c.readType).length,
+    fullCalls: calls.filter((c) => typeof c.command === 'string' && /#full/.test(c.command)).length,
+    styleDeviations: calls.filter((c) => c.styleDeviation).length,
+  };
+}
+
 const filesIn = (dir) => { try { return dir ? fs.readdirSync(dir, { recursive: true }).length : 0; } catch { return 0; } };
 
 /** What the session did, from its stream-json transcript. Text stays local; the row holds counts. */
@@ -336,7 +350,9 @@ async function main(argv) {
     calls: rows.reduce((n, r) => n + (r.calls?.length ?? 0), 0),
     styleDeviations: rows.reduce((n, r) => n + (r.calls ?? []).filter((c) => c.styleDeviation).length, 0),
     readTypeCalls: rows.reduce((n, r) => n + (r.calls ?? []).filter((c) => c.readType).length, 0),
+    allBareItems: rows.filter((r) => itemStyle(r.calls).allBare).length,
     stateSha256: [...new Set(rows.map((r) => r.stateSha256))],
+    perItem: rows.map((r) => ({ id: r.id, ...itemStyle(r.calls) })),
   };
   fs.writeFileSync(path.join(outDir, 'run.json'), JSON.stringify(run, null, 1));
   return run;
@@ -349,4 +365,4 @@ if (require.main === module) {
   }, (e) => { console.error(`[claims-90] ${e.stack || e.message}`); process.exitCode = 2; });
 }
 
-module.exports = { parseArgs, parseItems, installedHookShape, settingsFor, childEnv, readTranscript, styleDeviation, main };
+module.exports = { parseArgs, parseItems, installedHookShape, settingsFor, childEnv, readTranscript, styleDeviation, itemStyle, main };

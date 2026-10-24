@@ -136,6 +136,11 @@ test('answerer: hook settings follow the installed shape; env and transcript che
   assert.equal(dev('memory wake-up'), false);
   for (const c of ['memory search "q" | head -50', 'memory search "q" 2>&1', 'memory search q #full', 'memory search a; memory search b', 'memory search a && memory wake-up', 'cat x', 'echo $(memory search q)']) assert.equal(dev(c), true, c);
   assert.equal(styleDeviation({ tool: 'Read', command: null }), false, 'a Read of a saved output is not a memory command');
+  const { itemStyle } = require('./claims-90/answerer.cjs');
+  const call = (command) => ({ tool: 'Bash', command, styleDeviation: dev(command), readType: /\|/.test(command) });
+  assert.deepEqual(itemStyle([call('memory search "q"'), call('memory wake-up')]), { allBare: true, calls: 2, readTypeCalls: 0, fullCalls: 0, styleDeviations: 0 });
+  assert.deepEqual(itemStyle([call('memory search "q" #full'), call('memory search "q" | head -5')]), { allBare: false, calls: 2, readTypeCalls: 1, fullCalls: 1, styleDeviations: 2 });
+  assert.equal(itemStyle([call('memory search "q"'), { tool: 'Read', command: null, styleDeviation: false }]).allBare, false, 'a Read of a saved output is not bare');
   const shape = { matcher: '*', timeout: 30, events: ['PreToolUse', 'PostToolUse', 'PostToolUseFailure'] };
   const s = settingsFor(shape, 'http://127.0.0.1:1/hook/t', 'X:/b.txt', 'X:/jail/hive/agents/a/tool-output');
   for (const e of shape.events) assert.deepEqual(s.hooks[e], [{ matcher: '*', hooks: [{ type: 'http', url: 'http://127.0.0.1:1/hook/t', timeout: 30 }] }]);
