@@ -7,6 +7,9 @@
 //                                     to the file process, then the file put in it. Everything
 //                                     the file starts is created inside; when the file is gone
 //                                     the handle closes and the rest goes with it.
+//   file-job check <markPid> <pid>    BARE-NODE-TEST-NO-OWNER (own-job.cjs): is the job named for
+//                                     <markPid> there, and does it hold <pid>? Exit 0 when it does;
+//                                     3 no such job, 4 no such process, 6 the process is not in it.
 //   file-job kill <pid> <createdMs>   The watchdog: the job of that file, only while <pid> is
 //                                     still the process born at <createdMs> and in it; then
 //                                     TerminateJobObject, and wait until it holds no process and
@@ -63,10 +66,11 @@ static class FileJob
         try
         {
             if (a.Length == 2 && a[0] == "join") return Join(int.Parse(a[1]));
+            if (a.Length == 3 && a[0] == "check") return Check(int.Parse(a[1]), int.Parse(a[2]));
             if (a.Length == 3 && a[0] == "kill") return Kill(int.Parse(a[1]), long.Parse(a[2]));
         }
         catch (Exception e) { Console.Error.WriteLine("[file-job] " + e.Message); return 1; }
-        Console.Error.WriteLine("usage: file-job join <pid> | kill <pid> <createdMs>");
+        Console.Error.WriteLine("usage: file-job join <pid> | check <markPid> <pid> | kill <pid> <createdMs>");
         return 2;
     }
 
@@ -86,6 +90,19 @@ static class FileJob
         IntPtr dst;
         if (!DuplicateHandle(GetCurrentProcess(), job, p, out dst, 0, false, 2 /* SAME_ACCESS */)) throw new Exception("DuplicateHandle failed (" + Marshal.GetLastWin32Error() + ")");
         if (!AssignProcessToJobObject(job, p)) throw new Exception("AssignProcessToJobObject failed (" + Marshal.GetLastWin32Error() + ")");
+        return 0;
+    }
+
+    static int Check(int markPid, int pid)
+    {
+        // JOB_OBJECT_QUERY on the job, QUERY_LIMITED_INFORMATION on the process: enough for IsProcessInJob
+        IntPtr job = OpenJobObjectW(0x0004, false, Name(markPid));
+        if (job == IntPtr.Zero) { Console.Error.WriteLine("no job " + Name(markPid) + " (" + Marshal.GetLastWin32Error() + ")"); return 3; }
+        IntPtr p = OpenProcess(0x1000, false, pid);
+        if (p == IntPtr.Zero) { Console.Error.WriteLine("no process " + pid + " (" + Marshal.GetLastWin32Error() + ")"); return 4; }
+        bool inJob;
+        if (!IsProcessInJob(p, job, out inJob)) throw new Exception("IsProcessInJob failed (" + Marshal.GetLastWin32Error() + ")");
+        if (!inJob) { Console.Error.WriteLine("process " + pid + " is not in the job of " + markPid); return 6; }
         return 0;
     }
 
