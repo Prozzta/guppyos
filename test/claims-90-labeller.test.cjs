@@ -57,8 +57,9 @@ test('guard hook: denies in the PreToolUse shape and writes the open log', () =>
 
 test('jail: forbidden names are caught; the docs are not', () => {
   const f = (p) => ({ path: p });
-  assert.deepEqual(L.forbiddenIn(['docs/INSTRUCTIONS-H1.md', 'docs/LABEL-GUIDE-C90-v2.md', 'docs/batch-07.jsonl', 'docs/xcheck-andy-D.json', 'docs/INSTRUCTIONS.md', 'hive/tasks.json', 'hive/agents/a/inbox/.done/2026-x.json', 'repo.git/packed-refs'].map(f)), []);
-  for (const p of ['hive/agents/a/memory/claims.jsonl', 'hive/agents/a/memory.md', 'hive/claims-reconcile-queue.json', 'docs/key-andy-h1.jsonl', 'sealed-jim/x', 'elig-f/out.json', 'x/index-v2.sqlite']) assert.equal(L.forbiddenIn([f(p)]).length, 1, p);
+  assert.deepEqual(L.forbiddenIn(['docs/CLAIMS-90-SPEC-v2-excerpt.md', 'docs/LABEL-GUIDE.md', 'docs/INSTRUCTIONS-H1.md','docs/LABEL-GUIDE-C90-v2.md', 'docs/batch-07.jsonl', 'docs/xcheck-andy-D.json', 'docs/INSTRUCTIONS.md', 'hive/tasks.json', 'hive/agents/a/inbox/.done/2026-x.json', 'repo.git/packed-refs'].map(f)), []);
+  assert.deepEqual(L.parseArgs(['--snapshot', 's', '--addendum', 'a', '--labeller', 'andy', '--group', 'F', '--xcheck', 'x', '--batch', 'b', '--instructions', 'i', '--guide', 'g', '--pilot', 'p', '--prompt', 'q', '--key', 'k', '--out', 'o', '--claude', 'c', '--doc', 'C:/x/LABEL-GUIDE-base.md=LABEL-GUIDE.md']).docs, [{ from: 'C:/x/LABEL-GUIDE-base.md', name: 'LABEL-GUIDE.md' }]);
+  for (const p of ['docs/CLAIMS-90-SPEC.md', 'hive/agents/a/memory/claims.jsonl','hive/agents/a/memory.md', 'hive/claims-reconcile-queue.json', 'docs/key-andy-h1.jsonl', 'sealed-jim/x', 'elig-f/out.json', 'x/index-v2.sqlite']) assert.equal(L.forbiddenIn([f(p)]).length, 1, p);
 });
 
 test('settings: the key file is allowed by an Edit rule (Claude Code judges Write by Edit rules); only the guard hook', () => {

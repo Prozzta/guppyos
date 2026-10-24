@@ -19,7 +19,7 @@
  *   node test/claims-90/labeller.cjs --snapshot <dir> --addendum <dir> --labeller <name>
  *        --group F|D --xcheck <ids.json> --batch <batch-NN.jsonl> --instructions <INSTRUCTIONS-H1.md>
  *        --guide <guide.md> --pilot <pilot INSTRUCTIONS.md> --prompt <prompt.md> --key <key.jsonl>
- *        --out <dir> [--model <id>] [--claude <exe>] [--keep]
+ *        --out <dir> [--doc <file>=<name.md>]... [--model <id>] [--claude <exe>] [--keep]
  * The prompt may use {labeller}, {group}, {batchName}, {today}, {jail}, {keyFile} and {ownIds}.
  * Writes under --out/<batchName>-<labeller>/: transcript.jsonl, jail-files.json, open-log.jsonl,
  * key-batch.jsonl and run.json. Item text and keys stay local; mails carry counts and shas only.
@@ -39,10 +39,16 @@ const TOOLS = ['Bash', 'Glob', 'Grep', 'Read', 'Write'];
 const FORBIDDEN = /(^|\/)(memory|claims[^/]*|sealed[^/]*|elig[^/]*|key-[^/]*|[^/]*\.sqlite[^/]*|memory\.md|[^/]*ledger[^/]*)(\/|$)/i;
 
 function parseArgs(argv) {
-  const o = { keep: false, model: 'claude-opus-5-5' };
+  const o = { keep: false, model: 'claude-opus-5-5', docs: [] };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--keep') o.keep = true;
+    else if (a === '--doc') {
+      // --doc <file>=<name>: one more reference doc, placed as docs/<name> (Jim 20:20).
+      const m = /^(.+)=([A-Za-z0-9._-]+\.md)$/.exec(argv[++i] || '');
+      if (!m) throw new Error('--doc takes <file>=<name.md>');
+      o.docs.push({ from: m[1], name: m[2] });
+    }
     else if (/^--(snapshot|addendum|labeller|group|xcheck|batch|instructions|guide|pilot|prompt|key|out|model|claude)$/.test(a)) o[a.slice(2)] = argv[++i];
     else throw new Error(`unknown argument ${a}`);
   }
@@ -79,6 +85,7 @@ function buildJail(jail, o, snap, addDir) {
   copyFile(o.guide, path.join(jail, 'docs', path.basename(o.guide)));
   copyFile(o.pilot, path.join(jail, 'docs', 'INSTRUCTIONS.md'));
   copyFile(o.xcheck, path.join(jail, 'docs', path.basename(o.xcheck)));
+  for (const d of o.docs || []) copyFile(d.from, path.join(jail, 'docs', d.name));
   for (const f of ['tasks.json', 'board.md', 'PROTOCOL.md']) copyFile(path.join(hive, f), path.join(jail, 'hive', f));
   fs.cpSync(path.join(hive, 'tasks-archive'), path.join(jail, 'hive', 'tasks-archive'), { recursive: true });
   for (const a of fs.readdirSync(path.join(hive, 'agents'))) {
@@ -107,7 +114,7 @@ function jailFiles(jail) {
 
 /** Names that must never be in a jail. repo.git internals and docs/ are judged too. */
 function forbiddenIn(files) {
-  return files.map((f) => f.path).filter((p) => !p.startsWith('repo.git/') && FORBIDDEN.test(p.replace(/^docs\/(INSTRUCTIONS(-H1)?\.md|LABEL-GUIDE[^/]*|batch-\d+\.jsonl|xcheck-[^/]*)$/, 'docs/ok')));
+  return files.map((f) => f.path).filter((p) => !p.startsWith('repo.git/') && FORBIDDEN.test(p.replace(/^docs\/(INSTRUCTIONS(-H1)?\.md|LABEL-GUIDE[^/]*|CLAIMS-90-SPEC-v2-excerpt\.md|batch-\d+\.jsonl|xcheck-[^/]*)$/, 'docs/ok')));
 }
 
 function settingsFor(jail, openLog, keyFile) {
@@ -206,6 +213,7 @@ async function main(argv) {
     snapshot: path.basename(snap), manifestSha256: v.manifestSha256, addendumSha256: ad.addendumSha256, model: o.model,
     claudeExeSha256: sha256(fs.readFileSync(o.claude)),
     shas: Object.fromEntries(['batch', 'instructions', 'guide', 'pilot', 'xcheck', 'prompt'].map((k) => [k, sha256(fs.readFileSync(o[k]))])),
+    docShas: Object.fromEntries(o.docs.map((d) => [d.name, sha256(fs.readFileSync(d.from))])),
     code: { head: R.git(path.resolve(__dirname, '..', '..'), ['rev-parse', 'HEAD']), dirty: R.git(path.resolve(__dirname, '..', '..'), ['status', '--porcelain', '--', 'test/claims-90']) || '' },
     rows: batch.length, ownRows: own.length,
   };
