@@ -8,7 +8,7 @@
  * shared temp folder: other agents and apps write there all the time, so a diff could not name the
  * file and would go red on their files.
  *
- * PRELOAD: in a test-file process TEMP/TMP/TMPDIR move to <root>\<pid>-<unique>, inherited by its children;
+ * PRELOAD: in a test-file process TEMP/TMP/TMPDIR/LOCALAPPDATA move to <root>\<pid>-<unique>, inherited by its children;
  * elsewhere nothing changes. TEMPLEAKS: names the non-empty folders only. RUN: a real run of two
  * fixture files, one leaking: the run fails, names that file only, and removes its folder.
  * TEMPDIR / REMOVEDIR: test/tools/test-temp.cjs, what the offending files now use: tempDir's
@@ -30,12 +30,12 @@ const fresh = (name) => { const d = path.join(tmpRoot, `${name}-${++n}`); fs.mkd
 /** A node process with the preload as run-tests adds it; prints its tmpdir, its NODE_OPTIONS and a child's tmpdir. */
 function preloaded(root, { context = 'child-v8' } = {}) {
   const opt = `--require "${runner.TEMP_JAIL_PRELOAD.split(path.sep).join('/')}"`;
-  const env = { ...process.env, NODE_OPTIONS: opt, GUPPY_TEMP_JAIL: root, GUPPY_TEMP_JAIL_OPT: opt, TEMP: os.tmpdir(), TMP: os.tmpdir(), TMPDIR: os.tmpdir() };
+  const env = { ...process.env, NODE_OPTIONS: opt, GUPPY_TEMP_JAIL: root, GUPPY_TEMP_JAIL_OPT: opt, TEMP: os.tmpdir(), TMP: os.tmpdir(), TMPDIR: os.tmpdir(), LOCALAPPDATA: 'C:\\real-profile-must-not-be-used' };
   delete env.GUPPY_SHARED_TEMP; // set by the preload of this file under run-tests; the child's must set it itself
   delete env.NODE_TEST_CONTEXT;
   if (context) env.NODE_TEST_CONTEXT = context;
   const script = "const os=require('os');const c=require('child_process').spawnSync(process.execPath,['-e','process.stdout.write(require(\"os\").tmpdir())'],{encoding:'utf8'});"
-    + "process.stdout.write(JSON.stringify({ tmp: os.tmpdir(), pid: process.pid, opts: process.env.NODE_OPTIONS || '', jail: process.env.GUPPY_TEMP_JAIL || '', child: c.stdout, shared: require(" + JSON.stringify(path.join(__dirname, 'tools', 'shared-temp.cjs')) + ").sharedTemp() }))";
+    + "process.stdout.write(JSON.stringify({ tmp: os.tmpdir(), local: process.env.LOCALAPPDATA, pid: process.pid, opts: process.env.NODE_OPTIONS || '', jail: process.env.GUPPY_TEMP_JAIL || '', child: c.stdout, shared: require(" + JSON.stringify(path.join(__dirname, 'tools', 'shared-temp.cjs')) + ").sharedTemp() }))";
   const file = path.join(fresh('script'), 'probe.test.cjs');
   fs.writeFileSync(file, script);
   const r = spawnSync(process.execPath, [file], { env, encoding: 'utf8', windowsHide: true, timeout: 60_000 });
@@ -51,6 +51,7 @@ test('PRELOAD: a test-file process and its children get <root>\\<pid>-<unique> a
   const dir = path.join(root, mine[0]);
   assert.equal(o.tmp, dir, 'TEMP JAIL: os.tmpdir() is the file\'s own folder');
   assert.equal(o.child, dir, 'TEMP JAIL: a child the file starts inherits it');
+  assert.equal(o.local, dir, 'TEMP JAIL: LocalAppData is also per-file and inherited by native helpers');
   assert.ok(fs.statSync(dir).isDirectory(), 'TEMP JAIL: the folder exists');
   assert.equal(fs.readFileSync(`${dir}.file`, 'utf8'), o.file, 'TEMP JAIL: <folder>.file names the file (argv[1])');
   assert.equal(o.opts, '', 'TEMP JAIL: the preload takes itself out of NODE_OPTIONS');

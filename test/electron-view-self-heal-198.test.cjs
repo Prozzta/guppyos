@@ -13,6 +13,30 @@ const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const { cappedHeavyJob, halfCpuMask, swiftShaderMaskForHeavyJob, swiftShaderView } = require('./electron-harness/electron-bin.cjs');
 
+function withElectronBinStubs(stubs, fn) {
+  const Module = require('node:module');
+  const target = require.resolve('./electron-harness/electron-bin.cjs');
+  const originalLoad = Module._load;
+  const prior = require.cache[target];
+  delete require.cache[target];
+  Module._load = function (request, parent, isMain) {
+    if (request === 'node:child_process') return { execFileSync: stubs.execFileSync };
+    if (request === 'node:os' && stubs.os) return stubs.os;
+    if (request === 'electron') return stubs.electron;
+    if (request.endsWith('/tools/shared-temp.cjs')) return { sharedTemp: () => stubs.tmp };
+    return originalLoad.call(this, request, parent, isMain);
+  };
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  Object.defineProperty(process, 'platform', { value: 'win32' });
+  try { return fn(require('./electron-harness/electron-bin.cjs')); }
+  finally {
+    Object.defineProperty(process, 'platform', platform);
+    Module._load = originalLoad;
+    delete require.cache[target];
+    if (prior) require.cache[target] = prior;
+  }
+}
+
 function fakeDist(dir) {
   const dist = join(dir, 'dist');
   mkdirSync(join(dist, 'locales'), { recursive: true });
@@ -127,11 +151,31 @@ test('dead partial and stale plain views are cleaned, but a live partial is reta
   });
 });
 
-test('self-query and affinity probes retain their explicit timeout, and only explicit mask overrides are cached (M6/M7)', () => {
-  const source = readFileSync(join(__dirname, 'electron-harness', 'electron-bin.cjs'), 'utf8');
-  assert.ok((source.match(/timeout: 15_000/g) || []).length >= 2, 'both external probes time out');
-  assert.match(source, /cachedHarnessMasks\.has\(key\)/);
-  assert.match(source, /const override = env\.HARNESS_CPU_MASK/);
-  assert.match(source, /const key = String\(override\);/, 'the cache key distinguishes explicit affinity overrides');
-  assert.match(source, /if \(override === undefined\) mask = swiftShaderMaskForHeavyJob\(env\)/, 'live affinity is not cached');
+test('a hanging helper is fail-open, and two unoverridden launches use their live affinity (M6/M7)', () => {
+  withTemp((dir) => {
+    const exe = fakeDist(dir); const tmp = join(dir, 'tmp'); let affinity = '3'; let logical = 8; const calls = [];
+    withElectronBinStubs({ electron: exe, tmp, os: { cpus: () => Array(logical) }, execFileSync(command, args, options) {
+      calls.push({ command, args, options });
+      if (args[0] === 'self-query') { const error = new Error('hung helper'); error.code = 'ETIMEDOUT'; throw error; }
+      return `${affinity} 8`;
+    } }, ({ cappedHeavyJob: capped, harnessElectron }) => {
+      assert.equal(capped({}), false, 'a helper that does not reply cannot cap an unrelated launch');
+      assert.equal(calls[0].options.timeout, 15_000, 'the hanging helper has a bounded wait');
+      const first = harnessElectron({});
+      affinity = '12';
+      const second = harnessElectron({});
+      assert.notEqual(first, second, 'a changed process affinity creates a new unoverridden view');
+      const affinityCalls = calls.filter((c) => c.command === 'powershell.exe');
+      assert.equal(affinityCalls.length, 2, 'each unoverridden launch probes affinity again');
+      assert.ok(affinityCalls.every((c) => c.options.timeout === 15_000), 'each hanging affinity probe has a bounded wait');
+      logical = 8;
+      const cachedFirst = harnessElectron({ HARNESS_CPU_MASK: '255' });
+      logical = 16;
+      const cachedSameOverride = harnessElectron({ HARNESS_CPU_MASK: '255' });
+      const cachedOtherOverride = harnessElectron({ HARNESS_CPU_MASK: '127' });
+      assert.equal(cachedSameOverride, cachedFirst, 'the same explicit override keeps its original bounded view');
+      assert.notEqual(cachedOtherOverride, cachedFirst, 'different explicit overrides do not share a cache entry');
+      assert.ok(existsSync(first) && existsSync(second), 'both live-affinity views are materialized');
+    });
+  });
 });

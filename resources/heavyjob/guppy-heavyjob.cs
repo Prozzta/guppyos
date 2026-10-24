@@ -290,13 +290,17 @@ static class HeavyJob
                 if (File.Exists(marker))
                 {
                     string name = File.ReadAllText(marker).Trim(); IntPtr job = OpenJobObjectW(JOB_ALL, false, name);
-                    IntPtr proc = OpenProcess(0x1000, false, child); bool inJob = false;
+                    // A marker only identifies a candidate job.  The querying process itself must
+                    // still be a member: a live marker is shared by every Guppy instance under
+                    // this Windows user, and its owner is not evidence about this caller.
+                    IntPtr proc = OpenProcess(0x1000, false, GetCurrentProcessId());
+                    IntPtr owner = OpenProcess(0x1000, false, child); bool inJob = false, ownerInJob = false;
                     if (job != IntPtr.Zero && proc != IntPtr.Zero) IsProcessInJob(proc, job, out inJob);
-                    if (proc != IntPtr.Zero) CloseHandle(proc); if (job != IntPtr.Zero) CloseHandle(job);
-                    // Git Bash can report a libuv-spawned Node descendant outside its inherited
-                    // outer job even though the live, creation-time-pinned shell still owns it.
-                    // The named job remains the authoritative cap record for that live owner.
-                    if (inJob || (Created(child) == childCreated && job != IntPtr.Zero)) return name;
+                    if (job != IntPtr.Zero && owner != IntPtr.Zero) IsProcessInJob(owner, job, out ownerInJob);
+                    if (proc != IntPtr.Zero) CloseHandle(proc); if (owner != IntPtr.Zero) CloseHandle(owner); if (job != IntPtr.Zero) CloseHandle(job);
+                    // A Git Bash/libuv child can be outside the inherited job.  Its exact, creation-
+                    // pinned ancestor is still caller-bound evidence, but a merely live named job is not.
+                    if (inJob || (child != GetCurrentProcessId() && Created(child) == childCreated && ownerInJob)) return name;
                     try { File.Delete(marker); } catch { }
                 }
             }
@@ -310,32 +314,6 @@ static class HeavyJob
             child = p; childCreated = created;
         }
         return null;
-    }
-
-    // Git-for-Windows may launch each external command through a fresh MSYS fork whose Windows
-    // parent is not the interactive Bash.  In that shape there is no usable ancestry edge.  A
-    // newest live marker is the command just joined; its owner and named job are both revalidated.
-    static string SoleLiveMarkedJob()
-    {
-        string found = null; DateTime newest = DateTime.MinValue;
-        try
-        {
-            foreach (string path in Directory.GetFiles(MarkerRoot(), "guppy-heavy-job-*.marker"))
-            {
-                var m = System.Text.RegularExpressions.Regex.Match(Path.GetFileName(path), @"^guppy-heavy-job-(\d+)-(\d+)\.marker$");
-                int pid; long created;
-                if (!m.Success || !int.TryParse(m.Groups[1].Value, out pid) || !long.TryParse(m.Groups[2].Value, out created)) continue;
-                if (Created(pid) != created) continue;
-                string name = File.ReadAllText(path).Trim();
-                IntPtr job = OpenJobObjectW(JOB_ALL, false, name);
-                if (job == IntPtr.Zero) continue;
-                CloseHandle(job);
-                DateTime written = File.GetLastWriteTimeUtc(path);
-                if (written >= newest) { newest = written; found = name; }
-            }
-        }
-        catch { }
-        return found;
     }
 
     // The consecutive shell ancestors of this process, nearest first, each created before its child
@@ -424,7 +402,6 @@ static class HeavyJob
         try
         {
             string outer = AncestorMarkedJob();
-            if (string.IsNullOrEmpty(outer)) outer = SoleLiveMarkedJob();
             if (!string.IsNullOrEmpty(outer))
             {
                 IntPtr job = OpenJobObjectW(JOB_ALL, false, outer);

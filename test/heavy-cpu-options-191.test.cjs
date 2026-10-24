@@ -65,9 +65,10 @@ test('the native helper pins hard-cap mode and the exact 50% CPU rate (M1)', () 
   assert.match(native, /IsProcessInJob\(proc, job, out inJob\)/, 'a marker is trusted only while its process remains in the named job');
   assert.match(native, /created == 0 \|\| created > childCreated/, 'ancestor walk rejects a parent created after its child');
   assert.match(native, /MarkerRoot\(\).*?heavyjob-markers/s, 'breadcrumbs stay in a Guppy-owned folder');
-  assert.match(native, /SpecialFolder\.LocalApplicationData/, 'a caller TEMP jail never owns marker cleanup');
+  assert.match(native, /SpecialFolder\.LocalApplicationData/, 'the runner redirects LocalAppData for each test file');
   assert.match(native, /CleanMarkers\(\)/, 'dead pid+creation-time breadcrumbs are cleaned');
-  assert.match(native, /if \(inJob \|\| \(Created\(child\) == childCreated && job != IntPtr\.Zero\)\) return name;/, 'reading a live shell marker never consumes it');
+  assert.match(native, /inJob \|\| \(child != GetCurrentProcessId\(\) && Created\(child\) == childCreated && ownerInJob\)/, 'a marker is accepted only for the caller or its verified in-job ancestor');
+  assert.doesNotMatch(native, /SoleLiveMarkedJob/, 'no shared-folder newest-marker fallback may cap an unrelated caller');
   assert.match(native, /var rate = new CPU_RATE \{ ControlFlags = cap \? CPU_RATE_ENABLE \| CPU_RATE_HARD_CAP : 0, CpuRate = cap \? CPU_RATE_50_PERCENT : 0 \}/);
   assert.doesNotMatch(native, /LIMIT_AFFINITY|SetProcessAffinityMask/);
   assert.match(native, /return \"\{\\\"background\\\":\" \+ \(background \? \"true\" : \"false\"\) \+ \",\\\"cap\\\":\" \+ \(cap \? \"true\" : \"false\"\) \+ \",\\\"rate\\\":\" \+ \(cap \? CPU_RATE_50_PERCENT : 0\) \+ \",\\\"affinity\\\":null\}\"/,
@@ -352,7 +353,7 @@ test('CODEX-CMD-COMPUTED-SHELL-192: a shell named by a const of one string reads
 
 const CSC =path.join(process.env.WINDIR || 'C:\\Windows', 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe');
 
-test('LIVE Bash join keeps its marker for repeated, sibling and background self-queries without TEMP residue (B1)',
+test('LIVE Bash join keeps its marker for repeated, sibling and background self-queries without LOCALAPPDATA residue (B1)',
   { skip: process.platform !== 'win32' || !fs.existsSync(path.join(__dirname, '..', 'resources', 'heavyjob', 'bin', 'guppy-heavyjob.exe')) ? 'Windows helper not built' : false, timeout: 30_000 },
   async () => {
     const { spawn, spawnSync } = require('node:child_process');
@@ -375,7 +376,7 @@ test('LIVE Bash join keeps its marker for repeated, sibling and background self-
       }
     });
     const ask = (line) => new Promise((resolve) => { replies.push(resolve); serve.stdin.write(`${line}\n`); });
-    const assertQueries = async (line, count) => {
+     const assertQueries = async (line, count) => {
       const name = `${id}-${count}`;
       assert.deepEqual(await ask(`create ${name} 0 1`), { ok: true });
       try {
@@ -384,7 +385,22 @@ test('LIVE Bash join keeps its marker for repeated, sibling and background self-
         const rows = r.stdout.trim().split(/\r?\n/).filter(Boolean).map(JSON.parse);
         assert.equal(rows.length, count, r.stdout);
         for (const row of rows) assert.deepEqual(row, expected, r.stderr);
-      } finally { assert.deepEqual(await ask(`close ${name}`), { ok: true }); }
+       } finally { assert.deepEqual(await ask(`close ${name}`), { ok: true }); }
+     };
+    const waitReady = (child) => new Promise((resolve, reject) => {
+      let out = '';
+      const fail = (e) => reject(new Error(`held shell did not become ready: ${e.message || e}\n${out}`));
+      child.stdout.setEncoding('utf8');
+      child.stdout.on('data', (d) => { out += d; child.hcpuOutput = out; if (out.includes('READY\n')) resolve(out); });
+      child.once('error', fail);
+      child.once('exit', (code) => { if (!out.includes('READY\n')) fail(`exit ${code}`); });
+    });
+    const waitExit = (child) => new Promise((resolve) => child.exitCode === null ? child.once('exit', resolve) : resolve());
+    const heldShell = (name, cap, queryFile) => {
+      const program = queryFile
+        ? `echo READY; sleep 1; ${quote(exe)} self-query > ${quote(queryFile)}`
+        : 'echo READY; sleep 2';
+      return spawn(bash, ['-lc', `${quote(exe)} join ${name} 0 ${cap ? 1 : 0}; ${program}`], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     };
     try {
       // The same shell, two separately spawned Node processes, and a background command all find
@@ -392,10 +408,33 @@ test('LIVE Bash join keeps its marker for repeated, sibling and background self-
       await assertQueries(`${quote(exe)} self-query; ${quote(exe)} self-query; ${quote(exe)} self-query`, 3);
       const nodeExe = exe.replace(/\\/g, '/');
       const nodeQuery = `${quote(process.execPath)} -e ${quote(`process.stdout.write(require("node:child_process").execFileSync(${JSON.stringify(nodeExe)}, ["self-query"], {encoding:"utf8"}))`)}`;
-      await assertQueries(`${nodeQuery}; ${nodeQuery}`, 2);
-      await assertQueries(`${quote(exe)} self-query; ${quote(exe)} self-query & wait`, 2);
-      const root = path.join(process.env.TEMP || os.tmpdir(), 'guppy-heavyjob-markers');
-      assert.ok(!fs.existsSync(root), 'marker bookkeeping never leaves a caller TEMP directory');
+       await assertQueries(`${nodeQuery}; ${nodeQuery}`, 2);
+       await assertQueries(`${quote(exe)} self-query; ${quote(exe)} self-query & wait`, 2);
+       // A marker folder is shared by this Windows user, so only membership of the querying child
+       // can select it.  Hold a cap live and prove an unrelated process does not borrow it.
+       const capName = `${id}-live-cap`; const uncappedName = `${id}-live-uncapped`;
+       assert.deepEqual(await ask(`create ${capName} 0 1`), { ok: true });
+       assert.deepEqual(await ask(`create ${uncappedName} 0 0`), { ok: true });
+       let capped; let uncapped;
+       try {
+         const queryFile = path.join(process.env.TEMP || os.tmpdir(), `${capName}.json`);
+         capped = heldShell(capName, true, queryFile); await waitReady(capped);
+         const unrelated = JSON.parse(spawnSync(exe, ['self-query'], { encoding: 'utf8', windowsHide: true }).stdout.trim());
+         assert.equal(unrelated.cap, false, 'an unrelated process cannot take another shell\'s capped marker');
+         uncapped = heldShell(uncappedName, false, false); await waitReady(uncapped);
+         await waitExit(capped);
+         const row = JSON.parse(fs.readFileSync(queryFile, 'utf8'));
+         fs.rmSync(queryFile, { force: true });
+         assert.deepEqual(row, expected, 'a capped caller ignores a newer live uncapped marker');
+       } finally {
+         if (capped && capped.exitCode === null) capped.kill();
+         if (uncapped && uncapped.exitCode === null) uncapped.kill();
+         await Promise.all([capped, uncapped].filter(Boolean).map(waitExit));
+         assert.deepEqual(await ask(`close ${capName}`), { ok: true });
+         assert.deepEqual(await ask(`close ${uncappedName}`), { ok: true });
+       }
+       const root = path.join(process.env.LOCALAPPDATA || os.tmpdir(), 'Munder Difflin', 'Guppy', 'heavyjob-markers');
+       assert.ok(!fs.existsSync(root), 'marker bookkeeping is removed with the jailed LocalAppData directory');
     } finally {
       try { serve.stdin.end(); } catch { /* gone */ }
       if (serve.exitCode === null) await new Promise((resolve) => serve.once('exit', resolve));

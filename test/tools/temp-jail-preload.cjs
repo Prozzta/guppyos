@@ -2,7 +2,7 @@
 /**
  * TEST-TEMP-HYGIENE: run-tests.cjs loads this into every process of its `node --test` through
  * NODE_OPTIONS. In a test-file process (NODE_TEST_CONTEXT), before any test code runs, TEMP, TMP and
- * TMPDIR point at a folder of the file's own, <root>\<pid>, and <root>\<pid>.file names the file.
+ * TMPDIR and LOCALAPPDATA point at a folder of the file's own, <root>\<pid>, and <root>\<pid>.file names the file.
  * os.tmpdir() reads them on every call, and every process the file starts inherits them, so what
  * the file and its children leave in "the temp folder" is in that folder. After the run the runner
  * names each file whose folder is not empty and fails the run (tempLeaks in run-tests.cjs). The
@@ -27,6 +27,10 @@ if (root && opt && String(process.env.NODE_TEST_CONTEXT || '').startsWith('child
     process.env.TEMP = dir;
     process.env.TMP = dir;
     process.env.TMPDIR = dir;
+    // Native helpers use Environment.SpecialFolder.LocalApplicationData for durable-looking
+    // state such as job markers.  It is test state too: keep it under the per-file jail so the
+    // runner can reject leaks and no test mutates the real user profile.
+    process.env.LOCALAPPDATA = dir;
   } catch (e) {
     process.stderr.write(`[test-runner] ${process.argv[1] || 'a test file'} has no temp folder of its own (${String(e)}): its temp leaks are not checked\n`);
   }
