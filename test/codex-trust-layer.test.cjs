@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CODEX-TRUST-LAYER (1.1.76). Design: CODEX-TRUST-LAYER.md rev 2 section 6 (tests 1-11, 13-15;
  * test 12 is Jim's real codex run, whose facts these tests encode: an MCP server starts at

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * LOAD-FLAKES-176 (renderer half, Jim). Two harness-side flakes, neither a product bug:

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 // The shipped TES camera uses the semantic lip-to-lip fit. Its source cache is integer-sized,
 // but the displayed scale is intentionally exact and may be fractional.

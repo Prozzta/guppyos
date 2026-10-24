@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * MAIN-SYNC-LOG-LEDGER (config), found by the widened mutation scan after Jim's FAIL on the tasks

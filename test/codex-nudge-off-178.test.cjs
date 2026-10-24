@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CODEX-MODEL-SWITCH-PROMPT P1 (1.1.78, Jim; god 92f9b1): once either usage window reaches 90 %, Codex
  * 0.157.1 opens a modal "Approaching rate limits - Switch to gpt-6-luna for lower credit usage?"

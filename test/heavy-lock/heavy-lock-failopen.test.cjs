@@ -1,4 +1,5 @@
 'use strict';
+require('../tools/own-job.cjs');
 /**
  * HEAVY-JOB-LOCK-FAILOPEN (1.1.77, god 570978). Three defects of the heavy-job lock, plus the two
  * wrapped-suite gaps in the card's notes (Andy 42b671):

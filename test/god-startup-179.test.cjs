@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 // GOD-STARTUP-TOKENS R1-R3 (1.1.79, Jim; diagnosis hive/agents/jim-mtujpe28/GOD-STARTUP-1M-TOKENS-045.md):
 //   R1  an AUTOMATIC god resume starts FRESH, with a handoff in context, when the last session is
 //       over 150K tokens, past the 1 h cache lifetime, from another Claude Code version, or on

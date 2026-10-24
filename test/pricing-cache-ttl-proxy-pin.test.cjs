@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * PRICING-CACHE-TTL-SPLIT: the proxy bridge is the live CostSample producer.

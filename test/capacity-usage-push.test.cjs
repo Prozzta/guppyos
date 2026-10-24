@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * v1.1.45 unit #13 — crit 15, "no renderer polling": the Monitor 5H / Weekly usage line is

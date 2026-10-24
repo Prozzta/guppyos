@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * HOOK-BROKER P4 (AGY, Jim's spike): AGY's observational hooks (PostToolUse, PostInvocation) and

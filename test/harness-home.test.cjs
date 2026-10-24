@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * Issue #140 — the onboarding harness-home field is typed by hand as often as it

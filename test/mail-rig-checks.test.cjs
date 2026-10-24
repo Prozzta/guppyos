@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * ZT-I1-MAIL 1.1.75 slice 8: the Jim must-fix checks C1-C8 of INBOX-DESIGN §11.15, as INTEGRATED
  * rig tests (test/mail-rig/). Layer (a), zero model tokens. The same rules are also pinned at unit

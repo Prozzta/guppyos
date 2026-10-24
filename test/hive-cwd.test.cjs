@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * Ingestion guarantee: whatever the user types, the hive registry stores an

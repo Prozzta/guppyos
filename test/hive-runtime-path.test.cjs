@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * Layer 1 fixed the commands WE generate (every hook shim runs through

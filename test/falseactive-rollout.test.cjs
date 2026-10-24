@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * FALSEACTIVE-STALL-2 (B1, god's ruling): Codex's own rollout closes a turn whose Stop was

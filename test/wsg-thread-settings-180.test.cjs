@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * DWIGHT-INPUT-DEAD-179 F4 (1.1.80, its own commit; Andy rules on it): a proof of Codex's

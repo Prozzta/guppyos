@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * liveness-v1 contract, type level (C:/Dunder/_work/creed-177/LIVENESS-V1.md). Self-contained, no
  * framework: `node test/liveness-v1-contract.test.cjs`.

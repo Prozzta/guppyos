@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * procKill tests — prove the PID-release hardening works on a REAL process
  * tree. Self-contained, no framework — run with `node test/proc-kill.test.cjs`

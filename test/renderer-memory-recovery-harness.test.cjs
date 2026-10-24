@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * MEMSPIKE-167, RENDERED: a hidden window whose renderer freezes in a busy loop while allocating

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * CODEX-WAKE-162 (Jim, agents/jim-mtujpe28/POST-INSTALL-161.md): on 1.1.61 canary 5 stacked two

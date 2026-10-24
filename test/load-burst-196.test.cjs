@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * LOAD-BURST-196 (god 3c612c, Jim a094f1). node --test starts a file process per core at once, and

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * L0-FUSION acquire-time detached attach - on a REAL xterm in a real Electron renderer.

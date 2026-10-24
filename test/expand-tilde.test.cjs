@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * `~` is a SHELL convention — Node's fs/child_process treat it as a literal

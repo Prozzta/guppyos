@@ -1,4 +1,5 @@
 'use strict';
+require('../tools/own-job.cjs');
 /**
  * HEAVY-LOCK-UNNAMED-EXEC (god 953d52). A Codex code-mode `exec` whose exec_command the rollout
  * cannot name (a computed cmd `for (const c of cmds) await tools.exec_command({cmd: c})`, a

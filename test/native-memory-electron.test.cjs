@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * NATIVE-MEMORY: the store, the engine and the worker against the REAL shipped natives - the
  * app's Electron-ABI better-sqlite3, the pinned sqlite-vec DLL, onnxruntime-node and the bundled

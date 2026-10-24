@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * READS-PROMPT-TRIM (1.1.83): each hive Claude agent spawns without the tools, skills and claude.ai

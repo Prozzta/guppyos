@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * TEST-GLOB-PID-RECYCLE (1.1.88): a test lists and kills only the processes it started.
  * test-runner-glob listed the Human's HWiNFO64.EXE (pid 20664) as a hung file's child, on

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * ZT-I1-MAIL 1.1.75 slice 4: every harness reader of "inbox file position" reads the ledger
  * (INBOX-DESIGN.md §3 #5/#6, §11.8 #9-#16, §11.15 C8). The HARNESS now moves a message file into

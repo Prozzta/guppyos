@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * REBRAND-ARTIFACT-NAMES (1.1.83): the release files become Guppy-*, and a 1.1.81 install's
  * MANUAL-download link (fixed Munder-Difflin-* names) still resolves: afterAllArtifactBuild writes a

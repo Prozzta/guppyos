@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * STARTUP-TIMING-162 + MEMORY-STATUS-LAZY (god, after Jim's STARTUP-STALL-159):

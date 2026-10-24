@@ -1,4 +1,5 @@
 'use strict';
+require('../tools/own-job.cjs');
 
 /**
  * HEAVY-LOCK-OPAQUE-SCRIPT-196. The PreToolUse classifier reads the command line (and the scripts it

@@ -1,4 +1,5 @@
 'use strict';
+require('../tools/own-job.cjs');
 /**
  * HEAVY-LOCK-FALSE-NEGATIVES (god 13:47Z, P1). At 13:44Z-13:46Z Dwight's Codex ran
  * `node test/tools/run-tests.cjs <needle>` and `npm test -- <needle>` while Jim held the only slot.

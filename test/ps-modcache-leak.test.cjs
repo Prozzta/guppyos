@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * TEST-PS-MODCACHE-LEAK (1.1.98): four worktree roots held a stray
  * Microsoft\Windows\PowerShell\ModuleAnalysisCache (2026-10-15/16, each written during a full run

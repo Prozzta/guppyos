@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * MIDTURN-MAIL-BLIND (1.1.55; card in tasks.json, Jim's design endorsed by god: L2 first, then L1).
  * Agents could not see mail that arrived mid-turn, so they acted on superseded instructions:

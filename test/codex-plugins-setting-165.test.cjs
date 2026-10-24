@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CODEX-BLOAT-165 fix 5, as the Human chose: "Hive Codex agents inherit my Codex plugins" is a
  * Settings choice, OFF by default. Off = our per-agent config.toml turns the copied plugins off;

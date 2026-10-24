@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * TES-BUBBLE-TAIL-SHARP-189, RENDERED (a hidden Electron window, the REAL OfficeFloor): on the tes
  * pack and on the plain office, in the Human's 575x612 pane, a tall 360x760 and a wide 960x500, on

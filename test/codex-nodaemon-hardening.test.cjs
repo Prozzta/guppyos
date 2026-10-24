@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * CODEX-NODAEMON-HARDENING (1.1.76). Every Codex hive agent gets `--no-daemon` unless its CLI is

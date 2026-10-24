@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * Regression for the silent unknown-recipient drop. `deliver()` returned early

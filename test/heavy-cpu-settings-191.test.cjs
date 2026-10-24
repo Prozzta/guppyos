@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * HEAVY-CPU-OPTIONS-191: the two options persist. Each of the four combinations is written through
  * the real config module, lands in config.json, and is what the heavy jobs read back (heavyCpuOptions).

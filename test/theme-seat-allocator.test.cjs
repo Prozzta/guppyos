@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 // The manifest-driven station allocator. The pack declares the fill order
 // (stations.seatOrder, captain first for the orchestrator) and a per-preset

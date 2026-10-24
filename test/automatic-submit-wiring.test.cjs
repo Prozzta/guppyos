@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * L0-FUSION stage 5.2 — the submit owner JOINED to the real main-process parts.

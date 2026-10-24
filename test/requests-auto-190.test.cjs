@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * REQUESTS-AUTO-190: every open ask closes itself when its work is over, with no hand triage (the
  * Human: "fully automatic"). The replay of the real ledgers (2026-10-17: 714 asks, 65 closed by hand,

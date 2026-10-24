@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * CHANGELOG-HEADINGS-GATE (1.1.99). The 1.1.99 cut commit 2cd1f281 replaced "## [1.1.98] — 2026-10-22"

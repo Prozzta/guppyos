@@ -1,4 +1,5 @@
 'use strict';
+require('../tools/own-job.cjs');
 
 /**
  * HEAVY-LOCK-RESERVATION-RELEASE (card, 2026-10-04 07:00Z): Jim got HEAVY SLOT FREE (reserved to

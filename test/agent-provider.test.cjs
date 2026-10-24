@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * Agent-provider registry tests. Self-contained, no test framework — run with
  * `node test/agent-provider.test.cjs` (mirrors test/kg-core.test.cjs). The

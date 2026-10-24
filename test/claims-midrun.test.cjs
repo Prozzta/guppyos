@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CL-READERWATCHER (god 886ed8): an agent made a writer WHILE THE APP RUNS (memory-sources.json
  * edited mid-run, then its first claim) never loses its memory.md or archive notes from search.

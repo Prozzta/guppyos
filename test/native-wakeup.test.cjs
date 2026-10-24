@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * NATIVE-WAKEUP-EMPTY-INDEX (1.1.55; god andynwe, decision a+b). On the first native start,
  * Phyllis's task-start `memory wake-up` met an EMPTY index ("## L1 - No memories yet."):

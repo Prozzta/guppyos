@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * HIVE-DWIGHT-BG-REINVOKE (god 7e4159): the owed-work continuation.

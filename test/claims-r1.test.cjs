@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CLAIM-LEDGER R1 (plan §W2 "R1 exact duplicate becomes a sighting"; B11: exact-only), written by
  * the W1 store on every append path (the endpoint and W6's import): an exact duplicate of one of

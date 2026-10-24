@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 // Lane layout for the commit history rail. Untested while it sat unused; now it
 // is what the graph actually renders from, so the shapes it has to get right are

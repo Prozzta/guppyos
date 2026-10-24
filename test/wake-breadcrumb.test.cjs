@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * The 1.1.49 log storm: the reconcile breadcrumb de-duplication that suppressed NOTHING.
  *

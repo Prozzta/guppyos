@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * MUNDER_DEV=1 isolation helpers (src/main/devIsolation.ts) — pure, no electron.

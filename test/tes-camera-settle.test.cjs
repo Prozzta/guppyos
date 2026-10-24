@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 // TES-GUPPY-SETTLE: the TES floor's camera eases by elapsed time (the office's per-tick step,
 // compounded at 30 per second) and lands exactly on its target once what is left would move the

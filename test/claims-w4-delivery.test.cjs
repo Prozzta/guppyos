@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CLAIM-LEDGER W4 delivery (claims/delivery.ts), Jim's CL-W4-INT audit:
  *   M-1 the read-only warning (healthy writer: none)   M-2 only the verified prefix is delivered

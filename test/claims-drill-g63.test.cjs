@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 // @heavy-lock live: sustained work: the 1.1.83 downgrade drill (about 150 s in the 1.1.91 FULL). HEAVY-LOCK-LIVE-FILE-192: one run of this file takes the heavy slot.
 /**
  * CLAIM-LEDGER W6, gate G6.3: the downgrade drill to 1.1.83 (spec amendment A7; plan §3 W6).

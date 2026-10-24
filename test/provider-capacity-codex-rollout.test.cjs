@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * L0-CORE — reading Codex allowance out of the rollout it already writes.

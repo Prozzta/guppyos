@@ -20,6 +20,7 @@
  *
  * Single file: `node test/tools/run-tests.cjs perf-151-nits`.
  */
+require('./tools/own-job.cjs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');

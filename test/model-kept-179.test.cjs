@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 // AGENT-MODEL-NOT-KEPT (1.1.79, Jim; diagnosis hive/agents/jim-mtujpe28/CODEX-MODEL-SWITCH-AND-MODEL-NOT-KEPT.md):
 //   M1  a person's in-terminal /model is classed 'user': the user/auto window is the previous
 //       observation's OWN time (the turn_context stamp), not the clock of the hook that re-read it;

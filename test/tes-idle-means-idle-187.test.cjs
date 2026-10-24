@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * IDLE-MEANS-IDLE-187, surface 3 (TES StationFloor): the station floor reads the heavy-job lock as

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * #141 — "garbled text" in the thought bubbles. The pty scrape stripped ONLY

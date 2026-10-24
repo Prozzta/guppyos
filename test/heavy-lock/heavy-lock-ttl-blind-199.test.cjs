@@ -1,4 +1,5 @@
 'use strict';
+require('../tools/own-job.cjs');
 
 /**
  * HEAVY-HANDOFF-RACE, Jim's audit of 59c87898, MINOR 3 (god, conv-9594bd, 2026-10-23). (b) renewed a hold the

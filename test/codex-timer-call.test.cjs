@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * CODEX-TIMER-CALL (1.1.77): an unauthenticated Codex can spend two 30-second

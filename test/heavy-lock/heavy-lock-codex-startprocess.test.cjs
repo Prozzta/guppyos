@@ -1,4 +1,5 @@
 'use strict';
+require('../tools/own-job.cjs');
 /**
  * HEAVY-LOCK-SHAPES-189, god conv-cbab35. At 18:18:34Z Dwight's Codex (code mode, PowerShell) started
  * a full suite with `$suite=Start-Process -FilePath npm.cmd -ArgumentList 'test' ...` while Jim held

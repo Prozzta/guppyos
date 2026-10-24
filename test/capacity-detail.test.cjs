@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * v1.1.45 unit #4 — the provider DETAIL panel (design of record §12, C2.9): a SEPARATE

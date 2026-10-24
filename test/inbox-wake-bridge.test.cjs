@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * Pre-M1 event-wake bridge — submit integration and self-resume (test plan C, and the

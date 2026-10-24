@@ -1,4 +1,5 @@
 'use strict';
+require('../tools/own-job.cjs');
 
 /**
  * START-FIXES-163 (1) — phantom resume key. One of the three fixes the Human approved from Jim's WHY-162.

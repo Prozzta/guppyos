@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CODEX-MODEL-SWITCH-PROMPT P2 + P3 (1.1.79; god 5ebef5, from Jim's
  * CODEX-MODEL-SWITCH-AND-MODEL-NOT-KEPT.md).

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * god authors a spawn request's `command` as a full command LINE, but the PTY

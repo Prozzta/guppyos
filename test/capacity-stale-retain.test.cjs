@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * STALE-RETAIN (human ruling 2026-09-22; SUPERSEDES A1). A pool whose reading has merely

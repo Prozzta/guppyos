@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * TEST-FLAKE-RENDERER-PROFILE: the probe names where a busy renderer is stuck from the paused stacks

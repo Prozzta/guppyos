@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CL-READERWATCHER MUST-1 (Jim): a mid-run raise leaves NO search gap at all. The worker's first
  * claims sync used to drop the replaced markdown when it planned the claims, embed them one queue

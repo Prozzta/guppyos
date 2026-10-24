@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * REBRAND-GUPPY part A (1.1.82, the Human 2026-10-03): the app and its exe become Guppy, the data

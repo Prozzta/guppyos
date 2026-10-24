@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * logTail() must return the SAME rows as reading the whole file, without reading it.
  *

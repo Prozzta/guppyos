@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * HOOK-BROKER P1 (Jim's spec, god's go): Claude's hooks are POSTed to the HookServer

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * WSG LIVENESS (rc/1.1.76 gate, ISO mail-rig-faults:68). Creed's deterministic repro, as a
  * regression: a Codex stub that processes (and so echoes) its stdin late. Before the fix, an

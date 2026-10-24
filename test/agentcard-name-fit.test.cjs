@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * The agent card's NAME outranks its badges (MunderDev 97bda465 + c6b98de9, TES-GUPPY-PORT-PLAN
  * step 7). At the 220px card the god row (rename pencil + BOSS + a status chip like "working")

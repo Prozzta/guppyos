@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * HARNESS-CRASHPAD guard. Every Electron MAIN a test launches must keep userData, sessionData,
  * crashDumps (and appData, logs) inside its own sandbox, through

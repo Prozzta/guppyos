@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * ZERO-TOKEN-LIVENESS, PTY slice (design slice 3; Jim L5): CRASHED vs EXITED comes from an
  * EXPLICIT-TEARDOWN MARK set before any harness-requested kill, never from the exit code (a tab

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * MAIL-RIG-C1-FLAKE: Rig.beatUntil({ holdWhileBusy }) never moves the simulated clock while the
  * host reports a wake in flight or a turn running; it waits for the EVENT (the condition, or the

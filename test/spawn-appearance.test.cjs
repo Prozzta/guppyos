@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 // main's spawn-request appearance sanitiser (TES looks, MunderDev 0bba1dc8): only a small
 // plain object of short strings ever reaches the renderer. Oversize, arrays, non-strings,

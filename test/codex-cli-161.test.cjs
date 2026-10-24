@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * CODEX-WAKE-161 addendum (Jim): (a) Codex agents spawn with `--no-daemon`, but only when the

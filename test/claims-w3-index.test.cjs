@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CLAIM-LEDGER W3 gates on the real store (the app's better-sqlite3 + sqlite-vec under Electron as
  * Node, through the C4 drill runner: sandbox hive, jailed home, allow-list env):

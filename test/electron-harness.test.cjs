@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * L0-UI-B5 — the authorised Electron renderer harness, and the one observation

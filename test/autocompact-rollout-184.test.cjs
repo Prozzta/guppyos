@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * READS-AUTOCOMPACT-ROLLOUT (1.1.84): the auto-compact window god piloted in 1.1.81 becomes the

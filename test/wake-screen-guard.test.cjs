@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * WAKE-SCREEN-GUARD (1.1.76): automatic delivery never types into a Codex screen that is not

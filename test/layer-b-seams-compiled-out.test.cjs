@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * ZT-I1-MAIL 1.1.75 (god 4dd770 decision 1, Jim): the release check scripts/verify-packaged-no-seams.cjs
  * proves the SHIPPED app.asar has the layer-(b) seams compiled out. Tested on synthetic asars (both

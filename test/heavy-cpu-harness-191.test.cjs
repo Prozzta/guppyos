@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 // @heavy-lock live: it compiles and spawns real CPU-limit helpers (about 26 s in the 1.1.91 FULL). HEAVY-LOCK-LIVE-FILE-192: one run of this file takes the heavy slot.
 /**
  * HEAVY-CPU-OPTIONS-191, option 2 (half the logical processors) vs the Electron harness.

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CL-HARNESS-ROLLOVER-RENAME-CRASH: the final replace (tmp -> memory.md) can fail and stay failed.
  * On this PC Bitdefender's CMD heuristic (CMD:Heur.BZC.PZQ.Pantera) flags some rollover tmp files and

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * HOOK-BROKER P3 (Jim's spike, god's go): Codex PreToolUse/PostToolUse as `mcp_tool` hooks into

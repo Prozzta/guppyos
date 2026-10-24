@@ -1,4 +1,5 @@
 'use strict';
+require('../tools/own-job.cjs');
 /**
  * HEAVY-LOCK-LIVE-FILE-192. The lock admitted, while Andy held the slot, a single LIVE test file
  * (about 40 s of real job helpers, probes and holds) and mutant loops run through a variable

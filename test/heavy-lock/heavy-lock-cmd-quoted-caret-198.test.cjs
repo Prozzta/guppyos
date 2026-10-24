@@ -1,4 +1,5 @@
 'use strict';
+require('../tools/own-job.cjs');
 
 /**
  * HEAVY-LOCK-CMD-QUOTED-CARET-198 (Creed f47f59, god 3994c2; Jim's hidden .bat proof). cmd reads a

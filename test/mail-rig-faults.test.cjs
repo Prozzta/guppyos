@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * ZT-I1-MAIL 1.1.75 slice 8: the 12 FAULT-INJECTION tests of INBOX-DESIGN §8.3 (F1-F12), on the
  * fake-agent rig (test/mail-rig/). Layer (a): zero model tokens.

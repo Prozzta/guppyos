@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * REQUESTS-BADGE-84 (god 09ef18, ruling 4d2bbc): the requests badge counts only asks that are
  * really still open. Every close records its reason; nothing is closed by age or by content.

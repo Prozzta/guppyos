@@ -1,4 +1,5 @@
 'use strict';
+require('../tools/own-job.cjs');
 
 /**
  * HEAVY-LOCK-VARPATH-READ (god conv-7efeac; Andy's design and root cause, god's NARROW approval

@@ -1,4 +1,5 @@
 'use strict';
+require('../tools/own-job.cjs');
 /**
  * HEAVY-LOCK-SHAPES-189: shapes the classifier read as light although they run a heavy job (or the
  * reverse). Each row was LIGHT (or heavy) at int-1.1.89 66411ad6 and is classified by what it runs now:

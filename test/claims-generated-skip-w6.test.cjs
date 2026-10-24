@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CLAIM-LEDGER W6, gate G6.6: a GENERATED memory.md (a view rendered from the claims ledger, first
  * line = GENERATED_MEMORY_MARKER) is never touched by the 1.1.83 janitors:

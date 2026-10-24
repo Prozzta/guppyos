@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * RIG-DESYNC (rc/1.1.76 final gate #2, round 1/b): the mail rig's Codex "screen" must never run
  * ahead of the PTY output the host has received.

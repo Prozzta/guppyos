@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 // TES-BUBBLES-188: the 1.1.87 TES floor kept the restore note 'starting up' in its clouds for
 // minutes (for good on a Codex agent with no early hook), never spoke the pack's own lines, and
 // drew the clouds of seated people far above their heads at the Speck desks.

@@ -1,4 +1,5 @@
 'use strict';
+require('../tools/own-job.cjs');
 
 /**
  * START-FIXES-163 (2) — non-Claude agents never read Claude transcripts. One of the three fixes the Human approved from Jim's WHY-162.

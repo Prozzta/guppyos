@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CLAIMS-HEAD-ANCHOR: main keeps each agent's ledger head in user-data. A ledger that no longer
  * reaches its anchored head (its folder deleted, a line cut off the end, a restart from '') is a

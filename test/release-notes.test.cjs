@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * Release-note digest (src/shared/releaseNotes.ts).

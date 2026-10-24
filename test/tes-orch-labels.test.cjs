@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 // TES-ORCH-LABELS (1.1.86): UI text names the orchestrator the floor shows. In the Office (and
 // the built-in TV themes) every label reads exactly as before, "Michael"; on a theme-pack floor

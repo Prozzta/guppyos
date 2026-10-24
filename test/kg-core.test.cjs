@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * Knowledge Graph core + agent-CLI tests. Self-contained, no test framework —
  * run with `node test/kg-core.test.cjs` (mirrors test/slack.test.cjs).

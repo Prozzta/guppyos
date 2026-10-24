@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * ZT-I1-MAIL layer (b): the runner's PowerShell scripts REALLY RUN (the 62daa6ba dry run aborted at
  * 0 s because a multi-line script fed to `powershell -Command -` over stdin is silently not executed).

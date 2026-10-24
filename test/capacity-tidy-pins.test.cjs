@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * v1.1.45 CAPUI-TIDY — the deferred pins from Jim's unit audits, so nothing ships unpinned.

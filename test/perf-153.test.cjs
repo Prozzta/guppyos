@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * 1.1.53 AV (Jim, AV-152; the Human approved R1 + R2).

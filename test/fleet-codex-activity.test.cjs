@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 // FLEET-CODEX-ACTIVITY: Codex has no OTLP feed. Its bounded rollout fallback
 // must nevertheless make the normal usage seam and the context IPC source live.

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CL-M4-CHAINS-PANEL: "possible duplicates" in Settings > Claim Ledger (the Human's choice, option a of
  * Jim's CL-M4 backlog prefilter). Live claims of one agent that name the same card (Jim's card rule,

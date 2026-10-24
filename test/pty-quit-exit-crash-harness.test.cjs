@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * EXIT-CRASH, RENDERED: quitting with 4 real ConPTY sessions. The pre-fix order (resolve right

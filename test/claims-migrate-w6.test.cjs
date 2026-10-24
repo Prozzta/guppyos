@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CLAIM-LEDGER W6 (src/main/claims/migrate.ts): the legacy import, the fallback parser and the frozen
  * backup (_work/system1/CLAIM-LEDGER-BUILD-PLAN.md §3 W6).

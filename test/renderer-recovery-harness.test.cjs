@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * RENDERER-RECOVERY-164, RENDERED: a real hidden Electron window, a real renderer kill (by pid),

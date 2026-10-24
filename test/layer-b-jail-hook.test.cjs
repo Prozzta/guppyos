@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * ZT-I1-MAIL layer (b), R1 proof (god c0a73f (a)) + Jim's re-audit: the Claude jail hook
  * (test/tools/layer-b-jail-hook.cjs) is a STRICT ALLOWLIST. Read/Glob/Grep/LS inside the sandbox and

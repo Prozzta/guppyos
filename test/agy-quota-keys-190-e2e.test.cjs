@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * AGY-QUOTA-KEYS-190, god's proof (conv-0d4948, option 2): the REAL agy 1.4.0 tick, end to end

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * ZT-I2-CONDENSE (god f2315f): the hidden Haiku condense is gone, and stays gone.
  *

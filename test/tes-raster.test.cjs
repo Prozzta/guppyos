@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 // @heavy-lock live: sustained work: rasterises scenes (about 43 s in the 1.1.91 FULL). HEAVY-LOCK-LIVE-FILE-192: one run of this file takes the heavy slot.
 
 // TES-GUPPY-RASTER, TES-FLOOR-EASE-188: drawn whole every frame, TES's 'below' and statics cost

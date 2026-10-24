@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * MEMSPIKE-168: OUR per-agent Codex config.toml always carries the selected [tui] keys that bound
  * Codex's transcript replay on a pty resize, whatever the seed copied from the user's

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * L0-VAL3 — the two normaliser writers must decide APPLICABILITY by the same rule.

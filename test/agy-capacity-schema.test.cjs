@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * AGY 1.1.48 commit 1 - the Antigravity capacity schema and its strict normalizer.

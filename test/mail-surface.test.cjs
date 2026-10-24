@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * ZT-I1-MAIL 1.1.75 slice 2: message BODIES reach the agent inside hook context (INBOX-DESIGN.md
  * §2, §2.1, §2.2, §11.1, §11.2, §11.6, §11.9, §11.17 N1/N2/N3). Zero model tokens: the builder is

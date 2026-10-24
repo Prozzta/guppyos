@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * v1.1.45 unit #14 PHASE 2 — the PIE-DOT, human-approved, pinned. Each rule kills a census

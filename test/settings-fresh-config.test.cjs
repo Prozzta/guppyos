@@ -2,6 +2,7 @@
 // and the live lock read limit 2) but Settings showed the old value on reopen. Root cause: App
 // handed SettingsModal the config snapshot it loaded ONCE at startup; the modal seeds its controls
 // from that prop on mount and saves straight to main, so every setting saved since launch read stale.
+require('./tools/own-job.cjs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');

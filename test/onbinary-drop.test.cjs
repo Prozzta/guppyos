@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 // ONBINARY-DROP: legacy X10 uses xterm.onBinary.  The important boundary is
 // node-pty's real child, not merely a mocked proc.write: ConPTY consumes ESC[M

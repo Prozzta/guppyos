@@ -1,4 +1,5 @@
 'use strict';
+require('../tools/own-job.cjs');
 
 /**
  * HEAVY-LOCK-SHELL-KEYWORD-196 (god 86030e, split from HEAVY-LOCK-GLOB-LOOP-196). A segment opened

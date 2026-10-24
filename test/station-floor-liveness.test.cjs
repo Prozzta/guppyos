@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 // PANEL-WORKING-COLOUR-186: the TES floor must use the same display-status projection as the
 // office floor. A long tool can leave the hook-driven status at idle while liveness knows it is

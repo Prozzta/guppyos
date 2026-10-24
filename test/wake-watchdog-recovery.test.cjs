@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * WAKE-WATCHDOG-RECOVERY (1.1.76, P1b). The stall watchdog only LOGGED an agent stuck

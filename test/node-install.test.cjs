@@ -8,6 +8,7 @@
  * shell that will run an installer as root — without touching the network:
  * `resolveNodeInstaller` takes an injectable fetch, and every other function is pure.
  */
+require('./tools/own-job.cjs');
 const test = require('node:test');
 const assert = require('node:assert');
 const load = require('./load-ts.cjs');

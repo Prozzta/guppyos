@@ -1,4 +1,5 @@
 'use strict';
+require('../tools/own-job.cjs');
 
 /**
  * HEAVY-HANDOFF-RACE (god, conv-af1bba, 2026-10-23). Three heavy-lock handoff faults, each seen live

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /** Route A keeps a fixed, useful user sentinel and moves changing inbox facts to
  * the UserPromptSubmit hook's transient developer context.

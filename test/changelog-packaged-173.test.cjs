@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * CHANGELOG-NOT-PACKAGED (1.1.73). main's 'app:info' (the voice get_app_info tool) reads

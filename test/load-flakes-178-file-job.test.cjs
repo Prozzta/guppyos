@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * LOAD-FLAKES-178: a hung test file is killed with everything it started, whenever each process was
  * born. The watchdog's tree kill came from a process snapshot taken seconds earlier under load, so a

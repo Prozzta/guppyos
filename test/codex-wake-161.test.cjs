@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * CODEX-WAKE-161 (Jim, agents/jim-mtujpe28/CODEX-WAKE-ROOTCAUSE.md). A wake line reached

@@ -1,4 +1,5 @@
 'use strict';
+require('../tools/own-job.cjs');
 
 /**
  * HEAVY-HANDOFF-RACE (e) (god, conv-9a2d94, 2026-10-23). Live (log.jsonl, kind heavy-lock): Dwight's bench

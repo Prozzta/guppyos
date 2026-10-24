@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * WAKE-FALSE-INTERFERED-RESTART (1.1.98), the rig half: the owner's WAKE_TYPED_NOT_SENT latch set

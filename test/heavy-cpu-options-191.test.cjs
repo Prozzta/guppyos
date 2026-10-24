@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * HEAVY-CPU-OPTIONS-191: Settings, beside "Heavy jobs at once", two independent options for heavy jobs:
  * background CPU priority (BELOW_NORMAL) and half the logical processors (floor(n/2), at least 1).

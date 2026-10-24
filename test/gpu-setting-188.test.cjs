@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * GPU-SETTING-188: Settings → Graphics (Auto / GPU / CPU only) with a "Rendering: …" indicator.
  * - the setting's parse and default (a missing, corrupt or unknown value is Auto);

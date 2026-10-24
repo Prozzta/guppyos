@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * COMPOSER-LAG-152 (Jim's report, god's scope F1 + F2): per-keystroke waste on two typing

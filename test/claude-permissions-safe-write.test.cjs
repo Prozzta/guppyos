@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * CLAUDE-JSON-WIPE (1.1.91): ensureClaudePermissionsAccepted must never wipe the user's

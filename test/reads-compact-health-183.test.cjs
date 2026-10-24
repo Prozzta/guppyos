@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * READS-COMPACT-HEALTH (1.1.83): the safety net for the auto-compact rollout. After each
  * compaction the SessionStart(compact) hook carries the agent's cards in progress and the mail it

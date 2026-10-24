@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 // @heavy-lock live: it runs the test runner itself (about 27 s in the 1.1.91 FULL). HEAVY-LOCK-LIVE-FILE-192: one run of this file takes the heavy slot.
 /**
  * CLAIMS-PERF-LANE: run-tests.cjs runs test/perf/*.perf.cjs SERIALLY after the parallel suite, so

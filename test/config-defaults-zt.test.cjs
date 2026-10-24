@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * ZT-I4: the shipped defaults. The hourly ops standup is opt-in (the floor digest replaces

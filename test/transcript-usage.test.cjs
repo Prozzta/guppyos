@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * readAgentUsage incremental-cache tests. Self-contained, no framework — run
  * with `node test/transcript-usage.test.cjs` (mirrors test/breaker.test.cjs).

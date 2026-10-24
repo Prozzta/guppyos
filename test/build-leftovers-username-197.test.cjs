@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * BUILD-LEFTOVERS-USERNAME-197 (Jim d449c6 INFO on the 1.1.96 cut, god b8a715). The 1.1.95 and 1.1.96

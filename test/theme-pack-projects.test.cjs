@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 // Theme packs as project themes (the integration of PR-a's project themes with PR-b's packs, PR-c's UI tokens and
 // PR-d's looks). Generic: no pack is named here. A registered pack id is a project theme in main and the renderer; a

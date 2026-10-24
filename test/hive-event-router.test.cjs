@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * Pre-M1 event-wake bridge, commit 1 — the HYBRID router and the delivery edge

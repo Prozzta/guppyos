@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * READS-MAIL-CAP (1.1.83): long mail injected into god's turns arrives as its first ~1,500
  * characters plus the file paths (inbox/ now, inbox/.done/ after the turn), so the rest stays fully

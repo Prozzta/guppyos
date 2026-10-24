@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 // ICON-SPECK: the app icon is Speck, the TES pack's look-builder preset, in place of
 // Michael. tools/make-logo.cjs renders him through the app's own path (manifest ->

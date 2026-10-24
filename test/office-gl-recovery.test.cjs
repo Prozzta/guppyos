@@ -13,6 +13,7 @@
  * logged its own graceful "[terminal] webgl context lost — falling back to DOM
  * renderer". The office had no such fallback. These tests pin the one it has now.
  */
+require('./tools/own-job.cjs');
 const test = require('node:test');
 const assert = require('node:assert');
 const load = require('./load-ts.cjs');

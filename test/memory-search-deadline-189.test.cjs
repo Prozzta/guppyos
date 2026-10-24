@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * MEMORY-SEARCH-TIMEOUT-DURING-INDEX-189 (Jim 5b76db): during a 1757-part claims sync, 1 of 84
  * searches got "memory search timed out after 250 ms" (exit 4), and nothing logged it.

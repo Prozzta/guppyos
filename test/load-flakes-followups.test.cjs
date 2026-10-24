@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * LOAD-FLAKES-FOLLOWUPS (1.1.77; Jim's LOAD-FLAKES-176 audit, J-LF1..3, and the RPROF note).
  * Pure driver tests: the host's `call` is stubbed and the hold loops run on an injected clock, so

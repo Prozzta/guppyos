@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * ZERO-TOKEN-LIVENESS: the zero-token proof (design slice 7, Jim L2) and the CODEX-STOP-MISSING
  * acceptance replay of turn 01a0f363 (fixtures/liveness-01a0f363.json, from the real rollout and

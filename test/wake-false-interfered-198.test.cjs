@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * WAKE-FALSE-INTERFERED-RESTART (1.1.98, Human 2026-10-22).

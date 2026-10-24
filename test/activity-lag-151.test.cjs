@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * ACTIVITY-LAG-151 (Jim's report, god's scope): the renderer's steady tax that grows with

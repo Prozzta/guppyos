@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * L0-FIX7 — the three defects Dwight demonstrated at pin 4 (`3bf0ce53`), research

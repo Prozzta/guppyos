@@ -7,6 +7,7 @@
  * builds instants from calendar fields instead of adding milliseconds, and it
  * is asserted here in a fixed zone so the test means the same thing everywhere.
  */
+require('./tools/own-job.cjs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const loadTs = require('./load-ts.cjs');

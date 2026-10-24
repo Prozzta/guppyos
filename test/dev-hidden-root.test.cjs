@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * ZT-I1-MAIL 1.1.75 layer (b), TEST INFRASTRUCTURE ONLY: the two dev-only seams the hidden
  * full-app run needs (INBOX-DESIGN §11.18 #48, the Human's option A), and the marker that they

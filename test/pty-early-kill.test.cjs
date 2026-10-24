@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * PTY-EARLY-KILL-LEAK (1.1.77). node-pty 1.1.0's WindowsTerminal defers kill() until the
  * terminal's FIRST OUTPUT (`_deferNoArgs`, run on the first 'data' event). A child killed before it

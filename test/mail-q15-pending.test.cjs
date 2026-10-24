@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * ZT-I1-MAIL 1.1.75 slice 4b (god's rulings after Jim's re-check):
  *  (a) mutant K13: the wake coordinator's pending source that index.ts wires is the REAL rule

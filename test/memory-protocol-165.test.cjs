@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CODEX-BLOAT-165 fix 3: protocol line 1 no longer tells every agent (Claude, Codex, AGY - the
  * same injectedPrompt feeds all of them) to read memory.md whole at every task start, and the

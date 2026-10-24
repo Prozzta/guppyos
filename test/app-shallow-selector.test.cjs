@@ -15,6 +15,7 @@
  *
  * Single file: `node test/tools/run-tests.cjs app-shallow-selector`.
  */
+require('./tools/own-job.cjs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');

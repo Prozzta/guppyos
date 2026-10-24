@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * GPU-COMPOSITING-INSTALLED-189: the startup 'graphics' row in log.jsonl.
  *

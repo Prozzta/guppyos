@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * L0-FUSION stage 5.4d / 5.6 - THE COMPOSER, RENDERED. The production MessageQueueComposer

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 // PERF-FLOOR-FILL-188: the TES floor's damage tracking (damage.ts): which device-px rects a frame
 // draws again. The rendered proof that a frame so drawn equals a full draw is in the harness.
 const test = require('node:test');

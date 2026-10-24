@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * READS-181 (god 350e5f, approved 1faf38): replace token-saving habits with app features.

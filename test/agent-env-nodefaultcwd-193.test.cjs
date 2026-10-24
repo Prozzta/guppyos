@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * AGENT-ENV-NODEFAULTCWD-193. The Claude Code CLI sets NoDefaultCurrentDirectoryInExePath=1 for

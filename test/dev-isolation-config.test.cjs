@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * MUNDER_DEV=1 clamp at the PERSISTENCE boundary (Andy M4 finding on 0d1441db:

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * The inbox-wake COORDINATOR (pre-M1 event-wake bridge, test plan B): pending / announced /

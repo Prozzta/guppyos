@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * Outbox files can be created by a non-atomic writer. The router used to parse

@@ -4,7 +4,8 @@
  * NODE_OPTIONS. In a test-file process (NODE_TEST_CONTEXT), before any test code runs, the file
  * joins a job of its own (file-job.cs join): every process it starts is then created inside that
  * job, and the watchdog's kill takes them all at once. The file takes this back out of NODE_OPTIONS,
- * so nothing it starts loads it again (its children are in its job already).
+ * so nothing it starts loads it again (its children are in its job already), and marks the join
+ * in GUPPY_FILE_JOB_PID so the file's own join (own-job.cjs, BARE-NODE-TEST-NO-OWNER) is skipped.
  */
 const exe = process.env.GUPPY_FILE_JOB_EXE;
 const opt = process.env.GUPPY_FILE_JOB_OPT; // the exact text run-tests added to NODE_OPTIONS
@@ -17,5 +18,8 @@ if (exe && opt && String(process.env.NODE_TEST_CONTEXT || '').startsWith('child'
   if (r.status !== 0) {
     const why = (r.stderr || '').trim() || (r.error ? String(r.error) : `exit ${r.status}`);
     process.stderr.write(`[test-runner] ${process.argv[1] || 'a test file'} is not in a job of its own (${why}): a hung run of it is killed from a snapshot\n`);
+  } else {
+    // BARE-NODE-TEST-NO-OWNER: the file's own join (test/tools/own-job.cjs) sees this and does nothing.
+    process.env.GUPPY_FILE_JOB_PID = String(process.pid);
   }
 }

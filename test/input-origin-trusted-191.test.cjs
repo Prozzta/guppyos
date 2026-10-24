@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * MODEL-NOT-KEPT-191 T1 - a TRUSTED keystroke on a rendered terminal classifies HUMAN.

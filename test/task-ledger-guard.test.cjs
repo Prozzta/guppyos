@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * ZT-I3 §3.1: the task-ledger guard watches tasks.json and NEVER writes it. It keeps the

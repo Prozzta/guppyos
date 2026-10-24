@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 // @heavy-lock live: sustained work (about 77 s in the 1.1.91 FULL). HEAVY-LOCK-LIVE-FILE-192: one run of this file takes the heavy slot.
 /**
  * CLAIM-LEDGER W6 (src/main/claims/exportLedger.ts): the rollback exports.

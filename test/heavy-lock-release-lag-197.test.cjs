@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * HEAVY-LOCK-RELEASE-LAG-197: the heavy lock is freed within about a second of the wrapped job
  * exiting, on every exit path (success, a failed gate, a kill, a crash), from the job's own exit

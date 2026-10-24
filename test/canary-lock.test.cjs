@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * The packaged-canary lock. GATE-1 borrows a FIXED dev root, so it is mutually exclusive

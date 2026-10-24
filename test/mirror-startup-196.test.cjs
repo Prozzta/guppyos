@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * MIRROR-STARTUP-196 (god P0 1e19d4): on 1.1.95 live the mirror cost guard turned every terminal
  * mirror off 6.0 s after app start (mirror-auto-off event-loop-delay, share 0.02594, eldMs 52.67,

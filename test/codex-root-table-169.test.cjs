@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * WAKEA-169 F1 (the same class as MS-169 F1): ONE shared root-table setter
  * (setCodexRootTableKeys) serves both setCodexTuiKeys ([tui]) and setCodexFeatureFlags

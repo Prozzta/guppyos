@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 // @heavy-lock live: sustained work: 10,000 appends with simulated crashes (about 170 s in the 1.1.91 FULL). HEAVY-LOCK-LIVE-FILE-192: one run of this file takes the heavy slot.
 /**
  * CLAIM-LEDGER W1 gate G1.1, crash safety: 10,000 appends with simulated crashes, against real

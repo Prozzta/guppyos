@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 // The Office stays Guppy's own floor. Upstream (MunderDev f6532e5b) moved the
 // office's layout into office.layout.json; the Guppy port keeps Guppy's inline

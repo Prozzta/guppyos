@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * UI-CRAWL fix (Dwight d41157ff moved fleet/capacity/undelivered persistence off main; Andy's audit

@@ -1,4 +1,5 @@
 'use strict';
+require('../tools/own-job.cjs');
 
 /**
  * HEAVY-LOCK-FALSE-HEAVY-198 (god 327b16). Andy, 2026-10-19 ~20:21Z: a light chain

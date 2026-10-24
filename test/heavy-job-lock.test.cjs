@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * HEAVY-JOB-SERIALIZE (1.1.55; god andyheavy + andyheavycfg, the Human's "Heavy jobs at once").
  * "One heavy job at a time" was a prose rule, broken twice on 2026-09-26 (and the Human's PC froze

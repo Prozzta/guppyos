@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * ELECTRON-VIEW-SELF-HEAL: the shared Electron view (electron-bin.cjs swiftShaderView) is ready only when
  * its .complete marker AND every top-level name of its dist are there. On 2026-10-21 the view lost

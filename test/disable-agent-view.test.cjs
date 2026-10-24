@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * JOB-ENV-IDENTITY (1.1.71; its own commit so it can be dropped): a hive Claude agent must never

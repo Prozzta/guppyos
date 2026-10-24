@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * AGY-QUOTA-KEYS-190: agy 1.3.6/1.4.0 added a fifth quota bucket, and every tick drifted

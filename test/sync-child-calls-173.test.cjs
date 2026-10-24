@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * SYNC-CHILD-CALLS (1.1.73): no user-triggerable main-process path runs a SYNCHRONOUS child
  * process. The main thread must never block on one (SYNC-KILLALL-WHY.md: killAll's per-terminal

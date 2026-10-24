@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * WORKTREE-REMOVE-JUNCTION-191: stopping an isolated agent or worker must never delete anything

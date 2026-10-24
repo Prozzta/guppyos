@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * ⌘-click on a path in terminal output. Two jobs, and the matcher is the one

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CL-M4-WP step 3 (design §2): the per-agent search-result log (source 2) and the deterministic
  * candidate collection / RRF ranking the note CLI calls. All texts and ids are invented.

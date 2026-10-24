@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 // @heavy-lock live: sustained work: real git worktrees and junctions. One run of this file takes the heavy slot.
 /**
  * RELEASE-WORKTREE-PRUNE (1.1.98): scripts/release-worktrees.cjs, step 8 of docs/release-checklist.md.

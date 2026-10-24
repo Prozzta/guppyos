@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * L0-TERMMATRIX — does the candidate clear control actually empty a REAL provider

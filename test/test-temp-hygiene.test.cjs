@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * TEST-TEMP-HYGIENE (1.1.98): ordinary tests left mkdtemp folders in the temp folder
  * (md-update-applied, md-cost, md-roster, proj/home/transcript, kg-test, ...; Jim 2026-09-20), and

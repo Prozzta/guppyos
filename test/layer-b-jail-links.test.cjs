@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * god (the packages-junction blocker): (a) no junction/symlink under the sandbox base may lead out of

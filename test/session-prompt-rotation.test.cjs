@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * SESSION-PROMPT-ROTATION (1.1.76). A resumed Claude session keeps the system prompt it was

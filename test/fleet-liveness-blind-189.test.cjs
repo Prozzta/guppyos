@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * FLEET-LIVENESS-BLIND (2026-10-16): Dwight (Codex) was shown working for 3h50m with no hook or

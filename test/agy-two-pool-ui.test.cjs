@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * AGY 1.1.48 commit 3 - two pools per Antigravity account, and the LAZY ROW rule.

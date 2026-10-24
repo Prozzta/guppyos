@@ -1,4 +1,5 @@
 'use strict';
+require('../tools/own-job.cjs');
 
 /**
  * HEAVY-LOCK-FALSE-POSITIVE (god, conv-20ca42, 2026-10-23). Two LIGHT god commands were denied as heavy

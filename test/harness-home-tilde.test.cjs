@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * #140 — onboarding died on `ENOENT: mkdir '~/HarnessAgents'`: the wizard lets

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * Multi-endpoint webhook server — the routing + isolation rules that a single

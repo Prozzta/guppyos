@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * DWIGHT-INPUT-DEAD-179 (1.1.80): a RESUMED Codex agent was refused every delivery with

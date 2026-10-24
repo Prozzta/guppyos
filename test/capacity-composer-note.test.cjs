@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * v1.1.45 unit #11 — the composer's capacity note is UNCONDITIONAL. An empty queue on a

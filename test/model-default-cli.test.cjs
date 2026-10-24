@@ -3,6 +3,7 @@
 // config-load migration (flagged, logged to the hive by main), godModel is untouched, and an
 // existing agent's stored model is never affected.
 'use strict';
+require('./tools/own-job.cjs');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');

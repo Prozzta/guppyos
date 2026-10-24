@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * Regression for the 2026-08-15 webhook-card loss: ASK ME had read an eight-card

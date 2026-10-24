@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * RENDERER-RECOVERY-164, RENDERED: the local crash reporter in a real hidden Electron.

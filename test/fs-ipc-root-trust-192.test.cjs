@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * FS-IPC-ROOT-TRUST-192 - main decides which roots the fs:* IPC may open.

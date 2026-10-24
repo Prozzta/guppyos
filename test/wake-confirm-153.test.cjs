@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * 1.1.53: ACTIVE NEEDS CONFIRMATION (Jim, WAKE-BUGS-152.md; god's rulings andywake + andyconfirm).

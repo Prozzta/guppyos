@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CODEX-BLOAT-165 fix 7: a Codex agent's developer_instructions carry an output-hygiene rule
  * (no whole files or CSVs; ranges, matches, capped output; big edits via files). Other providers'

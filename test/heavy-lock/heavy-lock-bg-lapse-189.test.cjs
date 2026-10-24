@@ -1,4 +1,5 @@
 'use strict';
+require('../tools/own-job.cjs');
 /**
  * HEAVY-LOCK-BG-LAPSE-189: Jim's chain at 08:40:28Z wrote a script with a heredoc and ran it in the
  * same backgrounded Bash call. At PreToolUse the script did not exist yet, the classifier read

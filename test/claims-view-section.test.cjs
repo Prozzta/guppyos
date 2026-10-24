@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 // CL-W6-VIEW-SECTION: in a GENERATED memory.md, W4's own headings (the title, "How I work",
 // "Working set", "All claims") give a bullet the agent appends below them no `section`. A heading
 // the agent writes itself keeps its section, and so does every heading of a legacy (not generated)

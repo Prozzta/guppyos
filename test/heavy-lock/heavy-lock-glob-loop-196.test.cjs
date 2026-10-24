@@ -1,4 +1,5 @@
 'use strict';
+require('../tools/own-job.cjs');
 
 /**
  * HEAVY-LOCK-GLOB-LOOP-196 (god 0f986b). A serial loop over every test file

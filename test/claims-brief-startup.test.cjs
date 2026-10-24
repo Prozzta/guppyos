@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 // CL-BRIEF-STARTUP: the claims briefing reaches the agent at startup and after a compaction, and its
 // log row says what the agent got.
 //  - Cause 1: the working set re-tokenized the whole output for every candidate line (quadratic):

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * NATIVE-MEMORY (1.1.54), the parts that run in plain Node: the tokenizer, the chunker, the
  * source allow-list and migration report, the CLI text, request validation, tokens, the main-side

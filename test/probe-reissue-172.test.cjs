@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * PROBE-REISSUE (1.1.72; god's GO "A" + "B" on Jim's DWIGHT-HOLD chain, relayed to the Human).

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 // TES plan step 5 (the join) in Guppy, end to end with the neutral-deck fixture (invented art,
 // no TES data): main registers the bundled packs before any config is read, so a pack id

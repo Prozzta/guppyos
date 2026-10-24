@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * HISTORY-VIEW-169, RENDERED: the production HistoryView in a hidden Electron window

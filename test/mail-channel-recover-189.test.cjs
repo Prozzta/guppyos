@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * MAIL-CHANNEL-STUCK-DEGRADED (1.1.89): a mail channel degrade (§11.10) is no longer for good.
  *  (d) trigger B judges a wake by what FOLLOWS it: a hook clears it, a confirm window that ends with

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * RESOLVER-TIMEOUT-MISS (1.1.76): a command lookup killed by its time box is UNKNOWN, not a miss.
  *

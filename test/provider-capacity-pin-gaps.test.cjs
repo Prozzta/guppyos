@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * L0-PIN-GAPS — four requirements from the L0-CONFORM map (research `0d8c903`) that

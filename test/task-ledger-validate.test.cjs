@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * ZT-I3 §3.1: `validateLedger`, the whole-ledger check, and the one duplicate-id rule

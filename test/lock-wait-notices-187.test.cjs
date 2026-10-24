@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * LOCK-WAIT-NOTICES-187 (1.1.87): the heavy-job lock left a waiting agent unaware in two places

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * CAPACITY-DUP-CONFIRM-163 — the Dwight deadlock of 2026-09-27 (Jim, CAPACITY-DEADLOCK.md).

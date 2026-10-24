@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 // VOICE-THEME-185 (Jim's release SHOULD b): 1.1.84 could switch the theme by voice
 // (update_setting officeTheme, the global key). 1.1.85 made themes per project and dropped

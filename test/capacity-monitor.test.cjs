@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * v1.1.45 CAPUI-MONITOR — the Monitor line choice (Budget / 5H / Weekly), its budget

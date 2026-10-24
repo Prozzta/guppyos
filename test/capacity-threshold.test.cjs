@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * v1.1.45 unit #8 — the C2.8 capacity-display threshold: the input contract, its

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * v1.1.45 unit #12 — VOCABULARY AND GEOMETRY GUARDS for the whole capacity display

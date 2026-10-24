@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * MAIN-SYNC-LOG-LEDGER (tasks): HiveManager.tasks() was a disk read + parse of tasks.json on every
