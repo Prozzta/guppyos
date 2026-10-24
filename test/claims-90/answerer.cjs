@@ -52,7 +52,9 @@ function parseArgs(argv) {
 }
 
 function parseItems(file) {
-  const items = fs.readFileSync(file, 'utf8').split(/\r?\n/).filter((l) => l.trim()).map((l) => JSON.parse(l));
+  // Jim's DEV item files name the id `itemId`; the gate files name it `id`.
+  const items = fs.readFileSync(file, 'utf8').split(/\r?\n/).filter((l) => l.trim()).map((l) => JSON.parse(l))
+    .map((it) => (it.id === undefined && it.itemId !== undefined ? { ...it, id: it.itemId } : it));
   const ids = new Set();
   for (const it of items) {
     if (typeof it.id !== 'string' || !/^[A-Za-z0-9._-]{1,80}$/.test(it.id) || ids.has(it.id)) throw new Error(`item id missing, unsafe or repeated: ${it.id}`);

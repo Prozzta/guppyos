@@ -126,7 +126,10 @@ test('PIN: the contained answerer reads what the tree\'s own hook gives it (M4, 
 });
 
 test('answerer: hook settings follow the installed shape; env and transcript checks', () => {
-  const { settingsFor, childEnv, readTranscript, styleDeviation } = require('./claims-90/answerer.cjs');
+  const { settingsFor, childEnv, readTranscript, styleDeviation, parseItems: answererItems } = require('./claims-90/answerer.cjs');
+  const itemsFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'c90-ai-')), 'items.jsonl');
+  fs.writeFileSync(itemsFile, [{ itemId: 'DV001', asker: 'god', question: 'q?', group: 'F' }, { id: 'P1', asker: 'jim', question: 'r?' }].map((r) => JSON.stringify(r)).join('\n'));
+  assert.deepEqual(answererItems(itemsFile).map((i) => i.id), ['DV001', 'P1'], 'the DEV files name the id itemId');
   const dev = (command) => styleDeviation({ tool: 'Bash', command });
   assert.equal(dev('memory search "codex quota"'), false, 'bare');
   assert.equal(dev('memory search --results 3 "a | b > c; d"'), false, 'quoted query text is not a pipe');
