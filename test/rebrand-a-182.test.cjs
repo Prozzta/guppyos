@@ -280,7 +280,7 @@ test('build/installer.nsh: customInstall re-targets old-exe links in the pin fol
 });
 
 function nsisTools() {
-  const cache = path.join(process.env.LOCALAPPDATA || '', 'electron-builder', 'Cache', 'nsis');
+  const cache = path.join(process.env.GUPPY_SHARED_LOCALAPPDATA || process.env.LOCALAPPDATA || '', 'electron-builder', 'Cache', 'nsis'); // INT 1.1.102: the real folder under run-tests' LOCALAPPDATA jail
   if (!fs.existsSync(cache)) return null;
   const nsis = fs.readdirSync(cache).find((d) => /^nsis-\d/.test(d));
   const res = fs.readdirSync(cache).find((d) => /^nsis-resources-/.test(d));
@@ -290,8 +290,10 @@ function nsisTools() {
   return fs.existsSync(makensis) && fs.existsSync(path.join(plugins, 'WinShell.dll')) ? { makensis, plugins } : null;
 }
 
+// INT 1.1.102: WScript.Shell makes LOCALAPPDATA\Microsoft; keep it in a folder of this file's own, not run-tests' jail.
+let psLocal = null;
 const ps = (script, env) => spawnSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
-  { env: require('./tools/ps-env.cjs').psEnv({ ...process.env, ...env }), encoding: 'utf8', windowsHide: true, timeout: 60_000 });
+  { env: require('./tools/ps-env.cjs').psEnv({ ...process.env, LOCALAPPDATA: (psLocal ??= tmp('pslocal')), ...env }), encoding: 'utf8', windowsHide: true, timeout: 60_000 });
 const makeLnk = (lnk, target) => assert.equal(ps('$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:L); $s.TargetPath=$env:T; $s.Save()', { L: lnk, T: target }).status, 0);
 const lnkTarget = (lnk) => ps('[Console]::Out.Write((New-Object -ComObject WScript.Shell).CreateShortcut($env:L).TargetPath)', { L: lnk }).stdout;
 
@@ -329,7 +331,9 @@ test('build/installer.nsh, compiled and run on fake links: the pin to the old ex
   ].join('\r\n'));
   const c = spawnSync(makensis, ['/V2', nsi], { encoding: 'utf8', windowsHide: true, timeout: 60_000 });
   assert.equal(c.status, 0, c.stdout + c.stderr);
-  const r = spawnSync(path.join(dir, 'harness.exe'), ['/S'], { windowsHide: true, timeout: 60_000 });
+  // INT 1.1.102: Windows makes LOCALAPPDATA\Microsoft for the installer; keep it in this dir, not run-tests' jail.
+  fs.mkdirSync(path.join(dir, 'local'), { recursive: true });
+  const r = spawnSync(path.join(dir, 'harness.exe'), ['/S'], { windowsHide: true, timeout: 60_000, env: { ...process.env, LOCALAPPDATA: path.join(dir, 'local') } });
   assert.equal(r.status, 0);
   const guppy = path.join(inst, 'Guppy.exe');
   assert.equal(lnkTarget(path.join(pins, 'Munder Difflin.lnk')).toLowerCase(), guppy.toLowerCase());

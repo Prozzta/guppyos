@@ -52,7 +52,7 @@ test('installer.nsh: only HKCU\\Software\\Classes\\munderdifflin, and only after
 });
 
 function nsisTools() {
-  const cache = path.join(process.env.LOCALAPPDATA || '', 'electron-builder', 'Cache', 'nsis');
+  const cache = path.join(process.env.GUPPY_SHARED_LOCALAPPDATA || process.env.LOCALAPPDATA || '', 'electron-builder', 'Cache', 'nsis'); // INT 1.1.102: the real folder under run-tests' LOCALAPPDATA jail
   if (!fs.existsSync(cache)) return null;
   const nsis = fs.readdirSync(cache).find((d) => /^nsis-\d/.test(d));
   const res = fs.readdirSync(cache).find((d) => /^nsis-resources-/.test(d));
@@ -126,7 +126,9 @@ test('compiled: the matcher accepts a command that runs a Guppy.exe and nothing 
     '  FileWrite $9 "$R0$R4"',
     '  FileClose $9',
   ]);
-  const r = spawnSync(path.join(dir, 'harness.exe'), ['/S'], { windowsHide: true, timeout: 60_000 });
+  // INT 1.1.102: Windows makes LOCALAPPDATA\Microsoft for the installer; keep it in this dir, not run-tests' jail.
+  fs.mkdirSync(path.join(dir, 'local'), { recursive: true });
+  const r = spawnSync(path.join(dir, 'harness.exe'), ['/S'], { windowsHide: true, timeout: 60_000, env: { ...process.env, LOCALAPPDATA: path.join(dir, 'local') } });
   assert.equal(r.status, 0);
   assert.equal(fs.readFileSync(out, 'utf8'), CASES.map(([, ok]) => (ok ? '1,' : '0,')).join('') + 'r0r4');
 });

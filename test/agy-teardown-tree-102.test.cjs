@@ -110,7 +110,9 @@ async function run(Pty, end, { after } = {}) {
     const t0 = Date.now();
     while ((alive(inner) || alive(root)) && Date.now() - t0 < DEADLINE_MS) await sleep(100);
     // The tree can be gone before taskkill's close event runs closePty (INT 1.1.102 FULL: closed 0).
+    const tGone = Date.now(); const lateClose = closes.n === 0;
     while (closes.n === 0 && Date.now() - t0 < DEADLINE_MS) await sleep(25);
+    if (lateClose) process.stderr.write(`[agy-teardown] the close came ${Date.now() - tGone} ms after the tree was gone (${tGone - t0} ms)\n`);
     const out = { ...extra, innerGone: !alive(inner), rootGone: !alive(root) };
     if (after) Object.assign(out, await after(closes, out, m, root));
     return { ...out, closes: closes.n };

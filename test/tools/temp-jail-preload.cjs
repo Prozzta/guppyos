@@ -23,6 +23,9 @@ if (root && opt && String(process.env.NODE_TEST_CONTEXT || '').startsWith('child
   // The real temp folder, for the caches that are shared on purpose and kept between runs
   // (shared-temp.cjs). A nested run keeps the outermost one.
   if (!process.env.GUPPY_SHARED_TEMP) process.env.GUPPY_SHARED_TEMP = require('os').tmpdir();
+  // INT 1.1.102: the real local app-data folder, read-only, for tools cached there on purpose
+  // (electron-builder's NSIS cache); LOCALAPPDATA itself moves into the jail below.
+  if (!process.env.GUPPY_SHARED_LOCALAPPDATA && process.env.LOCALAPPDATA) process.env.GUPPY_SHARED_LOCALAPPDATA = process.env.LOCALAPPDATA;
   try {
     // <pid>-<unique>: a later file can get a finished file's pid, and must not share its folder.
     const dir = fs.mkdtempSync(path.join(root, `${process.pid}-`));

@@ -25,9 +25,10 @@ const scenario = path.join(__dirname, 'electron-harness', 'scenarios', 'app-shal
 let run;
 const result = () => (run ??= runScenario(scenario, { timeoutMs: 180_000 }));
 
-test('RENDERED: N real ticks on a NON-selected agent render App and its memo children 0 times', async () => {
+test('RENDERED: N real ticks on a NON-selected agent render App and its memo children 0 times', async (t) => {
   const r = await result();
   assert.equal(r.ok, true, r.error);
+  if (r.settled) t.diagnostic(`census settled in ${r.settled.ms} ms; late renders before phase A: ${JSON.stringify(r.settled.late)}`);
   assert.equal(r.floorMounted, true, 'the real floor (a canvas) must be mounted: this measures the live tree');
   const a = r.phaseA;
   assert.equal(a.App, 0, `App rendered ${a.App} times for ${r.N} ticks on another agent (raw: ${JSON.stringify(r.rawA)})`);

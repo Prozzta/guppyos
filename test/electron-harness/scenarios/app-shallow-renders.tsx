@@ -105,12 +105,16 @@ window.__harnessRun = async () => {
 
     // INT 1.1.102 (cap-199's perf-151-nits settle): under the CPU cap a late startup render landed
     // in phase A (App 1 for 50 ticks, every App child once). Wait for the census to go quiet first.
+    const settled = { ms: 0, late: [] as Record<string, number>[] };
+    const t0 = performance.now();
     for (let i = 0; ; i += 1) {
       resetRenderCounts();
       await settle(50);
       if (Object.keys(renderCounts()).length === 0) break;
+      settled.late.push(renderCounts());
       if (i === 19) throw new Error(`render census never settled: ${JSON.stringify(renderCounts())}`);
     }
+    settled.ms = Math.round(performance.now() - t0);
     resetRenderCounts();
     await tick('a2');
     const a = renderCounts();
@@ -124,7 +128,7 @@ window.__harnessRun = async () => {
 
     await act(async () => { root.unmount(); });
     host.remove();
-    window.harness.report({ ok: true, N, floorMounted, phaseA: pick(a), phaseB: pick(b), phaseC: pick(c), rawA: a, rawB: b, pins: selectorPins() });
+    window.harness.report({ ok: true, N, floorMounted, phaseA: pick(a), phaseB: pick(b), phaseC: pick(c), rawA: a, rawB: b, pins: selectorPins(), settled });
   } catch (e) {
     window.harness.report({ ok: false, error: e instanceof Error ? `${e.message}\n${e.stack}` : String(e) });
   }
