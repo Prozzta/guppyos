@@ -204,7 +204,7 @@ const LAUNCHES = /\bharnessElectron\s*\(|require\(\s*['"][^'"]*electron-harness\
 const READ_ONLY = ['test/automatic-submit-wiring.test.cjs', 'test/harness-crashpad-guard.test.cjs', 'test/theme-bundle-boundaries.test.cjs',
   'test/related-tests-198.test.cjs', 'test/icon-speck.test.cjs', 'test/electron-view-self-heal-198.test.cjs'];
 /** Classifier tests that hold a launch as fixture TEXT (a string they classify), never run it. */
-const TEXT_ONLY = ['test/heavy-lock/heavy-lock-live-file-192.test.cjs'];
+const TEXT_ONLY = ['test/heavy-lock/heavy-lock-live-file-192.test.cjs', 'test/capped-render-lane-198.test.cjs'];
 const tracked = execFileSync('git', ['-C', REPO, 'ls-files', '--', 'test/*.test.cjs', 'test/**/*.test.cjs'], { encoding: 'utf8' }).split('\n').filter(Boolean);
 
 /** `strip`: test hook, a file whose `@heavy-lock live` line the reader drops (the tag-removed mutant). */
@@ -212,7 +212,7 @@ K.census = async ({ HJ: M, HK: H }, _t, strip) => {
   const base = H.HookServer.heavyScriptCtx(REPO);
   const ctx = strip ? { ...base, readScript: (p, cd) => { const t = base.readScript(p, cd); return t !== null && p.replace(/\\/g, '/').endsWith(strip) ? t.replace(/^.*@heavy-lock live.*$/m, '') : t; } } : base;
   for (const f of TEXT_ONLY) assert.ok(tracked.includes(f), `${f} is tracked`);
-  const launchers = tracked.filter((f) => !TEXT_ONLY.includes(f) && LAUNCHES.test(fs.readFileSync(path.join(REPO, f), 'utf8')));
+  const launchers = tracked.filter((f) => !TEXT_ONLY.includes(f) && !READ_ONLY.includes(f) && LAUNCHES.test(fs.readFileSync(path.join(REPO, f), 'utf8')));
   assert.ok(launchers.includes('test/quit-sweep.electron.test.cjs') && launchers.includes('test/activity-lag-151.test.cjs') && launchers.length >= 30,
     `the census finds the launchers (${launchers.length}): ${launchers.slice(0, 5).join(', ')}`);
   const light = launchers.filter((f) => !sure(cls(M, `node --test ${f}`, ctx)));

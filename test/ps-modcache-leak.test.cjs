@@ -112,7 +112,7 @@ function testFiles(dir) {
 // variable) with cwd os.tmpdir(), and gets the runner's env in suite runs.
 const KNOWN = {
   'electron-harness/electron-bin.cjs': 1,
-  'heavy-cpu-options-191.test.cjs': 1,
+  'heavy-cpu-options-191.test.cjs': 2, // INT 1.1.102: + cap-199's known-folder query (B1)
   'heavy-job-lock.test.cjs': 1,
   'ps-policy-temp-leak-198.test.cjs': 2,
   'rebrand-a-182.test.cjs': 1,
@@ -149,7 +149,9 @@ test('CENSUS: every PowerShell spawn under test/ passes psEnv (the census itself
 
 test('RUNNER: run-tests gives every test file a PSModuleAnalysisCachePath (also for PowerShell the product under test starts)', () => {
   const src = fs.readFileSync(path.join(__dirname, 'tools', 'run-tests.cjs'), 'utf8');
-  assert.match(src, /const env = require\('\.\/ps-env\.cjs'\)\.psEnv\(process\.env, \{ temp: false \}\);\r?\n\s*delete env\.NODE_TEST_CONTEXT;/, 'PS MODCACHE runner: the children env goes through psEnv');
+  // INT 1.1.102: cap-199 injects the env (processEnv, defaulting to process.env) for its jobRate tests.
+  assert.match(src, /\bprocessEnv = process\.env,/, 'PS MODCACHE runner: the injected env defaults to process.env');
+  assert.match(src, /const env = require\('\.\/ps-env\.cjs'\)\.psEnv\(processEnv, \{ temp: false \}\);\r?\n\s*delete env\.NODE_TEST_CONTEXT;/, 'PS MODCACHE runner: the children env goes through psEnv');
 });
 
 test('ROOT: no PowerShell module cache folder in the repo root', () => {

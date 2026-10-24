@@ -70,6 +70,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 (async () => {
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE; // must launch as Electron, not as Node
+  // INT 1.1.102: under cap-199's jail LOCALAPPDATA is this file's temp folder, and the fixture's
+  // processes left "Microsoft" there (a TEMP LEAK); keep it in the sandbox this test removes.
+  env.LOCALAPPDATA = path.join(sandbox, 'local');
+  fs.mkdirSync(env.LOCALAPPDATA);
 
   const child = spawn(electronBin, [fixture, `--pid-file=${pidFile}`, `--sandbox=${sandbox}`], {
     stdio: ['ignore', 'pipe', 'pipe'],

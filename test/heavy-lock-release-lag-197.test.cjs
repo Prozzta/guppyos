@@ -293,7 +293,11 @@ async function liveRelease(t, o) {
   const wrapped = await jobs.begin(AGENT, { command: o.body }, false, 'call-1');
   assert.ok(wrapped, 'the call is wrapped');
   const id = jobs.ids()[0];
-  const sh = spawn('bash', ['-c', `"${exe.replace(/\\/g, '/')}" join ${id} 0 0; ${o.body}`], { stdio: 'ignore', windowsHide: true });
+  // INT 1.1.102: cap-199's join writes its shell marker under LOCALAPPDATA; give it a folder of this
+  // file's own, removed with the helpers (it was a TEMP LEAK, "Munder Difflin", under the runner's jail).
+  const local = fs.mkdtempSync(path.join(os.tmpdir(), 'hlr197-local-'));
+  helperDirs.push(local);
+  const sh = spawn('bash', ['-c', `"${exe.replace(/\\/g, '/')}" join ${id} 0 0; ${o.body}`], { stdio: 'ignore', windowsHide: true, env: { ...process.env, LOCALAPPDATA: local } });
   const t0 = Date.now();
   // A kill ends every process of the job (what stopping a background task does to its tree; a tree
   // kill from the Git Bash launcher alone misses the MSYS children, which then keep the job running).

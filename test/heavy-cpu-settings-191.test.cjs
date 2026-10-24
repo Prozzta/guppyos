@@ -15,10 +15,13 @@ const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'hcpu-settings-'));
 const electron = require.resolve('electron');
 require.cache[electron] = { id: electron, filename: electron, loaded: true, exports: { app: { getPath: () => userData } } };
 
-const { readConfig, writeConfig } = loadTs('src/main/config.ts');
+const { readConfig, writeConfig, __resetConfigCacheForTests } = loadTs('src/main/config.ts');
 const { heavyCpuOptions } = loadTs('src/main/heavyCpu.ts');
 
 test.after(() => fs.rmSync(userData, { recursive: true, force: true }));
+// INT 1.1.102: an edit behind the config module's back drops its read cache (CONFIG-READ-CACHE, 1.1.101),
+// as a hand edit would be picked up at the next revalidate.
+const handEdit = (text) => { fs.writeFileSync(path.join(userData, 'config.json'), text); __resetConfigCacheForTests(); };
 
 test('background defaults off and the 50% CPU-rate cap defaults on', () => {
   assert.deepEqual(heavyCpuOptions(readConfig()), { background: false, cap: true });
@@ -40,13 +43,13 @@ test('each of the four combinations persists to config.json and is read back; on
 });
 
 test('the retired half-core ON preference migrates, while its persisted old false default is dropped (M7)', () => {
-  fs.writeFileSync(path.join(userData, 'config.json'), JSON.stringify({ heavyJobsHalfCores: true }));
+  handEdit(JSON.stringify({ heavyJobsHalfCores: true }));
   assert.deepEqual(heavyCpuOptions(readConfig()), { background: false, cap: true });
   writeConfig({ heavyJobsBackgroundPriority: true });
   const disk = JSON.parse(fs.readFileSync(path.join(userData, 'config.json'), 'utf8'));
   assert.equal(disk.heavyJobsCpuCap, true);
   assert.equal('heavyJobsHalfCores' in disk, false);
-  fs.writeFileSync(path.join(userData, 'config.json'), JSON.stringify({ heavyJobsHalfCores: false }));
+  handEdit(JSON.stringify({ heavyJobsHalfCores: false }));
   assert.deepEqual(heavyCpuOptions(readConfig()), { background: false, cap: true }, 'old persisted false was the old default, never an opt-out of the new default-on cap');
   writeConfig({ heavyJobsAtOnce: 'off' });
   assert.equal('heavyJobsHalfCores' in JSON.parse(fs.readFileSync(path.join(userData, 'config.json'), 'utf8')), false);

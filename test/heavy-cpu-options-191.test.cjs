@@ -387,7 +387,7 @@ test('LIVE Bash join keeps its marker for repeated, sibling and background self-
     const id = `hcpu-b1-${process.pid}`;
     const markerJail = fs.mkdtempSync(path.join(os.tmpdir(), 'hcpu-markers-'));
     const env = { ...process.env, LOCALAPPDATA: markerJail };
-    const knownLocal = spawnSync('powershell.exe', ['-NoProfile', '-Command', '[Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)'], { encoding: 'utf8', windowsHide: true }).stdout.trim();
+    const knownLocal = spawnSync('powershell.exe', ['-NoProfile', '-Command', '[Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)'], { encoding: 'utf8', env: require('./tools/ps-env.cjs').psEnv(process.env), windowsHide: true }).stdout.trim();
     const knownRoot = path.join(knownLocal, 'Munder Difflin', 'Guppy', 'heavyjob-markers');
     const quote = (s) => `'${s.replace(/'/g, "'\\\"'\\\"'")}'`;
     const expected = { background: false, cap: true, rate: 5000, affinity: null };

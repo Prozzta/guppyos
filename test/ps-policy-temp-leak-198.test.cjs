@@ -185,7 +185,9 @@ test('RUNNER: run-tests sweeps dead pids\' folders at the end of a run', () => {
 
 test('RUNNER: only run-tests opts out of the PowerShell temp folder, and its files keep their temp jail', () => {
   const src = fs.readFileSync(path.join(__dirname, 'tools', 'run-tests.cjs'), 'utf8');
-  assert.match(src, /psEnv\(process\.env, \{ temp: false \}\)/, 'PS POLICY runner: the env for the whole run opts out');
+  // INT 1.1.102: cap-199 injects the env (processEnv, defaulting to process.env) for its jobRate tests.
+  assert.match(src, /\bprocessEnv = process\.env,/, 'PS POLICY runner: the injected env defaults to process.env');
+  assert.match(src, /psEnv\(processEnv, \{ temp: false \}\)/, 'PS POLICY runner: the env for the whole run opts out');
   const roots = [__dirname, path.join(__dirname, '..', 'scripts'), path.join(__dirname, '..', 'src')];
   const optOuts = [];
   const walk = (d) => {

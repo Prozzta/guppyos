@@ -103,6 +103,14 @@ window.__harnessRun = async () => {
     await settle(600);
     const floorMounted = !!host.querySelector('canvas');
 
+    // INT 1.1.102 (cap-199's perf-151-nits settle): under the CPU cap a late startup render landed
+    // in phase A (App 1 for 50 ticks, every App child once). Wait for the census to go quiet first.
+    for (let i = 0; ; i += 1) {
+      resetRenderCounts();
+      await settle(50);
+      if (Object.keys(renderCounts()).length === 0) break;
+      if (i === 19) throw new Error(`render census never settled: ${JSON.stringify(renderCounts())}`);
+    }
     resetRenderCounts();
     await tick('a2');
     const a = renderCounts();
