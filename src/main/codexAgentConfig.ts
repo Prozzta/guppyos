@@ -347,3 +347,89 @@ export function setCodexTuiKeys(config: string, entries: Readonly<Record<string,
 export function setCodexFeatureFlags(config: string, entries: Record<string, boolean>): string {
   return setCodexRootTableKeys(config, 'features', entries);
 }
+
+/** TOML string for a path: literal unless the path holds a single quote. */
+function tomlPathString(v: string): string {
+  return v.includes("'") ? `"${v.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"` : `'${v}'`;
+}
+
+/** One string token, a comment (which ends the scan) or a multi-line opener (which leaves the rest of the line). */
+const STRING_TOKEN = /#.*$|'''|"""|'[^']*'|"(?:[^"\\]|\\.)*"/g;
+const HEADER = /^\s*\[\[?([^\]]+)\]\]?\s*(#.*)?$/;
+const NESTED_CODEX_HOME = /(^\s*|[{,]\s*)(CODEX_HOME\s*=\s*)("(?:[^"\\]|\\.)*"|'[^']*')/g;
+
+/**
+ * CODEX-MCP-ISOLATION: the seed's values that name the user's real ~/.codex are moved to the
+ * agent's own home, in every build (before this only MUNDER_DEV sanitised them). The Human's
+ * seed carries a node_repl MCP server whose env sets CODEX_HOME, NODE_REPL_TRUSTED_CODE_PATHS and
+ * NODE_REPL_TRUSTED_SERVICES to paths in ~/.codex, and the bundled marketplace source is under
+ * ~/.codex/.tmp, so every agent's helper read and trusted the user's profile.
+ *  - every `CODEX_HOME =` key (bare or in an inline table) becomes the agent home, whatever it
+ *    held: an absent key would let the helper fall back to the user's ~/.codex;
+ *  - any other path at or under the real ~/.codex (or `~/.codex`) keeps its subpath under the
+ *    agent home, in the slash style it was written in. Codex fills its own home's plugin cache
+ *    and bundled marketplace, so the mapped paths are where this agent's copies live.
+ * Paths OUTSIDE ~/.codex (the installed Codex runtime under AppData, ~/.cache) are the shared
+ * read-only runtime and are kept. Table headers are keys, not values, and are left alone; a
+ * basic string with escapes other than \\ and \" and a multi-line string are left as written.
+ */
+export function isolateCodexHomePaths(
+  config: string,
+  opts: { userCodexHome: string; agentCodexHome: string; win32?: boolean },
+): { text: string; rewritten: number } {
+  const win32 = opts.win32 ?? process.platform === 'win32';
+  // Same length as the input, so an index into the folded form is an index into the original.
+  const fold = (s: string): string => win32
+    ? Array.from(s, (c) => { const l = c === '\\' ? '/' : c.toLowerCase(); return l.length === c.length ? l : c; }).join('')
+    : s;
+  const roots = [fold(opts.userCodexHome).replace(/[\\/]+$/, ''), '~/.codex'];
+  const agentFwd = opts.agentCodexHome.replace(/\\/g, '/');
+  let rewritten = 0;
+  const mapPath = (v: string): string => {
+    const f = fold(v);
+    let out = '';
+    let from = 0;
+    for (let i = 0; i < v.length; i++) {
+      if (i > 0 && /[A-Za-z0-9._-]/.test(f.charAt(i - 1))) continue;
+      const root = roots.find((r) => f.startsWith(r, i) && /^(|[\\/;,\s])$/.test(f.charAt(i + r.length)));
+      if (!root) continue;
+      const hit = v.slice(i, i + root.length);
+      out += v.slice(from, i) + (hit.includes('/') && !hit.includes('\\') ? agentFwd : opts.agentCodexHome);
+      from = i + root.length;
+      i = from - 1;
+      rewritten++;
+    }
+    return out + v.slice(from);
+  };
+  const home = tomlPathString(opts.agentCodexHome);
+  const lines = config.split(/\r?\n/).map((line) => {
+    if (HEADER.test(line)) return line;
+    const next = line.replace(NESTED_CODEX_HOME, (m, lead: string, key: string, value: string) => {
+      if (value === home) return m;
+      rewritten++;
+      return `${lead}${key}${home}`;
+    });
+    let out = '';
+    let from = 0;
+    for (const m of next.matchAll(STRING_TOKEN)) {
+      const tok = m[0];
+      if (tok.startsWith('#') || tok === "'''" || tok === '"""') break;
+      const at = m.index ?? 0;
+      let mapped = tok;
+      if (tok.startsWith("'")) {
+        const v = mapPath(tok.slice(1, -1));
+        if (v !== tok.slice(1, -1)) mapped = tomlPathString(v);
+      } else {
+        const raw = tok.slice(1, -1);
+        if (raw.replace(/\\["\\]/g, '').includes('\\')) continue;
+        const plain = raw.replace(/\\(["\\])/g, '$1');
+        const v = mapPath(plain);
+        if (v !== plain) mapped = `"${v.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+      }
+      out += next.slice(from, at) + mapped;
+      from = at + tok.length;
+    }
+    return out + next.slice(from);
+  });
+  return { text: lines.join('\n'), rewritten };
+}
