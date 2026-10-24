@@ -17,6 +17,7 @@
  *   M4 the quit ignores trees still being swept: their close lands after it resolves (MINOR 2)
  *   M5 closePty has no once guard: the quit and the late close both close the ConPTY (MINOR 2)
  *   M6 closeTree never closes the ConPTY (Jim's X1): fails at the close count, never hangs (MINOR 3)
+ *   X9 a settled close stays in closingTrees, so a later quit sweeps its (maybe reused) pid (Jim r2)
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -59,7 +60,9 @@ const cp = require('node:child_process');
 const { EventEmitter } = require('node:events');
 const realSpawn = cp.spawn;
 let firstTaskkill = null;   // (args) => fake child, used once
+let taskkillArgs = null;    // when an array, every taskkill's args are recorded in it
 cp.spawn = function spawn(cmd, args, ...rest) {
+  if (cmd === 'taskkill' && taskkillArgs) taskkillArgs.push([...args]);
   if (cmd === 'taskkill' && firstTaskkill) {
     const f = firstTaskkill; firstTaskkill = null;
     return f(args, rest);
@@ -109,10 +112,11 @@ async function run(Pty, end, { after } = {}) {
     // The tree can be gone before taskkill's close event runs closePty (INT 1.1.102 FULL: closed 0).
     while (closes.n === 0 && Date.now() - t0 < DEADLINE_MS) await sleep(25);
     const out = { ...extra, innerGone: !alive(inner), rootGone: !alive(root) };
-    if (after) await after(closes, out);
+    if (after) Object.assign(out, await after(closes, out, m, root));
     return { ...out, closes: closes.n };
   } finally {
     firstTaskkill = null;
+    taskkillArgs = null;
     fs.writeFileSync(path.join(dir, 'go'), '');   // release a leaked inner at once
     if (root && alive(root)) { try { process.kill(root); } catch { /* gone */ } }
     await m.killAllAsync(2_000).catch(() => {});
@@ -122,18 +126,42 @@ async function run(Pty, end, { after } = {}) {
   }
 }
 
+/** Jim's X9: once a kill's close has run, the session leaves closingTrees, so a later quit sweeps
+ *  nothing for it (its pid may already belong to another process). Settled = the close ran and
+ *  the ConPTY's exit removed the session (killByOwner leaves that to onExit). Then records what a
+ *  killAllAsync hands taskkill. The close count is taken BEFORE that quit, which would otherwise
+ *  close a pending ConPTY itself and hide M6. */
+const afterSettled = async (closes, _out, m, root) => {
+  for (let i = 0; i < 120 && (closes.n === 0 || m.sessions.size > 0); i++) await sleep(25);
+  const closesAtSettle = closes.n;
+  const pendingAfterClose = m.closingTrees.size;
+  taskkillArgs = [];
+  await m.killAllAsync(2_000);
+  const quitSwept = taskkillArgs.some((a) => a.includes(String(root)));
+  taskkillArgs = null;
+  return { closesAtSettle, pendingAfterClose, quitSwept };
+};
+const settledChecks = (r, who) => {
+  assert.equal(r.pendingAfterClose, 0, `${who}: A SETTLED CLOSE LEAVES closingTrees: ${r.pendingAfterClose} session(s) still pending after the close ran`);
+  assert.equal(r.quitSwept, false, `${who}: A LATER QUIT SWEEPS NO PID OF A SETTLED SESSION`);
+};
+
 const K = {};
 K.kill = async (Pty) => {
-  const r = await run(Pty, (m, id) => assert.equal(m.kill(id).ok, true));
+  const r = await run(Pty, (m, id) => assert.equal(m.kill(id).ok, true), { after: afterSettled });
   assert.ok(r.rootGone, 'KILL: the PTY root is gone');
   assert.ok(r.innerGone, `KILL ENDS THE WHOLE TREE: a descendant off the pseudo-console is still alive ${DEADLINE_MS} ms after kill()`);
+  assert.equal(r.closesAtSettle, 1, `KILL CLOSES THE CONPTY ONCE: closed ${r.closesAtSettle} times (the sweep alone ends the processes, not the pseudo-console)`);
   assert.equal(r.closes, 1, `KILL CLOSES THE CONPTY ONCE: closed ${r.closes} times (the sweep alone ends the processes, not the pseudo-console)`);
+  settledChecks(r, 'KILL');
 };
 K.owner = async (Pty) => {
-  const r = await run(Pty, (m, _id, owner) => m.killByOwner(owner));
+  const r = await run(Pty, (m, _id, owner) => m.killByOwner(owner), { after: afterSettled });
   assert.ok(r.rootGone, 'OWNER: the PTY root is gone');
   assert.ok(r.innerGone, `KILLBYOWNER ENDS THE WHOLE TREE: a descendant off the pseudo-console is still alive ${DEADLINE_MS} ms after killByOwner()`);
+  assert.equal(r.closesAtSettle, 1, `KILLBYOWNER CLOSES THE CONPTY ONCE: closed ${r.closesAtSettle} times`);
   assert.equal(r.closes, 1, `KILLBYOWNER CLOSES THE CONPTY ONCE: closed ${r.closes} times`);
+  settledChecks(r, 'KILLBYOWNER');
 };
 
 K.retry = async (Pty) => {
@@ -191,6 +219,10 @@ const MUTANTS = [
     killer: 'quitOwner', dies: /NO DOUBLE CLOSE/ },
   { name: "M6 closeTree never closes the ConPTY (Jim's X1): must fail, not hang", edits: [[': undefined)).then(close, close);', ': undefined)).then(() => {}, () => {});']],
     killer: 'kill', dies: /KILL CLOSES THE CONPTY ONCE/ },
+  { name: "X9 a settled close stays in closingTrees (Jim's X9)", edits: [['const close = (): void => { this.closingTrees.delete(s); this.closePty(s); };', 'const close = (): void => { this.closePty(s); };']],
+    killer: 'kill', dies: /A SETTLED CLOSE LEAVES closingTrees/ },
+  { name: "X9 under killByOwner()", edits: [['const close = (): void => { this.closingTrees.delete(s); this.closePty(s); };', 'const close = (): void => { this.closePty(s); };']],
+    killer: 'owner', dies: /A SETTLED CLOSE LEAVES closingTrees/ },
 ];
 
 test('MUTANT CENSUS: every mutant applies once and dies at the assertion that names its guarantee', async (t) => {

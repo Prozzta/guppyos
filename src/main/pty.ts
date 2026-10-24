@@ -512,7 +512,9 @@ export class PtyManager {
    *  `taskkill /T` on a dead pid and found nothing: every descendant off the pseudo-console (agy's
    *  inner agy.exe on its own conhost, a detached daemon) lived on. node-pty's Windows kill already
    *  terminates the console's processes outright, so no graceful close is lost. POSIX keeps the
-   *  polite SIGHUP and the group sweep after the grace. */
+   *  polite SIGHUP and the group sweep after the grace.
+   *  Known gap: a root that already died on its own leaves `taskkill /T` nothing to walk, so its
+   *  descendants off the pseudo-console survive any kill. Tracked on card AGY-DESCENDANT-SNAPSHOT. */
   private closeTree(s: PtySession): void {
     const pid = s.proc.pid;
     if (process.platform !== 'win32') {
