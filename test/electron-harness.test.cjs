@@ -101,12 +101,20 @@ test('HARNESS: the A15 IPC-ordering experiment is reproducible, all three phases
   assert.equal(production_shape.writeAfterMark, 200, 'every production-shape pair ordered');
   assert.equal(nothing_awaited.writeAfterMark, 500, 'and every pair with nothing awaited');
   // Phase 3 is the only one that loses a renderer, so it is the only one that tests
-  // what A15 worries about. Rounds may legitimately land as "neither".
+  // what A15 worries about. Rounds may legitimately land as "neither", or as "markOnly"
+  // (the mark arrived and the write died with the renderer), likelier under load.
   assert.equal(renderer_crashes.writeWithoutMark, 0, 'no crash round lost only its mark');
   assert.equal(
-    renderer_crashes.writeAfterMark + renderer_crashes.neither, 5,
-    'every crash round landed in one of the two safe outcomes'
+    renderer_crashes.writeAfterMark + renderer_crashes.neither + renderer_crashes.markOnly, 5,
+    'every crash round landed in one of the three safe outcomes'
   );
+  // INT102-TEST-FOLLOWUPS (Jim, INT-1.1.102 A15): the outcome sum once left markOnly out.
+  // Every phase's four outcomes must account for every round, so none can drop out again.
+  assert.deepEqual(Object.values(r.phases).map((p) => p.trials), [200, 500, 5], 'the trial counts asked for');
+  for (const [name, phase] of Object.entries(r.phases)) {
+    assert.equal(phase.writeAfterMark + phase.writeWithoutMark + phase.neither + phase.markOnly, phase.trials,
+      `${name}: the four outcomes account for every round (${JSON.stringify(phase)})`);
+  }
 });
 
 test('HARNESS: it supports the READS C2.11 #14 needs — and #14 is still unobservable', async () => {

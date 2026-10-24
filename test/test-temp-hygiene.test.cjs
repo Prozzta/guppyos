@@ -155,3 +155,54 @@ test('REMOVEDIR: waits while something holds the folder, and gives up after its 
   assert.equal(await removeDir('x', { rm: held(Infinity), budgetMs: 1000, ...clock }), false, 'TEMP REMOVE: a folder held for good is given up');
   assert.equal(calls, 5, 'TEMP REMOVE: at 0, 250, 500, 750 and 1000 ms, then no more');
 });
+
+// INT102-TEST-FOLLOWUPS (Jim, INT-1.1.102 NIT 1): GUPPY_SHARED_LOCALAPPDATA, the REAL local app-data
+// folder, reaches every jailed child. It is read-only by convention; this pins the convention: one
+// setter (the preload), only the known readers, and those readers only list and test paths in it.
+const SHARED_LAD = 'GUPPY_SHARED_LOCALAPPDATA';
+const SHARED_LAD_SETTER = 'test/tools/temp-jail-preload.cjs';
+const SHARED_LAD_READERS = ['test/rebrand-a-182.test.cjs', 'test/rebrand-updater-base-183.test.cjs', 'test/scheme-drop-187.test.cjs'];
+const FS_WRITES = /\b(?:writeFile|appendFile|copyFile|cp|rm|rmdir|unlink|mkdir|mkdtemp|rename|symlink|link|truncate|chmod|utimes|open)(?:Sync)?\s*\(/;
+/** The problems with one reader's text: the shared folder used other than by listing, or a derived
+ *  path (cache, makensis, plugins) handed to an fs write. */
+function sharedLadProblems(text) {
+  const out = [];
+  const at = text.indexOf(`process.env.${SHARED_LAD}`);
+  const start = text.lastIndexOf('\nfunction ', at);
+  const end = text.indexOf('\n}', at);
+  if (at < 0 || start < 0 || end < 0) return ['no reader function found'];
+  const body = text.slice(start, end);
+  for (const m of body.matchAll(/\bfs\.(\w+)/g)) if (!['existsSync', 'readdirSync'].includes(m[1])) out.push(`fs.${m[1]} on the shared folder`);
+  if (FS_WRITES.test(body)) out.push('a write call in the reader');
+  for (const line of text.split(/\r?\n/)) {
+    if (FS_WRITES.test(line) && /\b(?:cache|makensis|plugins)\b(?!['"`])/.test(line.replace(/(['"`])(?:\\.|(?!\1).)*\1/g, '""'))) out.push(`a write on a shared path: ${line.trim()}`);
+  }
+  return out;
+}
+test('SHARED LOCALAPPDATA: one setter, the known readers only, and they only read (Jim NIT 1)', () => {
+  const root = path.join(__dirname, '..');
+  const files = [];
+  const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+    if (e.name === 'node_modules' || e.name.startsWith('.')) continue;
+    const p = path.join(d, e.name);
+    if (e.isDirectory()) walk(p); else if (/\.(?:c?js|mjs|ts|tsx)$/.test(e.name)) files.push(p);
+  } };
+  for (const d of ['src', 'scripts', 'test', 'build']) if (fs.existsSync(path.join(root, d))) walk(path.join(root, d));
+  const rel = (p) => path.relative(root, p).split(path.sep).join('/');
+  const users = files.map(rel).filter((f) => f !== 'test/test-temp-hygiene.test.cjs' && fs.readFileSync(path.join(root, f), 'utf8').includes(SHARED_LAD)).sort();
+  assert.deepEqual(users, [...SHARED_LAD_READERS, SHARED_LAD_SETTER].sort(), 'ONLY THE PRELOAD AND THE KNOWN READERS NAME THE SHARED LOCALAPPDATA (src and scripts never do)');
+  const setter = fs.readFileSync(path.join(root, SHARED_LAD_SETTER), 'utf8');
+  assert.equal(setter.split(`process.env.${SHARED_LAD} =`).length - 1, 1, 'THE PRELOAD SETS IT ONCE');
+  for (const f of SHARED_LAD_READERS) {
+    const text = fs.readFileSync(path.join(root, f), 'utf8');
+    assert.ok(!text.includes(`process.env.${SHARED_LAD} =`), `${f}: A READER NEVER SETS IT`);
+    assert.deepEqual(sharedLadProblems(text), [], `${f}: THE SHARED LOCALAPPDATA IS ONLY READ`);
+  }
+  // The scanner itself: each way a reader could start writing is caught.
+  const ok = fs.readFileSync(path.join(root, SHARED_LAD_READERS[0]), 'utf8');
+  const rmIn = ok.replace('fs.readdirSync(cache).find((d) => /^nsis-\\d/', 'fs.rmSync(cache, { recursive: true }) || fs.readdirSync(cache).find((d) => /^nsis-\\d/');
+  assert.notEqual(rmIn, ok, 'the scanner probe applies');
+  assert.equal(sharedLadProblems(rmIn).length > 0, true, 'a rm in the reader is caught');
+  assert.equal(sharedLadProblems(`${ok}\nfs.copyFileSync(nsi, plugins);\n`).length > 0, true, 'a write on a derived path is caught');
+  assert.equal(sharedLadProblems(`${ok}\nfs.writeFileSync(path.join(dir, 'makensis.log'), 'x');\n`).length, 0, 'a path NAMED like one in a string is not a shared path');
+});
