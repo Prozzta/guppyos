@@ -11,15 +11,24 @@
  */
 import { request as httpsRequest } from 'node:https';
 
-export function getText(url: string, opts: { timeoutMs?: number } = {}): Promise<string> {
+/** Redirect hops followed before giving up: a loop or a long chain fails
+ *  instead of running until the timeout, one request per hop. */
+export const MAX_REDIRECTS = 5;
+
+export function getText(url: string, opts: { timeoutMs?: number } = {}, hop = 0): Promise<string> {
   const timeoutMs = opts.timeoutMs ?? 12000;
+  // Checked on EVERY hop, so a redirect cannot downgrade to http either.
+  if (!/^https:\/\//i.test(url)) return Promise.reject(new Error('https only'));
   return new Promise((resolve, reject) => {
     const req = httpsRequest(url, { method: 'GET', headers: { 'user-agent': 'munder-difflin' } }, (res) => {
       // Follow a redirect once per hop; raw.githubusercontent does this for
       // branch aliases and the request just fails without it.
       if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         res.resume();
-        getText(res.headers.location, opts).then(resolve, reject);
+        if (hop >= MAX_REDIRECTS) { reject(new Error('too many redirects')); return; }
+        let next: string;
+        try { next = new URL(res.headers.location, url).href; } catch { reject(new Error('bad redirect')); return; }
+        getText(next, opts, hop + 1).then(resolve, reject);
         return;
       }
       if (res.statusCode !== 200) { res.resume(); reject(new Error(`HTTP ${res.statusCode}`)); return; }

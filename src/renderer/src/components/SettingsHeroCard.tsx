@@ -25,7 +25,7 @@ import { useEffect, useState } from 'react';
 import { PixelButton } from './PixelButton';
 import { Icon } from './Icon';
 import { DEFAULT_HERO, type HeroPayload } from '@shared/heroPayload';
-import { manualDownloadUrl, pendingVersion, reduceStatus, REPO, type UpdateStatus } from '@shared/updateState';
+import { changelogUrl, manualDownloadUrl, pendingVersion, reduceStatus, REPO, type UpdateStatus } from '@shared/updateState';
 
 const GITHUB_REPO_URL = `https://github.com/${REPO}`;
 
@@ -34,6 +34,10 @@ export function SettingsHeroCard() {
   // Starts on the compiled-in defaults, so there is no empty frame or spinner
   // while the fetch is in flight — it just fills in if anything changed.
   const [hero, setHero] = useState<HeroPayload>(DEFAULT_HERO);
+  /** HERO-FEED-BRANCH: the ref the feed was read from (latest release tag, else
+   *  the default branch), so the changelog link opens the SAME live line. null
+   *  until a fetch has happened, when the link falls back to the releases page. */
+  const [heroRef, setHeroRef] = useState<string | null>(null);
   /** Whatever release the updater knows about, so the card can offer the
    *  manual download right where the version is shown. */
   const [status, setStatus] = useState<UpdateStatus | null>(null);
@@ -57,7 +61,7 @@ export function SettingsHeroCard() {
       .then((i) => { if (alive) setVersion(i.version); })
       .catch(() => { /* the card is still useful without it */ });
     window.cth.heroPayload()
-      .then((r) => { if (alive) setHero(r.hero); })
+      .then((r) => { if (alive) { setHero(r.hero); setHeroRef(r.ref ?? null); } })
       .catch(() => { /* defaults already rendered */ });
     return () => { alive = false; };
   }, []);
@@ -176,8 +180,8 @@ export function SettingsHeroCard() {
           >report a problem</PixelButton>
           <span style={{ flex: 1 }} />
           <a
-            href={`${GITHUB_REPO_URL}/blob/main/CHANGELOG.md`}
-            onClick={(e) => { e.preventDefault(); void window.cth.openExternal(`${GITHUB_REPO_URL}/blob/main/CHANGELOG.md`); }}
+            href={changelogUrl(heroRef)}
+            onClick={(e) => { e.preventDefault(); void window.cth.openExternal(changelogUrl(heroRef)); }}
             style={{ fontSize: 12, color: 'var(--cth-ink-500)' }}
           >full changelog →</a>
         </div>

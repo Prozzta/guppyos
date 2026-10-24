@@ -1128,7 +1128,7 @@ const api = {
     return () => ipcRenderer.removeListener('models:catalogChanged', listener);
   },
   /** Settings hero payload — plan + sponsor, fetched from the repo and cached. */
-  heroPayload: (force?: boolean): Promise<{ hero: HeroPayload; fetchedAt: number; stale: boolean }> =>
+  heroPayload: (force?: boolean): Promise<{ hero: HeroPayload; fetchedAt: number; stale: boolean; ref: string | null }> =>
     ipcRenderer.invoke('hero:payload', force),
   /** Skills already installed for the coding agents on this machine. */
   skillsLocal: (cwd?: string): Promise<LocalSkill[]> => ipcRenderer.invoke('skills:local', cwd),
