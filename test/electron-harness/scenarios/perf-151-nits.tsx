@@ -33,6 +33,12 @@ declare global {
 
 (globalThis as unknown as { __APP_VERSION__: string }).__APP_VERSION__ = '0.0.0-harness';
 const config = { onboardingComplete: true, harnessHome: 'C:/harness-test-home', recentHomes: [] };
+// INT 1.1.102: the demo loop (store/mockEvents.ts, setInterval at TICK_MS = 1800) runs on a floor with
+// no PTY agent, which a stub bridge always is. Its random steps rewrite a1 and a2 (status, station)
+// mid-census: measured at 1869 ms after mount, inside a phase A that cap-199's 650 ms settle runs
+// to about 2180 ms. Hold it off; the test pins TICK_MS so a change to it fails here, not silently.
+const realSetInterval = window.setInterval.bind(window);
+window.setInterval = ((fn: TimerHandler, ms?: number, ...rest: unknown[]) => (ms === 1800 ? 0 : realSetInterval(fn, ms, ...rest))) as typeof window.setInterval;
 const LONG_ERROR = 'the control socket for this agent closed before the request was acknowledged (ECONNRESET after 3 retries over 12 s); the agent is still running and can be stopped from its terminal';
 const LONG_NAME = 'Agent With A Display Name Long Enough To Overflow The Composer Row';
 let haltMode: 'ok' | 'throw' = 'ok';

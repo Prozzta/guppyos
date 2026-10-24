@@ -169,3 +169,18 @@ test('STATIC: N2 wiring in AgentControlStrip, MessageQueueComposer and the recor
   assert.match(rec, /function clearError\(\): void \{\s*setState\(\{ error: null \}\);/);
   assert.match(rec, /clearError \}/);
 });
+
+// INT 1.1.102: both render-census scenarios hold off the demo loop by its period (1800 ms). Pin the
+// period and that no other renderer setInterval uses it, so the hold cannot drift or catch another timer.
+test('PIN: the scenarios hold off the demo loop by its period, and only it ticks at 1800 ms', () => {
+  const mock = codeOnly(readSource('src/renderer/src/store/mockEvents.ts'));
+  assert.match(mock, /const TICK_MS = 1800;/, 'the demo loop period the scenarios hold off');
+  assert.match(mock, /window\.setInterval\([\s\S]*?\}, TICK_MS\)/, 'the demo loop is a setInterval at TICK_MS');
+  for (const s of ['perf-151-nits.tsx', 'app-shallow-renders.tsx']) {
+    assert.match(readSource('test/electron-harness/scenarios/' + s), /window\.setInterval = \(\(fn: TimerHandler, ms\?: number, \.\.\.rest: unknown\[\]\) => \(ms === 1800 \? 0 :/, s + ' holds off the demo loop');
+  }
+  const hits = [];
+  const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else if (/\.tsx?$/.test(e.name) && !/\.test\./.test(e.name) && /setInterval\((?:(?!setInterval|setTimeout)[\s\S]){0,400}?,\s*(?:1800|1_800)\s*\)/.test(fs.readFileSync(p, 'utf8'))) hits.push(path.relative(path.join(__dirname, '..'), p).split(path.sep).join('/')); } };
+  walk(path.join(__dirname, '..', 'src', 'renderer', 'src'));
+  assert.deepEqual(hits, [], 'no renderer setInterval at a literal 1800 ms (the scenarios would hold it off too)');
+});
