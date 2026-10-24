@@ -69,20 +69,28 @@ function queryTerms(query: string): string[] {
   return [...new Set(oneLine(query).toLowerCase().split(/[^\p{L}\p{N}._\-/@#]+/u).filter((t) => t.length >= 3))];
 }
 
+/** Whether any query term occurs in `s` (the same terms windowContent anchors on). */
+export function hasTerm(s: string, query: string): boolean {
+  const low = s.toLowerCase();
+  return queryTerms(query).some((t) => low.includes(t));
+}
+
 /**
  * The content of one compact hit within `max` characters: the whole one-line content when it fits;
  * else NOT the head but a window that holds the first query term found (the matched text), with
  * `…` at each cut edge, so a value past the head is still read. A hit with no term in it keeps the head.
  */
-export function windowContent(content: string, query: string, max: number): { text: string; clipped: boolean } {
+export function windowContent(content: string, query: string, max: number, mode: 'auto' | 'window' = 'auto'): { text: string; clipped: boolean } {
   const s = oneLine(content);
-  if (s.length <= max) return { text: s, clipped: false };
+  // `window` mode never keeps the head, even when the whole fits `max`: the caller saw the wrap cost pop the
+  // matched term off it (S1 of Jim's re-audit), so a window anchored on the term is what survives that cost.
+  if (mode === 'auto' && s.length <= max) return { text: s, clipped: false };
   if (max < 8) return { text: clip(s, max), clipped: true };
   const low = s.toLowerCase();
   let at = -1;
   for (const t of queryTerms(query)) { const i = low.indexOf(t); if (i >= 0 && (at < 0 || i < at)) at = i; }
   // The head holds the term (with some text after it), or no term is in this chunk: the head.
-  if (at < 0 || at + 24 <= max - 1) return { text: clip(s, max), clipped: true };
+  if (at < 0 || (mode === 'auto' && at + 24 <= max - 1)) return { text: clip(s, max), clipped: true };
   // Else a window that starts a third before the term, on a word boundary, and runs to the budget.
   let start = Math.max(0, at - Math.floor(max / 3));
   const sp = s.indexOf(' ', start);
@@ -153,11 +161,19 @@ export function formatSearchCompact(query: string, flags: SearchFlags, hits: Sea
       }
       cut = true;
       const avail = budget - meta.length - 1;
-      const w = windowContent(whole, query, Math.max(1, avail - 5 * Math.ceil(avail / CONTENT_WIDTH)));
-      lines = wrap(w.text, CONTENT_WIDTH);
-      // Word wrapping can add a line: drop from the end until the hit fits its budget (marked `…`).
-      while (lines.length > 1 && costOf(meta, lines) > budget) { lines.pop(); lines[lines.length - 1] = clip(`${lines[lines.length - 1]}…`, CONTENT_WIDTH); }
-      if (costOf(meta, lines) > budget) lines = [clip(lines[0] ?? '', Math.max(1, avail - 5))];
+      const max = Math.max(1, avail - 5 * Math.ceil(avail / CONTENT_WIDTH));
+      // Word wrapping can add lines: drop from the end until the hit fits its budget (marked `…`).
+      const fit = (text: string): string[] => {
+        let ls = wrap(text, CONTENT_WIDTH);
+        while (ls.length > 1 && costOf(meta, ls) > budget) { ls.pop(); ls[ls.length - 1] = clip(`${ls[ls.length - 1]}…`, CONTENT_WIDTH); }
+        if (costOf(meta, ls) > budget) ls = [clip(ls[0] ?? '', Math.max(1, avail - 5))];
+        return ls;
+      };
+      let w = windowContent(whole, query, max);
+      lines = fit(w.text);
+      // The head was chosen before the wrap cost; if the popped lines took every matched term with them, the
+      // window (a third before the term) is what survives the cost. Decided AFTER wrapping (S1).
+      if (!w.text.startsWith('…') && hasTerm(whole, query) && !hasTerm(lines.join(' '), query)) { w = windowContent(whole, query, max, 'window'); lines = fit(w.text); }
     }
     if (cut) clipped++;
     out.push(meta, ...lines.map((l) => `    ${l}`));

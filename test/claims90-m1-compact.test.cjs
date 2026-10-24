@@ -290,3 +290,29 @@ test('M1 MUST 3: the UI callers (hive:searchMemory, hive:memoryWakeUp: Memory pa
   assert.match(src, /nativeMemory\.query\('search', \{ query, full: true,/, 'MUTANT: the UI search is verbose');
   assert.match(src, /nativeMemory\.query\('wake-up', \{ full: true,/, 'MUTANT: the UI wake-up is verbose');
 });
+
+test('M1 S1 (Jim re-audit): a term near the end of the head survives the wrap cost (window after wrapping, not before)', () => {
+  // Long words waste most of every wrapped line, so the head (chosen on raw chars) costs more lines than its
+  // budget and the closing lines are popped; the term sitting in them must come back through the window.
+  // Jim's example: 1 hit, ~1360 chars, the term around char 1120-1200. Only BODY lines count: the header
+  // echoes the query, so a match anywhere in the text proves nothing.
+  const word = (i) => `w${String(i).padStart(3, '0')}${'x'.repeat(76)}`;
+  const body = (text) => lines(text).filter((l) => l.startsWith('    ')).join(' ');
+  let windowed = 0;
+  for (let head = 12; head <= 14; head++) {
+    for (let pad = 0; pad <= 90; pad += 10) {
+      const content = `${Array.from({ length: head }, (_, i) => word(i)).join(' ')} ${'p'.repeat(pad)} the token is f00dcafe1234 ${word(901)} ${word(902)} ${word(903)}`;
+      const at = content.indexOf('f00dcafe1234');
+      const text = F.formatSearch('f00dcafe1234', {}, [chunk(1, content)]);
+      assert.match(body(text), /f00dcafe1234/, `MUTANT: the matched term at char ${at} of ${content.length} is shown in the body (1 hit)`);
+      assert.ok(text.length <= F.COMPACT_MAX_CHARS && lines(text).every((l) => l.length <= F.COMPACT_LINE_MAX), 'cap and line max hold');
+      if (/^ {4}…/m.test(text)) windowed++;
+    }
+  }
+  assert.ok(windowed >= 1, `the window branch was taken after wrapping at least once (${windowed})`);
+  // windowContent in window mode never returns the head
+  const w = F.windowContent(`${'a'.repeat(100)} needle ${'b'.repeat(300)}`, 'needle', 300, 'window');
+  assert.ok(w.text.startsWith('…') && /needle/.test(w.text));
+  assert.equal(F.hasTerm('A Needle here', 'needle'), true);
+  assert.equal(F.hasTerm('nothing', 'needle'), false);
+});

@@ -65,11 +65,12 @@ const MUTANTS = [
   ['r the engine ignores full on wake-up', ENGINE, 'return { exit: 0, text: formatWakeUp(identity, entries, pinned, { full }) };', 'return { exit: 0, text: formatWakeUp(identity, entries, pinned) };'],
   ['s the CLI does not parse --full', CLI, "if (flag === '--full' && (out.cmd === 'search' || out.cmd === 'wake-up')) { out.args.full = true; i += 1; continue; }", ''],
   ['t the CLI parses --full on every command', CLI, "if (flag === '--full' && (out.cmd === 'search' || out.cmd === 'wake-up')) { out.args.full = true; i += 1; continue; }", "if (flag === '--full') { out.args.full = true; i += 1; continue; }"],
-  ['u a clipped chunk shows its head, not a window around the matched term', FORMAT, 'if (at < 0 || at + 24 <= max - 1) return { text: clip(s, max), clipped: true };', 'if (true) return { text: clip(s, max), clipped: true };'],
+  ['u a clipped chunk shows its head, not a window around the matched term', FORMAT, "if (at < 0 || (mode === 'auto' && at + 24 <= max - 1)) return { text: clip(s, max), clipped: true };", 'if (true) return { text: clip(s, max), clipped: true };'],
   ['v the clipped hits are not counted in the footer', FORMAT, 'if (clipped) out.push(clipNote(clipped));', ''],
   ['w a hit gets one even share, never more (the old per-hit split)', FORMAT, 'const COMPACT_SHARES = 3;', 'const COMPACT_SHARES = 1;'],
   ['x the UI search (hive:searchMemory) gets the compact text', INDEX, "nativeMemory.query('search', { query, full: true,", "nativeMemory.query('search', { query,"],
   ['y the UI wake-up (hive:memoryWakeUp) gets the compact text', INDEX, "nativeMemory.query('wake-up', { full: true,", "nativeMemory.query('wake-up', {"],
+  ['z the head is kept even when the wrap cost popped the matched term (no window fallback)', FORMAT, "if (!w.text.startsWith('…') && hasTerm(whole, query) && !hasTerm(lines.join(' '), query))", 'if (false)'],
 ];
 
 const prefix = process.argv[2] || '';
