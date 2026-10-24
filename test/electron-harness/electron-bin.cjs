@@ -10,7 +10,7 @@ const { execFileSync } = require('node:child_process');
 const { join, dirname, basename } = require('node:path');
 
 const HEAVYJOB_HELPER = join(__dirname, '..', '..', 'resources', 'heavyjob', 'bin', 'guppy-heavyjob.exe');
-let cachedHarnessMask; let cachedHarnessMaskSet = false;
+const cachedHarnessMasks = new Map();
 
 function cappedHeavyJob(env = process.env) {
   if (env.GUPPY_HEAVY_CPU_CAP === '1') return true;
@@ -100,9 +100,17 @@ function swiftShaderView(exe, mask = null, suppliedTmp) {
 function harnessElectron(env = process.env) {
   const exe = require('electron');
   if (process.platform !== 'win32') return exe;
-  // A runner process keeps its affinity for life; avoid a PowerShell probe for every Electron launch.
-  if (!cachedHarnessMaskSet) { cachedHarnessMask = swiftShaderMaskForHeavyJob(env); cachedHarnessMaskSet = true; }
-  return swiftShaderView(exe, cachedHarnessMask);
+  // Only an explicit override is cacheable.  The real process affinity can change while a runner
+  // lives, so an unoverridden launch probes it again rather than assuming affinity for life.
+  const override = env.HARNESS_CPU_MASK;
+  let mask;
+  if (override === undefined) mask = swiftShaderMaskForHeavyJob(env);
+  else {
+    const key = String(override);
+    if (!cachedHarnessMasks.has(key)) cachedHarnessMasks.set(key, swiftShaderMaskForHeavyJob(env));
+    mask = cachedHarnessMasks.get(key);
+  }
+  return swiftShaderView(exe, mask);
 }
 
 module.exports = { harnessElectron, cappedHeavyJob, harnessCpuMask, halfCpuMask, swiftShaderMaskForHeavyJob, swiftShaderView };

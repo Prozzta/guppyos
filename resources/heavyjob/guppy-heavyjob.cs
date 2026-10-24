@@ -85,8 +85,9 @@ static class HeavyJob
     const uint CPU_RATE_ENABLE = 0x1, CPU_RATE_HARD_CAP = 0x4, CPU_RATE_50_PERCENT = 5000;
     const uint JOB_ALL = 0x1F001F;
     const uint PROC_SET_QUOTA_TERMINATE_QUERY = 0x0100 | 0x0001 | 0x0400 | 0x0200; // SET_QUOTA|TERMINATE|QUERY_INFORMATION|SET_INFORMATION
-    static readonly HashSet<string> Shells = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        { "bash.exe", "sh.exe", "dash.exe", "zsh.exe", "powershell.exe", "pwsh.exe", "cmd.exe" };
+        static readonly HashSet<string> Shells = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            { "bash.exe", "sh.exe", "dash.exe", "zsh.exe", "powershell.exe", "pwsh.exe", "cmd.exe",
+              "bash", "sh", "dash", "zsh", "powershell", "pwsh", "cmd" };
 
     static int Main(string[] a)
     {
@@ -228,9 +229,9 @@ static class HeavyJob
         // helper.  Leave a pid+creation-time keyed breadcrumb for descendants instead.  `self-query`
         // follows its parent chain to this shell and opens the named outer job, rather than asking
         // only libuv's nested job (which has no CPU-rate limit).
-        // Only Git/Unix Bash's fork stub hides the outer job from a descendant query; cmd and
-        // PowerShell descendants query their inherited job directly, so do not create a breadcrumb.
-        if (HasPosixShellAncestor())
+        // A descendant can be a libuv child that hides the outer job.  Persist every shell-chain
+        // owner; ordinary cmd/PowerShell descendants simply never need to consult their marker.
+        if (chain.Count != 0)
         {
             CleanMarkers();
             try { Directory.CreateDirectory(MarkerRoot()); } catch { }
@@ -240,20 +241,24 @@ static class HeavyJob
         return 0;
     }
 
-    // Markers are Guppy-owned and short-lived: a descendant consumes its shell's marker, while
-    // every new join removes markers whose exact pid+creation-time owner has exited.  Never leave
-    // arbitrary files directly in the runner's TEMP jail.
-    static string MarkerRoot() { return Path.Combine(Path.GetTempPath(), "guppy-heavyjob-markers"); }
+    // A marker belongs to the shell, not one query.  It therefore lives in Guppy's local app-data
+    // (never the caller's TEMP jail) until a later helper observes that its pid+creation-time owner
+    // is dead.  This keeps it available to foreground, background and sibling descendants.
+    static string MarkerRoot() { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Munder Difflin", "Guppy", "heavyjob-markers"); }
     static string CapMarker(int pid, long created) { return Path.Combine(MarkerRoot(), "guppy-heavy-job-" + pid + "-" + created + ".marker"); }
 
-    static bool HasPosixShellAncestor()
+    static long MarkerCreatedFor(int pid)
     {
-        IntPtr snap = CreateToolhelp32Snapshot(0x2, 0); var parent = new Dictionary<int, int>(); var image = new Dictionary<int, string>();
-        var e = new PROCESSENTRY32 { dwSize = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32)) };
-        if (Process32FirstW(snap, ref e)) do { parent[(int)e.th32ProcessID] = (int)e.th32ParentProcessID; image[(int)e.th32ProcessID] = e.szExeFile; } while (Process32NextW(snap, ref e));
-        CloseHandle(snap); int pid = GetCurrentProcessId();
-        while (parent.TryGetValue(pid, out pid)) { string imageName; if (image.TryGetValue(pid, out imageName) && (imageName.Equals("bash.exe", StringComparison.OrdinalIgnoreCase) || imageName.Equals("sh.exe", StringComparison.OrdinalIgnoreCase))) return true; }
-        return false;
+        try
+        {
+            foreach (string path in Directory.GetFiles(MarkerRoot(), "guppy-heavy-job-" + pid + "-*.marker"))
+            {
+                var m = System.Text.RegularExpressions.Regex.Match(Path.GetFileName(path), @"^guppy-heavy-job-\d+-(\d+)\.marker$");
+                long created; if (m.Success && long.TryParse(m.Groups[1].Value, out created)) return created;
+            }
+        }
+        catch { }
+        return 0;
     }
 
     static void CleanMarkers()
@@ -288,27 +293,49 @@ static class HeavyJob
                     IntPtr proc = OpenProcess(0x1000, false, child); bool inJob = false;
                     if (job != IntPtr.Zero && proc != IntPtr.Zero) IsProcessInJob(proc, job, out inJob);
                     if (proc != IntPtr.Zero) CloseHandle(proc); if (job != IntPtr.Zero) CloseHandle(job);
-                    if (inJob) { RemoveJobMarkers(name); return name; }
+                    // Git Bash can report a libuv-spawned Node descendant outside its inherited
+                    // outer job even though the live, creation-time-pinned shell still owns it.
+                    // The named job remains the authoritative cap record for that live owner.
+                    if (inJob || (Created(child) == childCreated && job != IntPtr.Zero)) return name;
                     try { File.Delete(marker); } catch { }
                 }
             }
             catch { }
             int p; if (!parent.TryGetValue(child, out p)) break;
-            long created = Created(p); if (created == 0 || created > childCreated) break;
+            long created = Created(p);
+            // A restricted libuv child can be unable to query its live shell parent.  Its marker
+            // still carries that parent's creation identity, so use it to continue the walk.
+            if (created == 0) created = MarkerCreatedFor(p);
+            if (created == 0 || created > childCreated) break;
             child = p; childCreated = created;
         }
         return null;
     }
 
-    static void RemoveJobMarkers(string name)
+    // Git-for-Windows may launch each external command through a fresh MSYS fork whose Windows
+    // parent is not the interactive Bash.  In that shape there is no usable ancestry edge.  A
+    // newest live marker is the command just joined; its owner and named job are both revalidated.
+    static string SoleLiveMarkedJob()
     {
+        string found = null; DateTime newest = DateTime.MinValue;
         try
         {
             foreach (string path in Directory.GetFiles(MarkerRoot(), "guppy-heavy-job-*.marker"))
-                if (File.ReadAllText(path).Trim() == name) try { File.Delete(path); } catch { }
-            if (Directory.Exists(MarkerRoot()) && Directory.GetFileSystemEntries(MarkerRoot()).Length == 0) Directory.Delete(MarkerRoot());
+            {
+                var m = System.Text.RegularExpressions.Regex.Match(Path.GetFileName(path), @"^guppy-heavy-job-(\d+)-(\d+)\.marker$");
+                int pid; long created;
+                if (!m.Success || !int.TryParse(m.Groups[1].Value, out pid) || !long.TryParse(m.Groups[2].Value, out created)) continue;
+                if (Created(pid) != created) continue;
+                string name = File.ReadAllText(path).Trim();
+                IntPtr job = OpenJobObjectW(JOB_ALL, false, name);
+                if (job == IntPtr.Zero) continue;
+                CloseHandle(job);
+                DateTime written = File.GetLastWriteTimeUtc(path);
+                if (written >= newest) { newest = written; found = name; }
+            }
         }
         catch { }
+        return found;
     }
 
     // The consecutive shell ancestors of this process, nearest first, each created before its child
@@ -397,31 +424,15 @@ static class HeavyJob
         try
         {
             string outer = AncestorMarkedJob();
+            if (string.IsNullOrEmpty(outer)) outer = SoleLiveMarkedJob();
             if (!string.IsNullOrEmpty(outer))
             {
                 IntPtr job = OpenJobObjectW(JOB_ALL, false, outer);
                 if (job != IntPtr.Zero) try { Console.Out.Write(QueryJob(job) + "\n"); return 0; } finally { CloseHandle(job); }
             }
-            string self = QueryJob(IntPtr.Zero); RemoveAncestorMarkers(); Console.Out.Write(self + "\n"); return 0;
+            string self = QueryJob(IntPtr.Zero); Console.Out.Write(self + "\n"); return 0;
         }
         catch { Console.Out.Write("{\"background\":false,\"cap\":false,\"rate\":0,\"affinity\":null}\n"); return 0; }
-    }
-
-    static void RemoveAncestorMarkers()
-    {
-        var parent = new Dictionary<int, int>(); IntPtr snap = CreateToolhelp32Snapshot(0x2, 0);
-        var e = new PROCESSENTRY32 { dwSize = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32)) };
-        if (Process32FirstW(snap, ref e)) do { parent[(int)e.th32ProcessID] = (int)e.th32ParentProcessID; } while (Process32NextW(snap, ref e));
-        CloseHandle(snap);
-        int child = GetCurrentProcessId(); long childCreated = Created(child);
-        while (child != 0)
-        {
-            try { File.Delete(CapMarker(child, childCreated)); } catch { }
-            int p; if (!parent.TryGetValue(child, out p)) break;
-            long created = Created(p); if (created == 0 || created > childCreated) break;
-            child = p; childCreated = created;
-        }
-        CleanMarkers();
     }
 
     // The job's own priority and CPU-rate limits. A hard cap never sets an affinity limit.

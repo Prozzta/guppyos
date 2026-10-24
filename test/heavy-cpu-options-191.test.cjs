@@ -64,8 +64,10 @@ test('the native helper pins hard-cap mode and the exact 50% CPU rate (M1)', () 
   assert.match(native, /self-query/, 'a joined Bash or PowerShell command can query its own Job Object rate');
   assert.match(native, /IsProcessInJob\(proc, job, out inJob\)/, 'a marker is trusted only while its process remains in the named job');
   assert.match(native, /created == 0 \|\| created > childCreated/, 'ancestor walk rejects a parent created after its child');
-  assert.match(native, /MarkerRoot\(\).*guppy-heavyjob-markers/, 'breadcrumbs stay in a Guppy-owned folder');
+  assert.match(native, /MarkerRoot\(\).*?heavyjob-markers/s, 'breadcrumbs stay in a Guppy-owned folder');
+  assert.match(native, /SpecialFolder\.LocalApplicationData/, 'a caller TEMP jail never owns marker cleanup');
   assert.match(native, /CleanMarkers\(\)/, 'dead pid+creation-time breadcrumbs are cleaned');
+  assert.match(native, /if \(inJob \|\| \(Created\(child\) == childCreated && job != IntPtr\.Zero\)\) return name;/, 'reading a live shell marker never consumes it');
   assert.match(native, /var rate = new CPU_RATE \{ ControlFlags = cap \? CPU_RATE_ENABLE \| CPU_RATE_HARD_CAP : 0, CpuRate = cap \? CPU_RATE_50_PERCENT : 0 \}/);
   assert.doesNotMatch(native, /LIMIT_AFFINITY|SetProcessAffinityMask/);
   assert.match(native, /return \"\{\\\"background\\\":\" \+ \(background \? \"true\" : \"false\"\) \+ \",\\\"cap\\\":\" \+ \(cap \? \"true\" : \"false\"\) \+ \",\\\"rate\\\":\" \+ \(cap \? CPU_RATE_50_PERCENT : 0\) \+ \",\\\"affinity\\\":null\}\"/,
@@ -350,20 +352,54 @@ test('CODEX-CMD-COMPUTED-SHELL-192: a shell named by a const of one string reads
 
 const CSC =path.join(process.env.WINDIR || 'C:\\Windows', 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe');
 
-test('LIVE Bash join -> node self-query observes the outer hard cap and leaves no TEMP marker (B1)',
+test('LIVE Bash join keeps its marker for repeated, sibling and background self-queries without TEMP residue (B1)',
   { skip: process.platform !== 'win32' || !fs.existsSync(path.join(__dirname, '..', 'resources', 'heavyjob', 'bin', 'guppy-heavyjob.exe')) ? 'Windows helper not built' : false, timeout: 30_000 },
-  () => {
-    const { spawnSync } = require('node:child_process');
+  async () => {
+    const { spawn, spawnSync } = require('node:child_process');
     const exe = path.join(__dirname, '..', 'resources', 'heavyjob', 'bin', 'guppy-heavyjob.exe');
     const bash = path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Git', 'bin', 'bash.exe');
     if (!fs.existsSync(bash)) return;
     const id = `hcpu-b1-${process.pid}`;
     const quote = (s) => `'${s.replace(/'/g, "'\\\"'\\\"'")}'`;
-    const r = spawnSync(bash, ['-lc', `${quote(exe)} join ${id} 0 1; ${quote(exe)} self-query`], { encoding: 'utf8', windowsHide: true });
-    assert.equal(r.status, 0, r.stderr);
-    assert.deepEqual(JSON.parse(r.stdout.trim().split(/\r?\n/).at(-1)), { background: false, cap: true, rate: 5000, affinity: null });
-    const root = path.join(process.env.TEMP || os.tmpdir(), 'guppy-heavyjob-markers');
-    assert.ok(!fs.existsSync(root) || fs.readdirSync(root).length === 0, 'the consumed marker leaves no TEMP residue');
+    const expected = { background: false, cap: true, rate: 5000, affinity: null };
+    const serve = spawn(exe, ['serve'], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
+    let buffer = ''; const replies = [];
+    serve.stdout.setEncoding('utf8');
+    serve.stdout.on('data', (chunk) => {
+      buffer += chunk;
+      let newline;
+      while ((newline = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1);
+        if (/"event"/.test(line)) continue;
+        const resolve = replies.shift(); if (resolve) resolve(JSON.parse(line));
+      }
+    });
+    const ask = (line) => new Promise((resolve) => { replies.push(resolve); serve.stdin.write(`${line}\n`); });
+    const assertQueries = async (line, count) => {
+      const name = `${id}-${count}`;
+      assert.deepEqual(await ask(`create ${name} 0 1`), { ok: true });
+      try {
+        const r = spawnSync(bash, ['-lc', `${quote(exe)} join ${name} 0 1; ${line}`], { encoding: 'utf8', windowsHide: true });
+        assert.equal(r.status, 0, r.stderr);
+        const rows = r.stdout.trim().split(/\r?\n/).filter(Boolean).map(JSON.parse);
+        assert.equal(rows.length, count, r.stdout);
+        for (const row of rows) assert.deepEqual(row, expected, r.stderr);
+      } finally { assert.deepEqual(await ask(`close ${name}`), { ok: true }); }
+    };
+    try {
+      // The same shell, two separately spawned Node processes, and a background command all find
+      // the still-live shell marker.  A marker is lifetime state, not a one-shot query token.
+      await assertQueries(`${quote(exe)} self-query; ${quote(exe)} self-query; ${quote(exe)} self-query`, 3);
+      const nodeExe = exe.replace(/\\/g, '/');
+      const nodeQuery = `${quote(process.execPath)} -e ${quote(`process.stdout.write(require("node:child_process").execFileSync(${JSON.stringify(nodeExe)}, ["self-query"], {encoding:"utf8"}))`)}`;
+      await assertQueries(`${nodeQuery}; ${nodeQuery}`, 2);
+      await assertQueries(`${quote(exe)} self-query; ${quote(exe)} self-query & wait`, 2);
+      const root = path.join(process.env.TEMP || os.tmpdir(), 'guppy-heavyjob-markers');
+      assert.ok(!fs.existsSync(root), 'marker bookkeeping never leaves a caller TEMP directory');
+    } finally {
+      try { serve.stdin.end(); } catch { /* gone */ }
+      if (serve.exitCode === null) await new Promise((resolve) => serve.once('exit', resolve));
+    }
   });
 
 test('LIVE cmd: the `&` join line leaves the command exactly as cmd runs it (output and exit code), and its processes are in the job',

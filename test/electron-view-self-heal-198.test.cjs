@@ -99,6 +99,16 @@ test('a ready view (marker and executable) is used as it is, not rebuilt', () =>
   });
 });
 
+test('a complete view with the wrong capped affinity ini is rebuilt (M3)', () => {
+  withTemp((dir) => {
+    const src = fakeDist(dir); const tmp = join(dir, 'tmp');
+    const exe = swiftShaderView(src, 0xfn, tmp); const view = join(exe, '..');
+    writeFileSync(join(view, 'SwiftShader.ini'), '[Processor]\nAffinityMask=3\n');
+    swiftShaderView(src, 0xfn, tmp);
+    assert.equal(readFileSync(join(view, 'SwiftShader.ini'), 'utf8'), '[Processor]\nAffinityMask=15\n');
+  });
+});
+
 test('dead partial and stale plain views are cleaned, but a live partial is retained (Jim NIT)', () => {
   withTemp((dir) => {
     const src = fakeDist(dir); const tmp = join(dir, 'tmp');
@@ -106,11 +116,22 @@ test('dead partial and stale plain views are cleaned, but a live partial is reta
     const version = require('electron/package.json').version;
     swiftShaderView(src, 0xffffn, tmp);
     mkdirSync(join(root, `${version}-plain`));
+    mkdirSync(join(root, `${version}-ffff.broken-999999`));
     mkdirSync(join(root, `${version}-ffff.part-999999`));
     mkdirSync(join(root, `${version}-ffff.part-${process.pid}`));
     swiftShaderView(src, 0xffffn, tmp);
     assert.ok(!existsSync(join(root, `${version}-plain`)));
+    assert.ok(!existsSync(join(root, `${version}-ffff.broken-999999`)), 'a dead broken attempt is cleaned');
     assert.ok(!existsSync(join(root, `${version}-ffff.part-999999`)));
     assert.ok(existsSync(join(root, `${version}-ffff.part-${process.pid}`)));
   });
+});
+
+test('self-query and affinity probes retain their explicit timeout, and only explicit mask overrides are cached (M6/M7)', () => {
+  const source = readFileSync(join(__dirname, 'electron-harness', 'electron-bin.cjs'), 'utf8');
+  assert.ok((source.match(/timeout: 15_000/g) || []).length >= 2, 'both external probes time out');
+  assert.match(source, /cachedHarnessMasks\.has\(key\)/);
+  assert.match(source, /const override = env\.HARNESS_CPU_MASK/);
+  assert.match(source, /const key = String\(override\);/, 'the cache key distinguishes explicit affinity overrides');
+  assert.match(source, /if \(override === undefined\) mask = swiftShaderMaskForHeavyJob\(env\)/, 'live affinity is not cached');
 });
