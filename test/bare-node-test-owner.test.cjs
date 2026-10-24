@@ -146,6 +146,12 @@ function childRows(pids) {
   const ping = c ? own.childrenOf(own.processTable(`ParentProcessId = ${c.pid}`), c).find((r) => /^ping/i.test(r.name)) : undefined;
   return { detached: d, cmd: c, ping };
 }
+/**
+ * The fixture dir, removed with retries: a child the job just killed (ping, cwd there) is out of the process
+ * table before its handles are closed (file-job.cs, EBUSY-195), and a first rmdir can meet ENOTEMPTY/EBUSY.
+ * Jim's r2 bare runs left such dirs in %TEMP%; the fixture's node --test also no longer runs with cwd = dir.
+ */
+const rmDir = (dir) => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 30, retryDelay: 100 });
 /** Kill what is left of the fixture's children (and the node parent), each verified by pid + CreationDate. */
 function sweep(rows) { return own.killVerified(rows.filter(Boolean), {}); }
 
@@ -155,14 +161,14 @@ async function bareRun(dir, name, helperLine, { mode = 'FAIL', env: extra = {} }
   const pidsFile = path.join(dir, `${name}.pids.json`);
   const env = bareEnv({ BNTO_PIDS: pidsFile, ...extra });
   if (mode === 'FAIL') {
-    const r = spawnSync(process.execPath, ['--test', file], { cwd: dir, env, encoding: 'utf8', windowsHide: true, timeout: 180_000 });
+    const r = spawnSync(process.execPath, ['--test', file], { cwd: os.tmpdir(), env, encoding: 'utf8', windowsHide: true, timeout: 180_000 });
     const pids = readPids(pidsFile);
     assert.ok(pids, `${name}: the fixture spawned and wrote its pids (exit ${r.status}, stderr ${JSON.stringify((r.stderr || '').slice(-400))})`);
     assert.equal(r.status, 1, `${name}: the bare node --test failed, as the fixture's test does`);
     return { pids, stderr: r.stderr || '', stdout: r.stdout || '' };
   }
   // HANG: node --test runs on; hand back the parent to kill
-  const p = spawn(process.execPath, ['--test', file], { cwd: dir, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+  const p = spawn(process.execPath, ['--test', file], { cwd: os.tmpdir(), env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
   const parentBornMs = Date.now();
   let errText = ''; p.stderr.setEncoding('utf8'); p.stderr.on('data', (d) => { errText += d; }); p.stdout.setEncoding('utf8'); p.stdout.on('data', (d) => { errText += d; });
   let exit = null; p.once('exit', (code, signal) => { exit = { code, signal }; });
@@ -194,32 +200,43 @@ test('LIVE: with the helper, a bare node --test of a failing, spawning file leav
     await until('control swept', () => !rowOf(bare.pids.detached, bare.pids.bornMs), 20_000);
   } finally {
     sweep(leftovers);
-    fs.rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   }
 });
 
-test('LIVE: a forged or stale GUPPY_FILE_JOB_PID does not disable the owner: the mark fails its check, the file joins, the orphan is reaped', LIVE, async () => {
+test('LIVE: a forged, stale or foreign GUPPY_FILE_JOB_PID does not disable the owner: the mark fails its check, the file joins, the orphan is reaped', LIVE, async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bnto-'));
   const leftovers = [];
+  let holder = null;
   try {
     // a pid that was a process and is gone: a cmd that exited (its job name, if ever there, is gone with it)
     const dead = spawnSync('cmd.exe', ['/d', '/c', 'exit 0'], { windowsHide: true, stdio: 'ignore' });
     assert.equal(dead.status, 0);
     assert.ok(dead.pid, 'the dead pid is known');
     await until('dead pid gone', () => own.lookupPids([dead.pid]).length === 0, 20_000);
-    for (const [label, mark] of [['forged', '1'], ['stale', String(dead.pid)]]) {
+    // a LIVE job that does not hold us (Jim r2 K2: the check must read IsProcessInJob, not just find the
+    // job): a bare node that requires own-job.cjs (so it owns Local\guppy-testfile-<its pid>) and waits
+    const { exe } = R.prepareFileJob();
+    assert.ok(exe);
+    holder = spawn(process.execPath, ['-e', `require(${JSON.stringify(HELPER.split(path.sep).join('/'))}); setInterval(() => {}, 1000)`], { env: bareEnv({}), stdio: 'ignore', windowsHide: true });
+    holder.bornMs = Date.now();
+    await until('holder joined its job', () => spawnSync(exe, ['check', String(holder.pid), String(holder.pid)], { windowsHide: true, stdio: 'ignore' }).status === 0, 60_000);
+    const notInIt = spawnSync(exe, ['check', String(holder.pid), String(process.pid)], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'], encoding: 'utf8' });
+    assert.equal(notInIt.status, 6, `file-job check: the holder's job is there but does not hold this process: ${notInIt.stderr}`);
+    for (const [label, mark, reason] of [['forged', '1', 'no job Local\\\\+guppy-testfile-1 \\(\\d+\\)'], ['stale', String(dead.pid), `no job Local\\\\+guppy-testfile-${dead.pid} \\(\\d+\\)`], ['foreign (a live job of another file)', String(holder.pid), `process \\d+ is not in the job of ${holder.pid}`]]) {
       const r = await bareRun(dir, `mark-${label}`, req(HELPER), { env: { GUPPY_FILE_JOB_PID: mark } });
       const now = childRows(r.pids);
       leftovers.push(now.detached, now.cmd, now.ping);
       // node --test reports the file's stderr through its reporter (stdout) in some versions: look in both
-      assert.match(r.stderr + r.stdout, new RegExp(`\\[own-job\\] .*GUPPY_FILE_JOB_PID=${mark} names no job holding this process \\((no job Local\\\\+guppy-testfile-${mark}.*?)\\): joining a job of its own`), `${label} mark ${mark}: said with the tool's reason (TAP doubles the backslash)`);
+      assert.match(r.stderr + r.stdout, new RegExp(`\\[own-job\\] .*GUPPY_FILE_JOB_PID=${mark} names no job holding this process \\(${reason}\\): joining a job of its own`), `${label} mark ${mark}: said with the tool's reason (TAP doubles the backslash)`);
       assert.equal(now.detached, undefined, `${label} mark ${mark}: the detached node ${r.pids.detached} is dead when the bare node --test has exited`);
       assert.equal(now.cmd, undefined, `${label} mark ${mark}: cmd is dead`);
       assert.equal(now.ping, undefined, `${label} mark ${mark}: ping is dead`);
     }
   } finally {
+    if (holder) sweep([rowOf(holder.pid, holder.bornMs)]);
     sweep(leftovers);
-    fs.rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   }
 });
 
@@ -243,7 +260,7 @@ test('LIVE: a hard kill of the bare node --test parent takes the file\'s childre
       .catch((e) => { const now = childRows(run.pids); assert.fail(`${e.message}: still alive ${JSON.stringify({ detached: !!now.detached, cmd: !!now.cmd, ping: !!now.ping })}`); });
   } finally {
     if (run) sweep([rowOf(run.parent.pid, run.parent.bornMs), ...Object.values(childRows(run.pids))]);
-    fs.rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   }
 });
 
@@ -319,6 +336,6 @@ test('LIVE: mutants of own-job.cjs are caught: without a real join the detached 
     assert.deepEqual(survivors, [], 'every mutant is killed (its orphan is seen alive)');
   } finally {
     sweep(leftovers);
-    fs.rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   }
 });
