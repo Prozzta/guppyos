@@ -234,3 +234,40 @@ test('NIT3: CODEX_HOME is a parsed key (bare, quoted, dotted, inline); the same 
   assert.equal(lines[2], `t = { 'CODEX_HOME' = '${A}', k = 1 }`);
   assert.deepEqual(lines.slice(3), src.split('\n').slice(3), 'string contents, a header holding "]" and its comment are untouched');
 });
+
+// Round 3 (UHera on d7e3883c).
+test('MINOR A: a leading byte-order mark does not hide line 1', () => {
+  const out = iso(`\uFEFFa = '${R}\\x'\nb = '${R}'\n`);
+  assert.equal(out.text, `\uFEFFa = '${A}\\x'\nb = '${A}'\n`, 'THE BOM IS KEPT AND LINE 1 IS STILL REWRITTEN');
+  assert.equal(out.rewritten, 2);
+});
+
+test('NIT A: a single-line triple-quoted CODEX_HOME value is the agent home too; a multi-line one is prose', () => {
+  for (const q of ['"""', "'''"]) {
+    assert.equal(iso(`CODEX_HOME = ${q}${R}${q}\n`).text, `CODEX_HOME = '${A}'\n`, `${q}: THE SINGLE-LINE TRIPLE-QUOTED HOME IS FORCED`);
+    assert.equal(iso(`env = { CODEX_HOME = ${q}D:\\o${q} }\n`).text, `env = { CODEX_HOME = '${A}' }\n`, `${q}: inline too`);
+    const multi = `CODEX_HOME = ${q}\nprose\n${q}\n`;
+    assert.equal(iso(multi).text, multi, `${q}: a multi-line body is copied`);
+    for (const broken of [`CODEX_HOME = ${q}D:\\o`, `CODEX_HOME = ${q}`]) {
+      assert.equal(iso(broken).text, broken, `${q}: AN UNCLOSED TRIPLE QUOTE IS TEXT IT CANNOT READ, COPIED`);
+    }
+  }
+  // Only the value right after CODEX_HOME = is the home; the entries of an array under it are paths.
+  assert.equal(iso(`CODEX_HOME = ['${R}\\x', 'D:\\o']\n`).text, `CODEX_HOME = ['${A}\\x', 'D:\\o']\n`, 'AN ARRAY UNDER CODEX_HOME IS MAPPED, NOT FORCED');
+  // An array entry it cannot read is stepped over, and the values after it are still read.
+  assert.equal(iso(`a = [ }, '${R}' ]\n`).text, `a = [ }, '${A}' ]\n`);
+});
+
+test('NIT B: nesting depth cannot make the transform throw; 20000 nested arrays are still processed', () => {
+  const deep = 20000;
+  const src = `a = ${'['.repeat(deep)}'${R}\\x'${']'.repeat(deep)}\nb = { c = ${'['.repeat(deep)}{ CODEX_HOME = 'D:\\o' }${']'.repeat(deep)} }\nd = '${R}'\n`;
+  let out;
+  assert.doesNotThrow(() => { out = iso(src); }, 'DEEP NESTING DOES NOT THROW');
+  assert.equal(out.text, src.replace(`'${R}\\x'`, `'${A}\\x'`).replace(`'D:\\o'`, `'${A}'`).replace(`d = '${R}'`, `d = '${A}'`),
+    'THE DEEP VALUES ARE PROCESSED, NOT COPIED');
+  assert.equal(out.rewritten, 3);
+  assert.ok(!out.text.includes(R), 'no real ~/.codex value is left');
+  // An unclosed deep array runs to the end of the text and keeps reading values.
+  const open = `a = ${'['.repeat(deep)}\n'${R}'\n`;
+  assert.equal(iso(open).text, open.replace(R, A));
+});

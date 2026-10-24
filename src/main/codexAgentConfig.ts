@@ -468,7 +468,11 @@ export function isolateCodexHomePaths(
   const stringValue = (e: number, isHome: boolean): void => {
     const tok = s.slice(i, e);
     const q = tok[0];
-    if (tok.length < 2 || tok[tok.length - 1] !== q || tok.startsWith(q.repeat(3))) { copyTo(e); return; }
+    const triple = tok.startsWith(q.repeat(3));
+    // A single-line triple-quoted CODEX_HOME is still a home; a multi-line one is prose.
+    const closed = triple ? tok.length >= 6 && tok.endsWith(q.repeat(3)) && !/[\r\n]/.test(tok)
+      : tok.length >= 2 && tok[tok.length - 1] === q;
+    if (!closed || (triple && !isHome)) { copyTo(e); return; }
     let next = tok;
     if (isHome) {
       next = tomlPathString(opts.agentCodexHome);
@@ -487,40 +491,51 @@ export function isolateCodexHomePaths(
     out += next;
     i = e;
   };
+  /** One value with everything nested in it. A loop over an explicit stack of open arrays and
+   *  inline tables, not recursion, so no depth of nesting can overflow the stack. */
   const value = (isHome: boolean): void => {
-    skipBlank(false);
-    const e = stringEnd(i);
-    if (e > 0) { stringValue(e, isHome); return; }
-    if (s[i] === '[') {
-      copyTo(i + 1);
-      for (;;) {
-        skipBlank(true);
-        if (i >= s.length) return;
-        if (s[i] === ']') { copyTo(i + 1); return; }
-        if (s[i] === ',') { copyTo(i + 1); continue; }
-        const at = i;
-        value(false);
-        if (i === at) copyTo(i + 1);
+    const open: string[] = [];   // the closer of each array or inline table still open
+    let home = isHome;
+    for (;;) {
+      // A string, a bare scalar, or the opener of an array or inline table.
+      skipBlank(false);
+      const at = i;
+      const e = stringEnd(i);
+      if (e > 0) stringValue(e, home);
+      else if (s[i] === '[' || s[i] === '{') { open.push(s[i] === '[' ? ']' : '}'); copyTo(i + 1); }
+      else {
+        let j = i;
+        while (j < s.length && !/[,\]}#\s]/.test(s[j])) j++;
+        copyTo(j);
+        // An array entry this scanner cannot read: step over one character.
+        if (i === at && open[open.length - 1] === ']') copyTo(i + 1);
       }
-    }
-    if (s[i] === '{') {
-      copyTo(i + 1);
+      home = false;
+      // Then on to the next value, closing what ends on the way.
       for (;;) {
+        const closer = open[open.length - 1];
+        if (closer === undefined) return;
+        if (closer === ']') {
+          skipBlank(true);
+          if (i >= s.length) return;
+          if (s[i] === ']') { copyTo(i + 1); open.pop(); continue; }
+          if (s[i] === ',') { copyTo(i + 1); continue; }
+          break;
+        }
         skipBlank(false);
-        if (i >= s.length || s[i] === '\n' || s[i] === '\r') return;
-        if (s[i] === '}') { copyTo(i + 1); return; }
+        if (i >= s.length || s[i] === '\n' || s[i] === '\r') { open.pop(); continue; }
+        if (s[i] === '}') { copyTo(i + 1); open.pop(); continue; }
         if (s[i] === ',') { copyTo(i + 1); continue; }
-        const at = i;
+        const kat = i;
         const k = key();
         skipBlank(false);
-        if (s[i] === '=') { copyTo(i + 1); value(k === 'CODEX_HOME'); }
-        if (i === at) copyTo(i + 1);
+        if (s[i] === '=') { copyTo(i + 1); home = k === 'CODEX_HOME'; break; }
+        if (i === kat) copyTo(i + 1);
       }
     }
-    let j = i;
-    while (j < s.length && !/[,\]}#\s]/.test(s[j])) j++;
-    copyTo(j);
   };
+  // A byte-order mark is not a key: copy it, so line 1 is still read.
+  if (s.charCodeAt(0) === 0xfeff) copyTo(1);
   while (i < s.length) {
     skipBlank(true);
     if (i >= s.length) break;
