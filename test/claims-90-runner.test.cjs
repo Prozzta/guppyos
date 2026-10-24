@@ -91,6 +91,7 @@ test('PIN: what the asker reads is what hooks.ts condensedToolOutput gives it (J
   assert.match(child, /C\.capForCommand\(command, isGod && configured \? Math\.max\(configured, C\.TOOL_OUTPUT_CAP_READ\) : configured\)/, 'god gets at least the read cap');
   assert.match(child, /const dir = path\.join\(hive, 'agents', asker, 'tool-output'\);/, 'the full text is saved where the agent can Read it');
   assert.match(child, /C\.condenseOutput\(\{ text: seenRaw, cap, path: saved \}\)/, 'the footer names that real file');
+  assert.match(child, /for \(const s of item\.briefing === false \? \[\] : sources\)/, 'briefing: false answers the wake-up as a mid-session call (a render leases reconcile prompts)');
 });
 
 test('PIN: the world view answers from the addendum, never the live disk (Jim M3)', () => {

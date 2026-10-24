@@ -305,7 +305,9 @@ function inProcessFork(runWorker, deps) {
   let n = 0;
   for (const item of spec.items) {
     const briefing = {};
-    for (const s of sources) {
+    // Each render leases the reconcile prompts it shows (W5), so a briefing before the wake-up
+    // changes what the wake-up shows. briefing: false answers the wake-up as a mid-session call.
+    for (const s of item.briefing === false ? [] : sources) {
       const text = await claimDelivery.workingSet(item.asker, s, WORKING_SET_MAX_CHARS);
       briefing[s] = { text, chars: text ? text.length : 0 };
     }
