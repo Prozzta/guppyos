@@ -178,7 +178,7 @@ test('SYNC-CHILD CENSUS: the scanner sees every spelling, and ignores comments a
 
 const MUTANTS = [
   { name: 'spawnSync via a named import (the original killAll shape)', file: 'src/main/pty.ts',
-    anchor: "import { ensureKilled, killTreesAsync } from './procKill';",
+    anchor: "import { ensureKilled, isAlive, killTreesAsync } from './procKill';",
     add: "\nimport { spawnSync } from 'node:child_process';\nexport function rogue(): void { spawnSync('taskkill', ['/pid', '1', '/T', '/F'], { timeout: 10_000 }); }" },
   { name: 'execFileSync via require(...) (the nodeInstall shape)', file: 'src/main/nodeInstall.ts',
     anchor: "import { execFile } from 'node:child_process';",

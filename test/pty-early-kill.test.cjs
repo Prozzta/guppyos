@@ -97,5 +97,5 @@ test('wiring: PtyManager.spawn arms every terminal right after pty.spawn; the ki
   assert.ok(at > 0);
   const after = src.slice(at, at + 1200);
   assert.match(after, /\}\);\n\s+\/\/ PTY-EARLY-KILL-LEAK[^\n]*\n\s+armEarlyKill\(proc\);/);
-  assert.equal([...src.matchAll(/s\.proc\.kill\(\)/g)].length, 4, 'every kill path (kill and killByOwner via closeTree x2, killAllAsync x2) reaches the armed kill');
+  assert.equal([...src.matchAll(/s\.proc\.kill\(\)/g)].length, 3, 'every kill path (closeTree on POSIX, closePty for closeTree and killAllAsync on Windows, killAllAsync on POSIX) reaches the armed kill');
 });
