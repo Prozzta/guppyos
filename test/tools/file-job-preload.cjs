@@ -5,7 +5,8 @@
  * joins a job of its own (file-job.cs join): every process it starts is then created inside that
  * job, and the watchdog's kill takes them all at once. The file takes this back out of NODE_OPTIONS,
  * so nothing it starts loads it again (its children are in its job already), and marks the join
- * in GUPPY_FILE_JOB_PID so the file's own join (own-job.cjs, BARE-NODE-TEST-NO-OWNER) is skipped.
+ * in GUPPY_FILE_JOB_PID, only after it succeeded (bare-node-test-owner pins that with a failing
+ * join exe), so the file's own join (own-job.cjs, BARE-NODE-TEST-NO-OWNER) verifies it and stops.
  */
 const exe = process.env.GUPPY_FILE_JOB_EXE;
 const opt = process.env.GUPPY_FILE_JOB_OPT; // the exact text run-tests added to NODE_OPTIONS
