@@ -107,9 +107,9 @@ test('the natural-exit path reports before it deletes, after its stale-session g
   const report = onExit.indexOf('this.reportEnd(opts.id, session, exitCode, signal)');
   const del = onExit.indexOf('this.sessions.delete(opts.id)');
   assert.ok(guard >= 0 && report > guard && del > report, 'guard, then report, then delete');
-  // kill(): mark, kill, report, delete.
+  // kill(): mark, kill, report, delete. AGY-TEARDOWN: the kill is closeTree (sweep, then close).
   const kill = src.slice(src.indexOf('  kill(id: string)'), src.indexOf('  list()'));
-  const order = ['s.explicitTeardown = true', 's.proc.kill()', 'this.reportEnd(id, s, null)', 'this.sessions.delete(id)'].map((t) => kill.indexOf(t));
+  const order = ['s.explicitTeardown = true', 'this.closeTree(s)', 'this.reportEnd(id, s, null)', 'this.sessions.delete(id)'].map((t) => kill.indexOf(t));
   assert.ok(order.every((i, k) => i >= 0 && (k === 0 || i > order[k - 1])), `kill order ${order}`);
 });
 

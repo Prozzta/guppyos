@@ -8,7 +8,7 @@ import type { TerminalPromptState } from '../shared/promptState';
 import type { WebContents } from 'electron';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { delimiter, join, win32 } from 'node:path';
-import { ensureKilled, killTreesAsync } from './procKill';
+import { ensureKilled, isAlive, killTreesAsync } from './procKill';
 import { expandTilde } from './fs';
 import { buildPtyEnv } from './ptyEnv';
 import { createPtyDataBatcher, type PtyDataBatcher } from './ptyDataBatcher';
@@ -105,6 +105,8 @@ interface PtySession {
   /** ZERO-TOKEN-LIVENESS: the harness asked for this incarnation to end (kill, window close).
    *  Set BEFORE the kill, so the exit that follows is EXITED, never CRASHED. */
   explicitTeardown?: boolean;
+  /** AGY-TEARDOWN r2: the ConPTY was closed (closePty), so a second close is a no-op. */
+  ptyClosed?: boolean;
   /** GOD-TERMINAL-CONTROL M1: this incarnation's headless screen (terminalMirror.ts), fed every
    *  accepted chunk. Absent when the mirror is off or could not be made. Dies with the session. */
   mirror?: TerminalMirror;
@@ -453,6 +455,9 @@ export interface PtyStartupHooks {
 
 export class PtyManager {
   private sessions = new Map<string, PtySession>();
+  /** AGY-TEARDOWN r2 (Jim MINOR 2): sessions whose ConPTY close is still waiting on closeTree's
+   *  sweep. killAllAsync takes them over, so no close lands after a quit has resolved. */
+  private closingTrees = new Set<PtySession>();
   private webContents: WebContents | null = null;
   /** Fired when a PTY exits on its OWN (child finished/crashed/killed
    *  externally), so the main process can run the SAME lifecycle teardown
@@ -495,14 +500,39 @@ export class PtyManager {
     for (const [id, s] of [...this.sessions.entries()]) {
       if (s.owner === wc) {
         s.explicitTeardown = true;   // its onExit is the harness's own close, not a crash
-        try {
-          const pid = s.proc.pid;
-          s.proc.kill();
-          ensureKilled(pid);
-        } catch { /* already gone */ }
+        try { this.closeTree(s); } catch { /* already gone */ }
         void id;
       }
     }
+  }
+
+  /** AGY-TEARDOWN: an explicit kill of ONE terminal and everything it started. On Windows the tree
+   *  is swept while it is still intact and the ConPTY is closed only after that sweep (or its cap),
+   *  killAllAsync's order. Closing first ended the root, so the sweep ensureKilled ran 4 s later was
+   *  `taskkill /T` on a dead pid and found nothing: every descendant off the pseudo-console (agy's
+   *  inner agy.exe on its own conhost, a detached daemon) lived on. node-pty's Windows kill already
+   *  terminates the console's processes outright, so no graceful close is lost. POSIX keeps the
+   *  polite SIGHUP and the group sweep after the grace. */
+  private closeTree(s: PtySession): void {
+    const pid = s.proc.pid;
+    if (process.platform !== 'win32') {
+      s.proc.kill();
+      ensureKilled(pid); // verify + sweep the process group so no PID leaks
+      return;
+    }
+    const close = (): void => { this.closingTrees.delete(s); this.closePty(s); };
+    if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) { close(); return; }
+    this.closingTrees.add(s);
+    // Jim MINOR 1: re-verify after the sweep. A taskkill that failed or hit its cap leaves the root
+    // alive, and the root still holds the tree, so one more sweep runs before the close.
+    void killTreesAsync([pid]).then(() => (isAlive(pid) ? killTreesAsync([pid]) : undefined)).then(close, close);
+  }
+
+  /** Close a session's ConPTY once: closeTree's late close and a quit can both reach the same one. */
+  private closePty(s: PtySession): void {
+    if (s.ptyClosed) return;
+    s.ptyClosed = true;
+    try { s.proc.kill(); } catch { /* already gone */ }
   }
 
   /** Register the natural-exit teardown callback. Invoked from inside node-pty's
@@ -1128,9 +1158,7 @@ export class PtyManager {
     try {
       s.explicitTeardown = true;   // ZERO-TOKEN-LIVENESS: marked BEFORE the kill
       s.out?.flush(); // what arrived before the kill still belongs on this pty's screen
-      const pid = s.proc.pid;
-      s.proc.kill();
-      ensureKilled(pid); // verify + sweep the process group so no PID leaks
+      this.closeTree(s);
       // kill() deletes the session now, so node-pty's later onExit is swallowed: report the end here.
       this.reportEnd(id, s, null);
       this.sessions.delete(id);
@@ -1198,8 +1226,11 @@ export class PtyManager {
    *  group-kills after the grace. Never rejects. */
   killAllAsync(capMs?: number): Promise<void> {
     this.exitHandler = null;
-    const sessions = [...this.sessions.values()];
+    // AGY-TEARDOWN r2: plus every tree a kill()/killByOwner() is still sweeping (closingTrees), so
+    // their closes run here, inside the awaited quit, and their own late close is then a no-op.
+    const sessions = [...new Set([...this.sessions.values(), ...this.closingTrees])];
     this.sessions.clear();
+    this.closingTrees.clear();
     if (process.platform !== 'win32') {
       for (const s of sessions) {
         try { s.proc.kill(); } catch { /* noop */ }
@@ -1220,7 +1251,7 @@ export class PtyManager {
       } catch { done(); }
     }));
     const closePtys = (): void => {
-      for (const s of sessions) { try { s.proc.kill(); } catch { /* noop */ } }
+      for (const s of sessions) this.closePty(s);
     };
     const allExited = (): Promise<void> => Promise.race([
       Promise.all(exited).then(() => undefined),
