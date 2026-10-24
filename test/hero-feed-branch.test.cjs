@@ -194,6 +194,51 @@ const SCENARIOS = {
     fs.writeFileSync(cp, JSON.stringify({ hero: LIVE_HERO, fetchedAt: Date.now() - 7 * HOUR, lastAttempt: Date.now() - 1000 }));
     await h.loadHero(cp, { force: true });
     assert.equal(requests.length, 2, 'A FORCED REFRESH IS THE USER ASKING AND GOES THROUGH THE BACKOFF');
+  },
+  // Round 3, Andy M1: a time in the future (a clock set back, an edited file) is expired, not fresh.
+  async futureFetchedAt(h) {
+    github();
+    const cp = cachePath();
+    fs.writeFileSync(cp, JSON.stringify({ hero: LIVE_HERO, fetchedAt: Date.now() + 2 * HOUR, ref: 'v1.1.100' }));
+    const r = await h.loadHero(cp);
+    assert.deepEqual(rawRequests(), [rawUrl('v1.1.101')], 'A FUTURE fetchedAt IS EXPIRED, NOT FRESH');
+    assert.equal(r.ref, 'v1.1.101');
+    assert.equal(r.stale, false);
+  },
+  async futureLastAttempt(h) {
+    offline();
+    const cp = cachePath();
+    fs.writeFileSync(cp, JSON.stringify({ hero: LIVE_HERO, fetchedAt: Date.now() - 7 * HOUR, lastAttempt: Date.now() + 2 * HOUR }));
+    await h.loadHero(cp);
+    assert.equal(requests.length, 2, 'A FUTURE lastAttempt DOES NOT BACK OFF');
+    offline();
+    fs.writeFileSync(cp, JSON.stringify({ hero: LIVE_HERO, fetchedAt: Date.now() - 7 * HOUR, lastAttempt: String(Date.now() - 1000) }));
+    await h.loadHero(cp);
+    assert.equal(requests.length, 2, 'A lastAttempt THAT IS NOT A NUMBER DOES NOT BACK OFF');
+  },
+  // Round 3, Andy N1: the cache file is untrusted input. A wrong shape is no cache: the defaults,
+  // and the refresh is allowed (offline here, so it is asked once and fails).
+  async wrongShapeCache(h) {
+    for (const shape of [{}, 5, [], 'x', null, { fetchedAt: 0 }, { hero: null, fetchedAt: Date.now() }, { hero: 5, fetchedAt: Date.now() }, { hero: [], fetchedAt: Date.now() },
+      { hero: LIVE_HERO, fetchedAt: 'x' }, { hero: LIVE_HERO }]) {
+      offline();
+      const cp = cachePath();
+      fs.writeFileSync(cp, JSON.stringify(shape));
+      const r = await h.loadHero(cp);
+      assert.equal(requests.length, 2, `A WRONG-SHAPE CACHE (${JSON.stringify(shape)}) DOES NOT BLOCK THE REFRESH`);
+      assert.deepEqual(r.hero, DEFAULT_HERO, `A WRONG-SHAPE CACHE (${JSON.stringify(shape)}) IS NO CACHE: THE DEFAULTS`);
+      assert.equal(r.ref, null);
+      assert.equal(r.stale, true);
+    }
+  },
+  async cachedHeroRevalidated(h) {
+    github();
+    const cp = cachePath();
+    const dirty = { plan: { label: 7, blurb: 'Kept.' }, sponsor: { name: 'S', url: 'http://plain.example/' }, notice: 9 };
+    fs.writeFileSync(cp, JSON.stringify({ hero: dirty, fetchedAt: Date.now() - 1000, ref: 'v1.1.101' }));
+    const r = await h.loadHero(cp);
+    assert.deepEqual(requests, [], 'a fresh cache, still no request');
+    assert.deepEqual(r.hero, { plan: { label: DEFAULT_HERO.plan.label, blurb: 'Kept.' }, sponsor: null, notice: null }, 'THE CACHED HERO IS RE-VALIDATED ON READ');
   }
 };
 
@@ -286,6 +331,26 @@ const HTTPS_SCENARIOS = {
       await assert.rejects(getText('http://a.example/1'), /https only/, 'a plain-http URL is refused before any request');
       assert.deepEqual(net.seen, ['https://a.example/1']);
     } finally { net.restore(); }
+  },
+  // Round 3, Andy L1: the downgrade sits on a LATER hop (https -> https -> http).
+  async refusesADowngradeOnALaterHop(getText) {
+    const net = fakeHttps((url) => url.endsWith('/1') ? redirectTo('https://a.example/2')
+      : url.endsWith('/2') ? redirectTo('http://a.example/3') : page('plain'));
+    try {
+      await assert.rejects(getText('https://a.example/1'), /https only/, 'A DOWNGRADE ON A LATER HOP IS REFUSED');
+      assert.deepEqual(net.seen, ['https://a.example/1', 'https://a.example/2'], 'the http hop is never requested');
+    } finally { net.restore(); }
+  },
+  // Round 3, Andy L2: a relative Location resolves against the hop that sent it, after a move
+  // to another host and a deeper path, not against the first URL.
+  async relativeAfterAHostMove(getText) {
+    const net = fakeHttps((url) => url === 'https://a.example/1' ? redirectTo('https://b.example/deep/x')
+      : url === 'https://b.example/deep/x' ? redirectTo('y') : url === 'https://b.example/deep/y' ? redirectTo('../z') : page('moved'));
+    try {
+      assert.equal(await getText('https://a.example/1'), 'moved');
+      assert.deepEqual(net.seen, ['https://a.example/1', 'https://b.example/deep/x', 'https://b.example/deep/y', 'https://b.example/z'],
+        'A RELATIVE Location RESOLVES AGAINST THE HOP THAT SENT IT');
+    } finally { net.restore(); }
   }
 };
 for (const [name, run] of Object.entries(HTTPS_SCENARIOS)) {
@@ -331,13 +396,32 @@ const HERO_MUTANTS = [
   { name: 'M8 the cached ref is trusted', dies: /REPORTS NONE/,
     edits: [['cached && isGitRef(cached.ref) ? cached.ref : null', "cached && typeof cached.ref === 'string' ? cached.ref : null"]] },
   { name: 'M9 no negative cache', dies: /NOT RETRIED WITHIN THE BACKOFF/,
-    edits: [["const backingOff = cached && typeof cached.lastAttempt === 'number' && Date.now() - cached.lastAttempt < RETRY_AFTER_MS;", 'const backingOff = false;']] },
+    edits: [['const backingOff = cached && within(cached.lastAttempt, RETRY_AFTER_MS);', 'const backingOff = false;']] },
   { name: 'M10 the failure is not recorded', dies: /NOT RETRIED WITHIN THE BACKOFF|RECORDED AS lastAttempt/,
     edits: [['const failed: HeroCache = { ...(cached ?? { hero: DEFAULT_HERO, fetchedAt: 0 }), lastAttempt: Date.now() };', 'const failed: HeroCache = { ...(cached ?? { hero: DEFAULT_HERO, fetchedAt: 0 }) };']] },
   { name: 'M11 the backoff never expires', dies: /THE BACKOFF EXPIRES/,
-    edits: [['Date.now() - cached.lastAttempt < RETRY_AFTER_MS;', 'Date.now() - cached.lastAttempt < Infinity;']] },
+    edits: [['within(cached.lastAttempt, RETRY_AFTER_MS)', 'within(cached.lastAttempt, Infinity)']] },
   { name: 'M12 a forced refresh is backed off too', dies: /A FORCED REFRESH IS THE USER ASKING/,
-    edits: [['if (cached && !opts.force && backingOff) {', 'if (cached && backingOff) {']] }
+    edits: [['if (cached && !opts.force && backingOff) {', 'if (cached && backingOff) {']] },
+  // Round 3 (Andy M1, N1)
+  { name: 'M13 a future fetchedAt is fresh', dies: /A FUTURE fetchedAt IS EXPIRED/,
+    edits: [['within(cached.fetchedAt, TTL_MS)', 'now - cached.fetchedAt < TTL_MS']] },
+  { name: 'M14 a future lastAttempt backs off', dies: /A FUTURE lastAttempt DOES NOT BACK OFF/,
+    edits: [['within(cached.lastAttempt, RETRY_AFTER_MS)', "typeof cached.lastAttempt === 'number' && now - cached.lastAttempt < RETRY_AFTER_MS"]] },
+  { name: 'M15 no future guard at all', dies: /A FUTURE fetchedAt IS EXPIRED|A FUTURE lastAttempt DOES NOT BACK OFF/,
+    edits: [["typeof ts === 'number' && now - ts >= 0 && now - ts < ms", "typeof ts === 'number' && now - ts < ms"]] },
+  { name: 'M16 a non-number lastAttempt backs off', dies: /A lastAttempt THAT IS NOT A NUMBER DOES NOT BACK OFF/,
+    edits: [["typeof ts === 'number' && now - ts >= 0", '(ts as number) !== undefined && now - (ts as number) >= 0']] },
+  { name: 'M17 the cache shape is not checked', dies: /A WRONG-SHAPE CACHE/,
+    edits: [["cached = readCache(JSON.parse(readFileSync(cachePath, 'utf8')));", "cached = JSON.parse(readFileSync(cachePath, 'utf8'));"]] },
+  { name: 'M18 the cached hero is not re-validated', dies: /THE CACHED HERO IS RE-VALIDATED ON READ/,
+    edits: [['return { ...(c as unknown as HeroCache), hero: parseHeroPayload(c.hero) };', 'return c as unknown as HeroCache;']] },
+  { name: 'M19 a null hero passes', dies: /A WRONG-SHAPE CACHE \(\{"hero":null/,
+    edits: [['if (!c?.hero || typeof c.hero', 'if (c?.hero === undefined || typeof c.hero']] },
+  { name: 'M20 an array hero passes', dies: /A WRONG-SHAPE CACHE \(\{"hero":\[\]/,
+    edits: [[' || Array.isArray(c.hero)) return null;', ') return null;']] },
+  { name: 'M21 a non-number fetchedAt passes', dies: /A WRONG-SHAPE CACHE \(\{"hero":\{.*"fetchedAt":"x"\}\)/,
+    edits: [["if (typeof c.fetchedAt !== 'number') return null;", '']] }
 ];
 const REF_MUTANTS = [
   { name: "J3 '%' allowed", dies: /MUST REFUSE "a%2/,
@@ -355,7 +439,12 @@ const HTTPS_MUTANTS = [
   { name: 'F1 no hop limit', dies: /A REDIRECT LOOP FAILS AT THE HOP LIMIT/,
     edits: [['if (hop >= MAX_REDIRECTS) {', 'if (false) {']] },
   { name: 'F2 http allowed on a hop', dies: /A REDIRECT TO http IS REFUSED/,
-    edits: [["if (!/^https:\\/\\//i.test(url)) return Promise.reject(new Error('https only'));", "if (hop === 0 && !/^https:\\/\\//i.test(url)) return Promise.reject(new Error('https only'));"]] }
+    edits: [["if (!/^https:\\/\\//i.test(url)) return Promise.reject(new Error('https only'));", "if (hop === 0 && !/^https:\\/\\//i.test(url)) return Promise.reject(new Error('https only'));"]] },
+  // Round 3: Andy's A1 and A3.
+  { name: 'A1 https checked on the first two hops only', dies: /A DOWNGRADE ON A LATER HOP IS REFUSED/,
+    edits: [["if (!/^https:\\/\\//i.test(url)) return Promise.reject(new Error('https only'));", "if (hop <= 1 && !/^https:\\/\\//i.test(url)) return Promise.reject(new Error('https only'));"]] },
+  { name: 'A3 a relative Location resolves against a fixed base', dies: /A RELATIVE Location RESOLVES AGAINST THE HOP THAT SENT IT/,
+    edits: [['new URL(res.headers.location, url)', 'new URL(res.headers.location, "https://a.example/")']] }
 ];
 
 function mutate(src, edits, count = 1) {
@@ -382,7 +471,7 @@ test('mutation census: every mutant dies, the real files survive', async () => {
   for (const run of Object.values(SCENARIOS)) await run(realHero);
   refTable(updateState);
   for (const run of Object.values(HTTPS_SCENARIOS)) await run(realGetText);
-  assert.equal(HERO_MUTANTS.length + REF_MUTANTS.length + HTTPS_MUTANTS.length, 19, '12 hero.ts + 5 isGitRef + 2 getText');
+  assert.equal(HERO_MUTANTS.length + REF_MUTANTS.length + HTTPS_MUTANTS.length, 30, '21 hero.ts + 5 isGitRef + 4 getText');
 
   await census('src/main/hero.ts', HERO_MUTANTS, async (mod) => { for (const run of Object.values(SCENARIOS)) await run(mod); });
   await census('src/shared/updateState.ts', REF_MUTANTS, (mod) => refTable(mod));

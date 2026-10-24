@@ -68,20 +68,34 @@ export interface HeroResult {
   ref: string | null;
 }
 
+/** The cache file is untrusted input (an old build, a hand edit, a torn write).
+ *  A wrong shape is no cache at all: the defaults, and the refresh is allowed.
+ *  A right shape still has its hero re-validated, field by field. */
+function readCache(raw: unknown): HeroCache | null {
+  // JSON null has no fields; a number, a string or an array has no .hero.
+  const c = raw as Record<string, unknown> | null;
+  if (!c?.hero || typeof c.hero !== 'object' || Array.isArray(c.hero)) return null;
+  if (typeof c.fetchedAt !== 'number') return null;
+  return { ...(c as unknown as HeroCache), hero: parseHeroPayload(c.hero) };
+}
+
 export async function loadHero(
   cachePath: string,
   opts: { force?: boolean } = {}
 ): Promise<HeroResult> {
   let cached: HeroCache | null = null;
   try {
-    if (existsSync(cachePath)) cached = JSON.parse(readFileSync(cachePath, 'utf8'));
+    if (existsSync(cachePath)) cached = readCache(JSON.parse(readFileSync(cachePath, 'utf8')));
   } catch { cached = null; }
   const cachedRef = cached && isGitRef(cached.ref) ? cached.ref : null;
 
-  if (cached && !opts.force && Date.now() - cached.fetchedAt < TTL_MS) {
+  // A time in the future (a clock set back, an edited file) is expired, not fresh.
+  const now = Date.now();
+  const within = (ts: unknown, ms: number): boolean => typeof ts === 'number' && now - ts >= 0 && now - ts < ms;
+  if (cached && !opts.force && within(cached.fetchedAt, TTL_MS)) {
     return { hero: cached.hero, fetchedAt: cached.fetchedAt, stale: false, ref: cachedRef };
   }
-  const backingOff = cached && typeof cached.lastAttempt === 'number' && Date.now() - cached.lastAttempt < RETRY_AFTER_MS;
+  const backingOff = cached && within(cached.lastAttempt, RETRY_AFTER_MS);
   if (cached && !opts.force && backingOff) {
     return { hero: cached.hero, fetchedAt: cached.fetchedAt, stale: true, ref: cachedRef };
   }
