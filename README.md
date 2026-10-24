@@ -25,7 +25,7 @@ and unattended.
 
 <p>
   <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-F4D35E.svg?style=flat-square&labelColor=6E1423"></a>
-  <img alt="Version: 1.1.101" src="https://img.shields.io/badge/version-1.1.101-F4D35E.svg?style=flat-square&labelColor=6E1423">
+  <img alt="Version: 1.1.102" src="https://img.shields.io/badge/version-1.1.102-F4D35E.svg?style=flat-square&labelColor=6E1423">
   <img alt="Fork of chaitanyagiri/munder-difflin" src="https://img.shields.io/badge/fork%20of-chaitanyagiri%2Fmunder--difflin-F4F1EA.svg?style=flat-square&labelColor=6E1423">
 </p>
 
@@ -315,10 +315,14 @@ wholesale merges. The shape of the line, as evidence for the three ideas above:
   waits for the heavy slot like the full suite, light commands are no longer held, heavy jobs hand
   the slot over cleanly, a new floor starts with only its own god, and a release can no longer drop
   an earlier release's notes.
-- **Settings that keep each other's changes** (1.1.101, the current release) — turning on one MCP
+- **Settings that keep each other's changes** (1.1.101) — turning on one MCP
   server no longer turns off another, the knowledge-graph toggle keeps its folder, auto-compact and
   Schedules no longer undo each other, the app reads its config, registry and task files from
   memory, and a test run that opens app windows waits for the heavy slot.
+- **Heavy jobs held to half the PC, clean terminal closes** (1.1.102, the current release) — heavy
+  jobs are hard-capped at 50% of the PC's CPU by default, closing an agent's terminal ends every
+  process it started, Codex agents no longer reach into your own Codex folder, and the Settings
+  hero card follows the current release.
 
 Every milestone carries a dated human acceptance and evidence tag in the fork's
 internal mission ledger; this README keeps only the shape.

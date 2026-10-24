@@ -11,6 +11,38 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/guppyos/releases).
 
+## [1.1.102] — 2026-10-24
+
+**Heavy jobs are held to half the PC, closing a terminal ends everything it started, and Codex agents keep out of your own Codex folder.**
+Rollback: 1.1.101 (reinstall).
+
+### Changed
+
+- **Heavy jobs are hard-capped at 50% of the PC's CPU, on by default.** The Windows option that
+  limited heavy jobs to half the processors is replaced by a hard cap at 50% of the whole
+  machine's CPU rate. Every processor stays visible, so tools that size themselves from the
+  processor count are no longer squeezed onto half of them. The new **Heavy jobs CPU cap** switch
+  in Settings is on by default and applies at once to jobs already running; turning on the old
+  half-processors option carries over as on. If a heavy job runs inside another job that refuses
+  the cap, its terminal says that the cap was not applied, and the command still runs.
+- **The Settings hero card follows the current release.** The card and its "full changelog" link
+  read from the latest release (or the repository's default branch), found when the card
+  refreshes, instead of a fixed branch that was no longer kept up to date. Offline, it shows its
+  last copy or the built-in text. A failed refresh is not retried for an hour, and redirects are
+  followed over https only.
+
+### Fixed
+
+- **Closing an agent's terminal ends every process it started.** On Windows, closing a terminal
+  shut its console first, so processes that ran outside that console (such as Antigravity's inner
+  process, or a detached helper) kept running. The app now ends the whole process tree first, and
+  tries again if anything survives, before it closes the console. Quitting the app finishes any
+  close still in progress.
+- **Codex agents no longer point into your own Codex folder.** Each Codex agent's settings are
+  copied from your own Codex config. In regular builds, the copy kept paths into your own
+  `~/.codex` (the Node REPL MCP server's home and trusted paths, and the plugin marketplace
+  source). Every such path now points into the agent's own Codex home, in every build.
+
 ## [1.1.101] — 2026-10-24
 
 **Settings changes no longer undo each other, the main process reads its files far less, and test runs that open windows wait their turn.**
