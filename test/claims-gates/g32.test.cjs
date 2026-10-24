@@ -81,6 +81,8 @@ test('G3.2: the full-corpus default-search p95 of the new build is at most 1.5x 
   for (const a of claimAgents) {
     fs.mkdirSync(path.join(newHive, 'agents', a, 'memory', 'claims'), { recursive: true });
     fs.writeFileSync(path.join(newHive, 'agents', a, 'memory', 'claims', '2026-10.jsonl'), '');
+    // CL-READERWATCHER (be5cc784): claims are a source only once the S0 import has settled; older builds ignore the file.
+    fs.writeFileSync(path.join(newHive, 'agents', a, 'memory', 'claims-import.json'), '{"v":1}\n');
   }
   fs.writeFileSync(path.join(newHive, 'memory-sources.json'), JSON.stringify({ topLevel: [], include: {}, ledger: Object.fromEntries(claimAgents.map((a) => [a, 'reader'])) }));
   const script = path.join(__dirname, 'g32-latency.cjs');
