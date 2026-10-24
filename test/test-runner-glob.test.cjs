@@ -14,7 +14,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const runner = require('./tools/run-tests.cjs');
-const { selectTestFiles, run } = runner;
+const { selectTestFiles } = runner;
+// These runner-behaviour tests are not process-job integration tests. Pin their
+// concurrency to the uncapped branch so a fresh npm-ci tree need not have bin/.
+const run = (options) => runner.run({ jobRate: () => 0, ...options });
 
 const REPO = path.resolve(__dirname, '..');
 const TEST_DIR = path.join(REPO, 'test');
@@ -97,6 +100,57 @@ test('the expanded file list is passed to node --test - no glob character surviv
   assert.ok(fileArgs.every((a) => a.endsWith('.test.cjs')));
   assert.strictEqual(args.filter((a) => a.endsWith('.test.cjs')).length, 2, 'exactly the selected files');
   assert.deepStrictEqual(fileArgs.map((a) => path.basename(a)), ['a.test.cjs', 'b.test.cjs']);
+});
+
+test('a self-queried hard-capped heavy job scales node test concurrency and its startup gate', () => {
+  const { spawn, calls } = fakeSpawn({ status: 0 });
+  const gates = [];
+  const logs = sink();
+  const code = run({
+    testDir: 'test', readdir: () => ['a.test.cjs'], spawn, log: logs.write,
+    processEnv: {}, cores: 32, jobRate: () => 5000,
+    startGate: ({ slots }) => { gates.push(slots); return null; },
+  });
+  assert.strictEqual(code, 0);
+  assert.deepStrictEqual(gates, [4], 'the gate uses the 16-core capped share');
+  assert.ok(calls[0].args.includes('--test-concurrency=16'), calls[0].args.join(' '));
+  assert.match(logs.lines.join('\n'), /heavy CPU rate 5000: node concurrency 16 of 32 visible cores/);
+  assert.strictEqual(runner.cappedCores({}, 1, 5000), 1, 'one visible core remains one');
+  let helperCall;
+  assert.equal(runner.selfJobRate({ env: {}, platform: 'win32', spawnSyncFn: (...args) => { helperCall = args; return { status: 0, stdout: '{"cap":true,"rate":5000}' }; } }), 5000, 'self-query makes Bash and PowerShell joins cap-aware');
+  assert.equal(helperCall[0], runner.HEAVYJOB_HELPER, 'self-query uses this branch\'s built helper, not PATH');
+  assert.deepEqual(helperCall[1], ['self-query']);
+  assert.throws(
+    () => runner.selfJobRate({ env: {}, platform: 'win32', spawnSyncFn: () => ({ status: 2, stderr: 'usage: guppy-heavyjob join ...' }) }),
+    /self-query is unavailable/,
+    'an old helper without self-query is a named failure, never an uncapped zero'
+  );
+  const notices = sink();
+  assert.equal(
+    runner.selfJobRate({ env: {}, platform: 'win32', notice: notices.write, spawnSyncFn: () => ({ error: Object.assign(new Error('not found'), { code: 'ENOENT' }) }) }),
+    0,
+    'a fresh npm-ci tree has no helper and therefore no cap information'
+  );
+  assert.match(notices.lines.join('\n'), /helper is not built .*CPU cap unknown/);
+  assert.equal(runner.selfJobRate({ env: { GUPPY_HEAVY_CPU_CAP: '0' }, platform: 'win32', spawnSyncFn: () => ({ stdout: '{"cap":true,"rate":5000}' }) }), 0, 'an explicit cap-off override wins');
+  assert.equal(runner.selfJobRate({ env: {}, platform: 'win32', spawnSyncFn: () => ({ status: 0, stdout: '{"cap":false,"rate":0}' }) }), 0, 'an uncapped job reports no usable rate');
+
+  const queryFailure = sink();
+  assert.equal(run({
+    testDir: 'test', readdir: () => ['a.test.cjs'], spawn: fakeSpawn({ status: 0 }).spawn,
+    log: () => {}, err: queryFailure.write, jobRate: () => { throw new Error('self-query unsupported'); }
+  }), 1);
+  assert.match(queryFailure.lines.join('\n'), /cannot query heavy CPU cap: Error: self-query unsupported/);
+
+  const open = fakeSpawn({ status: 0 });
+  const openGates = [];
+  assert.strictEqual(run({
+    testDir: 'test', readdir: () => ['a.test.cjs'], spawn: open.spawn, log: () => {},
+    processEnv: {}, cores: 32, jobRate: () => 0,
+    startGate: ({ slots }) => { openGates.push(slots); return null; },
+  }), 0);
+  assert.deepStrictEqual(openGates, [8], 'cap-off preserves the 32-core startup gate');
+  assert.ok(!open.calls[0].args.some((arg) => arg.startsWith('--test-concurrency=')), 'the uncapped 32-core default is not artificially restricted');
 });
 
 // ── TEST-RUNNER-FILE-TIMEOUT (1.1.76): a file that never finishes is a NAMED failure ──────────
@@ -410,7 +464,8 @@ test('PIN: against the REAL test directory discovery is root tests plus only fol
   // MAIN-SYNC registry cache: + 1 (registry-read-cache).
   // MAIN-SYNC tasks cache: + 1 (tasks-read-cache).
   // MAIN-SYNC voice task writes by id: + 1 (voice-task-cache).
-  assert.equal(files.length, 525, `the focused suite must retain its pre-fold file count, got ${files.length}`);
+  // INT 1.1.102: HALFCORES-OVERSUBSCRIBE: + 1 (harness-progress-199).
+  assert.equal(files.length, 526, `the focused suite must retain its pre-fold file count, got ${files.length}`);
   assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
   assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');
   assert.ok(files.includes(path.join('start-fixes-163', 'start-fixes-163-boot-submit.test.cjs')), 'the start-fixes feature folder is included');

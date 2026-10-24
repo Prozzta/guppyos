@@ -18,6 +18,7 @@ const loadTs = require('./load-ts.cjs');
 const T = loadTs('src/main/startupTiming.ts');
 const { StartupTiming, STARTUP_TIMING_WINDOW_MS, STARTUP_LOOP_ROW_SAMPLES, STARTUP_MAX_RENDERER_ROWS } = T;
 const { NativeMemoryWiring } = loadTs('src/main/nativeMemory/mainWiring.ts');
+const { selfJobRate } = require('./tools/run-tests.cjs');
 
 const ROOT = path.join(__dirname, '..');
 const src = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
@@ -217,7 +218,13 @@ test('(1) REAL loop delay: Node\'s histogram sees a blocked main thread in the r
   assert.ok(loop.length >= 2, `samples: ${loop}`);
   assert.ok(Math.max(...loop) >= 300, `the 400 ms block shows (max ${Math.max(...loop)} ms)`);
   const end = rows.find((x) => x.ev === 'end');
-  assert.ok(end.loopWorstMs >= 300 && end.loopWorstT >= 1_100 && end.loopWorstT <= 2_700, JSON.stringify(end));
+  // A Job Object hard cap limits CPU time, not wall time.  The assertion's scheduling allowance
+  // must therefore scale with the actual Job Object share: it still requires the same real 400 ms
+  // block, while a 50% capped process may be scheduled after the 2.6 s recorder deadline.
+  const rate = selfJobRate();
+  const scheduleScale = rate > 0 ? 10_000 / rate : 1;
+  const latestExpected = Math.ceil(2_700 * scheduleScale);
+  assert.ok(end.loopWorstMs >= 300 && end.loopWorstT >= 1_100 && end.loopWorstT <= latestExpected, `${JSON.stringify(end)} (rate ${rate || 'open'}, latest ${latestExpected})`);
 });
 
 // ── the renderer half ───────────────────────────────────────────────────────

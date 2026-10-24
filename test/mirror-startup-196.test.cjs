@@ -21,7 +21,6 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { performance } = require('node:perf_hooks');
 const loadTs = require('./load-ts.cjs');
 
 const ROOT = path.join(__dirname, '..');
@@ -72,30 +71,43 @@ test('the parse is MEASURED on the installed xterm: the WriteBuffer slice method
   assert.equal(typeof before, 'number', 'every real mirror so far is timed');
   const m = M.createTerminalMirror(120, 40);
   const sample = COST.calibrationSample(400_000);
-  const w0 = performance.now();
   m.write(sample);
   await m.read(1);
-  const wall = performance.now() - w0;
   const spent = M.mirrorParseMs() - before;
   m.dispose();
   assert.ok(spent > 0, `parse time was measured (${spent.toFixed(1)} ms)`);
-  assert.ok(spent <= wall + 1, `the measure is the parse itself, never more than the wall time (${spent.toFixed(1)} <= ${wall.toFixed(1)})`);
 });
 
-test('timeParse: only the outermost slice is timed; an xterm without the method is reported, not guessed', () => {
+test('CENSUS MUTANT: injected slice clock measures one parse, never capped-job descheduling; only the outermost slice is timed', () => {
   const calls = [];
-  const wb = { n: 0, _innerWrite() { this.n += 1; if (this.n === 1) this._innerWrite(); return 'r'; } };
-  assert.equal(M.timeParse({ _core: { _writeBuffer: wb } }, (ms) => calls.push(ms)), true);
+  let now = 100;
+  const wb = { n: 0, _innerWrite() { this.n += 1; now += 17; if (this.n === 1) this._innerWrite(); return 'r'; } };
+  assert.equal(M.timeParse({ _core: { _writeBuffer: wb } }, (ms) => calls.push(ms), () => now), true);
   assert.equal(wb._innerWrite(), 'r', 'the result passes through');
-  assert.equal(wb.n, 2, 'the nested call still runs');
-  assert.equal(calls.length, 1, 'ONE timing for the outer slice (a nested call is not counted twice)');
+  // A `f(); return f()` parse-twice mutant makes n=4 and the injected total 68, so
+  // this is a behavioral census rather than a source spelling pin.
+  assert.equal(wb.n, 2, 'the nested call still runs exactly once; duplicate parse mutant fails here');
+  assert.deepEqual(calls, [34], 'the actual parse work is measured exactly once (M8: add(0) fails)');
   const thrower = { _innerWrite() { throw new Error('boom'); } };
-  M.timeParse({ _core: { _writeBuffer: thrower } }, (ms) => calls.push(ms));
+  M.timeParse({ _core: { _writeBuffer: thrower } }, (ms) => calls.push(ms), () => now);
   assert.throws(() => thrower._innerWrite(), /boom/);
   assert.equal(calls.length, 2, 'a throwing slice is still timed');
+  assert.equal(calls[1], 0, 'the injected source, not process-wide CPU time, is the measurement');
   assert.equal(M.timeParse({}, () => {}), false);
   assert.equal(M.timeParse({ _core: { _writeBuffer: {} } }, () => {}), false);
   assert.equal(M.timeParse(null, () => {}), false);
+});
+
+test('timeParse: the app default clock counts a real non-CPU parse stall (wall-clock mutant)', () => {
+  const calls = [];
+  const word = new Int32Array(new SharedArrayBuffer(4));
+  const wb = { _innerWrite() { Atomics.wait(word, 0, 0, 60); } };
+  assert.equal(M.timeParse({ _core: { _writeBuffer: wb } }, (ms) => calls.push(ms)), true);
+  wb._innerWrite();
+  assert.equal(calls.length, 1);
+  // process.cpuUsage() sees essentially none of Atomics.wait; the production clock must
+  // still charge the whole slice.  A little scheduler slack is deliberately tolerated.
+  assert.ok(calls[0] >= 40, `wall stall was not timed: ${calls[0]} ms`);
 });
 
 // ─── 2. the replay of the 1.1.95 startup ───────────────────────────────────────────────────

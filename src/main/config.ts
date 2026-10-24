@@ -243,9 +243,9 @@ export interface HarnessConfig {
    *  run every heavy job at background CPU priority (BELOW_NORMAL), every process of it. Independent
    *  of the limit above (Off included). Default off. Applied live, to running jobs too. */
   heavyJobsBackgroundPriority?: boolean;
-  /** HEAVY-CPU-OPTIONS-191, Windows: limit every heavy job to half the logical processors
-   *  (floor(n/2), at least 1). Independent of the other two. Default off. Applied live. */
-  heavyJobsHalfCores?: boolean;
+  /** HALFCORES-OVERSUBSCRIBE, Windows: hard-cap every heavy job at 50% of the whole
+   *  machine's CPU rate (all processors remain visible). Default on. Applied live. */
+  heavyJobsCpuCap?: boolean;
   /** CODEX-BLOAT-165 fix 2 (Settings → Agents & Models, "Codex tool output cap"): the
    *  `tool_output_token_limit` written into each hive Codex agent's OWN config.toml, in Codex's
    *  estimated tokens (1000-10000), or 'off' (no key written). Default 4000. Never written to the
@@ -566,7 +566,7 @@ const DEFAULTS: HarnessConfig = {
   orchestratorMaySpawn: false,
   heavyJobsAtOnce: 1,
   heavyJobsBackgroundPriority: false,
-  heavyJobsHalfCores: false,
+  heavyJobsCpuCap: true,
   codexToolOutputTokenLimit: CODEX_TOOL_OUTPUT_LIMIT_DEFAULT,
   codexInheritPlugins: false,
   defaultCommand: 'claude',
@@ -980,7 +980,7 @@ function readConfigCached(fresh: boolean): HarnessConfig {
   let built: HarnessConfig;
   try {
     raw = readFileSync(p, 'utf8');
-    const parsed = JSON.parse(raw);
+    const parsed = migrateHeavyJobsCpuCap(JSON.parse(raw));
     for (const k of RETIRED_CONFIG_KEYS) delete parsed[k];
     configIntegrity = null;
     configCorruptFingerprint = null;
@@ -1001,6 +1001,18 @@ function readConfigCached(fresh: boolean): HarnessConfig {
   if (gen === configWriteGen) configCache = { path: p, key: provenStatKey(st, configWall()), value, checkedAt: now };
   watchConfig(p);
   return value;
+}
+
+/** 1.1.98: processor affinity under-sized neither Node nor other tool runtimes on Windows.
+ * Only an old ON is meaningful: the former default was false and writeConfig persisted defaults,
+ * so false cannot distinguish an explicit choice from every upgraded install. Retire the old key;
+ * missing or false therefore gets the Human's new default-on 50% cap. */
+function migrateHeavyJobsCpuCap(parsed: unknown): Record<string, unknown> {
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return parsed as Record<string, unknown>;
+  const next = { ...(parsed as Record<string, unknown>) };
+  if (!('heavyJobsCpuCap' in next) && next.heavyJobsHalfCores === true) next.heavyJobsCpuCap = true;
+  delete next.heavyJobsHalfCores;
+  return next;
 }
 
 /** (#140, the upgrade path) A config.json persisted BEFORE `writeConfig`

@@ -1,11 +1,11 @@
 /**
  * HEAVY-CPU-OPTIONS-191: Settings, beside "Heavy jobs at once", two independent options for heavy
  * jobs (an install, build, full suite or bench an agent runs): run them at background CPU priority
- * (BELOW_NORMAL), and limit them to half the logical processors (floor(n/2), at least 1). Either,
+ * (BELOW_NORMAL), and hard-cap them at 50% of the whole machine. Either,
  * neither or both, each independent of the heavy lock (Off or N).
  *
  * How (Windows): every heavy call the PreToolUse hook classifies is rewritten to
- * `guppy-heavyjob join <job> <b> <h>; <the command, verbatim>`. Guppy first creates the named Job
+ * `guppy-heavyjob join <job> <b> <c>; <the command, verbatim>`. Guppy first creates the named Job
  * Object with the current limits (the helper's `serve` process holds its handle, so the job can be
  * found again); the join line puts the call's shell into it, so every process the command starts is
  * created inside the job and stays there (no breakaway). Every heavy call is wrapped, both options
@@ -18,19 +18,18 @@
  *
  * A courtesy limit, not a security boundary: any process of the user's session can open the named
  * job and change or lift its limits (`guppy-heavyjob set <job> 0 0`), so an agent can lift its own.
- * Lifting a limit resets the members (the helper's SetJob): priority NORMAL and affinity the whole
- * machine, even for a process that had narrowed its own affinity before.
+ * Lifting a limit resets a background member to NORMAL; CPU-rate control never changes any
+ * process's affinity.
  *
- * Option 2 and Electron: under an affinity limit Electron 32's SwiftShader GPU process deadlocks
- * (heavycpu/ROOTCAUSE.md), so on Windows a test always starts Electron from a view of its folder
- * whose SwiftShader.ini keeps those workers on option 2's processors, limit or not, since the limit
- * can be turned on while a suite runs (test/electron-harness/electron-bin.cjs). The app itself never runs in a heavy job.
+ * The cap is a JobObjectCpuRateControlInformation hard cap (5000 = 50.00% of the whole machine),
+ * not an affinity mask: every logical processor remains available and Electron's GPU workers retain
+ * their normal affinity. The app itself never runs in a heavy job.
  */
 import { spawn } from 'node:child_process';
 import { autoModeFlagForProvider, type AgentProvider } from '../shared/agentProvider';
 
-/** Option 2's switch (god 123473: held off until the harness SwiftShader stall was fixed; 7ef310: on). */
-export const HEAVY_HALF_CORES_AVAILABLE = true;
+/** JobObjectCpuRateControlInformation uses one-hundredths of one percent. */
+export const HEAVY_CPU_CAP_RATE = 5000;
 /** The helper's name on the agent PATH (the dir is on every hive agent's pathPrepend). */
 export const HEAVY_JOB_COMMAND = 'guppy-heavyjob';
 /** A process created up to this long before the call started still counts as the call's own. */
@@ -47,18 +46,13 @@ export const HEAVY_JOB_REQUEST_MS = 3_000;
  *  right after the join line exits; a new process inside this window keeps the job running). */
 export const HEAVY_JOB_EXIT_CONFIRM_MS = 400;
 
-export interface HeavyCpuOptions { background: boolean; half: boolean }
+export interface HeavyCpuOptions { background: boolean; cap: boolean }
 
-export interface HeavyCpuConfig { heavyJobsBackgroundPriority?: boolean; heavyJobsHalfCores?: boolean }
+export interface HeavyCpuConfig { heavyJobsBackgroundPriority?: boolean; heavyJobsCpuCap?: boolean }
 
-/** The options in force. Option 2 counts only when it is available. */
-export function heavyCpuOptions(cfg: HeavyCpuConfig, halfAvailable: boolean = HEAVY_HALF_CORES_AVAILABLE): HeavyCpuOptions {
-  return { background: cfg.heavyJobsBackgroundPriority === true, half: halfAvailable && cfg.heavyJobsHalfCores === true };
-}
-
-/** Option 2's processor count: floor(n/2), at least 1 (32 -> 16). */
-export function halfCoreCount(logical: number): number {
-  return Math.max(1, Math.floor(logical / 2));
+/** The hard cap is on by default; an explicit settings change reaches existing jobs. */
+export function heavyCpuOptions(cfg: HeavyCpuConfig): HeavyCpuOptions {
+  return { background: cfg.heavyJobsBackgroundPriority === true, cap: cfg.heavyJobsCpuCap !== false };
 }
 
 /** A job id the helper accepts ([A-Za-z0-9_-]), unique per call. */
@@ -72,7 +66,7 @@ export function heavyJobId(agentId: string, seq: number, now: number): string {
  *  have, and runs the command itself inside the job. Elsewhere cmd passes the rest of the line to
  *  the helper, which runs it under a second cmd. */
 export function joinLine(id: string, o: HeavyCpuOptions, cmd = false): string {
-  return `${HEAVY_JOB_COMMAND} join ${id} ${o.background ? 1 : 0} ${o.half ? 1 : 0}${cmd ? ' & ' : '; '}`;
+  return `${HEAVY_JOB_COMMAND} join ${id} ${o.background ? 1 : 0} ${o.cap ? 1 : 0}${cmd ? ' & ' : '; '}`;
 }
 
 /** Whether an agent started with this command line runs commands without asking its user: its
@@ -234,7 +228,10 @@ export class HeavyJobs {
     const id = heavyJobId(agentId, ++this.seq, start);
     const wrapped = wrapToolInput(toolInput, id, o, cmd);
     if (!wrapped) return null;
-    const r = await this.req(`create ${id} ${o.background ? 1 : 0} ${o.half ? 1 : 0}`);
+    // 5000 means 50% of all logical processors. Under the legacy heavyJobsHalfCores affinity job
+    // that equals the affinity ceiling, so the rate cap adds nothing there; with half-cores off it
+    // bites against the full set. Keep the shipped half-machine rate unchanged.
+    const r = await this.req(`create ${id} ${o.background ? 1 : 0} ${o.cap ? 1 : 0}`);
     // Not created: the join line still makes the job with these limits itself (the options hold);
     // only a later live change cannot reach it.
     if (r?.ok === true) {
@@ -242,7 +239,7 @@ export class HeavyJobs {
       this.arm();
       if (callId) this.tell(agentId, callId, id, 'held');
     }
-    this.log({ action: 'wrap', agentId, job: id, background: o.background, half: o.half, held: r?.ok === true });
+    this.log({ action: 'wrap', agentId, job: id, background: o.background, cap: o.cap, rate: o.cap ? HEAVY_CPU_CAP_RATE : 0, held: r?.ok === true });
     return wrapped;
   }
 
@@ -250,8 +247,8 @@ export class HeavyJobs {
   async applyLive(): Promise<void> {
     const o = this.d.options();
     for (const j of [...this.jobs.values()]) {
-      const r = await this.req(`set ${j.id} ${o.background ? 1 : 0} ${o.half ? 1 : 0}`);
-      this.log({ action: 'apply-live', job: j.id, background: o.background, half: o.half, ok: r?.ok === true });
+      const r = await this.req(`set ${j.id} ${o.background ? 1 : 0} ${o.cap ? 1 : 0}`);
+      this.log({ action: 'apply-live', job: j.id, background: o.background, cap: o.cap, rate: o.cap ? HEAVY_CPU_CAP_RATE : 0, ok: r?.ok === true });
     }
   }
 

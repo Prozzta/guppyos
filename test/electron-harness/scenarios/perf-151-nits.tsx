@@ -66,7 +66,9 @@ async function tick(id: string): Promise<void> {
       useStore.getState().updateAgent(id, { status: i % 2 ? 'working' : 'idle', action: `tick ${i}`, progress: i, contextTokens: 1000 + i });
     });
   }
-  await settle(150);
+  // A post-render echo is still a tick cost even when it is deferred past the normal settle.
+  // Keep this beyond the mutation's 400 ms delay.
+  await settle(650);
 }
 /** esbuild renames a `memo(function X` inner function to `X2` when the export is also `X`. */
 const of = (c: Record<string, number>, name: string) =>
@@ -76,6 +78,18 @@ const pick = (c: Record<string, number>) => ({
   ...Object.fromEntries(NAMES.map((n) => [n, of(c, n)])),
   total: Object.values(c).reduce((a, b) => a + b, 0)
 });
+
+/** The harness starts App and its bridge asynchronously. Wait for that work to quiesce before
+ * starting a render census: under a Job Object hard cap, a render scheduled before the census can
+ * otherwise land after resetRenderCounts() and be falsely charged to the first tick. */
+async function settleRenderCensus(): Promise<void> {
+  for (let i = 0; i < 20; i += 1) {
+    resetRenderCounts();
+    await settle(50);
+    if (Object.keys(renderCounts()).length === 0) return;
+  }
+  throw new Error(`render census never settled: ${JSON.stringify(renderCounts())}`);
+}
 
 function selectorPins() {
   const s = (agents: Agent[]) => ({ ...useStore.getState(), agents });
@@ -114,6 +128,7 @@ window.__harnessRun = async () => {
     const floorMounted = !!host.querySelector('canvas');
 
     // A. ticks on a non-selected agent.
+    await settleRenderCensus();
     resetRenderCounts();
     await tick('a2');
     const a = renderCounts();
@@ -127,7 +142,7 @@ window.__harnessRun = async () => {
     const tOpenTicks = pick(renderCounts());
     resetRenderCounts();
     await act(async () => { useStore.getState().updateAgent('a2', { name: 'ZED' }); });
-    await settle(150);
+    await settle(650);
     const tRename = pick(renderCounts());
     await act(async () => { useStore.getState().closeTaskDetail(); });
     await settle(100);

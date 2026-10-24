@@ -66,10 +66,27 @@ if (Number.isFinite(forcedDpr) && forcedDpr > 0) app.commandLine.appendSwitch('f
 isolateAppPaths(app, sandboxRoot);
 
 let finished = false;
+// The scenario may stall in the renderer without ever returning a result. Keep its
+// last checkpoint in main so the timeout names the frame and operation that stopped.
+let latestProgress = { frames: 0, renders: 0, phase: 'setup', step: 'bundle', at: new Date().toISOString() };
+let progressTimer = null;
+function noteProgress(payload) {
+  if (!payload || typeof payload !== 'object') return;
+  const { frames, renders, phase, step } = payload;
+  if (Number.isFinite(frames) && frames >= 0) latestProgress.frames = Math.floor(frames);
+  if (Number.isFinite(renders) && renders >= 0) latestProgress.renders = Math.floor(renders);
+  if (typeof phase === 'string' && phase) latestProgress.phase = phase;
+  if (typeof step === 'string' && step) latestProgress.step = step;
+  latestProgress.at = new Date().toISOString();
+}
+function logProgress() {
+  process.stderr.write(`[harness] progress ${JSON.stringify(latestProgress)}\n`);
+}
 /** One exit path, so a result and a failure cannot both be printed. */
 function finish(payload) {
   if (finished) return;
   finished = true;
+  if (progressTimer) clearInterval(progressTimer);
   process.stdout.write(`\n__HARNESS_RESULT__${JSON.stringify(payload)}\n`);
   app.exit(0);
 }
@@ -231,6 +248,7 @@ app.whenReady().then(async () => {
     if (timer) clearTimeout(timer);
     finish(payload);
   });
+  ipcMain.on('harness:progress', (_e, payload) => noteProgress(payload));
 
   try {
     const code = await bundleScenario(scenario);
@@ -342,8 +360,15 @@ app.whenReady().then(async () => {
     clearTimeout(setupTimer);
     const setupMs = Date.now() - setupStart;
     process.stderr.write(`[harness] setup ${setupMs} ms (bundle ${code.length} bytes)\n`);
+    noteProgress({ phase: 'scenario', step: 'awaiting scenario start', frames: 0, renders: 0 });
+    logProgress();
+    progressTimer = setInterval(logProgress, 10_000);
+    progressTimer.unref?.();
     timer = setTimeout(
-      () => finish({ ok: false, error: `harness timed out after ${timeoutMs}ms (scenario; setup took ${setupMs} ms before it)` }),
+      () => {
+        logProgress();
+        finish({ ok: false, error: `harness timed out after ${timeoutMs}ms (scenario; setup took ${setupMs} ms before it); progress ${JSON.stringify(latestProgress)}` });
+      },
       timeoutMs
     );
     timer.unref?.();

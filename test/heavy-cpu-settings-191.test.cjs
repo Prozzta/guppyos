@@ -1,6 +1,6 @@
 'use strict';
 /**
- * HEAVY-CPU-OPTIONS-191: the two options persist. Each of the four combinations is written through
+ * HALFCORES-OVERSUBSCRIBE: the two options persist. Each of the four combinations is written through
  * the real config module, lands in config.json, and is what the heavy jobs read back (heavyCpuOptions).
  */
 const test = require('node:test');
@@ -20,21 +20,34 @@ const { heavyCpuOptions } = loadTs('src/main/heavyCpu.ts');
 
 test.after(() => fs.rmSync(userData, { recursive: true, force: true }));
 
-test('both options default off', () => {
-  assert.deepEqual(heavyCpuOptions(readConfig()), { background: false, half: false });
+test('background defaults off and the 50% CPU-rate cap defaults on', () => {
+  assert.deepEqual(heavyCpuOptions(readConfig()), { background: false, cap: true });
 });
 
 test('each of the four combinations persists to config.json and is read back; one option never moves the other', () => {
-  for (const [b, h] of [[true, false], [false, true], [true, true], [false, false]]) {
-    writeConfig({ heavyJobsBackgroundPriority: b, heavyJobsHalfCores: h });
+  for (const [b, c] of [[true, false], [false, true], [true, true], [false, false]]) {
+    writeConfig({ heavyJobsBackgroundPriority: b, heavyJobsCpuCap: c });
     const disk = JSON.parse(fs.readFileSync(path.join(userData, 'config.json'), 'utf8'));
     assert.equal(disk.heavyJobsBackgroundPriority, b);
-    assert.equal(disk.heavyJobsHalfCores, h);
-    assert.deepEqual(heavyCpuOptions(readConfig()), { background: b, half: h });
+    assert.equal(disk.heavyJobsCpuCap, c);
+    assert.deepEqual(heavyCpuOptions(readConfig()), { background: b, cap: c });
   }
-  writeConfig({ heavyJobsHalfCores: true });
+  writeConfig({ heavyJobsCpuCap: true });
   writeConfig({ heavyJobsBackgroundPriority: true });
-  assert.deepEqual(heavyCpuOptions(readConfig()), { background: true, half: true }, 'a patch of one keeps the other');
+  assert.deepEqual(heavyCpuOptions(readConfig()), { background: true, cap: true }, 'a patch of one keeps the other');
   writeConfig({ heavyJobsAtOnce: 'off' });
-  assert.deepEqual(heavyCpuOptions(readConfig()), { background: true, half: true }, 'independent of the heavy lock');
+  assert.deepEqual(heavyCpuOptions(readConfig()), { background: true, cap: true }, 'independent of the heavy lock');
+});
+
+test('the retired half-core ON preference migrates, while its persisted old false default is dropped (M7)', () => {
+  fs.writeFileSync(path.join(userData, 'config.json'), JSON.stringify({ heavyJobsHalfCores: true }));
+  assert.deepEqual(heavyCpuOptions(readConfig()), { background: false, cap: true });
+  writeConfig({ heavyJobsBackgroundPriority: true });
+  const disk = JSON.parse(fs.readFileSync(path.join(userData, 'config.json'), 'utf8'));
+  assert.equal(disk.heavyJobsCpuCap, true);
+  assert.equal('heavyJobsHalfCores' in disk, false);
+  fs.writeFileSync(path.join(userData, 'config.json'), JSON.stringify({ heavyJobsHalfCores: false }));
+  assert.deepEqual(heavyCpuOptions(readConfig()), { background: false, cap: true }, 'old persisted false was the old default, never an opt-out of the new default-on cap');
+  writeConfig({ heavyJobsAtOnce: 'off' });
+  assert.equal('heavyJobsHalfCores' in JSON.parse(fs.readFileSync(path.join(userData, 'config.json'), 'utf8')), false);
 });

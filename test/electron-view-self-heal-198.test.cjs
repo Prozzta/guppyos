@@ -11,7 +11,31 @@ const assert = require('node:assert/strict');
 const { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
-const { swiftShaderView } = require('./electron-harness/electron-bin.cjs');
+const { cappedHeavyJob, halfCpuMask, swiftShaderMaskForHeavyJob, swiftShaderView } = require('./electron-harness/electron-bin.cjs');
+
+function withElectronBinStubs(stubs, fn) {
+  const Module = require('node:module');
+  const target = require.resolve('./electron-harness/electron-bin.cjs');
+  const originalLoad = Module._load;
+  const prior = require.cache[target];
+  delete require.cache[target];
+  Module._load = function (request, parent, isMain) {
+    if (request === 'node:child_process') return { execFileSync: stubs.execFileSync };
+    if (request === 'node:os' && stubs.os) return stubs.os;
+    if (request === 'electron') return stubs.electron;
+    if (request.endsWith('/tools/shared-temp.cjs')) return { sharedTemp: () => stubs.tmp };
+    return originalLoad.call(this, request, parent, isMain);
+  };
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  Object.defineProperty(process, 'platform', { value: 'win32' });
+  try { return fn(require('./electron-harness/electron-bin.cjs')); }
+  finally {
+    Object.defineProperty(process, 'platform', platform);
+    Module._load = originalLoad;
+    delete require.cache[target];
+    if (prior) require.cache[target] = prior;
+  }
+}
 
 function fakeDist(dir) {
   const dist = join(dir, 'dist');
@@ -38,9 +62,25 @@ test('a view that lost its executable but kept .complete is rebuilt, at the same
     assert.equal(swiftShaderView(src, 0xffffn, tmp), exe, 'the same view path');
     assert.equal(readFileSync(exe, 'utf8'), 'exe', 'the executable is back');
     if (process.platform === 'win32') assert.equal(statSync(exe).nlink, 2, 'a hard link to the dist, not a copy');
-    assert.equal(readFileSync(join(view, 'SwiftShader.ini'), 'utf8'), '[Processor]\nAffinityMask=65535\n');
+    assert.equal(existsSync(join(view, 'SwiftShader.ini')), true, 'the supplied capped mask writes an affinity view');
     assert.equal(readFileSync(join(view, 'locales', 'en-US.pak'), 'utf8'), 'pak');
     assert.deepEqual(readdirSync(join(tmp, 'guppy-electron-view')), [view.split(/[\\/]/).pop()], 'no part or stale folder left');
+  });
+});
+
+test('every job uses a bounded SwiftShader view, intersected with a non-contiguous outer affinity', () => {
+  withTemp((dir) => {
+    const src = fakeDist(dir);
+    const tmp = join(dir, 'tmp');
+    assert.equal(cappedHeavyJob({ GUPPY_HEAVY_CPU_CAP: '1' }), true);
+    assert.equal(cappedHeavyJob({ GUPPY_HEAVY_CPU_CAP: '0' }), false);
+    const mask = swiftShaderMaskForHeavyJob({ GUPPY_HEAVY_CPU_CAP: '1' }, 8);
+    assert.equal(mask, 15n, 'four processors in the capped view');
+    assert.equal(swiftShaderMaskForHeavyJob({ GUPPY_HEAVY_CPU_CAP: '0' }, 8), 15n, 'cap-off remains bounded: a plain view can stall');
+    assert.equal(swiftShaderMaskForHeavyJob({ HARNESS_CPU_MASK: '170' }, 8), 10n, 'the half view intersects a non-contiguous outer affinity');
+    assert.equal(swiftShaderMaskForHeavyJob({ HARNESS_CPU_MASK: '160' }, 8), 160n, 'when the intersection is empty, retain the outer affinity');
+    const capped = swiftShaderView(src, mask, tmp);
+    assert.match(readFileSync(join(capped, '..', 'SwiftShader.ini'), 'utf8'), /AffinityMask=15/);
   });
 });
 
@@ -80,5 +120,62 @@ test('a ready view (marker and executable) is used as it is, not rebuilt', () =>
     writeFileSync(join(view, 'sentinel'), '');
     assert.equal(swiftShaderView(src, 0xffffn, tmp), exe);
     assert.ok(existsSync(join(view, 'sentinel')), 'the view was kept');
+  });
+});
+
+test('a complete view with the wrong capped affinity ini is rebuilt (M3)', () => {
+  withTemp((dir) => {
+    const src = fakeDist(dir); const tmp = join(dir, 'tmp');
+    const exe = swiftShaderView(src, 0xfn, tmp); const view = join(exe, '..');
+    writeFileSync(join(view, 'SwiftShader.ini'), '[Processor]\nAffinityMask=3\n');
+    swiftShaderView(src, 0xfn, tmp);
+    assert.equal(readFileSync(join(view, 'SwiftShader.ini'), 'utf8'), '[Processor]\nAffinityMask=15\n');
+  });
+});
+
+test('dead partial and stale plain views are cleaned, but a live partial is retained (Jim NIT)', () => {
+  withTemp((dir) => {
+    const src = fakeDist(dir); const tmp = join(dir, 'tmp');
+    const root = join(tmp, 'guppy-electron-view'); mkdirSync(root, { recursive: true });
+    const version = require('electron/package.json').version;
+    swiftShaderView(src, 0xffffn, tmp);
+    mkdirSync(join(root, `${version}-plain`));
+    mkdirSync(join(root, `${version}-ffff.broken-999999`));
+    mkdirSync(join(root, `${version}-ffff.part-999999`));
+    mkdirSync(join(root, `${version}-ffff.part-${process.pid}`));
+    swiftShaderView(src, 0xffffn, tmp);
+    assert.ok(!existsSync(join(root, `${version}-plain`)));
+    assert.ok(!existsSync(join(root, `${version}-ffff.broken-999999`)), 'a dead broken attempt is cleaned');
+    assert.ok(!existsSync(join(root, `${version}-ffff.part-999999`)));
+    assert.ok(existsSync(join(root, `${version}-ffff.part-${process.pid}`)));
+  });
+});
+
+test('a hanging helper is fail-open, and two unoverridden launches use their live affinity (M6/M7)', () => {
+  withTemp((dir) => {
+    const exe = fakeDist(dir); const tmp = join(dir, 'tmp'); let affinity = '3'; let logical = 8; const calls = [];
+    withElectronBinStubs({ electron: exe, tmp, os: { cpus: () => Array(logical) }, execFileSync(command, args, options) {
+      calls.push({ command, args, options });
+      if (args[0] === 'self-query') { const error = new Error('hung helper'); error.code = 'ETIMEDOUT'; throw error; }
+      return `${affinity} 8`;
+    } }, ({ cappedHeavyJob: capped, harnessElectron }) => {
+      assert.equal(capped({}), false, 'a helper that does not reply cannot cap an unrelated launch');
+      assert.equal(calls[0].options.timeout, 15_000, 'the hanging helper has a bounded wait');
+      const first = harnessElectron({});
+      affinity = '12';
+      const second = harnessElectron({});
+      assert.notEqual(first, second, 'a changed process affinity creates a new unoverridden view');
+      const affinityCalls = calls.filter((c) => c.command === 'powershell.exe');
+      assert.equal(affinityCalls.length, 2, 'each unoverridden launch probes affinity again');
+      assert.ok(affinityCalls.every((c) => c.options.timeout === 15_000), 'each hanging affinity probe has a bounded wait');
+      logical = 8;
+      const cachedFirst = harnessElectron({ HARNESS_CPU_MASK: '255' });
+      logical = 16;
+      const cachedSameOverride = harnessElectron({ HARNESS_CPU_MASK: '255' });
+      const cachedOtherOverride = harnessElectron({ HARNESS_CPU_MASK: '127' });
+      assert.equal(cachedSameOverride, cachedFirst, 'the same explicit override keeps its original bounded view');
+      assert.notEqual(cachedOtherOverride, cachedFirst, 'different explicit overrides do not share a cache entry');
+      assert.ok(existsSync(first) && existsSync(second), 'both live-affinity views are materialized');
+    });
   });
 });

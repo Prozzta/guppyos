@@ -1,157 +1,28 @@
-'use strict';
-// @heavy-lock live: it compiles and spawns real CPU-limit helpers (about 26 s in the 1.1.91 FULL). HEAVY-LOCK-LIVE-FILE-192: one run of this file takes the heavy slot.
-/**
- * HEAVY-CPU-OPTIONS-191, option 2 (half the logical processors) vs the Electron harness.
- *
- * With --disable-gpu a harness Electron runs WebGL on SwiftShader, whose worker threads ask for every
- * processor of the machine. Inside a heavy job limited to half of them those threads cannot start and
- * the GPU process waits for them forever, so every App scenario stalled (heavycpu/ROOTCAUSE.md). On
- * Windows a test now always starts Electron from a view of its dist folder with a SwiftShader.ini that
- * keeps the workers on the processors option 2 allows (electron-bin.cjs), limit or not, because the
- * limit can be turned on while a suite runs; flags and renderer are unchanged.
- *
- * The RENDERED test runs a real App scenario inside a real job built by the helper Guppy ships
- * (resources/heavyjob/guppy-heavyjob.cs, compiled here with the in-box csc) with the half-processor limit.
- */
+// @heavy-lock live: compiles and invokes the shipped Windows Job Object helper.
+/** HALFCORES-OVERSUBSCRIBE: live native proof of CPU-rate hard-cap mode and live application. */
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { spawn, spawnSync } = require('node:child_process');
-const { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } = require('node:fs');
-const { tmpdir } = require('node:os');
+const { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } = require('node:fs');
+const { availableParallelism, tmpdir } = require('node:os');
 const { join, relative } = require('node:path');
-const { harnessCpuMask, halfCpuMask, swiftShaderMask, swiftShaderView } = require('./electron-harness/electron-bin.cjs');
-const own = require('./tools/own-procs.cjs');
 
 const root = join(__dirname, '..');
 const CSC = join(process.env.WINDIR || 'C:\\Windows', 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe');
+const jailedEnv = (dir) => ({ ...process.env, LOCALAPPDATA: join(dir, 'localappdata') });
 
-test('the SwiftShader.ini mask: the job\'s processors below bit 31 (SwiftShader reads a 32-bit signed int)', () => {
-  assert.equal(swiftShaderMask(0xffffn), 65535, 'half of 32: processors 0-15');
-  assert.equal(swiftShaderMask(0xffffffffn), 0x7fffffff, 'half of 64: the 31 lowest, never a negative int');
-  assert.equal(swiftShaderMask(0x1n), 1);
-  assert.throws(() => swiftShaderMask(0xffff00000000n), /no processor below 31/);
-});
-
-test('option 2\'s processors: the lowest floor(n/2), at least 1, counting at most 64', () => {
-  assert.equal(halfCpuMask(32), 0xffffn);
-  assert.equal(halfCpuMask(3), 1n);
-  assert.equal(halfCpuMask(1), 1n);
-  assert.equal(halfCpuMask(128), 0xffffffffn, 'the helper counts at most 64');
-});
-
-test('HARNESS_CPU_MASK, when the runner set it, is the answer; nothing else is asked', () => {
-  assert.equal(harnessCpuMask({ HARNESS_CPU_MASK: '65535' }), 65535n);
-  assert.equal(harnessCpuMask({ HARNESS_CPU_MASK: '' }), null);
-});
-
-test('the view: every file of the dist folder (hard links where the volume allows) plus SwiftShader.ini; made once', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'hcpu-view-'));
+test('SAFE CLEANUP: a plain node --test run leaves a LocalAppData sentinel intact', () => {
+  const sandbox = mkdtempSync(join(tmpdir(), 'hcpu-sentinel-'));
+  const sentinel = join(sandbox, 'Munder Difflin', 'Guppy', 'keep-me.txt');
   try {
-    const dist = join(dir, 'dist');
-    mkdirSync(join(dist, 'locales'), { recursive: true });
-    writeFileSync(join(dist, 'electron.exe'), 'exe');
-    writeFileSync(join(dist, 'v8_context_snapshot.bin'), 'snap');
-    writeFileSync(join(dist, 'locales', 'en-US.pak'), 'pak');
-    const exe = swiftShaderView(join(dist, 'electron.exe'), 0xffffn, join(dir, 'tmp'));
-    const view = join(exe, '..');
-    assert.equal(readFileSync(join(view, 'SwiftShader.ini'), 'utf8'), '[Processor]\nAffinityMask=65535\n');
-    for (const f of ['electron.exe', 'v8_context_snapshot.bin', join('locales', 'en-US.pak')]) {
-      assert.equal(readFileSync(join(view, f), 'utf8'), readFileSync(join(dist, f), 'utf8'), f);
-    }
-    if (process.platform === 'win32') assert.equal(statSync(join(view, 'electron.exe')).nlink, 2, 'a hard link, not a copy');
-    assert.equal(swiftShaderView(join(dist, 'electron.exe'), 0xffffn, join(dir, 'tmp')), exe, 'the same view again');
-    assert.deepEqual(readdirSync(join(dir, 'tmp', 'guppy-electron-view')).length, 1, 'no part folder left');
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+    require('node:fs').mkdirSync(join(sandbox, 'Munder Difflin', 'Guppy'), { recursive: true });
+    writeFileSync(sentinel, 'keep');
+    const r = spawnSync(process.execPath, ['--test', '--test-name-pattern', '^never-match$', __filename], { encoding: 'utf8', windowsHide: true, env: { ...process.env, LOCALAPPDATA: sandbox } });
+    assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+    assert.equal(existsSync(sentinel), true, 'a direct test run must not sweep LocalAppData');
+  } finally { rmSync(sandbox, { recursive: true, force: true }); }
 });
 
-test('the test runner asks once and passes the answer to every test file', () => {
-  const { run } = require('./tools/run-tests.cjs');
-  const dir = mkdtempSync(join(tmpdir(), 'hcpu-runner-'));
-  try {
-    writeFileSync(join(dir, 'a.test.cjs'), '');
-    for (const [mask, want] of [[0xffffn, '65535'], [null, '']]) {
-      let seen = null;
-      let asked = 0;
-      const saved = process.env.HARNESS_CPU_MASK;
-      delete process.env.HARNESS_CPU_MASK;
-      try {
-        run({ testDir: dir, cwd: dir, spawn: (args, opts) => { seen = opts.env.HARNESS_CPU_MASK; return { status: 0 }; },
-          watchdog: () => ({ stop() {} }), log() {}, err() {}, cpuMask: () => { asked += 1; return mask; } });
-      } finally {
-        if (saved === undefined) delete process.env.HARNESS_CPU_MASK; else process.env.HARNESS_CPU_MASK = saved;
-      }
-      assert.equal(seen, want);
-      assert.equal(asked, 1);
-    }
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-// HALFCORES-SUITE-198: node's availableParallelism ignores affinity on Windows (32 inside a 16-CPU
-// job), so a FULL in the half job ran 31 files on 16 processors. The runner sizes from the mask.
-test('the test runner sizes its concurrency and start slots from the mask; no mask leaves both unchanged', () => {
-  const { run, maskCpus, startSlots } = require('./tools/run-tests.cjs');
-  assert.equal(maskCpus('65535'), 16);
-  assert.equal(maskCpus('1'), 1);
-  assert.equal(maskCpus(String(0xaaaan)), 8);
-  assert.equal(maskCpus(String((1n << 64n) - 1n)), 64);
-  for (const none of ['', undefined, '0', 'x', '-1', '0x10']) assert.equal(maskCpus(none), null, String(none));
-  const dir = mkdtempSync(join(tmpdir(), 'hcpu-size-'));
-  const saved = { mask: process.env.HARNESS_CPU_MASK, slots: process.env.GUPPY_START_SLOTS };
-  try {
-    writeFileSync(join(dir, 'a.test.cjs'), '');
-    delete process.env.GUPPY_START_SLOTS;
-    for (const [mask, conc, slots] of [[0xffffn, ['--test-concurrency=15'], 4], [1n, ['--test-concurrency=1'], 2], [null, [], startSlots({})]]) {
-      delete process.env.HARNESS_CPU_MASK;
-      let args = null;
-      let gateSlots = null;
-      run({ testDir: dir, cwd: dir, spawn: (a) => { args = a; return { status: 0 }; }, startGate: (o) => { gateSlots = o.slots; return null; },
-        watchdog: () => ({ stop() {} }), log() {}, err() {}, cpuMask: () => mask });
-      assert.deepEqual(args.filter((a) => a.startsWith('--test-concurrency')), conc, `mask ${mask}`);
-      assert.equal(gateSlots, slots, `mask ${mask}: start slots`);
-    }
-  } finally {
-    for (const [k, v] of [['HARNESS_CPU_MASK', saved.mask], ['GUPPY_START_SLOTS', saved.slots]]) {
-      if (v === undefined) delete process.env[k]; else process.env[k] = v;
-    }
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('CENSUS: every Electron a test starts comes from harnessElectron, never require(\'electron\') directly', () => {
-  const bad = [];
-  const walk = (d) => {
-    for (const e of readdirSync(d, { withFileTypes: true })) {
-      const p = join(d, e.name);
-      if (e.isDirectory()) { if (e.name !== 'node_modules') walk(p); continue; }
-      if (!/\.(c|m)?js$/.test(e.name) || p === join(__dirname, 'electron-harness', 'electron-bin.cjs')) continue;
-      const src = readFileSync(p, 'utf8');
-      // A path to the executable (an assignment or a spawn argument); a destructuring require is an Electron main's own API.
-      if (/(?:=|spawn\w*\(|execFile\w*\()\s*require\(\s*['"]electron['"]\s*\)(?!\s*\.)/.test(src.replace(/const\s*\{[^}]*\}\s*=\s*require\(\s*['"]electron['"]\s*\)/g, ''))) bad.push(relative(root, p));
-    }
-  };
-  walk(__dirname);
-  assert.deepEqual(bad, [], 'these start Electron without the CPU-limit view: use require(\'./electron-harness/electron-bin.cjs\').harnessElectron()');
-});
-
-const CHILD = `
-const { join } = require('node:path');
-const { runScenario } = require(${JSON.stringify(join(root, 'test', 'electron-harness', 'run.cjs'))});
-const { harnessCpuMask } = require(${JSON.stringify(join(root, 'test', 'electron-harness', 'electron-bin.cjs'))});
-(async () => {
-  const limited = harnessCpuMask() !== null;
-  const r = await runScenario(${JSON.stringify(join(root, 'test', 'electron-harness', 'scenarios', 'app-recovery.tsx'))}, { timeoutMs: 90_000 });
-  process.stdout.write('HCPU ' + JSON.stringify({ limited, ok: r.ok, error: r.error || null, picker: r.normal && r.normal.picker }) + '\\n');
-})().catch((e) => { process.stdout.write('HCPU ' + JSON.stringify({ ok: false, error: String(e && e.message || e).slice(0, 2000) }) + '\\n'); });
-`;
-
-/** The serve helper's reply channel, read as src/main/heavyCpu.ts reads it: stdout split into lines,
- *  an unsolicited {"event":...} line (a job exiting, written between replies) never taken as a reply,
- *  replies matched to requests in order. Taking the first stdout chunk read an exit event as the
- *  answer to `set` (1.1.99 FINAL, the flip test). */
 function serveChannel(stdout, write) {
   let buf = '';
   const queue = [];
@@ -177,9 +48,7 @@ test('the serve channel skips event lines and answers each request with its own 
   const out = new PassThrough();
   const sent = [];
   const replies = [
-    // An exit event alone in a chunk before the reply: the chunk the old helper took as the answer.
     ['{"event":"exit","job":"j","msg":7,"pid":1}\r\n{"event":"exit","job":"j","msg":7,"pid":2}\r\n', '{"ok":true}\r\n'],
-    // An event and the reply in one chunk, and a reply split across chunks.
     ['{"event":"exit","job":"j","msg":4,"pid":3}\r\n{"ok":true,"half":', 'true}\r\n'],
   ];
   const ask = serveChannel(out, (line) => {
@@ -192,127 +61,180 @@ test('the serve channel skips event lines and answers each request with its own 
   assert.deepEqual(sent, ['set j 0 1\n', 'query j\n']);
 });
 
-/** The helper Guppy ships, compiled here with the in-box csc. */
-function buildHelper(dir) {
-  const exe = join(dir, 'guppy-heavyjob.exe');
-  const c = spawnSync(CSC, ['-nologo', '-O', `-out:${exe}`, join(root, 'resources', 'heavyjob', 'guppy-heavyjob.cs')], { encoding: 'utf8', windowsHide: true });
-  assert.equal(c.status, 0, `csc: ${c.stdout}${c.stderr}`);
-  return exe;
-}
+test('CENSUS: Electron scenarios take the shared harness executable, never require Electron as a spawn target', () => {
+  const bad = [];
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const file = join(dir, entry.name);
+      if (entry.isDirectory()) { if (entry.name !== 'node_modules') walk(file); continue; }
+      if (!/\.(c|m)?js$/.test(entry.name) || file === join(__dirname, 'electron-harness', 'electron-bin.cjs')) continue;
+      const source = readFileSync(file, 'utf8').replace(/const\s*\{[^}]*\}\s*=\s*require\(\s*['\"]electron['\"]\s*\)/g, '');
+      if (/(?:=|spawn\w*\(|execFile\w*\()\s*require\(\s*['\"]electron['\"]\s*\)(?!\s*\.)/.test(source)) bad.push(relative(root, file));
+    }
+  };
+  walk(__dirname);
+  assert.deepEqual(bad, [], 'use electron-harness/electron-bin.cjs instead of spawning require(\'electron\') directly');
+});
 
-const FLIP_CHILD = `
-const fs = require('node:fs');
-const { runScenario } = require(${JSON.stringify(join(root, 'test', 'electron-harness', 'run.cjs'))});
-const { harnessCpuMask } = require(${JSON.stringify(join(root, 'test', 'electron-harness', 'electron-bin.cjs'))});
-(async () => {
-  // As the test runner does: the mask is asked once, at the start, before any limit.
-  process.env.HARNESS_CPU_MASK = String(harnessCpuMask() ?? '');
-  const atStart = process.env.HARNESS_CPU_MASK;
-  fs.writeFileSync(process.argv[2], 'ready');
-  while (!fs.existsSync(process.argv[3])) await new Promise((r) => setTimeout(r, 100));
-  const after = String(harnessCpuMask({}) ?? '');
-  const r = await runScenario(${JSON.stringify(join(root, 'test', 'electron-harness', 'scenarios', 'app-recovery.tsx'))}, { timeoutMs: 90_000 });
-  process.stdout.write('HCPU ' + JSON.stringify({ atStart, after, ok: r.ok, error: r.error || null, picker: r.normal && r.normal.picker }) + '\\n');
-})().catch((e) => { process.stdout.write('HCPU ' + JSON.stringify({ ok: false, error: String(e && e.message || e).slice(0, 2000) }) + '\\n'); });
-`;
+test('REGRESSIONS: cmd receives a child script path, and M10 normalises CPU cores by worker capacity', () => {
+  const source = readFileSync(__filename, 'utf8');
+  assert.match(source, /writeFileSync\(childPath, RECOVERY_CHILD\)/, 'the multi-line recovery program is materialised as a script');
+  assert.match(source, /process\.execPath, childPath\]/, 'cmd join receives the script path, not a multi-line -e argument');
+  assert.match(source, /const processors = availableParallelism\(\)/, 'M10 saturates the processors available to this process');
+      assert.match(source, /const capRate = Math\.max\(100, Math\.floor\(open\.cpu \/ open\.wall \/ processors \* 2500\)\)/, 'M10 caps near a quarter of the measured open ceiling');
+      assert.match(source, /Math\.round\(ceiling\.cpu \/ ceiling\.wall\)/, 'M10 sizes workers to the measured open ceiling');
+      assert.match(source, /cappedCpuRate <= openCpuRate \* 0\.6/, 'M10 proves the cap reduces CPU time per wall second');
+      assert.match(source, /cappedCpuRate <= targetCpuRate \* 1\.25/, 'M10 proves CPU time never exceeds the requested rate ceiling');
+});
 
-// HALFCORES-SUITE-198: the suite itself may run inside a heavy job (the shipped half-processors option
-// on a FULL), and Windows ANDs the affinity of every job a process is nested in. So the child starts
-// with this file's own mask (not necessarily none), the flip ends at that mask AND half, and the
-// flip of THIS job is proven on the job's own limits (the helper's query), which no outer job hides.
-test('RENDERED (real App), live flip: a suite started with its own job unlimited, half then turned on for that job, then a scenario starts: it does not stall (Jim MUST-1)',
-  { skip: process.platform !== 'win32' ? 'heavy jobs are Windows-only' : !existsSync(CSC) ? `no in-box csc at ${CSC}` : false, timeout: 600_000 },
+test('LIVE: a fresh cap-off job creates and joins, then cap on/off/on applies to the held job (M1/M8/M9)',
+  { skip: process.platform !== 'win32' ? 'heavy jobs are Windows-only' : !existsSync(CSC) ? `no in-box csc at ${CSC}` : false, timeout: 120_000 },
   async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'hcpu-flip-'));
-    let serve = null;
-    let child = null;
-    let bornMs = 0;
+    const dir = mkdtempSync(join(tmpdir(), 'hcpu-rate-'));
+    let serve;
     try {
-      const exe = buildHelper(dir);
-      const script = join(dir, 'child.cjs');
-      writeFileSync(script, FLIP_CHILD);
-      const ready = join(dir, 'ready');
-      const go = join(dir, 'go');
-      const env = { ...process.env };
-      delete env.HARNESS_CPU_MASK;
-      const id = `hcpu-flip-${process.pid}-${Date.now().toString(36)}`;
-      // Guppy's side: the job is made with no limit and held by serve, as begin() does.
-      serve = spawn(exe, ['serve'], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
-      const ask = serveChannel(serve.stdout, (s) => serve.stdin.write(s));
-      const json = async (line) => { const j = JSON.parse(await ask(line)); assert.equal(j.ok, true, `${line}: ${JSON.stringify(j)}`); return j; };
-      const { logical } = await json('cpus');
-      const ambient = harnessCpuMask({}); // this file's own processors, fresh (null = all of them)
-      const all = logical >= 64 ? (1n << 64n) - 1n : (1n << BigInt(logical)) - 1n;
-      assert.match(await ask(`create ${id} 0 0`), /"ok":true/);
-      assert.deepEqual(await json(`query ${id}`), { ok: true, background: false, half: false, mask: null }, 'the job starts with no limit of its own');
-      child = spawn(exe, ['join', id, '0', '0;', process.execPath, script, ready, go], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
-      bornMs = Date.now();
-      let out = '';
-      let err = '';
-      child.stdout.on('data', (d) => { out += d; });
-      child.stderr.on('data', (d) => { err += d; });
-      const closed = new Promise((r) => child.on('close', r));
-      const until = Date.now() + 60_000;
-      while (!existsSync(ready) && Date.now() < until) await new Promise((r) => setTimeout(r, 100));
-      assert.ok(existsSync(ready), `the child never got ready.\n${out}\n${err}`);
-      // Settings, option 2 turned on while the suite runs: the job the child is in gets the half limit.
-      assert.match(await ask(`set ${id} 0 1`), /"ok":true/);
-      assert.deepEqual(await json(`query ${id}`), { ok: true, background: false, half: true, mask: String(halfCpuMask(logical)) }, 'the flip set THIS job\'s half limit');
-      const started = Date.now();
-      writeFileSync(go, '');
-      const code = await closed;
-      const at = out.lastIndexOf('HCPU ');
-      assert.ok(at >= 0, `no result (exit ${code}).\n${out}\n${err}`);
-      const r = JSON.parse(out.slice(at + 5).split('\n')[0]);
-      assert.equal(r.atStart, String(ambient ?? ''), 'the child started with this file\'s own processors: its job added no limit');
-      assert.equal(r.after, String((ambient ?? all) & halfCpuMask(logical)), 'after the flip: this file\'s processors AND half');
-      assert.equal(r.ok, true, r.error);
-      assert.equal(r.picker, true, 'the App rendered its launch picker');
-      assert.ok(Date.now() - started < 90_000, `took ${Date.now() - started} ms`);
+      const exe = join(dir, 'guppy-heavyjob.exe');
+      const compiled = spawnSync(CSC, ['-nologo', '-O', `-out:${exe}`, join(root, 'resources', 'heavyjob', 'guppy-heavyjob.cs')], { encoding: 'utf8', windowsHide: true });
+      assert.equal(compiled.status, 0, `csc: ${compiled.stdout}${compiled.stderr}`);
+      serve = spawn(exe, ['serve'], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true, env: jailedEnv(dir) });
+      const ask = serveChannel(serve.stdout, (line) => serve.stdin.write(line));
+      const request = async (line) => JSON.parse(await ask(line));
+      const id = `rate-${process.pid}-${Date.now().toString(36)}`;
+      const offId = `${id}-off`;
+      assert.deepEqual(await request(`create ${offId} 0 0`), { ok: true }, 'fresh cap-off must not call class 15 with flags zero');
+      assert.deepEqual(await request(`query ${offId}`), { ok: true, background: false, cap: false, rate: 0, affinity: null });
+      const joinedOff = spawnSync(exe, ['join', offId, '0', '0'], { encoding: 'utf8', windowsHide: true, env: jailedEnv(dir) });
+      assert.equal(joinedOff.status, 0, `fresh cap-off join: ${joinedOff.stdout}${joinedOff.stderr}`);
+      assert.deepEqual(await request(`close ${offId}`), { ok: true });
+      assert.deepEqual(await request(`create ${id} 0 1`), { ok: true });
+      assert.deepEqual(await request(`query ${id}`), { ok: true, background: false, cap: true, rate: 5000, affinity: null });
+      assert.deepEqual(await request(`set ${id} 0 0`), { ok: true });
+      assert.deepEqual(await request(`query ${id}`), { ok: true, background: false, cap: false, rate: 0, affinity: null });
+      assert.deepEqual(await request(`set ${id} 1 1`), { ok: true });
+      assert.deepEqual(await request(`query ${id}`), { ok: true, background: true, cap: true, rate: 5000, affinity: null });
+      assert.deepEqual(await request(`close ${id}`), { ok: true });
     } finally {
-      // A failed step must not leave the child waiting for its go file.
-      // Only what this child started (pid + birth, own-procs), never a ParentProcessId walk.
-      if (child && child.exitCode === null) own.killOwnTree({ pid: child.pid, bornMs, name: 'guppy-heavyjob.exe' });
-      // The helper .exe in the folder stays locked until serve has exited: wait for it before removing.
-      if (serve && serve.exitCode === null && serve.signalCode === null) {
-        const gone = new Promise((r) => serve.once('exit', r));
-        serve.kill();
-        await gone;
-      }
+      try { serve?.stdin.end(); } catch { /* gone */ }
+      if (serve?.exitCode === null) await new Promise((resolve) => serve.once('exit', resolve));
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-test('RENDERED (real App) inside a heavy job limited to half the processors: the scenario runs, it does not stall',
-  { skip: process.platform !== 'win32' ? 'heavy jobs are Windows-only' : !existsSync(CSC) ? `no in-box csc at ${CSC}` : false, timeout: 600_000 },
+const RECOVERY_CHILD = `
+const { runScenario } = require(${JSON.stringify(join(root, 'test', 'electron-harness', 'run.cjs'))});
+const scenario = ${JSON.stringify(join(root, 'test', 'electron-harness', 'scenarios', 'app-recovery.tsx'))};
+process.stdout.write('HCPU-READY\\n');
+runScenario(scenario, { timeoutMs: 90_000 }).then((r) => {
+  process.stdout.write('HCPU ' + JSON.stringify({ ok: r.ok, error: r.error || null, picker: r.normal && r.normal.picker }) + '\\n');
+}).catch((e) => process.stdout.write('HCPU ' + JSON.stringify({ ok: false, error: String(e && e.message || e) }) + '\\n'));
+`;
+
+/** Runs the real hidden App through the shipped helper, inside its named Job Object. */
+async function renderedJob(exe, ask, dir, id, cap, { flip = false } = {}) {
+  assert.deepEqual(await ask(`create ${id} 0 ${cap}`), { ok: true });
+  const childPath = join(dir, 'child.cjs');
+  writeFileSync(childPath, RECOVERY_CHILD);
+  const child = spawn(exe, ['join', id, '0', `${cap};`, process.execPath, childPath], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: jailedEnv(dir) });
+  let out = ''; let err = '';
+  child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
+  child.stdout.on('data', (data) => { out += data; }); child.stderr.on('data', (data) => { err += data; });
+  if (flip) {
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`rendered child never became ready: ${out} ${err}`)), 15_000);
+      const ready = () => { if (out.includes('HCPU-READY')) { clearTimeout(timer); child.stdout.off('data', ready); resolve(); } };
+      child.stdout.on('data', ready); ready();
+    });
+    assert.deepEqual(await ask(`set ${id} 0 0`), { ok: true }, 'the active App job accepts cap off');
+    assert.deepEqual(await ask(`set ${id} 0 1`), { ok: true }, 'the active App job accepts cap on again');
+  }
+  await new Promise((resolve) => child.once('exit', resolve));
+  const hit = /HCPU (\{.*\})/.exec(out);
+  assert.ok(hit, `rendered child reply missing: ${out} ${err}`);
+  const result = JSON.parse(hit[1]);
+  assert.equal(result.ok, true, `real App recovery scenario in job: ${result.error}`);
+  assert.equal(result.picker, true, 'the normal real App view rendered inside the job');
+  assert.deepEqual(await ask(`close ${id}`), { ok: true });
+}
+
+test('RENDERED: a real App scenario starts inside an initially capped job (MUST-1)',
+  { skip: process.platform !== 'win32' ? 'heavy jobs are Windows-only' : !existsSync(CSC) ? `no in-box csc at ${CSC}` : false, timeout: 150_000 },
   async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'hcpu-harness-'));
+    const dir = mkdtempSync(join(tmpdir(), 'hcpu-rendered-')); let serve;
     try {
-      const exe = buildHelper(dir);
-      const script = join(dir, 'child.cjs');
-      writeFileSync(script, CHILD);
-      const env = { ...process.env };
-      delete env.HARNESS_CPU_MASK; // the child must find the limit itself, as a real heavy call does
-      const id = `hcpu-test-${process.pid}-${Date.now().toString(36)}`;
-      // The cmd form of the join line: the helper joins itself to the job and runs the rest inside it.
-      const child = spawn(exe, ['join', id, '0', '1;', process.execPath, script], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
-      let out = '';
-      let err = '';
-      child.stdout.on('data', (d) => { out += d; });
-      child.stderr.on('data', (d) => { err += d; });
-      const started = Date.now();
-      // Without the view the scenario's own 90 s guard fires (the GPU process never answers); a
-      // healthy run takes a few seconds.
-      const code = await new Promise((r) => child.on('close', r));
-      const at = out.lastIndexOf('HCPU ');
-      assert.ok(at >= 0, `no result (exit ${code}).\n${out}\n${err}`);
-      const r = JSON.parse(out.slice(at + 5).split('\n')[0]);
-      assert.doesNotMatch(err, /limits not applied/, err);
-      assert.equal(r.limited, true, 'the child is inside the half-processor limit');
-      assert.equal(r.ok, true, r.error);
-      assert.equal(r.picker, true, 'the App rendered its launch picker');
-      assert.ok(Date.now() - started < 90_000, `took ${Date.now() - started} ms`);
+      const exe = join(dir, 'guppy-heavyjob.exe');
+      const compiled = spawnSync(CSC, ['-nologo', '-O', `-out:${exe}`, join(root, 'resources', 'heavyjob', 'guppy-heavyjob.cs')], { encoding: 'utf8', windowsHide: true });
+      assert.equal(compiled.status, 0, `csc: ${compiled.stdout}${compiled.stderr}`);
+      serve = spawn(exe, ['serve'], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true, env: jailedEnv(dir) });
+      const askLine = serveChannel(serve.stdout, (line) => serve.stdin.write(line));
+      const ask = async (line) => JSON.parse(await askLine(line));
+      await renderedJob(exe, ask, dir, `rendered-${process.pid}-${Date.now().toString(36)}`, 1);
+    } finally { try { serve?.stdin.end(); } catch {} if (serve?.exitCode === null) await new Promise((resolve) => serve.once('exit', resolve)); rmSync(dir, { recursive: true, force: true }); }
+  });
+
+test('RENDERED: cap on/off/on flips while a real App job is alive (MUST-1)',
+  { skip: process.platform !== 'win32' ? 'heavy jobs are Windows-only' : !existsSync(CSC) ? `no in-box csc at ${CSC}` : false, timeout: 150_000 },
+  async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hcpu-flip-')); let serve;
+    try {
+      const exe = join(dir, 'guppy-heavyjob.exe');
+      const compiled = spawnSync(CSC, ['-nologo', '-O', `-out:${exe}`, join(root, 'resources', 'heavyjob', 'guppy-heavyjob.cs')], { encoding: 'utf8', windowsHide: true });
+      assert.equal(compiled.status, 0, `csc: ${compiled.stdout}${compiled.stderr}`);
+      serve = spawn(exe, ['serve'], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true, env: jailedEnv(dir) });
+      const askLine = serveChannel(serve.stdout, (line) => serve.stdin.write(line));
+      const ask = async (line) => JSON.parse(await askLine(line));
+      await renderedJob(exe, ask, dir, `flip-${process.pid}-${Date.now().toString(36)}`, 1, { flip: true });
+    } finally { try { serve?.stdin.end(); } catch {} if (serve?.exitCode === null) await new Promise((resolve) => serve.once('exit', resolve)); rmSync(dir, { recursive: true, force: true }); }
+  });
+
+test('LIVE: a measured sub-ceiling cap reduces available busy throughput, then the job recovers uncapped (M10)',
+  { skip: process.platform !== 'win32' ? 'heavy jobs are Windows-only' : !existsSync(CSC) ? `no in-box csc at ${CSC}` : false, timeout: 120_000 },
+  async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hcpu-throughput-'));
+    let serve;
+    try {
+      const exe = join(dir, 'guppy-heavyjob.exe');
+      const compiled = spawnSync(CSC, ['-nologo', '-O', `-out:${exe}`, join(root, 'resources', 'heavyjob', 'guppy-heavyjob.cs')], { encoding: 'utf8', windowsHide: true });
+      assert.equal(compiled.status, 0, `csc: ${compiled.stdout}${compiled.stderr}`);
+      serve = spawn(exe, ['serve'], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true, env: jailedEnv(dir) });
+      const askLine = serveChannel(serve.stdout, (line) => serve.stdin.write(line));
+      const ask = async (line) => JSON.parse(await askLine(line));
+      const worker = "const {parentPort,workerData}=require('node:worker_threads');const gate=new Int32Array(workerData.gate);parentPort.postMessage('ready');Atomics.wait(gate,0,0);const end=Date.now()+workerData.ms;let n=0;while(Date.now()<end){n++;}parentPort.postMessage(n)";
+      const processors = availableParallelism();
+      const busy = (workers) => `const {Worker}=require('node:worker_threads');const source=${JSON.stringify(worker)},gate=new SharedArrayBuffer(4),list=Array.from({length:${workers}},()=>new Worker(source,{eval:true,workerData:{gate,ms:4000}}));let ready=0,counts=[],w,c;for(const x of list)x.on('message',(m)=>{if(m==='ready'){if(++ready===list.length){w=Date.now();c=process.cpuUsage();Atomics.store(new Int32Array(gate),0,1);Atomics.notify(new Int32Array(gate),0)}}else if(counts.push(m)===list.length){const u=process.cpuUsage(c);console.log(JSON.stringify({wall:Date.now()-w,cpu:(u.user+u.system)/1000,work:counts.reduce((a,n)=>a+n,0)}))}})`;
+      const run = async (cap, rate = 5000, workers = processors) => {
+        const id = `rate-${process.pid}-${Date.now().toString(36)}-${cap}`;
+        assert.deepEqual(await ask(`create ${id} 0 ${cap}${cap ? ` ${rate}` : ''}`), { ok: true });
+        const child = spawn(exe, ['join', id, '0', `${cap};`, process.execPath, '-e', busy(workers)], { encoding: 'utf8', windowsHide: true, env: jailedEnv(dir) });
+        let out = ''; child.stdout.on('data', (d) => { out += d; });
+        await new Promise((resolve) => child.once('exit', resolve));
+        assert.deepEqual(await ask(`close ${id}`), { ok: true });
+        return JSON.parse(out.trim());
+      };
+      const quarterId = `query-rate-${process.pid}-${Date.now().toString(36)}`;
+      assert.deepEqual(await ask(`create ${quarterId} 0 1 2500`), { ok: true });
+      assert.deepEqual(await ask(`query ${quarterId}`), { ok: true, background: false, cap: true, rate: 2500, affinity: null });
+      assert.deepEqual(await ask(`close ${quarterId}`), { ok: true });
+      const badId = `${quarterId}-bad`;
+      assert.equal((await ask(`create ${badId} 0 1 nope`)).ok, false);
+      assert.equal((await ask(`query ${badId}`)).ok, false, 'a bad rate must not leave a held job');
+      await run(0); // warm the worker source before measuring either side of the comparison
+      const ceiling = await run(0);
+      // The runner's own heavy job (legacy half-cores affinity or priority) can already bound this
+      // control; size the control to the measured ceiling, then set a hard cap near a quarter of it.
+      // Turbo makes loop work nonlinear, so CPU time per wall second is the assertion.
+      const workerCount = Math.max(1, Math.round(ceiling.cpu / ceiling.wall));
+      const open = await run(0, 5000, workerCount);
+      const capRate = Math.max(100, Math.floor(open.cpu / open.wall / processors * 2500));
+      const capped = await run(1, capRate, workerCount);
+      const openCpuRate = open.cpu / open.wall;
+      const cappedCpuRate = capped.cpu / capped.wall;
+      const targetCpuRate = processors * capRate / 10000;
+      assert.ok(cappedCpuRate <= openCpuRate * 0.6, `cap did not reduce CPU rate: open=${JSON.stringify(open)} capped=${JSON.stringify(capped)} rate=${capRate}`);
+      assert.ok(cappedCpuRate <= targetCpuRate * 1.25, `cap exceeded requested CPU rate: target=${targetCpuRate} open=${JSON.stringify(open)} capped=${JSON.stringify(capped)} rate=${capRate}`);
+      console.log(`M10 ratios work=${(open.work / capped.work).toFixed(3)} cpu=${(cappedCpuRate / openCpuRate).toFixed(3)} target=${targetCpuRate.toFixed(3)} actual=${cappedCpuRate.toFixed(3)} rate=${capRate} workers=${workerCount}`);
     } finally {
+      try { serve?.stdin.end(); } catch { /* gone */ }
+      if (serve?.exitCode === null) await new Promise((resolve) => serve.once('exit', resolve));
       rmSync(dir, { recursive: true, force: true });
     }
   });

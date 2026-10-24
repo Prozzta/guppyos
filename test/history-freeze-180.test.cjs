@@ -118,8 +118,10 @@ test('MUTANT M3 (neither): plain scrolling loops, as 1.1.70 to 1.1.79 did', asyn
   assert.notEqual(both, src);
   const r = await run('M3', { [HISTORY_VIEW]: [src, both] });
   assert.equal(r.ok, true, r.error);
-  assert.match(String(r.short.loop), /Maximum update depth/);
-  assert.match(String(r.real.loop), /Maximum update depth/);
+  for (const [name, trial] of Object.entries({ short: r.short, real: r.real })) {
+    assert.match(String(trial.loop), /Maximum update depth/,
+      `${name}: the full causal defect must loop (${JSON.stringify(trial)})`);
+  }
 });
 
 test('MUTANT M4 (a boundary that does not catch): the History fallback is gone', async () => {

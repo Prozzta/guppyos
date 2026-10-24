@@ -110,13 +110,53 @@ window.__harnessRun = async () => {
     const noteAfterUnload = noteNow();
     const lastFlushNote = rosterWrites.length ? rosterWrites[rosterWrites.length - 1].agents.find((x) => x.id === 'a1')?.note ?? null : null;
 
-    // F. C3 (Jim's pin): SLOW typing, a key every 100 ms for over 2 s. The debounce must
-    // restart on EVERY key: nothing is committed while typing, one commit after the pause.
+    // F. C3 (Jim's pin): a key every 100 ms for over 2 s. This is a debounce contract, so
+    // advance an owned clock rather than sleeping on a CPU-throttled renderer: a hard Job Object
+    // cap can delay this test process for more than the debounce interval even while its queued
+    // input cadence is 100 ms. The real component timer is still used; only its clock is virtual.
     c0 = counts();
     let slow = '';
-    for (let i = 0; i < 22; i++) { slow += 's'; const v = slow; await act(async () => { setValue(area()!, v); }); await sleep(100); }
+    const realSetTimeout = globalThis.setTimeout;
+    const realClearTimeout = globalThis.clearTimeout;
+    let clock = 0;
+    let nextTimer = 1;
+    const timers = new Map<number, { due: number; fn: () => void }>();
+    let captureDraftTimer = false;
+    globalThis.setTimeout = ((fn: () => void, ms = 0, ...args: any[]) => {
+      // Only the synchronous debounce armed by this scenario's input is virtual.  Timers from
+      // React, Electron, or another harness task remain on the real scheduler.
+      if (!captureDraftTimer) return realSetTimeout(fn, ms, ...args);
+      const id = nextTimer++;
+      timers.set(id, { due: clock + Number(ms), fn: () => fn(...args) });
+      return id as unknown as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout;
+    globalThis.clearTimeout = ((id: ReturnType<typeof setTimeout>) => {
+      if (!timers.delete(id as unknown as number)) realClearTimeout(id);
+    }) as typeof clearTimeout;
+    const advance = (ms: number) => {
+      clock += ms;
+      for (;;) {
+        const due = [...timers.entries()].filter(([, t]) => t.due <= clock).sort((a, b) => a[1].due - b[1].due)[0];
+        if (!due) return;
+        timers.delete(due[0]);
+        act(() => { due[1].fn(); });
+      }
+    };
+    try {
+      for (let i = 0; i < 22; i++) {
+        slow += 's'; const v = slow;
+        captureDraftTimer = true;
+        try { act(() => { setValue(area()!, v); }); } finally { captureDraftTimer = false; }
+        advance(100);
+      }
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+      globalThis.clearTimeout = realClearTimeout;
+    }
     const slowDuring = delta(c0);
-    await sleep(700);
+    // The final input's callback remains in the owned queue; invoke it after the pause.
+    clock += 700;
+    for (const [id, timer] of [...timers]) if (timer.due <= clock) { timers.delete(id); act(() => { timer.fn(); }); }
     const slowAfter = delta(c0);
     const noteAfterSlow = noteNow();
 

@@ -1,7 +1,7 @@
 'use strict';
 /**
  * HEAVY-CPU-OPTIONS-191: Settings, beside "Heavy jobs at once", two independent options for heavy jobs:
- * background CPU priority (BELOW_NORMAL) and half the logical processors (floor(n/2), at least 1).
+ * background CPU priority (BELOW_NORMAL) and a hard 50% CPU-rate cap with all processors visible.
  * Every allowed heavy PreToolUse is rewritten to `guppy-heavyjob join <job> <b> <h>; <command>`, after
  * Guppy made the job with the options in force; Settings changes reach running jobs; a job with nothing
  * of its call left is lifted and let go. The live proof (every process of a real FULL) is in
@@ -36,24 +36,71 @@ const C = loadTs('src/main/heavyCpu.ts');
 const HJ = loadTs('src/main/heavyJob.ts');
 const M = loadTs('src/main/codexHookMcp.ts');
 const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
+function removeJailedMarkers() {
+  const jail = process.env.GUPPY_TEMP_JAIL_ROOT;
+  const local = process.env.LOCALAPPDATA;
+  if (!jail || !local || !path.resolve(local).startsWith(`${path.resolve(jail)}${path.sep}`)) return;
+  const markerRoot = path.join(local, 'Munder Difflin', 'Guppy', 'heavyjob-markers');
+  fs.rmSync(markerRoot, { recursive: true, force: true });
+  for (const dir of [path.dirname(markerRoot), path.dirname(path.dirname(markerRoot))]) {
+    try { if (fs.readdirSync(dir).length === 0) fs.rmdirSync(dir); } catch { /* absent or not ours */ }
+  }
+}
+test.after(removeJailedMarkers);
 
-test('the options: each independent, default off; half = floor(n/2), at least 1', () => {
-  assert.deepEqual(C.heavyCpuOptions({}), { background: false, half: false });
-  assert.deepEqual(C.heavyCpuOptions({ heavyJobsBackgroundPriority: true }), { background: true, half: false });
-  assert.deepEqual(C.heavyCpuOptions({ heavyJobsHalfCores: true }), { background: false, half: true });
-  assert.deepEqual(C.heavyCpuOptions({ heavyJobsBackgroundPriority: true, heavyJobsHalfCores: true }), { background: true, half: true });
-  assert.equal(C.HEAVY_HALF_CORES_AVAILABLE, true, 'option 2 is enabled (god 7ef310)');
-  assert.deepEqual([32, 16, 3, 2, 1].map(C.halfCoreCount), [16, 8, 1, 1, 1]);
+test('SAFE CLEANUP: a plain node --test options run leaves a LocalAppData sentinel intact', () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'hcpu-options-sentinel-'));
+  const sentinel = path.join(sandbox, 'Munder Difflin', 'Guppy', 'keep-me.txt');
+  try {
+    fs.mkdirSync(path.dirname(sentinel), { recursive: true });
+    fs.writeFileSync(sentinel, 'keep');
+    const r = require('node:child_process').spawnSync(process.execPath, ['--test', '--test-name-pattern', '^never-match$', __filename], { cwd: path.join(__dirname, '..'), encoding: 'utf8', windowsHide: true, env: { ...process.env, LOCALAPPDATA: sandbox } });
+    assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+    assert.equal(fs.existsSync(sentinel), true, 'a direct options test run must not sweep LocalAppData');
+  } finally { fs.rmSync(sandbox, { recursive: true, force: true }); }
+});
+
+test('the options: each independent; the hard cap defaults to exactly 50% (M1)', () => {
+  assert.deepEqual(C.heavyCpuOptions({}), { background: false, cap: true });
+  assert.deepEqual(C.heavyCpuOptions({ heavyJobsBackgroundPriority: true }), { background: true, cap: true });
+  assert.deepEqual(C.heavyCpuOptions({ heavyJobsCpuCap: false }), { background: false, cap: false });
+  assert.deepEqual(C.heavyCpuOptions({ heavyJobsBackgroundPriority: true, heavyJobsCpuCap: false }), { background: true, cap: false });
+  assert.equal(C.HEAVY_CPU_CAP_RATE, 5000, 'CPU-rate units are 1/100 percent of the whole machine');
 });
 
 test('the join line goes before the command, verbatim; command (Claude, Codex) and CommandLine (AGY)', () => {
-  const o = { background: true, half: false };
+  const o = { background: true, cap: false };
   assert.deepEqual(C.wrapToolInput({ command: 'npm ci', description: 'x' }, 'j1', o), { command: 'guppy-heavyjob join j1 1 0; npm ci', description: 'x' });
-  assert.deepEqual(C.wrapToolInput({ CommandLine: 'npm run build', Cwd: 'C:/w' }, 'j2', { background: false, half: true }), { CommandLine: 'guppy-heavyjob join j2 0 1; npm run build', Cwd: 'C:/w' });
+  assert.deepEqual(C.wrapToolInput({ CommandLine: 'npm run build', Cwd: 'C:/w' }, 'j2', { background: false, cap: true }), { CommandLine: 'guppy-heavyjob join j2 0 1; npm run build', Cwd: 'C:/w' });
   assert.equal(C.wrapToolInput({ file_path: 'x' }, 'j', o), null);
   assert.equal(C.wrapToolInput('npm ci', 'j', o), null);
   assert.match(C.heavyJobId('creed-mukyiphw', 3, 1e12), /^creed-mukyiphw-[a-z0-9]+-3$/);
   assert.match(C.heavyJobId('a b/c', 1, 0), /^[A-Za-z0-9_-]+$/);
+});
+
+test('the native helper pins hard-cap mode and the exact 50% CPU rate (M1)', () => {
+  const native = read('resources/heavyjob/guppy-heavyjob.cs');
+  assert.match(native, /CPU_RATE_ENABLE = 0x1, CPU_RATE_HARD_CAP = 0x4, CPU_RATE_50_PERCENT = 5000/);
+  assert.match(native, /ControlFlags = cap \? CPU_RATE_ENABLE \| CPU_RATE_HARD_CAP : 0/);
+  assert.match(native, /if \(!cap && !CpuRateEnabled\(job\)\) return;/, 'M9: fresh cap-off jobs skip invalid class-15 zero flags; a live cap-off still clears it');
+  assert.match(native, /GUPPY_HEAVY_CPU_CAP.*cap \? "1" : "0"/, 'the joined command can size workers to the Job Object CPU share');
+  assert.match(native, /self-query/, 'a joined Bash or PowerShell command can query its own Job Object rate');
+  assert.match(native, /IsProcessInJob\(proc, job, out inJob\)/, 'a marker is trusted only while its process remains in the named job');
+  assert.match(native, /created == 0 \|\| created > childCreated/, 'ancestor walk rejects a parent created after its child');
+  assert.match(native, /MarkerRoot\(\).*?heavyjob-markers/s, 'breadcrumbs stay in a Guppy-owned folder');
+  assert.match(native, /GetEnvironmentVariable\("LOCALAPPDATA"\)/, 'native markers honor the runner\'s LocalAppData jail');
+  assert.match(native, /SpecialFolder\.LocalApplicationData/, 'the runner redirects LocalAppData for each test file');
+  assert.match(native, /CleanMarkers\(\)/, 'dead pid+creation-time breadcrumbs are cleaned');
+  assert.match(native, /inJob \|\| \(child != GetCurrentProcessId\(\) && Created\(child\) == childCreated && ownerInJob\)/, 'a marker is accepted only for the caller or its verified in-job ancestor');
+  assert.doesNotMatch(native, /SoleLiveMarkedJob/, 'no shared-folder newest-marker fallback may cap an unrelated caller');
+  assert.match(native, /var rate = new CPU_RATE \{ ControlFlags = cap \? CPU_RATE_ENABLE \| CPU_RATE_HARD_CAP : 0, CpuRate = cap \? cpuRate : 0 \}/);
+  assert.doesNotMatch(native, /LIMIT_AFFINITY|SetProcessAffinityMask/);
+  assert.match(native, /return \"\{\\\"background\\\":\" \+ \(background \? \"true\" : \"false\"\) \+ \",\\\"cap\\\":\" \+ \(cap \? \"true\" : \"false\"\) \+ \",\\\"rate\\\":\" \+ \(cap \? rate\.CpuRate : 0\) \+ \",\\\"affinity\\\":null\}\"/,
+    'M1: capped queries must explicitly report no affinity limit');
+  assert.match(native, /unsupported outer job; cap not applied \(ERROR_ACCESS_DENIED\)/,
+    'an outer-job access denial is loud and distinguishable from an ordinary helper error');
+  assert.match(native, /static bool OuterJobDenial\(Exception e\) \{ return e\.Message == \"AssignProcessToJobObject failed \(5\)\"; \}/,
+    'only a failed assignment to Guppy\'s own job is classified as an unsupported outer job');
 });
 
 test('M6: AGY run_command CommandLine is read, so its heavy calls are classified', () => {
@@ -90,7 +137,7 @@ function jobs(opts, f, now) {
 }
 
 test('HeavyJobs: the job is made with the options in force, then the call is rewritten (M1)', async () => {
-  const f = fakeChannel(); const now = { t: 1000 }; const opts = { o: { background: false, half: true } };
+  const f = fakeChannel(); const now = { t: 1000 }; const opts = { o: { background: false, cap: true } };
   const { j, logs } = jobs(opts, f, now);
   const w = await j.begin('creed', { command: 'npm ci' });
   const id = j.ids()[0];
@@ -103,16 +150,16 @@ test('HeavyJobs: the job is made with the options in force, then the call is rew
 });
 
 test('HeavyJobs: a Settings change reaches every running job (M8)', async () => {
-  const f = fakeChannel(); const now = { t: 1000 }; const opts = { o: { background: false, half: false } };
+  const f = fakeChannel(); const now = { t: 1000 }; const opts = { o: { background: false, cap: false } };
   const { j } = jobs(opts, f, now);
   await j.begin('a', { command: 'npm ci' }); await j.begin('b', { command: 'npm run build' });
-  opts.o = { background: true, half: true };
+  opts.o = { background: true, cap: true };
   await j.applyLive();
   assert.deepEqual(f.sent.filter((l) => l.startsWith('set')), j.ids().map((id) => `set ${id} 1 1`));
 });
 
 test('HeavyJobs: a job whose processes all predate its call (a shell that outlived it) is lifted after two checks; one still running its call is kept (M7)', async () => {
-  const f = fakeChannel(); const now = { t: 10_000 }; const opts = { o: { background: true, half: true } };
+  const f = fakeChannel(); const now = { t: 10_000 }; const opts = { o: { background: true, cap: true } };
   const { j, logs } = jobs(opts, f, now);
   await j.begin('a', { command: 'npm ci' });
   const id = j.ids()[0];
@@ -140,13 +187,13 @@ test('HeavyJobs: a job whose processes all predate its call (a shell that outliv
 });
 
 test('HeavyJobs: a job whose call has not started yet (a prompt, a wait for the slot) is kept, and a Settings change still reaches it (M9)', async () => {
-  const f = fakeChannel(); const now = { t: 10_000 }; const opts = { o: { background: false, half: false } };
+  const f = fakeChannel(); const now = { t: 10_000 }; const opts = { o: { background: false, cap: false } };
   const { j, logs } = jobs(opts, f, now);
   await j.begin('a', { command: 'node test/tools/run-tests.cjs' });
   const id = j.ids()[0];
   for (let i = 0; i < 5; i++) { now.t += C.HEAVY_JOB_POLL_MS; await j.poll(); }
   assert.deepEqual(j.ids(), [id], 'empty since it was made: the call has not started, so it is kept');
-  opts.o = { background: true, half: true };
+  opts.o = { background: true, cap: true };
   await j.applyLive();
   assert.equal(f.sent.at(-1), `set ${id} 1 1`, 'the change reaches the job before its call starts');
   f.rows[id] = [{ pid: 7, name: 'bash', createdMs: now.t }];
@@ -193,7 +240,7 @@ async function server(t, limit, o) {
 }
 
 test('HOOK: an allowed heavy call is rewritten for each provider; a light one and a denied one are not (M2, M3, M4)', async (t) => {
-  const { f, fire } = await server(t, 1, { background: true, half: true });
+  const { f, fire } = await server(t, 1, { background: true, cap: true });
   const claude = await fire('a1', 'npm ci', { transport: 'http', tool_use_id: 'u1' });
   assert.match(claude.hookSpecificOutput.updatedInput.command, /^guppy-heavyjob join a1-[a-z0-9]+-1 1 1; npm ci$/);
   assert.equal(claude.hookSpecificOutput.permissionDecision, undefined, 'Claude applies the rewrite as it is; its own permission check stays');
@@ -212,7 +259,7 @@ test('HOOK: an allowed heavy call is rewritten for each provider; a light one an
 });
 
 test('HOOK: Codex that asks its user first: no rewrite and no allow, so its approval prompt stays; the same call auto-approved is wrapped (Jim SHOULD-2)', async (t) => {
-  const { s, f, fire, hive, logs } = await server(t, 'off', { background: false, half: true });
+  const { s, f, fire, hive, logs } = await server(t, 'off', { background: false, cap: true });
   const asks = await fire('a1', 'text(1)', { transport: 'mcp', tool_name: 'Bash', hook_tool_input: { command: 'npm ci' } });
   assert.deepEqual(logs.filter((r) => r.action === 'skip-ask-first'), [{ kind: 'heavy-cpu', action: 'skip-ask-first', agentId: 'a1', provider: 'claude' }], 'the declined call is logged with its agent and provider (Jim SHOULD-1 a)');
   assert.equal(asks?.hookSpecificOutput?.permissionDecision, undefined, 'no allow for an agent that asks');
@@ -247,7 +294,7 @@ test('approvesWithoutAsking: the provider\'s own auto-approve flag, every token 
 });
 
 test('HOOK: Codex with the lock Off: the nested command from the hook template is wrapped, with allow; a cmd call gets the cmd separator (M3, M10)', async (t) => {
-  const { s, fire } = await server(t, 'off', { background: false, half: true });
+  const { s, fire } = await server(t, 'off', { background: false, cap: true });
   s.setHeavyAutoApproves(() => true);
   const r = await fire('a1', 'text(1)', { transport: 'mcp', tool_name: 'Bash', hook_tool_input: { command: 'node test/tools/run-tests.cjs' } });
   assert.equal(r.hookSpecificOutput.permissionDecision, 'allow', 'Codex drops updatedInput without allow');
@@ -262,7 +309,7 @@ test('HOOK: Codex with the lock Off: the nested command from the hook template i
 });
 
 test('HOOK: with no tool-use id (AGY, some Codex paths) the PostToolUse of a wrapped call releases its slot (Jim SHOULD-1)', async (t) => {
-  const { s, fire } = await server(t, 1, { background: false, half: true });
+  const { s, fire } = await server(t, 1, { background: false, cap: true });
   const pre = await fire('a1', 'npm ci', { transport: 'http' });
   const wrapped = pre.hookSpecificOutput.updatedInput.command;
   assert.match(wrapped, /^guppy-heavyjob join a1-\S+ 0 1; npm ci$/);
@@ -330,6 +377,106 @@ test('CODEX-CMD-COMPUTED-SHELL-192: a shell named by a const of one string reads
 
 const CSC =path.join(process.env.WINDIR || 'C:\\Windows', 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe');
 
+test('LIVE Bash join keeps its marker for repeated, sibling and background self-queries without LOCALAPPDATA residue (B1)',
+  { skip: process.platform !== 'win32' || !fs.existsSync(path.join(__dirname, '..', 'resources', 'heavyjob', 'bin', 'guppy-heavyjob.exe')) ? 'Windows helper not built' : false, timeout: 30_000 },
+  async () => {
+    const { spawn, spawnSync } = require('node:child_process');
+    const exe = path.join(__dirname, '..', 'resources', 'heavyjob', 'bin', 'guppy-heavyjob.exe');
+    const bash = path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Git', 'bin', 'bash.exe');
+    if (!fs.existsSync(bash)) return;
+    const id = `hcpu-b1-${process.pid}`;
+    const markerJail = fs.mkdtempSync(path.join(os.tmpdir(), 'hcpu-markers-'));
+    const env = { ...process.env, LOCALAPPDATA: markerJail };
+    const knownLocal = spawnSync('powershell.exe', ['-NoProfile', '-Command', '[Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)'], { encoding: 'utf8', windowsHide: true }).stdout.trim();
+    const knownRoot = path.join(knownLocal, 'Munder Difflin', 'Guppy', 'heavyjob-markers');
+    const quote = (s) => `'${s.replace(/'/g, "'\\\"'\\\"'")}'`;
+    const expected = { background: false, cap: true, rate: 5000, affinity: null };
+    const serve = spawn(exe, ['serve'], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true, env });
+    let buffer = ''; const replies = [];
+    serve.stdout.setEncoding('utf8');
+    serve.stdout.on('data', (chunk) => {
+      buffer += chunk;
+      let newline;
+      while ((newline = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1);
+        if (/"event"/.test(line)) continue;
+        const resolve = replies.shift(); if (resolve) resolve(JSON.parse(line));
+      }
+    });
+    const ask = (line) => new Promise((resolve) => { replies.push(resolve); serve.stdin.write(`${line}\n`); });
+     const assertQueries = async (line, count) => {
+      const name = `${id}-${count}`;
+      assert.deepEqual(await ask(`create ${name} 0 1`), { ok: true });
+      try {
+        const r = spawnSync(bash, ['-lc', `${quote(exe)} join ${name} 0 1; ${line}`], { encoding: 'utf8', windowsHide: true, env });
+        assert.equal(r.status, 0, r.stderr);
+        const rows = r.stdout.trim().split(/\r?\n/).filter(Boolean).map(JSON.parse);
+        assert.equal(rows.length, count, r.stdout);
+        for (const row of rows) assert.deepEqual(row, expected, r.stderr);
+       } finally { assert.deepEqual(await ask(`close ${name}`), { ok: true }); }
+     };
+    const waitReady = (child) => new Promise((resolve, reject) => {
+      let out = '';
+      const fail = (e) => reject(new Error(`held shell did not become ready: ${e.message || e}\n${out}`));
+      child.stdout.setEncoding('utf8');
+      child.stdout.on('data', (d) => { out += d; child.hcpuOutput = out; if (out.includes('READY\n')) resolve(out); });
+      child.once('error', fail);
+      child.once('exit', (code) => { if (!out.includes('READY\n')) fail(`exit ${code}`); });
+    });
+    const waitExit = (child) => new Promise((resolve) => child.exitCode === null ? child.once('exit', resolve) : resolve());
+    const heldShell = (name, cap, queryFile) => {
+      const program = queryFile
+        ? `echo READY; sleep 1; ${quote(exe)} self-query > ${quote(queryFile)}`
+        : 'echo READY; sleep 2';
+      return spawn(bash, ['-lc', `${quote(exe)} join ${name} 0 ${cap ? 1 : 0}; ${program}`], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env });
+    };
+    let capName; let uncappedName; let capped; let uncapped;
+    try {
+      // The same shell, two separately spawned Node processes, and a background command all find
+      // the still-live shell marker.  A marker is lifetime state, not a one-shot query token.
+      await assertQueries(`${quote(exe)} self-query; ${quote(exe)} self-query; ${quote(exe)} self-query`, 3);
+      const nodeExe = exe.replace(/\\/g, '/');
+      const nodeQuery = `${quote(process.execPath)} -e ${quote(`process.stdout.write(require("node:child_process").execFileSync(${JSON.stringify(nodeExe)}, ["self-query"], {encoding:"utf8"}))`)}`;
+       await assertQueries(`${nodeQuery}; ${nodeQuery}`, 2);
+       await assertQueries(`${quote(exe)} self-query; ${quote(exe)} self-query & wait`, 2);
+       // A marker folder is shared by this Windows user, so only membership of the querying child
+       // can select it.  Hold a cap live and prove an unrelated process does not borrow it.
+       capName = `${id}-live-cap`; uncappedName = `${id}-live-uncapped`;
+       assert.deepEqual(await ask(`create ${capName} 0 1`), { ok: true });
+       assert.deepEqual(await ask(`create ${uncappedName} 0 0`), { ok: true });
+        const markerRoot = path.join(markerJail, 'Munder Difflin', 'Guppy', 'heavyjob-markers');
+       try {
+         const queryFile = path.join(process.env.TEMP || os.tmpdir(), `${capName}.json`);
+          capped = heldShell(capName, true, queryFile); await waitReady(capped);
+          assert.ok(fs.existsSync(markerRoot), 'the held native helper writes markers inside this file\'s jailed LocalAppData');
+         const unrelated = JSON.parse(spawnSync(exe, ['self-query'], { encoding: 'utf8', windowsHide: true, env }).stdout.trim());
+         assert.equal(unrelated.cap, false, 'an unrelated process cannot take another shell\'s capped marker');
+         uncapped = heldShell(uncappedName, false, false); await waitReady(uncapped);
+         await waitExit(capped);
+         const row = JSON.parse(fs.readFileSync(queryFile, 'utf8'));
+         fs.rmSync(queryFile, { force: true });
+         assert.deepEqual(row, expected, 'a capped caller ignores a newer live uncapped marker');
+       } finally {
+         if (capped && capped.exitCode === null) capped.kill();
+         if (uncapped && uncapped.exitCode === null) uncapped.kill();
+         await Promise.all([capped, uncapped].filter(Boolean).map(waitExit));
+         assert.deepEqual(await ask(`close ${capName}`), { ok: true });
+         assert.deepEqual(await ask(`close ${uncappedName}`), { ok: true });
+       }
+     } finally {
+       try { serve.stdin.end(); } catch { /* gone */ }
+       if (serve.exitCode === null) await new Promise((resolve) => serve.once('exit', resolve));
+       fs.rmSync(markerJail, { recursive: true, force: true });
+     }
+    // Do not snapshot/diff another user's shared marker folder: only this test's identifiers matter.
+    const forbidden = [id, capName, uncappedName, capped?.pid, uncapped?.pid].filter(Boolean).map(String);
+    const knownFiles = fs.existsSync(knownRoot) ? fs.readdirSync(knownRoot) : [];
+    for (const file of knownFiles) {
+      const body = fs.readFileSync(path.join(knownRoot, file), 'utf8');
+      assert.ok(!forbidden.some((token) => file.includes(token) || body.includes(token)), `jailed B1 leaked marker ${file} into real LocalAppData`);
+    }
+  });
+
 test('LIVE cmd: the `&` join line leaves the command exactly as cmd runs it (output and exit code), and its processes are in the job',
   { skip: process.platform !== 'win32' ? 'cmd is Windows-only' : !fs.existsSync(CSC) ? `no in-box csc at ${CSC}` : false, timeout: 120_000 },
   async () => {
@@ -364,7 +511,7 @@ test('LIVE cmd: the `&` join line leaves the command exactly as cmd runs it (out
         'if 1==1 (echo yes) else (echo no)', 'for %f in (1 2) do @echo %f', 'echo 7 & exit /b 7',
         'node -e "process.stdout.write(process.argv.slice(1).join(String.fromCharCode(124)))" a "b c" d^e "%HCPU_OUTER%"']) {
         const plain = run(line);
-        const joined = run(C.joinLine(id, { background: false, half: true }, false) + line);
+        const joined = run(C.joinLine(id, { background: false, cap: true }, false) + line);
         assert.equal(joined.stdout, plain.stdout, `; ${line}`);
         assert.equal(joined.status, plain.status, `; ${line}`);
         assert.doesNotMatch(joined.stderr, /limits not applied/, joined.stderr);
@@ -375,7 +522,8 @@ test('LIVE cmd: the `&` join line leaves the command exactly as cmd runs it (out
       const inside = run(joinLineFor(id) + `guppy-heavyjob list ${id}`);
       const rows = inside.stdout.trim().split(/\r?\n/).map((l) => JSON.parse(l)); // one JSON line per process
       assert.ok(rows.some((r) => /^cmd\.exe$/i.test(r.name)), `cmd is in the job: ${inside.stdout}`);
-      assert.ok(rows.every((r) => r.cpus === C.halfCoreCount(os.cpus().length)), `every member on half the processors: ${inside.stdout}`);
+      const usable = rows[0]?.cpus;
+      assert.ok(Number.isInteger(usable) && usable > 0 && rows.every((r) => r.cpus === usable), `CPU-rate control leaves the process's actually usable processors available: ${inside.stdout}`);
       // A shell with its own console: its conhost.exe started with it, before the join line, and joins too.
       // (Start-Process makes a new console; without -Wait, which would put the shell in a job of its own.)
       const ownFile = path.join(dir, 'own.txt');
@@ -392,7 +540,7 @@ test('LIVE cmd: the `&` join line leaves the command exactly as cmd runs it (out
     }
   });
 
-function joinLineFor(id) { return C.joinLine(id, { background: false, half: true }, true); }
+function joinLineFor(id) { return C.joinLine(id, { background: false, cap: true }, true); }
 
 test('Codex hook config: PreToolUse carries ${tool_input}; an unfilled or bad template is ignored', () => {
   const toml = M.codexMcpHookToml('http://127.0.0.1:1/mcp/a/x', 'ab'.repeat(16));
@@ -432,23 +580,25 @@ test('AGY shim: a rewrite becomes AGY\'s allow + overwrite, context rides along;
   assert.equal(JSON.parse(await shimOut({ hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: 'no' } })).decision, 'deny');
 });
 
-test('WIRING: config keys (default off), Settings rows beside "Heavy jobs at once", live apply, helper on PATH, built from source', () => {
+test('WIRING: the default 50% cap, migration, Settings row and live apply are connected (M1/M8)', () => {
   assert.match(read('src/main/hooks.ts'), /if \(ti && tail && typeof ti\.command === 'string' && isCmdShell\(pendingExecShell\(tail, ti\.command\)\)\) p\.hook_cmd_shell = true;/, 'a Codex call that asked for cmd is marked from its rollout (M10)');
   const cfg = read('src/main/config.ts');
   assert.match(cfg, /heavyJobsBackgroundPriority\?: boolean;/);
-  assert.match(cfg, /heavyJobsHalfCores\?: boolean;/);
-  assert.match(cfg, /heavyJobsBackgroundPriority: false,\s+heavyJobsHalfCores: false,/);
+  assert.match(cfg, /heavyJobsCpuCap\?: boolean;/);
+  assert.match(cfg, /heavyJobsBackgroundPriority: false,\s+heavyJobsCpuCap: true,/);
+  assert.match(cfg, /migrateHeavyJobsCpuCap/);
+  assert.match(cfg, /next\.heavyJobsHalfCores === true/, 'M7: only an explicit legacy ON may carry into the new default-on cap');
   const ui = read('src/renderer/src/components/SettingsModal.tsx');
   const at = ui.indexOf('Heavy jobs at once\n') >= 0 ? ui.indexOf('Heavy jobs at once\n') : ui.indexOf('Heavy jobs at once\r\n');
-  assert.ok(at > 0 && ui.indexOf('Heavy jobs at background priority') > at && ui.indexOf('Heavy jobs on half the processors') > at, 'the two rows follow "Heavy jobs at once"');
+  assert.ok(at > 0 && ui.indexOf('Heavy jobs at background priority') > at && ui.indexOf('Heavy jobs CPU cap') > at, 'the two rows follow "Heavy jobs at once"');
   assert.match(ui, /updateConfig\(\{ heavyJobsBackgroundPriority: next \}/);
-  assert.match(ui, /updateConfig\(\{ heavyJobsHalfCores: next \}/);
+  assert.match(ui, /updateConfig\(\{ heavyJobsCpuCap: next \}/);
   const note = ui.indexOf('Codex and Antigravity agents that ask before running commands are not limited.');
-  assert.ok(note > ui.indexOf('Heavy jobs on half the processors'), 'the ask-first exemption is said under the two toggles (Jim SHOULD-1 b)');
+  assert.ok(note > ui.indexOf('Heavy jobs CPU cap'), 'the ask-first exemption is said under the two toggles (Jim SHOULD-1 b)');
   const idx = read('src/main/index.ts');
   assert.match(idx, /hookServer\.setHeavyJobs\(heavyJobs\);/);
   assert.match(idx, /options: \(\) => heavyCpuOptions\(readConfig\(\)\)/, 'read live');
-  assert.match(idx, /'heavyJobsBackgroundPriority' in patch \|\| 'heavyJobsHalfCores' in patch\)\) void heavyJobs\.applyLive\(\)/);
+  assert.match(idx, /'heavyJobsBackgroundPriority' in patch \|\| 'heavyJobsCpuCap' in patch\)\) void heavyJobs\.applyLive\(\)/);
   assert.match(idx, /if \(heavyJobExe\(\)\) opts\.pathPrepend = \[\.\.\.\(opts\.pathPrepend \?\? \[\]\), heavyJobDir\(\)\];/);
   const pkg = JSON.parse(read('package.json'));
   assert.match(pkg.scripts.build, /node tools\/build-heavyjob\.cjs/);

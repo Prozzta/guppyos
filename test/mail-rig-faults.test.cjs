@@ -459,8 +459,14 @@ test('F11 Stop never arrives (AGY false-active): the 30-minute stale-epoch back-
   await waitFor(() => rig.contexts('ag-1').some((c) => c.ids.includes(m.id)), { what: 'surfaced at PreInvocation' });
   await waitFor(async () => (await rig.entry('ag-1', m.id))?.state === 'surfaced', { what: 'confirmed by latency' });
   // No Stop. AGY's statusline goes idle (the native idle the coordinator believes after its grace).
+  const idleStatuses = async () => (await rig.call('diags')).filter((d) => d.stage === 'provider-status' && d.agentId === 'ag-1' && d.status === 'idle').length;
+  const idleBefore = await idleStatuses();
   rig.cue('ag-1', { cue: 'statusline', state: 'idle' });
   await waitFor(() => rig.transcript('ag-1').some((r) => r.kind === 'statusline' && r.installed), { what: 'statusline tick' });
+  // The one-way shim's child exit is not main's receipt. Receive the real provider-status
+  // event before taking F11's one post-grace beat; otherwise a loaded host can defer the
+  // pending idle just after that beat and this test falsely calls the product stuck.
+  await waitFor(async () => (await idleStatuses()) > idleBefore, { what: 'host receipt of this idle status tick' });
   await rig.call('advance', { ms: 10_000 });
   await rig.beat();
   await waitFor(async () => (await rig.call('wakeState', { id: 'ag-1' })).lifecycle === 'idle', { what: 'lifecycle idle' });
@@ -479,6 +485,27 @@ test('F11 Stop never arrives (AGY false-active): the 30-minute stale-epoch back-
   await waitFor(() => acted(rig, 'ag-1', m.id), { what: 'acted at the next real Stop' });
   for (let i = 0; i < 3; i++) { await rig.call('advance', { ms: 31 * 60_000 }); await rig.beat(); await sleep(200); }
   assert.equal((await rig.call('diags')).filter((d) => d.stage === 'mail-epoch-stale' && d.agentId === 'ag-1').length, 1, 'the back-edge fired ONCE');
+});
+
+test('F11 pin: a held AGY idle tick leaves lifecycle active through the first beat, then the deferred-idle contract closes it on the next beat', T, async (t) => {
+  const rig = await startRig(t);
+  await rig.setup([{ id: 'ag-1', flavour: 'agy', scenario: { manualTurns: true } }]);
+  const m = await rig.call('send', { to: 'ag-1', subject: 'f11-order', body: 'hold the idle tick' });
+  await rig.beat();
+  await waitFor(() => rig.contexts('ag-1').some((c) => c.ids.includes(m.id)), { what: 'surfaced at PreInvocation' });
+  await waitFor(async () => (await rig.entry('ag-1', m.id))?.state === 'surfaced', { what: 'confirmed by latency' });
+  await rig.call('holdProviderStatus', { id: 'ag-1' });
+  const idleStatuses = async () => (await rig.call('diags')).filter((d) => d.stage === 'provider-status' && d.agentId === 'ag-1' && d.status === 'idle').length;
+  const idleBefore = await idleStatuses();
+  rig.cue('ag-1', { cue: 'statusline', state: 'idle' });
+  await waitFor(() => rig.transcript('ag-1').some((r) => r.kind === 'statusline' && r.installed), { what: 'statusline tick' });
+  await rig.call('advance', { ms: 10_000 });
+  await rig.beat();
+  assert.equal((await rig.call('wakeState', { id: 'ag-1' })).lifecycle, 'active', 'a tick held past the first beat cannot close the epoch');
+  assert.equal((await rig.call('releaseProviderStatus', { id: 'ag-1' })).released, 1, 'the held one-way tick is delivered once');
+  await waitFor(async () => (await idleStatuses()) > idleBefore, { what: 'host receipt after release' });
+  await rig.beat();
+  await waitFor(async () => (await rig.call('wakeState', { id: 'ag-1' })).lifecycle === 'idle', { what: 'deferred idle on the next beat' });
 });
 
 // ——————————————————————————————————————————————————————————————————————————— Q38

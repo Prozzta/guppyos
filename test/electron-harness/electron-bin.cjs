@@ -1,127 +1,116 @@
 'use strict';
 /**
- * HEAVY-CPU-OPTIONS-191: the Electron a test starts.
- *
- * On Windows a test always starts Electron from a view of its dist folder (hard links, so nothing is
- * copied when the volume allows) whose SwiftShader.ini keeps the harness's software renderer on the
- * processors option 2 allows. Inside a heavy job limited to part of the processors (Settings, "Heavy
- * jobs on half the processors") SwiftShader (--disable-gpu) would otherwise hang. Its marl worker threads
- * ask for every processor of the machine, the job refuses them, and the GPU process waits forever for
- * workers that never started (heavycpu/ROOTCAUSE.md; Phyllis PRIOR-ART Q3). SwiftShader reads
- * SwiftShader.ini from the folder of the executable ([Processor] AffinityMask) and then asks only for
- * those processors. The limit can be turned on while a suite runs (live apply), so the view is used
- * with no limit too: a later limit never takes a processor the workers were given (Jim MUST-1, r9).
- * The flags and the renderer stay the same, so the pixels do too. The hardware GPU and WARP were tried
- * instead, and both miss the floor's exact texel check. Elsewhere it is the installed Electron.
+ * Electron executable selection for the harness. CPU-rate control leaves every processor visible,
+ * but SwiftShader's worker pool must always be bounded.  A plain view can stall even before a
+ * cap is applied, and a live cap must never take processors away from an existing renderer.
  */
 const fs = require('node:fs');
 const os = require('node:os');
+const { execFileSync } = require('node:child_process');
 const { join, dirname, basename } = require('node:path');
 
-/**
- * This process's processor mask (BigInt) when it may use fewer logical processors than the machine
- * has, else null. Node cannot see a job's limit (os.availableParallelism() still says all of
- * them), so a PowerShell child, which inherits the job, reads it. The test runner asks once and
- * passes the answer down in HARNESS_CPU_MASK (a decimal mask, or '' for no limit).
- */
+const HEAVYJOB_HELPER = join(__dirname, '..', '..', 'resources', 'heavyjob', 'bin', 'guppy-heavyjob.exe');
+const cachedHarnessMasks = new Map();
+
+function cappedHeavyJob(env = process.env) {
+  if (env.GUPPY_HEAVY_CPU_CAP === '1') return true;
+  if (env.GUPPY_HEAVY_CPU_CAP === '0' || process.platform !== 'win32') return false;
+  try {
+    const reply = JSON.parse(execFileSync(HEAVYJOB_HELPER, ['self-query'], { encoding: 'utf8', windowsHide: true, timeout: 15_000, env }));
+    return reply?.cap === true && Number.isInteger(reply?.rate) && reply.rate > 0;
+  } catch { return false; } // a focused npm-ci tree may not have the helper built yet
+}
+
+function halfCpuMask(logical = os.cpus().length) {
+  return (1n << BigInt(Math.max(1, Math.floor(Math.min(logical, 64) / 2)))) - 1n;
+}
+
 function harnessCpuMask(env = process.env) {
   if (env.HARNESS_CPU_MASK !== undefined) return /^[1-9]\d*$/.test(env.HARNESS_CPU_MASK) ? BigInt(env.HARNESS_CPU_MASK) : null;
   if (process.platform !== 'win32') return null;
-  let out;
   try {
-    out = require('node:child_process').execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+    const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
       '"$([uint64][int64][Diagnostics.Process]::GetCurrentProcess().ProcessorAffinity) $env:NUMBER_OF_PROCESSORS"'],
-      { encoding: 'utf8', windowsHide: true, timeout: 15_000, env: require('../tools/ps-env.cjs').psEnv() });
-  } catch {
-    return null; // unknown: the installed Electron, as before
-  }
-  const [mask, all] = out.trim().split(/\s+/);
-  if (!/^\d+$/.test(mask ?? '') || !/^\d+$/.test(all ?? '')) return null;
-  const m = BigInt(mask);
-  let has = 0;
-  for (let x = m; x; x >>= 1n) has += Number(x & 1n);
-  return has > 0 && has < Number(all) ? m : null;
+    { encoding: 'utf8', windowsHide: true, timeout: 15_000, env: require('../tools/ps-env.cjs').psEnv(env) });
+    const [mask, all] = out.trim().split(/\s+/);
+    if (!/^\d+$/.test(mask ?? '') || !/^\d+$/.test(all ?? '')) return null;
+    const m = BigInt(mask); let has = 0;
+    for (let x = m; x; x >>= 1n) has += Number(x & 1n);
+    return has > 0 && has < Number(all) ? m : null;
+  } catch { return null; }
 }
 
-/**
- * The AffinityMask for SwiftShader.ini. SwiftShader reads it as a 32-bit signed int, so a mask
- * with bit 31 or higher set would be misread; the processors the job allows below bit 31 are used
- * (the half-processors option always allows the lowest ones).
- */
-function swiftShaderMask(mask) {
-  const m = mask & 0x7fffffffn;
-  if (!m) throw new Error(`electron-bin: the CPU limit ${mask.toString(16)} allows no processor below 31, so SwiftShader cannot be kept inside it`);
-  return Number(m);
+function swiftShaderMaskForHeavyJob(env = process.env, logical = os.cpus().length) {
+  const half = halfCpuMask(logical);
+  const limit = harnessCpuMask(env);
+  return limit === null ? half : (limit & half) || limit;
 }
 
 function linkTree(from, to) {
   fs.mkdirSync(to, { recursive: true });
   for (const e of fs.readdirSync(from, { withFileTypes: true })) {
-    const src = join(from, e.name);
-    const dst = join(to, e.name);
+    const src = join(from, e.name); const dst = join(to, e.name);
     if (e.isDirectory()) linkTree(src, dst);
-    else {
-      try { fs.linkSync(src, dst); } catch { fs.copyFileSync(src, dst); }
-    }
+    else { try { fs.linkSync(src, dst); } catch { fs.copyFileSync(src, dst); } }
   }
 }
 
-/**
- * ELECTRON-VIEW-SELF-HEAL: a view is ready only when its .complete marker AND every top-level name of
- * the dist folder are there. On 2026-10-21 the shared view lost electron.exe alone while .complete
- * stayed, and every Electron test on the machine failed ENOENT until the view was renamed aside by hand.
- * What deleted it is not named, so a lost DLL or .pak counts too (Jim NIT 1).
- */
-function viewReady(dir, from) {
+function viewReady(dir, from, sm) {
   if (!fs.existsSync(join(dir, '.complete'))) return false;
-  try { return fs.readdirSync(from).every((n) => fs.existsSync(join(dir, n))); } catch { return false; }
+  try {
+    if (!fs.readdirSync(from).every((n) => fs.existsSync(join(dir, n)))) return false;
+    return sm === null || fs.readFileSync(join(dir, 'SwiftShader.ini'), 'utf8') === `[Processor]\nAffinityMask=${sm}\n`;
+  } catch { return false; }
 }
 
-/** The view of the dist folder for this mask, made once and shared (under the temp folder). */
-function swiftShaderView(exe, mask, tmp = require('../tools/shared-temp.cjs').sharedTemp()) {
+/** A self-healing bounded view; stale partial and broken attempts are discarded first. */
+function swiftShaderView(exe, mask = null, suppliedTmp) {
+  const tmp = suppliedTmp ?? (typeof mask === 'string' ? mask : require('../tools/shared-temp.cjs').sharedTemp());
   const version = require('electron/package.json').version;
-  const sm = swiftShaderMask(mask);
-  const dir = join(tmp, 'guppy-electron-view', `${version}-${sm.toString(16)}`);
-  const name = basename(exe);
-  const from = dirname(exe);
-  if (!viewReady(dir, from)) {
+  const sm = mask === null ? null : Number(mask & 0x7fffffffn);
+  if (mask !== null && !sm) throw new Error(`electron-bin: the CPU mask ${mask.toString(16)} has no SwiftShader-supported processor`);
+  const dir = join(tmp, 'guppy-electron-view', sm === null ? `${version}-plain` : `${version}-${sm.toString(16)}`);
+  const name = basename(exe); const from = dirname(exe);
+  const root = dirname(dir);
+  try {
+    for (const entry of fs.readdirSync(root)) {
+      const part = new RegExp(`^${basename(dir).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.part-(\\d+)$`).exec(entry);
+      const stalePart = part && Number(part[1]) !== process.pid && (() => { try { process.kill(Number(part[1]), 0); return false; } catch { return true; } })();
+      if (stalePart || entry.startsWith(`${basename(dir)}.broken-`) || /-plain$/.test(entry)) fs.rmSync(join(root, entry), { recursive: true, force: true });
+    }
+  } catch { /* root does not exist yet */ }
+  if (!viewReady(dir, from, sm)) {
     const part = `${dir}.part-${process.pid}`;
     linkTree(from, part);
-    fs.writeFileSync(join(part, 'SwiftShader.ini'), `[Processor]\nAffinityMask=${sm}\n`);
+    if (sm !== null) fs.writeFileSync(join(part, 'SwiftShader.ini'), `[Processor]\nAffinityMask=${sm}\n`);
     fs.writeFileSync(join(part, '.complete'), '');
-    if (fs.existsSync(dir) && !viewReady(dir, from)) {
-      // A broken view is moved aside, then removed; another test may have moved or rebuilt it first.
-      const stale = `${dir}.stale-${process.pid}-${Date.now()}`;
-      try { fs.renameSync(dir, stale); } catch { /* moved by another test */ }
-      try { fs.rmSync(stale, { recursive: true, force: true }); } catch { /* a file still held: left behind */ }
+    if (fs.existsSync(dir) && !viewReady(dir, from, sm)) {
+      const stale = `${dir}.broken-${process.pid}-${Date.now()}`;
+      try { fs.renameSync(dir, stale); } catch { /* another test moved it */ }
+      try { fs.rmSync(stale, { recursive: true, force: true }); } catch { /* held files are harmless */ }
     }
     try { fs.renameSync(part, dir); } catch (e) {
-      // Another test made it first: use that one. The part holds only links and plain files.
-      if (!viewReady(dir, from)) throw e;
+      if (!viewReady(dir, from, sm)) throw e;
       fs.rmSync(part, { recursive: true, force: true });
     }
   }
   return join(dir, name);
 }
 
-/**
- * The processors option 2 allows: the lowest floor(n/2) logical ones, at least 1, as the helper sets
- * them (resources/heavyjob/guppy-heavyjob.cs HalfMask). Where Node sees fewer processors than the
- * helper (one processor group), the mask is a subset of the helper's, which is still inside it.
- */
-function halfCpuMask(logical = os.cpus().length) {
-  return (1n << BigInt(Math.max(1, Math.floor(Math.min(logical, 64) / 2)))) - 1n;
-}
-
-/** The Electron executable for a test to start. */
 function harnessElectron(env = process.env) {
   const exe = require('electron');
   if (process.platform !== 'win32') return exe;
-  // The processors of option 2 (a limit turned on later never takes one away), within any limit
-  // already in force; a limit outside them all is used as it is.
-  const limit = harnessCpuMask(env);
-  const half = halfCpuMask();
-  return swiftShaderView(exe, limit === null ? half : (limit & half) || limit);
+  // Only an explicit override is cacheable.  The real process affinity can change while a runner
+  // lives, so an unoverridden launch probes it again rather than assuming affinity for life.
+  const override = env.HARNESS_CPU_MASK;
+  let mask;
+  if (override === undefined) mask = swiftShaderMaskForHeavyJob(env);
+  else {
+    const key = String(override);
+    if (!cachedHarnessMasks.has(key)) cachedHarnessMasks.set(key, swiftShaderMaskForHeavyJob(env));
+    mask = cachedHarnessMasks.get(key);
+  }
+  return swiftShaderView(exe, mask);
 }
 
-module.exports = { harnessElectron, harnessCpuMask, halfCpuMask, swiftShaderMask, swiftShaderView };
+module.exports = { harnessElectron, cappedHeavyJob, harnessCpuMask, halfCpuMask, swiftShaderMaskForHeavyJob, swiftShaderView };
