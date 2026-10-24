@@ -64,6 +64,28 @@ export type UpdateAction = 'none' | 'check' | 'download' | 'restart' | 'open-rel
  *  not a runtime path; nothing in the running app reads it.) */
 export const REPO = 'Prozzta/guppyos';
 
+/** HERO-FEED-BRANCH: a plausible git ref (tag or branch name) to interpolate into
+ *  a GitHub URL. Resolved from the API at runtime, so it is validated rather than
+ *  trusted: one path segment or a few, no dots-only segments, no whitespace, no
+ *  URL punctuation, at most 100 chars. */
+export function isGitRef(value: unknown): value is string {
+  return typeof value === 'string'
+    && value.length > 0 && value.length <= 100
+    && /^[A-Za-z0-9][A-Za-z0-9._-]*(\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/.test(value)
+    && !value.split('/').some((seg) => /^\.+$/.test(seg) || seg.endsWith('.lock'));
+}
+
+/** HERO-FEED-BRANCH: where the Settings card's "full changelog" points. `ref` is
+ *  the line the hero feed was read from (latest release tag, else the default
+ *  branch, resolved at runtime in main/hero.ts); without one (offline on a fresh
+ *  install) the releases page is the only link that is right whatever the live
+ *  branch is called. Never a branch name written here. */
+export function changelogUrl(ref: string | null | undefined): string {
+  return isGitRef(ref)
+    ? `https://github.com/${REPO}/blob/${ref}/CHANGELOG.md`
+    : `https://github.com/${REPO}/releases`;
+}
+
 /** REBRAND-GUPPY: the first release whose artifacts are named Guppy-*. Up to 1.1.82 they keep
  *  Munder-Difflin-*, because 1.1.81 (and older) build their manual-download link from those
  *  fixed names; a build that knows this switch can follow the rename from 1.1.83 on. */

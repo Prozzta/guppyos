@@ -2,7 +2,7 @@
 
 /**
  * The hero payload is REMOTE data that renders in Settings. It is fetched from a
- * file in this repo, so the trust level is "whatever is on main" — which is high,
+ * file in this repo, so the trust level is "whatever is on the live release line" — which is high,
  * but not high enough to render unvalidated, because the failure modes are silent:
  * a typo'd URL becomes a dead button, an unbounded string wrecks the dialog, and
  * a malformed edit could blank the card for every user at once.
