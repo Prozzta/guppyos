@@ -46,6 +46,8 @@ function seedFor(home) {
     `CODEX_HOME = '${real}'`,
     `NODE_REPL_TRUSTED_SERVICES = "${fwd(path.join(real, 'plugins', 'cache', 'openai-bundled', 'browser', '1', 'scripts', 'browser-service.mjs'))}"`,
     `CODEX_STATE = '${real.toUpperCase()}\\state'`,
+    // JSON held in a literal string: the separators are doubled (Jim MINOR2 ii).
+    `NODE_REPL_JSON = '{"home":"${esc(path.join(real, 'p'))}"}'`,
     '',
     '[mcp_servers.other]',
     `env = { CODEX_HOME = "${esc(real)}", KEEP = '${path.join(home, '.codex-backup')}' }`,
@@ -72,7 +74,8 @@ function sandbox(t, seed) {
   return { home, hive, seed: text };
 }
 
-const norm = (s) => s.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+// Doubled separators collapse, so a path escaped inside JSON in a string is seen too.
+const norm = (s) => s.replace(/\\/g, '/').replace(/\/{2,}/g, '/').replace(/\/+$/, '').toLowerCase();
 /** Every spelling of the real profile root that a path value could resolve to. */
 function realRoots(home) {
   return [norm(path.join(home, '.codex')), '~/.codex'];
@@ -110,7 +113,7 @@ test('THE walk: no string in the generated config.toml and no spawn env value re
   const roots = realRoots(s.home);
   // Control: the walker sees the seed's leaks, so a clean result below is not a blind walker.
   const seeded = strings(toml.parse(s.seed)).filter(([, v]) => hitsReal(v, roots)).map(([k]) => k);
-  assert.ok(seeded.length >= 7, `control: the seed must carry the real-home paths (${seeded.join(', ')})`);
+  assert.ok(seeded.length >= 8,`control: the seed must carry the real-home paths (${seeded.join(', ')})`);
   const leaks = strings(doc).filter(([, v]) => hitsReal(v, roots)).map(([k]) => k);
   assert.deepEqual(leaks, [], `generated config.toml paths into the real ~/.codex: ${leaks.join(', ')}`);
   const envLeaks = Object.entries(r.env).filter(([, v]) => hitsReal(v, roots)).map(([k]) => k);
@@ -128,6 +131,7 @@ test('the nested helper homes are the AGENT home: every CODEX_HOME key, and path
   assert.equal(env.NODE_REPL_TRUSTED_CODE_PATHS.split(';')[0], agent, 'the trusted root is the agent home');
   assert.equal(env.NODE_REPL_TRUSTED_SERVICES, `${agent.replace(/\\/g, '/')}/plugins/cache/openai-bundled/browser/1/scripts/browser-service.mjs`, 'same slash style, same subpath');
   assert.equal(env.CODEX_STATE, path.join(agent, 'state'), 'a differently cased spelling is the same Windows path');
+  assert.equal(JSON.parse(env.NODE_REPL_JSON).home, path.join(agent, 'p'), 'JSON in a literal: doubled separators, still valid JSON');
   assert.equal(doc.marketplaces['openai-bundled'].source, path.join(agent, '.tmp', 'bundled-marketplaces', 'openai-bundled'));
   assert.equal(doc.mcp_servers.node_repl.args[0], path.join(agent, 'plugins', 'cache', 'repl.mjs'), 'a multi-line array element too');
 });
@@ -165,4 +169,68 @@ test('pure: isolateCodexHomePaths rewrites values only, leaves table headers and
   assert.equal(out.rewritten, 4);
   const posix = cfg.isolateCodexHomePaths(`x = "/home/U/.codex/a"`, { userCodexHome: '/home/u/.codex', agentCodexHome: '/h/a/.codex', win32: false });
   assert.equal(posix.text, `x = "/home/U/.codex/a"`, 'case is significant off Windows');
+  // A basic string with an escape other than \\ and \" is left as written: re-encoding it would change it.
+  const esc = `e = "C:\\\\Users\\\\u\\\\.codex\\\\x\\u0041"`;
+  assert.equal(cfg.isolateCodexHomePaths(esc, { userCodexHome: real, agentCodexHome: agent, win32: true }).text, esc);
+});
+
+// Jim's audit of c2cc5176 (2 MINOR + 3 NIT): each finding is pinned below on the pure transform.
+const R = 'C:\\Users\\u\\.codex';
+const A = 'C:\\H\\agents\\a\\.codex';
+const iso = (text, win32 = true) => cfg.isolateCodexHomePaths(text, { userCodexHome: R, agentCodexHome: A, win32 });
+
+test('MINOR1: a multi-line string body is prose and is copied as written, CODEX_HOME = and quoted ~/.codex paths included', () => {
+  for (const q of ['"""', "'''"]) {
+    const body = `d = ${q}\nsee '${R}\\AGENTS.md' and "~/.codex/x"\nCODEX_HOME = "kept"\n[not.a.header]\n${q}\n`;
+    const out = iso(`${body}after = '${R}\\a'\n`);
+    assert.equal(out.text, `${body}after = '${A}\\a'\n`, `${q}: the body is untouched and the value after it is still rewritten`);
+    assert.equal(out.rewritten, 1);
+  }
+  // A body may end in one or two quotes before the closer.
+  const tail = `d = """x ""${'"""'}\nv = '${R}'\n`;
+  assert.equal(iso(tail).text, `d = """x ""${'"""'}\nv = '${A}'\n`);
+});
+
+test('MINOR2 (i): a line inside an open array that looks like a header is a value; a header is found only at the top level', () => {
+  const src = `a = [\n  ['${R}\\x'],\n  ['${R}\\y']\n]\n[t]\nb = '${R}'\n`;
+  assert.equal(iso(src).text, `a = [\n  ['${A}\\x'],\n  ['${A}\\y']\n]\n[t]\nb = '${A}'\n`);
+});
+
+test('MINOR2 (ii): the root with doubled separators (JSON in a literal string) maps with doubled separators', () => {
+  const src = `s = '{"b":"${R.replace(/\\/g, '\\\\')}\\\\p\\\\b.mjs"}'\n`;
+  const out = iso(src);
+  assert.equal(out.text, `s = '{"b":"${A.replace(/\\/g, '\\\\')}\\\\p\\\\b.mjs"}'\n`);
+  assert.equal(JSON.parse(toml.parse(out.text).s).b, `${A}\\p\\b.mjs`, 'still valid JSON naming the agent home');
+  const fwd = iso(`s = '{"b":"C://Users//u//.codex//p"}'\n`);
+  assert.equal(fwd.text, `s = '{"b":"C://H//agents//a//.codex//p"}'\n`, 'doubled forward slashes keep their style');
+});
+
+test('NIT1: line endings are kept; a seed with nothing to rewrite comes back byte-identical', () => {
+  const crlf = `a = 1\r\n# c '${R}'\r\n[t]\r\nb = '${R}'\r\n`;
+  assert.equal(iso(crlf).text, `a = 1\r\n# c '${R}'\r\n[t]\r\nb = '${A}'\r\n`);
+  const clean = 'model = "x"\r\n\r\n[tui]  # keep\r\nalt = "never"\r\narr = [ 1, 2 ,3 ]\r\nt = { a = 1, b = "two" }\r\n';
+  const out = iso(clean);
+  assert.equal(out.text, clean);
+  assert.equal(out.rewritten, 0);
+});
+
+test('NIT2 + boundaries: ~/.codex after a "/" is a URL path, not the profile; a path character before or after the root is not the root', () => {
+  const src = [`u = 'https://h/~/.codex/x'`, `v = '~/.codex/x'`, `w = 'a;~/.codex'`,
+    `p = 'X${R}'`, `q = '${R}2'`, `r = '${R}-backup'`, `s = 'C:\\Users\\uu\\.codex'`, `x = '\\\\?\\${R}\\m'`, ''].join('\n');
+  const lines = iso(src).text.split('\n');
+  assert.equal(lines[0], `u = 'https://h/~/.codex/x'`);
+  assert.equal(lines[1], `v = 'C:/H/agents/a/.codex/x'`);
+  assert.equal(lines[2], `w = 'a;C:/H/agents/a/.codex'`);
+  assert.deepEqual(lines.slice(3, 7), src.split('\n').slice(3, 7), 'X<root>, <root>2, <root>-backup and a lookalike user are not the root');
+  assert.equal(lines[7], `x = '\\\\?\\${A}\\m'`, 'the extended-length prefix still names the root');
+});
+
+test('NIT3: CODEX_HOME is a parsed key (bare, quoted, dotted, inline); the same text inside a string or a header is not', () => {
+  const src = [`"CODEX_HOME" = 'D:\\o'`, `env.CODEX_HOME = 'D:\\o'`, `t = { 'CODEX_HOME' = "D:\\\\o", k = 1 }`,
+    `desc = "a, CODEX_HOME = 'q'"`, `[projects.'${R}\\a]b'] # CODEX_HOME = 'q'`, `trust_level = 'trusted'`, ''].join('\n');
+  const lines = iso(src).text.split('\n');
+  assert.equal(lines[0], `"CODEX_HOME" = '${A}'`);
+  assert.equal(lines[1], `env.CODEX_HOME = '${A}'`);
+  assert.equal(lines[2], `t = { 'CODEX_HOME' = '${A}', k = 1 }`);
+  assert.deepEqual(lines.slice(3), src.split('\n').slice(3), 'string contents, a header holding "]" and its comment are untouched');
 });
