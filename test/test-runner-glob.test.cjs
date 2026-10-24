@@ -464,11 +464,12 @@ test('PIN: against the REAL test directory discovery is root tests plus only fol
   // MAIN-SYNC registry cache: + 1 (registry-read-cache).
   // MAIN-SYNC tasks cache: + 1 (tasks-read-cache).
   // MAIN-SYNC voice task writes by id: + 1 (voice-task-cache).
-  // INT 1.1.102: HALFCORES-OVERSUBSCRIBE: + 1 (harness-progress-199).
+  // INT 1.1.102 (re-pinned once for the merged tree, 525 + 5):
+  // HEAVY-CPU-CAP-199: + 1 (capped-render-lane-198); HALFCORES-OVERSUBSCRIBE: + 1 (harness-progress-199).
   // HERO-FEED-BRANCH live release line: + 1 (hero-feed-branch).
   // CODEX-MCP-ISOLATION: + 1 (codex-mcp-isolation).
   // AGY-TEARDOWN: + 1 (agy-teardown-tree-102).
-  assert.equal(files.length, 526, `the focused suite must retain its pre-fold file count, got ${files.length}`);
+  assert.equal(files.length, 530, `the focused suite must retain its pre-fold file count, got ${files.length}`);
   assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
   assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');
   assert.ok(files.includes(path.join('start-fixes-163', 'start-fixes-163-boot-submit.test.cjs')), 'the start-fixes feature folder is included');
