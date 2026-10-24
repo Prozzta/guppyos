@@ -10,6 +10,7 @@ const { execFileSync } = require('node:child_process');
 const { join, dirname, basename } = require('node:path');
 
 const HEAVYJOB_HELPER = join(__dirname, '..', '..', 'resources', 'heavyjob', 'bin', 'guppy-heavyjob.exe');
+let cachedHarnessMask; let cachedHarnessMaskSet = false;
 
 function cappedHeavyJob(env = process.env) {
   if (env.GUPPY_HEAVY_CPU_CAP === '1') return true;
@@ -72,7 +73,11 @@ function swiftShaderView(exe, mask = null, suppliedTmp) {
   const name = basename(exe); const from = dirname(exe);
   const root = dirname(dir);
   try {
-    for (const name of fs.readdirSync(root)) if (name.startsWith(`${basename(dir)}.part-`) || name.startsWith(`${basename(dir)}.broken-`)) fs.rmSync(join(root, name), { recursive: true, force: true });
+    for (const entry of fs.readdirSync(root)) {
+      const part = new RegExp(`^${basename(dir).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.part-(\\d+)$`).exec(entry);
+      const stalePart = part && Number(part[1]) !== process.pid && (() => { try { process.kill(Number(part[1]), 0); return false; } catch { return true; } })();
+      if (stalePart || entry.startsWith(`${basename(dir)}.broken-`) || /-plain$/.test(entry)) fs.rmSync(join(root, entry), { recursive: true, force: true });
+    }
   } catch { /* root does not exist yet */ }
   if (!viewReady(dir, from, sm)) {
     const part = `${dir}.part-${process.pid}`;
@@ -94,7 +99,10 @@ function swiftShaderView(exe, mask = null, suppliedTmp) {
 
 function harnessElectron(env = process.env) {
   const exe = require('electron');
-  return process.platform === 'win32' ? swiftShaderView(exe, swiftShaderMaskForHeavyJob(env)) : exe;
+  if (process.platform !== 'win32') return exe;
+  // A runner process keeps its affinity for life; avoid a PowerShell probe for every Electron launch.
+  if (!cachedHarnessMaskSet) { cachedHarnessMask = swiftShaderMaskForHeavyJob(env); cachedHarnessMaskSet = true; }
+  return swiftShaderView(exe, cachedHarnessMask);
 }
 
 module.exports = { harnessElectron, cappedHeavyJob, harnessCpuMask, halfCpuMask, swiftShaderMaskForHeavyJob, swiftShaderView };

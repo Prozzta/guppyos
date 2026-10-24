@@ -62,7 +62,10 @@ test('the native helper pins hard-cap mode and the exact 50% CPU rate (M1)', () 
   assert.match(native, /if \(!cap && !CpuRateEnabled\(job\)\) return;/, 'M9: fresh cap-off jobs skip invalid class-15 zero flags; a live cap-off still clears it');
   assert.match(native, /GUPPY_HEAVY_CPU_CAP.*cap \? "1" : "0"/, 'the joined command can size workers to the Job Object CPU share');
   assert.match(native, /self-query/, 'a joined Bash or PowerShell command can query its own Job Object rate');
-  assert.match(native, /QueryJob\(IntPtr\.Zero\)/, 'self-query asks Windows for the current process Job Object');
+  assert.match(native, /IsProcessInJob\(proc, job, out inJob\)/, 'a marker is trusted only while its process remains in the named job');
+  assert.match(native, /created == 0 \|\| created > childCreated/, 'ancestor walk rejects a parent created after its child');
+  assert.match(native, /MarkerRoot\(\).*guppy-heavyjob-markers/, 'breadcrumbs stay in a Guppy-owned folder');
+  assert.match(native, /CleanMarkers\(\)/, 'dead pid+creation-time breadcrumbs are cleaned');
   assert.match(native, /var rate = new CPU_RATE \{ ControlFlags = cap \? CPU_RATE_ENABLE \| CPU_RATE_HARD_CAP : 0, CpuRate = cap \? CPU_RATE_50_PERCENT : 0 \}/);
   assert.doesNotMatch(native, /LIMIT_AFFINITY|SetProcessAffinityMask/);
   assert.match(native, /return \"\{\\\"background\\\":\" \+ \(background \? \"true\" : \"false\"\) \+ \",\\\"cap\\\":\" \+ \(cap \? \"true\" : \"false\"\) \+ \",\\\"rate\\\":\" \+ \(cap \? CPU_RATE_50_PERCENT : 0\) \+ \",\\\"affinity\\\":null\}\"/,
@@ -346,6 +349,22 @@ test('CODEX-CMD-COMPUTED-SHELL-192: a shell named by a const of one string reads
 });
 
 const CSC =path.join(process.env.WINDIR || 'C:\\Windows', 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe');
+
+test('LIVE Bash join -> node self-query observes the outer hard cap and leaves no TEMP marker (B1)',
+  { skip: process.platform !== 'win32' || !fs.existsSync(path.join(__dirname, '..', 'resources', 'heavyjob', 'bin', 'guppy-heavyjob.exe')) ? 'Windows helper not built' : false, timeout: 30_000 },
+  () => {
+    const { spawnSync } = require('node:child_process');
+    const exe = path.join(__dirname, '..', 'resources', 'heavyjob', 'bin', 'guppy-heavyjob.exe');
+    const bash = path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Git', 'bin', 'bash.exe');
+    if (!fs.existsSync(bash)) return;
+    const id = `hcpu-b1-${process.pid}`;
+    const quote = (s) => `'${s.replace(/'/g, "'\\\"'\\\"'")}'`;
+    const r = spawnSync(bash, ['-lc', `${quote(exe)} join ${id} 0 1; ${quote(exe)} self-query`], { encoding: 'utf8', windowsHide: true });
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(JSON.parse(r.stdout.trim().split(/\r?\n/).at(-1)), { background: false, cap: true, rate: 5000, affinity: null });
+    const root = path.join(process.env.TEMP || os.tmpdir(), 'guppy-heavyjob-markers');
+    assert.ok(!fs.existsSync(root) || fs.readdirSync(root).length === 0, 'the consumed marker leaves no TEMP residue');
+  });
 
 test('LIVE cmd: the `&` join line leaves the command exactly as cmd runs it (output and exit code), and its processes are in the job',
   { skip: process.platform !== 'win32' ? 'cmd is Windows-only' : !fs.existsSync(CSC) ? `no in-box csc at ${CSC}` : false, timeout: 120_000 },

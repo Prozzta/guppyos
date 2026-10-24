@@ -98,3 +98,19 @@ test('a ready view (marker and executable) is used as it is, not rebuilt', () =>
     assert.ok(existsSync(join(view, 'sentinel')), 'the view was kept');
   });
 });
+
+test('dead partial and stale plain views are cleaned, but a live partial is retained (Jim NIT)', () => {
+  withTemp((dir) => {
+    const src = fakeDist(dir); const tmp = join(dir, 'tmp');
+    const root = join(tmp, 'guppy-electron-view'); mkdirSync(root, { recursive: true });
+    const version = require('electron/package.json').version;
+    swiftShaderView(src, 0xffffn, tmp);
+    mkdirSync(join(root, `${version}-plain`));
+    mkdirSync(join(root, `${version}-ffff.part-999999`));
+    mkdirSync(join(root, `${version}-ffff.part-${process.pid}`));
+    swiftShaderView(src, 0xffffn, tmp);
+    assert.ok(!existsSync(join(root, `${version}-plain`)));
+    assert.ok(!existsSync(join(root, `${version}-ffff.part-999999`)));
+    assert.ok(existsSync(join(root, `${version}-ffff.part-${process.pid}`)));
+  });
+});
