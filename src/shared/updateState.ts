@@ -66,13 +66,17 @@ export const REPO = 'Prozzta/guppyos';
 
 /** HERO-FEED-BRANCH: a plausible git ref (tag or branch name) to interpolate into
  *  a GitHub URL. Resolved from the API at runtime, so it is validated rather than
- *  trusted: one path segment or a few, no dots-only segments, no whitespace, no
- *  URL punctuation, at most 100 chars. */
+ *  trusted. Allowed: ASCII letters, digits, '.', '_' and '-', in one or more
+ *  '/'-separated segments that each start alphanumeric; no '..' anywhere; no
+ *  segment ending in '.' or '.lock'; at most 100 chars. Everything else (percent
+ *  escapes, backslashes, '#', ':', '@', '?', '//', whitespace, non-ASCII, zero-width
+ *  characters) is refused, so a ref can never bend the URL path it is put in. */
 export function isGitRef(value: unknown): value is string {
   return typeof value === 'string'
     && value.length > 0 && value.length <= 100
     && /^[A-Za-z0-9][A-Za-z0-9._-]*(\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/.test(value)
-    && !value.split('/').some((seg) => /^\.+$/.test(seg) || seg.endsWith('.lock'));
+    && !value.includes('..')
+    && !value.split('/').some((seg) => seg.endsWith('.') || seg.endsWith('.lock'));
 }
 
 /** HERO-FEED-BRANCH: where the Settings card's "full changelog" points. `ref` is

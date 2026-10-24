@@ -30,6 +30,11 @@ export function heroUrlFor(ref: string): string {
 }
 /** Plan copy and sponsors change on a human timescale. */
 const TTL_MS = 6 * 60 * 60 * 1000;
+/** After a FAILED refresh, no new request until this has passed; the stale cache
+ *  or the defaults are served meanwhile. Otherwise a refusing API (offline, rate
+ *  limited, 403) would cost two unauthenticated calls per Settings mount. A
+ *  forced refresh is the user asking, and goes through. */
+export const RETRY_AFTER_MS = 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 8000;
 
 type Fetch = (url: string, opts: { timeoutMs?: number }) => Promise<string>;
@@ -52,7 +57,7 @@ export async function resolveLiveRef(fetch: Fetch = getText): Promise<string> {
   }
 }
 
-export interface HeroCache { hero: HeroPayload; fetchedAt: number; ref?: string }
+export interface HeroCache { hero: HeroPayload; fetchedAt: number; ref?: string; lastAttempt?: number }
 export interface HeroResult {
   hero: HeroPayload;
   fetchedAt: number;
@@ -76,6 +81,10 @@ export async function loadHero(
   if (cached && !opts.force && Date.now() - cached.fetchedAt < TTL_MS) {
     return { hero: cached.hero, fetchedAt: cached.fetchedAt, stale: false, ref: cachedRef };
   }
+  const backingOff = cached && typeof cached.lastAttempt === 'number' && Date.now() - cached.lastAttempt < RETRY_AFTER_MS;
+  if (cached && !opts.force && backingOff) {
+    return { hero: cached.hero, fetchedAt: cached.fetchedAt, stale: true, ref: cachedRef };
+  }
 
   try {
     const ref = await resolveLiveRef();
@@ -90,6 +99,13 @@ export async function loadHero(
     } catch { /* cache is an optimisation */ }
     return { hero, fetchedAt: payload.fetchedAt, stale: false, ref };
   } catch {
+    // Remember the failure (negative cache) so the next mount inside
+    // RETRY_AFTER_MS serves what we have without asking again.
+    const failed: HeroCache = { ...(cached ?? { hero: DEFAULT_HERO, fetchedAt: 0 }), lastAttempt: Date.now() };
+    try {
+      mkdirSync(dirname(cachePath), { recursive: true });
+      writeFileSync(cachePath, JSON.stringify(failed));
+    } catch { /* cache is an optimisation */ }
     if (cached) return { hero: cached.hero, fetchedAt: cached.fetchedAt, stale: true, ref: cachedRef };
     return { hero: DEFAULT_HERO, fetchedAt: 0, stale: true, ref: null };
   }

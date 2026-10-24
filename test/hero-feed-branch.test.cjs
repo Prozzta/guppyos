@@ -14,20 +14,32 @@
  * renderer so the changelog link opens the same line. Offline it fails safe:
  * cache, then compiled-in defaults, never a guessed branch.
  *
- * Network is stubbed at the one https seam (fetchText.getText), so this runs
- * offline and every URL the feed asks for is on record.
+ * Round 2 (Creed's audit): the ref check refuses every character that could
+ * bend a URL path (percent escapes, backslashes, '#', ':', '@', '//', non-ASCII,
+ * zero-width); a failed refresh is remembered (negative cache) so a refusing
+ * API costs no more calls until RETRY_AFTER_MS; and getText, the one https
+ * seam, follows at most MAX_REDIRECTS hops and stays https on every one.
+ *
+ * Network is stubbed at that seam (fetchText.getText) for the feed tests, and
+ * at node:https.request for the seam's own tests, so this runs offline and
+ * every URL asked for is on record.
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const https = require('node:https');
+const { EventEmitter } = require('node:events');
 const loadTs = require('./load-ts.cjs');
 const { readSource } = require('./read-source.cjs');
+
+const BS = String.fromCharCode(92);
 
 // The seam: hero.ts (and every mutant of it, loaded beside the real file)
 // imports './fetchText', which resolves to this same cached module.
 const fetchText = loadTs('src/main/fetchText.ts');
+const realGetText = fetchText.getText;
 let requests = [];
 let routes = {};
 fetchText.getText = async (url) => {
@@ -37,7 +49,8 @@ fetchText.getText = async (url) => {
   return hit;
 };
 
-const { REPO, changelogUrl, isGitRef } = loadTs('src/shared/updateState.ts');
+const updateState = loadTs('src/shared/updateState.ts');
+const { REPO, changelogUrl, isGitRef } = updateState;
 const { DEFAULT_HERO } = loadTs('src/shared/heroPayload.ts');
 const realHero = loadTs('src/main/hero.ts');
 
@@ -45,6 +58,7 @@ const API = `https://api.github.com/repos/${REPO}`;
 const RAW_HOST = 'https://raw.githubusercontent.com/';
 const rawUrl = (ref) => `${RAW_HOST}${REPO}/${ref}/docs/hero.json`;
 const LIVE_HERO = { plan: { label: 'Live', blurb: 'Copy from the live line.' }, sponsor: null, notice: null };
+const HOUR = 60 * 60 * 1000;
 
 const tmpDirs = [];
 function cachePath() {
@@ -63,6 +77,7 @@ function github({ tag = 'v1.1.101', branch = 'release-1.1.101', heroOn } = {}) {
   if (branch !== null) routes[API] = JSON.stringify({ default_branch: branch });
   routes[rawUrl(heroOn ?? (typeof tag === 'string' && isGitRef(tag) ? tag : branch))] = JSON.stringify(LIVE_HERO);
 }
+const offline = () => { routes = {}; requests = []; };
 const rawRequests = () => requests.filter((u) => u.startsWith(RAW_HOST));
 const noMain = () => assert.ok(!requests.some((u) => /\/main\//.test(u)), `NEVER fetches main: ${requests.join(' ')}`);
 
@@ -87,7 +102,7 @@ const SCENARIOS = {
     noMain();
   },
   async badTag(h) {
-    for (const tag of ['v1 ../../evil', 42, '', 'a/../b', 'x'.repeat(101)]) {
+    for (const tag of ['v1 ../../evil', 42, '', 'a/../b', 'a%2fevil', `a${BS}evil`, 'x'.repeat(101)]) {
       github({ tag });
       const r = await h.loadHero(cachePath());
       assert.equal(r.ref, 'release-1.1.101', `AN UNUSABLE tag_name (${JSON.stringify(tag)}) FALLS TO THE DEFAULT BRANCH`);
@@ -96,7 +111,7 @@ const SCENARIOS = {
     }
   },
   async offlineNoCache(h) {
-    routes = {}; requests = [];
+    offline();
     const r = await h.loadHero(cachePath());
     assert.deepEqual(r.hero, DEFAULT_HERO, 'OFFLINE WITH NO CACHE RENDERS THE DEFAULTS');
     assert.equal(r.stale, true);
@@ -104,10 +119,10 @@ const SCENARIOS = {
     assert.deepEqual(rawRequests(), [], 'OFFLINE NEVER GUESSES A BRANCH TO FETCH');
   },
   async offlineCached(h) {
-    routes = {}; requests = [];
+    offline();
     const cp = cachePath();
     const hero = { ...LIVE_HERO, plan: { label: 'Cached', blurb: 'From last time.' } };
-    fs.writeFileSync(cp, JSON.stringify({ hero, fetchedAt: Date.now() - 7 * 60 * 60 * 1000, ref: 'v1.1.100' }));
+    fs.writeFileSync(cp, JSON.stringify({ hero, fetchedAt: Date.now() - 7 * HOUR, ref: 'v1.1.100' }));
     const r = await h.loadHero(cp);
     assert.equal(r.hero.plan.label, 'Cached', 'OFFLINE SERVES THE EXPIRED CACHE');
     assert.equal(r.stale, true);
@@ -134,6 +149,51 @@ const SCENARIOS = {
       assert.equal(r.ref, null, `A CACHE WITHOUT A USABLE REF (${JSON.stringify(extra)}) REPORTS NONE`);
       assert.equal(r.hero.plan.label, 'Live');
     }
+  },
+  // L1: a refusing API is asked once per RETRY_AFTER_MS, not twice per mount.
+  async negativeCacheNoCache(h) {
+    offline();
+    const cp = cachePath();
+    await h.loadHero(cp);
+    const r = await h.loadHero(cp);
+    assert.equal(requests.length, 2, 'A FAILED REFRESH IS NOT RETRIED WITHIN THE BACKOFF (two mounts = 2 requests, not 4)');
+    assert.deepEqual(r.hero, DEFAULT_HERO);
+    assert.equal(r.stale, true);
+    assert.equal(r.ref, null);
+  },
+  async negativeCacheStale(h) {
+    offline();
+    const cp = cachePath();
+    fs.writeFileSync(cp, JSON.stringify({ hero: LIVE_HERO, fetchedAt: Date.now() - 7 * HOUR, ref: 'v1.1.100' }));
+    await h.loadHero(cp);
+    const r = await h.loadHero(cp);
+    assert.equal(requests.length, 2, 'A FAILED REFRESH OVER A STALE CACHE IS NOT RETRIED WITHIN THE BACKOFF');
+    assert.equal(r.hero.plan.label, 'Live', 'the stale cache is still served');
+    assert.equal(r.ref, 'v1.1.100');
+    assert.equal(r.stale, true);
+    const onDisk = JSON.parse(fs.readFileSync(cp, 'utf8'));
+    assert.equal(onDisk.hero.plan.label, 'Live', 'the failure note keeps the cached payload');
+    assert.ok(Date.now() - onDisk.lastAttempt < 5000, 'THE FAILURE IS RECORDED AS lastAttempt');
+  },
+  async negativeCacheExpires(h) {
+    offline();
+    const cp = cachePath();
+    fs.writeFileSync(cp, JSON.stringify({ hero: LIVE_HERO, fetchedAt: Date.now() - 7 * HOUR, lastAttempt: Date.now() - h.RETRY_AFTER_MS - 1000 }));
+    await h.loadHero(cp);
+    assert.equal(requests.length, 2, 'THE BACKOFF EXPIRES: an old lastAttempt lets the refresh run again');
+    // ...and comes back online: the next successful refresh clears the note.
+    github();
+    fs.writeFileSync(cp, JSON.stringify({ hero: LIVE_HERO, fetchedAt: Date.now() - 7 * HOUR, lastAttempt: Date.now() - h.RETRY_AFTER_MS - 1000 }));
+    const r = await h.loadHero(cp);
+    assert.equal(r.stale, false);
+    assert.equal(JSON.parse(fs.readFileSync(cp, 'utf8')).lastAttempt, undefined, 'A SUCCESSFUL REFRESH DROPS lastAttempt');
+  },
+  async negativeCacheForce(h) {
+    offline();
+    const cp = cachePath();
+    fs.writeFileSync(cp, JSON.stringify({ hero: LIVE_HERO, fetchedAt: Date.now() - 7 * HOUR, lastAttempt: Date.now() - 1000 }));
+    await h.loadHero(cp, { force: true });
+    assert.equal(requests.length, 2, 'A FORCED REFRESH IS THE USER ASKING AND GOES THROUGH THE BACKOFF');
   }
 };
 
@@ -149,12 +209,88 @@ test('the changelog link follows the resolved ref and never names a branch', () 
   }
 });
 
-test('isGitRef admits tags and branches and refuses what cannot go in a URL path', () => {
-  for (const ok of ['v1.1.101', 'release-1.1.101', 'feat/x', 'a.b-c_d']) assert.equal(isGitRef(ok), true, ok);
-  for (const bad of ['', 'a b', '..', 'a/../b', 'x.lock', 'a?b', '/x', 'x/', '-x', 'x'.repeat(101), 7, null, undefined, {}]) {
-    assert.equal(isGitRef(bad), false, JSON.stringify(bad));
+// M1: every value that could bend a URL path. Written against a module so the
+// census can run the table on a widened isGitRef.
+const REF_OK = ['v1.1.101', 'release-1.1.101', 'feat/x', 'a.b-c_d', 'a', 'v1.1.101-rc.1'];
+const REF_BAD = [
+  '', 'a b', '..', 'a/../b', 'x.lock', 'a?b', '/x', 'x/', '-x', '.x', 'x'.repeat(101),
+  'a%2eb', 'a%2fb', `a${BS}b`, `a${BS}..${BS}b`, 'a#b', 'a:b', 'a@b', 'a//b',
+  '\uFF21b', '\u00E9', 'v1\u200B', 'a/.b', 'v1..2', 'a.', 'a./b', 'a\u0000b', 'a\nb',
+  'https://evil.example/x', 7, null, undefined, {}, ['v1.1.101']
+];
+function refTable(mod) {
+  for (const ok of REF_OK) assert.equal(mod.isGitRef(ok), true, `isGitRef accepts ${ok}`);
+  for (const bad of REF_BAD) {
+    assert.equal(mod.isGitRef(bad), false, `isGitRef MUST REFUSE ${JSON.stringify(bad)}`);
+    if (typeof bad === 'string') {
+      // Belt and braces: even if accepted, nothing here escapes the repo path.
+      assert.equal(mod.changelogUrl(bad), `https://github.com/${REPO}/releases`);
+    }
   }
-});
+}
+test('isGitRef admits tags and branches and refuses what cannot go in a URL path', () => refTable(updateState));
+
+// L2: the https seam itself, driven through a fake node:https.request.
+function fakeHttps(plan) {
+  const real = https.request;
+  const seen = [];
+  https.request = (url, _opts, cb) => {
+    seen.push(url);
+    const req = new EventEmitter();
+    req.setTimeout = () => {};
+    req.destroy = (err) => { if (err) req.emit('error', err); };
+    req.end = () => {
+      const p = plan(url);
+      const res = new EventEmitter();
+      res.statusCode = p.status;
+      res.headers = p.headers ?? {};
+      res.resume = () => {};
+      res.setEncoding = () => {};
+      process.nextTick(() => {
+        cb(res);
+        if (p.body !== undefined) res.emit('data', p.body);
+        res.emit('end');
+      });
+    };
+    return req;
+  };
+  return { seen, restore: () => { https.request = real; } };
+}
+const redirectTo = (location) => ({ status: 302, headers: { location } });
+const page = (body) => ({ status: 200, body });
+
+const HTTPS_SCENARIOS = {
+  async followsAFewHops(getText) {
+    const net = fakeHttps((url) => url.endsWith('/1') ? redirectTo('https://a.example/2')
+      : url.endsWith('/2') ? redirectTo('/3') : page('hello'));
+    try {
+      assert.equal(await getText('https://a.example/1'), 'hello');
+      assert.deepEqual(net.seen, ['https://a.example/1', 'https://a.example/2', 'https://a.example/3'], 'a relative Location resolves against the hop that sent it');
+    } finally { net.restore(); }
+  },
+  async stopsAtTheHopLimit(getText) {
+    let n = 0;
+    // Bounded, so a mutant with no hop limit lands on a page instead of hanging.
+    const net = fakeHttps(() => n < 50 ? redirectTo(`https://a.example/${++n}`) : page('end'));
+    try {
+      await assert.rejects(getText('https://a.example/0'), /too many redirects/, 'A REDIRECT LOOP FAILS AT THE HOP LIMIT');
+      assert.equal(net.seen.length, 6, 'the first request plus MAX_REDIRECTS hops, no more');
+    } finally { net.restore(); }
+  },
+  async staysHttpsOnEveryHop(getText) {
+    let n = 0;
+    const net = fakeHttps(() => n++ < 50 ? redirectTo('http://a.example/plain') : page('end'));
+    try {
+      await assert.rejects(getText('https://a.example/1'), /https only/, 'A REDIRECT TO http IS REFUSED');
+      assert.deepEqual(net.seen, ['https://a.example/1'], 'the http hop is never requested');
+      await assert.rejects(getText('http://a.example/1'), /https only/, 'a plain-http URL is refused before any request');
+      assert.deepEqual(net.seen, ['https://a.example/1']);
+    } finally { net.restore(); }
+  }
+};
+for (const [name, run] of Object.entries(HTTPS_SCENARIOS)) {
+  test(`getText: ${name}`, () => run(realGetText));
+}
 
 test('no shipped file hard-codes the main branch for the hero feed or the changelog', () => {
   const hero = readSource('src/main/hero.ts');
@@ -174,8 +310,9 @@ test('no shipped file hard-codes the main branch for the hero feed or the change
   assert.match(readSource('src/main/index.ts'), /ipcMain\.handle\('hero:payload'[\s\S]{0,120}loadHero\(/);
 });
 
-// ── mutation census: each edit to the real hero.ts must die on a named assertion ──
-const MUTANTS = [
+// ── mutation census: each edit to a real file must die on a named assertion ──
+const REF_CLASS = '[A-Za-z0-9._-]*';
+const HERO_MUTANTS = [
   { name: 'M1 the ref is main again', dies: /THE REF IS THE LATEST RELEASE TAG/,
     edits: [['const ref = await resolveLiveRef();', "const ref = 'main';"]] },
   { name: 'M2 only the default branch is consulted', dies: /THE REF IS THE LATEST RELEASE TAG/,
@@ -183,37 +320,71 @@ const MUTANTS = [
   { name: 'M3 the tag is interpolated unvalidated', dies: /FALLS TO THE DEFAULT BRANCH|NEVER REACHES A URL/,
     edits: [['if (!isGitRef(value)) throw', "if (typeof value !== 'string') throw"]] },
   { name: 'M4 offline guesses main', dies: /OFFLINE NEVER GUESSES A BRANCH TO FETCH/,
-    edits: [['  } catch {\n    if (cached) return', "  } catch {\n    void getText(heroUrlFor('main'), { timeoutMs: FETCH_TIMEOUT_MS }).catch(() => undefined);\n    if (cached) return"]] },
+    edits: [['  } catch {\n    // Remember', "  } catch {\n    void getText(heroUrlFor('main'), { timeoutMs: FETCH_TIMEOUT_MS }).catch(() => undefined);\n    // Remember"]] },
   { name: 'M5 the ref is not cached', dies: /THE REF IS CACHED BESIDE THE PAYLOAD/,
     edits: [['const payload: HeroCache = { hero, fetchedAt: Date.now(), ref };', 'const payload: HeroCache = { hero, fetchedAt: Date.now() };']] },
   { name: 'M6 a stale answer drops its ref', dies: /THE CACHED REF COMES BACK WITH THE CACHED PAYLOAD/,
-    edits: [['stale: true, ref: cachedRef };', 'stale: true, ref: null };']] },
+    edits: [['    if (cached) return { hero: cached.hero, fetchedAt: cached.fetchedAt, stale: true, ref: cachedRef };\n    return { hero: DEFAULT_HERO',
+             '    if (cached) return { hero: cached.hero, fetchedAt: cached.fetchedAt, stale: true, ref: null };\n    return { hero: DEFAULT_HERO']] },
   { name: 'M7 a fresh cache drops its ref', dies: /A FRESH CACHE STILL CARRIES ITS REF/,
     edits: [['stale: false, ref: cachedRef };', 'stale: false, ref: null };']] },
   { name: 'M8 the cached ref is trusted', dies: /REPORTS NONE/,
-    edits: [['cached && isGitRef(cached.ref) ? cached.ref : null', 'cached && typeof cached.ref === \'string\' ? cached.ref : null']] }
+    edits: [['cached && isGitRef(cached.ref) ? cached.ref : null', "cached && typeof cached.ref === 'string' ? cached.ref : null"]] },
+  { name: 'M9 no negative cache', dies: /NOT RETRIED WITHIN THE BACKOFF/,
+    edits: [["const backingOff = cached && typeof cached.lastAttempt === 'number' && Date.now() - cached.lastAttempt < RETRY_AFTER_MS;", 'const backingOff = false;']] },
+  { name: 'M10 the failure is not recorded', dies: /NOT RETRIED WITHIN THE BACKOFF|RECORDED AS lastAttempt/,
+    edits: [['const failed: HeroCache = { ...(cached ?? { hero: DEFAULT_HERO, fetchedAt: 0 }), lastAttempt: Date.now() };', 'const failed: HeroCache = { ...(cached ?? { hero: DEFAULT_HERO, fetchedAt: 0 }) };']] },
+  { name: 'M11 the backoff never expires', dies: /THE BACKOFF EXPIRES/,
+    edits: [['Date.now() - cached.lastAttempt < RETRY_AFTER_MS;', 'Date.now() - cached.lastAttempt < Infinity;']] },
+  { name: 'M12 a forced refresh is backed off too', dies: /A FORCED REFRESH IS THE USER ASKING/,
+    edits: [['if (cached && !opts.force && backingOff) {', 'if (cached && backingOff) {']] }
+];
+const REF_MUTANTS = [
+  { name: "J3 '%' allowed", dies: /MUST REFUSE "a%2/,
+    edits: [[REF_CLASS, '[A-Za-z0-9._%-]*']], count: 2 },
+  { name: 'J4 backslash allowed', dies: /MUST REFUSE "a\\\\/,
+    edits: [[REF_CLASS, `[A-Za-z0-9._${BS}${BS}-]*`]], count: 2 },
+  { name: "J5 '..' allowed", dies: /MUST REFUSE "v1\.\.2"/,
+    edits: [["    && !value.includes('..')\n", '']] },
+  { name: 'J6 a trailing dot allowed', dies: /MUST REFUSE "a\."/,
+    edits: [["seg.endsWith('.') || seg.endsWith('.lock')", "seg.endsWith('.lock')"]] },
+  { name: 'J7 non-ASCII allowed', dies: /MUST REFUSE "Ａb"/,
+    edits: [['/^[A-Za-z0-9][A-Za-z0-9._-]*(\\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/', '/^[\\p{L}0-9][\\p{L}0-9._-]*(\\/[\\p{L}0-9][\\p{L}0-9._-]*)*$/u']] }
+];
+const HTTPS_MUTANTS = [
+  { name: 'F1 no hop limit', dies: /A REDIRECT LOOP FAILS AT THE HOP LIMIT/,
+    edits: [['if (hop >= MAX_REDIRECTS) {', 'if (false) {']] },
+  { name: 'F2 http allowed on a hop', dies: /A REDIRECT TO http IS REFUSED/,
+    edits: [["if (!/^https:\\/\\//i.test(url)) return Promise.reject(new Error('https only'));", "if (hop === 0 && !/^https:\\/\\//i.test(url)) return Promise.reject(new Error('https only'));"]] }
 ];
 
-function mutate(src, edits) {
+function mutate(src, edits, count = 1) {
   let out = src;
   for (const [from, to] of edits) {
-    assert.equal(out.split(from).length - 1, 1, `mutant anchor must occur exactly once: ${from}`);
-    out = out.replace(from, to);
+    assert.equal(out.split(from).length - 1, count, `mutant anchor must occur exactly ${count}x: ${from}`);
+    out = out.split(from).join(to);
   }
   return out;
 }
 
-test('mutation census: every mutant of hero.ts dies, the real file survives', async () => {
-  const src = readSource('src/main/hero.ts');
-  for (const run of Object.values(SCENARIOS)) await run(realHero);
-  assert.equal(MUTANTS.length, 8);
-  for (const m of MUTANTS) {
-    const mod = loadTs.fromText('src/main/hero.ts', mutate(src, m.edits));
+async function census(file, mutants, runAll) {
+  const src = readSource(file);
+  for (const m of mutants) {
+    const mod = loadTs.fromText(file, mutate(src, m.edits, m.count));
     let death = null;
-    for (const run of Object.values(SCENARIOS)) {
-      try { await run(mod); } catch (e) { death = e; break; }
-    }
+    try { await runAll(mod); } catch (e) { death = e; }
     assert.ok(death, `${m.name} must die`);
     assert.match(String(death.message), m.dies, `${m.name} died elsewhere: ${death.message}`);
   }
+}
+
+test('mutation census: every mutant dies, the real files survive', async () => {
+  for (const run of Object.values(SCENARIOS)) await run(realHero);
+  refTable(updateState);
+  for (const run of Object.values(HTTPS_SCENARIOS)) await run(realGetText);
+  assert.equal(HERO_MUTANTS.length + REF_MUTANTS.length + HTTPS_MUTANTS.length, 19, '12 hero.ts + 5 isGitRef + 2 getText');
+
+  await census('src/main/hero.ts', HERO_MUTANTS, async (mod) => { for (const run of Object.values(SCENARIOS)) await run(mod); });
+  await census('src/shared/updateState.ts', REF_MUTANTS, (mod) => refTable(mod));
+  await census('src/main/fetchText.ts', HTTPS_MUTANTS, async (mod) => { for (const run of Object.values(HTTPS_SCENARIOS)) await run(mod.getText); });
 });
