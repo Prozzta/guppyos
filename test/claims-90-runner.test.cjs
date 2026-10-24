@@ -194,44 +194,91 @@ test('the addendum check names a changed file or another snapshot; refs at T_s c
   assert.equal(valueAt(`${log}\n${b} ${z} X <x> 300 +0000\tdelete`, 400), null, 'deleted before T_s');
 });
 
-test('C0b: a memory.md Read goes to the T_s copy, Read only; the leak check accepts a live path only when the hook rewrote it', () => {
-  const { memoryMdOf } = require('./claims-90/memory-md.cjs');
-  const { settingsFor, readTranscript } = require('./claims-90/answerer.cjs');
+test('C0b: memory.md reads (Read, or a read-only grep/cat/head/tail/sed -n) go to the T_s copy; the leak check accepts a live path only when the hook allowed that call', () => {
+  const { memoryMdOf, memoryMdCommand } = require('./claims-90/memory-md.cjs');
+  const { settingsFor, readTranscript, memoryMdUse } = require('./claims-90/answerer.cjs');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'c90-mmd-'));
   const sbx = path.join(dir, 'hive');
   fs.mkdirSync(path.join(sbx, 'agents', 'a'), { recursive: true });
-  fs.writeFileSync(path.join(sbx, 'agents', 'a', 'memory.md'), 'x');
+  fs.writeFileSync(path.join(sbx, 'agents', 'a', 'memory.md'), '## claim-history-c-1\nthe deploy moved to Friday after the freeze was lifted by god\n');
   const copy = path.join(sbx, 'agents', 'a', 'memory.md');
-  for (const live of ['C:/Dunder/hive/agents/a/memory.md', 'C:\\Dunder\\hive\\agents\\a\\memory.md', '/c/Dunder/hive/agents/a/memory.md']) {
+  const H = sbx.replace(/\\/g, '/');
+  for (const live of ['C:/Dunder/hive/agents/a/memory.md', 'C:\\Dunder\\hive\\agents\\a\\memory.md', '/c/Dunder/hive/agents/a/memory.md', 'c:/dunder/HIVE/agents/a/memory.md']) {
     assert.deepEqual(memoryMdOf(live, sbx), { kind: 'live', agent: 'a', target: copy }, live);
   }
   assert.deepEqual(memoryMdOf(copy, sbx), { kind: 'sandbox', agent: 'a', target: copy });
   for (const no of ['C:/Dunder/hive/agents/b/memory.md', 'C:/Dunder/hive/agents/a/../a/memory.md', 'C:/Dunder/hive/agents/a/inbox/memory.md',
-    'C:/Dunder/hive/memory.md', 'C:/Dunder/hive/agents/a/memory.md.bak', path.join(sbx, 'agents', 'a', 'other.md'), null]) {
+    'C:/Dunder/hive/memory.md', 'C:/Dunder/hive/agents/a/memory.md.bak', path.join(sbx, 'agents', 'a', 'other.md'), 'agents/a/memory.md', null]) {
     assert.equal(memoryMdOf(no, sbx), null, String(no));
+  }
+  // Bash: the allowed shapes, live rewritten, sandbox kept.
+  const ok = {
+    'grep -n "c-1" C:/Dunder/hive/agents/a/memory.md': ['grep', 'rewritten', `grep -n "c-1" '${H}/agents/a/memory.md'`],
+    'grep -n -A 5 c-1 "$MUNDER_HIVE_ROOT/agents/a/memory.md" | head -20': ['grep', 'sandbox', null],
+    'grep -n c-1 $MUNDER_HIVE_ROOT/agents/a/memory.md #full': ['grep', 'sandbox', null],
+    "sed -n '/claim-history-c-1/,+12p' /c/Dunder/hive/agents/a/memory.md": ['sed', 'rewritten', null],
+    'sed -n 10,20p C:/Dunder/hive/agents/a/memory.md': ['sed', 'rewritten', null],
+    'tail -n 50 C:/Dunder/hive/agents/a/memory.md | grep -i deploy': ['tail', 'rewritten', null],
+    'head -40 C:/Dunder/hive/agents/a/memory.md': ['head', 'rewritten', null],
+    "cat 'C:\\Dunder\\hive\\agents\\a\\memory.md'": ['cat', 'rewritten', `cat '${H}/agents/a/memory.md'`],
+  };
+  for (const [c, [cmd, kind, out]] of Object.entries(ok)) {
+    const r = memoryMdCommand(c, sbx);
+    assert.ok(r, c);
+    assert.deepEqual([r.cmd, r.kind, r.agents], [cmd, kind, ['a']], c);
+    if (kind === 'sandbox') assert.equal(r.command, c, 'a sandbox command runs as typed');
+    else assert.ok(!/Dunder[\\/]+hive/i.test(r.command) && r.command.includes(H), 'the live path is replaced by the copy');
+    if (out) assert.equal(r.command, out);
+  }
+  for (const c of ['cd $MUNDER_HIVE_ROOT && grep x agents/a/memory.md', 'grep x C:/Dunder/hive/agents/a/memory.md > o', 'grep x C:/Dunder/hive/agents/a/memory.md; id',
+    'grep x C:/Dunder/hive/agents/a/memory.md C:/Dunder/hive/tasks.json', 'grep -r x C:/Dunder/hive/agents/a/memory.md', 'grep -f C:/Dunder/hive/x C:/Dunder/hive/agents/a/memory.md',
+    "sed -n '1w o' C:/Dunder/hive/agents/a/memory.md", "sed -n 'e id' C:/Dunder/hive/agents/a/memory.md", 'sed -i s/a/b/ C:/Dunder/hive/agents/a/memory.md', 'sed 1p C:/Dunder/hive/agents/a/memory.md',
+    'grep x C:/Dunder/hive/agents/a/memory.md | sort', 'grep x C:/Dunder/hive/agents/a/memory.md | head -5 C:/Dunder/hive/tasks.json', 'grep x C:/Dunder/hive/agents/a/memory.md || id',
+    'grep "$(id)" C:/Dunder/hive/agents/a/memory.md', 'grep x `id` C:/Dunder/hive/agents/a/memory.md', 'grep x $HOME/agents/a/memory.md', 'grep x C:/Dunder/hive/agents/*/memory.md',
+    'grep x C:/Dunder/hive/agents/b/memory.md', 'grep x agents/a/memory.md', 'tail -f C:/Dunder/hive/agents/a/memory.md', 'grep x', 'awk 1 C:/Dunder/hive/agents/a/memory.md',
+    'grep x C:/Dunder/hive/agents/a/memory.md # note']) {
+    assert.equal(memoryMdCommand(c, sbx), null, c);
   }
   const shape = { matcher: '*', timeout: 30, events: ['PreToolUse'] };
   const st = settingsFor(shape, 'http://127.0.0.1:1/hook/t', 'X:/b.txt', 'X:/jail/hive/agents/a/tool-output', 'X:/jail/hive');
   assert.ok(st.permissions.allow.includes('Read(//x/jail/hive/agents/*/memory.md)'), 'the sandbox copy is readable');
-  assert.ok(!st.permissions.allow.some((r) => /^Grep|Dunder\/hive/.test(r)), 'no Grep, nothing live');
+  assert.deepEqual(st.permissions.allow.filter((r) => r.startsWith('Bash')), ['Bash(memory:*)'], 'no settings rule allows grep/cat: only the hook does, per call');
+  assert.ok(!st.permissions.allow.some((r) => /dunder\/hive/i.test(r)), 'no allow rule reaches the live tree');
   assert.ok(!st.permissions.deny.includes('Read(//c/Dunder/hive/**)') && st.permissions.deny.includes('Edit(//c/Dunder/hive/**)'), 'a deny rule would beat the rewrite; Edit stays denied');
-  assert.ok(!st.permissions.allow.some((r) => /dunder\/hive/i.test(r)), 'and no allow rule reaches the live tree');
-  const t = path.join(dir, 't.jsonl');
+  // Leak check.
+  const tf = path.join(dir, 't.jsonl');
   const use = (id, name, input) => JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name, input }] } });
-  fs.writeFileSync(t, [
+  const g = 'grep -n c-1 C:/Dunder/hive/agents/a/memory.md';
+  fs.writeFileSync(tf, [
     use('1', 'Read', { file_path: 'C:/Dunder/hive/agents/a/memory.md' }),
     use('2', 'Read', { file_path: 'C:/Dunder/hive/agents/a/memory.md' }),
     use('3', 'Read', { file_path: copy }),
     use('4', 'Grep', { pattern: 'x', path: 'C:/Dunder/hive/agents/a/memory.md' }),
-    use('5', 'Bash', { command: 'grep x C:/Dunder/hive/agents/a/memory.md' }),
+    use('5', 'Bash', { command: g }),
+    use('6', 'Bash', { command: g }),
+    use('7', 'Bash', { command: 'cat C:/Dunder/hive/tasks.json' }),
+    use('8', 'Bash', { command: g + ' | sort' }),
   ].join('\n'));
-  const r = readTranscript(t, 'X:/jail/hive/agents/a/tool-output', [/[\\/]+Dunder[\\/]+hive/i], { sandboxHive: sbx, rewritten: new Set(['1']) });
-  assert.deepEqual(r.leaks.map((l) => l.id), ['2', '2', '4', '5'], 'not rewritten = a leak; Grep and Bash stay leaks');
-  assert.deepEqual(r.memoryMdReads.map((m) => [m.id, m.kind]), [['1', 'rewritten'], ['3', 'sandbox']]);
+  const hooked = new Map([
+    ['1', { toolUseId: '1', memoryMd: { tool: 'Read', kind: 'rewritten' } }],
+    ['5', { toolUseId: '5', command: g, memoryMd: { tool: 'grep', kind: 'rewritten' } }],
+    ['7', { toolUseId: '7', command: 'cat C:/Dunder/hive/tasks.json', memoryMd: { tool: 'cat', kind: 'rewritten' } }],
+    ['8', { toolUseId: '8', command: g, memoryMd: { tool: 'grep', kind: 'rewritten' } }],
+  ]);
+  const r = readTranscript(tf, 'X:/jail/hive/agents/a/tool-output', [/[\\/]+Dunder[\\/]+hive/i], { sandboxHive: sbx, hooked });
+  assert.deepEqual([...new Set(r.leaks.map((l) => l.id))], ['2', '4', '6', '7', '8'], 'no hook row, a command the rule refuses, or a command other than the hooked one: a leak');
+  assert.deepEqual(r.memoryMdCalls.map((m) => [m.id, m.tool, m.kind]), [['1', 'Read', 'rewritten'], ['3', 'Read', 'sandbox'], ['5', 'grep', 'rewritten']]);
+  const use1 = memoryMdUse(r.memoryMdCalls, 'Per its history: the deploy moved to Friday after the freeze was lifted.', sbx);
+  assert.deepEqual(use1, { calls: 3, byCommand: { Read: 2, grep: 1 }, rewritten: 2, sandbox: 1, quoted: true });
+  assert.equal(memoryMdUse(r.memoryMdCalls, 'not in memory', sbx).quoted, false);
+  assert.deepEqual(memoryMdUse([], 'x', sbx), { calls: 0, byCommand: {}, rewritten: 0, sandbox: 0, quoted: false });
+  // The serve hook: the call limit first; Read and Bash through the shared rule; any other live Read denied.
   const child = fs.readFileSync(path.join(__dirname, 'claims-90', 'answer-child.cjs'), 'utf8');
-  assert.match(child, /p\.tool_name === 'Read' \? memoryMdOf\(/, 'the serve hook rewrites Read only');
-  assert.ok(child.indexOf("row.denied = 'call limit'") < child.indexOf('memoryMdOf(p.tool_input'), 'the 5-call limit comes first');
-  assert.match(child, /permissionDecision: 'allow', updatedInput: \{ \.\.\.p\.tool_input, file_path: m\.target \}/);
-  assert.ok(child.indexOf('memoryMdOf(p.tool_input') < child.indexOf("row.denied = 'live hive'"), 'any other live Read is denied by the hook');
+  const at = (x) => { const i = child.indexOf(x); assert.ok(i > 0, x); return i; };
+  assert.ok(at("row.denied = 'call limit'") < at('memoryMdOf(p.tool_input'), 'the 5-call limit comes first');
+  assert.ok(at('memoryMdOf(p.tool_input') < at("row.denied = 'live hive'"));
+  assert.match(child, /permissionDecision: 'allow', updatedInput: \{ \.\.\.p\.tool_input, file_path: m\.target \} \}/);
+  assert.match(child, /p\.tool_name === 'Bash' \? memoryMdCommand\(command, hive\)/);
+  assert.match(child, /permissionDecision: 'allow', updatedInput: \{ \.\.\.p\.tool_input, command: b\.command \} \}/);
   fs.rmSync(dir, { recursive: true, force: true });
 });

@@ -24,7 +24,7 @@ const http = require('node:http');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { createRequire } = require('node:module');
-const { memoryMdOf } = require('./memory-md.cjs');
+const { memoryMdOf, memoryMdCommand } = require('./memory-md.cjs');
 
 const spec = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 const out = fs.openSync(spec.out, 'w');
@@ -378,10 +378,10 @@ function inProcessFork(runWorker, deps) {
           fs.appendFileSync(spec.serve.hookLogFile, `${JSON.stringify(row)}\n`);
           return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: `The limit is ${spec.serve.maxCalls} tool calls.` } };
         }
-        // C0b: a Read of an agent's memory.md goes to the sandbox's T_s copy (Read only).
+        // C0b: a Read of an agent's memory.md goes to the sandbox's T_s copy.
         const m = p.tool_name === 'Read' ? memoryMdOf(p.tool_input?.file_path, hive) : null;
         if (m) {
-          row.memoryMd = { kind: m.kind === 'live' ? 'rewritten' : 'sandbox', agent: m.agent };
+          row.memoryMd = { tool: 'Read', kind: m.kind === 'live' ? 'rewritten' : 'sandbox', agents: [m.agent] };
           fs.appendFileSync(spec.serve.hookLogFile, `${JSON.stringify(row)}\n`);
           if (m.kind === 'live') return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow', updatedInput: { ...p.tool_input, file_path: m.target } } };
           return {};
@@ -391,6 +391,14 @@ function inProcessFork(runWorker, deps) {
           row.denied = 'live hive';
           fs.appendFileSync(spec.serve.hookLogFile, `${JSON.stringify(row)}\n`);
           return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'The live hive is not readable here.' } };
+        }
+        // C0b option B: a read-only grep/cat/head/tail/sed -n of memory.md runs on the T_s copy. No settings
+        // rule allows it; this allow is the only way it runs (anything else in Bash stays refused).
+        const b = p.tool_name === 'Bash' ? memoryMdCommand(command, hive) : null;
+        if (b) {
+          row.memoryMd = { tool: b.cmd, kind: b.kind, agents: b.agents };
+          fs.appendFileSync(spec.serve.hookLogFile, `${JSON.stringify(row)}\n`);
+          return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow', updatedInput: { ...p.tool_input, command: b.command } } };
         }
       } else if (event === 'PostToolUse') {
         try { updatedToolOutput = hooks.condensedToolOutput(asker, { ...p, transport: 'http' }); } catch { updatedToolOutput = null; }

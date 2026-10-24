@@ -28,7 +28,7 @@ const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { drillEnv } = require('../claims-drill/runner.cjs');
 const R = require('./run.cjs');
-const { memoryMdOf } = require('./memory-md.cjs');
+const { memoryMdOf, memoryMdCommand } = require('./memory-md.cjs');
 const Condense = require('../load-ts.cjs')(path.join(__dirname, '..', '..', 'src', 'main', 'toolOutputCondense.ts'));
 
 const REPO = path.resolve(__dirname, '..', '..');
@@ -167,6 +167,23 @@ function itemStyle(calls = []) {
   };
 }
 
+/**
+ * God 21:45: memory.md use per item, by command and by path form, and whether the answer quotes it
+ * (any 40-char run of the answer, whitespace folded, found in a memory.md copy the item read). Counts only.
+ */
+function memoryMdUse(calls = [], answer = null, sandboxHive = null) {
+  const byCommand = {};
+  for (const c of calls) byCommand[c.tool] = (byCommand[c.tool] ?? 0) + 1;
+  const fold = (x) => x.replace(/\s+/g, ' ').trim();
+  let quoted = false;
+  if (calls.length && answer && sandboxHive) {
+    const text = [...new Set(calls.flatMap((c) => c.agents))].map((a) => { try { return fold(fs.readFileSync(path.join(sandboxHive, 'agents', a, 'memory.md'), 'utf8')); } catch { return ''; } }).join('\n');
+    const ans = fold(answer);
+    for (let i = 0; i + 40 <= ans.length && !quoted; i += 5) quoted = text.includes(ans.slice(i, i + 40));
+  }
+  return { calls: calls.length, byCommand, rewritten: calls.filter((c) => c.kind === 'rewritten').length, sandbox: calls.filter((c) => c.kind === 'sandbox').length, quoted };
+}
+
 const filesIn = (dir) => { try { return dir ? fs.readdirSync(dir, { recursive: true }).length : 0; } catch { return 0; } };
 
 /** What the session did, from its stream-json transcript. Text stays local; the row holds counts. */
@@ -183,10 +200,19 @@ function readTranscript(file, allowedRead, liveRes, memoryMd = null) {
     }
   }
   const leaks = [];
-  const memoryMdReads = [];
+  // C0b: a memory.md read is not a leak when the serve hook allowed that very call (hooks.jsonl row with
+  // memoryMd, same command) and it passes the same rule here; a sandbox-path Read needs no hook row.
+  const memoryMdCalls = [];
   for (const u of uses) {
-    const m = u.name === 'Read' && memoryMd ? memoryMdOf(u.input?.file_path, memoryMd.sandboxHive) : null;
-    if (m && (m.kind === 'sandbox' || memoryMd.rewritten.has(u.id))) { memoryMdReads.push({ id: u.id, kind: m.kind === 'live' ? 'rewritten' : 'sandbox', agent: m.agent }); continue; }
+    const h = memoryMd?.hooked.get(u.id);
+    if (memoryMd && u.name === 'Read') {
+      const m = memoryMdOf(u.input?.file_path, memoryMd.sandboxHive);
+      if (m && (m.kind === 'sandbox' || h?.memoryMd?.kind === 'rewritten')) { memoryMdCalls.push({ id: u.id, tool: 'Read', kind: m.kind === 'live' ? 'rewritten' : 'sandbox', agents: [m.agent] }); continue; }
+    }
+    if (memoryMd && u.name === 'Bash' && h?.memoryMd && h.command === u.input?.command) {
+      const b = memoryMdCommand(u.input?.command, memoryMd.sandboxHive);
+      if (b) { memoryMdCalls.push({ id: u.id, tool: b.cmd, kind: b.kind, agents: b.agents }); continue; }
+    }
     const s = JSON.stringify(u.input);
     for (const re of liveRes) if (re.test(s)) leaks.push({ tool: u.name, id: u.id, pattern: String(re) });
     if (u.name === 'Read' && !String(u.input?.file_path || '').replace(/\\/g, '/').toLowerCase().startsWith(allowedRead.toLowerCase())) leaks.push({ tool: 'Read', id: u.id, pattern: 'outside the tool-output folder' });
@@ -203,7 +229,7 @@ function readTranscript(file, allowedRead, liveRes, memoryMd = null) {
     answer: result?.result ?? null,
     result: result ? { isError: !!result.is_error, subtype: result.subtype, turns: result.num_turns, costUsd: result.total_cost_usd, usage: result.usage, denials: (result.permission_denials || []).length } : null,
     leaks,
-    memoryMdReads,
+    memoryMdCalls,
   };
 }
 
@@ -275,7 +301,7 @@ async function answerItem(o, v, addDir, item, key, shape, instruction, outDir) {
     fs.writeFileSync(serve.stopFile, '');
     await serverClosed;
     const hookRows = fs.existsSync(serve.hookLogFile) ? fs.readFileSync(serve.hookLogFile, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
-    const t = readTranscript(transcript, fwd(a.toolOutputDir), LIVE_RES(), { sandboxHive: hive, rewritten: new Set(hookRows.filter((x) => x.memoryMd?.kind === 'rewritten').map((x) => x.toolUseId)) });
+    const t = readTranscript(transcript, fwd(a.toolOutputDir), LIVE_RES(), { sandboxHive: hive, hooked: new Map(hookRows.filter((x) => x.event === 'PreToolUse' && x.memoryMd).map((x) => [x.toolUseId, x])) });
     const memCalls = fs.existsSync(serve.callsFile) ? fs.readFileSync(serve.callsFile, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
     const serveRows = fs.existsSync(answers) ? fs.readFileSync(answers, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
     row.serve = serveRows.find((r) => r.summary)?.summary ?? { ok: false, reason: serverErr.slice(0, 300) };
@@ -295,7 +321,7 @@ async function answerItem(o, v, addDir, item, key, shape, instruction, outDir) {
     });
     row.memoryCalls = memCalls.map((m) => ({ cmd: m.cmd, args: m.args, exit: m.exit, chars: m.chars, textSha256: m.textSha256 }));
     row.denied = hookRows.filter((x) => x.denied).length;
-    row.memoryMdReads = t.memoryMdReads;
+    row.memoryMd = memoryMdUse(t.memoryMdCalls, t.answer, hive);
     row.init = t.init;
     row.result = t.result;
     row.answerSha256 = t.answer === null ? null : sha256(t.answer);
@@ -371,10 +397,13 @@ async function main(argv) {
     styleDeviations: rows.reduce((n, r) => n + (r.calls ?? []).filter((c) => c.styleDeviation).length, 0),
     readTypeCalls: rows.reduce((n, r) => n + (r.calls ?? []).filter((c) => c.readType).length, 0),
     allBareItems: rows.filter((r) => itemStyle(r.calls).allBare).length,
-    memoryMdReads: rows.reduce((n, r) => n + (r.memoryMdReads ?? []).length, 0),
-    memoryMdItems: rows.filter((r) => (r.memoryMdReads ?? []).length).length,
+    memoryMdCalls: rows.reduce((n, r) => n + (r.memoryMd?.calls ?? 0), 0),
+    memoryMdByCommand: rows.reduce((o, r) => { for (const [k, n] of Object.entries(r.memoryMd?.byCommand ?? {})) o[k] = (o[k] ?? 0) + n; return o; }, {}),
+    memoryMdRewritten: rows.reduce((n, r) => n + (r.memoryMd?.rewritten ?? 0), 0),
+    memoryMdItems: rows.filter((r) => r.memoryMd?.calls).length,
+    memoryMdQuotedItems: rows.filter((r) => r.memoryMd?.quoted).length,
     stateSha256: [...new Set(rows.map((r) => r.stateSha256))],
-    perItem: rows.map((r) => ({ id: r.id, ...itemStyle(r.calls), memoryMdReads: (r.memoryMdReads ?? []).length })),
+    perItem: rows.map((r) => ({ id: r.id, ...itemStyle(r.calls), memoryMdCalls: r.memoryMd?.calls ?? 0, memoryMdQuoted: !!r.memoryMd?.quoted })),
   };
   fs.writeFileSync(path.join(outDir, 'run.json'), JSON.stringify(run, null, 1));
   return run;
@@ -387,4 +416,4 @@ if (require.main === module) {
   }, (e) => { console.error(`[claims-90] ${e.stack || e.message}`); process.exitCode = 2; });
 }
 
-module.exports = { parseArgs, parseItems, installedHookShape, settingsFor, childEnv, readTranscript, styleDeviation, itemStyle, main };
+module.exports = { parseArgs, parseItems, installedHookShape, settingsFor, childEnv, readTranscript, styleDeviation, itemStyle, memoryMdUse, main };
