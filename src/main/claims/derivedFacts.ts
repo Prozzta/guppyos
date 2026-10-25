@@ -242,14 +242,43 @@ export function shaMentions(text: unknown): ShaMention[] {
 }
 
 /**
- * The sha a done mail reports in its subject as `@<sha>` (`CARD @<sha>`), lower-cased, or null. With
- * several (`PASS @A, NIT folded @B`) the LAST is the tip it reports (god c33130).
+ * The shas a done mail reports in its subject as `@<sha>` (`CARD @<sha>`), lower-cased, once each, with
+ * the word written just before each (lower-cased, edge punctuation trimmed): `guppy/x-1 @abc1234` -> guppy/x-1.
  */
-export function subjectAtSha(subject: unknown): string | null {
-  if (typeof subject !== 'string') return null;
-  let last: string | null = null;
-  for (const m of subject.matchAll(/(?<![0-9A-Za-z])@([0-9a-fA-F]{7,40})(?![0-9A-Za-z])/g)) if (/[0-9]/.test(m[1])) last = m[1].toLowerCase();
-  return last;
+export function subjectAtShas(subject: unknown): Array<{ sha: string; name: string }> {
+  if (typeof subject !== 'string') return [];
+  const out: Array<{ sha: string; name: string }> = [];
+  for (const m of subject.matchAll(/(?<![0-9A-Za-z])@([0-9a-fA-F]{7,40})(?![0-9A-Za-z])/g)) {
+    const sha = m[1].toLowerCase();
+    if (!/[0-9]/.test(sha) || out.some((x) => x.sha === sha)) continue;
+    const before = subject.slice(0, m.index).trimEnd().split(/\s+/).pop() ?? '';
+    out.push({ sha, name: before.replace(/^[^0-9A-Za-z]+|[^0-9A-Za-z]+$/g, '').toLowerCase() });
+  }
+  return out;
+}
+
+/**
+ * The subject @sha of a done mail on `card` (god ab86be, Jim b3803c, DV007), or null when it writes
+ * none. One is the mail's sha. Of several: the descendant when they form an ancestry chain; else the
+ * one written next to the card's id or its branch name (guppy/<id>); else 'ambiguous' (never guess).
+ */
+export async function subjectTip(shas: ReadonlyArray<{ sha: string; name: string }>, card: string, git: GitPort): Promise<string | null | 'ambiguous'> {
+  if (shas.length <= 1) return shas[0]?.sha ?? null;
+  const full: string[] = [];
+  for (const x of shas) {
+    const f = await git.commitOf(x.sha);
+    if (f) full.push(f);
+  }
+  if (full.length === shas.length) {
+    for (let i = 0; i < full.length; i++) {
+      let tip = true;
+      for (let j = 0; j < full.length && tip; j++) if (full[j] !== full[i] && !(await git.isAncestor(full[j], full[i]))) tip = false;
+      if (tip) return shas[i].sha;
+    }
+  }
+  const id = card.toLowerCase();
+  const next = shas.filter((x) => x.name === id || x.name === `guppy/${id}` || x.name === `origin/guppy/${id}`);
+  return next.length === 1 ? next[0].sha : 'ambiguous';
 }
 
 /**
@@ -564,8 +593,8 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
     seen.add(m.id);
     if (m.act !== 'done') { skip(m.id, 'notDone'); continue; }
     const mentions = [...shaMentions(m.subject), ...shaMentions(typeof m.body === 'string' ? m.body : '')];
-    const reported = subjectAtSha(m.subject);
-    if (!mentions.length && !reported) { skip(m.id, 'noShaWord'); continue; }
+    const atShas = subjectAtShas(m.subject);
+    if (!mentions.length && !atShas.length) { skip(m.id, 'noShaWord'); continue; }
     const commits: string[] = [];
     const words: string[] = [];   // the sha words as written, for latestInGitOrder (it resolves them itself)
     const rangeOf = new Map<string, ShaMention['range']>();
@@ -576,11 +605,14 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
       words.push(x.sha);
       if (x.range) rangeOf.set(full, x.range);
     }
-    if (!commits.length && !reported) { skip(m.id, 'noCommit'); continue; }
+    if (!commits.length && !atShas.length) { skip(m.id, 'noCommit'); continue; }
     const card = await cardOfDoneMail(m, known, match, commits, git);
     if (typeof card !== 'string') { skip(m.id, card.reason, card.cards); continue; }
     const key = cardKey(card, 'donesha');
     if (!key) { skip(m.id, 'noCard', [card]); continue; }
+    // Several subject @shas that git cannot order and no card name settles: no claim from this mail.
+    const reported = await subjectTip(atShas, card, git);
+    if (reported === 'ambiguous') { skip(m.id, 'ambiguous', [card]); continue; }
     // F2: a sha the subject reports as @<sha> is the mail's sha, even when the repository lacks it.
     const reportedFull = reported ? await git.commitOf(reported) : null;
     const commit = reported ? (reportedFull ?? reported) : ((await latestInGitOrder(words, git)) ?? commits[0]);

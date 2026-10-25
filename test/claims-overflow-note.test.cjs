@@ -105,14 +105,21 @@ test('CL-OVERFLOW-NOTE: below the minimum budget the note goes in alone if it fi
 test('CL-OVERFLOW-NOTE: the live budget 2,772 (WordPiece-like counter) now ends with the note; before, it ended on a history pointer', () => {
   const { records, state, view } = fixture(400);
   const out = V.createClaimViews(records, COUNTERS.words).buildWorkingSet(state, view, 2772);
-  assert.equal(out.receipt.used, 2772);
+  assert.ok(out.receipt.used <= 2772);
   assert.equal(omittedOf(out), 280);
   assert.deepEqual(out.text.split('\n').slice(-2), ['⚠ Working set omitted 280 claim(s) at the 2772-token budget.', '+280 more']);
   // 50d18f14 kept the same 87 claims and two more history pointers, and told the agent nothing.
   assert.equal(out.receipt.included.length, 87);
+  // The boundary: a budget the text fills exactly still ends with the note (2772 did before
+  // HISTORY-PTR 252134c5 respelled the pointers; 2770 is the nearest exact fill with the same counts).
+  const cap = V.createClaimViews(records, COUNTERS.words).buildWorkingSet(state, view, 2770);
+  assert.equal(cap.receipt.used, 2770);
+  assert.equal(omittedOf(cap), 280);
+  assert.equal(cap.receipt.included.length, 87);
+  assert.deepEqual(cap.text.split('\n').slice(-2), ['⚠ Working set omitted 280 claim(s) at the 2770-token budget.', '+280 more']);
 });
 
-test('CL-OVERFLOW-NOTE: byte-identical to 50d18f14 when nothing overflows, and when the note already fitted', () => {
+test('CL-OVERFLOW-NOTE: byte-identical to 50d18f14 (pointer spelling aside) when nothing overflows, and when the note already fitted', () => {
   // Digests taken from guppy/claims-brief-startup @50d18f14 (text and receipt).
   const { records, state, view } = fixture(60);
   const got = Object.fromEntries(Object.entries(COUNTERS).map(([name, fn]) => {
@@ -120,8 +127,10 @@ test('CL-OVERFLOW-NOTE: byte-identical to 50d18f14 when nothing overflows, and w
     assert.equal(omittedOf(out), 0, `${name}: nothing overflows`);
     return [name, digest(out)];
   }));
-  assert.deepEqual(got, { words: '089479b4d70d3123', length: '2ebcb2782174449d', ceil4: '1327bb28566ccc75', heavySep: 'cdb87f283060384c' });
+  // Re-pinned for CLAIMS-90 HISTORY-PTR (252134c5): each text is 50d18f14's with only the pointer
+  // respelled (memory.md#claim-history-<id> -> memory history <id>), checked by text diff.
+  assert.deepEqual(got, { words: '41a229705ea66d8a', length: 'cece0373896caa22', ceil4: '58e321f7dd880557', heavySep: 'd2c7bfa68c60aa14' });
   const f400 = fixture(400);
   const out = V.createClaimViews(f400.records, COUNTERS.ceil4).buildWorkingSet(f400.state, f400.view, 2772);
-  assert.equal(digest(out), '6259df1c273adc02', 'ceil4 at 2,772: the note already fitted after the full pack, so that pack is kept');
+  assert.equal(digest(out), 'c72546476f8b666b', 'ceil4 at 2,772: the note already fitted after the full pack, so that pack is kept');
 });
