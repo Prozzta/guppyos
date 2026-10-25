@@ -1,7 +1,7 @@
 'use strict';
 /**
  * CLAIMS-90 R2 (C90-GET, god ae1569 + 8218c8, Jim df789a b-d): the search side of the lookup.
- *  - every keyed claim hit carries `get: memory get <key>` on its meta line (HISTORY-PTR g) and a `Get:` line in --full;
+ *  - the compact text ends with one `get: memory get <key>` line for the keys shown (HISTORY-PTR g, step 2) and --full has a `Get:` line per hit;
  *  - `--newest`: among hits the compact gate lets through (a query term in the text, or a lexical match) the order is
  *    newest first with [1] the answer candidate; a hit that only mentions a specific term in PASSING (replaced X,
  *    was X, X -> , from X to, X replaced by) comes after the hits that state it; prior claims stay last; ungated hits
@@ -60,10 +60,11 @@ test('newestOrder: gated hits newest first; a passing-only mention follows the h
   assert.equal(F.hitTimeMs({ claim: null, filedAt: 5 }), 5);
 });
 
-test('compact output: every keyed claim hit ends its meta line with `· get: memory get <key>`; --newest names its order and [1] is the newest stating hit; --exact names the scan', () => {
+test('compact output: one `get: memory get <key>` footer line for the keys shown (step 2: never on a meta line); --newest names its order and [1] is the newest stating hit; --exact names the scan', () => {
   const hits = [hit(0, 'k.a: build at 1111111 old', meta('c1', 'k.a', '2026-10-01T00:00:00Z')), hit(1, 'k.a: build at 1111111 new', meta('c2', 'k.a', '2026-10-05T00:00:00Z')), md(2, 'a note without a key', 1)];
   const plain = F.formatSearchCompact('1111111', {}, hits);
-  assert.match(plain, /^\[1\] current · fact · k\.a · 2026-10-01 · c1 · a1\/memory · get: memory get k\.a$/m, 'MUTANT: no pointer');
+  assert.match(plain, /^\[1\] current · fact · k\.a · 2026-10-01 · c1 · a1\/memory$/m);
+  assert.equal(lines(plain).pop(), 'get: memory get k.a', 'MUTANT: no pointer');
   assert.match(plain, /^Results for: "1111111" — 3 hits, current first \(--full: whole chunks\)$/m);
   const newest = F.formatSearchCompact('1111111', { newest: true }, hits);
   assert.match(newest, /^Results for: "1111111" — 3 hits, newest first \(\[1\] answer candidate\) \(--full: whole chunks\)$/m);
@@ -180,4 +181,5 @@ test('T3 (god fe1140): a live-mode search drops confirmed-superseded claim hits 
   const oracle = fs.readFileSync(path.join(REPO, 'test/tools/claims90-search.cjs'), 'utf8');
   assert.equal((oracle.match(/dropStale\(/g) || []).length, 2, 'the search oracle drops on both branches too');
   assert.equal((oracle.match(/staleFetchK\(/g) || []).length, 2, 'both store calls fetch 2k');
+  assert.match(oracle, /k: staleFetchK\(results5, mode\), poolK: results5,/, 'step 2: the oracle sizes the RRF pool from the caller k too');
 });

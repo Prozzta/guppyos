@@ -283,7 +283,7 @@ export class MemoryEngine {
         return { exit: 0, text: formatSearch(a.query, a, all), json: json(all) };
       }
       const [qv] = await this.embed([a.query]);
-      const hits = servedHits(dropStale(this.d.store.search({ query: a.query, queryVec: qv, wing: a.wing ?? null, room: a.room ?? null, sinceMs, beforeMs, k: fetchK, mode: a.mode ?? 'live', kind: a.kind ?? null, key: a.key ?? null }), a.mode, k));  // CLAIMS-90 HISTORY-PTR
+      const hits = servedHits(dropStale(this.d.store.search({ query: a.query, queryVec: qv, wing: a.wing ?? null, room: a.room ?? null, sinceMs, beforeMs, k: fetchK, poolK: k, mode: a.mode ?? 'live', kind: a.kind ?? null, key: a.key ?? null }), a.mode, k));  // CLAIMS-90 HISTORY-PTR
       return { exit: 0, text: formatSearch(a.query, a, hits), json: json(hits) };
     }, o);
   }

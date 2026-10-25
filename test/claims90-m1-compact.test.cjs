@@ -32,7 +32,7 @@ const lines = (t) => t.replace(/\n$/, '').split('\n');
 const condensed = (cmd, text) => shouldCondense('Bash', { command: cmd }, { stdout: text }, TOOL_OUTPUT_CAP_DEFAULT);
 
 test('M1 caps: the compact budget is under the condenser cap, a compact line under its line max, the wake-up share at most half', () => {
-  assert.ok(F.COMPACT_MAX_CHARS < TOOL_OUTPUT_CAP_DEFAULT, `${F.COMPACT_MAX_CHARS} < ${TOOL_OUTPUT_CAP_DEFAULT}`);
+  assert.ok(F.COMPACT_MAX_CHARS + F.COMPACT_GET_MAX < TOOL_OUTPUT_CAP_DEFAULT, `${F.COMPACT_MAX_CHARS} + ${F.COMPACT_GET_MAX} < ${TOOL_OUTPUT_CAP_DEFAULT}`);
   assert.ok(F.COMPACT_LINE_MAX < LINE_MAX, `${F.COMPACT_LINE_MAX} < ${LINE_MAX}`);
   assert.ok(F.WAKE_COMPACT_MAX_CHARS * 2 <= F.COMPACT_MAX_CHARS, 'the claims working set gets at least half of a compact wake-up');
 });
@@ -50,13 +50,14 @@ test('M1 search (default): current first, then plain chunks, then prior / prior?
   assert.match(L[0], /^Results for: "synthetic port" — 5 hits, current first \[wing=wing-x\] \(--full: whole chunks\)$/);
   const metas = L.filter((l) => /^\[\d\] /.test(l));
   assert.deepEqual(metas.map((l) => l.split(' · ')[0]), ['[1] current', '[2] current', '[3] wing-x/general', '[4] prior', '[5] prior?'], 'MUTANT: priors never come before current values');
-  // CLAIMS-90 R2 (C90-GET): the first line of a keyed claim hit ends with the ready `get: memory get <key>` line.
-  assert.match(metas[0], /^\[1\] current · fact · synthetic\.port · 2026-10-10 · c-synth00000003 · wing-x\/memory · get: memory get synthetic\.port$/);
+  // CLAIMS-90 R2 (C90-GET; step 2): the meta line ends at the wing/room; the ready `memory get` is one footer line after the hits.
+  assert.match(metas[0], /^\[1\] current · fact · synthetic\.port · 2026-10-10 · c-synth00000003 · wing-x\/memory$/);
+  assert.equal(L[L.length - 1], 'get: memory get synthetic.port · memory get synthetic.host');
   assert.match(metas[2], /^\[3\] wing-x\/general · NOTES\.md$/);
   assert.match(L[L.indexOf(metas[0]) + 1], /^ {4}port 2222 \(current\) synthetic-c-w0/);
   assert.match(L[L.indexOf(metas[2]) + 1], /^ {4}## 2026-09-20 - synthetic note about ports/, 'a chunk\'s lines are joined into one');
   assert.doesNotMatch(text, /\[5\] prior · /, 'MUTANT: an unconfirmed supersession (superseded?) is prior?, never shown as a certain prior');
-  assert.ok(text.length <= F.COMPACT_MAX_CHARS, `${text.length}`);
+  assert.ok(text.length <= F.COMPACT_MAX_CHARS + F.COMPACT_GET_MAX, `${text.length}`);
   assert.equal(condensed('memory search synthetic port', text), false, 'the condenser leaves the compact text alone');
   assert.equal(F.formatSearch('nothing', {}, []), '\n  No results found for: "nothing"\n', 'the no-results line is unchanged');
 });
@@ -67,7 +68,7 @@ test('M1 search budget BY CONSTRUCTION: adversarial hits (100 hits, 5 KB chunks,
     : chunk(i + 1, lorem(700, `y${i}`) + '\n' + lorem(700, `z${i}`))));
   for (const [n, hits] of [[1, big.slice(0, 1)], [2, big.slice(0, 2)], [5, big.slice(0, 5)], [10, big.slice(0, 10)], [100, big]]) {
     const text = F.formatSearch('q '.repeat(1000), { wing: 'w'.repeat(120), room: 'r'.repeat(120), since: '2026-01-01', before: '2026-12-31' }, hits);
-    assert.ok(text.length <= F.COMPACT_MAX_CHARS, `${n} hits: ${text.length} > ${F.COMPACT_MAX_CHARS}`);
+    assert.ok(text.length <= F.COMPACT_MAX_CHARS + F.COMPACT_GET_MAX, `${n} hits: ${text.length} > ${F.COMPACT_MAX_CHARS}`);
     assert.ok(lines(text).every((l) => l.length <= F.COMPACT_LINE_MAX), `${n} hits: a line over ${F.COMPACT_LINE_MAX}`);
     assert.equal(condensed('memory search q', text), false, `${n} hits: condensed`);
     const shown = lines(text).filter((l) => /^\[\d+\] /.test(l)).length;
@@ -157,7 +158,7 @@ test('M1 wiring: the compact wake-up leads with the claims working set (current 
   const r = await w.handle(tok, { cmd: 'wake-up' });
   assert.ok(r.body.text.startsWith('# Memory working set — a1\n- synthetic current value 0:'), 'MUTANT: claims (current values) come first');
   assert.ok(r.body.text.endsWith(native), 'then the compact native text, whole');
-  assert.ok(r.body.text.length <= F.COMPACT_MAX_CHARS, `${r.body.text.length} > ${F.COMPACT_MAX_CHARS}`);
+  assert.ok(r.body.text.length <= F.COMPACT_MAX_CHARS + F.COMPACT_GET_MAX, `${r.body.text.length} > ${F.COMPACT_MAX_CHARS}`);
   assert.match(r.body.text, /… \d+ more lines \(--full\)\n\nWake-up \(compact/, 'MUTANT: the claims block is fitted with a pointer');
   assert.equal(condensed('memory wake-up', r.body.text), false);
   const full = await w.handle(tok, { cmd: 'wake-up', args: { full: true } });
@@ -247,7 +248,7 @@ test('M1 MUST 1: a value past char 154 of a live claim is shown at 1 hit and at 
   assert.match(five, /9f8e7d6c5b4a/, 'MUTANT: 5 hits: the current value is whole (current first, up to three shares)');
   assert.match(lines(five)[1], /^\[1\] current · fact · synthetic\.sha/);
   for (const t of [one, five]) {
-    assert.ok(t.length <= F.COMPACT_MAX_CHARS, `${t.length}`);
+    assert.ok(t.length <= F.COMPACT_MAX_CHARS + F.COMPACT_GET_MAX, `${t.length}`);
     assert.ok(lines(t).every((l) => l.length <= F.COMPACT_LINE_MAX), 'no line over the line max');
     assert.equal(condensed('memory search synthetic sha', t), false);
   }
@@ -263,7 +264,7 @@ test('M1 MUST 1: a clipped chunk shows a window around the matched term (not the
   assert.match(text, /zebrafinch relay port 4471/, 'MUTANT: the matched text is inside the window');
   assert.match(text, /^ {4}…/m, 'the window says it starts inside the chunk');
   assert.match(text, /^… \d hits? clipped \(--full shows whole chunks\)$/m, 'MUTANT: the clipped hits are counted');
-  assert.ok(text.length <= F.COMPACT_MAX_CHARS, `${text.length}`);
+  assert.ok(text.length <= F.COMPACT_MAX_CHARS + F.COMPACT_GET_MAX, `${text.length}`);
   assert.ok(lines(text).every((l) => l.length <= F.COMPACT_LINE_MAX));
   const shown = lines(text).filter((l) => /^\[\d\] /.test(l)).length;
   const more = /… (\d+) more hits? not shown/.exec(text);
@@ -306,7 +307,7 @@ test('M1 S1 (Jim re-audit): a term near the end of the head survives the wrap co
       const at = content.indexOf('f00dcafe1234');
       const text = F.formatSearch('f00dcafe1234', {}, [chunk(1, content)]);
       assert.match(body(text), /f00dcafe1234/, `MUTANT: the matched term at char ${at} of ${content.length} is shown in the body (1 hit)`);
-      assert.ok(text.length <= F.COMPACT_MAX_CHARS && lines(text).every((l) => l.length <= F.COMPACT_LINE_MAX), 'cap and line max hold');
+      assert.ok(text.length <= F.COMPACT_MAX_CHARS + F.COMPACT_GET_MAX && lines(text).every((l) => l.length <= F.COMPACT_LINE_MAX), 'cap and line max hold');
       if (/^ {4}…/m.test(text)) windowed++;
     }
   }

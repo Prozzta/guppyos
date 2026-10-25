@@ -29,6 +29,9 @@ export interface SearchFlags {
 export const COMPACT_MAX_CHARS = 1400;
 /** One compact line stays under the condenser's LINE_MAX (160) so no line is ever clipped. */
 export const COMPACT_LINE_MAX = 158;
+/** CLAIMS-90 R2 step 2 (Jim 595cc6): the one `get:` footer line, OUTSIDE the hit budget so the pointer costs no hit a
+ *  character; COMPACT_MAX_CHARS + this stays under the condenser cap (1500). Includes its newline. */
+export const COMPACT_GET_MAX = 96;
 /** The native part of a compact wake-up; the rest of COMPACT_MAX_CHARS is the claims working set's. */
 export const WAKE_COMPACT_MAX_CHARS = 700;
 /** A hit or an entry never gets less than this; what no longer fits goes behind `--results` / `--full`. */
@@ -74,8 +77,18 @@ export function rankHits<T extends Pick<SearchHit, 'content' | 'claim'>>(query: 
 
 const base = (p: string): string => p.split('/').pop() ?? p;
 
-/** CLAIMS-90 R2 (C90-GET, HISTORY-PTR g): the ready `memory get` line a keyed claim hit carries on its first line. */
-export const getPointer = (key: string): string => `get: memory get ${key}`;
+/** CLAIMS-90 R2 (C90-GET, HISTORY-PTR g): the ready `memory get` lookup for a key. */
+export const getPointer = (key: string): string => `memory get ${key}`;
+/** The compact footer: `get: memory get <key>` for each distinct key shown, in printed order, while it fits COMPACT_GET_MAX. */
+export function getFooter(keys: string[]): string | null {
+  let line = '';
+  for (const k of [...new Set(keys)]) {
+    const next = line ? `${line} · ${getPointer(k)}` : `get: ${getPointer(k)}`;
+    if (next.length + 1 > COMPACT_GET_MAX) break;
+    line = next;
+  }
+  return line || null;
+}
 
 /** A hit's time for the newest-first order: its claim's date, else the chunk's filing time, else 0 (unknown: sorts last). */
 export function hitTimeMs(h: Pick<SearchHit, 'claim' | 'filedAt'>): number {
@@ -260,6 +273,7 @@ export function formatSearchCompact(query: string, flags: SearchFlags, hits: Sea
   // The clipped-hits note is reserved the first time a hit is clipped (so it always fits), never before.
   const clipReserve = clipNote(hits.length).length + 1;
   let clipped = 0;
+  const keys: string[] = [];
   for (let i = 0; i < ordered.length; i++) {
     const h = ordered[i];
     const left = ordered.length - i;
@@ -274,9 +288,8 @@ export function formatSearchCompact(query: string, flags: SearchFlags, hits: Sea
     // tight share the meta line gives up room (down to 24 chars) so that line still shows.
     const split = leadSplit(h);
     const metaMax = Math.max(24, Math.min(COMPACT_LINE_MAX, budget - 16 - (split ? Math.min(split.lead.length + 5, 64) : 0)));
-    // CLAIMS-90 R2 (C90-GET, HISTORY-PTR g): a keyed claim hit's first line ends with the ready `get: memory get <key>`.
     const meta = clip(h.claim
-      ? `[${i + 1}] ${statusWord(h.claim.status)} · ${h.claim.kind} · ${h.claim.key ?? '-'} · ${h.claim.at.slice(0, 10)} · ${h.claim.id} · ${h.wing}/${h.room}${h.claim.key ? ` · ${getPointer(h.claim.key)}` : ''}`
+      ? `[${i + 1}] ${statusWord(h.claim.status)} · ${h.claim.kind} · ${h.claim.key ?? '-'} · ${h.claim.at.slice(0, 10)} · ${h.claim.id} · ${h.wing}/${h.room}`
       : `[${i + 1}] ${h.wing}/${h.room} · ${base(h.source)}`, metaMax);
     const whole = split ? (split.rest ? `${split.lead} ${split.rest}` : split.lead) : oneLine(h.content);
     let lines = wrap(whole, CONTENT_WIDTH);
@@ -333,8 +346,13 @@ export function formatSearchCompact(query: string, flags: SearchFlags, hits: Sea
     if (cut) clipped++;
     out.push(meta, ...lines.map((l) => `    ${l}`));
     used += costOf(meta, lines);
+    if (h.claim?.key) keys.push(h.claim.key);
   }
   if (clipped) out.push(clipNote(clipped));
+  // CLAIMS-90 R2 (C90-GET, HISTORY-PTR g; step 2): the ready `memory get` for the keys shown, once each, on one line after
+  // the hits, so no hit pays for it (a pointer on every meta line cut rank 2-5 visibility).
+  const get = getFooter(keys);
+  if (get) out.push(get);
   return out.join('\n') + '\n';
 }
 

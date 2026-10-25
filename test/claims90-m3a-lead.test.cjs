@@ -89,7 +89,7 @@ test('M3a: the 1400/158 caps hold with leads on every hit (1, 5 and 12 keyed hit
   for (const n of [1, 5, 12]) {
     const hits = Array.from({ length: n }, (_, i) => hit(10 + i, `fact · k.${i}.${lorem(6, 'key')} · 2026-10-03\n${lorem(60, `v${i}`)}`, meta(`c-000000000${String(i).padStart(3, '0')}`, `k.${i}.${lorem(6, 'key')}`)));
     const text = F.formatSearch('v0word33', {}, hits);
-    assert.ok(text.length <= F.COMPACT_MAX_CHARS, `${n} hits: ${text.length} <= ${F.COMPACT_MAX_CHARS}`);
+    assert.ok(text.length <= F.COMPACT_MAX_CHARS + F.COMPACT_GET_MAX, `${n} hits: ${text.length} <= ${F.COMPACT_MAX_CHARS}`);
     assert.ok(lines(text).every((l) => l.length <= F.COMPACT_LINE_MAX), `${n} hits: every line <= ${F.COMPACT_LINE_MAX}`);
     const b = block(text, 1);
     assert.match(b.body[0], /^k\.0\.keyword0 /, `${n} hits: MUTANT: the first hit opens with its key`);
@@ -123,7 +123,7 @@ test('M3a: on a tight share the lead is shortened, never at the cost of the matc
     });
     // M3: a 6-hex run is a plain word, so the query names nothing and the hit keeps rank 3 (a full sha would lift it to [1]).
     const text = F.formatSearch('f00dca', {}, hits);
-    assert.ok(text.length <= F.COMPACT_MAX_CHARS && lines(text).every((l) => l.length <= F.COMPACT_LINE_MAX), `at ${at}: caps`);
+    assert.ok(text.length <= F.COMPACT_MAX_CHARS + F.COMPACT_GET_MAX && lines(text).every((l) => l.length <= F.COMPACT_LINE_MAX), `at ${at}: caps`);
     const b = block(text, 3);
     assert.match(b.body.join(' '), /f00dca/, `MUTANT: with the sha at char ${at} the queried term is shown in hit [3] (the shortened lead cut it in two: the plain window takes over)`);
     assert.ok(b.body[0].startsWith('k.2: ') || b.body[0].startsWith('…'), `at ${at}: the hit opens with its lead or with the window`);
