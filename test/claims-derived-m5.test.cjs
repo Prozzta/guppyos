@@ -300,7 +300,7 @@ test('(d) done mails, R2 (a)(c): one per (card, sender): the newest done mail an
   const mails = [
     { id: 'm1', act: 'done', from: 'agent-x', card: 'SYN-D1', subject: 'SYN-D2 aaaaaa1', body: 'also bbbbbb2', created_at: '2026-10-02T00:00:00Z' },
     { id: 'm1', act: 'done', card: 'SYN-D1', subject: 'a second copy of m1', body: 'cccccc3' },
-    { id: 'm2', act: 'done', from: 'agent-y', subject: 'SYN D2 shipped', body: 'range aaaaaa1..dddddd4, 1234567 is no sha and fedcba9 no commit', created_at: '2026-10-03T00:00:00Z' },
+    { id: 'm2', act: 'done', from: 'agent-y', subject: 'SYN-D2 shipped', body: 'range aaaaaa1..dddddd4, 1234567 is no sha and fedcba9 no commit', created_at: '2026-10-03T00:00:00Z' },
     { id: 'm3', act: 'done', subject: 'no card here', body: 'SYN-D3 at cccccc3' },
     { id: 'm4', act: 'done', subject: 'SYN-D1 and SYN-D2', body: 'dddddd4' },
     { id: 'm5', act: 'inform', subject: 'SYN-D1', body: 'dddddd4' },
@@ -340,14 +340,15 @@ test('(d) done mails, R2 (a)(c): one per (card, sender): the newest done mail an
   const still = await F.doneMailFacts([{ id: 'm4', act: 'done', subject: 'SYN-D1 and SYN-D2', body: 'eeeeee5' }], ['SYN-D1', 'SYN-D2'], gm);
   assert.deepEqual(still.skips, [{ mail: 'm4', reason: 'ambiguous', cards: ['SYN-D1', 'SYN-D2'] }], 'git names neither: ambiguous');
   // A card id the subject writes exactly beats one the delivery inherited (reply/conversation link);
-  // a spelling variant (a space for the dash) does not (god c33130), but counts with no link; with no
-  // card in the subject the inherited link counts; a body mention never does.
+  // a spelling variant (a space for the dash) never links, with or without a link (god c33130, c19239);
+  // with no card in the subject the inherited link counts; a body mention never does.
   const linked = await F.doneMailFacts([{ id: 'm12', act: 'done', from: 'agent-x', cards: ['syn-d3'], subject: 'SYN-D1', body: 'aaaaaa1' }], ['SYN-D1', 'SYN-D3'], g);
   assert.deepEqual(linked.facts.map((f) => f.slot), ['card.syn-d1.donesha#agent-x']);
   const variant = await F.doneMailFacts([{ id: 'm15', act: 'done', from: 'agent-x', cards: ['syn-d3'], subject: 'SYN D1', body: 'aaaaaa1' }], ['SYN-D1', 'SYN-D3'], g);
   assert.deepEqual(variant.facts.map((f) => f.slot), ['card.syn-d3.donesha#agent-x'], 'a variant never beats a link');
-  const variantAlone = await F.doneMailFacts([{ id: 'm16', act: 'done', from: 'agent-x', subject: 'SYN D1', body: 'aaaaaa1' }], ['SYN-D1', 'SYN-D3'], g);
-  assert.deepEqual(variantAlone.facts.map((f) => f.slot), ['card.syn-d1.donesha#agent-x'], 'a variant with no link still counts');
+  const variantAlone = await F.doneMailFacts([{ id: 'm16', act: 'done', from: 'agent-x', subject: 'temp leak fixed', body: 'aaaaaa1' }], ['TEMP-LEAK', 'SYN-D3'], g);
+  assert.deepEqual(variantAlone.facts, [], 'a variant-only subject links no card');
+  assert.deepEqual(variantAlone.skips, [{ mail: 'm16', reason: 'noCard' }]);
   const inherited = await F.doneMailFacts([{ id: 'm13', act: 'done', from: 'agent-x', cards: ['syn-d3'], subject: 'stage sweep', body: 'SYN-D1 aaaaaa1' }], ['SYN-D1', 'SYN-D3'], g);
   assert.deepEqual(inherited.facts.map((f) => f.slot), ['card.syn-d3.donesha#agent-x']);
   const both = await F.doneMailFacts([{ id: 'm14', act: 'done', from: 'agent-x', cards: ['syn-d3'], subject: 'SYN-D1 and SYN-D3', body: 'aaaaaa1' }], ['SYN-D1', 'SYN-D3'], g);
@@ -439,7 +440,7 @@ function fixtureHive(x, r) {
   fs.mkdirSync(path.join(x.root, 'tasks-archive'));
   fs.writeFileSync(path.join(x.root, 'tasks-archive', '2026-10.jsonl'), `${JSON.stringify({ at: '2026-10-03T13:00:00Z', card: { id: 'SYN-A1', title: 'Archived', status: 'done', result: `done at ${c.slice(0, 8)}` } })}\n`);
   for (const ag of ['agent-x', 'agent-y']) fs.mkdirSync(path.join(x.root, 'agents', ag, 'inbox', '.done'), { recursive: true });
-  const mail = { id: 'm-h1', act: 'done', from: 'agent-x', to: 'god', subject: 'SYN H2 shipped', body: `range ${a.slice(0, 8)}..${c.slice(0, 8)}`, created_at: '2026-10-03T12:00:00Z' };
+  const mail = { id: 'm-h1', act: 'done', from: 'agent-x', to: 'god', subject: 'SYN-H2 shipped', body: `range ${a.slice(0, 8)}..${c.slice(0, 8)}`, created_at: '2026-10-03T12:00:00Z' };
   deliver(x, 'agent-x', mail, '.done');
   deliver(x, 'agent-y', mail);
   deliver(x, 'agent-y', { id: 'm-h2', act: 'request', from: 'god', subject: 'SYN-H1', body: b });
@@ -450,7 +451,7 @@ function fixtureHive(x, r) {
   fs.writeFileSync(path.join(x.root, 'agents', 'agent-y', 'inbox', '.done', 'm-h2.json'), JSON.stringify({ id: 'm-h2', act: 'done', from: 'god', card: 'SYN-H2', subject: 'SYN-H2', body: b }));
   // and a delivered done mail whose inbox copy was edited to name b (its body no longer hashes to the
   // ledger's, so only the ledger's subject counts).
-  deliver(x, 'agent-x', { id: 'm-h5', act: 'done', from: 'agent-x', subject: 'SYN H2 follow-up', body: 'no commit named' }, '', { body: `now names ${b}` });
+  deliver(x, 'agent-x', { id: 'm-h5', act: 'done', from: 'agent-x', subject: 'SYN-H2 follow-up', body: 'no commit named' }, '', { body: `now names ${b}` });
   return { a, b, c, side, tagObj };
 }
 

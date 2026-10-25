@@ -498,7 +498,7 @@ const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 /**
  * Guide A12: a card id in text, case-insensitive, its dashes written as a dash, a space or nothing.
- * `exact`: only as written (case aside), the precision a done mail's subject needs to beat a link.
+ * `exact`: only as written (case aside), the precision a done mail's card link needs (variants < 0.95).
  */
 export function cardMatcher(cardIds: readonly string[], exact = false): (text: unknown) => string[] {
   const ids = [...new Set(cardIds.filter((c) => typeof c === 'string' && c.length >= 2))].sort((a, b) => b.length - a.length);
@@ -546,8 +546,7 @@ const mailAt = (m: MailLike): string => iso(m.created_at) ?? '';
  * A mail copied to several inboxes counts once (by id).
  */
 export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonly string[], git: GitPort): Promise<DoneMailResult> {
-  const match = cardMatcher(cardIds);
-  const exactMatch = cardMatcher(cardIds, true);
+  const match = cardMatcher(cardIds, true);
   const known = new Map(cardIds.map((c) => [c.toLowerCase(), c]));
   const skipped: Record<DoneSkipReason, number> = { notDone: 0, noShaWord: 0, noCommit: 0, noCard: 0, ambiguous: 0 };
   const skips: DoneSkip[] = [];
@@ -578,7 +577,7 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
       if (x.range) rangeOf.set(full, x.range);
     }
     if (!commits.length && !reported) { skip(m.id, 'noCommit'); continue; }
-    const card = await cardOfDoneMail(m, known, match, commits, git, exactMatch);
+    const card = await cardOfDoneMail(m, known, match, commits, git);
     if (typeof card !== 'string') { skip(m.id, card.reason, card.cards); continue; }
     const key = cardKey(card, 'donesha');
     if (!key) { skip(m.id, 'noCard', [card]); continue; }
@@ -608,22 +607,19 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
 /** The done mail's card (see doneMailFacts), or why there is none. */
 async function cardOfDoneMail(
   m: MailLike, known: Map<string, string>, match: (text: unknown) => string[], commits: readonly string[], git: GitPort,
-  exactMatch: (text: unknown) => string[] = match,
 ): Promise<string | { reason: 'noCard' | 'ambiguous'; cards?: string[] }> {
   const field = typeof m.card === 'string' ? known.get(m.card.toLowerCase()) : undefined;
   if (field) return field;
   const linked = Array.isArray(m.cards)
     ? [...new Set(m.cards.map((c) => (typeof c === 'string' ? known.get(c.toLowerCase()) : undefined)).filter((c): c is string => !!c))]
     : [];
-  // A card id the subject writes exactly beats one inherited by a reply or conversation link; a
-  // spelling variant (a space for a dash) counts only when nothing is linked (god c33130: variant
-  // precision < 0.95); a card named only in the body never counts (mention-body is weak: spec F).
-  const exact = exactMatch(m.subject);
+  // `match` takes exact card ids only: a spelling variant (a space for a dash) never links (god
+  // c33130, c19239: variant precision < 0.95). A card id the subject writes beats one inherited by a
+  // reply or conversation link; a card named only in the body never counts (mention-body is weak: spec F).
+  const exact = match(m.subject);
   if (exact.length === 1) return exact[0];
   if (linked.length === 1 && (!exact.length || exact.includes(linked[0]))) return linked[0];
-  const variant = exact.length || linked.length ? [] : match(m.subject);
-  if (variant.length === 1) return variant[0];
-  const named = exact.length ? exact : linked.length ? linked : variant;
+  const named = exact.length ? exact : linked;
   if (!named.length) return { reason: 'noCard' };
   if (git.message) {
     const byGit = new Set<string>();

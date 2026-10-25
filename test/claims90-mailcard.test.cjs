@@ -77,6 +77,9 @@ test('link rules: a mention is a registry id word; the subject\'s (trusted) come
   assert.ok(MC.TRUSTED_METHODS.has('mention-subject') && !MC.TRUSTED_METHODS.has('mention-body'));
   assert.deepEqual(MC.linkMail({ id: 'm', body: 'step F1 of the plan' }, ctxOf()), { cards: [], method: 'none' });
   assert.deepEqual(MC.linkMail({ id: 'm', subject: 'status', body: 'see -CARD-TWO. and CUT-1.1.9.' }, ctxOf()), { cards: ['CARD-TWO', 'CUT-1.1.9'], method: 'mention-body' }, 'edge punctuation trimmed in the body');
+  // A spelling variant (a space for the dash) never links (god c19239: precision < 0.95), even with no other link.
+  assert.deepEqual(MC.linkMail({ id: 'm', subject: 'CARD TWO shipped', body: 'no id here' }, ctxOf()), { cards: [], method: 'none' }, 'variant-only subject: no link');
+  assert.deepEqual(MC.linkMail({ id: 'm', subject: 'card two shipped', body: 'see CARD-TWO' }, ctxOf()), { cards: ['CARD-TWO'], method: 'mention-body' }, 'variant subject: the body mention at most (weak)');
 });
 
 // ———————————————————————————————————————————————————————————— index
