@@ -89,7 +89,7 @@ export function chunksFor(records: LedgerRec[], state: ClaimsState): RoomedClaim
     const room = claimRoom(r);
     for (const p of pieces.length ? pieces : [r.text]) {
       const content = `${header}\n${heading}${p}`;
-      out.push({ claimId: r.id, wing: r.agent, kind: r.kind, ckey: r.key ?? null, at: r.at, status: st.status, content, contentSha256: sha256Hex(content), room });
+      out.push({ claimId: r.id, wing: r.agent, kind: r.kind, ckey: r.key ?? null, at: r.at, status: st.status, supersededBy: st.supersededBy ?? null, content, contentSha256: sha256Hex(content), room });
     }
   }
   return out;

@@ -227,6 +227,8 @@ export interface UsageRec { at: string; claim: string; op: 'view' | 'hit' | 'hel
 export interface ClaimChunk {
   claimId: string; wing: string; kind: ClaimKind; ckey: string | null; at: string;
   status: Status; content: string /* 'kind Â· key Â· date\n' + text */; contentSha256: string;
+  /** CLAIMS-90 M2: the claim this one was superseded by (ClaimState.supersededBy), else null/absent. */
+  supersededBy?: string | null;
 }
 
 /** Appended to memory/receipts.jsonl. */

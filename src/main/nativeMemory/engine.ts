@@ -585,5 +585,7 @@ function defaultWatch(dir: string, onChange: (file: string) => void): FSWatcher 
 /** Shadow diagnostics and JSON output carry no content: ids, sources, ranks, scores. */
 export function redactHit(h: SearchHit): Record<string, unknown> {
   return { chunkId: h.chunkId, wing: h.wing, room: h.room, source: h.source, cosineSim: h.cosineSim, bm25: h.bm25,
-    ...(h.claim ? { claimId: h.claim.id, status: h.claim.status } : {}) };
+    ...(h.claim ? { claimId: h.claim.id, status: h.claim.status } : {}),
+    // CLAIMS-90 M2: the live view's prior-version count (a count, no content).
+    ...(h.priors !== undefined ? { priors: h.priors } : {}) };
 }

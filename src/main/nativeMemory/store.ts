@@ -80,6 +80,33 @@ export interface SearchHit {
   score: number;
   /** A claim chunk's claim (null for markdown chunks). */
   claim?: { id: string; status: string; kind: string; key: string | null; at: string } | null;
+  /** CLAIMS-90 M2 (live mode, claim rows): how many superseded claims this claim replaces, along its
+   *  own supersession chain (`--history` shows them). Absent in history / all mode and on markdown. */
+  priors?: number;
+}
+
+/** The column the one-row-per-claim collapse reads from a search row (CLAIMS-90 M2). */
+export interface GroupRow { claim_id: string | null }
+/**
+ * CLAIMS-90 M2: one row per CLAIM in the live view. Walks the fused candidates in rank order and keeps
+ * the first `k` rows after collapsing: a claim is shown once, as its best-ranked MATCHED part (never
+ * swapped for part 0 or for another claim), every later part of it is skipped, and the row counts the
+ * superseded claims behind it (`priors(row)`). Same-key live claims are separate facts in this hive
+ * (Jim's M2 audit: 84 of 329 keys hold several), so a key never collapses; only the supersession
+ * chain does, and that chain is already hidden by the live-mode visibility filter, so the hit itself
+ * is always the row. Markdown rows pass through unchanged. Pure: the lookup is injected.
+ */
+export function onePerClaim<F, R extends GroupRow>(cands: Iterable<{ f: F; r: R }>, k: number, priors: (r: R) => number): Array<{ f: F; r: R; priors: number }> {
+  const out: Array<{ f: F; r: R; priors: number }> = [];
+  const seen = new Set<string>();
+  for (const c of cands) {
+    if (out.length >= k) break;
+    if (!c.r.claim_id) { out.push({ f: c.f, r: c.r, priors: 0 }); continue; }
+    if (seen.has(c.r.claim_id)) continue;
+    seen.add(c.r.claim_id);
+    out.push({ f: c.f, r: c.r, priors: priors(c.r) });
+  }
+  return out;
 }
 
 /**
@@ -125,7 +152,7 @@ export interface ClaimPlan {
   /** Claims whose indexed parts differ from the ledger's (a purge rewrite): all their parts go. */
   drop: string[];
   /** Status changes (no re-embed): claim id -> new status. */
-  status: Array<{ claimId: string; status: string; at: string }>;
+  status: Array<{ claimId: string; status: string; at: string; supersededBy?: string | null }>;
   /** G3.5: room changes (no re-embed): claim id -> the room all its chunks move to. */
   rooms?: Array<{ claimId: string; room: string }>;
 }
@@ -228,6 +255,10 @@ export class NativeMemoryStore {
         WHEN (SELECT value FROM index_meta WHERE key = 'claims_delete_ok') IS NOT '1' BEGIN
         SELECT RAISE(ABORT, 'claims is append-only'); END;
       CREATE TABLE IF NOT EXISTS claim_status(claim_id TEXT PRIMARY KEY, status TEXT NOT NULL, vis TEXT NOT NULL, at TEXT NOT NULL);`);
+    // CLAIMS-90 M2: the supersession link (ClaimState.supersededBy) beside the status. Added in place on an
+    // index built before it (same file, no re-embed); the next claims sync fills it as a status change.
+    const statusCols = (this.db.prepare('PRAGMA table_info(claim_status)').all() as Array<{ name: string }>).map((c) => c.name);
+    if (!statusCols.includes('superseded_by')) this.db.exec('ALTER TABLE claim_status ADD COLUMN superseded_by TEXT');
     this.setMetaIfAbsent('schema_version', String(SCHEMA_VERSION));
     this.setMetaIfAbsent('generation', '0');
   }
@@ -357,22 +388,38 @@ export class NativeMemoryStore {
       const fusedAll = rrf(lex.map((r) => r.id), vec.map((r) => r.id));
       const bm = new Map(lex.map((r) => [r.id, r.s]));
       const dist = new Map(vec.map((r) => [r.id, r.d]));
-      const row = this.db.prepare(`SELECT c.chunk_id, c.wing, c.room, c.source_id, c.content, c.claim_id, cs.status, cl.kind, cl.ckey, cl.at
-        FROM chunks c ${joins} WHERE c.chunk_id = ?`);
+      const cols = 'c.chunk_id, c.wing, c.room, c.source_id, c.content, c.claim_id, cs.status, cl.kind, cl.ckey, cl.at';
+      const row = this.db.prepare(`SELECT ${cols} FROM chunks c ${joins} WHERE c.chunk_id = ?`);
       type Row = { chunk_id: number; wing: string; room: string; source_id: string; content: string; claim_id: string | null; status: string | null; kind: string | null; ckey: string | null; at: string | null };
       const allowed = new Set<string>(MODE_VIS[mode]);
       // Fail closed in BOTH branches (Jim W3-2): a claim chunk is returned only when its status row
       // exists and its visibility is in the mode (the KNN fast path filters on the vec0 column, so
       // this is the check that a missing or stale status row cannot slip past).
-      const rows: Array<{ f: { id: number; score: number }; r: Row }> = [];
-      for (const f of fusedAll) {
-        if (rows.length >= k) break;
-        const r = row.get(f.id) as Row | undefined;
-        if (!r) continue;
-        if (r.claim_id && mode !== 'all' && (r.status === null || !allowed.has(visOf(r.status)))) continue;
-        rows.push({ f, r });
+      type Fused = { id: number; score: number };
+      const visible = function* (): Generator<{ f: Fused; r: Row }> {
+        for (const f of fusedAll) {
+          const r = row.get(f.id) as Row | undefined;
+          if (!r) continue;
+          if (r.claim_id && mode !== 'all' && (r.status === null || !allowed.has(visOf(r.status)))) continue;
+          yield { f, r };
+        }
+      };
+      let rows: Array<{ f: Fused; r: Row; priors?: number }>;
+      if (mode === 'live') {
+        // CLAIMS-90 M2: the live view shows one row per claim (its best-ranked matched part) and counts
+        // the superseded claims behind it along its supersession chain (definitive 'superseded' links
+        // only: a 'superseded?' claim stays a row of its own; purged ones are not counted). History and
+        // all keep every part of every version, unchanged.
+        const chain = this.db.prepare(`WITH RECURSIVE chain(id) AS (
+            SELECT claim_id FROM claim_status WHERE superseded_by = @id AND status = 'superseded'
+            UNION SELECT s.claim_id FROM claim_status s JOIN chain ON s.superseded_by = chain.id WHERE s.status = 'superseded')
+          SELECT COUNT(*) AS n FROM chain`);
+        rows = onePerClaim(visible(), k, (r) => (chain.get({ id: r.claim_id }) as { n: number }).n);
+      } else {
+        rows = [];
+        for (const c of visible()) { if (rows.length >= k) break; rows.push(c); }
       }
-      return rows.map(({ f, r }) => {
+      return rows.map(({ f, r, priors }) => {
         const d = dist.get(f.id);
         const b = bm.get(f.id);
         return {
@@ -380,7 +427,8 @@ export class NativeMemoryStore {
           cosineSim: d === undefined ? null : 1 - d,
           bm25: b === undefined ? null : -b,
           score: f.score,
-          claim: r.claim_id ? { id: r.claim_id, status: r.status ?? 'unknown', kind: r.kind ?? '', key: r.ckey, at: r.at ?? '' } : null
+          claim: r.claim_id ? { id: r.claim_id, status: r.status ?? 'unknown', kind: r.kind ?? '', key: r.ckey, at: r.at ?? '' } : null,
+          ...(r.claim_id && priors !== undefined ? { priors } : {})
         };
       });
     });
@@ -400,8 +448,8 @@ export class NativeMemoryStore {
       m.set(r.part, r.content_sha256);
       have.set(r.claim_id, m);
     }
-    const status = new Map((this.db.prepare(`SELECT s.claim_id, s.status FROM claim_status s JOIN claims c ON c.claim_id = s.claim_id AND c.part = 0 WHERE c.wing = ?`).all(wing) as Array<{ claim_id: string; status: string }>)
-      .map((r) => [r.claim_id, r.status]));
+    const status = new Map((this.db.prepare(`SELECT s.claim_id, s.status, s.superseded_by FROM claim_status s JOIN claims c ON c.claim_id = s.claim_id AND c.part = 0 WHERE c.wing = ?`).all(wing) as Array<{ claim_id: string; status: string; superseded_by: string | null }>)
+      .map((r) => [r.claim_id, { status: r.status, by: r.superseded_by }]));
     const incoming = new Map<string, ClaimPart[]>();
     for (const p of parts) { const l = incoming.get(p.claimId) ?? []; l.push(p); incoming.set(p.claimId, l); }
     const drop = new Set<string>();
@@ -416,7 +464,10 @@ export class NativeMemoryStore {
     }
     const st: ClaimPlan['status'] = [];
     for (const [id, ps] of incoming) {
-      if (!add.some((p) => p.claimId === id) && status.get(id) !== ps[0].status) st.push({ claimId: id, status: ps[0].status, at: ps[0].at });
+      // A changed status OR a changed supersession link (CLAIMS-90 M2) is a status row; never a re-embed.
+      const was = status.get(id);
+      if (!add.some((p) => p.claimId === id) && (was?.status !== ps[0].status || (was?.by ?? null) !== (ps[0].supersededBy ?? null)))
+        st.push({ claimId: id, status: ps[0].status, at: ps[0].at, supersededBy: ps[0].supersededBy ?? null });
     }
     // G3.5: a kept claim filed in another room than main now names moves (rows only, never a re-embed).
     const roomNow = new Map((this.db.prepare('SELECT claim_id, room FROM chunks WHERE wing = ? AND claim_id IS NOT NULL AND claim_part = 0').all(wing) as Array<{ claim_id: string; room: string }>)
@@ -442,19 +493,19 @@ export class NativeMemoryStore {
       const insClaim = this.db.prepare('INSERT INTO claims(claim_id, part, wing, kind, ckey, at, content, content_sha256) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
       const insChunk = this.db.prepare('INSERT INTO chunks(source_id, ordinal, wing, room, content, content_sha256, filed_at, claim_id, claim_part) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
       const insVec = this.db.prepare('INSERT INTO chunks_vec(rowid, embedding, vis) VALUES (?, ?, ?)');
-      const setStatus = this.db.prepare('INSERT INTO claim_status(claim_id, status, vis, at) VALUES (?, ?, ?, ?) ON CONFLICT(claim_id) DO UPDATE SET status = excluded.status, vis = excluded.vis, at = excluded.at');
+      const setStatus = this.db.prepare('INSERT INTO claim_status(claim_id, status, vis, at, superseded_by) VALUES (?, ?, ?, ?, ?) ON CONFLICT(claim_id) DO UPDATE SET status = excluded.status, vis = excluded.vis, at = excluded.at, superseded_by = excluded.superseded_by');
       plan.add.forEach((p, i) => {
         insClaim.run(p.claimId, p.part, plan.wing, p.kind, p.ckey, p.at, p.content, p.contentSha256);
         const info = insChunk.run(sourcePath, ord++, plan.wing, p.room ?? CLAIM_ROOM_DEFAULT, p.content, p.contentSha256, Date.parse(p.at) || meta.nowMs, p.claimId, p.part);
         insVec.run(BigInt(info.lastInsertRowid), f32(embeddings[i]), visOf(p.status));
-        if (p.part === 0) setStatus.run(p.claimId, p.status, visOf(p.status), p.at);
+        if (p.part === 0) setStatus.run(p.claimId, p.status, visOf(p.status), p.at, p.supersededBy ?? null);
       });
       // A status change updates the status row AND the vec0 metadata of every chunk of the claim
       // (a multi-part claim hides all its parts: god's (b)). Never a re-embed.
       const chunksOf = this.db.prepare('SELECT chunk_id FROM chunks WHERE claim_id = ?');
       const setVis = this.db.prepare('UPDATE chunks_vec SET vis = ? WHERE rowid = ?');
       for (const s of plan.status) {
-        setStatus.run(s.claimId, s.status, visOf(s.status), s.at);
+        setStatus.run(s.claimId, s.status, visOf(s.status), s.at, s.supersededBy ?? null);
         for (const r of chunksOf.all(s.claimId) as Array<{ chunk_id: number }>) setVis.run(visOf(s.status), BigInt(r.chunk_id));
       }
       const setRoom = this.db.prepare('UPDATE chunks SET room = ? WHERE claim_id = ?');

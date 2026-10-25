@@ -72,7 +72,7 @@ module.exports = async (drill) => {
   const chunk = (id, wing, status, text, extra = {}) => {
     const kind = extra.kind ?? 'fact'; const key = extra.key ?? null; const at = extra.at ?? '2026-10-03T10:00:00.000Z';
     const content = `${kind} · ${key ?? '-'} · ${at.slice(0, 10)}\n${text}`;
-    return { claimId: id, wing, kind, ckey: key, at, status, content, contentSha256: sha256Hex(content) };
+    return { claimId: id, wing, kind, ckey: key, at, status, supersededBy: extra.supersededBy ?? null, content, contentSha256: sha256Hex(content) };
   };
   const sync = (eng, wing, chunks) => eng.syncClaims({ wing, path: `agents/${wing}/memory/claims`, head: 'h', chunks: withParts(chunks) });
   const claimHits = (r) => (Array.isArray(r.json) ? r.json.filter((h) => h.claimId) : []);
@@ -570,6 +570,90 @@ module.exports = async (drill) => {
     fs.rmSync(path.join(hive, 'memory-sources.json'), { force: true });
     fs.rmSync(path.join(hive, 'agents'), { recursive: true, force: true });
     return { counts, schema: 2 };
+  }
+
+  if (s === 'm2keys') {
+    // CLAIMS-90 M2 (rework after Jim's audit): the live view shows one row per CLAIM (its best-ranked
+    // matched part) and counts the superseded claims behind it along its supersession chain; same-key
+    // live claims are separate facts and stay separate rows; --history keeps every part of every version.
+    fs.rmSync(path.join(hive, 'agents'), { recursive: true, force: true });
+    ledger('a1');
+    manifest({ a1: 'writer' });
+    // Upgrade path: an index built before the superseded_by column gets it in place on open.
+    const file = path.join(hive, 'm2.sqlite');
+    const pragma = (st) => st.db.prepare('PRAGMA table_info(claim_status)').all().map((c) => c.name);
+    const s0 = open(file);
+    s0.db.exec('ALTER TABLE claim_status DROP COLUMN superseded_by');
+    const colsBefore = pragma(s0);
+    s0.close();
+    const store = open(file);
+    const colsAfter = pragma(store);
+    const eng = engine(store, bowEmbedder());
+    await eng.backfill();
+    const K = 'release.current';
+    const chunks = [
+      // A real supersession chain: k1 -> k2 -> k3 (head, live). k4 purged, k5 retracted (same key, no link: separate).
+      chunk('c-0000000000k1', 'a1', 'superseded', 'the narwhal release current is 1.1.98', { kind: 'decision', key: K, at: '2026-10-01T10:00:00.000Z', supersededBy: 'c-0000000000k2' }),
+      chunk('c-0000000000k2', 'a1', 'superseded', 'the narwhal release current is 1.1.99', { kind: 'decision', key: K, at: '2026-10-02T10:00:00.000Z', supersededBy: 'c-0000000000k3' }),
+      chunk('c-0000000000k3', 'a1', 'live', 'the narwhal release current is 1.1.100', { kind: 'decision', key: K, at: '2026-10-03T10:00:00.000Z' }),
+      chunk('c-0000000000k4', 'a1', 'purged', 'the narwhal release current is 1.1.97 draft', { kind: 'decision', key: K, at: '2026-09-30T10:00:00.000Z' }),
+      chunk('c-0000000000k5', 'a1', 'retracted', 'the narwhal release current is 1.1.101 (wrong, retracted)', { kind: 'decision', key: K, at: '2026-10-04T10:00:00.000Z' }),
+      chunk('c-0000000000o1', 'a1', 'live', 'the narwhal okapi cut is friday', { key: 'release.okapi' }),
+      chunk('c-0000000000u1', 'a1', 'live', 'a narwhal note with no key at all'),
+      // Two SEPARATE live facts under one key (Jim's M2 audit: normal in this hive): each is its own row.
+      chunk('c-0000000000k6', 'a1', 'live', 'the narwhal release legacy current is 2.0 for the ibis wing', { kind: 'decision', key: 'release.legacy', at: '2026-10-01T10:00:00.000Z' }),
+      chunk('c-0000000000k7', 'a1', 'live', 'the narwhal release legacy current is 2.1 for the egret wing', { kind: 'decision', key: 'release.legacy', at: '2026-10-02T10:00:00.000Z' }),
+      // A soft (superseded?) link: both rows stay; the uncertain prior is not counted (god's (b)).
+      chunk('c-0000000000s1', 'a1', 'superseded?', 'the narwhal soft pair old value is quail', { key: 'soft.pair', at: '2026-10-01T10:00:00.000Z', supersededBy: 'c-0000000000s2' }),
+      chunk('c-0000000000s2', 'a1', 'live', 'the narwhal soft pair new value is quokka', { key: 'soft.pair', at: '2026-10-02T10:00:00.000Z' }),
+      // A chain whose head is retracted (god's (a)): the live view never shows a dead head; --history shows both.
+      chunk('c-0000000000d1', 'a1', 'superseded', 'the narwhal dead head heron was 7', { key: 'dead.head', at: '2026-10-01T10:00:00.000Z', supersededBy: 'c-0000000000d2' }),
+      chunk('c-0000000000d2', 'a1', 'retracted', 'the narwhal dead head heron is 8 (retracted)', { key: 'dead.head', at: '2026-10-02T10:00:00.000Z' }),
+    ];
+    // A long KEYED claim split into parts as chunksFor would; the answer sits in the LAST part only.
+    const { chunksFor } = L('src/main/claims/chunks.ts');
+    const longText = `${Array.from({ length: 140 }, (_, i) => `pelican lighthouse ${i}`).join(' ')} the pelican tip sha is 1234abcd`;
+    chunks.push(...chunksFor([{ v: 1, id: 'c-00000000long', t: 'claim', kind: 'fact', key: 'release.tip', text: longText, source: 'legacy', at: '2026-10-03T10:00:00.000Z', wt: '2026-10-03T10:00:00.000Z', agent: 'a1', prev: '', mac: '' }],
+      { v: 1, agent: 'a1', registryHash: '', ledgerHead: '', conflicts: [], claims: { 'c-00000000long': { id: 'c-00000000long', status: 'live', sightings: 0, firstAt: '', lastAt: '', pinned: false, reasons: [] } } }));
+    const synced = await sync(eng, 'a1', chunks);
+    const rows = (r) => claimHits(r).map((h) => [h.claimId, h.priors ?? null]);
+    const q = 'narwhal release current';
+    const live = await eng.search({ query: q, results: 10 });
+    const liveFiltered = await eng.search({ query: q, results: 10, wing: 'a1' });
+    const history = await eng.search({ query: q, results: 10, mode: 'history' });
+    const all = await eng.search({ query: q, results: 10, mode: 'all' });
+    const keyed = await eng.search({ query: q, results: 10, key: K });
+    const sinceLate = await eng.search({ query: q, results: 10, since: '2026-10-03T00:00:00.000Z' });
+    const legacy = await eng.search({ query: 'narwhal release legacy current', results: 10 });
+    const ibisLegacy = await eng.search({ query: 'narwhal legacy ibis', results: 10 });
+    const egretLegacy = await eng.search({ query: 'narwhal legacy egret', results: 10 });
+    const soft = await eng.search({ query: 'narwhal soft pair', results: 10 });
+    const deadLive = await eng.search({ query: 'narwhal dead head heron', results: 10 });
+    const deadHistory = await eng.search({ query: 'narwhal dead head heron', results: 10, mode: 'history' });
+    const long = await eng.search({ query: 'pelican tip sha 1234abcd', results: 10 });
+    const longHistory = await eng.search({ query: 'pelican lighthouse', results: 10, mode: 'history' });
+    // A later sync that only moves a link (k5 now superseded by k3) is a status change, never a re-embed.
+    const k5 = chunks.find((c) => c.claimId === 'c-0000000000k5');
+    const relinked = chunks.map((c) => (c === k5 ? { ...c, status: 'superseded', supersededBy: 'c-0000000000k3' } : c));
+    const resync = await sync(eng, 'a1', relinked);
+    const liveRelinked = await eng.search({ query: q, results: 10 });
+    const k1 = chunks.find((c) => c.claimId === 'c-0000000000k1');
+    const linkOnly = relinked.map((c) => (c === k1 ? { ...c, supersededBy: 'c-0000000000k3' } : c));
+    const resync2 = await sync(eng, 'a1', linkOnly);
+    const liveLinkOnly = await eng.search({ query: q, results: 10 });
+    const out = {
+      parts: synced.embedded, colsBefore, colsAfter,
+      live: rows(live), liveText: live.text, liveFiltered: rows(liveFiltered),
+      history: rows(history), historyText: history.text, all: rows(all), keyed: rows(keyed), sinceLate: rows(sinceLate),
+      legacy: rows(legacy), legacyText: legacy.text, ibisLegacy: rows(ibisLegacy), egretLegacy: rows(egretLegacy),
+      soft: rows(soft), softText: soft.text, deadLive: rows(deadLive), deadHistory: rows(deadHistory),
+      long: rows(long), longText: long.text, longHistory: rows(longHistory),
+      longParts: store.db.prepare('SELECT COUNT(*) AS n FROM chunks WHERE claim_id = ?').get('c-00000000long').n,
+      resync: { embedded: resync.embedded, statusChanges: resync.statusChanges }, liveRelinked: rows(liveRelinked),
+      resync2: { embedded: resync2.embedded, statusChanges: resync2.statusChanges }, liveLinkOnly: rows(liveLinkOnly),
+    };
+    await eng.close(); store.close();
+    return out;
   }
 
   return { ok: false, reason: `unknown scenario ${s}` };

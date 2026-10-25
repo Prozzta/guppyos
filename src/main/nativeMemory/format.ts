@@ -46,6 +46,8 @@ export function formatSearch(query: string, flags: SearchFlags, hits: SearchHit[
       L.push(`      Claim:  [${prior ? 'prior' : maybePrior ? 'prior?' : h.claim.status} · ${h.claim.kind} · ${h.claim.key ?? '-'} · ${date} · ${h.claim.id}]`);
       if (prior) L.push(`      Version: prior (dated ${date}); search for the key to see its current value.`);
       if (maybePrior) L.push(`      Version: possibly replaced (unconfirmed, dated ${date}); search for the key to see its current value.`);
+      // CLAIMS-90 M2: the live view counts the superseded claims this one replaces; they sit behind --history.
+      if (h.priors) L.push(`      Versions: ${h.priors} prior version(s) this claim supersedes; --history shows them.`);
     }
     L.push(`      Match:  cosine_sim=${h.cosineSim === null ? '0.0' : py(h.cosineSim)}  bm25=${h.bm25 === null ? '0.0' : py(h.bm25)}`);
     L.push('');
