@@ -25,6 +25,7 @@ const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { createRequire } = require('node:module');
 const { memoryMdOf, memoryMdCommand } = require('./memory-md.cjs');
+const { hiveTasksFor, claimsDepsFor, UNAVAILABLE_RE } = require('./claims-deps.cjs');
 
 const spec = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 const out = fs.openSync(spec.out, 'w');
@@ -172,6 +173,9 @@ function inProcessFork(runWorker, deps) {
     registry: () => registry(),
     isOwner: (agentId) => claimLevel(agentId) === 'writer',
   });
+  // Jim 4370f6 / god 8c87a7: get and history answer through main's own read wiring (claims-deps.cjs).
+  const hiveTasks = hiveTasksFor(L, hive);
+  const claimsDeps = claimsDepsFor(L, { hive, store, agents: ledgerAgents, allTasks: hiveTasks.allTasks });
   const nativeMemory = new NativeMemoryWiring({
     hiveRoot: () => hive,
     enabled: () => config.semanticMemory !== false,
@@ -183,8 +187,8 @@ function inProcessFork(runWorker, deps) {
     writeCommand: () => null,
     log,
     vecLoadablePath: () => treeRequire('sqlite-vec').getLoadablePath(),
-    // Claim verbs are writes: the answerer may not write, so they answer as a build without a ledger.
-    claims: () => null,
+    // The read verbs answer as the app's; every write verb is refused (level reader).
+    claims: () => claimsDeps,
     claimLedger: () => config.claimLedger,
     anchoredAgents: () => store.anchoredAgents(),
     onWorkerReady: () => { workerReady = claimsIndex.syncAll(); },
@@ -256,7 +260,7 @@ function inProcessFork(runWorker, deps) {
       const logCall = (status, b) => {
         if (!spec.serve) return;
         const text = typeof b?.text === 'string' ? b.text : '';
-        const row = { at: new Date().toISOString(), asker: askerOf.get(m[1]) ?? null, cmd: body?.cmd ?? null, args: body?.args ?? null, status, exit: b?.exit ?? null, chars: text.length, textSha256: crypto.createHash('sha256').update(text).digest('hex') };
+        const row = { at: new Date().toISOString(), asker: askerOf.get(m[1]) ?? null, cmd: body?.cmd ?? null, args: body?.args ?? null, status, exit: b?.exit ?? null, chars: text.length, textSha256: crypto.createHash('sha256').update(text).digest('hex'), unavailable: UNAVAILABLE_RE.test(`${b?.error ?? ''}\n${text}`) };
         fs.appendFileSync(spec.serve.callsFile, `${JSON.stringify(row)}\n`);
       };
       nativeMemory.handle(m[1], body).then((r) => { logCall(r.status, r.body); reply(r.status, r.body); }, () => { logCall(500, null); reply(500, { exit: 4, error: 'memory handler failed' }); });
@@ -427,11 +431,21 @@ function inProcessFork(runWorker, deps) {
       fs.writeFileSync(file, text ?? '', 'utf8');
       askers[asker] = { token, hookUrl: `${baseUrl.replace(/\/memory$/, '/hook')}/${hookToken}`, briefing: file, briefingChars: text ? text.length : 0, briefingSha256: crypto.createHash('sha256').update(text ?? '').digest('hex'), toolOutputDir: path.join(hive, 'agents', asker, 'tool-output') };
     }
-    const connect = { url: baseUrl, hive, cli, askers, env: { MUNDER_HIVE_ROOT: hive, MUNDER_MEMORY_URL: baseUrl, MEMORY_TOKEN: '<askers[id].token>' }, calls: spec.serve.callsFile, stop: spec.serve.stopFile, ledgers, synced, worldCalls };
+    // The preflight's real terms (Jim 4370f6 MUST 2): the first asker's newest keyed claim, else another agent's.
+    const probeOf = (first) => {
+      for (const a of [first, ...ledgerAgents().filter((x) => x !== first)]) {
+        const vp = verifiedPrefix(store.readLedger(a));
+        const c = vp ? [...vp.records].reverse().find((r) => r.t === 'claim' && typeof r.key === 'string' && r.key) : null;
+        if (c) return { agent: a, key: c.key, claimId: c.id };
+      }
+      return null;
+    };
+    const connect = { url: baseUrl, hive, cli, askers, env: { MUNDER_HIVE_ROOT: hive, MUNDER_MEMORY_URL: baseUrl, MEMORY_TOKEN: '<askers[id].token>' }, calls: spec.serve.callsFile, stop: spec.serve.stopFile, ledgers, synced, worldCalls, probe: probeOf(spec.serve.askers[0]) };
     fs.writeFileSync(spec.serve.connectFile, JSON.stringify(connect, null, 1));
     while (!fs.existsSync(spec.serve.stopFile)) await new Promise((r) => setTimeout(r, 500));
     emit({ summary: { ...verdict(), persistRisk: persistRisk.length,served: Object.keys(askers), ledgers, synced, worldCalls } });
     server.close();
+    hiveTasks.dispose();
     await nativeMemory.shutdown().catch(() => {});
     fs.closeSync(out);
     process.exit(0);

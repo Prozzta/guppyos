@@ -73,7 +73,9 @@ test('PIN: containment before product code, and no answer over a ledger that doe
   assert.match(child, /LIVE_HIVE_RE\.test\(p\) \|\| !under\(p, spec\.home\)/, 'hive and user data must be inside the jailed home');
   assert.match(child, /const LEAK_RE = \/\^\(HIVE_\|AGENT_\|MEMORY_\|MUNDER_\|CLAUDE_CODE_\|CLAUDE\|CTH_\|KG_\)\/i;/);
   assert.match(child, /filter\(\(\[, v\]\) => v\.verified !== v\.records\)/, 'every ledger verifies to its full length');
-  assert.match(child, /claims: \(\) => null,/, 'claim verbs (writes) are not wired for the answerer');
+  // Jim 4370f6 / god 8c87a7: get and history answer through main's read wiring; writes stay refused (level reader).
+  assert.match(child, /\n\s+claims: \(\) => claimsDeps,\r?\n/, 'the read verbs are wired for the answerer');
+  assert.doesNotMatch(child, /claims: \(\) => null/, 'no path serves the answerer without claims deps');
   const run = codeOnly(readSource('test/claims-90/run.cjs'));
   assert.match(run, /if \(links\.length\) throw/, 'a link or junction in the snapshot stops the run');
   assert.match(run, /if \(v\.diffs\.length\) throw/, 'a manifest difference stops the run');

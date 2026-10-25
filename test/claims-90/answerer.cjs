@@ -18,6 +18,7 @@
  *        --instruction <file> --out <dir> [--model <id>] [--claude <exe>] [--resources <dir>] [--keep]
  *        [--build <worktree>]   serve a branch build (its src, out/ hook shape, Electron and memory-cli)
  *        [--hide-stale 0|1]     C90_HIDE_STALE for the serve child (step 3 OFF arm: 0); recorded in run.json appEnv
+ *        [--preflight-only]     run the preflight (every verb an agent is shown, one real call each) and stop
  *
  * items.jsonl: { "id": "...", "asker": "<agent id>", "question": "..." }
  * The instruction file may use {asker}, {today} and {question}.
@@ -31,6 +32,7 @@ const { spawn } = require('node:child_process');
 const { drillEnv } = require('../claims-drill/runner.cjs');
 const R = require('./run.cjs');
 const { memoryMdOf, memoryMdCommand } = require('./memory-md.cjs');
+const { UNAVAILABLE_RE } = require('./claims-deps.cjs');
 
 const REPO = path.resolve(__dirname, '..', '..');
 const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
@@ -50,6 +52,7 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--keep') o.keep = true;
+    else if (a === '--preflight-only') o.preflightOnly = true;
     else if (/^--(snapshot|addendum|items|instruction|out|model|claude|resources|tree|build)$/.test(a)) o[a.slice(2)] = argv[++i];
     else if (a === '--hide-stale') { o.hideStale = argv[++i]; if (!/^[01]$/.test(o.hideStale)) throw new Error('--hide-stale takes 0 or 1'); }
     else throw new Error(`unknown argument ${a}`);
@@ -314,6 +317,84 @@ function closeOf(p, ms) {
   });
 }
 
+/** Why one preflight call fails, or null: a non-zero exit, a reply that the build does not answer the verb, or nothing. */
+function preflightProblem(r) {
+  if (r.code !== 0) return `exit ${r.code}`;
+  if (UNAVAILABLE_RE.test(`${r.stdout}\n${r.stderr}`)) return 'the build does not answer it';
+  if (!r.stdout.trim()) return 'an empty reply';
+  return null;
+}
+
+/** Jim 4370f6 run guard: the calls of one item that the build did not answer (serve log, and what the transcript shows). */
+function unavailableOf(memCalls, transcriptCalls) {
+  return {
+    serve: memCalls.filter((m) => m.unavailable).length,
+    transcript: transcriptCalls.filter((c) => UNAVAILABLE_RE.test(c.result?.text ?? '')).length,
+  };
+}
+
+function runOnce(exe, args, env) {
+  return new Promise((resolve) => {
+    const p = spawn(exe, args, { env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = ''; let stderr = '';
+    p.stdout.setEncoding('utf8').on('data', (d) => { stdout += d; });
+    p.stderr.setEncoding('utf8').on('data', (d) => { stderr += d; });
+    p.on('close', (code) => resolve({ code, stdout, stderr }));
+  });
+}
+
+/**
+ * Jim 4370f6 MUST 2: before the first item, one real call of every verb an agent is shown (wake-up,
+ * search, get <real key> --agent <asker>, history <real claim id>) through a serve child on the
+ * staged snapshot, with the build's own memory CLI. A non-zero exit, a reply that the build does not
+ * answer the verb, or an empty reply stops the run before any spend. Counts only are kept.
+ */
+async function preflight(o, v, addDir, key, asker, outDir) {
+  const dir = path.join(outDir, 'preflight');
+  fs.mkdirSync(dir, { recursive: true });
+  const home = fs.mkdtempSync(path.join(outDir, 'sandbox-'));
+  for (const d of ['tmp', path.join('AppData', 'Local')]) fs.mkdirSync(path.join(home, d), { recursive: true });
+  const calls = [];
+  try {
+    const { hive, userData } = R.stageSandbox(path.resolve(o.snapshot), v.manifest, home);
+    const world = path.join(home, 'world.json');
+    fs.copyFileSync(path.join(addDir, 'world.json'), world);
+    const serve = { askers: [asker], maxCalls: MAX_CALLS, connectFile: path.join(dir, 'connect.json'), callsFile: path.join(dir, 'calls.jsonl'), hookLogFile: path.join(dir, 'hooks.jsonl'), stopFile: path.join(home, 'stop') };
+    for (const f of [serve.connectFile, serve.callsFile, serve.hookLogFile]) fs.rmSync(f, { force: true });
+    const specFile = path.join(home, 'answer-spec.json');
+    fs.writeFileSync(specFile, JSON.stringify({ tree: o.tree, hive, userData, home, resourcesDir: o.resources, now: v.manifest.takenFrom, world, items: [], out: path.join(dir, 'serve.jsonl'), serve }));
+    const server = spawn(R.electronOf(o.tree), [path.join(__dirname, 'answer-child.cjs'), specFile], { cwd: o.tree, env: serveEnv(o, home), windowsHide: true, stdio: ['pipe', 'ignore', 'pipe'] });
+    let serverErr = '';
+    server.stderr.on('data', (d) => { if (serverErr.length < 20000) serverErr += d; });
+    const serverClosed = closeOf(server, 10 * 60_000);
+    server.stdin.end(`${key}\n`);
+    try {
+      if (!(await waitFor(serve.connectFile, 5 * 60_000))) return { ok: false, reason: `the serve child did not come up: ${serverErr.slice(0, 300)}`, calls };
+      const connect = JSON.parse(fs.readFileSync(serve.connectFile, 'utf8'));
+      const p = connect.probe;
+      if (!p) return { ok: false, reason: 'no keyed claim in the snapshot to probe get and history with', calls };
+      const cliTree = o.build || o.tree;
+      const cli = path.join(cliTree, 'resources', 'memory-cli.cjs');
+      const env = { ...childEnv(path.join(home, 'bin'), { MUNDER_HIVE_ROOT: hive, MUNDER_MEMORY_URL: connect.url, MEMORY_TOKEN: connect.askers[asker].token }), ELECTRON_RUN_AS_NODE: '1' };
+      for (const argv of [['wake-up'], ['search', p.key], ['get', p.key, '--agent', asker], ['history', p.claimId]]) {
+        const r = await runOnce(R.electronOf(cliTree), [cli, ...argv], env);
+        calls.push({ cmd: argv[0], exit: r.code, chars: r.stdout.length, sha256: sha256(r.stdout), problem: preflightProblem(r) });
+      }
+    } finally {
+      fs.writeFileSync(serve.stopFile, '');
+      await serverClosed;
+    }
+    const bad = calls.filter((c) => c.problem);
+    return bad.length ? { ok: false, reason: bad.map((c) => `${c.cmd}: ${c.problem}`).join('; '), calls } : { ok: true, calls };
+  } finally {
+    if (!o.keep) {
+      const inner = R.linksUnder(home);
+      if (inner.length) console.error(`[claims-90] kept the sandbox: it holds a link (${inner[0]})`);
+      else fs.rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+    }
+  }
+}
+
 async function answerItem(o, v, addDir, item, key, shape, instruction, outDir) {
   const itemDir = path.join(outDir, 'items', item.id);
   fs.mkdirSync(itemDir, { recursive: true });
@@ -386,7 +467,8 @@ async function answerItem(o, v, addDir, item, key, shape, instruction, outDir) {
         responseChars: h?.response?.stdoutChars ?? null, persisted: h?.response?.persisted ?? null,
       };
     });
-    row.memoryCalls = memCalls.map((m) => ({ cmd: m.cmd, args: m.args, exit: m.exit, chars: m.chars, textSha256: m.textSha256 }));
+    row.memoryCalls = memCalls.map((m) => ({ cmd: m.cmd, args: m.args, exit: m.exit, chars: m.chars, textSha256: m.textSha256, unavailable: !!m.unavailable }));
+    row.unavailable = unavailableOf(memCalls, t.calls);
     row.denied = hookRows.filter((x) => x.denied).length;
     row.memoryMd = memoryMdUse(t.memoryMdCalls, t.answer, hive);
     row.init = t.init;
@@ -397,6 +479,7 @@ async function answerItem(o, v, addDir, item, key, shape, instruction, outDir) {
     const initOk = t.init && JSON.stringify([...(t.init.tools || [])].sort()) === JSON.stringify(['Bash', 'Read']) && t.init.mcpServers === 0 && t.init.otherPlugins === 0 && t.init.autoMemoryFiles === 0 && t.init.additionalDirectories === 0;
     if (t.leaks.length) row.invalid = `leak check: ${t.leaks.length} hit(s)`;
     else if (!initOk) row.invalid = 'the session started with more than the shim tools';
+    else if (row.unavailable.serve || row.unavailable.transcript) row.invalid = `a memory verb was not answered (serve ${row.unavailable.serve}, transcript ${row.unavailable.transcript})`;
     else if (row.exit !== 0 || !t.result || t.result.isError) row.invalid = `session failed (exit ${row.exit}): ${ccErr.slice(0, 200)}`;
     else if (!row.serve.ok) row.invalid = `serve: ${row.serve.reason}`;
     const idx = path.join(userData, 'memory', `${hiveId.to}-v2.sqlite`);
@@ -446,6 +529,11 @@ async function main(argv) {
     const { userData } = R.stageSandbox(snap, v.manifest, keyHome);
     key = await R.unwrapKey(o.tree, userData, keyHome);
   } finally { fs.rmSync(keyHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }); }
+  // Jim 4370f6 MUST 2: every verb an agent is shown answers before any spend.
+  const pre = await preflight(o, v, addDir, key, items[0].asker, outDir);
+  fs.writeFileSync(path.join(outDir, 'preflight.json'), JSON.stringify(pre, null, 1));
+  if (!pre.ok) throw new Error(`preflight failed: ${pre.reason}`);
+  if (o.preflightOnly) return { preflightOnly: true, preflight: pre, code: code0, items: 0, invalid: 0, stateSha256: [] };
   const answersFile = path.join(outDir, 'answers.jsonl');
   fs.writeFileSync(answersFile, '');
   const rows = [];
@@ -467,6 +555,9 @@ async function main(argv) {
     codeAtEnd: (() => { const c = codeAt(); return JSON.stringify(c) === JSON.stringify(code0) ? 'unchanged' : c; })(),
     itemsSha256: sha256(fs.readFileSync(o.items)), items: items.length,
     invalid: rows.filter((r) => r.invalid).length,
+    // Jim 4370f6: the preflight's calls, and the items with a verb the build did not answer (each INVALID).
+    preflight: pre,
+    unavailableItems: rows.filter((r) => r.unavailable && (r.unavailable.serve || r.unavailable.transcript)).length,
     calls: rows.reduce((n, r) => n + (r.calls?.length ?? 0), 0),
     styleDeviations: rows.reduce((n, r) => n + (r.calls ?? []).filter((c) => c.styleDeviation).length, 0),
     readTypeCalls: rows.reduce((n, r) => n + (r.calls ?? []).filter((c) => c.readType).length, 0),
@@ -490,4 +581,4 @@ if (require.main === module) {
   }, (e) => { console.error(`[claims-90] ${e.stack || e.message}`); process.exitCode = 2; });
 }
 
-module.exports = { parseArgs, parseItems, installedHookShape, hookShapeOf, buildHookShape, buildInfo, buildMemoryShim, condenseOf, settingsFor, childEnv, readTranscript, styleDeviation, itemStyle, memoryMdUse, main };
+module.exports = { preflightProblem, unavailableOf, parseArgs, parseItems, installedHookShape, hookShapeOf, buildHookShape, buildInfo, buildMemoryShim, condenseOf, settingsFor, childEnv, readTranscript, styleDeviation, itemStyle, memoryMdUse, main };
