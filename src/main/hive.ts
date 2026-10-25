@@ -28,6 +28,7 @@ import { basename, join, dirname, isAbsolute, win32, posix } from 'node:path';
 import { homedir } from 'node:os';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { AppendFile, LOG_KEEP_ROTATED, rotatedFiles } from './appendLog';
+import { MailCardIndex, NO_CARD, indexEntries, indexLinkContext, isNoCard, linkMail, type MailLink } from './mailCards';
 import { atomicWriteJson as atomicWriteJsonFile, atomicWriteJsonAsync } from './atomicJson';
 import { ASK_BACKSTOP_MS, ASK_CLOSE_REASON_MAX, MailLedger, answeredByMessage, cardIdValue, freshMailId, isValidMailId, owesWork, replyTracked, staleObligations, supersededByMessage, type CardEvidence, type MailLedgerDoc, type ReleaseRun, type StaleObligation } from './mailLedger';
 import { mailObligationsView, type MailObligationsAgent } from './mailReaders';
@@ -796,6 +797,8 @@ export class HiveManager {
   /** TASKS-JSON-SPLIT: the hourly archive pass and the archive reader's cache. */
   private archiveTimer: ReturnType<typeof setInterval> | null = null;
   private archiveCache: { root: string; stamp: string; cards: Map<string, Record<string, unknown>> } | null = null;
+  /** C90-MAILCARD: the per-card mail index of the current hive root (mailCards.ts). */
+  private mailCardIndex: MailCardIndex | null = null;
   /** ZT-I3: watches tasks.json (never writes it) and keeps the per-card sidecar. */
   readonly ledgerGuard = new TaskLedgerGuard({
     root: () => this.root(),
@@ -2917,7 +2920,7 @@ export class HiveManager {
    *  else the first carded message in its conversation (sender's or recipient's ledger; R1). */
   private needsHumanCard(msg: HiveMessage, to: string): string | null {
     const own = cardIdValue(msg.card);
-    if (own) return own;
+    if (own && !isNoCard(own)) return own;
     const seen = new Set<string>([msg.id]);
     let cur = msg.in_reply_to;
     for (let i = 0; cur && i < HiveManager.NEEDS_HUMAN_ANCESTOR_HOPS && !seen.has(cur); i++) {
@@ -2962,6 +2965,91 @@ export class HiveManager {
       cur = parent.in_reply_to ?? null;
     }
     return count;
+  }
+
+  /** C90-MAILCARD: the index of the current root (a new root gets a fresh one), or null without a hive. */
+  private mailCards(): MailCardIndex | null {
+    const root = this.root();
+    if (!root) return null;
+    if (this.mailCardIndex?.hiveRoot !== root) this.mailCardIndex = new MailCardIndex(root);
+    return this.mailCardIndex;
+  }
+
+  /**
+   * C90-MAILCARD forward linking: the card a routed message is about (mailCards.ts linkMail; a parent
+   * older than the index is read from its delivered file). One card sets msg.card. A message from a
+   * floor agent that names no card, several, or an unknown one is bounced to its sender (true is
+   * returned as 'bounced'); floor-wide mail (broadcast, or god's) may say card "none". Mail from
+   * the router, 'system' or the Human, and a needs_human ask, are never bounced. A floor with no
+   * cards yet requires none.
+   * An index failure never blocks mail (null: routed unlinked, logged).
+   */
+  private linkCard(msg: HiveMessage, reg: Registry, godId: string): MailLink | 'bounced' | null {
+    let link: MailLink;
+    let cardIds: string[];
+    try {
+      const index = this.mailCards();
+      if (!index) return null;
+      cardIds = (this.allTasks().tasks as Array<{ id?: unknown }>).map((t) => t?.id).filter((id): id is string => typeof id === 'string' && cardIdValue(id) === id && !isNoCard(id));
+      const ctx = indexLinkContext(index, cardIds);
+      const linkOf = ctx.linkOf;
+      ctx.linkOf = (id) => {
+        const rec = linkOf(id);
+        if (rec) return rec;
+        // A parent older than the index: its MailLedger entry (main-written), never an inbox file,
+        // so a file written straight into an inbox cannot lend its card to a reply.
+        for (const agent of Object.keys(reg.agents)) {
+          const parent = this.mail.ledger(agent).entries[id];
+          if (!parent) continue;
+          const own = cardIdValue(parent.cardId);
+          const card = own ? ctx.cardOf(own) : null;
+          return { cards: card ? [card] : [], method: card ? 'field' : 'none', in_reply_to: parent.inReplyTo ?? null };
+        }
+        return null;
+      };
+      link = linkMail(msg, ctx);
+    } catch (e) {
+      try { this.appendLog({ kind: 'mail-card-error', id: msg.id, op: 'link', error: String(e) }); } catch { /* noop */ }
+      return null;
+    }
+    const floorWide = msg.to === 'broadcast' || msg.from === godId;
+    // A needs_human ask is never held back: it reaches god as before and its sender is told the
+    // card is missing (surfaceNeedsHuman).
+    const exempt = !Object.prototype.hasOwnProperty.call(reg.agents, msg.from) || cardIds.length === 0 || msg.needs_human === true;
+    if (link.method === 'none' && isNoCard(msg.card) && floorWide) { msg.card = NO_CARD; return link; }
+    if (link.method !== 'ambiguous' && link.method !== 'none' && link.cards.length === 1) { msg.card = link.cards[0]; return link; }
+    if (link.method === 'none' && msg.to === 'broadcast' && msg.card === undefined) { msg.card = NO_CARD; return link; }
+    if (exempt) return link;
+    const why = isNoCard(msg.card)
+      ? 'card "none" is only for floor-wide mail (to broadcast, or from god)'
+      : link.cards.length > 1
+        ? `it names several cards (${link.cards.slice(0, 6).join(', ')}) and none of them is its card field`
+        : cardIdValue(msg.card) ? `its card "${cardIdValue(msg.card)}" is not a card on this board` : 'it names no card';
+    this.appendLog({ kind: 'drop', reason: 'no-card', from: msg.from, to: msg.to, id: msg.id, method: link.method, cards: link.cards.length });
+    const notice = this.normalize({
+      to: msg.from,
+      act: 'inform',
+      in_reply_to: null,
+      requires_reply: false,
+      subject: `[card required] ${msg.subject}`.slice(0, 200),
+      body: `The hive router did not deliver your ${msg.act} to ${msg.to} ("${msg.subject}"): ${why}. Every message names the card it is about, so the card (its claims and its mail) is the history. Send it again with "card": "<CARD-ID>" (a tasks.json card id), or as a reply (in_reply_to) to a message on that card. Floor-wide mail to broadcast uses "card": "none". Nothing is lost: it is in your outbox/.sent/.`
+    }, 'system');
+    const notified = this.deliver(notice, msg.from);
+    this.emitMessage(notice, notified ? [msg.from] : []);
+    return 'bounced';
+  }
+
+  /** C90-MAILCARD: record a routed message and its delivered copies in the per-card mail index. */
+  private indexMail(msg: HiveMessage, link: MailLink, delivered: readonly string[]): void {
+    try {
+      const index = this.mailCards();
+      if (!index) return;
+      const now = Date.now();
+      const { link: rec, rows } = indexEntries(msg, link, 'delivery', delivered.map((to) => ({ to, deliveredAt: now })), new Date(now).toISOString());
+      index.record(rec, rows);
+    } catch (e) {
+      try { this.appendLog({ kind: 'mail-card-error', id: msg.id, op: 'index', error: String(e) }); } catch { /* noop */ }
+    }
   }
 
   /** A delivered message by id: <id>.json in any agent's inbox or inbox/.done, or null. */
@@ -3102,6 +3190,10 @@ export class HiveManager {
     }
     const reg = this.registry();
     const godId = reg.godId ?? 'god';
+    // C90-MAILCARD: every message names its card (field, reply chain, conversation or one mention);
+    // an agent's message that names none is bounced to it before anything else happens.
+    const link = this.linkCard(msg, reg, godId);
+    if (link === 'bounced') return;
     // The hive has no separate human-approval queue — approvals are native to
     // each agent's Claude Code session (and approvable remotely). A message aimed
     // at "human" is handled by the god/orchestrator, the human's proxy here.
@@ -3235,6 +3327,7 @@ export class HiveManager {
       }
     }
     this.appendLog({ kind: 'message', from: msg.from, to: msg.to, act: msg.act, subject: msg.subject, id: msg.id, delivered });
+    if (link && delivered.length) this.indexMail(msg, link, delivered);
     this.emitMessage(msg, targets);
     // Main-process observer (e.g. the closing-time controller watching for the
     // team's ACKs and the god's COMPLETE). Best-effort, never breaks routing.

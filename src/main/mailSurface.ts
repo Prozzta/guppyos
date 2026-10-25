@@ -291,6 +291,8 @@ function renderItem(it: MailBlockItem, truncate: boolean, keep = MAIL_TRUNCATE_C
   if (e.inReplyTo) meta.push(`in_reply_to: ${escapeMailText(e.inReplyTo)}`);
   meta.push(...flagsOf(e));
   if (meta.length) lines.push(meta.join(' | '));
+  // C90-MAILCARD: the card is the history; one line says how to read it.
+  if (e.cardId && e.cardId.toLowerCase() !== 'none') lines.push(`card: ${escapeMailText(e.cardId)} (its claims and mail: memory get ${escapeMailText(e.cardId)})`);
   if (e.redelivered) lines.push('(re-delivered: this may already have been handled — check before acting)');
   if (e.legacy && e.surfacedAt == null) lines.push('(delivered before 1.1.75; may already have been handled)');
   const body = escapeMailText(it.body);

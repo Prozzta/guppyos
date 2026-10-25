@@ -151,8 +151,10 @@ test('hive: a backstop close tells both sides once, logs its reason, is recorded
   const human = hive.send({ to: 'andy-1', act: 'request', subject: 'Human must pick', body: 'go', needs_human: true }, 'god-1');
   assert.equal(hive.mail.ledger('andy-1').entries[human.id].needsHuman, true, 'stamped at delivery through the real send path');
   hive.addTask({ id: 'ASK-QA-1', title: 'needs the Human', status: 'blocked', dependsOn: [], humanQA: [{ q: 'Which one?', askedAt: new Date().toISOString() }] });
+  // C90-MAILCARD: an agent's message names its card (MISC-1, a neutral card); god's direct mail says card "none".
+  hive.addTask({ id: 'MISC-1', title: 'misc', status: 'doing', dependsOn: [] });
   const onQA = hive.send({ to: 'andy-1', act: 'request', subject: 'build it once the Human picks', body: 'go', card: 'ASK-QA-1' }, 'god-1');
-  hive.send({ to: 'god-1', act: 'inform', subject: 'something else', body: 'fyi' }, 'andy-1');
+  hive.send({ to: 'god-1', act: 'inform', subject: 'something else', body: 'fyi', card: 'MISC-1' }, 'andy-1');
   assert.deepEqual(hive.autoCloseStaleObligations(null), [], 'fresh: open');
   const before = { god: inbox(hive, 'god-1').length, andy: inbox(hive, 'andy-1').length };
   const later = Date.now() + 25 * H;
