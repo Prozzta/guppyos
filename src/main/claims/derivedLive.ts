@@ -12,9 +12,9 @@
  * It never touches the delivery path (wake/mail confirm): it only reads the MailLedger files that
  * delivery wrote (hive/state/mail). Runs never overlap; a failure is logged and the next pass tries again.
  */
-import { cardFieldFacts, cardRecordFacts, decisionFacts, doneMailFacts, parseChangelog, releaseFacts, type MailLike } from './derivedFacts';
+import { cardFieldFacts, cardRecordFacts, decisionFacts, rulingMailFacts, doneMailFacts, parseChangelog, releaseFacts, type MailLike } from './derivedFacts';
 import { DerivedGit } from './derivedGit';
-import { readCards, readDoneMails, runDerivedBackfill, syncDerived, type DerivedWriterDeps } from './derivedWriter';
+import { readCards, readDoneMails, readIndexRulingMails, runDerivedBackfill, syncDerived, type DerivedWriterDeps } from './derivedWriter';
 
 export const DERIVED_START_DELAY_MS = 20_000;
 export const DERIVED_CARDS_DEBOUNCE_MS = 5_000;
@@ -104,6 +104,7 @@ export class DerivedLive {
     const c = this.ctx(); if (!c) return;
     const git = c.git && await c.git.ok() ? c.git : null;
     const rel = await this.releaseSource(git);
+    await syncDerived(c.w, rulingMailFacts(readIndexRulingMails(c.root)));
     await syncDerived(c.w, releaseFacts(parseChangelog(rel.changelog), rel.tags));
     const mails = this.newDoneMails(c.root);
     if (git && mails.length) {

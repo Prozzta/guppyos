@@ -660,6 +660,12 @@ test('live driver: waits while disabled, serializes runs, reads only new done-ma
   deliver(x, 'agent-x', { id: 'm-h3', act: 'done', from: 'agent-x', card: 'SYN-H1', subject: 'x', body: r.g(['rev-parse', 'HEAD~2']) });
   await live.run('pass', () => live.pass());
   assert.equal(x.claims().length, n1 + 1, 'the seen mail is not re-read');
+  // A ruling mail lands in the per-card mail index (no registry: god is 'god'); the pass writes it.
+  fs.mkdirSync(path.join(x.root, 'state', 'mail-cards'), { recursive: true });
+  fs.writeFileSync(path.join(x.root, 'state', 'mail-cards', 'syn-h1.jsonl'), `${JSON.stringify({ v: 1, id: 'm-h4', card: 'SYN-H1', cards: ['SYN-H1'], cardFrom: 'field', from: 'god', to: 'agent-x', act: 'inform', subject: 'RULING: ship it' })}\n`);
+  await live.run('pass', () => live.pass());
+  assert.equal(x.claims().length, n1 + 2, 'the live pass writes the ruling');
+  assert.ok(x.claims().some((c) => /^card\.syn-h1\.decision\.m[0-9a-f]{8}$/.test(c.key)));
   live.cardsChanged();
   assert.equal(timers.length, 3, 'the card change is debounced through a timer');
   assert.ok(!x.logs.some((row) => row.kind === 'claims-derived-failed'), JSON.stringify(x.logs.filter((row) => row.kind === 'claims-derived-failed')));
@@ -729,4 +735,47 @@ test('R2 (e) card record: the result and each note entry under card.<id>.decisio
   const c = await W.runDerivedBackfill(x.deps, { hiveRoot: x.root, git: null, releases: { changelog: null, tags: [] } });
   assert.equal(c.records.appended, facts.filter((f0) => f0.key.startsWith('card.syn-r1')).length);
   assert.equal((await W.runDerivedBackfill(x.deps, { hiveRoot: x.root, git: null, releases: { changelog: null, tags: [] } })).records.appended, 0, 'idempotent');
+});
+
+test('R2 (g) ruling mails: god mails saying RULING, linked by a trusted method, under card.<id>.decision.m<h8>, whole', async () => {
+  const long = 'word '.repeat(150).trim();
+  const id = (n) => `2026-10-25T00-00-00-000Z-0000${n}`;
+  const row = (card, cardFrom, extra) => ({ v: 1, card, cards: [card], cardFrom, from: 'god', to: 'jim-1', act: 'request', ...extra });
+  const withBody = (body) => ({ body, bodyHash: mailBodyHash(body) });
+  const x = setup();
+  fs.writeFileSync(path.join(x.root, 'registry.json'), JSON.stringify({ godId: 'god', agents: {} }));
+  const dir = path.join(x.root, 'state', 'mail-cards');
+  fs.mkdirSync(dir, { recursive: true });
+  const rows = {
+    'syn-g1': [
+      row('SYN-G1', 'field', { id: id('a1'), subject: 'Split ruled', ...withBody(`RULING on the split: ${long}`), created_at: '2026-10-25T08:39:33.000Z' }),
+      row('SYN-G1', 'mention-body', { id: id('a2'), subject: 'status', ...withBody('RULING: a body mention only') }),
+      row('SYN-G1', 'field', { id: id('a3'), subject: 'next steps', ...withBody('please rebase') }),
+      row('SYN-G1', 'field', { id: id('a4'), from: 'jim-1', subject: 'RULING proposal', ...withBody('mine') }),
+      row('SYN-G1', 'field', { id: id('a5'), act: 'done', subject: 'RULING applied', ...withBody('done') }),
+      row('SYN-G1', 'reply', { id: id('a6'), act: 'inform', subject: 'Ruling: keep both', body: 'tampered', bodyHash: mailBodyHash('the real body') }),
+      row('SYN-G1', 'field', { id: id('a7'), subject: 'Split ruled', ...withBody('RULING: a second one, same subject') }),
+    ],
+    'syn-g2': [row('SYN-G2', 'mention-subject', { id: id('a1'), subject: 'Split ruled', ...withBody(`RULING on the split: ${long}`), created_at: '2026-10-25T08:39:33.000Z' })],
+  };
+  for (const [name, rs] of Object.entries(rows)) fs.writeFileSync(path.join(dir, `${name}.jsonl`), rs.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  fs.writeFileSync(path.join(dir, '_links.jsonl'), `${JSON.stringify(row('SYN-G1', 'field', { id: id('b1'), mailId: id('b1'), method: 'field', subject: 'RULING' }))}\n`);
+  const mails = W.readIndexRulingMails(x.root);
+  assert.deepEqual(mails.map((m) => [m.id, m.cards]).sort(), [[id('a1'), ['SYN-G1', 'SYN-G2']], [id('a6'), ['SYN-G1']], [id('a7'), ['SYN-G1']]],
+    'god only, not done, says RULING or ruled; a mention-body link, a plain mail and the _links file never count');
+  assert.equal(mails.find((m) => m.id === id('a6')).body, undefined, 'a body that does not hash to the row is not taken');
+  assert.equal(F.isRulingMail({ from: 'god', act: 'inform', subject: 'status', body: 'a ruling is pending' }, 'god'), false, 'lower-case ruling in the body alone is not a ruling');
+  const facts = F.rulingMailFacts(mails);
+  const g1 = facts.filter((f0) => f0.key.startsWith('card.syn-g1.decision.m'));
+  assert.equal(new Set(facts.map((f0) => f0.key)).size, facts.length, 'one key per mail (two rulings with one subject do not share one)');
+  assert.ok(g1.length > 2 && g1.every((f0) => /^card\.syn-g1\.decision\.m[0-9a-f]{8}(\.p\d)?$/.test(f0.key)));
+  const a1 = g1.filter((f0) => f0.refs.some((r) => r.type === 'msg' && r.value === id('a1')));
+  assert.match(a1[0].text, /^Card SYN-G1 ruling \(part 1 of \d\): Split ruled — RULING on the split: word/);
+  assert.equal(a1.map((f0) => f0.text.replace(/^[^:]*: /, '')).join(' '), `Split ruled — RULING on the split: ${long}`, 'whole, nothing lost');
+  assert.equal(a1[0].at, '2026-10-25T08:39:33.000Z');
+  assert.equal(g1.find((f0) => f0.refs.some((r) => r.value === id('a6'))).text, 'Card SYN-G1 ruling: Ruling: keep both');
+  assert.ok(facts.some((f0) => f0.key.startsWith('card.syn-g2.decision.m')), 'each linked card gets the ruling');
+  const c = await W.runDerivedBackfill(x.deps, { hiveRoot: x.root, git: null, releases: { changelog: null, tags: [] } });
+  assert.equal(c.rulings.appended, facts.length);
+  assert.equal((await W.runDerivedBackfill(x.deps, { hiveRoot: x.root, git: null, releases: { changelog: null, tags: [] } })).rulings.appended, 0, 'idempotent');
 });

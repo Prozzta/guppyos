@@ -15,6 +15,9 @@
  *   (f) card.<id>.decision.result, card.<id>.decision.n<h8>   R2: the card's own record, whole, in parts:
  *                                 its result, and each note entry (h8 = the entry's hash, so entries
  *                                 keep their keys as notes grow). A ruling that lives only there is found.
+ *   (g) card.<id>.decision.m<h8>  R2 (research T4): each god ruling mail on the card, whole, in parts (h8 =
+ *                                 the mail id's hash). Only mails the mail-card index links by a trusted
+ *                                 method (field, reply, conversation, mention-subject); see isRulingMail.
  *
  * Card ids are lower-cased in keys (the registry's KEY_RE); an id that cannot make a key is skipped.
  */
@@ -141,6 +144,34 @@ export function cardRecordFacts(cards: readonly CardLike[]): DerivedFact[] {
       if (!k || seen.has(k)) continue;
       seen.add(k);
       out.push(...inParts(k, 'fact', `Card ${c.id} note`, fold(e), entryAt(e), refs));
+    }
+  }
+  return out;
+}
+
+/** A mail from the per-card mail index: the cards it is linked to by a trusted method only. */
+export interface RulingMailLike { id: string; from: string; act: string; subject?: string; body?: string; cards: string[]; at?: string }
+
+/**
+ * (g) A ruling: god's mail (not a done report) that says RULING (upper case) in its subject or body,
+ * or ruling/ruled in its subject. Human answers are humanQA entries, already rule (a).
+ */
+export function isRulingMail(m: Pick<RulingMailLike, 'from' | 'act' | 'subject' | 'body'>, godId: string): boolean {
+  if (m.from !== godId || m.act === 'done') return false;
+  return /\bRULING\b/.test(`${m.subject ?? ''}\n${m.body ?? ''}`) || /\b(?:ruling|ruled)\b/i.test(m.subject ?? '');
+}
+
+/** (g) One fact per (card, ruling mail): the subject and the body, whole, at the mail's time. */
+export function rulingMailFacts(mails: readonly RulingMailLike[]): DerivedFact[] {
+  const out: DerivedFact[] = [];
+  for (const m of mails) {
+    const whole = fold([m.subject, m.body].filter((s) => typeof s === 'string' && s.trim()).join(' — '));
+    if (!whole) continue;
+    const h = `m${createHash('sha256').update(m.id).digest('hex').slice(0, 8)}`;
+    for (const card of [...new Set(m.cards)]) {
+      const k = cardKey(card, 'decision', h);
+      if (!k) continue;
+      out.push(...inParts(k, 'fact', `Card ${card} ruling`, whole, iso(m.at), [{ type: 'task', value: card }, { type: 'msg', value: m.id }]));
     }
   }
   return out;

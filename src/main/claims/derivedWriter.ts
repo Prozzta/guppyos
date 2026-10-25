@@ -17,11 +17,12 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DERIVED_AGENT_ID, type AppendOrigin, type AppendResult, type ClaimRec, type ClaimsState, type LedgerRec, type ReadResult, type RecordDraft } from '../../shared/claims';
 import {
-  cardFieldFacts, cardRecordFacts, decisionFacts, doneMailFacts, gitHistoryFacts, parseChangelog, releaseFacts, shaMentions,
+  cardFieldFacts, cardRecordFacts, decisionFacts, isRulingMail, rulingMailFacts, type RulingMailLike, doneMailFacts, gitHistoryFacts, parseChangelog, releaseFacts, shaMentions,
   type CardLike, type DerivedFact, type GitLogPort, type MailLike, type TagLike,
 } from './derivedFacts';
 import { mergeHotCold, readArchive } from '../taskArchive';
 import { isValidMailId, mailBodyHash, type MailLedgerDoc } from '../mailLedger';
+import { TRUSTED_METHODS, type MailLinkMethod } from '../mailCards';
 
 export interface DerivedStore {
   readLedger(agentId: string): ReadResult;
@@ -179,6 +180,46 @@ export function readIndexDoneMails(hiveRoot: string, seen?: Set<string>): MailLi
   return out;
 }
 
+/**
+ * R2 (g): god's ruling mails in the per-card mail index (isRulingMail), each with the cards whose
+ * file holds it under a trusted link method; a mention-body link never counts. The body counts only
+ * when it hashes to the row's bodyHash. god is the registry's godId (default 'god').
+ */
+export function readIndexRulingMails(hiveRoot: string): RulingMailLike[] {
+  let godId = 'god';
+  try {
+    const g = (JSON.parse(readFileSync(join(hiveRoot, 'registry.json'), 'utf8')) as { godId?: unknown }).godId;
+    if (typeof g === 'string' && g) godId = g;
+  } catch { /* no registry: god */ }
+  const dir = join(hiveRoot, 'state', 'mail-cards');
+  let files: string[] = [];
+  try { files = readdirSync(dir).filter((n) => n.endsWith('.jsonl') && !n.startsWith('_')).sort(); } catch { return []; }
+  const byId = new Map<string, RulingMailLike>();
+  for (const f of files) {
+    let lines: string[] = [];
+    try { lines = readFileSync(join(dir, f), 'utf8').split('\n'); } catch { continue; }
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let r: Record<string, unknown>;
+      try { r = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
+      if (!r || typeof r.id !== 'string' || !isValidMailId(r.id) || typeof r.card !== 'string') continue;
+      if (!TRUSTED_METHODS.has(r.cardFrom as MailLinkMethod)) continue;
+      const body = typeof r.bodyHash === 'string' && typeof r.body === 'string' && mailBodyHash(r.body) === r.bodyHash ? r.body : undefined;
+      const m: RulingMailLike = byId.get(r.id) ?? {
+        id: r.id, from: String(r.from ?? ''), act: String(r.act ?? ''),
+        ...(typeof r.subject === 'string' ? { subject: r.subject } : {}),
+        ...(body !== undefined ? { body } : {}),
+        cards: [],
+        ...(typeof r.created_at === 'string' ? { at: r.created_at } : Number.isFinite(r.deliveredAt) ? { at: new Date(r.deliveredAt as number).toISOString() } : {}),
+      };
+      if (!isRulingMail(m, godId)) continue;
+      if (!m.cards.includes(r.card)) m.cards.push(r.card);
+      byId.set(r.id, m);
+    }
+  }
+  return [...byId.values()];
+}
+
 /** The body of an inbox copy of message `id`, only when it hashes to the ledger's bodyHash. */
 function bodyOf(inbox: string, id: string, bodyHash: string): { body?: unknown } {
   for (const file of [join(inbox, `${id}.json`), join(inbox, '.done', `${id}.json`)]) {
@@ -202,7 +243,7 @@ export interface BackfillInput {
 }
 
 export interface BackfillCounts {
-  cards: number; doneMails: number; decisions: SyncCounts; records: SyncCounts; cardFields: SyncCounts; releases: SyncCounts; doneShas: SyncCounts;
+  cards: number; doneMails: number; decisions: SyncCounts; records: SyncCounts; rulings: SyncCounts; cardFields: SyncCounts; releases: SyncCounts; doneShas: SyncCounts;
   doneSkipped: Record<string, number>; doneOlder: number; gitShas: SyncCounts;
 }
 
@@ -217,6 +258,7 @@ export async function runDerivedBackfill(deps: DerivedWriterDeps, input: Backfil
   }
   const decisions = await syncDerived(deps, decisionFacts(cards));
   const records = await syncDerived(deps, cardRecordFacts(cards));
+  const rulings = await syncDerived(deps, rulingMailFacts(readIndexRulingMails(input.hiveRoot)));
   const cardFields = await syncDerived(deps, await cardFieldFacts(cards, input.git));
   const releases = await syncDerived(deps, releaseFacts(parseChangelog(input.releases.changelog), input.releases.tags));
   const cardIds = cards.map((c) => c.id).filter((id): id is string => typeof id === 'string');
@@ -225,7 +267,7 @@ export async function runDerivedBackfill(deps: DerivedWriterDeps, input: Backfil
   for (const s of done.skips) deps.log?.({ kind: 'claims-derived-done-skip', mail: s.mail.slice(0, 120), reason: s.reason, ...(s.cards ? { cards: s.cards } : {}) });
   const doneShas = await syncDerived(deps, done.facts);
   const gitShas = input.git?.log ? await syncDerived(deps, await gitHistoryFacts(await input.git.log(), cardIds, input.git)) : { facts: 0, appended: 0, unchanged: 0, superseded: 0, failed: 0 };
-  const counts = { cards: cards.length, doneMails: mails.length, decisions, records, cardFields, releases, doneShas, doneSkipped: done.skipped, doneOlder: done.older, gitShas };
+  const counts = { cards: cards.length, doneMails: mails.length, decisions, records, rulings, cardFields, releases, doneShas, doneSkipped: done.skipped, doneOlder: done.older, gitShas };
   deps.log?.({ kind: 'claims-derived-backfill', ...counts });
   return counts;
 }
