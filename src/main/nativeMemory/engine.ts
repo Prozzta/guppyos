@@ -279,12 +279,11 @@ export class MemoryEngine {
         const needle = exactNeedle(a.query);
         const chunks = needle ? this.d.store.searchExact({ query: needle, wing: a.wing ?? null, room: a.room ?? null, sinceMs, beforeMs, k: fetchK, mode: a.mode ?? 'live', kind: a.kind ?? null, key: a.key ?? null }) : [];
         const files = needle && !a.wing && !a.room && !a.kind && !a.key ? exactFileHits(this.d.hiveRoot, needle, k) : [];
-        const all = [...dropStale(chunks, a.mode, k), ...files];
+        const all = servedHits([...dropStale(chunks, a.mode, k), ...files]);  // matched on raw text, rewritten for display
         return { exit: 0, text: formatSearch(a.query, a, all), json: json(all) };
       }
       const [qv] = await this.embed([a.query]);
-      const hits = dropStale(this.d.store.search({ query: a.query, queryVec: qv, wing: a.wing ?? null, room: a.room ?? null, sinceMs, beforeMs, k: fetchK, mode: a.mode ?? 'live', kind: a.kind ?? null, key: a.key ?? null }), a.mode, k)
-        .map((h) => ({ ...h, content: withHistoryCommands(h.content) }));  // CLAIMS-90 HISTORY-PTR: old memory.md anchors served as commands
+      const hits = servedHits(dropStale(this.d.store.search({ query: a.query, queryVec: qv, wing: a.wing ?? null, room: a.room ?? null, sinceMs, beforeMs, k: fetchK, mode: a.mode ?? 'live', kind: a.kind ?? null, key: a.key ?? null }), a.mode, k));  // CLAIMS-90 HISTORY-PTR
       return { exit: 0, text: formatSearch(a.query, a, hits), json: json(hits) };
     }, o);
   }
@@ -642,6 +641,9 @@ export const EXACT_TEXT_FILES = ['PROTOCOL.md', 'board.md'] as const;
  * CLAIMS-90 R2: the lines of PROTOCOL.md and board.md that hold the needle, as hits whose source is `<file>:<line>`
  * (wing `hive`, room `docs`, no claim), at most `k` per file, in file order. A missing file is no hit.
  */
+/** CLAIMS-90 HISTORY-PTR: every served hit (semantic, bm25 or --exact file line) shows old memory.md anchors as commands. */
+export const servedHits = (hits: SearchHit[]): SearchHit[] => hits.map((h) => ({ ...h, content: withHistoryCommands(h.content) }));
+
 export function exactFileHits(hiveRoot: string, needle: string, k: number): SearchHit[] {
   const out: SearchHit[] = [];
   for (const file of EXACT_TEXT_FILES) {

@@ -22,6 +22,7 @@ const loadTs = require('./load-ts.cjs');
 const REPO = path.resolve(__dirname, '..');
 const F = loadTs('src/main/nativeMemory/format.ts');
 const E = loadTs('src/main/nativeMemory/engine.ts');
+const P = loadTs('src/main/claims/historyPointer.ts');
 const { validateRequest } = loadTs('src/main/nativeMemory/service.ts');
 
 const hit = (i, content, claim, extra = {}) => ({ chunkId: i, wing: 'a1', room: 'memory', source: 'agents/a1/claims.jsonl', content, cosineSim: 0.4, bm25: 0.9, score: 0.9 - i / 1000, claim, ...extra });
@@ -100,6 +101,13 @@ test('--exact: the needle drops surrounding quotes and folds whitespace; PROTOCO
   assert.deepEqual(hits.map((h) => [h.source, h.wing, h.room, h.content]), [['PROTOCOL.md:4', 'hive', 'docs', 'No INT, no publish.'], ['board.md:2', 'hive', 'docs', '- rule: **No INT**, no `publish` (god)']]);
   assert.ok(hits.every((h) => h.claim === null && h.bm25 === null && typeof h.filedAt === 'number'));
   assert.equal(E.exactFileHits(root, 'heavy slot', 1).length, 1, 'k caps per file');
+  // Creed efae3e: --exact hits are served through the history-pointer rewrite too (matched on the raw line first).
+  fs.appendFileSync(path.join(root, 'PROTOCOL.md'), 'ptr memory.md#claim-history-c-a1 line\n');
+  const raw = E.exactFileHits(root, 'memory.md#claim-history-c-a1', 5);
+  assert.equal(raw.length, 1, 'the raw anchor text matches');
+  const served = E.servedHits(raw);
+  assert.equal(served[0].content, P.withHistoryCommands(raw[0].content)); assert.notEqual(served[0].content, raw[0].content, 'MUTANT: exact hits not rewritten');
+  assert.equal(served[0].source, 'PROTOCOL.md:6');
   assert.equal(E.exactFileHits(root, 'heavy slot', 5).length, 2, 'case-folded');
   fs.rmSync(path.join(root, 'board.md'));
   assert.equal(E.exactFileHits(root, 'no int', 5).length, 1, 'a missing file is skipped');
