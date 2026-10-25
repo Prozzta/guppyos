@@ -4,6 +4,7 @@ import type {
 } from '../../shared/claims';
 import { GENERATED_MEMORY_MARKER } from './generated';
 import { reconcilePromptText } from './reconcile';
+import { historyPointer } from './historyPointer';
 
 /** B8 fixed budget shares; lower-tier unused capacity flows down only. */
 export const WORKING_SET_TIER_SHARES = [0.40, 0.10, 0.50] as const;
@@ -77,6 +78,33 @@ function historyCurrent(group: ClaimRec[], state: ClaimsState): ClaimRec | undef
 
 const claimDate = (c: ClaimRec): string => (c.at || c.wt).slice(0, 10);
 const historyAnchor = (id: string): string => `claim-history-${id}`;
+const byHistoryTime = (a: ClaimRec, b: ClaimRec): number => cmp(a.at || a.wt, b.at || b.wt) || cmp(a.wt, b.wt) || cmp(a.id, b.id);
+/** One history group as dated CURRENT / CONFLICT / PRIOR lines (memory.md's section and `memory history`). */
+function historyLines(kept: ClaimRec[], current: ClaimRec, state: ClaimsState): string[] {
+  const lines: string[] = [];
+  for (const rec of kept) {
+    const status = state.claims[rec.id]?.status ?? 'live';
+    const label = rec.id === current.id ? 'CURRENT' : state.claims[rec.id]?.status === 'live' ? 'CONFLICT' : 'PRIOR';
+    const [first, ...rest] = rec.text.split('\n');
+    lines.push(`- ${label} — ${claimDate(rec)} — ${first} [status:${status}] [c:${rec.id}]`, ...rest.map(line => `  ${line}`));
+  }
+  return lines;
+}
+
+/**
+ * CLAIMS-90 HISTORY-PTR: the answer to `memory history <id>`: the dated history group that holds
+ * `id`, in memory.md's section layout (no anchor). A purged claim is left out; null when `id` is
+ * not a claim of these records (or only a purged one).
+ */
+export function renderClaimHistory(records: LedgerRec[], state: ClaimsState, id: string): string | null {
+  const claims = records.filter((r): r is ClaimRec => r.t === 'claim');
+  const shown = (c: ClaimRec): boolean => state.claims[c.id]?.status !== 'purged';
+  if (!claims.some(c => c.id === id && shown(c))) return null;
+  const group = [...historyGroups(claims, state).values()].find(g => g.some(c => c.id === id)) ?? [];
+  const kept = group.filter(shown).sort(byHistoryTime);
+  const current = historyCurrent(kept, state) ?? kept[kept.length - 1];
+  return [`### Claim history: ${current.key ?? current.id}`, ...historyLines(kept, current, state)].join('\n') + '\n';
+}
 
 /** Bind an immutable append-order snapshot and the native-memory tokenizer to frozen W4 signatures. */
 export function createClaimViews(records: LedgerRec[], countTokens: CountTokens, reconcileItems: ReconcileItem[] = [], registry?: KeyRegistry): {
@@ -144,7 +172,7 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
     const historyPointers = [...histories.values()].filter(group => group.length > 1)
       .map(group => historyCurrent(group, state))
       .filter((c): c is ClaimRec => !!c && state.claims[c.id]?.status === 'live')
-      .map(c => ({ id: c.id, line: `- ${c.key ?? c.id} history: memory.md#${historyAnchor(c.id)}` }));
+      .map(c => ({ id: c.id, line: `- ${c.key ?? c.id} history: ${historyPointer(c.id)}` }));
     // CL-OVERFLOW-NOTE: one packing pass. `room` bounds the total size of the lines packed; the
     // tier shares (and the budget named in the warnings) stay on `cap`. room == cap is the packing
     // as it was; a smaller room keeps space free for the overflow note and "+N more".
@@ -165,7 +193,7 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
       for (const { claim, order: _order } of groups[0]) {
         const id = claim.id;
         const group = historyFor.get(id);
-        const line = workingSetLine(claim, view.flags[id] ?? []) + (group && group.length > 1 ? ` [history: memory.md#${historyAnchor(id)}]` : '');
+        const line = workingSetLine(claim, view.flags[id] ?? []) + (group && group.length > 1 ? ` [history: ${historyPointer(id)}]` : '');
         if (!add(line, 0, id)) excluded.set(id, 'tier-share');
       }
       let markersIncluded = 0;
@@ -188,7 +216,7 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
           let localUsed = 0;
           for (const { claim } of items) {
             const id = claim.id; const group = historyFor.get(id);
-            const line = workingSetLine(claim) + (group && group.length > 1 ? ` [history: memory.md#${historyAnchor(id)}]` : '');
+            const line = workingSetLine(claim) + (group && group.length > 1 ? ` [history: ${historyPointer(id)}]` : '');
             const n = lineTokens(line);
             if (used + (selected.length + 1) * sep + selectedTokens + n <= room &&
                 selectedTokens + n <= t2Cap && localUsed + n <= localCap) {
@@ -299,7 +327,7 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
       }
       lines.push('', '## All claims (complete export)');
       const histories = historyGroups(claims, state);
-      const ordered = [...histories.values()].map(group => group.slice().sort((a, b) => cmp(a.at || a.wt, b.at || b.wt) || cmp(a.wt, b.wt) || cmp(a.id, b.id)))
+      const ordered = [...histories.values()].map(group => group.slice().sort(byHistoryTime))
         .sort((a, b) => cmp(a.at(-1)?.at ?? a.at(-1)?.wt ?? '', b.at(-1)?.at ?? b.at(-1)?.wt ?? ''));
       for (const group of ordered) {
         const kept = group.filter(rec => !isExcluded(rec.id));
@@ -310,13 +338,7 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
           continue;
         }
         const current = historyCurrent(kept, state) ?? kept.at(-1)!;
-        lines.push('', `### Claim history: ${current.key ?? current.id}`, `<a id="${historyAnchor(current.id)}"></a>`);
-        for (const rec of kept) {
-          const status = state.claims[rec.id]?.status ?? 'live';
-          const label = rec.id === current.id ? 'CURRENT' : state.claims[rec.id]?.status === 'live' ? 'CONFLICT' : 'PRIOR';
-          const [first, ...rest] = rec.text.split('\n');
-          lines.push(`- ${label} — ${claimDate(rec)} — ${first} [status:${status}] [c:${rec.id}]`, ...rest.map(line => `  ${line}`));
-        }
+        lines.push('', `### Claim history: ${current.key ?? current.id}`, `<a id="${historyAnchor(current.id)}"></a>`, ...historyLines(kept, current, state));
       }
       for (const rec of selectedRecords) if (rec.t === 'event') lines.push(`<!-- event:${rec.id} ${rec.ev} -->`);
     }
