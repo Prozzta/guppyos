@@ -300,3 +300,14 @@ test('backfill script: refuses the live hive and a hive under the app\'s user da
   assert.equal(out.ok, true);
   assert.equal(out.recorded, 8);
 });
+
+test('the generated PROTOCOL.md states the forward-linking rules (god 0e0ead)', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'hive.ts'), 'utf8').replace(/\r\n/g, '\n');
+  const proto = src.slice(src.indexOf('const PROTOCOL_MD = `'), src.indexOf('## Asking the Human'));
+  assert.match(proto, /### Every message is on a card/);
+  assert.doesNotMatch(proto, /READS-181> \(optional\)/, 'the card field is no longer optional');
+  for (const s of ['its \\`card\\` field', '(\\`in_reply_to\\`)', 'on one card only', 'only in the body does not set the card',
+    '\\`[card required]\\` notice', '\\`"card": "none"\\`', "god's direct\nmail otherwise needs a card", 'is never held back']) {
+    assert.ok(proto.includes(s), s);
+  }
+});

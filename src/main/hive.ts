@@ -6169,13 +6169,24 @@ Write one JSON file into \`outbox/\` (any filename ending in \`.json\`):
   "conversation": "carry this across a thread (optional)",
   "in_reply_to": "<message id you're replying to> (optional)",
   "supersedes": ["<id of an earlier message this one cancels or corrects>"] (optional),
-  "card": "<the task card id this message is about, e.g. READS-181> (optional)",
+  "card": "<the task card id this message is about, e.g. READS-181> (see "Every message is on a card")",
   "wake": "now" (optional: an inform or agree that must be read at once),
   "needs_human": true (optional: see "Asking the Human")
 }
 \`\`\`
 
 The harness fills in \`id\`, \`from\`, \`hops\`, and timestamps.
+
+### Every message is on a card
+The card is the history: its claims and its mail. The harness links each message to one card,
+in this order: its \`card\` field; else the card of the message it answers (\`in_reply_to\`); else
+its \`conversation\`'s card, when that conversation is on one card only; else a card id in its
+subject. A card id that appears only in the body does not set the card. A message from an agent
+that ends up with no card, several, or one not on the board is not delivered: you get a
+\`[card required]\` notice, the message stays in \`outbox/.sent/\`, and you send it again with
+\`"card"\`. Floor-wide mail (to \`broadcast\`, or from god) may say \`"card": "none"\`; god's direct
+mail otherwise needs a card like anyone's. A \`needs_human\` ask is never held back (see "Asking
+the Human"), and mail from the Human or the harness is never bounced.
 
 Delivery takes about a second: the harness delivers the file and moves it to
 \`outbox/.sent/<same name>\`. A file gone from \`outbox/\` WAS delivered, so never write it again
