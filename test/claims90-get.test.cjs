@@ -106,7 +106,8 @@ test('current, competing, superseded: newest live claim is current; other live v
   const r = get('card.foo-7');
   assert.equal(r.current.source, 'claim');
   assert.equal(r.current.claimId, 'c-bbbbbbbbbbb2', 'the newest live row under the set (the hand claim, 2026-10-03T10)');
-  assert.ok(r.competing.some((x) => x.claimId === 'c-aaaaaaaaaaa5'), 'the live derived status row competes');
+  assert.ok(!r.competing.some((x) => x.claimId === 'c-aaaaaaaaaaa5'), 'MUST 1: a sub-key field row never competes for the bare key');
+  assert.ok(r.competing.some((x) => x.claimId === 'c-ccccccccccc1'), 'the other live hand claim competes');
   assert.ok(!r.competing.some((x) => x.kind === 'decision'), 'decisions never compete');
   const s = r.superseded.find((x) => x.claimId === 'c-bbbbbbbbbbb1');
   assert.ok(s, 'the superseded hand claim is listed');
@@ -281,13 +282,30 @@ test('db7d4a + T5 (god fe1140): a mention-body mail is listed weak and never cur
   assert.equal(G.trustedLink('mention'), false, 'an unsplit legacy mention is weak until the index splits it');
 });
 
+test('MUST 1 (god 5b990a A, Jim ad1da8): a bare card key takes current/competing/superseded only from claims keyed card.<id> or its aliases; a newer sub-key field claim stays in fields/decisions (MUTANT: newest row under the set)', () => {
+  const f = fixture();
+  const late = c('c-ddddddddddd1', 'derived', 'card.foo-7.assignee', '2026-10-24T17:53:49.905Z', 'Card FOO-7 assignee: alpha-1');
+  const old = c('c-ddddddddddd2', 'derived', 'card.foo-7.status', '2026-09-01T10:00:00.000Z', 'Card FOO-7 status: todo', { supersedes: ['c-ddddddddddd0'] });
+  const d = deps({ ledgers: { ...f.ledgers, derived: [...f.ledgers.derived, late, old] } });
+  const r = get('card.foo-7', {}, d);
+  assert.equal(r.current.claimId, 'c-bbbbbbbbbbb2', 'MUTANT: the backfill-stamped field claim became current');
+  assert.ok(r.competing.every((x) => x.key === 'card.foo-7'), r.competing.map((x) => x.key).join());
+  assert.ok(r.superseded.every((x) => x.key === 'card.foo-7'), r.superseded.map((x) => x.key).join());
+  assert.ok(r.keys.includes('card.foo-7.assignee') && r.fields.assignee === 'alpha-1', 'the sub-key is still in the set and the field shows');
+  assert.equal(get('card.foo-7.assignee', {}, d).current.claimId, 'c-ddddddddddd1', 'the sub-key itself still answers');
+  assert.equal(get('card.foo-7', { agent: 'alpha-1' }, d).current.claimId, 'c-bbbbbbbbbbb2');
+  // An alias of the bare key still counts as its own.
+  const d2 = deps({ ledgers: d.ledgers, registry: registry({ 'build.foo7': 'card.foo-7' }) });
+  assert.equal(get('build.foo7', {}, d2).current.claimId, 'c-bbbbbbbbbbb2');
+});
+
 test('T2 (god fe1140): the text view prints COUNTS of competing/superseded rows and lists their bodies only on --all; the JSON keeps every row; C90_HIDE_STALE=0 is the OFF arm (MUTANT: bodies always)', () => {
   const r = get('card.foo-7');
-  assert.ok(r.competing.length >= 2 && r.superseded.length === 1, 'the JSON keeps every row');
+  assert.ok(r.competing.length >= 1 && r.superseded.length === 1, 'the JSON keeps every row');
   const saved = process.env.C90_HIDE_STALE; delete process.env.C90_HIDE_STALE;
   try {
     const t = G.formatGet(r);
-    assert.match(t, /^competing: \d+ other live values hidden \(--all lists them\)$/m);
+    assert.match(t, /^competing: \d+ other live values? hidden \(--all lists them\)$/m);
     assert.match(t, /^superseded: 1 replaced value hidden \(--all lists them\)$/m);
     assert.doesNotMatch(t, /c-bbbbbbbbbbb1|c-aaaaaaaaaaa5/, 'no stale body in the default view');
     assert.match(t, /^current: card\.foo-7: FOO-7 build moved to 2222222 on branch x$/m, 'the current line is unchanged');

@@ -119,6 +119,7 @@ const MUTANTS = [
   ['T db7d4a: a body-only mention can make a mail current', GET, "{ field: 8, reply: 4, conversation: 2, 'mention-subject': 1 };", "{ field: 8, reply: 4, conversation: 2, 'mention-subject': 1, 'mention-body': 1 };"],
   ['U T2: the text view always lists the competing/superseded bodies', GET, 'const bodies = opts.history === true || !hideStale();', 'const bodies = true;'],
   ['V T3: a live search keeps confirmed priors', ENGINE, "return hits.filter((h) => !h.claim || h.claim.status !== 'superseded').slice(0, k);", 'return hits.slice(0, k);'],
+  ['X MUST 1 (god 5b990a A): a sub-key field claim can be the bare card current', GET, "const owns = (c: ClaimRec): boolean => !bareCard || ownKeys.has(canonicalKey(c.key ?? '', d.registry));", 'const owns = (_c: ClaimRec): boolean => true;'],
   ['W T5: equal-time mails have no link-strength tiebreak', GET, '.sort((a, b) => b.ms - a.ms || linkRank(b.m.cardFrom) - linkRank(a.m.cardFrom));', '.sort((a, b) => b.ms - a.ms);'],
 ];
 

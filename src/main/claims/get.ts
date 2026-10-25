@@ -293,8 +293,14 @@ export function resolveGet(rawTerm: string, opts: GetOptions, d: GetDeps): GetRe
   const all: ClaimRec[] = [];
   for (const k of keys) for (const id of ix.byKey.get(k) ?? []) { const c = ix.claims.get(id); if (c) all.push(c); }
   const live = all.filter((c) => ix.status.get(c.id) === 'live');
+  // MUST 1 (god 5b990a A, Jim ad1da8): a bare card key's current, competing and superseded come only from claims keyed
+  // card.<id> itself or its aliases; sub-key field claims live in fields{} / decisions[] and never compete for it
+  // (a derived field claim stamped at the backfill's --now outranked every real note on 10 gated rows).
+  const ownKeys = new Set(aliasSet(ix, base));
+  const bareCard = isCardKey(base) && !FIELD_SUFFIX.test(base);
+  const owns = (c: ClaimRec): boolean => !bareCard || ownKeys.has(canonicalKey(c.key ?? '', d.registry));
   const decisions = live.filter((c) => isDecision(canonicalKey(c.key ?? '', d.registry))).sort(newestFirst).map(row);
-  const values = live.filter((c) => !isDecision(canonicalKey(c.key ?? '', d.registry))).sort(newestFirst);
+  const values = live.filter((c) => owns(c) && !isDecision(canonicalKey(c.key ?? '', d.registry))).sort(newestFirst);
   const agent = opts.agent?.trim() || null;
   let pick: ClaimRec | undefined;
   if (agent) {
@@ -303,7 +309,7 @@ export function resolveGet(rawTerm: string, opts: GetOptions, d: GetDeps): GetRe
       ?? values[0];
   } else pick = values[0];
   const competing = values.filter((c) => c !== pick).map(row);
-  const superseded: GetSupersededRow[] = all.filter((c) => ix.status.get(c.id) !== 'live').sort(newestFirst).map((c) => ({
+  const superseded: GetSupersededRow[] = all.filter((c) => owns(c) && ix.status.get(c.id) !== 'live').sort(newestFirst).map((c) => ({
     claimId: c.id, agent: c.agent, at: c.at, key: c.key ?? '', status: ix.status.get(c.id) ?? 'unknown', excerpt: excerpt(c.text),
     supersededBy: [...(ix.supersededBy.get(c.id) ?? [])].sort(cmp), ...(ix.reason.get(c.id) ? { reason: ix.reason.get(c.id) } : {}),
   }));

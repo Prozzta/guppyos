@@ -177,8 +177,9 @@ function queryTerms(query: string): string[] {
  */
 export function termSpecificity(t: string): 1 | 2 | 3 {
   // CLAIMS-90 M3 SHOULD 1 + 3 (Jim's audit): a sha has a digit (a 7+ letter word is not one); a card id is a hyphenated
-  // token with a digit segment (claims-90, cl-m4-forward-path-2), not the one-hyphen shape.
-  if ((/^[0-9a-f]{7,}$/.test(t) && /\d/.test(t)) || /^\d+\.\d+(\.\d+)+$/.test(t) || (/^[a-z][a-z0-9]*(-[a-z0-9]+)+$/.test(t) && /(?:^|-)\d+(?:-|$)/.test(t)) || /^c-[0-9a-f]{8,}$/.test(t)) return 3;
+  // token with a digit segment (claims-90, cl-m4-forward-path-2), not the one-hyphen shape. SHOULD 2: a dotted card id
+  // (cut-1.1.100: a version as the last segment) is a card id too, so card.cut-1.1.100.* lifts by prefix.
+  if ((/^[0-9a-f]{7,}$/.test(t) && /\d/.test(t)) || /^\d+\.\d+(\.\d+)+$/.test(t) || (/^[a-z][a-z0-9]*(-[a-z0-9]+)+$/.test(t) && /(?:^|-)\d+(?:-|$)/.test(t)) || /^c-[0-9a-f]{8,}$/.test(t) || /^[a-z][a-z0-9]*(-[a-z0-9]+)*-\d+(\.\d+)+$/.test(t)) return 3;
   if (/^[a-z0-9_\-]+(\.[a-z0-9_\-]+)+$/.test(t)) return 2;
   return 1;
 }

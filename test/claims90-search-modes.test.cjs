@@ -145,6 +145,8 @@ test('M3 SHOULDs 1-3 (Jim\'s audit): a sha needs a digit; a card id is a hyphena
   assert.equal(F.termSpecificity('deadbeef'), 1, 'SHOULD 1: seven+ hex letters without a digit is a word');
   for (const t of ['release', 'claims-', 'c-abc', 'x-1y-', 'foo-bar', 'one-two-three']) assert.equal(F.termSpecificity(t), 1, t);
   // SHOULD 2: a dotted card id names its keys by prefix (card.cut-1.1.100.status), so the key-aware lift applies.
+  assert.equal(F.termSpecificity('cut-1.1.100'), 3, 'a dotted card id is a level-3 term (census row S needs this to bite)');
+  assert.equal(F.termSpecificity('cut-1.1'), 3); assert.equal(F.termSpecificity('cut-1.1.'), 1);
   const hits = [hit(0, 'status doing', meta('d1', 'card.cut-1.1.100.status', '2026-10-01T00:00:00Z')), hit(1, 'cut-1.1.100 mentioned in a note about release 1.1.100', meta('d2', 'release.1.1.100', '2026-10-02T00:00:00Z'))];
   const ranked = F.rankHits('cut-1.1.100', hits);
   assert.equal(ranked[0].claim.id, 'd1', 'the card\'s own key is lifted over a mention');
