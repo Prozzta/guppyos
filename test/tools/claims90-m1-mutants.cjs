@@ -120,6 +120,11 @@ const MUTANTS = [
   ['U T2: the text view always lists the competing/superseded bodies', GET, 'const bodies = opts.history === true || !hideStale();', 'const bodies = true;'],
   ['V T3: a live search keeps confirmed priors', ENGINE, "return hits.filter((h) => !h.claim || h.claim.status !== 'superseded').slice(0, k);", 'return hits.slice(0, k);'],
   ['X MUST 1 (god 5b990a A): a sub-key field claim can be the bare card current', GET, "const owns = (c: ClaimRec): boolean => !bareCard || ownKeys.has(canonicalKey(c.key ?? '', d.registry));", 'const owns = (_c: ClaimRec): boolean => true;'],
+  ['Y G1: lastsha takes a mail current', GET, "const mailKey = field === null || field === 'donesha';", "const mailKey = field === null || field === 'donesha' || field === 'lastsha';"],
+  ['Z G1: donesha takes an inform mail', GET, "const doneOnly = field === 'donesha';", 'const doneOnly = false;'],
+  ['AB G2: release.<v> newest wins over the git claim', GET, "if (!agent && base.startsWith(RELEASE_PREFIX)) pick = values.find((c) => c.agent === 'derived') ?? pick;", ''],
+  ['AC exact: the needle keeps markup', ENGINE, 'return stripMarkup(s.toLowerCase());', 'return s.toLowerCase();'],
+  ['AD exact: file lines compared raw', ENGINE, 'if (!stripMarkup(lines[i].toLowerCase()).includes(needle)) continue;', 'if (!lines[i].toLowerCase().includes(needle)) continue;'],
   ['W T5: equal-time mails have no link-strength tiebreak', GET, '.sort((a, b) => b.ms - a.ms || linkRank(b.m.cardFrom) - linkRank(a.m.cardFrom));', '.sort((a, b) => b.ms - a.ms);'],
 ];
 

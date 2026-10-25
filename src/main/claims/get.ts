@@ -88,6 +88,7 @@ const linkParts = (cardFrom: string): string[] => String(cardFrom ?? '').toLower
 export const linkRank = (cardFrom: string): number => linkParts(cardFrom).reduce((n, p) => n + (TRUSTED_LINKS[p] ?? 0), 0);
 export const trustedLink = (cardFrom: string): boolean => linkRank(cardFrom) > 0;
 const CARD_PREFIX = 'card.';
+const RELEASE_PREFIX = 'release.';
 const FIELD_SUFFIX = /\.(status|assignee|lastsha|donesha|decision\.[a-z0-9]{8})$/;
 const SHA_RE = /\b[0-9a-f]{7,40}\b/g;
 const VERSION_RE = /\b\d+\.\d+(?:\.\d+)+\b/g;
@@ -308,6 +309,9 @@ export function resolveGet(rawTerm: string, opts: GetOptions, d: GetDeps): GetRe
       ?? values.find((c) => c.agent === 'derived' && c.text.includes(`from ${agent} `))
       ?? values[0];
   } else pick = values[0];
+  // G2 (god 6f7b2c, Jim 3a543d): for release.<v> git is the authority: the derived git-sourced claim is current
+  // and agent claims (often mis-keyed to a neighbouring version) compete behind it, whatever their age.
+  if (!agent && base.startsWith(RELEASE_PREFIX)) pick = values.find((c) => c.agent === 'derived') ?? pick;
   const competing = values.filter((c) => c !== pick).map(row);
   const superseded: GetSupersededRow[] = all.filter((c) => owns(c) && ix.status.get(c.id) !== 'live').sort(newestFirst).map((c) => ({
     claimId: c.id, agent: c.agent, at: c.at, key: c.key ?? '', status: ix.status.get(c.id) ?? 'unknown', excerpt: excerpt(c.text),
@@ -336,13 +340,18 @@ export function resolveGet(rawTerm: string, opts: GetOptions, d: GetDeps): GetRe
       mails = paged.page.map(mailRow);
       nextBefore = paged.nextBefore;
       if (!opts.noMail) {
+        // G1 (god 6f7b2c, Jim 3a543d): only the bare card and donesha take a mail current; lastsha, status, assignee,
+        // fixVersion and decisions are the card record's, so no mail outranks their claim. For donesha the question is
+        // the done mail, so only act=done mails qualify; the ac6f85 done-sha fallback is for these two keys only.
         const field = base.startsWith(CARD_PREFIX) ? (FIELD_SUFFIX.exec(base)?.[1] ?? null) : null;
-        const shaField = field === null || field === 'donesha' || field === 'lastsha';
+        const mailKey = field === null || field === 'donesha';
+        const doneOnly = field === 'donesha';
+        const shaField = mailKey;
         const known = new Set<string>();
         for (const c of all) { for (const s of sha7(c.text)) known.add(s); for (const v of versions(c.text)) known.add(v); for (const r of c.refs ?? []) if (r.type === 'commit') for (const s of sha7(r.value)) known.add(s); }
         const pickMs = pick ? atMs(pick) : -Infinity;
         const candidates = pageMails(rows, rows.length, null).page
-          .filter((m) => (!agent || m.from === agent) && m.body !== undefined && trustedLink(m.cardFrom))
+          .filter((m) => mailKey && (!doneOnly || m.act === 'done') && (!agent || m.from === agent) && m.body !== undefined && trustedLink(m.cardFrom))
           .map((m) => ({ m, ms: epochMs(m.created_at) || epochMs(m.id) }))
           .filter((x) => Number.isFinite(x.ms) && x.ms > pickMs)
           .sort((a, b) => b.ms - a.ms || linkRank(b.m.cardFrom) - linkRank(a.m.cardFrom));

@@ -401,7 +401,8 @@ export class NativeMemoryStore {
     if (!needle) return [];
     const mode: SearchMode = o.mode === 'history' || o.mode === 'all' ? o.mode : 'live';
     const visFilter = mode === 'all' ? '1' : `(c.claim_id IS NULL OR cs.vis IN (${visList(mode)}))`;
-    const filt = ['instr(lower(c.content), @needle) > 0', '(@wing IS NULL OR c.wing = @wing)', '(@room IS NULL OR c.room = @room)', '(@since IS NULL OR c.filed_at >= @since)', '(@before IS NULL OR c.filed_at < @before)',
+    // god 6f7b2c: exact ignores markdown markup (** and backticks) in the text; the needle arrives stripped (engine.exactNeedle).
+    const filt = ["instr(replace(replace(lower(c.content), '**', ''), '`', ''), @needle) > 0", '(@wing IS NULL OR c.wing = @wing)', '(@room IS NULL OR c.room = @room)', '(@since IS NULL OR c.filed_at >= @since)', '(@before IS NULL OR c.filed_at < @before)',
       '(@kind IS NULL OR cl.kind = @kind)', '(@key IS NULL OR cl.ckey = @key)', visFilter].join(' AND ');
     const joins = 'LEFT JOIN claim_status cs ON cs.claim_id = c.claim_id LEFT JOIN claims cl ON cl.claim_id = c.claim_id AND cl.part = c.claim_part';
     const params = { needle, wing: o.wing ?? null, room: o.room ?? null, since: o.sinceMs ?? null, before: o.beforeMs ?? null, kind: o.kind ?? null, key: o.key ?? null, n: k };

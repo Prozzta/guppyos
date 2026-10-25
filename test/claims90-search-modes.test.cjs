@@ -89,12 +89,15 @@ test('--exact: the needle drops surrounding quotes and folds whitespace; PROTOCO
   assert.equal(E.exactNeedle('  "Hello   World" '), 'hello world');
   assert.equal(E.exactNeedle("'No INT, no publish'"), 'no int, no publish');
   assert.equal(E.exactNeedle('plain  text'), 'plain text');
+  // god 6f7b2c: markup-insensitive on every source. MUTANT: needle keeps ** / backticks, or a file line is compared raw.
+  assert.equal(E.exactNeedle('**No INT**, no `publish`'), 'no int, no publish');
+  assert.equal(E.stripMarkup('a **b** `c`'), 'a b c');
   assert.deepEqual([...E.EXACT_TEXT_FILES], ['PROTOCOL.md', 'board.md'], 'god 8218c8: the D5 rows');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'c90-exact-'));
   fs.writeFileSync(path.join(root, 'PROTOCOL.md'), '# P\n\nThe heavy slot: one job.\nNo INT, no publish.\nA third Heavy Slot line.\n');
-  fs.writeFileSync(path.join(root, 'board.md'), 'board\r\n- rule: No INT, no publish (god)\r\n');
+  fs.writeFileSync(path.join(root, 'board.md'), 'board\r\n- rule: **No INT**, no `publish` (god)\r\n');
   const hits = E.exactFileHits(root, 'no int, no publish', 5);
-  assert.deepEqual(hits.map((h) => [h.source, h.wing, h.room, h.content]), [['PROTOCOL.md:4', 'hive', 'docs', 'No INT, no publish.'], ['board.md:2', 'hive', 'docs', '- rule: No INT, no publish (god)']]);
+  assert.deepEqual(hits.map((h) => [h.source, h.wing, h.room, h.content]), [['PROTOCOL.md:4', 'hive', 'docs', 'No INT, no publish.'], ['board.md:2', 'hive', 'docs', '- rule: **No INT**, no `publish` (god)']]);
   assert.ok(hits.every((h) => h.claim === null && h.bm25 === null && typeof h.filedAt === 'number'));
   assert.equal(E.exactFileHits(root, 'heavy slot', 1).length, 1, 'k caps per file');
   assert.equal(E.exactFileHits(root, 'heavy slot', 5).length, 2, 'case-folded');

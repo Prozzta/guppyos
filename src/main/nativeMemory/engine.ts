@@ -620,13 +620,17 @@ function defaultWatch(dir: string, onChange: (file: string) => void): FSWatcher 
 }
 
 /** Shadow diagnostics and JSON output carry no content: ids, sources, ranks, scores. */
-/** CLAIMS-90 R2: the exact-text needle: trimmed, matching outer quotes dropped, whitespace folded, lower-cased. */
+/** CLAIMS-90 R2: the exact-text needle: trimmed, matching outer quotes dropped, whitespace folded, lower-cased,
+ *  markdown emphasis (`**`) and backticks dropped (god 6f7b2c: exact ignores markup on every source). */
 export function exactNeedle(q: string): string {
   let s = q.trim().replace(/\s+/g, ' ');
   const m = /^(["'`])(.*)\1$/.exec(s);
   if (m) s = m[2].trim();
-  return s.toLowerCase();
+  return stripMarkup(s.toLowerCase());
 }
+
+/** The markup `--exact` ignores on both sides (needle and text): `**` and backticks. Mirrors store.searchExact's SQL. */
+export const stripMarkup = (s: string): string => s.replace(/\*\*/g, '').replace(/`/g, '');
 
 /** The hive files `--exact` reads as text from the served root (god 8218c8: PROTOCOL.md and board.md, the D5 rows). */
 export const EXACT_TEXT_FILES = ['PROTOCOL.md', 'board.md'] as const;
@@ -643,7 +647,7 @@ export function exactFileHits(hiveRoot: string, needle: string, k: number): Sear
     const lines = text.split(/\r?\n/);
     let n = 0;
     for (let i = 0; i < lines.length && n < k; i++) {
-      if (!lines[i].toLowerCase().includes(needle)) continue;
+      if (!stripMarkup(lines[i].toLowerCase()).includes(needle)) continue;
       n++;
       out.push({ chunkId: -(out.length + 1), wing: 'hive', room: 'docs', source: `${file}:${i + 1}`, content: lines[i].trim(), cosineSim: null, bm25: null, score: 0, claim: null, filedAt });
     }

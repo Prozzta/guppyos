@@ -7,7 +7,7 @@
  *  - current = newest live claim (--agent: that agent's claim, or the derived row naming its done mail, first);
  *    competing = the other live values; superseded = the inverse of supersedes with a <=120-char excerpt;
  *  - a card's decision list is complete and newest first, never folded into competing;
- *  - the mail rule (Jim 784b65 s4 d): a NEWER card mail naming a known value (or, for donesha/lastsha/the bare card,
+ *  - the mail rule (Jim 784b65 s4 d): a NEWER card mail naming a known value (or, for donesha/the bare card,
  *    a commit sha in that agent's done mail) is current, with its source; Human mail (no body) never; --no-mail
  *    is the claims-only control; times compare as epoch ms (tie -> claim; dashed mail-id times parse);
  *  - mails newest first, MAIL_DEFAULT per page, --before pages back, one row per mail id;
@@ -165,7 +165,7 @@ test('mail rule: a NEWER card mail naming a known value is current (source mail,
   assert.equal(get('card.foo-7', { agent: 'alpha-1' }, d).current.source, 'mail');
 });
 
-test('mail rule, done-sha (Jim ac6f85): for donesha/lastsha or the bare card, a commit sha in that agent\'s DONE mail is a known value even with no claim under the key; other fields keep the known-value rule', () => {
+test('mail rule, done-sha (Jim ac6f85, G1 6f7b2c): for donesha or the bare card, a commit sha in that agent\'s DONE mail is a known value even with no claim under the key; other fields keep the known-value rule', () => {
   const rows = [mail('2026-10-08T09-00-00-000Z-ffffff', 'alpha-1', 'god', 'done', 'FOO-7 done', '2026-10-08T09:00:00.000Z', `landed as ${'abc1234' + 'f'.repeat(33)} on guppy/foo-7`)];
   const d = deps({ mailRows: () => rows });
   const r = get('card.foo-7.donesha', { agent: 'alpha-1' }, d);
@@ -173,6 +173,18 @@ test('mail rule, done-sha (Jim ac6f85): for donesha/lastsha or the bare card, a 
   assert.equal(get('card.foo-7.donesha', {}, d).current.source, 'mail', 'without --agent any agent\'s done mail counts');
   assert.equal(get('card.foo-7.donesha', { agent: 'beta-2' }, d).current.source, 'claim', 'not that agent\'s mail');
   assert.equal(get('card.foo-7.status', {}, d).current.source, 'claim', 'status is not a sha field: an unknown sha is not a value');
+  // G1 (god 6f7b2c, Jim 3a543d): lastsha/status/assignee/fixVersion are the card record's; no mail becomes their current
+  // even when it names their value (MUTANT: lastsha takes the newer done mail).
+  const dl = deps({ mailRows: () => rows }); dl.ledgers = { ...dl.ledgers, 'beta-2': [...dl.ledgers['beta-2'], c('c-eeeeeeeeeee1', 'beta-2', 'card.foo-7.lastsha', '2026-10-01T10:00:00.000Z', 'Card FOO-7 lastsha: abc1234f')] };
+  assert.equal(get('card.foo-7.lastsha', {}, dl).current.claimId, 'c-eeeeeeeeeee1', 'lastsha: the card record is the authority');
+  assert.equal(get('card.foo-7.lastsha', { agent: 'alpha-1' }, dl).current.source, 'claim');
+  assert.equal(get('card.foo-7.status', { agent: 'alpha-1' }, dl).current.source, 'claim');
+  // donesha takes act=done mails only (MUTANT: a conversation-linked inform naming the sha wins).
+  const infRows = [mail('2026-10-09T09-00-00-000Z-eeeeee', 'alpha-1', 'god', 'inform', 'FOO-7 progress', '2026-10-09T09:00:00.000Z', `now at ${SHA_B} too`, { cardFrom: 'conversation' })];
+  const di = deps({ mailRows: () => [...infRows, ...rows] });
+  const ri = get('card.foo-7.donesha', {}, di);
+  assert.equal(ri.current.source, 'mail'); assert.equal(ri.current.mailId, '2026-10-08T09-00-00-000Z-ffffff', 'the done mail, not the newer inform');
+  assert.equal(get('card.foo-7', {}, di).current.mailId, '2026-10-09T09-00-00-000Z-eeeeee', 'the bare card still takes any trusted mail naming a known value, whatever its act');
   // F5 shape: a pruned card with NO claim at all under the key still answers from its done mail.
   const d5 = deps({ mailRows: () => rows }); d5.ledgers = { 'alpha-1': [c('c-bbbbbbbbbbb9', 'alpha-1', 'card.foo-7.status', '2026-10-01T10:00:00.000Z', 'Card FOO-7 status: doing')] };
   const r5 = get('card.foo-7.donesha', {}, d5);
@@ -280,6 +292,17 @@ test('db7d4a + T5 (god fe1140): a mention-body mail is listed weak and never cur
   assert.ok(G.linkRank('field') > G.linkRank('reply+conversation+mention-subject'), 'an explicit card field outranks every inferred link');
   assert.equal(G.linkRank('mention-body'), 0);
   assert.equal(G.trustedLink('mention'), false, 'an unsplit legacy mention is weak until the index splits it');
+});
+
+test('G2 (god 6f7b2c, Jim 3a543d): for release.<v> the derived git-sourced claim is current and newer agent claims compete; --agent still picks that agent (MUTANT: newest wins)', () => {
+  const git = c('c-fffffffffff1', 'derived', 'release.1.1.100', '2026-10-20T10:00:00.000Z', 'Guppy 1.1.100, tag v1.1.100 is commit 0123456789abcdef0123456789abcdef01234567', { source: 'derived', refs: [{ type: 'commit', value: '0123456789abcdef0123456789abcdef01234567' }] });
+  const note = c('c-fffffffffff2', 'alpha-1', 'release.1.1.100', '2026-10-22T10:00:00.000Z', '1.1.101 cut as 89abcdef0123456789abcdef0123456789abcdef');
+  const d = deps({ ledgers: { derived: [git], 'alpha-1': [note] } });
+  const r = get('release.1.1.100', {}, d);
+  assert.equal(r.current.claimId, 'c-fffffffffff1', 'MUTANT: the newer mis-keyed agent note became current');
+  assert.deepEqual(r.competing.map((x) => x.claimId), ['c-fffffffffff2']);
+  assert.equal(get('release.1.1.100', { agent: 'alpha-1' }, d).current.claimId, 'c-fffffffffff2');
+  assert.equal(get('release.1.1.100', {}, deps({ ledgers: { 'alpha-1': [note] } })).current.claimId, 'c-fffffffffff2', 'no git claim: newest');
 });
 
 test('MUST 1 (god 5b990a A, Jim ad1da8): a bare card key takes current/competing/superseded only from claims keyed card.<id> or its aliases; a newer sub-key field claim stays in fields/decisions (MUTANT: newest row under the set)', () => {
