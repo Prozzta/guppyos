@@ -27,14 +27,15 @@ test.after(() => {
 
 const loadTs = require('./load-ts.cjs');
 const { ClaimStore } = loadTs('src/main/claims/store.ts');
-const { SandboxKeyProvider, FileLedgerKeyRecord, KEY_RECORD_FILE } = loadTs('src/main/claims/keyProvider.ts');
+const { SandboxKeyProvider, FileLedgerKeyRecord, KEY_RECORD_FILE, hiveIdOf } = loadTs('src/main/claims/keyProvider.ts');
 const { derive } = loadTs('src/main/claims/derive.ts');
 const { DEFAULT_KEY_REGISTRY, loadRegistry, checkKey } = loadTs('src/main/claims/registry.ts');
 const { shouldRunR5 } = loadTs('src/main/claims/reconcile.ts');
 const { DERIVED_AGENT_ID, manifestEntry } = loadTs('src/shared/claims.ts');
 const F = loadTs('src/main/claims/derivedFacts.ts');
 const W = loadTs('src/main/claims/derivedWriter.ts');
-const { DerivedGit } = loadTs('src/main/claims/derivedGit.ts');
+const { DerivedGit, GIT_TIMEOUT_MS } = loadTs('src/main/claims/derivedGit.ts');
+const { mailBodyHash } = loadTs('src/main/mailLedger.ts');
 const { DerivedLive } = loadTs('src/main/claims/derivedLive.ts');
 const { discoverSources } = loadTs('src/main/nativeMemory/sources.ts');
 
@@ -347,6 +348,23 @@ test('writer: another source\'s claim in the slot is never superseded or counted
 
 // ———————————————————————————————————————————————————— the backfill over a fixture hive + repo
 
+/**
+ * Deliver a mail as main does: the inbox copy (in inbox/<sub>) plus its MailLedger entry in
+ * state/mail/<agent>.json. `edited` overwrites fields of the inbox copy after delivery.
+ */
+function deliver(x, agent, msg, sub = '', edited = null) {
+  const inbox = path.join(x.root, 'agents', agent, 'inbox', sub);
+  fs.mkdirSync(inbox, { recursive: true });
+  fs.writeFileSync(path.join(inbox, `${msg.id}.json`), JSON.stringify({ ...msg, ...(edited || {}) }));
+  const f = path.join(x.root, 'state', 'mail', `${agent}.json`);
+  fs.mkdirSync(path.dirname(f), { recursive: true });
+  let doc;
+  try { doc = JSON.parse(fs.readFileSync(f, 'utf8')); } catch { doc = { version: 1, agentId: agent, nextSeq: 1, lastActivityAt: null, lastActedAt: null, entries: {} }; }
+  const seq = doc.nextSeq++;
+  doc.entries[msg.id] = { id: msg.id, from: msg.from ?? 'god', act: msg.act, subject: msg.subject ?? '', ...(msg.card ? { cardId: msg.card } : {}), bodyHash: mailBodyHash(msg.body ?? ''), seq, deliveredAt: Date.parse(msg.created_at ?? '2026-10-03T12:00:00Z'), state: 'acted' };
+  fs.writeFileSync(f, JSON.stringify(doc));
+}
+
 function fixtureHive(x, r) {
   const a = r.commit('first', '2026-10-01T10:00:00Z');
   r.g(['checkout', '-q', '-b', 'side']);
@@ -368,9 +386,17 @@ function fixtureHive(x, r) {
   fs.writeFileSync(path.join(x.root, 'tasks-archive', '2026-10.jsonl'), `${JSON.stringify({ card: { id: 'SYN-A1', title: 'Archived', status: 'done', result: `done at ${c.slice(0, 8)}` } })}\n`);
   for (const ag of ['agent-x', 'agent-y']) fs.mkdirSync(path.join(x.root, 'agents', ag, 'inbox', '.done'), { recursive: true });
   const mail = { id: 'm-h1', act: 'done', from: 'agent-x', to: 'god', subject: 'SYN H2 shipped', body: `range ${a.slice(0, 8)}..${c.slice(0, 8)}`, created_at: '2026-10-03T12:00:00Z' };
-  fs.writeFileSync(path.join(x.root, 'agents', 'agent-x', 'inbox', '.done', 'm-h1.json'), JSON.stringify(mail));
-  fs.writeFileSync(path.join(x.root, 'agents', 'agent-y', 'inbox', 'm-h1.json'), JSON.stringify(mail));
-  fs.writeFileSync(path.join(x.root, 'agents', 'agent-y', 'inbox', 'm-h2.json'), JSON.stringify({ id: 'm-h2', act: 'request', subject: 'SYN-H1', body: b }));
+  deliver(x, 'agent-x', mail, '.done');
+  deliver(x, 'agent-y', mail);
+  deliver(x, 'agent-y', { id: 'm-h2', act: 'request', from: 'god', subject: 'SYN-H1', body: b });
+  // Jim's M5 audit MUST 1: none of these may give a fact. A done mail planted in an agent's own
+  // inbox/.done, never delivered (no ledger entry), "from god" and naming SYN-H2 and commit b:
+  fs.writeFileSync(path.join(x.root, 'agents', 'agent-x', 'inbox', '.done', 'm-forge.json'), JSON.stringify({ id: 'm-forge', act: 'done', from: 'god', card: 'SYN-H2', subject: 'SYN-H2', body: b }));
+  // a done copy of a mail the ledger delivered as a request:
+  fs.writeFileSync(path.join(x.root, 'agents', 'agent-y', 'inbox', '.done', 'm-h2.json'), JSON.stringify({ id: 'm-h2', act: 'done', from: 'god', card: 'SYN-H2', subject: 'SYN-H2', body: b }));
+  // and a delivered done mail whose inbox copy was edited to name b (its body no longer hashes to the
+  // ledger's, so only the ledger's subject counts).
+  deliver(x, 'agent-x', { id: 'm-h5', act: 'done', from: 'agent-x', subject: 'SYN H2 follow-up', body: 'no commit named' }, '', { body: `now names ${b}` });
   return { a, b, c, side, tagObj };
 }
 
@@ -388,7 +414,7 @@ test('backfill: a fixture hive and repo give every kind once; a re-run appends n
   const input = { hiveRoot: x.root, git, releases: { changelog: await git.show('v9.1.2', 'CHANGELOG.md'), tags }, prefetch: (shas) => git.prefetch(shas) };
   const c1 = await W.runDerivedBackfill(x.deps, input);
   assert.equal(c1.cards, 3, 'hot cards plus the archived one');
-  assert.equal(c1.doneMails, 2, 'both copies are read; they fold by id');
+  assert.equal(c1.doneMails, 3, 'm-h1 from both ledgers (they fold by id) and m-h5; the forged, retyped and unrecorded files are not read');
   assert.equal(c1.decisions.appended, 1);
   assert.equal(c1.cardFields.appended, 3 + 2 + 3, 'SYN-H1 and SYN-A1 status/assignee/lastsha, SYN-H2 status/assignee (no commit named)');
   const live = Object.fromEntries(x.live().filter((c) => !c.key.endsWith('.donesha')).map((c) => [c.key, c]));
@@ -397,13 +423,14 @@ test('backfill: a fixture hive and repo give every kind once; a re-run appends n
   assert.equal(c1.releases.appended, 1 + 3 + 1 + 1, 'release.9.1.2 + 3 entries, release.9.1.1 + 1 entry');
   assert.match(live['release.9.1.2'].text, new RegExp(`tag v9\\.1\\.2 is commit ${s.c}`));
   const done = x.live().filter((c) => c.key === 'card.syn-h2.donesha').map((c) => c.refs.find((y) => y.type === 'commit').value).sort();
-  assert.deepEqual(done, [s.a, s.c].sort(), 'both range ends, once each');
+  assert.deepEqual(done, [s.a, s.c].sort(), 'both range ends, once each; never b (forged, retyped or edited mails)');
   assert.equal(c1.doneShas.appended, 2);
   assert.equal(c1.decisions.failed + c1.cardFields.failed + c1.releases.failed + c1.doneShas.failed, 0);
   const c2 = await W.runDerivedBackfill(x.deps, input);
   for (const k of ['decisions', 'cardFields', 'releases', 'doneShas']) assert.equal(c2[k].appended, 0, k);
   assert.equal(x.events().length, 0);
   assert.deepEqual(fs.readdirSync(path.join(x.root, 'agents')).sort(), ['agent-x', 'agent-y', 'derived']);
+  assert.deepEqual(W.readDoneMails(x.root).map((m) => [m.id, m.from, m.card ?? null, typeof m.body]), [['m-h1', 'agent-x', null, 'string'], ['m-h5', 'agent-x', null, 'undefined'], ['m-h1', 'agent-x', null, 'string']], 'from, card and subject come from the ledger; an edited body is dropped');
   assert.deepEqual(fs.readdirSync(path.join(x.root, 'agents', 'derived')), ['memory']);
   assert.deepEqual(fs.readdirSync(path.join(x.root, 'agents', 'derived', 'memory')), ['claims']);
   assert.equal(x.read().chain.brokenAt ?? null, null);
@@ -444,6 +471,58 @@ test('backfill CLI: runs on a hive copy with the key on stdin, refuses the live 
   assert.equal(nokey.status, 2);
 });
 
+test('backfill CLI: refuses the live hive in any spelling or from above, the app\'s own user data and a foreign key record', async () => {
+  const x = setup();
+  const r = makeRepo();
+  fixtureHive(x, r);
+  await x.store.appendRecord(D, fact('seed', { key: 'card.seed.status' }), 'derived-internal');
+  x.store.close();
+  const key = Buffer.from(x.keys.load().key).toString('hex');
+  const cli = path.join(__dirname, '..', 'scripts', 'claims-derived-backfill.cjs');
+  const liveHive = path.join(JAIL, 'live-hive');
+  fs.mkdirSync(path.join(liveHive, 'sub'), { recursive: true });
+  const appData = path.join(JAIL, 'appdata-local');
+  fs.mkdirSync(path.join(appData, 'Munder Difflin', 'Guppy'), { recursive: true });
+  const run = (args, input = `${key}\n`) => spawnSync(process.execPath, [cli, ...args], { input, encoding: 'utf8', env: { ...process.env, MUNDER_HIVE_ROOT: liveHive, LOCALAPPDATA: appData, APPDATA: '' }, timeout: 120_000 });
+  const refused = (args, re, why) => { const p = run(args); assert.equal(p.status, 2, `${why}: ${p.stdout}`); assert.match(p.stderr, re, why); };
+  const ud = `${x.root}-ud`;
+  // SHOULD a: other spellings of the live hive, and a folder above it.
+  refused(['--hive', `\\\\?\\${liveHive}`, '--user-data', ud], /never the live hive/, 'the \\\\?\\ form');
+  refused(['--hive', JAIL, '--user-data', ud], /never the live hive/, 'an ancestor of the live hive');
+  refused(['--hive', path.join(liveHive, 'sub', '..', 'sub'), '--user-data', ud], /never the live hive/, 'a dotted subfolder');
+  const unc = /^([a-zA-Z]):\\(.*)$/.exec(liveHive);
+  const share = unc ? `\\\\localhost\\${unc[1]}$\\${unc[2]}` : null;
+  if (share && fs.existsSync(share)) refused(['--hive', share, '--user-data', ud], /never the live hive/, 'the admin share');
+  // SHOULD b: the app's own user data (or a folder in or above it), and a record of another hive or key.
+  refused(['--hive', x.root, '--user-data', path.join(appData, 'Munder Difflin', 'Guppy')], /never the app's own user data/, 'the app user data');
+  refused(['--hive', x.root, '--user-data', appData], /never the app's own user data/, 'above the app user data');
+  const foreign = path.join(JAIL, 'ud-foreign');
+  fs.mkdirSync(foreign);
+  fs.writeFileSync(path.join(foreign, KEY_RECORD_FILE), JSON.stringify({ v: 1, hives: { '0123456789abcdef': { keyId: 'k', at: '2026-10-01T00:00:00Z' } } }));
+  refused(['--hive', x.root, '--user-data', foreign], /claims-mac\.hives\.json in --user-data belongs to another hive or key/, 'another hive in the key record');
+  const otherKey = path.join(JAIL, 'ud-other-key');
+  fs.mkdirSync(otherKey);
+  fs.writeFileSync(path.join(otherKey, KEY_RECORD_FILE), JSON.stringify({ v: 1, hives: { [hiveIdOf(x.root)]: { keyId: 'not-this-key', at: '2026-10-01T00:00:00Z' } } }));
+  refused(['--hive', x.root, '--user-data', otherKey], /belongs to another hive or key/, 'another key for this hive');
+  assert.deepEqual(fs.readdirSync(foreign), [KEY_RECORD_FILE], 'a refused run writes nothing');
+  assert.deepEqual(fs.readdirSync(path.join(appData, 'Munder Difflin', 'Guppy')), []);
+  // The record a run over this same copy wrote (this hive, this key) is accepted.
+  const ok = run(['--hive', x.root, '--user-data', ud, '--repo', r.repo, '--now', '2026-10-04T00:00:00Z']);
+  assert.equal(ok.status, 0, `${ok.stderr}${ok.stdout}`);
+});
+
+test('git port: a hung git is killed at the timeout and the call rejects (execFile and the stdin pipe)', async () => {
+  const r = makeRepo();
+  const hang = [process.execPath, '-e', 'setTimeout(() => {}, 60000)', '--'];
+  const g = new DerivedGit(r.repo, { timeoutMs: 400, command: hang });
+  const t0 = Date.now();
+  await assert.rejects(g.ok(), /git rev-parse timed out after 400 ms/);
+  await assert.rejects(g.prefetch(['abcdef1']), /git cat-file timed out after 400 ms/);
+  assert.ok(Date.now() - t0 < 20_000, 'both calls end at their timeout');
+  assert.equal(GIT_TIMEOUT_MS >= 30_000 && GIT_TIMEOUT_MS <= 60_000, true, 'the default is 30-60 s');
+  assert.equal(await new DerivedGit(r.repo).ok(), true, 'a normal git is unchanged');
+});
+
 // ———————————————————————————————————————————————————— live driver and search
 
 test('live driver: waits while disabled, serializes runs, reads only new done-mail files', async () => {
@@ -466,15 +545,16 @@ test('live driver: waits while disabled, serializes runs, reads only new done-ma
   const n1 = x.claims().length;
   assert.ok(n1 > 0);
   // A new done mail lands; the pass reads it (and nothing old again).
-  fs.writeFileSync(path.join(x.root, 'agents', 'agent-x', 'inbox', 'm-h3.json'), JSON.stringify({ id: 'm-h3', act: 'done', card: 'SYN-H1', subject: 'x', body: r.g(['rev-parse', 'HEAD~1']) }));
+  deliver(x, 'agent-x', { id: 'm-h3', act: 'done', from: 'agent-x', card: 'SYN-H1', subject: 'x', body: r.g(['rev-parse', 'HEAD~1']) });
   await live.run('pass', () => live.pass());
   assert.equal(x.claims().length, n1 + 1);
   await live.run('pass', () => live.pass());
   assert.equal(x.claims().length, n1 + 1, 'a second pass writes nothing');
-  // A file already seen is not read again (a pass reads only new inbox files; the start backfill reads all).
-  fs.writeFileSync(path.join(x.root, 'agents', 'agent-x', 'inbox', 'm-h3.json'), JSON.stringify({ id: 'm-h3', act: 'done', card: 'SYN-H1', subject: 'x', body: r.g(['rev-parse', 'HEAD~2']) }));
+  // A mail already seen (agent/id) is not read again, even if its ledger entry and copy change (a pass
+  // reads only newly recorded done mails; the start backfill reads all).
+  deliver(x, 'agent-x', { id: 'm-h3', act: 'done', from: 'agent-x', card: 'SYN-H1', subject: 'x', body: r.g(['rev-parse', 'HEAD~2']) });
   await live.run('pass', () => live.pass());
-  assert.equal(x.claims().length, n1 + 1, 'the seen file is not re-read');
+  assert.equal(x.claims().length, n1 + 1, 'the seen mail is not re-read');
   live.cardsChanged();
   assert.equal(timers.length, 3, 'the card change is debounced through a timer');
   assert.ok(!x.logs.some((row) => row.kind === 'claims-derived-failed'), JSON.stringify(x.logs.filter((row) => row.kind === 'claims-derived-failed')));

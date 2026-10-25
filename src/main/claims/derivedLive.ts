@@ -6,18 +6,15 @@
  *
  *   start   one full backfill a little after the claim store opens (derivedWriter.runDerivedBackfill)
  *   cards   tasks.json changed (TaskLedgerGuard.onChange): the decisions and card fields, debounced
- *   timer   every PASS_MS: the cards again, the done mails that arrived since the last pass (only new
- *           inbox files are read) and the releases
+ *   timer   every PASS_MS: the cards again, the done mails the MailLedger recorded since the last pass
+ *           and the releases
  *
- * It never reads the delivery path (wake/mail confirm): new done mails are found by file name. Runs
- * never overlap; a failure is logged and the next pass tries again.
+ * It never touches the delivery path (wake/mail confirm): it only reads the MailLedger files that
+ * delivery wrote (hive/state/mail). Runs never overlap; a failure is logged and the next pass tries again.
  */
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { DERIVED_AGENT_ID } from '../../shared/claims';
 import { cardFieldFacts, decisionFacts, doneMailFacts, parseChangelog, releaseFacts, type MailLike } from './derivedFacts';
 import { DerivedGit } from './derivedGit';
-import { readCards, runDerivedBackfill, syncDerived, type DerivedWriterDeps } from './derivedWriter';
+import { readCards, readDoneMails, runDerivedBackfill, syncDerived, type DerivedWriterDeps } from './derivedWriter';
 
 export const DERIVED_START_DELAY_MS = 20_000;
 export const DERIVED_CARDS_DEBOUNCE_MS = 5_000;
@@ -87,7 +84,7 @@ export class DerivedLive {
   private async full(): Promise<void> {
     const c = this.ctx(); if (!c) return;
     const git = c.git && await c.git.ok() ? c.git : null;
-    // Mark every inbox file seen first: the backfill reads them all (and any that land meanwhile); a
+    // Mark every recorded done mail seen first: the backfill reads them all (and any that land meanwhile); a
     // mail read twice is idempotent, a mail marked but never read would be lost.
     this.newDoneMails(c.root);
     await runDerivedBackfill(c.w, { hiveRoot: c.root, git, releases: await this.releaseSource(git), ...(git ? { prefetch: (s) => git.prefetch(s) } : {}) });
@@ -118,31 +115,8 @@ export class DerivedLive {
     return { changelog: this.d.changelog(), tags: git ? await git.tags() : [] };
   }
 
-  /** The done mails in inbox files not seen before (every file is remembered by path). */
+  /** The done mails the MailLedger recorded since the last pass (each remembered by agent/id). */
   private newDoneMails(root: string): MailLike[] {
-    const out: MailLike[] = [];
-    const agentsDir = join(root, 'agents');
-    let agents: string[] = [];
-    try { agents = readdirSync(agentsDir).filter((a) => a !== DERIVED_AGENT_ID); } catch { return out; }
-    for (const a of agents) {
-      for (const dir of [join(agentsDir, a, 'inbox'), join(agentsDir, a, 'inbox', '.done')]) {
-        if (!existsSync(dir)) continue;
-        let names: string[] = [];
-        try { names = readdirSync(dir).filter((n) => n.endsWith('.json')); } catch { continue; }
-        for (const n of names) {
-          // A message moves from inbox/ to .done/ under the same name: remember the name, not the folder.
-          const k = `${a}/${n}`;
-          if (this.seenMail.has(k)) continue;
-          this.seenMail.add(k);
-          try {
-            const text = readFileSync(join(dir, n), 'utf8');
-            if (!/"act"\s*:\s*"done"/.test(text)) continue;
-            const m = JSON.parse(text) as MailLike;
-            if (m?.act === 'done') out.push(m);
-          } catch { /* torn or gone */ }
-        }
-      }
-    }
-    return out;
+    return readDoneMails(root, this.seenMail);
   }
 }
