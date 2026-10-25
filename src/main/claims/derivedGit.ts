@@ -7,7 +7,7 @@
  * network remote) never stalls the later passes.
  */
 import { execFile, spawn } from 'node:child_process';
-import type { GitPort, TagLike } from './derivedFacts';
+import type { GitLogPort, TagLike } from './derivedFacts';
 
 const SHA_RE = /^[0-9a-f]{7,40}$/;
 export const GIT_TIMEOUT_MS = 45_000;
@@ -47,8 +47,9 @@ function gitStdin(repo: string, args: string[], input: string, o: Required<Deriv
   });
 }
 
-export class DerivedGit implements GitPort {
+export class DerivedGit implements GitLogPort {
   private readonly commits = new Map<string, string | null>();
+  private readonly messages = new Map<string, string | null>();
   private readonly times = new Map<string, number>();
   private readonly ancestry = new Map<string, boolean>();
   private readonly o: Required<DerivedGitOptions>;
@@ -108,6 +109,30 @@ export class DerivedGit implements GitPort {
       if (!name) continue;
       const commit = type === 'tag' ? peeled : obj;
       if (commit && /^[0-9a-f]{40}$/.test(commit)) out.push({ name, commit, ...(date ? { date } : {}) });
+    }
+    return out;
+  }
+
+  /** A commit's message, or null. */
+  async message(commit: string): Promise<string | null> {
+    if (!this.messages.has(commit)) {
+      const r = await git(this.repo, ['show', '-s', '--format=%B', commit], this.o);
+      this.messages.set(commit, r.code === 0 ? r.out : null);
+    }
+    return this.messages.get(commit) ?? null;
+  }
+
+  /** Every commit on the branches, tags and remotes: full sha, committer time, message (stashes left out). */
+  async log(): Promise<Array<{ commit: string; time: number; message: string }>> {
+    const r = await git(this.repo, ['log', '--branches', '--tags', '--remotes', '--format=%H%x1f%ct%x1f%B%x1e'], this.o);
+    if (r.code !== 0) return [];
+    const out: Array<{ commit: string; time: number; message: string }> = [];
+    for (const rec of r.out.split('\x1e')) {
+      const [h, ct, ...msg] = rec.replace(/^\s+/, '').split('\x1f');
+      if (!h || !/^[0-9a-f]{40}$/.test(h)) continue;
+      const message = msg.join('\x1f');
+      out.push({ commit: h, time: Number(ct) || 0, message });
+      this.messages.set(h, message);
     }
     return out;
   }

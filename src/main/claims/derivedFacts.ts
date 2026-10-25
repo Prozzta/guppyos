@@ -3,14 +3,18 @@
  * guess). Each fact names its SLOT (the one live value it fills) and becomes a claim with source
  * 'derived' in the derived ledger (derivedWriter.ts). Pure: git is reached through a port.
  *
- *   (a) card.<id>.decision.<q8>   each answered humanQA entry: the answer and its date. q8 is the
- *                                 question's hash, so a newer answer to the same question replaces it.
+ *   (a) card.<id>.decision.<q8>   each answered humanQA entry: the answer, its date and the question,
+ *                                 never clipped (R2): a long one goes on in .decision.<q8>.p2, .p3, ...
+ *                                 q8 is the question's hash, so a newer answer to the same question replaces it.
  *   (b) card.<id>.status | .assignee | .lastsha   from the card; lastsha is the latest in GIT ORDER
  *                                 among the commits named in the card's result and notes (guide A11).
  *   (c) release.<ver>, release.<ver>.e<n>   CHANGELOG sections and their entries; the release tag's commit.
- *   (d) card.<id>.donesha         one per commit named by a done mail; the card from the mail's card
- *                                 field, else its subject, else its body; the commit from the subject or
- *                                 body, ranges a..b included (guide A12).
+ *   (d) card.<id>.donesha         R2: one per card and sender: the sender's newest done mail for the card
+ *                                 and the latest in git order of the commits it names (doneMailFacts).
+ *   (e) card.<id>.gitsha          R2: the latest in git order of the commits whose message names the card.
+ *   (f) card.<id>.decision.result, card.<id>.decision.n<h8>   R2: the card's own record, whole, in parts:
+ *                                 its result, and each note entry (h8 = the entry's hash, so entries
+ *                                 keep their keys as notes grow). A ruling that lives only there is found.
  *
  * Card ids are lower-cased in keys (the registry's KEY_RE); an id that cannot make a key is skipped.
  */
@@ -41,6 +45,20 @@ export function clip(s: string, n: number): string {
   return chars.length <= n ? f : `${chars.slice(0, Math.max(0, n - 1)).join('')}…`;
 }
 const len = (s: string): number => [...s].length;
+/** Folded text cut into pieces of at most n characters, at spaces where it can. */
+export function splitWords(s: string, n: number): string[] {
+  const chars = [...fold(s)];
+  const out: string[] = [];
+  let i = 0;
+  while (i < chars.length) {
+    let j = Math.min(chars.length, i + n);
+    if (j < chars.length) { const sp = chars.lastIndexOf(' ', j); if (sp > i + n / 2) j = sp; }
+    out.push(chars.slice(i, j).join('').trim());
+    i = j;
+    while (chars[i] === ' ') i++;
+  }
+  return out.length ? out : [''];
+}
 const isoOk = (s: unknown): s is string => typeof s === 'string' && !Number.isNaN(Date.parse(s)) && /(Z|[+-]\d\d:?\d\d)$/.test(s);
 const iso = (s: unknown): string | undefined => (isoOk(s) ? new Date(Date.parse(s)).toISOString() : undefined);
 
@@ -71,18 +89,58 @@ export function decisionFacts(cards: readonly CardLike[]): DerivedFact[] {
       if (!prior || (at ?? '') > (prior.at ?? '') || ((at ?? '') === (prior.at ?? '') && i > prior.i)) bySlot.set(key, { qa, at, i });
     });
     for (const [key, { qa, at }] of bySlot) {
-      const day = at ? ` (answered ${at.slice(0, 10)})` : '';
-      const head = `Human decision on ${c.id}: asked "`;
-      const mid = '"; the Human answered "';
-      const tail = `"${day}`;
-      const room = TEXT_MAX - len(head) - len(mid) - len(tail);
-      const a = fold(qa.a as string);
-      const qRoom = Math.max(60, room - Math.min(len(a), room - 60));
-      const q = clip(qa.q as string, qRoom);
-      const text = `${head}${q}${mid}${clip(a, room - len(q))}${tail}`;
+      const day = at ? ` on ${at.slice(0, 10)}` : '';
+      const whole = `the Human answered "${fold(qa.a as string)}"${day} to the question "${fold(qa.q as string)}"`;
       const refs: Ref[] = [{ type: 'task', value: c.id as string }];
       if (typeof qa.msgId === 'string' && qa.msgId && qa.msgId.length <= 200) refs.push({ type: 'msg', value: qa.msgId });
-      out.push({ slot: key, key, kind: 'decision', text, ...(at ? { at } : {}), refs });
+      out.push(...inParts(key, 'decision', `Human decision on ${c.id}`, whole, at, refs));
+    }
+  }
+  return out;
+}
+
+/**
+ * The whole text as one claim under `key` when it fits, else parts under key, key.p2, ... (at most 9,
+ * and only with room in the key grammar; without it, one clipped claim). Each text starts with the
+ * label, plus " (part k of n)" when cut.
+ */
+function inParts(key: string, kind: ClaimKind, label: string, whole: string, at: string | undefined, refs: Ref[]): DerivedFact[] {
+  const head = (k: number, n: number): string => `${label}${n > 1 ? ` (part ${k} of ${n})` : ''}: `;
+  let parts = len(whole) <= TEXT_MAX - len(head(1, 1)) ? [whole] : splitWords(whole, TEXT_MAX - len(head(9, 9)));
+  if (parts.length > 1 && (parts.length > 9 || !keyOk(`${key}.p${parts.length}`))) parts = [clip(whole, TEXT_MAX - len(head(1, 1)))];
+  return parts.map((p, i) => {
+    const k = i === 0 ? key : `${key}.p${i + 1}`;
+    return { slot: k, key: k, kind, text: `${head(i + 1, parts.length)}${p}`, ...(at ? { at } : {}), refs };
+  });
+}
+
+/** A note field cut into entries: each line that starts with a date (optionally in brackets) opens one. */
+export function noteEntries(notes: unknown): string[] {
+  const list = Array.isArray(notes) ? notes : [notes];
+  const out: string[] = [];
+  for (const n of list) {
+    const s = typeof n === 'string' ? n : n && typeof n === 'object' ? JSON.stringify(n) : '';
+    for (const e of s.split(/\n(?=\s*\[?\d{4}-\d\d-\d\d)/)) if (e.trim()) out.push(e.trim());
+  }
+  return out;
+}
+const entryAt = (e: string): string | undefined => iso(/^\[?(\d{4}-\d\d-\d\d[T ][0-9:.]+(?:Z|[+-]\d\d:?\d\d))/.exec(e)?.[1]?.replace(' ', 'T'));
+
+/** (f) The card's result and each note entry under card.<id>.decision.*, whole (R2: Jim D2/D3). */
+export function cardRecordFacts(cards: readonly CardLike[]): DerivedFact[] {
+  const out: DerivedFact[] = [];
+  for (const c of cards) {
+    if (typeof c?.id !== 'string') continue;
+    const refs: Ref[] = [{ type: 'task', value: c.id }];
+    const rk = cardKey(c.id, 'decision', 'result');
+    if (rk && typeof c.result === 'string' && c.result.trim()) out.push(...inParts(rk, 'fact', `Card ${c.id} result`, fold(c.result), undefined, refs));
+    const seen = new Set<string>();
+    for (const e of noteEntries(c.notes)) {
+      const h = `n${questionHash(e)}`;
+      const k = cardKey(c.id, 'decision', h);
+      if (!k || seen.has(k)) continue;
+      seen.add(k);
+      out.push(...inParts(k, 'fact', `Card ${c.id} note`, fold(e), entryAt(e), refs));
     }
   }
   return out;
@@ -96,6 +154,8 @@ export interface GitPort {
   commitOf(sha: string): Promise<string | null>;
   isAncestor(ancestor: string, descendant: string): Promise<boolean>;
   time(commit: string): Promise<number>;
+  /** The commit's message (subject and body), or null; optional (R2: settles a done mail naming several cards). */
+  message?(commit: string): Promise<string | null>;
 }
 
 const SHA_RE = /(?<![0-9A-Za-z])([0-9a-f]{7,40})(?:(\.\.\.?)([0-9a-f]{7,40}))?(?![0-9A-Za-z])/g;
@@ -146,6 +206,42 @@ export async function latestInGitOrder(candidates: readonly string[], git: GitPo
     if (t > bestT || (t === bestT && h > best)) { best = h; bestT = t; }
   }
   return best;
+}
+
+/** A git port that can also list every commit with its message (R2 git-history facts). */
+export interface GitLogPort extends GitPort {
+  log?(): Promise<Array<{ commit: string; time: number; message: string }>>;
+}
+
+/**
+ * R2 (b): card.<id>.gitsha per card that some commit message names (registry ids, guide A12): the
+ * latest in git order of those commits, so a done commit stays findable after its mail is gone. Of
+ * many, the eight newest by time are compared in git order.
+ */
+export async function gitHistoryFacts(log: ReadonlyArray<{ commit: string; time: number; message: string }>, cardIds: readonly string[], git: GitPort): Promise<DerivedFact[]> {
+  const match = cardMatcher(cardIds);
+  const byCard = new Map<string, Array<{ commit: string; time: number }>>();
+  for (const c of log) for (const card of match(c.message)) {
+    const list = byCard.get(card) ?? [];
+    list.push({ commit: c.commit, time: c.time });
+    byCard.set(card, list);
+  }
+  const out: DerivedFact[] = [];
+  for (const [card, list] of [...byCard].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
+    const key = cardKey(card, 'gitsha');
+    if (!key) continue;
+    const newest = [...list].sort((a, b) => b.time - a.time || (a.commit < b.commit ? 1 : -1)).slice(0, 8).map((x) => x.commit);
+    const best = await latestInGitOrder(newest, git);
+    if (!best) continue;
+    const t0 = list.find((x) => x.commit === best)?.time;
+    out.push({
+      slot: key, key, kind: 'fact',
+      text: `Card ${card}: the latest commit in git order whose message names the card is ${best.slice(0, 8)} (${best}); ${list.length} commit${list.length > 1 ? 's name' : ' names'} it`,
+      ...(t0 ? { at: new Date(t0 * 1000).toISOString() } : {}),
+      refs: [{ type: 'task', value: card }, { type: 'commit', value: best }],
+    });
+  }
+  return out;
 }
 
 // ———————————————————————————————————————————————————————————— (b) card fields
@@ -250,7 +346,7 @@ export function releaseFacts(sections: readonly ChangelogSection[], tags: readon
 
 // ———————————————————————————————————————————————————————————— (d) done mails
 
-export interface MailLike { id?: unknown; from?: unknown; act?: unknown; subject?: unknown; body?: unknown; card?: unknown; created_at?: unknown }
+export interface MailLike { id?: unknown; from?: unknown; act?: unknown; subject?: unknown; body?: unknown; card?: unknown; cards?: unknown; created_at?: unknown }
 
 const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -272,57 +368,110 @@ export function cardMatcher(cardIds: readonly string[]): (text: unknown) => stri
   };
 }
 
-export interface DoneMailResult { facts: DerivedFact[]; skipped: { notDone: number; noCard: number; ambiguous: number; noCommit: number } }
+/** Why a done mail gave no done-sha fact (one row per mail; the counts sum them). */
+export type DoneSkipReason = 'notDone' | 'noShaWord' | 'noCommit' | 'noCard' | 'ambiguous';
+export interface DoneSkip { mail: string; reason: DoneSkipReason; cards?: string[] }
+export interface DoneMailResult {
+  facts: DerivedFact[];
+  skipped: Record<DoneSkipReason, number>;
+  /** Every skipped mail with its reason. */
+  skips: DoneSkip[];
+  /** Done mails that gave a commit but are older than their sender's newest one for the card. */
+  older: number;
+}
+
+const mailAt = (m: MailLike): string => iso(m.created_at) ?? '';
 
 /**
- * One fact per (card, commit) from the done mails. The card: the mail's card field when it is a
- * known card, else the one card its subject names, else the one card its body names (more than
- * one = ambiguous, skipped). Commits: the sha words of the subject and body that git resolves to a
- * commit. A mail copied to several inboxes counts once (by id).
+ * R2 (a): ONE fact per (card, sender): the sender's NEWEST done mail for the card that names a
+ * commit, and the one commit it stands for, the latest in git order of those it names (guide A11),
+ * so no claim holds two values. Older mails of that sender for that card give no fact; their
+ * claims are superseded by the writer (same slot, card.<id>.donesha#<sender>).
+ *
+ * The card: the mail's card field when it is a known card, else the cards its delivery linked
+ * (`cards`, the mail-cards index), else the cards its subject names, else its body. With more than
+ * one, git decides: the card named by the messages of the commits the mail names, when exactly one
+ * candidate is named there; otherwise the mail is ambiguous. Commits: the sha words of the subject
+ * and body that git resolves to a commit (ranges a..b give both ends). R2 (c): a mail that gives no
+ * fact carries a reason; noShaWord, noCommit and ambiguous are each what git confirmed.
+ * A mail copied to several inboxes counts once (by id).
  */
 export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonly string[], git: GitPort): Promise<DoneMailResult> {
   const match = cardMatcher(cardIds);
   const known = new Map(cardIds.map((c) => [c.toLowerCase(), c]));
-  const skipped = { notDone: 0, noCard: 0, ambiguous: 0, noCommit: 0 };
-  const facts = new Map<string, DerivedFact>();
+  const skipped: Record<DoneSkipReason, number> = { notDone: 0, noShaWord: 0, noCommit: 0, noCard: 0, ambiguous: 0 };
+  const skips: DoneSkip[] = [];
+  const skip = (mail: string, reason: DoneSkipReason, cards?: string[]): void => {
+    skipped[reason]++;
+    skips.push({ mail, reason, ...(cards?.length ? { cards } : {}) });
+  };
+  const newest = new Map<string, { m: MailLike & { id: string }; card: string; from: string; commit: string; named: number; range?: ShaMention['range'] }>();
+  let withCommit = 0;
   const seen = new Set<string>();
-  for (const m of mails) {
-    if (!m || typeof m.id !== 'string' || seen.has(m.id)) continue;
+  const ordered = [...mails].filter((m): m is MailLike & { id: string } => !!m && typeof m.id === 'string')
+    .sort((a, b) => (mailAt(a) < mailAt(b) ? -1 : mailAt(a) > mailAt(b) ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  for (const m of ordered) {
+    if (seen.has(m.id)) continue;
     seen.add(m.id);
-    if (m.act !== 'done') { skipped.notDone++; continue; }
-    let card: string | undefined = typeof m.card === 'string' ? known.get(m.card.toLowerCase()) : undefined;
-    if (!card) {
-      const inSubject = match(m.subject);
-      const inBody = inSubject.length ? [] : match(typeof m.body === 'string' ? m.body : '');
-      const named = inSubject.length ? inSubject : inBody;
-      if (named.length > 1) { skipped.ambiguous++; continue; }
-      card = named[0];
-    }
-    if (!card) { skipped.noCard++; continue; }
+    if (m.act !== 'done') { skip(m.id, 'notDone'); continue; }
     const mentions = [...shaMentions(m.subject), ...shaMentions(typeof m.body === 'string' ? m.body : '')];
-    let any = false;
-    const done = new Set<string>();
+    if (!mentions.length) { skip(m.id, 'noShaWord'); continue; }
+    const commits: string[] = [];
+    const words: string[] = [];   // the sha words as written, for latestInGitOrder (it resolves them itself)
+    const rangeOf = new Map<string, ShaMention['range']>();
     for (const x of mentions) {
       const full = await git.commitOf(x.sha);
-      if (!full || done.has(full)) continue;
-      done.add(full);
-      const key = cardKey(card, 'donesha');
-      if (!key) continue;
-      any = true;
-      const slot = `${key}#${full}`;
-      const prior = facts.get(slot);
-      const at = iso(m.created_at);
-      if (prior && (prior.at ?? '') <= (at ?? '')) continue;   // the first mail that named it
-      const from = typeof m.from === 'string' ? clip(m.from, 60) : 'unknown';
-      const range = x.range ? ` (the ${x.range.end === 'from' ? 'start' : 'end'} of the range ${x.range.from}..${x.range.to})` : '';
-      facts.set(slot, {
-        slot, key, kind: 'fact',
-        text: `Card ${card}: the done mail ${clip(m.id, 80)} from ${from} names commit ${full.slice(0, 8)} (${full})${range}`,
-        ...(at ? { at } : {}),
-        refs: [{ type: 'task', value: card }, { type: 'msg', value: m.id.slice(0, 200) }, { type: 'commit', value: full }],
-      });
+      if (!full || commits.includes(full)) continue;
+      commits.push(full);
+      words.push(x.sha);
+      if (x.range) rangeOf.set(full, x.range);
     }
-    if (!any) skipped.noCommit++;
+    if (!commits.length) { skip(m.id, 'noCommit'); continue; }
+    const card = await cardOfDoneMail(m, known, match, commits, git);
+    if (typeof card !== 'string') { skip(m.id, card.reason, card.cards); continue; }
+    const key = cardKey(card, 'donesha');
+    if (!key) { skip(m.id, 'noCard', [card]); continue; }
+    const commit = (await latestInGitOrder(words, git)) ?? commits[0];
+    const from = typeof m.from === 'string' && m.from ? clip(m.from, 60) : 'unknown';
+    withCommit++;
+    newest.set(`${key}#${from}`, { m, card, from, commit, named: commits.length, range: rangeOf.get(commit) });
   }
-  return { facts: [...facts.values()], skipped };
+  const facts: DerivedFact[] = [];
+  for (const [slot, { m, card, from, commit, named, range }] of newest) {
+    const key = slot.slice(0, slot.lastIndexOf('#'));
+    const at = iso(m.created_at);
+    const of = range ? ` (the ${range.end === 'from' ? 'start' : 'end'} of the range ${range.from}..${range.to})` : '';
+    const others = named > 1 ? `; it is the latest in git order of the ${named} commits the mail names` : '';
+    facts.push({
+      slot, key, kind: 'fact',
+      text: `Card ${card}: the newest done mail from ${from} (${clip(m.id, 80)}) names commit ${commit.slice(0, 8)} (${commit})${of}${others}`,
+      ...(at ? { at } : {}),
+      refs: [{ type: 'task', value: card }, { type: 'msg', value: m.id.slice(0, 200) }, { type: 'commit', value: commit }],
+    });
+  }
+  return { facts, skipped, skips, older: withCommit - facts.length };
+}
+
+/** The done mail's card (see doneMailFacts), or why there is none. */
+async function cardOfDoneMail(
+  m: MailLike, known: Map<string, string>, match: (text: unknown) => string[], commits: readonly string[], git: GitPort,
+): Promise<string | { reason: 'noCard' | 'ambiguous'; cards?: string[] }> {
+  const field = typeof m.card === 'string' ? known.get(m.card.toLowerCase()) : undefined;
+  if (field) return field;
+  const linked = Array.isArray(m.cards)
+    ? [...new Set(m.cards.map((c) => (typeof c === 'string' ? known.get(c.toLowerCase()) : undefined)).filter((c): c is string => !!c))]
+    : [];
+  const inSubject = linked.length ? [] : match(m.subject);
+  const named = linked.length ? linked : inSubject.length ? inSubject : match(typeof m.body === 'string' ? m.body : '');
+  if (named.length === 1) return named[0];
+  if (!named.length) return { reason: 'noCard' };
+  if (git.message) {
+    const byGit = new Set<string>();
+    for (const c of commits) {
+      const hits = match(await git.message(c)).filter((x) => named.includes(x));
+      if (hits.length === 1) byGit.add(hits[0]);
+    }
+    if (byGit.size === 1) return [...byGit][0];
+  }
+  return { reason: 'ambiguous', cards: named.slice(0, 8) };
 }

@@ -4,7 +4,8 @@
  * from primary records become claims with source 'derived' in the reserved `derived` ledger:
  * (a) answered humanQA, (b) card status/assignee/last sha in git order (guide A11), (c) CHANGELOG
  * entries and release tags, (d) done-mail shas from the card field, subject and body, ranges
- * included (guide A12). Idempotent; a change supersedes the writer's own claim. Fixtures only:
+ * included (guide A12). Idempotent; a change supersedes the writer's own claim. R2: one done-sha
+ * claim per (card, sender), decisions never clipped, the mail-cards index, git history. Fixtures only:
  * synthetic cards, mails and a throwaway git repo; HOME jailed first.
  */
 const test = require('node:test');
@@ -162,17 +163,33 @@ test('(a) decisions: answered entries only, the later answer to the same questio
   const ship = out.find((f) => f.text.includes('widget'));
   assert.match(ship.key, /^card\.syn-dec\.1\.decision\.[0-9a-f]{8}$/);
   assert.equal(ship.slot, ship.key);
-  assert.match(ship.text, /the Human answered "Yes, ship it" \(answered 2026-10-03\)$/);
+  assert.equal(ship.text, 'Human decision on SYN-Dec.1: the Human answered "Yes, ship it" on 2026-10-03 to the question "Ship the synthetic widget?"');
   assert.equal(ship.at, '2026-10-03T09:00:00.000Z');
   assert.equal(ship.kind, 'decision');
   assert.deepEqual(ship.refs, [{ type: 'task', value: 'SYN-Dec.1' }, { type: 'msg', value: 'm-1' }]);
-  const long = F.decisionFacts([{ id: 'SYN-2', humanQA: [{ q: 'q'.repeat(900), a: 'a'.repeat(900), answeredAt: '2026-10-01T00:00:00Z' }] }])[0];
-  assert.ok([...long.text].length <= 400, `${[...long.text].length}`);
+  // R2 (e): never clipped: a long decision goes on in .p2, .p3, ... (each claim within 400 characters).
+  const qLong = Array.from({ length: 150 }, (_, i) => `q${i}`).join(' ');
+  const aLong = Array.from({ length: 150 }, (_, i) => `a${i}`).join(' ');
+  const parts = F.decisionFacts([{ id: 'SYN-2', humanQA: [{ q: qLong, a: aLong, answeredAt: '2026-10-01T00:00:00Z' }] }]);
+  assert.ok(parts.length >= 3, `${parts.length}`);
+  assert.ok(parts.every((p) => [...p.text].length <= 400), parts.map((p) => [...p.text].length).join());
+  assert.match(parts[0].key, /^card\.syn-2\.decision\.[0-9a-f]{8}$/);
+  parts.slice(1).forEach((p, i) => assert.equal(p.key, `${parts[0].key}.p${i + 2}`));
+  parts.forEach((p, i) => assert.ok(p.text.startsWith(`Human decision on SYN-2 (part ${i + 1} of ${parts.length}): `), p.text.slice(0, 50)));
+  const whole = parts.map((p) => p.text.replace(/^Human decision on SYN-2 \(part \d+ of \d+\): /, '')).join(' ');
+  assert.equal(whole, `the Human answered "${aLong}" on 2026-10-01 to the question "${qLong}"`, 'every word of the answer and the question, in order');
+  assert.ok(parts[0].text.includes('the Human answered "a0 a1'), 'the answer comes first');
+  const long = parts[0];
+  // No room in the key grammar for parts: one clipped claim, as before.
+  const deep = F.decisionFacts([{ id: 'S.Y.N.4.5', humanQA: [{ q: qLong, a: aLong }] }]);
+  assert.equal(deep.length, 1);
+  assert.ok([...deep[0].text].length <= 400 && deep[0].text.endsWith('…'));
   const undated = F.decisionFacts([{ id: 'SYN-3', humanQA: [{ q: 'Colour?', a: 'Red' }, { q: 'Colour?', a: 'Green' }] }]);
   assert.equal(undated.length, 1);
-  assert.match(undated[0].text, /answered "Green"$/, 'no dates: the later entry on the card wins');
+  assert.match(undated[0].text, /answered "Green" to the question "Colour\?"$/, 'no dates: the later entry on the card wins');
   assert.equal(undated[0].at, undefined);
-  assert.match(long.text, /answered 2026-10-01/);
+  assert.match(whole, / on 2026-10-01 to the question /);
+  assert.equal(long.at, '2026-10-01T00:00:00.000Z');
 });
 
 // ———————————————————————————————————————————————————— shas and git order
@@ -194,6 +211,7 @@ function fakeGit(spec) {
     async commitOf(s) { this.calls++; return spec.commits[s] ?? null; },
     async isAncestor(a, b) { return a !== b && anc(a, b); },
     async time(c) { return spec.time[c] ?? 0; },
+    ...(spec.messages ? { async message(c) { return spec.messages[c] ?? null; } } : {}),
   };
 }
 const H = (c) => c.repeat(40);
@@ -275,7 +293,7 @@ test('A12 card match: dash, space or nothing; case-insensitive; the longest id; 
   assert.deepEqual(m('CLAIMS 90 M5 landed'), ['CLAIMS-90-M5'], 'the longest id, written with spaces');
 });
 
-test('(d) done mails: card field, else subject, else body; shas that are commits, ranges both ends; one per (card, commit)', async () => {
+test('(d) done mails, R2 (a)(c): one per (card, sender): the newest done mail and the latest of its commits; every skip has a reason', async () => {
   const g = fakeGit({ commits: { aaaaaa1: H('a'), bbbbbb2: H('b'), cccccc3: H('c'), dddddd4: H('d') }, parents: {}, time: {} });
   const mails = [
     { id: 'm1', act: 'done', from: 'agent-x', card: 'SYN-D1', subject: 'SYN-D2 aaaaaa1', body: 'also bbbbbb2', created_at: '2026-10-02T00:00:00Z' },
@@ -287,22 +305,41 @@ test('(d) done mails: card field, else subject, else body; shas that are commits
     { id: 'm6', act: 'done', subject: 'SYN-D1 nothing', body: 'no shas' },
     { id: 'm7', act: 'done', card: 'SYN-D1', subject: 'again', body: 'aaaaaa1', created_at: '2026-10-01T00:00:00Z' },
     { id: 'm8', act: 'done', subject: 'SYN-D3 follow-up', body: 'like SYN-D1 at bbbbbb2' },
+    { id: 'm9', act: 'done', card: 'SYN-D2', subject: 'names fedcba9 only', created_at: '2026-10-05T00:00:00Z' },
+    { id: 'm10', act: 'done', subject: 'nothing known', body: 'at aaaaaa1' },
+    { id: 'm11', act: 'done', from: 'agent-x', card: 'SYN-D1', subject: 'later', body: 'cccccc3', created_at: '2026-10-04T00:00:00Z' },
   ];
   const r = await F.doneMailFacts(mails, ['SYN-D1', 'SYN-D2', 'SYN-D3'], g);
-  const slots = r.facts.map((f) => f.slot).sort();
-  assert.deepEqual(slots, [
-    `card.syn-d1.donesha#${H('a')}`, `card.syn-d1.donesha#${H('b')}`,
-    `card.syn-d2.donesha#${H('a')}`, `card.syn-d2.donesha#${H('d')}`,
-    `card.syn-d3.donesha#${H('b')}`, `card.syn-d3.donesha#${H('c')}`,
+  const bySlot = Object.fromEntries(r.facts.map((f) => [f.slot, f]));
+  assert.deepEqual(Object.keys(bySlot).sort(), [
+    'card.syn-d1.donesha#agent-x', 'card.syn-d1.donesha#unknown', 'card.syn-d2.donesha#agent-y', 'card.syn-d3.donesha#unknown',
   ]);
+  const commit = (s) => bySlot[s].refs.find((y) => y.type === 'commit').value;
+  assert.equal(commit('card.syn-d1.donesha#agent-x'), H('c'), 'the sender\'s newest mail (m11) wins over m1');
+  assert.match(bySlot['card.syn-d1.donesha#agent-x'].text, /^Card SYN-D1: the newest done mail from agent-x \(m11\) names commit cccccccc \(c{40}\)$/);
+  assert.equal(commit('card.syn-d1.donesha#unknown'), H('a'));
+  assert.equal(commit('card.syn-d3.donesha#unknown'), H('b'), 'm8 (by id after m3, both undated)');
+  const d2 = bySlot['card.syn-d2.donesha#agent-y'];
+  assert.equal(commit('card.syn-d2.donesha#agent-y'), H('d'), 'one commit per claim: the latest in git order of those it names');
+  assert.match(d2.text, /\(the end of the range aaaaaa1\.\.dddddd4\); it is the latest in git order of the 2 commits the mail names$/);
+  assert.equal((d2.text.match(/[0-9a-f]{40}/g) || []).length, 1, 'F7: one value per claim');
+  assert.deepEqual(d2.refs, [{ type: 'task', value: 'SYN-D2' }, { type: 'msg', value: 'm2' }, { type: 'commit', value: H('d') }]);
+  assert.equal(d2.at, '2026-10-03T00:00:00.000Z');
   assert.equal(r.facts.some((f) => f.refs.some((y) => y.type === 'commit' && y.value.startsWith('fedcba9'))), false, 'a hex word git does not know is no commit');
-  assert.deepEqual(r.skipped, { notDone: 1, noCard: 0, ambiguous: 1, noCommit: 1 });
-  const d1a = r.facts.find((f) => f.slot === `card.syn-d1.donesha#${H('a')}`);
-  assert.match(d1a.text, /done mail m7 from unknown names commit aaaaaaaa/, 'the earliest mail that named it');
-  const d2d = r.facts.find((f) => f.slot === `card.syn-d2.donesha#${H('d')}`);
-  assert.match(d2d.text, /\(the end of the range aaaaaa1\.\.dddddd4\)$/);
-  assert.deepEqual(d2d.refs, [{ type: 'task', value: 'SYN-D2' }, { type: 'msg', value: 'm2' }, { type: 'commit', value: H('d') }]);
-  assert.equal(d2d.at, '2026-10-03T00:00:00.000Z');
+  assert.deepEqual(r.skipped, { notDone: 1, noShaWord: 1, noCommit: 1, noCard: 1, ambiguous: 1 });
+  assert.deepEqual(r.skips, [
+    { mail: 'm10', reason: 'noCard' }, { mail: 'm4', reason: 'ambiguous', cards: ['SYN-D1', 'SYN-D2'] }, { mail: 'm5', reason: 'notDone' }, { mail: 'm6', reason: 'noShaWord' }, { mail: 'm9', reason: 'noCommit' },
+  ]);
+  assert.equal(r.older, 2, 'm1 (agent-x on SYN-D1) and m3 (unknown on SYN-D3): older mails of their (card, sender)');
+  // A mail naming several cards: git settles it when the messages of its commits name exactly one of them.
+  const gm = fakeGit({ commits: { dddddd4: H('d'), eeeeee5: H('e') }, parents: {}, time: {}, messages: { [H('d')]: 'SYN-D2: fix the thing', [H('e')]: 'unrelated' } });
+  const settled = await F.doneMailFacts([{ id: 'm4', act: 'done', from: 'agent-z', subject: 'SYN-D1 and SYN-D2', body: 'dddddd4 eeeeee5' }], ['SYN-D1', 'SYN-D2'], gm);
+  assert.deepEqual(settled.facts.map((f) => f.slot), ['card.syn-d2.donesha#agent-z']);
+  const still = await F.doneMailFacts([{ id: 'm4', act: 'done', subject: 'SYN-D1 and SYN-D2', body: 'eeeeee5' }], ['SYN-D1', 'SYN-D2'], gm);
+  assert.deepEqual(still.skips, [{ mail: 'm4', reason: 'ambiguous', cards: ['SYN-D1', 'SYN-D2'] }], 'git names neither: ambiguous');
+  // The cards the delivery linked (mail-cards index) come before the subject and body.
+  const linked = await F.doneMailFacts([{ id: 'm12', act: 'done', from: 'agent-x', cards: ['syn-d3'], subject: 'SYN-D1', body: 'aaaaaa1' }], ['SYN-D1', 'SYN-D3'], g);
+  assert.deepEqual(linked.facts.map((f) => f.slot), ['card.syn-d3.donesha#agent-x']);
 });
 
 // ———————————————————————————————————————————————————— the writer
@@ -311,8 +348,8 @@ test('writer: idempotent (no claim and no sighting on a re-run), a change supers
   const x = setup();
   const f1 = [
     { slot: 'card.syn-w.status', key: 'card.syn-w.status', kind: 'fact', text: 'Card SYN-W status: doing', refs: [{ type: 'task', value: 'SYN-W' }] },
-    { slot: `card.syn-w.donesha#${H('a')}`, key: 'card.syn-w.donesha', kind: 'fact', text: 'sha a', refs: [{ type: 'commit', value: H('a') }] },
-    { slot: `card.syn-w.donesha#${H('b')}`, key: 'card.syn-w.donesha', kind: 'fact', text: 'sha b', refs: [{ type: 'commit', value: H('b') }] },
+    { slot: 'card.syn-w.donesha#agent-a', key: 'card.syn-w.donesha', kind: 'fact', text: `Card SYN-W: the newest done mail from agent-a (m1) names commit aaaaaaaa (${H('a')})`, refs: [{ type: 'commit', value: H('a') }] },
+    { slot: 'card.syn-w.donesha#agent-b', key: 'card.syn-w.donesha', kind: 'fact', text: `Card SYN-W: the newest done mail from agent-b (m2) names commit bbbbbbbb (${H('b')})`, refs: [{ type: 'commit', value: H('b') }] },
   ];
   assert.deepEqual(await W.syncDerived(x.deps, f1), { facts: 3, appended: 3, unchanged: 0, superseded: 0, failed: 0 });
   assert.deepEqual(await W.syncDerived(x.deps, f1), { facts: 3, appended: 0, unchanged: 3, superseded: 0, failed: 0 });
@@ -340,7 +377,9 @@ test('writer: idempotent (no claim and no sighting on a re-run), a change supers
 });
 
 test('writer: another source\'s claim in the slot is never superseded or counted', () => {
-  assert.equal(W.slotOf({ key: 'card.a.donesha', refs: [{ type: 'commit', value: H('a') }] }), `card.a.donesha#${H('a')}`);
+  assert.equal(W.slotOf({ key: 'card.a.donesha', text: `Card A: the newest done mail from agent-x (m1) names commit aaaaaaaa (${H('a')})` }), 'card.a.donesha#agent-x');
+  assert.equal(W.slotOf({ key: 'card.a.donesha', text: `Card A: the done mail m1 from agent-y names commit aaaaaaaa (${H('a')})` }), 'card.a.donesha#agent-y', 'M5\'s per-commit claims fall in their sender\'s slot');
+  assert.equal(W.slotOf({ key: 'card.a.donesha', refs: [{ type: 'commit', value: H('a') }] }), null);
   assert.equal(W.slotOf({ key: 'card.a.donesha' }), null);
   assert.equal(W.slotOf({ key: 'card.a.status' }), 'card.a.status');
   assert.equal(W.slotOf({}), null);
@@ -423,11 +462,14 @@ test('backfill: a fixture hive and repo give every kind once; a re-run appends n
   assert.equal(c1.releases.appended, 1 + 3 + 1 + 1, 'release.9.1.2 + 3 entries, release.9.1.1 + 1 entry');
   assert.match(live['release.9.1.2'].text, new RegExp(`tag v9\\.1\\.2 is commit ${s.c}`));
   const done = x.live().filter((c) => c.key === 'card.syn-h2.donesha').map((c) => c.refs.find((y) => y.type === 'commit').value).sort();
-  assert.deepEqual(done, [s.a, s.c].sort(), 'both range ends, once each; never b (forged, retyped or edited mails)');
-  assert.equal(c1.doneShas.appended, 2);
+  assert.deepEqual(done, [s.c], 'one claim for (SYN-H2, agent-x): the range end c, later in git order than a; never b (forged, retyped or edited mails)');
+  assert.equal(c1.doneShas.appended, 1);
+  assert.deepEqual(c1.doneSkipped, { notDone: 0, noShaWord: 1, noCommit: 0, noCard: 0, ambiguous: 0 });
+  assert.deepEqual(x.logs.filter((r) => r.kind === 'claims-derived-done-skip'), [{ kind: 'claims-derived-done-skip', mail: 'm-h5', reason: 'noShaWord' }], 'R2 (c): the skip is logged with its reason');
+  assert.equal(c1.gitShas.appended, 0, 'no commit message names a card');
   assert.equal(c1.decisions.failed + c1.cardFields.failed + c1.releases.failed + c1.doneShas.failed, 0);
   const c2 = await W.runDerivedBackfill(x.deps, input);
-  for (const k of ['decisions', 'cardFields', 'releases', 'doneShas']) assert.equal(c2[k].appended, 0, k);
+  for (const k of ['decisions', 'cardFields', 'releases', 'doneShas', 'gitShas']) assert.equal(c2[k].appended, 0, k);
   assert.equal(x.events().length, 0);
   assert.deepEqual(fs.readdirSync(path.join(x.root, 'agents')).sort(), ['agent-x', 'agent-y', 'derived']);
   assert.deepEqual(W.readDoneMails(x.root).map((m) => [m.id, m.from, m.card ?? null, typeof m.body]), [['m-h1', 'agent-x', null, 'string'], ['m-h5', 'agent-x', null, 'undefined'], ['m-h1', 'agent-x', null, 'string']], 'from, card and subject come from the ledger; an edited body is dropped');
@@ -441,6 +483,69 @@ test('backfill: a fixture hive and repo give every kind once; a re-run appends n
   assert.equal(c3.doneMails, 0);
   assert.equal(y.live().some((c) => /\.(lastsha|donesha)$/.test(c.key)), false);
   assert.equal(c3.releases.appended, 6);
+});
+
+test('R2 (a): the sender\'s newer done mail supersedes its older claims (M5 per-commit ones too); other senders stay; an older fact never replaces a newer claim', async () => {
+  const x = setup();
+  const legacy = (sha, from, mail) => ({ t: 'claim', kind: 'fact', key: 'card.syn-r.donesha', source: 'derived', text: `Card SYN-R: the done mail ${mail} from ${from} names commit ${sha.slice(0, 8)} (${sha})`, refs: [{ type: 'commit', value: sha }], at: '2026-10-01T00:00:00.000Z' });
+  for (const d of [legacy(H('a'), 'agent-x', 'm1'), legacy(H('b'), 'agent-x', 'm1'), legacy(H('c'), 'agent-y', 'm2')]) assert.equal((await x.store.appendRecord(D, d, 'derived-internal')).ok, true);
+  const [la, lb, lc] = x.claims().map((c) => c.id);
+  const g = fakeGit({ commits: { dddddd4: H('d') }, parents: {}, time: {} });
+  const r = await F.doneMailFacts([{ id: 'm3', act: 'done', from: 'agent-x', card: 'SYN-R', subject: 'dddddd4', created_at: '2026-10-02T00:00:00Z' }], ['SYN-R'], g);
+  assert.deepEqual(await W.syncDerived(x.deps, r.facts), { facts: 1, appended: 1, unchanged: 0, superseded: 2, failed: 0 });
+  const live = x.live();
+  assert.deepEqual(live.map((c) => c.refs.find((y) => y.type === 'commit').value).sort(), [H('c'), H('d')], 'agent-y\'s claim stays live beside agent-x\'s newest');
+  const nw = live.find((c) => c.text.includes('agent-x'));
+  assert.deepEqual([...nw.supersedes].sort(), [la, lb].sort());
+  assert.equal(nw.supersedesReason.category, 'changed');
+  assert.ok(x.claims().some((c) => c.id === lc) && x.claims().length === 4, 'nothing deleted');
+  // An older mail's fact (a pass that no longer sees the newer one) does not replace the newer claim.
+  const old = await F.doneMailFacts([{ id: 'm0', act: 'done', from: 'agent-x', card: 'SYN-R', subject: 'dddddd4 again', created_at: '2026-09-30T00:00:00Z' }], ['SYN-R'], g);
+  const kept = await W.syncDerived(x.deps, old.facts);
+  assert.equal(kept.appended, 0);
+  assert.equal(kept.older, 1);
+});
+
+test('R2 (b): done mails from main\'s permanent mail-cards index (merged with the MailLedger by id); a body counts only when it hashes; git history facts', async () => {
+  const x = setup();
+  const r = makeRepo();
+  const a = r.commit('SYN-G1: first step', '2026-10-01T10:00:00Z');
+  const b = r.commit('second step for SYN-G1 and SYN G2', '2026-10-02T10:00:00Z');
+  r.commit('unrelated', '2026-10-03T10:00:00Z');
+  const dir = path.join(x.root, 'state', 'mail-cards');
+  fs.mkdirSync(dir, { recursive: true });
+  const row = (o) => JSON.stringify({ v: 1, act: 'done', trust: 'two-party', ...o, bodyHash: mailBodyHash(o.hashOf ?? o.body ?? '') });
+  fs.writeFileSync(path.join(dir, 'syn-g1.jsonl'), [
+    row({ id: 'm-i1', card: 'SYN-G1', cards: ['SYN-G1'], cardFrom: 'reply', from: 'agent-x', to: 'god', subject: 'shipped', body: `at ${a.slice(0, 8)}`, created_at: '2026-10-01T12:00:00Z' }),
+    row({ id: 'm-i1', card: 'SYN-G1', cards: ['SYN-G1'], cardFrom: 'reply', from: 'agent-x', to: 'jim', subject: 'shipped', body: `at ${a.slice(0, 8)}`, created_at: '2026-10-01T12:00:00Z' }),
+    row({ id: 'm-i2', card: 'SYN-G1', cards: ['SYN-G1'], cardFrom: 'field', from: 'agent-y', to: 'god', subject: 'edited', body: `now ${b.slice(0, 8)}`, hashOf: 'the delivered body', created_at: '2026-10-02T12:00:00Z' }),
+    row({ id: 'm-i3', card: 'SYN-G1', cards: ['SYN-G1'], cardFrom: 'field', from: 'agent-y', to: 'god', act: 'inform', subject: 'fyi', body: b }),
+    '{torn',
+  ].join('\n'));
+  fs.writeFileSync(path.join(dir, '_links.jsonl'), `${JSON.stringify({ v: 1, mailId: 'm-i1', cards: ['SYN-G1'], method: 'reply', act: 'done' })}\n${row({ id: 'm-i9', card: 'SYN-G1', from: 'agent-z', subject: 'not a mail file', body: `at ${a.slice(0, 8)}` })}\n`);
+  deliver(x, 'agent-x', { id: 'm-i1', act: 'done', from: 'agent-x', subject: 'shipped', body: `at ${a.slice(0, 8)}`, created_at: '2026-10-01T12:00:00Z' });
+  const mails = W.readDoneMails(x.root);
+  assert.deepEqual(mails.map((m) => [m.id, m.from, JSON.stringify(m.cards ?? null), typeof m.body]), [['m-i1', 'agent-x', '["SYN-G1"]', 'string'], ['m-i2', 'agent-y', '["SYN-G1"]', 'undefined']], 'one per id; the ledger copy folds into the index row; a body that does not hash is dropped; not-done rows and _links are not read');
+  const seen = new Set();
+  assert.equal(W.readDoneMails(x.root, seen).length, 2);
+  assert.equal(W.readDoneMails(x.root, seen).length, 0, 'a pass reads each index row once');
+  fs.writeFileSync(path.join(x.root, 'tasks.json'), JSON.stringify({ tasks: [{ id: 'SYN-G1', status: 'done' }, { id: 'SYN-G2', status: 'todo' }] }));
+  const git = new DerivedGit(r.repo);
+  const facts = await F.gitHistoryFacts(await git.log(), ['SYN-G1', 'SYN-G2'], git);
+  assert.deepEqual(facts.map((f) => [f.key, f.refs[1].value]), [['card.syn-g1.gitsha', b], ['card.syn-g2.gitsha', b]]);
+  assert.match(facts[0].text, new RegExp(`^Card SYN-G1: the latest commit in git order whose message names the card is ${b.slice(0, 8)} \\(${b}\\); 2 commits name it$`));
+  assert.equal(facts[0].at, '2026-10-02T10:00:00.000Z');
+  // More than 8 commits name a card: the 8 NEWEST are compared, so the newest wins.
+  let last = '';
+  for (let i = 0; i < 10; i++) last = r.commit(`SYN-G3 step ${i}`, `2026-10-0${4 + Math.floor(i / 5)}T1${i % 5}:00:00Z`);
+  const g3 = await F.gitHistoryFacts(await git.log(), ['SYN-G3'], git);
+  assert.equal(g3[0].refs[1].value, last, 'the newest of 10');
+  assert.match(g3[0].text, /; 10 commits name it$/);
+  const c = await W.runDerivedBackfill(x.deps, { hiveRoot: x.root, git, releases: { changelog: null, tags: [] } });
+  assert.equal(c.gitShas.appended, 2);
+  assert.equal(c.doneShas.appended, 1, 'm-i1 (agent-x): commit a; m-i2 has no body that hashes and no sha in its subject');
+  assert.deepEqual(c.doneSkipped, { notDone: 0, noShaWord: 1, noCommit: 0, noCard: 0, ambiguous: 0 });
+  assert.equal((await W.runDerivedBackfill(x.deps, { hiveRoot: x.root, git, releases: { changelog: null, tags: [] } })).gitShas.appended, 0, 'idempotent');
 });
 
 test('backfill CLI: runs on a hive copy with the key on stdin, refuses the live hive', async () => {
@@ -459,7 +564,7 @@ test('backfill CLI: runs on a hive copy with the key on stdin, refuses the live 
   assert.equal(out.ok, true);
   assert.equal(out.tags, 1);
   assert.equal(out.changelog, true);
-  assert.equal(out.doneShas.appended, 2);
+  assert.equal(out.doneShas.appended, 1);
   const again = JSON.parse(run(['--hive', x.root, '--user-data', `${x.root}-ud`, '--repo', r.repo, '--now', '2026-10-04T00:00:00Z']).stdout);
   assert.equal(again.decisions.appended + again.cardFields.appended + again.releases.appended + again.doneShas.appended, 0, 'idempotent across processes');
   const wt = x.store.readLedger(D).records.filter((c) => c.text !== 'seed').map((c) => c.wt);
@@ -577,4 +682,51 @@ test('search: the derived ledger is a claims source once it has segments (it has
   assert.equal(manifestEntry(undefined, D), 'writer');
   assert.equal(manifestEntry({}, 'a1'), undefined, 'an agent with no entry stays off');
   assert.equal(manifestEntry({ derived: 'shadow' }, D), 'shadow');
+});
+
+test('R2 (d): a note retires only the writer\'s own same-key claim it restates (a value changed); card.* stays multi', () => {
+  const V = loadTs('src/main/claims/valueSupersede.ts');
+  const E = loadTs('src/main/claims/endpoint.ts');
+  assert.equal(V.restates('Card SYN-A1 is pushed to origin at abc1234 on branch b', 'Card SYN-A1 is pushed to origin at 0f1e2d3 on branch b'), true, 'a changed sha');
+  assert.equal(V.restates('Release v1.2.4 of the tool shipped on 2026-01-03 with 7 fixes', 'Release v1.2.3 of the tool shipped on 2026-01-02 with 5 fixes'), true, 'versions, dates, counts');
+  assert.equal(V.restates('Card SYN-A1 is pushed to origin at abc1234 on branch b', 'Card SYN-A1 is pushed to origin at abc1234 on branch b'), false, 'the same value is a duplicate, not a change');
+  assert.equal(V.restates('Card SYN-A1 tests pass on the branch now', 'Card SYN-A1 tests fail on the branch now'), false, 'no value word: a different fact');
+  assert.equal(V.restates('Card SYN-A1 build abc1234 passed its gate', 'Card SYN-A1 review 0f1e2d3 passed its gate'), false, 'other words: a different fact, even with a new value');
+  assert.equal(V.restates('at abc1234', 'at 0f1e2d3'), false, 'too short to count');
+  const live = { 'agent-a': [{ id: 'c-a1', text: 'Card SYN-A1 is pushed to origin at 0f1e2d3 on branch b' }, { id: 'c-a2', text: 'Card SYN-A1 needs a second reviewer before the cut' }] };
+  const d = { liveByKey: (a) => (live[a] ?? []).map((c) => c.id), liveClaimsByKey: (a) => live[a] ?? [] };
+  const note = { key: 'card.syn-a1', text: 'Card SYN-A1 is pushed to origin at abc1234 on branch b' };
+  assert.deepEqual(E.sameKeyAuto(d, 'agent-a', note), ['c-a1'], 'only the restated claim');
+  assert.deepEqual(E.sameKeyAuto(d, 'agent-b', note), [], 'another agent\'s claims are never touched');
+  assert.deepEqual(E.sameKeyAuto(d, 'agent-a', { ...note, separate: 'c-a1' }), [], 'an explicit choice wins');
+  assert.deepEqual(E.sameKeyAuto(d, 'agent-a', { ...note, fromMail: 'm1' }), [], 'a mail note never supersedes');
+  const r = E.cardKeyRefusal(d, 'agent-a', note);
+  assert.ok(r && r.ids.length === 1 && r.ids[0] === 'c-a2', 'the S3 refusal still lists the unrelated same-key claim');
+  live['agent-a'].pop();
+  assert.equal(E.cardKeyRefusal(d, 'agent-a', note), null, 'with only the restated claim left the note is written (and retires it)');
+});
+
+test('R2 (e) card record: the result and each note entry under card.<id>.decision.*, whole, in parts; keys stay as notes grow', async () => {
+  const long = 'word '.repeat(150).trim();
+  const card = { id: 'SYN-R1', result: `closed: ${long}`, notes: '[2026-03-01T10:00:00.000Z] parked by the floor owner\n2026-03-02 voided, superseded by SYN-R2\n[2026-03-01T10:00:00.000Z] parked by the floor owner' };
+  const facts = F.cardRecordFacts([card, { id: 'SYN-R0' }, { id: 'SYN-R3', notes: [{ by: 'god', text: 'kept' }] }]);
+  const keys = facts.map((x) => x.key);
+  assert.ok(keys.includes('card.syn-r1.decision.result') && keys.includes('card.syn-r1.decision.result.p2'), 'a long result goes on in parts');
+  const res = facts.filter((x) => x.key.startsWith('card.syn-r1.decision.result'));
+  assert.match(res[0].text, /^Card SYN-R1 result \(part 1 of \d\): closed: word/);
+  assert.equal(res.map((x) => x.text.replace(/^[^:]*: /, '')).join(' '), `closed: ${long}`, 'nothing lost');
+  const notes = facts.filter((x) => /\.decision\.n[0-9a-f]{8}$/.test(x.key) && x.key.startsWith('card.syn-r1'));
+  assert.equal(notes.length, 2, 'one claim per distinct entry (a repeated entry once)');
+  assert.equal(notes[0].text, 'Card SYN-R1 note: [2026-03-01T10:00:00.000Z] parked by the floor owner');
+  assert.equal(notes[0].at, '2026-03-01T10:00:00.000Z');
+  assert.equal(notes[1].at, undefined, 'a date with no time gives no at');
+  assert.ok(facts.some((x) => x.key.startsWith('card.syn-r3.decision.n') && x.text.includes('"kept"')), 'an object note entry is kept as JSON');
+  assert.ok(!keys.some((k) => k.startsWith('card.syn-r0')), 'no result, no notes: nothing');
+  const grown = F.cardRecordFacts([{ ...card, notes: `${card.notes}\n[2026-03-03T09:00:00.000Z] reopened` }]);
+  for (const n of notes) assert.ok(grown.some((g) => g.key === n.key && g.text === n.text), 'old entries keep their keys');
+  const x = setup();
+  fs.writeFileSync(path.join(x.root, 'tasks.json'), JSON.stringify({ tasks: [card] }));
+  const c = await W.runDerivedBackfill(x.deps, { hiveRoot: x.root, git: null, releases: { changelog: null, tags: [] } });
+  assert.equal(c.records.appended, facts.filter((f0) => f0.key.startsWith('card.syn-r1')).length);
+  assert.equal((await W.runDerivedBackfill(x.deps, { hiveRoot: x.root, git: null, releases: { changelog: null, tags: [] } })).records.appended, 0, 'idempotent');
 });

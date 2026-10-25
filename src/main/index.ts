@@ -1774,6 +1774,11 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
       return view.claims.filter((c) => c.key === key && view.status(c.id) === 'live')
         .sort((a, b) => Date.parse(b.wt) - Date.parse(a.wt) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)).map((c) => c.id);
     },
+    liveClaimsByKey: (agentId, key) => {
+      const view = claimsLedgerView(agentId);
+      if (!view) return [];
+      return view.claims.filter((c) => c.key === key && view.status(c.id) === 'live').map((c) => ({ id: c.id, text: c.text }));
+    },
     // CL-M4-FORWARD-PATH: counts and flags only (detail), never note or reason text.
     onNoteChoice: (agentId, choice, ids, detail) => hive.appendLog({ kind: 'claims-note-choice', agentId, choice, targets: ids.slice(0, 10), ...(detail ?? {}) })
   };

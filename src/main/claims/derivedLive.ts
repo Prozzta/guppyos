@@ -12,7 +12,7 @@
  * It never touches the delivery path (wake/mail confirm): it only reads the MailLedger files that
  * delivery wrote (hive/state/mail). Runs never overlap; a failure is logged and the next pass tries again.
  */
-import { cardFieldFacts, decisionFacts, doneMailFacts, parseChangelog, releaseFacts, type MailLike } from './derivedFacts';
+import { cardFieldFacts, cardRecordFacts, decisionFacts, doneMailFacts, parseChangelog, releaseFacts, type MailLike } from './derivedFacts';
 import { DerivedGit } from './derivedGit';
 import { readCards, readDoneMails, runDerivedBackfill, syncDerived, type DerivedWriterDeps } from './derivedWriter';
 
@@ -95,6 +95,7 @@ export class DerivedLive {
     const cards = readCards(c.root);
     const git = c.git && await c.git.ok() ? c.git : null;
     await syncDerived(c.w, decisionFacts(cards));
+    await syncDerived(c.w, cardRecordFacts(cards));
     await syncDerived(c.w, await cardFieldFacts(cards, git));
   }
 
@@ -107,7 +108,9 @@ export class DerivedLive {
     const mails = this.newDoneMails(c.root);
     if (git && mails.length) {
       const ids = readCards(c.root).map((x) => x.id).filter((id): id is string => typeof id === 'string');
-      await syncDerived(c.w, (await doneMailFacts(mails, ids, git)).facts);
+      const done = await doneMailFacts(mails, ids, git);
+      for (const s of done.skips) this.d.log({ kind: 'claims-derived-done-skip', mail: s.mail.slice(0, 120), reason: s.reason, ...(s.cards ? { cards: s.cards } : {}) });
+      await syncDerived(c.w, done.facts);
     }
   }
 

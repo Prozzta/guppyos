@@ -17,8 +17,8 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DERIVED_AGENT_ID, type AppendOrigin, type AppendResult, type ClaimRec, type ClaimsState, type LedgerRec, type ReadResult, type RecordDraft } from '../../shared/claims';
 import {
-  cardFieldFacts, decisionFacts, doneMailFacts, parseChangelog, releaseFacts, shaMentions,
-  type CardLike, type DerivedFact, type GitPort, type MailLike, type TagLike,
+  cardFieldFacts, cardRecordFacts, decisionFacts, doneMailFacts, gitHistoryFacts, parseChangelog, releaseFacts, shaMentions,
+  type CardLike, type DerivedFact, type GitLogPort, type MailLike, type TagLike,
 } from './derivedFacts';
 import { mergeHotCold, readArchive } from '../taskArchive';
 import { isValidMailId, mailBodyHash, type MailLedgerDoc } from '../mailLedger';
@@ -34,14 +34,20 @@ export interface DerivedWriterDeps {
   log?: (row: Record<string, unknown>) => void;
 }
 
-export interface SyncCounts { facts: number; appended: number; unchanged: number; superseded: number; failed: number }
+export interface SyncCounts { facts: number; appended: number; unchanged: number; superseded: number; failed: number; older?: number }
 
-/** A claim's slot: its key; for a done-mail sha (one claim per commit under one key) key#commit. */
-export function slotOf(c: Pick<ClaimRec, 'key' | 'refs'>): string | null {
+/** The sender a done-sha claim's text names (the writer's own template; M5's per-commit claims too). */
+const DONE_FROM_RE = /\bdone mail (?:\S+ )?from (\S+) /;
+
+/**
+ * A claim's slot: its key; for a done-mail sha (R2: one claim per card and SENDER under one key)
+ * key#<sender>, so the sender's newer done mail supersedes its older claims, M5's per-commit ones included.
+ */
+export function slotOf(c: Pick<ClaimRec, 'key' | 'refs' | 'text'>): string | null {
   if (!c.key) return null;
   if (c.key.endsWith('.donesha')) {
-    const commit = c.refs?.find((r) => r.type === 'commit')?.value;
-    return commit ? `${c.key}#${commit}` : null;
+    const from = DONE_FROM_RE.exec(typeof c.text === 'string' ? c.text : '')?.[1];
+    return from ? `${c.key}#${from}` : null;
   }
   return c.key;
 }
@@ -67,6 +73,8 @@ export async function syncDerived(deps: DerivedWriterDeps, facts: readonly Deriv
     done.add(f.slot);
     const prior = live.get(f.slot) ?? [];
     if (prior.some((c) => c.key === f.key && c.text === f.text && refsId(c.refs) === refsId(f.refs))) { counts.unchanged++; continue; }
+    // A fact dated before the slot's live claim never replaces it (a pass that no longer sees a newer record).
+    if (f.at && prior.some((c) => typeof c.at === 'string' && c.at > f.at!)) { counts.older = (counts.older ?? 0) + 1; continue; }
     const draft: RecordDraft = {
       t: 'claim', kind: f.kind, text: f.text, key: f.key,
       ...(f.refs.length ? { refs: f.refs } : {}),
@@ -107,7 +115,8 @@ export function readCards(hiveRoot: string): CardLike[] {
  * An inbox file the ledger never recorded is ignored. `seen` (agent/id) skips entries read before.
  */
 export function readDoneMails(hiveRoot: string, seen?: Set<string>): MailLike[] {
-  const out: MailLike[] = [];
+  const out: MailLike[] = readIndexDoneMails(hiveRoot, seen);
+  const byId = new Map(out.map((m) => [m.id as string, m]));
   const mailDir = join(hiveRoot, 'state', 'mail');
   let files: string[] = [];
   try { files = readdirSync(mailDir).filter((n) => n.endsWith('.json')).sort(); } catch { return out; }
@@ -122,11 +131,48 @@ export function readDoneMails(hiveRoot: string, seen?: Set<string>): MailLike[] 
       const k = `${agent}/${e.id}`;
       if (seen?.has(k)) continue;
       seen?.add(k);
+      const had = byId.get(e.id);
+      if (had) { if (!had.card && e.cardId) had.card = e.cardId; continue; }   // the index row has the body
       out.push({
         id: e.id, from: e.from, act: 'done', subject: e.subject,
         ...(e.cardId ? { card: e.cardId } : {}),
         ...(Number.isFinite(e.deliveredAt) ? { created_at: new Date(e.deliveredAt).toISOString() } : {}),
         ...(typeof e.bodyHash === 'string' ? bodyOf(join(hiveRoot, 'agents', agent, 'inbox'), e.id, e.bodyHash) : {}),
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * R2 (b): the done mails of main's permanent per-card mail index (hive/state/mail-cards/<card>.jsonl,
+ * written at delivery or by the trusted backfill; never pruned), one per id, with the cards the mail
+ * was linked to. The body counts only when it hashes to the row's bodyHash. `seen` holds idx/<id>.
+ */
+export function readIndexDoneMails(hiveRoot: string, seen?: Set<string>): MailLike[] {
+  const out: MailLike[] = [];
+  const dir = join(hiveRoot, 'state', 'mail-cards');
+  let files: string[] = [];
+  try { files = readdirSync(dir).filter((n) => n.endsWith('.jsonl') && !n.startsWith('_')).sort(); } catch { return out; }
+  const got = new Set<string>();
+  for (const f of files) {
+    let lines: string[] = [];
+    try { lines = readFileSync(join(dir, f), 'utf8').split('\n'); } catch { continue; }
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let r: Record<string, unknown>;
+      try { r = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
+      if (!r || r.act !== 'done' || typeof r.id !== 'string' || !isValidMailId(r.id) || got.has(r.id)) continue;
+      got.add(r.id);
+      if (seen?.has(`idx/${r.id}`)) continue;
+      seen?.add(`idx/${r.id}`);
+      const body = typeof r.bodyHash === 'string' && r.body !== undefined && mailBodyHash(r.body) === r.bodyHash ? { body: r.body } : {};
+      out.push({
+        id: r.id, from: r.from, act: 'done', subject: r.subject,
+        ...(typeof r.card === 'string' ? { card: r.card } : {}),
+        ...(Array.isArray(r.cards) ? { cards: r.cards } : {}),
+        ...(typeof r.created_at === 'string' ? { created_at: r.created_at } : Number.isFinite(r.deliveredAt) ? { created_at: new Date(r.deliveredAt as number).toISOString() } : {}),
+        ...body,
       });
     }
   }
@@ -149,13 +195,16 @@ export interface ReleaseSource { changelog: string | null; tags: TagLike[] }
 export interface BackfillInput {
   hiveRoot: string;
   /** null: no repo (lastsha and done-mail shas need git to tell a commit from any hex word; tags too). */
-  git: GitPort | null;
+  git: GitLogPort | null;
   releases: ReleaseSource;
   /** Optional prefetch of every sha the run will ask about (one git process instead of one per sha). */
   prefetch?: (shas: string[]) => Promise<void>;
 }
 
-export interface BackfillCounts { cards: number; doneMails: number; decisions: SyncCounts; cardFields: SyncCounts; releases: SyncCounts; doneShas: SyncCounts; doneSkipped: Record<string, number> }
+export interface BackfillCounts {
+  cards: number; doneMails: number; decisions: SyncCounts; records: SyncCounts; cardFields: SyncCounts; releases: SyncCounts; doneShas: SyncCounts;
+  doneSkipped: Record<string, number>; doneOlder: number; gitShas: SyncCounts;
+}
 
 export async function runDerivedBackfill(deps: DerivedWriterDeps, input: BackfillInput): Promise<BackfillCounts> {
   const cards = readCards(input.hiveRoot);
@@ -167,12 +216,16 @@ export async function runDerivedBackfill(deps: DerivedWriterDeps, input: Backfil
     await input.prefetch([...shas]);
   }
   const decisions = await syncDerived(deps, decisionFacts(cards));
+  const records = await syncDerived(deps, cardRecordFacts(cards));
   const cardFields = await syncDerived(deps, await cardFieldFacts(cards, input.git));
   const releases = await syncDerived(deps, releaseFacts(parseChangelog(input.releases.changelog), input.releases.tags));
   const cardIds = cards.map((c) => c.id).filter((id): id is string => typeof id === 'string');
-  const done = input.git ? await doneMailFacts(mails, cardIds, input.git) : { facts: [], skipped: { noGit: 1 } as Record<string, number> };
+  const done = input.git ? await doneMailFacts(mails, cardIds, input.git) : { facts: [], skipped: { noGit: 1 } as Record<string, number>, skips: [], older: 0 };
+  // R2 (c): every skipped done mail is logged with its reason (ids and card ids only).
+  for (const s of done.skips) deps.log?.({ kind: 'claims-derived-done-skip', mail: s.mail.slice(0, 120), reason: s.reason, ...(s.cards ? { cards: s.cards } : {}) });
   const doneShas = await syncDerived(deps, done.facts);
-  const counts = { cards: cards.length, doneMails: mails.length, decisions, cardFields, releases, doneShas, doneSkipped: done.skipped };
+  const gitShas = input.git?.log ? await syncDerived(deps, await gitHistoryFacts(await input.git.log(), cardIds, input.git)) : { facts: 0, appended: 0, unchanged: 0, superseded: 0, failed: 0 };
+  const counts = { cards: cards.length, doneMails: mails.length, decisions, records, cardFields, releases, doneShas, doneSkipped: done.skipped, doneOlder: done.older, gitShas };
   deps.log?.({ kind: 'claims-derived-backfill', ...counts });
   return counts;
 }
