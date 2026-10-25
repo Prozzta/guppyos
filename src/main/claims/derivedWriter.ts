@@ -17,7 +17,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DERIVED_AGENT_ID, type AppendOrigin, type AppendResult, type ClaimRec, type ClaimsState, type LedgerRec, type ReadResult, type RecordDraft } from '../../shared/claims';
 import {
-  cardFieldFacts, cardRecordFacts, decisionFacts, isRulingMail, rulingMailFacts, type RulingMailLike, type BumpMap, doneMailFacts, gitHistoryFacts, parseChangelog, releaseFacts, shaMentions,
+  cardFieldFacts, cardRecordFacts, decisionFacts, isRulingMail, rulingMailFacts, type RulingMailLike, type BumpMap, doneMailFacts, gitHistoryFacts, mergeFacts, parseChangelog, releaseFacts, shaMentions,
   type CardLike, type DerivedFact, type GitLogPort, type MailLike, type TagLike,
 } from './derivedFacts';
 import { mergeHotCold, readArchive } from '../taskArchive';
@@ -314,8 +314,11 @@ export async function runDerivedBackfill(deps: DerivedWriterDeps, input: Backfil
   // R2 (c): every skipped done mail is logged with its reason (ids and card ids only).
   for (const s of done.skips) deps.log?.({ kind: 'claims-derived-done-skip', mail: s.mail.slice(0, 120), reason: s.reason, ...(s.cards ? { cards: s.cards } : {}) });
   const doneShas = await syncDerived(deps, done.facts);
-  const gitShas = input.git?.log ? await syncDerived(deps, await gitHistoryFacts(await input.git.log(), cardIds, input.git)) : { facts: 0, appended: 0, unchanged: 0, superseded: 0, failed: 0 };
-  const counts = { cards: cards.length, doneMails: mails.length, decisions, records, rulings, cardFields, releases, doneShas, doneSkipped: done.skipped, doneOlder: done.older, gitShas };
+  const none = { facts: 0, appended: 0, unchanged: 0, superseded: 0, failed: 0 };
+  const log = input.git?.log ? await input.git.log() : null;
+  const gitShas = log && input.git ? await syncDerived(deps, await gitHistoryFacts(log, cardIds, input.git)) : none;
+  const merges = log && input.git ? await syncDerived(deps, await mergeFacts(log, cardIds, input.git)) : none;
+  const counts = { cards: cards.length, doneMails: mails.length, decisions, records, rulings, cardFields, releases, doneShas, doneSkipped: done.skipped, doneOlder: done.older, gitShas, merges };
   deps.log?.({ kind: 'claims-derived-backfill', ...counts });
   return counts;
 }

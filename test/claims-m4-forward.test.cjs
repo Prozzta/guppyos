@@ -289,6 +289,11 @@ test('registry: card.<id> keys are multi (no rule supersede), never refused as n
   fs.writeFileSync(R.registryPath(root), JSON.stringify(old));
   const loaded = R.loadRegistry(root);
   assert.deepEqual(loaded.namespaces.at(-1), { pattern: 'card.*', cardinality: 'multi' });
+  // A branch no card owns keeps its merge claim under branch.<name> (single); old registries gain it.
+  assert.deepEqual(R.checkKey(reg, 'branch.lone-branch', 'derived', '2026-10-16T00:00:00Z'), { ok: true, cardinality: 'single', added: true });
+  const noBranch = { v: 1, namespaces: R.DEFAULT_KEY_REGISTRY.namespaces.filter((n) => n.pattern !== 'branch.*'), keys: {} };
+  fs.writeFileSync(R.registryPath(root), JSON.stringify(noBranch));
+  assert.ok(R.loadRegistry(root).namespaces.some((n) => n.pattern === 'branch.*' && n.cardinality === 'single'), 'old registries gain branch.*');
   assert.deepEqual(loaded.keys, old.keys);
   // Two notes on one card key both stay live under derive (R2 is single-only).
   const recsIn = [

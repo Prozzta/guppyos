@@ -30,6 +30,8 @@ export const DEFAULT_KEY_REGISTRY: KeyRegistry = {
     { pattern: 'project.*', cardinality: 'single' },
     { pattern: 'pref.*', cardinality: 'single' },
     { pattern: 'list.*', cardinality: 'multi' },
+    // CLAIMS-90 step 1: the merge claim of a branch no card owns (branch.<name>.*).
+    { pattern: 'branch.*', cardinality: 'single' },
     { pattern: 'card.*', cardinality: 'multi' },
   ],
   keys: {},

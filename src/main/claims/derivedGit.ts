@@ -140,16 +140,16 @@ export class DerivedGit implements GitLogPort {
     return this.messages.get(commit) ?? null;
   }
 
-  /** Every commit on the branches, tags and remotes: full sha, committer time, message (stashes left out). */
-  async log(): Promise<Array<{ commit: string; time: number; message: string }>> {
-    const r = await git(this.repo, ['log', '--branches', '--tags', '--remotes', '--format=%H%x1f%ct%x1f%B%x1e'], this.o);
+  /** Every commit on the branches, tags and remotes: full sha, committer time, parents, message (stashes left out). */
+  async log(): Promise<Array<{ commit: string; time: number; message: string; parents: string[] }>> {
+    const r = await git(this.repo, ['log', '--branches', '--tags', '--remotes', '--format=%H%x1f%ct%x1f%P%x1f%B%x1e'], this.o);
     if (r.code !== 0) return [];
-    const out: Array<{ commit: string; time: number; message: string }> = [];
+    const out: Array<{ commit: string; time: number; message: string; parents: string[] }> = [];
     for (const rec of r.out.split('\x1e')) {
-      const [h, ct, ...msg] = rec.replace(/^\s+/, '').split('\x1f');
+      const [h, ct, p = '', ...msg] = rec.replace(/^\s+/, '').split('\x1f');
       if (!h || !/^[0-9a-f]{40}$/.test(h)) continue;
       const message = msg.join('\x1f');
-      out.push({ commit: h, time: Number(ct) || 0, message });
+      out.push({ commit: h, time: Number(ct) || 0, message, parents: p.trim() ? p.trim().split(/\s+/) : [] });
       this.messages.set(h, message);
     }
     return out;
