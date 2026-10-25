@@ -347,15 +347,15 @@ test('(d) done mails, R2 (a)(c): one per (card, sender): the newest done mail an
 test('writer: idempotent (no claim and no sighting on a re-run), a change supersedes its own claim, slots stay apart', async () => {
   const x = setup();
   const f1 = [
-    { slot: 'card.syn-w.status', key: 'card.syn-w.status', kind: 'fact', text: 'Card SYN-W status: doing', refs: [{ type: 'task', value: 'SYN-W' }] },
-    { slot: 'card.syn-w.donesha#agent-a', key: 'card.syn-w.donesha', kind: 'fact', text: `Card SYN-W: the newest done mail from agent-a (m1) names commit aaaaaaaa (${H('a')})`, refs: [{ type: 'commit', value: H('a') }] },
-    { slot: 'card.syn-w.donesha#agent-b', key: 'card.syn-w.donesha', kind: 'fact', text: `Card SYN-W: the newest done mail from agent-b (m2) names commit bbbbbbbb (${H('b')})`, refs: [{ type: 'commit', value: H('b') }] },
+    { slot: 'card.syn-w.status', key: 'card.syn-w.status', kind: 'fact', text: 'Card SYN-W status: doing', at: '2026-10-01T00:00:00.000Z', refs: [{ type: 'task', value: 'SYN-W' }] },
+    { slot: 'card.syn-w.donesha#agent-a', key: 'card.syn-w.donesha', kind: 'fact', text: `Card SYN-W: the newest done mail from agent-a (m1) names commit aaaaaaaa (${H('a')})`, at: '2026-10-01T01:00:00.000Z', refs: [{ type: 'commit', value: H('a') }] },
+    { slot: 'card.syn-w.donesha#agent-b', key: 'card.syn-w.donesha', kind: 'fact', text: `Card SYN-W: the newest done mail from agent-b (m2) names commit bbbbbbbb (${H('b')})`, at: '2026-10-01T02:00:00.000Z', refs: [{ type: 'commit', value: H('b') }] },
   ];
   assert.deepEqual(await W.syncDerived(x.deps, f1), { facts: 3, appended: 3, unchanged: 0, superseded: 0, failed: 0 });
   assert.deepEqual(await W.syncDerived(x.deps, f1), { facts: 3, appended: 0, unchanged: 3, superseded: 0, failed: 0 });
   assert.equal(x.events().length, 0, 'no R1 sighting events');
   const first = x.claims()[0].id;
-  const f2 = [{ ...f1[0], text: 'Card SYN-W status: done' }, f1[1], f1[2]];
+  const f2 = [{ ...f1[0], text: 'Card SYN-W status: done', at: '2026-10-02T00:00:00.000Z' }, f1[1], f1[2]];
   assert.deepEqual(await W.syncDerived(x.deps, f2), { facts: 3, appended: 1, unchanged: 2, superseded: 1, failed: 0 });
   const live = x.live();
   assert.equal(live.length, 3);
@@ -363,14 +363,17 @@ test('writer: idempotent (no claim and no sighting on a re-run), a change supers
   assert.equal(st.text, 'Card SYN-W status: done');
   assert.deepEqual(st.supersedes, [first]);
   assert.equal(st.supersedesReason.category, 'changed');
-  // Back to the earlier value: a new claim (the old one is superseded, not live), not a sighting.
-  assert.equal((await W.syncDerived(x.deps, f1)).appended, 1);
+  // A fact older than the slot's live claim never replaces it.
+  assert.equal((await W.syncDerived(x.deps, f1)).older, 1);
+  // Back to the earlier value, newer: a new claim (the old one is superseded, not live), not a sighting.
+  const back = [{ ...f1[0], at: '2026-10-03T00:00:00.000Z' }, f1[1], f1[2]];
+  assert.equal((await W.syncDerived(x.deps, back)).appended, 1);
   assert.equal(x.events().length, 0);
   assert.equal(x.live().find((c) => c.key === 'card.syn-w.status').text, 'Card SYN-W status: doing');
   // A refs change alone is a change.
-  assert.equal((await W.syncDerived(x.deps, [{ ...f1[0], refs: [{ type: 'task', value: 'SYN-W' }, { type: 'msg', value: 'm9' }] }])).appended, 1);
+  assert.equal((await W.syncDerived(x.deps, [{ ...back[0], refs: [{ type: 'task', value: 'SYN-W' }, { type: 'msg', value: 'm9' }] }])).appended, 1);
   // A refused append is counted and logged, never thrown.
-  const bad = await W.syncDerived(x.deps, [{ slot: 'card.syn-w.x', key: 'card.syn-w.x', kind: 'fact', text: 'y'.repeat(401), refs: [] }]);
+  const bad = await W.syncDerived(x.deps, [{ slot: 'card.syn-w.x', key: 'card.syn-w.x', kind: 'fact', text: 'y'.repeat(401), at: '2026-10-01T00:00:00.000Z', refs: [] }]);
   assert.equal(bad.failed, 1);
   assert.ok(x.logs.some((r) => r.kind === 'claims-derived-append-failed'));
   assert.ok(x.claims().every((c) => c.source === 'derived'));
@@ -422,7 +425,7 @@ function fixtureHive(x, r) {
   ] };
   fs.writeFileSync(path.join(x.root, 'tasks.json'), JSON.stringify(tasks));
   fs.mkdirSync(path.join(x.root, 'tasks-archive'));
-  fs.writeFileSync(path.join(x.root, 'tasks-archive', '2026-10.jsonl'), `${JSON.stringify({ card: { id: 'SYN-A1', title: 'Archived', status: 'done', result: `done at ${c.slice(0, 8)}` } })}\n`);
+  fs.writeFileSync(path.join(x.root, 'tasks-archive', '2026-10.jsonl'), `${JSON.stringify({ at: '2026-10-03T13:00:00Z', card: { id: 'SYN-A1', title: 'Archived', status: 'done', result: `done at ${c.slice(0, 8)}` } })}\n`);
   for (const ag of ['agent-x', 'agent-y']) fs.mkdirSync(path.join(x.root, 'agents', ag, 'inbox', '.done'), { recursive: true });
   const mail = { id: 'm-h1', act: 'done', from: 'agent-x', to: 'god', subject: 'SYN H2 shipped', body: `range ${a.slice(0, 8)}..${c.slice(0, 8)}`, created_at: '2026-10-03T12:00:00Z' };
   deliver(x, 'agent-x', mail, '.done');
@@ -662,7 +665,7 @@ test('live driver: waits while disabled, serializes runs, reads only new done-ma
   assert.equal(x.claims().length, n1 + 1, 'the seen mail is not re-read');
   // A ruling mail lands in the per-card mail index (no registry: god is 'god'); the pass writes it.
   fs.mkdirSync(path.join(x.root, 'state', 'mail-cards'), { recursive: true });
-  fs.writeFileSync(path.join(x.root, 'state', 'mail-cards', 'syn-h1.jsonl'), `${JSON.stringify({ v: 1, id: 'm-h4', card: 'SYN-H1', cards: ['SYN-H1'], cardFrom: 'field', from: 'god', to: 'agent-x', act: 'inform', subject: 'RULING: ship it' })}\n`);
+  fs.writeFileSync(path.join(x.root, 'state', 'mail-cards', 'syn-h1.jsonl'), `${JSON.stringify({ v: 1, id: 'm-h4', card: 'SYN-H1', cards: ['SYN-H1'], cardFrom: 'field', from: 'god', to: 'agent-x', act: 'inform', subject: 'RULING: ship it', created_at: '2026-10-03T14:00:00Z' })}\n`);
   await live.run('pass', () => live.pass());
   assert.equal(x.claims().length, n1 + 2, 'the live pass writes the ruling');
   assert.ok(x.claims().some((c) => /^card\.syn-h1\.decision\.m[0-9a-f]{8}$/.test(c.key)));
@@ -714,7 +717,7 @@ test('R2 (d): a note retires only the writer\'s own same-key claim it restates (
 
 test('R2 (e) card record: the result and each note entry under card.<id>.decision.*, whole, in parts; keys stay as notes grow', async () => {
   const long = 'word '.repeat(150).trim();
-  const card = { id: 'SYN-R1', result: `closed: ${long}`, notes: '[2026-03-01T10:00:00.000Z] parked by the floor owner\n2026-03-02 voided, superseded by SYN-R2\n[2026-03-01T10:00:00.000Z] parked by the floor owner' };
+  const card = { id: 'SYN-R1', doneAt: '2026-03-04T00:00:00Z', result: `closed: ${long}`, notes: '[2026-03-01T10:00:00.000Z] parked by the floor owner\n2026-03-02 voided, superseded by SYN-R2\n[2026-03-01T10:00:00.000Z] parked by the floor owner' };
   const facts = F.cardRecordFacts([card, { id: 'SYN-R0' }, { id: 'SYN-R3', notes: [{ by: 'god', text: 'kept' }] }]);
   const keys = facts.map((x) => x.key);
   assert.ok(keys.includes('card.syn-r1.decision.result') && keys.includes('card.syn-r1.decision.result.p2'), 'a long result goes on in parts');
@@ -725,7 +728,7 @@ test('R2 (e) card record: the result and each note entry under card.<id>.decisio
   assert.equal(notes.length, 2, 'one claim per distinct entry (a repeated entry once)');
   assert.equal(notes[0].text, 'Card SYN-R1 note: [2026-03-01T10:00:00.000Z] parked by the floor owner');
   assert.equal(notes[0].at, '2026-03-01T10:00:00.000Z');
-  assert.equal(notes[1].at, undefined, 'a date with no time gives no at');
+  assert.equal(notes[1].at, '2026-03-02T00:00:00.000Z', 'a date with no time gives that day\'s start');
   assert.ok(facts.some((x) => x.key.startsWith('card.syn-r3.decision.n') && x.text.includes('"kept"')), 'an object note entry is kept as JSON');
   assert.ok(!keys.some((k) => k.startsWith('card.syn-r0')), 'no result, no notes: nothing');
   const grown = F.cardRecordFacts([{ ...card, notes: `${card.notes}\n[2026-03-03T09:00:00.000Z] reopened` }]);
@@ -740,7 +743,7 @@ test('R2 (e) card record: the result and each note entry under card.<id>.decisio
 test('R2 (g) ruling mails: god mails saying RULING, linked by a trusted method, under card.<id>.decision.m<h8>, whole', async () => {
   const long = 'word '.repeat(150).trim();
   const id = (n) => `2026-10-25T00-00-00-000Z-0000${n}`;
-  const row = (card, cardFrom, extra) => ({ v: 1, card, cards: [card], cardFrom, from: 'god', to: 'jim-1', act: 'request', ...extra });
+  const row = (card, cardFrom, extra) => ({ v: 1, card, cards: [card], cardFrom, from: 'god', to: 'jim-1', act: 'request', created_at: '2026-10-25T08:00:00.000Z', ...extra });
   const withBody = (body) => ({ body, bodyHash: mailBodyHash(body) });
   const x = setup();
   fs.writeFileSync(path.join(x.root, 'registry.json'), JSON.stringify({ godId: 'god', agents: {} }));
@@ -778,4 +781,51 @@ test('R2 (g) ruling mails: god mails saying RULING, linked by a trusted method, 
   const c = await W.runDerivedBackfill(x.deps, { hiveRoot: x.root, git: null, releases: { changelog: null, tags: [] } });
   assert.equal(c.rulings.appended, facts.length);
   assert.equal((await W.runDerivedBackfill(x.deps, { hiveRoot: x.root, git: null, releases: { changelog: null, tags: [] } })).rulings.appended, 0, 'idempotent');
+});
+
+test('valid time (god e551de): every derived claim carries its source time; none is written without one; a run-stamped claim is re-dated', async () => {
+  const x = setup();
+  // no source time: never written (the store would stamp the run's time)
+  const c0 = await W.syncDerived(x.deps, [{ slot: 'card.syn-v.status', key: 'card.syn-v.status', kind: 'fact', text: 'Card SYN-V status: done', refs: [] }]);
+  assert.deepEqual([c0.appended, c0.noTime], [0, 1]);
+  // a claim stamped with a run's time (as before) is re-dated once, as a correction, then left alone
+  await x.store.appendRecord(D, { t: 'claim', kind: 'fact', key: 'card.syn-v.status', text: 'Card SYN-V status: done' }, 'derived-internal');
+  const f = { slot: 'card.syn-v.status', key: 'card.syn-v.status', kind: 'fact', text: 'Card SYN-V status: done', at: '2026-09-01T00:00:00.000Z', refs: [] };
+  const c1 = await W.syncDerived(x.deps, [f]);
+  assert.deepEqual([c1.appended, c1.redated, c1.older ?? 0], [1, 1, 0]);
+  const v = x.live().find((c) => c.key === 'card.syn-v.status');
+  assert.equal(v.at, '2026-09-01T00:00:00.000Z');
+  assert.deepEqual(v.supersedesReason, { category: 'corrected', note: 'valid time' });
+  assert.equal((await W.syncDerived(x.deps, [f])).unchanged, 1, 'idempotent');
+  // a time after the write time is stored clamped (F2) and still counts as unchanged
+  const fut = { ...f, slot: 'card.syn-v.assignee', key: 'card.syn-v.assignee', text: 'Card SYN-V has no assignee', at: '2999-01-01T00:00:00.000Z' };
+  assert.equal((await W.syncDerived(x.deps, [fut])).appended, 1);
+  assert.equal((await W.syncDerived(x.deps, [fut])).unchanged, 1);
+  // the sources: status-since (task-meta), the archive row, the card stamps; never the run time
+  fs.writeFileSync(path.join(x.root, 'tasks.json'), JSON.stringify({ tasks: [
+    { id: 'SYN-V1', status: 'doing', assignee: 'a', createdAt: '2026-09-01T00:00:00Z', startedAt: '2026-09-02T00:00:00Z' },
+    { id: 'SYN-V2', status: 'blocked', assignee: 'a', createdAt: '2026-09-01T00:00:00Z' },
+    { id: 'SYN-V3', status: 'todo' },
+  ] }));
+  fs.mkdirSync(path.join(x.root, 'state'), { recursive: true });
+  fs.writeFileSync(path.join(x.root, 'state', 'task-meta.json'), JSON.stringify({ v: 1, cards: {
+    'SYN-V1': { status: 'doing', statusSince: Date.parse('2026-09-03T00:00:00Z'), lastEditAt: Date.parse('2026-09-04T00:00:00Z') },
+    'SYN-V2': { status: 'todo', statusSince: Date.parse('2026-09-05T00:00:00Z') },
+  } }));
+  fs.mkdirSync(path.join(x.root, 'tasks-archive'), { recursive: true });
+  fs.writeFileSync(path.join(x.root, 'tasks-archive', '2026-09.jsonl'), `${JSON.stringify({ at: '2026-09-06T00:00:00Z', card: { id: 'SYN-V4', status: 'done', assignee: 'b' } })}\n`);
+  const cards = W.readCards(x.root);
+  const at = Object.fromEntries((await F.cardFieldFacts(cards, null)).map((f0) => [f0.key, f0.at]));
+  assert.equal(at['card.syn-v1.status'], '2026-09-03T00:00:00.000Z', 'status-since from the harness record');
+  assert.equal(at['card.syn-v1.assignee'], '2026-09-04T00:00:00.000Z', 'the last edit');
+  assert.equal(at['card.syn-v2.status'], '2026-09-01T00:00:00.000Z', 'a status-since for another status is not used');
+  assert.equal(at['card.syn-v3.status'], undefined, 'no time at all: none (not written)');
+  assert.equal(at['card.syn-v4.status'], '2026-09-06T00:00:00.000Z', 'an archived card: its archive row');
+  assert.equal(F.statusAt({ status: 'done', doneAt: '2026-09-07T00:00:00Z', createdAt: '2026-09-01T00:00:00Z' }), '2026-09-07T00:00:00.000Z');
+  assert.equal(F.statusAt({ status: 'done', createdAt: '2026-09-01T00:00:00Z' }), '2026-09-01T00:00:00.000Z', 'only the record time is left');
+  assert.equal(F.statusAt({ status: 'todo', createdAt: '2026-09-01T00:00:00Z', updatedAt: '2026-09-10T00:00:00Z' }), '2026-09-01T00:00:00.000Z', 'todo since creation');
+  const rel = F.releaseFacts([{ version: '9.1.3', date: '2026-09-08', entries: [{ heading: 'Fixed', text: 'x' }] }], []);
+  assert.deepEqual(rel.map((f0) => f0.at), ['2026-09-08T00:00:00.000Z', '2026-09-08T00:00:00.000Z'], 'no tag: the CHANGELOG section date');
+  const dec = F.decisionFacts([{ id: 'SYN-V5', humanQA: [{ q: 'Go?', a: 'Yes', askedAt: '2026-09-09T00:00:00Z' }] }]);
+  assert.equal(dec[0].at, '2026-09-09T00:00:00.000Z', 'no answer time: the question time');
 });

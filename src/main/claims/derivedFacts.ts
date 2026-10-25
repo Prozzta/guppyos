@@ -20,6 +20,11 @@
  *                                 method (field, reply, conversation, mention-subject); see isRulingMail.
  *
  * Card ids are lower-cased in keys (the registry's KEY_RE); an id that cannot make a key is skipped.
+ *
+ * Valid time (god e551de): each fact's `at` is when its source fact held, never the run's time: the
+ * answer's (or question's) time, the note entry's date, the card's status-since and record times
+ * (cardAt), the commit's time, the tag's or CHANGELOG section's date, the mail's time. A fact with
+ * no source time is not written (syncDerived counts it as noTime).
  */
 import { createHash } from 'node:crypto';
 import type { ClaimKind, Ref } from '../../shared/claims';
@@ -70,6 +75,24 @@ const iso = (s: unknown): string | undefined => (isoOk(s) ? new Date(Date.parse(
 export interface QaLike { q?: unknown; a?: unknown; askedAt?: unknown; answeredAt?: unknown; msgId?: unknown }
 export interface CardLike {
   id?: unknown; title?: unknown; status?: unknown; assignee?: unknown; result?: unknown; notes?: unknown; humanQA?: unknown;
+  createdAt?: unknown; startedAt?: unknown; updatedAt?: unknown; doneAt?: unknown;
+  /** Set by the reader: the harness's status-since for the card's current status (state/task-meta.json),
+   *  its last edit there, and the time of the card's archive row. ISO strings. */
+  statusSince?: unknown; lastEditAt?: unknown; archivedAt?: unknown;
+}
+
+/** The newest time the card's record was written (its value held then), else undefined. */
+export function cardAt(c: CardLike): string | undefined {
+  for (const v of [c.lastEditAt, c.updatedAt, c.doneAt, c.archivedAt, c.startedAt, c.createdAt]) { const t = iso(v); if (t) return t; }
+  return undefined;
+}
+
+/** When the card's current status began: the harness's status-since, else the status's own stamp,
+ *  else the card's record time (a todo card: its creation). */
+export function statusAt(c: CardLike): string | undefined {
+  const s = typeof c.status === 'string' ? c.status : '';
+  return iso(c.statusSince) ?? (s === 'done' ? iso(c.doneAt) : undefined) ?? (s === 'doing' ? iso(c.startedAt) : undefined)
+    ?? (s === 'todo' ? iso(c.createdAt) : undefined) ?? cardAt(c);
 }
 
 export function questionHash(q: string): string {
@@ -96,7 +119,7 @@ export function decisionFacts(cards: readonly CardLike[]): DerivedFact[] {
       const whole = `the Human answered "${fold(qa.a as string)}"${day} to the question "${fold(qa.q as string)}"`;
       const refs: Ref[] = [{ type: 'task', value: c.id as string }];
       if (typeof qa.msgId === 'string' && qa.msgId && qa.msgId.length <= 200) refs.push({ type: 'msg', value: qa.msgId });
-      out.push(...inParts(key, 'decision', `Human decision on ${c.id}`, whole, at, refs));
+      out.push(...inParts(key, 'decision', `Human decision on ${c.id}`, whole, at ?? iso(qa.askedAt) ?? cardAt(c), refs));
     }
   }
   return out;
@@ -128,6 +151,8 @@ export function noteEntries(notes: unknown): string[] {
   return out;
 }
 const entryAt = (e: string): string | undefined => iso(/^\[?(\d{4}-\d\d-\d\d[T ][0-9:.]+(?:Z|[+-]\d\d:?\d\d))/.exec(e)?.[1]?.replace(' ', 'T'));
+/** A bare YYYY-MM-DD as that day's start (UTC). */
+const dayAt = (s: unknown): string | undefined => { const m = typeof s === 'string' ? /^\[?(\d{4}-\d\d-\d\d)(?![T\d])/.exec(s.trim()) : null; return m ? iso(`${m[1]}T00:00:00Z`) : undefined; };
 
 /** (f) The card's result and each note entry under card.<id>.decision.*, whole (R2: Jim D2/D3). */
 export function cardRecordFacts(cards: readonly CardLike[]): DerivedFact[] {
@@ -136,14 +161,14 @@ export function cardRecordFacts(cards: readonly CardLike[]): DerivedFact[] {
     if (typeof c?.id !== 'string') continue;
     const refs: Ref[] = [{ type: 'task', value: c.id }];
     const rk = cardKey(c.id, 'decision', 'result');
-    if (rk && typeof c.result === 'string' && c.result.trim()) out.push(...inParts(rk, 'fact', `Card ${c.id} result`, fold(c.result), undefined, refs));
+    if (rk && typeof c.result === 'string' && c.result.trim()) out.push(...inParts(rk, 'fact', `Card ${c.id} result`, fold(c.result), iso(c.doneAt) ?? cardAt(c), refs));
     const seen = new Set<string>();
     for (const e of noteEntries(c.notes)) {
       const h = `n${questionHash(e)}`;
       const k = cardKey(c.id, 'decision', h);
       if (!k || seen.has(k)) continue;
       seen.add(k);
-      out.push(...inParts(k, 'fact', `Card ${c.id} note`, fold(e), entryAt(e), refs));
+      out.push(...inParts(k, 'fact', `Card ${c.id} note`, fold(e), entryAt(e) ?? dayAt(e) ?? cardAt(c), refs));
     }
   }
   return out;
@@ -286,19 +311,22 @@ export async function cardFieldFacts(cards: readonly CardLike[], git: GitPort | 
     const task: Ref = { type: 'task', value: id };
     const status = cardKey(id, 'status');
     if (status && typeof c.status === 'string' && c.status) {
-      out.push({ slot: status, key: status, kind: 'fact', text: `Card ${id}${title} status: ${clip(c.status, 40)}`, refs: [task] });
+      const at = statusAt(c);
+      out.push({ slot: status, key: status, kind: 'fact', text: `Card ${id}${title} status: ${clip(c.status, 40)}`, ...(at ? { at } : {}), refs: [task] });
     }
     const assignee = cardKey(id, 'assignee');
     if (assignee) {
       const who = typeof c.assignee === 'string' && c.assignee.trim() ? clip(c.assignee, 80) : null;
-      out.push({ slot: assignee, key: assignee, kind: 'fact', text: who ? `Card ${id}${title} is assigned to ${who}` : `Card ${id}${title} has no assignee`, refs: [task] });
+      const at = cardAt(c);
+      out.push({ slot: assignee, key: assignee, kind: 'fact', text: who ? `Card ${id}${title} is assigned to ${who}` : `Card ${id}${title} has no assignee`, ...(at ? { at } : {}), refs: [task] });
     }
     const lastsha = cardKey(id, 'lastsha');
     if (lastsha && git) {
       const shas = [...shaMentions(c.result), ...shaMentions(c.notes)].map((m) => m.sha);
       const best = shas.length ? await latestInGitOrder(shas, git) : null;
       if (best) {
-        out.push({ slot: lastsha, key: lastsha, kind: 'fact', text: `Card ${id}${title} last commit (latest in git order of the commits its result and notes name): ${best.slice(0, 8)} (${best})`, refs: [task, { type: 'commit', value: best }] });
+        const t0 = await git.time(best);
+        out.push({ slot: lastsha, key: lastsha, kind: 'fact', text: `Card ${id}${title} last commit (latest in git order of the commits its result and notes name): ${best.slice(0, 8)} (${best})`, ...(t0 > 0 ? { at: new Date(t0 * 1000).toISOString() } : {}), refs: [task, { type: 'commit', value: best }] });
       }
     }
   }
@@ -364,12 +392,13 @@ export function releaseFacts(sections: readonly ChangelogSection[], tags: readon
     let text = parts.join(', ');
     if (s?.headline) text = `${text}. ${clip(s.headline, TEXT_MAX - len(text) - 2)}`;
     const refs: Ref[] = t ? [{ type: 'commit', value: t.commit }] : [];
-    out.push({ slot: key, key, kind: 'fact', text: clip(text, TEXT_MAX), ...(iso(t?.date) ? { at: iso(t?.date) } : {}), refs });
+    const at = iso(t?.date) ?? dayAt(s?.date);
+    out.push({ slot: key, key, kind: 'fact', text: clip(text, TEXT_MAX), ...(at ? { at } : {}), refs });
     (s?.entries ?? []).forEach((e, i) => {
       const ek = `${key}.e${i + 1}`;
       if (!keyOk(ek)) return;
       const head = `Guppy ${v}${s?.date ? ` (${s.date})` : ''} CHANGELOG${e.heading ? ` ${e.heading}` : ''}: `;
-      out.push({ slot: ek, key: ek, kind: 'fact', text: `${head}${clip(e.text, TEXT_MAX - len(head))}`, refs });
+      out.push({ slot: ek, key: ek, kind: 'fact', text: `${head}${clip(e.text, TEXT_MAX - len(head))}`, ...(at ? { at } : {}), refs });
     });
   }
   return out;

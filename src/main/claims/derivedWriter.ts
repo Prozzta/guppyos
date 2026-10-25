@@ -35,7 +35,7 @@ export interface DerivedWriterDeps {
   log?: (row: Record<string, unknown>) => void;
 }
 
-export interface SyncCounts { facts: number; appended: number; unchanged: number; superseded: number; failed: number; older?: number }
+export interface SyncCounts { facts: number; appended: number; unchanged: number; superseded: number; failed: number; older?: number; noTime?: number; redated?: number }
 
 /** The sender a done-sha claim's text names (the writer's own template; M5's per-commit claims too). */
 const DONE_FROM_RE = /\bdone mail (?:\S+ )?from (\S+) /;
@@ -72,19 +72,25 @@ export async function syncDerived(deps: DerivedWriterDeps, facts: readonly Deriv
   for (const f of facts) {
     if (done.has(f.slot)) continue;   // one value per slot per sync: the first fact wins
     done.add(f.slot);
+    // Valid time (god e551de): a fact with no source time is never written (the store would stamp the run's time).
+    if (!f.at) { counts.noTime = (counts.noTime ?? 0) + 1; continue; }
     const prior = live.get(f.slot) ?? [];
-    if (prior.some((c) => c.key === f.key && c.text === f.text && refsId(c.refs) === refsId(f.refs))) { counts.unchanged++; continue; }
-    // A fact dated before the slot's live claim never replaces it (a pass that no longer sees a newer record).
-    if (f.at && prior.some((c) => typeof c.at === 'string' && c.at > f.at!)) { counts.older = (counts.older ?? 0) + 1; continue; }
+    const same = prior.find((c) => c.key === f.key && c.text === f.text && refsId(c.refs) === refsId(f.refs));
+    // The store clamps at to its write time (F2), so a stored claim holds min(fact time, its wt).
+    if (same && same.at === (typeof same.wt === 'string' && same.wt < f.at ? same.wt : f.at)) { counts.unchanged++; continue; }
+    // A fact dated before the slot's live claim never replaces it (a pass that no longer sees a newer record),
+    // unless it is the same value: then only its time was wrong (a claim stamped with a run's time), re-dated.
+    if (!same && prior.some((c) => typeof c.at === 'string' && c.at > f.at!)) { counts.older = (counts.older ?? 0) + 1; continue; }
     const draft: RecordDraft = {
       t: 'claim', kind: f.kind, text: f.text, key: f.key,
       ...(f.refs.length ? { refs: f.refs } : {}),
-      ...(f.at ? { at: f.at } : {}),
-      ...(prior.length ? { supersedes: prior.map((c) => c.id), supersedesReason: { category: 'changed' as const } } : {}),
+      at: f.at,
+      ...(prior.length ? { supersedes: prior.map((c) => c.id), supersedesReason: same ? { category: 'corrected' as const, note: 'valid time' } : { category: 'changed' as const } } : {}),
     };
     const res = await deps.store.appendRecord(DERIVED_AGENT_ID, draft, 'derived-internal');
     if (res.ok) {
       counts.appended++;
+      if (same) counts.redated = (counts.redated ?? 0) + 1;
       if (prior.length) counts.superseded += prior.length;
     } else {
       counts.failed++;
@@ -105,7 +111,47 @@ export function readCards(hiveRoot: string): CardLike[] {
   } catch { /* no tasks.json */ }
   let archived: ReturnType<typeof readArchive> = new Map();
   try { archived = readArchive(hiveRoot); } catch { /* no archive */ }
-  return mergeHotCold(hot, archived).filter((c): c is CardLike => !!c && typeof c === 'object');
+  const meta = readTaskMeta(hiveRoot);
+  const archivedAt = readArchiveTimes(hiveRoot);
+  return mergeHotCold(hot, archived).filter((c): c is CardLike => !!c && typeof c === 'object').map((c) => {
+    const id = typeof c.id === 'string' ? c.id : '';
+    const m = meta.get(id);
+    const extra: Partial<CardLike> = {};
+    if (m && m.status === c.status && Number.isFinite(m.statusSince)) extra.statusSince = new Date(m.statusSince as number).toISOString();
+    if (m && Number.isFinite(m.lastEditAt)) extra.lastEditAt = new Date(m.lastEditAt as number).toISOString();
+    if (archivedAt.has(id)) extra.archivedAt = archivedAt.get(id);
+    return Object.keys(extra).length ? { ...c, ...extra } : c;
+  });
+}
+
+/** The harness's per-card status record (state/task-meta.json): status, statusSince and lastEditAt (ms). */
+function readTaskMeta(hiveRoot: string): Map<string, { status?: unknown; statusSince?: unknown; lastEditAt?: unknown }> {
+  try {
+    const j = JSON.parse(readFileSync(join(hiveRoot, 'state', 'task-meta.json'), 'utf8')) as { cards?: Record<string, unknown> };
+    return new Map(Object.entries(j?.cards ?? {}).filter(([, v]) => !!v && typeof v === 'object') as Array<[string, { status?: unknown; statusSince?: unknown; lastEditAt?: unknown }]>);
+  } catch { return new Map(); }
+}
+
+/** Each archived card's newest archive row time (tasks-archive/YYYY-MM.jsonl rows {at, card}). */
+function readArchiveTimes(hiveRoot: string): Map<string, string> {
+  const out = new Map<string, string>();
+  const dir = join(hiveRoot, 'tasks-archive');
+  let files: string[] = [];
+  try { files = readdirSync(dir).filter((f) => /^\d{4}-\d{2}\.jsonl$/.test(f)).sort(); } catch { return out; }
+  for (const f of files) {
+    let text = '';
+    try { text = readFileSync(join(dir, f), 'utf8'); } catch { continue; }
+    for (const line of text.split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        const r = JSON.parse(line) as { at?: unknown; card?: { id?: unknown } };
+        const id = r?.card?.id;
+        const at = typeof r?.at === 'string' && Number.isFinite(Date.parse(r.at)) ? new Date(Date.parse(r.at)).toISOString() : null;
+        if (typeof id === 'string' && at) out.set(id, at);
+      } catch { /* a torn line */ }
+    }
+  }
+  return out;
 }
 
 /**
