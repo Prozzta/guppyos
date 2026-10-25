@@ -36,7 +36,7 @@ if (fs.existsSync(CLI_BACKUP)) {
   console.log('recovered resources/memory-cli.cjs from an interrupted run');
 }
 if (process.argv.includes('--recover-only')) process.exit(0);
-const TESTS = ['test/claims90-m1-compact.test.cjs', 'test/native-memory.test.cjs', 'test/claims90-m3a-lead.test.cjs'];
+const TESTS = ['test/claims90-m1-compact.test.cjs', 'test/native-memory.test.cjs', 'test/claims90-m3a-lead.test.cjs', 'test/claims90-m3-rank.test.cjs'];
 const FORMAT = 'src/main/nativeMemory/format.ts';
 const WIRING = 'src/main/nativeMemory/mainWiring.ts';
 const SERVICE = 'src/main/nativeMemory/service.ts';
@@ -80,6 +80,13 @@ const MUTANTS = [
   ['m3a-5 a matched term cut in two by the shortened lead is lost (no plain-window fallback)', FORMAT, 'lines = hasTerm(whole, query) && !hasTerm(lead, query) && !hasTerm(from, query)', 'lines = false'],
   ['m3a-6 the lead is dropped on a tight share instead of shortened', FORMAT, '} else if (split && avail - 5 - 29 >= 24) {', '} else if (false) {'],
   ['m3a-7 the wake-up working set drops the key prefix', VIEWS, "claim.key ? claimLine({ ...claim, text: `${claim.key}: ${claim.text}` }, 'current', flags) : claimLine(claim, 'current', flags);", "claimLine(claim, 'current', flags);"],
+  // CLAIMS-90 M3 (ranking): the specificity anchor and the key-aware lift.
+  ['m3-1 the window anchors on the earliest term again (S2 back)', FORMAT, 'if (at < 0 || sp > best || (sp === best && i < at)) { at = i; best = sp; }', 'if (at < 0 || i < at) { at = i; best = sp; }'],
+  ['m3-2 the compact order is currentFirst only (no lift)', FORMAT, 'const ordered = rankHits(query, hits);', 'const ordered = currentFirst(hits);'],
+  ['m3-3 a plain word that is a key segment lifts', FORMAT, "if (key && (key === t || (sp === 3 && key.split('.').includes(t)))) return true;", "if (key && (key === t || key.split('.').includes(t))) return true;"],
+  ['m3-4 a sha / version / card id in the content does not lift', FORMAT, 'return sp === 3 && h.content.toLowerCase().includes(t);', 'return false;'],
+  ['m3-5 a named prior crosses above the live value', FORMAT, '.sort((a, b) => a.g - b.g || a.n - b.n || a.i - b.i)', '.sort((a, b) => a.n - b.n || a.g - b.g || a.i - b.i)'],
+  ['m3-6 a version is not a naming term', FORMAT, " || /^\\d+\\.\\d+(\\.\\d+)+$/.test(t)", ''],
 ];
 
 const prefix = process.argv[2] || '';

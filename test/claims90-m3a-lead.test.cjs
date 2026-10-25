@@ -121,10 +121,11 @@ test('M3a: on a tight share the lead is shortened, never at the cost of the matc
       if (i === 2) v = `${v.slice(0, at)} ${sha} ${v.slice(at)}`;
       return hit(10 + i, `fact · k.${i} · 2026-10-03\n${v}`, meta(`c-000000000${String(i).padStart(3, '0')}`, `k.${i}`));
     });
-    const text = F.formatSearch('f00dcafe', {}, hits);
+    // M3: a 6-hex run is a plain word, so the query names nothing and the hit keeps rank 3 (a full sha would lift it to [1]).
+    const text = F.formatSearch('f00dca', {}, hits);
     assert.ok(text.length <= F.COMPACT_MAX_CHARS && lines(text).every((l) => l.length <= F.COMPACT_LINE_MAX), `at ${at}: caps`);
     const b = block(text, 3);
-    assert.match(b.body.join(' '), /f00dcafe/, `MUTANT: with the sha at char ${at} it is shown in hit [3] (the shortened lead cut it in two: the plain window takes over)`);
+    assert.match(b.body.join(' '), /f00dca/, `MUTANT: with the sha at char ${at} the queried term is shown in hit [3] (the shortened lead cut it in two: the plain window takes over)`);
     assert.ok(b.body[0].startsWith('k.2: ') || b.body[0].startsWith('…'), `at ${at}: the hit opens with its lead or with the window`);
   }
 });

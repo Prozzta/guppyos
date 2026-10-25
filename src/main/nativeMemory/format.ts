@@ -40,9 +40,32 @@ function statusWord(status: string): string {
   return status === 'live' ? 'current' : status === 'superseded' ? 'prior' : status === 'superseded?' ? 'prior?' : status;
 }
 /** Current values first: live claims, then plain chunks, then prior / prior? / retracted claims; rank order within each group. */
+/** The status group of a hit: current claims (0), then markdown (1), then prior / prior? claims (2). */
+const statusGroup = (h: { claim?: SearchHit['claim'] }): number => (!h.claim ? 1 : h.claim.status === 'live' ? 0 : 2);
+
 export function currentFirst<T extends { claim?: SearchHit['claim'] }>(hits: T[]): T[] {
-  const group = (h: T): number => (!h.claim ? 1 : h.claim.status === 'live' ? 0 : 2);
-  return hits.map((h, i) => ({ h, i })).sort((a, b) => group(a.h) - group(b.h) || a.i - b.i).map((x) => x.h);
+  return hits.map((h, i) => ({ h, i })).sort((a, b) => statusGroup(a.h) - statusGroup(b.h) || a.i - b.i).map((x) => x.h);
+}
+
+/**
+ * M3 (CLAIMS-90): the compact order. Current first (currentFirst), and inside each status group a hit the
+ * query NAMES comes before one it does not: a query term that is the hit's whole claim key, a card id that is
+ * a segment of it (`claims-90` names `card.claims-90`), its claim id, or a sha / version / card id (a
+ * level-3 term) found in its content. A plain word never lifts, so a query that names nothing keeps the
+ * order; a group never crosses another, so a prior is never lifted above the current value of its key.
+ */
+export function rankHits<T extends Pick<SearchHit, 'content' | 'claim'>>(query: string, hits: T[]): T[] {
+  const terms = queryTerms(query);
+  const named = (h: T): boolean => terms.some((t) => {
+    const sp = termSpecificity(t);
+    if (h.claim) {
+      const key = (h.claim.key ?? '').toLowerCase();
+      if (key && (key === t || (sp === 3 && key.split('.').includes(t)))) return true;
+      if (h.claim.id.toLowerCase() === t) return true;
+    }
+    return sp === 3 && h.content.toLowerCase().includes(t);
+  });
+  return hits.map((h, i) => ({ h, i, n: named(h) ? 0 : 1, g: statusGroup(h) })).sort((a, b) => a.g - b.g || a.n - b.n || a.i - b.i).map((x) => x.h);
 }
 
 const base = (p: string): string => p.split('/').pop() ?? p;
@@ -88,6 +111,17 @@ function queryTerms(query: string): string[] {
   return [...new Set(oneLine(query).toLowerCase().split(/[^\p{L}\p{N}._\-/@#]+/u).filter((t) => t.length >= 3))];
 }
 
+/**
+ * M3 (CLAIMS-90): how much a query term NAMES one thing. 3 = a sha (7+ hex), a version (1.1.102), a card id
+ * (claims-90) or a claim id (c-…); 2 = a dotted key (release.tip); 1 = a word. The window anchors on the most
+ * specific matched term and the compact order lifts a hit that a level-3 term or its key names.
+ */
+export function termSpecificity(t: string): 1 | 2 | 3 {
+  if (/^[0-9a-f]{7,}$/.test(t) || /^\d+\.\d+(\.\d+)+$/.test(t) || /^[a-z][a-z0-9]*-\d+$/.test(t) || /^c-[0-9a-f]{8,}$/.test(t)) return 3;
+  if (/^[a-z0-9_\-]+(\.[a-z0-9_\-]+)+$/.test(t)) return 2;
+  return 1;
+}
+
 /** Whether any query term occurs in `s` (the same terms windowContent anchors on). */
 export function hasTerm(s: string, query: string): boolean {
   const low = s.toLowerCase();
@@ -107,7 +141,15 @@ export function windowContent(content: string, query: string, max: number, mode:
   if (max < 8) return { text: clip(s, max), clipped: true };
   const low = s.toLowerCase();
   let at = -1;
-  for (const t of queryTerms(query)) { const i = low.indexOf(t); if (i >= 0 && (at < 0 || i < at)) at = i; }
+  // M3 (S2): the anchor is the MOST SPECIFIC matched term (a sha, version or id over a key over a word), the
+  // earliest among equals: a topic word at the head must not pull the window off the value the query names.
+  let best = 0;
+  for (const t of queryTerms(query)) {
+    const i = low.indexOf(t);
+    if (i < 0) continue;
+    const sp = termSpecificity(t);
+    if (at < 0 || sp > best || (sp === best && i < at)) { at = i; best = sp; }
+  }
   // The head holds the term (with some text after it), or no term is in this chunk: the head.
   if (at < 0 || (mode === 'auto' && at + 24 <= max - 1)) return { text: clip(s, max), clipped: true };
   // Else a window that starts a third before the term, on a word boundary, and runs to the budget.
@@ -147,7 +189,7 @@ export function formatSearchCompact(query: string, flags: SearchFlags, hits: Sea
   const filters = [flags.wing && `wing=${flags.wing}`, flags.room && `room=${flags.room}`, flags.since && `since=${flags.since}`, flags.before && `before=${flags.before}`].filter(Boolean).join(' ');
   // `Results for: "q"` is kept verbatim: the drill gates strip that line to compare bodies.
   const header = clip(`Results for: "${oneLine(query)}" — ${hits.length} hit${hits.length === 1 ? '' : 's'}, current first${filters ? ` [${filters}]` : ''} (--full: whole chunks)`, COMPACT_LINE_MAX);
-  const ordered = currentFirst(hits);
+  const ordered = rankHits(query, hits);
   const out: string[] = [header];
   let used = header.length + 1;
   const footer = (n: number): string => `… ${n} more hit${n === 1 ? '' : 's'} not shown (fewer --results, or --full)`;
