@@ -15,6 +15,9 @@ export interface SearchFlags {
   before?: string | null;
   /** CLAIMS-90 M1: `--full` prints the whole-chunk (verbose) text; the default is the compact text. */
   full?: boolean;
+  /** CLAIMS-90 R2 (C90-GET): `--exact` (an exact-text scan, no ranking by meaning) and `--newest` (newest first, [1] the answer candidate). */
+  exact?: boolean;
+  newest?: boolean;
 }
 
 /**
@@ -60,7 +63,8 @@ export function rankHits<T extends Pick<SearchHit, 'content' | 'claim'>>(query: 
     const sp = termSpecificity(t);
     if (h.claim) {
       const key = (h.claim.key ?? '').toLowerCase();
-      if (key && (key === t || (sp === 3 && key.split('.').includes(t)))) return true;
+      // M3 SHOULD 2: a dotted card id (cut-1.1.100) names `card.cut-1.1.100.*` by prefix, not by one segment.
+      if (key && (key === t || (sp === 3 && (key.split('.').includes(t) || key === `card.${t}` || key.startsWith(`card.${t}.`))))) return true;
       if (h.claim.id.toLowerCase() === t) return true;
     }
     return sp === 3 && h.content.toLowerCase().includes(t);
@@ -69,6 +73,61 @@ export function rankHits<T extends Pick<SearchHit, 'content' | 'claim'>>(query: 
 }
 
 const base = (p: string): string => p.split('/').pop() ?? p;
+
+/** CLAIMS-90 R2 (C90-GET, HISTORY-PTR g): the ready `memory get` line a keyed claim hit carries on its first line. */
+export const getPointer = (key: string): string => `get: memory get ${key}`;
+
+/** A hit's time for the newest-first order: its claim's date, else the chunk's filing time, else 0 (unknown: sorts last). */
+export function hitTimeMs(h: Pick<SearchHit, 'claim' | 'filedAt'>): number {
+  const t = h.claim?.at ? Date.parse(h.claim.at) : NaN;
+  if (Number.isFinite(t)) return t;
+  return typeof h.filedAt === 'number' && Number.isFinite(h.filedAt) ? h.filedAt : 0;
+}
+
+/**
+ * CLAIMS-90 R2 (god ae1569): a PASSING reference. `term` occurs in `content` only inside the shapes that name an
+ * OLD value: `replaced <X>`, `was <X>`, `previously <X>`, `<X> ->`, `from <X> to`, `<X> (was) replaced by|with`. A text
+ * that states the term anywhere else (`replaced X with Y` states Y) is not passing. A shape rule over all text,
+ * never a value list.
+ */
+export function passingOnly(content: string, term: string): boolean {
+  const low = content.toLowerCase();
+  const t = term.toLowerCase();
+  let i = low.indexOf(t);
+  if (i < 0) return false;
+  while (i >= 0) {
+    const before = low.slice(Math.max(0, i - 16), i);
+    const after = low.slice(i + t.length, i + t.length + 24);
+    const passing = /(?:^|[^a-z])(?:replaced|was|previously)\s+["'`(]?$/.test(before)
+      || /^["'`)]?\s*(?:->|→|=>)/.test(after)
+      || (/(?:^|[^a-z])from\s+["'`(]?$/.test(before) && /^["'`)]?\s+to\s/.test(after))
+      || /^["'`)]?\s+(?:was\s+|is\s+)?replaced\s+(?:by|with)\s/.test(after);
+    if (!passing) return false;
+    i = low.indexOf(t, i + 1);
+  }
+  return true;
+}
+
+/**
+ * CLAIMS-90 R2 (god ae1569, the Human's "walk back from now, stop at the first fit"): the newest-first order for
+ * an unkeyed question. Only a hit the compact gate lets through takes part (a query term in its text, or a lexical
+ * match: the same test the compact window anchors on), so age alone never lifts a hit that matches nothing; the
+ * rest follow in rank order. Current claims and markdown share one group (a note can be the newest statement),
+ * prior / prior? claims stay last. In a group a hit whose every matched specific term is a PASSING reference
+ * (passingOnly) comes after the hits that state a term; then newest first; ties keep rank order.
+ */
+export function newestOrder<T extends Pick<SearchHit, 'content' | 'claim' | 'filedAt' | 'bm25'>>(query: string, hits: T[]): T[] {
+  const specific = queryTerms(query).filter((t) => termSpecificity(t) === 3);
+  const gated = (h: T): boolean => hasTerm(h.content, query) || h.bm25 !== null;
+  const demoted = (h: T): number => {
+    const matched = specific.filter((t) => h.content.toLowerCase().includes(t));
+    return matched.length && matched.every((t) => passingOnly(h.content, t)) ? 1 : 0;
+  };
+  const group = (h: T): number => (h.claim && h.claim.status !== 'live' ? 1 : 0);
+  return hits.map((h, i) => ({ h, i, gate: gated(h) ? 0 : 1, g: group(h), d: demoted(h), t: hitTimeMs(h) }))
+    .sort((a, b) => a.gate - b.gate || (a.gate ? a.i - b.i : a.g - b.g || a.d - b.d || b.t - a.t || a.i - b.i))
+    .map((x) => x.h);
+}
 
 /**
  * CLAIMS-90 M3a (layout probe, Jim's re-audit): a CURRENT (live) claim hit opens with ONE line
@@ -117,7 +176,9 @@ function queryTerms(query: string): string[] {
  * specific matched term and the compact order lifts a hit that a level-3 term or its key names.
  */
 export function termSpecificity(t: string): 1 | 2 | 3 {
-  if (/^[0-9a-f]{7,}$/.test(t) || /^\d+\.\d+(\.\d+)+$/.test(t) || /^[a-z][a-z0-9]*-\d+$/.test(t) || /^c-[0-9a-f]{8,}$/.test(t)) return 3;
+  // CLAIMS-90 M3 SHOULD 1 + 3 (Jim's audit): a sha has a digit (a 7+ letter word is not one); a card id is a hyphenated
+  // token with a digit segment (claims-90, cl-m4-forward-path-2), not the one-hyphen shape.
+  if ((/^[0-9a-f]{7,}$/.test(t) && /\d/.test(t)) || /^\d+\.\d+(\.\d+)+$/.test(t) || (/^[a-z][a-z0-9]*(-[a-z0-9]+)+$/.test(t) && /(?:^|-)\d+(?:-|$)/.test(t)) || /^c-[0-9a-f]{8,}$/.test(t)) return 3;
   if (/^[a-z0-9_\-]+(\.[a-z0-9_\-]+)+$/.test(t)) return 2;
   return 1;
 }
@@ -188,8 +249,9 @@ const costOf = (meta: string, lines: string[]): number => meta.length + 1 + line
 export function formatSearchCompact(query: string, flags: SearchFlags, hits: SearchHit[]): string {
   const filters = [flags.wing && `wing=${flags.wing}`, flags.room && `room=${flags.room}`, flags.since && `since=${flags.since}`, flags.before && `before=${flags.before}`].filter(Boolean).join(' ');
   // `Results for: "q"` is kept verbatim: the drill gates strip that line to compare bodies.
-  const header = clip(`Results for: "${oneLine(query)}" — ${hits.length} hit${hits.length === 1 ? '' : 's'}, current first${filters ? ` [${filters}]` : ''} (--full: whole chunks)`, COMPACT_LINE_MAX);
-  const ordered = rankHits(query, hits);
+  // CLAIMS-90 R2: `--newest` names its order and marks [1] as the answer candidate; `--exact` names the scan.
+  const header = clip(`Results for: "${oneLine(query)}" — ${hits.length} hit${hits.length === 1 ? '' : 's'}, ${flags.newest ? 'newest first ([1] answer candidate)' : 'current first'}${flags.exact ? ', exact text' : ''}${filters ? ` [${filters}]` : ''} (--full: whole chunks)`, COMPACT_LINE_MAX);
+  const ordered = flags.newest ? newestOrder(query, hits) : rankHits(query, hits);
   const out: string[] = [header];
   let used = header.length + 1;
   const footer = (n: number): string => `… ${n} more hit${n === 1 ? '' : 's'} not shown (fewer --results, or --full)`;
@@ -211,8 +273,9 @@ export function formatSearchCompact(query: string, flags: SearchFlags, hits: Sea
     // tight share the meta line gives up room (down to 24 chars) so that line still shows.
     const split = leadSplit(h);
     const metaMax = Math.max(24, Math.min(COMPACT_LINE_MAX, budget - 16 - (split ? Math.min(split.lead.length + 5, 64) : 0)));
+    // CLAIMS-90 R2 (C90-GET, HISTORY-PTR g): a keyed claim hit's first line ends with the ready `get: memory get <key>`.
     const meta = clip(h.claim
-      ? `[${i + 1}] ${statusWord(h.claim.status)} · ${h.claim.kind} · ${h.claim.key ?? '-'} · ${h.claim.at.slice(0, 10)} · ${h.claim.id} · ${h.wing}/${h.room}`
+      ? `[${i + 1}] ${statusWord(h.claim.status)} · ${h.claim.kind} · ${h.claim.key ?? '-'} · ${h.claim.at.slice(0, 10)} · ${h.claim.id} · ${h.wing}/${h.room}${h.claim.key ? ` · ${getPointer(h.claim.key)}` : ''}`
       : `[${i + 1}] ${h.wing}/${h.room} · ${base(h.source)}`, metaMax);
     const whole = split ? (split.rest ? `${split.lead} ${split.rest}` : split.lead) : oneLine(h.content);
     let lines = wrap(whole, CONTENT_WIDTH);
@@ -284,7 +347,7 @@ export function formatSearchFull(query: string, flags: SearchFlags, hits: Search
   if (flags.since) L.push(`  Since: ${flags.since}`);
   if (flags.before) L.push(`  Before: ${flags.before}`);
   L.push('='.repeat(60), '');
-  hits.forEach((h, i) => {
+  (flags.newest ? newestOrder(query, hits) : hits).forEach((h, i) => {
     L.push(`  [${i + 1}] ${h.wing} / ${h.room}`);
     L.push(`      Source: ${base(h.source)}`);
     // CLAIM-LEDGER (A5): each claim hit shows [status · kind · key · date · id].
@@ -295,6 +358,8 @@ export function formatSearchFull(query: string, flags: SearchFlags, hits: Search
       const maybePrior = h.claim.status === 'superseded?';
       const date = h.claim.at.slice(0, 10);
       L.push(`      Claim:  [${prior ? 'prior' : maybePrior ? 'prior?' : h.claim.status} · ${h.claim.kind} · ${h.claim.key ?? '-'} · ${date} · ${h.claim.id}]`);
+      // CLAIMS-90 R2 (C90-GET): the ready lookup for the key's current value.
+      if (h.claim.key) L.push(`      Get:    memory get ${h.claim.key}`);
       if (prior) L.push(`      Version: prior (dated ${date}); search for the key to see its current value.`);
       if (maybePrior) L.push(`      Version: possibly replaced (unconfirmed, dated ${date}); search for the key to see its current value.`);
     }

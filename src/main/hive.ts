@@ -2681,8 +2681,8 @@ export class HiveManager {
     // on the agent's PATH (Jim M2), so this line never names a command the agent cannot run.
     const memoryLine = semanticMemory
       ? claimWriter
-        ? 'Semantic memory: the whole hive shares searchable memory. Run `memory search "<query>"` for retrieval; `memory wake-up` returns the current claim working set and standing lessons. Record durable facts and decisions with the memory claim-ledger writer; do not write them into memory.md.'
-        : 'Semantic memory: the whole hive shares a searchable memory (the built-in memory engine). To recall relevant past knowledge across the team, run `memory search "<query>"`; run `memory wake-up` at the start of a task for a memory digest. Your notes in memory.md are indexed automatically — write durable facts there.'
+        ? 'Semantic memory: the whole hive shares searchable memory. Run `memory search "<query>"` for retrieval; `memory wake-up` returns the current claim working set and standing lessons; `memory get <key|card-id>` returns the CURRENT value of a key or card (and what it replaced, a card's decisions and mail history) without reading hits. Record durable facts and decisions with the memory claim-ledger writer; do not write them into memory.md.'
+        : 'Semantic memory: the whole hive shares a searchable memory (the built-in memory engine). To recall relevant past knowledge across the team, run `memory search "<query>"`; run `memory wake-up` at the start of a task for a memory digest; `memory get <key|card-id>` returns the CURRENT value of a key or card (and what it replaced, a card's decisions and mail history) without reading hits. Your notes in memory.md are indexed automatically — write durable facts there.'
       : '';
     // Enterprise Knowledge Graph (opt-in). Volatile-free: the bundled-node launcher
     // and the KG CLI are both fixed absolute paths for an install, so baking them
@@ -5962,8 +5962,8 @@ export const MAIL_RULES_NOT_IN_MEMORY = 'Mail handling is defined by the current
 export function protocolLineOne(mode: MailPromptMode, semanticMemory: boolean, memoryMd: string, inboxDir: string, doneDir: string, claimWriter = false): string {
   const memory = semanticMemory
     ? claimWriter
-      ? `1. At the START of a task, run \`memory wake-up\` for your current claim working set and standing lessons, then \`memory search "<query>"\` for anything specific. Record durable facts with the claim-ledger writer; do NOT write new facts into ${memoryMd}.`
-      : `1. At the START of a task, read the \`## How I work (standing lessons)\` section at the top of ${memoryMd} (your method lessons; follow them); then run \`memory wake-up\` for a digest of your memory and \`memory search "<query>"\` for anything specific; do NOT read ${memoryMd} whole (if you must open it, read only its last ~40 lines; older notes are in memory-archive-*.md and \`memory search\` covers them).`
+      ? `1. At the START of a task, run \`memory wake-up\` for your current claim working set and standing lessons, then \`memory search "<query>"\` for anything specific and \`memory get <key|card-id>\` for the current value of a key or card. Record durable facts with the claim-ledger writer; do NOT write new facts into ${memoryMd}.`
+      : `1. At the START of a task, read the \`## How I work (standing lessons)\` section at the top of ${memoryMd} (your method lessons; follow them); then run \`memory wake-up\` for a digest of your memory and \`memory search "<query>"\` for anything specific (\`memory get <key|card-id>\` for the current value of a key or card); do NOT read ${memoryMd} whole (if you must open it, read only its last ~40 lines; older notes are in memory-archive-*.md and \`memory search\` covers them).`
     : `1. At the START of a task, read the \`## How I work (standing lessons)\` section at the top of ${memoryMd} (your method lessons; follow them); then read the LAST ~40 lines of ${memoryMd} (the newest notes; do NOT print the whole file; older notes are in memory-archive-*.md, search them with grep when needed).`;
   const mail = mode === 'inject'
     ? 'Messages for you arrive inside your context as a <hive-mail> block; the harness tracks them. You do not read, list or move inbox files. If a message is marked re-delivered, check whether you already handled it.'
@@ -6009,7 +6009,8 @@ function renderCommandsMd(): string {
 const FLOOR_COMMANDS_MD = [
   '## FLOOR COMMANDS (the hive\'s own, in hive/bin)',
   '',
-  '- `memory search "<query>"` — by meaning across the hive. `--wing <agent>`, `--results N`, `--since ISO` / `--before ISO`, `--kind K`, `--key card.<id>`, `--history`.',
+  '- `memory get <key|card-id>` — the CURRENT value of a key or card as a field (newest live claim, or a newer card mail naming a known value), then competing, superseded (with what replaced them), a card\'s decision list, fields and mail history newest first. `--agent A` (that agent\'s value), `--mail N`, `--before MAILID`, `--no-mail`, `--format json`. Every search hit names its key and this line.',
+  '- `memory search "<query>"` — by meaning across the hive. `--wing <agent>`, `--results N`, `--since ISO` / `--before ISO`, `--kind K`, `--key card.<id>`, `--history`; `--exact` scans text (quoted lines, PROTOCOL.md, board.md, changelog entries); `--newest` orders newest first with [1] the answer candidate.',
   '- `memory wake-up` — your current claims and standing lessons; `memory status` — the engine\'s state.',
   '- `memory note [--kind fact|decision|lesson|preference|procedure|pointer|todo] [--key card.<id>] TEXT` — one durable claim (claim ledger on). When related claims exist the note waits for your choice: `--supersedes ID --reason changed|corrected|moved` (replace), `--separate ID[,ID]` (both stay true) or `--cancel`.',
   '- `memory retract ID... --why TEXT`, `memory reconcile A B --answer keep-both|supersedes|retract`, `memory used ID --op helped|hurt`.',
@@ -6239,9 +6240,16 @@ human rather than retry. Route work to an agent already on the floor first eithe
 ## Semantic memory (the built-in memory engine)
 When semantic memory is on (Settings; the default), the hive shares a searchable
 memory and you have the \`memory\` command, served by the app's memory engine:
+- \`memory get <key|card-id>\` — the CURRENT value of a key or card, as a field: the
+  newest live claim (or a newer card mail that names a known value), then competing
+  values, superseded ones with what replaced them, a card's decision list, its fields
+  and its mail history newest first (\`--mail N\`, \`--before <mail-id>\` to page back,
+  \`--agent <id>\` for one agent's value). Prefer it to reading search hits.
 - \`memory search "<query>"\` — recall relevant past knowledge across the whole
   team by meaning (not just keywords). Add \`--wing <agent-id>\` to scope to one
-  agent, \`--results N\` to widen.
+  agent, \`--results N\` to widen; \`--exact\` for an exact line (quoted rulings,
+  PROTOCOL.md, board.md, changelog entries); \`--newest\` for newest first. Every
+  hit names its key and the \`memory get\` line that answers it.
 - \`memory wake-up\` — a short digest of what matters, good at the start of a task.
 
 Your \`memory.md\` is indexed automatically, so the durable facts you write there

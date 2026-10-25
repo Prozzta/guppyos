@@ -317,6 +317,16 @@ const MEMORY_ROUTE = /^\/memory\/([0-9a-f]{32})$/;
 export const MEMORY_HTTP_BODY_MAX = 64 * 1024;
 
 export type MemoryHttpHandler = (token: string, body: unknown) => Promise<{ status: number; body: unknown }>;
+/** CLAIMS-90 R2 (C90-GET): the same handler keyed by agent id, for the MCP tools (their endpoint URL already carries the agent's token). */
+export type MemoryAgentHandler = (agentId: string, body: unknown) => Promise<{ status: number; body: unknown }>;
+/** CLAIMS-90 R2: the `memory get` / `memory search` tools on the hook MCP server (god f5ba70: MCP is in). */
+export const MEMORY_GET_TOOL = 'memory_get';
+export const MEMORY_SEARCH_TOOL = 'memory_search';
+/** The argument names each memory tool forwards (the service validates values; an unknown name is dropped). */
+export const MEMORY_TOOL_ARGS: Record<string, readonly string[]> = {
+  [MEMORY_GET_TOOL]: ['term', 'agent', 'mail', 'before', 'noMail'],
+  [MEMORY_SEARCH_TOOL]: ['query', 'wing', 'room', 'results', 'since', 'before', 'history', 'all', 'kind', 'key', 'full', 'exact', 'newest']
+};
 
 /** The in-terminal context gauge the status line prints (the same text the command shim
  *  printed): "ctx 45k/200k (22%)", or "" without a usable context_window. */
@@ -634,6 +644,10 @@ export class HookServer {
   /** NATIVE-MEMORY: set by main when the engine is past `legacy`; null = the route is 404. */
   private memoryHandler: MemoryHttpHandler | null = null;
 
+  private memoryAgentHandler: MemoryAgentHandler | null = null;
+  setMemoryAgentHandler(h: MemoryAgentHandler | null): void {
+    this.memoryAgentHandler = h;
+  }
   setMemoryHandler(h: MemoryHttpHandler | null): void {
     this.memoryHandler = h;
   }
@@ -1012,9 +1026,19 @@ export class HookServer {
         const pv = typeof m.params?.protocolVersion === 'string' ? m.params.protocolVersion : '2025-06-18';
         ok({ protocolVersion: pv, capabilities: { tools: { listChanged: false } }, serverInfo: { name: MCP_SERVER_NAME, version: '1' } });
       } else if (m.method === 'tools/list') {
-        ok({ tools: [{ name: HIVE_HOOK_TOOL, description: 'Internal Munder hook sink. Not for model use: calls are rejected.', inputSchema: { type: 'object', additionalProperties: true } }] });
+        // CLAIMS-90 R2 (C90-GET): the two memory tools answer exactly as the `memory` command does (same handler).
+        ok({ tools: [
+          { name: HIVE_HOOK_TOOL, description: 'Internal Munder hook sink. Not for model use: calls are rejected.', inputSchema: { type: 'object', additionalProperties: true } },
+          { name: MEMORY_GET_TOOL, description: 'memory get <key|card-id>: the CURRENT value of a key or card (newest live claim, or a newer card mail naming a known value), then competing, superseded, a card\'s decision list, fields and mail history newest first. Same output as the `memory get` command.',
+            inputSchema: { type: 'object', required: ['term'], additionalProperties: false, properties: { term: { type: 'string', description: 'a key (card.<id>.donesha, release.tip) or a card id' }, agent: { type: 'string', description: 'pick that agent\'s value (--agent)' }, mail: { type: 'integer', minimum: 0, maximum: 50, description: 'mails to list (default 5)' }, before: { type: 'string', description: 'page mails back from this mail id' }, noMail: { type: 'boolean', description: 'claims only: ignore the card mail index' } } } },
+          { name: MEMORY_SEARCH_TOOL, description: 'memory search <query>: hits across the hive\'s shared memory, current values first; exact=true scans text (quoted lines, PROTOCOL.md, board.md, changelog); newest=true orders newest first with [1] the answer candidate. Same output as the `memory search` command.',
+            inputSchema: { type: 'object', required: ['query'], additionalProperties: false, properties: { query: { type: 'string' }, wing: { type: 'string' }, room: { type: 'string' }, results: { type: 'integer', minimum: 1, maximum: 100 }, since: { type: 'string' }, before: { type: 'string' }, history: { type: 'boolean' }, all: { type: 'boolean' }, kind: { type: 'string' }, key: { type: 'string' }, full: { type: 'boolean' }, exact: { type: 'boolean' }, newest: { type: 'boolean' } } } }
+        ] });
       } else if (m.method === 'ping') {
         ok({});
+      } else if (m.method === 'tools/call' && (m.params?.name === MEMORY_GET_TOOL || m.params?.name === MEMORY_SEARCH_TOOL)) {
+        const r = await this.onMcpMemory(agentId, m.params.name, m.params.arguments);
+        if ('error' in r) err(r.error.code, r.error.message); else ok(r.result);
       } else if (m.method === 'tools/call') {
         const r = await this.onMcpToolCall(agentId, token, m.params ?? {});
         if ('claims' in r && r.claims) claims.push(...r.claims);
@@ -1026,6 +1050,23 @@ export class HookServer {
     }
     if (!out.length) { send(202, null); return; }
     send(200, batch ? out : out[0]);
+  }
+
+  /** CLAIMS-90 R2 (C90-GET): a memory tool call. The endpoint URL identified the agent (its token), so the
+   *  request is the same `{cmd, args}` the CLI posts, through the same handler: `content[0].text` is the text the
+   *  command prints (byte-identical), `structuredContent` the whole reply ({exit, text, json, error}). */
+  private async onMcpMemory(agentId: string, name: string, args: unknown): Promise<{ result: unknown } | { error: { code: number; message: string } }> {
+    const h = this.memoryAgentHandler;
+    if (!h) return { error: { code: -32001, message: 'memory is not available' } };
+    const given = (args && typeof args === 'object' ? args : {}) as Record<string, unknown>;
+    const picked: Record<string, unknown> = {};
+    for (const k of MEMORY_TOOL_ARGS[name] ?? []) if (given[k] !== undefined) picked[k] = given[k];
+    const cmd = name === MEMORY_GET_TOOL ? 'get' : 'search';
+    let r: { status: number; body: unknown };
+    try { r = await h(agentId, { cmd, args: picked }); } catch { return { error: { code: -32000, message: 'memory handler failed' } }; }
+    const body = (r.body && typeof r.body === 'object' ? r.body : {}) as { exit?: number; text?: string; error?: string };
+    const text = typeof body.text === 'string' ? body.text : typeof body.error === 'string' ? `memory: ${body.error}` : '';
+    return { result: { content: [{ type: 'text', text }], structuredContent: r.body, isError: r.status !== 200 || (body.exit ?? 0) !== 0 } };
   }
 
   /** One Codex tool hook. The static input must carry this agent's token (`k`), so a call the

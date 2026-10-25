@@ -80,6 +80,8 @@ export interface SearchHit {
   score: number;
   /** A claim chunk's claim (null for markdown chunks). */
   claim?: { id: string; status: string; kind: string; key: string | null; at: string } | null;
+  /** CLAIMS-90 R2: when the chunk was filed (epoch ms); the newest-first order falls back to it for markdown. */
+  filedAt?: number;
 }
 
 /**
@@ -357,9 +359,9 @@ export class NativeMemoryStore {
       const fusedAll = rrf(lex.map((r) => r.id), vec.map((r) => r.id));
       const bm = new Map(lex.map((r) => [r.id, r.s]));
       const dist = new Map(vec.map((r) => [r.id, r.d]));
-      const row = this.db.prepare(`SELECT c.chunk_id, c.wing, c.room, c.source_id, c.content, c.claim_id, cs.status, cl.kind, cl.ckey, cl.at
+      const row = this.db.prepare(`SELECT c.chunk_id, c.wing, c.room, c.source_id, c.content, c.filed_at, c.claim_id, cs.status, cl.kind, cl.ckey, cl.at
         FROM chunks c ${joins} WHERE c.chunk_id = ?`);
-      type Row = { chunk_id: number; wing: string; room: string; source_id: string; content: string; claim_id: string | null; status: string | null; kind: string | null; ckey: string | null; at: string | null };
+      type Row = { chunk_id: number; wing: string; room: string; source_id: string; content: string; filed_at: number; claim_id: string | null; status: string | null; kind: string | null; ckey: string | null; at: string | null };
       const allowed = new Set<string>(MODE_VIS[mode]);
       // Fail closed in BOTH branches (Jim W3-2): a claim chunk is returned only when its status row
       // exists and its visibility is in the mode (the KNN fast path filters on the vec0 column, so
@@ -380,11 +382,43 @@ export class NativeMemoryStore {
           cosineSim: d === undefined ? null : 1 - d,
           bm25: b === undefined ? null : -b,
           score: f.score,
-          claim: r.claim_id ? { id: r.claim_id, status: r.status ?? 'unknown', kind: r.kind ?? '', key: r.ckey, at: r.at ?? '' } : null
+          claim: r.claim_id ? { id: r.claim_id, status: r.status ?? 'unknown', kind: r.kind ?? '', key: r.ckey, at: r.at ?? '' } : null,
+          filedAt: r.filed_at
         };
       });
     });
     return read.deferred();
+  }
+
+  /**
+   * CLAIMS-90 R2 (C90-GET): `search --exact`. A case-insensitive substring scan of the chunk text (claims and
+   * markdown alike) with the same wing/room/date/kind/key and visibility filters as search(), no embedding, so it
+   * answers with the model unloaded. Live claims first, then newest first (a claim's date, else the filing time).
+   */
+  searchExact(o: Omit<SearchOptions, 'queryVec'>): SearchHit[] {
+    const k = Math.max(1, Math.min(100, Math.floor(o.k)));
+    const needle = o.query.toLowerCase();
+    if (!needle) return [];
+    const mode: SearchMode = o.mode === 'history' || o.mode === 'all' ? o.mode : 'live';
+    const visFilter = mode === 'all' ? '1' : `(c.claim_id IS NULL OR cs.vis IN (${visList(mode)}))`;
+    const filt = ['instr(lower(c.content), @needle) > 0', '(@wing IS NULL OR c.wing = @wing)', '(@room IS NULL OR c.room = @room)', '(@since IS NULL OR c.filed_at >= @since)', '(@before IS NULL OR c.filed_at < @before)',
+      '(@kind IS NULL OR cl.kind = @kind)', '(@key IS NULL OR cl.ckey = @key)', visFilter].join(' AND ');
+    const joins = 'LEFT JOIN claim_status cs ON cs.claim_id = c.claim_id LEFT JOIN claims cl ON cl.claim_id = c.claim_id AND cl.part = c.claim_part';
+    const params = { needle, wing: o.wing ?? null, room: o.room ?? null, since: o.sinceMs ?? null, before: o.beforeMs ?? null, kind: o.kind ?? null, key: o.key ?? null, n: k };
+    type Row = { chunk_id: number; wing: string; room: string; source_id: string; content: string; filed_at: number; claim_id: string | null; status: string | null; kind: string | null; ckey: string | null; at: string | null };
+    const allowed = new Set<string>(MODE_VIS[mode]);
+    const read = this.db.transaction(() => this.db.prepare(`SELECT c.chunk_id, c.wing, c.room, c.source_id, c.content, c.filed_at, c.claim_id, cs.status, cl.kind, cl.ckey, cl.at
+        FROM chunks c ${joins} WHERE ${filt}
+        ORDER BY CASE WHEN c.claim_id IS NOT NULL AND cs.status = 'live' THEN 0 ELSE 1 END,
+          COALESCE(cl.at, strftime('%Y-%m-%dT%H:%M:%fZ', c.filed_at / 1000.0, 'unixepoch')) DESC, c.filed_at DESC, c.chunk_id DESC LIMIT @n`).all(params) as Row[]);
+    // Fail closed as search() does: a claim chunk without a status row in the mode is never returned.
+    return (read.deferred() as Row[])
+      .filter((r) => !(r.claim_id && mode !== 'all' && (r.status === null || !allowed.has(visOf(r.status)))))
+      .map((r) => ({
+        chunkId: r.chunk_id, wing: r.wing, room: r.room, source: r.source_id, content: r.content, cosineSim: null, bm25: null, score: 0,
+        claim: r.claim_id ? { id: r.claim_id, status: r.status ?? 'unknown', kind: r.kind ?? '', key: r.ckey, at: r.at ?? '' } : null,
+        filedAt: r.filed_at
+      }));
   }
 
   // — CLAIM-LEDGER (W3) —

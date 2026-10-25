@@ -50,7 +50,8 @@ test('M1 search (default): current first, then plain chunks, then prior / prior?
   assert.match(L[0], /^Results for: "synthetic port" — 5 hits, current first \[wing=wing-x\] \(--full: whole chunks\)$/);
   const metas = L.filter((l) => /^\[\d\] /.test(l));
   assert.deepEqual(metas.map((l) => l.split(' · ')[0]), ['[1] current', '[2] current', '[3] wing-x/general', '[4] prior', '[5] prior?'], 'MUTANT: priors never come before current values');
-  assert.match(metas[0], /^\[1\] current · fact · synthetic\.port · 2026-10-10 · c-synth00000003 · wing-x\/memory$/);
+  // CLAIMS-90 R2 (C90-GET): the first line of a keyed claim hit ends with the ready `get: memory get <key>` line.
+  assert.match(metas[0], /^\[1\] current · fact · synthetic\.port · 2026-10-10 · c-synth00000003 · wing-x\/memory · get: memory get synthetic\.port$/);
   assert.match(metas[2], /^\[3\] wing-x\/general · NOTES\.md$/);
   assert.match(L[L.indexOf(metas[0]) + 1], /^ {4}port 2222 \(current\) synthetic-c-w0/);
   assert.match(L[L.indexOf(metas[2]) + 1], /^ {4}## 2026-09-20 - synthetic note about ports/, 'a chunk\'s lines are joined into one');
@@ -81,7 +82,7 @@ test('M1 search --full: the verbose whole-chunk text, unchanged (the GOLDEN layo
   const hits = [claim(1, 'superseded?', 'synthetic.host', '2026-09-15', 'line one\nline two'), chunk(2, 'plain')];
   const full = F.formatSearch('q', { full: true, wing: 'wing-x' }, hits);
   assert.equal(full, F.formatSearchFull('q', { full: true, wing: 'wing-x' }, hits));
-  assert.match(full, /^\n={60}\n {2}Results for: "q"\n {2}Wing: wing-x\n={60}\n\n {2}\[1\] wing-x \/ memory\n {6}Source: claim\n {6}Claim: {2}\[prior\? · fact · synthetic\.host · 2026-09-15 · c-synth00000001\]\n {6}Version: possibly replaced/);
+  assert.match(full, /^\n={60}\n {2}Results for: "q"\n {2}Wing: wing-x\n={60}\n\n {2}\[1\] wing-x \/ memory\n {6}Source: claim\n {6}Claim: {2}\[prior\? · fact · synthetic\.host · 2026-09-15 · c-synth00000001\]\n {6}Get:    memory get synthetic\.host\n {6}Version: possibly replaced/);
   assert.match(full, /\n {6}line one\n {6}line two\n/);
   assert.notEqual(F.formatSearch('q', {}, hits), full, 'MUTANT: the default is the compact text, not the verbose one');
 });
@@ -186,7 +187,7 @@ test('M1 engine: wakeUp(wing) is compact, wakeUp(wing, true) the section-4 frame
 
 test('M1 request validation: `full` is a boolean on search and wake-up (false unless exactly true); every other search argument is unchanged', () => {
   const s = validateRequest({ cmd: 'search', args: { query: 'x', results: 7, history: true, full: true } }, 'a1');
-  assert.deepEqual(s, { op: 'search', args: { query: 'x', wing: null, room: null, results: 7, since: null, before: null, caller: 'a1', mode: 'history', kind: null, key: null, full: true } });
+  assert.deepEqual(s, { op: 'search', args: { query: 'x', wing: null, room: null, results: 7, since: null, before: null, caller: 'a1', mode: 'history', kind: null, key: null, full: true, exact: false, newest: false } });
   assert.equal(validateRequest({ cmd: 'search', args: { query: 'x', full: 'yes' } }, 'a1').args.full, false, 'MUTANT: only the boolean true');
   assert.equal(validateRequest({ cmd: 'search', args: { query: 'x' } }, 'a1').args.full, false);
   assert.deepEqual(validateRequest({ cmd: 'wake-up', args: { full: true } }, 'a1'), { op: 'wake-up', args: { wing: 'a1', full: true } });

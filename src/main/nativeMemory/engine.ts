@@ -16,7 +16,7 @@ import { chunkMarkdown, CHUNKER_VERSION, type Chunk } from './chunker';
 import { discoverSources, ALLOW_LIST_VERSION, SOURCES_CONFIG_FILE, sha256, type Discovery, type SourceEntry } from './sources';
 import { CLAIM_EMBED_VERSION, claimEmbedText, claimEmbedVersionKey, compactionDecision, NativeMemoryStore, type ClaimPart, type SearchHit } from './store';
 import type { LedgerLevel, SearchMode } from '../../shared/claims';
-import { formatSearch, formatStatus, formatWakeUp, WAKE_MAX_CHARS } from './format';
+import { formatSearch, formatStatus, formatWakeUp, newestOrder, rankHits, WAKE_MAX_CHARS } from './format';
 import { pinnedSection, pinnedStatus, type PinnedStatus } from '../memoryRollover';
 
 export const PRIORITY = { search: 0, wake: 1, status: 1, ingest: 2, backfill: 3, compact: 4 } as const;
@@ -103,6 +103,9 @@ export interface SearchArgs { query: string; wing?: string | null; room?: string
   mode?: SearchMode; kind?: string | null; key?: string | null;
   /** CLAIMS-90 M1: the verbose (whole-chunk) text; the default is the compact text. */
   full?: boolean;
+  /** CLAIMS-90 R2 (C90-GET): `--exact` scans text (chunks + PROTOCOL.md + board.md), no embedding; `--newest` orders newest first. */
+  exact?: boolean;
+  newest?: boolean;
   /** The asking agent's own wing (from its MEMORY_TOKEN): never a filter, only a backfill hint. */
   caller?: string | null }
 export interface EngineReply { exit: number; text: string; json?: unknown }
@@ -247,9 +250,28 @@ export class MemoryEngine {
       this.stats.searches++;
       const sinceMs = a.since ? Date.parse(a.since) : null;
       const beforeMs = a.before ? Date.parse(a.before) : null;
+      const k = a.results ?? 5;
+      // CLAIMS-90 R2 (C90-GET): the JSON keeps its array shape; under --newest every row also carries both ranks
+      // (rankNewest = the printed order, rankCurrent = the compact order) so one run scores both.
+      const json = (hits: SearchHit[]): unknown[] => {
+        if (!a.newest) return hits.map(redactHit);
+        const cur = rankHits(a.query, hits);
+        return newestOrder(a.query, hits).map((h, i) => ({ ...redactHit(h), rankNewest: i + 1, rankCurrent: cur.indexOf(h) + 1 }));
+      };
+      if (a.exact) {
+        // Exact text: a substring scan of the chunks (no embedding, so it answers with the model unloaded), then
+        // the hive's PROTOCOL.md and board.md read as text from the served root (board.md is outside the source
+        // allow-list, so neither is relied on to be indexed). File lines belong to no wing: a wing/room/kind/key
+        // filter leaves them out.
+        const needle = exactNeedle(a.query);
+        const chunks = needle ? this.d.store.searchExact({ query: needle, wing: a.wing ?? null, room: a.room ?? null, sinceMs, beforeMs, k, mode: a.mode ?? 'live', kind: a.kind ?? null, key: a.key ?? null }) : [];
+        const files = needle && !a.wing && !a.room && !a.kind && !a.key ? exactFileHits(this.d.hiveRoot, needle, k) : [];
+        const all = [...chunks, ...files];
+        return { exit: 0, text: formatSearch(a.query, a, all), json: json(all) };
+      }
       const [qv] = await this.embed([a.query]);
-      const hits = this.d.store.search({ query: a.query, queryVec: qv, wing: a.wing ?? null, room: a.room ?? null, sinceMs, beforeMs, k: a.results ?? 5, mode: a.mode ?? 'live', kind: a.kind ?? null, key: a.key ?? null });
-      return { exit: 0, text: formatSearch(a.query, a, hits), json: hits.map(redactHit) };
+      const hits = this.d.store.search({ query: a.query, queryVec: qv, wing: a.wing ?? null, room: a.room ?? null, sinceMs, beforeMs, k, mode: a.mode ?? 'live', kind: a.kind ?? null, key: a.key ?? null });
+      return { exit: 0, text: formatSearch(a.query, a, hits), json: json(hits) };
     }, o);
   }
 
@@ -586,6 +608,37 @@ function defaultWatch(dir: string, onChange: (file: string) => void): FSWatcher 
 }
 
 /** Shadow diagnostics and JSON output carry no content: ids, sources, ranks, scores. */
+/** CLAIMS-90 R2: the exact-text needle: trimmed, matching outer quotes dropped, whitespace folded, lower-cased. */
+export function exactNeedle(q: string): string {
+  let s = q.trim().replace(/\s+/g, ' ');
+  const m = /^(["'`])(.*)\1$/.exec(s);
+  if (m) s = m[2].trim();
+  return s.toLowerCase();
+}
+
+/** The hive files `--exact` reads as text from the served root (god 8218c8: PROTOCOL.md and board.md, the D5 rows). */
+export const EXACT_TEXT_FILES = ['PROTOCOL.md', 'board.md'] as const;
+
+/**
+ * CLAIMS-90 R2: the lines of PROTOCOL.md and board.md that hold the needle, as hits whose source is `<file>:<line>`
+ * (wing `hive`, room `docs`, no claim), at most `k` per file, in file order. A missing file is no hit.
+ */
+export function exactFileHits(hiveRoot: string, needle: string, k: number): SearchHit[] {
+  const out: SearchHit[] = [];
+  for (const file of EXACT_TEXT_FILES) {
+    let text: string; let filedAt = 0;
+    try { const p = join(hiveRoot, file); text = readFileSync(p, 'utf8'); filedAt = Math.floor(statSync(p).mtimeMs); } catch { continue; }
+    const lines = text.split(/\r?\n/);
+    let n = 0;
+    for (let i = 0; i < lines.length && n < k; i++) {
+      if (!lines[i].toLowerCase().includes(needle)) continue;
+      n++;
+      out.push({ chunkId: -(out.length + 1), wing: 'hive', room: 'docs', source: `${file}:${i + 1}`, content: lines[i].trim(), cosineSim: null, bm25: null, score: 0, claim: null, filedAt });
+    }
+  }
+  return out;
+}
+
 export function redactHit(h: SearchHit): Record<string, unknown> {
   return { chunkId: h.chunkId, wing: h.wing, room: h.room, source: h.source, cosineSim: h.cosineSim, bm25: h.bm25,
     ...(h.claim ? { claimId: h.claim.id, status: h.claim.status } : {}) };

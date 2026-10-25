@@ -161,7 +161,7 @@ test('FTS query + RRF + compaction policy (pure)', () => {
 
 test('VALIDATION (section 6): ranges, ISO dates, wing names; wake-up without --wing is the CALLER\'s', () => {
   // NATIVE-WAKEUP (b): `caller` is the token's wing as a backfill hint; `wing` (the filter) stays null.
-  assert.deepEqual(validateRequest({ cmd: 'search', args: { query: 'x', results: 3 } }, 'a1'), { op: 'search', args: { query: 'x', wing: null, room: null, results: 3, since: null, before: null, caller: 'a1', mode: 'live', kind: null, key: null, full: false } });
+  assert.deepEqual(validateRequest({ cmd: 'search', args: { query: 'x', results: 3 } }, 'a1'), { op: 'search', args: { query: 'x', wing: null, room: null, results: 3, since: null, before: null, caller: 'a1', mode: 'live', kind: null, key: null, full: false, exact: false, newest: false } });
   for (const bad of [{ query: '' }, { query: 'x', results: 0 }, { query: 'x', results: 101 }, { query: 'x', results: 2.5 }, { query: 'x', wing: 'a b' }, { query: 'x', since: 'yesterday' }, { query: 'x'.repeat(2001) }]) {
     assert.equal(validateRequest({ cmd: 'search', args: bad }, 'a1').exit, EXIT.usage, JSON.stringify(bad));
   }
@@ -339,7 +339,7 @@ test('WIRING: query() serves the Memory panel / Command Center as caller `human`
   const seen = [];
   w.client.request = async (op, args) => { seen.push({ op, args }); return { ok: true, exit: 0, text: 'T\n' }; };
   assert.equal((await w.query('search', { query: 'log rotation', wing: 'jim' })).text, 'T\n');
-  assert.deepEqual(seen[0], { op: 'search', args: { query: 'log rotation', wing: 'jim', room: null, results: 5, since: null, before: null, caller: 'human', mode: 'live', kind: null, key: null, full: false } });
+  assert.deepEqual(seen[0], { op: 'search', args: { query: 'log rotation', wing: 'jim', room: null, results: 5, since: null, before: null, caller: 'human', mode: 'live', kind: null, key: null, full: false, exact: false, newest: false } });
   assert.equal((await w.query('search', { query: '' })).exit, EXIT.usage);
   await w.query('wake-up', { wing: 'andy' });
   assert.deepEqual(seen[1], { op: 'wake-up', args: { wing: 'andy', full: false } });
@@ -446,10 +446,10 @@ test('CLI: posts to the endpoint and prints its text with its exit; never spawns
   assert.equal((await capture((io) => cli.main(['status'], env({ MEMORY_TOKEN: 'cd'.repeat(16) }), io))).code, 5, '403 -> exit 5');
   const mine = await capture((io) => cli.main(['mine', 'x'], env(), io));
   assert.equal(mine.code, 2);
-  assert.match(mine.err, /^memory: unknown command "mine"; use search, wake-up or status/);
+  assert.match(mine.err, /^memory: unknown command "mine"; use get, search, wake-up or status/);
   const help = await capture((io) => cli.main(['--help'], env(), io));
   assert.equal(help.code, 0);
-  assert.match(help.out, /^usage: memory \{search QUERY/);
+  assert.match(help.out, /^usage: memory \{get KEY\|CARD-ID [^\n]*\| search QUERY/);
   assert.equal(calls.length, 0, 'the command never spawns a process');
   assert.doesNotMatch(fs.readFileSync(CLI, 'utf8'), /child_process|spawnSync|memory-engine\.json|palace/i);
 });

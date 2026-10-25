@@ -285,7 +285,9 @@ export function validateRequest(body: MemoryRequest, callerWing: string): { op: 
     if (key !== null && (typeof key !== 'string' || !/^[a-z0-9][a-z0-9_.-]{0,119}$/.test(key))) return { exit: EXIT.usage, error: 'bad --key' };
     // `caller` (the token's wing) is never a filter: only NATIVE-WAKEUP (b)'s backfill hint.
     // CLAIMS-90 M1: `--full` = the verbose (whole-chunk) text; the default is the compact text.
-    return { op: 'search', args: { query: q, wing, room, results: n, since: a.since ?? null, before: a.before ?? null, caller: callerWing, mode, kind, key, full: a.full === true } };
+    // CLAIMS-90 R2 (C90-GET): `--exact` (exact text, no embedding) and `--newest` (newest first). Flags only.
+    for (const k of ['exact', 'newest'] as const) if (a[k] !== undefined && a[k] !== null && typeof a[k] !== 'boolean') return { exit: EXIT.usage, error: `--${k} takes no value` };
+    return { op: 'search', args: { query: q, wing, room, results: n, since: a.since ?? null, before: a.before ?? null, caller: callerWing, mode, kind, key, full: a.full === true, exact: a.exact === true, newest: a.newest === true } };
   }
   if (cmd === 'wake-up') {
     const wing = optWing(a.wing);

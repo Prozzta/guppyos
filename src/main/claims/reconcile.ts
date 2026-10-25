@@ -183,6 +183,10 @@ export class ReconcileQueue {
     this.save();
     return { turn, items: items.map((i) => ({ ...i })) };
   }
+  /** CLAIMS-90 R2 (C90-GET): every queued item of an agent, leased or not, as copies; reads nothing but memory. */
+  allItems(agentId: string): ReconcileItem[] {
+    return (this.state.agents[agentId]?.items ?? []).map((item) => ({ ...item }));
+  }
   /** Read queued candidates without leasing, changing the sequence, or writing the queue. */
   peek(agentId: string, limit = 3): ReconcileItem[] {
     return (this.state.agents[agentId]?.items ?? []).filter((item) => !item.leaseTurn)

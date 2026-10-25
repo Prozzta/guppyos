@@ -25,7 +25,7 @@ import { reconcileApiForHive as createReconcileApiForHive, refreshReconcileQueue
 import { WordPieceTokenizer, wordPieceConfigFromTokenizerJson } from './nativeMemory/wordpiece';
 import { readSourcesConfig } from './nativeMemory/sources';
 import { DEFAULT_KEY_REGISTRY, loadRegistry } from './claims/registry';
-import { CLAIM_LEDGER_CLAMP_ROW, CLAIMS_ALERT_KEY_MISSING, effectiveLevel, IMPLEMENTED_LEVEL, type DeriveFn, type LedgerLevel, type ReconcileItem, type UsageRec } from '../shared/claims';
+import { CLAIM_LEDGER_CLAMP_ROW, CLAIMS_ALERT_KEY_MISSING, effectiveLevel, IMPLEMENTED_LEVEL, type DeriveFn, type LedgerLevel, type LedgerRec, type ReconcileItem, type UsageRec } from '../shared/claims';
 import { CodexVersionLog, codexNoDaemonGate, readCodexVersion } from './codexCli';
 import { codexLayerOptInKey, type CodexLayerNotice } from './codexProjectLayers';
 import { StartupTiming } from './startupTiming';
@@ -104,6 +104,7 @@ import { FloorDigest, FLOOR_DIGEST_DEFAULTS, FLOOR_DIGEST_FILE, readFlaggedForHu
 import { HiveManager, archivedForMail, type AgentMeta, type ArchiveReason, type HiveMessage, type HiveTask } from './hive';
 import { applyLedgerOp, perAgentQueue, type LedgerDeps } from './ledger';
 import { cardKeyRefusal, handleClaimVerb } from './claims/endpoint';
+import { formatGet, resolveGet } from './claims/get';
 import { actionableBacklog, coordinatorPendingIds, fleetMailFields, ledgerInboxMessages, mailCoordinationAt } from './mailReaders';
 import { HookServer } from './hooks';
 import { TermControl } from './termControl';
@@ -1742,7 +1743,25 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
         .sort((a, b) => Date.parse(b.wt) - Date.parse(a.wt) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)).map((c) => c.id);
     },
     // CL-M4-FORWARD-PATH: counts and flags only (detail), never note or reason text.
-    onNoteChoice: (agentId, choice, ids, detail) => hive.appendLog({ kind: 'claims-note-choice', agentId, choice, targets: ids.slice(0, 10), ...(detail ?? {}) })
+    onNoteChoice: (agentId, choice, ids, detail) => hive.appendLog({ kind: 'claims-note-choice', agentId, choice, targets: ids.slice(0, 10), ...(detail ?? {}) }),
+    // CLAIMS-90 R2 (C90-GET): read-only over every agent's VERIFIED ledger prefix (the same path as
+    // claimsLedgerView), the registry, the reconcile queue's alias pairs, tasks.json and the per-card
+    // mail index. The text is formatGet's on every path (CLI, MCP, hook-served).
+    get: (_agentId, args) => {
+      const ep = claimsEndpoint() as ClaimsEndpointDeps;
+      const ledgers: Record<string, LedgerRec[]> = {};
+      for (const a of claimLedgerAgents()) { const prefix = verifiedPrefix(ep.store.readLedger(a)); if (prefix) ledgers[a] = prefix.records; }
+      let reg; try { reg = loadRegistry(root); } catch { reg = DEFAULT_KEY_REGISTRY; }
+      const queue = reconcileQueueForHive(root);
+      const reconcileItems = Object.keys(ledgers).flatMap((a) => queue.allItems(a));
+      const tasks = ((hive.allTasks() as { tasks?: Array<Record<string, unknown>> }).tasks ?? []);
+      const mailRows = (card: string): string[] | null => {
+        if (!/^[a-z0-9][a-z0-9._-]{0,119}$/.test(card)) return null;
+        try { return readFileSync(join(root, 'state', 'mail-cards', `${card}.jsonl`), 'utf8').split('\n'); } catch { return null; }
+      };
+      const r = resolveGet(args.term, { agent: args.agent ?? null, mail: args.mail, before: args.before ?? null, noMail: args.noMail === true }, { ledgers, registry: reg, reconcileItems, tasks, mailRows, ruleConfig: { r4: false } });
+      return { text: formatGet(r, { agent: args.agent ?? null }), json: r };
+    },
   };
 }
 /** CLAIMS-HEAD-ANCHOR (Jim A-2): read every anchored agent of this hive; a break alerts once
@@ -1887,6 +1906,8 @@ function claimNoteCandidates(agentId: string, text: string, o: { key?: string } 
   }), agentId, text, new Date(), o.key !== undefined ? { key: o.key } : {});
 }
 hookServer.setMemoryHandler(async (token, body) => { await claimsImportReady(); return nativeMemory.handle(token, body); });
+// CLAIMS-90 R2 (C90-GET): the hook MCP server's memory_get / memory_search tools, the same handler by agent id.
+hookServer.setMemoryAgentHandler(async (agentId, body) => { await claimsImportReady(); return nativeMemory.handleAs(agentId, body); });
 // CLAIM-LEDGER W4: rebuild from the verified ledger at SessionStart (every source), `memory
 // wake-up` and each Codex spawn (claims/delivery.ts). The live view is never persisted; only its
 // receipt is, once per distinct text, on a rotating file.

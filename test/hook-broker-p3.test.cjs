@@ -121,7 +121,8 @@ test('MCP handshake: initialize, notifications, tools/list (one internal tool), 
   assert.equal(init.body.result.protocolVersion, '2025-06-18');
   assert.equal((await rpc(ep.url, { jsonrpc: '2.0', method: 'notifications/initialized' })).status, 202);
   const list = await rpc(ep.url, { jsonrpc: '2.0', id: 2, method: 'tools/list' });
-  assert.deepEqual(list.body.result.tools.map((x) => x.name), ['hive_hook']);
+  // CLAIMS-90 R2 (C90-GET): the hook sink plus the two memory tools (memory_get, memory_search), nothing else.
+  assert.deepEqual(list.body.result.tools.map((x) => x.name), ['hive_hook', 'memory_get', 'memory_search']);
   assert.deepEqual((await rpc(ep.url, { jsonrpc: '2.0', id: 3, method: 'ping' })).body.result, {});
 });
 

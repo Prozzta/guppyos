@@ -1,0 +1,259 @@
+'use strict';
+/**
+ * CLAIMS-90 R2 (C90-GET): `memory get <key|card>` resolves one term to one key set and returns the CURRENT value as
+ * a field (Jim ff7793 design, df789a + ac6f85 changes, god 7c1acc mail history, Creed 5f3e80 key contract):
+ *  - resolution: exact key, then card.<term>, then the registry alias chain, reconcile key-alias pairs and key-alias
+ *    events (union-find); a claim id resolves to its key; a card key covers its derived sub-keys;
+ *  - current = newest live claim (--agent: that agent's claim, or the derived row naming its done mail, first);
+ *    competing = the other live values; superseded = the inverse of supersedes with a <=120-char excerpt;
+ *  - a card's decision list is complete and newest first, never folded into competing;
+ *  - the mail rule (Jim 784b65 s4 d): a NEWER card mail naming a known value (or, for donesha/lastsha/the bare card,
+ *    a commit sha in that agent's done mail) is current, with its source; Human mail (no body) never; --no-mail
+ *    is the claims-only control; times compare as epoch ms (tie -> claim; dashed mail-id times parse);
+ *  - mails newest first, MAIL_DEFAULT per page, --before pages back, one row per mail id;
+ *  - an unknown term is exit 0 with the one "no claim under <keys tried>" line, identical on every path;
+ *  - read-only: the offline oracle test/tools/claims90-get.cjs prints the same text and JSON and writes nothing.
+ */
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const { spawnSync } = require('node:child_process');
+const loadTs = require('./load-ts.cjs');
+
+const REPO = path.resolve(__dirname, '..');
+const G = loadTs('src/main/claims/get.ts');
+const { DEFAULT_KEY_REGISTRY } = loadTs('src/main/claims/registry.ts');
+
+const SHA_A = '1234abc' + 'd'.repeat(33);
+const SHA_B = '9876fed' + 'e'.repeat(33);
+const c = (id, agent, key, at, text, extra = {}) => ({ t: 'claim', id, at, wt: at, agent, kind: 'fact', key, text, source: 'note', ...extra });
+const mail = (id, from, to, act, subject, created_at, body, extra = {}) => JSON.stringify({ v: 1, id, card: 'FOO-7', cards: ['FOO-7'], cardFrom: 'field', from, to, act, subject, created_at, deliveredAt: 1, bodyHash: 'h', trust: 'delivery', ...(body === undefined ? {} : { body }), ...extra });
+
+function registry(aliases = {}) {
+  const reg = JSON.parse(JSON.stringify(DEFAULT_KEY_REGISTRY));
+  reg.keys = reg.keys || {};
+  for (const [k, v] of Object.entries(aliases)) reg.keys[k] = { aliasOf: v };
+  return reg;
+}
+
+function fixture() {
+  const ledgers = {
+    derived: [
+      c('c-aaaaaaaaaaa1', 'derived', 'card.foo-7.donesha', '2026-10-01T10:00:00.000Z', `Card FOO-7: the newest done mail from alpha-1 (m1) names commit 1234abc (${SHA_A})`, { refs: [{ type: 'commit', value: SHA_A }] }),
+      c('c-aaaaaaaaaaa2', 'derived', 'card.foo-7.donesha', '2026-10-02T10:00:00.000Z', `Card FOO-7: the newest done mail from beta-2 (m2) names commit 9876fed (${SHA_B})`, { refs: [{ type: 'commit', value: SHA_B }] }),
+      c('c-aaaaaaaaaaa3', 'derived', 'card.foo-7.decision.abcd1234', '2026-10-02T11:00:00.000Z', 'Human decision on FOO-7: asked "x"; the Human answered "yes"', { kind: 'decision' }),
+      c('c-aaaaaaaaaaa4', 'derived', 'card.foo-7.decision.abcd5678', '2026-10-01T11:00:00.000Z', 'Human decision on FOO-7: asked "y"; the Human answered "no"', { kind: 'decision' }),
+      c('c-aaaaaaaaaaa6', 'derived', 'card.foo-7.decision.abcd9999', '2026-09-01T11:00:00.000Z', 'Human decision on FOO-7: asked "z"; the Human answered "later"', { kind: 'decision' }),
+      c('c-aaaaaaaaaaa5', 'derived', 'card.foo-7.status', '2026-10-02T12:00:00.000Z', 'Card FOO-7 status: doing'),
+    ],
+    'alpha-1': [
+      c('c-bbbbbbbbbbb1', 'alpha-1', 'card.foo-7', '2026-09-30T10:00:00.000Z', `FOO-7 build is at 1111111 on branch x ${'long '.repeat(40)}tail`),
+      c('c-bbbbbbbbbbb2', 'alpha-1', 'card.foo-7', '2026-10-03T10:00:00.000Z', 'FOO-7 build moved to 2222222 on branch x', { supersedes: ['c-bbbbbbbbbbb1'], supersedesReason: { category: 'changed' } }),
+    ],
+    'beta-2': [
+      c('c-ccccccccccc1', 'beta-2', 'card.foo-7', '2026-10-01T09:00:00.000Z', 'FOO-7: beta thinks the build is 1111111 still'),
+      c('c-ccccccccccc2', 'beta-2', 'card.foo-7.donesha', '2026-10-01T12:00:00.000Z', `beta-2 landed FOO-7 as ${SHA_B}`),
+    ],
+  };
+  const tasks = [{ id: 'FOO-7', status: 'doing', assignee: 'alpha-1', title: 'Foo seven', tags: ['x'] }, { id: 'cut-1.1.100', status: 'done', title: 'Dotted' }];
+  return { ledgers, tasks };
+}
+
+const deps = (over = {}) => { const f = fixture(); return { ledgers: f.ledgers, registry: registry(), reconcileItems: [], tasks: f.tasks, mailRows: () => null, ruleConfig: { r4: false }, ...over }; };
+const get = (term, opts = {}, d = deps()) => G.resolveGet(term, opts, d);
+const text = (term, opts = {}, d = deps()) => G.formatGet(G.resolveGet(term, opts, d), opts);
+const lines = (t) => t.replace(/\n$/, '').split('\n');
+
+test('resolution: exact key; a bare card id (any case, quoted, "memory get" prefix) is card.<id> and covers every derived sub-key; a claim id resolves to its key', () => {
+  assert.deepEqual(get('card.foo-7.status').keys, ['card.foo-7.status']);
+  for (const term of ['FOO-7', 'foo-7', '"foo-7"', 'memory get foo-7', ' card.foo-7 ']) {
+    const r = get(term);
+    assert.equal(r.card, 'foo-7', term);
+    assert.deepEqual(r.keys, ['card.foo-7', 'card.foo-7.decision.abcd1234', 'card.foo-7.decision.abcd5678', 'card.foo-7.decision.abcd9999', 'card.foo-7.donesha', 'card.foo-7.status'], term);
+  }
+  const byId = get('c-bbbbbbbbbbb1');
+  assert.equal(byId.current.claimId, 'c-bbbbbbbbbbb2', 'a claim id names its key, and the key answers with its current value');
+  assert.match(text('FOO-7'), /^get foo-7 → keys: card\.foo-7, card\.foo-7\.decision\.abcd1234.* \(card foo-7\)\n/);
+  // A card known only to tasks.json (no claim yet) still resolves (its fields and mails show).
+  const r = get('cut-1.1.100');
+  assert.equal(r.card, 'cut-1.1.100'); assert.deepEqual(r.keys, ['card.cut-1.1.100']); assert.equal(r.current, null);
+  assert.match(text('cut-1.1.100'), /current: none \(no live claim under card\.cut-1\.1\.100\)/);
+});
+
+test('alias closure: the registry aliasOf chain, a reconcile key-alias pair and a key-alias event each join keys into one set; the merged keys are printed', () => {
+  const d = deps({ registry: registry({ 'card.foo-7.lastsha': 'card.foo-7.donesha' }) });
+  const r = get('card.foo-7.lastsha', {}, d);
+  assert.deepEqual(r.keys, ['card.foo-7.donesha', 'card.foo-7.lastsha']);
+  assert.equal(r.current.claimId, 'c-aaaaaaaaaaa2', 'the newest live donesha row');
+  // A reconcile queue pair over two claim ids with different keys.
+  const d2 = deps();
+  d2.ledgers['gamma-3'] = [c('c-ddddddddddd1', 'gamma-3', 'build.foo7', '2026-10-04T10:00:00.000Z', 'build foo7 at 4444444')];
+  d2.reconcileItems = [{ itemId: 'i1', kind: 'key-alias', a: 'c-ddddddddddd1', b: 'c-bbbbbbbbbbb2', text: 'Possible key alias' }];
+  const r2 = get('build.foo7', {}, d2);
+  assert.ok(r2.keys.includes('card.foo-7') && r2.keys.includes('build.foo7'), r2.keys.join());
+  assert.equal(r2.current.claimId, 'c-ddddddddddd1', 'newest across the merged set');
+  assert.match(text('build.foo7', {}, d2), /^get build\.foo7 → keys: build\.foo7, card\.foo-7(, card\.foo-7\.[a-z0-9.]+)+ \(card foo-7\)\n/);
+  // The same pair answered as a key-alias event.
+  const d3 = deps();
+  d3.ledgers['gamma-3'] = [c('c-ddddddddddd1', 'gamma-3', 'build.foo7', '2026-10-04T10:00:00.000Z', 'build foo7 at 4444444'), { t: 'event', id: 'e-1', at: '2026-10-04T11:00:00.000Z', wt: 'x', agent: 'gamma-3', ev: 'key-alias', targets: ['c-ddddddddddd1', 'c-bbbbbbbbbbb2'] }];
+  assert.ok(get('build.foo7', {}, d3).keys.includes('card.foo-7'));
+});
+
+test('current, competing, superseded: newest live claim is current; other live values compete; superseded rows carry the inverse of supersedes, the reason and a <=120-char excerpt (MUTANT: ids only)', () => {
+  const r = get('card.foo-7');
+  assert.equal(r.current.source, 'claim');
+  assert.equal(r.current.claimId, 'c-bbbbbbbbbbb2', 'the newest live row under the set (the hand claim, 2026-10-03T10)');
+  assert.ok(r.competing.some((x) => x.claimId === 'c-aaaaaaaaaaa5'), 'the live derived status row competes');
+  assert.ok(!r.competing.some((x) => x.kind === 'decision'), 'decisions never compete');
+  const s = r.superseded.find((x) => x.claimId === 'c-bbbbbbbbbbb1');
+  assert.ok(s, 'the superseded hand claim is listed');
+  assert.deepEqual(s.supersededBy, ['c-bbbbbbbbbbb2']);
+  assert.equal(s.reason, 'changed');
+  assert.ok(s.excerpt.length <= 120 && s.excerpt.endsWith('…') && s.excerpt.includes('1111111'), s.excerpt);
+  const t = text('card.foo-7');
+  assert.match(t, /^superseded \(1\):\n  card\.foo-7: FOO-7 build is at 1111111 .*\[superseded · alpha-1 · 2026-09-30 · c-bbbbbbbbbbb1 → replaced by c-bbbbbbbbbbb2 · changed\]$/m);
+  assert.match(t, /^current: card\.foo-7: FOO-7 build moved to 2222222 on branch x\n  \[claim · alpha-1 · 2026-10-03 · c-bbbbbbbbbbb2\]$/m);
+});
+
+test('decisions: a card returns its FULL decision list newest first (D1 has 20 rows), a sub-key only its own; fields come from tasks.json', () => {
+  const r = get('FOO-7');
+  assert.deepEqual(r.decisions.map((x) => x.claimId), ['c-aaaaaaaaaaa3', 'c-aaaaaaaaaaa4', 'c-aaaaaaaaaaa6'], 'all three, newest first (MUTANT: newest only)');
+  assert.deepEqual(r.fields, { id: 'FOO-7', status: 'doing', assignee: 'alpha-1', title: 'Foo seven' }, 'primitive fields only');
+  const t = text('FOO-7');
+  assert.match(t, /^decisions \(3\):\n  card\.foo-7\.decision\.abcd1234: .*\n  card\.foo-7\.decision\.abcd5678: .*\n  card\.foo-7\.decision\.abcd9999: .*\nfields: status=doing assignee=alpha-1 title=Foo seven$/m);
+  assert.equal(get('card.foo-7.status').decisions.length, 0, 'a field sub-key is not the card');
+  assert.doesNotMatch(text('card.foo-7.status'), /^decisions/m);
+});
+
+test('--agent: picks that agent\'s newest live claim, else the derived row naming its done mail ("from <agent> "), else the global newest (Jim df789a a; MUTANT: global only)', () => {
+  assert.equal(get('card.foo-7.donesha').current.claimId, 'c-aaaaaaaaaaa2', 'no --agent: newest live');
+  assert.equal(get('card.foo-7.donesha', { agent: 'beta-2' }).current.claimId, 'c-ccccccccccc2', 'beta-2 wrote one itself');
+  assert.equal(get('card.foo-7.donesha', { agent: 'alpha-1' }).current.claimId, 'c-aaaaaaaaaaa1', 'alpha-1: the derived row "from alpha-1 "');
+  assert.equal(get('card.foo-7.donesha', { agent: 'nobody' }).current.claimId, 'c-aaaaaaaaaaa2', 'unknown agent: global newest');
+  const t = text('card.foo-7.donesha', { agent: 'alpha-1' });
+  assert.match(t, /^get card\.foo-7\.donesha → keys: card\.foo-7\.donesha \(card foo-7\) \[--agent alpha-1\]\n/);
+  assert.match(t, /^competing \(2\):/m);
+});
+
+test('mail rule: a NEWER card mail naming a known value is current (source mail, its id named); unknown values, Human mail (no body) and older mail never; --no-mail is the claims-only control', () => {
+  const rows = [
+    mail('2026-10-04T09-00-00-000Z-aaaaaa', 'alpha-1', 'god', 'inform', 'FOO-7 state', '2026-10-04T09:00:00.000Z', 'the build is back at 1111111 after the revert'),
+    mail('2026-10-04T09-00-00-000Z-aaaaaa', 'alpha-1', 'jim-x', 'inform', 'FOO-7 state', '2026-10-04T09:00:00.000Z', 'the build is back at 1111111 after the revert'),
+    mail('2026-10-05T09-00-00-000Z-bbbbbb', 'god', 'alpha-1', 'inform', 'FOO-7 chatter', '2026-10-05T09:00:00.000Z', 'no value here at all'),
+    mail('2026-10-06T09-00-00-000Z-cccccc', 'human', 'alpha-1', 'inform', 'FOO-7: use 7777777', '2026-10-06T09:00:00.000Z', undefined),
+    mail('2026-09-01T09-00-00-000Z-dddddd', 'alpha-1', 'god', 'inform', 'FOO-7 old', '2026-09-01T09:00:00.000Z', 'the build was 2222222 once'),
+  ];
+  const d = deps({ mailRows: (card) => (card === 'foo-7' ? rows : null) });
+  const r = get('card.foo-7', {}, d);
+  assert.equal(r.current.source, 'mail');
+  assert.equal(r.current.mailId, '2026-10-04T09-00-00-000Z-aaaaaa', 'the newest mail naming a KNOWN value (1111111 is a superseded value); the Human mail has no body, the chatter no value');
+  assert.equal(r.current.agent, 'alpha-1');
+  assert.ok(r.current.text.includes('1111111'), r.current.text);
+  assert.match(G.formatGet(r), /^current: card\.foo-7: FOO-7 state — the build is back at 1111111 after the revert\n  \[mail · alpha-1 · 2026-10-04 · 2026-10-04T09-00-00-000Z-aaaaaa\]$/m);
+  const control = get('card.foo-7', { noMail: true }, d);
+  assert.equal(control.current.source, 'claim'); assert.equal(control.current.claimId, 'c-bbbbbbbbbbb2');
+  // Mail naming only an unknown value: the claim pick stays.
+  const d2 = deps({ mailRows: () => [mail('2026-10-07T09-00-00-000Z-eeeeee', 'alpha-1', 'god', 'inform', 'FOO-7', '2026-10-07T09:00:00.000Z', 'maybe 5555555 someday')] });
+  assert.equal(get('card.foo-7', {}, d2).current.source, 'claim', 'MUTANT: any newer mail wins');
+  // --agent applies to mail too: another agent's mail is not that agent's value.
+  assert.equal(get('card.foo-7', { agent: 'beta-2' }, d).current.source, 'claim');
+  assert.equal(get('card.foo-7', { agent: 'alpha-1' }, d).current.source, 'mail');
+});
+
+test('mail rule, done-sha (Jim ac6f85): for donesha/lastsha or the bare card, a commit sha in that agent\'s DONE mail is a known value even with no claim under the key; other fields keep the known-value rule', () => {
+  const rows = [mail('2026-10-08T09-00-00-000Z-ffffff', 'alpha-1', 'god', 'done', 'FOO-7 done', '2026-10-08T09:00:00.000Z', `landed as ${'abc1234' + 'f'.repeat(33)} on guppy/foo-7`)];
+  const d = deps({ mailRows: () => rows });
+  const r = get('card.foo-7.donesha', { agent: 'alpha-1' }, d);
+  assert.equal(r.current.source, 'mail'); assert.ok(r.current.text.includes('abc1234'), r.current.text);
+  assert.equal(get('card.foo-7.donesha', {}, d).current.source, 'mail', 'without --agent any agent\'s done mail counts');
+  assert.equal(get('card.foo-7.donesha', { agent: 'beta-2' }, d).current.source, 'claim', 'not that agent\'s mail');
+  assert.equal(get('card.foo-7.status', {}, d).current.source, 'claim', 'status is not a sha field: an unknown sha is not a value');
+  // F5 shape: a pruned card with NO claim at all under the key still answers from its done mail.
+  const d5 = deps({ mailRows: () => rows }); d5.ledgers = { 'alpha-1': [c('c-bbbbbbbbbbb9', 'alpha-1', 'card.foo-7.status', '2026-10-01T10:00:00.000Z', 'Card FOO-7 status: doing')] };
+  const r5 = get('card.foo-7.donesha', {}, d5);
+  assert.deepEqual(r5.keys, ['card.foo-7.donesha']); assert.equal(r5.current.source, 'mail');
+  const tdone = G.formatGet(r5);
+  assert.match(tdone, /^current: card\.foo-7\.donesha: FOO-7 done — landed as abc1234f+ on guppy\/foo-7\n  \[mail · alpha-1 · 2026-10-08 · 2026-10-08T09-00-00-000Z-ffffff\]$/m);
+  const inform = deps({ mailRows: () => [mail('2026-10-08T09-00-00-000Z-ffffff', 'alpha-1', 'god', 'inform', 'FOO-7 wip', '2026-10-08T09:00:00.000Z', `trying ${'abc1234' + 'f'.repeat(33)}`)] });
+  assert.equal(get('card.foo-7.donesha', {}, inform).current.source, 'claim', 'an inform mail is not a done mail');
+});
+
+test('time compare is epoch ms, never strings: a tie goes to the claim; a dashed mail-id time (no created_at) parses; an ISO string that would sort "later" as text but is earlier loses (census row)', () => {
+  const claimAt = '2026-10-03T10:00:00.000Z';
+  const pickCurrent = (created_at, id) => get('card.foo-7', {}, deps({ mailRows: () => [mail(id, 'alpha-1', 'god', 'inform', 'FOO-7', created_at, 'back at 1111111', created_at === undefined ? {} : { created_at })] })).current.source;
+  // The newest live claim under card.foo-7 is the hand claim c-bbbbbbbbbbb2 at 2026-10-03T10:00Z: compare against that pick.
+  const pickMs = Date.parse('2026-10-03T10:00:00.000Z');
+  assert.equal(pickCurrent(new Date(pickMs).toISOString(), '2026-10-03T10-00-00-000Z-tie000'), 'claim', 'tie: the claim');
+  assert.equal(pickCurrent(new Date(pickMs + 1).toISOString(), '2026-10-03T10-00-00-001Z-ms0001'), 'mail', '1 ms newer: the mail');
+  assert.equal(pickCurrent('2026-10-03T12:00:00+02:00', '2026-10-03T10-00-00-000Z-offset'), 'claim', 'an offset time equal in ms (text sorts later) is a tie');
+  assert.equal(pickCurrent('2026-10-03T12:00:00.500+02:00', '2026-10-03T10-00-00-500Z-offset'), 'mail', 'offset form, 500 ms newer');
+  assert.equal(pickCurrent(undefined, '2026-10-03T10-00-00-001Z-dashed'), 'mail', 'no created_at: the dashed id time parses (mixed formats)');
+  assert.equal(pickCurrent(undefined, '2026-10-03T09-59-59-999Z-dashed'), 'claim');
+  assert.equal(G.epochMs('2026-10-25T07-14-05-563Z-df789a'), Date.parse('2026-10-25T07:14:05.563Z'));
+  assert.equal(G.epochMs('2026-10-25T07-14-05Z-x'), Date.parse('2026-10-25T07:14:05.000Z'));
+  assert.ok(Number.isNaN(G.epochMs('yesterday')));
+  void claimAt;
+});
+
+test('mails: newest first, MAIL_DEFAULT per page, one row per mail id with recipients joined, --before pages back, --mail 0 hides them; an absent index says so', () => {
+  const rows = [];
+  for (let i = 1; i <= 7; i++) rows.push(mail(`2026-10-1${i}T09-00-00-000Z-m${i}`, 'alpha-1', i === 3 ? 'god' : 'jim-x', 'inform', `FOO-7 mail ${i}`, `2026-10-1${i}T09:00:00.000Z`, 'nothing valued'));
+  rows.push(mail('2026-10-13T09-00-00-000Z-m3', 'alpha-1', 'creed-y', 'inform', 'FOO-7 mail 3', '2026-10-13T09:00:00.000Z', 'nothing valued'));
+  const d = deps({ mailRows: () => rows });
+  const r = get('FOO-7', {}, d);
+  assert.equal(r.mailIndex, 'present');
+  assert.deepEqual(r.mails.map((m) => m.id.slice(-2)), ['m7', 'm6', 'm5', 'm4', 'm3']);
+  assert.equal(r.mails.length, G.MAIL_DEFAULT);
+  assert.deepEqual(r.mails[4].to, ['god', 'creed-y'], 'two recipients, one row');
+  assert.equal(r.nextBefore, '2026-10-13T09-00-00-000Z-m3');
+  const page2 = get('FOO-7', { before: r.nextBefore }, d);
+  assert.deepEqual(page2.mails.map((m) => m.id.slice(-2)), ['m2', 'm1']); assert.equal(page2.nextBefore, null);
+  assert.equal(get('FOO-7', { mail: 0 }, d).mails.length, 0);
+  assert.equal(get('FOO-7', { mail: 500 }, d).mails.length, 7, 'capped at MAIL_MAX, not refused here (the endpoint refuses >50)');
+  const t = G.formatGet(r);
+  assert.match(t, /^mails \(5 newest first; older: --before 2026-10-13T09-00-00-000Z-m3\):\n  2026-10-17T09-00-00-000Z-m7 alpha-1 → jim-x inform: FOO-7 mail 7 \[field · delivery\]\n/m);
+  assert.match(t, /^  2026-10-13T09-00-00-000Z-m3 alpha-1 → god,creed-y inform: FOO-7 mail 3 \[field · delivery\]$/m);
+  assert.match(text('FOO-7', {}, deps({ mailRows: () => null })), /^mails: no mail index for this card yet \(hive\/state\/mail-cards\)$/m);
+  assert.equal(get('card.foo-7.status', {}, d).mails.length, 5, 'a sub-key is still the card: its mail shows');
+});
+
+test('unknown term: exit-0 shape with current null and the ONE "no claim under <keys tried>" line (identical on every path); a card.-prefixed term is tried once', () => {
+  const r = get('nothing-here');
+  assert.equal(r.current, null); assert.deepEqual(r.keys, []); assert.deepEqual(r.tried, ['nothing-here', 'card.nothing-here']);
+  assert.equal(text('nothing-here'), 'no claim under nothing-here, card.nothing-here\n');
+  assert.equal(text('card.nothing-here'), 'no claim under card.nothing-here\n');
+  assert.equal(text('c-000000000000'), 'no claim under c-000000000000, card.c-000000000000\n', 'an unknown claim id is just a term');
+});
+
+test('offline oracle (test/tools/claims90-get.cjs): over a hive FOLDER it prints the same text and JSON as resolveGet/formatGet, exits 0 on an unknown term with the same line, and writes nothing (sha256 of every file unchanged)', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'c90-get-'));
+  const f = fixture();
+  for (const [agent, recs] of Object.entries(f.ledgers)) {
+    const dir = path.join(root, 'agents', agent, 'memory', 'claims'); fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, '2026-10.jsonl'), recs.map((x) => JSON.stringify(x)).join('\n') + '\n');
+  }
+  fs.writeFileSync(path.join(root, 'tasks.json'), JSON.stringify({ tasks: f.tasks }));
+  fs.writeFileSync(path.join(root, 'claims-reconcile-queue.json'), JSON.stringify({ agents: { 'alpha-1': { sequence: 1, items: [], r5: [] } } }));
+  fs.mkdirSync(path.join(root, 'state', 'mail-cards'), { recursive: true });
+  const rows = [mail('2026-10-08T09-00-00-000Z-ffffff', 'alpha-1', 'god', 'done', 'FOO-7 done', '2026-10-08T09:00:00.000Z', `landed as ${'abc1234' + 'f'.repeat(33)}`)];
+  fs.writeFileSync(path.join(root, 'state', 'mail-cards', 'foo-7.jsonl'), rows.join('\n') + '\n');
+  const digest = () => { const out = []; const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else out.push(`${path.relative(root, p)} ${crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex')}`); } }; walk(root); return out.sort().join('\n'); };
+  const before = digest();
+  const run = (...args) => spawnSync(process.execPath, [path.join(REPO, 'test', 'tools', 'claims90-get.cjs'), root, ...args], { encoding: 'utf8', cwd: REPO, timeout: 120_000 });
+  const d = deps({ mailRows: (card) => (card === 'foo-7' ? rows : null) });
+  for (const [term, flags, opts] of [['FOO-7', [], {}], ['card.foo-7.donesha', ['--agent', 'alpha-1'], { agent: 'alpha-1' }], ['card.foo-7.donesha', ['--agent', 'beta-2', '--no-mail'], { agent: 'beta-2', noMail: true }], ['c-bbbbbbbbbbb1', ['--mail', '1'], { mail: 1 }]]) {
+    const r = run(term, ...flags);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, text(term, opts, d), `text path: ${term} ${flags.join(' ')}`);
+    const j = run(term, ...flags, '--json');
+    assert.deepEqual(JSON.parse(j.stdout), JSON.parse(JSON.stringify(get(term, opts, d))), `json path: ${term}`);
+  }
+  const none = run('nothing-here');
+  assert.equal(none.status, 0); assert.equal(none.stdout, 'no claim under nothing-here, card.nothing-here\n');
+  assert.equal(digest(), before, 'READ-ONLY: no file changed');
+  assert.equal(run().status, 2, 'usage');
+  fs.rmSync(root, { recursive: true, force: true });
+});

@@ -201,6 +201,12 @@ export class NativeMemoryWiring {
   async handle(token: string, body: unknown): Promise<{ status: number; body: unknown }> {
     const agentId = this.tokens.resolve(token);
     if (!agentId) return { status: 403, body: { exit: EXIT.unauthorized, error: 'unauthorized' } };
+    return this.handleAs(agentId, body);
+  }
+
+  /** CLAIMS-90 R2 (C90-GET): the same request for an agent already identified (the hook MCP tools, whose
+   *  endpoint URL carries the agent's token): one code path, so the text is byte-identical to the CLI's. */
+  async handleAs(agentId: string, body: unknown): Promise<{ status: number; body: unknown }> {
     const cmd = body && typeof body === 'object' ? (body as Record<string, unknown>).cmd : undefined;
     const claims = typeof cmd === 'string' && CLAIM_VERBS.has(cmd) ? this.d.claims?.() ?? null : null;
     if (claims) {

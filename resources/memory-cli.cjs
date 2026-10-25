@@ -13,7 +13,9 @@ const http = require('http');
 
 const EXIT = { ok: 0, usage: 2, unavailable: 3, degraded: 4, unauthorized: 5 };
 const REQUEST_TIMEOUT_MS = 10000;
-const USAGE = 'usage: memory {search QUERY [--wing W] [--room R] [--results N] [--since ISO] [--before ISO] [--history|--all] [--kind K] [--key K] [--full] | wake-up [--wing W] [--full] | status} [--format json]\n'
+const USAGE = 'usage: memory {get KEY|CARD-ID [--agent A] [--mail N] [--before MAILID] [--no-mail] | search QUERY [--wing W] [--room R] [--results N] [--since ISO] [--before ISO] [--history|--all] [--kind K] [--key K] [--exact] [--newest] [--full] | wake-up [--wing W] [--full] | status} [--format json]\n'
+  + '  get: the CURRENT value of a key or card (newest live claim; --agent A: that agent\'s), then competing, superseded (with what replaced them), a card\'s decision list, fields and its mail history newest first (--mail N, --before MAILID to page back)\n'
+  + '  search --exact "<text>": exact text (quoted lines, changelog entries) over claims, notes, PROTOCOL.md and board.md; --newest: hits newest first, [1] marked as the answer candidate\n'
   + '  search and wake-up print a compact, current-first text that fits the tool-output cap; --full prints the whole chunks / the whole wake-up text\n'
   + '  one memory command per tool call: the cap is per call, so two chained commands get condensed; raw (non-condensed) readers may prefer --full\n'
   + '  claim ledger (when it is on for you):\n'
@@ -66,7 +68,15 @@ function parseArgs(argv) {
     if (flag && out.cmd === 'search') {
       // CLAIM-LEDGER read modes and claim filters (spec amendment A5).
       if (flag === '--history' || flag === '--all') { out.args[flag.slice(2)] = true; i += 1; continue; }
+      // CLAIMS-90 R2: exact-text mode and the newest-first order.
+      if (flag === '--exact' || flag === '--newest') { out.args[flag.slice(2)] = true; i += 1; continue; }
       if (flag === '--kind' || flag === '--key') { out.args[flag.slice(2)] = val(); i += step(); continue; }
+    }
+    // CLAIMS-90 R2 (C90-GET): `memory get KEY|CARD [--agent A] [--mail N] [--before MAILID] [--no-mail]`.
+    if (flag && out.cmd === 'get') {
+      if (flag === '--agent') { out.args.agent = val(); i += step(); continue; }
+      if (flag === '--mail') { out.args.mail = Number(val()); i += step(); continue; }
+      if (flag === '--no-mail') { out.args.noMail = true; i += 1; continue; }
     }
     if (flag && CLAIM_VERBS.has(out.cmd)) {
       if (flag === '--pin') { out.args.pin = true; i += 1; continue; }
@@ -87,6 +97,7 @@ function parseArgs(argv) {
     i += 1;
   }
   if (out.cmd === 'search') out.args.query = positional.join(' ');
+  else if (out.cmd === 'get') { out.args.term = positional.join(' '); }
   else if (out.cmd === 'note') {
     // CL-M4-FORWARD-PATH nit 5 (Jim): `memory note lesson TEXT` sets the kind (it used to be stored as
     // the text of a fact). Only an exact kind word with text after it, and only without --kind.
@@ -150,12 +161,12 @@ async function main(argv, env, io = STDIO) {
     return EXIT.usage;
   }
   if (p.help || !p.cmd) { io.out(USAGE); return p.cmd || p.help ? EXIT.ok : EXIT.usage; }
-  if (p.cmd === 'search' || p.cmd === 'wake-up' || p.cmd === 'status' || CLAIM_VERBS.has(p.cmd)) {
+  if (p.cmd === 'search' || p.cmd === 'wake-up' || p.cmd === 'status' || p.cmd === 'get' || CLAIM_VERBS.has(p.cmd)) {
     if (p.rest.length) { io.err(`memory: unsupported arguments: ${p.rest.join(' ')}\n`); return EXIT.usage; }
     if (p.kindWord) io.err(`memory: noted as kind ${p.kindWord} (the first word); use --kind fact to keep the word as text\n`);
     return request(env, p, io);
   }
-  io.err(`memory: unknown command "${p.cmd}"; use search, wake-up or status (memory.md and your notes are indexed automatically), or a claim verb: note, retract, accept, dismiss, reconcile, used, export --complete.\n`);
+  io.err(`memory: unknown command "${p.cmd}"; use get, search, wake-up or status (memory.md and your notes are indexed automatically), or a claim verb: note, retract, accept, dismiss, reconcile, used, export --complete.\n`);
   return EXIT.usage;
 }
 
