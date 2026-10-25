@@ -75,6 +75,7 @@ test('invalid ids are reassigned with sender_id, and nothing lands outside the i
   const added = walk(home).filter((f) => !before.has(f));
   const allowed = (f) => f.startsWith(path.join('hive', 'agents', 'jim-1', 'inbox') + path.sep)
     || f.startsWith(path.join('hive', 'state', 'mail') + path.sep)
+    || f.startsWith(path.join('hive', 'state', 'mail-cards') + path.sep)   // C90-MAILCARD: the per-card mail index
     || /^hive[\\/]log.*\.jsonl$/.test(f);
   assert.deepEqual(added.filter((f) => !allowed(f)), []);
   assert.ok(!walk(home).some((f) => /escaped/.test(f)), 'no traversal target exists anywhere');

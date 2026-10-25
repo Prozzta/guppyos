@@ -50,7 +50,7 @@ function cardinality(key: string, registry: KeyRegistry): 'single' | 'multi' | u
 }
 
 function protectedFromMail(source: ClaimRec, target: ClaimRec): boolean {
-  return source.source.startsWith('mail:') && (target.source === 'self' || target.source === 'human' || target.source === 'legacy');
+  return source.source.startsWith('mail:') && (target.source === 'self' || target.source === 'human' || target.source === 'legacy' || target.source === 'derived');
 }
 
 function setStatus(state: MutableState | undefined, status: Status, reason: string, supersededBy?: string): void {
@@ -107,7 +107,7 @@ export function derive(records: LedgerRec[], registry: KeyRegistry, ruleConfig: 
   for (const list of keyed.values()) {
     list.sort(recordOrder);
     const category = (claim: ClaimRec): 'mail' | 'protected' | 'other' => claim.source.startsWith('mail:') ? 'mail'
-      : claim.source === 'self' || claim.source === 'human' || claim.source === 'legacy' ? 'protected' : 'other';
+      : claim.source === 'self' || claim.source === 'human' || claim.source === 'legacy' || claim.source === 'derived' ? 'protected' : 'other';
     const latest: Partial<Record<'mail' | 'protected' | 'other', ClaimRec>> = {};
     for (const claim of list) latest[category(claim)] = claim;
     const suffix: Array<Partial<Record<'mail' | 'protected' | 'other', ClaimRec>>> = new Array(list.length);

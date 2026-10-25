@@ -289,16 +289,18 @@ test('hive: A tie by card, B answers at routing, C supersedes; each close is log
   hive.startLedgerGuard();
   t.after(() => hive.stopLedgerGuard());
   hive.addTask({ id: 'SHIP-IT-1', title: 'ship', status: 'doing', dependsOn: [] });
+  // C90-MAILCARD: an agent's message names its card (MISC-1, a neutral card); god's direct mail says card "none".
+  hive.addTask({ id: 'MISC-1', title: 'misc', status: 'doing', dependsOn: [] });
   const tied = hive.send({ to: 'andy-1', act: 'request', subject: 'build it (no card in subject)', body: 'go', card: 'SHIP-IT-1' }, 'god-1');
-  const cited = hive.send({ to: 'andy-1', act: 'request', subject: 'review', body: 'go', conversation: 'conv-a' }, 'god-1');
-  const retract = hive.send({ to: 'andy-1', act: 'request', subject: 'old plan', body: 'go', conversation: 'conv-b' }, 'god-1');
-  const live = hive.send({ to: 'andy-1', act: 'request', subject: 'still open', body: 'go', conversation: 'conv-c' }, 'god-1');
-  const jims = hive.send({ to: 'andy-1', act: 'request', subject: 'jim asks', body: 'go', conversation: 'conv-j' }, 'jim-1');
+  const cited = hive.send({ to: 'andy-1', act: 'request', subject: 'review', body: 'go', conversation: 'conv-a', card: 'none' }, 'god-1');
+  const retract = hive.send({ to: 'andy-1', act: 'request', subject: 'old plan', body: 'go', conversation: 'conv-b', card: 'none' }, 'god-1');
+  const live = hive.send({ to: 'andy-1', act: 'request', subject: 'still open', body: 'go', conversation: 'conv-c', card: 'none' }, 'god-1');
+  const jims = hive.send({ to: 'andy-1', act: 'request', subject: 'jim asks', body: 'go', conversation: 'conv-j', card: 'MISC-1' }, 'jim-1');
   assert.equal(hive.mail.ledger('andy-1').entries[tied.id].cardId, 'SHIP-IT-1', 'the tie is stored');
   await tick();
 
-  hive.send({ to: 'god-1', act: 'done', subject: 'reviewed', body: `answers ${cited.id}; ${jims.id} is jim's`, conversation: 'conv-other' }, 'andy-1');
-  hive.send({ to: 'andy-1', act: 'inform', subject: 'new plan', body: 'drop the old one', conversation: 'conv-b', supersedes: [retract.id] }, 'god-1');
+  hive.send({ to: 'god-1', act: 'done', subject: 'reviewed', body: `answers ${cited.id}; ${jims.id} is jim's`, conversation: 'conv-other', card: 'MISC-1' }, 'andy-1');
+  hive.send({ to: 'andy-1', act: 'inform', subject: 'new plan', body: 'drop the old one', conversation: 'conv-b', supersedes: [retract.id], card: 'none' }, 'god-1');
   assert.deepEqual(openIds(hive), [tied.id, live.id, jims.id].sort(), 'B and C closed at routing');
 
   await tick();

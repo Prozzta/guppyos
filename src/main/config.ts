@@ -276,6 +276,10 @@ export interface HarnessConfig {
   /** CLAIM-LEDGER: the ledger level (off | shadow | reader | writer); absent = off. A build clamps a
    *  level it does not implement down to the highest it does (shared/claims.ts effectiveLevel). */
   claimLedger?: string;
+  /** CLAIMS-90 M5: the derived claim writer (claims/derivedLive.ts); absent = on, false = off. */
+  derivedClaims?: boolean;
+  /** CLAIMS-90 M5: the git repo the derived writer reads commits and tags from; absent = none. */
+  derivedClaimsRepo?: string;
   /** Recurring auto-dispatch missions handled by the scheduler. */
   missions?: ScheduledMission[];
   /** One-time guard: has the built-in hourly ops standup been seeded into an

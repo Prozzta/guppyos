@@ -36,10 +36,11 @@ function score(key, readView, entryClaims = {}) {
     const shownLine = current && (current.claimId
       ? workingLines.find(line => line.includes(`[c:${current.claimId}]`) && /\[status:current\]/.test(line))
       : lead(current.text) && workingLines.find(line => line.includes(lead(current.text))));
-    const anchor = current?.claimId ? `memory.md#claim-history-${current.claimId}` : null;
-    const pointer = anchor
-      ? workingLines.some(line => line.includes(anchor) && /history:/i.test(line))
-      : workingLines.some(line => item.topic && line.startsWith(`- ${item.topic} history: memory.md#`));
+    // CLAIMS-90 HISTORY-PTR: the product's pointer is `memory history <id>`; older outputs carry the file anchor.
+    const anchors = current?.claimId ? [`memory history ${current.claimId}`, `memory.md#claim-history-${current.claimId}`] : null;
+    const pointer = anchors
+      ? workingLines.some(line => anchors.some(a => line.includes(a)) && /history:/i.test(line))
+      : workingLines.some(line => item.topic && (line.startsWith(`- ${item.topic} history: memory history `) || line.startsWith(`- ${item.topic} history: memory.md#`)));
     // Clause 3 (design §8): the working set EITHER shows the current version OR carries a per-fact
     // history pointer (Jim's step-2 re-audit, W1). Text-only arm A uses the same rule. That the
     // product also suffixes a shown current with its pointer is pinned by the views render tests.

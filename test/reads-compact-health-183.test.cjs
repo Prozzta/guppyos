@@ -255,7 +255,7 @@ test('hooks: SessionStart(compact) carries the cards in progress and owed mail b
   ]);
   // An answer owed from an earlier turn (the ledger's obligation list).
   f.server.mailReminders = () => [{ entry: { id: 'old-1', from: 'jim-1', act: 'request', subject: 'please check', state: 'acted', epoch: 'e-old' }, ageMs: 3_600_000 }];
-  const m = f.hive.send({ to: 'god-1', act: 'inform', subject: 'live', body: 'live body' }, 'jim-1');
+  const m = f.hive.send({ to: 'god-1', act: 'inform', subject: 'live', body: 'live body', card: 'READS-COMPACT-HEALTH' }, 'jim-1');
   f.fire('god-1', 'UserPromptSubmit', { prompt: 'go' });
   const c = f.ctx(f.fire('god-1', 'SessionStart', { source: 'compact' }));
   assert.ok(c.includes('<after-compaction>'), c.slice(0, 300));

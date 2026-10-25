@@ -78,7 +78,7 @@ export function claimHistory(view: Pick<LedgerUiAgentView, 'claims' | 'events'>,
   const claim = view.claims.find((c) => c.id === id);
   if (!claim) return { items: [], status: null, reasons: [] };
   const items: HistoryItem[] = [];
-  const by = (src: string): string => (src === 'human' ? 'the Human' : src === 'self' ? 'the agent' : src === 'legacy' ? 'the memory.md import' : src.startsWith('mail:') ? `mail ${src.slice(5)}` : src);
+  const by = (src: string): string => (src === 'human' ? 'the Human' : src === 'self' ? 'the agent' : src === 'legacy' ? 'the memory.md import' : src === 'derived' ? 'the derived writer' :src.startsWith('mail:') ? `mail ${src.slice(5)}` : src);
   items.push({ at: claim.wt, id, text: `Written by ${by(claim.source)} as a ${claim.kind}${claim.key ? ` on key ${claim.key}` : ''}.` });
   for (const old of claim.supersedes ?? []) {
     items.push({ at: claim.wt, id, text: `It replaces ${short(old)}${claim.supersedesReason ? ` (${claim.supersedesReason.category}${claim.supersedesReason.note ? `: ${claim.supersedesReason.note}` : ''})` : ''}.` });

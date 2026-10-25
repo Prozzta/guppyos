@@ -298,9 +298,10 @@ export async function enqueueR5AfterIndex(agentId: string, claimId: string, deps
   } catch { /* indexing/R5 are advisory and cannot roll back an acknowledged append */ }
 }
 
-/** Exclude only the one-time W6 import; reader-watcher claims have source self and still qualify. */
+/** Exclude the one-time W6 import and the derived writer (CLAIMS-90 M5: deterministic, it supersedes
+ *  its own claims, and no agent answers for its ledger); reader-watcher claims have source self and still qualify. */
 export function shouldRunR5(rec: LedgerRec): rec is ClaimRec {
-  return rec.t === 'claim' && rec.source !== 'legacy';
+  return rec.t === 'claim' && rec.source !== 'legacy' && rec.source !== 'derived';
 }
 
 /** Stable item ids are independent of enqueue order and process lifetime. */

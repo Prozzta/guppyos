@@ -11,11 +11,12 @@ import { ClaimsIndexSync, verifiedPrefix } from './claims/indexSync';
 import { derive as deriveClaims } from './claims/derive';
 import { worldView as buildClaimsWorldView } from './claims/world';
 import { buildClaimsWorldSnapshot } from './claims/worldSnapshot';
-import { createClaimViews, DEFAULT_WORKING_SET_BUDGET } from './claims/views';
+import { createClaimViews, DEFAULT_WORKING_SET_BUDGET, renderClaimHistory } from './claims/views';
 import { createClaimExport, type ClaimExport } from './claims/exportWiring';
 import { createLedgerUi } from './claims/ledgerUi';
 import { scrubExport } from './claims/exportLedger';
 import { importAtStart } from './claims/startupImport';
+import { DerivedLive } from './claims/derivedLive';
 import { makeW6Append } from './claims/w6Append';
 import { memoryMdReplaced, READER_WATCH_SYNC_MS, ReaderWatchers } from './claims/readerWatch';
 import { importSettled } from './claims/ingest';
@@ -25,7 +26,7 @@ import { reconcileApiForHive as createReconcileApiForHive, refreshReconcileQueue
 import { WordPieceTokenizer, wordPieceConfigFromTokenizerJson } from './nativeMemory/wordpiece';
 import { readSourcesConfig } from './nativeMemory/sources';
 import { DEFAULT_KEY_REGISTRY, loadRegistry } from './claims/registry';
-import { CLAIM_LEDGER_CLAMP_ROW, CLAIMS_ALERT_KEY_MISSING, effectiveLevel, IMPLEMENTED_LEVEL, type DeriveFn, type LedgerLevel, type LedgerRec, type ReconcileItem, type UsageRec } from '../shared/claims';
+import { CLAIM_LEDGER_CLAMP_ROW, CLAIMS_ALERT_KEY_MISSING, DERIVED_AGENT_ID, effectiveLevel, IMPLEMENTED_LEVEL, manifestEntry, type DeriveFn, type LedgerLevel, type LedgerRec, type ReconcileItem, type UsageRec } from '../shared/claims';
 import { CodexVersionLog, codexNoDaemonGate, readCodexVersion } from './codexCli';
 import { codexLayerOptInKey, type CodexLayerNotice } from './codexProjectLayers';
 import { StartupTiming } from './startupTiming';
@@ -623,9 +624,13 @@ const floorDigest = new FloorDigest({
 }, () => ({ ...FLOOR_DIGEST_DEFAULTS, ...(readConfig().floorDigest ?? {}) }));
 // DWIGHT-HELD-INTERFERED-2028: built once the wake bridge exists (below).
 let heldInterference: HeldInterferenceWatch | null = null;
+// CLAIMS-90 M5: the derived claim writer, built with the claim wiring below (derivedLive.ts).
+let derivedClaims: DerivedLive | null = null;
 hive.ledgerGuard.onChange(() => {
   try { boardMonitor.tick(); } catch (e) { console.error('[board-monitor]', e); }
   boardStatus.request();
+  // CLAIMS-90 M5: the card decisions and fields follow tasks.json (debounced).
+  derivedClaims?.cardsChanged();
 });
 // #7C — operator control state (pause/gate/steer/halt), read by the HookServer
 // when deciding hook returns.
@@ -1618,6 +1623,31 @@ function claimLedgerAgents(): string[] {
   try { withSegments = readdirSync(join(root, 'agents')).filter((a) => store.segments(a).length > 0); } catch { /* no agents */ }
   return [...new Set([...withSegments, ...store.anchoredAgents()])];
 }
+// CLAIMS-90 M5: the derived claim writer (source 'derived', the reserved derived ledger). Started
+// with the claim store; config derivedClaims (absent = on), derivedClaimsRepo (git, optional).
+derivedClaims = new DerivedLive({
+  hiveRoot: () => hive.root(),
+  writer: () => {
+    const ep = claimsEndpoint(); const root = hive.root();
+    if (!ep || !root || !claimsDerive) return null;
+    const registry = (): ReturnType<typeof loadRegistry> => { try { return loadRegistry(root); } catch { return DEFAULT_KEY_REGISTRY; } };
+    return { store: ep.store, derive: (records) => claimsDerive(records, registry(), { r4: false }), log: (row) => hive.appendLog(row) };
+  },
+  enabled: () => readConfig().derivedClaims !== false && claimLevel(DERIVED_AGENT_ID) !== 'off',
+  repo: () => { const r = readConfig().derivedClaimsRepo; return typeof r === 'string' && r.trim() ? r : null; },
+  changelog: () => {
+    for (const p of [join(app.getAppPath(), 'CHANGELOG.md'), join(process.cwd(), 'CHANGELOG.md')]) {
+      try { const t = readFileSync(p, 'utf8'); if (t) return t; } catch { /* try next */ }
+    }
+    return null;
+  },
+  log: (row) => hive.appendLog(row),
+});
+/** CLAIMS-90 M5: the ledgers an agent writes. The derived ledger is indexed, anchored and rekeyed like
+ *  any (claimLedgerAgents), but it has no memory.md to import or watch, no export and no R5 queue. */
+function claimAgentLedgers(): string[] {
+  return claimLedgerAgents().filter((a) => a !== DERIVED_AGENT_ID);
+}
 // CL-READERWATCHER: a reader or writer agent's memory.md has left search for its ledger, so a bullet
 // written into it while the app runs reaches the ledger (and the index, through onAppend) by W6's
 // ReaderWatcher (claims/readerWatch.ts). Started only after the S0 import has settled; re-synced on
@@ -1626,7 +1656,7 @@ function claimLedgerAgents(): string[] {
 // (god 886ed8), when onSettled syncs its claims into the index.
 const readerWatchers = new ReaderWatchers({
   hiveRoot: () => (claimsEndpoint() ? hive.root() : null),
-  agents: () => (claimsEndpoint() ? claimLedgerAgents() : []),
+  agents: () => (claimsEndpoint() ? claimAgentLedgers() : []),
   candidates: () => { const root = hive.root(); return root && claimsEndpoint() ? claimImportCandidates(root) : []; },
   onSettled: (agentId) => { claimsIndexSync()?.schedule(agentId); },
   level: claimLevel,
@@ -1669,7 +1699,7 @@ function claimLevel(agentId: string): LedgerLevel {
   // W3: the per-agent manifest entry (memory-sources.json `ledger`) narrows the setting, as the
   // worker's discovery does: main and the worker compute the same effective level.
   const root = hive.root();
-  const agentEntry = root ? readSourcesConfig(root).ledger?.[agentId] : undefined;
+  const agentEntry = root ? manifestEntry(readSourcesConfig(root).ledger, agentId) : undefined;
   const e = effectiveLevel(saved, agentEntry);
   const clampKey = `${String(saved)}|${String(agentEntry)}`;
   if (e.clamped && !claimClampLogged.has(clampKey)) {
@@ -1695,7 +1725,7 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
         taskStatus: (id) => ((hive.allTasks() as { tasks?: Array<{ id: string; status: string }> }).tasks ?? []).find((t) => t.id === id)?.status ?? null,
         onAppend: (agentId, id, rec) => {
           // CL-READERWATCHER: a first claim of an unimported reader or writer starts its import now.
-          try { const at = hive.root(); if (at && memoryMdReplaced(claimLevel(agentId)) && !importSettled(at, agentId)) void claimsImportReady().then(() => readerWatchers.ensureImported(agentId)); } catch (e) { hive.appendLog({ kind: 'claims-watch-error', agentId, error: String(e).slice(0, 160) }); }
+          try { const at = hive.root(); if (at && agentId !== DERIVED_AGENT_ID && memoryMdReplaced(claimLevel(agentId)) && !importSettled(at, agentId)) void claimsImportReady().then(() => readerWatchers.ensureImported(agentId)); } catch (e) { hive.appendLog({ kind: 'claims-watch-error', agentId, error: String(e).slice(0, 160) }); }
           claimExport().onAppend(agentId, id, rec);
           if (!shouldRunR5(rec)) { claimsIndexSync()?.schedule(agentId); return; }
           const root = hive.root(); if (!root) return;
@@ -1719,6 +1749,8 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
     };
     // Jim A-2: claims start checks every anchored agent (a deleted or cut ledger alerts at once).
     setImmediate(claimsAnchorCheck);
+    // CLAIMS-90 M5: the derived writer's start backfill and passes (once per app run).
+    setImmediate(() => derivedClaims?.start());
     // W6: the switch to writer mode or a restart after a crash: catch every writer's export up.
     setImmediate(() => { try { claimExport().syncAll(claimLedgerAgents()); } catch (e) { hive.appendLog({ kind: 'claims-export-failed', step: 'sync', error: String(e).slice(0, 160) }); } });
     // CL-READERWATCHER: watch memory.md for the agents whose ledger replaced it in search.
@@ -1730,6 +1762,7 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
     store: claimStore.store,
     level: claimLevel,
     exportComplete: (agentId) => claimExport().complete(agentId),
+    claimHistory: (agentId, id) => claimHistory(agentId, id),
     onReconcile: (agentId, a, b) => reconcileQueueForHive(root).answeredPair(agentId, a, b),
     noteCandidates: (agentId, text, o) => claimNoteCandidates(agentId, text, o),
     validateSupersedes: (agentId, ids) => {
@@ -1741,6 +1774,11 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
       if (!view) return [];
       return view.claims.filter((c) => c.key === key && view.status(c.id) === 'live')
         .sort((a, b) => Date.parse(b.wt) - Date.parse(a.wt) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)).map((c) => c.id);
+    },
+    liveClaimsByKey: (agentId, key) => {
+      const view = claimsLedgerView(agentId);
+      if (!view) return [];
+      return view.claims.filter((c) => c.key === key && view.status(c.id) === 'live').map((c) => ({ id: c.id, text: c.text }));
     },
     // CL-M4-FORWARD-PATH: counts and flags only (detail), never note or reason text.
     onNoteChoice: (agentId, choice, ids, detail) => hive.appendLog({ kind: 'claims-note-choice', agentId, choice, targets: ids.slice(0, 10), ...(detail ?? {}) }),
@@ -1876,6 +1914,20 @@ ipcMain.handle('claims-ui:set-level', (evt, level: unknown) => (ledgerUiSender(e
 ipcMain.handle('claims-ui:export', (evt, agentId: unknown) => (ledgerUiSender(evt) ? ledgerUi.exportNow(String(agentId)) : NOT_HERE));
 ipcMain.handle('claims-ui:keep-one', (evt, agentId: unknown, keep: unknown, retire: unknown) => (ledgerUiSender(evt) ? ledgerUi.keepOne(String(agentId), keep, retire) : NOT_HERE));
 ipcMain.handle('claims-ui:keep-all', (evt, agentId: unknown, ids: unknown) => (ledgerUiSender(evt) ? ledgerUi.keepAll(String(agentId), ids) : NOT_HERE));
+/** CLAIMS-90 HISTORY-PTR: `memory history <id>` over the served hive's verified ledgers: the caller's
+ *  own first, then every other ledger agent's (a search hit can show another agent's pointer). */
+function claimHistory(agentId: string, id: string): { ok: true; text: string; owner: string } | { ok: false; error: string } {
+  const root = hive.root(); const ep = claimsEndpoint();
+  if (!root || !ep) return { ok: false, error: 'the claim ledger is not open' };
+  let reg; try { reg = loadRegistry(root); } catch { reg = DEFAULT_KEY_REGISTRY; }
+  for (const owner of [agentId, ...claimLedgerAgents().filter((a) => a !== agentId)]) {
+    const prefix = verifiedPrefix(ep.store.readLedger(owner));
+    if (!prefix || !prefix.records.some((r) => r.t === 'claim' && r.id === id)) continue;
+    const text = renderClaimHistory(prefix.records, deriveClaims(prefix.records, reg, { r4: false }), id);
+    if (text) return { ok: true, text, owner };
+  }
+  return { ok: false, error: `no claim ${id} in this hive's verified ledgers` };
+}
 function claimsLedgerView(agentId: string) {
   const root = hive.root(); const ep = claimsEndpoint();
   if (!root || !ep) return null;
@@ -1892,7 +1944,7 @@ const hiveCandidateCorpus = new HiveCorpus({ agents: () => Object.keys(hive.regi
 const claimCandidateScorer = makeLocalScorer(embedViaWorker((texts) => nativeMemory.embed(texts)), () => hiveCandidateCorpus.corpus());
 /** S1: off the interactive note path, fill the shared scorer with every live own-ledger claim. */
 function warmClaimCandidateVectors(): Promise<void> {
-  const pool = claimLedgerAgents().flatMap((agentId) => {
+  const pool = claimAgentLedgers().flatMap((agentId) => {
     const view = claimsLedgerView(agentId);
     return view ? view.claims.filter((c) => view.status(c.id) === 'live').map((c) => ({ id: c.id, owner: agentId, wt: c.wt, key: c.key, text: c.text, status: 'live' as const })) : [];
   });

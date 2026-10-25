@@ -302,7 +302,8 @@ function entryFromMessage(msg: MailMessageLike, seq: number, now: number, via: M
     inReplyTo: typeof msg.in_reply_to === 'string' ? msg.in_reply_to : null,
     ...(Array.isArray(msg.supersedes) && msg.supersedes.length ? { supersedes: msg.supersedes.filter((s) => typeof s === 'string').slice(0, 10) } : {}),
     ...(msg.wake === 'now' ? { wakeNow: true } : {}),
-    ...(cardIdValue(msg.card) ? { cardId: cardIdValue(msg.card)! } : {}),
+    // C90-MAILCARD: floor-wide mail says card "none"; that is no card, so it never ties asks together.
+    ...(cardIdValue(msg.card) && cardIdValue(msg.card)!.toLowerCase() !== 'none' ? { cardId: cardIdValue(msg.card)! } : {}),
     ...(msg.needs_human === true ? { needsHuman: true } : {}),
     ...(msg.to === 'broadcast' ? { broadcast: true } : {}),
     ...(HUMAN_RELAY_RE.test(String(msg.subject ?? '')) || (msg.to === 'broadcast' && typeof msg.body === 'string' && HUMAN_RELAY_RE.test(msg.body)) ? { humanRelay: true } : {}),

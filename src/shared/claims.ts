@@ -48,7 +48,13 @@ export const LEDGER_RECORD_VERSION = 1;
 export type ClaimKind = 'fact' | 'decision' | 'lesson' | 'preference' | 'procedure' | 'pointer' | 'todo';
 export const CLAIM_KINDS: readonly ClaimKind[] = ['fact', 'decision', 'lesson', 'preference', 'procedure', 'pointer', 'todo'];
 
-export type ClaimSource = 'self' | 'human' | 'god' | `mail:${string}` | 'legacy';
+export type ClaimSource = 'self' | 'human' | 'god' | `mail:${string}` | 'legacy' | 'derived';
+/**
+ * CLAIMS-90 M5: the reserved pseudo-agent whose ledger holds the derived claims (source 'derived'),
+ * written only by main's derived writer from primary records (tasks.json, done mails, git). It is
+ * never in registry.json and never spawned; its folder holds only memory/claims.
+ */
+export const DERIVED_AGENT_ID = 'derived';
 export type Ref = { type: 'file' | 'commit' | 'task' | 'msg' | 'url'; value: string };
 export type SupersedesReason = { category: 'changed' | 'corrected' | 'moved'; note?: string };
 export const SUPERSEDES_REASON_NOTE_MAX = 200; // UTF-16 code units, matching JS string limits.
@@ -130,14 +136,15 @@ export type LedgerRec = ClaimRec | EventRec;
 
 /**
  * What a caller may send. Main fills id, wt, the at-clamp, agent (from the token), prev and mac.
- * source 'human' only from the UI IPC; 'legacy' only from W6 import; agents' tokens get 'self' or 'mail:<id>'.
+ * source 'human' only from the UI IPC; 'legacy' only from W6 import; 'derived' only from the derived writer;
+ * agents' tokens get 'self' or 'mail:<id>'.
  * C3: no 'retract' event; retract with a claim draft carrying `retracts`.
  * `rekey` is not a draft: only main's Human-confirmed Settings action writes it (C2).
  */
 export type RecordDraft =
   | {
       t: 'claim'; kind: ClaimKind; text: string; key?: string; refs?: Ref[]; ttl?: string | null; pin?: true;
-      supersedes?: string[]; supersedesReason?: SupersedesReason; retracts?: string[]; at?: string; source?: 'self' | 'human' | `mail:${string}` | 'legacy';
+      supersedes?: string[]; supersedesReason?: SupersedesReason; retracts?: string[]; at?: string; source?: 'self' | 'human' | `mail:${string}` | 'legacy' | 'derived';
       legacy?: ClaimRec['legacy']; section?: string;
     }
   | {
@@ -154,8 +161,10 @@ export type AppendResult = { ok: true; id: string } | { ok: false; error: string
  *   'ledger-route' the /ledger route's memory part (W6); as 'endpoint'
  *   'ui-ipc'       the Human's UI (W7); source 'human', <= 400
  *   'w6-internal'  W6 importLegacy and parseNewBullets only; source 'legacy' or 'self', `legacy` allowed, <= 4000
+ *   'derived-internal'  CLAIMS-90 M5, main's derived writer only; source 'derived', claims only, only into
+ *                  the DERIVED_AGENT_ID ledger (which no other origin may write), <= 400
  */
-export type AppendOrigin = 'endpoint' | 'ledger-route' | 'ui-ipc' | 'w6-internal';
+export type AppendOrigin = 'endpoint' | 'ledger-route' | 'ui-ipc' | 'w6-internal' | 'derived-internal';
 
 export interface TornInfo { segment: string; offset: number; bytes: number; quarantinedTo: string; at: string }
 
@@ -273,6 +282,15 @@ export const LEDGER_LEVELS: readonly LedgerLevel[] = ['off', 'shadow', 'reader',
 export interface LedgerFlags { claimLedger: LedgerLevel; reconcile: boolean; r4: boolean }
 /** memory-sources.json carries `{ ledger: Record<agentId, LedgerLevel> }`. */
 export interface LedgerManifest { ledger: Record<string, LedgerLevel> }
+/**
+ * An agent's manifest entry. CLAIMS-90 M5: the derived ledger has no hire to add its entry, so an
+ * absent one reads as writer (the Settings level and config derivedClaims still rule); a written
+ * entry narrows it like any agent's.
+ */
+export function manifestEntry(ledger: Record<string, unknown> | undefined, agentId: string): unknown {
+  const v = ledger?.[agentId];
+  return v === undefined && agentId === DERIVED_AGENT_ID ? 'writer' : v;
+}
 
 /**
  * CL-READERWATCHER (god 886ed8): `<hive>/agents/<id>/memory/<this>` records that the agent's S0 import

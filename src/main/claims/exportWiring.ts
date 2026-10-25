@@ -20,7 +20,7 @@
  *   agent's memory.md with W4's complete rendering, without the archive-backed entries (ruling 2).
  *   The export format is exportLedger.ts's and W4's; nothing here renders.
  */
-import type { ClaimsState, DeriveFn, KeyRegistry, LedgerLevel, LedgerRec, ReadResult, WorldView } from '../../shared/claims';
+import { DERIVED_AGENT_ID, type ClaimsState, type DeriveFn, type KeyRegistry, type LedgerLevel, type LedgerRec, type ReadResult, type WorldView } from '../../shared/claims';
 import { appendStatusMarkers, archiveBackedIds, exportComplete, flushExport, syncExport, type ExportFlush } from './exportLedger';
 import { verifiedPrefix } from './indexSync';
 import { createClaimViews } from './views';
@@ -106,13 +106,15 @@ export function createClaimExport(d: ClaimExportDeps): ClaimExport {
 
   return {
     onAppend: (agentId, id, rec) => {
+      // CLAIMS-90 M5: the derived ledger has no memory.md to export into.
+      if (agentId === DERIVED_AGENT_ID) return;
       try { enqueue(agentId, () => exportAppend(agentId, id, rec)); } catch (e) { fail(agentId, 'append', e); }
     },
     syncAll: (agents) => {
       let total = 0;
       for (const agentId of agents) {
         try {
-          if (d.level(agentId) !== 'writer') continue;
+          if (agentId === DERIVED_AGENT_ID || d.level(agentId) !== 'writer') continue;
           const dir = d.agentDir(agentId);
           if (!dir) continue;
           const prefix = verified(agentId, 'sync');

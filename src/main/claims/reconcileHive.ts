@@ -1,4 +1,4 @@
-import type { ClaimsState, KeyRegistry, LedgerRec, ReconcileItem } from '../../shared/claims';
+import { DERIVED_AGENT_ID, type ClaimsState, type KeyRegistry, type LedgerRec, type ReconcileItem } from '../../shared/claims';
 import { derive } from './derive';
 import { verifiedPrefix } from './indexSync';
 import { ReconcileApi, keyAliasCandidates, reconcileItemId, type ReconcileQueue } from './reconcile';
@@ -16,6 +16,8 @@ export interface ReconcileHiveDeps {
 
 /** Refresh the derived census from the verified ledger; R5 candidates are merged by queue.refresh. */
 export function refreshReconcileQueueForHive(root: string, agentId: string, deps: ReconcileHiveDeps): number {
+  // CLAIMS-90 M5: no one answers for the derived ledger, and its writer supersedes its own claims.
+  if (agentId === DERIVED_AGENT_ID) return 0;
   const endpoint = deps.endpoint();
   if (!endpoint) return 0;
   const prefix = verifiedPrefix(endpoint.store.readLedger(agentId));

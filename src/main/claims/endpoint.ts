@@ -1,7 +1,9 @@
 /**
  * CLAIM-LEDGER W1: the claim verbs of `POST /memory/<token>` (and, through W6, the /ledger route's
  * memory part): note, retract, accept, dismiss, used, reconcile, and `export --complete` (W6's
- * planned-downgrade export of the agent's own memory.md; main supplies it as `exportComplete`).
+ * planned-downgrade export of the agent's own memory.md; main supplies it as `exportComplete`), and
+ * `history ID` (CLAIMS-90 HISTORY-PTR: the read behind a `[history: memory history <id>]` pointer;
+ * main supplies it as `claimHistory`).
  *
  * IDENTITY (G1.3). The agent is the token's agent, resolved before this runs. A body that names an
  * agent or a wing - or sets `source` or `legacy` (god cac15f) - is refused, at the top level or in
@@ -14,8 +16,9 @@
 import { LEDGER_LEVELS, type AppendOrigin, type ClaimKind, type LedgerLevel, type RecordDraft, type Ref, type SupersedesReason } from '../../shared/claims';
 import type { ClaimStore } from './store';
 import type { CandidateResult } from './candidates';
+import { restatedIds } from './valueSupersede';
 
-export const CLAIM_VERBS: ReadonlySet<string> = new Set(['note', 'retract', 'accept', 'dismiss', 'used', 'reconcile', 'export', 'get']);
+export const CLAIM_VERBS: ReadonlySet<string> = new Set(['note', 'retract', 'accept', 'dismiss', 'used', 'reconcile', 'export', 'history', 'get']);
 
 export interface ClaimReply { ok: boolean; exit: number; text?: string; json?: unknown; error?: string }
 
@@ -23,6 +26,7 @@ const EXIT = { ok: 0, usage: 2, unavailable: 3 } as const;
 /** Field names an agent must never send: identity and provenance are main's (G1.3, god cac15f). */
 const FORBIDDEN = new Set(['agent', 'agentId', 'wing', 'source', 'legacy', 'section', 'by', 'wt', 'prev', 'mac', 'origin']);
 const MSG_ID_RE = /^[A-Za-z0-9._:-]{1,120}$/;
+const CLAIM_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 export interface ClaimsEndpointDeps {
   store: ClaimStore;
@@ -32,6 +36,9 @@ export interface ClaimsEndpointDeps {
   onReconcile?: (agentId: string, a: string, b: string) => void;
   /** CLAIM-LEDGER W6: `memory export --complete` (exportWiring.ts); absent = not wired in this build. */
   exportComplete?: (agentId: string) => { ok: true; file: string; bytes: number; note: string } | { ok: false; error: string };
+  /** CLAIMS-90 HISTORY-PTR: the history group holding claim `id` in the served hive (the caller's
+   *  ledger first, then the other agents'); absent = not wired in this build. */
+  claimHistory?: (agentId: string, id: string) => { ok: true; text: string; owner: string } | { ok: false; error: string };
   /** CL-M4-WP: fresh candidate scan on the note path; presentation never appends. `key` lists a
    *  same-key live claim first (CL-M4-FORWARD-PATH; an offer, never a supersede). */
   noteCandidates?: (agentId: string, text: string, o?: { key?: string }) => Promise<CandidateResult>;
@@ -39,6 +46,8 @@ export interface ClaimsEndpointDeps {
   validateSupersedes?: (agentId: string, ids: string[]) => boolean;
   /** S3: the agent's own LIVE claims with this key, newest first (verified state). */
   liveByKey?: (agentId: string, key: string) => string[];
+  /** R2 (d): the same live claims with their text, for the restatement rule (valueSupersede.ts). */
+  liveClaimsByKey?: (agentId: string, key: string) => Array<{ id: string; text: string }>;
   /** Choice-only diagnostics. Never pass note/reason text to this callback. */
   onNoteChoice?: (agentId: string, choice: NoteChoice, ids: string[], detail?: NoteChoiceDetail) => void;
   /** CLAIMS-90 R2 (C90-GET): `memory get <key|card>`, read-only over every verified ledger (claims/get.ts); absent = not wired in this build. */
@@ -70,6 +79,8 @@ export interface NoteChoiceDetail {
   cardKeyRefused?: true;
   /** offered: a bare --separate was sent back to the offer. */
   bareSeparate?: boolean;
+  /** replace: R2 (d), the note said nothing and replaced the writer's own same-key claims it restates. */
+  sameKeyAuto?: true;
 }
 
 function usage(error: string): ClaimReply { return { ok: false, exit: EXIT.usage, error }; }
@@ -101,11 +112,14 @@ function parseRefs(v: unknown): Ref[] | string {
  * offer, so a note keyed `card.*` is refused while a live own claim has that key, unless it says
  * what it does to it (supersedes, or separate ids). The text names the ids and the exact fields to
  * add. Null when the note may be written. Nothing is ever superseded here.
+ * CLAIMS-90 R2 (d): a self note that says nothing and RESTATES a live same-key claim (sameKeyAuto)
+ * is not refused: handleClaimVerb retires the restated claims; the others are still listed here.
  */
-export function cardKeyRefusal(d: Pick<ClaimsEndpointDeps, 'liveByKey'>, agentId: string, args: Record<string, unknown>): { text: string; ids: string[] } | null {
+export function cardKeyRefusal(d: Pick<ClaimsEndpointDeps, 'liveByKey' | 'liveClaimsByKey'>, agentId: string, args: Record<string, unknown>): { text: string; ids: string[] } | null {
   const key = args.key;
   if (typeof key !== 'string' || !key.startsWith('card.')) return null;
-  const live = d.liveByKey?.(agentId, key) ?? [];
+  const restated = new Set(sameKeyAuto(d, agentId, args));
+  const live = (d.liveByKey?.(agentId, key) ?? []).filter((id) => !restated.has(id));
   if (!live.length) return null;
   // A ledger route cannot show the candidate offer.  A non-bare separate therefore counts only
   // when it explicitly keeps at least one of this key's live claims apart.
@@ -117,6 +131,18 @@ export function cardKeyRefusal(d: Pick<ClaimsEndpointDeps, 'liveByKey'>, agentId
     ids: list,
     text: `your live claim${list.length > 1 ? 's' : ''} ${list.join(', ')} already ${list.length > 1 ? 'have' : 'has'} key ${key}. Say what this note does to ${list.length > 1 ? 'them' : 'it'}, then send the op again: add "supersedes": ["${list[0]}"], "reason": "changed" (or "corrected" / "moved") to the memory part when it replaces ${list.length > 1 ? 'one' : 'it'}; add "separate": ["${list.join('", "')}"] when both stay true. Nothing was written`,
   };
+}
+
+/**
+ * CLAIMS-90 R2 (d), the write-time supersede rule (god 9f7922; valueSupersede.ts): a self note under
+ * a key that says nothing about its same-key claims (no --supersedes, --separate or --cancel) retires
+ * the writer's OWN live claims under that key that it RESTATES (same text but a value), reason
+ * changed, note "restated". Other same-key claims and another agent's claims are never touched.
+ */
+export function sameKeyAuto(d: Pick<ClaimsEndpointDeps, 'liveClaimsByKey'>, agentId: string, args: Record<string, unknown>): string[] {
+  if (typeof args.key !== 'string' || typeof args.text !== 'string') return [];
+  if (args.supersedes !== undefined || args.separate !== undefined || args.cancel !== undefined || args.fromMail !== undefined) return [];
+  return restatedIds(args.text, d.liveClaimsByKey?.(agentId, args.key) ?? []);
 }
 
 export async function handleClaimVerb(d: ClaimsEndpointDeps, agentId: string, body: unknown, origin: Extract<AppendOrigin, 'endpoint' | 'ledger-route'>): Promise<ClaimReply> {
@@ -142,6 +168,18 @@ export async function handleClaimVerb(d: ClaimsEndpointDeps, agentId: string, bo
     if (!d.get) return { ok: false, exit: EXIT.unavailable, error: 'memory get is not available in this build' };
     const r = d.get(agentId, { term: args.term, agent: (args.agent as string | null | undefined) ?? null, mail: args.mail as number | undefined, before: (args.before as string | null | undefined) ?? null, noMail: args.noMail === true, history: args.history === true });
     return { ok: true, exit: EXIT.ok, text: r.text, json: r.json };
+  }
+
+  // CLAIMS-90 HISTORY-PTR: a read of the served hive, like search, so it answers at every level: a
+  // pointer an agent was shown (a wake-up, or an older memory.md in a search hit) always resolves.
+  if (cmd === 'history') {
+    for (const k of Object.keys(args)) if (k !== 'id') return usage(`history takes only a claim id (not "${k}")`);
+    if (typeof args.id !== 'string' || !CLAIM_ID_RE.test(args.id)) return usage('history needs one claim id, like: memory history c-0123456789ab');
+    if (!d.claimHistory) return { ok: false, exit: EXIT.unavailable, error: 'history is not available in this build' };
+    const r = d.claimHistory(agentId, args.id);
+    return r.ok
+      ? { ok: true, exit: EXIT.ok, text: r.text, json: { id: args.id, owner: r.owner } }
+      : { ok: false, exit: EXIT.usage, error: r.error };
   }
 
   const level = d.level(agentId);
@@ -174,7 +212,7 @@ export async function handleClaimVerb(d: ClaimsEndpointDeps, agentId: string, bo
       if (typeof args.fromMail !== 'string' || !MSG_ID_RE.test(args.fromMail)) return usage('bad --from-mail (a message id)');
       source = `mail:${args.fromMail}`;
     }
-    const sup = args.supersedes === undefined ? undefined : ids(args.supersedes);
+    let sup = args.supersedes === undefined ? undefined : ids(args.supersedes);
     if (sup === null) return usage('supersedes: claim ids');
     // CL-M4-FORWARD-PATH: --separate names the ids it keeps apart (c-a,c-b); a bare one is still
     // accepted, but with candidates present it returns the offer instead of writing.
@@ -199,6 +237,8 @@ export async function handleClaimVerb(d: ClaimsEndpointDeps, agentId: string, bo
     if (args.reasonText !== undefined && args.reason === undefined) return usage('--reason-text requires --reason');
     if (args.key !== undefined && typeof args.key !== 'string') return usage('--key is text');
     const key = args.key as string | undefined;
+    const auto = sameKeyAuto(d, agentId, args);
+    if (auto.length) sup = auto;
     if (origin === 'ledger-route') {
       const refused = cardKeyRefusal(d, agentId, args);
       if (refused) {
@@ -210,7 +250,7 @@ export async function handleClaimVerb(d: ClaimsEndpointDeps, agentId: string, bo
       d.onNoteChoice?.(agentId, 'cancel', [], { origin, shown: 0, sameKey: 0, sameCard: 0, keyed: key !== undefined });
       return { ok: true, exit: EXIT.ok, text: 'cancelled; no claim was written\n', json: { choice: 'cancel' } };
     }
-    const supersedesReason: SupersedesReason | undefined = args.reason === undefined ? undefined : {
+    const supersedesReason: SupersedesReason | undefined = auto.length ? { category: 'changed', note: 'restated' } : args.reason === undefined ? undefined : {
       category: args.reason as SupersedesReason['category'],
       ...(args.reasonText !== undefined ? { note: args.reasonText as string } : {}),
     };
@@ -246,7 +286,7 @@ export async function handleClaimVerb(d: ClaimsEndpointDeps, agentId: string, bo
     if (sup?.length) {
       if (!d.validateSupersedes?.(agentId, sup)) return usage('supersedes must name only your own currently live claims; refresh candidates and choose again');
       const sameKeyIds = new Set(candidates.filter((c) => c.why === 'same key').map((c) => c.id));
-      d.onNoteChoice?.(agentId, 'replace', sup, detail({ inOffer: sup.filter((x) => offerIds.has(x)).length, sameKeyChosen: sup.some((x) => sameKeyIds.has(x)) }));
+      d.onNoteChoice?.(agentId, 'replace', sup, detail({ inOffer: sup.filter((x) => offerIds.has(x)).length, sameKeyChosen: sup.some((x) => sameKeyIds.has(x)), ...(auto.length ? { sameKeyAuto: true } : {}) }));
     } else if (apart) {
       d.onNoteChoice?.(agentId, 'separate', apart, detail({ inOffer: apart.filter((x) => offerIds.has(x)).length }));
     } else if (choices && !candidates.length) d.onNoteChoice?.(agentId, 'new', [], detail());
@@ -265,6 +305,9 @@ export async function handleClaimVerb(d: ClaimsEndpointDeps, agentId: string, bo
     };
     const result = await store.appendRecord(agentId, draft, origin);
     const choice = separate ? 'separate' : 'new';
+    if (result.ok && auto.length) {
+      return { ...done(result, 'noted'), text: `noted ${result.id}; it restates and replaces your claim${auto.length > 1 ? 's' : ''} ${auto.join(', ')} under key ${key} (same words, a new value). If both stay true, write it with --separate ${auto.join(',')} instead.\n`, json: { id: result.id, choice: 'replace', sameKeyAuto: auto } };
+    }
     return result.ok && !sup ? { ...done(result, 'noted'), text: `noted ${result.id} (${choice})\n`, json: { id: result.id, choice } } : done(result, 'noted');
   }
 
