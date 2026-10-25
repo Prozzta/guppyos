@@ -28,7 +28,7 @@ import { basename, join, dirname, isAbsolute, win32, posix } from 'node:path';
 import { homedir } from 'node:os';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { AppendFile, LOG_KEEP_ROTATED, rotatedFiles } from './appendLog';
-import { MailCardIndex, NO_CARD, indexEntries, indexLinkContext, isNoCard, linkMail, type MailLink } from './mailCards';
+import { MailCardIndex, NO_CARD, indexEntries, indexLinkContext, isNoCard, linkMail, TRUSTED_METHODS, type MailLink } from './mailCards';
 import { atomicWriteJson as atomicWriteJsonFile, atomicWriteJsonAsync } from './atomicJson';
 import { ASK_BACKSTOP_MS, ASK_CLOSE_REASON_MAX, MailLedger, answeredByMessage, cardIdValue, freshMailId, isValidMailId, owesWork, replyTracked, staleObligations, supersededByMessage, type CardEvidence, type MailLedgerDoc, type ReleaseRun, type StaleObligation } from './mailLedger';
 import { mailObligationsView, type MailObligationsAgent } from './mailReaders';
@@ -3017,12 +3017,14 @@ export class HiveManager {
     // card is missing (surfaceNeedsHuman).
     const exempt = !Object.prototype.hasOwnProperty.call(reg.agents, msg.from) || cardIds.length === 0 || msg.needs_human === true;
     if (link.method === 'none' && isNoCard(msg.card) && floorWide) { msg.card = NO_CARD; return link; }
-    if (link.method !== 'ambiguous' && link.method !== 'none' && link.cards.length === 1) { msg.card = link.cards[0]; return link; }
+    if (TRUSTED_METHODS.has(link.method) && link.cards.length === 1) { msg.card = link.cards[0]; return link; }
     if (link.method === 'none' && msg.to === 'broadcast' && msg.card === undefined) { msg.card = NO_CARD; return link; }
     if (exempt) return link;
     const why = isNoCard(msg.card)
       ? 'card "none" is only for floor-wide mail (to broadcast, or from god)'
-      : link.cards.length > 1
+      : link.method === 'mention-body'
+        ? `it names ${link.cards.slice(0, 6).join(', ')} only in its body, and a body mention does not set a card`
+        : link.cards.length > 1
         ? `it names several cards (${link.cards.slice(0, 6).join(', ')}) and none of them is its card field`
         : cardIdValue(msg.card) ? `its card "${cardIdValue(msg.card)}" is not a card on this board` : 'it names no card';
     this.appendLog({ kind: 'drop', reason: 'no-card', from: msg.from, to: msg.to, id: msg.id, method: link.method, cards: link.cards.length });

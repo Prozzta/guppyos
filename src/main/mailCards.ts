@@ -15,8 +15,11 @@
  * Link rules, the same for every message (no per-item logic): the card field when it names a
  * registry card; else the reply chain (the nearest ancestor with exactly one card); else the
  * conversation when its carded messages name exactly one card; else every registry card id the
- * subject or body names (mention). A conversation with several cards and no other rule is
- * `ambiguous`, never a guess. An explicit card `none` marks floor-wide mail.
+ * subject names (mention-subject); else every one the body names (mention-body). A mention-body
+ * link is WEAK (god d65b59, Jim's sample: 10 of 53 body-only links wrong): it is indexed and listed,
+ * but it never sets a delivered message's card and it does not count as coverage. A conversation
+ * with several cards and no other rule is `ambiguous`, never a guess. An explicit card `none`
+ * marks floor-wide mail.
  * The Human's mail is linked by id only: its subject and body are never copied.
  */
 import { appendFileSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
@@ -32,7 +35,9 @@ export const NO_CARD = 'none';
 /** The most in_reply_to hops the reply rule walks. */
 export const MAIL_CARD_REPLY_HOPS = 20;
 
-export type MailLinkMethod = 'field' | 'reply' | 'conversation' | 'mention' | 'ambiguous' | 'none';
+export type MailLinkMethod = 'field' | 'reply' | 'conversation' | 'mention-subject' | 'mention-body' | 'ambiguous' | 'none';
+/** Methods that link a message for coverage and for delivery (mention-body is listed only). */
+export const TRUSTED_METHODS: ReadonlySet<MailLinkMethod> = new Set(['field', 'reply', 'conversation', 'mention-subject']);
 export type MailLinkTrust = 'delivery' | 'mail-ledger' | 'two-party';
 
 export interface MailLinkRecord {
@@ -98,7 +103,7 @@ export function isNoCard(card: unknown): boolean {
 
 const INHERITED: ReadonlySet<MailLinkMethod> = new Set(['field', 'reply', 'conversation']);
 
-/** The link rules (see the header), in order: field, reply chain, conversation, mention. */
+/** The link rules (see the header), in order: field, reply chain, conversation, mention-subject, mention-body. */
 export function linkMail(m: LinkableMail, ctx: LinkContext): MailLink {
   const own = cardIdValue(m.card);
   if (own && isNoCard(own)) return { cards: [], method: 'none' };
@@ -117,8 +122,10 @@ export function linkMail(m: LinkableMail, ctx: LinkContext): MailLink {
   }
   const conv = typeof m.conversation === 'string' && m.conversation ? [...new Set(ctx.conversationCards(m.conversation))] : [];
   if (conv.length === 1) return { cards: conv, method: 'conversation' };
-  const named = ctx.mentions(`${str(m.subject)}\n${str(m.body)}`);
-  if (named.length) return { cards: named, method: 'mention' };
+  const inSubject = ctx.mentions(str(m.subject));
+  if (inSubject.length) return { cards: inSubject, method: 'mention-subject' };
+  const inBody = ctx.mentions(str(m.body));
+  if (inBody.length) return { cards: inBody, method: 'mention-body' };
   if (conv.length > 1) return { cards: conv, method: 'ambiguous' };
   return { cards: [], method: 'none' };
 }
@@ -314,6 +321,10 @@ export interface MailCardBackfillCounts {
   byTrust: Record<string, number>;
   excluded: Record<string, number>;
   unlinked: string[];
+  /** Mails linked only by a body mention (weak: indexed, not coverage). */
+  weak: number;
+  /** Mails with a trusted link (TRUSTED_METHODS), the coverage numerator. */
+  covered: number;
 }
 
 type SentKey = string;
@@ -432,7 +443,7 @@ export function backfillMailCards(hiveRoot: string, now: string): MailCardBackfi
     linkOf: (id) => linked.get(id) ?? index.linkOf(id),
     conversationCards: (c) => [...(conv.get(c) ?? [])],
   }, cardIds);
-  const counts: MailCardBackfillCounts = { mails: mails.length, recorded: 0, already: 0, byMethod: {}, byAct: {}, byFrom: {}, byTrust: {}, excluded, unlinked: [] };
+  const counts: MailCardBackfillCounts = { mails: mails.length, recorded: 0, already: 0, byMethod: {}, byAct: {}, byFrom: {}, byTrust: {}, excluded, unlinked: [], weak: 0, covered: 0 };
   const bump = (o: Record<string, Record<string, number>>, k: string, method: string): void => { const r = (o[k] = o[k] ?? {}); r[method] = (r[method] ?? 0) + 1; };
   const order = [...mails].sort((a, b) => (a.created_at ?? '').localeCompare(b.created_at ?? '') || a.id.localeCompare(b.id));
   for (const m of order) {
@@ -447,6 +458,8 @@ export function backfillMailCards(hiveRoot: string, now: string): MailCardBackfi
     bump(counts.byAct, m.act || '?', link.method);
     bump(counts.byFrom, m.from || '?', link.method);
     if (link.method === 'none' || link.method === 'ambiguous') counts.unlinked.push(m.id);
+    if (link.method === 'mention-body') counts.weak++;
+    if (TRUSTED_METHODS.has(link.method)) counts.covered++;
   }
   return counts;
 }

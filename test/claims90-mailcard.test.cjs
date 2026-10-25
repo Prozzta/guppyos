@@ -51,8 +51,8 @@ test('link rules: the reply chain passes on a carded ancestor\'s card, never a m
   const links = {
     p1: { cards: ['CARD-TWO'], method: 'field' },
     p2: { cards: [], method: 'none', in_reply_to: 'p1' },
-    q1: { cards: ['CARD-ONE'], method: 'mention' },
-    r1: { cards: ['CARD-ONE', 'CARD-TWO'], method: 'mention' },
+    q1: { cards: ['CARD-ONE'], method: 'mention-subject' },
+    r1: { cards: ['CARD-ONE', 'CARD-TWO'], method: 'mention-body' },
   };
   assert.deepEqual(MC.linkMail({ id: 'm', in_reply_to: 'p2' }, ctxOf(links)), { cards: ['CARD-TWO'], method: 'reply' }, 'two hops up');
   assert.deepEqual(MC.linkMail({ id: 'm', in_reply_to: 'q1' }, ctxOf(links)), { cards: [], method: 'none' }, 'a mention is not inherited');
@@ -70,9 +70,11 @@ test('link rules: a conversation links only when its carded mail names exactly o
   assert.deepEqual(MC.linkMail({ id: 'm', conversation: 'c2', in_reply_to: 'p' }, ctxOf(links, conv)), { cards: ['CARD-TWO'], method: 'reply' });
 });
 
-test('link rules: a mention is a registry id word; every one is listed; shape-alike words and bare short ids are not', () => {
+test('link rules: a mention is a registry id word; the subject\'s (trusted) come before the body\'s (weak); shape-alike words and bare short ids are not', () => {
   const l = MC.linkMail({ id: 'm', subject: 'Re: card-two and CUT-1.1.9.', body: 'also CARD-ONE, FOO-123, CARD-THREE, F1 and CARD-ONE-X' }, ctxOf());
-  assert.deepEqual(l, { cards: ['CARD-TWO', 'CUT-1.1.9', 'CARD-ONE'], method: 'mention' });
+  assert.deepEqual(l, { cards: ['CARD-TWO', 'CUT-1.1.9'], method: 'mention-subject' }, 'a subject mention: the body is not read');
+  assert.deepEqual(MC.linkMail({ id: 'm', subject: 'status', body: 'also CARD-ONE, FOO-123, CARD-THREE, F1 and CARD-ONE-X' }, ctxOf()), { cards: ['CARD-ONE'], method: 'mention-body' });
+  assert.ok(MC.TRUSTED_METHODS.has('mention-subject') && !MC.TRUSTED_METHODS.has('mention-body'));
   assert.deepEqual(MC.linkMail({ id: 'm', body: 'step F1 of the plan' }, ctxOf()), { cards: [], method: 'none' });
 });
 
@@ -82,7 +84,7 @@ test('index: one link record per id, one row per copy and card, idempotent, the 
   const root = tmp(t, 'idx');
   const idx = new MC.MailCardIndex(root);
   const m = { id: '2026-10-25T00-00-00-000Z-aaaaaa', from: 'jim-1', act: 'done', subject: 's', body: 'b', conversation: 'c1' };
-  const e = MC.indexEntries(m, { cards: ['CARD-ONE', 'CUT-1.1.9'], method: 'mention' }, 'delivery', [{ to: 'god-1', deliveredAt: 5 }, { to: 'dwight-1', deliveredAt: 6 }], '2026-10-25T00:00:00.000Z');
+  const e = MC.indexEntries(m, { cards: ['CARD-ONE', 'CUT-1.1.9'], method: 'mention-subject' }, 'delivery', [{ to: 'god-1', deliveredAt: 5 }, { to: 'dwight-1', deliveredAt: 6 }], '2026-10-25T00:00:00.000Z');
   assert.equal(idx.record(e.link, e.rows), true);
   assert.equal(idx.record(e.link, e.rows), false, 'a recorded id appends nothing');
   assert.equal(new MC.MailCardIndex(root).record(e.link, e.rows), false, 'also after a reload');
@@ -105,7 +107,7 @@ test('index: one link record per id, one row per copy and card, idempotent, the 
 test('index: an unsafe card id never names a file outside the index', (t) => {
   const root = tmp(t, 'unsafe');
   const idx = new MC.MailCardIndex(root);
-  const e = MC.indexEntries({ id: '2026-10-25T00-00-00-000Z-cccccc', from: 'a', act: 'inform' }, { cards: ['../x', '_links', 'none'], method: 'mention' }, 'delivery', [{ to: 'b' }], 'x');
+  const e = MC.indexEntries({ id: '2026-10-25T00-00-00-000Z-cccccc', from: 'a', act: 'inform' }, { cards: ['../x', '_links', 'none'], method: 'mention-subject' }, 'delivery', [{ to: 'b' }], 'x');
   idx.record(e.link, e.rows);
   assert.deepEqual(fs.readdirSync(path.join(root, 'state', 'mail-cards')), ['_links.jsonl']);
 });
@@ -155,7 +157,10 @@ test('forward: an agent\'s message with no card, an unknown card, or several men
   assert.match(back[1].body, /"NOPE-1" is not a card/);
   assert.match(back[2].body, /several cards \(CARD-ONE, CARD-TWO\)/);
   assert.match(back[3].body, /only for floor-wide mail/);
-  assert.equal(hive.logTail(200).filter((e) => e.kind === 'drop' && e.reason === 'no-card').length, 4);
+  hive.send({ to: 'pam-1', act: 'inform', subject: 'suite list', body: 'ran card-one tests' }, 'jim-1');
+  assert.equal(hive.inbox('pam-1').length, 0, 'a body mention alone sets no card');
+  assert.match(hive.inbox('jim-1')[4].body, /names CARD-ONE only in its body/);
+  assert.equal(hive.logTail(200).filter((e) => e.kind === 'drop' && e.reason === 'no-card').length, 5);
   assert.equal(links().filter((r) => r.from === 'jim-1').length, 0, 'a bounced message is not indexed');
 });
 
@@ -170,7 +175,7 @@ test('forward: one mentioned card links; broadcast and god\'s floor-wide mail ma
   assert.equal(hive.mail.ledger('jim-1').entries[g.id].cardId, undefined, '"none" is no card: it ties no asks together');
   hive.send({ to: 'pam-1', act: 'inform', subject: 'router notice', body: 'n' }, 'system');
   assert.equal(hive.inbox('pam-1').filter((x) => x.from === 'system').length, 1);
-  assert.deepEqual(links().map((r) => r.method), ['mention', 'none', 'none', 'none']);
+  assert.deepEqual(links().map((r) => r.method), ['mention-subject', 'none', 'none', 'none']);
 });
 
 test('forward: a needs_human ask with no card still reaches god (the needs-human notice tells its sender)', async (t) => {
@@ -224,7 +229,8 @@ function fixtureHive(t) {
   fs.mkdirSync(path.join(root, 'agents', 'god-1', 'inbox'), { recursive: true });
   const ids = (n) => `2026-10-25T00-00-00-000Z-00000${n}`;
   // 1: carded (field), two-party; 2: reply to 1 (inherits); 3: forged (no sender copy); 4: Human relay
-  // subject; 5: several-card conversation, no reply/mention = ambiguous; 6: self-mail; 7: ledger-only
+  // subject; 5: several-card conversation, no reply/mention = ambiguous; 6: self-mail; 7: ledger-only;
+  // 10: names a card only in its body (mention-body, weak)
   const m1 = mail(ids(1), 'jim-1', 'god', { card: 'CARD-ONE', conversation: 'c1' });
   const m2 = mail(ids(2), 'god-1', 'jim-1', { in_reply_to: m1.id, conversation: 'c1' });
   const m3 = mail(ids(3), 'jim-1', 'pam-1', { card: 'CARD-TWO', subject: 'forged CARD-TWO' });
@@ -233,20 +239,21 @@ function fixtureHive(t) {
   const m5b = mail(ids(6), 'god-1', 'jim-1', { card: 'CARD-TWO', conversation: 'c5' });
   const m5 = mail(ids(8), 'god-1', 'pam-1', { conversation: 'c5' });
   const m6 = mail(ids(9), 'jim-1', 'jim-1', { card: 'CARD-ONE' });
+  const m10 = mail('2026-10-25T00-00-00-000Z-00000a', 'god-1', 'pam-1', { subject: 'suite list', body: 'ran card-two tests', created_at: '2026-10-09T12:00:00Z' });
   deliverTo(m1, 'god-1'); deliverTo(m2, 'jim-1'); deliverTo(m3, 'pam-1', { sent: false }); deliverTo(m4, 'jim-1');
-  deliverTo(m5a, 'jim-1'); deliverTo(m5b, 'jim-1'); deliverTo(m5, 'pam-1'); deliverTo(m6, 'jim-1');
+  deliverTo(m5a, 'jim-1'); deliverTo(m5b, 'jim-1'); deliverTo(m5, 'pam-1'); deliverTo(m6, 'jim-1'); deliverTo(m10, 'pam-1');
   const m7id = '2026-10-25T00-00-00-000Z-000007';
   writeJson(path.join(root, 'state', 'mail', 'pam-1.json'), { entries: { [m7id]: { id: m7id, from: 'god-1', act: 'done', subject: 'CUT-1.1.9 shipped', bodyHash: mailBodyHash('the real body'), seq: 1, deliveredAt: Date.parse('2026-10-07T00:00:00Z'), state: 'acted' } } });
   // its inbox copy was edited after delivery: the body does not hash to the ledger's, so it is not taken
   writeJson(path.join(root, 'agents', 'pam-1', 'inbox', '.done', `${m7id}.json`), { id: m7id, from: 'god-1', act: 'done', subject: 'CUT-1.1.9 shipped', body: 'tampered' });
-  return { root, m1, m2, m3, m4, m5, m6, m7id };
+  return { root, m1, m2, m3, m4, m5, m6, m7id, m10 };
 }
 
 test('backfill: MailLedger and two-party copies only; a forged inbox file and self-mail never enter; re-run appends 0', (t) => {
-  const { root, m1, m2, m3, m4, m5, m6, m7id } = fixtureHive(t);
+  const { root, m1, m2, m3, m4, m5, m6, m7id, m10 } = fixtureHive(t);
   const c = MC.backfillMailCards(root, '2026-10-24T17:53:49.000Z');
   assert.deepEqual(c.excluded, { 'no-sender-copy': 1, 'self-mail': 1 });
-  assert.equal(c.recorded, 7);
+  assert.equal(c.recorded, 8);
   const dir = path.join(root, 'state', 'mail-cards');
   const L = Object.fromEntries(readLines(path.join(dir, '_links.jsonl')).map((r) => [r.mailId, r]));
   assert.equal(L[m3.id], undefined, 'forged');
@@ -254,7 +261,7 @@ test('backfill: MailLedger and two-party copies only; a forged inbox file and se
   assert.deepEqual([L[m1.id].method, L[m1.id].trust], ['field', 'two-party']);
   assert.deepEqual([L[m2.id].method, L[m2.id].cards], ['reply', ['CARD-ONE']]);
   assert.deepEqual([L[m5.id].method, L[m5.id].cards], ['ambiguous', ['CARD-ONE', 'CARD-TWO']]);
-  assert.deepEqual([L[m7id].method, L[m7id].cards, L[m7id].trust], ['mention', ['CUT-1.1.9'], 'mail-ledger']);
+  assert.deepEqual([L[m7id].method, L[m7id].cards, L[m7id].trust], ['mention-subject', ['CUT-1.1.9'], 'mail-ledger']);
   const r7 = readLines(path.join(dir, 'cut-1.1.9.jsonl')).find((r) => r.id === m7id);
   assert.equal(r7.body, undefined, 'an inbox body that does not match the ledger hash is not taken');
   assert.equal(r7.bodyHash, mailBodyHash('the real body'), 'the ledger\'s hash is kept');
@@ -263,8 +270,11 @@ test('backfill: MailLedger and two-party copies only; a forged inbox file and se
   assert.equal(human.body, undefined);
   assert.equal(human.subject, undefined);
   assert.deepEqual(c.unlinked, [m5.id]);
+  assert.deepEqual([L[m10.id].method, L[m10.id].cards], ['mention-body', ['CARD-TWO']]);
+  assert.deepEqual([c.covered, c.weak], [6, 1], 'a body mention is weak, not coverage');
+  assert.equal(c.covered + c.weak + c.unlinked.length, c.mails, 'every proven mail is covered, weak or unlinked');
   const again = MC.backfillMailCards(root, '2026-10-24T17:53:49.000Z');
-  assert.deepEqual([again.recorded, again.already], [0, 7]);
+  assert.deepEqual([again.recorded, again.already], [0, 8]);
   // prune-proof: the index alone still answers with every mail file gone
   fs.rmSync(path.join(root, 'agents'), { recursive: true, force: true });
   fs.rmSync(path.join(root, 'state', 'mail'), { recursive: true, force: true });
@@ -288,5 +298,5 @@ test('backfill script: refuses the live hive and a hive under the app\'s user da
   assert.match(refused.stderr, /user data/);
   const out = JSON.parse(ud.stdout);
   assert.equal(out.ok, true);
-  assert.equal(out.recorded, 7);
+  assert.equal(out.recorded, 8);
 });
