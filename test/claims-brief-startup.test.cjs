@@ -40,6 +40,20 @@ function fixture(n) {
 }
 const wordCount = (s) => s.split(/\s+/).filter(Boolean).length;
 const digest = (x) => crypto.createHash('sha256').update(JSON.stringify(x)).digest('hex').slice(0, 16);
+/** CLAIMS-90 M3a (6abb51af): every included keyed claim line (fixture: i % 11 == 0, key k.<i % 44>) opens with
+ *  `- <key>: `, no unkeyed line does, and (HISTORY-PTR 252134c5) no pointer names a file. Returns the keyed count. */
+function keyedLines(text) {
+  assert.doesNotMatch(text, /memory\.md#/, 'no memory.md# anchor');
+  let keyed = 0;
+  for (const line of text.split('\n')) {
+    const m = /^- (?:⚠ [^·]+ · )?(.*) \[status:current\] \[c:c-(\d+)\]/.exec(line);
+    if (!m) continue;
+    const i = Number(m[2]);
+    if (i % 11 === 0) { assert.ok(m[1].startsWith(`k.${i % 44}: `), `c-${m[2]}: keyed line opens with its key: ${line.slice(0, 60)}`); keyed++; }
+    else assert.doesNotMatch(m[1], /^k\.\d+: /, `c-${m[2]}: an unkeyed line carries no key`);
+  }
+  return keyed;
+}
 const counting = (fn) => { const c = (s) => { c.calls++; return fn(s); }; c.calls = 0; return c; };
 
 test('CL-BRIEF-STARTUP cause 1: a 1,000-claim working set counts each line about once, not the whole output per line', () => {
@@ -72,8 +86,13 @@ test('CL-BRIEF-STARTUP cause 1: same text and receipt as before the fix (golden)
   // in words3000, words700, length9000 and length2500 the respelled pointer costs a different count,
   // so one pointer line moves across the cap (out for words: one word became three; in for length:
   // shorter). heavySep4000 and heavySep2500 are unchanged.
-  const golden = { words3000: '523bf3503b9c44e9', words700: '80380573ff0ba6c0', length9000: 'aaac905198410bcc', length2500: 'b0f0134756c0d471',
-    heavySep9000: 'd5d2090f1fd5b99f', heavySep6000: '736fabc22955165b', heavySep4000: '05c315f3a1617b99', heavySep2500: '1f1f2a9256503fe4' };
+  // Re-pinned for CLAIMS-90 M3a (6abb51af) on the merged branch: a keyed claim's working-set line opens with
+  // `- <key>: ` (the fixture keys every 11th claim). Exactly the four packs that include a keyed line moved
+  // (words3000, words700, length9000, heavySep9000: one keyed line each); length2500, heavySep6000,
+  // heavySep4000 and heavySep2500 include none and keep the HISTORY-PTR digests. keyedLines() checks the text.
+  const golden = { words3000: 'b9d0d1832af57b19', words700: 'f575764d78d5eb46', length9000: '459e492d226de8c9', length2500: 'b0f0134756c0d471',
+    heavySep9000: 'e6cd208ec78bac96', heavySep6000: '736fabc22955165b', heavySep4000: '05c315f3a1617b99', heavySep2500: '1f1f2a9256503fe4' };
+  const keyedPer = { words3000: 1, words700: 1, length9000: 1, length2500: 0, heavySep9000: 1, heavySep6000: 0, heavySep4000: 0, heavySep2500: 0 };
   // Additive over '\n' like WordPiece, but each separator costs 51: the running sums must count them.
   const heavySep = (s) => s.length + 50 * (s.split('\n').length - 1);
   const got = {};
@@ -82,6 +101,7 @@ test('CL-BRIEF-STARTUP cause 1: same text and receipt as before the fix (golden)
     const out = V.createClaimViews(records, fn).buildWorkingSet(state, view, budget);
     assert.equal(out.receipt.used, fn(out.text), `${name}: receipt.used is the count of the delivered text`);
     assert.ok(out.receipt.used <= budget, `${name}: within the budget`);
+    assert.equal(keyedLines(out.text), keyedPer[name], `${name}: the keyed lines open with their key (M3a) and no other line does`);
     got[name] = digest(out);
   }
   assert.deepEqual(got, golden);

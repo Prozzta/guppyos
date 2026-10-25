@@ -111,12 +111,13 @@ test('CL-OVERFLOW-NOTE: the live budget 2,772 (WordPiece-like counter) now ends 
   // 50d18f14 kept the same 87 claims and two more history pointers, and told the agent nothing.
   assert.equal(out.receipt.included.length, 87);
   // The boundary: a budget the text fills exactly still ends with the note (2772 did before
-  // HISTORY-PTR 252134c5 respelled the pointers; 2770 is the nearest exact fill with the same counts).
-  const cap = V.createClaimViews(records, COUNTERS.words).buildWorkingSet(state, view, 2770);
-  assert.equal(cap.receipt.used, 2770);
+  // HISTORY-PTR 252134c5 respelled the pointers; 2770 was the nearest exact fill with the same counts;
+  // CLAIMS-90 M3a 6abb51af keyed-line lead on the merged branch: 2785, same 87 / 280).
+  const cap = V.createClaimViews(records, COUNTERS.words).buildWorkingSet(state, view, 2785);
+  assert.equal(cap.receipt.used, 2785);
   assert.equal(omittedOf(cap), 280);
   assert.equal(cap.receipt.included.length, 87);
-  assert.deepEqual(cap.text.split('\n').slice(-2), ['⚠ Working set omitted 280 claim(s) at the 2770-token budget.', '+280 more']);
+  assert.deepEqual(cap.text.split('\n').slice(-2), ['⚠ Working set omitted 280 claim(s) at the 2785-token budget.', '+280 more']);
 });
 
 test('CL-OVERFLOW-NOTE: byte-identical to 50d18f14 (pointer spelling aside) when nothing overflows, and when the note already fitted', () => {
@@ -128,9 +129,10 @@ test('CL-OVERFLOW-NOTE: byte-identical to 50d18f14 (pointer spelling aside) when
     return [name, digest(out)];
   }));
   // Re-pinned for CLAIMS-90 HISTORY-PTR (252134c5): each text is 50d18f14's with only the pointer
-  // respelled (memory.md#claim-history-<id> -> memory history <id>), checked by text diff.
-  assert.deepEqual(got, { words: '41a229705ea66d8a', length: 'cece0373896caa22', ceil4: '58e321f7dd880557', heavySep: 'd2c7bfa68c60aa14' });
+  // respelled (memory.md#claim-history-<id> -> memory history <id>), checked by text diff; then for
+  // CLAIMS-90 M3a (6abb51af, merged branch): every keyed line (fixture i % 11 == 0) opens with `- k.<i % 44>: `.
+  assert.deepEqual(got, { words: 'dd0b67ee69333a49', length: '65f76c138e9fdab9', ceil4: '3721f3017076379f', heavySep: '10eaab682a95a113' });
   const f400 = fixture(400);
   const out = V.createClaimViews(f400.records, COUNTERS.ceil4).buildWorkingSet(f400.state, f400.view, 2772);
-  assert.equal(digest(out), 'c72546476f8b666b', 'ceil4 at 2,772: the note already fitted after the full pack, so that pack is kept');
+  assert.equal(digest(out), 'bfc20f07b181f061', 'ceil4 at 2,772: the note already fitted after the full pack, so that pack is kept');
 });
