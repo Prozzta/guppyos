@@ -17,6 +17,7 @@
  *   node test/claims-90/answerer.cjs --snapshot <dir> --addendum <dir> --items <items.jsonl>
  *        --instruction <file> --out <dir> [--model <id>] [--claude <exe>] [--resources <dir>] [--keep]
  *        [--build <worktree>]   serve a branch build (its src, out/ hook shape, Electron and memory-cli)
+ *        [--hide-stale 0|1]     C90_HIDE_STALE for the serve child (step 3 OFF arm: 0); recorded in run.json appEnv
  *
  * items.jsonl: { "id": "...", "asker": "<agent id>", "question": "..." }
  * The instruction file may use {asker}, {today} and {question}.
@@ -37,12 +38,20 @@ const MAX_CALLS = 5;
 const ITEM_TIMEOUT_MS = 10 * 60_000;
 const INSTALLED_APP = path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Munder Difflin', 'Guppy');
 
+/** The serve child's environment: the drill allow-list, plus C90_HIDE_STALE when --hide-stale names it (step 3 arms). */
+function serveEnv(o, home) {
+  const env = drillEnv(home);
+  if (o.hideStale !== undefined) env.C90_HIDE_STALE = o.hideStale;
+  return env;
+}
+
 function parseArgs(argv) {
   const o = { keep: false, model: 'claude-opus-5-5' };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--keep') o.keep = true;
     else if (/^--(snapshot|addendum|items|instruction|out|model|claude|resources|tree|build)$/.test(a)) o[a.slice(2)] = argv[++i];
+    else if (a === '--hide-stale') { o.hideStale = argv[++i]; if (!/^[01]$/.test(o.hideStale)) throw new Error('--hide-stale takes 0 or 1'); }
     else throw new Error(`unknown argument ${a}`);
   }
   for (const k of ['snapshot', 'addendum', 'items', 'instruction', 'out']) if (!o[k]) throw new Error(`--${k} is required`);
@@ -322,7 +331,7 @@ async function answerItem(o, v, addDir, item, key, shape, instruction, outDir) {
     const specFile = path.join(home, 'answer-spec.json');
     const answers = path.join(itemDir, 'serve.jsonl');
     fs.writeFileSync(specFile, JSON.stringify({ tree: o.tree, hive, userData, home, resourcesDir: o.resources, now: v.manifest.takenFrom, world, items: [], out: answers, serve }));
-    const server = spawn(R.electronOf(o.tree), [path.join(__dirname, 'answer-child.cjs'), specFile], { cwd: o.tree, env: drillEnv(home), windowsHide: true, stdio: ['pipe', 'ignore', 'pipe'] });
+    const server = spawn(R.electronOf(o.tree), [path.join(__dirname, 'answer-child.cjs'), specFile], { cwd: o.tree, env: serveEnv(o, home), windowsHide: true, stdio: ['pipe', 'ignore', 'pipe'] });
     let serverErr = '';
     server.stderr.on('data', (d) => { if (serverErr.length < 20000) serverErr += d; });
     const serverClosed = closeOf(server, ITEM_TIMEOUT_MS + 5 * 60_000);
@@ -453,6 +462,8 @@ async function main(argv) {
     code: code0,
     // --build: code.head is the build's commit; the runner's own commit is here.
     build, runnerHead: R.git(REPO, ['rev-parse', 'HEAD']),
+    // Step 3: the serve child's C90_HIDE_STALE (T2 + T3 switch); null = unset, the default ON.
+    appEnv: { C90_HIDE_STALE: o.hideStale ?? null },
     codeAtEnd: (() => { const c = codeAt(); return JSON.stringify(c) === JSON.stringify(code0) ? 'unchanged' : c; })(),
     itemsSha256: sha256(fs.readFileSync(o.items)), items: items.length,
     invalid: rows.filter((r) => r.invalid).length,
