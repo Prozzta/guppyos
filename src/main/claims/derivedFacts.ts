@@ -241,11 +241,15 @@ export function shaMentions(text: unknown): ShaMention[] {
   return out;
 }
 
-/** The sha a done mail reports in its subject as `@<sha>` (`CARD @<sha>`), lower-cased, or null. */
+/**
+ * The sha a done mail reports in its subject as `@<sha>` (`CARD @<sha>`), lower-cased, or null. With
+ * several (`PASS @A, NIT folded @B`) the LAST is the tip it reports (god c33130).
+ */
 export function subjectAtSha(subject: unknown): string | null {
   if (typeof subject !== 'string') return null;
-  const m = /(?<![0-9A-Za-z])@([0-9a-fA-F]{7,40})(?![0-9A-Za-z])/.exec(subject);
-  return m && /[0-9]/.test(m[1]) ? m[1].toLowerCase() : null;
+  let last: string | null = null;
+  for (const m of subject.matchAll(/(?<![0-9A-Za-z])@([0-9a-fA-F]{7,40})(?![0-9A-Za-z])/g)) if (/[0-9]/.test(m[1])) last = m[1].toLowerCase();
+  return last;
 }
 
 /**
@@ -307,6 +311,53 @@ export async function gitHistoryFacts(log: ReadonlyArray<{ commit: string; time:
       text: `Card ${card}: the latest commit in git order whose message names the card is ${best.slice(0, 8)} (${best}); ${list.length} commit${list.length > 1 ? 's name' : ' names'} it`,
       ...(t0 ? { at: new Date(t0 * 1000).toISOString() } : {}),
       refs: [{ type: 'task', value: card }, { type: 'commit', value: best }],
+    });
+  }
+  return out;
+}
+
+/**
+ * A merge into an INT: `Merge [branch |remote-tracking branch ]<name> [@<sha>|(<sha>)] into int-<v>`
+ * (also `int/release-<v>`, `INT <v>`). Without a sha the tip is the merge's second parent.
+ */
+const MERGE_RE = /^Merge\s+(?:(?:remote-tracking\s+)?branch\s+)?'?([^\s']+)'?(?:\s+(?:@|\()?([0-9a-f]{7,40})\)?)?\s+into\s+'?int(?:-|\/release-|\s)?(\d+(?:\.\d+)+)(?![0-9A-Za-z])/i;
+
+/**
+ * Merge class (god c33130): per merge commit into an INT, the merged tip and the INT, latest-wins per
+ * owner: card.<id>.merge when a card owns the branch (its id equals the branch name, or the message
+ * names the card itself), else branch.<name> (the name as in git, lower-cased).
+ */
+export async function mergeFacts(log: ReadonlyArray<{ commit: string; time: number; message: string; parents?: readonly string[] }>, cardIds: readonly string[], git: GitPort): Promise<DerivedFact[]> {
+  const known = new Map(cardIds.map((c) => [c.toLowerCase(), c]));
+  const newest = new Map<string, { commit: string; time: number; branch: string; tip: string; int: string; card: string | null }>();
+  for (const c of log) {
+    const m = MERGE_RE.exec(c.message.split('\n')[0].trim());
+    const tip = m?.[2] ?? c.parents?.[1];
+    if (!m || !tip) continue;
+    const branch = m[1].replace(/^(?:origin\/)?guppy\//i, '');
+    const card = known.get(branch.toLowerCase()) ?? null;
+    const key = card ? cardKey(card, 'merge') : keyOk(`branch.${branch.toLowerCase()}`) ? `branch.${branch.toLowerCase()}` : null;
+    if (!key) continue;
+    const prior = newest.get(key);
+    if (prior && (prior.time > c.time || (prior.time === c.time && prior.commit > c.commit))) continue;
+    newest.set(key, { commit: c.commit, time: c.time, branch: m[1], tip: tip.toLowerCase(), int: `INT-${m[3]}`, card });
+  }
+  const out: DerivedFact[] = [];
+  for (const [key, x] of [...newest].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
+    const tipFull = await git.commitOf(x.tip);
+    const tip = tipFull ?? x.tip;
+    const int = known.get(x.int.toLowerCase()) ?? x.int;
+    const who = x.card ? `Card ${x.card}: branch ${x.branch}` : `Branch ${x.branch}`;
+    out.push({
+      slot: key, key, kind: 'fact',
+      text: `${who} was last merged into ${int} at tip ${tip.slice(0, 8)} (${tip}${tipFull ? '' : ', not in the repository'}) by merge commit ${x.commit.slice(0, 8)} (${x.commit})`,
+      ...(x.time > 0 ? { at: new Date(x.time * 1000).toISOString() } : {}),
+      refs: [
+        ...(x.card ? [{ type: 'task' as const, value: x.card }] : []),
+        ...(known.has(int.toLowerCase()) ? [{ type: 'task' as const, value: int }] : []),
+        ...(tipFull ? [{ type: 'commit' as const, value: tipFull }] : []),
+        { type: 'commit' as const, value: x.commit },
+      ],
     });
   }
   return out;
@@ -445,11 +496,14 @@ export interface MailLike { id?: unknown; from?: unknown; act?: unknown; subject
 
 const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-/** Guide A12: a card id in text, case-insensitive, its dashes written as a dash, a space or nothing. */
-export function cardMatcher(cardIds: readonly string[]): (text: unknown) => string[] {
+/**
+ * Guide A12: a card id in text, case-insensitive, its dashes written as a dash, a space or nothing.
+ * `exact`: only as written (case aside), the precision a done mail's card link needs (variants < 0.95).
+ */
+export function cardMatcher(cardIds: readonly string[], exact = false): (text: unknown) => string[] {
   const ids = [...new Set(cardIds.filter((c) => typeof c === 'string' && c.length >= 2))].sort((a, b) => b.length - a.length);
   if (ids.length === 0) return () => [];
-  const alt = ids.map((id) => escapeRe(id).replace(/-/g, '[- ]?')).join('|');
+  const alt = ids.map((id) => (exact ? escapeRe(id) : escapeRe(id).replace(/-/g, '[- ]?'))).join('|');
   const re = new RegExp(`(?<![A-Za-z0-9.-])(${alt})(?![A-Za-z0-9]|[.-][A-Za-z0-9])`, 'gi');
   const canon = new Map(ids.map((id) => [id.toLowerCase().replace(/[- ]/g, ''), id]));
   return (text) => {
@@ -492,7 +546,7 @@ const mailAt = (m: MailLike): string => iso(m.created_at) ?? '';
  * A mail copied to several inboxes counts once (by id).
  */
 export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonly string[], git: GitPort): Promise<DoneMailResult> {
-  const match = cardMatcher(cardIds);
+  const match = cardMatcher(cardIds, true);
   const known = new Map(cardIds.map((c) => [c.toLowerCase(), c]));
   const skipped: Record<DoneSkipReason, number> = { notDone: 0, noShaWord: 0, noCommit: 0, noCard: 0, ambiguous: 0 };
   const skips: DoneSkip[] = [];
@@ -559,12 +613,13 @@ async function cardOfDoneMail(
   const linked = Array.isArray(m.cards)
     ? [...new Set(m.cards.map((c) => (typeof c === 'string' ? known.get(c.toLowerCase()) : undefined)).filter((c): c is string => !!c))]
     : [];
-  // The card the subject names outright beats one inherited by a reply or conversation link; a card
-  // named only in the body never counts (mention-body is weak: spec F).
-  const inSubject = match(m.subject);
-  if (inSubject.length === 1) return inSubject[0];
-  if (linked.length === 1 && (!inSubject.length || inSubject.includes(linked[0]))) return linked[0];
-  const named = inSubject.length ? inSubject : linked;
+  // `match` takes exact card ids only: a spelling variant (a space for a dash) never links (god
+  // c33130, c19239: variant precision < 0.95). A card id the subject writes beats one inherited by a
+  // reply or conversation link; a card named only in the body never counts (mention-body is weak: spec F).
+  const exact = match(m.subject);
+  if (exact.length === 1) return exact[0];
+  if (linked.length === 1 && (!exact.length || exact.includes(linked[0]))) return linked[0];
+  const named = exact.length ? exact : linked;
   if (!named.length) return { reason: 'noCard' };
   if (git.message) {
     const byGit = new Set<string>();

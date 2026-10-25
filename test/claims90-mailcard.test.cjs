@@ -76,6 +76,10 @@ test('link rules: a mention is a registry id word; the subject\'s (trusted) come
   assert.deepEqual(MC.linkMail({ id: 'm', subject: 'status', body: 'also CARD-ONE, FOO-123, CARD-THREE, F1 and CARD-ONE-X' }, ctxOf()), { cards: ['CARD-ONE'], method: 'mention-body' });
   assert.ok(MC.TRUSTED_METHODS.has('mention-subject') && !MC.TRUSTED_METHODS.has('mention-body'));
   assert.deepEqual(MC.linkMail({ id: 'm', body: 'step F1 of the plan' }, ctxOf()), { cards: [], method: 'none' });
+  assert.deepEqual(MC.linkMail({ id: 'm', subject: 'status', body: 'see -CARD-TWO. and CUT-1.1.9.' }, ctxOf()), { cards: ['CARD-TWO', 'CUT-1.1.9'], method: 'mention-body' }, 'edge punctuation trimmed in the body');
+  // A spelling variant (a space for the dash) never links (god c19239: precision < 0.95), even with no other link.
+  assert.deepEqual(MC.linkMail({ id: 'm', subject: 'CARD TWO shipped', body: 'no id here' }, ctxOf()), { cards: [], method: 'none' }, 'variant-only subject: no link');
+  assert.deepEqual(MC.linkMail({ id: 'm', subject: 'card two shipped', body: 'see CARD-TWO' }, ctxOf()), { cards: ['CARD-TWO'], method: 'mention-body' }, 'variant subject: the body mention at most (weak)');
 });
 
 // ———————————————————————————————————————————————————————————— index
@@ -310,33 +314,4 @@ test('the generated PROTOCOL.md states the forward-linking rules (god 0e0ead)', 
     '\\`[card required]\\` notice', '\\`"card": "none"\\`', "god's direct\nmail otherwise needs a card", 'is never held back']) {
     assert.ok(proto.includes(s), s);
   }
-});
-
-test('separator-variant subject mention (god b72740): space, underscore or hyphen, whole word; also linked beside a reply or conversation link', (t) => {
-  const sm = MC.registrySubjectMentions(['INT-1.1.97', 'INT-1.1.9', 'C90-FACTS', 'TOP_LEVEL', 'F1']);
-  assert.deepEqual(sm('INT 1.1.97 audited'), ['INT-1.1.97']);
-  assert.deepEqual(sm('int_1.1.97, c90 facts and C90_FACTS'), ['INT-1.1.97', 'C90-FACTS']);
-  assert.deepEqual(sm('TOP_LEVEL and top level'), [], 'an id with no - or . never counts (as registryMentions)');
-  assert.deepEqual(sm('INT 1.1.9.'), ['INT-1.1.9'], 'edge punctuation');
-  assert.deepEqual(sm('INT  1.1.97 / PRINT 1.1.97 / INT 1.1.970 / F1 / INT 1.1.97x'), [], 'one separator, whole word, no bare short id');
-  const links = { p: { cards: ['CARD-ONE'], method: 'field' } };
-  const r = MC.linkMail({ id: 'm', in_reply_to: 'p', subject: 'card two shipped @abc1234' }, ctxOf(links));
-  assert.deepEqual(r, { cards: ['CARD-ONE'], method: 'reply', also: ['CARD-TWO'] });
-  assert.deepEqual(MC.linkMail({ id: 'm', in_reply_to: 'p', subject: 'CARD-ONE done' }, ctxOf(links)), { cards: ['CARD-ONE'], method: 'reply' }, 'the same card adds nothing');
-  assert.deepEqual(MC.linkMail({ id: 'm', conversation: 'c1', subject: 'card_two' }, ctxOf({}, { c1: ['CARD-ONE'] })), { cards: ['CARD-ONE'], method: 'conversation', also: ['CARD-TWO'] });
-  assert.deepEqual(MC.linkMail({ id: 'm', card: 'CARD-ONE', subject: 'card two' }, ctxOf()), { cards: ['CARD-ONE'], method: 'field' }, 'the sender\'s own card field stands alone');
-  assert.deepEqual(MC.linkMail({ id: 'm', subject: 'card two', body: 'CARD-ONE' }, ctxOf()), { cards: ['CARD-TWO'], method: 'mention-subject' });
-  assert.deepEqual(MC.linkMail({ id: 'm', subject: 'status', body: 'card two' }, ctxOf()), { cards: [], method: 'none' }, 'the body stays exact');
-  assert.deepEqual(MC.linkMail({ id: 'm', subject: 'status', body: 'see -CARD-TWO. and CUT-1.1.9.' }, ctxOf()), { cards: ['CARD-TWO', 'CUT-1.1.9'], method: 'mention-body' }, 'edge punctuation trimmed in the body');
-  // each card's rows carry their own cardFrom; the link record keeps both
-  const root = tmp(t, 'also');
-  const idx = new MC.MailCardIndex(root);
-  const m = { id: '2026-10-25T00-00-00-000Z-cccccc', from: 'jim-1', act: 'done', subject: 'card two shipped', body: 'b', in_reply_to: 'p' };
-  const e = MC.indexEntries(m, r, 'delivery', [{ to: 'god-1' }], 'x');
-  assert.equal(idx.record(e.link, e.rows), true);
-  const dir = path.join(root, 'state', 'mail-cards');
-  assert.deepEqual(readLines(path.join(dir, '_links.jsonl'))[0].also, ['CARD-TWO']);
-  assert.deepEqual(readLines(path.join(dir, 'card-one.jsonl')).map((x) => [x.cardFrom, x.cards]), [['reply', ['CARD-ONE', 'CARD-TWO']]]);
-  assert.deepEqual(readLines(path.join(dir, 'card-two.jsonl')).map((x) => [x.cardFrom, x.cards]), [['mention-subject', ['CARD-ONE', 'CARD-TWO']]]);
-  assert.equal(new MC.MailCardIndex(root).linkOf(m.id).also[0], 'CARD-TWO');
 });

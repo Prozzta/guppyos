@@ -15,10 +15,7 @@
  * Link rules, the same for every message (no per-item logic): the card field when it names a
  * registry card; else the reply chain (the nearest ancestor with exactly one card); else the
  * conversation when its carded messages name exactly one card; else every registry card id the
- * subject names (mention-subject); else every one the body names (mention-body). In the subject a
- * card id may be written with a space, underscore or hyphen for any of its separators (INT 1.1.97,
- * int_1.1.97); a card the subject names that way or outright is ALSO linked (mention-subject, its own
- * rows) when a reply or conversation link points at another card (god b72740). A mention-body
+ * subject names (mention-subject); else every one the body names (mention-body). A mention-body
  * link is WEAK (god d65b59, Jim's sample: 10 of 53 body-only links wrong): it is indexed and listed,
  * but it never sets a delivered message's card and it does not count as coverage. A conversation
  * with several cards and no other rule is `ambiguous`, never a guess. An explicit card `none`
@@ -53,7 +50,6 @@ export interface MailLinkRecord {
   from?: string;
   conversation?: string;
   in_reply_to?: string;
-  also?: string[];
 }
 
 export interface MailCardRow {
@@ -75,8 +71,7 @@ export interface MailCardRow {
   trust: MailLinkTrust;
 }
 
-/** `also`: cards the subject names besides a reply or conversation link's (each a mention-subject row). */
-export interface MailLink { cards: string[]; method: MailLinkMethod; also?: string[] }
+export interface MailLink { cards: string[]; method: MailLinkMethod }
 
 /** What a message offers the link rules. */
 export interface LinkableMail {
@@ -97,8 +92,6 @@ export interface LinkContext {
   conversationCards(conversation: string): string[];
   /** Every registry card id the text names. */
   mentions(text: string): string[];
-  /** Every registry card id a subject names, separators written as a space, underscore or hyphen. */
-  subjectMentions?(text: string): string[];
 }
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : v == null ? '' : JSON.stringify(v));
@@ -123,24 +116,18 @@ export function linkMail(m: LinkableMail, ctx: LinkContext): MailLink {
     const parent = ctx.linkOf(cur);
     if (!parent) break;
     // Only a carded ancestor passes its card on (field, or itself inherited); a mention does not.
-    if (INHERITED.has(parent.method) && parent.cards.length === 1) return withSubject({ cards: [...parent.cards], method: 'reply' }, m, ctx);
+    if (INHERITED.has(parent.method) && parent.cards.length === 1) return { cards: [...parent.cards], method: 'reply' };
     if (parent.cards.length > 1) break;   // a several-card ancestor: the chain cannot choose
     cur = typeof parent.in_reply_to === 'string' ? parent.in_reply_to : null;
   }
   const conv = typeof m.conversation === 'string' && m.conversation ? [...new Set(ctx.conversationCards(m.conversation))] : [];
-  if (conv.length === 1) return withSubject({ cards: conv, method: 'conversation' }, m, ctx);
-  const inSubject = (ctx.subjectMentions ?? ctx.mentions)(str(m.subject));
+  if (conv.length === 1) return { cards: conv, method: 'conversation' };
+  const inSubject = ctx.mentions(str(m.subject));
   if (inSubject.length) return { cards: inSubject, method: 'mention-subject' };
   const inBody = ctx.mentions(str(m.body));
   if (inBody.length) return { cards: inBody, method: 'mention-body' };
   if (conv.length > 1) return { cards: conv, method: 'ambiguous' };
   return { cards: [], method: 'none' };
-}
-
-/** An inherited link plus the cards its subject names besides it. */
-function withSubject(link: MailLink, m: LinkableMail, ctx: LinkContext): MailLink {
-  const also = (ctx.subjectMentions ?? ctx.mentions)(str(m.subject)).filter((c) => !link.cards.includes(c));
-  return also.length ? { ...link, also } : link;
 }
 
 /**
@@ -159,30 +146,6 @@ export function registryMentions(cardIds: Iterable<string>): (text: string) => s
     for (const raw of text.split(/[^A-Za-z0-9._-]+/)) {
       const w = raw.replace(/^[._-]+|[._-]+$/g, '').toLowerCase();
       const id = w ? canon.get(w) : undefined;
-      if (id && !out.includes(id)) out.push(id);
-    }
-    return out;
-  };
-}
-
-/**
- * Registry card ids named in a subject: as registryMentions, but each separator of an id (`-`, `_`)
- * may be written as a hyphen, an underscore or one space (INT 1.1.97 = INT_1.1.97 = int-1.1.97), as
- * a whole word. The same ids count (with a `-` or `.`); no shape alone makes a card.
- */
-export function registrySubjectMentions(cardIds: Iterable<string>): (text: string) => string[] {
-  const canon = new Map<string, string>();
-  const key = (s: string): string => s.toLowerCase().replace(/[-_ ]/g, '-');
-  for (const id of cardIds) if (typeof id === 'string' && /[-.]/.test(id)) canon.set(key(id), id);
-  if (canon.size === 0) return () => [];
-  const alt = [...canon.keys()].sort((a, b) => b.length - a.length)
-    .map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/-/g, '[-_ ]')).join('|');
-  const re = new RegExp(`(?<![A-Za-z0-9._-])(${alt})(?![A-Za-z0-9]|[._-][A-Za-z0-9])`, 'gi');
-  return (text) => {
-    const out: string[] = [];
-    if (!text) return out;
-    for (const m of text.matchAll(re)) {
-      const id = canon.get(key(m[1]));
       if (id && !out.includes(id)) out.push(id);
     }
     return out;
@@ -304,7 +267,6 @@ export function indexEntries(m: IndexableMail, link: MailLink, trust: MailLinkTr
   const human = isHumanMail(m);
   const rec: MailLinkRecord = {
     v: 1, mailId: m.id, cards: [...link.cards], method: link.method, at, trust,
-    ...(link.also?.length ? { also: [...link.also] } : {}),
     ...(m.from ? { from: m.from } : {}),
     ...(m.conversation ? { conversation: m.conversation } : {}),
     ...(m.in_reply_to ? { in_reply_to: m.in_reply_to } : {}),
@@ -312,12 +274,10 @@ export function indexEntries(m: IndexableMail, link: MailLink, trust: MailLinkTr
   const rows: MailCardRow[] = [];
   if (link.method === 'ambiguous' || link.method === 'none') return { link: rec, rows };
   const bodyHash = m.body === undefined && typeof m.bodyHash === 'string' ? m.bodyHash : mailBodyHash(m.body ?? '');
-  const all = [...link.cards, ...(link.also ?? [])];
-  for (const card of all) {
-    const cardFrom = link.cards.includes(card) ? link.method : 'mention-subject';
+  for (const card of link.cards) {
     for (const c of copies) {
       rows.push({
-        v: 1, id: m.id, card, cards: all, cardFrom, from: m.from, to: c.to, act: m.act,
+        v: 1, id: m.id, card, cards: [...link.cards], cardFrom: link.method, from: m.from, to: c.to, act: m.act,
         ...(!human && typeof m.subject === 'string' ? { subject: m.subject } : {}),
         ...(m.conversation ? { conversation: m.conversation } : {}),
         ...(m.in_reply_to ? { in_reply_to: m.in_reply_to } : {}),
@@ -340,7 +300,6 @@ export function indexLinkContext(index: { linkOf(id: string): MailLinkRecord | n
     linkOf: (id) => index.linkOf(id),
     conversationCards: (c) => index.conversationCards(c),
     mentions: registryMentions(cardIds),
-    subjectMentions: registrySubjectMentions(cardIds),
   };
 }
 
@@ -366,8 +325,6 @@ export interface MailCardBackfillCounts {
   weak: number;
   /** Mails with a trusted link (TRUSTED_METHODS), the coverage numerator. */
   covered: number;
-  /** Mails also linked to a card their subject names besides a reply or conversation link. */
-  alsoSubject: number;
 }
 
 type SentKey = string;
@@ -486,12 +443,12 @@ export function backfillMailCards(hiveRoot: string, now: string): MailCardBackfi
     linkOf: (id) => linked.get(id) ?? index.linkOf(id),
     conversationCards: (c) => [...(conv.get(c) ?? [])],
   }, cardIds);
-  const counts: MailCardBackfillCounts = { mails: mails.length, recorded: 0, already: 0, byMethod: {}, byAct: {}, byFrom: {}, byTrust: {}, excluded, unlinked: [], weak: 0, covered: 0, alsoSubject: 0 };
+  const counts: MailCardBackfillCounts = { mails: mails.length, recorded: 0, already: 0, byMethod: {}, byAct: {}, byFrom: {}, byTrust: {}, excluded, unlinked: [], weak: 0, covered: 0 };
   const bump = (o: Record<string, Record<string, number>>, k: string, method: string): void => { const r = (o[k] = o[k] ?? {}); r[method] = (r[method] ?? 0) + 1; };
   const order = [...mails].sort((a, b) => (a.created_at ?? '').localeCompare(b.created_at ?? '') || a.id.localeCompare(b.id));
   for (const m of order) {
     const prior = index.linkOf(m.id);
-    const link: MailLink = prior ? { cards: prior.cards, method: prior.method, ...(prior.also?.length ? { also: prior.also } : {}) } : linkMail(m, ctx);
+    const link: MailLink = prior ? { cards: prior.cards, method: prior.method } : linkMail(m, ctx);
     const { link: rec, rows } = indexEntries(m, link, m.trust, m.copies, now);
     linked.set(m.id, prior ?? rec);
     if (prior) counts.already++;
@@ -503,7 +460,6 @@ export function backfillMailCards(hiveRoot: string, now: string): MailCardBackfi
     if (link.method === 'none' || link.method === 'ambiguous') counts.unlinked.push(m.id);
     if (link.method === 'mention-body') counts.weak++;
     if (TRUSTED_METHODS.has(link.method)) counts.covered++;
-    if (link.also?.length) counts.alsoSubject++;
   }
   return counts;
 }

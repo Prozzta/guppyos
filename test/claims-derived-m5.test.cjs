@@ -300,7 +300,7 @@ test('(d) done mails, R2 (a)(c): one per (card, sender): the newest done mail an
   const mails = [
     { id: 'm1', act: 'done', from: 'agent-x', card: 'SYN-D1', subject: 'SYN-D2 aaaaaa1', body: 'also bbbbbb2', created_at: '2026-10-02T00:00:00Z' },
     { id: 'm1', act: 'done', card: 'SYN-D1', subject: 'a second copy of m1', body: 'cccccc3' },
-    { id: 'm2', act: 'done', from: 'agent-y', subject: 'SYN D2 shipped', body: 'range aaaaaa1..dddddd4, 1234567 is no sha and fedcba9 no commit', created_at: '2026-10-03T00:00:00Z' },
+    { id: 'm2', act: 'done', from: 'agent-y', subject: 'SYN-D2 shipped', body: 'range aaaaaa1..dddddd4, 1234567 is no sha and fedcba9 no commit', created_at: '2026-10-03T00:00:00Z' },
     { id: 'm3', act: 'done', subject: 'no card here', body: 'SYN-D3 at cccccc3' },
     { id: 'm4', act: 'done', subject: 'SYN-D1 and SYN-D2', body: 'dddddd4' },
     { id: 'm5', act: 'inform', subject: 'SYN-D1', body: 'dddddd4' },
@@ -339,10 +339,16 @@ test('(d) done mails, R2 (a)(c): one per (card, sender): the newest done mail an
   assert.deepEqual(settled.facts.map((f) => f.slot), ['card.syn-d2.donesha#agent-z']);
   const still = await F.doneMailFacts([{ id: 'm4', act: 'done', subject: 'SYN-D1 and SYN-D2', body: 'eeeeee5' }], ['SYN-D1', 'SYN-D2'], gm);
   assert.deepEqual(still.skips, [{ mail: 'm4', reason: 'ambiguous', cards: ['SYN-D1', 'SYN-D2'] }], 'git names neither: ambiguous');
-  // A card the subject names outright beats one the delivery inherited (reply/conversation link);
+  // A card id the subject writes exactly beats one the delivery inherited (reply/conversation link);
+  // a spelling variant (a space for the dash) never links, with or without a link (god c33130, c19239);
   // with no card in the subject the inherited link counts; a body mention never does.
-  const linked = await F.doneMailFacts([{ id: 'm12', act: 'done', from: 'agent-x', cards: ['syn-d3'], subject: 'SYN D1', body: 'aaaaaa1' }], ['SYN-D1', 'SYN-D3'], g);
+  const linked = await F.doneMailFacts([{ id: 'm12', act: 'done', from: 'agent-x', cards: ['syn-d3'], subject: 'SYN-D1', body: 'aaaaaa1' }], ['SYN-D1', 'SYN-D3'], g);
   assert.deepEqual(linked.facts.map((f) => f.slot), ['card.syn-d1.donesha#agent-x']);
+  const variant = await F.doneMailFacts([{ id: 'm15', act: 'done', from: 'agent-x', cards: ['syn-d3'], subject: 'SYN D1', body: 'aaaaaa1' }], ['SYN-D1', 'SYN-D3'], g);
+  assert.deepEqual(variant.facts.map((f) => f.slot), ['card.syn-d3.donesha#agent-x'], 'a variant never beats a link');
+  const variantAlone = await F.doneMailFacts([{ id: 'm16', act: 'done', from: 'agent-x', subject: 'temp leak fixed', body: 'aaaaaa1' }], ['TEMP-LEAK', 'SYN-D3'], g);
+  assert.deepEqual(variantAlone.facts, [], 'a variant-only subject links no card');
+  assert.deepEqual(variantAlone.skips, [{ mail: 'm16', reason: 'noCard' }]);
   const inherited = await F.doneMailFacts([{ id: 'm13', act: 'done', from: 'agent-x', cards: ['syn-d3'], subject: 'stage sweep', body: 'SYN-D1 aaaaaa1' }], ['SYN-D1', 'SYN-D3'], g);
   assert.deepEqual(inherited.facts.map((f) => f.slot), ['card.syn-d3.donesha#agent-x']);
   const both = await F.doneMailFacts([{ id: 'm14', act: 'done', from: 'agent-x', cards: ['syn-d3'], subject: 'SYN-D1 and SYN-D3', body: 'aaaaaa1' }], ['SYN-D1', 'SYN-D3'], g);
@@ -434,7 +440,7 @@ function fixtureHive(x, r) {
   fs.mkdirSync(path.join(x.root, 'tasks-archive'));
   fs.writeFileSync(path.join(x.root, 'tasks-archive', '2026-10.jsonl'), `${JSON.stringify({ at: '2026-10-03T13:00:00Z', card: { id: 'SYN-A1', title: 'Archived', status: 'done', result: `done at ${c.slice(0, 8)}` } })}\n`);
   for (const ag of ['agent-x', 'agent-y']) fs.mkdirSync(path.join(x.root, 'agents', ag, 'inbox', '.done'), { recursive: true });
-  const mail = { id: 'm-h1', act: 'done', from: 'agent-x', to: 'god', subject: 'SYN H2 shipped', body: `range ${a.slice(0, 8)}..${c.slice(0, 8)}`, created_at: '2026-10-03T12:00:00Z' };
+  const mail = { id: 'm-h1', act: 'done', from: 'agent-x', to: 'god', subject: 'SYN-H2 shipped', body: `range ${a.slice(0, 8)}..${c.slice(0, 8)}`, created_at: '2026-10-03T12:00:00Z' };
   deliver(x, 'agent-x', mail, '.done');
   deliver(x, 'agent-y', mail);
   deliver(x, 'agent-y', { id: 'm-h2', act: 'request', from: 'god', subject: 'SYN-H1', body: b });
@@ -445,7 +451,7 @@ function fixtureHive(x, r) {
   fs.writeFileSync(path.join(x.root, 'agents', 'agent-y', 'inbox', '.done', 'm-h2.json'), JSON.stringify({ id: 'm-h2', act: 'done', from: 'god', card: 'SYN-H2', subject: 'SYN-H2', body: b }));
   // and a delivered done mail whose inbox copy was edited to name b (its body no longer hashes to the
   // ledger's, so only the ledger's subject counts).
-  deliver(x, 'agent-x', { id: 'm-h5', act: 'done', from: 'agent-x', subject: 'SYN H2 follow-up', body: 'no commit named' }, '', { body: `now names ${b}` });
+  deliver(x, 'agent-x', { id: 'm-h5', act: 'done', from: 'agent-x', subject: 'SYN-H2 follow-up', body: 'no commit named' }, '', { body: `now names ${b}` });
   return { a, b, c, side, tagObj };
 }
 
@@ -522,6 +528,7 @@ test('R2 (b): done mails from main\'s permanent mail-cards index (merged with th
   const a = r.commit('SYN-G1: first step', '2026-10-01T10:00:00Z');
   const b = r.commit('second step for SYN-G1 and SYN G2', '2026-10-02T10:00:00Z');
   r.commit('unrelated', '2026-10-03T10:00:00Z');
+  r.commit(`Merge guppy/lone @${a.slice(0, 8)} into int-9.1.2`, '2026-10-03T11:00:00Z');
   const dir = path.join(x.root, 'state', 'mail-cards');
   fs.mkdirSync(dir, { recursive: true });
   const row = (o) => JSON.stringify({ v: 1, act: 'done', trust: 'two-party', ...o, bodyHash: mailBodyHash(o.hashOf ?? o.body ?? '') });
@@ -553,6 +560,7 @@ test('R2 (b): done mails from main\'s permanent mail-cards index (merged with th
   assert.match(g3[0].text, /; 10 commits name it$/);
   const c = await W.runDerivedBackfill(x.deps, { hiveRoot: x.root, git, releases: { changelog: null, tags: [] } });
   assert.equal(c.gitShas.appended, 2);
+  assert.equal(c.merges.appended, 1, 'branch.lone: a merge subject (god c33130)');
   assert.equal(c.doneShas.appended, 1, 'm-i1 (agent-x): commit a; m-i2 has no body that hashes and no sha in its subject');
   assert.deepEqual(c.doneSkipped, { notDone: 0, noShaWord: 1, noCommit: 0, noCard: 0, ambiguous: 0 });
   assert.equal((await W.runDerivedBackfill(x.deps, { hiveRoot: x.root, git, releases: { changelog: null, tags: [] } })).gitShas.appended, 0, 'idempotent');
@@ -864,6 +872,15 @@ test('gate v2.4 step 1 (Jim a6ae9d): trusted links only, the subject @sha, the b
   assert.equal(by['card.syn-f2.donesha#agent-z'].refs[2].value, H('5'), 'a digit-only @sha');
   assert.equal(F.subjectAtSha('CARD-1 @1A2B3C4D done'), '1a2b3c4d');
   assert.equal(F.subjectAtSha('mail me@abcdef12'), null, 'part of a word');
+  assert.equal(F.subjectAtSha('PASS 0/0/1 @aaaaaa1, NIT folded @bbbbbb2'), 'bbbbbb2', 'several: the last');
+  // Several subject @shas (Jim 0acf5a DV151): the last is the tip, whether git order agrees or not.
+  const two = await F.doneMailFacts([
+    { id: 'm6', act: 'done', from: 'agent-w', card: 'SYN-F2', subject: 'SYN-F2 PASS @aaaaaa1, NIT folded @bbbbbb2', created_at: '2026-10-01T00:00:00Z' },
+    { id: 'm7', act: 'done', from: 'agent-v', card: 'SYN-F2', subject: 'SYN-F2 @bbbbbb2 re-checked on @aaaaaa1', created_at: '2026-10-01T00:00:00Z' },
+  ], ['SYN-F2'], g);
+  const tw = Object.fromEntries(two.facts.map((f) => [f.slot, f]));
+  assert.equal(tw['card.syn-f2.donesha#agent-w'].refs[2].value, H('b'), 'last and latest in git order agree');
+  assert.equal(tw['card.syn-f2.donesha#agent-v'].refs[2].value, H('a'), 'the last, though git order says otherwise');
   // lastsha: a digit-only @sha in the card record counts (it is the descendant here).
   const lf = await F.cardFieldFacts([{ id: 'SYN-F5', status: 'done', createdAt: '2026-10-01T00:00:00Z', result: 'merged bbbbbb2; then mutants @58102304 (off bbbbbb2)' }],
     fakeGit({ commits: { bbbbbb2: H('b'), '58102304': H('5') }, parents: { [H('5')]: [H('b')] }, time: { [H('5')]: 1 } }));
@@ -892,4 +909,28 @@ test('gate v2.4 step 1 (Jim a6ae9d): trusted links only, the subject @sha, the b
   assert.equal(rel['release.9.1.2.bump'].text, `Guppy 9.1.2 version bump: the first commit that sets package.json version to 9.1.2 is ${bump.slice(0, 8)} (${bump})`);
   assert.equal(rel['release.9.1.2.bump'].at, '2026-10-02T10:00:00.000Z');
   assert.equal(rel['release.9.1.2.e1'].text, 'Guppy 9.1.2 (2026-10-03) CHANGELOG Fixed: Lead. Uses memory search --exact.', 'no markup');
+});
+
+test('merge class (god c33130): a merge into an INT gives card.<id>.merge when a card owns the branch, else branch.<name>; latest wins', async () => {
+  const g = fakeGit({ commits: { aaaaaa1: H('a'), bbbbbb2: H('b'), dddddd4: H('d'), [H('t')]: H('t') }, parents: {}, time: {} });
+  const log = [
+    { commit: H('1'), time: 100, message: 'Merge guppy/syn-m1 @aaaaaa1 into int-9.1.2 (Jim PASS)\n\nbody' },
+    { commit: H('2'), time: 200, message: 'Merge guppy/syn-m1 @bbbbbb2 into int-9.1.2 (Jim PASS, X9 pin)' },
+    { commit: H('3'), time: 150, message: 'Merge guppy/Lone-Branch (cccccc3) into int/release-9.1.1: notes' },
+    { commit: H('4'), time: 160, message: 'Merge guppy/no-sha into int-9.1.3', parents: [H('x'), H('t')] },
+    { commit: H('5'), time: 170, message: 'Merge origin/main into integration/v0.4.5' },
+    { commit: H('6'), time: 180, message: 'Merge SYN-M2 dddddd4 into INT 9.1.2 stage 3' },
+    { commit: H('7'), time: 190, message: 'Merge guppy/no-parent into int-9.1.3', parents: [H('x')] },
+    { commit: H('8'), time: 300, message: 'SYN-M1: Merge guppy/syn-m1 @aaaaaa1 into int-9.1.2 (not a merge subject)' },
+  ];
+  const facts = await F.mergeFacts(log, ['SYN-M1', 'SYN-M2', 'INT-9.1.2'], g);
+  const by = Object.fromEntries(facts.map((f) => [f.key, f]));
+  assert.deepEqual(Object.keys(by), ['branch.lone-branch', 'branch.no-sha', 'card.syn-m1.merge', 'card.syn-m2.merge']);
+  assert.equal(by['card.syn-m1.merge'].text, `Card SYN-M1: branch guppy/syn-m1 was last merged into INT-9.1.2 at tip bbbbbbbb (${H('b')}) by merge commit 22222222 (${H('2')})`);
+  assert.deepEqual(by['card.syn-m1.merge'].refs, [{ type: 'task', value: 'SYN-M1' }, { type: 'task', value: 'INT-9.1.2' }, { type: 'commit', value: H('b') }, { type: 'commit', value: H('2') }]);
+  assert.equal(by['card.syn-m1.merge'].at, new Date(200000).toISOString());
+  assert.equal(by['branch.lone-branch'].text, `Branch guppy/Lone-Branch was last merged into INT-9.1.1 at tip cccccc3 (cccccc3, not in the repository) by merge commit 33333333 (${H('3')})`);
+  assert.deepEqual(by['branch.lone-branch'].refs, [{ type: 'commit', value: H('3') }]);
+  assert.equal(by['branch.no-sha'].refs[0].value, H('t'), 'no sha in the subject: the second parent');
+  assert.match(by['card.syn-m2.merge'].text, /^Card SYN-M2: branch SYN-M2 was last merged into INT-9.1.2 at tip dddddddd/);
 });
