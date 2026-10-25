@@ -35,12 +35,31 @@ function where(p, jail) {
   return 'outside';
 }
 
-/** Split a command into words, keeping quoted text together (quotes removed). */
+/**
+ * Split a command into words as a POSIX shell does: unquoted whitespace ends a word, and quoted and
+ * unquoted pieces next to each other join into one word (-S"a b" is one word). Inside double quotes
+ * a backslash escapes " \ $ ` and is kept before anything else; single quotes are literal. Outside
+ * quotes a backslash and the char after it are kept as typed, so \x still reads as a root path.
+ */
 function words(cmd) {
   const out = [];
-  const re = /"((?:[^"\\]|\\.)*)"|'([^']*)'|(\S+)/g;
-  let m;
-  while ((m = re.exec(cmd))) out.push(m[1] ?? m[2] ?? m[3]);
+  let w = null;
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i];
+    if (/\s/.test(c)) { if (w !== null) out.push(w); w = null; continue; }
+    if (w === null) w = '';
+    if (c === '\\') { w += cmd.slice(i, i + 2); i++; continue; }
+    if (c === "'") { const e = cmd.indexOf("'", i + 1); const end = e < 0 ? cmd.length : e; w += cmd.slice(i + 1, end); i = end; continue; }
+    if (c === '"') {
+      for (i++; i < cmd.length && cmd[i] !== '"'; i++) {
+        if (cmd[i] === '\\' && /["\\$`]/.test(cmd[i + 1] ?? '')) i++;
+        w += cmd[i];
+      }
+      continue;
+    }
+    w += c;
+  }
+  if (w !== null) out.push(w);
   return out;
 }
 
@@ -70,7 +89,7 @@ function check(tool, input, jail, keyFile) {
     const cmd = String(i.command ?? '');
     const unquoted = cmd.replace(/"(?:[^"\\]|\\.)*"|'[^']*'/g, '""');
     const w = words(cmd);
-    const pathWord = w.find((x) => /^([a-zA-Z]:|[\\/]|~)/.test(x) || /(^|[\\/])\.\.([\\/]|$)/.test(x));
+    const pathWord = w.find((x) => (/^([a-zA-Z]:|[\\/]|~)/.test(x) && !x.startsWith('\\"')) || /(^|[\\/])\.\.([\\/]|$)/.test(x));
     if (pathWord && where(pathWord, jail) === 'outside') return { decision: 'deny', place: 'outside', path: pathWord, reason: 'a path outside the jail' };
     if (w[0] !== 'git' || /[;&|<>`\n\r]|\$\(|\$\{/.test(unquoted)) return { decision: 'deny', place: 'jail', path: null, reason: 'Bash runs one git command, no chain, pipe or redirection' };
     if (!GIT_READ.has(w[1])) return { decision: 'deny', place: 'jail', path: null, reason: `git ${w[1] ?? ''} is not a read command here` };

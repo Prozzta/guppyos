@@ -43,6 +43,25 @@ test('guard: Bash runs one read-only git command', () => {
   assert.equal(ck('Bash', { command: 'git show HEAD:x /c/Dunder/hive/x' }).place, 'outside', 'a path word outside the jail');
 });
 
+test('guard: a quoted argument stays one word, escaped quotes and mid-token quotes included (H1 batch 06 false positive)', () => {
+  // The two batch-06 calls: words() split -S"\"version\": \"1.1.85\"" at the quoted space and read
+  // \"1.1.85\"" as a root-relative path, so a denied read made the batch INVALID.
+  const batch06 = [
+    'git log --oneline --format="%h %H %cI %s" -S"\\"version\\": \\"1.1.85\\"" origin/release-1.1.85 -- package.json',
+    'git log --all --format="%H %cI %D %s" -G"\\"version\\": \\"1.1.85\\"" -- package.json',
+  ];
+  for (const c of batch06) assert.deepEqual([ck('Bash', { command: c }).decision, ck('Bash', { command: c }).place], ['allow', 'jail'], c);
+  assert.deepEqual(G.words(batch06[0]), ['git', 'log', '--oneline', '--format=%h %H %cI %s', '-S"version": "1.1.85"', 'origin/release-1.1.85', '--', 'package.json']);
+  assert.deepEqual(G.words('a "b c"d e\'f g\'h "x\\\\y"'), ['a', 'b cd', 'ef gh', 'x\\y'], 'adjacent pieces join; \\\\ in double quotes is one backslash');
+  assert.deepEqual(G.words(' "" x '), ['', 'x'], 'an empty quoted word is a word');
+  assert.equal(ck('Bash', { command: 'git log -S \\"1.1.85\\"' }).place, 'jail', 'a word starting with \\" is never a path word');
+  // A real path outside stays outside, however it is quoted.
+  for (const c of ['git log -- "C:/x"', 'git log -- \\x', 'git log -- C:"/x"', 'git log -- "\\\\server\\share"', 'git log -- \'/c/Dunder/hive\'', 'git log -- "a/../../x"']) {
+    const v = ck('Bash', { command: c });
+    assert.deepEqual([v.decision, v.place], ['deny', 'outside'], c);
+  }
+});
+
 test('guard hook: denies in the PreToolUse shape and writes the open log', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'c90-guard-'));
   const log = path.join(dir, 'open.jsonl');
