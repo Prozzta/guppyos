@@ -201,6 +201,8 @@ test('sha mentions: 7-40 hex with a digit and a letter, ranges give both ends, n
   assert.equal(m[2].range.end, 'to');
   assert.equal(m[3].range.to, '123abcd', 'a...b counts as a range too');
   assert.deepEqual(F.shaMentions(null), []);
+  // Digit-only shas (Jim a6ae9d F2): written @<sha>, or 8+ digits that are not a date; git decides the rest.
+  assert.deepEqual(F.shaMentions('head @58102304 and @1234567, size 94861030, date 20261024, count 5948').map((x) => x.sha), ['58102304', '1234567', '94861030']);
 });
 
 function fakeGit(spec) {
@@ -269,11 +271,11 @@ test('(c) releases: CHANGELOG sections and entries (Unreleased skipped), the tag
   assert.equal(secs[0].entries[0].text, '**The widget is faster.** It was slow and now it is not.');
   const out = F.releaseFacts(secs, [{ name: 'v9.1.2', commit: H('c'), date: '2026-10-24T10:00:00+02:00' }, { name: 'v9.0.0', commit: H('d') }, { name: 'not-a-version', commit: H('e') }]);
   const by = Object.fromEntries(out.map((f) => [f.key, f]));
-  assert.match(by['release.9.1.2'].text, new RegExp(`^Guppy 9\\.1\\.2, released 2026-10-24 \\(CHANGELOG\\), tag v9\\.1\\.2 is commit ${H('c')} \\(tagged 2026-10-24\\)\\. \\*\\*Synthetic headline`));
+  assert.match(by['release.9.1.2'].text, new RegExp(`^Guppy 9\\.1\\.2, released 2026-10-24 \\(CHANGELOG\\), tag v9\\.1\\.2 is commit ${H('c')} \\(tagged 2026-10-24\\)\\. Synthetic headline for nine one two\\.$`), 'stored without markup');
   assert.equal(by['release.9.1.2'].at, '2026-10-24T08:00:00.000Z');
   assert.deepEqual(by['release.9.1.2'].refs, [{ type: 'commit', value: H('c') }]);
-  assert.equal(by['release.9.1.2.e1'].text, 'Guppy 9.1.2 (2026-10-24) CHANGELOG Changed: **The widget is faster.** It was slow and now it is not.');
-  assert.equal(by['release.9.1.2.e3'].text, 'Guppy 9.1.2 (2026-10-24) CHANGELOG Fixed: **A crash on start.** Gone.');
+  assert.equal(by['release.9.1.2.e1'].text, 'Guppy 9.1.2 (2026-10-24) CHANGELOG Changed: The widget is faster. It was slow and now it is not.', 'stored without markup');
+  assert.equal(by['release.9.1.2.e3'].text, 'Guppy 9.1.2 (2026-10-24) CHANGELOG Fixed: A crash on start. Gone.');
   assert.equal(by['release.9.0.0'].text, `Guppy 9.0.0, tag v9.0.0 is commit ${H('d')}`, 'a tag with no section still gives its release');
   assert.equal(by['release.9.1.1'].refs.length, 0);
   assert.equal(Object.keys(by).some((k) => /unreleased|not-a-version/i.test(k)), false);
@@ -326,20 +328,25 @@ test('(d) done mails, R2 (a)(c): one per (card, sender): the newest done mail an
   assert.deepEqual(d2.refs, [{ type: 'task', value: 'SYN-D2' }, { type: 'msg', value: 'm2' }, { type: 'commit', value: H('d') }]);
   assert.equal(d2.at, '2026-10-03T00:00:00.000Z');
   assert.equal(r.facts.some((f) => f.refs.some((y) => y.type === 'commit' && y.value.startsWith('fedcba9'))), false, 'a hex word git does not know is no commit');
-  assert.deepEqual(r.skipped, { notDone: 1, noShaWord: 1, noCommit: 1, noCard: 1, ambiguous: 1 });
+  assert.deepEqual(r.skipped, { notDone: 1, noShaWord: 1, noCommit: 1, noCard: 2, ambiguous: 1 });
   assert.deepEqual(r.skips, [
-    { mail: 'm10', reason: 'noCard' }, { mail: 'm4', reason: 'ambiguous', cards: ['SYN-D1', 'SYN-D2'] }, { mail: 'm5', reason: 'notDone' }, { mail: 'm6', reason: 'noShaWord' }, { mail: 'm9', reason: 'noCommit' },
+    { mail: 'm10', reason: 'noCard' }, { mail: 'm3', reason: 'noCard' }, { mail: 'm4', reason: 'ambiguous', cards: ['SYN-D1', 'SYN-D2'] }, { mail: 'm5', reason: 'notDone' }, { mail: 'm6', reason: 'noShaWord' }, { mail: 'm9', reason: 'noCommit' },
   ]);
-  assert.equal(r.older, 2, 'm1 (agent-x on SYN-D1) and m3 (unknown on SYN-D3): older mails of their (card, sender)');
+  assert.equal(r.older, 1, 'm1 (agent-x on SYN-D1): an older mail of its (card, sender); m3 names SYN-D3 only in its body: no card (F1)');
   // A mail naming several cards: git settles it when the messages of its commits name exactly one of them.
   const gm = fakeGit({ commits: { dddddd4: H('d'), eeeeee5: H('e') }, parents: {}, time: {}, messages: { [H('d')]: 'SYN-D2: fix the thing', [H('e')]: 'unrelated' } });
   const settled = await F.doneMailFacts([{ id: 'm4', act: 'done', from: 'agent-z', subject: 'SYN-D1 and SYN-D2', body: 'dddddd4 eeeeee5' }], ['SYN-D1', 'SYN-D2'], gm);
   assert.deepEqual(settled.facts.map((f) => f.slot), ['card.syn-d2.donesha#agent-z']);
   const still = await F.doneMailFacts([{ id: 'm4', act: 'done', subject: 'SYN-D1 and SYN-D2', body: 'eeeeee5' }], ['SYN-D1', 'SYN-D2'], gm);
   assert.deepEqual(still.skips, [{ mail: 'm4', reason: 'ambiguous', cards: ['SYN-D1', 'SYN-D2'] }], 'git names neither: ambiguous');
-  // The cards the delivery linked (mail-cards index) come before the subject and body.
-  const linked = await F.doneMailFacts([{ id: 'm12', act: 'done', from: 'agent-x', cards: ['syn-d3'], subject: 'SYN-D1', body: 'aaaaaa1' }], ['SYN-D1', 'SYN-D3'], g);
-  assert.deepEqual(linked.facts.map((f) => f.slot), ['card.syn-d3.donesha#agent-x']);
+  // A card the subject names outright beats one the delivery inherited (reply/conversation link);
+  // with no card in the subject the inherited link counts; a body mention never does.
+  const linked = await F.doneMailFacts([{ id: 'm12', act: 'done', from: 'agent-x', cards: ['syn-d3'], subject: 'SYN D1', body: 'aaaaaa1' }], ['SYN-D1', 'SYN-D3'], g);
+  assert.deepEqual(linked.facts.map((f) => f.slot), ['card.syn-d1.donesha#agent-x']);
+  const inherited = await F.doneMailFacts([{ id: 'm13', act: 'done', from: 'agent-x', cards: ['syn-d3'], subject: 'stage sweep', body: 'SYN-D1 aaaaaa1' }], ['SYN-D1', 'SYN-D3'], g);
+  assert.deepEqual(inherited.facts.map((f) => f.slot), ['card.syn-d3.donesha#agent-x']);
+  const both = await F.doneMailFacts([{ id: 'm14', act: 'done', from: 'agent-x', cards: ['syn-d3'], subject: 'SYN-D1 and SYN-D3', body: 'aaaaaa1' }], ['SYN-D1', 'SYN-D3'], g);
+  assert.deepEqual(both.facts.map((f) => f.slot), ['card.syn-d3.donesha#agent-x'], 'several in the subject: the linked one among them');
 });
 
 // ———————————————————————————————————————————————————— the writer
@@ -458,7 +465,7 @@ test('backfill: a fixture hive and repo give every kind once; a re-run appends n
   assert.equal(c1.cards, 3, 'hot cards plus the archived one');
   assert.equal(c1.doneMails, 3, 'm-h1 from both ledgers (they fold by id) and m-h5; the forged, retyped and unrecorded files are not read');
   assert.equal(c1.decisions.appended, 1);
-  assert.equal(c1.cardFields.appended, 3 + 2 + 3, 'SYN-H1 and SYN-A1 status/assignee/lastsha, SYN-H2 status/assignee (no commit named)');
+  assert.equal(c1.cardFields.appended, 4 + 3 + 4, 'SYN-H1 and SYN-A1 status/assignee/fixversion/lastsha, SYN-H2 status/assignee/fixversion (no commit named)');
   const live = Object.fromEntries(x.live().filter((c) => !c.key.endsWith('.donesha')).map((c) => [c.key, c]));
   assert.match(live['card.syn-h1.lastsha'].text, new RegExp(`${s.side}\\)$`), 'unrelated lines: the side commit is later by time');
   assert.match(live['card.syn-a1.lastsha'].text, new RegExp(`${s.c}\\)$`), 'archived cards count');
@@ -525,7 +532,7 @@ test('R2 (b): done mails from main\'s permanent mail-cards index (merged with th
     row({ id: 'm-i3', card: 'SYN-G1', cards: ['SYN-G1'], cardFrom: 'field', from: 'agent-y', to: 'god', act: 'inform', subject: 'fyi', body: b }),
     '{torn',
   ].join('\n'));
-  fs.writeFileSync(path.join(dir, '_links.jsonl'), `${JSON.stringify({ v: 1, mailId: 'm-i1', cards: ['SYN-G1'], method: 'reply', act: 'done' })}\n${row({ id: 'm-i9', card: 'SYN-G1', from: 'agent-z', subject: 'not a mail file', body: `at ${a.slice(0, 8)}` })}\n`);
+  fs.writeFileSync(path.join(dir, '_links.jsonl'), `${JSON.stringify({ v: 1, mailId: 'm-i1', cards: ['SYN-G1'], method: 'reply', act: 'done' })}\n${row({ id: 'm-i9', card: 'SYN-G1', cardFrom: 'field', from: 'agent-z', subject: 'not a mail file', body: `at ${a.slice(0, 8)}` })}\n`);
   deliver(x, 'agent-x', { id: 'm-i1', act: 'done', from: 'agent-x', subject: 'shipped', body: `at ${a.slice(0, 8)}`, created_at: '2026-10-01T12:00:00Z' });
   const mails = W.readDoneMails(x.root);
   assert.deepEqual(mails.map((m) => [m.id, m.from, JSON.stringify(m.cards ?? null), typeof m.body]), [['m-i1', 'agent-x', '["SYN-G1"]', 'string'], ['m-i2', 'agent-y', '["SYN-G1"]', 'undefined']], 'one per id; the ledger copy folds into the index row; a body that does not hash is dropped; not-done rows and _links are not read');
@@ -828,4 +835,61 @@ test('valid time (god e551de): every derived claim carries its source time; none
   assert.deepEqual(rel.map((f0) => f0.at), ['2026-09-08T00:00:00.000Z', '2026-09-08T00:00:00.000Z'], 'no tag: the CHANGELOG section date');
   const dec = F.decisionFacts([{ id: 'SYN-V5', humanQA: [{ q: 'Go?', a: 'Yes', askedAt: '2026-09-09T00:00:00Z' }] }]);
   assert.equal(dec[0].at, '2026-09-09T00:00:00.000Z', 'no answer time: the question time');
+});
+
+test('gate v2.4 step 1 (Jim a6ae9d): trusted links only, the subject @sha, the bump commit, fixVersion, plain CHANGELOG text', async () => {
+  // F1: a mention-body index row never gives a done mail its card; a reply row gives linked cards, not the field.
+  const x = setup();
+  const dir = path.join(x.root, 'state', 'mail-cards');
+  fs.mkdirSync(dir, { recursive: true });
+  const row = (o) => JSON.stringify({ v: 1, act: 'done', trust: 'two-party', to: 'god', bodyHash: mailBodyHash(o.body ?? ''), ...o });
+  fs.writeFileSync(path.join(dir, 'syn-f1.jsonl'), [
+    row({ id: 'm-f1', card: 'SYN-F1', cards: ['SYN-F1'], cardFrom: 'mention-body', from: 'agent-x', subject: 'other work', body: 'like SYN-F1 at aaaaaa1' }),
+    row({ id: 'm-f2', card: 'SYN-F1', cards: ['SYN-F1'], cardFrom: 'reply', from: 'agent-x', subject: 'sweep', body: 'bbbbbb2' }),
+    row({ id: 'm-f3', card: 'SYN-F1', cards: ['SYN-F1'], cardFrom: 'mention-subject', from: 'agent-y', subject: 'SYN-F1 shipped', body: 'cccccc3' }),
+  ].join('\n'));
+  const mails = W.readDoneMails(x.root);
+  assert.deepEqual(mails.map((m) => [m.id, m.card ?? null, JSON.stringify(m.cards ?? null)]), [['m-f2', null, '["SYN-F1"]'], ['m-f3', null, '["SYN-F1"]']]);
+  // F2: the subject's @sha is the mail's sha, preferred over body commits and kept when git lacks it.
+  const g = fakeGit({ commits: { aaaaaa1: H('a'), bbbbbb2: H('b'), '58102304': H('5') }, parents: { [H('b')]: [H('a')] }, time: {} });
+  const r = await F.doneMailFacts([
+    { id: 'm1', act: 'done', from: 'agent-x', card: 'SYN-F2', subject: 'SYN-F2 @aaaaaa1', body: 'on base bbbbbb2', created_at: '2026-10-01T00:00:00Z' },
+    { id: 'm2', act: 'done', from: 'agent-y', card: 'SYN-F2', subject: 'SYN-F2 @fedcba98', body: 'no other sha', created_at: '2026-10-01T00:00:00Z' },
+    { id: 'm3', act: 'done', from: 'agent-z', card: 'SYN-F2', subject: 'SYN-F2 @58102304', created_at: '2026-10-01T00:00:00Z' },
+  ], ['SYN-F2'], g);
+  const by = Object.fromEntries(r.facts.map((f) => [f.slot, f]));
+  assert.match(by['card.syn-f2.donesha#agent-x'].text, new RegExp(`names commit aaaaaaaa \\(${H('a')}\\) as its subject's @sha$`), 'not the later body commit');
+  assert.match(by['card.syn-f2.donesha#agent-y'].text, /names commit fedcba98 \(fedcba98\) as its subject's @sha \(not in the repository\)$/);
+  assert.deepEqual(by['card.syn-f2.donesha#agent-y'].refs.map((y) => y.type), ['task', 'msg'], 'no commit ref for a sha the repository lacks');
+  assert.equal(by['card.syn-f2.donesha#agent-z'].refs[2].value, H('5'), 'a digit-only @sha');
+  assert.equal(F.subjectAtSha('CARD-1 @1A2B3C4D done'), '1a2b3c4d');
+  assert.equal(F.subjectAtSha('mail me@abcdef12'), null, 'part of a word');
+  // lastsha: a digit-only @sha in the card record counts (it is the descendant here).
+  const lf = await F.cardFieldFacts([{ id: 'SYN-F5', status: 'done', createdAt: '2026-10-01T00:00:00Z', result: 'merged bbbbbb2; then mutants @58102304 (off bbbbbb2)' }],
+    fakeGit({ commits: { bbbbbb2: H('b'), '58102304': H('5') }, parents: { [H('5')]: [H('b')] }, time: { [H('5')]: 1 } }));
+  assert.match(lf.find((f) => f.key === 'card.syn-f5.lastsha').text, new RegExp(`${H('5')}\\)$`));
+  // F4: fixVersion like status and assignee.
+  const ff = await F.cardFieldFacts([{ id: 'SYN-F4', status: 'blocked', fixVersion: '1.1.97', updatedAt: '2026-10-02T00:00:00Z' }, { id: 'SYN-F6', status: 'todo', createdAt: '2026-10-02T00:00:00Z' }], null);
+  const fv = Object.fromEntries(ff.map((f) => [f.key, f]));
+  assert.equal(fv['card.syn-f4.fixversion'].text, 'Card SYN-F4 fix version: 1.1.97');
+  assert.equal(fv['card.syn-f4.fixversion'].at, '2026-10-02T00:00:00.000Z');
+  assert.equal(fv['card.syn-f6.fixversion'].text, 'Card SYN-F6 has no fix version');
+  // F3: the bump commit is the first commit that sets package.json "version" to V (not the tag commit).
+  const rp = makeRepo();
+  rp.commit('start', '2026-10-01T10:00:00Z', 'package.json', '{\n  "name": "x",\n  "version": "9.1.1"\n}\n');
+  const bump = rp.commit('9.1.2: bump', '2026-10-02T10:00:00Z', 'package.json', '{\n  "name": "x",\n  "version": "9.1.2"\n}\n');
+  const tagged = rp.commit('9.1.2: docs', '2026-10-03T10:00:00Z');
+  rp.g(['tag', 'v9.1.2']);
+  rp.commit('try 9.1.3', '2026-10-04T10:00:00Z', 'package.json', '{\n  "name": "x",\n  "version": "9.1.3"\n}\n');
+  rp.commit('back to 9.1.2', '2026-10-05T10:00:00Z', 'package.json', '{\n  "name": "x",\n  "version": "9.1.2"\n}\n');
+  const dg = new DerivedGit(rp.repo);
+  const bumps = await dg.bumps();
+  assert.equal(bumps.get('9.1.2').commit, bump);
+  assert.equal(bumps.get('9.1.1').commit, rp.g(['rev-list', '--max-parents=0', 'HEAD']));
+  const rel = Object.fromEntries(F.releaseFacts([{ version: '9.1.2', date: '2026-10-03', headline: '**Bold** and `code`', entries: [{ heading: 'Fixed', text: '**Lead.** Uses `memory search --exact`.' }] }], await dg.tags(), bumps).map((f) => [f.key, f]));
+  assert.match(rel['release.9.1.2'].text, new RegExp(`tag v9\\.1\\.2 is commit ${tagged} \\(tagged 2026-10-03\\), version bump commit ${bump}\\. Bold and code$`));
+  assert.deepEqual(rel['release.9.1.2'].refs, [{ type: 'commit', value: tagged }, { type: 'commit', value: bump }]);
+  assert.equal(rel['release.9.1.2.bump'].text, `Guppy 9.1.2 version bump: the first commit that sets package.json version to 9.1.2 is ${bump.slice(0, 8)} (${bump})`);
+  assert.equal(rel['release.9.1.2.bump'].at, '2026-10-02T10:00:00.000Z');
+  assert.equal(rel['release.9.1.2.e1'].text, 'Guppy 9.1.2 (2026-10-03) CHANGELOG Fixed: Lead. Uses memory search --exact.', 'no markup');
 });

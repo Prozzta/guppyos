@@ -105,7 +105,7 @@ export class DerivedLive {
     const git = c.git && await c.git.ok() ? c.git : null;
     const rel = await this.releaseSource(git);
     await syncDerived(c.w, rulingMailFacts(readIndexRulingMails(c.root)));
-    await syncDerived(c.w, releaseFacts(parseChangelog(rel.changelog), rel.tags));
+    await syncDerived(c.w, releaseFacts(parseChangelog(rel.changelog), rel.tags, rel.bumps));
     const mails = this.newDoneMails(c.root);
     if (git && mails.length) {
       const ids = readCards(c.root).map((x) => x.id).filter((id): id is string => typeof id === 'string');
@@ -115,8 +115,8 @@ export class DerivedLive {
     }
   }
 
-  private async releaseSource(git: DerivedGit | null): Promise<{ changelog: string | null; tags: Awaited<ReturnType<DerivedGit['tags']>> }> {
-    return { changelog: this.d.changelog(), tags: git ? await git.tags() : [] };
+  private async releaseSource(git: DerivedGit | null): Promise<{ changelog: string | null; tags: Awaited<ReturnType<DerivedGit['tags']>>; bumps?: Awaited<ReturnType<DerivedGit['bumps']>> }> {
+    return { changelog: this.d.changelog(), tags: git ? await git.tags() : [], ...(git ? { bumps: await git.bumps() } : {}) };
   }
 
   /** The done mails the MailLedger recorded since the last pass (each remembered by agent/id). */

@@ -150,7 +150,7 @@ async function main() {
     const reg = () => { try { return loadRegistry(hive); } catch { return DEFAULT_KEY_REGISTRY; } };
     const counts = await runDerivedBackfill(
       { store, derive: (records) => derive(records, reg(), { r4: false }), log: (row) => logs.push(row) },
-      { hiveRoot: hive, git, releases: { changelog, tags }, ...(git ? { prefetch: (s) => git.prefetch(s) } : {}) },
+      { hiveRoot: hive, git, releases: { changelog, tags, ...(git ? { bumps: await git.bumps() } : {}) }, ...(git ? { prefetch: (s) => git.prefetch(s) } : {}) },
     );
     const failed = logs.filter((r) => r.kind === 'claims-derived-append-failed').length;
     process.stdout.write(`${JSON.stringify({ ok: failed === 0, ...counts, tags: tags.length, changelog: changelog !== null, logKinds: [...new Set(logs.map((r) => r.kind))] })}\n`);

@@ -17,7 +17,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DERIVED_AGENT_ID, type AppendOrigin, type AppendResult, type ClaimRec, type ClaimsState, type LedgerRec, type ReadResult, type RecordDraft } from '../../shared/claims';
 import {
-  cardFieldFacts, cardRecordFacts, decisionFacts, isRulingMail, rulingMailFacts, type RulingMailLike, doneMailFacts, gitHistoryFacts, parseChangelog, releaseFacts, shaMentions,
+  cardFieldFacts, cardRecordFacts, decisionFacts, isRulingMail, rulingMailFacts, type RulingMailLike, type BumpMap, doneMailFacts, gitHistoryFacts, parseChangelog, releaseFacts, shaMentions,
   type CardLike, type DerivedFact, type GitLogPort, type MailLike, type TagLike,
 } from './derivedFacts';
 import { mergeHotCold, readArchive } from '../taskArchive';
@@ -179,7 +179,7 @@ export function readDoneMails(hiveRoot: string, seen?: Set<string>): MailLike[] 
       if (seen?.has(k)) continue;
       seen?.add(k);
       const had = byId.get(e.id);
-      if (had) { if (!had.card && e.cardId) had.card = e.cardId; continue; }   // the index row has the body
+      if (had) continue;   // the index row has the body and the link method
       out.push({
         id: e.id, from: e.from, act: 'done', subject: e.subject,
         ...(e.cardId ? { card: e.cardId } : {}),
@@ -210,14 +210,16 @@ export function readIndexDoneMails(hiveRoot: string, seen?: Set<string>): MailLi
       let r: Record<string, unknown>;
       try { r = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
       if (!r || r.act !== 'done' || typeof r.id !== 'string' || !isValidMailId(r.id) || got.has(r.id)) continue;
+      // F1 (spec F): a mention-body (or unknown) link never gives a done mail its card.
+      if (!TRUSTED_METHODS.has(r.cardFrom as MailLinkMethod)) continue;
       got.add(r.id);
       if (seen?.has(`idx/${r.id}`)) continue;
       seen?.add(`idx/${r.id}`);
       const body = typeof r.bodyHash === 'string' && r.body !== undefined && mailBodyHash(r.body) === r.bodyHash ? { body: r.body } : {};
       out.push({
         id: r.id, from: r.from, act: 'done', subject: r.subject,
-        ...(typeof r.card === 'string' ? { card: r.card } : {}),
-        ...(Array.isArray(r.cards) ? { cards: r.cards } : {}),
+        ...(typeof r.card === 'string' && r.cardFrom === 'field' ? { card: r.card } : {}),
+        ...(Array.isArray(r.cards) ? { cards: r.cards } : typeof r.card === 'string' ? { cards: [r.card] } : {}),
         ...(typeof r.created_at === 'string' ? { created_at: r.created_at } : Number.isFinite(r.deliveredAt) ? { created_at: new Date(r.deliveredAt as number).toISOString() } : {}),
         ...body,
       });
@@ -277,7 +279,7 @@ function bodyOf(inbox: string, id: string, bodyHash: string): { body?: unknown }
   return {};
 }
 
-export interface ReleaseSource { changelog: string | null; tags: TagLike[] }
+export interface ReleaseSource { changelog: string | null; tags: TagLike[]; bumps?: BumpMap }
 
 export interface BackfillInput {
   hiveRoot: string;
@@ -306,7 +308,7 @@ export async function runDerivedBackfill(deps: DerivedWriterDeps, input: Backfil
   const records = await syncDerived(deps, cardRecordFacts(cards));
   const rulings = await syncDerived(deps, rulingMailFacts(readIndexRulingMails(input.hiveRoot)));
   const cardFields = await syncDerived(deps, await cardFieldFacts(cards, input.git));
-  const releases = await syncDerived(deps, releaseFacts(parseChangelog(input.releases.changelog), input.releases.tags));
+  const releases = await syncDerived(deps, releaseFacts(parseChangelog(input.releases.changelog), input.releases.tags, input.releases.bumps));
   const cardIds = cards.map((c) => c.id).filter((id): id is string => typeof id === 'string');
   const done = input.git ? await doneMailFacts(mails, cardIds, input.git) : { facts: [], skipped: { noGit: 1 } as Record<string, number>, skips: [], older: 0 };
   // R2 (c): every skipped done mail is logged with its reason (ids and card ids only).

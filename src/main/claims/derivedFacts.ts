@@ -75,7 +75,7 @@ const iso = (s: unknown): string | undefined => (isoOk(s) ? new Date(Date.parse(
 export interface QaLike { q?: unknown; a?: unknown; askedAt?: unknown; answeredAt?: unknown; msgId?: unknown }
 export interface CardLike {
   id?: unknown; title?: unknown; status?: unknown; assignee?: unknown; result?: unknown; notes?: unknown; humanQA?: unknown;
-  createdAt?: unknown; startedAt?: unknown; updatedAt?: unknown; doneAt?: unknown;
+  createdAt?: unknown; startedAt?: unknown; updatedAt?: unknown; doneAt?: unknown; fixVersion?: unknown;
   /** Set by the reader: the harness's status-since for the card's current status (state/task-meta.json),
    *  its last edit there, and the time of the card's archive row. ISO strings. */
   statusSince?: unknown; lastEditAt?: unknown; archivedAt?: unknown;
@@ -215,8 +215,12 @@ export interface GitPort {
 }
 
 const SHA_RE = /(?<![0-9A-Za-z])([0-9a-f]{7,40})(?:(\.\.\.?)([0-9a-f]{7,40}))?(?![0-9A-Za-z])/g;
-/** A hex word that could be a sha: 7-40 hex with at least one digit and one letter (no dates, no words). */
-const shaLike = (s: string): boolean => /[0-9]/.test(s) && /[a-f]/.test(s);
+/** A hex word that could be a sha: 7-40 hex with at least one digit and one letter (no words). A sha
+ *  of digits only (58102304) counts when written as @<sha> or when it has 8 or more digits and is not a
+ *  YYYYMMDD date; git still
+ *  decides whether it is a commit, so a date or a count that is not one is dropped there. */
+const DATE8 = /^(?:19|20)\d\d(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])$/;
+const shaLike = (s: string, at = false): boolean => /[0-9]/.test(s) && (/[a-f]/.test(s) || at || (s.length >= 8 && !DATE8.test(s)));
 
 export interface ShaMention { sha: string; range?: { from: string; to: string; end: 'from' | 'to' } }
 
@@ -225,15 +229,23 @@ export function shaMentions(text: unknown): ShaMention[] {
   if (typeof text !== 'string' || !text) return [];
   const out: ShaMention[] = [];
   const seen = new Set<string>();
-  const add = (m: ShaMention): void => { if (shaLike(m.sha) && !seen.has(m.sha)) { seen.add(m.sha); out.push(m); } };
+  const add = (m: ShaMention, at = false): void => { if (shaLike(m.sha, at) && !seen.has(m.sha)) { seen.add(m.sha); out.push(m); } };
   for (const m of text.matchAll(SHA_RE)) {
     const [, a, dots, b] = m;
-    if (dots && b && shaLike(a) && shaLike(b)) {
+    const at = (m.index ?? 0) > 0 && text[(m.index ?? 0) - 1] === '@';
+    if (dots && b && shaLike(a, at) && shaLike(b, at)) {
       add({ sha: a, range: { from: a, to: b, end: 'from' } });
       add({ sha: b, range: { from: a, to: b, end: 'to' } });
-    } else if (!dots) add({ sha: a });
+    } else if (!dots) add({ sha: a }, at);
   }
   return out;
+}
+
+/** The sha a done mail reports in its subject as `@<sha>` (`CARD @<sha>`), lower-cased, or null. */
+export function subjectAtSha(subject: unknown): string | null {
+  if (typeof subject !== 'string') return null;
+  const m = /(?<![0-9A-Za-z])@([0-9a-fA-F]{7,40})(?![0-9A-Za-z])/.exec(subject);
+  return m && /[0-9]/.test(m[1]) ? m[1].toLowerCase() : null;
 }
 
 /**
@@ -320,6 +332,12 @@ export async function cardFieldFacts(cards: readonly CardLike[], git: GitPort | 
       const at = cardAt(c);
       out.push({ slot: assignee, key: assignee, kind: 'fact', text: who ? `Card ${id}${title} is assigned to ${who}` : `Card ${id}${title} has no assignee`, ...(at ? { at } : {}), refs: [task] });
     }
+    const fixversion = cardKey(id, 'fixversion');
+    if (fixversion) {
+      const v = typeof c.fixVersion === 'string' && c.fixVersion.trim() ? clip(c.fixVersion.trim(), 40) : null;
+      const at = cardAt(c);
+      out.push({ slot: fixversion, key: fixversion, kind: 'fact', text: v ? `Card ${id}${title} fix version: ${v}` : `Card ${id}${title} has no fix version`, ...(at ? { at } : {}), refs: [task] });
+    }
     const lastsha = cardKey(id, 'lastsha');
     if (lastsha && git) {
       const shas = [...shaMentions(c.result), ...shaMentions(c.notes)].map((m) => m.sha);
@@ -374,8 +392,17 @@ const tagVersion = (name: string): string | null => {
   return m ? m[1] : null;
 };
 
-/** release.<ver>: the section's date, headline and tag commit; release.<ver>.e<n>: each entry's lead. */
-export function releaseFacts(sections: readonly ChangelogSection[], tags: readonly TagLike[]): DerivedFact[] {
+/** CHANGELOG markup a reader does not type: bold (**) and code (`) marks. */
+const plain = (s: string): string => s.replace(/\*\*|`/g, '');
+
+/** The first commit that sets package.json "version" to each version (git log -G order). */
+export type BumpMap = ReadonlyMap<string, { commit: string; time: number }>;
+
+/**
+ * release.<ver>: the section's date, headline, tag commit and version bump commit; release.<ver>.e<n>:
+ * each entry's lead; release.<ver>.bump: the bump commit. Text is stored without CHANGELOG markup.
+ */
+export function releaseFacts(sections: readonly ChangelogSection[], tags: readonly TagLike[], bumps?: BumpMap): DerivedFact[] {
   const out: DerivedFact[] = [];
   const tagOf = new Map<string, TagLike>();
   for (const t of tags) { const v = tagVersion(t.name); if (v && /^[0-9a-f]{40}$/.test(t.commit)) tagOf.set(v, t); }
@@ -389,16 +416,24 @@ export function releaseFacts(sections: readonly ChangelogSection[], tags: readon
     const parts = [`Guppy ${v}`];
     if (s?.date) parts.push(`released ${s.date} (CHANGELOG)`);
     if (t) parts.push(`tag ${t.name} is commit ${t.commit}${iso(t.date) ? ` (tagged ${iso(t.date)!.slice(0, 10)})` : ''}`);
+    const b = bumps?.get(v);
+    if (b) parts.push(`version bump commit ${b.commit}`);
     let text = parts.join(', ');
-    if (s?.headline) text = `${text}. ${clip(s.headline, TEXT_MAX - len(text) - 2)}`;
+    if (s?.headline) text = `${text}. ${clip(plain(s.headline), TEXT_MAX - len(text) - 2)}`;
     const refs: Ref[] = t ? [{ type: 'commit', value: t.commit }] : [];
-    const at = iso(t?.date) ?? dayAt(s?.date);
+    if (b && b.commit !== t?.commit) refs.push({ type: 'commit', value: b.commit });
+    const at = iso(t?.date) ?? dayAt(s?.date) ?? (b && b.time > 0 ? new Date(b.time * 1000).toISOString() : undefined);
     out.push({ slot: key, key, kind: 'fact', text: clip(text, TEXT_MAX), ...(at ? { at } : {}), refs });
+    const bk = `${key}.bump`;
+    if (b && keyOk(bk)) {
+      const bt = b.time > 0 ? new Date(b.time * 1000).toISOString() : at;
+      out.push({ slot: bk, key: bk, kind: 'fact', text: `Guppy ${v} version bump: the first commit that sets package.json version to ${v} is ${b.commit.slice(0, 8)} (${b.commit})`, ...(bt ? { at: bt } : {}), refs: [{ type: 'commit', value: b.commit }] });
+    }
     (s?.entries ?? []).forEach((e, i) => {
       const ek = `${key}.e${i + 1}`;
       if (!keyOk(ek)) return;
       const head = `Guppy ${v}${s?.date ? ` (${s.date})` : ''} CHANGELOG${e.heading ? ` ${e.heading}` : ''}: `;
-      out.push({ slot: ek, key: ek, kind: 'fact', text: `${head}${clip(e.text, TEXT_MAX - len(head))}`, ...(at ? { at } : {}), refs });
+      out.push({ slot: ek, key: ek, kind: 'fact', text: `${head}${clip(plain(e.text), TEXT_MAX - len(head))}`, ...(at ? { at } : {}), refs });
     });
   }
   return out;
@@ -465,7 +500,7 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
     skipped[reason]++;
     skips.push({ mail, reason, ...(cards?.length ? { cards } : {}) });
   };
-  const newest = new Map<string, { m: MailLike & { id: string }; card: string; from: string; commit: string; named: number; range?: ShaMention['range'] }>();
+  const newest = new Map<string, { m: MailLike & { id: string }; card: string; from: string; commit: string; named: number; range?: ShaMention['range']; subject: boolean; inRepo: boolean }>();
   let withCommit = 0;
   const seen = new Set<string>();
   const ordered = [...mails].filter((m): m is MailLike & { id: string } => !!m && typeof m.id === 'string')
@@ -475,7 +510,8 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
     seen.add(m.id);
     if (m.act !== 'done') { skip(m.id, 'notDone'); continue; }
     const mentions = [...shaMentions(m.subject), ...shaMentions(typeof m.body === 'string' ? m.body : '')];
-    if (!mentions.length) { skip(m.id, 'noShaWord'); continue; }
+    const reported = subjectAtSha(m.subject);
+    if (!mentions.length && !reported) { skip(m.id, 'noShaWord'); continue; }
     const commits: string[] = [];
     const words: string[] = [];   // the sha words as written, for latestInGitOrder (it resolves them itself)
     const rangeOf = new Map<string, ShaMention['range']>();
@@ -486,27 +522,29 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
       words.push(x.sha);
       if (x.range) rangeOf.set(full, x.range);
     }
-    if (!commits.length) { skip(m.id, 'noCommit'); continue; }
+    if (!commits.length && !reported) { skip(m.id, 'noCommit'); continue; }
     const card = await cardOfDoneMail(m, known, match, commits, git);
     if (typeof card !== 'string') { skip(m.id, card.reason, card.cards); continue; }
     const key = cardKey(card, 'donesha');
     if (!key) { skip(m.id, 'noCard', [card]); continue; }
-    const commit = (await latestInGitOrder(words, git)) ?? commits[0];
+    // F2: a sha the subject reports as @<sha> is the mail's sha, even when the repository lacks it.
+    const reportedFull = reported ? await git.commitOf(reported) : null;
+    const commit = reported ? (reportedFull ?? reported) : ((await latestInGitOrder(words, git)) ?? commits[0]);
     const from = typeof m.from === 'string' && m.from ? clip(m.from, 60) : 'unknown';
     withCommit++;
-    newest.set(`${key}#${from}`, { m, card, from, commit, named: commits.length, range: rangeOf.get(commit) });
+    newest.set(`${key}#${from}`, { m, card, from, commit, named: commits.length, range: rangeOf.get(commit), subject: !!reported, inRepo: !reported || !!reportedFull });
   }
   const facts: DerivedFact[] = [];
-  for (const [slot, { m, card, from, commit, named, range }] of newest) {
+  for (const [slot, { m, card, from, commit, named, range, subject, inRepo }] of newest) {
     const key = slot.slice(0, slot.lastIndexOf('#'));
     const at = iso(m.created_at);
     const of = range ? ` (the ${range.end === 'from' ? 'start' : 'end'} of the range ${range.from}..${range.to})` : '';
-    const others = named > 1 ? `; it is the latest in git order of the ${named} commits the mail names` : '';
+    const others = subject ? ` as its subject's @sha${inRepo ? '' : ' (not in the repository)'}` : named > 1 ? `; it is the latest in git order of the ${named} commits the mail names` : '';
     facts.push({
       slot, key, kind: 'fact',
-      text: `Card ${card}: the newest done mail from ${from} (${clip(m.id, 80)}) names commit ${commit.slice(0, 8)} (${commit})${of}${others}`,
+      text: `Card ${card}: the newest done mail from ${from} (${clip(m.id, 80)}) names commit ${commit.slice(0, 8)} (${commit})${subject ? '' : of}${others}`,
       ...(at ? { at } : {}),
-      refs: [{ type: 'task', value: card }, { type: 'msg', value: m.id.slice(0, 200) }, { type: 'commit', value: commit }],
+      refs: [{ type: 'task', value: card }, { type: 'msg', value: m.id.slice(0, 200) }, ...(inRepo ? [{ type: 'commit' as const, value: commit }] : [])],
     });
   }
   return { facts, skipped, skips, older: withCommit - facts.length };
@@ -521,9 +559,12 @@ async function cardOfDoneMail(
   const linked = Array.isArray(m.cards)
     ? [...new Set(m.cards.map((c) => (typeof c === 'string' ? known.get(c.toLowerCase()) : undefined)).filter((c): c is string => !!c))]
     : [];
-  const inSubject = linked.length ? [] : match(m.subject);
-  const named = linked.length ? linked : inSubject.length ? inSubject : match(typeof m.body === 'string' ? m.body : '');
-  if (named.length === 1) return named[0];
+  // The card the subject names outright beats one inherited by a reply or conversation link; a card
+  // named only in the body never counts (mention-body is weak: spec F).
+  const inSubject = match(m.subject);
+  if (inSubject.length === 1) return inSubject[0];
+  if (linked.length === 1 && (!inSubject.length || inSubject.includes(linked[0]))) return linked[0];
+  const named = inSubject.length ? inSubject : linked;
   if (!named.length) return { reason: 'noCard' };
   if (git.message) {
     const byGit = new Set<string>();

@@ -113,6 +113,24 @@ export class DerivedGit implements GitLogPort {
     return out;
   }
 
+  /** F3: the first commit (oldest first, over every branch, tag and remote) whose package.json diff sets
+   *  "version" to each version. */
+  async bumps(): Promise<Map<string, { commit: string; time: number }>> {
+    const r = await git(this.repo, ['log', '--branches', '--tags', '--remotes', '--reverse', '--no-color', '-U0', '-p', '--format=%x1e%H%x1f%ct', '--', 'package.json'], this.o);
+    const out = new Map<string, { commit: string; time: number }>();
+    if (r.code !== 0) return out;
+    for (const rec of r.out.split('\x1e')) {
+      const [h, rest = ''] = rec.split('\x1f');
+      if (!h || !/^[0-9a-f]{40}$/.test(h.trim())) continue;
+      const time = Number(rest.split('\n')[0]) || 0;
+      for (const line of rest.split('\n')) {
+        const v = /^\+\s*"version"\s*:\s*"([^"]+)"/.exec(line)?.[1];
+        if (v && !out.has(v)) out.set(v, { commit: h.trim(), time });
+      }
+    }
+    return out;
+  }
+
   /** A commit's message, or null. */
   async message(commit: string): Promise<string | null> {
     if (!this.messages.has(commit)) {
