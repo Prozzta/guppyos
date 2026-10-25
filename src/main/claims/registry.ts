@@ -17,7 +17,7 @@
  */
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { KeyRegistry } from '../../shared/claims';
+import { DERIVED_AGENT_ID, type KeyRegistry } from '../../shared/claims';
 import { canonicalJson, sha256Hex } from './canonical';
 
 export const KEY_REGISTRY_FILE = 'memory-keys.json';
@@ -123,7 +123,9 @@ export function checkKey(reg: KeyRegistry, key: string, agentId: string, nowIso:
   }
   const known = reg.keys[key];
   if (known) return { ok: true, cardinality: known.cardinality, added: false };
-  const near = key.startsWith(CARD_KEY_PREFIX) ? null : nearMiss(reg, key);
+  // CLAIMS-90 M5: the derived writer's keys are built from versions and ids, never typed, and
+  // release.1.1.97 is one edit from release.1.1.98: no near-miss check for them.
+  const near = key.startsWith(CARD_KEY_PREFIX) || agentId === DERIVED_AGENT_ID ? null : nearMiss(reg, key);
   if (near) return { ok: false, error: `unknown key "${key}"; did you mean "${near}"?`, didYouMean: near };
   const ns = namespaceFor(reg, key, agentId);
   if (!ns) {

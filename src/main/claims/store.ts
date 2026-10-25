@@ -45,7 +45,7 @@ import * as nodeFs from 'node:fs';
 import { basename, join } from 'node:path';
 import {
   CLAIM_KINDS, CLAIM_TEXT_MAX, CLAIM_TEXT_MAX_LEGACY, CLAIMS_ALERT_CHAIN_BROKEN, CLAIMS_ALERT_KEY_MISSING, SUPERSEDES_REASON_NOTE_MAX,
-  EVENT_KINDS, LEDGER_RECORD_VERSION,
+  DERIVED_AGENT_ID, EVENT_KINDS, LEDGER_RECORD_VERSION,
   type AppendOrigin, type AppendResult, type ChainBreak, type ClaimKind, type ClaimRec, type ClaimSource,
   type EventRec, type LedgerRec, type MacKeyProvider, type ReadResult, type RecordDraft, type Ref, type TornInfo,
   type UsageRec, type SupersedesReason,
@@ -838,10 +838,15 @@ export class ClaimStore {
   private build(agentId: string, draft: RecordDraft, origin: AppendOrigin, s: AgentState, wt: string):
     { rec: LedgerRec; registryAdded: (() => void) | null } | { error: string; didYouMean?: string } {
     if (!isObj(draft)) return { error: 'the draft is not an object' };
+    // CLAIMS-90 M5: the derived ledger and the derived writer's origin belong to each other only.
+    if ((agentId === DERIVED_AGENT_ID) !== (origin === 'derived-internal')) {
+      return { error: origin === 'derived-internal' ? 'the derived writer writes the derived ledger only' : 'refused: the derived ledger is written by the derived writer only' };
+    }
     const external = origin !== 'w6-internal';
     if (draft.t === 'claim') return this.buildClaim(agentId, draft, origin, external, s, wt);
     if (draft.t === 'event') {
       if (origin === 'w6-internal') return { error: 'the import writes claims only' };
+      if (origin === 'derived-internal') return { error: 'the derived writer writes claims only' };
       for (const k of Object.keys(draft)) if (!EVENT_DRAFT_FIELDS.has(k)) return { error: `unknown field "${k}"` };
       if (!DRAFT_EVENTS.has(draft.ev)) return { error: `unsupported event "${String(draft.ev)}"` };
       const targets = this.idList(draft.targets, 'targets', s, draft.ev === 'revert' ? 'any' : 'claim');
@@ -877,6 +882,9 @@ export class ClaimStore {
       if (draft.source !== undefined && draft.source !== 'legacy' && draft.source !== 'self') return { error: 'the import writes source legacy or self only' };
       source = draft.source ?? 'legacy';
       if (source === 'legacy' && draft.legacy === undefined) return { error: 'a legacy claim needs its legacy provenance' };
+    } else if (origin === 'derived-internal') {
+      if (draft.source !== undefined && draft.source !== 'derived') return { error: 'the derived writer writes source derived only' };
+      source = 'derived';
     } else {
       if (draft.source !== undefined && draft.source !== 'self' && !(typeof draft.source === 'string' && MAIL_SOURCE_RE.test(draft.source))) {
         return { error: 'refused: an agent claim is self or mail:<id>' };

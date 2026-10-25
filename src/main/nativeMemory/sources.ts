@@ -25,7 +25,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
-import { CLAIMS_IMPORT_SETTLED_FILE, effectiveLevel, IMPLEMENTED_LEVEL, type LedgerLevel } from '../../shared/claims';
+import { CLAIMS_IMPORT_SETTLED_FILE, DERIVED_AGENT_ID, effectiveLevel, IMPLEMENTED_LEVEL, manifestEntry, type LedgerLevel } from '../../shared/claims';
 
 /** Bumped whenever the rules below change: it is recorded in the index and the report. */
 export const ALLOW_LIST_VERSION = 2;
@@ -189,7 +189,7 @@ export function discoverSources(hiveRoot: string, config: SourcesConfig = readSo
   for (const id of agents) {
     const dir = join(agentsDir, id);
     walkMd(dir, allMd);
-    const level = effectiveLevel(ledgerOpts.claimLedger, config.ledger?.[id], ledgerOpts.implemented ?? IMPLEMENTED_LEVEL).level;
+    const level = effectiveLevel(ledgerOpts.claimLedger, manifestEntry(config.ledger, id), ledgerOpts.implemented ?? IMPLEMENTED_LEVEL).level;
     if (level !== 'off') ledgerLevels[id] = level;
     // Only an agent that HAS a ledger (a monthly segment) swaps its markdown for claims: an agent
     // with none yet (a new hire, an unimported one) keeps memory.md, so nothing it wrote vanishes.
@@ -201,7 +201,8 @@ export function discoverSources(hiveRoot: string, config: SourcesConfig = readSo
       let segments = false;
       try { segments = readdirSync(claimsDir).some((n) => SEGMENT_FILE.test(n)); } catch { segments = false; }
       // A deleted ledger does not swap the markdown back in: main's anchor says it existed (A-2).
-      hasLedger = segments ? existsSync(join(dir, 'memory', CLAIMS_IMPORT_SETTLED_FILE)) : ledgerOpts.anchored?.includes(id) === true;
+      // CLAIMS-90 M5: the derived ledger has no markdown to import, so it never settles; its segments are enough.
+      hasLedger = segments ? id === DERIVED_AGENT_ID || existsSync(join(dir, 'memory', CLAIMS_IMPORT_SETTLED_FILE)) : ledgerOpts.anchored?.includes(id) === true;
     }
     const flagged = hasLedger;
     if (flagged) {

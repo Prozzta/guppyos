@@ -93,7 +93,8 @@ test('text limits: 400 for external entry points, 4000 for the w6-internal origi
   assert.equal(claims.CLAIM_TEXT_MAX, 400);
   assert.equal(claims.CLAIM_TEXT_MAX_LEGACY, 4000);
   const origin = /export type AppendOrigin = ([^;]+);/.exec(source)[1];
-  assert.deepEqual([...origin.matchAll(/'([a-z0-9-]+)'/g)].map((m) => m[1]), ['endpoint', 'ledger-route', 'ui-ipc', 'w6-internal']);
+  // CLAIMS-90 M5 (god 104bfd): 'derived-internal', main's derived writer, 400 like the external ones.
+  assert.deepEqual([...origin.matchAll(/'([a-z0-9-]+)'/g)].map((m) => m[1]), ['endpoint', 'ledger-route', 'ui-ipc', 'w6-internal', 'derived-internal']);
   assert.match(source, /export type AppendRecordFn = \(agentId: string, draft: RecordDraft, origin: AppendOrigin\)/);
 });
 
