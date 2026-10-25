@@ -16,6 +16,7 @@
  *
  *   node test/claims-90/answerer.cjs --snapshot <dir> --addendum <dir> --items <items.jsonl>
  *        --instruction <file> --out <dir> [--model <id>] [--claude <exe>] [--resources <dir>] [--keep]
+ *        [--build <worktree>]   serve a branch build (its src, out/ hook shape, Electron and memory-cli)
  *
  * items.jsonl: { "id": "...", "asker": "<agent id>", "question": "..." }
  * The instruction file may use {asker}, {today} and {question}.
@@ -29,7 +30,6 @@ const { spawn } = require('node:child_process');
 const { drillEnv } = require('../claims-drill/runner.cjs');
 const R = require('./run.cjs');
 const { memoryMdOf, memoryMdCommand } = require('./memory-md.cjs');
-const Condense = require('../load-ts.cjs')(path.join(__dirname, '..', '..', 'src', 'main', 'toolOutputCondense.ts'));
 
 const REPO = path.resolve(__dirname, '..', '..');
 const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
@@ -42,10 +42,18 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--keep') o.keep = true;
-    else if (/^--(snapshot|addendum|items|instruction|out|model|claude|resources|tree)$/.test(a)) o[a.slice(2)] = argv[++i];
+    else if (/^--(snapshot|addendum|items|instruction|out|model|claude|resources|tree|build)$/.test(a)) o[a.slice(2)] = argv[++i];
     else throw new Error(`unknown argument ${a}`);
   }
   for (const k of ['snapshot', 'addendum', 'items', 'instruction', 'out']) if (!o[k]) throw new Error(`--${k} is required`);
+  // god 7fea2c: --build serves memory from a branch build (a worktree at that commit, built: out/,
+  // node_modules) in place of the installed app: its src is the tree, its out/ the hook shape, its
+  // Electron and resources/memory-cli.cjs the shim. --resources (the models) stays the installed one.
+  if (o.build) {
+    o.build = path.resolve(o.build);
+    if (o.tree && path.resolve(o.tree).toLowerCase() !== o.build.toLowerCase()) throw new Error('--tree and --build name different trees');
+    o.tree = o.build;
+  }
   o.tree = path.resolve(o.tree || REPO);
   o.resources = path.resolve(o.resources || path.join(INSTALLED_APP, 'resources'));
   o.claude = o.claude || claudeExe();
@@ -80,11 +88,50 @@ function installedHookShape(resources) {
   const asarFile = path.join(resources, 'app.asar');
   const asar = require(path.join(REPO, 'node_modules', '@electron', 'asar'));
   const js = asar.extractFile(asarFile, path.join('out', 'main', 'index.js')).toString('utf8');
+  return { asarSha256: sha256(fs.readFileSync(asarFile)), ...hookShapeOf(js, 'the installed app.asar') };
+}
+
+/** The tool-output hook entry in a built out/main/index.js (hive.ts hookSettings, as bundled). */
+function hookShapeOf(js, what) {
   const timeout = /HOOK_HTTP_TIMEOUT_S = (\d+);/.exec(js);
   const entry = /const hook = \(matcher\) => hookUrl \? \{ \.\.\.matcher \? \{ matcher \} : \{\}, hooks: \[\{ type: "http", url: hookUrl, timeout: HOOK_HTTP_TIMEOUT_S \}\] \} : entry\(matcher\)/.exec(js);
   const events = ['PreToolUse', 'PostToolUse', 'PostToolUseFailure'].filter((e) => js.includes(`${e}: [hook("*")]`));
-  if (!timeout || !entry || events.length !== 3) throw new Error('the installed app.asar does not wire the tool hooks as expected');
-  return { asarSha256: sha256(fs.readFileSync(asarFile)), mainSha256: sha256(js), entrySource: entry[0], timeout: Number(timeout[1]), events, matcher: '*' };
+  if (!timeout || !entry || events.length !== 3) throw new Error(`${what} does not wire the tool hooks as expected`);
+  return { mainSha256: sha256(js), entrySource: entry[0], timeout: Number(timeout[1]), events, matcher: '*' };
+}
+
+/** A branch build's hook shape, from the out/main/index.js built in its worktree. */
+function buildHookShape(build) {
+  const file = path.join(build, 'out', 'main', 'index.js');
+  if (!fs.existsSync(file)) throw new Error(`the build has no out/main/index.js (build it in its worktree first): ${build}`);
+  return { asarSha256: null, ...hookShapeOf(fs.readFileSync(file, 'utf8'), 'the build\'s out/main/index.js') };
+}
+
+/** Every file under a folder, hashed in path order (the build's out/ as one identity). */
+function treeSha256(dir) {
+  const files = fs.readdirSync(dir, { recursive: true }).map(String).filter((f) => fs.statSync(path.join(dir, f)).isFile()).map(fwd).sort();
+  return sha256(files.map((f) => `${f}\0${sha256(fs.readFileSync(path.join(dir, f)))}`).join('\n'));
+}
+
+/** What run.json records of a branch build: its commit, whether src or resources differ from it, its out/. */
+function buildInfo(build) {
+  const asar = path.join(build, 'dist', 'win-unpacked', 'resources', 'app.asar');
+  return {
+    dir: path.basename(build),
+    commit: R.git(build, ['rev-parse', 'HEAD']),
+    dirty: R.git(build, ['status', '--porcelain', '--', 'src', 'resources']) || '',
+    outMainSha256: sha256(fs.readFileSync(path.join(build, 'out', 'main', 'index.js'))),
+    outSha256: treeSha256(path.join(build, 'out')),
+    memoryCliSha256: sha256(fs.readFileSync(path.join(build, 'resources', 'memory-cli.cjs'))),
+    asarSha256: fs.existsSync(asar) ? sha256(fs.readFileSync(asar)) : null,
+  };
+}
+
+/** The tree's toolOutputCondense (the readType test), one load per tree. */
+const condensers = new Map();
+function condenseOf(tree) {
+  if (!condensers.has(tree)) condensers.set(tree, require(path.join(tree, 'test', 'load-ts.cjs'))(path.join(tree, 'src', 'main', 'toolOutputCondense.ts')));
+  return condensers.get(tree);
 }
 
 /** The installed `memory` shim, copied into the jail's bin (the same command an agent shell runs). */
@@ -94,6 +141,16 @@ function installMemoryShim(binDir) {
   fs.mkdirSync(binDir, { recursive: true });
   fs.writeFileSync(path.join(binDir, 'memory'), text);
   return { sha256: sha256(text) };
+}
+
+/** A branch build's `memory` shim: the installed shim's form, with the build's Electron and memory-cli.cjs. */
+function buildMemoryShim(binDir, build) {
+  const cli = path.join(build, 'resources', 'memory-cli.cjs');
+  if (!fs.existsSync(cli)) throw new Error('the build has no resources/memory-cli.cjs');
+  const text = `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec "${fwd(R.electronOf(build))}" "${fwd(cli)}" "$@"\n`;
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.writeFileSync(path.join(binDir, 'memory'), text);
+  return { sha256: sha256(text.split(fwd(build)).join('<build>')), memoryCliSha256: sha256(fs.readFileSync(cli)) };
 }
 
 const fwd = (p) => p.replace(/\\/g, '/');
@@ -280,7 +337,7 @@ async function answerItem(o, v, addDir, item, key, shape, instruction, outDir) {
     const a = connect.askers[item.asker];
     row.briefing = { chars: a.briefingChars, sha256: a.briefingSha256 };
     const jailBin = path.join(home, 'bin');
-    row.memoryShim = installMemoryShim(jailBin);
+    row.memoryShim = o.build ? buildMemoryShim(jailBin, o.build) : installMemoryShim(jailBin);
     const settingsFile = path.join(home, 'claude-settings.json');
     const settings = settingsFor(shape, a.hookUrl, a.briefing, a.toolOutputDir, hive);
     fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 1));
@@ -306,6 +363,7 @@ async function answerItem(o, v, addDir, item, key, shape, instruction, outDir) {
     const serveRows = fs.existsSync(answers) ? fs.readFileSync(answers, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
     row.serve = serveRows.find((r) => r.summary)?.summary ?? { ok: false, reason: serverErr.slice(0, 300) };
     // Gate 1: what the transcript shows the model = the tree's hook = the runner's view.
+    const Condense = condenseOf(o.tree);
     row.calls = t.calls.map((c) => {
       const h = hookRows.find((x) => x.event === 'PostToolUse' && x.toolUseId === c.id);
       const f = hookRows.find((x) => x.event === 'PostToolUseFailure' && x.toolUseId === c.id);
@@ -365,7 +423,10 @@ async function main(argv) {
   if (ad.diffs.length) throw new Error(`the addendum does not match (${ad.diffs.length}): ${ad.diffs.slice(0, 3).join('; ')}`);
   const items = parseItems(o.items);
   const instruction = fs.readFileSync(o.instruction, 'utf8');
-  const shape = installedHookShape(o.resources);
+  const shape = o.build ? buildHookShape(o.build) : installedHookShape(o.resources);
+  // A branch build's hook entry is compared with the installed app's (the same hook, or say so).
+  const sameHook = (a, b) => a.entrySource === b.entrySource && a.timeout === b.timeout && JSON.stringify(a.events) === JSON.stringify(b.events) && a.matcher === b.matcher;
+  const build = o.build ? { ...buildInfo(o.build), hookEqualsInstalled: sameHook(shape, installedHookShape(o.resources)) } : null;
   const outDir = path.resolve(o.out);
   fs.mkdirSync(outDir, { recursive: true });
   // The key is unwrapped once, from a staged copy, and kept in memory.
@@ -390,6 +451,8 @@ async function main(argv) {
     snapshot: path.basename(snap), manifestSha256: v.manifestSha256, addendumSha256: ad.addendumSha256, now: v.manifest.takenFrom,
     model: o.model, claudeExeSha256: sha256(fs.readFileSync(o.claude)), hookShape: shape, instructionSha256: sha256(instruction),
     code: code0,
+    // --build: code.head is the build's commit; the runner's own commit is here.
+    build, runnerHead: R.git(REPO, ['rev-parse', 'HEAD']),
     codeAtEnd: (() => { const c = codeAt(); return JSON.stringify(c) === JSON.stringify(code0) ? 'unchanged' : c; })(),
     itemsSha256: sha256(fs.readFileSync(o.items)), items: items.length,
     invalid: rows.filter((r) => r.invalid).length,
@@ -416,4 +479,4 @@ if (require.main === module) {
   }, (e) => { console.error(`[claims-90] ${e.stack || e.message}`); process.exitCode = 2; });
 }
 
-module.exports = { parseArgs, parseItems, installedHookShape, settingsFor, childEnv, readTranscript, styleDeviation, itemStyle, memoryMdUse, main };
+module.exports = { parseArgs, parseItems, installedHookShape, hookShapeOf, buildHookShape, buildInfo, buildMemoryShim, condenseOf, settingsFor, childEnv, readTranscript, styleDeviation, itemStyle, memoryMdUse, main };

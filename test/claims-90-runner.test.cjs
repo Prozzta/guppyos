@@ -282,3 +282,75 @@ test('C0b: memory.md reads (Read, or a read-only grep/cat/head/tail/sed -n) go t
   assert.match(child, /permissionDecision: 'allow', updatedInput: \{ \.\.\.p\.tool_input, command: b\.command \} \}/);
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test('--build: the branch build is the tree, its out/ the hook shape, its Electron and memory-cli the shim; run.json identity (god 7fea2c)', () => {
+  const A = require('./claims-90/answerer.cjs');
+  const { execFileSync } = require('node:child_process');
+  const base = ['--snapshot', 's', '--addendum', 'a', '--items', 'i', '--instruction', 'n', '--out', 'o', '--claude', 'c'];
+  const build = fs.mkdtempSync(path.join(os.tmpdir(), 'c90-build-'));
+  const o = A.parseArgs([...base, '--build', build]);
+  assert.equal(o.build, path.resolve(build));
+  assert.equal(o.tree, path.resolve(build), 'the build is the tree');
+  assert.equal(A.parseArgs([...base, '--build', build, '--tree', build]).tree, path.resolve(build), 'the same tree twice is fine');
+  assert.throws(() => A.parseArgs([...base, '--build', build, '--tree', os.tmpdir()]), /--tree and --build name different trees/);
+  assert.match(A.parseArgs(base).resources, /Guppy[\\/]resources$/, 'no build: the installed resources');
+  assert.match(o.resources, /Guppy[\\/]resources$/, 'a build keeps the installed resources (the models)');
+
+  assert.throws(() => A.buildHookShape(build), /no out\/main\/index\.js/);
+  const js = [
+    'const HOOK_HTTP_TIMEOUT_S = 30;',
+    'const hook = (matcher) => hookUrl ? { ...matcher ? { matcher } : {}, hooks: [{ type: "http", url: hookUrl, timeout: HOOK_HTTP_TIMEOUT_S }] } : entry(matcher)',
+    'PreToolUse: [hook("*")], PostToolUse: [hook("*")], PostToolUseFailure: [hook("*")]',
+  ].join('\n');
+  fs.mkdirSync(path.join(build, 'out', 'main'), { recursive: true });
+  fs.writeFileSync(path.join(build, 'out', 'main', 'index.js'), js);
+  const shape = A.buildHookShape(build);
+  assert.equal(shape.asarSha256, null);
+  assert.equal(shape.mainSha256, sha(js));
+  assert.equal(shape.timeout, 30);
+  assert.deepEqual(shape.events, ['PreToolUse', 'PostToolUse', 'PostToolUseFailure']);
+  assert.throws(() => A.hookShapeOf(js.replace('PostToolUseFailure: [hook("*")]', ''), 'x'), /x does not wire the tool hooks/);
+
+  const electron = path.join(build, 'electron.exe');
+  fs.writeFileSync(electron, '');
+  fs.mkdirSync(path.join(build, 'node_modules', 'electron'), { recursive: true });
+  fs.writeFileSync(path.join(build, 'node_modules', 'electron', 'index.js'), `module.exports = ${JSON.stringify(electron)};`);
+  const bin = path.join(build, 'jail-bin');
+  assert.throws(() => A.buildMemoryShim(bin, build), /no resources\/memory-cli\.cjs/);
+  fs.mkdirSync(path.join(build, 'resources'));
+  fs.writeFileSync(path.join(build, 'resources', 'memory-cli.cjs'), 'cli');
+  const shim = A.buildMemoryShim(bin, build);
+  const text = fs.readFileSync(path.join(bin, 'memory'), 'utf8');
+  const f = (p) => p.replace(/\\/g, '/');
+  assert.equal(text, `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec "${f(electron)}" "${f(path.join(build, 'resources', 'memory-cli.cjs'))}" "$@"\n`);
+  assert.equal(shim.memoryCliSha256, sha('cli'));
+  assert.equal(shim.sha256, sha(text.split(f(build)).join('<build>')), 'the shim sha does not depend on where the build sits');
+
+  const git = (...a) => execFileSync('git', ['-C', build, ...a], { encoding: 'utf8' }).trim();
+  git('init', '-q');
+  git('add', 'out', 'resources');
+  git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 't');
+  let info = A.buildInfo(build);
+  assert.equal(info.commit, git('rev-parse', 'HEAD'));
+  assert.equal(info.dirty, '');
+  assert.equal(info.outMainSha256, sha(js));
+  assert.equal(info.memoryCliSha256, sha('cli'));
+  assert.equal(info.asarSha256, null, 'no dist asar');
+  assert.equal(info.dir, path.basename(build));
+  fs.writeFileSync(path.join(build, 'resources', 'memory-cli.cjs'), 'cli2');
+  info = A.buildInfo(build);
+  assert.match(info.dirty, /memory-cli\.cjs/, 'a changed resource shows');
+  const out1 = info.outSha256;
+  fs.writeFileSync(path.join(build, 'out', 'main', 'extra.js'), 'x');
+  assert.notEqual(A.buildInfo(build).outSha256, out1, 'out/ is hashed as a whole');
+  fs.mkdirSync(path.join(build, 'dist', 'win-unpacked', 'resources'), { recursive: true });
+  fs.writeFileSync(path.join(build, 'dist', 'win-unpacked', 'resources', 'app.asar'), 'asar');
+  assert.equal(A.buildInfo(build).asarSha256, sha('asar'));
+  fs.rmSync(build, { recursive: true, force: true });
+
+  const src = codeOnly(readSource(path.join(__dirname, 'claims-90', 'answerer.cjs')));
+  assert.match(src, /const shape = o\.build \? buildHookShape\(o\.build\) : installedHookShape\(o\.resources\);/);
+  assert.match(src, /o\.build \? buildMemoryShim\(/, 'the jail shim is the build\'s');
+  assert.match(src, /hookEqualsInstalled: sameHook\(shape, installedHookShape\(o\.resources\)\)/);
+  assert.match(src, /const Condense = condenseOf\(o\.tree\);/, 'the condenser is the build\'s');
+});
