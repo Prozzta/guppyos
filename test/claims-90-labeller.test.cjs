@@ -63,6 +63,27 @@ test('guard: a quoted argument stays one word, escaped quotes and mid-token quot
   }
 });
 
+test('guard: one tokenizer finds chains and substitutions; -O, -f, ~, HOME, every path word and ref writes are judged (Jim, guard round 2)', () => {
+  const is = (c, d, p) => { const v = ck('Bash', { command: c }); assert.deepEqual([v.decision, v.place], [d, p], c); };
+  // MUST 1: an escaped quote outside quotes is a literal, so the ; runs a second command.
+  for (const c of ['git log \\" ; echo x ; \\" "x"', 'git log "a" ; echo x', "git log 'a' ; echo x", 'git log a\\;b', 'git log\necho x', 'git log "$(echo x)"', 'git log "`echo x`"']) is(c, 'deny', 'jail');
+  for (const c of ['git log --grep "a|b; c" --all', "git log --grep '$(x)'"]) is(c, 'allow', 'jail');
+  assert.deepEqual(G.scan('git log \\" ; echo x').ops, [';']);
+  // MUST 2: grep's pager in every form (stuck, bundled, =, separate, abbreviated); -f likewise.
+  for (const c of ['git grep -Oless foo', 'git grep -iOless foo', 'git grep --open-files-in-pager=less foo', 'git grep -O less foo', 'git grep --open=less foo', 'git grep -fpats foo']) is(c, 'deny', 'jail');
+  for (const c of ['git log -SOllama', 'git grep -e Oless', 'git grep --text foo']) is(c, 'allow', 'jail');
+  // SHOULD a: the shell expands ~ and HOME outside the jail; other variables are denied.
+  for (const c of ['git log -- ~/x', 'git log -- $HOME/x', 'git log -- ${HOME}/x', 'git log -- "$HOME/x"']) is(c, 'deny', 'outside');
+  is('git log -- $PWD/x', 'deny', 'jail');
+  // SHOULD b: every path word is judged, not only the first.
+  const J = jail.replace(/\\/g, '/');
+  is(`git show HEAD:a ${J}/a C:/Dunder/hive/x`, 'deny', 'outside');
+  is(`git show HEAD:a ${J}/a`, 'allow', 'jail');
+  // SHOULD c: git tag and git branch list; a form that writes a ref is denied.
+  for (const c of ['git tag', 'git tag -l "v1.*"', 'git tag --list v1', 'git tag -n5 --points-at HEAD', 'git branch', 'git branch -a --contains abc', 'git branch -vv', 'git branch --list "rel*"']) is(c, 'allow', 'jail');
+  for (const c of ['git tag newtag', 'git tag -a v9 -m x', 'git tag -d v1', 'git tag -l --del v1', 'git branch x', 'git branch -D x', 'git branch -m a b', 'git branch --set-upstream-to=o/x']) is(c, 'deny', 'jail');
+});
+
 test('guard hook: denies in the PreToolUse shape and writes the open log', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'c90-guard-'));
   const log = path.join(dir, 'open.jsonl');
