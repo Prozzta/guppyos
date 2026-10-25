@@ -5,7 +5,7 @@
  * memory-keys.json, claims-reconcile-queue.json, tasks.json and state/mail-cards/<card>.jsonl are read as files,
  * and resolveGet + formatGet run exactly as main runs them behind the endpoint. READ-ONLY: nothing is written.
  *
- *   node test/tools/claims90-get.cjs <hiveRoot> <term> [--agent A] [--mail N] [--before MAILID] [--no-mail] [--json]
+ *   node test/tools/claims90-get.cjs <hiveRoot> <term> [--agent A] [--mail N] [--before MAILID] [--no-mail] [--all] [--json]
  *
  * Output: the get text on stdout (`--json`: the GetResult JSON, the same object the CLI prints with --format json).
  * Exit 0 (also for an unknown term: "no claim under <keys tried>" on the text path, current null on JSON), 2 usage,
@@ -20,7 +20,7 @@ const has = (f) => argv.includes(f);
 const val = (f, d = null) => { const i = argv.indexOf(f); return i >= 0 && i + 1 < argv.length ? argv[i + 1] : d; };
 const positional = argv.filter((a, i) => !a.startsWith('--') && !(i > 0 && ['--agent', '--mail', '--before'].includes(argv[i - 1])));
 const [hiveRoot, term] = positional;
-if (!hiveRoot || !term) { process.stderr.write('usage: claims90-get.cjs <hiveRoot> <term> [--agent A] [--mail N] [--before MAILID] [--no-mail] [--json]\n'); process.exit(2); }
+if (!hiveRoot || !term) { process.stderr.write('usage: claims90-get.cjs <hiveRoot> <term> [--agent A] [--mail N] [--before MAILID] [--no-mail] [--all] [--json]\n'); process.exit(2); }
 
 /** Raw ledger lines of every agent with a claims folder (the auditor's copy has no MAC key: every parseable row counts). */
 function readLedgers(root) {
@@ -63,9 +63,9 @@ try {
   };
   const agent = val('--agent');
   const mail = val('--mail') === null ? undefined : Number(val('--mail'));
-  const opts = { agent, mail, before: val('--before'), noMail: has('--no-mail') };
+  const opts = { agent, mail, before: val('--before'), noMail: has('--no-mail'), history: has('--all') || has('--history') };
   const r = resolveGet(term, opts, { ledgers, registry, reconcileItems, tasks, mailRows, ruleConfig: { r4: false } });
-  process.stdout.write(has('--json') ? JSON.stringify(r) + '\n' : formatGet(r, { agent }));
+  process.stdout.write(has('--json') ? JSON.stringify(r) + '\n' : formatGet(r, { agent, history: opts.history }));
 } catch (e) {
   process.stderr.write(`claims90-get: ${e && e.stack ? e.stack : String(e)}\n`);
   process.exitCode = 1;

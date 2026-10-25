@@ -324,7 +324,7 @@ export const MEMORY_GET_TOOL = 'memory_get';
 export const MEMORY_SEARCH_TOOL = 'memory_search';
 /** The argument names each memory tool forwards (the service validates values; an unknown name is dropped). */
 export const MEMORY_TOOL_ARGS: Record<string, readonly string[]> = {
-  [MEMORY_GET_TOOL]: ['term', 'agent', 'mail', 'before', 'noMail'],
+  [MEMORY_GET_TOOL]: ['term', 'agent', 'mail', 'before', 'noMail', 'history'],
   [MEMORY_SEARCH_TOOL]: ['query', 'wing', 'room', 'results', 'since', 'before', 'history', 'all', 'kind', 'key', 'full', 'exact', 'newest']
 };
 
@@ -1030,7 +1030,7 @@ export class HookServer {
         ok({ tools: [
           { name: HIVE_HOOK_TOOL, description: 'Internal Munder hook sink. Not for model use: calls are rejected.', inputSchema: { type: 'object', additionalProperties: true } },
           { name: MEMORY_GET_TOOL, description: 'memory get <key|card-id>: the CURRENT value of a key or card (newest live claim, or a newer card mail naming a known value), then competing, superseded, a card\'s decision list, fields and mail history newest first. Same output as the `memory get` command.',
-            inputSchema: { type: 'object', required: ['term'], additionalProperties: false, properties: { term: { type: 'string', description: 'a key (card.<id>.donesha, release.tip) or a card id' }, agent: { type: 'string', description: 'pick that agent\'s value (--agent)' }, mail: { type: 'integer', minimum: 0, maximum: 50, description: 'mails to list (default 5)' }, before: { type: 'string', description: 'page mails back from this mail id' }, noMail: { type: 'boolean', description: 'claims only: ignore the card mail index' } } } },
+            inputSchema: { type: 'object', required: ['term'], additionalProperties: false, properties: { term: { type: 'string', description: 'a key (card.<id>.donesha, release.tip) or a card id' }, agent: { type: 'string', description: 'pick that agent\'s value (--agent)' }, mail: { type: 'integer', minimum: 0, maximum: 50, description: 'mails to list (default 5)' }, before: { type: 'string', description: 'page mails back from this mail id' }, noMail: { type: 'boolean', description: 'claims only: ignore the card mail index' }, history: { type: 'boolean', description: 'list the competing and superseded bodies (--all); the default prints their counts' } } } },
           { name: MEMORY_SEARCH_TOOL, description: 'memory search <query>: hits across the hive\'s shared memory, current values first; exact=true scans text (quoted lines, PROTOCOL.md, board.md, changelog); newest=true orders newest first with [1] the answer candidate. Same output as the `memory search` command.',
             inputSchema: { type: 'object', required: ['query'], additionalProperties: false, properties: { query: { type: 'string' }, wing: { type: 'string' }, room: { type: 'string' }, results: { type: 'integer', minimum: 1, maximum: 100 }, since: { type: 'string' }, before: { type: 'string' }, history: { type: 'boolean' }, all: { type: 'boolean' }, kind: { type: 'string' }, key: { type: 'string' }, full: { type: 'boolean' }, exact: { type: 'boolean' }, newest: { type: 'boolean' } } } }
         ] });

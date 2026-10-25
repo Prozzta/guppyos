@@ -113,7 +113,7 @@ test('current, competing, superseded: newest live claim is current; other live v
   assert.deepEqual(s.supersededBy, ['c-bbbbbbbbbbb2']);
   assert.equal(s.reason, 'changed');
   assert.ok(s.excerpt.length <= 120 && s.excerpt.endsWith('…') && s.excerpt.includes('1111111'), s.excerpt);
-  const t = text('card.foo-7');
+  const t = text('card.foo-7', { history: true });
   assert.match(t, /^superseded \(1\):\n  card\.foo-7: FOO-7 build is at 1111111 .*\[superseded · alpha-1 · 2026-09-30 · c-bbbbbbbbbbb1 → replaced by c-bbbbbbbbbbb2 · changed\]$/m);
   assert.match(t, /^current: card\.foo-7: FOO-7 build moved to 2222222 on branch x\n  \[claim · alpha-1 · 2026-10-03 · c-bbbbbbbbbbb2\]$/m);
 });
@@ -135,7 +135,8 @@ test('--agent: picks that agent\'s newest live claim, else the derived row namin
   assert.equal(get('card.foo-7.donesha', { agent: 'nobody' }).current.claimId, 'c-aaaaaaaaaaa2', 'unknown agent: global newest');
   const t = text('card.foo-7.donesha', { agent: 'alpha-1' });
   assert.match(t, /^get card\.foo-7\.donesha → keys: card\.foo-7\.donesha \(card foo-7\) \[--agent alpha-1\]\n/);
-  assert.match(t, /^competing \(2\):/m);
+  assert.match(t, /^competing: 2 other live values hidden \(--all lists them\)$/m);
+  assert.match(text('card.foo-7.donesha', { agent: 'alpha-1', history: true }), /^competing \(2\):/m);
 });
 
 test('mail rule: a NEWER card mail naming a known value is current (source mail, its id named); unknown values, Human mail (no body) and older mail never; --no-mail is the claims-only control', () => {
@@ -256,4 +257,45 @@ test('offline oracle (test/tools/claims90-get.cjs): over a hive FOLDER it prints
   assert.equal(digest(), before, 'READ-ONLY: no file changed');
   assert.equal(run().status, 2, 'usage');
   fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('db7d4a + T5 (god fe1140): a mention-body mail is listed weak and never current; only field/reply/conversation/mention-subject links can; at equal time subject+conversation outranks subject-only', () => {
+  const body = mail('2026-10-08T09-00-00-000Z-f00001', 'alpha-1', 'god', 'inform', 'build chatter', '2026-10-08T09:00:00.000Z', 'FOO-7 is back at 1111111', { cardFrom: 'mention-body' });
+  const r = get('card.foo-7', {}, deps({ mailRows: () => [body] }));
+  assert.equal(r.current.source, 'claim', 'MUTANT: a body-only mention makes a mail current');
+  assert.equal(r.mails.length, 1); assert.equal(r.mails[0].weak, true);
+  assert.match(G.formatGet(r), /\[mention-body · weak · delivery\]$/m);
+  const subj = mail('2026-10-08T09-00-00-000Z-f00002', 'alpha-1', 'god', 'inform', 'FOO-7 is back at 1111111', '2026-10-08T09:00:00.000Z', 'see subject', { cardFrom: 'mention-subject' });
+  const r2 = get('card.foo-7', {}, deps({ mailRows: () => [body, subj] }));
+  assert.equal(r2.current.source, 'mail'); assert.equal(r2.current.mailId, '2026-10-08T09-00-00-000Z-f00002');
+  assert.equal(r2.mails.find((m) => m.id.endsWith('f00002')).weak, false);
+  assert.match(G.formatGet(r2), /\[mention-subject · delivery\]$/m);
+  // T5: the same epoch ms, two trusted mails naming different known values: the stronger link wins whatever the row order.
+  const a = mail('2026-10-09T09-00-00-000Z-f00003', 'alpha-1', 'god', 'inform', 'FOO-7 at 1111111', '2026-10-09T09:00:00.000Z', 'x', { cardFrom: 'mention-subject' });
+  const b = mail('2026-10-09T09-00-00-000Z-f00004', 'alpha-1', 'god', 'inform', 'FOO-7 at 2222222', '2026-10-09T09:00:00.000Z', 'y', { cardFrom: 'mention-subject+conversation' });
+  assert.equal(get('card.foo-7', {}, deps({ mailRows: () => [a, b] })).current.mailId, '2026-10-09T09-00-00-000Z-f00004', 'MUTANT: no link-strength tiebreak');
+  assert.equal(get('card.foo-7', {}, deps({ mailRows: () => [b, a] })).current.mailId, '2026-10-09T09-00-00-000Z-f00004');
+  assert.ok(G.linkRank('mention-subject+conversation') > G.linkRank('mention-subject'));
+  assert.ok(G.linkRank('field') > G.linkRank('reply+conversation+mention-subject'), 'an explicit card field outranks every inferred link');
+  assert.equal(G.linkRank('mention-body'), 0);
+  assert.equal(G.trustedLink('mention'), false, 'an unsplit legacy mention is weak until the index splits it');
+});
+
+test('T2 (god fe1140): the text view prints COUNTS of competing/superseded rows and lists their bodies only on --all; the JSON keeps every row; C90_HIDE_STALE=0 is the OFF arm (MUTANT: bodies always)', () => {
+  const r = get('card.foo-7');
+  assert.ok(r.competing.length >= 2 && r.superseded.length === 1, 'the JSON keeps every row');
+  const saved = process.env.C90_HIDE_STALE; delete process.env.C90_HIDE_STALE;
+  try {
+    const t = G.formatGet(r);
+    assert.match(t, /^competing: \d+ other live values hidden \(--all lists them\)$/m);
+    assert.match(t, /^superseded: 1 replaced value hidden \(--all lists them\)$/m);
+    assert.doesNotMatch(t, /c-bbbbbbbbbbb1|c-aaaaaaaaaaa5/, 'no stale body in the default view');
+    assert.match(t, /^current: card\.foo-7: FOO-7 build moved to 2222222 on branch x$/m, 'the current line is unchanged');
+    const all = G.formatGet(r, { history: true });
+    assert.match(all, /^competing \(\d+\):$/m); assert.match(all, /^superseded \(1\):$/m); assert.match(all, /c-bbbbbbbbbbb1/);
+    process.env.C90_HIDE_STALE = '0';
+    assert.equal(G.formatGet(r), all, 'the OFF arm prints what --all prints');
+    process.env.C90_HIDE_STALE = '1';
+    assert.equal(G.formatGet(r), t, 'any other value is ON');
+  } finally { if (saved === undefined) delete process.env.C90_HIDE_STALE; else process.env.C90_HIDE_STALE = saved; }
 });

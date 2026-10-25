@@ -113,6 +113,7 @@ test('cross-path: CLI text == MCP memory_get content text == handleAs text, byte
     [['get', 'card.foo-7', '--agent', 'beta-2', '--mail', '1', '--no-mail'], { term: 'card.foo-7', agent: 'beta-2', mail: 1, noMail: true }],
     [['get', 'card.foo-7.donesha', '--agent', 'alpha-1'], { term: 'card.foo-7.donesha', agent: 'alpha-1' }],
     [['get', 'FOO-7', '--before', '2026-10-08T09-00-00-000Z-ffffff'], { term: 'FOO-7', before: '2026-10-08T09-00-00-000Z-ffffff' }],
+    [['get', 'card.foo-7.donesha', '--agent', 'alpha-1', '--all'], { term: 'card.foo-7.donesha', agent: 'alpha-1', history: true }],
     [['get', 'nothing-here'], { term: 'nothing-here' }],
   ];
   for (const [argv, args] of cases) {
@@ -162,7 +163,7 @@ test('cross-path: search --exact / --newest reach the engine with the flags on e
   assert.equal(seen.length, 3);
   for (const a of seen) { assert.equal(a.exact, true, 'MUTANT: exact dropped'); assert.equal(a.newest, true, 'MUTANT: newest dropped'); assert.equal(a.results, 3); assert.equal(a.k, undefined); assert.equal(a.evil, undefined); }
   assert.match(direct.body.text, /newest first \(\[1\] answer candidate\), exact text/);
-  assert.deepEqual([...MEMORY_TOOL_ARGS[MEMORY_GET_TOOL]], ['term', 'agent', 'mail', 'before', 'noMail']);
+  assert.deepEqual([...MEMORY_TOOL_ARGS[MEMORY_GET_TOOL]], ['term', 'agent', 'mail', 'before', 'noMail', 'history']);
   assert.ok(MEMORY_TOOL_ARGS[MEMORY_SEARCH_TOOL].includes('exact') && MEMORY_TOOL_ARGS[MEMORY_SEARCH_TOOL].includes('newest'));
 });
 
@@ -174,7 +175,7 @@ test('MCP tools/list: hive_hook, memory_get, memory_search (schemas name the arg
   const list = await rpc(ep.url, { jsonrpc: '2.0', id: 2, method: 'tools/list' });
   assert.deepEqual(list.body.result.tools.map((x) => x.name), ['hive_hook', 'memory_get', 'memory_search']);
   const getTool = list.body.result.tools.find((x) => x.name === 'memory_get');
-  assert.deepEqual(Object.keys(getTool.inputSchema.properties).sort(), ['agent', 'before', 'mail', 'noMail', 'term']);
+  assert.deepEqual(Object.keys(getTool.inputSchema.properties).sort(), ['agent', 'before', 'history', 'mail', 'noMail', 'term']);
   assert.deepEqual(getTool.inputSchema.required, ['term']);
   const searchTool = list.body.result.tools.find((x) => x.name === 'memory_search');
   assert.ok(['exact', 'newest', 'query'].every((k) => k in searchTool.inputSchema.properties));

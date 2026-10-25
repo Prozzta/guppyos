@@ -24,6 +24,7 @@
  */
 import type { ClaimRec, ClaimsState, EventRec, KeyRegistry, LedgerRec, ReconcileItem } from '../../shared/claims';
 import { derive } from './derive';
+import { hideStale } from './stale';
 
 export interface GetDeps {
   /** Verified records per agent id, append order (main: verifiedPrefix(readLedger); the tool: the raw lines). */
@@ -46,11 +47,13 @@ export interface GetOptions {
   before?: string | null;
   /** Claims-only current pick (the regression control for the mail rule). */
   noMail?: boolean;
+  /** T2 (god fe1140): `--all` lists the competing and superseded bodies; the default (while hideStale()) prints their counts. */
+  history?: boolean;
 }
 
 export interface GetClaimRow { claimId: string; agent: string; at: string; text: string; key: string; kind: string; refs?: ClaimRec['refs'] }
 export interface GetSupersededRow { claimId: string; agent: string; at: string; key: string; status: string; excerpt: string; supersededBy: string[]; reason?: string }
-export interface GetMailRow { id: string; from: string; to: string[]; act: string; subject: string; at: string; cardFrom: string; trust: string; excerpt: string }
+export interface GetMailRow { id: string; from: string; to: string[]; act: string; subject: string; at: string; cardFrom: string; trust: string; weak: boolean; excerpt: string }
 export interface GetCurrent {
   source: 'claim' | 'mail';
   claimId?: string; mailId?: string;
@@ -77,6 +80,13 @@ export const MAIL_DEFAULT = 5;
 export const MAIL_MAX = 50;
 const EXCERPT_MAX = 120;
 const MAIL_TEXT_MAX = 400;
+/** god db7d4a: the card-link methods whose mail can become current, with a strength (T5). A body-only mention (and an
+ *  unsplit legacy `mention`) is weak: listed in mails[] tagged weak, never current, never counted toward coverage. */
+const TRUSTED_LINKS: Record<string, number> = { field: 8, reply: 4, conversation: 2, 'mention-subject': 1 };
+const linkParts = (cardFrom: string): string[] => String(cardFrom ?? '').toLowerCase().split('+').map((s) => s.trim()).filter(Boolean);
+/** T5 (god fe1140): at equal time a mail linked by more trusted methods (subject+conversation) outranks one linked by fewer (subject-only). */
+export const linkRank = (cardFrom: string): number => linkParts(cardFrom).reduce((n, p) => n + (TRUSTED_LINKS[p] ?? 0), 0);
+export const trustedLink = (cardFrom: string): boolean => linkRank(cardFrom) > 0;
 const CARD_PREFIX = 'card.';
 const FIELD_SUFFIX = /\.(status|assignee|lastsha|donesha|decision\.[a-z0-9]{8})$/;
 const SHA_RE = /\b[0-9a-f]{7,40}\b/g;
@@ -244,7 +254,7 @@ export function pageMails(rows: ParsedMail[], n: number, before: string | null):
   return { page, nextBefore: all.length > page.length && page.length ? page[page.length - 1].id : null };
 }
 
-const mailRow = (m: ParsedMail & { tos: string[] }): GetMailRow => ({ id: m.id, from: m.from, to: m.tos, act: m.act, subject: m.subject, at: m.created_at, cardFrom: m.cardFrom, trust: m.trust, excerpt: m.body === undefined ? '' : excerpt(m.body) });
+const mailRow = (m: ParsedMail & { tos: string[] }): GetMailRow => ({ id: m.id, from: m.from, to: m.tos, act: m.act, subject: m.subject, at: m.created_at, cardFrom: m.cardFrom, trust: m.trust, weak: !trustedLink(m.cardFrom), excerpt: m.body === undefined ? '' : excerpt(m.body) });
 
 export function resolveGet(rawTerm: string, opts: GetOptions, d: GetDeps): GetResult {
   const term = normaliseTerm(rawTerm);
@@ -326,10 +336,10 @@ export function resolveGet(rawTerm: string, opts: GetOptions, d: GetDeps): GetRe
         for (const c of all) { for (const s of sha7(c.text)) known.add(s); for (const v of versions(c.text)) known.add(v); for (const r of c.refs ?? []) if (r.type === 'commit') for (const s of sha7(r.value)) known.add(s); }
         const pickMs = pick ? atMs(pick) : -Infinity;
         const candidates = pageMails(rows, rows.length, null).page
-          .filter((m) => (!agent || m.from === agent) && m.body !== undefined)
+          .filter((m) => (!agent || m.from === agent) && m.body !== undefined && trustedLink(m.cardFrom))
           .map((m) => ({ m, ms: epochMs(m.created_at) || epochMs(m.id) }))
           .filter((x) => Number.isFinite(x.ms) && x.ms > pickMs)
-          .sort((a, b) => b.ms - a.ms);
+          .sort((a, b) => b.ms - a.ms || linkRank(b.m.cardFrom) - linkRank(a.m.cardFrom));
         for (const { m } of candidates) {
           const text = `${m.subject} ${m.body ?? ''}`;
           const hay = text.toLowerCase();
@@ -369,11 +379,18 @@ export function formatGet(r: GetResult, opts: GetOptions = {}): string {
     L.push(`current: ${kv(c.key, c.text)}`);
     L.push(`  [${c.source} · ${c.agent} · ${day(c.at)} · ${c.source === 'mail' ? c.mailId : c.claimId}]`);
   } else L.push(`current: none (no live claim under ${r.keys.join(', ')})`);
+  // T2 (god fe1140): bodies of the other rows only on --all (or with C90_HIDE_STALE=0); the counts always.
+  const bodies = opts.history === true || !hideStale();
+  const plural = (n: number, w: string): string => `${n} ${w}${n === 1 ? '' : 's'}`;
   if (r.competing.length) {
-    L.push(`competing (${r.competing.length}):`);
-    for (const c of r.competing) L.push(`  ${kv(c.key, c.text)} [${c.agent} · ${day(c.at)} · ${c.claimId}]`);
+    if (!bodies) L.push(`competing: ${plural(r.competing.length, 'other live value')} hidden (--all lists them)`);
+    else {
+      L.push(`competing (${r.competing.length}):`);
+      for (const c of r.competing) L.push(`  ${kv(c.key, c.text)} [${c.agent} · ${day(c.at)} · ${c.claimId}]`);
+    }
   }
-  if (r.superseded.length) {
+  if (r.superseded.length && !bodies) L.push(`superseded: ${plural(r.superseded.length, 'replaced value')} hidden (--all lists them)`);
+  else if (r.superseded.length) {
     L.push(`superseded (${r.superseded.length}):`);
     for (const s of r.superseded) L.push(`  ${kv(s.key, s.excerpt)} [${s.status} · ${s.agent} · ${day(s.at)} · ${s.claimId}${s.supersededBy.length ? ` → replaced by ${s.supersededBy.join(', ')}` : ''}${s.reason ? ` · ${s.reason}` : ''}]`);
   }
@@ -385,7 +402,7 @@ export function formatGet(r: GetResult, opts: GetOptions = {}): string {
     if (r.mailIndex === 'absent') L.push('mails: no mail index for this card yet (hive/state/mail-cards)');
     else if (r.mailIndex === 'present') {
       L.push(`mails (${r.mails.length} newest first${r.nextBefore ? `; older: --before ${r.nextBefore}` : ''}):`);
-      for (const m of r.mails) L.push(`  ${m.id} ${m.from} → ${m.to.join(',') || '-'} ${m.act}: ${excerpt(m.subject, 100)} [${m.cardFrom} · ${m.trust}]`);
+      for (const m of r.mails) L.push(`  ${m.id} ${m.from} → ${m.to.join(',') || '-'} ${m.act}: ${excerpt(m.subject, 100)} [${m.cardFrom}${m.weak ? ' · weak' : ''} · ${m.trust}]`);
     }
   }
   return L.join('\n') + '\n';

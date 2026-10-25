@@ -42,7 +42,7 @@ export interface ClaimsEndpointDeps {
   /** Choice-only diagnostics. Never pass note/reason text to this callback. */
   onNoteChoice?: (agentId: string, choice: NoteChoice, ids: string[], detail?: NoteChoiceDetail) => void;
   /** CLAIMS-90 R2 (C90-GET): `memory get <key|card>`, read-only over every verified ledger (claims/get.ts); absent = not wired in this build. */
-  get?: (agentId: string, args: { term: string; agent?: string | null; mail?: number; before?: string | null; noMail?: boolean }) => { text: string; json: unknown };
+  get?: (agentId: string, args: { term: string; agent?: string | null; mail?: number; before?: string | null; noMail?: boolean; history?: boolean }) => { text: string; json: unknown };
 }
 
 /** `unoffered`: a note written where no offer can be shown (the `ledger` command's memory part). */
@@ -132,14 +132,15 @@ export async function handleClaimVerb(d: ClaimsEndpointDeps, agentId: string, bo
 
   // CLAIMS-90 R2: `get` reads every agent's verified ledger and writes nothing, so it needs no level of its own.
   if (cmd === 'get') {
-    if (typeof args.term !== 'string' || !args.term.trim()) return usage('get needs a KEY or CARD id (memory get card.<id> | memory get <key> [--agent A] [--mail N] [--before MAILID] [--no-mail])');
-    for (const k of Object.keys(args)) if (!['term', 'agent', 'mail', 'before', 'noMail'].includes(k)) return usage(`get does not take "${k}"`);
+    if (typeof args.term !== 'string' || !args.term.trim()) return usage('get needs a KEY or CARD id (memory get card.<id> | memory get <key> [--agent A] [--mail N] [--before MAILID] [--no-mail] [--all])');
+    for (const k of Object.keys(args)) if (!['term', 'agent', 'mail', 'before', 'noMail', 'history'].includes(k)) return usage(`get does not take "${k}"`);
     if (args.agent !== undefined && args.agent !== null && (typeof args.agent !== 'string' || !/^[A-Za-z0-9._-]{1,80}$/.test(args.agent))) return usage('bad --agent (an agent id)');
     if (args.mail !== undefined && (typeof args.mail !== 'number' || !Number.isInteger(args.mail) || args.mail < 0 || args.mail > 50)) return usage('--mail must be 0-50');
     if (args.before !== undefined && args.before !== null && (typeof args.before !== 'string' || !MSG_ID_RE.test(args.before))) return usage('bad --before (a mail id)');
     if (args.noMail !== undefined && args.noMail !== true) return usage('--no-mail takes no value');
+    if (args.history !== undefined && args.history !== true) return usage('--all takes no value');
     if (!d.get) return { ok: false, exit: EXIT.unavailable, error: 'memory get is not available in this build' };
-    const r = d.get(agentId, { term: args.term, agent: (args.agent as string | null | undefined) ?? null, mail: args.mail as number | undefined, before: (args.before as string | null | undefined) ?? null, noMail: args.noMail === true });
+    const r = d.get(agentId, { term: args.term, agent: (args.agent as string | null | undefined) ?? null, mail: args.mail as number | undefined, before: (args.before as string | null | undefined) ?? null, noMail: args.noMail === true, history: args.history === true });
     return { ok: true, exit: EXIT.ok, text: r.text, json: r.json };
   }
 

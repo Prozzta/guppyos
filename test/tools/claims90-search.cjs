@@ -44,7 +44,7 @@ if (!db || !query) { emit('usage: claims90-search.cjs --db <index.sqlite> --quer
     const ort = require('onnxruntime-node');
     const sqliteVec = require('sqlite-vec');
     const { NativeMemoryStore } = loadTs('src/main/nativeMemory/store.ts');
-    const { redactHit, exactNeedle, exactFileHits } = loadTs('src/main/nativeMemory/engine.ts');
+    const { redactHit, exactNeedle, exactFileHits, dropStale, staleFetchK } = loadTs('src/main/nativeMemory/engine.ts');
     const { formatSearch, newestOrder, rankHits } = loadTs('src/main/nativeMemory/format.ts');
     const { WordPieceTokenizer, wordPieceConfigFromTokenizerJson } = loadTs('src/main/nativeMemory/wordpiece.ts');
     const { OnnxEmbedder } = loadTs('src/main/nativeMemory/embedder.ts');
@@ -72,15 +72,16 @@ if (!db || !query) { emit('usage: claims90-search.cjs --db <index.sqlite> --quer
     if (flags.exact) {
       const needle = exactNeedle(query);
       const hiveRoot = val('--hive');
-      const chunks = needle ? store.searchExact({ query: needle, wing: flags.wing, room: flags.room, sinceMs: flags.since ? Date.parse(flags.since) : null, beforeMs: flags.before ? Date.parse(flags.before) : null, k: results, mode, kind: val('--kind'), key: val('--key') }) : [];
+      const chunks = needle ? store.searchExact({ query: needle, wing: flags.wing, room: flags.room, sinceMs: flags.since ? Date.parse(flags.since) : null, beforeMs: flags.before ? Date.parse(flags.before) : null, k: staleFetchK(results, mode), mode, kind: val('--kind'), key: val('--key') }) : [];
       const files = needle && hiveRoot && !flags.wing && !flags.room && !val('--kind') && !val('--key') ? exactFileHits(hiveRoot, needle, results) : [];
-      hits = [...chunks, ...files];
+      hits = [...dropStale(chunks, mode, results), ...files];
     } else {
       const tok = new WordPieceTokenizer(wordPieceConfigFromTokenizerJson(JSON.parse(fs.readFileSync(path.join(modelDir, 'tokenizer.json'), 'utf8'))));
       emb = new OnnxEmbedder(path.join(modelDir, 'onnx', 'model.onnx'), tok, ort, { intraOpNumThreads: 2 });
       const [queryVec] = await emb.embed([query]);
-      hits = store.search({ query, queryVec, wing: flags.wing, room: flags.room, sinceMs: flags.since ? Date.parse(flags.since) : null, beforeMs: flags.before ? Date.parse(flags.before) : null, k: Number.isFinite(results) && results > 0 ? results : 5, mode, kind: val('--kind'), key: val('--key') });
+      hits = store.search({ query, queryVec, wing: flags.wing, room: flags.room, sinceMs: flags.since ? Date.parse(flags.since) : null, beforeMs: flags.before ? Date.parse(flags.before) : null, k: staleFetchK(Number.isFinite(results) && results > 0 ? results : 5, mode), mode, kind: val('--kind'), key: val('--key') });
     }
+    if (!flags.exact) hits = dropStale(hits, mode, results);
     const json = flags.newest ? (() => { const cur = rankHits(query, hits); return newestOrder(query, hits).map((h, i) => ({ ...redactHit(h), rankNewest: i + 1, rankCurrent: cur.indexOf(h) + 1 })); })() : hits.map(redactHit);
     const text = formatSearch(query, flags, hits);
     emit(has('--json') ? `${JSON.stringify({ query, flags: { ...flags, results, mode, kind: val('--kind'), key: val('--key') }, hits: json, text })}\n` : text, 0);

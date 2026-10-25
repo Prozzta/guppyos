@@ -16,6 +16,7 @@ import { chunkMarkdown, CHUNKER_VERSION, type Chunk } from './chunker';
 import { discoverSources, ALLOW_LIST_VERSION, SOURCES_CONFIG_FILE, sha256, type Discovery, type SourceEntry } from './sources';
 import { CLAIM_EMBED_VERSION, claimEmbedText, claimEmbedVersionKey, compactionDecision, NativeMemoryStore, type ClaimPart, type SearchHit } from './store';
 import type { LedgerLevel, SearchMode } from '../../shared/claims';
+import { hideStale } from '../claims/stale';
 import { formatSearch, formatStatus, formatWakeUp, newestOrder, rankHits, WAKE_MAX_CHARS } from './format';
 import { pinnedSection, pinnedStatus, type PinnedStatus } from '../memoryRollover';
 
@@ -109,6 +110,16 @@ export interface SearchArgs { query: string; wing?: string | null; room?: string
   /** The asking agent's own wing (from its MEMORY_TOKEN): never a filter, only a backfill hint. */
   caller?: string | null }
 export interface EngineReply { exit: number; text: string; json?: unknown }
+
+/** T3 (god fe1140): in live mode a confirmed-superseded claim hit (the `prior` row) is dropped, so a stale value never sits
+ *  beside the current one; `--history` / `--all` keep it, as does C90_HIDE_STALE=0. `prior?` (unconfirmed) and markdown stay. */
+export function dropStale<T extends { claim?: { status: string } | null }>(hits: T[], mode: SearchMode | undefined, k: number, env: NodeJS.ProcessEnv = process.env): T[] {
+  if ((mode ?? 'live') !== 'live' || !hideStale(env)) return hits.slice(0, k);
+  return hits.filter((h) => !h.claim || h.claim.status !== 'superseded').slice(0, k);
+}
+/** The rows to fetch so k survive the drop (the store caps at 100). */
+export const staleFetchK = (k: number, mode: SearchMode | undefined, env: NodeJS.ProcessEnv = process.env): number =>
+  (mode ?? 'live') === 'live' && hideStale(env) ? Math.min(100, k * 2) : k;
 
 export class MemoryEngine {
   private queue: Task[] = [];
@@ -251,6 +262,7 @@ export class MemoryEngine {
       const sinceMs = a.since ? Date.parse(a.since) : null;
       const beforeMs = a.before ? Date.parse(a.before) : null;
       const k = a.results ?? 5;
+      const fetchK = staleFetchK(k, a.mode);
       // CLAIMS-90 R2 (C90-GET): the JSON keeps its array shape; under --newest every row also carries both ranks
       // (rankNewest = the printed order, rankCurrent = the compact order) so one run scores both.
       const json = (hits: SearchHit[]): unknown[] => {
@@ -264,13 +276,13 @@ export class MemoryEngine {
         // allow-list, so neither is relied on to be indexed). File lines belong to no wing: a wing/room/kind/key
         // filter leaves them out.
         const needle = exactNeedle(a.query);
-        const chunks = needle ? this.d.store.searchExact({ query: needle, wing: a.wing ?? null, room: a.room ?? null, sinceMs, beforeMs, k, mode: a.mode ?? 'live', kind: a.kind ?? null, key: a.key ?? null }) : [];
+        const chunks = needle ? this.d.store.searchExact({ query: needle, wing: a.wing ?? null, room: a.room ?? null, sinceMs, beforeMs, k: fetchK, mode: a.mode ?? 'live', kind: a.kind ?? null, key: a.key ?? null }) : [];
         const files = needle && !a.wing && !a.room && !a.kind && !a.key ? exactFileHits(this.d.hiveRoot, needle, k) : [];
-        const all = [...chunks, ...files];
+        const all = [...dropStale(chunks, a.mode, k), ...files];
         return { exit: 0, text: formatSearch(a.query, a, all), json: json(all) };
       }
       const [qv] = await this.embed([a.query]);
-      const hits = this.d.store.search({ query: a.query, queryVec: qv, wing: a.wing ?? null, room: a.room ?? null, sinceMs, beforeMs, k, mode: a.mode ?? 'live', kind: a.kind ?? null, key: a.key ?? null });
+      const hits = dropStale(this.d.store.search({ query: a.query, queryVec: qv, wing: a.wing ?? null, room: a.room ?? null, sinceMs, beforeMs, k: fetchK, mode: a.mode ?? 'live', kind: a.kind ?? null, key: a.key ?? null }), a.mode, k);
       return { exit: 0, text: formatSearch(a.query, a, hits), json: json(hits) };
     }, o);
   }

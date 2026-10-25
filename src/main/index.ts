@@ -1759,8 +1759,8 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
         if (!/^[a-z0-9][a-z0-9._-]{0,119}$/.test(card)) return null;
         try { return readFileSync(join(root, 'state', 'mail-cards', `${card}.jsonl`), 'utf8').split('\n'); } catch { return null; }
       };
-      const r = resolveGet(args.term, { agent: args.agent ?? null, mail: args.mail, before: args.before ?? null, noMail: args.noMail === true }, { ledgers, registry: reg, reconcileItems, tasks, mailRows, ruleConfig: { r4: false } });
-      return { text: formatGet(r, { agent: args.agent ?? null }), json: r };
+      const r = resolveGet(args.term, { agent: args.agent ?? null, mail: args.mail, before: args.before ?? null, noMail: args.noMail === true, history: args.history === true }, { ledgers, registry: reg, reconcileItems, tasks, mailRows, ruleConfig: { r4: false } });
+      return { text: formatGet(r, { agent: args.agent ?? null, history: args.history === true }), json: r };
     },
   };
 }

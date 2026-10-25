@@ -125,7 +125,7 @@ test('request validation and CLI: exact/newest are booleans on search (a non-boo
   assert.deepEqual(cli.parseArgs(['get', 'card.foo-7.donesha']).args, { term: 'card.foo-7.donesha' });
   assert.deepEqual(cli.parseArgs(['wake-up', '--exact']).rest, ['--exact'], 'not a wake-up option');
   const USAGE = fs.readFileSync(CLI, 'utf8');
-  assert.match(USAGE, /usage: memory \{get KEY\|CARD-ID \[--agent A\] \[--mail N\] \[--before MAILID\] \[--no-mail\] \| search QUERY [^\n]*\[--exact\] \[--newest\] \[--full\] \| wake-up/);
+  assert.match(USAGE, /usage: memory \{get KEY\|CARD-ID \[--agent A\] \[--mail N\] \[--before MAILID\] \[--no-mail\] \[--all\] \| search QUERY [^\n]*\[--exact\] \[--newest\] \[--full\] \| wake-up/);
 });
 
 test('help text on every path names `memory get` and `--exact` (hive.ts briefing + protocol line + FLOOR COMMANDS + PROTOCOL.md section; the capabilities skill)', () => {
@@ -148,4 +148,23 @@ test('M3 SHOULDs 1-3 (Jim\'s audit): a sha needs a digit; a card id is a hyphena
   const hits = [hit(0, 'status doing', meta('d1', 'card.cut-1.1.100.status', '2026-10-01T00:00:00Z')), hit(1, 'cut-1.1.100 mentioned in a note about release 1.1.100', meta('d2', 'release.1.1.100', '2026-10-02T00:00:00Z'))];
   const ranked = F.rankHits('cut-1.1.100', hits);
   assert.equal(ranked[0].claim.id, 'd1', 'the card\'s own key is lifted over a mention');
+});
+
+test('T3 (god fe1140): a live-mode search drops confirmed-superseded claim hits (prior) unless --history/--all or C90_HIDE_STALE=0; prior? and markdown stay; k caps after the drop; both engine branches and the search oracle drop', () => {
+  const hits = [hit(1, 'a', meta('c1', 'k.a', '2026-10-01T00:00:00Z', 'superseded')), hit(2, 'b', meta('c2', 'k.a', '2026-10-02T00:00:00Z')),
+    hit(3, 'c', meta('c3', 'k.b', '2026-10-02T00:00:00Z', 'superseded?')), md(4, 'd', '2026-10-01T00:00:00Z'), hit(5, 'e', meta('c5', 'k.c', '2026-10-03T00:00:00Z'))];
+  const ids = (xs) => xs.map((h) => h.chunkId);
+  assert.deepEqual(ids(E.dropStale(hits, 'live', 5, {})), [2, 3, 4, 5], 'MUTANT: priors kept in live mode');
+  assert.deepEqual(ids(E.dropStale(hits, undefined, 5, {})), [2, 3, 4, 5]);
+  assert.deepEqual(ids(E.dropStale(hits, 'history', 5, {})), [1, 2, 3, 4, 5]);
+  assert.deepEqual(ids(E.dropStale(hits, 'all', 5, {})), [1, 2, 3, 4, 5]);
+  assert.deepEqual(ids(E.dropStale(hits, 'live', 5, { C90_HIDE_STALE: '0' })), [1, 2, 3, 4, 5], 'the OFF arm');
+  assert.deepEqual(ids(E.dropStale(hits, 'live', 2, {})), [2, 3], 'k caps after the drop');
+  assert.equal(E.staleFetchK(5, 'live', {}), 10); assert.equal(E.staleFetchK(5, 'history', {}), 5); assert.equal(E.staleFetchK(5, 'live', { C90_HIDE_STALE: '0' }), 5); assert.equal(E.staleFetchK(80, 'live', {}), 100);
+  const fs = require('node:fs');
+  const eng = fs.readFileSync(path.join(REPO, 'src/main/nativeMemory/engine.ts'), 'utf8');
+  assert.equal((eng.match(/dropStale[<(]/g) || []).length, 3, 'the definition, the exact branch and the vector branch');
+  const oracle = fs.readFileSync(path.join(REPO, 'test/tools/claims90-search.cjs'), 'utf8');
+  assert.equal((oracle.match(/dropStale\(/g) || []).length, 2, 'the search oracle drops on both branches too');
+  assert.equal((oracle.match(/staleFetchK\(/g) || []).length, 2, 'both store calls fetch 2k');
 });

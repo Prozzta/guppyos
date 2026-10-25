@@ -92,7 +92,7 @@ const MUTANTS = [
   ['M validation drops exact/newest', SERVICE, 'exact: a.exact === true, newest: a.newest === true', 'exact: false, newest: false'],
   ['N CLI does not parse --exact/--newest', CLI, "if (flag === '--exact' || flag === '--newest') { out.args[flag.slice(2)] = true; i += 1; continue; }", ''],
   ['O CLI does not parse the get flags', CLI, "if (flag === '--agent') { out.args.agent = val(); i += step(); continue; }", ''],
-  ['P MCP memory_get passes only the term', HOOKS, "[MEMORY_GET_TOOL]: ['term', 'agent', 'mail', 'before', 'noMail'],", "[MEMORY_GET_TOOL]: ['term'],"],
+  ['P MCP memory_get passes only the term', HOOKS, "[MEMORY_GET_TOOL]: ['term', 'agent', 'mail', 'before', 'noMail', 'history'],", "[MEMORY_GET_TOOL]: ['term'],"],
   ['Q MCP memory_search drops exact/newest', HOOKS, "'kind', 'key', 'full', 'exact', 'newest']", "'kind', 'key', 'full']"],
   ['R M3 SHOULD 1: a 7+ hex word without a digit is a sha', FORMAT, '(/^[0-9a-f]{7,}$/.test(t) && /\\d/.test(t))', '/^[0-9a-f]{7,}$/.test(t)'],
   ['S M3 SHOULD 2: a dotted card id does not match card.<id>.* by prefix', FORMAT, "key === `card.${t}` || key.startsWith(`card.${t}.`)", 'false'],
@@ -115,6 +115,11 @@ const MUTANTS = [
   ['m3-4 a sha / version / card id in the content does not lift', FORMAT, 'return sp === 3 && h.content.toLowerCase().includes(t);', 'return false;'],
   ['m3-5 a named prior crosses above the live value', FORMAT, '.sort((a, b) => a.g - b.g || a.n - b.n || a.i - b.i)', '.sort((a, b) => a.n - b.n || a.g - b.g || a.i - b.i)'],
   ['m3-6 a version is not a naming term', FORMAT, " || /^\\d+\\.\\d+(\\.\\d+)+$/.test(t)", ''],
+  // CLAIMS-90 R2 (god db7d4a, fe1140): weak mention-body links, T2 hidden bodies, T3 dropped stale search hits, T5 link-strength tiebreak.
+  ['T db7d4a: a body-only mention can make a mail current', GET, "{ field: 8, reply: 4, conversation: 2, 'mention-subject': 1 };", "{ field: 8, reply: 4, conversation: 2, 'mention-subject': 1, 'mention-body': 1 };"],
+  ['U T2: the text view always lists the competing/superseded bodies', GET, 'const bodies = opts.history === true || !hideStale();', 'const bodies = true;'],
+  ['V T3: a live search keeps confirmed priors', ENGINE, "return hits.filter((h) => !h.claim || h.claim.status !== 'superseded').slice(0, k);", 'return hits.slice(0, k);'],
+  ['W T5: equal-time mails have no link-strength tiebreak', GET, '.sort((a, b) => b.ms - a.ms || linkRank(b.m.cardFrom) - linkRank(a.m.cardFrom));', '.sort((a, b) => b.ms - a.ms);'],
 ];
 
 const prefix = process.argv[2] || '';

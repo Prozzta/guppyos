@@ -13,7 +13,7 @@ const http = require('http');
 
 const EXIT = { ok: 0, usage: 2, unavailable: 3, degraded: 4, unauthorized: 5 };
 const REQUEST_TIMEOUT_MS = 10000;
-const USAGE = 'usage: memory {get KEY|CARD-ID [--agent A] [--mail N] [--before MAILID] [--no-mail] | search QUERY [--wing W] [--room R] [--results N] [--since ISO] [--before ISO] [--history|--all] [--kind K] [--key K] [--exact] [--newest] [--full] | wake-up [--wing W] [--full] | status} [--format json]\n'
+const USAGE = 'usage: memory {get KEY|CARD-ID [--agent A] [--mail N] [--before MAILID] [--no-mail] [--all] | search QUERY [--wing W] [--room R] [--results N] [--since ISO] [--before ISO] [--history|--all] [--kind K] [--key K] [--exact] [--newest] [--full] | wake-up [--wing W] [--full] | status} [--format json]\n'
   + '  get: the CURRENT value of a key or card (newest live claim; --agent A: that agent\'s), then competing, superseded (with what replaced them), a card\'s decision list, fields and its mail history newest first (--mail N, --before MAILID to page back)\n'
   + '  search --exact "<text>": exact text (quoted lines, changelog entries) over claims, notes, PROTOCOL.md and board.md; --newest: hits newest first, [1] marked as the answer candidate\n'
   + '  search and wake-up print a compact, current-first text that fits the tool-output cap; --full prints the whole chunks / the whole wake-up text\n'
@@ -77,6 +77,7 @@ function parseArgs(argv) {
       if (flag === '--agent') { out.args.agent = val(); i += step(); continue; }
       if (flag === '--mail') { out.args.mail = Number(val()); i += step(); continue; }
       if (flag === '--no-mail') { out.args.noMail = true; i += 1; continue; }
+      if (flag === '--all' || flag === '--history') { out.args.history = true; i += 1; continue; }
     }
     if (flag && CLAIM_VERBS.has(out.cmd)) {
       if (flag === '--pin') { out.args.pin = true; i += 1; continue; }
