@@ -149,11 +149,11 @@ test('S1: a history group with two live members labels one CURRENT, one CONFLICT
   assert.match(full, /CURRENT — 2026-03-01 — later live successor/);
   assert.match(full, /CONFLICT — 2026-02-01 — earlier live successor/);
   const working = views.buildWorkingSet(state, world(), 50).text;
-  assert.equal((working.match(/history: memory\.md#/g) || []).length, 1);
-  assert.match(working, /history: memory\.md#claim-history-live-b/);
+  assert.equal((working.match(/history: memory history /g) || []).length, 1);
+  assert.match(working, /history: memory history live-b/);
 });
 
-test('S2: a shown current with history carries the inline [history: memory.md#claim-history-<id>] suffix, and the anchor exists', () => {
+test('S2: a shown current with history carries the inline [history: memory history <id>] suffix, and memory.md keeps the section anchor', () => {
   // A T2 fact and a T0 lesson, each with a superseded prior; ample budget, so both currents are shown.
   const oldFact = claim('fact-old', 'invented fact before', { key: 'invented-key', at: '2026-01-01', wt: '2026-01-01' });
   const fact = claim('fact-cur', 'invented fact after', { key: 'invented-key', at: '2026-02-01', wt: '2026-02-01', supersedes: ['fact-old'] });
@@ -167,10 +167,10 @@ test('S2: a shown current with history carries the inline [history: memory.md#cl
   for (const id of ['fact-cur', 'lesson-cur']) {
     const shown = lines.filter(l => l.includes(`[c:${id}]`));
     assert.equal(shown.length, 1, `${id} is shown once`);
-    assert.match(shown[0], new RegExp(`\\[status:current\\] \\[c:${id}\\] \\[history: memory\\.md#claim-history-${id}\\]$`), `${id}: the inline suffix`);
+    assert.match(shown[0], new RegExp(`\\[status:current\\] \\[c:${id}\\] \\[history: memory history ${id}\\]$`), `${id}: the inline suffix`);
     assert.ok(full.includes(`<a id="claim-history-${id}"></a>`), `${id}: the suffix's anchor is rendered in memory.md`);
     // Shown inline, so no standalone pointer duplicates it.
-    assert.equal(lines.filter(l => l.includes(`memory.md#claim-history-${id}`)).length, 1, `${id}: one pointer only`);
+    assert.equal(lines.filter(l => l.includes(`memory history ${id}`)).length, 1, `${id}: one pointer only`);
   }
   // The superseded priors are never shown as current in the working set.
   assert.ok(!lines.some(l => l.includes('[c:fact-old]') || l.includes('[c:lesson-old]')));

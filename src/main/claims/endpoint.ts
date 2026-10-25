@@ -1,7 +1,9 @@
 /**
  * CLAIM-LEDGER W1: the claim verbs of `POST /memory/<token>` (and, through W6, the /ledger route's
  * memory part): note, retract, accept, dismiss, used, reconcile, and `export --complete` (W6's
- * planned-downgrade export of the agent's own memory.md; main supplies it as `exportComplete`).
+ * planned-downgrade export of the agent's own memory.md; main supplies it as `exportComplete`), and
+ * `history ID` (CLAIMS-90 HISTORY-PTR: the read behind a `[history: memory history <id>]` pointer;
+ * main supplies it as `claimHistory`).
  *
  * IDENTITY (G1.3). The agent is the token's agent, resolved before this runs. A body that names an
  * agent or a wing - or sets `source` or `legacy` (god cac15f) - is refused, at the top level or in
@@ -15,7 +17,7 @@ import { LEDGER_LEVELS, type AppendOrigin, type ClaimKind, type LedgerLevel, typ
 import type { ClaimStore } from './store';
 import type { CandidateResult } from './candidates';
 
-export const CLAIM_VERBS: ReadonlySet<string> = new Set(['note', 'retract', 'accept', 'dismiss', 'used', 'reconcile', 'export']);
+export const CLAIM_VERBS: ReadonlySet<string> = new Set(['note', 'retract', 'accept', 'dismiss', 'used', 'reconcile', 'export', 'history']);
 
 export interface ClaimReply { ok: boolean; exit: number; text?: string; json?: unknown; error?: string }
 
@@ -23,6 +25,7 @@ const EXIT = { ok: 0, usage: 2, unavailable: 3 } as const;
 /** Field names an agent must never send: identity and provenance are main's (G1.3, god cac15f). */
 const FORBIDDEN = new Set(['agent', 'agentId', 'wing', 'source', 'legacy', 'section', 'by', 'wt', 'prev', 'mac', 'origin']);
 const MSG_ID_RE = /^[A-Za-z0-9._:-]{1,120}$/;
+const CLAIM_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 export interface ClaimsEndpointDeps {
   store: ClaimStore;
@@ -32,6 +35,9 @@ export interface ClaimsEndpointDeps {
   onReconcile?: (agentId: string, a: string, b: string) => void;
   /** CLAIM-LEDGER W6: `memory export --complete` (exportWiring.ts); absent = not wired in this build. */
   exportComplete?: (agentId: string) => { ok: true; file: string; bytes: number; note: string } | { ok: false; error: string };
+  /** CLAIMS-90 HISTORY-PTR: the history group holding claim `id` in the served hive (the caller's
+   *  ledger first, then the other agents'); absent = not wired in this build. */
+  claimHistory?: (agentId: string, id: string) => { ok: true; text: string; owner: string } | { ok: false; error: string };
   /** CL-M4-WP: fresh candidate scan on the note path; presentation never appends. `key` lists a
    *  same-key live claim first (CL-M4-FORWARD-PATH; an offer, never a supersede). */
   noteCandidates?: (agentId: string, text: string, o?: { key?: string }) => Promise<CandidateResult>;
@@ -126,6 +132,18 @@ export async function handleClaimVerb(d: ClaimsEndpointDeps, agentId: string, bo
   const args = (b.args ?? {}) as Record<string, unknown>;
   if (typeof args !== 'object' || Array.isArray(args)) return usage('args is not an object');
   for (const k of Object.keys(args)) if (FORBIDDEN.has(k)) return usage(`refused: "${k}" is set by the app, never by a request (the wing is your token's)`);
+
+  // CLAIMS-90 HISTORY-PTR: a read of the served hive, like search, so it answers at every level: a
+  // pointer an agent was shown (a wake-up, or an older memory.md in a search hit) always resolves.
+  if (cmd === 'history') {
+    for (const k of Object.keys(args)) if (k !== 'id') return usage(`history takes only a claim id (not "${k}")`);
+    if (typeof args.id !== 'string' || !CLAIM_ID_RE.test(args.id)) return usage('history needs one claim id, like: memory history c-0123456789ab');
+    if (!d.claimHistory) return { ok: false, exit: EXIT.unavailable, error: 'history is not available in this build' };
+    const r = d.claimHistory(agentId, args.id);
+    return r.ok
+      ? { ok: true, exit: EXIT.ok, text: r.text, json: { id: args.id, owner: r.owner } }
+      : { ok: false, exit: EXIT.usage, error: r.error };
+  }
 
   const level = d.level(agentId);
   if (level !== 'writer') {

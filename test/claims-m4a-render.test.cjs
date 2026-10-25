@@ -12,7 +12,7 @@ const entryClaims = { a1: {
 const key = { items: [{ changed: true, agent: 'a1', topic: 'invented-topic',
   current: 'a1:memory.md:10', entryIds: ['a1:memory.md:4', 'a1:memory.md:10'] }] };
 const goodFull = '### Claim history: invented\n- CURRENT — 2026-10-04 — current-invented [status:live] [c:c-current000001]\n- PRIOR — 2026-09-01 — prior-invented [status:superseded] [c:c-prior00000001]';
-const goodWorking = '# Memory working set\n- current-invented [status:current] [c:c-current000001] [history: memory.md#claim-history-c-current000001]';
+const goodWorking = '# Memory working set\n- current-invented [status:current] [c:c-current000001] [history: memory history c-current000001]';
 const read = (full = goodFull, working = goodWorking) => (_agent, name) => name === 'memory.md' ? full : working;
 
 test('M4a reads frozen key locators and scores through each replay entry-to-claim map', () => {
@@ -58,7 +58,9 @@ test('M4a rejects every stale duplicate copy of a prior, not just its first labe
 
 test('M4a clause 3: the working set shows the current version OR a per-fact pointer (design §8)', () => {
   // (1) The pointer alone, current budgeted out: passes.
-  const standalone = '# Memory working set\n- invented-topic history: memory.md#claim-history-c-current000001';
+  const standalone = '# Memory working set\n- invented-topic history: memory history c-current000001';
+  // An older output's file anchor still scores (frozen arm outputs).
+  assert.equal(score(key, read(goodFull, '# Memory working set\n- invented-topic history: memory.md#claim-history-c-current000001'), entryClaims).workingSetPass, 1);
   assert.equal(score(key, read(goodFull, standalone), entryClaims).workingSetPass, 1);
   // (2) The current version shown with no pointer: passes (Jim W1; it scored 0 before).
   const shownOnly = '# Memory working set\n- current-invented [status:current] [c:c-current000001]';

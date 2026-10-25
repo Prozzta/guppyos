@@ -17,6 +17,7 @@ import { discoverSources, ALLOW_LIST_VERSION, SOURCES_CONFIG_FILE, sha256, type 
 import { CLAIM_EMBED_VERSION, claimEmbedText, claimEmbedVersionKey, compactionDecision, NativeMemoryStore, type ClaimPart, type SearchHit } from './store';
 import type { LedgerLevel, SearchMode } from '../../shared/claims';
 import { formatSearch, formatStatus, formatWakeUp, WAKE_MAX_CHARS } from './format';
+import { withHistoryCommands } from '../claims/historyPointer';
 import { pinnedSection, pinnedStatus, type PinnedStatus } from '../memoryRollover';
 
 export const PRIORITY = { search: 0, wake: 1, status: 1, ingest: 2, backfill: 3, compact: 4 } as const;
@@ -246,7 +247,9 @@ export class MemoryEngine {
       const sinceMs = a.since ? Date.parse(a.since) : null;
       const beforeMs = a.before ? Date.parse(a.before) : null;
       const [qv] = await this.embed([a.query]);
-      const hits = this.d.store.search({ query: a.query, queryVec: qv, wing: a.wing ?? null, room: a.room ?? null, sinceMs, beforeMs, k: a.results ?? 5, mode: a.mode ?? 'live', kind: a.kind ?? null, key: a.key ?? null });
+      // CLAIMS-90 HISTORY-PTR: an older memory.md's `memory.md#claim-history-<id>` anchor is served as its command.
+      const hits = this.d.store.search({ query: a.query, queryVec: qv, wing: a.wing ?? null, room: a.room ?? null, sinceMs, beforeMs, k: a.results ?? 5, mode: a.mode ?? 'live', kind: a.kind ?? null, key: a.key ?? null })
+        .map((h) => ({ ...h, content: withHistoryCommands(h.content) }));
       return { exit: 0, text: formatSearch(a.query, a, hits), json: hits.map(redactHit) };
     }, o);
   }
@@ -265,7 +268,8 @@ export class MemoryEngine {
         // PINNED-MEMORY: the standing lessons, read from memory.md itself (never ranked or cut up).
         try { pinned = pinnedSection(readFileSync(join(this.d.hiveRoot, 'agents', wing, 'memory.md'), 'utf8')); } catch { pinned = null; }
       }
-      const entries = this.d.store.wakeUp(wing, WAKE_MAX_CHARS);
+      const entries = this.d.store.wakeUp(wing, WAKE_MAX_CHARS).map((e) => ({ ...e, content: withHistoryCommands(e.content) }));
+      if (pinned) pinned = withHistoryCommands(pinned);
       return { exit: 0, text: formatWakeUp(identity, entries, pinned) };
     });
   }

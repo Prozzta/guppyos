@@ -20,10 +20,11 @@ const USAGE = 'usage: memory {search QUERY [--wing W] [--room R] [--results N] [
   + '    When related claims exist, the note is not written until you choose: --supersedes (replace), --separate ID[,ID] (name the listed claims that stay true beside it), or --cancel. A claim with the same --key is listed first; key a card\'s notes by its card id (--key card.cl-m4-forward-path).\n'
   + '  memory retract ID... --why TEXT | memory accept ID... | memory dismiss ID...\n'
   + '  memory reconcile A B --answer keep-both|supersedes|retract [--why TEXT] | memory used ID [--op helped|hurt|hit|view] [--card CARD]\n'
-  + '  memory export --complete   (a complete memory.md from your ledger, before the ledger is turned down)\n';
+  + '  memory export --complete   (a complete memory.md from your ledger, before the ledger is turned down)\n'
+  + '  memory history ID   (the dated history of a claim, as a [history: memory history ID] pointer names it)\n';
 /** CLAIM-LEDGER W1: the claim verbs; the app checks the agent's level. */
 const NOTE_KINDS = new Set(['fact', 'decision', 'lesson', 'preference', 'procedure', 'pointer', 'todo']);
-const CLAIM_VERBS = new Set(['note', 'retract', 'accept', 'dismiss', 'used', 'reconcile', 'export']);
+const CLAIM_VERBS = new Set(['note', 'retract', 'accept', 'dismiss', 'used', 'reconcile', 'export', 'history']);
 const CLAIM_VALUE_FLAGS = { '--kind': 'kind', '--key': 'key', '--ttl': 'ttl', '--at': 'at', '--from-mail': 'fromMail', '--why': 'text', '--answer': 'answer', '--op': 'op', '--card': 'card', '--reason': 'reason', '--reason-text': 'reasonText' };
 const CLAIM_LIST_FLAGS = { '--ref': 'refs', '--supersedes': 'supersedes' };
 /** A `--separate` value: claim ids, comma-separated (anything else is the note's text). */
@@ -92,6 +93,7 @@ function parseArgs(argv) {
     else out.args.text = text;
   }
   else if (out.cmd === 'retract' || out.cmd === 'accept' || out.cmd === 'dismiss') out.args.ids = positional;
+  else if (out.cmd === 'history') { if (positional[0] !== undefined) out.args.id = positional[0]; out.rest.push(...positional.slice(1)); }
   else if (out.cmd === 'used') { if (positional[0] !== undefined) out.args.id = positional[0]; out.rest.push(...positional.slice(1)); }
   else if (out.cmd === 'reconcile') { if (positional[0] !== undefined) out.args.a = positional[0]; if (positional[1] !== undefined) out.args.b = positional[1]; out.rest.push(...positional.slice(2)); }
   else out.rest.push(...positional);
@@ -151,7 +153,7 @@ async function main(argv, env, io = STDIO) {
     if (p.kindWord) io.err(`memory: noted as kind ${p.kindWord} (the first word); use --kind fact to keep the word as text\n`);
     return request(env, p, io);
   }
-  io.err(`memory: unknown command "${p.cmd}"; use search, wake-up or status (memory.md and your notes are indexed automatically), or a claim verb: note, retract, accept, dismiss, reconcile, used, export --complete.\n`);
+  io.err(`memory: unknown command "${p.cmd}"; use search, wake-up or status (memory.md and your notes are indexed automatically), or a claim verb: note, retract, accept, dismiss, reconcile, used, export --complete, history.\n`);
   return EXIT.usage;
 }
 

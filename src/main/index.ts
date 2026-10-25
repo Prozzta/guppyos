@@ -11,7 +11,7 @@ import { ClaimsIndexSync, verifiedPrefix } from './claims/indexSync';
 import { derive as deriveClaims } from './claims/derive';
 import { worldView as buildClaimsWorldView } from './claims/world';
 import { buildClaimsWorldSnapshot } from './claims/worldSnapshot';
-import { createClaimViews, DEFAULT_WORKING_SET_BUDGET } from './claims/views';
+import { createClaimViews, DEFAULT_WORKING_SET_BUDGET, renderClaimHistory } from './claims/views';
 import { createClaimExport, type ClaimExport } from './claims/exportWiring';
 import { createLedgerUi } from './claims/ledgerUi';
 import { scrubExport } from './claims/exportLedger';
@@ -1761,6 +1761,7 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
     store: claimStore.store,
     level: claimLevel,
     exportComplete: (agentId) => claimExport().complete(agentId),
+    claimHistory: (agentId, id) => claimHistory(agentId, id),
     onReconcile: (agentId, a, b) => reconcileQueueForHive(root).answeredPair(agentId, a, b),
     noteCandidates: (agentId, text, o) => claimNoteCandidates(agentId, text, o),
     validateSupersedes: (agentId, ids) => {
@@ -1889,6 +1890,20 @@ ipcMain.handle('claims-ui:set-level', (evt, level: unknown) => (ledgerUiSender(e
 ipcMain.handle('claims-ui:export', (evt, agentId: unknown) => (ledgerUiSender(evt) ? ledgerUi.exportNow(String(agentId)) : NOT_HERE));
 ipcMain.handle('claims-ui:keep-one', (evt, agentId: unknown, keep: unknown, retire: unknown) => (ledgerUiSender(evt) ? ledgerUi.keepOne(String(agentId), keep, retire) : NOT_HERE));
 ipcMain.handle('claims-ui:keep-all', (evt, agentId: unknown, ids: unknown) => (ledgerUiSender(evt) ? ledgerUi.keepAll(String(agentId), ids) : NOT_HERE));
+/** CLAIMS-90 HISTORY-PTR: `memory history <id>` over the served hive's verified ledgers: the caller's
+ *  own first, then every other ledger agent's (a search hit can show another agent's pointer). */
+function claimHistory(agentId: string, id: string): { ok: true; text: string; owner: string } | { ok: false; error: string } {
+  const root = hive.root(); const ep = claimsEndpoint();
+  if (!root || !ep) return { ok: false, error: 'the claim ledger is not open' };
+  let reg; try { reg = loadRegistry(root); } catch { reg = DEFAULT_KEY_REGISTRY; }
+  for (const owner of [agentId, ...claimLedgerAgents().filter((a) => a !== agentId)]) {
+    const prefix = verifiedPrefix(ep.store.readLedger(owner));
+    if (!prefix || !prefix.records.some((r) => r.t === 'claim' && r.id === id)) continue;
+    const text = renderClaimHistory(prefix.records, deriveClaims(prefix.records, reg, { r4: false }), id);
+    if (text) return { ok: true, text, owner };
+  }
+  return { ok: false, error: `no claim ${id} in this hive's verified ledgers` };
+}
 function claimsLedgerView(agentId: string) {
   const root = hive.root(); const ep = claimsEndpoint();
   if (!root || !ep) return null;
