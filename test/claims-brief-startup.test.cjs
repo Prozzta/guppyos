@@ -67,8 +67,13 @@ test('CL-BRIEF-STARTUP cause 1: same text and receipt as before the fix (golden)
   const { records, state, view } = fixture(400);
   // CL-OVERFLOW-NOTE: all eight overflow, and in all eight 50d18f14 left the overflow note out; the
   // goldens moved once, to the packs that reserve room for the note and "+N more".
-  const golden = { words3000: '7b016f13a5c8e98a', words700: 'a60ceca2370330fe', length9000: '911140b22bf48b3a', length2500: '17668b1c1a853d6b',
-    heavySep9000: 'bb87869429961215', heavySep6000: '755d107e075bde6e', heavySep4000: '05c315f3a1617b99', heavySep2500: '1f1f2a9256503fe4' };
+  // Re-pinned for CLAIMS-90 HISTORY-PTR (252134c5) from a text diff against 252134c5^: heavySep9000 and
+  // heavySep6000 differ only in the pointer spelling (memory.md#claim-history-<id> -> memory history <id>);
+  // in words3000, words700, length9000 and length2500 the respelled pointer costs a different count,
+  // so one pointer line moves across the cap (out for words: one word became three; in for length:
+  // shorter). heavySep4000 and heavySep2500 are unchanged.
+  const golden = { words3000: '523bf3503b9c44e9', words700: '80380573ff0ba6c0', length9000: 'aaac905198410bcc', length2500: 'b0f0134756c0d471',
+    heavySep9000: 'd5d2090f1fd5b99f', heavySep6000: '736fabc22955165b', heavySep4000: '05c315f3a1617b99', heavySep2500: '1f1f2a9256503fe4' };
   // Additive over '\n' like WordPiece, but each separator costs 51: the running sums must count them.
   const heavySep = (s) => s.length + 50 * (s.split('\n').length - 1);
   const got = {};
@@ -119,7 +124,8 @@ test('CL-BRIEF-STARTUP (Jim NIT): no budget lets a history pointer (or any line)
     assert.ok(out.receipt.used <= b, `budget ${b}: used ${out.receipt.used}`);
     // CL-OVERFLOW-NOTE: an overflowing briefing ends with the note and "+N more"; the packed lines end before them.
     const packed = out.text.split('\n').filter((l) => !l.startsWith('⚠ Working set omitted') && !/^\+\d+ more$/.test(l));
-    if (out.receipt.used === b && / history: memory\.md#/.test(packed.at(-1))) pointersAtCap++;
+    // CLAIMS-90 HISTORY-PTR (252134c5): the pointer is the command `memory history <id>`, never a memory.md# anchor.
+    if (out.receipt.used === b && / history: memory history c-/.test(packed.at(-1))) pointersAtCap++;
   }
   assert.ok(pointersAtCap > 0, 'some budget ends exactly at the cap on a history pointer (the boundary is exercised)');
 });

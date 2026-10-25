@@ -870,17 +870,36 @@ test('gate v2.4 step 1 (Jim a6ae9d): trusted links only, the subject @sha, the b
   assert.match(by['card.syn-f2.donesha#agent-y'].text, /names commit fedcba98 \(fedcba98\) as its subject's @sha \(not in the repository\)$/);
   assert.deepEqual(by['card.syn-f2.donesha#agent-y'].refs.map((y) => y.type), ['task', 'msg'], 'no commit ref for a sha the repository lacks');
   assert.equal(by['card.syn-f2.donesha#agent-z'].refs[2].value, H('5'), 'a digit-only @sha');
-  assert.equal(F.subjectAtSha('CARD-1 @1A2B3C4D done'), '1a2b3c4d');
-  assert.equal(F.subjectAtSha('mail me@abcdef12'), null, 'part of a word');
-  assert.equal(F.subjectAtSha('PASS 0/0/1 @aaaaaa1, NIT folded @bbbbbb2'), 'bbbbbb2', 'several: the last');
-  // Several subject @shas (Jim 0acf5a DV151): the last is the tip, whether git order agrees or not.
+  assert.deepEqual(F.subjectAtShas('CARD-1 @1A2B3C4D done'), [{ sha: '1a2b3c4d', name: 'card-1' }]);
+  assert.deepEqual(F.subjectAtShas('mail me@abcdef12'), [], 'part of a word');
+  assert.deepEqual(F.subjectAtShas('on origin: guppy/X-1 @aaaaaa1, (Y-2: @bbbbbb2) and @aaaaaa1'), [{ sha: 'aaaaaa1', name: 'guppy/x-1' }, { sha: 'bbbbbb2', name: 'y-2' }], 'once each, the word before it');
+  // Several subject @shas (god ab86be, Jim b3803c DV007): an ancestry chain gives its descendant,
+  // whatever order the subject writes them in.
   const two = await F.doneMailFacts([
     { id: 'm6', act: 'done', from: 'agent-w', card: 'SYN-F2', subject: 'SYN-F2 PASS @aaaaaa1, NIT folded @bbbbbb2', created_at: '2026-10-01T00:00:00Z' },
     { id: 'm7', act: 'done', from: 'agent-v', card: 'SYN-F2', subject: 'SYN-F2 @bbbbbb2 re-checked on @aaaaaa1', created_at: '2026-10-01T00:00:00Z' },
   ], ['SYN-F2'], g);
   const tw = Object.fromEntries(two.facts.map((f) => [f.slot, f]));
-  assert.equal(tw['card.syn-f2.donesha#agent-w'].refs[2].value, H('b'), 'last and latest in git order agree');
-  assert.equal(tw['card.syn-f2.donesha#agent-v'].refs[2].value, H('a'), 'the last, though git order says otherwise');
+  assert.equal(tw['card.syn-f2.donesha#agent-w'].refs[2].value, H('b'), 'chain: the descendant, written last');
+  assert.equal(tw['card.syn-f2.donesha#agent-v'].refs[2].value, H('b'), 'chain: the descendant, written first');
+  // Unrelated shas: the one written next to this card's id or branch name; none or both: ambiguous,
+  // no claim from that mail (the sender's previous done mail stands).
+  const gu = fakeGit({ commits: { aaaaaa1: H('a'), cccccc3: H('c'), dddddd4: H('d') }, parents: {}, time: { [H('c')]: 300, [H('d')]: 100 } });
+  const un = await F.doneMailFacts([
+    { id: 'u1', act: 'done', from: 'agent-u', card: 'SYN-F2', subject: 'Both on origin: guppy/syn-other @cccccc3 and guppy/syn-f2 @dddddd4', created_at: '2026-10-01T00:00:00Z' },
+    { id: 'u2', act: 'done', from: 'agent-t', card: 'SYN-F2', subject: 'SYN-F2 @dddddd4, SYN-OTHER @cccccc3', created_at: '2026-10-01T00:00:00Z' },
+    { id: 'u3', act: 'done', from: 'agent-s', card: 'SYN-F2', subject: 'SYN-F2 @aaaaaa1', created_at: '2026-10-01T00:00:00Z' },
+    { id: 'u4', act: 'done', from: 'agent-s', card: 'SYN-F2', subject: 'PASS @cccccc3, NIT @dddddd4', created_at: '2026-10-02T00:00:00Z' },
+    { id: 'u5', act: 'done', from: 'agent-r', card: 'SYN-F2', subject: 'syn-f2 @cccccc3 and syn-f2 @dddddd4', created_at: '2026-10-02T00:00:00Z' },
+    { id: 'u6', act: 'done', from: 'agent-q', card: 'SYN-F2', subject: 'SYN-F2 @aaaaaa1 on base @fedcba98', created_at: '2026-10-02T00:00:00Z' },
+  ], ['SYN-F2', 'SYN-OTHER'], gu);
+  const ub = Object.fromEntries(un.facts.map((f) => [f.slot, f]));
+  assert.equal(ub['card.syn-f2.donesha#agent-u'].refs[2].value, H('d'), "unrelated: this card's branch name, written second (DV007)");
+  assert.equal(ub['card.syn-f2.donesha#agent-t'].refs[2].value, H('d'), "unrelated: this card's id, written first");
+  assert.equal(ub['card.syn-f2.donesha#agent-s'].refs[2].value, H('a'), 'unrelated, no name next to either: u4 skipped, u3 stands');
+  assert.equal(ub['card.syn-f2.donesha#agent-q'].refs[2].value, H('a'), 'a sha the repository lacks is no chain; the card name settles it');
+  assert.equal(ub['card.syn-f2.donesha#agent-r'], undefined, 'both next to the card: ambiguous');
+  assert.deepEqual(un.skips.filter((s) => s.reason === 'ambiguous'), [{ mail: 'u4', reason: 'ambiguous', cards: ['SYN-F2'] }, { mail: 'u5', reason: 'ambiguous', cards: ['SYN-F2'] }]);
   // lastsha: a digit-only @sha in the card record counts (it is the descendant here).
   const lf = await F.cardFieldFacts([{ id: 'SYN-F5', status: 'done', createdAt: '2026-10-01T00:00:00Z', result: 'merged bbbbbb2; then mutants @58102304 (off bbbbbb2)' }],
     fakeGit({ commits: { bbbbbb2: H('b'), '58102304': H('5') }, parents: { [H('5')]: [H('b')] }, time: { [H('5')]: 1 } }));
