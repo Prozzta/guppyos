@@ -16,20 +16,12 @@ const { recover, mutateFile, restoreFile } = require('./mutant-runner-helper.cjs
 
 const ROOT = path.resolve(__dirname, '..', '..');
 recover(ROOT);
-// The shared helper journals src/ only. resources/memory-cli.cjs is mutated here directly, with the
-// original bytes kept in the OS temp dir until the restore; a run killed mid-mutant is repaired on the next start.
+// MUTANT-JOURNAL-GATE NIT 1 (god 9cb49c): resources/memory-cli.cjs is journaled through the helper like the src
+// files, so load-ts and the suites that read the CLI text directly refuse a tree where it is left mutated.
+const mutateAny = (file, abs, original, mutated) => mutateFile(ROOT, abs, original, mutated);
+const restoreAny = (file, abs, original) => restoreFile(ROOT, abs, original);
+// Before NIT 1 the CLI's original bytes lived in the OS temp dir: repair a run of that code that was killed.
 const CLI_BACKUP = path.join(os.tmpdir(), 'claims90-m1-mutants-memory-cli.orig');
-const inSrc = (file) => file.startsWith(`src${path.sep}`) || file.startsWith('src/');
-function mutateAny(file, abs, original, mutated) {
-  if (inSrc(file)) return mutateFile(ROOT, abs, original, mutated);
-  fs.writeFileSync(CLI_BACKUP, original);
-  fs.writeFileSync(abs, mutated);
-}
-function restoreAny(file, abs, original) {
-  if (inSrc(file)) return restoreFile(ROOT, abs, original);
-  fs.writeFileSync(abs, original);
-  fs.rmSync(CLI_BACKUP, { force: true });
-}
 if (fs.existsSync(CLI_BACKUP)) {
   fs.writeFileSync(path.join(ROOT, 'resources/memory-cli.cjs'), fs.readFileSync(CLI_BACKUP));
   fs.rmSync(CLI_BACKUP, { force: true });

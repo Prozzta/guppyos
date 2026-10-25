@@ -10,6 +10,9 @@ const path = require('node:path');
 
 const REPO = path.join(__dirname, '..');
 const read = (rel) => fs.readFileSync(path.join(REPO, rel), 'utf8').replace(/\r\n/g, '\n');
+// MUTANT-JOURNAL-GATE NIT 1 (god 9cb49c): resources/memory-cli.cjs is read below without load-ts, and the m1
+// census mutates it in place; refuse a tree a mutant runner left (or is holding) mutated, like load-ts does.
+require('./tools/mutant-runner-helper.cjs').assertUnmutated(REPO, path.basename(__filename));
 const between = (s, a, b) => {
   const i = s.indexOf(a);
   assert.ok(i >= 0, `missing ${a}`);

@@ -11,6 +11,9 @@ const path = require('node:path');
 
 const REPO = path.join(__dirname, '..');
 const read = (rel) => fs.readFileSync(path.join(REPO, rel), 'utf8');
+// MUTANT-JOURNAL-GATE NIT 1 (god 9cb49c): resources/memory-cli.cjs is read below without load-ts, and the m1
+// census mutates it in place; refuse a tree a mutant runner left (or is holding) mutated, like load-ts does.
+require('./tools/mutant-runner-helper.cjs').assertUnmutated(REPO, path.basename(__filename));
 const builder = read('electron-builder.yml');
 /** A top-level `key: value` of electron-builder.yml (values here are plain scalars). */
 const top = (key) => {

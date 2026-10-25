@@ -68,6 +68,73 @@ test('MUTANT-JOURNAL-GATE bare node --test (god 5b1c57, Jim NIT): load-ts refuse
   fs.rmSync(root, { recursive: true, force: true });
 });
 
+test('MUTANT-JOURNAL-GATE NIT 1 (god 9cb49c, Jim 967fa3): new-floor-knowhow and rebrand-internal-names-182 read resources/memory-cli.cjs without load-ts and refuse a tree where a dead census left it mutated, before they read anything; the helper journals resources/ and scripts/ and nothing else (MUTANT: a bare node --test of either suite reads the mutated CLI)', { timeout: 120_000 }, () => {
+  const { spawnSync } = require('node:child_process');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'c90-nit1-'));
+  for (const dir of ['resources', 'scripts', 'src', 'docs', path.join('test', 'tools')]) fs.mkdirSync(path.join(root, dir), { recursive: true });
+  const SUITES = ['test/new-floor-knowhow.test.cjs', 'test/rebrand-internal-names-182.test.cjs'];
+  for (const rel of [...SUITES, 'test/tools/mutant-runner-helper.cjs', 'test/tools/ps-env.cjs']) fs.copyFileSync(path.join(REPO, rel), path.join(root, rel));
+  const cli = path.join(root, 'resources', 'memory-cli.cjs');
+  const dead = { pid: 2147483000, start: '2026-10-25T15:23:08Z' };
+  const journal = (file, owner = dead) => fs.writeFileSync(helper.journalPath(root), JSON.stringify({ owner, records: [{ file, original: Buffer.from('const CLAIM_VERBS = new Set([]);').toString('base64') }] }), 'utf8');
+  const env = { ...process.env, NODE_PATH: path.join(REPO, 'node_modules'), MUTANT_RUNNER_PID: '' };
+  delete env.NODE_OPTIONS; delete env.NODE_TEST_CONTEXT;
+  const suite = (rel) => spawnSync(process.execPath, ['--test', rel], { cwd: root, encoding: 'utf8', timeout: 60_000, env });
+  for (const rel of SUITES) {
+    const gate = path.basename(rel);
+    fs.writeFileSync(cli, 'const CLAIM_VERBS = new Set(["mutant"]);', 'utf8');
+    journal(cli);
+    let r = suite(rel);
+    assert.notEqual(r.status, 0, `${rel}: MUTANT: the suite ran over the mutated CLI`);
+    assert.match(`${r.stdout}${r.stderr}`, new RegExp(`\\[${gate.replace(/\./g, '\\.')}\\] refusing to load mutated source: an interrupted mutant runner \\(pid 2147483000, dead\\) left mutated files behind; run: node test/tools/claims90-m1-mutants\\.cjs --recover-only\\. Journaled: resources[\\\\/]+memory-cli\\.cjs`), `${rel}: the refusal names the suite`);
+    assert.equal(fs.readFileSync(cli, 'utf8'), 'const CLAIM_VERBS = new Set(["mutant"]);', 'a suite restores nothing');
+    // (the reporter doubles a backslash in its # diagnostic lines, hence the one-or-more separator class).
+    // The gate comes before any read: with the journal recovered the same suite gets past it (and then misses its
+    // other fixtures in this bare tree, which is a different error).
+    const lines = [];
+    assert.equal(helper.recover(root, (l) => lines.push(l)), 1);
+    assert.deepEqual(lines, [`[mutant-runner] restored ${path.join('resources', 'memory-cli.cjs')} left mutated by an interrupted run (pid 2147483000)`]);
+    assert.equal(fs.readFileSync(cli, 'utf8'), 'const CLAIM_VERBS = new Set([]);');
+    r = suite(rel);
+    assert.doesNotMatch(`${r.stdout}${r.stderr}`, /mutated source/, `${rel}: no journal, no refusal`);
+    assert.match(`${r.stdout}${r.stderr}`, /ENOENT/, `${rel}: past the gate, the bare tree's missing fixture is the error`);
+  }
+  // The helper journals src/, resources/ and scripts/ and refuses anything else, in and out of the tree.
+  for (const file of [path.join(root, 'scripts', 'release-worktrees.cjs'), path.join(root, 'src', 'x.ts'), cli]) {
+    journal(file); assert.deepEqual(helper.journalState(root).files, [path.relative(root, file)]);
+  }
+  for (const file of [path.join(root, 'docs', 'x.md'), path.join(root, 'package.json'), path.join(os.tmpdir(), 'x.ts')]) {
+    journal(file); assert.throws(() => helper.journalState(root), /refusing mutant recovery path outside src\/, resources\/, scripts\//, file);
+    assert.throws(() => helper.mutateFile(root, file, 'a', 'b'), /refusing mutant recovery path/);
+  }
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('MUTANT-JOURNAL-GATE NIT 2 (god 9cb49c, Jim 967fa3): release-worktrees-mutants journals every mutant through the helper and recovers a killed run (--recover-only restores scripts/release-worktrees.cjs and says so) (MUTANT: the census writes the source directly, a killed row stays mutated with nothing to detect it)', { timeout: 60_000 }, () => {
+  const { spawnSync } = require('node:child_process');
+  const runner = 'test/tools/release-worktrees-mutants.cjs';
+  const src = fs.readFileSync(path.join(REPO, runner), 'utf8');
+  // The loop mutates and restores only through the helper (the finally cannot run after a kill; the journal can).
+  assert.doesNotMatch(src, /fs\.writeFileSync\(/, 'MUTANT: the census writes a source file itself');
+  assert.match(src, /\n {4}mutateFile\(ROOT, abs, original, mutated\);\r?\n {4}r = run\(\);\r?\n {2}\} finally \{\r?\n {4}restoreFile\(ROOT, abs, original\);/);
+  assert.match(src, /\nrecover\(ROOT\);\r?\nif \(process\.argv\.includes\('--recover-only'\)\) process\.exit\(0\);/, 'recover before the baseline, then the recover-only exit');
+  // A killed run: the journal names a dead owner and scripts/release-worktrees.cjs carries the mutant.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'c90-nit2-'));
+  fs.mkdirSync(path.join(root, 'scripts')); fs.mkdirSync(path.join(root, 'test', 'tools'), { recursive: true });
+  for (const rel of [runner, 'test/tools/mutant-runner-helper.cjs', 'test/tools/ps-env.cjs']) fs.copyFileSync(path.join(REPO, rel), path.join(root, rel));
+  const file = path.join(root, 'scripts', 'release-worktrees.cjs');
+  fs.writeFileSync(file, 'if (false) rotated = 1;\r\n', 'utf8');
+  fs.writeFileSync(helper.journalPath(root), JSON.stringify({ owner: { pid: 2147483000, start: '2026-10-25T15:23:08Z' }, records: [{ file, original: Buffer.from('if (newest) rotated = 1;\r\n').toString('base64') }] }), 'utf8');
+  const env = { ...process.env, MUTANT_RUNNER_PID: '' }; delete env.NODE_OPTIONS; delete env.NODE_TEST_CONTEXT;
+  const r = spawnSync(process.execPath, [runner, '--recover-only'], { cwd: root, encoding: 'utf8', timeout: 30_000, env });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, new RegExp(`^\\[mutant-runner\\] restored scripts[\\\\/]release-worktrees\\.cjs left mutated by an interrupted run \\(pid 2147483000\\)$`, 'm'), 'MUTANT: a killed run restored nothing or said nothing');
+  assert.equal(fs.readFileSync(file, 'utf8'), 'if (newest) rotated = 1;\r\n', 'the original bytes, CRLF kept');
+  assert.equal(fs.existsSync(helper.journalPath(root)), false);
+  assert.doesNotMatch(r.stdout, /BASELINE|KILLED|SURVIVED/, '--recover-only runs no census');
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
 test('MUTANT-JOURNAL-GATE (Jim 1b5d87/b0a10e): the runner refuses ANY mutant-runner journal in the tree, live owner (named) or dead (recover command printed), and runs with none; recover() prints each file it restores (MUTANT: runs on mutated bytes / restores silently)', () => {
   const e = sink();
   const { spawn, calls } = fakeSpawn({ status: 0 });

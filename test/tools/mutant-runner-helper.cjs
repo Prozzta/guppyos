@@ -14,10 +14,13 @@ const { spawnSync } = require('node:child_process');
 
 const journalPath = (root) => path.join(root, '.mutant-runner-recovery.json');
 
+// Every tree a census mutates in place: TypeScript under src/, the shipped CLI under resources/ (m1), the
+// release scripts under scripts/ (release-worktrees). Anything else is not a mutant and is never restored.
+const MUTABLE = ['src', 'resources', 'scripts'];
 function checked(root, file) {
   const rel = path.relative(root, file);
-  if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || !rel.startsWith(`src${path.sep}`)) {
-    throw new Error(`refusing mutant recovery path outside src: ${file}`);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || !MUTABLE.some((dir) => rel.startsWith(`${dir}${path.sep}`))) {
+    throw new Error(`refusing mutant recovery path outside ${MUTABLE.join('/, ')}/: ${file}`);
   }
   return path.resolve(file);
 }
@@ -124,15 +127,16 @@ function recover(root, log = (line) => console.log(line)) {
  * test/load-ts.cjs asks this before it loads any TypeScript. The suites a census spawns run while its journal
  * is live: they are the measurement, and they inherit MUTANT_RUNNER_PID (set by mutateFile) naming that owner.
  * The runner itself (owner pid == this pid) may load too. Every other process refuses, never silently.
+ * gate names the caller: load-ts, or a suite that reads a journaled non-TS file itself (god 9cb49c NIT 1).
  */
-function assertUnmutated(root) {
+function assertUnmutated(root, gate = 'load-ts') {
   const { owner, live, files } = journalState(root);
   if (!files.length) return;
   if (owner && owner.pid === process.pid) return;
   if (live && String(owner.pid) === process.env.MUTANT_RUNNER_PID) return;
   const who = live ? `mutant runner pid ${owner.pid} (started ${owner.start}) is still mutating this tree; wait for it or stop it`
     : `an interrupted mutant runner${owner ? ` (pid ${owner.pid}, dead)` : ''} left mutated files behind; run: node test/tools/claims90-m1-mutants.cjs --recover-only`;
-  throw new Error(`[load-ts] refusing to load mutated source: ${who}. Journaled: ${files.join(', ')}`);
+  throw new Error(`[${gate}] refusing to load mutated source: ${who}. Journaled: ${files.join(', ')}`);
 }
 
 function mutateFile(root, file, original, mutated) {
