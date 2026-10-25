@@ -125,6 +125,8 @@ const MUTANTS = [
   ['AB G2: release.<v> newest wins over the git claim', GET, "if (!agent && base.startsWith(RELEASE_PREFIX)) pick = values.find((c) => c.agent === 'derived') ?? pick;", ''],
   ['AC exact: the needle keeps markup', ENGINE, 'return stripMarkup(s.toLowerCase());', 'return s.toLowerCase();'],
   ['AD exact: file lines compared raw', ENGINE, 'if (!stripMarkup(lines[i].toLowerCase()).includes(needle)) continue;', 'if (!lines[i].toLowerCase().includes(needle)) continue;'],
+  ['AE ruling 3: a branch name never resolves to its card', GET, '    if (taskIds.has(name) || hasKey(cardK)) base = ix.byKey.has(mergeK) ? mergeK : cardK;', '    if (false) base = cardK;'],
+  ['AF ruling 3: the merge sub-key is not a field (bare card takes it)', GET, 'fixversion|merge|decision', 'fixversion|decision'],
   ['W T5: equal-time mails have no link-strength tiebreak', GET, '.sort((a, b) => b.ms - a.ms || linkRank(b.m.cardFrom) - linkRank(a.m.cardFrom));', '.sort((a, b) => b.ms - a.ms);'],
 ];
 

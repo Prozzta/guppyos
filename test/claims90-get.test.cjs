@@ -294,6 +294,31 @@ test('db7d4a + T5 (god fe1140): a mention-body mail is listed weak and never cur
   assert.equal(G.trustedLink('mention'), false, 'an unsplit legacy mention is weak until the index splits it');
 });
 
+test('ruling 3 (god 690425, Creed bc11fc): a branch name (guppy/<b>, origin/guppy/<b>, any case) resolves to card.<b>.merge when <b> is a card and a merge claim exists, else to card.<b>, else to branch.<b> when claimed; the merge sub-key never becomes the bare card current (MUTANT: branch not resolved / merge claim is the bare current)', () => {
+  assert.equal(G.branchName('guppy/FOO-7'), 'foo-7'); assert.equal(G.branchName('origin/guppy/foo-7'), 'foo-7'); assert.equal(G.branchName('guppy/hotfix-1'), 'hotfix-1');
+  assert.equal(G.branchName('foo-7'), null, 'no slash: a card id, not a branch'); assert.equal(G.branchName('guppy/a/b'), null, 'a nested name is no valid key');
+  assert.equal(G.branchKeyOf('Hotfix-1'), 'branch.hotfix-1');
+  const f = fixture();
+  const merge = c('c-ggggggggggg1', 'derived', 'card.foo-7.merge', '2026-10-24T10:00:00.000Z', 'Card FOO-7: branch guppy/foo-7 was last merged into INT-1.1.102 at tip 22222222 by merge commit 44444444');
+  const orphan = c('c-ggggggggggg2', 'derived', 'branch.hotfix-1', '2026-10-06T10:00:00.000Z', 'Branch guppy/hotfix-1 was last merged into INT-1.1.102 at tip 33333333 by merge commit 55555555');
+  const d = deps({ ledgers: { ...f.ledgers, derived: [...f.ledgers.derived, merge, orphan] } });
+  const r = get('guppy/FOO-7', {}, d);
+  assert.deepEqual(r.keys, ['card.foo-7.merge']); assert.equal(r.card, 'foo-7'); assert.equal(r.current.claimId, 'c-ggggggggggg1', 'MUTANT: the branch did not resolve to the merge claim');
+  assert.deepEqual(r.tried, ['guppy/foo-7', 'card.guppy/foo-7', 'card.foo-7.merge', 'branch.foo-7']);
+  assert.equal(get('origin/guppy/foo-7', {}, d).current.claimId, 'c-ggggggggggg1');
+  assert.equal(get('card.foo-7', {}, d).current.claimId, 'c-bbbbbbbbbbb2', 'MUTANT: the newer merge sub-key claim became the bare card current');
+  assert.ok(get('card.foo-7', {}, d).keys.includes('card.foo-7.merge'), 'the merge sub-key is in the card set');
+  const o = get('guppy/hotfix-1', {}, d);
+  assert.deepEqual(o.keys, ['branch.hotfix-1']); assert.equal(o.card, null); assert.equal(o.current.claimId, 'c-ggggggggggg2');
+  assert.match(G.formatGet(o), /^get guppy\/hotfix-1 → keys: branch\.hotfix-1$/m);
+  assert.deepEqual(get('guppy/nobody', {}, d).keys, [], 'no card, no claims: unknown');
+  // A card with no merge claim yet: the branch is still the card.
+  assert.deepEqual(get('guppy/cut-1.1.100', {}, d).keys, ['card.cut-1.1.100']);
+  // A pruned card known only by its claims owns its branch too.
+  const dp = deps({ tasks: [], ledgers: { derived: [merge] } });
+  assert.deepEqual(get('guppy/foo-7', {}, dp).keys, ['card.foo-7.merge']);
+});
+
 test('G2 (god 6f7b2c, Jim 3a543d): for release.<v> the derived git-sourced claim is current and newer agent claims compete; --agent still picks that agent (MUTANT: newest wins)', () => {
   const git = c('c-fffffffffff1', 'derived', 'release.1.1.100', '2026-10-20T10:00:00.000Z', 'Guppy 1.1.100, tag v1.1.100 is commit 0123456789abcdef0123456789abcdef01234567', { source: 'derived', refs: [{ type: 'commit', value: '0123456789abcdef0123456789abcdef01234567' }] });
   const note = c('c-fffffffffff2', 'alpha-1', 'release.1.1.100', '2026-10-22T10:00:00.000Z', '1.1.101 cut as 89abcdef0123456789abcdef0123456789abcdef');

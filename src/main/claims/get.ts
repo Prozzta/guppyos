@@ -89,7 +89,18 @@ export const linkRank = (cardFrom: string): number => linkParts(cardFrom).reduce
 export const trustedLink = (cardFrom: string): boolean => linkRank(cardFrom) > 0;
 const CARD_PREFIX = 'card.';
 const RELEASE_PREFIX = 'release.';
-const FIELD_SUFFIX = /\.(status|assignee|lastsha|donesha|decision\.[a-z0-9]{8})$/;
+const BRANCH_PREFIX = 'branch.';
+/**
+ * Ruling 3 (god 690425), Creed bc11fc rule (b): a branch name (as in git, any case) minus a leading `guppy/` or
+ * `origin/guppy/`; when the rest is a card id the branch is the card's (its merge claim is card.<id>.merge), else the
+ * key is branch.<name lower-cased> (only when that is a valid key: no `/`). Null: not a branch name at all.
+ */
+export function branchName(term: string): string | null {
+  const m = /^(?:origin\/)?(?:guppy\/)?([a-z0-9][a-z0-9._-]*)$/i.exec(term.trim());
+  return m && /\//.test(term) ? m[1].toLowerCase() : null;
+}
+export const branchKeyOf = (name: string): string => `${BRANCH_PREFIX}${name.toLowerCase()}`;
+const FIELD_SUFFIX = /\.(status|assignee|lastsha|donesha|fixversion|merge|decision\.[a-z0-9]{8})$/;
 const SHA_RE = /\b[0-9a-f]{7,40}\b/g;
 const VERSION_RE = /\b\d+\.\d+(?:\.\d+)+\b/g;
 
@@ -280,6 +291,19 @@ export function resolveGet(rawTerm: string, opts: GetOptions, d: GetDeps): GetRe
         if (taskIds.has(ck.slice(CARD_PREFIX.length)) || ix.byKey.has(ck) || [...ix.byKey.keys()].some((k) => k.startsWith(`${ck}.`))) { base = canon; break; }
       }
     }
+  }
+  // Ruling 3 (god 690425): `memory get guppy/<b>` resolves to the owning card (rule (b): <b> is a card id, from
+  // tasks.json or any claim under card.<b>): its merge sub-key when claimed, else the card; a branch no card owns
+  // resolves to branch.<b> when claims exist under it (Creed's merge claims).
+  const name = base ? null : branchName(term);
+  if (name) {
+    const hasKey = (k: string): boolean => ix.byKey.has(k) || [...ix.byKey.keys()].some((o) => o.startsWith(`${k}.`));
+    const cardK = `${CARD_PREFIX}${name}`;
+    const mergeK = `${cardK}.merge`;
+    const bK = branchKeyOf(name);
+    tried.push(mergeK, bK);
+    if (taskIds.has(name) || hasKey(cardK)) base = ix.byKey.has(mergeK) ? mergeK : cardK;
+    else if (hasKey(bK)) base = bK;
   }
   const empty: GetResult = { term, keys: [], tried, card: null, current: null, competing: [], superseded: [], decisions: [], fields: null, mails: [], nextBefore: null, mailIndex: 'off' };
   if (!base) return empty;
