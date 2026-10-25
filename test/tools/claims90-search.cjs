@@ -79,7 +79,9 @@ if (!db || !query) { emit('usage: claims90-search.cjs --db <index.sqlite> --quer
       const tok = new WordPieceTokenizer(wordPieceConfigFromTokenizerJson(JSON.parse(fs.readFileSync(path.join(modelDir, 'tokenizer.json'), 'utf8'))));
       emb = new OnnxEmbedder(path.join(modelDir, 'onnx', 'model.onnx'), tok, ort, { intraOpNumThreads: 2 });
       const [queryVec] = await emb.embed([query]);
-      hits = store.search({ query, queryVec, wing: flags.wing, room: flags.room, sinceMs: flags.since ? Date.parse(flags.since) : null, beforeMs: flags.before ? Date.parse(flags.before) : null, k: staleFetchK(Number.isFinite(results) && results > 0 ? results : 5, mode), mode, kind: val('--kind'), key: val('--key') });
+      // CLAIMS-90 R2 step 2: the RRF pool is sized from the caller's k, never from the stale over-fetch (as the engine).
+      const results5 = Number.isFinite(results) && results > 0 ? results : 5;
+      hits = store.search({ query, queryVec, wing: flags.wing, room: flags.room, sinceMs: flags.since ? Date.parse(flags.since) : null, beforeMs: flags.before ? Date.parse(flags.before) : null, k: staleFetchK(results5, mode), poolK: results5, mode, kind: val('--kind'), key: val('--key') });
     }
     if (!flags.exact) hits = dropStale(hits, mode, results);
     const json = flags.newest ? (() => { const cur = rankHits(query, hits); return newestOrder(query, hits).map((h, i) => ({ ...redactHit(h), rankNewest: i + 1, rankCurrent: cur.indexOf(h) + 1 })); })() : hits.map(redactHit);

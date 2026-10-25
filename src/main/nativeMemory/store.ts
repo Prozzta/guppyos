@@ -62,6 +62,9 @@ export interface SearchOptions {
   sinceMs?: number | null;
   beforeMs?: number | null;
   k: number;
+  /** CLAIMS-90 R2 step 2 (Jim 595cc6): the k the RRF candidate pool is sized from (default k). The engine passes the
+   *  caller's k when it over-fetches for the stale drop, so the drop never changes the fused order of what it keeps. */
+  poolK?: number;
   /** CLAIM-LEDGER read modes (A5): live (default), history (+ superseded, retracted), all (+ purged). */
   mode?: SearchMode;
   /** Claims only: a kind or a key (markdown chunks have neither). */
@@ -323,11 +326,11 @@ export class NativeMemoryStore {
     this.setMeta('generation', String(Number(this.meta('generation') ?? '0') + 1));
   }
 
-  /** Hybrid search: FTS5 BM25 and cosine KNN, each over max(4k, 40) candidates, filtered by
+  /** Hybrid search: FTS5 BM25 and cosine KNN, each over max(4 poolK, 40) candidates (poolK defaults to k), filtered by
    *  wing/room/date BEFORE fusion, fused by RRF. One read snapshot for the whole query. */
   search(o: SearchOptions): SearchHit[] {
     const k = Math.max(1, Math.min(100, Math.floor(o.k)));
-    const cand = Math.max(4 * k, 40);
+    const cand = Math.max(4 * Math.max(1, Math.min(100, Math.floor(o.poolK ?? k))), 40);
     const mode: SearchMode = o.mode === 'history' || o.mode === 'all' ? o.mode : 'live';
     // CLAIM-LEDGER: a claim chunk is returned only when its claim's visibility is in the mode
     // (a claim chunk without a status row is never returned: fail closed). Markdown chunks

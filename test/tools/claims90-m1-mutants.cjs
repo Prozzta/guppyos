@@ -38,13 +38,16 @@ if (fs.existsSync(CLI_BACKUP)) {
 if (process.argv.includes('--recover-only')) process.exit(0);
 const TESTS = ['test/claims90-m1-compact.test.cjs', 'test/native-memory.test.cjs', 'test/claims90-m3a-lead.test.cjs', 'test/claims90-m3-rank.test.cjs',
   // CLAIMS-90 R2 (C90-GET): the lookup, the search modes and the cross-path test.
-  'test/claims90-get.test.cjs', 'test/claims90-search-modes.test.cjs', 'test/claims90-get-paths.test.cjs', 'test/hook-broker-p3.test.cjs'];
+  'test/claims90-get.test.cjs', 'test/claims90-search-modes.test.cjs', 'test/claims90-get-paths.test.cjs', 'test/hook-broker-p3.test.cjs',
+  // CLAIMS-90 R2 step 2: the pointer footer, the rank fuzz and the T3 pool.
+  'test/claims90-step2-rank-pool.test.cjs'];
 const GET = 'src/main/claims/get.ts';
 const HOOKS = 'src/main/hooks.ts';
 const FORMAT = 'src/main/nativeMemory/format.ts';
 const WIRING = 'src/main/nativeMemory/mainWiring.ts';
 const SERVICE = 'src/main/nativeMemory/service.ts';
 const ENGINE = 'src/main/nativeMemory/engine.ts';
+const STORE = 'src/main/nativeMemory/store.ts';
 const CLI = 'resources/memory-cli.cjs';
 const INDEX = 'src/main/index.ts';
 const VIEWS = 'src/main/claims/views.ts';
@@ -83,7 +86,11 @@ const MUTANTS = [
   ['D get: a card key does not cover its derived sub-keys', GET, "  for (const k of [...keySet]) if (isCardKey(k)) for (const other of ix.byKey.keys()) if (other.startsWith(`${k}.`)) keySet.add(other);\n", ''],
   ['E get: the done-sha rule is off (a sha in the agent\'s done mail is not a known value)', GET, "          if (!named.length && shaField && m.act === 'done' && (!agent || m.from === agent)) named = sha7(text);\n", ''],
   ['F get: the unknown-term line differs by path (keys tried not printed)', GET, 'L.push(`no claim under ${r.tried.join(\', \')}`);', 'L.push(`no claim under ${r.term}`);'],
-  ['G search: the meta line carries no get pointer', FORMAT, "${h.claim.key ? ` · ${getPointer(h.claim.key)}` : ''}", ''],
+  ['G search: the meta line carries no get pointer', FORMAT, '  if (get) out.push(get);', ''],
+  ['G2 step 2: the pointer is back on every meta line', FORMAT, '${h.claim.id} · ${h.wing}/${h.room}`', "${h.claim.id} · ${h.wing}/${h.room}${h.claim.key ? ` · get: ${getPointer(h.claim.key)}` : ''}`"],
+  ['G3 step 2: the footer repeats a key per hit', FORMAT, 'for (const k of [...new Set(keys)])', 'for (const k of keys)'],
+  ['AG step 2: the RRF pool from the over-fetched k (engine)', ENGINE, 'k: fetchK, poolK: k,', 'k: fetchK,'],
+  ['AH step 2: the RRF pool from the over-fetched k (store)', STORE, 'Math.floor(o.poolK ?? k)', 'Math.floor(k)'],
   ['H newest: no gate (an old high-score row that matches nothing can lead)', FORMAT, 'const gated = (h: T): boolean => hasTerm(h.content, query) || h.bm25 !== null;', 'const gated = (h: T): boolean => true;'],
   ['I newest: a passing mention is not demoted', FORMAT, "return matched.length && matched.every((t) => passingOnly(h.content, t)) ? 1 : 0;", 'return 0;'],
   ['J newest: priors share the group of current claims', FORMAT, "const group = (h: T): number => (h.claim && h.claim.status !== 'live' ? 1 : 0);", 'const group = (h: T): number => 0;'],
