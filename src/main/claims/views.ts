@@ -40,6 +40,10 @@ const claimLine = (claim: ClaimRec, status: string, flags: string[] = []): strin
   const [first, ...rest] = claim.text.split('\n');
   return [`- ${flagText(flags)}${first} [status:${status}] [c:${claim.id}]`, ...rest.map(line => `  ${line}`)].join('\n');
 };
+/** CLAIMS-90 M3a (layout probe): a working-set line opens with `<key>: <current value>` for a keyed claim
+ *  (an unkeyed claim's line already opens with its first line). memory.md rendering is unchanged. */
+const workingSetLine = (claim: ClaimRec, flags: string[] = []): string =>
+  claim.key ? claimLine({ ...claim, text: `${claim.key}: ${claim.text}` }, 'current', flags) : claimLine(claim, 'current', flags);
 
 /** Explicit supersedes and derived same-key supersededBy links form a dated history group. */
 function historyGroups(claims: ClaimRec[], state: ClaimsState): Map<string, ClaimRec[]> {
@@ -161,7 +165,7 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
       for (const { claim, order: _order } of groups[0]) {
         const id = claim.id;
         const group = historyFor.get(id);
-        const line = claimLine(claim, 'current', view.flags[id] ?? []) + (group && group.length > 1 ? ` [history: memory.md#${historyAnchor(id)}]` : '');
+        const line = workingSetLine(claim, view.flags[id] ?? []) + (group && group.length > 1 ? ` [history: memory.md#${historyAnchor(id)}]` : '');
         if (!add(line, 0, id)) excluded.set(id, 'tier-share');
       }
       let markersIncluded = 0;
@@ -184,7 +188,7 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
           let localUsed = 0;
           for (const { claim } of items) {
             const id = claim.id; const group = historyFor.get(id);
-            const line = claimLine(claim, 'current') + (group && group.length > 1 ? ` [history: memory.md#${historyAnchor(id)}]` : '');
+            const line = workingSetLine(claim) + (group && group.length > 1 ? ` [history: memory.md#${historyAnchor(id)}]` : '');
             const n = lineTokens(line);
             if (used + (selected.length + 1) * sep + selectedTokens + n <= room &&
                 selectedTokens + n <= t2Cap && localUsed + n <= localCap) {

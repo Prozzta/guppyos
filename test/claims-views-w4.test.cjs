@@ -184,7 +184,7 @@ test('S2 reverse: a current WITHOUT history carries no suffix, and no pointer or
   const views = V.createClaimViews(records, s => s.length);
   const working = views.buildWorkingSet(state, world(), 5000).text;
   const full = views.renderMemoryMd(state, world(), 'complete');
-  assert.match(working, /- invented lone fact \[status:current\] \[c:solo-fact\]$/m);
+  assert.match(working, /- lone-key: invented lone fact \[status:current\] \[c:solo-fact\]$/m);
   assert.match(working, /- invented lone habit \[status:current\] \[c:solo-lesson\]$/m);
   assert.doesNotMatch(working, /history:/);
   assert.doesNotMatch(full, /claim-history-/);

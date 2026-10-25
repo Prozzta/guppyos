@@ -470,7 +470,8 @@ test('PIN: against the REAL test directory discovery is root tests plus only fol
   // CODEX-MCP-ISOLATION: + 1 (codex-mcp-isolation).
   // AGY-TEARDOWN: + 1 (agy-teardown-tree-102).
   // CLAIMS-90 M1 compact memory output: + 1 (claims90-m1-compact).
-  assert.equal(files.length, 531, `the focused suite must retain its pre-fold file count, got ${files.length}`);
+  // CLAIMS-90 M3a lead line per claim hit: + 1 (claims90-m3a-lead).
+  assert.equal(files.length, 532, `the focused suite must retain its pre-fold file count, got ${files.length}`);
   assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
   assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');
   assert.ok(files.includes(path.join('start-fixes-163', 'start-fixes-163-boot-submit.test.cjs')), 'the start-fixes feature folder is included');

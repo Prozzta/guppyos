@@ -2,8 +2,8 @@
 
 /**
  * Mutant runner for CLAIMS-90 M1 (compact, current-first memory search / wake-up output under the
- * condenser cap). Each mutant injects ONE named regression into ONE source file, runs the M1 test
- * files, and must turn them RED. An anchor that is missing or not unique is INERT and counts as a
+ * condenser cap) and M3a (the `<key>: <current value>` lead line; rows `m3a-*`). Each mutant injects ONE
+ * named regression into ONE source file, runs the M1 + M3a test files, and must turn them RED. An anchor that is missing or not unique is INERT and counts as a
  * failure of the run. Same engine as gtc-m4-mutants.cjs. HEAVY: run it in the heavy slot.
  *
  *   node test/tools/claims90-m1-mutants.cjs [name-prefix]
@@ -36,13 +36,14 @@ if (fs.existsSync(CLI_BACKUP)) {
   console.log('recovered resources/memory-cli.cjs from an interrupted run');
 }
 if (process.argv.includes('--recover-only')) process.exit(0);
-const TESTS = ['test/claims90-m1-compact.test.cjs', 'test/native-memory.test.cjs'];
+const TESTS = ['test/claims90-m1-compact.test.cjs', 'test/native-memory.test.cjs', 'test/claims90-m3a-lead.test.cjs'];
 const FORMAT = 'src/main/nativeMemory/format.ts';
 const WIRING = 'src/main/nativeMemory/mainWiring.ts';
 const SERVICE = 'src/main/nativeMemory/service.ts';
 const ENGINE = 'src/main/nativeMemory/engine.ts';
 const CLI = 'resources/memory-cli.cjs';
 const INDEX = 'src/main/index.ts';
+const VIEWS = 'src/main/claims/views.ts';
 
 const MUTANTS = [
   ['a the compact budget is over the condenser cap', FORMAT, 'export const COMPACT_MAX_CHARS = 1400;', 'export const COMPACT_MAX_CHARS = 1600;'],
@@ -70,7 +71,15 @@ const MUTANTS = [
   ['w a hit gets one even share, never more (the old per-hit split)', FORMAT, 'const COMPACT_SHARES = 3;', 'const COMPACT_SHARES = 1;'],
   ['x the UI search (hive:searchMemory) gets the compact text', INDEX, "nativeMemory.query('search', { query, full: true,", "nativeMemory.query('search', { query,"],
   ['y the UI wake-up (hive:memoryWakeUp) gets the compact text', INDEX, "nativeMemory.query('wake-up', { full: true,", "nativeMemory.query('wake-up', {"],
-  ['z the head is kept even when the wrap cost popped the matched term (no window fallback)', FORMAT, "if (!w.text.startsWith('…') && hasTerm(whole, query) && !hasTerm(lines.join(' '), query))", 'if (false)'],
+  ['z the head is kept even when the wrap cost popped the matched term (no window fallback)', FORMAT, "if (!w.text.startsWith('…') && hasTerm(text, query) && !hasTerm(ls.join(' '), query)) ls = fit(windowContent(text, query, mx, 'window').text, bud);", ''],
+  // CLAIMS-90 M3a: the lead line.
+  ['m3a-1 a prior or prior? hit gets a `key: value` lead as if it were current', FORMAT, "if (!h.claim || h.claim.status !== 'live') return null;", 'if (!h.claim) return null;'],
+  ['m3a-2 a `##` heading becomes the value', FORMAT, ".filter((l) => !l.trim().startsWith('## '))", ''],
+  ['m3a-3 the body repeats the lead instead of continuing after it', FORMAT, 'lines = split.rest ? [split.lead, ...window(split.rest, restMax, budget - leadCost)] : [split.lead];', 'lines = split.rest ? [split.lead, ...window(whole, restMax, budget - leadCost)] : [split.lead];'],
+  ['m3a-4 a whole claim that fits keeps its header line instead of the key prefix', FORMAT, 'const whole = split ? (split.rest ? `${split.lead} ${split.rest}` : split.lead) : oneLine(h.content);', 'const whole = oneLine(h.content);'],
+  ['m3a-5 a matched term cut in two by the shortened lead is lost (no plain-window fallback)', FORMAT, 'lines = hasTerm(whole, query) && !hasTerm(lead, query) && !hasTerm(from, query)', 'lines = false'],
+  ['m3a-6 the lead is dropped on a tight share instead of shortened', FORMAT, '} else if (split && avail - 5 - 29 >= 24) {', '} else if (false) {'],
+  ['m3a-7 the wake-up working set drops the key prefix', VIEWS, "claim.key ? claimLine({ ...claim, text: `${claim.key}: ${claim.text}` }, 'current', flags) : claimLine(claim, 'current', flags);", "claimLine(claim, 'current', flags);"],
 ];
 
 const prefix = process.argv[2] || '';

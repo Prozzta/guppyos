@@ -46,6 +46,25 @@ export function currentFirst<T extends { claim?: SearchHit['claim'] }>(hits: T[]
 }
 
 const base = (p: string): string => p.split('/').pop() ?? p;
+
+/**
+ * CLAIMS-90 M3a (layout probe, Jim's re-audit): a CURRENT (live) claim hit opens with ONE line
+ * `<key>: <current value>` and its body continues where that line stops (no copy). The value is the claim
+ * text; the `kind · key · date` header and `##` headings are dropped from it (the meta line carries them).
+ * An unkeyed claim opens with its first sentence. A prior, prior? or markdown hit has no lead (null): a
+ * `key: value` line on an old value would read as the current one.
+ */
+export function leadSplit(h: Pick<SearchHit, 'content' | 'claim'>): { lead: string; rest: string } | null {
+  if (!h.claim || h.claim.status !== 'live') return null;
+  const body = oneLine(h.content.split('\n').slice(1).filter((l) => !l.trim().startsWith('## ')).join(' '));
+  if (!body) return null;
+  const full = h.claim.key ? `${h.claim.key}: ${body}` : body;
+  let lead = wrap(full, CONTENT_WIDTH)[0] ?? '';
+  if (!h.claim.key) { const m = /^.*?[.!?](?=\s|$)/.exec(full); if (m && m[0].length <= lead.length) lead = m[0]; }
+  return { lead, rest: full.slice(lead.length).trimStart() };
+}
+/** The lead line alone (null when the hit has none). */
+export const leadLine = (h: Pick<SearchHit, 'content' | 'claim'>): string | null => leadSplit(h)?.lead ?? null;
 const round3 = (n: number): number => Math.round(n * 1000) / 1000;
 
 /** Python's str(float) for the scores the legacy CLI prints (`0.436`, `1.347`, `0.0`). */
@@ -146,10 +165,14 @@ export function formatSearchCompact(query: string, flags: SearchFlags, hits: Sea
     const share = Math.floor(remaining / left);
     let budget = share >= COMPACT_MIN_HIT ? Math.min(remaining - (left - 1) * COMPACT_MIN_HIT, COMPACT_SHARES * share) : Math.min(remaining, COMPACT_MIN_HIT);
     if (budget < COMPACT_MIN_HIT) { out.push(footer(left)); break; }
+    // M3a: a current claim hit opens with `<key>: <value>` and its body continues after it (no copy); on a
+    // tight share the meta line gives up room (down to 24 chars) so that line still shows.
+    const split = leadSplit(h);
+    const metaMax = Math.max(24, Math.min(COMPACT_LINE_MAX, budget - 16 - (split ? Math.min(split.lead.length + 5, 64) : 0)));
     const meta = clip(h.claim
       ? `[${i + 1}] ${statusWord(h.claim.status)} · ${h.claim.kind} · ${h.claim.key ?? '-'} · ${h.claim.at.slice(0, 10)} · ${h.claim.id} · ${h.wing}/${h.room}`
-      : `[${i + 1}] ${h.wing}/${h.room} · ${base(h.source)}`, Math.min(COMPACT_LINE_MAX, budget - 16));
-    const whole = oneLine(h.content);
+      : `[${i + 1}] ${h.wing}/${h.room} · ${base(h.source)}`, metaMax);
+    const whole = split ? (split.rest ? `${split.lead} ${split.rest}` : split.lead) : oneLine(h.content);
     let lines = wrap(whole, CONTENT_WIDTH);
     let cut = false;
     if (costOf(meta, lines) > budget) {
@@ -163,17 +186,43 @@ export function formatSearchCompact(query: string, flags: SearchFlags, hits: Sea
       const avail = budget - meta.length - 1;
       const max = Math.max(1, avail - 5 * Math.ceil(avail / CONTENT_WIDTH));
       // Word wrapping can add lines: drop from the end until the hit fits its budget (marked `…`).
-      const fit = (text: string): string[] => {
+      const fit = (text: string, bud: number): string[] => {
+        const av = bud - meta.length - 1;
         let ls = wrap(text, CONTENT_WIDTH);
-        while (ls.length > 1 && costOf(meta, ls) > budget) { ls.pop(); ls[ls.length - 1] = clip(`${ls[ls.length - 1]}…`, CONTENT_WIDTH); }
-        if (costOf(meta, ls) > budget) ls = [clip(ls[0] ?? '', Math.max(1, avail - 5))];
+        while (ls.length > 1 && costOf(meta, ls) > bud) { ls.pop(); ls[ls.length - 1] = clip(`${ls[ls.length - 1]}…`, CONTENT_WIDTH); }
+        if (costOf(meta, ls) > bud) ls = [clip(ls[0] ?? '', Math.max(1, av - 5))];
         return ls;
       };
-      let w = windowContent(whole, query, max);
-      lines = fit(w.text);
       // The head was chosen before the wrap cost; if the popped lines took every matched term with them, the
       // window (a third before the term) is what survives the cost. Decided AFTER wrapping (S1).
-      if (!w.text.startsWith('…') && hasTerm(whole, query) && !hasTerm(lines.join(' '), query)) { w = windowContent(whole, query, max, 'window'); lines = fit(w.text); }
+      const window = (text: string, mx: number, bud: number): string[] => {
+        const w = windowContent(text, query, mx);
+        let ls = fit(w.text, bud);
+        if (!w.text.startsWith('…') && hasTerm(text, query) && !hasTerm(ls.join(' '), query)) ls = fit(windowContent(text, query, mx, 'window').text, bud);
+        return ls;
+      };
+      // M3a: the lead keeps its line when a window of the rest (>= 24 chars) fits beside it; with less room it stands
+      // alone only when it holds a matched term itself (or no part of the hit does). Else the hit is windowed as
+      // before, without the lead, so what is shown never falls below M1 + S1.
+      const leadCost = split ? split.lead.length + 5 : 0;
+      const restAvail = avail - leadCost;
+      if (split && restAvail >= 24 + 5) {
+        const restMax = Math.max(1, restAvail - 5 * Math.ceil(restAvail / CONTENT_WIDTH));
+        lines = split.rest ? [split.lead, ...window(split.rest, restMax, budget - leadCost)] : [split.lead];
+      } else if (split && avail - 5 - 29 >= 24) {
+        // M3a: a shorter lead (the key and the start of its value), then a window of what follows it.
+        const lead = clip(split.lead, avail - 5 - 29);
+        const lc = lead.length + 5;
+        const ra = avail - lc;
+        const from = whole.slice(lead.length - 1).trimStart();
+        // A term cut in two by the clip would be lost: then the whole hit is windowed as before, without the lead.
+        lines = hasTerm(whole, query) && !hasTerm(lead, query) && !hasTerm(from, query)
+          ? window(whole, max, budget)
+          : [lead, ...window(from, Math.max(1, ra - 5 * Math.ceil(ra / CONTENT_WIDTH)), budget - lc)];
+      } else {
+        const alone = split ? clip(split.lead, Math.max(1, avail - 5)) : null;
+        lines = alone !== null && (!hasTerm(whole, query) || hasTerm(alone, query)) ? [alone] : window(whole, max, budget);
+      }
     }
     if (cut) clipped++;
     out.push(meta, ...lines.map((l) => `    ${l}`));
@@ -208,6 +257,8 @@ export function formatSearchFull(query: string, flags: SearchFlags, hits: Search
       if (maybePrior) L.push(`      Version: possibly replaced (unconfirmed, dated ${date}); search for the key to see its current value.`);
     }
     L.push(`      Match:  cosine_sim=${h.cosineSim === null ? '0.0' : py(h.cosineSim)}  bm25=${h.bm25 === null ? '0.0' : py(h.bm25)}`);
+    const lead = leadLine(h);
+    if (lead) L.push(`      ${clip(lead, COMPACT_LINE_MAX)}`);
     L.push('');
     for (const line of h.content.trim().split('\n')) L.push(`      ${line}`);
     L.push('');
