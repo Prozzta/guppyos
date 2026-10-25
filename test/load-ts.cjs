@@ -4,6 +4,11 @@ const fs = require('node:fs');
 const path = require('node:path');
 const ts = require('typescript');
 
+// MUTANT-JOURNAL-GATE (god 5b1c57): a bare `node --test` skips run-tests.cjs and its journal gate, so the gate
+// sits here too: no TypeScript loads from a tree a mutant runner left (or is holding) mutated, except in
+// the suites that runner itself spawned. Once per process.
+require('./tools/mutant-runner-helper.cjs').assertUnmutated(path.resolve(__dirname, '..'));
+
 const cache = new Map();
 
 function resolveTs(fromDir, request) {

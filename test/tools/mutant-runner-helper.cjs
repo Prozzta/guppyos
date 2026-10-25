@@ -119,6 +119,22 @@ function recover(root, log = (line) => console.log(line)) {
   return records.length;
 }
 
+/**
+ * MUTANT-JOURNAL-GATE (god 5b1c57, Jim NIT): a bare `node --test <file>` never goes through run-tests.cjs, so
+ * test/load-ts.cjs asks this before it loads any TypeScript. The suites a census spawns run while its journal
+ * is live: they are the measurement, and they inherit MUTANT_RUNNER_PID (set by mutateFile) naming that owner.
+ * The runner itself (owner pid == this pid) may load too. Every other process refuses, never silently.
+ */
+function assertUnmutated(root) {
+  const { owner, live, files } = journalState(root);
+  if (!files.length) return;
+  if (owner && owner.pid === process.pid) return;
+  if (live && String(owner.pid) === process.env.MUTANT_RUNNER_PID) return;
+  const who = live ? `mutant runner pid ${owner.pid} (started ${owner.start}) is still mutating this tree; wait for it or stop it`
+    : `an interrupted mutant runner${owner ? ` (pid ${owner.pid}, dead)` : ''} left mutated files behind; run: node test/tools/claims90-m1-mutants.cjs --recover-only`;
+  throw new Error(`[load-ts] refusing to load mutated source: ${who}. Journaled: ${files.join(', ')}`);
+}
+
 function mutateFile(root, file, original, mutated) {
   const abs = checked(root, file);
   const { owner, records } = readJournal(root);
@@ -128,6 +144,8 @@ function mutateFile(root, file, original, mutated) {
   }
   if (records.some((record) => record.file === abs)) throw new Error(`already mutating ${abs}`);
   writeJournal(root, [...records, { file: abs, original }]);
+  // The suites this runner spawns inherit the owner pid: load-ts lets exactly them load the mutant.
+  process.env.MUTANT_RUNNER_PID = String(process.pid);
   fs.writeFileSync(abs, mutated, 'utf8');
   const pause = Number(process.env.MUTANT_RUNNER_PAUSE_AFTER_MUTATE_MS || 0);
   if (pause > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, pause);
@@ -139,4 +157,4 @@ function restoreFile(root, file, original) {
   writeJournal(root, readJournal(root).records.filter((record) => record.file !== abs));
 }
 
-module.exports = { recover, mutateFile, restoreFile, journalPath, journalState };
+module.exports = { recover, mutateFile, restoreFile, journalPath, journalState, assertUnmutated, processStart };

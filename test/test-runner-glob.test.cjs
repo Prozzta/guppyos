@@ -21,6 +21,53 @@ const run = (options) => runner.run({ jobRate: () => 0, mutantJournal: () => ({ 
 const helper = require('./tools/mutant-runner-helper.cjs');
 const os = require('node:os');
 
+test('MUTANT-JOURNAL-GATE bare node --test (god 5b1c57, Jim NIT): load-ts refuses mutated source under a dead-owner or foreign live journal, lets the census\'s own spawned suites (MUTANT_RUNNER_PID) and the runner itself load, and loads normally with no journal (MUTANT: a bare node --test runs on mutated bytes)', { timeout: 60_000 }, () => {
+  const { spawnSync, spawn: spawnChild } = require('node:child_process');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'c90-bare-gate-'));
+  fs.mkdirSync(path.join(root, 'src')); fs.mkdirSync(path.join(root, 'test', 'tools'), { recursive: true });
+  for (const rel of ['test/load-ts.cjs', 'test/tools/mutant-runner-helper.cjs', 'test/tools/ps-env.cjs', 'test/tools/shared-temp.cjs']) {
+    if (fs.existsSync(path.join(REPO, rel))) fs.copyFileSync(path.join(REPO, rel), path.join(root, rel));
+  }
+  const file = path.join(root, 'src', 'x.ts');
+  fs.writeFileSync(file, 'export const x = 1;', 'utf8');
+  const journal = (owner) => fs.writeFileSync(helper.journalPath(root), JSON.stringify({ owner, records: [{ file, original: Buffer.from('export const x = 1;').toString('base64') }] }), 'utf8');
+  const bare = (env = {}) => spawnSync(process.execPath, ['-e', "process.stdout.write(String(require('./test/load-ts.cjs')('src/x.ts').x))"],
+    { cwd: root, encoding: 'utf8', timeout: 30_000, env: { ...process.env, NODE_PATH: path.join(REPO, 'node_modules'), MUTANT_RUNNER_PID: '', ...env } });
+  // No journal: loads.
+  let r = bare(); assert.equal(r.status, 0, r.stderr); assert.equal(r.stdout, '1');
+  // Dead owner, mutant on disk: a bare load is refused with the recover command; the bytes stay (recover() is the fix).
+  fs.writeFileSync(file, 'export const x = 2;', 'utf8');
+  journal({ pid: 2147483000, start: '2026-10-25T15:23:08Z' });
+  r = bare(); assert.notEqual(r.status, 0, 'MUTANT: a bare node --test loaded the mutated bytes');
+  assert.match(r.stderr, /refusing to load mutated source: an interrupted mutant runner \(pid 2147483000, dead\) left mutated files behind; run: node test\/tools\/claims90-m1-mutants\.cjs --recover-only\. Journaled: src[\\/]x\.ts/);
+  assert.equal(fs.readFileSync(file, 'utf8'), 'export const x = 2;');
+  // In-process: the same refusal, and the runner's own pid may load (it is the one mutating).
+  assert.throws(() => helper.assertUnmutated(root), /interrupted mutant runner \(pid 2147483000, dead\)/);
+  journal({ pid: process.pid, start: 'x' }); assert.doesNotThrow(() => helper.assertUnmutated(root), 'the owner itself loads');
+  // A live foreign owner: refused and named, unless this process is a suite that owner spawned (MUTANT_RUNNER_PID).
+  const child = spawnChild(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
+  try {
+    const start = helper.processStart(child.pid);
+    assert.ok(start, 'the child start time reads');
+    journal({ pid: child.pid, start });
+    assert.equal(helper.journalState(root).live, true);
+    r = bare(); assert.notEqual(r.status, 0);
+    assert.match(r.stderr, new RegExp(`refusing to load mutated source: mutant runner pid ${child.pid} \\(started ${start.replace(/[.+*?()[\]]/g, '\\$&')}\\) is still mutating this tree; wait for it or stop it`));
+    r = bare({ MUTANT_RUNNER_PID: String(child.pid) }); assert.equal(r.status, 0, r.stderr); assert.equal(r.stdout, '2', 'the census\'s own suite measures the mutant');
+  } finally { child.kill(); }
+  // mutateFile hands the pid down to the suites it spawns.
+  fs.rmSync(helper.journalPath(root)); fs.writeFileSync(file, 'export const x = 1;', 'utf8');
+  const saved = process.env.MUTANT_RUNNER_PID; delete process.env.MUTANT_RUNNER_PID;
+  try {
+    helper.mutateFile(root, file, 'export const x = 1;', 'export const x = 3;');
+    assert.equal(process.env.MUTANT_RUNNER_PID, String(process.pid));
+    assert.doesNotThrow(() => helper.assertUnmutated(root));
+    helper.restoreFile(root, file, 'export const x = 1;');
+  } finally { if (saved === undefined) delete process.env.MUTANT_RUNNER_PID; else process.env.MUTANT_RUNNER_PID = saved; }
+  assert.equal(fs.readFileSync(file, 'utf8'), 'export const x = 1;');
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
 test('MUTANT-JOURNAL-GATE (Jim 1b5d87/b0a10e): the runner refuses ANY mutant-runner journal in the tree, live owner (named) or dead (recover command printed), and runs with none; recover() prints each file it restores (MUTANT: runs on mutated bytes / restores silently)', () => {
   const e = sink();
   const { spawn, calls } = fakeSpawn({ status: 0 });
