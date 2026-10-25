@@ -283,7 +283,21 @@ function run({
   cores = os.availableParallelism(),
   processEnv = process.env,
   jobRate = selfJobRate,
+  // MUTANT-JOURNAL-GATE: the tree's mutant-runner journal (injected by the contract tests).
+  mutantJournal = (root) => require('./mutant-runner-helper.cjs').journalState(root),
 } = {}) {
+  // MUTANT-JOURNAL-GATE (Jim 1b5d87/b0a10e): a census mutates src/ IN PLACE and journals each file; a runner
+  // killed mid-row leaves its mutant on disk (46c9dfeb: three M1 wake-up tests saw mutant j, 360/363). A suite
+  // run on such a tree is untrusted and a build from it would ship the mutant, so ANY journal fails closed:
+  // a live owner is named (wait for it or stop it); a dead owner gets the recover command. Never silent.
+  let journal;
+  try { journal = mutantJournal(cwd); } catch (e) { err(`[test-runner] cannot read the mutant-runner journal in ${cwd}: ${String(e)}`); return 1; }
+  if (journal.files.length) {
+    const who = journal.live ? `mutant runner pid ${journal.owner.pid} (started ${journal.owner.start}) is still mutating this tree; wait for it or stop it`
+      : `an interrupted mutant runner${journal.owner ? ` (pid ${journal.owner.pid}, dead)` : ''} left mutated files behind; run: node test/tools/claims90-m1-mutants.cjs --recover-only`;
+    err(`[test-runner] refusing to run on mutated source: ${who}. Journaled: ${journal.files.join(', ')}`);
+    return 1;
+  }
   let entries;
   try {
     entries = discoverTestFiles(testDir, readdir);

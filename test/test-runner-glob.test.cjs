@@ -17,7 +17,44 @@ const runner = require('./tools/run-tests.cjs');
 const { selectTestFiles } = runner;
 // These runner-behaviour tests are not process-job integration tests. Pin their
 // concurrency to the uncapped branch so a fresh npm-ci tree need not have bin/.
-const run = (options) => runner.run({ jobRate: () => 0, ...options });
+const run = (options) => runner.run({ jobRate: () => 0, mutantJournal: () => ({ owner: null, live: false, files: [] }), ...options });
+const helper = require('./tools/mutant-runner-helper.cjs');
+const os = require('node:os');
+
+test('MUTANT-JOURNAL-GATE (Jim 1b5d87/b0a10e): the runner refuses ANY mutant-runner journal in the tree, live owner (named) or dead (recover command printed), and runs with none; recover() prints each file it restores (MUTANT: runs on mutated bytes / restores silently)', () => {
+  const e = sink();
+  const { spawn, calls } = fakeSpawn({ status: 0 });
+  // Live owner: injected state (a live pid with a matching start time cannot be faked from a test).
+  const live = { owner: { pid: 4242, start: '2026-10-25T15:23:08Z' }, live: true, files: ['src/main/nativeMemory/format.ts'] };
+  assert.equal(runner.run({ jobRate: () => 0, testDir: 'test', readdir: () => ['a.test.cjs'], spawn, err: e.write, log: () => {}, mutantJournal: () => live }), 1);
+  assert.match(e.lines.join('\n'), /refusing to run on mutated source: mutant runner pid 4242 \(started 2026-10-25T15:23:08Z\) is still mutating this tree; wait for it or stop it\. Journaled: src\/main\/nativeMemory\/format\.ts/);
+  // Dead owner: a REAL journal in a temp tree, written by the helper, its owner a pid that is not running.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'c90-journal-'));
+  fs.mkdirSync(path.join(root, 'src'));
+  const file = path.join(root, 'src', 'format.ts');
+  fs.writeFileSync(file, 'return compact;', 'utf8');
+  fs.writeFileSync(helper.journalPath(root), JSON.stringify({ owner: { pid: 2147483000, start: '2026-10-25T15:23:08Z' }, records: [{ file, original: Buffer.from('return compact;').toString('base64') }] }), 'utf8');
+  fs.writeFileSync(file, 'return full;', 'utf8');
+  const state = helper.journalState(root);
+  assert.equal(state.live, false); assert.deepEqual(state.files, [path.join('src', 'format.ts')]);
+  const d = sink();
+  assert.equal(runner.run({ jobRate: () => 0, testDir: 'test', readdir: () => ['a.test.cjs'], spawn, cwd: root, err: d.write, log: () => {} }), 1, 'MUTANT: the suite ran on the mutated bytes');
+  assert.match(d.lines.join('\n'), /refusing to run on mutated source: an interrupted mutant runner \(pid 2147483000, dead\) left mutated files behind; run: node test\/tools\/claims90-m1-mutants\.cjs --recover-only\. Journaled: src[\\/]format\.ts/);
+  assert.equal(fs.readFileSync(file, 'utf8'), 'return full;', 'the runner itself restores nothing');
+  assert.equal(calls.length, 0, 'nothing spawned on a mutated tree');
+  // recover() puts the bytes back and says so.
+  const lines = [];
+  assert.equal(helper.recover(root, (l) => lines.push(l)), 1);
+  assert.equal(fs.readFileSync(file, 'utf8'), 'return compact;');
+  assert.deepEqual(lines, [`[mutant-runner] restored ${path.join('src', 'format.ts')} left mutated by an interrupted run (pid 2147483000)`]);
+  assert.equal(fs.existsSync(helper.journalPath(root)), false);
+  // No journal: the real helper reads the tree and the run goes on.
+  const ok = sink();
+  const code = runner.run({ jobRate: () => 0, testDir: 'test', readdir: () => ['a.test.cjs'], spawn, cwd: root, err: ok.write, log: () => {} });
+  assert.doesNotMatch(ok.lines.join('\n'), /mutated source/);
+  assert.notEqual(code, undefined);
+  fs.rmSync(root, { recursive: true, force: true });
+});
 
 const REPO = path.resolve(__dirname, '..');
 const TEST_DIR = path.join(REPO, 'test');

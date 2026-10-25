@@ -94,14 +94,27 @@ function writeJournal(root, records) {
   fs.renameSync(temp, journal);
 }
 
-function recover(root) {
+/**
+ * MUTANT-JOURNAL-GATE (Jim 1b5d87/b0a10e): what the tree's journal says, for a runner that must not run on
+ * mutated bytes. files: the journaled (still mutated) files, relative to root; live: their owner still runs.
+ */
+function journalState(root) {
+  const { owner, records } = readJournal(root);
+  return { owner, live: records.length > 0 && ownerLive(owner), files: records.map((record) => path.relative(root, record.file)) };
+}
+
+function recover(root, log = (line) => console.log(line)) {
   const { owner, records } = readJournal(root);
   if (records.length && ownerLive(owner)) {
     throw new Error(`mutant runner pid ${owner.pid} (started ${owner.start}) is still running, or its start time cannot be read to confirm it is not, `
       + `and owns ${journalPath(root)}; not restoring its live mutant. Wait for it to finish, or stop that runner first `
       + '(if that pid is not a mutant runner, delete the journal by hand).');
   }
-  for (const record of records) fs.writeFileSync(record.file, record.original, 'utf8');
+  for (const record of records) {
+    fs.writeFileSync(record.file, record.original, 'utf8');
+    // Never silent: the next runner's log shows a mutant was left behind (Jim b0a10e).
+    log(`[mutant-runner] restored ${path.relative(root, record.file)} left mutated by an interrupted run (pid ${owner ? owner.pid : 'unknown'})`);
+  }
   if (records.length) writeJournal(root, []);
   return records.length;
 }
@@ -126,4 +139,4 @@ function restoreFile(root, file, original) {
   writeJournal(root, readJournal(root).records.filter((record) => record.file !== abs));
 }
 
-module.exports = { recover, mutateFile, restoreFile, journalPath };
+module.exports = { recover, mutateFile, restoreFile, journalPath, journalState };
