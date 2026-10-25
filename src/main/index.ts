@@ -11,7 +11,7 @@ import { ClaimsIndexSync, verifiedPrefix } from './claims/indexSync';
 import { derive as deriveClaims } from './claims/derive';
 import { worldView as buildClaimsWorldView } from './claims/world';
 import { buildClaimsWorldSnapshot } from './claims/worldSnapshot';
-import { createClaimViews, DEFAULT_WORKING_SET_BUDGET, renderClaimHistory } from './claims/views';
+import { createClaimViews, DEFAULT_WORKING_SET_BUDGET } from './claims/views';
 import { createClaimExport, type ClaimExport } from './claims/exportWiring';
 import { createLedgerUi } from './claims/ledgerUi';
 import { scrubExport } from './claims/exportLedger';
@@ -26,7 +26,7 @@ import { reconcileApiForHive as createReconcileApiForHive, refreshReconcileQueue
 import { WordPieceTokenizer, wordPieceConfigFromTokenizerJson } from './nativeMemory/wordpiece';
 import { readSourcesConfig } from './nativeMemory/sources';
 import { DEFAULT_KEY_REGISTRY, loadRegistry } from './claims/registry';
-import { CLAIM_LEDGER_CLAMP_ROW, CLAIMS_ALERT_KEY_MISSING, DERIVED_AGENT_ID, effectiveLevel, IMPLEMENTED_LEVEL, manifestEntry, type DeriveFn, type LedgerLevel, type LedgerRec, type ReconcileItem, type UsageRec } from '../shared/claims';
+import { CLAIM_LEDGER_CLAMP_ROW, CLAIMS_ALERT_KEY_MISSING, DERIVED_AGENT_ID, effectiveLevel, IMPLEMENTED_LEVEL, manifestEntry, type DeriveFn, type LedgerLevel, type ReconcileItem, type UsageRec } from '../shared/claims';
 import { CodexVersionLog, codexNoDaemonGate, readCodexVersion } from './codexCli';
 import { codexLayerOptInKey, type CodexLayerNotice } from './codexProjectLayers';
 import { StartupTiming } from './startupTiming';
@@ -105,7 +105,7 @@ import { FloorDigest, FLOOR_DIGEST_DEFAULTS, FLOOR_DIGEST_FILE, readFlaggedForHu
 import { HiveManager, archivedForMail, type AgentMeta, type ArchiveReason, type HiveMessage, type HiveTask } from './hive';
 import { applyLedgerOp, perAgentQueue, type LedgerDeps } from './ledger';
 import { cardKeyRefusal, handleClaimVerb } from './claims/endpoint';
-import { formatGet, resolveGet } from './claims/get';
+import { claimGetOver, claimHistoryOver } from './claims/readWiring';
 import { actionableBacklog, coordinatorPendingIds, fleetMailFields, ledgerInboxMessages, mailCoordinationAt } from './mailReaders';
 import { HookServer } from './hooks';
 import { TermControl } from './termControl';
@@ -1782,24 +1782,8 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
     },
     // CL-M4-FORWARD-PATH: counts and flags only (detail), never note or reason text.
     onNoteChoice: (agentId, choice, ids, detail) => hive.appendLog({ kind: 'claims-note-choice', agentId, choice, targets: ids.slice(0, 10), ...(detail ?? {}) }),
-    // CLAIMS-90 R2 (C90-GET): read-only over every agent's VERIFIED ledger prefix (the same path as
-    // claimsLedgerView), the registry, the reconcile queue's alias pairs, tasks.json and the per-card
-    // mail index. The text is formatGet's on every path (CLI, MCP, hook-served).
-    get: (_agentId, args) => {
-      const ep = claimsEndpoint() as ClaimsEndpointDeps;
-      const ledgers: Record<string, LedgerRec[]> = {};
-      for (const a of claimLedgerAgents()) { const prefix = verifiedPrefix(ep.store.readLedger(a)); if (prefix) ledgers[a] = prefix.records; }
-      let reg; try { reg = loadRegistry(root); } catch { reg = DEFAULT_KEY_REGISTRY; }
-      const queue = reconcileQueueForHive(root);
-      const reconcileItems = Object.keys(ledgers).flatMap((a) => queue.allItems(a));
-      const tasks = ((hive.allTasks() as { tasks?: Array<Record<string, unknown>> }).tasks ?? []);
-      const mailRows = (card: string): string[] | null => {
-        if (!/^[a-z0-9][a-z0-9._-]{0,119}$/.test(card)) return null;
-        try { return readFileSync(join(root, 'state', 'mail-cards', `${card}.jsonl`), 'utf8').split('\n'); } catch { return null; }
-      };
-      const r = resolveGet(args.term, { agent: args.agent ?? null, mail: args.mail, before: args.before ?? null, noMail: args.noMail === true, history: args.history === true }, { ledgers, registry: reg, reconcileItems, tasks, mailRows, ruleConfig: { r4: false } });
-      return { text: formatGet(r, { agent: args.agent ?? null, history: args.history === true }), json: r };
-    },
+    // CLAIMS-90 R2 (C90-GET): read-only, claims/readWiring.ts (the answer child calls the same code).
+    get: (_agentId, args) => claimGetOver({ root, store: (claimsEndpoint() as ClaimsEndpointDeps).store, agents: claimLedgerAgents, tasks: () => ((hive.allTasks() as { tasks?: Array<Record<string, unknown>> }).tasks ?? []) }, args),
   };
 }
 /** CLAIMS-HEAD-ANCHOR (Jim A-2): read every anchored agent of this hive; a break alerts once
@@ -1914,19 +1898,11 @@ ipcMain.handle('claims-ui:set-level', (evt, level: unknown) => (ledgerUiSender(e
 ipcMain.handle('claims-ui:export', (evt, agentId: unknown) => (ledgerUiSender(evt) ? ledgerUi.exportNow(String(agentId)) : NOT_HERE));
 ipcMain.handle('claims-ui:keep-one', (evt, agentId: unknown, keep: unknown, retire: unknown) => (ledgerUiSender(evt) ? ledgerUi.keepOne(String(agentId), keep, retire) : NOT_HERE));
 ipcMain.handle('claims-ui:keep-all', (evt, agentId: unknown, ids: unknown) => (ledgerUiSender(evt) ? ledgerUi.keepAll(String(agentId), ids) : NOT_HERE));
-/** CLAIMS-90 HISTORY-PTR: `memory history <id>` over the served hive's verified ledgers: the caller's
- *  own first, then every other ledger agent's (a search hit can show another agent's pointer). */
+/** CLAIMS-90 HISTORY-PTR: `memory history <id>`, claims/readWiring.ts (the answer child calls the same code). */
 function claimHistory(agentId: string, id: string): { ok: true; text: string; owner: string } | { ok: false; error: string } {
   const root = hive.root(); const ep = claimsEndpoint();
   if (!root || !ep) return { ok: false, error: 'the claim ledger is not open' };
-  let reg; try { reg = loadRegistry(root); } catch { reg = DEFAULT_KEY_REGISTRY; }
-  for (const owner of [agentId, ...claimLedgerAgents().filter((a) => a !== agentId)]) {
-    const prefix = verifiedPrefix(ep.store.readLedger(owner));
-    if (!prefix || !prefix.records.some((r) => r.t === 'claim' && r.id === id)) continue;
-    const text = renderClaimHistory(prefix.records, deriveClaims(prefix.records, reg, { r4: false }), id);
-    if (text) return { ok: true, text, owner };
-  }
-  return { ok: false, error: `no claim ${id} in this hive's verified ledgers` };
+  return claimHistoryOver({ root, store: ep.store, agents: claimLedgerAgents }, agentId, id);
 }
 function claimsLedgerView(agentId: string) {
   const root = hive.root(); const ep = claimsEndpoint();
