@@ -560,7 +560,8 @@ test('PIN: against the REAL test directory discovery is root tests plus only fol
   // C90-GET: + 3 (claims90-get, claims90-search-modes, claims90-get-paths); C90-FACTS M5: + 1 (claims-derived-m5).
   // CLAIMS-90 step 3 fix R1/R2 (god bbcb4a): + 1 (claims90-step3-lead).
   // CLAIMS-90 step 3 runner branch (not merged): + 3 (claims-90-runner, claims-90-labeller, claims-90-answerer-get).
-  assert.equal(files.length, 544, `the focused suite must retain its pre-fold file count, got ${files.length}`);
+  // CLAIMS-90 search S3/S4 data side (Creed 15b4c1c5): + 1 (claims-search-targets).
+  assert.equal(files.length, 545, `the focused suite must retain its pre-fold file count, got ${files.length}`);
   assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
   assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');
   assert.ok(files.includes(path.join('start-fixes-163', 'start-fixes-163-boot-submit.test.cjs')), 'the start-fixes feature folder is included');

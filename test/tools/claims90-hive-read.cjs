@@ -54,7 +54,7 @@ function hiveReadDeps(root) {
 function hiveCardLead(root) {
   const { claimCardLeadOver } = loadTs('src/main/claims/readWiring.ts');
   const deps = hiveReadDeps(root);
-  return async (cards) => claimCardLeadOver(deps, cards);
+  return async (ask) => claimCardLeadOver(deps, ask);
 }
 
 /** The search text the engine prints for these hits: with a hive root the card briefs come from it (L7), without
@@ -62,7 +62,8 @@ function hiveCardLead(root) {
 async function searchTextOver(root, query, flags, hits) {
   const { cardLeadsFor } = loadTs('src/main/nativeMemory/engine.ts');
   const { formatSearch } = loadTs('src/main/nativeMemory/format.ts');
-  return formatSearch(query, flags, hits, await cardLeadsFor(hits, root ? hiveCardLead(root) : undefined));
+  const lead = await cardLeadsFor(hits, query, root ? hiveCardLead(root) : undefined);
+  return formatSearch(query, flags, hits, lead.briefs, lead.named);
 }
 
 module.exports = { readLedgers, readTasks, hiveReadDeps, hiveCardLead, searchTextOver };

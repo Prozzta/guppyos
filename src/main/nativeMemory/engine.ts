@@ -19,7 +19,7 @@ import type { LedgerLevel, SearchMode } from '../../shared/claims';
 import { hideStale } from '../claims/stale';
 import { formatSearch, formatStatus, formatWakeUp, newestOrder, rankHits, WAKE_MAX_CHARS } from './format';
 import { withHistoryCommands } from '../claims/historyPointer';
-import { cardIdOfKey } from '../claims/get';
+import { cardIdOfKey, EMPTY_CARD_LEADS, type CardLeadAsk, type CardLeadReply } from '../claims/get';
 import { pinnedSection, pinnedStatus, type PinnedStatus } from '../memoryRollover';
 
 export const PRIORITY = { search: 0, wake: 1, status: 1, ingest: 2, backfill: 3, compact: 4 } as const;
@@ -75,7 +75,7 @@ export interface EngineDeps {
   onIndexing?: (on: boolean, kind: string) => void;
   /** Step 3 fix R2 (god bbcb4a): the current field values of the cards a search's hits name, from main's resolver
    *  (the ledgers live in main, not in the worker); absent, failing or slow = the hits print as before. */
-  cardLead?: (cards: string[]) => Promise<Record<string, string[]>>;
+  cardLead?: (ask: CardLeadAsk) => Promise<CardLeadReply>;
 }
 /** R2: at most this many cards asked for per search. */
 export const CARD_LEADS_MAX = 12;
@@ -83,12 +83,20 @@ export const CARD_LEADS_MAX = 12;
  *  the engine's card-lead ask and the L7 tool (claims90-search.cjs --hive) build the briefs from this one list. */
 export const cardIdsOfHits = (hits: Array<Pick<SearchHit, 'claim'>>): string[] =>
   [...new Set(hits.map((h) => (h.claim?.key ? cardIdOfKey(h.claim.key) : null)).filter((c): c is string => !!c))].slice(0, CARD_LEADS_MAX);
-/** The card briefs for these hits through the cardLead dep: none without a dep, on a throw or a non-object answer. */
-export async function cardLeadsFor(hits: Array<Pick<SearchHit, 'claim'>>, cardLead: EngineDeps['cardLead']): Promise<Record<string, string[]>> {
-  if (!cardLead) return {};
+/** S4: how much of each hit's text goes to main with the query (a card id or version sits near the head). */
+export const LEAD_TEXT_MAX = 600;
+/** The card briefs for these hits through the cardLead dep (S3/S4: the query first, then the hit texts, so main can
+ *  name the cards and releases they mention): none without a dep, on a throw or a non-object answer. */
+export async function cardLeadsFor(hits: Array<Pick<SearchHit, 'claim' | 'content'>>, query: string, cardLead: EngineDeps['cardLead']): Promise<CardLeadReply> {
+  if (!cardLead) return EMPTY_CARD_LEADS;
   const cards = cardIdsOfHits(hits);
-  if (!cards.length) return {};
-  try { const r = await cardLead(cards); return r && typeof r === 'object' ? r : {}; } catch { return {}; }
+  const texts = [query, ...hits.slice(0, CARD_LEADS_MAX).map((h) => String(h.content ?? '').slice(0, LEAD_TEXT_MAX))];
+  try {
+    const r = await cardLead({ cards, texts });
+    if (!r || typeof r !== 'object') return EMPTY_CARD_LEADS;
+    const briefs = r.briefs && typeof r.briefs === 'object' ? r.briefs : {};
+    return { briefs, named: Array.isArray(r.named) ? r.named.filter((n): n is string => typeof n === 'string') : [] };
+  } catch { return EMPTY_CARD_LEADS; }
 }
 
 /** CLAIM-LEDGER: one agent's verified claim chunks, sent by main after an append (A6). */
@@ -297,16 +305,18 @@ export class MemoryEngine {
         const chunks = needle ? this.d.store.searchExact({ query: needle, wing: a.wing ?? null, room: a.room ?? null, sinceMs, beforeMs, k: fetchK, mode: a.mode ?? 'live', kind: a.kind ?? null, key: a.key ?? null }) : [];
         const files = needle && !a.wing && !a.room && !a.kind && !a.key ? exactFileHits(this.d.hiveRoot, needle, k) : [];
         const all = servedHits([...dropStale(chunks, a.mode, k), ...files]);  // matched on raw text, rewritten for display
-        return { exit: 0, text: formatSearch(a.query, a, all, await this.cardLeads(all)), json: json(all) };
+        const lead = await this.cardLeads(all, a.query);
+        return { exit: 0, text: formatSearch(a.query, a, all, lead.briefs, lead.named), json: json(all) };
       }
       const [qv] = await this.embed([a.query]);
       const hits = servedHits(dropStale(this.d.store.search({ query: a.query, queryVec: qv, wing: a.wing ?? null, room: a.room ?? null, sinceMs, beforeMs, k: fetchK, poolK: k, mode: a.mode ?? 'live', kind: a.kind ?? null, key: a.key ?? null }), a.mode, k));  // CLAIMS-90 HISTORY-PTR
-      return { exit: 0, text: formatSearch(a.query, a, hits, await this.cardLeads(hits)), json: json(hits) };
+      const lead = await this.cardLeads(hits, a.query);
+      return { exit: 0, text: formatSearch(a.query, a, hits, lead.briefs, lead.named), json: json(hits) };
     }, o);
   }
 
   /** Step 3 fix R2: the card briefs for the distinct cards the hits name (claim keys `card.<id>[.field]`), in hit order. */
-  private cardLeads(hits: SearchHit[]): Promise<Record<string, string[]>> { return cardLeadsFor(hits, this.d.cardLead); }
+  private cardLeads(hits: SearchHit[], query: string): Promise<CardLeadReply> { return cardLeadsFor(hits, query, this.d.cardLead); }
 
   async wakeUp(wing: string | null, full = false): Promise<EngineReply> {
     // (b) A wake-up is the caller's (or an explicit) wing: index it first.

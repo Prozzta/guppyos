@@ -84,11 +84,15 @@ export interface GetResult {
 }
 
 /** R1: the card fields the lead block answers, in print order (then the decision count); L4 adds audit. */
-export const CARD_FIELDS = ['donesha', 'lastsha', 'status', 'assignee', 'fixVersion', 'merge', 'audit'] as const;
+/** god 234b13: a merge into an rc line is its own key (card.<id>.merge.rc), so it never supersedes the INT merge;
+ *  the lead prints the INT merge lines first, then the rc ones, both labelled `merge:` with the value as stored. */
+export const CARD_FIELDS = ['donesha', 'lastsha', 'status', 'assignee', 'fixVersion', 'merge', 'merge.rc', 'audit'] as const;
 /** L3: the fields whose derived claims are one per (card, sender): the lead prints one line per agent. */
 export const PER_AGENT_FIELDS: readonly string[] = ['donesha'];
 /** R4 (god 4268df): a card may have one merge per INT line: one lead line per live structured merge claim, newest first. */
-export const MULTI_FIELDS: readonly string[] = ['merge'];
+export const MULTI_FIELDS: readonly string[] = ['merge', 'merge.rc'];
+/** The lead label of a multi-valued field: the rc merges print under `merge:` too (the value names its target). */
+const multiLabel = (f: string): string => (f === 'merge.rc' ? 'merge' : f);
 /** L4: the release.<v> lead lines, in print order (release.<v>.tag, release.<v>.bump: Creed's L1 keys). */
 export const RELEASE_FIELDS = ['tag', 'bump'] as const;
 const RELEASE_KEY = /^release\.\d+(?:\.\d+)+$/;
@@ -137,7 +141,7 @@ export function branchName(term: string): string | null {
   return m && /\//.test(term) ? m[1].toLowerCase() : null;
 }
 export const branchKeyOf = (name: string): string => `${BRANCH_PREFIX}${name.toLowerCase()}`;
-const FIELD_SUFFIX = /\.(status|assignee|lastsha|donesha|audit|fixversion|merge|decision\.[a-z0-9]{8})$/;
+const FIELD_SUFFIX = /\.(status|assignee|lastsha|donesha|audit|fixversion|merge(?:\.rc)?|decision\.[a-z0-9]{8})$/;
 const SHA_RE = /\b[0-9a-f]{7,40}\b/g;
 const VERSION_RE = /\b\d+\.\d+(?:\.\d+)+\b/g;
 
@@ -369,7 +373,9 @@ function resolveIn(ix: Indexed, term: string, opts: GetOptions, d: GetDeps, with
   // The alias set, then (card keys) every derived sub-key under any of them.
   const keySet = new Set(aliasSet(ix, base));
   const isCardKey = (k: string): boolean => k.startsWith(CARD_PREFIX);
-  for (const k of [...keySet]) if (isCardKey(k)) for (const other of ix.byKey.keys()) if (other.startsWith(`${k}.`)) keySet.add(other);
+  // god 234b13: a field sub-key (card.<id>.merge) takes no deeper key: card.<id>.merge.rc is its own field, so an rc
+  // merge never shows as the current of the INT merge key (nor competes with it).
+  for (const k of [...keySet]) if (isCardKey(k) && !FIELD_SUFFIX.test(k)) for (const other of ix.byKey.keys()) if (other.startsWith(`${k}.`)) keySet.add(other);
   const keys = [...keySet].sort(cmp);
   const cardKey = isCardKey(base) ? base : (keys.find(isCardKey) ?? null);
   const card = cardKey ? cardOf(cardKey, taskIds) : null;
@@ -487,6 +493,11 @@ function resolveIn(ix: Indexed, term: string, opts: GetOptions, d: GetDeps, with
       if (MULTI_FIELDS.includes(f)) { lead.push(...multiLines(ix, key, f, sub, d, fields?.[f])); continue; }
       lead.push(fieldLine(ix, f, key, resolveIn(ix, key, sub, d, false).current, fields?.[f]));
     }
+  } else if (withLead && !card && name !== null && base === branchKeyOf(name) && ix.byKey.has(`${base}.rc`)) {
+    // god 234b13: a branch no card owns keeps its INT merge (branch.<b>) and its rc merge (branch.<b>.rc) apart: the
+    // reply's current is the INT merge; when an rc merge exists too the reply leads with both, INT first.
+    const sub: GetOptions = { agent: opts.agent ?? null, noMail: true, mail: 0 };
+    lead = [...multiLines(ix, base, 'merge', sub, d, undefined), ...multiLines(ix, `${base}.rc`, 'merge.rc', sub, d, undefined)];
   } else if (withLead && !card && RELEASE_KEY.test(base)) {
     // L4: release.<v> leads with its tag and bump commits (release.<v>.tag / .bump); a release sub-key (release.<v>.pause,
     // release.<v>.e1) has no lead: that reply IS the field.
@@ -530,9 +541,10 @@ function multiLines(ix: Indexed, key: string, field: string, sub: GetOptions, d:
     const c = ix.claims.get(id);
     if (c && ix.status.get(id) === 'live' && typeof c.value === 'string') rows.push({ c, ms: epochMs(c.at) || 0 });
   }
-  if (!rows.length) return [fieldLine(ix, field, key, resolveIn(ix, key, sub, d, false).current, tv)];
+  // No rc merge is no line (the INT merge line already says merge: none / not structured yet).
+  if (!rows.length) return field === 'merge.rc' ? [] : [fieldLine(ix, field, key, resolveIn(ix, key, sub, d, false).current, tv)];
   rows.sort((x, y) => y.ms - x.ms || cmp(x.c.id, y.c.id));
-  return rows.map(({ c }) => ({ field, key, value: c.value ?? null, source: 'claim', id: c.id, agent: c.valueAgent ?? c.agent, at: c.at }));
+  return rows.map(({ c }) => ({ field: multiLabel(field), key, value: c.value ?? null, source: 'claim', id: c.id, agent: c.valueAgent ?? c.agent, at: c.at }));
 }
 
 /** L3: a per-agent field (one derived claim per card and sender, `valueAgent` the sender): `field (latest): value by
@@ -567,20 +579,35 @@ export function leadValue(text: string, max: number): string {
   return one.length <= max ? one : `${one.slice(0, max - 1)}…`;
 }
 
-/** R2: the brief a search hit carries for its card: the fields with a value (a per-agent field by its latest), then
- *  the decision count. */
-export function leadBrief(r: GetResult): string[] {
+/** S1 / S2 (god 7a4eec): the brief a search carries for a card or release: get's own lead lines, label first, one per
+ *  line, byte for byte what `memory get` prints for the same fields (every structured field, the per-agent donesha
+ *  lines, every merge, the audit), then the decision count. The lines the query names come first: a field by its
+ *  name or a word for it, an agent by its id or the id's first segment; the rest keep get's order. */
+export function leadBrief(r: GetResult, query = ''): string[] {
   if (!r.lead) return [];
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const l of r.lead) {
-    if (l.value === null || seen.has(l.field)) continue;
-    seen.add(l.field);
-    out.push(`${l.field}: ${leadValue(renderValue(l), BRIEF_VALUE_MAX)}`);
-  }
+  const words = queryWords(query);
+  const named = (l: GetFieldLine): boolean => (FIELD_WORDS[l.field] ?? [l.field.toLowerCase()]).some((w) => words.has(w)) || agentNamed(l.by ?? (l.latest ? l.agent : undefined), words);
+  const rows = r.lead.filter((l) => l.value !== null).map((l, i) => ({ l, i, n: named(l) ? 0 : 1 }));
+  rows.sort((x, y) => x.n - y.n || x.i - y.i);
+  const out = rows.map(({ l }) => leadLine(l));
   if (r.decisions.length) out.push(`decisions: ${r.decisions.length}`);
   return out;
 }
+/** The words a query names a field by (lower-case; `fixVersion` by `fixversion` too). */
+const FIELD_WORDS: Record<string, string[]> = {
+  donesha: ['donesha', 'done', 'done-sha'], lastsha: ['lastsha', 'tip', 'head', 'last', 'branch'], status: ['status', 'state'],
+  assignee: ['assignee', 'assigned', 'owner', 'assign'], fixVersion: ['fixversion', 'fix'], merge: ['merge', 'merged', 'merges', 'merging', 'int'],
+  audit: ['audit', 'audited', 'verdict'], tag: ['tag', 'tagged', 'published', 'publish'], bump: ['bump', 'bumped', 'version'],
+};
+const queryWords = (q: string): Set<string> => new Set(q.toLowerCase().split(/[^a-z0-9._\-/]+/).filter(Boolean));
+const agentNamed = (agent: string | undefined, words: Set<string>): boolean => !!agent && (words.has(agent.toLowerCase()) || words.has(agent.toLowerCase().split('-')[0]));
+
+/** S3 / S4: what a search asks main for: the cards its hits name, and the texts (the query first, then the hit
+ *  contents) a card id, a card's branch or a release version may be named in; main answers the briefs by term and
+ *  the named terms whose brief goes above the hits. */
+export interface CardLeadAsk { cards: string[]; texts: string[] }
+export interface CardLeadReply { briefs: Record<string, string[]>; named: string[] }
+export const EMPTY_CARD_LEADS: CardLeadReply = { briefs: {}, named: [] };
 
 const day = (iso: string): string => (iso || '').slice(0, 10);
 const kv = (key: string, text: string): string => (key ? `${key}: ${text.replace(/\s+/g, ' ').trim()}` : text.replace(/\s+/g, ' ').trim());
@@ -591,7 +618,7 @@ const clipLine = (s: string): string => (s.length <= GET_LINE_MAX ? s : `${s.sli
  *  target prints the tip plus `into ? (not structured yet)`. Every other value prints as stored. */
 const renderValue = (l: GetFieldLine): string => (l.field === 'merge' && l.value !== null && !/ into /.test(l.value) ? `${l.value} into ? (not structured yet)` : (l.value ?? ''));
 const leadLabel = (l: GetFieldLine): string => (l.latest ? `${l.field} (latest)` : l.by ? `${l.field} (${l.by})` : l.field);
-const leadLine = (l: GetFieldLine): string => {
+export const leadLine = (l: GetFieldLine): string => {
   if (l.value === null) return l.source === 'none' ? `${leadLabel(l)}: none` : `${leadLabel(l)}: not structured yet`;
   return `${leadLabel(l)}: ${leadValue(renderValue(l), LEAD_VALUE_MAX)}${l.latest && l.by ? ` by ${l.by}` : ''}`;
 };

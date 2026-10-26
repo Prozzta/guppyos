@@ -25,6 +25,8 @@ export interface SearchFlags {
   newest?: boolean;
   /** Step 3 fix R2: the card briefs (`<id>` → `field: value` items) the hits carry; set by formatSearch from its `leads`. */
   cardLeads?: CardLeads;
+  /** S3 (god 7a4eec): the terms (card ids, release keys) the query or a hit named: their briefs print above the hits. */
+  namedCards?: string[];
 }
 
 /**
@@ -175,15 +177,37 @@ function py(n: number): string {
   return Number.isInteger(r) ? `${r}.0` : String(r);
 }
 
-export function formatSearch(query: string, flags0: SearchFlags, hits: SearchHit[], leads: CardLeads = {}): string {
-  if (!hits.length) return `\n  No results found for: "${query}"\n`;
-  const flags = Object.keys(leads).length ? { ...flags0, cardLeads: leads } : flags0;
+export function formatSearch(query: string, flags0: SearchFlags, hits: SearchHit[], leads: CardLeads = {}, named: string[] = []): string {
+  const shown = named.filter((n) => leads[n]?.length);
+  const flags = Object.keys(leads).length ? { ...flags0, cardLeads: leads, ...(shown.length ? { namedCards: shown } : {}) } : flags0;
+  if (!hits.length && !shown.length) return `\n  No results found for: "${query}"\n`;
   return flags.full ? formatSearchFull(query, flags, hits) : formatSearchCompact(query, flags, hits);
 }
 
-/** R2: the card brief's text for a hit (`<id> now: f: v · f: v`), wrapped like content. */
-const briefLines = (cardId: string, items: string[]): string[] => wrap(`${cardId} now: ${items.join(' · ')}`, CONTENT_WIDTH);
+/** S1 (god 7a4eec): a card brief is its id on a header line, then get's lead lines label first, one per line (each
+ *  clipped to the content width; the lines are short structured values), indented two under the header. */
+const briefLines = (cardId: string, items: string[]): string[] => [cardId, ...items.map((i) => clip(`  ${i}`, CONTENT_WIDTH))];
 const linesCost = (ls: string[]): number => ls.reduce((n, l) => n + l.length + 5, 0);
+/** S2: a brief holds at most this many lines (the query's lines come first, so a cap never drops one it names). */
+export const BRIEF_LINES_MAX = 12;
+/** S3: the named block above the hits takes at most this much of the compact budget past the first brief. */
+export const NAMED_BLOCK_MAX = Math.floor(COMPACT_MAX_CHARS / 2);
+/** S3: the briefs of the terms the query or a hit named, above the hits: the first whole (BRIEF_LINES_MAX lines),
+ *  the next ones while the block is under NAMED_BLOCK_MAX, the rest as one `memory get` pointer line each. */
+function namedBlock(named: string[], leads: CardLeads, indent: string): { lines: string[]; shown: Set<string> } {
+  const lines: string[] = [];
+  const shown = new Set<string>();
+  let cost = 0;
+  for (const id of named) {
+    const items = (leads[id] ?? []).slice(0, BRIEF_LINES_MAX);
+    if (!items.length || shown.has(id)) continue;
+    const ls = [`${indent}${id}`, ...items.map((i) => clip(`${indent}    ${i}`, COMPACT_LINE_MAX))];
+    const c = ls.reduce((n, l) => n + l.length + 1, 0);
+    if (shown.size && cost + c > NAMED_BLOCK_MAX) { lines.push(clip(`${indent}${id}: memory get ${id}`, COMPACT_LINE_MAX)); continue; }
+    lines.push(...ls); cost += c; shown.add(id);
+  }
+  return { lines, shown };
+}
 /** R2: how far past its share a hit may grow for its brief, out of the pool (one floor share). */
 const BRIEF_EXTRA = 120;
 
@@ -289,7 +313,11 @@ export function formatSearchCompact(query: string, flags: SearchFlags, hits: Sea
   const clipReserve = clipNote(hits.length).length + 1;
   let clipped = 0;
   const keys: string[] = [];
-  const shownCards = new Set<string>();
+  // S3: the named briefs first, above every hit; a hit of a card shown there carries no second brief.
+  const top = namedBlock(flags.namedCards ?? [], leads, '');
+  out.push(...top.lines);
+  used += top.lines.reduce((n, l) => n + l.length + 1, 0);
+  const shownCards = new Set<string>(top.shown);
   for (let i = 0; i < ordered.length; i++) {
     const h = ordered[i];
     const left = ordered.length - i;
@@ -323,7 +351,7 @@ export function formatSearchCompact(query: string, flags: SearchFlags, hits: Sea
       // the agent can still reach with --results).
       const pool = share >= COMPACT_MIN_HIT ? remaining - (left - 1) * COMPACT_MIN_HIT - budget : remaining - budget;
       const room = budget - floor + Math.min(Math.max(0, pool), BRIEF_EXTRA);
-      const items = [...leads[cardId]];
+      const items = leads[cardId].slice(0, BRIEF_LINES_MAX);
       while (items.length) {
         const ls = briefLines(cardId, items);
         if (linesCost(ls) <= room) { cardLines = ls; break; }
@@ -408,6 +436,9 @@ export function formatSearchFull(query: string, flags: SearchFlags, hits: Search
   if (flags.since) L.push(`  Since: ${flags.since}`);
   if (flags.before) L.push(`  Before: ${flags.before}`);
   L.push('='.repeat(60), '');
+  // S3: the named briefs above the hits, as in the compact text.
+  const top = namedBlock(flags.namedCards ?? [], leads, '  ');
+  if (top.lines.length) L.push(...top.lines, '');
   (flags.newest ? newestOrder(query, hits) : hits).forEach((h, i) => {
     L.push(`  [${i + 1}] ${h.wing} / ${h.room}`);
     L.push(`      Source: ${base(h.source)}`);
@@ -423,7 +454,8 @@ export function formatSearchFull(query: string, flags: SearchFlags, hits: Search
       if (h.claim.key) L.push(`      Get:    memory get ${h.claim.key}`);
       // Step 3 fix R2: the card's current field values beside the pointer.
       const cardId = h.claim.key ? cardIdOfKey(h.claim.key) : null;
-      if (cardId && leads[cardId]?.length) L.push(`      Card:   ${cardId} now: ${leads[cardId].join(' · ')}`);
+      // S1: the brief as label-first lines under the id (BRIEF_LINES_MAX of them); not again for a card shown above.
+      if (cardId && leads[cardId]?.length && !top.shown.has(cardId)) L.push(`      Card:   ${cardId}`, ...leads[cardId].slice(0, BRIEF_LINES_MAX).map((l) => `              ${l}`));
       if (prior) L.push(`      Version: prior (dated ${date}); search for the key to see its current value.`);
       if (maybePrior) L.push(`      Version: possibly replaced (unconfirmed, dated ${date}); search for the key to see its current value.`);
     }

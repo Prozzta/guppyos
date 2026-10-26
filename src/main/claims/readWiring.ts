@@ -13,7 +13,8 @@ import { derive as deriveClaims } from './derive';
 import { renderClaimHistory } from './views';
 import { reconcileQueueForHive } from './reconcile';
 import { DEFAULT_KEY_REGISTRY, loadRegistry } from './registry';
-import { formatGet, leadBrief, resolveGet, resolveGetMany, type GetDeps } from './get';
+import { formatGet, leadBrief, resolveGet, resolveGetMany, type CardLeadAsk, type CardLeadReply, type GetDeps } from './get';
+import { targetIndex, targetsIn } from './searchTargets';
 import type { LedgerRec } from '../../shared/claims';
 
 export interface ClaimReadDeps {
@@ -51,13 +52,25 @@ export function claimGetOver(d: ClaimReadDeps, args: ClaimGetArgs): { text: stri
 
 /** Step 3 fix R2 (god bbcb4a): the card briefs a search's hits carry (`field: value` items per card id, the fields
  *  with a value and the decision count), over the same ledgers, registry, tasks and mail index as `memory get`. */
-export function claimCardLeadOver(d: ClaimReadDeps, cards: string[]): Record<string, string[]> {
-  const ids = cards.filter((c) => /^[a-z0-9][a-z0-9._-]{0,119}$/i.test(c));
-  if (!ids.length) return {};
-  const out: Record<string, string[]> = {};
-  resolveGetMany(ids, { mail: 0 }, getDeps(d)).forEach((r, i) => { const b = leadBrief(r); if (b.length) out[ids[i].toLowerCase()] = b; });
-  return out;
+export function claimCardLeadOver(d: ClaimReadDeps, ask: CardLeadAsk | string[]): CardLeadReply {
+  const a: CardLeadAsk = Array.isArray(ask) ? { cards: ask, texts: [] } : ask;
+  const ok = (c: string): boolean => /^[a-z0-9][a-z0-9._-]{0,119}$/i.test(c);
+  const cards = a.cards.filter(ok).map((c) => c.toLowerCase());
+  const texts = a.texts.filter((t) => typeof t === 'string');
+  if (!cards.length && !texts.length) return { briefs: {}, named: [] };
+  const deps = getDeps(d);
+  // S3 / S4: the cards (by id, card.<id> key or owned branch) and releases (by version) the query or a hit names,
+  // the query's first; their briefs print above the hits.
+  const keys = new Set<string>();
+  for (const recs of Object.values(deps.ledgers)) for (const r of recs as Array<{ t?: string; key?: unknown }>) if (r.t === 'claim' && typeof r.key === 'string') keys.add(r.key);
+  const named = texts.length ? [...new Set(targetsIn(texts, targetIndex((deps.tasks ?? []).map((t) => String(t.id ?? '')).filter(Boolean), keys), LEADS_MAX).map((t) => t.term.toLowerCase()).filter(ok))] : [];
+  const ids = [...new Set([...named, ...cards])].slice(0, LEADS_MAX * 2);
+  const briefs: Record<string, string[]> = {};
+  resolveGetMany(ids, { mail: 0 }, deps).forEach((r, i) => { const b = leadBrief(r, texts[0] ?? ''); if (b.length) briefs[ids[i]] = b; });
+  return { briefs, named: named.filter((n) => briefs[n]) };
 }
+/** At most this many named terms per search (the engine's CARD_LEADS_MAX). */
+const LEADS_MAX = 12;
 
 /** The read-only inputs of one `get` (or one batch of briefs): every agent's VERIFIED prefix, the registry, the
  *  reconcile queue's alias pairs, tasks.json and the per-card mail index. */

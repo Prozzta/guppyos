@@ -307,10 +307,34 @@ test('R4 merge class (god 4268df): one `merge:` lead line per live merge claim, 
   const mergeLines = (t) => t.split('\n').filter((l) => l.startsWith('merge: '));
   assert.deepEqual(mergeLines(text('FOO-7', {}, d)), [`merge: ${T2} into int-1.1.103`, `merge: ${T1} into int-1.1.102`], 'MUTANT: oldest first, one line only, or the target clipped');
   assert.deepEqual(get('FOO-7', {}, d).lead.filter((l) => l.field === 'merge').map((l) => l.id), ['c-ggggggggggg4', 'c-ggggggggggg3']);
+  // god 234b13: an rc merge lives under its own key (card.<id>.merge.rc): it never replaces the INT merge; the lead prints INT first, then rc.
+  const T3 = '3'.repeat(40);
+  const rc = deps({ ledgers: { ...f.ledgers, derived: [...f.ledgers.derived, m1, m2, c('c-ggggggggggg6', 'derived', 'card.foo-7.merge.rc', '2026-10-25T10:00:00.000Z', `Card FOO-7: branch guppy/foo-7 merged into rc-1.1.104 at ${T3}`, { value: `${T3} into rc-1.1.104` })] } });
+  assert.deepEqual(mergeLines(text('FOO-7', {}, rc)), [`merge: ${T2} into int-1.1.103`, `merge: ${T1} into int-1.1.102`, `merge: ${T3} into rc-1.1.104`], 'MUTANT: the newer rc merge above or instead of the INT merges');
+  assert.deepEqual(get('FOO-7', {}, rc).lead.filter((l) => l.field === 'merge').map((l) => l.key), ['card.foo-7.merge', 'card.foo-7.merge', 'card.foo-7.merge.rc']);
+  assert.deepEqual(G.leadBrief(get('FOO-7', {}, rc)).filter((b) => b.startsWith('merge: ')), [`merge: ${T2} into int-1.1.103`, `merge: ${T1} into int-1.1.102`, `merge: ${T3} into rc-1.1.104`], 'the brief carries both kinds');
+  assert.equal(G.cardIdOfKey('card.foo-7.merge.rc'), 'foo-7');
+  assert.deepEqual(G.CARD_FIELDS.slice(5, 8), ['merge', 'merge.rc', 'audit']);
+  assert.ok(!text('FOO-7', {}, d).includes('merge.rc'), 'no rc merge: no rc line and no `merge.rc` label');
+  const mk = get('card.foo-7.merge', {}, rc);
+  assert.equal(mk.current.claimId, 'c-ggggggggggg4', 'MUTANT: the newer rc merge read as the current of the INT merge key');
+  assert.deepEqual(mk.keys, ['card.foo-7.merge']); assert.deepEqual(mk.competing.map((x) => x.claimId), ['c-ggggggggggg3'], 'the older INT merge competes (R4); the rc merge never does');
+  assert.equal(get('card.foo-7.merge.rc', {}, rc).current.claimId, 'c-ggggggggggg6');
+  assert.equal(get('guppy/foo-7', {}, rc).current.claimId, 'c-ggggggggggg4', 'ruling 3: the branch term resolves to the INT merge sub-key');
+  assert.deepEqual(mergeLines(text('guppy/foo-7', {}, rc)), [`merge: ${T2} into int-1.1.103`, `merge: ${T1} into int-1.1.102`, `merge: ${T3} into rc-1.1.104`], 'the branch reply leads with both kinds, INT first');
+  // A branch no card owns: branch.<b> (INT) and branch.<b>.rc stay apart; the current is the INT merge, the reply leads with both.
+  const ob = deps({ ledgers: { ...f.ledgers, derived: [...f.ledgers.derived,
+    c('c-ggggggggggg7', 'derived', 'branch.hotfix-2', '2026-10-20T10:00:00.000Z', `Branch guppy/hotfix-2 merged into int-1.1.103 at ${T1}`, { value: `${T1} into int-1.1.103` }),
+    c('c-ggggggggggg8', 'derived', 'branch.hotfix-2.rc', '2026-10-25T10:00:00.000Z', `Branch guppy/hotfix-2 merged into rc-1.1.104 at ${T3}`, { value: `${T3} into rc-1.1.104` })] } });
+  const o = get('guppy/hotfix-2', {}, ob);
+  assert.deepEqual(o.keys, ['branch.hotfix-2']); assert.equal(o.current.claimId, 'c-ggggggggggg7', 'MUTANT: the newer rc merge became the branch current'); assert.deepEqual(o.competing, []);
+  assert.deepEqual(mergeLines(text('guppy/hotfix-2', {}, ob)), [`merge: ${T1} into int-1.1.103`, `merge: ${T3} into rc-1.1.104`], 'MUTANT: rc first, or the rc merge missing from the branch reply');
+  assert.equal(get('branch.hotfix-2.rc', {}, ob).current.claimId, 'c-ggggggggggg8');
+  assert.equal(get('guppy/hotfix-2', {}, deps({ ledgers: { ...f.ledgers, derived: [...f.ledgers.derived, c('c-ggggggggggg7', 'derived', 'branch.hotfix-2', '2026-10-20T10:00:00.000Z', 'x', { value: `${T1} into int-1.1.103` })] } })).lead, null, 'no rc merge: the plain branch reply has no lead');
   const bare = deps({ ledgers: { ...f.ledgers, derived: [...f.ledgers.derived, c('c-ggggggggggg5', 'derived', 'card.foo-7.merge', '2026-10-24T10:00:00.000Z', `Card FOO-7: merged at ${T2}`, { value: T2 })] } });
   assert.deepEqual(mergeLines(text('FOO-7', {}, bare)), [`merge: ${T2} into ? (not structured yet)`], 'MUTANT: a tip with no target prints as a whole merge');
   assert.ok(G.leadBrief(get('FOO-7', {}, bare)).includes(`merge: ${T2} into ? (not structured yet)`), 'the brief flags it the same way');
-  assert.ok(G.leadBrief(get('FOO-7', {}, d)).includes(`merge: ${T2} into int-1.1.103`) && !G.leadBrief(get('FOO-7', {}, d)).includes(`merge: ${T1} into int-1.1.102`), 'the brief: the newest merge only');
+  assert.deepEqual(G.leadBrief(get('FOO-7', {}, d)).filter((b) => b.startsWith('merge: ')), [`merge: ${T2} into int-1.1.103`, `merge: ${T1} into int-1.1.102`], 'S2 (god 7a4eec): the brief carries every merge, newest first');
 });
 
 test('ruling 3 (god 690425, Creed bc11fc): a branch name (guppy/<b>, origin/guppy/<b>, any case) resolves to card.<b>.merge when <b> is a card and a merge claim exists, else to card.<b>, else to branch.<b> when claimed; the merge sub-key never becomes the bare card current (MUTANT: branch not resolved / merge claim is the bare current)', () => {

@@ -45,6 +45,7 @@ const TESTS = ['test/claims90-m1-compact.test.cjs', 'test/native-memory.test.cjs
  *  suite under one mutant: `CENSUS_TESTS=test/x.test.cjs node test/tools/claims90-m1-mutants.cjs AG`). */
 const SUITES = process.env.CENSUS_TESTS ? process.env.CENSUS_TESTS.split(/[\s,]+/).filter(Boolean) : TESTS;
 const GET = 'src/main/claims/get.ts';
+const RW = 'src/main/claims/readWiring.ts';
 const HOOKS = 'src/main/hooks.ts';
 const FORMAT = 'src/main/nativeMemory/format.ts';
 const WIRING = 'src/main/nativeMemory/mainWiring.ts';
@@ -137,7 +138,21 @@ const MUTANTS = [
   ['AD exact: file lines compared raw', ENGINE, 'if (!stripMarkup(lines[i].toLowerCase()).includes(needle)) continue;', 'if (!lines[i].toLowerCase().includes(needle)) continue;'],
   ['AE ruling 3: a branch name never resolves to its card', GET, '    if (taskIds.has(name) || hasKey(cardK)) base = ix.byKey.has(mergeK) ? mergeK : cardK;', '    if (false) base = cardK;'],
   ['AF ruling 3: the merge sub-key is not a field (bare card takes it)', GET, 'fixversion|merge|decision', 'fixversion|decision'],
+  ['S1a brief format: label-first lines under the id header, never the one-line `<id> now:` join', FORMAT, "const briefLines = (cardId: string, items: string[]): string[] => [cardId, ...items.map((i) => clip(`  ${i}`, CONTENT_WIDTH))];", "const briefLines = (cardId: string, items: string[]): string[] => wrap(`${cardId} now: ${items.join(' · ')}`, CONTENT_WIDTH);"],
+  ['S1b brief parity: the brief line is get\'s own lead line (label with its agent), not a bare field: value', GET, '  const out = rows.map(({ l }) => leadLine(l));', '  const out = rows.map(({ l }) => `${l.field}: ${leadValue(renderValue(l), LEAD_VALUE_MAX)}`);'],
+  ['S2a brief order: the lines the query names come first', GET, '  rows.sort((x, y) => x.n - y.n || x.i - y.i);', '  rows.sort((x, y) => x.i - y.i);'],
+  ['S2b brief fields: every per-agent donesha line, not the latest alone', GET, '  const rows = r.lead.filter((l) => l.value !== null).map(', '  const rows = r.lead.filter((l) => l.value !== null && (!l.by || l.latest)).map('],
+  ['S3a named block: the named briefs print above the hits (compact)', FORMAT, "  const top = namedBlock(flags.namedCards ?? [], leads, '');", "  const top = namedBlock([], leads, '');"],
+  ['S3b named block: a card shown at the top carries no second brief under its hit', FORMAT, '  const shownCards = new Set<string>(top.shown);', '  const shownCards = new Set<string>();'],
+  ['S3c engine: the named terms of the reply reach the renderer', ENGINE, "    return { briefs, named: Array.isArray(r.named) ? r.named.filter((n): n is string => typeof n === 'string') : [] };", '    return { briefs, named: [] };'],
+  ['S4a engine: the hit texts go to main with the query', ENGINE, '  const texts = [query, ...hits.slice(0, CARD_LEADS_MAX).map((h) => String(h.content ?? \'\').slice(0, LEAD_TEXT_MAX))];', '  const texts = [query];'],
+  ['S4b wiring: the terms a text names are resolved and come back named', RW, '  return { briefs, named: named.filter((n) => briefs[n]) };', '  return { briefs, named: [] };'],
+  ['S4c wiring: the hit texts are scanned for card and release names, not the query alone', RW, '  const named = texts.length ? [...new Set(targetsIn(texts, ', '  const named = texts.length ? [...new Set(targetsIn(texts.slice(0, 1), '],
   ['AG R4 merge: a merge value without its INT target is flagged, never printed as a bare tip', GET, " ? `${l.value} into ? (not structured yet)` : ", " ? `${l.value}` : "],
+  ['AI rc merge (god 234b13): the INT merge lines print before the rc lines; the rc key is its own field', GET, "'merge', 'merge.rc', 'audit'] as const;", "'merge.rc', 'merge', 'audit'] as const;"],
+  ['AJ rc merge (god 234b13): an rc merge is never read from the INT key (no fold of the two keys)', GET, "  if (!rows.length) return field === 'merge.rc' ? [] : [", "  if (!rows.length || field === 'merge.rc') return field === 'merge.rc' ? [] : ["],
+  ['AK rc merge (god 234b13): the INT merge key takes no deeper key, so an rc merge is never its current', GET, '  for (const k of [...keySet]) if (isCardKey(k) && !FIELD_SUFFIX.test(k)) for (const other', '  for (const k of [...keySet]) if (isCardKey(k)) for (const other'],
+  ['AL rc merge (god 234b13): a branch no card owns leads with its INT and rc merges, INT first', GET, "lead = [...multiLines(ix, base, 'merge', sub, d, undefined), ...multiLines(ix, `${base}.rc`, 'merge.rc', sub, d, undefined)];", "lead = [...multiLines(ix, `${base}.rc`, 'merge.rc', sub, d, undefined), ...multiLines(ix, base, 'merge', sub, d, undefined)];"],
   ['AH R4 merge: one line per live merge claim, newest first', GET, '  rows.sort((x, y) => y.ms - x.ms || cmp(x.c.id, y.c.id));', '  rows.sort((x, y) => x.ms - y.ms || cmp(x.c.id, y.c.id));'],
   ['W T5: equal-time mails have no link-strength tiebreak', GET, '.sort((a, b) => b.ms - a.ms || linkRank(b.m.cardFrom) - linkRank(a.m.cardFrom));', '.sort((a, b) => b.ms - a.ms);'],
 ];
