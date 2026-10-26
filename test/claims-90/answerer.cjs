@@ -26,6 +26,7 @@
  * and run.json. Item text and answers stay local; mails carry counts and shas only.
  */
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
@@ -333,6 +334,55 @@ function unavailableOf(memCalls, transcriptCalls) {
   };
 }
 
+/**
+ * god 3164a1 (R5): the claude -p child keeps the CLI login and its default config dir, so Claude Code
+ * makes a project folder for each session under ~/.claude/projects, named after the session cwd (each
+ * character other than a letter or digit becomes '-'). It holds snapshot content (tool-results spills),
+ * so after each session the runner copies it into the run dir, checks the bytes, and deletes it: that
+ * exact folder only, never one holding a link. A folder still matching the answerer prefixes after that
+ * is a leftover: the item is INVALID and the run stops.
+ */
+const LEFTOVER_PREFIX = 'C--Dunder--work-claims-90-answerer-';
+const projectSlug = (cwd) => path.resolve(cwd).replace(/[^A-Za-z0-9]/g, '-');
+const claudeProjectsDir = (env = process.env) => path.join(env.CLAUDE_CONFIG_DIR?.trim() || path.join(os.homedir(), '.claude'), 'projects');
+const leftoverPrefixes = (outDir) => [LEFTOVER_PREFIX, `${projectSlug(outDir)}-`];
+
+function filesUnder(dir) {
+  const out = [];
+  const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else out.push(path.relative(dir, p)); } };
+  walk(dir);
+  return out.sort();
+}
+
+function sessionFolderOut(projects, cwd, dest) {
+  const folder = projectSlug(cwd);
+  const src = path.join(projects, folder);
+  if (!fs.existsSync(src)) return { folder, created: false, files: 0, removed: false, problem: null };
+  if (fs.lstatSync(src).isSymbolicLink() || R.linksUnder(src).length) return { folder, created: true, files: 0, removed: false, problem: 'the session folder holds a link' };
+  const to = path.join(dest, folder);
+  fs.cpSync(src, to, { recursive: true });
+  const files = filesUnder(src);
+  const unequal = files.filter((f) => !fs.existsSync(path.join(to, f)) || !fs.readFileSync(path.join(src, f)).equals(fs.readFileSync(path.join(to, f))));
+  if (unequal.length) return { folder, created: true, files: files.length, removed: false, problem: `${unequal.length} copied file(s) differ` };
+  fs.rmSync(src, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  return { folder, created: true, files: files.length, removed: !fs.existsSync(src), problem: fs.existsSync(src) ? 'the session folder could not be deleted' : null };
+}
+
+function leftoversIn(projects, prefixes) {
+  let names = [];
+  try { names = fs.readdirSync(projects); } catch { return []; }
+  return names.filter((n) => prefixes.some((p) => n.startsWith(p))).sort();
+}
+
+/** The item's (or the preflight's) session folder out of ~/.claude/projects, then the leftover check. */
+function sessionGuard(home, dest, outDir) {
+  const projects = claudeProjectsDir();
+  let session;
+  try { session = sessionFolderOut(projects, path.join(home, 'cwd'), dest); } catch (e) { session = { folder: projectSlug(path.join(home, 'cwd')), created: null, files: 0, removed: false, problem: String(e.message || e).slice(0, 200) }; }
+  const leftovers = leftoversIn(projects, leftoverPrefixes(outDir));
+  return { session, leftovers, problem: session.problem ?? (leftovers.length ? `${leftovers.length} answerer folder(s) left in ~/.claude/projects (${leftovers[0]})` : null) };
+}
+
 function runOnce(exe, args, env) {
   return new Promise((resolve) => {
     const p = spawn(exe, args, { env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -353,8 +403,9 @@ async function preflight(o, v, addDir, key, asker, outDir) {
   const dir = path.join(outDir, 'preflight');
   fs.mkdirSync(dir, { recursive: true });
   const home = fs.mkdtempSync(path.join(outDir, 'sandbox-'));
-  for (const d of ['tmp', path.join('AppData', 'Local')]) fs.mkdirSync(path.join(home, d), { recursive: true });
+  for (const d of ['tmp', path.join('AppData', 'Local'), 'cwd']) fs.mkdirSync(path.join(home, d), { recursive: true });
   const calls = [];
+  let probe = null;
   try {
     const { hive, userData } = R.stageSandbox(path.resolve(o.snapshot), v.manifest, home);
     const world = path.join(home, 'world.json');
@@ -384,8 +435,14 @@ async function preflight(o, v, addDir, key, asker, outDir) {
       fs.writeFileSync(serve.stopFile, '');
       await serverClosed;
     }
+    // god 3164a1: one tiny claude -p from a sandbox cwd proves the session folder is the one the guard
+    // names (it must appear) and that the guard moves it out (none may remain).
+    probe = await claudeProbe(o, home);
+    const guard = sessionGuard(home, path.join(dir, 'session'), outDir);
+    probe = { exit: probe.code, costUsd: probe.costUsd, ...guard, problem: probe.code !== 0 ? `claude -p exit ${probe.code}` : !guard.session.created ? `no session folder ${guard.session.folder} in ~/.claude/projects` : guard.problem };
     const bad = calls.filter((c) => c.problem);
-    return bad.length ? { ok: false, reason: bad.map((c) => `${c.cmd}: ${c.problem}`).join('; '), calls } : { ok: true, calls };
+    if (probe.problem) bad.push({ cmd: 'claude -p', problem: probe.problem });
+    return bad.length ? { ok: false, reason: bad.map((c) => `${c.cmd}: ${c.problem}`).join('; '), calls, probe } : { ok: true, calls, probe };
   } finally {
     if (!o.keep) {
       const inner = R.linksUnder(home);
@@ -393,6 +450,18 @@ async function preflight(o, v, addDir, key, asker, outDir) {
       else fs.rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
     }
   }
+}
+
+function claudeProbe(o, home) {
+  return new Promise((resolve) => {
+    const args = ['-p', '--model', o.model, '--output-format', 'json', '--setting-sources', 'project,local', '--strict-mcp-config', '--disable-slash-commands', '--no-session-persistence', '--tools', 'Read', '--permission-mode', 'default'];
+    const p = spawn(o.claude, args, { cwd: path.join(home, 'cwd'), env: childEnv(path.join(home, 'bin'), {}), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    let stdout = '';
+    p.stdout.setEncoding('utf8').on('data', (d) => { stdout += d; });
+    p.stderr.resume();
+    p.stdin.end('Reply with the single word ok.');
+    p.on('close', (code) => { let costUsd = null; try { costUsd = JSON.parse(stdout).total_cost_usd ?? null; } catch { /* not json */ } resolve({ code, costUsd }); });
+  });
 }
 
 async function answerItem(o, v, addDir, item, key, shape, instruction, outDir) {
@@ -486,6 +555,10 @@ async function answerItem(o, v, addDir, item, key, shape, instruction, outDir) {
     row.indexAfterSha256 = fs.existsSync(idx) ? sha256(fs.readFileSync(idx)) : null;
     return row;
   } finally {
+    const guard = sessionGuard(home, path.join(itemDir, 'session'), outDir);
+    row.session = guard.session;
+    row.leftovers = guard.leftovers;
+    if (guard.problem) row.invalid = `session folder: ${guard.problem}`;
     if (!o.keep) {
       const inner = R.linksUnder(home);
       if (inner.length) console.error(`[claims-90] kept the sandbox: it holds a link (${inner[0]})`);
@@ -542,6 +615,8 @@ async function main(argv) {
     rows.push(row);
     fs.appendFileSync(answersFile, `${JSON.stringify(row)}\n`);
     console.error(`[claims-90] ${item.id}: ${row.invalid ? `INVALID ${row.invalid}` : 'ok'} calls ${row.calls?.length ?? 0}`);
+    // god 3164a1: a session folder left in ~/.claude/projects stops the run.
+    if (row.session?.problem || row.leftovers?.length) throw new Error(`stopped at ${item.id}: ${row.invalid}`);
   }
   const run = {
     card: 'CLAIMS-90', mode: 'answerer', startedAt: t0, finishedAt: new Date().toISOString(),
@@ -581,4 +656,4 @@ if (require.main === module) {
   }, (e) => { console.error(`[claims-90] ${e.stack || e.message}`); process.exitCode = 2; });
 }
 
-module.exports = { preflightProblem, unavailableOf, parseArgs, parseItems, installedHookShape, hookShapeOf, buildHookShape, buildInfo, buildMemoryShim, condenseOf, settingsFor, childEnv, readTranscript, styleDeviation, itemStyle, memoryMdUse, main };
+module.exports = { projectSlug, claudeProjectsDir, leftoverPrefixes, sessionFolderOut, leftoversIn, LEFTOVER_PREFIX, preflightProblem, unavailableOf, parseArgs, parseItems, installedHookShape, hookShapeOf, buildHookShape, buildInfo, buildMemoryShim, condenseOf, settingsFor, childEnv, readTranscript, styleDeviation, itemStyle, memoryMdUse, main };

@@ -177,6 +177,50 @@ test('claims: () => null (the step 3 runs) answers get and history "unsupported 
   assert.deepEqual(A.unavailableOf([{ unavailable: false }], [{ result: { text: 'card.c90-fix current' } }]), { serve: 0, transcript: 0 });
 });
 
+test('god 3164a1 R5: the session folder name is the cwd with every non-alphanumeric a dash (as the step3-r2 folders)', () => {
+  assert.equal(A.projectSlug('C:\\Dunder\\_work\\claims-90\\answerer\\step3-r2\\off-1\\sandbox-Zd6MLo\\cwd'), 'C--Dunder--work-claims-90-answerer-step3-r2-off-1-sandbox-Zd6MLo-cwd');
+  assert.equal(A.claudeProjectsDir({}), path.join(JAIL, '.claude', 'projects'), 'the default config dir (the CLI login), here the jailed home');
+  assert.equal(A.claudeProjectsDir({ CLAUDE_CONFIG_DIR: 'C:/cfg' }), path.join('C:/cfg', 'projects'));
+  assert.ok(A.leftoverPrefixes(path.join(JAIL, 'out')).includes(A.LEFTOVER_PREFIX));
+});
+
+test('god 3164a1 R5: the item session folder is copied byte-equal into the run dir, then deleted; nothing else is touched', () => {
+  const projects = path.join(JAIL, 'r5', 'projects');
+  const out = path.join(JAIL, 'r5', 'run');
+  const cwd = path.join(out, 'sandbox-AAA', 'cwd');
+  const other = path.join(out, 'sandbox-BBB', 'cwd');
+  const mine = path.join(projects, A.projectSlug(cwd));
+  fs.mkdirSync(path.join(mine, 's1', 'tool-results'), { recursive: true });
+  fs.writeFileSync(path.join(mine, 's1', 'tool-results', 'b1.txt'), 'spilled get reply');
+  fs.mkdirSync(path.join(projects, 'C--Somebody-else'), { recursive: true });
+  const dest = path.join(out, 'items', 'DV1', 'session');
+  const r = A.sessionFolderOut(projects, cwd, dest);
+  assert.deepEqual(r, { folder: A.projectSlug(cwd), created: true, files: 1, removed: true, problem: null });
+  assert.equal(fs.existsSync(mine), false, 'deleted from projects');
+  assert.equal(fs.readFileSync(path.join(dest, A.projectSlug(cwd), 's1', 'tool-results', 'b1.txt'), 'utf8'), 'spilled get reply');
+  assert.ok(fs.existsSync(path.join(projects, 'C--Somebody-else')), 'another folder is untouched');
+  assert.deepEqual(A.sessionFolderOut(projects, other, dest), { folder: A.projectSlug(other), created: false, files: 0, removed: false, problem: null });
+  // A leftover of this run (or any answerer folder) is found; other folders are not.
+  fs.mkdirSync(path.join(projects, A.projectSlug(other)), { recursive: true });
+  fs.mkdirSync(path.join(projects, `${A.LEFTOVER_PREFIX}step3-on-1-sandbox-X-cwd`), { recursive: true });
+  assert.deepEqual(A.leftoversIn(projects, A.leftoverPrefixes(out)), [`${A.LEFTOVER_PREFIX}step3-on-1-sandbox-X-cwd`, A.projectSlug(other)].sort());
+  assert.deepEqual(A.leftoversIn(path.join(JAIL, 'r5', 'none'), A.leftoverPrefixes(out)), []);
+});
+
+test('god 3164a1 R5: a session folder holding a link is never copied or deleted', () => {
+  const projects = path.join(JAIL, 'r5l', 'projects');
+  const cwd = path.join(JAIL, 'r5l', 'run', 'sandbox-L', 'cwd');
+  const mine = path.join(projects, A.projectSlug(cwd));
+  const target = path.join(JAIL, 'r5l', 'target');
+  fs.mkdirSync(mine, { recursive: true }); fs.mkdirSync(target, { recursive: true });
+  fs.writeFileSync(path.join(target, 'keep.txt'), 'x');
+  fs.symlinkSync(target, path.join(mine, 'link'), 'junction');
+  const r = A.sessionFolderOut(projects, cwd, path.join(JAIL, 'r5l', 'dest'));
+  assert.equal(r.problem, 'the session folder holds a link');
+  assert.ok(fs.existsSync(path.join(target, 'keep.txt')) && fs.existsSync(mine), 'nothing deleted');
+  fs.unlinkSync(path.join(mine, 'link'));
+});
+
 test('static: the run guard is in the INVALID chain, the preflight gates the spend, the child serves claimsDeps', () => {
   const src = (f) => fs.readFileSync(path.join(__dirname, 'claims-90', f), 'utf8');
   assert.match(src('answerer.cjs'), /else if \(row\.unavailable\.serve \|\| row\.unavailable\.transcript\) row\.invalid = /);
@@ -187,4 +231,10 @@ test('static: the run guard is in the INVALID chain, the preflight gates the spe
   assert.match(src('answer-child.cjs'), /\n\s+taskStatus: taskStatusFor\(hiveTasks\.allTasks\),\r?\n/);
   assert.match(src('answer-child.cjs'), /\n\s+tasks: hiveTasks\.allTasks,\r?\n/);
   assert.doesNotMatch(src('answer-child.cjs'), /'tasks\.json'/);
+  // god 3164a1 R5: every item and the preflight's claude -p go through the session guard; a leftover stops the run.
+  assert.match(src('answerer.cjs'), /\n  \} finally \{\r?\n    const guard = sessionGuard\(home, path\.join\(itemDir, 'session'\), outDir\);\r?\n/);
+  assert.match(src('answerer.cjs'), /    if \(guard\.problem\) row\.invalid = /);
+  assert.match(src('answerer.cjs'), /    if \(row\.session\?\.problem \|\| row\.leftovers\?\.length\) throw new Error\(/);
+  assert.match(src('answerer.cjs'), /    probe = await claudeProbe\(o, home\);\r?\n    const guard = sessionGuard\(home, path\.join\(dir, 'session'\), outDir\);/);
+  assert.match(src('answerer.cjs'), /    if \(probe\.problem\) bad\.push\(/);
 });

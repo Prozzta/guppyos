@@ -30,6 +30,12 @@ const M = [
   ['P11 the preflight skips get', ANS, "[['wake-up'], ['search', p.key], ['get', p.key, '--agent', asker], ['history', p.claimId]]", "[['wake-up'], ['search', p.key], ['history', p.claimId]]", ['unit']],
   ['P12 the ledger taskStatus reads hot-only tasks', CHILD, '    taskStatus: taskStatusFor(hiveTasks.allTasks),', "    taskStatus: (id) => (JSON.parse(fs.readFileSync(path.join(hive, 'tasks.json'), 'utf8')).tasks ?? []).find((t) => t.id === id)?.status ?? null,", ['unit']],
   ['P13 the delivery tasks read hot-only tasks', CHILD, '    tasks: hiveTasks.allTasks,', "    tasks: () => JSON.parse(fs.readFileSync(path.join(hive, 'tasks.json'), 'utf8')).tasks ?? [],", ['unit']],
+  ['P15 the session folder is copied but not deleted', ANS, "  fs.rmSync(src, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });\n  return { folder, created: true,", "  return { folder, created: true,", ['unit']],
+  ['P16 the leftover check sees nothing', ANS, '  return names.filter((n) => prefixes.some((p) => n.startsWith(p))).sort();', '  return [];', ['unit']],
+  ['P17 a leftover does not mark the item', ANS, '    if (guard.problem) row.invalid = ', '    if (false) row.invalid = ', ['unit']],
+  ['P18 a leftover does not stop the run', ANS, '    if (row.session?.problem || row.leftovers?.length) throw new Error(', '    if (false) throw new Error(', ['unit']],
+  ['P19 the preflight ignores the claude -p probe', ANS, '    if (probe.problem) bad.push(', '    if (false) bad.push(', ['unit']],
+  ['P20 the session folder name drops the dashes', ANS, "const projectSlug = (cwd) => path.resolve(cwd).replace(/[^A-Za-z0-9]/g, '-');", "const projectSlug = (cwd) => path.resolve(cwd).replace(/[^A-Za-z0-9]+/g, '-');", ['unit', 'preflight']],
   ['P14 taskStatusFor misses the archive', DEPS, '  return (id) => (allTasks() ?? []).find((t) => t.id === id)?.status ?? null;', "  return (id) => (allTasks() ?? []).find((t) => t.id === id && t.status !== 'done')?.status ?? null;", ['unit']],
 ];
 
