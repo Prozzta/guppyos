@@ -55,6 +55,9 @@ const MUTANTS = [
   ['M2-e error lines repeat the block', CONDENSE, 'for (let i = keep + head; i < lines.length - tail; i += 1) {', 'for (let i = head; i < lines.length - tail; i += 1) {', M2],
   ['M2-f head lines repeat the block', CONDENSE, 'parts.push(...lines.slice(keep, keep + h).map(', 'parts.push(...lines.slice(0, h).map(', M2],
   ['M2-g any output gets a block', CONDENSE, '  if (h < 0) return 0;\n', '  if (h < 0) return Math.min(3, lines.length);\n', M2],
+  // n=310 (god 251eba / ad1b5d): briefs that leave no room for a hit still end a block.
+  ['M2-h no hit: no block', CONDENSE, 'return footer >= 0 ? footer : lines.length;', 'return 0;', M2],
+  ['M2-i the footer is not an end', CONDENSE, 'return footer >= 0 ? footer : lines.length;', 'return lines.length;', M2],
 ];
 
 const prefix = process.argv[2] || '';

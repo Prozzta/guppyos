@@ -57,11 +57,23 @@ test('with room for head lines, they start at the first hit: the block is never 
 test('any other output condenses as before: no block', () => {
   const plain = Array.from({ length: 300 }, (_, i) => `line ${i} ${i % 50 === 0 ? 'warning: x' : 'ok'}`).join('\n');
   assert.equal(C.searchBriefLines(plain.split('\n')), 0);
-  assert.equal(C.searchBriefLines(['  Results for: "q"', 'no hits here']), 0, 'no [1] hit, no block');
+  assert.equal(C.searchBriefLines(['  Results for: "q"', '  syn-7', '  … 3 more hits not shown (x)']), 2, 'no [1] hit: the block ends at the footer');
+  assert.equal(C.searchBriefLines(['  Results for: "q"', '  syn-7', '    a: b']), 3, 'no hit and no footer: the block runs to the end');
   assert.equal(C.searchBriefLines([...Array(25).fill('x'), '  Results for: "q"', '  [1] a / b']), 0, 'the header must be near the top');
   const out = condense(plain);
   assert.ok(out.length <= 1500);
   assert.match(out, /^\[condensed by Guppy[^\n]*\]\nline 0 warning: x\nline 1 ok\n/, 'head lines start at the top');
+});
+
+test('n=310: a compact reply whose briefs leave no room for a hit keeps both briefs whole', () => {
+  const long = (id) => Array.from({ length: 12 }, (_, k) => `field${k}: ${id} value ${'v'.repeat(48)}`);
+  const leads = { 'syn-7': long('syn-7'), 'int-9.1.2': long('int-9.1.2') };
+  const text = F.formatSearch('syn-7 rebase merged int-9.1.2', {}, Array.from({ length: 8 }, (_, i) => hit(i + 1)), leads, Object.keys(leads));
+  assert.ok(!/^\s*\[1\] /m.test(text), 'no hit printed (the n=310 shape)');
+  assert.ok(text.length > 1500, 'over the cap');
+  const out = condense(text);
+  const lines = out.split('\n');
+  for (const [id, items] of Object.entries(leads)) for (const b of items) assert.equal(lines.filter((l) => l.trim() === b).length, 1, `${id} brief line once: ${b}`);
 });
 
 test('the block is bounded: whole lines up to BRIEF_BLOCK_MAX_CHARS, the rest counted', () => {

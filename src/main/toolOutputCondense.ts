@@ -130,17 +130,22 @@ const clip = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n -
 export const BRIEF_BLOCK_MAX_CHARS = 4000;
 const SEARCH_HEADER_RE = /^\s*Results for: "/;
 const FIRST_HIT_RE = /^\s*\[1\] /;
+const HITS_FOOTER_RE = /^\s*… \d+ more hits? not shown/;
 
 /**
- * CLAIMS-90 L6 M2 (god 3dc16a): a `memory search` reply (its `Results for: "…"` header in the first 20 lines, a
- * `[1]` hit after it) keeps every line above the first hit, the header and the named briefs, whole and first,
+ * CLAIMS-90 L6 M2 (god 3dc16a): a `memory search` reply (its `Results for: "…"` header in the first 20 lines) keeps its block,
+ * the header and the named briefs, whole and first: every line above the first `[1]` hit, else above the
+ * `more hits not shown` footer (n=310: briefs filled the reply), else to the end. Bounded
  * within BRIEF_BLOCK_MAX_CHARS (whole lines; the rest is counted). 0 for any other output.
  */
 export function searchBriefLines(lines: readonly string[]): number {
   const h = lines.slice(0, 20).findIndex((l) => SEARCH_HEADER_RE.test(l));
   if (h < 0) return 0;
+  // n=310 (god 251eba): briefs can fill a compact reply so no hit prints; the block then ends at the footer, else the end.
   const first = lines.findIndex((l, i) => i > h && FIRST_HIT_RE.test(l));
-  return first < 0 ? 0 : first;
+  if (first >= 0) return first;
+  const footer = lines.findIndex((l, i) => i > h && HITS_FOOTER_RE.test(l));
+  return footer >= 0 ? footer : lines.length;
 }
 
 export interface CondenseArgs {
