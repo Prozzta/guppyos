@@ -16,17 +16,16 @@ const rows = execFileSync('git', ['log', '--merges', '--all', '--format=%H%x09%s
   .split('\n').filter(Boolean).map((l) => { const i = l.indexOf('\t'); return { commit: l.slice(0, i), subject: l.slice(i + 1).trim() }; });
 
 const form = (s) => {
-  const line = /^(?:int-|int\s+)?\d+(?:\.\d+)+:\s+merge\s/i.test(s);
+  const line = /^(?:rc\/|int-|int\s+)?\d+(?:\.\d+)+(?:\s+stage\s+\S+)?:\s+merge\s/i.test(s);
   const target = line ? s.split(':')[0] : (/\binto\s+(.*)$/i.exec(s)?.[1] ?? '');
   const t = target.replace(/^'/, '');
   const pre = `${/^origin\//i.test(t) ? 'origin/' : ''}${/^(?:origin\/)?guppy\//i.test(t) ? 'guppy/' : ''}`;
   const bare = t.replace(/^(?:origin\/)?(?:guppy\/)?/i, '');
-  const kind = /^int\/release-/i.test(bare) ? 'int/release-<v>' : /^int-/i.test(bare) ? 'int-<v>' : /^int\s/i.test(bare) ? 'INT <v>' : 'bare <v>';
+  const kind = /^rc\//i.test(bare) ? 'rc/<v> (stored rc-<v>)' : /^int\/release-/i.test(bare) ? 'int/release-<v>' : /^int-/i.test(bare) ? 'int-<v>' : /^int\s/i.test(bare) ? 'INT <v>' : 'bare <v>';
   return `${line ? '<target>: merge' : 'Merge … into'} ${pre}${kind}`;
 };
 const reason = (s) => {
   const into = /\binto\s+(.*)$/i.exec(s)?.[1];
-  if (/^rc\/\d/.test(s) || /^rc\//i.test(into ?? '')) return 'rc/<v>: a release-candidate line, not an INT line';
   if (!into) return /^merge\b/i.test(s) ? 'no target named (a plain git merge subject)' : 'not a merge subject (a free-text message on a merge commit)';
   const t = into.replace(/^'/, '');
   if (/^(?:local\s+)?main\b/i.test(t)) return 'main';
