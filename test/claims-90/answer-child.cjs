@@ -25,7 +25,7 @@ const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { createRequire } = require('node:module');
 const { memoryMdOf, memoryMdCommand } = require('./memory-md.cjs');
-const { hiveTasksFor, claimsDepsFor, UNAVAILABLE_RE } = require('./claims-deps.cjs');
+const { hiveTasksFor, taskStatusFor, claimsDepsFor, UNAVAILABLE_RE } = require('./claims-deps.cjs');
 
 const spec = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 const out = fs.openSync(spec.out, 'w');
@@ -121,7 +121,8 @@ function inProcessFork(runWorker, deps) {
   const config = JSON.parse(fs.readFileSync(path.join(ud, 'config.json'), 'utf8'));
   const logRows = [];
   const log = (row) => { if (logRows.length < 500) logRows.push(row); };
-  const tasks = () => { try { return JSON.parse(fs.readFileSync(path.join(hive, 'tasks.json'), 'utf8')).tasks ?? []; } catch { return []; } };
+  // Jim 0959e3 / 8dc581: every task read (get, the ledger's taskStatus, the delivery) is the app's HiveManager.allTasks().
+  const hiveTasks = hiveTasksFor(L, hive);
   const registry = () => { try { return loadRegistry(hive); } catch { return DEFAULT_KEY_REGISTRY; } };
   // index.ts claimLevel: the setting narrowed by memory-sources.json `ledger`.
   const claimLevel = (agentId) => effectiveLevel(config.claimLedger, readSourcesConfig(hive).ledger?.[agentId]).level;
@@ -145,7 +146,7 @@ function inProcessFork(runWorker, deps) {
     keyRecord: new FileLedgerKeyRecord(path.join(ud, KEY_RECORD_FILE)),
     headAnchor: new FileHeadAnchorStore(path.join(ud, HEAD_ANCHOR_FILE)),
     log,
-    taskStatus: (id) => tasks().find((t) => t.id === id)?.status ?? null,
+    taskStatus: taskStatusFor(hiveTasks.allTasks),
   });
   const endpoint = { root: hive, store, level: claimLevel };
   const ledgerAgents = () => {
@@ -174,7 +175,6 @@ function inProcessFork(runWorker, deps) {
     isOwner: (agentId) => claimLevel(agentId) === 'writer',
   });
   // Jim 4370f6 / god 8c87a7: get and history answer through main's own read wiring (claims-deps.cjs).
-  const hiveTasks = hiveTasksFor(L, hive);
   const claimsDeps = claimsDepsFor(L, { hive, store, agents: ledgerAgents, allTasks: hiveTasks.allTasks });
   const nativeMemory = new NativeMemoryWiring({
     hiveRoot: () => hive,
@@ -216,7 +216,7 @@ function inProcessFork(runWorker, deps) {
     // M3: the world view answers from the addendum's world.json, recorded once, never the live disk.
     git: frozenGit,
     fileExists: frozenFileExists,
-    tasks,
+    tasks: hiveTasks.allTasks,
     usage: (agentId) => { try { return fs.readFileSync(store.usageFile(agentId), 'utf8').split('\n').filter(Boolean).flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } }); } catch { return []; } },
     countTokens: () => {
       if (tokenCount) return tokenCount;

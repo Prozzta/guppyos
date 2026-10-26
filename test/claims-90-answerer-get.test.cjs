@@ -36,7 +36,7 @@ const { DEFAULT_KEY_REGISTRY, loadRegistry } = L('src/main/claims/registry.ts');
 const { formatGet, resolveGet } = L('src/main/claims/get.ts');
 const { HiveManager } = L('src/main/hive.ts');
 const { NativeMemoryWiring } = L('src/main/nativeMemory/mainWiring.ts');
-const { hiveTasksFor, claimsDepsFor, UNAVAILABLE_RE } = require('./claims-90/claims-deps.cjs');
+const { hiveTasksFor, taskStatusFor, claimsDepsFor, UNAVAILABLE_RE } = require('./claims-90/claims-deps.cjs');
 const A = require('./claims-90/answerer.cjs');
 
 let fixtures = 0;
@@ -136,6 +136,15 @@ test('Jim 0959e3: the child tasks are the app HiveManager.allTasks() (ids, statu
   }
 });
 
+test('Jim 8dc581: the child ledger taskStatus reads HiveManager.allTasks() (an archived card has its status)', async () => {
+  const f = await fixture();
+  const status = taskStatusFor(f.child.allTasks);
+  assert.equal(status('C90-FIX'), 'doing');
+  assert.equal(status('C90-OLD'), 'done', 'the archived card is found');
+  assert.equal(status('C90-NONE'), null);
+  assert.equal(f.app.tasks().tasks.some((t) => t.id === 'C90-OLD'), false, 'C90-OLD is in the archive only');
+});
+
 test('the child deps answer history as main did before the move; a write verb is refused at level reader', async () => {
   const f = await fixture();
   const w = wiring(f, () => depsOf(f));
@@ -174,4 +183,8 @@ test('static: the run guard is in the INVALID chain, the preflight gates the spe
   assert.match(src('answerer.cjs'), /if \(!pre\.ok\) throw new Error\(`preflight failed: /);
   assert.match(src('answerer.cjs'), /\[\['wake-up'\], \['search', p\.key\], \['get', p\.key, '--agent', asker\], \['history', p\.claimId\]\]/, 'every verb an agent is shown');
   assert.match(src('answer-child.cjs'), /\n\s+claims: \(\) => claimsDeps,\r?\n/);
+  // Jim 8dc581: the ledger's taskStatus and the delivery's tasks read the same allTasks; no hot-only reader is left.
+  assert.match(src('answer-child.cjs'), /\n\s+taskStatus: taskStatusFor\(hiveTasks\.allTasks\),\r?\n/);
+  assert.match(src('answer-child.cjs'), /\n\s+tasks: hiveTasks\.allTasks,\r?\n/);
+  assert.doesNotMatch(src('answer-child.cjs'), /'tasks\.json'/);
 });

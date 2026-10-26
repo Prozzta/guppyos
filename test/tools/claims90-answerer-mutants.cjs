@@ -28,6 +28,9 @@ const M = [
   ['P9 the run guard is out of the INVALID chain', ANS, '    else if (row.unavailable.serve || row.unavailable.transcript) row.invalid = ', '    else if (false) row.invalid = ', ['unit']],
   ['P10 a failed preflight does not stop the run', ANS, '  if (!pre.ok) throw new Error(`preflight failed: ', '  if (false) throw new Error(`preflight failed: ', ['unit']],
   ['P11 the preflight skips get', ANS, "[['wake-up'], ['search', p.key], ['get', p.key, '--agent', asker], ['history', p.claimId]]", "[['wake-up'], ['search', p.key], ['history', p.claimId]]", ['unit']],
+  ['P12 the ledger taskStatus reads hot-only tasks', CHILD, '    taskStatus: taskStatusFor(hiveTasks.allTasks),', "    taskStatus: (id) => (JSON.parse(fs.readFileSync(path.join(hive, 'tasks.json'), 'utf8')).tasks ?? []).find((t) => t.id === id)?.status ?? null,", ['unit']],
+  ['P13 the delivery tasks read hot-only tasks', CHILD, '    tasks: hiveTasks.allTasks,', "    tasks: () => JSON.parse(fs.readFileSync(path.join(hive, 'tasks.json'), 'utf8')).tasks ?? [],", ['unit']],
+  ['P14 taskStatusFor misses the archive', DEPS, '  return (id) => (allTasks() ?? []).find((t) => t.id === id)?.status ?? null;', "  return (id) => (allTasks() ?? []).find((t) => t.id === id && t.status !== 'done')?.status ?? null;", ['unit']],
 ];
 
 const preArgs = process.argv.slice(2);

@@ -5,6 +5,7 @@
  * calls, so the harness cannot drift from the shipped path. get's tasks are the app's own
  * HiveManager.allTasks() over the jailed hive (Jim 0959e3: tasks.json through the hive's reader, plus the
  * archive). The answerer never writes: level 'reader' refuses every write verb, as the app does for a reader.
+ * The ledger's taskStatus and the delivery's tasks read the same list (Jim 8dc581), as index.ts does.
  */
 const path = require('node:path');
 
@@ -14,6 +15,11 @@ function hiveTasksFor(L, hive) {
   const hm = new HiveManager(() => path.dirname(hive));
   if (path.resolve(hm.root() ?? '').toLowerCase() !== path.resolve(hive).toLowerCase()) throw new Error(`HiveManager roots ${hm.root()}, not ${hive}`);
   return { allTasks: () => hm.allTasks().tasks, dispose: () => hm.dispose() };
+}
+
+/** index.ts ClaimStore taskStatus: a card's status from hive.allTasks(), the archive included. */
+function taskStatusFor(allTasks) {
+  return (id) => (allTasks() ?? []).find((t) => t.id === id)?.status ?? null;
 }
 
 function claimsDepsFor(L, { hive, store, agents, allTasks }) {
@@ -30,4 +36,4 @@ function claimsDepsFor(L, { hive, store, agents, allTasks }) {
 /** Jim 4370f6 run guard: a reply saying the build does not answer a verb. */
 const UNAVAILABLE_RE = /unsupported command|not available in this build/;
 
-module.exports = { hiveTasksFor, claimsDepsFor, UNAVAILABLE_RE };
+module.exports = { hiveTasksFor, taskStatusFor, claimsDepsFor, UNAVAILABLE_RE };
