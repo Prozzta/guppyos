@@ -298,6 +298,21 @@ test('db7d4a + T5 (god fe1140): a mention-body mail is listed weak and never cur
   assert.equal(G.trustedLink('mention'), false, 'an unsplit legacy mention is weak until the index splits it');
 });
 
+test('R4 merge class (god 4268df): one `merge:` lead line per live merge claim, newest first, `<tip> into <target>` as stored; a value with no target says `into ? (not structured yet)`', () => {
+  const f = fixture();
+  const T1 = '1'.repeat(40); const T2 = '2'.repeat(40);
+  const m1 = c('c-ggggggggggg3', 'derived', 'card.foo-7.merge', '2026-10-20T10:00:00.000Z', `Card FOO-7: branch guppy/foo-7 merged into int-1.1.102 at ${T1}`, { value: `${T1} into int-1.1.102` });
+  const m2 = c('c-ggggggggggg4', 'derived', 'card.foo-7.merge', '2026-10-24T10:00:00.000Z', `Card FOO-7: branch guppy/foo-7 merged into int-1.1.103 at ${T2}`, { value: `${T2} into int-1.1.103` });
+  const d = deps({ ledgers: { ...f.ledgers, derived: [...f.ledgers.derived, m1, m2] } });
+  const mergeLines = (t) => t.split('\n').filter((l) => l.startsWith('merge: '));
+  assert.deepEqual(mergeLines(text('FOO-7', {}, d)), [`merge: ${T2} into int-1.1.103`, `merge: ${T1} into int-1.1.102`], 'MUTANT: oldest first, one line only, or the target clipped');
+  assert.deepEqual(get('FOO-7', {}, d).lead.filter((l) => l.field === 'merge').map((l) => l.id), ['c-ggggggggggg4', 'c-ggggggggggg3']);
+  const bare = deps({ ledgers: { ...f.ledgers, derived: [...f.ledgers.derived, c('c-ggggggggggg5', 'derived', 'card.foo-7.merge', '2026-10-24T10:00:00.000Z', `Card FOO-7: merged at ${T2}`, { value: T2 })] } });
+  assert.deepEqual(mergeLines(text('FOO-7', {}, bare)), [`merge: ${T2} into ? (not structured yet)`], 'MUTANT: a tip with no target prints as a whole merge');
+  assert.ok(G.leadBrief(get('FOO-7', {}, bare)).includes(`merge: ${T2} into ? (not structured yet)`), 'the brief flags it the same way');
+  assert.ok(G.leadBrief(get('FOO-7', {}, d)).includes(`merge: ${T2} into int-1.1.103`) && !G.leadBrief(get('FOO-7', {}, d)).includes(`merge: ${T1} into int-1.1.102`), 'the brief: the newest merge only');
+});
+
 test('ruling 3 (god 690425, Creed bc11fc): a branch name (guppy/<b>, origin/guppy/<b>, any case) resolves to card.<b>.merge when <b> is a card and a merge claim exists, else to card.<b>, else to branch.<b> when claimed; the merge sub-key never becomes the bare card current (MUTANT: branch not resolved / merge claim is the bare current)', () => {
   assert.equal(G.branchName('guppy/FOO-7'), 'foo-7'); assert.equal(G.branchName('origin/guppy/foo-7'), 'foo-7'); assert.equal(G.branchName('guppy/hotfix-1'), 'hotfix-1');
   assert.equal(G.branchName('foo-7'), null, 'no slash: a card id, not a branch'); assert.equal(G.branchName('guppy/a/b'), null, 'a nested name is no valid key');

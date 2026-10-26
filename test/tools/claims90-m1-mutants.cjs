@@ -40,9 +40,10 @@ const TESTS = ['test/claims90-m1-compact.test.cjs', 'test/native-memory.test.cjs
   // CLAIMS-90 R2 (C90-GET): the lookup, the search modes and the cross-path test.
   'test/claims90-get.test.cjs', 'test/claims90-search-modes.test.cjs', 'test/claims90-get-paths.test.cjs', 'test/hook-broker-p3.test.cjs',
   // CLAIMS-90 R2 step 2: the pointer footer, the rank fuzz and the T3 pool.
-  'test/claims90-step2-rank-pool.test.cjs',
-  // CLAIMS-90 step 3 fix L2-L5 / R4: the lead block prints structured values (merge: tip AND INT target).
-  'test/claims90-step3-lead.test.cjs'];
+  'test/claims90-step2-rank-pool.test.cjs'];
+/** CENSUS_TESTS=<files, comma or space separated> runs the census over those suites instead (a diagnosis of one
+ *  suite under one mutant: `CENSUS_TESTS=test/x.test.cjs node test/tools/claims90-m1-mutants.cjs AG`). */
+const SUITES = process.env.CENSUS_TESTS ? process.env.CENSUS_TESTS.split(/[\s,]+/).filter(Boolean) : TESTS;
 const GET = 'src/main/claims/get.ts';
 const HOOKS = 'src/main/hooks.ts';
 const FORMAT = 'src/main/nativeMemory/format.ts';
@@ -143,7 +144,7 @@ const MUTANTS = [
 
 const prefix = process.argv[2] || '';
 const selected = MUTANTS.filter(([name]) => name.startsWith(prefix));
-let killed = 0; let inert = 0;
+let killed = 0; let inert = 0; let timedOut = 0;
 for (const [name, file, from, to] of selected) {
   const abs = path.join(ROOT, file);
   const original = fs.readFileSync(abs, 'utf8');
@@ -159,14 +160,24 @@ for (const [name, file, from, to] of selected) {
   if (crlf) mutated = mutated.replace(/\n/g, '\r\n');
   try {
     mutateAny(file, abs, original, mutated);
-    const r = spawnSync(process.execPath, ['--test', ...TESTS], { cwd: ROOT, encoding: 'utf8', timeout: 300_000 });
-    const fails = (String(r.stdout).match(/^# fail (\d+)/m) || [])[1] ?? '?';
+    const t0 = Date.now();
+    const r = spawnSync(process.execPath, ['--test', ...SUITES], { cwd: ROOT, encoding: 'utf8', timeout: 300_000, maxBuffer: 64 * 1024 * 1024 });
+    const secs = Math.round((Date.now() - t0) / 1000);
+    const fails = (String(r.stdout).match(/^# fail (\d+)/m) || [])[1] ?? null;
+    // A run that never printed its summary (the 300 s timeout, a signal, a buffer overflow) proves nothing about
+    // the mutant: it is neither KILLED nor SURVIVED; the last file lines name where it stopped.
+    if (fails === null) {
+      timedOut++;
+      const tail = String(r.stdout).split('\n').filter((l) => /^(not )?ok \d+ - /.test(l)).slice(-3).join(' | ');
+      console.log(`NO-RESULT  ${name}  (${r.error?.code ?? r.signal ?? `exit ${r.status}`} after ${secs}s; last: ${tail || '-'})`);
+      continue;
+    }
     const dead = r.status !== 0;
     if (dead) killed++;
-    console.log(`${dead ? 'KILLED  ' : 'SURVIVED'}  ${name}  (failing tests: ${fails})`);
+    console.log(`${dead ? 'KILLED  ' : 'SURVIVED'}  ${name}  (failing tests: ${fails}, ${secs}s)`);
   } finally {
     restoreAny(file, abs, original);
   }
 }
-console.log(`\n${killed}/${selected.length} killed${inert ? `, ${inert} INERT` : ''}`);
+console.log(`\n${killed}/${selected.length} killed${inert ? `, ${inert} INERT` : ''}${timedOut ? `, ${timedOut} NO-RESULT` : ''}`);
 process.exit(killed === selected.length ? 0 : 1);
