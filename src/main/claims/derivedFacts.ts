@@ -357,28 +357,29 @@ export async function gitHistoryFacts(log: ReadonlyArray<{ commit: string; time:
  * A merge into an INT line, in both subject forms git history uses (god 0b71e3):
  * `Merge [branch |remote-tracking branch |commit ][guppy ]<ref> [words] into <target> [words]` and
  * `<target>[ stage <n>]: merge <ref> [words]`. The target is `int-<v>`, `int/release-<v>`, `INT <v>` or a
- * bare version, after an optional `origin/` and `guppy/`; every form is normalised to int-<v>. The tip is
+ * bare version, after an optional `origin/` and `guppy/`; every form is normalised to int-<v>. A merge into
+ * `rc/<v>` keeps its own target, rc-<v>, never int (god d77de8). The tip is
  * the sha right after the ref (`@<sha>`, `@ <sha>`, `(<sha>`, `<sha>`; in the line form the first `@<sha>`),
  * else the merge's second parent. `single` says the ref stands alone (no free words before the tip), so
- * it can name a branch. Other targets (main, feature, rc/, release-, integration/, v0.x and prose lines)
+ * it can name a branch. Other targets (main, feature, release-, integration/, v0.x, prose and versionless lines)
  * are not INT lines.
  */
-const MERGE_INT = String.raw`'?(?:origin\/)?(?:guppy\/)?(?:int-|int\/release-|int\s+)?(\d+(?:\.\d+)+)(?![0-9A-Za-z]|\.\d)`;
+const MERGE_INT = String.raw`'?(?:origin\/)?(?:guppy\/)?(rc\/)?(?:int-|int\/release-|int\s+)?(\d+(?:\.\d+)+)(?![0-9A-Za-z]|\.\d)`;
 const MERGE_RE = new RegExp(String.raw`^Merge\s+(?:(?:remote-tracking\s+)?branch\s+|commit\s+)?(?:guppy\s+)?'?([^\s']+)'?((?:\s+(?!into\s)\S+)*?)\s+into\s+${MERGE_INT}`, 'i');
-const MERGE_LINE_RE = /^(?:int-|int\s+)?(\d+(?:\.\d+)+)(?:\s+stage\s+\S+)?:\s+merge\s+'?([^\s']+)'?(.*)$/i;
+const MERGE_LINE_RE = /^(rc\/)?(?:int-|int\s+)?(\d+(?:\.\d+)+)(?:\s+stage\s+\S+)?:\s+merge\s+'?([^\s']+)'?(.*)$/i;
 const TIP_NEXT_RE = /^\s*(?:@\s?|\()?([0-9a-f]{7,40})(?![0-9A-Za-z])/i;
 const TIP_AT_RE = /@\s?([0-9a-f]{7,40})(?![0-9A-Za-z])/i;
 
-/** The ref, the tip sha when the subject names one, the INT target as int-<v>, and whether the ref stands alone; null when it is not a merge into an INT. */
+/** The ref, the tip sha when the subject names one, the target as int-<v> (or rc-<v>), and whether the ref stands alone; null when it is not a merge into an INT or rc line. */
 export function mergeSubject(subject: string): { ref: string; sha?: string; int: string; single: boolean } | null {
   const m = MERGE_RE.exec(subject);
   const l = m ? null : MERGE_LINE_RE.exec(subject);
   if (!m && !l) return null;
-  const [ref, rest, v] = m ? [m[1], m[2], m[3]] : [l![2], l![3], l![1]];
+  const [ref, rest, rc, v] = m ? [m[1], m[2], m[3], m[4]] : [l![3], l![4], l![1], l![2]];
   const next = TIP_NEXT_RE.exec(rest);
   const sha = (m ? next : TIP_AT_RE.exec(rest))?.[1];
   const sha1 = sha && /[0-9]/.test(sha) ? sha : undefined;
-  return { ref, ...(sha1 ? { sha: sha1 } : {}), int: `int-${v}`, single: !rest.trim() || (!!m && !!sha1) || /^\s*[@(]/.test(rest) };
+  return { ref, ...(sha1 ? { sha: sha1 } : {}), int: `${rc ? 'rc' : 'int'}-${v}`, single: !rest.trim() || (!!m && !!sha1) || /^\s*[@(]/.test(rest) };
 }
 
 /**

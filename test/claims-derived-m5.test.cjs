@@ -974,7 +974,9 @@ test('merge class (god 0b71e3): every INT target form git history uses, both sub
   assert.deepEqual(S('Merge guppy SYN-H @d4d4d4d into int-9.1.9'), { ref: 'SYN-H', sha: 'd4d4d4d', int: 'int-9.1.9', single: true });
   assert.deepEqual(S('Merge SYN-I step 3 a7a7a7a (pin) into INT 9.2.2 stage 17'), { ref: 'SYN-I', int: 'int-9.2.2', single: false }, 'free words: no sha taken, the tip is the second parent');
   assert.equal(S('Merge build leftovers username into 9.2.0').single, false);
-  for (const s of ['Merge release-9.1.1 @41120b14 into int: notes', 'Merge guppy/x into release-9.1.1', 'rc/9.1.1: merge x @abc1234', 'Merge x into the 9.1.1 line', 'Merge guppy/x into main', 'Merge a into b (folded into 9.1.1)']) assert.equal(S(s), null, s);
+  assert.deepEqual(S('rc/9.1.1: merge x @abc1234 (Jim PASS)'), { ref: 'x', sha: 'abc1234', int: 'rc-9.1.1', single: true }, 'rc keeps its own target (god d77de8)');
+  assert.equal(S('Merge guppy/x @a1b2c3d into rc/9.1.1').int, 'rc-9.1.1', 'never int');
+  for (const s of ['Merge release-9.1.1 @41120b14 into int: notes', 'Merge guppy/x into release-9.1.1', 'Merge x into the 9.1.1 line', 'Merge guppy/x into main', 'Merge a into b (folded into 9.1.1)']) assert.equal(S(s), null, s);
   const g = fakeGit({ commits: { a1b2c3d: H('a'), f1f2f3d: H('f') }, parents: {}, time: {} });
   const log = [
     { commit: H('1'), time: 100, message: 'Merge guppy/syn-a @a1b2c3d into int-9.1.2' },
@@ -984,11 +986,13 @@ test('merge class (god 0b71e3): every INT target form git history uses, both sub
     { commit: H('5'), time: 140, message: 'Merge build leftovers username into 9.2.0', parents: [H('x'), H('b')] },
     { commit: H('6'), time: 150, message: "Merge commit 'c3c3c3c' into guppy/int-9.2.1" },
     { commit: H('7'), time: 160, message: 'Merge SYN-I step 3 a7a7a7a (pin) into INT 9.2.2 stage 17', parents: [H('x'), H('9')] },
+    { commit: H('8'), time: 170, message: 'rc/9.0.7: merge rc-only @b9b9b9b (Jim PASS)' },
   ];
   const facts = await F.mergeFacts(log, ['SYN-A', 'SYN-D', 'SYN-F', 'SYN-I'], g);
   const by = Object.fromEntries(facts.map((f) => [f.key, f.value]));
   assert.deepEqual(by, {
     'branch.lone': 'e1e2e3d into int-9.1.6',
+    'branch.rc-only': 'b9b9b9b into rc-9.0.7',
     'card.syn-a.merge': `${H('a')} into int-9.1.2`,
     'card.syn-d.merge': `${H('d')} into int-9.1.5`,
     'card.syn-f.merge': `${H('f')} into int-9.1.7`,
