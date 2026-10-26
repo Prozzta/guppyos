@@ -24,7 +24,7 @@
  */
 import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative, sep } from 'node:path';
+import { isAbsolute, join, relative, sep } from 'node:path';
 import { CLAIMS_IMPORT_SETTLED_FILE, DERIVED_AGENT_ID, effectiveLevel, IMPLEMENTED_LEVEL, manifestEntry, type LedgerLevel } from '../../shared/claims';
 
 /** Bumped whenever the rules below change: it is recorded in the index and the report. */
@@ -55,6 +55,10 @@ export interface SourcesConfig {
   include: Record<string, string[]>;
   /** CLAIM-LEDGER: per-agent ledger levels (raw; effectiveLevel validates them). */
   ledger?: Record<string, unknown>;
+  /** CLAIMS-DEFAULT C1: the level of an agent with no `ledger` entry (raw; absent = off, REL-184). */
+  ledgerDefault?: unknown;
+  /** CLAIMS-DEFAULT C4: the git repo this floor's derived writer reads (absolute); overrides config. */
+  derivedRepo?: string;
 }
 
 /** CLAIM-LEDGER: the files a flagged agent's ledger replaces as sources (A3, F5). */
@@ -114,7 +118,8 @@ export function readSourcesConfig(hiveRoot: string): SourcesConfig {
     if (j.include && typeof j.include === 'object') {
       for (const [k, v] of Object.entries(j.include)) if (Array.isArray(v)) include[k] = v.filter((x): x is string => typeof x === 'string');
     }
-    return { topLevel, include, ledger };
+    const derivedRepo = typeof j.derivedRepo === 'string' && isAbsolute(j.derivedRepo) ? j.derivedRepo : undefined;
+    return { topLevel, include, ledger, ...(j.ledgerDefault !== undefined ? { ledgerDefault: j.ledgerDefault } : {}), ...(derivedRepo ? { derivedRepo } : {}) };
   } catch {
     return empty;
   }
@@ -189,7 +194,7 @@ export function discoverSources(hiveRoot: string, config: SourcesConfig = readSo
   for (const id of agents) {
     const dir = join(agentsDir, id);
     walkMd(dir, allMd);
-    const level = effectiveLevel(ledgerOpts.claimLedger, manifestEntry(config.ledger, id), ledgerOpts.implemented ?? IMPLEMENTED_LEVEL).level;
+    const level = effectiveLevel(ledgerOpts.claimLedger, manifestEntry(config.ledger, id, config.ledgerDefault), ledgerOpts.implemented ?? IMPLEMENTED_LEVEL).level;
     if (level !== 'off') ledgerLevels[id] = level;
     // Only an agent that HAS a ledger (a monthly segment) swaps its markdown for claims: an agent
     // with none yet (a new hire, an unimported one) keeps memory.md, so nothing it wrote vanishes.

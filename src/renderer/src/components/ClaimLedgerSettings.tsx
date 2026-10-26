@@ -69,7 +69,7 @@ export function ClaimLedgerSettings() {
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
           <span style={label}>Ledger level</span>
-          <span style={hint}>The most any agent may use. Each agent also needs its own entry in memory-sources.json.</span>
+          <span style={hint}>The most any agent may use. An agent also needs its own entry in memory-sources.json, or the floor default below.</span>
         </div>
         <div role="radiogroup" aria-label="Ledger level" style={{ display: 'flex', gap: 4, flex: 'none' }}>
           {LEVELS.map((l) => (
@@ -78,6 +78,16 @@ export function ClaimLedgerSettings() {
         </div>
       </div>
       <Message result={levelMsg} />
+      {summary?.floor && (
+        <div data-testid="claim-ledger-floor" style={{ ...hint, marginTop: 8, display: 'flex', flexDirection: 'column', gap: 2 }}>
+          <span>{summary.floor.ledgerDefault
+            ? `This floor: an agent without its own entry starts at ${summary.floor.ledgerDefault}.`
+            : 'This floor: an agent without its own entry is off.'}</span>
+          <span>{summary.floor.derivedRepo
+            ? `Derived facts read the git repo ${summary.floor.derivedRepo}.`
+            : 'No git repo is set for derived facts: merge, tag and release facts are not derived on this floor.'}</span>
+        </div>
+      )}
 
       <div style={{ ...hint, marginTop: 12, marginBottom: 6 }}>Agents with a ledger</div>
       {!summary || summary.agents.length === 0

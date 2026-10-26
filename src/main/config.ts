@@ -638,8 +638,13 @@ export interface ConfigIntegrityIssue {
 let configIntegrity: ConfigIntegrityIssue | null = null;
 let configCorruptFingerprint: string | null = null;
 
+/** What only a FRESH install (no config file, or a reset) starts with, never a read default for an
+ *  existing file: the default-model flag is done, and CLAIMS-DEFAULT C3 (god bb3f5b) the claim ledger
+ *  level is writer. An existing config without `claimLedger` stays off. */
+const FRESH_INSTALL: Partial<HarnessConfig> = { defaultModelCliMigratedV1: true, claimLedger: 'writer' };
+
 function configDefaults(): HarnessConfig {
-  return clampDevHome(withTriggerDefaults({ ...DEFAULTS, defaultModelCliMigratedV1: true }));
+  return clampDevHome(withTriggerDefaults({ ...DEFAULTS, ...FRESH_INSTALL }));
 }
 
 /** A tiny bounded backoff for Windows handles held by an editor or AV scanner. */
@@ -1286,12 +1291,12 @@ export function resetConfig(): HarnessConfig {
   assertConfigWritable();
   mkdirSync(dirname(p), { recursive: true });
   // A reset is a fresh install: nothing to clear, so the default-model flag is done.
-  writeConfigAtomically(p, { ...DEFAULTS, defaultModelCliMigratedV1: true });
+  writeConfigAtomically(p, { ...DEFAULTS, ...FRESH_INSTALL });
   // Drop the migration latch too: the file on disk is back to `triggersMigratedV1:
   // false`, and a latch left set would keep the flag from ever being written again
   // in this process. The migration itself is a no-op on defaults either way.
   triggersMigrationRan = false;
-  return withTriggerDefaults({ ...DEFAULTS, defaultModelCliMigratedV1: true });
+  return withTriggerDefaults({ ...DEFAULTS, ...FRESH_INSTALL });
 }
 
 /** Model ids by tier (Lane A #6.4). Kept in sync with AGENT_MODELS in

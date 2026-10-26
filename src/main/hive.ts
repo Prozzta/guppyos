@@ -714,6 +714,9 @@ export class HiveManager {
   private readonly routerRuntime: RouterRuntime;
   private claimLedgerLevel?: (agentId: string) => 'off' | 'shadow' | 'reader' | 'writer';
   setClaimLedgerLevelProvider(fn: ((agentId: string) => 'off' | 'shadow' | 'reader' | 'writer') | undefined): void { this.claimLedgerLevel = fn; }
+  /** CLAIMS-DEFAULT C2: run once when ensureHive creates a hive (no registry.json yet); main seeds memory-sources.json. */
+  private newHiveSeed?: (root: string) => void;
+  setNewHiveSeed(fn: ((root: string) => void) | undefined): void { this.newHiveSeed = fn; }
   /** CLAIM-LEDGER G4.5 (god's M-4 ruling): the claims working set (and W5's reconcile text) a Codex
    *  agent gets in its instruction file, written once per spawn, so it is session-stable. */
   private codexClaimContext?: (agentId: string) => Promise<string | null>;
@@ -1276,6 +1279,8 @@ export class HiveManager {
 
     const registry = join(root, 'registry.json');
     if (!existsSync(registry)) {
+      // CLAIMS-DEFAULT C2/C4: a hive created now is a new floor; it starts on the claim ledger.
+      try { this.newHiveSeed?.(root); } catch (e) { console.error('[hive] new floor seed:', e); }
       this.writeJson(registry, { godId: null, agents: {} } as Registry);
     }
     const board = join(root, 'board.md');

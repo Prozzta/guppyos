@@ -17,6 +17,7 @@ import { createLedgerUi } from './claims/ledgerUi';
 import { scrubExport } from './claims/exportLedger';
 import { importAtStart } from './claims/startupImport';
 import { DerivedLive } from './claims/derivedLive';
+import { derivedRepoFor, seedFloorSources } from './claims/floorSeed';
 import { makeW6Append } from './claims/w6Append';
 import { memoryMdReplaced, READER_WATCH_SYNC_MS, ReaderWatchers } from './claims/readerWatch';
 import { importSettled } from './claims/ingest';
@@ -1634,7 +1635,7 @@ derivedClaims = new DerivedLive({
     return { store: ep.store, derive: (records) => claimsDerive(records, registry(), { r4: false }), log: (row) => hive.appendLog(row) };
   },
   enabled: () => readConfig().derivedClaims !== false && claimLevel(DERIVED_AGENT_ID) !== 'off',
-  repo: () => { const r = readConfig().derivedClaimsRepo; return typeof r === 'string' && r.trim() ? r : null; },
+  repo: () => { const root = hive.root(); return derivedRepoFor(root ? readSourcesConfig(root).derivedRepo : undefined, readConfig().derivedClaimsRepo); },
   changelog: () => {
     for (const p of [join(app.getAppPath(), 'CHANGELOG.md'), join(process.cwd(), 'CHANGELOG.md')]) {
       try { const t = readFileSync(p, 'utf8'); if (t) return t; } catch { /* try next */ }
@@ -1699,7 +1700,8 @@ function claimLevel(agentId: string): LedgerLevel {
   // W3: the per-agent manifest entry (memory-sources.json `ledger`) narrows the setting, as the
   // worker's discovery does: main and the worker compute the same effective level.
   const root = hive.root();
-  const agentEntry = root ? manifestEntry(readSourcesConfig(root).ledger, agentId) : undefined;
+  const floor = root ? readSourcesConfig(root) : null;
+  const agentEntry = floor ? manifestEntry(floor.ledger, agentId, floor.ledgerDefault) : undefined;
   const e = effectiveLevel(saved, agentEntry);
   const clampKey = `${String(saved)}|${String(agentEntry)}`;
   if (e.clamped && !claimClampLogged.has(clampKey)) {
@@ -1709,6 +1711,13 @@ function claimLevel(agentId: string): LedgerLevel {
   return e.level;
 }
 hive.setClaimLedgerLevelProvider(claimLevel);
+// CLAIMS-DEFAULT C2/C4: a new hive starts on the ledger; its project folder (the first registered
+// repo, the agents' default cwd) feeds the derived writer when it is a git repo.
+hive.setNewHiveSeed((root) => {
+  const project = readConfig().registeredRepos?.[0] ?? null;
+  const wrote = seedFloorSources(root, project);
+  hive.appendLog({ kind: 'claims-floor-seeded', wrote });
+});
 function claimsEndpoint(): ClaimsEndpointDeps | null {
   const root = hive.root();
   if (!root) return null;
@@ -1863,6 +1872,10 @@ const ledgerUi = createLedgerUi({
   agents: () => (claimsEndpoint() ? claimLedgerAgents() : []),
   level: (agentId) => claimLevel(agentId),
   savedLevel: () => readConfig().claimLedger,
+  floor: () => {
+    const root = hive.root(); const f = root ? readSourcesConfig(root) : null;
+    return { ledgerDefault: f?.ledgerDefault, derivedRepo: derivedRepoFor(f?.derivedRepo, readConfig().derivedClaimsRepo) };
+  },
   saveLevel: (level) => { writeConfig({ claimLedger: level }); },
   levelChanged: () => nativeMemory.claimLedgerChanged(),
   registry: () => { const root = hive.root(); try { return root ? loadRegistry(root) : DEFAULT_KEY_REGISTRY; } catch { return DEFAULT_KEY_REGISTRY; } },
