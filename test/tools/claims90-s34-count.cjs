@@ -24,7 +24,7 @@ async function main() {
   const rows = fs.readFileSync(file, 'utf8').split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l).query);
   const briefs = new Map();
   const briefOf = async (term) => {
-    if (!briefs.has(term)) { const rep = await lead([term]); briefs.set(term, ((rep.briefs ?? rep)[term.toLowerCase()] ?? []).length > 0); }
+    if (!briefs.has(term)) { const rep = await lead({ cards: [], texts: [term] }); briefs.set(term, ((rep.briefs ?? rep)[term.toLowerCase()] ?? []).length > 0); }
     return briefs.get(term);
   };
   const tally = () => ({ queries: 0, named: 0, card: 0, release: 0, allBrief: 0, someBrief: 0, noBrief: 0 });
