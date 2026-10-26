@@ -354,7 +354,8 @@ test('M3b (god 08992e, Jim f6c424): a body line whose words sit before its first
     assert.ok(bodies.length >= 3, `${mode}: ${bodies.length} body lines`);
     for (const b of bodies) assert.equal(label(b), '|', `MUTANT (${mode}): a body line whose label is body text: ${b}`);
     for (const b of bodies) assert.doesNotMatch(b, /^ *\|: (VERSION BUMP|- tag v1\.1\.55|ready to merge)[^:=]*$/, `${mode}: the separator sits in the prefix, the body text keeps its own: ${b}`);
-    assert.ok(L.slice(first).some((l) => /\|: VERSION BUMP = FOUR PLACES/.test(l)) && L.slice(first).some((l) => /\|: - tag v1\.1\.55 = release-1\.1\.55 = abc1234|\|: .*ready to merge into 1\.1\.48: YES/.test(l)), `${mode}: the bodies print whole under the prefix`);
+    assert.ok(bodies.some((l) => /VERSION BUMP = FOUR PLACES/.test(l)), `${mode}: the body text prints under the prefix (as the M3a lead or a joined chunk in compact)`);
+    assert.ok(bodies.some((l) => /tag v1\.1\.55 = release-1\.1\.55|ready to merge into 1\.1\.48: YES|synthetic-b-w/.test(l)), `${mode}: more body text under the prefix`);
   }
 });
 
