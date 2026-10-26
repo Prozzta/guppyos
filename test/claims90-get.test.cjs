@@ -364,9 +364,11 @@ test('T2 (god fe1140): the text view prints COUNTS of competing/superseded rows 
     const all = G.formatGet(r, { history: true });
     assert.match(all, /^competing \(\d+\):$/m); assert.match(all, /^superseded \(1\):$/m); assert.match(all, /c-bbbbbbbbbbb1/);
     process.env.C90_HIDE_STALE = '0';
-    // Step 3 fix R1: --all also lists the decisions and lifts the cap; the OFF arm only shows the bodies.
+    // Step 3 fix R1: --all also lists the decisions and lifts the cap; the OFF arm only shows the bodies (still in the
+    // compact shape, so the long superseded line is clipped at GET_LINE_MAX: pin its body text, not its tail id).
     const off = G.formatGet(r);
-    assert.match(off, /^competing \(\d+\):$/m); assert.match(off, /^superseded \(1\):$/m); assert.match(off, /c-bbbbbbbbbbb1/, 'the OFF arm prints the bodies');
+    assert.match(off, /^competing \(\d+\):$/m); assert.match(off, /^superseded \(1\):$/m); assert.match(off, /c-ccccccccccc1/, 'the OFF arm prints the competing body');
+    assert.match(off, /^  card\.foo-7: FOO-7 build is at 1111111 on branch x/m, 'the OFF arm prints the superseded body');
     assert.match(off, /^decisions: 3 \(--all lists them\)$/m);
     process.env.C90_HIDE_STALE = '1';
     assert.equal(G.formatGet(r), t, 'any other value is ON');
