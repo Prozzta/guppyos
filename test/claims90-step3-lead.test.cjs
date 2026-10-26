@@ -275,7 +275,7 @@ test('S1 / S2 brief (god 7a4eec) + cardIdOfKey: the brief is get\'s lead lines b
   }
   const many = G.resolveGetMany(['foo-7', 'nope-1', 'card.foo-7.status'], { mail: 0 }, deps());
   assert.equal(many.length, 3); assert.equal(many[0].lead.length, 9); assert.equal(many[1].keys.length, 0); assert.equal(many[2].lead, null);
-  assert.deepEqual(G.EMPTY_CARD_LEADS, { briefs: {}, named: [] });
+  assert.deepEqual(G.EMPTY_CARD_LEADS, { briefs: {}, named: [], pointed: [] });
 });
 
 // ---- R2 render ----
@@ -291,7 +291,7 @@ const briefBlocks = (L) => {
   return out;
 };
 
-test('S1 compact (god 7a4eec): the first hit of a card carries the brief as an `<id>` header and label-first `field: value` lines, one per line, once per card, inside the budget; a plain key or chunk carries nothing; the footer and order are unchanged', () => {
+test('S1 / M1 compact (god 7a4eec, 5dc648): the brief (an `<id>` header and label-first `field: value` lines, one per line) prints at the top for the card the QUERY names only; a card a hit is keyed to or names gets one label-free pointer line there; no brief ever prints under a hit, so leads without a named card change nothing', () => {
   const hits = [
     hit(1, 'live', 'card.foo-7.donesha', '2026-10-02', 'done sha 9876fed ' + lorem(12, 'a')),
     hit(2, 'live', 'card.foo-7', '2026-10-03', 'build moved to 2222222 ' + lorem(12, 'b')),
@@ -300,81 +300,91 @@ test('S1 compact (god 7a4eec): the first hit of a card carries the brief as an `
     hit(5, 'superseded', 'card.bar-9', '2026-09-01', 'bar old ' + lorem(4, 'e')),
   ];
   const plain = F.formatSearch('foo-7 build', {}, hits);
-  const t = F.formatSearch('foo-7 build', {}, hits, LEADS);
+  assert.equal(F.formatSearch('foo-7 build', {}, hits, LEADS), plain, 'MUTANT: field lines outside the named brief (a brief under a hit)');
+  const t = F.formatSearch('foo-7 build', {}, hits, LEADS, ['foo-7'], ['bar-9', 'foo-7']);
   const L = lines(t);
   assert.ok(t.length <= F.COMPACT_MAX_CHARS + F.COMPACT_GET_MAX, `${t.length}`);
-  assert.equal(briefBlocks(L).filter((b) => b.id === 'foo-7').length, 1, 'MUTANT: the brief on every hit, or on none');
+  assert.deepEqual(L.slice(1, 8), ['foo-7', '    donesha (latest): 9876fed by beta-2', '    donesha (beta-2): 9876fed', '    status: doing', '    assignee: alpha-1', '    decisions: 3', 'bar-9: memory get bar-9'], 'MUTANT: a line joined, a label dropped, the pointer missing, or a named card pointed too');
+  assert.match(L[8], /^\[1\] /);
   assert.doesNotMatch(t, / now: /, 'MUTANT: the old one-line `<id> now:` brief');
+  assert.doesNotMatch(t, /status: done/, 'MUTANT: the pointed card\'s field lines printed');
+  assert.deepEqual(briefBlocks(L), [], 'MUTANT: a brief under a hit');
   const metas = L.filter((l) => /^\[\d\] /.test(l));
   assert.deepEqual(metas.map((l) => l.split(' · ')[2]), lines(plain).filter((l) => /^\[\d\] /.test(l)).map((l) => l.split(' · ')[2]), 'the order is the M3 order, briefs or not');
-  const first = L.findIndex((l) => l.startsWith('[1] '));
-  const second = L.findIndex((l) => l.startsWith('[2] '));
-  const brief = L.slice(first, second).indexOf('    foo-7');
-  assert.ok(brief > 1, 'the id header under the FIRST printed hit of the card, after its content line');
-  assert.deepEqual(L.slice(first + brief, first + brief + 6), ['    foo-7', '      donesha (latest): 9876fed by beta-2', '      donesha (beta-2): 9876fed', '      status: doing', '      assignee: alpha-1', '      decisions: 3'], 'MUTANT: a line joined, a label dropped, or the lines not under the header');
-  assert.deepEqual(L.slice(L.indexOf(metas[4]) + 2, L.indexOf(metas[4]) + 4), ['    bar-9', '      status: done'], 'a prior hit still names the card\'s CURRENT values');
-  assert.ok(!briefBlocks(L).some((b) => b.id === 'synthetic.port'));
   assert.equal(L[L.length - 1], lines(plain)[lines(plain).length - 1], 'the get footer is unchanged');
   for (const l of L) assert.ok(l.length <= F.COMPACT_LINE_MAX, l);
-  assert.equal(F.formatSearch('foo-7 build', {}, hits, {}), plain, 'no leads: byte-identical to before');
+  // Pointers only: no named card, one pointer line per card the hits carry, no field line anywhere.
+  const p = lines(F.formatSearch('foo-7 build', {}, hits, LEADS, [], ['foo-7', 'bar-9']));
+  assert.deepEqual(p.slice(1, 3), ['foo-7: memory get foo-7', 'bar-9: memory get bar-9'], 'MUTANT: pointers missing with no named card');
+  assert.ok(!p.some((l) => /^ {0,6}[a-z]+( \([^)]*\))?: /.test(l) && !/: memory get /.test(l)), 'MUTANT: a field line with no named card');
+  assert.deepEqual(p.filter((l) => /^\[\d\] /.test(l)).map((l) => l.split(' · ')[2]), metas.map((l) => l.split(' · ')[2]), 'the hits as before, under the pointers');
 });
 
-test('R2 compact budget: on a tight share the brief drops fields from its end, never pushes the content under one line or the matched term off it, and is left out when not one field fits', () => {
-  const hits = [];
-  for (let i = 1; i <= 12; i++) hits.push(hit(i, 'live', `card.card-${i}`, '2026-10-02', `${lorem(6, `h${i}`)} value-${i} ${lorem(30, `t${i}`)}`));
-  const leads = {};
-  for (let i = 1; i <= 12; i++) leads[`card-${i}`] = ['donesha: ' + 'f'.repeat(40), 'lastsha: ' + 'e'.repeat(40), 'status: doing', 'assignee: alpha-1', 'merge: ' + 'd'.repeat(40)];
-  const t = F.formatSearch('value-12 value-11 value-3', {}, hits, leads);
+test('M3 body prefix (god 5dc648): every hit-body line, compact and full, prints under the indent and `| `, so a note line that starts with a field label never reads as a field line; the brief lines are byte for byte as before', () => {
+  assert.equal(F.BODY_PREFIX, '| ');
+  const note = 'merge: 1234567 into int-1.1.98\ndone: shipped\ntag: v1.1.98 ' + lorem(30, 'n');
+  const hits = [hit(1, 'live', 'card.foo-7', '2026-10-03', note), chunk(2, '## note\nmerge: 7654321 into int-1.1.97 ' + lorem(40, 'c')), hit(3, 'live', 'synthetic.port', '2026-10-10', 'port 2222')];
+  const t = F.formatSearch('foo-7 merge', {}, hits, LEADS, ['foo-7']);
   const L = lines(t);
-  assert.ok(t.length <= F.COMPACT_MAX_CHARS + F.COMPACT_GET_MAX, `${t.length}`);
+  assert.deepEqual(L.slice(1, 7), ['foo-7', '    donesha (latest): 9876fed by beta-2', '    donesha (beta-2): 9876fed', '    status: doing', '    assignee: alpha-1', '    decisions: 3'], 'the brief unchanged');
+  const bodies = [];
+  for (let i = 7; i < L.length; i++) if (/^\[\d\] /.test(L[i])) { while (/^ {4}/.test(L[i + 1] ?? '')) bodies.push(L[++i]); }
+  assert.ok(bodies.length >= 4, `${bodies.length} body lines`);
+  for (const b of bodies) assert.match(b, /^ {4}\| \S/, `MUTANT: a body line without the prefix: ${b}`);
+  assert.match(t, /^ {4}\| card\.foo-7: done: shipped tag: v1\.1\.98 /m, 'the lead line (the body after the heading line) under the prefix too');
+  assert.doesNotMatch(t, /^ {4}(merge:|done:|tag:|card\.foo-7:|port |##|…)/m, 'MUTANT: a bare body line');
+  assert.match(t, /^ {4}\| (…|##|merge: 7654321)/m, 'the chunk body under the prefix');
   for (const l of L) assert.ok(l.length <= F.COMPACT_LINE_MAX, l);
-  const briefs = briefBlocks(L).filter((b) => /^card-\d+$/.test(b.id));
-  assert.ok(briefs.length >= 1, 'at least the first hit carries a brief');
-  assert.ok(briefs.some((b) => b.lines.length < 5 && b.lines.length >= 1 && b.lines[0].startsWith('donesha:')), 'MUTANT: a brief never shortened, or shortened from its head');
-  for (const m of L.filter((l) => /^\[\d+\] /.test(l))) {
-    const n = Number(/^\[(\d+)\]/.exec(m)[1]);
-    const i = L.indexOf(m);
-    assert.match(L[i + 1], /^ {4}(?!card-\d+$)\S/, `hit ${n} keeps its content line first`);
-    const key = m.split(' · ')[2];
-    const id = key.slice('card.'.length);
-    if (['card-12', 'card-11', 'card-3'].includes(id)) assert.ok(L.slice(i + 1, i + 4).some((l) => l.includes(`value-${id.split('-')[1]}`)), `hit ${n} (${id}) still shows its matched value`);
-  }
+  const full = F.formatSearch('foo-7 merge', { full: true }, hits, LEADS, ['foo-7']);
+  assert.match(full, /^ {6}\| card\.foo-7: done: shipped tag: .*\n\n {6}\| merge: 1234567 into int-1\.1\.98\n {6}\| done: shipped\n {6}\| tag: v1\.1\.98 /m, 'MUTANT: --full prints a bare body line');
+  assert.doesNotMatch(full, /^ {6}(merge|done|tag|port|card\.foo-7): /m);
+  assert.match(full, /^ {6}\| port 2222$/m);
+  assert.match(full, /^  foo-7\n {6}donesha \(latest\): 9876fed by beta-2\n/m, 'full: the brief unchanged');
 });
 
-test('S1 full: `--full` prints a Card: header with the label-first lines under it after the Get: pointer', () => {
-  const t = F.formatSearch('foo-7', { full: true }, [hit(1, 'live', 'card.foo-7.donesha', '2026-10-02', 'done sha 9876fed'), hit(2, 'live', 'synthetic.port', '2026-10-10', 'port 2222')], LEADS);
-  assert.match(t, /^      Get:    memory get card\.foo-7\.donesha\n      Card:   foo-7\n {14}donesha \(latest\): 9876fed by beta-2\n {14}donesha \(beta-2\): 9876fed\n {14}status: doing\n {14}assignee: alpha-1\n {14}decisions: 3\n      Match:/m);
-  assert.equal((t.match(/Card:/g) || []).length, 1);
+test('S1 / M1 full: `--full` prints the Get: pointer then Match: (no Card: block under a hit any more); the named brief and the pointers sit in the block after the header', () => {
+  const hits = [hit(1, 'live', 'card.foo-7.donesha', '2026-10-02', 'done sha 9876fed'), hit(2, 'live', 'card.bar-9', '2026-10-10', 'bar 2222')];
+  const t = F.formatSearch('foo-7', { full: true }, hits, LEADS, ['foo-7'], ['bar-9']);
+  assert.match(t, /^      Get:    memory get card\.foo-7\.donesha\n      Match:/m);
+  assert.doesNotMatch(t, /Card:/, 'MUTANT: a brief under a hit');
+  const FL = lines(t); const head = FL.indexOf('='.repeat(60), 2);
+  assert.deepEqual(FL.slice(head + 2, head + 9), ['  foo-7', '      donesha (latest): 9876fed by beta-2', '      donesha (beta-2): 9876fed', '      status: doing', '      assignee: alpha-1', '      decisions: 3', '  bar-9: memory get bar-9'], 'MUTANT: the named block or the pointer missing');
+  assert.doesNotMatch(t, /status: done/, 'MUTANT: the pointed card\'s field lines');
+  assert.match(t, /^ {6}\| done sha 9876fed$/m, 'the body under the prefix');
+  assert.equal(F.formatSearch('foo-7', { full: true }, hits, LEADS), F.formatSearch('foo-7', { full: true }, hits), 'leads without a named card change nothing');
 });
 
-test('S3 named (god 7a4eec): the briefs main names (the query\'s or a hit\'s card / release) print at the top above every hit, compact and full, the first whole, the rest while the block fits, then as `memory get` pointers; a card shown there carries no second brief under its hit; no hits still shows them', () => {
+test('S3 / M1 named (god 7a4eec, 5dc648): the briefs of the terms the QUERY names print at the top above every hit, compact and full, EACH whole (BRIEF_LINES_MAX lines), in the named order; the terms the hits name follow as `memory get` pointers; a named card is never pointed too; no hits still shows them', () => {
   const hits = [hit(1, 'live', 'card.foo-7.donesha', '2026-10-02', 'done sha 9876fed ' + lorem(12, 'a')), hit(2, 'live', 'card.bar-9', '2026-10-03', 'bar ' + lorem(12, 'b')), chunk(3, 'note ' + lorem(8, 'c'))];
   const leads = { ...LEADS, 'release.1.1.98': ['tag: ' + 'a'.repeat(40), 'bump: ' + 'b'.repeat(40)] };
-  const t = F.formatSearch('foo-7 build', {}, hits, leads, ['release.1.1.98', 'foo-7']);
+  const t = F.formatSearch('foo-7 build', {}, hits, leads, ['release.1.1.98', 'foo-7'], ['bar-9', 'foo-7']);
   const L = lines(t);
   assert.deepEqual(L.slice(1, 9), ['release.1.1.98', '    tag: ' + 'a'.repeat(40), '    bump: ' + 'b'.repeat(40), 'foo-7', '    donesha (latest): 9876fed by beta-2', '    donesha (beta-2): 9876fed', '    status: doing', '    assignee: alpha-1'], 'MUTANT: the named block missing, below the hits, or out of the named order');
-  assert.equal(L[9], '    decisions: 3'); assert.match(L[10], /^\[1\] /);
-  assert.equal(briefBlocks(L).filter((b) => b.id === 'foo-7').length, 0, 'MUTANT: a second brief under the hit of a card shown at the top');
-  assert.deepEqual(briefBlocks(L).map((b) => b.id), ['bar-9'], 'a card not named keeps its brief under its hit');
+  assert.equal(L[9], '    decisions: 3'); assert.equal(L[10], 'bar-9: memory get bar-9'); assert.match(L[11], /^\[1\] /);
+  assert.deepEqual(briefBlocks(L), [], 'MUTANT: a brief under a hit');
+  assert.doesNotMatch(t, /status: done/, 'MUTANT: the pointed card\'s field lines');
   assert.ok(t.length <= F.COMPACT_MAX_CHARS + F.COMPACT_GET_MAX, `${t.length}`);
   assert.equal(F.formatSearch('foo-7 build', {}, hits, leads, ['nope-1']), F.formatSearch('foo-7 build', {}, hits, leads), 'a named term with no brief changes nothing');
   assert.equal(F.formatSearch('foo-7 build', {}, hits, leads, []), F.formatSearch('foo-7 build', {}, hits, leads));
-  // The cap: the first named brief whole up to BRIEF_LINES_MAX lines; later ones only while the block is under NAMED_BLOCK_MAX, else one pointer line.
+  assert.equal(F.formatSearch('foo-7 build', {}, hits, leads, ['foo-7'], ['foo-7']), F.formatSearch('foo-7 build', {}, hits, leads, ['foo-7']), 'a named card is never pointed too');
+  // M1: EVERY named brief whole, capped by lines alone (no block cap, no demotion to a pointer): the hits give way.
   const big = {}; const named = [];
   for (let i = 1; i <= 8; i++) { big[`card-${i}`] = Array.from({ length: 15 }, (_, j) => `field${j}: ${'v'.repeat(60)}`); named.push(`card-${i}`); }
   const B = lines(F.formatSearch('x', {}, hits, big, named));
-  assert.equal(B.indexOf('card-1'), 1); assert.equal(B.slice(2, 2 + F.BRIEF_LINES_MAX).filter((l) => /^ {4}field\d+: /.test(l)).length, F.BRIEF_LINES_MAX, 'the first named brief whole, capped by lines');
-  assert.doesNotMatch(B[2 + F.BRIEF_LINES_MAX], /^ {4}field/, 'MUTANT: no line cap');
-  assert.ok(B.some((l) => /^card-\d+: memory get card-\d+$/.test(l)), 'MUTANT: every named brief printed whole');
-  assert.ok(B.filter((l) => /^card-\d+$/.test(l)).length >= 1 && B.filter((l) => /^card-\d+$/.test(l)).length < 8);
-  assert.ok(B.join('\n').length <= F.COMPACT_MAX_CHARS + F.COMPACT_GET_MAX + 600, `${B.join('\n').length}`);
+  for (let i = 1; i <= 8; i++) {
+    const at = 1 + (i - 1) * (1 + F.BRIEF_LINES_MAX);
+    assert.equal(B[at], `card-${i}`, `MUTANT: brief ${i} not whole, out of order, or demoted to a pointer`);
+    assert.equal(B.slice(at + 1, at + 1 + F.BRIEF_LINES_MAX).filter((l) => /^ {4}field\d+: /.test(l)).length, F.BRIEF_LINES_MAX, `brief ${i} whole, capped by lines`);
+  }
+  assert.doesNotMatch(B[1 + 8 * (1 + F.BRIEF_LINES_MAX)], /^ {4}field/, 'MUTANT: no line cap');
+  assert.ok(!B.some((l) => /^card-\d+: memory get /.test(l)), 'MUTANT: a named brief demoted to a pointer');
   assert.match(B[B.length - 1], /^\[1\] |^… |^keys:|^get:/, 'the hits still follow the block');
-  const full = F.formatSearch('foo-7 build', { full: true }, hits, leads, ['foo-7']);
+  const full = F.formatSearch('foo-7 build', { full: true }, hits, leads, ['foo-7'], ['bar-9']);
   const FL = lines(full);
   const head = FL.indexOf('='.repeat(60), 2);
   assert.deepEqual(FL.slice(head + 2, head + 5), ['  foo-7', '      donesha (latest): 9876fed by beta-2', '      donesha (beta-2): 9876fed'], 'full: the named block after the header');
-  assert.equal((full.match(/Card:   foo-7/g) || []).length, 0, 'full: not again under the hit');
-  assert.match(full, /Card:   bar-9\n {14}status: done/);
+  assert.equal(FL[head + 8], '  bar-9: memory get bar-9', 'full: the pointer after the briefs');
+  assert.doesNotMatch(full, /Card:|status: done/, 'full: no brief under a hit');
   const none = F.formatSearch('foo-7', {}, [], leads, ['foo-7']);
   assert.match(none, /^Results for: "foo-7" — 0 hits, current first \(--full: whole chunks\)\nfoo-7\n {4}donesha \(latest\): 9876fed by beta-2\n {4}donesha \(beta-2\): 9876fed\n/, 'no hits: the named brief still answers');
   assert.doesNotMatch(none, /^get: /m);
@@ -398,11 +408,11 @@ const engineWith = (hits, cardLead) => new MemoryEngine({
 test('S3 / S4 engine: the search asks the cardLead dep once with the distinct card ids of its hits in hit order AND the texts (the query first, then each hit\'s content), renders the briefs and the named block; no dep, a throw or a non-object leaves the text as before', async () => {
   const hits = [hit(1, 'live', 'card.foo-7.donesha', '2026-10-02', 'done sha 9876fed'), hit(2, 'live', 'card.foo-7', '2026-10-03', 'build moved'), hit(3, 'live', 'card.bar-9', '2026-10-04', 'bar current'), hit(4, 'live', 'synthetic.port', '2026-10-10', 'port 2222')];
   const calls = [];
-  const e = engineWith(hits, async (ask) => { calls.push(ask); return { briefs: LEADS, named: ['bar-9'] }; });
+  const e = engineWith(hits, async (ask) => { calls.push(ask); return { briefs: LEADS, named: ['bar-9'], pointed: ['foo-7'] }; });
   const r = await e.search({ query: 'foo-7', results: 4 });
   assert.deepEqual(calls, [{ cards: ['foo-7', 'bar-9'], texts: ['foo-7', 'done sha 9876fed', 'build moved', 'bar current', 'port 2222'] }], 'MUTANT: the query or the hit texts not sent');
-  assert.match(r.text, /^bar-9\n {4}status: done\n\[1\] /m, 'the named brief at the top');
-  assert.match(r.text, /^ {4}foo-7\n {6}donesha \(latest\): 9876fed by beta-2\n {6}donesha \(beta-2\): 9876fed\n {6}status: doing/m);
+  assert.match(r.text, /^bar-9\n {4}status: done\nfoo-7: memory get foo-7\n\[1\] /m, 'MUTANT: the named brief or the pointer missing at the top');
+  assert.doesNotMatch(r.text, /status: doing/, 'MUTANT: a brief for a card the query does not name');
   assert.equal(briefBlocks(lines(r.text)).filter((b) => b.id === 'bar-9').length, 0);
   const plain = (await engineWith(hits).search({ query: 'foo-7', results: 4 })).text;
   assert.doesNotMatch(plain, /^ {4}foo-7$/m);
@@ -415,10 +425,10 @@ test('S3 / S4 engine: the search asks the cardLead dep once with the distinct ca
   const r3 = await engineWith([], async (ask) => { calls.push(ask); return { briefs: LEADS, named: ['foo-7'] }; }).search({ query: 'foo-7', results: 1 });
   assert.match(r3.text, /0 hits, current first \(--full: whole chunks\)\nfoo-7\n {4}donesha/, 'no hits: the named brief still answers');
   const full = await e.search({ query: 'foo-7', results: 4, full: true });
-  assert.match(full.text, /^      Card:   foo-7\n {14}donesha \(latest\)/m);
-  assert.match(full.text, /^  bar-9\n {6}status: done/m);
+  assert.doesNotMatch(full.text, /Card:/, 'MUTANT: a brief under a hit');
+  assert.match(full.text, /^  bar-9\n {6}status: done\n  foo-7: memory get foo-7\n/m, 'MUTANT: the pointer not in the full block');
   const exact = await e.search({ query: 'foo-7', results: 4, exact: true });
-  assert.match(exact.text, /^ {4}foo-7\n {6}donesha/m, 'the --exact path carries the briefs too');
+  assert.match(exact.text, /^bar-9\n {4}status: done\nfoo-7: memory get foo-7\n/m, 'the --exact path carries the briefs and pointers too');
   const long = engineWith([hit(5, 'live', 'card.foo-7', '2026-10-03', 'x'.repeat(5000))], async (ask) => { calls.push(ask); return { briefs: {}, named: [] }; });
   await long.search({ query: 'q', results: 1 });
   assert.equal(calls[calls.length - 1].texts[1].length, E.LEAD_TEXT_MAX, 'a hit text goes capped');
@@ -439,17 +449,19 @@ test('L7: claims90-search.cjs --hive builds the briefs through main\'s claimCard
   const hits = [hit(1, 'live', 'card.foo-7.donesha', '2026-10-02', 'done sha 9876fed ' + lorem(10, 'a')), hit(2, 'live', 'card.foo-7', '2026-10-03', 'build moved ' + lorem(10, 'b')), hit(3, 'live', 'synthetic.port', '2026-10-10', 'port 2222')];
   const lead = hiveCardLead(root);
   assert.deepEqual(cardIdsOfHits(hits), ['foo-7']);
-  assert.deepEqual(await lead({ cards: ['foo-7', 'nope-1'], texts: [] }), { briefs: { 'foo-7': BRIEF_FOO }, named: [] }, 'the hive\'s real values, through claimCardLeadOver');
-  assert.deepEqual(await lead(['foo-7']), { briefs: { 'foo-7': BRIEF_FOO }, named: [] }, 'an old-shape ask (ids only) still answers');
-  // S3 / S4: the query names the release and a hit names the card: both briefs come back named, the query's first; the query orders the lines.
+  assert.deepEqual(await lead({ cards: ['foo-7', 'nope-1'], texts: [] }), { briefs: {}, named: [], pointed: ['foo-7', 'nope-1'] }, 'M1: the hits\' cards are pointed, never briefed');
+  assert.deepEqual(await lead(['foo-7']), { briefs: {}, named: [], pointed: ['foo-7'] }, 'an old-shape ask (ids only) still answers');
+  // S3 / S4 / M1: the query names the release (briefed, named) and a hit names the card (pointed, no brief).
   const ask = await lead({ cards: [], texts: ['the 1.1.98 tag', 'alpha-1 did FOO-7 audit'] });
-  assert.deepEqual(ask.named, ['release.1.1.98', 'foo-7'], 'MUTANT: a named term dropped, or the hit texts not scanned');
+  assert.deepEqual(ask.named, ['release.1.1.98'], 'MUTANT: a hit-named card briefed as if the query named it');
+  assert.deepEqual(ask.pointed, ['foo-7'], 'MUTANT: the hit texts not scanned for the pointers');
+  assert.deepEqual((await lead({ cards: ['foo-7'], texts: ['FOO-7 audit', 'alpha-1 did FOO-7 audit'] })).pointed, [], 'a named card is never pointed too');
   assert.deepEqual(ask.briefs['release.1.1.98'], [`tag: ${SHA_T}`, `bump: ${SHA_B}`]);
-  assert.equal(ask.briefs['foo-7'][0], `donesha (latest): ${SHA_B} by beta-2`, 'the hit text names audit and alpha-1, the query does not: get\'s order');
+  assert.equal(ask.briefs['foo-7'], undefined, 'M1: no field lines for a card the query does not name');
   assert.deepEqual((await lead({ cards: [], texts: ['FOO-7 audit by alpha-1'] })).briefs['foo-7'].slice(0, 2), [`donesha (alpha-1): ${SHA_A}`, `audit: PASS ${SHA_T}`], 'the query\'s agent and field lines first');
   assert.deepEqual((await lead({ cards: [], texts: ['guppy/foo-7 tip'] })).named, ['foo-7'], 'a branch owned by the card names it');
-  assert.deepEqual(await lead({ cards: [], texts: ['nothing here'] }), { briefs: {}, named: [] });
-  assert.deepEqual(await cardLeadsFor(hits, 'q', undefined), { briefs: {}, named: [] }); assert.deepEqual(await cardLeadsFor(hits, 'q', async () => { throw new Error('x'); }), { briefs: {}, named: [] });
+  assert.deepEqual(await lead({ cards: [], texts: ['nothing here'] }), { briefs: {}, named: [], pointed: [] });
+  assert.deepEqual(await cardLeadsFor(hits, 'q', undefined), { briefs: {}, named: [], pointed: [] }); assert.deepEqual(await cardLeadsFor(hits, 'q', async () => { throw new Error('x'); }), { briefs: {}, named: [], pointed: [] });
   const flags = { results: 4, wing: null, room: null, since: null, before: null, full: false, exact: false, newest: false };
   const tool = await searchTextOver(root, 'foo-7 build', flags, hits);
   const engine = (await engineWith(hits, lead).search({ query: 'foo-7 build', ...flags })).text;

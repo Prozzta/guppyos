@@ -95,7 +95,8 @@ export async function cardLeadsFor(hits: Array<Pick<SearchHit, 'claim' | 'conten
     const r = await cardLead({ cards, texts });
     if (!r || typeof r !== 'object') return EMPTY_CARD_LEADS;
     const briefs = r.briefs && typeof r.briefs === 'object' ? r.briefs : {};
-    return { briefs, named: Array.isArray(r.named) ? r.named.filter((n): n is string => typeof n === 'string') : [] };
+    const ids = (v: unknown): string[] => (Array.isArray(v) ? v.filter((n): n is string => typeof n === 'string') : []);
+    return { briefs, named: ids(r.named), pointed: ids(r.pointed) };
   } catch { return EMPTY_CARD_LEADS; }
 }
 
@@ -306,12 +307,12 @@ export class MemoryEngine {
         const files = needle && !a.wing && !a.room && !a.kind && !a.key ? exactFileHits(this.d.hiveRoot, needle, k) : [];
         const all = servedHits([...dropStale(chunks, a.mode, k), ...files]);  // matched on raw text, rewritten for display
         const lead = await this.cardLeads(all, a.query);
-        return { exit: 0, text: formatSearch(a.query, a, all, lead.briefs, lead.named), json: json(all) };
+        return { exit: 0, text: formatSearch(a.query, a, all, lead.briefs, lead.named, lead.pointed), json: json(all) };
       }
       const [qv] = await this.embed([a.query]);
       const hits = servedHits(dropStale(this.d.store.search({ query: a.query, queryVec: qv, wing: a.wing ?? null, room: a.room ?? null, sinceMs, beforeMs, k: fetchK, poolK: k, mode: a.mode ?? 'live', kind: a.kind ?? null, key: a.key ?? null }), a.mode, k));  // CLAIMS-90 HISTORY-PTR
       const lead = await this.cardLeads(hits, a.query);
-      return { exit: 0, text: formatSearch(a.query, a, hits, lead.briefs, lead.named), json: json(hits) };
+      return { exit: 0, text: formatSearch(a.query, a, hits, lead.briefs, lead.named, lead.pointed), json: json(hits) };
     }, o);
   }
 

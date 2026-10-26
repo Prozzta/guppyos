@@ -57,17 +57,20 @@ export function claimCardLeadOver(d: ClaimReadDeps, ask: CardLeadAsk | string[])
   const ok = (c: string): boolean => /^[a-z0-9][a-z0-9._-]{0,119}$/i.test(c);
   const cards = a.cards.filter(ok).map((c) => c.toLowerCase());
   const texts = a.texts.filter((t) => typeof t === 'string');
-  if (!cards.length && !texts.length) return { briefs: {}, named: [] };
+  if (!cards.length && !texts.length) return { briefs: {}, named: [], pointed: [] };
   const deps = getDeps(d);
-  // S3 / S4: the cards (by id, card.<id> key or owned branch) and releases (by version) the query or a hit names,
-  // the query's first; their briefs print above the hits.
+  // S3 / S4: the cards (by id, card.<id> key or owned branch) and releases (by version) the query or a hit names.
+  // M1 (god 5dc648): field lines print ONLY for what the QUERY names (texts[0]); every card or release a hit names
+  // (texts[1..]) or is keyed to (cards) is `pointed`: one label-free `memory get` line each, no brief resolved.
   const keys = new Set<string>();
   for (const recs of Object.values(deps.ledgers)) for (const r of recs as Array<{ t?: string; key?: unknown }>) if (r.t === 'claim' && typeof r.key === 'string') keys.add(r.key);
-  const named = texts.length ? [...new Set(targetsIn(texts, targetIndex((deps.tasks ?? []).map((t) => String(t.id ?? '')).filter(Boolean), keys), LEADS_MAX).map((t) => t.term.toLowerCase()).filter(ok))] : [];
-  const ids = [...new Set([...named, ...cards])].slice(0, LEADS_MAX * 2);
+  const ix = targetIndex((deps.tasks ?? []).map((t) => String(t.id ?? '')).filter(Boolean), keys);
+  const term = (ts: string[]): string[] => [...new Set(targetsIn(ts, ix, LEADS_MAX).map((t) => t.term.toLowerCase()).filter(ok))];
+  const named = texts.length ? term([texts[0]]) : [];
+  const pointed = [...new Set([...term(texts.slice(1)), ...cards])].filter((id) => !named.includes(id)).slice(0, LEADS_MAX);
   const briefs: Record<string, string[]> = {};
-  resolveGetMany(ids, { mail: 0 }, deps).forEach((r, i) => { const b = leadBrief(r, texts[0] ?? ''); if (b.length) briefs[ids[i]] = b; });
-  return { briefs, named: named.filter((n) => briefs[n]) };
+  resolveGetMany(named, { mail: 0 }, deps).forEach((r, i) => { const b = leadBrief(r, texts[0] ?? ''); if (b.length) briefs[named[i]] = b; });
+  return { briefs, named: named.filter((n) => briefs[n]), pointed };
 }
 /** At most this many named terms per search (the engine's CARD_LEADS_MAX). */
 const LEADS_MAX = 12;

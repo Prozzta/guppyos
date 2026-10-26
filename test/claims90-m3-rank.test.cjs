@@ -17,7 +17,7 @@ const hit = (i, content, claim, extra = {}) => ({ chunkId: i, wing: 'a1', room: 
 const meta = (id, key, kind = 'fact', status = 'live') => ({ id, status, kind, key, at: '2026-10-03T10:00:00.000Z' });
 const md = (i, content) => hit(i, content, null, { source: `agents/a1/memory-${i}.md` });
 const lines = (t) => t.replace(/\n$/, '').split('\n');
-const block = (text, n) => { const ls = lines(text); const a = ls.findIndex((l) => l.startsWith(`[${n}] `)); assert.ok(a >= 0, `hit [${n}] shown`); let b = a + 1; while (b < ls.length && ls[b].startsWith('    ')) b++; return { meta: ls[a], body: ls.slice(a + 1, b).map((l) => l.slice(4)) }; };
+const block = (text, n) => { const ls = lines(text); const a = ls.findIndex((l) => l.startsWith(`[${n}] `)); assert.ok(a >= 0, `hit [${n}] shown`); let b = a + 1; while (b < ls.length && ls[b].startsWith('    ')) b++; return { meta: ls[a], body: ls.slice(a + 1, b).map((l) => l.slice(6)) }; };  // M3: `    | ` before each body line
 const metas = (text) => lines(text).filter((l) => /^\[\d+\] /.test(l)).map((l) => l.replace(/^\[\d+\] /, ''));
 const filler = (n, seed) => Array.from({ length: n }, (_, i) => `${seed}word${i}`).join(' ');
 const SHA = 'f00dcafe1234567890abcdef1234567890abcdef';

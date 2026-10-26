@@ -7,7 +7,6 @@
 import type { SearchHit } from './store';
 import { PINNED_SOFT_CAP_BYTES } from '../memoryRollover';
 import { ordinal } from './sources';
-import { cardIdOfKey } from '../claims/get';
 
 /** Step 3 fix R2 (god bbcb4a): per card id (lower-cased), the `field: value` items of its current values (main's
  *  resolver, the same values `memory get <id>` leads with); a hit on the card prints them inline. */
@@ -25,8 +24,10 @@ export interface SearchFlags {
   newest?: boolean;
   /** Step 3 fix R2: the card briefs (`<id>` → `field: value` items) the hits carry; set by formatSearch from its `leads`. */
   cardLeads?: CardLeads;
-  /** S3 (god 7a4eec): the terms (card ids, release keys) the query or a hit named: their briefs print above the hits. */
+  /** S3 (god 7a4eec): the terms (card ids, release keys) the QUERY named: their briefs print above the hits. */
   namedCards?: string[];
+  /** M1 (god 5dc648): every other card or release the hits name or are keyed to: one `memory get` pointer line each, above the hits. */
+  pointedCards?: string[];
 }
 
 /**
@@ -163,7 +164,7 @@ export function leadSplit(h: Pick<SearchHit, 'content' | 'claim'>): { lead: stri
   const body = oneLine(h.content.split('\n').slice(1).filter((l) => !l.trim().startsWith('## ')).join(' '));
   if (!body) return null;
   const full = h.claim.key ? `${h.claim.key}: ${body}` : body;
-  let lead = wrap(full, CONTENT_WIDTH)[0] ?? '';
+  let lead = wrap(full, BODY_WIDTH)[0] ?? '';
   if (!h.claim.key) { const m = /^.*?[.!?](?=\s|$)/.exec(full); if (m && m[0].length <= lead.length) lead = m[0]; }
   return { lead, rest: full.slice(lead.length).trimStart() };
 }
@@ -177,42 +178,43 @@ function py(n: number): string {
   return Number.isInteger(r) ? `${r}.0` : String(r);
 }
 
-export function formatSearch(query: string, flags0: SearchFlags, hits: SearchHit[], leads: CardLeads = {}, named: string[] = []): string {
+export function formatSearch(query: string, flags0: SearchFlags, hits: SearchHit[], leads: CardLeads = {}, named: string[] = [], pointed: string[] = []): string {
   const shown = named.filter((n) => leads[n]?.length);
-  const flags = Object.keys(leads).length ? { ...flags0, cardLeads: leads, ...(shown.length ? { namedCards: shown } : {}) } : flags0;
+  const point = pointed.filter((p) => !shown.includes(p));
+  const flags: SearchFlags = { ...flags0, ...(Object.keys(leads).length ? { cardLeads: leads } : {}), ...(shown.length ? { namedCards: shown } : {}), ...(point.length ? { pointedCards: point } : {}) };
   if (!hits.length && !shown.length) return `\n  No results found for: "${query}"\n`;
   return flags.full ? formatSearchFull(query, flags, hits) : formatSearchCompact(query, flags, hits);
 }
 
 /** S1 (god 7a4eec): a card brief is its id on a header line, then get's lead lines label first, one per line (each
- *  clipped to the content width; the lines are short structured values), indented two under the header. */
-const briefLines = (cardId: string, items: string[]): string[] => [cardId, ...items.map((i) => clip(`  ${i}`, CONTENT_WIDTH))];
-const linesCost = (ls: string[]): number => ls.reduce((n, l) => n + l.length + 5, 0);
+ *  clipped to the line max; the lines are short structured values), indented four under the header. */
+const briefLines = (cardId: string, items: string[], indent: string): string[] => [`${indent}${cardId}`, ...items.map((i) => clip(`${indent}    ${i}`, COMPACT_LINE_MAX))];
 /** S2: a brief holds at most this many lines (the query's lines come first, so a cap never drops one it names). */
 export const BRIEF_LINES_MAX = 12;
-/** S3: the named block above the hits takes at most this much of the compact budget past the first brief. */
-export const NAMED_BLOCK_MAX = Math.floor(COMPACT_MAX_CHARS / 2);
-/** S3: the briefs of the terms the query or a hit named, above the hits: the first whole (BRIEF_LINES_MAX lines),
- *  the next ones while the block is under NAMED_BLOCK_MAX, the rest as one `memory get` pointer line each. */
-function namedBlock(named: string[], leads: CardLeads, indent: string): { lines: string[]; shown: Set<string> } {
+/** S3 / M1 (god 7a4eec, 5dc648): the block above the hits: the brief (BRIEF_LINES_MAX lines, whole) of EVERY card or
+ *  release the QUERY names, in the named order, then one label-free `<id>: memory get <id>` pointer line for every
+ *  other card or release a hit names or is keyed to. Field lines print nowhere else in a search, so a value beside
+ *  the named one can never read as a field line (the frozen L6 rule). The hits give way to the block. */
+function namedBlock(named: string[], pointed: string[], leads: CardLeads, indent: string): { lines: string[]; shown: Set<string> } {
   const lines: string[] = [];
   const shown = new Set<string>();
-  let cost = 0;
   for (const id of named) {
     const items = (leads[id] ?? []).slice(0, BRIEF_LINES_MAX);
     if (!items.length || shown.has(id)) continue;
-    const ls = [`${indent}${id}`, ...items.map((i) => clip(`${indent}    ${i}`, COMPACT_LINE_MAX))];
-    const c = ls.reduce((n, l) => n + l.length + 1, 0);
-    if (shown.size && cost + c > NAMED_BLOCK_MAX) { lines.push(clip(`${indent}${id}: memory get ${id}`, COMPACT_LINE_MAX)); continue; }
-    lines.push(...ls); cost += c; shown.add(id);
+    lines.push(...briefLines(id, items, indent)); shown.add(id);
   }
+  for (const id of pointed) if (!shown.has(id)) { lines.push(clip(`${indent}${id}: memory get ${id}`, COMPACT_LINE_MAX)); shown.add(id); }
   return { lines, shown };
 }
-/** R2: how far past its share a hit may grow for its brief, out of the pool (one floor share). */
-const BRIEF_EXTRA = 120;
 
-/** The width of a compact content line (4 spaces of indent before it). */
-const CONTENT_WIDTH = COMPACT_LINE_MAX - 4;
+/** M3 (god 5dc648): every hit-body line prints under the indent and this prefix, so a note line that starts with a
+ *  field label (`merge: …`, `done: …`, `tag: …`) can never read as a field line; field lines live in the brief alone. */
+export const BODY_PREFIX = '| ';
+const BODY_INDENT = 4;
+/** What one compact body line costs beyond its text: the indent, the prefix and the newline. */
+const BODY_OVERHEAD = BODY_INDENT + BODY_PREFIX.length + 1;
+/** The width of a compact body line (the indent and the prefix before it). */
+const BODY_WIDTH = COMPACT_LINE_MAX - BODY_INDENT - BODY_PREFIX.length;
 /** A hit may take up to this many even shares of what is left (the current values come first, so they get whole chunks). */
 const COMPACT_SHARES = 3;
 
@@ -288,8 +290,8 @@ export function wrap(s: string, width: number): string[] {
   return out;
 }
 
-/** What a hit's lines cost: meta + newline, then per content line 4 spaces + text + newline. */
-const costOf = (meta: string, lines: string[]): number => meta.length + 1 + lines.reduce((n, l) => n + l.length + 5, 0);
+/** What a hit's lines cost: meta + newline, then per body line the indent + the prefix + text + newline. */
+const costOf = (meta: string, lines: string[]): number => meta.length + 1 + lines.reduce((n, l) => n + l.length + BODY_OVERHEAD, 0);
 
 /**
  * The compact text, <= COMPACT_MAX_CHARS by construction: a meta line and the content, wrapped on
@@ -313,11 +315,10 @@ export function formatSearchCompact(query: string, flags: SearchFlags, hits: Sea
   const clipReserve = clipNote(hits.length).length + 1;
   let clipped = 0;
   const keys: string[] = [];
-  // S3: the named briefs first, above every hit; a hit of a card shown there carries no second brief.
-  const top = namedBlock(flags.namedCards ?? [], leads, '');
+  // S3 / M1: the named briefs and the pointers first, above every hit; no hit carries a brief of its own.
+  const top = namedBlock(flags.namedCards ?? [], flags.pointedCards ?? [], leads, '');
   out.push(...top.lines);
   used += top.lines.reduce((n, l) => n + l.length + 1, 0);
-  const shownCards = new Set<string>(top.shown);
   for (let i = 0; i < ordered.length; i++) {
     const h = ordered[i];
     const left = ordered.length - i;
@@ -331,53 +332,31 @@ export function formatSearchCompact(query: string, flags: SearchFlags, hits: Sea
     // M3a: a current claim hit opens with `<key>: <value>` and its body continues after it (no copy); on a
     // tight share the meta line gives up room (down to 24 chars) so that line still shows.
     const split = leadSplit(h);
-    const metaMax = Math.max(24, Math.min(COMPACT_LINE_MAX, budget - 16 - (split ? Math.min(split.lead.length + 5, 64) : 0)));
+    const metaMax = Math.max(24, Math.min(COMPACT_LINE_MAX, budget - 16 - (split ? Math.min(split.lead.length + BODY_OVERHEAD, 64) : 0)));
     const meta = clip(h.claim
       ? `[${i + 1}] ${statusWord(h.claim.status)} · ${h.claim.kind} · ${h.claim.key ?? '-'} · ${h.claim.at.slice(0, 10)} · ${h.claim.id} · ${h.wing}/${h.room}`
       : `[${i + 1}] ${h.wing}/${h.room} · ${base(h.source)}`, metaMax);
     const whole = split ? (split.rest ? `${split.lead} ${split.rest}` : split.lead) : oneLine(h.content);
-    // Step 3 fix R2 (god bbcb4a): the FIRST hit of a card carries the card's current field values (`<id> now: …`, from
-    // main's resolver: the values `memory get <id>` leads with) INSIDE its own budget, so a search-only agent sees the
-    // answer. The brief takes what the hit has over its content (never under one content line, so the matched term
-    // stays shown: M1 S1 / M3), drops fields from its end to fit, and is left out when not even one fits.
-    const cardId = h.claim?.key ? cardIdOfKey(h.claim.key) : null;
-    let cardLines: string[] = [];
-    if (cardId && !shownCards.has(cardId) && leads[cardId]?.length) {
-      // What the content keeps at least: its whole cost when short, else one windowed line (34 chars + the mark).
-      const floor = Math.min(costOf(meta, wrap(whole, CONTENT_WIDTH)), meta.length + 1 + 34 + 5);
-      // A tight share (many hits) holds no brief past that floor, so the brief may grow the hit by up to BRIEF_EXTRA
-      // out of the pool: when every later hit is still owed its floor share, only what is spare beyond those; when
-      // the list ends early anyway, the next hit gives way (a card's current value outranks one more clipped hit
-      // the agent can still reach with --results).
-      const pool = share >= COMPACT_MIN_HIT ? remaining - (left - 1) * COMPACT_MIN_HIT - budget : remaining - budget;
-      const room = budget - floor + Math.min(Math.max(0, pool), BRIEF_EXTRA);
-      const items = leads[cardId].slice(0, BRIEF_LINES_MAX);
-      while (items.length) {
-        const ls = briefLines(cardId, items);
-        if (linesCost(ls) <= room) { cardLines = ls; break; }
-        items.pop();
-      }
-      if (cardLines.length) { shownCards.add(cardId); budget = Math.max(floor, budget - linesCost(cardLines)); }
-    }
-    const cardCost = linesCost(cardLines);
-    let lines = wrap(whole, CONTENT_WIDTH);
+    // M1 (god 5dc648): no brief under a hit any more (step 3 fix R2 printed the card's field values here): a hit's
+    // card is pointed in the top block, and only the query-named brief carries field lines.
+    let lines = wrap(whole, BODY_WIDTH);
     let cut = false;
     if (costOf(meta, lines) > budget) {
       // Clipped: reserve the note now (once), then fit a window of the content into what is left.
       if (!clipped) {
-        const after = Math.min(budget, remaining - clipReserve - cardCost);
+        const after = Math.min(budget, remaining - clipReserve);
         if (after < meta.length + 14) { out.push(footer(left)); break; }
         budget = after;
       }
       cut = true;
       const avail = budget - meta.length - 1;
-      const max = Math.max(1, avail - 5 * Math.ceil(avail / CONTENT_WIDTH));
+      const max = Math.max(1, avail - BODY_OVERHEAD * Math.ceil(avail / BODY_WIDTH));
       // Word wrapping can add lines: drop from the end until the hit fits its budget (marked `…`).
       const fit = (text: string, bud: number): string[] => {
         const av = bud - meta.length - 1;
-        let ls = wrap(text, CONTENT_WIDTH);
-        while (ls.length > 1 && costOf(meta, ls) > bud) { ls.pop(); ls[ls.length - 1] = clip(`${ls[ls.length - 1]}…`, CONTENT_WIDTH); }
-        if (costOf(meta, ls) > bud) ls = [clip(ls[0] ?? '', Math.max(1, av - 5))];
+        let ls = wrap(text, BODY_WIDTH);
+        while (ls.length > 1 && costOf(meta, ls) > bud) { ls.pop(); ls[ls.length - 1] = clip(`${ls[ls.length - 1]}…`, BODY_WIDTH); }
+        if (costOf(meta, ls) > bud) ls = [clip(ls[0] ?? '', Math.max(1, av - BODY_OVERHEAD))];
         return ls;
       };
       // The head was chosen before the wrap cost; if the popped lines took every matched term with them, the
@@ -391,30 +370,30 @@ export function formatSearchCompact(query: string, flags: SearchFlags, hits: Sea
       // M3a: the lead keeps its line when a window of the rest (>= 24 chars) fits beside it; with less room it stands
       // alone only when it holds a matched term itself (or no part of the hit does). Else the hit is windowed as
       // before, without the lead, so what is shown never falls below M1 + S1.
-      const leadCost = split ? split.lead.length + 5 : 0;
+      const leadCost = split ? split.lead.length + BODY_OVERHEAD : 0;
       const restAvail = avail - leadCost;
-      if (split && restAvail >= 24 + 5) {
-        const restMax = Math.max(1, restAvail - 5 * Math.ceil(restAvail / CONTENT_WIDTH));
+      if (split && restAvail >= 24 + BODY_OVERHEAD) {
+        const restMax = Math.max(1, restAvail - BODY_OVERHEAD * Math.ceil(restAvail / BODY_WIDTH));
         lines = split.rest ? [split.lead, ...window(split.rest, restMax, budget - leadCost)] : [split.lead];
-      } else if (split && avail - 5 - 29 >= 24) {
+      } else if (split && avail - BODY_OVERHEAD - 29 >= 24) {
         // M3a: a shorter lead (the key and the start of its value), then a window of what follows it.
-        const lead = clip(split.lead, avail - 5 - 29);
-        const lc = lead.length + 5;
+        const lead = clip(split.lead, avail - BODY_OVERHEAD - 29);
+        const lc = lead.length + BODY_OVERHEAD;
         const ra = avail - lc;
         const from = whole.slice(lead.length - 1).trimStart();
         // A term cut in two by the clip would be lost: then the whole hit is windowed as before, without the lead.
         lines = hasTerm(whole, query) && !hasTerm(lead, query) && !hasTerm(from, query)
           ? window(whole, max, budget)
-          : [lead, ...window(from, Math.max(1, ra - 5 * Math.ceil(ra / CONTENT_WIDTH)), budget - lc)];
+          : [lead, ...window(from, Math.max(1, ra - BODY_OVERHEAD * Math.ceil(ra / BODY_WIDTH)), budget - lc)];
       } else {
-        const alone = split ? clip(split.lead, Math.max(1, avail - 5)) : null;
+        const alone = split ? clip(split.lead, Math.max(1, avail - BODY_OVERHEAD)) : null;
         lines = alone !== null && (!hasTerm(whole, query) || hasTerm(alone, query)) ? [alone] : window(whole, max, budget);
       }
     }
     if (cut) clipped++;
-    out.push(meta, ...lines.map((l) => `    ${l}`), ...cardLines.map((l) => `    ${l}`));
+    // M3: the body under the fixed prefix, never a bare `label: …` line.
+    out.push(meta, ...lines.map((l) => `    ${BODY_PREFIX}${l}`));
     used += costOf(meta, lines);
-    used += cardCost;
     if (h.claim?.key) keys.push(h.claim.key);
   }
   if (clipped) out.push(clipNote(clipped));
@@ -436,8 +415,8 @@ export function formatSearchFull(query: string, flags: SearchFlags, hits: Search
   if (flags.since) L.push(`  Since: ${flags.since}`);
   if (flags.before) L.push(`  Before: ${flags.before}`);
   L.push('='.repeat(60), '');
-  // S3: the named briefs above the hits, as in the compact text.
-  const top = namedBlock(flags.namedCards ?? [], leads, '  ');
+  // S3 / M1: the named briefs and the pointers above the hits, as in the compact text.
+  const top = namedBlock(flags.namedCards ?? [], flags.pointedCards ?? [], leads, '  ');
   if (top.lines.length) L.push(...top.lines, '');
   (flags.newest ? newestOrder(query, hits) : hits).forEach((h, i) => {
     L.push(`  [${i + 1}] ${h.wing} / ${h.room}`);
@@ -452,18 +431,15 @@ export function formatSearchFull(query: string, flags: SearchFlags, hits: Search
       L.push(`      Claim:  [${prior ? 'prior' : maybePrior ? 'prior?' : h.claim.status} · ${h.claim.kind} · ${h.claim.key ?? '-'} · ${date} · ${h.claim.id}]`);
       // CLAIMS-90 R2 (C90-GET): the ready lookup for the key's current value.
       if (h.claim.key) L.push(`      Get:    memory get ${h.claim.key}`);
-      // Step 3 fix R2: the card's current field values beside the pointer.
-      const cardId = h.claim.key ? cardIdOfKey(h.claim.key) : null;
-      // S1: the brief as label-first lines under the id (BRIEF_LINES_MAX of them); not again for a card shown above.
-      if (cardId && leads[cardId]?.length && !top.shown.has(cardId)) L.push(`      Card:   ${cardId}`, ...leads[cardId].slice(0, BRIEF_LINES_MAX).map((l) => `              ${l}`));
       if (prior) L.push(`      Version: prior (dated ${date}); search for the key to see its current value.`);
       if (maybePrior) L.push(`      Version: possibly replaced (unconfirmed, dated ${date}); search for the key to see its current value.`);
     }
     L.push(`      Match:  cosine_sim=${h.cosineSim === null ? '0.0' : py(h.cosineSim)}  bm25=${h.bm25 === null ? '0.0' : py(h.bm25)}`);
     const lead = leadLine(h);
-    if (lead) L.push(`      ${clip(lead, COMPACT_LINE_MAX)}`);
+    if (lead) L.push(`      ${BODY_PREFIX}${clip(lead, COMPACT_LINE_MAX)}`);
     L.push('');
-    for (const line of h.content.trim().split('\n')) L.push(`      ${line}`);
+    // M3: every body line under the fixed prefix.
+    for (const line of h.content.trim().split('\n')) L.push(`      ${BODY_PREFIX}${line}`);
     L.push('');
     L.push(`  ${'-'.repeat(56)}`);
   });

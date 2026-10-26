@@ -133,7 +133,7 @@ test('GOLDEN search text (the hybrid path, --full), including the filter lines a
   assert.equal(text, [
     '', '='.repeat(60), '  Results for: "log rotation"', '  Wing: oscar-mu3300lb', '  Since: 2026-09-01', '='.repeat(60), '',
     '  [1] oscar-mu3300lb / general', '      Source: UPSTREAM.md', '      Match:  cosine_sim=0.436  bm25=1.347', '',
-    '      line one', '      line two', '', `  ${'-'.repeat(56)}`, '', ''
+    '      | line one', '      | line two', '', `  ${'-'.repeat(56)}`, '', ''
   ].join('\n'));
   assert.equal(formatSearch('nothing', {}, []), '\n  No results found for: "nothing"\n');
   assert.match(formatSearch('q', { full: true }, [{ ...hits[0], cosineSim: null, bm25: 2 }]), /cosine_sim=0\.0 {2}bm25=2\.0/);

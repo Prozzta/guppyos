@@ -98,7 +98,7 @@ export async function runWorker(cfg: WorkerConfig, port: Port, deps: { Database:
   });
   const engine = new MemoryEngine({
     hiveRoot: cfg.hiveRoot, store, embedder, countTokens: (t) => tokenizer.count(t), claimLedger: cfg.claimLedger, anchored: cfg.anchored,
-    cardLead: async (lead) => { const r = await ask('card-lead', { cards: lead.cards, texts: lead.texts }); return r && typeof r === 'object' ? (r as { briefs: Record<string, string[]>; named: string[] }) : { briefs: {}, named: [] }; },
+    cardLead: async (lead) => { const r = await ask('card-lead', { cards: lead.cards, texts: lead.texts }); return r && typeof r === 'object' ? (r as { briefs: Record<string, string[]>; named: string[]; pointed: string[] }) : { briefs: {}, named: [], pointed: [] }; },
     log: (row) => port.postMessage({ event: 'log', ...row }),
     onModelUnload: () => port.postMessage({ event: 'model-unloaded' }),
     onModelLoaded: () => port.postMessage({ event: 'model-loaded' }),

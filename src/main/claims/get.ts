@@ -606,8 +606,14 @@ const agentNamed = (agent: string | undefined, words: Set<string>): boolean => !
  *  contents) a card id, a card's branch or a release version may be named in; main answers the briefs by term and
  *  the named terms whose brief goes above the hits. */
 export interface CardLeadAsk { cards: string[]; texts: string[] }
-export interface CardLeadReply { briefs: Record<string, string[]>; named: string[] }
-export const EMPTY_CARD_LEADS: CardLeadReply = { briefs: {}, named: [] };
+export interface CardLeadReply {
+  briefs: Record<string, string[]>;
+  /** The terms the QUERY names (their briefs print whole, field lines and all). */
+  named: string[];
+  /** M1 (god 5dc648): every other card or release the hits name or are keyed to: one label-free `memory get` pointer line each. */
+  pointed: string[];
+}
+export const EMPTY_CARD_LEADS: CardLeadReply = { briefs: {}, named: [], pointed: [] };
 
 const day = (iso: string): string => (iso || '').slice(0, 10);
 const kv = (key: string, text: string): string => (key ? `${key}: ${text.replace(/\s+/g, ' ').trim()}` : text.replace(/\s+/g, ' ').trim());

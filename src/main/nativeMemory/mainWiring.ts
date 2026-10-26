@@ -49,7 +49,7 @@ export interface WiringDeps {
   claims?: () => ClaimsEndpointDeps | null;
   /** Step 3 fix R2 (god bbcb4a): the card briefs the worker asks for while formatting a search (claims/readWiring.ts
    *  claimCardLeadOver: the same resolver as `memory get`). */
-  cardLead?: (ask: { cards: string[]; texts: string[] }) => { briefs: Record<string, string[]>; named: string[] };
+  cardLead?: (ask: { cards: string[]; texts: string[] }) => { briefs: Record<string, string[]>; named: string[]; pointed: string[] };
   /** CLAIM-LEDGER W3: the Settings level (config claimLedger), passed to the worker's discovery. */
   claimLedger?: () => unknown;
   /** CLAIMS-HEAD-ANCHOR (A-2): the agents anchored for this hive, sent with the level. */

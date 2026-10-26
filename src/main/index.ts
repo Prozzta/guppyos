@@ -1842,7 +1842,7 @@ const nativeMemory = new NativeMemoryWiring({
   // Step 3 fix R2 (god bbcb4a): the card briefs a search's hits carry, claims/readWiring.ts (the resolver of memory get).
   cardLead: (ask) => {
     const root = hive.root(); const ep = claimsEndpoint();
-    if (!root || !ep) return { briefs: {}, named: [] };
+    if (!root || !ep) return { briefs: {}, named: [], pointed: [] };
     return claimCardLeadOver({ root, store: ep.store, agents: claimLedgerAgents, tasks: () => ((hive.allTasks() as { tasks?: Array<Record<string, unknown>> }).tasks ?? []) }, ask);
   },
   vecLoadablePath: () => {

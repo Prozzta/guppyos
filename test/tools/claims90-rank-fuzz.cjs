@@ -48,7 +48,7 @@ function block(t, n) {
   if (a < 0) return null;
   let b = a + 1;
   while (b < ls.length && ls[b].startsWith('    ')) b++;
-  return ls.slice(a + 1, b).map((l) => l.slice(4)).join(' ');
+  return ls.slice(a + 1, b).map((l) => l.slice(6)).join(' ');  // M3: `    | ` before each body line
 }
 
 /** cells[`${max}/${n}/${rank}`] = { whole, term } in percent over `trials` fixtures per (max, n). */

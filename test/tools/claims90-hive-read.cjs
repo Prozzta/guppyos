@@ -63,7 +63,7 @@ async function searchTextOver(root, query, flags, hits) {
   const { cardLeadsFor } = loadTs('src/main/nativeMemory/engine.ts');
   const { formatSearch } = loadTs('src/main/nativeMemory/format.ts');
   const lead = await cardLeadsFor(hits, query, root ? hiveCardLead(root) : undefined);
-  return formatSearch(query, flags, hits, lead.briefs, lead.named);
+  return formatSearch(query, flags, hits, lead.briefs, lead.named, lead.pointed);
 }
 
 module.exports = { readLedgers, readTasks, hiveReadDeps, hiveCardLead, searchTextOver };
