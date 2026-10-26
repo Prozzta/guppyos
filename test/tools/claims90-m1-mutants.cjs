@@ -40,7 +40,9 @@ const TESTS = ['test/claims90-m1-compact.test.cjs', 'test/native-memory.test.cjs
   // CLAIMS-90 R2 (C90-GET): the lookup, the search modes and the cross-path test.
   'test/claims90-get.test.cjs', 'test/claims90-search-modes.test.cjs', 'test/claims90-get-paths.test.cjs', 'test/hook-broker-p3.test.cjs',
   // CLAIMS-90 R2 step 2: the pointer footer, the rank fuzz and the T3 pool.
-  'test/claims90-step2-rank-pool.test.cjs'];
+  'test/claims90-step2-rank-pool.test.cjs',
+  // CLAIMS-90 step 3 S1-S4 (god 7a4eec): the brief / named-block pins (rows S1a-S4c live only here).
+  'test/claims90-step3-lead.test.cjs'];
 /** CENSUS_TESTS=<files, comma or space separated> runs the census over those suites instead (a diagnosis of one
  *  suite under one mutant: `CENSUS_TESTS=test/x.test.cjs node test/tools/claims90-m1-mutants.cjs AG`). */
 const SUITES = process.env.CENSUS_TESTS ? process.env.CENSUS_TESTS.split(/[\s,]+/).filter(Boolean) : TESTS;
@@ -87,7 +89,7 @@ const MUTANTS = [
   ['A get: --agent ignores the derived row naming the agent\'s done mail', GET, "      ?? values.find((c) => c.agent === 'derived' && c.text.includes(`from ${agent} `))\n", ''],
   ['B get: the decision list is newest-only', GET, "const decisions = live.filter((c) => isDecision(canonicalKey(c.key ?? '', d.registry))).sort(newestFirst).map(row);", "const decisions = live.filter((c) => isDecision(canonicalKey(c.key ?? '', d.registry))).sort(newestFirst).slice(0, 1).map(row);"],
   ['C get: superseded rows carry no excerpt', GET, 'status: ix.status.get(c.id) ?? \'unknown\', excerpt: excerpt(c.text),', 'status: ix.status.get(c.id) ?? \'unknown\', excerpt: \'\','],
-  ['D get: a card key does not cover its derived sub-keys', GET, "  for (const k of [...keySet]) if (isCardKey(k)) for (const other of ix.byKey.keys()) if (other.startsWith(`${k}.`)) keySet.add(other);\n", ''],
+  ['D get: a card key does not cover its derived sub-keys', GET, "  for (const k of [...keySet]) if (isCardKey(k) && !FIELD_SUFFIX.test(k)) for (const other of ix.byKey.keys()) if (other.startsWith(`${k}.`)) keySet.add(other);\n", ''],
   ['E get: the done-sha rule is off (a sha in the agent\'s done mail is not a known value)', GET, "          if (!named.length && shaField && m.act === 'done' && (!agent || m.from === agent)) named = sha7(text);\n", ''],
   ['F get: the unknown-term line differs by path (keys tried not printed)', GET, 'L.push(`no claim under ${r.tried.join(\', \')}`);', 'L.push(`no claim under ${r.term}`);'],
   ['G search: the meta line carries no get pointer', FORMAT, '  if (get) out.push(get);', ''],
@@ -137,7 +139,7 @@ const MUTANTS = [
   ['AC exact: the needle keeps markup', ENGINE, 'return stripMarkup(s.toLowerCase());', 'return s.toLowerCase();'],
   ['AD exact: file lines compared raw', ENGINE, 'if (!stripMarkup(lines[i].toLowerCase()).includes(needle)) continue;', 'if (!lines[i].toLowerCase().includes(needle)) continue;'],
   ['AE ruling 3: a branch name never resolves to its card', GET, '    if (taskIds.has(name) || hasKey(cardK)) base = ix.byKey.has(mergeK) ? mergeK : cardK;', '    if (false) base = cardK;'],
-  ['AF ruling 3: the merge sub-key is not a field (bare card takes it)', GET, 'fixversion|merge|decision', 'fixversion|decision'],
+  ['AF ruling 3: the merge sub-key is not a field (bare card takes it)', GET, 'fixversion|merge(?:\\.rc)?|decision', 'fixversion|decision'],
   ['S1a brief format: label-first lines under the id header, never the one-line `<id> now:` join', FORMAT, "const briefLines = (cardId: string, items: string[]): string[] => [cardId, ...items.map((i) => clip(`  ${i}`, CONTENT_WIDTH))];", "const briefLines = (cardId: string, items: string[]): string[] => wrap(`${cardId} now: ${items.join(' · ')}`, CONTENT_WIDTH);"],
   ['S1b brief parity: the brief line is get\'s own lead line (label with its agent), not a bare field: value', GET, '  const out = rows.map(({ l }) => leadLine(l));', '  const out = rows.map(({ l }) => `${l.field}: ${leadValue(renderValue(l), LEAD_VALUE_MAX)}`);'],
   ['S2a brief order: the lines the query names come first', GET, '  rows.sort((x, y) => x.n - y.n || x.i - y.i);', '  rows.sort((x, y) => x.i - y.i);'],
