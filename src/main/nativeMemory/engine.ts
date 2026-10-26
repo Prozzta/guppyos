@@ -79,6 +79,17 @@ export interface EngineDeps {
 }
 /** R2: at most this many cards asked for per search. */
 export const CARD_LEADS_MAX = 12;
+/** The distinct card ids a search's hits name (claim keys `card.<id>[.field]`), in hit order, at most CARD_LEADS_MAX:
+ *  the engine's card-lead ask and the L7 tool (claims90-search.cjs --hive) build the briefs from this one list. */
+export const cardIdsOfHits = (hits: Array<Pick<SearchHit, 'claim'>>): string[] =>
+  [...new Set(hits.map((h) => (h.claim?.key ? cardIdOfKey(h.claim.key) : null)).filter((c): c is string => !!c))].slice(0, CARD_LEADS_MAX);
+/** The card briefs for these hits through the cardLead dep: none without a dep, on a throw or a non-object answer. */
+export async function cardLeadsFor(hits: Array<Pick<SearchHit, 'claim'>>, cardLead: EngineDeps['cardLead']): Promise<Record<string, string[]>> {
+  if (!cardLead) return {};
+  const cards = cardIdsOfHits(hits);
+  if (!cards.length) return {};
+  try { const r = await cardLead(cards); return r && typeof r === 'object' ? r : {}; } catch { return {}; }
+}
 
 /** CLAIM-LEDGER: one agent's verified claim chunks, sent by main after an append (A6). */
 export interface ClaimsSyncArgs { wing: string; path: string; head: string; chunks: ClaimPart[];
@@ -295,12 +306,7 @@ export class MemoryEngine {
   }
 
   /** Step 3 fix R2: the card briefs for the distinct cards the hits name (claim keys `card.<id>[.field]`), in hit order. */
-  private async cardLeads(hits: SearchHit[]): Promise<Record<string, string[]>> {
-    if (!this.d.cardLead) return {};
-    const cards = [...new Set(hits.map((h) => (h.claim?.key ? cardIdOfKey(h.claim.key) : null)).filter((c): c is string => !!c))].slice(0, CARD_LEADS_MAX);
-    if (!cards.length) return {};
-    try { const r = await this.d.cardLead(cards); return r && typeof r === 'object' ? r : {}; } catch { return {}; }
-  }
+  private cardLeads(hits: SearchHit[]): Promise<Record<string, string[]>> { return cardLeadsFor(hits, this.d.cardLead); }
 
   async wakeUp(wing: string | null, full = false): Promise<EngineReply> {
     // (b) A wake-up is the caller's (or an explicit) wing: index it first.

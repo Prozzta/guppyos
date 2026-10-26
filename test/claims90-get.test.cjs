@@ -231,8 +231,9 @@ test('mails: newest first, MAIL_DEFAULT per page, one row per mail id with recip
   assert.equal(get('FOO-7', { mail: 0 }, d).mails.length, 0);
   assert.equal(get('FOO-7', { mail: 500 }, d).mails.length, 7, 'capped at MAIL_MAX, not refused here (the endpoint refuses >50)');
   const t = G.formatGet(r);
-  assert.match(t, /^mails \(5 newest first; older: --before 2026-10-13T09-00-00-000Z-m3\):\n  2026-10-17T09-00-00-000Z-m7 alpha-1 → jim-x inform: FOO-7 mail 7 \[field · delivery\]\n/m);
-  assert.match(t, /^  2026-10-13T09-00-00-000Z-m3 alpha-1 → god,creed-y inform: FOO-7 mail 3 \[field · delivery\]$/m);
+  // L5 (god fada64): a mail row is labelled `mail:` (its id before a colon read as a field label to the oracle).
+  assert.match(t, /^mails \(5 newest first; older: --before 2026-10-13T09-00-00-000Z-m3\):\n  mail: 2026-10-17T09-00-00-000Z-m7 alpha-1 → jim-x inform — FOO-7 mail 7 \[field · delivery\]\n/m);
+  assert.match(t, /^  mail: 2026-10-13T09-00-00-000Z-m3 alpha-1 → god,creed-y inform — FOO-7 mail 3 \[field · delivery\]$/m);
   assert.match(text('FOO-7', {}, deps({ mailRows: () => null })), /^mails: no mail index for this card yet \(hive\/state\/mail-cards\)$/m);
   assert.equal(get('card.foo-7.status', {}, d).mails.length, 5, 'a sub-key is still the card: its mail shows');
 });

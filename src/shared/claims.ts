@@ -102,6 +102,14 @@ export interface ClaimRec extends RecBase {
    * in an export. MAC-covered like every field.
    */
   section?: string;
+  /**
+   * CLAIMS-90 step 3 L1 (god fada64, Creed 011da9): a derived FIELD claim's structured value beside its prose (the
+   * sha, status word, agent id, version or merged tip; `none` when the card has no such value), one line, set only
+   * by the derived writer (an agent draft with it is refused). The lead block prints it (L2) and never the prose.
+   */
+  value?: string;
+  /** L1: on card.<id>.donesha claims, the done mail's sender (every derived claim's `agent` is the derived ledger). */
+  valueAgent?: string;
 }
 
 export type EventKind =

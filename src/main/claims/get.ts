@@ -59,6 +59,10 @@ export interface GetCurrent {
   claimId?: string; mailId?: string;
   agent: string; at: string; text: string; key: string;
   refs?: ClaimRec['refs'];
+  /** L2: the structured value (a derived claim's `value`; for a mail current the known value the mail names). */
+  value?: string;
+  /** L3: the sender a per-agent value belongs to (a donesha claim's `valueAgent`). */
+  valueAgent?: string;
 }
 export interface GetResult {
   term: string;
@@ -79,22 +83,31 @@ export interface GetResult {
   lead: GetFieldLine[] | null;
 }
 
-/** R1: the card fields the lead block answers, in print order (then the decision count). */
-export const CARD_FIELDS = ['donesha', 'lastsha', 'status', 'assignee', 'fixVersion', 'merge'] as const;
+/** R1: the card fields the lead block answers, in print order (then the decision count); L4 adds audit. */
+export const CARD_FIELDS = ['donesha', 'lastsha', 'status', 'assignee', 'fixVersion', 'merge', 'audit'] as const;
+/** L3: the fields whose derived claims are one per (card, sender): the lead prints one line per agent. */
+export const PER_AGENT_FIELDS: readonly string[] = ['donesha'];
+/** L4: the release.<v> lead lines, in print order (release.<v>.tag, release.<v>.bump: Creed's L1 keys). */
+export const RELEASE_FIELDS = ['tag', 'bump'] as const;
+const RELEASE_KEY = /^release\.\d+(?:\.\d+)+$/;
 export interface GetFieldLine {
   field: string;
-  /** The current value's text (one line), null when nothing answers it. */
+  /** The key the line answers (card.<id>.<field> / release.<v>.<field>). */
+  key?: string;
+  /** L2: the STRUCTURED value, null when nothing answers it (source none) or the current claim carries no value yet. */
   value: string | null;
   /** Where it came from: the field's claim, the mail rule, tasks.json, or nothing. */
   source: 'claim' | 'mail' | 'tasks' | 'none';
   id?: string; agent?: string; at?: string;
+  /** L3: a per-agent line (`field (agent): value`); `latest` marks the newest of them (`field (latest): value by agent`). */
+  by?: string; latest?: true;
 }
 /** R1: the compact `get` text stays under the tool-output condenser cap (1500) by construction: these equal
  *  format.ts COMPACT_MAX_CHARS / COMPACT_LINE_MAX (pinned by test/claims90-step3-lead.test.cjs). */
 export const GET_MAX_CHARS = 1400;
 export const GET_LINE_MAX = 158;
 /** A lead value on its `field: value` line; the search brief (R2) shows less. */
-const LEAD_VALUE_MAX = 80;
+const LEAD_VALUE_MAX = 120;
 const BRIEF_VALUE_MAX = 48;
 
 export const MAIL_DEFAULT = 5;
@@ -121,7 +134,7 @@ export function branchName(term: string): string | null {
   return m && /\//.test(term) ? m[1].toLowerCase() : null;
 }
 export const branchKeyOf = (name: string): string => `${BRANCH_PREFIX}${name.toLowerCase()}`;
-const FIELD_SUFFIX = /\.(status|assignee|lastsha|donesha|fixversion|merge|decision\.[a-z0-9]{8})$/;
+const FIELD_SUFFIX = /\.(status|assignee|lastsha|donesha|audit|fixversion|merge|decision\.[a-z0-9]{8})$/;
 const SHA_RE = /\b[0-9a-f]{7,40}\b/g;
 const VERSION_RE = /\b\d+\.\d+(?:\.\d+)+\b/g;
 
@@ -153,8 +166,15 @@ export function canonicalKey(key: string, registry: KeyRegistry): string {
 export function normaliseTerm(raw: string): string {
   let t = raw.trim().replace(/^["'`]+|["'`]+$/g, '').trim().toLowerCase();
   t = t.replace(/^memory\s+get\s+/, '').trim();
+  // L5: an id as the sources line writes it (its dash before the hex run as an underscore) is the id.
+  t = t.replace(/^c_(?=[0-9a-f]{12}$)/, 'c-');
   return t;
 }
+
+/** L5 (god fada64): an id written so no bare 7+ hex run reads as a sha: the dash before such a run becomes an
+ *  underscore (`c-be6e7c6f41b9` → `c_be6e7c6f41b9`; a mail id's dashed time has no such run). normaliseTerm reads
+ *  it back. A general shape rule over every id, never an id list. */
+export const safeId = (id: string): string => id.replace(/-(?=[0-9a-f]{7,}(?![0-9a-z]))/gi, '_');
 
 const sha7 = (s: string): string[] => (s.toLowerCase().match(SHA_RE) ?? []).filter((x) => /\d/.test(x)).map((x) => x.slice(0, 7));
 const versions = (s: string): string[] => s.match(VERSION_RE) ?? [];
@@ -366,6 +386,7 @@ function resolveIn(ix: Indexed, term: string, opts: GetOptions, d: GetDeps, with
   let pick: ClaimRec | undefined;
   if (agent) {
     pick = values.find((c) => c.agent === agent)
+      ?? values.find((c) => c.valueAgent === agent)
       ?? values.find((c) => c.agent === 'derived' && c.text.includes(`from ${agent} `))
       ?? values[0];
   } else pick = values[0];
@@ -377,7 +398,7 @@ function resolveIn(ix: Indexed, term: string, opts: GetOptions, d: GetDeps, with
     claimId: c.id, agent: c.agent, at: c.at, key: c.key ?? '', status: ix.status.get(c.id) ?? 'unknown', excerpt: excerpt(c.text),
     supersededBy: [...(ix.supersededBy.get(c.id) ?? [])].sort(cmp), ...(ix.reason.get(c.id) ? { reason: ix.reason.get(c.id) } : {}),
   }));
-  let current: GetCurrent | null = pick ? { source: 'claim', claimId: pick.id, agent: pick.agent, at: pick.at, text: pick.text, key: pick.key ?? '', ...(pick.refs?.length ? { refs: pick.refs } : {}) } : null;
+  let current: GetCurrent | null = pick ? { source: 'claim', claimId: pick.id, agent: pick.agent, at: pick.at, text: pick.text, key: pick.key ?? '', ...(pick.refs?.length ? { refs: pick.refs } : {}), ...(typeof pick.value === 'string' ? { value: pick.value } : {}), ...(typeof pick.valueAgent === 'string' ? { valueAgent: pick.valueAgent } : {}) } : null;
 
   // The card's tasks.json row (primitive fields only).
   let fields: Record<string, unknown> | null = null;
@@ -423,13 +444,16 @@ function resolveIn(ix: Indexed, term: string, opts: GetOptions, d: GetDeps, with
           if (!named.length && shaField && m.act === 'done' && (!agent || m.from === agent)) named = sha7(text);
           if (!named.length) continue;
           const first = named.map((v) => hay.indexOf(v)).filter((i) => i >= 0).sort((a, b) => a - b)[0] ?? 0;
+          // L2: the value the mail names, whole (the sha run at the first named value, or the version as written).
+          const run = /^[0-9a-f]{7,40}/i.exec(text.slice(first));
+          const value = run ? run[0].toLowerCase() : text.slice(first, first + (named.find((v) => hay.indexOf(v) === first)?.length ?? 0));
           const body = m.body ?? '';
           let shown = `${m.subject} — ${excerpt(body, MAIL_TEXT_MAX)}`;
           if (!named.some((v) => shown.toLowerCase().includes(v))) {
             const startIn = Math.max(0, first - m.subject.length - 1 - 60);
             shown = `${m.subject} — …${excerpt(body.slice(startIn), MAIL_TEXT_MAX - m.subject.length - 4)}`;
           }
-          current = { source: 'mail', mailId: m.id, agent: m.from, at: m.created_at, text: shown, key: base };
+          current = { source: 'mail', mailId: m.id, agent: m.from, at: m.created_at, text: shown, key: base, ...(value ? { value } : {}) };
           break;
         }
       }
@@ -451,48 +475,86 @@ function resolveIn(ix: Indexed, term: string, opts: GetOptions, d: GetDeps, with
       for (const [k, ids] of ix.byKey) if (k.startsWith(`${CARD_PREFIX}${card}.`) && isDecision(k)) for (const id of ids) { const c = ix.claims.get(id); if (c && ix.status.get(c.id) === 'live') rows.push(c); }
       shownDecisions = rows.sort(newestFirst).map(row);
     }
+    // L2 (god fada64): every line's value is the STRUCTURED value (a derived claim's `value`, the mail rule's named
+    // value, or the tasks.json field), never a cut of the prose; L3: a per-agent field prints one line per agent.
     const sub: GetOptions = { agent: opts.agent ?? null, noMail: opts.noMail === true, mail: 0 };
     for (const f of CARD_FIELDS) {
-      const c = resolveIn(ix, `${CARD_PREFIX}${card}.${f.toLowerCase()}`, sub, d, false).current;
-      const tv = fields?.[f];
-      if (c) lead.push({ field: f, value: c.text, source: c.source, id: c.source === 'mail' ? c.mailId : c.claimId, agent: c.agent, at: c.at });
-      else if (tv !== undefined && tv !== null && tv !== '') lead.push({ field: f, value: String(tv), source: 'tasks' });
-      else lead.push({ field: f, value: null, source: 'none' });
+      const key = `${CARD_PREFIX}${card}.${f.toLowerCase()}`;
+      if (PER_AGENT_FIELDS.includes(f)) { lead.push(...perAgentLines(ix, key, f, sub, d)); continue; }
+      lead.push(fieldLine(ix, f, key, resolveIn(ix, key, sub, d, false).current, fields?.[f]));
     }
-  } else if (withLead && !card && base.startsWith(RELEASE_PREFIX)) {
+  } else if (withLead && !card && RELEASE_KEY.test(base)) {
+    // L4: release.<v> leads with its tag and bump commits (release.<v>.tag / .bump); a release sub-key (release.<v>.pause,
+    // release.<v>.e1) has no lead: that reply IS the field.
     lead = [];
-    for (const k of [...ix.byKey.keys()].filter((o) => o.startsWith(`${base}.`)).sort(cmp)) {
-      const c = resolveIn(ix, k, { agent: opts.agent ?? null, noMail: true, mail: 0 }, d, false).current;
-      const field = k.slice(base.length + 1);
-      lead.push(c ? { field, value: c.text, source: c.source, id: c.claimId, agent: c.agent, at: c.at } : { field, value: null, source: 'none' });
+    for (const f of RELEASE_FIELDS) {
+      const key = `${base}.${f}`;
+      const c = ix.byKey.has(key) ? resolveIn(ix, key, { agent: opts.agent ?? null, noMail: true, mail: 0 }, d, false).current : null;
+      lead.push(fieldLine(ix, f, key, c, undefined));
     }
-    // A release sub-key (release.<v>.pause) has no sub-keys of its own: no lead, that reply IS the field.
-    if (!lead.length) lead = null;
   }
   return { term, keys, tried, card, current, competing, superseded, decisions: shownDecisions, fields, mails, nextBefore, mailIndex, lead };
 }
 
-/**
- * R1: a lead value on one line: the whole text when it fits, else its head, or a window on the first sha / version
- * in it when that lies past the head (a mail current is `subject — body…`: the value the field names must be what
- * the agent reads, not the subject). A shape rule over all text, never a value list.
- */
-export function leadValue(text: string, max: number): string {
-  const one = text.replace(/\s+/g, ' ').trim();
-  if (one.length <= max) return one;
-  const m = /\b(?=[0-9a-f]*\d)[0-9a-f]{7,40}\b|\b\d+\.\d+(?:\.\d+)+\b/i.exec(one);
-  if (!m || m.index + m[0].length <= max - 1) return `${one.slice(0, max - 1)}…`;
-  let start = Math.max(0, m.index - Math.floor(max / 3));
-  const sp = one.indexOf(' ', start);
-  if (sp >= 0 && sp < m.index) start = sp + 1;
-  const body = one.slice(start, start + max - 2);
-  return `…${body}${start + max - 2 < one.length ? '…' : ''}`;
+/** The newest live claim under a key that carries a structured value (the backfill's target; an agent's prose claim
+ *  may be newer and current, but the lead prints values only). */
+function structuredUnder(ix: Indexed, key: string): ClaimRec | undefined {
+  const rows: ClaimRec[] = [];
+  for (const id of ix.byKey.get(key) ?? []) { const c = ix.claims.get(id); if (c && ix.status.get(id) === 'live' && typeof c.value === 'string') rows.push(c); }
+  return rows.sort(newestFirst)[0];
 }
 
-/** R2: the brief a search hit carries for its card: the fields with a value, then the decision count. */
+/** L2: one lead line for a field: the current's structured value (a current claim without one yields to the newest
+ *  structured claim under the key; none at all prints as not structured yet), else the tasks.json field, else none. */
+function fieldLine(ix: Indexed, field: string, key: string, c: GetCurrent | null, tv: unknown): GetFieldLine {
+  if (c) {
+    const own = { field, key, source: c.source, id: c.source === 'mail' ? c.mailId : c.claimId, agent: c.valueAgent ?? c.agent, at: c.at };
+    if (c.value !== undefined) return { ...own, value: c.value };
+    const s = structuredUnder(ix, key);
+    if (s) return { field, key, value: s.value ?? null, source: 'claim', id: s.id, agent: s.valueAgent ?? s.agent, at: s.at };
+    return { ...own, value: null };
+  }
+  if (tv !== undefined && tv !== null && tv !== '') return { field, key, value: String(tv), source: 'tasks' };
+  return { field, key, value: null, source: 'none' };
+}
+
+/** L3: a per-agent field (one derived claim per card and sender, `valueAgent` the sender): `field (latest): value by
+ *  agent`, then `field (agent): value` for every agent that has one, newest first. The field's own current (the mail
+ *  rule may name a newer done mail than any claim) joins as its sender's value. --agent keeps that agent's lines. */
+function perAgentLines(ix: Indexed, key: string, field: string, sub: GetOptions, d: GetDeps): GetFieldLine[] {
+  const latest = resolveIn(ix, key, sub, d, false).current;
+  const byAgent = new Map<string, { value: string; source: 'claim' | 'mail'; id: string; at: string; ms: number }>();
+  const offer = (agent: string, value: string, source: 'claim' | 'mail', id: string, at: string): void => {
+    const ms = epochMs(at) || 0;
+    const prev = byAgent.get(agent);
+    if (!prev || ms > prev.ms) byAgent.set(agent, { value, source, id, at, ms });
+  };
+  for (const id of ix.byKey.get(key) ?? []) {
+    const c = ix.claims.get(id);
+    if (c && ix.status.get(id) === 'live' && typeof c.value === 'string') offer(c.valueAgent ?? c.agent, c.value, 'claim', c.id, c.at);
+  }
+  if (latest?.source === 'mail' && latest.value) offer(latest.agent, latest.value, 'mail', latest.mailId ?? '', latest.at);
+  const agent = sub.agent?.trim() || null;
+  const rows = [...byAgent.entries()].filter(([a]) => !agent || a === agent).sort((x, y) => y[1].ms - x[1].ms || cmp(x[0], y[0]));
+  if (!rows.length) {
+    if (agent) return [{ field, key, value: null, source: 'none', by: agent }];
+    return [latest ? { field, key, value: null, source: latest.source, id: latest.source === 'mail' ? latest.mailId : latest.claimId, agent: latest.agent, at: latest.at } : { field, key, value: null, source: 'none' }];
+  }
+  const line = ([a, r]: (typeof rows)[number]): GetFieldLine => ({ field, key, value: r.value, source: r.source, id: r.id, agent: a, at: r.at, by: a });
+  return [{ ...line(rows[0]), latest: true }, ...rows.map(line)];
+}
+
+/** R1 / L2: a lead value on one line, clipped at its end (values are structured and short; no window on prose). */
+export function leadValue(text: string, max: number): string {
+  const one = text.replace(/\s+/g, ' ').trim();
+  return one.length <= max ? one : `${one.slice(0, max - 1)}…`;
+}
+
+/** R2: the brief a search hit carries for its card: the fields with a value (a per-agent field by its latest), then
+ *  the decision count. */
 export function leadBrief(r: GetResult): string[] {
   if (!r.lead) return [];
-  const out = r.lead.filter((l) => l.value !== null).map((l) => `${l.field}: ${leadValue(l.value ?? '', BRIEF_VALUE_MAX)}`);
+  const out = r.lead.filter((l) => l.value !== null && (!l.by || l.latest)).map((l) => `${l.field}: ${leadValue(l.value ?? '', BRIEF_VALUE_MAX)}`);
   if (r.decisions.length) out.push(`decisions: ${r.decisions.length}`);
   return out;
 }
@@ -501,10 +563,25 @@ const day = (iso: string): string => (iso || '').slice(0, 10);
 const kv = (key: string, text: string): string => (key ? `${key}: ${text.replace(/\s+/g, ' ').trim()}` : text.replace(/\s+/g, ' ').trim());
 
 const clipLine = (s: string): string => (s.length <= GET_LINE_MAX ? s : `${s.slice(0, GET_LINE_MAX - 1)}…`);
+/** L2 / L5: `label: value`, one value per line, no source on it (the sources line carries the ids). */
+const leadLabel = (l: GetFieldLine): string => (l.latest ? `${l.field} (latest)` : l.by ? `${l.field} (${l.by})` : l.field);
 const leadLine = (l: GetFieldLine): string => {
-  if (l.value === null) return `${l.field}: none`;
-  const src = l.source === 'tasks' ? 'tasks.json' : `${l.source} · ${l.agent ?? '-'} · ${day(l.at ?? '')} · ${l.id ?? '-'}`;
-  return `${l.field}: ${leadValue(l.value, LEAD_VALUE_MAX)} [${src}]`;
+  if (l.value === null) return l.source === 'none' ? `${leadLabel(l)}: none` : `${leadLabel(l)}: not structured yet`;
+  return `${leadLabel(l)}: ${leadValue(l.value, LEAD_VALUE_MAX)}${l.latest && l.by ? ` by ${l.by}` : ''}`;
+};
+/** L5: the lead's sources on one `sources:` line after it, each id written sha-proof (safeId), tasks.json by name.
+ *  A long list wraps onto indented continuation lines (no label, no clipping: every id stays whole). */
+export const sourcesLines = (lead: GetFieldLine[]): string[] => {
+  const parts = lead.filter((l) => l.source !== 'none' && !l.latest).map((l) => `${leadLabel(l)} ${l.source === 'tasks' ? 'tasks.json' : safeId(l.id ?? '-')}`);
+  const out: string[] = [];
+  let line = '';
+  for (const p of parts) {
+    const head = out.length || line ? line : 'sources:';
+    const next = `${head} ${p};`;
+    if (next.length > GET_LINE_MAX && line) { out.push(line); line = `  ${p};`; } else line = next;
+  }
+  if (line) out.push(line);
+  return out.map((l, i) => (i === out.length - 1 ? l.replace(/;$/, '') : l));
 };
 
 /** R1: the compact text's cap by construction: every line clipped to GET_LINE_MAX, the tail behind one pointer line
@@ -544,6 +621,7 @@ export function formatGet(r: GetResult, opts: GetOptions = {}): string {
   if (r.lead) {
     for (const l of r.lead) L.push(leadLine(l));
     if (r.card && !all) L.push(`decisions: ${r.decisions.length}${r.decisions.length ? ' (--all lists them)' : ''}`);
+    L.push(...sourcesLines(r.lead));
   }
   if (r.current) {
     const c = r.current;
@@ -576,7 +654,7 @@ export function formatGet(r: GetResult, opts: GetOptions = {}): string {
     if (r.mailIndex === 'absent') L.push('mails: no mail index for this card yet (hive/state/mail-cards)');
     else if (r.mailIndex === 'present') {
       L.push(`mails (${r.mails.length} newest first${r.nextBefore ? `; older: --before ${r.nextBefore}` : ''}):`);
-      for (const m of r.mails) L.push(`  ${m.id} ${m.from} → ${m.to.join(',') || '-'} ${m.act}: ${excerpt(m.subject, 100)} [${m.cardFrom}${m.weak ? ' · weak' : ''} · ${m.trust}]`);
+      for (const m of r.mails) L.push(`  mail: ${m.id} ${m.from} → ${m.to.join(',') || '-'} ${m.act} — ${excerpt(m.subject, 100)} [${m.cardFrom}${m.weak ? ' · weak' : ''} · ${m.trust}]`);
     }
   }
   return all ? L.join('\n') + '\n' : fitGet(L);

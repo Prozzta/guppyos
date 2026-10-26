@@ -3,7 +3,10 @@
  * CLAIMS-90 M3: this build's `memory search` over a GIVEN index file, offline (the auditor's fix-2 replay
  * against the frozen T_s index). No app, no HTTP, no hive discovery: the store is opened from a COPY of the
  * file (so a frozen snapshot is never written), the query is embedded with the real model, store.search runs
- * exactly as the engine runs it, and formatSearch prints the text agents read.
+ * exactly as the engine runs it, and formatSearch prints the text agents read. L7 (god 985a82): with --hive <root>
+ * the card briefs (`<id> now: field: value · …`) come from that hive's ledgers through main's claimCardLeadOver,
+ * exactly as main answers the worker's card-lead ask (test/tools/claims90-hive-read.cjs), then the engine's own
+ * cardLeadsFor + formatSearch; without --hive the hits print with no brief.
  *
  * Run UNDER ELECTRON AS NODE (the app's better-sqlite3 and sqlite-vec are Electron-ABI builds):
  *   set ELECTRON_RUN_AS_NODE=1
@@ -45,7 +48,8 @@ if (!db || !query) { emit('usage: claims90-search.cjs --db <index.sqlite> --quer
     const sqliteVec = require('sqlite-vec');
     const { NativeMemoryStore } = loadTs('src/main/nativeMemory/store.ts');
     const { redactHit, exactNeedle, exactFileHits, dropStale, staleFetchK } = loadTs('src/main/nativeMemory/engine.ts');
-    const { formatSearch, newestOrder, rankHits } = loadTs('src/main/nativeMemory/format.ts');
+    const { newestOrder, rankHits } = loadTs('src/main/nativeMemory/format.ts');
+    const { searchTextOver } = require(path.join(REPO, 'test', 'tools', 'claims90-hive-read.cjs'));
     const { WordPieceTokenizer, wordPieceConfigFromTokenizerJson } = loadTs('src/main/nativeMemory/wordpiece.ts');
     const { OnnxEmbedder } = loadTs('src/main/nativeMemory/embedder.ts');
     const manifest = JSON.parse(fs.readFileSync(path.join(REPO, 'resources', 'models', 'native-memory-manifest.json'), 'utf8'));
@@ -68,10 +72,10 @@ if (!db || !query) { emit('usage: claims90-search.cjs --db <index.sqlite> --quer
     const flags = { wing: val('--wing'), room: val('--room'), since: val('--since'), before: val('--before'), full: has('--full'), exact: has('--exact'), newest: has('--newest') };
     const results = Number(val('--results', '5'));
     const mode = has('--all') ? 'all' : has('--history') ? 'history' : 'live';
+    const hiveRoot = val('--hive');
     let hits;
     if (flags.exact) {
       const needle = exactNeedle(query);
-      const hiveRoot = val('--hive');
       const chunks = needle ? store.searchExact({ query: needle, wing: flags.wing, room: flags.room, sinceMs: flags.since ? Date.parse(flags.since) : null, beforeMs: flags.before ? Date.parse(flags.before) : null, k: staleFetchK(results, mode), mode, kind: val('--kind'), key: val('--key') }) : [];
       const files = needle && hiveRoot && !flags.wing && !flags.room && !val('--kind') && !val('--key') ? exactFileHits(hiveRoot, needle, results) : [];
       hits = [...dropStale(chunks, mode, results), ...files];
@@ -85,7 +89,7 @@ if (!db || !query) { emit('usage: claims90-search.cjs --db <index.sqlite> --quer
     }
     if (!flags.exact) hits = dropStale(hits, mode, results);
     const json = flags.newest ? (() => { const cur = rankHits(query, hits); return newestOrder(query, hits).map((h, i) => ({ ...redactHit(h), rankNewest: i + 1, rankCurrent: cur.indexOf(h) + 1 })); })() : hits.map(redactHit);
-    const text = formatSearch(query, flags, hits);
+    const text = await searchTextOver(hiveRoot, query, flags, hits);
     emit(has('--json') ? `${JSON.stringify({ query, flags: { ...flags, results, mode, kind: val('--kind'), key: val('--key') }, hits: json, text })}\n` : text, 0);
   } catch (e) {
     emit(`claims90-search: ${e && e.stack ? e.stack : String(e)}\n`, 1);

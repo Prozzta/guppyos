@@ -3,10 +3,18 @@
  * CLAIMS-90 step 3 fix (god bbcb4a, after Jim f0d494: agents typed the field term on 6 of 332 rows, the bare card
  * on 142, and 40% of get replies passed the 1500 cap):
  *  R1: a bare card `memory get <CARD-ID>` LEADS with one compact block of per-field current values (donesha, lastsha,
- *      status, assignee, fixVersion, merge, then the decision count) as `field: value [source]` lines; the whole
- *      reply is under the 1500 cap by construction (every line under GET_LINE_MAX, the tail behind a pointer past
- *      GET_MAX_CHARS); the decision list and the competing / superseded bodies are behind --all / --history;
- *      guppy/<branch> and release.<v> get the same shape; a field sub-key the agent typed has no lead.
+ *      status, assignee, fixVersion, merge, audit, then the decision count); the whole reply is under the 1500 cap by
+ *      construction (every line under GET_LINE_MAX, the tail behind a pointer past GET_MAX_CHARS); the decision list
+ *      and the competing / superseded bodies are behind --all / --history; guppy/<branch> and release.<v> get the
+ *      same shape; a field sub-key the agent typed has no lead.
+ *  L2-L5 (god fada64, after Jim a293f7: the lead printed prose windows, 2/84): a lead line is `field: <value>` from the
+ *      claim's STRUCTURED value (L1, Creed: ClaimRec.value / valueAgent), never a window on the prose, no title and no
+ *      card id on it; a per-agent field (donesha) prints `field (latest): value by agent` then one `field (agent): value`
+ *      per agent, newest first (L3); release.<v> leads with tag: and bump:, audit joins the card fields (L4); the lead
+ *      block is the only `label:` text in the reply, no claim id sits on a value line, and the ids go on one `sources:`
+ *      line (wrapped, never clipped) written so none reads as a sha (L5: c-<12 hex> → c_<12 hex>).
+ *  L7 (god 985a82): test/tools/claims90-search.cjs --hive <root> builds the briefs through main's claimCardLeadOver and
+ *      the engine's own helpers: its text is byte-for-byte the engine's.
  *  R2: a search hit on a card (any claim keyed card.<id>.*) carries the card's current values inline (`<id> now:
  *      field: value · …`) once per card, inside the hit's budget, never under one content line (the matched term
  *      stays shown); the worker asks main for them over the port (`{ ask, op, args }` → `{ answer, result }`), and
@@ -30,17 +38,22 @@ const { NativeMemoryClient } = loadTs('src/main/nativeMemory/service.ts');
 
 const SHA_A = '1234abc' + 'd'.repeat(33);
 const SHA_B = '9876fed' + 'e'.repeat(33);
+const SHA_T = 'abcdef0' + '1'.repeat(33);
 const c = (id, agent, key, at, text, extra = {}) => ({ t: 'claim', id, at, wt: at, agent, kind: 'fact', key, text, source: 'note', ...extra });
 const mail = (id, from, to, act, subject, created_at, body) => JSON.stringify({ v: 1, id, card: 'FOO-7', cards: ['FOO-7'], cardFrom: 'field', from, to, act, subject, created_at, deliveredAt: 1, bodyHash: 'h', trust: 'delivery', ...(body === undefined ? {} : { body }) });
 const lines = (t) => t.replace(/\n$/, '').split('\n');
 
 function fixture(decisions = 3, extraCards = []) {
   const derived = [
-    c('c-aaaaaaaaaaa1', 'derived', 'card.foo-7.donesha', '2026-10-01T10:00:00.000Z', `Card FOO-7: the newest done mail from alpha-1 (m1) names commit 1234abc (${SHA_A})`, { refs: [{ type: 'commit', value: SHA_A }] }),
-    c('c-aaaaaaaaaaa2', 'derived', 'card.foo-7.donesha', '2026-10-02T10:00:00.000Z', `Card FOO-7: the newest done mail from beta-2 (m2) names commit 9876fed (${SHA_B})`, { refs: [{ type: 'commit', value: SHA_B }] }),
-    c('c-aaaaaaaaaaa5', 'derived', 'card.foo-7.status', '2026-10-02T12:00:00.000Z', 'Card FOO-7 status: doing'),
-    c('c-aaaaaaaaaaa7', 'derived', 'card.foo-7.lastsha', '2026-10-02T13:00:00.000Z', `Card FOO-7: the branch tip is ${SHA_A}`),
+    // L1 (Creed): every derived field claim carries its structured `value` beside the prose (donesha: `valueAgent` too).
+    c('c-aaaaaaaaaaa1', 'derived', 'card.foo-7.donesha', '2026-10-01T10:00:00.000Z', `Card FOO-7: the newest done mail from alpha-1 (m1) names commit 1234abc (${SHA_A})`, { refs: [{ type: 'commit', value: SHA_A }], value: SHA_A, valueAgent: 'alpha-1' }),
+    c('c-aaaaaaaaaaa2', 'derived', 'card.foo-7.donesha', '2026-10-02T10:00:00.000Z', `Card FOO-7: the newest done mail from beta-2 (m2) names commit 9876fed (${SHA_B})`, { refs: [{ type: 'commit', value: SHA_B }], value: SHA_B, valueAgent: 'beta-2' }),
+    c('c-aaaaaaaaaaa5', 'derived', 'card.foo-7.status', '2026-10-02T12:00:00.000Z', 'Card FOO-7 ("Foo seven") status: doing', { value: 'doing' }),
+    c('c-aaaaaaaaaaa7', 'derived', 'card.foo-7.lastsha', '2026-10-02T13:00:00.000Z', `Card FOO-7: the branch tip is ${SHA_A}`, { value: SHA_A }),
+    c('c-aaaaaaaaaab1', 'derived', 'card.foo-7.audit', '2026-10-05T11:00:00.000Z', `Card FOO-7 audit: PASS at ${SHA_T} (Jim)`, { value: `PASS ${SHA_T}` }),
     c('c-aaaaaaaaaaa8', 'derived', 'release.1.1.98', '2026-10-05T13:00:00.000Z', 'release 1.1.98 cut at 7777777 (git tag v1.1.98)'),
+    c('c-aaaaaaaaaab2', 'derived', 'release.1.1.98.tag', '2026-10-05T13:00:00.000Z', `release 1.1.98: tag v1.1.98 is commit ${SHA_T}`, { value: SHA_T }),
+    c('c-aaaaaaaaaab3', 'derived', 'release.1.1.98.bump', '2026-10-04T13:00:00.000Z', `release 1.1.98: the version bump is commit ${SHA_B}`, { value: SHA_B }),
     c('c-aaaaaaaaaaa9', 'derived', 'release.1.1.98.pause', '2026-10-06T13:00:00.000Z', 'release 1.1.98 paused: the Human asked for a hold'),
   ];
   for (let i = 0; i < decisions; i++) derived.push(c(`c-dddddddd${String(i).padStart(4, '0')}`, 'derived', `card.foo-7.decision.ab${String(i).padStart(6, '0')}`, `2026-09-${String(1 + (i % 28)).padStart(2, '0')}T11:00:00.000Z`, `Human decision on FOO-7: asked "q${i}"; the Human answered "a${i}"`, { kind: 'decision' }));
@@ -60,61 +73,123 @@ function fixture(decisions = 3, extraCards = []) {
 const deps = (over = {}, decisions = 3, extraCards = []) => { const f = fixture(decisions, extraCards); return { ledgers: f.ledgers, registry: JSON.parse(JSON.stringify(DEFAULT_KEY_REGISTRY)), reconcileItems: [], tasks: f.tasks, mailRows: () => null, ruleConfig: { r4: false }, ...over }; };
 const get = (term, opts = {}, d = deps()) => G.resolveGet(term, opts, d);
 const text = (term, opts = {}, d = deps()) => G.formatGet(G.resolveGet(term, opts, d), opts);
-const leadOf = (t) => lines(t).slice(1, 8);
+const SHA7 = /(?<![0-9a-z_])[0-9a-f]{7,}(?![0-9a-z_])/i; // a hex run joined by `_` is no sha (c_<12 hex>, …-merge_<sha>)
+/** L5: the reply's `label:` lines outside the lead block are only the section labels. */
+const SECTION = /^(current|competing|superseded|decisions|fields|mails|sources|superseded by|history|no claim|no mails?)\b/;
 
 test('R1 caps: the get text\'s budget equals the compact search budget and stays under the condenser cap', () => {
   assert.equal(G.GET_MAX_CHARS, F.COMPACT_MAX_CHARS);
   assert.equal(G.GET_LINE_MAX, F.COMPACT_LINE_MAX);
   assert.ok(G.GET_MAX_CHARS < TOOL_OUTPUT_CAP_DEFAULT, `${G.GET_MAX_CHARS} < ${TOOL_OUTPUT_CAP_DEFAULT}`);
-  assert.deepEqual([...G.CARD_FIELDS], ['donesha', 'lastsha', 'status', 'assignee', 'fixVersion', 'merge']);
+  assert.deepEqual([...G.CARD_FIELDS], ['donesha', 'lastsha', 'status', 'assignee', 'fixVersion', 'merge', 'audit'], 'L4: audit joins the card fields');
+  assert.deepEqual([...G.PER_AGENT_FIELDS], ['donesha']); assert.deepEqual([...G.RELEASE_FIELDS], ['tag', 'bump']);
 });
 
-test('R1 lead: a bare card leads with every field\'s current value, in order, each with its source, then the decision count; the current line follows', () => {
+test('L2 + L3 lead: a bare card leads with `field: <value>` from the STRUCTURED value, in order; donesha prints a latest line and one line per agent, newest first; then the decision count', () => {
   const r = get('FOO-7');
-  assert.deepEqual(r.lead.map((l) => [l.field, l.source, l.id ?? null]), [
-    ['donesha', 'claim', 'c-aaaaaaaaaaa2'], ['lastsha', 'claim', 'c-aaaaaaaaaaa7'], ['status', 'claim', 'c-aaaaaaaaaaa5'],
-    ['assignee', 'tasks', null], ['fixVersion', 'tasks', null], ['merge', 'claim', 'c-bbbbbbbbbbb3'],
-  ], 'MUTANT: a field answered by nothing, or out of order');
-  assert.equal(r.lead[3].value, 'alpha-1'); assert.equal(r.lead[4].value, '1.1.103');
+  assert.deepEqual(r.lead.map((l) => [l.field, l.by ?? null, l.latest === true, l.source, l.id ?? null, l.value]), [
+    ['donesha', 'beta-2', true, 'claim', 'c-aaaaaaaaaaa2', SHA_B], ['donesha', 'beta-2', false, 'claim', 'c-aaaaaaaaaaa2', SHA_B], ['donesha', 'alpha-1', false, 'claim', 'c-aaaaaaaaaaa1', SHA_A],
+    ['lastsha', null, false, 'claim', 'c-aaaaaaaaaaa7', SHA_A], ['status', null, false, 'claim', 'c-aaaaaaaaaaa5', 'doing'],
+    ['assignee', null, false, 'tasks', null, 'alpha-1'], ['fixVersion', null, false, 'tasks', null, '1.1.103'],
+    ['merge', null, false, 'claim', 'c-bbbbbbbbbbb3', null], ['audit', null, false, 'claim', 'c-aaaaaaaaaab1', `PASS ${SHA_T}`],
+  ], 'MUTANT: a field answered by nothing, out of order, a prose value, or the asked agent ignored');
+  assert.equal(r.lead[7].key, 'card.foo-7.merge');
   const L = lines(text('FOO-7'));
   assert.match(L[0], /^get foo-7 → keys: card\.foo-7, /);
-  assert.match(L[1], /^donesha: Card FOO-7: the newest done mail from beta-2 \(m2\) names commit 9876fed .*\[claim · derived · 2026-10-02 · c-aaaaaaaaaaa2\]$/);
-  assert.match(L[2], /^lastsha: Card FOO-7: the branch tip is 1234abcd+ \[claim · derived · 2026-10-02 · c-aaaaaaaaaaa7\]$/);
-  assert.equal(L[3], 'status: Card FOO-7 status: doing [claim · derived · 2026-10-02 · c-aaaaaaaaaaa5]');
-  assert.equal(L[4], 'assignee: alpha-1 [tasks.json]');
-  assert.equal(L[5], 'fixVersion: 1.1.103 [tasks.json]');
-  assert.equal(L[6], 'merge: guppy/foo-7 merged into guppy/main as 3333333 [claim · alpha-1 · 2026-10-04 · c-bbbbbbbbbbb3]');
-  assert.equal(L[7], 'decisions: 3 (--all lists them)');
-  assert.match(L[8], /^current: card\.foo-7: FOO-7 build moved to 2222222 on branch x$/);
-  assert.equal(L[10], 'competing: 1 other live value hidden (--all lists them)', 'competing stays a count by default');
+  assert.equal(L[1], `donesha (latest): ${SHA_B} by beta-2`);
+  assert.equal(L[2], `donesha (beta-2): ${SHA_B}`);
+  assert.equal(L[3], `donesha (alpha-1): ${SHA_A}`);
+  assert.equal(L[4], `lastsha: ${SHA_A}`);
+  assert.equal(L[5], 'status: doing', 'MUTANT: the prose (title, card id) on the line');
+  assert.equal(L[6], 'assignee: alpha-1');
+  assert.equal(L[7], 'fixVersion: 1.1.103');
+  assert.equal(L[8], 'merge: not structured yet', 'an agent\'s own merge claim has no structured value: no window on its prose');
+  assert.equal(L[9], `audit: PASS ${SHA_T}`);
+  assert.equal(L[10], 'decisions: 3 (--all lists them)');
+  assert.match(L[13], /^current: card\.foo-7: FOO-7 build moved to 2222222 on branch x$/);
+  assert.equal(L[15], 'competing: 1 other live value hidden (--all lists them)', 'competing stays a count by default');
   assert.doesNotMatch(text('FOO-7'), /^decisions \(3\):|^  card\.foo-7\.decision\./m, 'MUTANT: the decision list in the default view');
+  // L2: no title, no card id, no claim id, no source bracket on a lead line; a value line holds exactly one value.
+  for (const l of L.slice(1, 11)) { assert.doesNotMatch(l, /foo-7|Foo seven|c-[0-9a-f]{12}|\[claim|\[mail|\[tasks/i, l); assert.ok((l.match(SHA7) || []).length <= 1, l); }
+  // A structured merge (the derived writer's) prints its tip; a newer per-agent value sorts first.
+  const d = deps();
+  d.ledgers.derived.push(c('c-aaaaaaaaaab4', 'derived', 'card.foo-7.merge', '2026-10-09T10:00:00.000Z', `guppy/foo-7 merged into guppy/main, tip ${SHA_T}`, { value: SHA_T }));
+  d.ledgers.derived.push(c('c-aaaaaaaaaab5', 'derived', 'card.foo-7.donesha', '2026-10-10T10:00:00.000Z', `Card FOO-7: the newest done mail from gamma-3 (m9) names commit abcdef0 (${SHA_T})`, { value: SHA_T, valueAgent: 'gamma-3' }));
+  const M = lines(text('FOO-7', {}, d));
+  assert.deepEqual(M.slice(1, 5), [`donesha (latest): ${SHA_T} by gamma-3`, `donesha (gamma-3): ${SHA_T}`, `donesha (beta-2): ${SHA_B}`, `donesha (alpha-1): ${SHA_A}`], 'MUTANT: oldest first, or one agent dropped');
+  assert.equal(M[9], `merge: ${SHA_T}`);
+  assert.equal(get('FOO-7', {}, d).lead.length, 10);
 });
 
-test('R1 lead: an unanswered field says none; a field sub-key the agent typed has no lead; the mail rule answers donesha in the lead as it does the field', () => {
-  const d = deps({ tasks: [{ id: 'FOO-7', status: 'doing' }] });
-  const L = lines(text('foo-7', {}, d));
-  assert.equal(L[4], 'assignee: none'); assert.equal(L[5], 'fixVersion: none');
-  assert.equal(get('card.foo-7.donesha').lead, null, 'a sub-key is the field');
-  assert.doesNotMatch(text('card.foo-7.donesha'), /^lastsha: /m);
-  assert.doesNotMatch(text('card.foo-7.status'), /^decisions/m, 'a sub-key with no decisions prints no count');
-  const rows = [mail('2026-10-08T09-00-00-000Z-ffffff', 'alpha-1', 'god', 'done', 'FOO-7 done', '2026-10-08T09:00:00.000Z', `landed as ${'abc1234f'.repeat(5)}`)];
+test('L3 --agent: the asked agent\'s own donesha line (and latest), nothing of the others; an agent without one says none; the mail rule\'s newer done mail joins as its sender\'s value', () => {
+  const rows = [mail('2026-10-08T09-00-00-000Z-ffffff', 'alpha-1', 'god', 'done', 'FOO-7 done', '2026-10-08T09:00:00.000Z', `landed as ${'ABC1234F'.repeat(5)}`)];
   const withMail = deps({ mailRows: (card) => (card === 'foo-7' ? rows : null) });
   const r = get('FOO-7', {}, withMail);
-  assert.equal(r.lead[0].source, 'mail'); assert.equal(r.lead[0].id, '2026-10-08T09-00-00-000Z-ffffff');
-  assert.equal(r.lead[0].value, get('card.foo-7.donesha', {}, withMail).current.text, 'the lead is what the field get says');
-  assert.equal(r.lead[1].source, 'claim', 'lastsha takes no mail (G1)');
-  assert.match(text('FOO-7', {}, withMail), /^donesha: FOO-7 done — landed as abc1234f.*\[mail · alpha-1 · 2026-10-08 · 2026-10-08T09-00-00-000Z-ffffff\]$/m);
-  assert.equal(get('FOO-7', { noMail: true }, withMail).lead[0].source, 'claim', '--no-mail: claims only, in the lead too');
+  assert.deepEqual(r.lead.slice(0, 3).map((l) => [l.by, l.latest === true, l.source, l.id, l.value]), [
+    ['alpha-1', true, 'mail', '2026-10-08T09-00-00-000Z-ffffff', 'abc1234f'.repeat(5)], ['alpha-1', false, 'mail', '2026-10-08T09-00-00-000Z-ffffff', 'abc1234f'.repeat(5)], ['beta-2', false, 'claim', 'c-aaaaaaaaaaa2', SHA_B],
+  ], 'the mail names the newest sha for alpha-1 (lowercased); beta-2 keeps its claim');
+  assert.equal(r.lead[0].value, get('card.foo-7.donesha', {}, withMail).current.value, 'the lead is what the field get says');
+  assert.equal(r.lead[3].source, 'claim', 'lastsha takes no mail (G1)');
+  const L = lines(text('FOO-7', {}, withMail));
+  assert.equal(L[1], `donesha (latest): ${'abc1234f'.repeat(5)} by alpha-1`); assert.equal(L[2], `donesha (alpha-1): ${'abc1234f'.repeat(5)}`); assert.equal(L[3], `donesha (beta-2): ${SHA_B}`);
+  assert.match(L.find((l) => l.startsWith('sources:')), /^sources: donesha \(alpha-1\) 2026-10-08T09-00-00-000Z-ffffff; donesha \(beta-2\) c_aaaaaaaaaaa2; /);
+  assert.equal(get('FOO-7', { noMail: true }, withMail).lead[0].id, 'c-aaaaaaaaaaa2', '--no-mail: claims only, in the lead too');
+  const A = lines(text('FOO-7', { agent: 'alpha-1' }, withMail));
+  assert.deepEqual(A.slice(1, 4), [`donesha (latest): ${'abc1234f'.repeat(5)} by alpha-1`, `donesha (alpha-1): ${'abc1234f'.repeat(5)}`, `lastsha: ${SHA_A}`], 'MUTANT: the asked agent ignored (Jim a293f7, 19 rows)');
+  assert.doesNotMatch(text('FOO-7', { agent: 'alpha-1' }, withMail), /beta-2/);
+  const B = lines(text('FOO-7', { agent: 'beta-2' }));
+  assert.deepEqual(B.slice(1, 3), [`donesha (latest): ${SHA_B} by beta-2`, `donesha (beta-2): ${SHA_B}`]);
+  assert.equal(lines(text('FOO-7', { agent: 'gamma-3' }))[1], 'donesha (gamma-3): none');
+  assert.equal(get('FOO-7', { agent: 'gamma-3' }).lead.length, 7);
 });
 
-test('R1 lead value: a long value keeps its head unless the first sha / version lies past it; then a window on it (a mail current is subject — body)', () => {
+test('L2 none / sub-key: an unanswered field says none; a field sub-key the agent typed has no lead; a release sub-key has none', () => {
+  const d = deps({ tasks: [{ id: 'FOO-7', status: 'doing' }] });
+  const L = lines(text('foo-7', {}, d));
+  assert.equal(L[6], 'assignee: none'); assert.equal(L[7], 'fixVersion: none');
+  assert.doesNotMatch(L.find((l) => l.startsWith('sources:')), /assignee|fixVersion/, 'a none line has no source');
+  assert.equal(get('card.foo-7.donesha').lead, null, 'a sub-key is the field');
+  assert.doesNotMatch(text('card.foo-7.donesha'), /^lastsha: |^sources: /m);
+  assert.doesNotMatch(text('card.foo-7.status'), /^decisions/m, 'a sub-key with no decisions prints no count');
+  assert.equal(get('release.1.1.98.pause').lead, null);
+  assert.equal(get('release.1.1.98.tag').lead, null);
+});
+
+test('L2 lead value: a structured value prints whole (clipped only past its own cap, never a window on prose); a claim with no value yields to a newer structured one under the key', () => {
   assert.equal(G.leadValue('short value', 80), 'short value');
   const head = `${'word '.repeat(30)}tail`;
   assert.equal(G.leadValue(head, 40), `${head.slice(0, 39)}…`);
   const late = `${'subject words '.repeat(8)}— landed as ${SHA_B} and more`;
-  const v = G.leadValue(late, 60);
-  assert.ok(v.length <= 60, `${v.length}`); assert.ok(v.includes('9876fed'), v); assert.ok(v.startsWith('…'), v);
-  assert.ok(G.leadValue(`${'x '.repeat(40)}version 1.1.103 shipped`, 40).includes('1.1.103'));
+  assert.equal(G.leadValue(late, 60), `${late.slice(0, 59)}…`, 'MUTANT: a window cut from the prose');
+  const d = deps();
+  d.ledgers['alpha-1'].push(c('c-bbbbbbbbbbb4', 'alpha-1', 'card.foo-7.lastsha', '2026-10-09T10:00:00.000Z', `FOO-7 tip now ${SHA_T}, says alpha`));
+  const r = get('FOO-7', {}, d);
+  const ls = r.lead.find((l) => l.field === 'lastsha');
+  assert.equal(ls.value, SHA_A); assert.equal(ls.id, 'c-aaaaaaaaaaa7', 'the agent\'s prose claim is newer but unstructured: the structured value answers');
+  assert.equal(lines(text('FOO-7', {}, d))[4], `lastsha: ${SHA_A}`);
+});
+
+test('L5 format: the lead block is the only `label:` text; no claim id on a value line; the ids sit on one sources: line, wrapped not clipped, with no bare 7+ hex run; a c_ id resolves back', () => {
+  const t = text('FOO-7');
+  const L = lines(t);
+  const srcAt = L.findIndex((l) => l.startsWith('sources:'));
+  assert.equal(srcAt, 11, 'after the lead and the decision count');
+  assert.equal(L[11], 'sources: donesha (beta-2) c_aaaaaaaaaaa2; donesha (alpha-1) c_aaaaaaaaaaa1; lastsha c_aaaaaaaaaaa7; status c_aaaaaaaaaaa5; assignee tasks.json;');
+  assert.equal(L[12], '  fixVersion tasks.json; merge c_bbbbbbbbbbb3; audit c_aaaaaaaaaab1', 'MUTANT: the sources line clipped at GET_LINE_MAX (ids lost) instead of wrapped');
+  for (const l of L.slice(11, 13)) { assert.doesNotMatch(l, SHA7, l); assert.ok(l.length <= G.GET_LINE_MAX); }
+  for (const l of L.slice(13)) if (/^[a-zA-Z][a-zA-Z ()-]*: /.test(l)) assert.match(l, SECTION, `a body line with a field label: ${l}`);
+  for (const l of L.slice(1, 11)) assert.doesNotMatch(l, /c[-_][0-9a-f]{12}/, l);
+  assert.deepEqual(G.sourcesLines([]), []);
+  const many = Array.from({ length: 30 }, (_, i) => ({ field: `f${i}`, value: 'v', source: 'claim', id: `c-${String(i).padStart(12, '0')}` }));
+  const S = G.sourcesLines(many);
+  assert.ok(S.length >= 3 && S[0].startsWith('sources: ') && S.slice(1).every((l) => /^ {2}f\d+ c_/.test(l)), S.join('|'));
+  for (const l of S) assert.ok(l.length <= G.GET_LINE_MAX, l);
+  assert.equal(S.join(' ').match(/c_\d{12}/g).length, 30, 'every id survives');
+  assert.equal(G.safeId('c-be6e7c6f41b9'), 'c_be6e7c6f41b9');
+  assert.equal(G.safeId('2026-10-26T05-28-27-422Z-fada64'), '2026-10-26T05-28-27-422Z-fada64', 'a mail id with a 6-hex tail is no sha');
+  assert.equal(G.safeId('2026-10-26T05-28-27-422Z-c90-merge-abcdef0'), '2026-10-26T05-28-27-422Z-c90-merge_abcdef0');
+  assert.equal(get('c_aaaaaaaaaaa5').keys[0], 'card.foo-7.status', 'the sha-proof spelling resolves as the claim id');
+  assert.equal(get('c_aaaaaaaaaaa5').current.claimId, 'c-aaaaaaaaaaa5');
 });
 
 test('R1 cap by construction: 60 decisions, 50 mails, a long key list and long values stay under GET_MAX_CHARS, every line under GET_LINE_MAX, the lead block first and a pointer to --all', () => {
@@ -125,41 +200,47 @@ test('R1 cap by construction: 60 decisions, 50 mails, a long key list and long v
   assert.ok(t.length <= G.GET_MAX_CHARS, `${t.length} <= ${G.GET_MAX_CHARS} (MUTANT: no cap)`);
   for (const l of lines(t)) assert.ok(l.length <= G.GET_LINE_MAX, `${l.length}: ${l}`);
   const L = lines(t);
-  assert.match(L[1], /^donesha: /); assert.equal(L[7], 'decisions: 60 (--all lists them)');
+  assert.match(L[1], /^donesha \(latest\): /); assert.equal(L[10], 'decisions: 60 (--all lists them)');
   assert.match(L[L.length - 1], /^… \d+ more lines \(--all prints everything\)$/, 'MUTANT: no pointer');
   const full = text('FOO-7', { mail: 50, history: true }, d);
   assert.ok(full.length > G.GET_MAX_CHARS, 'the --all view is uncapped');
   assert.match(full, /^decisions \(60\):$/m);
   assert.equal(lines(full).filter((l) => /^  card\.foo-7\.decision\./.test(l)).length, 60);
-  assert.match(full, /^donesha: /m, 'the lead block stays in the --all view');
-  assert.equal(get('FOO-7', {}, d).lead.length, 6);
+  assert.match(full, /^donesha \(latest\): /m, 'the lead block stays in the --all view');
+  assert.match(full, /^  mail: 2026-10-0\dT0\d-00-\d\d-000Z-[a-z0-9]{6} alpha-1 → god inform — FOO-7 long subject /m, 'L5: a mail row is labelled mail:, its id never before a colon');
+  assert.equal(get('FOO-7', {}, d).lead.length, 9);
 });
 
-test('R1 same shape: guppy/<branch> leads with the card\'s fields; release.<v> leads with its live sub-keys; a plain key has no lead', () => {
+test('R1 / L4 same shape: guppy/<branch> leads with the card\'s fields; release.<v> leads with tag: and bump:; a plain key has no lead', () => {
   const b = get('guppy/foo-7');
   assert.deepEqual(b.keys, ['card.foo-7.merge']); assert.equal(b.card, 'foo-7');
-  assert.deepEqual(b.lead.map((l) => l.field), ['donesha', 'lastsha', 'status', 'assignee', 'fixVersion', 'merge']);
+  assert.deepEqual(b.lead.map((l) => l.field), ['donesha', 'donesha', 'donesha', 'lastsha', 'status', 'assignee', 'fixVersion', 'merge', 'audit']);
   const bt = lines(text('origin/guppy/FOO-7'));
-  assert.equal(bt[6], 'merge: guppy/foo-7 merged into guppy/main as 3333333 [claim · alpha-1 · 2026-10-04 · c-bbbbbbbbbbb3]');
-  assert.equal(bt[7], 'decisions: 3 (--all lists them)');
+  assert.equal(bt[8], 'merge: not structured yet');
+  assert.equal(bt[10], 'decisions: 3 (--all lists them)');
   const r = get('release.1.1.98');
-  assert.deepEqual(r.lead, [{ field: 'pause', value: 'release 1.1.98 paused: the Human asked for a hold', source: 'claim', id: 'c-aaaaaaaaaaa9', agent: 'derived', at: '2026-10-06T13:00:00.000Z' }]);
-  assert.equal(lines(text('release.1.1.98'))[1], 'pause: release 1.1.98 paused: the Human asked for a hold [claim · derived · 2026-10-06 · c-aaaaaaaaaaa9]');
-  assert.equal(get('release.1.1.98.pause').lead, null);
-  assert.equal(get('c-bbbbbbbbbbb2').lead.length, 6, 'a claim id of the bare card resolves to the card: the lead too');
+  assert.deepEqual(r.lead, [
+    { field: 'tag', key: 'release.1.1.98.tag', value: SHA_T, source: 'claim', id: 'c-aaaaaaaaaab2', agent: 'derived', at: '2026-10-05T13:00:00.000Z' },
+    { field: 'bump', key: 'release.1.1.98.bump', value: SHA_B, source: 'claim', id: 'c-aaaaaaaaaab3', agent: 'derived', at: '2026-10-04T13:00:00.000Z' },
+  ], 'MUTANT: no bump / tag line (Jim a293f7 cause 5)');
+  assert.deepEqual(lines(text('release.1.1.98')).slice(1, 5), [`tag: ${SHA_T}`, `bump: ${SHA_B}`, 'sources: tag c_aaaaaaaaaab2; bump c_aaaaaaaaaab3', 'current: release.1.1.98: release 1.1.98 cut at 7777777 (git tag v1.1.98)']);
+  const d = deps(); d.ledgers.derived = d.ledgers.derived.filter((x) => x.key !== 'release.1.1.98.bump');
+  assert.deepEqual(lines(text('release.1.1.98', {}, d)).slice(1, 3), [`tag: ${SHA_T}`, 'bump: none']);
+  assert.equal(get('c-bbbbbbbbbbb2').lead.length, 9, 'a claim id of the bare card resolves to the card: the lead too');
+  assert.equal(get('card.foo-7.decision.ab000000').lead, null);
 });
 
-test('R2 brief + cardIdOfKey: the brief lists the fields with a value and the decision count; the key→card map strips a known field suffix', () => {
+test('R2 brief + cardIdOfKey: the brief lists the fields with a value (a per-agent field by its latest) and the decision count; the key→card map strips a known field suffix', () => {
   assert.deepEqual(G.leadBrief(get('FOO-7')), [
-    'donesha: …names commit 9876fed (9876fedeeeeeeeeeeeeeeeee…', 'lastsha: …branch tip is 1234abcddddddddddddddddddddddddd…', 'status: Card FOO-7 status: doing',
-    'assignee: alpha-1', 'fixVersion: 1.1.103', 'merge: guppy/foo-7 merged into guppy/main as 3333333', 'decisions: 3',
-  ]);
+    `donesha: ${SHA_B}`, `lastsha: ${SHA_A}`, 'status: doing', 'assignee: alpha-1', 'fixVersion: 1.1.103', `audit: PASS ${SHA_T}`, 'decisions: 3',
+  ], 'MUTANT: a prose window, every per-agent line, or the unstructured merge in the brief');
   assert.deepEqual(G.leadBrief(get('card.foo-7.status')), []);
-  for (const [k, id] of [['card.foo-7', 'foo-7'], ['card.foo-7.donesha', 'foo-7'], ['card.FOO-7.decision.abcd1234', 'foo-7'], ['card.cut-1.1.100', 'cut-1.1.100'], ['card.cut-1.1.100.status', 'cut-1.1.100'], ['release.1.1.98', null], ['card.', null]]) {
+  assert.deepEqual(G.leadBrief(get('release.1.1.98')), [`tag: ${SHA_T}`, `bump: ${SHA_B}`]);
+  for (const [k, id] of [['card.foo-7', 'foo-7'], ['card.foo-7.donesha', 'foo-7'], ['card.foo-7.audit', 'foo-7'], ['card.FOO-7.decision.abcd1234', 'foo-7'], ['card.cut-1.1.100', 'cut-1.1.100'], ['card.cut-1.1.100.status', 'cut-1.1.100'], ['release.1.1.98', null], ['card.', null]]) {
     assert.equal(G.cardIdOfKey(k), id, k);
   }
   const many = G.resolveGetMany(['foo-7', 'nope-1', 'card.foo-7.status'], { mail: 0 }, deps());
-  assert.equal(many.length, 3); assert.equal(many[0].lead.length, 6); assert.equal(many[1].keys.length, 0); assert.equal(many[2].lead, null);
+  assert.equal(many.length, 3); assert.equal(many[0].lead.length, 9); assert.equal(many[1].keys.length, 0); assert.equal(many[2].lead, null);
 });
 
 // ---- R2 render ----
@@ -256,6 +337,34 @@ test('R2 engine: the search asks the cardLead dep once with the distinct card id
   assert.match(full.text, /^      Card:   foo-7 now: /m);
   const exact = await e.search({ query: 'foo-7', results: 4, exact: true });
   assert.match(exact.text, /^ {4}foo-7 now: /m, 'the --exact path carries the briefs too');
+});
+
+test('L7: claims90-search.cjs --hive builds the briefs through main\'s claimCardLeadOver (hive-read deps) and the engine\'s own helpers: its text is byte-for-byte the engine\'s for the same hits', async () => {
+  const { hiveCardLead, hiveReadDeps, searchTextOver } = require('./tools/claims90-hive-read.cjs');
+  const { cardIdsOfHits, cardLeadsFor } = loadTs('src/main/nativeMemory/engine.ts');
+  const root = path.join(JAIL, 'hive-l7');
+  const f = fixture(3);
+  for (const [agent, recs] of Object.entries(f.ledgers)) {
+    fs.mkdirSync(path.join(root, 'agents', agent, 'memory', 'claims'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'agents', agent, 'memory', 'claims', '2026-10.jsonl'), recs.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  }
+  fs.writeFileSync(path.join(root, 'tasks.json'), JSON.stringify({ tasks: f.tasks }));
+  const d = hiveReadDeps(root);
+  assert.deepEqual(d.agents().sort(), ['alpha-1', 'beta-2', 'derived']); assert.equal(d.store.readLedger('derived').chain, 'ok'); assert.equal(d.store.readLedger('nope').records.length, 0);
+  const hits = [hit(1, 'live', 'card.foo-7.donesha', '2026-10-02', 'done sha 9876fed ' + lorem(10, 'a')), hit(2, 'live', 'card.foo-7', '2026-10-03', 'build moved ' + lorem(10, 'b')), hit(3, 'live', 'synthetic.port', '2026-10-10', 'port 2222')];
+  const lead = hiveCardLead(root);
+  assert.deepEqual(cardIdsOfHits(hits), ['foo-7']);
+  assert.deepEqual(await lead(['foo-7', 'nope-1']), { 'foo-7': [`donesha: ${SHA_B}`, `lastsha: ${SHA_A}`, 'status: doing', 'assignee: alpha-1', 'fixVersion: 1.1.103', `audit: PASS ${SHA_T}`, 'decisions: 3'] }, 'the hive\'s real values, through claimCardLeadOver');
+  assert.deepEqual(await cardLeadsFor(hits, undefined), {}); assert.deepEqual(await cardLeadsFor(hits, async () => { throw new Error('x'); }), {});
+  const flags = { results: 4, wing: null, room: null, since: null, before: null, full: false, exact: false, newest: false };
+  const tool = await searchTextOver(root, 'foo-7 build', flags, hits);
+  const engine = (await engineWith(hits, lead).search({ query: 'foo-7 build', ...flags })).text;
+  assert.equal(tool, engine, 'MUTANT: the tool\'s text differs from the engine\'s');
+  assert.match(tool, new RegExp(`^ {4}foo-7 now: donesha: ${SHA_B} · lastsha: ${SHA_A} · status: doing`, 'm'), 'the brief carries the structured values');
+  assert.equal(await searchTextOver(null, 'foo-7 build', flags, hits), F.formatSearch('foo-7 build', flags, hits), 'no --hive: no brief, as before');
+  const src = fs.readFileSync(path.join(REPO, 'test', 'tools', 'claims90-search.cjs'), 'utf8');
+  assert.match(src, /const text = await searchTextOver\(hiveRoot, query, flags, hits\);/, 'the tool prints through the same helper');
+  assert.doesNotMatch(src, /formatSearch\(/, 'no second format path in the tool');
 });
 
 function fakeWorker() {
