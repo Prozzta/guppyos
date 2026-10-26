@@ -170,4 +170,23 @@ function gate(filename) {
   assertUnmutated(root, path.relative(root, filename).split(path.sep).join('/'));
 }
 
-module.exports = { recover, mutateFile, restoreFile, journalPath, journalState, assertUnmutated, gate, processStart };
+/** Every anchor of a census, checked before anything is mutated (god eac6c9): rows are { name, file, from }, matched
+ * once on LF-normalised text like the runners do. A missing or duplicated anchor fails the whole run HERE, naming each
+ * row, so a census that cannot mutate never half-runs or passes as INERT. `--anchors-only` stops after the check
+ * (test-runner-glob runs every census that way, so a stale anchor is a test failure). */
+function checkAnchors(root, rows) {
+  const texts = new Map();
+  const bad = [];
+  for (const { name, file, from } of rows) {
+    const abs = path.resolve(root, file);
+    if (!texts.has(abs)) texts.set(abs, fs.existsSync(abs) ? fs.readFileSync(abs, 'utf8').replace(/\r\n/g, '\n') : null);
+    const text = texts.get(abs);
+    const hits = text === null ? -1 : text.split(from).length - 1;
+    if (hits !== 1) bad.push(`${name}: anchor ${hits < 0 ? 'file missing' : hits === 0 ? 'missing' : `not unique (${hits})`} in ${path.relative(root, abs)}`);
+  }
+  if (bad.length) throw new Error(`INERT mutants, nothing mutated:\n  ${bad.join('\n  ')}`);
+  if (process.argv.includes('--anchors-only')) { console.log(`anchors ok: ${rows.length} rows`); process.exit(0); }
+  return rows.length;
+}
+
+module.exports = { recover, mutateFile, restoreFile, checkAnchors, journalPath, journalState, assertUnmutated, gate, processStart };

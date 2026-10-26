@@ -187,6 +187,7 @@ test('MUTANT-JOURNAL NO-BYPASS (god 5cc045/ed8032, Jim 967fa3/29e886): every tes
     assert.match(src, /\brecover\((?:ROOT|REPO|root)\)/, `${f}: recovers an interrupted run before anything else`);
     assert.match(src, /\bmutateFile\(/, `${f}: mutates through the helper`);
     assert.match(src, /\brestoreFile\(/, `${f}: restores through the helper`);
+    assert.match(src, /\bcheckAnchors\(/, `${f}: checks every anchor before mutating (god eac6c9)`);
     assert.doesNotMatch(src, direct, `${f}: MUTANT: writes a file without the journal`);
     const code = src.replace(/require\((['"])[^'"]+\1\)/g, '');
     for (const m of code.matchAll(/'([\w./-]+\.(?:cjs|mjs|js|cs))'/g)) {
@@ -246,6 +247,46 @@ test('MUTANT-JOURNAL-GATE gate(__filename) names the suite from the repo root; t
   assert.equal(runner.run({ ...base, mutantJournal: () => ({ ...live, live: false }), spawn: deadSpawn.spawn, err: dead.write, processEnv: { ...process.env, MUTANT_RUNNER_PID: '4242' } }), 1);
   assert.match(dead.lines.join('\n'), /an interrupted mutant runner \(pid 4242, dead\)/);
   assert.equal(deadSpawn.calls.length, 0);
+});
+
+test('MUTANT ANCHORS (god eac6c9): every census checks all of its anchors through the helper before mutating anything, and --anchors-only runs just that check: a missing or duplicated anchor is a named failure here, not a half-run census (MUTANT: a stale anchor aborts a census quietly / a row is skipped as INERT)', { timeout: 120_000 }, () => {
+  const { spawnSync } = require('node:child_process');
+  // The unit: one file, one good row, one missing, one duplicated; the throw names each bad row and nothing is written.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'c90-anchors-'));
+  fs.mkdirSync(path.join(root, 'src'));
+  fs.writeFileSync(path.join(root, 'src', 'x.ts'), 'const a = 1;\r\nconst b = 2;\r\nconst b2 = 2;\r\n', 'utf8');
+  const rows = [
+    { name: 'good', file: 'src/x.ts', from: 'const a = 1;' },
+    { name: 'gone', file: 'src/x.ts', from: 'const c = 3;' },
+    { name: 'twice', file: 'src/x.ts', from: '= 2;' },
+    { name: 'nofile', file: 'src/y.ts', from: 'const a = 1;' },
+  ];
+  assert.throws(() => helper.checkAnchors(root, rows), (e) => {
+    assert.match(e.message, /^INERT mutants, nothing mutated:/);
+    assert.match(e.message, /gone: anchor missing in src[\\/]x\.ts/);
+    assert.match(e.message, /twice: anchor not unique \(2\) in src[\\/]x\.ts/);
+    assert.match(e.message, /nofile: anchor file missing in src[\\/]y\.ts/);
+    assert.doesNotMatch(e.message, /good:/);
+    return true;
+  }, 'MUTANT: a bad anchor is not a failure, or is not named');
+  assert.equal(helper.checkAnchors(root, [rows[0], { name: 'lf', file: 'src/x.ts', from: 'const a = 1;\nconst b = 2;' }]), 2, 'good rows pass, matched on LF-normalised text');
+  fs.rmSync(root, { recursive: true, force: true });
+  // Every census in the tree: --anchors-only must say how many rows it checked and exit 0, touching nothing.
+  const tools = path.join(REPO, 'test', 'tools');
+  const runners = fs.readdirSync(tools).filter((f) => /mutants?\.cjs$/.test(f) && f !== 'mutant-runner-helper.cjs');
+  const env = { ...process.env, MUTANT_RUNNER_PID: '' };
+  delete env.NODE_OPTIONS; delete env.NODE_TEST_CONTEXT;
+  const bad = [];
+  let rowsChecked = 0;
+  for (const f of runners) {
+    const r = spawnSync(process.execPath, [path.join(tools, f), '--anchors-only'], { cwd: REPO, encoding: 'utf8', windowsHide: true, timeout: 60_000, env });
+    const m = /anchors ok: (\d+) rows/.exec(r.stdout || '');
+    if (r.status !== 0 || !m) bad.push(`${f}: status ${r.status}\n${r.stdout}\n${r.stderr}`);
+    else rowsChecked += Number(m[1]);
+  }
+  assert.deepEqual(bad, [], 'MUTANT: a census cannot mutate one of its rows');
+  assert.ok(rowsChecked >= 300, `the censuses check their rows (${rowsChecked})`);
+  assert.equal(fs.existsSync(helper.journalPath(REPO)), false, 'the anchor check journals nothing');
 });
 
 const REPO = path.resolve(__dirname, '..');

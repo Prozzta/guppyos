@@ -12,7 +12,7 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..', '..');
-const { recover, mutateFile, restoreFile } = require('./mutant-runner-helper.cjs');
+const { recover, mutateFile, restoreFile, checkAnchors } = require('./mutant-runner-helper.cjs');
 recover(ROOT);
 if (process.argv.includes('--recover-only')) process.exit(0);
 const TEST = 'test/pty-exit-record-198.test.cjs';
@@ -70,6 +70,7 @@ const MUTANTS = [
   ['X25 a wide-char row never wraps', REC, 'const mayWrap = (l: string) => !cols || l.length >= cols || /[^\\x00-\\x7f]/.test(l);', 'const mayWrap = (l: string) => !cols || l.length >= cols;', WRAPPED]
 ];
 
+checkAnchors(ROOT, MUTANTS.map(([name, file, from]) => ({ name, file, from })));
 const run = () => spawnSync(process.execPath, ['--test', TEST], { cwd: ROOT, encoding: 'utf8', windowsHide: true, timeout: 300_000 });
 const base = run();
 if (base.status !== 0) {

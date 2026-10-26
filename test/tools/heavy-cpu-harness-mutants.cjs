@@ -5,7 +5,7 @@ const { spawnSync } = require('node:child_process');
 const path = require('node:path');
 const os = require('node:os');
 const root = path.join(__dirname, '..', '..');
-const { recover, mutateFile, restoreFile } = require('./mutant-runner-helper.cjs');
+const { recover, mutateFile, restoreFile, checkAnchors } = require('./mutant-runner-helper.cjs');
 recover(root);
 if (process.argv.includes('--recover-only')) process.exit(0);
 const source = path.join(root, 'test', 'heavy-cpu-harness-191.test.cjs');
@@ -20,6 +20,7 @@ const mutants = [
   ['helper-ignores-rate', helper, 'CpuRate = cap ? cpuRate : 0', 'CpuRate = cap ? CPU_RATE_50_PERCENT : 0'],
 ];
 mutants[0].splice(1, 0, source);
+checkAnchors(root, [...mutants.map(([name, file, from]) => ({ name, file, from })), { name: 'helper-ignores-rate (query oracle)', file: source, from: 'rate: 2500, affinity: null' }]);
 for (const [name, file, from, to] of mutants) {
   const original = fs.readFileSync(file, 'utf8');
   if (original.indexOf(from) < 0 || original.indexOf(from) !== original.lastIndexOf(from)) throw new Error(`${name}: anchor missing or ambiguous`);

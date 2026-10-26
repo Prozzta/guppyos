@@ -12,7 +12,7 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..', '..');
-const { recover, mutateFile, restoreFile } = require('./mutant-runner-helper.cjs');
+const { recover, mutateFile, restoreFile, checkAnchors } = require('./mutant-runner-helper.cjs');
 recover(ROOT);
 if (process.argv.includes('--recover-only')) process.exit(0);
 const TEST = 'test/wake-stale-loading-header-197.test.cjs';
@@ -35,6 +35,7 @@ const MUTANTS = [
   ['W2 the held recheck passes no latch', OWNER, 'deps.homeDir?.(), this.postHandoff.get(ptyId) === held.incarnation)', 'deps.homeDir?.())', WIRE]
 ];
 
+checkAnchors(ROOT, MUTANTS.map(([name, file, from]) => ({ name, file, from })));
 const run = () => spawnSync(process.execPath, ['--test', TEST], { cwd: ROOT, encoding: 'utf8', windowsHide: true, timeout: 300_000 });
 const base = run();
 if (base.status !== 0) {

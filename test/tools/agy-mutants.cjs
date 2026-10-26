@@ -31,7 +31,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
-const { recover, mutateFile, restoreFile } = require('./mutant-runner-helper.cjs');
+const { recover, mutateFile, restoreFile, checkAnchors } = require('./mutant-runner-helper.cjs');
 
 const REPO = path.resolve(__dirname, '..', '..');
 recover(REPO);
@@ -228,6 +228,7 @@ if (!chosen.length) {
   process.exit(2);
 }
 
+checkAnchors(REPO, chosen.map((m) => ({ name: m.id, file: m.file, from: m.from })));
 const sha = (p) => crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
 const touched = [...new Set(chosen.map((m) => m.file))];
 const baseline = Object.fromEntries(touched.map((p) => [p, sha(p)]));

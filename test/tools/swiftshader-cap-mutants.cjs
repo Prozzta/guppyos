@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const { spawnSync } = require('node:child_process');
 const path = require('node:path');
 const root = path.join(__dirname, '..', '..');
-const { recover, mutateFile, restoreFile } = require('./mutant-runner-helper.cjs');
+const { recover, mutateFile, restoreFile, checkAnchors } = require('./mutant-runner-helper.cjs');
 recover(root);
 if (process.argv.includes('--recover-only')) process.exit(0);
 const source = path.join(root, 'test', 'electron-harness', 'electron-bin.cjs');
@@ -18,6 +18,7 @@ const mutants = [
   ['no-mask-cache', 'if (!cachedHarnessMasks.has(key))', 'if (true)'],
   ['wrong-mask-cache-key', 'const key = String(override);', "const key = 'all-overrides';"],
 ];
+checkAnchors(root, mutants.map(([name, from]) => ({ name, file: source, from })));
 for (const [name, from, to] of mutants) {
   if (original.indexOf(from) < 0 || original.indexOf(from) !== original.lastIndexOf(from)) throw new Error(`${name}: anchor missing or ambiguous`);
   try {

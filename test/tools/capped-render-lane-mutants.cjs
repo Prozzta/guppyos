@@ -6,7 +6,7 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const root = path.resolve(__dirname, '..', '..');
-const { recover, mutateFile, restoreFile } = require('./mutant-runner-helper.cjs');
+const { recover, mutateFile, restoreFile, checkAnchors } = require('./mutant-runner-helper.cjs');
 recover(root);
 if (process.argv.includes('--recover-only')) process.exit(0);
 const source = path.join(root, 'test', 'tools', 'run-tests.cjs');
@@ -21,11 +21,13 @@ const mutants = [
   },
   {
     name: 'render-lane-is-not-serial',
-    from: "extraArgs: ['--test-concurrency=1']",
-    to: 'extraArgs: []',
+    // The perf lane is serial too (run-tests.cjs line ~471): anchor on the render lane's label.
+    from: "label: 'render lane: ', extraArgs: ['--test-concurrency=1']",
+    to: "label: 'render lane: ', extraArgs: []",
     dies: /Electron harness lane is serial/
   }
 ];
+checkAnchors(root, mutants.map(({ name, from }) => ({ name, file: source, from })));
 const run = () => spawnSync(process.execPath, ['--test', contract], { cwd: root, encoding: 'utf8', windowsHide: true });
 if (run().status !== 0) throw new Error('BASELINE RED: capped render lane contract must pass before mutation');
 try {

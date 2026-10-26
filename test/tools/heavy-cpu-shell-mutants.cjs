@@ -14,7 +14,7 @@ const { spawnSync } = require('node:child_process');
 const os = require('node:os');
 
 const ROOT = path.resolve(__dirname, '..', '..');
-const { recover, mutateFile, restoreFile } = require('./mutant-runner-helper.cjs');
+const { recover, mutateFile, restoreFile, checkAnchors } = require('./mutant-runner-helper.cjs');
 recover(ROOT);
 if (process.argv.includes('--recover-only')) process.exit(0);
 const TEST = 'test/heavy-cpu-options-191.test.cjs';
@@ -40,6 +40,7 @@ const MUTANTS = [
   ['H3 percent left for the second parse', CS, 'if (c == \'%\') { sb.Append("%GUPPY_HEAVYJOB_PCT%"); continue; }', '', LIVE],
 ];
 
+checkAnchors(ROOT, MUTANTS.map(([name, file, from]) => ({ name, file, from })));
 const local = fs.mkdtempSync(path.join(os.tmpdir(), 'hcpu-shell-mutant-'));
 const run = () => spawnSync(process.execPath, ['--test', TEST], { cwd: ROOT, encoding: 'utf8', windowsHide: true, timeout: 600_000, env: { ...process.env, LOCALAPPDATA: local } });
 if (run().status !== 0) {
