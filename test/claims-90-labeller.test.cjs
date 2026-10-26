@@ -112,6 +112,49 @@ test('settings: the key file is allowed by an Edit rule (Claude Code judges Writ
   assert.match(s.hooks.PreToolUse[0].hooks[0].command, /labeller-guard\.cjs/);
 });
 
+test('god 3ba8b6 R5: the jail session folder is copied byte-equal into the run dir and deleted; another labeller is not judged', () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'c90-label-r5-'));
+  try {
+    const projects = path.join(base, 'projects');
+    const out = path.join(base, 'h1-runs', 'andy');
+    const j = path.join(out, 'jail-batch-07-andy-AAA');
+    const mine = path.join(projects, G.projectSlug(j));
+    fs.mkdirSync(path.join(mine, 's1', 'tool-results'), { recursive: true });
+    fs.writeFileSync(path.join(mine, 's1', 'tool-results', 'b1.txt'), 'spilled git output');
+    const sele = path.join(projects, `${G.projectSlug(path.join(base, 'h1-runs', 'sele'))}-jail-batch-09-sele-BBB`);
+    fs.mkdirSync(sele, { recursive: true });
+    const dest = path.join(out, 'batch-07-andy', 'session');
+    const r = L.sessionOut(projects, j, dest, out);
+    assert.deepEqual(r, { session: { folder: G.projectSlug(j), created: true, files: 1, removed: true, problem: null }, leftovers: [], problem: null });
+    assert.equal(fs.existsSync(mine), false, 'deleted from projects');
+    assert.equal(fs.readFileSync(path.join(dest, G.projectSlug(j), 's1', 'tool-results', 'b1.txt'), 'utf8'), 'spilled git output');
+    assert.ok(fs.existsSync(sele), 'another labeller\'s live session folder is untouched and not a leftover');
+    // A folder of this --out's jails left behind is a leftover.
+    const old = path.join(projects, `${L.leftoverPrefix(out)}batch-06-andy-OLD`);
+    fs.mkdirSync(old, { recursive: true });
+    const r2 = L.sessionOut(projects, path.join(out, 'jail-batch-08-andy-CCC'), dest, out);
+    assert.equal(r2.session.created, false);
+    assert.deepEqual(r2.leftovers, [path.basename(old)]);
+    assert.match(r2.problem, /1 jail folder\(s\) left/);
+    // A folder holding a link is never copied or deleted.
+    const k = path.join(out, 'jail-batch-09-andy-DDD');
+    const linked = path.join(projects, G.projectSlug(k));
+    const target = path.join(base, 'target');
+    fs.mkdirSync(linked, { recursive: true }); fs.mkdirSync(target, { recursive: true }); fs.writeFileSync(path.join(target, 'keep.txt'), 'x');
+    fs.symlinkSync(target, path.join(linked, 'link'), 'junction');
+    assert.equal(L.sessionOut(projects, k, dest, out).session.problem, 'the session folder holds a link');
+    assert.ok(fs.existsSync(path.join(target, 'keep.txt')) && fs.existsSync(linked));
+    fs.unlinkSync(path.join(linked, 'link'));
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test('god 3ba8b6 R5 static: the session folder is moved out before the verdict and a problem is INVALID first', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'claims-90', 'labeller.cjs'), 'utf8');
+  assert.match(src, /\n    const s = sessionOut\(path\.dirname\(G\.ownOutputsDir\(jail\)\), jail, path\.join\(runDir, 'session'\), o\.out\);\r?\n/);
+  assert.match(src, /\n    if \(s\.problem\) reason = `session folder: /);
+  assert.ok(src.indexOf('const s = sessionOut(') < src.indexOf('fs.appendFileSync(keyOut, lines)'), 'before any key row is appended');
+});
+
 test('audit: a compaction or an out-of-jail call is caught; the key is judged', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'c90-audit-'));
   const t = path.join(dir, 't.jsonl');

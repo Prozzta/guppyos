@@ -15,6 +15,9 @@
  * open log. The batch is INVALID if the session compacts, starts with more than its tools, or
  * names any path outside the jail (the guard's log and the transcript are both judged).
  * A VALID batch's key rows (only the labeller's own rows) and a COST row are appended to --key.
+ * god 3ba8b6 (R5): Claude Code keeps a folder per session in ~/.claude/projects named after the jail
+ * (it can hold spilled snapshot output). When the session ends it is copied into <run>/session with a
+ * byte check and deleted; a folder of this labeller's jails still there makes the batch INVALID.
  *
  *   node test/claims-90/labeller.cjs --snapshot <dir> --addendum <dir> --labeller <name>
  *        --group F|D --xcheck <ids.json> --batch <batch-NN.jsonl> --instructions <INSTRUCTIONS-H1.md>
@@ -22,7 +25,7 @@
  *        --out <dir> [--doc <file>=<name.md>]... [--model <id>] [--claude <exe>] [--keep]
  * The prompt may use {labeller}, {group}, {batchName}, {today}, {jail}, {keyFile} and {ownIds}.
  * Writes under --out/<batchName>-<labeller>/: transcript.jsonl, jail-files.json, open-log.jsonl,
- * key-batch.jsonl and run.json. Item text and keys stay local; mails carry counts and shas only.
+ * key-batch.jsonl, run.json and session/. Item text and keys stay local; mails carry counts and shas only.
  */
 const fs = require('node:fs');
 const path = require('node:path');
@@ -140,6 +143,42 @@ function jailEnv(jail, scratch) {
   return { ...env, GIT_DIR: path.join(jail, 'repo.git'), GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: path.join(scratch, 'gitconfig-empty'), GIT_PAGER: 'cat', PAGER: 'cat', GIT_TERMINAL_PROMPT: '0' };
 }
 
+/** god 3ba8b6: the session folders of this --out's jails (another labeller's --out is not judged). */
+const leftoverPrefix = (out) => `${G.projectSlug(path.resolve(out))}-jail-`;
+
+function filesUnder(dir) {
+  const out = [];
+  const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else out.push(path.relative(dir, p)); } };
+  walk(dir);
+  return out.sort();
+}
+
+/** The session folder of one jail out of projects/ into dest (byte check, then delete; never one holding a link), then the leftover check. */
+function sessionOut(projects, jail, dest, out) {
+  const folder = G.projectSlug(jail);
+  const src = path.join(projects, folder);
+  let session;
+  try {
+    if (!fs.existsSync(src)) session = { folder, created: false, files: 0, removed: false, problem: null };
+    else if (fs.lstatSync(src).isSymbolicLink() || R.linksUnder(src).length) session = { folder, created: true, files: 0, removed: false, problem: 'the session folder holds a link' };
+    else {
+      const to = path.join(dest, folder);
+      fs.cpSync(src, to, { recursive: true });
+      const files = filesUnder(src);
+      const unequal = files.filter((f) => !fs.existsSync(path.join(to, f)) || !fs.readFileSync(path.join(src, f)).equals(fs.readFileSync(path.join(to, f))));
+      if (unequal.length) session = { folder, created: true, files: files.length, removed: false, problem: `${unequal.length} copied file(s) differ` };
+      else {
+        fs.rmSync(src, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+        session = { folder, created: true, files: files.length, removed: !fs.existsSync(src), problem: fs.existsSync(src) ? 'the session folder could not be deleted' : null };
+      }
+    }
+  } catch (e) { session = { folder, created: null, files: 0, removed: false, problem: String(e.message || e).slice(0, 200) }; }
+  let names = [];
+  try { names = fs.readdirSync(projects); } catch { names = []; }
+  const leftovers = names.filter((n) => n.startsWith(leftoverPrefix(out))).sort();
+  return { session, leftovers, problem: session.problem ?? (leftovers.length ? `${leftovers.length} jail folder(s) left in ~/.claude/projects (${leftovers[0]})` : null) };
+}
+
 /** What the session did. compact: any compaction record. outside: calls the guard rules judge outside. */
 function auditTranscript(file, jail, keyFile) {
   const rows = fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } }) : [];
@@ -252,6 +291,10 @@ async function main(argv) {
       child.on('close', (code) => { clearTimeout(timer); run.stderrTail = err.slice(-300); resolve(code); });
       child.stdin.end(prompt);
     });
+    // god 3ba8b6: the session is over; its projects folder goes into the run dir before any verdict.
+    const s = sessionOut(path.dirname(G.ownOutputsDir(jail)), jail, path.join(runDir, 'session'), o.out);
+    run.session = s.session;
+    run.leftovers = s.leftovers;
     const a = auditTranscript(transcript, jail, keyFile);
     const log = readJsonl(openLog);
     const logOutside = log.filter((r) => r.place === 'outside').length;
@@ -260,7 +303,8 @@ async function main(argv) {
     // The guard must have seen every call (the hook is the open log's source).
     const unlogged = a.calls.filter((c) => !log.some((r) => r.toolUseId === c.id)).length;
     let reason = null;
-    if (a.compact) reason = `the session compacted (${a.compact})`;
+    if (s.problem) reason = `session folder: ${s.problem}`;
+    else if (a.compact) reason = `the session compacted (${a.compact})`;
     else if (a.outside || logOutside) reason = `a call named a path outside the jail (transcript ${a.outside}, open log ${logOutside})`;
     else if (!initOk) reason = 'the session started with more than its tools';
     else if (unlogged) reason = `${unlogged} call(s) missing from the open log`;
@@ -298,4 +342,4 @@ if (require.main === module) {
   }, (e) => { console.error(`[claims-90] ${e.stack || e.message}`); process.exitCode = 2; });
 }
 
-module.exports = { parseArgs, ownRows, buildJail, jailFiles, forbiddenIn, settingsFor, jailEnv, auditTranscript, checkKey, FORBIDDEN, TOOLS, main };
+module.exports = { parseArgs, ownRows, buildJail, jailFiles, forbiddenIn, settingsFor, jailEnv, auditTranscript, checkKey, sessionOut, leftoverPrefix, FORBIDDEN, TOOLS, main };
