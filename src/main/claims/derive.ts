@@ -96,6 +96,23 @@ export function derive(records: LedgerRec[], registry: KeyRegistry, ruleConfig: 
   }
 
   // R2: only registered single-cardinality keys; ordering is bitemporal and independent of input order.
+  // A claim never loses R2 to one it explicitly (even transitively) supersedes: the R3 statement is the author's order,
+  // and an equal or earlier valid time on the replacement (a correction written under the same clock) must not leave the key with no live claim.
+  const replaces = (from: ClaimRec, target: ClaimRec): boolean => {
+    const seen = new Set<string>();
+    const stack = [from];
+    while (stack.length) {
+      const source = stack.pop() as ClaimRec;
+      for (const id of source.supersedes ?? []) {
+        const next = byId.get(id);
+        if (!next || seen.has(id) || protectedFromMail(source, next)) continue;
+        if (id === target.id) return true;
+        seen.add(id);
+        stack.push(next);
+      }
+    }
+    return false;
+  };
   const keyed = new Map<string, ClaimRec[]>();
   for (const claim of claims) {
     if (!claim.key || cardinality(canonicalKey(claim.key, registry), registry) !== 'single') continue;
@@ -124,7 +141,7 @@ export function derive(records: LedgerRec[], registry: KeyRegistry, ruleConfig: 
         : ownClass === 'mail' ? [candidates.mail, candidates.protected, candidates.other]
           : [candidates.protected, candidates.mail, candidates.other];
       const newer = eligible.filter((item): item is ClaimRec => !!item).sort(recordOrder).at(-1);
-      if (newer) setStatus(state[older.id], 'superseded', `R2 by ${newer.id}`, newer.id);
+      if (newer && !replaces(older, newer)) setStatus(state[older.id], 'superseded', `R2 by ${newer.id}`, newer.id);
     }
     const newestProtected = latest.protected;
     const newestMail = latest.mail;

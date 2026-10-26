@@ -44,7 +44,7 @@ import { randomBytes } from 'node:crypto';
 import * as nodeFs from 'node:fs';
 import { basename, join } from 'node:path';
 import {
-  CLAIM_KINDS, CLAIM_TEXT_MAX, CLAIM_TEXT_MAX_LEGACY, CLAIMS_ALERT_CHAIN_BROKEN, CLAIMS_ALERT_KEY_MISSING, SUPERSEDES_REASON_NOTE_MAX,
+  CLAIM_KINDS, CLAIM_TEXT_MAX, CLAIM_TEXT_MAX_LEGACY, CLAIM_VALUE_MAX, CLAIMS_ALERT_CHAIN_BROKEN, CLAIMS_ALERT_KEY_MISSING, SUPERSEDES_REASON_NOTE_MAX,
   DERIVED_AGENT_ID, EVENT_KINDS, LEDGER_RECORD_VERSION,
   type AppendOrigin, type AppendResult, type ChainBreak, type ClaimKind, type ClaimRec, type ClaimSource,
   type EventRec, type LedgerRec, type MacKeyProvider, type ReadResult, type RecordDraft, type Ref, type TornInfo,
@@ -106,7 +106,7 @@ const FD_IDLE_MS = 30_000;
 const ANCHOR_DELAY_MS = 1_000;
 const REF_VALUE_MAX = 500;
 
-const CLAIM_DRAFT_FIELDS = new Set(['t', 'kind', 'text', 'key', 'refs', 'ttl', 'pin', 'supersedes', 'supersedesReason', 'retracts', 'at', 'source', 'legacy', 'section']);
+const CLAIM_DRAFT_FIELDS = new Set(['t', 'kind', 'text', 'key', 'refs', 'ttl', 'pin', 'supersedes', 'supersedesReason', 'retracts', 'at', 'source', 'legacy', 'section', 'value', 'valueAgent']);
 const SUPERSEDES_REASON_CATEGORIES = new Set(['changed', 'corrected', 'moved']);
 
 function validSupersedesReason(value: unknown): value is SupersedesReason {
@@ -183,8 +183,8 @@ export const PURGED_TEXT = '[purged]';
 
 /** A purged claim: the content goes, the structure derive needs stays. */
 export function tombstone(rec: ClaimRec): ClaimRec {
-  const { refs: _r, supersedesReason: _s, redacted: _d, legacy: _l, section: _c, ...rest } = rec;
-  void _r; void _s; void _d; void _l; void _c;
+  const { refs: _r, supersedesReason: _s, redacted: _d, legacy: _l, section: _c, value: _v, valueAgent: _a, ...rest } = rec;
+  void _r; void _s; void _d; void _l; void _c; void _v; void _a;
   return { ...rest, text: PURGED_TEXT };
 }
 
@@ -896,6 +896,13 @@ export class ClaimStore {
     if (draft.section !== undefined && origin !== 'w6-internal') return { error: 'refused: a section is set by the import only' };
     if (draft.section !== undefined && typeof draft.section !== 'string') return { error: 'section is text' };
     const section = clampSection(draft.section);
+    // L1: a structured value (and its agent) comes from the derived writer only; one line, never cut.
+    for (const f of ['value', 'valueAgent'] as const) {
+      const v = draft[f];
+      if (v === undefined) continue;
+      if (origin !== 'derived-internal') return { error: `refused: ${f} is set by the derived writer only` };
+      if (typeof v !== 'string' || !v.trim() || /[\r\n]/.test(v) || charLen(v) > CLAIM_VALUE_MAX) return { error: `${f} is one line of at most ${CLAIM_VALUE_MAX} characters` };
+    }
     if (draft.legacy !== undefined) {
       const lg = draft.legacy as unknown;
       if (!isObj(lg) || typeof lg.file !== 'string' || !lg.file || lg.file.length > 300 || !Number.isInteger(lg.line) || (lg.line as number) < 0
@@ -977,6 +984,8 @@ export class ClaimStore {
       ...(red.redacted ? { redacted: true as const } : {}),
       ...(draft.legacy !== undefined ? { legacy: draft.legacy } : {}),
       ...(section !== undefined ? { section } : {}),
+      ...(draft.value !== undefined ? { value: draft.value } : {}),
+      ...(draft.valueAgent !== undefined ? { valueAgent: draft.valueAgent } : {}),
     };
     return { rec, registryAdded };
   }

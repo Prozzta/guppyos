@@ -103,14 +103,18 @@ export interface ClaimRec extends RecBase {
    */
   section?: string;
   /**
-   * CLAIMS-90 step 3 L1 (god fada64, Creed 011da9): a derived FIELD claim's structured value beside its prose (the
-   * sha, status word, agent id, version or merged tip; `none` when the card has no such value), one line, set only
-   * by the derived writer (an agent draft with it is refused). The lead block prints it (L2) and never the prose.
+   * CLAIMS-90 L1 (god 69bc66): a derived FIELD claim's value on its own, beside the prose: the full sha
+   * (donesha, lastsha, gitsha, merge tip, release bump and tag), the status word, the agent id, the
+   * version, or `<PASS|FAIL> <sha>` for an audit; `none` when the card has no assignee / fix version.
+   * One line, at most CLAIM_VALUE_MAX characters. Set by the derived writer only. MAC-covered.
    */
   value?: string;
-  /** L1: on card.<id>.donesha claims, the done mail's sender (every derived claim's `agent` is the derived ledger). */
+  /** L3: the agent a per-agent field value belongs to (a done-mail sha's sender). Derived writer only. */
   valueAgent?: string;
 }
+
+/** L1: the most a claim's structured value may hold (one line). */
+export const CLAIM_VALUE_MAX = 120;
 
 export type EventKind =
   | 'sighting' | 'inferred-supersede' | 'soft-supersede' | 'reconcile-answer' | 'revert'
@@ -153,7 +157,7 @@ export type RecordDraft =
   | {
       t: 'claim'; kind: ClaimKind; text: string; key?: string; refs?: Ref[]; ttl?: string | null; pin?: true;
       supersedes?: string[]; supersedesReason?: SupersedesReason; retracts?: string[]; at?: string; source?: 'self' | 'human' | `mail:${string}` | 'legacy' | 'derived';
-      legacy?: ClaimRec['legacy']; section?: string;
+      legacy?: ClaimRec['legacy']; section?: string; value?: string; valueAgent?: string;
     }
   | {
       t: 'event'; ev: 'accept' | 'dismiss' | 'reconcile-answer' | 'revert' | 'pin' | 'unpin'; targets: string[];

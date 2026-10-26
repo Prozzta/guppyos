@@ -9,6 +9,10 @@
  * writer's own previous claim(s) for that slot (reason `changed`). A slot no fact names any more is
  * left as it is (nothing is retracted).
  *
+ * L1 (god 69bc66): a fact's structured value (and value agent) is part of "the same": a live claim with the same
+ * key, text and refs but another value (an older claim written before values existed) is superseded by the
+ * same fact with its value (reason `corrected`, note "structured value"), so one sync backfills every field claim.
+ *
  * The backfill reads the primary records of a hive (tasks.json and tasks-archive, the done mails main's
  * MailLedger recorded at delivery, the CHANGELOG and tags) and syncs every fact. The app runs it at
  * start; the CLAIMS-90 runner runs it over the frozen T_s copy (scripts/claims-derived-backfill.cjs).
@@ -35,7 +39,7 @@ export interface DerivedWriterDeps {
   log?: (row: Record<string, unknown>) => void;
 }
 
-export interface SyncCounts { facts: number; appended: number; unchanged: number; superseded: number; failed: number; older?: number; noTime?: number; redated?: number }
+export interface SyncCounts { facts: number; appended: number; unchanged: number; superseded: number; failed: number; older?: number; noTime?: number; redated?: number; valued?: number }
 
 /** The sender a done-sha claim's text names (the writer's own template; M5's per-commit claims too). */
 const DONE_FROM_RE = /\bdone mail (?:\S+ )?from (\S+) /;
@@ -76,8 +80,9 @@ export async function syncDerived(deps: DerivedWriterDeps, facts: readonly Deriv
     if (!f.at) { counts.noTime = (counts.noTime ?? 0) + 1; continue; }
     const prior = live.get(f.slot) ?? [];
     const same = prior.find((c) => c.key === f.key && c.text === f.text && refsId(c.refs) === refsId(f.refs));
+    const sameValue = !!same && same.value === f.value && same.valueAgent === f.valueAgent;
     // The store clamps at to its write time (F2), so a stored claim holds min(fact time, its wt).
-    if (same && same.at === (typeof same.wt === 'string' && same.wt < f.at ? same.wt : f.at)) { counts.unchanged++; continue; }
+    if (same && sameValue && same.at === (typeof same.wt === 'string' && same.wt < f.at ? same.wt : f.at)) { counts.unchanged++; continue; }
     // A fact dated before the slot's live claim never replaces it (a pass that no longer sees a newer record),
     // unless it is the same value: then only its time was wrong (a claim stamped with a run's time), re-dated.
     if (!same && prior.some((c) => typeof c.at === 'string' && c.at > f.at!)) { counts.older = (counts.older ?? 0) + 1; continue; }
@@ -85,12 +90,15 @@ export async function syncDerived(deps: DerivedWriterDeps, facts: readonly Deriv
       t: 'claim', kind: f.kind, text: f.text, key: f.key,
       ...(f.refs.length ? { refs: f.refs } : {}),
       at: f.at,
-      ...(prior.length ? { supersedes: prior.map((c) => c.id), supersedesReason: same ? { category: 'corrected' as const, note: 'valid time' } : { category: 'changed' as const } } : {}),
+      ...(f.value !== undefined ? { value: f.value } : {}),
+      ...(f.valueAgent !== undefined ? { valueAgent: f.valueAgent } : {}),
+      ...(prior.length ? { supersedes: prior.map((c) => c.id), supersedesReason: same ? { category: 'corrected' as const, note: sameValue ? 'valid time' : 'structured value' } : { category: 'changed' as const } } : {}),
     };
     const res = await deps.store.appendRecord(DERIVED_AGENT_ID, draft, 'derived-internal');
     if (res.ok) {
       counts.appended++;
-      if (same) counts.redated = (counts.redated ?? 0) + 1;
+      if (same && sameValue) counts.redated = (counts.redated ?? 0) + 1;
+      if (same && !sameValue) counts.valued = (counts.valued ?? 0) + 1;
       if (prior.length) counts.superseded += prior.length;
     } else {
       counts.failed++;
