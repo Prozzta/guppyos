@@ -15,6 +15,8 @@
  *   (f) card.<id>.decision.result, card.<id>.decision.n<h8>   R2: the card's own record, whole, in parts:
  *                                 its result, and each note entry (h8 = the entry's hash, so entries
  *                                 keep their keys as notes grow). A ruling that lives only there is found.
+ *   (h) card.<id>.audit           L4: the newest dated result/note entry that states an audit verdict (PASS or FAIL)
+ *                                 with its commit (@<sha>): the verdict and that commit.
  *   (g) card.<id>.decision.m<h8>  R2 (research T4): each god ruling mail on the card, whole, in parts (h8 =
  *                                 the mail id's hash). Only mails the mail-card index links by a trusted
  *                                 method (field, reply, conversation, mention-subject); see isRulingMail.
@@ -25,11 +27,15 @@
  * answer's (or question's) time, the note entry's date, the card's status-since and record times
  * (cardAt), the commit's time, the tag's or CHANGELOG section's date, the mail's time. A fact with
  * no source time is not written (syncDerived counts it as noTime).
+ *
+ * Structured value (L1, god 69bc66): every FIELD fact (status, assignee, fixversion, lastsha, audit, gitsha,
+ * merge, donesha, release.<v>.bump, release.<v>.tag) carries `value`, the one value the field names, beside
+ * its prose, so a reader prints it without cutting a window from the text. Decisions and CHANGELOG entries are prose.
  */
 import { createHash } from 'node:crypto';
 import type { ClaimKind, Ref } from '../../shared/claims';
 
-export interface DerivedFact { slot: string; key: string; kind: ClaimKind; text: string; at?: string; refs: Ref[] }
+export interface DerivedFact { slot: string; key: string; kind: ClaimKind; text: string; at?: string; refs: Ref[]; value?: string; valueAgent?: string }
 
 /** The registry's key grammar (registry.ts KEY_RE, KEY_MAX). */
 const KEY_RE = /^[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9][a-z0-9_-]*){1,7}$/;
@@ -340,6 +346,7 @@ export async function gitHistoryFacts(log: ReadonlyArray<{ commit: string; time:
       text: `Card ${card}: the latest commit in git order whose message names the card is ${best.slice(0, 8)} (${best}); ${list.length} commit${list.length > 1 ? 's name' : ' names'} it`,
       ...(t0 ? { at: new Date(t0 * 1000).toISOString() } : {}),
       refs: [{ type: 'task', value: card }, { type: 'commit', value: best }],
+      value: best,
     });
   }
   return out;
@@ -387,6 +394,7 @@ export async function mergeFacts(log: ReadonlyArray<{ commit: string; time: numb
         ...(tipFull ? [{ type: 'commit' as const, value: tipFull }] : []),
         { type: 'commit' as const, value: x.commit },
       ],
+      value: tip,
     });
   }
   return out;
@@ -404,19 +412,19 @@ export async function cardFieldFacts(cards: readonly CardLike[], git: GitPort | 
     const status = cardKey(id, 'status');
     if (status && typeof c.status === 'string' && c.status) {
       const at = statusAt(c);
-      out.push({ slot: status, key: status, kind: 'fact', text: `Card ${id}${title} status: ${clip(c.status, 40)}`, ...(at ? { at } : {}), refs: [task] });
+      out.push({ slot: status, key: status, kind: 'fact', text: `Card ${id}${title} status: ${clip(c.status, 40)}`, ...(at ? { at } : {}), refs: [task], value: clip(c.status, 40) });
     }
     const assignee = cardKey(id, 'assignee');
     if (assignee) {
       const who = typeof c.assignee === 'string' && c.assignee.trim() ? clip(c.assignee, 80) : null;
       const at = cardAt(c);
-      out.push({ slot: assignee, key: assignee, kind: 'fact', text: who ? `Card ${id}${title} is assigned to ${who}` : `Card ${id}${title} has no assignee`, ...(at ? { at } : {}), refs: [task] });
+      out.push({ slot: assignee, key: assignee, kind: 'fact', text: who ? `Card ${id}${title} is assigned to ${who}` : `Card ${id}${title} has no assignee`, ...(at ? { at } : {}), refs: [task], value: who ?? 'none' });
     }
     const fixversion = cardKey(id, 'fixversion');
     if (fixversion) {
       const v = typeof c.fixVersion === 'string' && c.fixVersion.trim() ? clip(c.fixVersion.trim(), 40) : null;
       const at = cardAt(c);
-      out.push({ slot: fixversion, key: fixversion, kind: 'fact', text: v ? `Card ${id}${title} fix version: ${v}` : `Card ${id}${title} has no fix version`, ...(at ? { at } : {}), refs: [task] });
+      out.push({ slot: fixversion, key: fixversion, kind: 'fact', text: v ? `Card ${id}${title} fix version: ${v}` : `Card ${id}${title} has no fix version`, ...(at ? { at } : {}), refs: [task], value: v ?? 'none' });
     }
     const lastsha = cardKey(id, 'lastsha');
     if (lastsha && git) {
@@ -424,11 +432,40 @@ export async function cardFieldFacts(cards: readonly CardLike[], git: GitPort | 
       const best = shas.length ? await latestInGitOrder(shas, git) : null;
       if (best) {
         const t0 = await git.time(best);
-        out.push({ slot: lastsha, key: lastsha, kind: 'fact', text: `Card ${id}${title} last commit (latest in git order of the commits its result and notes name): ${best.slice(0, 8)} (${best})`, ...(t0 > 0 ? { at: new Date(t0 * 1000).toISOString() } : {}), refs: [task, { type: 'commit', value: best }] });
+        out.push({ slot: lastsha, key: lastsha, kind: 'fact', text: `Card ${id}${title} last commit (latest in git order of the commits its result and notes name): ${best.slice(0, 8)} (${best})`, ...(t0 > 0 ? { at: new Date(t0 * 1000).toISOString() } : {}), refs: [task, { type: 'commit', value: best }], value: best });
       }
+    }
+    const audit = cardKey(id, 'audit');
+    const v = audit ? auditVerdict(c) : null;
+    if (audit && v) {
+      const full = git ? await git.commitOf(v.sha) : null;
+      const sha = full ?? v.sha;
+      out.push({ slot: audit, key: audit, kind: 'fact', text: `Card ${id}${title} latest audit verdict (the newest dated result or note entry that states one): ${v.verdict} at commit ${sha.slice(0, 8)} (${sha})`, at: v.at, refs: [task, ...(full ? [{ type: 'commit' as const, value: full }] : [])], value: `${v.verdict} ${sha}` });
     }
   }
   return out;
+}
+
+/** An audit word, then (within the entry) a verdict and its commit: `AUDIT ... PASS ... @<sha>`. */
+const AUDIT_WORD_RE = /\b(?:re-?)?audit\w*|\bre-?check\w*|\bfinal\b|\bverdict\b/i;
+const VERDICT_RE = /\b(PASS|FAIL)\b[^@\n]{0,60}?@([0-9a-fA-F]{7,40})(?![0-9A-Za-z])/g;
+
+/**
+ * L4 (god 69bc66): the card's latest audit verdict: of the dated entries of its result and notes that name an
+ * audit and state PASS or FAIL with a commit (@<sha>), the newest by date (on a tie, the later one written);
+ * within an entry, the last verdict it states. The sha as written, lower-cased.
+ */
+export function auditVerdict(c: CardLike): { verdict: 'PASS' | 'FAIL'; sha: string; at: string } | null {
+  let best: { verdict: 'PASS' | 'FAIL'; sha: string; at: string } | null = null;
+  for (const e of [...noteEntries(c.result), ...noteEntries(c.notes)]) {
+    const at = entryAt(e) ?? dayAt(e);
+    if (!at || !AUDIT_WORD_RE.test(e)) continue;
+    let last: RegExpMatchArray | null = null;
+    for (const m of e.matchAll(VERDICT_RE)) if (/[0-9]/.test(m[2])) last = m;
+    if (!last) continue;
+    if (!best || at >= best.at) best = { verdict: last[1] as 'PASS' | 'FAIL', sha: last[2].toLowerCase(), at };
+  }
+  return best;
 }
 
 // ———————————————————————————————————————————————————————————— (c) releases
@@ -507,8 +544,12 @@ export function releaseFacts(sections: readonly ChangelogSection[], tags: readon
     const bk = `${key}.bump`;
     if (b && keyOk(bk)) {
       const bt = b.time > 0 ? new Date(b.time * 1000).toISOString() : at;
-      out.push({ slot: bk, key: bk, kind: 'fact', text: `Guppy ${v} version bump: the first commit that sets package.json version to ${v} is ${b.commit.slice(0, 8)} (${b.commit})`, ...(bt ? { at: bt } : {}), refs: [{ type: 'commit', value: b.commit }] });
+      out.push({ slot: bk, key: bk, kind: 'fact', text: `Guppy ${v} version bump: the first commit that sets package.json version to ${v} is ${b.commit.slice(0, 8)} (${b.commit})`, ...(bt ? { at: bt } : {}), refs: [{ type: 'commit', value: b.commit }], value: b.commit });
     }
+    // L4: release.<ver>.tag, the tag's commit as its own field (release.<ver> stays prose).
+    const tk = `${key}.tag`;
+    const tt = t ? iso(t.date) ?? at : undefined;
+    if (t && keyOk(tk) && tt) out.push({ slot: tk, key: tk, kind: 'fact', text: `Guppy ${v} release tag ${t.name} is commit ${t.commit.slice(0, 8)} (${t.commit})`, at: tt, refs: [{ type: 'commit', value: t.commit }], value: t.commit });
     (s?.entries ?? []).forEach((e, i) => {
       const ek = `${key}.e${i + 1}`;
       if (!keyOk(ek)) return;
@@ -631,6 +672,7 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
       text: `Card ${card}: the newest done mail from ${from} (${clip(m.id, 80)}) names commit ${commit.slice(0, 8)} (${commit})${subject ? '' : of}${others}`,
       ...(at ? { at } : {}),
       refs: [{ type: 'task', value: card }, { type: 'msg', value: m.id.slice(0, 200) }, ...(inRepo ? [{ type: 'commit' as const, value: commit }] : [])],
+      value: commit, valueAgent: from,
     });
   }
   return { facts, skipped, skips, older: withCommit - facts.length };

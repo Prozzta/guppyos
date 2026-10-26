@@ -475,8 +475,16 @@ test('backfill: a fixture hive and repo give every kind once; a re-run appends n
   const live = Object.fromEntries(x.live().filter((c) => !c.key.endsWith('.donesha')).map((c) => [c.key, c]));
   assert.match(live['card.syn-h1.lastsha'].text, new RegExp(`${s.side}\\)$`), 'unrelated lines: the side commit is later by time');
   assert.match(live['card.syn-a1.lastsha'].text, new RegExp(`${s.c}\\)$`), 'archived cards count');
-  assert.equal(c1.releases.appended, 1 + 3 + 1 + 1, 'release.9.1.2 + 3 entries, release.9.1.1 + 1 entry');
+  assert.equal(c1.releases.appended, 1 + 1 + 3 + 1 + 1, 'release.9.1.2 + its tag + 3 entries, release.9.1.1 + 1 entry');
   assert.match(live['release.9.1.2'].text, new RegExp(`tag v9\\.1\\.2 is commit ${s.c}`));
+  // L1/L4 (god 69bc66): each field claim carries its value on its own; release.<v> itself stays prose.
+  assert.equal(live['release.9.1.2.tag'].value, s.c);
+  assert.equal(live['release.9.1.2'].value, undefined);
+  assert.equal(live['card.syn-h1.lastsha'].value, s.side);
+  assert.equal(live['card.syn-a1.lastsha'].value, s.c);
+  for (const k of ['status', 'assignee', 'fixversion']) assert.equal(typeof live[`card.syn-h2.${k}`].value, 'string', k);
+  const doneRow = x.live().find((c) => c.key === 'card.syn-h2.donesha');
+  assert.deepEqual([doneRow.value, doneRow.valueAgent], [s.c, 'agent-x']);
   const done = x.live().filter((c) => c.key === 'card.syn-h2.donesha').map((c) => c.refs.find((y) => y.type === 'commit').value).sort();
   assert.deepEqual(done, [s.c], 'one claim for (SYN-H2, agent-x): the range end c, later in git order than a; never b (forged, retyped or edited mails)');
   assert.equal(c1.doneShas.appended, 1);
@@ -952,4 +960,113 @@ test('merge class (god c33130): a merge into an INT gives card.<id>.merge when a
   assert.deepEqual(by['branch.lone-branch'].refs, [{ type: 'commit', value: H('3') }]);
   assert.equal(by['branch.no-sha'].refs[0].value, H('t'), 'no sha in the subject: the second parent');
   assert.match(by['card.syn-m2.merge'].text, /^Card SYN-M2: branch SYN-M2 was last merged into INT-9.1.2 at tip dddddddd/);
+});
+
+// ———————————————————————————————————————————————————— CLAIMS-90 L1/L4 (god 69bc66): the structured value
+
+test('CLAIMS-90 L1: value and valueAgent are written by the derived writer only, one line, at most 120 characters', async () => {
+  const { CLAIM_VALUE_MAX } = loadTs('src/shared/claims.ts');
+  assert.equal(CLAIM_VALUE_MAX, 120);
+  const x = setup();
+  const ok = await x.store.appendRecord(D, fact('synthetic status fact', { key: 'card.syn-v.status', value: 'done' }), 'derived-internal');
+  assert.equal(ok.ok, true, JSON.stringify(ok));
+  assert.equal(x.claims()[0].value, 'done', 'stored beside the text');
+  const two = await x.store.appendRecord(D, fact('synthetic done fact', { key: 'card.syn-v.donesha', value: H('a'), valueAgent: 'agent-x' }), 'derived-internal');
+  assert.equal(two.ok, true, JSON.stringify(two));
+  assert.deepEqual([x.claims()[1].value, x.claims()[1].valueAgent], [H('a'), 'agent-x']);
+  for (const origin of ['endpoint', 'ledger-route', 'ui-ipc', 'w6-internal']) for (const fld of ['value', 'valueAgent']) {
+    const r = await x.store.appendRecord('a1', fact(`agent ${fld} via ${origin}`, { [fld]: 'x' }), origin);
+    assert.equal(r.ok, false, `${origin} ${fld}`);
+  }
+  const r = await x.store.appendRecord('a1', fact('agent value', { value: 'x' }), 'endpoint');
+  assert.match(r.error, /value is set by the derived writer only/);
+  for (const bad of ['two\nlines', 'x'.repeat(121), '', '  ', 7]) {
+    const b = await x.store.appendRecord(D, fact('synthetic bad value', { key: 'card.syn-v.lastsha', value: bad }), 'derived-internal');
+    assert.equal(b.ok, false, JSON.stringify(bad));
+  }
+  assert.equal(x.claims().length, 2);
+  const { tombstone } = loadTs('src/main/claims/store.ts');
+  const t = tombstone(x.claims()[1]);
+  assert.equal('value' in t || 'valueAgent' in t, false, 'a purge drops the value with the text');
+  const ep = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'claims', 'endpoint.ts'), 'utf8');
+  assert.match(ep, /const FORBIDDEN = new Set\(\[[^\]]*'value', 'valueAgent'/, 'a request may not carry them');
+});
+
+test('CLAIMS-90 L4: the audit verdict is the newest dated entry naming an audit with PASS|FAIL @sha; the last verdict within it', () => {
+  const card = (result, notes) => ({ id: 'SYN-AU', result, notes });
+  assert.equal(F.auditVerdict(card('', '')), null);
+  assert.equal(F.auditVerdict(card('', 'AUDIT PASS @1234abcd (no date)')), null, 'an undated line is no entry');
+  assert.equal(F.auditVerdict(card('', '[2026-10-01] PASS @1234abcd shipped')), null, 'no audit word: not an audit verdict');
+  assert.equal(F.auditVerdict(card('', '[2026-10-01] AUDIT PASS 1234abcd')), null, 'the commit is written @<sha>');
+  assert.deepEqual(F.auditVerdict(card('', '[2026-10-01] AUDIT FAIL @1234abcd\n[2026-10-03] re-audit PASS @5678ABCD after the fix\n[2026-10-02] audit FAIL @9999eeee')),
+    { verdict: 'PASS', sha: '5678abcd', at: '2026-10-03T00:00:00.000Z' }, 'newest by date, not by place; lower-cased');
+  assert.deepEqual(F.auditVerdict(card('[2026-10-05T10:00:00Z] Jim audit FAIL @1111aaaa, then RECHECK PASS @2222bbbb', '[2026-10-04] AUDIT PASS @3333cccc')),
+    { verdict: 'PASS', sha: '2222bbbb', at: '2026-10-05T10:00:00.000Z' }, 'the result counts; within an entry the last verdict');
+  assert.deepEqual(F.auditVerdict(card('', '[2026-10-01] AUDIT PASS @1234abcd\n[2026-10-01] AUDIT FAIL @5678abcd')).verdict, 'FAIL', 'a tie: the later one written');
+});
+
+test('CLAIMS-90 L1/L4: every field fact carries its value; audit and tag are their own fields', async () => {
+  const A = 'a1'.repeat(20), B = 'b2'.repeat(20);
+  const git = fakeGit({ commits: { a1a1a1a1: A, [A]: A, b2b2b2b2: B, [B]: B }, parents: { [B]: [A] }, time: { [A]: 100, [B]: 200 } });
+  const cards = [
+    { id: 'SYN-F1', title: 'T', status: 'done', assignee: 'agent-x', fixVersion: '9.1.2', result: 'landed @a1a1a1a1', notes: '[2026-10-02] audit PASS @b2b2b2b2', updatedAt: '2026-10-02T00:00:00Z' },
+    { id: 'SYN-F2', status: 'todo', createdAt: '2026-10-01T00:00:00Z' },
+  ];
+  const by = Object.fromEntries((await F.cardFieldFacts(cards, git)).map((x) => [x.key, x]));
+  assert.equal(by['card.syn-f1.status'].value, 'done');
+  assert.equal(by['card.syn-f1.assignee'].value, 'agent-x');
+  assert.equal(by['card.syn-f1.fixversion'].value, '9.1.2');
+  assert.equal(by['card.syn-f1.lastsha'].value, B);
+  assert.equal(by['card.syn-f1.audit'].value, `PASS ${B}`, 'the verdict, one space, the full commit');
+  assert.equal(by['card.syn-f1.audit'].at, '2026-10-02T00:00:00.000Z', 'dated by its entry');
+  assert.match(by['card.syn-f1.audit'].text, /latest audit verdict .*: PASS at commit b2b2b2b2/);
+  assert.deepEqual([by['card.syn-f2.assignee'].value, by['card.syn-f2.fixversion'].value], ['none', 'none']);
+  assert.equal(by['card.syn-f2.audit'], undefined);
+  const nogit = Object.fromEntries((await F.cardFieldFacts(cards, null)).map((x) => [x.key, x]));
+  assert.equal(nogit['card.syn-f1.audit'].value, 'PASS b2b2b2b2', 'without git the sha as written');
+  const rel = Object.fromEntries(F.releaseFacts([{ version: '9.1.2', date: '2026-10-03', entries: [{ heading: 'Fixed', text: 'x' }] }], [{ name: 'v9.1.2', commit: A, date: '2026-10-03T00:00:00Z' }], new Map([['9.1.2', { commit: B, time: 100 }]])).map((x) => [x.key, x]));
+  assert.equal(rel['release.9.1.2.tag'].value, A);
+  assert.match(rel['release.9.1.2.tag'].text, /release tag v9\.1\.2 is commit a1a1a1a1/);
+  assert.equal(rel['release.9.1.2.bump'].value, B);
+  for (const k of ['release.9.1.2', 'release.9.1.2.e1']) assert.equal(rel[k].value, undefined, `${k} is prose`);
+  const gh = await F.gitHistoryFacts([{ commit: A, time: 100, message: 'SYN-F1 x' }], ['SYN-F1'], git);
+  assert.equal(gh[0].value, A);
+  const mg = await F.mergeFacts([{ commit: B, time: 200, message: 'Merge branch guppy/syn-f1 @a1a1a1a1 into int-9.1.2' }], ['SYN-F1'], git);
+  assert.deepEqual([mg[0].key, mg[0].value], ['card.syn-f1.merge', A], 'the merged tip');
+});
+
+test('CLAIMS-90 L1: R2 never undoes an explicit supersedes when the replacement shares the valid and write time of its target', () => {
+  const reg = { v: 1, namespaces: [{ pattern: 'single.*', cardinality: 'single' }], keys: {} };
+  const at = '2026-10-01T00:00:00.000Z';
+  const rec = (id, extra = {}) => ({ v: 1, id, t: 'claim', kind: 'fact', key: 'single.k', text: id, source: 'derived', at, wt: at, agent: D, mac: `m-${id}`, prev: '', ...extra });
+  // ids are ordered so that the target sorts after its replacement on the id tie-break
+  const s = derive([rec('c-z-old'), rec('c-a-new', { supersedes: ['c-z-old'] })], reg, { r4: false });
+  assert.equal(s.claims['c-a-new'].status, 'live', 'the replacement stays live');
+  assert.equal(s.claims['c-z-old'].status, 'superseded');
+  assert.equal(s.claims['c-z-old'].supersededBy, 'c-a-new');
+  // R2 order is mid, top, base: the claim right after the newest replacement is one it supersedes only through mid
+  const chain = derive([rec('c-c-base'), rec('c-a-mid', { supersedes: ['c-c-base'] }), rec('c-b-top', { supersedes: ['c-a-mid'] })], reg, { r4: false });
+  assert.deepEqual(['c-c-base', 'c-a-mid', 'c-b-top'].map((id) => chain.claims[id].status), ['superseded', 'superseded', 'live'], 'transitively too');
+  const mail = derive([rec('c-z-own'), rec('c-a-mail', { source: 'mail:m1', supersedes: ['c-z-own'] })], reg, { r4: false });
+  assert.equal(mail.claims['c-z-own'].status, 'live', 'a mail supersedes of a derived claim still has no effect');
+  assert.equal(mail.claims['c-a-mail'].status, 'superseded', 'and so earns no exemption from R2');
+});
+
+test('CLAIMS-90 L1 backfill: a live field claim without a value is superseded once by the same fact with it (corrected, structured value)', async () => {
+  const x = setup();
+  const at = '2026-10-01T00:00:00.000Z';
+  const old = { slot: 'card.syn-b.status', key: 'card.syn-b.status', kind: 'fact', text: 'Card SYN-B status: done', at, refs: [{ type: 'task', value: 'SYN-B' }] };
+  assert.equal((await W.syncDerived(x.deps, [old])).appended, 1);
+  assert.equal(x.live()[0].value, undefined, 'an older claim, written before values');
+  const withValue = { ...old, value: 'done' };
+  const c = await W.syncDerived(x.deps, [withValue]);
+  assert.deepEqual([c.appended, c.superseded, c.valued, c.unchanged, c.redated], [1, 1, 1, 0, undefined]);
+  const live = x.live();
+  assert.equal(live.length, 1);
+  assert.equal(live[0].value, 'done');
+  assert.deepEqual(live[0].supersedesReason, { category: 'corrected', note: 'structured value' });
+  assert.equal((await W.syncDerived(x.deps, [withValue])).unchanged, 1, 'a second sync appends nothing');
+  const moved = await W.syncDerived(x.deps, [{ ...withValue, value: 'doing', text: 'Card SYN-B status: doing', at: '2026-10-02T00:00:00.000Z' }]);
+  assert.deepEqual([moved.appended, moved.valued], [1, undefined], 'a changed value is a change, not a backfill');
+  assert.equal(x.live()[0].supersedesReason.category, 'changed');
 });
