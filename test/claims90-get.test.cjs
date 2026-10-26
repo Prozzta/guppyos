@@ -364,7 +364,10 @@ test('T2 (god fe1140): the text view prints COUNTS of competing/superseded rows 
     const all = G.formatGet(r, { history: true });
     assert.match(all, /^competing \(\d+\):$/m); assert.match(all, /^superseded \(1\):$/m); assert.match(all, /c-bbbbbbbbbbb1/);
     process.env.C90_HIDE_STALE = '0';
-    assert.equal(G.formatGet(r), all, 'the OFF arm prints what --all prints');
+    // Step 3 fix R1: --all also lists the decisions and lifts the cap; the OFF arm only shows the bodies.
+    const off = G.formatGet(r);
+    assert.match(off, /^competing \(\d+\):$/m); assert.match(off, /^superseded \(1\):$/m); assert.match(off, /c-bbbbbbbbbbb1/, 'the OFF arm prints the bodies');
+    assert.match(off, /^decisions: 3 \(--all lists them\)$/m);
     process.env.C90_HIDE_STALE = '1';
     assert.equal(G.formatGet(r), t, 'any other value is ON');
   } finally { if (saved === undefined) delete process.env.C90_HIDE_STALE; else process.env.C90_HIDE_STALE = saved; }

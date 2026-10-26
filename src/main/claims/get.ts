@@ -466,6 +466,8 @@ function resolveIn(ix: Indexed, term: string, opts: GetOptions, d: GetDeps, with
       const field = k.slice(base.length + 1);
       lead.push(c ? { field, value: c.text, source: c.source, id: c.claimId, agent: c.agent, at: c.at } : { field, value: null, source: 'none' });
     }
+    // A release sub-key (release.<v>.pause) has no sub-keys of its own: no lead, that reply IS the field.
+    if (!lead.length) lead = null;
   }
   return { term, keys, tried, card, current, competing, superseded, decisions: shownDecisions, fields, mails, nextBefore, mailIndex, lead };
 }

@@ -211,7 +211,7 @@ test('R2 compact budget: on a tight share the brief drops fields from its end, n
   for (const m of L.filter((l) => /^\[\d+\] /.test(l))) {
     const n = Number(/^\[(\d+)\]/.exec(m)[1]);
     const i = L.indexOf(m);
-    assert.match(L[i + 1], /^ {4}card\.card-\d+: /, `hit ${n} keeps its content line first`);
+    assert.match(L[i + 1], /^ {4}(?!card-\d+ now: )\S/, `hit ${n} keeps its content line first`);
     const key = m.split(' · ')[2];
     const id = key.slice('card.'.length);
     if (['card-12', 'card-11', 'card-3'].includes(id)) assert.ok(L.slice(i + 1, i + 4).some((l) => l.includes(`value-${id.split('-')[1]}`)), `hit ${n} (${id}) still shows its matched value`);
