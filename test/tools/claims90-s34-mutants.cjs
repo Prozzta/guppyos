@@ -25,6 +25,7 @@ const MUTANTS = [
   ['S3-b a guppy/ branch names no card', T, ".replace(/^guppy\\//i, '')", ''],
   ['S3-c an origin/ branch names no card', T, "token.replace(/^origin\\//i, '')", 'token'],
   ['S3-d card.<id>.<field> keeps the field', T, ".replace(CARD_FIELD_RE, '')", ''],
+  ['S3-m card.<id>.merge.rc keeps the rc field', T, 'merge(?:\\.rc)?|', 'merge|'],
   ['S3-e card.<id>.decision.<x> keeps the decision', T, ".replace(/\\.decision\\..*$/i, '')", ''],
   ['S3-f no short names', T, ' ?? short.get(name)', ''],
   ['S3-g a shared short name names a card', T, 'out.has(s) ? null : id', 'id'],

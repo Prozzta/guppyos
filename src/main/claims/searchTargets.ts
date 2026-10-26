@@ -24,7 +24,7 @@ const VERSION = String.raw`\d+(?:\.\d+)+`;
 const VERSION_RE = new RegExp(`^${VERSION}$`);
 const RELEASE_KEY_RE = new RegExp(String.raw`^release\.(${VERSION})(?:\.[a-z0-9]+)*$`, 'i');
 const RELEASE_PREFIX_RE = /^(?:v|int-|int\/release-|release-|rc-|rc\/)/i;
-const CARD_FIELD_RE = /\.(?:status|assignee|lastsha|donesha|audit|fixversion|merge|gitsha|branch)$/i;
+const CARD_FIELD_RE = /\.(?:status|assignee|lastsha|donesha|audit|fixversion|merge(?:\.rc)?|gitsha|branch)$/i;
 const CARD_ID_RE = /^[a-z0-9][a-z0-9._-]{0,119}$/i;
 
 /** The card id a `card.<id>[.<field>|.decision.<x>]` key names, as written; null for any other key. */

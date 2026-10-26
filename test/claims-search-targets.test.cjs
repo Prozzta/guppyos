@@ -27,6 +27,8 @@ test('a card id in any case and inside punctuation names its card, as tasks.json
   }
   assert.deepEqual(terms(['only-key-3 donesha']), ['card:only-key-3']);
   assert.deepEqual(terms(['card.dec-5.decision.x']), ['card:dec-5']);
+  assert.deepEqual(terms(['card.foo-7.merge.rc']), ['card:FOO-7'], 'the rc merge key (god 234b13)');
+  assert.deepEqual([...targetIndex([], ['card.rc-9.merge.rc']).cards.values()], ['rc-9']);
 });
 
 test('a branch a card owns names that card; a foreign branch path names nothing', () => {
