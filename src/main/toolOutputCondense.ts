@@ -6,7 +6,8 @@
  * re-reads). A PostToolUse hook may REPLACE a successful command's output (`updatedToolOutput`,
  * verified on Claude Code 2.1.288). Over the cap, the model gets what keeps the agent able to act:
  * the outcome line, every error/warning line (deduplicated), the first and last lines (where the
- * summaries are), and the path of the FULL output, which is always kept on disk.
+ * summaries are), and the path of the FULL output, which is always kept on disk. A memory search
+ * reply also keeps its header and its brief block whole (CLAIMS-90 L6 M2, god 3dc16a).
  *
  * Not condensed: a failed command (it fires PostToolUseFailure, which cannot replace output; it
  * keeps Claude Code's native cap), a command ending in `#full`, and output within the cap.
@@ -124,6 +125,24 @@ export function shouldCondense(tool: string | undefined, toolInput: unknown, r: 
 
 const clip = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
+/** M2: the most a search reply's header + brief block may add over the cap (12 lines per named brief; the
+ *  formatter bounds the block itself, so this only guards a runaway). */
+export const BRIEF_BLOCK_MAX_CHARS = 4000;
+const SEARCH_HEADER_RE = /^\s*Results for: "/;
+const FIRST_HIT_RE = /^\s*\[1\] /;
+
+/**
+ * CLAIMS-90 L6 M2 (god 3dc16a): a `memory search` reply (its `Results for: "…"` header in the first 20 lines, a
+ * `[1]` hit after it) keeps every line above the first hit, the header and the named briefs, whole and first,
+ * within BRIEF_BLOCK_MAX_CHARS (whole lines; the rest is counted). 0 for any other output.
+ */
+export function searchBriefLines(lines: readonly string[]): number {
+  const h = lines.slice(0, 20).findIndex((l) => SEARCH_HEADER_RE.test(l));
+  if (h < 0) return 0;
+  const first = lines.findIndex((l, i) => i > h && FIRST_HIT_RE.test(l));
+  return first < 0 ? 0 : first;
+}
+
 export interface CondenseArgs {
   /** The full output (or as much of it as could be read). */
   text: string;
@@ -149,12 +168,20 @@ export function condenseOutput(a: CondenseArgs): string {
   const outcome = `[condensed by Guppy: the command succeeded${a.interpretation ? ` (${clip(a.interpretation, 80)})` : ''}`
     + `${a.interrupted ? ', interrupted' : ''}; ${chars.toLocaleString('en-US')} chars, ${lines.length.toLocaleString('en-US')} lines${a.partial ? ' (read in part)' : ''}]`;
   const footer = `[full output: ${a.path} (Read it with offset/limit, or grep it). End a command with #full to see its output uncondensed.]`;
+  // M2: a search reply's header + brief block, kept whole ahead of the plan; the cap applies to the rest.
+  const blockEnd = searchBriefLines(lines);
+  const kept: string[] = [];
+  let keptChars = 0;
+  for (let i = 0; i < blockEnd && keptChars + lines[i].length + 1 <= BRIEF_BLOCK_MAX_CHARS; i += 1) { kept.push(lines[i]); keptChars += lines[i].length + 1; }
+  if (kept.length < blockEnd) kept.push(`… ${blockEnd - kept.length} brief lines omitted`);
+  const keep = blockEnd;
+  const room = a.cap + kept.reduce((n, l) => n + l.length + 1, 0);
 
   // Error lines outside the head and tail, deduplicated (×N), in order of first appearance.
   const pickErrors = (head: number, tail: number, max: number, width: number): string[] => {
     const seen = new Map<string, number>();
     const order: string[] = [];
-    for (let i = head; i < lines.length - tail; i += 1) {
+    for (let i = keep + head; i < lines.length - tail; i += 1) {
       const l = lines[i].trim();
       if (!l || !ERROR_RE.test(l)) continue;
       const k = clip(l, width);
@@ -166,12 +193,12 @@ export function condenseOutput(a: CondenseArgs): string {
     return out;
   };
   const build = (head: number, tail: number, errs: number, width: number): string => {
-    const h = Math.min(head, lines.length);
-    const t = Math.min(tail, Math.max(0, lines.length - h));
-    const parts = [outcome];
-    if (h) parts.push(...lines.slice(0, h).map((l) => clip(l, width)));
+    const h = Math.min(head, lines.length - keep);
+    const t = Math.min(tail, Math.max(0, lines.length - keep - h));
+    const parts = [outcome, ...kept];
+    if (h) parts.push(...lines.slice(keep, keep + h).map((l) => clip(l, width)));
     const e = errs ? pickErrors(h, t, errs, width) : [];
-    const skipped = lines.length - h - t;
+    const skipped = lines.length - keep - h - t;
     if (skipped > 0) parts.push(e.length ? `… ${skipped} lines omitted; error and warning lines among them:` : `… ${skipped} lines omitted`);
     if (e.length) parts.push(...e.map((l) => `  ${l}`));
     if (t) parts.push(...lines.slice(lines.length - t).map((l) => clip(l, width)));
@@ -196,9 +223,9 @@ export function condenseOutput(a: CondenseArgs): string {
   ];
   for (const [h, t, e, w] of plans) {
     const s = build(h, t, e, w);
-    if (s.length <= a.cap) return s;
+    if (s.length <= room) return s;
   }
-  // Last resort: the outcome and the path are what must survive.
-  const bare = `${outcome}\n${footer}`;
-  return bare.length <= a.cap ? bare : clip(bare, a.cap);
+  // Last resort: the outcome, the brief block and the path are what must survive.
+  const bare = [outcome, ...kept, footer].join('\n');
+  return bare.length <= room ? bare : clip(bare, room);
 }

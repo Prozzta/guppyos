@@ -4,7 +4,8 @@
  * Mutant runner for CLAIMS-90 search S3/S4 (god 33b32e), the data side: searchTargets.ts, which maps a card id, a
  * card-owned branch or a release version named in a query or hit to its card or release. Each mutant injects ONE
  * named regression through the shared helper (mutateFile / restoreFile), runs the targets test, and must turn it
- * RED. A missing or non-unique anchor is INERT and fails the run.
+ * RED. A missing or non-unique anchor is INERT and fails the run. L6 M2 (god 3dc16a) rows mutate the tool-output
+ * condenser (a condensed --full search keeps the named brief) and run their own test (the 5th field).
  *
  *   node test/tools/claims90-s34-mutants.cjs [name-prefix]
  */
@@ -18,6 +19,8 @@ recover(ROOT);
 if (process.argv.includes('--recover-only')) process.exit(0);
 const TESTS = ['test/claims-search-targets.test.cjs'];
 const T = 'src/main/claims/searchTargets.ts';
+const CONDENSE = 'src/main/toolOutputCondense.ts';
+const M2 = ['test/claims90-l6-m2.test.cjs'];
 
 const MUTANTS = [
   // S3: a card id, card key or card-owned branch names its card.
@@ -44,12 +47,20 @@ const MUTANTS = [
   ['S4-e no dedupe', T, 'if (!seen.has(k)) { seen.add(k); out.push(t); }', 'out.push(t);'],
   ['S4-f no cap', T, 'if (out.length >= max) return out;', ''],
   ['S4-g hits before the query', T, 'for (const text of texts) {', 'for (const text of [...texts].reverse()) {'],
+  // L6 M2: the condenser keeps a search reply's header + brief block whole, bounded, and condenses the rest as before.
+  ['M2-a no brief block is kept', CONDENSE, 'const blockEnd = searchBriefLines(lines);', 'const blockEnd = 0;', M2],
+  ['M2-b the cap also counts the block', CONDENSE, 'const room = a.cap + kept.reduce((n, l) => n + l.length + 1, 0);', 'const room = a.cap;', M2],
+  ['M2-c the block is unbounded', CONDENSE, 'keptChars + lines[i].length + 1 <= BRIEF_BLOCK_MAX_CHARS', 'true', M2],
+  ['M2-d the header must be the first line', CONDENSE, 'lines.slice(0, 20).findIndex(', 'lines.slice(0, 1).findIndex(', M2],
+  ['M2-e error lines repeat the block', CONDENSE, 'for (let i = keep + head; i < lines.length - tail; i += 1) {', 'for (let i = head; i < lines.length - tail; i += 1) {', M2],
+  ['M2-f head lines repeat the block', CONDENSE, 'parts.push(...lines.slice(keep, keep + h).map(', 'parts.push(...lines.slice(0, h).map(', M2],
+  ['M2-g any output gets a block', CONDENSE, '  if (h < 0) return 0;\n', '  if (h < 0) return Math.min(3, lines.length);\n', M2],
 ];
 
 const prefix = process.argv[2] || '';
 const selected = MUTANTS.filter(([name]) => name.startsWith(prefix));
 let killed = 0; let inert = 0;
-for (const [name, file, from, to] of selected) {
+for (const [name, file, from, to, tests] of selected) {
   const abs = path.join(ROOT, file);
   const original = fs.readFileSync(abs, 'utf8');
   const crlf = original.includes('\r\n');
@@ -64,7 +75,7 @@ for (const [name, file, from, to] of selected) {
   if (crlf) mutated = mutated.replace(/\n/g, '\r\n');
   try {
     mutateFile(ROOT, abs, original, mutated);
-    const r = spawnSync(process.execPath, ['--test', ...TESTS], { cwd: ROOT, encoding: 'utf8', timeout: 600_000 });
+    const r = spawnSync(process.execPath, ['--test', ...(tests ?? TESTS)], { cwd: ROOT, encoding: 'utf8', timeout: 600_000 });
     const fails = (String(r.stdout).match(/^# fail (\d+)/m) || [])[1] ?? '?';
     const dead = r.status !== 0;
     if (dead) killed++;
