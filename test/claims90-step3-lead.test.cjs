@@ -343,7 +343,7 @@ test('M3 / M3b body prefix (god 5dc648, 08992e): every hit-body line, compact an
 });
 
 test('M3b (god 08992e, Jim f6c424): a body line whose words sit before its first `:` or `=` (`VERSION BUMP = x`, `- tag v = y`, `merge into z: w`) is no field line: the frozen label (everything before the first `:` or `=`) of every body line is the fixed prefix token, so the named brief\'s field lines are the only field lines in the reply', () => {
-  const label = (l) => { const m = /^([^:=]*)[:=]/.exec(l); return m ? m[1].trim() : null; };
+  const label = (l) => { const m = /^([^:=]*)[:=]/.exec(l); return m && m[1].trim() ? m[1].trim() : null; };  // a `====` rule line has no label
   const note = 'VERSION BUMP = FOUR PLACES (package, lock, hero, notes)\n- tag v1.1.55 = release-1.1.55 = abc1234\nready to merge into 1.1.48: YES';
   const hits = [hit(1, 'live', 'card.foo-7', '2026-10-03', note), chunk(2, '## bump\nVERSION BUMP = FOUR PLACES ' + lorem(30, 'b')), hit(3, 'live', 'synthetic.port', '2026-10-10', 'port 2222')];
   for (const [mode, t, briefIndent] of [['compact', F.formatSearch('foo-7 bump', {}, hits, LEADS, ['foo-7']), 4], ['full', F.formatSearch('foo-7 bump', { full: true }, hits, LEADS, ['foo-7']), 6]]) {
