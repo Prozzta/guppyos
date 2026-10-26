@@ -47,6 +47,9 @@ export interface WiringDeps {
   /** CLAIM-LEDGER W1: the claim verbs (note, retract, ...), or null when this build or hive has no
    *  ledger; then they answer "unsupported" as before. They do not need the index worker. */
   claims?: () => ClaimsEndpointDeps | null;
+  /** Step 3 fix R2 (god bbcb4a): the card briefs the worker asks for while formatting a search (claims/readWiring.ts
+   *  claimCardLeadOver: the same resolver as `memory get`). */
+  cardLead?: (cards: string[]) => Record<string, string[]>;
   /** CLAIM-LEDGER W3: the Settings level (config claimLedger), passed to the worker's discovery. */
   claimLedger?: () => unknown;
   /** CLAIMS-HEAD-ANCHOR (A-2): the agents anchored for this hive, sent with the level. */
@@ -84,7 +87,10 @@ export class NativeMemoryWiring {
       fork: () => d.fork(d.workerEntry),
       // The config is read at fork only: the level it carries is what a new worker knows (W3-1).
       config: () => { const c = this.workerConfig(); if (c) this.sentLedger = { v: c.claimLedger, anchored: (c.anchored ?? []).join(',') }; return c; },
-      log: d.log, onReady: () => d.onWorkerReady?.()
+      log: d.log, onReady: () => d.onWorkerReady?.(),
+      ask: (op, args) => (op === 'card-lead' && d.cardLead
+        ? d.cardLead(Array.isArray(args.cards) ? (args.cards as unknown[]).filter((c): c is string => typeof c === 'string').slice(0, 12) : [])
+        : null)
     });
   }
 

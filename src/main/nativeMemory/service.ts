@@ -57,6 +57,9 @@ export interface ServiceDeps {
   log?: (row: Record<string, unknown>) => void;
   /** Told when a (re)started worker is ready (CLAIM-LEDGER: main re-sends every agent's claims). */
   onReady?: () => void;
+  /** Step 3 fix R2 (god bbcb4a): answers a worker's reverse request (`{ ask, op, args }` → `{ answer, result }`);
+   *  null (or absent) = the worker goes without. */
+  ask?: (op: string, args: Record<string, unknown>) => unknown;
 }
 
 export class NativeMemoryClient {
@@ -108,6 +111,8 @@ export class NativeMemoryClient {
   }
 
   private onMessage(msg: unknown): void {
+    const q = msg as { ask?: unknown; op?: unknown; args?: unknown } | null;
+    if (q && typeof q.ask === 'number') { this.answer(q.ask, String(q.op ?? ''), (q.args && typeof q.args === 'object' ? q.args : {}) as Record<string, unknown>); return; }
     const m = msg as { id?: number; event?: string } & Reply;
     if (m && m.event) {
       if (m.event === 'ready') { this.ready = true; try { this.d.onReady?.(); } catch { /* best effort */ } }
@@ -141,6 +146,13 @@ export class NativeMemoryClient {
     const exit = typeof m.exit === 'number' ? m.exit : m.ok ? EXIT.ok : EXIT.degraded;
     if (!m.ok && exit === EXIT.degraded) this.degraded(m.error === 'expired' ? 'expired' : 'error', p, { error: String(m.error ?? '').slice(0, 200), ...(timing ?? {}) });
     p.resolve({ ok: !!m.ok, exit, text: m.text, json: m.json, error: m.error });
+  }
+
+  /** Step 3 fix R2: a worker's reverse request; a missing dep, a throw or a rejection answers null. */
+  private answer(id: number, op: string, args: Record<string, unknown>): void {
+    const w = this.worker;
+    const post = (result: unknown): void => { try { w?.postMessage({ answer: id, result }); } catch { /* worker gone */ } };
+    try { Promise.resolve(this.d.ask ? this.d.ask(op, args) : null).then(post, () => post(null)); } catch { post(null); }
   }
 
   /** MEMORY-SEARCH-TIMEOUT-DURING-INDEX-189 (A): every degraded reply writes one row (capped). */

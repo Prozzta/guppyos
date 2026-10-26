@@ -13,7 +13,7 @@ import { derive as deriveClaims } from './derive';
 import { renderClaimHistory } from './views';
 import { reconcileQueueForHive } from './reconcile';
 import { DEFAULT_KEY_REGISTRY, loadRegistry } from './registry';
-import { formatGet, resolveGet } from './get';
+import { formatGet, leadBrief, resolveGet, resolveGetMany, type GetDeps } from './get';
 import type { LedgerRec } from '../../shared/claims';
 
 export interface ClaimReadDeps {
@@ -45,6 +45,23 @@ export function claimHistoryOver(d: Pick<ClaimReadDeps, 'root' | 'store' | 'agen
  *  claimsLedgerView), the registry, the reconcile queue's alias pairs, tasks.json and the per-card
  *  mail index. The text is formatGet's on every path (CLI, MCP, hook-served). */
 export function claimGetOver(d: ClaimReadDeps, args: ClaimGetArgs): { text: string; json: unknown } {
+  const r = resolveGet(args.term, { agent: args.agent ?? null, mail: args.mail, before: args.before ?? null, noMail: args.noMail === true, history: args.history === true }, getDeps(d));
+  return { text: formatGet(r, { agent: args.agent ?? null, history: args.history === true }), json: r };
+}
+
+/** Step 3 fix R2 (god bbcb4a): the card briefs a search's hits carry (`field: value` items per card id, the fields
+ *  with a value and the decision count), over the same ledgers, registry, tasks and mail index as `memory get`. */
+export function claimCardLeadOver(d: ClaimReadDeps, cards: string[]): Record<string, string[]> {
+  const ids = cards.filter((c) => /^[a-z0-9][a-z0-9._-]{0,119}$/i.test(c));
+  if (!ids.length) return {};
+  const out: Record<string, string[]> = {};
+  resolveGetMany(ids, { mail: 0 }, getDeps(d)).forEach((r, i) => { const b = leadBrief(r); if (b.length) out[ids[i].toLowerCase()] = b; });
+  return out;
+}
+
+/** The read-only inputs of one `get` (or one batch of briefs): every agent's VERIFIED prefix, the registry, the
+ *  reconcile queue's alias pairs, tasks.json and the per-card mail index. */
+function getDeps(d: ClaimReadDeps): GetDeps {
   const root = d.root;
   const ledgers: Record<string, LedgerRec[]> = {};
   for (const a of d.agents()) { const prefix = verifiedPrefix(d.store.readLedger(a)); if (prefix) ledgers[a] = prefix.records; }
@@ -56,6 +73,5 @@ export function claimGetOver(d: ClaimReadDeps, args: ClaimGetArgs): { text: stri
     if (!/^[a-z0-9][a-z0-9._-]{0,119}$/.test(card)) return null;
     try { return readFileSync(join(root, 'state', 'mail-cards', `${card}.jsonl`), 'utf8').split('\n'); } catch { return null; }
   };
-  const r = resolveGet(args.term, { agent: args.agent ?? null, mail: args.mail, before: args.before ?? null, noMail: args.noMail === true, history: args.history === true }, { ledgers, registry: reg, reconcileItems, tasks, mailRows, ruleConfig: { r4: false } });
-  return { text: formatGet(r, { agent: args.agent ?? null, history: args.history === true }), json: r };
+  return { ledgers, registry: reg, reconcileItems, tasks, mailRows, ruleConfig: { r4: false } };
 }

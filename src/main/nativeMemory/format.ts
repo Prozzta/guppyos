@@ -7,6 +7,11 @@
 import type { SearchHit } from './store';
 import { PINNED_SOFT_CAP_BYTES } from '../memoryRollover';
 import { ordinal } from './sources';
+import { cardIdOfKey } from '../claims/get';
+
+/** Step 3 fix R2 (god bbcb4a): per card id (lower-cased), the `field: value` items of its current values (main's
+ *  resolver, the same values `memory get <id>` leads with); a hit on the card prints them inline. */
+export type CardLeads = Record<string, string[]>;
 
 export interface SearchFlags {
   wing?: string | null;
@@ -18,6 +23,8 @@ export interface SearchFlags {
   /** CLAIMS-90 R2 (C90-GET): `--exact` (an exact-text scan, no ranking by meaning) and `--newest` (newest first, [1] the answer candidate). */
   exact?: boolean;
   newest?: boolean;
+  /** Step 3 fix R2: the card briefs (`<id>` → `field: value` items) the hits carry; set by formatSearch from its `leads`. */
+  cardLeads?: CardLeads;
 }
 
 /**
@@ -168,10 +175,17 @@ function py(n: number): string {
   return Number.isInteger(r) ? `${r}.0` : String(r);
 }
 
-export function formatSearch(query: string, flags: SearchFlags, hits: SearchHit[]): string {
+export function formatSearch(query: string, flags0: SearchFlags, hits: SearchHit[], leads: CardLeads = {}): string {
   if (!hits.length) return `\n  No results found for: "${query}"\n`;
+  const flags = Object.keys(leads).length ? { ...flags0, cardLeads: leads } : flags0;
   return flags.full ? formatSearchFull(query, flags, hits) : formatSearchCompact(query, flags, hits);
 }
+
+/** R2: the card brief's text for a hit (`<id> now: f: v · f: v`), wrapped like content. */
+const briefLines = (cardId: string, items: string[]): string[] => wrap(`${cardId} now: ${items.join(' · ')}`, CONTENT_WIDTH);
+const linesCost = (ls: string[]): number => ls.reduce((n, l) => n + l.length + 5, 0);
+/** R2: how far past its share a hit may grow for its brief, out of the pool (one floor share). */
+const BRIEF_EXTRA = 120;
 
 /** The width of a compact content line (4 spaces of indent before it). */
 const CONTENT_WIDTH = COMPACT_LINE_MAX - 4;
@@ -261,6 +275,7 @@ const costOf = (meta: string, lines: string[]): number => meta.length + 1 + line
  * longer fit go behind a `more hits` pointer. `--full` prints every chunk whole.
  */
 export function formatSearchCompact(query: string, flags: SearchFlags, hits: SearchHit[]): string {
+  const leads = flags.cardLeads ?? {};
   const filters = [flags.wing && `wing=${flags.wing}`, flags.room && `room=${flags.room}`, flags.since && `since=${flags.since}`, flags.before && `before=${flags.before}`].filter(Boolean).join(' ');
   // `Results for: "q"` is kept verbatim: the drill gates strip that line to compare bodies.
   // CLAIMS-90 R2: `--newest` names its order and marks [1] as the answer candidate; `--exact` names the scan.
@@ -274,6 +289,7 @@ export function formatSearchCompact(query: string, flags: SearchFlags, hits: Sea
   const clipReserve = clipNote(hits.length).length + 1;
   let clipped = 0;
   const keys: string[] = [];
+  const shownCards = new Set<string>();
   for (let i = 0; i < ordered.length; i++) {
     const h = ordered[i];
     const left = ordered.length - i;
@@ -292,12 +308,36 @@ export function formatSearchCompact(query: string, flags: SearchFlags, hits: Sea
       ? `[${i + 1}] ${statusWord(h.claim.status)} · ${h.claim.kind} · ${h.claim.key ?? '-'} · ${h.claim.at.slice(0, 10)} · ${h.claim.id} · ${h.wing}/${h.room}`
       : `[${i + 1}] ${h.wing}/${h.room} · ${base(h.source)}`, metaMax);
     const whole = split ? (split.rest ? `${split.lead} ${split.rest}` : split.lead) : oneLine(h.content);
+    // Step 3 fix R2 (god bbcb4a): the FIRST hit of a card carries the card's current field values (`<id> now: …`, from
+    // main's resolver: the values `memory get <id>` leads with) INSIDE its own budget, so a search-only agent sees the
+    // answer. The brief takes what the hit has over its content (never under one content line, so the matched term
+    // stays shown: M1 S1 / M3), drops fields from its end to fit, and is left out when not even one fits.
+    const cardId = h.claim?.key ? cardIdOfKey(h.claim.key) : null;
+    let cardLines: string[] = [];
+    if (cardId && !shownCards.has(cardId) && leads[cardId]?.length) {
+      // What the content keeps at least: its whole cost when short, else one windowed line (34 chars + the mark).
+      const floor = Math.min(costOf(meta, wrap(whole, CONTENT_WIDTH)), meta.length + 1 + 34 + 5);
+      // A tight share (many hits) holds no brief past that floor, so the brief may grow the hit by up to BRIEF_EXTRA
+      // out of the pool: when every later hit is still owed its floor share, only what is spare beyond those; when
+      // the list ends early anyway, the next hit gives way (a card's current value outranks one more clipped hit
+      // the agent can still reach with --results).
+      const pool = share >= COMPACT_MIN_HIT ? remaining - (left - 1) * COMPACT_MIN_HIT - budget : remaining - budget;
+      const room = budget - floor + Math.min(Math.max(0, pool), BRIEF_EXTRA);
+      const items = [...leads[cardId]];
+      while (items.length) {
+        const ls = briefLines(cardId, items);
+        if (linesCost(ls) <= room) { cardLines = ls; break; }
+        items.pop();
+      }
+      if (cardLines.length) { shownCards.add(cardId); budget = Math.max(floor, budget - linesCost(cardLines)); }
+    }
+    const cardCost = linesCost(cardLines);
     let lines = wrap(whole, CONTENT_WIDTH);
     let cut = false;
     if (costOf(meta, lines) > budget) {
       // Clipped: reserve the note now (once), then fit a window of the content into what is left.
       if (!clipped) {
-        const after = Math.min(budget, remaining - clipReserve);
+        const after = Math.min(budget, remaining - clipReserve - cardCost);
         if (after < meta.length + 14) { out.push(footer(left)); break; }
         budget = after;
       }
@@ -344,8 +384,9 @@ export function formatSearchCompact(query: string, flags: SearchFlags, hits: Sea
       }
     }
     if (cut) clipped++;
-    out.push(meta, ...lines.map((l) => `    ${l}`));
+    out.push(meta, ...lines.map((l) => `    ${l}`), ...cardLines.map((l) => `    ${l}`));
     used += costOf(meta, lines);
+    used += cardCost;
     if (h.claim?.key) keys.push(h.claim.key);
   }
   if (clipped) out.push(clipNote(clipped));
@@ -358,6 +399,7 @@ export function formatSearchCompact(query: string, flags: SearchFlags, hits: Sea
 
 /** The verbose (whole-chunk) text: `--full`. */
 export function formatSearchFull(query: string, flags: SearchFlags, hits: SearchHit[]): string {
+  const leads = flags.cardLeads ?? {};
   if (!hits.length) return `\n  No results found for: "${query}"\n`;
   const L: string[] = [];
   L.push('', '='.repeat(60), `  Results for: "${query}"`);
@@ -379,6 +421,9 @@ export function formatSearchFull(query: string, flags: SearchFlags, hits: Search
       L.push(`      Claim:  [${prior ? 'prior' : maybePrior ? 'prior?' : h.claim.status} · ${h.claim.kind} · ${h.claim.key ?? '-'} · ${date} · ${h.claim.id}]`);
       // CLAIMS-90 R2 (C90-GET): the ready lookup for the key's current value.
       if (h.claim.key) L.push(`      Get:    memory get ${h.claim.key}`);
+      // Step 3 fix R2: the card's current field values beside the pointer.
+      const cardId = h.claim.key ? cardIdOfKey(h.claim.key) : null;
+      if (cardId && leads[cardId]?.length) L.push(`      Card:   ${cardId} now: ${leads[cardId].join(' · ')}`);
       if (prior) L.push(`      Version: prior (dated ${date}); search for the key to see its current value.`);
       if (maybePrior) L.push(`      Version: possibly replaced (unconfirmed, dated ${date}); search for the key to see its current value.`);
     }

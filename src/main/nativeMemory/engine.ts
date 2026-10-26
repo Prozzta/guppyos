@@ -19,6 +19,7 @@ import type { LedgerLevel, SearchMode } from '../../shared/claims';
 import { hideStale } from '../claims/stale';
 import { formatSearch, formatStatus, formatWakeUp, newestOrder, rankHits, WAKE_MAX_CHARS } from './format';
 import { withHistoryCommands } from '../claims/historyPointer';
+import { cardIdOfKey } from '../claims/get';
 import { pinnedSection, pinnedStatus, type PinnedStatus } from '../memoryRollover';
 
 export const PRIORITY = { search: 0, wake: 1, status: 1, ingest: 2, backfill: 3, compact: 4 } as const;
@@ -72,7 +73,12 @@ export interface EngineDeps {
    *  backfill or changed-source ingest) and when the last one ends, so main can give a search
    *  the indexing budget meanwhile. */
   onIndexing?: (on: boolean, kind: string) => void;
+  /** Step 3 fix R2 (god bbcb4a): the current field values of the cards a search's hits name, from main's resolver
+   *  (the ledgers live in main, not in the worker); absent, failing or slow = the hits print as before. */
+  cardLead?: (cards: string[]) => Promise<Record<string, string[]>>;
 }
+/** R2: at most this many cards asked for per search. */
+export const CARD_LEADS_MAX = 12;
 
 /** CLAIM-LEDGER: one agent's verified claim chunks, sent by main after an append (A6). */
 export interface ClaimsSyncArgs { wing: string; path: string; head: string; chunks: ClaimPart[];
@@ -280,12 +286,20 @@ export class MemoryEngine {
         const chunks = needle ? this.d.store.searchExact({ query: needle, wing: a.wing ?? null, room: a.room ?? null, sinceMs, beforeMs, k: fetchK, mode: a.mode ?? 'live', kind: a.kind ?? null, key: a.key ?? null }) : [];
         const files = needle && !a.wing && !a.room && !a.kind && !a.key ? exactFileHits(this.d.hiveRoot, needle, k) : [];
         const all = servedHits([...dropStale(chunks, a.mode, k), ...files]);  // matched on raw text, rewritten for display
-        return { exit: 0, text: formatSearch(a.query, a, all), json: json(all) };
+        return { exit: 0, text: formatSearch(a.query, a, all, await this.cardLeads(all)), json: json(all) };
       }
       const [qv] = await this.embed([a.query]);
       const hits = servedHits(dropStale(this.d.store.search({ query: a.query, queryVec: qv, wing: a.wing ?? null, room: a.room ?? null, sinceMs, beforeMs, k: fetchK, poolK: k, mode: a.mode ?? 'live', kind: a.kind ?? null, key: a.key ?? null }), a.mode, k));  // CLAIMS-90 HISTORY-PTR
-      return { exit: 0, text: formatSearch(a.query, a, hits), json: json(hits) };
+      return { exit: 0, text: formatSearch(a.query, a, hits, await this.cardLeads(hits)), json: json(hits) };
     }, o);
+  }
+
+  /** Step 3 fix R2: the card briefs for the distinct cards the hits name (claim keys `card.<id>[.field]`), in hit order. */
+  private async cardLeads(hits: SearchHit[]): Promise<Record<string, string[]>> {
+    if (!this.d.cardLead) return {};
+    const cards = [...new Set(hits.map((h) => (h.claim?.key ? cardIdOfKey(h.claim.key) : null)).filter((c): c is string => !!c))].slice(0, CARD_LEADS_MAX);
+    if (!cards.length) return {};
+    try { const r = await this.d.cardLead(cards); return r && typeof r === 'object' ? r : {}; } catch { return {}; }
   }
 
   async wakeUp(wing: string | null, full = false): Promise<EngineReply> {

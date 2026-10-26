@@ -105,7 +105,7 @@ import { FloorDigest, FLOOR_DIGEST_DEFAULTS, FLOOR_DIGEST_FILE, readFlaggedForHu
 import { HiveManager, archivedForMail, type AgentMeta, type ArchiveReason, type HiveMessage, type HiveTask } from './hive';
 import { applyLedgerOp, perAgentQueue, type LedgerDeps } from './ledger';
 import { cardKeyRefusal, handleClaimVerb } from './claims/endpoint';
-import { claimGetOver, claimHistoryOver } from './claims/readWiring';
+import { claimCardLeadOver, claimGetOver, claimHistoryOver } from './claims/readWiring';
 import { actionableBacklog, coordinatorPendingIds, fleetMailFields, ledgerInboxMessages, mailCoordinationAt } from './mailReaders';
 import { HookServer } from './hooks';
 import { TermControl } from './termControl';
@@ -1839,6 +1839,12 @@ const nativeMemory = new NativeMemoryWiring({
   memoryBaseUrl: () => hookServer.memoryBaseUrl(),
   writeCommand: (script) => hive.writeMemoryCommand(script),
   log: (row) => hive.appendLog(row),
+  // Step 3 fix R2 (god bbcb4a): the card briefs a search's hits carry, claims/readWiring.ts (the resolver of memory get).
+  cardLead: (cards) => {
+    const root = hive.root(); const ep = claimsEndpoint();
+    if (!root || !ep) return {};
+    return claimCardLeadOver({ root, store: ep.store, agents: claimLedgerAgents, tasks: () => ((hive.allTasks() as { tasks?: Array<Record<string, unknown>> }).tasks ?? []) }, cards);
+  },
   vecLoadablePath: () => {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     try { return toUnpacked((require('sqlite-vec') as { getLoadablePath(): string }).getLoadablePath()); } catch { return null; }

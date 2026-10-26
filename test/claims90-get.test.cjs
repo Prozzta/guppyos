@@ -95,7 +95,7 @@ test('alias closure: the registry aliasOf chain, a reconcile key-alias pair and 
   const r2 = get('build.foo7', {}, d2);
   assert.ok(r2.keys.includes('card.foo-7') && r2.keys.includes('build.foo7'), r2.keys.join());
   assert.equal(r2.current.claimId, 'c-ddddddddddd1', 'newest across the merged set');
-  assert.match(text('build.foo7', {}, d2), /^get build\.foo7 → keys: build\.foo7, card\.foo-7(, card\.foo-7\.[a-z0-9.]+)+ \(card foo-7\)\n/);
+  assert.match(text('build.foo7', {}, d2), /^get build\.foo7 → keys: build\.foo7, card\.foo-7(, card\.foo-7\.[a-z0-9.]+)+(, … \+\d+ more)? \(card foo-7\)\n/);
   // The same pair answered as a key-alias event.
   const d3 = deps();
   d3.ledgers['gamma-3'] = [c('c-ddddddddddd1', 'gamma-3', 'build.foo7', '2026-10-04T10:00:00.000Z', 'build foo7 at 4444444'), { t: 'event', id: 'e-1', at: '2026-10-04T11:00:00.000Z', wt: 'x', agent: 'gamma-3', ev: 'key-alias', targets: ['c-ddddddddddd1', 'c-bbbbbbbbbbb2'] }];
@@ -123,8 +123,11 @@ test('decisions: a card returns its FULL decision list newest first (D1 has 20 r
   const r = get('FOO-7');
   assert.deepEqual(r.decisions.map((x) => x.claimId), ['c-aaaaaaaaaaa3', 'c-aaaaaaaaaaa4', 'c-aaaaaaaaaaa6'], 'all three, newest first (MUTANT: newest only)');
   assert.deepEqual(r.fields, { id: 'FOO-7', status: 'doing', assignee: 'alpha-1', title: 'Foo seven' }, 'primitive fields only');
-  const t = text('FOO-7');
+  // Step 3 fix R1 (god bbcb4a): the list is the --all view; the default view carries the count in the lead block.
+  const t = text('FOO-7', { history: true });
   assert.match(t, /^decisions \(3\):\n  card\.foo-7\.decision\.abcd1234: .*\n  card\.foo-7\.decision\.abcd5678: .*\n  card\.foo-7\.decision\.abcd9999: .*\nfields: status=doing assignee=alpha-1 title=Foo seven$/m);
+  assert.match(text('FOO-7'), /^decisions: 3 \(--all lists them\)$/m, 'default: the count only');
+  assert.doesNotMatch(text('FOO-7'), /^decisions \(3\):/m);
   assert.equal(get('card.foo-7.status').decisions.length, 0, 'a field sub-key is not the card');
   assert.doesNotMatch(text('card.foo-7.status'), /^decisions/m);
 });
@@ -355,7 +358,8 @@ test('T2 (god fe1140): the text view prints COUNTS of competing/superseded rows 
     const t = G.formatGet(r);
     assert.match(t, /^competing: \d+ other live values? hidden \(--all lists them\)$/m);
     assert.match(t, /^superseded: 1 replaced value hidden \(--all lists them\)$/m);
-    assert.doesNotMatch(t, /c-bbbbbbbbbbb1|c-aaaaaaaaaaa5/, 'no stale body in the default view');
+    // (step 3 fix R1: the lead block cites the live status sub-key claim c-aaaaaaaaaaa5 as its source; that is no body)
+    assert.doesNotMatch(t, /c-bbbbbbbbbbb1|1111111/, 'no stale body in the default view');
     assert.match(t, /^current: card\.foo-7: FOO-7 build moved to 2222222 on branch x$/m, 'the current line is unchanged');
     const all = G.formatGet(r, { history: true });
     assert.match(all, /^competing \(\d+\):$/m); assert.match(all, /^superseded \(1\):$/m); assert.match(all, /c-bbbbbbbbbbb1/);

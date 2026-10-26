@@ -74,7 +74,28 @@ export interface GetResult {
   mails: GetMailRow[];
   nextBefore: string | null;
   mailIndex: 'present' | 'absent' | 'off';
+  /** Step 3 fix R1 (god bbcb4a): the per-field current values a bare card (or its branch / a release key) LEADS with;
+   *  null for a field sub-key the agent typed, or a plain key. */
+  lead: GetFieldLine[] | null;
 }
+
+/** R1: the card fields the lead block answers, in print order (then the decision count). */
+export const CARD_FIELDS = ['donesha', 'lastsha', 'status', 'assignee', 'fixVersion', 'merge'] as const;
+export interface GetFieldLine {
+  field: string;
+  /** The current value's text (one line), null when nothing answers it. */
+  value: string | null;
+  /** Where it came from: the field's claim, the mail rule, tasks.json, or nothing. */
+  source: 'claim' | 'mail' | 'tasks' | 'none';
+  id?: string; agent?: string; at?: string;
+}
+/** R1: the compact `get` text stays under the tool-output condenser cap (1500) by construction: these equal
+ *  format.ts COMPACT_MAX_CHARS / COMPACT_LINE_MAX (pinned by test/claims90-step3-lead.test.cjs). */
+export const GET_MAX_CHARS = 1400;
+export const GET_LINE_MAX = 158;
+/** A lead value on its `field: value` line; the search brief (R2) shows less. */
+const LEAD_VALUE_MAX = 80;
+const BRIEF_VALUE_MAX = 48;
 
 export const MAIL_DEFAULT = 5;
 export const MAIL_MAX = 50;
@@ -269,8 +290,23 @@ export function pageMails(rows: ParsedMail[], n: number, before: string | null):
 const mailRow = (m: ParsedMail & { tos: string[] }): GetMailRow => ({ id: m.id, from: m.from, to: m.tos, act: m.act, subject: m.subject, at: m.created_at, cardFrom: m.cardFrom, trust: m.trust, weak: !trustedLink(m.cardFrom), excerpt: m.body === undefined ? '' : excerpt(m.body) });
 
 export function resolveGet(rawTerm: string, opts: GetOptions, d: GetDeps): GetResult {
-  const term = normaliseTerm(rawTerm);
+  return resolveIn(index(d), normaliseTerm(rawTerm), opts, d, true);
+}
+
+/** R2: several terms over ONE index of the ledgers (the search path asks for every card its hits name). */
+export function resolveGetMany(rawTerms: string[], opts: GetOptions, d: GetDeps): GetResult[] {
   const ix = index(d);
+  return rawTerms.map((t) => resolveIn(ix, normaliseTerm(t), opts, d, true));
+}
+
+/** R2: the card a `card.*` claim key names, minus a known field suffix (the search path has no tasks.json at hand). */
+export function cardIdOfKey(key: string): string | null {
+  const k = key.toLowerCase();
+  if (!k.startsWith(CARD_PREFIX)) return null;
+  return k.slice(CARD_PREFIX.length).replace(FIELD_SUFFIX, '') || null;
+}
+
+function resolveIn(ix: Indexed, term: string, opts: GetOptions, d: GetDeps, withLead: boolean): GetResult {
   const taskIds = new Set((d.tasks ?? []).map((t) => String(t.id ?? '').toLowerCase()).filter(Boolean));
   const tried: string[] = [];
   let base: string | null = null;
@@ -305,7 +341,7 @@ export function resolveGet(rawTerm: string, opts: GetOptions, d: GetDeps): GetRe
     if (taskIds.has(name) || hasKey(cardK)) base = ix.byKey.has(mergeK) ? mergeK : cardK;
     else if (hasKey(bK)) base = bK;
   }
-  const empty: GetResult = { term, keys: [], tried, card: null, current: null, competing: [], superseded: [], decisions: [], fields: null, mails: [], nextBefore: null, mailIndex: 'off' };
+  const empty: GetResult = { term, keys: [], tried, card: null, current: null, competing: [], superseded: [], decisions: [], fields: null, mails: [], nextBefore: null, mailIndex: 'off', lead: null };
   if (!base) return empty;
   // The alias set, then (card keys) every derived sub-key under any of them.
   const keySet = new Set(aliasSet(ix, base));
@@ -399,20 +435,114 @@ export function resolveGet(rawTerm: string, opts: GetOptions, d: GetDeps): GetRe
       }
     }
   }
-  return { term, keys, tried, card, current, competing, superseded, decisions, fields, mails, nextBefore, mailIndex };
+  // Step 3 fix R1 (god bbcb4a): a bare card, or a branch that resolves to its card (card.<b>.merge / card.<b>), LEADS
+  // with every field's current value, each resolved exactly as `memory get card.<id>.<field>` would (the field's
+  // claim, else the mail rule, else tasks.json), so the agent reads the answer without typing the field term (Jim
+  // f0d494: 6 of 332 rows typed it). A release.<v> key leads with its live sub-keys (release.<v>.pause, ...).
+  // Never for a field sub-key the agent typed: that reply IS the field.
+  let lead: GetFieldLine[] | null = null;
+  // The lead's decision count is the card's whatever key the term reached it by (a branch name resolves to the
+  // merge sub-key, whose own rows hold no decision).
+  let shownDecisions = decisions;
+  if (withLead && card && (bareCard || name !== null)) {
+    lead = [];
+    if (!bareCard) {
+      const rows: ClaimRec[] = [];
+      for (const [k, ids] of ix.byKey) if (k.startsWith(`${CARD_PREFIX}${card}.`) && isDecision(k)) for (const id of ids) { const c = ix.claims.get(id); if (c && ix.status.get(c.id) === 'live') rows.push(c); }
+      shownDecisions = rows.sort(newestFirst).map(row);
+    }
+    const sub: GetOptions = { agent: opts.agent ?? null, noMail: opts.noMail === true, mail: 0 };
+    for (const f of CARD_FIELDS) {
+      const c = resolveIn(ix, `${CARD_PREFIX}${card}.${f.toLowerCase()}`, sub, d, false).current;
+      const tv = fields?.[f];
+      if (c) lead.push({ field: f, value: c.text, source: c.source, id: c.source === 'mail' ? c.mailId : c.claimId, agent: c.agent, at: c.at });
+      else if (tv !== undefined && tv !== null && tv !== '') lead.push({ field: f, value: String(tv), source: 'tasks' });
+      else lead.push({ field: f, value: null, source: 'none' });
+    }
+  } else if (withLead && !card && base.startsWith(RELEASE_PREFIX)) {
+    lead = [];
+    for (const k of [...ix.byKey.keys()].filter((o) => o.startsWith(`${base}.`)).sort(cmp)) {
+      const c = resolveIn(ix, k, { agent: opts.agent ?? null, noMail: true, mail: 0 }, d, false).current;
+      const field = k.slice(base.length + 1);
+      lead.push(c ? { field, value: c.text, source: c.source, id: c.claimId, agent: c.agent, at: c.at } : { field, value: null, source: 'none' });
+    }
+  }
+  return { term, keys, tried, card, current, competing, superseded, decisions: shownDecisions, fields, mails, nextBefore, mailIndex, lead };
+}
+
+/**
+ * R1: a lead value on one line: the whole text when it fits, else its head, or a window on the first sha / version
+ * in it when that lies past the head (a mail current is `subject — body…`: the value the field names must be what
+ * the agent reads, not the subject). A shape rule over all text, never a value list.
+ */
+export function leadValue(text: string, max: number): string {
+  const one = text.replace(/\s+/g, ' ').trim();
+  if (one.length <= max) return one;
+  const m = /\b(?=[0-9a-f]*\d)[0-9a-f]{7,40}\b|\b\d+\.\d+(?:\.\d+)+\b/i.exec(one);
+  if (!m || m.index + m[0].length <= max - 1) return `${one.slice(0, max - 1)}…`;
+  let start = Math.max(0, m.index - Math.floor(max / 3));
+  const sp = one.indexOf(' ', start);
+  if (sp >= 0 && sp < m.index) start = sp + 1;
+  const body = one.slice(start, start + max - 2);
+  return `…${body}${start + max - 2 < one.length ? '…' : ''}`;
+}
+
+/** R2: the brief a search hit carries for its card: the fields with a value, then the decision count. */
+export function leadBrief(r: GetResult): string[] {
+  if (!r.lead) return [];
+  const out = r.lead.filter((l) => l.value !== null).map((l) => `${l.field}: ${leadValue(l.value ?? '', BRIEF_VALUE_MAX)}`);
+  if (r.decisions.length) out.push(`decisions: ${r.decisions.length}`);
+  return out;
 }
 
 const day = (iso: string): string => (iso || '').slice(0, 10);
 const kv = (key: string, text: string): string => (key ? `${key}: ${text.replace(/\s+/g, ' ').trim()}` : text.replace(/\s+/g, ' ').trim());
 
-/** The text every path prints (CLI, MCP, hook-served): identical by construction. */
+const clipLine = (s: string): string => (s.length <= GET_LINE_MAX ? s : `${s.slice(0, GET_LINE_MAX - 1)}…`);
+const leadLine = (l: GetFieldLine): string => {
+  if (l.value === null) return `${l.field}: none`;
+  const src = l.source === 'tasks' ? 'tasks.json' : `${l.source} · ${l.agent ?? '-'} · ${day(l.at ?? '')} · ${l.id ?? '-'}`;
+  return `${l.field}: ${leadValue(l.value, LEAD_VALUE_MAX)} [${src}]`;
+};
+
+/** R1: the compact text's cap by construction: every line clipped to GET_LINE_MAX, the tail behind one pointer line
+ *  once the whole would pass GET_MAX_CHARS (the lead block is first, so it is what always survives). */
+function fitGet(lines: string[]): string {
+  const ls = lines.map(clipLine);
+  const cost = (xs: string[]): number => xs.reduce((n, l) => n + l.length + 1, 0);
+  if (cost(ls) <= GET_MAX_CHARS) return ls.join('\n') + '\n';
+  const more = (n: number): string => `… ${n} more line${n === 1 ? '' : 's'} (--all prints everything)`;
+  let keep = ls.length;
+  while (keep > 1 && cost(ls.slice(0, keep)) + more(ls.length - keep).length + 1 > GET_MAX_CHARS) keep--;
+  return [...ls.slice(0, keep), more(ls.length - keep)].join('\n') + '\n';
+}
+
+/** The text every path prints (CLI, MCP, hook-served): identical by construction. Step 3 fix R1 (god bbcb4a): the
+ *  default view is COMPACT: the lead block (`field: value [source]` lines and the decision count), the current value,
+ *  the competing / superseded counts, fields and the newest mails, every line under GET_LINE_MAX and the whole under
+ *  GET_MAX_CHARS by construction; `--all` / `--history` prints the decision list and the hidden bodies, uncapped. */
 export function formatGet(r: GetResult, opts: GetOptions = {}): string {
   const L: string[] = [];
   if (!r.keys.length) {
     L.push(`no claim under ${r.tried.join(', ')}`);
     return L.join('\n') + '\n';
   }
-  L.push(`get ${r.term} → keys: ${r.keys.join(', ')}${r.card ? ` (card ${r.card})` : ''}${opts.agent ? ` [--agent ${opts.agent}]` : ''}`);
+  const all = opts.history === true;
+  // The header: the key list gives way on a long line (its tail behind `… +N more`), never the card tag after it.
+  const prefix = `get ${r.term} → keys: `;
+  const suffix = `${r.card ? ` (card ${r.card})` : ''}${opts.agent ? ` [--agent ${opts.agent}]` : ''}`;
+  let ks = r.keys.join(', ');
+  if (!all && prefix.length + ks.length + suffix.length > GET_LINE_MAX) {
+    const more = (n: number): string => `, … +${n} more`;
+    let n = r.keys.length;
+    while (n > 1 && prefix.length + r.keys.slice(0, n).join(', ').length + more(r.keys.length - n).length + suffix.length > GET_LINE_MAX) n--;
+    ks = r.keys.slice(0, n).join(', ') + more(r.keys.length - n);
+  }
+  L.push(prefix + ks + suffix);
+  if (r.lead) {
+    for (const l of r.lead) L.push(leadLine(l));
+    if (r.card && !all) L.push(`decisions: ${r.decisions.length}${r.decisions.length ? ' (--all lists them)' : ''}`);
+  }
   if (r.current) {
     const c = r.current;
     L.push(`current: ${kv(c.key, c.text)}`);
@@ -434,9 +564,12 @@ export function formatGet(r: GetResult, opts: GetOptions = {}): string {
     for (const s of r.superseded) L.push(`  ${kv(s.key, s.excerpt)} [${s.status} · ${s.agent} · ${day(s.at)} · ${s.claimId}${s.supersededBy.length ? ` → replaced by ${s.supersededBy.join(', ')}` : ''}${s.reason ? ` · ${s.reason}` : ''}]`);
   }
   if (r.card) {
-    // A bare card key always shows its decision list (even empty); a sub-key shows it only when it has rows.
-    if (r.decisions.length || r.keys.includes(`${CARD_PREFIX}${r.card}`)) L.push(`decisions (${r.decisions.length}):`);
-    for (const dRow of r.decisions) L.push(`  ${kv(dRow.key, dRow.text)} [${day(dRow.at)} · ${dRow.claimId}]`);
+    // A bare card key always shows its decision list (even empty); a sub-key shows it only when it has rows. Compact:
+    // the count (already in the lead block when there is one), the list behind --all.
+    const listed = r.decisions.length || r.keys.includes(`${CARD_PREFIX}${r.card}`);
+    if (listed && !all && !r.lead) L.push(`decisions: ${r.decisions.length} (--all lists them)`);
+    else if (listed && all) L.push(`decisions (${r.decisions.length}):`);
+    if (all) for (const dRow of r.decisions) L.push(`  ${kv(dRow.key, dRow.text)} [${day(dRow.at)} · ${dRow.claimId}]`);
     if (r.fields) L.push(`fields: ${Object.entries(r.fields).filter(([k]) => k !== 'id').map(([k, v]) => `${k}=${String(v)}`).join(' ')}`);
     if (r.mailIndex === 'absent') L.push('mails: no mail index for this card yet (hive/state/mail-cards)');
     else if (r.mailIndex === 'present') {
@@ -444,5 +577,5 @@ export function formatGet(r: GetResult, opts: GetOptions = {}): string {
       for (const m of r.mails) L.push(`  ${m.id} ${m.from} → ${m.to.join(',') || '-'} ${m.act}: ${excerpt(m.subject, 100)} [${m.cardFrom}${m.weak ? ' · weak' : ''} · ${m.trust}]`);
     }
   }
-  return L.join('\n') + '\n';
+  return all ? L.join('\n') + '\n' : fitGet(L);
 }

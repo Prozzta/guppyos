@@ -46,6 +46,8 @@ export interface Port {
 }
 
 export interface WorkerMessage { id: number; op: string; args?: Record<string, unknown>; deadline?: number }
+/** Step 3 fix R2: how long the worker waits for main's answer to a reverse request (`{ ask, op, args }`). */
+export const ASK_TIMEOUT_MS = 1_500;
 
 /** Open the store; a file that fails `quick_check` is quarantined and a fresh one created
  *  (it is a cache: the backfill rebuilds it from the Markdown). */
@@ -84,8 +86,19 @@ export async function runWorker(cfg: WorkerConfig, port: Port, deps: { Database:
     }
   };
   const embedder = new OnnxEmbedder(modelPath, tokenizer, verifiedOrt, { intraOpNumThreads: 2 });
+  // Step 3 fix R2 (god bbcb4a): a reverse request to main (the ledgers live there), answered as `{ answer, result }`
+  // on the same port or timed out to null (the engine then prints the hits without the card brief).
+  const asks = new Map<number, (v: unknown) => void>();
+  let askSeq = 0;
+  const ask = (op: string, args: Record<string, unknown>): Promise<unknown> => new Promise((resolve) => {
+    const id = ++askSeq;
+    const t = setTimeout(() => { if (asks.delete(id)) resolve(null); }, ASK_TIMEOUT_MS);
+    asks.set(id, (v) => { clearTimeout(t); resolve(v); });
+    port.postMessage({ ask: id, op, args });
+  });
   const engine = new MemoryEngine({
     hiveRoot: cfg.hiveRoot, store, embedder, countTokens: (t) => tokenizer.count(t), claimLedger: cfg.claimLedger, anchored: cfg.anchored,
+    cardLead: async (cards) => { const r = await ask('card-lead', { cards }); return r && typeof r === 'object' ? (r as Record<string, string[]>) : {}; },
     log: (row) => port.postMessage({ event: 'log', ...row }),
     onModelUnload: () => port.postMessage({ event: 'model-unloaded' }),
     onModelLoaded: () => port.postMessage({ event: 'model-loaded' }),
@@ -98,6 +111,8 @@ export async function runWorker(cfg: WorkerConfig, port: Port, deps: { Database:
 
   const reply = (id: number, r: Record<string, unknown>): void => port.postMessage({ id, ...r });
   port.on('message', (e) => {
+    const ans = e.data as { answer?: unknown; result?: unknown } | null;
+    if (ans && typeof ans.answer === 'number') { const fn = asks.get(ans.answer); asks.delete(ans.answer); fn?.(ans.result ?? null); return; }
     const m = e.data as WorkerMessage;
     if (!m || typeof m.id !== 'number' || typeof m.op !== 'string') return;
     const a = m.args ?? {};
@@ -116,7 +131,7 @@ export async function runWorker(cfg: WorkerConfig, port: Port, deps: { Database:
     switch (m.op) {
       case 'search':
         guard(engine.search({ query: String(a.query ?? ''), wing: (a.wing as string) ?? null, room: (a.room as string) ?? null, results: Number(a.results ?? 5), since: (a.since as string) ?? null, before: (a.before as string) ?? null, caller: (a.caller as string) ?? null,
-          mode: a.mode === 'history' || a.mode === 'all' ? a.mode : 'live', kind: (a.kind as string) ?? null, key: (a.key as string) ?? null, full: a.full === true },
+          mode: a.mode === 'history' || a.mode === 'all' ? a.mode : 'live', exact: a.exact === true, newest: a.newest === true, kind: (a.kind as string) ?? null, key: (a.key as string) ?? null, full: a.full === true },
         { deadline: m.deadline, timing: (t) => { timing = t; } }), (r) => ({ exit: r.exit, text: r.text, json: r.json }));
         break;
       case 'wake-up':
