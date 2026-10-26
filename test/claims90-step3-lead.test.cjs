@@ -350,7 +350,7 @@ test('M3b (god 08992e, Jim f6c424): a body line whose words sit before its first
     const L = lines(t); const first = L.findIndex((l) => /^ {0,2}\[1\] /.test(l)); assert.ok(first > 0, `${mode}: a hit`);
     const briefLabels = L.slice(0, first).map(label).filter((x) => x !== null);
     assert.deepEqual(briefLabels.filter((x) => x !== 'Results for' && x !== 'Wing' && x !== 'Since'), ['donesha (latest)', 'donesha (beta-2)', 'status', 'assignee', 'decisions'], `${mode}: the brief field lines, byte for byte`);
-    const bodies = L.slice(first).filter((l) => new RegExp(`^ {${briefIndent}}\\S`).test(l) && !/^ {6}(Source|Match|Get|Card):/.test(l));
+    const bodies = L.slice(first).filter((l) => new RegExp(`^ {${briefIndent}}\\S`).test(l) && !/^ {6}(Source|Claim|Get|Version|Match|Card):/.test(l));  // the --full meta lines (format.ts ~423-437) are no body lines
     assert.ok(bodies.length >= 3, `${mode}: ${bodies.length} body lines`);
     for (const b of bodies) assert.equal(label(b), '|', `MUTANT (${mode}): a body line whose label is body text: ${b}`);
     for (const b of bodies) assert.doesNotMatch(b, /^ *\|: (VERSION BUMP|- tag v1\.1\.55|ready to merge)[^:=]*$/, `${mode}: the separator sits in the prefix, the body text keeps its own: ${b}`);
