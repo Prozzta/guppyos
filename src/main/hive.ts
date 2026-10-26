@@ -34,6 +34,7 @@ import { ASK_BACKSTOP_MS, ASK_CLOSE_REASON_MAX, MailLedger, answeredByMessage, c
 import { mailObligationsView, type MailObligationsAgent } from './mailReaders';
 import { UNDELIVERED_DIR, dropUndeliveredItems, mailMigrationDone, markUndeliveredSeen, readUndeliveredReport, readUndeliveredReportAsync, restoreUndeliveredFiles, runMailMigration, setAsideUndelivered, type MailMigrationResult, type UndeliveredReport } from './mailMigration';
 import { mailChannelMode, mailPromptMode, type MailPromptMode } from './mailSurface';
+import { CARD_FACT_RULE } from './claims/cardFactRule';
 import { rolloverMemory, seedPinnedSection, pinnedOverCapDue, PINNED_SEED, PINNED_SOFT_CAP_BYTES, MEMORY_STOP_ROLLOVER_BYTES, type RolloverResult } from './memoryRollover';
 import { shouldSeedCodexTrust, withAgentTrust, codexProjectLayerRiskKeys } from './codexTrustSeed';
 import { codexProjectLayers, decideCodexLayers, type CodexLayerNotice, type CodexLayerReport } from './codexProjectLayers';
@@ -6357,6 +6358,8 @@ memory and you have the \`memory\` command, served by the app's memory engine:
   PROTOCOL.md, board.md, changelog entries); \`--newest\` for newest first. Every
   hit names its key and the \`memory get\` line that answers it.
 - \`memory wake-up\` — a short digest of what matters, good at the start of a task.
+
+${CARD_FACT_RULE}
 
 Your \`memory.md\` is indexed automatically, so the durable facts you write there
 become searchable by every agent. There is no \`mine\` step. When your start-up instructions

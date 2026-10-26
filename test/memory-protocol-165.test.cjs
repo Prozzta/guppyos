@@ -306,3 +306,15 @@ test('nit 4: a raced rollover at spawn is logged (memory-rollover-raced) and mem
   assert.ok(!rows.some((r) => r.kind === 'memory-rollover'), 'no rollover row');
   assert.match(fs.readFileSync(path.join(dir, 'memory.md'), 'utf8'), /- late\n$/);
 });
+
+test('CLAIMS-90 R3 (god 066d84): PROTOCOL.md\'s memory section carries the answer-one-value rule verbatim, once', async (t) => {
+  const s = sandbox(t);
+  await s.hive.ensureAgent({ id: 'cr-1', name: 'Creed', provider: 'claude', cwd: s.home }, { semanticMemory: true });
+  const { CARD_FACT_RULE } = loadTs('src/main/claims/cardFactRule.ts');
+  const proto = fs.readFileSync(path.join(s.home, 'harness', 'hive', 'PROTOCOL.md'), 'utf8').replace(/\r\n/g, '\n');
+  assert.equal(proto.split(CARD_FACT_RULE).length, 2, 'the rule, once');
+  const at = proto.indexOf(CARD_FACT_RULE);
+  const wake = proto.indexOf('- `memory wake-up`');
+  assert.ok(wake > 0 && wake < at && at - wake < 200, 'right under the memory wake-up line');
+  assert.ok(proto.lastIndexOf('\n## ', at) === proto.lastIndexOf('\n## ', wake), 'in the same section');
+});

@@ -555,3 +555,27 @@ test('Jim M-4 / G4.5: the Codex instruction file and wake-up get the same bytes 
   assert.match(hive, /preset\.systemPromptChannel === 'codex-developer-instructions' \? HiveManager\.codexDeveloperInstructions\(prompt, claimContext\) : null/);
   assert.match(hive, /try \{ claimContext = await this\.codexClaimContext\(meta\.id\); \}/);
 });
+
+test('CLAIMS-90 R3 (god 066d84): the brief\'s line 2 is the answer-one-value rule, for a writer, a reader and a capped brief, inside the cap', async () => {
+  const { CARD_FACT_RULE } = loadTs('src/main/claims/cardFactRule.ts');
+  assert.match(CARD_FACT_RULE, /memory get <CARD-ID>/);
+  assert.match(CARD_FACT_RULE, /single current value/);
+  assert.match(CARD_FACT_RULE, /only when asked for history/);
+  const x = setup({ levels: { a2: 'reader' } });
+  await note(x.ref.store, 'a1', 'synthetic writer fact');
+  await note(x.ref.store, 'a2', 'synthetic reader fact');
+  for (const a of ['a1', 'a2']) {
+    const w = await x.delivery.workingSet(a);
+    assert.equal(w.split('\n')[1], CARD_FACT_RULE, `${a}: line 2`);
+    assert.equal(w.split(CARD_FACT_RULE).length, 2, `${a}: once`);
+  }
+  assert.match(await x.delivery.workingSet('a1'), /synthetic writer fact/);
+  assert.ok((await x.delivery.workingSet('a2')).endsWith(D.READ_ONLY_WARNING), 'the warning still ends a reader\'s brief');
+  for (let i = 0; i < 120; i++) await note(x.ref.store, 'a1', `synthetic claim ${i} about the widget relay and the crate on port ${4400 + i}, with some more words to make it long`);
+  for (const cap of [undefined, D.WORKING_SET_MAX_CHARS]) {
+    const w = await x.delivery.workingSet('a1', 'startup', cap);
+    assert.equal(w.split('\n')[1], CARD_FACT_RULE, 'a full brief keeps the rule');
+    assert.ok(w.length <= (cap ?? D.WORKING_SET_DELIVERY_MAX_CHARS), `${w.length} over the cap`);
+    assert.match(w, /\+\d+ more/, 'the claims gave way, not the rule');
+  }
+});
