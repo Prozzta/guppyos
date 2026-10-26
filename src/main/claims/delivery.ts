@@ -22,6 +22,7 @@ import { MAIL_JOINED_BUDGET } from '../mailSurface';
 import { verifiedPrefix } from './indexSync';
 import { createClaimViews, DEFAULT_WORKING_SET_BUDGET, type CountTokens } from './views';
 import { reconcilePromptText } from './reconcile';
+import { CARD_FACT_RULE } from './cardFactRule';
 import { buildClaimsWorldSnapshot, runGit, WORLD_SNAPSHOT_DEADLINE_MS, type ClaimsWorldSnapshot, type GitRunner } from './worldSnapshot';
 
 /** M-3: what the mail block keeps at a SessionStart(compact) beside a full working set and the carry. */
@@ -166,21 +167,25 @@ export function createClaimDelivery(d: ClaimDeliveryDeps): ClaimDelivery {
       const { buildWorkingSetDetailed } = createClaimViews(records, countTokens, items, registry);
       const warning = readOnly ? `\n\n${READ_ONLY_WARNING}` : '';
       const tail = warning;
+      // CLAIMS-90 R3: the answer-one-value rule, under the header line; the cap reserves it like the warning.
+      const head = `\n${CARD_FACT_RULE}`;
+      const fixed = head.length + tail.length;
       // M-3: B8 shares at the plan's B, scaled down until the text fits the character cap.
       let budget = DEFAULT_WORKING_SET_BUDGET;
       let built = buildWorkingSetDetailed(state, view, budget);
-      for (let i = 0; i < 6 && built.text.length + tail.length > cap && budget > 1; i++) {
-        budget = Math.max(1, Math.floor(budget * (cap - tail.length) / (built.text.length + 1) * 0.95));
+      for (let i = 0; i < 6 && built.text.length + fixed > cap && budget > 1; i++) {
+        budget = Math.max(1, Math.floor(budget * (cap - fixed) / (built.text.length + 1) * 0.95));
         built = buildWorkingSetDetailed(state, view, budget);
       }
       // Last resort (Jim's note): cut the working set at a LINE boundary and keep the warning whole.
       let body = built.text;
-      if (body.length + tail.length > cap) {
-        const room = Math.max(0, cap - tail.length);
+      if (body.length + fixed > cap) {
+        const room = Math.max(0, cap - fixed);
         const cut = body.lastIndexOf('\n', room);
         body = cut > 0 ? body.slice(0, cut) : body.slice(0, room);
       }
-      const text = body + tail;
+      const nl = body.indexOf('\n');
+      const text = (nl < 0 ? body + head : body.slice(0, nl) + head + body.slice(nl)) + tail;
       const bodyLines = new Set(body.split('\n'));
       const renderedItems = items.filter((item) => bodyLines.has(reconcilePromptText(item)));
       const renderedIds = new Set(renderedItems.map((item) => item.itemId));
