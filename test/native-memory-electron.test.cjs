@@ -1,4 +1,7 @@
 'use strict';
+// MUTANT-JOURNAL-GATE (god 5cc045/ed8032): this suite loads a file a census mutates in place (one load-ts never sees);
+// refuse a tree a killed census left mutated, before anything is read.
+require('./tools/mutant-runner-helper.cjs').gate(__filename);
 /**
  * NATIVE-MEMORY: the store, the engine and the worker against the REAL shipped natives - the
  * app's Electron-ABI better-sqlite3, the pinned sqlite-vec DLL, onnxruntime-node and the bundled

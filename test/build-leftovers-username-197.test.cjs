@@ -1,4 +1,7 @@
 'use strict';
+// MUTANT-JOURNAL-GATE (god 5cc045/ed8032): this suite loads a file a census mutates in place (one load-ts never sees);
+// refuse a tree a killed census left mutated, before anything is read.
+require('./tools/mutant-runner-helper.cjs').gate(__filename);
 
 /**
  * BUILD-LEFTOVERS-USERNAME-197 (Jim d449c6 INFO on the 1.1.96 cut, god b8a715). The 1.1.95 and 1.1.96

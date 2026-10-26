@@ -14,6 +14,9 @@ const { spawnSync } = require('node:child_process');
 const os = require('node:os');
 
 const ROOT = path.resolve(__dirname, '..', '..');
+const { recover, mutateFile, restoreFile } = require('./mutant-runner-helper.cjs');
+recover(ROOT);
+if (process.argv.includes('--recover-only')) process.exit(0);
 const TEST = 'test/heavy-cpu-options-191.test.cjs';
 const TS = 'src/main/codexHookMcp.ts';
 const CS = 'resources/heavyjob/guppy-heavyjob.cs';
@@ -59,10 +62,10 @@ for (const [name, file, from, to, dies] of MUTANTS) {
   if (original.includes('\r\n')) mutated = mutated.replace(/\n/g, '\r\n');
   let r;
   try {
-    fs.writeFileSync(abs, mutated);
+    mutateFile(ROOT, abs, original, mutated);
     r = run();
   } finally {
-    fs.writeFileSync(abs, original);
+    restoreFile(ROOT, abs, original);
   }
   const named = dies.test(`${r.stdout}${r.stderr}`);
   const killed = r.status !== 0 && named;

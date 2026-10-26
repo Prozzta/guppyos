@@ -16,7 +16,9 @@ const journalPath = (root) => path.join(root, '.mutant-runner-recovery.json');
 
 // Every tree a census mutates in place: TypeScript under src/, the shipped CLI under resources/ (m1), the
 // release scripts under scripts/ (release-worktrees). Anything else is not a mutant and is never restored.
-const MUTABLE = ['src', 'resources', 'scripts'];
+// test/ too (god 5cc045): the runner censuses mutate test/tools/run-tests.cjs, the temp-jail helpers, the electron
+// harness and one suite in place; they are gated by hand (gate below) because load-ts never sees them.
+const MUTABLE = ['src', 'resources', 'scripts', 'test'];
 function checked(root, file) {
   const rel = path.relative(root, file);
   if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || !MUTABLE.some((dir) => rel.startsWith(`${dir}${path.sep}`))) {
@@ -161,4 +163,11 @@ function restoreFile(root, file, original) {
   writeJournal(root, readJournal(root).records.filter((record) => record.file !== abs));
 }
 
-module.exports = { recover, mutateFile, restoreFile, journalPath, journalState, assertUnmutated, processStart };
+/** The one-line suite gate (god 5cc045/ed8032): a suite that loads a file a census mutates (a non-TS file load-ts
+ * never sees) calls gate(__filename) at module top and refuses a mutated tree under its own repo-relative name. */
+function gate(filename) {
+  const root = path.resolve(__dirname, '..', '..');
+  assertUnmutated(root, path.relative(root, filename).split(path.sep).join('/'));
+}
+
+module.exports = { recover, mutateFile, restoreFile, journalPath, journalState, assertUnmutated, gate, processStart };

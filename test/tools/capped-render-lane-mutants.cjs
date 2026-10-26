@@ -6,6 +6,9 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const root = path.resolve(__dirname, '..', '..');
+const { recover, mutateFile, restoreFile } = require('./mutant-runner-helper.cjs');
+recover(root);
+if (process.argv.includes('--recover-only')) process.exit(0);
 const source = path.join(root, 'test', 'tools', 'run-tests.cjs');
 const contract = 'test/capped-render-lane-198.test.cjs';
 const original = fs.readFileSync(source, 'utf8');
@@ -29,13 +32,13 @@ try {
   for (const mutant of mutants) {
     const hits = original.split(mutant.from).length - 1;
     if (hits !== 1) throw new Error(`mutant anchor ${mutant.name} matched ${hits} times`);
-    fs.writeFileSync(source, original.replace(mutant.from, mutant.to));
+    mutateFile(root, source, original, original.replace(mutant.from, mutant.to));
     const result = run();
     const output = `${result.stdout}\n${result.stderr}`;
     if (result.status === 0 || !mutant.dies.test(output)) throw new Error(`SURVIVED ${mutant.name}: ${output}`);
     console.log(`KILLED ${mutant.name}`);
-    fs.writeFileSync(source, original);
+    restoreFile(root, source, original);
   }
 } finally {
-  fs.writeFileSync(source, original);
+  restoreFile(root, source, original);
 }

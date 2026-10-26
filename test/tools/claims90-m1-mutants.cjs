@@ -10,7 +10,6 @@
  */
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const { recover, mutateFile, restoreFile } = require('./mutant-runner-helper.cjs');
 
@@ -20,13 +19,6 @@ recover(ROOT);
 // files, so load-ts and the suites that read the CLI text directly refuse a tree where it is left mutated.
 const mutateAny = (file, abs, original, mutated) => mutateFile(ROOT, abs, original, mutated);
 const restoreAny = (file, abs, original) => restoreFile(ROOT, abs, original);
-// Before NIT 1 the CLI's original bytes lived in the OS temp dir: repair a run of that code that was killed.
-const CLI_BACKUP = path.join(os.tmpdir(), 'claims90-m1-mutants-memory-cli.orig');
-if (fs.existsSync(CLI_BACKUP)) {
-  fs.writeFileSync(path.join(ROOT, 'resources/memory-cli.cjs'), fs.readFileSync(CLI_BACKUP));
-  fs.rmSync(CLI_BACKUP, { force: true });
-  console.log('recovered resources/memory-cli.cjs from an interrupted run');
-}
 if (process.argv.includes('--recover-only')) process.exit(0);
 const TESTS = ['test/claims90-m1-compact.test.cjs', 'test/native-memory.test.cjs', 'test/claims90-m3a-lead.test.cjs', 'test/claims90-m3-rank.test.cjs',
   // CLAIMS-90 R2 (C90-GET): the lookup, the search modes and the cross-path test.

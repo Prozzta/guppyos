@@ -5,6 +5,9 @@ const { spawnSync } = require('node:child_process');
 const path = require('node:path');
 const os = require('node:os');
 const root = path.join(__dirname, '..', '..');
+const { recover, mutateFile, restoreFile } = require('./mutant-runner-helper.cjs');
+recover(root);
+if (process.argv.includes('--recover-only')) process.exit(0);
 const source = path.join(root, 'test', 'heavy-cpu-harness-191.test.cjs');
 const helper = path.join(root, 'resources', 'heavyjob', 'guppy-heavyjob.cs');
 const create = "create ${id} 0 ${cap}${cap ? ` ${rate}` : ''}";
@@ -25,10 +28,10 @@ for (const [name, file, from, to] of mutants) {
   try {
     // Keep the direct query oracle from killing this helper mutation first: M10 must reject it
     // from delivered CPU time versus the requested-rate ceiling.
-    if (queryOriginal) fs.writeFileSync(source, queryOriginal.replace('rate: 2500, affinity: null', 'rate: 5000, affinity: null'));
-    fs.writeFileSync(file, original.replace(from, to));
+    if (queryOriginal) mutateFile(root, source, queryOriginal, queryOriginal.replace('rate: 2500, affinity: null', 'rate: 5000, affinity: null'));
+    mutateFile(root, file, original, original.replace(from, to));
     const r = spawnSync(process.execPath, ['--test', 'test/heavy-cpu-harness-191.test.cjs'], { cwd: root, encoding: 'utf8', windowsHide: true, env: { ...process.env, LOCALAPPDATA: local } });
     if (r.status === 0) throw new Error(`SURVIVED ${name}: ${r.stdout}\n${r.stderr}`);
     console.log(`KILLED ${name}`);
-  } finally { fs.writeFileSync(file, original); if (queryOriginal) fs.writeFileSync(source, queryOriginal); fs.rmSync(local, { recursive: true, force: true }); }
+  } finally { restoreFile(root, file, original); if (queryOriginal) restoreFile(root, source, queryOriginal); fs.rmSync(local, { recursive: true, force: true }); }
 }
