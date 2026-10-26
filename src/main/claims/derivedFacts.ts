@@ -31,6 +31,7 @@
  * Structured value (L1, god 69bc66): every FIELD fact (status, assignee, fixversion, lastsha, audit, gitsha,
  * merge, donesha, release.<v>.bump, release.<v>.tag) carries `value`, the one value the field names, beside
  * its prose, so a reader prints it without cutting a window from the text. Decisions and CHANGELOG entries are prose.
+ * A merge has two points, so its value is `<tip> into int-<v>` (god 0b71e3).
  */
 import { createHash } from 'node:crypto';
 import type { ClaimKind, Ref } from '../../shared/claims';
@@ -353,10 +354,32 @@ export async function gitHistoryFacts(log: ReadonlyArray<{ commit: string; time:
 }
 
 /**
- * A merge into an INT: `Merge [branch |remote-tracking branch ]<name> [@<sha>|(<sha>)] into int-<v>`
- * (also `int/release-<v>`, `INT <v>`). Without a sha the tip is the merge's second parent.
+ * A merge into an INT line, in both subject forms git history uses (god 0b71e3):
+ * `Merge [branch |remote-tracking branch |commit ][guppy ]<ref> [words] into <target> [words]` and
+ * `<target>[ stage <n>]: merge <ref> [words]`. The target is `int-<v>`, `int/release-<v>`, `INT <v>` or a
+ * bare version, after an optional `origin/` and `guppy/`; every form is normalised to int-<v>. The tip is
+ * the sha right after the ref (`@<sha>`, `@ <sha>`, `(<sha>`, `<sha>`; in the line form the first `@<sha>`),
+ * else the merge's second parent. `single` says the ref stands alone (no free words before the tip), so
+ * it can name a branch. Other targets (main, feature, rc/, release-, integration/, v0.x and prose lines)
+ * are not INT lines.
  */
-const MERGE_RE = /^Merge\s+(?:(?:remote-tracking\s+)?branch\s+)?'?([^\s']+)'?(?:\s+(?:@|\()?([0-9a-f]{7,40})\)?)?\s+into\s+'?int(?:-|\/release-|\s)?(\d+(?:\.\d+)+)(?![0-9A-Za-z])/i;
+const MERGE_INT = String.raw`'?(?:origin\/)?(?:guppy\/)?(?:int-|int\/release-|int\s+)?(\d+(?:\.\d+)+)(?![0-9A-Za-z]|\.\d)`;
+const MERGE_RE = new RegExp(String.raw`^Merge\s+(?:(?:remote-tracking\s+)?branch\s+|commit\s+)?(?:guppy\s+)?'?([^\s']+)'?((?:\s+(?!into\s)\S+)*?)\s+into\s+${MERGE_INT}`, 'i');
+const MERGE_LINE_RE = /^(?:int-|int\s+)?(\d+(?:\.\d+)+)(?:\s+stage\s+\S+)?:\s+merge\s+'?([^\s']+)'?(.*)$/i;
+const TIP_NEXT_RE = /^\s*(?:@\s?|\()?([0-9a-f]{7,40})(?![0-9A-Za-z])/i;
+const TIP_AT_RE = /@\s?([0-9a-f]{7,40})(?![0-9A-Za-z])/i;
+
+/** The ref, the tip sha when the subject names one, the INT target as int-<v>, and whether the ref stands alone; null when it is not a merge into an INT. */
+export function mergeSubject(subject: string): { ref: string; sha?: string; int: string; single: boolean } | null {
+  const m = MERGE_RE.exec(subject);
+  const l = m ? null : MERGE_LINE_RE.exec(subject);
+  if (!m && !l) return null;
+  const [ref, rest, v] = m ? [m[1], m[2], m[3]] : [l![2], l![3], l![1]];
+  const next = TIP_NEXT_RE.exec(rest);
+  const sha = (m ? next : TIP_AT_RE.exec(rest))?.[1];
+  const sha1 = sha && /[0-9]/.test(sha) ? sha : undefined;
+  return { ref, ...(sha1 ? { sha: sha1 } : {}), int: `int-${v}`, single: !rest.trim() || (!!m && !!sha1) || /^\s*[@(]/.test(rest) };
+}
 
 /**
  * Merge class (god c33130): per merge commit into an INT, the merged tip and the INT, latest-wins per
@@ -367,16 +390,18 @@ export async function mergeFacts(log: ReadonlyArray<{ commit: string; time: numb
   const known = new Map(cardIds.map((c) => [c.toLowerCase(), c]));
   const newest = new Map<string, { commit: string; time: number; branch: string; tip: string; int: string; card: string | null }>();
   for (const c of log) {
-    const m = MERGE_RE.exec(c.message.split('\n')[0].trim());
-    const tip = m?.[2] ?? c.parents?.[1];
+    const m = mergeSubject(c.message.split('\n')[0].trim());
+    const tip = m?.sha ?? c.parents?.[1];
     if (!m || !tip) continue;
-    const branch = m[1].replace(/^(?:origin\/)?guppy\//i, '');
+    const branch = m.ref.replace(/^origin\//i, '').replace(/^guppy\//i, '');
     const card = known.get(branch.toLowerCase()) ?? null;
-    const key = card ? cardKey(card, 'merge') : keyOk(`branch.${branch.toLowerCase()}`) ? `branch.${branch.toLowerCase()}` : null;
+    // a free-worded ref ("build leftovers username") or a bare commit names no branch
+    const named = m.single && !/^[0-9a-f]{7,40}$/i.test(branch);
+    const key = card ? cardKey(card, 'merge') : named && keyOk(`branch.${branch.toLowerCase()}`) ? `branch.${branch.toLowerCase()}` : null;
     if (!key) continue;
     const prior = newest.get(key);
     if (prior && (prior.time > c.time || (prior.time === c.time && prior.commit > c.commit))) continue;
-    newest.set(key, { commit: c.commit, time: c.time, branch: m[1], tip: tip.toLowerCase(), int: `INT-${m[3]}`, card });
+    newest.set(key, { commit: c.commit, time: c.time, branch: m.ref, tip: tip.toLowerCase(), int: m.int.replace(/^int/, 'INT'), card });
   }
   const out: DerivedFact[] = [];
   for (const [key, x] of [...newest].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
@@ -394,7 +419,7 @@ export async function mergeFacts(log: ReadonlyArray<{ commit: string; time: numb
         ...(tipFull ? [{ type: 'commit' as const, value: tipFull }] : []),
         { type: 'commit' as const, value: x.commit },
       ],
-      value: tip,
+      value: `${tip} into ${x.int.toLowerCase()}`,
     });
   }
   return out;

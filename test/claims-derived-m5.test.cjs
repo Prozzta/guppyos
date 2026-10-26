@@ -962,6 +962,40 @@ test('merge class (god c33130): a merge into an INT gives card.<id>.merge when a
   assert.match(by['card.syn-m2.merge'].text, /^Card SYN-M2: branch SYN-M2 was last merged into INT-9.1.2 at tip dddddddd/);
 });
 
+test('merge class (god 0b71e3): every INT target form git history uses, both subject forms; the value is the tip into int-<v>', async () => {
+  const S = (s) => F.mergeSubject(s);
+  assert.deepEqual(S('Merge guppy/syn-a @a1b2c3d into int-9.1.2 (Jim PASS)'), { ref: 'guppy/syn-a', sha: 'a1b2c3d', int: 'int-9.1.2', single: true });
+  assert.equal(S('Merge guppy/syn-b (b1b2c3d) into int/release-9.1.3: notes').int, 'int-9.1.3');
+  assert.equal(S('Merge SYN-C c1c2c3d into INT 9.1.4 stage 3').int, 'int-9.1.4');
+  assert.deepEqual(S('Merge origin/guppy/syn-d into 9.1.5'), { ref: 'origin/guppy/syn-d', int: 'int-9.1.5', single: true }, 'a bare version; no sha');
+  assert.equal(S('Merge guppy/syn-e @e1e2e3d into origin/guppy/int-9.1.6').int, 'int-9.1.6', 'origin/ and guppy/ before the target');
+  assert.deepEqual(S('INT 9.1.7: merge SYN-F @f1f2f3d'), { ref: 'SYN-F', sha: 'f1f2f3d', int: 'int-9.1.7', single: true }, 'the line form');
+  assert.deepEqual(S('INT-9.1.8 stage 12: merge syn-g fix-up @a9a9a9a; glob 1'), { ref: 'syn-g', sha: 'a9a9a9a', int: 'int-9.1.8', single: false }, 'line form, a stage, free words');
+  assert.deepEqual(S('Merge guppy SYN-H @d4d4d4d into int-9.1.9'), { ref: 'SYN-H', sha: 'd4d4d4d', int: 'int-9.1.9', single: true });
+  assert.deepEqual(S('Merge SYN-I step 3 a7a7a7a (pin) into INT 9.2.2 stage 17'), { ref: 'SYN-I', int: 'int-9.2.2', single: false }, 'free words: no sha taken, the tip is the second parent');
+  assert.equal(S('Merge build leftovers username into 9.2.0').single, false);
+  for (const s of ['Merge release-9.1.1 @41120b14 into int: notes', 'Merge guppy/x into release-9.1.1', 'rc/9.1.1: merge x @abc1234', 'Merge x into the 9.1.1 line', 'Merge guppy/x into main', 'Merge a into b (folded into 9.1.1)']) assert.equal(S(s), null, s);
+  const g = fakeGit({ commits: { a1b2c3d: H('a'), f1f2f3d: H('f') }, parents: {}, time: {} });
+  const log = [
+    { commit: H('1'), time: 100, message: 'Merge guppy/syn-a @a1b2c3d into int-9.1.2' },
+    { commit: H('2'), time: 110, message: 'Merge origin/guppy/syn-d into 9.1.5', parents: [H('x'), H('d')] },
+    { commit: H('3'), time: 120, message: 'INT 9.1.7: merge SYN-F @f1f2f3d' },
+    { commit: H('4'), time: 130, message: 'Merge guppy/lone @e1e2e3d into origin/guppy/int-9.1.6' },
+    { commit: H('5'), time: 140, message: 'Merge build leftovers username into 9.2.0', parents: [H('x'), H('b')] },
+    { commit: H('6'), time: 150, message: "Merge commit 'c3c3c3c' into guppy/int-9.2.1" },
+    { commit: H('7'), time: 160, message: 'Merge SYN-I step 3 a7a7a7a (pin) into INT 9.2.2 stage 17', parents: [H('x'), H('9')] },
+  ];
+  const facts = await F.mergeFacts(log, ['SYN-A', 'SYN-D', 'SYN-F', 'SYN-I'], g);
+  const by = Object.fromEntries(facts.map((f) => [f.key, f.value]));
+  assert.deepEqual(by, {
+    'branch.lone': 'e1e2e3d into int-9.1.6',
+    'card.syn-a.merge': `${H('a')} into int-9.1.2`,
+    'card.syn-d.merge': `${H('d')} into int-9.1.5`,
+    'card.syn-f.merge': `${H('f')} into int-9.1.7`,
+    'card.syn-i.merge': `${H('9')} into int-9.2.2`,
+  }, 'a free-worded ref or a bare commit names no branch');
+});
+
 // ———————————————————————————————————————————————————— CLAIMS-90 L1/L4 (god 69bc66): the structured value
 
 test('CLAIMS-90 L1: value and valueAgent are written by the derived writer only, one line, at most 120 characters', async () => {
@@ -1032,7 +1066,7 @@ test('CLAIMS-90 L1/L4: every field fact carries its value; audit and tag are the
   const gh = await F.gitHistoryFacts([{ commit: A, time: 100, message: 'SYN-F1 x' }], ['SYN-F1'], git);
   assert.equal(gh[0].value, A);
   const mg = await F.mergeFacts([{ commit: B, time: 200, message: 'Merge branch guppy/syn-f1 @a1a1a1a1 into int-9.1.2' }], ['SYN-F1'], git);
-  assert.deepEqual([mg[0].key, mg[0].value], ['card.syn-f1.merge', A], 'the merged tip');
+  assert.deepEqual([mg[0].key, mg[0].value], ['card.syn-f1.merge', `${A} into int-9.1.2`], 'the merged tip and its INT target');
 });
 
 test('CLAIMS-90 L1: R2 never undoes an explicit supersedes when the replacement shares the valid and write time of its target', () => {
