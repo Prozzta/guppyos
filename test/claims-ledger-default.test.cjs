@@ -112,6 +112,38 @@ test('(h) main and the worker discovery give one level for the same inputs', () 
   assert.deepEqual([d.ledgerLevels['syn-a'], d.ledgerLevels['syn-b'], d.ledgerLevels['syn-c']], [undefined, 'reader', 'writer']);
 });
 
+test('EQ (Jim e7aa07 a): with no ledgerDefault and no derivedRepo, manifestEntry, discovery, claimLevel and repo() equal 3aaf0d12', () => {
+  // The 3aaf0d12 definitions, verbatim in behaviour.
+  const oldEntry = (ledger, id) => { const v = ledger?.[id]; return v === undefined && id === DERIVED_AGENT_ID ? 'writer' : v; };
+  const oldRepo = (r) => (typeof r === 'string' && r.trim() ? r : null);
+  const root = tmp('eq');
+  const ledger = { 'syn-w': 'writer', 'syn-r': 'reader', 'syn-o': 'off', 'syn-g': 'Writer' };
+  fs.writeFileSync(path.join(root, SOURCES_CONFIG_FILE), JSON.stringify({ topLevel: [], include: {}, ledger }));
+  const ids = ['syn-w', 'syn-r', 'syn-o', 'syn-g', 'syn-absent', DERIVED_AGENT_ID];
+  // Each agent has markdown, a settled import and a ledger segment, so its level decides its source set.
+  for (const id of ids) {
+    fs.mkdirSync(path.join(root, 'agents', id, 'memory', 'claims'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'agents', id, 'memory.md'), '# m\n');
+    fs.writeFileSync(path.join(root, 'agents', id, 'memory', 'claims-import.json'), '{}');
+    fs.writeFileSync(path.join(root, 'agents', id, 'memory', 'claims', '2026-10.jsonl'), '');
+  }
+  const f = readSourcesConfig(root);
+  assert.equal(f.ledgerDefault, undefined); assert.equal(f.derivedRepo, undefined);
+  for (const saved of ['writer', 'reader', 'off', undefined]) {
+    for (const id of ids) {
+      assert.equal(manifestEntry(f.ledger, id, f.ledgerDefault), oldEntry(ledger, id), `manifestEntry ${id}`);
+      // claimLevel (index.ts): effectiveLevel(saved, manifestEntry(floor.ledger, agentId, floor.ledgerDefault)).
+      assert.deepEqual(effectiveLevel(saved, manifestEntry(f.ledger, id, f.ledgerDefault)), effectiveLevel(saved, oldEntry(ledger, id)), `claimLevel ${saved} ${id}`);
+    }
+    const now = discoverSources(root, f, { claimLedger: saved });
+    const was = discoverSources(root, { topLevel: [], include: {}, ledger }, { claimLedger: saved });
+    assert.deepEqual(now.ledgerLevels, was.ledgerLevels, `discovery levels ${saved}`);
+    assert.deepEqual(now.eligible.map((e) => e.path), was.eligible.map((e) => e.path), `discovery source set ${saved}`);
+  }
+  // repo() (index.ts): derivedRepoFor(floor derivedRepo, config derivedClaimsRepo).
+  for (const c of ['C:/syn/repo', '', '  ', undefined, null, 7]) assert.equal(derivedRepoFor(f.derivedRepo, c), oldRepo(c), `repo() with config ${JSON.stringify(c)}`);
+});
+
 test('C4: the seed names the project folder as derivedRepo only when it is a git repo; the floor repo overrides config', () => {
   const repo = tmp('repo');
   fs.mkdirSync(path.join(repo, '.git'));

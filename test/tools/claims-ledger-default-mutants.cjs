@@ -39,6 +39,11 @@ const MUTANTS = [
   ['(g) a seed overwrites an existing manifest', SEED, '  if (existsSync(file)) return false;\n', ''],
   ['(h)1 discovery ignores ledgerDefault', SOURCES, 'manifestEntry(config.ledger, id, config.ledgerDefault)', 'manifestEntry(config.ledger, id)'],
   ['(h)2 main ignores ledgerDefault', MAIN, 'manifestEntry(floor.ledger, agentId, floor.ledgerDefault)', 'manifestEntry(floor.ledger, agentId)'],
+  // Jim e7aa07 (a): on the H1 floor inputs the level, discovery and repo() values equal 3aaf0d12.
+  ['EQ-a an absent entry takes an absent default', CLAIMS, '  if (ledgerDefault !== undefined) return ledgerDefault;\n', '  if (agentId === DERIVED_AGENT_ID || ledgerDefault !== undefined) return ledgerDefault;\n'],
+  ['EQ-b the manifest reader invents a default', SOURCES, '...(j.ledgerDefault !== undefined ? { ledgerDefault: j.ledgerDefault } : {}), ', "ledgerDefault: j.ledgerDefault ?? 'reader', "],
+  ['EQ-c repo() drops the config repo', SEED, "  return typeof configRepo === 'string' && configRepo.trim() ? configRepo : null;", '  return null;'],
+  ['EQ-d repo() takes a blank config repo', SEED, "  return typeof configRepo === 'string' && configRepo.trim() ? configRepo : null;", "  return typeof configRepo === 'string' ? configRepo : null;"],
   ['C4-a any project folder is a repo', SEED, ' && isRepo(projectFolder)', ''],
   ['C4-b a relative folder can be a repo', SEED, "typeof projectFolder === 'string' && isAbsolute(projectFolder)", "typeof projectFolder === 'string'"],
   ['C4-c config beats the floor repo', SEED, "  if (typeof floorRepo === 'string' && floorRepo.trim()) return floorRepo;\n", ''],
