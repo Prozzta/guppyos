@@ -298,10 +298,14 @@ export interface LedgerManifest { ledger: Record<string, LedgerLevel> }
  * An agent's manifest entry. CLAIMS-90 M5: the derived ledger has no hire to add its entry, so an
  * absent one reads as writer (the Settings level and config derivedClaims still rule); a written
  * entry narrows it like any agent's.
+ * CLAIMS-DEFAULT C1 (god bb3f5b): a floor's `ledgerDefault` stands in for an absent entry, so a floor
+ * seeded at creation starts every agent there. A manifest without it keeps REL-184: absent = off.
  */
-export function manifestEntry(ledger: Record<string, unknown> | undefined, agentId: string): unknown {
+export function manifestEntry(ledger: Record<string, unknown> | undefined, agentId: string, ledgerDefault?: unknown): unknown {
   const v = ledger?.[agentId];
-  return v === undefined && agentId === DERIVED_AGENT_ID ? 'writer' : v;
+  if (v !== undefined) return v;
+  if (ledgerDefault !== undefined) return ledgerDefault;
+  return agentId === DERIVED_AGENT_ID ? 'writer' : undefined;
 }
 
 /**

@@ -40,6 +40,8 @@ export interface LedgerUiDeps {
   /** The agent's effective level (main's claimLevel). */
   level: (agentId: string) => LedgerLevel;
   savedLevel: () => unknown;
+  /** CLAIMS-DEFAULT C5: this floor's memory-sources.json ledgerDefault (raw) and the derived repo in use. */
+  floor?: () => { ledgerDefault: unknown; derivedRepo: string | null };
   saveLevel: (level: LedgerLevel) => void;
   /** mainWiring.claimLedgerChanged(): resolves once a running worker follows the new level. */
   levelChanged: () => Promise<void> | null;
@@ -131,7 +133,9 @@ export function createLedgerUi(d: LedgerUiDeps) {
         const r = store.readLedger(agentId);
         return { agentId, level: d.level(agentId), claims: r.records.filter((x) => x.t === 'claim').length, readOnly: r.chain !== 'ok' };
       }) : [];
-      return { saved: typeof saved === 'string' ? saved : null, effective: effectiveLevel(saved, saved).level, agents };
+      const f = d.floor?.();
+      const floor = f ? { ledgerDefault: typeof f.ledgerDefault === 'string' && (LEDGER_LEVELS as readonly string[]).includes(f.ledgerDefault) ? f.ledgerDefault as LedgerLevel : null, derivedRepo: f.derivedRepo } : undefined;
+      return { saved: typeof saved === 'string' ? saved : null, effective: effectiveLevel(saved, saved).level, agents, ...(floor ? { floor } : {}) };
     },
 
     view,
