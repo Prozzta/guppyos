@@ -23,6 +23,9 @@
  *        --group F|D --xcheck <ids.json> --batch <batch-NN.jsonl> --instructions <INSTRUCTIONS-H1.md>
  *        --guide <guide.md> --pilot <pilot INSTRUCTIONS.md> --prompt <prompt.md> --key <key.jsonl>
  *        --out <dir> [--doc <file>=<name.md>]... [--model <id>] [--claude <exe>] [--keep]
+ *        [--provider claude|codex] [--codex <exe>] [--codex-auth <auth.json>]
+ * T6 (god 495956, Jim 475eab): --provider codex runs the same jail with codex exec instead (labeller-codex.cjs);
+ * the jail, the key check and the verdict file are the same, the codex events replace the transcript.
  * The prompt may use {labeller}, {group}, {batchName}, {today}, {jail}, {keyFile} and {ownIds}.
  * Writes under --out/<batchName>-<labeller>/: transcript.jsonl, jail-files.json, open-log.jsonl,
  * key-batch.jsonl, run.json and session/. Item text and keys stay local; mails carry counts and shas only.
@@ -34,6 +37,7 @@ const { spawn, execFileSync } = require('node:child_process');
 const R = require('./run.cjs');
 const G = require('./labeller-guard.cjs');
 const { childEnv } = require('./answerer.cjs');
+const CX = require('./labeller-codex.cjs');
 
 const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
 const BATCH_TIMEOUT_MS = 90 * 60_000;
@@ -42,7 +46,7 @@ const TOOLS = ['Bash', 'Glob', 'Grep', 'Read', 'Write'];
 const FORBIDDEN = /(^|\/)(memory|claims[^/]*|sealed[^/]*|elig[^/]*|key-[^/]*|[^/]*\.sqlite[^/]*|memory\.md|[^/]*ledger[^/]*)(\/|$)/i;
 
 function parseArgs(argv) {
-  const o = { keep: false, model: 'claude-opus-5-5', docs: [] };
+  const o = { keep: false, docs: [], provider: 'claude' };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--keep') o.keep = true;
@@ -52,12 +56,22 @@ function parseArgs(argv) {
       if (!m) throw new Error('--doc takes <file>=<name.md>');
       o.docs.push({ from: m[1], name: m[2] });
     }
-    else if (/^--(snapshot|addendum|labeller|group|xcheck|batch|instructions|guide|pilot|prompt|key|out|model|claude)$/.test(a)) o[a.slice(2)] = argv[++i];
+    else if (/^--(snapshot|addendum|labeller|group|xcheck|batch|instructions|guide|pilot|prompt|key|out|model|claude|provider|codex)$/.test(a)) o[a.slice(2)] = argv[++i];
+    else if (a === '--codex-auth') o.codexAuth = argv[++i];
     else throw new Error(`unknown argument ${a}`);
   }
   for (const k of ['snapshot', 'addendum', 'labeller', 'group', 'xcheck', 'batch', 'instructions', 'guide', 'pilot', 'prompt', 'key', 'out']) if (!o[k]) throw new Error(`--${k} is required`);
   if (!/^[a-z][a-z0-9-]*$/.test(o.labeller)) throw new Error('bad --labeller');
   if (!/^[FD]$/.test(o.group)) throw new Error('--group is F or D');
+  if (o.provider === 'codex') {
+    // The codex default model unless --model names one.
+    o.codex = o.codex || CX.codexExe();
+    o.codexAuth = o.codexAuth || CX.realAuthFile();
+    o.model = o.model || null;
+    return o;
+  }
+  if (o.provider !== 'claude') throw new Error('--provider is claude or codex');
+  o.model = o.model || 'claude-opus-5-5';
   o.claude = o.claude || claudeExe();
   return o;
 }
@@ -250,7 +264,7 @@ async function main(argv) {
   const run = {
     card: 'CLAIMS-90', mode: 'labeller', labeller: o.labeller, group: o.group, batch: batchName, startedAt,
     snapshot: path.basename(snap), manifestSha256: v.manifestSha256, addendumSha256: ad.addendumSha256, model: o.model,
-    claudeExeSha256: sha256(fs.readFileSync(o.claude)),
+    ...(o.provider === 'codex' ? { provider: 'codex', providerExeSha256: sha256(fs.readFileSync(o.codex)) } : { claudeExeSha256: sha256(fs.readFileSync(o.claude)) }),
     shas: Object.fromEntries(['batch', 'instructions', 'guide', 'pilot', 'xcheck', 'prompt'].map((k) => [k, sha256(fs.readFileSync(o[k]))])),
     docShas: Object.fromEntries(o.docs.map((d) => [d.name, sha256(fs.readFileSync(d.from))])),
     code: { head: R.git(path.resolve(__dirname, '..', '..'), ['rev-parse', 'HEAD']), dirty: R.git(path.resolve(__dirname, '..', '..'), ['status', '--porcelain', '--', 'test/claims-90']) || '' },
@@ -279,6 +293,25 @@ async function main(argv) {
     fs.writeFileSync(settingsFile, JSON.stringify(settingsFor(jail, openLog, keyFile), null, 1));
     const fill = { labeller: o.labeller, group: o.group, batchName, today: v.manifest.takenFrom, jail: jail.replace(/\\/g, '/'), keyFile: keyFile.replace(/\\/g, '/'), ownIds: own.map((r) => r.itemId).join(', ') };
     const prompt = fs.readFileSync(o.prompt, 'utf8').replace(/\{(labeller|group|batchName|today|jail|keyFile|ownIds)\}/g, (_, k) => fill[k]);
+    if (o.provider === 'codex') {
+      const s = await CX.codexSession({ exe: o.codex, model: o.model, jail, scratch, runDir, keyFile, openLog, jailFiles, prompt: prompt + CX.CODEX_NOTE.replace('{keyFile}', fill.keyFile), baseEnv: jailEnv(jail, scratch), authFile: o.codexAuth, timeoutMs: BATCH_TIMEOUT_MS });
+      const key = checkKey(fs.existsSync(keyFile) ? fs.readFileSync(keyFile, 'utf8') : '', own);
+      const a = s.audit;
+      const tokens = CX.codexTokens(a?.usage);
+      Object.assign(run, {
+        exit: s.exit, ms: s.ms, stderrTail: s.stderrTail, leftovers: s.leftovers, calls: a?.calls.length ?? 0, outside: a?.outside ?? 0, logRows: readJsonl(openLog).length,
+        codex: { envLeaks: s.envLeaks, projectLayer: s.projectLayer, homeBefore: s.homeBefore, homeRemoved: s.homeRemoved, authAbsentAfter: s.authAbsentAfter, authAtCommand: s.authAtCommand, authRefreshed: s.authRefreshed, authWrittenBack: s.authWrittenBack, credentialHits: s.credentialHits, jailChanged: s.jailChanged, otherItems: a?.otherItems ?? null },
+        byTool: { shell: a?.calls.length ?? 0 }, keyed: key.keyed, missing: key.missing, keyBatchSha256: null, costUsd: null, usage: a?.usage ?? null, tokens,
+      });
+      const reason = CX.codexReason(s, key, own);
+      if (reason) return finish('INVALID', { reason });
+      const cost = { itemId: 'COST', labeller: o.labeller, batches: batchName.replace(/^batch-/, ''), tokensStart: 0, tokensEnd: tokens, tokensF: null, tokensD: null, tokensSplitUnmeasured: true, costUsd: null, startedAt, endedAt: new Date().toISOString() };
+      const lines = [...key.rows, cost].map((r) => JSON.stringify(r)).join('\n') + '\n';
+      fs.writeFileSync(path.join(runDir, 'key-batch.jsonl'), lines);
+      run.keyBatchSha256 = sha256(lines);
+      fs.appendFileSync(keyOut, lines);
+      return finish('VALID', { keySha256: sha256(fs.readFileSync(keyOut)) });
+    }
     const transcript = path.join(runDir, 'transcript.jsonl');
     const args = ['-p', '--model', o.model, '--output-format', 'stream-json', '--verbose', '--settings', settingsFile, '--setting-sources', 'project,local',
       '--strict-mcp-config', '--disable-slash-commands', '--no-session-persistence', '--tools', TOOLS.join(','), '--permission-mode', 'default'];
