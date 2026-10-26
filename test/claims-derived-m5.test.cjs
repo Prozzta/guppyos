@@ -987,17 +987,21 @@ test('merge class (god 0b71e3): every INT target form git history uses, both sub
     { commit: H('6'), time: 150, message: "Merge commit 'c3c3c3c' into guppy/int-9.2.1" },
     { commit: H('7'), time: 160, message: 'Merge SYN-I step 3 a7a7a7a (pin) into INT 9.2.2 stage 17', parents: [H('x'), H('9')] },
     { commit: H('8'), time: 170, message: 'rc/9.0.7: merge rc-only @b9b9b9b (Jim PASS)' },
+    { commit: H('c'), time: 180, message: 'rc/9.1.2: merge SYN-A @c1c2c3d' },
+    { commit: H('e'), time: 190, message: 'Merge guppy/lone @d1d2d3d into rc/9.1.6' },
   ];
   const facts = await F.mergeFacts(log, ['SYN-A', 'SYN-D', 'SYN-F', 'SYN-I'], g);
   const by = Object.fromEntries(facts.map((f) => [f.key, f.value]));
   assert.deepEqual(by, {
     'branch.lone': 'e1e2e3d into int-9.1.6',
-    'branch.rc-only': 'b9b9b9b into rc-9.0.7',
+    'branch.lone.rc': 'd1d2d3d into rc-9.1.6',
+    'branch.rc-only.rc': 'b9b9b9b into rc-9.0.7',
     'card.syn-a.merge': `${H('a')} into int-9.1.2`,
+    'card.syn-a.merge.rc': 'c1c2c3d into rc-9.1.2',
     'card.syn-d.merge': `${H('d')} into int-9.1.5`,
     'card.syn-f.merge': `${H('f')} into int-9.1.7`,
     'card.syn-i.merge': `${H('9')} into int-9.2.2`,
-  }, 'a free-worded ref or a bare commit names no branch');
+  }, 'a free-worded ref or a bare commit names no branch; a later rc merge leaves the INT merge current (god 234b13)');
 });
 
 // ———————————————————————————————————————————————————— CLAIMS-90 L1/L4 (god 69bc66): the structured value

@@ -56,6 +56,8 @@ const MUTANTS = [
   ['M-m a free-worded ref names a branch', FACTS, 'const named = m.single && ', 'const named = '],
   ['M-o no rc/ target in the Merge form', FACTS, "(?:guppy\\/)?(rc\\/)?(?:int-", "(?:guppy\\/)?()(?:int-"],
   ['M-p no rc/ target in the line form', FACTS, "/^(rc\\/)?(?:int-|int\\s+)?", "/^()(?:int-|int\\s+)?"],
+  ['M-r an rc merge shares the INT key (supersedes it)', FACTS, "const rc = m.int.startsWith('rc-') ? ['rc'] : [];", 'const rc: string[] = [];'],
+  ['M-s an rc branch merge shares the INT branch key', FACTS, "const bKey = ['branch', branch.toLowerCase(), ...rc].join('.');", "const bKey = ['branch', branch.toLowerCase()].join('.');"],
   ['M-q rc is stored as int', FACTS, "int: `${rc ? 'rc' : 'int'}-${v}`", 'int: `int-${v}`'],
   ['M-n the line form takes no @sha', FACTS, 'const sha = (m ? next : TIP_AT_RE.exec(rest))?.[1];', 'const sha = (m ? next : null)?.[1];'],
   ['L1-o donesha has no value agent', FACTS, 'value: commit, valueAgent: from,', 'value: commit,'],

@@ -358,7 +358,8 @@ export async function gitHistoryFacts(log: ReadonlyArray<{ commit: string; time:
  * `Merge [branch |remote-tracking branch |commit ][guppy ]<ref> [words] into <target> [words]` and
  * `<target>[ stage <n>]: merge <ref> [words]`. The target is `int-<v>`, `int/release-<v>`, `INT <v>` or a
  * bare version, after an optional `origin/` and `guppy/`; every form is normalised to int-<v>. A merge into
- * `rc/<v>` keeps its own target, rc-<v>, never int (god d77de8). The tip is
+ * `rc/<v>` keeps its own target, rc-<v>, never int (god d77de8), under its own key (the INT key + `.rc`), so a
+ * later rc merge never supersedes the INT merge (god 234b13). The tip is
  * the sha right after the ref (`@<sha>`, `@ <sha>`, `(<sha>`, `<sha>`; in the line form the first `@<sha>`),
  * else the merge's second parent. `single` says the ref stands alone (no free words before the tip), so
  * it can name a branch. Other targets (main, feature, release-, integration/, v0.x, prose and versionless lines)
@@ -398,7 +399,10 @@ export async function mergeFacts(log: ReadonlyArray<{ commit: string; time: numb
     const card = known.get(branch.toLowerCase()) ?? null;
     // a free-worded ref ("build leftovers username") or a bare commit names no branch
     const named = m.single && !/^[0-9a-f]{7,40}$/i.test(branch);
-    const key = card ? cardKey(card, 'merge') : named && keyOk(`branch.${branch.toLowerCase()}`) ? `branch.${branch.toLowerCase()}` : null;
+    // an rc merge is its own fact (god 234b13): key + `.rc`, so it never supersedes the INT merge
+    const rc = m.int.startsWith('rc-') ? ['rc'] : [];
+    const bKey = ['branch', branch.toLowerCase(), ...rc].join('.');
+    const key = card ? cardKey(card, 'merge', ...rc) : named && keyOk(bKey) ? bKey : null;
     if (!key) continue;
     const prior = newest.get(key);
     if (prior && (prior.time > c.time || (prior.time === c.time && prior.commit > c.commit))) continue;
