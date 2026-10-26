@@ -40,7 +40,9 @@ const TESTS = ['test/claims90-m1-compact.test.cjs', 'test/native-memory.test.cjs
   // CLAIMS-90 R2 (C90-GET): the lookup, the search modes and the cross-path test.
   'test/claims90-get.test.cjs', 'test/claims90-search-modes.test.cjs', 'test/claims90-get-paths.test.cjs', 'test/hook-broker-p3.test.cjs',
   // CLAIMS-90 R2 step 2: the pointer footer, the rank fuzz and the T3 pool.
-  'test/claims90-step2-rank-pool.test.cjs'];
+  'test/claims90-step2-rank-pool.test.cjs',
+  // CLAIMS-90 step 3 fix L2-L5 / R4: the lead block prints structured values (merge: tip AND INT target).
+  'test/claims90-step3-lead.test.cjs'];
 const GET = 'src/main/claims/get.ts';
 const HOOKS = 'src/main/hooks.ts';
 const FORMAT = 'src/main/nativeMemory/format.ts';
@@ -134,6 +136,8 @@ const MUTANTS = [
   ['AD exact: file lines compared raw', ENGINE, 'if (!stripMarkup(lines[i].toLowerCase()).includes(needle)) continue;', 'if (!lines[i].toLowerCase().includes(needle)) continue;'],
   ['AE ruling 3: a branch name never resolves to its card', GET, '    if (taskIds.has(name) || hasKey(cardK)) base = ix.byKey.has(mergeK) ? mergeK : cardK;', '    if (false) base = cardK;'],
   ['AF ruling 3: the merge sub-key is not a field (bare card takes it)', GET, 'fixversion|merge|decision', 'fixversion|decision'],
+  ['AG R4 merge: a merge value without its INT target is flagged, never printed as a bare tip', GET, " ? `${l.value} into ? (not structured yet)` : ", " ? `${l.value}` : "],
+  ['AH R4 merge: one line per live merge claim, newest first', GET, '  rows.sort((x, y) => y.ms - x.ms || cmp(x.c.id, y.c.id));', '  rows.sort((x, y) => x.ms - y.ms || cmp(x.c.id, y.c.id));'],
   ['W T5: equal-time mails have no link-strength tiebreak', GET, '.sort((a, b) => b.ms - a.ms || linkRank(b.m.cardFrom) - linkRank(a.m.cardFrom));', '.sort((a, b) => b.ms - a.ms);'],
 ];
 

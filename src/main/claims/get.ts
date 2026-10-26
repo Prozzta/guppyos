@@ -87,6 +87,8 @@ export interface GetResult {
 export const CARD_FIELDS = ['donesha', 'lastsha', 'status', 'assignee', 'fixVersion', 'merge', 'audit'] as const;
 /** L3: the fields whose derived claims are one per (card, sender): the lead prints one line per agent. */
 export const PER_AGENT_FIELDS: readonly string[] = ['donesha'];
+/** R4 (god 4268df): a card may have one merge per INT line: one lead line per live structured merge claim, newest first. */
+export const MULTI_FIELDS: readonly string[] = ['merge'];
 /** L4: the release.<v> lead lines, in print order (release.<v>.tag, release.<v>.bump: Creed's L1 keys). */
 export const RELEASE_FIELDS = ['tag', 'bump'] as const;
 const RELEASE_KEY = /^release\.\d+(?:\.\d+)+$/;
@@ -108,7 +110,8 @@ export const GET_MAX_CHARS = 1400;
 export const GET_LINE_MAX = 158;
 /** A lead value on its `field: value` line; the search brief (R2) shows less. */
 const LEAD_VALUE_MAX = 120;
-const BRIEF_VALUE_MAX = 48;
+/** R4 (Jim cd199c): a merge value is `<tip> into <int line>`; the brief prints it whole (the compact budget drops whole fields, not chars). */
+const BRIEF_VALUE_MAX = 80;
 
 export const MAIL_DEFAULT = 5;
 export const MAIL_MAX = 50;
@@ -481,6 +484,7 @@ function resolveIn(ix: Indexed, term: string, opts: GetOptions, d: GetDeps, with
     for (const f of CARD_FIELDS) {
       const key = `${CARD_PREFIX}${card}.${f.toLowerCase()}`;
       if (PER_AGENT_FIELDS.includes(f)) { lead.push(...perAgentLines(ix, key, f, sub, d)); continue; }
+      if (MULTI_FIELDS.includes(f)) { lead.push(...multiLines(ix, key, f, sub, d, fields?.[f])); continue; }
       lead.push(fieldLine(ix, f, key, resolveIn(ix, key, sub, d, false).current, fields?.[f]));
     }
   } else if (withLead && !card && RELEASE_KEY.test(base)) {
@@ -516,6 +520,19 @@ function fieldLine(ix: Indexed, field: string, key: string, c: GetCurrent | null
   }
   if (tv !== undefined && tv !== null && tv !== '') return { field, key, value: String(tv), source: 'tasks' };
   return { field, key, value: null, source: 'none' };
+}
+
+/** R4 (god 4268df): a multi-valued field (merge: one derived claim per INT line the card went into): one line per live
+ *  claim with a structured value, newest first; with none, the single-field fallback (unstructured / none). */
+function multiLines(ix: Indexed, key: string, field: string, sub: GetOptions, d: GetDeps, tv: unknown): GetFieldLine[] {
+  const rows: Array<{ c: ClaimRec; ms: number }> = [];
+  for (const id of ix.byKey.get(key) ?? []) {
+    const c = ix.claims.get(id);
+    if (c && ix.status.get(id) === 'live' && typeof c.value === 'string') rows.push({ c, ms: epochMs(c.at) || 0 });
+  }
+  if (!rows.length) return [fieldLine(ix, field, key, resolveIn(ix, key, sub, d, false).current, tv)];
+  rows.sort((x, y) => y.ms - x.ms || cmp(x.c.id, y.c.id));
+  return rows.map(({ c }) => ({ field, key, value: c.value ?? null, source: 'claim', id: c.id, agent: c.valueAgent ?? c.agent, at: c.at }));
 }
 
 /** L3: a per-agent field (one derived claim per card and sender, `valueAgent` the sender): `field (latest): value by
@@ -554,7 +571,13 @@ export function leadValue(text: string, max: number): string {
  *  the decision count. */
 export function leadBrief(r: GetResult): string[] {
   if (!r.lead) return [];
-  const out = r.lead.filter((l) => l.value !== null && (!l.by || l.latest)).map((l) => `${l.field}: ${leadValue(l.value ?? '', BRIEF_VALUE_MAX)}`);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const l of r.lead) {
+    if (l.value === null || seen.has(l.field)) continue;
+    seen.add(l.field);
+    out.push(`${l.field}: ${leadValue(renderValue(l), BRIEF_VALUE_MAX)}`);
+  }
   if (r.decisions.length) out.push(`decisions: ${r.decisions.length}`);
   return out;
 }
@@ -564,10 +587,13 @@ const kv = (key: string, text: string): string => (key ? `${key}: ${text.replace
 
 const clipLine = (s: string): string => (s.length <= GET_LINE_MAX ? s : `${s.slice(0, GET_LINE_MAX - 1)}…`);
 /** L2 / L5: `label: value`, one value per line, no source on it (the sources line carries the ids). */
+/** R4 (god 4268df): a merge value names the tip AND the INT line (`<tip> into int-X.Y.Z`); one stored without its
+ *  target prints the tip plus `into ? (not structured yet)`. Every other value prints as stored. */
+const renderValue = (l: GetFieldLine): string => (l.field === 'merge' && l.value !== null && !/ into /.test(l.value) ? `${l.value} into ? (not structured yet)` : (l.value ?? ''));
 const leadLabel = (l: GetFieldLine): string => (l.latest ? `${l.field} (latest)` : l.by ? `${l.field} (${l.by})` : l.field);
 const leadLine = (l: GetFieldLine): string => {
   if (l.value === null) return l.source === 'none' ? `${leadLabel(l)}: none` : `${leadLabel(l)}: not structured yet`;
-  return `${leadLabel(l)}: ${leadValue(l.value, LEAD_VALUE_MAX)}${l.latest && l.by ? ` by ${l.by}` : ''}`;
+  return `${leadLabel(l)}: ${leadValue(renderValue(l), LEAD_VALUE_MAX)}${l.latest && l.by ? ` by ${l.by}` : ''}`;
 };
 /** L5: the lead's sources on one `sources:` line after it, each id written sha-proof (safeId), tasks.json by name.
  *  A long list wraps onto indented continuation lines (no label, no clipping: every id stays whole). */

@@ -117,8 +117,34 @@ test('L2 + L3 lead: a bare card leads with `field: <value>` from the STRUCTURED 
   d.ledgers.derived.push(c('c-aaaaaaaaaab5', 'derived', 'card.foo-7.donesha', '2026-10-10T10:00:00.000Z', `Card FOO-7: the newest done mail from gamma-3 (m9) names commit abcdef0 (${SHA_T})`, { value: SHA_T, valueAgent: 'gamma-3' }));
   const M = lines(text('FOO-7', {}, d));
   assert.deepEqual(M.slice(1, 5), [`donesha (latest): ${SHA_T} by gamma-3`, `donesha (gamma-3): ${SHA_T}`, `donesha (beta-2): ${SHA_B}`, `donesha (alpha-1): ${SHA_A}`], 'MUTANT: oldest first, or one agent dropped');
-  assert.equal(M[9], `merge: ${SHA_T}`);
+  assert.equal(M[9], `merge: ${SHA_T} into ? (not structured yet)`, 'R4: a merge value without its INT target is flagged');
   assert.equal(get('FOO-7', {}, d).lead.length, 10);
+});
+
+test('R4 merge (Jim cd199c, god 4268df): a merge value names the tip AND the INT line; one lead line per live merge claim, newest first; a value without its target says `into ? (not structured yet)`; the brief carries the newest whole', () => {
+  const d = deps();
+  d.ledgers.derived.push(c('c-aaaaaaaaaab6', 'derived', 'card.foo-7.merge', '2026-10-09T10:00:00.000Z', `guppy/foo-7 merged into int-1.1.103 as ${SHA_T}`, { value: `${SHA_T} into int-1.1.103` }));
+  d.ledgers.derived.push(c('c-aaaaaaaaaab7', 'derived', 'card.foo-7.merge', '2026-10-07T10:00:00.000Z', `guppy/foo-7 merged into int-1.1.102 as ${SHA_B}`, { value: `${SHA_B} into int-1.1.102` }));
+  const L = lines(text('FOO-7', {}, d));
+  assert.equal(L[8], `merge: ${SHA_T} into int-1.1.103`, 'MUTANT: the target clipped off, or the tip alone');
+  assert.equal(L[9], `merge: ${SHA_B} into int-1.1.102`, 'MUTANT: oldest first, or one merge dropped');
+  assert.equal(L[10], `audit: PASS ${SHA_T}`);
+  assert.ok(L[8].length <= G.GET_LINE_MAX);
+  assert.deepEqual(G.MULTI_FIELDS, ['merge']);
+  const r = get('FOO-7', {}, d);
+  assert.equal(r.lead.length, 10); assert.deepEqual(r.lead.filter((l) => l.field === 'merge').map((l) => l.id), ['c-aaaaaaaaaab6', 'c-aaaaaaaaaab7']);
+  const si = L.findIndex((l) => l.startsWith('sources:')); let S = L[si];
+  for (let i = si + 1; i < L.length && L[i].startsWith('  '); i++) S += ` ${L[i].trim()}`;
+  assert.match(S, /merge c_aaaaaaaaaab6;.*merge c_aaaaaaaaaab7/, 'the sources line names every merge claim, newest first');
+  const brief = G.leadBrief(r);
+  assert.ok(brief.includes(`merge: ${SHA_T} into int-1.1.103`), 'the brief carries both points too');
+  assert.equal(brief.filter((b) => b.startsWith('merge: ')).length, 1, 'the brief: the newest merge only');
+  assert.equal(G.leadBrief(get('card.foo-7.merge', {}, d)).length, 0);
+  const bare = deps();
+  bare.ledgers.derived.push(c('c-aaaaaaaaaab8', 'derived', 'card.foo-7.merge', '2026-10-09T10:00:00.000Z', `guppy/foo-7 merged as ${SHA_T}`, { value: SHA_T }));
+  assert.equal(lines(text('FOO-7', {}, bare))[8], `merge: ${SHA_T} into ? (not structured yet)`, 'MUTANT: a tip alone passes as a merge');
+  assert.ok(G.leadBrief(get('FOO-7', {}, bare)).includes(`merge: ${SHA_T} into ? (not structured yet)`));
+  assert.equal(lines(text('release.1.1.98'))[2], `bump: ${SHA_B}`, 'only a merge value asks for a target');
 });
 
 test('L3 --agent: the asked agent\'s own donesha line (and latest), nothing of the others; an agent without one says none; the mail rule\'s newer done mail joins as its sender\'s value', () => {
