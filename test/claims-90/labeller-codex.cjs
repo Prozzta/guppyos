@@ -1,34 +1,41 @@
 'use strict';
 /**
- * CLAIMS-90 T6 (god 495956, Jim 475eab): the labeller jail run by Codex instead of Claude Code, so the third read of
- * the H1 key comes from another model family under the same audit. labeller.cjs --provider codex calls this module.
+ * CLAIMS-90 T6 (god 495956 and cfacba, Jim 475eab and f7d551): the labeller jail run by Codex instead of Claude Code,
+ * so the third read of the H1 key comes from another model family under the same audit. labeller.cjs --provider codex
+ * calls this module. Reads outside the jail are PREVENTED before they run, not only detected:
  *
- *   codex exec --json --ephemeral --ignore-user-config --ignore-rules -s read-only, cwd = the mkdtemp jail.
+ *   codex exec --json --ephemeral --ignore-user-config --ignore-rules, cwd = the mkdtemp jail, with a permission
+ *   profile that makes only :minimal and the jail readable. The unelevated Windows sandbox cannot enforce split read
+ *   rules, so it refuses EVERY shell command before CreateProcess (fail-closed); the shell tools are off as well, and
+ *   so is every other tool that has a feature flag (images, browser, computer use, apps, plugins, agents...). There are
+ *   no execpolicy allow rules: an allow rule skips the sandbox (probe: a Get-Content prefix rule read an outside decoy).
+ *   The session reads only through the runner's MCP server (labeller-jail-mcp.cjs), which checks every path argument
+ *   before it reads and logs every call; its log is the open log. A refused call never ran and makes the batch INVALID.
+ *   Code mode stays on: turning off its host turns off every tool (probe), and its JS has no file or network API.
  *   CODEX_HOME is a fresh folder beside the jail (codex refuses helpers under %TEMP%) holding ONLY a copy of the
- *   Codex login. Codex reads it at start; the copy is deleted when codex prints thread.started, which is before any
- *   model reply and so before any command (the unelevated sandbox limits writes, not reads, so an ACL cannot hide
- *   it). A login codex refreshes mid-run is caught, deleted again and written back to the real file (only when that
- *   file is unchanged since the copy), so the Human's login stays valid. The folder is deleted after every run.
+ *   Codex login. Codex reads it at start; the copy is deleted when codex prints thread.started, before any model
+ *   reply. A login codex writes later is deleted too and is NEVER written back (Jim 49a485): the batch is INVALID and
+ *   says so. A change to the real login during the run is recorded, never touched. The folder is deleted after every run.
  *   The env is the answerer allow-list with no HIVE_*, AGENT_*, MEMORY_*, MUTANT_* (etc.) key and no hive or Guppy
  *   PATH dir; a leak is INVALID before launch.
- *   The read-only sandbox lets no command write and has no network; the model alone talks to the provider. The session
- *   cannot write key.jsonl itself: its final message (codex -o) holds the key lines and the runner writes them.
- *   Every event is audited: a shell command naming a path outside the jail (or reaching one through env, drives or
- *   parent navigation) goes into the open log as outside; any item other than a message, reasoning, a plan or a shell
- *   command is INVALID. A credential value in any output is redacted and INVALID.
+ *   The session cannot write: its final message (codex -o) holds the key lines and the runner writes key.jsonl.
+ *   Any event item other than a message, reasoning, a plan or a call to the jail MCP server is INVALID. A credential
+ *   value in any output is redacted and INVALID.
  */
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
-const G = require('./labeller-guard.cjs');
+const MCP = require('./labeller-jail-mcp.cjs');
 
 const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
-const ITEM_TYPES = new Set(['agent_message', 'reasoning', 'todo_list', 'command_execution']);
+const ITEM_TYPES = new Set(['agent_message', 'reasoning', 'todo_list', 'mcp_tool_call']);
 const LEAK_KEY = /^(HIVE|AGENT|MEMORY|MUTANT|MUNDER|GUPPY|CLAUDE|ANTHROPIC|OPENAI|CODEX(?!_HOME$))/i;
 const HIVE_DIR = /[\\/](Dunder[\\/]+hive|Munder Difflin)([\\/]|$)/i;
-const CODEX_NOTE = '\n\nThis session runs in a read-only sandbox and cannot write files. Do not try to create {keyFile}. End with a final message that holds exactly the lines that file must contain, one JSON object per line, and nothing else.\n';
+// Every tool feature that is on by default in codex-cli 0.157.1 except code_mode_host (off = no tools at all).
+const FEATURES_OFF = ['shell_tool', 'unified_exec', 'view_image', 'image_generation', 'browser_use', 'browser_use_external', 'browser_use_full_cdp_access', 'in_app_browser', 'computer_use', 'in_app_local_automation', 'apps', 'plugins', 'remote_plugin', 'multi_agent', 'skill_search', 'tool_suggest', 'goals', 'hooks', 'workspace_dependencies', 'skill_mcp_dependency_install', 'sleep_tool'];
+const CODEX_NOTE = '\n\nThis session reads files only through the jail tools (list_files, read_file, search, git); paths are relative to the working folder. It cannot run shell commands or write files. Do not try to create {keyFile}. End with a final message that holds exactly the lines that file must contain, one JSON object per line, and nothing else.\n';
 
 function codexExe() {
   for (const dir of (process.env.PATH || '').split(path.delimiter)) {
@@ -74,50 +81,32 @@ function redact(text, secrets) {
   return { text: t, found };
 }
 
-/** The script a codex shell item runs: the -Command argument of its PowerShell launch, else the whole string. */
-function shellScript(command) {
-  const c = String(command ?? '');
-  const m = /^\s*(?:"[^"]*powershell(?:\.exe)?"|\S*powershell(?:\.exe)?)\s+(?:-NoProfile\s+)?-Command\s+([\s\S]*)$/i.exec(c);
-  if (!m) return c;
-  const s = m[1].trim();
-  if (s.length >= 2 && s[0] === "'" && s.endsWith("'")) return s.slice(1, -1).replace(/''/g, "'");
-  if (s.length >= 2 && s[0] === '"' && s.endsWith('"')) return s.slice(1, -1).replace(/\\"/g, '"');
-  return s;
+/** The codex exec arguments: no shell, no allow rules, the jail-only read profile and the jail MCP server. */
+function codexArgs({ jail, lastMsg, model, mcpLog }) {
+  const fwd = (p) => p.replace(/\\/g, '/');
+  // codex splits a -c key on '.' and keeps quotes in it (a quoted ":minimal" is refused as a relative path), so the
+  // filesystem keys go unquoted, and a jail path holding '.' or '=' is refused rather than keyed wrongly.
+  if (/[.="]/.test(fwd(jail))) throw new Error('the jail path holds ".", "=" or a quote: codex cannot key it');
+  return ['exec', '--json', '--ephemeral', '--skip-git-repo-check', '--ignore-user-config', '--ignore-rules', '--color', 'never',
+    '-c', 'approval_policy="never"', '-c', 'windows.sandbox="unelevated"', '-c', 'web_search="disabled"', '-c', 'project_doc_max_bytes=0',
+    '-c', 'default_permissions="labeller"', '-c', 'permissions.labeller.filesystem.:minimal="read"', '-c', `permissions.labeller.filesystem.${fwd(jail)}="read"`,
+    ...FEATURES_OFF.flatMap((f) => ['-c', `features.${f}=false`]),
+    '-c', `mcp_servers.jail.command=${JSON.stringify(fwd(process.execPath))}`,
+    '-c', `mcp_servers.jail.args=${JSON.stringify([fwd(path.join(__dirname, 'labeller-jail-mcp.cjs')), fwd(jail), fwd(mcpLog)])}`,
+    ...MCP.TOOLS.flatMap((t) => ['-c', `mcp_servers.jail.tools.${t.name}.approval_mode="approve"`]),
+    '-C', jail, '-o', lastMsg, ...(model ? ['-m', model] : []), '-'];
 }
 
-// Ways to reach outside the jail without naming a path: env, provider drives, the home and parent navigation.
-const REACH = /\$env:|\$\{env:|(^|[^\w-])env:|\$HOME\b|\$PSHOME\b|\$PROFILE\b|\[(System\.)?Environment\]|%[A-Za-z_][A-Za-z0-9_]*%|\b(HKLM|HKCU|HKCR|HKU|HKCC|Registry|Cert|Variable|Function|Alias|WSMan):|GetParent|\.Parent\b|Get-PSDrive|GetLogicalDrives|DriveInfo|SpecialFolder|GetFolderPath|GetTempPath|-EncodedCommand|\b(iex|Invoke-Expression|Start-Process|cmd(\.exe)?\s+\/c)\b/i;
-
-/** Judge one shell script: place 'outside' with the first offending path, else 'jail'. */
-function judgeShell(script, jail) {
-  const s = String(script ?? '');
-  const reach = REACH.exec(s);
-  if (reach) return { place: 'outside', path: reach[0].trim(), reason: 'reaches outside the jail without a path' };
-  if (/(^|[\\/\s'"=(,])\.\.([\\/\s'"),;]|$)/.test(s)) return { place: 'outside', path: '..', reason: 'a path outside the jail' };
-  if (/(^|[\s'"=(,])~([\\/\s'"),;]|$)/.test(s)) return { place: 'outside', path: '~', reason: 'a path outside the jail' };
-  if (/(^|[\s'"=(,])\\\\/.test(s)) return { place: 'outside', path: '\\\\', reason: 'a UNC or device path' };
-  for (const m of s.matchAll(/(?<![A-Za-z0-9_])([A-Za-z]:(?:[\\/][^\s'"`;|,)]*)?)/g)) {
-    const p = m[1];
-    if (!/[\\/]/.test(p)) return { place: 'outside', path: p, reason: 'a drive outside the jail' };
-    if (G.where(p, jail) === 'outside') return { place: 'outside', path: p, reason: 'a path outside the jail' };
-  }
-  for (const m of s.matchAll(/(?:^|[\s'"=(,])([\\/](?:[A-Za-z0-9_.$-][^\s'"`;|,)]*)?)(?=$|[\s'"`;|,)])/g)) return { place: 'outside', path: m[1], reason: 'a rooted path' };
-  return { place: 'jail', path: null, reason: '' };
-}
-
-/** What the session did, from the codex JSON events. */
-function auditEvents(text, jail) {
+/** What the session did, from the codex JSON events (tool calls as codex saw them; the reads come from the MCP log). */
+function auditEvents(text) {
   const rows = String(text ?? '').split('\n').filter((l) => l.trim()).flatMap((l) => { try { return [JSON.parse(l)]; } catch { return [{ type: 'unparsed' }]; } });
-  const calls = [];
+  const tools = [];
   const other = [];
   for (const r of rows) {
     if (r.type !== 'item.completed' && r.type !== 'item.started') continue;
     const it = r.item || {};
-    if (!ITEM_TYPES.has(it.type)) { other.push(String(it.type ?? 'unknown')); continue; }
-    if (it.type === 'command_execution' && r.type === 'item.completed') {
-      const script = shellScript(it.command);
-      calls.push({ id: it.id ?? null, tool: 'shell', command: script, exitCode: it.exit_code ?? null, ...judgeShell(script, jail) });
-    }
+    if (!ITEM_TYPES.has(it.type) || (it.type === 'mcp_tool_call' && it.server !== 'jail')) { other.push(it.type === 'mcp_tool_call' ? `mcp:${it.server}` : String(it.type ?? 'unknown')); continue; }
+    if (it.type === 'mcp_tool_call' && r.type === 'item.completed') tools.push({ id: it.id ?? null, tool: it.tool, status: it.status });
   }
   const completed = rows.filter((r) => r.type === 'turn.completed');
   const usage = completed.length ? completed.reduce((u, r) => {
@@ -125,8 +114,7 @@ function auditEvents(text, jail) {
     return u;
   }, {}) : null;
   return {
-    calls,
-    outside: calls.filter((c) => c.place === 'outside').length,
+    tools,
     otherItems: [...new Set(other)],
     failed: rows.filter((r) => /^(turn\.failed|error)$/.test(r.type)).length,
     unparsed: rows.filter((r) => r.type === 'unparsed').length,
@@ -134,6 +122,16 @@ function auditEvents(text, jail) {
     threadStarted: rows.some((r) => r.type === 'thread.started'),
     usage,
   };
+}
+
+/** The MCP server's call log as open-log rows: a refused call is 'outside' and was never run. */
+function readsFromLog(text) {
+  return String(text ?? '').split('\n').filter((l) => l.trim()).map((l) => {
+    let j; try { j = JSON.parse(l); } catch { return { tool: 'unparsed', path: null, place: 'outside', decision: 'deny', reason: 'an unreadable MCP log row' }; }
+    const a = j.args || {};
+    const target = a.path ?? a.glob ?? (Array.isArray(a.args) ? a.args.join(' ') : null);
+    return { at: j.at, tool: `mcp:${j.tool}`, path: target, pattern: a.pattern ?? null, place: j.decision === 'allow' ? 'jail' : 'outside', decision: j.decision === 'allow' ? 'allow' : 'deny', reason: j.reason || '' };
+  });
 }
 
 /** The key lines from the final message: one code fence around them is dropped. */
@@ -168,7 +166,7 @@ function codexLeftovers(realHome, jail, sinceMs) {
 
 /**
  * One codex session in the jail. Returns what the verdict needs; never leaves CODEX_HOME or the login copy behind.
- * opts: { exe, model, jail, scratch, runDir, prompt, keyFile, baseEnv, authFile, realHome, timeoutMs, openLog }.
+ * opts: { exe, model, jail, scratch, runDir, prompt, keyFile, baseEnv, authFile, realHome, timeoutMs, openLog, jailFiles }.
  */
 async function codexSession(opts) {
   const { exe, model, jail, scratch, runDir, keyFile, baseEnv, authFile, openLog, jailFiles } = opts;
@@ -177,17 +175,19 @@ async function codexSession(opts) {
   const homeAuth = path.join(home, 'auth.json');
   const lastMsg = path.join(scratch, 'last-message.txt');
   const events = path.join(runDir, 'events.jsonl');
-  const res = { exit: null, ms: 0, envLeaks: [], projectLayer: [], homeBefore: [], authAtCommand: 0, authRefreshed: 0, authWrittenBack: false, credentialHits: 0, homeRemoved: false, authAbsentAfter: false, leftovers: [], jailChanged: false, audit: null, stderrTail: '' };
+  const mcpLog = path.join(runDir, 'mcp-log.jsonl');
+  const res = { exit: null, ms: 0, envLeaks: [], projectLayer: [], homeBefore: [], authAtCall: 0, authRefreshed: 0, authWrittenBack: false, realAuthChanged: false, credentialHits: 0, homeRemoved: false, authAbsentAfter: false, leftovers: [], jailChanged: false, audit: null, reads: [], refused: 0, stderrTail: '' };
   const original = fs.readFileSync(authFile);
   let secrets = authSecrets(original);
-  let latest = null;
   const takeAuth = () => {
     if (!fs.existsSync(homeAuth)) return false;
     const b = fs.readFileSync(homeAuth);
-    if (!b.equals(original)) { latest = b; secrets = [...new Set([...secrets, ...authSecrets(b)])]; }
+    if (!b.equals(original)) secrets = [...new Set([...secrets, ...authSecrets(b)])];
     fs.rmSync(homeAuth, { force: true });
     return true;
   };
+  // Built before the login copy: a jail path codex cannot key throws with nothing to clean up.
+  const args = codexArgs({ jail, lastMsg, model, mcpLog });
   try {
     fs.copyFileSync(authFile, homeAuth);
     res.homeBefore = fs.readdirSync(home).sort();
@@ -198,8 +198,7 @@ async function codexSession(opts) {
     res.projectLayer = files.map((x) => x.path).filter((p) => !p.startsWith('repo.git/') && /(^|\/)(\.codex|AGENTS(\.override)?\.md)(\/|$)/i.test(p));
     if (res.envLeaks.length || res.projectLayer.length || res.homeBefore.join() !== 'auth.json') return res;
     const before = JSON.stringify(files);
-    const args = ['exec', '--json', '--ephemeral', '--skip-git-repo-check', '--ignore-user-config', '--ignore-rules', '--color', 'never', '-s', 'read-only',
-      '-c', 'windows.sandbox="unelevated"', '-c', 'web_search="disabled"', '-c', 'project_doc_max_bytes=0', '-C', jail, '-o', lastMsg, ...(model ? ['-m', model] : []), '-'];
+    fs.writeFileSync(mcpLog, '');
     const t0 = Date.now();
     let started = false;
     let out = '';
@@ -214,7 +213,7 @@ async function codexSession(opts) {
           const line = buf.slice(0, i); buf = buf.slice(i + 1);
           let j; try { j = JSON.parse(line); } catch { continue; }
           if (!started && j.type === 'thread.started') { started = true; takeAuth(); continue; }
-          if (j.type === 'item.started' && j.item?.type === 'command_execution' && fs.existsSync(homeAuth)) res.authAtCommand++;
+          if (j.type === 'item.started' && j.item?.type !== 'agent_message' && fs.existsSync(homeAuth)) res.authAtCall++;
           if (started && takeAuth()) res.authRefreshed++;
         }
       });
@@ -226,21 +225,21 @@ async function codexSession(opts) {
     });
     res.ms = Date.now() - t0;
     if (takeAuth() && started) res.authRefreshed++;
-    // Keep the Human's login valid: a refreshed copy goes back, only if the real file is unchanged since the copy.
-    if (latest && fs.readFileSync(authFile).equals(original)) {
-      fs.writeFileSync(`${authFile}.c90-tmp`, latest);
-      fs.renameSync(`${authFile}.c90-tmp`, authFile);
-      res.authWrittenBack = true;
-    }
+    // Never written back (Jim 49a485): the real login is only compared, so the batch can say whether it changed.
+    res.realAuthChanged = !fs.readFileSync(authFile).equals(original);
     const ev = redact(out, secrets);
     const tail = redact(res.stderrTail, secrets);
     const msg = redact(fs.existsSync(lastMsg) ? fs.readFileSync(lastMsg, 'utf8') : '', secrets);
-    res.credentialHits = ev.found + tail.found + msg.found;
+    const log = redact(fs.readFileSync(mcpLog, 'utf8'), secrets);
+    res.credentialHits = ev.found + tail.found + msg.found + log.found;
     res.stderrTail = tail.text;
     fs.writeFileSync(events, ev.text);
-    res.audit = auditEvents(ev.text, jail);
-    // The open log: one row per shell command, judged as the guard judges a call.
-    fs.appendFileSync(openLog, res.audit.calls.map((c) => `${JSON.stringify({ at: new Date().toISOString(), toolUseId: c.id, tool: 'shell', path: c.path, pattern: null, command: c.command, place: c.place, decision: c.place === 'outside' ? 'deny' : 'allow', reason: c.reason })}\n`).join(''));
+    fs.writeFileSync(mcpLog, log.text);
+    res.audit = auditEvents(ev.text);
+    // The open log: one row per MCP call, as the server judged it before reading.
+    res.reads = readsFromLog(log.text);
+    res.refused = res.reads.filter((r) => r.decision === 'deny').length;
+    fs.appendFileSync(openLog, res.reads.map((r) => `${JSON.stringify(r)}\n`).join(''));
     res.jailChanged = JSON.stringify(jailFiles(jail)) !== before;
     if (!res.credentialHits && msg.text.trim()) fs.writeFileSync(keyFile, keyFromMessage(msg.text));
     res.leftovers = codexLeftovers(realHome, jail, t0);
@@ -261,12 +260,12 @@ function codexReason(s, key, own) {
   if (!s.homeRemoved || !s.authAbsentAfter) return 'CODEX_HOME or the login copy was left behind';
   if (s.leftovers.length) return `${s.leftovers.length} codex session file(s) left for this jail (${s.leftovers[0]})`;
   if (s.credentialHits) return `a credential value appeared in the session output (${s.credentialHits}, redacted)`;
-  if (s.authAtCommand) return `the login copy was present while ${s.authAtCommand} command(s) started`;
-  if (s.authRefreshed) return `codex refreshed the login during the session (${s.authWrittenBack ? 'written back' : 'not written back'}); run the batch again`;
+  if (s.authAtCall) return `the login copy was present while ${s.authAtCall} tool call(s) started`;
+  if (s.authRefreshed) return `codex wrote a new login during the session; it was deleted and NOT written back${s.realAuthChanged ? ' (the real login also changed during the run, untouched)' : ''}; run the batch again`;
   const a = s.audit;
   if (!a) return 'the session did not run';
-  if (a.otherItems.length) return `the session used more than shell commands (${a.otherItems.join(', ')})`;
-  if (a.outside) return `a call named a path outside the jail (events ${a.outside})`;
+  if (a.otherItems.length) return `the session used more than the jail tools (${a.otherItems.join(', ')})`;
+  if (s.refused) return `${s.refused} call(s) asked for a path outside the jail and were refused before reading (${s.reads.find((r) => r.decision === 'deny').reason})`;
   if (s.jailChanged) return 'the jail changed during the session';
   if (s.exit !== 0 || !a.turnCompleted || a.failed || a.unparsed) return `session failed (exit ${s.exit})`;
   if (key.problems.length) return `key file: ${key.problems[0]}`;
@@ -276,4 +275,4 @@ function codexReason(s, key, own) {
 
 const codexTokens = (u) => (u ? (u.input_tokens || 0) + (u.output_tokens || 0) : null);
 
-module.exports = { codexExe, realAuthFile, codexEnv, envLeaks, authSecrets, redact, shellScript, judgeShell, auditEvents, keyFromMessage, codexLeftovers, codexSession, codexReason, codexTokens, CODEX_NOTE, ITEM_TYPES, sha256 };
+module.exports = { codexExe, realAuthFile, codexEnv, envLeaks, authSecrets, redact, codexArgs, auditEvents, readsFromLog, keyFromMessage, codexLeftovers, codexSession, codexReason, codexTokens, CODEX_NOTE, ITEM_TYPES, FEATURES_OFF, sha256 };

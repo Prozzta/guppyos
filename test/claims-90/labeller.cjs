@@ -25,7 +25,8 @@
  *        --out <dir> [--doc <file>=<name.md>]... [--model <id>] [--claude <exe>] [--keep]
  *        [--provider claude|codex] [--codex <exe>] [--codex-auth <auth.json>]
  * T6 (god 495956, Jim 475eab): --provider codex runs the same jail with codex exec instead (labeller-codex.cjs);
- * the jail, the key check and the verdict file are the same, the codex events replace the transcript.
+ * the jail, the key check and the verdict file are the same, the codex events replace the transcript, and the jail MCP
+ * server's call log (labeller-jail-mcp.cjs, every path checked before it reads) replaces the guard's open log.
  * The prompt may use {labeller}, {group}, {batchName}, {today}, {jail}, {keyFile} and {ownIds}.
  * Writes under --out/<batchName>-<labeller>/: transcript.jsonl, jail-files.json, open-log.jsonl,
  * key-batch.jsonl, run.json and session/. Item text and keys stay local; mails carry counts and shas only.
@@ -299,9 +300,9 @@ async function main(argv) {
       const a = s.audit;
       const tokens = CX.codexTokens(a?.usage);
       Object.assign(run, {
-        exit: s.exit, ms: s.ms, stderrTail: s.stderrTail, leftovers: s.leftovers, calls: a?.calls.length ?? 0, outside: a?.outside ?? 0, logRows: readJsonl(openLog).length,
-        codex: { envLeaks: s.envLeaks, projectLayer: s.projectLayer, homeBefore: s.homeBefore, homeRemoved: s.homeRemoved, authAbsentAfter: s.authAbsentAfter, authAtCommand: s.authAtCommand, authRefreshed: s.authRefreshed, authWrittenBack: s.authWrittenBack, credentialHits: s.credentialHits, jailChanged: s.jailChanged, otherItems: a?.otherItems ?? null },
-        byTool: { shell: a?.calls.length ?? 0 }, keyed: key.keyed, missing: key.missing, keyBatchSha256: null, costUsd: null, usage: a?.usage ?? null, tokens,
+        exit: s.exit, ms: s.ms, stderrTail: s.stderrTail, leftovers: s.leftovers, calls: s.reads.length, outside: s.refused, logRows: readJsonl(openLog).length,
+        codex: { envLeaks: s.envLeaks, projectLayer: s.projectLayer, homeBefore: s.homeBefore, homeRemoved: s.homeRemoved, authAbsentAfter: s.authAbsentAfter, authAtCall: s.authAtCall, authRefreshed: s.authRefreshed, authWrittenBack: s.authWrittenBack, realAuthChanged: s.realAuthChanged, credentialHits: s.credentialHits, jailChanged: s.jailChanged, otherItems: a?.otherItems ?? null, eventToolCalls: a?.tools.length ?? 0 },
+        byTool: s.reads.reduce((m, r) => ({ ...m, [r.tool]: (m[r.tool] || 0) + 1 }), {}), keyed: key.keyed, missing: key.missing, keyBatchSha256: null, costUsd: null, usage: a?.usage ?? null, tokens,
       });
       const reason = CX.codexReason(s, key, own);
       if (reason) return finish('INVALID', { reason });

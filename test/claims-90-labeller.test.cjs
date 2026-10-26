@@ -151,7 +151,7 @@ test('god 3ba8b6 R5 static: the session folder is moved out before the verdict a
   const src = fs.readFileSync(path.join(__dirname, 'claims-90', 'labeller.cjs'), 'utf8');
   assert.match(src, /\n    const s = sessionOut\(path\.dirname\(G\.ownOutputsDir\(jail\)\), jail, path\.join\(runDir, 'session'\), o\.out\);\r?\n/);
   assert.match(src, /\n    if \(s\.problem\) reason = `session folder: /);
-  assert.ok(src.indexOf('const s = sessionOut(') < src.indexOf('fs.appendFileSync(keyOut, lines)'), 'before any key row is appended');
+  assert.ok(src.indexOf('const s = sessionOut(') < src.lastIndexOf('fs.appendFileSync(keyOut, lines)'), 'before any key row is appended (the claude branch appends last)');
 });
 
 test('audit: a compaction or an out-of-jail call is caught; the key is judged', () => {
