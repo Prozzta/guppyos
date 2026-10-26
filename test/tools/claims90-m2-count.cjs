@@ -71,7 +71,9 @@ const say = (s) => { process.stdout.write(s); if (outFile) fs.appendFileSync(out
     hits = dropStale(hits, mode, results);
     const text = await searchTextOver(hive, r.query, flags, hits);
     const named = [];
-    for (const x of targetsIn([r.query], ix)) { const rep = await lead([x.term]); const b = (rep.briefs ?? rep)[x.term.toLowerCase()]; if (b && b.length) named.push([x.term.toLowerCase(), b.slice(0, 12)]); }
+    // M1: briefs resolve only for what the query text names (a bare id list is pointed, unbriefed).
+    const rep = await lead({ cards: [], texts: [r.query] });
+    for (const x of targetsIn([r.query], ix)) { const b = rep.briefs[x.term.toLowerCase()]; if (b && b.length) named.push([x.term.toLowerCase(), b.slice(0, 12)]); }
     t.rows++;
     if (flags.full) t.fullRows++;
     if (!named.length) continue;
@@ -85,6 +87,7 @@ const say = (s) => { process.stdout.write(s); if (outFile) fs.appendFileSync(out
     if (all(text)) t.rawAll++;
     if (all(before)) t.beforeAll++;
     if (all(after)) t.afterAll++;
+    else if (all(text)) (t.misses ??= []).push({ row: t.rows, named: named.length, full: flags.full, rawChars: text.length, afterChars: after.length });
     if (flags.full) { if (isC) t.fullCondensed++; if (all(before)) t.fullBefore++; if (all(after)) t.fullAfter++; }
   }
   say(`${JSON.stringify(t)}\n`);
