@@ -320,8 +320,8 @@ test('S1 / M1 compact (god 7a4eec, 5dc648): the brief (an `<id>` header and labe
   assert.deepEqual(p.filter((l) => /^\[\d\] /.test(l)).map((l) => l.split(' · ')[2]), metas.map((l) => l.split(' · ')[2]), 'the hits as before, under the pointers');
 });
 
-test('M3 body prefix (god 5dc648): every hit-body line, compact and full, prints under the indent and `| `, so a note line that starts with a field label never reads as a field line; the brief lines are byte for byte as before', () => {
-  assert.equal(F.BODY_PREFIX, '| ');
+test('M3 / M3b body prefix (god 5dc648, 08992e): every hit-body line, compact and full, prints under the indent and `|: `, so a note line that starts with a field label never reads as a field line and the prefix carries the line\'s first separator; the brief lines are byte for byte as before', () => {
+  assert.equal(F.BODY_PREFIX, '|: ');
   const note = 'merge: 1234567 into int-1.1.98\ndone: shipped\ntag: v1.1.98 ' + lorem(30, 'n');
   const hits = [hit(1, 'live', 'card.foo-7', '2026-10-03', note), chunk(2, '## note\nmerge: 7654321 into int-1.1.97 ' + lorem(40, 'c')), hit(3, 'live', 'synthetic.port', '2026-10-10', 'port 2222')];
   const t = F.formatSearch('foo-7 merge', {}, hits, LEADS, ['foo-7']);
@@ -330,16 +330,32 @@ test('M3 body prefix (god 5dc648): every hit-body line, compact and full, prints
   const bodies = [];
   for (let i = 7; i < L.length; i++) if (/^\[\d\] /.test(L[i])) { while (/^ {4}/.test(L[i + 1] ?? '')) bodies.push(L[++i]); }
   assert.ok(bodies.length >= 4, `${bodies.length} body lines`);
-  for (const b of bodies) assert.match(b, /^ {4}\| \S/, `MUTANT: a body line without the prefix: ${b}`);
-  assert.match(t, /^ {4}\| card\.foo-7: done: shipped tag: v1\.1\.98 /m, 'the lead line (the body after the heading line) under the prefix too');
+  for (const b of bodies) assert.match(b, /^ {4}\|: \S/, `MUTANT: a body line without the prefix: ${b}`);
+  assert.match(t, /^ {4}\|: card\.foo-7: done: shipped tag: v1\.1\.98 /m, 'the lead line (the body after the heading line) under the prefix too');
   assert.doesNotMatch(t, /^ {4}(merge:|done:|tag:|card\.foo-7:|port |##|…)/m, 'MUTANT: a bare body line');
-  assert.match(t, /^ {4}\| (…|##|merge: 7654321)/m, 'the chunk body under the prefix');
+  assert.match(t, /^ {4}\|: (…|##|merge: 7654321)/m, 'the chunk body under the prefix');
   for (const l of L) assert.ok(l.length <= F.COMPACT_LINE_MAX, l);
   const full = F.formatSearch('foo-7 merge', { full: true }, hits, LEADS, ['foo-7']);
-  assert.match(full, /^ {6}\| card\.foo-7: done: shipped tag: .*\n\n {6}\| merge: 1234567 into int-1\.1\.98\n {6}\| done: shipped\n {6}\| tag: v1\.1\.98 /m, 'MUTANT: --full prints a bare body line');
+  assert.match(full, /^ {6}\|: card\.foo-7: done: shipped tag: .*\n\n {6}\|: merge: 1234567 into int-1\.1\.98\n {6}\|: done: shipped\n {6}\|: tag: v1\.1\.98 /m, 'MUTANT: --full prints a bare body line');
   assert.doesNotMatch(full, /^ {6}(merge|done|tag|port|card\.foo-7): /m);
-  assert.match(full, /^ {6}\| port 2222$/m);
+  assert.match(full, /^ {6}\|: port 2222$/m);
   assert.match(full, /^  foo-7\n {6}donesha \(latest\): 9876fed by beta-2\n/m, 'full: the brief unchanged');
+});
+
+test('M3b (god 08992e, Jim f6c424): a body line whose words sit before its first `:` or `=` (`VERSION BUMP = x`, `- tag v = y`, `merge into z: w`) is no field line: the frozen label (everything before the first `:` or `=`) of every body line is the fixed prefix token, so the named brief\'s field lines are the only field lines in the reply', () => {
+  const label = (l) => { const m = /^([^:=]*)[:=]/.exec(l); return m ? m[1].trim() : null; };
+  const note = 'VERSION BUMP = FOUR PLACES (package, lock, hero, notes)\n- tag v1.1.55 = release-1.1.55 = abc1234\nready to merge into 1.1.48: YES';
+  const hits = [hit(1, 'live', 'card.foo-7', '2026-10-03', note), chunk(2, '## bump\nVERSION BUMP = FOUR PLACES ' + lorem(30, 'b')), hit(3, 'live', 'synthetic.port', '2026-10-10', 'port 2222')];
+  for (const [mode, t, briefIndent] of [['compact', F.formatSearch('foo-7 bump', {}, hits, LEADS, ['foo-7']), 4], ['full', F.formatSearch('foo-7 bump', { full: true }, hits, LEADS, ['foo-7']), 6]]) {
+    const L = lines(t); const first = L.findIndex((l) => /^ {0,2}\[1\] /.test(l)); assert.ok(first > 0, `${mode}: a hit`);
+    const briefLabels = L.slice(0, first).map(label).filter((x) => x !== null);
+    assert.deepEqual(briefLabels.filter((x) => x !== 'Results for' && x !== 'Wing' && x !== 'Since'), ['donesha (latest)', 'donesha (beta-2)', 'status', 'assignee', 'decisions'], `${mode}: the brief field lines, byte for byte`);
+    const bodies = L.slice(first).filter((l) => new RegExp(`^ {${briefIndent}}\\S`).test(l) && !/^ {6}(Source|Match|Get|Card):/.test(l));
+    assert.ok(bodies.length >= 3, `${mode}: ${bodies.length} body lines`);
+    for (const b of bodies) assert.equal(label(b), '|', `MUTANT (${mode}): a body line whose label is body text: ${b}`);
+    for (const b of bodies) assert.doesNotMatch(b, /^ *\|: (VERSION BUMP|- tag v1\.1\.55|ready to merge)[^:=]*$/, `${mode}: the separator sits in the prefix, the body text keeps its own: ${b}`);
+    assert.ok(L.slice(first).some((l) => /\|: VERSION BUMP = FOUR PLACES/.test(l)) && L.slice(first).some((l) => /\|: - tag v1\.1\.55 = release-1\.1\.55 = abc1234|\|: .*ready to merge into 1\.1\.48: YES/.test(l)), `${mode}: the bodies print whole under the prefix`);
+  }
 });
 
 test('S1 / M1 full: `--full` prints the Get: pointer then Match: (no Card: block under a hit any more); the named brief and the pointers sit in the block after the header', () => {
@@ -350,7 +366,7 @@ test('S1 / M1 full: `--full` prints the Get: pointer then Match: (no Card: block
   const FL = lines(t); const head = FL.indexOf('='.repeat(60), 2);
   assert.deepEqual(FL.slice(head + 2, head + 9), ['  foo-7', '      donesha (latest): 9876fed by beta-2', '      donesha (beta-2): 9876fed', '      status: doing', '      assignee: alpha-1', '      decisions: 3', '  bar-9: memory get bar-9'], 'MUTANT: the named block or the pointer missing');
   assert.doesNotMatch(t, /status: done/, 'MUTANT: the pointed card\'s field lines');
-  assert.match(t, /^ {6}\| done sha 9876fed$/m, 'the body under the prefix');
+  assert.match(t, /^ {6}\|: done sha 9876fed$/m, 'the body under the prefix');
   assert.equal(F.formatSearch('foo-7', { full: true }, hits, LEADS), F.formatSearch('foo-7', { full: true }, hits), 'leads without a named card change nothing');
 });
 

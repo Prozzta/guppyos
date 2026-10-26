@@ -209,7 +209,7 @@ function namedBlock(named: string[], pointed: string[], leads: CardLeads, indent
 
 /** M3 (god 5dc648): every hit-body line prints under the indent and this prefix, so a note line that starts with a
  *  field label (`merge: …`, `done: …`, `tag: …`) can never read as a field line; field lines live in the brief alone. */
-export const BODY_PREFIX = '| ';
+export const BODY_PREFIX = '|: ';
 const BODY_INDENT = 4;
 /** What one compact body line costs beyond its text: the indent, the prefix and the newline. */
 const BODY_OVERHEAD = BODY_INDENT + BODY_PREFIX.length + 1;

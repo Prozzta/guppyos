@@ -54,8 +54,8 @@ test('M1 search (default): current first, then plain chunks, then prior / prior?
   assert.match(metas[0], /^\[1\] current · fact · synthetic\.port · 2026-10-10 · c-synth00000003 · wing-x\/memory$/);
   assert.equal(L[L.length - 1], 'get: memory get synthetic.port · memory get synthetic.host');
   assert.match(metas[2], /^\[3\] wing-x\/general · NOTES\.md$/);
-  assert.match(L[L.indexOf(metas[0]) + 1], /^ {4}\| port 2222 \(current\) synthetic-c-w0/);
-  assert.match(L[L.indexOf(metas[2]) + 1], /^ {4}\| ## 2026-09-20 - synthetic note about ports/, 'a chunk\'s lines are joined into one');
+  assert.match(L[L.indexOf(metas[0]) + 1], /^ {4}\|: port 2222 \(current\) synthetic-c-w0/);
+  assert.match(L[L.indexOf(metas[2]) + 1], /^ {4}\|: ## 2026-09-20 - synthetic note about ports/, 'a chunk\'s lines are joined into one');
   assert.doesNotMatch(text, /\[5\] prior · /, 'MUTANT: an unconfirmed supersession (superseded?) is prior?, never shown as a certain prior');
   assert.ok(text.length <= F.COMPACT_MAX_CHARS + F.COMPACT_GET_MAX, `${text.length}`);
   assert.equal(condensed('memory search synthetic port', text), false, 'the condenser leaves the compact text alone');
@@ -84,7 +84,7 @@ test('M1 search --full: the verbose whole-chunk text, unchanged (the GOLDEN layo
   const full = F.formatSearch('q', { full: true, wing: 'wing-x' }, hits);
   assert.equal(full, F.formatSearchFull('q', { full: true, wing: 'wing-x' }, hits));
   assert.match(full, /^\n={60}\n {2}Results for: "q"\n {2}Wing: wing-x\n={60}\n\n {2}\[1\] wing-x \/ memory\n {6}Source: claim\n {6}Claim: {2}\[prior\? · fact · synthetic\.host · 2026-09-15 · c-synth00000001\]\n {6}Get:    memory get synthetic\.host\n {6}Version: possibly replaced/);
-  assert.match(full, /\n {6}\| line one\n {6}\| line two\n/, 'M3: the body under the prefix');
+  assert.match(full, /\n {6}\|: line one\n {6}\|: line two\n/, 'M3: the body under the prefix');
   assert.notEqual(F.formatSearch('q', {}, hits), full, 'MUTANT: the default is the compact text, not the verbose one');
 });
 
@@ -237,7 +237,7 @@ test('M1 MUST 1: a value past char 154 of a live claim is shown at 1 hit and at 
   assert.doesNotMatch(one, /clipped|…/, '1 hit: nothing is cut');
   const content = lines(one).filter((l) => /^ {4}/.test(l));
   assert.ok(content.length >= 2, 'the content is wrapped on several lines');
-  assert.equal(content.map((l) => l.slice(6)).join(' '), long, 'the whole content, in order (M3: under the `| ` prefix)');
+  assert.equal(content.map((l) => l.slice(7)).join(' '), long, 'the whole content, in order (M3: under the `|: ` prefix)');
   const five = F.formatSearch('synthetic sha', {}, [
     claim(2, 'superseded', 'synthetic.sha', '2026-09-01', `${lorem(13, 'a')} sha 00000000dead ${lorem(10, 'b')}`),
     live,
@@ -262,7 +262,7 @@ test('M1 MUST 1: a clipped chunk shows a window around the matched term (not the
   const hits = Array.from({ length: 5 }, (_, i) => chunk(i + 1, big));
   const text = F.formatSearch('zebrafinch relay', {}, hits);
   assert.match(text, /zebrafinch relay port 4471/, 'MUTANT: the matched text is inside the window');
-  assert.match(text, /^ {4}\| …/m, 'the window says it starts inside the chunk');
+  assert.match(text, /^ {4}\|: …/m, 'the window says it starts inside the chunk');
   assert.match(text, /^… \d hits? clipped \(--full shows whole chunks\)$/m, 'MUTANT: the clipped hits are counted');
   assert.ok(text.length <= F.COMPACT_MAX_CHARS + F.COMPACT_GET_MAX, `${text.length}`);
   assert.ok(lines(text).every((l) => l.length <= F.COMPACT_LINE_MAX));
@@ -308,7 +308,7 @@ test('M1 S1 (Jim re-audit): a term near the end of the head survives the wrap co
       const text = F.formatSearch('f00dcafe1234', {}, [chunk(1, content)]);
       assert.match(body(text), /f00dcafe1234/, `MUTANT: the matched term at char ${at} of ${content.length} is shown in the body (1 hit)`);
       assert.ok(text.length <= F.COMPACT_MAX_CHARS + F.COMPACT_GET_MAX && lines(text).every((l) => l.length <= F.COMPACT_LINE_MAX), 'cap and line max hold');
-      if (/^ {4}\| …/m.test(text)) windowed++;
+      if (/^ {4}\|: …/m.test(text)) windowed++;
     }
   }
   assert.ok(windowed >= 1, `the window branch was taken after wrapping at least once (${windowed})`);

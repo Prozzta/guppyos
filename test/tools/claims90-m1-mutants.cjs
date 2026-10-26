@@ -151,6 +151,7 @@ const MUTANTS = [
   ['M1b engine: the pointed terms of the reply reach the renderer', ENGINE, '    return { briefs, named: ids(r.named), pointed: ids(r.pointed) };', '    return { briefs, named: ids(r.named), pointed: [] };'],
   ['M3a compact: a hit-body line prints bare (a `merge:` note reads as a field line)', FORMAT, '    out.push(meta, ...lines.map((l) => `    ${BODY_PREFIX}${l}`));', '    out.push(meta, ...lines.map((l) => `    ${l}`));'],
   ['M3b full: a hit-body line prints bare', FORMAT, "    for (const line of h.content.trim().split('\\n')) L.push(`      ${BODY_PREFIX}${line}`);", "    for (const line of h.content.trim().split('\\n')) L.push(`      ${line}`);"],
+  ['M3c (god 08992e) the body prefix carries no separator: the words of a body line before its first `:` or `=` read as a field label', FORMAT, "export const BODY_PREFIX = '|: ';", "export const BODY_PREFIX = '| ';"],
   ['S3c engine: the named terms of the reply reach the renderer', ENGINE, '    return { briefs, named: ids(r.named), pointed: ids(r.pointed) };', '    return { briefs, named: [], pointed: ids(r.pointed) };'],
   ['S4a engine: the hit texts go to main with the query', ENGINE, '  const texts = [query, ...hits.slice(0, CARD_LEADS_MAX).map((h) => String(h.content ?? \'\').slice(0, LEAD_TEXT_MAX))];', '  const texts = [query];'],
   ['S4b wiring: the terms the query names are resolved and come back named, the pointers beside them', RW, '  return { briefs, named: named.filter((n) => briefs[n]), pointed };', '  return { briefs, named: [], pointed: [] };'],

@@ -16,7 +16,7 @@ const V = loadTs('src/main/claims/views.ts');
 const hit = (i, content, claim, extra = {}) => ({ chunkId: i, wing: 'a1', room: 'memory', source: 'agents/a1/claims.jsonl', content, cosineSim: 0.4, bm25: 0.9, score: 0.9 - i / 1000, claim, ...extra });
 const meta = (id, key, kind = 'fact', status = 'live') => ({ id, status, kind, key, at: '2026-10-03T10:00:00.000Z' });
 const lines = (t) => t.replace(/\n$/, '').split('\n');
-const block = (text, n) => { const ls = lines(text); const a = ls.findIndex((l) => l.startsWith(`[${n}] `)); assert.ok(a >= 0, `hit [${n}] shown`); let b = a + 1; while (b < ls.length && ls[b].startsWith('    ')) b++; return { meta: ls[a], body: ls.slice(a + 1, b).map((l) => l.slice(6)) }; };  // M3: `    | ` before each body line
+const block = (text, n) => { const ls = lines(text); const a = ls.findIndex((l) => l.startsWith(`[${n}] `)); assert.ok(a >= 0, `hit [${n}] shown`); let b = a + 1; while (b < ls.length && ls[b].startsWith('    ')) b++; return { meta: ls[a], body: ls.slice(a + 1, b).map((l) => l.slice(7)) }; };  // M3: `    |: ` before each body line
 const count = (s, needle) => s.split(needle).length - 1;
 
 test('M3a: a keyed current claim opens with `<key>: <current value>`; a whole claim that fits is printed once (compact and --full)', () => {
@@ -31,7 +31,7 @@ test('M3a: a keyed current claim opens with `<key>: <current value>`; a whole cl
   const full = F.formatSearch('narwhal release current', { full: true }, [h]);
   const fl = lines(full);
   const at = fl.findIndex((l) => /^      Match:  cosine_sim=/.test(l));
-  assert.equal(fl[at + 1], '      | release.current: the narwhal release current is 1.1.100', 'MUTANT: --full opens the content with the lead line (M3: under the prefix)');
+  assert.equal(fl[at + 1], '      |: release.current: the narwhal release current is 1.1.100', 'MUTANT: --full opens the content with the lead line (M3: under the prefix)');
   assert.equal(fl[at + 2], '', 'the blank line and the whole content follow as before');
 });
 
@@ -73,7 +73,7 @@ test('M3a: a clipped current hit continues after its lead, no copy; a later part
   assert.equal(F.leadLine(md), null);
   const text = F.formatSearch('narwhal', {}, [...parts, md]);
   const b = block(text, 1);
-  assert.equal(b.body[0], F.wrap(`release.tip.1: ${value}`, F.COMPACT_LINE_MAX - 6)[0], 'MUTANT: the lead is the first wrapped line of `key: value`');
+  assert.equal(b.body[0], F.wrap(`release.tip.1: ${value}`, F.COMPACT_LINE_MAX - 7)[0], 'MUTANT: the lead is the first wrapped line of `key: value`');
   const shown = b.body.join(' ').replace(/…$/, '');
   assert.ok(`release.tip.1: ${value} the pelican tip sha is 1234abcd1`.startsWith(shown), 'MUTANT: the body continues where the lead stops, nothing repeated');
   assert.equal(count(text, 'release.tip.1: '), 1);
@@ -93,7 +93,7 @@ test('M3a: the 1400/158 caps hold with leads on every hit (1, 5 and 12 keyed hit
     assert.ok(lines(text).every((l) => l.length <= F.COMPACT_LINE_MAX), `${n} hits: every line <= ${F.COMPACT_LINE_MAX}`);
     const b = block(text, 1);
     assert.match(b.body[0], /^k\.0\.keyword0 /, `${n} hits: MUTANT: the first hit opens with its key`);
-    assert.equal(lines(text).filter((l) => /^    \| k\.0\.keyword0 /.test(l)).length, 1, `${n} hits: the lead exactly once`);
+    assert.equal(lines(text).filter((l) => /^    \|: k\.0\.keyword0 /.test(l)).length, 1, `${n} hits: the lead exactly once`);
     assert.match(b.body.join(' '), /v0word33/, `${n} hits: MUTANT: the matched term is shown in the hit's block`);
     assert.ok(count(b.body.join(' '), 'v0word1 ') <= 1, `${n} hits: no part of the value is repeated`);
   }
