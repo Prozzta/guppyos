@@ -2973,6 +2973,9 @@ export class HiveManager {
     return count;
   }
 
+  /** The startup catch-up's writer (index.ts): the router's own index of `root`, so both see one set of recorded ids. */
+  mailCardIndexFor(root: string): MailCardIndex | null { return this.root() === root ? this.mailCards() : null; }
+
   /** C90-MAILCARD: the index of the current root (a new root gets a fresh one), or null without a hive. */
   private mailCards(): MailCardIndex | null {
     const root = this.root();

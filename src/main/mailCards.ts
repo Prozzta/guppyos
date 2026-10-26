@@ -343,6 +343,19 @@ const listJson = (dir: string): string[] => { try { return readdirSync(dir).filt
  * sender and recipient different agents). Every other copy is counted in `excluded` by reason.
  */
 export function readProvenMail(hiveRoot: string): { mails: BackfillMail[]; excluded: Record<string, number> } {
+  return drain(provenMailSteps(hiveRoot));
+}
+
+/** Runs a step generator to its end without pausing (the script's and the tests' sync readers). */
+function drain<T>(g: Generator<void, T>): T {
+  for (;;) { const r = g.next(); if (r.done) return r.value; }
+}
+
+/**
+ * readProvenMail as steps: every `yield` is a point the startup catch-up pauses at (after each
+ * agent's sent copies, each MailLedger file and each inbox folder), so the main loop keeps turning.
+ */
+function* provenMailSteps(hiveRoot: string): Generator<void, { mails: BackfillMail[]; excluded: Record<string, number> }> {
   const excluded: Record<string, number> = {};
   const skip = (why: string): void => { excluded[why] = (excluded[why] ?? 0) + 1; };
   const agentsDir = join(hiveRoot, 'agents');
@@ -358,6 +371,7 @@ export function readProvenMail(hiveRoot: string): { mails: BackfillMail[]; exclu
       if (!m || typeof m !== 'object') continue;
       for (const to of ([] as unknown[]).concat(m.to ?? [])) sent.add(sentKey(a, to === 'broadcast' ? 'broadcast' : recipientOf(to), m.subject, m.body));
     }
+    yield;
   }
   const byId = new Map<string, BackfillMail>();
   const put = (m: BackfillMail): void => {
@@ -395,6 +409,7 @@ export function readProvenMail(hiveRoot: string): { mails: BackfillMail[]; exclu
         copies: [{ to: agent, ...(Number.isFinite(e.deliveredAt) ? { deliveredAt: e.deliveredAt } : {}) }],
       });
     }
+    yield;
   }
   // inbox copies, two-party only
   for (const a of agents) {
@@ -417,6 +432,7 @@ export function readProvenMail(hiveRoot: string): { mails: BackfillMail[]; exclu
           copies: [{ to: a }],
         });
       }
+      yield;
     }
   }
   return { mails: [...byId.values()], excluded };
@@ -428,9 +444,20 @@ export function readProvenMail(hiveRoot: string): { mails: BackfillMail[]; exclu
  * rule sees the whole conversation. Idempotent: recorded ids append nothing.
  */
 export function backfillMailCards(hiveRoot: string, now: string): MailCardBackfillCounts {
-  const { mails, excluded } = readProvenMail(hiveRoot);
+  return drain(backfillMailCardSteps(hiveRoot, now));
+}
+
+/** The startup catch-up pauses after this many linked messages. */
+export const CATCHUP_SLICE = 200;
+
+/**
+ * backfillMailCards as steps (the same code, so the startup catch-up and the script give one index):
+ * the proven-mail steps, then a `yield` every CATCHUP_SLICE messages. `index` is the writer to record
+ * through (main passes the router's own instance, so both see one set of recorded ids).
+ */
+export function* backfillMailCardSteps(hiveRoot: string, now: string, index: MailCardIndex = new MailCardIndex(hiveRoot)): Generator<void, MailCardBackfillCounts> {
+  const { mails, excluded } = yield* provenMailSteps(hiveRoot);
   const cardIds = registryCardIds(hiveRoot);
-  const index = new MailCardIndex(hiveRoot);
   const canon = new Map(cardIds.map((c) => [c.toLowerCase(), c]));
   const conv = new Map<string, Set<string>>();
   for (const m of mails) {
@@ -446,7 +473,9 @@ export function backfillMailCards(hiveRoot: string, now: string): MailCardBackfi
   const counts: MailCardBackfillCounts = { mails: mails.length, recorded: 0, already: 0, byMethod: {}, byAct: {}, byFrom: {}, byTrust: {}, excluded, unlinked: [], weak: 0, covered: 0 };
   const bump = (o: Record<string, Record<string, number>>, k: string, method: string): void => { const r = (o[k] = o[k] ?? {}); r[method] = (r[method] ?? 0) + 1; };
   const order = [...mails].sort((a, b) => (a.created_at ?? '').localeCompare(b.created_at ?? '') || a.id.localeCompare(b.id));
+  let n = 0;
   for (const m of order) {
+    if (n++ % CATCHUP_SLICE === CATCHUP_SLICE - 1) yield;
     const prior = index.linkOf(m.id);
     const link: MailLink = prior ? { cards: prior.cards, method: prior.method } : linkMail(m, ctx);
     const { link: rec, rows } = indexEntries(m, link, m.trust, m.copies, now);
@@ -462,4 +491,58 @@ export function backfillMailCards(hiveRoot: string, now: string): MailCardBackfi
     if (TRUSTED_METHODS.has(link.method)) counts.covered++;
   }
   return counts;
+}
+
+// ———————————————————————————————————————————————————————————— startup catch-up
+
+/** The log row of one startup catch-up (counts), and of one that failed. */
+export const MAILCARDS_BACKFILL_ROW = 'mailcards-backfill';
+export const MAILCARDS_BACKFILL_FAILED_ROW = 'mailcards-backfill-failed';
+
+export interface MailCardCatchUpDeps {
+  log: (row: Record<string, unknown>) => void;
+  /** The router's index of this root (one set of recorded ids with routing); a fresh one without. */
+  index?: MailCardIndex | null;
+  /** The link records' `at` (the runner passes T_s for a byte-equal `_links.jsonl`); now otherwise. */
+  now?: () => string;
+  /** What a step pause awaits (a macrotask turn: the window and the router keep going). */
+  pause?: () => Promise<void>;
+}
+
+/**
+ * MAILCARD catch-up at every app start (god 38f4b0): indexes every proven message not yet in
+ * state/mail-cards (mail delivered while the app was closed included) with the backfill's own link
+ * rules and trust levels, through the router's index. Writes only state/mail-cards, never mail or
+ * ledgers. Idempotent: a second start records nothing. Pauses at every step so startup is never
+ * blocked. Logs one `mailcards-backfill` row with the counts; a failure logs `mailcards-backfill-failed`
+ * and resolves null (never throws). The derived writer starts only once this settled (Jim 414b4c).
+ */
+export async function startupMailCardCatchUp(hiveRoot: string, d: MailCardCatchUpDeps): Promise<MailCardBackfillCounts | null> {
+  const pause = d.pause ?? (() => new Promise<void>((r) => setImmediate(r)));
+  const t0 = Date.now();
+  let steps = 0;
+  try {
+    const g = backfillMailCardSteps(hiveRoot, (d.now ?? (() => new Date().toISOString()))(), d.index ?? new MailCardIndex(hiveRoot));
+    for (;;) {
+      const r = g.next();
+      if (r.done) {
+        const c = r.value;
+        d.log({ kind: MAILCARDS_BACKFILL_ROW, mails: c.mails, recorded: c.recorded, already: c.already, covered: c.covered, weak: c.weak, unlinked: c.unlinked.length, byMethod: c.byMethod, byTrust: c.byTrust, excluded: c.excluded, steps, ms: Date.now() - t0 });
+        return c;
+      }
+      steps++;
+      await pause();
+    }
+  } catch (e) {
+    d.log({ kind: MAILCARDS_BACKFILL_FAILED_ROW, error: String(e).slice(0, 200), steps, ms: Date.now() - t0 });
+    return null;
+  }
+}
+
+/**
+ * The derived writer starts only once the catch-up settled, success or failure (it reads the index's
+ * done mails: started beside a running catch-up its ledger would depend on timing). Nothing else waits.
+ */
+export function startAfterMailCardCatchUp(catchUp: Promise<unknown>, startDerived: () => void): Promise<void> {
+  return catchUp.then(() => undefined, () => undefined).then(() => { startDerived(); });
 }

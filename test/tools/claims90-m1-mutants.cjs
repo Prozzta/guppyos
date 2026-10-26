@@ -42,7 +42,9 @@ const TESTS = ['test/claims90-m1-compact.test.cjs', 'test/native-memory.test.cjs
   // CLAIMS-90 R2 step 2: the pointer footer, the rank fuzz and the T3 pool.
   'test/claims90-step2-rank-pool.test.cjs',
   // CLAIMS-90 step 3 S1-S4 (god 7a4eec): the brief / named-block pins (rows S1a-S4c live only here).
-  'test/claims90-step3-lead.test.cjs'];
+  'test/claims90-step3-lead.test.cjs',
+  // MAILCARD catch-up at app start (god 38f4b0, Jim 414b4c): rows MC-a..MC-h live only here.
+  'test/claims90-mailcard-startup.test.cjs'];
 /** CENSUS_TESTS=<files, comma or space separated> runs the census over those suites instead (a diagnosis of one
  *  suite under one mutant: `CENSUS_TESTS=test/x.test.cjs node test/tools/claims90-m1-mutants.cjs AG`). */
 const SUITES = process.env.CENSUS_TESTS ? process.env.CENSUS_TESTS.split(/[\s,]+/).filter(Boolean) : TESTS;
@@ -56,6 +58,7 @@ const ENGINE = 'src/main/nativeMemory/engine.ts';
 const STORE = 'src/main/nativeMemory/store.ts';
 const CLI = 'resources/memory-cli.cjs';
 const INDEX = 'src/main/index.ts';
+const MAILCARDS = 'src/main/mailCards.ts';
 const VIEWS = 'src/main/claims/views.ts';
 
 const MUTANTS = [
@@ -152,6 +155,15 @@ const MUTANTS = [
   ['M3a compact: a hit-body line prints bare (a `merge:` note reads as a field line)', FORMAT, '    out.push(meta, ...lines.map((l) => `    ${BODY_PREFIX}${l}`));', '    out.push(meta, ...lines.map((l) => `    ${l}`));'],
   ['M3b full: a hit-body line prints bare', FORMAT, "    for (const line of h.content.trim().split('\\n')) L.push(`      ${BODY_PREFIX}${line}`);", "    for (const line of h.content.trim().split('\\n')) L.push(`      ${line}`);"],
   ['M3c (god 08992e) the body prefix carries no separator: the words of a body line before its first `:` or `=` read as a field label', FORMAT, "export const BODY_PREFIX = '|: ';", "export const BODY_PREFIX = '| ';"],
+  // MAILCARD catch-up at app start (god 38f4b0, Jim 414b4c)
+  ['MC-a the catch-up records nothing (the index is never built)', MAILCARDS, 'else if (index.record(rec, rows)) counts.recorded++;', 'else if (false) counts.recorded++;'],
+  ['MC-b the derived writer starts beside the running catch-up (no await)', MAILCARDS, 'return catchUp.then(() => undefined, () => undefined).then(() => { startDerived(); });', 'startDerived(); return catchUp.then(() => undefined, () => undefined);'],
+  ['MC-c the startup block starts the derived writer on its own timer, not after the catch-up', INDEX, 'void startAfterMailCardCatchUp(mailCardCatchUp, () => derivedClaims?.start());', 'setImmediate(() => derivedClaims?.start()); void mailCardCatchUp;'],
+  ['MC-d the startup block never runs the catch-up', INDEX, 'const mailCardCatchUp = startupMailCardCatchUp(root, { log: (row) => hive.appendLog(row), index: hive.mailCardIndexFor(root) });', 'const mailCardCatchUp = Promise.resolve(null);'],
+  ['MC-e the catch-up never pauses (startup blocked for the whole read)', MAILCARDS, '      steps++;\n      await pause();', '      steps++;'],
+  ['MC-f a failed catch-up logs nothing (and throws)', MAILCARDS, "    d.log({ kind: MAILCARDS_BACKFILL_FAILED_ROW, error: String(e).slice(0, 200), steps, ms: Date.now() - t0 });\n    return null;", '    throw e;'],
+  ['MC-g a second start forgets the recorded ids (re-links every message)', MAILCARDS, '    const prior = index.linkOf(m.id);\n    const link: MailLink = prior', '    const prior = null;\n    const link: MailLink = prior'],
+  ['MC-h the catch-up writes through a fresh index, not the router\'s (two sets of recorded ids)', INDEX, 'index: hive.mailCardIndexFor(root) });', 'index: null });'],
   ['S3c engine: the named terms of the reply reach the renderer', ENGINE, '    return { briefs, named: ids(r.named), pointed: ids(r.pointed) };', '    return { briefs, named: [], pointed: ids(r.pointed) };'],
   ['S4a engine: the hit texts go to main with the query', ENGINE, '  const texts = [query, ...hits.slice(0, CARD_LEADS_MAX).map((h) => String(h.content ?? \'\').slice(0, LEAD_TEXT_MAX))];', '  const texts = [query];'],
   ['S4b wiring: the terms the query names are resolved and come back named, the pointers beside them', RW, '  return { briefs, named: named.filter((n) => briefs[n]), pointed };', '  return { briefs, named: [], pointed: [] };'],

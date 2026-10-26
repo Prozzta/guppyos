@@ -17,6 +17,7 @@ import { createLedgerUi } from './claims/ledgerUi';
 import { scrubExport } from './claims/exportLedger';
 import { importAtStart } from './claims/startupImport';
 import { DerivedLive } from './claims/derivedLive';
+import { startAfterMailCardCatchUp, startupMailCardCatchUp } from './mailCards';
 import { derivedRepoFor, seedFloorSources } from './claims/floorSeed';
 import { makeW6Append } from './claims/w6Append';
 import { memoryMdReplaced, READER_WATCH_SYNC_MS, ReaderWatchers } from './claims/readerWatch';
@@ -1758,8 +1759,13 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
     };
     // Jim A-2: claims start checks every anchored agent (a deleted or cut ledger alerts at once).
     setImmediate(claimsAnchorCheck);
-    // CLAIMS-90 M5: the derived writer's start backfill and passes (once per app run).
-    setImmediate(() => derivedClaims?.start());
+    // MAILCARD catch-up (god 38f4b0): every start indexes the proven mail not yet in state/mail-cards
+    // (mail delivered while the app was closed included) through the router's own index, pausing at
+    // every step: the window never waits for it.
+    const mailCardCatchUp = startupMailCardCatchUp(root, { log: (row) => hive.appendLog(row), index: hive.mailCardIndexFor(root) });
+    // CLAIMS-90 M5: the derived writer's start backfill and passes (once per app run) start only once
+    // the catch-up settled (Jim 414b4c): the derived writer reads the index's done mails.
+    void startAfterMailCardCatchUp(mailCardCatchUp, () => derivedClaims?.start());
     // W6: the switch to writer mode or a restart after a crash: catch every writer's export up.
     setImmediate(() => { try { claimExport().syncAll(claimLedgerAgents()); } catch (e) { hive.appendLog({ kind: 'claims-export-failed', step: 'sync', error: String(e).slice(0, 160) }); } });
     // CL-READERWATCHER: watch memory.md for the agents whose ledger replaced it in search.
