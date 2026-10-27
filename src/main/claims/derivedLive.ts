@@ -13,6 +13,7 @@
  * delivery wrote (hive/state/mail). Runs never overlap; a failure is logged and the next pass tries again.
  */
 import { cardFieldFacts, cardRecordFacts, decisionFacts, rulingMailFacts, doneMailFacts, parseChangelog, releaseFacts, type MailLike } from './derivedFacts';
+import { doneMailStatuses, writeDoneMailStatus } from './derivedDoneStatus';
 import { DerivedGit } from './derivedGit';
 import { readCards, readDoneMails, readIndexRulingMails, runDerivedBackfill, syncDerived, type DerivedWriterDeps } from './derivedWriter';
 
@@ -111,6 +112,7 @@ export class DerivedLive {
       const ids = readCards(c.root).map((x) => x.id).filter((id): id is string => typeof id === 'string');
       const done = await doneMailFacts(mails, ids, git);
       for (const s of done.skips) this.d.log({ kind: 'claims-derived-done-skip', mail: s.mail.slice(0, 120), reason: s.reason, ...(s.cards ? { cards: s.cards } : {}) });
+      writeDoneMailStatus(c.root, doneMailStatuses(mails, done));
       await syncDerived(c.w, done.facts);
     }
   }

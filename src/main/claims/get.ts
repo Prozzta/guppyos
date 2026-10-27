@@ -37,6 +37,8 @@ export interface GetDeps {
   tasks?: Array<Record<string, unknown>>;
   /** The per-card mail index lines for a card id (lower-cased), oldest first; null when there is no file. */
   mailRows?: (cardLower: string) => string[] | null;
+  /** The derived layer's verdict on a done mail (derivedDoneStatus), null while it has not reached the mail. */
+  doneMailStatus?: (mailId: string) => string | null;
   ruleConfig?: { r4: boolean };
 }
 
@@ -515,8 +517,13 @@ function resolveIn(ix: Indexed, term: string, opts: GetOptions, d: GetDeps, with
         const known = new Set<string>();
         for (const c of all) { for (const s of sha7(c.text)) known.add(s); for (const v of versions(c.text)) known.add(v); for (const r of c.refs ?? []) if (r.type === 'commit') for (const s of sha7(r.value)) known.add(s); }
         const pickMs = pick ? atMs(pick) : -Infinity;
+        // CLAIMS-WEAKLINK-DONESHA round 4b (god f7c2bc item 2): for donesha the mail rule bridges only the lag
+        // before the derived layer reaches a done mail. A mail it has processed has either given a claim (the
+        // claim is the current) or been refused (another card's merge, an ambiguous link): its sha is never
+        // the current by itself.
+        const reached = (m: ParsedMail): boolean => doneOnly && !!d.doneMailStatus && d.doneMailStatus(m.id) !== null;
         const candidates = pageMails(rows, rows.length, null).page
-          .filter((m) => mailKey && (!doneOnly || m.act === 'done') && (!agent || m.from === agent) && m.body !== undefined && trustedLink(m.cardFrom))
+          .filter((m) => mailKey && (!doneOnly || m.act === 'done') && (!agent || m.from === agent) && m.body !== undefined && trustedLink(m.cardFrom) && !reached(m))
           .map((m) => ({ m, ms: epochMs(m.created_at) || epochMs(m.id) }))
           .filter((x) => Number.isFinite(x.ms) && x.ms > pickMs)
           .sort((a, b) => b.ms - a.ms || linkRank(b.m.cardFrom) - linkRank(a.m.cardFrom));

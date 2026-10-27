@@ -13,6 +13,7 @@ import { derive as deriveClaims } from './derive';
 import { renderClaimHistory } from './views';
 import { reconcileQueueForHive } from './reconcile';
 import { DEFAULT_KEY_REGISTRY, loadRegistry, registryPath } from './registry';
+import { readDoneMailStatus } from './derivedDoneStatus';
 import { formatGet, leadBrief, resolveGet, resolveGetMany, warmGetIndex, type CardLeadAsk, type CardLeadReply, type GetDeps } from './get';
 import { targetIndex, targetsIn, type TargetIndex } from './searchTargets';
 import type { LedgerRec, ReadResult } from '../../shared/claims';
@@ -98,7 +99,7 @@ function getDeps(d: ClaimReadDeps): GetDeps {
     if (!/^[a-z0-9][a-z0-9._-]{0,119}$/.test(card)) return null;
     try { return readFileSync(join(root, 'state', 'mail-cards', `${card}.jsonl`), 'utf8').split('\n'); } catch { return null; }
   };
-  const deps: GetDeps = { ledgers, registry: reg, reconcileItems, tasks, mailRows, ruleConfig: { r4: false } };
+  const deps: GetDeps = { ledgers, registry: reg, reconcileItems, tasks, mailRows, doneMailStatus: readDoneMailStatus(root), ruleConfig: { r4: false } };
   kept = { sig, deps, targets: null };
   return deps;
 }

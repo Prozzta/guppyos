@@ -513,6 +513,10 @@ test('backfill: a fixture hive and repo give every kind once; a re-run appends n
   assert.deepEqual(x.logs.filter((r) => r.kind === 'claims-derived-done-skip'), [{ kind: 'claims-derived-done-skip', mail: 'm-h5', reason: 'noShaWord' }], 'R2 (c): the skip is logged with its reason');
   assert.equal(c1.gitShas.appended, 1, 'commit a names SYN-H2 in its subject (card.syn-h2.gitsha); no other commit names a card');
   assert.equal(c1.decisions.failed + c1.cardFields.failed + c1.releases.failed + c1.doneShas.failed, 0);
+  // Round 4b: the backfill records a verdict for every done mail it processed (get's mail rule reads it by id).
+  const verdicts = JSON.parse(fs.readFileSync(path.join(x.root, 'state', 'derived-done-mails.json'), 'utf8'));
+  assert.deepEqual(Object.keys(verdicts).sort(), ['m-h1', 'm-h5']);
+  assert.ok(Object.values(verdicts).every((v) => typeof v === 'string' && v.length), 'each a status word');
   const c2 = await W.runDerivedBackfill(x.deps, input);
   for (const k of ['decisions', 'cardFields', 'releases', 'doneShas', 'gitShas']) assert.equal(c2[k].appended, 0, k);
   assert.equal(x.events().length, 0);
