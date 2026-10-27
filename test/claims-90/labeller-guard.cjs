@@ -53,8 +53,11 @@ function where(p, jail) {
 }
 
 /**
- * Read a command as a POSIX shell does, in one pass. words: unquoted whitespace ends a word, and
- * quoted and unquoted pieces next to each other join into one word (-S"a b" is one word). Inside
+ * Read a command as a POSIX shell does, in one pass. words: unquoted whitespace ends a word, and so
+ * does an unquoted operator char (; & | < > newline: `cd /jail; ls` gives the word /jail, not
+ * /jail; which read as a sibling folder outside the jail, LABELLER-GUARD-FALSEPOS a); the operator
+ * itself is never part of a word, only an op. Quoted and unquoted pieces next to each other join
+ * into one word (-S"a b" is one word; 'a;b' keeps its ;). Inside
  * double quotes a backslash escapes " \ $ ` and is kept before anything else; single quotes are
  * literal. Outside quotes a backslash and the char after it are kept as typed, so \x still reads as
  * a root path. ops: every chain, pipe, redirection or substitution the shell would act on (; & | < >
@@ -75,7 +78,9 @@ function scan(cmd) {
   for (let i = 0; i < cmd.length; i++) {
     const c = cmd[i];
     if (/[;&|<>\n\r`]/.test(c)) ops.push(c);
-    if (/\s/.test(c)) { if (w !== null) out.push(w); w = null; continue; }
+    // An unquoted operator ends the word before it and starts none: the shell never passes it to a
+    // command, so a path next to it is judged without it (a path after it is judged on its own).
+    if (/[;&|<>\s]/.test(c)) { if (w !== null) out.push(w); w = null; continue; }
     if (w === null) w = '';
     if (c === '\\') { if (/[;&|<>`]/.test(cmd[i + 1] ?? '')) ops.push(`\\${cmd[i + 1]}`); w += cmd.slice(i, i + 2); i++; continue; }
     if (c === "'") { const e = cmd.indexOf("'", i + 1); const end = e < 0 ? cmd.length : e; w += cmd.slice(i + 1, end); i = end; continue; }

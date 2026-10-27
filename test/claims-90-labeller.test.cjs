@@ -167,3 +167,69 @@ test('audit: a compaction or an out-of-jail call is caught; the key is judged', 
   const k = L.checkKey('{"itemId":"A"}\n{"itemId":"B"}\n{"itemId":"A"}\nnot json\n', own);
   assert.deepEqual([k.keyed, k.missing, k.problems.length], [1, ['C'], 3]);
 });
+
+test('LABELLER-GUARD-FALSEPOS (a): an unquoted operator ends a word, so a jail path before ; is the jail; outside paths, .., quoted ; and every deny stay', () => {
+  const J = jail.replace(/\\/g, '/');
+  const is = (c, d, p, why) => { const v = ck('Bash', { command: c }); assert.deepEqual([v.decision, v.place], [d, p], why || c); };
+  // The A12b false void: `cd <jail>; cat ...` read "<jail>;" as a sibling folder outside the jail. Denied still (not one git command), but in the jail.
+  is(`cd ${J}; cat docs/x.json; ls hive`, 'deny', 'jail', 'the jail path before ; is the jail');
+  is(`cd ${J}&& ls hive`, 'deny', 'jail');
+  is(`cd ${J}|cat`, 'deny', 'jail');
+  is(`cat ${J}/docs/x.json>out`, 'deny', 'jail');
+  assert.deepEqual(G.words(`cd ${J}; ls hive`), ['cd', J, 'ls', 'hive'], 'the operator is no word');
+  assert.deepEqual(G.scan(`cd ${J}; ls hive`).ops, [';']);
+  assert.deepEqual(G.words('a&&b||c|d;e>f<g 2>&1'), ['a', 'b', 'c', 'd', 'e', 'f', 'g', '2', '1']);
+  // Negatives: nothing loosens.
+  is('cd C:/Dunder/hive; ls', 'deny', 'outside', 'an outside path before ; is outside');
+  is(`cat ${J}/../x;`, 'deny', 'outside', '.. before ; is outside');
+  is(`${J};../x`, 'deny', 'outside', '.. after ; is outside');
+  is(`cd ${J};C:/Dunder/hive/x`, 'deny', 'outside', 'a ;-joined outside path is judged on its own');
+  is(`cd ${J}; cat C:/Dunder/hive/tasks.json`, 'deny', 'outside', 'a real outside path after a jail cd');
+  is('cat C:/Dunder/hive/tasks.json;', 'deny', 'outside', 'an outside path with a trailing ;');
+  is('echo x>C:/Dunder/hive/out', 'deny', 'outside', 'a redirection target outside the jail is a path word now');
+  is('echo x;/etc/passwd', 'deny', 'outside');
+  is('git log -- ~/x; ls', 'deny', 'outside');
+  is('git log -- $HOME/x; ls', 'deny', 'outside');
+  // Quoted and escaped operators stay in the word; an escaped operator is still an op (denied as a chain).
+  assert.deepEqual(G.words("git log --grep 'a;b' \"c|d\""), ['git', 'log', '--grep', 'a;b', 'c|d']);
+  is("git log --grep 'a;b' \"c|d\" --all", 'allow', 'jail', 'quoted operators are literal');
+  assert.deepEqual(G.words('git log a\\;b'), ['git', 'log', 'a\\;b'], 'an escaped ; stays in the word');
+  is('git log a\\;b', 'deny', 'jail', 'an escaped ; is still an op');
+  for (const c of ['git log \\" ; echo x ; \\" "x"', 'git log "a" ; echo x', 'git log\necho x', 'git log "$(echo x)"', 'git log "`echo x`"', 'git log | cat', 'git log > x']) is(c, 'deny', 'jail');
+  assert.deepEqual(G.words('git log \\" ; echo x'), ['git', 'log', '\\"', 'echo', 'x']);
+});
+
+test('LABELLER-GUARD-FALSEPOS (b): a call the CLI rejected at input validation is not unlogged; any other call missing from the open log still voids', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'c90-audit-fp-'));
+  const t = path.join(dir, 't.jsonl');
+  const use = (id, name, input) => ({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name, input }] } });
+  const res = (id, content, is_error) => ({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, content, ...(is_error ? { is_error: true } : {}) }] } });
+  const VAL = '<tool_use_error>InputValidationError: Glob failed due to the following issue:\nAn unexpected parameter `head_limit` was provided</tool_use_error>';
+  fs.writeFileSync(t, [
+    { type: 'system', subtype: 'init', tools: L.TOOLS, plugins: [] },
+    use('ok', 'Read', { file_path: 'hive/tasks.json' }), res('ok', 'file text'),
+    use('rej', 'Glob', { pattern: 'hive/**', head_limit: 5 }), res('rej', VAL, true),
+    use('rej2', 'Grep', { pattern: 'x', path: 'hive' }), res('rej2', [{ type: 'text', text: VAL }], true),
+    use('err', 'Bash', { command: 'git log' }), res('err', 'exit code 128', true),
+    use('den', 'Read', { file_path: 'C:/Dunder/hive/agents/x/memory.md' }), res('den', VAL, true),
+    use('noerr', 'Read', { file_path: 'hive/a.md' }), res('noerr', VAL),
+    use('none', 'Read', { file_path: 'hive/b.md' }),
+    { type: 'result', num_turns: 3 },
+  ].map((r) => JSON.stringify(r)).join('\n'));
+  const a = L.auditTranscript(t, jail, keyFile);
+  assert.deepEqual(a.calls.map((c) => [c.id, c.rejected]), [['ok', false], ['rej', true], ['rej2', true], ['err', false], ['den', true], ['noerr', false], ['none', false]], 'only the InputValidationError result (string or text parts, is_error) marks a call rejected');
+  assert.equal(a.rejected, 3);
+  assert.equal(a.outside, 1, 'a rejected call naming an outside path still counts as outside');
+  const logged = (...ids) => ids.map((id) => ({ toolUseId: id }));
+  assert.deepEqual(L.unloggedCalls(a.calls, logged('ok', 'err', 'noerr', 'none')).map((c) => c.id), [], 'a validation-rejected call needs no open-log row');
+  assert.deepEqual(L.unloggedCalls(a.calls, logged('ok', 'noerr', 'none')).map((c) => c.id), ['err'], 'an unlogged call with an ordinary error result still voids');
+  assert.deepEqual(L.unloggedCalls(a.calls, logged('ok', 'err', 'none')).map((c) => c.id), ['noerr'], 'the validation text without is_error does not exempt');
+  assert.deepEqual(L.unloggedCalls(a.calls, logged('err', 'noerr', 'none')).map((c) => c.id), ['ok'], 'an unlogged call with a normal result still voids');
+  assert.deepEqual(L.unloggedCalls(a.calls, []).map((c) => c.id), ['ok', 'err', 'noerr', 'none']);
+  assert.equal(L.isValidationRejection('  <tool_use_error>InputValidationError: x'), true);
+  for (const c of ['InputValidationError: x', '<tool_use_error>Error: x</tool_use_error>', 'x <tool_use_error>InputValidationError', '', null, [{ type: 'image' }]]) assert.equal(L.isValidationRejection(c), false, JSON.stringify(c));
+  // The verdict uses the helper (the batch run itself needs a live claude).
+  const src = fs.readFileSync(path.join(__dirname, 'claims-90', 'labeller.cjs'), 'utf8');
+  assert.match(src, /\n    const unlogged = unloggedCalls\(a\.calls, log\)\.length;\r?\n/);
+  assert.match(src, /else if \(unlogged\) reason = `\$\{unlogged\} call\(s\) missing from the open log`;/);
+});

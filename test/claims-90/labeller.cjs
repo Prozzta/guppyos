@@ -188,7 +188,19 @@ function auditTranscript(file, jail, keyFile) {
   const calls = [];
   for (const r of rows) {
     if (r.type !== 'assistant' || !Array.isArray(r.message?.content)) continue;
-    for (const c of r.message.content) if (c.type === 'tool_use') calls.push({ id: c.id, tool: c.name, ...G.check(c.name, c.input, jail, keyFile) });
+    for (const c of r.message.content) if (c.type === 'tool_use') calls.push({ id: c.id, tool: c.name, ...G.check(c.name, c.input, jail, keyFile), rejected: false });
+  }
+  // LABELLER-GUARD-FALSEPOS (b): a call the CLI rejected at input validation (its tool_result is
+  // the <tool_use_error>InputValidationError text) never ran and never reached the PreToolUse hook,
+  // so the open log has no row for it. Only that result shape marks a call rejected; its input is
+  // still judged above (an outside path in a rejected call still counts).
+  for (const r of rows) {
+    if (r.type !== 'user' || !Array.isArray(r.message?.content)) continue;
+    for (const c of r.message.content) {
+      if (c.type !== 'tool_result' || !c.is_error) continue;
+      const call = calls.find((x) => x.id === c.tool_use_id);
+      if (call && isValidationRejection(c.content)) call.rejected = true;
+    }
   }
   return {
     init: init ? {
@@ -201,8 +213,22 @@ function auditTranscript(file, jail, keyFile) {
     calls,
     outside: calls.filter((c) => c.place === 'outside').length,
     denied: calls.filter((c) => c.decision === 'deny').length,
+    rejected: calls.filter((c) => c.rejected).length,
     result: result ? { isError: !!result.is_error, numTurns: result.num_turns, costUsd: result.total_cost_usd, usage: result.usage || null } : null,
   };
+}
+
+/** True for the tool_result content Claude Code writes when it rejects a call's input before the
+ *  tool (and the PreToolUse hook) runs: `<tool_use_error>InputValidationError: ...`. Nothing else. */
+function isValidationRejection(content) {
+  const text = typeof content === 'string' ? content : Array.isArray(content) ? content.map((x) => (x && typeof x.text === 'string' ? x.text : '')).join('\n') : '';
+  return /^\s*<tool_use_error>\s*InputValidationError\b/.test(text);
+}
+
+/** The transcript calls the guard never saw: no open-log row with their id. A validation-rejected
+ *  call is the one exception (the hook never ran for it); every other missing row voids the batch. */
+function unloggedCalls(calls, log) {
+  return calls.filter((c) => !c.rejected && !log.some((r) => r.toolUseId === c.id));
 }
 
 /** The session's key file, judged against the rows it had to key. */
@@ -300,8 +326,9 @@ async function main(argv) {
     const logOutside = log.filter((r) => r.place === 'outside').length;
     const key = checkKey(fs.existsSync(keyFile) ? fs.readFileSync(keyFile, 'utf8') : '', own);
     const initOk = a.init && JSON.stringify([...(a.init.tools || [])].sort()) === JSON.stringify(TOOLS) && a.init.mcpServers === 0 && a.init.otherPlugins === 0 && a.init.autoMemoryFiles === 0 && a.init.additionalDirectories === 0 && a.init.skills === 0;
-    // The guard must have seen every call (the hook is the open log's source).
-    const unlogged = a.calls.filter((c) => !log.some((r) => r.toolUseId === c.id)).length;
+    // The guard must have seen every call (the hook is the open log's source); a call the CLI
+    // rejected at input validation never reached it (LABELLER-GUARD-FALSEPOS b).
+    const unlogged = unloggedCalls(a.calls, log).length;
     let reason = null;
     if (s.problem) reason = `session folder: ${s.problem}`;
     else if (a.compact) reason = `the session compacted (${a.compact})`;
@@ -314,7 +341,7 @@ async function main(argv) {
     else if (key.missing.length) reason = `key file: ${key.missing.length} of ${own.length} rows missing`;
     const tokens = tokensOf(a.result?.usage);
     Object.assign(run, {
-      exit, ms: Date.now() - t0, init: a.init, compact: a.compact, calls: a.calls.length, denied: a.denied, outside: a.outside, logRows: log.length, logOutside, unlogged,
+      exit, ms: Date.now() - t0, init: a.init, compact: a.compact, calls: a.calls.length, denied: a.denied, rejected: a.rejected, outside: a.outside, logRows: log.length, logOutside, unlogged,
       byTool: a.calls.reduce((m, c) => ({ ...m, [c.tool]: (m[c.tool] || 0) + 1 }), {}),
       keyed: key.keyed, missing: key.missing, keyBatchSha256: null, costUsd: a.result?.costUsd ?? null, usage: a.result?.usage ?? null, tokens,
     });
@@ -342,4 +369,4 @@ if (require.main === module) {
   }, (e) => { console.error(`[claims-90] ${e.stack || e.message}`); process.exitCode = 2; });
 }
 
-module.exports = { parseArgs, ownRows, buildJail, jailFiles, forbiddenIn, settingsFor, jailEnv, auditTranscript, checkKey, sessionOut, leftoverPrefix, FORBIDDEN, TOOLS, main };
+module.exports = { parseArgs, ownRows, buildJail, jailFiles, forbiddenIn, settingsFor, jailEnv, auditTranscript, isValidationRejection, unloggedCalls, checkKey, sessionOut, leftoverPrefix, FORBIDDEN, TOOLS, main };
