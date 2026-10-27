@@ -14,13 +14,14 @@ import { renderClaimHistory } from './views';
 import { reconcileQueueForHive } from './reconcile';
 import { DEFAULT_KEY_REGISTRY, loadRegistry } from './registry';
 import { formatGet, leadBrief, resolveGet, resolveGetMany, type CardLeadAsk, type CardLeadReply, type GetDeps } from './get';
-import { targetIndex, targetsIn } from './searchTargets';
-import type { LedgerRec } from '../../shared/claims';
+import { targetIndex, targetsIn, type TargetIndex } from './searchTargets';
+import type { LedgerRec, ReadResult } from '../../shared/claims';
 
 export interface ClaimReadDeps {
   /** The served hive root. */
   root: string;
-  store: Pick<ClaimStore, 'readLedger'>;
+  /** readLedgerCached when present (main's ClaimStore): the last verified read while the ledger files are unchanged. */
+  store: Pick<ClaimStore, 'readLedger'> & Partial<Pick<ClaimStore, 'readLedgerCached'>>;
   /** Every agent with a ledger in this hive (main's claimLedgerAgents). */
   agents: () => string[];
   /** tasks.json's tasks (main's hive.allTasks()). */
@@ -62,9 +63,7 @@ export function claimCardLeadOver(d: ClaimReadDeps, ask: CardLeadAsk | string[])
   // S3 / S4: the cards (by id, card.<id> key or owned branch) and releases (by version) the query or a hit names.
   // M1 (god 5dc648): field lines print ONLY for what the QUERY names (texts[0]); every card or release a hit names
   // (texts[1..]) or is keyed to (cards) is `pointed`: one label-free `memory get` line each, no brief resolved.
-  const keys = new Set<string>();
-  for (const recs of Object.values(deps.ledgers)) for (const r of recs as Array<{ t?: string; key?: unknown }>) if (r.t === 'claim' && typeof r.key === 'string') keys.add(r.key);
-  const ix = targetIndex((deps.tasks ?? []).map((t) => String(t.id ?? '')).filter(Boolean), keys);
+  const ix = targetsOf(deps);
   const term = (ts: string[]): string[] => [...new Set(targetsIn(ts, ix, LEADS_MAX).map((t) => t.term.toLowerCase()).filter(ok))];
   const named = texts.length ? term([texts[0]]) : [];
   const pointed = [...new Set([...term(texts.slice(1)), ...cards])].filter((id) => !named.includes(id)).slice(0, LEADS_MAX);
@@ -79,15 +78,42 @@ const LEADS_MAX = 12;
  *  reconcile queue's alias pairs, tasks.json and the per-card mail index. */
 function getDeps(d: ClaimReadDeps): GetDeps {
   const root = d.root;
+  const read = (a: string): ReadResult => (d.store.readLedgerCached ? d.store.readLedgerCached(a) : d.store.readLedger(a));
   const ledgers: Record<string, LedgerRec[]> = {};
-  for (const a of d.agents()) { const prefix = verifiedPrefix(d.store.readLedger(a)); if (prefix) ledgers[a] = prefix.records; }
+  for (const a of d.agents()) { const prefix = verifiedPrefix(read(a)); if (prefix) ledgers[a] = prefix.records; }
   let reg; try { reg = loadRegistry(root); } catch { reg = DEFAULT_KEY_REGISTRY; }
   const queue = reconcileQueueForHive(root);
   const reconcileItems = Object.keys(ledgers).flatMap((a) => queue.allItems(a));
   const tasks = d.tasks();
+  const sig = { root, ledgers: Object.entries(ledgers), registry: JSON.stringify(reg), reconcile: JSON.stringify(reconcileItems), tasks: JSON.stringify(tasks) };
+  const k = kept;
+  if (k && k.sig.root === root && k.sig.registry === sig.registry && k.sig.reconcile === sig.reconcile && k.sig.tasks === sig.tasks
+    && k.sig.ledgers.length === sig.ledgers.length && k.sig.ledgers.every(([a, recs], i) => sig.ledgers[i][0] === a && sig.ledgers[i][1] === recs)) return k.deps;
+  // The same registry object while its text is unchanged, so get's per-ledger derive is kept for unchanged agents.
+  if (k && k.sig.root === root && k.sig.registry === sig.registry) reg = k.deps.registry;
   const mailRows = (card: string): string[] | null => {
     if (!/^[a-z0-9][a-z0-9._-]{0,119}$/.test(card)) return null;
     try { return readFileSync(join(root, 'state', 'mail-cards', `${card}.jsonl`), 'utf8').split('\n'); } catch { return null; }
   };
-  return { ledgers, registry: reg, reconcileItems, tasks, mailRows, ruleConfig: { r4: false } };
+  const deps: GetDeps = { ledgers, registry: reg, reconcileItems, tasks, mailRows, ruleConfig: { r4: false } };
+  kept = { sig, deps, targets: null };
+  return deps;
+}
+
+/**
+ * CLAIMS-90 brief cost (god 986e89): the last read's inputs and the GetDeps built from them. While every input is
+ * the same (each agent's verified records array, as the store's readLedgerCached returns it unchanged, and the
+ * registry, reconcile items and tasks by value), getDeps returns the same GetDeps object, so get's index and the
+ * search target index are built once, not per ask. One hive is served at a time (the last root read).
+ */
+let kept: { sig: { root: string; ledgers: Array<[string, LedgerRec[]]>; registry: string; reconcile: string; tasks: string }; deps: GetDeps; targets: TargetIndex | null } | null = null;
+
+/** The search target index (cards by id, card.<id> keys, owned branches, releases) of one GetDeps, kept with it. */
+function targetsOf(deps: GetDeps): TargetIndex {
+  if (kept?.deps === deps && kept.targets) return kept.targets;
+  const keys = new Set<string>();
+  for (const recs of Object.values(deps.ledgers)) for (const r of recs as Array<{ t?: string; key?: unknown }>) if (r.t === 'claim' && typeof r.key === 'string') keys.add(r.key);
+  const ix = targetIndex((deps.tasks ?? []).map((t) => String(t.id ?? '')).filter(Boolean), keys);
+  if (kept?.deps === deps) kept.targets = ix;
+  return ix;
 }

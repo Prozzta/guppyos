@@ -203,7 +203,33 @@ interface Indexed {
   parent: Map<string, string>;
 }
 
+/**
+ * CLAIMS-90 brief cost (god 986e89): derive() over every agent's ledger was ~220 ms of a ~230 ms brief on the
+ * step-3 hive (17k records). The index is a pure function of its GetDeps, so one GetDeps object is indexed once
+ * (readWiring keeps the same object while no input changed), and an agent's derive is kept per records array (the
+ * store's verified read returns the same array while the ledger is unchanged), so one agent's append re-derives
+ * that agent only. Readers never mutate an Indexed beyond the alias root's path compression (same answers).
+ */
+const INDEXED = new WeakMap<GetDeps, Indexed>();
+const DERIVED = new WeakMap<LedgerRec[], { reg: KeyRegistry; r4: boolean; state: ClaimsState | null }>();
+function deriveKept(records: LedgerRec[], reg: KeyRegistry, rule: { r4: boolean }): ClaimsState | null {
+  const hit = DERIVED.get(records);
+  if (hit && hit.reg === reg && hit.r4 === rule.r4) return hit.state;
+  let state: ClaimsState | null = null;
+  try { state = derive(records, reg, rule); } catch { state = null; }
+  DERIVED.set(records, { reg, r4: rule.r4, state });
+  return state;
+}
+
 function index(d: GetDeps): Indexed {
+  const kept = INDEXED.get(d);
+  if (kept) return kept;
+  const ix = indexNow(d);
+  INDEXED.set(d, ix);
+  return ix;
+}
+
+function indexNow(d: GetDeps): Indexed {
   const reg = d.registry;
   const rule = d.ruleConfig ?? { r4: false };
   const claims = new Map<string, ClaimRec>();
@@ -222,8 +248,7 @@ function index(d: GetDeps): Indexed {
   const events: EventRec[] = [];
   for (const agent of Object.keys(d.ledgers).sort(cmp)) {
     const records = d.ledgers[agent] ?? [];
-    let state: ClaimsState | null = null;
-    try { state = derive(records, reg, rule); } catch { state = null; }
+    const state = deriveKept(records, reg, rule);
     for (const r of records) {
       if (r.t === 'event') { events.push(r); continue; }
       if (r.t !== 'claim') continue;

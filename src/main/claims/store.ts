@@ -238,6 +238,8 @@ export class ClaimStore {
   private readonly fs: LedgerIo;
   private readonly now: () => Date;
   private readonly state = new Map<string, AgentState>();
+  /** readLedgerCached: the last chain-'ok' read per agent and the segment bytes it parsed and verified. */
+  private readonly verifiedReads = new Map<string, { seen: Array<{ file: string; buf: Buffer }>; result: ReadResult }>();
   private readonly queues = new Map<string, Promise<unknown>>();
   private readonly alerted = new Set<string>();
   private keyMissing = false;
@@ -296,15 +298,43 @@ export class ClaimStore {
    */
   readLedger(agentId: string): ReadResult {
     try {
-      return this.readInner(agentId);
+      // The bytes kept are the very buffers this read parsed and verified (not a second read that could race an append).
+      const seen: Array<{ file: string; buf: Buffer }> = [];
+      const r = this.readInner(agentId, seen);
+      if (r.chain === 'ok' && !r.torn) this.verifiedReads.set(agentId, { seen, result: r }); else this.verifiedReads.delete(agentId);
+      return r;
     } catch (e) {
+      this.verifiedReads.delete(agentId);
       const chain: ChainBreak = { brokenAt: 'read', reason: 'parse' };
       this.log({ kind: 'claims-read-failed', agentId, error: String(e).slice(0, 200) });
       return { records: [], torn: null, chain };
     }
   }
 
-  private readInner(agentId: string): ReadResult {
+  /**
+   * CLAIMS-90 brief cost (god 986e89): readLedger's last FULLY VERIFIED result while the agent's segment files are
+   * byte-for-byte the bytes that read parsed and verified; otherwise a full readLedger. A search brief reads every
+   * agent's ledger, and re-parsing and re-verifying ~17k lines per ask cost most of the warm budget; reading the
+   * bytes and comparing them (memcmp) does not. The check is on content, never on size or mtime, so a segment changed
+   * in place (same size, mtime put back) is re-read and re-verified. Only a chain-'ok' read is kept, and any readLedger
+   * (the integrity paths: checkAll, the writers) replaces or drops it.
+   */
+  readLedgerCached(agentId: string): ReadResult {
+    const hit = this.verifiedReads.get(agentId);
+    if (hit && this.sameBytes(agentId, hit.seen)) return hit.result;
+    return this.readLedger(agentId);
+  }
+
+  /** The agent's segments are exactly these files with exactly these bytes. */
+  private sameBytes(agentId: string, seen: Array<{ file: string; buf: Buffer }>): boolean {
+    try {
+      const files = this.segments(agentId);
+      if (files.length !== seen.length || files.some((f, i) => f !== seen[i].file)) return false;
+      return seen.every(({ file, buf }) => nodeFs.statSync(file).size === buf.length && nodeFs.readFileSync(file).equals(buf));
+    } catch { return false; }
+  }
+
+  private readInner(agentId: string, seen?: Array<{ file: string; buf: Buffer }>): ReadResult {
     if (!AGENT_RE.test(agentId)) return { records: [], torn: null, chain: { brokenAt: 'agent', reason: 'parse' } };
     this.finishPurgeSwap(agentId);
     const files = this.segments(agentId);
@@ -323,6 +353,7 @@ export class ClaimStore {
           structural = { brokenAt: `${file}@${end}`, reason: 'parse' };
         }
       }
+      seen?.push({ file, buf });
       let off = 0;
       while (off < buf.length) {
         const nl = buf.indexOf(0x0a, off);
