@@ -119,9 +119,10 @@ test('negative: a passing mention never promotes; its own card field naming anot
   const noMsg = { async commitOf(s) { return s === 'bbbbbb2' ? H('b') : null; }, async isAncestor() { return false; }, async time() { return 0; } };
   const blind = await F.doneMailFacts([{ id: 'wl-2', act: 'done', from: 'auditor', subject: 'Re: delta audit', body: 'PASS at bbbbbb2 (syn-wl)' }], CARDS, noMsg);
   assert.deepEqual(blind.skips, [{ mail: 'wl-2', reason: 'bodyOnly', cards: ['SYN-WL'] }]);
-  // A body mention that is a spelling variant (a space for the dash) is no candidate at all.
+  // Round 5 (god bfcff1, deliberately changed from round 2's noCard): a body mention written as a spelling
+  // variant (a space for the dash) names the card like any other; git confirms it through b's subject.
   const variant = await F.doneMailFacts([{ id: 'v-1', act: 'done', from: 'auditor', subject: 'Re: delta audit', body: 'PASS at bbbbbb2 (syn wl)' }], CARDS, git);
-  assert.deepEqual(variant.skips, [{ mail: 'v-1', reason: 'noCard' }]);
+  assert.deepEqual(slots(variant), ['card.syn-wl.donesha#auditor']);
 });
 
 test('index: a mention-body row reaches doneMailFacts with its body but no card and no linked cards; through the writer the body-linked report wins only when git confirms it', async () => {
@@ -391,6 +392,64 @@ test('round 4b: a merge into the card\'s own line is that card\'s work (the merg
   assert.equal(F.mergedInto('int-9.1.2 stage 2: merge guppy/x-1 @abc1234'), 'int-9.1.2');
   assert.equal(F.mergedInto('Merge guppy/x-1 @abc1234'), '');
   assert.equal(F.mergedInto('X-1: fold into the map'), '');
+  // Round 5: the whole line name after "into", not one token.
+  assert.equal(F.mergedInto('Merge FEAT-1 @abc1234 into INT 9.9.9 stage 20'), 'INT 9.9.9', 'MUTANT one-token: INT');
+  assert.equal(F.mergedInto('Merge FEAT-1 @abc1234 into INT 9.9.9'), 'INT 9.9.9');
+  assert.equal(F.mergedInto('Merge FEAT-1 @abc1234 into INT 9.9.9 (FEAT-1, Jim PASS)'), 'INT 9.9.9');
+  assert.equal(F.mergedInto('INT 9.9.9 stage 20: merge FEAT-1 @abc1234'), 'INT 9.9.9');
+});
+
+// Round 5 (god bfcff1): s3 is a stage merge whose subject writes the line name with spaces; u is a commit of a
+// card tasks.json does not know (card-shaped); v is another int card's own commit, its id written with a space.
+const S3 = HX('6', '2');
+const U = HX('6', '3');
+const V = HX('6', '4');
+const CARDS5 = [...CARDS4, 'INT-9.1.2'];
+const git5 = fakeGit(
+  { aaaaaa1: H('a'), bbbbbb2: H('b'), cccccc3: H('c'), dddddd4: H('d'), c3c3c3c: R3.i, d4d4d4d: R3.j, e6e6e6e: S3, f7f7f7f: U, a8a8a8a: V },
+  { [H('a')]: 'SYN-WL step 3: serve the current value', [H('b')]: 'SYN-WL: fold the delta-audit nits', [H('c')]: 'SYN-OTHER: the other card', [H('d')]: 'housekeeping',
+    [R3.i]: 'Merge guppy/syn-wl @bbbbbb2 into guppy/int-9.1 (SYN-WL, Jim PASS)',
+    [R3.j]: 'Merge guppy/syn-other @cccccc3 into guppy/int-9.1 (SYN-OTHER, Jim PASS)',
+    [S3]: 'Merge guppy/syn-wl @bbbbbb2 into INT 9.1.2 stage 3 (SYN-WL, Jim PASS)',
+    [U]: 'FEAT-NEW: a card the board does not know yet', [V]: 'INT 9.1 fixup 4' },
+  {
+    parents: { [H('b')]: [H('a')], [R3.i]: [H('d'), H('b')], [R3.j]: [R3.i, H('c')], [S3]: [H('d'), H('b')] },
+    files: { [H('a')]: ['src/main/x.ts'], [H('b')]: ['src/main/x.ts'], [H('c')]: ['src/main/y.ts'], [H('d')]: ['package.json'], [U]: ['src/main/z.ts'], [V]: ['src/main/w.ts'] },
+  },
+);
+
+test('round 5: one card recogniser everywhere (variants, whole into-line, card-shaped unknown ids); no fallback after a dropped carried commit', async () => {
+  // (1) A stage merge whose subject writes the line name with spaces is the int card's own work.
+  const spaced = await F.doneMailFacts([{ id: 'r5-1', act: 'done', from: 'int-builder', card: 'INT-9.1.2', subject: 'stage 3', body: 'e6e6e6e', created_at: T0 }], CARDS5, git5);
+  assert.equal(commitOf(spaced, 'card.int-9.1.2.donesha#int-builder'), S3, 'MUTANT one-token: into = "INT" names no card, the merge is dropped');
+  const spacedFeat = await F.doneMailFacts([{ id: 'r5-2', act: 'done', from: 'builder', card: 'SYN-WL', subject: 'landed', body: 'e6e6e6e', created_at: T0 }], CARDS5, git5);
+  assert.equal(commitOf(spacedFeat, 'card.syn-wl.donesha#builder'), H('b'), 'the feature card still gets its parent');
+  // The int card named with a space in a MAIL subject links like the exact id.
+  const mailVariant = await F.doneMailFacts([{ id: 'r5-3', act: 'done', from: 'gate', subject: 'int 9.1 stage 1 PASS @c3c3c3c', body: 'green', created_at: T0 }], CARDS5, git5);
+  assert.equal(commitOf(mailVariant, 'card.int-9.1.donesha#gate'), R3.i);
+  // (C) A card-shaped token the board does not know names some other card: the link is refused.
+  const unknown = await F.doneMailFacts([{ id: 'r5-4', act: 'done', from: 'auditor', cards: ['SYN-WL'], subject: 'Re: sweep', body: 'f7f7f7f', created_at: T0 }], CARDS5, git5);
+  assert.deepEqual(unknown.facts, [], 'MUTANT no-shape: FEAT-NEW reads as naming no card and the link counts');
+  assert.deepEqual(unknown.skips, [{ mail: 'r5-4', reason: 'ambiguous', cards: ['SYN-WL', 'FEAT-NEW'] }]);
+  // (C) Another int card's own commit, its id written with a space, names that card.
+  const spacedCommit = await F.doneMailFacts([{ id: 'r5-5', act: 'done', from: 'auditor', cards: ['SYN-WL'], subject: 'Re: sweep', body: 'a8a8a8a', created_at: T0 }], CARDS5, git5);
+  assert.deepEqual(spacedCommit.skips, [{ mail: 'r5-5', reason: 'ambiguous', cards: ['SYN-WL', 'INT-9.1'] }]);
+  // (2) A subject @sha that (B) drops (a merge into another line) never falls back to a body sha, by field or by link.
+  const dropped = await F.doneMailFacts([{ id: 'r5-6', act: 'done', from: 'builder', card: 'SYN-WL', subject: 'sweep @d4d4d4d', body: 'also dddddd4', created_at: T0 }], CARDS5, git5);
+  assert.deepEqual(dropped.facts, [], 'MUTANT fallback: the row carries d, a body sha naming no card');
+  assert.deepEqual(dropped.skips, [{ mail: 'r5-6', reason: 'noCommit', cards: ['SYN-WL'] }]);
+  const droppedLink = await F.doneMailFacts([{ id: 'r5-7', act: 'done', from: 'auditor', cards: ['SYN-WL'], subject: 'Re: sweep @d4d4d4d', body: 'see bbbbbb2', created_at: T0 }], CARDS5, git5);
+  assert.deepEqual(droppedLink.skips, [{ mail: 'r5-7', reason: 'noCommit', cards: ['SYN-WL'] }], 'not even the own commit the body lists');
+  // The dropped self entry: the stage merge is INT-9.1's own; for the feature card it is dropped and nothing else is carried.
+  const droppedSelf = await F.doneMailFacts([{ id: 'r5-8', act: 'done', from: 'gate', subject: 'SYN-OTHER swept @c3c3c3c', body: 'then cccccc3', created_at: T0 }], CARDS5, git5);
+  assert.deepEqual(droppedSelf.facts, []);
+  // The recogniser itself.
+  const namer = F.cardNamer(['INT-9.1', 'SYN-WL']);
+  assert.deepEqual(namer('FEAT-X lands on INT 9.1 beside syn wl'), { cards: ['INT-9.1', 'SYN-WL'], others: ['FEAT-X'] });
+  assert.deepEqual(namer('feat-x in lower case; guppy/feat-x; INT-9.1.2 stage 3'), { cards: [], others: ['INT-9.1.2'] }, 'lower case is no card shape; a longer id is another card');
+  assert.deepEqual(namer('INT-9.1: X-1 Y-2.3 ab-CD'), { cards: ['INT-9.1'], others: ['X-1', 'Y-2.3'] });
+  assert.deepEqual(namer(''), { cards: [], others: [] });
+  assert.deepEqual(F.cardMatcher(['INT-9.1'])('int 9.1 and FEAT-X'), ['INT-9.1'], 'cardMatcher is the recogniser\'s cards');
 });
 
 test('round 4b: the derived layer records a verdict per processed done mail; get reads it by mail id', async () => {
@@ -411,6 +470,15 @@ test('round 4b: the derived layer records a verdict per processed done mail; get
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, S.DONE_MAIL_STATUS_FILE), 'utf8')), { 'st-1': 'fact', 'st-2': 'older', 'st-3': 'fact', 'st-4': 'notDone', 'st-5': 'noCommit' }, 'merged, later verdicts win');
   assert.equal(read('st-5'), 'noCommit', 're-read on change');
   assert.equal(S.readDoneMailStatus(path.join(JAIL, 'none'))('st-1'), null, 'no file: nothing reached');
+  // Round 5 (god 5c9b37): the known verdicts only; a record over the size cap is treated as absent.
+  for (const v of ['fact', 'older', 'notDone', 'noShaWord', 'noCommit', 'noCard', 'ambiguous', 'bodyOnly']) assert.ok(S.isDoneMailVerdict(v), v);
+  for (const v of ['bogus', '', null, 7]) assert.ok(!S.isDoneMailVerdict(v), String(v));
+  const big = path.join(JAIL, 'hive-big');
+  fs.mkdirSync(path.join(big, 'state'), { recursive: true });
+  fs.writeFileSync(path.join(big, S.DONE_MAIL_STATUS_FILE), JSON.stringify({ 'st-1': 'fact', pad: 'x'.repeat(S.DONE_MAIL_STATUS_MAX_BYTES) }));
+  assert.equal(S.readDoneMailStatus(big)('st-1'), null, 'MUTANT no-cap: the oversized record is parsed');
+  S.writeDoneMailStatus(big, { 'st-2': 'older' });
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(big, S.DONE_MAIL_STATUS_FILE), 'utf8')), { 'st-2': 'older' }, 'a write starts over from an oversized record');
 });
 
 test('round 3 C: a single inherited link counts only when the commit the row would carry names no different card', async () => {
@@ -428,11 +496,12 @@ test('round 3 C: a single inherited link counts only when the commit the row wou
   // base and history shas the body lists name another card (an int audit listing many shas).
   const listed = await F.doneMailFacts([{ id: 'r3c-8', act: 'done', from: 'auditor', cards: ['SYN-WL'], subject: 'Re: audit @bbbbbb2', body: 'base cccccc3, history dddddd4, earlier aaaaaa1', created_at: T0 }], CARDS, git3);
   assert.equal(commitOf(listed, 'card.syn-wl.donesha#auditor'), H('b'), 'the listed shas naming other cards are not judged');
-  // A refused link (the carried commit c names SYN-OTHER) still takes the git check: b's subject names
-  // the link card, so the row stands (its value is the carried commit).
+  // A refused link (the carried commit c, the latest in git order, names SYN-OTHER) still takes the git check,
+  // and b's subject confirms the link card; but the row would carry c, which does not count for SYN-WL, so
+  // round 5 (god bfcff1: no fallback to another listed sha) skips it (deliberately changed from round 4).
   const mixed = await F.doneMailFacts([{ id: 'r3c-4', act: 'done', from: 'auditor', cards: ['SYN-WL'], subject: 'Re: sweep', body: 'bbbbbb2 beside cccccc3', created_at: T0 }], CARDS, git3);
-  assert.deepEqual(slots(mixed), ['card.syn-wl.donesha#auditor'], 'refused link, confirmed by git');
-  assert.deepEqual(mixed.skips, []);
+  assert.deepEqual(mixed.facts, [], 'MUTANT fallback: the refused commit c (or b) becomes the value');
+  assert.deepEqual(mixed.skips, [{ mail: 'r3c-4', reason: 'ambiguous', cards: ['SYN-WL', 'SYN-OTHER'] }]);
   // Refused and unconfirmed: the carried commit (c, the latest in git order: no ancestry, equal times, the larger
   // sha) names SYN-OTHER and no commit names SYN-WL.
   const refused = await F.doneMailFacts([{ id: 'r3c-9', act: 'done', from: 'auditor', cards: ['SYN-WL'], subject: 'Re: sweep', body: 'b8b8b8b then cccccc3', created_at: T0 }], CARDS, git3);

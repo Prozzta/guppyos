@@ -178,6 +178,9 @@ test('L3 --agent: the asked agent\'s own donesha line (and latest), nothing of t
   assert.deepEqual(get('FOO-7', {}, reached).lead.slice(0, 3).map((l) => [l.by, l.latest === true, l.source, l.value]), [['beta-2', true, 'claim', SHA_B], ['beta-2', false, 'claim', SHA_B], ['alpha-1', false, 'claim', SHA_A]]);
   const lag = deps({ mailRows: (card) => (card === 'foo-7' ? rows : null), doneMailStatus: () => null });
   assert.equal(get('card.foo-7.donesha', {}, lag).current.source, 'mail', 'no verdict yet: the mail bridges the lag');
+  // Round 5 (god 5c9b37): a word outside the known verdict set is no verdict.
+  const bogus = deps({ mailRows: (card) => (card === 'foo-7' ? rows : null), doneMailStatus: () => 'bogus' });
+  assert.equal(get('card.foo-7.donesha', {}, bogus).current.source, 'mail', 'MUTANT any-word: an unknown verdict word skips the mail');
   const noClaims = deps({ mailRows: (card) => (card === 'foo-7' ? gate : null) });
   noClaims.ledgers = { ...noClaims.ledgers, derived: noClaims.ledgers.derived.filter((c) => c.key !== 'card.foo-7.donesha') };
   assert.deepEqual(get('FOO-7', {}, noClaims).lead.slice(0, 2).map((l) => [l.by, l.latest === true, l.source, l.value]), [['gamma-3', true, 'mail', 'dead1234'.repeat(5)], ['gamma-3', false, 'mail', 'dead1234'.repeat(5)]]);

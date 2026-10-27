@@ -356,17 +356,18 @@ test('(d) done mails, R2 (a)(c): one per (card, sender): the newest done mail an
   const contradicted = await F.doneMailFacts([{ id: 'm17', act: 'done', from: 'agent-x', cards: ['syn-d3'], subject: 'SYN-D1', body: 'dddddd4' }], ['SYN-D1', 'SYN-D3'], g);
   assert.deepEqual(contradicted.facts, [], 'the subject names SYN-D1, no commit subject confirms it: not SYN-D1, and never the contradicted link');
   assert.deepEqual(contradicted.skips, [{ mail: 'm17', reason: 'ambiguous', cards: ['SYN-D1'] }]);
-  // CLAIMS-WEAKLINK-DONESHA round 3 (C): the link counts only when no reported commit's subject names
-  // a different card; commit a names SYN-D1 (and SYN-D2), so a syn-d3 link reporting it gives nothing.
+  // CLAIMS-WEAKLINK-DONESHA round 5 (god bfcff1; deliberately changed from god c33130/c19239): a spelling
+  // variant in the subject names the card like the exact id, so m15 reads as m12 (SYN-D1, confirmed by a),
+  // and a variant-only subject is a candidate that git must confirm (here it does not: ambiguous, not noCard).
   const variant = await F.doneMailFacts([{ id: 'm15', act: 'done', from: 'agent-x', cards: ['syn-d3'], subject: 'SYN D1', body: 'aaaaaa1' }], ['SYN-D1', 'SYN-D3'], g);
-  assert.deepEqual(variant.facts, [], 'a variant never beats a link, and the link does not count on another card\'s commit');
-  assert.deepEqual(variant.skips, [{ mail: 'm15', reason: 'ambiguous', cards: ['SYN-D3', 'SYN-D1'] }]);
+  assert.deepEqual(variant.facts.map((f) => f.slot), ['card.syn-d1.donesha#agent-x'], 'the variant names SYN-D1; git confirms it');
   const variantAlone = await F.doneMailFacts([{ id: 'm16', act: 'done', from: 'agent-x', subject: 'temp leak fixed', body: 'aaaaaa1' }], ['TEMP-LEAK', 'SYN-D3'], g);
-  assert.deepEqual(variantAlone.facts, [], 'a variant-only subject links no card');
-  assert.deepEqual(variantAlone.skips, [{ mail: 'm16', reason: 'noCard' }]);
+  assert.deepEqual(variantAlone.facts, [], 'a variant-only subject is a candidate; no commit subject confirms it');
+  assert.deepEqual(variantAlone.skips, [{ mail: 'm16', reason: 'ambiguous', cards: ['TEMP-LEAK'] }]);
   const inherited = await F.doneMailFacts([{ id: 'm13', act: 'done', from: 'agent-x', cards: ['syn-d3'], subject: 'stage sweep', body: 'SYN-D1 aaaaaa1' }], ['SYN-D1', 'SYN-D3'], g);
   assert.deepEqual(inherited.facts, [], "round 3 (C): the commit's subject names SYN-D1, not the linked card");
-  assert.deepEqual(inherited.skips, [{ mail: 'm13', reason: 'ambiguous', cards: ['SYN-D3', 'SYN-D1'] }]);
+  // Round 5: SYN-D2, which a's subject also names, is no card of this board but is card-shaped: some other card.
+  assert.deepEqual(inherited.skips, [{ mail: 'm13', reason: 'ambiguous', cards: ['SYN-D3', 'SYN-D1', 'SYN-D2'] }]);
   const inheritedPlain = await F.doneMailFacts([{ id: 'm18', act: 'done', from: 'agent-x', cards: ['syn-d3'], subject: 'stage sweep', body: 'dddddd4' }], ['SYN-D1', 'SYN-D3'], g);
   assert.deepEqual(inheritedPlain.facts.map((f) => f.slot), ['card.syn-d3.donesha#agent-x'], 'a commit naming no card still counts with the link');
   const both = await F.doneMailFacts([{ id: 'm14', act: 'done', from: 'agent-x', cards: ['syn-d3'], subject: 'SYN-D1 and SYN-D3', body: 'aaaaaa1' }], ['SYN-D1', 'SYN-D3'], g);
@@ -704,6 +705,10 @@ test('live driver: waits while disabled, serializes runs, reads only new done-ma
   deliver(x, 'agent-x', { id: 'm-h3', act: 'done', from: 'agent-x', card: 'SYN-H1', subject: 'x', body: r.g(['rev-parse', 'HEAD~1']) });
   await live.run('pass', () => live.pass());
   assert.equal(x.claims().length, n1 + 1);
+  // Round 5: the live pass records its verdict on the new mail (the backfill recorded m-h1 and m-h5).
+  const verdicts = JSON.parse(fs.readFileSync(path.join(x.root, 'state', 'derived-done-mails.json'), 'utf8'));
+  assert.equal(verdicts['m-h3'], 'fact', 'MUTANT live-no-write: only the backfill writes verdicts');
+  assert.deepEqual(Object.keys(verdicts).sort(), ['m-h1', 'm-h3', 'm-h5']);
   await live.run('pass', () => live.pass());
   assert.equal(x.claims().length, n1 + 1, 'a second pass writes nothing');
   // A mail already seen (agent/id) is not read again, even if its ledger entry and copy change (a pass
