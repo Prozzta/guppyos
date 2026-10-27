@@ -19,7 +19,7 @@ const [src, termsFile] = process.argv.slice(2).filter((a) => !a.startsWith('--')
 if (!src || !termsFile) { console.error('usage: claims90-brief-bench.cjs <builtHiveRoot> <termsFile> [--json]'); process.exit(2); }
 const { ClaimStore } = loadTs('src/main/claims/store.ts');
 const { SandboxKeyProvider, FileLedgerKeyRecord, FileHeadAnchorStore, KEY_RECORD_FILE, HEAD_ANCHOR_FILE } = loadTs('src/main/claims/keyProvider.ts');
-const { recordMac, sha256Hex } = loadTs('src/main/claims/canonical.ts');
+const { keyIdOf, recordMac, sha256Hex } = loadTs('src/main/claims/canonical.ts');
 const { claimCardLeadOver } = loadTs('src/main/claims/readWiring.ts');
 
 const SEG = /^\d{4}-\d{2}\.jsonl$/;
@@ -64,6 +64,8 @@ for (const agent of fs.readdirSync(path.join(src, 'agents'))) {
 const agents = () => Object.keys(last);
 const tasks = (() => { try { const t = JSON.parse(fs.readFileSync(path.join(hive, 'tasks.json'), 'utf8')); return Array.isArray(t) ? t : (t.tasks ?? []); } catch { return []; } })();
 const keys = new SandboxKeyProvider(key);
+// main's user-data record of this hive's ledger key (the store refuses a key it has no record of once segments exist).
+new FileLedgerKeyRecord(path.join(ud, KEY_RECORD_FILE)).set(hive, keyIdOf(key));
 const newStore = () => new ClaimStore({ hiveRoot: hive, keys, keyRecord: new FileLedgerKeyRecord(path.join(ud, KEY_RECORD_FILE)), headAnchor: new FileHeadAnchorStore(path.join(ud, HEAD_ANCHOR_FILE)), anchorDelayMs: 1e9 });
 const deps = (store) => ({ root: hive, store, agents, tasks: () => tasks });
 const ask = (q) => ({ cards: [], texts: [q] });
