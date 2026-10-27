@@ -25,6 +25,7 @@ import {
   type CardLike, type DerivedFact, type GitLogPort, type MailLike, type TagLike,
 } from './derivedFacts';
 import { mergeHotCold, readArchive } from '../taskArchive';
+import { doneMailStatuses, writeDoneMailStatus } from './derivedDoneStatus';
 import { isValidMailId, mailBodyHash, type MailLedgerDoc } from '../mailLedger';
 import { TRUSTED_METHODS, type MailLinkMethod } from '../mailCards';
 
@@ -325,6 +326,8 @@ export async function runDerivedBackfill(deps: DerivedWriterDeps, input: Backfil
   const done = input.git ? await doneMailFacts(mails, cardIds, input.git) : { facts: [], skipped: { noGit: 1 } as Record<string, number>, skips: [], older: 0 };
   // R2 (c): every skipped done mail is logged with its reason (ids and card ids only).
   for (const s of done.skips) deps.log?.({ kind: 'claims-derived-done-skip', mail: s.mail.slice(0, 120), reason: s.reason, ...(s.cards ? { cards: s.cards } : {}) });
+  // Round 4b: every processed done mail's verdict, so `memory get`'s mail rule bridges only the derived lag.
+  writeDoneMailStatus(input.hiveRoot, doneMailStatuses(mails, done));
   const doneShas = await syncDerived(deps, done.facts);
   const none = { facts: 0, appended: 0, unchanged: 0, superseded: 0, failed: 0 };
   const log = input.git?.log ? await input.git.log() : null;

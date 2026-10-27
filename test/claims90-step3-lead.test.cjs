@@ -170,6 +170,14 @@ test('L3 --agent: the asked agent\'s own donesha line (and latest), nothing of t
   const withGate = deps({ mailRows: (card) => (card === 'foo-7' ? gate : null) });
   const g = get('FOO-7', {}, withGate);
   assert.deepEqual(g.lead.slice(0, 2).map((l) => [l.by, l.latest === true, l.source, l.value]), [['beta-2', true, 'claim', SHA_B], ['gamma-3', false, 'mail', 'dead1234'.repeat(5)]]);
+  // Round 4b (god f7c2bc item 2): a done mail the derived layer has reached (a verdict in derivedDoneStatus) is
+  // never the current by itself: refused, its sha leaves both the field key's current and the lead; a mail with no
+  // verdict yet (the derived lag) still bridges as before.
+  const reached = deps({ mailRows: (card) => (card === 'foo-7' ? rows : null), doneMailStatus: (id) => (id === '2026-10-08T09-00-00-000Z-ffffff' ? 'ambiguous' : null) });
+  assert.deepEqual([get('card.foo-7.donesha', {}, reached).current.source, get('card.foo-7.donesha', {}, reached).current.value], ['claim', SHA_B], 'MUTANT: a refused done mail\'s sha is the field current (G1 leak)');
+  assert.deepEqual(get('FOO-7', {}, reached).lead.slice(0, 3).map((l) => [l.by, l.latest === true, l.source, l.value]), [['beta-2', true, 'claim', SHA_B], ['beta-2', false, 'claim', SHA_B], ['alpha-1', false, 'claim', SHA_A]]);
+  const lag = deps({ mailRows: (card) => (card === 'foo-7' ? rows : null), doneMailStatus: () => null });
+  assert.equal(get('card.foo-7.donesha', {}, lag).current.source, 'mail', 'no verdict yet: the mail bridges the lag');
   const noClaims = deps({ mailRows: (card) => (card === 'foo-7' ? gate : null) });
   noClaims.ledgers = { ...noClaims.ledgers, derived: noClaims.ledgers.derived.filter((c) => c.key !== 'card.foo-7.donesha') };
   assert.deepEqual(get('FOO-7', {}, noClaims).lead.slice(0, 2).map((l) => [l.by, l.latest === true, l.source, l.value]), [['gamma-3', true, 'mail', 'dead1234'.repeat(5)], ['gamma-3', false, 'mail', 'dead1234'.repeat(5)]]);

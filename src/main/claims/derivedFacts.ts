@@ -242,18 +242,35 @@ export function mergedBranch(subject: string): string {
   return m ? m[1] : '';
 }
 
+/** The line a merge commit's subject says it merged INTO ("Merge guppy/x-1 @abc into guppy/int-9.1.2
+ *  stage 2", "int-9.1.2 stage 2: merge guppy/x-1"), or '' for none. */
+export function mergedInto(subject: string): string {
+  const m = /^Merge\s.*?\binto\s+'?([^\s']+)'?/i.exec(subject);
+  if (m) return m[1];
+  const l = /^'?([^\s':]+)'?(?:\s+stage\s+\S+)?:\s+merge\s/i.exec(subject);
+  return l ? l[1] : '';
+}
+
 /** A commit a done mail reports, resolved to the work it stands for (round 3). */
 export interface ReportedCommit {
   /** The commit a row would carry: the commit itself, or, through a merge, the merged parent. */
   commit: string;
   /** The text that may name a card: the commit's subject line and, through a merge, the branch the
-   *  merge's subject says it merged. */
+   *  merge's subject says it merged; for a merge itself (`into`), only the line it merged into. */
   text: string;
   /** The merge the mail wrote, when the commit was reached through one (a merge confirms nothing and
-   *  is never the reported sha). */
+   *  is never the reported sha, except for the line it merged into: `into`). */
   merge?: string;
+  /** Every merge the commit was reached through, innermost first (round 4b: a parent below a merge into
+   *  the card's own line is not the card's value). */
+  chain?: string[];
   /** The commit changes only CHANGELOG/docs files (or none): it confirms no card. */
   docsOnly: boolean;
+  /** Round 4b (god aa8321): the commit is a merge and this is the line it merged into (its subject says
+   *  so, or an earlier merge on its first-parent chain does). For the card that owns that line the
+   *  merge IS the card's own work: the row carries the merge sha and its merged parents are not
+   *  descended. For every other card the entry is dropped and the merged parents count as round 3. */
+  into?: string;
 }
 
 const MERGE_DEPTH = 3;
@@ -272,16 +289,36 @@ export async function resolveReported(full: string, git: GitPort, depth = 0): Pr
   if (parents && parents.length >= 2) {
     if (depth >= MERGE_DEPTH) return [];
     const branch = mergedBranch(subject);
-    const out: ReportedCommit[] = [];
+    // Round 4b: the merge itself, for the line it merged into (the caller keeps it only for that card).
+    const into = await mergedIntoOf(subject, parents, git);
+    const out: ReportedCommit[] = into ? [{ commit: full, text: into, docsOnly: false, into }] : [];
     for (const p of parents.slice(1)) {
       for (const r of await resolveReported(p, git, depth + 1)) {
-        if (!out.some((x) => x.commit === r.commit)) out.push({ ...r, text: branch ? `${r.text} ${branch}` : r.text, merge: full });
+        if (out.some((x) => x.commit === r.commit)) continue;
+        out.push(r.into !== undefined ? r : { ...r, text: branch ? `${r.text} ${branch}` : r.text, merge: full, chain: [...(r.chain ?? []), full] });
       }
     }
     return out;
   }
   const files = git.changedFiles ? await git.changedFiles(full) : null;
   return [{ commit: full, text: subject, docsOnly: files !== null && files.every(isDocFile) }];
+}
+
+/** The line a merge merged into: what its subject says, else what an earlier merge on its first-parent
+ *  chain says (a stage chain on an INT line: "int-9.1.2 stage 3" merged on top of "... into int-9.1.2"),
+ *  up to MERGE_DEPTH steps back; '' when nothing says. */
+async function mergedIntoOf(subject: string, parents: readonly string[], git: GitPort): Promise<string> {
+  const own = mergedInto(subject);
+  if (own || !git.parents) return own;
+  let p: string | undefined = parents[0];
+  for (let i = 0; i < MERGE_DEPTH && p; i++) {
+    const pp = await git.parents(p);
+    if (!pp || pp.length < 2) return '';
+    const t = mergedInto(commitSubject(git.message ? await git.message(p) : null));
+    if (t) return t;
+    p = pp[0];
+  }
+  return '';
 }
 
 const SHA_RE = /(?<![0-9A-Za-z])([0-9a-f]{7,40})(?:(\.\.\.?)([0-9a-f]{7,40}))?(?![0-9A-Za-z])/g;
@@ -741,7 +778,7 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
     skipped[reason]++;
     skips.push({ mail, reason, ...(cards?.length ? { cards } : {}) });
   };
-  const newest = new Map<string, { m: MailLike & { id: string }; card: string; from: string; commit: string; named: number; range?: ShaMention['range']; subject: boolean; inRepo: boolean; via?: string }>();
+  const newest = new Map<string, { m: MailLike & { id: string }; card: string; from: string; commit: string; named: number; range?: ShaMention['range']; subject: boolean; inRepo: boolean; via?: string; own: boolean }>();
   let withCommit = 0;
   const seen = new Set<string>();
   const ordered = [...mails].filter((m): m is MailLike & { id: string } => !!m && typeof m.id === 'string')
@@ -778,7 +815,12 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
     }
     if (!entries.length && !ats.length) { skip(m.id, 'noCommit'); continue; }
     // (B) A commit reached through a merge counts for the card only when its subject or branch names it.
-    const keepFor = (card: string) => (e: ReportedCommit | undefined): boolean => !e || !e.merge || match(e.text).includes(card);
+    // Round 4b: a merge into the card's own line is the card's work: it counts as itself and the parents
+    // it merged are not descended; for every other card such a merge entry is dropped.
+    const keepFor = (card: string): ((e: ReportedCommit | undefined) => boolean) => {
+      const own = new Set(entries.filter((e) => e.into !== undefined && match(e.into).includes(card)).map((e) => e.commit));
+      return (e) => !e || (e.into !== undefined ? own.has(e.commit) : !e.merge || (!(e.chain ?? []).some((c) => own.has(c)) && match(e.text).includes(card)));
+    };
     // (C) The commits a row on `card` would carry: the subject's @shas, else the latest in git order.
     const carriedFor = async (card: string): Promise<ReportedCommit[]> => {
       const keep = keepFor(card);
@@ -803,17 +845,18 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
     const at = reported ? atsKept.find((a) => a.sha === reported) : undefined;
     const reportedFull = at ? (at.full ?? await git.commitOf(at.sha)) : null;
     const commit = reported ? (reportedFull ?? reported) : ((await latestOfCommits(kept.map((e) => e.commit), git)) ?? kept[0].commit);
-    const via = at ? at.entry?.merge : kept.find((e) => e.commit === commit)?.merge;
+    const entry = at ? at.entry : kept.find((e) => e.commit === commit);
+    const via = entry?.merge;
     const from = typeof m.from === 'string' && m.from ? clip(m.from, 60) : 'unknown';
     withCommit++;
-    newest.set(`${key}#${from}`, { m, card, from, commit, named: kept.length, range: rangeOf.get(commit), subject: !!reported, inRepo: !reported || !!reportedFull, via });
+    newest.set(`${key}#${from}`, { m, card, from, commit, named: kept.length, range: rangeOf.get(commit), subject: !!reported, inRepo: !reported || !!reportedFull, via, own: entry?.into !== undefined });
   }
   const facts: DerivedFact[] = [];
-  for (const [slot, { m, card, from, commit, named, range, subject, inRepo, via }] of newest) {
+  for (const [slot, { m, card, from, commit, named, range, subject, inRepo, via, own }] of newest) {
     const key = slot.slice(0, slot.lastIndexOf('#'));
     const at = iso(m.created_at);
     const of = range ? ` (the ${range.end === 'from' ? 'start' : 'end'} of the range ${range.from}..${range.to})` : '';
-    const merged = via ? ` (the merged parent of ${via.slice(0, 8)}, the merge the mail wrote)` : '';
+    const merged = via ? ` (the merged parent of ${via.slice(0, 8)}, the merge the mail wrote)` : own ? " (the merge into the card's own line)" : '';
     const others = subject ? ` as its subject's @sha${inRepo ? '' : ' (not in the repository)'}${merged}` : named > 1 ? `; it is the latest in git order of the ${named} commits the mail names${merged}` : merged;
     facts.push({
       slot, key, kind: 'fact',
