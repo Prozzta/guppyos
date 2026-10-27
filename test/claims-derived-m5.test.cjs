@@ -356,15 +356,24 @@ test('(d) done mails, R2 (a)(c): one per (card, sender): the newest done mail an
   const contradicted = await F.doneMailFacts([{ id: 'm17', act: 'done', from: 'agent-x', cards: ['syn-d3'], subject: 'SYN-D1', body: 'dddddd4' }], ['SYN-D1', 'SYN-D3'], g);
   assert.deepEqual(contradicted.facts, [], 'the subject names SYN-D1, no commit subject confirms it: not SYN-D1, and never the contradicted link');
   assert.deepEqual(contradicted.skips, [{ mail: 'm17', reason: 'ambiguous', cards: ['SYN-D1'] }]);
+  // CLAIMS-WEAKLINK-DONESHA round 3 (C): the link counts only when no reported commit's subject names
+  // a different card; commit a names SYN-D1 (and SYN-D2), so a syn-d3 link reporting it gives nothing.
   const variant = await F.doneMailFacts([{ id: 'm15', act: 'done', from: 'agent-x', cards: ['syn-d3'], subject: 'SYN D1', body: 'aaaaaa1' }], ['SYN-D1', 'SYN-D3'], g);
-  assert.deepEqual(variant.facts.map((f) => f.slot), ['card.syn-d3.donesha#agent-x'], 'a variant never beats a link');
+  assert.deepEqual(variant.facts, [], 'a variant never beats a link, and the link does not count on another card\'s commit');
+  assert.deepEqual(variant.skips, [{ mail: 'm15', reason: 'ambiguous', cards: ['SYN-D3', 'SYN-D1'] }]);
   const variantAlone = await F.doneMailFacts([{ id: 'm16', act: 'done', from: 'agent-x', subject: 'temp leak fixed', body: 'aaaaaa1' }], ['TEMP-LEAK', 'SYN-D3'], g);
   assert.deepEqual(variantAlone.facts, [], 'a variant-only subject links no card');
   assert.deepEqual(variantAlone.skips, [{ mail: 'm16', reason: 'noCard' }]);
   const inherited = await F.doneMailFacts([{ id: 'm13', act: 'done', from: 'agent-x', cards: ['syn-d3'], subject: 'stage sweep', body: 'SYN-D1 aaaaaa1' }], ['SYN-D1', 'SYN-D3'], g);
-  assert.deepEqual(inherited.facts.map((f) => f.slot), ['card.syn-d3.donesha#agent-x']);
+  assert.deepEqual(inherited.facts, [], "round 3 (C): the commit's subject names SYN-D1, not the linked card");
+  assert.deepEqual(inherited.skips, [{ mail: 'm13', reason: 'ambiguous', cards: ['SYN-D3', 'SYN-D1'] }]);
+  const inheritedPlain = await F.doneMailFacts([{ id: 'm18', act: 'done', from: 'agent-x', cards: ['syn-d3'], subject: 'stage sweep', body: 'dddddd4' }], ['SYN-D1', 'SYN-D3'], g);
+  assert.deepEqual(inheritedPlain.facts.map((f) => f.slot), ['card.syn-d3.donesha#agent-x'], 'a commit naming no card still counts with the link');
   const both = await F.doneMailFacts([{ id: 'm14', act: 'done', from: 'agent-x', cards: ['syn-d3'], subject: 'SYN-D1 and SYN-D3', body: 'aaaaaa1' }], ['SYN-D1', 'SYN-D3'], g);
-  assert.deepEqual(both.facts.map((f) => f.slot), ['card.syn-d3.donesha#agent-x'], 'several in the subject: the linked one among them');
+  assert.deepEqual(both.facts, [], "several in the subject, the linked one among them: still nothing on another card's commit");
+  assert.deepEqual(both.skips, [{ mail: 'm14', reason: 'ambiguous', cards: ['SYN-D3', 'SYN-D1'] }]);
+  const bothPlain = await F.doneMailFacts([{ id: 'm19', act: 'done', from: 'agent-x', cards: ['syn-d3'], subject: 'SYN-D1 and SYN-D3', body: 'dddddd4' }], ['SYN-D1', 'SYN-D3'], g);
+  assert.deepEqual(bothPlain.facts.map((f) => f.slot), ['card.syn-d3.donesha#agent-x'], 'several in the subject: the linked one among them');
 });
 
 // ———————————————————————————————————————————————————— the writer
