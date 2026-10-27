@@ -526,7 +526,7 @@ test('R2 port: the client answers a worker\'s `{ ask, op, args }` through the as
 test('R2 wiring (static): the worker asks main for `card-lead` and answers `{ answer }` messages; mainWiring routes `card-lead` to the cardLead dep; index.ts wires claimCardLeadOver; the worker passes --exact / --newest to the engine', () => {
   const src = (p) => fs.readFileSync(path.join(REPO, p), 'utf8');
   const worker = src('src/main/nativeMemory/worker.ts');
-  assert.match(worker, /cardLead: async \(lead\) => \{ const r = await ask\('card-lead', \{ cards: lead\.cards, texts: lead\.texts \}\);/, 'S4: the worker sends the texts with the cards');
+  assert.match(worker, /cardLead: async \(lead\) => \{ const r = await ask\('card-lead', \{ cards: lead\.cards, texts: lead\.texts \}, lead\.deadline\);/, 'S4: the worker sends the texts with the cards');
   assert.match(worker, /typeof ans\.answer === 'number'/);
   assert.match(worker, /port\.postMessage\(\{ ask: id, op, args \}\)/);
   assert.match(worker, /exact: a\.exact === true, newest: a\.newest === true, kind: \(a\.kind as string\) \?\? null, key: \(a\.key as string\) \?\? null, full: a\.full === true \}/, 'MUTANT: --exact / --newest dropped between service.ts and the engine');

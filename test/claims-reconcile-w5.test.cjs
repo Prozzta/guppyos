@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
-const { ReconcileQueue, ReconcileApi, enqueueR5AfterIndex, shouldRunR5, keyAliasCandidates, reconcileItemId, TAU2, reconcilePromptText } = loadTs(path.join(__dirname, '../src/main/claims/reconcile.ts'));
+const { ReconcileQueue, ReconcileApi, enqueueR5AfterIndex, shouldRunR5, keyAliasCandidates, keysMayAlias, reconcileItemId, TAU2, reconcilePromptText } = loadTs(path.join(__dirname, '../src/main/claims/reconcile.ts'));
 const { reconcileApiForHive, createReconcileLiveClaims, refreshReconcileQueueForHive } = loadTs(path.join(__dirname, '../src/main/claims/reconcileHive.ts'));
 const { handleClaimVerb } = loadTs(path.join(__dirname, '../src/main/claims/endpoint.ts'));
 
@@ -409,4 +409,19 @@ test('R5 append hook gates on the extracted one-time-import predicate', () => {
   const index = fs.readFileSync(path.join(__dirname, '../src/main/index.ts'), 'utf8');
   // {0,560}: CL-READERWATCHER's import trigger (one comment and one line) may come first.
   assert.match(index, /onAppend:\s*\(agentId,\s*id,\s*rec\)\s*=>\s*\{[\s\S]{0,560}if\s*\(!shouldRunR5\(rec\)\)/);
+});
+
+test('CLAIMS-KEYFIND-FOLLOWUPS (c) keysMayAlias: keys that differ in a number are two versions, never one key misspelt; keyAliasCandidates no longer proposes them, and still proposes a typo pair', () => {
+  assert.equal(keysMayAlias('card.int-1.1.101', 'card.int-1.1.102'), false);
+  assert.equal(keysMayAlias('card.int-1.1.100', 'card.int-1.1.101'), false);
+  assert.equal(keysMayAlias('release.1.1.99', 'release.1.1.100'), false);
+  assert.equal(keysMayAlias('card.int-1.1.100', 'card.cut-1.1.100'), true, 'same digits: the typo rule alone cannot tell two cards apart (get uses tasks.json for that)');
+  assert.equal(keysMayAlias('release.name', 'release.na_me'), true);
+  assert.equal(keysMayAlias('card.foo-7', 'card.fo-7'), true);
+  assert.equal(keysMayAlias('card.foo-7', 'card.foo-77'), false);
+  const reg = { v: 1, namespaces: [{ pattern: 'release.*', cardinality: 'single' }], keys: {} };
+  const claim = (id, key) => ({ id, agent: 'owner', key, t: 'claim', kind: 'fact' });
+  const state = { claims: { a: { status: 'live' }, b: { status: 'live' }, c: { status: 'live' }, d: { status: 'live' }, e: { status: 'live' } } };
+  const found = keyAliasCandidates('owner', [claim('a', 'release.1.1.101'), claim('b', 'release.1.1.102'), claim('c', 'release.1.1.100'), claim('d', 'release.name'), claim('e', 'release.na_me')], state, reg);
+  assert.deepEqual(found.map((f) => [f.a, f.b]), [['d', 'e']], 'only the typo pair; no version pair is proposed');
 });

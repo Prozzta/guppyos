@@ -414,3 +414,51 @@ test('T2 (god fe1140): the text view prints COUNTS of competing/superseded rows 
     assert.equal(G.formatGet(r), t, 'any other value is ON');
   } finally { if (saved === undefined) delete process.env.C90_HIDE_STALE; else process.env.C90_HIDE_STALE = saved; }
 });
+
+// CLAIMS-KEYFIND-FOLLOWUPS (c), god 8ee714: open key-alias pairs over versions / two known cards.
+function versionDeps() {
+  const ledgers = {
+    'alpha-1': [
+      c('c-aaaaaaaaaaa1', 'alpha-1', 'card.int-1.1.100', '2026-10-01T10:00:00.000Z', 'INT-1.1.100 merged at 1111111'),
+      c('c-aaaaaaaaaaa2', 'alpha-1', 'card.cut-1.1.100', '2026-10-02T10:00:00.000Z', 'CUT-1.1.100 installer at 2222222'),
+      c('c-aaaaaaaaaaa3', 'alpha-1', 'card.int-1.1.101', '2026-10-03T10:00:00.000Z', 'INT-1.1.101 merged at 3333333'),
+      c('c-aaaaaaaaaaa4', 'alpha-1', 'card.int-1.1.102', '2026-10-04T10:00:00.000Z', 'INT-1.1.102 merged at 4444444'),
+      c('c-aaaaaaaaaaa5', 'alpha-1', 'card.foo-7', '2026-10-05T10:00:00.000Z', 'FOO-7 build at 5555555'),
+      c('c-aaaaaaaaaaa6', 'alpha-1', 'card.fo-7', '2026-10-06T10:00:00.000Z', 'FO-7 (typo) build at 6666666'),
+    ],
+  };
+  const tasks = [{ id: 'INT-1.1.100', status: 'done' }, { id: 'CUT-1.1.100', status: 'done' }, { id: 'INT-1.1.101', status: 'done' }, { id: 'INT-1.1.102', status: 'doing' }, { id: 'FOO-7', status: 'doing' }];
+  // The open proposals the typo-distance census made before the fix (persisted queues still carry them).
+  const open = (i, a, b) => ({ itemId: `i${i}`, kind: 'key-alias', a, b, text: 'Possible key alias' });
+  const reconcileItems = [open(1, 'c-aaaaaaaaaaa1', 'c-aaaaaaaaaaa2'), open(2, 'c-aaaaaaaaaaa1', 'c-aaaaaaaaaaa3'), open(3, 'c-aaaaaaaaaaa3', 'c-aaaaaaaaaaa4'), open(4, 'c-aaaaaaaaaaa5', 'c-aaaaaaaaaaa6')];
+  return { ledgers, registry: JSON.parse(JSON.stringify(DEFAULT_KEY_REGISTRY)), reconcileItems, tasks, mailRows: () => null, ruleConfig: { r4: false } };
+}
+
+test('CLAIMS-KEYFIND-FOLLOWUPS (c) get: open key-alias pairs no longer merge card.int-1.1.100 / cut-1.1.100 / int-1.1.101 / int-1.1.102: each version answers with its own fact; a typo pair over one unknown card still merges', () => {
+  const d = versionDeps();
+  const r102 = G.resolveGet('card.int-1.1.102', {}, d);
+  assert.deepEqual(r102.keys, ['card.int-1.1.102'], 'MUTANT: another version\'s key joined the set');
+  assert.equal(r102.current.claimId, 'c-aaaaaaaaaaa4');
+  const r100 = G.resolveGet('card.int-1.1.100', {}, d);
+  assert.deepEqual(r100.keys, ['card.int-1.1.100'], 'two cards tasks.json knows (int / cut) never merge on edit distance');
+  assert.equal(r100.current.claimId, 'c-aaaaaaaaaaa1', 'not the cut card\'s newer fact');
+  assert.deepEqual(G.resolveGet('card.cut-1.1.100', {}, d).keys, ['card.cut-1.1.100']);
+  assert.equal(G.resolveGet('card.int-1.1.101', {}, d).current.claimId, 'c-aaaaaaaaaaa3');
+  assert.doesNotMatch(G.formatGet(r102, {}), /1\.1\.100|1\.1\.101/, 'the printed answer names no other version');
+  const typo = G.resolveGet('card.foo-7', {}, d);
+  assert.deepEqual(typo.keys, ['card.fo-7', 'card.foo-7'], 'fo-7 is no card in tasks.json: the open typo pair still joins');
+  assert.equal(typo.current.claimId, 'c-aaaaaaaaaaa6');
+});
+
+test('CLAIMS-KEYFIND-FOLLOWUPS (c) get: an ANSWERED alias is the agent\'s word and still joins the same keys (key-alias event; registry aliasOf)', () => {
+  const d = versionDeps();
+  d.reconcileItems = [];
+  d.ledgers['alpha-1'].push({ t: 'event', id: 'e-1', at: '2026-10-07T10:00:00.000Z', wt: 'x', agent: 'alpha-1', ev: 'key-alias', targets: ['c-aaaaaaaaaaa3', 'c-aaaaaaaaaaa4'] });
+  const r = G.resolveGet('card.int-1.1.101', {}, d);
+  assert.deepEqual(r.keys, ['card.int-1.1.101', 'card.int-1.1.102'], 'an answered key-alias event joins whatever the agent said');
+  assert.equal(r.current.claimId, 'c-aaaaaaaaaaa4');
+  const d2 = versionDeps();
+  d2.reconcileItems = [];
+  d2.registry.keys = { ...(d2.registry.keys || {}), 'card.cut-1.1.100': { aliasOf: 'card.int-1.1.100' } };
+  assert.deepEqual(G.resolveGet('card.int-1.1.100', {}, d2).keys, ['card.cut-1.1.100', 'card.int-1.1.100'], 'a registry alias joins as before');
+});

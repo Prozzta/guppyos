@@ -24,6 +24,7 @@
  */
 import type { ClaimRec, ClaimsState, EventRec, KeyRegistry, LedgerRec, ReconcileItem } from '../../shared/claims';
 import { derive } from './derive';
+import { keysMayAlias } from './reconcile';
 import { hideStale } from './stale';
 
 export interface GetDeps {
@@ -254,10 +255,20 @@ function index(d: GetDeps): Indexed {
     }
   }
   for (const [k, v] of Object.entries(reg.keys)) if (v.aliasOf) union(k, canonicalKey(k, reg));
+  // CLAIMS-KEYFIND-FOLLOWUPS (c): an OPEN key-alias proposal (unanswered queue item) joins two keys only while they
+  // could be one key misspelt: never two keys that differ in a number (two versions), never the keys of two cards
+  // tasks.json both knows (card.int-1.1.100 / card.cut-1.1.100 are two cards, whatever their edit distance). An
+  // answered alias (key-alias event, registry aliasOf) is the agent's word and joins as before.
+  const known = new Set((d.tasks ?? []).map((t) => String(t.id ?? '').toLowerCase()).filter(Boolean));
+  const twoKnownCards = (ka: string, kb: string): boolean => {
+    const a = cardIdOfKey(ka), b = cardIdOfKey(kb);
+    return !!a && !!b && a !== b && known.has(a) && known.has(b);
+  };
   for (const item of d.reconcileItems ?? []) {
     if (!String(item.kind).startsWith('key-alias')) continue;
     const ka = claims.get(item.a)?.key, kb = claims.get(item.b)?.key;
-    if (ka && kb) union(canonicalKey(ka, reg), canonicalKey(kb, reg));
+    if (!ka || !kb || !keysMayAlias(ka, kb) || twoKnownCards(ka, kb)) continue;
+    union(canonicalKey(ka, reg), canonicalKey(kb, reg));
   }
   return { claims, status, supersededBy, reason, byKey, parent };
 }
@@ -641,7 +652,7 @@ const agentNamed = (agent: string | undefined, words: Set<string>): boolean => !
 /** S3 / S4: what a search asks main for: the cards its hits name, and the texts (the query first, then the hit
  *  contents) a card id, a card's branch or a release version may be named in; main answers the briefs by term and
  *  the named terms whose brief goes above the hits. */
-export interface CardLeadAsk { cards: string[]; texts: string[] }
+export interface CardLeadAsk { cards: string[]; texts: string[]; /** Epoch ms: the asking search's deadline (the ask never outlives it). */ deadline?: number }
 export interface CardLeadReply {
   briefs: Record<string, string[]>;
   /** The terms the QUERY names (their briefs print whole, field lines and all). */

@@ -46,8 +46,14 @@ export interface Port {
 }
 
 export interface WorkerMessage { id: number; op: string; args?: Record<string, unknown>; deadline?: number }
-/** Step 3 fix R2: how long the worker waits for main's answer to a reverse request (`{ ask, op, args }`). */
+/** Step 3 fix R2: how long the worker waits for main's answer to a reverse request (`{ ask, op, args }`) when the
+ *  request carries no deadline of its own. */
 export const ASK_TIMEOUT_MS = 1_500;
+/** CLAIMS-KEYFIND-FOLLOWUPS (b): an ask made for a request with a deadline waits until that deadline (the search's
+ *  own budget: 250 ms warm, 1 s indexing, 2 s cold), never a shorter fixed wait. A brief main answers inside the
+ *  budget is printed; one it cannot answer in time expires the whole search (named exit 4), so hits are never printed
+ *  without their brief while the search itself still had time. The wait is never negative. */
+export const askWaitMs = (deadline: number | undefined, now: number): number => (typeof deadline === 'number' ? Math.max(0, deadline - now) : ASK_TIMEOUT_MS);
 
 /** Open the store; a file that fails `quick_check` is quarantined and a fresh one created
  *  (it is a cache: the backfill rebuilds it from the Markdown). */
@@ -90,15 +96,17 @@ export async function runWorker(cfg: WorkerConfig, port: Port, deps: { Database:
   // on the same port or timed out to null (the engine then prints the hits without the card brief).
   const asks = new Map<number, (v: unknown) => void>();
   let askSeq = 0;
-  const ask = (op: string, args: Record<string, unknown>): Promise<unknown> => new Promise((resolve) => {
+  const ask = (op: string, args: Record<string, unknown>, deadline?: number): Promise<unknown> => new Promise((resolve) => {
     const id = ++askSeq;
-    const t = setTimeout(() => { if (asks.delete(id)) resolve(null); }, ASK_TIMEOUT_MS);
+    const waitMs = askWaitMs(deadline, Date.now());
+    // A timed-out ask is logged (main sees native-memory-ask-timeout), never dropped silently.
+    const t = setTimeout(() => { if (asks.delete(id)) { port.postMessage({ event: 'log', kind: 'native-memory-ask-timeout', op, waitMs, bounded: typeof deadline === 'number' }); resolve(null); } }, waitMs);
     asks.set(id, (v) => { clearTimeout(t); resolve(v); });
     port.postMessage({ ask: id, op, args });
   });
   const engine = new MemoryEngine({
     hiveRoot: cfg.hiveRoot, store, embedder, countTokens: (t) => tokenizer.count(t), claimLedger: cfg.claimLedger, anchored: cfg.anchored,
-    cardLead: async (lead) => { const r = await ask('card-lead', { cards: lead.cards, texts: lead.texts }); return r && typeof r === 'object' ? (r as { briefs: Record<string, string[]>; named: string[]; pointed: string[] }) : { briefs: {}, named: [], pointed: [] }; },
+    cardLead: async (lead) => { const r = await ask('card-lead', { cards: lead.cards, texts: lead.texts }, lead.deadline); return r && typeof r === 'object' ? (r as { briefs: Record<string, string[]>; named: string[]; pointed: string[] }) : { briefs: {}, named: [], pointed: [] }; },
     log: (row) => port.postMessage({ event: 'log', ...row }),
     onModelUnload: () => port.postMessage({ event: 'model-unloaded' }),
     onModelLoaded: () => port.postMessage({ event: 'model-loaded' }),

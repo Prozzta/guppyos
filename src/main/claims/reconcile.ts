@@ -314,7 +314,16 @@ export function reconcilePromptText(item: ReconcileItem): string {
   return `⚠ reconcile ${item.itemId}: ${item.text} — Answer: memory reconcile ${item.a} ${item.b} --answer keep-both|supersedes`;
 }
 
-/** Pure proposal-only census: same registered namespace, live owner claims, similar distinct keys. */
+/** CLAIMS-KEYFIND-FOLLOWUPS (c): two keys that differ in a number are two versions or two ids, never one key
+ *  misspelt (card.int-1.1.101 / card.int-1.1.102, release.1.1.99 / release.1.1.100): a typo-distance pairing must
+ *  not propose them, and an open proposal must not merge them. Compared as the sequence of digit runs. */
+export function keysMayAlias(ka: string, kb: string): boolean {
+  const digits = (k: string): string => (k.match(/[0-9]+/g) ?? []).join('.');
+  return digits(ka) === digits(kb);
+}
+
+/** Pure proposal-only census: same registered namespace, live owner claims, similar distinct keys (never two keys
+ *  that differ in a number: keysMayAlias). */
 export function keyAliasCandidates(agentId: string, records: ClaimRec[], state: ClaimsState, registry: KeyRegistry): ReconcileCandidate[] {
   const rows = records.filter((r) => r.agent === agentId && !!r.key && state.claims[r.id]?.status === 'live')
     .sort((a, b) => a.id.localeCompare(b.id));
@@ -325,7 +334,7 @@ export function keyAliasCandidates(agentId: string, records: ClaimRec[], state: 
   const out: ReconcileCandidate[] = [];
   for (let i = 0; i < rows.length; i++) for (let j = i + 1; j < rows.length; j++) {
     const a = rows[i], b = rows[j], ka = a.key!, kb = b.key!;
-    if (ka === kb || namespace(ka) === '' || namespace(ka) !== namespace(kb)) continue;
+    if (ka === kb || namespace(ka) === '' || namespace(ka) !== namespace(kb) || !keysMayAlias(ka, kb)) continue;
     const na = ka.replace(/[-_]/g, ''), nb = kb.replace(/[-_]/g, '');
     if (na !== nb && editDistance(ka, kb) > 2) continue;
     const pair = [a.id, b.id].sort();

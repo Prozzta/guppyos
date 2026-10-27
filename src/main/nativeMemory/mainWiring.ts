@@ -296,7 +296,7 @@ export class NativeMemoryWiring {
     if (why) return { ok: false, exit: EXIT.unavailable, error: `memory is unavailable (${why})` };
     const push = this.pushClaimLedger();
     if (push) await push;
-    return this.client.request('claims-sync', { ...args, claimLedger: this.d.claimLedger?.() } as unknown as Record<string, unknown>, 120_000);
+    return this.client.request('claims-sync', { ...args, claimLedger: this.d.claimLedger?.() } as unknown as Record<string, unknown>, claimsSyncDeadlineMs(args.chunks.length));
   }
 
   /** CLAIM-LEDGER W3: R5 candidates for a just-appended claim (the W3 side of R5CandidatesFn). */
@@ -323,6 +323,14 @@ export class NativeMemoryWiring {
     return this.client.shutdown();
   }
 }
+
+/** CLAIMS-KEYFIND-FOLLOWUPS (a): a sync's deadline grows with the chunks it carries. The worker embeds them one by
+ *  one (engine EMBED_BATCH), so a fixed 120 s let the derived wing's first sync (11,639 chunks on the on-1 floor)
+ *  time out on main every time while the worker went on embedding: the fill was logged as failed, onIndexed never
+ *  ran, and searches meanwhile saw no derived claim. A sync of no new parts still answers within the base. */
+export const CLAIMS_SYNC_BASE_MS = 120_000;
+export const CLAIMS_SYNC_PER_CHUNK_MS = 150;
+export const claimsSyncDeadlineMs = (chunks: number): number => CLAIMS_SYNC_BASE_MS + Math.max(0, Math.floor(chunks)) * CLAIMS_SYNC_PER_CHUNK_MS;
 
 /** A path inside app.asar, mapped to its asar-unpacked copy (a DLL cannot load from the archive). */
 export function toUnpacked(p: string): string {

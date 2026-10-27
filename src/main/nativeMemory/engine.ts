@@ -87,12 +87,14 @@ export const cardIdsOfHits = (hits: Array<Pick<SearchHit, 'claim'>>): string[] =
 export const LEAD_TEXT_MAX = 600;
 /** The card briefs for these hits through the cardLead dep (S3/S4: the query first, then the hit texts, so main can
  *  name the cards and releases they mention): none without a dep, on a throw or a non-object answer. */
-export async function cardLeadsFor(hits: Array<Pick<SearchHit, 'claim' | 'content'>>, query: string, cardLead: EngineDeps['cardLead']): Promise<CardLeadReply> {
+export async function cardLeadsFor(hits: Array<Pick<SearchHit, 'claim' | 'content'>>, query: string, cardLead: EngineDeps['cardLead'], deadline?: number): Promise<CardLeadReply> {
   if (!cardLead) return EMPTY_CARD_LEADS;
   const cards = cardIdsOfHits(hits);
   const texts = [query, ...hits.slice(0, CARD_LEADS_MAX).map((h) => String(h.content ?? '').slice(0, LEAD_TEXT_MAX))];
   try {
-    const r = await cardLead({ cards, texts });
+    // CLAIMS-KEYFIND-FOLLOWUPS (b): the search's deadline travels with the ask, so the worker waits for main's brief
+    // as long as the search itself may run (never a shorter fixed wait that drops the brief while the search goes on).
+    const r = await cardLead({ cards, texts, ...(typeof deadline === 'number' ? { deadline } : {}) });
     if (!r || typeof r !== 'object') return EMPTY_CARD_LEADS;
     const briefs = r.briefs && typeof r.briefs === 'object' ? r.briefs : {};
     const ids = (v: unknown): string[] => (Array.isArray(v) ? v.filter((n): n is string => typeof n === 'string') : []);
@@ -306,18 +308,18 @@ export class MemoryEngine {
         const chunks = needle ? this.d.store.searchExact({ query: needle, wing: a.wing ?? null, room: a.room ?? null, sinceMs, beforeMs, k: fetchK, mode: a.mode ?? 'live', kind: a.kind ?? null, key: a.key ?? null }) : [];
         const files = needle && !a.wing && !a.room && !a.kind && !a.key ? exactFileHits(this.d.hiveRoot, needle, k) : [];
         const all = servedHits([...dropStale(chunks, a.mode, k), ...files]);  // matched on raw text, rewritten for display
-        const lead = await this.cardLeads(all, a.query);
+        const lead = await this.cardLeads(all, a.query, o.deadline);
         return { exit: 0, text: formatSearch(a.query, a, all, lead.briefs, lead.named, lead.pointed), json: json(all) };
       }
       const [qv] = await this.embed([a.query]);
       const hits = servedHits(dropStale(this.d.store.search({ query: a.query, queryVec: qv, wing: a.wing ?? null, room: a.room ?? null, sinceMs, beforeMs, k: fetchK, poolK: k, mode: a.mode ?? 'live', kind: a.kind ?? null, key: a.key ?? null }), a.mode, k));  // CLAIMS-90 HISTORY-PTR
-      const lead = await this.cardLeads(hits, a.query);
+      const lead = await this.cardLeads(hits, a.query, o.deadline);
       return { exit: 0, text: formatSearch(a.query, a, hits, lead.briefs, lead.named, lead.pointed), json: json(hits) };
     }, o);
   }
 
   /** Step 3 fix R2: the card briefs for the distinct cards the hits name (claim keys `card.<id>[.field]`), in hit order. */
-  private cardLeads(hits: SearchHit[], query: string): Promise<CardLeadReply> { return cardLeadsFor(hits, query, this.d.cardLead); }
+  private cardLeads(hits: SearchHit[], query: string, deadline?: number): Promise<CardLeadReply> { return cardLeadsFor(hits, query, this.d.cardLead, deadline); }
 
   async wakeUp(wing: string | null, full = false): Promise<EngineReply> {
     // (b) A wake-up is the caller's (or an explicit) wing: index it first.
