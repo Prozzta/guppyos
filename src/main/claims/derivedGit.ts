@@ -7,7 +7,44 @@
  * network remote) never stalls the later passes.
  */
 import { execFile, spawn } from 'node:child_process';
+import { isDocFile } from './derivedFacts';
 import type { GitLogPort, TagLike } from './derivedFacts';
+
+/** A whole N.N.N version token (9.9.9, 9.9.10), never a part of a longer dotted number (1.9.9.9). */
+const VERSION_TOKEN_RE = /(?<![0-9]\.?)[0-9]+\.[0-9]+\.[0-9]+(?!\.?[0-9])/g;
+
+/**
+ * Round 7 (god 3af596, R7-2): whether a unified patch (git diff-tree -p -U0 of one commit) changes, in every
+ * non-doc file, only lines that pair with their counterpart identically once N.N.N version tokens are masked:
+ * each hunk's removed and added lines are equal in count and pairwise equal after masking. A pure addition
+ * or deletion, a binary change or any other line makes it code. Doc files (isDocFile) are free.
+ */
+export function versionMaskedDiff(patch: string): boolean {
+  let doc = false;
+  let removed: string[] = [];
+  let added: string[] = [];
+  const flush = (): boolean => {
+    if (!doc) {
+      if (removed.length !== added.length) return false;
+      for (let i = 0; i < removed.length; i++) {
+        if (removed[i].replace(VERSION_TOKEN_RE, 'N.N.N') !== added[i].replace(VERSION_TOKEN_RE, 'N.N.N')) return false;
+      }
+    }
+    removed = []; added = [];
+    return true;
+  };
+  for (const line of patch.split('\n')) {
+    const file = /^diff --git "?a\/(.*?)"? "?b\//.exec(line);
+    if (file) { if (!flush()) return false; doc = isDocFile(file[1]); continue; }
+    if (line.startsWith('@@')) { if (!flush()) return false; continue; }
+    if (doc) continue;
+    if (/^(?:Binary files |GIT binary patch)/.test(line)) return false;
+    if (/^(?:\+\+\+|---) /.test(line)) continue;
+    if (line.startsWith('-')) removed.push(line.slice(1));
+    else if (line.startsWith('+')) added.push(line.slice(1));
+  }
+  return flush();
+}
 
 const SHA_RE = /^[0-9a-f]{7,40}$/;
 export const GIT_TIMEOUT_MS = 45_000;
@@ -162,24 +199,14 @@ export class DerivedGit implements GitLogPort {
     return this.files.get(commit) ?? null;
   }
 
-  /** Round 6 (R6-2): whether the commit's diff of `path` (against its first parent; a root commit against
-   *  nothing) changes only "version" lines (a root package.json / package-lock.json bump), or null when git
-   *  cannot say. */
-  async versionOnly(commit: string, path: string): Promise<boolean | null> {
-    const key = `${commit}\0${path}`;
-    if (!this.versionDiffs.has(key)) {
-      const r = await git(this.repo, ['diff-tree', '--no-commit-id', '--root', '-r', '-p', '-U0', '--no-color', commit, '--', path], this.o);
-      let v: boolean | null = null;
-      if (r.code === 0) {
-        v = true;
-        for (const line of r.out.split('\n')) {
-          if (!/^[-+]/.test(line) || /^(?:\+\+\+|---) /.test(line)) continue;
-          if (!/^[-+]\s*"version"\s*:\s*"[^"]*"\s*,?\s*$/.test(line)) { v = false; break; }
-        }
-      }
-      this.versionDiffs.set(key, v);
+  /** Round 7 (R7-2): whether the commit's diff (against its first parent; a root commit against nothing) is
+   *  a version-masked twin of itself in every non-doc file (versionMaskedDiff), or null when git cannot say. */
+  async versionOnly(commit: string): Promise<boolean | null> {
+    if (!this.versionDiffs.has(commit)) {
+      const r = await git(this.repo, ['diff-tree', '--no-commit-id', '--root', '-r', '-p', '-U0', '--no-color', '--no-renames', commit], this.o);
+      this.versionDiffs.set(commit, r.code === 0 ? versionMaskedDiff(r.out) : null);
     }
-    return this.versionDiffs.get(key) ?? null;
+    return this.versionDiffs.get(commit) ?? null;
   }
 
   /** Every commit on the branches, tags and remotes: full sha, committer time, parents, message (stashes left out). */
