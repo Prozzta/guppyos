@@ -723,8 +723,11 @@ const mailAt = (m: MailLike): string => iso(m.created_at) ?? '';
  * names the card, else the merge is dropped from the mail; so a later int/rc merge mail on the card
  * yields the same own-commit sha as the builder's mail, never a sha that displaces it. (A) A commit
  * that changes only CHANGELOG/docs files (changedFiles) confirms nothing, whatever its subject says.
- * (C) The single-link path also requires that no commit the mail reports names a different card
- * (a commit naming no card still counts with the link); one that does gives nothing (ambiguous).
+ * (C) The single-link path also requires that the commit the row would carry (the subject's @sha,
+ * else the done sha the mail's commits give) does not name a different card; the other shas a mail
+ * lists (bases, history, alternatives) are not judged, and a commit naming no card still counts.
+ * A refused link falls through to the git check with the link beside the subject's cards, so a
+ * commit whose subject names the link card still confirms it (Jim's gate on 8028fa88).
  * Commits: the sha words of the subject and body that git resolves to a commit (ranges a..b give
  * both ends). R2 (c): a mail that gives no fact carries a reason; noShaWord, noCommit, ambiguous
  * and bodyOnly are each what git confirmed. A mail copied to several inboxes counts once (by id).
@@ -774,12 +777,22 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
       for (const r of resolved.get(full) ?? await resolveReported(full, git)) ats.push({ sha: r.commit, name: x.name, full: r.commit, entry: r });
     }
     if (!entries.length && !ats.length) { skip(m.id, 'noCommit'); continue; }
-    const card = cardOfDoneMail(m, known, match, entries);
+    // (B) A commit reached through a merge counts for the card only when its subject or branch names it.
+    const keepFor = (card: string) => (e: ReportedCommit | undefined): boolean => !e || !e.merge || match(e.text).includes(card);
+    // (C) The commits a row on `card` would carry: the subject's @shas, else the latest in git order.
+    const carriedFor = async (card: string): Promise<ReportedCommit[]> => {
+      const keep = keepFor(card);
+      const atEntries = ats.filter((a) => a.entry && keep(a.entry)).map((a) => a.entry as ReportedCommit);
+      if (atEntries.length) return atEntries;
+      const kept = entries.filter(keep);
+      const latest = await latestOfCommits(kept.map((e) => e.commit), git);
+      return kept.filter((e) => e.commit === latest);
+    };
+    const card = await cardOfDoneMail(m, known, match, entries, carriedFor);
     if (typeof card !== 'string') { skip(m.id, card.reason, card.cards); continue; }
     const key = cardKey(card, 'donesha');
     if (!key) { skip(m.id, 'noCard', [card]); continue; }
-    // (B) A commit reached through a merge counts for the card only when its subject or branch names it.
-    const keep = (e: ReportedCommit | undefined): boolean => !e || !e.merge || match(e.text).includes(card);
+    const keep = keepFor(card);
     const kept = entries.filter(keep);
     const atsKept = ats.filter((a) => keep(a.entry));
     if (!kept.length && !atsKept.length) { skip(m.id, 'noCommit', [card]); continue; }
@@ -814,9 +827,10 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
 }
 
 /** The done mail's card (see doneMailFacts), or why there is none. */
-function cardOfDoneMail(
+async function cardOfDoneMail(
   m: MailLike, known: Map<string, string>, match: (text: unknown) => string[], entries: readonly ReportedCommit[],
-): string | { reason: 'noCard' | 'ambiguous' | 'bodyOnly'; cards?: string[] } {
+  carriedFor: (card: string) => Promise<readonly ReportedCommit[]>,
+): Promise<string | { reason: 'noCard' | 'ambiguous' | 'bodyOnly'; cards?: string[] }> {
   const field = typeof m.card === 'string' ? known.get(m.card.toLowerCase()) : undefined;
   if (field) return field;
   const linked = Array.isArray(m.cards)
@@ -828,13 +842,16 @@ function cardOfDoneMail(
   // weak (spec F; Jim's gate M-a: "U6 included" in a subject made card.u6): a candidate only, and
   // only git confirms it (CLAIMS-WEAKLINK-DONESHA).
   const exact = match(m.subject);
+  // Round 3 (C): the link counts only when the commit the row would carry names no different card (a
+  // commit naming no card still counts; a merge of another card's branch names that card). The other
+  // shas the mail lists are not judged. A refused link is weak: it joins the subject's cards below.
+  let refused: string[] | undefined;
   if (linked.length === 1 && (!exact.length || exact.includes(linked[0]))) {
-    // Round 3 (C): the link counts only when no commit the mail reports names a different card (a
-    // commit naming no card still counts with the link); a merge of another card's branch names it.
-    const others = [...new Set(entries.flatMap((e) => match(e.text)).filter((c) => c !== linked[0]))];
-    return others.length ? { reason: 'ambiguous', cards: [linked[0], ...others].slice(0, 8) } : linked[0];
+    const others = [...new Set((await carriedFor(linked[0])).flatMap((e) => match(e.text)).filter((c) => c !== linked[0]))];
+    if (!others.length) return linked[0];
+    refused = [linked[0], ...others];
   }
-  const strong = exact.length ? exact : linked;
+  const strong = refused ? [...new Set([linked[0], ...exact])] : exact.length ? exact : linked;
   const named = strong.length ? strong : match(m.body);
   if (!named.length) return { reason: 'noCard' };
   const byGit = new Set<string>();
@@ -847,7 +864,7 @@ function cardOfDoneMail(
     if (hits.length === 1) byGit.add(hits[0]);
   }
   if (byGit.size === 1) return [...byGit][0];
-  return { reason: strong.length ? 'ambiguous' : 'bodyOnly', cards: named.slice(0, 8) };
+  return { reason: strong.length ? 'ambiguous' : 'bodyOnly', cards: (refused ?? named).slice(0, 8) };
 }
 
 /** The subject line of a commit message (git's %s: the text before the first blank line, folded to
