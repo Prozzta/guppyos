@@ -217,7 +217,9 @@ export interface GitPort {
   commitOf(sha: string): Promise<string | null>;
   isAncestor(ancestor: string, descendant: string): Promise<boolean>;
   time(commit: string): Promise<number>;
-  /** The commit's message (subject and body), or null; optional (R2: settles a done mail naming several cards). */
+  /** The commit's message (subject and body), or null; optional (R2: settles a done mail naming several
+   *  cards). Only its SUBJECT (first line) confirms a card: CHANGELOG, cut and int merge commits list
+   *  many cards in their bodies (CLAIMS-WEAKLINK-DONESHA round 2, Jim M-b). */
   message?(commit: string): Promise<string | null>;
 }
 
@@ -637,16 +639,18 @@ const mailAt = (m: MailLike): string => iso(m.created_at) ?? '';
  * so no claim holds two values. Older mails of that sender for that card give no fact; their
  * claims are superseded by the writer (same slot, card.<id>.donesha#<sender>).
  *
- * The card: the mail's card field when it is a known card, else the cards its delivery linked
- * (`cards`, the mail-cards index), else the cards its subject names. With more than one, git
- * decides: the card named by the messages of the commits the mail names, when exactly one
- * candidate is named there; otherwise the mail is ambiguous. CLAIMS-WEAKLINK-DONESHA: a mail with
- * none of those links (no card field, nothing inherited, no card in its subject) falls back to the
- * cards its BODY names, and those count only when git confirms: exactly one of them is named by the
- * messages of the commits the mail reports. So a card's own done report that names the card only in
- * its body (a delta-audit reply, lower case, beside other cards) is found, while a passing mention
- * in a done mail about another card never is: that mail's own field, link or subject names the
- * other card and wins, and with no link at all an unconfirmed body mention gives nothing (bodyOnly).
+ * The card: the mail's card field when it is a known card. Without one, a card the delivery linked
+ * (`cards`, the mail-cards index: a reply or conversation link) counts when it is the only one and
+ * the subject names no other card. Every other candidate needs git (CLAIMS-WEAKLINK-DONESHA, round
+ * 2 after Jim's gate): the cards the subject names, else the linked cards, else the cards the BODY
+ * names, and one of them counts only when exactly one is named by the SUBJECT line of a commit the
+ * mail reports (a card's own commits name it in their subject; a CHANGELOG, cut or int merge commit
+ * lists many cards in its body and confirms nothing; a short id that is really a label in a mail's
+ * subject, "U6 included", has no commit subject naming it). So a card's own done report that names
+ * the card only in its body (a delta-audit reply, lower case, beside other cards) is found, while a
+ * passing mention in a done mail about another card never is: that mail's own field or link names
+ * the other card and wins, and an unconfirmed subject or body mention gives nothing (ambiguous /
+ * bodyOnly).
  * Commits: the sha words of the subject and body that git resolves to a commit (ranges a..b give
  * both ends). R2 (c): a mail that gives no fact carries a reason; noShaWord, noCommit, ambiguous
  * and bodyOnly are each what git confirmed. A mail copied to several inboxes counts once (by id).
@@ -724,11 +728,11 @@ async function cardOfDoneMail(
     ? [...new Set(m.cards.map((c) => (typeof c === 'string' ? known.get(c.toLowerCase()) : undefined)).filter((c): c is string => !!c))]
     : [];
   // `match` takes exact card ids only: a spelling variant (a space for a dash) never links (god
-  // c33130, c19239: variant precision < 0.95). A card id the subject writes beats one inherited by a
-  // reply or conversation link; a card named only in the body is weak (spec F): it is a candidate
-  // only when nothing else names a card, and only git can confirm it (CLAIMS-WEAKLINK-DONESHA).
+  // c33130, c19239: variant precision < 0.95). A single inherited link (reply/conversation) that the
+  // subject does not contradict is the card. Anything else, a card the subject names included, is
+  // weak (spec F; Jim's gate M-a: "U6 included" in a subject made card.u6): a candidate only, and
+  // only git confirms it (CLAIMS-WEAKLINK-DONESHA).
   const exact = match(m.subject);
-  if (exact.length === 1) return exact[0];
   if (linked.length === 1 && (!exact.length || exact.includes(linked[0]))) return linked[0];
   const strong = exact.length ? exact : linked;
   const named = strong.length ? strong : match(m.body);
@@ -736,10 +740,20 @@ async function cardOfDoneMail(
   if (git.message) {
     const byGit = new Set<string>();
     for (const c of commits) {
-      const hits = match(await git.message(c)).filter((x) => named.includes(x));
+      // Jim's gate M-b: the commit's SUBJECT line only. A CHANGELOG, cut or int merge commit lists
+      // many cards in its body; a card's own commit names it in the subject.
+      const hits = match(commitSubject(await git.message(c))).filter((x) => named.includes(x));
       if (hits.length === 1) byGit.add(hits[0]);
     }
     if (byGit.size === 1) return [...byGit][0];
   }
   return { reason: strong.length ? 'ambiguous' : 'bodyOnly', cards: named.slice(0, 8) };
+}
+
+/** The subject line of a commit message (git's %s: the text before the first blank line, folded to
+ *  one line), or '' for none. */
+export function commitSubject(message: string | null | undefined): string {
+  if (typeof message !== 'string') return '';
+  const head = message.replace(/\r\n?/g, '\n').trimStart().split(/\n[ \t]*\n/, 1)[0];
+  return head.split('\n').map((l) => l.trim()).filter(Boolean).join(' ');
 }

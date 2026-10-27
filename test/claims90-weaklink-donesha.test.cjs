@@ -7,6 +7,9 @@
  * body names, and one of them counts only when the messages of the commits the mail reports name exactly
  * that one. A passing mention (a done mail about another card: its own field, link or subject names the
  * other card) never promotes; with no link at all, an unconfirmed body mention gives nothing (bodyOnly).
+ * Round 2 (Jim's gate, god cdd4c7): a card the SUBJECT names, in a mail with no card field, takes the
+ * same git check (M-a: "U1-U9 killed (U6 included)" made card.u6); and git confirms on the commit's
+ * SUBJECT line only (M-b: CHANGELOG, cut and int merge commits list many cards in their bodies).
  * Synthetic mails and a fake git port only; HOME jailed first.
  */
 const test = require('node:test');
@@ -39,11 +42,14 @@ function fakeGit(commits, messages) {
     async message(c) { return messages[c] ?? null; },
   };
 }
-const CARDS = ['SYN-WL', 'SYN-OTHER', 'SYN-THIRD', 'SYN-PIN'];
-// Commits: a and b are SYN-WL's own (their messages name the card); c is SYN-OTHER's; d names no card.
+const CARDS = ['SYN-WL', 'SYN-OTHER', 'SYN-THIRD', 'SYN-PIN', 'U6', 'M1'];
+// Commits: a and b are SYN-WL's own (their subjects name the card); c is SYN-OTHER's; d names no card;
+// e is a CHANGELOG commit whose BODY lists SYN-WL, SYN-OTHER and SYN-PIN; f an int merge whose body lists them.
+const CHANGELOG = 'docs: CHANGELOG for 9.1.0\n\n- SYN-WL: the weak link\n- SYN-OTHER: the other card\n- SYN-PIN: pins\n';
+const INT_MERGE = "Merge guppy/syn-pin into int-9.1.0\n\ncarries SYN-WL @aaaaaa1, SYN-OTHER @cccccc3 and SYN-PIN\n";
 const git = fakeGit(
-  { aaaaaa1: H('a'), bbbbbb2: H('b'), cccccc3: H('c'), dddddd4: H('d') },
-  { [H('a')]: 'SYN-WL step 3: serve the current value', [H('b')]: 'SYN-WL: fold the delta-audit nits', [H('c')]: 'SYN-OTHER: the other card', [H('d')]: 'housekeeping' },
+  { aaaaaa1: H('a'), bbbbbb2: H('b'), cccccc3: H('c'), dddddd4: H('d'), eeeeee5: H('e'), ffffff6: H('f') },
+  { [H('a')]: 'SYN-WL step 3: serve the current value', [H('b')]: 'SYN-WL: fold the delta-audit nits', [H('c')]: 'SYN-OTHER: the other card', [H('d')]: 'housekeeping', [H('e')]: CHANGELOG, [H('f')]: INT_MERGE },
 );
 const slots = (r) => r.facts.map((f) => f.slot).sort();
 const commitOf = (r, slot) => r.facts.find((f) => f.slot === slot).refs.find((y) => y.type === 'commit').value;
@@ -133,4 +139,55 @@ test('index: a mention-body row reaches doneMailFacts with its body but no card 
   const torn = W.readDoneMails(root).find((m) => m.id === 'wl-9');
   assert.deepEqual([torn.card ?? null, torn.cards ?? null, torn.body ?? null], [null, null, null]);
   assert.deepEqual((await F.doneMailFacts([torn], CARDS, git)).skips, [{ mail: 'wl-9', reason: 'noCard' }]);
+});
+
+test('round 2 M-a: a card the subject names (no card field) takes the git check: confirmed by a commit subject it is found; a label-like id in the subject is not', async () => {
+  const mails = [
+    // The delta-audit reply whose SUBJECT names the card and whose commit's subject names it: found.
+    { id: 'r2-1', act: 'done', from: 'auditor', subject: 'Re: SYN-WL delta audit PASS at bbbbbb2', body: 'rows unchanged', created_at: '2026-10-24T10:00:00Z' },
+    // "U1-U9 killed (U6 included)": U6 is a known card id but a label here; the commit is SYN-OTHER's: nothing.
+    { id: 'r2-2', act: 'done', from: 'runner', subject: 'U1-U9 killed (U6 included) at cccccc3', body: 'the mutant census', created_at: '2026-10-24T11:00:00Z' },
+    // "M1 unanswered": the commit names no card: nothing.
+    { id: 'r2-3', act: 'done', from: 'runner', subject: 'M1 unanswered, dddddd4 pushed', body: 'see the log', created_at: '2026-10-24T12:00:00Z' },
+    // Two cards in the subject, one of them the commit subject's: that one (unchanged).
+    { id: 'r2-4', act: 'done', from: 'builder', subject: 'SYN-WL and SYN-PIN at aaaaaa1', body: '', created_at: '2026-10-24T13:00:00Z' },
+  ];
+  const r = await F.doneMailFacts(mails, CARDS, git);
+  assert.deepEqual(slots(r), ['card.syn-wl.donesha#auditor', 'card.syn-wl.donesha#builder']);
+  assert.equal(commitOf(r, 'card.syn-wl.donesha#auditor'), H('b'));
+  assert.equal(commitOf(r, 'card.syn-wl.donesha#builder'), H('a'));
+  assert.deepEqual(r.skips, [
+    { mail: 'r2-2', reason: 'ambiguous', cards: ['U6'] },
+    { mail: 'r2-3', reason: 'ambiguous', cards: ['M1'] },
+  ]);
+  assert.equal(r.facts.some((f) => /card\.(u6|m1)\./.test(f.key)), false, 'no card.u6 or card.m1 from a label in a subject');
+  // A single inherited link the subject does not contradict still counts without git (unchanged).
+  const linked = await F.doneMailFacts([{ id: 'r2-5', act: 'done', from: 'auditor', cards: ['syn-wl'], subject: 'Re: delta audit, dddddd4', body: 'fine' }], CARDS, git);
+  assert.deepEqual(slots(linked), ['card.syn-wl.donesha#auditor']);
+});
+
+test('round 2 M-b: git confirms on the commit SUBJECT only: a CHANGELOG or int merge commit whose body lists the card confirms nothing', async () => {
+  const mails = [
+    // A cut audit mail (no card field) naming a few cards in its subject, reporting the CHANGELOG commit: nothing.
+    { id: 'r2-6', act: 'done', from: 'auditor', subject: 'cut 9.1.0 audit: SYN-WL, SYN-OTHER checked @eeeeee5', body: 'all rows green', created_at: '2026-10-24T14:00:00Z' },
+    // The same mail naming ONE card in its subject: the CHANGELOG body lists it, the subject does not: nothing.
+    { id: 'r2-7', act: 'done', from: 'auditor', subject: 'cut 9.1.0 audit: SYN-WL checked @eeeeee5', body: 'all rows green', created_at: '2026-10-24T15:00:00Z' },
+    // A body-named card with the int merge commit (its body lists the card): nothing.
+    { id: 'r2-8', act: 'done', from: 'integrator', subject: 'int 9.1.0 staged ffffff6', body: 'carries syn-wl and syn-other', created_at: '2026-10-24T16:00:00Z' },
+    // The CHANGELOG commit beside the card's own commit: the own commit's subject settles it.
+    { id: 'r2-9', act: 'done', from: 'builder', subject: 'SYN-WL done at bbbbbb2, changelog eeeeee5', body: '', created_at: '2026-10-24T17:00:00Z' },
+  ];
+  const r = await F.doneMailFacts(mails, CARDS, git);
+  assert.deepEqual(slots(r), ['card.syn-wl.donesha#builder']);
+  assert.deepEqual(r.skips, [
+    { mail: 'r2-6', reason: 'ambiguous', cards: ['SYN-WL', 'SYN-OTHER'] },
+    { mail: 'r2-7', reason: 'ambiguous', cards: ['SYN-WL'] },
+    { mail: 'r2-8', reason: 'bodyOnly', cards: ['SYN-WL', 'SYN-OTHER'] },
+  ]);
+  // The subject line as git's %s: the text before the first blank line, folded; CRLF and a leading blank line tolerated.
+  assert.equal(F.commitSubject(CHANGELOG), 'docs: CHANGELOG for 9.1.0');
+  assert.equal(F.commitSubject('SYN-WL: fold\r\nthe nits\r\n\r\nbody SYN-OTHER'), 'SYN-WL: fold the nits');
+  assert.equal(F.commitSubject('\n\nsubject only'), 'subject only');
+  assert.equal(F.commitSubject(null), '');
+  assert.equal(F.commitSubject(''), '');
 });
