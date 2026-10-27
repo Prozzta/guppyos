@@ -114,6 +114,12 @@ function buildJail(jail, o, snap, addDir) {
   const repo = path.join(jail, 'repo.git');
   execFileSync('git', ['clone', '--quiet', '--mirror', path.join(addDir, 'repo-at-ts.bundle'), repo], { stdio: 'ignore' });
   execFileSync('git', ['--git-dir', repo, 'config', 'remote.origin.url', 'repo-at-ts.bundle'], { stdio: 'ignore' });
+  if (o.provider === 'codex') {
+    // codex has no git (god a2e5b2): the facts go in as plain files and the mirror leaves the jail.
+    CX.exportGitFacts(repo, path.join(jail, 'git'));
+    for (const rel of fs.readdirSync(repo, { recursive: true })) if (fs.lstatSync(path.join(repo, rel)).isSymbolicLink()) throw new Error(`the mirror holds a link: ${rel}`);
+    fs.rmSync(repo, { recursive: true });
+  }
   // key.jsonl is not created: the session writes it once (Write wants a Read before it overwrites).
   return jailFiles(jail);
 }

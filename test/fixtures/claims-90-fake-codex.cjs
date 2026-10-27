@@ -3,7 +3,8 @@
 // and the row ids (IDS:a,b). It reads the login at start as codex does, starts the jail MCP server from the runner's
 // -c mcp_servers.jail.* arguments and calls it as the model would, prints codex --json events, and writes the final
 // message to -o. ENVLOG:<file> writes its env key names there; ARGVLOG:<file> its arguments. DECOY:<path> names a
-// decoy file the decoy scenario asks for in several shapes.
+// decoy file the decoy scenario asks for in several shapes. GITARGS:<file> holds a JSON list of git argument lists the
+// gitargs scenario sends straight to the server as a 'git' call (a model that ignores tools/list).
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
@@ -33,8 +34,8 @@ process.stdin.on('data', (d) => { prompt += d; }).on('end', async () => {
   });
   const rpc = (method, params) => new Promise((resolve) => { const id = nextId++; waiting.set(id, resolve); server.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`); });
   let n = 0;
-  const tool = async (name, a) => {
-    if (!args.includes(`mcp_servers.jail.tools.${name}.approval_mode="approve"`)) { emit({ type: 'item.completed', item: { id: `item_${n++}`, type: 'mcp_tool_call', server: 'jail', tool: name, arguments: a, result: null, error: { message: 'MCP tool call requires approval, but approval policy is never' }, status: 'failed' } }); return ''; }
+  const tool = async (name, a, direct = false) => {
+    if (!direct && !args.includes(`mcp_servers.jail.tools.${name}.approval_mode="approve"`)) { emit({ type: 'item.completed', item: { id: `item_${n++}`, type: 'mcp_tool_call', server: 'jail', tool: name, arguments: a, result: null, error: { message: 'MCP tool call requires approval, but approval policy is never' }, status: 'failed' } }); return ''; }
     const id = `item_${n++}`;
     emit({ type: 'item.started', item: { id, type: 'mcp_tool_call', server: 'jail', tool: name, arguments: a, status: 'in_progress' } });
     const r = (await rpc('tools/call', { name, arguments: a })).result;
@@ -57,6 +58,7 @@ process.stdin.on('data', (d) => { prompt += d; }).on('end', async () => {
     seen.push(await tool('search', { pattern: 'DECOY', path: path.dirname(decoy) }));
     seen.push(await tool('search', { pattern: 'DECOY', glob: '../**' }));
   }
+  if (scenario === 'gitargs') for (const a of JSON.parse(fs.readFileSync(word('GITARGS'), 'utf8'))) seen.push(await tool('git', { args: a }, true));
   if (scenario === 'link') { seen.push(await tool('read_file', { path: 'docs/out/secret.txt' })); seen.push(await tool('search', { pattern: 'DECOY' })); }
   if (scenario === 'credential') emit({ type: 'item.completed', item: { id: 'item_c', type: 'agent_message', text: token } });
   if (scenario === 'other') emit({ type: 'item.completed', item: { id: 'item_o', type: 'web_search', query: 'q' } });

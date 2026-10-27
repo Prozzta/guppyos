@@ -11,7 +11,10 @@
  *   no execpolicy allow rules: an allow rule skips the sandbox (probe: a Get-Content prefix rule read an outside decoy).
  *   The session reads only through the runner's MCP server (labeller-jail-mcp.cjs), which checks every path argument
  *   before it reads and logs every call; its log is the open log. A refused call never ran and makes the batch INVALID.
- *   Code mode stays on: turning off its host turns off every tool (probe), and its JS has no file or network API.
+ *   Code mode stays on: turning off its host turns off every tool (probe), and its JS has no file or network API (the
+ *   real smoke's session C tries each one against an outside decoy and a local listener).
+ *   There is no git tool (god a2e5b2): the jail holds git/ (exportGitFacts, from the frozen bundle before launch) and
+ *   no repo.git, so no git process ever sees a model argument.
  *   CODEX_HOME is a fresh folder beside the jail (codex refuses helpers under %TEMP%) holding ONLY a copy of the
  *   Codex login. Codex reads it at start; the copy is deleted when codex prints thread.started, before any model
  *   reply. A login codex writes later is deleted too and is NEVER written back (Jim 49a485): the batch is INVALID and
@@ -35,7 +38,57 @@ const LEAK_KEY = /^(HIVE|AGENT|MEMORY|MUTANT|MUNDER|GUPPY|CLAUDE|ANTHROPIC|OPENA
 const HIVE_DIR = /[\\/](Dunder[\\/]+hive|Munder Difflin)([\\/]|$)/i;
 // Every tool feature that is on by default in codex-cli 0.157.1 except code_mode_host (off = no tools at all).
 const FEATURES_OFF = ['shell_tool', 'unified_exec', 'view_image', 'image_generation', 'browser_use', 'browser_use_external', 'browser_use_full_cdp_access', 'in_app_browser', 'computer_use', 'in_app_local_automation', 'apps', 'plugins', 'remote_plugin', 'multi_agent', 'skill_search', 'tool_suggest', 'goals', 'hooks', 'workspace_dependencies', 'skill_mcp_dependency_install', 'sleep_tool'];
-const CODEX_NOTE = '\n\nThis session reads files only through the jail tools (list_files, read_file, search, git); paths are relative to the working folder. It cannot run shell commands or write files. Do not try to create {keyFile}. End with a final message that holds exactly the lines that file must contain, one JSON object per line, and nothing else.\n';
+const CODEX_NOTE = '\n\nThis session reads files only through the jail tools (list_files, read_file, search); paths are relative to the working folder. There is no git command: the repository\'s history at the snapshot is in git/ (read git/README.md first). It cannot run shell commands or write files. Do not try to create {keyFile}. End with a final message that holds exactly the lines that file must contain, one JSON object per line, and nothing else.\n';
+
+const GIT_README = `The snapshot repository's history, exported before this session started. There is no git command.
+  log.txt       every commit, newest first: <sha> parents=<sha ...> date=<commit date> author-date=<date> refs=(<refs>) <subject>
+  branches.txt  <branch> <tip sha> <commit date> <subject>
+  tags.txt      <tag> <object sha> <commit sha> <date> <subject>
+  show/<sha>.txt  the full message, stat and patch of that commit (merges: combined diff)
+`;
+
+/** Run git on a repo with no system or global config and no pager. Returns the raw stdout bytes. */
+function gitOut(repo, args) {
+  const r = require('node:child_process').spawnSync('git', ['--no-pager', '-c', 'core.fsmonitor=false', '-c', 'core.quotepath=true', ...args], {
+    cwd: repo, windowsHide: true, maxBuffer: 1 << 30,
+    env: { SystemRoot: process.env.SystemRoot, PATH: process.env.PATH, GIT_DIR: repo, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: path.join(repo, 'no-global-config'), GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' },
+  });
+  if (r.error || r.status !== 0) throw new Error(`git ${args[0]} failed: ${r.error ? r.error.message : String(r.stderr).trim()}`);
+  return r.stdout;
+}
+
+/**
+ * The git facts a labeller needs, as plain files under dest (god a2e5b2: no git process sees model arguments).
+ * Deterministic: the same repo gives the same bytes, so a jail's git/ can be checked against a fresh export.
+ */
+function exportGitFacts(repo, dest) {
+  fs.mkdirSync(path.join(dest, 'show'), { recursive: true });
+  fs.writeFileSync(path.join(dest, 'README.md'), GIT_README);
+  const log = gitOut(repo, ['log', '--all', '--date-order', '--format=%H parents=%P date=%cI author-date=%aI refs=(%D) %s']);
+  fs.writeFileSync(path.join(dest, 'log.txt'), log);
+  fs.writeFileSync(path.join(dest, 'branches.txt'), gitOut(repo, ['for-each-ref', '--sort=refname', '--format=%(refname:short) %(objectname) %(committerdate:iso-strict) %(subject)', 'refs/heads']));
+  fs.writeFileSync(path.join(dest, 'tags.txt'), gitOut(repo, ['for-each-ref', '--sort=refname', '--format=%(refname:short) %(objectname) %(*objectname) %(creatordate:iso-strict) %(subject)', 'refs/tags']));
+  // One stream for every commit (one spawn per commit is minutes on this repo). A fresh random marker starts
+  // each commit: diffs hold any byte (this repo's minified files carry \x1e), never this export's marker.
+  const mark = Buffer.from(`\n@@export-${crypto.randomBytes(16).toString('hex')}@@ `, 'latin1');
+  const all = Buffer.concat([Buffer.from('\n'), gitOut(repo, ['log', '--all', '--date-order', '--no-color', '--no-ext-diff', '--no-textconv', '--find-renames', '--cc', '--stat', '--patch',
+    `--format=${mark.toString('latin1').slice(1)}%H%ncommit %H%nparents %P%nauthor %an%ndate %aI%ncommit-date %cI%nrefs %D%n%n%B`])]);
+  const shas = log.toString('latin1').split('\n').filter(Boolean).map((l) => l.slice(0, 40));
+  let n = 0;
+  for (let i = all.indexOf(mark); i !== -1;) {
+    const next = all.indexOf(mark, i + mark.length);
+    const chunk = all.subarray(i + mark.length, next === -1 ? all.length : next);
+    const nl = chunk.indexOf(0x0a);
+    const sha = chunk.subarray(0, nl).toString('latin1');
+    if (sha !== shas[n]) throw new Error(`git export: commit ${n} is ${sha.slice(0, 50)}, log.txt has ${shas[n]}`);
+    // The marker's own newline ends the previous commit's text: give it back.
+    fs.writeFileSync(path.join(dest, 'show', `${sha}.txt`), next === -1 ? chunk.subarray(nl + 1) : Buffer.concat([chunk.subarray(nl + 1), Buffer.from('\n')]));
+    n++;
+    i = next;
+  }
+  if (n !== shas.length) throw new Error(`git export: ${n} commits shown, log.txt has ${shas.length}`);
+  return n;
+}
 
 function codexExe() {
   for (const dir of (process.env.PATH || '').split(path.delimiter)) {
@@ -275,4 +328,4 @@ function codexReason(s, key, own) {
 
 const codexTokens = (u) => (u ? (u.input_tokens || 0) + (u.output_tokens || 0) : null);
 
-module.exports = { codexExe, realAuthFile, codexEnv, envLeaks, authSecrets, redact, codexArgs, auditEvents, readsFromLog, keyFromMessage, codexLeftovers, codexSession, codexReason, codexTokens, CODEX_NOTE, ITEM_TYPES, FEATURES_OFF, sha256 };
+module.exports = { exportGitFacts, GIT_README, codexExe, realAuthFile, codexEnv, envLeaks, authSecrets, redact, codexArgs, auditEvents, readsFromLog, keyFromMessage, codexLeftovers, codexSession, codexReason, codexTokens, CODEX_NOTE, ITEM_TYPES, FEATURES_OFF, sha256 };

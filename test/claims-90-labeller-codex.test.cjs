@@ -41,7 +41,9 @@ async function session(scenario, extra = {}) {
   const argvLog = path.join(f.root, 'argv.json');
   const baseEnv = extra.baseEnv ?? { SystemRoot: process.env.SystemRoot, PATH: process.env.PATH, TEMP: process.env.TEMP, USERPROFILE: f.fakeHome };
   const decoy = extra.decoy ? path.join(f.fakeHome, extra.decoy) : '';
-  const prompt = `SCENARIO:${scenario} IDS:it-1,it-2 ENVLOG:${envLog} ARGVLOG:${argvLog}${decoy ? ` DECOY:${decoy}` : ''}${extra.realAuth ? ` REALAUTH:${f.authFile}` : ''}`;
+  const gitArgs = path.join(f.root, 'gitargs.json');
+  if (extra.gitArgs) fs.writeFileSync(gitArgs, JSON.stringify(extra.gitArgs));
+  const prompt = `SCENARIO:${scenario} IDS:it-1,it-2 ENVLOG:${envLog} ARGVLOG:${argvLog}${decoy ? ` DECOY:${decoy}` : ''}${extra.gitArgs ? ` GITARGS:${gitArgs}` : ''}${extra.realAuth ? ` REALAUTH:${f.authFile}` : ''}`;
   const s = await CX.codexSession({ exe: FAKE, model: null, jail: f.jail, scratch: f.scratch, runDir: f.runDir, keyFile: f.keyFile, openLog: f.openLog, jailFiles: L.jailFiles, prompt, baseEnv, authFile: f.authFile, timeoutMs: 60_000 });
   const key = L.checkKey(fs.existsSync(f.keyFile) ? fs.readFileSync(f.keyFile, 'utf8') : '', OWN);
   const leftHomes = fs.readdirSync(f.root).filter((n) => n.startsWith('codexhome-'));
@@ -78,7 +80,7 @@ test('T6 census: the session gets no shell, no allow rules, the jail-only read p
   assert.ok(!a.includes('features.code_mode_host=false'), 'code mode stays on (off = no tools at all)');
   assert.ok(!a.includes('-s') && !a.includes('--sandbox'), 'no -s: it would replace the jail-only read profile');
   assert.ok(!a.some((x) => /dangerously|approve-for-me|full-auto|rules/.test(x) && x !== '--ignore-rules'), 'no bypass and no rules file');
-  assert.deepEqual(MCP.TOOLS.map((t) => t.name), ['list_files', 'read_file', 'search', 'git']);
+  assert.deepEqual(MCP.TOOLS.map((t) => t.name), ['list_files', 'read_file', 'search']);
   assert.match(fs.readFileSync(path.join(r.f.runDir, 'mcp-log.jsonl'), 'utf8'), /"tool":"read_file"/, 'the reads went through the jail server');
 });
 
@@ -154,12 +156,97 @@ test('T6 census: search and list globs can never widen the root; output is bound
   assert.ok(MCP.call(f.jail, 'search', { pattern: '(', regex: true }).refused);
 });
 
-test('T6 census: git runs only read commands on repo.git, with no file-reading option and no outside path', () => {
+// The read subcommands the removed git tool allowed (27bebb97), for the fuzz row.
+const OLD_GIT_SUBS = ['log', 'show', 'tag', 'branch', 'rev-parse', 'rev-list', 'describe', 'ls-tree', 'cat-file', 'for-each-ref', 'show-ref', 'merge-base', 'name-rev', 'shortlog', 'grep'];
+// Every short letter some git subcommand reads a file through (-f grep/blame, -F tag/commit, -O orderfile, -C/-c, ...).
+const FILE_LETTERS = 'fFOCcSmMdDuxX';
+
+function decoyForms(abs) {
+  const fwd = abs.replace(/\\/g, '/');
+  const mix = fwd.replace(/\//g, (s, i) => (i % 2 ? '\\' : '/'));
+  return [abs, fwd, mix, `\\\\?\\${abs}`, 'C:x', '//server/x', `//?/${fwd}`];
+}
+
+test('T6 census (Jim 3ac795, god a2e5b2): there is no git tool; every bundled-option read, in every path form, is REFUSED as an unknown tool and the decoy text is in no saved output', async () => {
+  assert.deepEqual(MCP.TOOLS.map((t) => t.name), ['list_files', 'read_file', 'search']);
   const f = fixture();
-  for (const a of [['config', '--list'], ['diff', '--no-index', 'a', 'b'], ['log', '--output=x'], ['log', '-OC:/x'], ['grep', '-f', 'p'], ['grep', '-fp'], ['log', 'C:\\x'], ['log', '--', '/etc/x'], ['log', '--', '../x'], ['blame', 'a'], ['tag', '-d', 'v1'], ['log', '--git-dir=C:/x'], ['log', '--format=%H', '--work-tree=x'], [], 'log']) {
-    assert.ok(MCP.call(f.jail, 'git', { args: a }).refused, JSON.stringify(a));
+  const decoy = path.join(f.fakeHome, '.claude', '.credentials.json');
+  const jim = [];
+  for (const d of decoyForms(decoy)) {
+    jim.push(['grep', `-Ef${d}`, 'HEAD'], ['grep', `-Eif${d}`, 'HEAD'], ['grep', `-if${d}`, 'HEAD'], ['grep', `-Pf${d}`, 'HEAD'], ['log', `-pO${d}`], ['log', `--orderf=${d}`], ['log', `--fil=${d}`], ['log', '--file', d]);
   }
-  assert.ok(MCP.GIT_SUBS.has('log') && MCP.GIT_SUBS.has('show') && !MCP.GIT_SUBS.has('config') && !MCP.GIT_SUBS.has('diff'));
+  // In a session: the server refuses each one, logs it, and the batch is INVALID.
+  const r = await session('gitargs', { gitArgs: jim });
+  const log = fs.readFileSync(r.f.openLog, 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((x) => x.tool === 'mcp:git');
+  assert.equal(log.length, jim.length, 'every git call reached the server and was logged');
+  assert.ok(log.every((x) => x.decision === 'deny'), 'every git call refused');
+  const mcpLog = fs.readFileSync(path.join(r.f.runDir, 'mcp-log.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((x) => x.tool === 'git');
+  assert.ok(mcpLog.length === jim.length && mcpLog.every((x) => x.reason === 'no tool git'), 'refused as an unknown tool');
+  assert.notEqual(r.reason, null, 'the batch is INVALID');
+  assert.ok(!r.saved.includes(DECOY), 'decoy text absent from events, MCP log, open log, final message and key');
+  // Fuzz: each old subcommand x each file letter, in 2- and 3-letter bundles with an attached absolute decoy path.
+  let n = 0;
+  for (const sub of OLD_GIT_SUBS) for (const L of FILE_LETTERS) for (const d of decoyForms(decoy)) for (const b of [`-E${L}`, `-ip${L}`, `-${L}E`]) {
+    const res = MCP.call(f.jail, 'git', { args: [sub, `${b}${d}`, 'HEAD'] });
+    assert.equal(res.refused, 'no tool git', `${sub} ${b}`);
+    assert.ok(!JSON.stringify(res).includes(DECOY));
+    n++;
+  }
+  assert.equal(n, OLD_GIT_SUBS.length * FILE_LETTERS.length * 7 * 3);
+});
+
+function git(cwd, args) { return require('node:child_process').execFileSync('git', ['-c', 'user.name=syn', '-c', 'user.email=syn@example.invalid', '-c', 'commit.gpgsign=false', '-c', 'tag.gpgsign=false', ...args], { cwd, encoding: 'utf8', env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: path.join(cwd, '..', 'no-global-config'), GIT_AUTHOR_DATE: '2026-10-01T00:00:00Z', GIT_COMMITTER_DATE: '2026-10-01T00:00:00Z' } }); }
+
+test('T6 census (god a2e5b2): a codex jail holds the git facts as plain files equal to a fresh export of the bundle, and no repo.git', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'c90-gitx-'));
+  const work = path.join(root, 'work'); fs.mkdirSync(work);
+  git(work, ['init', '-q', '-b', 'main']);
+  fs.writeFileSync(path.join(work, 'a.txt'), 'one\n'); git(work, ['add', '.']); git(work, ['commit', '-q', '-m', 'first']);
+  git(work, ['checkout', '-q', '-b', 'side']); fs.writeFileSync(path.join(work, 'b.txt'), 'side\n'); git(work, ['add', '.']); git(work, ['commit', '-q', '-m', 'side work']);
+  git(work, ['checkout', '-q', 'main']); fs.writeFileSync(path.join(work, 'a.txt'), 'two\x1e minified\n'); git(work, ['commit', '-qa', '-m', 'second', '-m', '\x1e body']); // bytes a fixed separator split breaks on
+  git(work, ['merge', '-q', '--no-ff', '-m', 'merge side', 'side']); git(work, ['tag', '-a', 'v1', '-m', 'release one']);
+  const addDir = path.join(root, 'add'); fs.mkdirSync(addDir);
+  git(work, ['bundle', 'create', '-q', path.join(addDir, 'repo-at-ts.bundle'), '--all']);
+  const snap = path.join(root, 'snap');
+  fs.mkdirSync(path.join(snap, 'hive', 'tasks-archive'), { recursive: true }); fs.mkdirSync(path.join(snap, 'hive', 'agents'));
+  for (const n of ['tasks.json', 'board.md', 'PROTOCOL.md']) fs.writeFileSync(path.join(snap, 'hive', n), 'syn\n');
+  const doc = (n) => { const p = path.join(root, n); fs.writeFileSync(p, 'syn\n'); return p; };
+  const o = { provider: 'codex', batch: doc('batch-01.jsonl'), instructions: doc('i.md'), guide: doc('guide.md'), pilot: doc('pilot.md'), xcheck: doc('xcheck-a.json'), docs: [] };
+  const jail = path.join(root, 'jail');
+  const files = L.buildJail(jail, o, snap, addDir);
+  assert.ok(!fs.existsSync(path.join(jail, 'repo.git')), 'the mirror left the jail');
+  assert.ok(!files.some((x) => x.path.startsWith('repo.git/')));
+  const mirror = path.join(root, 'fresh.git');
+  require('node:child_process').execFileSync('git', ['clone', '--quiet', '--mirror', path.join(addDir, 'repo-at-ts.bundle'), mirror], { stdio: 'ignore' });
+  const fresh = path.join(root, 'fresh'); fs.mkdirSync(fresh);
+  assert.equal(CX.exportGitFacts(mirror, path.join(fresh, 'git')), 4, 'four commits exported');
+  const pick = (list) => list.filter((x) => x.path.startsWith('git/')).map((x) => `${x.path} ${x.sha256}`);
+  assert.deepEqual(pick(files), pick(L.jailFiles(fresh)), 'the jail git files equal a fresh export (hash)');
+  const logTxt = fs.readFileSync(path.join(jail, 'git', 'log.txt'), 'utf8');
+  assert.equal(logTxt.trim().split('\n').length, 4);
+  assert.match(logTxt, /^[0-9a-f]{40} parents=[0-9a-f]{40} [0-9a-f]{40} date=2026-10-01T00:00:00(?:Z|[+]00:00) .*merge side$/m, 'the merge lists both parents and its date');
+  assert.match(fs.readFileSync(path.join(jail, 'git', 'tags.txt'), 'utf8'), /^v1 [0-9a-f]{40} [0-9a-f]{40} 2026-10-01T00:00:00(?:Z|[+]00:00) release one$/m);
+  assert.match(fs.readFileSync(path.join(jail, 'git', 'branches.txt'), 'utf8'), /^main [0-9a-f]{40} .* merge side\nside [0-9a-f]{40} .* side work$/m);
+  const second = logTxt.split('\n').find((l) => l.endsWith(' second')).slice(0, 40);
+  assert.match(fs.readFileSync(path.join(jail, 'git', 'show', `${second}.txt`), 'utf8'), /^commit [0-9a-f]{40}\n[\s\S]*second[\s\S]*-one\n\+two/);
+  assert.equal(fs.readdirSync(path.join(jail, 'git', 'show')).length, 4);
+  // The model reads them through the jail tools like any other file.
+  assert.match(MCP.call(jail, 'search', { pattern: 'release one', path: 'git' }).text, /^git\/tags\.txt:1:/);
+});
+
+test('T6 census (Jim 3ac795 minor): a regex search that backtracks forever is refused at the time limit; the server keeps answering', () => {
+  const f = fixture();
+  // 2^33 backtracking steps: tens of seconds with no limit (so a census mutant that drops the limit ends), never 1.5 s.
+  fs.writeFileSync(path.join(f.jail, 'docs', 'evil.md'), `${'a'.repeat(33)}!\n`);
+  const keep = MCP.LIMITS.searchMs;
+  MCP.LIMITS.searchMs = 1500;
+  try {
+    const t0 = Date.now();
+    assert.match(MCP.call(f.jail, 'search', { pattern: '^(a+)+$', regex: true }).refused, /did not finish in 1\.5 s/);
+    assert.ok(Date.now() - t0 < 10_000, 'ended at the limit');
+    assert.match(MCP.call(f.jail, 'search', { pattern: 'it-\\d', regex: true }).text, /docs\/batch-01\.jsonl:1:/, 'a normal regex still answers');
+  } finally { MCP.LIMITS.searchMs = keep; }
+  assert.equal(MCP.SEARCH_MS, 20_000);
 });
 
 test('T6 census: an env leak is INVALID; the session env has no hive key or hive PATH dir', async () => {

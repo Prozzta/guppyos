@@ -9,7 +9,10 @@
  *   list_files {path?, glob?}           files under a jail folder (relative paths), at most LIST_MAX
  *   read_file  {path, offset?, limit?}  lines of one jail file, at most READ_MAX_LINES / READ_MAX_BYTES
  *   search     {pattern, path?, glob?, regex?}  matching lines under a jail folder, at most SEARCH_MAX hits
- *   git        {args}                   one read-only git command on the jail's repo.git (GIT_DIR), no shell
+ * There is no git tool (Jim 3ac795, god a2e5b2): a git process given model arguments read an outside file through a
+ * bundled short option. The runner exports the git facts as plain files under git/ before launch (exportGitFacts in
+ * labeller-codex.cjs), read like any other jail file. A regex search runs in a child process with a time limit, so a
+ * pattern that backtracks forever cannot hang the server.
  *
  *   node labeller-jail-mcp.cjs <jail> <log.jsonl>
  */
@@ -24,9 +27,8 @@ const SEARCH_MAX = 200;
 const LINE_MAX = 300;
 const OUT_MAX = 64 * 1024;
 const DEVICE = /^(CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|CLOCK\$|COM[0-9¹²³]|LPT[0-9¹²³])(\..*)?$/i;
-const GIT_SUBS = new Set(['log', 'show', 'tag', 'branch', 'rev-parse', 'rev-list', 'describe', 'ls-tree', 'cat-file', 'for-each-ref', 'show-ref', 'merge-base', 'name-rev', 'shortlog', 'grep']);
-// Options that read or write a file named in their value, change the repo or run a program.
-const GIT_DENY = /^(--output|--git-dir|--work-tree|--exec-path|--no-index|--ext-diff|--textconv|--upload-pack|--receive-pack|--exec|--open-files-in-pager|--orderfile|--ignore-revs-file|--contents|--mailmap-file|--mailmap-blob|--exclude-from|--file|--pathspec-from-file|--stdin|--batch-command|--edit|--delete|--force|--move|--copy|--set-upstream-to|--create-reflog|--sign|--local-user|--message|--cleanup|--annotate)($|=)|^-[OfFdDmMu]/;
+const SEARCH_MS = 20_000;
+const LIMITS = { searchMs: SEARCH_MS }; // a test shortens it in-process
 
 /** Why a path argument is refused, or null. Relative jail paths only, judged before anything is read. */
 function pathProblem(arg) {
@@ -97,6 +99,19 @@ function walk(root, real) {
   return { files: files.sort(), links };
 }
 
+/** Matching lines of jail files (each read up to READ_MAX_BYTES): at most SEARCH_MAX shown, all counted. */
+function searchFiles(root, files, pattern, regex) {
+  const r = regex ? new RegExp(pattern, 'i') : null;
+  const q = pattern.toLowerCase();
+  const out = [];
+  let total = 0;
+  for (const f of files) {
+    const lines = fs.readFileSync(path.join(root, f)).subarray(0, READ_MAX_BYTES).toString('utf8').split(/\r?\n/);
+    lines.forEach((l, i) => { if (r ? r.test(l) : l.toLowerCase().includes(q)) { total++; if (out.length < SEARCH_MAX) out.push(`${f}:${i + 1}:${l.slice(0, LINE_MAX)}`); } });
+  }
+  return { out, total };
+}
+
 const cut = (s) => (s.length > OUT_MAX ? `${s.slice(0, OUT_MAX)}\n[output cut at ${OUT_MAX} bytes]` : s);
 
 /** One tool call: { text, refused? }. Exported for the tests; the server below only frames it. */
@@ -125,35 +140,16 @@ function call(jail, name, a = {}) {
     const hit = files.filter((f) => !re || re.test(f) || re.test(path.posix.basename(f)));
     if (name === 'list_files') return { text: cut(hit.slice(0, LIST_MAX).join('\n') + (hit.length > LIST_MAX ? `\n[${hit.length - LIST_MAX} more not listed]` : '')) };
     if (typeof a.pattern !== 'string' || !a.pattern.length) return { refused: 'search needs a pattern' };
-    let test;
-    if (a.regex) { let r; try { r = new RegExp(a.pattern, 'i'); } catch { return { refused: 'not a valid regular expression' }; } test = (l) => r.test(l); }
-    else { const q = a.pattern.toLowerCase(); test = (l) => l.toLowerCase().includes(q); }
-    const out = [];
-    let total = 0;
-    for (const f of hit) {
-      if (f.startsWith('repo.git/')) continue;
-      const lines = fs.readFileSync(path.join(root, f)).subarray(0, READ_MAX_BYTES).toString('utf8').split(/\r?\n/);
-      lines.forEach((l, i) => { if (test(l)) { total++; if (out.length < SEARCH_MAX) out.push(`${f}:${i + 1}:${l.slice(0, LINE_MAX)}`); } });
-    }
-    return { text: cut(out.join('\n') + (total > SEARCH_MAX ? `\n[${total - SEARCH_MAX} more hits not shown]` : '') || 'no match') };
-  }
-  if (name === 'git') {
-    const args = a.args;
-    if (!Array.isArray(args) || !args.length || !args.every((x) => typeof x === 'string')) return { refused: 'git needs args: a list of strings' };
-    if (!GIT_SUBS.has(args[0])) return { refused: `git ${args[0]} is not a read command here` };
-    for (const x of args.slice(1)) {
-      if (/[\x00-\x1f]/.test(x)) return { refused: 'a control character' };
-      if (GIT_DENY.test(x)) return { refused: `git option ${x.split('=')[0]} is not allowed` };
-      if (/(^|=)([A-Za-z]:|[\\/])/.test(x)) return { refused: 'an absolute, drive or UNC path' };
-      if (/(^|[\\/=])\.\.([\\/]|$)/.test(x)) return { refused: 'a parent (..) segment' };
-    }
-    const sub = ['tag', 'branch'].includes(args[0]) ? [args[0], '--list', ...args.slice(1)] : args;
-    const gitDir = path.join(root, 'repo.git');
-    const r = spawnSync('git', ['--no-pager', '-c', 'core.fsmonitor=false', '-c', 'core.pager=cat', ...sub], {
-      cwd: gitDir, encoding: 'utf8', windowsHide: true, timeout: 60_000, maxBuffer: 8 * OUT_MAX,
-      env: { SystemRoot: process.env.SystemRoot, PATH: process.env.PATH, GIT_DIR: gitDir, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: path.join(gitDir, 'no-global-config'), GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' },
-    });
-    return { text: cut(`${r.stdout || ''}${r.stderr ? `\n[stderr] ${r.stderr}` : ''}${r.status ? `\n[exit ${r.status}]` : ''}`) };
+    if (a.regex) { try { new RegExp(a.pattern, 'i'); } catch { return { refused: 'not a valid regular expression' }; } }
+    const searched = hit.filter((f) => !f.startsWith('repo.git/'));
+    let res;
+    if (a.regex) {
+      // A regex runs in a child with a time limit: a backtracking pattern ends the child, not the server.
+      const r = spawnSync(process.execPath, [__filename, '--search-child'], { input: JSON.stringify({ root, files: searched, pattern: a.pattern }), encoding: 'utf8', timeout: LIMITS.searchMs, windowsHide: true, maxBuffer: 8 * OUT_MAX });
+      if (r.error || r.status !== 0) return { refused: `the regular expression did not finish in ${LIMITS.searchMs / 1000} s` };
+      res = JSON.parse(r.stdout);
+    } else res = searchFiles(root, searched, a.pattern, false);
+    return { text: cut(res.out.join('\n') + (res.total > SEARCH_MAX ? `\n[${res.total - SEARCH_MAX} more hits not shown]` : '') || 'no match') };
   }
   return { refused: `no tool ${name}` };
 }
@@ -162,7 +158,6 @@ const TOOLS = [
   { name: 'list_files', description: 'List files under a folder of the working folder (relative paths only). Optional glob filter with * ? **.', inputSchema: { type: 'object', properties: { path: { type: 'string' }, glob: { type: 'string' } } } },
   { name: 'read_file', description: 'Read lines of one file in the working folder by relative path. offset is 0-based; limit is a line count.', inputSchema: { type: 'object', properties: { path: { type: 'string' }, offset: { type: 'number' }, limit: { type: 'number' } }, required: ['path'] } },
   { name: 'search', description: 'Find lines containing pattern (case-insensitive; regex true for a regular expression) in files under a folder of the working folder. Optional glob filter.', inputSchema: { type: 'object', properties: { pattern: { type: 'string' }, path: { type: 'string' }, glob: { type: 'string' }, regex: { type: 'boolean' } }, required: ['pattern'] } },
-  { name: 'git', description: 'Run one read-only git command on the snapshot repository, e.g. {"args":["log","--oneline","-20"]}. Allowed: log show tag branch rev-parse rev-list describe ls-tree cat-file for-each-ref show-ref merge-base name-rev shortlog grep.', inputSchema: { type: 'object', properties: { args: { type: 'array', items: { type: 'string' } } }, required: ['args'] } },
 ];
 
 function serve(jail, log) {
@@ -188,6 +183,9 @@ function serve(jail, log) {
   });
 }
 
-if (require.main === module) serve(process.argv[2], process.argv[3]);
+if (require.main === module && process.argv[2] === '--search-child') {
+  const j = JSON.parse(fs.readFileSync(0, 'utf8'));
+  process.stdout.write(JSON.stringify(searchFiles(j.root, j.files, j.pattern, true)));
+} else if (require.main === module) serve(process.argv[2], process.argv[3]);
 
-module.exports = { pathProblem, jailPath, globProblem, globRe, call, TOOLS, GIT_SUBS, SEARCH_MAX, LIST_MAX, READ_MAX_LINES, OUT_MAX };
+module.exports = { pathProblem, jailPath, globProblem, globRe, call, TOOLS, searchFiles, SEARCH_MS, LIMITS, SEARCH_MAX, LIST_MAX, READ_MAX_LINES, OUT_MAX };

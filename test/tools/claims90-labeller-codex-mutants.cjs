@@ -32,10 +32,17 @@ const M = [
   ['G2 a glob problem is ignored', MCP, '    if (gp) return { refused: gp };\n', ''],
   ['G3 search hits are unbounded', MCP, 'if (out.length < SEARCH_MAX) out.push(', 'if (true) out.push('],
   ['G4 read lines are unbounded', MCP, '    const n = Math.min(READ_MAX_LINES, Math.max(1, Number(a.limit) || READ_MAX_LINES));', '    const n = Math.max(1, Number(a.limit) || 1e9);'],
-  // git: read commands only, no file-reading option, no outside path.
-  ['T1 any git subcommand runs', MCP, "    if (!GIT_SUBS.has(args[0])) return ", '    if (false) return '],
-  ['T2 git file options are allowed', MCP, "      if (GIT_DENY.test(x)) return ", '      if (false) return '],
-  ['T3 git absolute paths are allowed', MCP, "      if (/(^|=)([A-Za-z]:|[\\\\/])/.test(x)) return ", '      if (false) return '],
+  // No git tool (god a2e5b2): git facts are exported files; a regex search has a time limit.
+  ['T1 a git tool answers', MCP, "  return { refused: `no tool ${name}` };\n}", "  if (name === 'git') return { text: require('node:child_process').spawnSync('git', a.args, { cwd: jail, encoding: 'utf8' }).stderr || 'ran' };\n  return { refused: `no tool ${name}` };\n}"],
+  ['T2 git is listed as a tool', MCP, "  { name: 'search',", "  { name: 'git', description: 'git', inputSchema: { type: 'object' } },\n  { name: 'search',"],
+  ['T3 the codex jail keeps repo.git', LAB, '    fs.rmSync(repo, { recursive: true });\n', ''],
+  ['T4 no git export in the codex jail', LAB, "    CX.exportGitFacts(repo, path.join(jail, 'git'));\n", ''],
+  ['T5 the export drops merge parents', CX, "--format=%H parents=%P date=", "--format=%H parents=%p date="],
+  ['T6 the export is not deterministic', CX, "  fs.writeFileSync(path.join(dest, 'README.md'), GIT_README);", "  fs.writeFileSync(path.join(dest, 'README.md'), GIT_README + Date.now());"],
+  ['T7 the export skips show files', CX, "    fs.writeFileSync(path.join(dest, 'show', `${sha}.txt`), next === -1", '    void (next === -1'],
+  ['T10 the export splits on a byte a diff can hold', CX, "  const mark = Buffer.from(`\\n@@export-${crypto.randomBytes(16).toString('hex')}@@ `, 'latin1');", "  const mark = Buffer.from('\\n\\x1e', 'latin1');"],
+  ['T8 a regex search has no time limit', MCP, 'timeout: LIMITS.searchMs, ', ''],
+  ['T9 a regex search runs in the server', MCP, '    if (a.regex) {\n', '    if (false) {\n'],
   // The session has no shell, no allow rules and only the jail tools (god cfacba / 8d13d1).
   ['S1 shell tool stays on', CX, "const FEATURES_OFF = ['shell_tool', ", 'const FEATURES_OFF = ['],
   ['S2 view_image stays on', CX, "'unified_exec', 'view_image', ", "'unified_exec', "],
