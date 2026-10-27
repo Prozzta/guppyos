@@ -296,7 +296,10 @@ test('A12 card match: dash, space or nothing; case-insensitive; the longest id; 
 });
 
 test('(d) done mails, R2 (a)(c): one per (card, sender): the newest done mail and the latest of its commits; every skip has a reason', async () => {
-  const g = fakeGit({ commits: { aaaaaa1: H('a'), bbbbbb2: H('b'), cccccc3: H('c'), dddddd4: H('d') }, parents: {}, time: {} });
+  // CLAIMS-WEAKLINK-DONESHA round 2: a card named in a subject (no card field) needs a commit SUBJECT
+  // naming it, like a body-named one. a is a shared commit of SYN-D1 and SYN-D2; b is SYN-D3's; c and d name no card.
+  const g = fakeGit({ commits: { aaaaaa1: H('a'), bbbbbb2: H('b'), cccccc3: H('c'), dddddd4: H('d') }, parents: {}, time: {},
+    messages: { [H('a')]: 'SYN-D1 and SYN-D2: the shared step', [H('b')]: 'SYN-D3: follow-up', [H('c')]: 'later work\n\nSYN-D3 in the body only', [H('d')]: 'housekeeping' } });
   const mails = [
     { id: 'm1', act: 'done', from: 'agent-x', card: 'SYN-D1', subject: 'SYN-D2 aaaaaa1', body: 'also bbbbbb2', created_at: '2026-10-02T00:00:00Z' },
     { id: 'm1', act: 'done', card: 'SYN-D1', subject: 'a second copy of m1', body: 'cccccc3' },
@@ -332,18 +335,27 @@ test('(d) done mails, R2 (a)(c): one per (card, sender): the newest done mail an
   assert.deepEqual(r.skips, [
     { mail: 'm10', reason: 'noCard' }, { mail: 'm3', reason: 'bodyOnly', cards: ['SYN-D3'] }, { mail: 'm4', reason: 'ambiguous', cards: ['SYN-D1', 'SYN-D2'] }, { mail: 'm5', reason: 'notDone' }, { mail: 'm6', reason: 'noShaWord' }, { mail: 'm9', reason: 'noCommit' },
   ]);
-  assert.equal(r.older, 1, 'm1 (agent-x on SYN-D1): an older mail of its (card, sender); m3 names SYN-D3 only in its body and git confirms nothing: no card (F1, CLAIMS-WEAKLINK-DONESHA)');
+  assert.equal(r.older, 1, 'm1 (agent-x on SYN-D1): an older mail of its (card, sender); m3 names SYN-D3 only in its body and the commit subject does not: no card (F1, CLAIMS-WEAKLINK-DONESHA)');
+  // Round 2 (Jim M-a): a subject-named card from a mail with no card field takes the same git check.
+  const blind = await F.doneMailFacts([mails[2], mails[8]], ['SYN-D1', 'SYN-D2', 'SYN-D3'], fakeGit({ commits: { aaaaaa1: H('a'), bbbbbb2: H('b'), dddddd4: H('d') }, parents: {}, time: {} }));
+  assert.deepEqual(blind.facts, [], 'no message port: a subject-named card is never confirmed');
+  assert.deepEqual(blind.skips, [{ mail: 'm8', reason: 'ambiguous', cards: ['SYN-D3'] }, { mail: 'm2', reason: 'ambiguous', cards: ['SYN-D2'] }]);
   // A mail naming several cards: git settles it when the messages of its commits name exactly one of them.
   const gm = fakeGit({ commits: { dddddd4: H('d'), eeeeee5: H('e') }, parents: {}, time: {}, messages: { [H('d')]: 'SYN-D2: fix the thing', [H('e')]: 'unrelated' } });
   const settled = await F.doneMailFacts([{ id: 'm4', act: 'done', from: 'agent-z', subject: 'SYN-D1 and SYN-D2', body: 'dddddd4 eeeeee5' }], ['SYN-D1', 'SYN-D2'], gm);
   assert.deepEqual(settled.facts.map((f) => f.slot), ['card.syn-d2.donesha#agent-z']);
   const still = await F.doneMailFacts([{ id: 'm4', act: 'done', subject: 'SYN-D1 and SYN-D2', body: 'eeeeee5' }], ['SYN-D1', 'SYN-D2'], gm);
   assert.deepEqual(still.skips, [{ mail: 'm4', reason: 'ambiguous', cards: ['SYN-D1', 'SYN-D2'] }], 'git names neither: ambiguous');
-  // A card id the subject writes exactly beats one the delivery inherited (reply/conversation link);
-  // a spelling variant (a space for the dash) never links, with or without a link (god c33130, c19239);
-  // with no card in the subject the inherited link counts; a body mention never beats a link.
+  // A card id the subject writes exactly beats one the delivery inherited (reply/conversation link)
+  // when a commit subject confirms it (round 2); unconfirmed, the mail gives nothing (never the link
+  // the subject contradicts); a spelling variant (a space for the dash) never links, with or without
+  // a link (god c33130, c19239); with no card in the subject the inherited link counts; a body
+  // mention never beats a link.
   const linked = await F.doneMailFacts([{ id: 'm12', act: 'done', from: 'agent-x', cards: ['syn-d3'], subject: 'SYN-D1', body: 'aaaaaa1' }], ['SYN-D1', 'SYN-D3'], g);
   assert.deepEqual(linked.facts.map((f) => f.slot), ['card.syn-d1.donesha#agent-x']);
+  const contradicted = await F.doneMailFacts([{ id: 'm17', act: 'done', from: 'agent-x', cards: ['syn-d3'], subject: 'SYN-D1', body: 'dddddd4' }], ['SYN-D1', 'SYN-D3'], g);
+  assert.deepEqual(contradicted.facts, [], 'the subject names SYN-D1, no commit subject confirms it: not SYN-D1, and never the contradicted link');
+  assert.deepEqual(contradicted.skips, [{ mail: 'm17', reason: 'ambiguous', cards: ['SYN-D1'] }]);
   const variant = await F.doneMailFacts([{ id: 'm15', act: 'done', from: 'agent-x', cards: ['syn-d3'], subject: 'SYN D1', body: 'aaaaaa1' }], ['SYN-D1', 'SYN-D3'], g);
   assert.deepEqual(variant.facts.map((f) => f.slot), ['card.syn-d3.donesha#agent-x'], 'a variant never beats a link');
   const variantAlone = await F.doneMailFacts([{ id: 'm16', act: 'done', from: 'agent-x', subject: 'temp leak fixed', body: 'aaaaaa1' }], ['TEMP-LEAK', 'SYN-D3'], g);
@@ -421,7 +433,8 @@ function deliver(x, agent, msg, sub = '', edited = null) {
 }
 
 function fixtureHive(x, r) {
-  const a = r.commit('first', '2026-10-01T10:00:00Z');
+  // Round 2 (CLAIMS-WEAKLINK-DONESHA): m-h1 below has no card field, so a commit SUBJECT must name SYN-H2.
+  const a = r.commit('SYN-H2: first', '2026-10-01T10:00:00Z');
   r.g(['checkout', '-q', '-b', 'side']);
   const side = r.commit('side line', '2026-10-05T10:00:00Z', 's.txt');
   r.g(['checkout', '-q', 'main']);
@@ -490,7 +503,7 @@ test('backfill: a fixture hive and repo give every kind once; a re-run appends n
   assert.equal(c1.doneShas.appended, 1);
   assert.deepEqual(c1.doneSkipped, { notDone: 0, noShaWord: 1, noCommit: 0, noCard: 0, ambiguous: 0, bodyOnly: 0 });
   assert.deepEqual(x.logs.filter((r) => r.kind === 'claims-derived-done-skip'), [{ kind: 'claims-derived-done-skip', mail: 'm-h5', reason: 'noShaWord' }], 'R2 (c): the skip is logged with its reason');
-  assert.equal(c1.gitShas.appended, 0, 'no commit message names a card');
+  assert.equal(c1.gitShas.appended, 1, 'commit a names SYN-H2 in its subject (card.syn-h2.gitsha); no other commit names a card');
   assert.equal(c1.decisions.failed + c1.cardFields.failed + c1.releases.failed + c1.doneShas.failed, 0);
   const c2 = await W.runDerivedBackfill(x.deps, input);
   for (const k of ['decisions', 'cardFields', 'releases', 'doneShas', 'gitShas']) assert.equal(c2[k].appended, 0, k);
