@@ -15,7 +15,8 @@
  * rule); (B) a merge (2+ parents) confirms nothing on its own sha and is never reported: it resolves to
  * its merged parent, which counts when its subject or the merged branch names the card, else the merge
  * is dropped, so a later int/rc merge mail yields the builder's own sha and never displaces it; (C) the
- * single-link path needs no reported commit naming a different card.
+ * single-link path needs the commit the row would carry to name no different card (Jim's gate on
+ * 8028fa88: the other shas a mail lists are not judged, and a refused link still takes the git check).
  * Synthetic mails and a fake git port only; HOME jailed first.
  */
 const test = require('node:test');
@@ -319,7 +320,7 @@ test('round 3 B: a merge confirms nothing on its own sha; it resolves to the mer
   assert.equal(commitOf(blind, 'card.syn-wl.donesha#gate'), R3.i);
 });
 
-test('round 3 C: a single inherited link counts only when no reported commit names a different card', async () => {
+test('round 3 C: a single inherited link counts only when the commit the row would carry names no different card', async () => {
   // The link says SYN-WL; the reported commit's subject names SYN-OTHER: nothing (never SYN-OTHER either).
   const other = await F.doneMailFacts([{ id: 'r3c-1', act: 'done', from: 'auditor', cards: ['SYN-WL'], subject: 'Re: diagnosis', body: 'see cccccc3', created_at: T0 }], CARDS, git3);
   assert.deepEqual(other.facts, []);
@@ -330,12 +331,28 @@ test('round 3 C: a single inherited link counts only when no reported commit nam
   // The card's own commit beside one naming no card: counts.
   const own = await F.doneMailFacts([{ id: 'r3c-3', act: 'done', from: 'auditor', cards: ['SYN-WL'], subject: 'Re: sweep', body: 'bbbbbb2 then dddddd4', created_at: T0 }], CARDS, git3);
   assert.deepEqual(slots(own), ['card.syn-wl.donesha#auditor']);
-  // One of several reported commits naming another card is enough to withhold the link.
+  // Only the commit the row would carry is judged: the subject's @sha is the card's own commit, and the
+  // base and history shas the body lists name another card (an int audit listing many shas).
+  const listed = await F.doneMailFacts([{ id: 'r3c-8', act: 'done', from: 'auditor', cards: ['SYN-WL'], subject: 'Re: audit @bbbbbb2', body: 'base cccccc3, history dddddd4, earlier aaaaaa1', created_at: T0 }], CARDS, git3);
+  assert.equal(commitOf(listed, 'card.syn-wl.donesha#auditor'), H('b'), 'the listed shas naming other cards are not judged');
+  // A refused link (the carried commit c names SYN-OTHER) still takes the git check: b's subject names
+  // the link card, so the row stands (its value is the carried commit).
   const mixed = await F.doneMailFacts([{ id: 'r3c-4', act: 'done', from: 'auditor', cards: ['SYN-WL'], subject: 'Re: sweep', body: 'bbbbbb2 beside cccccc3', created_at: T0 }], CARDS, git3);
-  assert.deepEqual(mixed.skips, [{ mail: 'r3c-4', reason: 'ambiguous', cards: ['SYN-WL', 'SYN-OTHER'] }]);
-  // Through a merge: the link with the int merge of another card's branch resolves to that card's commit: nothing.
+  assert.deepEqual(slots(mixed), ['card.syn-wl.donesha#auditor'], 'refused link, confirmed by git');
+  assert.deepEqual(mixed.skips, []);
+  // Refused and unconfirmed: the carried commit (c, the latest in git order: no ancestry, equal times, the larger
+  // sha) names SYN-OTHER and no commit names SYN-WL.
+  const refused = await F.doneMailFacts([{ id: 'r3c-9', act: 'done', from: 'auditor', cards: ['SYN-WL'], subject: 'Re: sweep', body: 'b8b8b8b then cccccc3', created_at: T0 }], CARDS, git3);
+  assert.deepEqual(refused.facts, []);
+  assert.deepEqual(refused.skips, [{ mail: 'r3c-9', reason: 'ambiguous', cards: ['SYN-WL', 'SYN-OTHER'] }]);
+  // The same shas with the card's own commit as the subject's @sha: the carried commit is judged, not the list.
+  const carried = await F.doneMailFacts([{ id: 'r3c-10', act: 'done', from: 'auditor', cards: ['SYN-WL'], subject: 'Re: sweep @b8b8b8b', body: 'after cccccc3', created_at: T0 }], CARDS, git3);
+  assert.equal(commitOf(carried, 'card.syn-wl.donesha#auditor'), R3.n);
+  // Through a merge: the link with the int merge of another card's branch resolves to that card's commit, which
+  // (B) drops for the link card before (C) judges it: no commit is left (round 3 pinned ambiguous here).
   const merge = await F.doneMailFacts([{ id: 'r3c-5', act: 'done', from: 'auditor', cards: ['SYN-WL'], subject: 'Re: int cut', body: 'd4d4d4d', created_at: T0 }], CARDS, git3);
-  assert.deepEqual(merge.skips, [{ mail: 'r3c-5', reason: 'ambiguous', cards: ['SYN-WL', 'SYN-OTHER'] }]);
+  assert.deepEqual(merge.facts, []);
+  assert.deepEqual(merge.skips, [{ mail: 'r3c-5', reason: 'noCommit', cards: ['SYN-WL'] }]);
   // A docs-only commit naming another card is still a commit naming another card.
   const docs = await F.doneMailFacts([{ id: 'r3c-6', act: 'done', from: 'auditor', cards: ['SYN-OTHER'], subject: 'Re: row', body: 'a1a1a1a', created_at: T0 }], CARDS, git3);
   assert.deepEqual(docs.skips, [{ mail: 'r3c-6', reason: 'ambiguous', cards: ['SYN-OTHER', 'SYN-WL'] }]);

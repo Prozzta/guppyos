@@ -645,7 +645,13 @@ function perAgentLines(ix: Indexed, key: string, field: string, sub: GetOptions,
     return [latest ? { field, key, value: null, source: latest.source, id: latest.source === 'mail' ? latest.mailId : latest.claimId, agent: latest.agent, at: latest.at } : { field, key, value: null, source: 'none' }];
   }
   const line = ([a, r]: (typeof rows)[number]): GetFieldLine => ({ field, key, value: r.value, source: r.source, id: r.id, agent: a, at: r.at, by: a });
-  return [{ ...line(rows[0]), latest: true }, ...rows.map(line)];
+  // CLAIMS-WEAKLINK-DONESHA round 4 (god d77ac5 item 3): the field line is the newest CLAIM row when the key has one.
+  // A claim row carries a commit git resolved for the card (derivedFacts); the mail rule's row is the first sha a
+  // newer done mail wrote, unchecked against git, and the derived layer may have refused that very mail (a merge of
+  // another card, an ambiguous link). It still joins as its sender's line, so a done mail the derived sync has not
+  // reached yet stays visible, but it never takes the field line from a resolved row by age alone.
+  const top = rows.find(([, r]) => r.source === 'claim') ?? rows[0];
+  return [{ ...line(top), latest: true }, ...rows.map(line)];
 }
 
 /** R1 / L2: a lead value on one line, clipped at its end (values are structured and short; no window on prose). */
