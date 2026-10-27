@@ -63,6 +63,19 @@ const M = [
   ['P42 the child level skips the manifest default (derived off)', CHILD, 'return effectiveLevel(config.claimLedger, manifestEntry(floor.ledger, agentId, floor.ledgerDefault)).level;', 'return effectiveLevel(config.claimLedger, floor.ledger?.[agentId]).level;', ['preflight', 'unit']],
   ['P43 a build with the derived ledger off runs on', ANS, '    if (!built.derivedOn) return { problem: ', '    if (false) return { problem: ', ['unit']],
   ['P44 the changelog is not the newest version tag\'s', ANS, '  const tag = newestVersionTag(', "  const tag = 'v1.1.90' || newestVersionTag(", ['unit']],
+  // god ba807e: the preflight's synced index is served to every item.
+  ['P45 the index is not served (each item re-embeds)', ANS, '    row.indexServedSha256 = serveIndex(pre.servedState.index, userData, hiveId.to);', '    row.indexServedSha256 = pre.served.index.sha256;', ['unit']],
+  ['P46 a sync timeout is ignored', ANS, '    if (!s.reply?.ok) return ', '    if (false) return ', ['unit']],
+  ['P47 an item that re-embeds runs on', ANS, '    if (embedNone && j?.embedded !== 0) return ', '    if (false) return ', ['unit']],
+  ['P48 the item sync check is out of the INVALID chain', ANS, '    if (!row.invalid && syncBad) row.invalid = ', '    if (false) row.invalid = ', ['unit']],
+  ['P49 an item index unlike the served one runs on', ANS, '    else if (!row.invalid && indexKey(row.indexAfter) !== indexKey(pre.served.index.digest)) row.invalid = ', '    else if (false) row.invalid = ', ['unit']],
+  ['P50 the preflight skips the index check', ANS, "    calls.push({ cmd: 'index sync', problem: syncProblem(", "    calls.push({ cmd: 'index sync', problem: null && syncProblem(", ['unit']],
+  ['P51 a sync that drops runs on', ANS, '    if (j?.dropped !== 0) return ', '    if (false) return ', ['unit']],
+  ['P52 an index with WAL bytes is served', ANS, '  if (d.walBytes !== 0) return ', '  if (false) return ', ['unit']],
+  ['P53 an index short of vectors is served', ANS, '  if (!(d.chunks > 0) || d.vectors !== d.chunks) return ', '  if (false) return ', ['unit']],
+  ['P54 index equality ignores the chunk sha', ANS, 'JSON.stringify({ perWing: d.perWing, vectors: d.vectors, chunkSha256: d.chunkSha256 })', 'JSON.stringify({ perWing: d.perWing, vectors: d.vectors })', ['unit']],
+  ['P55 a stale WAL of the staged index is kept', ANS, '  for (const f of [`${p}-wal`, `${p}-shm`]) fs.rmSync(f, { force: true });', '', ['unit']],
+  ['P56 the child reads the index before its worker shut down', CHILD, '    await nativeMemory.shutdown().catch(() => {});\n    // god ba807e', '    // god ba807e', ['unit']],
   ['P14 taskStatusFor misses the archive', DEPS, '  return (id) => (allTasks() ?? []).find((t) => t.id === id)?.status ?? null;', "  return (id) => (allTasks() ?? []).find((t) => t.id === id && t.status !== 'done')?.status ?? null;", ['unit']],
 ];
 

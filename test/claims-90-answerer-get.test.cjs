@@ -373,3 +373,61 @@ test('god b6624e fix 1: the preflight child builds the served state through the 
   assert.match(run, /row\.servedSha256 = applyServed\(pre\.servedState, hive, userData, hiveId\.to\);/, 'every item gets the preflight\'s state');
   assert.match(run, /if \(row\.servedSha256 !== pre\.served\.sha256\) throw /);
 });
+
+test('god ba807e: the preflight serves its synced index to every item; a failed, dropping or (on an item) embedding sync, or an index that is not whole or not the served one, stops it', () => {
+  const ok = (records, embedded, dropped = 0) => ({ sent: true, records, chunks: records, reply: { ok: true, exit: 0, json: { embedded, dropped, statusChanges: 0, roomChanges: 0 } } });
+  const timedOut = { sent: true, records: 11639, chunks: 11639, reply: { ok: false, exit: 4, error: 'memory claims-sync timed out after 120000 ms' } };
+  const off = { sent: false, why: 'level' };
+  // The preflight fills the index: a full embed is fine there, a timeout or a drop is not.
+  assert.equal(A.syncProblem([ok(1652, 0), ok(11639, 11639), off], { embedNone: false }), null);
+  assert.match(A.syncProblem([ok(1652, 0), timedOut], { embedNone: false }), /^sync 2 \(11639 records\): memory claims-sync timed out/);
+  assert.match(A.syncProblem([ok(11639, 11639, 3)], { embedNone: false }), /dropped 3$/);
+  assert.match(A.syncProblem(null, { embedNone: false }), /no index sync/);
+  // An item is served that index: its sync embeds nothing.
+  assert.equal(A.syncProblem([ok(1652, 0), ok(11639, 0), off], { embedNone: true }), null);
+  assert.match(A.syncProblem([ok(1652, 0), ok(11639, 40)], { embedNone: true }), /^sync 2 \(11639 records\) embedded 40$/);
+  assert.match(A.syncProblem([timedOut], { embedNone: true }), /timed out/);
+  // The index served must be whole.
+  const d = { perWing: [{ wing: 'claims-derived', chunks: 11639 }, { wing: 'memory', chunks: 900 }], chunks: 12539, vectors: 12539, chunkSha256: 'a'.repeat(64), walBytes: 0 };
+  assert.equal(A.indexProblem(d), null);
+  assert.match(A.indexProblem(null), /no index/);
+  assert.match(A.indexProblem({ error: 'SQLITE_CANTOPEN' }), /could not be read: SQLITE_CANTOPEN/);
+  assert.match(A.indexProblem({ ...d, walBytes: 4096 }), /4096 WAL bytes/);
+  assert.match(A.indexProblem({ ...d, vectors: 900 }), /900 vectors for 12539 chunks/);
+  assert.match(A.indexProblem({ ...d, perWing: [], chunks: 0, vectors: 0 }), /0 vectors for 0 chunks/);
+  // Equality is by content: the per-wing counts, the vectors and the chunk sha; not the WAL size read.
+  assert.equal(A.indexKey(d), A.indexKey({ ...d, walBytes: 7 }));
+  assert.notEqual(A.indexKey(d), A.indexKey({ ...d, chunkSha256: 'b'.repeat(64) }));
+  assert.notEqual(A.indexKey(d), A.indexKey({ ...d, perWing: [{ wing: 'claims-derived', chunks: 11638 }, { wing: 'memory', chunks: 901 }] }));
+  assert.notEqual(A.indexKey(d), A.indexKey({ ...d, vectors: 12538 }));
+  assert.equal(A.indexKey({ error: 'x' }), null);
+  assert.deepEqual(A.syncRows([ok(5, 0), timedOut, off]), [
+    { records: 5, chunks: 5, ok: true, embedded: 0, dropped: 0 },
+    { records: 11639, chunks: 11639, ok: false, embedded: null, dropped: null, error: 'memory claims-sync timed out after 120000 ms' },
+    { sent: false, why: 'level' },
+  ]);
+  // serveIndex writes the bytes under the item's hive id and drops a stale WAL of the staged copy.
+  const W = fs.mkdtempSync(path.join(JAIL, 'serve-index-'));
+  const ud = path.join(W, 'ud'); fs.mkdirSync(path.join(ud, 'memory'), { recursive: true });
+  const p = path.join(ud, 'memory', 'hive-item-v2.sqlite');
+  fs.writeFileSync(p, 'staged'); fs.writeFileSync(`${p}-wal`, 'stale'); fs.writeFileSync(`${p}-shm`, 'stale');
+  const buf = Buffer.from('synced index bytes');
+  const sha = require('node:crypto').createHash('sha256').update(buf).digest('hex');
+  assert.equal(A.serveIndex({ buf, sha256: sha }, ud, 'hive-item'), sha);
+  assert.deepEqual(fs.readFileSync(p), buf);
+  assert.ok(!fs.existsSync(`${p}-wal`) && !fs.existsSync(`${p}-shm`), 'no WAL of the staged copy is left to replay over it');
+  // The wiring: the preflight checks and captures the index; every item is served it, checked, and its sync judged.
+  const run = fs.readFileSync(path.join(__dirname, 'claims-90', 'answerer.cjs'), 'utf8');
+  const child = fs.readFileSync(path.join(__dirname, 'claims-90', 'answer-child.cjs'), 'utf8');
+  assert.match(run, /calls\.push\(\{ cmd: 'index sync', problem: syncProblem\(summary\?\.synced, \{ embedNone: false \}\) \?\? indexProblem\(summary\?\.index\) \?\? \(indexBuf \? null : 'no index file'\) \}\);/, 'the preflight fails on the index sync or index');
+  assert.match(run, /if \(indexBuf\) servedState\.index = \{ buf: indexBuf, sha256: served\.index\.sha256 \};/);
+  assert.match(run, /waitFor\(serve\.connectFile, PREFLIGHT_SYNC_MS\)/, 'the preflight waits out the full first sync');
+  assert.match(run, /row\.indexServedSha256 = serveIndex\(pre\.servedState\.index, userData, hiveId\.to\);/, 'every item gets the preflight\'s index');
+  assert.match(run, /if \(row\.indexServedSha256 !== pre\.served\.index\.sha256\) throw /);
+  assert.match(run, /const syncBad = syncProblem\(row\.serve\.synced, \{ embedNone: true \}\);\r?\n    if \(!row\.invalid && syncBad\) row\.invalid = /, 'an item whose sync embeds or times out is INVALID');
+  assert.match(run, /else if \(!row\.invalid && indexKey\(row\.indexAfter\) !== indexKey\(pre\.served\.index\.digest\)\) row\.invalid = /, 'an item whose index is not the served one is INVALID');
+  const shut = child.indexOf('    await nativeMemory.shutdown().catch(() => {});\n    // god ba807e');
+  const shutCrlf = shut >= 0 ? shut : child.indexOf('    await nativeMemory.shutdown().catch(() => {});\r\n    // god ba807e');
+  const dig = child.indexOf('index: indexDigest(nativeMemory.dbFile())');
+  assert.ok(shutCrlf > 0 && dig > shutCrlf, 'the serve child reads the index only after its worker shut down');
+});
