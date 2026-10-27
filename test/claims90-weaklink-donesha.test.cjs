@@ -10,6 +10,12 @@
  * Round 2 (Jim's gate, god cdd4c7): a card the SUBJECT names, in a mail with no card field, takes the
  * same git check (M-a: "U1-U9 killed (U6 included)" made card.u6); and git confirms on the commit's
  * SUBJECT line only (M-b: CHANGELOG, cut and int merge commits list many cards in their bodies).
+ * Round 3 (Jim's gate on 844a3ddf, god 2b8abf): only the card's OWN commit confirms it. (A) a commit
+ * that changes only CHANGELOG/docs files confirms nothing (GitPort.changedFiles, no subject-prefix
+ * rule); (B) a merge (2+ parents) confirms nothing on its own sha and is never reported: it resolves to
+ * its merged parent, which counts when its subject or the merged branch names the card, else the merge
+ * is dropped, so a later int/rc merge mail yields the builder's own sha and never displaces it; (C) the
+ * single-link path needs no reported commit naming a different card.
  * Synthetic mails and a fake git port only; HOME jailed first.
  */
 const test = require('node:test');
@@ -33,13 +39,17 @@ const W = loadTs('src/main/claims/derivedWriter.ts');
 const { mailBodyHash } = loadTs('src/main/mailLedger.ts');
 
 const H = (c) => c.repeat(40);
-/** A git port over a fixed map: short sha -> full commit, full commit -> message. No ancestry, no times. */
-function fakeGit(commits, messages) {
+/** A git port over a fixed map: short sha -> full commit, full commit -> message. No ancestry, no times.
+ *  `extra.parents` / `extra.files` (full -> [full] / [path]) add the round-3 methods; without them the
+ *  port, like an older one, answers neither parents nor changed files. */
+function fakeGit(commits, messages, extra = {}) {
   return {
     async commitOf(s) { return commits[s] ?? null; },
     async isAncestor() { return false; },
     async time() { return 0; },
     async message(c) { return messages[c] ?? null; },
+    ...(extra.parents ? { async parents(c) { return extra.parents[c] ?? []; } } : {}),
+    ...(extra.files ? { async changedFiles(c) { return extra.files[c] ?? null; } } : {}),
   };
 }
 const CARDS = ['SYN-WL', 'SYN-OTHER', 'SYN-THIRD', 'SYN-PIN', 'U6', 'M1'];
@@ -190,4 +200,146 @@ test('round 2 M-b: git confirms on the commit SUBJECT only: a CHANGELOG or int m
   assert.equal(F.commitSubject('\n\nsubject only'), 'subject only');
   assert.equal(F.commitSubject(null), '');
   assert.equal(F.commitSubject(''), '');
+});
+
+// ———————————————————————————————————————————————————————————— round 3: only the card's own commit confirms
+
+// Round-3 commits beside a-f (hex fulls so they look like shas): g, h change only docs although their
+// subjects name SYN-WL; i is the int merge of SYN-WL's branch (merged parent b); j merges SYN-OTHER's
+// branch on top of i; k is the rc merge of the int line (nested: k -> i -> b); l merges a tidy commit n
+// whose subject names no card but whose branch does; p merges SYN-OTHER's branch under a subject that
+// names SYN-WL (a merge's own subject must never confirm).
+const HX = (c, n) => c.repeat(39) + n;
+const R3 = {
+  g: H('7'), h: H('8'), i: H('9'), j: H('0'), k: H('1'), l: H('2'), p: H('3'), n: H('4'),
+  q1: HX('5', '1'), q2: HX('5', '2'), q3: HX('5', '3'), q4: HX('5', '4'),
+};
+const git3 = fakeGit(
+  { aaaaaa1: H('a'), bbbbbb2: H('b'), cccccc3: H('c'), dddddd4: H('d'), eeeeee5: H('e'),
+    a1a1a1a: R3.g, b2b2b2b: R3.h, c3c3c3c: R3.i, d4d4d4d: R3.j, e5e5e5e: R3.k, f6f6f6f: R3.l, a7a7a7a: R3.p, b8b8b8b: R3.n, c9c9c9c: R3.q1 },
+  { [H('a')]: 'SYN-WL step 3: serve the current value', [H('b')]: 'SYN-WL: fold the delta-audit nits', [H('c')]: 'SYN-OTHER: the other card', [H('d')]: 'housekeeping', [H('e')]: CHANGELOG,
+    [R3.g]: 'CHANGELOG 9.1.0: row 5 (SYN-WL)', [R3.h]: 'docs: the SYN-WL guide',
+    [R3.i]: 'Merge guppy/syn-wl @bbbbbb2 into guppy/int-9.1 (SYN-WL, Jim PASS)',
+    [R3.j]: 'Merge guppy/syn-other @cccccc3 into guppy/int-9.1 (SYN-OTHER, Jim PASS)',
+    [R3.k]: 'Merge guppy/int-9.1 into rc/9.1 (cut)',
+    [R3.l]: "Merge branch 'guppy/syn-wl' into guppy/int-9.1", [R3.n]: 'tidy the tests',
+    [R3.p]: 'Merge guppy/syn-pin @cccccc3 into guppy/int-9.1 (SYN-WL re-check)',
+    [R3.q1]: 'Merge 1', [R3.q2]: 'Merge 2', [R3.q3]: 'Merge 3', [R3.q4]: 'Merge guppy/syn-wl' },
+  {
+    parents: { [H('b')]: [H('a')], [R3.i]: [H('d'), H('b')], [R3.j]: [R3.i, H('c')], [R3.k]: [H('d'), R3.i], [R3.l]: [H('d'), R3.n], [R3.p]: [H('d'), H('c')],
+      [R3.q1]: [H('d'), R3.q2], [R3.q2]: [H('d'), R3.q3], [R3.q3]: [H('d'), R3.q4], [R3.q4]: [H('d'), H('b')] },
+    files: { [H('a')]: ['src/main/x.ts'], [H('b')]: ['src/main/x.ts', 'CHANGELOG.md'], [H('c')]: ['src/main/y.ts'], [H('d')]: ['package.json'], [H('e')]: ['CHANGELOG.md'],
+      [R3.g]: ['CHANGELOG.md'], [R3.h]: ['docs/guide.md', 'README.md'], [R3.n]: ['test/x.test.cjs'] },
+  },
+);
+const T0 = '2026-10-20T10:00:00Z';
+
+test('round 3 A: a commit that changes only CHANGELOG/docs files confirms nothing, whatever its subject says', async () => {
+  // Subject-named (no card field): the CHANGELOG row commit names SYN-WL in its SUBJECT and changes only CHANGELOG.md.
+  const changelog = await F.doneMailFacts([{ id: 'r3a-1', act: 'done', from: 'cutter', subject: 'SYN-WL row added to the CHANGELOG', body: 'at a1a1a1a', created_at: T0 }], CARDS, git3);
+  assert.deepEqual(changelog.facts, [], 'no row: the commit is not the card\'s work');
+  assert.deepEqual(changelog.skips, [{ mail: 'r3a-1', reason: 'ambiguous', cards: ['SYN-WL'] }]);
+  const docs = await F.doneMailFacts([{ id: 'r3a-2', act: 'done', from: 'writer', subject: 'SYN-WL guide written', body: 'b2b2b2b', created_at: T0 }], CARDS, git3);
+  assert.deepEqual(docs.facts, [], 'docs/ and README.md only');
+  // Body-named: the same, bodyOnly.
+  const body = await F.doneMailFacts([{ id: 'r3a-3', act: 'done', from: 'writer', subject: 'docs sweep', body: 'syn-wl guide at b2b2b2b', created_at: T0 }], CARDS, git3);
+  assert.deepEqual(body.skips, [{ mail: 'r3a-3', reason: 'bodyOnly', cards: ['SYN-WL'] }]);
+  // A commit that changes CHANGELOG.md beside source is the card's work: confirms as before.
+  const mixed = await F.doneMailFacts([{ id: 'r3a-4', act: 'done', from: 'builder', subject: 'SYN-WL nits folded', body: 'bbbbbb2', created_at: T0 }], CARDS, git3);
+  assert.equal(commitOf(mixed, 'card.syn-wl.donesha#builder'), H('b'));
+  // Beside the card's own commit the docs commit neither confirms nor contradicts.
+  const beside = await F.doneMailFacts([{ id: 'r3a-5', act: 'done', from: 'builder', subject: 'SYN-WL done', body: 'bbbbbb2, CHANGELOG row a1a1a1a', created_at: T0 }], CARDS, git3);
+  assert.deepEqual(slots(beside), ['card.syn-wl.donesha#builder']);
+  // Only confirmation is withheld: a mail whose card FIELD is the card still reports the docs commit.
+  const field = await F.doneMailFacts([{ id: 'r3a-6', act: 'done', from: 'cutter', card: 'SYN-WL', subject: 'row added', body: 'a1a1a1a', created_at: T0 }], CARDS, git3);
+  assert.equal(commitOf(field, 'card.syn-wl.donesha#cutter'), R3.g);
+  // Without a changedFiles method the files are unknown and the subject confirms as in round 2 (the
+  // production port, DerivedGit, has the method).
+  const blind = await F.doneMailFacts([{ id: 'r3a-7', act: 'done', from: 'cutter', subject: 'SYN-WL row added', body: 'a1a1a1a', created_at: T0 }], CARDS,
+    fakeGit({ a1a1a1a: R3.g }, { [R3.g]: 'CHANGELOG 9.1.0: row 5 (SYN-WL)' }));
+  assert.deepEqual(slots(blind), ['card.syn-wl.donesha#cutter']);
+  for (const [f, doc] of [['CHANGELOG.md', true], ['CHANGELOG', true], ['sub/CHANGELOG-9.1.md', true], ['docs/guide.md', true], ['docs/a/b.txt', true], ['README.md', true], ['src/notes.md', true], ['docs\\guide.md', true],
+    ['src/main/x.ts', false], ['package.json', false], ['test/docs.test.cjs', false], ['mydocs/x.txt', false], ['src/changelog.ts', false]]) {
+    assert.equal(F.isDocFile(f), doc, f);
+  }
+});
+
+test('round 3 B: a merge confirms nothing on its own sha; it resolves to the merged parent when that names the card, else it is dropped; a later merge mail never displaces the own-commit sha', async () => {
+  const builder = { id: 'r3b-1', act: 'done', from: 'builder', card: 'SYN-WL', subject: 'SYN-WL served @bbbbbb2', body: 'on origin', created_at: T0 };
+  // (1) The int merge of the card's branch, reported later by the same sender with a card field: the value
+  // is the merged parent b, the same sha as before, never the merge sha i.
+  const same = await F.doneMailFacts([builder, { id: 'r3b-2', act: 'done', from: 'builder', card: 'SYN-WL', subject: 'SYN-WL merged into int @c3c3c3c', body: 'int-9.1 carries it', created_at: '2026-10-21T10:00:00Z' }], CARDS, git3);
+  assert.deepEqual(slots(same), ['card.syn-wl.donesha#builder']);
+  assert.equal(commitOf(same, 'card.syn-wl.donesha#builder'), H('b'), 'the merged parent, not the merge');
+  assert.match(same.facts[0].text, /names commit bbbbbbbb \(b{40}\) as its subject's @sha \(the merged parent of 99999999, the merge the mail wrote\)$/);
+  assert.equal(same.older, 1);
+  // (2) A gate mail from another sender, no card field, subject naming the card, reporting the merge:
+  // confirmed through the parent's subject; its row carries b, so the builder's row and the gate's agree.
+  const gate = await F.doneMailFacts([builder, { id: 'r3b-3', act: 'done', from: 'gate', subject: 'Jim PASS SYN-WL on int @c3c3c3c', body: 'green', created_at: '2026-10-21T11:00:00Z' }], CARDS, git3);
+  assert.deepEqual(slots(gate), ['card.syn-wl.donesha#builder', 'card.syn-wl.donesha#gate']);
+  assert.equal(commitOf(gate, 'card.syn-wl.donesha#gate'), H('b'));
+  assert.equal(commitOf(gate, 'card.syn-wl.donesha#builder'), H('b'), 'the builder\'s own row survives unchanged');
+  assert.ok(!JSON.stringify(gate.facts).includes(R3.i), 'the merge sha appears nowhere as a value');
+  // (3) The int merge of ANOTHER card's branch (j, merged parent c = SYN-OTHER): nothing for SYN-WL,
+  // whether the subject names the card or the card field does; never the merge sha, never c.
+  const other = await F.doneMailFacts([{ id: 'r3b-4', act: 'done', from: 'gate', subject: 'SYN-WL int cut @d4d4d4d', body: 'cut', created_at: T0 }], CARDS, git3);
+  assert.deepEqual(other.facts, []);
+  assert.deepEqual(other.skips, [{ mail: 'r3b-4', reason: 'ambiguous', cards: ['SYN-WL'] }]);
+  const otherField = await F.doneMailFacts([{ id: 'r3b-5', act: 'done', from: 'gate', card: 'SYN-WL', subject: 'int cut @d4d4d4d', body: 'cut', created_at: T0 }], CARDS, git3);
+  assert.deepEqual(otherField.facts, [], 'dropped: the merged parent names another card');
+  assert.deepEqual(otherField.skips, [{ mail: 'r3b-5', reason: 'noCommit', cards: ['SYN-WL'] }]);
+  // (4) A merge whose own subject names the card but whose merged parent is another card's commit (p):
+  // the merge's subject never confirms.
+  const ownSubject = await F.doneMailFacts([{ id: 'r3b-6', act: 'done', from: 'gate', subject: 'SYN-WL re-check merged @a7a7a7a', body: 're-check', created_at: T0 }], CARDS, git3);
+  assert.deepEqual(ownSubject.facts, []);
+  assert.deepEqual(ownSubject.skips, [{ mail: 'r3b-6', reason: 'ambiguous', cards: ['SYN-WL'] }]);
+  // (5) Nested: the rc merge of the int line resolves through i to b.
+  const rc = await F.doneMailFacts([{ id: 'r3b-7', act: 'done', from: 'cutter', subject: 'SYN-WL in rc/9.1 @e5e5e5e', body: 'cut', created_at: T0 }], CARDS, git3);
+  assert.equal(commitOf(rc, 'card.syn-wl.donesha#cutter'), H('b'));
+  // (6) The merged BRANCH names the card when the parent's subject does not (l merges n, "tidy the tests").
+  const branch = await F.doneMailFacts([{ id: 'r3b-8', act: 'done', from: 'builder', subject: 'SYN-WL tidy merged @f6f6f6f', body: 'tidy', created_at: T0 }], CARDS, git3);
+  assert.equal(commitOf(branch, 'card.syn-wl.donesha#builder'), R3.n);
+  // (7) A merge named in the body (no @sha) resolves the same way; beside the own commit the value is still b.
+  const bodyMerge = await F.doneMailFacts([{ id: 'r3b-9', act: 'done', from: 'builder', card: 'SYN-WL', subject: 'landed', body: 'bbbbbb2, merged as c3c3c3c', created_at: T0 }], CARDS, git3);
+  assert.equal(commitOf(bodyMerge, 'card.syn-wl.donesha#builder'), H('b'));
+  assert.doesNotMatch(bodyMerge.facts[0].text, /latest in git order of the 2/, 'the merge and its parent are one commit');
+  // (8) resolveReported: merges nest at most 3 deep; mergedBranch forms.
+  assert.deepEqual(await F.resolveReported(R3.i, git3), [{ commit: H('b'), text: 'SYN-WL: fold the delta-audit nits guppy/syn-wl', merge: R3.i, docsOnly: false }]);
+  assert.deepEqual((await F.resolveReported(R3.k, git3)).map((r) => [r.commit, r.merge]), [[H('b'), R3.k]]);
+  assert.deepEqual(await F.resolveReported(R3.q1, git3), [], 'four merges deep gives nothing');
+  assert.deepEqual(await F.resolveReported(R3.g, git3), [{ commit: R3.g, text: 'CHANGELOG 9.1.0: row 5 (SYN-WL)', docsOnly: true }]);
+  assert.equal(F.mergedBranch('Merge guppy/x-1 @abc1234 into guppy/int-1 (X-1, Jim PASS)'), 'guppy/x-1');
+  assert.equal(F.mergedBranch("Merge branch 'guppy/x-1' into main"), 'guppy/x-1');
+  assert.equal(F.mergedBranch('Merge remote-tracking branch \'origin/guppy/x-1\''), 'origin/guppy/x-1');
+  assert.equal(F.mergedBranch('Merge pull request #7 from org/guppy/x-1'), 'org/guppy/x-1');
+  assert.equal(F.mergedBranch('X-1: merge the two maps'), '');
+  // Without a parents method every commit is a plain one (an older port): the merge sha itself, as in round 2.
+  const blind = await F.doneMailFacts([{ id: 'r3b-10', act: 'done', from: 'gate', subject: 'Jim PASS SYN-WL on int @c3c3c3c', body: 'green', created_at: T0 }], CARDS,
+    fakeGit({ c3c3c3c: R3.i }, { [R3.i]: 'Merge guppy/syn-wl @bbbbbb2 into guppy/int-9.1 (SYN-WL, Jim PASS)' }));
+  assert.equal(commitOf(blind, 'card.syn-wl.donesha#gate'), R3.i);
+});
+
+test('round 3 C: a single inherited link counts only when no reported commit names a different card', async () => {
+  // The link says SYN-WL; the reported commit's subject names SYN-OTHER: nothing (never SYN-OTHER either).
+  const other = await F.doneMailFacts([{ id: 'r3c-1', act: 'done', from: 'auditor', cards: ['SYN-WL'], subject: 'Re: diagnosis', body: 'see cccccc3', created_at: T0 }], CARDS, git3);
+  assert.deepEqual(other.facts, []);
+  assert.deepEqual(other.skips, [{ mail: 'r3c-1', reason: 'ambiguous', cards: ['SYN-WL', 'SYN-OTHER'] }]);
+  // A commit naming no card still counts with the link.
+  const plain = await F.doneMailFacts([{ id: 'r3c-2', act: 'done', from: 'auditor', cards: ['SYN-WL'], subject: 'Re: sweep', body: 'dddddd4', created_at: T0 }], CARDS, git3);
+  assert.equal(commitOf(plain, 'card.syn-wl.donesha#auditor'), H('d'));
+  // The card's own commit beside one naming no card: counts.
+  const own = await F.doneMailFacts([{ id: 'r3c-3', act: 'done', from: 'auditor', cards: ['SYN-WL'], subject: 'Re: sweep', body: 'bbbbbb2 then dddddd4', created_at: T0 }], CARDS, git3);
+  assert.deepEqual(slots(own), ['card.syn-wl.donesha#auditor']);
+  // One of several reported commits naming another card is enough to withhold the link.
+  const mixed = await F.doneMailFacts([{ id: 'r3c-4', act: 'done', from: 'auditor', cards: ['SYN-WL'], subject: 'Re: sweep', body: 'bbbbbb2 beside cccccc3', created_at: T0 }], CARDS, git3);
+  assert.deepEqual(mixed.skips, [{ mail: 'r3c-4', reason: 'ambiguous', cards: ['SYN-WL', 'SYN-OTHER'] }]);
+  // Through a merge: the link with the int merge of another card's branch resolves to that card's commit: nothing.
+  const merge = await F.doneMailFacts([{ id: 'r3c-5', act: 'done', from: 'auditor', cards: ['SYN-WL'], subject: 'Re: int cut', body: 'd4d4d4d', created_at: T0 }], CARDS, git3);
+  assert.deepEqual(merge.skips, [{ mail: 'r3c-5', reason: 'ambiguous', cards: ['SYN-WL', 'SYN-OTHER'] }]);
+  // A docs-only commit naming another card is still a commit naming another card.
+  const docs = await F.doneMailFacts([{ id: 'r3c-6', act: 'done', from: 'auditor', cards: ['SYN-OTHER'], subject: 'Re: row', body: 'a1a1a1a', created_at: T0 }], CARDS, git3);
+  assert.deepEqual(docs.skips, [{ mail: 'r3c-6', reason: 'ambiguous', cards: ['SYN-OTHER', 'SYN-WL'] }]);
+  // A card FIELD is not a link: it reports another card's commit as before.
+  const field = await F.doneMailFacts([{ id: 'r3c-7', act: 'done', from: 'auditor', card: 'SYN-WL', subject: 'Re: diagnosis', body: 'see cccccc3', created_at: T0 }], CARDS, git3);
+  assert.equal(commitOf(field, 'card.syn-wl.donesha#auditor'), H('c'));
 });
