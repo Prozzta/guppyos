@@ -95,7 +95,9 @@ const stats = (xs) => {
 };
 const out = { lines, agents: agents().length, terms: terms.length, named: 0 };
 // cold: a new store per ask (no verified read kept, new record arrays, so nothing downstream is kept either).
-out.cold = stats(terms.map((q) => ms(() => claimCardLeadOver(deps(newStore()), ask(q)))));
+// Each cold store is closed after its ask: an open one stays reachable through its anchor timer with every kept read
+// (~12 MB of segment bytes), and 120 of them made the later modes measure GC pressure no app has (one store).
+out.cold = stats(terms.map((q) => { const s = newStore(); const v = ms(() => claimCardLeadOver(deps(s), ask(q))); s.close(); return v; }));
 // warm: one store, unchanged ledgers (first ask primes it and is not counted).
 const store = newStore();
 claimCardLeadOver(deps(store), ask(terms[0]));
