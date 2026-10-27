@@ -5,7 +5,9 @@
  * MAC-verifies them as it does in the app. Never point it at a live floor: it copies, and only reads the copy.
  *   cold    each ask on a new ClaimStore (nothing kept: the first ask after a start)
  *   warm    asks on one store, ledgers unchanged
- *   append  one signed line appended to the derived ledger before each ask (a claims sync landing between asks)
+ *   append      one signed line appended to the derived ledger before each ask (a claims sync landing between asks)
+ *   appendWarm  the same, with main's post-append warm (warmCardLeads) run before the ask; warmMs is its cost
+ * Each ask is search-shaped: the query plus 5 hit texts of up to 600 chars.
  * Usage: node test/tools/claims90-brief-bench.cjs <builtHiveRoot> <termsFile (one query per line)> [--json]
  * Prints p50 / p95 / max ms per mode. Exit 2 on usage, 3 when the re-signed copy does not verify.
  */
@@ -20,7 +22,7 @@ if (!src || !termsFile) { console.error('usage: claims90-brief-bench.cjs <builtH
 const { ClaimStore } = loadTs('src/main/claims/store.ts');
 const { SandboxKeyProvider, FileLedgerKeyRecord, FileHeadAnchorStore, KEY_RECORD_FILE, HEAD_ANCHOR_FILE } = loadTs('src/main/claims/keyProvider.ts');
 const { keyIdOf, recordMac, sha256Hex } = loadTs('src/main/claims/canonical.ts');
-const { claimCardLeadOver } = loadTs('src/main/claims/readWiring.ts');
+const { claimCardLeadOver, warmCardLeads } = loadTs('src/main/claims/readWiring.ts');
 
 const SEG = /^\d{4}-\d{2}\.jsonl$/;
 const terms = fs.readFileSync(termsFile, 'utf8').split(/\r?\n/).filter((l) => l.trim());
@@ -68,7 +70,17 @@ const keys = new SandboxKeyProvider(key);
 new FileLedgerKeyRecord(path.join(ud, KEY_RECORD_FILE)).set(hive, keyIdOf(key));
 const newStore = () => new ClaimStore({ hiveRoot: hive, keys, keyRecord: new FileLedgerKeyRecord(path.join(ud, KEY_RECORD_FILE)), headAnchor: new FileHeadAnchorStore(path.join(ud, HEAD_ANCHOR_FILE)), anchorDelayMs: 1e9 });
 const deps = (store) => ({ root: hive, store, agents, tasks: () => tasks });
-const ask = (q) => ({ cards: [], texts: [q] });
+// Search-shaped: the query, then 5 hit texts (the engine sends up to LEAD_TEXT_MAX = 600 chars of each), drawn from
+// the ledgers' claim texts by a fixed seed.
+const hitTexts = [];
+for (const a of Object.keys(last)) for (const f of fs.readdirSync(path.dirname(last[a].file))) {
+  for (const l of fs.readFileSync(path.join(path.dirname(last[a].file), f), 'utf8').split('\n')) {
+    try { const v = JSON.parse(l); if (v.t === 'claim' && typeof v.text === 'string') hitTexts.push(v.text.slice(0, 600)); } catch { /* blank */ }
+  }
+}
+let seed = 7;
+const pick = () => hitTexts[(seed = (seed * 48271) % 2147483647) % hitTexts.length];
+const ask = (q) => ({ cards: [], texts: [q, pick(), pick(), pick(), pick(), pick()] });
 
 const probe = newStore();
 for (const a of agents()) {
@@ -91,13 +103,19 @@ out.warm = stats(terms.map((q) => ms(() => { if (claimCardLeadOver(deps(store), 
 // append: one signed derived line before each ask (the largest ledger, the one a claims sync appends to).
 const grow = 'derived' in last ? 'derived' : agents()[0];
 let n = 0;
-out.append = stats(terms.map((q) => {
+const grow1 = () => {
   const prev = last[grow];
   const line = sign(grow, { t: 'claim', id: `c-bench${String(++n).padStart(8, '0')}`, at: new Date().toISOString(), kind: 'fact', key: `bench.${n}`, text: `bench line ${n}`, source: 'derived' }, prev.line);
   fs.appendFileSync(prev.file, line + '\n');
   last[grow] = { file: prev.file, line };
-  return ms(() => claimCardLeadOver(deps(store), ask(q)));
-}));
+};
+// append: the ask lands before main's post-append warm ran (the worst case).
+out.append = stats(terms.map((q) => { grow1(); return ms(() => claimCardLeadOver(deps(store), ask(q))); }));
+// appendWarm: main's warm (index.ts warmCardLeadsSoon, CARD_LEAD_WARM_MS after the append) ran first; `warmMs` is
+// what that warm costs main, off the search's path.
+const warmMs = [];
+out.appendWarm = stats(terms.map((q) => { grow1(); warmMs.push(ms(() => warmCardLeads(deps(store)))); return ms(() => claimCardLeadOver(deps(store), ask(q))); }));
+out.warmMs = stats(warmMs);
 const r = store.readLedger(grow);
 out.appendVerified = r.chain === 'ok';
 fs.rmSync(jail, { recursive: true, force: true });

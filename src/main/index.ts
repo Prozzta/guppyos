@@ -107,7 +107,7 @@ import { FloorDigest, FLOOR_DIGEST_DEFAULTS, FLOOR_DIGEST_FILE, readFlaggedForHu
 import { HiveManager, archivedForMail, type AgentMeta, type ArchiveReason, type HiveMessage, type HiveTask } from './hive';
 import { applyLedgerOp, perAgentQueue, type LedgerDeps } from './ledger';
 import { cardKeyRefusal, handleClaimVerb } from './claims/endpoint';
-import { claimCardLeadOver, claimGetOver, claimHistoryOver } from './claims/readWiring';
+import { claimCardLeadOver, claimGetOver, claimHistoryOver, warmCardLeads, type ClaimReadDeps } from './claims/readWiring';
 import { actionableBacklog, coordinatorPendingIds, fleetMailFields, ledgerInboxMessages, mailCoordinationAt } from './mailReaders';
 import { HookServer } from './hooks';
 import { TermControl } from './termControl';
@@ -1737,7 +1737,8 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
           // CL-READERWATCHER: a first claim of an unimported reader or writer starts its import now.
           try { const at = hive.root(); if (at && agentId !== DERIVED_AGENT_ID && memoryMdReplaced(claimLevel(agentId)) && !importSettled(at, agentId)) void claimsImportReady().then(() => readerWatchers.ensureImported(agentId)); } catch (e) { hive.appendLog({ kind: 'claims-watch-error', agentId, error: String(e).slice(0, 160) }); }
           claimExport().onAppend(agentId, id, rec);
-          if (!shouldRunR5(rec)) { claimsIndexSync()?.schedule(agentId); return; }
+          if (!shouldRunR5(rec)) { claimsIndexSync()?.schedule(agentId); warmCardLeadsSoon(); return; }
+          warmCardLeadsSoon();
           const root = hive.root(); if (!root) return;
           void enqueueR5AfterIndex(agentId, id, {
             syncIndex: () => claimsIndexSync()?.syncNow(agentId) ?? Promise.resolve(null),
@@ -1809,6 +1810,24 @@ function claimsAnchorCheck(): void {
   try { claimsEndpoint()?.store.checkAnchored(); } catch (e) { hive.appendLog({ kind: 'claims-anchor-check-failed', error: String(e).slice(0, 160) }); }
 }
 setInterval(claimsAnchorCheck, CLAIMS_ANCHOR_CHECK_MS).unref?.();
+/** The search brief's read deps over the served hive, as the memory service's cardLead builds them (claims/readWiring.ts),
+ *  or null with no hive or claims store. */
+function cardLeadDeps(): ClaimReadDeps | null {
+  const root = hive.root(); const ep = claimsEndpoint();
+  return root && ep ? { root, store: ep.store, agents: claimLedgerAgents, tasks: () => ((hive.allTasks() as { tasks?: Array<Record<string, unknown>> }).tasks ?? []) } : null;
+}
+/** CLAIMS-BRIEF-LATENCY (god 360a86): CARD_LEAD_WARM_MS after a claim append (once per burst, never pushed back by
+ *  later appends), main rebuilds the brief's inputs so the next search's brief is warm (claims/readWiring.ts). */
+const CARD_LEAD_WARM_MS = 250;
+let cardLeadWarm: ReturnType<typeof setTimeout> | null = null;
+function warmCardLeadsSoon(): void {
+  if (cardLeadWarm) return;
+  cardLeadWarm = setTimeout(() => {
+    cardLeadWarm = null;
+    try { const d = cardLeadDeps(); if (d) warmCardLeads(d); } catch (e) { hive.appendLog({ kind: 'claims-brief-warm-failed', error: String(e).slice(0, 160) }); }
+  }, CARD_LEAD_WARM_MS);
+  cardLeadWarm.unref?.();
+}
 /** REL-184 S0 (Jim option (a)): once per hive root, shadowImport every agent at shadow or higher
  *  (claims/startupImport.ts). Every path that forks the memory worker or appends a claim waits for
  *  it, so discovery never sees a segment without its legacy entries; the wait is capped. */

@@ -164,6 +164,20 @@ function isObj(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
+type VerifiedRead = { seen: Array<{ file: string; buf: Buffer }>; result: ReadResult; head: string; reached: Set<string> };
+
+/** One ledger line as a record, or null (not JSON, not a claim or event, or a supersedesReason without supersedes). */
+function ledgerRec(line: string): LedgerRec | null {
+  try {
+    const v = JSON.parse(line) as unknown;
+    if (isObj(v) && typeof v.id === 'string' && (v.t === 'claim' || v.t === 'event')) {
+      if (v.t !== 'claim' || v.supersedesReason === undefined ||
+        (Array.isArray(v.supersedes) && v.supersedes.length > 0 && validSupersedesReason(v.supersedesReason))) return v as unknown as LedgerRec;
+    }
+  } catch { /* not a record */ }
+  return null;
+}
+
 /** Every line parses and chains on the one before it (the MAC-free structure; Jim A-1). */
 function prevHolds(lines: Array<{ line: string; rec: LedgerRec | null }>): boolean {
   let prev = '';
@@ -238,8 +252,9 @@ export class ClaimStore {
   private readonly fs: LedgerIo;
   private readonly now: () => Date;
   private readonly state = new Map<string, AgentState>();
-  /** readLedgerCached: the last chain-'ok' read per agent and the segment bytes it parsed and verified. */
-  private readonly verifiedReads = new Map<string, { seen: Array<{ file: string; buf: Buffer }>; result: ReadResult }>();
+  /** readLedgerCached: the last chain-'ok' read per agent, the segment bytes it parsed and verified, the sha256 of
+   *  its last line, and the head anchors it showed the ledger reaches. */
+  private readonly verifiedReads = new Map<string, VerifiedRead>();
   private readonly queues = new Map<string, Promise<unknown>>();
   private readonly alerted = new Set<string>();
   private keyMissing = false;
@@ -300,8 +315,13 @@ export class ClaimStore {
     try {
       // The bytes kept are the very buffers this read parsed and verified (not a second read that could race an append).
       const seen: Array<{ file: string; buf: Buffer }> = [];
+      const before = this.anchorWant(agentId);
       const r = this.readInner(agentId, seen);
-      if (r.chain === 'ok' && !r.torn) this.verifiedReads.set(agentId, { seen, result: r }); else this.verifiedReads.delete(agentId);
+      if (r.chain === 'ok' && !r.torn) {
+        // An ok read reached the anchor it was checked against and adopted its head (the anchor moves there).
+        const head = this.state.get(agentId)?.head ?? '';
+        this.verifiedReads.set(agentId, { seen, result: r, head, reached: new Set([before, head, this.anchorWant(agentId)].filter((h): h is string => !!h)) });
+      } else this.verifiedReads.delete(agentId);
       return r;
     } catch (e) {
       this.verifiedReads.delete(agentId);
@@ -318,20 +338,73 @@ export class ClaimStore {
    * bytes and comparing them (memcmp) does not. The check is on content, never on size or mtime, so a segment changed
    * in place (same size, mtime put back) is re-read and re-verified. Only a chain-'ok' read is kept, and any readLedger
    * (the integrity paths: checkAll, the writers) replaces or drops it.
+   * CLAIMS-BRIEF-LATENCY (god 360a86): when the files are those bytes plus whole lines appended after them (an
+   * append, a new month's segment), only the appended lines are verified, as verify and checkAnchor would: each
+   * parses, chains on the line before it, names this agent and passes its MAC, and the head anchor is one the ledger
+   * was shown to reach. Anything else (a rekey line, a pending purge, a torn tail, no key, any changed earlier byte)
+   * is a full readLedger, which reports and alerts as before. Re-verifying the 11.6k-line derived ledger on every
+   * claims-sync append cost ~365 ms of the next brief.
    */
   readLedgerCached(agentId: string): ReadResult {
     const hit = this.verifiedReads.get(agentId);
-    if (hit && this.sameBytes(agentId, hit.seen)) return hit.result;
-    return this.readLedger(agentId);
+    const grown = hit ? this.grownBytes(agentId, hit.seen) : null;
+    if (hit && grown && grown.added.length === 0) return hit.result;
+    if (hit && grown) { const r = this.extendRead(agentId, hit, grown); if (r) return r; }    return this.readLedger(agentId);
   }
 
-  /** The agent's segments are exactly these files with exactly these bytes. */
-  private sameBytes(agentId: string, seen: Array<{ file: string; buf: Buffer }>): boolean {
+  /** The agent's segments as these files with these bytes plus whole lines after them (`added`: the new bytes of
+   *  the last kept file, then any newer files), with the bytes now; null on any other difference. */
+  private grownBytes(agentId: string, seen: Array<{ file: string; buf: Buffer }>): { seen: Array<{ file: string; buf: Buffer }>; added: Buffer[] } | null {
     try {
       const files = this.segments(agentId);
-      if (files.length !== seen.length || files.some((f, i) => f !== seen[i].file)) return false;
-      return seen.every(({ file, buf }) => nodeFs.statSync(file).size === buf.length && nodeFs.readFileSync(file).equals(buf));
-    } catch { return false; }
+      if (files.length < seen.length || seen.some(({ file }, i) => files[i] !== file)) return null;
+      const now: Array<{ file: string; buf: Buffer }> = [];
+      const added: Buffer[] = [];
+      for (let i = 0; i < files.length; i++) {
+        const old = seen[i]?.buf;
+        const buf = nodeFs.readFileSync(files[i]);
+        if (old && i < seen.length - 1 && !buf.equals(old)) return null;
+        if (old && (buf.length < old.length || !buf.subarray(0, old.length).equals(old))) return null;
+        const fresh = old ? buf.subarray(old.length) : buf;
+        if (fresh.length && fresh[fresh.length - 1] !== 0x0a) return null;
+        if (fresh.length) added.push(fresh);
+        now.push({ file: files[i], buf });
+      }
+      return { seen: now, added };
+    } catch { return null; }
+  }
+
+  /** The kept read extended by the appended lines when every one verifies after the kept head; null otherwise. */
+  private extendRead(agentId: string, hit: VerifiedRead, grown: { seen: Array<{ file: string; buf: Buffer }>; added: Buffer[] }): ReadResult | null {
+    const key = this.keys();
+    if (!key || this.d.headAnchor?.get(this.d.hiveRoot, agentId)?.pending) return null;
+    const recs: LedgerRec[] = [];
+    const reached = new Set(hit.reached);
+    let prev = hit.head;
+    for (const chunk of grown.added) {
+      for (const line of chunk.toString('utf8').split('\n').slice(0, -1)) {
+        const rec = ledgerRec(line);
+        if (!rec || rec.prev !== prev || rec.agent !== agentId || (rec.t === 'event' && rec.ev === 'rekey')) return null;
+        if (recordMac(key, rec as unknown as Record<string, unknown>) !== rec.mac) return null;
+        prev = sha256Hex(line);
+        reached.add(prev);
+        recs.push(rec);
+      }
+    }
+    const want = this.anchorWant(agentId);
+    if (want && !reached.has(want)) return null;
+    if (recs.length && want !== prev) this.anchorSoon(agentId, prev, recs[recs.length - 1].id);
+    const result: ReadResult = { records: [...hit.result.records, ...recs], torn: null, chain: 'ok' };
+    this.verifiedReads.set(agentId, { seen: grown.seen, result, head: prev, reached });
+    return result;
+  }
+
+  /** The head the anchor check holds the ledger to now (this process's unflushed head, else the stored one); null
+   *  while a purge's re-anchor is pending. */
+  private anchorWant(agentId: string): string | null {
+    const stored = this.d.headAnchor?.get(this.d.hiveRoot, agentId);
+    if (stored?.pending) return null;
+    return this.anchorTimers.get(agentId)?.head ?? stored?.head ?? null;
   }
 
   private readInner(agentId: string, seen?: Array<{ file: string; buf: Buffer }>): ReadResult {
@@ -359,15 +432,7 @@ export class ClaimStore {
         const nl = buf.indexOf(0x0a, off);
         const stop = nl < 0 ? buf.length : nl;
         const line = buf.subarray(off, stop).toString('utf8');
-        let rec: LedgerRec | null = null;
-        try {
-          const v = JSON.parse(line) as unknown;
-          if (isObj(v) && typeof v.id === 'string' && (v.t === 'claim' || v.t === 'event')) {
-            if (v.t !== 'claim' || v.supersedesReason === undefined ||
-              (Array.isArray(v.supersedes) && v.supersedes.length > 0 && validSupersedesReason(v.supersedesReason))) rec = v as unknown as LedgerRec;
-          }
-        } catch { rec = null; }
-        lines.push({ file, offset: off, bytes: stop - off, line, rec });
+        lines.push({ file, offset: off, bytes: stop - off, line, rec: ledgerRec(line) });
         off = stop + 1;
       }
     });

@@ -28,7 +28,7 @@ test.after(() => {
 const loadTs = require('./load-ts.cjs');
 const { ClaimStore } = loadTs('src/main/claims/store.ts');
 const { SandboxKeyProvider, FileLedgerKeyRecord, FileHeadAnchorStore, KEY_RECORD_FILE, HEAD_ANCHOR_FILE } = loadTs('src/main/claims/keyProvider.ts');
-const { claimCardLeadOver, claimGetOver } = loadTs('src/main/claims/readWiring.ts');
+const { claimCardLeadOver, claimGetOver, warmCardLeads } = loadTs('src/main/claims/readWiring.ts');
 const { DEFAULT_KEY_REGISTRY, saveRegistry } = loadTs('src/main/claims/registry.ts');
 
 let n = 0;
@@ -118,6 +118,91 @@ test('STORE: a broken or torn read is never kept: once the break is mended with 
   assert.ok(!after.torn, 'the tail completed (cut back here): the torn read was not served again');
 });
 
+// CLAIMS-BRIEF-LATENCY (god 360a86): appended lines are verified alone, never trusted.
+const { randomBytes } = require('node:crypto');
+const { recordMac, sha256Hex } = loadTs('src/main/claims/canonical.ts');
+function grownStore() {
+  const root = hive(); const ud = `${root}-ud`;
+  const key = randomBytes(32);
+  let t = Date.parse('2026-10-27T10:00:00Z');
+  const anchors = new FileHeadAnchorStore(path.join(ud, HEAD_ANCHOR_FILE));
+  const store = new ClaimStore({ hiveRoot: root, keys: new SandboxKeyProvider(key), keyRecord: new FileLedgerKeyRecord(path.join(ud, KEY_RECORD_FILE)), headAnchor: anchors, now: () => new Date(t += 1000) });
+  STORES.push(store);
+  const full = store.readInner.bind(store);
+  const counts = { full: 0 };
+  store.readInner = (...a) => { counts.full++; return full(...a); };
+  const dir = path.join(root, 'agents', 'andy', 'memory', 'claims');
+  const seg = () => path.join(dir, fs.readdirSync(dir).sort().pop());
+  let k = 0;
+  /** A line appended by hand: signed with `signKey` after the newest line unless `over` changes a field. */
+  const append = (over = {}, signKey = key) => {
+    const last = fs.readFileSync(seg(), 'utf8').trimEnd().split('\n').pop();
+    const r = { t: 'claim', id: `c-hand${String(++k).padStart(6, '0')}`, at: new Date(t += 1000).toISOString(), kind: 'fact', text: `hand fact ${k}`, source: 'self', agent: 'andy', prev: sha256Hex(last), ...over };
+    r.mac = recordMac(signKey, r);
+    fs.appendFileSync(seg(), JSON.stringify(r) + '\n');
+    return r.id;
+  };
+  return { root, key, store, counts, append, seg, anchors, setNow: (iso) => { t = Date.parse(iso); } };
+}
+
+test('STORE: lines appended after a kept read are verified alone and extend it (no full re-read), a new month segment too (MUTANT: a full read per append)', async () => {
+  const g = grownStore();
+  await ok(g.store.appendRecord('andy', note('first'), 'endpoint'));
+  const a = g.store.readLedgerCached('andy');
+  const fulls = g.counts.full;
+  const id = g.append();
+  const b = g.store.readLedgerCached('andy');
+  assert.equal(b.chain, 'ok');
+  assert.notEqual(b.records, a.records, 'a new records array (the brief re-indexes)');
+  assert.deepEqual(b.records.map((r) => r.id), [...a.records.map((r) => r.id), id]);
+  assert.equal(g.counts.full, fulls, 'the kept read was extended, not re-read');
+  assert.equal(g.store.readLedgerCached('andy'), b, 'and kept');
+  g.setNow('2026-11-02T10:00:00Z');
+  const nid = await ok(g.store.appendRecord('andy', note('november'), 'endpoint'));
+  const before = g.counts.full;
+  const c = g.store.readLedgerCached('andy');
+  assert.ok(path.basename(g.seg()).startsWith('2026-11'), 'a new segment');
+  assert.equal(c.chain, 'ok'); assert.equal(c.records[c.records.length - 1].id, nid);
+  assert.equal(g.counts.full, before, 'a new segment after the kept ones extends too');
+  assert.equal(g.store.readLedger('andy').records.length, c.records.length, 'the full read agrees');
+});
+
+for (const [name, bad, mutant] of [
+  ['a MAC under another key', (g) => g.append({}, randomBytes(32)), 'no MAC check'],
+  ['a prev that skips the head', (g) => g.append({ prev: 'e'.repeat(64) }), 'no prev check'],
+  ['another agent\'s line', (g) => g.append({ agent: 'jim' }), 'no agent check'],
+  ['an earlier line changed in place, then a good append', (g) => {
+    const f = g.seg(); fs.writeFileSync(f, fs.readFileSync(f, 'utf8').replace('first', 'FIRST')); g.append();
+  }, 'only the new bytes compared'],
+  ['a cut head anchor, then a good append', (g) => {
+    g.store.close(); g.anchors.set(g.root, 'andy', { head: 'f'.repeat(64), lastId: 'c-000000000000' }); g.append();
+  }, 'no anchor check'],
+]) {
+  test(`STORE: an appended ${name} is never served; the read reports the break (MUTANT: ${mutant})`, async () => {
+    const g = grownStore();
+    await ok(g.store.appendRecord('andy', note('first'), 'endpoint'));
+    await ok(g.store.appendRecord('andy', note('second'), 'endpoint'));
+    assert.equal(g.store.readLedgerCached('andy').chain, 'ok');
+    bad(g);
+    assert.notEqual(g.store.readLedgerCached('andy').chain, 'ok');
+  });
+}
+
+test('STORE: a line chained on the head but written into an older segment is never served (MUTANT: any kept file may grow)', async () => {
+  const g = grownStore();
+  await ok(g.store.appendRecord('andy', note('october'), 'endpoint'));
+  g.setNow('2026-11-02T10:00:00Z');
+  await ok(g.store.appendRecord('andy', note('november'), 'endpoint'));
+  assert.equal(g.store.readLedgerCached('andy').chain, 'ok');
+  const newest = g.seg();
+  const older = path.join(path.dirname(newest), fs.readdirSync(path.dirname(newest)).sort()[0]);
+  const head = fs.readFileSync(newest, 'utf8').trimEnd().split('\n').pop();
+  const r = { t: 'claim', id: 'c-hand-older', at: '2026-11-03T10:00:00.000Z', kind: 'fact', text: 'misplaced', source: 'self', agent: 'andy', prev: sha256Hex(head) };
+  r.mac = recordMac(g.key, r);
+  fs.appendFileSync(older, JSON.stringify(r) + '\n');
+  assert.notEqual(g.store.readLedgerCached('andy').chain, 'ok');
+});
+
 // Wiring fixtures: a stub store whose records arrays the test controls (the same array while "unchanged").
 const BUMP1 = '57ae9b25' + 'a'.repeat(32);
 const BUMP2 = '0badf00d' + 'b'.repeat(32);
@@ -157,6 +242,24 @@ test('WIRING: a warm brief touches no ledger record; a changed records array or 
   tasks = [...tasks, { id: 'MAIL-STUCK-9', status: 'done' }];
   const r = claimCardLeadOver(d, { cards: [], texts: ['q', 'MAIL-STUCK-9 was merged'] });
   assert.deepEqual(r.pointed, ['mail-stuck-9'], 'a changed task list rebuilds the target index (MUTANT: tasks left out of the kept signature)');
+});
+
+test('WIRING: warmCardLeads after a ledger change leaves the next brief warm; it builds nothing before a first brief for the root (MUTANT: warm builds no index)', () => {
+  const root = hive();
+  const one = counted([c('c_000000000001', 'release.1.1.90.bump', '2026-10-17T10:00:00.000Z', `Guppy 1.1.90 version bump is ${BUMP1}`, BUMP1)]);
+  const ledgers = { derived: one.p };
+  const store = { readLedger: (a) => ({ records: ledgers[a] ?? [], torn: null, chain: 'ok' }) };
+  const d = { root, store, agents: () => Object.keys(ledgers), tasks: () => [] };
+  assert.equal(warmCardLeads(d), false, 'no brief asked for this root yet: nothing built');
+  assert.equal(one.box.gets, 0);
+  const q = { cards: [], texts: ['bump 1.1.90 version commit'] };
+  claimCardLeadOver(d, q);
+  const two = counted([...one.p, c('c_000000000002', 'release.1.1.90.bump', '2026-10-18T10:00:00.000Z', `Guppy 1.1.90 version bump is ${BUMP2}`, BUMP2)]);
+  ledgers.derived = two.p;
+  assert.equal(warmCardLeads(d), true);
+  two.box.gets = 0;
+  assert.ok(claimCardLeadOver(d, q).briefs['release.1.1.90'].includes(`bump: ${BUMP2}`), 'the warmed answer is the new one');
+  assert.equal(two.box.gets, 0, 'the brief after the warm touched no record');
 });
 
 test('WIRING: a registry change with the ledgers unchanged re-derives (MUTANT: the kept derive served across a registry change)', () => {

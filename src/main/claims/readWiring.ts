@@ -12,8 +12,8 @@ import { verifiedPrefix } from './indexSync';
 import { derive as deriveClaims } from './derive';
 import { renderClaimHistory } from './views';
 import { reconcileQueueForHive } from './reconcile';
-import { DEFAULT_KEY_REGISTRY, loadRegistry } from './registry';
-import { formatGet, leadBrief, resolveGet, resolveGetMany, type CardLeadAsk, type CardLeadReply, type GetDeps } from './get';
+import { DEFAULT_KEY_REGISTRY, loadRegistry, registryPath } from './registry';
+import { formatGet, leadBrief, resolveGet, resolveGetMany, warmGetIndex, type CardLeadAsk, type CardLeadReply, type GetDeps } from './get';
 import { targetIndex, targetsIn, type TargetIndex } from './searchTargets';
 import type { LedgerRec, ReadResult } from '../../shared/claims';
 
@@ -81,16 +81,19 @@ function getDeps(d: ClaimReadDeps): GetDeps {
   const read = (a: string): ReadResult => (d.store.readLedgerCached ? d.store.readLedgerCached(a) : d.store.readLedger(a));
   const ledgers: Record<string, LedgerRec[]> = {};
   for (const a of d.agents()) { const prefix = verifiedPrefix(read(a)); if (prefix) ledgers[a] = prefix.records; }
-  let reg; try { reg = loadRegistry(root); } catch { reg = DEFAULT_KEY_REGISTRY; }
+  // The registry by its file text: parsed only when the text changed (a parse and re-serialise per ask was ~14 ms).
+  let regText: string | null; try { regText = readFileSync(registryPath(root), 'utf8'); } catch { regText = null; }
   const queue = reconcileQueueForHive(root);
   const reconcileItems = Object.keys(ledgers).flatMap((a) => queue.allItems(a));
   const tasks = d.tasks();
-  const sig = { root, ledgers: Object.entries(ledgers), registry: JSON.stringify(reg), reconcile: JSON.stringify(reconcileItems), tasks: JSON.stringify(tasks) };
+  const sig = { root, ledgers: Object.entries(ledgers), registry: regText, reconcile: JSON.stringify(reconcileItems), tasks: JSON.stringify(tasks) };
   const k = kept;
   if (k && k.sig.root === root && k.sig.registry === sig.registry && k.sig.reconcile === sig.reconcile && k.sig.tasks === sig.tasks
     && k.sig.ledgers.length === sig.ledgers.length && k.sig.ledgers.every(([a, recs], i) => sig.ledgers[i][0] === a && sig.ledgers[i][1] === recs)) return k.deps;
   // The same registry object while its text is unchanged, so get's per-ledger derive is kept for unchanged agents.
+  let reg: GetDeps['registry'];
   if (k && k.sig.root === root && k.sig.registry === sig.registry) reg = k.deps.registry;
+  else { try { reg = loadRegistry(root); } catch { reg = DEFAULT_KEY_REGISTRY; } }
   const mailRows = (card: string): string[] | null => {
     if (!/^[a-z0-9][a-z0-9._-]{0,119}$/.test(card)) return null;
     try { return readFileSync(join(root, 'state', 'mail-cards', `${card}.jsonl`), 'utf8').split('\n'); } catch { return null; }
@@ -106,7 +109,22 @@ function getDeps(d: ClaimReadDeps): GetDeps {
  * registry, reconcile items and tasks by value), getDeps returns the same GetDeps object, so get's index and the
  * search target index are built once, not per ask. One hive is served at a time (the last root read).
  */
-let kept: { sig: { root: string; ledgers: Array<[string, LedgerRec[]]>; registry: string; reconcile: string; tasks: string }; deps: GetDeps; targets: TargetIndex | null } | null = null;
+let kept: { sig: { root: string; ledgers: Array<[string, LedgerRec[]]>; registry: string | null; reconcile: string; tasks: string }; deps: GetDeps; targets: TargetIndex | null } | null = null;
+
+/**
+ * CLAIMS-BRIEF-LATENCY (god 360a86): build the brief's inputs now (verified reads, get's index, the target index) so
+ * the next search's brief finds them kept. Main calls it, debounced, after claim appends: on a live floor a claims
+ * sync lands between most searches, and the rebuild after it (~100 ms on the step-3 hive) then ran on the search's
+ * path, serially after the vector search. Only once a brief has been asked for this root (an app that never
+ * searches builds nothing). True when it built.
+ */
+export function warmCardLeads(d: ClaimReadDeps): boolean {
+  if (!kept || kept.sig.root !== d.root) return false;
+  const deps = getDeps(d);
+  warmGetIndex(deps);
+  targetsOf(deps);
+  return true;
+}
 
 /** The search target index (cards by id, card.<id> keys, owned branches, releases) of one GetDeps, kept with it. */
 function targetsOf(deps: GetDeps): TargetIndex {

@@ -229,6 +229,9 @@ function index(d: GetDeps): Indexed {
   return ix;
 }
 
+/** Build (or keep) get's index of these deps now, so the next resolve over the same deps finds it. */
+export function warmGetIndex(d: GetDeps): void { index(d); }
+
 function indexNow(d: GetDeps): Indexed {
   const reg = d.registry;
   const rule = d.ruleConfig ?? { r4: false };
