@@ -56,6 +56,7 @@ function fakeGit(commits, messages, extra = {}) {
     async message(c) { return messages[c] ?? null; },
     ...(extra.parents ? { async parents(c) { return extra.parents[c] ?? []; } } : {}),
     ...(extra.files ? { async changedFiles(c) { return extra.files[c] ?? null; } } : {}),
+    ...(extra.versions ? { async versionOnly(c, p) { return extra.versions[c + '|' + p] ?? null; } } : {}),
   };
 }
 const CARDS = ['SYN-WL', 'SYN-OTHER', 'SYN-THIRD', 'SYN-PIN', 'U6', 'M1'];
@@ -257,9 +258,10 @@ test('round 3 A: a commit that changes only CHANGELOG/docs files confirms nothin
   // Beside the card's own commit the docs commit neither confirms nor contradicts.
   const beside = await F.doneMailFacts([{ id: 'r3a-5', act: 'done', from: 'builder', subject: 'SYN-WL done', body: 'bbbbbb2, CHANGELOG row a1a1a1a', created_at: T0 }], CARDS, git3);
   assert.deepEqual(slots(beside), ['card.syn-wl.donesha#builder']);
-  // Only confirmation is withheld: a mail whose card FIELD is the card still reports the docs commit.
+  // Round 6 (god 18e97a, R6-2; deliberately changed from round 3): a docs-only commit is not carried for a
+  // feature card even by its card FIELD; only a cut/release card keeps it.
   const field = await F.doneMailFacts([{ id: 'r3a-6', act: 'done', from: 'cutter', card: 'SYN-WL', subject: 'row added', body: 'a1a1a1a', created_at: T0 }], CARDS, git3);
-  assert.equal(commitOf(field, 'card.syn-wl.donesha#cutter'), R3.g);
+  assert.deepEqual(field.skips, [{ mail: 'r3a-6', reason: 'noCommit', cards: ['SYN-WL'] }], 'MUTANT release carried by field');
   // Without a changedFiles method the files are unknown and the subject confirms as in round 2 (the
   // production port, DerivedGit, has the method).
   const blind = await F.doneMailFacts([{ id: 'r3a-7', act: 'done', from: 'cutter', subject: 'SYN-WL row added', body: 'a1a1a1a', created_at: T0 }], CARDS,
@@ -447,9 +449,109 @@ test('round 5: one card recogniser everywhere (variants, whole into-line, card-s
   const namer = F.cardNamer(['INT-9.1', 'SYN-WL']);
   assert.deepEqual(namer('FEAT-X lands on INT 9.1 beside syn wl'), { cards: ['INT-9.1', 'SYN-WL'], others: ['FEAT-X'] });
   assert.deepEqual(namer('feat-x in lower case; guppy/feat-x; INT-9.1.2 stage 3'), { cards: [], others: ['INT-9.1.2'] }, 'lower case is no card shape; a longer id is another card');
-  assert.deepEqual(namer('INT-9.1: X-1 Y-2.3 ab-CD'), { cards: ['INT-9.1'], others: ['X-1', 'Y-2.3'] });
+  // Round 6 (god 18e97a): X-1, a one-segment word plus a number, is a label, no card (deliberately changed from round 5).
+  assert.deepEqual(namer('INT-9.1: X-1 Y-2.3 ab-CD'), { cards: ['INT-9.1'], others: ['Y-2.3'] });
   assert.deepEqual(namer(''), { cards: [], others: [] });
   assert.deepEqual(F.cardMatcher(['INT-9.1'])('int 9.1 and FEAT-X'), ['INT-9.1'], 'cardMatcher is the recogniser\'s cards');
+});
+
+// Round 6 (god 18e97a / 40991c, Jim af127d): synthetic cards and commits only. w1..w9 are commits whose subjects
+// write a card in a short form (or an unrelated card-shaped token); rel is a release-only commit (version lines,
+// CHANGELOG, README), bump a package.json change beyond the version; m1 a stage merge into the int line whose
+// subject also names another card; plain a feature commit.
+const CARDS6 = [...CARDS5, 'FEAT-ALPHA-WIDGET-DRAW', 'FEAT-ALPHA-TILE', 'SYN-GAMMA-TILE', 'SYN-BETA-PIPE-123', 'CUT-9.9.9'];
+const R6 = { w1: HX('7', '1'), w2: HX('7', '2'), w3: HX('7', '3'), w4: HX('7', '4'), w5: HX('7', '5'), w6: HX('7', '6'), w7: HX('7', '7'), w8: HX('7', '8'), w9: HX('7', '9'),
+  rel: HX('8', '1'), bump: HX('8', '2'), m1: HX('8', '3'), plain: HX('8', '4'), m2: HX('8', '5') };
+const SRC = ['src/main/x.ts'];
+const git6 = fakeGit(
+  { aaaaaa1: H('a'), bbbbbb2: H('b'), cccccc3: H('c'), dddddd4: H('d'), c3c3c3c: R3.i, d4d4d4d: R3.j, e6e6e6e: S3, f7f7f7f: U, a8a8a8a: V,
+    '7a7a7a1': R6.w1, '7a7a7a2': R6.w2, '7a7a7a3': R6.w3, '7a7a7a4': R6.w4, '7a7a7a5': R6.w5, '7a7a7a6': R6.w6, '7a7a7a7': R6.w7, '7a7a7a8': R6.w8, '7a7a7a9': R6.w9,
+    '8b8b8b1': R6.rel, '8b8b8b2': R6.bump, '8b8b8b3': R6.m1, '8b8b8b4': R6.plain, '8b8b8b5': R6.m2 },
+  { [H('a')]: 'SYN-WL step 3: serve the current value', [H('b')]: 'SYN-WL: fold the delta-audit nits', [H('c')]: 'SYN-OTHER: the other card', [H('d')]: 'housekeeping',
+    [R3.i]: 'Merge guppy/syn-wl @bbbbbb2 into guppy/int-9.1 (SYN-WL, Jim PASS)',
+    [R3.j]: 'Merge guppy/syn-other @cccccc3 into guppy/int-9.1 (SYN-OTHER, Jim PASS)',
+    [S3]: 'Merge guppy/syn-wl @bbbbbb2 into INT 9.1.2 stage 3 (SYN-WL, Jim PASS)',
+    [U]: 'FEAT-NEW: a card the board does not know yet', [V]: 'INT 9.1 fixup 4',
+    [R6.w1]: 'FEAT-ALPHA-WIDGET-DRAW-123: the id plus a number', [R6.w2]: 'SYN-BETA-PIPE: the id minus its number',
+    [R6.w3]: 'SYN-GAMMA: a prefix run', [R6.w4]: 'WIDGET-DRAW: a suffix run', [R6.w5]: 'FAWD-ID: the initials',
+    [R6.w6]: 'ALPHA-WIDGET: a middle run', [R6.w7]: 'ZETA-QUAD-NODE-EDGE: an unrelated card', [R6.w8]: 'FEAT-ALPHA: a prefix of two cards',
+    [R6.w9]: 'DRAW-STUFF: a one-segment overlap',
+    [R6.rel]: 'cut 9.9.9: the version, the README badge and the CHANGELOG section', [R6.bump]: 'SYN-WL: bump a dependency',
+    [R6.m1]: 'Merge FEAT-ONE @f7f7f7f into SYN INT 9.1.2 stage 3', [R6.plain]: 'fix: tidy the widget',
+    [R6.m2]: 'Merge guppy/syn-wl @bbbbbb2 (stage 4, SYN-WL, Jim PASS)' },
+  {
+    parents: { [H('b')]: [H('a')], [R3.i]: [H('d'), H('b')], [R3.j]: [R3.i, H('c')], [S3]: [H('d'), H('b')], [R6.m1]: [H('d'), U], [R6.m2]: [R6.m1, H('b')] },
+    files: { [H('a')]: SRC, [H('b')]: SRC, [H('c')]: ['src/main/y.ts'], [H('d')]: ['package.json'], [U]: ['src/main/z.ts'], [V]: ['src/main/w.ts'],
+      [R6.w1]: SRC, [R6.w2]: SRC, [R6.w3]: SRC, [R6.w4]: SRC, [R6.w5]: SRC, [R6.w6]: SRC, [R6.w7]: SRC, [R6.w8]: SRC, [R6.w9]: SRC,
+      [R6.rel]: ['package.json', 'package-lock.json', 'CHANGELOG.md', 'README.md'], [R6.bump]: ['package.json'], [R6.plain]: SRC },
+    versions: { [R6.rel + '|package.json']: true, [R6.rel + '|package-lock.json']: true, [R6.bump + '|package.json']: false },
+  },
+);
+
+test('round 6: own-card short forms are the card; release-only commits confirm only a cut card; an int card carries only a merge into its line (god 18e97a)', async () => {
+  const link = (id, card, body, subject = 'Re: sweep') => F.doneMailFacts([{ id, act: 'done', from: 'auditor', cards: [card], subject, body, created_at: T0 }], CARDS6, git6);
+  const field = (id, card, body, subject = 'landed') => F.doneMailFacts([{ id, act: 'done', from: 'builder', card, subject, body, created_at: T0 }], CARDS6, git6);
+  const slot = (card) => `card.${card.toLowerCase()}.donesha#auditor`;
+  // R6-1 (a): the id plus a trailing number; the id minus its trailing number.
+  assert.equal(commitOf(await link('r6-1', 'FEAT-ALPHA-WIDGET-DRAW', '7a7a7a1'), slot('FEAT-ALPHA-WIDGET-DRAW')), R6.w1, 'MUTANT drop (a): FEAT-ALPHA-WIDGET-DRAW-123 refuses the link');
+  assert.equal(commitOf(await link('r6-2', 'SYN-BETA-PIPE-123', '7a7a7a2'), slot('SYN-BETA-PIPE-123')), R6.w2, 'the id minus -123 is the card');
+  // (b): a prefix run and a suffix run of the segments.
+  assert.equal(commitOf(await link('r6-3', 'SYN-GAMMA-TILE', '7a7a7a3'), slot('SYN-GAMMA-TILE')), R6.w3, 'MUTANT drop prefix');
+  assert.equal(commitOf(await link('r6-4', 'FEAT-ALPHA-WIDGET-DRAW', '7a7a7a4'), slot('FEAT-ALPHA-WIDGET-DRAW')), R6.w4, 'MUTANT drop suffix');
+  // (c): the initials.
+  assert.equal(commitOf(await link('r6-5', 'FEAT-ALPHA-WIDGET-DRAW', '7a7a7a5'), slot('FEAT-ALPHA-WIDGET-DRAW')), R6.w5, 'MUTANT drop initials');
+  // Still refused: a middle run, an unrelated 4-segment id, a form that fits two cards, a one-segment overlap.
+  const middle = await link('r6-6', 'FEAT-ALPHA-WIDGET-DRAW', '7a7a7a6');
+  assert.deepEqual(middle.skips, [{ mail: 'r6-6', reason: 'ambiguous', cards: ['FEAT-ALPHA-WIDGET-DRAW', 'ALPHA-WIDGET'] }], 'MUTANT middle run counts as own');
+  const unrelated = await link('r6-7', 'FEAT-ALPHA-WIDGET-DRAW', '7a7a7a7');
+  assert.deepEqual(unrelated.skips, [{ mail: 'r6-7', reason: 'ambiguous', cards: ['FEAT-ALPHA-WIDGET-DRAW', 'ZETA-QUAD-NODE-EDGE'] }], 'a 4-segment unrelated id still refuses');
+  const twoFit = await link('r6-8', 'FEAT-ALPHA-WIDGET-DRAW', '7a7a7a8');
+  assert.deepEqual(twoFit.skips, [{ mail: 'r6-8', reason: 'ambiguous', cards: ['FEAT-ALPHA-WIDGET-DRAW', 'FEAT-ALPHA'] }], 'MUTANT any fit: a form of two cards is some other card');
+  const oneSeg = await link('r6-9', 'FEAT-ALPHA-WIDGET-DRAW', '7a7a7a9');
+  assert.deepEqual(oneSeg.skips, [{ mail: 'r6-9', reason: 'ambiguous', cards: ['FEAT-ALPHA-WIDGET-DRAW', 'DRAW-STUFF'] }], 'MUTANT one-segment overlap counts as own');
+  // The recogniser and the form rule themselves.
+  const namer = F.cardNamer(CARDS6);
+  assert.deepEqual(namer('FAWD-7 then SGT-ID and FEAT-ALPHA-WIDGET-DRAW-9, encoded UTF-8 with SHA-1'), { cards: ['FEAT-ALPHA-WIDGET-DRAW', 'SYN-GAMMA-TILE'], others: [] }, 'MUTANT label: UTF-8 / SHA-1 are no card');
+  assert.deepEqual(namer('FEAT-ALPHA lands; ALPHA-WIDGET too'), { cards: [], others: ['FEAT-ALPHA', 'ALPHA-WIDGET'] });
+  assert.equal(F.isOwnForm('WIDGET-DRAW', 'FEAT-ALPHA-WIDGET-DRAW'), true);
+  assert.equal(F.isOwnForm('FEAT-ALPHA-WIDGET', 'FEAT-ALPHA-WIDGET-DRAW'), true);
+  assert.equal(F.isOwnForm('ALPHA-WIDGET', 'FEAT-ALPHA-WIDGET-DRAW'), false, 'a middle run');
+  assert.equal(F.isOwnForm('DRAW-STUFF', 'FEAT-ALPHA-WIDGET-DRAW'), false, 'a one-segment overlap');
+  assert.equal(F.isOwnForm('fawd', 'FEAT-ALPHA-WIDGET-DRAW'), false, 'R6-4: lower case is never a form');
+  assert.equal(F.isOwnForm('FAWD', 'FEAT-ALPHA-WIDGET-DRAW'), true);
+  assert.equal(F.isOwnForm('SYN-WL-77', 'SYN-WL'), true);
+  assert.equal(F.isOwnForm('SYN-WL-7X', 'SYN-WL'), false, 'only a bare number after the id');
+  // R6-2: a release-only commit (version lines + CHANGELOG + README) is the cut card's and no one else's.
+  assert.equal(commitOf(await field('r6-10', 'CUT-9.9.9', '8b8b8b1'), 'card.cut-9.9.9.donesha#builder'), R6.rel, 'MUTANT release confirms nothing: the cut card loses its row');
+  const relLink = await link('r6-11', 'SYN-WL', '8b8b8b1');
+  assert.deepEqual(relLink.skips, [{ mail: 'r6-11', reason: 'noCommit', cards: ['SYN-WL'] }], 'MUTANT release carried: a feature card the release mail mentions gets the release sha');
+  const relField = await field('r6-12', 'SYN-WL', '8b8b8b1');
+  assert.deepEqual(relField.skips, [{ mail: 'r6-12', reason: 'noCommit', cards: ['SYN-WL'] }], 'not even by field');
+  const relSubject = await F.doneMailFacts([{ id: 'r6-13', act: 'done', from: 'cutter', subject: 'cut 9.9.9 landed', body: '8b8b8b1', created_at: T0 }], CARDS6, git6);
+  assert.equal(commitOf(relSubject, 'card.cut-9.9.9.donesha#cutter'), R6.rel, 'git confirms the cut card by the release commit');
+  assert.equal(commitOf(await field('r6-14', 'SYN-WL', '8b8b8b2'), 'card.syn-wl.donesha#builder'), R6.bump, 'MUTANT any package.json: a change beyond the version line is not release-only');
+  assert.equal(F.isReleaseCard('CUT-9.9.9'), true); assert.equal(F.isReleaseCard('RELEASE-X'), true); assert.equal(F.isReleaseCard('FEAT-9.9.9-FIX'), true);
+  assert.equal(F.isReleaseCard('INT-9.9.9'), false, 'an int card is no cut card'); assert.equal(F.isReleaseCard('SYN-WL'), false);
+  assert.equal(F.isVersionFile('package-lock.json'), true); assert.equal(F.isVersionFile('pkg/package.json'), false, 'roots only');
+  // R6-3: an int card carries only a merge into its own line, by link and by field; a plain commit makes the row ambiguous.
+  const intPlain = await link('r6-15', 'INT-9.1.2', '8b8b8b4');
+  assert.deepEqual(intPlain.skips, [{ mail: 'r6-15', reason: 'ambiguous', cards: ['INT-9.1.2'] }], 'MUTANT int carries a plain commit');
+  const intFeat = await field('r6-16', 'INT-9.1.2', 'f7f7f7f');
+  assert.deepEqual(intFeat.skips, [{ mail: 'r6-16', reason: 'ambiguous', cards: ['INT-9.1.2'] }], 'a feature commit by field is no int done sha');
+  // R6-5 (a), Jim's P10: the merge self entry is judged on its into-line, not its whole subject.
+  assert.equal(commitOf(await link('r6-17', 'INT-9.1.2', '8b8b8b3'), slot('INT-9.1.2')), R6.m1, 'FEAT-ONE in the subject does not refuse the int card');
+  // The into-line comes from the first-parent chain (stage 4 on top of the stage 3 merge): judged on that line,
+  // the self entry names only the int card; judged on its whole subject it names SYN-WL and the link is refused.
+  assert.equal(commitOf(await link('r6-17b', 'INT-9.1.2', '8b8b8b5'), slot('INT-9.1.2')), R6.m2, 'MUTANT P10: the whole subject (SYN-WL) refuses the link');
+  const intSubject = await F.doneMailFacts([{ id: 'r6-18', act: 'done', from: 'gate', subject: 'int 9.1.2 stage 3 PASS', body: '8b8b8b3', created_at: T0 }], CARDS6, git6);
+  assert.equal(commitOf(intSubject, 'card.int-9.1.2.donesha#gate'), R6.m1, 'by subject: git confirms the int card by the merge into its line');
+  const intSubjectPlain = await F.doneMailFacts([{ id: 'r6-19', act: 'done', from: 'gate', subject: 'int 9.1 fixup PASS', body: 'a8a8a8a', created_at: T0 }], CARDS6, git6);
+  assert.deepEqual(intSubjectPlain.skips, [{ mail: 'r6-19', reason: 'ambiguous', cards: ['INT-9.1'] }], 'a plain commit naming the int card in its subject confirms nothing');
+  // R6-5 (b), Jim's P5: after every subject @sha is dropped the reason is noCommit, even when the body lists another card's commit.
+  const p5 = await field('r6-20', 'SYN-WL', 'see cccccc3 too', 'sweep @d4d4d4d');
+  assert.deepEqual(p5.skips, [{ mail: 'r6-20', reason: 'noCommit', cards: ['SYN-WL'] }], 'MUTANT P5: ambiguous');
+  const p5link = await link('r6-21', 'SYN-WL', 'see cccccc3 too', 'Re: sweep @d4d4d4d');
+  assert.deepEqual(p5link.skips, [{ mail: 'r6-21', reason: 'noCommit', cards: ['SYN-WL'] }]);
 });
 
 test('round 4b: the derived layer records a verdict per processed done mail; get reads it by mail id', async () => {
@@ -515,9 +617,10 @@ test('round 3 C: a single inherited link counts only when the commit the row wou
   const merge = await F.doneMailFacts([{ id: 'r3c-5', act: 'done', from: 'auditor', cards: ['SYN-WL'], subject: 'Re: int cut', body: 'd4d4d4d', created_at: T0 }], CARDS, git3);
   assert.deepEqual(merge.facts, []);
   assert.deepEqual(merge.skips, [{ mail: 'r3c-5', reason: 'noCommit', cards: ['SYN-WL'] }]);
-  // A docs-only commit naming another card is still a commit naming another card.
+  // A docs-only commit is not carried for a feature card (round 6, R6-2; deliberately changed from round 3's
+  // ambiguous [SYN-OTHER, SYN-WL]): the link holds, but no commit is left for the row.
   const docs = await F.doneMailFacts([{ id: 'r3c-6', act: 'done', from: 'auditor', cards: ['SYN-OTHER'], subject: 'Re: row', body: 'a1a1a1a', created_at: T0 }], CARDS, git3);
-  assert.deepEqual(docs.skips, [{ mail: 'r3c-6', reason: 'ambiguous', cards: ['SYN-OTHER', 'SYN-WL'] }]);
+  assert.deepEqual(docs.skips, [{ mail: 'r3c-6', reason: 'noCommit', cards: ['SYN-OTHER'] }]);
   // A card FIELD is not a link: it reports another card's commit as before.
   const field = await F.doneMailFacts([{ id: 'r3c-7', act: 'done', from: 'auditor', card: 'SYN-WL', subject: 'Re: diagnosis', body: 'see cccccc3', created_at: T0 }], CARDS, git3);
   assert.equal(commitOf(field, 'card.syn-wl.donesha#auditor'), H('c'));
