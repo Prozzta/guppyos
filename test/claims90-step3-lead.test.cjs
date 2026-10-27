@@ -150,18 +150,29 @@ test('R4 merge (Jim cd199c, god 4268df): a merge value names the tip AND the INT
   assert.equal(lines(text('release.1.1.98'))[2], `bump: ${SHA_B}`, 'only a merge value asks for a target');
 });
 
-test('L3 --agent: the asked agent\'s own donesha line (and latest), nothing of the others; an agent without one says none; the mail rule\'s newer done mail joins as its sender\'s value', () => {
+test('L3 --agent: the asked agent\'s own donesha line (and latest), nothing of the others; an agent without one says none; the mail rule\'s newer done mail joins as its sender\'s value but never takes the field line from a claim row', () => {
   const rows = [mail('2026-10-08T09-00-00-000Z-ffffff', 'alpha-1', 'god', 'done', 'FOO-7 done', '2026-10-08T09:00:00.000Z', `landed as ${'ABC1234F'.repeat(5)}`)];
   const withMail = deps({ mailRows: (card) => (card === 'foo-7' ? rows : null) });
   const r = get('FOO-7', {}, withMail);
+  // Round 4 (god d77ac5 item 3): the field line is the newest CLAIM row (a commit git resolved for the card); the
+  // mail rule's unchecked sha joins as alpha-1's line only.
   assert.deepEqual(r.lead.slice(0, 3).map((l) => [l.by, l.latest === true, l.source, l.id, l.value]), [
-    ['alpha-1', true, 'mail', '2026-10-08T09-00-00-000Z-ffffff', 'abc1234f'.repeat(5)], ['alpha-1', false, 'mail', '2026-10-08T09-00-00-000Z-ffffff', 'abc1234f'.repeat(5)], ['beta-2', false, 'claim', 'c-aaaaaaaaaaa2', SHA_B],
-  ], 'the mail names the newest sha for alpha-1 (lowercased); beta-2 keeps its claim');
-  assert.equal(r.lead[0].value, get('card.foo-7.donesha', {}, withMail).current.value, 'the lead is what the field get says');
+    ['beta-2', true, 'claim', 'c-aaaaaaaaaaa2', SHA_B], ['alpha-1', false, 'mail', '2026-10-08T09-00-00-000Z-ffffff', 'abc1234f'.repeat(5)], ['beta-2', false, 'claim', 'c-aaaaaaaaaaa2', SHA_B],
+  ], 'MUTANT: the unchecked mail row takes the field line by age (god d77ac5 item 3); the mail names the newest sha for alpha-1 (lowercased); beta-2 keeps its claim');
+  assert.equal(get('card.foo-7.donesha', {}, withMail).current.source, 'mail', 'the field key itself keeps G1: the newer done mail is its current');
   assert.equal(r.lead[3].source, 'claim', 'lastsha takes no mail (G1)');
   const L = lines(text('FOO-7', {}, withMail));
-  assert.equal(L[1], `donesha (latest): ${'abc1234f'.repeat(5)} by alpha-1`); assert.equal(L[2], `donesha (alpha-1): ${'abc1234f'.repeat(5)}`); assert.equal(L[3], `donesha (beta-2): ${SHA_B}`);
+  assert.equal(L[1], `donesha (latest): ${SHA_B} by beta-2`); assert.equal(L[2], `donesha (alpha-1): ${'abc1234f'.repeat(5)}`); assert.equal(L[3], `donesha (beta-2): ${SHA_B}`);
   assert.match(L.find((l) => l.startsWith('sources:')), /^sources: donesha \(alpha-1\) 2026-10-08T09-00-00-000Z-ffffff; donesha \(beta-2\) c_aaaaaaaaaaa2; /);
+  // Another sender's newer done mail (a gate mail writing the merge sha the derived layer refused) leaves the
+  // builders' field line alone; with no claim row under the key the mail row is the field line.
+  const gate = [mail('2026-10-09T09-00-00-000Z-eeeeee', 'gamma-3', 'god', 'done', 'FOO-7 merged', '2026-10-09T09:00:00.000Z', `int merge at ${'DEAD1234'.repeat(5)}`)];
+  const withGate = deps({ mailRows: (card) => (card === 'foo-7' ? gate : null) });
+  const g = get('FOO-7', {}, withGate);
+  assert.deepEqual(g.lead.slice(0, 2).map((l) => [l.by, l.latest === true, l.source, l.value]), [['beta-2', true, 'claim', SHA_B], ['gamma-3', false, 'mail', 'dead1234'.repeat(5)]]);
+  const noClaims = deps({ mailRows: (card) => (card === 'foo-7' ? gate : null) });
+  noClaims.ledgers = { ...noClaims.ledgers, derived: noClaims.ledgers.derived.filter((c) => c.key !== 'card.foo-7.donesha') };
+  assert.deepEqual(get('FOO-7', {}, noClaims).lead.slice(0, 2).map((l) => [l.by, l.latest === true, l.source, l.value]), [['gamma-3', true, 'mail', 'dead1234'.repeat(5)], ['gamma-3', false, 'mail', 'dead1234'.repeat(5)]]);
   assert.equal(get('FOO-7', { noMail: true }, withMail).lead[0].id, 'c-aaaaaaaaaaa2', '--no-mail: claims only, in the lead too');
   const A = lines(text('FOO-7', { agent: 'alpha-1' }, withMail));
   assert.deepEqual(A.slice(1, 4), [`donesha (latest): ${'abc1234f'.repeat(5)} by alpha-1`, `donesha (alpha-1): ${'abc1234f'.repeat(5)}`, `lastsha: ${SHA_A}`], 'MUTANT: the asked agent ignored (Jim a293f7, 19 rows)');
