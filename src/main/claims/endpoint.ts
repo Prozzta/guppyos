@@ -17,6 +17,7 @@ import { LEDGER_LEVELS, type AppendOrigin, type ClaimKind, type LedgerLevel, typ
 import type { ClaimStore } from './store';
 import type { CandidateResult } from './candidates';
 import { restatedIds } from './valueSupersede';
+import { readSafeId } from './get';
 
 export const CLAIM_VERBS: ReadonlySet<string> = new Set(['note', 'retract', 'accept', 'dismiss', 'used', 'reconcile', 'export', 'history', 'get']);
 
@@ -176,9 +177,11 @@ export async function handleClaimVerb(d: ClaimsEndpointDeps, agentId: string, bo
     for (const k of Object.keys(args)) if (k !== 'id') return usage(`history takes only a claim id (not "${k}")`);
     if (typeof args.id !== 'string' || !CLAIM_ID_RE.test(args.id)) return usage('history needs one claim id, like: memory history c-0123456789ab');
     if (!d.claimHistory) return { ok: false, exit: EXIT.unavailable, error: 'history is not available in this build' };
-    const r = d.claimHistory(agentId, args.id);
+    // An id as get prints it (c_<hex>, L5 sha-proof) is the ledger's c-<hex>: the same reading as get's terms.
+    const id = readSafeId(args.id);
+    const r = d.claimHistory(agentId, id);
     return r.ok
-      ? { ok: true, exit: EXIT.ok, text: r.text, json: { id: args.id, owner: r.owner } }
+      ? { ok: true, exit: EXIT.ok, text: r.text, json: { id, owner: r.owner } }
       : { ok: false, exit: EXIT.usage, error: r.error };
   }
 

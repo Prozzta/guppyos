@@ -174,9 +174,12 @@ export function normaliseTerm(raw: string): string {
   let t = raw.trim().replace(/^["'`]+|["'`]+$/g, '').trim().toLowerCase();
   t = t.replace(/^memory\s+get\s+/, '').trim();
   // L5: an id as the sources line writes it (its dash before the hex run as an underscore) is the id.
-  t = t.replace(/^c_(?=[0-9a-f]{12}$)/, 'c-');
-  return t;
+  return readSafeId(t);
 }
+
+/** A claim id as get prints it (safeId: `c_<12 hex>`) read back to the ledger's `c-<12 hex>`; any other text as is.
+ *  Shared by get's terms and by `memory history`, which takes the ids agents copy from get's sources line. */
+export const readSafeId = (id: string): string => id.replace(/^c_(?=[0-9a-f]{12}$)/i, 'c-');
 
 /** L5 (god fada64): an id written so no bare 7+ hex run reads as a sha: the dash before such a run becomes an
  *  underscore (`c-be6e7c6f41b9` → `c_be6e7c6f41b9`; a mail id's dashed time has no such run). normaliseTerm reads

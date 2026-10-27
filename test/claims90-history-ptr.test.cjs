@@ -93,6 +93,25 @@ test('HISTORY-PTR endpoint: `history` is a read at every level; it takes one cla
   assert.equal((await handleClaimVerb(deps('writer', false), 'a', { cmd: 'history', args: { id: 'c-k' } }, 'endpoint')).exit, 3);
 });
 
+test('history takes the id as get prints it (god 8a70fe): c_<hex> reads as c-<hex>; malformed ids still exit 2', async () => {
+  const { safeId, readSafeId, normaliseTerm } = loadTs('src/main/claims/get.ts');
+  const real = 'c-0123456789ab';
+  assert.equal(safeId(real), 'c_0123456789ab', 'the sources line writes the dash as an underscore (L5)');
+  assert.equal(readSafeId(safeId(real)), real, 'one shared helper reads it back');
+  assert.equal(normaliseTerm(safeId(real)), real, 'get reads it the same way');
+  const seen = [];
+  const deps = { store: {}, level: () => 'reader', claimHistory: (agentId, id) => { seen.push(id); return id === real ? { ok: true, text: 'H\n', owner: 'b' } : { ok: false, error: `no claim ${id}` }; } };
+  const r = await handleClaimVerb(deps, 'a', { cmd: 'history', args: { id: safeId(real) } }, 'endpoint');
+  assert.deepEqual(r, { ok: true, exit: 0, text: 'H\n', json: { id: real, owner: 'b' } }, 'a get-printed id exits 0 and names the ledger id');
+  assert.deepEqual(seen, [real], 'the ledger is asked for c-<hex>, never c_<hex>');
+  for (const bad of ['c_0123', 'c_0123456789abc', 'c_0123456789ag', 'c_', '../memory.md', 'c-0123456789ab/x']) {
+    const b = await handleClaimVerb(deps, 'a', { cmd: 'history', args: { id: bad } }, 'endpoint');
+    assert.equal(b.exit, 2, `${bad} still exits 2`);
+    assert.equal(b.ok, false);
+  }
+  assert.deepEqual(seen.slice(1), ['c_0123', 'c_0123456789abc', 'c_0123456789ag', 'c_'], 'not twelve hex after c_: nothing is rewritten; a path or a slash never reaches the ledger');
+});
+
 test('HISTORY-PTR CLI: the pointer a working set shows, run as typed, prints that claim\'s history from the served ledger', async () => {
   const { records, state } = fixture();
   const working = V.createClaimViews(records, s => (s.includes('[c:') ? 200 : 1)).buildWorkingSet(state, world(), 50).text;
