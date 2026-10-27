@@ -23,13 +23,16 @@ function taskStatusFor(allTasks) {
 }
 
 function claimsDepsFor(L, { hive, store, agents, allTasks }) {
-  const { claimGetOver, claimHistoryOver } = L('src/main/claims/readWiring.ts');
+  const { claimCardLeadOver, claimGetOver, claimHistoryOver } = L('src/main/claims/readWiring.ts');
   const read = { root: hive, store, agents, tasks: allTasks };
   return {
     store,
     level: () => 'reader',
     claimHistory: (agentId, id) => claimHistoryOver(read, agentId, id),
     get: (_agentId, args) => claimGetOver(read, args),
+    // CLAIMS-90 keyfind (god c4eea4): the search briefs (S1-S4), as index.ts's NativeMemoryWiring cardLead answers them.
+    // Without it every served search printed no card or release brief (on-1: no bump, tag or merge brief on any row).
+    cardLead: (ask) => claimCardLeadOver(read, ask),
   };
 }
 

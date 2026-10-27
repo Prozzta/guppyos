@@ -225,6 +225,8 @@ function inProcessFork(runWorker, deps) {
     vecLoadablePath: () => treeRequire('sqlite-vec').getLoadablePath(),
     // The read verbs answer as the app's; every write verb is refused (level reader).
     claims: () => claimsDeps,
+    // The search briefs through main's read wiring, as index.ts passes them (test/claims90-keyfind.test.cjs pins the set).
+    cardLead: (ask) => claimsDeps.cardLead(ask),
     claimLedger: () => config.claimLedger,
     anchoredAgents: () => store.anchoredAgents(),
     onWorkerReady: () => { workerReady = claimsIndex.syncAll(); },

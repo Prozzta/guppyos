@@ -69,6 +69,8 @@ export interface GetResult {
   keys: string[];
   /** The keys the resolution tried when nothing was found (the "no claim under" line). */
   tried: string[];
+  /** CLAIMS-90 keyfind (god c4eea4): on a miss, the existing keys nearest the term (nearKeys), each a `memory get` term. */
+  near?: string[];
   card: string | null;
   current: GetCurrent | null;
   competing: GetClaimRow[];
@@ -329,6 +331,37 @@ export function resolveGetMany(rawTerms: string[], opts: GetOptions, d: GetDeps)
   return rawTerms.map((t) => resolveIn(ix, normaliseTerm(t), opts, d, true));
 }
 
+/** At most this many keys on a miss's `nearest keys:` line. */
+export const NEAR_MAX = 6;
+const NEAR_VERSION = /\d+(?:\.\d+)+/g;
+/**
+ * CLAIMS-90 keyfind (god c4eea4): when `get` finds nothing, the existing keys nearest the term, by key grammar only:
+ * (1) for each version the term carries, `release.<v>` (when a release.<v>[.x] key exists) and the card ids that carry
+ * the same version as a hyphen word (int-<v>, cut-<v>, release-<v>, ...); (2) the card ids that contain the term's id
+ * or that it contains (at least 4 chars). A release first, then cards in id order, at most NEAR_MAX. An agent that
+ * guessed `card.cut-1.1.90` for the bump (on-1 DV106) is pointed at `release.1.1.90`, which leads with bump and tag.
+ */
+export function nearKeys(term: string, claimKeys: Iterable<string>, taskIds: Iterable<string>): string[] {
+  const t = term.toLowerCase().replace(/^card\./, '').replace(FIELD_SUFFIX, '');
+  const releases = new Set<string>();
+  const cards = new Set<string>();
+  for (const k of claimKeys) {
+    const r = /^release\.(\d+(?:\.\d+)+)(?:\.|$)/.exec(k);
+    if (r) releases.add(r[1]);
+    const c = cardIdOfKey(k);
+    if (c) cards.add(c.replace(/\.decision\..*$/, ''));
+  }
+  for (const id of taskIds) if (id) cards.add(id.toLowerCase());
+  const out: string[] = [];
+  const add = (k: string): void => { if (!out.includes(k)) out.push(k); };
+  const versions = [...new Set(t.match(NEAR_VERSION) ?? [])];
+  for (const v of versions) if (releases.has(v)) add(`release.${v}`);
+  const byVersion = (id: string): boolean => versions.some((v) => id.split('-').includes(v));
+  const byName = (id: string): boolean => t.length >= 4 && id.length >= 4 && id !== t && (id.includes(t) || t.includes(id));
+  for (const id of [...cards].sort()) if (byVersion(id) || (!versions.length && byName(id))) add(`${CARD_PREFIX}${id}`);
+  return out.slice(0, NEAR_MAX);
+}
+
 /** R2: the card a `card.*` claim key names, minus a known field suffix (the search path has no tasks.json at hand). */
 export function cardIdOfKey(key: string): string | null {
   const k = key.toLowerCase();
@@ -372,7 +405,7 @@ function resolveIn(ix: Indexed, term: string, opts: GetOptions, d: GetDeps, with
     else if (hasKey(bK)) base = bK;
   }
   const empty: GetResult = { term, keys: [], tried, card: null, current: null, competing: [], superseded: [], decisions: [], fields: null, mails: [], nextBefore: null, mailIndex: 'off', lead: null };
-  if (!base) return empty;
+  if (!base) return { ...empty, near: nearKeys(term, [...ix.byKey.keys()], taskIds) };
   // The alias set, then (card keys) every derived sub-key under any of them.
   const keySet = new Set(aliasSet(ix, base));
   const isCardKey = (k: string): boolean => k.startsWith(CARD_PREFIX);
@@ -646,6 +679,10 @@ export const sourcesLines = (lead: GetFieldLine[]): string[] => {
   return out.map((l, i) => (i === out.length - 1 ? l.replace(/;$/, '') : l));
 };
 
+/** CLAIMS-90 keyfind (god c4eea4): what the two sha fields mean, printed under a card lead that has both (on-1 DV094
+ *  answered `donesha (latest)` where the card's lastsha was asked). Under GET_LINE_MAX. */
+export const SHA_FIELDS_NOTE = "meaning: lastsha = the newest commit the card's results and notes name; donesha = the newest sha a done mail reports";
+
 /** R1: the compact text's cap by construction: every line clipped to GET_LINE_MAX, the tail behind one pointer line
  *  once the whole would pass GET_MAX_CHARS (the lead block is first, so it is what always survives). */
 function fitGet(lines: string[]): string {
@@ -666,6 +703,7 @@ export function formatGet(r: GetResult, opts: GetOptions = {}): string {
   const L: string[] = [];
   if (!r.keys.length) {
     L.push(`no claim under ${r.tried.join(', ')}`);
+    if (r.near?.length) L.push(`nearest keys: ${r.near.join(', ')} (memory get <key>)`);
     return L.join('\n') + '\n';
   }
   const all = opts.history === true;
@@ -682,6 +720,7 @@ export function formatGet(r: GetResult, opts: GetOptions = {}): string {
   L.push(prefix + ks + suffix);
   if (r.lead) {
     for (const l of r.lead) L.push(leadLine(l));
+    if (r.lead.some((l) => l.field === 'lastsha' && l.value !== null) && r.lead.some((l) => l.field === 'donesha' && l.value !== null)) L.push(SHA_FIELDS_NOTE);
     if (r.card && !all) L.push(`decisions: ${r.decisions.length}${r.decisions.length ? ' (--all lists them)' : ''}`);
     L.push(...sourcesLines(r.lead));
   }
