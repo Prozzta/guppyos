@@ -13,7 +13,11 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'claims-ledger-default-cfg-'));
+/** TEST-TEMP-HYGIENE: every temp entry this file makes, removed once at the end (the runner fails a leak). */
+const made = [];
+const tmp = (tag) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), `claims-ledger-default-${tag}-`)); made.push(d); return d; };
+test.after(() => { for (const d of made.reverse()) fs.rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); });
+const userData = tmp('cfg');
 const electron = require.resolve('electron');
 require.cache[electron] = { id: electron, filename: electron, loaded: true, exports: { app: { getPath: () => userData } } };
 
@@ -25,7 +29,6 @@ const { HiveManager } = loadTs('src/main/hive.ts');
 const { createLedgerUi } = loadTs('src/main/claims/ledgerUi.ts');
 const cfg = loadTs('src/main/config.ts');
 
-const tmp = (tag) => fs.mkdtempSync(path.join(os.tmpdir(), `claims-ledger-default-${tag}-`));
 /** The level main (claimLevel) and the worker (discoverSources) both compute for an agent. */
 const levelOf = (root, agentId, saved = 'writer') => {
   const f = readSourcesConfig(root);
