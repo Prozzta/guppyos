@@ -52,6 +52,8 @@ export class DerivedGit implements GitLogPort {
   private readonly messages = new Map<string, string | null>();
   private readonly times = new Map<string, number>();
   private readonly ancestry = new Map<string, boolean>();
+  private readonly parentsOf = new Map<string, string[] | null>();
+  private readonly files = new Map<string, string[] | null>();
   private readonly o: Required<DerivedGitOptions>;
   constructor(readonly repo: string, opts: DerivedGitOptions = {}) {
     this.o = { timeoutMs: opts.timeoutMs ?? GIT_TIMEOUT_MS, command: opts.command ?? ['git'] };
@@ -140,6 +142,25 @@ export class DerivedGit implements GitLogPort {
     return this.messages.get(commit) ?? null;
   }
 
+  /** A commit's parents (full shas, first parent first), or null (CLAIMS-WEAKLINK-DONESHA round 3). */
+  async parents(commit: string): Promise<string[] | null> {
+    if (!this.parentsOf.has(commit)) {
+      const r = await git(this.repo, ['rev-list', '--parents', '-n', '1', commit], this.o);
+      const w = r.out.trim().split(/\s+/).filter(Boolean);
+      this.parentsOf.set(commit, r.code === 0 && w.length > 0 && /^[0-9a-f]{40}$/.test(w[0]) ? w.slice(1) : null);
+    }
+    return this.parentsOf.get(commit) ?? null;
+  }
+
+  /** The paths a commit changes (against its first parent; a root commit against nothing), or null. */
+  async changedFiles(commit: string): Promise<string[] | null> {
+    if (!this.files.has(commit)) {
+      const r = await git(this.repo, ['diff-tree', '--no-commit-id', '--name-only', '-r', '--root', '-z', commit], this.o);
+      this.files.set(commit, r.code === 0 ? r.out.split('\0').map((s) => s.trim()).filter(Boolean) : null);
+    }
+    return this.files.get(commit) ?? null;
+  }
+
   /** Every commit on the branches, tags and remotes: full sha, committer time, parents, message (stashes left out). */
   async log(): Promise<Array<{ commit: string; time: number; message: string; parents: string[] }>> {
     const r = await git(this.repo, ['log', '--branches', '--tags', '--remotes', '--format=%H%x1f%ct%x1f%P%x1f%B%x1e'], this.o);
@@ -149,8 +170,10 @@ export class DerivedGit implements GitLogPort {
       const [h, ct, p = '', ...msg] = rec.replace(/^\s+/, '').split('\x1f');
       if (!h || !/^[0-9a-f]{40}$/.test(h)) continue;
       const message = msg.join('\x1f');
-      out.push({ commit: h, time: Number(ct) || 0, message, parents: p.trim() ? p.trim().split(/\s+/) : [] });
+      const parents = p.trim() ? p.trim().split(/\s+/) : [];
+      out.push({ commit: h, time: Number(ct) || 0, message, parents });
       this.messages.set(h, message);
+      this.parentsOf.set(h, parents);
     }
     return out;
   }
