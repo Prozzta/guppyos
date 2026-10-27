@@ -17,6 +17,10 @@
  * is dropped, so a later int/rc merge mail yields the builder's own sha and never displaces it; (C) the
  * single-link path needs the commit the row would carry to name no different card (Jim's gate on
  * 8028fa88: the other shas a mail lists are not judged, and a refused link still takes the git check).
+ * Round 4b (god aa8321/f7c2bc): a merge INTO the card's own line (its subject, or an earlier merge on its
+ * first-parent chain, says "into <the card's branch>") is that card's own work: the merge sha is the value
+ * and its merged parents are not descended; every other card sees (B) unchanged. The derived layer records
+ * a verdict per processed done mail (derivedDoneStatus) so get's mail rule bridges only the derived lag.
  * Synthetic mails and a fake git port only; HOME jailed first.
  */
 const test = require('node:test');
@@ -37,6 +41,7 @@ test.after(() => {
 const loadTs = require('./load-ts.cjs');
 const F = loadTs('src/main/claims/derivedFacts.ts');
 const W = loadTs('src/main/claims/derivedWriter.ts');
+const S = loadTs('src/main/claims/derivedDoneStatus.ts');
 const { mailBodyHash } = loadTs('src/main/mailLedger.ts');
 
 const H = (c) => c.repeat(40);
@@ -304,9 +309,10 @@ test('round 3 B: a merge confirms nothing on its own sha; it resolves to the mer
   const bodyMerge = await F.doneMailFacts([{ id: 'r3b-9', act: 'done', from: 'builder', card: 'SYN-WL', subject: 'landed', body: 'bbbbbb2, merged as c3c3c3c', created_at: T0 }], CARDS, git3);
   assert.equal(commitOf(bodyMerge, 'card.syn-wl.donesha#builder'), H('b'));
   assert.doesNotMatch(bodyMerge.facts[0].text, /latest in git order of the 2/, 'the merge and its parent are one commit');
-  // (8) resolveReported: merges nest at most 3 deep; mergedBranch forms.
-  assert.deepEqual(await F.resolveReported(R3.i, git3), [{ commit: H('b'), text: 'SYN-WL: fold the delta-audit nits guppy/syn-wl', merge: R3.i, docsOnly: false }]);
-  assert.deepEqual((await F.resolveReported(R3.k, git3)).map((r) => [r.commit, r.merge]), [[H('b'), R3.k]]);
+  // (8) resolveReported: merges nest at most 3 deep; mergedBranch forms. Round 4b: a merge whose subject says
+  // what line it merged into is listed too, for that line only (`into`); the nested int merge inside the rc merge keeps its own.
+  assert.deepEqual(await F.resolveReported(R3.i, git3), [{ commit: R3.i, text: 'guppy/int-9.1', docsOnly: false, into: 'guppy/int-9.1' }, { commit: H('b'), text: 'SYN-WL: fold the delta-audit nits guppy/syn-wl', merge: R3.i, chain: [R3.i], docsOnly: false }]);
+  assert.deepEqual((await F.resolveReported(R3.k, git3)).map((r) => [r.commit, r.merge, r.into, r.chain]), [[R3.k, undefined, 'rc/9.1', undefined], [R3.i, undefined, 'guppy/int-9.1', undefined], [H('b'), R3.k, undefined, [R3.i, R3.k]]]);
   assert.deepEqual(await F.resolveReported(R3.q1, git3), [], 'four merges deep gives nothing');
   assert.deepEqual(await F.resolveReported(R3.g, git3), [{ commit: R3.g, text: 'CHANGELOG 9.1.0: row 5 (SYN-WL)', docsOnly: true }]);
   assert.equal(F.mergedBranch('Merge guppy/x-1 @abc1234 into guppy/int-1 (X-1, Jim PASS)'), 'guppy/x-1');
@@ -318,6 +324,93 @@ test('round 3 B: a merge confirms nothing on its own sha; it resolves to the mer
   const blind = await F.doneMailFacts([{ id: 'r3b-10', act: 'done', from: 'gate', subject: 'Jim PASS SYN-WL on int @c3c3c3c', body: 'green', created_at: T0 }], CARDS,
     fakeGit({ c3c3c3c: R3.i }, { [R3.i]: 'Merge guppy/syn-wl @bbbbbb2 into guppy/int-9.1 (SYN-WL, Jim PASS)' }));
   assert.equal(commitOf(blind, 'card.syn-wl.donesha#gate'), R3.i);
+});
+
+// Round 4b: s2 is a second stage merge on the int line whose subject names no target (its first parent i does);
+// INT-9.1 is the card that owns the line guppy/int-9.1.
+const S2 = HX('6', '1');
+const CARDS4 = [...CARDS, 'INT-9.1'];
+const git4 = fakeGit(
+  { aaaaaa1: H('a'), bbbbbb2: H('b'), cccccc3: H('c'), dddddd4: H('d'), c3c3c3c: R3.i, d4d4d4d: R3.j, e5e5e5e: R3.k, d9d9d9d: S2, b8b8b8b: R3.n, f6f6f6f: R3.l },
+  { [H('a')]: 'SYN-WL step 3: serve the current value', [H('b')]: 'SYN-WL: fold the delta-audit nits', [H('c')]: 'SYN-OTHER: the other card', [H('d')]: 'housekeeping',
+    [R3.i]: 'Merge guppy/syn-wl @bbbbbb2 into guppy/int-9.1 (SYN-WL, Jim PASS)',
+    [R3.j]: 'Merge guppy/syn-other @cccccc3 into guppy/int-9.1 (SYN-OTHER, Jim PASS)',
+    [R3.k]: 'Merge guppy/int-9.1 into rc/9.1 (cut)',
+    [S2]: 'Merge guppy/syn-other @cccccc3 (stage 2)',
+    [R3.l]: "Merge branch 'guppy/syn-wl' into guppy/int-9.1", [R3.n]: 'tidy the tests' },
+  {
+    parents: { [H('b')]: [H('a')], [R3.i]: [H('d'), H('b')], [R3.j]: [R3.i, H('c')], [R3.k]: [H('d'), R3.i], [S2]: [R3.i, H('c')], [R3.l]: [H('d'), R3.n] },
+    files: { [H('a')]: ['src/main/x.ts'], [H('b')]: ['src/main/x.ts'], [H('c')]: ['src/main/y.ts'], [H('d')]: ['package.json'], [R3.n]: ['test/x.test.cjs'] },
+  },
+);
+
+test('round 4b: a merge into the card\'s own line is that card\'s work (the merge sha, not descended); every other card still gets the merged parent or nothing', async () => {
+  // The int card's own stage merge, by card field, by link and by subject @sha: the merge sha, no descent.
+  const field = await F.doneMailFacts([{ id: 'r4b-1', act: 'done', from: 'int-builder', card: 'INT-9.1', subject: 'stage 1 merged', body: 'c3c3c3c', created_at: T0 }], CARDS4, git4);
+  assert.equal(commitOf(field, 'card.int-9.1.donesha#int-builder'), R3.i, 'MUTANT always-descend: the int card gets the merged parent b');
+  assert.match(field.facts[0].text, /the merge into the card's own line/);
+  assert.doesNotMatch(field.facts[0].text, /merged parent|latest in git order/);
+  const link = await F.doneMailFacts([{ id: 'r4b-2', act: 'done', from: 'int-builder', cards: ['INT-9.1'], subject: 'Re: stage 1', body: 'c3c3c3c', created_at: T0 }], CARDS4, git4);
+  assert.equal(commitOf(link, 'card.int-9.1.donesha#int-builder'), R3.i);
+  const named = await F.doneMailFacts([{ id: 'r4b-3', act: 'done', from: 'gate', subject: 'INT-9.1 stage 1 PASS @c3c3c3c', body: 'green', created_at: T0 }], CARDS4, git4);
+  assert.equal(commitOf(named, 'card.int-9.1.donesha#gate'), R3.i, 'the line it merged into names the card');
+  // The feature card mentioned in that same merge still gets its own parent commit, never the merge sha.
+  const feat = await F.doneMailFacts([{ id: 'r4b-4', act: 'done', from: 'builder', subject: 'SYN-WL merged @c3c3c3c', body: 'landed', created_at: T0 }], CARDS4, git4);
+  assert.equal(commitOf(feat, 'card.syn-wl.donesha#builder'), H('b'), 'MUTANT never-descend: the feature card gets the merge sha');
+  const featLink = await F.doneMailFacts([{ id: 'r4b-5', act: 'done', from: 'builder', cards: ['SYN-WL'], subject: 'Re: build', body: 'c3c3c3c', created_at: T0 }], CARDS4, git4);
+  assert.equal(commitOf(featLink, 'card.syn-wl.donesha#builder'), H('b'));
+  // Both in one mail: each card its own value, the merge sha only on the int card.
+  const both = await F.doneMailFacts([
+    { id: 'r4b-6', act: 'done', from: 'int-builder', card: 'INT-9.1', subject: 'stage 1', body: 'c3c3c3c', created_at: T0 },
+    { id: 'r4b-7', act: 'done', from: 'builder', card: 'SYN-WL', subject: 'landed', body: 'c3c3c3c', created_at: T0 },
+  ], CARDS4, git4);
+  assert.deepEqual(both.facts.map((f) => [f.slot, f.value]).sort(), [['card.int-9.1.donesha#int-builder', R3.i], ['card.syn-wl.donesha#builder', H('b')]]);
+  // The next stage merge of another card's branch on the same line: the int card's work; SYN-WL gets nothing from it.
+  const stage = await F.doneMailFacts([{ id: 'r4b-8', act: 'done', from: 'int-builder', card: 'INT-9.1', subject: 'stage 2', body: 'd4d4d4d', created_at: T0 }], CARDS4, git4);
+  assert.equal(commitOf(stage, 'card.int-9.1.donesha#int-builder'), R3.j);
+  const other = await F.doneMailFacts([{ id: 'r4b-9', act: 'done', from: 'builder', card: 'SYN-WL', subject: 'landed', body: 'd4d4d4d', created_at: T0 }], CARDS4, git4);
+  assert.deepEqual(other.skips, [{ mail: 'r4b-9', reason: 'noCommit', cards: ['SYN-WL'] }]);
+  // A stage merge whose subject names no target: the earlier merge on its first-parent chain says the line.
+  const chain = await F.doneMailFacts([{ id: 'r4b-10', act: 'done', from: 'int-builder', card: 'INT-9.1', subject: 'stage 2', body: 'd9d9d9d', created_at: T0 }], CARDS4, git4);
+  assert.equal(commitOf(chain, 'card.int-9.1.donesha#int-builder'), S2, 'the first parent is on the card\'s line');
+  // The rc merge of the int line: for the int card the nested stage merge (its own line), never the rc merge sha;
+  // for the feature card the own tip, as round 3.
+  const rc = await F.doneMailFacts([{ id: 'r4b-11', act: 'done', from: 'cutter', card: 'INT-9.1', subject: 'cut', body: 'e5e5e5e', created_at: T0 }], CARDS4, git4);
+  assert.equal(commitOf(rc, 'card.int-9.1.donesha#cutter'), R3.i, 'the feature tip below the int card\'s own merge is not its value, although the rc merge merged the int branch');
+  const rcFeat = await F.doneMailFacts([{ id: 'r4b-12', act: 'done', from: 'gate', subject: 'SYN-WL in rc @e5e5e5e', body: 'cut', created_at: T0 }], CARDS4, git4);
+  assert.equal(commitOf(rcFeat, 'card.syn-wl.donesha#gate'), H('b'));
+  // A merge sha never comes through a subject mention or an inherited link of a card the line does not name.
+  const mention = await F.doneMailFacts([{ id: 'r4b-13', act: 'done', from: 'gate', subject: 'SYN-OTHER on int @c3c3c3c', body: 'checked', created_at: T0 }], CARDS4, git4);
+  assert.deepEqual(mention.facts, []);
+  // The same int card without the round-4b card in the list: nothing changes for the others (round 3 pins hold).
+  const r3 = await F.doneMailFacts([{ id: 'r4b-14', act: 'done', from: 'builder', subject: 'SYN-WL merged @c3c3c3c', body: 'landed', created_at: T0 }], CARDS, git4);
+  assert.equal(commitOf(r3, 'card.syn-wl.donesha#builder'), H('b'));
+  // mergedInto forms.
+  assert.equal(F.mergedInto('Merge guppy/x-1 @abc1234 into guppy/int-9.1.2 stage 2 (X-1)'), 'guppy/int-9.1.2');
+  assert.equal(F.mergedInto("Merge branch 'guppy/x-1' into 'guppy/int-9.1.2'"), 'guppy/int-9.1.2');
+  assert.equal(F.mergedInto('int-9.1.2 stage 2: merge guppy/x-1 @abc1234'), 'int-9.1.2');
+  assert.equal(F.mergedInto('Merge guppy/x-1 @abc1234'), '');
+  assert.equal(F.mergedInto('X-1: fold into the map'), '');
+});
+
+test('round 4b: the derived layer records a verdict per processed done mail; get reads it by mail id', async () => {
+  const root = path.join(JAIL, 'hive-status');
+  const done = await F.doneMailFacts([
+    { id: 'st-1', act: 'done', from: 'builder', card: 'SYN-WL', subject: 'landed', body: 'bbbbbb2', created_at: T0 },
+    { id: 'st-2', act: 'done', from: 'builder', card: 'SYN-WL', subject: 'landed', body: 'aaaaaa1', created_at: '2026-10-19T10:00:00Z' },
+    { id: 'st-3', act: 'done', from: 'auditor', cards: ['SYN-WL'], subject: 'Re: sweep', body: 'b8b8b8b then cccccc3', created_at: T0 },
+    { id: 'st-4', act: 'inform', from: 'x', subject: 'hello', body: 'bbbbbb2' },
+  ], CARDS, git3);
+  const statuses = S.doneMailStatuses([{ id: 'st-1' }, { id: 'st-2' }, { id: 'st-3' }, { id: 'st-4' }, { id: 7 }], done);
+  assert.deepEqual(statuses, { 'st-1': 'fact', 'st-2': 'older', 'st-3': 'ambiguous', 'st-4': 'notDone' });
+  S.writeDoneMailStatus(root, statuses);
+  const read = S.readDoneMailStatus(root);
+  assert.equal(read('st-3'), 'ambiguous'); assert.equal(read('st-1'), 'fact'); assert.equal(read('st-9'), null);
+  assert.equal(read('hasOwnProperty'), null);
+  S.writeDoneMailStatus(root, { 'st-3': 'fact', 'st-5': 'noCommit' });
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, S.DONE_MAIL_STATUS_FILE), 'utf8')), { 'st-1': 'fact', 'st-2': 'older', 'st-3': 'fact', 'st-4': 'notDone', 'st-5': 'noCommit' }, 'merged, later verdicts win');
+  assert.equal(read('st-5'), 'noCommit', 're-read on change');
+  assert.equal(S.readDoneMailStatus(path.join(JAIL, 'none'))('st-1'), null, 'no file: nothing reached');
 });
 
 test('round 3 C: a single inherited link counts only when the commit the row would carry names no different card', async () => {
