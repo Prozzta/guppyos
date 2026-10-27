@@ -309,6 +309,28 @@ function inProcessFork(runWorker, deps) {
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const baseUrl = `http://127.0.0.1:${server.address().port}/memory`;
 
+  // god ba807e: the index by content, read after the worker shut down: chunks per wing, chunks with a vector, and
+  // one sha over every chunk's identity (source path, ordinal, wing, claim id and part, content sha) in order.
+  // The WAL size is taken before the read opens the file.
+  const indexDigest = (file) => {
+    if (!file || !fs.existsSync(file)) return null;
+    try { return indexDigestOf(file); } catch (e) { return { error: String(e?.message ?? e).slice(0, 200) }; }
+  };
+  const indexDigestOf = (file) => {
+    const walBytes = fs.existsSync(`${file}-wal`) ? fs.statSync(`${file}-wal`).size : 0;
+    const db = new (treeRequire('better-sqlite3'))(file, { readonly: true, fileMustExist: true });
+    try {
+      db.loadExtension(treeRequire('sqlite-vec').getLoadablePath());
+      const perWing = db.prepare('SELECT wing, count(*) AS chunks FROM chunks GROUP BY wing ORDER BY wing').all();
+      const vectors = db.prepare('SELECT count(*) AS n FROM chunks_vec').get().n;
+      const h = crypto.createHash('sha256');
+      for (const r of db.prepare('SELECT source_id, ordinal, wing, claim_id, claim_part, content_sha256 FROM chunks ORDER BY source_id, ordinal').iterate()) {
+        h.update(`${r.source_id}\0${r.ordinal}\0${r.wing}\0${r.claim_id ?? ''}\0${r.claim_part ?? ''}\0${r.content_sha256}\n`);
+      }
+      return { perWing, chunks: perWing.reduce((s, w) => s + w.chunks, 0), vectors, chunkSha256: h.digest('hex'), walBytes };
+    } finally { db.close(); }
+  };
+
   // Warm up as an agent's first call does (the lazy fork), then wait for main's re-sync to land.
   const status0 = await nativeMemory.query('status');
   for (let i = 0; i < 600 && !workerReady; i++) await new Promise((r) => setTimeout(r, 100));
@@ -481,10 +503,11 @@ function inProcessFork(runWorker, deps) {
     const connect = { url: baseUrl, hive, cli, askers, env: { MUNDER_HIVE_ROOT: hive, MUNDER_MEMORY_URL: baseUrl, MEMORY_TOKEN: '<askers[id].token>' }, calls: spec.serve.callsFile, stop: spec.serve.stopFile, ledgers, synced, worldCalls, probe: probeOf(spec.serve.askers[0]) };
     fs.writeFileSync(spec.serve.connectFile, JSON.stringify(connect, null, 1));
     while (!fs.existsSync(spec.serve.stopFile)) await new Promise((r) => setTimeout(r, 500));
-    emit({ summary: { ...verdict(), persistRisk: persistRisk.length,served: Object.keys(askers), ledgers, synced, worldCalls } });
     server.close();
     hiveTasks.dispose();
     await nativeMemory.shutdown().catch(() => {});
+    // god ba807e: the index as the worker left it (shut down), so the runner can serve the preflight's to the items.
+    emit({ summary: { ...verdict(), persistRisk: persistRisk.length,served: Object.keys(askers), ledgers, synced, worldCalls, status1: status1.json ?? null, index: indexDigest(nativeMemory.dbFile()) } });
     fs.closeSync(out);
     process.exit(0);
   }
