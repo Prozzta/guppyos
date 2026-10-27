@@ -82,6 +82,8 @@ test('R1 caps: the get text\'s budget equals the compact search budget and stays
   assert.equal(G.GET_MAX_CHARS, F.COMPACT_MAX_CHARS);
   assert.equal(G.GET_LINE_MAX, F.COMPACT_LINE_MAX);
   assert.ok(G.GET_MAX_CHARS < TOOL_OUTPUT_CAP_DEFAULT, `${G.GET_MAX_CHARS} < ${TOOL_OUTPUT_CAP_DEFAULT}`);
+  // god 79d690: the sha-fields note is printed outside the cap, so the cap plus the note must stay under the condenser.
+  assert.ok(G.GET_MAX_CHARS + G.SHA_FIELDS_NOTE.length + 1 < TOOL_OUTPUT_CAP_DEFAULT, `${G.GET_MAX_CHARS} + note ${G.SHA_FIELDS_NOTE.length + 1} < ${TOOL_OUTPUT_CAP_DEFAULT}`);
   assert.deepEqual([...G.CARD_FIELDS], ['donesha', 'lastsha', 'status', 'assignee', 'fixVersion', 'merge', 'merge.rc', 'audit'], 'L4: audit joins the card fields; god 234b13: the rc merge is its own field after the INT merge');
   assert.deepEqual([...G.PER_AGENT_FIELDS], ['donesha']); assert.deepEqual([...G.RELEASE_FIELDS], ['tag', 'bump']);
 });
@@ -223,7 +225,11 @@ test('R1 cap by construction: 60 decisions, 50 mails, a long key list and long v
   const rows = [];
   for (let i = 0; i < 60; i++) rows.push(mail(`2026-10-0${1 + (i % 9)}T0${i % 10}-00-${String(i).padStart(2, '0')}-000Z-${String(i).padStart(6, 'a')}`, 'alpha-1', 'god', 'inform', `FOO-7 ${'long subject '.repeat(12)}${i}`, `2026-10-0${1 + (i % 9)}T0${i % 10}:00:${String(i % 60).padStart(2, '0')}.000Z`, `body ${i} ${'words '.repeat(80)}`));
   const d = deps({ mailRows: (card) => (card === 'foo-7' ? rows : null), tasks: [{ id: 'FOO-7', status: 'doing', assignee: 'alpha-1', title: 'T '.repeat(120), fixVersion: '1.1.103' }] }, 60);
-  const t = text('FOO-7', { mail: 50 }, d);
+  const whole = text('FOO-7', { mail: 50 }, d);
+  // god 79d690: FOO-7 has lastsha and donesha, so the sha-fields note follows the capped text, outside the cap.
+  assert.ok(whole.endsWith(`\n${G.SHA_FIELDS_NOTE}\n`), 'the note is the last line, after the --all pointer');
+  assert.ok(whole.length < TOOL_OUTPUT_CAP_DEFAULT, `${whole.length} < ${TOOL_OUTPUT_CAP_DEFAULT}`);
+  const t = whole.slice(0, -(G.SHA_FIELDS_NOTE.length + 1));
   assert.ok(t.length <= G.GET_MAX_CHARS, `${t.length} <= ${G.GET_MAX_CHARS} (MUTANT: no cap)`);
   for (const l of lines(t)) assert.ok(l.length <= G.GET_LINE_MAX, `${l.length}: ${l}`);
   const L = lines(t);

@@ -62,16 +62,17 @@ test('MISS: get prints "no claim under" then the nearest keys line; a hit prints
   assert.doesNotMatch(hit, /nearest keys/);
 });
 
-test('FIELDS: a card lead with lastsha and donesha carries the meaning line right under the lead (inside the compact cap); one without either does not', () => {
+test('FIELDS: a card lead with lastsha and donesha ends with the sha-fields note, outside the cap and in no `label:` form (god 79d690); one without either does not', () => {
   const r = G.resolveGet('MAIL-STUCK-9', {}, deps());
-  const lines = G.formatGet(r).split('\n');
-  const at = lines.indexOf(G.SHA_FIELDS_NOTE);
-  assert.ok(at > 0, 'the meaning line is printed');
-  assert.ok(lines.slice(1, at).some((l) => l.startsWith('lastsha: ')) && lines.slice(1, at).some((l) => l.startsWith('donesha')), 'after the lead lines');
-  assert.match(lines[at + 1], /^decisions: /, 'before the decisions count');
+  const t = G.formatGet(r);
+  assert.ok(t.endsWith(`\n${G.SHA_FIELDS_NOTE}\n`), 'the note is the last line');
+  assert.equal(G.formatGet(r, { history: true }).endsWith(`\n${G.SHA_FIELDS_NOTE}\n`), true, 'the --all view too');
+  const lines = t.split('\n');
+  assert.ok(lines.some((l) => l.startsWith('lastsha: ')) && lines.some((l) => l.startsWith('donesha')), 'the lead is printed as before');
+  assert.doesNotMatch(G.SHA_FIELDS_NOTE, /^[a-zA-Z][a-zA-Z ()-]*: /, 'a note, not a field label');
   assert.ok(G.SHA_FIELDS_NOTE.length <= G.GET_LINE_MAX);
-  assert.match(G.SHA_FIELDS_NOTE, /lastsha = the newest commit the card's results and notes name/);
-  assert.doesNotMatch(G.formatGet(G.resolveGet('INT-1.1.90', {}, deps())), /^meaning: /m, 'no sha fields: no line');
+  assert.match(G.SHA_FIELDS_NOTE, /lastsha = newest commit its notes name; donesha = newest sha a done mail reports/);
+  assert.ok(!G.formatGet(G.resolveGet('INT-1.1.90', {}, deps())).includes(G.SHA_FIELDS_NOTE), 'no sha fields: no note');
 });
 
 test('DRIFT: the answer child\'s claims deps answer the search briefs (cardLead) through main\'s claimCardLeadOver: a bump query names release.1.1.90 and leads with its bump', () => {

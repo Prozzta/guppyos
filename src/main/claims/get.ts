@@ -715,9 +715,11 @@ export const sourcesLines = (lead: GetFieldLine[]): string[] => {
   return out.map((l, i) => (i === out.length - 1 ? l.replace(/;$/, '') : l));
 };
 
-/** CLAIMS-90 keyfind (god c4eea4): what the two sha fields mean, printed under a card lead that has both (on-1 DV094
- *  answered `donesha (latest)` where the card's lastsha was asked). Under GET_LINE_MAX. */
-export const SHA_FIELDS_NOTE = "meaning: lastsha = the newest commit the card's results and notes name; donesha = the newest sha a done mail reports";
+/** CLAIMS-90 keyfind (god c4eea4): what the two sha fields mean, for a card lead that has both (on-1 DV094 answered
+ *  `donesha (latest)` where the card's lastsha was asked). A note, not a field: no `label:` form, printed as the last
+ *  line OUTSIDE the GET_MAX_CHARS cap (god 79d690), so it never pushes a capped line into the tail; the cap plus the
+ *  note stays under the condenser's TOOL_OUTPUT_CAP_DEFAULT (test/claims90-step3-lead.test.cjs pins the sum). */
+export const SHA_FIELDS_NOTE = '(lastsha = newest commit its notes name; donesha = newest sha a done mail reports)';
 
 /** R1: the compact text's cap by construction: every line clipped to GET_LINE_MAX, the tail behind one pointer line
  *  once the whole would pass GET_MAX_CHARS (the lead block is first, so it is what always survives). */
@@ -756,7 +758,6 @@ export function formatGet(r: GetResult, opts: GetOptions = {}): string {
   L.push(prefix + ks + suffix);
   if (r.lead) {
     for (const l of r.lead) L.push(leadLine(l));
-    if (r.lead.some((l) => l.field === 'lastsha' && l.value !== null) && r.lead.some((l) => l.field === 'donesha' && l.value !== null)) L.push(SHA_FIELDS_NOTE);
     if (r.card && !all) L.push(`decisions: ${r.decisions.length}${r.decisions.length ? ' (--all lists them)' : ''}`);
     L.push(...sourcesLines(r.lead));
   }
@@ -794,5 +795,7 @@ export function formatGet(r: GetResult, opts: GetOptions = {}): string {
       for (const m of r.mails) L.push(`  mail: ${m.id} ${m.from} → ${m.to.join(',') || '-'} ${m.act} — ${excerpt(m.subject, 100)} [${m.cardFrom}${m.weak ? ' · weak' : ''} · ${m.trust}]`);
     }
   }
-  return all ? L.join('\n') + '\n' : fitGet(L);
+  const body = all ? L.join('\n') + '\n' : fitGet(L);
+  const shaNote = !!r.lead && r.lead.some((l) => l.field === 'lastsha' && l.value !== null) && r.lead.some((l) => l.field === 'donesha' && l.value !== null);
+  return shaNote ? `${body}${SHA_FIELDS_NOTE}\n` : body;
 }
