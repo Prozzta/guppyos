@@ -76,6 +76,16 @@ const M = [
   ['P54 index equality ignores the chunk sha', ANS, 'JSON.stringify({ perWing: d.perWing, vectors: d.vectors, chunkSha256: d.chunkSha256 })', 'JSON.stringify({ perWing: d.perWing, vectors: d.vectors })', ['unit']],
   ['P55 a stale WAL of the staged index is kept', ANS, '  for (const f of [`${p}-wal`, `${p}-shm`]) fs.rmSync(f, { force: true });', '', ['unit']],
   ['P56 the child reads the index before its worker shut down', CHILD, '    await nativeMemory.shutdown().catch(() => {});\n    // god ba807e', '    // god ba807e', ['unit']],
+  // god 8c625b: per-search timing rows, and a search exit 4 makes the item INVALID.
+  ['P57 search4Of counts nothing', ANS, "  return memCalls.filter((m) => m.cmd === 'search' && m.exit === 4).length;", '  return 0;', ['unit']],
+  ['P58 a search exit 4 is out of the INVALID chain', ANS, '    else if (row.search4) row.invalid = ', '    else if (false) row.invalid = ', ['unit']],
+  ['P59 search4Of counts every verb', ANS, "memCalls.filter((m) => m.cmd === 'search' && m.exit === 4)", 'memCalls.filter((m) => m.exit === 4)', ['unit']],
+  ['P60 the fork gets no tap', CHILD, "ort: treeRequire('onnxruntime-node') }, searchTap),", "ort: treeRequire('onnxruntime-node') }),", ['unit']],
+  ['P61 the brief asks are not timed', CHILD, '    cardLead: timedCardLead,', '    cardLead: (ask) => claimsDeps.cardLead(ask),', ['unit']],
+  ['P62 a reply past its deadline passes as the worker exit', CHILD, 'exit: late ? 4 : workerExit,', 'exit: workerExit,', ['unit']],
+  ['P63 the serve summary drops the search rows', CHILD, 'index: indexDigest(nativeMemory.dbFile()), searches, memLog', 'index: indexDigest(nativeMemory.dbFile()), memLog', ['unit']],
+  ['P64 the tap misses main\'s requests', CHILD, '      tap?.toWorker(m);\n', '', ['unit']],
+  ['P65 the run total drops the exit-4 items', ANS, 'search4Items: rows.filter((r) => r.search4).length,', 'search4Items: 0,', ['unit']],
   ['P14 taskStatusFor misses the archive', DEPS, '  return (id) => (allTasks() ?? []).find((t) => t.id === id)?.status ?? null;', "  return (id) => (allTasks() ?? []).find((t) => t.id === id && t.status !== 'done')?.status ?? null;", ['unit']],
 ];
 

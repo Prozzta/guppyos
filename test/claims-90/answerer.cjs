@@ -521,6 +521,12 @@ function unavailableOf(memCalls, transcriptCalls) {
   };
 }
 
+/** god 8c625b: the searches of one item that exited 4 (degraded: a timeout), from the serve log. Any one makes the
+ *  item INVALID, so a timeout never passes as a wrong answer. */
+function search4Of(memCalls) {
+  return memCalls.filter((m) => m.cmd === 'search' && m.exit === 4).length;
+}
+
 /**
  * god 3164a1 (R5): the claude -p child keeps the CLI login and its default config dir, so Claude Code
  * makes a project folder for each session under ~/.claude/projects, named after the session cwd (each
@@ -641,6 +647,8 @@ async function preflight(o, v, addDir, key, asker, outDir) {
     const idxFile = path.join(userData, 'memory', `${hiveId.to}-v2.sqlite`);
     const indexBuf = fs.existsSync(idxFile) ? fs.readFileSync(idxFile) : null;
     served.index = { sha256: indexBuf ? sha256(indexBuf) : null, digest: summary?.index ?? null, sync: syncRows(summary?.synced) };
+    served.searches = summary?.searches ?? null;
+    served.memLog = summary?.memLog ?? null;
     calls.push({ cmd: 'index sync', problem: syncProblem(summary?.synced, { embedNone: false }) ?? indexProblem(summary?.index) ?? (indexBuf ? null : 'no index file') });
     if (indexBuf) servedState.index = { buf: indexBuf, sha256: served.index.sha256 };
     // god 3164a1: one tiny claude -p from a sandbox cwd proves the session folder is the one the guard
@@ -796,6 +804,7 @@ async function answerItem(o, v, addDir, item, key, shape, instruction, outDir, p
     });
     row.memoryCalls = memCalls.map((m) => ({ cmd: m.cmd, args: m.args, exit: m.exit, chars: m.chars, textSha256: m.textSha256, unavailable: !!m.unavailable }));
     row.unavailable = unavailableOf(memCalls, t.calls);
+    row.search4 = search4Of(memCalls);
     row.denied = hookRows.filter((x) => x.denied).length;
     row.memoryMd = memoryMdUse(t.memoryMdCalls, t.answer, hive);
     row.init = t.init;
@@ -807,10 +816,13 @@ async function answerItem(o, v, addDir, item, key, shape, instruction, outDir, p
     if (t.leaks.length) row.invalid = `leak check: ${t.leaks.length} hit(s)`;
     else if (!initOk) row.invalid = 'the session started with more than the shim tools';
     else if (row.unavailable.serve || row.unavailable.transcript) row.invalid = `a memory verb was not answered (serve ${row.unavailable.serve}, transcript ${row.unavailable.transcript})`;
+    else if (row.search4) row.invalid = `a search exited 4 (${row.search4})`;
     else if (row.exit !== 0 || !t.result || t.result.isError) row.invalid = `session failed (exit ${row.exit}): ${ccErr.slice(0, 200)}`;
     else if (!row.serve.ok) row.invalid = `serve: ${row.serve.reason}`;
     row.sync = syncRows(row.serve.synced);
     row.indexAfter = row.serve.index ?? null;
+    row.searches = row.serve.searches ?? null;
+    row.memLog = row.serve.memLog ?? null;
     const syncBad = syncProblem(row.serve.synced, { embedNone: true });
     if (!row.invalid && syncBad) row.invalid = `index sync: ${syncBad}`;
     else if (!row.invalid && indexKey(row.indexAfter) !== indexKey(pre.served.index.digest)) row.invalid = 'the index after the session differs from the served one';
@@ -896,6 +908,9 @@ async function main(argv) {
     // Jim 4370f6: the preflight's calls, and the items with a verb the build did not answer (each INVALID).
     preflight: pre,
     unavailableItems: rows.filter((r) => r.unavailable && (r.unavailable.serve || r.unavailable.transcript)).length,
+    // god 8c625b: the searches that exited 4, and the items they made INVALID.
+    search4Calls: rows.reduce((n, r) => n + (r.search4 ?? 0), 0),
+    search4Items: rows.filter((r) => r.search4).length,
     calls: rows.reduce((n, r) => n + (r.calls?.length ?? 0), 0),
     styleDeviations: rows.reduce((n, r) => n + (r.calls ?? []).filter((c) => c.styleDeviation).length, 0),
     readTypeCalls: rows.reduce((n, r) => n + (r.calls ?? []).filter((c) => c.readType).length, 0),
@@ -921,4 +936,4 @@ if (require.main === module) {
   }, (e) => { console.error(`[claims-90] ${e.stack || e.message}`); process.exitCode = 2; });
 }
 
-module.exports = { projectSlug, claudeProjectsDir, leftoverPrefixes, sessionFolderOut, leftoversIn, LEFTOVER_PREFIX, preflightProblem, firstIndexedCard, servedStateProblem, treeShas, prepareServed, captureServed, applyServed, servedSha, servedNumbers, syncProblem, indexProblem, indexKey, serveIndex, syncRows, ownSpillRead,unavailableOf, parseArgs, parseItems, installedHookShape, hookShapeOf, buildHookShape, buildInfo, buildMemoryShim, condenseOf, settingsFor, childEnv, readTranscript, styleDeviation, itemStyle, memoryMdUse, main };
+module.exports = { projectSlug, claudeProjectsDir, leftoverPrefixes, sessionFolderOut, leftoversIn, LEFTOVER_PREFIX, preflightProblem, firstIndexedCard, servedStateProblem, treeShas, prepareServed, captureServed, applyServed, servedSha, servedNumbers, syncProblem, indexProblem, indexKey, serveIndex, syncRows, ownSpillRead,unavailableOf, search4Of, parseArgs, parseItems, installedHookShape, hookShapeOf, buildHookShape, buildInfo, buildMemoryShim, condenseOf, settingsFor, childEnv, readTranscript, styleDeviation, itemStyle, memoryMdUse, main };
