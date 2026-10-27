@@ -12,6 +12,8 @@
  *   FJ-b  the hash is over the raw source bytes        -> 'LIVE FJ-b/FJ-c': CRLF and LF copies name ONE exe
  *   FJ-c  no prune after a fresh build                 -> 'LIVE FJ-b/FJ-c': a stale guppy-file-job-old.exe is gone
  *   FJ-d  a failed join is not recorded / not counted  -> 'FJ-d preload' (one row) and 'FJ-d runner' (strict fails)
+ *   FJ-e  a test builds the tool in a temp folder      -> 'FJ-e': a source scan of every prepareFileJob call in test/
+ * The census is test/tools/file-job-mutants.cjs (node test/tools/file-job-mutants.cjs).
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -176,22 +178,53 @@ test('LIVE: the in-box csc is on this box and builds the job tool (the fallback 
 });
 
 test('LIVE FJ-b/FJ-c: CRLF and LF copies of the source name ONE exe, and a fresh build prunes the stale ones beside it only', LIVE, () => {
+  // Jim MUST 1 on 991d11bc: the sources may sit in temp, but the exes are built in a folder of this
+  // run's own under the gitignored test/tools/bin, never in a temp folder (FJ-e guards every call).
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fj-bc-'));
+  const bin = path.join(R.FILE_JOB_DIR, `fj-bc-${process.pid}`);
   try {
     const lf = fs.readFileSync(path.join(__dirname, 'tools', 'file-job.cs'), 'utf8').replace(/\r\n/g, '\n');
     fs.writeFileSync(path.join(dir, 'lf.cs'), lf);
     fs.writeFileSync(path.join(dir, 'crlf.cs'), lf.replace(/\n/g, '\r\n'));
-    const bin = path.join(dir, 'bin');
-    fs.mkdirSync(bin);
+    fs.mkdirSync(bin, { recursive: true });
     for (const n of ['guppy-file-job-old.exe', 'keep.txt']) fs.writeFileSync(path.join(bin, n), 'x');
-    const a = R.prepareFileJob({ src: path.join(dir, 'lf.cs'), dir: bin });
+    const a = R.prepareFileJob({ src: path.join(dir, 'lf.cs'), dir: path.join(R.FILE_JOB_DIR, `fj-bc-${process.pid}`) });
     assert.ok(a.exe && fs.existsSync(a.exe), JSON.stringify(a));
     assert.equal(fs.existsSync(path.join(bin, 'guppy-file-job-old.exe')), false, 'FJ-c: THE STALE EXE IS PRUNED');
     assert.ok(fs.existsSync(path.join(bin, 'keep.txt')), 'nothing else is touched');
-    const b = R.prepareFileJob({ src: path.join(dir, 'crlf.cs'), dir: bin });
+    const b = R.prepareFileJob({ src: path.join(dir, 'crlf.cs'), dir: path.join(R.FILE_JOB_DIR, `fj-bc-${process.pid}`) });
     assert.equal(b.exe, a.exe, 'FJ-b: ONE EXE FOR BOTH LINE ENDINGS');
     assert.deepEqual(fs.readdirSync(bin).filter((n) => n.endsWith('.exe')), [path.basename(a.exe)]);
-  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(bin, { recursive: true, force: true });
+  }
+});
+
+test('FJ-e: every prepareFileJob call in the test tree builds under test/tools/bin, never in a temp folder', () => {
+  const calls = [];
+  const walk = (d) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) { if (e.name !== 'node_modules' && e.name !== 'bin') walk(p); continue; }
+      if (!/\.[cm]?[jt]s$/.test(e.name)) continue;
+      const src = fs.readFileSync(p, 'utf8');
+      for (let at = src.indexOf('prepareFileJob('); at >= 0; at = src.indexOf('prepareFileJob(', at + 1)) {
+        if (/function\s+$/.test(src.slice(Math.max(0, at - 12), at))) continue; // its definition
+        let depth = 0; let end = at + 'prepareFileJob'.length;
+        do { if (src[end] === '(') depth += 1; else if (src[end] === ')') depth -= 1; end += 1; } while (depth > 0 && end < src.length);
+        calls.push({ file: path.relative(__dirname, p), args: src.slice(at + 'prepareFileJob('.length, end - 1) });
+      }
+    }
+  };
+  walk(__dirname);
+  assert.ok(calls.length >= 8, `the scan found the calls (${calls.length})`);
+  const withDir = calls.filter((c) => /\bdir\s*:/.test(c.args));
+  assert.ok(withDir.length >= 2, 'the LIVE FJ-b/FJ-c builds are among them');
+  for (const c of calls) {
+    assert.doesNotMatch(c.args, /tmpdir|sharedTemp|mkdtemp|\bTE?MP\b|GUPPY_SHARED_TEMP/i, `NO EXE IN A TEMP FOLDER: ${c.file}: prepareFileJob(${c.args})`);
+    if (/\bdir\s*:/.test(c.args)) assert.match(c.args, /\bdir\s*:\s*(path\.join\(\s*)?R\.FILE_JOB_DIR\b/, `UNDER test/tools/bin: ${c.file}: prepareFileJob(${c.args})`);
+  }
 });
 
 // A test file's process, as node --test starts it: the preload joins its job; on "go" it starts
