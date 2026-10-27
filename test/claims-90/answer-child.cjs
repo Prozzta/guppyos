@@ -61,12 +61,13 @@ function readStdin() {
   });
 }
 
-/** The tree's worker, in process, behind a structured-clone port (utilityProcess semantics). */
-function inProcessFork(runWorker, deps) {
+/** The tree's worker, in process, behind a structured-clone port (utilityProcess semantics). `tap`
+ *  (god 8c625b) sees each message both ways, as sent; it never changes one. */
+function inProcessFork(runWorker, deps, tap = null) {
   const toMain = new Set();
   const exits = new Set();
   const port = {
-    postMessage: (msg) => { const m = structuredClone(msg); setImmediate(() => { for (const fn of toMain) fn(m); }); },
+    postMessage: (msg) => { const m = structuredClone(msg); tap?.toMain(m); setImmediate(() => { for (const fn of toMain) fn(m); }); },
     on: (_ev, fn) => { port.fns.add(fn); },
     fns: new Set(),
   };
@@ -80,6 +81,7 @@ function inProcessFork(runWorker, deps) {
         runWorker(m.config, port, deps).catch((err) => port.postMessage({ event: 'fatal', error: String(err?.stack ?? err) }));
         return;
       }
+      tap?.toWorker(m);
       setImmediate(() => { for (const fn of port.fns) fn({ data: m }); });
     },
     on(ev, fn) { (ev === 'exit' ? exits : toMain).add(fn); },
@@ -212,13 +214,37 @@ function inProcessFork(runWorker, deps) {
   });
   // Jim 4370f6 / god 8c87a7: get and history answer through main's own read wiring (claims-deps.cjs).
   const claimsDeps = claimsDepsFor(L, { hive, store, agents: ledgerAgents, allTasks: hiveTasks.allTasks });
+  // god 8c625b: each search as the worker port saw it (the deadline main gave it, its time, the worker's
+  // wait and run, the exit main returned: 4 once past the deadline) and the card-brief asks it made.
+  const searches = [];
+  const openSearch = new Map();
+  const searchTap = {
+    toWorker: (m) => {
+      if (m?.op !== 'search' || typeof m.id !== 'number' || searches.length >= 500) return;
+      const row = { at: new Date().toISOString(), budgetMs: typeof m.deadline === 'number' ? Math.round(m.deadline - Date.now()) : null, ms: null, exit: null, briefMs: [] };
+      searches.push(row);
+      openSearch.set(m.id, { row, t0: performance.now(), deadline: m.deadline });
+    },
+    toMain: (m) => {
+      const o = typeof m?.id === 'number' ? openSearch.get(m.id) : undefined;
+      if (!o) return;
+      openSearch.delete(m.id);
+      const late = typeof o.deadline === 'number' && Date.now() > o.deadline;
+      const workerExit = typeof m.exit === 'number' ? m.exit : m.ok ? 0 : 4;
+      Object.assign(o.row, { ms: Math.round(performance.now() - o.t0), exit: late ? 4 : workerExit, workerExit, late, error: m.ok ? null : String(m.error ?? '').slice(0, 200), waitMs: m.timing?.waitMs ?? null, runMs: m.timing?.runMs ?? null });
+    },
+  };
+  const timedCardLead = (ask) => {
+    const t0 = performance.now();
+    try { return claimsDeps.cardLead(ask); } finally { const o = [...openSearch.values()].pop(); if (o) o.row.briefMs.push(Math.round(performance.now() - t0)); }
+  };
   const nativeMemory = new NativeMemoryWiring({
     hiveRoot: () => hive,
     enabled: () => config.semanticMemory !== false,
     userData: ud,
     resourcesDir: spec.resourcesDir,
     workerEntry: 'in-process',
-    fork: () => inProcessFork(runWorker, { Database: treeRequire('better-sqlite3'), ort: treeRequire('onnxruntime-node') }),
+    fork: () => inProcessFork(runWorker, { Database: treeRequire('better-sqlite3'), ort: treeRequire('onnxruntime-node') }, searchTap),
     memoryBaseUrl: () => baseUrl,
     writeCommand: () => null,
     log,
@@ -226,7 +252,7 @@ function inProcessFork(runWorker, deps) {
     // The read verbs answer as the app's; every write verb is refused (level reader).
     claims: () => claimsDeps,
     // The search briefs through main's read wiring, as index.ts passes them (test/claims90-keyfind.test.cjs pins the set).
-    cardLead: (ask) => claimsDeps.cardLead(ask),
+    cardLead: timedCardLead,
     claimLedger: () => config.claimLedger,
     anchoredAgents: () => store.anchoredAgents(),
     onWorkerReady: () => { workerReady = claimsIndex.syncAll(); },
@@ -507,7 +533,7 @@ function inProcessFork(runWorker, deps) {
     hiveTasks.dispose();
     await nativeMemory.shutdown().catch(() => {});
     // god ba807e: the index as the worker left it (shut down), so the runner can serve the preflight's to the items.
-    emit({ summary: { ...verdict(), persistRisk: persistRisk.length,served: Object.keys(askers), ledgers, synced, worldCalls, status1: status1.json ?? null, index: indexDigest(nativeMemory.dbFile()) } });
+    emit({ summary: { ...verdict(), persistRisk: persistRisk.length,served: Object.keys(askers), ledgers, synced, worldCalls, status1: status1.json ?? null, index: indexDigest(nativeMemory.dbFile()), searches, memLog: logRows.filter((r) => /^native-memory/.test(String(r.kind ?? ''))) } });
     fs.closeSync(out);
     process.exit(0);
   }

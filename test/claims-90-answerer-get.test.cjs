@@ -431,3 +431,35 @@ test('god ba807e: the preflight serves its synced index to every item; a failed,
   const dig = child.indexOf('index: indexDigest(nativeMemory.dbFile())');
   assert.ok(shutCrlf > 0 && dig > shutCrlf, 'the serve child reads the index only after its worker shut down');
 });
+
+test('god 8c625b: every search is timed at the worker port (deadline, ms, worker wait/run, brief asks) into the serve summary, and an item with a search that exited 4 is INVALID', () => {
+  // search4Of counts only the searches that exited 4: another verb's exit 4, or a search's exit 0 or 2, is not one.
+  const calls = [
+    { cmd: 'search', exit: 4 }, { cmd: 'search', exit: 0 }, { cmd: 'search', exit: 2 },
+    { cmd: 'get', exit: 4 }, { cmd: 'history', exit: 4 }, { cmd: 'search', exit: 4 },
+  ];
+  assert.equal(A.search4Of(calls), 2);
+  assert.equal(A.search4Of([{ cmd: 'search', exit: 0 }, { cmd: 'wake-up', exit: 4 }]), 0);
+  assert.equal(A.search4Of([]), 0);
+  const run = fs.readFileSync(path.join(__dirname, 'claims-90', 'answerer.cjs'), 'utf8');
+  const child = fs.readFileSync(path.join(__dirname, 'claims-90', 'answer-child.cjs'), 'utf8');
+  // The INVALID chain, the item fields and the run totals.
+  assert.match(run, /row\.search4 = search4Of\(memCalls\);/);
+  assert.match(run, /else if \(row\.search4\) row\.invalid = `a search exited 4 \(\$\{row\.search4\}\)`;\r?\n    else if \(row\.exit !== 0/, 'a search exit 4 is in the INVALID chain, before the session result');
+  assert.match(run, /row\.searches = row\.serve\.searches \?\? null;/);
+  assert.match(run, /row\.memLog = row\.serve\.memLog \?\? null;/);
+  assert.match(run, /served\.searches = summary\?\.searches \?\? null;/);
+  assert.match(run, /search4Calls: rows\.reduce\(\(n, r\) => n \+ \(r\.search4 \?\? 0\), 0\),/);
+  assert.match(run, /search4Items: rows\.filter\(\(r\) => r\.search4\)\.length,/);
+  // The child: the tap sits on both directions of the worker port, it is passed to the fork, the brief dep is timed,
+  // a reply past its deadline counts as main's exit 4, and the summary carries the rows and the memory log.
+  assert.match(child, /postMessage: \(msg\) => \{ const m = structuredClone\(msg\); tap\?\.toMain\(m\); setImmediate/);
+  assert.match(child, /      tap\?\.toWorker\(m\);\r?\n      setImmediate\(\(\) => \{ for \(const fn of port\.fns\) fn\(\{ data: m \}\); \}\);/);
+  assert.match(child, /ort: treeRequire\('onnxruntime-node'\) \}, searchTap\),/, 'the fork gets the tap');
+  assert.match(child, /    cardLead: timedCardLead,/, 'the brief asks are timed');
+  assert.match(child, /try \{ return claimsDeps\.cardLead\(ask\); \} finally \{ const o = \[\.\.\.openSearch\.values\(\)\]\.pop\(\); if \(o\) o\.row\.briefMs\.push\(/);
+  assert.match(child, /budgetMs: typeof m\.deadline === 'number' \? Math\.round\(m\.deadline - Date\.now\(\)\) : null/);
+  assert.match(child, /exit: late \? 4 : workerExit, workerExit, late,/, 'a reply past its deadline is main\'s exit 4');
+  assert.match(child, /waitMs: m\.timing\?\.waitMs \?\? null, runMs: m\.timing\?\.runMs \?\? null/);
+  assert.match(child, /index: indexDigest\(nativeMemory\.dbFile\(\)\), searches, memLog: logRows\.filter\(\(r\) => \/\^native-memory\/\.test\(String\(r\.kind \?\? ''\)\)\) \} \}\);/);
+});
