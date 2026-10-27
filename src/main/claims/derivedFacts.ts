@@ -221,6 +221,67 @@ export interface GitPort {
    *  cards). Only its SUBJECT (first line) confirms a card: CHANGELOG, cut and int merge commits list
    *  many cards in their bodies (CLAIMS-WEAKLINK-DONESHA round 2, Jim M-b). */
   message?(commit: string): Promise<string | null>;
+  /** The commit's parents (full shas, first parent first), or null when git cannot say; optional
+   *  (CLAIMS-WEAKLINK-DONESHA round 3, B): a commit with two or more parents is a merge and confirms
+   *  nothing on its own sha. Without the method every commit counts as a plain one. */
+  parents?(commit: string): Promise<string[] | null>;
+  /** The paths the commit changes, or null when git cannot say; optional (round 3, A): a commit that
+   *  changes only CHANGELOG/docs files confirms nothing. Without the method files are unknown. */
+  changedFiles?(commit: string): Promise<string[] | null>;
+}
+
+/** A changed path that is documentation: a CHANGELOG (no extension or a text one) anywhere, anything
+ *  under docs/, any .md file. */
+export const isDocFile = (p: string): boolean =>
+  /(?:^|\/)changelog(?:[^/]*\.(?:md|markdown|txt|rst))?$|^docs\/|\.(?:md|markdown)$/i.test(p.trim().replace(/\\/g, '/'));
+
+/** The branch a merge commit's subject says it merged ("Merge guppy/x-1 @abc into int", "Merge branch
+ *  'guppy/x-1'", "Merge pull request #7 from org/guppy/x-1"), or '' for none / not a merge subject. */
+export function mergedBranch(subject: string): string {
+  const m = /^Merge\s+(?:pull\s+request\s+#\d+\s+from\s+|(?:remote-tracking\s+)?branch\s+)?'?([^\s']+)'?/i.exec(subject);
+  return m ? m[1] : '';
+}
+
+/** A commit a done mail reports, resolved to the work it stands for (round 3). */
+export interface ReportedCommit {
+  /** The commit a row would carry: the commit itself, or, through a merge, the merged parent. */
+  commit: string;
+  /** The text that may name a card: the commit's subject line and, through a merge, the branch the
+   *  merge's subject says it merged. */
+  text: string;
+  /** The merge the mail wrote, when the commit was reached through one (a merge confirms nothing and
+   *  is never the reported sha). */
+  merge?: string;
+  /** The commit changes only CHANGELOG/docs files (or none): it confirms no card. */
+  docsOnly: boolean;
+}
+
+const MERGE_DEPTH = 3;
+
+/**
+ * The commits a reported sha stands for (CLAIMS-WEAKLINK-DONESHA round 3, Jim's gate on 844a3ddf):
+ * a plain commit is itself, with its subject and whether it changes only docs; a merge (2+ parents)
+ * is never itself: it is each merged (non-first) parent, resolved the same way, with the merge's
+ * branch name added to the text, so an int/rc merge of the card's branch resolves to the card's own
+ * tip and a merge of something else resolves to a commit naming another card or none (dropped by
+ * the caller). Nested merges resolve up to MERGE_DEPTH deep; deeper gives nothing.
+ */
+export async function resolveReported(full: string, git: GitPort, depth = 0): Promise<ReportedCommit[]> {
+  const parents = git.parents ? await git.parents(full) : null;
+  const subject = commitSubject(git.message ? await git.message(full) : null);
+  if (parents && parents.length >= 2) {
+    if (depth >= MERGE_DEPTH) return [];
+    const branch = mergedBranch(subject);
+    const out: ReportedCommit[] = [];
+    for (const p of parents.slice(1)) {
+      for (const r of await resolveReported(p, git, depth + 1)) {
+        if (!out.some((x) => x.commit === r.commit)) out.push({ ...r, text: branch ? `${r.text} ${branch}` : r.text, merge: full });
+      }
+    }
+    return out;
+  }
+  const files = git.changedFiles ? await git.changedFiles(full) : null;
+  return [{ commit: full, text: subject, docsOnly: files !== null && files.every(isDocFile) }];
 }
 
 const SHA_RE = /(?<![0-9A-Za-z])([0-9a-f]{7,40})(?:(\.\.\.?)([0-9a-f]{7,40}))?(?![0-9A-Za-z])/g;
@@ -271,11 +332,11 @@ export function subjectAtShas(subject: unknown): Array<{ sha: string; name: stri
  * none. One is the mail's sha. Of several: the descendant when they form an ancestry chain; else the
  * one written next to the card's id or its branch name (guppy/<id>); else 'ambiguous' (never guess).
  */
-export async function subjectTip(shas: ReadonlyArray<{ sha: string; name: string }>, card: string, git: GitPort): Promise<string | null | 'ambiguous'> {
+export async function subjectTip(shas: ReadonlyArray<{ sha: string; name: string; full?: string }>, card: string, git: GitPort): Promise<string | null | 'ambiguous'> {
   if (shas.length <= 1) return shas[0]?.sha ?? null;
   const full: string[] = [];
   for (const x of shas) {
-    const f = await git.commitOf(x.sha);
+    const f = x.full ?? await git.commitOf(x.sha);
     if (f) full.push(f);
   }
   if (full.length === shas.length) {
@@ -301,6 +362,11 @@ export async function latestInGitOrder(candidates: readonly string[], git: GitPo
     const full = await git.commitOf(c);
     if (full && !commits.includes(full)) commits.push(full);
   }
+  return latestOfCommits(commits, git);
+}
+
+/** latestInGitOrder over commits already resolved to full shas (each once). */
+export async function latestOfCommits(commits: readonly string[], git: GitPort): Promise<string | null> {
   if (commits.length === 0) return null;
   // The commits no other candidate descends from; of those, the latest by time.
   const heads: string[] = [];
@@ -651,6 +717,14 @@ const mailAt = (m: MailLike): string => iso(m.created_at) ?? '';
  * passing mention in a done mail about another card never is: that mail's own field or link names
  * the other card and wins, and an unconfirmed subject or body mention gives nothing (ambiguous /
  * bodyOnly).
+ * Round 3 (Jim's gate on 844a3ddf): only the card's OWN commit confirms it. (B) A merge (2+ parents)
+ * confirms nothing on its own sha and is never reported: it resolves to its merged parent
+ * (resolveReported), which counts, and is the reported sha, when its subject or the merged branch
+ * names the card, else the merge is dropped from the mail; so a later int/rc merge mail on the card
+ * yields the same own-commit sha as the builder's mail, never a sha that displaces it. (A) A commit
+ * that changes only CHANGELOG/docs files (changedFiles) confirms nothing, whatever its subject says.
+ * (C) The single-link path also requires that no commit the mail reports names a different card
+ * (a commit naming no card still counts with the link); one that does gives nothing (ambiguous).
  * Commits: the sha words of the subject and body that git resolves to a commit (ranges a..b give
  * both ends). R2 (c): a mail that gives no fact carries a reason; noShaWord, noCommit, ambiguous
  * and bodyOnly are each what git confirmed. A mail copied to several inboxes counts once (by id).
@@ -664,7 +738,7 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
     skipped[reason]++;
     skips.push({ mail, reason, ...(cards?.length ? { cards } : {}) });
   };
-  const newest = new Map<string, { m: MailLike & { id: string }; card: string; from: string; commit: string; named: number; range?: ShaMention['range']; subject: boolean; inRepo: boolean }>();
+  const newest = new Map<string, { m: MailLike & { id: string }; card: string; from: string; commit: string; named: number; range?: ShaMention['range']; subject: boolean; inRepo: boolean; via?: string }>();
   let withCommit = 0;
   const seen = new Set<string>();
   const ordered = [...mails].filter((m): m is MailLike & { id: string } => !!m && typeof m.id === 'string')
@@ -676,37 +750,58 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
     const mentions = [...shaMentions(m.subject), ...shaMentions(typeof m.body === 'string' ? m.body : '')];
     const atShas = subjectAtShas(m.subject);
     if (!mentions.length && !atShas.length) { skip(m.id, 'noShaWord'); continue; }
-    const commits: string[] = [];
-    const words: string[] = [];   // the sha words as written, for latestInGitOrder (it resolves them itself)
+    // The commits the mail reports, each resolved to the work it stands for (round 3: a merge is its
+    // merged parent or nothing).
+    const entries: ReportedCommit[] = [];
     const rangeOf = new Map<string, ShaMention['range']>();
+    const resolved = new Map<string, ReportedCommit[]>();
     for (const x of mentions) {
       const full = await git.commitOf(x.sha);
-      if (!full || commits.includes(full)) continue;
-      commits.push(full);
-      words.push(x.sha);
-      if (x.range) rangeOf.set(full, x.range);
+      if (!full || resolved.has(full)) continue;
+      const rs = await resolveReported(full, git);
+      resolved.set(full, rs);
+      for (const r of rs) {
+        if (entries.some((e) => e.commit === r.commit)) continue;
+        entries.push(r);
+        if (x.range && !r.merge) rangeOf.set(r.commit, x.range);
+      }
     }
-    if (!commits.length && !atShas.length) { skip(m.id, 'noCommit'); continue; }
-    const card = await cardOfDoneMail(m, known, match, commits, git);
+    // The subject's @shas, resolved the same way; one the repository lacks stays as written (F2).
+    const ats: Array<{ sha: string; name: string; full?: string; entry?: ReportedCommit }> = [];
+    for (const x of atShas) {
+      const full = await git.commitOf(x.sha);
+      if (!full) { ats.push({ sha: x.sha, name: x.name }); continue; }
+      for (const r of resolved.get(full) ?? await resolveReported(full, git)) ats.push({ sha: r.commit, name: x.name, full: r.commit, entry: r });
+    }
+    if (!entries.length && !ats.length) { skip(m.id, 'noCommit'); continue; }
+    const card = cardOfDoneMail(m, known, match, entries);
     if (typeof card !== 'string') { skip(m.id, card.reason, card.cards); continue; }
     const key = cardKey(card, 'donesha');
     if (!key) { skip(m.id, 'noCard', [card]); continue; }
+    // (B) A commit reached through a merge counts for the card only when its subject or branch names it.
+    const keep = (e: ReportedCommit | undefined): boolean => !e || !e.merge || match(e.text).includes(card);
+    const kept = entries.filter(keep);
+    const atsKept = ats.filter((a) => keep(a.entry));
+    if (!kept.length && !atsKept.length) { skip(m.id, 'noCommit', [card]); continue; }
     // Several subject @shas that git cannot order and no card name settles: no claim from this mail.
-    const reported = await subjectTip(atShas, card, git);
+    const reported = await subjectTip(atsKept, card, git);
     if (reported === 'ambiguous') { skip(m.id, 'ambiguous', [card]); continue; }
     // F2: a sha the subject reports as @<sha> is the mail's sha, even when the repository lacks it.
-    const reportedFull = reported ? await git.commitOf(reported) : null;
-    const commit = reported ? (reportedFull ?? reported) : ((await latestInGitOrder(words, git)) ?? commits[0]);
+    const at = reported ? atsKept.find((a) => a.sha === reported) : undefined;
+    const reportedFull = at ? (at.full ?? await git.commitOf(at.sha)) : null;
+    const commit = reported ? (reportedFull ?? reported) : ((await latestOfCommits(kept.map((e) => e.commit), git)) ?? kept[0].commit);
+    const via = at ? at.entry?.merge : kept.find((e) => e.commit === commit)?.merge;
     const from = typeof m.from === 'string' && m.from ? clip(m.from, 60) : 'unknown';
     withCommit++;
-    newest.set(`${key}#${from}`, { m, card, from, commit, named: commits.length, range: rangeOf.get(commit), subject: !!reported, inRepo: !reported || !!reportedFull });
+    newest.set(`${key}#${from}`, { m, card, from, commit, named: kept.length, range: rangeOf.get(commit), subject: !!reported, inRepo: !reported || !!reportedFull, via });
   }
   const facts: DerivedFact[] = [];
-  for (const [slot, { m, card, from, commit, named, range, subject, inRepo }] of newest) {
+  for (const [slot, { m, card, from, commit, named, range, subject, inRepo, via }] of newest) {
     const key = slot.slice(0, slot.lastIndexOf('#'));
     const at = iso(m.created_at);
     const of = range ? ` (the ${range.end === 'from' ? 'start' : 'end'} of the range ${range.from}..${range.to})` : '';
-    const others = subject ? ` as its subject's @sha${inRepo ? '' : ' (not in the repository)'}` : named > 1 ? `; it is the latest in git order of the ${named} commits the mail names` : '';
+    const merged = via ? ` (the merged parent of ${via.slice(0, 8)}, the merge the mail wrote)` : '';
+    const others = subject ? ` as its subject's @sha${inRepo ? '' : ' (not in the repository)'}${merged}` : named > 1 ? `; it is the latest in git order of the ${named} commits the mail names${merged}` : merged;
     facts.push({
       slot, key, kind: 'fact',
       text: `Card ${card}: the newest done mail from ${from} (${clip(m.id, 80)}) names commit ${commit.slice(0, 8)} (${commit})${subject ? '' : of}${others}`,
@@ -719,9 +814,9 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
 }
 
 /** The done mail's card (see doneMailFacts), or why there is none. */
-async function cardOfDoneMail(
-  m: MailLike, known: Map<string, string>, match: (text: unknown) => string[], commits: readonly string[], git: GitPort,
-): Promise<string | { reason: 'noCard' | 'ambiguous' | 'bodyOnly'; cards?: string[] }> {
+function cardOfDoneMail(
+  m: MailLike, known: Map<string, string>, match: (text: unknown) => string[], entries: readonly ReportedCommit[],
+): string | { reason: 'noCard' | 'ambiguous' | 'bodyOnly'; cards?: string[] } {
   const field = typeof m.card === 'string' ? known.get(m.card.toLowerCase()) : undefined;
   if (field) return field;
   const linked = Array.isArray(m.cards)
@@ -733,20 +828,25 @@ async function cardOfDoneMail(
   // weak (spec F; Jim's gate M-a: "U6 included" in a subject made card.u6): a candidate only, and
   // only git confirms it (CLAIMS-WEAKLINK-DONESHA).
   const exact = match(m.subject);
-  if (linked.length === 1 && (!exact.length || exact.includes(linked[0]))) return linked[0];
+  if (linked.length === 1 && (!exact.length || exact.includes(linked[0]))) {
+    // Round 3 (C): the link counts only when no commit the mail reports names a different card (a
+    // commit naming no card still counts with the link); a merge of another card's branch names it.
+    const others = [...new Set(entries.flatMap((e) => match(e.text)).filter((c) => c !== linked[0]))];
+    return others.length ? { reason: 'ambiguous', cards: [linked[0], ...others].slice(0, 8) } : linked[0];
+  }
   const strong = exact.length ? exact : linked;
   const named = strong.length ? strong : match(m.body);
   if (!named.length) return { reason: 'noCard' };
-  if (git.message) {
-    const byGit = new Set<string>();
-    for (const c of commits) {
-      // Jim's gate M-b: the commit's SUBJECT line only. A CHANGELOG, cut or int merge commit lists
-      // many cards in its body; a card's own commit names it in the subject.
-      const hits = match(commitSubject(await git.message(c))).filter((x) => named.includes(x));
-      if (hits.length === 1) byGit.add(hits[0]);
-    }
-    if (byGit.size === 1) return [...byGit][0];
+  const byGit = new Set<string>();
+  for (const e of entries) {
+    // Jim's gate M-b: the commit's SUBJECT line only (a CHANGELOG, cut or int merge commit lists many
+    // cards in its body; a card's own commit names it in the subject). Round 3: a merge resolved to
+    // its merged parent (B); a commit changing only docs confirms nothing (A).
+    if (e.docsOnly) continue;
+    const hits = match(e.text).filter((x) => named.includes(x));
+    if (hits.length === 1) byGit.add(hits[0]);
   }
+  if (byGit.size === 1) return [...byGit][0];
   return { reason: strong.length ? 'ambiguous' : 'bodyOnly', cards: named.slice(0, 8) };
 }
 
