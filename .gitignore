@@ -1,6 +1,8 @@
 node_modules/
 # HEAVY-CPU-OPTIONS-191: compiled by tools/build-heavyjob.cjs on every build, never committed
 resources/heavyjob/bin/
+# AV-FILEJOB-FLAG: test/tools/run-tests.cjs compiles the per-file job tool here (never %TEMP%), never committed
+test/tools/bin/
 node_modules
 out/
 dist/

@@ -6,6 +6,12 @@
  * outlived the kill and kept the folder in use (EBUSY). Each file now joins a kill-on-close job of
  * its own before any test code runs (file-job-preload.cjs, file-job.cs), and the watchdog
  * terminates that job.
+ *
+ * AV-FILEJOB-FLAG census (each mutant of run-tests.cjs / file-job-preload.cjs fails a test here):
+ *   FJ-a  the tool is built in the temp folder again   -> 'FJ-a' (+ LIVE in-box csc): under test/tools/bin, never temp
+ *   FJ-b  the hash is over the raw source bytes        -> 'LIVE FJ-b/FJ-c': CRLF and LF copies name ONE exe
+ *   FJ-c  no prune after a fresh build                 -> 'LIVE FJ-b/FJ-c': a stale guppy-file-job-old.exe is gone
+ *   FJ-d  a failed join is not recorded / not counted  -> 'FJ-d preload' (one row) and 'FJ-d runner' (strict fails)
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -86,6 +92,78 @@ test('Jim NIT-1: the row after the kill says what was done; a recycled pid is ne
   assert.match(src, /outcome: \(d, r\) => fs\.appendFileSync\(outFile, `\$\{JSON\.stringify\(outcomeRow\(d, r, limit\)\)\}\\n`\)/);
 });
 
+// ── AV-FILEJOB-FLAG: where the tool is built, what is pruned, and a failed join fails closed ─────
+
+test('FJ-a: the job tool is built in the gitignored test/tools/bin, never in a temp folder', () => {
+  assert.equal(R.FILE_JOB_DIR, path.join(__dirname, 'tools', 'bin'));
+  const under = (dir, root) => !path.relative(root, dir).startsWith('..') && !path.isAbsolute(path.relative(root, dir));
+  for (const t of [os.tmpdir(), require('./tools/shared-temp.cjs').sharedTemp()]) assert.ok(!under(R.FILE_JOB_DIR, t), `not under ${t}`);
+  const ignore = fs.readFileSync(path.join(__dirname, '..', '.gitignore'), 'utf8');
+  assert.match(ignore, /^test\/tools\/bin\/\r?$/m, 'never committed');
+});
+
+test('the prune takes every other guppy-file-job-*.exe in its folder, but not a live run\'s half-built one', () => {
+  const gone = [];
+  const names = ['guppy-file-job-aaaaaaaaaaaa.exe', 'guppy-file-job-old.exe', 'guppy-file-job-bbbbbbbbbbbb-111.exe', 'guppy-file-job-cccccccccccc-222.exe', 'other.exe', 'guppy-file-job.cs'];
+  R.pruneFileJobs('D', path.join('D', 'guppy-file-job-aaaaaaaaaaaa.exe'), { readdir: () => names, remove: (p) => gone.push(path.basename(p)), alive: (pid) => pid === 222 });
+  assert.deepEqual(gone, ['guppy-file-job-old.exe', 'guppy-file-job-bbbbbbbbbbbb-111.exe']);
+  assert.doesNotThrow(() => R.pruneFileJobs('D', 'k', { readdir: () => { throw new Error('ENOENT'); } }), 'no folder: nothing to prune');
+  assert.doesNotThrow(() => R.pruneFileJobs('D', 'k', { readdir: () => ['guppy-file-job-x.exe'], remove: () => { throw new Error('EBUSY'); } }), 'one in use stays');
+});
+
+test('a strict run: GUPPY_FILE_JOB_STRICT=1, or the full suite unless GUPPY_FILE_JOB_STRICT=0', () => {
+  assert.equal(R.fileJobStrict({}, []), true, 'the full suite (what a gate runs)');
+  assert.equal(R.fileJobStrict({}, ['a']), false, 'a filtered run');
+  assert.equal(R.fileJobStrict({ GUPPY_FILE_JOB_STRICT: '1' }, ['a']), true);
+  assert.equal(R.fileJobStrict({ GUPPY_FILE_JOB_STRICT: '0' }, []), false);
+  assert.deepEqual(R.jobJoinFailures('{"file":"a","why":"x"}\n{"torn\n{"other":1}\n\n{"file":"b","why":"y"}\r\n'), [{ file: 'a', why: 'x' }, { file: 'b', why: 'y' }]);
+});
+
+test('FJ-d preload: a file whose join fails (the tool is gone) records one { file, why } row and hides the row file from its children', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fj-d-'));
+  try {
+    const fails = path.join(dir, 'ev.filejob');
+    const script = path.join(dir, 'f.cjs');
+    fs.writeFileSync(script, 'process.stdout.write(String(process.env.GUPPY_FILE_JOB_FAILS))');
+    const opt = `--require "${R.FILE_JOB_PRELOAD.split(path.sep).join('/')}"`;
+    const r = require('node:child_process').spawnSync(process.execPath, [script], { encoding: 'utf8', windowsHide: true, timeout: 60_000,
+      env: { ...process.env, NODE_TEST_CONTEXT: 'child', NODE_OPTIONS: opt, GUPPY_FILE_JOB_EXE: path.join(dir, 'gone', 'guppy-file-job-x.exe'), GUPPY_FILE_JOB_OPT: opt, GUPPY_FILE_JOB_FAILS: fails } });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, 'undefined', 'its children never append to the run\'s row file');
+    assert.match(r.stderr, /is not in a job of its own/);
+    const rows = R.jobJoinFailures(fs.readFileSync(fails, 'utf8'));
+    assert.equal(rows.length, 1, 'ONE JOB-JOIN-FAILED ROW');
+    assert.equal(rows[0].file, script);
+    assert.match(rows[0].why, /ENOENT/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('FJ-d runner: the summary counts job-join-failed rows, and a strict run with any FAILS', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fj-d-'));
+  try {
+    const go = ({ rows, env = {}, filters = ['a'], job = { exe: path.join(dir, 'gone.exe') } }) => {
+      const logs = []; const errs = []; let handed = null;
+      const code = R.run({ testDir: 'test', filters, readdir: () => ['a.test.cjs'], processEnv: { ...process.env, ...env }, jobRate: () => 0, eventsFile: path.join(dir, 'ev'),
+        spawn: (args, opts) => { handed = opts.env.GUPPY_FILE_JOB_FAILS; if (handed) for (let i = 0; i < rows; i++) fs.appendFileSync(handed, `${JSON.stringify({ file: `f${i}.test.cjs`, why: 'spawnSync gone.exe ENOENT' })}\n`); return { status: 0 }; },
+        log: (l) => logs.push(l), err: (l) => errs.push(l), timeoutMs: 5000, watchdog: () => ({ stop: () => {} }), fileJob: () => job });
+      return { code, logs, errs, handed };
+    };
+    const strict = go({ rows: 1, env: { GUPPY_FILE_JOB_STRICT: '1' } });
+    assert.equal(strict.code, 1, 'A STRICT RUN WITH A JOB-JOIN-FAILED ROW FAILS');
+    assert.ok(strict.logs.includes('[test-runner] file jobs: 1 job-join-failed (strict)'), strict.logs.join('\n'));
+    assert.ok(strict.errs.some((l) => l.startsWith('[test-runner] JOB JOIN FAILED: f0.test.cjs ran outside a job of its own (spawnSync gone.exe ENOENT)')), strict.errs.join('\n'));
+    assert.equal(strict.handed, path.join(dir, 'ev.filejob'));
+    assert.equal(fs.existsSync(strict.handed), false, 'the row file is removed');
+    assert.equal(go({ rows: 2 }).code, 0, 'a filtered run counts them but passes');
+    assert.ok(go({ rows: 2 }).logs.includes('[test-runner] file jobs: 2 job-join-failed'));
+    assert.equal(go({ rows: 1, filters: [] }).code, 1, 'the full suite is strict');
+    assert.equal(go({ rows: 1, filters: [], env: { GUPPY_FILE_JOB_STRICT: '0' } }).code, 0, 'waived');
+    assert.equal(go({ rows: 0, filters: [] }).code, 0, 'no row: passes');
+    assert.equal(go({ rows: 0, filters: [], job: { exe: null, why: 'no in-box csc at X' } }).code, 1, 'no tool on Windows in a strict run: FAILS');
+    assert.equal(go({ rows: 0, filters: [], job: { exe: null, why: 'not Windows' } }).code, 0, 'off Windows there is no job to join');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 // ── LIVE: the real tool, a file process and what it starts ────────────────────────────────
 
 const LIVE = { skip: process.platform !== 'win32' ? 'Windows only' : false, timeout: 180_000 };
@@ -94,6 +172,26 @@ test('LIVE: the in-box csc is on this box and builds the job tool (the fallback 
   assert.ok(fs.existsSync(CSC), `no in-box csc at ${CSC}`);
   const j = R.prepareFileJob();
   assert.ok(j.exe && fs.existsSync(j.exe), JSON.stringify(j));
+  assert.equal(path.dirname(j.exe), R.FILE_JOB_DIR, 'FJ-a: built in test/tools/bin');
+});
+
+test('LIVE FJ-b/FJ-c: CRLF and LF copies of the source name ONE exe, and a fresh build prunes the stale ones beside it only', LIVE, () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fj-bc-'));
+  try {
+    const lf = fs.readFileSync(path.join(__dirname, 'tools', 'file-job.cs'), 'utf8').replace(/\r\n/g, '\n');
+    fs.writeFileSync(path.join(dir, 'lf.cs'), lf);
+    fs.writeFileSync(path.join(dir, 'crlf.cs'), lf.replace(/\n/g, '\r\n'));
+    const bin = path.join(dir, 'bin');
+    fs.mkdirSync(bin);
+    for (const n of ['guppy-file-job-old.exe', 'keep.txt']) fs.writeFileSync(path.join(bin, n), 'x');
+    const a = R.prepareFileJob({ src: path.join(dir, 'lf.cs'), dir: bin });
+    assert.ok(a.exe && fs.existsSync(a.exe), JSON.stringify(a));
+    assert.equal(fs.existsSync(path.join(bin, 'guppy-file-job-old.exe')), false, 'FJ-c: THE STALE EXE IS PRUNED');
+    assert.ok(fs.existsSync(path.join(bin, 'keep.txt')), 'nothing else is touched');
+    const b = R.prepareFileJob({ src: path.join(dir, 'crlf.cs'), dir: bin });
+    assert.equal(b.exe, a.exe, 'FJ-b: ONE EXE FOR BOTH LINE ENDINGS');
+    assert.deepEqual(fs.readdirSync(bin).filter((n) => n.endsWith('.exe')), [path.basename(a.exe)]);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 // A test file's process, as node --test starts it: the preload joins its job; on "go" it starts
