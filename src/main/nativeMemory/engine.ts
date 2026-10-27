@@ -29,6 +29,26 @@ export const PRIORITY = { search: 0, wake: 1, status: 1, ingest: 2, backfill: 3,
  *  still put the END-TO-END p95 during a backfill at 304 ms (the shim's own start is ~110-150 ms),
  *  over the Human's 250 ms speed gate. A 1-chunk step is ~25 ms. */
 export const EMBED_BATCH = 1;
+/** CLAIMS-SYNC-SLICE-APPLY: a claims sync applies its new parts in slices of this many WHOLE claims,
+ *  each in its own queue step, so a search sees a wing's claims within seconds of its first sync
+ *  (a floor's first derived sync carries every derived claim: ~11.6k chunks, minutes of embedding,
+ *  during which the index used to hold none of them). Only for a wing with nothing to replace
+ *  (MUST-1: a wing whose markdown is still indexed keeps the all-at-once apply). */
+export const CLAIMS_APPLY_SLICE = 64;
+
+/** Group claim parts into slices of at most `size` whole claims, in order; a claim's parts never
+ *  split across slices (a multi-part claim is searchable whole or not at all). */
+export function sliceClaimParts<T extends { claimId: string }>(parts: readonly T[], size: number): T[][] {
+  const out: T[][] = [];
+  let cur: T[] = [];
+  let ids = new Set<string>();
+  for (const p of parts) {
+    if (!ids.has(p.claimId) && ids.size >= size) { out.push(cur); cur = []; ids = new Set(); }
+    cur.push(p); ids.add(p.claimId);
+  }
+  if (cur.length) out.push(cur);
+  return out;
+}
 /** A source changed on disk is ingested this long after its LAST change (spec: >= 2 s). */
 export const SOURCE_DEBOUNCE_MS = 2_000;
 /** Drop the model after this long without an embed (Jim R2: idle unload). */
@@ -476,12 +496,15 @@ export class MemoryEngine {
    *  claims are a source), so a claim never lands beside what it replaces. MUST-1: called in the
    *  queue step that applies the claims, so search sees the markdown or the claims, never neither. */
   private dropIneligible(wing: string, d: Discovery): number {
+    const gone = this.ineligibleSources(wing, d);
+    for (const p of gone) this.d.store.removeSource(p);
+    return gone.length;
+  }
+
+  /** The wing's indexed sources that are no longer eligible (its replaced markdown). */
+  private ineligibleSources(wing: string, d: Discovery): string[] {
     const keep = new Set(d.eligible.map((e) => e.path));
-    let n = 0;
-    for (const p of this.d.store.sourceShas().keys()) {
-      if (p.startsWith(`agents/${wing}/`) && !keep.has(p)) { this.d.store.removeSource(p); n++; }
-    }
-    return n;
+    return [...this.d.store.sourceShas().keys()].filter((p) => p.startsWith(`agents/${wing}/`) && !keep.has(p));
   }
 
   // — CLAIM-LEDGER (W3) —
@@ -507,19 +530,46 @@ export class MemoryEngine {
         const reembed = this.d.store.meta(claimEmbedVersionKey(a.wing)) !== String(CLAIM_EMBED_VERSION);
         return this.d.store.planClaims(a.wing, a.chunks, { reembed });
       });
-      const vectors: Float32Array[] = [];
-      for (let i = 0; i < plan.add.length; i += EMBED_BATCH) {
-        // The vector is the claim's text, never its `kind · key · date` header (claimEmbedText).
-        const batch = plan.add.slice(i, i + EMBED_BATCH).map((p) => claimEmbedText(p.content));
-        vectors.push(...await this.enqueue(PRIORITY.ingest, () => this.embed(batch)));
+      const embedAll = async (parts: ClaimPart[]): Promise<Float32Array[]> => {
+        const vectors: Float32Array[] = [];
+        for (let i = 0; i < parts.length; i += EMBED_BATCH) {
+          // The vector is the claim's text, never its `kind · key · date` header (claimEmbedText).
+          const batch = parts.slice(i, i + EMBED_BATCH).map((p) => claimEmbedText(p.content));
+          vectors.push(...await this.enqueue(PRIORITY.ingest, () => this.embed(batch)));
+        }
+        return vectors;
+      };
+      const meta = () => ({ head: a.head, nowMs: this.now(), manifestVersion: ALLOW_LIST_VERSION, embedVersion: CLAIM_EMBED_VERSION });
+      // CLAIMS-SYNC-SLICE-APPLY: a wing with nothing to replace applies in slices of whole claims (each
+      // its own transaction and queue step, searchable at once; a replaced claim's drop travels with
+      // its replacement). A wing whose markdown is still indexed applies all at once (MUST-1 below).
+      const slices = this.ineligibleSources(a.wing, d).length ? [plan.add] : sliceClaimParts(plan.add, CLAIMS_APPLY_SLICE);
+      if (slices.length <= 1) {
+        const vectors = await embedAll(plan.add);
+        // W3-1 (a) + MUST-1 (Jim): the replaced markdown leaves in the same queue step that applies the
+        // claims (not at plan time: searches run between the embeds and would see neither).
+        await this.enqueue(PRIORITY.ingest, async () => {
+          this.d.store.applyClaims(a.path, plan, vectors, meta());
+          this.dropIneligible(a.wing, this.discover());
+        });
+      } else {
+        const purged = new Set(plan.drop);
+        for (const slice of slices) {
+          const vectors = await embedAll(slice);
+          const ids = new Set(slice.map((p) => p.claimId));
+          const drop = plan.drop.filter((id) => ids.has(id));
+          for (const id of drop) purged.delete(id);
+          await this.enqueue(PRIORITY.ingest, async () => this.d.store.applyClaims(a.path, { wing: plan.wing, add: slice, drop, status: [], rooms: [] }, vectors, meta(), { partial: true }));
+        }
+        // The final step: purge drops, status and room changes, the head row, the embed-version meta
+        // and the markdown swap. A crash before it leaves no head: the next sync re-plans by content
+        // sha (planClaims never diffs by head) and embeds only what is missing.
+        await this.enqueue(PRIORITY.ingest, async () => {
+          this.d.store.applyClaims(a.path, { wing: plan.wing, add: [], drop: [...purged], status: plan.status, rooms: plan.rooms }, [], meta());
+          this.dropIneligible(a.wing, this.discover());
+        });
       }
-      // W3-1 (a) + MUST-1 (Jim): the replaced markdown leaves in the same queue step that applies the
-      // claims (not at plan time: searches run between the embeds and would see neither).
-      await this.enqueue(PRIORITY.ingest, async () => {
-        this.d.store.applyClaims(a.path, plan, vectors, { head: a.head, nowMs: this.now(), manifestVersion: ALLOW_LIST_VERSION, embedVersion: CLAIM_EMBED_VERSION });
-        this.dropIneligible(a.wing, this.discover());
-      });
-      this.d.log?.({ kind: 'claims-indexed', wing: a.wing, embedded: plan.add.length, dropped: plan.drop.length, statusChanges: plan.status.length, roomChanges: plan.rooms?.length ?? 0 });
+      this.d.log?.({ kind: 'claims-indexed', wing: a.wing, embedded: plan.add.length, dropped: plan.drop.length, statusChanges: plan.status.length, roomChanges: plan.rooms?.length ?? 0, slices: slices.length });
       return { embedded: plan.add.length, dropped: plan.drop.length, statusChanges: plan.status.length, roomChanges: plan.rooms?.length ?? 0 };
     }));
     this.claimSyncs.set(a.wing, run.catch(() => undefined));
