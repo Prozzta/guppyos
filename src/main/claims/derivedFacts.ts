@@ -243,12 +243,14 @@ export function mergedBranch(subject: string): string {
 }
 
 /** The line a merge commit's subject says it merged INTO ("Merge guppy/x-1 @abc into guppy/int-9.1.2
- *  stage 2", "int-9.1.2 stage 2: merge guppy/x-1"), or '' for none. */
+ *  stage 2", "int-9.1.2 stage 2: merge guppy/x-1"), or '' for none. Round 5 (god bfcff1): the whole
+ *  line name, to " stage", a "(" or the end ("into INT 9.9.9 stage 20" is the line "INT 9.9.9"), never
+ *  one token; the caller's card recogniser reads it. */
 export function mergedInto(subject: string): string {
-  const m = /^Merge\s.*?\binto\s+'?([^\s']+)'?/i.exec(subject);
-  if (m) return m[1];
-  const l = /^'?([^\s':]+)'?(?:\s+stage\s+\S+)?:\s+merge\s/i.exec(subject);
-  return l ? l[1] : '';
+  const m = /^Merge\s.*?\binto\s+'?(.+?)'?(?:\s+stage\b.*|\s*\(.*)?$/i.exec(subject);
+  if (m) return m[1].trim();
+  const l = /^'?([^':]+?)'?(?:\s+stage\s+\S+)?:\s+merge\s/i.exec(subject);
+  return l ? l[1].trim() : '';
 }
 
 /** A commit a done mail reports, resolved to the work it stands for (round 3). */
@@ -701,25 +703,45 @@ export interface MailLike { id?: unknown; from?: unknown; act?: unknown; subject
 
 const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+/** What a piece of text names: the known cards, and card-SHAPED tokens that are no known card. */
+export interface CardNames { cards: string[]; others: string[] }
+
+/** A token shaped like a card id that tasks.json does not know (an UPPER-KEBAB id such as a new card):
+ *  it names "some other card" (round 5, god bfcff1), never a known one. */
+const CARD_SHAPE_RE = /(?<![A-Za-z0-9./-])([A-Z][A-Z0-9]*(?:-[A-Z0-9]+(?:\.[0-9]+)*)+)(?![A-Za-z0-9-]|\.[A-Za-z0-9])/g;
+
 /**
- * Guide A12: a card id in text, case-insensitive, its dashes written as a dash, a space or nothing.
- * `exact`: only as written (case aside), the precision a done mail's card link needs (variants < 0.95).
+ * Guide A12, round 5 (god bfcff1): THE card-name recogniser, the one every rule reads (a commit subject,
+ * a merge's "into" line, a mail subject or body): a known card id, case-insensitive, its dashes written
+ * as a dash, a space or nothing ('INT 9.9.9', 'int-9.9.9', 'INT-9.9.9 stage 20'); the longest id wins and
+ * a partial id never matches. A card-shaped token that is no known id is an "other" card.
  */
-export function cardMatcher(cardIds: readonly string[], exact = false): (text: unknown) => string[] {
+export function cardNamer(cardIds: readonly string[]): (text: unknown) => CardNames {
   const ids = [...new Set(cardIds.filter((c) => typeof c === 'string' && c.length >= 2))].sort((a, b) => b.length - a.length);
-  if (ids.length === 0) return () => [];
-  const alt = ids.map((id) => (exact ? escapeRe(id) : escapeRe(id).replace(/-/g, '[- ]?'))).join('|');
-  const re = new RegExp(`(?<![A-Za-z0-9.-])(${alt})(?![A-Za-z0-9]|[.-][A-Za-z0-9])`, 'gi');
+  const alt = ids.map((id) => escapeRe(id).replace(/-/g, '[- ]?')).join('|');
+  const re = ids.length ? new RegExp(`(?<![A-Za-z0-9.-])(${alt})(?![A-Za-z0-9]|[.-][A-Za-z0-9])`, 'gi') : null;
   const canon = new Map(ids.map((id) => [id.toLowerCase().replace(/[- ]/g, ''), id]));
   return (text) => {
-    if (typeof text !== 'string' || !text) return [];
-    const found: string[] = [];
-    for (const m of text.matchAll(re)) {
-      const id = canon.get(m[1].toLowerCase().replace(/[- ]/g, ''));
-      if (id && !found.includes(id)) found.push(id);
+    if (typeof text !== 'string' || !text) return { cards: [], others: [] };
+    const cards: string[] = [];
+    let rest = text;
+    if (re) {
+      for (const m of text.matchAll(re)) {
+        const id = canon.get(m[1].toLowerCase().replace(/[- ]/g, ''));
+        if (id && !cards.includes(id)) cards.push(id);
+      }
+      rest = text.replace(re, ' ');
     }
-    return found;
+    const others: string[] = [];
+    for (const m of rest.matchAll(CARD_SHAPE_RE)) if (!canon.has(m[1].toLowerCase().replace(/[- ]/g, '')) && !others.includes(m[1])) others.push(m[1]);
+    return { cards, others };
   };
+}
+
+/** The known cards a text names (cardNamer's `cards`). */
+export function cardMatcher(cardIds: readonly string[]): (text: unknown) => string[] {
+  const namer = cardNamer(cardIds);
+  return (text) => namer(text).cards;
 }
 
 /** Why a done mail gave no done-sha fact (one row per mail; the counts sum them). */
@@ -770,7 +792,13 @@ const mailAt = (m: MailLike): string => iso(m.created_at) ?? '';
  * and bodyOnly are each what git confirmed. A mail copied to several inboxes counts once (by id).
  */
 export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonly string[], git: GitPort): Promise<DoneMailResult> {
-  const match = cardMatcher(cardIds, true);
+  // Round 5 (god bfcff1): one recogniser for every text (a mail subject or body, a commit subject, a
+  // merge's "into" line), variants included; a card-shaped unknown token names some other card.
+  const namer = cardNamer(cardIds);
+  const match = (text: unknown): string[] => namer(text).cards;
+  const namesOf = (e: ReportedCommit): CardNames => namer(e.into !== undefined ? e.into : e.text);
+  /** The cards other than `card` a commit names (known ids and card-shaped unknown tokens). */
+  const foreign = (e: ReportedCommit, card: string): string[] => { const n = namesOf(e); return [...n.cards.filter((c) => c !== card), ...n.others]; };
   const known = new Map(cardIds.map((c) => [c.toLowerCase(), c]));
   const skipped: Record<DoneSkipReason, number> = { notDone: 0, noShaWord: 0, noCommit: 0, noCard: 0, ambiguous: 0, bodyOnly: 0 };
   const skips: DoneSkip[] = [];
@@ -822,22 +850,24 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
       return (e) => !e || (e.into !== undefined ? own.has(e.commit) : !e.merge || (!(e.chain ?? []).some((c) => own.has(c)) && match(e.text).includes(card)));
     };
     // (C) The commits a row on `card` would carry: the subject's @shas, else the latest in git order.
+    // Round 5 (god bfcff1): a mail whose subject names @shas carries only those; when (B) drops them all
+    // (a merge into another line, a dropped self entry) the mail carries nothing, never a body sha.
     const carriedFor = async (card: string): Promise<ReportedCommit[]> => {
       const keep = keepFor(card);
       const atEntries = ats.filter((a) => a.entry && keep(a.entry)).map((a) => a.entry as ReportedCommit);
-      if (atEntries.length) return atEntries;
+      if (atEntries.length || ats.length) return atEntries;
       const kept = entries.filter(keep);
       const latest = await latestOfCommits(kept.map((e) => e.commit), git);
       return kept.filter((e) => e.commit === latest);
     };
-    const card = await cardOfDoneMail(m, known, match, entries, carriedFor);
+    const card = await cardOfDoneMail(m, known, match, foreign, entries, carriedFor);
     if (typeof card !== 'string') { skip(m.id, card.reason, card.cards); continue; }
     const key = cardKey(card, 'donesha');
     if (!key) { skip(m.id, 'noCard', [card]); continue; }
     const keep = keepFor(card);
     const kept = entries.filter(keep);
     const atsKept = ats.filter((a) => keep(a.entry));
-    if (!kept.length && !atsKept.length) { skip(m.id, 'noCommit', [card]); continue; }
+    if (ats.length ? !atsKept.length : !kept.length) { skip(m.id, 'noCommit', [card]); continue; }
     // Several subject @shas that git cannot order and no card name settles: no claim from this mail.
     const reported = await subjectTip(atsKept, card, git);
     if (reported === 'ambiguous') { skip(m.id, 'ambiguous', [card]); continue; }
@@ -846,6 +876,13 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
     const reportedFull = at ? (at.full ?? await git.commitOf(at.sha)) : null;
     const commit = reported ? (reportedFull ?? reported) : ((await latestOfCommits(kept.map((e) => e.commit), git)) ?? kept[0].commit);
     const entry = at ? at.entry : kept.find((e) => e.commit === commit);
+    // Round 5 (god bfcff1): the carried commit counts or the row is skipped. Without a card field, a
+    // carried commit that names only other cards (a refused link that another listed commit confirmed,
+    // a subject card confirmed by a different commit) is never the value: no fallback to it.
+    if (entry && !(typeof m.card === 'string' && known.has(m.card.toLowerCase()))) {
+      const f = foreign(entry, card);
+      if (f.length && !namesOf(entry).cards.includes(card)) { skip(m.id, 'ambiguous', [card, ...f].slice(0, 8)); continue; }
+    }
     const via = entry?.merge;
     const from = typeof m.from === 'string' && m.from ? clip(m.from, 60) : 'unknown';
     withCommit++;
@@ -871,26 +908,28 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
 
 /** The done mail's card (see doneMailFacts), or why there is none. */
 async function cardOfDoneMail(
-  m: MailLike, known: Map<string, string>, match: (text: unknown) => string[], entries: readonly ReportedCommit[],
-  carriedFor: (card: string) => Promise<readonly ReportedCommit[]>,
+  m: MailLike, known: Map<string, string>, match: (text: unknown) => string[], foreign: (e: ReportedCommit, card: string) => string[],
+  entries: readonly ReportedCommit[], carriedFor: (card: string) => Promise<readonly ReportedCommit[]>,
 ): Promise<string | { reason: 'noCard' | 'ambiguous' | 'bodyOnly'; cards?: string[] }> {
   const field = typeof m.card === 'string' ? known.get(m.card.toLowerCase()) : undefined;
   if (field) return field;
   const linked = Array.isArray(m.cards)
     ? [...new Set(m.cards.map((c) => (typeof c === 'string' ? known.get(c.toLowerCase()) : undefined)).filter((c): c is string => !!c))]
     : [];
-  // `match` takes exact card ids only: a spelling variant (a space for a dash) never links (god
-  // c33130, c19239: variant precision < 0.95). A single inherited link (reply/conversation) that the
-  // subject does not contradict is the card. Anything else, a card the subject names included, is
-  // weak (spec F; Jim's gate M-a: "U6 included" in a subject made card.u6): a candidate only, and
-  // only git confirms it (CLAIMS-WEAKLINK-DONESHA).
+  // `match` is the one recogniser (round 5, god bfcff1: variants included, replacing the exact-only
+  // link of god c33130/c19239). A single inherited link (reply/conversation) that the subject does not
+  // contradict is the card. Anything else, a card the subject names included, is weak (spec F; Jim's
+  // gate M-a: "U6 included" in a subject made card.u6): a candidate only, and only git confirms it
+  // (CLAIMS-WEAKLINK-DONESHA).
   const exact = match(m.subject);
   // Round 3 (C): the link counts only when the commit the row would carry names no different card (a
-  // commit naming no card still counts; a merge of another card's branch names that card). The other
-  // shas the mail lists are not judged. A refused link is weak: it joins the subject's cards below.
+  // commit naming no card still counts; a merge of another card's branch names that card; round 5: a
+  // card-shaped token that is no known card is a different card). The other shas the mail lists are
+  // not judged. A refused link is weak: it joins the subject's cards below, and the caller skips the
+  // row when the carried commit does not count for the card git confirms.
   let refused: string[] | undefined;
   if (linked.length === 1 && (!exact.length || exact.includes(linked[0]))) {
-    const others = [...new Set((await carriedFor(linked[0])).flatMap((e) => match(e.text)).filter((c) => c !== linked[0]))];
+    const others = [...new Set((await carriedFor(linked[0])).flatMap((e) => foreign(e, linked[0])))];
     if (!others.length) return linked[0];
     refused = [linked[0], ...others];
   }

@@ -12,8 +12,14 @@ import { dirname, join } from 'node:path';
 import type { DoneMailResult, MailLike } from './derivedFacts';
 
 export const DONE_MAIL_STATUS_FILE = join('state', 'derived-done-mails.json');
+/** A record larger than this is not parsed: the reader treats it as absent (fail safe, round 5 god 5c9b37). */
+export const DONE_MAIL_STATUS_MAX_BYTES = 4 * 1024 * 1024;
 
 export type DoneMailStatus = 'fact' | 'older' | string;
+
+/** The verdicts the derived layer writes; `memory get`'s mail rule honours no other word. */
+export const DONE_MAIL_VERDICTS: ReadonlySet<string> = new Set(['fact', 'older', 'notDone', 'noShaWord', 'noCommit', 'noCard', 'ambiguous', 'bodyOnly']);
+export const isDoneMailVerdict = (s: unknown): boolean => typeof s === 'string' && DONE_MAIL_VERDICTS.has(s);
 
 /** The status of every mail in `mails` after a doneMailFacts run over exactly those mails. */
 export function doneMailStatuses(mails: readonly MailLike[], done: DoneMailResult): Record<string, DoneMailStatus> {
@@ -30,6 +36,7 @@ export function doneMailStatuses(mails: readonly MailLike[], done: DoneMailResul
 
 function readAll(file: string): Record<string, DoneMailStatus> {
   try {
+    if (statSync(file).size > DONE_MAIL_STATUS_MAX_BYTES) return {};
     const doc = JSON.parse(readFileSync(file, 'utf8')) as unknown;
     if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return {};
     const out: Record<string, DoneMailStatus> = {};
@@ -56,7 +63,7 @@ export function readDoneMailStatus(hiveRoot: string): (mailId: string) => DoneMa
   let map: Record<string, DoneMailStatus> = {};
   return (mailId) => {
     let now: string;
-    try { const s = statSync(file); now = `${s.mtimeMs}:${s.size}`; } catch { now = 'none'; }
+    try { const s = statSync(file); now = s.size > DONE_MAIL_STATUS_MAX_BYTES ? 'none' : `${s.mtimeMs}:${s.size}`; } catch { now = 'none'; }
     if (now !== sig) { sig = now; map = now === 'none' ? {} : readAll(file); }
     return Object.prototype.hasOwnProperty.call(map, mailId) ? map[mailId] : null;
   };

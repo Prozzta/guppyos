@@ -26,6 +26,7 @@ import type { ClaimRec, ClaimsState, EventRec, KeyRegistry, LedgerRec, Reconcile
 import { derive } from './derive';
 import { keysMayAlias } from './reconcile';
 import { hideStale } from './stale';
+import { isDoneMailVerdict } from './derivedDoneStatus';
 
 export interface GetDeps {
   /** Verified records per agent id, append order (main: verifiedPrefix(readLedger); the tool: the raw lines). */
@@ -521,7 +522,8 @@ function resolveIn(ix: Indexed, term: string, opts: GetOptions, d: GetDeps, with
         // before the derived layer reaches a done mail. A mail it has processed has either given a claim (the
         // claim is the current) or been refused (another card's merge, an ambiguous link): its sha is never
         // the current by itself.
-        const reached = (m: ParsedMail): boolean => doneOnly && !!d.doneMailStatus && d.doneMailStatus(m.id) !== null;
+        // Round 5 (god 5c9b37): only a verdict from the known set counts; any other word is ignored.
+        const reached = (m: ParsedMail): boolean => doneOnly && !!d.doneMailStatus && isDoneMailVerdict(d.doneMailStatus(m.id));
         const candidates = pageMails(rows, rows.length, null).page
           .filter((m) => mailKey && (!doneOnly || m.act === 'done') && (!agent || m.from === agent) && m.body !== undefined && trustedLink(m.cardFrom) && !reached(m))
           .map((m) => ({ m, ms: epochMs(m.created_at) || epochMs(m.id) }))
