@@ -40,6 +40,8 @@ const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
 const DERIVED_DIR = 'derived'; // DERIVED_AGENT_ID (src/shared/claims.ts): the derived ledger's agent folder and anchor key
 const MAX_CALLS = 5;
 const ITEM_TIMEOUT_MS = 10 * 60_000;
+/** god ba807e: the preflight serve child's first full sync (claimsSyncDeadlineMs for 11,639 chunks is about 31 min). */
+const PREFLIGHT_SYNC_MS = 45 * 60_000;
 const INSTALLED_APP = path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Munder Difflin', 'Guppy');
 
 /** The serve child's environment: the drill allow-list, plus C90_HIDE_STALE when --hide-stale names it (step 3 arms). */
@@ -466,6 +468,51 @@ function servedStateProblem(ledgers, cardGet) {
   return null;
 }
 
+/**
+ * god ba807e: the index sync a serve child reports (ClaimsIndexSync.syncAll, one row per ledger). Every ledger it
+ * sent must reply ok (a timeout is not ok) with 0 dropped; on an item, which is served the preflight's synced
+ * index, it must also embed 0. The first problem, or null.
+ */
+function syncProblem(synced, { embedNone }) {
+  if (!Array.isArray(synced)) return 'the serve child reported no index sync';
+  for (const [i, s] of synced.entries()) {
+    if (!s?.sent) continue;
+    const j = s.reply?.json;
+    if (!s.reply?.ok) return `sync ${i + 1} (${s.records} records): ${String(s.reply?.error ?? 'failed').slice(0, 160)}`;
+    if (j?.dropped !== 0) return `sync ${i + 1} (${s.records} records) dropped ${j?.dropped}`;
+    if (embedNone && j?.embedded !== 0) return `sync ${i + 1} (${s.records} records) embedded ${j?.embedded}`;
+  }
+  return null;
+}
+
+/** god ba807e: the preflight's index must be whole before it is served: read, no WAL left, a vector for every chunk. */
+function indexProblem(d) {
+  if (!d) return 'the serve child left no index';
+  if (d.error) return `the index could not be read: ${d.error}`;
+  if (d.walBytes !== 0) return `the index has ${d.walBytes} WAL bytes after shutdown`;
+  if (!(d.chunks > 0) || d.vectors !== d.chunks) return `the index has ${d.vectors} vectors for ${d.chunks} chunks`;
+  return null;
+}
+
+/** One row per ledger the sync sent: records, chunks, ok, embedded, dropped (and the error of a failed one). */
+const syncRows = (synced) => (Array.isArray(synced) ? synced.map((s) => (s?.sent
+  ? { records: s.records, chunks: s.chunks, ok: !!s.reply?.ok, embedded: s.reply?.json?.embedded ?? null, dropped: s.reply?.json?.dropped ?? null, ...(s.reply?.ok ? {} : { error: String(s.reply?.error ?? '').slice(0, 160) }) }
+  : { sent: false, why: s?.why ?? null })) : null);
+
+/** The JSON rows of a .jsonl file the runner or a child wrote ([] when there is none). */
+const readRows = (file) => (fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
+
+/** The index by content (the per-wing chunk counts, the vector count and the chunk-identity sha), for equality. */
+const indexKey = (d) => (d && !d.error ? JSON.stringify({ perWing: d.perWing, vectors: d.vectors, chunkSha256: d.chunkSha256 }) : null);
+
+/** The preflight's index into an item's freshly staged sandbox, under the item's hive id; any WAL of the staged copy goes. */
+function serveIndex(index, userData, hiveIdOfItem) {
+  const p = path.join(userData, 'memory', `${hiveIdOfItem}-v2.sqlite`);
+  for (const f of [`${p}-wal`, `${p}-shm`]) fs.rmSync(f, { force: true });
+  fs.writeFileSync(p, index.buf);
+  return sha256(fs.readFileSync(p));
+}
+
 /** Jim 4370f6 run guard: the calls of one item that the build did not answer (serve log, and what the transcript shows). */
 function unavailableOf(memCalls, transcriptCalls) {
   return {
@@ -565,10 +612,12 @@ async function preflight(o, v, addDir, key, asker, outDir) {
     const server = spawn(R.electronOf(o.tree), [path.join(__dirname, 'answer-child.cjs'), specFile], { cwd: o.tree, env: serveEnv(o, home), windowsHide: true, stdio: ['pipe', 'ignore', 'pipe'] });
     let serverErr = '';
     server.stderr.on('data', (d) => { if (serverErr.length < 20000) serverErr += d; });
-    const serverClosed = closeOf(server, 10 * 60_000);
+    // god ba807e: this child embeds the derived ledger in full before it comes up (claimsSyncDeadlineMs scales with
+    // the chunks, about 31 min for 11,639), so its wait covers that.
+    const serverClosed = closeOf(server, PREFLIGHT_SYNC_MS + 15 * 60_000);
     server.stdin.end(`${key}\n`);
     try {
-      if (!(await waitFor(serve.connectFile, 5 * 60_000))) return { ok: false, reason: `the serve child did not come up: ${serverErr.slice(0, 300)}`, calls };
+      if (!(await waitFor(serve.connectFile, PREFLIGHT_SYNC_MS))) return { ok: false, reason: `the serve child did not come up: ${serverErr.slice(0, 300)}`, calls };
       const connect = JSON.parse(fs.readFileSync(serve.connectFile, 'utf8'));
       const p = connect.probe;
       if (!p) return { ok: false, reason: 'no keyed claim in the snapshot to probe get and history with', calls, served };
@@ -586,6 +635,14 @@ async function preflight(o, v, addDir, key, asker, outDir) {
       fs.writeFileSync(serve.stopFile, '');
       await serverClosed;
     }
+    // god ba807e: this child synced every ledger into the index (the derived one in full) and shut its worker
+    // down; that index file is served to every item, as a real floor's index already holds the derived claims.
+    const summary = readRows(path.join(dir, 'serve.jsonl')).find((r) => r.summary)?.summary ?? null;
+    const idxFile = path.join(userData, 'memory', `${hiveId.to}-v2.sqlite`);
+    const indexBuf = fs.existsSync(idxFile) ? fs.readFileSync(idxFile) : null;
+    served.index = { sha256: indexBuf ? sha256(indexBuf) : null, digest: summary?.index ?? null, sync: syncRows(summary?.synced) };
+    calls.push({ cmd: 'index sync', problem: syncProblem(summary?.synced, { embedNone: false }) ?? indexProblem(summary?.index) ?? (indexBuf ? null : 'no index file') });
+    if (indexBuf) servedState.index = { buf: indexBuf, sha256: served.index.sha256 };
     // god 3164a1: one tiny claude -p from a sandbox cwd proves the session folder is the one the guard
     // names (it must appear) and that the guard moves it out (none may remain).
     probe = await claudeProbe(o, home);
@@ -669,6 +726,10 @@ async function answerItem(o, v, addDir, item, key, shape, instruction, outDir, p
     // god b6624e fix 1: the preflight's served state (mail index, derived ledger and its anchor), byte for byte.
     row.servedSha256 = applyServed(pre.servedState, hive, userData, hiveId.to);
     if (row.servedSha256 !== pre.served.sha256) throw new Error(`the served state differs from the preflight's (${row.servedSha256})`);
+    // god ba807e: and the preflight's synced index, so this child's sync finds every claim embedded already.
+    if (!pre.servedState.index) throw new Error('the preflight served no index');
+    row.indexServedSha256 = serveIndex(pre.servedState.index, userData, hiveId.to);
+    if (row.indexServedSha256 !== pre.served.index.sha256) throw new Error(`the served index differs from the preflight's (${row.indexServedSha256})`);
     const queueFile = path.join(hive, 'claims-reconcile-queue.json');
     row.stateSha256 = fs.existsSync(queueFile) ? sha256(fs.readFileSync(queueFile)) : null;
     const world = path.join(home, 'world.json');
@@ -748,6 +809,11 @@ async function answerItem(o, v, addDir, item, key, shape, instruction, outDir, p
     else if (row.unavailable.serve || row.unavailable.transcript) row.invalid = `a memory verb was not answered (serve ${row.unavailable.serve}, transcript ${row.unavailable.transcript})`;
     else if (row.exit !== 0 || !t.result || t.result.isError) row.invalid = `session failed (exit ${row.exit}): ${ccErr.slice(0, 200)}`;
     else if (!row.serve.ok) row.invalid = `serve: ${row.serve.reason}`;
+    row.sync = syncRows(row.serve.synced);
+    row.indexAfter = row.serve.index ?? null;
+    const syncBad = syncProblem(row.serve.synced, { embedNone: true });
+    if (!row.invalid && syncBad) row.invalid = `index sync: ${syncBad}`;
+    else if (!row.invalid && indexKey(row.indexAfter) !== indexKey(pre.served.index.digest)) row.invalid = 'the index after the session differs from the served one';
     const idx = path.join(userData, 'memory', `${hiveId.to}-v2.sqlite`);
     row.indexAfterSha256 = fs.existsSync(idx) ? sha256(fs.readFileSync(idx)) : null;
     return row;
@@ -855,4 +921,4 @@ if (require.main === module) {
   }, (e) => { console.error(`[claims-90] ${e.stack || e.message}`); process.exitCode = 2; });
 }
 
-module.exports = { projectSlug, claudeProjectsDir, leftoverPrefixes, sessionFolderOut, leftoversIn, LEFTOVER_PREFIX, preflightProblem, firstIndexedCard, servedStateProblem, treeShas, prepareServed, captureServed, applyServed, servedSha, servedNumbers, ownSpillRead,unavailableOf, parseArgs, parseItems, installedHookShape, hookShapeOf, buildHookShape, buildInfo, buildMemoryShim, condenseOf, settingsFor, childEnv, readTranscript, styleDeviation, itemStyle, memoryMdUse, main };
+module.exports = { projectSlug, claudeProjectsDir, leftoverPrefixes, sessionFolderOut, leftoversIn, LEFTOVER_PREFIX, preflightProblem, firstIndexedCard, servedStateProblem, treeShas, prepareServed, captureServed, applyServed, servedSha, servedNumbers, syncProblem, indexProblem, indexKey, serveIndex, syncRows, ownSpillRead,unavailableOf, parseArgs, parseItems, installedHookShape, hookShapeOf, buildHookShape, buildInfo, buildMemoryShim, condenseOf, settingsFor, childEnv, readTranscript, styleDeviation, itemStyle, memoryMdUse, main };
