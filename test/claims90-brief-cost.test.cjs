@@ -29,6 +29,7 @@ const loadTs = require('./load-ts.cjs');
 const { ClaimStore } = loadTs('src/main/claims/store.ts');
 const { SandboxKeyProvider, FileLedgerKeyRecord, FileHeadAnchorStore, KEY_RECORD_FILE, HEAD_ANCHOR_FILE } = loadTs('src/main/claims/keyProvider.ts');
 const { claimCardLeadOver, claimGetOver } = loadTs('src/main/claims/readWiring.ts');
+const { DEFAULT_KEY_REGISTRY, saveRegistry } = loadTs('src/main/claims/registry.ts');
 
 let n = 0;
 function hive() {
@@ -90,6 +91,33 @@ test('STORE: a break readLedger finds while the files are byte-for-byte unchange
   assert.notEqual(store.readLedgerCached('andy').chain, 'ok', 'the kept ok read was dropped');
 });
 
+test('STORE: a broken or torn read is never kept: once the break is mended with the files unchanged, the next ask is ok (MUTANT: every read kept)', async () => {
+  const root = hive(); const ud = `${root}-ud`;
+  const keys = new SandboxKeyProvider();
+  const anchors = new FileHeadAnchorStore(path.join(ud, HEAD_ANCHOR_FILE));
+  const mk = () => { const s = new ClaimStore({ hiveRoot: root, keys, keyRecord: new FileLedgerKeyRecord(path.join(ud, KEY_RECORD_FILE)), headAnchor: anchors }); STORES.push(s); return s; };
+  const w = mk();
+  await ok(w.appendRecord('andy', note('a fact'), 'endpoint'));
+  w.close();
+  const store = mk();
+  const good = anchors.get(root, 'andy');
+  assert.ok(good, 'the writer anchored its head');
+  anchors.set(root, 'andy', { head: 'f'.repeat(64), lastId: 'c-000000000000' });
+  assert.notEqual(store.readLedgerCached('andy').chain, 'ok', 'cut anchor: broken');
+  anchors.set(root, 'andy', good);
+  assert.equal(store.readLedgerCached('andy').chain, 'ok', 'anchor mended, segments byte-identical: the broken read was not served again');
+  // Torn: a half-written tail line, then the files put back byte-for-byte.
+  const dir = path.join(root, 'agents', 'andy', 'memory', 'claims');
+  const seg = path.join(dir, fs.readdirSync(dir).sort().pop());
+  const whole = fs.readFileSync(seg);
+  fs.appendFileSync(seg, '{"t":"claim","id":"c-half');
+  assert.ok(store.readLedgerCached('andy').torn, 'a torn tail is reported');
+  fs.writeFileSync(seg, whole);
+  const after = store.readLedgerCached('andy');
+  assert.equal(after.chain, 'ok');
+  assert.ok(!after.torn, 'the tail completed (cut back here): the torn read was not served again');
+});
+
 // Wiring fixtures: a stub store whose records arrays the test controls (the same array while "unchanged").
 const BUMP1 = '57ae9b25' + 'a'.repeat(32);
 const BUMP2 = '0badf00d' + 'b'.repeat(32);
@@ -129,4 +157,20 @@ test('WIRING: a warm brief touches no ledger record; a changed records array or 
   tasks = [...tasks, { id: 'MAIL-STUCK-9', status: 'done' }];
   const r = claimCardLeadOver(d, { cards: [], texts: ['q', 'MAIL-STUCK-9 was merged'] });
   assert.deepEqual(r.pointed, ['mail-stuck-9'], 'a changed task list rebuilds the target index (MUTANT: tasks left out of the kept signature)');
+});
+
+test('WIRING: a registry change with the ledgers unchanged re-derives (MUTANT: the kept derive served across a registry change)', () => {
+  const root = hive();
+  const owner = (id, at, who) => ({ t: 'claim', id, at, wt: at, agent: 'derived', kind: 'fact', key: 'card.foo-7.owner', text: `FOO-7 owner is ${who}`, source: 'derived' });
+  const recs = [owner('c_000000000001', '2026-10-17T10:00:00.000Z', 'alpha'), owner('c_000000000002', '2026-10-18T10:00:00.000Z', 'beta')];
+  const store = { readLedger: () => ({ records: recs, torn: null, chain: 'ok' }), readLedgerCached: () => ({ records: recs, torn: null, chain: 'ok' }) };
+  const d = { root, store, agents: () => ['derived'], tasks: () => [{ id: 'FOO-7', status: 'doing' }] };
+  const q = { term: 'card.foo-7.owner' };
+  assert.match(claimGetOver(d, q).text, /competing: 1 other live value/, 'card.* is multi: both owners live');
+  const reg = structuredClone(DEFAULT_KEY_REGISTRY);
+  reg.keys['card.foo-7.owner'] = { cardinality: 'single' };
+  saveRegistry(root, reg);
+  const t = claimGetOver(d, q).text;
+  assert.match(t, /superseded: 1 replaced value/, 'single now: the older owner is superseded (same records array)');
+  assert.doesNotMatch(t, /competing:/);
 });
