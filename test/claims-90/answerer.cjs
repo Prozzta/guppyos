@@ -37,6 +37,7 @@ const { UNAVAILABLE_RE } = require('./claims-deps.cjs');
 
 const REPO = path.resolve(__dirname, '..', '..');
 const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
+const DERIVED_DIR = 'derived'; // DERIVED_AGENT_ID (src/shared/claims.ts): the derived ledger's agent folder and anchor key
 const MAX_CALLS = 5;
 const ITEM_TIMEOUT_MS = 10 * 60_000;
 const INSTALLED_APP = path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Munder Difflin', 'Guppy');
@@ -168,7 +169,7 @@ function buildMemoryShim(binDir, build) {
 
 const fwd = (p) => p.replace(/\\/g, '/');
 
-function settingsFor(shape, hookUrl, briefingFile, toolOutputDir, sandboxHive) {
+function settingsFor(shape, hookUrl, briefingFile, toolOutputDir, sandboxHive, spillDir = null) {
   const http = { matcher: shape.matcher, hooks: [{ type: 'http', url: hookUrl, timeout: shape.timeout }] };
   const hooks = {};
   for (const e of shape.events) hooks[e] = [http];
@@ -179,7 +180,9 @@ function settingsFor(shape, hookUrl, briefingFile, toolOutputDir, sandboxHive) {
     permissions: {
       allow: ['Bash(memory:*)', `Read(//${fwd(toolOutputDir).replace(/^([A-Za-z]):/, (_, d) => d.toLowerCase())}/**)`,
         // C0b (god 21:21): the claim-history pointer, on the T_s copy; the hook rewrites a live path to it.
-        ...(sandboxHive ? [`Read(//${fwd(sandboxHive).replace(/^([A-Za-z]):/, (_, d) => d.toLowerCase())}/agents/*/memory.md)`] : [])],
+        ...(sandboxHive ? [`Read(//${fwd(sandboxHive).replace(/^([A-Za-z]):/, (_, d) => d.toLowerCase())}/agents/*/memory.md)`] : []),
+        // Jim 99a1d4 fix 3: the CLI's own spills, as live agents read theirs; readTranscript holds it to this session's id.
+        ...(spillDir ? [`Read(//${fwd(spillDir).replace(/^([A-Za-z]):/, (_, d) => d.toLowerCase())}/*/tool-results/**)`] : [])],
       deny: [
         // A deny rule is matched on the path the model typed, before any PreToolUse hook runs (probed on CLI
         // 2.1.310), so a Read deny on the live hive would refuse the memory.md Read the hook rewrites. With a
@@ -256,8 +259,24 @@ function memoryMdUse(calls = [], answer = null, sandboxHive = null) {
 
 const filesIn = (dir) => { try { return dir ? fs.readdirSync(dir, { recursive: true }).length : 0; } catch { return 0; } };
 
+/**
+ * Jim 99a1d4 fix 3, bfa9cd: a Read of the session's OWN CLI spill is allowed, as live agents read theirs:
+ * <projects>/<slug of the sandbox cwd>/<session id of the transcript's init event>/tool-results/<one file>,
+ * a plain file written before the session ended. Another session id, a lookalike or prefix, '..', a file
+ * outside tool-results or one written after the end is not.
+ */
+function ownSpillRead(file, spill, sessionId) {
+  if (!spill || !sessionId || typeof file !== 'string') return false;
+  const dir = `${fwd(path.join(spill.projects, projectSlug(spill.cwd), sessionId, 'tool-results'))}/`;
+  const f = fwd(file);
+  if (!f.toLowerCase().startsWith(dir.toLowerCase())) return false;
+  const name = f.slice(dir.length);
+  if (!name || name.includes('/')) return false;
+  try { const st = fs.lstatSync(file); return st.isFile() && st.mtimeMs <= spill.endedMs; } catch { return false; }
+}
+
 /** What the session did, from its stream-json transcript. Text stays local; the row holds counts. */
-function readTranscript(file, allowedRead, liveRes, memoryMd = null) {
+function readTranscript(file, allowedRead, liveRes, memoryMd = null, spill = null) {
   const rows = fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } }) : [];
   const init = rows.find((r) => r.type === 'system' && r.subtype === 'init') || null;
   const result = rows.find((r) => r.type === 'result') || null;
@@ -285,7 +304,7 @@ function readTranscript(file, allowedRead, liveRes, memoryMd = null) {
     }
     const s = JSON.stringify(u.input);
     for (const re of liveRes) if (re.test(s)) leaks.push({ tool: u.name, id: u.id, pattern: String(re) });
-    if (u.name === 'Read' && !String(u.input?.file_path || '').replace(/\\/g, '/').toLowerCase().startsWith(allowedRead.toLowerCase())) leaks.push({ tool: 'Read', id: u.id, pattern: 'outside the tool-output folder' });
+    if (u.name === 'Read' && !String(u.input?.file_path || '').replace(/\\/g, '/').toLowerCase().startsWith(allowedRead.toLowerCase()) && !ownSpillRead(u.input?.file_path, spill, init?.session_id)) leaks.push({ tool: 'Read', id: u.id, pattern: 'outside the tool-output folder' });
   }
   return {
     init: init ? {
@@ -323,6 +342,127 @@ function preflightProblem(r) {
   if (r.code !== 0) return `exit ${r.code}`;
   if (UNAVAILABLE_RE.test(`${r.stdout}\n${r.stderr}`)) return 'the build does not answer it';
   if (!r.stdout.trim()) return 'an empty reply';
+  return null;
+}
+
+/** The first card of the served state's mail index (state/mail-cards), or null when it has none. */
+function firstIndexedCard(hive) {
+  const dir = path.join(hive, 'state', 'mail-cards');
+  let names = [];
+  try { names = fs.readdirSync(dir).filter((n) => n.endsWith('.jsonl') && !n.startsWith('_')).sort(); } catch { return null; }
+  for (const n of names) {
+    for (const l of fs.readFileSync(path.join(dir, n), 'utf8').split('\n')) {
+      try { const c = JSON.parse(l).card; if (typeof c === 'string' && c) return c; } catch { /* a torn line */ }
+    }
+  }
+  return null;
+}
+
+/** sha256 of every file under dir, by forward-slash relative path. */
+function treeShas(dir) {
+  const out = {};
+  for (const rel of fs.readdirSync(dir, { recursive: true })) {
+    const abs = path.join(dir, rel);
+    const st = fs.lstatSync(abs);
+    if (st.isSymbolicLink()) throw new Error(`a link in the served state: ${rel}`);
+    if (st.isFile()) out[String(rel).replace(/\\/g, '/')] = sha256(fs.readFileSync(abs));
+  }
+  return out;
+}
+
+/**
+ * god b6624e (step 3 fix 1): what the preflight child's served-state build needs. The derived writer's repo
+ * is a mirror of the T_s bundle and its changelog is the CHANGELOG.md of the bundle's newest version tag (the
+ * rule of scripts/claims-derived-backfill.cjs, which built the gate jail; the bundle has no HEAD), so nothing
+ * after T_s enters (the tree under test is newer than T_s).
+ */
+function prepareServed(addDir, home) {
+  const repo = path.join(home, 'served-repo.git');
+  const git = (args) => require('node:child_process').execFileSync('git', args, { encoding: 'utf8', windowsHide: true, maxBuffer: 1 << 28, stdio: ['ignore', 'pipe', 'pipe'], env: { SystemRoot: process.env.SystemRoot, PATH: process.env.PATH, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: path.join(home, 'no-global-config'), GIT_TERMINAL_PROMPT: '0' } });
+  git(['clone', '--quiet', '--mirror', path.join(addDir, 'repo-at-ts.bundle'), repo]);
+  const tag = newestVersionTag(git(['--git-dir', repo, 'for-each-ref', '--format=%(refname:short)', 'refs/tags']).split('\n').filter(Boolean));
+  let changelog = '';
+  if (tag) try { changelog = git(['--git-dir', repo, 'show', `${tag}:CHANGELOG.md`]); } catch { /* no changelog in that tag */ }
+  const changelogFile = path.join(home, 'served-changelog.md');
+  fs.writeFileSync(changelogFile, changelog);
+  return { repo, changelogFile, changelogTag: tag };
+}
+
+/** scripts/claims-derived-backfill.cjs `newest`: the highest v?N.N[.N[.N]] tag name, or null. */
+function newestVersionTag(names) {
+  return names
+    .map((n) => ({ n, v: (/^v?(\d+(?:\.\d+){1,3})$/.exec(n) || [])[1] }))
+    .filter((x) => x.v)
+    .sort((a, b) => { const x = a.v.split('.').map(Number); const y = b.v.split('.').map(Number); for (let i = 0; i < 4; i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d; } return 0; })
+    .pop()?.n ?? null;
+}
+
+/**
+ * The served state the preflight child built: every hive file it added or changed (byte copies) and every
+ * head anchor it set (keyed by the preflight sandbox's hive id). Taken when the child is up, before any call.
+ */
+function captureServed(hive, userData, baseline, hiveIdOfPre) {
+  const now = treeShas(hive);
+  const changed = Object.keys(now).filter((rel) => baseline.hive[rel] !== now[rel]).sort();
+  // Only what the build writes is served: the mail index and the derived ledger (and its anchor). Any other
+  // write the child made by then is reported (servedNumbers().other) and not copied.
+  const ours = (rel) => rel.startsWith('state/mail-cards/') || rel.startsWith(`agents/${DERIVED_DIR}/`);
+  const files = changed.filter(ours).map((rel) => ({ rel, sha256: now[rel], buf: fs.readFileSync(path.join(hive, rel)) }));
+  const other = changed.filter((rel) => !ours(rel)).map((rel) => ({ path: rel, sha256: now[rel] }));
+  const removed = Object.keys(baseline.hive).filter((rel) => !(rel in now));
+  const heads = JSON.parse(fs.readFileSync(path.join(userData, 'claims-heads.json'), 'utf8')).hives?.[hiveIdOfPre] ?? {};
+  const anchors = heads[DERIVED_DIR] && JSON.stringify(baseline.heads[DERIVED_DIR] ?? null) !== JSON.stringify(heads[DERIVED_DIR]) ? { [DERIVED_DIR]: heads[DERIVED_DIR] } : {};
+  return { files, other, removed, anchors };
+}
+
+/** Copy the served state into an item's freshly staged sandbox (anchors re-keyed to its hive id). */
+function applyServed(served, hive, userData, hiveIdOfItem) {
+  for (const f of served.files) { const p = path.join(hive, f.rel); fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, f.buf); }
+  const hp = path.join(userData, 'claims-heads.json');
+  const j = JSON.parse(fs.readFileSync(hp, 'utf8'));
+  j.hives = j.hives ?? {};
+  j.hives[hiveIdOfItem] = { ...(j.hives[hiveIdOfItem] ?? {}), ...served.anchors };
+  fs.writeFileSync(hp, JSON.stringify(j, null, 2));
+  return servedSha(hive, served);
+}
+
+/** One sha over the served files as they are in a sandbox (the item check: equal to the preflight's). */
+function servedSha(hive, served) {
+  const h = crypto.createHash('sha256');
+  for (const f of served.files) h.update(`${f.rel}\0`).update(fs.readFileSync(path.join(hive, f.rel)));
+  return h.digest('hex');
+}
+
+/**
+ * The hash numbers for Jim (god b6624e): the mail-cards file list with shas, the derived ledger's line count
+ * and sha (its segments in order), and every other file the build wrote.
+ */
+function servedNumbers(served) {
+  const mail = served.files.filter((f) => f.rel.startsWith('state/mail-cards/'));
+  const derived = served.files.filter((f) => /^agents\/derived\/memory\/claims\/\d{4}-\d{2}\.jsonl$/.test(f.rel));
+  const dh = crypto.createHash('sha256');
+  let lines = 0;
+  for (const f of derived) { dh.update(f.buf); lines += f.buf.toString('utf8').split('\n').filter((l) => l.trim()).length; }
+  return {
+    mailCards: mail.map((f) => ({ path: f.rel.slice('state/mail-cards/'.length), sha256: f.sha256 })),
+    derivedLedger: { files: derived.map((f) => f.rel), lines, sha256: derived.length ? dh.digest('hex') : null },
+    derivedOther: served.files.filter((f) => !mail.includes(f) && !derived.includes(f)).map((f) => ({ path: f.rel, sha256: f.sha256 })),
+    other: served.other,
+    removed: served.removed,
+    anchors: Object.keys(served.anchors),
+  };
+}
+
+/**
+ * god f884de fix 2: the served state must be the one a real floor has, or the run stops before any spend:
+ * the serve child lists the 'derived' ledger with records, and a card get shows that card's mail index.
+ */
+function servedStateProblem(ledgers, cardGet) {
+  if (!(ledgers?.derived?.records > 0)) return "the serve child lists no 'derived' ledger";
+  if (!cardGet) return 'the served state has no mail index (state/mail-cards holds no card)';
+  const p = preflightProblem(cardGet);
+  if (p) return `card get: ${p}`;
+  if (/no mail index/.test(cardGet.stdout)) return 'a card get shows no mail index';
   return null;
 }
 
@@ -406,8 +546,16 @@ async function preflight(o, v, addDir, key, asker, outDir) {
   for (const d of ['tmp', path.join('AppData', 'Local'), 'cwd']) fs.mkdirSync(path.join(home, d), { recursive: true });
   const calls = [];
   let probe = null;
+  let servedState = null;
+  let served = null;
   try {
-    const { hive, userData } = R.stageSandbox(path.resolve(o.snapshot), v.manifest, home);
+    // god b6624e fix 1: a build-only child builds the served state on a full T_s stage; this sandbox then
+    // gets the same copy every item gets, so the preflight serves what the items serve.
+    const build = await buildServed(o, v, addDir, key, outDir, dir);
+    if (build.problem) return { ok: false, reason: build.problem, calls, build: build.report };
+    servedState = build.servedState;
+    const { hive, userData, hiveId } = R.stageSandbox(path.resolve(o.snapshot), v.manifest, home);
+    served = { ...servedNumbers(servedState), sha256: applyServed(servedState, hive, userData, hiveId.to), build: build.report };
     const world = path.join(home, 'world.json');
     fs.copyFileSync(path.join(addDir, 'world.json'), world);
     const serve = { askers: [asker], maxCalls: MAX_CALLS, connectFile: path.join(dir, 'connect.json'), callsFile: path.join(dir, 'calls.jsonl'), hookLogFile: path.join(dir, 'hooks.jsonl'), stopFile: path.join(home, 'stop') };
@@ -423,7 +571,7 @@ async function preflight(o, v, addDir, key, asker, outDir) {
       if (!(await waitFor(serve.connectFile, 5 * 60_000))) return { ok: false, reason: `the serve child did not come up: ${serverErr.slice(0, 300)}`, calls };
       const connect = JSON.parse(fs.readFileSync(serve.connectFile, 'utf8'));
       const p = connect.probe;
-      if (!p) return { ok: false, reason: 'no keyed claim in the snapshot to probe get and history with', calls };
+      if (!p) return { ok: false, reason: 'no keyed claim in the snapshot to probe get and history with', calls, served };
       const cliTree = o.build || o.tree;
       const cli = path.join(cliTree, 'resources', 'memory-cli.cjs');
       const env = { ...childEnv(path.join(home, 'bin'), { MUNDER_HIVE_ROOT: hive, MUNDER_MEMORY_URL: connect.url, MEMORY_TOKEN: connect.askers[asker].token }), ELECTRON_RUN_AS_NODE: '1' };
@@ -431,6 +579,9 @@ async function preflight(o, v, addDir, key, asker, outDir) {
         const r = await runOnce(R.electronOf(cliTree), [cli, ...argv], env);
         calls.push({ cmd: argv[0], exit: r.code, chars: r.stdout.length, sha256: sha256(r.stdout), problem: preflightProblem(r) });
       }
+      const card = firstIndexedCard(hive);
+      const g = card ? await runOnce(R.electronOf(cliTree), [cli, 'get', card, '--agent', asker], env) : null;
+      calls.push({ cmd: 'get <card>', exit: g ? g.code : null, chars: g ? g.stdout.length : 0, sha256: g ? sha256(g.stdout) : null, derivedRecords: connect.ledgers?.derived?.records ?? 0, problem: servedStateProblem(connect.ledgers, g) });
     } finally {
       fs.writeFileSync(serve.stopFile, '');
       await serverClosed;
@@ -442,11 +593,54 @@ async function preflight(o, v, addDir, key, asker, outDir) {
     probe = { exit: probe.code, costUsd: probe.costUsd, ...guard, problem: probe.code !== 0 ? `claude -p exit ${probe.code}` : !guard.session.created ? `no session folder ${guard.session.folder} in ~/.claude/projects` : guard.problem };
     const bad = calls.filter((c) => c.problem);
     if (probe.problem) bad.push({ cmd: 'claude -p', problem: probe.problem });
-    return bad.length ? { ok: false, reason: bad.map((c) => `${c.cmd}: ${c.problem}`).join('; '), calls, probe } : { ok: true, calls, probe };
+    const res = bad.length ? { ok: false, reason: bad.map((c) => `${c.cmd}: ${c.problem}`).join('; '), calls, probe, served } : { ok: true, calls, probe, served };
+    // The served files (bytes) go to the items, not into preflight.json.
+    Object.defineProperty(res, 'servedState', { value: servedState, enumerable: false });
+    return res;
   } finally {
     if (!o.keep) {
       const inner = R.linksUnder(home);
       if (inner.length) console.error(`[claims-90] kept the sandbox: it holds a link (${inner[0]})`);
+      else fs.rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+    }
+  }
+}
+
+/**
+ * god b6624e fix 1: build the served state once. A build-only child runs the app's startup entry points
+ * (mail-card catch-up, then the derived start backfill) on a full T_s stage, the mail they read included
+ * (the serving sandboxes do not hold it), and the runner captures exactly what that wrote.
+ */
+async function buildServed(o, v, addDir, key, outDir, dir) {
+  const home = fs.mkdtempSync(path.join(outDir, 'build-'));
+  const t0 = Date.now();
+  try {
+    for (const d of ['tmp', path.join('AppData', 'Local'), 'cwd']) fs.mkdirSync(path.join(home, d), { recursive: true });
+    const { hive, userData, hiveId } = R.stageSandbox(path.resolve(o.snapshot), v.manifest, home, ['primary-mail']);
+    const baseline = { hive: treeShas(hive), heads: JSON.parse(fs.readFileSync(path.join(userData, 'claims-heads.json'), 'utf8')).hives?.[hiveId.to] ?? {} };
+    const servedIn = prepareServed(addDir, home);
+    const world = path.join(home, 'world.json');
+    fs.copyFileSync(path.join(addDir, 'world.json'), world);
+    const out = path.join(dir, 'build.jsonl');
+    fs.rmSync(out, { force: true });
+    const specFile = path.join(home, 'answer-spec.json');
+    fs.writeFileSync(specFile, JSON.stringify({ tree: o.tree, hive, userData, home, resourcesDir: o.resources, now: v.manifest.takenFrom, world, items: [], out, served: { ...servedIn, buildOnly: true } }));
+    const child = spawn(R.electronOf(o.tree), [path.join(__dirname, 'answer-child.cjs'), specFile], { cwd: o.tree, env: serveEnv(o, home), windowsHide: true, stdio: ['pipe', 'ignore', 'pipe'] });
+    let stderr = '';
+    child.stderr.on('data', (d) => { if (stderr.length < 20000) stderr += d; });
+    const closed = closeOf(child, 30 * 60_000);
+    child.stdin.end(`${key}\n`);
+    const r = { code: await closed, stderr };
+    const rows = fs.existsSync(out) ? fs.readFileSync(out, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
+    const built = rows.find((x) => x.served)?.served ?? null;
+    const report = { exit: r.code, ms: Date.now() - t0, changelogTag: servedIn.changelogTag, catchUp: built?.catchUp ?? null, derivedOn: built?.derivedOn ?? null, derivedKinds: built?.derivedKinds ?? [] };
+    if (r.code !== 0 || !built) return { problem: `the served-state build failed (exit ${r.code}): ${rows.find((x) => x.summary)?.summary?.reason ?? r.stderr.slice(0, 300)}`, report };
+    if (!built.derivedOn) return { problem: 'the served-state build ran with the derived ledger off', report };
+    return { servedState: captureServed(hive, userData, baseline, hiveId.to), report };
+  } finally {
+    if (!o.keep) {
+      const inner = R.linksUnder(home);
+      if (inner.length) console.error(`[claims-90] kept the build sandbox: it holds a link (${inner[0]})`);
       else fs.rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
     }
   }
@@ -464,7 +658,7 @@ function claudeProbe(o, home) {
   });
 }
 
-async function answerItem(o, v, addDir, item, key, shape, instruction, outDir) {
+async function answerItem(o, v, addDir, item, key, shape, instruction, outDir, pre) {
   const itemDir = path.join(outDir, 'items', item.id);
   fs.mkdirSync(itemDir, { recursive: true });
   const home = fs.mkdtempSync(path.join(outDir, 'sandbox-'));
@@ -472,6 +666,9 @@ async function answerItem(o, v, addDir, item, key, shape, instruction, outDir) {
   const row = { id: item.id, asker: item.asker };
   try {
     const { hive, userData, hiveId } = R.stageSandbox(path.resolve(o.snapshot), v.manifest, home);
+    // god b6624e fix 1: the preflight's served state (mail index, derived ledger and its anchor), byte for byte.
+    row.servedSha256 = applyServed(pre.servedState, hive, userData, hiveId.to);
+    if (row.servedSha256 !== pre.served.sha256) throw new Error(`the served state differs from the preflight's (${row.servedSha256})`);
     const queueFile = path.join(hive, 'claims-reconcile-queue.json');
     row.stateSha256 = fs.existsSync(queueFile) ? sha256(fs.readFileSync(queueFile)) : null;
     const world = path.join(home, 'world.json');
@@ -498,7 +695,7 @@ async function answerItem(o, v, addDir, item, key, shape, instruction, outDir) {
     const jailBin = path.join(home, 'bin');
     row.memoryShim = o.build ? buildMemoryShim(jailBin, o.build) : installMemoryShim(jailBin);
     const settingsFile = path.join(home, 'claude-settings.json');
-    const settings = settingsFor(shape, a.hookUrl, a.briefing, a.toolOutputDir, hive);
+    const settings = settingsFor(shape, a.hookUrl, a.briefing, a.toolOutputDir, hive, path.join(claudeProjectsDir(), projectSlug(path.join(home, 'cwd'))));
     fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 1));
     row.settingsSha256 = sha256(JSON.stringify({ ...settings, hooks: { ...settings.hooks, SessionStart: '<briefing>' } }).replace(a.hookUrl, '<hook>').replace(/sandbox-[A-Za-z0-9]+/g, 'sandbox-*'));
     const prompt = instruction.replace(/\{asker\}/g, item.asker).replace(/\{today\}/g, v.manifest.takenFrom).replace(/\{question\}/g, item.question);
@@ -517,7 +714,7 @@ async function answerItem(o, v, addDir, item, key, shape, instruction, outDir) {
     fs.writeFileSync(serve.stopFile, '');
     await serverClosed;
     const hookRows = fs.existsSync(serve.hookLogFile) ? fs.readFileSync(serve.hookLogFile, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
-    const t = readTranscript(transcript, fwd(a.toolOutputDir), LIVE_RES(), { sandboxHive: hive, hooked: new Map(hookRows.filter((x) => x.event === 'PreToolUse' && x.memoryMd).map((x) => [x.toolUseId, x])) });
+    const t = readTranscript(transcript, fwd(a.toolOutputDir), LIVE_RES(), { sandboxHive: hive, hooked: new Map(hookRows.filter((x) => x.event === 'PreToolUse' && x.memoryMd).map((x) => [x.toolUseId, x])) }, { projects: claudeProjectsDir(), cwd: path.join(home, 'cwd'), endedMs: t0 + row.ms });
     const memCalls = fs.existsSync(serve.callsFile) ? fs.readFileSync(serve.callsFile, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
     const serveRows = fs.existsSync(answers) ? fs.readFileSync(answers, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
     row.serve = serveRows.find((r) => r.summary)?.summary ?? { ok: false, reason: serverErr.slice(0, 300) };
@@ -611,7 +808,7 @@ async function main(argv) {
   fs.writeFileSync(answersFile, '');
   const rows = [];
   for (const item of items) {
-    const row = await answerItem(o, v, addDir, item, key, shape, instruction, outDir);
+    const row = await answerItem(o, v, addDir, item, key, shape, instruction, outDir, pre);
     rows.push(row);
     fs.appendFileSync(answersFile, `${JSON.stringify(row)}\n`);
     console.error(`[claims-90] ${item.id}: ${row.invalid ? `INVALID ${row.invalid}` : 'ok'} calls ${row.calls?.length ?? 0}`);
@@ -643,6 +840,8 @@ async function main(argv) {
     memoryMdItems: rows.filter((r) => r.memoryMd?.calls).length,
     memoryMdQuotedItems: rows.filter((r) => r.memoryMd?.quoted).length,
     stateSha256: [...new Set(rows.map((r) => r.stateSha256))],
+    // god b6624e: every item served the preflight's state (one value = all equal).
+    servedSha256: [...new Set(rows.map((r) => r.servedSha256))],
     perItem: rows.map((r) => ({ id: r.id, ...itemStyle(r.calls), memoryMdCalls: r.memoryMd?.calls ?? 0, memoryMdQuoted: !!r.memoryMd?.quoted })),
   };
   fs.writeFileSync(path.join(outDir, 'run.json'), JSON.stringify(run, null, 1));
@@ -656,4 +855,4 @@ if (require.main === module) {
   }, (e) => { console.error(`[claims-90] ${e.stack || e.message}`); process.exitCode = 2; });
 }
 
-module.exports = { projectSlug, claudeProjectsDir, leftoverPrefixes, sessionFolderOut, leftoversIn, LEFTOVER_PREFIX, preflightProblem, unavailableOf, parseArgs, parseItems, installedHookShape, hookShapeOf, buildHookShape, buildInfo, buildMemoryShim, condenseOf, settingsFor, childEnv, readTranscript, styleDeviation, itemStyle, memoryMdUse, main };
+module.exports = { projectSlug, claudeProjectsDir, leftoverPrefixes, sessionFolderOut, leftoversIn, LEFTOVER_PREFIX, preflightProblem, firstIndexedCard, servedStateProblem, treeShas, prepareServed, captureServed, applyServed, servedSha, servedNumbers, ownSpillRead,unavailableOf, parseArgs, parseItems, installedHookShape, hookShapeOf, buildHookShape, buildInfo, buildMemoryShim, condenseOf, settingsFor, childEnv, readTranscript, styleDeviation, itemStyle, memoryMdUse, main };

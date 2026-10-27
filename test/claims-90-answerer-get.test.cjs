@@ -238,3 +238,138 @@ test('static: the run guard is in the INVALID chain, the preflight gates the spe
   assert.match(src('answerer.cjs'), /    probe = await claudeProbe\(o, home\);\r?\n    const guard = sessionGuard\(home, path\.join\(dir, 'session'\), outDir\);/);
   assert.match(src('answerer.cjs'), /    if \(probe\.problem\) bad\.push\(/);
 });
+
+test('Jim 99a1d4 fix 3, bfa9cd census: only the session\'s OWN spill (init session id, tool-results, written before the end) is read', () => {
+  const projects = path.join(JAIL, 'f3', 'projects');
+  const cwd = path.join(JAIL, 'f3', 'run', 'sandbox-S', 'cwd');
+  const slug = path.join(projects, A.projectSlug(cwd));
+  const put = (rel, mtime) => { const p = path.join(slug, rel); fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, 'spill'); if (mtime) fs.utimesSync(p, mtime / 1000, mtime / 1000); return p; };
+  const ended = Date.now() + 60_000;
+  const own = put(path.join('sess-own', 'tool-results', 'b1.txt'));
+  const other = put(path.join('sess-other', 'tool-results', 'b2.txt'));
+  const late = put(path.join('sess-own', 'tool-results', 'late.txt'), ended + 120_000);
+  const outside = put(path.join('sess-own', 'notes.txt'));
+  const sub = put(path.join('sess-own', 'tool-results', 'sub', 'b3.txt'));
+  const look = path.join(projects, `${A.projectSlug(cwd)}-x`, 'sess-own', 'tool-results', 'b4.txt');
+  fs.mkdirSync(path.dirname(look), { recursive: true }); fs.writeFileSync(look, 'spill');
+  // Same-length forms (census P21): only the prefix check refuses them, not the slice that follows it.
+  const otherSame = put(path.join('sess-oth', 'tool-results', 'b5.txt'));
+  const slugSame = A.projectSlug(cwd).replace(/.$/, (c) => (c === 'x' ? 'y' : 'x'));
+  const lookSame = path.join(projects, slugSame, 'sess-own', 'tool-results', 'b6.txt');
+  fs.mkdirSync(path.dirname(lookSame), { recursive: true }); fs.writeFileSync(lookSame, 'spill');
+  const spill = { projects, cwd, endedMs: ended };
+  const dotdot = `${slug}\\sess-own\\tool-results\\..\\..\\sess-other\\tool-results\\b2.txt`;
+  assert.equal(A.ownSpillRead(own, spill, 'sess-own'), true, 'own spill: allowed');
+  assert.equal(A.ownSpillRead(own.replace(/\\/g, '/'), spill, 'sess-own'), true, 'either slash form');
+  for (const [p, why] of [[other, 'another session id'], [otherSame, 'another session id of the same length'], [lookSame, 'a lookalike folder of the same length'], [late, 'written after the session ended'], [outside, 'outside tool-results'], [sub, 'below tool-results'], [look, 'a lookalike prefix folder'], [dotdot, "'..' into another session"], [path.join(slug, 'sess-own', 'tool-results', 'none.txt'), 'no such file']]) {
+    assert.equal(A.ownSpillRead(p, spill, 'sess-own'), false, why);
+  }
+  assert.equal(A.ownSpillRead(own, null, 'sess-own'), false, 'no spill context');
+  assert.equal(A.ownSpillRead(own, spill, null), false, 'no recorded session id');
+  // Through the transcript audit: the id is the init event's, never one taken from the path the agent names.
+  const tf = path.join(JAIL, 'f3', 't.jsonl');
+  const read = (id, file) => ({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name: 'Read', input: { file_path: file } }] } });
+  fs.writeFileSync(tf, [{ type: 'system', subtype: 'init', session_id: 'sess-own', tools: ['Bash', 'Read'] }, read('r1', own), read('r2', other), read('r3', dotdot), read('r4', late)].map((r) => JSON.stringify(r)).join('\n'));
+  const t = A.readTranscript(tf, 'X:/jail/hive/agents/a/tool-output', [], null, spill);
+  assert.deepEqual(t.leaks.map((l) => l.id), ['r2', 'r3', 'r4']);
+  assert.deepEqual(A.readTranscript(tf, 'X:/jail/hive/agents/a/tool-output', []).leaks.map((l) => l.id), ['r1', 'r2', 'r3', 'r4'], 'no spill context: every read outside tool-output is a leak');
+  // The permission allows the slug's spill folders only; the audit narrows it to the session.
+  const shape = { matcher: '*', events: ['PostToolUse'], timeout: 5 };
+  const s = A.settingsFor(shape, 'http://h', 'b.txt', 'X:/t', null, slug);
+  assert.ok(s.permissions.allow.includes(`Read(//${slug.replace(/\\/g, '/').replace(/^([A-Za-z]):/, (_, d) => d.toLowerCase())}/*/tool-results/**)`));
+  assert.equal(A.settingsFor(shape, 'http://h', 'b.txt', 'X:/t', null).permissions.allow.filter((a) => a.includes('tool-results')).length, 0);
+  const src = fs.readFileSync(path.join(__dirname, 'claims-90', 'answerer.cjs'), 'utf8');
+  assert.match(src, /\{ projects: claudeProjectsDir\(\), cwd: path\.join\(home, 'cwd'\), endedMs: t0 \+ row\.ms \}\);/, 'the item audit passes its own spill context');
+});
+
+test('god f884de fix 2: the preflight stops unless the serve child lists the derived ledger and a card get shows a mail index', () => {
+  const ok = { code: 0, stdout: 'card X\nmails: 2 (newest first)\n', stderr: '' };
+  assert.equal(A.servedStateProblem({ derived: { records: 5 } }, ok), null);
+  assert.match(A.servedStateProblem({ jim: { records: 5 } }, ok), /no 'derived' ledger/);
+  assert.match(A.servedStateProblem({ derived: { records: 0 } }, ok), /no 'derived' ledger/);
+  assert.match(A.servedStateProblem(undefined, ok), /no 'derived' ledger/);
+  assert.match(A.servedStateProblem({ derived: { records: 5 } }, null), /no mail index/);
+  assert.match(A.servedStateProblem({ derived: { records: 5 } }, { code: 0, stdout: 'mails: no mail index for this card yet (hive/state/mail-cards)\n', stderr: '' }), /card get shows no mail index/);
+  assert.match(A.servedStateProblem({ derived: { records: 5 } }, { code: 2, stdout: '', stderr: '' }), /^card get: exit 2/);
+  const hive = path.join(JAIL, 'f2', 'hive');
+  assert.equal(A.firstIndexedCard(hive), null, 'no state/mail-cards');
+  const mc = path.join(hive, 'state', 'mail-cards');
+  fs.mkdirSync(mc, { recursive: true });
+  fs.writeFileSync(path.join(mc, '_links.jsonl'), `${JSON.stringify({ card: 'NOT-A-CARD-FILE' })}\n`);
+  assert.equal(A.firstIndexedCard(hive), null, '_links.jsonl is not a card file');
+  fs.writeFileSync(path.join(mc, 'c90-mailcard.jsonl'), `{torn\n${JSON.stringify({ v: 1, id: 'm1', card: 'C90-MAILCARD' })}\n`);
+  assert.equal(A.firstIndexedCard(hive), 'C90-MAILCARD');
+  const src = fs.readFileSync(path.join(__dirname, 'claims-90', 'answerer.cjs'), 'utf8');
+  assert.match(src, /problem: servedStateProblem\(connect\.ledgers, g\) \}\);/, 'the check is a preflight call, so a problem stops the run before any spend');
+});
+
+test('god b6624e fix 1: the preflight child builds the served state through the app\'s startup entry points; the runner copies exactly the mail index, the derived ledger and its anchor into every item, re-keyed, and the hashes match', () => {
+  const W = path.join(JAIL, 'f1');
+  const mk = (rel, text) => { fs.mkdirSync(path.dirname(path.join(W, rel)), { recursive: true }); fs.writeFileSync(path.join(W, rel), text); };
+  const heads = (pre) => JSON.stringify({ v: 1, hives: pre });
+  // The preflight sandbox after staging.
+  mk('a/hive/tasks.json', '[]'); mk('a/hive/agents/jim/memory/claims/2026-10.jsonl', '{"j":1}\n');
+  mk('a/ud/claims-heads.json', heads({ pre: { jim: { head: 'h-j', lastId: 'c-j', at: 't' } } }));
+  const hiveA = path.join(W, 'a', 'hive'); const udA = path.join(W, 'a', 'ud');
+  const baseline = { hive: A.treeShas(hiveA), heads: { jim: { head: 'h-j', lastId: 'c-j', at: 't' } } };
+  // What the build writes, and one write that is not the build's.
+  mk('a/hive/state/mail-cards/c90-facts.jsonl', '{"card":"C90-FACTS"}\n'); mk('a/hive/state/mail-cards/_links.jsonl', '{"id":"m1"}\n');
+  mk('a/hive/agents/derived/memory/claims/2026-09.jsonl', '{"d":1}\n{"d":2}\n'); mk('a/hive/agents/derived/memory/claims/2026-10.jsonl', '{"d":3}\n');
+  mk('a/hive/claims-reconcile-queue.json', '{"q":1}');
+  mk('a/ud/claims-heads.json', heads({ pre: { jim: { head: 'h-j', lastId: 'c-j', at: 't' }, derived: { head: 'h-d', lastId: 'c-d', at: 't2' } } }));
+  const served = A.captureServed(hiveA, udA, baseline, 'pre');
+  assert.deepEqual(served.files.map((f) => f.rel), ['agents/derived/memory/claims/2026-09.jsonl', 'agents/derived/memory/claims/2026-10.jsonl', 'state/mail-cards/_links.jsonl', 'state/mail-cards/c90-facts.jsonl']);
+  assert.deepEqual(served.other.map((f) => f.path), ['claims-reconcile-queue.json'], 'another write is reported, not served');
+  assert.deepEqual(Object.keys(served.anchors), ['derived'], 'only the derived anchor');
+  const n = A.servedNumbers(served);
+  assert.deepEqual(n.mailCards.map((f) => f.path), ['_links.jsonl', 'c90-facts.jsonl']);
+  assert.equal(n.derivedLedger.lines, 3);
+  assert.match(n.derivedLedger.sha256, /^[0-9a-f]{64}$/);
+  const preSha = A.servedSha(hiveA, served);
+  // An item sandbox: freshly staged from the snapshot, another hive id.
+  mk('b/hive/tasks.json', '[]'); mk('b/hive/agents/jim/memory/claims/2026-10.jsonl', '{"j":1}\n');
+  mk('b/ud/claims-heads.json', heads({ itm: { jim: { head: 'h-j', lastId: 'c-j', at: 't' } } }));
+  const hiveB = path.join(W, 'b', 'hive');
+  assert.equal(A.applyServed(served, hiveB, path.join(W, 'b', 'ud'), 'itm'), preSha, 'the item serves the preflight\'s bytes');
+  const hb = JSON.parse(fs.readFileSync(path.join(W, 'b', 'ud', 'claims-heads.json'), 'utf8'));
+  assert.deepEqual(Object.keys(hb.hives), ['itm']);
+  assert.deepEqual(hb.hives.itm, { jim: { head: 'h-j', lastId: 'c-j', at: 't' }, derived: { head: 'h-d', lastId: 'c-d', at: 't2' } }, 'the derived anchor re-keyed to the item\'s hive id');
+  assert.equal(fs.existsSync(path.join(hiveB, 'claims-reconcile-queue.json')), false);
+  fs.appendFileSync(path.join(hiveB, 'state', 'mail-cards', '_links.jsonl'), 'x');
+  assert.notEqual(A.servedSha(hiveB, served), preSha, 'a changed served file changes the sha');
+  // The derived repo and changelog come from the T_s bundle, not the tree under test.
+  const repo = path.join(W, 'repo'); fs.mkdirSync(repo);
+  const git = (args) => require('node:child_process').execFileSync('git', ['-c', 'user.name=syn', '-c', 'user.email=syn@example.invalid', '-c', 'commit.gpgsign=false', ...args], { cwd: repo, stdio: 'ignore', env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: path.join(W, 'no-global-config') } });
+  git(['init', '-q', '-b', 'main']);
+  // The changelog is the newest version tag's (the gate jail's backfill rule): v1.1.100 beats v1.1.90 by number,
+  // a non-version tag and the branch tip are not it, and the bundle carries no HEAD (as the T_s bundle).
+  for (const [text, tag] of [['# 1.1.90\n', 'v1.1.90'], ['# 1.1.100\n', 'v1.1.100'], ['# later\n', 'nightly'], ['# tip\n', null]]) {
+    fs.writeFileSync(path.join(repo, 'CHANGELOG.md'), text); git(['add', '.']); git(['commit', '-q', '-m', text.trim()]);
+    if (tag) git(['tag', tag]);
+  }
+  const add = path.join(W, 'add'); fs.mkdirSync(add);
+  git(['bundle', 'create', '-q', path.join(add, 'repo-at-ts.bundle'), '--branches', '--tags']);
+  const home = path.join(W, 'home'); fs.mkdirSync(home);
+  const s = A.prepareServed(add, home);
+  assert.equal(s.changelogTag, 'v1.1.100');
+  assert.equal(fs.readFileSync(s.changelogFile, 'utf8'), '# 1.1.100\n');
+  assert.ok(fs.existsSync(path.join(s.repo, 'HEAD')), 'a mirror of the bundle');
+  // The child builds through the app's own entry points, in the app's order, and the runner wires it.
+  const child = fs.readFileSync(path.join(__dirname, 'claims-90', 'answer-child.cjs'), 'utf8');
+  const cu = child.indexOf('const catchUp = startupMailCardCatchUp(hive, { log, now: () => spec.now });');
+  const seq = child.indexOf('await startAfterMailCardCatchUp(catchUp, () => derivedLive.start());');
+  const list = child.indexOf('// Integrity before any answer');
+  assert.ok(cu > 0 && seq > cu && list > seq, 'catch-up, then the derived start once it settled, then the ledger listing');
+  assert.match(child, /repo: \(\) => spec\.served\.repo,/);
+  assert.match(child, /if \(failed\.length\) \{ emit\(\{ summary: \{ ok: false, reason: `the served-state build failed: /, 'a failed build stops the child');
+  const run = fs.readFileSync(path.join(__dirname, 'claims-90', 'answerer.cjs'), 'utf8');
+  assert.match(child, /served: \{ catchUp: [\s\S]*if \(spec\.served\.buildOnly\) process\.exit\(0\);/, 'the build-only child stops before it serves');
+  assert.match(child, /effectiveLevel\(config\.claimLedger, manifestEntry\(floor\.ledger, agentId, floor\.ledgerDefault\)\)/, 'the child resolves a level as main does (the derived ledger defaults to writer)');
+  assert.match(run, /R\.stageSandbox\(path\.resolve\(o\.snapshot\), v\.manifest, home, \['primary-mail'\]\);/, 'the build stage holds the T_s mail');
+  assert.match(run, /served: \{ \.\.\.servedIn, buildOnly: true \} \}\)\);/, 'the build child gets the build inputs');
+  assert.match(run, /if \(!built\.derivedOn\) return \{ problem: /, 'a build with the derived ledger off stops the run');
+  assert.match(run, /served = \{ \.\.\.servedNumbers\(servedState\), sha256: applyServed\(servedState, hive, userData, hiveId\.to\), build: build\.report \};/, 'the preflight serves the items\' copy');
+  assert.doesNotMatch(run, /serve, served: servedIn/, 'the serving preflight child builds nothing');
+  assert.match(run, /row\.servedSha256 = applyServed\(pre\.servedState, hive, userData, hiveId\.to\);/, 'every item gets the preflight\'s state');
+  assert.match(run, /if \(row\.servedSha256 !== pre\.served\.sha256\) throw /);
+});

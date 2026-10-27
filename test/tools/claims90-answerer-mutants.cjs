@@ -36,6 +36,33 @@ const M = [
   ['P18 a leftover does not stop the run', ANS, '    if (row.session?.problem || row.leftovers?.length) throw new Error(', '    if (false) throw new Error(', ['unit']],
   ['P19 the preflight ignores the claude -p probe', ANS, '    if (probe.problem) bad.push(', '    if (false) bad.push(', ['unit']],
   ['P20 the session folder name drops the dashes', ANS, "const projectSlug = (cwd) => path.resolve(cwd).replace(/[^A-Za-z0-9]/g, '-');", "const projectSlug = (cwd) => path.resolve(cwd).replace(/[^A-Za-z0-9]+/g, '-');", ['unit', 'preflight']],
+  // Jim 99a1d4 fix 3, bfa9cd: the session's own spill only.
+  ['P21 a spill of another session id or a lookalike folder passes', ANS, '  if (!f.toLowerCase().startsWith(dir.toLowerCase())) return false;', "  if (!f.toLowerCase().includes('/tool-results/')) return false;", ['unit']],
+  ['P22 a spill path below or through tool-results passes', ANS, "  if (!name || name.includes('/')) return false;", '  if (!name) return false;', ['unit']],
+  ['P23 a spill written after the session ended passes', ANS, 'return st.isFile() && st.mtimeMs <= spill.endedMs;', 'return st.isFile();', ['unit']],
+  ['P24 the spill session id is the one in the path the agent names', ANS, '!ownSpillRead(u.input?.file_path, spill, init?.session_id)', "!ownSpillRead(u.input?.file_path, spill, fwd(String(u.input?.file_path)).split('/').slice(-3)[0])", ['unit']],
+  ['P25 every read outside tool-output counts as a spill', ANS, '&& !ownSpillRead(u.input?.file_path, spill, init?.session_id)) leaks.push', '&& false) leaks.push', ['unit']],
+  ['P26 the item audit gets no spill context', ANS, ", { projects: claudeProjectsDir(), cwd: path.join(home, 'cwd'), endedMs: t0 + row.ms });", ');', ['unit']],
+  ['P27 the settings do not allow the spill folder', ANS, '        ...(spillDir ? [', '        ...(false ? [', ['unit']],
+  // god f884de fix 2: the served state is a real floor's.
+  ['P28 no derived ledger passes the preflight', ANS, '  if (!(ledgers?.derived?.records > 0)) return', '  if (false) return', ['unit']],
+  ['P29 a served state with no indexed card passes', ANS, "  if (!cardGet) return 'the served state has no mail index", "  if (!cardGet) return null; if (false) return 'the served state has no mail index", ['unit']],
+  ['P30 a card get showing no mail index passes', ANS, "  if (/no mail index/.test(cardGet.stdout)) return 'a card get shows no mail index';", "  if (false) return 'a card get shows no mail index';", ['unit']],
+  ['P31 the served-state check is not a preflight call', ANS, 'problem: servedStateProblem(connect.ledgers, g) });', 'problem: null });', ['unit']],
+  // god b6624e fix 1: the served state is built through the app's startup entry points, then copied into every item.
+  ['P32 the mail-card catch-up never runs', CHILD, '    const catchUp = startupMailCardCatchUp(hive, { log, now: () => spec.now });', '    const catchUp = Promise.resolve(null);', ['preflight', 'unit']],
+  ['P33 the derived writer starts beside the running catch-up', CHILD, '    await startAfterMailCardCatchUp(catchUp, () => derivedLive.start());', '    derivedLive.start(); await catchUp;', ['unit']],
+  ['P34 the child stops the derived writer before it settled', CHILD, "    await derivedLive.run('served-settled', async () => {});", '', ['preflight']],
+  ['P35 a failed build does not stop the child', CHILD, '    if (failed.length) { emit(', '    if (false) { emit(', ['unit']],
+  ['P36 every write of the preflight child is served', ANS, "  const ours = (rel) => rel.startsWith('state/mail-cards/') || rel.startsWith(`agents/${DERIVED_DIR}/`);", '  const ours = () => true;', ['unit']],
+  ['P37 the derived anchor is not copied into the item', ANS, '{ ...(j.hives[hiveIdOfItem] ?? {}), ...served.anchors };', '{ ...(j.hives[hiveIdOfItem] ?? {}) };', ['unit']],
+  ['P38 the served sha ignores the file bytes', ANS, "  for (const f of served.files) h.update(`${f.rel}\\0`).update(fs.readFileSync(path.join(hive, f.rel)));", "  for (const f of served.files) h.update(`${f.rel}\\0`);", ['unit']],
+  ['P39 an item is not given the served state', ANS, '    row.servedSha256 = applyServed(pre.servedState, hive, userData, hiveId.to);', '    row.servedSha256 = pre.served.sha256;', ['unit']],
+  ['P40 an item serving other bytes runs on', ANS, '    if (row.servedSha256 !== pre.served.sha256) throw ', '    if (false) throw ', ['unit']],
+  ['P41 the build stage holds no mail', ANS, "v.manifest, home, ['primary-mail']);", 'v.manifest, home, []);', ['unit']],
+  ['P42 the child level skips the manifest default (derived off)', CHILD, 'return effectiveLevel(config.claimLedger, manifestEntry(floor.ledger, agentId, floor.ledgerDefault)).level;', 'return effectiveLevel(config.claimLedger, floor.ledger?.[agentId]).level;', ['preflight', 'unit']],
+  ['P43 a build with the derived ledger off runs on', ANS, '    if (!built.derivedOn) return { problem: ', '    if (false) return { problem: ', ['unit']],
+  ['P44 the changelog is not the newest version tag\'s', ANS, '  const tag = newestVersionTag(', "  const tag = 'v1.1.90' || newestVersionTag(", ['unit']],
   ['P14 taskStatusFor misses the archive', DEPS, '  return (id) => (allTasks() ?? []).find((t) => t.id === id)?.status ?? null;', "  return (id) => (allTasks() ?? []).find((t) => t.id === id && t.status !== 'done')?.status ?? null;", ['unit']],
 ];
 

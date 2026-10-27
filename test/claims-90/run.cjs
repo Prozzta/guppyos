@@ -96,10 +96,10 @@ function parseItems(file) {
 }
 
 /** Copy the groups the retrieval paths read into the sandbox (never the snapshot in place). */
-function stageSandbox(snap, manifest, home) {
+function stageSandbox(snap, manifest, home, extraGroups = []) {
   const hive = path.join(home, 'hive');
   const userData = path.join(home, 'AppData', 'Roaming', 'Guppy');
-  const groups = new Set(['retrieval', 'primary', 'retrieval-userdata', 'retrieval-index']);
+  const groups = new Set(['retrieval', 'primary', 'retrieval-userdata', 'retrieval-index', ...extraGroups]);
   for (const f of manifest.files) {
     if (!groups.has(f.group)) continue;
     const dest = f.path.startsWith('hive/') ? path.join(hive, f.path.slice(5)) : path.join(userData, f.path.slice('userdata/'.length));

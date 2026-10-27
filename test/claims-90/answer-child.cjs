@@ -112,7 +112,7 @@ function inProcessFork(runWorker, deps) {
   const { runWorker } = L('src/main/nativeMemory/worker.ts');
   const { readSourcesConfig } = L('src/main/nativeMemory/sources.ts');
   const { WordPieceTokenizer, wordPieceConfigFromTokenizerJson } = L('src/main/nativeMemory/wordpiece.ts');
-  const { effectiveLevel } = L('src/shared/claims.ts');
+  const { effectiveLevel, manifestEntry } = L('src/shared/claims.ts');
   const C = L('src/main/toolOutputCondense.ts');
   const { normalizeAgentProvider } = L('src/shared/agentProvider.ts');
 
@@ -124,8 +124,9 @@ function inProcessFork(runWorker, deps) {
   // Jim 0959e3 / 8dc581: every task read (get, the ledger's taskStatus, the delivery) is the app's HiveManager.allTasks().
   const hiveTasks = hiveTasksFor(L, hive);
   const registry = () => { try { return loadRegistry(hive); } catch { return DEFAULT_KEY_REGISTRY; } };
-  // index.ts claimLevel: the setting narrowed by memory-sources.json `ledger`.
-  const claimLevel = (agentId) => effectiveLevel(config.claimLedger, readSourcesConfig(hive).ledger?.[agentId]).level;
+  // index.ts claimLevel: the setting narrowed by the agent's manifest entry (memory-sources.json `ledger`,
+  // then `ledgerDefault`, then 'writer' for the derived ledger), as main computes it.
+  const claimLevel = (agentId) => { const floor = readSourcesConfig(hive); return effectiveLevel(config.claimLedger, manifestEntry(floor.ledger, agentId, floor.ledgerDefault)).level; };
   const reg = JSON.parse(fs.readFileSync(path.join(hive, 'registry.json'), 'utf8'));
   const world = JSON.parse(fs.readFileSync(spec.world, 'utf8'));
   const worldCalls = { git: 0, fileExists: 0, unrecorded: [] };
@@ -147,6 +148,8 @@ function inProcessFork(runWorker, deps) {
     headAnchor: new FileHeadAnchorStore(path.join(ud, HEAD_ANCHOR_FILE)),
     log,
     taskStatus: taskStatusFor(hiveTasks.allTasks),
+    // The served-state build writes at T_s (a stored claim holds min(fact time, write time)).
+    ...(spec.served && spec.now ? { now: () => new Date(spec.now) } : {}),
   });
   const endpoint = { root: hive, store, level: claimLevel };
   const ledgerAgents = () => {
@@ -154,6 +157,39 @@ function inProcessFork(runWorker, deps) {
     try { withSegments = fs.readdirSync(path.join(hive, 'agents')).filter((a) => store.segments(a).length > 0); } catch { /* none */ }
     return [...new Set([...withSegments, ...store.anchoredAgents()])];
   };
+
+  // god b6624e (step 3 fix 1): the preflight child builds the served state the way the app's start does
+  // (index.ts claims block): the mail-card catch-up, then the derived writer's start backfill once it settled.
+  // The derived repo is a mirror of the T_s bundle and the changelog is the bundle's, so nothing after T_s
+  // enters; the store writes at T_s. The runner copies the result into every item's sandbox.
+  if (spec.served) {
+    const { startupMailCardCatchUp, startAfterMailCardCatchUp } = L('src/main/mailCards.ts');
+    const { DerivedLive } = L('src/main/claims/derivedLive.ts');
+    const { DERIVED_AGENT_ID } = L('src/shared/claims.ts');
+    const changelog = fs.readFileSync(spec.served.changelogFile, 'utf8');
+    const derivedLive = new DerivedLive({
+      hiveRoot: () => hive,
+      writer: () => ({ store, derive: (records) => derive(records, registry(), { r4: false }), log }),
+      enabled: () => config.derivedClaims !== false && claimLevel(DERIVED_AGENT_ID) !== 'off',
+      repo: () => spec.served.repo,
+      changelog: () => changelog || null,
+      log,
+      // The start backfill at once and no passes: one build, then the child serves it.
+      setTimeout: (fn) => { fn(); return { unref() {} }; },
+      setInterval: () => ({ unref() {} }),
+    });
+    const catchUp = startupMailCardCatchUp(hive, { log, now: () => spec.now });
+    await startAfterMailCardCatchUp(catchUp, () => derivedLive.start());
+    await derivedLive.run('served-settled', async () => {});
+    derivedLive.stop();
+    const failed = logRows.filter((r) => /^(mailcards-backfill-failed|claims-derived-failed)$/.test(r.kind));
+    if (failed.length) { emit({ summary: { ok: false, reason: `the served-state build failed: ${failed[0].kind} ${String(failed[0].error ?? '').slice(0, 160)}` } }); process.exit(3); }
+    const derivedOn = config.derivedClaims !== false && claimLevel(DERIVED_AGENT_ID) !== 'off';
+    emit({ served: { catchUp: logRows.find((r) => r.kind === 'mailcards-backfill') ?? null, derivedOn, derivedKinds: [...new Set(logRows.filter((r) => /^claims-derived/.test(r.kind)).map((r) => r.kind))] } });
+    // The build runs on a full T_s stage (the mail it reads included); the runner copies what it wrote into
+    // the sandboxes that serve, which hold what an answering agent may see.
+    if (spec.served.buildOnly) process.exit(0);
+  }
 
   // Integrity before any answer (spec M4): every ledger verifies to its full length, or the run stops.
   const ledgers = {};
