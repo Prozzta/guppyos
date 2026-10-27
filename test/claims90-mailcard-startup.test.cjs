@@ -194,5 +194,5 @@ test('index.ts: the claims startup block runs the catch-up through the router\'s
   assert.match(hive, /mailCardIndexFor\(root: string\): MailCardIndex \| null \{ return this\.root\(\) === root \? this\.mailCards\(\) : null; \}/, 'the router hands its own index out');
   const mc = fs.readFileSync(path.join(REPO, 'src', 'main', 'mailCards.ts'), 'utf8');
   assert.match(mc, /const pause = d\.pause \?\? \(\(\) => new Promise<void>\(\(r\) => setImmediate\(r\)\)\);/, 'the default pause is a macrotask turn');
-  assert.match(mc, /export function backfillMailCards\(hiveRoot: string, now: string\): MailCardBackfillCounts \{\n\s+return drain\(backfillMailCardSteps\(hiveRoot, now\)\);/, 'the script path and the startup path are one generator');
+  assert.match(mc, /export function backfillMailCards\(hiveRoot: string, now: string\): MailCardBackfillCounts \{\r?\n\s+return drain\(backfillMailCardSteps\(hiveRoot, now\)\);/, 'the script path and the startup path are one generator (CRLF checkouts too)');
 });
