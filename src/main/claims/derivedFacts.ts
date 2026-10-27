@@ -228,12 +228,38 @@ export interface GitPort {
   /** The paths the commit changes, or null when git cannot say; optional (round 3, A): a commit that
    *  changes only CHANGELOG/docs files confirms nothing. Without the method files are unknown. */
   changedFiles?(commit: string): Promise<string[] | null>;
+  /** Round 6 (god 18e97a, R6-2): whether the commit's diff of `path` (a root package.json or
+   *  package-lock.json) changes only "version" lines, or null when git cannot say; optional. Without
+   *  it such a file counts as a code change. */
+  versionOnly?(commit: string, path: string): Promise<boolean | null>;
 }
 
 /** A changed path that is documentation: a CHANGELOG (no extension or a text one) anywhere, anything
  *  under docs/, any .md file. */
 export const isDocFile = (p: string): boolean =>
   /(?:^|\/)changelog(?:[^/]*\.(?:md|markdown|txt|rst))?$|^docs\/|\.(?:md|markdown)$/i.test(p.trim().replace(/\\/g, '/'));
+
+/** A root package.json / package-lock.json: release bookkeeping when a commit changes only its version
+ *  (round 6, R6-2). */
+export const isVersionFile = (p: string): boolean => /^package(?:-lock)?\.json$/i.test(p.trim().replace(/\\/g, '/'));
+
+/** Round 6 (god 18e97a): an int card, its id starting INT-: only a merge into its own line is ever its
+ *  done sha, by field, link or subject (R6-3). */
+export const isIntCard = (id: string): boolean => /^int-/i.test(id);
+
+/** Round 6 (god 18e97a): a cut/release card (RELEASE-*, CUT-*, or an id carrying a version N.N.N that is
+ *  no int card): the only card a version/changelog/readme/docs-only commit confirms or is carried for. */
+export const isReleaseCard = (id: string): boolean => !isIntCard(id) && (/^(?:release|cut)-/i.test(id) || /\d+\.\d+\.\d+/.test(id));
+
+/** Round 6 (R6-2): the changed files are all docs, or a root package.json / package-lock.json whose diff
+ *  is only its version line (when the port can read the diff): the commit is release bookkeeping. */
+async function releaseOnly(full: string, files: readonly string[], git: GitPort): Promise<boolean> {
+  for (const p of files) {
+    if (isDocFile(p)) continue;
+    if (!isVersionFile(p) || !git.versionOnly || (await git.versionOnly(full, p)) !== true) return false;
+  }
+  return true;
+}
 
 /** The branch a merge commit's subject says it merged ("Merge guppy/x-1 @abc into int", "Merge branch
  *  'guppy/x-1'", "Merge pull request #7 from org/guppy/x-1"), or '' for none / not a merge subject. */
@@ -266,7 +292,9 @@ export interface ReportedCommit {
   /** Every merge the commit was reached through, innermost first (round 4b: a parent below a merge into
    *  the card's own line is not the card's value). */
   chain?: string[];
-  /** The commit changes only CHANGELOG/docs files (or none): it confirms no card. */
+  /** The commit changes only CHANGELOG/docs files (or none), or (round 6, R6-2) only those plus the
+   *  version line of a root package.json / package-lock.json: it confirms, and is carried for, no card
+   *  but a cut/release card (isReleaseCard). */
   docsOnly: boolean;
   /** Round 4b (god aa8321): the commit is a merge and this is the line it merged into (its subject says
    *  so, or an earlier merge on its first-parent chain does). For the card that owns that line the
@@ -303,7 +331,7 @@ export async function resolveReported(full: string, git: GitPort, depth = 0): Pr
     return out;
   }
   const files = git.changedFiles ? await git.changedFiles(full) : null;
-  return [{ commit: full, text: subject, docsOnly: files !== null && files.every(isDocFile) }];
+  return [{ commit: full, text: subject, docsOnly: files !== null && (await releaseOnly(full, files, git)) }];
 }
 
 /** The line a merge merged into: what its subject says, else what an earlier merge on its first-parent
@@ -710,6 +738,36 @@ export interface CardNames { cards: string[]; others: string[] }
  *  it names "some other card" (round 5, god bfcff1), never a known one. */
 const CARD_SHAPE_RE = /(?<![A-Za-z0-9./-])([A-Z][A-Z0-9]*(?:-[A-Z0-9]+(?:\.[0-9]+)*)+)(?![A-Za-z0-9-]|\.[A-Za-z0-9])/g;
 
+/** Round 6 (god 18e97a): a one-segment word plus a number (UTF-8, SHA-1, HTTP-2) is a label, not a card
+ *  shape; no board card is shaped so. A new card shaped so stays unseen (a documented residual). */
+const LABEL_RE = /^[A-Z][A-Z0-9]*-[0-9]+$/;
+
+const NUM_RE = /^[0-9]+$/;
+
+/**
+ * Round 6 (god 18e97a, R6-1): `token` (an UPPER-KEBAB token that is no known id) is a short form of the
+ * card `id`: (a) the id plus or minus a trailing -NNN (FEAT-ALPHA-WIDGET-DRAW-123; SYN-BETA-PIPE for
+ * SYN-BETA-PIPE-123); (b) a contiguous PREFIX or SUFFIX of the id's segments, two or more of them, at
+ * least one not a bare number (FEAT-ALPHA, WIDGET-DRAW); (c) the initials of the id's segments, alone
+ * or plus -ID / -NNN (FAWD, FAWD-ID, FAWD-7). A middle run (ALPHA-WIDGET), a one-segment overlap
+ * (DRAW-STUFF), a lower-case or one-segment abbreviation never match: no guessing beyond these forms
+ * (R6-4, a documented residual). The recogniser takes the token as the card when exactly one known
+ * card fits, as "other" when several fit.
+ */
+export function isOwnForm(token: string, id: string): boolean {
+  const t = token, c = id.toUpperCase();
+  if (t === c) return true;
+  if (t.startsWith(`${c}-`) && NUM_RE.test(t.slice(c.length + 1))) return true;
+  if (c.startsWith(`${t}-`) && NUM_RE.test(c.slice(t.length + 1))) return true;
+  const ts = t.split('-'), cs = c.split('-');
+  if (ts.length >= 2 && ts.length < cs.length && ts.some((s) => !NUM_RE.test(s))) {
+    if (t === cs.slice(0, ts.length).join('-') || t === cs.slice(cs.length - ts.length).join('-')) return true;
+  }
+  if (cs.length < 2) return false;
+  const initials = cs.map((s) => s[0]).join('');
+  return t === initials || t === `${initials}-ID` || (t.startsWith(`${initials}-`) && NUM_RE.test(t.slice(initials.length + 1)));
+}
+
 /**
  * Guide A12, round 5 (god bfcff1): THE card-name recogniser, the one every rule reads (a commit subject,
  * a merge's "into" line, a mail subject or body): a known card id, case-insensitive, its dashes written
@@ -733,7 +791,16 @@ export function cardNamer(cardIds: readonly string[]): (text: unknown) => CardNa
       rest = text.replace(re, ' ');
     }
     const others: string[] = [];
-    for (const m of rest.matchAll(CARD_SHAPE_RE)) if (!canon.has(m[1].toLowerCase().replace(/[- ]/g, '')) && !others.includes(m[1])) others.push(m[1]);
+    for (const m of rest.matchAll(CARD_SHAPE_RE)) {
+      const t = m[1];
+      if (canon.has(t.toLowerCase().replace(/[- ]/g, '')) || others.includes(t)) continue;
+      // Round 6 (god 18e97a, R6-1): a short form of exactly one known card names that card; of several,
+      // some other card; a label (UTF-8, SHA-1) that is no card's form names nothing.
+      const fits = ids.filter((id) => isOwnForm(t, id));
+      if (fits.length === 1) { if (!cards.includes(fits[0])) cards.push(fits[0]); continue; }
+      if (!fits.length && LABEL_RE.test(t)) continue;
+      others.push(t);
+    }
     return { cards, others };
   };
 }
@@ -847,7 +914,10 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
     // it merged are not descended; for every other card such a merge entry is dropped.
     const keepFor = (card: string): ((e: ReportedCommit | undefined) => boolean) => {
       const own = new Set(entries.filter((e) => e.into !== undefined && match(e.into).includes(card)).map((e) => e.commit));
-      return (e) => !e || (e.into !== undefined ? own.has(e.commit) : !e.merge || (!(e.chain ?? []).some((c) => own.has(c)) && match(e.text).includes(card)));
+      // Round 6 (god 18e97a): an int card's done sha is only a merge into its own line, by field, link or
+      // subject (R6-3); a docs / release-only commit is carried only for a cut/release card (R6-2).
+      if (isIntCard(card)) return (e) => !e || (e.into !== undefined && own.has(e.commit));
+      return (e) => !e || (e.into !== undefined ? own.has(e.commit) : (!e.docsOnly || isReleaseCard(card)) && (!e.merge || (!(e.chain ?? []).some((c) => own.has(c)) && match(e.text).includes(card))));
     };
     // (C) The commits a row on `card` would carry: the subject's @shas, else the latest in git order.
     // Round 5 (god bfcff1): a mail whose subject names @shas carries only those; when (B) drops them all
@@ -867,7 +937,12 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
     const keep = keepFor(card);
     const kept = entries.filter(keep);
     const atsKept = ats.filter((a) => keep(a.entry));
-    if (ats.length ? !atsKept.length : !kept.length) { skip(m.id, 'noCommit', [card]); continue; }
+    if (ats.length ? !atsKept.length : !kept.length) {
+      // Round 6 (R6-3): a plain commit carried for an int card makes the row ambiguous. Subject @shas that
+      // (B) drops stay noCommit whatever the body lists (round 5; Jim's P5).
+      skip(m.id, !ats.length && entries.length && isIntCard(card) ? 'ambiguous' : 'noCommit', [card]);
+      continue;
+    }
     // Several subject @shas that git cannot order and no card name settles: no claim from this mail.
     const reported = await subjectTip(atsKept, card, git);
     if (reported === 'ambiguous') { skip(m.id, 'ambiguous', [card]); continue; }
@@ -941,8 +1016,9 @@ async function cardOfDoneMail(
     // Jim's gate M-b: the commit's SUBJECT line only (a CHANGELOG, cut or int merge commit lists many
     // cards in its body; a card's own commit names it in the subject). Round 3: a merge resolved to
     // its merged parent (B); a commit changing only docs confirms nothing (A).
-    if (e.docsOnly) continue;
-    const hits = match(e.text).filter((x) => named.includes(x));
+    // Round 6 (god 18e97a): a docs / release-only commit confirms only a cut/release card (R6-2); an int
+    // card is confirmed only by a merge into its own line (R6-3).
+    const hits = match(e.text).filter((x) => named.includes(x) && (!e.docsOnly || isReleaseCard(x)) && (!isIntCard(x) || e.into !== undefined));
     if (hits.length === 1) byGit.add(hits[0]);
   }
   if (byGit.size === 1) return [...byGit][0];

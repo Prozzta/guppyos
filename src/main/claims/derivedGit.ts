@@ -54,6 +54,7 @@ export class DerivedGit implements GitLogPort {
   private readonly ancestry = new Map<string, boolean>();
   private readonly parentsOf = new Map<string, string[] | null>();
   private readonly files = new Map<string, string[] | null>();
+  private readonly versionDiffs = new Map<string, boolean | null>();
   private readonly o: Required<DerivedGitOptions>;
   constructor(readonly repo: string, opts: DerivedGitOptions = {}) {
     this.o = { timeoutMs: opts.timeoutMs ?? GIT_TIMEOUT_MS, command: opts.command ?? ['git'] };
@@ -159,6 +160,26 @@ export class DerivedGit implements GitLogPort {
       this.files.set(commit, r.code === 0 ? r.out.split('\0').map((s) => s.trim()).filter(Boolean) : null);
     }
     return this.files.get(commit) ?? null;
+  }
+
+  /** Round 6 (R6-2): whether the commit's diff of `path` (against its first parent; a root commit against
+   *  nothing) changes only "version" lines (a root package.json / package-lock.json bump), or null when git
+   *  cannot say. */
+  async versionOnly(commit: string, path: string): Promise<boolean | null> {
+    const key = `${commit}\0${path}`;
+    if (!this.versionDiffs.has(key)) {
+      const r = await git(this.repo, ['diff-tree', '--no-commit-id', '--root', '-r', '-p', '-U0', '--no-color', commit, '--', path], this.o);
+      let v: boolean | null = null;
+      if (r.code === 0) {
+        v = true;
+        for (const line of r.out.split('\n')) {
+          if (!/^[-+]/.test(line) || /^(?:\+\+\+|---) /.test(line)) continue;
+          if (!/^[-+]\s*"version"\s*:\s*"[^"]*"\s*,?\s*$/.test(line)) { v = false; break; }
+        }
+      }
+      this.versionDiffs.set(key, v);
+    }
+    return this.versionDiffs.get(key) ?? null;
   }
 
   /** Every commit on the branches, tags and remotes: full sha, committer time, parents, message (stashes left out). */
