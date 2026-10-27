@@ -618,7 +618,7 @@ export function cardMatcher(cardIds: readonly string[], exact = false): (text: u
 }
 
 /** Why a done mail gave no done-sha fact (one row per mail; the counts sum them). */
-export type DoneSkipReason = 'notDone' | 'noShaWord' | 'noCommit' | 'noCard' | 'ambiguous';
+export type DoneSkipReason = 'notDone' | 'noShaWord' | 'noCommit' | 'noCard' | 'ambiguous' | 'bodyOnly';
 export interface DoneSkip { mail: string; reason: DoneSkipReason; cards?: string[] }
 export interface DoneMailResult {
   facts: DerivedFact[];
@@ -638,17 +638,23 @@ const mailAt = (m: MailLike): string => iso(m.created_at) ?? '';
  * claims are superseded by the writer (same slot, card.<id>.donesha#<sender>).
  *
  * The card: the mail's card field when it is a known card, else the cards its delivery linked
- * (`cards`, the mail-cards index), else the cards its subject names, else its body. With more than
- * one, git decides: the card named by the messages of the commits the mail names, when exactly one
- * candidate is named there; otherwise the mail is ambiguous. Commits: the sha words of the subject
- * and body that git resolves to a commit (ranges a..b give both ends). R2 (c): a mail that gives no
- * fact carries a reason; noShaWord, noCommit and ambiguous are each what git confirmed.
- * A mail copied to several inboxes counts once (by id).
+ * (`cards`, the mail-cards index), else the cards its subject names. With more than one, git
+ * decides: the card named by the messages of the commits the mail names, when exactly one
+ * candidate is named there; otherwise the mail is ambiguous. CLAIMS-WEAKLINK-DONESHA: a mail with
+ * none of those links (no card field, nothing inherited, no card in its subject) falls back to the
+ * cards its BODY names, and those count only when git confirms: exactly one of them is named by the
+ * messages of the commits the mail reports. So a card's own done report that names the card only in
+ * its body (a delta-audit reply, lower case, beside other cards) is found, while a passing mention
+ * in a done mail about another card never is: that mail's own field, link or subject names the
+ * other card and wins, and with no link at all an unconfirmed body mention gives nothing (bodyOnly).
+ * Commits: the sha words of the subject and body that git resolves to a commit (ranges a..b give
+ * both ends). R2 (c): a mail that gives no fact carries a reason; noShaWord, noCommit, ambiguous
+ * and bodyOnly are each what git confirmed. A mail copied to several inboxes counts once (by id).
  */
 export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonly string[], git: GitPort): Promise<DoneMailResult> {
   const match = cardMatcher(cardIds, true);
   const known = new Map(cardIds.map((c) => [c.toLowerCase(), c]));
-  const skipped: Record<DoneSkipReason, number> = { notDone: 0, noShaWord: 0, noCommit: 0, noCard: 0, ambiguous: 0 };
+  const skipped: Record<DoneSkipReason, number> = { notDone: 0, noShaWord: 0, noCommit: 0, noCard: 0, ambiguous: 0, bodyOnly: 0 };
   const skips: DoneSkip[] = [];
   const skip = (mail: string, reason: DoneSkipReason, cards?: string[]): void => {
     skipped[reason]++;
@@ -711,7 +717,7 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
 /** The done mail's card (see doneMailFacts), or why there is none. */
 async function cardOfDoneMail(
   m: MailLike, known: Map<string, string>, match: (text: unknown) => string[], commits: readonly string[], git: GitPort,
-): Promise<string | { reason: 'noCard' | 'ambiguous'; cards?: string[] }> {
+): Promise<string | { reason: 'noCard' | 'ambiguous' | 'bodyOnly'; cards?: string[] }> {
   const field = typeof m.card === 'string' ? known.get(m.card.toLowerCase()) : undefined;
   if (field) return field;
   const linked = Array.isArray(m.cards)
@@ -719,11 +725,13 @@ async function cardOfDoneMail(
     : [];
   // `match` takes exact card ids only: a spelling variant (a space for a dash) never links (god
   // c33130, c19239: variant precision < 0.95). A card id the subject writes beats one inherited by a
-  // reply or conversation link; a card named only in the body never counts (mention-body is weak: spec F).
+  // reply or conversation link; a card named only in the body is weak (spec F): it is a candidate
+  // only when nothing else names a card, and only git can confirm it (CLAIMS-WEAKLINK-DONESHA).
   const exact = match(m.subject);
   if (exact.length === 1) return exact[0];
   if (linked.length === 1 && (!exact.length || exact.includes(linked[0]))) return linked[0];
-  const named = exact.length ? exact : linked;
+  const strong = exact.length ? exact : linked;
+  const named = strong.length ? strong : match(m.body);
   if (!named.length) return { reason: 'noCard' };
   if (git.message) {
     const byGit = new Set<string>();
@@ -733,5 +741,5 @@ async function cardOfDoneMail(
     }
     if (byGit.size === 1) return [...byGit][0];
   }
-  return { reason: 'ambiguous', cards: named.slice(0, 8) };
+  return { reason: strong.length ? 'ambiguous' : 'bodyOnly', cards: named.slice(0, 8) };
 }

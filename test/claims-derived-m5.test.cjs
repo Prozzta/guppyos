@@ -328,11 +328,11 @@ test('(d) done mails, R2 (a)(c): one per (card, sender): the newest done mail an
   assert.deepEqual(d2.refs, [{ type: 'task', value: 'SYN-D2' }, { type: 'msg', value: 'm2' }, { type: 'commit', value: H('d') }]);
   assert.equal(d2.at, '2026-10-03T00:00:00.000Z');
   assert.equal(r.facts.some((f) => f.refs.some((y) => y.type === 'commit' && y.value.startsWith('fedcba9'))), false, 'a hex word git does not know is no commit');
-  assert.deepEqual(r.skipped, { notDone: 1, noShaWord: 1, noCommit: 1, noCard: 2, ambiguous: 1 });
+  assert.deepEqual(r.skipped, { notDone: 1, noShaWord: 1, noCommit: 1, noCard: 1, ambiguous: 1, bodyOnly: 1 });
   assert.deepEqual(r.skips, [
-    { mail: 'm10', reason: 'noCard' }, { mail: 'm3', reason: 'noCard' }, { mail: 'm4', reason: 'ambiguous', cards: ['SYN-D1', 'SYN-D2'] }, { mail: 'm5', reason: 'notDone' }, { mail: 'm6', reason: 'noShaWord' }, { mail: 'm9', reason: 'noCommit' },
+    { mail: 'm10', reason: 'noCard' }, { mail: 'm3', reason: 'bodyOnly', cards: ['SYN-D3'] }, { mail: 'm4', reason: 'ambiguous', cards: ['SYN-D1', 'SYN-D2'] }, { mail: 'm5', reason: 'notDone' }, { mail: 'm6', reason: 'noShaWord' }, { mail: 'm9', reason: 'noCommit' },
   ]);
-  assert.equal(r.older, 1, 'm1 (agent-x on SYN-D1): an older mail of its (card, sender); m3 names SYN-D3 only in its body: no card (F1)');
+  assert.equal(r.older, 1, 'm1 (agent-x on SYN-D1): an older mail of its (card, sender); m3 names SYN-D3 only in its body and git confirms nothing: no card (F1, CLAIMS-WEAKLINK-DONESHA)');
   // A mail naming several cards: git settles it when the messages of its commits name exactly one of them.
   const gm = fakeGit({ commits: { dddddd4: H('d'), eeeeee5: H('e') }, parents: {}, time: {}, messages: { [H('d')]: 'SYN-D2: fix the thing', [H('e')]: 'unrelated' } });
   const settled = await F.doneMailFacts([{ id: 'm4', act: 'done', from: 'agent-z', subject: 'SYN-D1 and SYN-D2', body: 'dddddd4 eeeeee5' }], ['SYN-D1', 'SYN-D2'], gm);
@@ -341,7 +341,7 @@ test('(d) done mails, R2 (a)(c): one per (card, sender): the newest done mail an
   assert.deepEqual(still.skips, [{ mail: 'm4', reason: 'ambiguous', cards: ['SYN-D1', 'SYN-D2'] }], 'git names neither: ambiguous');
   // A card id the subject writes exactly beats one the delivery inherited (reply/conversation link);
   // a spelling variant (a space for the dash) never links, with or without a link (god c33130, c19239);
-  // with no card in the subject the inherited link counts; a body mention never does.
+  // with no card in the subject the inherited link counts; a body mention never beats a link.
   const linked = await F.doneMailFacts([{ id: 'm12', act: 'done', from: 'agent-x', cards: ['syn-d3'], subject: 'SYN-D1', body: 'aaaaaa1' }], ['SYN-D1', 'SYN-D3'], g);
   assert.deepEqual(linked.facts.map((f) => f.slot), ['card.syn-d1.donesha#agent-x']);
   const variant = await F.doneMailFacts([{ id: 'm15', act: 'done', from: 'agent-x', cards: ['syn-d3'], subject: 'SYN D1', body: 'aaaaaa1' }], ['SYN-D1', 'SYN-D3'], g);
@@ -488,7 +488,7 @@ test('backfill: a fixture hive and repo give every kind once; a re-run appends n
   const done = x.live().filter((c) => c.key === 'card.syn-h2.donesha').map((c) => c.refs.find((y) => y.type === 'commit').value).sort();
   assert.deepEqual(done, [s.c], 'one claim for (SYN-H2, agent-x): the range end c, later in git order than a; never b (forged, retyped or edited mails)');
   assert.equal(c1.doneShas.appended, 1);
-  assert.deepEqual(c1.doneSkipped, { notDone: 0, noShaWord: 1, noCommit: 0, noCard: 0, ambiguous: 0 });
+  assert.deepEqual(c1.doneSkipped, { notDone: 0, noShaWord: 1, noCommit: 0, noCard: 0, ambiguous: 0, bodyOnly: 0 });
   assert.deepEqual(x.logs.filter((r) => r.kind === 'claims-derived-done-skip'), [{ kind: 'claims-derived-done-skip', mail: 'm-h5', reason: 'noShaWord' }], 'R2 (c): the skip is logged with its reason');
   assert.equal(c1.gitShas.appended, 0, 'no commit message names a card');
   assert.equal(c1.decisions.failed + c1.cardFields.failed + c1.releases.failed + c1.doneShas.failed, 0);
@@ -570,7 +570,7 @@ test('R2 (b): done mails from main\'s permanent mail-cards index (merged with th
   assert.equal(c.gitShas.appended, 2);
   assert.equal(c.merges.appended, 1, 'branch.lone: a merge subject (god c33130)');
   assert.equal(c.doneShas.appended, 1, 'm-i1 (agent-x): commit a; m-i2 has no body that hashes and no sha in its subject');
-  assert.deepEqual(c.doneSkipped, { notDone: 0, noShaWord: 1, noCommit: 0, noCard: 0, ambiguous: 0 });
+  assert.deepEqual(c.doneSkipped, { notDone: 0, noShaWord: 1, noCommit: 0, noCard: 0, ambiguous: 0, bodyOnly: 0 });
   assert.equal((await W.runDerivedBackfill(x.deps, { hiveRoot: x.root, git, releases: { changelog: null, tags: [] } })).gitShas.appended, 0, 'idempotent');
 });
 
@@ -854,7 +854,8 @@ test('valid time (god e551de): every derived claim carries its source time; none
 });
 
 test('gate v2.4 step 1 (Jim a6ae9d): trusted links only, the subject @sha, the bump commit, fixVersion, plain CHANGELOG text', async () => {
-  // F1: a mention-body index row never gives a done mail its card; a reply row gives linked cards, not the field.
+  // F1: a mention-body index row never gives a done mail its card (CLAIMS-WEAKLINK-DONESHA: the mail is read
+  // with its body but with no card and no linked cards, for git to confirm); a reply row gives linked cards, not the field.
   const x = setup();
   const dir = path.join(x.root, 'state', 'mail-cards');
   fs.mkdirSync(dir, { recursive: true });
@@ -865,7 +866,7 @@ test('gate v2.4 step 1 (Jim a6ae9d): trusted links only, the subject @sha, the b
     row({ id: 'm-f3', card: 'SYN-F1', cards: ['SYN-F1'], cardFrom: 'mention-subject', from: 'agent-y', subject: 'SYN-F1 shipped', body: 'cccccc3' }),
   ].join('\n'));
   const mails = W.readDoneMails(x.root);
-  assert.deepEqual(mails.map((m) => [m.id, m.card ?? null, JSON.stringify(m.cards ?? null)]), [['m-f2', null, '["SYN-F1"]'], ['m-f3', null, '["SYN-F1"]']]);
+  assert.deepEqual(mails.map((m) => [m.id, m.card ?? null, JSON.stringify(m.cards ?? null), typeof m.body]), [['m-f1', null, 'null', 'string'], ['m-f2', null, '["SYN-F1"]', 'string'], ['m-f3', null, '["SYN-F1"]', 'string']]);
   // F2: the subject's @sha is the mail's sha, preferred over body commits and kept when git lacks it.
   const g = fakeGit({ commits: { aaaaaa1: H('a'), bbbbbb2: H('b'), '58102304': H('5') }, parents: { [H('b')]: [H('a')] }, time: {} });
   const r = await F.doneMailFacts([

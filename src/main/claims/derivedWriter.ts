@@ -218,8 +218,12 @@ export function readIndexDoneMails(hiveRoot: string, seen?: Set<string>): MailLi
       let r: Record<string, unknown>;
       try { r = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
       if (!r || r.act !== 'done' || typeof r.id !== 'string' || !isValidMailId(r.id) || got.has(r.id)) continue;
-      // F1 (spec F): a mention-body (or unknown) link never gives a done mail its card.
-      if (!TRUSTED_METHODS.has(r.cardFrom as MailLinkMethod)) continue;
+      // F1 (spec F): a mention-body (or unknown) link never gives a done mail its card. CLAIMS-WEAKLINK-DONESHA:
+      // a mention-body row still carries the mail (subject, body, sender, time) with NO card and NO linked
+      // cards, so doneMailFacts can read the cards its body names and let the commits it reports settle
+      // the card (cardOfDoneMail); the weak link itself never becomes the card.
+      const weak = r.cardFrom === 'mention-body';
+      if (!weak && !TRUSTED_METHODS.has(r.cardFrom as MailLinkMethod)) continue;
       got.add(r.id);
       if (seen?.has(`idx/${r.id}`)) continue;
       seen?.add(`idx/${r.id}`);
@@ -227,7 +231,7 @@ export function readIndexDoneMails(hiveRoot: string, seen?: Set<string>): MailLi
       out.push({
         id: r.id, from: r.from, act: 'done', subject: r.subject,
         ...(typeof r.card === 'string' && r.cardFrom === 'field' ? { card: r.card } : {}),
-        ...(Array.isArray(r.cards) ? { cards: r.cards } : typeof r.card === 'string' ? { cards: [r.card] } : {}),
+        ...(weak ? {} : Array.isArray(r.cards) ? { cards: r.cards } : typeof r.card === 'string' ? { cards: [r.card] } : {}),
         ...(typeof r.created_at === 'string' ? { created_at: r.created_at } : Number.isFinite(r.deliveredAt) ? { created_at: new Date(r.deliveredAt as number).toISOString() } : {}),
         ...body,
       });
