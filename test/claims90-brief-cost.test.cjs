@@ -120,7 +120,7 @@ test('STORE: a broken or torn read is never kept: once the break is mended with 
 
 // CLAIMS-BRIEF-LATENCY (god 360a86): appended lines are verified alone, never trusted.
 const { randomBytes } = require('node:crypto');
-const { recordMac, sha256Hex } = loadTs('src/main/claims/canonical.ts');
+const { recordMac, sha256Hex, keyIdOf } = loadTs('src/main/claims/canonical.ts');
 function grownStore() {
   const root = hive(); const ud = `${root}-ud`;
   const key = randomBytes(32);
@@ -187,6 +187,27 @@ for (const [name, bad, mutant] of [
     assert.notEqual(g.store.readLedgerCached('andy').chain, 'ok');
   });
 }
+
+test('STORE: an appended rekey line is never taken on the fast path: one that does not follow the line before it reports the break (MUTANT: rekey accepted when appended)', async () => {
+  const g = grownStore();
+  await ok(g.store.appendRecord('andy', note('first'), 'endpoint'));
+  assert.equal(g.store.readLedgerCached('andy').chain, 'ok');
+  g.append({ t: 'event', ev: 'rekey', keyId: keyIdOf(g.key), targets: ['c-000000000000'] });
+  const r = g.store.readLedgerCached('andy');
+  assert.notEqual(r.chain, 'ok', 'the full verify checks a rekey against the line before it');
+});
+
+test('STORE: a pending purge re-anchor refuses the fast path; the full read drops one the ledger never reached (MUTANT: pending purge ignored when appended)', async () => {
+  const g = grownStore();
+  await ok(g.store.appendRecord('andy', note('first'), 'endpoint'));
+  g.store.close();   // the head anchor flushed: no unflushed head of this process stands in for the stored one
+  assert.equal(g.store.readLedgerCached('andy').chain, 'ok');
+  const stored = g.anchors.get(g.root, 'andy');
+  g.anchors.set(g.root, 'andy', { ...stored, pending: { head: 'a'.repeat(64), lastId: 'c-000000000000' } });
+  g.append();
+  assert.equal(g.store.readLedgerCached('andy').chain, 'ok');
+  assert.equal(g.anchors.get(g.root, 'andy').pending, undefined, 'the swap never happened: the full read dropped the pending re-anchor');
+});
 
 test('STORE: a line chained on the head but written into an older segment is never served (MUTANT: any kept file may grow)', async () => {
   const g = grownStore();
