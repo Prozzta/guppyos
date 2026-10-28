@@ -220,3 +220,65 @@ test('F4 builder: readDoneMails carries in_reply_to from the index row and the l
   assert.equal(subjects.get(LREQ), 'ABC-13: audit @4444ddd please', 'MUTANT F4: the ledger request entry\'s subject is collected');
   assert.equal(subjects.get(DONE), 'ABC-12 audit PASS @1111aaa, tip now 2222bbb');
 });
+
+// ———————————————————————————————————————————————————————————— F5
+
+test('F5: a done mail reporting a range A..B reports the latest commit in the range, in git order, that names the card (by subject or cherry-pick source); B counts only when every commit of the range is the card\'s; else no done-sha', async () => {
+  const CARDS = ['ABC-12', 'ABC-13'];
+  // Line: H1 (base) -> H2 (ABC-12) -> H3 (ABC-13); a second line H1 -> H4 (ABC-12) -> H5 (ABC-12); a cherry-pick H6 of H2.
+  const git = fakeGit(
+    { '1111aaa': H('1'), '2222bbb': H('2'), '3333ccc': H('3'), '4444ddd': H('4'), '5555eee': H('5'), '6666fff': H('6'), '7777aaa': H('7') },
+    { [H('1')]: 'base', [H('2')]: 'ABC-12: the widget', [H('3')]: 'ABC-13: the gadget', [H('4')]: 'ABC-12: part one', [H('5')]: 'ABC-12: part two',
+      [H('6')]: `the widget, backported\n\n(cherry picked from commit ${H('2')})`, [H('7')]: 'housekeeping' },
+    { files: Object.fromEntries(['1', '2', '3', '4', '5', '6', '7'].map((c) => [H(c), SRC])),
+      ancestors: [[H('1'), H('2')], [H('2'), H('3')], [H('1'), H('3')], [H('1'), H('4')], [H('4'), H('5')], [H('1'), H('5')], [H('1'), H('6')], [H('6'), H('7')], [H('1'), H('7')]],
+      ranges: { [`${H('1')}..${H('3')}`]: [H('2'), H('3')], [`${H('1')}..${H('5')}`]: [H('4'), H('5')], [`${H('1')}..${H('7')}`]: [H('6'), H('7')], [`${H('1')}..${H('2')}`]: [H('2')] } },
+  );
+  const run = (id, subject, extra) => F.doneMailFacts([mail(id, subject, extra)], CARDS, git);
+  // Twin: a two-commit range for two cards: each card gets its own commit; B (ABC-13's) is not every commit's card.
+  let r = await run('f5-a', 'ABC-12 + ABC-13: landed 1111aaa..3333ccc');
+  assert.equal(commitOf(r, slot('ABC-12', SAM)), H('2'));
+  assert.equal(commitOf(r, slot('ABC-13', SAM)), undefined, 'MUTANT F5: B counts only when every commit of the range is the card\'s');
+  assert.deepEqual(r.skips, [{ mail: 'f5-a', reason: 'noCommit', cards: ['ABC-13'] }]);
+  assert.match(r.facts[0].text, /a commit in the range 1111aaa\.\.3333ccc/);
+  // Twin: a range wholly of one card gives B.
+  r = await run('f5-b', 'ABC-12 landed 1111aaa..5555eee');
+  assert.equal(commitOf(r, slot('ABC-12', SAM)), H('5'));
+  assert.match(r.facts[0].text, /the end of the range 1111aaa\.\.5555eee/);
+  // The range's start A is outside A..B: a one-card range over another card's line gives nothing, never A.
+  r = await run('f5-c', 'ABC-12 landed 1111aaa..3333ccc', { card: 'ABC-13' });
+  assert.equal(commitOf(r, slot('ABC-13', SAM)), undefined, 'MUTANT F5: the end of a mixed range is not the card\'s');
+  assert.equal(commitOf(r, slot('ABC-12', SAM)), undefined);
+  // The card field names the card whose commits the range holds: its latest own commit, B excluded, is the sha.
+  r = await run('f5-d', 'landed 1111aaa..3333ccc', { card: 'ABC-12' });
+  assert.equal(commitOf(r, slot('ABC-12', SAM)), H('2'), 'MUTANT F5: the start of the range was reported');
+  // A cherry-pick names what its source names: the backport of ABC-12's commit is ABC-12's; the housekeeping end is not.
+  r = await run('f5-e', 'ABC-12 backported 1111aaa..7777aaa');
+  assert.equal(commitOf(r, slot('ABC-12', SAM)), H('6'), 'MUTANT F5: the cherry-pick source names the card');
+  // A written @A..B is a range, not a reported @sha.
+  r = await run('f5-f', 'ABC-12 landed @1111aaa..2222bbb');
+  assert.equal(commitOf(r, slot('ABC-12', SAM)), H('2'));
+  assert.match(r.facts[0].text, /the end of the range/);
+  // Without rangeCommits (an older git port) both ends count as named commits, as before.
+  const legacy = fakeGit({ '1111aaa': H('1'), '3333ccc': H('3') }, { [H('1')]: 'ABC-12: base', [H('3')]: 'housekeeping' }, { files: { [H('1')]: SRC, [H('3')]: SRC }, ancestors: [[H('1'), H('3')]] });
+  r = await F.doneMailFacts([mail('f5-g', 'ABC-12 landed 1111aaa..3333ccc')], CARDS, legacy);
+  assert.equal(commitOf(r, slot('ABC-12', SAM)), H('3'), 'the older reading: the range end, the later of the two ends');
+  assert.deepEqual(F.subjectAtShas('X @1111aaa..2222bbb @3333ccc'), [{ sha: '3333ccc', name: '1111aaa..2222bbb' }]);
+  assert.equal(F.cherryPickSource(`fix\n\n(cherry picked from commit ${H('2')})`), H('2'));
+  assert.equal(F.cherryPickSource('fix'), '');
+});
+
+test('F5 git: DerivedGit.rangeCommits lists from..to oldest first (full shas) and null for an unknown ref', async () => {
+  const { execFileSync } = require('node:child_process');
+  const G = loadTs('src/main/claims/derivedGit.ts');
+  const repo = path.join(JAIL, 'repo-f5');
+  fs.mkdirSync(repo, { recursive: true });
+  const g = (...a) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false', ...a], { cwd: repo, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+  g('init', '-q');
+  const shas = [];
+  for (const n of ['one', 'two', 'three']) { fs.writeFileSync(path.join(repo, 'f.txt'), n); g('add', 'f.txt'); g('commit', '-q', '-m', n); shas.push(g('rev-parse', 'HEAD')); }
+  const dg = new G.DerivedGit(repo);
+  assert.deepEqual(await dg.rangeCommits(shas[0], shas[2]), [shas[1], shas[2]]);
+  assert.deepEqual(await dg.rangeCommits(shas[2], shas[0]), []);
+  assert.equal(await dg.rangeCommits(shas[0], '0'.repeat(40)), null);
+});

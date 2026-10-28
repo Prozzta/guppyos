@@ -462,7 +462,9 @@ function fixtureHive(x, r) {
   fs.mkdirSync(path.join(x.root, 'tasks-archive'));
   fs.writeFileSync(path.join(x.root, 'tasks-archive', '2026-10.jsonl'), `${JSON.stringify({ at: '2026-10-03T13:00:00Z', card: { id: 'SYN-A1', title: 'Archived', status: 'done', result: `done at ${c.slice(0, 8)}` } })}\n`);
   for (const ag of ['agent-x', 'agent-y']) fs.mkdirSync(path.join(x.root, 'agents', ag, 'inbox', '.done'), { recursive: true });
-  const mail = { id: 'm-h1', act: 'done', from: 'agent-x', to: 'god', subject: 'SYN-H2 shipped', body: `range ${a.slice(0, 8)}..${c.slice(0, 8)}`, created_at: '2026-10-03T12:00:00Z' };
+  // Round 10 (F5): a range a..c would report the card's own commits IN it (b and c are not SYN-H2's: no
+  // done sha), so the mail names its commits a and c outright; c is the later in git order.
+  const mail = { id: 'm-h1', act: 'done', from: 'agent-x', to: 'god', subject: 'SYN-H2 shipped', body: `first ${a.slice(0, 8)} then ${c.slice(0, 8)}`, created_at: '2026-10-03T12:00:00Z' };
   deliver(x, 'agent-x', mail, '.done');
   deliver(x, 'agent-y', mail);
   deliver(x, 'agent-y', { id: 'm-h2', act: 'request', from: 'god', subject: 'SYN-H1', body: b });
@@ -508,7 +510,7 @@ test('backfill: a fixture hive and repo give every kind once; a re-run appends n
   const doneRow = x.live().find((c) => c.key === 'card.syn-h2.donesha');
   assert.deepEqual([doneRow.value, doneRow.valueAgent], [s.c, 'agent-x']);
   const done = x.live().filter((c) => c.key === 'card.syn-h2.donesha').map((c) => c.refs.find((y) => y.type === 'commit').value).sort();
-  assert.deepEqual(done, [s.c], 'one claim for (SYN-H2, agent-x): the range end c, later in git order than a; never b (forged, retyped or edited mails)');
+  assert.deepEqual(done, [s.c], 'one claim for (SYN-H2, agent-x): c, the later in git order of the two named commits; never b (forged, retyped or edited mails)');
   assert.equal(c1.doneShas.appended, 1);
   assert.deepEqual(c1.doneSkipped, { notDone: 0, noShaWord: 1, noCommit: 0, noCard: 0, ambiguous: 0, bodyOnly: 0 });
   assert.deepEqual(x.logs.filter((r) => r.kind === 'claims-derived-done-skip'), [{ kind: 'claims-derived-done-skip', mail: 'm-h5', reason: 'noShaWord' }], 'R2 (c): the skip is logged with its reason');

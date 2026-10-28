@@ -233,6 +233,11 @@ export interface GitPort {
    *  any file, tests included), or null when git cannot say; optional. Without it any non-doc file
    *  counts as a code change. */
   versionOnly?(commit: string): Promise<boolean | null>;
+  /** Round 10 (god a22191, F5): the commits of the range from..to (git's `from..to`: reachable from `to`
+   *  and not from `from`), full shas, oldest first, or null when git cannot say; optional. With it a
+   *  done mail reporting A..B reports the card's own commits in the range (see doneMailFacts); without
+   *  it both ends count as named commits. */
+  rangeCommits?(from: string, to: string): Promise<string[] | null>;
 }
 
 /** A changed path that is documentation: a CHANGELOG (no extension or a text one) anywhere, anything
@@ -303,6 +308,8 @@ export interface ReportedCommit {
 }
 
 const MERGE_DEPTH = 3;
+/** F5: the most commits a written range is listed for; a longer one keeps the both-ends reading. */
+const RANGE_MAX = 200;
 
 /**
  * The commits a reported sha stands for (CLAIMS-WEAKLINK-DONESHA round 3, Jim's gate on 844a3ddf):
@@ -314,7 +321,8 @@ const MERGE_DEPTH = 3;
  */
 export async function resolveReported(full: string, git: GitPort, depth = 0): Promise<ReportedCommit[]> {
   const parents = git.parents ? await git.parents(full) : null;
-  const subject = commitSubject(git.message ? await git.message(full) : null);
+  const message = git.message ? await git.message(full) : null;
+  const subject = commitSubject(message);
   if (parents && parents.length >= 2) {
     if (depth >= MERGE_DEPTH) return [];
     const branch = mergedBranch(subject);
@@ -330,7 +338,19 @@ export async function resolveReported(full: string, git: GitPort, depth = 0): Pr
     return out;
   }
   const files = git.changedFiles ? await git.changedFiles(full) : null;
-  return [{ commit: full, text: subject, docsOnly: files !== null && (await releaseOnly(full, files, git)) }];
+  // Round 10 (F5): a cherry-pick names what its source names ("(cherry picked from commit X)" in the
+  // message): the source's subject joins the text, as a merge's branch name does.
+  const source = cherryPickSource(message);
+  const sourceSubject = source && git.message ? commitSubject(await git.message(source)) : '';
+  const text = sourceSubject && sourceSubject !== subject ? `${subject} ${sourceSubject}` : subject;
+  return [{ commit: full, text, docsOnly: files !== null && (await releaseOnly(full, files, git)) }];
+}
+
+/** The commit a message says it was cherry-picked from (git's "(cherry picked from commit <sha>)"), or ''. */
+export function cherryPickSource(message: string | null | undefined): string {
+  if (typeof message !== 'string') return '';
+  const m = message.match(/\(cherry picked from commit ([0-9a-f]{7,40})\)/i);
+  return m ? m[1].toLowerCase() : '';
 }
 
 /** The line a merge merged into: what its subject says, else what an earlier merge on its first-parent
@@ -358,7 +378,8 @@ const SHA_RE = /(?<![0-9A-Za-z])([0-9a-f]{7,40})(?:(\.\.\.?)([0-9a-f]{7,40}))?(?
 const DATE8 = /^(?:19|20)\d\d(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])$/;
 const shaLike = (s: string, at = false): boolean => /[0-9]/.test(s) && (/[a-f]/.test(s) || at || (s.length >= 8 && !DATE8.test(s)));
 
-export interface ShaMention { sha: string; range?: { from: string; to: string; end: 'from' | 'to' } }
+/** `range.end`: which end of a written `a..b` the sha is; 'in' marks a commit of the range itself (F5). */
+export interface ShaMention { sha: string; range?: { from: string; to: string; end: 'from' | 'to' | 'in' } }
 
 /** The sha-like words in text, in order, each once; `a..b` (or `a...b`) gives both ends, marked. */
 export function shaMentions(text: unknown): ShaMention[] {
@@ -384,7 +405,8 @@ export function shaMentions(text: unknown): ShaMention[] {
 export function subjectAtShas(subject: unknown): Array<{ sha: string; name: string }> {
   if (typeof subject !== 'string') return [];
   const out: Array<{ sha: string; name: string }> = [];
-  for (const m of subject.matchAll(/(?<![0-9A-Za-z])@([0-9a-fA-F]{7,40})(?![0-9A-Za-z])/g)) {
+  // F5: `@a..b` is a range, not a reported @sha.
+  for (const m of subject.matchAll(/(?<![0-9A-Za-z])@([0-9a-fA-F]{7,40})(?![0-9A-Za-z]|\.{2,3}[0-9a-fA-F])/g)) {
     const sha = m[1].toLowerCase();
     if (!/[0-9]/.test(sha) || out.some((x) => x.sha === sha)) continue;
     const before = subject.slice(0, m.index).trimEnd().split(/\s+/).pop() ?? '';
@@ -1044,7 +1066,40 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
     const entries: ReportedCommit[] = [];
     const rangeOf = new Map<string, ShaMention['range']>();
     const resolved = new Map<string, ReportedCommit[]>();
+    // Round 10 (god a22191, F5): a written range A..B, when git can list it, reports the commits IN the
+    // range (A itself is outside it), each resolved like a named commit and marked with the range; the
+    // card's row keeps the ones naming the card, and B only when every commit of the range names it
+    // (keepFor). A range git cannot list, or one longer than RANGE_MAX, keeps the older reading: both
+    // ends as named commits.
+    const ranges = new Map<string, { to: string; shas: string[]; members: ReportedCommit[] }>();
+    const rangeKey = (r: NonNullable<ShaMention['range']>): string => `${r.from}..${r.to}`;
+    if (git.rangeCommits) {
+      for (const x of mentions) {
+        if (!x.range || x.range.end !== 'to' || ranges.has(rangeKey(x.range))) continue;
+        const [from, to] = await Promise.all([git.commitOf(x.range.from), git.commitOf(x.range.to)]);
+        if (!from || !to) continue;
+        const shas = await git.rangeCommits(from, to);
+        if (!shas || shas.length > RANGE_MAX) continue;
+        ranges.set(rangeKey(x.range), { to, shas, members: [] });
+      }
+    }
     for (const x of mentions) {
+      const range = x.range && ranges.has(rangeKey(x.range)) ? ranges.get(rangeKey(x.range)) : undefined;
+      if (range && x.range?.end === 'from') continue;
+      if (range && x.range) {
+        const { to } = range;
+        for (const member of range.shas) {
+          const rs = resolved.get(member) ?? await resolveReported(member, git);
+          resolved.set(member, rs);
+          for (const r of rs) {
+            if (!range.members.some((e) => e.commit === r.commit)) range.members.push(r);
+            if (entries.some((e) => e.commit === r.commit)) continue;
+            entries.push(r);
+            rangeOf.set(r.commit, { ...x.range, end: member === to ? 'to' : 'in' });
+          }
+        }
+        continue;
+      }
       const full = await git.commitOf(x.sha);
       if (!full || resolved.has(full)) continue;
       const rs = await resolveReported(full, git);
@@ -1055,6 +1110,19 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
         if (x.range && !r.merge) rangeOf.set(r.commit, x.range);
       }
     }
+    /** F5: whether a commit of a written range counts for `card`: one in the range only when it names the
+     *  card; the range's end only when every commit of the range names the card. A commit outside any
+     *  listed range always passes here. */
+    const inRangeFor = (card: string): ((e: ReportedCommit) => boolean) => {
+      const names = (e: ReportedCommit): boolean => namesOf(e).cards.includes(card);
+      return (e) => {
+        const r = rangeOf.get(e.commit);
+        const range = r && r.end !== 'from' ? ranges.get(rangeKey(r)) : undefined;
+        if (!range) return true;
+        if (!names(e)) return false;
+        return r.end === 'to' ? range.members.every(names) : true;
+      };
+    };
     // The subject's @shas, resolved the same way; one the repository lacks stays as written (F2).
     const ats: Array<{ sha: string; name: string; full?: string; entry?: ReportedCommit; written: string }> = [];
     for (const x of atShas) {
@@ -1069,6 +1137,11 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
     const fieldCard = fieldCardOf(m.card);
     const fieldRow = typeof fieldCard === 'string';
     const keepFor = (card: string): ((e: ReportedCommit | undefined) => boolean) => {
+      const base = keepBase(card);
+      const ranged = inRangeFor(card);
+      return (e) => base(e) && (!e || ranged(e));
+    };
+    const keepBase = (card: string): ((e: ReportedCommit | undefined) => boolean) => {
       const own = new Set(entries.filter((e) => e.into !== undefined && match(e.into).includes(card)).map((e) => e.commit));
       const plain = (e: ReportedCommit): boolean => !e.merge || (!(e.chain ?? []).some((c) => own.has(c)) && match(e.text).includes(card));
       // Round 6 (god 18e97a, R6-3): on a link or subject row an int card's done sha is only a merge into its
@@ -1135,7 +1208,7 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
       withCommit++;
       newest.set(`${key}#${from}`, { m, card, from, commit, named: kept.length, range: rangeOf.get(commit), subject: !!reported, inRepo: !reported || !!reportedFull, via, own: entry?.into !== undefined });
     };
-    const card = await cardOfDoneMail(m, fieldCard, known, match, foreign, entries, carriedFor);
+    const card = await cardOfDoneMail(m, fieldCard, known, match, foreign, entries, carriedFor, ranges.size > 0);
     if (typeof card !== 'string' && !Array.isArray(card)) { skip(m.id, card.reason, card.cards); continue; }
     // Round 10 (god a22191, F2): a subject naming several cards is a row on EACH, carrying the @shas the
     // subject pairs with that card (pairedAtShas); without one, the card's own commits among those the
@@ -1158,7 +1231,7 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
   for (const [slot, { m, card, from, commit, named, range, subject, inRepo, via, own }] of newest) {
     const key = slot.slice(0, slot.lastIndexOf('#'));
     const at = iso(m.created_at);
-    const of = range ? ` (the ${range.end === 'from' ? 'start' : 'end'} of the range ${range.from}..${range.to})` : '';
+    const of = range ? ` (${range.end === 'in' ? 'a commit in' : range.end === 'from' ? 'the start of' : 'the end of'} the range ${range.from}..${range.to})` : '';
     const merged = via ? ` (the merged parent of ${via.slice(0, 8)}, the merge the mail wrote)` : own ? " (the merge into the card's own line)" : '';
     const others = subject ? ` as its subject's @sha${inRepo ? '' : ' (not in the repository)'}${merged}` : named > 1 ? `; it is the latest in git order of the ${named} commits the mail names${merged}` : merged;
     facts.push({
@@ -1175,7 +1248,7 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
 /** The done mail's card (see doneMailFacts), or why there is none. */
 async function cardOfDoneMail(
   m: MailLike, fieldCard: string | null | undefined, known: Map<string, string>, match: (text: unknown) => string[], foreign: (e: ReportedCommit, card: string) => string[],
-  entries: readonly ReportedCommit[], carriedFor: (card: string) => Promise<readonly ReportedCommit[]>,
+  entries: readonly ReportedCommit[], carriedFor: (card: string) => Promise<readonly ReportedCommit[]>, ranged = false,
 ): Promise<string | string[] | { reason: 'noCard' | 'ambiguous' | 'bodyOnly'; cards?: string[] }> {
   if (fieldCard) return fieldCard;
   // Round 9 (P1): a card field naming a card the board does not know is a done mail about some OTHER
@@ -1197,7 +1270,9 @@ async function cardOfDoneMail(
   // @sha is a row on EACH card a commit the mail names confirms (a commit naming both confirms both), the
   // caller pairing each with its @sha; (F3) the thread's link does not enter. One confirmed card, or a
   // subject with no @sha, keeps the rule below: the one card git confirms, else ambiguous.
-  if (exact.length >= 2 && subjectAtShas(m.subject).length) {
+  // F5: a subject naming several cards over a commit range is a row on each as well (each card keeps
+  // its own commits of the range).
+  if (exact.length >= 2 && (subjectAtShas(m.subject).length || ranged)) {
     const confirmed = exact.filter((c) => entries.some((e) => hitsOf(e, exact).includes(c)));
     if (confirmed.length >= 2) return confirmed;
   }

@@ -92,6 +92,7 @@ export class DerivedGit implements GitLogPort {
   private readonly parentsOf = new Map<string, string[] | null>();
   private readonly files = new Map<string, string[] | null>();
   private readonly versionDiffs = new Map<string, boolean | null>();
+  private readonly rangesOf = new Map<string, string[] | null>();
   private readonly o: Required<DerivedGitOptions>;
   constructor(readonly repo: string, opts: DerivedGitOptions = {}) {
     this.o = { timeoutMs: opts.timeoutMs ?? GIT_TIMEOUT_MS, command: opts.command ?? ['git'] };
@@ -207,6 +208,18 @@ export class DerivedGit implements GitLogPort {
       this.versionDiffs.set(commit, r.code === 0 ? versionMaskedDiff(r.out) : null);
     }
     return this.versionDiffs.get(commit) ?? null;
+  }
+
+  /** Round 10 (F5): the commits of `from..to` (reachable from `to`, not from `from`), full shas, oldest
+   *  first, or null when git cannot say. */
+  async rangeCommits(from: string, to: string): Promise<string[] | null> {
+    const key = `${from}..${to}`;
+    if (!this.rangesOf.has(key)) {
+      const r = await git(this.repo, ['rev-list', '--reverse', key], this.o);
+      const w = r.out.trim().split(/\s+/).filter(Boolean);
+      this.rangesOf.set(key, r.code === 0 && w.every((x) => /^[0-9a-f]{40}$/.test(x)) ? w : null);
+    }
+    return this.rangesOf.get(key) ?? null;
   }
 
   /** Every commit on the branches, tags and remotes: full sha, committer time, parents, message (stashes left out). */
