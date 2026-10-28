@@ -1194,6 +1194,10 @@ async function cardOfDoneMail(
   // not judged. A refused link is weak: it joins the subject's cards below, and the caller skips the
   // row when the carried commit does not count for the card git confirms.
   let refused: string[] | undefined;
+  // Round 10 (god a22191, F3): the mail's own card outranks its thread: the card field first (above), then
+  // a card its own subject names; the reply / conversation link applies only when the subject names no
+  // card, or names the linked card itself (among others it only breaks the tie, and a carried commit of
+  // another card refuses it). A subject naming only another card is judged on that card alone.
   if (linked.length === 1 && (!exact.length || exact.includes(linked[0]))) {
     const others = [...new Set((await carriedFor(linked[0])).flatMap((e) => foreign(e, linked[0])))];
     if (!others.length) return linked[0];

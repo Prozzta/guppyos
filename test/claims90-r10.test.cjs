@@ -121,3 +121,34 @@ test('F2: a done mail whose subject names two or more cards with @shas is indexe
   assert.deepEqual([...F.pairedAtShas('ABC-13 and ABC-12 landed: @1111aaa, @2222bbb', ['ABC-12', 'ABC-13'], namer)], [['ABC-12', ['2222bbb']], ['ABC-13', ['1111aaa']]], 'MUTANT F2: order of appearance, not of the card list');
   assert.deepEqual([...F.pairedAtShas('ABC-12 PASS @1111aaa; ABC-13 FAIL', ['ABC-12', 'ABC-13'], namer)], [['ABC-12', ['1111aaa']], ['ABC-13', []]], 'a card in a segment with no @sha gets none');
 });
+
+// ———————————————————————————————————————————————————————————— F3
+
+test('F3: the mail\'s own card field, then a card its own subject names, outranks the card of the thread it replies to; the reply link applies only when the mail names no card', async () => {
+  const CARDS = ['ABC-12', 'ABC-13'];
+  const git = fakeGit({ '1111aaa': H('1'), '2222bbb': H('2'), '4444ddd': H('4') }, { [H('1')]: 'ABC-12: the widget', [H('2')]: 'ABC-13: the gadget', [H('4')]: 'housekeeping' },
+    { files: { [H('1')]: SRC, [H('2')]: SRC, [H('4')]: SRC } });
+  const run = (id, subject, extra) => F.doneMailFacts([mail(id, subject, { cards: ['ABC-12'], ...extra })], CARDS, git);
+  // Twin: a reply in card A's thread (linked to ABC-12) whose card field is ABC-13 is indexed to ABC-13 only.
+  let r = await run('f3-a', 'Re: ABC-12 audit: PASS @2222bbb', { card: 'ABC-13' });
+  assert.equal(commitOf(r, slot('ABC-13', SAM)), H('2'));
+  assert.equal(commitOf(r, slot('ABC-12', SAM)), undefined, 'MUTANT F3: the field outranks the thread and the subject');
+  assert.deepEqual(r.skips, []);
+  // A reply in ABC-12's thread whose own subject names ABC-13 (its commit confirms it) is ABC-13's, not the thread's.
+  r = await run('f3-b', 'ABC-13 PASS @2222bbb');
+  assert.equal(commitOf(r, slot('ABC-13', SAM)), H('2'), 'MUTANT F3: the subject outranks the thread');
+  assert.equal(commitOf(r, slot('ABC-12', SAM)), undefined);
+  // The link applies when the subject names no card (a bare verdict in the thread), or only the thread's card.
+  r = await run('f3-c', 'Re: audit PASS @1111aaa');
+  assert.equal(commitOf(r, slot('ABC-12', SAM)), H('1'), 'a reply naming no card takes the thread');
+  r = await run('f3-d', 'Re: ABC-12 audit PASS @1111aaa');
+  assert.equal(commitOf(r, slot('ABC-12', SAM)), H('1'));
+  // A subject naming the thread's card and another, with no @sha, is judged by git over both (the link alone never decides).
+  r = await run('f3-e', 'ABC-12 thread: ABC-13 landed at 2222bbb');
+  assert.equal(commitOf(r, slot('ABC-13', SAM)), H('2'), 'MUTANT F3: the link would have made this ABC-12');
+  assert.equal(commitOf(r, slot('ABC-12', SAM)), undefined);
+  // A subject card no commit confirms, in another card's thread, is ambiguous: never the thread's card by fallback.
+  r = await run('f3-f', 'ABC-13 PASS @4444ddd');
+  assert.deepEqual(r.skips, [{ mail: 'f3-f', reason: 'ambiguous', cards: ['ABC-13'] }]);
+  assert.equal(commitOf(r, slot('ABC-12', SAM)), undefined, 'MUTANT F3: no fallback to the thread');
+});
