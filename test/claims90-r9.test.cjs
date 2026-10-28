@@ -206,3 +206,28 @@ test('gate R1 (P3): an unknown token with no number is a topic, not another card
   // P3-a stands: the foreign commits there name full ids.
   assert.equal(commitOf(await F.doneMailFacts([field3('r1-d', 'landed', 'carries 2222bbb and 3333ccc on top of 1111aaa', T1)], CARDS3, git3), I3), H('5'));
 });
+
+test('gate R2 (P2): an id suffix names the linked card even when shared; a trailing verdict segment is not a second item', async () => {
+  const CARDS = ['ALPHA-WIDGET-101', 'BETA-WIDGET-101', 'GAMMA-LOOP-201'];
+  const git = fakeGit({ abc1234: H('1'), bcd2345: H('2') }, { [H('1')]: 'ALPHA-WIDGET-101: fix', [H('2')]: 'fix the widget' });
+  const link = (id, subject, card = 'ALPHA-WIDGET-101') => F.doneMailFacts([{ id, act: 'done', from: 'sam-aaaaaaaa', cards: [card], subject, body: '', created_at: T0 }], CARDS, git);
+  const A = slot('ALPHA-WIDGET-101', 'sam-aaaaaaaa');
+  assert.equal(commitOf(await link('r2-a', 'Re: WIDGET-101 @abc1234 delta - PASS 0/0/0'), A), H('1'), 'MUTANT R2: the shared suffix is "another card"');
+  assert.equal(commitOf(await link('r2-b', 'ALPHA-WIDGET-101 delta - PASS 0/0/0 @abc1234'), A), H('1'), 'MUTANT R2: the trailing verdict holding the sha is a second item');
+  assert.equal(commitOf(await link('r2-c', 'Re: WIDGET-101 delta - PASS 0/0/0 @abc1234'), A), H('1'));
+  // The suffix names the LINKED card only: on BETA's row the same subject is BETA's (its own suffix too).
+  assert.equal(commitOf(await link('r2-d', 'Re: WIDGET-101 @bcd2345 delta - PASS 0/0/0', 'BETA-WIDGET-101'), slot('BETA-WIDGET-101', 'sam-aaaaaaaa')), H('2'), 'each card owns its suffix');
+  // A suffix of another card is not this card's: GAMMA's row with a WIDGET-101 item stays ambiguous among two items.
+  const r2e = (await link('r2-e', 'WIDGET-101 PASS @abc1234; GAMMA-LOOP-201 FAIL', 'GAMMA-LOOP-201')).skips;
+  assert.equal(r2e.length, 1); assert.equal(r2e[0].reason, 'ambiguous'); assert.equal(r2e[0].mail, 'r2-e');
+  // A line word keeps a status segment an item (P2-a stands); a partial that is not a suffix does not name the card.
+  const lone = (subject, name, card = 'ALPHA-WIDGET-101') => F.loneAtCounts(subject, { sha: 'abc1234', name }, card, F.cardNamer(CARDS));
+  assert.equal(lone('Re: resume - 3 verdicts: GAMMA-LOOP PASS (live deny); DELTA M3 PASS, M4 NOT YET; rc NIT done @abc1234', 'done', 'GAMMA-LOOP-201'), false, 'MUTANT R2: the rc segment folds away and P2-a counts');
+  assert.equal(lone('GAMMA-LOOP-201 PASS; OTHER-THING-9 FAIL; int stage 3 done @abc1234', 'done', 'GAMMA-LOOP-201'), false, 'an int line segment');
+  assert.equal(lone('OTHER-THING-9 FAIL; done @abc1234', 'done', 'GAMMA-LOOP-201'), true, 'a verdict folds into the item before it: one item, rule (iii)');
+  assert.equal(lone('GAMMA-LOOP-201 PASS; OTHER-THING-9 FAIL; done @abc1234', 'done', 'GAMMA-LOOP-201'), false, 'MUTANT R2: the folded verdict is the other item\'s');
+  assert.equal(lone('A-1 PASS; B-2 FAIL @abc1234', 'fail', 'GAMMA-LOOP-201'), false, 'MUTANT R2: a segment with a word of its own ("B-2") is an item, not a verdict');
+  assert.equal(lone('ALPHA-WIDGET-101 PASS - FAIL 1/0/0 @abc1234', 'fail'), true, 'a verdict folds into the item before it (the card)');
+  assert.equal(lone('OTHER-WIDGET-102 @abc1234; OTHER-THING-9 FAIL', 'other-widget-102'), false, 'MUTANT R2: a card-shaped token that is not a suffix of the id is another item');
+  assert.equal(lone('PASS 0/0/0 @abc1234', 'pass'), true, 'a lone verdict segment is the one item');
+});

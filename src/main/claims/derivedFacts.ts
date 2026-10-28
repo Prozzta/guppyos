@@ -417,6 +417,10 @@ export async function subjectTip(shas: ReadonlyArray<{ sha: string; name: string
 const SEGMENT_RE = /;|\s[-–—]\s/;
 /** A segment that reports an item: it names a card (known or card-shaped) or states a status. */
 const STATUS_WORD_RE = /\b(?:pass|fail|done|landed|merged|released|cut|shipped|verdicts?)\b/i;
+/** A segment about a line rather than a card: an int, rc or stage line (gate R2). */
+const LINE_WORD_RE = /(?<![A-Za-z0-9])(?:int|rc|stage)(?![A-Za-z])/i;
+/** A segment that says nothing but a verdict: status words, counts (0/0/0) and an @sha (gate R2, " - PASS 0/0/0"). */
+const VERDICT_ONLY_RE = /^(?:[\s,.:()!-]*(?:pass|fail|done|landed|merged|released|cut|shipped|verdicts?|\d[\d/]*|@[0-9a-f]{7,40}))+[\s,.:()!-]*$/i;
 
 /**
  * Round 9 (P2): whether a done mail's LONE subject @sha counts for `card` on a link or subject row. It
@@ -428,11 +432,22 @@ export function loneAtCounts(subject: string, at: { sha: string; name: string },
   const id = card.toLowerCase();
   if (at.name === id || at.name === `guppy/${id}` || at.name === `origin/guppy/${id}`) return true;
   const branchRe = new RegExp(`guppy/${escapeRe(id)}(?![A-Za-z0-9-])`, 'i');
-  const isItem = (s: string): boolean => { const n = names(s); return n.cards.length > 0 || n.others.length > 0 || STATUS_WORD_RE.test(s); };
-  const segments = subject.split(SEGMENT_RE);
+  // Gate R2: a short form of the card's own id (an id suffix, WIDGET-101 for ALPHA-WIDGET-101) names the card
+  // on its own row even when another card shares the suffix.
+  const namesCard = (s: string): boolean => { const n = names(s); return n.cards.includes(card) || n.others.some((o) => { const t = o.toLowerCase(); return t === id || id.endsWith(`-${t}`); }) || branchRe.test(s); };
+  const namesAny = (s: string): boolean => { const n = names(s); return n.cards.length > 0 || n.others.length > 0 || namesCard(s); };
+  // Gate R2: a segment that says nothing but a verdict (" - PASS 0/0/0", "done @sha") is the verdict of the item
+  // before it, not an item of its own; it folds into that segment. A segment with any other word ("B-2 FAIL")
+  // is an item; a line word (int, rc, stage) makes a segment an item too. A sha-only segment names no item (ii).
+  const segments: string[] = [];
+  for (const s of subject.split(SEGMENT_RE)) {
+    if (segments.length && STATUS_WORD_RE.test(s) && VERDICT_ONLY_RE.test(s)) segments[segments.length - 1] += ` ${s}`;
+    else segments.push(s);
+  }
+  const isItem = (s: string): boolean => namesAny(s) || LINE_WORD_RE.test(s) || STATUS_WORD_RE.test(s);
   const atRe = new RegExp(`@${at.sha}(?![0-9A-Za-z])`, 'i');
   const seg = segments.find((s) => atRe.test(s)) ?? subject;
-  if (names(seg).cards.includes(card) || branchRe.test(seg) || !isItem(seg)) return true;
+  if (namesCard(seg) || !isItem(seg)) return true;
   return segments.filter(isItem).length <= 1;
 }
 
