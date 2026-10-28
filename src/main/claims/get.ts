@@ -100,7 +100,7 @@ export const MULTI_FIELDS: readonly string[] = ['merge', 'merge.rc'];
 /** The lead label of a multi-valued field: the rc merges print under `merge:` too (the value names its target). */
 const multiLabel = (f: string): string => (f === 'merge.rc' ? 'merge' : f);
 /** L4: the release.<v> lead lines, in print order (release.<v>.tag, release.<v>.bump: Creed's L1 keys). */
-export const RELEASE_FIELDS = ['tag', 'bump'] as const;
+export const RELEASE_FIELDS = ['tag', 'bump', 'head', 'installer'] as const;
 const RELEASE_KEY = /^release\.\d+(?:\.\d+)+$/;
 export interface GetFieldLine {
   field: string;
@@ -193,6 +193,19 @@ export const readSafeId = (id: string): string => id.replace(/^c_(?=[0-9a-f]{12}
 export const safeId = (id: string): string => id.replace(/-(?=[0-9a-f]{7,}(?![0-9a-z]))/gi, '_');
 
 const sha7 = (s: string): string[] => (s.toLowerCase().match(SHA_RE) ?? []).filter((x) => /\d/.test(x)).map((x) => x.slice(0, 7));
+
+/** The done-mail fallback has no repository lookup. An all-digit run is usually an epoch, and an
+ * explicitly labelled setup/installer sha256 is an artefact digest; both are rejected here only. */
+const mailCommitShas = (s: string): string[] => {
+  const out: string[] = [];
+  for (const m of s.toLowerCase().matchAll(SHA_RE)) {
+    const x = m[0];
+    const before = s.slice(Math.max(0, m.index! - 32), m.index!).toLowerCase();
+    if (!/\d/.test(x) || !/[a-f]/.test(x) || /(?:setup|installer)\s+(?:digest|sha256|sha-256)\s*[:=]?\s*$/.test(before)) continue;
+    out.push(x.slice(0, 7));
+  }
+  return out;
+};
 const versions = (s: string): string[] => s.match(VERSION_RE) ?? [];
 
 interface Indexed {
@@ -534,7 +547,7 @@ function resolveIn(ix: Indexed, term: string, opts: GetOptions, d: GetDeps, with
           const hay = text.toLowerCase();
           let named = [...known].filter((v) => hay.includes(v));
           // Jim ac6f85: for a done-sha field (or the bare card) a commit sha in that agent's done mail is a known value.
-          if (!named.length && shaField && m.act === 'done' && (!agent || m.from === agent)) named = sha7(text);
+          if (!named.length && shaField && m.act === 'done' && (!agent || m.from === agent)) named = mailCommitShas(text);
           if (!named.length) continue;
           const first = named.map((v) => hay.indexOf(v)).filter((i) => i >= 0).sort((a, b) => a - b)[0] ?? 0;
           // L2: the value the mail names, whole (the sha run at the first named value, or the version as written).

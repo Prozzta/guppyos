@@ -181,6 +181,17 @@ export function cardRecordFacts(cards: readonly CardLike[]): DerivedFact[] {
   return out;
 }
 
+/** An explicit close-as-superseded marker belongs to this card only when it is in its own result
+ * or closing notes. A mention that another card was superseded must not change this card's state. */
+export function closedAsSupersededBy(c: Pick<CardLike, 'result' | 'notes'>): string | null {
+  for (const text of [c.result, ...noteEntries(c.notes)]) {
+    if (typeof text !== 'string') continue;
+    const m = /(?:^|[\n;])\s*(?:\[[^\]]+\]\s*)?(?:close[- ]superseded|closed\s+as\s+superseded)\s+by\s+([A-Z][A-Z0-9]*(?:-[A-Z0-9]+(?:\.[0-9]+)*)+)\b/i.exec(text);
+    if (m) return m[1];
+  }
+  return null;
+}
+
 /** A mail from the per-card mail index: the cards it is linked to by a trusted method only. */
 export interface RulingMailLike { id: string; from: string; act: string; subject?: string; body?: string; cards: string[]; at?: string }
 
@@ -614,7 +625,9 @@ export async function cardFieldFacts(cards: readonly CardLike[], git: GitPort | 
     const status = cardKey(id, 'status');
     if (status && typeof c.status === 'string' && c.status) {
       const at = statusAt(c);
-      out.push({ slot: status, key: status, kind: 'fact', text: `Card ${id}${title} status: ${clip(c.status, 40)}`, ...(at ? { at } : {}), refs: [task], value: clip(c.status, 40) });
+      const by = closedAsSupersededBy(c);
+      const value = by ? 'VOID (closed as superseded by ' + by + ')' : clip(c.status, 40);
+      out.push({ slot: status, key: status, kind: 'fact', text: 'Card ' + id + title + ' status: ' + value, ...(at ? { at } : {}), refs: [task], value });
     }
     const assignee = cardKey(id, 'assignee');
     if (assignee) {
@@ -712,6 +725,8 @@ export function auditVerdict(c: CardLike): { verdict: 'PASS' | 'FAIL'; sha: stri
 // ———————————————————————————————————————————————————————————— (c) releases
 
 export interface TagLike { name: string; commit: string; date?: string }
+/** The tip of origin/release-<version>, when that remote ref is available. */
+export interface ReleaseHead { version: string; commit: string }
 export interface ChangelogSection { version: string; date?: string; headline?: string; entries: Array<{ heading: string; text: string }> }
 
 const VERSION_RE = /^\d+(?:\.\d+){1,3}$/;
@@ -760,12 +775,22 @@ export type BumpMap = ReadonlyMap<string, { commit: string; time: number }>;
  * release.<ver>: the section's date, headline, tag commit and version bump commit; release.<ver>.e<n>:
  * each entry's lead; release.<ver>.bump: the bump commit. Text is stored without CHANGELOG markup.
  */
-export function releaseFacts(sections: readonly ChangelogSection[], tags: readonly TagLike[], bumps?: BumpMap): DerivedFact[] {
+export function releaseFacts(sections: readonly ChangelogSection[], tags: readonly TagLike[], bumps?: BumpMap, heads: readonly ReleaseHead[] = [], sources: { cards?: readonly CardLike[]; mails?: readonly MailLike[] } = {}): DerivedFact[] {
   const out: DerivedFact[] = [];
   const tagOf = new Map<string, TagLike>();
   for (const t of tags) { const v = tagVersion(t.name); if (v && /^[0-9a-f]{40}$/.test(t.commit)) tagOf.set(v, t); }
   const versions = new Set<string>([...sections.map((s) => s.version), ...tagOf.keys()]);
   const secOf = new Map(sections.map((s) => [s.version, s]));
+  const headOf = new Map(heads.filter((h) => VERSION_RE.test(h.version) && /^[0-9a-f]{40}$/i.test(h.commit)).map((h) => [h.version, h.commit.toLowerCase()]));
+  const digestFor = (version: string): string | null => {
+    const releaseCard = new RegExp('\\b(?:release|cut)-' + version.replace(/\./g, '\\.') + '(?![0-9.])', 'i');
+    const labelled = /\b(?:setup|installer)\s+(?:digest|sha256|sha-256)\s*[:=]?\s*([0-9a-f]{64})(?![0-9a-f])/i;
+    const texts: unknown[] = [];
+    for (const c of sources.cards ?? []) if (typeof c.id === 'string' && releaseCard.test(c.id)) texts.push(c.result, c.notes);
+    for (const m of sources.mails ?? []) if (m.act === 'done' && releaseCard.test(String(m.subject ?? '') + ' ' + String(m.body ?? ''))) texts.push(m.subject, m.body);
+    for (const text of texts) { const hit = typeof text === 'string' ? labelled.exec(text) : null; if (hit) return hit[1].toLowerCase(); }
+    return null;
+  };
   for (const v of versions) {
     const key = `release.${v}`;
     if (!keyOk(key)) continue;
@@ -775,7 +800,11 @@ export function releaseFacts(sections: readonly ChangelogSection[], tags: readon
     if (s?.date) parts.push(`released ${s.date} (CHANGELOG)`);
     if (t) parts.push(`tag ${t.name} is commit ${t.commit}${iso(t.date) ? ` (tagged ${iso(t.date)!.slice(0, 10)})` : ''}`);
     const b = bumps?.get(v);
+    const head = headOf.get(v);
+    const digest = digestFor(v);
     if (b) parts.push(`version bump commit ${b.commit}`);
+    if (head) parts.push('origin release-' + v + ' head ' + head);
+    if (digest) parts.push('installer digest ' + digest);
     let text = parts.join(', ');
     if (s?.headline) text = `${text}. ${clip(plain(s.headline), TEXT_MAX - len(text) - 2)}`;
     const refs: Ref[] = t ? [{ type: 'commit', value: t.commit }] : [];
@@ -791,6 +820,10 @@ export function releaseFacts(sections: readonly ChangelogSection[], tags: readon
     const tk = `${key}.tag`;
     const tt = t ? iso(t.date) ?? at : undefined;
     if (t && keyOk(tk) && tt) out.push({ slot: tk, key: tk, kind: 'fact', text: `Guppy ${v} release tag ${t.name} is commit ${t.commit.slice(0, 8)} (${t.commit})`, at: tt, refs: [{ type: 'commit', value: t.commit }], value: t.commit });
+    const hk = key + '.head';
+    if (head && keyOk(hk)) out.push({ slot: hk, key: hk, kind: 'fact', text: 'Guppy ' + v + ' release branch origin/release-' + v + ' head is ' + head.slice(0, 8) + ' (' + head + ')', ...(at ? { at } : {}), refs: [{ type: 'commit', value: head }], value: head });
+    const dk = key + '.installer';
+    if (digest && keyOk(dk)) out.push({ slot: dk, key: dk, kind: 'fact', text: 'Guppy ' + v + ' installer digest: ' + digest, ...(at ? { at } : {}), refs: [], value: digest });
     (s?.entries ?? []).forEach((e, i) => {
       const ek = `${key}.e${i + 1}`;
       if (!keyOk(ek)) return;

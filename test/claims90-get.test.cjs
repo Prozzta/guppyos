@@ -132,6 +132,16 @@ test('decisions: a card returns its FULL decision list newest first (D1 has 20 r
   assert.doesNotMatch(text('card.foo-7.status'), /^decisions/m);
 });
 
+test('F7 lag bridge: a done mail fallback rejects epoch timestamps and labelled installer digests', () => {
+  const timestamp = mail('2026-10-10T09-00-00-000Z-ffffff', 'alpha-1', 'god', 'done', 'FOO-7 done', '2026-10-10T09:00:00.000Z', 'finished at 1760100000000');
+  const digest = mail('2026-10-11T09-00-00-000Z-ffffff', 'alpha-1', 'god', 'done', 'FOO-7 done', '2026-10-11T09:00:00.000Z', 'setup sha256 ' + 'a'.repeat(64));
+  for (const row of [timestamp, digest]) {
+    const d = deps({ mailRows: () => [row] });
+    const r = get('card.foo-7.donesha', { agent: 'alpha-1' }, d);
+    assert.equal(r.current.source, 'claim', 'twin: non-commit token cannot bridge the derived lag');
+  }
+});
+
 test('--agent: picks that agent\'s newest live claim, else the derived row naming its done mail ("from <agent> "), else the global newest (Jim df789a a; MUTANT: global only)', () => {
   assert.equal(get('card.foo-7.donesha').current.claimId, 'c-aaaaaaaaaaa2', 'no --agent: newest live');
   assert.equal(get('card.foo-7.donesha', { agent: 'beta-2' }).current.claimId, 'c-ccccccccccc2', 'beta-2 wrote one itself');

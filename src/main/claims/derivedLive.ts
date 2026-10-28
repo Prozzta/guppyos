@@ -106,7 +106,7 @@ export class DerivedLive {
     const git = c.git && await c.git.ok() ? c.git : null;
     const rel = await this.releaseSource(git);
     await syncDerived(c.w, rulingMailFacts(readIndexRulingMails(c.root)));
-    await syncDerived(c.w, releaseFacts(parseChangelog(rel.changelog), rel.tags, rel.bumps));
+    await syncDerived(c.w, releaseFacts(parseChangelog(rel.changelog), rel.tags, rel.bumps, rel.heads, { cards: readCards(c.root), mails: readDoneMails(c.root) }));
     const mails = this.newDoneMails(c.root);
     if (git && mails.length) {
       const ids = readCards(c.root).map((x) => x.id).filter((id): id is string => typeof id === 'string');
@@ -117,8 +117,8 @@ export class DerivedLive {
     }
   }
 
-  private async releaseSource(git: DerivedGit | null): Promise<{ changelog: string | null; tags: Awaited<ReturnType<DerivedGit['tags']>>; bumps?: Awaited<ReturnType<DerivedGit['bumps']>> }> {
-    return { changelog: this.d.changelog(), tags: git ? await git.tags() : [], ...(git ? { bumps: await git.bumps() } : {}) };
+  private async releaseSource(git: DerivedGit | null): Promise<{ changelog: string | null; tags: Awaited<ReturnType<DerivedGit['tags']>>; bumps?: Awaited<ReturnType<DerivedGit['bumps']>>; heads?: Awaited<ReturnType<DerivedGit['releaseHeads']>> }> {
+    return { changelog: this.d.changelog(), tags: git ? await git.tags() : [], ...(git ? { bumps: await git.bumps(), heads: await git.releaseHeads() } : {}) };
   }
 
   /** The done mails the MailLedger recorded since the last pass (each remembered by agent/id). */

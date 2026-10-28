@@ -284,6 +284,34 @@ test('(c) releases: CHANGELOG sections and entries (Unreleased skipped), the tag
 
 // ———————————————————————————————————————————————————— (d) done mails
 
+test('F6 release fields: branch head is independent of the tag and installer digest is only a labelled release source', () => {
+  const tag = H('a'), head = H('b'), digest = 'c'.repeat(64);
+  const facts = F.releaseFacts(
+    [{ version: '9.2.1', date: '2026-10-25', entries: [] }, { version: '9.2.2', entries: [] }, { version: '9.2.3', entries: [] }],
+    [{ name: 'v9.2.1', commit: tag, date: '2026-10-25T00:00:00Z' }, { name: 'v9.2.2', commit: H('d'), date: '2026-10-25T00:00:00Z' }],
+    undefined,
+    [{ version: '9.2.1', commit: head }, { version: '9.2.2', commit: H('d') }],
+    { cards: [{ id: 'CUT-9.2.1', result: 'setup sha256 ' + digest }], mails: [{ act: 'done', subject: 'CUT-9.2.2 done', body: 'installer digest ' + 'e'.repeat(64) }] },
+  );
+  const by = Object.fromEntries(facts.map((f) => [f.key, f]));
+  assert.equal(by['release.9.2.1.head'].value, head, 'twin: docs commit after tag remains the branch head');
+  assert.equal(by['release.9.2.2.head'].value, H('d'), 'twin: head equal to tag is retained');
+  assert.equal(by['release.9.2.1.installer'].value, digest);
+  assert.equal(by['release.9.2.2.installer'].value, 'e'.repeat(64));
+  assert.equal(by['release.9.2.3.installer'], undefined, 'twin: no labelled digest creates no field');
+  assert.equal(by['release.9.2.1'].refs.some((r) => r.value === digest), false, 'digest never becomes a commit ref');
+});
+
+test('F8 card status: an explicit own close-as-superseded marker voids a done card, but another card mention does not', async () => {
+  const cards = [
+    { id: 'CUT-9.2.1', status: 'done', result: 'CLOSE-SUPERSEDED by CUT-9.2.2', doneAt: '2026-10-25T00:00:00Z' },
+    { id: 'CUT-9.2.2', status: 'done', notes: 'CUT-9.2.1 was CLOSE-SUPERSEDED by CUT-9.2.2', doneAt: '2026-10-25T00:00:00Z' },
+  ];
+  const by = Object.fromEntries((await F.cardFieldFacts(cards, null)).map((f) => [f.key, f]));
+  assert.equal(by['card.cut-9.2.1.status'].value, 'VOID (closed as superseded by CUT-9.2.2)');
+  assert.equal(by['card.cut-9.2.2.status'].value, 'done', 'twin: another card supercession leaves this done card alone');
+});
+
 test('A12 card match: dash, space or nothing; case-insensitive; the longest id; no partial ids', () => {
   const m = F.cardMatcher(['INT-1.1.98', 'CLAIMS-90', 'CLAIMS-90-M5', 'X']);
   assert.deepEqual(m('INT 1.1.98 done'), ['INT-1.1.98']);

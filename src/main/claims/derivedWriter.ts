@@ -292,7 +292,7 @@ function bodyOf(inbox: string, id: string, bodyHash: string): { body?: unknown }
   return {};
 }
 
-export interface ReleaseSource { changelog: string | null; tags: TagLike[]; bumps?: BumpMap }
+export interface ReleaseSource { changelog: string | null; tags: TagLike[]; bumps?: BumpMap; heads?: import('./derivedFacts').ReleaseHead[] }
 
 export interface BackfillInput {
   hiveRoot: string;
@@ -321,7 +321,7 @@ export async function runDerivedBackfill(deps: DerivedWriterDeps, input: Backfil
   const records = await syncDerived(deps, cardRecordFacts(cards));
   const rulings = await syncDerived(deps, rulingMailFacts(readIndexRulingMails(input.hiveRoot)));
   const cardFields = await syncDerived(deps, await cardFieldFacts(cards, input.git));
-  const releases = await syncDerived(deps, releaseFacts(parseChangelog(input.releases.changelog), input.releases.tags, input.releases.bumps));
+  const releases = await syncDerived(deps, releaseFacts(parseChangelog(input.releases.changelog), input.releases.tags, input.releases.bumps, input.releases.heads, { cards, mails }));
   const cardIds = cards.map((c) => c.id).filter((id): id is string => typeof id === 'string');
   const done = input.git ? await doneMailFacts(mails, cardIds, input.git) : { facts: [], skipped: { noGit: 1 } as Record<string, number>, skips: [], older: 0 };
   // R2 (c): every skipped done mail is logged with its reason (ids and card ids only).
