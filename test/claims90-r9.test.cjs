@@ -229,6 +229,7 @@ test('gate R2 (P2): an id suffix names the linked card even when shared; a trail
   assert.equal(lone('A-1 PASS; B-2 FAIL @abc1234', 'fail', 'GAMMA-LOOP-201'), false, 'MUTANT R2: a segment with a word of its own ("B-2") is an item, not a verdict');
   assert.equal(lone('ALPHA-WIDGET-101 PASS - FAIL 1/0/0 @abc1234', 'fail'), true, 'a verdict folds into the item before it (the card)');
   assert.equal(lone('OTHER-WIDGET-102 @abc1234; OTHER-THING-9 FAIL', 'other-widget-102'), false, 'MUTANT R2: a card-shaped token that is not a suffix of the id is another item');
+  assert.equal(lone('WIDGET-101 PASS @abc1234; GAMMA-LOOP-201 FAIL', 'pass'), true, 'MUTANT R2 (suffix): among two items the suffix segment is the card\'s');
   assert.equal(lone('PASS 0/0/0 @abc1234', 'pass'), true, 'a lone verdict segment is the one item');
 });
 
@@ -243,7 +244,7 @@ test('gate R3 (P4): a sentence end bounds the clause; the caution judges the ver
   const E1b = '2026-01-02T19:31Z Kim FAIL 2/0/0 @7777aaa; Core PASS (no typed text).';
   assert.deepEqual(F.auditVerdict(card('', E1b)), { verdict: 'FAIL', sha: '7777aaa', at: '2026-01-02T19:31:00.000Z' }, 'MUTANT R3(c): "<Agent> FAIL … @sha" without an audit word');
   assert.equal(F.auditVerdict(card('', '2026-01-02 taskkill FAIL 2/0/0 @7777aaa')), null, 'MUTANT R3(c): a lower-case word before the verdict is not an agent');
-  assert.equal(F.auditVerdict(card('', '2026-01-02 Kim FAIL; landed @7777aaa')), null, 'MUTANT R3(c): the agent verdict and the sha must share a clause');
+  assert.equal(F.auditVerdict(card('', '2026-01-02 Kim FAIL; fixed in @7777aaa')), null, 'MUTANT R3(c): the agent verdict and the sha must share a clause');
   assert.equal(F.auditVerdict(card('', '2026-01-02 Kim FAIL 2/0/0 @7777aaa LANDED in int-9')), null, 'the caution still applies to the agent form');
   assert.equal(F.auditVerdict(card('', '2026-01-02 PASS @7777aaa')), null, 'a bare verdict-first PASS still needs the audit word');
   assert.equal(F.auditVerdict(card('', '2026-01-02 re-based @5555eee Jim PASS. Queued INT stage 20.')).sha, '5555eee', 'sha-first with a later sentence');
