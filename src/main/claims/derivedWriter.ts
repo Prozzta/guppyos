@@ -170,8 +170,8 @@ function readArchiveTimes(hiveRoot: string): Map<string, string> {
  * inbox/.done copy only when it hashes to the entry's bodyHash; otherwise the subject alone counts.
  * An inbox file the ledger never recorded is ignored. `seen` (agent/id) skips entries read before.
  */
-export function readDoneMails(hiveRoot: string, seen?: Set<string>): MailLike[] {
-  const out: MailLike[] = readIndexDoneMails(hiveRoot, seen);
+export function readDoneMails(hiveRoot: string, seen?: Set<string>, subjects?: Map<string, string>): MailLike[] {
+  const out: MailLike[] = readIndexDoneMails(hiveRoot, seen, subjects);
   const byId = new Map(out.map((m) => [m.id as string, m]));
   const mailDir = join(hiveRoot, 'state', 'mail');
   let files: string[] = [];
@@ -183,7 +183,10 @@ export function readDoneMails(hiveRoot: string, seen?: Set<string>): MailLike[] 
     try { doc = JSON.parse(readFileSync(join(mailDir, f), 'utf8')) as MailLedgerDoc; } catch { continue; }
     if (!doc || typeof doc !== 'object' || !doc.entries || typeof doc.entries !== 'object') continue;
     for (const e of Object.values(doc.entries).sort((a, b) => (a?.seq ?? 0) - (b?.seq ?? 0))) {
-      if (!e || e.act !== 'done' || !isValidMailId(e.id)) continue;
+      if (!e || !isValidMailId(e.id)) continue;
+      // Round 10 (F4): every recorded mail's subject, whatever its act, so a done reply can tell a quoted @sha.
+      if (subjects && typeof e.subject === 'string' && !subjects.has(e.id)) subjects.set(e.id, e.subject);
+      if (e.act !== 'done') continue;
       const k = `${agent}/${e.id}`;
       if (seen?.has(k)) continue;
       seen?.add(k);
@@ -192,6 +195,7 @@ export function readDoneMails(hiveRoot: string, seen?: Set<string>): MailLike[] 
       out.push({
         id: e.id, from: e.from, act: 'done', subject: e.subject,
         ...(e.cardId ? { card: e.cardId } : {}),
+        ...(typeof e.inReplyTo === 'string' && e.inReplyTo ? { in_reply_to: e.inReplyTo } : {}),
         ...(Number.isFinite(e.deliveredAt) ? { created_at: new Date(e.deliveredAt).toISOString() } : {}),
         ...(typeof e.bodyHash === 'string' ? bodyOf(join(hiveRoot, 'agents', agent, 'inbox'), e.id, e.bodyHash) : {}),
       });
@@ -205,7 +209,7 @@ export function readDoneMails(hiveRoot: string, seen?: Set<string>): MailLike[] 
  * written at delivery or by the trusted backfill; never pruned), one per id, with the cards the mail
  * was linked to. The body counts only when it hashes to the row's bodyHash. `seen` holds idx/<id>.
  */
-export function readIndexDoneMails(hiveRoot: string, seen?: Set<string>): MailLike[] {
+export function readIndexDoneMails(hiveRoot: string, seen?: Set<string>, subjects?: Map<string, string>): MailLike[] {
   const out: MailLike[] = [];
   const dir = join(hiveRoot, 'state', 'mail-cards');
   let files: string[] = [];
@@ -218,7 +222,9 @@ export function readIndexDoneMails(hiveRoot: string, seen?: Set<string>): MailLi
       if (!line.trim()) continue;
       let r: Record<string, unknown>;
       try { r = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
-      if (!r || r.act !== 'done' || typeof r.id !== 'string' || !isValidMailId(r.id) || got.has(r.id)) continue;
+      if (!r || typeof r.id !== 'string' || !isValidMailId(r.id)) continue;
+      if (subjects && typeof r.subject === 'string' && !subjects.has(r.id)) subjects.set(r.id, r.subject);
+      if (r.act !== 'done' || got.has(r.id)) continue;
       // F1 (spec F): a mention-body (or unknown) link never gives a done mail its card. CLAIMS-WEAKLINK-DONESHA:
       // a mention-body row still carries the mail (subject, body, sender, time) with NO card and NO linked
       // cards, so doneMailFacts can read the cards its body names and let the commits it reports settle
@@ -232,6 +238,7 @@ export function readIndexDoneMails(hiveRoot: string, seen?: Set<string>): MailLi
       out.push({
         id: r.id, from: r.from, act: 'done', subject: r.subject,
         ...(typeof r.card === 'string' && r.cardFrom === 'field' ? { card: r.card } : {}),
+        ...(typeof r.in_reply_to === 'string' && r.in_reply_to ? { in_reply_to: r.in_reply_to } : {}),
         ...(weak ? {} : Array.isArray(r.cards) ? { cards: r.cards } : typeof r.card === 'string' ? { cards: [r.card] } : {}),
         ...(typeof r.created_at === 'string' ? { created_at: r.created_at } : Number.isFinite(r.deliveredAt) ? { created_at: new Date(r.deliveredAt as number).toISOString() } : {}),
         ...body,
@@ -310,7 +317,8 @@ export interface BackfillCounts {
 
 export async function runDerivedBackfill(deps: DerivedWriterDeps, input: BackfillInput): Promise<BackfillCounts> {
   const cards = readCards(input.hiveRoot);
-  const mails = input.git ? readDoneMails(input.hiveRoot) : [];
+  const subjects = new Map<string, string>();
+  const mails = input.git ? readDoneMails(input.hiveRoot, undefined, subjects) : [];
   if (input.git && input.prefetch) {
     const shas = new Set<string>();
     for (const c of cards) for (const t of [c.result, c.notes]) for (const m of shaMentions(t)) shas.add(m.sha);
@@ -323,7 +331,7 @@ export async function runDerivedBackfill(deps: DerivedWriterDeps, input: Backfil
   const cardFields = await syncDerived(deps, await cardFieldFacts(cards, input.git));
   const releases = await syncDerived(deps, releaseFacts(parseChangelog(input.releases.changelog), input.releases.tags, input.releases.bumps));
   const cardIds = cards.map((c) => c.id).filter((id): id is string => typeof id === 'string');
-  const done = input.git ? await doneMailFacts(mails, cardIds, input.git) : { facts: [], skipped: { noGit: 1 } as Record<string, number>, skips: [], older: 0 };
+  const done = input.git ? await doneMailFacts(mails, cardIds, input.git, { subjectOf: (id) => subjects.get(id) }) : { facts: [], skipped: { noGit: 1 } as Record<string, number>, skips: [], older: 0 };
   // R2 (c): every skipped done mail is logged with its reason (ids and card ids only).
   for (const s of done.skips) deps.log?.({ kind: 'claims-derived-done-skip', mail: s.mail.slice(0, 120), reason: s.reason, ...(s.cards ? { cards: s.cards } : {}) });
   // Round 4b: every processed done mail's verdict, so `memory get`'s mail rule bridges only the derived lag.

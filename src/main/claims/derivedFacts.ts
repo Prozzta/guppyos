@@ -842,7 +842,13 @@ export function releaseFacts(sections: readonly ChangelogSection[], tags: readon
 
 // ———————————————————————————————————————————————————————————— (d) done mails
 
-export interface MailLike { id?: unknown; from?: unknown; act?: unknown; subject?: unknown; body?: unknown; card?: unknown; cards?: unknown; created_at?: unknown }
+export interface MailLike { id?: unknown; from?: unknown; act?: unknown; subject?: unknown; body?: unknown; card?: unknown; cards?: unknown; created_at?: unknown; in_reply_to?: unknown }
+
+/** Round 10 (F4): what doneMailFacts may ask about the mails around a done mail. */
+export interface DoneMailContext {
+  /** The subject of the mail `id` (the one a done mail replies to), or undefined when unknown. */
+  subjectOf?(id: string): string | undefined;
+}
 
 const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -992,7 +998,7 @@ const mailAt = (m: MailLike): string => iso(m.created_at) ?? '';
  * both ends). R2 (c): a mail that gives no fact carries a reason; noShaWord, noCommit, ambiguous
  * and bodyOnly are each what git confirmed. A mail copied to several inboxes counts once (by id).
  */
-export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonly string[], git: GitPort): Promise<DoneMailResult> {
+export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonly string[], git: GitPort, ctx: DoneMailContext = {}): Promise<DoneMailResult> {
   // Round 5 (god bfcff1): one recogniser for every text (a mail subject or body, a commit subject, a
   // merge's "into" line), variants included; a card-shaped unknown token names some other card.
   const namer = cardNamer(cardIds);
@@ -1024,7 +1030,14 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
     seen.add(m.id);
     if (m.act !== 'done') { skip(m.id, 'notDone'); continue; }
     const mentions = [...shaMentions(m.subject), ...shaMentions(typeof m.body === 'string' ? m.body : '')];
-    const atShas = subjectAtShas(m.subject);
+    // Round 10 (god a22191, F4): an @sha the subject shares with the subject of the mail it replies to is
+    // QUOTED (the request's sha), not reported: it loses the subject-@sha priority and the mail's sha is the
+    // existing rule over the commits it names (the latest in git order of the card's line), so an audit
+    // reply naming only the quoted sha keeps it, one naming a newer tip too gives the tip, and one naming an
+    // older base too keeps the quoted sha. An @sha the request did not write keeps its priority.
+    const parent = typeof m.in_reply_to === 'string' && m.in_reply_to && ctx.subjectOf ? ctx.subjectOf(m.in_reply_to) : undefined;
+    const quoted = subjectAtShas(parent).map((x) => x.sha);
+    const atShas = subjectAtShas(m.subject).filter((x) => !quoted.some((q) => q.startsWith(x.sha) || x.sha.startsWith(q)));
     if (!mentions.length && !atShas.length) { skip(m.id, 'noShaWord'); continue; }
     // The commits the mail reports, each resolved to the work it stands for (round 3: a merge is its
     // merged parent or nothing).

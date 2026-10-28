@@ -36,6 +36,8 @@ export interface DerivedLiveDeps {
 export class DerivedLive {
   private chain: Promise<unknown> = Promise.resolve();
   private seenMail = new Set<string>();
+  /** Round 10 (F4): the subject of every mail read so far, by id (a done reply's parent may be an older mail). */
+  private subjects = new Map<string, string>();
   private root: string | null = null;
   private git: DerivedGit | null = null;
   private debounce: ReturnType<typeof setTimeout> | null = null;
@@ -75,7 +77,7 @@ export class DerivedLive {
     const root = this.d.hiveRoot();
     const w = this.d.writer();
     if (!root || !w) return null;
-    if (root !== this.root) { this.root = root; this.seenMail = new Set(); this.git = null; }
+    if (root !== this.root) { this.root = root; this.seenMail = new Set(); this.subjects = new Map(); this.git = null; }
     const repo = this.d.repo();
     if (repo && this.git?.repo !== repo) this.git = new DerivedGit(repo);
     if (!repo) this.git = null;
@@ -110,7 +112,7 @@ export class DerivedLive {
     const mails = this.newDoneMails(c.root);
     if (git && mails.length) {
       const ids = readCards(c.root).map((x) => x.id).filter((id): id is string => typeof id === 'string');
-      const done = await doneMailFacts(mails, ids, git);
+      const done = await doneMailFacts(mails, ids, git, { subjectOf: (id) => this.subjects.get(id) });
       for (const s of done.skips) this.d.log({ kind: 'claims-derived-done-skip', mail: s.mail.slice(0, 120), reason: s.reason, ...(s.cards ? { cards: s.cards } : {}) });
       writeDoneMailStatus(c.root, doneMailStatuses(mails, done));
       await syncDerived(c.w, done.facts);
@@ -123,6 +125,6 @@ export class DerivedLive {
 
   /** The done mails the MailLedger recorded since the last pass (each remembered by agent/id). */
   private newDoneMails(root: string): MailLike[] {
-    return readDoneMails(root, this.seenMail);
+    return readDoneMails(root, this.seenMail, this.subjects);
   }
 }
