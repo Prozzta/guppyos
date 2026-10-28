@@ -413,6 +413,29 @@ export async function subjectTip(shas: ReadonlyArray<{ sha: string; name: string
   return next.length === 1 ? next[0].sha : 'ambiguous';
 }
 
+/** A subject's segments: split on ';' and on ' - ' (round 9, P2: a reply that reports several items). */
+const SEGMENT_RE = /;|\s[-–—]\s/;
+/** A segment that reports an item: it names a card (known or card-shaped) or states a status. */
+const STATUS_WORD_RE = /\b(?:pass|fail|done|landed|merged|released|cut|shipped|verdicts?)\b/i;
+
+/**
+ * Round 9 (P2): whether a done mail's LONE subject @sha counts for `card` on a link or subject row. It
+ * does when (i) the word before it is the card's id or branch; (ii) the subject segment it sits in names
+ * the card or its branch, or names no item; or (iii) the subject reports one item only. Otherwise the
+ * sha may belong to another item the reply reports, and the row is ambiguous (never guess).
+ */
+export function loneAtCounts(subject: string, at: { sha: string; name: string }, card: string, names: (text: unknown) => CardNames): boolean {
+  const id = card.toLowerCase();
+  if (at.name === id || at.name === `guppy/${id}` || at.name === `origin/guppy/${id}`) return true;
+  const branchRe = new RegExp(`guppy/${escapeRe(id)}(?![A-Za-z0-9-])`, 'i');
+  const isItem = (s: string): boolean => { const n = names(s); return n.cards.length > 0 || n.others.length > 0 || STATUS_WORD_RE.test(s); };
+  const segments = subject.split(SEGMENT_RE);
+  const atRe = new RegExp(`@${at.sha}(?![0-9A-Za-z])`, 'i');
+  const seg = segments.find((s) => atRe.test(s)) ?? subject;
+  if (names(seg).cards.includes(card) || branchRe.test(seg) || !isItem(seg)) return true;
+  return segments.filter(isItem).length <= 1;
+}
+
 /**
  * Guide A11: the latest commit in git order among the candidates. A descendant beats its ancestor;
  * on unrelated lines the later committer time wins (then the larger sha, so the result never
@@ -966,6 +989,9 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
       skip(m.id, !ats.length && entries.length && isIntCard(card) && !fieldRow ? 'ambiguous' : 'noCommit', [card]);
       continue;
     }
+    // Round 9 (P2): on a link or subject row a lone subject @sha counts only when the subject ties it to
+    // the card (the word before it, its segment) or reports one item; else it may be another item's sha.
+    if (!fieldRow && atShas.length === 1 && typeof m.subject === 'string' && !loneAtCounts(m.subject, atShas[0], card, namer)) { skip(m.id, 'ambiguous', [card]); continue; }
     // Several subject @shas that git cannot order and no card name settles: no claim from this mail.
     const reported = await subjectTip(atsKept, card, git);
     if (reported === 'ambiguous') { skip(m.id, 'ambiguous', [card]); continue; }

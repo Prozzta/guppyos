@@ -73,3 +73,48 @@ test('P1: a card field naming an unknown card is that other card: the mail count
   // A known field still wins over a link to another card (unchanged).
   assert.equal(commitOf(await F.doneMailFacts([mail1('p1-g', { card: 'SYN-PIN', subject: 'pin @abc1235' })], CARDS1, git1), slot('SYN-PIN', 'sam-aaaaaaaa')), H('2'));
 });
+
+// ———————————————————————————————————————————————————————————— P2
+const CARDS2 = ['GAMMA-LOOP-201', 'SYN-PIN'];
+const git2 = fakeGit({ def5678: H('3'), def5679: H('4') }, { [H('3')]: 'tidy the loop', [H('4')]: 'GAMMA-LOOP-201: the loop itself' });
+const link2 = (id, subject, extra = {}) => F.doneMailFacts([{ id, act: 'done', from: 'pat-dddddddd', cards: ['GAMMA-LOOP-201'], subject, body: '', created_at: T0, ...extra }], CARDS2, git2);
+const G2 = slot('GAMMA-LOOP-201', 'pat-dddddddd');
+
+test('P2: a lone subject @sha counts on a link or subject row only when the subject ties it to the card or reports one item', async () => {
+  const amb = (r, id) => assert.deepEqual(r.skips, [{ mail: id, reason: 'ambiguous', cards: ['GAMMA-LOOP-201'] }], id);
+  // P2-a: a multi-item reply; the sha sits in an item that is not the card.
+  amb(await link2('p2-a', 'Re: resume - 3 verdicts: GAMMA-LOOP PASS (live deny); DELTA M3 PASS, M4 NOT YET; rc NIT done @def5678'), 'p2-a');
+  // P2-b, P2-c (must not regress): the card's own line, and a one-item subject.
+  assert.equal(commitOf(await link2('p2-b', 'GAMMA-LOOP-201 delta PASS @def5678'), G2), H('3'), 'P2-b');
+  assert.equal(commitOf(await link2('p2-c', 'delta PASS @def5678'), G2), H('3'), 'P2-c');
+  // (i) the word before the sha is the card or its branch, in a multi-item subject.
+  assert.equal(commitOf(await link2('p2-d', 'OTHER-THING-9 FAIL; guppy/gamma-loop-201 @def5678'), G2), H('3'), 'MUTANT (i): the branch before the sha');
+  assert.equal(commitOf(await link2('p2-d2', 'OTHER-THING-9 FAIL; GAMMA-LOOP-201 @def5678'), G2), H('3'), '(i): the id before the sha');
+  // (ii) the segment names the card, or names no item (the sha alone).
+  assert.equal(commitOf(await link2('p2-e', 'Re: sweep - GAMMA-LOOP-201 PASS @def5678; OTHER-THING-9 FAIL'), G2), H('3'), 'MUTANT (ii): the segment names the card');
+  assert.equal(commitOf(await link2('p2-f', 'GAMMA-LOOP-201 PASS; OTHER-THING-9 FAIL; @def5678'), G2), H('3'), 'MUTANT (ii): a sha-only segment');
+  assert.equal(commitOf(await link2('p2-f2', 'GAMMA-LOOP-201 PASS; OTHER-THING-9 FAIL - at @def5678'), G2), H('3'), '(ii): a segment naming no item');
+  // (iii) one item only, with a reply prefix segment that is no item.
+  assert.equal(commitOf(await link2('p2-g', 'Re: sweep - delta PASS @def5678'), G2), H('3'), 'MUTANT (iii): a one-item subject behind a prefix');
+  // Not tied: the sha sits with another card's item, or with a status of its own among several items.
+  amb(await link2('p2-h', 'OTHER-THING-9 FAIL @def5678; GAMMA-LOOP-201 PASS'), 'p2-h');
+  amb(await link2('p2-i', 'GAMMA-LOOP-201 PASS; OTHER-THING-9 FAIL; rc landed @def5678'), 'p2-i');
+  // A subject row (no link) takes the same check; a FIELD row does not (the field is authoritative).
+  assert.deepEqual((await link2('p2-j', 'GAMMA-LOOP-201 PASS; OTHER-THING-9 FAIL @def5678', { cards: [] })).skips, [{ mail: 'p2-j', reason: 'ambiguous', cards: ['GAMMA-LOOP-201'] }], 'by subject too');
+  assert.equal(commitOf(await link2('p2-k', 'Re: resume - 3 verdicts: GAMMA-LOOP PASS (live deny); DELTA M3 PASS, M4 NOT YET; rc NIT done @def5678', { card: 'GAMMA-LOOP-201' }), G2), H('3'), 'MUTANT: a field row is unchanged');
+  // A commit whose own subject names the card is not needed: the subject settles it, not git (the rule is the subject's).
+  amb(await link2('p2-l', 'OTHER-THING-9 FAIL @def5679; GAMMA-LOOP-201 PASS'), 'p2-l');
+  // Two @shas go through subjectTip as before (unchanged): next to the card's id wins.
+  assert.equal(commitOf(await link2('p2-m', 'OTHER-THING-9 @def5678; GAMMA-LOOP-201 @def5679'), G2), H('4'), 'two @shas: unchanged');
+  // loneAtCounts itself.
+  const names = F.cardNamer(CARDS2);
+  const lone = (subject, name = '') => F.loneAtCounts(subject, { sha: 'def5678', name }, 'GAMMA-LOOP-201', names);
+  assert.equal(lone('A-1 PASS; B-2 FAIL @def5678', 'gamma-loop-201'), true, 'MUTANT (i): the word before the sha is the id although its segment is another item');
+  assert.equal(lone('A-1 PASS; B-2 FAIL @def5678', 'origin/guppy/gamma-loop-201'), true, '(i): the branch');
+  assert.equal(lone('A-1 PASS; B-2 FAIL @def5678', 'gamma-loop-20'), false, '(i): a partial id is not the card');
+  assert.equal(lone('A-1 PASS; B-2 FAIL; done @def5678', 'done'), false, 'MUTANT: three items, the sha with a status of its own');
+  assert.equal(lone('A-1 PASS; B-2 FAIL; @def5678', 'fail'), true, 'a sha-only segment names no item');
+  assert.equal(lone('A-1 PASS — gamma loop 201 done @def5678', 'done'), true, 'the segment names the card (space form)');
+  assert.equal(lone('one @def5678', 'one'), true, 'one item');
+  assert.equal(lone('Re: thread - one @DEF5678', 'one'), true, 'the sha as written, any case; the prefix is no item');
+});
