@@ -443,16 +443,55 @@ export function loneAtCounts(subject: string, at: { sha: string; name: string },
   // Gate R2: a segment that says nothing but a verdict (" - PASS 0/0/0", "done @sha") is the verdict of the item
   // before it, not an item of its own; it folds into that segment. A segment with any other word ("B-2 FAIL")
   // is an item; a line word (int, rc, stage) makes a segment an item too. A sha-only segment names no item (ii).
-  const segments: string[] = [];
-  for (const s of subject.split(SEGMENT_RE)) {
-    if (segments.length && STATUS_WORD_RE.test(s) && VERDICT_ONLY_RE.test(s)) segments[segments.length - 1] += ` ${s}`;
-    else segments.push(s);
-  }
+  const segments = subjectSegments(subject);
   const isItem = (s: string): boolean => namesAny(s) || LINE_WORD_RE.test(s) || STATUS_WORD_RE.test(s);
   const atRe = new RegExp(`@${at.sha}(?![0-9A-Za-z])`, 'i');
   const seg = segments.find((s) => atRe.test(s)) ?? subject;
   if (namesCard(seg) || !isItem(seg)) return true;
   return segments.filter(isItem).length <= 1;
+}
+
+/** A subject's segments (SEGMENT_RE) with each verdict-only segment folded into the one before it. */
+function subjectSegments(subject: string): string[] {
+  const segments: string[] = [];
+  for (const s of subject.split(SEGMENT_RE)) {
+    if (segments.length && STATUS_WORD_RE.test(s) && VERDICT_ONLY_RE.test(s)) segments[segments.length - 1] += ` ${s}`;
+    else segments.push(s);
+  }
+  return segments;
+}
+
+/**
+ * Round 10 (god a22191, F2): the subject @shas (as written, lower-cased) a done mail pairs with EACH of
+ * the cards its subject names, by segment: an @sha written after a card's id or branch (guppy/<id>) is
+ * that card's; a segment with one other @sha gives it to every card the segment names ("A + B: PASS
+ * @sha"); as many other @shas as cards pair in order of appearance; any other count is 'ambiguous' for
+ * those cards (never guess). A card named in no segment with an @sha gets none.
+ */
+export function pairedAtShas(subject: string, cards: readonly string[], names: (text: unknown) => CardNames): Map<string, string[] | 'ambiguous'> {
+  const out = new Map<string, string[] | 'ambiguous'>(cards.map((c) => [c, []]));
+  const give = (card: string, sha: string): void => { const v = out.get(card); if (Array.isArray(v) && !v.includes(sha)) v.push(sha); };
+  const ownName = (card: string, name: string): boolean => { const id = card.toLowerCase(); return name === id || name === `guppy/${id}` || name === `origin/guppy/${id}`; };
+  for (const seg of subjectSegments(subject)) {
+    const segCards = cards.filter((c) => names(seg).cards.includes(c));
+    const ats = subjectAtShas(seg);
+    if (!segCards.length || !ats.length) continue;
+    const named = ats.filter((a) => cards.some((c) => ownName(c, a.name)));
+    for (const a of named) for (const c of cards) if (ownName(c, a.name)) give(c, a.sha);
+    const rest = ats.filter((a) => !named.includes(a));
+    const open = segCards.filter((c) => !named.some((a) => ownName(c, a.name)));
+    if (!rest.length) continue;
+    if (ats.length === 1) { for (const c of segCards) give(c, ats[0].sha); continue; }
+    if (rest.length === 1) { for (const c of open) give(c, rest[0].sha); continue; }
+    const at = (c: string): number => seg.search(new RegExp(`(?<![A-Za-z0-9.-])${escapeRe(c).replace(/-/g, '[- ]?')}(?![A-Za-z0-9])`, 'i'));
+    const inOrder = open.map((c) => [c, at(c)] as const);
+    if (rest.length === open.length && inOrder.every(([, i]) => i >= 0)) {
+      inOrder.sort((a, b) => a[1] - b[1]).forEach(([c], i) => give(c, rest[i].sha));
+      continue;
+    }
+    for (const c of open) out.set(c, 'ambiguous');
+  }
+  return out;
 }
 
 /**
@@ -1004,11 +1043,11 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
       }
     }
     // The subject's @shas, resolved the same way; one the repository lacks stays as written (F2).
-    const ats: Array<{ sha: string; name: string; full?: string; entry?: ReportedCommit }> = [];
+    const ats: Array<{ sha: string; name: string; full?: string; entry?: ReportedCommit; written: string }> = [];
     for (const x of atShas) {
       const full = await git.commitOf(x.sha);
-      if (!full) { ats.push({ sha: x.sha, name: x.name }); continue; }
-      for (const r of resolved.get(full) ?? await resolveReported(full, git)) ats.push({ sha: r.commit, name: x.name, full: r.commit, entry: r });
+      if (!full) { ats.push({ sha: x.sha, name: x.name, written: x.sha }); continue; }
+      for (const r of resolved.get(full) ?? await resolveReported(full, git)) ats.push({ sha: r.commit, name: x.name, full: r.commit, entry: r, written: x.sha });
     }
     if (!entries.length && !ats.length) { skip(m.id, 'noCommit'); continue; }
     // (B) A commit reached through a merge counts for the card only when its subject or branch names it.
@@ -1047,41 +1086,60 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
       const latest = await latestOfCommits(kept.map((e) => e.commit), git);
       return kept.filter((e) => e.commit === latest);
     };
+    const rowFor = async (card: string, ats: ReadonlyArray<{ sha: string; name: string; full?: string; entry?: ReportedCommit }>, entries: readonly ReportedCommit[], paired: boolean): Promise<void> => {
+      const key = cardKey(card, 'donesha');
+      if (!key) { skip(m.id, 'noCard', [card]); return; }
+      const keep = keepFor(card);
+      const kept = entries.filter(keep);
+      const atsKept = ats.filter((a) => keep(a.entry));
+      if (ats.length ? !atsKept.length : !kept.length) {
+        // Round 6 (R6-3): a plain commit carried for an int card makes the row ambiguous. Subject @shas that
+        // (B) drops stay noCommit whatever the body lists (round 5; Jim's P5).
+        skip(m.id, !ats.length && entries.length && isIntCard(card) && !fieldRow ? 'ambiguous' : 'noCommit', [card]);
+        return;
+      }
+      // Round 9 (P2): on a link or subject row a lone subject @sha counts only when the subject ties it to
+      // the card (the word before it, its segment) or reports one item; else it may be another item's sha.
+      // Round 10 (F2): a paired row's @shas are tied to the card already.
+      if (!fieldRow && !paired && atShas.length === 1 && typeof m.subject === 'string' && !loneAtCounts(m.subject, atShas[0], card, namer)) { skip(m.id, 'ambiguous', [card]); return; }
+      // Several subject @shas that git cannot order and no card name settles: no claim from this mail.
+      const reported = await subjectTip(atsKept, card, git);
+      if (reported === 'ambiguous') { skip(m.id, 'ambiguous', [card]); return; }
+      // F2: a sha the subject reports as @<sha> is the mail's sha, even when the repository lacks it.
+      const at = reported ? atsKept.find((a) => a.sha === reported) : undefined;
+      const reportedFull = at ? (at.full ?? await git.commitOf(at.sha)) : null;
+      const commit = reported ? (reportedFull ?? reported) : ((await latestOfCommits(kept.map((e) => e.commit), git)) ?? kept[0].commit);
+      const entry = at ? at.entry : kept.find((e) => e.commit === commit);
+      // Round 5 (god bfcff1): the carried commit counts or the row is skipped. Without a card field, a
+      // carried commit that names only other cards (a refused link that another listed commit confirmed,
+      // a subject card confirmed by a different commit) is never the value: no fallback to it.
+      if (entry && !fieldRow) {
+        const f = foreign(entry, card);
+        if (f.length && !namesOf(entry).cards.includes(card)) { skip(m.id, 'ambiguous', [card, ...f].slice(0, 8)); return; }
+      }
+      const via = entry?.merge;
+      const from = typeof m.from === 'string' && m.from ? clip(m.from, 60) : 'unknown';
+      withCommit++;
+      newest.set(`${key}#${from}`, { m, card, from, commit, named: kept.length, range: rangeOf.get(commit), subject: !!reported, inRepo: !reported || !!reportedFull, via, own: entry?.into !== undefined });
+    };
     const card = await cardOfDoneMail(m, fieldCard, known, match, foreign, entries, carriedFor);
-    if (typeof card !== 'string') { skip(m.id, card.reason, card.cards); continue; }
-    const key = cardKey(card, 'donesha');
-    if (!key) { skip(m.id, 'noCard', [card]); continue; }
-    const keep = keepFor(card);
-    const kept = entries.filter(keep);
-    const atsKept = ats.filter((a) => keep(a.entry));
-    if (ats.length ? !atsKept.length : !kept.length) {
-      // Round 6 (R6-3): a plain commit carried for an int card makes the row ambiguous. Subject @shas that
-      // (B) drops stay noCommit whatever the body lists (round 5; Jim's P5).
-      skip(m.id, !ats.length && entries.length && isIntCard(card) && !fieldRow ? 'ambiguous' : 'noCommit', [card]);
-      continue;
+    if (typeof card !== 'string' && !Array.isArray(card)) { skip(m.id, card.reason, card.cards); continue; }
+    // Round 10 (god a22191, F2): a subject naming several cards is a row on EACH, carrying the @shas the
+    // subject pairs with that card (pairedAtShas); without one, the card's own commits among those the
+    // mail names. A card the pairing cannot settle is skipped as ambiguous (never guess).
+    const multi = Array.isArray(card);
+    const pairs = multi && typeof m.subject === 'string' ? pairedAtShas(m.subject, card, namer) : null;
+    for (const c of multi ? card : [card]) {
+      const paired = pairs?.get(c);
+      if (paired === 'ambiguous') { skip(m.id, 'ambiguous', [c]); continue; }
+      // On a multi-card row the carried commit is one that names the card (its own commit, or a merge into its
+      // own line): the other card's commit the same mail reports never becomes this card's sha.
+      const confirms = (e: ReportedCommit | undefined): boolean => !!e && namesOf(e).cards.includes(c);
+      const rowAts = paired ? ats.filter((a) => paired.includes(a.written) && confirms(a.entry)) : ats;
+      if (paired && paired.length && !rowAts.length) { skip(m.id, 'ambiguous', [c]); continue; }
+      const rowEntries = multi ? entries.filter(confirms) : entries;
+      await rowFor(c, rowAts, rowEntries, multi);
     }
-    // Round 9 (P2): on a link or subject row a lone subject @sha counts only when the subject ties it to
-    // the card (the word before it, its segment) or reports one item; else it may be another item's sha.
-    if (!fieldRow && atShas.length === 1 && typeof m.subject === 'string' && !loneAtCounts(m.subject, atShas[0], card, namer)) { skip(m.id, 'ambiguous', [card]); continue; }
-    // Several subject @shas that git cannot order and no card name settles: no claim from this mail.
-    const reported = await subjectTip(atsKept, card, git);
-    if (reported === 'ambiguous') { skip(m.id, 'ambiguous', [card]); continue; }
-    // F2: a sha the subject reports as @<sha> is the mail's sha, even when the repository lacks it.
-    const at = reported ? atsKept.find((a) => a.sha === reported) : undefined;
-    const reportedFull = at ? (at.full ?? await git.commitOf(at.sha)) : null;
-    const commit = reported ? (reportedFull ?? reported) : ((await latestOfCommits(kept.map((e) => e.commit), git)) ?? kept[0].commit);
-    const entry = at ? at.entry : kept.find((e) => e.commit === commit);
-    // Round 5 (god bfcff1): the carried commit counts or the row is skipped. Without a card field, a
-    // carried commit that names only other cards (a refused link that another listed commit confirmed,
-    // a subject card confirmed by a different commit) is never the value: no fallback to it.
-    if (entry && !fieldRow) {
-      const f = foreign(entry, card);
-      if (f.length && !namesOf(entry).cards.includes(card)) { skip(m.id, 'ambiguous', [card, ...f].slice(0, 8)); continue; }
-    }
-    const via = entry?.merge;
-    const from = typeof m.from === 'string' && m.from ? clip(m.from, 60) : 'unknown';
-    withCommit++;
-    newest.set(`${key}#${from}`, { m, card, from, commit, named: kept.length, range: rangeOf.get(commit), subject: !!reported, inRepo: !reported || !!reportedFull, via, own: entry?.into !== undefined });
   }
   const facts: DerivedFact[] = [];
   for (const [slot, { m, card, from, commit, named, range, subject, inRepo, via, own }] of newest) {
@@ -1105,7 +1163,7 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
 async function cardOfDoneMail(
   m: MailLike, fieldCard: string | null | undefined, known: Map<string, string>, match: (text: unknown) => string[], foreign: (e: ReportedCommit, card: string) => string[],
   entries: readonly ReportedCommit[], carriedFor: (card: string) => Promise<readonly ReportedCommit[]>,
-): Promise<string | { reason: 'noCard' | 'ambiguous' | 'bodyOnly'; cards?: string[] }> {
+): Promise<string | string[] | { reason: 'noCard' | 'ambiguous' | 'bodyOnly'; cards?: string[] }> {
   if (fieldCard) return fieldCard;
   // Round 9 (P1): a card field naming a card the board does not know is a done mail about some OTHER
   // card: it never falls through to the thread's link or the subject (guide A12).
@@ -1119,6 +1177,17 @@ async function cardOfDoneMail(
   // gate M-a: "U6 included" in a subject made card.u6): a candidate only, and only git confirms it
   // (CLAIMS-WEAKLINK-DONESHA).
   const exact = match(m.subject);
+  // The cards a reported commit confirms (Jim's gate M-b: by its SUBJECT line only; see byGit below).
+  const hitsOf = (e: ReportedCommit, named: readonly string[]): string[] =>
+    match(e.into !== undefined ? e.into : e.text).filter((x) => named.includes(x) && (!e.docsOnly || isReleaseCard(x)) && (!isIntCard(x) || e.into !== undefined || (!e.merge && leadsWithCard(e.text, x))));
+  // Round 10 (god a22191, F2): a subject naming two or more cards (ids or their forms) and reporting an
+  // @sha is a row on EACH card a commit the mail names confirms (a commit naming both confirms both), the
+  // caller pairing each with its @sha; (F3) the thread's link does not enter. One confirmed card, or a
+  // subject with no @sha, keeps the rule below: the one card git confirms, else ambiguous.
+  if (exact.length >= 2 && subjectAtShas(m.subject).length) {
+    const confirmed = exact.filter((c) => entries.some((e) => hitsOf(e, exact).includes(c)));
+    if (confirmed.length >= 2) return confirmed;
+  }
   // Round 3 (C): the link counts only when the commit the row would carry names no different card (a
   // commit naming no card still counts; a merge of another card's branch names that card; round 5: a
   // card-shaped token that is no known card is a different card). The other shas the mail lists are
@@ -1141,7 +1210,7 @@ async function cardOfDoneMail(
     // Round 6 (god 18e97a): a docs / release-only commit confirms only a cut/release card (R6-2); an int
     // card is confirmed only by a merge into its own line (R6-3) or (round 8, R8) a plain commit whose subject
     // leads with its id.
-    const hits = match(e.into !== undefined ? e.into : e.text).filter((x) => named.includes(x) && (!e.docsOnly || isReleaseCard(x)) && (!isIntCard(x) || e.into !== undefined || (!e.merge && leadsWithCard(e.text, x))));
+    const hits = hitsOf(e, named);
     if (hits.length === 1) byGit.add(hits[0]);
   }
   if (byGit.size === 1) return [...byGit][0];

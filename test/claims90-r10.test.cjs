@@ -69,3 +69,55 @@ test('F1: a known id plus a role suffix names the card (ABC-12-INT -> ABC-12) un
   const amb = await F.doneMailFacts([mail('f1-b', 'TWIN-NAME PASS @1111aaa')], CARDS, git);
   assert.deepEqual(amb.skips, [{ mail: 'f1-b', reason: 'noCard' }], 'twin: the shared prefix indexes nothing');
 });
+
+// ———————————————————————————————————————————————————————————— F2
+
+test('F2: a done mail whose subject names two or more cards with @shas is indexed under EACH card with the sha the subject pairs with it', async () => {
+  const CARDS = ['ABC-12', 'ABC-13', 'INT-9.9.9'];
+  const M = 'ab'.repeat(20);
+  const git = fakeGit(
+    { '1111aaa': H('1'), '2222bbb': H('2'), '3333ccc': H('3'), '4444ddd': H('4'), '5555eee': H('5'), '6666fff': H('6'), ab1ab1a: M },
+    { [H('1')]: 'ABC-12: the widget', [H('2')]: 'ABC-13: the gadget', [H('3')]: 'ABC-12 ABC-13: the shared refactor', [H('4')]: 'housekeeping',
+      [H('5')]: 'int-9.9.9 stage 1: base', [H('6')]: 'ABC-13: a fixup', [M]: 'Merge guppy/abc-12 @1111aaa into int-9.9.9 stage 2 (ABC-12, PASS)' },
+    { files: { [H('1')]: SRC, [H('2')]: SRC, [H('3')]: SRC, [H('4')]: SRC, [H('5')]: SRC, [H('6')]: SRC }, parents: { [M]: [H('5'), H('1')] } },
+  );
+  const run = (id, subject, extra) => F.doneMailFacts([mail(id, subject, extra)], CARDS, git);
+  // Twin 1: two cards, two paired shas (segments; the id before the sha; a branch name before it).
+  let r = await run('f2-a', 'ABC-12 PASS @1111aaa; ABC-13 PASS @2222bbb');
+  assert.equal(commitOf(r, slot('ABC-12', SAM)), H('1'), 'MUTANT F2: the first segment pairs ABC-12 with its sha');
+  assert.equal(commitOf(r, slot('ABC-13', SAM)), H('2'), 'MUTANT F2: the second segment pairs ABC-13 with its sha');
+  assert.deepEqual(r.skips, []);
+  r = await run('f2-b', 'landed ABC-12 @1111aaa and ABC-13 @2222bbb: PASS');
+  assert.equal(commitOf(r, slot('ABC-12', SAM)), H('1')); assert.equal(commitOf(r, slot('ABC-13', SAM)), H('2'), 'the word before each @sha');
+  r = await run('f2-c', 'merge guppy/abc-12 @1111aaa (ABC-12 the widget) + merge guppy/abc-13 @2222bbb (ABC-13 the gadget)');
+  assert.equal(commitOf(r, slot('ABC-12', SAM)), H('1')); assert.equal(commitOf(r, slot('ABC-13', SAM)), H('2'), 'a branch name before each @sha');
+  // Twin 2: two cards sharing one sha (a commit naming both).
+  r = await run('f2-d', 'ABC-12 + ABC-13 refactor: PASS @3333ccc');
+  assert.equal(commitOf(r, slot('ABC-12', SAM)), H('3'), 'MUTANT F2: one @sha for the segment goes to every card in it');
+  assert.equal(commitOf(r, slot('ABC-13', SAM)), H('3'));
+  assert.deepEqual(r.skips, []);
+  // Twin 3: an int-merge report: the feature card's line gets its branch-tip sha, never the int merge; the int line keeps the merge.
+  r = await run('f2-e', 'INT-9.9.9 stage 2: merge guppy/abc-12 @ab1ab1a (ABC-12 the widget) PASS');
+  assert.equal(commitOf(r, slot('ABC-12', SAM)), H('1'), 'MUTANT F2: the merged parent, never the int merge commit');
+  assert.equal(commitOf(r, slot('INT-9.9.9', SAM)), M, 'the merge into its own line is the int card\'s');
+  assert.deepEqual(r.skips, []);
+  // The other card's sha never becomes this card's: a paired sha whose commit is the other card's work is ambiguous.
+  r = await run('f2-f', 'ABC-12 PASS @2222bbb; ABC-13 PASS @1111aaa');
+  assert.deepEqual(r.skips, [{ mail: 'f2-f', reason: 'ambiguous', cards: ['ABC-12'] }, { mail: 'f2-f', reason: 'ambiguous', cards: ['ABC-13'] }], 'MUTANT F2: the pairing is checked against the commit');
+  // A pairing that cannot be settled (two cards, three @shas in one segment) is ambiguous for those cards; a card the subject names
+  // and no commit confirms gets no row, and a body-sha mail (no subject @sha) keeps the one-card git rule.
+  r = await run('f2-g', 'ABC-12 ABC-13 @1111aaa @2222bbb @4444ddd PASS');
+  assert.deepEqual(r.skips, [{ mail: 'f2-g', reason: 'ambiguous', cards: ['ABC-12'] }, { mail: 'f2-g', reason: 'ambiguous', cards: ['ABC-13'] }]);
+  r = await run('f2-h', 'ABC-12 and ABC-13 at 1111aaa');
+  assert.equal(commitOf(r, slot('ABC-12', SAM)), H('1')); assert.equal(commitOf(r, slot('ABC-13', SAM)), undefined, 'no @sha: the one card git confirms (unchanged)');
+  // The F1 forms name cards here too (ABC-12-INT -> ABC-12).
+  r = await run('f2-i', 'ABC-12-INT PASS @1111aaa; ABC-13-INT PASS @6666fff');
+  assert.equal(commitOf(r, slot('ABC-12', SAM)), H('1')); assert.equal(commitOf(r, slot('ABC-13', SAM)), H('6'));
+  // pairedAtShas itself.
+  const namer = F.cardNamer(CARDS);
+  assert.deepEqual([...F.pairedAtShas('ABC-12 @1111aaa, ABC-13 @2222bbb - ABC-12 again @3333ccc', ['ABC-12', 'ABC-13'], namer)], [['ABC-12', ['1111aaa', '3333ccc']], ['ABC-13', ['2222bbb']]]);
+  assert.deepEqual([...F.pairedAtShas('ABC-12 and ABC-13 @1111aaa @2222bbb', ['ABC-12', 'ABC-13'], namer)], [['ABC-12', ['2222bbb']], ['ABC-13', ['1111aaa']]], 'the id written before an @sha claims it first; the other sha goes to the open card');
+  assert.deepEqual([...F.pairedAtShas('ABC-12 and ABC-13 landed: @1111aaa, @2222bbb', ['ABC-12', 'ABC-13'], namer)], [['ABC-12', ['1111aaa']], ['ABC-13', ['2222bbb']]], 'as many @shas as cards pair in order of appearance');
+  assert.deepEqual([...F.pairedAtShas('ABC-13 and ABC-12 landed: @1111aaa, @2222bbb', ['ABC-12', 'ABC-13'], namer)], [['ABC-12', ['2222bbb']], ['ABC-13', ['1111aaa']]], 'MUTANT F2: order of appearance, not of the card list');
+  assert.deepEqual([...F.pairedAtShas('ABC-12 PASS @1111aaa; ABC-13 FAIL', ['ABC-12', 'ABC-13'], namer)], [['ABC-12', ['1111aaa']], ['ABC-13', []]], 'a card in a segment with no @sha gets none');
+});
