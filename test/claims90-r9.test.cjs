@@ -160,3 +160,35 @@ test('P3: an int card\'s field row never carries another card\'s plain commit; i
   assert.match(s1.facts[0].text, /names commit 55555555 \(5{40}\)/);
   assert.doesNotMatch(s1.facts[0].value, /^9\.4\.2$/);
 });
+
+// ———————————————————————————————————————————————————————————— P4
+const card = (result, notes) => ({ id: 'FOO-FIX-401', result, notes });
+const E1 = '2026-01-02T10:00Z FINAL PASS 0/0/0 @7777aaa';
+const E2 = '2026-01-03T02:27Z god: re-based guppy/foo-fix-401 @5555eee, Jim PASS 9a9a9a; waiting on the stage-3 merge.';
+const E3 = '2026-01-03T04:24Z god: LANDED in origin/guppy/int-9.4.2 @6666fff (Jim stage-3 PASS 8b8b8b)';
+
+test('P4: an audit entry written sha-first counts; a verdict on another line\'s tip never does', () => {
+  const v = F.auditVerdict(card('', [E1, E2, E3].join('\n')));
+  assert.equal(v.verdict, 'PASS'); assert.equal(v.sha, '5555eee', 'MUTANT P4: stale 7777aaa, or the int tip 6666fff');
+  assert.ok(v.at.startsWith('2026-01-03T02:27'), v.at);
+  // P4-b (must not regress): verdict-first with an audit word.
+  assert.deepEqual(F.auditVerdict(card('', '2026-01-02 Jim re-audit PASS 0/0/1 @7777aaa')).sha, '7777aaa', 'P4-b');
+  // The caution alone: nothing (LANDED, int-, stage-3, each on its own).
+  assert.equal(F.auditVerdict(card('', E3)), null, 'MUTANT caution: the int tip becomes the audit');
+  assert.equal(F.auditVerdict(card('', '2026-01-03 merged into guppy/int-9.4.2 @6666fff, Jim PASS')), null, 'merged into');
+  assert.equal(F.auditVerdict(card('', '2026-01-03 stage-3 @6666fff Jim PASS')), null, 'stage-N');
+  assert.equal(F.auditVerdict(card('', '2026-01-03 on rc-9.4 @6666fff, Jim PASS')), null, 'an rc line');
+  assert.equal(F.auditVerdict(card('', '2026-01-03 audit: @5555eee PASS; LANDED in int-9.4.2 @6666fff (Jim PASS)')).sha, '5555eee', 'MUTANT clause: the exclusion is per clause, the own clause still counts');
+  // A bare PASS after the sha needs the entry's audit word; `<agent> PASS` does not.
+  assert.equal(F.auditVerdict(card('', '2026-01-03 @5555eee PASS shipped')), null, 'MUTANT: a bare PASS with no audit word');
+  assert.equal(F.auditVerdict(card('', '2026-01-03 audit: @5555eee PASS')).sha, '5555eee', 'a bare PASS with the audit word');
+  assert.deepEqual(F.auditVerdict(card('', '2026-01-03 re-based @5555eee (Jim FAIL)')), { verdict: 'FAIL', sha: '5555eee', at: '2026-01-03T00:00:00.000Z' }, 'MUTANT agent: <agent> FAIL in brackets');
+  // The last verdict in the entry wins, sha-first and verdict-first alike; a clause break ends the reach.
+  assert.equal(F.auditVerdict(card('', '2026-01-03 re-based @5555eee, Jim PASS; then @9999bbb, Jim FAIL')).sha, '9999bbb', 'the last stated');
+  assert.equal(F.auditVerdict(card('', '2026-01-03 audit FAIL @1111aaa; re-based @5555eee, Jim PASS')).sha, '5555eee');
+  assert.equal(F.auditVerdict(card('', '2026-01-03 audit: re-based @5555eee; Jim PASS on the other')), null, 'MUTANT clause: the verdict sits in another clause');
+  // The newest dated entry wins as before; an entry with no verdict leaves the older one.
+  assert.equal(F.auditVerdict(card('', [E1, E2].join('\n'))).sha, '5555eee');
+  assert.equal(F.auditVerdict(card('', [E2, E1].join('\n'))).sha, '5555eee', 'order of writing does not matter across dates');
+  assert.equal(F.auditVerdict(card('', [E1, E3].join('\n'))).sha, '7777aaa', 'the int-tip entry is skipped, the older audit stands');
+});

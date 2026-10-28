@@ -632,6 +632,17 @@ export async function cardFieldFacts(cards: readonly CardLike[], git: GitPort | 
 /** An audit word, then (within the entry) a verdict and its commit: `AUDIT ... PASS ... @<sha>`. */
 const AUDIT_WORD_RE = /\b(?:re-?)?audit\w*|\bre-?check\w*|\bfinal\b|\bverdict\b/i;
 const VERDICT_RE = /\b(PASS|FAIL)\b[^@\n]{0,60}?@([0-9a-fA-F]{7,40})(?![0-9A-Za-z])/g;
+/** Round 9 (P4): an entry written sha-first: `@<sha>, Jim PASS` or `@<sha> ... PASS` within the clause. */
+const SHA_FIRST_RE = /@([0-9a-fA-F]{7,40})(?![0-9A-Za-z])([^@;\n]{0,60}?)(?:\s|\()([A-Za-z][A-Za-z0-9_-]*\s+)?(PASS|FAIL)\b/g;
+/** Round 9 (P4, the caution): a clause about ANOTHER line's tip (LANDED in int-…, merged into, stage-N):
+ *  its verdict is that line's, never the card's audit. */
+const OTHER_LINE_RE = /\bLANDED\b|\bmerged\s+into\b|\bstage-?\s?\d|(?<![A-Za-z0-9])(?:int|rc)[-\s]\d/i;
+/** The clause (between ';' or line breaks) around position i. */
+const clauseAt = (e: string, i: number): string => {
+  const start = Math.max(e.lastIndexOf(';', i), e.lastIndexOf('\n', i)) + 1;
+  const ends = [e.indexOf(';', i), e.indexOf('\n', i)].filter((x) => x >= 0);
+  return e.slice(start, ends.length ? Math.min(...ends) : e.length);
+};
 
 /**
  * L4 (god 69bc66): the card's latest audit verdict: of the dated entries of its result and notes that name an
@@ -642,11 +653,25 @@ export function auditVerdict(c: CardLike): { verdict: 'PASS' | 'FAIL'; sha: stri
   let best: { verdict: 'PASS' | 'FAIL'; sha: string; at: string } | null = null;
   for (const e of [...noteEntries(c.result), ...noteEntries(c.notes)]) {
     const at = entryAt(e) ?? dayAt(e);
-    if (!at || !AUDIT_WORD_RE.test(e)) continue;
-    let last: RegExpMatchArray | null = null;
-    for (const m of e.matchAll(VERDICT_RE)) if (/[0-9]/.test(m[2])) last = m;
-    if (!last) continue;
-    if (!best || at >= best.at) best = { verdict: last[1] as 'PASS' | 'FAIL', sha: last[2].toLowerCase(), at };
+    if (!at) continue;
+    const auditWord = AUDIT_WORD_RE.test(e);
+    const found: Array<{ i: number; verdict: 'PASS' | 'FAIL'; sha: string }> = [];
+    if (auditWord) for (const m of e.matchAll(VERDICT_RE)) {
+      const i = (m.index ?? 0) + m[0].indexOf('@');
+      if (/[0-9]/.test(m[2]) && !OTHER_LINE_RE.test(clauseAt(e, i))) found.push({ i, verdict: m[1] as 'PASS' | 'FAIL', sha: m[2] });
+    }
+    // Round 9 (P4): sha-first, within one clause; `<agent> PASS` states an audit verdict on its own, a bare
+    // PASS needs the entry's audit word; a clause about another line's tip (the caution) never counts.
+    for (const m of e.matchAll(SHA_FIRST_RE)) {
+      const i = m.index ?? 0;
+      if (!/[0-9]/.test(m[1]) || OTHER_LINE_RE.test(clauseAt(e, i))) continue;
+      const agent = m[3]?.trim();
+      if (!auditWord && !(agent && !/^(?:stage|int|rc)\b/i.test(agent))) continue;
+      found.push({ i, verdict: m[4] as 'PASS' | 'FAIL', sha: m[1] });
+    }
+    if (!found.length) continue;
+    const last = found.reduce((a, b) => (b.i >= a.i ? b : a));
+    if (!best || at >= best.at) best = { verdict: last.verdict, sha: last.sha.toLowerCase(), at };
   }
   return best;
 }
