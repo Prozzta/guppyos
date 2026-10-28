@@ -231,3 +231,27 @@ test('gate R2 (P2): an id suffix names the linked card even when shared; a trail
   assert.equal(lone('OTHER-WIDGET-102 @abc1234; OTHER-THING-9 FAIL', 'other-widget-102'), false, 'MUTANT R2: a card-shaped token that is not a suffix of the id is another item');
   assert.equal(lone('PASS 0/0/0 @abc1234', 'pass'), true, 'a lone verdict segment is the one item');
 });
+
+test('gate R3 (P4): a sentence end bounds the clause; the caution judges the verdict\'s own clause; an agent word is a name', () => {
+  const E1 = '2026-01-02T19:31Z Kim FAIL 2/0/0 @7777aaa. Core PASS (no typed text). Branch-only reds: x 91/1.';
+  const E2 = '2026-01-02T23:59Z Kim re-audit PASS 0/0/0 @8888bbb (msg m1): 64/64. Queued INT stage 20 (ahead of OTHER).';
+  assert.deepEqual(F.auditVerdict(card('', [E1, E2].join('\n'))), { verdict: 'PASS', sha: '8888bbb', at: '2026-01-02T23:59:00.000Z' }, 'MUTANT R3(b): the later sentence voids E2');
+  assert.equal(F.auditVerdict(card('', E2)).sha, '8888bbb');
+  // E1 alone: "Core PASS" is not sha-first (the sentence ends before it); Kim's own verdict-first FAIL stands (E1b rule).
+  assert.deepEqual(F.auditVerdict(card('', E1)), { verdict: 'FAIL', sha: '7777aaa', at: '2026-01-02T19:31:00.000Z' }, 'MUTANT R3(a): "@sha. Core PASS" read sha-first');
+  // E1b (Jim 68bab4): the bound does not help ("@sha; Core PASS"); the verdict is Kim's (the clause's agent word), never "Core PASS".
+  const E1b = '2026-01-02T19:31Z Kim FAIL 2/0/0 @7777aaa; Core PASS (no typed text).';
+  assert.deepEqual(F.auditVerdict(card('', E1b)), { verdict: 'FAIL', sha: '7777aaa', at: '2026-01-02T19:31:00.000Z' }, 'MUTANT R3(c): "<Agent> FAIL … @sha" without an audit word');
+  assert.equal(F.auditVerdict(card('', '2026-01-02 taskkill FAIL 2/0/0 @7777aaa')), null, 'MUTANT R3(c): a lower-case word before the verdict is not an agent');
+  assert.equal(F.auditVerdict(card('', '2026-01-02 Kim FAIL; landed @7777aaa')), null, 'MUTANT R3(c): the agent verdict and the sha must share a clause');
+  assert.equal(F.auditVerdict(card('', '2026-01-02 Kim FAIL 2/0/0 @7777aaa LANDED in int-9')), null, 'the caution still applies to the agent form');
+  assert.equal(F.auditVerdict(card('', '2026-01-02 PASS @7777aaa')), null, 'a bare verdict-first PASS still needs the audit word');
+  assert.equal(F.auditVerdict(card('', '2026-01-02 re-based @5555eee Jim PASS. Queued INT stage 20.')).sha, '5555eee', 'sha-first with a later sentence');
+  assert.equal(F.auditVerdict(card('', '2026-01-02 LANDED in int-9.4.2 @6666fff. Jim PASS on the card')), null, 'the sentence break works both ways: the LANDED clause keeps its sha');
+  assert.equal(F.auditVerdict(card('', '2026-01-02 re-based @5555eee, taskkill PASS')), null, 'MUTANT R3: a lower-case word is not an agent');
+  assert.equal(F.auditVerdict(card('', '2026-01-02 re-based @5555eee, god PASS')).sha, '5555eee', 'god is an agent');
+  assert.equal(F.auditVerdict(card('', '2026-01-02 v9.4.2 re-based @5555eee, Kim FAIL')).verdict, 'FAIL', 'a version dot is no sentence end');
+  // P4-a and P4-b stand.
+  assert.equal(F.auditVerdict(card('', ['2026-01-02T10:00Z FINAL PASS 0/0/0 @7777aaa', '2026-01-03T02:27Z god: re-based guppy/foo-fix-401 @5555eee, Jim PASS 9a9a9a; waiting on the stage-3 merge.', '2026-01-03T04:24Z god: LANDED in origin/guppy/int-9.4.2 @6666fff (Jim stage-3 PASS 8b8b8b)'].join('\n'))).sha, '5555eee');
+  assert.equal(F.auditVerdict(card('', '2026-01-02 Jim re-audit PASS 0/0/1 @7777aaa')).sha, '7777aaa');
+});

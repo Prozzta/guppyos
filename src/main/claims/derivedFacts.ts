@@ -648,16 +648,27 @@ export async function cardFieldFacts(cards: readonly CardLike[], git: GitPort | 
 const AUDIT_WORD_RE = /\b(?:re-?)?audit\w*|\bre-?check\w*|\bfinal\b|\bverdict\b/i;
 const VERDICT_RE = /\b(PASS|FAIL)\b[^@\n]{0,60}?@([0-9a-fA-F]{7,40})(?![0-9A-Za-z])/g;
 /** Round 9 (P4): an entry written sha-first: `@<sha>, Jim PASS` or `@<sha> ... PASS` within the clause. */
-const SHA_FIRST_RE = /@([0-9a-fA-F]{7,40})(?![0-9A-Za-z])([^@;\n]{0,60}?)(?:\s|\()([A-Za-z][A-Za-z0-9_-]*\s+)?(PASS|FAIL)\b/g;
+const SHA_FIRST_RE = /@([0-9a-fA-F]{7,40})(?![0-9A-Za-z])((?:(?!\.\s)[^@;\n]){0,60}?)(?:\s|\()((?:[A-Z][a-z]+|god)\s+)?(PASS|FAIL)\b/g;
 /** Round 9 (P4, the caution): a clause about ANOTHER line's tip (LANDED in int-…, merged into, stage-N):
  *  its verdict is that line's, never the card's audit. */
 const OTHER_LINE_RE = /\bLANDED\b|\bmerged\s+into\b|\bstage-?\s?\d|(?<![A-Za-z0-9])(?:int|rc)[-\s]\d/i;
-/** The clause (between ';' or line breaks) around position i. */
-const clauseAt = (e: string, i: number): string => {
-  const start = Math.max(e.lastIndexOf(';', i), e.lastIndexOf('\n', i)) + 1;
-  const ends = [e.indexOf(';', i), e.indexOf('\n', i)].filter((x) => x >= 0);
-  return e.slice(start, ends.length ? Math.min(...ends) : e.length);
+/** A clause ends at ';', a line break or a sentence end ('. ' or a final '.'): gate R3, a later sentence of the
+ *  entry ("Queued INT stage 20") is not the verdict's clause, and "@sha. Core PASS" is not sha-first. */
+const CLAUSE_BREAK_RE = /;|\n|\.(?=\s|$)/g;
+/** The [start, end) of the clause around position i. */
+const clauseBounds = (e: string, i: number): [number, number] => {
+  let start = 0; let end = e.length;
+  for (const m of e.matchAll(CLAUSE_BREAK_RE)) {
+    const j = m.index ?? 0;
+    if (j < i) start = j + 1; else { end = j; break; }
+  }
+  return [start, end];
 };
+/** The clause around position i. */
+const clauseAt = (e: string, i: number): string => e.slice(...clauseBounds(e, i));
+/** Gate R3 twin (E1b): the verdict-first form `<Agent> FAIL 2/0/0 @<sha>` states a verdict by its agent word
+ *  (the same proper-name shape as sha-first) when the word sits right before the verdict in the sha's clause. */
+const AGENT_BEFORE_RE = /(?:^|[\s(])(?:[A-Z][a-z]+|god)\s+$/;
 
 /**
  * L4 (god 69bc66): the card's latest audit verdict: of the dated entries of its result and notes that name an
@@ -671,8 +682,11 @@ export function auditVerdict(c: CardLike): { verdict: 'PASS' | 'FAIL'; sha: stri
     if (!at) continue;
     const auditWord = AUDIT_WORD_RE.test(e);
     const found: Array<{ i: number; verdict: 'PASS' | 'FAIL'; sha: string }> = [];
-    if (auditWord) for (const m of e.matchAll(VERDICT_RE)) {
-      const i = (m.index ?? 0) + m[0].indexOf('@');
+    for (const m of e.matchAll(VERDICT_RE)) {
+      const v = m.index ?? 0; const i = v + m[0].indexOf('@');
+      // Gate R3 twin (E1b): `<Agent> FAIL 2/0/0 @<sha>` states a verdict without an audit word, like the sha-first
+      // form, when the agent word, the verdict and the sha share one clause.
+      if (!auditWord && !(AGENT_BEFORE_RE.test(e.slice(0, v)) && clauseBounds(e, i)[0] <= v)) continue;
       if (/[0-9]/.test(m[2]) && !OTHER_LINE_RE.test(clauseAt(e, i))) found.push({ i, verdict: m[1] as 'PASS' | 'FAIL', sha: m[2] });
     }
     // Round 9 (P4): sha-first, within one clause; `<agent> PASS` states an audit verdict on its own, a bare
@@ -681,7 +695,7 @@ export function auditVerdict(c: CardLike): { verdict: 'PASS' | 'FAIL'; sha: stri
       const i = m.index ?? 0;
       if (!/[0-9]/.test(m[1]) || OTHER_LINE_RE.test(clauseAt(e, i))) continue;
       const agent = m[3]?.trim();
-      if (!auditWord && !(agent && !/^(?:stage|int|rc)\b/i.test(agent))) continue;
+      if (!auditWord && !agent) continue;
       found.push({ i, verdict: m[4] as 'PASS' | 'FAIL', sha: m[1] });
     }
     if (!found.length) continue;
