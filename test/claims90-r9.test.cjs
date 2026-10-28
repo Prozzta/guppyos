@@ -260,7 +260,13 @@ test('gate R3 (P4): a sentence end bounds the clause; the caution judges the ver
 test('gate R4 (P3): a release card is a version card; a fix card named RELEASE-… is another card, and its commit is not the int done sha', async () => {
   // isReleaseCard itself.
   for (const id of ['RELEASE-9.4.2', 'CUT-9.4.2', 'cut-1.1.100', 'release-9.1.1', 'OMEGA-1.1.102-NOTES']) assert.equal(F.isReleaseCard(id), true, `twin: ${id} keeps the release treatment`);
-  for (const id of ['RELEASE-WIDGET-301', 'CUT-OFF-9', 'release-notes', 'INT-9.4.2']) assert.equal(F.isReleaseCard(id), false, `MUTANT R4 (prefix test): ${id} is no release card`);
+  for (const id of ['RELEASE-WIDGET-301', 'CUT-OFF-9', 'CUT-CMD-THING', 'release-notes', 'INT-9.4.2']) assert.equal(F.isReleaseCard(id), false, `MUTANT R4 (prefix test): ${id} is no release card`);
+  // Jim 805d71: a cut named by a bare build number (CUT-301 = the 9.3.01 cut) is a release card.
+  for (const id of ['CUT-301', 'RELEASE-301', 'cut-12']) assert.equal(F.isReleaseCard(id), true, `MUTANT R4 (bare number dropped): ${id} is a release card`);
+  const gitC = fakeGit({ '5555eee': H('9') }, { [H('9')]: '9.3.1: the version in package.json and both package-lock.json root entries' },
+    { files: { [H('9')]: ['package.json', 'package-lock.json'] }, versions: { [H('9')]: true } });
+  const cutMail = { id: 'r4-d', act: 'done', from: 'cutter-eeeeeeee', card: 'CUT-301', subject: 'DONE CUT-301: cutter @ 5555eee; markers 12/12', body: '', created_at: T0 };
+  assert.equal(commitOf(await F.doneMailFacts([cutMail], ['INT-9.4.2', 'CUT-301'], gitC), slot('CUT-301', 'cutter-eeeeeeee')), H('9'), 'MUTANT R4 (bare number dropped): the release commit confirms the CUT-301 card');
   // Jim's fixture: the owner's release mail, then a done mail on the same int card about a RELEASE-WIDGET-301 fix.
   const CARDS = ['INT-9.4.2', 'RELEASE-WIDGET-301'];
   const git = fakeGit({ '3333ccc': H('7'), '4444ddd': H('8') },

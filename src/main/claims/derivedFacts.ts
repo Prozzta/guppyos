@@ -247,8 +247,10 @@ export const isIntCard = (id: string): boolean => /^int-/i.test(id);
 /** Round 6 (god 18e97a): a cut/release card (RELEASE-N.N, CUT-N.N, or an id carrying a version N.N.N that is
  *  no int card): the only card a version/changelog/readme/docs-only commit confirms or is carried for.
  *  Gate R4 (Jim 2699a7): a version card, never a fix card whose name starts with RELEASE- and ends in a card number
- *  (RELEASE-WIDGET-301 is a fix card; RELEASE-9.4.2 and CUT-9.4.2 are release cards). */
-export const isReleaseCard = (id: string): boolean => !isIntCard(id) && (/^(?:release|cut)-\d+(?:\.\d+)+(?![0-9A-Za-z])/i.test(id) || /\d+\.\d+\.\d+/.test(id));
+ *  (RELEASE-WIDGET-301 is a fix card; RELEASE-9.4.2 and CUT-9.4.2 are release cards). Jim 805d71: the board names
+ *  cuts by a bare build number too (CUT-301 = the 9.3.01 cut), so the prefix plus a number and nothing more is a
+ *  release card; a word after the prefix (CUT-CMD-THING) makes a fix card. */
+export const isReleaseCard = (id: string): boolean => !isIntCard(id) && (/^(?:release|cut)-\d+(?:\.\d+)*$/i.test(id) || /\d+\.\d+\.\d+/.test(id));
 
 /** Round 6/7 (R6-2, R7-2): the changed files are all docs, or every changed line of every non-doc file is
  *  a version-masked twin of its counterpart (GitPort.versionOnly): the commit is release bookkeeping. */
