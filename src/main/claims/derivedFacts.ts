@@ -186,8 +186,14 @@ export function cardRecordFacts(cards: readonly CardLike[]): DerivedFact[] {
 export function closedAsSupersededBy(c: Pick<CardLike, 'result' | 'notes'>): string | null {
   for (const text of [c.result, ...noteEntries(c.notes)]) {
     if (typeof text !== 'string') continue;
-    const m = /(?:^|[\n;])\s*(?:\[[^\]]+\]\s*)?(?:close[- ]superseded|closed\s+as\s+superseded)\s+by\s+([A-Z][A-Z0-9]*(?:-[A-Z0-9]+(?:\.[0-9]+)*)+)\b/i.exec(text);
-    if (m) return m[1];
+    const marker = /(?:close[- ]superseded\s*(?::|by)\s*|closed\s+as\s+superseded\s+by\s*)([A-Z][A-Z0-9]*(?:-[A-Z0-9]+(?:\.[0-9]+)*)+)\b/ig;
+    for (const m of text.matchAll(marker)) {
+      // A card's note can report another card's state.  That is evidence about the
+      // other card, not an instruction to void this one ("CUT-1 was CLOSE-...").
+      const line = text.slice(text.lastIndexOf('\n', m.index) + 1, m.index);
+      if (/[A-Z][A-Z0-9]*(?:-[A-Z0-9]+(?:\.[0-9]+)*)+\s+(?:was|is)\s*$/i.test(line)) continue;
+      return m[1];
+    }
   }
   return null;
 }
@@ -783,12 +789,23 @@ export function releaseFacts(sections: readonly ChangelogSection[], tags: readon
   const secOf = new Map(sections.map((s) => [s.version, s]));
   const headOf = new Map(heads.filter((h) => VERSION_RE.test(h.version) && /^[0-9a-f]{40}$/i.test(h.commit)).map((h) => [h.version, h.commit.toLowerCase()]));
   const digestFor = (version: string): string | null => {
-    const releaseCard = new RegExp('\\b(?:release|cut)-' + version.replace(/\./g, '\\.') + '(?![0-9.])', 'i');
+    const escaped = version.replace(/\./g, '\\.');
+    const releaseCard = new RegExp('\\b(?:release|cut)-' + escaped + '(?![0-9.])', 'i');
     const labelled = /\b(?:setup|installer)\s+(?:digest|sha256|sha-256)\s*[:=]?\s*([0-9a-f]{64})(?![0-9a-f])/i;
-    const texts: unknown[] = [];
-    for (const c of sources.cards ?? []) if (typeof c.id === 'string' && releaseCard.test(c.id)) texts.push(c.result, c.notes);
-    for (const m of sources.mails ?? []) if (m.act === 'done' && releaseCard.test(String(m.subject ?? '') + ' ' + String(m.body ?? ''))) texts.push(m.subject, m.body);
-    for (const text of texts) { const hit = typeof text === 'string' ? labelled.exec(text) : null; if (hit) return hit[1].toLowerCase(); }
+    // Keep the version beside its own digest: one done mail can report two releases.
+    const afterVersion = new RegExp(releaseCard.source + '[^\\n]{0,240}?' + labelled.source, 'i');
+    const digestAfterVersion = (text: unknown): string | null => typeof text === 'string' ? afterVersion.exec(text)?.[1]?.toLowerCase() ?? null : null;
+    const digest = (text: unknown): string | null => typeof text === 'string' ? labelled.exec(text)?.[1]?.toLowerCase() ?? null : null;
+    for (const c of sources.cards ?? []) {
+      const text = [c.result, c.notes].filter((x): x is string => typeof x === 'string').join('\n');
+      const hit = digestAfterVersion(text) ?? (typeof c.id === 'string' && releaseCard.test(c.id) ? digest(text) : null);
+      if (hit) return hit;
+    }
+    for (const m of sources.mails ?? []) {
+      if (m.act !== 'done') continue;
+      const hit = digestAfterVersion(`${m.subject ?? ''} ${m.body ?? ''}`);
+      if (hit) return hit;
+    }
     return null;
   };
   for (const v of versions) {

@@ -206,6 +206,10 @@ test('mail rule, done-sha (Jim ac6f85, G1 6f7b2c): for donesha or the bare card,
   assert.match(tdone, /^current: card\.foo-7\.donesha: FOO-7 done — landed as abc1234f+ on guppy\/foo-7\n  \[mail · alpha-1 · 2026-10-08 · 2026-10-08T09-00-00-000Z-ffffff\]$/m);
   const inform = deps({ mailRows: () => [mail('2026-10-08T09-00-00-000Z-ffffff', 'alpha-1', 'god', 'inform', 'FOO-7 wip', '2026-10-08T09:00:00.000Z', `trying ${'abc1234' + 'f'.repeat(33)}`)] });
   assert.equal(get('card.foo-7.donesha', {}, inform).current.source, 'claim', 'an inform mail is not a done mail');
+  // A labelled installer digest can enter `known` through claim prose, but never becomes a done-mail commit.
+  const dDigest = deps({ mailRows: () => [mail('2026-10-10T09-00-00-000Z-digest', 'alpha-1', 'god', 'done', 'FOO-7 done', '2026-10-10T09:00:00.000Z', 'published setup sha256 deadbeef')] });
+  dDigest.ledgers['alpha-1'] = [...dDigest.ledgers['alpha-1'], c('c-eeeeeeeeeee2', 'alpha-1', 'card.foo-7.donesha', '2026-10-01T10:00:00.000Z', 'FOO-7 published setup sha256 deadbeef')];
+  assert.equal(get('card.foo-7.donesha', { agent: 'alpha-1' }, dDigest).current.source, 'claim', 'known-set digest prefixes take the same done-mail guard as fallback shas');
 });
 
 test('time compare is epoch ms, never strings: a tie goes to the claim; a dashed mail-id time (no created_at) parses; an ISO string that would sort "later" as text but is earlier loses (census row)', () => {

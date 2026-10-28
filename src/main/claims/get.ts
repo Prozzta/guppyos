@@ -206,6 +206,13 @@ const mailCommitShas = (s: string): string[] => {
   }
   return out;
 };
+/** Apply the done-mail sha guard to a known value too: claim prose can put a digest prefix in `known`. */
+const safeKnownMailValue = (s: string, value: string, at: number): boolean => {
+  if (!/^[0-9a-f]{7,40}$/i.test(value)) return true;
+  if (!/[a-f]/i.test(value)) return false;
+  const before = s.slice(Math.max(0, at - 32), at).toLowerCase();
+  return !/(?:setup|installer)\s+(?:digest|sha256|sha-256)\s*[:=]?\s*$/.test(before);
+};
 const versions = (s: string): string[] => s.match(VERSION_RE) ?? [];
 
 interface Indexed {
@@ -545,7 +552,14 @@ function resolveIn(ix: Indexed, term: string, opts: GetOptions, d: GetDeps, with
         for (const { m } of candidates) {
           const text = `${m.subject} ${m.body ?? ''}`;
           const hay = text.toLowerCase();
-          let named = [...known].filter((v) => hay.includes(v));
+          let named = [...known].filter((v) => {
+            let at = hay.indexOf(v);
+            while (at >= 0) {
+              if (!(shaField && m.act === 'done') || safeKnownMailValue(text, v, at)) return true;
+              at = hay.indexOf(v, at + 1);
+            }
+            return false;
+          });
           // Jim ac6f85: for a done-sha field (or the bare card) a commit sha in that agent's done mail is a known value.
           if (!named.length && shaField && m.act === 'done' && (!agent || m.from === agent)) named = mailCommitShas(text);
           if (!named.length) continue;

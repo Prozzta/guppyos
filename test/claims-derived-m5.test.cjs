@@ -285,20 +285,23 @@ test('(c) releases: CHANGELOG sections and entries (Unreleased skipped), the tag
 // ———————————————————————————————————————————————————— (d) done mails
 
 test('F6 release fields: branch head is independent of the tag and installer digest is only a labelled release source', () => {
-  const tag = H('a'), head = H('b'), digest = 'c'.repeat(64);
+  const tag = H('a'), head = H('b'), digest = 'c'.repeat(64), numbered = 'd'.repeat(64);
   const facts = F.releaseFacts(
-    [{ version: '9.2.1', date: '2026-10-25', entries: [] }, { version: '9.2.2', entries: [] }, { version: '9.2.3', entries: [] }],
+    [{ version: '9.2.1', date: '2026-10-25', entries: [] }, { version: '9.2.2', entries: [] }, { version: '9.2.3', entries: [] }, { version: '9.2.4', entries: [] }, { version: '9.2.5', entries: [] }, { version: '9.2.6', entries: [] }],
     [{ name: 'v9.2.1', commit: tag, date: '2026-10-25T00:00:00Z' }, { name: 'v9.2.2', commit: H('d'), date: '2026-10-25T00:00:00Z' }],
     undefined,
     [{ version: '9.2.1', commit: head }, { version: '9.2.2', commit: H('d') }],
-    { cards: [{ id: 'CUT-9.2.1', result: 'setup sha256 ' + digest }], mails: [{ act: 'done', subject: 'CUT-9.2.2 done', body: 'installer digest ' + 'e'.repeat(64) }] },
+    { cards: [{ id: 'CUT-9.2.1', result: 'setup sha256 ' + digest }, { id: 'REL-442', result: 'release-9.2.3 branch setup sha256 ' + numbered }], mails: [{ act: 'done', subject: 'CUT-9.2.2 done', body: 'installer digest ' + 'e'.repeat(64) }, { act: 'done', subject: 'release-9.2.4 setup sha256 ' + 'f'.repeat(64) + '; release-9.2.5 installer digest ' + 'a'.repeat(64) }] },
   );
   const by = Object.fromEntries(facts.map((f) => [f.key, f]));
   assert.equal(by['release.9.2.1.head'].value, head, 'twin: docs commit after tag remains the branch head');
   assert.equal(by['release.9.2.2.head'].value, H('d'), 'twin: head equal to tag is retained');
   assert.equal(by['release.9.2.1.installer'].value, digest);
   assert.equal(by['release.9.2.2.installer'].value, 'e'.repeat(64));
-  assert.equal(by['release.9.2.3.installer'], undefined, 'twin: no labelled digest creates no field');
+  assert.equal(by['release.9.2.3.installer'].value, numbered, 'a numbered release card can name its release branch in text');
+  assert.equal(by['release.9.2.4.installer'].value, 'f'.repeat(64), 'a multi-release mail keeps each version with its own digest');
+  assert.equal(by['release.9.2.5.installer'].value, 'a'.repeat(64));
+  assert.equal(by['release.9.2.6.installer'], undefined, 'twin: no labelled digest creates no field');
   assert.equal(by['release.9.2.1'].refs.some((r) => r.value === digest), false, 'digest never becomes a commit ref');
 });
 
@@ -306,10 +309,12 @@ test('F8 card status: an explicit own close-as-superseded marker voids a done ca
   const cards = [
     { id: 'CUT-9.2.1', status: 'done', result: 'CLOSE-SUPERSEDED by CUT-9.2.2', doneAt: '2026-10-25T00:00:00Z' },
     { id: 'CUT-9.2.2', status: 'done', notes: 'CUT-9.2.1 was CLOSE-SUPERSEDED by CUT-9.2.2', doneAt: '2026-10-25T00:00:00Z' },
+    { id: 'TRIAGE-12', status: 'done', notes: '[2026-10-25T00:00:00Z] TRIAGE-12 (proposal, applied 2026-10-25) CLOSE-SUPERSEDED: BAR-7 (replacement reason). Evidence: synthetic', doneAt: '2026-10-25T00:00:00Z' },
   ];
   const by = Object.fromEntries((await F.cardFieldFacts(cards, null)).map((f) => [f.key, f]));
   assert.equal(by['card.cut-9.2.1.status'].value, 'VOID (closed as superseded by CUT-9.2.2)');
   assert.equal(by['card.cut-9.2.2.status'].value, 'done', 'twin: another card supercession leaves this done card alone');
+  assert.equal(by['card.triage-12.status'].value, 'VOID (closed as superseded by BAR-7)', 'the real mid-line colon marker is an own-card close');
 });
 
 test('A12 card match: dash, space or nothing; case-insensitive; the longest id; no partial ids', () => {
@@ -632,6 +637,8 @@ test('backfill CLI: runs on a hive copy with the key on stdin, refuses the live 
   const x = setup();
   const r = makeRepo();
   fixtureHive(x, r);
+  const releaseHead = r.g(['rev-parse', 'HEAD']);
+  r.g(['update-ref', 'refs/remotes/origin/release-9.1.2', releaseHead]);
   // The store makes its key at the first append; the CLI gets it as hex, as the runner passes it.
   await x.store.appendRecord(D, fact('seed', { key: 'card.seed.status' }), 'derived-internal');
   x.store.close();
@@ -645,6 +652,7 @@ test('backfill CLI: runs on a hive copy with the key on stdin, refuses the live 
   assert.equal(out.tags, 1);
   assert.equal(out.changelog, true);
   assert.equal(out.doneShas.appended, 1);
+  assert.equal(x.store.readLedger(D).records.find((c) => c.key === 'release.9.1.2.head').value, releaseHead, 'the CLI forwards origin release heads to the backfill');
   const again = JSON.parse(run(['--hive', x.root, '--user-data', `${x.root}-ud`, '--repo', r.repo, '--now', '2026-10-04T00:00:00Z']).stdout);
   assert.equal(again.decisions.appended + again.cardFields.appended + again.releases.appended + again.doneShas.appended, 0, 'idempotent across processes');
   const wt = x.store.readLedger(D).records.filter((c) => c.text !== 'seed').map((c) => c.wt);
