@@ -255,3 +255,20 @@ test('gate R3 (P4): a sentence end bounds the clause; the caution judges the ver
   assert.equal(F.auditVerdict(card('', ['2026-01-02T10:00Z FINAL PASS 0/0/0 @7777aaa', '2026-01-03T02:27Z god: re-based guppy/foo-fix-401 @5555eee, Jim PASS 9a9a9a; waiting on the stage-3 merge.', '2026-01-03T04:24Z god: LANDED in origin/guppy/int-9.4.2 @6666fff (Jim stage-3 PASS 8b8b8b)'].join('\n'))).sha, '5555eee');
   assert.equal(F.auditVerdict(card('', '2026-01-02 Jim re-audit PASS 0/0/1 @7777aaa')).sha, '7777aaa');
 });
+
+test('gate R4 (P3): a release card is a version card; a fix card named RELEASE-… is another card, and its commit is not the int done sha', async () => {
+  // isReleaseCard itself.
+  for (const id of ['RELEASE-9.4.2', 'CUT-9.4.2', 'cut-1.1.100', 'release-9.1.1', 'OMEGA-1.1.102-NOTES']) assert.equal(F.isReleaseCard(id), true, `twin: ${id} keeps the release treatment`);
+  for (const id of ['RELEASE-WIDGET-301', 'CUT-OFF-9', 'release-notes', 'INT-9.4.2']) assert.equal(F.isReleaseCard(id), false, `MUTANT R4 (prefix test): ${id} is no release card`);
+  // Jim's fixture: the owner's release mail, then a done mail on the same int card about a RELEASE-WIDGET-301 fix.
+  const CARDS = ['INT-9.4.2', 'RELEASE-WIDGET-301'];
+  const git = fakeGit({ '3333ccc': H('7'), '4444ddd': H('8') },
+    { [H('7')]: 'cut 9.4.2: the version', [H('8')]: 'ci: RELEASE-WIDGET-301 the workflow dry-builds only' },
+    { files: { [H('7')]: ['package.json', 'CHANGELOG.md'], [H('8')]: ['.github/workflows/build.yml'] }, versions: { [H('7')]: true } });
+  const r4 = await F.doneMailFacts([field3('r4-a', '9.4.2 released @3333ccc', '', T0), field3('r4-b', 'RELEASE-WIDGET-301: CI built a different asar; root fix drafted', 'names 4444ddd', T1)], CARDS, git);
+  assert.equal(commitOf(r4, I3), H('7'), 'MUTANT R4: the int donesha stays the release commit; 4444ddd is RELEASE-WIDGET-301\'s');
+  assert.deepEqual(r4.skips, [{ mail: 'r4-b', reason: 'noCommit', cards: ['INT-9.4.2'] }]);
+  // Twin: the same mail naming a real release card's commit is carried (P3 release exemption, round 6/7).
+  const gitR = fakeGit({ '3333ccc': H('7'), '4444ddd': H('8') }, { [H('7')]: 'cut 9.4.2: the version', [H('8')]: 'RELEASE-9.4.2 prep: the badge' }, { files: { [H('7')]: ['package.json'], [H('8')]: SRC }, versions: { [H('7')]: true } });
+  assert.equal(commitOf(await F.doneMailFacts([field3('r4-c', 'prep', 'names 4444ddd', T1)], ['INT-9.4.2', 'RELEASE-9.4.2'], gitR), I3), H('8'), 'twin: a commit naming only the version card is the line\'s own');
+});

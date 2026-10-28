@@ -534,7 +534,8 @@ test('round 6: own-card short forms are the card; release-only commits confirm o
   const relSubject = await F.doneMailFacts([{ id: 'r6-13', act: 'done', from: 'cutter', subject: 'cut 9.9.9 landed', body: '8b8b8b1', created_at: T0 }], CARDS6, git6);
   assert.equal(commitOf(relSubject, 'card.cut-9.9.9.donesha#cutter'), R6.rel, 'git confirms the cut card by the release commit');
   assert.equal(commitOf(await field('r6-14', 'SYN-WL', '8b8b8b2'), 'card.syn-wl.donesha#builder'), R6.bump, 'MUTANT any package.json: a change beyond the version line is not release-only');
-  assert.equal(F.isReleaseCard('CUT-9.9.9'), true); assert.equal(F.isReleaseCard('RELEASE-X'), true); assert.equal(F.isReleaseCard('FEAT-9.9.9-FIX'), true);
+  // Gate R4 (Jim 2699a7): a release card carries a version; RELEASE-X (no version) is a fix card, so the round-6 pin flips.
+  assert.equal(F.isReleaseCard('CUT-9.9.9'), true); assert.equal(F.isReleaseCard('RELEASE-9.9.9'), true); assert.equal(F.isReleaseCard('RELEASE-X'), false); assert.equal(F.isReleaseCard('FEAT-9.9.9-FIX'), true);
   assert.equal(F.isReleaseCard('INT-9.9.9'), false, 'an int card is no cut card'); assert.equal(F.isReleaseCard('SYN-WL'), false);
   // R6-3: an int card carries only a merge into its own line, by link and by field; a plain commit makes the row ambiguous.
   const intPlain = await link('r6-15', 'INT-9.1.2', '8b8b8b4');
