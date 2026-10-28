@@ -19,6 +19,7 @@ const loadTs = require('./load-ts.cjs');
 const REPO = path.resolve(__dirname, '..');
 const { NativeMemoryWiring, claimsSyncDeadlineMs, CLAIMS_SYNC_BASE_MS, CLAIMS_SYNC_PER_CHUNK_MS } = loadTs('src/main/nativeMemory/mainWiring.ts');
 const { askWaitMs, ASK_TIMEOUT_MS } = loadTs('src/main/nativeMemory/worker.ts');
+const { SEARCH_DEADLINE_WARM_MS } = loadTs('src/main/nativeMemory/service.ts');
 const { cardLeadsFor } = loadTs('src/main/nativeMemory/engine.ts');
 
 const dirs = [];
@@ -89,7 +90,8 @@ test('(b) askWaitMs: an ask for a request with a deadline waits exactly until th
   assert.equal(ASK_TIMEOUT_MS, 1_500);
   assert.equal(askWaitMs(undefined, 10_000), 1_500);
   assert.equal(askWaitMs(12_000, 10_000), 2_000, 'a cold search (2 s) lets main take the whole 2 s for the brief');
-  assert.equal(askWaitMs(10_250, 10_000), 250, 'a warm search (250 ms) never waits past its own deadline');
+  assert.equal(askWaitMs(10_000 + SEARCH_DEADLINE_WARM_MS, 10_000), SEARCH_DEADLINE_WARM_MS, 'a warm search never waits past its own deadline');
+  assert.ok(askWaitMs(10_000 + SEARCH_DEADLINE_WARM_MS, 10_000) >= 300, 'warm 500 ms: a brief main answers after 300 ms is still waited for');
   assert.equal(askWaitMs(9_000, 10_000), 0, 'a deadline already past waits nothing');
 });
 

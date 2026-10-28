@@ -1,7 +1,7 @@
 'use strict';
 /**
  * MEMORY-SEARCH-TIMEOUT-DURING-INDEX-189 (Jim 5b76db): during a 1757-part claims sync, 1 of 84
- * searches got "memory search timed out after 250 ms" (exit 4), and nothing logged it.
+ * searches got "memory search timed out after <warm> ms" (exit 4; 250 ms then, SEARCH_DEADLINE_WARM_MS now), and nothing logged it.
  *   A  every degraded reply writes one log row (capped), and a late reply says where the time went;
  *   B  while the worker reports indexing, a warm search gets SEARCH_DEADLINE_INDEXING_MS;
  *   C  a search whose deadline passed while it was queued is answered expired, never run.
@@ -26,6 +26,7 @@ test.after(() => {
 const loadTs = require('./load-ts.cjs');
 const { NativeMemoryClient, EXIT, SEARCH_DEADLINE_WARM_MS, SEARCH_DEADLINE_COLD_MS, SEARCH_DEADLINE_INDEXING_MS, DEGRADED_LOG_EVERY_MS } = loadTs('src/main/nativeMemory/service.ts');
 const { MemoryEngine, QueueExpired } = loadTs('src/main/nativeMemory/engine.ts');
+const { askWaitMs } = loadTs('src/main/nativeMemory/worker.ts');
 
 function fakeWorker() {
   const w = { posted: [], handlers: { message: [], exit: [] } };
@@ -61,23 +62,40 @@ test('T1 (A): a search that times out writes ONE degraded row; its late reply wr
   assert.deepEqual(r.rows, [], 'a good reply writes nothing');
   const p = r.client.request('search', { query: 'x' });
   const req = r.last();
-  assert.equal(req.deadline, r.now + SEARCH_DEADLINE_WARM_MS, 'quiet worker: the warm 250 ms budget is unchanged');
+  assert.equal(req.deadline, r.now + SEARCH_DEADLINE_WARM_MS, 'quiet worker: the warm budget is unchanged');
   r.now += SEARCH_DEADLINE_WARM_MS;
   r.fire(r.now);
   const got = await p;
   assert.equal(got.exit, EXIT.degraded);
-  assert.match(got.error, /^memory search timed out after 250 ms$/);
-  assert.deepEqual(degradedRows(r), [{ kind: 'native-memory-degraded', op: 'search', reason: 'deadline', budgetMs: 250, warm: true, indexing: false, elapsedMs: 250 }]);
+  assert.equal(got.error, `memory search timed out after ${SEARCH_DEADLINE_WARM_MS} ms`);
+  assert.deepEqual(degradedRows(r), [{ kind: 'native-memory-degraded', op: 'search', reason: 'deadline', budgetMs: SEARCH_DEADLINE_WARM_MS, warm: true, indexing: false, elapsedMs: SEARCH_DEADLINE_WARM_MS }]);
   r.now += 40;
-  r.w().reply({ id: req.id, ok: true, exit: 0, text: 'T', timing: { waitMs: 230, runMs: 60, inFlight: 'ingest' } });
+  r.w().reply({ id: req.id, ok: true, exit: 0, text: 'T', timing: { waitMs: SEARCH_DEADLINE_WARM_MS - 20, runMs: 60, inFlight: 'ingest' } });
   // Past the rate cap (Jim S2): a second late row would be written, so 'once' is the code's doing.
   r.now += DEGRADED_LOG_EVERY_MS;
   r.w().reply({ id: req.id, ok: true, exit: 0, text: 'T' });
   assert.deepEqual(r.rows.filter((x) => x.kind === 'native-memory-late-reply'),
-    [{ kind: 'native-memory-late-reply', op: 'search', budgetMs: 250, lateByMs: 40, ok: true, waitMs: 230, runMs: 60, inFlight: 'ingest' }]);
+    [{ kind: 'native-memory-late-reply', op: 'search', budgetMs: SEARCH_DEADLINE_WARM_MS, lateByMs: 40, ok: true, waitMs: SEARCH_DEADLINE_WARM_MS - 20, runMs: 60, inFlight: 'ingest' }]);
 });
 
-test('T1 (B): while the worker reports indexing, a warm search gets SEARCH_DEADLINE_INDEXING_MS; after it, 250 again; cold stays cold; the event is state, not a row', async () => {
+test('WARM-500 (the Human, via Jim 06b032): the warm budget is 500 ms; a card-lead ask main answers after 300 ms is printed WITH its brief, exit 0, no row', async () => {
+  assert.equal(SEARCH_DEADLINE_WARM_MS, 500, 'MUTANT: the warm budget is the ruled 0.5 s');
+  const r = rig();
+  await r.warmUp();
+  const p = r.client.request('search', { query: 'foo-7 status' });
+  const req = r.last();
+  assert.equal(req.deadline, r.now + 500, 'the warm search carries a 500 ms deadline');
+  assert.equal(askWaitMs(req.deadline, r.now), 500, 'the card-lead ask waits the whole 500 ms (askWaitMs follows the search deadline)');
+  r.now += 300;
+  const BRIEF = 'foo-7\n  status: doing\n[1] hit';
+  r.w().reply({ id: req.id, ok: true, exit: 0, text: BRIEF, timing: { waitMs: 300, runMs: 10 } });
+  const got = await p;
+  assert.deepEqual([got.exit, got.text], [EXIT.ok, BRIEF], 'printed with its brief, exit 0 (under 250 ms this was exit 4)');
+  assert.deepEqual(r.rows, [], 'no degraded or late row');
+  assert.ok(r.timers.find((t) => t.at === req.deadline).cleared, 'the deadline timer is cleared by the reply');
+});
+
+test('T1 (B): while the worker reports indexing, a warm search gets SEARCH_DEADLINE_INDEXING_MS; after it, the warm budget again; cold stays cold; the event is state, not a row', async () => {
   assert.equal(SEARCH_DEADLINE_INDEXING_MS, 1_000);
   assert.ok(SEARCH_DEADLINE_INDEXING_MS > SEARCH_DEADLINE_WARM_MS && SEARCH_DEADLINE_INDEXING_MS < SEARCH_DEADLINE_COLD_MS);
   const r = rig();
@@ -92,7 +110,7 @@ test('T1 (B): while the worker reports indexing, a warm search gets SEARCH_DEADL
   assert.equal(r.last().deadline, r.now + 8_000, 'an explicit deadline is never changed');
   r.w().reply({ event: 'indexing', on: false, kind: 'backfill' });
   void r.client.request('search', { query: 'q' });
-  assert.equal(r.last().deadline, r.now + SEARCH_DEADLINE_WARM_MS, 'indexing over: 250 ms');
+  assert.equal(r.last().deadline, r.now + SEARCH_DEADLINE_WARM_MS, 'indexing over: the warm budget');
   // Main sent a claims sync (or a backfill, or a level change): indexing from the send, before the
   // worker's event can arrive; and no longer once it is answered.
   for (const op of ['claims-sync', 'backfill', 'claim-ledger']) {
@@ -102,7 +120,7 @@ test('T1 (B): while the worker reports indexing, a warm search gets SEARCH_DEADL
     assert.equal(r.last().deadline, r.now + SEARCH_DEADLINE_INDEXING_MS, `${op} outstanding: 1000 ms`);
     r.w().reply({ id: idx, ok: true, exit: 0 });
     void r.client.request('search', { query: op });
-    assert.equal(r.last().deadline, r.now + SEARCH_DEADLINE_WARM_MS, `${op} answered: 250 ms`);
+    assert.equal(r.last().deadline, r.now + SEARCH_DEADLINE_WARM_MS, `${op} answered: the warm budget`);
   }
   assert.deepEqual(r.rows, [], 'indexing events are not log rows');
 });

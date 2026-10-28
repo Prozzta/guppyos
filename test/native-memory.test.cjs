@@ -24,7 +24,7 @@ const { chunkMarkdown, CHUNK_MAX_TOKENS } = loadTs('src/main/nativeMemory/chunke
 const { discoverSources, safeRelativeMd, MAX_SOURCE_BYTES } = loadTs('src/main/nativeMemory/sources.ts');
 const { formatSearch, formatWakeUp } = loadTs('src/main/nativeMemory/format.ts');
 const { ftsQuery, rrf, compactionDecision } = loadTs('src/main/nativeMemory/store.ts');
-const { validateRequest, MemoryTokens, NativeMemoryClient, EXIT } = loadTs('src/main/nativeMemory/service.ts');
+const { validateRequest, MemoryTokens, NativeMemoryClient, EXIT, SEARCH_DEADLINE_WARM_MS } = loadTs('src/main/nativeMemory/service.ts');
 const { NativeMemoryWiring, dbFileFor, toUnpacked } = loadTs('src/main/nativeMemory/mainWiring.ts');
 const { HookServer } = loadTs('src/main/hooks.ts');
 
@@ -215,8 +215,8 @@ test('CLIENT (section 3): no fork until the first request; one init; replies by 
   workers[0].reply({ id: req.id, ok: true, exit: 0, text: 'T' });
   assert.deepEqual(await p1, { ok: true, exit: 0, text: 'T', json: undefined, error: undefined });
   const p2 = c.request('search', { query: 'y' });
-  assert.equal(workers[0].posted[2].deadline, 1000 + 250, 'warm deadline 250 ms');
-  const t = timers.find((x) => !x.cleared && x.at === 1250);
+  assert.equal(workers[0].posted[2].deadline, 1000 + SEARCH_DEADLINE_WARM_MS, 'warm deadline');
+  const t = timers.find((x) => !x.cleared && x.at === 1000 + SEARCH_DEADLINE_WARM_MS);
   t.fn();
   assert.equal((await p2).exit, EXIT.degraded, 'the caller is never blocked past the deadline');
   const p3 = c.request('status', {});
@@ -237,7 +237,7 @@ test('CLIENT (Jim N2): after the worker reports an idle model unload, the next r
   workers[0].reply({ id: req.id, ok: true, exit: 0 });
   await p;
   void c.request('search', { query: 'y' });
-  assert.equal(workers[0].posted[2].deadline, 250, 'warm');
+  assert.equal(workers[0].posted[2].deadline, SEARCH_DEADLINE_WARM_MS, 'warm');
   workers[0].reply({ event: 'model-unloaded' });
   void c.request('search', { query: 'z' });
   assert.equal(workers[0].posted[3].deadline, 2000, 'cold again after the unload');

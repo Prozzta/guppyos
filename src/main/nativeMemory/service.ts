@@ -16,11 +16,12 @@ import { CLAIM_KINDS } from '../../shared/claims';
 /** CLI exit codes (section 6). */
 export const EXIT = { ok: 0, usage: 2, unavailable: 3, degraded: 4, unauthorized: 5 } as const;
 
-export const SEARCH_DEADLINE_WARM_MS = 250;
+/** The Human's ruling (Jim 06b032, 2026-10-28): a warm search may take up to 0.5 s (was 250 ms). */
+export const SEARCH_DEADLINE_WARM_MS = 500;
 export const SEARCH_DEADLINE_COLD_MS = 2_000;
 /** MEMORY-SEARCH-TIMEOUT-DURING-INDEX-189: a warm search while the worker reports indexing. It
  *  waits for one index step besides its own work, on a machine the index is loading (Jim saw 1 of
- *  84 searches cross 250 ms during a 1757-part claims sync). Under the cold budget and the CLI's
+ *  84 searches cross the then 250 ms warm budget during a 1757-part claims sync). Under the cold budget and the CLI's
  *  10 s. */
 export const SEARCH_DEADLINE_INDEXING_MS = 1_000;
 /** At most one log row per reason this often (a wedged worker must not flood log.jsonl); the next

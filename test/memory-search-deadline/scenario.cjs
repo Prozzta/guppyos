@@ -7,7 +7,7 @@
  * process (worker-host.cjs), joined by the IPC channel, as main and the utility process are. The
  * model is a fake ONNX session that takes STEP_MS per run (off the JS thread, as ONNX Runtime):
  * a loaded machine, where the rest of an index step plus a search's own query embed is usually
- * more than the 250 ms warm budget. What matters is the
+ * more than the warm budget (SEARCH_DEADLINE_WARM_MS). What matters is the
  * cost of one step, not the number of parts, so the claims sync is PARTS parts, not Jim's 1757.
  *   leg 'index': agent w1 is raised (its claims replace its markdown); a claims sync runs while
  *                one search at a time (wing w2, plain markdown) is sent, every 50 ms.
@@ -91,7 +91,7 @@ module.exports = async (drill) => {
     };
     // The startup backfill (joined) and one first search that loads the model: the client is
     // warm from here. The backfill's ok reply already marks the client warm, so this setup search
-    // would get the quiet 250 ms budget; give it an explicit one (the suite's load once took 262 ms).
+    // would get the quiet warm budget; give it an explicit one (the suite's load once took 262 ms).
     const bf = await client.request('backfill', {}, 60_000);
     const cold = await search(30_000);
     if (fatal) return { ok: false, reason: 'the worker failed', error: fatal };

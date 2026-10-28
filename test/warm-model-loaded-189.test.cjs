@@ -1,9 +1,9 @@
 'use strict';
 /**
  * WARM-MEANS-MODEL-LOADED-189 (Jim S3 on MEMORY-SEARCH-TIMEOUT-DURING-INDEX-189): the client chose the
- * warm 250 ms search budget after ANY ok reply, but the worker loads the embedding model lazily, on
+ * warm search budget (SEARCH_DEADLINE_WARM_MS, then 250 ms) after ANY ok reply, but the worker loads the embedding model lazily, on
  * its first embed. A status, wake-up, backfill with nothing to embed, or any other reply after an idle
- * unload marked the client warm, and the next search paid the model load on 250 ms: exit 4.
+ * unload marked the client warm, and the next search paid the model load on the warm budget: exit 4.
  * Warm now means the model is loaded: set by a search's ok reply (a search always embeds its query)
  * or the worker's 'model-loaded' event; cleared by 'model-unloaded' and by the worker's exit.
  */

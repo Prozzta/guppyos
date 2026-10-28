@@ -50,7 +50,7 @@ export interface WorkerMessage { id: number; op: string; args?: Record<string, u
  *  request carries no deadline of its own. */
 export const ASK_TIMEOUT_MS = 1_500;
 /** CLAIMS-KEYFIND-FOLLOWUPS (b): an ask made for a request with a deadline waits until that deadline (the search's
- *  own budget: 250 ms warm, 1 s indexing, 2 s cold), never a shorter fixed wait. A brief main answers inside the
+ *  own budget: SEARCH_DEADLINE_WARM_MS warm, 1 s indexing, 2 s cold), never a shorter fixed wait. A brief main answers inside the
  *  budget is printed; one it cannot answer in time expires the whole search (named exit 4), so hits are never printed
  *  without their brief while the search itself still had time. The wait is never negative. */
 export const askWaitMs = (deadline: number | undefined, now: number): number => (typeof deadline === 'number' ? Math.max(0, deadline - now) : ASK_TIMEOUT_MS);

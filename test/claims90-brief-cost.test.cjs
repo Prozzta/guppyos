@@ -1,6 +1,6 @@
 'use strict';
 /**
- * CLAIMS-90 brief cost (god 986e89): a search brief must fit the warm search deadline (250 ms). It re-read and
+ * CLAIMS-90 brief cost (god 986e89): a search brief must fit the warm search deadline (SEARCH_DEADLINE_WARM_MS, 500 ms since the Human's ruling of 2026-10-28; 250 ms when the card was cut). It re-read and
  * re-verified every ledger and re-derived every agent per ask (~230 ms raw on the step-3 hive, more with MACs).
  *  - STORE: readLedgerCached returns readLedger's last chain-'ok' result while the segment files are unchanged;
  *    never a record the MAC check did not pass, and a broken read is never kept.
