@@ -740,6 +740,17 @@ const LABEL_RE = /^[A-Z][A-Z0-9]*-[0-9]+$/;
 const NUM_RE = /^[0-9]+$/;
 
 /**
+ * Round 8 (god 6b94a5, Jim 165f37): whether a commit subject's FIRST token is the card id, written with
+ * its dashes as a dash or a space ('INT 9.1.2 fixup 4', 'INT-9.1.2 stage 3 fixup', 'int 9.1.2: pin'),
+ * followed by a space, a colon or the end: the commit is the line's own. The id named later, another
+ * id first, or a longer version (9.1.20, 9.1.2.1) is not.
+ */
+export function leadsWithCard(subject: string, id: string): boolean {
+  const body = id.split('-').map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[-\\s]');
+  return new RegExp(`^${body}(?=[\\s:]|$)`, 'i').test(subject);
+}
+
+/**
  * Round 6 (god 18e97a, R6-1): `token` (an UPPER-KEBAB token that is no known id) is a short form of the
  * card `id`: (a) the id plus or minus a trailing -NNN (FEAT-ALPHA-WIDGET-DRAW-123; SYN-BETA-PIPE for
  * SYN-BETA-PIPE-123); (b) a contiguous PREFIX or SUFFIX of the id's segments, two or more of them, at
@@ -914,7 +925,9 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
       // Round 6 (god 18e97a, R6-3): on a link or subject row an int card's done sha is only a merge into its
       // own line; round 7 (god 3af596, R7-1): a FIELD row for an int card is judged as in round 5 (its own
       // plain line commit, a fixup or a pin, is a real done sha; the field is authoritative).
-      if (isIntCard(card)) return fieldRow ? (e) => !e || (e.into !== undefined ? own.has(e.commit) : plain(e)) : (e) => !e || (e.into !== undefined && own.has(e.commit));
+      // Round 8 (god 6b94a5, R8): on those rows a PLAIN commit whose own subject leads with the int card's id is
+      // the line's own commit as well; a commit reached through a merge is not.
+      if (isIntCard(card)) return fieldRow ? (e) => !e || (e.into !== undefined ? own.has(e.commit) : plain(e)) : (e) => !e || (e.into !== undefined ? own.has(e.commit) : !e.merge && leadsWithCard(e.text, card));
       // R6-2: a docs / release-only commit is carried only for a cut/release card.
       return (e) => !e || (e.into !== undefined ? own.has(e.commit) : (!e.docsOnly || isReleaseCard(card)) && plain(e));
     };
@@ -1016,8 +1029,9 @@ async function cardOfDoneMail(
     // cards in its body; a card's own commit names it in the subject). Round 3: a merge resolved to
     // its merged parent (B); a commit changing only docs confirms nothing (A).
     // Round 6 (god 18e97a): a docs / release-only commit confirms only a cut/release card (R6-2); an int
-    // card is confirmed only by a merge into its own line (R6-3).
-    const hits = match(e.into !== undefined ? e.into : e.text).filter((x) => named.includes(x) && (!e.docsOnly || isReleaseCard(x)) && (!isIntCard(x) || e.into !== undefined));
+    // card is confirmed only by a merge into its own line (R6-3) or (round 8, R8) a plain commit whose subject
+    // leads with its id.
+    const hits = match(e.into !== undefined ? e.into : e.text).filter((x) => named.includes(x) && (!e.docsOnly || isReleaseCard(x)) && (!isIntCard(x) || e.into !== undefined || (!e.merge && leadsWithCard(e.text, x))));
     if (hits.length === 1) byGit.add(hits[0]);
   }
   if (byGit.size === 1) return [...byGit][0];

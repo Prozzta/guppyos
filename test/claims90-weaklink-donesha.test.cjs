@@ -549,8 +549,10 @@ test('round 6: own-card short forms are the card; release-only commits confirm o
   assert.equal(commitOf(await link('r6-17b', 'INT-9.1.2', '8b8b8b5'), slot('INT-9.1.2')), R6.m2, 'MUTANT P10: the whole subject (SYN-WL) refuses the link');
   const intSubject = await F.doneMailFacts([{ id: 'r6-18', act: 'done', from: 'gate', subject: 'int 9.1.2 stage 3 PASS', body: '8b8b8b3', created_at: T0 }], CARDS6, git6);
   assert.equal(commitOf(intSubject, 'card.int-9.1.2.donesha#gate'), R6.m1, 'by subject: git confirms the int card by the merge into its line');
+  // Round 8 (god 6b94a5; deliberately changed from round 6): the fixup's subject LEADS with the int id, so it is the
+  // line's own commit and confirms the card; a plain commit naming the id later still confirms nothing (round 8 test).
   const intSubjectPlain = await F.doneMailFacts([{ id: 'r6-19', act: 'done', from: 'gate', subject: 'int 9.1 fixup PASS', body: 'a8a8a8a', created_at: T0 }], CARDS6, git6);
-  assert.deepEqual(intSubjectPlain.skips, [{ mail: 'r6-19', reason: 'ambiguous', cards: ['INT-9.1'] }], 'a plain commit naming the int card in its subject confirms nothing');
+  assert.equal(commitOf(intSubjectPlain, 'card.int-9.1.donesha#gate'), V, 'R8: the line\'s own fixup confirms the int card by subject');
   // R6-5 (b), Jim's P5: after every subject @sha is dropped the reason is noCommit, even when the body lists another card's commit.
   const p5 = await field('r6-20', 'SYN-WL', 'see cccccc3 too', 'sweep @d4d4d4d');
   assert.deepEqual(p5.skips, [{ mail: 'r6-20', reason: 'noCommit', cards: ['SYN-WL'] }], 'MUTANT P5: ambiguous');
@@ -621,8 +623,10 @@ test('round 7: an int card by FIELD keeps its plain line commit (R7-1); the rele
   assert.deepEqual(namer('SGW-FOO beside SYN-BETA; ALPHA-9-1 too'), { cards: ['SYN-BETA-123', 'SYN-ALPHA-9-1'], others: ['SGW-FOO'] });
   // R7-3 (f): git never confirms an int card by a plain commit's subject: a subject naming the int card and another
   // card, whose only commit is the int fixup, is ambiguous between both (the fixup confirms neither).
-  assert.deepEqual((await bySubject('r7-12', 'int 9.1 fixup and SYN-OTHER PASS', 'a8a8a8a')).skips, [{ mail: 'r7-12', reason: 'ambiguous', cards: ['INT-9.1', 'SYN-OTHER'] }], 'MUTANT (f): the fixup confirms the int card');
-  assert.deepEqual((await link('r7-13', 'INT-9.1', 'a8a8a8a')).skips, [{ mail: 'r7-13', reason: 'ambiguous', cards: ['INT-9.1'] }], 'by link the fixup is carried and refused');
+  // Round 8 (deliberately changed): the fixup leads with the int id, so it confirms INT-9.1 and is kept by link; the
+  // round-8 test pins the (f) shapes with commits that name the id later or another line.
+  assert.equal(commitOf(await bySubject('r7-12', 'int 9.1 fixup and SYN-OTHER PASS', 'a8a8a8a'), slot('INT-9.1', 'gate')), V, 'R8: the own-line fixup confirms the int card among two named');
+  assert.equal(commitOf(await link('r7-13', 'INT-9.1', 'a8a8a8a'), slot('INT-9.1')), V, 'R8: by link the own-line fixup is kept');
   // R7-2 with the faked port: without versionOnly a non-doc file is code (the older port); a docs-only commit needs no port.
   const noPort = fakeGit({ ...G6[0] }, { ...G6[1] }, { parents: G6[2].parents, files: G6[2].files });
   const relNoPort = await F.doneMailFacts([{ id: 'r7-14', act: 'done', from: 'cutter', card: 'CUT-9.9.9', subject: 'cut', body: '8b8b8b1', created_at: T0 }], CARDS6, noPort);
@@ -630,6 +634,58 @@ test('round 7: an int card by FIELD keeps its plain line commit (R7-1); the rele
   assert.deepEqual((await F.doneMailFacts([{ id: 'r7-15', act: 'done', from: 'auditor', cards: ['SYN-WL'], subject: 'Re: cut', body: '8b8b8b1', created_at: T0 }], CARDS6, noPort)).skips,
     [{ mail: 'r7-15', reason: 'ambiguous', cards: ['SYN-WL', 'CUT-9.9.9'] }], 'without the port the release commit counts as code: carried, and refused as another card\'s');
   assert.deepEqual((await link('r7-16', 'SYN-WL', '8b8b8b1')).skips, [{ mail: 'r7-16', reason: 'noCommit', cards: ['SYN-WL'] }], 'with the port it is release-only and carried for no feature card');
+});
+
+// Round 8 (god 6b94a5, Jim 165f37): x1..x7 are plain commits on or near the int line; m6 a two-parent commit whose
+// subject leads with the int id (judged as a merge: no into-line, so only its merged parent); m7 a merge of a branch
+// whose tip is x1 into some other line.
+const R8 = { x1: HX('a', '1'), x2: HX('a', '2'), x3: HX('a', '3'), x4: HX('a', '4'), x5: HX('a', '5'), x6: HX('a', '6'), x7: HX('a', '7'), m6: HX('a', '8'), m7: HX('a', '9') };
+const git8 = fakeGit(
+  { ...G6[0], '1a1a1a1': R8.x1, '1a1a1a2': R8.x2, '1a1a1a3': R8.x3, '1a1a1a4': R8.x4, '1a1a1a5': R8.x5, '1a1a1a6': R8.x6, '1a1a1a7': R8.x7, '1a1a1a8': R8.m6, '1a1a1a9': R8.m7 },
+  { ...G6[1], [R8.x1]: 'INT 9.1.2 fixup 4: re-pin the count', [R8.x2]: 'INT-9.1.2 stage 3 fixup: the count', [R8.x3]: 'fix: thing for INT 9.1.2',
+    [R8.x4]: 'INT 9.1.3: another line', [R8.x5]: 'INT 9.1.20: a longer version', [R8.x6]: 'INT 9.1.2.1: a longer version still', [R8.x7]: 'int 9.1.2: lower case',
+    [R8.m6]: 'INT 9.1.2 stage 3', [R8.m7]: 'Merge guppy/int-9.1.2-fix @1a1a1a1 into guppy/other' },
+  { ...G6[2], parents: { ...G6[2].parents, [R8.m6]: [H('d'), U], [R8.m7]: [H('d'), R8.x1] },
+    files: { ...G6[2].files, [R8.x1]: SRC, [R8.x2]: SRC, [R8.x3]: SRC, [R8.x4]: SRC, [R8.x5]: SRC, [R8.x6]: SRC, [R8.x7]: SRC } },
+);
+
+test('round 8: on a link or subject row a plain commit whose own subject leads with the int card\'s id is the line\'s own commit; every other plain commit stays refused (god 6b94a5)', async () => {
+  const link = (id, card, body, subject = 'Re: sweep') => F.doneMailFacts([{ id, act: 'done', from: 'auditor', cards: [card], subject, body, created_at: T0 }], CARDS6, git8);
+  const bySubject = (id, subject, body) => F.doneMailFacts([{ id, act: 'done', from: 'gate', subject, body, created_at: T0 }], CARDS6, git8);
+  const slot = (card, who = 'auditor') => `card.${card.toLowerCase()}.donesha#${who}`;
+  const amb = (r, id, cards) => assert.deepEqual(r.skips, [{ mail: id, reason: 'ambiguous', cards }], id);
+  // The spellings: a dash or a space, a space / colon / end after, any case.
+  assert.equal(commitOf(await link('r8-1', 'INT-9.1.2', '1a1a1a1', 'Re: INT-9.1.2 @1a1a1a1: PASS'), slot('INT-9.1.2')), R8.x1, 'MUTANT R8 dropped: the fixup is refused');
+  assert.equal(commitOf(await link('r8-2', 'INT-9.1.2', '1a1a1a2'), slot('INT-9.1.2')), R8.x2, 'MUTANT separator: INT-9.1.2 stage 3 fixup');
+  assert.equal(commitOf(await link('r8-3', 'INT-9.1.2', '1a1a1a7'), slot('INT-9.1.2')), R8.x7, 'MUTANT case: int 9.1.2: lower case');
+  // Not the line's own: the id later; another int line first; a longer version; a feature commit; a plain verb.
+  amb(await link('r8-4', 'INT-9.1.2', '1a1a1a3'), 'r8-4', ['INT-9.1.2']);
+  // (INT-9.1.3 and INT-9.1.20 are not board cards, so they are not named in the cards list.)
+  amb(await link('r8-5', 'INT-9.1.2', '1a1a1a4'), 'r8-5', ['INT-9.1.2']);
+  amb(await link('r8-6', 'INT-9.1.2', '1a1a1a5'), 'r8-6', ['INT-9.1.2']);
+  amb(await link('r8-7', 'INT-9.1.2', '1a1a1a6'), 'r8-7', ['INT-9.1.2']);
+  amb(await link('r8-8', 'INT-9.1', '1a1a1a1'), 'r8-8', ['INT-9.1']);
+  amb(await link('r8-9', 'INT-9.1.2', 'f7f7f7f'), 'r8-9', ['INT-9.1.2']);
+  amb(await link('r8-10', 'INT-9.1.2', '8b8b8b4'), 'r8-10', ['INT-9.1.2']);
+  // A commit reached through a merge into another line is not the line's own, whatever its subject leads with.
+  amb(await link('r8-11', 'INT-9.1.2', '1a1a1a9'), 'r8-11', ['INT-9.1.2']);
+  // A two-parent commit whose subject leads with the id is a merge: no into-line, so only its merged parent (a feature commit).
+  amb(await link('r8-12', 'INT-9.1.2', '1a1a1a8'), 'r8-12', ['INT-9.1.2']);
+  // The rule is the int card's: a feature card linked to the int line's own fixup has its link refused, since the
+  // fixup confirms the int card through git (R8) and not the feature card.
+  amb(await link('r8-13', 'SYN-WL', '1a1a1a1'), 'r8-13', ['SYN-WL', 'INT-9.1.2']);
+  // Through git by subject: the own-line fixup confirms the int card among two named cards; a commit naming the id later,
+  // or a feature commit, confirms nothing.
+  assert.equal(commitOf(await bySubject('r8-14', 'INT-9.1.2 and SYN-OTHER PASS', '1a1a1a1'), slot('INT-9.1.2', 'gate')), R8.x1, 'MUTANT git: the own-line fixup confirms nothing');
+  amb(await bySubject('r8-15', 'INT-9.1.2 and SYN-OTHER PASS', '1a1a1a3'), 'r8-15', ['INT-9.1.2', 'SYN-OTHER']);
+  amb(await bySubject('r8-16', 'INT-9.1.2 and SYN-OTHER PASS', '8b8b8b4'), 'r8-16', ['INT-9.1.2', 'SYN-OTHER']);
+  // Field rows are unchanged (round 7): the fixup and the feature commit both count by field.
+  assert.equal(commitOf(await F.doneMailFacts([{ id: 'r8-17', act: 'done', from: 'builder', card: 'INT-9.1.2', subject: 'landed', body: '1a1a1a3', created_at: T0 }], CARDS6, git8), slot('INT-9.1.2', 'builder')), R8.x3);
+  // leadsWithCard itself.
+  assert.equal(F.leadsWithCard('INT 9.1.2 fixup 4: x', 'INT-9.1.2'), true); assert.equal(F.leadsWithCard('INT-9.1.2', 'INT-9.1.2'), true); assert.equal(F.leadsWithCard('int 9.1.2: pin', 'INT-9.1.2'), true);
+  assert.equal(F.leadsWithCard('INT 9.1.20: x', 'INT-9.1.2'), false, 'MUTANT boundary'); assert.equal(F.leadsWithCard('INT 9.1.2.1: x', 'INT-9.1.2'), false); assert.equal(F.leadsWithCard('INT 9.1.2-fix', 'INT-9.1.2'), false);
+  assert.equal(F.leadsWithCard('SYN INT 9.1.2 fixup 4', 'INT-9.1.2'), false, 'a leading word: not first'); assert.equal(F.leadsWithCard('INT 9.1.2', 'INT-9.1'), false, 'a longer id is another line');
+  assert.equal(F.leadsWithCard('INT  9.1.2', 'INT-9.1.2'), false, 'one separator'); assert.equal(F.leadsWithCard('INT_9.1.2', 'INT-9.1.2'), false);
 });
 
 // Round 7 (R7-2, Jim's (g)): DerivedGit.versionOnly against a real tiny repo, not the faked port.
