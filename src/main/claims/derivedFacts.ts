@@ -819,6 +819,8 @@ const CARD_SHAPE_RE = /(?<![A-Za-z0-9./-])([A-Z][A-Z0-9]*(?:-[A-Z0-9]+(?:\.[0-9]
 const LABEL_RE = /^[A-Z][A-Z0-9]*-[0-9]+$/;
 
 const NUM_RE = /^[0-9]+$/;
+/** Round 10 (F1 a): a role suffix is one or more word segments with no digit (INT, RC, AUDIT, INT-AUDIT). */
+const ROLE_SUFFIX_RE = /^[A-Z]+(?:-[A-Z]+)*$/;
 
 /** A card id or a card field in its canonical form: lower-case, dashes and spaces dropped (round 9, P1). */
 const canonCard = (s: string): string => s.toLowerCase().replace(/[-\s]/g, '');
@@ -848,6 +850,9 @@ export function isOwnForm(token: string, id: string): boolean {
   const t = token, c = id.toUpperCase();
   if (t === c) return true;
   if (t.startsWith(`${c}-`) && NUM_RE.test(t.slice(c.length + 1))) return true;
+  // Round 10 (god a22191, F1 a): the id plus a ROLE suffix of word segments (ABC-12-INT, ABC-12-AUDIT) is a
+  // form of the card, unless the longer token is itself a known card (the recogniser matched it first).
+  if (t.startsWith(`${c}-`) && ROLE_SUFFIX_RE.test(t.slice(c.length + 1))) return true;
   if (c.startsWith(`${t}-`) && NUM_RE.test(c.slice(t.length + 1))) return true;
   const ts = t.split('-'), cs = c.split('-');
   if (ts.length >= 2 && ts.length < cs.length && ts.some((s) => !NUM_RE.test(s))) {
