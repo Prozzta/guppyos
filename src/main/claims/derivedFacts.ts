@@ -989,8 +989,11 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
       // Round 9 (P3): on an int card's FIELD row a plain commit that names only OTHER cards (another card's
       // own work the int done mail lists) is not carried; the line's own commits (fixups, pins, the release
       // commit, a subject leading with the id) still are.
-      // The line's release commit (version-only files, or naming only a cut card) is the line's own.
-      const foreignOnly = (e: ReportedCommit): boolean => !e.docsOnly && foreign(e, card).some((x) => !isReleaseCard(x)) && !namesOf(e).cards.includes(card);
+      // The line's release commit (version-only files, or naming only a cut card) is the line's own. Gate R1:
+      // an unknown card-shaped token with no number (OMEGA-PINS) is a topic, not another card; a known card
+      // is another card whatever its shape.
+      const otherCard = (x: string): boolean => !isReleaseCard(x) && (known.has(x.toLowerCase()) || /[0-9]/.test(x));
+      const foreignOnly = (e: ReportedCommit): boolean => !e.docsOnly && foreign(e, card).some(otherCard) && !namesOf(e).cards.includes(card);
       if (isIntCard(card)) return fieldRow ? (e) => !e || (e.into !== undefined ? own.has(e.commit) : plain(e) && !foreignOnly(e)) : (e) => !e || (e.into !== undefined ? own.has(e.commit) : !e.merge && leadsWithCard(e.text, card));
       // R6-2: a docs / release-only commit is carried only for a cut/release card.
       return (e) => !e || (e.into !== undefined ? own.has(e.commit) : (!e.docsOnly || isReleaseCard(card)) && plain(e));

@@ -541,7 +541,8 @@ test('round 6: own-card short forms are the card; release-only commits confirm o
   assert.deepEqual(intPlain.skips, [{ mail: 'r6-15', reason: 'ambiguous', cards: ['INT-9.1.2'] }], 'MUTANT int carries a plain commit');
   // Round 7 (god 3af596, R7-1) let a FIELD row carry any plain commit; round 9 (Jim brief-p P3, deliberately
   // retargeted) refuses a plain commit whose subject names only OTHER cards (here the unknown card FEAT-NEW).
-  assert.deepEqual((await field('r6-16', 'INT-9.1.2', 'f7f7f7f')).skips, [{ mail: 'r6-16', reason: 'noCommit', cards: ['INT-9.1.2'] }], 'P3: another card\'s commit by field is not the int done sha');
+  // Gate R1 (Jim c366fb): FEAT-NEW has no number, so it is a topic, not another card; the P3 retarget of r9 goes back.
+  assert.equal(commitOf(await field('r6-16', 'INT-9.1.2', 'f7f7f7f'), 'card.int-9.1.2.donesha#builder'), U, 'R7-1 / gate R1: a plain commit naming a non-numbered topic by field is the int done sha');
   // R6-5 (a), Jim's P10: the merge self entry is judged on its into-line, not its whole subject.
   assert.equal(commitOf(await link('r6-17', 'INT-9.1.2', '8b8b8b3'), slot('INT-9.1.2')), R6.m1, 'FEAT-ONE in the subject does not refuse the int card');
   // The into-line comes from the first-parent chain (stage 4 on top of the stage 3 merge): judged on that line,

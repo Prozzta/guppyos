@@ -192,3 +192,17 @@ test('P4: an audit entry written sha-first counts; a verdict on another line\'s 
   assert.equal(F.auditVerdict(card('', [E2, E1].join('\n'))).sha, '5555eee', 'order of writing does not matter across dates');
   assert.equal(F.auditVerdict(card('', [E1, E3].join('\n'))).sha, '7777aaa', 'the int-tip entry is skipped, the older audit stands');
 });
+
+// ———————————————————————————————————————————————————————————— gate fixes (Jim c366fb)
+test('gate R1 (P3): an unknown token with no number is a topic, not another card; a numbered one or a known card is', async () => {
+  const gitR1 = fakeGit({ '2222bbb': H('b'), '2222bbc': H('c'), '2222bbd': H('d') },
+    { [H('b')]: 'OMEGA-PINS taskkill /T pin: a call inside a string is data', [H('c')]: 'OMEGA-PINS-301 taskkill pin', [H('d')]: 'SYN-PIN: the other card' },
+    { files: { [H('b')]: SRC, [H('c')]: SRC, [H('d')]: SRC } });
+  const r1 = await F.doneMailFacts([field3('r1-a', 'OMEGA-PINS taskkill pin fix @2222bbb: PASS 0/0/0', '')], CARDS3, gitR1);
+  assert.equal(commitOf(r1, I3), H('b'), 'MUTANT R1: the topic token refuses the int row');
+  assert.deepEqual(r1.skips, []);
+  assert.deepEqual((await F.doneMailFacts([field3('r1-b', 'pin fix @2222bbc', '')], CARDS3, gitR1)).skips, [{ mail: 'r1-b', reason: 'noCommit', cards: ['INT-9.4.2'] }], 'a numbered unknown token is another card');
+  assert.deepEqual((await F.doneMailFacts([field3('r1-c', 'pin fix @2222bbd', '')], CARDS3, gitR1)).skips, [{ mail: 'r1-c', reason: 'noCommit', cards: ['INT-9.4.2'] }], 'MUTANT R1: a known card with no number is another card');
+  // P3-a stands: the foreign commits there name full ids.
+  assert.equal(commitOf(await F.doneMailFacts([field3('r1-d', 'landed', 'carries 2222bbb and 3333ccc on top of 1111aaa', T1)], CARDS3, git3), I3), H('5'));
+});
