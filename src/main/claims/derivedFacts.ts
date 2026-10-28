@@ -739,6 +739,9 @@ const LABEL_RE = /^[A-Z][A-Z0-9]*-[0-9]+$/;
 
 const NUM_RE = /^[0-9]+$/;
 
+/** A card id or a card field in its canonical form: lower-case, dashes and spaces dropped (round 9, P1). */
+const canonCard = (s: string): string => s.toLowerCase().replace(/[-\s]/g, '');
+
 /**
  * Round 8 (god 6b94a5, Jim 165f37): whether a commit subject's FIRST token is the card id, written with
  * its dashes as a dash or a space ('INT 9.1.2 fixup 4', 'INT-9.1.2 stage 3 fixup', 'int 9.1.2: pin'),
@@ -872,7 +875,14 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
   const namesOf = (e: ReportedCommit): CardNames => namer(e.into !== undefined ? e.into : e.text);
   /** The cards other than `card` a commit names (known ids and card-shaped unknown tokens). */
   const foreign = (e: ReportedCommit, card: string): string[] => { const n = namesOf(e); return [...n.cards.filter((c) => c !== card), ...n.others]; };
-  const known = new Map(cardIds.map((c) => [c.toLowerCase(), c]));
+  const known = new Map(cardIds.flatMap((c) => [[c.toLowerCase(), c], [canonCard(c), c]] as Array<[string, string]>));
+  // Round 9 (P1): the card field, read like every other card name (case, dash or space), but whole: a
+  // field that names no known card names some other card (guide A12) and the mail counts for nothing.
+  const fieldCardOf = (field: unknown): string | null | undefined => {
+    if (typeof field !== 'string' || !field.trim()) return undefined;
+    const t = field.trim();
+    return known.get(t.toLowerCase()) ?? known.get(canonCard(t)) ?? null;
+  };
   const skipped: Record<DoneSkipReason, number> = { notDone: 0, noShaWord: 0, noCommit: 0, noCard: 0, ambiguous: 0, bodyOnly: 0 };
   const skips: DoneSkip[] = [];
   const skip = (mail: string, reason: DoneSkipReason, cards?: string[]): void => {
@@ -918,7 +928,8 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
     // (B) A commit reached through a merge counts for the card only when its subject or branch names it.
     // Round 4b: a merge into the card's own line is the card's work: it counts as itself and the parents
     // it merged are not descended; for every other card such a merge entry is dropped.
-    const fieldRow = typeof m.card === 'string' && known.has(m.card.toLowerCase());
+    const fieldCard = fieldCardOf(m.card);
+    const fieldRow = typeof fieldCard === 'string';
     const keepFor = (card: string): ((e: ReportedCommit | undefined) => boolean) => {
       const own = new Set(entries.filter((e) => e.into !== undefined && match(e.into).includes(card)).map((e) => e.commit));
       const plain = (e: ReportedCommit): boolean => !e.merge || (!(e.chain ?? []).some((c) => own.has(c)) && match(e.text).includes(card));
@@ -942,7 +953,7 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
       const latest = await latestOfCommits(kept.map((e) => e.commit), git);
       return kept.filter((e) => e.commit === latest);
     };
-    const card = await cardOfDoneMail(m, known, match, foreign, entries, carriedFor);
+    const card = await cardOfDoneMail(m, fieldCard, known, match, foreign, entries, carriedFor);
     if (typeof card !== 'string') { skip(m.id, card.reason, card.cards); continue; }
     const key = cardKey(card, 'donesha');
     if (!key) { skip(m.id, 'noCard', [card]); continue; }
@@ -995,11 +1006,13 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
 
 /** The done mail's card (see doneMailFacts), or why there is none. */
 async function cardOfDoneMail(
-  m: MailLike, known: Map<string, string>, match: (text: unknown) => string[], foreign: (e: ReportedCommit, card: string) => string[],
+  m: MailLike, fieldCard: string | null | undefined, known: Map<string, string>, match: (text: unknown) => string[], foreign: (e: ReportedCommit, card: string) => string[],
   entries: readonly ReportedCommit[], carriedFor: (card: string) => Promise<readonly ReportedCommit[]>,
 ): Promise<string | { reason: 'noCard' | 'ambiguous' | 'bodyOnly'; cards?: string[] }> {
-  const field = typeof m.card === 'string' ? known.get(m.card.toLowerCase()) : undefined;
-  if (field) return field;
+  if (fieldCard) return fieldCard;
+  // Round 9 (P1): a card field naming a card the board does not know is a done mail about some OTHER
+  // card: it never falls through to the thread's link or the subject (guide A12).
+  if (fieldCard === null) return { reason: 'noCard', cards: [clip(String(m.card).trim(), 60)] };
   const linked = Array.isArray(m.cards)
     ? [...new Set(m.cards.map((c) => (typeof c === 'string' ? known.get(c.toLowerCase()) : undefined)).filter((c): c is string => !!c))]
     : [];
