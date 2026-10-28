@@ -38,6 +38,7 @@ function fakeGit(commits, messages, extra = {}) {
     async message(c) { return messages[c] ?? null; },
     ...(extra.parents ? { async parents(c) { return extra.parents[c] ?? []; } } : {}),
     ...(extra.files ? { async changedFiles(c) { return extra.files[c] ?? null; } } : {}),
+    ...(extra.versions ? { async versionOnly(c) { return extra.versions[c] ?? null; } } : {}),
   };
 }
 const T0 = '2026-01-10T10:00:00.000Z';
@@ -117,4 +118,45 @@ test('P2: a lone subject @sha counts on a link or subject row only when the subj
   assert.equal(lone('A-1 PASS — gamma loop 201 done @def5678', 'done'), true, 'the segment names the card (space form)');
   assert.equal(lone('one @def5678', 'one'), true, 'one item');
   assert.equal(lone('Re: thread - one @DEF5678', 'one'), true, 'the sha as written, any case; the prefix is no item');
+});
+
+// ———————————————————————————————————————————————————————————— P3
+const CARDS3 = ['INT-9.4.2', 'SYN-PIN'];
+const git3 = fakeGit(
+  { '1111aaa': H('5'), '2222bbb': H('6'), '3333ccc': H('7'), '4444ddd': H('8'), '5555eee': H('9') },
+  { [H('5')]: 'INT 9.4.2 release', [H('6')]: 'OMEGA-CI-ONE-301: fix publish', [H('7')]: 'PSI-IPC-302: full run', [H('8')]: 'INT 9.4.2 fixup 2', [H('9')]: 'INT 9.4.2: merge prep for OMEGA-CI-ONE-301' },
+  { parents: { [H('5')]: [H('a')], [H('6')]: [H('5')], [H('7')]: [H('6')], [H('8')]: [H('5')], [H('9')]: [H('5')] }, files: { [H('5')]: SRC, [H('6')]: SRC, [H('7')]: SRC, [H('8')]: SRC, [H('9')]: SRC },
+    times: { [H('5')]: 10, [H('6')]: 20, [H('7')]: 30, [H('8')]: 40, [H('9')]: 50 } },
+);
+const field3 = (id, subject, body, created_at = T0) => ({ id, act: 'done', from: 'kim-bbbbbbbb', card: 'INT-9.4.2', subject, body, created_at });
+const I3 = slot('INT-9.4.2', 'kim-bbbbbbbb');
+
+test('P3: an int card\'s field row never carries another card\'s plain commit; its own line commits still count', async () => {
+  const early = field3('p3-a1', '9.4.2 released @1111aaa', '');
+  const late = field3('p3-a2', 'landed', 'carries 2222bbb and 3333ccc on top of 1111aaa', T1);
+  const both = await F.doneMailFacts([early, late], CARDS3, git3);
+  assert.equal(commitOf(both, I3), H('5'), 'MUTANT P3: the newest mail picks another card\'s commit (3333ccc) and overwrites the int row');
+  assert.equal(commitOf(await F.doneMailFacts([late], CARDS3, git3), I3), H('5'), 'the later mail alone gives the int tip');
+  assert.equal(commitOf(await F.doneMailFacts([early], CARDS3, git3), I3), H('5'), 'the earlier mail alone');
+  // P3-b (must not regress): the line's own fixup by field.
+  assert.equal(commitOf(await F.doneMailFacts([field3('p3-b', 'fixup', '4444ddd')], CARDS3, git3), I3), H('8'), 'P3-b');
+  // Its own commit naming another card as well is still the line's (names the card).
+  assert.equal(commitOf(await F.doneMailFacts([field3('p3-c', 'prep', '5555eee')], CARDS3, git3), I3), H('9'));
+  // Only other cards' commits: nothing is carried (noCommit), and the sender's earlier row stands.
+  const only = await F.doneMailFacts([early, field3('p3-d', 'landed', '2222bbb 3333ccc', T1)], CARDS3, git3);
+  assert.equal(commitOf(only, I3), H('5'));
+  assert.deepEqual(only.skips, [{ mail: 'p3-d', reason: 'noCommit', cards: ['INT-9.4.2'] }]);
+  // A subject @sha that is another card's commit on a field row: nothing carried either.
+  assert.deepEqual((await F.doneMailFacts([field3('p3-e', 'done @2222bbb', '')], CARDS3, git3)).skips, [{ mail: 'p3-e', reason: 'noCommit', cards: ['INT-9.4.2'] }]);
+  // The line's release commit is its own: version-only files naming the cut card, or a cut card named in a source commit.
+  const git3r = fakeGit({ ...{ '1111aaa': H('5'), '6666fff': H('r'), '7777abc': H('s') } }, { [H('5')]: 'INT 9.4.2 release', [H('r')]: 'cut 9.4.2: the version and the CHANGELOG section', [H('s')]: 'CUT-9.4.2 prep: the badge' },
+    { files: { [H('5')]: SRC, [H('r')]: ['package.json', 'package-lock.json', 'CHANGELOG.md'], [H('s')]: SRC }, versions: { [H('r')]: true } });
+  const CARDS3R = [...CARDS3, 'CUT-9.4.2'];
+  assert.equal(commitOf(await F.doneMailFacts([field3('p3-f', 'cut', '6666fff')], CARDS3R, git3r), I3), H('r'), 'MUTANT release: the release-only commit naming the cut card is the line\'s own');
+  assert.equal(commitOf(await F.doneMailFacts([field3('p3-g', 'prep', '7777abc')], CARDS3R, git3r), I3), H('s'), 'a source commit naming only the cut card is the line\'s own');
+  // S-1 (side check): the value is a sha, never the version in the subject.
+  const s1 = await F.doneMailFacts([{ id: 's-1', act: 'done', from: 'rae-cccccccc', card: 'INT-9.4.2', subject: 'INT-9.4.2 final FULL - PASS on 1111aaa', body: '', created_at: T0 }], CARDS3, git3);
+  assert.equal(valueOf(s1, slot('INT-9.4.2', 'rae-cccccccc')), H('5'), 'S-1: the value is the sha');
+  assert.match(s1.facts[0].text, /names commit 55555555 \(5{40}\)/);
+  assert.doesNotMatch(s1.facts[0].value, /^9\.4\.2$/);
 });

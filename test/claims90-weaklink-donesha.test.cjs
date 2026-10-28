@@ -539,9 +539,9 @@ test('round 6: own-card short forms are the card; release-only commits confirm o
   // R6-3: an int card carries only a merge into its own line, by link and by field; a plain commit makes the row ambiguous.
   const intPlain = await link('r6-15', 'INT-9.1.2', '8b8b8b4');
   assert.deepEqual(intPlain.skips, [{ mail: 'r6-15', reason: 'ambiguous', cards: ['INT-9.1.2'] }], 'MUTANT int carries a plain commit');
-  // Round 7 (god 3af596, R7-1; deliberately changed from round 6): by card FIELD the int card is judged as in
-  // round 5, so a plain commit on its line is its done sha whatever its subject names.
-  assert.equal(commitOf(await field('r6-16', 'INT-9.1.2', 'f7f7f7f'), 'card.int-9.1.2.donesha#builder'), U, 'R7-1: a plain commit by field is the int done sha');
+  // Round 7 (god 3af596, R7-1) let a FIELD row carry any plain commit; round 9 (Jim brief-p P3, deliberately
+  // retargeted) refuses a plain commit whose subject names only OTHER cards (here the unknown card FEAT-NEW).
+  assert.deepEqual((await field('r6-16', 'INT-9.1.2', 'f7f7f7f')).skips, [{ mail: 'r6-16', reason: 'noCommit', cards: ['INT-9.1.2'] }], 'P3: another card\'s commit by field is not the int done sha');
   // R6-5 (a), Jim's P10: the merge self entry is judged on its into-line, not its whole subject.
   assert.equal(commitOf(await link('r6-17', 'INT-9.1.2', '8b8b8b3'), slot('INT-9.1.2')), R6.m1, 'FEAT-ONE in the subject does not refuse the int card');
   // The into-line comes from the first-parent chain (stage 4 on top of the stage 3 merge): judged on that line,
@@ -580,7 +580,8 @@ test('round 7: an int card by FIELD keeps its plain line commit (R7-1); the rele
   // R7-1: by FIELD an int card keeps its own plain line commit: a fixup, a pin naming another card, the line's
   // release commit. By link the merges-only rule (R6-3) and its 'ambiguous' reason stay.
   assert.equal(commitOf(await field('r7-1', 'INT-9.1', 'a8a8a8a'), slot('INT-9.1', 'builder')), V, 'MUTANT R7-1: field + fixup refused');
-  assert.equal(commitOf(await field('r7-2', 'INT-9.1', 'cccccc3'), slot('INT-9.1', 'builder')), H('c'), 'field + a pin naming SYN-OTHER');
+  // Round 9 (P3, deliberately retargeted): a commit naming only another board card is that card's, not the line's.
+  assert.deepEqual((await field('r7-2', 'INT-9.1', 'cccccc3')).skips, [{ mail: 'r7-2', reason: 'noCommit', cards: ['INT-9.1'] }], 'P3: field + a commit naming only SYN-OTHER is refused');
   assert.equal(commitOf(await field('r7-3', 'INT-9.1.2', '8b8b8b1'), slot('INT-9.1.2', 'builder')), R6.rel, 'MUTANT R7-1: field + the line\'s release commit refused');
   assert.deepEqual((await link('r7-4', 'INT-9.1.2', '8b8b8b4')).skips, [{ mail: 'r7-4', reason: 'ambiguous', cards: ['INT-9.1.2'] }], 'by link a plain commit stays ambiguous');
   assert.equal(commitOf(await link('r7-5', 'INT-9.1.2', '8b8b8b3'), slot('INT-9.1.2')), R6.m1, 'by link a merge into the line is the done sha');

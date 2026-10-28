@@ -961,7 +961,12 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
       // plain line commit, a fixup or a pin, is a real done sha; the field is authoritative).
       // Round 8 (god 6b94a5, R8): on those rows a PLAIN commit whose own subject leads with the int card's id is
       // the line's own commit as well; a commit reached through a merge is not.
-      if (isIntCard(card)) return fieldRow ? (e) => !e || (e.into !== undefined ? own.has(e.commit) : plain(e)) : (e) => !e || (e.into !== undefined ? own.has(e.commit) : !e.merge && leadsWithCard(e.text, card));
+      // Round 9 (P3): on an int card's FIELD row a plain commit that names only OTHER cards (another card's
+      // own work the int done mail lists) is not carried; the line's own commits (fixups, pins, the release
+      // commit, a subject leading with the id) still are.
+      // The line's release commit (version-only files, or naming only a cut card) is the line's own.
+      const foreignOnly = (e: ReportedCommit): boolean => !e.docsOnly && foreign(e, card).some((x) => !isReleaseCard(x)) && !namesOf(e).cards.includes(card);
+      if (isIntCard(card)) return fieldRow ? (e) => !e || (e.into !== undefined ? own.has(e.commit) : plain(e) && !foreignOnly(e)) : (e) => !e || (e.into !== undefined ? own.has(e.commit) : !e.merge && leadsWithCard(e.text, card));
       // R6-2: a docs / release-only commit is carried only for a cut/release card.
       return (e) => !e || (e.into !== undefined ? own.has(e.commit) : (!e.docsOnly || isReleaseCard(card)) && plain(e));
     };
