@@ -886,6 +886,8 @@ const CARD_SHAPE_RE = /(?<![A-Za-z0-9./-])([A-Z][A-Z0-9]*(?:-[A-Z0-9]+(?:\.[0-9]
 const LABEL_RE = /^[A-Z][A-Z0-9]*-[0-9]+$/;
 
 const NUM_RE = /^[0-9]+$/;
+/** A token carrying a number somewhere (a card-shaped id with its number, not a bare role word). */
+const NUM_IN_RE = /[0-9]/;
 /** Round 10 (must 2b): a conventional commit's scope at the start of a subject, "test(abc-hull): ..." or
  *  "fix(abc-hull)!: ...": a kebab token of two or more segments (a one-word scope is a topic, not a card). */
 const SCOPE_RE = /^\s*[A-Za-z]+\(([A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+)\)!?:/;
@@ -1037,6 +1039,10 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
   const namesOf = (e: ReportedCommit): CardNames => namer(e.into !== undefined ? e.into : e.text);
   /** The cards other than `card` a commit names (known ids and card-shaped unknown tokens). */
   const foreign = (e: ReportedCommit, card: string): string[] => { const n = namesOf(e); return [...n.cards.filter((c) => c !== card), ...n.others]; };
+  // Round 10 (Jim's gate, must 4): the card-shaped ids a text writes that are no board card's form at all
+  // (a shared form of several board cards is "other" to the namer but not a stranger: round 9 R2 ties it
+  // to the linked card).
+  const strangersOf = (text: unknown): string[] => namer(text).others.filter((t) => !cardIds.some((id) => isOwnForm(t, id)));
   const known = new Map(cardIds.flatMap((c) => [[c.toLowerCase(), c], [canonCard(c), c]] as Array<[string, string]>));
   // Round 9 (P1): the card field, read like every other card name (case, dash or space), but whole: a
   // field that names no known card names some other card (guide A12) and the mail counts for nothing.
@@ -1239,7 +1245,7 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
       withCommit++;
       newest.set(`${key}#${from}`, { m, card, from, commit, named: kept.length, range: rangeOf.get(commit), subject: !!reported, inRepo: !reported || !!reportedFull, via, own: entry?.into !== undefined });
     };
-    const card = await cardOfDoneMail(m, fieldCard, known, match, foreign, entries, carriedFor, ranges.size > 0);
+    const card = await cardOfDoneMail(m, fieldCard, known, match, strangersOf, foreign, entries, carriedFor, ranges.size > 0);
     if (typeof card !== 'string' && !Array.isArray(card)) { skip(m.id, card.reason, card.cards); continue; }
     // Round 10 (god a22191, F2): a subject naming several cards is a row on EACH, carrying the @shas the
     // subject pairs with that card (pairedAtShas); without one, the card's own commits among those the
@@ -1278,8 +1284,8 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
 
 /** The done mail's card (see doneMailFacts), or why there is none. */
 async function cardOfDoneMail(
-  m: MailLike, fieldCard: string | null | undefined, known: Map<string, string>, match: (text: unknown) => string[], foreign: (e: ReportedCommit, card: string) => string[],
-  entries: readonly ReportedCommit[], carriedFor: (card: string) => Promise<readonly ReportedCommit[]>, ranged = false,
+  m: MailLike, fieldCard: string | null | undefined, known: Map<string, string>, match: (text: unknown) => string[], strangersOf: (text: unknown) => string[],
+  foreign: (e: ReportedCommit, card: string) => string[], entries: readonly ReportedCommit[], carriedFor: (card: string) => Promise<readonly ReportedCommit[]>, ranged = false,
 ): Promise<string | string[] | { reason: 'noCard' | 'ambiguous' | 'bodyOnly'; cards?: string[] }> {
   if (fieldCard) return fieldCard;
   // Round 9 (P1): a card field naming a card the board does not know is a done mail about some OTHER
@@ -1294,6 +1300,13 @@ async function cardOfDoneMail(
   // gate M-a: "U6 included" in a subject made card.u6): a candidate only, and only git confirms it
   // (CLAIMS-WEAKLINK-DONESHA).
   const exact = match(m.subject);
+  // Round 10 (Jim's gate, must 4): a subject that names no known card but writes a card-shaped id with a
+  // number that is no board card's form (a card the board never made, or one it lacks) names THAT card:
+  // the thread's link does not enter and the mail has no card here. A form shared by several board cards
+  // is not such an id (round 9 R2: the linked card owns it). The round-9 rule refusing commits of such
+  // ids is unchanged.
+  const unknown = exact.length ? [] : strangersOf(m.subject).filter((x) => NUM_IN_RE.test(x));
+  if (unknown.length) return { reason: 'noCard', cards: unknown.slice(0, 8) };
   // The cards a reported commit confirms (Jim's gate M-b: by its SUBJECT line only; see byGit below).
   const hitsOf = (e: ReportedCommit, named: readonly string[]): string[] =>
     match(e.into !== undefined ? e.into : e.text).filter((x) => named.includes(x) && (!e.docsOnly || isReleaseCard(x)) && (!isIntCard(x) || e.into !== undefined || (!e.merge && leadsWithCard(e.text, x))));

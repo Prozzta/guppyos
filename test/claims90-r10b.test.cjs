@@ -125,3 +125,31 @@ test('must 3: a quoted @sha loses its priority only when the subject also writes
   r = await run('m3-h', 'Re: ABC-12: covered by 2222bbb');
   assert.deepEqual(r.skips, [{ mail: 'm3-h', reason: 'ambiguous', cards: ['ABC-12', 'XYZ-34'] }]);
 });
+
+// ———————————————————————————————————————————————————————————— must 4 (F3)
+
+test('must 4: a subject writing a card-shaped id the board lacks names that card, so the thread link does not enter; no id lets the link in; a known id is that card', async () => {
+  const CARDS = ['ABC-12', 'XYZ-34'];
+  const S = H('1'), X = H('2');
+  const git = fakeGit({ '1111aaa': S, '2222bbb': X }, { [S]: 'fix: the widget', [X]: 'XYZ-34: the gadget' }, { files: { [S]: SRC, [X]: SRC }, times: { [S]: 1, [X]: 2 } });
+  const run = (id, subject, extra) => F.doneMailFacts([mail(id, subject, { cards: ['ABC-12'], in_reply_to: 'req-1', ...extra })], CARDS, git);
+  // Twin: an unknown card-shaped id in a reply plus a link: no row for the linked card, the mail has no card.
+  let r = await run('m4-a', 'PASS: NEW-THING-99 @1111aaa (clean)');
+  assert.equal(r.facts.length, 0, 'MUTANT must 4: the thread link entered over an unknown id');
+  assert.deepEqual(r.skips, [{ mail: 'm4-a', reason: 'noCard', cards: ['NEW-THING-99'] }]);
+  // Twin: the same reply with no id: the link enters, as before.
+  r = await run('m4-b', 'PASS @1111aaa (clean)');
+  assert.equal(commitOf(r, slot('ABC-12', SAM)), S, 'no id: the link is the card');
+  // Twin: a known id: that card (F3), never the linked one.
+  r = await run('m4-c', 'PASS: XYZ-34 @2222bbb (clean)');
+  assert.equal(commitOf(r, slot('XYZ-34', SAM)), X);
+  assert.equal(commitOf(r, slot('ABC-12', SAM)), undefined);
+  // A card field outranks the subject's unknown id (round 9); a bare role word or a version is no id.
+  r = await run('m4-d', 'PASS: NEW-THING-99 @1111aaa (clean)', { card: 'ABC-12' });
+  assert.equal(commitOf(r, slot('ABC-12', SAM)), S, 'the field row is unchanged');
+  r = await run('m4-e', 'PASS-INT @1111aaa for v1.1.102 (clean)');
+  assert.equal(commitOf(r, slot('ABC-12', SAM)), S, 'a role word without a number is no card');
+  // A form shared by two board cards is not an unknown id: the linked card owns it (round 9 R2 stands).
+  r = await F.doneMailFacts([mail('m4-f', 'Re: WIDGET-7 @1111aaa: PASS', { cards: ['ALPHA-WIDGET-7'], in_reply_to: 'req-1' })], ['ALPHA-WIDGET-7', 'BETA-WIDGET-7'], git);
+  assert.equal(commitOf(r, slot('ALPHA-WIDGET-7', SAM)), S, 'a shared form is the linked card\'s, not a stranger');
+});
