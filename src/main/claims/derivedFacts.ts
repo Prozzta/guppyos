@@ -1118,7 +1118,7 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
       return (e) => {
         const r = rangeOf.get(e.commit);
         const range = r && r.end !== 'from' ? ranges.get(rangeKey(r)) : undefined;
-        if (!range) return true;
+        if (!r || !range) return true;
         if (!names(e)) return false;
         return r.end === 'to' ? range.members.every(names) : true;
       };
