@@ -132,6 +132,16 @@ test('decisions: a card returns its FULL decision list newest first (D1 has 20 r
   assert.doesNotMatch(text('card.foo-7.status'), /^decisions/m);
 });
 
+test('F7 lag bridge: a done mail fallback rejects epoch timestamps and labelled installer digests', () => {
+  const timestamp = mail('2026-10-10T09-00-00-000Z-ffffff', 'alpha-1', 'god', 'done', 'FOO-7 done', '2026-10-10T09:00:00.000Z', 'finished at 1760100000000');
+  const digest = mail('2026-10-11T09-00-00-000Z-ffffff', 'alpha-1', 'god', 'done', 'FOO-7 done', '2026-10-11T09:00:00.000Z', 'setup sha256 ' + 'a'.repeat(64));
+  for (const row of [timestamp, digest]) {
+    const d = deps({ mailRows: () => [row] });
+    const r = get('card.foo-7.donesha', { agent: 'alpha-1' }, d);
+    assert.equal(r.current.source, 'claim', 'twin: non-commit token cannot bridge the derived lag');
+  }
+});
+
 test('--agent: picks that agent\'s newest live claim, else the derived row naming its done mail ("from <agent> "), else the global newest (Jim df789a a; MUTANT: global only)', () => {
   assert.equal(get('card.foo-7.donesha').current.claimId, 'c-aaaaaaaaaaa2', 'no --agent: newest live');
   assert.equal(get('card.foo-7.donesha', { agent: 'beta-2' }).current.claimId, 'c-ccccccccccc2', 'beta-2 wrote one itself');
@@ -196,6 +206,20 @@ test('mail rule, done-sha (Jim ac6f85, G1 6f7b2c): for donesha or the bare card,
   assert.match(tdone, /^current: card\.foo-7\.donesha: FOO-7 done — landed as abc1234f+ on guppy\/foo-7\n  \[mail · alpha-1 · 2026-10-08 · 2026-10-08T09-00-00-000Z-ffffff\]$/m);
   const inform = deps({ mailRows: () => [mail('2026-10-08T09-00-00-000Z-ffffff', 'alpha-1', 'god', 'inform', 'FOO-7 wip', '2026-10-08T09:00:00.000Z', `trying ${'abc1234' + 'f'.repeat(33)}`)] });
   assert.equal(get('card.foo-7.donesha', {}, inform).current.source, 'claim', 'an inform mail is not a done mail');
+  // A labelled installer digest can enter `known` through claim prose, but never becomes a done-mail commit.
+  const dDigest = deps({ mailRows: () => [mail('2026-10-10T09-00-00-000Z-digest', 'alpha-1', 'god', 'done', 'FOO-7 done', '2026-10-10T09:00:00.000Z', 'published setup sha256 deadbeef')] });
+  dDigest.ledgers['alpha-1'] = [...dDigest.ledgers['alpha-1'], c('c-eeeeeeeeeee2', 'alpha-1', 'card.foo-7.donesha', '2026-10-01T10:00:00.000Z', 'FOO-7 published setup sha256 deadbeef')];
+  assert.equal(get('card.foo-7.donesha', { agent: 'alpha-1' }, dDigest).current.source, 'claim', 'known-set digest prefixes take the same done-mail guard as fallback shas');
+  for (const [word, body, why] of [
+    ['faceb00', 'artifact faceb00d…cafe', 'an abbreviated digest has more hex after its ellipsis'],
+    ['feedfac', 'uploaded setup.exe feedface', 'a hex value directly after an asset filename is a digest'],
+  ]) {
+    const dArtifact = deps({ mailRows: () => [mail('2026-10-11T09-00-00-000Z-artifact', 'alpha-1', 'god', 'done', 'FOO-7 done', '2026-10-11T09:00:00.000Z', body)] });
+    dArtifact.ledgers['alpha-1'] = [...dArtifact.ledgers['alpha-1'], c(`c-${word}11111`, 'alpha-1', 'card.foo-7.donesha', '2026-10-01T10:00:00.000Z', `FOO-7 known ${word}`)];
+    assert.equal(get('card.foo-7.donesha', { agent: 'alpha-1' }, dArtifact).current.source, 'claim', why);
+  }
+  const dReal = deps({ mailRows: () => [mail('2026-10-12T09-00-00-000Z-real', 'alpha-1', 'god', 'done', 'FOO-7 done', '2026-10-12T09:00:00.000Z', 'built setup.exe from abc1234f') ] });
+  assert.equal(get('card.foo-7.donesha', { agent: 'alpha-1' }, dReal).current.source, 'mail', 'a real commit mentioned after setup.exe in prose remains a done sha');
 });
 
 test('time compare is epoch ms, never strings: a tie goes to the claim; a dashed mail-id time (no created_at) parses; an ISO string that would sort "later" as text but is earlier loses (census row)', () => {

@@ -321,7 +321,7 @@ function bodyOf(inbox: string, id: string, bodyHash: string): { body?: unknown }
   return {};
 }
 
-export interface ReleaseSource { changelog: string | null; tags: TagLike[]; bumps?: BumpMap }
+export interface ReleaseSource { changelog: string | null; tags: TagLike[]; bumps?: BumpMap; heads?: import('./derivedFacts').ReleaseHead[] }
 
 export interface BackfillInput {
   hiveRoot: string;
@@ -352,7 +352,7 @@ export async function runDerivedBackfill(deps: DerivedWriterDeps, input: Backfil
   const records = await syncDerived(deps, cardRecordFacts(cards));
   const rulings = await syncDerived(deps, rulingMailFacts(readIndexRulingMails(input.hiveRoot)));
   const cardFields = await syncDerived(deps, await cardFieldFacts(cards, input.git));
-  const releases = await syncDerived(deps, releaseFacts(parseChangelog(input.releases.changelog), input.releases.tags, input.releases.bumps));
+  const releases = await syncDerived(deps, releaseFacts(parseChangelog(input.releases.changelog), input.releases.tags, input.releases.bumps, input.releases.heads, { cards, mails }));
   const cardIds = cards.map((c) => c.id).filter((id): id is string => typeof id === 'string');
   // Round 10 re-gate (Jim cf751a): the history is read BEFORE the done mails, so its messages and parents are
   // cached for them (one walk) instead of one show and one rev-list per reported commit.

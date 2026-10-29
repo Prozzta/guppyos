@@ -81,11 +81,11 @@ const SECTION = /^(current|competing|superseded|decisions|fields|mails|sources|s
 test('R1 caps: the get text\'s budget equals the compact search budget and stays under the condenser cap', () => {
   assert.equal(G.GET_MAX_CHARS, F.COMPACT_MAX_CHARS);
   assert.equal(G.GET_LINE_MAX, F.COMPACT_LINE_MAX);
-  assert.ok(G.GET_MAX_CHARS < TOOL_OUTPUT_CAP_DEFAULT, `${G.GET_MAX_CHARS} < ${TOOL_OUTPUT_CAP_DEFAULT}`);
+  assert.ok(G.GET_MAX_CHARS < TOOL_OUTPUT_CAP_DEFAULT, `budget ${G.GET_MAX_CHARS} < condenser ${TOOL_OUTPUT_CAP_DEFAULT}`);
   // god 79d690: the sha-fields note is printed outside the cap, so the cap plus the note must stay under the condenser.
-  assert.ok(G.GET_MAX_CHARS + G.SHA_FIELDS_NOTE.length + 1 < TOOL_OUTPUT_CAP_DEFAULT, `${G.GET_MAX_CHARS} + note ${G.SHA_FIELDS_NOTE.length + 1} < ${TOOL_OUTPUT_CAP_DEFAULT}`);
+  assert.ok(G.GET_MAX_CHARS + G.SHA_FIELDS_NOTE.length + 1 < TOOL_OUTPUT_CAP_DEFAULT, `budget ${G.GET_MAX_CHARS} + note ${G.SHA_FIELDS_NOTE.length + 1} < condenser ${TOOL_OUTPUT_CAP_DEFAULT}`);
   assert.deepEqual([...G.CARD_FIELDS], ['donesha', 'lastsha', 'status', 'assignee', 'fixVersion', 'merge', 'merge.rc', 'audit'], 'L4: audit joins the card fields; god 234b13: the rc merge is its own field after the INT merge');
-  assert.deepEqual([...G.PER_AGENT_FIELDS], ['donesha']); assert.deepEqual([...G.RELEASE_FIELDS], ['tag', 'bump']);
+  assert.deepEqual([...G.PER_AGENT_FIELDS], ['donesha']); assert.deepEqual([...G.RELEASE_FIELDS], ['tag', 'bump', 'head', 'installer']);
 });
 
 test('L2 + L3 lead: a bare card leads with `field: <value>` from the STRUCTURED value, in order; donesha prints a latest line and one line per agent, newest first; then the decision count', () => {
@@ -277,8 +277,10 @@ test('R1 / L4 same shape: guppy/<branch> leads with the card\'s fields; release.
   assert.deepEqual(r.lead, [
     { field: 'tag', key: 'release.1.1.98.tag', value: SHA_T, source: 'claim', id: 'c-aaaaaaaaaab2', agent: 'derived', at: '2026-10-05T13:00:00.000Z' },
     { field: 'bump', key: 'release.1.1.98.bump', value: SHA_B, source: 'claim', id: 'c-aaaaaaaaaab3', agent: 'derived', at: '2026-10-04T13:00:00.000Z' },
+    { field: 'head', key: 'release.1.1.98.head', value: null, source: 'none' },
+    { field: 'installer', key: 'release.1.1.98.installer', value: null, source: 'none' },
   ], 'MUTANT: no bump / tag line (Jim a293f7 cause 5)');
-  assert.deepEqual(lines(text('release.1.1.98')).slice(1, 5), [`tag: ${SHA_T}`, `bump: ${SHA_B}`, 'sources: tag c_aaaaaaaaaab2; bump c_aaaaaaaaaab3', 'current: release.1.1.98: release 1.1.98 cut at 7777777 (git tag v1.1.98)']);
+  assert.deepEqual(lines(text('release.1.1.98')).slice(1, 7), [`tag: ${SHA_T}`, `bump: ${SHA_B}`, 'head: none', 'installer: none', 'sources: tag c_aaaaaaaaaab2; bump c_aaaaaaaaaab3', 'current: release.1.1.98: release 1.1.98 cut at 7777777 (git tag v1.1.98)']);
   const d = deps(); d.ledgers.derived = d.ledgers.derived.filter((x) => x.key !== 'release.1.1.98.bump');
   assert.deepEqual(lines(text('release.1.1.98', {}, d)).slice(1, 3), [`tag: ${SHA_T}`, 'bump: none']);
   assert.equal(get('c-bbbbbbbbbbb2').lead.length, 9, 'a claim id of the bare card resolves to the card: the lead too');

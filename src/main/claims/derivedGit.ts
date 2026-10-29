@@ -8,7 +8,7 @@
  */
 import { execFile, spawn } from 'node:child_process';
 import { isDocFile } from './derivedFacts';
-import type { GitLogPort, TagLike } from './derivedFacts';
+import type { GitLogPort, ReleaseHead, TagLike } from './derivedFacts';
 
 /** The mainline refs (local and origin's) that branchesContaining reports beside the guppy branches. */
 const LINE_REFS = ['refs/heads/main', 'refs/heads/master', 'refs/heads/release-*', 'refs/remotes/origin/main', 'refs/remotes/origin/master', 'refs/remotes/origin/release-*'];
@@ -161,6 +161,18 @@ export class DerivedGit implements GitLogPort {
 
   /** F3: the first commit (oldest first, over every branch, tag and remote) whose package.json diff sets
    *  "version" to each version. */
+  /** Tips of the release branches fetched from origin, keyed by their semantic version. */
+  async releaseHeads(): Promise<ReleaseHead[]> {
+    const r = await git(this.repo, ['for-each-ref', '--format=%(refname:short)%09%(objectname)', 'refs/remotes/origin/release-*'], this.o);
+    const out: ReleaseHead[] = [];
+    for (const line of r.out.split('\n')) {
+      const [name, commit] = line.split('\t');
+      const version = /^origin\/release-(\d+(?:\.\d+){1,3})$/.exec(name ?? '')?.[1];
+      if (version && /^[0-9a-f]{40}$/.test(commit ?? '')) out.push({ version, commit });
+    }
+    return out;
+  }
+
   async bumps(): Promise<Map<string, { commit: string; time: number }>> {
     const r = await git(this.repo, ['log', '--branches', '--tags', '--remotes', '--reverse', '--no-color', '-U0', '-p', '--format=%x1e%H%x1f%ct', '--', 'package.json'], this.o);
     const out = new Map<string, { commit: string; time: number }>();
