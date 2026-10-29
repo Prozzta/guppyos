@@ -551,3 +551,35 @@ test('re-gate cf751a: on a 900-id board, 1,000 done mails with subject and body 
   assert.ok(r.facts.length > 0, 'the twin writes facts');
   assert.ok(reads <= tokens.size * N * 2, `board ids read ${reads} times for ${tokens.size} distinct tokens (bound ${tokens.size * N * 2})`);
 });
+
+// ———————————————————————————————————————————————————————————— re-gate MUST 1 (Jim 61bddb)
+
+test('re-gate MUST 1: a body @sha written after ANOTHER card\'s name never enters this card\'s tip set; a subject @sha whose commit names the card outranks body @shas; a body pair of the card itself still counts', async () => {
+  const G = loadTs('src/main/claims/derivedGit.ts');
+  const r = mirrorRepo('m1');
+  r.on('guppy/int-9.9.9', 'main'); r.commit('INT-9.9.9 stage 1: base');
+  r.on('guppy/foo-18', 'guppy/int-9.9.9'); r.commit('FOO-12: first step'); const a = r.commit('FOO-12: the probe limit'); r.commit('FOO-12: tidy');
+  const p = r.commit('tidy the probe limit');
+  r.on('guppy/plain-x', 'main'); const b = r.commit('Normalize native probe environment scrub');
+  r.g('switch', '-q', 'main');
+  const PAD = Array.from({ length: 900 }, (_, k) => `PAD-${k}`);
+  const subject = `Re: FOO-12: pushed @${s8(a)}, with ${SAM}; one limit needs your call`;
+  const body = (word) => `Branch: origin guppy/foo-18 @${s8(a)}, off origin INT 9.9.9\nStage 10 (your req): I'll batch ${word} @${s8(b)} with the rest once each`;
+  const row = (id, subj, bd) => mail(id, subj, { card: 'FOO-12', cards: ['FOO-12'], in_reply_to: 'req-m1', body: bd });
+  const parent = { id: 'req-m1', subject: 'Next: FOO-12 (yours)' };
+  // (a) BAR-NAMES is a board card: its body pair is its own, the subject's own commit is the fact.
+  let res = await runReal(G, r, [...PAD, 'FOO-12', 'BAR-NAMES', 'INT-9.9.9'], row('m1-a', subject, body('BAR-NAMES')), parent);
+  assert.equal(commitOf(res, slot('FOO-12', SAM)), a, 'MUTANT MUST 1 (a): another card\'s body pair entered the tip set');
+  // (b) an unknown numbered card-shaped token is another item (F9): still the subject's commit.
+  res = await runReal(G, r, [...PAD, 'FOO-12', 'INT-9.9.9'], row('m1-b', subject, body('BAR-NAMES-41')), parent);
+  assert.equal(commitOf(res, slot('FOO-12', SAM)), a, 'MUST 1 (b)');
+  // (c) a body line pairing the card itself, no subject @sha: that sha counts.
+  res = await runReal(G, r, [...PAD, 'FOO-12', 'BAR-NAMES', 'INT-9.9.9'], row('m1-c', 'Re: FOO-12: pushed, one limit needs your call', `Stage 10: FOO-12 @${s8(b)} landed`), parent);
+  assert.equal(commitOf(res, slot('FOO-12', SAM)), b, 'MUST 1 (c): the card\'s own body pair (must 7) counts');
+  // (a2) rule 1 alone: the subject's commit names no card, so only the body pair's owner settles it.
+  res = await runReal(G, r, [...PAD, 'FOO-12', 'BAR-NAMES', 'INT-9.9.9'], row('m1-a2', `Re: FOO-12: pushed @${s8(p)}, with ${SAM}`, body('BAR-NAMES')), parent);
+  assert.equal(commitOf(res, slot('FOO-12', SAM)), p, 'MUTANT MUST 1 rule 1: another card\'s body pair made the row ambiguous');
+  // (e) rule 2 alone: the subject's own commit outranks the card's own body pair of an unrelated commit.
+  res = await runReal(G, r, [...PAD, 'FOO-12', 'BAR-NAMES', 'INT-9.9.9'], row('m1-e', subject, `Stage 10: FOO-12 @${s8(b)} queued`), parent);
+  assert.equal(commitOf(res, slot('FOO-12', SAM)), a, 'MUTANT MUST 1 rule 2: a body @sha outranked the subject\'s own commit');
+});

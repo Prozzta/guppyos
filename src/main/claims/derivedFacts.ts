@@ -1356,16 +1356,26 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
       const latest = await latestOfCommits(pool.map((e) => e.commit), git);
       return pool.filter((e) => e.commit === latest);
     };
+    /** Re-gate MUST 1 (Jim 61bddb): the written @shas that may be `card`'s. A body @sha written straight after
+     *  ANOTHER card's name pairs with that card and never enters this card's set, whatever its commit says; a
+     *  subject @sha whose commit names the card outranks every body @sha (must E, for the tip choice). */
+    const ownAts = <T extends { name: string; entry?: ReportedCommit; body?: boolean }>(card: string, list: readonly T[], keep: (e: ReportedCommit | undefined) => boolean): T[] => {
+      const mine = list.filter((a) => !a.body || pairCardOf(a.name, cardIds) === card);
+      const subjectOwn = mine.some((a) => !a.body && !!a.entry && keep(a.entry) && namesOf(a.entry).cards.includes(card));
+      return subjectOwn ? mine.filter((a) => !a.body) : mine;
+    };
     const carriedFor = async (card: string): Promise<ReportedCommit[]> => {
       const keep = keepFor(card);
-      const atEntries = ats.filter((a) => a.entry && keep(a.entry)).map((a) => a.entry as ReportedCommit);
-      if (atEntries.length || ats.length) return atEntries;
+      const mine = ownAts(card, ats, keep);
+      const atEntries = mine.filter((a) => a.entry && keep(a.entry)).map((a) => a.entry as ReportedCommit);
+      if (atEntries.length || mine.length) return atEntries;
       return fallbackOf(card, entries.filter(keep));
     };
     const rowFor = async (card: string, ats: ReadonlyArray<{ sha: string; name: string; full?: string; entry?: ReportedCommit; body?: boolean }>, entries: readonly ReportedCommit[], paired: boolean): Promise<void> => {
       const key = cardKey(card, 'donesha');
       if (!key) { skip(m.id, 'noCard', [card]); return; }
       const keep = keepFor(card);
+      ats = ownAts(card, ats, keep);
       const kept = entries.filter(keep);
       const atsKept = ats.filter((a) => keep(a.entry));
       if (ats.length ? !atsKept.length : !kept.length) {
