@@ -170,17 +170,22 @@ test('STATIC: N2 wiring in AgentControlStrip, MessageQueueComposer and the recor
   assert.match(rec, /clearError \}/);
 });
 
-// INT 1.1.102: both render-census scenarios hold off the demo loop by its period (1800 ms). Pin the
-// period and that no other renderer setInterval uses it, so the hold cannot drift or catch another timer.
-test('PIN: the scenarios hold off the demo loop by its period, and only it ticks at 1800 ms', () => {
+// INT 1.1.102: both render-census scenarios hold off the demo loop. INT102-TEST-FOLLOWUPS (Jim NIT 2): the hold is
+// keyed on the CALLER (startMockLoop in the stack), not on the 1800 ms period. Pin that the demo loop's setInterval
+// is called inside startMockLoop, that no other renderer name the stack test would match exists, and that the
+// harness bundle keeps names (not minified), so the hold can neither miss the loop nor catch another timer.
+test('PIN: the scenarios hold off the demo loop by its caller (startMockLoop), and only it', () => {
   const mock = codeOnly(readSource('src/renderer/src/store/mockEvents.ts'));
-  assert.match(mock, /const TICK_MS = 1800;/, 'the demo loop period the scenarios hold off');
-  assert.match(mock, /window\.setInterval\([\s\S]*?\}, TICK_MS\)/, 'the demo loop is a setInterval at TICK_MS');
+  assert.match(mock, /export function startMockLoop\(\) \{\n  if \(interval !== null\) return;\n  interval = window\.setInterval\(\(\) => \{/, 'the demo loop is a setInterval called inside startMockLoop');
   for (const s of ['perf-151-nits.tsx', 'app-shallow-renders.tsx']) {
-    assert.match(readSource('test/electron-harness/scenarios/' + s), /window\.setInterval = \(\(fn: TimerHandler, ms\?: number, \.\.\.rest: unknown\[\]\) => \(ms === 1800 \? 0 :/, s + ' holds off the demo loop');
+    const src = readSource('test/electron-harness/scenarios/' + s);
+    assert.match(src, /window\.setInterval = \(\(fn: TimerHandler, ms\?: number, \.\.\.rest: unknown\[\]\) => \(\/\\bstartMockLoop\/\.test\(new Error\(\)\.stack \?\? ''\) \? 0 : realSetInterval\(fn, ms, \.\.\.rest\)\)\)/, s + ' holds off the demo loop by its caller');
+    assert.doesNotMatch(src, /ms === 1800/, s + ' no longer holds by the period');
   }
   const hits = [];
-  const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else if (/\.tsx?$/.test(e.name) && !/\.test\./.test(e.name) && /setInterval\((?:(?!setInterval|setTimeout)[\s\S]){0,400}?,\s*(?:1800|1_800)\s*\)/.test(fs.readFileSync(p, 'utf8'))) hits.push(path.relative(path.join(__dirname, '..'), p).split(path.sep).join('/')); } };
+  const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else if (/\.tsx?$/.test(e.name) && !/\.test\./.test(e.name) && /\bstartMockLoop\w*\s*(?:\(|=|:)/.test(fs.readFileSync(p, 'utf8').replace(/import[^;]*;/g, '').replace(/\bstartMockLoop\(\)\s*;/g, ''))) hits.push(path.relative(path.join(__dirname, '..'), p).split(path.sep).join('/')); } };
   walk(path.join(__dirname, '..', 'src', 'renderer', 'src'));
-  assert.deepEqual(hits, [], 'no renderer setInterval at a literal 1800 ms (the scenarios would hold it off too)');
+  assert.deepEqual(hits, ['src/renderer/src/store/mockEvents.ts'], 'only mockEvents defines a startMockLoop name (the hold matches no other function)');
+  const main = readSource('test/electron-harness/harness-main.cjs');
+  assert.doesNotMatch(main, /\bminify(?:Identifiers)?\s*:\s*true|keepNames\s*:\s*false/, 'the harness bundle keeps function names, so the stack names startMockLoop');
 });
