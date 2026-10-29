@@ -1066,9 +1066,15 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
     // existing rule over the commits it names (the latest in git order of the card's line), so an audit
     // reply naming only the quoted sha keeps it, one naming a newer tip too gives the tip, and one naming an
     // older base too keeps the quoted sha. An @sha the request did not write keeps its priority.
+    // Jim's gate (must 3): a quoted @sha loses that priority ONLY when the subject also writes another sha
+    // (the "covered by the T verdict" shape); a plain audit reply that names the request's sha and nothing
+    // else reports that very sha, whatever the body lists.
     const parent = typeof m.in_reply_to === 'string' && m.in_reply_to && ctx.subjectOf ? ctx.subjectOf(m.in_reply_to) : undefined;
     const quoted = subjectAtShas(parent).map((x) => x.sha);
-    const atShas = subjectAtShas(m.subject).filter((x) => !quoted.some((q) => q.startsWith(x.sha) || x.sha.startsWith(q)));
+    const isQuoted = (sha: string): boolean => quoted.some((q) => q.startsWith(sha) || sha.startsWith(q));
+    const written = subjectAtShas(m.subject);
+    const otherSha = shaMentions(m.subject).some((x) => !isQuoted(x.sha));
+    const atShas = otherSha ? written.filter((x) => !isQuoted(x.sha)) : written;
     if (!mentions.length && !atShas.length) { skip(m.id, 'noShaWord'); continue; }
     // The commits the mail reports, each resolved to the work it stands for (round 3: a merge is its
     // merged parent or nothing).
@@ -1178,13 +1184,23 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
     // (C) The commits a row on `card` would carry: the subject's @shas, else the latest in git order.
     // Round 5 (god bfcff1): a mail whose subject names @shas carries only those; when (B) drops them all
     // (a merge into another line, a dropped self entry) the mail carries nothing, never a body sha.
+    // Jim's gate (must 3): on a row the mail itself names (a card field, or the card in the subject) the
+    // fallback never takes a commit whose subject names a different card and not this one: the latest is
+    // taken among the card's own and no-card commits when any remain. On a pure link row the commits are
+    // the only evidence, so round 5 holds unchanged: such a commit as the latest makes the row ambiguous.
+    const namedRow = (card: string): boolean => fieldRow || match(m.subject).includes(card);
+    const ownOrNone = (card: string) => (e: ReportedCommit): boolean => !foreign(e, card).length || namesOf(e).cards.includes(card);
+    const fallbackOf = async (card: string, kept: readonly ReportedCommit[]): Promise<ReportedCommit[]> => {
+      const clean = namedRow(card) ? kept.filter(ownOrNone(card)) : [];
+      const pool = clean.length ? clean : kept;
+      const latest = await latestOfCommits(pool.map((e) => e.commit), git);
+      return pool.filter((e) => e.commit === latest);
+    };
     const carriedFor = async (card: string): Promise<ReportedCommit[]> => {
       const keep = keepFor(card);
       const atEntries = ats.filter((a) => a.entry && keep(a.entry)).map((a) => a.entry as ReportedCommit);
       if (atEntries.length || ats.length) return atEntries;
-      const kept = entries.filter(keep);
-      const latest = await latestOfCommits(kept.map((e) => e.commit), git);
-      return kept.filter((e) => e.commit === latest);
+      return fallbackOf(card, entries.filter(keep));
     };
     const rowFor = async (card: string, ats: ReadonlyArray<{ sha: string; name: string; full?: string; entry?: ReportedCommit }>, entries: readonly ReportedCommit[], paired: boolean): Promise<void> => {
       const key = cardKey(card, 'donesha');
@@ -1208,7 +1224,8 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
       // F2: a sha the subject reports as @<sha> is the mail's sha, even when the repository lacks it.
       const at = reported ? atsKept.find((a) => a.sha === reported) : undefined;
       const reportedFull = at ? (at.full ?? await git.commitOf(at.sha)) : null;
-      const commit = reported ? (reportedFull ?? reported) : ((await latestOfCommits(kept.map((e) => e.commit), git)) ?? kept[0].commit);
+      const fallback = reported ? [] : await fallbackOf(card, kept);
+      const commit = reported ? (reportedFull ?? reported) : (fallback[0] ?? kept[0]).commit;
       const entry = at ? at.entry : kept.find((e) => e.commit === commit);
       // Round 5 (god bfcff1): the carried commit counts or the row is skipped. Without a card field, a
       // carried commit that names only other cards (a refused link that another listed commit confirmed,

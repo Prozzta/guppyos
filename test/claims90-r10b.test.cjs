@@ -87,3 +87,41 @@ test('must 2: a reported range A..B reports only a member of it (a cherry-pick s
   assert.deepEqual(F.cardNamer(['ABC-HULL-STRETCH-12'])('fix(hull): abc-hull again'), { cards: [], others: [] }, 'a one-word scope and a lower-case word elsewhere name nothing');
   assert.deepEqual(F.cardNamer(['ABC-HULL-STRETCH-12'])('fix(re-check): wording'), { cards: [], others: [] }, 'a scope that is no card\'s form names nothing');
 });
+
+// ———————————————————————————————————————————————————————————— must 3 (F4)
+
+test('must 3: a quoted @sha loses its priority only when the subject also writes another sha; the fallback never takes a commit whose subject names a different card', async () => {
+  const CARDS = ['ABC-12', 'XYZ-34'];
+  // S (ABC-12) -> T (ABC-12, newer); X (XYZ-34, newest, another line); N (names no card, newest of all).
+  const S = H('1'), T = H('3'), X = H('2'), N = H('4');
+  const git = fakeGit(
+    { '1111aaa': S, '3333ccc': T, '2222bbb': X, '4444ddd': N },
+    { [S]: 'ABC-12: the widget', [T]: 'ABC-12: the widget, covered', [X]: 'XYZ-34: the gadget', [N]: 'housekeeping' },
+    { files: { [S]: SRC, [T]: SRC, [X]: SRC, [N]: SRC }, times: { [S]: 1, [T]: 2, [X]: 3, [N]: 4 }, ancestors: [[S, T]] },
+  );
+  const REQ = 'req-1';
+  const ctx = { subjectOf: (id) => (id === REQ ? 'ABC-12 re-check @1111aaa' : undefined) };
+  const run = (id, subject, extra) => F.doneMailFacts([mail(id, subject, { cards: ['ABC-12'], in_reply_to: REQ, ...extra })], CARDS, git, ctx);
+  // Twin: the plain audit reply keeps @S, whatever the body lists (another card's newer commit; a no-card one).
+  let r = await run('m3-a', 'ABC-12 re-check @1111aaa: PASS-WITH-CHANGES', { body: 'compare 2222bbb and 4444ddd' });
+  assert.equal(commitOf(r, slot('ABC-12', SAM)), S, 'MUTANT must 3: the quoted @sha alone keeps its priority');
+  assert.deepEqual(r.skips, []);
+  // Twin: the covered-by reply writes a second sha, so the quoted one yields: T, the newer commit of the card's line.
+  r = await run('m3-b', 'Re: ABC-12 @1111aaa: covered by the 3333ccc verdict');
+  assert.equal(commitOf(r, slot('ABC-12', SAM)), T, 'MUTANT must 3: the subject writes another sha, so the quoted one is not reported');
+  // Twin: a body commit of another card is never picked: the fallback takes the latest among the card's own and no-card commits.
+  r = await run('m3-c', 'Re: ABC-12 @1111aaa: covered by the 3333ccc verdict', { body: 'see also 2222bbb' });
+  assert.equal(commitOf(r, slot('ABC-12', SAM)), T, 'MUTANT must 3: the fallback took another card\'s commit');
+  r = await run('m3-d', 'ABC-12 done, see 1111aaa', { in_reply_to: undefined, body: 'then 2222bbb landed too' });
+  assert.equal(commitOf(r, slot('ABC-12', SAM)), S, 'no quoting at all: the other card\'s newer commit is still never the value');
+  r = await run('m3-e', 'done, see 1111aaa', { in_reply_to: undefined, cards: undefined, card: 'ABC-12', body: 'then 2222bbb landed too' });
+  assert.equal(commitOf(r, slot('ABC-12', SAM)), S, 'a field row too');
+  // A no-card commit still counts in the fallback (unchanged): the latest of S and N is N.
+  r = await run('m3-f', 'Re: ABC-12 @1111aaa: covered by the 4444ddd verdict');
+  assert.equal(commitOf(r, slot('ABC-12', SAM)), N);
+  // Only another card's commits in the fallback: the row stays ambiguous (never that commit).
+  r = await run('m3-g', 'Re: ABC-12 @1111aaa: covered by 2222bbb');
+  assert.equal(commitOf(r, slot('ABC-12', SAM)), S, 'the quoted sha is still a commit the mail names: the fallback takes it over the other card\'s');
+  r = await run('m3-h', 'Re: ABC-12: covered by 2222bbb');
+  assert.deepEqual(r.skips, [{ mail: 'm3-h', reason: 'ambiguous', cards: ['ABC-12', 'XYZ-34'] }]);
+});
