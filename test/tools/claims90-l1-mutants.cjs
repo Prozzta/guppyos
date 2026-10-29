@@ -36,7 +36,7 @@ const MUTANTS = [
   ['L1-h a purge keeps the value', STORE, 'value: _v, valueAgent: _a, ...rest } = rec;\n  void _r; void _s; void _d; void _l; void _c; void _v; void _a;', '...rest } = rec;\n  void _r; void _s; void _d; void _l; void _c;'],
   ['L1-i a request may carry a value', ENDPOINT, "'section', 'value', 'valueAgent', 'by',", "'section', 'by',"],
   // L1: each field fact sets its value.
-  ['L1-j status has no value', FACTS, 'refs: [task], value: clip(c.status, 40) });', 'refs: [task] });'],
+  ['L1-j status has no value', FACTS, "      const value = by ? 'VOID (closed as superseded by ' + by + ')' : clip(c.status, 40);\n      out.push({ slot: status, key: status, kind: 'fact', text: 'Card ' + id + title + ' status: ' + value, ...(at ? { at } : {}), refs: [task], value });", ''],
   ['L1-k no assignee has no value (not none)', FACTS, "value: who ?? 'none' });", 'value: who ?? undefined });'],
   ['L1-l lastsha has no value', FACTS, "refs: [task, { type: 'commit', value: best }], value: best });", "refs: [task, { type: 'commit', value: best }] });"],
   ['L1-m gitsha has no value', FACTS, '      value: best,\n', ''],
