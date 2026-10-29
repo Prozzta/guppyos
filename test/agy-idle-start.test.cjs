@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * AGY-STARTUP-TURN (1.1.55; god andyagystart/andyagyprobe/andycodexok). An AGY spawn used to get
  * the hive protocol as `agy -i "<protocol>"`: a first USER turn, which AGY ran as a task at every

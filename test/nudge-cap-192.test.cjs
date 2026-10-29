@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * NUDGE-CAP-192: the inbox wake nudge names at most INBOX_NUDGE_MAX_IDS (8) ids, the oldest, then
  * "and N more". It used to list every pending id (~43 chars each), so 60 ids wrapped to ~33 rows at

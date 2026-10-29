@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * L0-CORE — ProviderCapacityTracker, against Oscar's L0-SEM

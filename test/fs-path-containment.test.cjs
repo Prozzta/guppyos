@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * The workspace root is the confinement boundary for the file IPC: the renderer

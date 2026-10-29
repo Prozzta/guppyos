@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CLAIMS-90 keyfind (god c4eea4): on-1 agents did not reach keyed facts that `memory get <right key>` answers.
  *  - DRIFT: the step-3 answer child built its NativeMemoryWiring without index.ts's cardLead, so no served search

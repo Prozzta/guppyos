@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 // Theme looks, part 2: durable per-theme looks, the builder's draft flow,
 // fallbacks, and the one portrait route every census site goes through.

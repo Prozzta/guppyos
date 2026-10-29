@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 // REBRAND-LINK-SCHEME (1.1.83): hire links use guppy://. munderdifflin:// was an alias
 // until 1.1.86; SCHEME-DROP (1.1.87) removed it, so such links are now rejected (the

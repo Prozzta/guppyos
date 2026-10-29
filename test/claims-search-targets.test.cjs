@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CLAIMS-90 search S3/S4 (god 33b32e): searchTargets.ts maps a card id, a card-owned branch or a release version
  * named in a query or a hit to the card or release whose brief leads the results. Pure; synthetic ids only.

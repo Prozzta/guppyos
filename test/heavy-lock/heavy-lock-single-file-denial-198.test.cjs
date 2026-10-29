@@ -1,4 +1,5 @@
 'use strict';
+require('../tools/own-job.cjs');
 /**
  * HEAVY-LOCK-SINGLE-FILE-DENIAL-198 (Dwight 05:21Z + 05:24Z). During an exclusive bench, Dwight's
  * Codex ran `node --test test/<one>.test.cjs` and was queued as a "bench (a script the lock cannot

@@ -8,6 +8,7 @@
  * be able to look like a pass - plus a pin on the package.json script itself, which is
  * the only thing that stops the glob quietly coming back.
  */
+require('./tools/own-job.cjs');
 // MUTANT-JOURNAL-GATE (god 5cc045/ed8032): this suite loads a file a census mutates in place (one load-ts never sees);
 // refuse a tree a killed census left mutated, before anything is read.
 require('./tools/mutant-runner-helper.cjs').gate(__filename);
@@ -76,7 +77,9 @@ test('MUTANT-JOURNAL-GATE NIT 1 (god 9cb49c, Jim 967fa3): new-floor-knowhow and 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'c90-nit1-'));
   for (const dir of ['resources', 'scripts', 'src', 'docs', path.join('test', 'tools')]) fs.mkdirSync(path.join(root, dir), { recursive: true });
   const SUITES = ['test/new-floor-knowhow.test.cjs', 'test/rebrand-internal-names-182.test.cjs'];
-  for (const rel of [...SUITES, 'test/tools/mutant-runner-helper.cjs', 'test/tools/ps-env.cjs']) fs.copyFileSync(path.join(REPO, rel), path.join(root, rel));
+  // INT 1.1.103: both suites now require tools/own-job.cjs first (BARE-NODE-TEST-NO-OWNER); without run-tests.cjs
+  // in this bare tree it says so on stderr and the suite runs on.
+  for (const rel of [...SUITES, 'test/tools/mutant-runner-helper.cjs', 'test/tools/ps-env.cjs', 'test/tools/own-job.cjs']) fs.copyFileSync(path.join(REPO, rel), path.join(root, rel));
   const cli = path.join(root, 'resources', 'memory-cli.cjs');
   const dead = { pid: 2147483000, start: '2026-10-25T15:23:08Z' };
   const journal = (file, owner = dead) => fs.writeFileSync(helper.journalPath(root), JSON.stringify({ owner, records: [{ file, original: Buffer.from('const CLAIM_VERBS = new Set([]);').toString('base64') }] }), 'utf8');
@@ -752,7 +755,8 @@ test('PIN: against the REAL test directory discovery is root tests plus only fol
   // claims90-keyfind-followups, claims90-brief-cost).
   // CLAIMS-90 round 9 (god a77298): + 1 (claims90-r9).
   // CLAIMS-90 round 10, Jim's gate (f8c1d8): + 1 (claims90-r10b).
-  assert.equal(files.length, 555,`the focused suite must retain its pre-fold file count, got ${files.length}`);
+  // BARE-NODE-TEST-NO-OWNER: + 1 (bare-node-test-owner), + 1 (own-job-guard).
+  assert.equal(files.length, 557,`the focused suite must retain its pre-fold file count, got ${files.length}`);
   assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
   assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');
   assert.ok(files.includes(path.join('start-fixes-163', 'start-fixes-163-boot-submit.test.cjs')), 'the start-fixes feature folder is included');

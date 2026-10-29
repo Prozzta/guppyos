@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * ZT-I1-MAIL 1.1.75, god's rulings Q31/Q32/Q34 (7048a1), the archive-reason refinement (0f1672),
  * the work-order leftover correction (1c7544) and Jim's slice 6/7 audit (migration report loss).

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * LAG-150 release pins (god, PERF-150-RELEASE). Test-only: each one pins a property of

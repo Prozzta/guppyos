@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * GOD-TERMINAL-CONTROL M2 (design doc section 13 + 13a): the screen gate can read main's mirror.
  *

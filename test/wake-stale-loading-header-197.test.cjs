@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 // WAKE-LIFECYCLE-UNKNOWN-197: after the 1.1.97 restart a resumed Codex kept the startup draft's
 // `model: loading` box as the NEWEST header in its buffer while the live chat widget was up (empty

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * RENDERER-RECOVERY-164 (WHITE-SCREEN-162): a crashed renderer is brought back instead of

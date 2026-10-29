@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * IMPACT-LOOP-171, RENDERED on the REAL App (a hidden Electron window, sandboxed by run.cjs +
  * isolateAppPaths): with an agent card whose impact is non-null - a 100% capacity HOLD on one

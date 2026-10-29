@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 // COFFEE-NEVER-186: on the TES floor nobody seemed to go for coffee. The crew model (crew.ts) ran
 // coffee all along, but StationFloor drew only the people, so a run looked like a wander stop.

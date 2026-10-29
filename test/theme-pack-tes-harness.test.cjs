@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * TES data (plan step 6), RENDERED (a hidden Electron window, the real OfficeFloor): the repo's own
  * themes/tes pack, bundled through the harness's packSources stub (harness-main.cjs,

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * F11 (1.1.91 blocker, red since C1A1 @9378313c): a mail epoch closed while the claim that surfaced
  * it is still in flight.

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * IDLE-MEANS-IDLE-187 (1.1.87): an agent that started a suite in the background, waits in the

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 // @heavy-lock live: it spawns helper processes (about 38 s in the 1.1.91 FULL). HEAVY-LOCK-LIVE-FILE-192: one run of this file takes the heavy slot.
 
 /**

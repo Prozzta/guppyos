@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * AGY 1.1.48 commit 4 — the canonical provider-native lifecycle, and the false-active

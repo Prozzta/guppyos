@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * DEV ISOLATION OF L0's ONE ON-DISK ARTEFACT - the durable capacity-observation store.

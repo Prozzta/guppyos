@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * ZT-I3 §3.3: the board monitor's one automatic move. A doing card whose assignee was

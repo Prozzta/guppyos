@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 // pickDownloadAsset: the manual-update button should download the one asset
 // that installs on this machine, and fall back to the releases page otherwise.
 const test = require('node:test');

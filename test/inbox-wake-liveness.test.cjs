@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * ZERO-TOKEN-LIVENESS at the WWR boundary (design slices 2 and 4): the bridge RECORDS STUCK_WAKE
  * through the liveness monitor BEFORE the 1.1.76 WWR recovers an agent, and reports a give-up

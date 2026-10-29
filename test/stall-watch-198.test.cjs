@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * STALL-WATCH-198 (god, UI-CRAWL-HALFCORES-197): main-stall / input-delay / renderer-longtask rows

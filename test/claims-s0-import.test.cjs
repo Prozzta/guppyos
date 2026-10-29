@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * REL-184 S0 at claims start (Jim option (a), god 06:01Z): claims/startupImport.ts and its wiring.
  *   - the drill: a writer's legacy memory.md and archive notes are still found by search and in its

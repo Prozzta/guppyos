@@ -17,6 +17,7 @@
  * The real Pixi floor does not run under node: the coffee counts come from a
  * replay model of its timing, and the OfficeFloor wiring is pinned by source.
  */
+require('./tools/own-job.cjs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');

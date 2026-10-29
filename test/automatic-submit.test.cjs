@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * L0-FUSION stage 5.1 — the ONE main-owned programmatic submit transaction, proven

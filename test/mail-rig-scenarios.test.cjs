@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * ZT-I1-MAIL 1.1.75 slice 8: the layer-(a) SCENARIO tests listed after INBOX-DESIGN §8.3, and the
  * §11.17 v2 re-check tests N1-N4, on the fake-agent rig (test/mail-rig/). Zero model tokens.

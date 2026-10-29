@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * RENDERED: both identity dialogs use the active pack's builder, never leak an

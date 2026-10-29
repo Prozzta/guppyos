@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * BOOT-REENTER-PASTE-PROOF (1.1.81). A real Claude collapses god's typed 6-line orientation into

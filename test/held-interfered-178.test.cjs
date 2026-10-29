@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * DWIGHT-HELD-INTERFERED-2028 (1.1.78, Human-added; Jim's DWIGHT-HELD-INTERFERED.md, god plan-178).

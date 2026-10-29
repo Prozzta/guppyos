@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * CARDS-TAB-190: the Human's CARDS review tab (Command Center), replacing the Requests tab in the

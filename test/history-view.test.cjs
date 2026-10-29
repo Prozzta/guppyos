@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * HISTORY-VIEW-169: the History tab's main side.

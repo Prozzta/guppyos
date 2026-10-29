@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * god (on the codex git-window research): lb-codex and every Codex repro run the PRODUCT's argv,

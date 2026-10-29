@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * TES-BUBBLE-TAIL-SHARP-189: the Human's bar for a thought cloud, on both floors and at every fit.
  * - The tail points at the speaker's head. 1.1.88 drew it at 0.32 of the cloud's width and stepped

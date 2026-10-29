@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * PIPE-HOOK-NO-TOKEN-192 (Jim SHOULD-2 + NIT): every hook writer that is not the Claude or AGY

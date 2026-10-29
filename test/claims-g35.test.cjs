@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * G3.5 product fixes (Jim's CL-W8-G35-PARITY.md findings 1-3), invented text only, HOME jailed first:
  *   (1) ROOMS: a claim chunk is filed in the room its Markdown had (an archive's room, memory.md's

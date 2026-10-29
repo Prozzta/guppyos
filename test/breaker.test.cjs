@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * Circuit-breaker policy tests. Self-contained, no test framework — run with
  * `node test/breaker.test.cjs` (mirrors test/agent-provider.test.cjs).

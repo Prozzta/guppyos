@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * QUIT-HANG (Jim's SLOW-START-FLOOR-CRASH, 2026-09-26): quitting froze the app window

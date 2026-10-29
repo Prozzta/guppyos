@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * ZT-I3 (Jim C3): the validator is fitted to the ledger god actually writes. A fixture

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * CARDS-TAB-CLEANUP-191 (Jim's SHOULD): the SHOW DONE toggle, clicked in a real renderer, stores the

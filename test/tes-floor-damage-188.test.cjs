@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * PERF-FLOOR-FILL-188, RENDERED (scenarios/tes-floor-damage.tsx): the TES floor draws again only
  * what changed, and every frame so drawn is, px for px, the frame a full draw makes:

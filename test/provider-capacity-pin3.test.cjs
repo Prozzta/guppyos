@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * L0-FIX5 — the four counterexamples Dwight demonstrated at pin 3 (`f66b4f12`),

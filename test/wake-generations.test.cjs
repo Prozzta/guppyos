@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * ZT-I1-MAIL 1.1.75 (layer-b dry run #2, god c59e35): a wake claim's request id is
  * `<base>:<generation>`. The owner (automaticSubmit) delivers a request id AT MOST ONCE and replays a

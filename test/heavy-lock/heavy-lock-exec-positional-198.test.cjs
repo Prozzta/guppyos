@@ -1,4 +1,5 @@
 'use strict';
+require('../tools/own-job.cjs');
 
 /**
  * HEAVY-LOCK-EXEC-POSITIONAL (god 0ccbc3). `exec npm test` replaces the shell with npm test, and

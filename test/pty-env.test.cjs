@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * The app is often launched from inside a Claude Code session, and the parent

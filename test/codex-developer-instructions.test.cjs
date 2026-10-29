@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * AGY-STARTUP-TURN, the Codex half (god andycodexok). Codex used to get the hive protocol as a
  * POSITIONAL first prompt (`codex "<protocol>"`, and `codex resume <sid> "<protocol>"`): a first

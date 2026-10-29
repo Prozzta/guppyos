@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * ZT-I1-MAIL 1.1.75 slice 6: the one-shot, idempotent upgrade pass (INBOX-DESIGN.md §7.1,
  * §11.12(c), §11.17 N4, §11.18 #8). A real (jailed) hive; zero model tokens; no windows.

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * ZT-I4: the floor digest and the decision-only wake of god.

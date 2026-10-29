@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CLAIM-LEDGER W6 (src/main/claims/ingest.ts): the S0 import run and the reader-mode watcher.
  *   - every append goes through appendRecord with origin 'w6-internal' (no other origin, no R5 here);

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * NATIVEMEM-SOURCES-LOCALE-SORT (Creed, CL-W8-STREAM-ORDER audit). An agent's `.md` sources, and the
  * wake-up's rooms, were ordered with localeCompare: ICU puts `alpha_notes` before `alpha-notes` and

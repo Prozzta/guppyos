@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * MAILCARD catch-up at every app start (god 38f4b0, Jim 414b4c): the product builds and keeps

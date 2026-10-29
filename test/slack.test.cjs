@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 const assert = require('assert');
 const { shouldTrigger, ActivatedThreads, SeenEvents, dedupKey, ACTIVATED_THREADS_MAX, SEEN_EVENTS_MAX, MAX_FILES_PER_MESSAGE } =

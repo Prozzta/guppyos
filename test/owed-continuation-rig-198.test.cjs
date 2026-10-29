@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * HIVE-DWIGHT-BG-REINVOKE: the owed-work continuation end to end on the fake-agent rig (the beat is
  * the runWorkerWakeBeat body, rig-host mirrors runOwedContinuation). A Codex stub acts on god's

@@ -13,6 +13,7 @@
  * thing that supplies it. Delete either half and the bug returns silently, with
  * every unit test still green, because nothing pure is involved.
  */
+require('./tools/own-job.cjs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');

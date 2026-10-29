@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * TES-HULL M2, Jim NIT 2: placeFront rounds a front static's quad corners as Pixi's vertex shader
  * rounds the floor's, per target. Pixi's roundPixels works in clip space and the canvas projection is

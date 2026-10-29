@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 // REBRAND-GUPPY (1.1.82): the app is now Guppy (name, exe, data folder), but an existing 1.1.81
 // install must upgrade IN PLACE with all its data (the Human, 2026-10-03). That depends on
 // internal names users never see. Each pin below says what breaks if the name changes; see

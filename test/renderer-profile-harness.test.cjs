@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * RENDERER-PROFILE, RENDERED (test/electron-harness/renderer-profile-main.cjs), option A.

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * The hero payload is REMOTE data that renders in Settings. It is fetched from a

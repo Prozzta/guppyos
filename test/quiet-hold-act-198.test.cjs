@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * QUIET-HOLD-ACT-ONLY (1.1.98): the quiet hold keyed on the act alone.

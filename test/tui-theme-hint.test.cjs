@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 // Crush and OpenCode paint their own (dark) backgrounds regardless of the app
 // theme. The spawn now hands every agent a COLORFGBG hint and writes a theme

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * ZT-I1-MAIL layer (b), dry run #3 follow-up (god-approved, test infrastructure only):
  *  (a) the stub hook client mirrors the real shim (write, read the whole reply, destroy on 'end',

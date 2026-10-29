@@ -1,4 +1,5 @@
 'use strict';
+require('../tools/own-job.cjs');
 /**
  * HEAVY-LOCK-UNNAMED-SHOULDS (god 7acffb; Jim's re-audit of 8671c52e..6f3009e1, shoulds S1-S3).
  *  S3 when does a typed suite's slot free? `write_stdin` types the suite into a shell session an

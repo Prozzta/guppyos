@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * D11 — the circuit breaker's per-agent token cap is measured off

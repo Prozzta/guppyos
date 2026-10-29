@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * GATE-2 — the cold-boot lifecycle hole that deadlocked the packaged 1.1.46 floor.

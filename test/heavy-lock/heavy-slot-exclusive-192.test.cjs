@@ -1,4 +1,5 @@
 'use strict';
+require('../tools/own-job.cjs');
 /**
  * HEAVY-SLOT-EXCLUSIVE-192. With "Heavy jobs at once" = 2 a FULL (21-24 of 32 logical CPUs) and a
  * load bench (48+ burners) shared the machine with another heavy job and contaminated timing-sensitive

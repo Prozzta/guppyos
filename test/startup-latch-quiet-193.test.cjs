@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * STARTUP-LATCH-QUIET-193 (1.1.93 P0). Two defects seen right after the 16:04:50 app start:

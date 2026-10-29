@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 // TES-FLOOR-COLLISION-188: sitters never walk through any chair, their own included. Chairs are solid for every
 // walk; a seat is reached by plain floor to its approach spot (outside the chair, on the manifest's side), then a

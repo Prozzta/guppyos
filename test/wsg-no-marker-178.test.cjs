@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * WSG-CODEX-STARTUP-NO-MARKER + WSG-ALERT-NOT-DISMISSABLE (1.1.78), the parts outside the submit

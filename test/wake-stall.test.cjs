@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * The inbox-wake STALL WATCHDOG. The 1.1.46 floor did not fail loudly — it failed

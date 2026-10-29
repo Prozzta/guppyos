@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * ZT-I1-MAIL 1.1.75 slice 7: the open-request UI (INBOX-DESIGN.md §4.3, §11.13 option B, §11.18 #1)
  * and the once-only §7.1 step-2 undelivered report. Main's view over a real (jailed) hive, the

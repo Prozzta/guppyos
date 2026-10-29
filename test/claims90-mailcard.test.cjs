@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * C90-MAILCARD: every delivered message is linked to a card, and the card's mail is kept in a

@@ -1,4 +1,8 @@
 'use strict';
+require('./tools/own-job.cjs');
+// MUTANT-JOURNAL-GATE (god 5cc045/ed8032): this suite loads a file a census mutates in place (one load-ts never sees);
+// refuse a tree a killed census left mutated, before anything is read.
+require('./tools/mutant-runner-helper.cjs').gate(__filename);
 /**
  * CLAIMS-90 Phase 3 pins for the scoring runner (test/claims-90/): the snapshot check, the items
  * check, the containment checks, and the real-CLI shim passing argv through unchanged (spec 1b, 7).

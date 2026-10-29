@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * WIPE (1.1.60): no tracked file names the retired memory CLI, except the CHANGELOG (release

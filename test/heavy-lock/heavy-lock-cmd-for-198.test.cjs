@@ -1,4 +1,5 @@
 'use strict';
+require('../tools/own-job.cjs');
 
 /**
  * HEAVY-LOCK-CMD-FOR-198 (Jim 74a22b, god a370c8). cmd FOR loops were never classified:

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 // @heavy-lock live: sustained work (about 36 s in the 1.1.91 FULL). HEAVY-LOCK-LIVE-FILE-192: one run of this file takes the heavy slot.
 // CL-OVERFLOW-NOTE: when the claims briefing omits claims, the agent is always told. The packer used
 // the whole budget for claims and history pointers, then appended the overflow note and "+N more"

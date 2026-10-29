@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 // MAIL-PIPE-SHIM-CLOCK (1.1.79, GATE-179 round 1; god's ruling (1)+(a)).
 //
 // The gate found a LOST message: the real AGY shim printed nothing (its own 5 s give-up), yet the

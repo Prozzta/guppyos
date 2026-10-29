@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * AGY 1.1.48 commit 2 - the statusline shim, its transport, and HookServer's intake.

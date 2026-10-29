@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * JOB-ENV / SessionStart (1.1.70, on top of SESSION-CROSSWIRE 6398caed).

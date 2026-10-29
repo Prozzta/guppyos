@@ -1,4 +1,5 @@
 'use strict';
+require('../tools/own-job.cjs');
 /**
  * HEAVY-LOCK-CODEX-EXEC (god fa8c45). Dwight's Codex (code mode, `shell: "powershell"`) ran the full
  * suite as `node test/tools/run-tests.cjs *> <file>.log` with no heavy-lock acquire. The Codex hook

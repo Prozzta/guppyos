@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * v1.1.45 unit #7 — capacity toasts aligned to the design of record §13: ONLY entering

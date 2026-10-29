@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * NEEDS-HUMAN-NO-ESCALATE-192: `needs_human` was stored and never acted on (it only exempted an ask

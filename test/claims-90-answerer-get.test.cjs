@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CLAIMS-90 step 3 runner (Jim 4370f6, god 8c87a7): the answer child's claims deps (claims-90/claims-deps.cjs)
  * answer memory get and memory history byte for byte as main's wiring did before claims/readWiring.ts

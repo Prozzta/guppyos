@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * ZT-I3 §3.5: board-status.md is rendered by the harness, deterministically, and says what

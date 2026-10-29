@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CLAIMS-90 labeller jail (test-only tooling). Pins the guard's rules, the jail's forbidden-name
  * check, the transcript audit (compaction, out-of-jail calls) and the key-file check.

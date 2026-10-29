@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * GOD-TERMINAL-CONTROL M1 (design agents/andy-mtuk4y4x/GOD-TERMINAL-CONTROL-DESIGN.md, section 8;
  * Jim's review 16:23Z folded in): main's headless mirror per PTY, the god-only `term` channel

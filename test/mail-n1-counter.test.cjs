@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * ZT-I1-MAIL §11.19 #2 (Creed, INBOX-DESIGN 4883344; god's ruling on Jim's baseline at 502cedcd):
  * the N1 counter `unconfirmedSurfacings` counts ONLY surfacings whose §11.1 evidence is missing

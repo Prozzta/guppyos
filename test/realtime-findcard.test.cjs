@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /*
  * Unit test for the realtime findCard matcher (src/main/realtimeActions.ts).

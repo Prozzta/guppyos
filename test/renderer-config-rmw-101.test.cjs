@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * RENDERER-CONFIG-RMW (1.1.101). The renderer holds ONE config snapshot (fetched at boot and when
  * Settings opens; nothing pushes a change back), and ten of its config:update callers sent a whole

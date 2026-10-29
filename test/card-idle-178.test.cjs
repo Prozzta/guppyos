@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * CARD-IDLE-WHILE-WORKING (1.1.78): the Human saw Andy's card read "idle" while he worked. During

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * TES-SCENE-BOUNCE-188, RENDERED (a hidden Electron window, the REAL App on a TES project): the
  * Human saw the whole map scene jump up and settle back when they selected an agent card in the

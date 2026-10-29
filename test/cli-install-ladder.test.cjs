@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * Every provider's `installCommand` is `npm install -g …`. On a machine with no

@@ -12,7 +12,7 @@
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
-const { recover, mutateFile, restoreFile } = require('./mutant-runner-helper.cjs');
+const { recover, mutateFile, restoreFile, checkAnchors } = require('./mutant-runner-helper.cjs');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 recover(ROOT);
@@ -75,8 +75,10 @@ const MUTANTS = [
   ['L1-s a blocked mail supersedes earns the exemption', 'src/main/claims/derive.ts', 'if (!next || seen.has(id) || protectedFromMail(source, next)) continue;', 'if (!next || seen.has(id)) continue;'],
 ];
 
-const prefix = process.argv[2] || '';
+const prefix = process.argv.slice(2).find((a) => !a.startsWith('--')) || '';
 const selected = MUTANTS.filter(([name]) => name.startsWith(prefix));
+// INT 1.1.103 (MUTANT ANCHORS, god eac6c9): every anchor is checked before anything is mutated; --anchors-only stops here.
+checkAnchors(ROOT, selected.map(([name, file, from]) => ({ name, file, from })));
 let killed = 0; let inert = 0;
 for (const [name, file, from, to] of selected) {
   const abs = path.join(ROOT, file);

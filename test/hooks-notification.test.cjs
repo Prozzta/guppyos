@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * HookServer's Notification/Stop branches are what tell the harness an agent is
  * idle and safe to deliver queued mail to. Both branches call notify() but

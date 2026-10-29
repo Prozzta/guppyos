@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 // Theme packs, part 1: the XML reader, the TMX/TSX/TMJ normalizer and the
 // pixel rasterizer, on the neutral fixture pack (test/fixtures/themes).

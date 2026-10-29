@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * BOOT-ORPHAN-ASSIGNEE-DOWN + BOARDMONITOR-DOUBLE-RAISE (1.1.78; Dwight 644297f2 + 3c4fc538,

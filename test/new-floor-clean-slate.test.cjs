@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 // NEW-FLOOR-CLEAN-SLATE: a new floor starts with no agents but its own god. The renderer's
 // localStorage roster cache is one cache for every home (one Electron userData origin), and a

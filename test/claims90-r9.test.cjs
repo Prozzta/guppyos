@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CLAIMS-90 round 9 (god a77298; Jim's brief-p.md, sha f8878475): four derived-fact mechanisms, each with
  * its synthetic fixtures and must-not-regress twins. P1: a done mail's card field naming an unknown card is

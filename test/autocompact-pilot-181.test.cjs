@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * READS-ROTATE-AT-SIZE pilot (1.1.81): Claude Code's own auto-compact window, god-only at 150k.

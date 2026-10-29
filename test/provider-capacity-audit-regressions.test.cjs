@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * L0-REGR — the five adversarial counterexamples Dwight EXECUTED, pinned.

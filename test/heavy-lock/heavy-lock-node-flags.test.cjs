@@ -1,4 +1,5 @@
 'use strict';
+require('../tools/own-job.cjs');
 /**
  * HEAVY-LOCK-NODE-FLAGS-COMPLETE (god 7ab969). Two escapes left by HEAVY-LOCK-PRELOAD-ESCAPE:
  *  (a) a node option that takes its value as the next word, missing from NODE_VALUE_FLAGS, made

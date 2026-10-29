@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CLAIM-LEDGER W3, the parts that need no SQLite: claim chunks (chunksFor), main's verified index
  * sync (ClaimsIndexSync), discovery (the claims source, the three replaced patterns, levels),

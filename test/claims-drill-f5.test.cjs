@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CLAIM-LEDGER F5 as a C4 drill case: this build's ledger store under Electron as Node (the drill
  * runner, sandbox hive, jailed home): a torn rekey line records no new key id, and the retry heals

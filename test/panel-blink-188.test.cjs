@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 // PANEL-BLINK-188: on 1.1.87 the bridge's chair panels never blinked while their agent worked (the
 // viewer's paintPanels was never ported to the floor), and the bottom cards' status dots stood still.
 // (a) panels.ts: the ToSBridge *Panel shapes, their seats and lights, working/idle/empty, the 240 ms

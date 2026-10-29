@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * TRUST-SEED-175 (god option A, side branch zt175-trust-seed). codex 0.157.1 shows its directory-trust
  * screen when the cwd has no [projects."<cwd>"].trust_level (tui/src/lib.rs:2277-2279); the real run

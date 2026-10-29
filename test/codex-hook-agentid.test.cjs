@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * CODEX-HOOK-AGENTID (Jim's card, god's scope): a hook payload can carry the PROVIDER's own

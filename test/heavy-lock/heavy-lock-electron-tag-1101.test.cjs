@@ -1,4 +1,5 @@
 'use strict';
+require('../tools/own-job.cjs');
 /**
  * HEAVY-ELECTRON-TAG (Andy's HLFN audit, god's plan 2026-10-23 17:00Z). Two holes, measured on 1.1.100:
  *   - A FILTERED run (`npm test -- <needle>`, `run-tests.cjs <needle>`, and the lease on the runner's

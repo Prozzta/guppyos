@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * RR-164 (Jim finding 1), RENDERED on the REAL App (a hidden Electron window): a recovered view
  * opens on the live floor with the "restored" notice, not the launch-time HivePicker; a normal

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * SCREEN-GUARD-ALERT-FLOOR-193 (generalised, god c6b4d7): a floor-wide wake-delivery stall reaches
  * god as a `Floor: N decision(s)` item, whatever path refused it.

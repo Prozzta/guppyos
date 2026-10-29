@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * god R1 (Jim's real-mode sweep): the zero-token real-run preflight runs the PRODUCT's resolution

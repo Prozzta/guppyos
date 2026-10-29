@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CLAIMS-90 M3a (layout probe, after Jim's re-audit): a CURRENT claim hit in `memory search` opens with ONE
  * line `<key>: <current value>` (an unkeyed claim: its first sentence) and the body continues where that

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /*
  * Unit tests for the voice read-layer's MESSAGE-CONTENT + RECENT-ACTIVITY path

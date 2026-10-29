@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CLAIMS-90 round 10 (god a22191): five general index rules in the done-mail indexer (doneMailFacts), each
  * with its twins. F1: a subject token that is a known id plus a role suffix (ABC-12-INT), or a unique leading

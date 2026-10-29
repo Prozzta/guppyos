@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 // NEW-FLOOR-KNOWHOW: a fresh floor learns the floor tools from the shipped text (PROTOCOL.md,
 // COMMANDS.md, god's orientation and start-up line), not from older agents' memory. Each pin ties a

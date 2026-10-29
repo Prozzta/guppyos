@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * HIVE-DUP-DONE-MAIL: an agent that checks "is my file still in outbox/?" finds it gone (the router

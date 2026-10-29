@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * MAIN-SYNC-LOG-LEDGER (registry): HiveManager.registry() was a disk read + parse on every call

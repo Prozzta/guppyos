@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * The prompt mirror's timer exists only while there is a terminal to mirror.

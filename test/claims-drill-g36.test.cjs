@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CLAIM-LEDGER G3.6 (F6, C4): the OLD build (1.1.83) runs its own engine, under Electron as Node,
  * against a user-data memory folder that holds the new build's v2 index file and its own STALE index.

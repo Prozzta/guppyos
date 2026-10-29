@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * Release drops render REMOTE, AUTHOR-CONTROLLED HTML inside the app. The

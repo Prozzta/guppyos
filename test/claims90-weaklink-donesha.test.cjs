@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CLAIMS-WEAKLINK-DONESHA (god e2f85a; mechanism from Jim's R4): memory get's derived done-sha for a card
  * must reflect the latest done mail that reports a sha for that card itself, including when that mail

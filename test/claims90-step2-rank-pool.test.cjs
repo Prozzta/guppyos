@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CLAIMS-90 R2 step 2 (Jim 595cc6, god e91938):
  *  (1) the `get:` pointer costs no hit a character: it is one footer line after the hits, outside the hit budget,

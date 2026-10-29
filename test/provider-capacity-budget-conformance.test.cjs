@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * L0-VAL — L0-SEM §8 "Numeric overhead budget", the rows nothing was checking.

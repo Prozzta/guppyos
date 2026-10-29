@@ -1,4 +1,5 @@
 'use strict';
+require('../tools/own-job.cjs');
 
 /**
  * HEAVY-LOCK-POSITIONAL-192 (god 3d0379). In a single-quoted sh -c body the positional arguments

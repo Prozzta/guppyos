@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * REBRAND-UPDATER-BASE (1.1.83): the installer stores its differential-update base where the
  * updater looks for it. electron-builder 25.1.8 names the store "<package name>-updater" =

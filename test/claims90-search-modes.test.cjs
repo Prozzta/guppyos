@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CLAIMS-90 R2 (C90-GET, god ae1569 + 8218c8, Jim df789a b-d): the search side of the lookup.
  *  - the compact text ends with one `get: memory get <key>` line for the keys shown (HISTORY-PTR g, step 2) and --full has a `Get:` line per hit;

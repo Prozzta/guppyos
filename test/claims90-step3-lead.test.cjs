@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CLAIMS-90 step 3 fix (god bbcb4a, after Jim f0d494: agents typed the field term on 6 of 332 rows, the bare card
  * on 142, and 40% of get replies passed the 1500 cap):

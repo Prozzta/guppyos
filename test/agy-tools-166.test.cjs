@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * AGY-TOOLS-166. From 1.1.55 (AGY-STARTUP-TURN) an AGY hive agent runs as agy custom agent
  * `--agent munder-<id>`. A Markdown custom agent gets ONLY agy's fundamental tools (view_file,

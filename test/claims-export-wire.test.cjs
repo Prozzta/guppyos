@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CLAIM-LEDGER W6 wiring (src/main/claims/exportWiring.ts + main's index.ts): the production callers
  * of the rollback exports.

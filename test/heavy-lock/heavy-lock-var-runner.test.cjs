@@ -1,3 +1,4 @@
+require('../tools/own-job.cjs');
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const loadTs = require('../load-ts.cjs');

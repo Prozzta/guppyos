@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * SCHEME-DROP (1.1.87, the Human 2026-10-15): guppy:// is the only link scheme. Up to 1.1.86 the app
  * registered munderdifflin:// itself at every start (app.setAsDefaultProtocolClient writes

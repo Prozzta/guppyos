@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * WARM-MEANS-MODEL-LOADED-189 (Jim S3 on MEMORY-SEARCH-TIMEOUT-DURING-INDEX-189): the client chose the
  * warm search budget (SEARCH_DEADLINE_WARM_MS, then 250 ms) after ANY ok reply, but the worker loads the embedding model lazily, on

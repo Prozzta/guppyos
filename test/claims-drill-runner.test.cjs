@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CLAIM-LEDGER C4: the drill runner's guards, without starting Electron. It refuses the live hive
  * and the real home, fails (never skips) on a tree without Electron or the model, and its child

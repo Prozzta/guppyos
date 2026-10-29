@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * CODEX-REDRAW-151: nothing around a terminal may change its size when agent STATE changes.

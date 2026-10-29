@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CODEX-BLOAT-165 fix 1: an automatic Codex (and Antigravity) resume rotates to a fresh thread
  * when the recorded one started before today's local midnight or has grown past the size cap.

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * Hooks run under `/bin/sh` with a bare PATH (`/usr/bin:/bin:…`). A hook command

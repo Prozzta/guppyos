@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CLAIMS-90 L6 M2 (god 3dc16a): the tool-output condenser keeps a memory search reply's header and brief block
  * (every line above the first hit) whole, the way it keeps the header, within BRIEF_BLOCK_MAX_CHARS; the rest of

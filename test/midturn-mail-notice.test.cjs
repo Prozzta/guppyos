@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * MIDTURN-MAIL-BLIND L1 (1.1.55): an agent learns, DURING its turn, that new mail arrived in its
  * inbox after the turn began. It is named once each, on the same answering hooks the operator

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 // Jim's two SHOULDs on the TES join (plan step 5):
 // (a) normalization keeps a pack-shaped theme id that no registered pack has, so a pack renamed or
 //     dropped in a later build does not silently wipe projects' theme entries; the floor falls back

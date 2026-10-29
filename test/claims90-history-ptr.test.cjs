@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CLAIMS-90 HISTORY-PTR: a claim's history pointer is a runnable `memory history <id>` command
  * answered from the served hive, never a file anchor (an answerer read `memory.md#claim-history-<id>`

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * SESSION-CROSSWIRE (1.1.70): an agent could resume, and be charged for, another agent's

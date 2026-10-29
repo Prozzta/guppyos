@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CLAIMS-KEYFIND-FOLLOWUPS (god 8ee714): three side defects Andy found while fixing keyfind, each a product mechanism:
  *  (a) the claims-sync deadline grows with the chunk count (a fixed 120 s let the derived wing's first sync time out on

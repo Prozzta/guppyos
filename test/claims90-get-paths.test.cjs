@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CLAIMS-90 R2 (C90-GET, god f5ba70, acceptance e): `memory get` and `memory search --exact/--newest` give
  * BYTE-IDENTICAL text on every path agents use: the CLI over HTTP (`/memory/<token>` -> mainWiring.handle), the

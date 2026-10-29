@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * TUI-COMPOSER-ALLOWLIST-191: Guppy's automatic typing never acts on a non-composer screen for

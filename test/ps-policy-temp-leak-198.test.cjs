@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * PS-POLICY-TEMP-LEAK (1.1.98 final sweep, 2026-10-22): a full run failed on one TEMP LEAK,
  * test-runner-glob's temp jail held __PSScriptPolicyTest_5rmjj3ed.am3.ps1. Windows PowerShell 5.1

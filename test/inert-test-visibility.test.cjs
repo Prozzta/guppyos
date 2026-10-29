@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * Inert test files must announce themselves in the SUMMARY counters.
  *

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 // Behavioural checks at two theme boundaries, run on the REAL sources bundled by esbuild:
 //  1. getTheme() falls back to the Office for every id that is not its own built-in theme,

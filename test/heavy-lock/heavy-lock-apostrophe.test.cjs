@@ -1,4 +1,5 @@
 'use strict';
+require('../tools/own-job.cjs');
 /**
  * HEAVY-LOCK-APOSTROPHE-SWALLOW (Creed's VAR-RUNNER re-audit; god 7acffb). The quote scanner now
  * follows each shell's REAL quoting rules, measured on this machine (bash 5, Windows PowerShell 5.1,

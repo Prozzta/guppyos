@@ -7,6 +7,7 @@
  * landed; the reply line of a note-only op then echoed `card=X:done`, which looked like the op
  * had set it. The protocol example itself taught the `patch: { status: done }` shape.
  */
+require('./tools/own-job.cjs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');

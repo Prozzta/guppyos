@@ -3,6 +3,7 @@
 // the select box and its option popup LIGHT while the text inherited the dark theme's near-white
 // ink. Every select (and option) now takes its colours from the theme tokens, and the dark theme
 // declares the dark UA scheme.
+require('./tools/own-job.cjs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');

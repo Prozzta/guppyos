@@ -1,4 +1,5 @@
 'use strict';
+require('../tools/own-job.cjs');
 /**
  * HEAVY-LOCK-ADHOC-NODE (god b6b24a). Ad-hoc `node <script>.cjs` runs that load the ONNX runtime
  * and the embedder ran beside a held heavy-job slot: classifyCommand made `node <script>` heavy only

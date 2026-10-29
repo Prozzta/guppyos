@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * ZERO-TOKEN-LIVENESS, renderer slice (design "UI and Human choices"; Jim L3): the Command Center
  * liveness chip (src/renderer/src/components/LivenessChip.tsx) renders shared/livenessView.ts, and

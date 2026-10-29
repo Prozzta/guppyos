@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * v1.1.45 unit #5 — agent-card impact: the wiring and the rendering.

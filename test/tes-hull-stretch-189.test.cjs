@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 // TES-HULL-STRETCH-188: this is intentionally a rendered check.  The old 4096px one-row
 // continuation passed all pixel-alignment tests while making a tall narrow pane look like a hull

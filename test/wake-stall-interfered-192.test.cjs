@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * WAKE-STALL-INTERFERED-192: Jim and Andy held INTERFERED on their OWN wake text (1.1.90,
  * 2026-10-17). Jim's log, read-only:

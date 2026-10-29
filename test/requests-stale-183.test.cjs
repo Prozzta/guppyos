@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * REQUESTS-TAB-STALE (1.1.83): an open request closes when its work is provably finished, not only
  * on a routed reply or the Human's close. The rule (mailLedger.staleObligations), over a real

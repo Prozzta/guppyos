@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * ANDY-PTY-EXIT-2049: an UNREQUESTED PTY exit leaves a record naming what the session was doing
  * (god GO 05:39Z: the detached mirror only on a non-explicit end, an async fire-and-forget record,

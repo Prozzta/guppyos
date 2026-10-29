@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * Pre-M1 event-wake bridge, commit 3 — regression pins (plan section D). Each one fails if

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * ZERO-TOKEN-LIVENESS: the AgentLivenessMonitor reducer and its in-process API
  * (src/main/agentLiveness.ts; design dwight-177/ZERO-TOKEN-LIVENESS-DESIGN.md rev 2, contract

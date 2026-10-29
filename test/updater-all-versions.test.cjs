@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * UPDATER-ALL-VERSIONS (1.1.63): the updater offers EVERY newer release, not

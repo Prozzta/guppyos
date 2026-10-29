@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * L0-CORE — the collection seam: does a real status-line payload actually reach a

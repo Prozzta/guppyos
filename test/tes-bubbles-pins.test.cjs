@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 // TES-BUBBLES-186 follow-up pins.  These deliberately inspect the mount/tick
 // wiring rather than tes-raster: the behavior layer already exercises the

@@ -1,4 +1,5 @@
 'use strict';
+require('../tools/own-job.cjs');
 /**
  * HEAVY-LOCK-PRELOAD-ESCAPE (Jim's APOSTROPHE audit, god a2c1b5). Three classifier escapes:
  *  1. node's value flags: `node --require x test/tools/run-tests.cjs` read `x` as the script, so the

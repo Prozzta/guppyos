@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * D9 — an ephemeral worker (startEphemeralWorkerWatcher) and a voice-hire spawn

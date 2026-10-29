@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CODEX-BLOAT-165: what OUR per-agent Codex config.toml changes relative to the seed copied from
  * the user's ~/.codex/config.toml, and that the user's file itself is never written.

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * IMPACT-LOOP-171: the useAgentImpact re-subscribe loop that ran the renderer out of memory on
  * 2026-09-27 22:03Z and 2026-09-28 01:06Z (MEMSPIKE-WHY, "Recurrence ... causal chain").

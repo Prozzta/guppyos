@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * God has to know the LIVE floor across its own restarts — a roster it read once

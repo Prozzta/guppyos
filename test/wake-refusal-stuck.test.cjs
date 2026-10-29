@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * WAKE-STUCK-REFUSAL-ESCALATE (1.1.97, 2026-10-21 17:01:50-17:03:08Z): Dwight's terminal kept a
  * stale 'model: loading' header, so every reconcile wake settled REFUSED SCREEN_NOT_READY

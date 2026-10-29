@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * MODEL-PINBACK (1.1.70):
  *   G1 - OUR per-agent Codex config.toml names the model the agent is launched with (a `--model`

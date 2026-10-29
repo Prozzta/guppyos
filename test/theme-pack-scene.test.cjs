@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 // Theme packs, part 3: the analysed scene of the neutral fixture pack:
 // collision rasterized from polygons, rectangles and visible walls; seat-only

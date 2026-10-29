@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * ZT-I3 §3.2: `detectStale`, pure. Every rule with boundary times (just under / at the

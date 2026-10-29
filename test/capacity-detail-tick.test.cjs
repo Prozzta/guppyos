@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * v1.1.46 A2 (CAPUI-STALE-AGE-TICK) — the "Not refreshed in X min" note keeps counting while

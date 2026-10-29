@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * The agent-facing text the hive injects has to be runnable BY THE AGENT, on the

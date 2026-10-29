@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CLAIMS-90 R2 (C90-GET): `memory get <key|card>` resolves one term to one key set and returns the CURRENT value as
  * a field (Jim ff7793 design, df789a + ac6f85 changes, god 7c1acc mail history, Creed 5f3e80 key contract):

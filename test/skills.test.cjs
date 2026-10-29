@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * The skills catalog is parsed out of a hand-maintained README with no machine

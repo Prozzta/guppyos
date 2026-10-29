@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * AGY-MONITOR-1.4 (AGY design 1.4, deferred from 1.1.48; the Human 2026-10-18: "Build them").

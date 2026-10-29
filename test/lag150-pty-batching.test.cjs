@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * LAG-150 F3: pty output reaches the renderer in few IPC messages, not one per conpty chunk.

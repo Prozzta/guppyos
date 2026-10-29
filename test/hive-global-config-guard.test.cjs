@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * AGY-HOOKS-GLOBAL-GUARD - only the LIVE hive may write the user's global provider config.

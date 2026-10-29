@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * HISTORY-169-AUDIT (Jim) fixes:

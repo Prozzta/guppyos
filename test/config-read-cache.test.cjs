@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * MAIN-SYNC-LOG-LEDGER (config): readConfig was a disk read + parse + migrations on every call

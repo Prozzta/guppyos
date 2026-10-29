@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * TASKS-JSON-SPLIT: hot tasks.json (live + done < 48 h) and the append-only archive

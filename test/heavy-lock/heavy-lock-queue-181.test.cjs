@@ -1,4 +1,5 @@
 'use strict';
+require('../tools/own-job.cjs');
 
 /**
  * HEAVY-LOCK-SELF-WAIT (1.1.81), with HEAVY-LOCK-MISSED-RUNS-177 (the env `$(...)` escape) and

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * ZT-I2-CONDENSE (god f2315f): the hidden Haiku condense (reflect.ts) is retired. The same
  * deterministic rollover that runs at spawn now also runs at an agent's Stop hook when memory.md

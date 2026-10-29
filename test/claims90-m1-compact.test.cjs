@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CLAIMS-90 M1: `memory search` and `memory wake-up` print a compact, current-first text that fits
  * UNDER the tool-output condenser's 1500-character default cap BY CONSTRUCTION, so an agent reads

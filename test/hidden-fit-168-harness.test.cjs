@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * MEMSPIKE-168 - the hidden-terminal fit guard, on a REAL xterm in a real (hidden) Electron

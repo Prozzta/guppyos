@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * GTC M3 (1.1.97): the Human's message box (src/main/messageBox.ts) and its wiring.

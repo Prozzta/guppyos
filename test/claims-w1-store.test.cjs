@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CLAIM-LEDGER W1 gates (plan §3 W1): the ledger store and write path.
  *   G1.2 single writer, fsync before the ack   G1.3 token identity        G1.4 injection, by origin

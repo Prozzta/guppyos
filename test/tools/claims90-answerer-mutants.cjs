@@ -11,6 +11,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const { recover, mutateFile, restoreFile, checkAnchors } = require('./mutant-runner-helper.cjs');
 
 const ROOT = path.join(__dirname, '..', '..');
 const CHILD = 'test/claims-90/answer-child.cjs';
@@ -94,7 +95,10 @@ const M = [
   ['P14 taskStatusFor misses the archive', DEPS, '  return (id) => (allTasks() ?? []).find((t) => t.id === id)?.status ?? null;', "  return (id) => (allTasks() ?? []).find((t) => t.id === id && t.status !== 'done')?.status ?? null;", ['unit']],
 ];
 
-const preArgs = process.argv.slice(2);
+// INT 1.1.103 (MUTANT-JOURNAL-GATE): recover an interrupted run before anything, mutate through the journal.
+recover(ROOT);
+if (process.argv.includes('--recover-only')) process.exit(0);
+const preArgs = process.argv.slice(2).filter((a) => a !== '--anchors-only');
 function killer(k) {
   if (k === 'unit') return spawnSync(process.execPath, ['--test', 'test/claims-90-answerer-get.test.cjs'], { cwd: ROOT, encoding: 'utf8' }).status;
   const out = fs.mkdtempSync(path.join(os.tmpdir(), 'c90-preflight-'));
@@ -102,10 +106,7 @@ function killer(k) {
 }
 
 const lf = (s) => s.replace(/\r\n/g, '\n');
-for (const [, file, from] of M) {
-  const n = lf(fs.readFileSync(path.join(ROOT, file), 'utf8')).split(from).length - 1;
-  if (n !== 1) { console.log(`ANCHOR ${file} x${n}: ${from}`); process.exit(2); }
-}
+checkAnchors(ROOT, M.map(([name, file, from]) => ({ name, file, from })));
 const base = {};
 for (const k of ['unit', 'preflight']) { base[k] = killer(k); console.log(`baseline ${k}: exit ${base[k]}`); }
 if (base.unit !== 0 || base.preflight !== 0) { console.log('baseline fails: no census'); process.exit(2); }
@@ -118,11 +119,11 @@ for (const [name, file, from, to, killers] of M) {
   try {
     let mutated = t.replace(from, () => to);
     if (crlf) mutated = mutated.replace(/\n/g, '\r\n');
-    fs.writeFileSync(f, mutated);
+    mutateFile(ROOT, f, orig, mutated);
     const by = killers.filter((k) => killer(k) !== 0);
     if (by.length) killed++;
     console.log(`${by.length ? 'KILLED' : 'SURVIVED'} ${name}${by.length ? ` by ${by.join(', ')}` : ''}${by.length !== killers.length ? ` (not by ${killers.filter((k) => !by.includes(k)).join(', ')})` : ''}`);
-  } finally { fs.writeFileSync(f, orig); }
+  } finally { restoreFile(ROOT, f, orig); }
 }
 console.log(`TOTAL ${killed}/${M.length}`);
 process.exitCode = killed === M.length ? 0 : 1;

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * QUIET-HOLD-ACT-ONLY (1.1.98): the C:/Meta/hive/log.jsonl 2026-10-22 sequences, replayed through
  * the INTEGRATED rig (real HiveManager, ledgers, InboxWakeBridge, hooks and PTYs; test/mail-rig/)

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * WAKE TELEMETRY (D8). The durable breadcrumbs say what happened to one wake; these

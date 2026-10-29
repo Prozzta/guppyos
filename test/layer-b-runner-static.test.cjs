@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * ZT-I1-MAIL layer (b): STATIC safety pins on test/tools/layer-b-run.cjs (Jim's audit R1-R10, god
  * c0a73f, Dwight). Nothing here builds, launches the app, a window or any CLI: the runner module is

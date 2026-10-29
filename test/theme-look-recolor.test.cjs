@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 // Theme looks, part 1: recolouring a pack body (skin, shirt, hair) from the
 // manifest's part colours, on the neutral fixture's sheet.

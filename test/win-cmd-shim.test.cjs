@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * WINDOWS AGENT-TO-AGENT MESSAGING — the argv path.

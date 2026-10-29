@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 // Theme-scoped UI colour tokens (design/uiTokens.ts, design/uiTheme.ts). These tests hold four things in place:
 // tokens.css and its JS mirror agree; Office looks exactly as before (every colour that used to be a literal in the

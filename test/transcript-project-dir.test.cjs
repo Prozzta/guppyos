@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 // Originally contributed by Vyapak Goyal (@gts-47) in #123, extended here with
 // the dotted-path cases that the first version's dot-free fixtures could not

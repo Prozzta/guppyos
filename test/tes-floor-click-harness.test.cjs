@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * TES-GUPPY-RASTER, RENDERED (a hidden Electron window, the real OfficeFloor and the bundled tes
  * pack): once the floor draws from its static cache and draws again only what changed (the

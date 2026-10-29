@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * CARD-BADGE-AMBIGUOUS: the Human read the "2" on a player card's doing note as unread mail.

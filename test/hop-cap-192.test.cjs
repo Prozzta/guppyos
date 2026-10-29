@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * HOP-CAP-INERT-192: the loop guard (HOP_CAP 12) never fired. normalize() kept whatever `hops` the

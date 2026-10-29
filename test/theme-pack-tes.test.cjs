@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 // The TES bridge pack (themes/tes): data only, on the generic pack mechanisms. These tests hold the pack to its
 // acceptance list: it loads clean; the Human's files are verbatim copies (hashes in SOURCES.json); the bridge is 30x20

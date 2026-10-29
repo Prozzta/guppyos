@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * RULE-FIX-HOOK-NO-MODEL (god 82f71a): hive hook wiring uses only the zero-token hook types
  * (command, http, mcp_tool), never prompt/agent (a model call on every event they fire for).

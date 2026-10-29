@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CLAIMS-90 M3 (ranking, Jim's fix 1 + 2 targets): (S2) the compact window anchors on the MOST SPECIFIC matched
  * query term (a sha, version, card id or claim id over a dotted key over a word), so a topic word at the head of

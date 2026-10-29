@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * MAIN-SYNC-LOG-LEDGER commit 3, Jim's FAIL on 91235c64: with tasks() served from the deep-frozen

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CODEX-BLOAT-165 fix 4: a shorter wake nudge (every nudge is a user turn that Codex compaction
  * keeps), and a bounded Stop-drain text (each body capped, with a pointer to the full file).

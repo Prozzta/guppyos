@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * v1.1.45 unit #6 — the LIMITED entry banner (design of record §11, C2.12 rule 3), driven

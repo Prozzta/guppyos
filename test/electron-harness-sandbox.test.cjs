@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * THE HARNESS LEAVES NOTHING BEHIND - and says so loudly when it cannot help it.

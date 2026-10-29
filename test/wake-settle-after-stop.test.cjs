@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * P1 (ON HOLD, failing-first): layer-b dry run #6 wedge. A wake's typed turn can START and STOP
  * before the submit owner reports COMMITTED (the Codex F3 submit check takes ~1.5 s; a short turn

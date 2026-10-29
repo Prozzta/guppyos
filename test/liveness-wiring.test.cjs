@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * ZERO-TOKEN-LIVENESS, wiring (design slice 5; Jim L6): main constructs ONE AgentLivenessMonitor,
  * feeds it existing facts (registry, PTY, wake coordinator, Codex rollout, wake refusals, PTY ends),

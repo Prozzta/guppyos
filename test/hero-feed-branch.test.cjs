@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * HERO-FEED-BRANCH (card from 1.1.83, still live on 1.1.101).

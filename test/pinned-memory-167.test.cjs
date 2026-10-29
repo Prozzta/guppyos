@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * PINNED-MEMORY (57f3cc): an agent's `## How I work (standing lessons)` section holds its METHOD
  * lessons. 1.1.65's rollover archived them with the dated notes, and protocol line 1 no longer

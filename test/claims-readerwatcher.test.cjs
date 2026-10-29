@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CL-READERWATCHER: a hand edit of memory.md while the app runs stays searchable.
  * For an agent at reader or writer level with a ledger, discovery searches its claims instead of

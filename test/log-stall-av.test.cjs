@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * LOG-STALL-AV (Jim, MAIL-AV-152; 1.1.53). The mail/Write/Read antivirus pain was synchronous

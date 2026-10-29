@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * ZT-I1-MAIL 1.1.75 slice 5: the prompt texts (INBOX-DESIGN.md §5 P1-P12, §11.7, §11.12(c)).
  *  - Injection-mode agents (claude, codex, antigravity) are never told to read, list or MOVE inbox

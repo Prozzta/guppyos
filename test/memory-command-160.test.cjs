@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * WIPE (1.1.60; the Human 2026-09-27: "wipe" the retired memory CLI). Agents' memory command is

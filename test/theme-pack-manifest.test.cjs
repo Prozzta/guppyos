@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 // Theme packs, part 2: theme.json validation, the pack catalogue, and the
 // fallback guarantee (an unusable pack is a diagnostic, never a crash).

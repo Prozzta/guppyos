@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * GOD-STARTUP-WAITS-ENTER (1.1.80). On 2026-10-02 (1.1.79) god's orientation and its Enter were

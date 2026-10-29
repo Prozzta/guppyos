@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * GTC M4 (1.1.97): agent wakes through hook readiness, a typed send and the provider's own

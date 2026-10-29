@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * L0-FUSION stage 5.4b - WHAT A PERSON IS TOLD about a queue that is not moving, and the

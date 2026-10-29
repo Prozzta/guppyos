@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CLAIM-LEDGER W7: the Human's ledger UI (plan §3 W7; G7.1, G7.2).
  *  - The purge (R8): tombstone and re-chain through temp + rename, a purge event by the Human, the

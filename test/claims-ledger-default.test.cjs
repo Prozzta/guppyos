@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CLAIMS-DEFAULT (god bb3f5b): a NEW floor starts on the claim ledger, an existing one is unchanged.
  * C1 memory-sources.json `ledgerDefault` stands in for an absent agent entry; C2 a hive created now is

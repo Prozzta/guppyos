@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * ZT-I3 (Jim C1): API writes validate the CHANGE, not the file. A write is refused only if

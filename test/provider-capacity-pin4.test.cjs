@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * L0-FIX6 — the two source corrections from Oscar section 15, frozen at research

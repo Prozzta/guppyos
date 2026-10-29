@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CL-M4-FORWARD-PATH (Jim's CL-M4 calibration, section 4): consolidate at write time.
  *   - a bare --separate with candidates present returns the offer; --separate names the ids it keeps apart;

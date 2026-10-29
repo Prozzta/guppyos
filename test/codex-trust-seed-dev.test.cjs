@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * TRUST-SEED-175, DEV half: with MUNDER_DEV=1 (set BEFORE any product module loads, as DEV_ISOLATION
  * is read at load) the seed sanitiser still drops the USER's [projects.*] list, and the agent's OWN

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 // REBRAND-FILEDESCRIPTION (1.1.83): Task Manager names a Windows process by its exe's
 // FileDescription. electron-builder writes it from the package "description"
 // (app-builder-lib winPackager.signAndEditResources: `appInfo.description || appInfo.productName`;

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * AGY-TEARDOWN (Oscar's finding, reproduced on 1.1.101 by Andy 2026-10-24): an explicit PTY kill
  * left a descendant that is not on the pseudo-console alive. On Windows kill() and killByOwner()

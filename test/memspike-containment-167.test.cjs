@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * MEMSPIKE-167: containment for a runaway renderer (2026-09-27: 250 MB -> 2.95 GB in ~2 min; the
  * watchdog only logged and the Human had to kill the app). Main decides from its own process

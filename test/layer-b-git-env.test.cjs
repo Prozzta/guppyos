@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * god ruling A: GIT_CONFIG_NOSYSTEM=1, GCM_INTERACTIVE=never and GIT_TERMINAL_PROMPT=0 are in the jailed

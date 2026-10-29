@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * PROMOTION GUARANTEE: the packaged app may only ever look for, fetch or offer a
  * build from the human's own repository — never from the upstream project it was

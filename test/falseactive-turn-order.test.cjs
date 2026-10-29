@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * FALSEACTIVE-STALL-2 part A: a Codex tool hook that arrives AFTER its own turn's Stop

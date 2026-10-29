@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * BRANCH-RELATED-PINS-RUN (1.1.98 stage 12): scripts/related-tests.cjs.
  * - The matcher is pure: path forms a test uses (quoted, require without the extension, path

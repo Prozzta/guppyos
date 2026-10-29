@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CLAIM-LEDGER day-0 freeze (src/shared/claims.ts): the runtime parts of the frozen interface.
  *   - G0.1 the flag clamp: effective = min(global, agent, IMPLEMENTED); a level above the build is

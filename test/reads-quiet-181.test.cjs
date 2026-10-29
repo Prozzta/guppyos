@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * READS-QUIET-NOREPLY (1.1.81, god 271ed2 / c95516): quiet mail does not start a turn.

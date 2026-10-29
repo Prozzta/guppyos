@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 // Theme packs, part 5: idle people's coffee runs and wander-stop chats on the
 // neutral fixture pack. The brew spot and the mug spots come from the pack;

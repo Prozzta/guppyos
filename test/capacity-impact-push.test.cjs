@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * v1.1.45 CRIT-15-PRE — the agent-card impact string is PUSHED by main, never polled by

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * WORK-JUNCTION-DEBT step 3 (god 06:27Z): no new junction debt. A worktree whose node_modules is a
  * junction makes its target undeletable and `git worktree remove --force` empties that target (the

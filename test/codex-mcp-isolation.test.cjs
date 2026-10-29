@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CODEX-MCP-ISOLATION: a codex agent's generated config.toml was seeded from the user's
  * ~/.codex/config.toml verbatim outside DEV, so the node_repl MCP server it inherits ran with

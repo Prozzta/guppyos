@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CODEX-BLOAT-165 fix 2: the Codex tool-output cap (`tool_output_token_limit`), configurable in
  * Settings → Agents & Models. Default 4000, 1000-10000, or Off. Persisted in the app config and

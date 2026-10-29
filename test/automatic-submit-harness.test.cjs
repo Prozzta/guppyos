@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * L0-FUSION stage 5.4c - the fused transaction against a REAL xterm, in a real Electron

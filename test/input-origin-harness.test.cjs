@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * L0-FUSION stage 4 - input provenance on a REAL xterm in a real Electron renderer.

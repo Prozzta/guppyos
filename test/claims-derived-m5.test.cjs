@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CLAIMS-90 M5: the deterministic derived claim writers (god 357758, sign-off 104bfd). Facts read
  * from primary records become claims with source 'derived' in the reserved `derived` ledger:

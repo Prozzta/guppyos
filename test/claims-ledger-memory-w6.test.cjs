@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * CLAIM-LEDGER W6, gate G6.6 (second half): the `ledger` command's memory part lands as a claim.
  * At the effective level 'writer' memory.md is a generated view, so the memory part is ONE claim

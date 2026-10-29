@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * L0-S19FIX — L0-SEM section 19, read at the source (research `646179ec`).

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * ZT-I1-MAIL (1.1.75) §4.1 through the real router (HiveManager.send / routeOnce → deliver):

@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * HISTORY-SCROLL-FREEZE (1.1.80). Scrolling back in an agent's History tab blanked the whole app

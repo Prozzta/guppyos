@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * ZT-I1-MAIL (1.1.75) slice 1: the per-agent mail ledger (INBOX-DESIGN.md §1, §11).

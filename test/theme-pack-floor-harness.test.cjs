@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * TES foundation, RENDERED (a hidden Electron window, the real OfficeFloor): the pack dispatch
  * and its fallback, with the neutral-deck fixture bundled through the harness's packSources

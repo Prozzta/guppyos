@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * LAG-150: the installed 1.1.49 was still laggy after the main-thread fix. Measured with

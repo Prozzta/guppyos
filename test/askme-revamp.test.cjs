@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * ASKME-REVAMP: readable human-question cards, shared by ASK ME, the task detail and

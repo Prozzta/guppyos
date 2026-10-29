@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * GTC M3 (d), Jim 6b9a89 ruling (d): the renderer's hook stream carries `fully_idle`, and an AGY

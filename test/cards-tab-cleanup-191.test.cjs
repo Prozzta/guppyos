@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * CARDS-TAB-CLEANUP-191: in the CARDS tab, done cards stay hidden by default behind a visible

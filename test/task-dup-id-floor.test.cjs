@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 /**
  * TASKS-DUP-ID-LOOP (2026-10-01): tasks.json held two cards with id CHANGELOG-NOT-PACKAGED
