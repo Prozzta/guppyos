@@ -131,6 +131,25 @@ export function linkMail(m: LinkableMail, ctx: LinkContext): MailLink {
 }
 
 /**
+ * MAILCARD-CATCHUP-RACE: true when the message's reply chain, walked as linkMail walks it, reaches
+ * an ancestor the context does not know before any ancestor settles it (one carded ancestor, or a
+ * several-card one). Such a reply's link depends on mail not yet indexed.
+ */
+export function replyChainGap(m: LinkableMail, ctx: Pick<LinkContext, 'linkOf'>): boolean {
+  const seen = new Set<string>([m.id]);
+  let cur = typeof m.in_reply_to === 'string' ? m.in_reply_to : null;
+  for (let i = 0; cur && i < MAIL_CARD_REPLY_HOPS && !seen.has(cur); i++) {
+    seen.add(cur);
+    const parent = ctx.linkOf(cur);
+    if (!parent) return true;
+    if (INHERITED.has(parent.method) && parent.cards.length === 1) return false;
+    if (parent.cards.length > 1) return false;
+    cur = typeof parent.in_reply_to === 'string' ? parent.in_reply_to : null;
+  }
+  return false;
+}
+
+/**
  * Registry card ids named in a text: every word (letters, digits, `.`, `_`, `-`; edge punctuation
  * trimmed) that equals a registry card id, case-insensitive. Only registry ids count; no word is
  * taken for a card by its shape. A registry id with no `-` or `.` in it (F1, M1, T1, TE0) is not
@@ -189,6 +208,11 @@ export function cardFileName(card: string): string | null {
 export class MailCardIndex {
   private links: Map<string, MailLinkRecord> | null = null;
   private convCards = new Map<string, Set<string>>();
+  /** MAILCARD-CATCHUP-RACE (god 0a79ca): open startup catch-ups over this index. */
+  private catchUps = 0;
+  /** Live records held while a catch-up runs, in arrival order (see defer). */
+  private deferred: Array<{ id: string; entries: () => { link: MailLinkRecord; rows: MailCardRow[] } | null }> = [];
+  private deferredIds = new Set<string>();
 
   constructor(readonly hiveRoot: string) {}
 
@@ -221,6 +245,47 @@ export class MailCardIndex {
   linkOf(mailId: string): MailLinkRecord | null { return this.load().get(mailId) ?? null; }
   conversationCards(conversation: string): string[] { this.load(); return [...(this.convCards.get(conversation) ?? [])]; }
   get size(): number { return this.load().size; }
+
+  /** True while a startup catch-up writes through this index. */
+  get catchingUp(): boolean { return this.catchUps > 0; }
+  /** True when a live record of this id waits for the catch-up to settle (the catch-up skips it). */
+  isDeferred(mailId: string): boolean { return this.deferredIds.has(mailId); }
+  beginCatchUp(): void { this.catchUps++; }
+
+  /**
+   * MAILCARD-CATCHUP-RACE: a live record that arrives while a catch-up runs waits, in arrival order,
+   * and is recorded once the catch-up settled. So its link is decided against the whole caught-up
+   * index (a reply finds a parent the catch-up has not reached yet), and the rows keep their order:
+   * the older mail the catch-up records first, then the live mail as it arrived. `entries` builds the
+   * record at settle time (null records nothing). An id already waiting is not queued twice.
+   */
+  defer(mailId: string, entries: () => { link: MailLinkRecord; rows: MailCardRow[] } | null): void {
+    if (this.deferredIds.has(mailId)) return;
+    this.deferredIds.add(mailId);
+    this.deferred.push({ id: mailId, entries });
+  }
+
+  /**
+   * Close one catch-up; when it was the last one open, record every waiting live record in arrival
+   * order, append-only (an id already recorded appends nothing; one that fails is counted and the
+   * rest still go). Returns what it applied.
+   */
+  endCatchUp(): { queued: number; recorded: number; failed: number } {
+    if (this.catchUps > 0) this.catchUps--;
+    const out = { queued: 0, recorded: 0, failed: 0 };
+    if (this.catchUps > 0) return out;
+    const queue = this.deferred;
+    this.deferred = [];
+    for (const d of queue) {
+      out.queued++;
+      try {
+        const e = d.entries();
+        if (e && this.record(e.link, e.rows)) out.recorded++;
+      } catch { out.failed++; }
+      this.deferredIds.delete(d.id);
+    }
+    return out;
+  }
 
   /**
    * Record one message: its rows (one per delivered copy, into each linked card's file), then its
@@ -325,6 +390,8 @@ export interface MailCardBackfillCounts {
   weak: number;
   /** Mails with a trusted link (TRUSTED_METHODS), the coverage numerator. */
   covered: number;
+  /** Live mails the router holds for this catch-up's settle (MAILCARD-CATCHUP-RACE): skipped here. */
+  deferred: number;
 }
 
 type SentKey = string;
@@ -470,12 +537,14 @@ export function* backfillMailCardSteps(hiveRoot: string, now: string, index: Mai
     linkOf: (id) => linked.get(id) ?? index.linkOf(id),
     conversationCards: (c) => [...(conv.get(c) ?? [])],
   }, cardIds);
-  const counts: MailCardBackfillCounts = { mails: mails.length, recorded: 0, already: 0, byMethod: {}, byAct: {}, byFrom: {}, byTrust: {}, excluded, unlinked: [], weak: 0, covered: 0 };
+  const counts: MailCardBackfillCounts = { mails: mails.length, recorded: 0, already: 0, byMethod: {}, byAct: {}, byFrom: {}, byTrust: {}, excluded, unlinked: [], weak: 0, covered: 0, deferred: 0 };
   const bump = (o: Record<string, Record<string, number>>, k: string, method: string): void => { const r = (o[k] = o[k] ?? {}); r[method] = (r[method] ?? 0) + 1; };
   const order = [...mails].sort((a, b) => (a.created_at ?? '').localeCompare(b.created_at ?? '') || a.id.localeCompare(b.id));
   let n = 0;
   for (const m of order) {
     if (n++ % CATCHUP_SLICE === CATCHUP_SLICE - 1) yield;
+    // A live mail delivered during this catch-up is the router's: it is recorded once, at settle.
+    if (index.isDeferred(m.id)) { counts.deferred++; continue; }
     const prior = index.linkOf(m.id);
     const link: MailLink = prior ? { cards: prior.cards, method: prior.method } : linkMail(m, ctx);
     const { link: rec, rows } = indexEntries(m, link, m.trust, m.copies, now);
@@ -498,6 +567,8 @@ export function* backfillMailCardSteps(hiveRoot: string, now: string, index: Mai
 /** The log row of one startup catch-up (counts), and of one that failed. */
 export const MAILCARDS_BACKFILL_ROW = 'mailcards-backfill';
 export const MAILCARDS_BACKFILL_FAILED_ROW = 'mailcards-backfill-failed';
+/** The log row of the live records a catch-up held and then recorded (MAILCARD-CATCHUP-RACE). */
+export const MAILCARDS_DEFERRED_ROW = 'mailcards-deferred';
 
 export interface MailCardCatchUpDeps {
   log: (row: Record<string, unknown>) => void;
@@ -521,8 +592,11 @@ export async function startupMailCardCatchUp(hiveRoot: string, d: MailCardCatchU
   const pause = d.pause ?? (() => new Promise<void>((r) => setImmediate(r)));
   const t0 = Date.now();
   let steps = 0;
+  const index = d.index ?? new MailCardIndex(hiveRoot);
+  // MAILCARD-CATCHUP-RACE: the router holds its live records until this settles (success or failure).
+  index.beginCatchUp();
   try {
-    const g = backfillMailCardSteps(hiveRoot, (d.now ?? (() => new Date().toISOString()))(), d.index ?? new MailCardIndex(hiveRoot));
+    const g = backfillMailCardSteps(hiveRoot, (d.now ?? (() => new Date().toISOString()))(), index);
     for (;;) {
       const r = g.next();
       if (r.done) {
@@ -536,6 +610,12 @@ export async function startupMailCardCatchUp(hiveRoot: string, d: MailCardCatchU
   } catch (e) {
     d.log({ kind: MAILCARDS_BACKFILL_FAILED_ROW, error: String(e).slice(0, 200), steps, ms: Date.now() - t0 });
     return null;
+  } finally {
+    // Never throws: the held live records are recorded, then their count is logged.
+    try {
+      const s = index.endCatchUp();
+      if (s.queued) d.log({ kind: MAILCARDS_DEFERRED_ROW, ...s });
+    } catch { /* the settle never fails the catch-up */ }
   }
 }
 

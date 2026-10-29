@@ -28,7 +28,7 @@ import { basename, join, dirname, isAbsolute, win32, posix } from 'node:path';
 import { homedir } from 'node:os';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { AppendFile, LOG_KEEP_ROTATED, rotatedFiles } from './appendLog';
-import { MailCardIndex, NO_CARD, indexEntries, indexLinkContext, isNoCard, linkMail, TRUSTED_METHODS, type MailLink } from './mailCards';
+import { MailCardIndex, NO_CARD, indexEntries, indexLinkContext, isNoCard, linkMail, replyChainGap, TRUSTED_METHODS, type LinkContext, type MailLink } from './mailCards';
 import { atomicWriteJson as atomicWriteJsonFile, atomicWriteJsonAsync } from './atomicJson';
 import { ASK_BACKSTOP_MS, ASK_CLOSE_REASON_MAX, MailLedger, answeredByMessage, cardIdValue, freshMailId, isValidMailId, owesWork, replyTracked, staleObligations, supersededByMessage, type CardEvidence, type MailLedgerDoc, type ReleaseRun, type StaleObligation } from './mailLedger';
 import { mailObligationsView, type MailObligationsAgent } from './mailReaders';
@@ -2993,30 +2993,42 @@ export class HiveManager {
    * cards yet requires none.
    * An index failure never blocks mail (null: routed unlinked, logged).
    */
-  private linkCard(msg: HiveMessage, reg: Registry, godId: string): MailLink | 'bounced' | null {
+  /** The router's link context over `index`: the index, then a parent's MailLedger entry. */
+  private mailLinkContext(index: MailCardIndex, reg: Registry): { ctx: LinkContext; cardIds: string[] } {
+    const cardIds = (this.allTasks().tasks as Array<{ id?: unknown }>).map((t) => t?.id).filter((id): id is string => typeof id === 'string' && cardIdValue(id) === id && !isNoCard(id));
+    const ctx = indexLinkContext(index, cardIds);
+    const linkOf = ctx.linkOf;
+    ctx.linkOf = (id) => {
+      const rec = linkOf(id);
+      if (rec) return rec;
+      // A parent older than the index: its MailLedger entry (main-written), never an inbox file,
+      // so a file written straight into an inbox cannot lend its card to a reply.
+      for (const agent of Object.keys(reg.agents)) {
+        const parent = this.mail.ledger(agent).entries[id];
+        if (!parent) continue;
+        const own = cardIdValue(parent.cardId);
+        const card = own ? ctx.cardOf(own) : null;
+        return { cards: card ? [card] : [], method: card ? 'field' : 'none', in_reply_to: parent.inReplyTo ?? null };
+      }
+      return null;
+    };
+    return { ctx, cardIds };
+  }
+
+  private linkCard(msg: HiveMessage, reg: Registry, godId: string): MailLink | 'bounced' | 'deferred' | null {
     let link: MailLink;
     let cardIds: string[];
     try {
       const index = this.mailCards();
       if (!index) return null;
-      cardIds = (this.allTasks().tasks as Array<{ id?: unknown }>).map((t) => t?.id).filter((id): id is string => typeof id === 'string' && cardIdValue(id) === id && !isNoCard(id));
-      const ctx = indexLinkContext(index, cardIds);
-      const linkOf = ctx.linkOf;
-      ctx.linkOf = (id) => {
-        const rec = linkOf(id);
-        if (rec) return rec;
-        // A parent older than the index: its MailLedger entry (main-written), never an inbox file,
-        // so a file written straight into an inbox cannot lend its card to a reply.
-        for (const agent of Object.keys(reg.agents)) {
-          const parent = this.mail.ledger(agent).entries[id];
-          if (!parent) continue;
-          const own = cardIdValue(parent.cardId);
-          const card = own ? ctx.cardOf(own) : null;
-          return { cards: card ? [card] : [], method: card ? 'field' : 'none', in_reply_to: parent.inReplyTo ?? null };
-        }
-        return null;
-      };
-      link = linkMail(msg, ctx);
+      const lc = this.mailLinkContext(index, reg);
+      cardIds = lc.cardIds;
+      link = linkMail(msg, lc.ctx);
+      // MAILCARD-CATCHUP-RACE (god 0a79ca): while the startup catch-up runs, a reply whose chain
+      // reaches a parent neither the index nor a MailLedger holds yet is not judged now: it is
+      // delivered as written (no card set, never bounced) and linked once the catch-up settled
+      // (indexMail holds it). Its own card field, or an explicit "none", settles it at once.
+      if (index.catchingUp && link.method !== 'field' && link.method !== 'reply' && !isNoCard(msg.card) && replyChainGap(msg, lc.ctx)) return 'deferred';
     } catch (e) {
       try { this.appendLog({ kind: 'mail-card-error', id: msg.id, op: 'link', error: String(e) }); } catch { /* noop */ }
       return null;
@@ -3050,14 +3062,34 @@ export class HiveManager {
     return 'bounced';
   }
 
-  /** C90-MAILCARD: record a routed message and its delivered copies in the per-card mail index. */
-  private indexMail(msg: HiveMessage, link: MailLink, delivered: readonly string[]): void {
+  /**
+   * C90-MAILCARD: record a routed message and its delivered copies in the per-card mail index.
+   * MAILCARD-CATCHUP-RACE: while the startup catch-up runs, every record waits in arrival order and
+   * is written once it settled (MailCardIndex.defer); a 'deferred' link is decided then, against the
+   * caught-up index. The delivery time is the routing time either way.
+   */
+  private indexMail(msg: HiveMessage, link: MailLink | 'deferred', delivered: readonly string[]): void {
     try {
       const index = this.mailCards();
       if (!index) return;
       const now = Date.now();
-      const { link: rec, rows } = indexEntries(msg, link, 'delivery', delivered.map((to) => ({ to, deliveredAt: now })), new Date(now).toISOString());
-      index.record(rec, rows);
+      const copies = delivered.map((to) => ({ to, deliveredAt: now }));
+      const at = new Date(now).toISOString();
+      const snap: HiveMessage = { ...msg };
+      const entries = (): ReturnType<typeof indexEntries> | null => {
+        let l: MailLink;
+        if (link !== 'deferred') l = link;
+        else {
+          try { l = linkMail(snap, this.mailLinkContext(index, this.registry()).ctx); } catch (e) {
+            try { this.appendLog({ kind: 'mail-card-error', id: snap.id, op: 'link', error: String(e) }); } catch { /* noop */ }
+            return null;
+          }
+        }
+        return indexEntries(snap, l, 'delivery', copies, at);
+      };
+      if (index.catchingUp) { index.defer(msg.id, entries); return; }
+      const e = entries();
+      if (e) index.record(e.link, e.rows);
     } catch (e) {
       try { this.appendLog({ kind: 'mail-card-error', id: msg.id, op: 'index', error: String(e) }); } catch { /* noop */ }
     }

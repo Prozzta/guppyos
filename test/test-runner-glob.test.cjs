@@ -756,7 +756,9 @@ test('PIN: against the REAL test directory discovery is root tests plus only fol
   // CLAIMS-90 round 9 (god a77298): + 1 (claims90-r9).
   // CLAIMS-90 round 10, Jim's gate (f8c1d8): + 1 (claims90-r10b).
   // BARE-NODE-TEST-NO-OWNER: + 1 (bare-node-test-owner), + 1 (own-job-guard).
-  assert.equal(files.length, 557,`the focused suite must retain its pre-fold file count, got ${files.length}`);
+  // MAILCARD-CATCHUP-RACE (god 0a79ca): + 1 (claims90-mailcard-race).
+  // INT 1.1.103: both of the above, + 1 (claims-sync-slice-apply).
+  assert.equal(files.length, 559,`the focused suite must retain its pre-fold file count, got ${files.length}`);
   assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
   assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');
   assert.ok(files.includes(path.join('start-fixes-163', 'start-fixes-163-boot-submit.test.cjs')), 'the start-fixes feature folder is included');
