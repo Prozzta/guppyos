@@ -467,14 +467,20 @@ export class NativeMemoryStore {
     return { wing, add, drop: [...drop], status: st, rooms };
   }
 
-  /** Apply a claim plan with the embeddings of `plan.add` (same order), atomically. */
-  applyClaims(sourcePath: string, plan: ClaimPlan, embeddings: Float32Array[], meta: { head: string; nowMs: number; manifestVersion: number; embedVersion?: number }): void {
+  /** Apply a claim plan with the embeddings of `plan.add` (same order), atomically.
+   *  CLAIMS-SYNC-SLICE-APPLY `partial`: one slice of a larger sync. Its rows land and search sees them
+   *  (bumpGeneration), but the head row is not written (the source row exists for the chunks' key
+   *  with an empty sha until the final apply) and the embed-version meta is set only when the wing
+   *  had no claims before (a fresh wing's vectors are all of this recipe; a re-embed of an older
+   *  wing marks the recipe in its final apply, so a crash mid-way re-embeds it whole next time). */
+  applyClaims(sourcePath: string, plan: ClaimPlan, embeddings: Float32Array[], meta: { head: string; nowMs: number; manifestVersion: number; embedVersion?: number }, opts: { partial?: boolean } = {}): void {
     if (embeddings.length !== plan.add.length) throw new Error('applyClaims: embeddings/add length mismatch');
     this.db.transaction(() => {
+      const fresh = !this.db.prepare('SELECT 1 FROM claims WHERE wing = ? LIMIT 1').get(plan.wing);
       this.db.prepare(`INSERT INTO sources(source_id, path, sha256, allowed_kind, wing, room, mtime_ms, bytes, indexed_at, manifest_version)
         VALUES (@p, @p, @sha, 'claims', @wing, 'claims', @now, 0, @now, @mv)
         ON CONFLICT(source_id) DO UPDATE SET sha256 = excluded.sha256, indexed_at = excluded.indexed_at, manifest_version = excluded.manifest_version`)
-        .run({ p: sourcePath, sha: meta.head, wing: plan.wing, now: meta.nowMs, mv: meta.manifestVersion });
+        .run({ p: sourcePath, sha: opts.partial ? '' : meta.head, wing: plan.wing, now: meta.nowMs, mv: meta.manifestVersion });
       for (const id of plan.drop) this.dropClaim(id);
       let ord = ((this.db.prepare('SELECT max(ordinal) AS m FROM chunks WHERE source_id = ?').get(sourcePath) as { m: number | null }).m ?? -1) + 1;
       const insClaim = this.db.prepare('INSERT INTO claims(claim_id, part, wing, kind, ckey, at, content, content_sha256) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
@@ -498,7 +504,7 @@ export class NativeMemoryStore {
       const setRoom = this.db.prepare('UPDATE chunks SET room = ? WHERE claim_id = ?');
       for (const r of plan.rooms ?? []) setRoom.run(r.room, r.claimId);
       // The wing's vectors are now all of this recipe (in the same transaction as the re-embed).
-      if (meta.embedVersion !== undefined) this.setMeta(claimEmbedVersionKey(plan.wing), String(meta.embedVersion));
+      if (meta.embedVersion !== undefined && (!opts.partial || fresh)) this.setMeta(claimEmbedVersionKey(plan.wing), String(meta.embedVersion));
       if (plan.add.length || plan.drop.length || plan.status.length || plan.rooms?.length) this.bumpGeneration();
     }).immediate();
   }
