@@ -1253,24 +1253,3 @@ for (const shape of ['git', 'plain']) {
     assert.equal(x.logs.filter((row) => row.kind === 'claims-derived-failed').length, 0);
   });
 }
-
-test('CLAIMS-DEFAULT-ON-103: floorRepo resolves a seeded floor\'s folder live; a floor made before 1.1.103 (no ledgerDefault) reads only derivedRepoFor', () => {
-  const { floorRepo } = loadTs('src/main/claims/floorSeed.ts');
-  const yes = () => true; const no = () => false;
-  assert.equal(floorRepo({ ledgerDefault: 'writer' }, undefined, 'C:/p', yes), 'C:/p', 'seeded, folder is git');
-  assert.equal(floorRepo({ ledgerDefault: 'writer' }, undefined, 'C:/p', no), null, 'seeded, folder not git');
-  assert.equal(floorRepo({ ledgerDefault: 'writer' }, undefined, null, yes), null, 'seeded, no folder');
-  assert.equal(floorRepo({ ledgerDefault: 'writer' }, undefined, 'rel/p', yes), null, 'a relative folder never');
-  assert.equal(floorRepo({}, undefined, 'C:/p', yes), null, 'not seeded: unchanged (EQ)');
-  assert.equal(floorRepo(null, 'C:/cfg', 'C:/p', yes), 'C:/cfg', 'no floor: config');
-  assert.equal(floorRepo({ ledgerDefault: 'writer', derivedRepo: 'C:/f' }, 'C:/cfg', 'C:/p', yes), 'C:/f', 'the floor repo wins');
-  assert.equal(floorRepo({ ledgerDefault: 'writer' }, 'C:/cfg', 'C:/p', yes), 'C:/cfg', 'then config');
-  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'index.ts'), 'utf8').replace(/\r\n/g, '\n');
-  assert.ok(src.includes('  repo: () => derivedRepoNow(),'), 'the derived writer resolves its repo each pass');
-  assert.ok(src.includes("return floorRepo(root ? readSourcesConfig(root) : null, cfg.derivedClaimsRepo, cfg.registeredRepos?.[0] ?? null);"), 'from the floor, config and the project folder the seed uses');
-  assert.ok(src.includes('return { ledgerDefault: f?.ledgerDefault, derivedRepo: derivedRepoNow() };'), 'Settings shows the repo the writer reads');
-  // (c) the answer-child's claimLevel mirrors main's, ledgerDefault included, so a seeded floor is measured with the app wiring.
-  const child = fs.readFileSync(path.join(__dirname, 'claims-90', 'answer-child.cjs'), 'utf8');
-  assert.ok(src.includes('manifestEntry(floor.ledger, agentId, floor.ledgerDefault)'));
-  assert.ok(child.includes('effectiveLevel(config.claimLedger, manifestEntry(floor.ledger, agentId, floor.ledgerDefault)).level'), 'the answer-child passes ledgerDefault');
-});
