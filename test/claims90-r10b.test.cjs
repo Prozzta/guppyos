@@ -351,10 +351,11 @@ test('re-gate must A git: DerivedGit.branchesContaining names the guppy branches
   g(['update-ref', 'refs/heads/guppy/abc-12', three]);
   g(['update-ref', 'refs/heads/guppy/loc-5', three]);
   g(['update-ref', 'refs/heads/other/zz-1', three]);
+  g(['update-ref', 'refs/heads/release-1.2', two]);
   const dg = new G.DerivedGit(repo);
-  assert.deepEqual([...await dg.branchesContaining(one)].sort(), ['guppy/abc-12', 'guppy/loc-5']);
+  assert.deepEqual([...await dg.branchesContaining(one)].sort(), ['guppy/abc-12', 'guppy/loc-5', 'main', 'release-1.2'], 'must C: a line holding it is named by its plain name');
   assert.deepEqual([...await dg.branchesContaining(three)], ['guppy/loc-5'], 'a local copy behind origin\'s is not the branch; non-guppy refs never count');
-  assert.deepEqual([...await dg.branchesContaining(two)], ['guppy/abc-12']);
+  assert.deepEqual([...await dg.branchesContaining(two)].sort(), ['guppy/abc-12', 'release-1.2']);
   assert.equal(await dg.branchesContaining('f'.repeat(40)), null, 'a missing commit: git cannot say');
 });
 
@@ -409,4 +410,121 @@ test('re-gate must A: the pairing check asks git once per distinct sha (110 card
   assert.ok(contains <= distinct, `one containment call per distinct sha at most (${contains})`);
   assert.ok(mergeBase <= distinct, `MUTANT must A: a merge-base per board card branch (${mergeBase})`);
   assert.ok(calls.length <= 4 * distinct + 10, `git calls stay a small constant per distinct sha (${calls.length})`);
+});
+
+// ———————————————————————————————————————————————————————————— re-gate musts C-E (Jim 852664, 439873)
+
+/** A MIRROR-shaped repo (Jim 439873: the jail is a mirror clone, refs/heads only, no remotes) with helpers. */
+const { execFileSync } = require('node:child_process');
+let tick = 1700000000;
+function mirrorRepo(name) {
+  const repo = path.join(JAIL, name);
+  fs.mkdirSync(repo, { recursive: true });
+  let n = 0;
+  const g = (...args) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false', ...args], { cwd: repo, encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_DATE: `${tick} +0000`, GIT_COMMITTER_DATE: `${tick++} +0000` }, stdio: ['pipe', 'pipe', 'ignore'] }).trim();
+  const commit = (msg, file = `src/main/f${n++}.ts`) => { fs.mkdirSync(path.dirname(path.join(repo, file)), { recursive: true }); fs.writeFileSync(path.join(repo, file), `${msg} ${tick}`); g('add', file); g('commit', '-q', '-m', msg); return g('rev-parse', 'HEAD'); };
+  const on = (b, from) => g('switch', '-q', '-C', b, from);
+  const merge = (b, msg) => { g('merge', '-q', '--no-ff', '-m', msg, b); return g('rev-parse', 'HEAD'); };
+  /** Three card branches cut from `from` after its merges, each with its own commit. */
+  const later = (from) => { for (const b of ['later-a-1', 'later-b-2', 'later-c-3']) { on(`guppy/${b}`, from); commit(`${b.toUpperCase()}: work`); } };
+  g('init', '-q', '-b', 'main'); commit('base', 'f.txt');
+  return { repo, g, commit, on, merge, later };
+}
+const LATER = ['LATER-A-1', 'LATER-B-2', 'LATER-C-3'];
+const s8 = (x) => x.slice(0, 8);
+const runReal = async (G, r, cards, ml, parent) => F.doneMailFacts([ml], cards, new G.DerivedGit(r.repo), { subjectOf: (id) => (parent && id === parent.id ? parent.subject : undefined) });
+
+test('re-gate must C: a commit a line holds is merged work, none of the later card branches\' own: the pairing stays fact; on another card\'s unmerged branch alone it is still ambiguous; Jim\'s C1/C2 rows stay fact', async () => {
+  const G = loadTs('src/main/claims/derivedGit.ts');
+  // The rule: WIDGET-TAB-7 @c, c a plain commit on a work branch merged into int-9.9.9; the card's own branch
+  // exists but lacks c; three card branches cut after the merge reach c.
+  let r = mirrorRepo('mc-rule');
+  r.on('guppy/work-w', 'main'); const c = r.commit('fix: harden the widget');
+  r.on('guppy/other-wing-5', 'main'); const o = r.commit('fix: the wing');
+  r.on('guppy/int-9.9.9', 'main'); r.merge('guppy/work-w', 'merge guppy/work-w into guppy/int-9.9.9');
+  r.later('guppy/int-9.9.9');
+  r.on('guppy/widget-tab-7', 'main'); r.commit('WIDGET-TAB-7: re-cut');
+  r.g('switch', '-q', 'main');
+  const CARDS = ['WIDGET-TAB-7', 'OTHER-WING-5', 'INT-9.9.9', ...LATER];
+  let res = await runReal(G, r, CARDS, mail('mc-a', `WIDGET-TAB-7 @${s8(c)}: done`));
+  assert.equal(commitOf(res, slot('WIDGET-TAB-7', SAM)), c, 'MUTANT must C: a card branch cut after the merge claimed the merged commit');
+  // The hold still stands where it should: a plain commit only on another card's (unmerged) branch.
+  res = await runReal(G, r, CARDS, mail('mc-b', `WIDGET-TAB-7 @${s8(o)}: done`));
+  assert.deepEqual(res.skips, [{ mail: 'mc-b', reason: 'ambiguous', cards: ['WIDGET-TAB-7'] }], 'must 6 kept: another card\'s own commit contradicts the pair');
+
+  // C1 (field row; the own branch exists but lacks c; body: another card's int stage merge, its commits, a plain one).
+  r = mirrorRepo('mc-c1');
+  r.on('guppy/work-w', 'main'); r.commit('WIDGET-TAB-7: first step'); const c1 = r.commit('WIDGET-TAB-7: census M12 measurable, M13 anchor fixed');
+  r.on('guppy/other-positional-198', 'main'); const x = r.commit('OTHER-POSITIONAL-198: builtin delta');
+  r.on('guppy/other-guard', 'main'); const og1 = r.commit('OTHER-GUARD: one'); const og2 = r.commit('OTHER-GUARD: two');
+  r.on('guppy/plain-x', 'main'); const pl = r.commit('Normalize native probe environment scrub');
+  r.on('guppy/int-9.9.8', 'main'); r.merge('guppy/work-w', 'INT-9.9.8 stage 8: merge WIDGET-TAB-7');
+  const sm = r.merge('guppy/other-positional-198', `INT-9.9.8 stage 9: merge OTHER-POSITIONAL-198 builtin delta (guppy/other-positional-198 @${s8(x)}, tests)`);
+  r.later('guppy/int-9.9.8');
+  r.on('guppy/widget-tab-7', 'main'); r.commit('WIDGET-TAB-7: re-cut');
+  r.g('switch', '-q', 'main');
+  res = await runReal(G, r, ['WIDGET-TAB-7', 'OTHER-POSITIONAL-198', 'OTHER-GUARD', 'INT-9.9.8', ...LATER],
+    mail('mc-c1', `Re: WIDGET-TAB-7: pushed @${s8(c1)}, with the auditor; one limit needs your call`, { card: 'WIDGET-TAB-7', in_reply_to: 'req-c1', body: `Also: ${s8(sm)} ${s8(og1)} ${s8(og2)} ${s8(pl)}` }),
+    { id: 'req-c1', subject: 'Next: WIDGET-TAB-7 (yours, P2)' });
+  assert.equal(commitOf(res, slot('WIDGET-TAB-7', SAM)), c1, 'C1');
+
+  // C2 (reply row; m is the INT's own two-parent merge, "INT 9.9.9" spaced, no "into"; a second bare sha in the subject).
+  r = mirrorRepo('mc-c2');
+  r.on('guppy/other-rmw', 'main'); const sx = r.commit('test(config): drive the handlers');
+  r.on('guppy/other-read-cache', 'main'); const z = r.commit('OTHER-REG-CACHE: reg'); const b = r.commit('OTHER-READ-CACHE: stack tip');
+  r.on('guppy/other-tag', 'main'); const ot = r.commit('OTHER-TAG: tag');
+  r.on('guppy/int-9.9.9', 'main'); const pm = r.merge('guppy/other-tag', `INT 9.9.9: merge OTHER-TAG @${s8(ot)}`);
+  const p1 = r.merge('guppy/other-rmw', `INT 9.9.9: merge OTHER-RMW @${s8(sx)} (on OTHER-CACHE ${s8(z)})`);
+  const m = r.merge('guppy/other-read-cache', `INT 9.9.9: merge OTHER-READ-CACHE stack @${s8(b)} (OTHER-REG-CACHE ${s8(z)}, OTHER-READ-CACHE)`);
+  r.later('guppy/int-9.9.9');
+  r.g('switch', '-q', 'main'); const rn = r.commit('docs: release notes', 'docs/notes.md');
+  res = await runReal(G, r, ['INT-9.9.9', 'OTHER-RMW', 'OTHER-READ-CACHE', 'OTHER-REG-CACHE', 'OTHER-TAG', 'OTHER-CACHE', ...LATER],
+    mail('mc-c2', `INT-9.9.9 @${s8(m)}: PASS 0/0/0/1 (merges = auto-merge but the glob count 525; 7/7 survivors now killed by ${s8(sx)}; probe 19/19; 13 files green; NIT: a name)`,
+      { cards: ['INT-9.9.9'], in_reply_to: 'req-c2', body: `Read ${s8(pm)} ${s8(p1)} ${s8(z)} ${s8(b)} ${s8(ot)} ${s8(rn)}.` }),
+    { id: 'req-c2', subject: `Audit INT-9.9.9 @${s8(m)} (whole-INT), incl. the unaudited commits ${s8(z)}, ${s8(sx)}, ${s8(b)}` });
+  assert.equal(commitOf(res, slot('INT-9.9.9', SAM)), m, 'C2');
+});
+
+test('re-gate must D: reply-only done mails keep their sha: a bare subject sha that a body range p..c ends at is still the subject\'s report (D1); a plain fix on a differently named branch (D2)', async () => {
+  const G = loadTs('src/main/claims/derivedGit.ts');
+  let r = mirrorRepo('md-d1');
+  r.on('guppy/widget-tab-7', 'main'); const p = r.commit('WIDGET-TAB-7: the view'); const c = r.commit('WIDGET-TAB-7: link the ask (auditor delta SHOULD)');
+  r.on('guppy/int-9.9.9', 'main'); r.merge('guppy/widget-tab-7', 'merge guppy/widget-tab-7 into guppy/int-9.9.9');
+  r.later('guppy/int-9.9.9'); r.g('switch', '-q', 'main');
+  const CARDS = ['WIDGET-TAB-7', 'INT-9.9.9', ...LATER];
+  let res = await runReal(G, r, CARDS,
+    mail('md-d1', `WIDGET SHOULD fix ${s8(c)}: OK. Link only on the newest open ask of a BLOCKED card (x); tests 17/17; done`, { cards: ['WIDGET-TAB-7'], in_reply_to: 'req-d1', body: `Delta ${s8(p)}..${s8(c)} is View.tsx + review.ts + test. Fine.` }),
+    { id: 'req-d1', subject: `Spot-check WIDGET SHOULD fix @ ${s8(c)} (merged into int)` });
+  assert.equal(commitOf(res, slot('WIDGET-TAB-7', SAM)), c, 'MUTANT must D: the body range took the subject\'s own sha away (D1)');
+
+  r = mirrorRepo('md-d2');
+  r.on('guppy/related-run-sidecar', 'main'); r.commit('WIDGET-TAB-7: the run'); const p2 = r.commit('WIDGET-TAB-7: the sidecar'); const c2 = r.commit('fix: harden the related run sidecar');
+  r.on('guppy/int-9.9.9', 'main'); r.merge('guppy/related-run-sidecar', 'merge guppy/related-run-sidecar into guppy/int-9.9.9');
+  r.later('guppy/int-9.9.9'); r.g('switch', '-q', 'main');
+  res = await runReal(G, r, CARDS,
+    mail('md-d2', `WTK fix-up ${s8(c2)} re-check: PASS 0/0/0 (1 nit)`, { cards: ['WIDGET-TAB-7'], in_reply_to: 'req-d2', body: `Was ${s8(p2)}, now ${s8(c2)}.` }),
+    { id: 'req-d2', subject: `Re-check WTK fix-up @${s8(c2)} against your CHANGES 0/1/3` });
+  assert.equal(commitOf(res, slot('WIDGET-TAB-7', SAM)), c2, 'D2');
+});
+
+test('re-gate must E: the card\'s own commit the subject writes outranks a later body sha; a forward-looking body line ("Next: ... at <sha>") reports nothing', async () => {
+  const G = loadTs('src/main/claims/derivedGit.ts');
+  const r = mirrorRepo('me');
+  r.on('guppy/widget-tab-7', 'main'); const e1 = r.commit('WIDGET-TAB-7: delta one');
+  r.on('guppy/other-side', 'main'); const e2 = r.commit('fix: the other delta'); r.g('switch', '-q', 'main');
+  const CARDS = ['WIDGET-TAB-7', 'OTHER-SIDE-4'];
+  // Twin E (Jim's row): the subject's own-card sha against a later plain sha on a "Next:" line.
+  let res = await runReal(G, r, CARDS, mail('me-a', `WIDGET-TAB-7 delta ${s8(e1)}: PASS 0/1/0`, { body: `Checked the delta.\nNext: the OTHER delta at ${s8(e2)}` }));
+  assert.equal(commitOf(res, slot('WIDGET-TAB-7', SAM)), e1, 'E');
+  // The subject rule alone: a plain later sha on an ordinary body line still loses to the subject's own-card sha.
+  res = await runReal(G, r, CARDS, mail('me-b', `WIDGET-TAB-7 delta ${s8(e1)}: PASS 0/1/0`, { body: `Also touched ${s8(e2)}.` }));
+  assert.equal(commitOf(res, slot('WIDGET-TAB-7', SAM)), e1, 'MUTANT must E: a later body sha beat the subject\'s own-card sha');
+  // The forward-line rule alone: no subject sha; the "Next:" line's later sha is not reported.
+  res = await runReal(G, r, CARDS, mail('me-c', 'WIDGET-TAB-7: PASS 0/1/0', { body: `Fixed at ${s8(e1)}.\n- Next: the OTHER delta at ${s8(e2)}` }));
+  assert.equal(commitOf(res, slot('WIDGET-TAB-7', SAM)), e1, 'MUTANT must E: a forward-looking body line was read as a report');
+  // Not a forward line: "Next" inside a sentence.
+  assert.equal(F.FORWARD_LINE_RE.test('Next: the OTHER delta at abc1234'), true);
+  assert.equal(F.FORWARD_LINE_RE.test('TODO - rebase at abc1234'), true);
+  assert.equal(F.FORWARD_LINE_RE.test('The next delta landed at abc1234'), false);
+  assert.equal(F.FORWARD_LINE_RE.test('Nextcloud sync fixed at abc1234'), false);
 });

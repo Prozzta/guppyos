@@ -386,6 +386,9 @@ const DATE8 = /^(?:19|20)\d\d(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])$/;
 const shaLike = (s: string, at = false): boolean => /[0-9]/.test(s) && (/[a-f]/.test(s) || at || (s.length >= 8 && !DATE8.test(s)));
 
 /** `range.end`: which end of a written `a..b` the sha is; 'in' marks a commit of the range itself (F5). */
+/** A body line that names work still to come ("Next: ...", "Next up ...", "TODO: ..."), not a report (must E). */
+export const FORWARD_LINE_RE = /^\s*(?:[-*]\s*)?(?:next(?:\s+(?:up|step))?|to-?do|to do)\b\s*[:\-]/i;
+
 export interface ShaMention { sha: string; range?: { from: string; to: string; end: 'from' | 'to' | 'in' } }
 
 /** The sha-like words in text, in order, each once; `a..b` (or `a...b`) gives both ends, marked. */
@@ -1122,7 +1125,11 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
     if (seen.has(m.id)) continue;
     seen.add(m.id);
     if (m.act !== 'done') { skip(m.id, 'notDone'); continue; }
-    const mentions = [...shaMentions(m.subject), ...shaMentions(typeof m.body === 'string' ? m.body : '')];
+    // Re-gate must E (Jim 852664): a forward-looking body line ("Next: the other delta at <sha>") names work
+    // still to come, not a report: its shas are left out of the mail's commits and pairs.
+    const bodyLines = (typeof m.body === 'string' ? m.body.split(/\r?\n/) : []).filter((line) => !FORWARD_LINE_RE.test(line));
+    const subjectMentions = shaMentions(m.subject);
+    const mentions = [...subjectMentions, ...shaMentions(bodyLines.join('\n'))];
     // Round 10 (god a22191, F4): an @sha the subject shares with the subject of the mail it replies to is
     // QUOTED (the request's sha), not reported: it loses the subject-@sha priority and the mail's sha is the
     // existing rule over the commits it names (the latest in git order of the card's line), so an audit
@@ -1143,7 +1150,7 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
     // read like a subject pair for that card; quoted lines and the quoted parent's shas are left out, and a
     // sha the subject writes keeps the subject's word.
     const bodyPairs: Array<{ sha: string; name: string }> = [];
-    for (const line of typeof m.body === 'string' ? m.body.split(/\r?\n/) : []) {
+    for (const line of bodyLines) {
       if (/^\s*>/.test(line)) continue;
       for (const x of subjectAtShas(line)) {
         if (isQuoted(x.sha) || written.some((w) => w.sha === x.sha) || bodyPairs.some((b) => b.sha === x.sha)) continue;
@@ -1155,6 +1162,8 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
     const entries: ReportedCommit[] = [];
     const rangeOf = new Map<string, ShaMention['range']>();
     const resolved = new Map<string, ReportedCommit[]>();
+    /** The commits the SUBJECT's own sha words resolve to (must E). */
+    const inSubject = new Set<string>();
     // Round 10 (god a22191, F5): a written range A..B, when git can list it, reports the commits IN the
     // range (A itself is outside it), each resolved like a named commit and marked with the range; the
     // card's row keeps the ones naming the card, and B only when every commit of the range names it
@@ -1193,6 +1202,7 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
       if (!full || resolved.has(full)) continue;
       const rs = await resolveReported(full, git);
       resolved.set(full, rs);
+      if (subjectMentions.includes(x)) for (const r of rs) inSubject.add(r.commit);
       for (const r of rs) {
         if (entries.some((e) => e.commit === r.commit)) continue;
         entries.push(r);
@@ -1208,8 +1218,9 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
     }
     const atCommits = new Set(ats.flatMap((a) => (a.full ? [a.full] : [])));
     /** Round 10 (Jim's gate, must 6): whether an @sha paired with `card` by its own name holds: it does when
-     *  the repository lacks the commit, when the card's branch (guppy/<id>, origin first) reaches it, or when
-     *  no other card's branch does (taken as written); a commit on another card's branch alone contradicts it. */
+     *  the repository lacks the commit, when the card's branch (guppy/<id>, origin first) reaches it, when a
+     *  line holds it (merged work, must C), or when no other card's branch does (taken as written); a commit
+     *  on another card's branch alone contradicts it. */
     const branchTip = async (c: string): Promise<string | null> => (git.refCommit ? await git.refCommit(`guppy/${c.toLowerCase()}`) : null);
     const pairOk = async (card: string, a: { full?: string }): Promise<boolean> => {
       if (!a.full) return true;
@@ -1219,6 +1230,11 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
       if (on) {
         const branchOf = (c: string): string => `guppy/${c.toLowerCase()}`;
         if (on.has(branchOf(card))) return true;
+        // Re-gate must C (Jim 852664): another card's claim needs the commit among that card's OWN commits. A
+        // commit a line already holds (an int or release line, main, a release-* branch) is merged work: every
+        // card branch cut after the merge reaches it, yet it is none of theirs, so no branch hold applies.
+        const line = (n: string): boolean => !n.startsWith('guppy/') || isIntCard(n.slice(6)) || isReleaseCard(n.slice(6));
+        if ([...on].some(line)) return true;
         return !cardIds.some((other) => other !== card && !isIntCard(other) && !isReleaseCard(other) && on.has(branchOf(other)));
       }
       const own = await branchTip(card);
@@ -1244,7 +1260,9 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
       return (e) => {
         const r = rangeOf.get(e.commit);
         const range = r && r.end !== 'from' ? ranges.get(rangeKey(r)) : undefined;
-        if (!r) return ranges.size === 0 || atCommits.has(e.commit);
+        // Re-gate must D (Jim 852664, D1): a commit the SUBJECT writes, bare or as @sha, is reported by the
+        // subject itself; a body range ending at it does not take it away.
+        if (!r) return ranges.size === 0 || atCommits.has(e.commit) || inSubject.has(e.commit);
         if (!range) return true;
         if (!names(e)) return false;
         return r.end === 'to' ? range.members.every(names) : true;
@@ -1292,7 +1310,11 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
     const ownOrNone = (card: string) => (e: ReportedCommit): boolean => !foreign(e, card).length || namesOf(e).cards.includes(card);
     const fallbackOf = async (card: string, kept: readonly ReportedCommit[]): Promise<ReportedCommit[]> => {
       const clean = namedRow(card) ? kept.filter(ownOrNone(card)) : [];
-      const pool = clean.length ? clean : kept;
+      // Re-gate must E: a sha the subject writes that is the card's own commit (its subject names the card)
+      // outranks a body sha, however late that one is in git order: the pool is then the subject's commits.
+      const base = clean.length ? clean : kept;
+      const subjectOwn = base.some((e) => inSubject.has(e.commit) && namesOf(e).cards.includes(card));
+      const pool = subjectOwn ? base.filter((e) => inSubject.has(e.commit)) : base;
       const latest = await latestOfCommits(pool.map((e) => e.commit), git);
       return pool.filter((e) => e.commit === latest);
     };

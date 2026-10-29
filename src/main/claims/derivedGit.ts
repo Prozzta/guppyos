@@ -10,6 +10,9 @@ import { execFile, spawn } from 'node:child_process';
 import { isDocFile } from './derivedFacts';
 import type { GitLogPort, TagLike } from './derivedFacts';
 
+/** The mainline refs (local and origin's) that branchesContaining reports beside the guppy branches. */
+const LINE_REFS = ['refs/heads/main', 'refs/heads/master', 'refs/heads/release-*', 'refs/remotes/origin/main', 'refs/remotes/origin/master', 'refs/remotes/origin/release-*'];
+
 /** A whole N.N.N version token (9.9.9, 9.9.10), never a part of a longer dotted number (1.9.9.9). */
 const VERSION_TOKEN_RE = /(?<![0-9]\.?)[0-9]+\.[0-9]+\.[0-9]+(?!\.?[0-9])/g;
 
@@ -238,18 +241,19 @@ export class DerivedGit implements GitLogPort {
   /** Round 10 re-gate (Jim 42dc40, must A): the guppy/<id> branch names whose tip (origin's copy first, the
    *  same ref refCommit gives) reaches `commit`, or null when git cannot say. ONE for-each-ref --contains per
    *  distinct commit, cached, over the guppy branches local and remote: the pairing check is then a set
-   *  lookup, never one merge-base per board card. */
+   *  lookup, never one merge-base per board card. Must C (Jim 852664): the same call names the lines that
+   *  hold it too (main, master, release-*), by their plain name, so a merged commit is told apart. */
   async branchesContaining(commit: string): Promise<Set<string> | null> {
     if (!this.containing.has(commit)) {
       await this.refCommit('guppy/');
       const refs = this.refs ?? new Map<string, string>();
-      const r = await git(this.repo, ['for-each-ref', '--contains', commit, '--format=%(refname)', 'refs/heads/guppy', 'refs/remotes/origin/guppy'], this.o);
+      const r = await git(this.repo, ['for-each-ref', '--contains', commit, '--format=%(refname)', 'refs/heads/guppy', 'refs/remotes/origin/guppy', ...LINE_REFS], this.o);
       let out: Set<string> | null = null;
       if (r.code === 0) {
         out = new Set();
         for (const line of r.out.split('\n')) {
           const ref = line.trim();
-          const m = /^refs\/(?:heads|remotes\/origin)\/(guppy\/.+)$/.exec(ref);
+          const m = /^refs\/(?:heads|remotes\/origin)\/(guppy\/.+|main|master|release-[^/]+)$/.exec(ref);
           if (!m) continue;
           const preferred = refs.has(`refs/remotes/origin/${m[1]}`) ? `refs/remotes/origin/${m[1]}` : `refs/heads/${m[1]}`;
           if (ref === preferred) out.add(m[1]);
