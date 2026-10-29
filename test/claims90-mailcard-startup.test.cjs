@@ -165,7 +165,8 @@ test('the derived writer starts only once the catch-up settled, even a slowed on
   assert.deepEqual(seenAtStart, expected, 'MUTANT: the derived writer read a partial index (its ledger would depend on timing)');
   // a failed catch-up: the failure row, null, and the derived writer still starts
   const E = upgradedFloor(t, 'fail');
-  const broken = { linkOf: () => null, conversationCards: () => [], record: () => { throw new Error('disk full'); } };
+  // MAILCARD-CATCHUP-RACE adds the index's catch-up hooks (begin, deferred ids, settle) to the stub.
+  const broken = { linkOf: () => null, conversationCards: () => [], record: () => { throw new Error('disk full'); }, beginCatchUp: () => {}, isDeferred: () => false, endCatchUp: () => ({ queued: 0, recorded: 0, failed: 0 }) };
   const f = catchUp(E.root, { index: broken });
   let started = 0;
   await MC.startAfterMailCardCatchUp(f.promise, () => { started++; });
