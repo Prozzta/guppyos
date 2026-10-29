@@ -138,7 +138,10 @@ test('instructions still count: mail mode, role and the spawn-queue line change 
   assert.equal(hive.sessionPromptFingerprint({ ...WORKER, isAssistant: true }).variant, 'claude|inject|assistant');
 });
 
-const PIN_181_WORKER_INJECT = '165feeea0094cce3';
+// 1.1.103 DELIBERATELY moves this pin: protocol step 1 and the memory line name `memory get` (CLAIMS-90 R2,
+// 66b49cad), so every worker session rotates once on its first start after the 1.1.103 install (the
+// CHANGELOG says so); identity, memory, inbox and ledger are kept. The 1.1.81 value was '165feeea0094cce3'.
+const PIN_181_WORKER_INJECT = 'bb3ddc543d0b2332';
 
 test('LEGACY_175 table: 16 variants; 1.1.81 changes EVERY variant\'s instruction text (every session rotates once at the 1.1.81 install)', (t) => {
   // TRIPWIRE. If a later change edits the prompt's instructions, this fails: the install of that
