@@ -12,6 +12,9 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..', '..');
+const { recover, mutateFile, restoreFile, checkAnchors } = require('./mutant-runner-helper.cjs');
+recover(ROOT);
+if (process.argv.includes('--recover-only')) process.exit(0);
 const TEST = 'test/test-temp-hygiene.test.cjs';
 const PRELOAD = 'test/tools/temp-jail-preload.cjs';
 const RUNNER = 'test/tools/run-tests.cjs';
@@ -32,6 +35,7 @@ const MUTANTS = [
   ['M12 a root that cannot be removed is silent', RUNNER, "catch (e) { err(`[test-runner] the run's temp folders could not be removed", "catch (e) { (() => {})(`[test-runner] the run's temp folders could not be removed", /TEMP RUN: the root left behind is named/]
 ];
 
+checkAnchors(ROOT, MUTANTS.map(([name, file, from]) => ({ name, file, from })));
 const run = () => spawnSync(process.execPath, ['--test', TEST], { cwd: ROOT, encoding: 'utf8', windowsHide: true, timeout: 300_000 });
 if (run().status !== 0) {
   console.log(`BASELINE RED: ${TEST} fails unmutated, so no mutant proves anything.`);
@@ -53,10 +57,10 @@ for (const [name, rel, from, to, dies] of MUTANTS) {
   if (original.includes('\r\n')) mutated = mutated.replace(/\n/g, '\r\n');
   let r;
   try {
-    fs.writeFileSync(abs, mutated);
+    mutateFile(ROOT, abs, original, mutated);
     r = run();
   } finally {
-    fs.writeFileSync(abs, original);
+    restoreFile(ROOT, abs, original);
   }
   const named = dies.test(`${r.stdout}${r.stderr}`);
   const killed = r.status !== 0 && named;

@@ -12,6 +12,9 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..', '..');
+const { recover, mutateFile, restoreFile, checkAnchors } = require('./mutant-runner-helper.cjs');
+recover(ROOT);
+if (process.argv.includes('--recover-only')) process.exit(0);
 const TEST = 'test/wake-stale-loading-header-197.test.cjs';
 const SCREEN = 'src/shared/codexScreen.ts';
 const OWNER = 'src/main/automaticSubmit.ts';
@@ -32,6 +35,7 @@ const MUTANTS = [
   ['W2 the held recheck passes no latch', OWNER, 'deps.homeDir?.(), this.postHandoff.get(ptyId) === held.incarnation)', 'deps.homeDir?.())', WIRE]
 ];
 
+checkAnchors(ROOT, MUTANTS.map(([name, file, from]) => ({ name, file, from })));
 const run = () => spawnSync(process.execPath, ['--test', TEST], { cwd: ROOT, encoding: 'utf8', windowsHide: true, timeout: 300_000 });
 const base = run();
 if (base.status !== 0) {
@@ -53,10 +57,10 @@ for (const [name, rel, from, to, dies] of MUTANTS) {
   if (original.includes('\r\n')) mutated = mutated.replace(/\n/g, '\r\n');
   let r;
   try {
-    fs.writeFileSync(abs, mutated);
+    mutateFile(ROOT, abs, original, mutated);
     r = run();
   } finally {
-    fs.writeFileSync(abs, original);
+    restoreFile(ROOT, abs, original);
   }
   const named = dies.test(`${r.stdout}${r.stderr}`);
   const killed = r.status !== 0 && named;

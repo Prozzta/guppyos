@@ -1,4 +1,7 @@
 'use strict';
+// MUTANT-JOURNAL-GATE (god 5cc045/ed8032): this suite loads a file a census mutates in place (one load-ts never sees);
+// refuse a tree a killed census left mutated, before anything is read.
+require('./tools/mutant-runner-helper.cjs').gate(__filename);
 /**
  * LOAD-FLAKES-FOLLOWUPS (1.1.77; Jim's LOAD-FLAKES-176 audit, J-LF1..3, and the RPROF note).
  * Pure driver tests: the host's `call` is stubbed and the hold loops run on an injected clock, so

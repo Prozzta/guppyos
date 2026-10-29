@@ -15,6 +15,9 @@
  *
  * Single file: `node test/tools/run-tests.cjs app-shallow-selector`.
  */
+// MUTANT-JOURNAL-GATE (god 5cc045/ed8032): this suite loads a file a census mutates in place (one load-ts never sees);
+// refuse a tree a killed census left mutated, before anything is read.
+require('./tools/mutant-runner-helper.cjs').gate(__filename);
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');

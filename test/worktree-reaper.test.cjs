@@ -1,4 +1,7 @@
 'use strict';
+// MUTANT-JOURNAL-GATE (god 5cc045/ed8032): this suite loads a file a census mutates in place (one load-ts never sees);
+// refuse a tree a killed census left mutated, before anything is read.
+require('./tools/mutant-runner-helper.cjs').gate(__filename);
 // @heavy-lock live: sustained work: real git worktrees (about 41 s in the 1.1.91 FULL). HEAVY-LOCK-LIVE-FILE-192: one run of this file takes the heavy slot.
 /**
  * WORKTREE-REAPER (1.1.80 candidate): scripts/worktree-reaper.cjs.

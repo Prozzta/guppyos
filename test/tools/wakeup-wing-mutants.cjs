@@ -6,7 +6,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { recover, mutateFile, restoreFile } = require('./mutant-runner-helper.cjs');
+const { recover, mutateFile, restoreFile, checkAnchors } = require('./mutant-runner-helper.cjs');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const FILE = 'src/main/nativeMemory/mainWiring.ts';
@@ -17,6 +17,7 @@ const TO = 'this.claimWakeup?.(agentId)';
 recover(ROOT);
 if (process.argv.includes('--recover-only')) process.exit(0);
 
+checkAnchors(ROOT, [{ name: 'wake-up claims use selected wing', file: FILE, from: FROM }]);
 const run = () => spawnSync(process.execPath, ['--test', TEST], { cwd: ROOT, encoding: 'utf8', timeout: 300_000 });
 if (run().status !== 0) {
   console.log('BASELINE RED: the unmutated native-memory test fails, so this mutant proves nothing.');

@@ -1,4 +1,7 @@
 'use strict';
+// MUTANT-JOURNAL-GATE (god 5cc045/ed8032): this suite loads a file a census mutates in place (one load-ts never sees);
+// refuse a tree a killed census left mutated, before anything is read.
+require('./tools/mutant-runner-helper.cjs').gate(__filename);
 /**
  * TEST-GLOB-PID-RECYCLE (1.1.88): a test lists and kills only the processes it started.
  * test-runner-glob listed the Human's HWiNFO64.EXE (pid 20664) as a hung file's child, on

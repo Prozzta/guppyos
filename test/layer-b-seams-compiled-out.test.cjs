@@ -1,4 +1,7 @@
 'use strict';
+// MUTANT-JOURNAL-GATE (god 5cc045/ed8032): this suite loads a file a census mutates in place (one load-ts never sees);
+// refuse a tree a killed census left mutated, before anything is read.
+require('./tools/mutant-runner-helper.cjs').gate(__filename);
 /**
  * ZT-I1-MAIL 1.1.75 (god 4dd770 decision 1, Jim): the release check scripts/verify-packaged-no-seams.cjs
  * proves the SHIPPED app.asar has the layer-(b) seams compiled out. Tested on synthetic asars (both

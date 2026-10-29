@@ -11,6 +11,9 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..', '..');
+const { recover, mutateFile, restoreFile, checkAnchors } = require('./mutant-runner-helper.cjs');
+recover(ROOT);
+if (process.argv.includes('--recover-only')) process.exit(0);
 const TEST = 'test/owed-continuation-198.test.cjs';
 const OWED = 'src/main/owedContinuation.ts';
 const LEDGER = 'src/main/mailLedger.ts';
@@ -62,6 +65,7 @@ const MUTANTS = [
   ['M38 the nudge does not say how to close', OWED, 'If this is finished, reply done with in_reply_to <id>', 'Continue', /not ok \d+ - OWED PROTOCOL/]
 ];
 
+checkAnchors(ROOT, MUTANTS.map(([name, file, from]) => ({ name, file, from })));
 const run = () => spawnSync(process.execPath, ['--test', TEST], { cwd: ROOT, encoding: 'utf8', windowsHide: true, timeout: 300_000 });
 if (run().status !== 0) {
   console.log(`BASELINE RED: ${TEST} fails unmutated, so no mutant proves anything.`);
@@ -83,10 +87,10 @@ for (const [name, rel, from, to, dies] of MUTANTS) {
   if (original.includes('\r\n')) mutated = mutated.replace(/\n/g, '\r\n');
   let r;
   try {
-    fs.writeFileSync(abs, mutated);
+    mutateFile(ROOT, abs, original, mutated);
     r = run();
   } finally {
-    fs.writeFileSync(abs, original);
+    restoreFile(ROOT, abs, original);
   }
   const named = dies.test(`${r.stdout}${r.stderr}`);
   const killed = r.status !== 0 && named;

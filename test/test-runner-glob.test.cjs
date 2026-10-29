@@ -8,6 +8,9 @@
  * be able to look like a pass - plus a pin on the package.json script itself, which is
  * the only thing that stops the glob quietly coming back.
  */
+// MUTANT-JOURNAL-GATE (god 5cc045/ed8032): this suite loads a file a census mutates in place (one load-ts never sees);
+// refuse a tree a killed census left mutated, before anything is read.
+require('./tools/mutant-runner-helper.cjs').gate(__filename);
 const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('node:fs');
@@ -68,6 +71,73 @@ test('MUTANT-JOURNAL-GATE bare node --test (god 5b1c57, Jim NIT): load-ts refuse
   fs.rmSync(root, { recursive: true, force: true });
 });
 
+test('MUTANT-JOURNAL-GATE NIT 1 (god 9cb49c, Jim 967fa3): new-floor-knowhow and rebrand-internal-names-182 read resources/memory-cli.cjs without load-ts and refuse a tree where a dead census left it mutated, before they read anything; the helper journals resources/ and scripts/ and nothing else (MUTANT: a bare node --test of either suite reads the mutated CLI)', { timeout: 120_000 }, () => {
+  const { spawnSync } = require('node:child_process');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'c90-nit1-'));
+  for (const dir of ['resources', 'scripts', 'src', 'docs', path.join('test', 'tools')]) fs.mkdirSync(path.join(root, dir), { recursive: true });
+  const SUITES = ['test/new-floor-knowhow.test.cjs', 'test/rebrand-internal-names-182.test.cjs'];
+  for (const rel of [...SUITES, 'test/tools/mutant-runner-helper.cjs', 'test/tools/ps-env.cjs']) fs.copyFileSync(path.join(REPO, rel), path.join(root, rel));
+  const cli = path.join(root, 'resources', 'memory-cli.cjs');
+  const dead = { pid: 2147483000, start: '2026-10-25T15:23:08Z' };
+  const journal = (file, owner = dead) => fs.writeFileSync(helper.journalPath(root), JSON.stringify({ owner, records: [{ file, original: Buffer.from('const CLAIM_VERBS = new Set([]);').toString('base64') }] }), 'utf8');
+  const env = { ...process.env, NODE_PATH: path.join(REPO, 'node_modules'), MUTANT_RUNNER_PID: '' };
+  delete env.NODE_OPTIONS; delete env.NODE_TEST_CONTEXT;
+  const suite = (rel) => spawnSync(process.execPath, ['--test', rel], { cwd: root, encoding: 'utf8', timeout: 60_000, env });
+  for (const rel of SUITES) {
+    const gate = path.basename(rel);
+    fs.writeFileSync(cli, 'const CLAIM_VERBS = new Set(["mutant"]);', 'utf8');
+    journal(cli);
+    let r = suite(rel);
+    assert.notEqual(r.status, 0, `${rel}: MUTANT: the suite ran over the mutated CLI`);
+    assert.match(`${r.stdout}${r.stderr}`, new RegExp(`\\[${gate.replace(/\./g, '\\.')}\\] refusing to load mutated source: an interrupted mutant runner \\(pid 2147483000, dead\\) left mutated files behind; run: node test/tools/claims90-m1-mutants\\.cjs --recover-only\\. Journaled: resources[\\\\/]+memory-cli\\.cjs`), `${rel}: the refusal names the suite`);
+    assert.equal(fs.readFileSync(cli, 'utf8'), 'const CLAIM_VERBS = new Set(["mutant"]);', 'a suite restores nothing');
+    // (the reporter doubles a backslash in its # diagnostic lines, hence the one-or-more separator class).
+    // The gate comes before any read: with the journal recovered the same suite gets past it (and then misses its
+    // other fixtures in this bare tree, which is a different error).
+    const lines = [];
+    assert.equal(helper.recover(root, (l) => lines.push(l)), 1);
+    assert.deepEqual(lines, [`[mutant-runner] restored ${path.join('resources', 'memory-cli.cjs')} left mutated by an interrupted run (pid 2147483000)`]);
+    assert.equal(fs.readFileSync(cli, 'utf8'), 'const CLAIM_VERBS = new Set([]);');
+    r = suite(rel);
+    assert.doesNotMatch(`${r.stdout}${r.stderr}`, /mutated source/, `${rel}: no journal, no refusal`);
+    assert.match(`${r.stdout}${r.stderr}`, /ENOENT/, `${rel}: past the gate, the bare tree's missing fixture is the error`);
+  }
+  // The helper journals src/, resources/ and scripts/ and refuses anything else, in and out of the tree.
+  for (const file of [path.join(root, 'scripts', 'release-worktrees.cjs'), path.join(root, 'src', 'x.ts'), cli]) {
+    journal(file); assert.deepEqual(helper.journalState(root).files, [path.relative(root, file)]);
+  }
+  for (const file of [path.join(root, 'docs', 'x.md'), path.join(root, 'package.json'), path.join(os.tmpdir(), 'x.ts')]) {
+    journal(file); assert.throws(() => helper.journalState(root), /refusing mutant recovery path outside src\/, resources\/, scripts\//, file);
+    assert.throws(() => helper.mutateFile(root, file, 'a', 'b'), /refusing mutant recovery path/);
+  }
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('MUTANT-JOURNAL-GATE NIT 2 (god 9cb49c, Jim 967fa3): release-worktrees-mutants journals every mutant through the helper and recovers a killed run (--recover-only restores scripts/release-worktrees.cjs and says so) (MUTANT: the census writes the source directly, a killed row stays mutated with nothing to detect it)', { timeout: 60_000 }, () => {
+  const { spawnSync } = require('node:child_process');
+  const runner = 'test/tools/release-worktrees-mutants.cjs';
+  const src = fs.readFileSync(path.join(REPO, runner), 'utf8');
+  // The loop mutates and restores only through the helper (the finally cannot run after a kill; the journal can).
+  assert.doesNotMatch(src, /fs\.writeFileSync\(/, 'MUTANT: the census writes a source file itself');
+  assert.match(src, /\n {4}mutateFile\(ROOT, abs, original, mutated\);\r?\n {4}r = run\(\);\r?\n {2}\} finally \{\r?\n {4}restoreFile\(ROOT, abs, original\);/);
+  assert.match(src, /\nrecover\(ROOT\);\r?\nif \(process\.argv\.includes\('--recover-only'\)\) process\.exit\(0\);/, 'recover before the baseline, then the recover-only exit');
+  // A killed run: the journal names a dead owner and scripts/release-worktrees.cjs carries the mutant.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'c90-nit2-'));
+  fs.mkdirSync(path.join(root, 'scripts')); fs.mkdirSync(path.join(root, 'test', 'tools'), { recursive: true });
+  for (const rel of [runner, 'test/tools/mutant-runner-helper.cjs', 'test/tools/ps-env.cjs']) fs.copyFileSync(path.join(REPO, rel), path.join(root, rel));
+  const file = path.join(root, 'scripts', 'release-worktrees.cjs');
+  fs.writeFileSync(file, 'if (false) rotated = 1;\r\n', 'utf8');
+  fs.writeFileSync(helper.journalPath(root), JSON.stringify({ owner: { pid: 2147483000, start: '2026-10-25T15:23:08Z' }, records: [{ file, original: Buffer.from('if (newest) rotated = 1;\r\n').toString('base64') }] }), 'utf8');
+  const env = { ...process.env, MUTANT_RUNNER_PID: '' }; delete env.NODE_OPTIONS; delete env.NODE_TEST_CONTEXT;
+  const r = spawnSync(process.execPath, [runner, '--recover-only'], { cwd: root, encoding: 'utf8', timeout: 30_000, env });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, new RegExp(`^\\[mutant-runner\\] restored scripts[\\\\/]release-worktrees\\.cjs left mutated by an interrupted run \\(pid 2147483000\\)$`, 'm'), 'MUTANT: a killed run restored nothing or said nothing');
+  assert.equal(fs.readFileSync(file, 'utf8'), 'if (newest) rotated = 1;\r\n', 'the original bytes, CRLF kept');
+  assert.equal(fs.existsSync(helper.journalPath(root)), false);
+  assert.doesNotMatch(r.stdout, /BASELINE|KILLED|SURVIVED/, '--recover-only runs no census');
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
 test('MUTANT-JOURNAL-GATE (Jim 1b5d87/b0a10e): the runner refuses ANY mutant-runner journal in the tree, live owner (named) or dead (recover command printed), and runs with none; recover() prints each file it restores (MUTANT: runs on mutated bytes / restores silently)', () => {
   const e = sink();
   const { spawn, calls } = fakeSpawn({ status: 0 });
@@ -101,6 +171,122 @@ test('MUTANT-JOURNAL-GATE (Jim 1b5d87/b0a10e): the runner refuses ANY mutant-run
   assert.doesNotMatch(ok.lines.join('\n'), /mutated source/);
   assert.notEqual(code, undefined);
   fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('MUTANT-JOURNAL NO-BYPASS (god 5cc045/ed8032, Jim 967fa3/29e886): every test/tools/*mutants.cjs mutates only through the helper (recover before anything, mutateFile/restoreFile, no direct write), and every suite that loads a file a census mutates passes the journal check at module top: load-ts, assertUnmutated(REPO, ...) or gate(__filename) (MUTANT: a 12th runner writes source with no journal / a suite reads a journaled file ungated)', () => {
+  const tools = path.join(REPO, 'test', 'tools');
+  const runners = fs.readdirSync(tools).filter((f) => /mutants?\.cjs$/.test(f) && f !== 'mutant-runner-helper.cjs');
+  assert.ok(runners.length >= 17, `the census runners are found (${runners.length})`);
+  // Files a census mutates: every code-file literal in a runner (a path, a basename handed to path.join, or a
+  // mutant's file) except the suites it spawns. TypeScript is gated by load-ts; the rest must be gated by hand.
+  const mutable = new Set();
+  const direct = /\bfs\.(?:writeFileSync|appendFileSync|copyFileSync|renameSync|writeFile|truncateSync|promises)\b|\bfsp\.writeFile\b|[^.\w]writeFileSync\(/;
+  for (const f of runners) {
+    const src = fs.readFileSync(path.join(tools, f), 'utf8');
+    assert.match(src, /require\('\.\/mutant-runner-helper\.cjs'\)/, `${f}: requires the journal helper`);
+    assert.match(src, /\brecover\((?:ROOT|REPO|root)\)/, `${f}: recovers an interrupted run before anything else`);
+    assert.match(src, /\bmutateFile\(/, `${f}: mutates through the helper`);
+    assert.match(src, /\brestoreFile\(/, `${f}: restores through the helper`);
+    assert.match(src, /\bcheckAnchors\(/, `${f}: checks every anchor before mutating (god eac6c9)`);
+    assert.doesNotMatch(src, direct, `${f}: MUTANT: writes a file without the journal`);
+    const code = src.replace(/require\((['"])[^'"]+\1\)/g, '');
+    for (const m of code.matchAll(/'([\w./-]+\.(?:cjs|mjs|js|cs))'/g)) {
+      const base = path.basename(m[1]);
+      if (!/\.test\.cjs$/.test(base)) mutable.add(base);
+    }
+  }
+  for (const known of ['run-tests.cjs', 'memory-cli.cjs', 'release-worktrees.cjs', 'electron-bin.cjs', 'guppy-heavyjob.cs']) {
+    assert.ok(mutable.has(known), `the scan finds ${known} among the mutated files`);
+  }
+  // A suite a census mutates directly is a code file too (heavy-cpu-harness-191 is both the suite and a mutant file).
+  mutable.add('heavy-cpu-harness-191.test.cjs');
+  const suites = [];
+  (function walk(dir) {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) { if (e.name !== 'node_modules') walk(p); } else if (/\.test\.cjs$/.test(e.name)) suites.push(p);
+    }
+  })(path.join(REPO, 'test'));
+  const gated = (src) => /require\('(?:\.\.?\/)+load-ts\.cjs'\)/.test(src) || /\.assertUnmutated\(REPO,/.test(src) || /\.gate\(__filename\)/.test(src);
+  const ungated = [];
+  for (const s of suites) {
+    const src = fs.readFileSync(s, 'utf8');
+    const own = path.basename(s);
+    const hits = [...mutable].filter((b) => b !== own && src.includes(b));
+    if (hits.length && !gated(src)) ungated.push(`${path.relative(REPO, s)} (${hits.join(', ')})`);
+  }
+  assert.deepEqual(ungated, [], 'MUTANT: a suite loads a census-mutated file with no journal check');
+  assert.ok(suites.some((s) => /heavy-cpu-harness-191\.test\.cjs$/.test(s) && gated(fs.readFileSync(s, 'utf8'))), 'the suite its own census mutates is gated too');
+});
+
+test('MUTANT-JOURNAL-GATE gate(__filename) names the suite from the repo root; the runner lets exactly the census\'s own spawned suites (MUTANT_RUNNER_PID = live owner) run on a live journal, like load-ts (MUTANT: the census\'s own runner-driven suites are refused / a stray pid bypasses)', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'c90-gate-'));
+  fs.mkdirSync(path.join(root, 'src')); fs.mkdirSync(path.join(root, 'test', 'tools'), { recursive: true });
+  for (const rel of ['test/tools/mutant-runner-helper.cjs', 'test/tools/ps-env.cjs']) fs.copyFileSync(path.join(REPO, rel), path.join(root, rel));
+  const local = require(path.join(root, 'test', 'tools', 'mutant-runner-helper.cjs'));
+  const suite = path.join(root, 'test', 'x.test.cjs');
+  assert.doesNotThrow(() => local.gate(suite), 'no journal: the suite loads');
+  const file = path.join(root, 'src', 'x.ts');
+  fs.writeFileSync(file, 'export const x = 2;', 'utf8');
+  fs.writeFileSync(local.journalPath(root), JSON.stringify({ owner: { pid: 2147483000, start: 'x' }, records: [{ file, original: Buffer.from('export const x = 1;').toString('base64') }] }), 'utf8');
+  assert.throws(() => local.gate(suite), /^Error: \[test\/x\.test\.cjs\] refusing to load mutated source: an interrupted mutant runner \(pid 2147483000, dead\)/, 'MUTANT: the gate names nothing or loads');
+  fs.rmSync(root, { recursive: true, force: true });
+  // The runner gate: a live foreign owner refuses, unless this process is a suite that owner spawned.
+  const live = { owner: { pid: 4242, start: '2026-10-25T15:23:08Z' }, live: true, files: ['test/tools/run-tests.cjs'] };
+  const base = { jobRate: () => 0, testDir: 'test', readdir: () => ['a.test.cjs'], log: () => {}, mutantJournal: () => live };
+  const own = sink(); const ownSpawn = fakeSpawn({ status: 0 });
+  runner.run({ ...base, spawn: ownSpawn.spawn, err: own.write, processEnv: { ...process.env, MUTANT_RUNNER_PID: '4242' } });
+  assert.doesNotMatch(own.lines.join('\n'), /mutated source/, 'MUTANT: the census\'s own suite is refused');
+  assert.ok(ownSpawn.calls.length > 0, 'the census\'s own suite runs');
+  const stray = sink(); const straySpawn = fakeSpawn({ status: 0 });
+  assert.equal(runner.run({ ...base, spawn: straySpawn.spawn, err: stray.write, processEnv: { ...process.env, MUTANT_RUNNER_PID: '1' } }), 1);
+  assert.match(stray.lines.join('\n'), /refusing to run on mutated source: mutant runner pid 4242/, 'a stray pid does not bypass');
+  assert.equal(straySpawn.calls.length, 0);
+  // A dead owner is never bypassed, whatever the pid says.
+  const dead = sink(); const deadSpawn = fakeSpawn({ status: 0 });
+  assert.equal(runner.run({ ...base, mutantJournal: () => ({ ...live, live: false }), spawn: deadSpawn.spawn, err: dead.write, processEnv: { ...process.env, MUTANT_RUNNER_PID: '4242' } }), 1);
+  assert.match(dead.lines.join('\n'), /an interrupted mutant runner \(pid 4242, dead\)/);
+  assert.equal(deadSpawn.calls.length, 0);
+});
+
+test('MUTANT ANCHORS (god eac6c9): every census checks all of its anchors through the helper before mutating anything, and --anchors-only runs just that check: a missing or duplicated anchor is a named failure here, not a half-run census (MUTANT: a stale anchor aborts a census quietly / a row is skipped as INERT)', { timeout: 120_000 }, () => {
+  const { spawnSync } = require('node:child_process');
+  // The unit: one file, one good row, one missing, one duplicated; the throw names each bad row and nothing is written.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'c90-anchors-'));
+  fs.mkdirSync(path.join(root, 'src'));
+  fs.writeFileSync(path.join(root, 'src', 'x.ts'), 'const a = 1;\r\nconst b = 2;\r\nconst b2 = 2;\r\n', 'utf8');
+  const rows = [
+    { name: 'good', file: 'src/x.ts', from: 'const a = 1;' },
+    { name: 'gone', file: 'src/x.ts', from: 'const c = 3;' },
+    { name: 'twice', file: 'src/x.ts', from: '= 2;' },
+    { name: 'nofile', file: 'src/y.ts', from: 'const a = 1;' },
+  ];
+  assert.throws(() => helper.checkAnchors(root, rows), (e) => {
+    assert.match(e.message, /^INERT mutants, nothing mutated:/);
+    assert.match(e.message, /gone: anchor missing in src[\\/]x\.ts/);
+    assert.match(e.message, /twice: anchor not unique \(2\) in src[\\/]x\.ts/);
+    assert.match(e.message, /nofile: anchor file missing in src[\\/]y\.ts/);
+    assert.doesNotMatch(e.message, /good:/);
+    return true;
+  }, 'MUTANT: a bad anchor is not a failure, or is not named');
+  assert.equal(helper.checkAnchors(root, [rows[0], { name: 'lf', file: 'src/x.ts', from: 'const a = 1;\nconst b = 2;' }]), 2, 'good rows pass, matched on LF-normalised text');
+  fs.rmSync(root, { recursive: true, force: true });
+  // Every census in the tree: --anchors-only must say how many rows it checked and exit 0, touching nothing.
+  const tools = path.join(REPO, 'test', 'tools');
+  const runners = fs.readdirSync(tools).filter((f) => /mutants?\.cjs$/.test(f) && f !== 'mutant-runner-helper.cjs');
+  const env = { ...process.env, MUTANT_RUNNER_PID: '' };
+  delete env.NODE_OPTIONS; delete env.NODE_TEST_CONTEXT;
+  const bad = [];
+  let rowsChecked = 0;
+  for (const f of runners) {
+    const r = spawnSync(process.execPath, [path.join(tools, f), '--anchors-only'], { cwd: REPO, encoding: 'utf8', windowsHide: true, timeout: 60_000, env });
+    const m = /anchors ok: (\d+) rows/.exec(r.stdout || '');
+    if (r.status !== 0 || !m) bad.push(`${f}: status ${r.status}\n${r.stdout}\n${r.stderr}`);
+    else rowsChecked += Number(m[1]);
+  }
+  assert.deepEqual(bad, [], 'MUTANT: a census cannot mutate one of its rows');
+  assert.ok(rowsChecked >= 300, `the censuses check their rows (${rowsChecked})`);
+  assert.equal(fs.existsSync(helper.journalPath(REPO)), false, 'the anchor check journals nothing');
 });
 
 const REPO = path.resolve(__dirname, '..');

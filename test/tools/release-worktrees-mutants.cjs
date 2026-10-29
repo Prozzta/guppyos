@@ -4,13 +4,19 @@
 // audit can re-run it. Each mutant damages ONE source line at a unique anchor and must make
 // test/release-worktrees-198.test.cjs fail AT ITS OWN NAMED TEST; a survivor, a kill elsewhere or a
 // missing anchor fails the census. A heavy job (bench): run it in a heavy slot.
-//   node test/tools/release-worktrees-mutants.cjs
-// Each file is restored in a finally (CRLF kept).
+//   node test/tools/release-worktrees-mutants.cjs [--recover-only]
+// Each file is restored in a finally (CRLF kept). MUTANT-JOURNAL-GATE NIT 2 (god 9cb49c): every mutant goes
+// through mutant-runner-helper, so a run killed mid-row leaves a journal the gates refuse and the next run
+// (or --recover-only) restores.
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
+const { recover, mutateFile, restoreFile, checkAnchors } = require('./mutant-runner-helper.cjs');
+
 const ROOT = path.resolve(__dirname, '..', '..');
+recover(ROOT);
+if (process.argv.includes('--recover-only')) process.exit(0);
 const TEST = 'test/release-worktrees-198.test.cjs';
 const SRC = 'scripts/release-worktrees.cjs';
 const REAPER = 'scripts/worktree-reaper.cjs';
@@ -72,6 +78,7 @@ const MUTANTS = [
   ['R39 a refused apply still seeds', SRC, 'if (!cache.ok && o.seed && !blocking.length)', 'if (!cache.ok && o.seed)', HELD]
 ];
 
+checkAnchors(ROOT, MUTANTS.map(([name, file, from]) => ({ name, file, from })));
 const run = () => spawnSync(process.execPath, ['--test', TEST], { cwd: ROOT, encoding: 'utf8', windowsHide: true, timeout: 300_000 });
 const base = run();
 if (base.status !== 0) {
@@ -93,10 +100,10 @@ for (const [name, rel, from, to, dies] of MUTANTS) {
   if (original.includes('\r\n')) mutated = mutated.replace(/\n/g, '\r\n');
   let r;
   try {
-    fs.writeFileSync(abs, mutated);
+    mutateFile(ROOT, abs, original, mutated);
     r = run();
   } finally {
-    fs.writeFileSync(abs, original);
+    restoreFile(ROOT, abs, original);
   }
   const named = dies.test(`${r.stdout}${r.stderr}`);
   const killed = r.status !== 0 && named;

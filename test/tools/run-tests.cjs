@@ -292,7 +292,10 @@ function run({
   // a live owner is named (wait for it or stop it); a dead owner gets the recover command. Never silent.
   let journal;
   try { journal = mutantJournal(cwd); } catch (e) { err(`[test-runner] cannot read the mutant-runner journal in ${cwd}: ${String(e)}`); return 1; }
-  if (journal.files.length) {
+  // A census journals test/tools/run-tests.cjs itself now (god 5cc045), and the suites it spawns drive this runner
+  // in-process on the mutant: exactly the live owner's own children (MUTANT_RUNNER_PID, as in load-ts) pass.
+  const ownChild = journal.live && journal.owner && String(journal.owner.pid) === processEnv.MUTANT_RUNNER_PID;
+  if (journal.files.length && !ownChild) {
     const who = journal.live ? `mutant runner pid ${journal.owner.pid} (started ${journal.owner.start}) is still mutating this tree; wait for it or stop it`
       : `an interrupted mutant runner${journal.owner ? ` (pid ${journal.owner.pid}, dead)` : ''} left mutated files behind; run: node test/tools/claims90-m1-mutants.cjs --recover-only`;
     err(`[test-runner] refusing to run on mutated source: ${who}. Journaled: ${journal.files.join(', ')}`);

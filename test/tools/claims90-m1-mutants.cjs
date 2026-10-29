@@ -10,31 +10,15 @@
  */
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
-const { recover, mutateFile, restoreFile } = require('./mutant-runner-helper.cjs');
+const { recover, mutateFile, restoreFile, checkAnchors } = require('./mutant-runner-helper.cjs');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 recover(ROOT);
-// The shared helper journals src/ only. resources/memory-cli.cjs is mutated here directly, with the
-// original bytes kept in the OS temp dir until the restore; a run killed mid-mutant is repaired on the next start.
-const CLI_BACKUP = path.join(os.tmpdir(), 'claims90-m1-mutants-memory-cli.orig');
-const inSrc = (file) => file.startsWith(`src${path.sep}`) || file.startsWith('src/');
-function mutateAny(file, abs, original, mutated) {
-  if (inSrc(file)) return mutateFile(ROOT, abs, original, mutated);
-  fs.writeFileSync(CLI_BACKUP, original);
-  fs.writeFileSync(abs, mutated);
-}
-function restoreAny(file, abs, original) {
-  if (inSrc(file)) return restoreFile(ROOT, abs, original);
-  fs.writeFileSync(abs, original);
-  fs.rmSync(CLI_BACKUP, { force: true });
-}
-if (fs.existsSync(CLI_BACKUP)) {
-  fs.writeFileSync(path.join(ROOT, 'resources/memory-cli.cjs'), fs.readFileSync(CLI_BACKUP));
-  fs.rmSync(CLI_BACKUP, { force: true });
-  console.log('recovered resources/memory-cli.cjs from an interrupted run');
-}
+// MUTANT-JOURNAL-GATE NIT 1 (god 9cb49c): resources/memory-cli.cjs is journaled through the helper like the src
+// files, so load-ts and the suites that read the CLI text directly refuse a tree where it is left mutated.
+const mutateAny = (file, abs, original, mutated) => mutateFile(ROOT, abs, original, mutated);
+const restoreAny = (file, abs, original) => restoreFile(ROOT, abs, original);
 if (process.argv.includes('--recover-only')) process.exit(0);
 const TESTS = ['test/claims90-m1-compact.test.cjs', 'test/native-memory.test.cjs', 'test/claims90-m3a-lead.test.cjs', 'test/claims90-m3-rank.test.cjs',
   // CLAIMS-90 R2 (C90-GET): the lookup, the search modes and the cross-path test.
@@ -177,6 +161,7 @@ const MUTANTS = [
   ['W T5: equal-time mails have no link-strength tiebreak', GET, '.sort((a, b) => b.ms - a.ms || linkRank(b.m.cardFrom) - linkRank(a.m.cardFrom));', '.sort((a, b) => b.ms - a.ms);'],
 ];
 
+checkAnchors(ROOT, MUTANTS.map(([name, file, from]) => ({ name, file, from })));
 const prefix = process.argv[2] || '';
 const selected = MUTANTS.filter(([name]) => name.startsWith(prefix));
 let killed = 0; let inert = 0; let timedOut = 0;

@@ -14,10 +14,15 @@ const { spawnSync } = require('node:child_process');
 
 const journalPath = (root) => path.join(root, '.mutant-runner-recovery.json');
 
+// Every tree a census mutates in place: TypeScript under src/, the shipped CLI under resources/ (m1), the
+// release scripts under scripts/ (release-worktrees). Anything else is not a mutant and is never restored.
+// test/ too (god 5cc045): the runner censuses mutate test/tools/run-tests.cjs, the temp-jail helpers, the electron
+// harness and one suite in place; they are gated by hand (gate below) because load-ts never sees them.
+const MUTABLE = ['src', 'resources', 'scripts', 'test'];
 function checked(root, file) {
   const rel = path.relative(root, file);
-  if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || !rel.startsWith(`src${path.sep}`)) {
-    throw new Error(`refusing mutant recovery path outside src: ${file}`);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || !MUTABLE.some((dir) => rel.startsWith(`${dir}${path.sep}`))) {
+    throw new Error(`refusing mutant recovery path outside ${MUTABLE.join('/, ')}/: ${file}`);
   }
   return path.resolve(file);
 }
@@ -124,15 +129,16 @@ function recover(root, log = (line) => console.log(line)) {
  * test/load-ts.cjs asks this before it loads any TypeScript. The suites a census spawns run while its journal
  * is live: they are the measurement, and they inherit MUTANT_RUNNER_PID (set by mutateFile) naming that owner.
  * The runner itself (owner pid == this pid) may load too. Every other process refuses, never silently.
+ * gate names the caller: load-ts, or a suite that reads a journaled non-TS file itself (god 9cb49c NIT 1).
  */
-function assertUnmutated(root) {
+function assertUnmutated(root, gate = 'load-ts') {
   const { owner, live, files } = journalState(root);
   if (!files.length) return;
   if (owner && owner.pid === process.pid) return;
   if (live && String(owner.pid) === process.env.MUTANT_RUNNER_PID) return;
   const who = live ? `mutant runner pid ${owner.pid} (started ${owner.start}) is still mutating this tree; wait for it or stop it`
     : `an interrupted mutant runner${owner ? ` (pid ${owner.pid}, dead)` : ''} left mutated files behind; run: node test/tools/claims90-m1-mutants.cjs --recover-only`;
-  throw new Error(`[load-ts] refusing to load mutated source: ${who}. Journaled: ${files.join(', ')}`);
+  throw new Error(`[${gate}] refusing to load mutated source: ${who}. Journaled: ${files.join(', ')}`);
 }
 
 function mutateFile(root, file, original, mutated) {
@@ -157,4 +163,30 @@ function restoreFile(root, file, original) {
   writeJournal(root, readJournal(root).records.filter((record) => record.file !== abs));
 }
 
-module.exports = { recover, mutateFile, restoreFile, journalPath, journalState, assertUnmutated, processStart };
+/** The one-line suite gate (god 5cc045/ed8032): a suite that loads a file a census mutates (a non-TS file load-ts
+ * never sees) calls gate(__filename) at module top and refuses a mutated tree under its own repo-relative name. */
+function gate(filename) {
+  const root = path.resolve(__dirname, '..', '..');
+  assertUnmutated(root, path.relative(root, filename).split(path.sep).join('/'));
+}
+
+/** Every anchor of a census, checked before anything is mutated (god eac6c9): rows are { name, file, from }, matched
+ * once on LF-normalised text like the runners do. A missing or duplicated anchor fails the whole run HERE, naming each
+ * row, so a census that cannot mutate never half-runs or passes as INERT. `--anchors-only` stops after the check
+ * (test-runner-glob runs every census that way, so a stale anchor is a test failure). */
+function checkAnchors(root, rows) {
+  const texts = new Map();
+  const bad = [];
+  for (const { name, file, from } of rows) {
+    const abs = path.resolve(root, file);
+    if (!texts.has(abs)) texts.set(abs, fs.existsSync(abs) ? fs.readFileSync(abs, 'utf8').replace(/\r\n/g, '\n') : null);
+    const text = texts.get(abs);
+    const hits = text === null ? -1 : text.split(from).length - 1;
+    if (hits !== 1) bad.push(`${name}: anchor ${hits < 0 ? 'file missing' : hits === 0 ? 'missing' : `not unique (${hits})`} in ${path.relative(root, abs)}`);
+  }
+  if (bad.length) throw new Error(`INERT mutants, nothing mutated:\n  ${bad.join('\n  ')}`);
+  if (process.argv.includes('--anchors-only')) { console.log(`anchors ok: ${rows.length} rows`); process.exit(0); }
+  return rows.length;
+}
+
+module.exports = { recover, mutateFile, restoreFile, checkAnchors, journalPath, journalState, assertUnmutated, gate, processStart };

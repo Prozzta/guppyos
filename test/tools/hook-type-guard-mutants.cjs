@@ -11,6 +11,9 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..', '..');
+const { recover, mutateFile, restoreFile, checkAnchors } = require('./mutant-runner-helper.cjs');
+recover(ROOT);
+if (process.argv.includes('--recover-only')) process.exit(0);
 const TEST = 'test/hook-type-guard-198.test.cjs';
 const GUARD = 'src/main/hookTypeGuard.ts';
 const HIVE = 'src/main/hive.ts';
@@ -68,6 +71,7 @@ const MUTANTS = [
   ['H20 a worktree layer is scanned in place of its main checkout', HIVE, 'const dir = l.hooksFrom ?? l.dotCodex;', 'const dir = l.dotCodex;', at('Codex: a loading project layer')]
 ];
 
+checkAnchors(ROOT, MUTANTS.map(([name, file, from]) => ({ name, file, from })));
 const run = () => spawnSync(process.execPath, ['--test', TEST], { cwd: ROOT, encoding: 'utf8', windowsHide: true, timeout: 300_000 });
 if (run().status !== 0) {
   console.log(`BASELINE RED: ${TEST} fails unmutated, so no mutant proves anything.`);
@@ -89,10 +93,10 @@ for (const [name, rel, from, to, dies] of MUTANTS) {
   if (original.includes('\r\n')) mutated = mutated.replace(/\n/g, '\r\n');
   let r;
   try {
-    fs.writeFileSync(abs, mutated);
+    mutateFile(ROOT, abs, original, mutated);
     r = run();
   } finally {
-    fs.writeFileSync(abs, original);
+    restoreFile(ROOT, abs, original);
   }
   const named = dies.test(`${r.stdout}${r.stderr}`);
   const killed = r.status !== 0 && named;

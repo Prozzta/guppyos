@@ -12,6 +12,9 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..', '..');
+const { recover, mutateFile, restoreFile, checkAnchors } = require('./mutant-runner-helper.cjs');
+recover(ROOT);
+if (process.argv.includes('--recover-only')) process.exit(0);
 const TEST = 'test/pty-exit-record-198.test.cjs';
 const REC = 'src/main/ptyExitRecord.ts';
 const PTY = 'src/main/pty.ts';
@@ -67,6 +70,7 @@ const MUTANTS = [
   ['X25 a wide-char row never wraps', REC, 'const mayWrap = (l: string) => !cols || l.length >= cols || /[^\\x00-\\x7f]/.test(l);', 'const mayWrap = (l: string) => !cols || l.length >= cols;', WRAPPED]
 ];
 
+checkAnchors(ROOT, MUTANTS.map(([name, file, from]) => ({ name, file, from })));
 const run = () => spawnSync(process.execPath, ['--test', TEST], { cwd: ROOT, encoding: 'utf8', windowsHide: true, timeout: 300_000 });
 const base = run();
 if (base.status !== 0) {
@@ -88,10 +92,10 @@ for (const [name, rel, from, to, dies] of MUTANTS) {
   if (original.includes('\r\n')) mutated = mutated.replace(/\n/g, '\r\n');
   let r;
   try {
-    fs.writeFileSync(abs, mutated);
+    mutateFile(ROOT, abs, original, mutated);
     r = run();
   } finally {
-    fs.writeFileSync(abs, original);
+    restoreFile(ROOT, abs, original);
   }
   const named = dies.test(`${r.stdout}${r.stderr}`);
   const killed = r.status !== 0 && named;

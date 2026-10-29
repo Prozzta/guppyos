@@ -26,7 +26,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { recover, mutateFile, restoreFile } = require('./mutant-runner-helper.cjs');
+const { recover, mutateFile, restoreFile, checkAnchors } = require('./mutant-runner-helper.cjs');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 recover(ROOT);
@@ -586,6 +586,7 @@ const MUTANTS = [
 
 // THE BASELINE MUST BE GREEN. Against already-failing tests every mutant "dies", and a
 // kill that the unmutated code would also have scored is not evidence of anything.
+checkAnchors(ROOT, MUTANTS.map(([name, file, from]) => ({ name, file, from })));
 const baseline = spawnSync(process.execPath, ['--test', ...TESTS], { cwd: ROOT, encoding: 'utf8' });
 if (baseline.status !== 0) {
   console.log('BASELINE RED: the unmutated capacity tests fail, so no mutant result would mean anything.');
