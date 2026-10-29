@@ -528,3 +528,26 @@ test('re-gate must E: the card\'s own commit the subject writes outranks a later
   assert.equal(F.FORWARD_LINE_RE.test('The next delta landed at abc1234'), false);
   assert.equal(F.FORWARD_LINE_RE.test('Nextcloud sync fixed at abc1234'), false);
 });
+
+// ———————————————————————————————————————————————————————————— re-gate cf751a (board-size scaling)
+
+test('re-gate cf751a: on a 900-id board, 1,000 done mails with subject and body pair lines read the board ids at most (distinct tokens) x ids x 2 times, not once per card per token', async () => {
+  const N = 900, M = 1000;
+  const raw = Array.from({ length: N }, (_, k) => k % 3 === 0 ? `HULL-${k}` : `ABC${k % 30}-PART-${k}`);
+  let reads = 0;
+  const ids = new Proxy(raw, { get(t, p, r) { if (typeof p === 'string' && /^\d+$/.test(p)) reads++; return Reflect.get(t, p, r); } });
+  const commits = {}, messages = {}, files = {};
+  const sha = (k, j) => { const s = `b${k.toString(16)}c${j}`.padEnd(7, 'd').slice(0, 7); const f = s.repeat(6).slice(0, 40); commits[s] = f; messages[f] = `${raw[k]}: step ${j}`; files[f] = SRC; return s; };
+  const mails = [];
+  for (let j = 0; j < M; j++) {
+    const k = (j * 7) % N, o = (j * 13 + 1) % N;
+    const pairWord = raw[o].split('-').slice(0, 2).join('-');
+    mails.push({ id: `m-${j}`, act: 'done', from: SAM, subject: `${raw[k]} @${sha(k, 0)}: PASS`, body: `${raw[k]} @${sha(k, 1)}\n${pairWord} @${sha(o, 2)}`, created_at: new Date(Date.parse(T0) + j * 1000).toISOString(), cards: [raw[k]] });
+  }
+  const git = { ...fakeGit(commits, messages, { files }), async branchesContaining() { return new Set(); } };
+  const tokens = new Set();
+  for (const m of mails) for (const t of [m.subject, ...m.body.split('\n')]) for (const x of F.subjectAtShas(t)) tokens.add(x.name);
+  const r = await F.doneMailFacts(mails, ids, git, { subjectOf: () => undefined });
+  assert.ok(r.facts.length > 0, 'the twin writes facts');
+  assert.ok(reads <= tokens.size * N * 2, `board ids read ${reads} times for ${tokens.size} distinct tokens (bound ${tokens.size * N * 2})`);
+});

@@ -434,7 +434,11 @@ const PAIR_TOKEN_RE = /^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+(?:\.[0-9]+)*)*$/;
 /** Round 10 (Jim's gate, must 6): whether `token` (upper-case) is `id`'s form for a pairing: an own form
  *  (isOwnForm) or the id's LEADING segments, the first with a letter (ABC and ABC-CRAWL for ABC-CRAWL-19). */
 export function isPairForm(token: string, id: string): boolean {
-  if (isOwnForm(token, id)) return true;
+  return isOwnForm(token, id) || isLeadForm(token, id);
+}
+
+/** isPairForm's second half: `token` is `id`'s LEADING segments, the first with a letter (not a line word). */
+function isLeadForm(token: string, id: string): boolean {
   const ts = token.split('-'), cs = id.toUpperCase().split('-');
   // A line word alone (INT, RC, STAGE: "on int @sha") names the line, not the int card whose id leads with it.
   if (ts.length === 1 && LINE_WORD_RE.test(ts[0])) return false;
@@ -449,8 +453,41 @@ export function pairName(name: string, card: string, ids: readonly string[]): bo
   if (name === id || name === `guppy/${id}` || name === `origin/guppy/${id}`) return true;
   const t = name.replace(/^(?:origin\/)?guppy\//, '').toUpperCase();
   if (!PAIR_TOKEN_RE.test(t)) return false;
-  const fits = ids.filter((c) => isPairForm(t, c));
+  const fits = formFits(t, ids).pair;
   return fits.length === 1 && fits[0] === card;
+}
+
+/** The card among `ids` whose own name (pairName) `name` is, or null: what pairName says for each card,
+ *  read once. A name that is a card's id or branch is that card's; else its pair form, unique among `ids`. */
+export function pairCardOf(name: string, ids: readonly string[]): string | null {
+  const t = name.replace(/^(?:origin\/)?guppy\//, '');
+  let lower = LOWER_IDS.get(ids);
+  if (!lower) { lower = new Map(); for (const c of ids) if (!lower.has(c.toLowerCase())) lower.set(c.toLowerCase(), c); LOWER_IDS.set(ids, lower); }
+  const exact = lower.get(t);
+  if (exact !== undefined) return exact;
+  const u = t.toUpperCase();
+  if (!PAIR_TOKEN_RE.test(u)) return null;
+  const fits = formFits(u, ids).pair;
+  return fits.length === 1 ? fits[0] : null;
+}
+
+/** Round 10 re-gate (Jim cf751a): the ids among `ids` that `token` is an own form (isOwnForm) and a pair form
+ *  (isPairForm) of, in `ids` order, computed ONCE per token and id list. The callers read a mail's tokens
+ *  against the whole board; without the memo every token re-scanned every id per card, N^2 per token. */
+const LOWER_IDS = new WeakMap<readonly string[], Map<string, string>>();
+const FORM_FITS = new WeakMap<readonly string[], Map<string, { own: string[]; pair: string[] }>>();
+export function formFits(token: string, ids: readonly string[]): { own: string[]; pair: string[] } {
+  let memo = FORM_FITS.get(ids);
+  if (!memo) { memo = new Map(); FORM_FITS.set(ids, memo); }
+  let v = memo.get(token);
+  if (!v) {
+    v = { own: [], pair: [] };
+    for (const id of ids) {
+      if (isOwnForm(token, id)) { v.own.push(id); v.pair.push(id); } else if (isLeadForm(token, id)) v.pair.push(id);
+    }
+    memo.set(token, v);
+  }
+  return v;
 }
 
 /**
@@ -1017,7 +1054,7 @@ export function cardNamer(cardIds: readonly string[]): (text: unknown) => CardNa
       if (canon.has(t.toLowerCase().replace(/[- ]/g, '')) || others.includes(t)) return;
       // Round 6 (god 18e97a, R6-1): a short form of exactly one known card names that card; of several,
       // some other card; a label (UTF-8, SHA-1) that is no card's form names nothing.
-      const fits = ids.filter((id) => (pair ? isPairForm(t, id) : isOwnForm(t, id)));
+      const fits = pair ? formFits(t, ids).pair : formFits(t, ids).own;
       if (fits.length === 1) { if (!cards.includes(fits[0])) cards.push(fits[0]); return; }
       if (!fits.length && (formOnly || LABEL_RE.test(t))) return;
       others.push(t);
@@ -1101,7 +1138,7 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
   // Round 10 (Jim's gate, must 4): the card-shaped ids a text writes that are no board card's form at all
   // (a shared form of several board cards is "other" to the namer but not a stranger: round 9 R2 ties it
   // to the linked card).
-  const strangersOf = (text: unknown): string[] => namer(text).others.filter((t) => !cardIds.some((id) => isOwnForm(t, id)));
+  const strangersOf = (text: unknown): string[] => namer(text).others.filter((t) => !formFits(t, cardIds).own.length);
   const known = new Map(cardIds.flatMap((c) => [[c.toLowerCase(), c], [canonCard(c), c]] as Array<[string, string]>));
   // Round 9 (P1): the card field, read like every other card name (case, dash or space), but whole: a
   // field that names no known card names some other card (guide A12) and the mail counts for nothing.
@@ -1154,7 +1191,7 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
       if (/^\s*>/.test(line)) continue;
       for (const x of subjectAtShas(line)) {
         if (isQuoted(x.sha) || written.some((w) => w.sha === x.sha) || bodyPairs.some((b) => b.sha === x.sha)) continue;
-        if (cardIds.some((c) => pairName(x.name, c, cardIds))) bodyPairs.push(x);
+        if (pairCardOf(x.name, cardIds) !== null) bodyPairs.push(x);
       }
     }
     // The commits the mail reports, each resolved to the work it stands for (round 3: a merge is its
@@ -1248,7 +1285,8 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
     };
     /** Must 6: the cards whose own name (id, branch or pair form) the mail writes straight before an @sha, in
      *  the subject or (must 7) on a body line. */
-    const pairedCards = cardIds.filter((card) => ats.some((a) => pairName(a.name, card, cardIds)));
+    const pairedSet = new Set(ats.map((a) => pairCardOf(a.name, cardIds)));
+    const pairedCards = cardIds.filter((card) => pairedSet.has(card));
     /** F5: whether a commit of a written range counts for `card`: one in the range only when it names the
      *  card; the range's end only when every commit of the range names the card. Jim's gate (must 2a): a
      *  mail that reports a listed range reports its members: a commit outside every listed range (a base,

@@ -354,6 +354,9 @@ export async function runDerivedBackfill(deps: DerivedWriterDeps, input: Backfil
   const cardFields = await syncDerived(deps, await cardFieldFacts(cards, input.git));
   const releases = await syncDerived(deps, releaseFacts(parseChangelog(input.releases.changelog), input.releases.tags, input.releases.bumps));
   const cardIds = cards.map((c) => c.id).filter((id): id is string => typeof id === 'string');
+  // Round 10 re-gate (Jim cf751a): the history is read BEFORE the done mails, so its messages and parents are
+  // cached for them (one walk) instead of one show and one rev-list per reported commit.
+  const log = input.git?.log ? await input.git.log() : null;
   const done = input.git ? await doneMailFacts(mails, cardIds, input.git, { subjectOf: (id) => subjects.get(id) }) : { facts: [], skipped: { noGit: 1 } as Record<string, number>, skips: [], older: 0 };
   // R2 (c): every skipped done mail is logged with its reason (ids and card ids only).
   for (const s of done.skips) deps.log?.({ kind: 'claims-derived-done-skip', mail: s.mail.slice(0, 120), reason: s.reason, ...(s.cards ? { cards: s.cards } : {}) });
@@ -361,7 +364,6 @@ export async function runDerivedBackfill(deps: DerivedWriterDeps, input: Backfil
   writeDoneMailStatus(input.hiveRoot, doneMailStatuses(mails, done));
   const doneShas = await syncDerived(deps, done.facts);
   const none = { facts: 0, appended: 0, unchanged: 0, superseded: 0, failed: 0 };
-  const log = input.git?.log ? await input.git.log() : null;
   const gitShas = log && input.git ? await syncDerived(deps, await gitHistoryFacts(log, cardIds, input.git)) : none;
   const merges = log && input.git ? await syncDerived(deps, await mergeFacts(log, cardIds, input.git)) : none;
   const counts = { cards: cards.length, doneMails: mails.length, decisions, records, rulings, cardFields, releases, doneShas, doneSkipped: done.skipped, doneOlder: done.older, gitShas, merges };
