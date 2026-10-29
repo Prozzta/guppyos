@@ -194,3 +194,74 @@ test('must 5a: a run of INNER segments unique among board ids names that card; a
   assert.deepEqual(namer('WRAP-GAP + LIMIT-RE rebase'), { cards: ['PRE-WRAP-GAP-12', 'PRE-LIMIT-RE-12'], others: [] });
   assert.deepEqual(F.cardNamer(['PRE-WRAP-GAP-12', 'OLD-WRAP-GAP-13'])('WRAP-GAP rebase'), { cards: [], others: ['WRAP-GAP'] }, 'MUTANT must 5a: a shared inner run is some other card');
 });
+
+// ———————————————————————————————————————————————————————————— must 6 (F2)
+
+test('must 6: an id (or its leading form) written straight before its own @sha is the pairing, with no confirmation from the commit subject; the card\'s branch confirms it, another card\'s branch alone contradicts it', async () => {
+  const CARDS = ['ABC-CRAWL-19', 'INT-1.2', 'XYZ-34'];
+  const S1 = H('1'), X = H('2');
+  // S1 names no card ("fix: capacity sweep"); S2 (2222bbb) is not in the repository.
+  const mk = (refs) => fakeGit({ '1111aaa': S1, '3333ccc': X }, { [S1]: 'fix: capacity sweep over the hull', [X]: 'XYZ-34: the gadget' }, { files: { [S1]: SRC, [X]: SRC }, times: { [S1]: 1, [X]: 2 }, ...(refs ? { refs } : {}) });
+  const SUBJ = 'ABC @1111aaa merged into INT-1.2 with fixup 4; pushed @2222bbb';
+  const run = (id, git, extra = {}) => F.doneMailFacts([mail(id, SUBJ, { cards: ['INT-1.2'], in_reply_to: 'req-1', ...extra })], CARDS, git);
+  // Twin: the paired form with an unnamed commit on the card's branch: a fact for the card (never the thread's INT card).
+  let r = await run('m6-a', mk({ 'guppy/abc-crawl-19': S1 }));
+  assert.equal(commitOf(r, slot('ABC-CRAWL-19', SAM)), S1, 'MUTANT must 6: the pair ABC @S1 is the card\'s sha');
+  assert.equal(commitOf(r, slot('INT-1.2', SAM)), undefined, 'the thread\'s int card gets no row');
+  // Twin: the same with the commit on another card's branch and not on the card's own: skipped.
+  r = await run('m6-b', mk({ 'guppy/xyz-34': S1, 'guppy/abc-crawl-19': X }));
+  assert.equal(r.facts.length, 0, 'MUTANT must 6: a commit on another card\'s branch is not the pair');
+  assert.deepEqual(r.skips, [{ mail: 'm6-b', reason: 'ambiguous', cards: ['ABC-CRAWL-19'] }]);
+  // Accepted as written: no branch of the card known (and no other card's branch reaches it), or an older port without refCommit.
+  r = await run('m6-c', mk({ 'guppy/xyz-34': X }));
+  assert.equal(commitOf(r, slot('ABC-CRAWL-19', SAM)), S1, 'no branch ref: as written');
+  r = await run('m6-d', mk(null));
+  assert.equal(commitOf(r, slot('ABC-CRAWL-19', SAM)), S1, 'a port without refCommit: as written');
+  // The card's own branch reaching the commit outranks another card's branch that reaches it too.
+  r = await run('m6-e', mk({ 'guppy/abc-crawl-19': S1, 'guppy/xyz-34': S1 }));
+  assert.equal(commitOf(r, slot('ABC-CRAWL-19', SAM)), S1);
+  // A field row is unchanged by the branch check; a single-card row picks the paired sha of two by the name.
+  r = await run('m6-f', mk({ 'guppy/xyz-34': S1 }), { card: 'ABC-CRAWL-19', cards: [] });
+  assert.equal(commitOf(r, slot('ABC-CRAWL-19', SAM)), S1, 'the field row keeps its subject sha');
+  r = await F.doneMailFacts([mail('m6-g', 'ABC @1111aaa merged with fixup 4; pushed @2222bbb', { cards: ['ABC-CRAWL-19'], in_reply_to: 'req-1' })], CARDS, mk(null));
+  assert.equal(commitOf(r, slot('ABC-CRAWL-19', SAM)), S1, 'of two @shas the one after the card\'s own form');
+  // A leading form shared by two board cards pairs with neither: ambiguous, never a guess.
+  r = await F.doneMailFacts([mail('m6-h', SUBJ, { cards: ['INT-1.2'], in_reply_to: 'req-1' })], [...CARDS, 'ABC-SWEEP-20'], mk({ 'guppy/abc-crawl-19': S1 }));
+  assert.equal(commitOf(r, slot('ABC-CRAWL-19', SAM)), undefined, 'a shared leading form pairs with no card');
+  assert.equal(commitOf(r, slot('ABC-SWEEP-20', SAM)), undefined);
+  // The form pins.
+  assert.equal(F.isPairForm('ABC', 'ABC-CRAWL-19'), true);
+  assert.equal(F.isPairForm('ABC-CRAWL', 'ABC-CRAWL-19'), true);
+  assert.equal(F.isPairForm('CRAWL', 'ABC-CRAWL-19'), false, 'a lone inner word is no form');
+  assert.equal(F.isPairForm('19', 'ABC-CRAWL-19'), false, 'a number is no form');
+  assert.equal(F.pairName('abc', 'ABC-CRAWL-19', CARDS), true);
+  assert.equal(F.pairName('guppy/abc-crawl-19', 'ABC-CRAWL-19', CARDS), true);
+  assert.equal(F.pairName('abc', 'ABC-CRAWL-19', [...CARDS, 'ABC-SWEEP-20']), false, 'shared: no card\'s');
+  assert.equal(F.pairName('pushed', 'ABC-CRAWL-19', CARDS), false);
+  const namer = F.cardNamer(CARDS);
+  assert.deepEqual(namer('ABC @1111aaa merged'), { cards: ['ABC-CRAWL-19'], others: [] }, 'MUTANT must 6: the word before an @sha is a pair form');
+  assert.deepEqual(namer('ABC merged @1111aaa'), { cards: [], others: [] }, 'elsewhere a bare word is no card');
+  assert.deepEqual(F.cardNamer([...CARDS, 'ABC-SWEEP-20'])('ABC @1111aaa'), { cards: [], others: ['ABC'] }, 'shared: some other card');
+  assert.deepEqual(F.pairedAtShas(SUBJ, ['ABC-CRAWL-19'], namer, CARDS).get('ABC-CRAWL-19'), ['1111aaa']);
+  assert.equal(await F.subjectTip([{ sha: '1111aaa', name: 'abc' }, { sha: '2222bbb', name: 'pushed' }], 'ABC-CRAWL-19', mk(null), CARDS), '1111aaa');
+  assert.equal(F.loneAtCounts('ABC @1111aaa; XYZ-34 FAIL', { sha: '1111aaa', name: 'abc' }, 'ABC-CRAWL-19', namer, CARDS), true);
+});
+
+test('must 6 git: DerivedGit.refCommit gives a branch\'s sha, origin\'s copy first, and null for no such ref', async () => {
+  const { execFileSync } = require('node:child_process');
+  const G = loadTs('src/main/claims/derivedGit.ts');
+  const repo = path.join(JAIL, 'repo-m6');
+  fs.mkdirSync(repo, { recursive: true });
+  const g = (...a) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false', ...a], { cwd: repo, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+  g('init', '-q', '-b', 'main');
+  const shas = [];
+  for (const n of ['one', 'two']) { fs.writeFileSync(path.join(repo, 'f.txt'), n); g('add', 'f.txt'); g('commit', '-q', '-m', n); shas.push(g('rev-parse', 'HEAD')); }
+  g('branch', 'guppy/abc-12', shas[0]);
+  g('update-ref', 'refs/remotes/origin/guppy/xyz-34', shas[1]);
+  g('update-ref', 'refs/remotes/origin/guppy/abc-12', shas[1]);
+  const dg = new G.DerivedGit(repo);
+  assert.equal(await dg.refCommit('guppy/abc-12'), shas[1], 'origin first');
+  assert.equal(await dg.refCommit('guppy/xyz-34'), shas[1]);
+  assert.equal(await dg.refCommit('guppy/none-1'), null);
+  assert.equal(await dg.isAncestor(shas[0], await dg.refCommit('guppy/abc-12')), true);
+});

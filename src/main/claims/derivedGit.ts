@@ -93,6 +93,7 @@ export class DerivedGit implements GitLogPort {
   private readonly files = new Map<string, string[] | null>();
   private readonly versionDiffs = new Map<string, boolean | null>();
   private readonly rangesOf = new Map<string, string[] | null>();
+  private refs: Map<string, string> | null = null;
   private readonly o: Required<DerivedGitOptions>;
   constructor(readonly repo: string, opts: DerivedGitOptions = {}) {
     this.o = { timeoutMs: opts.timeoutMs ?? GIT_TIMEOUT_MS, command: opts.command ?? ['git'] };
@@ -220,6 +221,17 @@ export class DerivedGit implements GitLogPort {
       this.rangesOf.set(key, r.code === 0 && w.every((x) => /^[0-9a-f]{40}$/.test(x)) ? w : null);
     }
     return this.rangesOf.get(key) ?? null;
+  }
+
+  /** Round 10 (must 6): the full sha the branch `name` (guppy/<id>) points at: origin's copy first, then the
+   *  local one; null when neither exists. One for-each-ref serves every lookup. */
+  async refCommit(name: string): Promise<string | null> {
+    if (!this.refs) {
+      this.refs = new Map();
+      const r = await git(this.repo, ['for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads', 'refs/remotes'], this.o);
+      if (r.code === 0) for (const line of r.out.split('\n')) { const m = /^(\S+) ([0-9a-f]{40})$/.exec(line.trim()); if (m) this.refs.set(m[1], m[2]); }
+    }
+    return this.refs.get(`refs/remotes/origin/${name}`) ?? this.refs.get(`refs/heads/${name}`) ?? null;
   }
 
   /** Every commit on the branches, tags and remotes: full sha, committer time, parents, message (stashes left out). */

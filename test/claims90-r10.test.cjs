@@ -107,7 +107,8 @@ test('F2: a done mail whose subject names two or more cards with @shas is indexe
   // A pairing that cannot be settled (two cards, three @shas in one segment) is ambiguous for those cards; a card the subject names
   // and no commit confirms gets no row, and a body-sha mail (no subject @sha) keeps the one-card git rule.
   r = await run('f2-g', 'ABC-12 ABC-13 @1111aaa @2222bbb @4444ddd PASS');
-  assert.deepEqual(r.skips, [{ mail: 'f2-g', reason: 'ambiguous', cards: ['ABC-12'] }, { mail: 'f2-g', reason: 'ambiguous', cards: ['ABC-13'] }]);
+  // (Must 6: ABC-13 is written straight before @1111aaa, so that pair is read; the commit's own subject naming ABC-12 contradicts it.)
+  assert.deepEqual(r.skips, [{ mail: 'f2-g', reason: 'ambiguous', cards: ['ABC-12'] }, { mail: 'f2-g', reason: 'ambiguous', cards: ['ABC-13', 'ABC-12'] }]);
   r = await run('f2-h', 'ABC-12 and ABC-13 at 1111aaa');
   assert.equal(commitOf(r, slot('ABC-12', SAM)), H('1')); assert.equal(commitOf(r, slot('ABC-13', SAM)), undefined, 'no @sha: the one card git confirms (unchanged)');
   // The F1 forms name cards here too (ABC-12-INT -> ABC-12).
