@@ -1,5 +1,8 @@
 'use strict';
 require('./tools/own-job.cjs');
+// MUTANT-JOURNAL-GATE (god 5cc045/ed8032): this suite loads a file a census mutates in place (one load-ts never sees);
+// refuse a tree a killed census left mutated, before anything is read.
+require('./tools/mutant-runner-helper.cjs').gate(__filename);
 /**
  * CLAIMS-90 labeller jail (test-only tooling). Pins the guard's rules, the jail's forbidden-name
  * check, the transcript audit (compaction, out-of-jail calls) and the key-file check.

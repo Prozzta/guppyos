@@ -7,6 +7,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const { recover, mutateFile, restoreFile, checkAnchors } = require('./mutant-runner-helper.cjs');
 
 const ROOT = path.join(__dirname, '..', '..');
 const LAB = 'test/claims-90/labeller.cjs';
@@ -22,11 +23,12 @@ const M = [
 const unit = () => spawnSync(process.execPath, ['--test', 'test/claims-90-labeller.test.cjs'], { cwd: ROOT, encoding: 'utf8', env: process.env }).status;
 const lf = (s) => s.replace(/\r\n/g, '\n');
 const f = path.join(ROOT, LAB);
+// INT 1.1.103 (MUTANT-JOURNAL-GATE): recover a killed run, check every anchor (--anchors-only stops there),
+// and mutate through the journal.
+recover(ROOT);
+if (process.argv.includes('--recover-only')) process.exit(0);
+checkAnchors(ROOT, M.map(([name, from]) => ({ name, file: LAB, from })));
 const orig = fs.readFileSync(f, 'utf8');
-for (const [, from] of M) {
-  const n = lf(orig).split(from).length - 1;
-  if (n !== 1) { console.log(`ANCHOR x${n}: ${from}`); process.exit(2); }
-}
 const base = unit();
 console.log(`baseline unit: exit ${base}`);
 if (base !== 0) { console.log('baseline fails: no census'); process.exit(2); }
@@ -35,11 +37,11 @@ for (const [name, from, to] of M) {
   try {
     let t = lf(orig).replace(from, () => to);
     if (orig.includes('\r\n')) t = t.replace(/\n/g, '\r\n');
-    fs.writeFileSync(f, t);
+    mutateFile(ROOT, f, orig, t);
     const k = unit() !== 0;
     if (k) killed++;
     console.log(`${k ? 'KILLED' : 'SURVIVED'} ${name}`);
-  } finally { fs.writeFileSync(f, orig); }
+  } finally { restoreFile(ROOT, f, orig); }
 }
 console.log(`TOTAL ${killed}/${M.length}`);
 process.exitCode = killed === M.length ? 0 : 1;
