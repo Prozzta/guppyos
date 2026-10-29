@@ -1133,8 +1133,10 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
   const namer = cardNamer(cardIds);
   const match = (text: unknown): string[] => namer(text).cards;
   const namesOf = (e: ReportedCommit): CardNames => namer(e.into !== undefined ? e.into : e.text);
-  /** The cards other than `card` a commit names (known ids and card-shaped unknown tokens). */
+  /** Known ids plus card-shaped unknown tokens compete in the established attribution paths. */
   const foreign = (e: ReportedCommit, card: string): string[] => { const n = namesOf(e); return [...n.cards.filter((c) => c !== card), ...n.others]; };
+  /** F9: only board cards compete at the carried-commit check for a reported done sha. */
+  const confirmedForeign = (e: ReportedCommit, card: string): string[] => namesOf(e).cards.filter((c) => c !== card);
   // Round 10 (Jim's gate, must 4): the card-shaped ids a text writes that are no board card's form at all
   // (a shared form of several board cards is "other" to the namer but not a stranger: round 9 R2 ties it
   // to the linked card).
@@ -1405,7 +1407,7 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
       // carried commit that names only other cards (a refused link that another listed commit confirmed,
       // a subject card confirmed by a different commit) is never the value: no fallback to it.
       if (entry && !fieldRow) {
-        const f = foreign(entry, card);
+        const f = confirmedForeign(entry, card);
         if (f.length && !namesOf(entry).cards.includes(card)) { skip(m.id, 'ambiguous', [card, ...f].slice(0, 8)); return; }
       }
       const via = entry?.merge;

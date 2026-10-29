@@ -25,6 +25,31 @@ test.after(() => {
   fs.rmSync(JAIL, { recursive: true, force: true });
 });
 
+test('F9/F10: unknown numbered commit subjects are neutral, while a plain link-tier commit keeps attribution', async () => {
+  const CARDS = ['ABC-KEYS-14', 'XYZ-7'];
+  const S = H('a'), T = H('b');
+  const g = fakeGit({ aaa1aaa: S, bbb1bbb: T }, { [S]: 'ABC-KEYS-19: builder typo', [T]: 'XYZ-7: known other card' }, { files: { [S]: SRC, [T]: SRC } });
+  let r = await F.doneMailFacts([mail('f9-own', 'ABC-KEYS-14 @aaa1aaa: PASS', { cards: ['ABC-KEYS-14'] })], CARDS, g);
+  assert.equal(commitOf(r, slot('ABC-KEYS-14', SAM)), S, 'unknown commit token is neutral');
+  r = await F.doneMailFacts([mail('f10-link', 'PASS @aaa1aaa', { cards: ['ABC-KEYS-14'], in_reply_to: 'thread' })], CARDS, fakeGit({ aaa1aaa: S }, { [S]: 'plain commit' }, { files: { [S]: SRC } }));
+  assert.equal(commitOf(r, slot('ABC-KEYS-14', SAM)), S, 'plain commit preserves link-tier attribution');
+  r = await F.doneMailFacts([mail('f10-other', 'PASS @bbb1bbb', { cards: ['ABC-KEYS-14'], in_reply_to: 'thread' })], CARDS, g);
+  assert.equal(commitOf(r, slot('ABC-KEYS-14', SAM)), undefined, 'known other-card commit remains refused');
+});
+
+test('F9 mutant: widening it into foreignOnly lets a numbered unknown token carry an int field row', async () => {
+  const file = path.resolve(__dirname, '..', 'src/main/claims/derivedFacts.ts');
+  const source = fs.readFileSync(file, 'utf8');
+  const needle = 'const foreignOnly = (e: ReportedCommit): boolean => !e.docsOnly && foreign(e, card).some(otherCard) && !namesOf(e).cards.includes(card);';
+  const mutant = source.replace(needle, needle.replace('foreign(e, card)', 'confirmedForeign(e, card)'));
+  assert.notEqual(mutant, source, 'F9 foreignOnly mutant must apply once');
+  const MF = loadTs.fromText('src/main/claims/derivedFacts.ts', mutant);
+  const C = H('c');
+  const g = fakeGit({ ccc1ccc: C }, { [C]: 'OMEGA-PINS-301: another item' }, { files: { [C]: SRC } });
+  const r = await MF.doneMailFacts([mail('f9-mutant', 'pin fix @ccc1ccc', { card: 'INT-9.4.2' })], ['INT-9.4.2'], g);
+  assert.equal(commitOf(r, slot('INT-9.4.2', SAM)), C, 'MUTANT F9: foreignOnly must refuse numbered unknown tokens');
+});
+
 const loadTs = require('./load-ts.cjs');
 const F = loadTs('src/main/claims/derivedFacts.ts');
 
