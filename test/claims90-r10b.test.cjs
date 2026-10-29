@@ -234,6 +234,8 @@ test('must 6: an id (or its leading form) written straight before its own @sha i
   assert.equal(F.isPairForm('ABC-CRAWL', 'ABC-CRAWL-19'), true);
   assert.equal(F.isPairForm('CRAWL', 'ABC-CRAWL-19'), false, 'a lone inner word is no form');
   assert.equal(F.isPairForm('19', 'ABC-CRAWL-19'), false, 'a number is no form');
+  assert.equal(F.isPairForm('INT', 'INT-1.2'), false, 'a line word alone names the line, not the int card');
+  assert.equal(F.isPairForm('INT-1.2', 'INT-1.2'), true);
   assert.equal(F.pairName('abc', 'ABC-CRAWL-19', CARDS), true);
   assert.equal(F.pairName('guppy/abc-crawl-19', 'ABC-CRAWL-19', CARDS), true);
   assert.equal(F.pairName('abc', 'ABC-CRAWL-19', [...CARDS, 'ABC-SWEEP-20']), false, 'shared: no card\'s');
@@ -264,4 +266,45 @@ test('must 6 git: DerivedGit.refCommit gives a branch\'s sha, origin\'s copy fir
   assert.equal(await dg.refCommit('guppy/xyz-34'), shas[1]);
   assert.equal(await dg.refCommit('guppy/none-1'), null);
   assert.equal(await dg.isAncestor(shas[0], await dg.refCommit('guppy/abc-12')), true);
+});
+
+// ———————————————————————————————————————————————————————————— must 7 (F2, the SHOULD god ruled in)
+
+test('must 7: "@ sha" with a space is an @sha; the per-card "merge guppy/<branch> @<sha>" lines of an int-merge report in the BODY pair each card with its sha, held to the card\'s branch', async () => {
+  const CARDS = ['ABC-CRAWL-19', 'DEF-SWEEP-20', 'INT-1.2', 'XYZ-34'];
+  const A = H('1'), D = H('2'), S = H('3');
+  const mk = (refs) => fakeGit({ '1111aaa': A, '2222bbb': D, '3333ccc': S }, { [A]: 'fix: capacity sweep over the hull', [D]: 'DEF-SWEEP-20: the follow-up', [S]: 'int-1.2 stage 4: both merged' },
+    { files: { [A]: SRC, [D]: SRC, [S]: SRC }, times: { [A]: 1, [D]: 2, [S]: 3 }, ...(refs ? { refs } : {}) });
+  const SUBJ = 'int-1.2 @ 3333ccc: ABC-CRAWL-19 merged (Jim PASS) and DEF-SWEEP-20 follow-up merged';
+  const BODY = 'Both on origin now.\nmerge guppy/abc-crawl-19 @1111aaa\nmerge guppy/def-sweep-20 @2222bbb\n';
+  const run = (id, git, extra = {}) => F.doneMailFacts([mail(id, SUBJ, { body: BODY, cards: ['INT-1.2'], in_reply_to: 'req-1', ...extra })], CARDS, git);
+  // Twin: pairs listed in the body: each card gets the sha its body line pairs with it (DEF is no longer ambiguous).
+  let r = await run('m7-a', mk({ 'guppy/abc-crawl-19': A, 'guppy/def-sweep-20': D }));
+  assert.equal(commitOf(r, slot('ABC-CRAWL-19', SAM)), A, 'MUTANT must 7: the body pair is the card\'s sha');
+  assert.equal(commitOf(r, slot('DEF-SWEEP-20', SAM)), D, 'MUTANT must 7: the second body pair');
+  assert.match(r.facts.find((f) => f.slot === slot('ABC-CRAWL-19', SAM)).text, /body pairs with the card/);
+  assert.equal(r.skips.some((s) => s.cards && (s.cards.includes('ABC-CRAWL-19') || s.cards.includes('DEF-SWEEP-20'))), false);
+  // Twin: a body pair confirmed by branch reachability: on the card's branch, a fact; on another card's branch alone, skipped.
+  r = await run('m7-b', mk({ 'guppy/abc-crawl-19': A, 'guppy/xyz-34': D }));
+  assert.equal(commitOf(r, slot('ABC-CRAWL-19', SAM)), A);
+  assert.equal(commitOf(r, slot('DEF-SWEEP-20', SAM)), D, 'a commit whose subject names the card needs no branch');
+  r = await run('m7-c', mk({ 'guppy/xyz-34': A, 'guppy/def-sweep-20': D }));
+  assert.equal(commitOf(r, slot('ABC-CRAWL-19', SAM)), undefined, 'MUTANT must 7: an unnamed commit on another card\'s branch alone is not the pair');
+  assert.ok(r.skips.some((s) => s.mail === 'm7-c' && s.reason === 'ambiguous' && s.cards[0] === 'ABC-CRAWL-19'));
+  assert.equal(commitOf(r, slot('DEF-SWEEP-20', SAM)), D);
+  // Twin: the spaced "@ S" form on its own: the subject @sha of a single card.
+  r = await F.doneMailFacts([mail('m7-d', 'DEF-SWEEP-20 landed @ 2222bbb (Jim PASS)', { cards: ['INT-1.2'], in_reply_to: 'req-1' })], CARDS, mk(null));
+  assert.equal(commitOf(r, slot('DEF-SWEEP-20', SAM)), D, 'MUTANT must 7: "@ sha" is an @sha');
+  assert.match(r.facts.find((f) => f.slot === slot('DEF-SWEEP-20', SAM)).text, /subject's @sha/);
+  assert.equal(commitOf(r, slot('INT-1.2', SAM)), undefined);
+  // A quoted body line (a reply quoting the request) is not a pair; a body line naming no card's form is none.
+  r = await F.doneMailFacts([mail('m7-e', 'int-1.2 @ 3333ccc: DEF-SWEEP-20 follow-up merged', { body: '> merge guppy/abc-crawl-19 @1111aaa\nmerge guppy/def-sweep-20 @2222bbb\nsee also @1111aaa', cards: ['INT-1.2'], in_reply_to: 'req-1' })], CARDS, mk({ 'guppy/abc-crawl-19': A, 'guppy/def-sweep-20': D }));
+  assert.equal(commitOf(r, slot('DEF-SWEEP-20', SAM)), D);
+  assert.equal(commitOf(r, slot('ABC-CRAWL-19', SAM)), undefined, 'a quoted line pairs nothing');
+  // The pins.
+  assert.deepEqual(F.subjectAtShas('int-1.2 @ 3333ccc: X'), [{ sha: '3333ccc', name: 'int-1.2' }]);
+  assert.deepEqual(F.shaMentions('int-1.2 @ 3333ccc').map((x) => x.sha), ['3333ccc']);
+  assert.deepEqual([...F.pairedAtShas(SUBJ, ['ABC-CRAWL-19', 'DEF-SWEEP-20'], F.cardNamer(CARDS), CARDS, [{ sha: '1111aaa', name: 'guppy/abc-crawl-19' }, { sha: '2222bbb', name: 'guppy/def-sweep-20' }])],
+    [['ABC-CRAWL-19', ['1111aaa']], ['DEF-SWEEP-20', ['2222bbb']]], 'MUTANT must 7: body pairs, and the subject\'s int sha goes to neither');
+  assert.equal(F.loneAtCounts('ABC-CRAWL-19 landed @ 1111aaa; XYZ-34 FAIL', { sha: '1111aaa', name: 'landed' }, 'ABC-CRAWL-19', F.cardNamer(CARDS), CARDS), true, 'the spaced @sha sits in the card\'s segment');
 });
