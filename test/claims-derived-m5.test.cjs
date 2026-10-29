@@ -630,6 +630,44 @@ test('backfill CLI: runs on a hive copy with the key on stdin, refuses the live 
   assert.equal(nokey.status, 2);
 });
 
+test('round 10 (must 5b): a done mail the index never linked and no ledger holds reaches the derived pass when the hive proves its delivery, end to end through the backfill script and memory get', async () => {
+  const x = setup();
+  const r = makeRepo();
+  const sha = r.commit('ABC-12: the widget', '2026-10-01T10:00:00Z');
+  const tasks = { tasks: [{ id: 'ABC-12', title: 'The widget', status: 'doing', assignee: 'agent-x', dependsOn: [], priority: 1, createdAt: '2026-10-01T00:00:00Z' }] };
+  fs.writeFileSync(path.join(x.root, 'tasks.json'), JSON.stringify(tasks));
+  // The mail: to a non-god agent, no card field, the subject writing the card's role form (ABC-12-INT), never
+  // indexed (the index knows exact ids only) and never ledgered (delivered before the ledger existed). Its
+  // delivery is proven by the sender's outbox/.sent copy matching the inbox copy.
+  const sent = { to: 'agent-x', act: 'done', subject: `ABC-12-INT M-5 @${sha.slice(0, 7)}: OK to merge`, body: 'the int build is green' };
+  const inbox = { id: 'm-p1', from: 'agent-y', created_at: '2026-10-03T12:00:00Z', ...sent };
+  for (const ag of ['agent-x', 'agent-y']) fs.mkdirSync(path.join(x.root, 'agents', ag, 'inbox', '.done'), { recursive: true });
+  fs.mkdirSync(path.join(x.root, 'agents', 'agent-y', 'outbox', '.sent'), { recursive: true });
+  fs.writeFileSync(path.join(x.root, 'agents', 'agent-x', 'inbox', 'm-p1.json'), JSON.stringify(inbox));
+  // A twin with no sender copy: nothing proves it, so it never counts (its subject would claim ABC-12 too).
+  fs.writeFileSync(path.join(x.root, 'agents', 'agent-x', 'inbox', 'm-p2.json'), JSON.stringify({ ...inbox, id: 'm-p2', subject: 'ABC-12-INT M-5 @0000000: OK to merge' }));
+  assert.deepEqual(W.readDoneMails(x.root, undefined, undefined, { proven: true }).map((m) => m.id), [], 'MUTANT: an unproven inbox copy is read');
+  fs.writeFileSync(path.join(x.root, 'agents', 'agent-y', 'outbox', '.sent', 'm-p1.json'), JSON.stringify(sent));
+  assert.deepEqual(W.readDoneMails(x.root).map((m) => m.id), [], 'the live tick reads the index and the ledgers only');
+  const proven = W.readDoneMails(x.root, undefined, undefined, { proven: true });
+  assert.deepEqual(proven.map((m) => [m.id, m.from, m.subject, m.body]), [['m-p1', 'agent-y', sent.subject, sent.body]], 'MUTANT must 5b: the full pass reads the proven mail');
+  // End to end: the backfill script, then memory get on the derived ledger it wrote.
+  await x.store.appendRecord(D, fact('seed', { key: 'card.seed.status' }), 'derived-internal');
+  x.store.close();
+  const key = Buffer.from(x.keys.load().key).toString('hex');
+  const cli = path.join(__dirname, '..', 'scripts', 'claims-derived-backfill.cjs');
+  const ok = spawnSync(process.execPath, [cli, '--hive', x.root, '--user-data', `${x.root}-ud`, '--repo', r.repo, '--now', '2026-10-04T00:00:00Z'], { input: key, encoding: 'utf8', env: { ...process.env, MUNDER_HIVE_ROOT: path.join(JAIL, 'live-hive') }, timeout: 120_000 });
+  assert.equal(ok.status, 0, `${ok.stderr}${ok.stdout}`);
+  const out = JSON.parse(ok.stdout);
+  assert.equal(out.doneMails, 1);
+  assert.equal(out.doneShas.appended, 1, 'MUTANT must 5b: the unindexed done mail gives ABC-12 its done sha');
+  const records = x.store.readLedger(D).records;
+  const G = loadTs('src/main/claims/get.ts');
+  const got = G.resolveGet('ABC-12', {}, { ledgers: { derived: records }, registry: DEFAULT_KEY_REGISTRY, reconcileItems: [], tasks: tasks.tasks, mailRows: () => null, ruleConfig: { r4: false } });
+  assert.ok(got.keys.includes('card.abc-12.donesha'), JSON.stringify(got.keys));
+  assert.match(JSON.stringify(got), new RegExp(sha), 'memory get shows the done sha');
+});
+
 test('backfill CLI: refuses the live hive in any spelling or from above, the app\'s own user data and a foreign key record', async () => {
   const x = setup();
   const r = makeRepo();

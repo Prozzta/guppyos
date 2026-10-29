@@ -27,7 +27,7 @@ import {
 import { mergeHotCold, readArchive } from '../taskArchive';
 import { doneMailStatuses, writeDoneMailStatus } from './derivedDoneStatus';
 import { isValidMailId, mailBodyHash, type MailLedgerDoc } from '../mailLedger';
-import { TRUSTED_METHODS, type MailLinkMethod } from '../mailCards';
+import { TRUSTED_METHODS, readProvenMail, type MailLinkMethod } from '../mailCards';
 
 export interface DerivedStore {
   readLedger(agentId: string): ReadResult;
@@ -168,14 +168,19 @@ function readArchiveTimes(hiveRoot: string): Map<string, string> {
  * subject, card and delivery time come from the ledger entry, never from an agent-writable inbox
  * file (Jim's M5 audit MUST 1). The body (for its shas) is read from that agent's inbox or
  * inbox/.done copy only when it hashes to the entry's bodyHash; otherwise the subject alone counts.
- * An inbox file the ledger never recorded is ignored. `seen` (agent/id) skips entries read before.
+ * An inbox file the ledger never recorded is ignored, except on the full pass (`proven`, round 10 must
+ * 5b): a done mail that neither the index nor a ledger holds still counts when the hive's records prove
+ * its delivery (readProvenMail: the sender's outbox/.sent copy matches the recipient's inbox copy),
+ * so a done mail the index never linked (its subject writes a card's own form, not its id) reaches
+ * the subject rule. `seen` (agent/id) skips entries read before.
  */
-export function readDoneMails(hiveRoot: string, seen?: Set<string>, subjects?: Map<string, string>): MailLike[] {
+export function readDoneMails(hiveRoot: string, seen?: Set<string>, subjects?: Map<string, string>, opts: { proven?: boolean } = {}): MailLike[] {
   const out: MailLike[] = readIndexDoneMails(hiveRoot, seen, subjects);
   const byId = new Map(out.map((m) => [m.id as string, m]));
+  const have = new Set(byId.keys());
   const mailDir = join(hiveRoot, 'state', 'mail');
   let files: string[] = [];
-  try { files = readdirSync(mailDir).filter((n) => n.endsWith('.json')).sort(); } catch { return out; }
+  try { files = readdirSync(mailDir).filter((n) => n.endsWith('.json')).sort(); } catch { files = []; }
   for (const f of files) {
     const agent = f.slice(0, -'.json'.length);
     if (agent === DERIVED_AGENT_ID || !isValidMailId(agent)) continue;
@@ -190,14 +195,31 @@ export function readDoneMails(hiveRoot: string, seen?: Set<string>, subjects?: M
       const k = `${agent}/${e.id}`;
       if (seen?.has(k)) continue;
       seen?.add(k);
-      const had = byId.get(e.id);
-      if (had) continue;   // the index row has the body and the link method
+      if (byId.has(e.id)) continue;   // the index row has the body and the link method
+      have.add(e.id);
       out.push({
         id: e.id, from: e.from, act: 'done', subject: e.subject,
         ...(e.cardId ? { card: e.cardId } : {}),
         ...(typeof e.inReplyTo === 'string' && e.inReplyTo ? { in_reply_to: e.inReplyTo } : {}),
         ...(Number.isFinite(e.deliveredAt) ? { created_at: new Date(e.deliveredAt).toISOString() } : {}),
         ...(typeof e.bodyHash === 'string' ? bodyOf(join(hiveRoot, 'agents', agent, 'inbox'), e.id, e.bodyHash) : {}),
+      });
+    }
+  }
+  if (opts.proven) {
+    for (const m of readProvenMail(hiveRoot).mails) {
+      if (subjects && typeof m.subject === 'string' && !subjects.has(m.id)) subjects.set(m.id, m.subject);
+      if (m.act !== 'done' || have.has(m.id)) continue;
+      const k = `proven/${m.id}`;
+      if (seen?.has(k)) continue;
+      seen?.add(k);
+      have.add(m.id);
+      out.push({
+        id: m.id, from: m.from, act: 'done', subject: m.subject,
+        ...(typeof m.card === 'string' && m.card ? { card: m.card } : {}),
+        ...(typeof m.in_reply_to === 'string' && m.in_reply_to ? { in_reply_to: m.in_reply_to } : {}),
+        ...(typeof m.created_at === 'string' ? { created_at: m.created_at } : {}),
+        ...(m.body !== undefined ? { body: m.body } : {}),
       });
     }
   }
@@ -318,7 +340,8 @@ export interface BackfillCounts {
 export async function runDerivedBackfill(deps: DerivedWriterDeps, input: BackfillInput): Promise<BackfillCounts> {
   const cards = readCards(input.hiveRoot);
   const subjects = new Map<string, string>();
-  const mails = input.git ? readDoneMails(input.hiveRoot, undefined, subjects) : [];
+  // Round 10 (must 5b): the full pass also reads proven done mails the index and the ledgers lack.
+  const mails = input.git ? readDoneMails(input.hiveRoot, undefined, subjects, { proven: true }) : [];
   if (input.git && input.prefetch) {
     const shas = new Set<string>();
     for (const c of cards) for (const t of [c.result, c.notes]) for (const m of shaMentions(t)) shas.add(m.sha);
