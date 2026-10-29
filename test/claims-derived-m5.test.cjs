@@ -291,7 +291,7 @@ test('F6 release fields: branch head is independent of the tag and installer dig
     [{ name: 'v9.2.1', commit: tag, date: '2026-10-25T00:00:00Z' }, { name: 'v9.2.2', commit: H('d'), date: '2026-10-25T00:00:00Z' }],
     undefined,
     [{ version: '9.2.1', commit: head }, { version: '9.2.2', commit: H('d') }],
-    { cards: [{ id: 'CUT-9.2.1', result: 'setup sha256 ' + digest }, { id: 'REL-442', result: 'release-9.2.3 branch setup sha256 ' + numbered }], mails: [{ act: 'done', subject: 'CUT-9.2.2 done', body: 'installer digest ' + 'e'.repeat(64) }, { act: 'done', subject: 'release-9.2.4 setup sha256 ' + 'f'.repeat(64) + '; release-9.2.5 installer digest ' + 'a'.repeat(64) }] },
+    { cards: [{ id: 'CUT-9.2.1', result: 'setup sha256 ' + digest }, { id: 'REL-442', result: 'release-9.2.3 branch setup sha256 ' + numbered }], mails: [{ act: 'done', subject: 'CUT-9.2.2 done', body: 'installer digest ' + 'e'.repeat(64) }, { act: 'done', subject: 'REL-234 done', body: "target release-9.2.4, title 'Guppy 9.2.4'\nSETUP sha256: " + 'f'.repeat(64) }, { act: 'done', subject: 'release report', body: 'release-9.2.5 setup sha256 ' + 'a'.repeat(64) + '; release-9.2.6 installer digest ' + 'b'.repeat(64) }] },
   );
   const by = Object.fromEntries(facts.map((f) => [f.key, f]));
   assert.equal(by['release.9.2.1.head'].value, head, 'twin: docs commit after tag remains the branch head');
@@ -299,9 +299,9 @@ test('F6 release fields: branch head is independent of the tag and installer dig
   assert.equal(by['release.9.2.1.installer'].value, digest);
   assert.equal(by['release.9.2.2.installer'].value, 'e'.repeat(64));
   assert.equal(by['release.9.2.3.installer'].value, numbered, 'a numbered release card can name its release branch in text');
-  assert.equal(by['release.9.2.4.installer'].value, 'f'.repeat(64), 'a multi-release mail keeps each version with its own digest');
-  assert.equal(by['release.9.2.5.installer'].value, 'a'.repeat(64));
-  assert.equal(by['release.9.2.6.installer'], undefined, 'twin: no labelled digest creates no field');
+  assert.equal(by['release.9.2.4.installer'].value, 'f'.repeat(64), 'a numbered card mail keeps an upper-case, colon-labelled digest after a newline');
+  assert.equal(by['release.9.2.5.installer'].value, 'a'.repeat(64), 'a multi-release mail keeps each version with its own digest');
+  assert.equal(by['release.9.2.6.installer'].value, 'b'.repeat(64));
   assert.equal(by['release.9.2.1'].refs.some((r) => r.value === digest), false, 'digest never becomes a commit ref');
 });
 

@@ -210,6 +210,16 @@ test('mail rule, done-sha (Jim ac6f85, G1 6f7b2c): for donesha or the bare card,
   const dDigest = deps({ mailRows: () => [mail('2026-10-10T09-00-00-000Z-digest', 'alpha-1', 'god', 'done', 'FOO-7 done', '2026-10-10T09:00:00.000Z', 'published setup sha256 deadbeef')] });
   dDigest.ledgers['alpha-1'] = [...dDigest.ledgers['alpha-1'], c('c-eeeeeeeeeee2', 'alpha-1', 'card.foo-7.donesha', '2026-10-01T10:00:00.000Z', 'FOO-7 published setup sha256 deadbeef')];
   assert.equal(get('card.foo-7.donesha', { agent: 'alpha-1' }, dDigest).current.source, 'claim', 'known-set digest prefixes take the same done-mail guard as fallback shas');
+  for (const [word, body, why] of [
+    ['faceb00', 'artifact faceb00d…cafe', 'an abbreviated digest has more hex after its ellipsis'],
+    ['feedfac', 'uploaded setup.exe feedface', 'a hex value directly after an asset filename is a digest'],
+  ]) {
+    const dArtifact = deps({ mailRows: () => [mail('2026-10-11T09-00-00-000Z-artifact', 'alpha-1', 'god', 'done', 'FOO-7 done', '2026-10-11T09:00:00.000Z', body)] });
+    dArtifact.ledgers['alpha-1'] = [...dArtifact.ledgers['alpha-1'], c(`c-${word}11111`, 'alpha-1', 'card.foo-7.donesha', '2026-10-01T10:00:00.000Z', `FOO-7 known ${word}`)];
+    assert.equal(get('card.foo-7.donesha', { agent: 'alpha-1' }, dArtifact).current.source, 'claim', why);
+  }
+  const dReal = deps({ mailRows: () => [mail('2026-10-12T09-00-00-000Z-real', 'alpha-1', 'god', 'done', 'FOO-7 done', '2026-10-12T09:00:00.000Z', 'built setup.exe from abc1234f') ] });
+  assert.equal(get('card.foo-7.donesha', { agent: 'alpha-1' }, dReal).current.source, 'mail', 'a real commit mentioned after setup.exe in prose remains a done sha');
 });
 
 test('time compare is epoch ms, never strings: a tie goes to the claim; a dashed mail-id time (no created_at) parses; an ISO string that would sort "later" as text but is earlier loses (census row)', () => {

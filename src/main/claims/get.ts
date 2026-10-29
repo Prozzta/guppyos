@@ -194,14 +194,23 @@ export const safeId = (id: string): string => id.replace(/-(?=[0-9a-f]{7,}(?![0-
 
 const sha7 = (s: string): string[] => (s.toLowerCase().match(SHA_RE) ?? []).filter((x) => /\d/.test(x)).map((x) => x.slice(0, 7));
 
+/** A done-mail sha can be an artifact digest rather than a commit.  Keep genuine prose such as
+ * "built setup.exe from <commit>" valid: the asset rule only applies when the hex is adjacent. */
+const safeDoneMailSha = (s: string, value: string, at: number): boolean => {
+  if (!/[a-f]/i.test(value)) return false;
+  const before = s.slice(Math.max(0, at - 48), at).toLowerCase();
+  const after = s.slice(at + value.length);
+  if (/(?:setup|installer)\s+(?:digest|sha256|sha-256)\s*[:=]?\s*$/.test(before)) return false;
+  if (/\.(?:exe|blockmap|yml|zip)\s*$/.test(before)) return false;
+  return !/^[0-9a-f]*(?:…|\.\.\.)[0-9a-f]{4}/i.test(after);
+};
 /** The done-mail fallback has no repository lookup. An all-digit run is usually an epoch, and an
  * explicitly labelled setup/installer sha256 is an artefact digest; both are rejected here only. */
 const mailCommitShas = (s: string): string[] => {
   const out: string[] = [];
   for (const m of s.toLowerCase().matchAll(SHA_RE)) {
     const x = m[0];
-    const before = s.slice(Math.max(0, m.index! - 32), m.index!).toLowerCase();
-    if (!/\d/.test(x) || !/[a-f]/.test(x) || /(?:setup|installer)\s+(?:digest|sha256|sha-256)\s*[:=]?\s*$/.test(before)) continue;
+    if (!/\d/.test(x) || !safeDoneMailSha(s, x, m.index!)) continue;
     out.push(x.slice(0, 7));
   }
   return out;
@@ -209,9 +218,7 @@ const mailCommitShas = (s: string): string[] => {
 /** Apply the done-mail sha guard to a known value too: claim prose can put a digest prefix in `known`. */
 const safeKnownMailValue = (s: string, value: string, at: number): boolean => {
   if (!/^[0-9a-f]{7,40}$/i.test(value)) return true;
-  if (!/[a-f]/i.test(value)) return false;
-  const before = s.slice(Math.max(0, at - 32), at).toLowerCase();
-  return !/(?:setup|installer)\s+(?:digest|sha256|sha-256)\s*[:=]?\s*$/.test(before);
+  return safeDoneMailSha(s, value, at);
 };
 const versions = (s: string): string[] => s.match(VERSION_RE) ?? [];
 

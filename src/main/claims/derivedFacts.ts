@@ -793,7 +793,10 @@ export function releaseFacts(sections: readonly ChangelogSection[], tags: readon
     const releaseCard = new RegExp('\\b(?:release|cut)-' + escaped + '(?![0-9.])', 'i');
     const labelled = /\b(?:setup|installer)\s+(?:digest|sha256|sha-256)\s*[:=]?\s*([0-9a-f]{64})(?![0-9a-f])/i;
     // Keep the version beside its own digest: one done mail can report two releases.
-    const afterVersion = new RegExp(releaseCard.source + '[^\\n]{0,240}?' + labelled.source, 'i');
+    // A completion report commonly puts the branch and installer on separate lines.  Do not
+    // walk past a later release mention, though: that digest belongs to that later version.
+    const anotherRelease = '\\b(?:release|cut)-\\d+(?:\\.\\d+)+(?![0-9.])';
+    const afterVersion = new RegExp(releaseCard.source + '(?:(?!' + anotherRelease + ')[\\s\\S]){0,240}?' + labelled.source, 'i');
     const digestAfterVersion = (text: unknown): string | null => typeof text === 'string' ? afterVersion.exec(text)?.[1]?.toLowerCase() ?? null : null;
     const digest = (text: unknown): string | null => typeof text === 'string' ? labelled.exec(text)?.[1]?.toLowerCase() ?? null : null;
     for (const c of sources.cards ?? []) {
