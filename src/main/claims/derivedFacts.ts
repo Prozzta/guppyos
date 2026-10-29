@@ -911,12 +911,13 @@ export function leadsWithCard(subject: string, id: string): boolean {
 /**
  * Round 6 (god 18e97a, R6-1): `token` (an UPPER-KEBAB token that is no known id) is a short form of the
  * card `id`: (a) the id plus or minus a trailing -NNN (FEAT-ALPHA-WIDGET-DRAW-123; SYN-BETA-PIPE for
- * SYN-BETA-PIPE-123); (b) a contiguous PREFIX or SUFFIX of the id's segments, two or more of them, at
- * least one not a bare number (FEAT-ALPHA, WIDGET-DRAW); (c) the initials of the id's segments, alone
- * or plus -ID / -NNN (FAWD, FAWD-ID, FAWD-7). A middle run (ALPHA-WIDGET), a one-segment overlap
- * (DRAW-STUFF), a lower-case or one-segment abbreviation never match: no guessing beyond these forms
- * (R6-4, a documented residual). The recogniser takes the token as the card when exactly one known
- * card fits, as "other" when several fit.
+ * SYN-BETA-PIPE-123); (b) a contiguous run of the id's segments, two or more of them, at least one not
+ * a bare number: a prefix or a suffix (FEAT-ALPHA, WIDGET-DRAW) and, since round 10 (Jim's gate, must
+ * 5a, closing the R6-4 residual), an INNER run too (ALPHA-WIDGET; WRAP-GAP for PRE-WRAP-GAP-12); (c) the
+ * initials of the id's segments, alone or plus -ID / -NNN (FAWD, FAWD-ID, FAWD-7). A one-segment overlap
+ * (DRAW-STUFF), a run broken by a foreign segment (LIMIT-RE-REBASE), a lower-case or one-segment
+ * abbreviation never match: no guessing beyond these forms. The recogniser takes the token as the card
+ * when exactly one known card fits, as "other" when several fit.
  */
 export function isOwnForm(token: string, id: string): boolean {
   const t = token, c = id.toUpperCase();
@@ -928,7 +929,7 @@ export function isOwnForm(token: string, id: string): boolean {
   if (c.startsWith(`${t}-`) && NUM_RE.test(c.slice(t.length + 1))) return true;
   const ts = t.split('-'), cs = c.split('-');
   if (ts.length >= 2 && ts.length < cs.length && ts.some((s) => !NUM_RE.test(s))) {
-    if (t === cs.slice(0, ts.length).join('-') || t === cs.slice(cs.length - ts.length).join('-')) return true;
+    for (let i = 0; i + ts.length <= cs.length; i++) if (t === cs.slice(i, i + ts.length).join('-')) return true;
   }
   if (cs.length < 2) return false;
   const initials = cs.map((s) => s[0]).join('');

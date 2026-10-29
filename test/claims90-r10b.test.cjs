@@ -153,3 +153,44 @@ test('must 4: a subject writing a card-shaped id the board lacks names that card
   r = await F.doneMailFacts([mail('m4-f', 'Re: WIDGET-7 @1111aaa: PASS', { cards: ['ALPHA-WIDGET-7'], in_reply_to: 'req-1' })], ['ALPHA-WIDGET-7', 'BETA-WIDGET-7'], git);
   assert.equal(commitOf(r, slot('ALPHA-WIDGET-7', SAM)), S, 'a shared form is the linked card\'s, not a stranger');
 });
+
+// ———————————————————————————————————————————————————————————— must 5a (F1)
+
+test('must 5a: a run of INNER segments unique among board ids names that card; a shared run stays unresolved; two unique forms go the F2 way; a run broken by a foreign word is no form', async () => {
+  const CARDS = ['PRE-WRAP-GAP-12', 'PRE-LIMIT-RE-12', 'Z-1'];
+  const S = H('1'), W = H('2'), L = H('3');
+  const git = fakeGit(
+    { '1111aaa': S, '2222bbb': W, '3333ccc': L },
+    { [S]: 'PRE-WRAP-GAP-12 + PRE-LIMIT-RE-12: rebase both', [W]: 'PRE-WRAP-GAP-12: the gap', [L]: 'PRE-LIMIT-RE-12: the limit' },
+    { files: { [S]: SRC, [W]: SRC, [L]: SRC }, times: { [S]: 1, [W]: 2, [L]: 3 } },
+  );
+  // Every mail is a reply in card Z-1's thread with no card field: the inner forms must outrank the link.
+  const run = (id, subject, cards = CARDS) => F.doneMailFacts([mail(id, subject, { cards: ['Z-1'], in_reply_to: 'req-1' })], cards, git);
+  // Twin: a unique inner run names the card (never Z-1).
+  let r = await run('m5-a', 'LIMIT-RE rebase: PASS @3333ccc');
+  assert.equal(commitOf(r, slot('PRE-LIMIT-RE-12', SAM)), L, 'MUTANT must 5a: the inner run names the card');
+  assert.equal(commitOf(r, slot('Z-1', SAM)), undefined, 'MUTANT must 5a: the thread link filed it under Z');
+  assert.deepEqual(r.skips, []);
+  // Twin: two unique inner runs over one @sha whose commit names both: a row on each (the F2 way), never Z-1.
+  r = await run('m5-b', 'WRAP-GAP + LIMIT-RE rebase: final PASS @1111aaa');
+  assert.deepEqual(r.facts.map((f) => f.slot).sort(), [slot('PRE-LIMIT-RE-12', SAM), slot('PRE-WRAP-GAP-12', SAM)], 'MUTANT must 5a: both cards get their row');
+  assert.ok(r.facts.every((f) => f.value === S));
+  assert.deepEqual(r.skips, []);
+  // Twin: a run shared by two ids stays unresolved (no row for either), while the unique one still gets its row.
+  r = await run('m5-c', 'WRAP-GAP + LIMIT-RE rebase: final PASS @1111aaa', ['PRE-WRAP-GAP-12', 'OLD-WRAP-GAP-13', 'PRE-LIMIT-RE-12', 'Z-1']);
+  assert.deepEqual(r.facts.map((f) => f.slot), [slot('PRE-LIMIT-RE-12', SAM)], 'a shared run names no card');
+  // Twin: the card form plus an unrelated word in one token is no form (the recogniser says "some other card").
+  r = await run('m5-d', 'LIMIT-RE-REBASE done @3333ccc');
+  assert.deepEqual(r.facts, []);
+  assert.deepEqual(r.skips, [{ mail: 'm5-d', reason: 'ambiguous', cards: ['Z-1', 'PRE-LIMIT-RE-12'] }], 'the broken run is another card; the commit names the real one');
+  // The form rule itself.
+  assert.equal(F.isOwnForm('WRAP-GAP', 'PRE-WRAP-GAP-12'), true, 'MUTANT must 5a: an inner run');
+  assert.equal(F.isOwnForm('LIMIT-RE', 'PRE-LIMIT-RE-12'), true);
+  assert.equal(F.isOwnForm('LIMIT-RE-REBASE', 'PRE-LIMIT-RE-12'), false, 'a run broken by a foreign segment');
+  assert.equal(F.isOwnForm('GAP-12', 'PRE-WRAP-GAP-12'), true, 'a suffix run still counts');
+  assert.equal(F.isOwnForm('RE-12', 'PRE-LIMIT-RE-12'), true);
+  assert.equal(F.isOwnForm('12-RE', 'PRE-LIMIT-RE-12'), false, 'segments out of order');
+  const namer = F.cardNamer(CARDS);
+  assert.deepEqual(namer('WRAP-GAP + LIMIT-RE rebase'), { cards: ['PRE-WRAP-GAP-12', 'PRE-LIMIT-RE-12'], others: [] });
+  assert.deepEqual(F.cardNamer(['PRE-WRAP-GAP-12', 'OLD-WRAP-GAP-13'])('WRAP-GAP rebase'), { cards: [], others: ['WRAP-GAP'] }, 'MUTANT must 5a: a shared inner run is some other card');
+});

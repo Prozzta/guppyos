@@ -504,9 +504,9 @@ test('round 6: own-card short forms are the card; release-only commits confirm o
   assert.equal(commitOf(await link('r6-4', 'FEAT-ALPHA-WIDGET-DRAW', '7a7a7a4'), slot('FEAT-ALPHA-WIDGET-DRAW')), R6.w4, 'MUTANT drop suffix');
   // (c): the initials.
   assert.equal(commitOf(await link('r6-5', 'FEAT-ALPHA-WIDGET-DRAW', '7a7a7a5'), slot('FEAT-ALPHA-WIDGET-DRAW')), R6.w5, 'MUTANT drop initials');
-  // Still refused: a middle run, an unrelated 4-segment id, a form that fits two cards, a one-segment overlap.
-  const middle = await link('r6-6', 'FEAT-ALPHA-WIDGET-DRAW', '7a7a7a6');
-  assert.deepEqual(middle.skips, [{ mail: 'r6-6', reason: 'ambiguous', cards: ['FEAT-ALPHA-WIDGET-DRAW', 'ALPHA-WIDGET'] }], 'MUTANT middle run counts as own');
+  // Round 10 (Jim's gate, must 5a) closes the R6-4 residual: a unique INNER run is the card's own form too.
+  assert.equal(commitOf(await link('r6-6', 'FEAT-ALPHA-WIDGET-DRAW', '7a7a7a6'), slot('FEAT-ALPHA-WIDGET-DRAW')), R6.w6, 'MUTANT drop inner run (round 10 must 5a)');
+  // Still refused: an unrelated 4-segment id, a form that fits two cards, a one-segment overlap.
   const unrelated = await link('r6-7', 'FEAT-ALPHA-WIDGET-DRAW', '7a7a7a7');
   assert.deepEqual(unrelated.skips, [{ mail: 'r6-7', reason: 'ambiguous', cards: ['FEAT-ALPHA-WIDGET-DRAW', 'ZETA-QUAD-NODE-EDGE'] }], 'a 4-segment unrelated id still refuses');
   const twoFit = await link('r6-8', 'FEAT-ALPHA-WIDGET-DRAW', '7a7a7a8');
@@ -516,10 +516,10 @@ test('round 6: own-card short forms are the card; release-only commits confirm o
   // The recogniser and the form rule themselves.
   const namer = F.cardNamer(CARDS6);
   assert.deepEqual(namer('FAWD-7 then SGT-ID and FEAT-ALPHA-WIDGET-DRAW-9, encoded UTF-8 with SHA-1'), { cards: ['FEAT-ALPHA-WIDGET-DRAW', 'SYN-GAMMA-TILE'], others: [] }, 'MUTANT label: UTF-8 / SHA-1 are no card');
-  assert.deepEqual(namer('FEAT-ALPHA lands; ALPHA-WIDGET too'), { cards: [], others: ['FEAT-ALPHA', 'ALPHA-WIDGET'] });
+  assert.deepEqual(namer('FEAT-ALPHA lands; ALPHA-WIDGET too'), { cards: ['FEAT-ALPHA-WIDGET-DRAW'], others: ['FEAT-ALPHA'] }, 'round 10 must 5a: the unique inner run names the card; the shared prefix is some other card');
   assert.equal(F.isOwnForm('WIDGET-DRAW', 'FEAT-ALPHA-WIDGET-DRAW'), true);
   assert.equal(F.isOwnForm('FEAT-ALPHA-WIDGET', 'FEAT-ALPHA-WIDGET-DRAW'), true);
-  assert.equal(F.isOwnForm('ALPHA-WIDGET', 'FEAT-ALPHA-WIDGET-DRAW'), false, 'a middle run');
+  assert.equal(F.isOwnForm('ALPHA-WIDGET', 'FEAT-ALPHA-WIDGET-DRAW'), true, 'an inner run (round 10 must 5a)');
   assert.equal(F.isOwnForm('DRAW-STUFF', 'FEAT-ALPHA-WIDGET-DRAW'), false, 'a one-segment overlap');
   assert.equal(F.isOwnForm('fawd', 'FEAT-ALPHA-WIDGET-DRAW'), false, 'R6-4: lower case is never a form');
   assert.equal(F.isOwnForm('FAWD', 'FEAT-ALPHA-WIDGET-DRAW'), true);
