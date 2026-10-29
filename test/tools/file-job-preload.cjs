@@ -7,18 +7,25 @@
  * so nothing it starts loads it again (its children are in its job already), and marks the join
  * in GUPPY_FILE_JOB_PID, only after it succeeded (bare-node-test-owner pins that with a failing
  * join exe), so the file's own join (own-job.cjs, BARE-NODE-TEST-NO-OWNER) verifies it and stops.
+ * AV-FILEJOB-FLAG: a failed join also appends a { file, why } row to GUPPY_FILE_JOB_FAILS, which the
+ * runner counts in its summary (and a strict run fails on), so the loss is never stderr-only.
  */
 const exe = process.env.GUPPY_FILE_JOB_EXE;
 const opt = process.env.GUPPY_FILE_JOB_OPT; // the exact text run-tests added to NODE_OPTIONS
+const fails = process.env.GUPPY_FILE_JOB_FAILS;
 if (exe && opt && String(process.env.NODE_TEST_CONTEXT || '').startsWith('child')) {
   process.env.NODE_OPTIONS = String(process.env.NODE_OPTIONS || '').replace(opt, '').trim();
   if (!process.env.NODE_OPTIONS) delete process.env.NODE_OPTIONS;
   delete process.env.GUPPY_FILE_JOB_EXE;
   delete process.env.GUPPY_FILE_JOB_OPT;
+  delete process.env.GUPPY_FILE_JOB_FAILS;
   const r = require('child_process').spawnSync(exe, ['join', String(process.pid)], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'], encoding: 'utf8', timeout: 60_000 });
   if (r.status !== 0) {
     const why = (r.stderr || '').trim() || (r.error ? String(r.error) : `exit ${r.status}`);
     process.stderr.write(`[test-runner] ${process.argv[1] || 'a test file'} is not in a job of its own (${why}): a hung run of it is killed from a snapshot\n`);
+    if (fails) {
+      try { require('fs').appendFileSync(fails, `${JSON.stringify({ file: process.argv[1] || '', why })}\n`); } catch { /* the stderr line above stands */ }
+    }
   } else {
     // BARE-NODE-TEST-NO-OWNER: the file's own join (test/tools/own-job.cjs) sees this and does nothing.
     process.env.GUPPY_FILE_JOB_PID = String(process.pid);

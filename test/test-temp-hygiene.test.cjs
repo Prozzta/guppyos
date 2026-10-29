@@ -128,7 +128,7 @@ test('RUNNER pins: the preload goes in NODE_OPTIONS for the real runs, and a lea
   const src = fs.readFileSync(path.join(__dirname, 'tools', 'run-tests.cjs'), 'utf8');
   assert.match(src, /tempJail = spawn === nodeSpawn && watchdog === startWatchdog \? prepareTempJail : \(\) => null,/, 'TEMP PIN: real runs only');
   assert.match(src, /env\.GUPPY_TEMP_JAIL = jail\.root;\r?\n\s*env\.GUPPY_TEMP_JAIL_OPT = opt;/, 'TEMP PIN: the root and the exact option text');
-  assert.match(src, /const mainCode = leaked\(\) && hungCode === 0 \? 1 : hungCode;/, 'TEMP PIN: the perf-lane path checks leaks too');
+  assert.match(src, /const mainCode = leaked\(\) \+ joinFailed\(\) && hungCode === 0 \? 1 : hungCode;/, 'TEMP PIN: the perf-lane path checks leaks too');
 });
 
 test('TEMPDIR: every folder tempDir made, in module scope or in a test, is gone when the file\'s process ends', () => {

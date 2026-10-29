@@ -28,7 +28,7 @@ const MUTANTS = [
   ['M5 empty folders count as leaks', RUNNER, '    if (!entries.length) continue;\n', '', /TEMP LEAKS: the non-empty folders/],
   ['M6 pid-only folder names', RUNNER, 'const pid = /^(\\d+)-[A-Za-z0-9]+$/.exec(name);', 'const pid = /^(\\d+)$/.exec(name);', /TEMP LEAKS: the non-empty folders|TEMP RUN/],
   ['M7 a leak does not fail the run', RUNNER, 'return totals(n && hungCode === 0 ? 1 : hungCode,', 'return totals(hungCode,', /TEMP RUN: a leak fails a run whose tests all pass/],
-  ['M8 the perf-lane path ignores leaks', RUNNER, 'const mainCode = leaked() && hungCode === 0 ? 1 : hungCode;', 'const mainCode = hungCode;', /TEMP PIN: the perf-lane path checks leaks too/],
+  ['M8 the perf-lane path ignores leaks', RUNNER, 'const mainCode = leaked() + joinFailed() && hungCode === 0 ? 1 : hungCode;', 'const mainCode = hungCode;', /TEMP PIN: the perf-lane path checks leaks too/],
   ['M9 the jail root is kept', RUNNER, '    if (jail) { try { removeJail(jail.root); }', '    if (jail) { try { /* kept */ }', /TEMP RUN: the run's temp folders are removed afterwards/],
   ['M10 tempDir does not remove at exit', TOOL, "  if (!made.length) process.once('exit', removeAll);\n", '', /TEMP DIR: and both are removed when the process ends/],
   ['M11 removeDir does not wait', TOOL, '    try { rm(dir); return true; } catch { if (now() >= end) return false; }', '    try { rm(dir); return true; } catch { return false; }', /TEMP REMOVE: gone once the holder lets go/],

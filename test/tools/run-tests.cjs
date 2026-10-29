@@ -71,20 +71,26 @@ function startWatchdog(limitMs, outFile, jobExe = null) {
 }
 
 /**
- * LOAD-FLAKES-178: the per-file job tool (file-job.cs), built once with the in-box csc and kept in
- * the temp folder under its source's hash. Each file joins its own job at start (file-job-preload.cjs),
- * and the watchdog kills a hung file's job at once instead of the tree in its snapshot, which missed
- * a process born between the snapshot and the kill. { exe } or { exe: null, why }.
+ * LOAD-FLAKES-178: the per-file job tool (file-job.cs), built once with the in-box csc and kept under
+ * its source's hash. Each file joins its own job at start (file-job-preload.cjs), and the watchdog
+ * kills a hung file's job at once instead of the tree in its snapshot, which missed a process born
+ * between the snapshot and the kill. { exe } or { exe: null, why }.
+ * AV-FILEJOB-FLAG: built into test/tools/bin (gitignored, like resources/heavyjob/bin), never the temp
+ * folder: Bitdefender's heuristic flagged a fresh unsigned exe there, and 25 never-pruned copies had
+ * piled up. The hash is over the LF-normalised source (a CRLF and an LF checkout name ONE exe), and a
+ * fresh build removes the stale guppy-file-job-*.exe beside it, in that folder only.
  */
 const FILE_JOB_SRC = path.join(__dirname, 'file-job.cs');
 const FILE_JOB_PRELOAD = path.join(__dirname, 'file-job-preload.cjs');
+const FILE_JOB_DIR = path.join(__dirname, 'bin');
 const CSC = path.join(process.env.WINDIR || 'C:/Windows', 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe');
-function prepareFileJob({ csc = CSC, src = FILE_JOB_SRC, dir = require('./shared-temp.cjs').sharedTemp() } = {}) {
+function prepareFileJob({ csc = CSC, src = FILE_JOB_SRC, dir = FILE_JOB_DIR } = {}) {
   if (process.platform !== 'win32') return { exe: null, why: 'not Windows' };
   if (!fs.existsSync(csc)) return { exe: null, why: `no in-box csc at ${csc}` };
-  const hash = require('crypto').createHash('sha256').update(fs.readFileSync(src)).digest('hex').slice(0, 12);
+  const hash = require('crypto').createHash('sha256').update(fs.readFileSync(src, 'utf8').replace(/\r\n/g, '\n')).digest('hex').slice(0, 12);
   const exe = path.join(dir, `guppy-file-job-${hash}.exe`);
   if (fs.existsSync(exe)) return { exe };
+  try { fs.mkdirSync(dir, { recursive: true }); } catch (e) { return { exe: null, why: `cannot make ${dir}: ${e.code || e.message}` }; }
   // Built beside it and moved in: two runs at once never see half a file.
   const tmp = path.join(dir, `guppy-file-job-${hash}-${process.pid}.exe`);
   const r = spawnSync(csc, ['-nologo', '-O', `-out:${tmp}`, src], { encoding: 'utf8', windowsHide: true, timeout: 120_000 });
@@ -93,8 +99,24 @@ function prepareFileJob({ csc = CSC, src = FILE_JOB_SRC, dir = require('./shared
     return { exe: null, why: `csc failed: ${`${r.stdout || ''}${r.stderr || ''}`.trim().slice(0, 300) || String(r.error)}` };
   }
   try { fs.renameSync(tmp, exe); } catch { try { fs.rmSync(tmp, { force: true }); } catch { /* none */ } }
-  return fs.existsSync(exe) ? { exe } : { exe: null, why: `could not place ${exe}` };
+  if (!fs.existsSync(exe)) return { exe: null, why: `could not place ${exe}` };
+  pruneFileJobs(dir, exe);
+  return { exe };
 }
+
+/** AV-FILEJOB-FLAG: remove every other guppy-file-job-*.exe in `dir` (only there), except another
+ *  run's half-built `-<hash>-<pid>.exe` while that pid lives. One in use stays (Windows refuses). */
+function pruneFileJobs(dir, keep, { readdir = (d) => fs.readdirSync(d), remove = (p) => fs.rmSync(p, { force: true }), alive = pidAlive } = {}) {
+  let names;
+  try { names = readdir(dir); } catch { return; }
+  for (const n of names) {
+    if (!/^guppy-file-job-.*\.exe$/i.test(n) || n === path.basename(keep)) continue;
+    const building = /^guppy-file-job-[0-9a-f]{12}-(\d+)\.exe$/i.exec(n);
+    if (building && alive(Number(building[1]))) continue;
+    try { remove(path.join(dir, n)); } catch { /* in use: the next fresh build tries again */ }
+  }
+}
+function pidAlive(pid) { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } }
 
 /**
  * LOAD-BURST-196: the start gate (file-start-gate.cjs): at most `slots` test files load at once, and
@@ -382,11 +404,16 @@ function burstLine(text, slots) {
 /** run() from the per-file jobs on, with the start gate in place (LOAD-BURST-196). */
 function runGated({ rel, renderRel = [], env, gate, jail = null, spawn, cwd, timeoutMs, isTTY, eventsFile, readFile, removeFile, failureFile, writeFailureFile, watchdog, fileJob, log, err, perfDir, filters, readdir, concurrency, cores }) {
   const job = fileJob();
+  const strict = fileJobStrict(env, filters);
+  let joinFile = null;
   if (job.exe) {
     const opt = `--require "${FILE_JOB_PRELOAD.split(path.sep).join('/')}"`;
     env.NODE_OPTIONS = [env.NODE_OPTIONS, opt].filter(Boolean).join(' ');
     env.GUPPY_FILE_JOB_EXE = job.exe;
     env.GUPPY_FILE_JOB_OPT = opt;
+    // AV-FILEJOB-FLAG: each file that could not join its job appends a row here.
+    joinFile = `${eventsFile}.filejob`;
+    env.GUPPY_FILE_JOB_FAILS = joinFile;
   } else if (job.why) {
     // Loud, once per run: the fallback must never pass for the normal path.
     err(`[test-runner] per-file jobs are unavailable (${job.why}): a hung file is killed from a process snapshot, which can miss a process born just before the kill (LOAD-FLAKES-178)`);
@@ -396,20 +423,60 @@ function runGated({ rel, renderRel = [], env, gate, jail = null, spawn, cwd, tim
   const render = renderRel.length ? runNodeTest({ ...fx, rel: renderRel, eventsFile: `${eventsFile}.render`, label: 'render lane: ', extraArgs: ['--test-concurrency=1'] }) : { res: { status: 0 }, counts: ZERO_COUNTS, failures: [], hung: [] };
   if (gate) log(burstLine(readFile(path.join(gate.dir, 'starts.jsonl')), gate.slots));
   // A child that never started, or was killed by a signal (status null), is a failure, not a pass.
-  if (spawnFailed(main.res, '', err) || spawnFailed(render.res, 'render lane: ', err)) return totals(1, sumCounts(main.counts, render.counts), 'not run', log, [...main.failures, ...render.failures], { failureFile, writeFailureFile });
+  if (spawnFailed(main.res, '', err) || spawnFailed(render.res, 'render lane: ', err)) {
+    if (joinFile) removeFile(joinFile);
+    return totals(1, sumCounts(main.counts, render.counts), 'not run', log, [...main.failures, ...render.failures], { failureFile, writeFailureFile });
+  }
   // A timed-out file fails the run whatever node's own exit code says.
   // TEST-TEMP-HYGIENE: a file that left anything in its temp folder fails the run, as a timed-out one does.
   const leaked = () => (jail ? reportTempLeaks(tempLeaks(jail.root), err) : 0);
   const mergedCounts = sumCounts(main.counts, render.counts);
   const mergedFailures = [...main.failures, ...render.failures];
   const hungCode = (main.hung.length || render.hung.length) && main.res.status === 0 && render.res.status === 0 ? 1 : (main.res.status || render.res.status);
+  const joinFailed = () => fileJobVerdict({ job, joinFile, strict, readFile, removeFile, log, err });
   if (!perfDir) {
-    const n = leaked();
+    const n = leaked() + joinFailed();
     return totals(n && hungCode === 0 ? 1 : hungCode, mergedCounts, 'off', log, mergedFailures, { failureFile, writeFailureFile });
   }
   const lane = runPerfLane({ perfDir, filters, readdir, ...fx, eventsFile: `${eventsFile}.perf`, log });
-  const mainCode = leaked() && hungCode === 0 ? 1 : hungCode;
+  const mainCode = leaked() + joinFailed() && hungCode === 0 ? 1 : hungCode;
   return totals(mainCode !== 0 ? mainCode : lane.code, sumCounts(mergedCounts, lane.counts), lane.state, log, [...mergedFailures, ...lane.failures], { failureFile, writeFailureFile });
+}
+
+/** AV-FILEJOB-FLAG: a run that must keep every file in a job of its own: GUPPY_FILE_JOB_STRICT=1, or
+ *  the full suite (no filter: what a gate runs) unless GUPPY_FILE_JOB_STRICT=0. */
+function fileJobStrict(env, filters = []) {
+  if (env.GUPPY_FILE_JOB_STRICT === '1') return true;
+  if (env.GUPPY_FILE_JOB_STRICT === '0') return false;
+  return !filters.length;
+}
+
+/** The preload's job-join-failed rows ({ file, why }, one JSON line each). Unreadable or empty: none. */
+function jobJoinFailures(text) {
+  const out = [];
+  for (const line of String(text || '').split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try { const r = JSON.parse(line); if (r && typeof r.file === 'string') out.push(r); } catch { /* a torn line: skip */ }
+  }
+  return out;
+}
+
+/**
+ * AV-FILEJOB-FLAG: a file that ran outside a job of its own (its join failed: the exe blocked or
+ * removed mid-run) is killed from a snapshot if it hangs, which can miss a process born just before
+ * the kill, and that used to show on stderr only. Names each such file and counts them in the
+ * summary; a strict run with any of them, or with no job tool at all on Windows, FAILS. Returns 1 to
+ * fail the run, else 0. An injected run (no tool asked for: exe and why both null) prints nothing.
+ */
+function fileJobVerdict({ job, joinFile, strict, readFile, removeFile, log, err }) {
+  if (!job.exe && !job.why) return 0;
+  const rows = joinFile ? jobJoinFailures(readFile(joinFile)) : [];
+  if (joinFile) removeFile(joinFile);
+  for (const r of rows) err(`[test-runner] JOB JOIN FAILED: ${r.file} ran outside a job of its own (${r.why})`);
+  if (job.exe) log(`[test-runner] file jobs: ${rows.length} job-join-failed${strict ? ' (strict)' : ''}`);
+  const fail = strict && (rows.length > 0 || (!job.exe && job.why !== 'not Windows'));
+  if (fail) err(`[test-runner] ${rows.length ? `${rows.length} test file(s) ran outside a job of their own` : 'per-file jobs are unavailable'} in a strict run - the run FAILS (AV-FILEJOB-FLAG; GUPPY_FILE_JOB_STRICT=0 waives it)`);
+  return fail ? 1 : 0;
 }
 
 /**
@@ -533,7 +600,7 @@ function totals(code, counts, laneState, log, failures = [], {
   return code;
 }
 
-module.exports = { prepareFileJob, FILE_JOB_PRELOAD, prepareTempJail, TEMP_JAIL_PRELOAD, tempLeaks, reportTempLeaks,prepareStartGate, startSlots, cappedCores, selfJobRate, HEAVYJOB_HELPER, CPU_RATE_50_PERCENT, START_GATE_PRELOAD, burstLine, selectTestFiles, discoverTestFiles, renderLaneFiles, FEATURE_TEST_DIRS, run, runPerfLane, runCounts, failingTests, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
+module.exports = { prepareFileJob, pruneFileJobs, FILE_JOB_DIR, FILE_JOB_PRELOAD, fileJobStrict, jobJoinFailures, fileJobVerdict, prepareTempJail, TEMP_JAIL_PRELOAD, tempLeaks, reportTempLeaks,prepareStartGate, startSlots, cappedCores, selfJobRate, HEAVYJOB_HELPER, CPU_RATE_50_PERCENT, START_GATE_PRELOAD, burstLine, selectTestFiles, discoverTestFiles, renderLaneFiles, FEATURE_TEST_DIRS, run, runPerfLane, runCounts, failingTests, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
 
 if (require.main === module) {
   const repoRoot = path.resolve(__dirname, '..', '..');
