@@ -77,7 +77,7 @@ const MUTANTS = [
   ['B get: the decision list is newest-only', GET, "const decisions = live.filter((c) => isDecision(canonicalKey(c.key ?? '', d.registry))).sort(newestFirst).map(row);", "const decisions = live.filter((c) => isDecision(canonicalKey(c.key ?? '', d.registry))).sort(newestFirst).slice(0, 1).map(row);"],
   ['C get: superseded rows carry no excerpt', GET, 'status: ix.status.get(c.id) ?? \'unknown\', excerpt: excerpt(c.text),', 'status: ix.status.get(c.id) ?? \'unknown\', excerpt: \'\','],
   ['D get: a card key does not cover its derived sub-keys', GET, "  for (const k of [...keySet]) if (isCardKey(k) && !FIELD_SUFFIX.test(k)) for (const other of ix.byKey.keys()) if (other.startsWith(`${k}.`)) keySet.add(other);\n", ''],
-  ['E get: the done-sha rule is off (a sha in the agent\'s done mail is not a known value)', GET, "          if (!named.length && shaField && m.act === 'done' && (!agent || m.from === agent)) named = sha7(text);\n", ''],
+  ['E get: the done-sha rule is off (a sha in the agent\'s done mail is not a known value)', GET, "          if (!named.length && shaField && m.act === 'done' && (!agent || m.from === agent)) named = mailCommitShas(text);\n", ''],
   ['F get: the unknown-term line differs by path (keys tried not printed)', GET, 'L.push(`no claim under ${r.tried.join(\', \')}`);', 'L.push(`no claim under ${r.term}`);'],
   ['G search: the meta line carries no get pointer', FORMAT, '  if (get) out.push(get);', ''],
   ['G2 step 2: the pointer is back on every meta line', FORMAT, '${h.claim.id} · ${h.wing}/${h.room}`', "${h.claim.id} · ${h.wing}/${h.room}${h.claim.key ? ` · get: ${getPointer(h.claim.key)}` : ''}`"],
