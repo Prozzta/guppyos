@@ -341,8 +341,10 @@ async function until(cond, ms, what) {
   while (!cond()) { if (Date.now() > end) throw new Error(`timed out waiting for ${what}`); await sleep(50); }
 }
 /** Kill a start()ed child and its tree: on win32 only what own-procs proves is ours (no taskkill /T). */
-function killTree({ child, bornMs }) {
-  if (process.platform === 'win32') own.killOwnTree({ pid: child.pid, bornMs });
+function killTree({ child, bornMs }, { rootFirst = false } = {}) {
+  // rootFirst: the root before its children (killVerified hands them deepest first). For a lease
+  // holder, so it is gone before its file child dies and cannot exit on its own and release.
+  if (process.platform === 'win32') own.killOwnTree({ pid: child.pid, bornMs }, rootFirst ? { kill: (rows) => own.stopIfSame(rows.slice().reverse()) } : {});
   else try { process.kill(-child.pid, 'SIGKILL'); } catch { try { process.kill(child.pid, 'SIGKILL'); } catch { /* gone */ } }
 }
 
@@ -451,13 +453,19 @@ K.e2eCrashAndDeadWaiter = async (t, M = HJ, preload = PRELOAD) => {
   await until(() => b.lock.queueSnapshot().waiters.some((w) => w.agentId === 'b'), 15_000, "b's wait");
   assert.equal(b.lock.acquire('c', H, 'npm test', 'hc', false).allow, false);
   killTree(wb);
-  killTree(run);
+  // INT102-TEST-FOLLOWUPS (Jim, INT-1.1.102 MUST C): the lease holder (the node --test runner)
+  // dies BEFORE its file child. Killed after, it could see the child die and exit on its own, and
+  // its preload's release would log lease-end, not lease-gone.
+  killTree(run, { rootFirst: true });
   await wb.done; await run.done;
+  const t0 = Date.now();
   await b.lock.scan();
-  await until(() => b.notes.includes('c'), 15_000, "c's notice");
-  assert.ok(b.logs.some((x) => x.action === 'lease-gone' && x.agentId === 'a'), "A CRASHED TEST RUN'S LEASE IS FREED BY THE SCAN");
-  assert.ok(b.logs.some((x) => x.action === 'queue-dropped' && x.agentId === 'b' && x.reason === 'waiter-gone'), 'A KILLED WAITING WRAPPER LEAVES THE QUEUE');
-  assert.deepEqual(b.notes, ['c'], 'THE NEXT QUEUED AGENT GETS HEAVY SLOT FREE WITHIN ONE SCAN');
+  // Every assert names the lock's path, so a flake says which way the slot was freed.
+  const trail = () => `${JSON.stringify(b.logs.map((x) => [x.action, x.agentId, x.reason].filter(Boolean).join(':')))} notes=${JSON.stringify(b.notes)} scan+${Date.now() - t0}ms`;
+  await until(() => b.notes.includes('c'), 15_000, "c's notice").catch((e) => { throw new Error(`${e.message}: ${trail()}`); });
+  assert.ok(b.logs.some((x) => x.action === 'lease-gone' && x.agentId === 'a'), `A CRASHED TEST RUN'S LEASE IS FREED BY THE SCAN: ${trail()}`);
+  assert.ok(b.logs.some((x) => x.action === 'queue-dropped' && x.agentId === 'b' && x.reason === 'waiter-gone'), `A KILLED WAITING WRAPPER LEAVES THE QUEUE: ${trail()}`);
+  assert.deepEqual(b.notes, ['c'], `THE NEXT QUEUED AGENT GETS HEAVY SLOT FREE WITHIN ONE SCAN: ${trail()}`);
 };
 test('E2E MUST C: a killed lease holder and a waiting wrapper killed with taskkill /F leave the lock; the next agent gets HEAVY SLOT FREE in one scan', { timeout: 120_000 }, (t) => K.e2eCrashAndDeadWaiter(t));
 
