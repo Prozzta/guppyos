@@ -886,6 +886,9 @@ const CARD_SHAPE_RE = /(?<![A-Za-z0-9./-])([A-Z][A-Z0-9]*(?:-[A-Z0-9]+(?:\.[0-9]
 const LABEL_RE = /^[A-Z][A-Z0-9]*-[0-9]+$/;
 
 const NUM_RE = /^[0-9]+$/;
+/** Round 10 (must 2b): a conventional commit's scope at the start of a subject, "test(abc-hull): ..." or
+ *  "fix(abc-hull)!: ...": a kebab token of two or more segments (a one-word scope is a topic, not a card). */
+const SCOPE_RE = /^\s*[A-Za-z]+\(([A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+)\)!?:/;
 /** Round 10 (F1 a): a role suffix is one or more word segments with no digit (INT, RC, AUDIT, INT-AUDIT). */
 const ROLE_SUFFIX_RE = /^[A-Z]+(?:-[A-Z]+)*$/;
 
@@ -953,16 +956,22 @@ export function cardNamer(cardIds: readonly string[]): (text: unknown) => CardNa
       rest = text.replace(re, ' ');
     }
     const others: string[] = [];
-    for (const m of rest.matchAll(CARD_SHAPE_RE)) {
-      const t = m[1];
-      if (canon.has(t.toLowerCase().replace(/[- ]/g, '')) || others.includes(t)) continue;
+    const place = (t: string, formOnly = false): void => {
+      if (canon.has(t.toLowerCase().replace(/[- ]/g, '')) || others.includes(t)) return;
       // Round 6 (god 18e97a, R6-1): a short form of exactly one known card names that card; of several,
       // some other card; a label (UTF-8, SHA-1) that is no card's form names nothing.
       const fits = ids.filter((id) => isOwnForm(t, id));
-      if (fits.length === 1) { if (!cards.includes(fits[0])) cards.push(fits[0]); continue; }
-      if (!fits.length && LABEL_RE.test(t)) continue;
+      if (fits.length === 1) { if (!cards.includes(fits[0])) cards.push(fits[0]); return; }
+      if (!fits.length && (formOnly || LABEL_RE.test(t))) return;
       others.push(t);
-    }
+    };
+    for (const m of rest.matchAll(CARD_SHAPE_RE)) place(m[1]);
+    // Round 10 (Jim's gate, must 2b): a commit subject's conventional scope, "test(abc-hull): ...", is written
+    // lower-case; read upper-case it is a card's own form like any other token (unique: that card; shared:
+    // some other card; no card's form: a topic, nothing). Only the scope is read so: no other lower-case
+    // word is a card.
+    const scope = rest.match(SCOPE_RE);
+    if (scope) place(scope[1].toUpperCase(), true);
     return { cards, others };
   };
 }
@@ -1110,19 +1119,6 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
         if (x.range && !r.merge) rangeOf.set(r.commit, x.range);
       }
     }
-    /** F5: whether a commit of a written range counts for `card`: one in the range only when it names the
-     *  card; the range's end only when every commit of the range names the card. A commit outside any
-     *  listed range always passes here. */
-    const inRangeFor = (card: string): ((e: ReportedCommit) => boolean) => {
-      const names = (e: ReportedCommit): boolean => namesOf(e).cards.includes(card);
-      return (e) => {
-        const r = rangeOf.get(e.commit);
-        const range = r && r.end !== 'from' ? ranges.get(rangeKey(r)) : undefined;
-        if (!r || !range) return true;
-        if (!names(e)) return false;
-        return r.end === 'to' ? range.members.every(names) : true;
-      };
-    };
     // The subject's @shas, resolved the same way; one the repository lacks stays as written (F2).
     const ats: Array<{ sha: string; name: string; full?: string; entry?: ReportedCommit; written: string }> = [];
     for (const x of atShas) {
@@ -1130,6 +1126,24 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
       if (!full) { ats.push({ sha: x.sha, name: x.name, written: x.sha }); continue; }
       for (const r of resolved.get(full) ?? await resolveReported(full, git)) ats.push({ sha: r.commit, name: x.name, full: r.commit, entry: r, written: x.sha });
     }
+    const atCommits = new Set(ats.flatMap((a) => (a.full ? [a.full] : [])));
+    /** F5: whether a commit of a written range counts for `card`: one in the range only when it names the
+     *  card; the range's end only when every commit of the range names the card. Jim's gate (must 2a): a
+     *  mail that reports a listed range reports its members: a commit outside every listed range (a base,
+     *  a cherry-pick source quoted in the body) is never the value unless the subject writes it as @sha;
+     *  a cherry-pick's source confirms the member (resolveReported), it is never the value itself. Without
+     *  a listed range every commit passes here. */
+    const inRangeFor = (card: string): ((e: ReportedCommit) => boolean) => {
+      const names = (e: ReportedCommit): boolean => namesOf(e).cards.includes(card);
+      return (e) => {
+        const r = rangeOf.get(e.commit);
+        const range = r && r.end !== 'from' ? ranges.get(rangeKey(r)) : undefined;
+        if (!r) return ranges.size === 0 || atCommits.has(e.commit);
+        if (!range) return true;
+        if (!names(e)) return false;
+        return r.end === 'to' ? range.members.every(names) : true;
+      };
+    };
     if (!entries.length && !ats.length) { skip(m.id, 'noCommit'); continue; }
     // (B) A commit reached through a merge counts for the card only when its subject or branch names it.
     // Round 4b: a merge into the card's own line is the card's work: it counts as itself and the parents
