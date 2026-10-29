@@ -374,6 +374,39 @@ test('god b6624e fix 1: the preflight child builds the served state through the 
   assert.match(run, /if \(row\.servedSha256 !== pre\.served\.sha256\) throw /);
 });
 
+test('god 43499f: every state file the build writes is served (the done-mail verdicts memory get reads); a sandbox that lacks one stops the run', () => {
+  const W = path.join(JAIL, 'f43499f');
+  const mk = (rel, text) => { fs.mkdirSync(path.dirname(path.join(W, rel)), { recursive: true }); fs.writeFileSync(path.join(W, rel), text); };
+  const heads = JSON.stringify({ v: 1, hives: { pre: {} } });
+  mk('a/hive/tasks.json', '[]'); mk('a/hive/state/task-meta.json', '{"cards":{}}'); mk('a/ud/claims-heads.json', heads);
+  const hiveA = path.join(W, 'a', 'hive'); const udA = path.join(W, 'a', 'ud');
+  const baseline = { hive: A.treeShas(hiveA), heads: {} };
+  mk('a/hive/state/mail-cards/c90-facts.jsonl', '{"card":"C90-FACTS"}\n');
+  mk('a/hive/state/derived-done-mails.json', '{"v":1,"mails":{"m1":"refused"}}');
+  mk('a/hive/agents/derived/memory/claims/2026-10.jsonl', '{"d":1}\n');
+  mk('a/hive/memory-keys.json', '{}');
+  const served = A.captureServed(hiveA, udA, baseline, 'pre');
+  assert.deepEqual(served.files.map((f) => f.rel), ['agents/derived/memory/claims/2026-10.jsonl', 'state/derived-done-mails.json', 'state/mail-cards/c90-facts.jsonl'], 'the done-mail verdicts are served with the mail index');
+  assert.deepEqual(served.other.map((f) => f.path), ['memory-keys.json'], 'a write outside state and the derived ledger is reported, not served');
+  assert.deepEqual(Object.keys(served.stateAfter), ['state/derived-done-mails.json', 'state/mail-cards/c90-facts.jsonl', 'state/task-meta.json'], 'every state file present after the build, the staged ones too');
+  assert.deepEqual(A.servedNumbers(served).derivedOther.map((f) => f.path), ['state/derived-done-mails.json'], 'and it is in the hash numbers');
+  // An item sandbox staged from the snapshot gets every one.
+  mk('b/hive/tasks.json', '[]'); mk('b/hive/state/task-meta.json', '{"cards":{}}'); mk('b/ud/claims-heads.json', heads);
+  const hiveB = path.join(W, 'b', 'hive');
+  A.applyServed(served, hiveB, path.join(W, 'b', 'ud'), 'itm');
+  assert.deepEqual(A.servedMissing(served, hiveB), [], 'nothing missing');
+  // The old copy (mail index and derived ledger only) left the verdicts out: that is caught.
+  fs.rmSync(path.join(hiveB, 'state', 'derived-done-mails.json'));
+  assert.deepEqual(A.servedMissing(served, hiveB), ['state/derived-done-mails.json'], 'a missing state file is named');
+  // A staged state file with other bytes is caught too.
+  mk('b/hive/state/derived-done-mails.json', '{"v":1,"mails":{"m1":"refused"}}'); mk('b/hive/state/task-meta.json', '{"cards":{"X":1}}');
+  assert.deepEqual(A.servedMissing(served, hiveB), ['state/task-meta.json'], 'a changed state file is named');
+  // Both runner modes check it: the preflight returns not ok, an item throws (an INVALID row).
+  const run = fs.readFileSync(path.join(__dirname, 'claims-90', 'answerer.cjs'), 'utf8');
+  assert.match(run, /const missing = servedMissing\(servedState, hive\);\s+if \(missing\.length\) return \{ ok: false, reason: /, 'the preflight fails');
+  assert.match(run, /const missing = servedMissing\(pre\.servedState, hive\);\s+if \(missing\.length\) throw new Error\(/, 'every item checks it');
+});
+
 test('god ba807e: the preflight serves its synced index to every item; a failed, dropping or (on an item) embedding sync, or an index that is not whole or not the served one, stops it', () => {
   const ok = (records, embedded, dropped = 0) => ({ sent: true, records, chunks: records, reply: { ok: true, exit: 0, json: { embedded, dropped, statusChanges: 0, roomChanges: 0 } } });
   const timedOut = { sent: true, records: 11639, chunks: 11639, reply: { ok: false, exit: 4, error: 'memory claims-sync timed out after 120000 ms' } };

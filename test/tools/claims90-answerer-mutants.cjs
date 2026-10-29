@@ -54,7 +54,7 @@ const M = [
   ['P33 the derived writer starts beside the running catch-up', CHILD, '    await startAfterMailCardCatchUp(catchUp, () => derivedLive.start());', '    derivedLive.start(); await catchUp;', ['unit']],
   ['P34 the child stops the derived writer before it settled', CHILD, "    await derivedLive.run('served-settled', async () => {});", '', ['preflight']],
   ['P35 a failed build does not stop the child', CHILD, '    if (failed.length) { emit(', '    if (false) { emit(', ['unit']],
-  ['P36 every write of the preflight child is served', ANS, "  const ours = (rel) => rel.startsWith('state/mail-cards/') || rel.startsWith(`agents/${DERIVED_DIR}/`);", '  const ours = () => true;', ['unit']],
+  ['P36 every write of the preflight child is served', ANS, "  const ours = (rel) => rel.startsWith('state/') || rel.startsWith(`agents/${DERIVED_DIR}/`);", '  const ours = () => true;', ['unit']],
   ['P37 the derived anchor is not copied into the item', ANS, '{ ...(j.hives[hiveIdOfItem] ?? {}), ...served.anchors };', '{ ...(j.hives[hiveIdOfItem] ?? {}) };', ['unit']],
   ['P38 the served sha ignores the file bytes', ANS, "  for (const f of served.files) h.update(`${f.rel}\\0`).update(fs.readFileSync(path.join(hive, f.rel)));", "  for (const f of served.files) h.update(`${f.rel}\\0`);", ['unit']],
   ['P39 an item is not given the served state', ANS, '    row.servedSha256 = applyServed(pre.servedState, hive, userData, hiveId.to);', '    row.servedSha256 = pre.served.sha256;', ['unit']],
@@ -86,6 +86,11 @@ const M = [
   ['P63 the serve summary drops the search rows', CHILD, 'index: indexDigest(nativeMemory.dbFile()), searches, memLog', 'index: indexDigest(nativeMemory.dbFile()), memLog', ['unit']],
   ['P64 the tap misses main\'s requests', CHILD, '      tap?.toWorker(m);\n', '', ['unit']],
   ['P65 the run total drops the exit-4 items', ANS, 'search4Items: rows.filter((r) => r.search4).length,', 'search4Items: 0,', ['unit']],
+  ['P66 the done-mail verdicts the build writes are not served (only the mail index, as before)', ANS, "  const ours = (rel) => rel.startsWith('state/') || rel.startsWith(`agents/${DERIVED_DIR}/`);", "  const ours = (rel) => rel.startsWith('state/mail-cards/') || rel.startsWith(`agents/${DERIVED_DIR}/`);", ['unit']],
+  ['P67 no state is recorded after the build', ANS, "Object.keys(now).filter((rel) => rel.startsWith('state/')).sort()", "Object.keys(now).filter((rel) => rel.startsWith('state/mail-cards/')).sort()", ['unit']],
+  ['P68 the sandbox check ignores changed bytes', ANS, "return !fs.existsSync(p) || sha256(fs.readFileSync(p)) !== sha;", "return !fs.existsSync(p);", ['unit']],
+  ['P69 the preflight skips the sandbox state check', ANS, "    const missing = servedMissing(servedState, hive);\n", "    const missing = [];\n", ['unit']],
+  ['P70 an item skips the sandbox state check', ANS, "    const missing = servedMissing(pre.servedState, hive);\n", "    const missing = [];\n", ['unit']],
   ['P14 taskStatusFor misses the archive', DEPS, '  return (id) => (allTasks() ?? []).find((t) => t.id === id)?.status ?? null;', "  return (id) => (allTasks() ?? []).find((t) => t.id === id && t.status !== 'done')?.status ?? null;", ['unit']],
 ];
 

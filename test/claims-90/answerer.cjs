@@ -406,15 +406,26 @@ function newestVersionTag(names) {
 function captureServed(hive, userData, baseline, hiveIdOfPre) {
   const now = treeShas(hive);
   const changed = Object.keys(now).filter((rel) => baseline.hive[rel] !== now[rel]).sort();
-  // Only what the build writes is served: the mail index and the derived ledger (and its anchor). Any other
-  // write the child made by then is reported (servedNumbers().other) and not copied.
-  const ours = (rel) => rel.startsWith('state/mail-cards/') || rel.startsWith(`agents/${DERIVED_DIR}/`);
+  // Only what the build writes is served: every state file (the mail index, the done-mail verdicts memory get
+  // reads, god 43499f) and the derived ledger (and its anchor). Any other write the child made by then is
+  // reported (servedNumbers().other) and not copied.
+  const ours = (rel) => rel.startsWith('state/') || rel.startsWith(`agents/${DERIVED_DIR}/`);
   const files = changed.filter(ours).map((rel) => ({ rel, sha256: now[rel], buf: fs.readFileSync(path.join(hive, rel)) }));
   const other = changed.filter((rel) => !ours(rel)).map((rel) => ({ path: rel, sha256: now[rel] }));
   const removed = Object.keys(baseline.hive).filter((rel) => !(rel in now));
   const heads = JSON.parse(fs.readFileSync(path.join(userData, 'claims-heads.json'), 'utf8')).hives?.[hiveIdOfPre] ?? {};
   const anchors = heads[DERIVED_DIR] && JSON.stringify(baseline.heads[DERIVED_DIR] ?? null) !== JSON.stringify(heads[DERIVED_DIR]) ? { [DERIVED_DIR]: heads[DERIVED_DIR] } : {};
-  return { files, other, removed, anchors };
+  // Every state file present after the build, so a sandbox can be checked to hold each one (servedMissing).
+  const stateAfter = Object.fromEntries(Object.keys(now).filter((rel) => rel.startsWith('state/')).sort().map((rel) => [rel, now[rel]]));
+  return { files, other, removed, anchors, stateAfter };
+}
+
+/** god 43499f: each state file present after the build that a sandbox lacks or holds other bytes of, or []. */
+function servedMissing(served, hive) {
+  return Object.entries(served.stateAfter ?? {}).filter(([rel, sha]) => {
+    const p = path.join(hive, rel);
+    return !fs.existsSync(p) || sha256(fs.readFileSync(p)) !== sha;
+  }).map(([rel]) => rel);
 }
 
 /** Copy the served state into an item's freshly staged sandbox (anchors re-keyed to its hive id). */
@@ -609,6 +620,8 @@ async function preflight(o, v, addDir, key, asker, outDir) {
     servedState = build.servedState;
     const { hive, userData, hiveId } = R.stageSandbox(path.resolve(o.snapshot), v.manifest, home);
     served = { ...servedNumbers(servedState), sha256: applyServed(servedState, hive, userData, hiveId.to), build: build.report };
+    const missing = servedMissing(servedState, hive);
+    if (missing.length) return { ok: false, reason: `the sandbox lacks state the build wrote: ${missing.join(', ')}`, calls, served };
     const world = path.join(home, 'world.json');
     fs.copyFileSync(path.join(addDir, 'world.json'), world);
     const serve = { askers: [asker], maxCalls: MAX_CALLS, connectFile: path.join(dir, 'connect.json'), callsFile: path.join(dir, 'calls.jsonl'), hookLogFile: path.join(dir, 'hooks.jsonl'), stopFile: path.join(home, 'stop') };
@@ -734,6 +747,8 @@ async function answerItem(o, v, addDir, item, key, shape, instruction, outDir, p
     // god b6624e fix 1: the preflight's served state (mail index, derived ledger and its anchor), byte for byte.
     row.servedSha256 = applyServed(pre.servedState, hive, userData, hiveId.to);
     if (row.servedSha256 !== pre.served.sha256) throw new Error(`the served state differs from the preflight's (${row.servedSha256})`);
+    const missing = servedMissing(pre.servedState, hive);
+    if (missing.length) throw new Error(`the sandbox lacks state the build wrote: ${missing.join(', ')}`);
     // god ba807e: and the preflight's synced index, so this child's sync finds every claim embedded already.
     if (!pre.servedState.index) throw new Error('the preflight served no index');
     row.indexServedSha256 = serveIndex(pre.servedState.index, userData, hiveId.to);
@@ -936,4 +951,4 @@ if (require.main === module) {
   }, (e) => { console.error(`[claims-90] ${e.stack || e.message}`); process.exitCode = 2; });
 }
 
-module.exports = { projectSlug, claudeProjectsDir, leftoverPrefixes, sessionFolderOut, leftoversIn, LEFTOVER_PREFIX, preflightProblem, firstIndexedCard, servedStateProblem, treeShas, prepareServed, captureServed, applyServed, servedSha, servedNumbers, syncProblem, indexProblem, indexKey, serveIndex, syncRows, ownSpillRead,unavailableOf, search4Of, parseArgs, parseItems, installedHookShape, hookShapeOf, buildHookShape, buildInfo, buildMemoryShim, condenseOf, settingsFor, childEnv, readTranscript, styleDeviation, itemStyle, memoryMdUse, main };
+module.exports = { projectSlug, claudeProjectsDir, leftoverPrefixes, sessionFolderOut, leftoversIn, LEFTOVER_PREFIX, preflightProblem, firstIndexedCard, servedStateProblem, treeShas, prepareServed, captureServed, applyServed, servedMissing, servedSha, servedNumbers, syncProblem, indexProblem, indexKey, serveIndex, syncRows, ownSpillRead,unavailableOf, search4Of, parseArgs, parseItems, installedHookShape, hookShapeOf, buildHookShape, buildInfo, buildMemoryShim, condenseOf, settingsFor, childEnv, readTranscript, styleDeviation, itemStyle, memoryMdUse, main };
