@@ -241,6 +241,10 @@ export interface GitPort {
   /** Round 10 (Jim's gate, must 6): the full sha the branch `name` (guppy/<id>) points at, origin's copy first,
    *  or null when no such ref exists. Without the method a pair written by a card's own name is taken as written. */
   refCommit?(name: string): Promise<string | null>;
+  /** Round 10 re-gate (Jim 42dc40, must A): the guppy/<id> branch names (origin's copy first, as refCommit)
+   *  whose tip reaches the commit, or null when git cannot say; optional. With it the pairing check asks git
+   *  once per distinct sha; without it, one isAncestor per board card branch (small fake ports only). */
+  branchesContaining?(commit: string): Promise<Set<string> | null>;
 }
 
 /** A changed path that is documentation: a CHANGELOG (no extension or a text one) anywhere, anything
@@ -924,8 +928,17 @@ const LABEL_RE = /^[A-Z][A-Z0-9]*-[0-9]+$/;
 const NUM_RE = /^[0-9]+$/;
 /** A word (2+ upper-case characters, segments allowed) written straight before an @sha (must 6). */
 const PAIR_WORD_RE = /(?<![A-Za-z0-9./-])([A-Z][A-Z0-9]+(?:-[A-Z0-9]+(?:\.[0-9]+)*)*)(?=\s?@ ?[0-9a-fA-F]{7,40}(?![0-9A-Za-z]))/g;
-/** A token carrying a number somewhere (a card-shaped id with its number, not a bare role word). */
-const NUM_IN_RE = /[0-9]/;
+/** Round 10 re-gate (Jim 42dc40, must B): whether a card-shaped token the board lacks names a card (so the
+ *  thread link does not enter): it has a word segment of 2+ letters AND a final all-digit (or dotted version)
+ *  segment that is not the end of a letter+digit range. NEW-THING-99 and CUT-1.1.80 do; list labels such as
+ *  X1-X3, D1-D8, R6-R11, J1-J10, PLAN-V4 or PHASE-D1-8 do not. */
+export const strangerNamesCard = (t: string): boolean => {
+  const seg = t.split('-');
+  if (seg.length < 2) return false;
+  if (!/^[0-9]+(?:\.[0-9]+)*$/.test(seg[seg.length - 1])) return false;
+  if (/^[A-Z]+[0-9]+$/i.test(seg[seg.length - 2])) return false;
+  return seg.slice(0, -1).some((s) => /^[A-Z]{2,}$/i.test(s));
+};
 /** Round 10 (must 2b): a conventional commit's scope at the start of a subject, "test(abc-hull): ..." or
  *  "fix(abc-hull)!: ...": a kebab token of two or more segments (a one-word scope is a topic, not a card). */
 const SCOPE_RE = /^\s*[A-Za-z]+\(([A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+)\)!?:/;
@@ -1200,6 +1213,14 @@ export async function doneMailFacts(mails: readonly MailLike[], cardIds: readonl
     const branchTip = async (c: string): Promise<string | null> => (git.refCommit ? await git.refCommit(`guppy/${c.toLowerCase()}`) : null);
     const pairOk = async (card: string, a: { full?: string }): Promise<boolean> => {
       if (!a.full) return true;
+      // Re-gate must A: one containment answer per sha, then set membership over the board (no git spawn
+      // inside the loop over cards: ~150 card branches times every paired sha killed the full pass).
+      const on = git.branchesContaining ? await git.branchesContaining(a.full) : null;
+      if (on) {
+        const branchOf = (c: string): string => `guppy/${c.toLowerCase()}`;
+        if (on.has(branchOf(card))) return true;
+        return !cardIds.some((other) => other !== card && !isIntCard(other) && !isReleaseCard(other) && on.has(branchOf(other)));
+      }
       const own = await branchTip(card);
       if (own && await git.isAncestor(a.full, own)) return true;
       for (const other of cardIds) {
@@ -1383,8 +1404,9 @@ async function cardOfDoneMail(
   // number that is no board card's form (a card the board never made, or one it lacks) names THAT card:
   // the thread's link does not enter and the mail has no card here. A form shared by several board cards
   // is not such an id (round 9 R2: the linked card owns it). The round-9 rule refusing commits of such
-  // ids is unchanged.
-  const unknown = exact.length ? [] : strangersOf(m.subject).filter((x) => NUM_IN_RE.test(x));
+  // ids is unchanged. Re-gate must B: only a stranger shaped as a card id counts (strangerNamesCard); an
+  // item-range label (X1-X3, D1-D8, PLAN-V4) is a list label and lets the link in.
+  const unknown = exact.length ? [] : strangersOf(m.subject).filter(strangerNamesCard);
   if (unknown.length) return { reason: 'noCard', cards: unknown.slice(0, 8) };
   // The cards a reported commit confirms (Jim's gate M-b: by its SUBJECT line only; see byGit below).
   const hitsOf = (e: ReportedCommit, named: readonly string[]): string[] =>

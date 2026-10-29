@@ -308,3 +308,105 @@ test('must 7: "@ sha" with a space is an @sha; the per-card "merge guppy/<branch
     [['ABC-CRAWL-19', ['1111aaa']], ['DEF-SWEEP-20', ['2222bbb']]], 'MUTANT must 7: body pairs, and the subject\'s int sha goes to neither');
   assert.equal(F.loneAtCounts('ABC-CRAWL-19 landed @ 1111aaa; XYZ-34 FAIL', { sha: '1111aaa', name: 'landed' }, 'ABC-CRAWL-19', F.cardNamer(CARDS), CARDS), true, 'the spaced @sha sits in the card\'s segment');
 });
+
+// ———————————————————————————————————————————————————————————— re-gate (Jim 42dc40)
+
+test('re-gate must B: a stranger counts as a card only with a 2+ letter word and a final number that ends no letter+digit range; item-range labels let the thread link in', async () => {
+  for (const t of ['NEW-THING-99', 'CUT-1.1.80', 'ABC-12', 'C90-GET-2']) assert.equal(F.strangerNamesCard(t), true, t);
+  for (const t of ['X1-X3', 'D1-D8', 'F1-F4', 'S1-S3', 'R6-R11', 'J1-J10', 'PLAN-V4', 'PHASE-D1-8', 'M-5', 'X-9']) assert.equal(F.strangerNamesCard(t), false, t);
+  const CARDS = ['ABC-12', 'XYZ-34'];
+  const S = H('1');
+  const git = fakeGit({ '1111aaa': S }, { [S]: 'fix: the widget' }, { files: { [S]: SRC }, times: { [S]: 1 } });
+  const run = (id, subject) => F.doneMailFacts([mail(id, subject, { cards: ['ABC-12'], in_reply_to: 'req-1' })], CARDS, git);
+  let r = await run('mb-a', 'fixed X1-X3 @1111aaa');
+  assert.equal(commitOf(r, slot('ABC-12', SAM)), S, 'MUTANT must B: an item range blocked the link');
+  r = await run('mb-b', 'PLAN-V4 merged @1111aaa');
+  assert.equal(commitOf(r, slot('ABC-12', SAM)), S, 'a version label is no card');
+  r = await run('mb-c', 'D1-D8, F1-F4, R6-R11 and J1-J10 done @1111aaa');
+  assert.equal(commitOf(r, slot('ABC-12', SAM)), S);
+  r = await run('mb-d', 'NEW-THING-99 @1111aaa');
+  assert.equal(r.facts.length, 0, 'a card-shaped stranger still blocks the link');
+  assert.deepEqual(r.skips, [{ mail: 'mb-d', reason: 'noCard', cards: ['NEW-THING-99'] }]);
+  r = await run('mb-e', 'CUT-1.1.80 tagged @1111aaa');
+  assert.equal(r.facts.length, 0, 'a dotted version end counts');
+});
+
+const gitIn = (repo) => {
+  const { execFileSync } = require('node:child_process');
+  return (args, input) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false', ...args], { cwd: repo, encoding: 'utf8', input, stdio: ['pipe', 'pipe', 'ignore'] }).trim();
+};
+
+test('re-gate must A git: DerivedGit.branchesContaining names the guppy branches whose preferred tip (origin first) reaches a commit; null when git cannot say', async () => {
+  const G = loadTs('src/main/claims/derivedGit.ts');
+  const repo = path.join(JAIL, 'repo-ma1');
+  fs.mkdirSync(repo, { recursive: true });
+  const g = gitIn(repo);
+  g(['init', '-q', '-b', 'main']);
+  fs.writeFileSync(path.join(repo, 'f.txt'), 'one'); g(['add', 'f.txt']); g(['commit', '-q', '-m', 'one']);
+  const one = g(['rev-parse', 'HEAD']);
+  const tree = g(['rev-parse', 'HEAD^{tree}']);
+  const two = g(['commit-tree', tree, '-p', one, '-m', 'two']);
+  const three = g(['commit-tree', tree, '-p', one, '-m', 'three']);
+  g(['update-ref', 'refs/remotes/origin/guppy/abc-12', two]);
+  g(['update-ref', 'refs/heads/guppy/abc-12', three]);
+  g(['update-ref', 'refs/heads/guppy/loc-5', three]);
+  g(['update-ref', 'refs/heads/other/zz-1', three]);
+  const dg = new G.DerivedGit(repo);
+  assert.deepEqual([...await dg.branchesContaining(one)].sort(), ['guppy/abc-12', 'guppy/loc-5']);
+  assert.deepEqual([...await dg.branchesContaining(three)], ['guppy/loc-5'], 'a local copy behind origin\'s is not the branch; non-guppy refs never count');
+  assert.deepEqual([...await dg.branchesContaining(two)], ['guppy/abc-12']);
+  assert.equal(await dg.branchesContaining('f'.repeat(40)), null, 'a missing commit: git cannot say');
+});
+
+test('re-gate must A: the pairing check asks git once per distinct sha (110 card branches, 60 paired done mails): no merge-base per board card', async () => {
+  const G = loadTs('src/main/claims/derivedGit.ts');
+  const repo = path.join(JAIL, 'repo-ma2');
+  fs.mkdirSync(repo, { recursive: true });
+  const g = gitIn(repo);
+  g(['init', '-q', '-b', 'main']);
+  fs.writeFileSync(path.join(repo, 'f.txt'), 'base'); g(['add', 'f.txt']); g(['commit', '-q', '-m', 'base']);
+  const base = g(['rev-parse', 'HEAD']);
+  const N = 110;
+  // One fast-import: card i's commit changes a source file (a commit changing nothing confirms nothing) and is
+  // the tip of origin's guppy/hull-i alone.
+  const data = (s) => `data ${Buffer.byteLength(s)}\n${s}\n`;
+  let stream = '';
+  for (let i = 1; i <= N; i++) stream += `commit refs/remotes/origin/guppy/hull-${i}\ncommitter t <t@t> ${1700000000 + i} +0000\n${data(`fix: sweep ${i}`)}from ${base}\nM 100644 inline src/main/w.ts\n${data(`v${i}`)}\n`;
+  g(['fast-import', '--quiet'], stream);
+  const tips = new Map(g(['for-each-ref', '--format=%(refname) %(objectname)', 'refs/remotes/origin/guppy']).split('\n').map((l) => l.split(' ')));
+  const c = [null];
+  for (let i = 1; i <= N; i++) c.push(tips.get(`refs/remotes/origin/guppy/hull-${i}`));
+  const CARDS = [...Array.from({ length: N }, (_, k) => `HULL-${k + 1}`), 'INT-1.2'];
+  // 55 mails pair a card with its own commit; 5 pair a card with another card's commit (on that branch alone).
+  const mails = [];
+  for (let i = 1; i <= 55; i++) mails.push(mail(`ma-${i}`, `HULL-${i} @${c[i].slice(0, 12)} merged into INT-1.2`, { cards: ['INT-1.2'], in_reply_to: 'req-1' }));
+  for (let i = 56; i <= 60; i++) mails.push(mail(`ma-${i}`, `HULL-${i} @${c[i + 50].slice(0, 12)} merged into INT-1.2`, { cards: ['INT-1.2'], in_reply_to: 'req-1' }));
+  // 10 more mails report shas already reported (a re-send, a copy to god): the answer per sha is cached.
+  for (let i = 1; i <= 10; i++) mails.push(mail(`ma-again-${i}`, `HULL-${i} @${c[i].slice(0, 12)} merged into INT-1.2 (again)`, { cards: ['INT-1.2'], in_reply_to: 'req-1' }));
+  const LOG = path.join(JAIL, 'ma2-git-calls.log');
+  const wrap = path.join(JAIL, 'ma2-git-wrap.cjs');
+  fs.writeFileSync(wrap, [
+    "const { spawnSync } = require('node:child_process');",
+    `require('node:fs').appendFileSync(${JSON.stringify(LOG)}, process.argv.slice(2).join(' ') + '\\n');`,
+    "const args = process.argv.slice(2);",
+    // Only cat-file --batch-check reads stdin (prefetch); the other calls leave it open, so it is read only then.
+    "const input = args.includes('cat-file') ? require('node:fs').readFileSync(0) : undefined;",
+    "const r = spawnSync('git', args, { input, stdio: [input ? 'pipe' : 'ignore', 'inherit', 'inherit'] });",
+    'process.exit(r.status === null ? 1 : r.status);',
+  ].join('\n'));
+  const dg = new G.DerivedGit(repo, { command: [process.execPath, wrap] });
+  // As the full pass does (derivedWriter): prefetch the written shas and read the log first.
+  await dg.prefetch(mails.map((m) => /@([0-9a-f]{12})/.exec(m.subject)[1]));
+  await dg.log();
+  fs.writeFileSync(LOG, '');
+  const r = await F.doneMailFacts(mails, CARDS, dg);
+  for (let i = 1; i <= 55; i++) assert.equal(commitOf(r, slot(`HULL-${i}`, SAM)), c[i], `HULL-${i}: ${JSON.stringify(r.skips.filter((s) => s.mail === `ma-${i}`))} ${r.facts.length} facts`);
+  for (let i = 56; i <= 60; i++) assert.ok(r.skips.some((s) => s.mail === `ma-${i}` && s.reason === 'ambiguous'), `ma-${i}: another card's commit is not the pair`);
+  const calls = fs.readFileSync(LOG, 'utf8').split('\n').filter(Boolean);
+  const distinct = 60;
+  const contains = calls.filter((l) => l.includes('--contains')).length;
+  const mergeBase = calls.filter((l) => l.includes('merge-base')).length;
+  assert.ok(contains <= distinct, `one containment call per distinct sha at most (${contains})`);
+  assert.ok(mergeBase <= distinct, `MUTANT must A: a merge-base per board card branch (${mergeBase})`);
+  assert.ok(calls.length <= 4 * distinct + 10, `git calls stay a small constant per distinct sha (${calls.length})`);
+});

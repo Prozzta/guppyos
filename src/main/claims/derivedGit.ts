@@ -94,6 +94,7 @@ export class DerivedGit implements GitLogPort {
   private readonly versionDiffs = new Map<string, boolean | null>();
   private readonly rangesOf = new Map<string, string[] | null>();
   private refs: Map<string, string> | null = null;
+  private readonly containing = new Map<string, Set<string> | null>();
   private readonly o: Required<DerivedGitOptions>;
   constructor(readonly repo: string, opts: DerivedGitOptions = {}) {
     this.o = { timeoutMs: opts.timeoutMs ?? GIT_TIMEOUT_MS, command: opts.command ?? ['git'] };
@@ -232,6 +233,31 @@ export class DerivedGit implements GitLogPort {
       if (r.code === 0) for (const line of r.out.split('\n')) { const m = /^(\S+) ([0-9a-f]{40})$/.exec(line.trim()); if (m) this.refs.set(m[1], m[2]); }
     }
     return this.refs.get(`refs/remotes/origin/${name}`) ?? this.refs.get(`refs/heads/${name}`) ?? null;
+  }
+
+  /** Round 10 re-gate (Jim 42dc40, must A): the guppy/<id> branch names whose tip (origin's copy first, the
+   *  same ref refCommit gives) reaches `commit`, or null when git cannot say. ONE for-each-ref --contains per
+   *  distinct commit, cached, over the guppy branches local and remote: the pairing check is then a set
+   *  lookup, never one merge-base per board card. */
+  async branchesContaining(commit: string): Promise<Set<string> | null> {
+    if (!this.containing.has(commit)) {
+      await this.refCommit('guppy/');
+      const refs = this.refs ?? new Map<string, string>();
+      const r = await git(this.repo, ['for-each-ref', '--contains', commit, '--format=%(refname)', 'refs/heads/guppy', 'refs/remotes/origin/guppy'], this.o);
+      let out: Set<string> | null = null;
+      if (r.code === 0) {
+        out = new Set();
+        for (const line of r.out.split('\n')) {
+          const ref = line.trim();
+          const m = /^refs\/(?:heads|remotes\/origin)\/(guppy\/.+)$/.exec(ref);
+          if (!m) continue;
+          const preferred = refs.has(`refs/remotes/origin/${m[1]}`) ? `refs/remotes/origin/${m[1]}` : `refs/heads/${m[1]}`;
+          if (ref === preferred) out.add(m[1]);
+        }
+      }
+      this.containing.set(commit, out);
+    }
+    return this.containing.get(commit) ?? null;
   }
 
   /** Every commit on the branches, tags and remotes: full sha, committer time, parents, message (stashes left out). */
