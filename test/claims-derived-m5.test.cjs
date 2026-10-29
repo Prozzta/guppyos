@@ -1220,3 +1220,73 @@ test('CLAIMS-90 L1 backfill: a live field claim without a value is superseded on
   assert.deepEqual([moved.appended, moved.valued], [1, undefined], 'a changed value is a change, not a backfill');
   assert.equal(x.live()[0].supersedesReason.category, 'changed');
 });
+
+// ———————————————————————————————————————————————————— CLAIMS-DEFAULT-ON-103: the two new-floor shapes
+
+/**
+ * A new floor (seeded memory-sources.json) over a project folder that is a git repo, and its twin over a
+ * folder that is not. Both: the first start builds the mail-cards index and the derived ledger with no manual
+ * step, and later passes keep them current. Only the git floor has the facts that need a commit (donesha); on
+ * the other the done mail stays for get's mail rule (no verdict), and once the folder becomes a git repo the
+ * next pass reads it (floorRepo resolves live).
+ */
+for (const shape of ['git', 'plain']) {
+  test(`CLAIMS-DEFAULT-ON-103 twin (${shape} project folder): the first start builds the mail index and the derived ledger, and passes keep them current`, async () => {
+    const { seedFloorSources, floorRepo } = loadTs('src/main/claims/floorSeed.ts');
+    const { readSourcesConfig } = loadTs('src/main/nativeMemory/sources.ts');
+    const { effectiveLevel } = loadTs('src/shared/claims.ts');
+    const MC = loadTs('src/main/mailCards.ts');
+    const x = setup();
+    const r = shape === 'git' ? makeRepo() : null;
+    const project = r ? r.repo : path.join(JAIL, `plain-${++n}`);
+    if (!r) fs.mkdirSync(project);
+    assert.equal(seedFloorSources(x.root, project), true, 'a new floor is seeded');
+    const floor = () => readSourcesConfig(x.root);
+    assert.equal(floor().ledgerDefault, 'writer');
+    assert.equal(floor().derivedRepo, r ? project : undefined, 'derivedRepo only over a git folder');
+    const sha = r ? r.commit('SYN-T1: work', '2026-10-01T10:00:00Z') : 'a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0';
+    const writeTasks = (ids) => fs.writeFileSync(path.join(x.root, 'tasks.json'), JSON.stringify({ tasks: ids.map((id) => ({ id, title: id, status: 'doing', dependsOn: [], priority: 1, createdAt: '2026-10-01T00:00:00Z' })) }));
+    writeTasks(['SYN-T1']);
+    deliver(x, 'agent-x', { id: 'm-t1', act: 'done', from: 'agent-x', card: 'SYN-T1', subject: 'SYN-T1 done', body: `done at ${sha}`, created_at: '2026-10-02T12:00:00Z' });
+    // The app's start: the catch-up builds the index, then the derived writer starts (index.ts order).
+    const counts = await MC.startupMailCardCatchUp(x.root, { log: () => {}, now: () => '2026-10-03T00:00:00Z', pause: async () => {} });
+    assert.ok(counts, 'the catch-up ran');
+    assert.ok(fs.readFileSync(path.join(x.root, 'state', 'mail-cards', 'syn-t1.jsonl'), 'utf8').includes('m-t1'), 'the mail index holds the done mail');
+    const live = new DerivedLive({
+      hiveRoot: () => x.root,
+      writer: () => x.deps,
+      enabled: () => effectiveLevel('writer', manifestEntry(floor().ledger, D, floor().ledgerDefault)).level !== 'off',
+      repo: () => floorRepo(floor(), undefined, project),
+      changelog: () => null,
+      log: (row) => x.logs.push(row),
+    });
+    await live.run('start', () => live.full());
+    const keys = () => x.live().map((c) => c.key);
+    assert.ok(keys().includes('card.syn-t1.status'), 'the derived ledger is built at first start');
+    const done = () => x.live().filter((c) => c.key === 'card.syn-t1.donesha');
+    const verdicts = path.join(x.root, 'state', 'derived-done-mails.json');
+    if (r) {
+      assert.deepEqual(done().map((c) => c.refs.find((y) => y.type === 'commit').value), [sha], 'git floor: the done sha');
+      assert.equal(JSON.parse(fs.readFileSync(verdicts, 'utf8'))['m-t1'], 'fact');
+    } else {
+      assert.equal(done().length, 0, 'no repo: no done-sha fact');
+      assert.equal(fs.existsSync(verdicts), false, 'and no verdict, so get serves the done mail');
+    }
+    // Kept current: a new card reaches the derived ledger on the cards pass.
+    writeTasks(['SYN-T1', 'SYN-T2']);
+    await live.run('cards', () => live.cards());
+    assert.ok(keys().includes('card.syn-t2.status'), 'a new card is derived');
+    if (!r) {
+      // The folder becomes a git repo: the next pass reads it, with no manual step.
+      const GIT = ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false'];
+      const g = (args) => execFileSync('git', [...GIT, ...args], { cwd: project, encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_DATE: '2026-10-04T10:00:00Z', GIT_COMMITTER_DATE: '2026-10-04T10:00:00Z' } }).trim();
+      g(['init', '-q', '-b', 'main']); fs.writeFileSync(path.join(project, 'f.txt'), 'x'); g(['add', '-A']); g(['commit', '-q', '-m', 'SYN-T2: late']);
+      const late = g(['rev-parse', 'HEAD']);
+      assert.equal(floorRepo(floor(), undefined, project), project, 'the seeded floor now resolves its folder');
+      deliver(x, 'agent-x', { id: 'm-t2', act: 'done', from: 'agent-x', card: 'SYN-T2', subject: 'SYN-T2 done', body: `done at ${late}`, created_at: '2026-10-04T12:00:00Z' });
+      await live.run('pass', () => live.pass());
+      assert.deepEqual(x.live().filter((c) => c.key === 'card.syn-t2.donesha').map((c) => c.refs.find((y) => y.type === 'commit').value), [late], 'the next pass derives from the new repo');
+    }
+    assert.equal(x.logs.filter((row) => row.kind === 'claims-derived-failed').length, 0);
+  });
+}

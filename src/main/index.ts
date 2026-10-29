@@ -18,7 +18,7 @@ import { scrubExport } from './claims/exportLedger';
 import { importAtStart } from './claims/startupImport';
 import { DerivedLive } from './claims/derivedLive';
 import { startAfterMailCardCatchUp, startupMailCardCatchUp } from './mailCards';
-import { derivedRepoFor, seedFloorSources } from './claims/floorSeed';
+import { floorRepo, seedFloorSources } from './claims/floorSeed';
 import { makeW6Append } from './claims/w6Append';
 import { memoryMdReplaced, READER_WATCH_SYNC_MS, ReaderWatchers } from './claims/readerWatch';
 import { importSettled } from './claims/ingest';
@@ -1636,7 +1636,7 @@ derivedClaims = new DerivedLive({
     return { store: ep.store, derive: (records) => claimsDerive(records, registry(), { r4: false }), log: (row) => hive.appendLog(row) };
   },
   enabled: () => readConfig().derivedClaims !== false && claimLevel(DERIVED_AGENT_ID) !== 'off',
-  repo: () => { const root = hive.root(); return derivedRepoFor(root ? readSourcesConfig(root).derivedRepo : undefined, readConfig().derivedClaimsRepo); },
+  repo: () => derivedRepoNow(),
   changelog: () => {
     for (const p of [join(app.getAppPath(), 'CHANGELOG.md'), join(process.cwd(), 'CHANGELOG.md')]) {
       try { const t = readFileSync(p, 'utf8'); if (t) return t; } catch { /* try next */ }
@@ -1645,6 +1645,11 @@ derivedClaims = new DerivedLive({
   },
   log: (row) => hive.appendLog(row),
 });
+/** C4: the derived writer's repo now: the floor's, else config, else a seeded floor's project folder once it is git. */
+function derivedRepoNow(): string | null {
+  const root = hive.root(); const cfg = readConfig();
+  return floorRepo(root ? readSourcesConfig(root) : null, cfg.derivedClaimsRepo, cfg.registeredRepos?.[0] ?? null);
+}
 /** CLAIMS-90 M5: the ledgers an agent writes. The derived ledger is indexed, anchored and rekeyed like
  *  any (claimLedgerAgents), but it has no memory.md to import or watch, no export and no R5 queue. */
 function claimAgentLedgers(): string[] {
@@ -1899,7 +1904,7 @@ const ledgerUi = createLedgerUi({
   savedLevel: () => readConfig().claimLedger,
   floor: () => {
     const root = hive.root(); const f = root ? readSourcesConfig(root) : null;
-    return { ledgerDefault: f?.ledgerDefault, derivedRepo: derivedRepoFor(f?.derivedRepo, readConfig().derivedClaimsRepo) };
+    return { ledgerDefault: f?.ledgerDefault, derivedRepo: derivedRepoNow() };
   },
   saveLevel: (level) => { writeConfig({ claimLedger: level }); },
   levelChanged: () => nativeMemory.claimLedgerChanged(),
