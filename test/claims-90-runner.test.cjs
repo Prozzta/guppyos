@@ -127,9 +127,11 @@ test('PIN: the contained answerer reads what the tree\'s own hook gives it (M4, 
   assert.match(ans, /R\.stageSandbox\(path\.resolve\(o\.snapshot\), v\.manifest, home\)/, 'each item starts from the T_s copy');
 });
 
-test('answerer: hook settings follow the installed shape; env and transcript checks', () => {
+test('answerer: hook settings follow the installed shape; env and transcript checks', (tc) => {
   const { settingsFor, childEnv, readTranscript, styleDeviation, parseItems: answererItems } = require('./claims-90/answerer.cjs');
-  const itemsFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'c90-ai-')), 'items.jsonl');
+  const itemsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'c90-ai-'));
+  tc.after(() => fs.rmSync(itemsDir, { recursive: true, force: true }));
+  const itemsFile = path.join(itemsDir, 'items.jsonl');
   fs.writeFileSync(itemsFile, [{ itemId: 'DV001', asker: 'god', question: 'q?', group: 'F' }, { id: 'P1', asker: 'jim', question: 'r?' }].map((r) => JSON.stringify(r)).join('\n'));
   assert.deepEqual(answererItems(itemsFile).map((i) => i.id), ['DV001', 'P1'], 'the DEV files name the id itemId');
   const dev = (command) => styleDeviation({ tool: 'Bash', command });
