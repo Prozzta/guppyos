@@ -29,7 +29,7 @@ A release has one path: the verified local cut. The Release workflow
      `MUNDER_MODEL_CACHE=<root>/release-cache/models/all-MiniLM-L6-v2 node scripts/fetch-memory-model.cjs`.
      `npm run cut:prune` prints the cache path, and `-- --seed-cache` fills it.
    - `node scripts/release-markers.cjs` on the source tree and again on the build. It must print
-     `ALL 12 MARKERS OK`.
+     `ALL 13 MARKERS OK`.
    - `npm run cut:win` (and `npm run dist:win`) ends with `node scripts/verify-changelog-history.cjs` on the built asar: every
      released `## [x.y.z]` section of the last release's CHANGELOG (the newest `v*` tag behind HEAD
      other than this version's) is still there with its heading unchanged, in order, with no line
