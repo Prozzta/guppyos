@@ -38,16 +38,17 @@ markup for every user, so it is treated as no drop at all.
 
 ## What you can use
 
-Use the real drop tokens: `--ink`, `--ink-soft`, `--paper`, `--cream`, `--lemon`,
-`--mint`, and `--coral`. In development, Ctrl+Shift+I can inspect the host UI.
+Use the drop tokens defined by the renderer: `--paper`, `--cream`, `--cream-2`,
+`--white`, `--ink`, `--ink-dim`, `--ink-faint`, `--ink-soft`, `--yellow`, `--sky`,
+`--maroon`, `--lilac`, `--peach`, `--mint`, `--tan`, `--rose`, `--sky-soft`,
+`--accent`, and `--line`. In development, Ctrl+Shift+I can inspect the host UI.
 
 Images, video, audio, web fonts, gradients, transforms, grid, flexbox, keyframe
 animations, `prefers-color-scheme`, `prefers-reduced-motion`. Remote assets must
 be **https** (or `data:`/`blob:`).
 
-A small token palette is pre-defined — `--ink`, `--ink-soft`, `--paper`,
-`--cream`, `--lemon`, `--mint`, `--coral` — so a drop can match the app without
-restating its colours. Ignore them entirely for a bespoke look.
+A renderer-defined token palette is listed above, so a drop can match the app
+without restating its colours. Ignore it entirely for a bespoke look.
 
 ## What you cannot use, and why
 

@@ -16,14 +16,13 @@ surfaces are distinct from the loopback-only hook broker.
 
 ## Supported versions
 
-Security fixes target supported release branches.
-
-This is an early prototype. Security fixes target the `main` branch only.
+Security fixes target only the latest published Guppy release and the newest release-1.1.x
+branch it was cut from. Fixes ship in the next release; older releases and `main` are unsupported.
 
 | Version | Supported |
 |---|---|
-| `main` | ✅ |
-| older tags | ❌ |
+| Latest release (currently 1.1.103, branch `release-1.1.103`) | supported |
+| Older releases, `main` | not supported |
 
 ## Reporting a vulnerability
 

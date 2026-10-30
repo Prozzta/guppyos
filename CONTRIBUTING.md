@@ -13,7 +13,7 @@ participating, you agree to uphold it.
 
 ### Prerequisites
 
-> Current release builds are Windows and Linux; download them from the [Guppyos releases page](https://github.com/Prozzta/guppyos/releases). CI uses Node.js 20+.
+> Current releases are Windows x64 only (installer and portable); download them from the [guppyos releases page](https://github.com/Prozzta/guppyos/releases). CI uses Node.js 20.
 
 - **macOS, Windows, or Linux** — signed/notarized macOS builds, plus Windows and
   Linux builds, ship from the [releases page](https://github.com/chaitanyagiri/munder-difflin/releases/latest).
