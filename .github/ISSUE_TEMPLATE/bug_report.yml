@@ -32,7 +32,7 @@ body:
     id: guppy
     attributes:
       label: Guppy version
-      description: Shown in Settings, next to the Guppy name.
+      description: Shown in the title bar next to the Guppy logo, and in Settings > General under Updates.
       placeholder: e.g. v1.1.103
     validations:
       required: true
