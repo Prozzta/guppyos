@@ -11,7 +11,7 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/guppyos/releases).
 
-## [1.1.103] — 2026-10-29
+## [1.1.103] — 2026-10-30
 
 **New floors get the claims ledger with no setup, search sees a first claims sync while it runs, and replies no longer race the startup mail catch-up.**
 Rollback: 1.1.102 (reinstall).
