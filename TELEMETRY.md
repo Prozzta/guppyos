@@ -66,17 +66,15 @@ Any one of these fully disables telemetry:
    anonymous usage stats" during onboarding). Takes effect immediately.
 2. Set the standard [`DO_NOT_TRACK`](https://consoledonottrack.com)
    environment variable (any value other than `0`). Respected unconditionally.
-3. **Build from source.** The PostHog key is injected only in official release
-   CI; a local or forked build compiles without one and the analytics module
-   is a no-op — forks never send events anywhere.
+3. **Build from source.** No published Guppy release carries a `POSTHOG_KEY`,
+   so analytics are compiled out. A build enables analytics only when it is
+   explicitly built with `POSTHOG_KEY`.
 
 ## Self-hosting note
 
 > **Fork release cuts.** This fork's local release cuts do not set `POSTHOG_KEY` or
-> `POSTHOG_HOST`. They compile analytics dark: no client, install-id file, or event.
-> A build explicitly given `POSTHOG_KEY` can compile analytics in; the disabled
-> upstream-style release workflow is not this fork's release path.
+> `POSTHOG_HOST`, so they compile analytics dark: no client, install-id file, or event.
 
-PostHog is open source and self-hostable. Official builds point at PostHog
-Cloud (US); the endpoint is a build-time setting (`POSTHOG_HOST`), so the
-project can move to a self-hosted instance without any code change.
+PostHog is open source and self-hostable. For a deliberately analytics-enabled
+build, the endpoint is a build-time setting (`POSTHOG_HOST`), so the project
+can use a self-hosted instance without a code change.
