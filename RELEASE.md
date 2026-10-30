@@ -1,4 +1,4 @@
-# Guppy v1.1.96
+# Guppy releases
 
 **A local hive of Claude Code, Antigravity, Codex, Gemini, Cursor, Grok & Copilot agents that run themselves.**
 Messaging, routing, and remembering, coordinated by your clone, Michael. Local-first and open source.
@@ -7,7 +7,13 @@ Messaging, routing, and remembering, coordinated by your clone, Michael. Local-f
 
 ---
 
-## What's new in 1.1.96
+## Maintained release notes
+
+`CHANGELOG.md` is the maintained source for release notes, including
+[1.1.103](CHANGELOG.md#1103--2026-10-30). Published assets are on the
+[Guppyos releases page](https://github.com/Prozzta/guppyos/releases).
+
+## Historical 1.1.96 notes
 
 **Heavy jobs are counted where they really run, and god's screen reading survives a busy start.**
 Rollback: reinstall 1.1.95.

@@ -1,5 +1,10 @@
 # Integration Templates — first-wave YC tools
 
+> **1.1.103 note.** New floors enable the claims ledger by default. Integrations that record
+> durable facts use `memory note` or `ledger` (card facts keyed as `card.<card-id>`), not direct
+> `memory.md` appends. `memory get <key|card-id>` reads a current recorded value; `memory search
+> --exact` and `--newest` refine retrieval.
+
 Declarative templates so **adding a tool = pick a template + paste a secret** — no
 per-tool client code. Each template is pure data conforming to the **canonical
 `IntegrationTemplate`** in `src/shared/integrations.ts` (Jim's registry/broker spec —

@@ -1,4 +1,8 @@
-# Guppy — Spec
+# Guppy — historical spec
+
+> **Status — 2026-10-30.** This is the original MVP proposal. Its macOS-first, tmux-only,
+> Claude-only, and no agent-to-agent messaging assumptions are no longer true. For current
+> behavior, read [README.md](README.md), [HIVE.md](HIVE.md), and [CHANGELOG.md](CHANGELOG.md).
 
 A desktop control room for the Claude Code agents you already run in terminals. Each agent is a Sims-style avatar in a shared 2D workspace; you can watch them work, send them commands, and configure their goals/skills/MCP from one place.
 
