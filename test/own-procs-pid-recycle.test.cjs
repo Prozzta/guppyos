@@ -229,7 +229,9 @@ const PPID_ALLOW = {
   'tools/layer-b-core.cjs': [/ParentProcessId/, /x\.ppid === l\.pid && \/\^codex/],
   'test-runner-glob.test.cjs': [/ParentProcessId/],                                   // a CreationDate-windowed listing; parse fixtures
   'heavy-job-lock.test.cjs': [/ParentProcessId/],                                     // parse fixtures
-  'layer-b-codex-argv.test.cjs': [/c\.ppid === x\.pid/]                               // a fake table
+  'layer-b-codex-argv.test.cjs': [/c\.ppid === x\.pid/],                              // a fake table
+  // INT 1.1.103 (BARE-NODE-TEST-NO-OWNER): a listing narrowed by ParentProcessId, then own-procs' childrenOf (birth-checked)
+  'bare-node-test-owner.test.cjs': [/own\.childrenOf\(own\.processTable\(`ParentProcessId = \$\{c\.pid\}`\), c\)/]
 };
 test('PIN (all of test/): no tree walk by ParentProcessId alone outside own-procs (an allow-list, each entry a listing or checked)', () => {
   const bad = hits(PPID).filter((h) => !(PPID_ALLOW[h.file] || []).some((re) => re.test(h.text)));
