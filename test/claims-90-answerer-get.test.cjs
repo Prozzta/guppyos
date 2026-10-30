@@ -367,7 +367,8 @@ test('god b6624e fix 1: the preflight child builds the served state through the 
   assert.match(child, /effectiveLevel\(config\.claimLedger, manifestEntry\(floor\.ledger, agentId, floor\.ledgerDefault\)\)/, 'the child resolves a level as main does (the derived ledger defaults to writer)');
   assert.match(run, /R\.stageSandbox\(path\.resolve\(o\.snapshot\), v\.manifest, home, \['primary-mail'\]\);/, 'the build stage holds the T_s mail');
   assert.match(run, /served: \{ \.\.\.servedIn, buildOnly: true \} \}\)\);/, 'the build child gets the build inputs');
-  assert.match(run, /if \(!built\.derivedOn\) return \{ problem: /, 'a build with the derived ledger off stops the run');
+  assert.match(run, /if \(!built\.derivedOn\) return 'the served-state build ran with the derived ledger off';/, 'a build with the derived ledger off is a problem');
+  assert.match(run, /if \(problem\) return \{ problem, report \};/, 'and a build problem stops the run');
   assert.match(run, /served = \{ \.\.\.servedNumbers\(servedState\), sha256: applyServed\(servedState, hive, userData, hiveId\.to\), build: build\.report \};/, 'the preflight serves the items\' copy');
   assert.doesNotMatch(run, /serve, served: servedIn/, 'the serving preflight child builds nothing');
   assert.match(run, /row\.servedSha256 = applyServed\(pre\.servedState, hive, userData, hiveId\.to\);/, 'every item gets the preflight\'s state');
