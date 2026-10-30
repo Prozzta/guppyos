@@ -17,54 +17,97 @@ and never reasons about it.
 
 ---
 
-## 1. One gate
+## 1. One submit owner
 
-One place types automatic messages into a live agent's PTY: the **drain loop**,
-`useHive.ts` effect #4. Everything that wants to reach a running agent enqueues into
-the MD queue and lets the drain decide when.
+One place submits automatic text into a live agent's PTY: **main's
+`automaticSubmit.ts`**, the one main-owned programmatic submit transaction. Nothing in
+the renderer writes a queued message to a PTY itself; it *asks* main through
+`window.cth.autoSubmit(...)`, and main types, checks and presses Enter, or declines.
 
-(The single exception is the god agent's boot sequence, `useHive.ts:284`, which
-writes its remote-control command and orientation prompt directly. That PTY was
-spawned milliseconds earlier and is covered by the boot-grace window, so there is no
-user draft it could land on.)
+Three paths ask the owner:
+
+- **The renderer drain** (`useHive.ts` effect 4) decides *which* queued item is next
+  and *when* it is worth asking, then calls `cth.autoSubmit` with the request id
+  `queue:<agent>:<item id>`. The Human's own composer items go to main's message box
+  instead (`cth.messageBoxDeliver`) when main's control snapshot reports the `term`
+  path.
+- **Boot prompts.** Seed and orientation prompts call `cth.autoSubmit` with the
+  `BOOT_SEQUENCE` class and keep asking while main answers "not now" (see
+  `submitBootPrompt`). There is no direct-write exception for god any more.
+- **Inbox wakes** never touch the MD queue. `inboxWakeBridge.ts` in main turns every
+  wake edge (a durable inbox write, a Stop/idle hook, a control release, a capacity
+  change, SEND_AGAIN after an interference) into one coalesced `requestInboxWake`,
+  plus a 15 s reconciliation beat. That re-reads the inbox, takes the one in-flight
+  claim and submits through the owner as `CAPACITY_GATED` under a stable request id.
+  The renderer's 4 s inbox *hint* (effect 3) only asks main to look; it carries no
+  payload and submits nothing.
 
 ```
-composer / Slack ingress ─┐
-inbox nudge (effect #3) ──┼──▶ enqueueMessage(agentId, text) ──▶ MD queue ──▶ drain (#4) ──▶ PTY
-scheduled /compact (#6) ──┘
+composer / Slack ingress ──────┐
+non-Claude work orders (2e) ───┼──▶ enqueueMessage ──▶ MD queue ──▶ drain (effect 4) ─┐
+voice queue inserts (5c) ──────┤                                                     │
+context triggers /compact (6) ─┘                                                     ├──▶ automaticSubmit.ts ──▶ PTY
+boot prompts (submitBootPrompt) ─────────────────────────────────────────────────────┤      (main, the one owner)
+inbox wake edges ──▶ inboxWakeBridge.ts (main) ──▶ requestInboxWake ─────────────────┘
 ```
 
 This is load-bearing. When the inbox nudge wrote straight into the terminal, it was
 a second writer with its own idea of when the prompt was free — and its text landed
 on top of a half-written line, so the nudge and the user's sentence were submitted
-together as one garbled prompt. Routing it through the queue means one loop owns
-every "is this terminal free?" decision, and the nudge needs no prompt logic of its
-own.
+together as one garbled prompt. With one owner, every "is this terminal free, and
+did Enter really go out?" decision is made in one place, and it is idempotent on the
+request id: main delivers an id at most once, so a reload between main's Enter and
+the renderer's acknowledgement cannot type a message twice.
 
 The drain runs on every store change (debounced 200 ms, so a burst of PTY output
 coalesces) plus a 3 s backstop tick.
 
-## 2. What the drain checks
+## 2. What the drain checks, and what main answers
 
-The front of an agent's MD queue is delivered only when **all** of these hold:
+The drain picks the next item (`pickQueuedForDelivery`; a person's message is offered
+ahead of an automatic one main refused last time) and asks main only when **all** of
+these hold:
 
 | Condition | Why |
 |---|---|
-| agent status is `idle` | don't interrupt a running turn |
+| agent is idle, or breaker-pinned with a terminal quiet for `QUIESCE_IDLE_MS` | don't interrupt a running turn (the Human's message-box items skip this: main judges idle) |
 | auto-delivery not paused — **or the message was manually released** | floor-wide switch (Command Center); see below |
+| no capacity hold from main — **or the message was manually released** | a limited provider delays work instead of destroying it |
 | past the boot grace window | the CLI is still painting its banner |
-| `isTerminalAutomationSafe(ptyId)` | the user owns the prompt — see below |
-| 4.5 s since the last delivery to this agent | back-to-back sends jam the TUI |
+| `isTerminalAutomationSafe(ptyId)` | the user owns the prompt — see below (skipped on the message-box path) |
+| 4.5 s since the last delivery to this agent (`FLUSH_COOLDOWN_MS`) | back-to-back sends jam the TUI |
+| the item's delivery-time precondition still holds | an inbox nudge with no mail left pending is dropped, not deferred |
 
 **Manual release (v0.3.5).** While floor-wide auto-delivery is paused, every queued row
 shows a **send now** link. Clicking it sets `manual: true` on that message and moves it
-to the front of its queue. The drain then bypasses **only the pause check** for that
-message — every other condition in this table still applies, so a manually released
-message waits for idle, respects your draft/picker, and is acknowledged the same way.
-The pause gate holds everything else untouched.
+to the front of its queue. The drain then bypasses **only the pause and capacity
+checks** for that message, and asks main with the `USER_RELEASED` class instead of
+`CAPACITY_GATED`. Every other condition still applies, so a manually released message
+waits for idle and respects your draft/picker.
 
-Delivery is acknowledged only after both PTY writes (the text, then the submit) have
-succeeded. A failure leaves the message visible in the queue and it retries.
+**Main's transaction.** The owner runs ADMIT → READY → STAGE → GAP and ends in one of
+three acknowledgements:
+
+| Ack | Meaning |
+|---|---|
+| **COMMIT** | the final check passed and Enter went out in the same turn |
+| **ABORT** | capacity refused late; nobody typed, our text was erased and the erase verified on screen. Retryable |
+| **INTERFERED** | a human wrote after STAGE. No Enter, no clear, no retry: the item is held and automatic delivery to that terminal is inhibited until a person resolves it ("send queued message" or "already handled - drop") |
+
+A human write before STAGE, or any other "not now" before typing, is a side-effect-free
+refusal (REFUSED). Only `CAPACITY_GATED` submissions can ABORT; `USER_RELEASED` and
+`BOOT_SEQUENCE` do not ask capacity. Raw human keystrokes never pass through the owner.
+
+What the drain does with each outcome:
+
+| Outcome | Queue item |
+|---|---|
+| `COMMITTED` | removed (and its work order recorded) |
+| `REFUSED` / `ABORTED` | stays queued at no attempt cost; nothing of ours is on the prompt |
+| `INTERFERED` | held — shown as held by the composer from main's control snapshot, never retried into the prompt, never dropped |
+| `HUMAN_HANDLED` | removed: a person marked it already handled |
+| `TYPED_NOT_SENT` | removed: the message box typed it but pressed no Enter, so it is on the terminal now |
+| `FAILED` / `REJECTED` | retried on the next cooldown-spaced flush, then dropped loudly after `MAX_SEND_ATTEMPTS` (3) |
 
 ## 3. The user owns the prompt
 
@@ -146,7 +189,11 @@ there", not "is the queue blocked".
 
 | File | Role |
 |---|---|
+| `src/main/automaticSubmit.ts` | the one submit owner: admission classes, ADMIT → READY → STAGE → GAP, COMMIT / ABORT / INTERFERED. Electron-free, every effect injected |
+| `src/main/automaticSubmitWiring.ts` | joins the owner to the real PTY manager, the capacity runtime and the renderer's screen oracle; the IPC handlers (`autoSubmit:submit`, `autoSubmit:resolveInterference`) are a few lines in `src/main/index.ts` |
+| `src/main/inboxWakeBridge.ts` | main's inbox wakes: wake edges → `requestInboxWake` → one claim → the owner as `CAPACITY_GATED` |
+| `src/main/messageBox.ts` | the Human's own composer items on the `term` path (`cth.messageBoxDeliver`): delivered through TermControl, gated by main's hook state |
 | `src/renderer/src/components/terminalAutomation.ts` | pure policy — blocks, expiry windows. No DOM, fully unit-tested (`test/terminal-automation.test.cjs`) |
 | `src/renderer/src/components/terminalPool.ts` | the pooled xterm per PTY; buffer reads, latches, `isTerminalAutomationSafe`, `hasTerminalDraft` |
-| `src/renderer/src/hooks/useHive.ts` | effect #3 inbox nudge (enqueues), effect #4 drain (the one writer), effect #6 scheduled `/compact` |
+| `src/renderer/src/hooks/useHive.ts` | `submitBootPrompt` (boot prompts), effect 3 inbox hint (asks main, submits nothing), effect 4 drain (asks the owner), effect 6 context triggers (enqueue `/compact`) |
 | `src/renderer/src/store/store.ts` | the MD queues themselves + agent persistence |

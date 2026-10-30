@@ -45,10 +45,13 @@ leaking a real secret is not. The exact battery is proven by
 
 ## Sources that expose METADATA ONLY (and why)
 
-- **`log.jsonl` (`get_activity`)** — lifecycle events only (`kind`, `agentId`,
-  `ts`, actor). It never carries message bodies by design: it is high-frequency
-  and append-only, so bodies belong on the dedicated, redacted `get_messages`
-  path instead. This keeps the activity feed cheap and free of un-redacted text.
+- **`log.jsonl` (`get_activity`)** — lifecycle events (`kind`, `agentId`, `ts`,
+  actor). It never carries message bodies by design: it is high-frequency and
+  append-only, so bodies belong on the dedicated, redacted `get_messages` path.
+  It does carry message **subjects**: every routed message writes a `message` row
+  (`from`, `to`, `act`, `subject`, `id`), and its subject is not redacted.
+  `hive:log` returns the raw rows, so those subjects reach the renderer, but
+  `get_activity` speaks only each row's kind, actor and age, never a subject.
 - **`registry.json` / `fleet.json`** (via `get_fleet_status` / `list_agents` /
   `get_agent_detail`) — agent metadata (status, cwd, tokens, breaker). No bodies.
 - **`get_config`** — a hand-picked non-sensitive allowlist; never the raw config
@@ -61,8 +64,13 @@ leaking a real secret is not. The exact battery is proven by
   shape-free form (e.g. a bare random string with no prefix and no `key:`) is not
   guaranteed to be caught. It does not redact PII beyond credentials.
 - **Message scope.** `get_messages` reads `inbox`/`outbox` and their handled
-  subfolders (`inbox/.done`, `outbox/.sent`). Messages purged from disk are gone;
-  there is no separate archive store.
+  subfolders (`inbox/.done`, `outbox/.sent`), and nothing else. The mail ledger
+  (`state/mail/<id>.json`) drops acted entries after 7 days (`MAIL_ACTED_RETENTION_MS`,
+  open asks excepted), but the `.done`/`.sent` files stay and remain this path's
+  history. A separate permanent archive now exists: the per-card mail index under
+  `state/mail-cards/` (`mailCards.ts`), append-only and never pruned, whose rows
+  can hold a message's subject and body (the Human's mail by id only).
+  `get_messages` does not read it, so the voice agent cannot reach it.
 - **Dedup.** A delivered message exists in both sender outbox and recipient
   inbox; results dedup by message id, so the `direction`/`owner`/`archived`
   fields reflect the first copy encountered during traversal.

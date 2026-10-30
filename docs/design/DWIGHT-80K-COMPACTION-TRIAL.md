@@ -10,7 +10,7 @@ generated `agents/<id>/.codex/config.toml`; the user's `~/.codex/config.toml` is
 and never written. The trial does not change Dwight's model (terra).
 
 `registry.json` is frequently read-modify-written by the main process, so activation is only safe
-while the app is fully stopped. God stops Munder Difflin, sets
+while the app is fully stopped. God stops Guppy, sets
 `agents["dwight-mu32ztys"].codexAutoCompactTokenLimit` to `80000`, saves the registry, and then
 starts the app. Before starting the measurement clock, confirm the regenerated file contains
 exactly `model_auto_compact_token_limit = 80000`:

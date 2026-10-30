@@ -11,9 +11,12 @@ purchased on 2026-08-20 (see `tilesets/LIMEZUASSETS-LICENSE.txt`):
 
 - ✅ May be **edited and used in any commercial or non-commercial project**.
 - ❌ May not be resold, or edited and resold.
-- ⚠️ **Credits are required**, linking to <https://limezu.itch.io/>. This obligation is live. The
-  link must stay in the README acknowledgements, in the app's about/credits surface, and on the
-  website. Removing it breaks the licence.
+- ❌ May not be **distributed to others** as an asset. It ships only inside this app, drawn on the
+  office floor; the tileset files must not be offered for download or reuse on their own.
+- ⚠️ **Credits are required**, linking to <https://limezu.itch.io/>. This obligation is live.
+  Today the credit lives in the repository README: the Asset licensing note under "License" and
+  the LimeZu line under "Acknowledgements". The app itself has no about/credits surface that
+  shows it yet. Removing the README credit breaks the licence.
 
 The three bundled tilesets are `interiors.png`, `office-tileset.png` and
 `a5-office-floors-walls.png`. Each one is imported by `scene/office/themeRegistry.ts` and actually

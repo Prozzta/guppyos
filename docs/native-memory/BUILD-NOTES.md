@@ -1,10 +1,19 @@
 # Native memory engine: build notes (branch `memory-154`)
 
-> **History.** These notes record how the engine was built (1.1.54) and cut over. Since
-> 1.1.59 the engine is the ONLY memory: the `memory-engine.json` modes (`legacy`, `shadow`,
-> `fallback-legacy`), the shadow/parity path, the legacy Python CLI and `src/main/memory.ts`
-> are all gone. Since 1.1.60 agents run it as the `memory` command. The mode, rollback and
-> parity sections below describe 1.1.54 and are history.
+> **Historical document (marked 2026-10-30, checked against 1.1.103).** These notes record how
+> the engine was built (1.1.54) and cut over, and are kept as they were written. Do not read them
+> as a description of the current code. Since 1.1.59 the engine is the ONLY memory: the
+> `memory-engine.json` modes (`legacy`, `shadow`, `fallback-legacy`), the shadow/parity path, the
+> legacy Python CLI and `src/main/memory.ts` are all gone. Since 1.1.60 agents run it as the
+> `memory` command. Rows below that no longer hold:
+> - **CLI verbs:** `memory` now takes `get`, `search`, `wake-up`, `status` and the claim verbs
+>   (`note`, `retract`, `accept`, `dismiss`, `reconcile`, `used`, `export --complete`, `history`),
+>   not only `search` / `wake-up` / `status` (`resources/memory-cli.cjs`).
+> - **Markers:** `scripts/release-markers.cjs` checks 13 markers (`ALL 13 MARKERS OK`), not 10.
+> - **Tools:** `native-memory-parity.cjs` and `native-memory-parity-stats.cjs` are removed; only
+>   `scripts/native-memory-migrate.cjs` remains.
+> - **`memory-engine.json`:** the app deletes it at start (`pruneRetiredHiveFiles`); nothing reads it.
+> - **Executable:** the app is `Guppy.exe` (`productName: Guppy`), not `Munder Difflin.exe`.
 
 **Status:** built and tested on branch `memory-154`, off `origin/release-1.1.53` (`79ee6b91`, with `76c8d3ce` carried).
 - Nothing is pushed, released or cut.
