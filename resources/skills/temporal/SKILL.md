@@ -32,9 +32,6 @@ node "$AGENT_DIR/.claude/skills/temporal/when.mjs" --json last7Days
 node "$AGENT_DIR/.claude/skills/temporal/when.mjs" --list
 ```
 
-If `$AGENT_DIR` is somehow unset, the script also lives under
-`~/.claude/skills/temporal/when.mjs`.
-
 ### Windows
 
 | Keyword | Meaning |

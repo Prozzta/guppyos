@@ -73,19 +73,32 @@ holds the credentials and performs the outbound call on your behalf. You never
 see or store a secret, and only loopback callers are accepted — so integration
 access is brokered, auditable, and credential-free from your side.
 
-How integrations are surfaced to you is **environment-dependent** — the exact
-set enabled depends on how you were spawned and the hive's configuration — so
-discover what's live at run time rather than assuming. The broker pattern is
-stable even as specific integrations are added; treat the list below as the
-current surface, not a fixed contract.
+When the broker is running, the harness gives you two env vars:
+
+- `MD_BROKER_URL` — the broker's loopback base URL (`http://127.0.0.1:<port>`).
+- `MD_BROKER_TOKEN` — your per-worker capability token (a handle, not a secret).
+
+Call an integration as `<METHOD> $MD_BROKER_URL/i/<integrationId>/<path>`, with
+the token in an `Authorization: Bearer $MD_BROKER_TOKEN` (or
+`X-MD-Broker-Token: $MD_BROKER_TOKEN`) header. The broker checks the token,
+injects the integration's real credential and forwards to its base URL:
+
+```bash
+curl -s -H "Authorization: Bearer $MD_BROKER_TOKEN" "$MD_BROKER_URL/i/<integrationId>/<path>"
+```
+
+Which integrations are enabled depends on how you were spawned and the hive's
+configuration: if `MD_BROKER_URL` is unset, you have no brokered integrations.
+Treat the list below as the current surface, not a fixed contract.
 
 Concrete capabilities you may have right now (check availability before relying
 on one):
 
 - **Reply to the originating Slack thread.** If your objective arrived from
   Slack, your dispatch includes the exact loopback reply command —
-  `node "<helper>" --channel <C> --thread <T> --text "<mrkdwn>"`. Use *that*
-  command verbatim to post your result back to the thread. Send a substantive
+  `"<node>" "<helper>" --channel <C> --thread <T> --text "<mrkdwn>"`, where
+  `<node>` is the hive's own Node path (a bare `node` may not be on your PATH).
+  Run *that* command verbatim to post your result back to the thread. Send a substantive
   reply (a short `*bold*` headline + the actual outcome/links), never a bare
   "done".
 - **Hive messaging.** Coordinate or hand off by writing an outbox message JSON
@@ -94,8 +107,14 @@ on one):
 - **Semantic memory (the built-in memory engine).** If enabled for you:
   `memory search "<query>"` to recall shared knowledge, `memory get <key|card-id>`
   for the current value of a key or card (its competing and superseded values, a
-  card's decisions and mail history), `memory wake-up` for a digest. Your memory.md
-  is indexed automatically.
+  card's decisions and mail history), `memory wake-up` for a digest, `memory status`
+  for the engine's state; add `--format json` for machine-readable output. Where
+  you record facts depends on your floor: on a claims-ledger floor (the default for
+  new floors) record them with `memory note` (`--kind lesson` for method lessons,
+  `--key card.<card-id>` for a card's notes, `--supersedes ID --reason
+  changed|corrected|moved` to replace a fact) and do not write new facts into
+  memory.md; otherwise append them to memory.md, which is indexed automatically.
+  Your start-up prompt says which applies to you.
 - **Enterprise Knowledge Graph.** If enabled: `node "$KG_CLI" search "<query>"`
   for ranked passages, `node "$KG_CLI" list`, `node "$KG_CLI" get <id>` — use it
   for company-specific facts instead of guessing.
@@ -104,8 +123,8 @@ on one):
   by the hive's consent configuration.
 
 As additional brokered integrations land (calendar, mail, docs, web fetch, …),
-they follow the same shape: a brokered, credential-free call discoverable at run
-time. Pair them with the temporal skills above — resolve the date window first,
+they follow the same shape: a credential-free call to `$MD_BROKER_URL/i/<integrationId>/...`
+with your broker token. Pair them with the temporal skills above — resolve the date window first,
 then pass those concrete ISO bounds to the integration query.
 
 ## 4. Boundaries
