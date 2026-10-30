@@ -15,11 +15,10 @@ participating, you agree to uphold it.
 
 > Current releases are Windows x64 only (installer and portable); download them from the [guppyos releases page](https://github.com/Prozzta/guppyos/releases). CI uses Node.js 20.
 
-- **macOS, Windows, or Linux** — signed/notarized macOS builds, plus Windows and
-  Linux builds, ship from the [releases page](https://github.com/chaitanyagiri/munder-difflin/releases/latest).
+- **macOS, Windows, or Linux** — all are valid development platforms.
   Cross-platform smoke-testing and fixes are still very welcome (see
   [Good first areas](#good-first-areas)).
-- **Node.js 18+** and npm.
+- **Node.js 20** and npm (matching CI).
 - A **C/C++ toolchain** to build `node-pty`'s native addon. On macOS:
   ```bash
   xcode-select --install
