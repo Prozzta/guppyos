@@ -25,7 +25,7 @@ and unattended.
 
 <p>
   <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-F4D35E.svg?style=flat-square&labelColor=6E1423"></a>
-  <img alt="Version: 1.1.102" src="https://img.shields.io/badge/version-1.1.102-F4D35E.svg?style=flat-square&labelColor=6E1423">
+  <img alt="Version: 1.1.103" src="https://img.shields.io/badge/version-1.1.103-F4D35E.svg?style=flat-square&labelColor=6E1423">
   <img alt="Fork of chaitanyagiri/munder-difflin" src="https://img.shields.io/badge/fork%20of-chaitanyagiri%2Fmunder--difflin-F4F1EA.svg?style=flat-square&labelColor=6E1423">
 </p>
 
@@ -319,10 +319,13 @@ wholesale merges. The shape of the line, as evidence for the three ideas above:
   server no longer turns off another, the knowledge-graph toggle keeps its folder, auto-compact and
   Schedules no longer undo each other, the app reads its config, registry and task files from
   memory, and a test run that opens app windows waits for the heavy slot.
-- **Heavy jobs held to half the PC, clean terminal closes** (1.1.102, the current release) — heavy
+- **Heavy jobs held to half the PC, clean terminal closes** (1.1.102) — heavy
   jobs are hard-capped at 50% of the PC's CPU by default, closing an agent's terminal ends every
   process it started, Codex agents no longer reach into your own Codex folder, and the Settings
   hero card follows the current release.
+- **Claims ledger on for new floors** (1.1.103, the current release) — a floor created on 1.1.103
+  builds its claims ledger at first start with no setup, search sees a first claims sync while it
+  runs, and replies no longer race the startup mail catch-up.
 
 Every milestone carries a dated human acceptance and evidence tag in the fork's
 internal mission ledger; this README keeps only the shape.

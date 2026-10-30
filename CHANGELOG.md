@@ -11,6 +11,42 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/guppyos/releases).
 
+## [1.1.103] — 2026-10-29
+
+**New floors get the claims ledger with no setup, search sees a first claims sync while it runs, and replies no longer race the startup mail catch-up.**
+Rollback: 1.1.102 (reinstall).
+
+### Changed
+
+- **The claims ledger is on by default for new floors.** A floor created on 1.1.103 builds its
+  mail-cards index and its derived claims at first start, with no manual step, and keeps both
+  current. If the floor's project folder is a git repo, its commits feed the ledger too. A plain
+  folder works from mail alone, and its commits are picked up once the folder becomes a repo.
+  Settings shows the repo the ledger reads. Floors made before 1.1.103 keep their settings. At
+  every start, each floor indexes any mail it has not indexed yet, so the first start after the
+  upgrade can take longer on a floor with a lot of history.
+- **`memory get <key|card-id>`** returns the current value of a key or a card as a field. After
+  it come the competing values and the superseded ones, each with what replaced it.
+  `memory search` adds `--exact` and `--newest`, and `memory history` accepts the ids that `get`
+  prints. The memory tools are also offered over MCP.
+- **Agents start one fresh conversation after this install.** The protocol text injected into
+  sessions now names `memory get`, so each affected session starts a new conversation the first
+  time it starts on 1.1.103. Identity, memory, inbox and ledger are kept.
+
+### Fixed
+
+- **A floor's first claims sync is searchable while it runs.** A first sync (or one after a
+  reset) used to apply every derived claim in a single step at the end, so search found none of
+  them for minutes. It now applies whole claims in slices, and search sees the first slice within
+  seconds. A sync that stops part-way resumes where it left off and embeds only what is missing.
+- **Replies sent during the startup mail catch-up are linked, not bounced.** A reply that arrived
+  while the catch-up was still reading the hive could miss its parent. It is now delivered as
+  written and linked once the catch-up settles, with rows kept in arrival order.
+- **The derived claims link commits, done mails and card status more carefully.** Fixes cover
+  merge and cherry-pick commits, branches cut after a merge, a commit subject naming another
+  card, superseded cards, and slow backfills on large boards. Accuracy validation is in progress;
+  the last sealed test did not meet its 0.90 bound.
+
 ## [1.1.102] — 2026-10-24
 
 **Heavy jobs are held to half the PC, closing a terminal ends everything it started, and Codex agents keep out of your own Codex folder.**
