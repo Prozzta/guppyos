@@ -17,7 +17,7 @@ body:
     attributes:
       label: Steps to reproduce
       placeholder: |
-        1. Run `npm run dev`
+        1. Open Guppy
         2. Add an agent with command `...`
         3. See error
     validations:
@@ -29,17 +29,29 @@ body:
       description: Console output, stack traces, or a screenshot/clip if it's visual.
       render: shell
   - type: input
-    id: macos
+    id: guppy
     attributes:
-      label: macOS version
-      placeholder: e.g. 15.0
+      label: Guppy version
+      description: Shown in Settings, next to the Guppy name.
+      placeholder: e.g. v1.1.103
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Install type
+      options:
+        - Installer (setup.exe)
+        - Portable (portable.exe)
+        - Source build (npm run dev / npm run build)
     validations:
       required: true
   - type: input
-    id: node
+    id: windows
     attributes:
-      label: Node version
-      placeholder: node -v
+      label: Windows version
+      description: Run `winver`.
+      placeholder: e.g. Windows 11 23H2
     validations:
       required: true
   - type: input
@@ -47,12 +59,16 @@ body:
     attributes:
       label: Claude Code version (if relevant)
       placeholder: claude --version
+  - type: input
+    id: node
+    attributes:
+      label: Node version (source builds only)
+      placeholder: node -v
   - type: checkboxes
     id: checks
     attributes:
       label: Pre-flight
       options:
-        - label: I re-ran `npm install` so `node-pty` is rebuilt for the current Electron ABI.
-          required: true
         - label: I searched existing issues and this isn't a duplicate.
           required: true
+        - label: "Source builds only: I re-ran `npm install` so `node-pty` is rebuilt for the current Electron ABI."

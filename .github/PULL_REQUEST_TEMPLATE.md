@@ -18,8 +18,10 @@
 
 ## Checklist
 
-- [ ] `npm run typecheck` passes (the de-facto CI gate).
+- [ ] `npm run typecheck` passes. CI (`.github/workflows/ci.yml`) runs it, and `npm run build`, only for
+      pushes and PRs to `main`; for a PR into a `release-*` branch, run both locally.
 - [ ] `npm run build` succeeds.
 - [ ] Any new UI derives from `DESIGN.md` / `tokens.ts` — no ad-hoc colors, spacing, or fonts.
-- [ ] If I added art, it's my own or compatibly licensed, and listed in `ATTRIBUTION.md`.
+- [ ] If I added art, it's my own or compatibly licensed, and credited in
+      `src/renderer/src/assets/ATTRIBUTION.md` (TES theme art: `themes/tes/LICENSE-ARTWORK.md`).
 - [ ] PR is focused on a single change.

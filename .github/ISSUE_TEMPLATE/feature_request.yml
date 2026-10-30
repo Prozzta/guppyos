@@ -27,7 +27,10 @@ body:
       options:
         - Office floor / avatars
         - Terminals / PTY
-        - The hive (memory, routing, GOD agent)
+        - The hive (routing, mail, GOD agent)
+        - Memory / claims ledger
+        - Agents / providers (Claude Code, Codex, Antigravity)
+        - Installer / updates
         - Files / git
         - Onboarding / config
         - Design system
