@@ -23,7 +23,9 @@ test.after(() => {
 });
 
 const loadTs = require('../load-ts.cjs');
-const { SEARCH_DEADLINE_WARM_MS, SEARCH_DEADLINE_INDEXING_MS } = loadTs('src/main/nativeMemory/service.ts');
+const { SEARCH_DEADLINE_INDEXING_MS } = loadTs('src/main/nativeMemory/service.ts');
+// The warm budget when the failure reproduced; this drill must still exceed that old limit.
+const OLD_WARM_MS = 250;
 const { runDrill } = require('../claims-drill/runner.cjs');
 const TREE = path.join(__dirname, '..', '..');
 
@@ -63,7 +65,7 @@ test('T3: searches DURING a claims sync on a loaded machine answer, with hits, i
   assert.ok(answered.every((s) => s.hits > 0), 'each one with results (markdown before the apply, claims after)');
   const slowest = Math.max(...answered.map((s) => s.ms));
   assert.ok(slowest < SEARCH_DEADLINE_INDEXING_MS, `slowest ${slowest} ms`);
-  assert.ok(slowest > SEARCH_DEADLINE_WARM_MS, `vacuity: on this loaded machine a search during the sync takes more than the warm budget ${SEARCH_DEADLINE_WARM_MS} ms (slowest ${slowest} ms)`);
+  assert.ok(slowest > OLD_WARM_MS, `vacuity: on this loaded machine a search during the sync takes more than the old warm budget ${OLD_WARM_MS} ms (slowest ${slowest} ms)`);
   assert.ok(r.events.includes('on:claims-sync') && r.events.at(-1).startsWith('off:'), JSON.stringify(r.events));
   console.log(`# during the sync: ${r.during.length} searches (${failed.length} missed: ${failed.map((s) => s.error).join(', ') || 'none'}), slowest answered ${slowest} ms; after: exit ${r.after.exit} in ${r.after.ms} ms`);
 });
