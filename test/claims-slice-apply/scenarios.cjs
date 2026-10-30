@@ -16,11 +16,18 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 
 const DIM = 384;
+// A search embeds its query through the same embedder (engine.search, one `tokNNN` text): those
+// calls are counted apart, so `calls` (and `failAt`) count claim-part embeds only and the drill's
+// own searches never consume the budget or hit the dead embedder.
+const isQuery = (texts) => texts.length === 1 && /^tok\d{3}$/.test(texts[0]);
 function bowEmbedder(failAt = 0) {
-  const e = { loaded: true, calls: 0 };
+  const e = { loaded: true, calls: 0, queries: 0 };
   e.embed = async (texts) => {
-    e.calls++;
-    if (failAt && e.calls >= failAt) throw new Error('embedder died (drill)');
+    if (isQuery(texts)) e.queries++;
+    else {
+      e.calls++;
+      if (failAt && e.calls >= failAt) throw new Error('embedder died (drill)');
+    }
     return texts.map((t) => {
       const v = new Float32Array(DIM);
       for (const w of t.toLowerCase().match(/[a-z0-9]+/g) ?? []) {
@@ -131,10 +138,11 @@ module.exports = async (drill) => {
     const applies2 = watchApplies(store, eng2, { settled: false });
     const res2 = await sync(eng2);
     await settle(applies2);
+    const nApplies2 = applies2.length;  // before res3: the no-op third sync is one apply of its own
     const sampled = [0, CLAIMS_APPLY_SLICE - 1, CLAIMS_APPLY_SLICE, CLAIMS_APPLY_SLICE + 5, N - 1];
     const found = {}; for (const i of sampled) found[i] = await finds(eng2, i);
     const res3 = await sync(eng2);
-    const out = { n: N, slice: CLAIMS_APPLY_SLICE, crashed, res2, applies2: applies2.length, embedCalls2: emb2.calls, found, head: store.sourceShas().get(PATH) ?? null, res3,
+    const out = { n: N, slice: CLAIMS_APPLY_SLICE, crashed, res2, applies2: nApplies2, embedCalls2: emb2.calls, found, head: store.sourceShas().get(PATH) ?? null, res3,
       claimRows: store.db.prepare('SELECT count(*) AS n FROM claims WHERE wing = ?').get(W).n, chunkRows: store.db.prepare('SELECT count(*) AS n FROM chunks WHERE source_id = ?').get(PATH).n };
     await eng2.close(); store.close();
     return out;
@@ -156,7 +164,7 @@ module.exports = async (drill) => {
     // a search in the middle of the embeds (after the first slice's worth): markdown, no claims
     let during = null;
     const realEmbed = emb.embed;
-    emb.embed = async (texts) => { const v = await realEmbed(texts); if (emb.calls === CLAIMS_APPLY_SLICE + 1) during = hits(eng, tok(0)).then((hs) => ({ md: mdHits(hs), claims: hs.filter((h) => h.claimId).length })); return v; };
+    emb.embed = async (texts) => { const v = await realEmbed(texts); if (!isQuery(texts) && emb.calls === CLAIMS_APPLY_SLICE + 1) during = hits(eng, tok(0)).then((hs) => ({ md: mdHits(hs), claims: hs.filter((h) => h.claimId).length })); return v; };
     const res = await sync(eng).then((r) => { state.settled = true; return r; });
     await settle(applies);
     during = during ? await during : null;
