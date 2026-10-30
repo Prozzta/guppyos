@@ -16,6 +16,8 @@ surfaces are distinct from the loopback-only hook broker.
 
 ## Supported versions
 
+Security fixes target supported release branches.
+
 This is an early prototype. Security fixes target the `main` branch only.
 
 | Version | Supported |

@@ -1,5 +1,7 @@
 # macOS code signing & notarization (maintainer runbook)
 
+> macOS artifacts are not currently released. This is a future maintainer runbook for `Guppy.app`.
+
 Signing binds the app's TCC grants (Documents/Desktop/Downloads access) to a
 **stable code signature**, so users are prompted for folder access **once**
 instead of on every agent action. Notarization clears Gatekeeper so the app
