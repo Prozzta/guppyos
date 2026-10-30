@@ -8,12 +8,15 @@
  *   electron key-unwrap.cjs <tree> <userDataCopy>   -> stdout: the key, base64, one line; exit 0
  *
  * The key leaves only on stdout (a pipe to run.cjs) and is never written to a file.
+ * HARNESS-CRASHPAD: isolateAppPaths makes the userData copy the sandbox (userData and sessionData are
+ * the copy itself; appData, crashDumps and logs go inside it), before any path is used.
  */
 const path = require('node:path');
 const { app, safeStorage } = require('electron');
+const { isolateAppPaths } = require('../electron-harness/isolate-paths.cjs');
 
 const [tree, userData] = process.argv.slice(-2);
-app.setPath('userData', userData);
+isolateAppPaths(app, userData);
 app.disableHardwareAcceleration();
 app.whenReady().then(() => {
   try {

@@ -180,9 +180,14 @@ function inProcessFork(runWorker, deps, tap = null) {
       setTimeout: (fn) => { fn(); return { unref() {} }; },
       setInterval: () => ({ unref() {} }),
     });
+    // Jim 97b61f: a start row and an end row (ms) per phase; the runner reports both and, at its cap, the one that ran out.
+    const phase = async (name, fn) => { emit({ phase: { name, start: true } }); const t = Date.now(); await fn(); emit({ phase: { name, ms: Date.now() - t } }); };
     const catchUp = startupMailCardCatchUp(hive, { log, now: () => spec.now });
-    await startAfterMailCardCatchUp(catchUp, () => derivedLive.start());
-    await derivedLive.run('served-settled', async () => {});
+    await phase('mail-card catch-up', () => catchUp.then(() => {}, () => {}));
+    await phase('derived start backfill', async () => {
+      await startAfterMailCardCatchUp(catchUp, () => derivedLive.start());
+      await derivedLive.run('served-settled', async () => {});
+    });
     derivedLive.stop();
     const failed = logRows.filter((r) => /^(mailcards-backfill-failed|claims-derived-failed)$/.test(r.kind));
     if (failed.length) { emit({ summary: { ok: false, reason: `the served-state build failed: ${failed[0].kind} ${String(failed[0].error ?? '').slice(0, 160)}` } }); process.exit(3); }

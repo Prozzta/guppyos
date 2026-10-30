@@ -42,6 +42,10 @@ const MAX_CALLS = 5;
 const ITEM_TIMEOUT_MS = 10 * 60_000;
 /** god ba807e: the preflight serve child's first full sync (claimsSyncDeadlineMs for 11,639 chunks is about 31 min). */
 const PREFLIGHT_SYNC_MS = 45 * 60_000;
+/** Jim 97b61f: the served-state build's cap. On the real T_s snapshot the mail-card catch-up takes about 15 min and the
+ *  derived start backfill about 18 min (one child, one after the other): both, with headroom for a loaded machine. */
+const SERVED_BUILD_CAP_MS = 75 * 60_000;
+const SERVED_BUILD_PHASES = ['mail-card catch-up', 'derived start backfill'];
 const INSTALLED_APP = path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Munder Difflin', 'Guppy');
 
 /** The serve child's environment: the drill allow-list, plus C90_HIDE_STALE when --hide-stale names it (step 3 arms). */
@@ -337,6 +341,40 @@ function closeOf(p, ms) {
     const t = setTimeout(() => { p.kill(); }, ms);
     p.on('close', (code) => { clearTimeout(t); resolve(code); });
   });
+}
+
+/** closeOf that also says whether the cap killed the child. */
+function closeOrCap(p, ms) {
+  return new Promise((resolve) => {
+    let capped = false;
+    const t = setTimeout(() => { capped = true; p.kill(); }, ms);
+    p.on('close', (code) => { clearTimeout(t); resolve({ code, capped }); });
+  });
+}
+
+/** The served-state build's phases from its rows: each one's ms (null when it never finished), in order, and the one
+ *  that started and did not finish (null when none). */
+function buildPhases(rows) {
+  const phases = SERVED_BUILD_PHASES.map((name) => {
+    const started = rows.some((x) => x.phase?.name === name && x.phase.start);
+    const end = rows.find((x) => x.phase?.name === name && typeof x.phase.ms === 'number');
+    return { name, started, ms: end ? end.phase.ms : null };
+  });
+  const running = phases.find((p) => p.started && p.ms === null)?.name ?? null;
+  return { phases: phases.map(({ name, ms }) => ({ name, ms })), running };
+}
+
+/** Why the served-state build failed, or null. A capped build names its cap and the phase that ran out. */
+function buildProblem({ code, capped, capMs, rows, stderr }) {
+  const { phases, running } = buildPhases(rows);
+  if (capped) {
+    const done = phases.filter((p) => p.ms !== null).map((p) => `${p.name} ${Math.round(p.ms / 1000)} s`).join(', ');
+    return `the served-state build ran out of its ${Math.round(capMs / 60_000)} min cap in the ${running ?? 'start-up (before the first phase)'} phase${done ? ` (finished: ${done})` : ''}`;
+  }
+  const built = rows.find((x) => x.served)?.served ?? null;
+  if (code !== 0 || !built) return `the served-state build failed (exit ${code})${running ? ` in the ${running} phase` : ''}: ${rows.find((x) => x.summary)?.summary?.reason ?? String(stderr ?? '').slice(0, 300)}`;
+  if (!built.derivedOn) return 'the served-state build ran with the derived ledger off';
+  return null;
 }
 
 /** Why one preflight call fails, or null: a non-zero exit, a reply that the build does not answer the verb, or nothing. */
@@ -706,14 +744,14 @@ async function buildServed(o, v, addDir, key, outDir, dir) {
     const child = spawn(R.electronOf(o.tree), [path.join(__dirname, 'answer-child.cjs'), specFile], { cwd: o.tree, env: serveEnv(o, home), windowsHide: true, stdio: ['pipe', 'ignore', 'pipe'] });
     let stderr = '';
     child.stderr.on('data', (d) => { if (stderr.length < 20000) stderr += d; });
-    const closed = closeOf(child, 30 * 60_000);
+    const closed = closeOrCap(child, SERVED_BUILD_CAP_MS);
     child.stdin.end(`${key}\n`);
-    const r = { code: await closed, stderr };
+    const { code, capped } = await closed;
     const rows = fs.existsSync(out) ? fs.readFileSync(out, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
     const built = rows.find((x) => x.served)?.served ?? null;
-    const report = { exit: r.code, ms: Date.now() - t0, changelogTag: servedIn.changelogTag, catchUp: built?.catchUp ?? null, derivedOn: built?.derivedOn ?? null, derivedKinds: built?.derivedKinds ?? [] };
-    if (r.code !== 0 || !built) return { problem: `the served-state build failed (exit ${r.code}): ${rows.find((x) => x.summary)?.summary?.reason ?? r.stderr.slice(0, 300)}`, report };
-    if (!built.derivedOn) return { problem: 'the served-state build ran with the derived ledger off', report };
+    const report = { exit: code, ms: Date.now() - t0, capMs: SERVED_BUILD_CAP_MS, capped, phases: buildPhases(rows).phases, changelogTag: servedIn.changelogTag, catchUp: built?.catchUp ?? null, derivedOn: built?.derivedOn ?? null, derivedKinds: built?.derivedKinds ?? [] };
+    const problem = buildProblem({ code, capped, capMs: SERVED_BUILD_CAP_MS, rows, stderr });
+    if (problem) return { problem, report };
     return { servedState: captureServed(hive, userData, baseline, hiveId.to), report };
   } finally {
     if (!o.keep) {
@@ -951,4 +989,4 @@ if (require.main === module) {
   }, (e) => { console.error(`[claims-90] ${e.stack || e.message}`); process.exitCode = 2; });
 }
 
-module.exports = { projectSlug, claudeProjectsDir, leftoverPrefixes, sessionFolderOut, leftoversIn, LEFTOVER_PREFIX, preflightProblem, firstIndexedCard, servedStateProblem, treeShas, prepareServed, captureServed, applyServed, servedMissing, servedSha, servedNumbers, syncProblem, indexProblem, indexKey, serveIndex, syncRows, ownSpillRead,unavailableOf, search4Of, parseArgs, parseItems, installedHookShape, hookShapeOf, buildHookShape, buildInfo, buildMemoryShim, condenseOf, settingsFor, childEnv, readTranscript, styleDeviation, itemStyle, memoryMdUse, main };
+module.exports = { SERVED_BUILD_CAP_MS, buildPhases, buildProblem, projectSlug, claudeProjectsDir, leftoverPrefixes, sessionFolderOut, leftoversIn, LEFTOVER_PREFIX, preflightProblem, firstIndexedCard, servedStateProblem, treeShas, prepareServed, captureServed, applyServed, servedSha, servedNumbers, syncProblem, indexProblem, indexKey, serveIndex, syncRows, ownSpillRead,unavailableOf, search4Of, parseArgs, parseItems, installedHookShape, hookShapeOf, buildHookShape, buildInfo, buildMemoryShim, condenseOf, settingsFor, childEnv, readTranscript, styleDeviation, itemStyle, memoryMdUse, main, servedMissing };
