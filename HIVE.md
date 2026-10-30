@@ -4,7 +4,7 @@
 > `memory get <key|card-id>` retrieves the current recorded value; `memory search --exact` is
 > exact-text search and `--newest` orders results newest first. With the ledger active, durable
 > facts are written through `memory note`/`ledger`, not direct `memory.md` appends. See
-> [CHANGELOG.md](./CHANGELOG.md#1103--2026-10-30) for release-specific behavior.
+> [CHANGELOG.md](./CHANGELOG.md#11103--2026-10-30) for release-specific behavior.
 
 > How Guppy turns a room full of independent `claude`
 > processes into a collaborating, self-coordinating team with persistent memory,

@@ -10,7 +10,7 @@ Messaging, routing, and remembering, coordinated by your clone, Michael. Local-f
 ## Maintained release notes
 
 `CHANGELOG.md` is the maintained source for release notes, including
-[1.1.103](CHANGELOG.md#1103--2026-10-30). Published assets are on the
+[1.1.103](CHANGELOG.md#11103--2026-10-30). Published assets are on the
 [Guppyos releases page](https://github.com/Prozzta/guppyos/releases).
 
 ## Historical 1.1.96 notes

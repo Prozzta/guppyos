@@ -3,7 +3,7 @@
 > **Current workflow note — 1.1.103.** This design predates the claims-ledger default. New floors
 > use the ledger for durable agent facts: `memory get <key|card-id>` reads the current recorded
 > value, and `memory search --exact`/`--newest` refine retrieval. Integrations write facts through
-> the ledger writer, not direct `memory.md` appends. See [CHANGELOG.md](../../CHANGELOG.md#1103--2026-10-30).
+> the ledger writer, not direct `memory.md` appends. See [CHANGELOG.md](../../CHANGELOG.md#11103--2026-10-30).
 
 **Feature:** Knowledge Graph (enterprise context store + agent access)
 **Branch:** `feat/knowledge-graph` · **Author:** Stanley · **Status:** design + v1 vertical slice in this pass

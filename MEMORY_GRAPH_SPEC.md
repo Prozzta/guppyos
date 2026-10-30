@@ -1,7 +1,13 @@
 # Memory Graph Visualization — Spec (Phase 1)
 
+> **Status — 2026-10-30.** This is the design for the shipped memory-graph panel. Its raw-memory
+> topic model predates the claims ledger; it remains useful as panel design context, not as the
+> current memory contract. Current memory behavior is in [HIVE.md](HIVE.md) and
+> [CHANGELOG.md](CHANGELOG.md#11103--2026-10-30).
+
 **Feature #8** of the Munder Difflin harness roadmap · author: Jim · branch `feature/memory-graph`
-**Status:** awaiting god sign-off. No component code is written yet — this document is the contract for Phase 2.
+**Historical implementation note:** the panel has shipped; this document is retained as its
+design reference.
 
 ---
 

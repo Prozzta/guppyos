@@ -332,7 +332,7 @@ wholesale merges. The shape of the line, as evidence for the three ideas above:
 New floors start with the claims ledger enabled. Use `memory get <key|card-id>` for a current
 recorded value; use `memory search --exact` for exact text and `--newest` for newer matches first.
 These tools surface recorded claims and history, not an accuracy guarantee. See the
-[1.1.103 CHANGELOG entry](CHANGELOG.md#1103--2026-10-30) for behavior and limits.
+[1.1.103 CHANGELOG entry](CHANGELOG.md#11103--2026-10-30) for behavior and limits.
 
 Every milestone carries a dated human acceptance and evidence tag in the fork's
 internal mission ledger; this README keeps only the shape.
