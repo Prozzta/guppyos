@@ -27,7 +27,9 @@ follow them.
      working set and standing lessons.
    - Otherwise: read the `## How I work (standing lessons)` section at the top of
      `$AGENT_DIR/memory.md` and follow it, then run `memory wake-up` for a digest
-     of your memory.
+     of your memory. (Without semantic memory: read the last ~40 lines of
+     `$AGENT_DIR/memory.md` instead, no wake-up, search or get; grep
+     `memory-archive-*.md` for older notes.)
    - Then `memory search "<query>"` for anything specific, and
      `memory get <key|card-id>` for the current value of a key or card.
    - Do NOT read `$AGENT_DIR/memory.md` whole. If you must open it, read only its
