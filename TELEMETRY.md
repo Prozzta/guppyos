@@ -72,6 +72,11 @@ Any one of these fully disables telemetry:
 
 ## Self-hosting note
 
+> **Fork release cuts.** This fork's local release cuts do not set `POSTHOG_KEY` or
+> `POSTHOG_HOST`. They compile analytics dark: no client, install-id file, or event.
+> A build explicitly given `POSTHOG_KEY` can compile analytics in; the disabled
+> upstream-style release workflow is not this fork's release path.
+
 PostHog is open source and self-hostable. Official builds point at PostHog
 Cloud (US); the endpoint is a build-time setting (`POSTHOG_HOST`), so the
 project can move to a self-hosted instance without any code change.

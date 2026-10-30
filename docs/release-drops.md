@@ -38,6 +38,9 @@ markup for every user, so it is treated as no drop at all.
 
 ## What you can use
 
+Use the real drop tokens: `--ink`, `--ink-soft`, `--paper`, `--cream`, `--lemon`,
+`--mint`, and `--coral`. In development, Ctrl+Shift+I can inspect the host UI.
+
 Images, video, audio, web fonts, gradients, transforms, grid, flexbox, keyframe
 animations, `prefers-color-scheme`, `prefers-reduced-motion`. Remote assets must
 be **https** (or `data:`/`blob:`).
