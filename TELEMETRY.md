@@ -1,6 +1,10 @@
 # Telemetry
 
-Guppy collects a small set of **anonymous** usage events so we can
+> **Published-release status:** Published Guppy releases send no telemetry: they
+> are built without `POSTHOG_KEY`, so analytics are compiled out. The contract
+> below applies only to a build explicitly made with `POSTHOG_KEY`.
+
+An analytics-enabled build collects a small set of **anonymous** usage events so we can
 understand adoption (how many people launch the app, which features get used)
 and make the product better. This document is the complete, authoritative
 contract: **if an event or property is not listed here, the app does not send
@@ -10,7 +14,7 @@ lockstep, and because the repo is open source you can verify that yourself.
 
 ## What is sent
 
-Every event carries only these common properties:
+Every event from an analytics-enabled build carries only these common properties:
 
 | Property | Example | Notes |
 | --- | --- | --- |
@@ -58,22 +62,19 @@ identifiers, or API keys. Nothing free-form — the property allowlist in
 - IP-based geolocation is used only to derive a country for aggregate stats;
   PostHog does not retain the IP on the event.
 
-## Opting out
+## Opting out in analytics-enabled builds
 
-Any one of these fully disables telemetry:
+Any one of these fully disables telemetry in an analytics-enabled build:
 
 1. **Settings → General → Anonymous usage stats → off** (or uncheck "Share
    anonymous usage stats" during onboarding). Takes effect immediately.
 2. Set the standard [`DO_NOT_TRACK`](https://consoledonottrack.com)
    environment variable (any value other than `0`). Respected unconditionally.
-3. **Build from source.** No published Guppy release carries a `POSTHOG_KEY`,
+3. **Builds without a key.** No published Guppy release carries a `POSTHOG_KEY`,
    so analytics are compiled out. A build enables analytics only when it is
    explicitly built with `POSTHOG_KEY`.
 
 ## Self-hosting note
-
-> **Fork release cuts.** This fork's local release cuts do not set `POSTHOG_KEY` or
-> `POSTHOG_HOST`, so they compile analytics dark: no client, install-id file, or event.
 
 PostHog is open source and self-hostable. For a deliberately analytics-enabled
 build, the endpoint is a build-time setting (`POSTHOG_HOST`), so the project
