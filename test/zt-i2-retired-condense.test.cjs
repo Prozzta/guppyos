@@ -83,7 +83,10 @@ test('ZT-I2 (3): no upkeep path in src/main or src/shared spawns claude in print
     // HEAVY-LOCK-OPAQUE-SCRIPT-196's processImage: `ps -p <pid>` names a process id, not claude's print mode.
     ['src/main/heavyJob.ts', ": ['ps', ['-o', 'comm=', '-p', String(pid)]];"],
     // Copilot's visible worker session takes its brief this way: an agent the Human sees, not upkeep.
-    ['src/shared/agentProvider.ts', "initialPromptFlag: '-p',"]
+    ['src/shared/agentProvider.ts', "initialPromptFlag: '-p',"],
+    // CLAIMS-90 M5 derivedGit.ts: git's patch flag (`git log -p`, `git diff-tree -p`), not claude's print mode.
+    ['src/main/claims/derivedGit.ts', "const r = await git(this.repo, ['log', '--branches', '--tags', '--remotes', '--reverse', '--no-color', '-U0', '-p', '--format=%x1e%H%x1f%ct', '--', 'package.json'], this.o);"],
+    ['src/main/claims/derivedGit.ts', "const r = await git(this.repo, ['diff-tree', '--no-commit-id', '--root', '-r', '-p', '-U0', '--no-color', '--no-renames', commit], this.o);"]
   ];
   // Prose the app shows an agent (god's monitoring hint), not a command the app runs.
   const PROSE = ['Use `claude -p "..." --output-format json` for a one-off headless query.'];

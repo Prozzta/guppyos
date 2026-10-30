@@ -61,7 +61,11 @@ const M = [
   ['P40 an item serving other bytes runs on', ANS, '    if (row.servedSha256 !== pre.served.sha256) throw ', '    if (false) throw ', ['unit']],
   ['P41 the build stage holds no mail', ANS, "v.manifest, home, ['primary-mail']);", 'v.manifest, home, []);', ['unit']],
   ['P42 the child level skips the manifest default (derived off)', CHILD, 'return effectiveLevel(config.claimLedger, manifestEntry(floor.ledger, agentId, floor.ledgerDefault)).level;', 'return effectiveLevel(config.claimLedger, floor.ledger?.[agentId]).level;', ['preflight', 'unit']],
-  ['P43 a build with the derived ledger off runs on', ANS, '    if (!built.derivedOn) return { problem: ', '    if (false) return { problem: ', ['unit']],
+  ['P43 a build with the derived ledger off runs on', ANS, "  if (!built.derivedOn) return 'the served-state build ran with the derived ledger off';", "  if (false) return 'the served-state build ran with the derived ledger off';", ['unit']],
+  // Jim 97b61f: the served-state build's cap fits both phases, reports each, and names the one that ran out.
+  ['P66 the build keeps the 30 min cap', ANS, '    const closed = closeOrCap(child, SERVED_BUILD_CAP_MS);', '    const closed = closeOrCap(child, 30 * 60_000);', ['unit']],
+  ['P67 a capped build does not name its phase', ANS, "in the ${running ?? 'start-up (before the first phase)'} phase", 'in an unknown phase', ['unit']],
+  ['P68 preflight.json build drops the phase times', ANS, 'capMs: SERVED_BUILD_CAP_MS, capped, phases: buildPhases(rows).phases,', 'capMs: SERVED_BUILD_CAP_MS, capped,', ['unit']],
   ['P44 the changelog is not the newest version tag\'s', ANS, '  const tag = newestVersionTag(', "  const tag = 'v1.1.90' || newestVersionTag(", ['unit']],
   // god ba807e: the preflight's synced index is served to every item.
   ['P45 the index is not served (each item re-embeds)', ANS, '    row.indexServedSha256 = serveIndex(pre.servedState.index, userData, hiveId.to);', '    row.indexServedSha256 = pre.served.index.sha256;', ['unit']],

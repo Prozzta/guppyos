@@ -463,3 +463,29 @@ test('god 8c625b: every search is timed at the worker port (deadline, ms, worker
   assert.match(child, /waitMs: m\.timing\?\.waitMs \?\? null, runMs: m\.timing\?\.runMs \?\? null/);
   assert.match(child, /index: indexDigest\(nativeMemory\.dbFile\(\)\), searches, memLog: logRows\.filter\(\(r\) => \/\^native-memory\/\.test\(String\(r\.kind \?\? ''\)\)\) \} \}\);/);
 });
+
+test('served-state build (Jim 97b61f): a row per phase with its ms into the build report; a cap that fits both phases and names the phase that ran out', () => {
+  const { SERVED_BUILD_CAP_MS, buildPhases, buildProblem } = require('./claims-90/answerer.cjs');
+  assert.ok(SERVED_BUILD_CAP_MS >= 2 * (15 + 18) * 60_000, 'the cap holds both measured phases (about 15 + 18 min) with headroom');
+  assert.ok(SERVED_BUILD_CAP_MS <= 2 * 60 * 60_000, 'and stays a cap');
+  const start = (name) => ({ phase: { name, start: true } });
+  const end = (name, ms) => ({ phase: { name, ms } });
+  const served = { served: { catchUp: { kind: 'mailcards-backfill' }, derivedOn: true, derivedKinds: [] } };
+  const whole = [start('mail-card catch-up'), end('mail-card catch-up', 900_000), start('derived start backfill'), end('derived start backfill', 1_080_000), served];
+  assert.deepEqual(buildPhases(whole), { phases: [{ name: 'mail-card catch-up', ms: 900_000 }, { name: 'derived start backfill', ms: 1_080_000 }], running: null });
+  assert.equal(buildProblem({ code: 0, capped: false, capMs: SERVED_BUILD_CAP_MS, rows: whole, stderr: '' }), null, 'a whole build passes');
+  const inDerived = whole.slice(0, 3);
+  assert.deepEqual(buildPhases(inDerived), { phases: [{ name: 'mail-card catch-up', ms: 900_000 }, { name: 'derived start backfill', ms: null }], running: 'derived start backfill' });
+  assert.equal(buildProblem({ code: null, capped: true, capMs: 75 * 60_000, rows: inDerived, stderr: '' }), 'the served-state build ran out of its 75 min cap in the derived start backfill phase (finished: mail-card catch-up 900 s)');
+  assert.equal(buildProblem({ code: null, capped: true, capMs: 75 * 60_000, rows: [start('mail-card catch-up')], stderr: '' }), 'the served-state build ran out of its 75 min cap in the mail-card catch-up phase');
+  assert.match(buildProblem({ code: null, capped: true, capMs: 75 * 60_000, rows: [], stderr: '' }), /in the start-up \(before the first phase\) phase$/);
+  assert.equal(buildProblem({ code: 3, capped: false, capMs: SERVED_BUILD_CAP_MS, rows: [...whole.slice(0, 4), { summary: { reason: 'x failed' } }], stderr: '' }), 'the served-state build failed (exit 3): x failed', 'a failure that is not the cap keeps its reason');
+  assert.equal(buildProblem({ code: 0, capped: false, capMs: SERVED_BUILD_CAP_MS, rows: [...whole.slice(0, 4), { served: { derivedOn: false } }], stderr: '' }), 'the served-state build ran with the derived ledger off');
+  const child = fs.readFileSync(path.join(__dirname, 'claims-90', 'answer-child.cjs'), 'utf8');
+  assert.match(child, /await phase\('mail-card catch-up', /, 'the child reports the catch-up phase');
+  assert.match(child, /await phase\('derived start backfill', /, 'and the derived start backfill phase');
+  const ans = fs.readFileSync(path.join(__dirname, 'claims-90', 'answerer.cjs'), 'utf8');
+  assert.match(ans, /const closed = closeOrCap\(child, SERVED_BUILD_CAP_MS\);/, 'the build runs under that cap');
+  assert.match(ans, /capMs: SERVED_BUILD_CAP_MS, capped, phases: buildPhases\(rows\)\.phases,/, 'preflight.json build records the cap and both phase times');
+  assert.doesNotMatch(ans, /closeOf\(child, 30 \* 60_000\)/, 'the old 30 min cap is gone');
+});
