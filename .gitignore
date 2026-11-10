@@ -38,3 +38,4 @@ test/electron-harness/.mutant-run-*.cjs
 # NATIVE-MEMORY: the bundled model is provisioned by scripts/fetch-memory-model.cjs (digest-pinned
 # in resources/models/native-memory-manifest.json); the 90 MB binaries are never committed.
 resources/models/*/
+resources/input/bin/
