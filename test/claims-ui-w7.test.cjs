@@ -611,7 +611,10 @@ test('G7.2: the purge is reachable only from the app window\'s Settings IPC', ()
   const handlers = idx.split('\n').filter((l) => l.includes("ipcMain.handle('claims-ui:"));
   assert.equal(handlers.length, 9);   // W7's 7, and CL-M4-CHAINS-PANEL's keep-one / keep-all
   for (const h of handlers) assert.match(h, /\(ledgerUiSender\(evt\) \?/, h);
-  assert.match(idx, /function ledgerUiSender[^]*?BrowserWindow\.fromWebContents\(evt\.sender\) && evt\.senderFrame === evt\.sender\.mainFrame/);
+  // GUPPY-BLOB-P01: the window + top-frame rule moved into isAppWindowSender (which also refuses the
+  // blob overlay); its behaviour is pinned in test/blob-overlay.test.cjs.
+  assert.match(idx, /function ledgerUiSender[^]*?isAppWindowSender\(evt, \(wc\) => !!BrowserWindow\.fromWebContents\(wc as Electron\.WebContents\), blobOverlay\?\.overlayContents\(\) \?\? null\)/);
+  assert.match(fs.readFileSync(path.join(ROOT, 'src/main/blobOverlay.ts'), 'utf8'), /return hasWindow\(evt\.sender\) && evt\.senderFrame === evt\.sender\.mainFrame;/);
   assert.match(idx, /if \(DEV_HIDDEN\) return false;/, 'a hidden harness run never confirms');
   assert.match(idx, /defaultId: 1, cancelId: 1/, 'Cancel is the default button');
   // Nothing else in main calls a purge.

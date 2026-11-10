@@ -78,7 +78,11 @@ export default defineConfig({
     define,
     build: {
       rollupOptions: {
-        input: { index: resolve(__dirname, 'src/preload/index.ts') }
+        input: {
+          index: resolve(__dirname, 'src/preload/index.ts'),
+          // GUPPY-BLOB-P01: the blob overlay's own narrow preload.
+          blob: resolve(__dirname, 'src/preload/blob.ts')
+        }
       }
     }
   },
@@ -87,7 +91,11 @@ export default defineConfig({
     root: resolve(__dirname, 'src/renderer'),
     build: {
       rollupOptions: {
-        input: { index: resolve(__dirname, 'src/renderer/index.html') }
+        input: {
+          index: resolve(__dirname, 'src/renderer/index.html'),
+          // GUPPY-BLOB-P01: the blob overlay page.
+          blob: resolve(__dirname, 'src/renderer/blob.html')
+        }
       }
     },
     plugins: [react()],

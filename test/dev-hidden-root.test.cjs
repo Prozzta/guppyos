@@ -241,7 +241,13 @@ test('SOURCE: every window-surfacing call in main is behind DEV_HIDDEN (structur
   const ctor = idx.slice(idx.indexOf('const win = new BrowserWindow({'), idx.indexOf("win.once('ready-to-show'"));
   assert.match(ctor, /show: false,/, 'built hidden');
   assert.match(ctor, /backgroundThrottling: false,/, 'hidden timers are not throttled');
-  assert.equal((idx.match(/new BrowserWindow\(/g) || []).length, 1, 'one window constructor, the gated one');
+  // GUPPY-BLOB-P01: the second constructor is the blob overlay's, built hidden and surfaced
+  // (showInactive) only behind DEV_HIDDEN, which the structural check above enforces.
+  assert.equal((idx.match(/new BrowserWindow\(/g) || []).length, 2, 'two window constructors: the app window and the blob overlay');
+  const blobCtor = idx.slice(idx.indexOf('function createBlobOverlayWindow('), idx.indexOf('const blobOverlay: BlobOverlayController'));
+  assert.equal((blobCtor.match(/new BrowserWindow\(/g) || []).length, 1, 'the second is the blob overlay');
+  assert.match(blobCtor, /show: false,/, 'the overlay is built hidden');
+  assert.match(blobCtor, /if \(DEV_HIDDEN \|\| w\.isDestroyed\(\)\) return;[^\n]*\n\s*w\.showInactive\(\);/, 'and surfaced only behind DEV_HIDDEN');
   // The refusal is loud and exits before anything else runs.
   assert.match(idx, /const rootRes = resolveDevDataRoot\(\{ liveUserData: stableUserData \}\);\s*if \(!rootRes\.ok\) \{\s*console\.error\(`\[dev-isolation\] REFUSING TO START[^`]*`\);\s*process\.exit\(97\);/);
   assert.match(idx, /if \(rootRes\.override\) devStableForbidden\.push\(fixedDevDataRoot\(\)\);/);

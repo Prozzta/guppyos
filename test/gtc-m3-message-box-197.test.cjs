@@ -415,7 +415,8 @@ test('MUST 3: messageBox:deliver answers only the app window, and its writer is 
   const check = body.indexOf('if (!ledgerUiSender(evt)) return');
   assert.ok(check > 0 && check < body.indexOf('messageBox.deliver('), 'the sender check comes first');
   assert.match(idx, /write: \(ptyId, data\) => ptyManager\.write\(ptyId, data, 'HUMAN'\)/);
-  assert.match(idx, /function ledgerUiSender\(evt: Electron\.IpcMainInvokeEvent\): boolean \{\s*return !!BrowserWindow\.fromWebContents\(evt\.sender\) && evt\.senderFrame === evt\.sender\.mainFrame;/);
+  // GUPPY-BLOB-P01: app window + top frame, and never the blob overlay (test/blob-overlay.test.cjs).
+  assert.match(idx, /function ledgerUiSender\(evt: Electron\.IpcMainInvokeEvent\): boolean \{\s*return isAppWindowSender\(evt, \(wc\) => !!BrowserWindow\.fromWebContents\(wc as Electron\.WebContents\), blobOverlay\?\.overlayContents\(\) \?\? null\);/);
 });
 
 test('MUST 3: human: true is set by MessageQueueComposer alone (a hive-sourced enqueue can never act as the Human)', () => {

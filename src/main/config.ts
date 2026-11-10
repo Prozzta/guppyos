@@ -22,6 +22,7 @@ import { expandTilde, normalizeHiveHome } from './fs';
 import { provenStatKey, statKey } from './statCacheKey';
 import { isProjectThemeId, isProjectThemeSeed, isStoredProjectThemeId, projectThemeHomeKey, resolveProjectTheme, type ProjectThemeId, type ProjectThemeSeed } from '../shared/projectTheme';
 import type { IntegrationRecord } from '../shared/integrations';
+import type { BlobConfigFields } from '../shared/blob';
 import {
   DEFAULT_CONTEXT_TRIGGER,
   DEFAULT_ORG_TRIGGER,
@@ -206,7 +207,9 @@ export interface KnowledgeGraphConfig {
   rootPath?: string;
 }
 
-export interface HarnessConfig {
+/** GUPPY-BLOB-P01: the blob overlay's fields (blobEnabled, blobHotkey, blobInvisible,
+ *  blobInvisibleMain, blobPosition) are declared and defaulted in src/shared/blob.ts. */
+export interface HarnessConfig extends BlobConfigFields {
   /** Has the user completed the first-run onboarding? */
   onboardingComplete: boolean;
   /** Self-identified audience picked on the first onboarding screen. Drives the
