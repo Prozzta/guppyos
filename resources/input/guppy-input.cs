@@ -1,4 +1,4 @@
-// Windows-only dictation companion. JSON-lines stdin/stdout: hook/unhook/type/echo/selftest/cliptest/ping/quit.
+// Windows-only dictation companion. JSON-lines stdin/stdout: hook/unhook/type/echo/selftest/cliptest/focustest/ping/quit.
 //
 // Threads:
 // - main: owns the message queue and the WH_KEYBOARD_LL hook (installed/removed only via queued WM_WORK commands);
@@ -8,6 +8,10 @@
 //
 // Delivery caveat (UIPI): SendInput into a window of a higher integrity level (an elevated app) is dropped by Windows
 // yet still reported as inserted, so {"ok":true} means "handed to Windows", not "arrived".
+//
+// Focus (F1): every real chord-down carries the foreground window ("hwnd"); 'type' must name that window and is refused
+// with "focus changed" if another window is in front (checked before the modifier wait, after it, and before a paste).
+// Every reply names its op, so the parent can match replies that the two threads (hook vs reader) answer out of order.
 using System;
 using System.Collections.Concurrent;
 using System.IO;
@@ -39,6 +43,7 @@ class GuppyInput
     [DllImport("user32.dll")] static extern int GetMessage(out MSG msg, IntPtr hwnd, uint min, uint max);
     [DllImport("user32.dll")] static extern short GetAsyncKeyState(int vk);
     [DllImport("user32.dll")] static extern uint GetClipboardSequenceNumber();
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
     [DllImport("kernel32.dll")] static extern IntPtr GetModuleHandle(string name);
     [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
 
@@ -53,7 +58,11 @@ class GuppyInput
     static void Reply(string json) { try { Output.Add(json); } catch (InvalidOperationException) { /* shutting down */ } }
     static void Writer() { try { foreach (string row in Output.GetConsumingEnumerable()) { Console.WriteLine(row); Console.Out.Flush(); } } catch { /* pipe gone: the parent restarts us */ } }
     static string Esc(string s) { var r = new StringBuilder(); foreach (char c in s) { if (c == '\\') r.Append("\\\\"); else if (c == '\"') r.Append("\\\""); else if (c == '\r') r.Append("\\r"); else if (c == '\n') r.Append("\\n"); else if (c == '\b') r.Append("\\b"); else if (c == '\f') r.Append("\\f"); else if (c < 0x20) r.Append("\\u00").Append(((int)c).ToString("X2")); else r.Append(c); } return r.ToString(); }
-    static void Error(string e) { Reply("{\"ok\":false,\"error\":\"" + Esc(e) + "\"}"); }
+    static void Error(string op, string e) { Reply("{\"ok\":false,\"op\":\"" + Esc(op ?? "") + "\",\"error\":\"" + Esc(e) + "\"}"); }
+    static long Foreground() { return GetForegroundWindow().ToInt64(); }
+    static long ParseHwnd(string s) { long v; return s != null && long.TryParse(s, out v) && v > 0 ? v : 0; }
+    /** F1: text may go only to the window that was in front at chord-down. null = allowed. */
+    static string FocusRefusal(long want, long now) { if (want == 0) return "no target window"; if (now != want) return "focus changed"; return null; }
     static string StringValue(string json, string name) {
         int p = json.IndexOf("\"" + name + "\"", StringComparison.Ordinal); if (p < 0 || (p = json.IndexOf(':', p)) < 0) return null; p++; while (p < json.Length && char.IsWhiteSpace(json[p])) p++;
         if (p >= json.Length || json[p++] != '\"') return null; var r = new StringBuilder();
@@ -77,7 +86,7 @@ class GuppyInput
     static bool Transition(int vk, bool down, bool up) {
         if (IsCtrl(vk)) ctrl = down ? true : up ? false : ctrl; if (IsAlt(vk)) alt = down ? true : up ? false : alt; if (IsShift(vk)) shift = down ? true : up ? false : shift; if (vk == VK_LWIN || vk == VK_RWIN) win = down ? true : up ? false : win;
         bool swallow = false;
-        if (enabled && vk == key && down && ModifiersMatch() && !active) { active = true; swallowing = true; swallow = true; Reply("{\"ev\":\"down\"}"); }
+        if (enabled && vk == key && down && ModifiersMatch() && !active) { active = true; swallowing = true; swallow = true; Reply("{\"ev\":\"down\",\"hwnd\":\"" + Foreground() + "\"}"); }
         else if (enabled && vk == key && down && swallowing) swallow = true;
         if (enabled && active && ((vk == key && up) || !ModifiersMatch())) { active = false; Reply("{\"ev\":\"up\"}"); }
         if (vk == key && up && swallowing) { swallow = true; swallowing = false; }
@@ -88,7 +97,7 @@ class GuppyInput
     static void ApplyHooks() {
         int cmd;
         while (HookCommands.TryDequeue(out cmd)) {
-            if (cmd == 1) { if (hook == IntPtr.Zero) hook = SetWindowsHookEx(WH_KEYBOARD_LL, Callback, GetModuleHandle(null), 0); if (hook == IntPtr.Zero) { enabled = false; Error("SetWindowsHookEx failed (" + Marshal.GetLastWin32Error() + ")"); } else Reply("{\"ok\":true,\"op\":\"hook\"}"); }
+            if (cmd == 1) { if (hook == IntPtr.Zero) hook = SetWindowsHookEx(WH_KEYBOARD_LL, Callback, GetModuleHandle(null), 0); if (hook == IntPtr.Zero) { enabled = false; Error("hook", "SetWindowsHookEx failed (" + Marshal.GetLastWin32Error() + ")"); } else Reply("{\"ok\":true,\"op\":\"hook\"}"); }
             else if (cmd == 2) { if (hook != IntPtr.Zero) { UnhookWindowsHookEx(hook); hook = IntPtr.Zero; } Reply("{\"ok\":true,\"op\":\"unhook\"}"); }
         }
     }
@@ -112,18 +121,30 @@ class GuppyInput
         foreach (string f in src.GetFormats(false)) { try { object v = src.GetData(f, false); if (v != null) { copy.SetData(f, false, v); n++; } } catch { /* a format that cannot be rendered is skipped */ } }
         return n > 0 ? copy : null;
     }
-    static bool PasteFallback(string text) {
+    /** Returns whether the paste was sent. 'restored' is false when the old clipboard could not be put back (the paste still
+     *  happened, so the reply stays ok). 'why' is set when focus moved and nothing was pasted. A huge clipboard (Excel, an
+     *  image) makes the snapshot slow: it runs BEFORE anything is changed, so the parent's type timeout killing us there
+     *  leaves the clipboard untouched and types nothing. */
+    static bool PasteFallback(string text, long want, out bool restored, out string why) {
+        restored = true; why = null; DataObject saved; uint ours;
         try {
-            DataObject saved = CopyFormats(Clipboard.GetDataObject());
+            saved = CopyFormats(Clipboard.GetDataObject());
             Clipboard.SetDataObject(TransientText(text), true);
-            uint ours = GetClipboardSequenceNumber();
-            INPUT[] rows = new INPUT[] { new INPUT { type = INPUT_KEYBOARD, ki = new KEYBDINPUT { wVk = 0x11 } }, new INPUT { type = INPUT_KEYBOARD, ki = new KEYBDINPUT { wVk = 0x56 } }, new INPUT { type = INPUT_KEYBOARD, ki = new KEYBDINPUT { wVk = 0x56, dwFlags = KEYEVENTF_KEYUP } }, new INPUT { type = INPUT_KEYBOARD, ki = new KEYBDINPUT { wVk = 0x11, dwFlags = KEYEVENTF_KEYUP } } };
-            bool ok = SendInput((uint)rows.Length, rows, Marshal.SizeOf(typeof(INPUT))) == rows.Length;
-            Thread.Sleep(PASTE_SETTLE_MS);
-            // Restore only if the clipboard still holds our entry: a newer copy by the user or an app wins.
-            if (GetClipboardSequenceNumber() == ours) { if (saved != null) { MarkTransient(saved); Clipboard.SetDataObject(saved, true); } else Clipboard.Clear(); }
-            return ok;
+            ours = GetClipboardSequenceNumber();
         } catch { return false; }
+        bool ok = false;
+        try {
+            why = FocusRefusal(want, Foreground());
+            if (why == null) {
+                INPUT[] rows = new INPUT[] { new INPUT { type = INPUT_KEYBOARD, ki = new KEYBDINPUT { wVk = 0x11 } }, new INPUT { type = INPUT_KEYBOARD, ki = new KEYBDINPUT { wVk = 0x56 } }, new INPUT { type = INPUT_KEYBOARD, ki = new KEYBDINPUT { wVk = 0x56, dwFlags = KEYEVENTF_KEYUP } }, new INPUT { type = INPUT_KEYBOARD, ki = new KEYBDINPUT { wVk = 0x11, dwFlags = KEYEVENTF_KEYUP } } };
+                ok = SendInput((uint)rows.Length, rows, Marshal.SizeOf(typeof(INPUT))) == rows.Length;
+                Thread.Sleep(PASTE_SETTLE_MS);
+            }
+        } catch { ok = false; }
+        // Restore only if the clipboard still holds our entry: a newer copy by the user or an app wins.
+        try { if (GetClipboardSequenceNumber() == ours) { if (saved != null) { MarkTransient(saved); Clipboard.SetDataObject(saved, true); } else Clipboard.Clear(); } }
+        catch { restored = false; }
+        return ok;
     }
     /** Exercises the snapshot and the transient marking on private DataObjects: never touches the real clipboard. */
     static void ClipTest() {
@@ -135,23 +156,35 @@ class GuppyInput
         Reply("{\"ok\":true,\"op\":\"cliptest\",\"text\":\"" + Esc(text ?? "") + "\",\"custom\":\"" + Esc(custom) + "\",\"transient\":" + (excluded ? "true" : "false") + ",\"transientText\":\"" + Esc((t.GetData(DataFormats.UnicodeText, false) as string) ?? "") + "\"}");
     }
 
-    static void Selftest() { if (hook != IntPtr.Zero) { Error("selftest unavailable while hooked"); return; } bool oe = enabled, oc = ctrl, oa = alt, os = shift, ow = win, ox = active, oz = swallowing; int ok = key; bool nc = needCtrl, na = needAlt, ns = needShift, nw = needWin; ParseChord("Ctrl+Alt+Space"); enabled = true; ctrl = alt = shift = win = active = swallowing = false; bool[] rows = new bool[] { Transition(VK_LCONTROL, true, false), Transition(VK_LMENU, true, false), Transition(0x20, true, false), Transition(0x20, false, true), Transition(VK_LMENU, false, true), Transition(0x20, true, false), Transition(0x20, false, true) }; enabled = oe; ctrl = oc; alt = oa; shift = os; win = ow; active = ox; swallowing = oz; key = ok; needCtrl = nc; needAlt = na; needShift = ns; needWin = nw; Reply("{\"ok\":true,\"op\":\"selftest\",\"swallow\":[" + String.Join(",", Array.ConvertAll(rows, x => x ? "true" : "false")) + "]}"); }
+    /** F1 without typing anything: FocusRefusal on given values ("now" defaults to the real foreground window). */
+    static void FocusTest(string line) {
+        string nowRaw = StringValue(line, "now"); long want = ParseHwnd(StringValue(line, "want")); long now = nowRaw == null ? Foreground() : ParseHwnd(nowRaw);
+        Reply("{\"ok\":true,\"op\":\"focustest\",\"refusal\":\"" + Esc(FocusRefusal(want, now) ?? "") + "\"}");
+    }
+    static void Selftest() { if (hook != IntPtr.Zero) { Error("selftest", "selftest unavailable while hooked"); return; } bool oe = enabled, oc = ctrl, oa = alt, os = shift, ow = win, ox = active, oz = swallowing; int ok = key; bool nc = needCtrl, na = needAlt, ns = needShift, nw = needWin; ParseChord("Ctrl+Alt+Space"); enabled = true; ctrl = alt = shift = win = active = swallowing = false; bool[] rows = new bool[] { Transition(VK_LCONTROL, true, false), Transition(VK_LMENU, true, false), Transition(0x20, true, false), Transition(0x20, false, true), Transition(VK_LMENU, false, true), Transition(0x20, true, false), Transition(0x20, false, true) }; enabled = oe; ctrl = oc; alt = oa; shift = os; win = ow; active = ox; swallowing = oz; key = ok; needCtrl = nc; needAlt = na; needShift = ns; needWin = nw; Reply("{\"ok\":true,\"op\":\"selftest\",\"swallow\":[" + String.Join(",", Array.ConvertAll(rows, x => x ? "true" : "false")) + "]}"); }
     static void Reader() {
         for (string line; (line = Console.ReadLine()) != null;) {
             string op = StringValue(line, "op");
-            if (op == "hook") { string chord = StringValue(line, "chord") ?? "Ctrl+Alt+Space"; if (!ParseChord(chord)) Error("bad chord"); else { enabled = true; RequestHook(1); } }
+            if (op == "hook") { string chord = StringValue(line, "chord") ?? "Ctrl+Alt+Space"; if (!ParseChord(chord)) Error("hook", "bad chord"); else { enabled = true; RequestHook(1); } }
             else if (op == "unhook") { enabled = false; if (active) { active = false; Reply("{\"ev\":\"up\"}"); } swallowing = false; RequestHook(2); }
             else if (op == "type") {
-                string text = StringValue(line, "text");
-                if (text == null) Error("missing text");
-                else if (text.Length == 0) Error("empty text");
-                else if (!WaitModifiersReleased()) Error("modifier keys still held");
-                else { uint n = SendUnicode(text); uint total = (uint)(text.Length * 2); bool fallback = n == 0 && PasteFallback(text); Reply("{\"ok\":" + ((n == total || fallback) ? "true" : "false") + ",\"fallback\":" + (fallback ? "true" : "false") + "}"); }
+                string text = StringValue(line, "text"); long want = ParseHwnd(StringValue(line, "hwnd")); string refuse;
+                if (text == null) Error("type", "missing text");
+                else if (text.Length == 0) Error("type", "empty text");
+                else if ((refuse = FocusRefusal(want, Foreground())) != null) Error("type", refuse);
+                else if (!WaitModifiersReleased()) Error("type", "modifier keys still held");
+                else if ((refuse = FocusRefusal(want, Foreground())) != null) Error("type", refuse);   // switched while letting go
+                else {
+                    uint n = SendUnicode(text); uint total = (uint)(text.Length * 2); bool restored = true; string why = null;
+                    bool fallback = n == 0 && PasteFallback(text, want, out restored, out why);
+                    if (n == 0 && !fallback && why != null) Error("type", why);
+                    else Reply("{\"ok\":" + ((n == total || fallback) ? "true" : "false") + ",\"op\":\"type\",\"fallback\":" + (fallback ? "true" : "false") + ",\"restored\":" + (restored ? "true" : "false") + "}");
+                }
             }
-            else if (op == "echo") { string text = StringValue(line, "text"); if (text == null) Error("missing text"); else Reply("{\"ok\":true,\"op\":\"echo\",\"text\":\"" + Esc(text) + "\"}"); }
-            else if (op == "selftest") Selftest(); else if (op == "cliptest") ClipTest(); else if (op == "ping") Reply("{\"ok\":true,\"op\":\"ping\"}");
+            else if (op == "echo") { string text = StringValue(line, "text"); if (text == null) Error("echo", "missing text"); else Reply("{\"ok\":true,\"op\":\"echo\",\"text\":\"" + Esc(text) + "\"}"); }
+            else if (op == "selftest") Selftest(); else if (op == "cliptest") ClipTest(); else if (op == "focustest") FocusTest(line); else if (op == "ping") Reply("{\"ok\":true,\"op\":\"ping\"}");
             else if (op == "quit") { enabled = false; swallowing = false; Reply("{\"ok\":true,\"op\":\"quit\"}"); PostThreadMessage(mainThread, WM_QUIT, UIntPtr.Zero, IntPtr.Zero); return; }
-            else Error("unknown op");
+            else Error(op ?? "", "unknown op");
         }
         PostThreadMessage(mainThread, WM_QUIT, UIntPtr.Zero, IntPtr.Zero);
     }

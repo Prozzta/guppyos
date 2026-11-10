@@ -38,10 +38,15 @@ export const DICTATION_COPY = {
   noSpeech: 'No speech detected; nothing was typed.',
   timeout: 'The recording never arrived; nothing was typed.',
   typeFailed: 'The transcript could not be typed.',
+  focusChanged: 'Focus changed before typing; nothing was typed.',
+  tooLarge: 'The recording is too large to transcribe; nothing was typed.',
 } as const;
 
 /** Longest transcript we type (a 2-minute clip is far below it). */
 export const DICTATION_MAX_CHARS = 4_000;
+
+/** Groq's upload limit; a 2-minute webm/opus clip is about 2 MB. Larger clips are refused in main. */
+export const DICTATION_MAX_AUDIO_BYTES = 25 * 1024 * 1024;
 
 /**
  * The text that may be typed: every line break, tab and other control character becomes a space
@@ -51,8 +56,13 @@ export const DICTATION_MAX_CHARS = 4_000;
 export function normalizeTranscript(text: unknown): string {
   if (typeof text !== 'string') return '';
   // eslint-disable-next-line no-control-regex
-  const flat = text.replace(/[\u0000-\u001f\u007f\u0085\u2028\u2029]+/g, ' ').replace(/[ \u00a0]{2,}/g, ' ').trim();
-  return flat.length > DICTATION_MAX_CHARS ? flat.slice(0, DICTATION_MAX_CHARS).trimEnd() : flat;
+  const flat = text.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ').replace(/[ \u00a0]{2,}/g, ' ').trim();
+  if (flat.length <= DICTATION_MAX_CHARS) return flat;
+  let cut = flat.slice(0, DICTATION_MAX_CHARS);
+  // Never end on half a surrogate pair (an emoji cut in two would type a lone, invalid half).
+  const last = cut.charCodeAt(cut.length - 1);
+  if (last >= 0xd800 && last <= 0xdbff) cut = cut.slice(0, -1);
+  return cut.trimEnd();
 }
 
 /** What main asks the app window's capture to do (`dictation:capture`). */

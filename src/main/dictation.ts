@@ -10,11 +10,14 @@
  * - a SYNTHETIC 'up' (the helper died mid-hold) cancels: the half clip is discarded;
  * - a tap shorter than MIN_HOLD_MS is discarded without a network call;
  * - turning the feature off mid-flight drops whatever is in flight;
- * - no key -> a clear message on the first hold, no recording.
+ * - no key -> a clear message on the first hold, no recording;
+ * - F1: the text is typed only into the window that was in front at chord-down (the helper
+ *   refuses 'focus changed' otherwise); a hold with no known window types nothing;
+ * - F2: a capture error while still listening is shown at once (not after the clip wait).
  *
  * Electron-free: helper, capture, STT, timers and the publish/notify sinks are injected.
  */
-import { DICTATION_CHORD, DICTATION_COPY, DICTATION_OFF, normalizeTranscript, type DictationAudioPayload, type DictationStatus } from '../shared/dictation';
+import { DICTATION_CHORD, DICTATION_COPY, DICTATION_MAX_AUDIO_BYTES, DICTATION_OFF, normalizeTranscript, type DictationAudioPayload, type DictationStatus } from '../shared/dictation';
 import type { SttProvider } from './stt';
 import type { HookState, InputEvent, InputEventInfo, InputReply } from './win32Input';
 
@@ -30,7 +33,8 @@ export interface DictationHelper {
   onHookState(fn: (state: HookState, error?: string) => void): () => void;
   startHook(chord?: string): Promise<InputReply | null>;
   stopHook(): Promise<InputReply | null>;
-  type(text: string): Promise<InputReply | null>;
+  /** `hwnd` is the window that was in front at chord-down; the helper types only into it. */
+  type(text: string, hwnd: string): Promise<InputReply | null>;
   kill(): void;
 }
 
@@ -74,9 +78,11 @@ export class DictationController {
   private status: DictationStatus = DICTATION_OFF;
   private notifiedNoKey = false;
   private clipTaken = false;
+  /** F1: the foreground window at this session's chord-down ('' = unknown: nothing is typed). */
+  private target = '';
 
   constructor(private readonly d: DictationDeps) {
-    d.helper.onEvent((ev, info) => { if (ev === 'down') this.onDown(); else this.onUp(info.synthetic === true); });
+    d.helper.onEvent((ev, info) => { if (ev === 'down') this.onDown(info.hwnd); else this.onUp(info.synthetic === true); });
     d.helper.onHookState((s, err) => { this.hook = s; this.hookError = err; this.publish(); });
   }
 
@@ -118,12 +124,21 @@ export class DictationController {
 
   /** The window's clip for `session`. Returns false when it was not expected (stale or off). */
   onAudio(p: DictationAudioPayload): boolean {
-    if (!this.enabled || this.phase !== 'transcribing' || this.clipTaken || !p || p.session !== this.session) return false;
+    if (!this.enabled || this.clipTaken || !p || p.session !== this.session) return false;
+    // F2: the mic failed (denied, busy) while the chord is still held: say why now, not after the clip wait.
+    if (this.phase === 'listening' && typeof p.error === 'string' && p.error) {
+      this.clearTimer();
+      this.d.capture.cancel(this.session);
+      this.fail(p.error);   // phase idle: the release, and any later payload for this session, are ignored
+      return true;
+    }
+    if (this.phase !== 'transcribing') return false;
     this.clipTaken = true;   // one clip per session: a repeat can never transcribe (and type) twice
     this.clearTimer();
     const session = this.session;
     if (p.error || !p.audio) { this.fail(p.error || 'nothing recorded'); return true; }
     if (p.audio.byteLength === 0) { this.fail('nothing recorded'); return true; }
+    if (p.audio.byteLength > DICTATION_MAX_AUDIO_BYTES) { this.fail(DICTATION_COPY.tooLarge); return true; }   // Groq's upload limit
     void this.d.stt.transcribe({ audio: p.audio, mimeType: p.mimeType, filename: `dictation.${(p.mimeType || '').includes('ogg') ? 'ogg' : 'webm'}` })
       .then((r) => this.onTranscript(session, r.ok ? r.text : undefined, r.ok ? undefined : r.error));
     return true;
@@ -131,7 +146,7 @@ export class DictationController {
 
   // ---------------------------------------------------------------- internals
 
-  private onDown(): void {
+  private onDown(hwnd: string | undefined): void {
     if (!this.enabled || this.phase !== 'idle') return;
     const ready = this.d.stt.ready();
     if (!ready.ok) {
@@ -141,6 +156,7 @@ export class DictationController {
     }
     const session = ++this.session;
     this.clipTaken = false;
+    this.target = typeof hwnd === 'string' && /^[1-9][0-9]*$/.test(hwnd) ? hwnd : '';
     const r = this.d.capture.start(session);
     if (!r.ok) { this.fail(r.error); return; }
     this.clearError();
@@ -175,12 +191,15 @@ export class DictationController {
     if (error !== undefined) { this.phase = 'idle'; this.fail(error); return; }
     const text = normalizeTranscript(raw);
     if (!text) { this.phase = 'idle'; this.fail(DICTATION_COPY.noSpeech); return; }
+    const target = this.target;
+    if (!target) { this.phase = 'idle'; this.fail(DICTATION_COPY.focusChanged); return; }   // F1: no known window, nothing typed
     this.phase = 'typing';
     this.publish();
-    void this.d.helper.type(text).then((r) => {
+    void this.d.helper.type(text, target).then((r) => {
       if (session !== this.session) return;
       this.phase = 'idle';
-      if (r?.ok) { this.d.log?.({ kind: 'dictation-typed', chars: text.length, fallback: r.fallback === true }); this.clearError(); this.publish(); }
+      if (r?.ok) { this.d.log?.({ kind: 'dictation-typed', chars: text.length, fallback: r.fallback === true, restored: r.restored !== false }); this.clearError(); this.publish(); }
+      else if (r?.error === 'focus changed' || r?.error === 'no target window') this.fail(DICTATION_COPY.focusChanged);
       else this.fail(r?.error ? `${DICTATION_COPY.typeFailed} (${r.error})` : DICTATION_COPY.typeFailed);
     });
   }

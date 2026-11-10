@@ -28,13 +28,13 @@ function fakeTimers() {
 
 function rig(opts = {}) {
   const ev = new Set(); const st = new Set();
-  const calls = { startHook: [], stopHook: 0, kill: 0, typed: [], capture: [], notify: [], published: [], stt: [] };
+  const calls = { startHook: [], stopHook: 0, kill: 0, typed: [], typedInto: [], capture: [], notify: [], published: [], stt: [] };
   const helper = {
     onEvent: (fn) => { ev.add(fn); return () => ev.delete(fn); },
     onHookState: (fn) => { st.add(fn); return () => st.delete(fn); },
     startHook: async (chord) => { calls.startHook.push(chord); return opts.hookReply === undefined ? { ok: true, op: 'hook' } : opts.hookReply; },
     stopHook: async () => { calls.stopHook++; return { ok: true }; },
-    type: async (text) => { calls.typed.push(text); return opts.typeReply === undefined ? { ok: true, fallback: false } : opts.typeReply; },
+    type: async (text, hwnd) => { calls.typed.push(text); calls.typedInto.push(hwnd); return opts.typeReply === undefined ? { ok: true, fallback: false } : opts.typeReply; },
     kill: () => { calls.kill++; },
   };
   let key = opts.key === undefined ? 'gsk_test' : opts.key;
@@ -59,7 +59,7 @@ function rig(opts = {}) {
   });
   return {
     ctl, calls, timers,
-    down: () => { for (const f of ev) f('down', {}); },
+    down: (info = { hwnd: '4242' }) => { for (const f of ev) f('down', info); },
     up: (info = {}) => { for (const f of ev) f('up', info); },
     hookState: (s, e) => { for (const f of st) f(s, e); },
     advance: (ms) => { now += ms; },
@@ -352,4 +352,79 @@ test('wiring: the clip is accepted only from the app window that was asked to re
   assert.match(blob, /setDictationStatus\(s: DictationStatus\): void \{\r?\n\s*this\.dictation = s;\r?\n\s*this\.push\(\);/);
   const pre = read('src/preload/blob.ts');
   assert.doesNotMatch(pre, /dictation/, 'the overlay preload gains nothing: it only shows the state main pushes');
+});
+
+// ---------------------------------------------------------------- fixup 1: F1, F2, nits
+test('F1: the transcript is typed only into the window that was in front at chord-down', async () => {
+  const r = rig();
+  r.ctl.apply(true); await flush();
+  r.down({ hwnd: '111' }); r.advance(1200); r.up();
+  const s1 = r.calls.capture.find((c) => c[0] === 'start')[1];
+  r.audio(s1); await flush(); await flush();
+  assert.deepEqual(r.calls.typedInto, ['111'], 'type names the chord-down window');
+  r.down({ hwnd: '222' }); r.advance(1200); r.up();
+  r.audio(r.calls.capture.filter((c) => c[0] === 'start').at(-1)[1]); await flush(); await flush();
+  assert.deepEqual(r.calls.typedInto, ['111', '222'], 'each session uses its own window');
+});
+
+test('F1: a refused focus check, or a down with no usable window, types nothing and says why', async () => {
+  for (const reply of [{ ok: false, op: 'type', error: 'focus changed' }, { ok: false, op: 'type', error: 'no target window' }]) {
+    const r = rig({ typeReply: reply });
+    r.ctl.apply(true); await flush();
+    const s = await holdAndRelease(r); r.audio(s); await flush(); await flush();
+    assert.equal(r.ctl.current().state, 'error');
+    assert.equal(r.ctl.current().message, SD.DICTATION_COPY.focusChanged, reply.error);
+  }
+  for (const info of [{}, { hwnd: '' }, { hwnd: '0' }, { hwnd: 'abc' }, { hwnd: 42 }]) {
+    const r = rig();
+    r.ctl.apply(true); await flush();
+    r.down(info); r.advance(1200); r.up();
+    const s = r.calls.capture.find((c) => c[0] === 'start')[1];
+    r.audio(s); await flush(); await flush();
+    assert.deepEqual(r.calls.typed, [], `no type call for ${JSON.stringify(info)}`);
+    assert.equal(r.ctl.current().message, SD.DICTATION_COPY.focusChanged);
+  }
+});
+
+test('F2: a capture error while still listening is shown at once; the release then does nothing', async () => {
+  const r = rig();
+  r.ctl.apply(true); await flush();
+  r.down(); r.advance(100);
+  const s = r.calls.capture.find((c) => c[0] === 'start')[1];
+  assert.equal(r.audio(s + 1, { audio: undefined, error: 'microphone permission denied' }), false, 'a stale session error is refused');
+  assert.equal(r.audio(s, { audio: undefined }), false, 'a clip without an error is not accepted while listening');
+  assert.equal(r.ctl.current().state, 'listening');
+  assert.equal(r.audio(s, { audio: undefined, error: 'microphone permission denied' }), true);
+  assert.deepEqual(r.ctl.current(), { state: 'error', message: 'microphone permission denied', chord: SD.DICTATION_CHORD });
+  assert.ok(r.calls.capture.some((c) => c[0] === 'cancel' && c[1] === s), 'the recording is cancelled');
+  assert.equal(r.timers.has(D.DICTATION_MAX_HOLD_MS), false, 'the max-hold timer is cleared');
+  r.advance(1500); r.up();
+  assert.equal(r.calls.capture.some((c) => c[0] === 'stop'), false, 'the later release does not ask for a clip');
+  assert.equal(r.timers.has(D.DICTATION_AUDIO_WAIT_MS), false, 'and does not wait 15 s for one');
+  assert.equal(r.audio(s, { audio: undefined, error: 'again' }), false, 'one result per session');
+  assert.equal(r.calls.stt.length, 0); assert.deepEqual(r.calls.typed, []);
+});
+
+test('nit: a clip over Groq\'s 25 MB limit is refused before any upload', async () => {
+  const r = rig();
+  r.ctl.apply(true); await flush();
+  const s = await holdAndRelease(r);
+  assert.equal(r.ctl.onAudio({ session: s, audio: { byteLength: SD.DICTATION_MAX_AUDIO_BYTES + 1 }, mimeType: 'audio/webm' }), true);
+  assert.equal(r.calls.stt.length, 0, 'no network call');
+  assert.equal(r.ctl.current().message, SD.DICTATION_COPY.tooLarge);
+  const ok = rig(); ok.ctl.apply(true); await flush();
+  const s2 = await holdAndRelease(ok);
+  ok.ctl.onAudio({ session: s2, audio: { byteLength: SD.DICTATION_MAX_AUDIO_BYTES }, mimeType: 'audio/webm' });
+  assert.equal(ok.calls.stt.length, 1, 'exactly the limit is still sent');
+  assert.equal(SD.DICTATION_MAX_AUDIO_BYTES, 25 * 1024 * 1024);
+});
+
+test('nit: the length cap never splits a surrogate pair; C1 controls become spaces', () => {
+  const emoji = String.fromCodePoint(0x1f600);
+  const cut = SD.normalizeTranscript('a'.repeat(SD.DICTATION_MAX_CHARS - 1) + emoji + 'tail');
+  assert.equal(cut, 'a'.repeat(SD.DICTATION_MAX_CHARS - 1), 'the half emoji is dropped, not typed');
+  const whole = SD.normalizeTranscript('a'.repeat(SD.DICTATION_MAX_CHARS - 2) + emoji + 'tail');
+  assert.equal(whole, 'a'.repeat(SD.DICTATION_MAX_CHARS - 2) + emoji, 'a pair that fits is kept');
+  for (const code of [0x80, 0x85, 0x90, 0x9b, 0x9f]) assert.equal(SD.normalizeTranscript(`x${String.fromCharCode(code)}y`), 'x y', `U+${code.toString(16)}`);
+  assert.equal(SD.normalizeTranscript('caf' + String.fromCharCode(0xe9)), 'caf' + String.fromCharCode(0xe9), 'Latin-1 letters are kept');
 });

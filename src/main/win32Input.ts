@@ -21,9 +21,11 @@ export const INPUT_HELPER_TYPE_MS = 10_000;
 /** Re-arm delays after a child death; the last one repeats. */
 export const INPUT_HELPER_REARM_MS: readonly number[] = [250, 1_000, 4_000, 15_000, 30_000];
 export type InputEvent = 'down' | 'up';
-export interface InputEventInfo { synthetic?: boolean }
+/** `hwnd`: the foreground window at a real 'down' (decimal), so `type` can refuse if focus moved (F1). */
+export interface InputEventInfo { synthetic?: boolean; hwnd?: string }
 export type HookState = 'armed' | 'rearming' | 'failed' | 'off';
-export interface InputReply { ok?: boolean; error?: string; fallback?: boolean; op?: string }
+/** `restored: false`: the paste happened but the previous clipboard could not be put back. */
+export interface InputReply { ok?: boolean; error?: string; fallback?: boolean; restored?: boolean; op?: string }
 export interface InputHelperChild {
   stdin: NodeJS.WritableStream;
   stdout: NodeJS.ReadableStream;
@@ -49,7 +51,9 @@ export function inputHelperPath(appPath: string, resourcesPath: string, packaged
 export class Win32InputHelper {
   private child: InputHelperChild | null = null;
   private buffer = '';
-  private readonly pending: Array<(row: InputReply | null) => void> = [];
+  /** Replies come from two helper threads (hook/unhook from the hook thread, the rest from the reader), so a
+   *  reply is matched to the oldest pending request with the same op, not just to the oldest one. */
+  private readonly pending: Array<{ op: string; settle: (row: InputReply | null) => void }> = [];
   private readonly listeners = new Set<(event: InputEvent, info: InputEventInfo) => void>();
   private readonly stateListeners = new Set<(state: HookState, error?: string) => void>();
   /** The chord the owner wants armed, or null. Survives child restarts. */
@@ -99,17 +103,22 @@ export class Win32InputHelper {
     let at: number;
     while ((at = this.buffer.indexOf('\n')) >= 0) {
       const line = this.buffer.slice(0, at).trim(); this.buffer = this.buffer.slice(at + 1);
-      let row: InputReply & { ev?: unknown };
-      try { row = JSON.parse(line) as InputReply & { ev?: unknown }; } catch { row = {}; }
-      if (row.ev === 'down' || row.ev === 'up') this.emit(row.ev, {});
-      else this.pending.shift()?.(row);
+      let row: InputReply & { ev?: unknown; hwnd?: unknown };
+      try { row = JSON.parse(line) as InputReply & { ev?: unknown; hwnd?: unknown }; } catch { row = {}; }
+      if (row.ev === 'down') this.emit('down', typeof row.hwnd === 'string' ? { hwnd: row.hwnd } : {});
+      else if (row.ev === 'up') this.emit('up', {});
+      else {
+        const byOp = typeof row.op === 'string' && row.op ? this.pending.findIndex((p) => p.op === row.op) : -1;
+        const at2 = byOp >= 0 ? byOp : 0;
+        if (this.pending.length) this.pending.splice(at2, 1)[0].settle(row);
+      }
     }
   }
 
   private dead(child: InputHelperChild): void {
     if (this.child !== child) return;
     this.child = null; this.buffer = '';
-    while (this.pending.length) this.pending.shift()!(null);
+    while (this.pending.length) this.pending.shift()!.settle(null);
     // A hold in progress can never get its real 'up' now: close it, so a recording cannot stick.
     if (this.last === 'down') this.emit('up', { synthetic: true });
     if (this.wanted !== null) this.scheduleRearm();
@@ -147,7 +156,7 @@ export class Win32InputHelper {
       // A late reply cannot remain in the FIFO: kill this child so the next request starts with a
       // fresh protocol stream rather than consuming an answer intended for an expired request.
       const timer = this.timers.set(() => { if (!settled) { settled = true; resolve(null); this.dead(child); try { child.kill(); } catch { /* gone */ } } }, ms);
-      this.pending.push((reply) => { if (!settled) { settled = true; this.timers.clear(timer); resolve(reply); } });
+      this.pending.push({ op: row.op ?? '', settle: (reply) => { if (!settled) { settled = true; this.timers.clear(timer); resolve(reply); } } });
       try { child.stdin.write(JSON.stringify(row) + '\n'); } catch { this.dead(child); }
     });
   }
@@ -166,7 +175,8 @@ export class Win32InputHelper {
     return this.request({ op: 'unhook' });
   }
 
-  type(text: string): Promise<InputReply | null> { return this.request({ op: 'type', text }, this.typeMs); }
+  /** Types only into `hwnd` (the foreground window at chord-down): the helper refuses 'focus changed' otherwise. */
+  type(text: string, hwnd: string): Promise<InputReply | null> { return this.request({ op: 'type', text, hwnd }, this.typeMs); }
 
   /** Stop the helper even when its pipe has already failed; a killed child unhooks on process exit. */
   kill(): void {
