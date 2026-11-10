@@ -69,7 +69,7 @@ test('built helper accepts safe UTF-8 echo and hook transition self-test without
     const wait = (n) => new Promise((resolve, reject) => { const until = Date.now() + 4000; const tick = () => rows.length >= n ? resolve(rows[n - 1]) : Date.now() > until ? reject(new Error('helper response timed out')) : setTimeout(tick, 10); tick(); });
     child.stdin.write('{"op":"ping"}\n'); assert.deepEqual(await wait(1), { ok: true, op: 'ping' });
     child.stdin.write(JSON.stringify({ op: 'echo', text: 'café 日本 😀' }) + '\n'); assert.deepEqual(await wait(2), { ok: true, op: 'echo', text: 'café 日本 😀' });
-    child.stdin.write('{"op":"selftest"}\n'); assert.deepEqual(await wait(3), { ev: 'down' }); assert.deepEqual(await wait(4), { ev: 'up' }); assert.deepEqual(await wait(5), { ok: true, op: 'selftest' });
+    child.stdin.write('{"op":"selftest"}\n'); assert.deepEqual(await wait(3), { ev: 'down' }); assert.deepEqual(await wait(4), { ev: 'up' }); assert.deepEqual(await wait(5), { ok: true, op: 'selftest', swallow: [false, false, true, true, false, false, false] });
     const exited = new Promise((resolve) => child.once('exit', resolve));
     child.stdin.write('{"op":"quit"}\n'); assert.deepEqual(await wait(6), { ok: true, op: 'quit' });
     await exited;
