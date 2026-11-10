@@ -1,5 +1,5 @@
 /**
- * GUPPY-BLOB-P01 — Settings → General → Guppy blob.
+ * GUPPY-BLOB-P01 — Settings → General → Blob.
  *
  * Its own section with its own save lifecycle (like GraphicsSetting): it reads main's blob status
  * and saves only the blob fields through `blob:setConfig`, which main accepts from an app window
@@ -8,10 +8,11 @@
 import { useEffect, useState } from 'react';
 import { PixelButton } from './PixelButton';
 import { BLOB_DEFAULT_HOTKEY, isValidBlobHotkey, type BlobSettingsPatch, type BlobStatus } from '@shared/blob';
+import { DICTATION_CHORD, type DictationState } from '@shared/dictation';
 
 export const BLOB_COPY = {
-  heading: 'Guppy blob',
-  enable: 'Show the Guppy blob',
+  heading: 'Blob',
+  enable: 'Show the Blob',
   enableHelp: 'A small always-on-top blob. Click it for the action ring; drag it anywhere. It never takes focus from the app you are typing in.',
   hotkey: 'Show/hide hotkey',
   hotkeyHelp: `Modifiers then one key, e.g. ${BLOB_DEFAULT_HOTKEY}. Leave blank for no hotkey.`,
@@ -20,8 +21,15 @@ export const BLOB_COPY = {
   invisibleHelp: 'Screenshots, recordings and screen shares leave the blob out (Windows 10 2004 or later).',
   invisibleMain: 'Hide Guppy\'s own windows from screen shares',
   invisibleMainHelp: 'The same for the main window and every floor. Works even when the blob is off.',
-  failed: 'The blob settings could not be saved.'
+  failed: 'The blob settings could not be saved.',
+  dictation: `Dictation: hold ${DICTATION_CHORD} to talk`,
+  dictationHelp: 'In any app: hold to talk, release, and the transcript is typed into the focused field (Groq Whisper, using the Free Flow key; audio goes to Groq). Never presses Enter. Windows only.',
+  dictationState: {
+    off: 'Off', ready: 'Ready', listening: 'Listening', transcribing: 'Transcribing', typing: 'Typing', error: 'Last attempt failed', unavailable: 'Unavailable'
+  } as Record<DictationState, string>
 };
+/** While Settings is open the dictation line follows main (listening, errors, a missing key). */
+const STATUS_POLL_MS = 1500;
 
 const rowStyle = { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 } as const;
 const titleStyle = { fontSize: 13, lineHeight: '20px', color: 'var(--cth-ink-900)' } as const;
@@ -48,7 +56,11 @@ export function BlobSetting() {
       setStatus(r.status);
       setHotkey(r.status.hotkey);
     }).catch(() => { /* section stays empty */ });
-    return () => { live = false; };
+    // Only the status (not the hotkey draft) follows the poll, so typing a hotkey is not clobbered.
+    const poll = window.setInterval(() => {
+      void window.cth.blobStatus().then((r) => { if (live && r.ok) setStatus(r.status); }).catch(() => { /* next tick */ });
+    }, STATUS_POLL_MS);
+    return () => { live = false; window.clearInterval(poll); };
   }, []);
 
   const save = async (patch: BlobSettingsPatch): Promise<void> => {
@@ -109,6 +121,19 @@ export function BlobSetting() {
               <span style={helpStyle}>{BLOB_COPY.invisibleHelp}</span>
             </div>
             <Toggle on={status.invisible} busy={busy} onClick={() => void save({ invisible: !status.invisible })} />
+          </div>
+
+          <div style={rowStyle}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+              <span style={titleStyle}>{BLOB_COPY.dictation}</span>
+              <span style={helpStyle}>{BLOB_COPY.dictationHelp}</span>
+              {status.dictation && (
+                <span data-testid="blob-dictation-state" style={{ ...helpStyle, color: status.dictationStatus.state === 'error' || status.dictationStatus.state === 'unavailable' ? 'var(--cth-danger-600, #b3261e)' : 'var(--cth-ink-700)' }}>
+                  {BLOB_COPY.dictationState[status.dictationStatus.state]}{status.dictationStatus.message ? `: ${status.dictationStatus.message}` : ''}
+                </span>
+              )}
+            </div>
+            <Toggle on={status.dictation} busy={busy} onClick={() => void save({ dictation: !status.dictation })} />
           </div>
         </>
       )}

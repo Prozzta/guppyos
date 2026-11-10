@@ -11,6 +11,7 @@ import type { Eligibility, TerminalInputState } from '../shared/inputProvenance'
 import type { TerminalPromptState } from '../shared/promptState';
 import type { HireManifest } from '../shared/hire';
 import type { BlobSettingsPatch, BlobStatus } from '../shared/blob';
+import type { DictationAudioPayload, DictationCaptureCommand } from '../shared/dictation';
 export type { HireManifest } from '../shared/hire';
 import type { LivenessV1 } from '../shared/livenessV1';
 import type { HeavyLockView } from '../shared/activityView';
@@ -1688,6 +1689,15 @@ const api = {
     ipcRenderer.invoke('blob:status'),
   blobSetConfig: (patch: BlobSettingsPatch): Promise<{ ok: true; status: BlobStatus } | { ok: false; error: string }> =>
     ipcRenderer.invoke('blob:setConfig', patch),
+  /** GUPPY-DICTATION-P2: main asks this window to record (start/stop/cancel a session). */
+  onDictationCapture: (cb: (cmd: DictationCaptureCommand) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, cmd: DictationCaptureCommand) => cb(cmd);
+    ipcRenderer.on('dictation:capture', listener);
+    return () => ipcRenderer.removeListener('dictation:capture', listener);
+  },
+  /** The recorded clip (or the reason there is none) for a session main asked for. */
+  dictationAudio: (arg: DictationAudioPayload): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('dictation:audio', arg),
 
   // ─── Integrations registry (Phase 2 — labeled REST endpoints via the secret broker) ──
   // Bridges the §6 IPC surface for the Settings UI. WRITE-ONLY secret contract end to

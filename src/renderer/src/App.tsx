@@ -40,6 +40,7 @@ import { FullscreenTerminal } from '@/components/FullscreenTerminal';
 import { TaskDetailOverlay } from '@/components/TaskDetailOverlay';
 import { IdePanel } from '@/ide/IdePanel';
 import { useHoldOptionToTalk } from '@/freeflow/holdOption';
+import { installDictationCapture } from '@/freeflow/dictationCapture';
 import brandLogo from '@brand/logo.png?url';
 import { useOrchestratorName } from '@/hooks/useOrchestratorName';
 
@@ -181,6 +182,8 @@ export function App() {
   // for whichever agent the user is viewing; gated on the flag, terminal-safe
   // (solo-hold threshold, aborts on any other key). See freeflow/holdOption.ts.
   useHoldOptionToTalk();
+  // GUPPY-DICTATION-P2: main records system-wide dictation through this window's mic.
+  useEffect(() => installDictationCapture(), []);
 
   // Mirror the project's floor so OfficeFloor renders it, from every config the app
   // holds: the first load, onboarding's result (a new pack project shows its floor at

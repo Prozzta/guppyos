@@ -343,7 +343,7 @@ test('validation: hotkeys and patches', () => {
   assert.equal(sanitizeBlobPatch({ hotkey: 'B' }).ok, false);
   assert.equal(sanitizeBlobPatch(null).ok, false);
   assert.deepEqual(blobSettingsFrom({ blobHotkey: 'nonsense', blobPosition: { x: 'a', y: 1 }, blobInvisible: 0 }),
-    { enabled: false, hotkey: BLOB_DEFAULT_HOTKEY, invisible: true, invisibleMain: false, position: null }, 'malformed config falls back to defaults');
+    { enabled: false, hotkey: BLOB_DEFAULT_HOTKEY, invisible: true, invisibleMain: false, position: null, dictation: false }, 'malformed config falls back to defaults');
 });
 
 // ─── (pins) ───────────────────────────────────────────────────────────────────

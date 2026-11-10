@@ -6,6 +6,7 @@
  *
  * Pure: shared by main (validation, persistence), the overlay preload and the renderer.
  */
+import type { DictationStatus } from './dictation';
 
 /** The ring's six slots, clockwise from the top (UX: agents/god/refs/stapler-ring.png). */
 export const BLOB_SLOTS = ['screenshot', 'meeting', 'invisible', 'close', 'screen', 'message'] as const;
@@ -33,6 +34,8 @@ export interface BlobSettings {
   invisibleMain: boolean;
   /** Last dragged position (top-left of the collapsed blob), or null for the default corner. */
   position: BlobPosition | null;
+  /** GUPPY-DICTATION-P2: hold Ctrl+Alt+Space to dictate into the focused app. Default off. */
+  dictation: boolean;
 }
 
 /** The config fields behind BlobSettings (HarnessConfig keeps them flat). */
@@ -42,10 +45,11 @@ export interface BlobConfigFields {
   blobInvisible?: boolean;
   blobInvisibleMain?: boolean;
   blobPosition?: BlobPosition | null;
+  blobDictation?: boolean;
 }
 
 /** What the Settings section may send (`blob:setConfig`); position is the overlay's own business. */
-export interface BlobSettingsPatch { enabled?: boolean; hotkey?: string; invisible?: boolean; invisibleMain?: boolean }
+export interface BlobSettingsPatch { enabled?: boolean; hotkey?: string; invisible?: boolean; invisibleMain?: boolean; dictation?: boolean }
 
 /** What main tells the overlay and the Settings section. */
 export interface BlobStatus extends BlobSettings {
@@ -53,6 +57,8 @@ export interface BlobStatus extends BlobSettings {
   hotkeyRegistered: boolean;
   /** The overlay is currently shown. */
   visible: boolean;
+  /** Where dictation is (off unless enabled, supported and armed). */
+  dictationStatus: DictationStatus;
 }
 
 /** What main pushes to the overlay on `blob:status`. */
@@ -108,6 +114,7 @@ export function blobSettingsFrom(cfg: BlobConfigFields | null | undefined): Blob
     invisible: c.blobInvisible !== false,
     invisibleMain: c.blobInvisibleMain === true,
     position: isPosition(c.blobPosition) ? { x: Math.round(c.blobPosition.x), y: Math.round(c.blobPosition.y) } : null,
+    dictation: c.blobDictation === true,
   };
 }
 
@@ -122,6 +129,7 @@ export function sanitizeBlobPatch(patch: unknown): { ok: true; fields: BlobConfi
   if (typeof p.enabled === 'boolean') fields.blobEnabled = p.enabled;
   if (typeof p.invisible === 'boolean') fields.blobInvisible = p.invisible;
   if (typeof p.invisibleMain === 'boolean') fields.blobInvisibleMain = p.invisibleMain;
+  if (typeof p.dictation === 'boolean') fields.blobDictation = p.dictation;
   if ('hotkey' in p) {
     const h = typeof p.hotkey === 'string' ? p.hotkey.trim() : p.hotkey;
     if (!isValidBlobHotkey(h)) return { ok: false, error: 'invalid hotkey (use modifiers then one key, e.g. Control+Alt+G)' };

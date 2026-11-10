@@ -22,6 +22,7 @@ import {
   BLOB_COMING_SOON, BLOB_DISABLED, BLOB_SLOTS, blobSettingsFrom, sanitizeBlobPatch,
   type BlobActionResult, type BlobConfigFields, type BlobPosition, type BlobSettings, type BlobSlot, type BlobStatus,
 } from '../shared/blob';
+import { DICTATION_OFF, type DictationStatus } from '../shared/dictation';
 
 export interface Rect { x: number; y: number; width: number; height: number }
 
@@ -65,6 +66,8 @@ export interface BlobOverlayDeps {
   /** A hidden (harness) run never shows an overlay and never takes a global hotkey. */
   hidden: boolean;
   log?(row: Record<string, unknown>): void;
+  /** GUPPY-DICTATION-P2: called at the end of every apply() with the settings in force. */
+  onApplied?(settings: BlobSettings): void;
 }
 
 /** The collapsed blob and the open ring, in DIPs. */
@@ -97,6 +100,7 @@ export class BlobOverlayController {
   private pos: BlobPosition | null = null;
   private drag: { startCursor: { x: number; y: number }; startPos: BlobPosition } | null = null;
   private respawns = 0;
+  private dictation: DictationStatus = DICTATION_OFF;
 
   constructor(private readonly d: BlobOverlayDeps) {
     this.settings = blobSettingsFrom(d.readConfig());
@@ -113,6 +117,7 @@ export class BlobOverlayController {
       position: this.pos ?? this.settings.position,
       hotkeyRegistered: this.registered !== null,
       visible: !!this.win && !this.win.isDestroyed() && this.win.isVisible(),
+      dictationStatus: this.dictation,
     };
   }
 
@@ -125,6 +130,7 @@ export class BlobOverlayController {
     if (!on) {
       this.unregisterHotkey();
       this.destroyWindow();
+      this.applied();
       return this.status();
     }
     if (!this.win || this.win.isDestroyed()) this.createWindow();
@@ -139,7 +145,18 @@ export class BlobOverlayController {
       }
     }
     this.push();
+    this.applied();
     return this.status();
+  }
+
+  /** The dictation controller's state, shown by the overlay (listening, transcribing, ...). */
+  setDictationStatus(s: DictationStatus): void {
+    this.dictation = s;
+    this.push();
+  }
+
+  private applied(): void {
+    try { this.d.onApplied?.(this.settings); } catch (e) { this.d.log?.({ kind: 'blob-on-applied-failed', error: e instanceof Error ? e.message : String(e) }); }
   }
 
   /** A Settings patch (already from an app window). */
