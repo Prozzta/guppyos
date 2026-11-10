@@ -211,6 +211,8 @@ export interface KnowledgeGraphConfig {
  *  blobInvisibleMain, blobPosition, and GUPPY-DICTATION-P2's blobDictation) are declared and
  *  defaulted in src/shared/blob.ts. */
 export interface HarnessConfig extends BlobConfigFields {
+  /** Windows opt-in: closing Guppy hides it to the notification tray, keeping agents alive. */
+  keepInTray?: boolean;
   /** Has the user completed the first-run onboarding? */
   onboardingComplete: boolean;
   /** Self-identified audience picked on the first onboarding screen. Drives the
@@ -596,6 +598,8 @@ const DEFAULTS: HarnessConfig = {
   notifications: false,
   strongKeepalive: false,
   autoUpdate: true,
+  /** Windows opt-in: closing the primary window hides it while the app keeps running. */
+  keepInTray: false,
   telemetryEnabled: true,
   multiWindow: true,
   tvShowOffices: false,

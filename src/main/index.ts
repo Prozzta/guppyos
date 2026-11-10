@@ -1,5 +1,5 @@
 import './packThemes'; // theme packs join the project-theme catalogue before any config is read
-import { app, BrowserWindow, clipboard, crashReporter, dialog, globalShortcut, ipcMain, Menu, powerMonitor, powerSaveBlocker, safeStorage, screen, session, shell, Notification, utilityProcess } from 'electron';
+import { app, BrowserWindow, clipboard, crashReporter, dialog, globalShortcut, ipcMain, Menu, powerMonitor, powerSaveBlocker, safeStorage, screen, session, shell, Notification, Tray, utilityProcess } from 'electron';
 import { runQuitSteps, type QuitReport } from './quitTeardown';
 import { NativeMemoryWiring, toUnpacked } from './nativeMemory/mainWiring';
 import { ClaimStore } from './claims/store';
@@ -68,6 +68,7 @@ import { DictationController } from './dictation';
 import { GroqSttProvider } from './stt';
 import { Win32InputHelper, inputHelperPath } from './win32Input';
 import { DICTATION_COPY, type DictationCaptureCommand } from '../shared/dictation';
+import { TrayModeController } from './trayMode';
 import { ProviderModelStore, defaultAdapters } from './providerModels';
 import {
   readConfig, readConfigForWrite, writeConfig, pruneRetiredConfigKeys, setAgentTokenCap, registerRepo, unregisterRepo, patchMission, setProjectThemeForHome, resolveProjectThemeForHome, setAgentUsageDisplay, setCapacityDisplayThreshold, setGraphicsMode, resetConfig, ensureHarnessHome, homeHasNoProject, ensureClaudePermissionsAccepted,
@@ -2443,6 +2444,21 @@ let floorSeq = 0;
 
 /** When true, skip the quit interceptor (user already confirmed). */
 let allowQuit = false;
+/** Set only once Electron is actually quitting: close must never turn into hide after this. */
+let quitting = false;
+
+const trayMode = new TrayModeController({
+  platform: () => process.platform,
+  enabled: () => readConfig().keepInTray === true,
+  // The installed Guppy executable already owns the app icon; ask Windows for it rather than
+  // shipping a second artwork copy just for the notification area.
+  icon: () => app.getFileIcon(process.execPath, { size: 'small' }),
+  createTray: (icon) => new Tray(icon as Electron.NativeImage),
+  buildMenu: (items) => Menu.buildFromTemplate(items),
+  mainWindow: () => mainWindow,
+  toggleBlob: () => blobOverlay.toggleVisible(),
+  quit: () => teardownAndQuit()
+});
 
 /** Agents spawned with `isolate: true` get a dedicated git worktree; this maps
  *  the agent/pty id → the worktree path so we can tear it down on kill. */
@@ -4772,6 +4788,7 @@ function createWindow(opts: { floor?: boolean; partition?: string; recovery?: Re
   // Close interception when live PTYs exist. The red-X destroys the window;
   // intercept it the same way before-quit does so PTY users aren't surprised.
   win.on('close', (e) => {
+    if (!isFloor && trayMode.hideOnClose(e, win, quitting)) return;
     if (allowQuit) return;
     if (isFloor) {
       // A floor's close is NOT an app quit — confirm only its OWN terminals,
@@ -5898,6 +5915,7 @@ ipcMain.handle('config:update', (_evt, patch: Partial<HarnessConfig>) => {
   // transition so ordinary config writes never re-enter it.
   const hiveWasEnabled = hive.enabled();
   const next = writeConfig(patch);
+  if (patch && 'keepInTray' in patch) void trayMode.sync().catch(() => { /* tray is best-effort */ });
   // HEAVY-LIMIT-REEVAL-192: capacity changes must wake queued agents now.
   if (patch && 'heavyJobsAtOnce' in patch) heavyLock.limitChanged();
   // Live opt-in/out from Settings → Privacy (TELEMETRY.md).
@@ -9142,21 +9160,26 @@ app.on('child-process-gone', (_e, d) => {
 // before-quit covers Cmd-Q / dock-quit; the per-window close handler covers
 // the red close button. Both routes hit the same warning UX.
 app.on('before-quit', (e) => {
-  if (allowQuit) return;
-  const count = ptyManager.list().length;
-  if (count === 0) return;
-  e.preventDefault();
-  if (mainWindow) {
-    if (rendererGone(mainWindow.webContents)) { quitOrCancelNatively(count, mainWindow); return; }
-    surfaceWindow(mainWindow, { focus: true });   // MUNDER_HIDDEN: never focus
-    mainWindow.webContents.send('app:closeRequested', { ptyCount: count });
-  } else quitOrCancelNatively(count, null);
+  if (!allowQuit) {
+    const count = ptyManager.list().length;
+    if (count > 0) {
+      e.preventDefault();
+      if (mainWindow) {
+        if (rendererGone(mainWindow.webContents)) { quitOrCancelNatively(count, mainWindow); return; }
+        surfaceWindow(mainWindow, { focus: true });   // MUNDER_HIDDEN: never focus
+        mainWindow.webContents.send('app:closeRequested', { ptyCount: count });
+      } else quitOrCancelNatively(count, null);
+      return;
+    }
+  }
+  quitting = true;
 });
 
 // The last chance to flush a coalesced capacity write. `before-quit` can be
 // preventDefault-ed by the running-terminals warning above, so the flush hangs off
 // `will-quit`, which only fires once the quit is actually going ahead.
 app.on('will-quit', () => {
+  trayMode.dispose();
   try { blobOverlay.dispose(); } catch (e) { console.error('[quit] blobOverlay.dispose:', e); }
   try { dictation.dispose(); } catch (e) { console.error('[quit] dictation.dispose:', e); }   // kills the helper: no hook left behind
   try { globalShortcut.unregisterAll(); } catch { /* none held */ }

@@ -433,6 +433,15 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
     catch { setAutoUpdateOn(!next); }
   };
 
+  // Windows only: the main process creates/destroys the native tray immediately.
+  const [keepInTray, setKeepInTray] = useState<boolean>(config.keepInTray === true);
+  const toggleKeepInTray = async () => {
+    const next = !keepInTray;
+    setKeepInTray(next);
+    try { await window.cth.updateConfig({ keepInTray: next }); }
+    catch { setKeepInTray(!next); }
+  };
+
   // ─── Anonymous usage stats (default ON = opt-out; contract in TELEMETRY.md) ─
   const [telemetryOn, setTelemetryOn] = useState<boolean>(config.telemetryEnabled !== false);
   const toggleTelemetry = async () => {
@@ -1067,6 +1076,22 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
                           </PixelButton>
                         </div>
                         <div style={{ height: 10 }} />
+                        {window.cth.platform === 'win32' && <>
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                              <span style={{ fontSize: 13, lineHeight: '20px', color: 'var(--cth-ink-900)' }}>
+                                Keep running in the tray when closed
+                              </span>
+                              <span style={{ fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-500)' }}>
+                                Agents keep running and using tokens while hidden. Your PC will not fall asleep on its own while Guppy is running hidden; Quit Guppy from the tray to let it sleep.
+                              </span>
+                            </div>
+                            <PixelButton variant={keepInTray ? 'primary' : 'secondary'} size="sm" onClick={toggleKeepInTray}>
+                              {keepInTray ? 'on' : 'off'}
+                            </PixelButton>
+                          </div>
+                          <div style={{ height: 10 }} />
+                        </>}
                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
                           <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                             <span style={{ fontSize: 13, lineHeight: '20px', color: 'var(--cth-ink-900)' }}>
