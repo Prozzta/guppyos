@@ -30,8 +30,8 @@ participating, you agree to uphold it.
 ### Install & run
 
 ```bash
-git clone <your-fork-url> munder-difflin
-cd munder-difflin
+git clone <your-fork-url> guppyos
+cd guppyos
 npm install        # postinstall rebuilds node-pty against Electron's ABI
 npm run dev        # live-reloading Electron build
 ```
