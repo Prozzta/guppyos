@@ -1,5 +1,5 @@
 import './packThemes'; // theme packs join the project-theme catalogue before any config is read
-import { app, BrowserWindow, clipboard, crashReporter, dialog, ipcMain, Menu, powerMonitor, powerSaveBlocker, safeStorage, screen, shell, Notification, utilityProcess } from 'electron';
+import { app, BrowserWindow, clipboard, crashReporter, dialog, globalShortcut, ipcMain, Menu, powerMonitor, powerSaveBlocker, safeStorage, screen, session, shell, Notification, utilityProcess } from 'electron';
 import { runQuitSteps, type QuitReport } from './quitTeardown';
 import { NativeMemoryWiring, toUnpacked } from './nativeMemory/mainWiring';
 import { ClaimStore } from './claims/store';
@@ -63,6 +63,7 @@ import { resolveCommandAsync, invalidateCommandCache } from './commandResolver';
 import { daemonExecutable, headlessSpawnRefusal, missingCliAction, npmRungDecision, toolRowStatus } from './cliLookupPolicy';
 import { initAutoUpdater, abortPendingRestart } from './updater';
 import { RealtimeFloorWatcher } from './realtimeFloorWatcher';
+import { BlobOverlayController, isAppWindowSender, registerBlobIpc, type BlobWindowLike, type Rect as BlobRect } from './blobOverlay';
 import { ProviderModelStore, defaultAdapters } from './providerModels';
 import {
   readConfig, readConfigForWrite, writeConfig, pruneRetiredConfigKeys, setAgentTokenCap, registerRepo, unregisterRepo, patchMission, setProjectThemeForHome, resolveProjectThemeForHome, setAgentUsageDisplay, setCapacityDisplayThreshold, setGraphicsMode, resetConfig, ensureHarnessHome, homeHasNoProject, ensureClaudePermissionsAccepted,
@@ -1925,7 +1926,7 @@ const ledgerUi = createLedgerUi({
   },
   confirm: async (q) => {
     if (DEV_HIDDEN) return false;   // a hidden (harness) run never confirms a ledger write
-    const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
+    const win = BrowserWindow.getFocusedWindow() ?? mainWindow ?? [...allWindows][0];
     const opts = { type: (q.danger ? 'warning' : 'question') as 'warning' | 'question', buttons: [q.ok, 'Cancel'], defaultId: 1, cancelId: 1, title: q.title, message: q.message, detail: q.detail, noLink: true };
     const r = win && !win.isDestroyed() ? await dialog.showMessageBox(win, opts) : await dialog.showMessageBox(opts);
     return r.response === 0;
@@ -1933,9 +1934,10 @@ const ledgerUi = createLedgerUi({
   log: (row) => hive.appendLog(row),
   onReconcile: (agentId, a, b) => { const root = hive.root(); if (root) reconcileQueueForHive(root).answeredPair(agentId, a, b); },
 });
-/** W7: only a top frame of one of the app's own windows may call the ledger UI. */
+/** W7: only a top frame of one of the app's own windows may call the ledger UI.
+ *  GUPPY-BLOB-P01: the blob overlay is a BrowserWindow too, so it is refused here explicitly. */
 function ledgerUiSender(evt: Electron.IpcMainInvokeEvent): boolean {
-  return !!BrowserWindow.fromWebContents(evt.sender) && evt.senderFrame === evt.sender.mainFrame;
+  return isAppWindowSender(evt, (wc) => !!BrowserWindow.fromWebContents(wc as Electron.WebContents), blobOverlay?.overlayContents() ?? null);
 }
 const NOT_HERE = { ok: false as const, error: 'refused: not from the app window' };
 ipcMain.handle('claims-ui:summary', (evt) => (ledgerUiSender(evt) ? ledgerUi.summary() : NOT_HERE));
@@ -2310,6 +2312,74 @@ let mainWindow: BrowserWindow | null = null;
 /** Every open window (primary + floors). A registry, not a single handle, so
  *  multi-window lifecycle (focus tracking, quit fan-out) is correct. */
 const allWindows = new Set<BrowserWindow>();
+
+/** GUPPY-BLOB-P01: the blob overlay window. Its own preload (preload/blob.js), its own in-memory
+ *  session with every permission denied, no navigation, no popups. focusable:false + showInactive
+ *  so the app the Human is typing in keeps focus. It is NOT in allWindows: it is not an app window. */
+const BLOB_PARTITION = 'blob-overlay';
+let blobSessionReady = false;
+function createBlobOverlayWindow(bounds: BlobRect, onGone: (reason: string) => void): BlobWindowLike {
+  const ses = session.fromPartition(BLOB_PARTITION);
+  if (!blobSessionReady) {
+    blobSessionReady = true;
+    ses.setPermissionRequestHandler((_wc, _perm, cb) => cb(false));
+    ses.setPermissionCheckHandler(() => false);
+  }
+  const w = new BrowserWindow({
+    ...bounds,
+    show: false,
+    frame: false,
+    transparent: true,
+    backgroundColor: '#00000000',
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    focusable: false,
+    hasShadow: false,
+    alwaysOnTop: true,
+    title: 'Guppy',
+    webPreferences: {
+      preload: join(__dirname, '../preload/blob.js'),
+      partition: BLOB_PARTITION,
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false,
+      webviewTag: false,
+      spellcheck: false,
+      devTools: isDev
+    }
+  });
+  w.setAlwaysOnTop(true, 'screen-saver');
+  w.setVisibleOnAllWorkspaces(true);
+  w.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  w.webContents.on('will-navigate', (e) => e.preventDefault());
+  // Not covered by watchWindowHealth (app windows only): a dead overlay renderer is destroyed and
+  // re-created once by the controller, never left as an inert always-on-top box.
+  w.webContents.on('render-process-gone', (_e, details) => { try { onGone(details.reason); } catch { /* best-effort */ } });
+  w.once('ready-to-show', () => {
+    if (DEV_HIDDEN || w.isDestroyed()) return;   // a hidden (harness) run never surfaces it (the controller never builds it there either)
+    w.showInactive();
+  });
+  if (isDev && process.env.ELECTRON_RENDERER_URL) void w.loadURL(`${process.env.ELECTRON_RENDERER_URL}/blob.html`);
+  else void w.loadFile(join(__dirname, '../renderer/blob.html'));
+  return w as unknown as BlobWindowLike;
+}
+
+const blobOverlay: BlobOverlayController = new BlobOverlayController({
+  createWindow: createBlobOverlayWindow,
+  globalShortcut,
+  readConfig: () => readConfig(),
+  writeConfig: (patch) => { writeConfig(patch); },
+  appWindows: () => allWindows,
+  workArea: (point) => (point ? screen.getDisplayNearestPoint(point) : screen.getPrimaryDisplay()).workArea,
+  cursor: () => screen.getCursorScreenPoint(),
+  hidden: DEV_HIDDEN,
+  log: (row) => { try { hive.appendLog(row); } catch { /* best-effort */ } }
+});
+registerBlobIpc(ipcMain as unknown as Parameters<typeof registerBlobIpc>[0], blobOverlay, (evt) => ledgerUiSender(evt as unknown as Electron.IpcMainInvokeEvent));
 /** Monotonic floor counter → a stable, unique session partition per floor so
  *  each floor's renderer state (localStorage: agents, queues, selection) is
  *  isolated from every other window's. */
@@ -4564,6 +4634,7 @@ function createWindow(opts: { floor?: boolean; partition?: string; recovery?: Re
 
   allWindows.add(win);
   watchWindowHealth(win, isFloor, { partition, policy: opts.recovery ?? new RecoveryPolicy() });
+  blobOverlay.protectAppWindow(win);   // GUPPY-BLOB-P01: the "hide Guppy's windows from shares" option
   // Global timer events follow the user — the most-recently-focused window is
   // primary. The primary is also seeded synchronously so boot events route now.
   win.on('focus', () => { mainWindow = win; });
@@ -4697,6 +4768,9 @@ function createWindow(opts: { floor?: boolean; partition?: string; recovery?: Re
 
   win.on('closed', () => {
     allWindows.delete(win);
+    // GUPPY-BLOB-P01: the overlay must not keep the app alive (window-all-closed) after the
+    // last app window closes.
+    if (allWindows.size === 0) { try { blobOverlay.dispose(); } catch { /* best-effort */ } }
     // A closed floor must not leave its terminals running headless. (Natural
     // onExit teardown — archive + worktree cleanup — still runs per PTY.)
     if (isFloor) { try { ptyManager.killByOwner(wc); } catch { /* best-effort */ } }
@@ -8725,6 +8799,8 @@ app.whenReady().then(() => {
     if (gone.length) { try { hive.appendLog({ kind: 'crash-dumps-pruned', count: gone.length, kept: KEEP_DUMPS }); } catch { /* best-effort */ } }
   }).catch(() => { /* best-effort */ });
   createWindow();
+  // GUPPY-BLOB-P01: the blob overlay + its hotkey, per the saved settings (off by default).
+  try { blobOverlay.apply(); } catch (e) { console.error('[blob] apply:', e); }
   // NATIVE-WAKEUP-EMPTY-INDEX (a): in NATIVE mode, fork the memory worker (its below-normal
   // startup backfill fills the index) 30 s after the first window finished loading, the spec's
   // lazy rule ("no earlier than 30 seconds after the first window becomes idle"), so an agent's
@@ -8762,7 +8838,9 @@ app.whenReady().then(() => {
     });
   }
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    // (macOS only: a window re-created here does not bring back the blob overlay disposed on the
+    // last close; the next blob settings change does. Guppy ships for Windows first.)
+    if (allWindows.size === 0) createWindow();
   });
 });
 
@@ -9015,6 +9093,8 @@ app.on('before-quit', (e) => {
 // preventDefault-ed by the running-terminals warning above, so the flush hangs off
 // `will-quit`, which only fires once the quit is actually going ahead.
 app.on('will-quit', () => {
+  try { blobOverlay.dispose(); } catch (e) { console.error('[quit] blobOverlay.dispose:', e); }
+  try { globalShortcut.unregisterAll(); } catch { /* none held */ }
   capacityStore.saveNow();
   capacityDetailTicker.stopAll();
   // AGY statusline lease. `before-quit` only routes through teardownAndQuit when

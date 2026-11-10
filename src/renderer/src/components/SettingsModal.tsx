@@ -17,6 +17,7 @@ import { PixelButton } from './PixelButton';
 import { ClaimLedgerSettings } from './ClaimLedgerSettings';
 import { CapacityDisplaySetting } from './CapacityDisplaySetting';
 import { GraphicsSetting } from './GraphicsSetting';
+import { BlobSetting } from './BlobSetting';
 import { CodexToolOutputSetting } from './CodexToolOutputSetting';
 import { CodexPluginsSetting } from './CodexPluginsSetting';
 import { CodexLayerOptInsSetting } from './CodexLayerNotice';
@@ -1030,6 +1031,11 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
 
                       {/* GPU-SETTING-188: Graphics (Auto / GPU / CPU only) and what is really rendering. */}
                       <GraphicsSetting />
+
+                      <div style={{ height: 1, background: 'var(--cth-ink-300)' }} />
+
+                      {/* GUPPY-BLOB-P01: the Guppy blob overlay (enable, hotkey, invisible). */}
+                      <BlobSetting />
 
                       <div style={{ height: 1, background: 'var(--cth-ink-300)' }} />
 

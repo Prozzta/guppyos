@@ -52,6 +52,7 @@
     "@xterm/headless": "5.5.0",
     "@xterm/xterm": "^5.5.0",
     "better-sqlite3": "^11.10.0",
+    "blobatar": "2.7.0",
     "commit-graph": "^2.4.0",
     "electron-updater": "^6.8.9",
     "localtunnel": "^2.0.2",

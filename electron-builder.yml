@@ -84,6 +84,9 @@ files:
 extraResources:
   - from: resources/md-slack-reply.cjs
     to: md-slack-reply.cjs
+  # GUPPY-BLOB-P01: third-party licences (blobatar, MIT). A .txt: `files` drops **/*.md.
+  - from: resources/THIRD-PARTY-NOTICES.txt
+    to: THIRD-PARTY-NOTICES.txt
   # Knowledge Graph agent CLI + its pure-JS core. Agents invoke `node
   # <resources>/kg.cjs` out-of-process; kg-core.cjs ships beside it so the CLI's
   # `require('./kg-core.cjs')` resolves outside the asar.
