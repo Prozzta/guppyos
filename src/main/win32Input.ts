@@ -29,7 +29,11 @@ export class Win32InputHelper {
   private readonly pending: Array<(row: InputReply | null) => void> = [];
   private readonly listeners = new Set<(event: InputEvent) => void>();
 
-  constructor(private readonly exe: () => string | null, private readonly start: InputHelperSpawn = (file) => spawn(file, [], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true })) {}
+  constructor(
+    private readonly exe: () => string | null,
+    private readonly start: InputHelperSpawn = (file) => spawn(file, [], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true }),
+    private readonly requestMs = INPUT_HELPER_REQUEST_MS
+  ) {}
 
   onEvent(listener: (event: InputEvent) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
 
@@ -39,7 +43,7 @@ export class Win32InputHelper {
     if (!exe) return null;
     try {
       const child = this.start(exe); this.child = child; child.stdout.setEncoding('utf8');
-      child.stdout.on('data', (chunk: string) => this.read(chunk));
+      child.stdout.on('data', (chunk: string) => { if (this.child === child) this.read(chunk); });
       child.on('error', () => this.dead(child)); child.on('exit', () => this.dead(child));
       child.stdin.on('error', () => this.dead(child));
       return child;
@@ -68,7 +72,9 @@ export class Win32InputHelper {
     const child = this.ensure(); if (!child) return Promise.resolve(null);
     return new Promise((resolve) => {
       let settled = false;
-      const timer = setTimeout(() => { if (!settled) { settled = true; resolve(null); } }, INPUT_HELPER_REQUEST_MS);
+      // A late reply cannot remain in the FIFO: kill this child so the next request starts with a
+      // fresh protocol stream rather than consuming an answer intended for an expired request.
+      const timer = setTimeout(() => { if (!settled) { settled = true; resolve(null); this.dead(child); try { child.kill(); } catch { /* gone */ } } }, this.requestMs);
       timer.unref?.();
       this.pending.push((reply) => { if (!settled) { settled = true; clearTimeout(timer); resolve(reply); } });
       try { child.stdin.write(JSON.stringify(row) + '\n'); } catch { this.dead(child); }
