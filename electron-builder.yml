@@ -130,6 +130,11 @@ extraResources:
     to: heavyjob
     filter:
       - guppy-heavyjob.exe
+  # Dictation's Windows input companion: built from source with the in-box C# compiler.
+  - from: resources/input/bin
+    to: input
+    filter:
+      - guppy-input.exe
   - from: resources/models
     to: models
     filter:
