@@ -37,13 +37,17 @@ test('Win32InputHelper sends JSON, separates unsolicited hook events, restarts, 
 test('Win32InputHelper kills an overdue child so a late reply cannot desynchronise the next request', async () => {
   const children = [];
   const helper = new I.Win32InputHelper(() => 'C:/input/guppy-input.exe', () => { const c = new FakeChild(); children.push(c); return c; }, 5);
-  assert.equal(await helper.request({ op: 'ping' }), null);
-  assert.equal(children[0].killed, true, 'timeout terminates the old protocol stream');
-  const next = helper.request({ op: 'ping' });
-  children[0].reply({ ok: true, op: 'stale' });
-  children[1].reply({ ok: true, op: 'ping' });
-  assert.deepEqual(await next, { ok: true, op: 'ping' });
-  helper.kill();
+  // The wrapper's request timer is unref'd (it must never hold the app open). With only fakes
+  // here, nothing else is ref'd, and Node 20's runner would end the loop mid-await.
+  const keepAlive = setInterval(() => {}, 1000);
+  try {
+    assert.equal(await helper.request({ op: 'ping' }), null);
+    assert.equal(children[0].killed, true, 'timeout terminates the old protocol stream');
+    const next = helper.request({ op: 'ping' });
+    children[0].reply({ ok: true, op: 'stale' });
+    children[1].reply({ ok: true, op: 'ping' });
+    assert.deepEqual(await next, { ok: true, op: 'ping' });
+  } finally { clearInterval(keepAlive); helper.kill(); }
 });
 
 test('input helper path selects packaged and development resource locations', () => {

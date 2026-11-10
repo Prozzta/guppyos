@@ -509,7 +509,11 @@ test('WIRING: startup prepares after the HookServer listens; every teardown rele
     const stop = index.indexOf(`console.error('[${tag}] hookServer.stop:'`);
     assert.ok(release > 0 && release < stop, `${tag}: released before the HookServer stops`);
   }
-  assert.match(index, /app\.on\('will-quit', \(\) => \{[\s\S]{0,600}hive\.stopAgyStatusline\(\)/,
+  // The handler body, bounded by its own closing line rather than a character window
+  // (Blob + dictation disposals grew it past 600 chars).
+  const wq = index.indexOf("app.on('will-quit', () => {");
+  const wqBody = wq > 0 ? index.slice(wq, index.indexOf('\n});\n', wq)) : '';
+  assert.ok(wqBody.includes('hive.stopAgyStatusline()'),
     'and on will-quit, which an ordinary quit with no terminals reaches without teardownAndQuit');
 });
 

@@ -8856,8 +8856,6 @@ app.whenReady().then(() => {
     if (gone.length) { try { hive.appendLog({ kind: 'crash-dumps-pruned', count: gone.length, kept: KEEP_DUMPS }); } catch { /* best-effort */ } }
   }).catch(() => { /* best-effort */ });
   createWindow();
-  // GUPPY-BLOB-P01: the blob overlay + its hotkey, per the saved settings (off by default).
-  try { blobOverlay.apply(); } catch (e) { console.error('[blob] apply:', e); }
   // NATIVE-WAKEUP-EMPTY-INDEX (a): in NATIVE mode, fork the memory worker (its below-normal
   // startup backfill fills the index) 30 s after the first window finished loading, the spec's
   // lazy rule ("no earlier than 30 seconds after the first window becomes idle"), so an agent's
@@ -8875,6 +8873,9 @@ app.whenReady().then(() => {
     }, NATIVE_MEMORY_PREWARM_DELAY_MS);
     c.unref?.();
   });
+  // GUPPY-BLOB-P01: the blob overlay + its hotkey, per the saved settings (off by default).
+  // Same synchronous tick as createWindow(), kept below the prewarm block it must not split.
+  try { blobOverlay.apply(); } catch (e) { console.error('[blob] apply:', e); }
   // Auto-start the Slack webhook server when configured. Best-effort: a tunnel
   // failure (offline) is logged, not fatal. The tunnel URL is ephemeral and
   // changes per restart, so the user re-pastes it via Settings → Start.
