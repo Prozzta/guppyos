@@ -36,6 +36,7 @@ const {
   BlobOverlayController, registerBlobIpc, isAppWindowSender, isOverlaySender,
   REFUSED_NOT_APP, REFUSED_NOT_OVERLAY, BLOB_SIZE, RING_SIZE
 } = loadTs('src/main/blobOverlay.ts');
+const { ringSlotPosition, RING_SLOTS } = loadTs('src/renderer/src/blob/ring.ts');
 const { sanitizeBlobPatch, isValidBlobHotkey, blobSettingsFrom, BLOB_DEFAULT_HOTKEY, BLOB_SLOTS } = loadTs('src/shared/blob.ts');
 
 test.after(() => fs.rmSync(jail, { recursive: true, force: true }));
@@ -80,8 +81,9 @@ function harness(opts = {}) {
   const logs = [];
   const apps = opts.apps ?? [appWindow()];
   let cursor = { x: 500, y: 500 };
+  const displays = opts.displays ?? [{ x: 0, y: 0, width: 1920, height: 1040 }];
   const deps = {
-    createWindow: (b) => { const w = fakeWindow(b); created.push(w); return w; },
+    createWindow: (b, onGone) => { const w = fakeWindow(b); w.onGone = onGone; created.push(w); return w; },
     globalShortcut: {
       register: (acc, fn) => { if (opts.taken && opts.taken.includes(acc)) return false; shortcuts.set(acc, fn); return true; },
       unregister: (acc) => { shortcuts.delete(acc); }
@@ -89,7 +91,15 @@ function harness(opts = {}) {
     readConfig: () => readConfig(),
     writeConfig: (p) => writeConfig(p),
     appWindows: () => apps,
-    workArea: () => ({ x: 0, y: 0, width: 1920, height: 1040 }),
+    // Displays: the first is primary; a point outside every display gets the nearest (Electron's
+    // getDisplayNearestPoint), modelled as the one whose centre is closest.
+    workArea: (pt) => {
+      if (!pt) return displays[0];
+      const inside = displays.find((d) => pt.x >= d.x && pt.x < d.x + d.width && pt.y >= d.y && pt.y < d.y + d.height);
+      if (inside) return inside;
+      const dist = (d) => Math.hypot(pt.x - (d.x + d.width / 2), pt.y - (d.y + d.height / 2));
+      return [...displays].sort((a, b) => dist(a) - dist(b))[0];
+    },
     cursor: () => cursor,
     hidden: opts.hidden === true,
     log: (row) => logs.push(row)
@@ -364,4 +374,100 @@ test('pin: the overlay window is focusable:false, sandboxed, on its own partitio
   assert.doesNotMatch(body, /allWindows\.add/, 'the overlay is not an app window');
   assert.match(src, /allWindows\.delete\(win\);[\s\S]{0,200}if \(allWindows\.size === 0\)[^\n]*blobOverlay\.dispose\(\)/, 'last app window closed -> overlay disposed');
   assert.match(src, /app\.on\('will-quit',\s*\(\)\s*=>\s*\{[\s\S]{0,80}blobOverlay\.dispose\(\)/);
+});
+
+// ─── Jim M1 / S1 / S2 ─────────────────────────────────────────────────────────
+
+const inside = (r, wa) => r.x >= wa.x && r.y >= wa.y && r.x + (r.width ?? 0) <= wa.x + wa.width && r.y + (r.height ?? 0) <= wa.y + wa.height;
+function assertRingOnScreen(win, wa, label) {
+  const b = win.bounds;
+  assert.equal(b.width, RING_SIZE, label);
+  assert.ok(inside(b, wa), `${label}: ring box ${JSON.stringify(b)} inside ${JSON.stringify(wa)}`);
+  for (const slot of RING_SLOTS) {
+    const c = ringSlotPosition(slot);
+    const pt = { x: b.x + c.x, y: b.y + c.y };
+    assert.ok(pt.x - 30 >= wa.x && pt.y - 30 >= wa.y && pt.x + 30 <= wa.x + wa.width && pt.y + 30 <= wa.y + wa.height, `${label}: slot ${slot} at ${JSON.stringify(pt)} fully on screen`);
+  }
+}
+
+test('M1: at the default corner the open ring (box and every slot button) is inside the work area', () => {
+  resetConfig();
+  writeConfig({ blobEnabled: true });
+  const hz = harness();
+  hz.ctl.apply();
+  const collapsed = { ...hz.win().bounds };
+  hz.ctl.setRing(true);
+  assertRingOnScreen(hz.win(), { x: 0, y: 0, width: 1920, height: 1040 }, 'default corner');
+  hz.ctl.setRing(false);
+  assert.deepEqual(hz.win().bounds, collapsed, 'closing puts the blob back where it was');
+  assert.equal(readConfig().blobPosition, undefined, 'opening the ring saves nothing');
+  hz.ctl.dispose();
+});
+
+test('M1: every edge and a second display with negative coordinates', () => {
+  const displays = [{ x: 0, y: 0, width: 1920, height: 1040 }, { x: -1280, y: -200, width: 1280, height: 984 }];
+  const spots = [{ x: 0, y: 0 }, { x: 1824, y: 0 }, { x: 0, y: 944 }, { x: 900, y: 944 }, { x: -1280, y: -200 }, { x: -96, y: 688 }];
+  for (const pos of spots) {
+    resetConfig();
+    writeConfig({ blobEnabled: true, blobPosition: pos });
+    const hz = harness({ displays });
+    hz.ctl.apply();
+    hz.ctl.setRing(true);
+    const wa = displays.find((d) => pos.x >= d.x && pos.x < d.x + d.width && pos.y >= d.y && pos.y < d.y + d.height);
+    assertRingOnScreen(hz.win(), wa, JSON.stringify(pos));
+    hz.ctl.dispose();
+  }
+});
+
+test('S1: a saved position on a display that is gone comes back inside the nearest work area', () => {
+  resetConfig();
+  writeConfig({ blobEnabled: true, blobPosition: { x: 4200, y: 300 } });   // a right-hand monitor, unplugged
+  const hz = harness();
+  hz.ctl.apply();
+  const b = hz.win().bounds;
+  assert.ok(inside(b, { x: 0, y: 0, width: 1920, height: 1040 }), JSON.stringify(b));
+  assert.deepEqual({ x: b.x, y: b.y }, { x: 1920 - BLOB_SIZE, y: 300 });
+  hz.ctl.dispose();
+});
+
+test('S1: a drag dropped past an edge is saved fully on screen', () => {
+  resetConfig();
+  writeConfig({ blobEnabled: true, blobPosition: { x: 1800, y: 900 } });
+  const hz = harness();
+  hz.ctl.apply();
+  hz.setCursor({ x: 0, y: 0 });
+  hz.ctl.dragStart();
+  hz.setCursor({ x: 300, y: 300 });
+  hz.ctl.dragMove();
+  hz.ctl.dragEnd();
+  assert.deepEqual(onDisk().blobPosition, { x: 1920 - BLOB_SIZE, y: 1040 - BLOB_SIZE });
+  assert.deepEqual(hz.win().bounds, { x: 1920 - BLOB_SIZE, y: 1040 - BLOB_SIZE, width: BLOB_SIZE, height: BLOB_SIZE });
+  hz.ctl.dispose();
+});
+
+test('S2: a dead overlay renderer is destroyed and re-created once (protection re-applied), then left off', () => {
+  resetConfig();
+  writeConfig({ blobEnabled: true });
+  const hz = harness();
+  hz.ctl.apply();
+  const first = hz.win();
+  first.onGone('crashed');
+  assert.equal(first.destroyed, true);
+  assert.equal(hz.created.length, 2, 're-created once');
+  assert.deepEqual(hz.win().protection, [true], 'the new window is protected');
+  assert.equal(hz.ctl.overlayContents(), hz.win().webContents);
+  first.onGone('crashed');
+  assert.equal(hz.created.length, 2, "a stale window's death is ignored");
+  hz.win().onGone('oom');
+  assert.equal(hz.win().destroyed, true);
+  assert.equal(hz.created.length, 2, 'a second death leaves it off');
+  assert.equal(hz.ctl.overlayContents(), null);
+  assert.deepEqual(hz.logs.filter((l) => l.kind === 'blob-renderer-gone').map((l) => [l.reason, l.respawn]), [['crashed', true], ['oom', false]]);
+  hz.ctl.dispose();
+});
+
+test('S2 pin: the overlay window forwards render-process-gone to the controller', () => {
+  const src = codeOnly(readSource('src/main/index.ts'));
+  const m = src.match(/function createBlobOverlayWindow\([\s\S]*?\n\}/);
+  assert.match(m[0], /webContents\.on\('render-process-gone',[^\n]*onGone\(details\.reason\)/);
 });

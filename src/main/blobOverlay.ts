@@ -50,8 +50,9 @@ export interface BlobWindowLike {
 export interface ProtectableWindow { isDestroyed(): boolean; setContentProtection(on: boolean): void }
 
 export interface BlobOverlayDeps {
-  /** Builds the real overlay BrowserWindow (index.ts): frameless, transparent, focusable:false. */
-  createWindow(bounds: Rect): BlobWindowLike;
+  /** Builds the real overlay BrowserWindow (index.ts): frameless, transparent, focusable:false.
+   *  `onGone` is called when its renderer dies (render-process-gone). */
+  createWindow(bounds: Rect, onGone: (reason: string) => void): BlobWindowLike;
   globalShortcut: { register(accelerator: string, fn: () => void): boolean; unregister(accelerator: string): void };
   readConfig(): BlobConfigFields;
   writeConfig(patch: BlobConfigFields): void;
@@ -95,6 +96,7 @@ export class BlobOverlayController {
   /** Collapsed top-left; follows drags. */
   private pos: BlobPosition | null = null;
   private drag: { startCursor: { x: number; y: number }; startPos: BlobPosition } | null = null;
+  private respawns = 0;
 
   constructor(private readonly d: BlobOverlayDeps) {
     this.settings = blobSettingsFrom(d.readConfig());
@@ -200,7 +202,10 @@ export class BlobOverlayController {
   dragEnd(): void {
     if (!this.drag) return;
     this.drag = null;
-    const p = this.currentPos();
+    const c = this.currentPos();
+    const p = this.clampBox(c.x, c.y, BLOB_SIZE);   // dropped past an edge: it comes back fully on screen
+    this.pos = p;
+    this.place();
     this.d.writeConfig({ blobPosition: p });
     this.settings = { ...this.settings, position: p };
   }
@@ -223,11 +228,26 @@ export class BlobOverlayController {
     return { x: wa.x + wa.width - BLOB_SIZE - MARGIN, y: wa.y + wa.height - BLOB_SIZE - MARGIN };
   }
 
+  /** Keeps a size×size box inside the work area of the display nearest its centre. A saved
+   *  position on a display that is gone (or after a layout/DPI change) comes back on screen. */
+  private clampBox(x: number, y: number, size: number): BlobPosition {
+    const wa = this.d.workArea({ x: x + size / 2, y: y + size / 2 });
+    const fit = (v: number, lo: number, span: number): number => (span <= size ? lo : Math.min(Math.max(v, lo), lo + span - size));
+    return { x: Math.round(fit(x, wa.x, wa.width)), y: Math.round(fit(y, wa.y, wa.height)) };
+  }
+
+  /**
+   * The collapsed blob at its position; the open ring centred on the blob, shifted inward as a
+   * whole when the blob sits near a work-area edge (the default corner does), so every slot is on
+   * screen. While the ring is open the blob is drawn at the ring's centre, so it shifts with it;
+   * its saved position is untouched and closing the ring puts it back.
+   */
   private bounds(): Rect {
     const p = this.currentPos();
     if (!this.ringOpen) return { x: p.x, y: p.y, width: BLOB_SIZE, height: BLOB_SIZE };
     const off = Math.round((RING_SIZE - BLOB_SIZE) / 2);
-    return { x: p.x - off, y: p.y - off, width: RING_SIZE, height: RING_SIZE };
+    const r = this.clampBox(p.x - off, p.y - off, RING_SIZE);
+    return { x: r.x, y: r.y, width: RING_SIZE, height: RING_SIZE };
   }
 
   private place(): void {
@@ -235,11 +255,23 @@ export class BlobOverlayController {
   }
 
   private createWindow(): void {
-    this.pos = this.currentPos();
+    const p = this.currentPos();
+    this.pos = this.clampBox(p.x, p.y, BLOB_SIZE);
     this.ringOpen = false;
-    const w = this.d.createWindow(this.bounds());
+    const w = this.d.createWindow(this.bounds(), (reason) => this.onGone(w, reason));
     this.win = w;
     w.on('closed', () => { if (this.win === w) this.win = null; });
+  }
+
+  /** The overlay's renderer died: an inert always-on-top box must not stay. Destroy it and
+   *  re-create it once per run; a second death leaves it off until the next settings change. */
+  private onGone(w: BlobWindowLike, reason: string): void {
+    if (this.win !== w) return;
+    this.d.log?.({ kind: 'blob-renderer-gone', reason, respawn: this.respawns < 1 });
+    this.destroyWindow();
+    if (this.respawns >= 1) return;
+    this.respawns++;
+    if (this.settings.enabled && !this.d.hidden) { this.createWindow(); if (this.win) this.protect(this.win, this.settings.invisible); this.push(); }
   }
 
   private destroyWindow(): void {

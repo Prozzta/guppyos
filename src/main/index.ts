@@ -2318,7 +2318,7 @@ const allWindows = new Set<BrowserWindow>();
  *  so the app the Human is typing in keeps focus. It is NOT in allWindows: it is not an app window. */
 const BLOB_PARTITION = 'blob-overlay';
 let blobSessionReady = false;
-function createBlobOverlayWindow(bounds: BlobRect): BlobWindowLike {
+function createBlobOverlayWindow(bounds: BlobRect, onGone: (reason: string) => void): BlobWindowLike {
   const ses = session.fromPartition(BLOB_PARTITION);
   if (!blobSessionReady) {
     blobSessionReady = true;
@@ -2356,6 +2356,9 @@ function createBlobOverlayWindow(bounds: BlobRect): BlobWindowLike {
   w.setVisibleOnAllWorkspaces(true);
   w.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   w.webContents.on('will-navigate', (e) => e.preventDefault());
+  // Not covered by watchWindowHealth (app windows only): a dead overlay renderer is destroyed and
+  // re-created once by the controller, never left as an inert always-on-top box.
+  w.webContents.on('render-process-gone', (_e, details) => { try { onGone(details.reason); } catch { /* best-effort */ } });
   w.once('ready-to-show', () => {
     if (DEV_HIDDEN || w.isDestroyed()) return;   // a hidden (harness) run never surfaces it (the controller never builds it there either)
     w.showInactive();
@@ -8835,6 +8838,8 @@ app.whenReady().then(() => {
     });
   }
   app.on('activate', () => {
+    // (macOS only: a window re-created here does not bring back the blob overlay disposed on the
+    // last close; the next blob settings change does. Guppy ships for Windows first.)
     if (allWindows.size === 0) createWindow();
   });
 });

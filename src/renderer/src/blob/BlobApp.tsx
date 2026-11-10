@@ -156,7 +156,13 @@ export function BlobApp(): ReactElement {
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
-        onPointerCancel={() => { press.current = null; }}
+        onPointerCancel={() => {
+          // A cancelled drag still ends in main, so the position is saved and main drops its drag.
+          const p = press.current;
+          press.current = null;
+          if (p?.raf) cancelAnimationFrame(p.raf);
+          if (p?.dragging && api) void api.drag('end');
+        }}
       >
         <Blobatar name={BLOB_NAME} palette={BLOB_PALETTE} background={false} traits={BLOB_TRAITS} animate="always" expression={expr} size={88} title="Guppy" />
       </button>
