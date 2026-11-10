@@ -225,6 +225,7 @@ import {
 import { buildMissingCliScript, chooseInstallRung } from './cliInstall';
 import { detectNodeVersion, nodeIsUsable, resolveNodeInstaller } from './nodeInstall';
 import { toolCatalog, type ToolStatus } from '../shared/toolCatalog';
+import { buildPrereqStatus } from './buildPrereqs';
 import { listLocalSkills, loadCatalog, installSkill, uninstallSkill, type LocalSkill } from './skills';
 import { loadHero } from './hero';
 import { spawnAppearance } from './spawnAppearance';
@@ -6567,6 +6568,23 @@ ipcMain.handle('tools:status', async (): Promise<ToolStatus[]> => {
     return { ...spec, installCommand, found: row.found, path: row.path, ...(row.unknown ? { unknown: true } : {}) };
   }));
 });
+
+// GUPPY-BUILD-PREREQS: the opt-in "Build from source" group. Probed only when the user opens it
+// (vswhere and two interpreters are slower than a PATH lookup); each child is time-boxed and a
+// time-out is reported as "not checked", never as missing. Nothing is installed from here.
+ipcMain.handle('tools:buildStatus', async (): Promise<ToolStatus[]> => buildPrereqStatus({
+  platform: process.platform,
+  env: process.env,
+  exists: existsSync,
+  exec: (file, args) => new Promise((resolve) => {
+    try {
+      execFile(file, args, { timeout: 10_000, windowsHide: true, encoding: 'utf8' }, (err, stdout) => {
+        const e = err as (Error & { killed?: boolean; signal?: string | null }) | null;
+        resolve({ ok: !e, stdout: String(stdout ?? ''), ...(e && (e.killed || e.signal === 'SIGTERM') ? { timedOut: true } : {}) });
+      });
+    } catch { resolve({ ok: false, stdout: '' }); }
+  })
+}));
 
 // ─── IPC: semantic memory (the memory engine) ───────────────────────────────
 // The Memory panel, Command Center and the voice tools ask the memory engine directly

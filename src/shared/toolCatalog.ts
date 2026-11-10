@@ -18,7 +18,8 @@
 
 import { AGENT_PROVIDER_PRESETS } from './agentProvider';
 
-export type ToolKind = 'prerequisite' | 'engine';
+/** GUPPY-BUILD-PREREQS: 'build' rows are the opt-in "Build from source" group (buildToolCatalog). */
+export type ToolKind = 'prerequisite' | 'engine' | 'build';
 
 export interface ToolSpec {
   /** Stable row id. For a probed binary this is also the name we look up. */
@@ -105,8 +106,123 @@ export interface ToolStatus extends ToolSpec {
   unknown?: boolean;
   /** Extra live context — e.g. a version string. */
   detail?: string;
+  /** GUPPY-BUILD-PREREQS: present but not usable as is (wrong Node major, a Python node-gyp will
+   *  not find). The row shows this line and its installCommand even though `found` is true. */
+  warn?: string;
   /** `install` already resolved for the running platform. */
   installCommand: string;
+}
+
+// ─── GUPPY-BUILD-PREREQS: the "Build from source" group ─────────────────────
+// What `npm ci` needs on a machine that builds Guppy itself: better-sqlite3 and node-pty are
+// native addons, compiled by node-gyp through @electron/rebuild in postinstall. None of it is
+// needed to RUN the app, so the group is opt-in (probed only when the user opens it) and no row
+// is essential. Nothing here installs anything: the rows show the command, the user runs it.
+
+/** The Node major the build is pinned to: .nvmrc and the CI workflows say the same (test-pinned). */
+export const BUILD_NODE_MAJOR = 20;
+/** The Python the floor builds with. node-gyp accepts any 3.6+, so another 3.x is a warning. */
+export const BUILD_PYTHON = '3.12';
+
+/** vswhere `-requires` ids per VS row (all must be present). The VC-tools row probes the MSVC
+ *  x86/x64 compiler component (what node-gyp itself checks), which both the Build Tools VCTools
+ *  workload and a full VS "Desktop development with C++" install provide. */
+export const BUILD_VS_REQUIRES: Record<'build:vs-vctools' | 'build:vs-clangcl' | 'build:vs-spectre', string[]> = {
+  'build:vs-vctools': ['Microsoft.VisualStudio.Component.VC.Tools.x86.x64'],
+  'build:vs-clangcl': ['Microsoft.VisualStudio.Component.VC.Llvm.Clang', 'Microsoft.VisualStudio.Component.VC.Llvm.ClangToolset'],
+  'build:vs-spectre': ['Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre']
+};
+
+/** Install-text placeholders the main process fills from the probe (vswhere's installer and the
+ *  found VS install path); left as written when VS is not there yet. */
+export const VS_SETUP_TOKEN = '{vsSetup}';
+export const VS_PATH_TOKEN = '{vsPath}';
+export const VS_SETUP_DEFAULT = 'C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\setup.exe';
+export const VS_PATH_DEFAULT = 'C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools';
+
+const ADMIN_NOTE = 'Needs an admin prompt (it asks for UAC approval).';
+const vsModify = (ids: string[]) =>
+  `"${VS_SETUP_TOKEN}" modify --installPath "${VS_PATH_TOKEN}" ${ids.map((id) => `--add ${id}`).join(' ')} --passive --norestart`;
+
+export const BUILD_GROUP = {
+  title: 'Build from source',
+  blurb: 'Only for building Guppy itself from its source code. Running the app needs none of this.',
+  why: 'npm ci compiles two native modules, better-sqlite3 (the memory database) and node-pty (the agent terminals), with node-gyp. These are the tools that build needs.',
+  posixNote: 'You also need a C/C++ compiler: on macOS run xcode-select --install, on Linux install build-essential (or your distro\'s gcc, g++ and make).'
+} as const;
+
+const BUILD_TOOLS: (ToolSpec & { platforms: Array<'win32' | 'posix'> })[] = [
+  {
+    id: 'build:node',
+    bin: 'node',
+    label: `Node.js ${BUILD_NODE_MAJOR}`,
+    kind: 'build',
+    why: `The build is pinned to Node ${BUILD_NODE_MAJOR} (.nvmrc). Another major, or a Node built with PGO (Node 26), breaks the native module builds.`,
+    essential: false,
+    install: {
+      posix: `nvm install ${BUILD_NODE_MAJOR} && nvm use ${BUILD_NODE_MAJOR}`,
+      win32: `winget install --id CoreyButler.NVMforWindows -e   # then, in a new terminal: nvm install ${BUILD_NODE_MAJOR} && nvm use ${BUILD_NODE_MAJOR}`
+    },
+    docsUrl: 'https://nodejs.org/en/download',
+    platforms: ['win32', 'posix']
+  },
+  {
+    id: 'build:python',
+    bin: 'python',
+    label: `Python ${BUILD_PYTHON}`,
+    kind: 'build',
+    why: 'node-gyp runs Python to generate the native build files.',
+    essential: false,
+    install: {
+      posix: `brew install python@${BUILD_PYTHON}   # macOS · or: sudo apt install python${BUILD_PYTHON}`,
+      win32: `winget install --id Python.Python.${BUILD_PYTHON} -e`
+    },
+    docsUrl: 'https://www.python.org/downloads/',
+    platforms: ['win32', 'posix']
+  },
+  {
+    id: 'build:vs-vctools',
+    bin: null,
+    label: 'VS 2022 Build Tools (C++)',
+    kind: 'build',
+    why: 'The MSVC C++ compiler that builds better-sqlite3 and node-pty on Windows.',
+    essential: false,
+    install: {
+      posix: '',
+      win32: 'winget install --id Microsoft.VisualStudio.2022.BuildTools -e --override "--passive --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"'
+    },
+    note: ADMIN_NOTE,
+    docsUrl: 'https://visualstudio.microsoft.com/visual-cpp-build-tools/',
+    platforms: ['win32']
+  },
+  {
+    id: 'build:vs-clangcl',
+    bin: null,
+    label: 'ClangCL toolset',
+    kind: 'build',
+    why: 'node-pty\'s Windows build uses the ClangCL platform toolset.',
+    essential: false,
+    install: { posix: '', win32: vsModify(BUILD_VS_REQUIRES['build:vs-clangcl']) },
+    note: `${ADMIN_NOTE} Install the VS 2022 Build Tools first.`,
+    platforms: ['win32']
+  },
+  {
+    id: 'build:vs-spectre',
+    bin: null,
+    label: 'Spectre-mitigated libraries',
+    kind: 'build',
+    why: 'node-pty links the Spectre-mitigated MSVC libraries. Without them its build stops with MSB8040.',
+    essential: false,
+    install: { posix: '', win32: vsModify(BUILD_VS_REQUIRES['build:vs-spectre']) },
+    note: `${ADMIN_NOTE} Install the VS 2022 Build Tools first.`,
+    platforms: ['win32']
+  }
+];
+
+/** The "Build from source" rows for a `process.platform` value: on posix, Node and Python only. */
+export function buildToolCatalog(platform: string): ToolSpec[] {
+  const key = platform === 'win32' ? 'win32' : 'posix';
+  return BUILD_TOOLS.filter((t) => t.platforms.includes(key)).map(({ platforms: _p, ...spec }) => spec);
 }
 
 /**

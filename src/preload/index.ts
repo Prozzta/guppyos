@@ -1120,6 +1120,8 @@ const api = {
   /** Which external tools (git, each agent engine) are actually
    *  present on this machine, with a platform-resolved install command each. */
   toolsStatus: (): Promise<ToolStatus[]> => ipcRenderer.invoke('tools:status'),
+  /** GUPPY-BUILD-PREREQS: the opt-in "Build from source" rows (Node, Python, VS components), probed on ask. */
+  toolsBuildStatus: (): Promise<ToolStatus[]> => ipcRenderer.invoke('tools:buildStatus'),
   /** REFRESH-MODELS: the models file (userData/models.json), or null. A file read, never a lookup. */
   modelCatalog: (): Promise<ModelsCatalog | null> => ipcRenderer.invoke('models:catalog'),
   /** REFRESH-MODELS: the Settings button. Queries every provider, rewrites the file, returns the per-provider rows. */

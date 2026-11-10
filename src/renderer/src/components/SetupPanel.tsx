@@ -19,7 +19,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { PixelButton } from './PixelButton';
 import { Icon } from './Icon';
 import { useStore } from '@/store/store';
-import { setupPrompt, type ToolStatus, type ToolKind } from '../../../shared/toolCatalog';
+import { setupPrompt, BUILD_GROUP, type ToolStatus, type ToolKind } from '../../../shared/toolCatalog';
 import { useOrchestratorName } from '@/hooks/useOrchestratorName';
 
 const SECTIONS: { kind: ToolKind; title: string; blurb: string }[] = [
@@ -37,7 +37,7 @@ function StatusChip({ tool }: { tool: ToolStatus }) {
       boxShadow: `inset 0 0 0 1px ${ready ? 'var(--cth-mint)' : 'var(--cth-ink-300)'}`,
       color: 'var(--cth-ink-900)'
     }}>
-      {ready ? 'READY' : tool.unknown ? 'NOT CHECKED' : tool.essential ? 'MISSING' : 'NOT SET UP'}
+      {ready && tool.warn ? 'CHECK' : ready ? 'READY' : tool.unknown ? 'NOT CHECKED' : tool.essential ? 'MISSING' : 'NOT SET UP'}
     </span>
   );
 }
@@ -77,6 +77,11 @@ function ToolRow({ tool }: { tool: ToolStatus }) {
         </div>
       )}
 
+      {/* GUPPY-BUILD-PREREQS: present but not usable as is: say why, and show the fix below. */}
+      {tool.found && tool.warn && (
+        <div style={{ fontSize: 11, color: 'var(--cth-ink-900)', lineHeight: 1.5 }}>{tool.warn}</div>
+      )}
+
       {/* RESOLVER-TIMEOUT-MISS: not checked (the lookup gave no answer) is not missing: no install
           command, just say so; reopening the panel checks again. */}
       {!tool.found && tool.unknown && (
@@ -84,7 +89,7 @@ function ToolRow({ tool }: { tool: ToolStatus }) {
       )}
 
       {/* Missing WITH a scripted install: the exact command, one click to copy. */}
-      {!tool.found && !tool.unknown && tool.installCommand && (
+      {(!tool.found || tool.warn) && !tool.unknown && tool.installCommand && (
         <div style={{ display: 'flex', gap: 6, alignItems: 'stretch' }}>
           <code style={{
             flex: 1, minWidth: 0, fontFamily: 'var(--cth-font-mono)', fontSize: 11,
@@ -114,6 +119,57 @@ function ToolRow({ tool }: { tool: ToolStatus }) {
             >docs →</a>
           )}
         </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * GUPPY-BUILD-PREREQS: "Build from source", opt-in. Nothing is probed until the user opens it:
+ * these rows matter only to someone building Guppy from its source, and the probes (vswhere, two
+ * interpreters) are slower than the PATH lookups above. Not part of the ready count or of
+ * "set up everything"; nothing here installs anything.
+ */
+function BuildFromSourceSection() {
+  const [rows, setRows] = useState<ToolStatus[] | null>(null);
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const check = useCallback(async () => {
+    setOpen(true);
+    setBusy(true);
+    try { setRows(await window.cth.toolsBuildStatus()); }
+    catch { setRows([]); }
+    finally { setBusy(false); }
+  }, []);
+  // Posix gets only Node and Python rows; the compiler is a note there (no VS rows).
+  const posix = rows !== null && rows.length > 0 && !rows.some((t) => t.id.startsWith('build:vs-'));
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{
+          flex: 1, fontFamily: 'var(--cth-font-display)', fontSize: 10, letterSpacing: 0.5,
+          color: 'var(--cth-ink-500)', textTransform: 'uppercase'
+        }}>{BUILD_GROUP.title}</div>
+        {open && (
+          <PixelButton variant="ghost" size="sm" onClick={() => setOpen(false)}>hide</PixelButton>
+        )}
+        <PixelButton variant="ghost" size="sm" onClick={() => void check()} disabled={busy}>
+          {busy ? 'checking…' : rows === null ? 'check' : 're-check'}
+        </PixelButton>
+      </div>
+      <div style={{ fontSize: 11, color: 'var(--cth-ink-500)', marginTop: -2 }}>{BUILD_GROUP.blurb}</div>
+      {open && (
+        <>
+          <div style={{ fontSize: 11, color: 'var(--cth-ink-700)', lineHeight: 1.5 }}>{BUILD_GROUP.why}</div>
+          {rows === null
+            ? <div style={{ fontSize: 11, color: 'var(--cth-ink-500)' }}>Checking the build tools…</div>
+            : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {rows.map((t) => <ToolRow key={t.id} tool={t} />)}
+              </div>
+            )}
+          {posix && <div style={{ fontSize: 11, color: 'var(--cth-ink-500)', lineHeight: 1.5 }}>{BUILD_GROUP.posixNote}</div>}
+        </>
       )}
     </div>
   );
@@ -207,6 +263,8 @@ export function SetupPanel({ onDone }: { onDone?: () => void } = {}) {
           </div>
         );
       })}
+
+      <BuildFromSourceSection />
     </div>
   );
 }
