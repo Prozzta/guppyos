@@ -297,6 +297,14 @@ export class ClaimStore {
     try { this.d.log?.(row); } catch { /* best effort */ }
   }
 
+  /** CLAIMS-REKEY-SHARED-KEY: the shared key file exists but does not decrypt; it is left as is. */
+  private alertUnreadableKey(reason: string): void {
+    if (reason !== 'decrypt-failed') return;
+    this.alertOnce('key-unreadable', {
+      kind: CLAIMS_ALERT_KEY_MISSING, reason: 'the shared ledger key file exists but does not decrypt; it was not replaced', to: ['god', 'human'],
+    });
+  }
+
   private alertOnce(dedup: string, row: Record<string, unknown>): void {
     if (this.alerted.has(dedup)) return;
     this.alerted.add(dedup);
@@ -739,7 +747,10 @@ export class ClaimStore {
     if (!key) {
       if (this.anySegmentAnywhere()) return { ok: false, error: 'the ledger is read-only: its key is missing; the Human has been alerted' };
       const made = this.d.keys.create();
-      if (!made.ok) return { ok: false, error: `no ledger key could be created (${made.reason})` };
+      if (!made.ok) {
+        this.alertUnreadableKey(made.reason);
+        return { ok: false, error: `no ledger key could be created (${made.reason})` };
+      }
       key = made.key;
       this.d.keyRecord.set(this.d.hiveRoot, made.keyId);
       this.key = made.key;
@@ -1104,9 +1115,13 @@ export class ClaimStore {
   // ---------------------------------------------------------------- rekey (C2, Human only)
 
   /**
-   * The Human's Settings action after a lost key. Creates a new key, then appends to every agent's
-   * ledger a `rekey` event chained over its last record. Refused for an agent whose prev chain is
-   * broken or that has a MAC failure under a key that still loads (a forgery: G1.8). Never automatic.
+   * The Human's Settings action after a lost key. Uses the user-data folder's CURRENT key when it
+   * loads, and creates one only when no key file exists (CLAIMS-REKEY-SHARED-KEY: the key file is
+   * shared by every floor of the folder, so minting a new one would orphan the others; an existing
+   * key that does not decrypt is refused and alerted, never replaced). Then appends to every
+   * agent's ledger a `rekey` event chained over its last record, and records this floor's id under
+   * that key id. Refused for an agent whose prev chain is broken or that has a MAC failure under a
+   * key that still loads (a forgery: G1.8). Never automatic.
    */
   async rekey(confirmedByHuman: true): Promise<{ ok: boolean; keyId?: string; rekeyed: string[]; refused: Array<{ agentId: string; why: string }> }> {
     if (confirmedByHuman !== true) return { ok: false, rekeyed: [], refused: [] };
@@ -1125,8 +1140,12 @@ export class ClaimStore {
       this.log({ kind: 'claims-rekey', keyId: null, rekeyed: [], refused });
       return { ok: false, rekeyed: [], refused };
     }
-    const made = this.d.keys.create();
-    if (!made.ok) return { ok: false, rekeyed: [], refused: [...refused, ...eligible.map((agentId) => ({ agentId, why: `no key (${made.reason})` }))] };
+    const cur = this.d.keys.load();
+    const made = cur.ok ? cur : cur.reason === 'missing' ? this.d.keys.create() : cur;
+    if (!made.ok) {
+      this.alertUnreadableKey(made.reason);
+      return { ok: false, rekeyed: [], refused: [...refused, ...eligible.map((agentId) => ({ agentId, why: `no key (${made.reason})` }))] };
+    }
     // F5 (Jim, god d05408): the new key id is recorded in user-data only AFTER every eligible
     // agent's rekey line is written and fsynced. Until then the record keeps the old id, so every
     // ledger reads key-missing (read-only) and a retry is safe.

@@ -3,14 +3,15 @@
  *
  * The app's provider keeps 32 random bytes encrypted with Electron safeStorage (DPAPI on Windows)
  * in a file under the app's user-data folder: never in an agent's env, never in a hive file.
- * `load()` never creates a key; `create()` makes a new one (first use with no ledger anywhere, or a
- * Human rekey). safeStorage is passed in, so this module loads without Electron.
+ * `load()` never creates a key; `create()` makes one only when no key file exists (first use with no
+ * ledger anywhere, or a Human rekey after the key file is gone). It never replaces a key file:
+ * every floor of the user-data folder uses it (CLAIMS-REKEY-SHARED-KEY). safeStorage is passed in, so this module loads without Electron.
  *
  * SandboxKeyProvider holds a key in memory, for tests and the Electron-as-Node drills (safeStorage
  * is not usable before `app` is ready).
  */
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { MacKeyLoad, MacKeyProvider } from '../../shared/claims';
 import { keyIdOf } from './canonical';
@@ -22,6 +23,39 @@ export interface SafeStorageLike {
   isEncryptionAvailable(): boolean;
   encryptString(plain: string): Buffer;
   decryptString(enc: Buffer): string;
+}
+
+/**
+ * CLAIMS-REKEY-SHARED-KEY: every floor that runs from one user-data folder shares its key file and
+ * its record files, and two app instances can write them at once. A read-modify-write of a shared
+ * file runs under `<file>.lock` (exclusive create; a lock older than LOCK_STALE_MS is a dead
+ * holder's and is broken). Throws when the lock stays busy past LOCK_WAIT_MS, like any write error.
+ */
+const LOCK_WAIT_MS = 5000;
+const LOCK_STALE_MS = 10000;
+const lockSleep = new Int32Array(new SharedArrayBuffer(4));
+export function withUserDataLock<T>(file: string, fn: () => T): T {
+  const lock = `${file}.lock`;
+  mkdirSync(dirname(file), { recursive: true });
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  let fd: number;
+  for (;;) {
+    try { fd = openSync(lock, 'wx'); break; } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      // EPERM/EACCES: Windows, while the last holder's unlink is still pending.
+      if (code !== 'EEXIST' && code !== 'EPERM' && code !== 'EACCES') throw e;
+      try { if (Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) { unlinkSync(lock); continue; } } catch { /* gone or busy: retry */ }
+      if (Date.now() > deadline) throw new Error(`the user-data lock stayed busy: ${lock}`);
+      Atomics.wait(lockSleep, 0, 0, 5);
+    }
+  }
+  try {
+    try { writeSync(fd, String(process.pid)); } catch { /* the pid is a hint only */ }
+    return fn();
+  } finally {
+    try { closeSync(fd); } catch { /* closed */ }
+    try { unlinkSync(lock); } catch { /* best effort: a stale lock is broken later */ }
+  }
 }
 
 export class SafeStorageKeyProvider implements MacKeyProvider {
@@ -39,14 +73,33 @@ export class SafeStorageKeyProvider implements MacKeyProvider {
     }
   }
 
+  /**
+   * CLAIMS-REKEY-SHARED-KEY: makes a key only when no key file exists. The file is shared by every
+   * floor of this user-data folder, so an existing key is never replaced: one that loads is
+   * returned as is, one that does not decrypt is refused ('decrypt-failed', the caller alerts).
+   * The new file is linked in exclusively, so two instances that both found none end on one key.
+   */
   create(): MacKeyLoad {
     if (!this.safe.isEncryptionAvailable()) return { ok: false, reason: 'unavailable' };
+    if (existsSync(this.file)) return this.existing();
     const key = randomBytes(KEY_BYTES);
     mkdirSync(dirname(this.file), { recursive: true });
     const tmp = `${this.file}.${process.pid}.tmp`;
     writeFileSync(tmp, this.safe.encryptString(key.toString('base64')));
-    renameSync(tmp, this.file);
+    try {
+      linkSync(tmp, this.file);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'EEXIST') return this.existing();
+      throw e;
+    } finally {
+      try { unlinkSync(tmp); } catch { /* gone */ }
+    }
     return { ok: true, key, keyId: keyIdOf(key) };
+  }
+
+  private existing(): MacKeyLoad {
+    const l = this.load();
+    return l.ok || l.reason === 'unavailable' ? l : { ok: false, reason: 'decrypt-failed' };
   }
 }
 
@@ -81,13 +134,15 @@ export class FileLedgerKeyRecord implements LedgerKeyRecord {
     const e = this.read().hives[hiveIdOf(hiveRoot)];
     return e && typeof e.keyId === 'string' ? e.keyId : null;
   }
+  /** Under the user-data lock: the read and the rename are one step, so no other floor's entry is lost. */
   set(hiveRoot: string, keyId: string): void {
-    const j = this.read();
-    j.hives[hiveIdOf(hiveRoot)] = { keyId, at: new Date().toISOString() };
-    mkdirSync(dirname(this.file), { recursive: true });
-    const tmp = `${this.file}.${process.pid}.tmp`;
-    writeFileSync(tmp, JSON.stringify(j, null, 2) + '\n');
-    renameSync(tmp, this.file);
+    withUserDataLock(this.file, () => {
+      const j = this.read();
+      j.hives[hiveIdOf(hiveRoot)] = { keyId, at: new Date().toISOString() };
+      const tmp = `${this.file}.${process.pid}.tmp`;
+      writeFileSync(tmp, JSON.stringify(j, null, 2) + '\n');
+      renameSync(tmp, this.file);
+    });
   }
 }
 
@@ -128,11 +183,14 @@ export class FileHeadAnchorStore implements HeadAnchorStore {
     const h = this.read().hives[hiveIdOf(hiveRoot)] ?? {};
     return Object.keys(h).filter((a) => typeof h[a]?.head === 'string' && (h[a].head !== '' || !!h[a].pending));
   }
+  /** Under the user-data lock (CLAIMS-REKEY-SHARED-KEY), like the key record. */
   set(hiveRoot: string, agentId: string, a: { head: string; lastId: string; pending?: PendingAnchor }): void {
+    withUserDataLock(this.file, () => this.setLocked(hiveRoot, agentId, a));
+  }
+  private setLocked(hiveRoot: string, agentId: string, a: { head: string; lastId: string; pending?: PendingAnchor }): void {
     const j = this.read();
     const h = (j.hives[hiveIdOf(hiveRoot)] ??= {});
     h[agentId] = { head: a.head, lastId: a.lastId, at: new Date().toISOString(), ...(a.pending ? { pending: { head: a.pending.head, lastId: a.pending.lastId } } : {}) };
-    mkdirSync(dirname(this.file), { recursive: true });
     const tmp = `${this.file}.${process.pid}.tmp`;
     writeFileSync(tmp, JSON.stringify(j, null, 2));
     renameSync(tmp, this.file);
