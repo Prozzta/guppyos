@@ -27,7 +27,6 @@ export interface TrayModeDeps {
   icon(): Promise<unknown>;
   createTray(icon: unknown): TrayLike;
   buildMenu(items: TrayMenuItem[]): unknown;
-  mainWindow(): TrayWindowLike | null;
   toggleBlob(): void;
   quit(): void;
 }
@@ -35,10 +34,14 @@ export interface TrayModeDeps {
 export class TrayModeController {
   private tray: TrayLike | null = null;
   private creating = false;
+  /** The primary window, never a most-recently-focused Floor window. */
+  private primary: TrayWindowLike | null = null;
 
   constructor(private readonly d: TrayModeDeps) {}
 
   private wanted(): boolean { return this.d.platform() === 'win32' && this.d.enabled(); }
+
+  setPrimaryWindow(win: TrayWindowLike): void { this.primary = win; }
 
   /** Reconcile a live Settings change. The icon is async on Windows because it
    * comes from the installed Guppy executable, not a second artwork asset. */
@@ -62,17 +65,18 @@ export class TrayModeController {
 
   /** Returns true exactly when the close became a hide. */
   hideOnClose(event: TrayCloseEventLike, win: TrayWindowLike, quitting: boolean): boolean {
-    if (quitting || !this.wanted() || win.isDestroyed()) return false;
+    // A tray must already exist before hiding. If obtaining the native icon or
+    // constructing a Tray failed, retain Electron's normal close/PTY-warning
+    // route instead of stranding a hidden app without a recovery affordance.
+    if (quitting || !this.wanted() || !this.tray || win.isDestroyed()) return false;
+    this.primary = win;
     event.preventDefault();
     win.hide();
-    // Failing to obtain the executable icon must not become an unhandled
-    // rejection on a close event; the hidden app is still usable via launch.
-    void this.sync().catch(() => { /* tray is best-effort */ });
     return true;
   }
 
   open(): void {
-    const win = this.d.mainWindow();
+    const win = this.primary;
     if (!win || win.isDestroyed()) return;
     if (win.isMinimized()) win.restore();
     win.show();

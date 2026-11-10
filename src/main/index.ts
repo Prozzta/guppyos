@@ -2315,6 +2315,8 @@ const persist = new PersistStore();
  *  the most-recently-focused live window, so global events follow the user.
  *  Additional "floor" windows are tracked in `allWindows` below. */
 let mainWindow: BrowserWindow | null = null;
+/** The non-floor Guppy window. Unlike mainWindow, focus never retargets this to a Floor. */
+let primaryWindow: BrowserWindow | null = null;
 /** Every open window (primary + floors). A registry, not a single handle, so
  *  multi-window lifecycle (focus tracking, quit fan-out) is correct. */
 const allWindows = new Set<BrowserWindow>();
@@ -2455,9 +2457,10 @@ const trayMode = new TrayModeController({
   icon: () => app.getFileIcon(process.execPath, { size: 'small' }),
   createTray: (icon) => new Tray(icon as Electron.NativeImage),
   buildMenu: (items) => Menu.buildFromTemplate(items),
-  mainWindow: () => mainWindow,
   toggleBlob: () => blobOverlay.toggleVisible(),
-  quit: () => teardownAndQuit()
+  // Route through Electron so a tray quit gets the same live-PTY warning as
+  // every other quit path (including the updater's quitAndInstall()).
+  quit: () => app.quit()
 });
 
 /** Agents spawned with `isolate: true` get a dedicated git worktree; this maps
@@ -4612,7 +4615,7 @@ if (!gotInstanceLock) {
   app.quit();
 } else {
   app.on('second-instance', (_evt, argv) => {
-    surfaceWindow(mainWindow, { restore: true, focus: true });   // MUNDER_HIDDEN: never restore or focus
+    surfaceWindow(primaryWindow ?? mainWindow, { show: true, restore: true, focus: true });   // MUNDER_HIDDEN: never restore or focus
     const link = argv.find(isHireLinkArg);
     if (link) void handleHireLink(link);
   });
@@ -4710,7 +4713,13 @@ function createWindow(opts: { floor?: boolean; partition?: string; recovery?: Re
   // Global timer events follow the user — the most-recently-focused window is
   // primary. The primary is also seeded synchronously so boot events route now.
   win.on('focus', () => { mainWindow = win; });
-  if (!isFloor) mainWindow = win;
+  if (!isFloor) {
+    mainWindow = win;
+    primaryWindow = win;
+    trayMode.setPrimaryWindow(win);
+    // Create the recovery affordance before a close may hide the primary.
+    void trayMode.sync().catch(() => { /* tray is best-effort */ });
+  }
 
   // Permission gate for the renderer (our own trusted, local content). The only
   // permission we constrain is microphone capture: it's allowed ONLY while a mic
@@ -4852,6 +4861,7 @@ function createWindow(opts: { floor?: boolean; partition?: string; recovery?: Re
       mainWindow = null;
       for (const w of allWindows) { if (!w.isDestroyed()) { mainWindow = w; break; } }
     }
+    if (primaryWindow === win) primaryWindow = null;
     syncKeepAwake();
   });
 
@@ -9164,10 +9174,11 @@ app.on('before-quit', (e) => {
     const count = ptyManager.list().length;
     if (count > 0) {
       e.preventDefault();
-      if (mainWindow) {
-        if (rendererGone(mainWindow.webContents)) { quitOrCancelNatively(count, mainWindow); return; }
-        surfaceWindow(mainWindow, { focus: true });   // MUNDER_HIDDEN: never focus
-        mainWindow.webContents.send('app:closeRequested', { ptyCount: count });
+      const quitWindow = primaryWindow ?? mainWindow;
+      if (quitWindow) {
+        if (rendererGone(quitWindow.webContents)) { quitOrCancelNatively(count, quitWindow); return; }
+        surfaceWindow(quitWindow, { show: true, focus: true });   // MUNDER_HIDDEN: never focus
+        quitWindow.webContents.send('app:closeRequested', { ptyCount: count });
       } else quitOrCancelNatively(count, null);
       return;
     }
