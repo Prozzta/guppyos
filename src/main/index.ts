@@ -64,6 +64,10 @@ import { daemonExecutable, headlessSpawnRefusal, missingCliAction, npmRungDecisi
 import { initAutoUpdater, abortPendingRestart } from './updater';
 import { RealtimeFloorWatcher } from './realtimeFloorWatcher';
 import { BlobOverlayController, isAppWindowSender, registerBlobIpc, type BlobWindowLike, type Rect as BlobRect } from './blobOverlay';
+import { DictationController } from './dictation';
+import { GroqSttProvider } from './stt';
+import { Win32InputHelper, inputHelperPath } from './win32Input';
+import { DICTATION_COPY, type DictationCaptureCommand } from '../shared/dictation';
 import { ProviderModelStore, defaultAdapters } from './providerModels';
 import {
   readConfig, readConfigForWrite, writeConfig, pruneRetiredConfigKeys, setAgentTokenCap, registerRepo, unregisterRepo, patchMission, setProjectThemeForHome, resolveProjectThemeForHome, setAgentUsageDisplay, setCapacityDisplayThreshold, setGraphicsMode, resetConfig, ensureHarnessHome, homeHasNoProject, ensureClaudePermissionsAccepted,
@@ -2340,7 +2344,7 @@ function createBlobOverlayWindow(bounds: BlobRect, onGone: (reason: string) => v
     focusable: false,
     hasShadow: false,
     alwaysOnTop: true,
-    title: 'Guppy',
+    title: 'Blob',
     webPreferences: {
       preload: join(__dirname, '../preload/blob.js'),
       partition: BLOB_PARTITION,
@@ -2377,9 +2381,60 @@ const blobOverlay: BlobOverlayController = new BlobOverlayController({
   workArea: (point) => (point ? screen.getDisplayNearestPoint(point) : screen.getPrimaryDisplay()).workArea,
   cursor: () => screen.getCursorScreenPoint(),
   hidden: DEV_HIDDEN,
-  log: (row) => { try { hive.appendLog(row); } catch { /* best-effort */ } }
+  log: (row) => { try { hive.appendLog(row); } catch { /* best-effort */ } },
+  onApplied: (s) => { dictation.apply(s.enabled && s.dictation); }   // only from apply(), after module init
 });
 registerBlobIpc(ipcMain as unknown as Parameters<typeof registerBlobIpc>[0], blobOverlay, (evt) => ledgerUiSender(evt as unknown as Electron.IpcMainInvokeEvent));
+
+/** GUPPY-DICTATION-P2: hold Ctrl+Alt+Space anywhere -> the app window records the mic -> Groq (key
+ *  stays in main) -> the input helper types the transcript into the focused app. Off by default
+ *  (Settings > Blob); the helper is spawned only while it is on, and never in a hidden run. */
+let dictationTarget: Electron.WebContents | null = null;
+function dictationWindow(): BrowserWindow | null {
+  if (mainWindow && !mainWindow.isDestroyed()) return mainWindow;
+  for (const w of allWindows) if (!w.isDestroyed()) return w;
+  return null;
+}
+function sendDictationCapture(cmd: DictationCaptureCommand): boolean {
+  const wc = cmd.op === 'start' ? dictationWindow()?.webContents ?? null : dictationTarget;
+  if (!wc || wc.isDestroyed()) return false;
+  if (cmd.op === 'start') dictationTarget = wc;
+  try { wc.send('dictation:capture', cmd); return true; } catch { return false; }
+}
+const dictationHelper = new Win32InputHelper(() => {
+  const exe = inputHelperPath(app.getAppPath(), process.resourcesPath, app.isPackaged);
+  return existsSync(exe) ? exe : null;
+});
+const dictation: DictationController = new DictationController({
+  helper: dictationHelper,
+  stt: new GroqSttProvider(() => { const c = readConfig(); return { apiKey: c.groqApiKey, model: c.freeflowModel }; }),
+  capture: {
+    start: (session) => (sendDictationCapture({ op: 'start', session }) ? { ok: true } : { ok: false, error: DICTATION_COPY.noWindow }),
+    stop: (session) => { sendDictationCapture({ op: 'stop', session }); },
+    cancel: (session) => { sendDictationCapture({ op: 'cancel', session }); }
+  },
+  supported: process.platform === 'win32' && !DEV_HIDDEN,
+  publish: (s) => blobOverlay.setDictationStatus(s),
+  notify: (body) => { if (DEV_HIDDEN) return; try { if (Notification.isSupported()) new Notification({ title: 'Blob dictation', body, silent: true }).show(); } catch { /* best-effort */ } },
+  log: (row) => { try { hive.appendLog(row); } catch { /* best-effort */ } },
+  now: () => Date.now(),
+  timers: { set: (fn, ms) => setTimeout(fn, ms), clear: (h) => clearTimeout(h as ReturnType<typeof setTimeout>) }
+});
+/** The clip for a session, only from the app window that was asked to record it. */
+ipcMain.handle('dictation:audio', (evt, arg: unknown) => {
+  if (!ledgerUiSender(evt) || !dictationTarget || evt.sender !== dictationTarget) return { ok: false, error: 'refused: not the recording window' };
+  const a = (arg ?? {}) as { session?: unknown; audio?: unknown; mimeType?: unknown; error?: unknown };
+  if (typeof a.session !== 'number' || !Number.isSafeInteger(a.session)) return { ok: false, error: 'bad session' };
+  const audio = a.audio instanceof ArrayBuffer || a.audio instanceof Uint8Array ? a.audio : undefined;
+  return {
+    ok: dictation.onAudio({
+      session: a.session,
+      audio,
+      mimeType: typeof a.mimeType === 'string' ? a.mimeType.slice(0, 64) : undefined,
+      error: typeof a.error === 'string' ? a.error.slice(0, 200) : audio ? undefined : 'nothing recorded'
+    })
+  };
+});
 /** Monotonic floor counter → a stable, unique session partition per floor so
  *  each floor's renderer state (localStorage: agents, queues, selection) is
  *  isolated from every other window's. */
@@ -4652,7 +4707,8 @@ function createWindow(opts: { floor?: boolean; partition?: string; recovery?: Re
   // xterm/editor copy must keep working).
   const micFeatureLive = (): boolean => {
     const cfg = readConfig();
-    return cfg.freeflowEnabled === true || cfg.realtimeVoiceEnabled === true;
+    return cfg.freeflowEnabled === true || cfg.realtimeVoiceEnabled === true
+      || (cfg.blobEnabled === true && cfg.blobDictation === true);   // GUPPY-DICTATION-P2 records here
   };
   const ses = win.webContents.session;
   ses.setPermissionRequestHandler((_wc, permission, callback, details) => {
@@ -4770,7 +4826,7 @@ function createWindow(opts: { floor?: boolean; partition?: string; recovery?: Re
     allWindows.delete(win);
     // GUPPY-BLOB-P01: the overlay must not keep the app alive (window-all-closed) after the
     // last app window closes.
-    if (allWindows.size === 0) { try { blobOverlay.dispose(); } catch { /* best-effort */ } }
+    if (allWindows.size === 0) { try { dictation.dispose(); blobOverlay.dispose(); } catch { /* best-effort */ } }
     // A closed floor must not leave its terminals running headless. (Natural
     // onExit teardown — archive + worktree cleanup — still runs per PTY.)
     if (isFloor) { try { ptyManager.killByOwner(wc); } catch { /* best-effort */ } }
@@ -7675,6 +7731,7 @@ ipcMain.handle('freeflow:setConfig', (_evt, patch: unknown) => {
   if (typeof p.apiKey === 'string') next.groqApiKey = p.apiKey.trim() || undefined;
   if (typeof p.model === 'string') next.freeflowModel = p.model.trim() || DEFAULT_GROQ_MODEL;
   writeConfig(next);
+  dictation.refresh();   // GUPPY-DICTATION-P2: a key added or removed changes what the blob says
   return { ok: true };
 });
 
@@ -9094,6 +9151,7 @@ app.on('before-quit', (e) => {
 // `will-quit`, which only fires once the quit is actually going ahead.
 app.on('will-quit', () => {
   try { blobOverlay.dispose(); } catch (e) { console.error('[quit] blobOverlay.dispose:', e); }
+  try { dictation.dispose(); } catch (e) { console.error('[quit] dictation.dispose:', e); }   // kills the helper: no hook left behind
   try { globalShortcut.unregisterAll(); } catch { /* none held */ }
   capacityStore.saveNow();
   capacityDetailTicker.stopAll();

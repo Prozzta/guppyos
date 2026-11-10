@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactElement } from 'react';
 import { Blobatar } from 'blobatar/react';
-import { idle, shy, thinking, unsure, type Expression } from 'blobatar/expression';
+import { happy, idle, shy, surprised, thinking, unsure, type Expression } from 'blobatar/expression';
 // shy: the brief reaction when the blob hides itself from shares; thinking when it shows again.
 import { BLOB_COMING_SOON, BLOB_DISABLED, type BlobOverlayApi, type BlobOverlayStatus, type BlobSlot } from '../../../shared/blob';
 import { RING_SLOTS, ringSlotPosition } from './ring';
@@ -46,6 +46,15 @@ const LABEL: Record<BlobSlot, string> = {
   message: 'Record message',
 };
 
+/** Not `shy` anywhere here: its heat tints the pinned yellow head peach. */
+const DICT_EXPR: Record<string, Expression | undefined> = {
+  listening: surprised,
+  transcribing: thinking,
+  typing: happy,
+  error: unsure,
+  unavailable: unsure,
+};
+
 export function BlobApp(): ReactElement {
   const api = window.blob;
   const [status, setStatus] = useState<BlobOverlayStatus | null>(null);
@@ -62,6 +71,11 @@ export function BlobApp(): ReactElement {
   }, [api]);
 
   const invisible = status?.invisible === true;
+  // GUPPY-DICTATION-P2: the face and halo follow dictation; a ring reaction (toast) still wins.
+  const dict = status?.dictationStatus;
+  const dictState = dict && dict.state !== 'off' && dict.state !== 'ready' ? dict.state : null;
+  const dictExpr = DICT_EXPR[dictState ?? ''];
+  const dictTitle = dict?.message ?? (dictState === 'listening' ? 'Listening... release to type' : dict?.state === 'ready' ? `Blob (hold ${dict.chord} to dictate)` : 'Blob');
   // Back to idle once a reaction's toast is gone. Not `shy` while invisible: shy's heat tints the
   // yellow head peach, and invisible is the default, so the blob would blush all the time.
   useEffect(() => { if (!toast) setExpr(idle); }, [toast]);
@@ -120,9 +134,9 @@ export function BlobApp(): ReactElement {
   };
 
   return (
-    <div className={`blob-stage${ringOpen ? ' is-open' : ''}`}>
+    <div className={`blob-stage${ringOpen ? ' is-open' : ''}${dictState ? ` dict-${dictState}` : ''}`} data-dictation={dict?.state ?? 'off'}>
       {ringOpen && (
-        <div className="blob-ring" role="menu" aria-label="Guppy actions">
+        <div className="blob-ring" role="menu" aria-label="Blob actions">
           <div className="blob-ring-track" aria-hidden />
           {RING_SLOTS.map((slot) => {
             const pos = ringSlotPosition(slot);
@@ -151,7 +165,8 @@ export function BlobApp(): ReactElement {
       <button
         type="button"
         className="blob-face"
-        aria-label={ringOpen ? 'Close Guppy actions' : 'Open Guppy actions'}
+        aria-label={ringOpen ? 'Close Blob actions' : 'Open Blob actions'}
+        title={dictTitle}
         aria-expanded={ringOpen}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
@@ -164,7 +179,7 @@ export function BlobApp(): ReactElement {
           if (p?.dragging && api) void api.drag('end');
         }}
       >
-        <Blobatar name={BLOB_NAME} palette={BLOB_PALETTE} background={false} traits={BLOB_TRAITS} animate="always" expression={expr} size={88} title="Guppy" />
+        <Blobatar name={BLOB_NAME} palette={BLOB_PALETTE} background={false} traits={BLOB_TRAITS} animate="always" expression={toast ? expr : dictExpr ?? expr} size={88} title={dictTitle} />
       </button>
     </div>
   );

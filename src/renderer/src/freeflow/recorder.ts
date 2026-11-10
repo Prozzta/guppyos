@@ -19,6 +19,7 @@
  */
 import { useSyncExternalStore } from 'react';
 import { useStore } from '@/store/store';
+import { pickMimeType } from './mime';
 
 export type FreeflowStatus = 'idle' | 'recording' | 'transcribing';
 
@@ -58,18 +59,7 @@ let wantActive = false;
 /** True while getUserMedia is in flight, to ignore re-entrant start() calls. */
 let opening = false;
 
-/** Prefer webm/opus (Groq-supported, Chromium default); fall back to whatever the
- *  platform offers. Returns '' to let MediaRecorder pick its default. */
-function pickMimeType(): string {
-  const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus'];
-  const supported = typeof MediaRecorder !== 'undefined' && typeof MediaRecorder.isTypeSupported === 'function';
-  if (supported) {
-    for (const c of candidates) {
-      if (MediaRecorder.isTypeSupported(c)) return c;
-    }
-  }
-  return '';
-}
+// pickMimeType lives in ./mime (shared with the GUPPY-DICTATION-P2 capture).
 
 /** Release the mic stream so the OS recording indicator clears. */
 function teardownStream(): void {

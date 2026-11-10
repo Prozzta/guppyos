@@ -208,7 +208,8 @@ export interface KnowledgeGraphConfig {
 }
 
 /** GUPPY-BLOB-P01: the blob overlay's fields (blobEnabled, blobHotkey, blobInvisible,
- *  blobInvisibleMain, blobPosition) are declared and defaulted in src/shared/blob.ts. */
+ *  blobInvisibleMain, blobPosition, and GUPPY-DICTATION-P2's blobDictation) are declared and
+ *  defaulted in src/shared/blob.ts. */
 export interface HarnessConfig extends BlobConfigFields {
   /** Has the user completed the first-run onboarding? */
   onboardingComplete: boolean;

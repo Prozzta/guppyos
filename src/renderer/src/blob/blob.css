@@ -38,6 +38,29 @@ html, body, #blob-root {
 .blob-face:active { cursor: grabbing; }
 .blob-face svg { pointer-events: none; }
 
+/* GUPPY-DICTATION-P2: a halo says what dictation is doing (the window is only 96 px, so no text). */
+.blob-face::before {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  border: 3px solid transparent;
+  pointer-events: none;
+}
+.dict-listening .blob-face::before { border-color: #e5484d; animation: blob-listen 900ms ease-in-out infinite; }
+.dict-transcribing .blob-face::before,
+.dict-typing .blob-face::before { border-color: #3e63dd; border-top-color: transparent; animation: blob-spin 800ms linear infinite; }
+.dict-error .blob-face::before,
+.dict-unavailable .blob-face::before { border-color: #f5a524; border-style: dashed; }
+@keyframes blob-listen {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.96); }
+}
+@keyframes blob-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .dict-listening .blob-face::before, .dict-transcribing .blob-face::before, .dict-typing .blob-face::before { animation: none; }
+}
+
 .blob-ring {
   position: absolute;
   inset: 0;
