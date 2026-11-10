@@ -7,9 +7,10 @@
 ### Agent harness to run an AI crew on your own machine — the hardened fork
 
 **Free, open source (MIT) and performant**: a multi-agent harness that runs an AI crew of
-Claude Code, Codex and Antigravity agents on your own machine, using the subscriptions you
-already pay for, on their hourly limits. It turns the terminal coding CLIs you already run into
-a crew that keeps working while you're away, coordinated by a captain on your own machine.
+Claude Code, Codex, Antigravity, Grok and other terminal CLI agents on your own machine, using
+the subscriptions you already pay for, on their hourly limits. It turns the terminal coding
+CLIs you already run into a crew that keeps working while you're away, coordinated by a
+captain on your own machine.
 
 **Actively maintained.** Latest release: **v1.1.103 (2026-10-30)**, with a Windows x64
 installer; macOS and Linux build from source.<br>
