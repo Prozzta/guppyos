@@ -9,6 +9,7 @@ const root = path.join(__dirname, '..');
 const main = fs.readFileSync(path.join(root, 'src', 'main', 'index.ts'), 'utf8');
 const preload = fs.readFileSync(path.join(root, 'src', 'preload', 'index.ts'), 'utf8');
 const terminalPool = fs.readFileSync(path.join(root, 'src', 'renderer', 'src', 'components', 'terminalPool.ts'), 'utf8');
+const clipboardHandlers = fs.readFileSync(path.join(root, 'src', 'main', 'clipboard.ts'), 'utf8');
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
 const builder = fs.readFileSync(path.join(root, 'electron-builder.yml'), 'utf8');
 
@@ -20,10 +21,13 @@ test('Electron rebuild tooling is pinned and better-sqlite3 is on the Node 24 li
   assert.match(builder, /node_modules\/better-sqlite3\/\*\*/);
 });
 
-test('Electron 45 clipboard IPC awaits the main-process asynchronous API', () => {
-  assert.match(main, /ipcMain\.handle\('app:copyToClipboard', async \(_evt, text: unknown\) => \{[\s\S]*?await clipboard\.writeText\(text\)/);
-  assert.match(main, /ipcMain\.handle\('app:readClipboard', async \(\) => \{[\s\S]*?await clipboard\.readText\(\)/);
-  assert.match(main, /ipcMain\.handle\('clipboard:saveImage', async \(\) => \{[\s\S]*?await clipboard\.read\(\)[\s\S]*?getType\('image\/png'\)[\s\S]*?arrayBuffer\(\)/);
+test('Electron 45 clipboard IPC uses the promise-only main-process API', () => {
+  assert.match(main, /copyClipboardText\(clipboard, text\)/);
+  assert.match(main, /readClipboardText\(clipboard\)/);
+  assert.match(main, /readClipboardPng\(clipboard\)/);
+  assert.match(clipboardHandlers, /await clipboard\.writeText\(text\)/);
+  assert.match(clipboardHandlers, /await clipboard\.readText\(\)/);
+  assert.match(clipboardHandlers, /await clipboard\.read\(\)[\s\S]*?getType\('image\/png'\)[\s\S]*?arrayBuffer\(\)/);
   assert.doesNotMatch(main, /clipboard\.readImage\(|app:readClipboardSync|sendSync/);
 });
 

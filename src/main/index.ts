@@ -1,6 +1,7 @@
 import './packThemes'; // theme packs join the project-theme catalogue before any config is read
 import { app, BrowserWindow, clipboard, crashReporter, dialog, globalShortcut, ipcMain, Menu, powerMonitor, powerSaveBlocker, safeStorage, screen, session, shell, Notification, Tray, utilityProcess } from 'electron';
 import { runQuitSteps, type QuitReport } from './quitTeardown';
+import { copyClipboardText, readClipboardPng, readClipboardText } from './clipboard';
 import { NativeMemoryWiring, toUnpacked } from './nativeMemory/mainWiring';
 import { ClaimStore } from './claims/store';
 import { SearchResultLog } from './claims/searchLog';
@@ -5793,16 +5794,14 @@ ipcMain.handle('session:resolveCwd', (_evt, sessionId: unknown) =>
 
 // ─── IPC: clipboard ─────────────────────────────────────────────────────────
 ipcMain.handle('app:copyToClipboard', async (_evt, text: unknown) => {
-  if (typeof text !== 'string') return { ok: false, error: 'invalid text' };
-  try { await clipboard.writeText(text); return { ok: true }; }
-  catch (e) { return { ok: false, error: e instanceof Error ? e.message : String(e) }; }
+  return copyClipboardText(clipboard, text);
 });
 // STARTUP-TIMING-162: the renderer's long tasks and first-redraw marks (validated in startupTiming).
 ipcMain.on('startup:timing', (_evt, batch: unknown) => startupTiming.fromRenderer(batch));
 // STALL-WATCH-198: the renderer's slow input and long tasks (validated and rate-capped in stallWatch).
 ipcMain.on('stall:watch', (_evt, batch: unknown) => stallWatch.fromRenderer(batch));
 ipcMain.handle('app:readClipboard', async () => {
-  try { return await clipboard.readText(); } catch { return ''; }
+  return readClipboardText(clipboard);
 });
 // Electron 44 makes clipboard reads asynchronous; terminal paste marks the
 // eventual renderer emission as HUMAN.
@@ -6697,14 +6696,13 @@ ipcMain.handle('dialog:attachFiles', async (evt) => {
 // clipboard holds no image (e.g. a normal text paste).
 ipcMain.handle('clipboard:saveImage', async () => {
   try {
-    const item = (await clipboard.read()).find((entry) => entry.types.includes('image/png'));
-    if (!item) return { ok: false as const, error: 'no image in clipboard' };
-    const png = await item.getType('image/png');
+    const png = await readClipboardPng(clipboard);
+    if (!png) return { ok: false as const, error: 'no image in clipboard' };
     const dir = join(app.getPath('temp'), 'cth-pastes');
     mkdirSync(dir, { recursive: true });
     const name = `paste-${Date.now()}.png`;
     const dest = join(dir, name);
-    writeFileSync(dest, Buffer.from(await png.arrayBuffer()));
+    writeFileSync(dest, Buffer.from(png));
     return { ok: true as const, file: { path: dest, name } };
   } catch (e) {
     return { ok: false as const, error: e instanceof Error ? e.message : String(e) };
