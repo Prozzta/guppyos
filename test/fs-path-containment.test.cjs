@@ -87,7 +87,7 @@ const CASES = {
   },
   junction: {
     finalText: 'jout',                   // final component is a junction out of the workspace
-    finalBin: 'jout',
+    finalBin: 'jout/secret.bin',         // and an external FILE reached through it
     intermediate: 'sub/deep.txt',
     writeThrough: 'jout/overwrite-me.txt',
     dangling: 'dangling/newly-created.txt',
@@ -119,6 +119,18 @@ function makeWorkspace(kind) {
   fs.writeFileSync(path.join(root, 'real.txt'), 'in-workspace\n');
   fs.writeFileSync(path.join(root, 'docs', 'shot.bin'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x02]));
 
+  try {
+    plantLinks(kind, root, outside);
+  } catch (e) {
+    // A failed link call must not leak the temp dir: withWorkspace's cleanup
+    // only runs once the workspace has been handed back.
+    fs.rmSync(dir, { recursive: true, force: true });
+    throw e;
+  }
+  return { dir, root, outside };
+}
+
+function plantLinks(kind, root, outside) {
   if (kind === 'symlink') {
     // (a) final-component symlinks to external targets
     fs.symlinkSync(path.join(outside, 'secret.txt'), path.join(root, 'innocent.txt'));
@@ -146,8 +158,6 @@ function makeWorkspace(kind) {
     // (d) a junction that stays INSIDE the workspace
     fs.symlinkSync(path.join(root, 'docs'), path.join(root, 'docs-link'), 'junction');
   }
-
-  return { dir, root, outside };
 }
 
 function withWorkspace(kind, fn) {
@@ -157,7 +167,7 @@ function withWorkspace(kind, fn) {
 
 // ─── which link kinds this run covers ───────────────────────────────────────
 
-test('every kind of link this user can plant is covered', () => {
+test('every kind of link this user can plant is covered', (t) => {
   // No kind is dropped because creating it happened to fail: a symlink kind left
   // out on Windows must be one the OS refuses to this user (EPERM), and the
   // junction kind, which needs no privilege, always runs there.
@@ -169,7 +179,7 @@ test('every kind of link this user can plant is covered', () => {
   } else {
     assert.deepEqual(KINDS, ['symlink']);
   }
-  test.diagnostic?.(`link kinds covered: ${KINDS.join(', ')}`);
+  t.diagnostic(`link kinds covered: ${KINDS.join(', ')}`);
 });
 
 for (const kind of KINDS) {
