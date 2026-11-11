@@ -136,7 +136,7 @@ These tools surface recorded claims and history, not an accuracy guarantee. See 
 
 - **Windows x64** for this fork's installer releases; the codebase also builds on macOS
   and Linux (upstream ships all three).
-- **Node.js 18+** and npm, plus a C/C++ toolchain for `node-pty`'s native addon.
+- **Node.js 24** (`.nvmrc`, matching CI) and npm, plus a C/C++ toolchain for `node-pty`'s native addon.
 - At least one supported agent CLI on your `PATH` — [Claude Code](https://claude.com/claude-code)
   (`claude`, the default), Antigravity (`agy`), OpenAI Codex (`codex`), or xAI Grok (`grok`).
 
