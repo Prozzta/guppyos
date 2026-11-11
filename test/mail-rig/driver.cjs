@@ -326,7 +326,7 @@ class Rig {
    * its whole bound to report a misleading "the stubs stayed busy".
    */
   async stubsIdle(ids = this.agentIds) {
-    if (await this.call('inFlight')) return false;
+    const inFlight = await this.call('inFlight');
     const outs = await this.call('outcomes');
     for (const id of ids) {
       if (this.stubGone(id)) continue;
@@ -336,7 +336,27 @@ class Rig {
       try { comp = JSON.parse(fs.readFileSync(path.join(this.stubDir(id), 'composer.json'), 'utf8')); } catch { comp = null; }
       if (comp && comp.pending > 0) return false;
     }
-    return true;
+    if (!inFlight) return true;
+    // MAIL-RIG-F12: a dead hook shim leaves the product's submit confirmation unresolved until
+    // simulated time reaches its bounded timeout.  Once the fake CLI has finished a turn and
+    // every hook in that turn failed locally with exit 127, there is no real work under the
+    // clock.  This is deliberately narrower than "inFlight": an un-attributed or non-127
+    // coordinator remains held, so a real stuck submit cannot be hidden by this exception.
+    const inFlightIds = await this.call('inFlightIds');
+    if (!Array.isArray(inFlightIds) || inFlightIds.length === 0) return false;
+    return inFlightIds.every((id) => this.completedExit127Turn(id));
+  }
+
+  /** MAIL-RIG-F12: the current fake turn finished, and no hook reached the app. */
+  completedExit127Turn(agentId) {
+    const tr = this.transcript(agentId);
+    const start = tr.map((r, n) => r.kind === 'start' ? n : -1).filter((n) => n >= 0).pop();
+    if (start === undefined) return false;
+    const turn = tr.slice(start);
+    const hooks = turn.filter((r) => r.kind === 'hook');
+    return turn.some((r) => r.kind === 'turn-end')
+      && hooks.length > 0
+      && hooks.every((r) => r.transport === 'none' && r.exit === 127);
   }
 
   /** J-LF2: this agent's stub can do no work: its recorded process is dead, or the test hung it. */

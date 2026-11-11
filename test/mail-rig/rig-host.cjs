@@ -604,8 +604,11 @@ async function main() {
       const reg = hive.registry();
       return Object.keys(reg.agents || {}).filter((a) => f.ptyForAgent(a)).some((a) => { const s = workerWake.state(a); return !!s.inFlight || s.lifecycle === 'active'; });
     },
-    // LOAD-FLAKES-176: is any wake being typed right now (the host half of Rig.stubsIdle)?
+    // LOAD-FLAKES-176 / MAIL-RIG-F12: which wakes are being typed right now.  The driver may
+    // advance only past the narrow, completed all-exit-127 shim case; it must keep a genuinely
+    // stuck coordinator attributed to its agent and held.
     inFlight: () => Object.keys(hive.registry().agents || {}).some((a) => !!workerWake.state(a).inFlight),
+    inFlightIds: () => Object.keys(hive.registry().agents || {}).filter((a) => !!workerWake.state(a).inFlight),
     diags: ({ since = 0 } = {}) => rig.diags.filter((d) => d.at >= since),
     outcomes: () => rig.outcomes,
     advance: ({ ms }) => rig.clock.advance(ms),
