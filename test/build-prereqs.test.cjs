@@ -131,7 +131,8 @@ test('python: node-gyp picks another working 3.x: ready, shown as information (n
   let r = byId(await P.buildPrereqStatus(m1.deps))['build:python'];
   assert.equal(r.found, true); assert.equal(r.path, 'C:\\Py313\\python.exe');
   assert.equal(r.warn, undefined, 'node-gyp accepts any 3.6+, so the build works (Jim N2)');
-  assert.match(r.detail, /3\.13\.1 .*builds fine; the floor uses 3\.12/);
+  assert.equal(r.detail, '3.13.1 (via the py launcher)');
+  assert.match(C.buildToolCatalog('win32').find((t) => t.id === 'build:python').why, /release workflow builds with 3\.11/, 'the panel must not contradict release.yml');
   assert.equal(m1.calls.some((c) => c[0] === PY312), false, 'a working pick needs no 3.12 search');
   // node-gyp's own default list (3.11) counts as a pick
   r = byId(await P.buildPrereqStatus(machine({ pythons: { [PY311]: '3.11.9' } }).deps))['build:python'];

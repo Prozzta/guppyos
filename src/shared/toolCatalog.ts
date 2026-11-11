@@ -168,9 +168,9 @@ const BUILD_TOOLS: (ToolSpec & { platforms: Array<'win32' | 'posix'> })[] = [
   {
     id: 'build:python',
     bin: 'python',
-    label: `Python ${BUILD_PYTHON}`,
+    label: 'Python 3',
     kind: 'build',
-    why: 'node-gyp runs Python to generate the native build files.',
+    why: `node-gyp runs Python to generate the native build files. Any 3.x it finds works: the release workflow builds with 3.11, this floor with ${BUILD_PYTHON}.`,
     essential: false,
     install: {
       posix: `brew install python@${BUILD_PYTHON}   # macOS · or: sudo apt install python${BUILD_PYTHON}`,

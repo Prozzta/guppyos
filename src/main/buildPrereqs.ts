@@ -110,9 +110,8 @@ export async function probePython(deps: BuildProbeDeps): Promise<Row> {
   }
   const mm = BUILD_PYTHON.replace('.', '');
   const wanted = (v: string) => v.startsWith(`${BUILD_PYTHON}.`);
-  if (hit && wanted(hit.version)) return { found: true, path: hit.exe, detail: `${hit.version} (via ${hit.via})` };
-  // node-gyp accepts any 3.6+, so another 3.x builds fine: information, not a warning.
-  if (hit) return { found: true, path: hit.exe, detail: `${hit.version} (via ${hit.via}) · builds fine; the floor uses ${BUILD_PYTHON}` };
+  // node-gyp accepts any 3.6+ (release.yml builds with 3.11): another 3.x is ready, not a warning.
+  if (hit) return { found: true, path: hit.exe, detail: `${hit.version} (via ${hit.via})` };
 
   // node-gyp found no Python: is a 3.12 installed where node-gyp does not look?
   let p312: PyHit | null = null;
