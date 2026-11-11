@@ -20,6 +20,7 @@
  * Still ONE continuous fill per figure (§9: continuous = provider capacity); never segments.
  */
 import type { ProviderCapacityDetailView } from '@shared/capacityDetail';
+import { leadWindowKind } from '@shared/providerCapacity';
 import type { PresentedPool } from './capacityStrip';
 
 /** Pixel diameter of every pie-dot (the old state glyph was 14px text). */
@@ -113,10 +114,12 @@ export function leadDotOf(pool: PresentedPool): DotLook {
 /** The same rules for the provider-details header (one mark for a pool everywhere). */
 export function detailDotOf(view: ProviderCapacityDetailView): DotLook {
   if (view.state === 'LIMITED') return { kind: 'STOP' };
-  const kept = view.windows.find((w) => w.kind === 'FIVE_HOUR')?.lastKnownPercent;
+  // CAP-NO-5H-WINDOW: the lead row (Weekly when the reading has no 5h window), as the strip leads.
+  const lead = leadWindowKind(view.windows);
+  const kept = view.windows.find((w) => w.kind === lead)?.lastKnownPercent;
   if (typeof kept === 'number') return { kind: 'PIE', percent: kept };
   if (view.freshness.verdict === 'STALE') return { kind: 'DIMMED' };
   if (view.state === 'UNKNOWN') return { kind: 'SPOTTED' };
-  const five = view.windows.find((w) => w.kind === 'FIVE_HOUR')?.remainingPercent;
+  const five = view.windows.find((w) => w.kind === lead)?.remainingPercent;
   return typeof five === 'number' ? { kind: 'PIE', percent: five } : { kind: 'RING' };
 }

@@ -16,7 +16,7 @@
  * text names the family (`3P · 5h · 20% used`), and the row carries the strip's opaque
  * poolId so the line can open that one family's detail. The renderer never picks a pool.
  */
-import { applicabilityOf, type PoolCapacitySnapshot, type WindowKind } from '../shared/providerCapacity';
+import { applicabilityOf, leadWindowKind, type PoolCapacitySnapshot, type WindowKind } from '../shared/providerCapacity';
 import { agyFamilyOf, isAgentUsageDisplay, isBudgetExempt, validateAgentUsagePush, type AgentUsageDisplay, type AgentUsagePush, type AgentUsageView, type UsageWindowView } from '../shared/agentUsage';
 import { formatLocalTime } from './capacityStrip';
 
@@ -53,7 +53,8 @@ export function agentUsageView(
   family: '3p' | 'gemini' | null = null
 ): AgentUsageView {
   return {
-    fiveHour: windowView(pool, 'FIVE_HOUR', now, formatTime, family),
+    // CAP-NO-5H-WINDOW: a reading with no 5h window at all gives the 5h line the Weekly figure.
+    fiveHour: windowView(pool, pool ? leadWindowKind(pool.windows) : 'FIVE_HOUR', now, formatTime, family),
     weekly: windowView(pool, 'SEVEN_DAY', now, formatTime, family)
   };
 }
