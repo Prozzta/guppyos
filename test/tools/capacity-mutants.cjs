@@ -82,11 +82,12 @@ const PROVIDER_CAP = 'src/shared/providerCapacity.ts';
 const MUTANTS = [
   // ── CAP-NO-5H-WINDOW: a reading with no 5h window leads with Weekly ──────────────
   ['no5h the lead never moves to Weekly', PROVIDER_CAP,
-    "windows.some((w) => w.kind === 'SEVEN_DAY') ? 'SEVEN_DAY' : 'FIVE_HOUR';",
-    "windows.some((w) => w.kind === 'SEVEN_DAY') ? 'FIVE_HOUR' : 'FIVE_HOUR';"],
+    "return !has('FIVE_HOUR') && has('SEVEN_DAY') ? 'SEVEN_DAY' : 'FIVE_HOUR';",
+    "return !has('FIVE_HOUR') && has('SEVEN_DAY') ? 'FIVE_HOUR' : 'FIVE_HOUR';"],
   ['no5h Weekly leads with no weekly window behind it', PROVIDER_CAP,
-    "return !windows.some((w) => w.kind === 'FIVE_HOUR') && windows.some((w) => w.kind === 'SEVEN_DAY')",
-    "return !windows.some((w) => w.kind === 'FIVE_HOUR') && true"],
+    "return !has('FIVE_HOUR') && has('SEVEN_DAY') ?", "return !has('FIVE_HOUR') && true ?"],
+  ['no5h a stated-INAPPLICABLE 5h row keeps the 5h lead', PROVIDER_CAP,
+    "w.kind === kind && w.applicability !== 'INAPPLICABLE'", "w.kind === kind"],
   ['no5h the weekly row repeats under a Weekly lead', STRIP,
     "    if (lead === 'SEVEN_DAY') {\n      return",
     "    if (lead === 'NEVER') {\n      return"],

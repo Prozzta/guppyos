@@ -324,8 +324,13 @@ export function windowKindFromMinutes(minutes: number | null | undefined): Windo
  * It is decided from the windows of the reading itself, never from the absence of a reading: a
  * pool with no windows (or no reading at all) keeps leading with 5h and stays unknown.
  */
-export function leadWindowKind(windows: readonly { kind: WindowKind | string }[]): 'FIVE_HOUR' | 'SEVEN_DAY' {
-  return !windows.some((w) => w.kind === 'FIVE_HOUR') && windows.some((w) => w.kind === 'SEVEN_DAY') ? 'SEVEN_DAY' : 'FIVE_HOUR';
+export function leadWindowKind(windows: readonly { kind: WindowKind | string; applicability?: WindowApplicability }[]): 'FIVE_HOUR' | 'SEVEN_DAY' {
+  // A row stated INAPPLICABLE is not a window this plan has (Jim, 03dc6556 nit): it neither keeps
+  // the 5h lead nor gives Weekly one. An UNKNOWN-applicability 5h row still keeps 5h (and the pool
+  // UNKNOWN): we cannot say the plan has no 5h limit. The details' view windows have INAPPLICABLE
+  // rows filtered out already, so main and the details dot compute the same lead.
+  const has = (kind: string) => windows.some((w) => w.kind === kind && w.applicability !== 'INAPPLICABLE');
+  return !has('FIVE_HOUR') && has('SEVEN_DAY') ? 'SEVEN_DAY' : 'FIVE_HOUR';
 }
 
 /** User-safe label, main-owned. */

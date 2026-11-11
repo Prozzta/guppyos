@@ -88,9 +88,11 @@ export interface DisplayReadyMeter {
 }
 
 /**
- * The permanent lead row. Always present, labelled `5h` (C2.11 crit 1) - or `Weekly` when the
- * pool's reading has no five-hour window at all (CAP-NO-5H-WINDOW, Human 2026-11-11: a plan with
- * no 5h limit). Main decides the label; the renderer draws whatever row it is sent.
+ * The permanent lead row, always present. C2.11 crit 1 (as amended by CAP-NO-5H-WINDOW, Human
+ * 2026-11-11, ruled by Jim on 03dc6556): the lead row is labelled `5h`, OR `Weekly` exactly when
+ * the pool's reading has no FIVE_HOUR window and has a SEVEN_DAY one. Its text opens with its own
+ * label; a Weekly lead never sits beside a weekly row and never takes BLOCKED_SUBORDINATE
+ * (leadRowInvariants). Main decides the label; the renderer draws whatever row it is sent.
  */
 export interface FiveHourStrip {
   label: '5h' | 'Weekly';
