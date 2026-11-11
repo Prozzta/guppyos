@@ -30,6 +30,7 @@ import { CapacityLimitBanner } from '@/components/CapacityLimitBanner';
 import { UpdateBadge } from '@/components/UpdateBadge';
 import { useAppTheme, toggleAppTheme } from '@/design/theme';
 import { SettingsModal, type Section as SettingsSection } from '@/components/SettingsModal';
+import { BlobAppDialogs } from '@/blob/BlobAppDialogs';
 import { PixelPanel } from '@/components/PixelPanel';
 import { PixelButton } from '@/components/PixelButton';
 import { Icon } from '@/components/Icon';
@@ -544,6 +545,8 @@ export function App() {
           onConfigChange={setConfig}
         />
       )}
+
+      <BlobAppDialogs />
 
       {settingsOpen && settingsConfig && (
         <SettingsModal

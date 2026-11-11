@@ -2387,7 +2387,18 @@ const blobOverlay: BlobOverlayController = new BlobOverlayController({
   cursor: () => screen.getCursorScreenPoint(),
   hidden: DEV_HIDDEN,
   log: (row) => { try { hive.appendLog(row); } catch { /* best-effort */ } },
-  onApplied: (s) => { dictation.apply(s.enabled && s.dictation); }   // only from apply(), after module init
+  onApplied: (s) => { dictation.apply(s.enabled && s.dictation); },  // only from apply(), after module init
+  // BLOB-MESSAGE: a ring action that needs the app (record a message, later screenshot/meeting) opens
+  // its dialog in the Guppy window; the overlay never gets the app's API.
+  openInApp: (action) => {
+    const w = dictationWindow();
+    if (!w) return false;
+    if (w.isMinimized()) w.restore();
+    w.show();
+    w.focus();
+    w.webContents.send('blob:openInApp', action);
+    return true;
+  }
 });
 registerBlobIpc(ipcMain as unknown as Parameters<typeof registerBlobIpc>[0], blobOverlay, (evt) => ledgerUiSender(evt as unknown as Electron.IpcMainInvokeEvent));
 

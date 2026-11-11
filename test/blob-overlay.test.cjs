@@ -37,7 +37,7 @@ const {
   REFUSED_NOT_APP, REFUSED_NOT_OVERLAY, BLOB_SIZE, RING_SIZE
 } = loadTs('src/main/blobOverlay.ts');
 const { ringSlotPosition, RING_SLOTS } = loadTs('src/renderer/src/blob/ring.ts');
-const { sanitizeBlobPatch, isValidBlobHotkey, blobSettingsFrom, BLOB_DEFAULT_HOTKEY, BLOB_SLOTS } = loadTs('src/shared/blob.ts');
+const { sanitizeBlobPatch, isValidBlobHotkey, blobSettingsFrom, BLOB_DEFAULT_HOTKEY, BLOB_SLOTS, BLOB_COMING_SOON, BLOB_APP_ACTIONS, isBlobAppAction } = loadTs('src/shared/blob.ts');
 
 test.after(() => { require('./load-ts.cjs').closeConfigWatchers(); fs.rmSync(jail, { recursive: true, force: true }); });
 
@@ -102,7 +102,8 @@ function harness(opts = {}) {
     },
     cursor: () => cursor,
     hidden: opts.hidden === true,
-    log: (row) => logs.push(row)
+    log: (row) => logs.push(row),
+    ...(opts.openInApp ? { openInApp: opts.openInApp } : {})
   };
   const ctl = new BlobOverlayController(deps);
   return { ctl, created, shortcuts, logs, apps, setCursor: (c) => { cursor = c; }, win: () => created[created.length - 1] };
@@ -330,6 +331,21 @@ test('ring: opens around the blob centre and closes back; coming-soon / disabled
   assert.equal(hz.ctl.action('close').state, 'done');
   assert.deepEqual(hz.win().bounds, { x: 800, y: 600, width: BLOB_SIZE, height: BLOB_SIZE });
   assert.deepEqual([...BLOB_SLOTS].sort(), ['close', 'invisible', 'meeting', 'message', 'screen', 'screenshot']);
+  hz.ctl.dispose();
+});
+
+test('openInApp (BLOB-MESSAGE): a coming-soon app action never opens the app; app actions are the three ring slots', () => {
+  resetConfig();
+  writeConfig({ blobEnabled: true, blobPosition: { x: 800, y: 600 } });
+  const calls = [];
+  const hz = harness({ openInApp: (a) => { calls.push(a); return true; } });
+  hz.ctl.apply();
+  hz.ctl.setRing(true);
+  for (const s of BLOB_COMING_SOON) assert.equal(hz.ctl.action(s).state, 'coming-soon', s);
+  assert.deepEqual(calls, [], 'coming-soon wins over openInApp');
+  assert.deepEqual([...BLOB_APP_ACTIONS].sort(), ['meeting', 'message', 'screenshot']);
+  for (const s of BLOB_APP_ACTIONS) assert.equal(isBlobAppAction(s), true, s);
+  for (const s of ['close', 'invisible', 'screen', '', null, 'Message']) assert.equal(isBlobAppAction(s), false, String(s));
   hz.ctl.dispose();
 });
 

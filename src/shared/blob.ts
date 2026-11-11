@@ -17,6 +17,14 @@ export const BLOB_COMING_SOON: readonly BlobSlot[] = ['screenshot', 'meeting', '
 /** Shown greyed out and never actionable (screen sharing is out of scope). */
 export const BLOB_DISABLED: readonly BlobSlot[] = ['screen'];
 
+/**
+ * BLOB-MESSAGE: ring slots whose action opens a dialog in the Guppy window. The overlay itself
+ * still cannot deliver or read anything; main shows the app window and sends it 'blob:openInApp'.
+ */
+export const BLOB_APP_ACTIONS = ['message', 'screenshot', 'meeting'] as const;
+export type BlobAppAction = (typeof BLOB_APP_ACTIONS)[number];
+export function isBlobAppAction(s: unknown): s is BlobAppAction { return typeof s === 'string' && (BLOB_APP_ACTIONS as readonly string[]).includes(s); }
+
 /** Show/hide hotkey. Ctrl+Alt+Space stays free for phase-2 dictation. */
 export const BLOB_DEFAULT_HOTKEY = 'Control+Alt+G';
 
