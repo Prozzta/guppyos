@@ -160,6 +160,18 @@ export function monthOf(iso: string): string {
   return iso.slice(0, 7);
 }
 
+/**
+ * CLAIMS-M5-BACKFILL: the segment a record dated `wt` is appended to. Segments are read oldest first by
+ * file name, so the ledger order is the name order; a record whose wt month is earlier than the newest
+ * segment (a clock set back, or the backfill's --now T_s over a copy holding later records) must not
+ * land in an earlier-sorting file, or the re-read puts it before its prev and the chain reads broken.
+ * It goes into the newest segment instead; its wt is kept as stamped.
+ */
+export function segmentFor(wt: string, newest: string | null | undefined): string {
+  const own = `${monthOf(wt)}.jsonl`;
+  return newest && newest > own ? newest : own;
+}
+
 function isObj(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
@@ -857,10 +869,12 @@ export class ClaimStore {
    */
   private writeLine(agentId: string, s: AgentState, rec: LedgerRec, line: string, bytes: Buffer, registryAdded: (() => void) | null): Promise<AppendResult> {
     const dir = this.claimsDir(agentId);
-    const file = join(dir, `${monthOf(rec.wt)}.jsonl`);
     let h: AppendHandle | undefined;
+    let file = '';
     try {
       h = this.fds.get(agentId);
+      // The open handle is the newest segment (every append goes to the newest); without one, list them.
+      file = join(dir, segmentFor(rec.wt, h ? basename(h.file) : this.segments(agentId).map((f) => basename(f)).pop()));
       if (h && h.file !== file) { this.closeFd(agentId); h = undefined; }
       if (!h) {
         nodeFs.mkdirSync(dir, { recursive: true });
@@ -1260,7 +1274,7 @@ export class ClaimStore {
     };
     ev.mac = recordMac(key, ev as unknown as Record<string, unknown>);
     const evLine = canonicalJson(ev);
-    const month = `${monthOf(wt)}.jsonl`;
+    const month = segmentFor(wt, live.files.map((f) => f.name).pop());
     const files = new Map(live.files.map((f) => [f.name, f.text]));
     files.set(month, (files.get(month) ?? '') + evLine + '\n');
     const newDir = `${dir}.purge-new`;
