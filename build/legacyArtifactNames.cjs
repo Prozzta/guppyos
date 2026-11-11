@@ -14,10 +14,6 @@ const path = require('node:path');
 
 const PREFIX = 'Guppy-';
 const LEGACY_PREFIX = 'Munder-Difflin-';
-// electron-updater compares UpdateInfo.minimumSystemVersion with os.release(),
-// which is the Darwin kernel release on macOS (Ventura = Darwin 22.0.0), rather
-// than the marketing macOS version used by Info.plist.
-const MAC_UPDATE_MINIMUM_SYSTEM_VERSION = '22.0.0';
 /** The file shapes an old app builds a manual-download link from (after the prefix). */
 const LEGACY_SHAPES = [
   /^\d+\.\d+\.\d+-win-x64-setup\.exe$/,
@@ -33,22 +29,9 @@ function legacyName(file) {
   return LEGACY_SHAPES.some((r) => r.test(rest)) ? LEGACY_PREFIX + rest : null;
 }
 
-/** Ensure generated latest-mac.yml protects unsupported macOS versions. */
-function setMacUpdateMinimum(file) {
-  if (path.basename(file) !== 'latest-mac.yml') return false;
-  const before = fs.readFileSync(file, 'utf8');
-  const line = `minimumSystemVersion: ${MAC_UPDATE_MINIMUM_SYSTEM_VERSION}`;
-  const after = /^minimumSystemVersion:\s*.*$/m.test(before)
-    ? before.replace(/^minimumSystemVersion:\s*.*$/m, line)
-    : `${before.replace(/\s*$/, '')}\n${line}\n`;
-  if (after !== before) fs.writeFileSync(file, after);
-  return true;
-}
-
 async function afterAllArtifactBuild(result) {
   const extra = [];
   for (const file of (result && result.artifactPaths) || []) {
-    setMacUpdateMinimum(file);
     const name = legacyName(file);
     if (!name) continue;
     const dest = path.join(path.dirname(file), name);
@@ -66,5 +49,3 @@ module.exports = afterAllArtifactBuild;
 module.exports.default = afterAllArtifactBuild;
 module.exports.legacyName = legacyName;
 module.exports.LEGACY_SHAPES = LEGACY_SHAPES;
-module.exports.MAC_UPDATE_MINIMUM_SYSTEM_VERSION = MAC_UPDATE_MINIMUM_SYSTEM_VERSION;
-module.exports.setMacUpdateMinimum = setMacUpdateMinimum;
