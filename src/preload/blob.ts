@@ -5,7 +5,7 @@
  * read config or change its own settings.
  */
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
-import type { BlobOverlayApi, BlobOverlayStatus } from '../shared/blob';
+import type { BlobGazePoint, BlobOverlayApi, BlobOverlayStatus } from '../shared/blob';
 
 const blobApi: BlobOverlayApi = {
   status: () => ipcRenderer.invoke('blob:overlay:status'),
@@ -16,6 +16,12 @@ const blobApi: BlobOverlayApi = {
     const fn = (_e: IpcRendererEvent, s: BlobOverlayStatus): void => cb(s);
     ipcRenderer.on('blob:status', fn);
     return () => { ipcRenderer.removeListener('blob:status', fn); };
+  },
+  gaze: (on) => ipcRenderer.invoke('blob:overlay:gaze', on),
+  onGaze: (cb) => {
+    const fn = (_e: IpcRendererEvent, p: BlobGazePoint): void => cb(p);
+    ipcRenderer.on('blob:gaze', fn);
+    return () => { ipcRenderer.removeListener('blob:gaze', fn); };
   },
 };
 

@@ -34,7 +34,7 @@ const { readSource, codeOnly } = require('./read-source.cjs');
 const { readConfig, writeConfig, resetConfig: resetRealConfig } = loadTs('src/main/config.ts');
 const {
   BlobOverlayController, registerBlobIpc, isAppWindowSender, isOverlaySender,
-  REFUSED_NOT_APP, REFUSED_NOT_OVERLAY, BLOB_SIZE, RING_SIZE
+  REFUSED_NOT_APP, REFUSED_NOT_OVERLAY, BLOB_SIZE, RING_SIZE, BLOB_GAZE_HIDDEN_MS
 } = loadTs('src/main/blobOverlay.ts');
 const { ringSlotPosition, RING_SLOTS } = loadTs('src/renderer/src/blob/ring.ts');
 const { sanitizeBlobPatch, isValidBlobHotkey, blobSettingsFrom, BLOB_DEFAULT_HOTKEY, BLOB_SLOTS } = loadTs('src/shared/blob.ts');
@@ -102,7 +102,8 @@ function harness(opts = {}) {
     },
     cursor: () => cursor,
     hidden: opts.hidden === true,
-    log: (row) => logs.push(row)
+    log: (row) => logs.push(row),
+    ...(opts.deps ?? {})
   };
   const ctl = new BlobOverlayController(deps);
   return { ctl, created, shortcuts, logs, apps, setCursor: (c) => { cursor = c; }, win: () => created[created.length - 1] };
@@ -143,13 +144,13 @@ test('gate: blob:overlay:* only from the overlay top frame; blob:status/setConfi
   const isApp = (evt) => isAppWindowSender(evt, (wc) => known.has(wc), hz.ctl.overlayContents());
   const ipc = fakeIpc();
   registerBlobIpc(ipc, hz.ctl, isApp);
-  assert.deepEqual(ipc.channels().sort(), ['blob:overlay:action', 'blob:overlay:drag', 'blob:overlay:ring', 'blob:overlay:status', 'blob:setConfig', 'blob:status']);
+  assert.deepEqual(ipc.channels().sort(), ['blob:overlay:action', 'blob:overlay:drag', 'blob:overlay:gaze', 'blob:overlay:ring', 'blob:overlay:status', 'blob:setConfig', 'blob:status']);
 
   const fromOverlay = { sender: overlay, senderFrame: overlay.mainFrame };
   const fromOverlaySub = { sender: overlay, senderFrame: { id: 'iframe' } };
   const fromApp = { sender: app, senderFrame: app.mainFrame };
 
-  for (const ch of ['blob:overlay:status', 'blob:overlay:action', 'blob:overlay:ring', 'blob:overlay:drag']) {
+  for (const ch of ['blob:overlay:status', 'blob:overlay:action', 'blob:overlay:ring', 'blob:overlay:drag', 'blob:overlay:gaze']) {
     assert.deepEqual(ipc.call(ch, fromApp, 'invisible'), REFUSED_NOT_OVERLAY, `${ch} refuses the app window`);
     assert.deepEqual(ipc.call(ch, fromOverlaySub, 'invisible'), REFUSED_NOT_OVERLAY, `${ch} refuses an overlay subframe`);
   }
@@ -348,12 +349,12 @@ test('validation: hotkeys and patches', () => {
 
 // ─── (pins) ───────────────────────────────────────────────────────────────────
 
-test('pin: the overlay preload exposes only window.blob over blob:overlay:* (+ the blob:status push)', () => {
+test('pin: the overlay preload exposes only window.blob over blob:overlay:* (+ the blob:status and blob:gaze pushes)', () => {
   const src = codeOnly(readSource('src/preload/blob.ts'));
   const invoked = [...src.matchAll(/ipcRenderer\.(\w+)\(\s*'([^']+)'/g)].map((m) => `${m[1]} ${m[2]}`);
   assert.ok(invoked.length >= 5);
   for (const c of invoked) {
-    assert.ok(/^invoke blob:overlay:/.test(c) || /^(on|removeListener) blob:status$/.test(c), `unexpected channel use: ${c}`);
+    assert.ok(/^invoke blob:overlay:/.test(c) || /^(on|removeListener) blob:(status|gaze)$/.test(c), `unexpected channel use: ${c}`);
   }
   assert.doesNotMatch(src, /ipcRenderer\.(send|sendSync|postMessage)\b/);
   const exposed = [...src.matchAll(/exposeInMainWorld\(\s*'([^']+)'/g)].map((m) => m[1]);
@@ -470,4 +471,117 @@ test('S2 pin: the overlay window forwards render-process-gone to the controller'
   const src = codeOnly(readSource('src/main/index.ts'));
   const m = src.match(/function createBlobOverlayWindow\([\s\S]*?\n\}/);
   assert.match(m[0], /webContents\.on\('render-process-gone',[^\n]*onGone\(details\.reason\)/);
+});
+
+// ─── (BLOB-GAZE / BLOB-ORCH-MOOD) ───────────────────────────────────────────────
+
+/** Manual timers: fire() runs every pending callback once (each tick re-schedules itself). */
+function manualTimers() {
+  const live = new Map(); let n = 0;
+  return {
+    set: (fn, ms) => { const h = ++n; live.set(h, { fn, ms }); return h; },
+    clear: (h) => { live.delete(h); },
+    pending: () => [...live.values()].map((t) => t.ms),
+    fire: () => { const all = [...live.entries()]; live.clear(); for (const [, t] of all) t.fn(); },
+  };
+}
+const { BLOB_GAZE_MS, BLOB_MOODS, isBlobMood } = loadTs('src/shared/blob.ts');
+const gazeSent = (w) => w.webContents.sent.filter(([ch]) => ch === 'blob:gaze').map(([, p]) => p);
+
+test('gaze: off until the overlay asks; then the cursor, in overlay client coordinates, only when it changes', () => {
+  resetConfig(); writeConfig({ blobEnabled: true });
+  const t = manualTimers();
+  const hz = harness({ deps: { gazeTimers: t } });
+  hz.ctl.apply();
+  const w = hz.win();
+  assert.deepEqual(t.pending(), [], 'no timer before the overlay asks');
+  hz.ctl.setGaze(true);
+  assert.deepEqual(t.pending(), [BLOB_GAZE_MS], 'visible: sampled at BLOB_GAZE_MS');
+  hz.setCursor({ x: w.bounds.x + 10, y: w.bounds.y - 40 });
+  t.fire();
+  assert.deepEqual(gazeSent(w), [{ x: 10, y: -40 }]);
+  t.fire();
+  assert.equal(gazeSent(w).length, 1, 'an unchanged point is not resent');
+  hz.setCursor({ x: w.bounds.x + 11.6, y: w.bounds.y });
+  t.fire();
+  assert.deepEqual(gazeSent(w).at(-1), { x: 12, y: 0 }, 'rounded');
+  hz.ctl.setGaze(false);
+  assert.deepEqual(t.pending(), [], 'off: the timer is gone');
+  hz.ctl.setGaze('yes');
+  assert.deepEqual(t.pending(), [], 'only a real true turns it on');
+});
+
+test('gaze: the focused field wins over the cursor; a bad focus point falls back to the cursor', () => {
+  resetConfig(); writeConfig({ blobEnabled: true });
+  const t = manualTimers();
+  let focus = null;
+  const hz = harness({ deps: { gazeTimers: t, focusPoint: () => focus } });
+  hz.ctl.apply();
+  const w = hz.win();
+  hz.ctl.setGaze(true);
+  hz.setCursor({ x: w.bounds.x + 5, y: w.bounds.y + 5 });
+  focus = { x: w.bounds.x - 300, y: w.bounds.y + 200 };
+  t.fire();
+  assert.deepEqual(gazeSent(w).at(-1), { x: -300, y: 200 });
+  focus = { x: NaN, y: 1 };
+  t.fire();
+  assert.deepEqual(gazeSent(w).at(-1), { x: 5, y: 5 });
+  hz.ctl.setGaze(false);
+});
+
+test('gaze: hidden overlay only checks slowly and sends nothing; destroy stops the feed', () => {
+  resetConfig(); writeConfig({ blobEnabled: true });
+  const t = manualTimers();
+  const hz = harness({ deps: { gazeTimers: t } });
+  hz.ctl.apply();
+  const w = hz.win();
+  w.visible = false;   // not shown yet (ready-to-show) or hidden by the hotkey
+  hz.ctl.setGaze(true);
+  assert.deepEqual(t.pending(), [BLOB_GAZE_HIDDEN_MS]);
+  t.fire();
+  assert.deepEqual(gazeSent(w), [], 'nothing sent while hidden');
+  assert.deepEqual(t.pending(), [BLOB_GAZE_HIDDEN_MS], 'still checking');
+  hz.ctl.toggleVisible();
+  assert.deepEqual(t.pending(), [BLOB_GAZE_MS], 'shown: re-paced');
+  t.fire();
+  assert.equal(gazeSent(w).length, 1);
+  writeConfig({ blobEnabled: false });
+  hz.ctl.apply();
+  assert.deepEqual(t.pending(), [], 'overlay gone: no timer left');
+});
+
+test('mood: idle by default, setMood validates and pushes on change only', () => {
+  resetConfig(); writeConfig({ blobEnabled: true });
+  const hz = harness();
+  hz.ctl.apply();
+  const w = hz.win();
+  assert.equal(hz.ctl.status().mood, 'idle');
+  assert.deepEqual([...BLOB_MOODS], ['idle', 'working', 'sleepy', 'waiting', 'sick', 'happy', 'sad']);
+  assert.equal(isBlobMood('working'), true); assert.equal(isBlobMood('angry'), false); assert.equal(isBlobMood(1), false);
+  const pushes = () => w.webContents.sent.filter(([ch]) => ch === 'blob:status').length;
+  const before = pushes();
+  assert.equal(hz.ctl.setMood('angry'), false);
+  assert.equal(pushes(), before, 'refused: no push');
+  assert.equal(hz.ctl.setMood('working'), true);
+  assert.equal(pushes(), before + 1);
+  assert.equal(w.webContents.sent.at(-1)[1].mood, 'working');
+  assert.equal(hz.ctl.setMood('working'), true);
+  assert.equal(pushes(), before + 1, 'same mood: no push');
+  assert.equal(hz.ctl.status().mood, 'working');
+});
+
+test('BLOB-GAZE pins: gaze.css, eye travel, reduced motion, face priority and the mood map', () => {
+  const read = (f) => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
+  const app = codeOnly(read('src/renderer/src/blob/BlobApp.tsx'));
+  assert.match(read('src/renderer/src/blob/main.tsx'), /import 'blobatar\/gaze\.css'/);
+  assert.match(read('src/renderer/src/blob/blob.css'), /--mo-track-travel:\s*[1-9]/, 'travel is registered at 0px: it must be set');
+  assert.match(app, /'\(prefers-reduced-motion: reduce\)'/);
+  assert.match(app, /api\.gaze\(!mq\.matches\)/, 'the feed is off under reduced motion');
+  assert.match(app, /off\(\); void api\.gaze\(false\)/, 'unmount turns the feed off');
+  assert.match(app, /faceExpression\(toast \? expr : null, dictExpr, status\?\.mood\)/);
+  const map = /MOOD_EXPR[^=]*=\s*\{([^}]*)\}/.exec(app)[1].split(',').map((e) => e.trim()).filter(Boolean)
+    .map((e) => e.includes(':') ? e.split(':').map((x) => x.trim()) : [e, e]);
+  assert.deepEqual(Object.fromEntries(map), { idle: 'idle', working: 'thinking', sleepy: 'sleepy', waiting: 'unsure', sick: 'sick', happy: 'happy', sad: 'sad' });
+  const fe = /export function faceExpression\([^)]*\)[^{]*\{([\s\S]*?)\n\}/.exec(app)[1];
+  assert.ok(fe.indexOf('toastExpr') < fe.indexOf('dictExpr') && fe.indexOf('dictExpr') < fe.indexOf('MOOD_EXPR'), 'toast, then dictation, then mood');
 });

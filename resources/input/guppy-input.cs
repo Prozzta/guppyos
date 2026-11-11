@@ -1,4 +1,4 @@
-// Windows-only dictation companion. JSON-lines stdin/stdout: hook/unhook/type/echo/selftest/cliptest/focustest/ping/quit.
+// Windows-only dictation companion. JSON-lines stdin/stdout: hook/unhook/type/echo/selftest/cliptest/focustest/focuspoint/ping/quit.
 //
 // Threads:
 // - main: owns the message queue and the WH_KEYBOARD_LL hook (installed/removed only via queued WM_WORK commands);
@@ -44,6 +44,15 @@ class GuppyInput
     [DllImport("user32.dll")] static extern short GetAsyncKeyState(int vk);
     [DllImport("user32.dll")] static extern uint GetClipboardSequenceNumber();
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    // BLOB-GAZE: where the user is typing, so the Blob can look there while dictating.
+    [StructLayout(LayoutKind.Sequential)] struct RECT { public int left, top, right, bottom; }
+    [StructLayout(LayoutKind.Sequential)] struct POINT { public int x, y; }
+    [StructLayout(LayoutKind.Sequential)] struct GUITHREADINFO { public int cbSize; public int flags; public IntPtr hwndActive, hwndFocus, hwndCapture, hwndMenuOwner, hwndMoveSize, hwndCaret; public RECT rcCaret; }
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd, IntPtr pid);
+    [DllImport("user32.dll")] static extern bool GetGUIThreadInfo(uint thread, ref GUITHREADINFO info);
+    [DllImport("user32.dll")] static extern bool ClientToScreen(IntPtr hwnd, ref POINT p);
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr hwnd, out RECT r);
+    [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr ctx);
     [DllImport("kernel32.dll")] static extern IntPtr GetModuleHandle(string name);
     [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
 
@@ -60,6 +69,25 @@ class GuppyInput
     static string Esc(string s) { var r = new StringBuilder(); foreach (char c in s) { if (c == '\\') r.Append("\\\\"); else if (c == '\"') r.Append("\\\""); else if (c == '\r') r.Append("\\r"); else if (c == '\n') r.Append("\\n"); else if (c == '\b') r.Append("\\b"); else if (c == '\f') r.Append("\\f"); else if (c < 0x20) r.Append("\\u00").Append(((int)c).ToString("X2")); else r.Append(c); } return r.ToString(); }
     static void Error(string op, string e) { Reply("{\"ok\":false,\"op\":\"" + Esc(op ?? "") + "\",\"error\":\"" + Esc(e) + "\"}"); }
     static long Foreground() { return GetForegroundWindow().ToInt64(); }
+    /** BLOB-GAZE: the focus point at chord-down, in PHYSICAL screen pixels (per-monitor aware for this call only; the parent
+     *  converts to DIPs). The caret when the app has a Win32 caret, else the focused control's centre, else the window's.
+     *  Returns the JSON fields to append (",\"fx\":..,\"fy\":..,\"fk\":\"caret|field|window\"") or "" when unknown. Cheap, safe in the hook callback. */
+    static string FocusPoint(IntPtr fg) {
+        if (fg == IntPtr.Zero) return "";
+        IntPtr prev = IntPtr.Zero; bool scoped = false;
+        try { prev = SetThreadDpiAwarenessContext(new IntPtr(-4)); scoped = prev != IntPtr.Zero; } catch (EntryPointNotFoundException) { /* before Windows 10 1607 */ }
+        try {
+            var gi = new GUITHREADINFO(); gi.cbSize = Marshal.SizeOf(typeof(GUITHREADINFO));
+            if (GetGUIThreadInfo(GetWindowThreadProcessId(fg, IntPtr.Zero), ref gi)) {
+                if (gi.hwndCaret != IntPtr.Zero) { var p = new POINT { x = (gi.rcCaret.left + gi.rcCaret.right) / 2, y = (gi.rcCaret.top + gi.rcCaret.bottom) / 2 }; if (ClientToScreen(gi.hwndCaret, ref p)) return Pt(p.x, p.y, "caret"); }
+                RECT f; if (gi.hwndFocus != IntPtr.Zero && GetWindowRect(gi.hwndFocus, out f)) return Pt((f.left + f.right) / 2, (f.top + f.bottom) / 2, "field");
+            }
+            RECT w; if (GetWindowRect(fg, out w)) return Pt((w.left + w.right) / 2, (w.top + w.bottom) / 2, "window");
+            return "";
+        } catch { return ""; }
+        finally { if (scoped) { try { SetThreadDpiAwarenessContext(prev); } catch { } } }
+    }
+    static string Pt(int x, int y, string kind) { return ",\"fx\":" + x + ",\"fy\":" + y + ",\"fk\":\"" + kind + "\""; }
     static long ParseHwnd(string s) { long v; return s != null && long.TryParse(s, out v) && v > 0 ? v : 0; }
     /** F1: text may go only to the window that was in front at chord-down. null = allowed. */
     static string FocusRefusal(long want, long now) { if (want == 0) return "no target window"; if (now != want) return "focus changed"; return null; }
@@ -86,7 +114,7 @@ class GuppyInput
     static bool Transition(int vk, bool down, bool up) {
         if (IsCtrl(vk)) ctrl = down ? true : up ? false : ctrl; if (IsAlt(vk)) alt = down ? true : up ? false : alt; if (IsShift(vk)) shift = down ? true : up ? false : shift; if (vk == VK_LWIN || vk == VK_RWIN) win = down ? true : up ? false : win;
         bool swallow = false;
-        if (enabled && vk == key && down && ModifiersMatch() && !active) { active = true; swallowing = true; swallow = true; Reply("{\"ev\":\"down\",\"hwnd\":\"" + Foreground() + "\"}"); }
+        if (enabled && vk == key && down && ModifiersMatch() && !active) { active = true; swallowing = true; swallow = true; IntPtr fg = GetForegroundWindow(); Reply("{\"ev\":\"down\",\"hwnd\":\"" + fg.ToInt64() + "\"" + FocusPoint(fg) + "}"); }
         else if (enabled && vk == key && down && swallowing) swallow = true;
         if (enabled && active && ((vk == key && up) || !ModifiersMatch())) { active = false; Reply("{\"ev\":\"up\"}"); }
         if (vk == key && up && swallowing) { swallow = true; swallowing = false; }
@@ -182,7 +210,7 @@ class GuppyInput
                 }
             }
             else if (op == "echo") { string text = StringValue(line, "text"); if (text == null) Error("echo", "missing text"); else Reply("{\"ok\":true,\"op\":\"echo\",\"text\":\"" + Esc(text) + "\"}"); }
-            else if (op == "selftest") Selftest(); else if (op == "cliptest") ClipTest(); else if (op == "focustest") FocusTest(line); else if (op == "ping") Reply("{\"ok\":true,\"op\":\"ping\"}");
+            else if (op == "selftest") Selftest(); else if (op == "cliptest") ClipTest(); else if (op == "focustest") FocusTest(line); else if (op == "focuspoint") { IntPtr fg = GetForegroundWindow(); Reply("{\"ok\":true,\"op\":\"focuspoint\",\"hwnd\":\"" + fg.ToInt64() + "\"" + FocusPoint(fg) + "}"); } else if (op == "ping") Reply("{\"ok\":true,\"op\":\"ping\"}");
             else if (op == "quit") { enabled = false; swallowing = false; Reply("{\"ok\":true,\"op\":\"quit\"}"); PostThreadMessage(mainThread, WM_QUIT, UIntPtr.Zero, IntPtr.Zero); return; }
             else Error(op ?? "", "unknown op");
         }

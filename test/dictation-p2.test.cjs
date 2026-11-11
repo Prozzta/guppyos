@@ -428,3 +428,18 @@ test('nit: the length cap never splits a surrogate pair; C1 controls become spac
   for (const code of [0x80, 0x85, 0x90, 0x9b, 0x9f]) assert.equal(SD.normalizeTranscript(`x${String.fromCharCode(code)}y`), 'x y', `U+${code.toString(16)}`);
   assert.equal(SD.normalizeTranscript('caf' + String.fromCharCode(0xe9)), 'caf' + String.fromCharCode(0xe9), 'Latin-1 letters are kept');
 });
+
+test('BLOB-GAZE: focusPoint() is the chord-down focus during a session and null when idle', async () => {
+  const r = rig({ stt: { ok: true, text: 'hi' } });
+  r.ctl.apply(true); await flush();
+  assert.equal(r.ctl.focusPoint(), null, 'idle: none');
+  r.down({ hwnd: '4242', focus: { x: 120, y: 340, kind: 'caret' } });
+  assert.deepEqual(r.ctl.focusPoint(), { x: 120, y: 340, kind: 'caret' });
+  r.advance(1500); r.up();
+  const session = r.calls.capture[0][1];
+  r.audio(session); await flush(); await flush();
+  assert.equal(r.ctl.current().state, 'ready');
+  assert.equal(r.ctl.focusPoint(), null, 'back to idle: the eyes return to the cursor');
+  r.down({ hwnd: '4242' });
+  assert.equal(r.ctl.focusPoint(), null, 'a down without a point gives none (no stale point)');
+});

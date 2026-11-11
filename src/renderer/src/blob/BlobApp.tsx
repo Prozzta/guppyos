@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactElement } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactElement } from 'react';
 import { Blobatar } from 'blobatar/react';
-import { happy, idle, shy, surprised, thinking, unsure, type Expression } from 'blobatar/expression';
+import { happy, idle, sad, shy, sick, sleepy, surprised, thinking, unsure, type Expression } from 'blobatar/expression';
+import { gaze, type Gaze } from 'blobatar/gaze';
 // shy: the brief reaction when the blob hides itself from shares; thinking when it shows again.
-import { BLOB_COMING_SOON, BLOB_DISABLED, type BlobOverlayApi, type BlobOverlayStatus, type BlobSlot } from '../../../shared/blob';
+import { BLOB_COMING_SOON, BLOB_DISABLED, type BlobGazePoint, type BlobMood, type BlobOverlayApi, type BlobOverlayStatus, type BlobSlot } from '../../../shared/blob';
 import { RING_SLOTS, ringSlotPosition } from './ring';
 
 declare global { interface Window { blob?: BlobOverlayApi } }
@@ -55,6 +56,26 @@ const DICT_EXPR: Record<string, Expression | undefined> = {
   unavailable: unsure,
 };
 
+/** BLOB-ORCH-MOOD: the orchestrator's mood on the face when nothing else is showing. */
+export const MOOD_EXPR: Record<BlobMood, Expression> = {
+  idle,
+  working: thinking,
+  sleepy,
+  waiting: unsure,
+  sick,
+  happy,
+  sad,
+};
+
+/** The face's expression: a ring reaction (toast) first, then dictation, then the orchestrator's mood. */
+export function faceExpression(toastExpr: Expression | null, dictExpr: Expression | undefined, mood: BlobMood | undefined): Expression {
+  if (toastExpr) return toastExpr;
+  if (dictExpr) return dictExpr;
+  return (mood && MOOD_EXPR[mood]) || idle;
+}
+
+const REDUCED_MOTION = '(prefers-reduced-motion: reduce)';
+
 export function BlobApp(): ReactElement {
   const api = window.blob;
   const [status, setStatus] = useState<BlobOverlayStatus | null>(null);
@@ -63,12 +84,58 @@ export function BlobApp(): ReactElement {
   const [expr, setExpr] = useState<Expression>(idle);
   const press = useRef<{ x: number; y: number; dragging: boolean; raf: number } | null>(null);
   const toastTimer = useRef<number | undefined>(undefined);
+  // BLOB-GAZE: one driver on the face's <svg>; main feeds the screen cursor (or, while dictating, the
+  // focused field) as overlay-client points, since a click-through overlay never sees pointer moves.
+  const faceRef = useRef<HTMLButtonElement | null>(null);
+  const gazeRef = useRef<{ svg: SVGSVGElement; g: Gaze } | null>(null);
+  const lastPoint = useRef<BlobGazePoint | null>(null);
+  const hovered = useRef<Element | null>(null);
 
   useEffect(() => {
     if (!api) return;
     void api.status().then((r) => { if (r.ok) setStatus(r.status); });
     return api.onStatus((s) => { setStatus(s); if (typeof s.ringOpen === 'boolean') setRingOpen(s.ringOpen); });
   }, [api]);
+
+  // Re-attach whenever the face's <svg> is a new element (the component may replace it).
+  useLayoutEffect(() => {
+    const svg = faceRef.current?.querySelector('svg') ?? null;
+    if (gazeRef.current?.svg === svg) return;
+    gazeRef.current?.g.stop();
+    gazeRef.current = null;
+    if (!svg) return;
+    const g = gaze(svg, { target: hovered.current ?? lastPoint.current });
+    gazeRef.current = { svg, g };
+  });
+  useEffect(() => () => { gazeRef.current?.g.stop(); gazeRef.current = null; }, []);
+
+  // The feed runs only while motion is allowed; the driver itself also stands down under reduced motion.
+  useEffect(() => {
+    if (!api) return;
+    const mq = window.matchMedia(REDUCED_MOTION);
+    const sync = (): void => { void api.gaze(!mq.matches); if (mq.matches) { lastPoint.current = null; gazeRef.current?.g.lookAt(null); } };
+    sync();
+    mq.addEventListener('change', sync);
+    const off = api.onGaze((p) => {
+      if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) return;
+      lastPoint.current = { x: p.x, y: p.y };
+      if (!hovered.current) gazeRef.current?.g.lookAt(lastPoint.current);
+    });
+    return () => { mq.removeEventListener('change', sync); off(); void api.gaze(false); };
+  }, [api]);
+
+  // The face moves inside the window when the ring opens or closes: re-measure it, and a slot that
+  // was hovered when the ring closed no longer exists.
+  useLayoutEffect(() => {
+    if (!ringOpen && hovered.current) { hovered.current = null; gazeRef.current?.g.lookAt(lastPoint.current); }
+    gazeRef.current?.g.remeasure();
+  }, [ringOpen]);
+
+  // A hovered ring button holds the eyes; leaving it hands them back to the feed.
+  const lookAtSlot = (el: Element | null): void => {
+    hovered.current = el;
+    gazeRef.current?.g.lookAt(el ?? lastPoint.current);
+  };
 
   const invisible = status?.invisible === true;
   // GUPPY-DICTATION-P2: the face and halo follow dictation; a ring reaction (toast) still wins.
@@ -154,6 +221,8 @@ export function BlobApp(): ReactElement {
                 aria-pressed={slot === 'invisible' ? active : undefined}
                 title={soon ? `${LABEL[slot]} (coming soon)` : LABEL[slot]}
                 onClick={() => { if (!disabled) void onSlot(slot); }}
+                onPointerEnter={(e) => lookAtSlot(e.currentTarget)}
+                onPointerLeave={() => lookAtSlot(null)}
               >
                 <Icon slot={slot} invisible={invisible} />
                 {toast?.slot === slot && <span className="blob-toast" role="status">{toast.text}</span>}
@@ -165,6 +234,7 @@ export function BlobApp(): ReactElement {
       <button
         type="button"
         className="blob-face"
+        ref={faceRef}
         aria-label={ringOpen ? 'Close Blob actions' : 'Open Blob actions'}
         title={dictTitle}
         aria-expanded={ringOpen}
@@ -179,7 +249,7 @@ export function BlobApp(): ReactElement {
           if (p?.dragging && api) void api.drag('end');
         }}
       >
-        <Blobatar name={BLOB_NAME} palette={BLOB_PALETTE} background={false} traits={BLOB_TRAITS} animate="always" expression={toast ? expr : dictExpr ?? expr} size={88} title={dictTitle} />
+        <Blobatar name={BLOB_NAME} palette={BLOB_PALETTE} background={false} traits={BLOB_TRAITS} animate="always" expression={faceExpression(toast ? expr : null, dictExpr, status?.mood)} size={88} title={dictTitle} />
       </button>
     </div>
   );
