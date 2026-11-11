@@ -35,6 +35,7 @@ fs.rmSync(agent, { recursive: true, force: true });
 setTimeout(() => {
   const cpu = process.cpuUsage(cpu0);
   const cpuMs = (cpu.user + cpu.system) / 1000;
+  fs.rmSync(agents, { recursive: true, force: true });
   console.log(JSON.stringify({ closed, cpuMs }));
   process.exit(closed && cpuMs < 250 ? 0 : 1);
 }, 500);

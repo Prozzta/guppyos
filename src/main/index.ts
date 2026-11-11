@@ -2735,8 +2735,8 @@ function removeWorkerScratch(workerId: string): void {
   const agentsRoot = join(root, 'agents');
   // Path-safety: the resolved dir must sit directly under agents/ with basename == id.
   if (resolve(dir) !== join(resolve(agentsRoot), basename(dir)) || basename(dir) !== workerId) return;
-  // Empty directory deletion may not emit an fs.watch event on Windows Node 22+.
-  // Close every main-owned watcher before removal, not after its callback.
+  // Electron 45 cannot recursively remove this parent while its child outbox is
+  // watched (ENOTEMPTY/EPERM), so close watchers before—not after—rmSync.
   hive.closeOutboxWatcher(join(dir, 'outbox'));
   readerWatchers.stop(workerId);
   try { rmSync(dir, { recursive: true, force: true }); }
