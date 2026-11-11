@@ -27,22 +27,23 @@ test('INPUT ORIGIN on a rendered terminal: regimes, exclusions, programmatic pas
   assert.equal(r.selfTest, 'pass', 'the startup self-test proves the reconstruction on this build');
   assert.equal(r.selfTestLeakedBytes, 0, 'NOT ONE BYTE from the self-test reached writePty');
 
-  // Dictation tools restore the clipboard immediately after Ctrl+Shift+V or a
-  // right-click.  A cancelled event followed by invoke('app:readClipboard') races
-  // that restore and pastes the old copy.  These gestures must reach Chromium's
-  // native paste route, which reads clipboardData inside the user gesture.
+  // Dictation tools restore the clipboard immediately after Ctrl+Shift+V. A
+  // cancelled event followed by invoke('app:readClipboard') races that restore
+  // and pastes the old copy, so this key must reach Chromium's native paste route.
   assert.equal(r.externalDictationPaste.shortcutAllowed, true,
     'Ctrl+Shift+V is not cancelled for an asynchronous clipboard IPC read');
   assert.equal(r.externalDictationPaste.shortcutReads, 0,
     'Ctrl+Shift+V does not read the restored clipboard through the bridge');
   assert.equal(r.externalDictationPaste.shortcutPasted, '',
     'Ctrl+Shift+V does not inject the stale previous clipboard text');
-  assert.equal(r.externalDictationPaste.rightClickAllowed, true,
-    'right-click without a selection leaves Chromium’s native Paste menu available');
-  assert.equal(r.externalDictationPaste.rightClickReads, 0,
-    'right-click does not schedule an asynchronous clipboard read');
-  assert.equal(r.externalDictationPaste.rightClickPasted, '',
-    'right-click does not inject the stale previous clipboard text');
+  assert.equal(r.externalDictationPaste.rightClickAllowed, false,
+    'right-click without a selection is handled by Guppy, not Electron’s absent default menu');
+  assert.equal(r.externalDictationPaste.rightClickReads, 1,
+    'right-click reads the current clipboard through the asynchronous bridge');
+  assert.equal(r.externalDictationPaste.rightClickPasted, 'previous-copy',
+    'right-click pastes the current clipboard text');
+  assert.equal(r.externalDictationPaste.rightClickOrigin, 'HUMAN',
+    'right-click’s programmatic xterm paste is explicitly human-originated');
   assert.equal(r.nativeCtrlVPasteAllowed, true, 'ordinary Ctrl+V remains native paste');
   assert.equal(r.nativeCtrlVPasteReads, 0, 'ordinary Ctrl+V still bypasses the bridge');
 

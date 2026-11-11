@@ -26,7 +26,7 @@ import {
   classifyPathToken, isPathToken, pathTokenMatcher, stripPathToken, type PathAction
 } from '@shared/terminalPaths';
 import {
-  attachInputOrigin, classifyOutbound, endInputWindowForOutput, resetInputWindow,
+  attachInputOrigin, classifyOutbound, endInputWindowForOutput, markHumanOrigin, resetInputWindow,
   runInputOriginSelfTest, type ProbeConsumer
 } from './inputOrigin';
 import type { InputOrigin } from '@shared/inputOrigin';
@@ -281,6 +281,17 @@ export function acquireTerminal(ptyId: string, theme?: ThemeMap, fontSize = 14):
     if (text) void window.cth.copyToClipboard(text);
     return true;
   };
+  /** Right-click paste is a deliberate asynchronous renderer request. Unlike a
+   * keyboard-driven dictation tool it is a human menu gesture, so it does not
+   * race an immediate clipboard restore. Mark the programmatic xterm emission. */
+  const pasteClipboard = (): void => {
+    if (entry.exited) return;
+    void window.cth.readClipboard().then((text) => {
+      if (!text || entry.exited) return;
+      markHumanOrigin(ptyId, 'paste-async');
+      term.paste(text);
+    });
+  };
   term.attachCustomKeyEventHandler((ev) => {
     if (ev.type !== 'keydown') return true;
     if (!(ev.ctrlKey || ev.metaKey)) return true;
@@ -302,13 +313,12 @@ export function acquireTerminal(ptyId: string, theme?: ThemeMap, fontSize = 14):
     return true;
   });
   host.addEventListener('contextmenu', (ev) => {
+    ev.preventDefault();
     if (copySelection()) {
-      ev.preventDefault();
       term.clearSelection();
+      return;
     }
-    // Without a selection, retain Chromium's native context menu. Its Paste
-    // command is a trusted native clipboard event, not a delayed IPC read, so an
-    // external dictation tool cannot race a restored clipboard value.
+    pasteClipboard();
   });
 
   // Answer the terminal-colour queries (OSC 10 foreground, OSC 11 background).

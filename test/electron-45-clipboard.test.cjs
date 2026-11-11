@@ -31,13 +31,13 @@ test('Electron 45 clipboard IPC uses the promise-only main-process API', () => {
   assert.doesNotMatch(main, /clipboard\.readImage\(|app:readClipboardSync|sendSync/);
 });
 
-test('sandboxed preload keeps the async bridge while terminal paste stays native', () => {
+test('sandboxed preload keeps the async bridge; shortcut stays native and right-click is explicit', () => {
   assert.match(preload, /readClipboard: \(\): Promise<string> =>\s*ipcRenderer\.invoke\('app:readClipboard'\)/);
   assert.doesNotMatch(preload, /readClipboardSync:|app:readClipboardSync/);
   assert.doesNotMatch(terminalPool, /readClipboardSync|paste-sync/);
-  assert.doesNotMatch(terminalPool, /window\.cth\.readClipboard|paste-async/);
   assert.match(terminalPool, /key === 'v' && ev\.shiftKey\)[\s\S]*?return true;/);
-  assert.match(terminalPool, /host\.addEventListener\('contextmenu',[\s\S]*?if \(copySelection\(\)\) \{[\s\S]*?ev\.preventDefault\(\)/);
+  assert.match(terminalPool, /host\.addEventListener\('contextmenu',[\s\S]*?ev\.preventDefault\(\)[\s\S]*?pasteClipboard\(\)/);
+  assert.match(terminalPool, /window\.cth\.readClipboard\(\)\.then\([\s\S]*?markHumanOrigin\(ptyId, 'paste-async'\)/);
 });
 
 test('Electron harness bridge fixtures expose no removed synchronous clipboard API', () => {

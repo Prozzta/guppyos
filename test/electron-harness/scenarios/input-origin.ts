@@ -40,8 +40,8 @@ function installBridgeStub(): void {
     redrawPty: () => { /* no pty */ }, resizePty: () => { /* no pty */ },
     copyToClipboard: () => { /* unused */ },
     // External dictation tools can restore the previous clipboard contents as soon
-    // as they have sent Ctrl+Shift+V/right-click.  This is deliberately that stale
-    // value: a terminal gesture must not start an asynchronous IPC clipboard read.
+    // as they have sent Ctrl+Shift+V. This is deliberately that stale value: the
+    // keyboard gesture must not start an asynchronous IPC clipboard read.
     readClipboard: () => { clipboardReads += 1; return Promise.resolve('previous-copy'); },
     statAbs: () => Promise.resolve(null), revealPath: () => Promise.resolve(),
     // The mirror, recorded rather than dropped, so the mode arm can read what main would.
@@ -75,13 +75,11 @@ window.__harnessRun = async () => {
     result.selfTestLeakedBytes = sent.length;
     sent.length = 0;
 
-    // ARM 0 - external-dictation paste is an atomic browser gesture, not an IPC
-    // round-trip.  Muesli/Wispr-style tools temporarily put dictated text on the
-    // clipboard, send one of these gestures, then immediately restore
-    // `previous-copy`.  The old Electron-45 migration cancelled each event and
-    // read the clipboard asynchronously, deterministically pasting previous-copy.
+    // ARM 0 - external-dictation Ctrl+Shift+V is an atomic browser gesture, not
+    // an IPC round-trip. Muesli/Wispr-style tools temporarily put dictated text on
+    // the clipboard, send the key, then immediately restore `previous-copy`.
     // Native Chromium paste reads ClipboardEvent.clipboardData in the gesture, so
-    // both must remain uncancelled and must schedule no bridge read here.
+    // this shortcut must remain uncancelled and must schedule no bridge read.
     const externalShortcut = new KeyboardEvent('keydown', {
       key: 'V', code: 'KeyV', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true
     });
@@ -96,7 +94,8 @@ window.__harnessRun = async () => {
     result.externalDictationPaste = {
       shortcutAllowed, shortcutReads, shortcutPasted,
       rightClickAllowed, rightClickReads: clipboardReads - shortcutReads,
-      rightClickPasted: sent.map((x) => x.data).join('')
+      rightClickPasted: sent.map((x) => x.data).join(''),
+      rightClickOrigin: lastOrigin()
     };
     sent.length = 0;
 
@@ -105,8 +104,9 @@ window.__harnessRun = async () => {
     const nativePaste = new KeyboardEvent('keydown', {
       key: 'V', code: 'KeyV', ctrlKey: true, bubbles: true, cancelable: true
     });
+    const readsBeforeNativeCtrlV = clipboardReads;
     result.nativeCtrlVPasteAllowed = ta.dispatchEvent(nativePaste);
-    result.nativeCtrlVPasteReads = clipboardReads;
+    result.nativeCtrlVPasteReads = clipboardReads - readsBeforeNativeCtrlV;
 
     // ARM 1 - keyboard, same tick. Kills: "no capture listener / listener after xterm's".
     key(ta, 'ArrowRight', 39);
