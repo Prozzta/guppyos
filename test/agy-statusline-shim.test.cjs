@@ -512,8 +512,10 @@ test('WIRING: startup prepares after the HookServer listens; every teardown rele
   // The handler body, bounded by its own closing line rather than a character window
   // (Blob + dictation disposals grew it past 600 chars).
   const wq = index.indexOf("app.on('will-quit', () => {");
-  const wqBody = wq > 0 ? index.slice(wq, index.indexOf('\n});\n', wq)) : '';
-  assert.ok(wqBody.includes('hive.stopAgyStatusline()'),
+  // EOL-agnostic: a checkout with core.autocrlf has CRLF, where '\n});\n' never matches.
+  const wqLen = wq > 0 ? index.slice(wq).search(/\r?\n\}\);\r?\n/) : -1;
+  assert.ok(wq > 0 && wqLen > 0, 'the no-arg will-quit handler and its closing line are found');
+  assert.ok(index.slice(wq, wq + wqLen).includes('hive.stopAgyStatusline()'),
     'and on will-quit, which an ordinary quit with no terminals reaches without teardownAndQuit');
 });
 
