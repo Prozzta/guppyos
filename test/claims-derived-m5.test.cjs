@@ -1290,3 +1290,28 @@ for (const shape of ['git', 'plain']) {
     assert.equal(x.logs.filter((row) => row.kind === 'claims-derived-failed').length, 0);
   });
 }
+
+// CLAIMS-M5-BACKFILL: an append whose clock month is earlier than the newest segment (a clock set back, or the
+// backfill's --now T_s over a copy holding later records) goes into the newest segment, so the name-ordered
+// re-read keeps the chain whole; before, it opened an earlier-sorting segment and the ledger read as broken.
+test('store: an append dated before the newest segment keeps the chain whole (no earlier-month segment)', async () => {
+  const root = path.join(JAIL, `hive-${++n}`);
+  fs.mkdirSync(path.join(root, 'agents'), { recursive: true });
+  const logs = [];
+  const keys = new SandboxKeyProvider();
+  let clock = '2026-11-11T00:00:00Z';
+  const store = new ClaimStore({ hiveRoot: root, keys, keyRecord: new FileLedgerKeyRecord(path.join(`${root}-ud`, KEY_RECORD_FILE)), log: (row) => logs.push(row), now: () => new Date(clock) });
+  STORES.push(store);
+  assert.equal((await store.appendRecord(D, fact('later', { key: 'card.later.status' }), 'derived-internal')).ok, true);
+  clock = '2026-10-04T00:00:00Z';
+  assert.equal((await store.appendRecord(D, fact('earlier', { key: 'card.earlier.status' }), 'derived-internal')).ok, true);
+  store.close();
+  const again = new ClaimStore({ hiveRoot: root, keys, keyRecord: new FileLedgerKeyRecord(path.join(`${root}-ud`, KEY_RECORD_FILE)), log: (row) => logs.push(row) });
+  STORES.push(again);
+  const r = again.readLedger(D);
+  assert.equal(r.chain, 'ok');
+  assert.deepEqual(r.records.filter((x) => x.t === 'claim').map((x) => [x.text, x.wt]), [['later', '2026-11-11T00:00:00.000Z'], ['earlier', '2026-10-04T00:00:00.000Z']]);
+  assert.deepEqual(again.segments(D).map((f) => path.basename(f)), ['2026-11.jsonl']);
+  assert.deepEqual(logs.filter((x) => x.kind === 'claims-chain-broken'), []);
+  assert.equal((await again.appendRecord(D, fact('after', { key: 'card.after.status' }), 'derived-internal')).ok, true);
+});
