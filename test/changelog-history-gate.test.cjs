@@ -37,7 +37,7 @@ const GOOD = BASE.replace('## [1.1.98]', NEW + '## [1.1.98]');
 test('a new section above the released ones passes; [Unreleased] and the preamble are not released', () => {
   assert.deepEqual(releasedSections(BASE).map((s) => s.version), ['1.1.98', '1.1.97']);
   assert.deepEqual(releasedSections(BASE)[0].lines, ['**Mail that arrives.**', 'Rollback: 1.1.97 (reinstall).', '### Fixed', '- Wakes typed but never sent.']);
-  assert.deepEqual(checkHistory(BASE, GOOD), { ok: true, problems: [], added: ['1.1.99'] });
+  assert.deepEqual(checkHistory(BASE, GOOD), { ok: true, problems: [], added: ['1.1.99'], linkUrlChanges: [] });
   assert.equal(checkHistory(BASE, nl(GOOD)).ok, true, 'line endings do not matter');
   assert.equal(checkHistory(BASE, GOOD.replace('- next', '- next\r\n- later')).ok, true, '[Unreleased] may change');
   assert.equal(checkHistory(BASE, GOOD.replace('- Wakes typed but never sent.', '- Wakes typed but never sent.\r\n- One more fix.')).ok, true, 'a line may be added');
@@ -64,6 +64,42 @@ test('an edited heading, a removed line, a reorder, a new section below a releas
   assert.match(one(GOOD.replace(/## \[1\.1\.97\][^]*$/, '')), /released heading dropped: "## \[1\.1\.97\] — 2026-10-19"/, 'a dropped older section');
 });
 
+// CHANGELOG-GATE-LINKREF (REL-1.1.104): docs 6186d41e repointed "[0.1.0]: <url>" from the moved
+// upstream (chaitanyagiri) to HarnessMD, and the gate read that as a lost line. Only a whole-line
+// link-reference definition may change, only its URL, matched by label in the same section.
+const OLD_URL = 'https://github.com/chaitanyagiri/munder-difflin/releases/tag/v0.1.0';
+const NEW_URL = 'https://github.com/HarnessMD/munder-difflin/releases/tag/v0.1.0';
+const REF_BASE = GOOD.replace('- Messages typed where the agent can take them.', `- Messages typed where the agent can take them.\r\n\r\n[0.1.0]: ${OLD_URL}`);
+
+test('link reference: a changed URL under the same label passes and is reported', () => {
+  assert.deepEqual(checkHistory(REF_BASE, REF_BASE), { ok: true, problems: [], added: [], linkUrlChanges: [] }, 'unchanged: nothing reported');
+  const r = checkHistory(REF_BASE, REF_BASE.replace(OLD_URL, NEW_URL));
+  assert.equal(r.ok, true, r.problems.join(' | '));
+  assert.deepEqual(r.linkUrlChanges, [{ version: '1.1.97', label: '0.1.0', from: OLD_URL, to: NEW_URL }]);
+});
+
+test('link reference: a deleted ref, a renamed label, a ref moved to another section, or a prose edit each FAIL', () => {
+  const one = (text) => { const r = checkHistory(REF_BASE, text); assert.equal(r.ok, false, text); assert.deepEqual(r.linkUrlChanges, []); return r.problems.join(' | '); };
+  assert.match(one(REF_BASE.replace(`\r\n[0.1.0]: ${OLD_URL}`, '')), /\[1\.1\.97\] lost 1 line\(s\), first: "\[0\.1\.0\]: /, 'deleted');
+  assert.match(one(REF_BASE.replace(`[0.1.0]: ${OLD_URL}`, `[0.1.1]: ${NEW_URL}`)), /\[1\.1\.97\] lost 1 line/, 'label renamed');
+  assert.match(one(REF_BASE.replace(`[0.1.0]: ${OLD_URL}`, `[0.1.0]: ${NEW_URL} "title"`)), /\[1\.1\.97\] lost 1 line/, 'not a whole-line ref any more');
+  assert.match(one(REF_BASE.replace(`\r\n[0.1.0]: ${OLD_URL}`, '').replace('- Wakes typed but never sent.', `- Wakes typed but never sent.\r\n[0.1.0]: ${NEW_URL}`)), /\[1\.1\.97\] lost 1 line/, 'moved to another section');
+  assert.match(one(REF_BASE.replace('- Wakes typed but never sent.', '- Wakes typed, never sent.')), /\[1\.1\.98\] lost 1 line\(s\), first: "- Wakes typed but never sent\."/, 'prose edit');
+  // A prose line that links inline is prose, not a reference definition.
+  const prose = REF_BASE.replace('- Messages typed where the agent can take them.', `- See [0.1.0]: ${OLD_URL}`);
+  assert.match(checkHistory(prose, prose.replace(OLD_URL, NEW_URL)).problems.join(), /\[1\.1\.97\] lost 1 line/, 'inline prose URL edit');
+});
+
+test('link reference: the CLI prints each allowed URL change; the real v1.1.103 -> int-1.1.104 CHANGELOG passes with exactly the [0.1.0] change', () => {
+  const tag = spawnSync('git', ['-C', ROOT, 'rev-parse', '-q', '--verify', 'v1.1.103^{commit}'], { encoding: 'utf8' });
+  if (tag.status !== 0) return; // a clone without the tag cannot run the real-history half
+  const r = spawnSync(process.execPath, [SCRIPT, path.join(ROOT, 'CHANGELOG.md'), '--base', 'v1.1.103'], { cwd: ROOT, encoding: 'utf8', windowsHide: true });
+  assert.equal(r.status, 0, r.stderr);
+  const lines = r.stdout.split(/\r?\n/).filter((l) => /link URL changed/.test(l));
+  assert.deepEqual(lines, [`  link URL changed in [0.1.0]: [0.1.0] ${OLD_URL} -> ${NEW_URL}`]);
+  assert.match(r.stdout, /CHANGELOG HISTORY OK \(base v1\.1\.103;/);
+});
+
 test('a base with no released section is a failure, never a pass', () => {
   const r = checkHistory('# Changelog\n\n## [Unreleased]\n', GOOD);
   assert.equal(r.ok, false);
@@ -75,7 +111,7 @@ test('this tree\'s CHANGELOG: the newest section on top of the rest passes, and 
   const heads = text.split('\n').filter((l) => /^## \[\d+\.\d+\.\d+\]/.test(l));
   assert.ok(heads.length >= 2, 'at least two released sections');
   const base = text.slice(0, text.indexOf(heads[0])) + text.slice(text.indexOf(heads[1]));
-  assert.deepEqual(checkHistory(base, text), { ok: true, problems: [], added: [heads[0].match(/\[(.+?)\]/)[1]] });
+  assert.deepEqual(checkHistory(base, text), { ok: true, problems: [], added: [heads[0].match(/\[(.+?)\]/)[1]], linkUrlChanges: [] });
   const defect = text.replace(heads[1] + '\n', '');
   assert.deepEqual(checkHistory(base, defect).problems, [`released heading dropped: "${heads[1]}"`]);
 });
@@ -88,7 +124,7 @@ test('the real 1.1.99 commits: 2cd1f281 FAILS and 96c15ba8 passes against the 1.
   () => {
     const [base, bad, good] = REAL.map(show);
     assert.deepEqual(checkHistory(base, bad).problems, ['released heading dropped: "## [1.1.98] — 2026-10-22"']);
-    assert.deepEqual(checkHistory(base, good), { ok: true, problems: [], added: ['1.1.99'] });
+    assert.deepEqual(checkHistory(base, good), { ok: true, problems: [], added: ['1.1.99'], linkUrlChanges: [] });
   });
 
 test('the CLI reads an app.asar\'s CHANGELOG, and exits 1 on a dropped heading, 0 when kept, 1 with no base', async (t) => {

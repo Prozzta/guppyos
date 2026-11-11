@@ -13,7 +13,9 @@
  * Checks, against every released "## [x.y.z]" section of the base:
  * - its heading line is still there, unchanged;
  * - the released sections keep the base's order, and new sections only go above them;
- * - none of its non-blank lines is gone (lines may be added, never removed).
+ * - none of its non-blank lines is gone (lines may be added, never removed). The one edit allowed:
+ *   a whole-line link reference "[label]: url" may change its URL (same label, same section); each
+ *   such change is printed.
  * Prints CHANGELOG HISTORY OK, or CHANGELOG HISTORY FAILED (exit 1).
  */
 'use strict';
@@ -22,6 +24,8 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 
 const RELEASED_RE = /^## \[(\d+\.\d+\.\d+)\]/;
+/** A whole line that is a Markdown link-reference definition: "[label]: url", nothing else. */
+const LINK_REF_RE = /^\[([^\]]+)\]: (\S+)$/;
 
 /** The released sections of a CHANGELOG, in file order: { version, heading, lines }. [Unreleased]
  *  and the preamble are not released, so they are not part of any section. */
@@ -44,6 +48,7 @@ function checkHistory(baseText, nextText) {
   const base = releasedSections(baseText);
   const next = releasedSections(nextText);
   const problems = [];
+  const linkUrlChanges = [];
   if (!base.length) problems.push('the base CHANGELOG has no released "## [x.y.z]" section');
   const byVersion = new Map();
   for (const s of next) {
@@ -56,10 +61,17 @@ function checkHistory(baseText, nextText) {
     if (!n) { problems.push(`released heading dropped: "${b.heading}"`); continue; }
     if (n.heading !== b.heading) problems.push(`released heading edited: "${b.heading}" is now "${n.heading}"`);
     // Every base line, in order, inside the same section: lines may be added, never removed.
+    // One exception: a whole-line link-reference definition ("[label]: url") may change its URL
+    // (an upstream repo moved), matched by the same label in the same section; it is reported.
     let at = 0;
     const lost = [];
     for (const l of b.lines) {
-      const i = n.lines.indexOf(l, at);
+      let i = n.lines.indexOf(l, at);
+      const ref = i < 0 ? LINK_REF_RE.exec(l) : null;
+      if (ref) {
+        i = n.lines.findIndex((x, k) => k >= at && (LINK_REF_RE.exec(x) || [])[1] === ref[1]);
+        if (i >= 0) linkUrlChanges.push({ version: b.version, label: ref[1], from: ref[2], to: LINK_REF_RE.exec(n.lines[i])[2] });
+      }
       if (i < 0) lost.push(l); else at = i + 1;
     }
     if (lost.length) problems.push(`[${b.version}] lost ${lost.length} line(s), first: "${lost[0].trim().slice(0, 120)}"`);
@@ -70,7 +82,7 @@ function checkHistory(baseText, nextText) {
   const firstReleased = next.findIndex((s) => released.has(s.version));
   const added = next.filter((s) => !released.has(s.version));
   for (const s of added) if (firstReleased >= 0 && next.indexOf(s) > firstReleased) problems.push(`new section [${s.version}] sits below a released one`);
-  return { ok: problems.length === 0, problems, added: added.map((s) => s.version) };
+  return { ok: problems.length === 0, problems, added: added.map((s) => s.version), linkUrlChanges };
 }
 
 /** The last release's tag: the newest v* tag behind HEAD that is not v<version>. Null if none. */
@@ -101,6 +113,7 @@ if (require.main === module) {
   const ref = bi >= 0 ? args[bi + 1] : baseRef(root, version);
   let problems;
   let added = [];
+  let linkUrlChanges = [];
   if (!ref) problems = [`no base: no v* tag behind HEAD other than v${version} (fetch the tags (unshallow a shallow clone), or pass --base <ref>)`];
   else {
     let baseText = null;
@@ -108,8 +121,10 @@ if (require.main === module) {
     let nextText = null;
     try { nextText = readChangelog(target); } catch (e) { problems = [`cannot read the CHANGELOG of ${target}: ${e.message}`]; }
     if (baseText === null) problems = [`cannot read ${ref}:CHANGELOG.md`];
-    else if (nextText !== null) ({ problems, added } = checkHistory(baseText, nextText));
+    else if (nextText !== null) ({ problems, added, linkUrlChanges } = checkHistory(baseText, nextText));
   }
+  // Allowed, but never silent: every link-reference URL that changed in a released section.
+  for (const c of linkUrlChanges) console.log(`  link URL changed in [${c.version}]: [${c.label}] ${c.from} -> ${c.to}`);
   if (!problems.length) { console.log(`CHANGELOG HISTORY OK (base ${ref}; new: ${added.map((v) => `[${v}]`).join(', ') || 'none'})`); process.exit(0); }
   for (const x of problems) console.error(`  - ${x}`);
   console.error(`CHANGELOG HISTORY FAILED (base ${ref || 'none'})`);
