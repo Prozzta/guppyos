@@ -109,6 +109,20 @@ test('the preload records only a test-file process, then takes itself out of NOD
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('a file the backstop killed is a FAILED file even when node\'s own report lists no failure for it', () => {
+  const rows = { 'ev.jsonl': '', 'ev.jsonl.watchdog': '', 'ev.jsonl.backstop': [
+    row({ file: 'hung.test.cjs', by: 'backstop', message: 'BACKSTOP: still running 9 ms after it started (backstop 5 ms; the watchdog did not end it): killing it' }),
+    row({ file: 'hung.test.cjs', by: 'backstop', kill: 'job', message: 'BACKSTOP: killed through its job' })].join('\n') };
+  const e = [];
+  const r = runner.runNodeTest({ rel: ['hung.test.cjs'], label: '', spawn: () => ({ status: 0 }), cwd: '.', timeoutMs: 5, isTTY: false, env: {},
+    eventsFile: 'ev.jsonl', readFile: (f) => rows[f] || '', removeFile: () => {}, watchdog: () => ({ stop: () => {} }),
+    backstop: () => ({ opt: '', env: {}, stop: () => {} }), err: (l) => e.push(l) });
+  assert.deepEqual(r.failures.map((f) => f.file), ['hung.test.cjs'], 'MUTANT: a backstop kill node did not report is not listed as failed');
+  assert.deepEqual(r.hung.map((h) => [h.file, h.by]), [['hung.test.cjs', 'backstop']]);
+  assert.match(e.join('\n'), /FILE TIMED OUT after 5 ms \(the runner's backstop killed it at \d+ ms\): hung\.test\.cjs/);
+  assert.match(e.join('\n'), /BACKSTOP: killed through its job: hung\.test\.cjs/);
+});
+
 test('END TO END (the Node 24 repro): a file whose test PASSED but which never exits is killed by the runner\'s backstop and FAILS the run, on every Node', { timeout: 120_000 }, () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runner-backstop105-'));
   const pidFile = path.join(dir, 'file.pid');
@@ -119,12 +133,16 @@ test('END TO END (the Node 24 repro): a file whose test PASSED but which never e
     ].join('\n'));
     fs.writeFileSync(path.join(dir, 'b-ok.test.cjs'), "require('node:test')('ok', () => {});\n");
     const e = []; let out = '';
-    const spawn = (args, opts) => { const r = spawnSync(process.execPath, args, { ...opts, stdio: 'pipe', encoding: 'utf8' }); out = r.stdout; return r; };
+    // Bounded (Jim, mutant A): spawnSync blocks the event loop, so the test's own timeout cannot fire;
+    // a backstop that never kills must FAIL this test, not hang the suite.
+    let timedOut = false;
+    const spawn = (args, opts) => { const r = spawnSync(process.execPath, args, { ...opts, stdio: 'pipe', encoding: 'utf8', timeout: 90_000, killSignal: 'SIGKILL' }); out = r.stdout; timedOut = timedOut || (r.error && r.error.code) === 'ETIMEDOUT'; return r; };
     const t0 = Date.now();
     // The watchdog stubbed out: the backstop alone must end it (on Node 24 nothing else would).
     const code = runner.run({ testDir: dir, cwd: dir, spawn, timeoutMs: 2_000, isTTY: false, log: () => {}, err: (l) => e.push(l),
       failureFile: () => path.join(dir, 'failures.json'), eventsFile: path.join(dir, 'ev.jsonl'), watchdog: () => ({ stop: () => {} }), backstop: runner.startBackstop });
     const took = Date.now() - t0;
+    assert.equal(timedOut, false, 'THE BACKSTOP NEVER ENDED THE FILE: node --test was still running at 90 s');
     assert.notEqual(code, 0, 'MUTANT: a file that never exits passes the run');
     assert.ok(took >= runner.backstopMs(2_000) && took < 90_000, `ended by the backstop, not before it and not never (${took} ms)`);
     assert.match(out, /^ok \d+ - done$/m, 'its test DID pass: only the never-exiting file fails');
@@ -138,6 +156,11 @@ test('END TO END (the Node 24 repro): a file whose test PASSED but which never e
     else assert.throws(() => process.kill(rec.pid, 0), /ESRCH/, 'the stuck file process is gone');
     assert.deepEqual(fs.readdirSync(dir).filter((n) => n.startsWith('ev.jsonl')), [], 'the record files (the backstop\'s among them) are cleaned up');
   } finally {
+    // A file a broken backstop left running: killed only when it is still ours.
+    try {
+      const rec = own.readRec(pidFile, path.basename(process.execPath));
+      if (rec && process.platform === 'win32') { if (own.stillOurs(rec)) own.killOwnTree(rec); } else if (rec) process.kill(rec.pid, 'SIGKILL');
+    } catch { /* gone, or no record */ }
     for (let i = 0; i < 50; i++) { try { fs.rmSync(dir, { recursive: true, force: true }); break; } catch { spawnSync(process.execPath, ['-e', 'setTimeout(()=>{},200)']); } }
   }
 });
