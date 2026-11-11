@@ -611,9 +611,12 @@ class WindowWatch {
     const hit = [...(m.visible || []).map((v) => `visible window ${v}`), ...(m.browsers || []).map((b) => `browser started by the tree ${b}`), ...(m.alerts || []).map((a) => `crash/UAC dialog process ${a}`)];
     if (hit.length) { this.hits.push({ at: new Date().toISOString(), hit }); this.onHit(hit.join('; ')); }
   }
-  /** Seen at least one good line, and not silent for too long. */
-  healthy(now = Date.now()) { return this.lines > 0 && now - this.lastAt < 15_000; }
+  /** Seen at least one good line, and not silent for too long. A stopped watcher is judged at its
+   *  stop: stop() kills it through two process-table queries, which under load take seconds, and
+   *  that time is the kill's, not the watcher's silence (LOAD-FLAKES-105). */
+  healthy(now = Date.now()) { return this.lines > 0 && (this.stoppedAt ?? now) - this.lastAt < 15_000; }
   stop() {
+    if (!this.stopped) this.stoppedAt = Date.now();
     this.stopped = true;
     // its own tree, verified (own-procs), not taskkill /T (TEST-GLOB-PID-RECYCLE)
     // LOAD-BURST-196: a kill that failed (a process-table query timed out under load) is kept, not
