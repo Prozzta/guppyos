@@ -26,11 +26,9 @@ const PY312 = `${LOCAL}\\Programs\\Python\\Python312\\python.exe`;
 const PY311 = `${LOCAL}\\Programs\\Python\\Python311\\python.exe`;
 const WIN_ENV = { 'ProgramFiles(x86)': PF86, ProgramFiles: 'C:\\Program Files', LOCALAPPDATA: LOCAL, SystemDrive: 'C:' };
 
-/** A fake machine. `node`: [version, pgo, execPath, clang, ltcg] (official Node 24 Windows by
- *  default) or null; `pythons`: { file: version }; `components`: VS component ids installed (in
- *  BT); `files`: paths that exist. */
-const NODE24 = ['24.22.2', false, 'C:\\node24\\node.exe', 1, true];
-function machine({ platform = 'win32', env = WIN_ENV, node = NODE24, pythons = {}, components = [], files = [], vswhere = true, timeouts = [] } = {}) {
+/** A fake machine. `node`: [version, pgo, execPath] or null; `pythons`: { file: version };
+ *  `components`: VS component ids installed (in BT); `files`: paths that exist. */
+function machine({ platform = 'win32', env = WIN_ENV, node = ['24.22.2', false, 'C:\\node24\\node.exe'], pythons = {}, components = [], files = [], vswhere = true, timeouts = [] } = {}) {
   const calls = [];
   const exists = (p) => files.includes(p) || (vswhere && p === VSWHERE) || Object.keys(pythons).includes(p);
   const exec = async (file, args) => {
@@ -53,14 +51,11 @@ function machine({ platform = 'win32', env = WIN_ENV, node = NODE24, pythons = {
 const byId = (rows) => Object.fromEntries(rows.map((r) => [r.id, r]));
 const ALL_VS = [...new Set(Object.values(C.BUILD_VS_REQUIRES).flat())];
 
-test('catalog: Windows has the five build rows, posix only Node and Python; none essential', () => {
+test('catalog: Windows has the four build rows, posix only Node and Python; none essential', () => {
   const win = C.buildToolCatalog('win32').map((t) => t.id);
-  assert.deepEqual(win, ['build:node', 'build:python', 'build:vs-vctools', 'build:vs-spectre', 'build:vs-clangcl']);
-  // Electron-header builds (node-pty) use MSVC v143; the ClangCL row is for a clang-cl Node's own
-  // host builds, and the probe shows it only when that Node reports clang 1 (GUPPY-NODE-LTS).
-  assert.equal(C.BUILD_CLANGCL_ID, 'build:vs-clangcl');
-  assert.match(byId(C.buildToolCatalog('win32'))['build:vs-clangcl'].install.win32,
-    /modify --installPath .*--add Microsoft\.VisualStudio\.Component\.VC\.Llvm\.Clang --add Microsoft\.VisualStudio\.Component\.VC\.Llvm\.ClangToolset/);
+  assert.deepEqual(win, ['build:node', 'build:python', 'build:vs-vctools', 'build:vs-spectre']);
+  // Native builds use MSVC v143: npm's node-gyp (10.3+) forces clang 0 on Windows even under the clang-cl built Node 24, so ClangCL is never needed (Jim M1, M1 on GUPPY-NODE-LTS)
+  assert.equal(JSON.stringify(C.buildToolCatalog('win32')).includes('Llvm'), false, 'no LLVM/ClangCL row or install line');
   assert.deepEqual(C.buildToolCatalog('linux').map((t) => t.id), ['build:node', 'build:python']);
   assert.deepEqual(C.buildToolCatalog('darwin').map((t) => t.id), ['build:node', 'build:python']);
   for (const t of C.buildToolCatalog('win32')) {
@@ -84,7 +79,7 @@ test('catalog: the install text names the exact winget / VS Installer ids and sa
   assert.match(w['build:python'].install.win32, /winget install --id Python\.Python\.3\.12 -e/);
   assert.match(w['build:vs-vctools'].install.win32, /Microsoft\.VisualStudio\.2022\.BuildTools.*--add Microsoft\.VisualStudio\.Workload\.VCTools/);
   assert.match(w['build:vs-spectre'].install.win32, /modify --installPath .*--add Microsoft\.VisualStudio\.Component\.VC\.Runtimes\.x86\.x64\.Spectre/);
-  for (const id of ['build:vs-vctools', 'build:vs-spectre', 'build:vs-clangcl']) assert.match(w[id].note, /admin prompt/, id);
+  for (const id of ['build:vs-vctools', 'build:vs-spectre']) assert.match(w[id].note, /admin prompt/, id);
   assert.match(C.BUILD_GROUP.why, /better-sqlite3/);
   assert.match(C.BUILD_GROUP.why, /node-pty/);
   assert.match(C.BUILD_GROUP.posixNote, /xcode-select --install/);
@@ -105,66 +100,16 @@ test('the Node pin matches .nvmrc, and every CI workflow reads .nvmrc', () => {
 
 test('node: the pinned major is ready; another major or a PGO build warns with the install text', async () => {
   let r = byId(await P.buildPrereqStatus(machine({ components: ALL_VS }).deps))['build:node'];
-  assert.equal(r.found, true); assert.equal(r.warn, undefined);
+  assert.equal(r.found, true); assert.equal(r.warn, undefined); assert.equal(r.detail, 'v24.22.2');
   assert.equal(r.path, 'C:\\node24\\node.exe');
-  r = byId(await P.buildPrereqStatus(machine({ node: ['26.1.0', false, 'C:\\n\\node.exe', 1, true] }).deps))['build:node'];
+  r = byId(await P.buildPrereqStatus(machine({ node: ['26.1.0', false, 'C:\\n\\node.exe'] }).deps))['build:node'];
   assert.equal(r.found, true); assert.match(r.warn, /26\.1\.0.*needs Node 24/); assert.match(r.installCommand, /nvm install 24/);
-  r = byId(await P.buildPrereqStatus(machine({ node: ['24.22.2', true, 'C:\\n\\node.exe', 1, true] }).deps))['build:node'];
+  r = byId(await P.buildPrereqStatus(machine({ node: ['24.22.2', true, 'C:\\n\\node.exe'] }).deps))['build:node'];
   assert.match(r.warn, /PGO \(enable_pgo_use\)/);
-  // the older 3-field probe output still parses (no clang/ltcg: no LTCG note)
-  r = byId(await P.buildPrereqStatus(machine({ node: ['24.22.2', false, 'C:\\n\\node.exe'] }).deps))['build:node'];
-  assert.equal(r.found, true); assert.equal(r.detail, 'v24.22.2');
   r = byId(await P.buildPrereqStatus(machine({ node: null }).deps))['build:node'];
   assert.equal(r.found, false); assert.equal(r.warn, undefined);
   r = byId(await P.buildPrereqStatus(machine({ timeouts: ['node'] }).deps))['build:node'];
   assert.equal(r.found, false); assert.equal(r.unknown, true, 'a timed-out probe is not checked, never missing');
-});
-
-test('node: clang 1 + node_with_ltcg is flagged on the row as information (npm ci is not affected), Windows only', async () => {
-  let r = byId(await P.buildPrereqStatus(machine({ components: ALL_VS }).deps))['build:node'];
-  assert.match(r.detail, /^v24\.22\.2 · clang-cl \+ LTCG: .*will not link \(llvm-lib rejects \/LTCG\)$/);
-  assert.equal(r.warn, undefined, 'the pinned official Node is ready, not CHECK');
-  assert.equal('clang' in r, false, 'the probe-internal clang value does not leak into the row');
-  for (const node of [['24.22.2', false, 'C:\\n\\node.exe', 1, false], ['22.23.4', false, 'C:\\n\\node.exe', 0, true]]) {
-    r = byId(await P.buildPrereqStatus(machine({ node }).deps))['build:node'];
-    assert.equal(r.detail, `v${node[0]}`, JSON.stringify(node));
-  }
-  r = byId(await P.buildPrereqStatus(machine({ platform: 'linux', env: {}, node: ['24.22.2', false, '/n/node', 1, true] }).deps))['build:node'];
-  assert.equal(r.detail, 'v24.22.2', 'LTCG is an MSVC/llvm-lib matter');
-});
-
-test('clangcl: the row follows the Node on PATH (process.config clang), not a hard-coded rule', async () => {
-  const CL = C.BUILD_VS_REQUIRES['build:vs-clangcl'];
-  // clang 1 (official Node 24): shown and probed by vswhere with its own ids
-  let m = machine({ components: ['Microsoft.VisualStudio.Component.VC.Tools.x86.x64', ...CL] });
-  let r = byId(await P.buildPrereqStatus(m.deps));
-  assert.equal(r['build:vs-clangcl'].found, true); assert.equal(r['build:vs-clangcl'].path, BT);
-  assert.ok(m.calls.some((c) => c[0] === VSWHERE && CL.every((id) => c.includes(id))));
-  r = byId(await P.buildPrereqStatus(machine({ components: ['Microsoft.VisualStudio.Component.VC.Tools.x86.x64'] }).deps));
-  assert.equal(r['build:vs-clangcl'].found, false);
-  assert.ok(r['build:vs-clangcl'].installCommand.includes(`--installPath "${BT}" --add Microsoft.VisualStudio.Component.VC.Llvm.Clang `));
-  // clang 0 (an MSVC-built Node, e.g. 22): no ClangCL row, and no vswhere call for it
-  m = machine({ node: ['22.23.4', false, 'C:\\n\\node.exe', 0, true] });
-  const rows = await P.buildPrereqStatus(m.deps);
-  assert.deepEqual(rows.map((t) => t.id), ['build:node', 'build:python', 'build:vs-vctools', 'build:vs-spectre']);
-  assert.equal(m.calls.some((c) => c.includes(CL[1])), false);
-  // the probe cannot tell (no Node, timeout, old output): keep the row rather than hide a need
-  for (const opts of [{ node: null }, { timeouts: ['node'] }, { node: ['24.22.2', false, 'C:\\n\\node.exe'] }]) {
-    assert.ok(byId(await P.buildPrereqStatus(machine(opts).deps))['build:vs-clangcl'], JSON.stringify(opts));
-  }
-});
-
-test('the node probe reads clang and node_with_ltcg from the real process.config shape', () => {
-  // the -e snippet run on this Node's own config: the same JSON shape probeNode parses
-  const src = fs.readFileSync(path.join(REPO, 'src/main/buildPrereqs.ts'), 'utf8');
-  const m = /const NODE_ARGS = \['-e', '((?:[^'\\]|\\.)*)'\];/.exec(src);
-  assert.ok(m, 'NODE_ARGS found');
-  const out = require('node:child_process').execFileSync(process.execPath, ['-e', m[1]], { encoding: 'utf8', windowsHide: true, timeout: 30_000 });
-  const [version, pgo, execPath, clang, ltcg] = JSON.parse(out);
-  const v = process.config.variables;
-  assert.equal(version, process.versions.node); assert.equal(execPath, process.execPath);
-  assert.equal(pgo, !!v.enable_pgo_use); assert.equal(clang, Number(v.clang) || 0);
-  assert.equal(ltcg, String(v.node_with_ltcg) === 'true');
 });
 
 test('python: node-gyp order: npm_config_python wins over PATH', async () => {
@@ -225,10 +170,10 @@ test('vs: each row asks vswhere -products * for VS 2022 with its own component i
 
 test('vs: everything installed is all ready; no vswhere means not found with the placeholders filled by defaults', async () => {
   let r = byId(await P.buildPrereqStatus(machine({ components: ALL_VS }).deps));
-  for (const id of ['build:vs-vctools', 'build:vs-spectre', 'build:vs-clangcl']) assert.equal(r[id].found, true, id);
+  for (const id of ['build:vs-vctools', 'build:vs-spectre']) assert.equal(r[id].found, true, id);
   const m = machine({ vswhere: false });
   r = byId(await P.buildPrereqStatus(m.deps));
-  for (const id of ['build:vs-vctools', 'build:vs-spectre', 'build:vs-clangcl']) assert.equal(r[id].found, false, id);
+  for (const id of ['build:vs-vctools', 'build:vs-spectre']) assert.equal(r[id].found, false, id);
   assert.equal(m.calls.some((c) => c[0] === VSWHERE), false, 'no vswhere, no spawn');
   assert.ok(r['build:vs-spectre'].installCommand.includes(`--installPath "${C.VS_PATH_DEFAULT}"`));
   assert.equal(/\{vs(Setup|Path)\}/.test(r['build:vs-spectre'].installCommand), false, 'no token left in the shown command');
@@ -239,7 +184,7 @@ test('vs: everything installed is all ready; no vswhere means not found with the
 test('a probe that throws is a row, not a crash', async () => {
   const deps = { ...machine().deps, exec: async () => { throw new Error('boom'); } };
   const rows = await P.buildPrereqStatus(deps);
-  assert.equal(rows.length, 5, 'a Node probe that throws cannot tell clang, so the ClangCL row stays');
+  assert.equal(rows.length, 4);
   for (const r of rows) assert.equal(r.found, false, r.id);
 });
 

@@ -119,8 +119,7 @@ export interface ToolStatus extends ToolSpec {
 // needed to RUN the app, so the group is opt-in (probed only when the user opens it) and no row
 // is essential. Nothing here installs anything: the rows show the command, the user runs it.
 
-/** The Node major the build is pinned to: .nvmrc says the same and the CI workflows read .nvmrc
- *  (test-pinned). */
+/** The Node major the build is pinned to: .nvmrc says the same and the CI workflows read .nvmrc (test-pinned). */
 export const BUILD_NODE_MAJOR = 24;
 /** The Python the floor builds with. node-gyp accepts any 3.6+, so another 3.x is a warning. */
 export const BUILD_PYTHON = '3.12';
@@ -128,15 +127,10 @@ export const BUILD_PYTHON = '3.12';
 /** vswhere `-requires` ids per VS row (all must be present). The VC-tools row probes the MSVC
  *  x86/x64 compiler component (what node-gyp itself checks), which both the Build Tools VCTools
  *  workload and a full VS "Desktop development with C++" install provide. */
-export const BUILD_VS_REQUIRES: Record<'build:vs-vctools' | 'build:vs-spectre' | 'build:vs-clangcl', string[]> = {
+export const BUILD_VS_REQUIRES: Record<'build:vs-vctools' | 'build:vs-spectre', string[]> = {
   'build:vs-vctools': ['Microsoft.VisualStudio.Component.VC.Tools.x86.x64'],
-  'build:vs-spectre': ['Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre'],
-  'build:vs-clangcl': ['Microsoft.VisualStudio.Component.VC.Llvm.Clang', 'Microsoft.VisualStudio.Component.VC.Llvm.ClangToolset']
+  'build:vs-spectre': ['Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre']
 };
-
-/** The row that only a clang-cl built Node needs: the probe keeps it when the Node on PATH reports
- *  process.config clang 1 (official Node 24 does), drops it when it reports 0. */
-export const BUILD_CLANGCL_ID = 'build:vs-clangcl';
 
 /** Install-text placeholders the main process fills from the probe (vswhere's installer and the
  *  found VS install path); left as written when VS is not there yet. */
@@ -162,7 +156,7 @@ const BUILD_TOOLS: (ToolSpec & { platforms: Array<'win32' | 'posix'> })[] = [
     bin: 'node',
     label: `Node.js ${BUILD_NODE_MAJOR}`,
     kind: 'build',
-    why: `The build is pinned to Node ${BUILD_NODE_MAJOR} (.nvmrc). A native module with no prebuild for this Node is compiled with the running Node's own settings: a Node built with PGO (Node 26) asks for a profile that is not there, and one built with clang-cl and LTCG (Node 24) fails to link (llvm-lib rejects /LTCG). Guppy's modules use prebuilds or Electron's headers, so npm ci is not affected.`,
+    why: `The build is pinned to Node ${BUILD_NODE_MAJOR} (.nvmrc). node-gyp builds with the running Node's own settings, so another major can break the native builds: Node 26 (built with PGO) makes them ask for a PGO profile that is not there.`,
     essential: false,
     install: {
       posix: `nvm install ${BUILD_NODE_MAJOR} && nvm use ${BUILD_NODE_MAJOR}`,
@@ -208,17 +202,6 @@ const BUILD_TOOLS: (ToolSpec & { platforms: Array<'win32' | 'posix'> })[] = [
     why: 'node-pty links the Spectre-mitigated MSVC libraries. Without them its build stops with MSB8040.',
     essential: false,
     install: { posix: '', win32: vsModify(BUILD_VS_REQUIRES['build:vs-spectre']) },
-    note: `${ADMIN_NOTE} Install the VS 2022 Build Tools first.`,
-    platforms: ['win32']
-  },
-  {
-    id: BUILD_CLANGCL_ID,
-    bin: null,
-    label: 'ClangCL toolset',
-    kind: 'build',
-    why: 'This Node was built with clang-cl (process.config clang 1), so node-gyp builds a native module that has no prebuild for it with the ClangCL platform toolset.',
-    essential: false,
-    install: { posix: '', win32: vsModify(BUILD_VS_REQUIRES[BUILD_CLANGCL_ID]) },
     note: `${ADMIN_NOTE} Install the VS 2022 Build Tools first.`,
     platforms: ['win32']
   }
