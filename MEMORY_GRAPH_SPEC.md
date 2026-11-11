@@ -5,7 +5,7 @@
 > current memory contract. Current memory behavior is in [HIVE.md](HIVE.md) and
 > [CHANGELOG.md](CHANGELOG.md#11103--2026-10-30).
 
-**Feature #8** of the Munder Difflin harness roadmap · author: Jim · branch `feature/memory-graph`
+**Feature #8** of the Guppy (then Munder Difflin) harness roadmap · author: Jim · branch `feature/memory-graph`
 **Historical implementation note:** the panel has shipped; this document is retained as its
 design reference.
 

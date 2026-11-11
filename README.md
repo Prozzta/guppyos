@@ -4,20 +4,24 @@
 
 # Guppy
 
-*Formerly Munder Difflin. Renamed in 1.1.82; an installed copy updates in place and keeps its agents, history and settings.*
-
 ### Agent harness to run an AI crew on your own machine — the hardened fork
 
-**Free, open source and performant** — a multi-agent harness that works with the
-subscriptions you already pay for, on their hourly limits. It turns the terminal coding CLIs
-you already run into a crew that keeps working while you're away, coordinated by a
+**Free, open source (MIT) and performant**: a multi-agent harness that runs an AI crew of
+Claude Code, Codex, Antigravity, Grok and other terminal CLI agents on your own machine, using
+the subscriptions you already pay for, on their hourly limits. It turns the terminal coding
+CLIs you already run into a crew that keeps working while you're away, coordinated by a
 captain on your own machine.
 
-This is **Prozzta/guppyos**, a fork of
-[chaitanyagiri/munder-difflin](https://github.com/chaitanyagiri/munder-difflin).
-The product concept, the office floor, and the foundation are upstream's work; this fork
-is a **hardened, independently versioned line** built for running a floor continuously
-and unattended.
+**Actively maintained.** Latest release: **v1.1.103 (2026-10-30)**, with a Windows x64
+installer; macOS and Linux build from source.<br>
+[Download](https://github.com/Prozzta/guppyos/releases/latest) ·
+[Website](https://guppyos.com) · [Changelog](./CHANGELOG.md)
+
+Guppy is the hardened, independently versioned fork of
+[Munder Difflin](https://github.com/HarnessMD/munder-difflin) (HarnessMD/munder-difflin),
+built for running a floor continuously and unattended. It was renamed from Munder Difflin in
+1.1.82; an installed copy updates in place and keeps its agents, history and settings. The
+product concept, the office floor, and the foundation are upstream's work.
 
 <p>
   <em>Electron · React · TypeScript · Pixi.js · xterm.js · node-pty</em>
@@ -26,7 +30,7 @@ and unattended.
 <p>
   <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-F4D35E.svg?style=flat-square&labelColor=6E1423"></a>
   <img alt="Version: 1.1.103" src="https://img.shields.io/badge/version-1.1.103-F4D35E.svg?style=flat-square&labelColor=6E1423">
-  <img alt="Fork of chaitanyagiri/munder-difflin" src="https://img.shields.io/badge/fork%20of-chaitanyagiri%2Fmunder--difflin-F4F1EA.svg?style=flat-square&labelColor=6E1423">
+  <a href="https://github.com/HarnessMD/munder-difflin"><img alt="Fork of HarnessMD/munder-difflin" src="https://img.shields.io/badge/fork%20of-HarnessMD%2Fmunder--difflin-F4F1EA.svg?style=flat-square&labelColor=6E1423"></a>
 </p>
 
 <br>
@@ -46,17 +50,121 @@ and unattended.
 
 ## Contents
 
-- [Why this fork exists](#why-this-fork-exists)
-- [How we got here](#how-we-got-here)
-- [How this fork is developed](#how-this-fork-is-developed)
 - [What it is](#what-it-is)
 - [How it works](#how-it-works)
 - [Getting started](#getting-started)
+- [Why this fork exists](#why-this-fork-exists)
+- [How this fork is developed](#how-this-fork-is-developed)
 - [Architecture](#architecture)
 - [Design system](#design-system)
 - [Telemetry](#telemetry)
 - [License](#license)
 - [Acknowledgements](#acknowledgements)
+
+## What it is
+
+Guppy is a desktop app that wraps **real terminal-agent CLIs** as fully-capable
+agents, wires them into a **hive**, and puts **a captain** in charge — the god agent
+(Cpt Kerk on the TES bridge, Michael in the office theme), the one agent *you* talk to
+in order to get things done.
+
+- **Every terminal is an agent.** Each `claude`, `agy`, `codex`, `grok`, or custom
+  session runs as a real process in a pseudo-terminal (`node-pty`), byte-for-byte
+  authentic, rendered with xterm.js.
+- **Every agent is an avatar.** Sessions appear as crew on a Pixi.js floor (the TES
+  bridge, or the office theme) — they walk to their stations as they work, and envelopes
+  fly station-to-station when they message each other.
+- **The hive coordinates them.** Agents read their memory and get their mail from the app; the
+  router moves messages between inboxes; the GOD agent adjudicates, assigns, and escalates only
+  when it needs you.
+- **Memory that persists.** A markdown-first memory layer with semantic recall and
+  automatic condensation, so agents remember across sessions without their memory files
+  growing forever.
+
+<p align="center">
+  <img src="./.github/media/tes-full-window.png" alt="Guppy with the TES theme: the bridge floor, agent stations and the side panels" width="820">
+</p>
+<p align="center">
+  <img src="./.github/media/tes-look-builder.png" alt="The Add Agent dialog with the TES look builder" width="404">
+  <img src="./.github/media/tes-memory.png" alt="An agent's memory panel in the TES theme" width="404">
+</p>
+
+## How it works
+
+```
+            you ── talk to ──►  ┌─────────────┐
+                                │  GOD agent  │  orchestrator / supervisor
+                                │ (captain's  │  roster · routing · adjudication
+                                │   chair)    │  blackboard · task ledger
+                                └──────┬──────┘
+                                       │ assigns · routes · escalates
+              ┌────────────────────────┼────────────────────────┐
+              ▼                         ▼                         ▼
+        ┌───────────┐            ┌───────────┐            ┌───────────┐
+        │  agent A  │  message   │  agent B  │  message   │  agent C  │
+        │ provider  │ ─────────► │ provider  │ ─────────► │ provider  │
+        │  + memory │            │  + memory │            │  + memory │
+        └───────────┘            └───────────┘            └───────────┘
+              └──────── shared hive: memory · mailbox · blackboard · log ───────┘
+```
+
+1. **You spawn agents** — each is a normal terminal process with its own working
+   directory, identity, and provider-specific lifecycle.
+2. **Agents collaborate through the hive** — a local folder of plain files. They write
+   to their own `outbox/`; the harness's router delivers into recipients' `inbox/`. The
+   hive is not a git repository: the harness runs no git there (since 1.1.53), and an
+   existing `hive/.git` from an older version is left untouched.
+3. **The GOD agent runs the floor** — it reads every request, resolves routine ones
+   itself, and only escalates *critical* items (spend, destructive ops, scope changes)
+   into an approvals queue you act on.
+4. **Everything is visible** — avatars, envelopes, the live terminal stream; you can type
+   back into any session, browse its files, and read its git history.
+
+See [`HIVE.md`](./HIVE.md) for the full multi-agent design, [`SPEC.md`](./SPEC.md) for
+the terminal/event plane, and [`DESIGN.md`](./DESIGN.md) for the visual system.
+
+### Memory and claims in 1.1.103
+
+New floors start with the claims ledger enabled. Use `memory get <key|card-id>` for a current
+recorded value; use `memory search --exact` for exact text and `--newest` for newer matches first.
+These tools surface recorded claims and history, not an accuracy guarantee. See the
+[1.1.103 CHANGELOG entry](CHANGELOG.md#11103--2026-10-30) for behavior and limits.
+
+## Getting started
+
+### Prerequisites
+
+- **Windows x64** for this fork's installer releases; the codebase also builds on macOS
+  and Linux (upstream ships all three).
+- **Node.js 18+** and npm, plus a C/C++ toolchain for `node-pty`'s native addon.
+- At least one supported agent CLI on your `PATH` — [Claude Code](https://claude.com/claude-code)
+  (`claude`, the default), Antigravity (`agy`), OpenAI Codex (`codex`), or xAI Grok (`grok`).
+
+### Install & run from source
+
+```bash
+git clone https://github.com/Prozzta/guppyos.git
+cd guppyos
+npm install        # postinstall rebuilds node-pty against Electron's ABI
+npm run dev        # launches the Electron app with hot reload
+```
+
+On first launch you'll go through the onboarding wizard, then land on the floor. Use
+**Add agent** to spawn your first session — the GOD agent takes the captain's chair
+automatically (Michael's office, in the office theme).
+
+### Other scripts
+
+```bash
+npm run build      # production build via electron-vite
+npm run typecheck  # type-check the node (main/preload) and web (renderer) projects
+node --test --test-concurrency=4 test/*.test.cjs   # the test suite
+```
+
+> If `node-pty` fails to load after an Electron upgrade, re-run `npm install` (the
+> `postinstall` hook runs `electron-rebuild` against the current Electron ABI). Note the
+> packaged installer ships natives rebuilt against Electron's ABI — an `npm ci
+> --ignore-scripts` build will not.
 
 ## Why this fork exists
 
@@ -122,221 +230,6 @@ that exercise the real installer artifact. The line is versioned independently (
 Upstream deserves full credit for the concept and the foundation; this fork exists
 because we run the thing in anger and needed it to survive that.
 
-## How we got here
-
-The fork moved in small, independently audited milestones — each proven in an isolated
-Dev build (fully separate identity, data, hive and hooks, demonstrably unable to touch
-the Stable install) before it went anywhere near the running floor, with upstream kept
-as a **patch library**: individual upstream fixes come in by `git cherry-pick`, never
-wholesale merges. The shape of the line, as evidence for the three ideas above:
-
-- **The wake path** — mailbox wakes made edge-triggered, then bridged (1.1.46) so a
-  delivered hive message wakes its recipient directly: the floor advances without a
-  heartbeat and without a human nudging stuck agents, and a stall watchdog names any
-  guard that wedges a wake instead of failing silently.
-- **The capacity safety seam** (promoted to the floor in v1.0.45, surfaced in the UI in
-  1.1.45) — the per-provider subscription-allowance tracking, admission, input
-  provenance, and single main-owned fail-closed submit path behind the first idea above,
-  shaped throughout by dated human rulings.
-- **The scheduler delta gate** — the no-change-standup fingerprint and the
-  heartbeat-off-by-default cost analysis behind the second idea, shipped with the
-  measured numbers.
-- **Memory condensation that cannot lose memory** (1.1.47) —
-  condense rebuilt on headless `claude --print` with double-validated structured
-  output; a verify-don't-trust gate that rejects any rewrite that doesn't round-trip
-  byte-for-byte, backed by lossless backups and an atomic swap; bounded splitting so an
-  oversized section converges across passes instead of wedging; and packaged release
-  canaries (a cold-boot wake gate and a real-model condense gate) that exercise the
-  actual installer artifact, not the dev build.
-- **Models and the Antigravity provider** (1.1.48) — current Claude models (Opus 5.5,
-  Fable 5.1, verified against the CLI's own registry), per-agent model persistence,
-  message-router robustness, the Antigravity provider integration (two never-merged
-  capacity pools, a default-closed global-config guard, native-lifecycle wake
-  coordination closing the false-active stall), and a committed hand-mutant gate.
-- **Performance, measured** (1.1.49–1.1.51) — a log that grew forever and a whole-file
-  read of it that froze the main thread (reads 460× faster, log rows −91% with every
-  wake event kept); the office-theme floor capped at 30 fps (renderer 40% → 10% of a core
-  idle); batched terminal output; and no more Codex transcript replays from terminal
-  resizes (27 replays for 11 queued messages → 0).
-- **A floor that doesn't stall itself** (1.1.52) — hive commits
-  moved off the main thread (a ~2.1 s freeze per routed message → ~11 ms); agent hooks
-  delivered to the app without starting processes (~450 ms → ~1 ms per Claude hook);
-  memory mining judged by the old indexer's job state, with a bloated index (673 MB for
-  ~30 MB of content) rebuilt, verified row for row and swapped in automatically; and
-  Antigravity hooks that actually load, so gates, steers and end-of-turn signals reach
-  AGY agents.
-- **Less work for the antivirus** (1.1.53) — no git in the hive at
-  all (about two commits per message, each about 59 scanned processes, gone); a Claude
-  status line that starts no processes (3.9 → 0 per refresh); `log.jsonl` and the cost
-  ledger kept open and rolled over at 8 MB instead of rescanned on every row (~0.4 s →
-  ~0.01 ms), with wake logging cut to the rows that record a change (27 → 4.5 per
-  message); an active turn that needs the provider's confirmation, so an agent can no
-  longer be stuck "active" by a stale status or a swallowed Enter; and the Ask Me cards.
-- **Memory search without Python** (1.1.54) — a native engine in the
-  app replaces the Python memory CLI agents ran (warm end to end ~127 ms against ~1,750 ms;
-  better ranking on every cohort of 373 real, labelled queries, NDCG@5 +20.7 points). It
-  shipped off: legacy by default (the Python CLI still required until the cutover), then a
-  staged rollout with an immediate `fallback-legacy` brake. The old index was never touched.
-- **Mail mid-turn, one heavy job at a time, and Talk** (1.1.55) — an
-  agent is told about mail that arrives while it works, at its next tool call; installs,
-  builds, full suites and benches take a slot (default one at a time, set in Settings), so
-  agents stop loading the machine all at once; the Human reads the conversation with
-  the god agent (Michael, in the office theme) in a Talk view beside the terminal; AGY
-  and Codex agents start idle with their instructions; and wakes left unsent in a
-  provider's input box are recovered.
-- **Talk taken out of the main app** (1.1.56) — it slowed the whole
-  app, most of all in the split view, so it is being rebuilt as a separate build. Everything
-  else in 1.1.55 stays, and Talk's history files on disk are left untouched.
-- **Settings fixes** (1.1.57) — Settings shows what you saved when
-  you reopen it (every control read its value from app start), and dropdowns are readable
-  in the dark theme and match the other inputs in both themes.
-- **Quitting without a freeze** (1.1.58) — quitting no longer
-  freezes the window (the clean-up runs in the background, time-limited), a Windows
-  shutdown or sign-out closes the app without the running-terminals prompt, small stutters
-  when an agent is archived or restarted are gone, and hangs and crashes are now logged.
-- **The Python memory CLI removed** (1.1.59) — the built-in memory engine is the only
-  memory and is always on (no Python, no background indexer); the heavy-job lock no longer
-  blocks light commands.
-- **The `memory` command** (1.1.60) — agents' memory searches reach the memory engine again
-  (one PATH per agent terminal, with the app's command first); the command is `memory`, and
-  the old engine's last traces are gone from the app.
-- **Codex wake-ups that arrive** (1.1.61) — Codex gets its Enter after its
-  paste window and the app checks the wake line really went out (never typing it twice); mail
-  that failed to wake an agent is retried with a backoff; God's Remote Control is switched on at
-  start instead of typed, so it no longer eats the first line.
-- **Start-up measured** (1.1.62) — the first 60 s of every start are
-  logged as timing rows (main-process stalls, slow window tasks, per-terminal output, agent
-  markers), the memory engine waits until it is first used, and Codex's wake check ignores
-  characters its screen drops, so a wake line is never sent twice.
-- **Restarts that keep context** (1.1.63) — a quick restart resumes a
-  Claude agent's real session instead of a new empty one, non-Claude agents never read Claude
-  transcripts (no more start-up freeze), a healthy restored Codex reading no longer holds its
-  wake-ups, and the update check lists every newer version to choose from.
-- **A view that comes back** (1.1.64) — if the window's view crashes, the
-  app reloads it (or replaces the window, keeping every agent terminal), opens straight on the
-  agents, saves a local crash dump, and can always be quit.
-- **Leaner Codex agents** (1.1.65) — a Codex agent starts a fresh
-  conversation each day (or past 20 MB) instead of resuming one forever, agents read a memory
-  digest instead of their whole memory file, large memory files are archived, and Settings has a
-  tool output cap (default 4,000 tokens) and a plugins choice (off by default).
-- **Antigravity agents that can act** (1.1.66) — a new Antigravity
-  conversation gets its tools (run commands, write and edit files) again, a live check guards it,
-  and the Windows test suite passes with 0 failures.
-- **A window that recovers from a memory runaway** (1.1.67) — the app
-  restarts its own view when it passes 1.5 GB twice in a row, even when frozen, while the agents
-  keep running, and logs what it needs to find the cause.
-- **Lessons that stay put** (1.1.68) — each agent's `## How I work (standing
-  lessons)` section is never archived and is read at every task start, and quitting no longer
-  crashes at the end.
-- **Codex readings that keep up** (1.1.69) — Codex agents' usage allowance
-  updates again on Windows, and a resize no longer re-sends a Codex agent's whole conversation.
-- **A clean quit and a history view** (1.1.70) — quitting no longer crashes
-  (the terminal library's race is fixed at its source), a read-only HISTORY tab shows each agent's
-  conversation, and a model you switch in an agent's terminal is kept after a restart.
-- **A window that stays up when an agent is held** (1.1.71) — an agent at
-  its usage limit no longer turns the window white, and hive agents always run in their own
-  terminal.
-- **Holds that clear themselves** (1.1.72) — an agent held at its usage
-  limit recovers after the reset on its own, and new agents start on each CLI's own default model.
-- **No waiting on helper programs** (1.1.73) — reset, moving the home folder and
-  importing PDFs never freeze the window, and "Refresh models" updates every model picker.
-- **Files that are never silently wiped** (1.1.74) — a damaged task board,
-  agent list or settings file is kept and named in a banner instead of being overwritten.
-- **The app handles the mail** (1.1.75) — Claude, Codex and Antigravity agents get each
-  message's text in their context; the app files handled mail itself and lists open requests.
-- **A floor that keeps going under load** (1.1.76) — the floor keeps moving on a busy machine,
-  and Codex agents get safety checks.
-- **A floor overview** (1.1.77) — god gets a written board summary, and every agent row shows
-  whether the agent is really working.
-- **Codex mail that is seen** (1.1.78) — messages to a Codex agent no longer get stuck where
-  nobody sees them, agent cards say "working" when the agent is, and the board stops raising
-  false alarms at start-up.
-- **Choices that stick** (1.1.79) — a model picked for an agent stays picked, Codex's own
-  questions are left to a person, and on most hook paths a reply that never reached an agent is
-  no longer counted as delivered.
-- **Agents that can be reached** (1.1.80) — a resumed Codex agent gets its messages again,
-  god's start-up message waits for Claude Code to be ready, and the Claude model list comes from
-  Claude Code itself.
-- **Cheaper steps** (1.1.81) — agents re-read much less on every step, are woken less often and
-  keep their bookkeeping to one command (`ledger`); an agent waiting for a test slot is told
-  when it is theirs.
-- **Munder Difflin becomes Guppy** (1.1.82) — only the name changes: agents, history and
-  settings are copied into the new Guppy folder, and the old folder is left as it was.
-- **Smaller contexts** (1.1.83) — the hive's agents carry smaller contexts, and the last pieces
-  of the rename are done.
-- **Automatic compaction** (1.1.84) — every Claude agent compacts its conversation
-  automatically, and the claims ledger starts as a trial with one agent.
-- **Theme packs** (1.1.85) — a project can have its own floor, chosen per project, starting
-  with TES; switching it keeps every agent.
-- **Speck** (1.1.86) — the app icon is Speck, and on a TES floor the app names TES's
-  orchestrator.
-- **A TES crew that behaves** (1.1.87) — crew stay at their desks while they work, no longer
-  walk over the console or through other chairs, show thought clouds and go for coffee, and the walls
-  stay crisp after a resize.
-- **A Graphics setting and a bridge that talks** (1.1.88) — Settings
-  chooses Auto, GPU or CPU only; the Requests badge counts only open asks; the TES crew speak
-  the pack's own lines to each other, and the floor fills its pane at whole device pixels.
-- **The claim ledger in Settings** (1.1.89) — Settings shows and edits
-  each agent's claims, a working agent that goes silent is flagged, and the TES station keeps its
-  proportions with thought clouds that point at the head.
-- **A CARDS tab** (1.1.90) — the Command Center shows every card for
-  review without changing it, the claim ledger groups possible duplicates, and AGY usage is back
-  on the capacity bar.
-- **Guppy keeps its hands off your draft** (1.1.91) — automatic typing
-  goes only into an empty prompt it recognises, a stalled wake is brought to the floor, heavy
-  jobs can run at background priority or under a hard CPU cap, and Antigravity wakes are
-  confirmed.
-- **Wakes reach Claude agents again** (1.1.92) — a hotfix: the prompt
-  check recognises Guppy's own context line under the Claude prompt, so messages are delivered.
-- **Wakes are sent again** (1.1.93) — a second hotfix: Guppy recognises
-  its own typed wake in the Claude prompt and presses Enter on it.
-- **Quiet agents are woken after a restart** (1.1.94) — a third hotfix: a
-  resumed Claude agent that stays quiet is recognised as ready without anyone typing, and a wake
-  waits until the resumed session has settled.
-- **God drives agent terminals directly** (1.1.95) — the coordinating agent
-  can read any agent's live screen, type into it and send, so a stuck agent can be cleared
-  without a person at the keyboard.
-- **Heavy jobs counted where they really run** (1.1.96) — a test run
-  started from a script is counted by its test processes, so it waits its turn like any other
-  heavy job, and the hidden screen copy now survives a busy app start.
-- **Messages typed where the agent can take them** (1.1.97) — your message
-  box sends straight into the agent's terminal once its own hooks say it is idle, and agent wakes
-  can do the same (opt-in); test runs start without a load burst, and installers no longer carry
-  native build leftovers.
-- **Mail that arrives, a fair heavy queue, honest costs** (1.1.98) — agent
-  wakes are no longer typed and left unsent or held behind a stale "loading" label, heavy jobs take
-  turns in a queue that frees at once, wrong cost figures are corrected, the network listeners
-  stay on this PC, and a stall watcher records every app freeze.
-- **A smoother window, floors that know their tools** (1.1.99) — saving
-  agent activity no longer freezes the window, a new floor ships with the floor tools written down,
-  god can settle a typed-over wake without you, agents are no longer wrongly shown as typed over,
-  Codex session files stay small, and quiet mail waits until it matters.
-- **A heavy lock that judges commands right** (1.1.100) — a broad test filter
-  waits for the heavy slot like the full suite, light commands are no longer held, heavy jobs hand
-  the slot over cleanly, a new floor starts with only its own god, and a release can no longer drop
-  an earlier release's notes.
-- **Settings that keep each other's changes** (1.1.101) — turning on one MCP
-  server no longer turns off another, the knowledge-graph toggle keeps its folder, auto-compact and
-  Schedules no longer undo each other, the app reads its config, registry and task files from
-  memory, and a test run that opens app windows waits for the heavy slot.
-- **Heavy jobs held to half the PC, clean terminal closes** (1.1.102) — heavy
-  jobs are hard-capped at 50% of the PC's CPU by default, closing an agent's terminal ends every
-  process it started, Codex agents no longer reach into your own Codex folder, and the Settings
-  hero card follows the current release.
-- **Claims ledger on for new floors** (1.1.103, the current release) — a floor created on 1.1.103
-  builds its claims ledger at first start with no setup, search sees a first claims sync while it
-  runs, and replies no longer race the startup mail catch-up.
-
-### Memory and claims in 1.1.103
-
-New floors start with the claims ledger enabled. Use `memory get <key|card-id>` for a current
-recorded value; use `memory search --exact` for exact text and `--newest` for newer matches first.
-These tools surface recorded claims and history, not an accuracy guarantee. See the
-[1.1.103 CHANGELOG entry](CHANGELOG.md#11103--2026-10-30) for behavior and limits.
-
-Every milestone carries a dated human acceptance and evidence tag in the fork's
-internal mission ledger; this README keeps only the shape.
-
 ## How this fork is developed
 
 The floor develops itself. This fork is built by a multi-agent Guppy floor —
@@ -347,103 +240,8 @@ work, and a change that fails audit goes back with a written finding and a requi
 It is slower than merging your own PRs, and it is why the guarantees above are stated
 as facts rather than hopes.
 
-## What it is
-
-Guppy is a desktop app that wraps **real terminal-agent CLIs** as fully-capable
-agents, wires them into a **hive**, and puts **a captain** in charge — the god agent
-(Cpt Kerk on the TES bridge, Michael in the office theme), the one agent *you* talk to
-in order to get things done.
-
-- **Every terminal is an agent.** Each `claude`, `agy`, `codex`, `grok`, or custom
-  session runs as a real process in a pseudo-terminal (`node-pty`), byte-for-byte
-  authentic, rendered with xterm.js.
-- **Every agent is an avatar.** Sessions appear as crew on a Pixi.js floor (the TES
-  bridge, or the office theme) — they walk to their stations as they work, and envelopes
-  fly station-to-station when they message each other.
-- **The hive coordinates them.** Agents read their memory and get their mail from the app; the
-  router moves messages between inboxes; the GOD agent adjudicates, assigns, and escalates only
-  when it needs you.
-- **Memory that persists.** A markdown-first memory layer with semantic recall and
-  automatic condensation, so agents remember across sessions without their memory files
-  growing forever.
-
-<p align="center">
-  <img src="./.github/media/tes-full-window.png" alt="Guppy with the TES theme: the bridge floor, agent stations and the side panels" width="820">
-</p>
-<p align="center">
-  <img src="./.github/media/tes-look-builder.png" alt="The Add Agent dialog with the TES look builder" width="404">
-  <img src="./.github/media/tes-memory.png" alt="An agent's memory panel in the TES theme" width="404">
-</p>
-
-## How it works
-
-```
-            you ── talk to ──►  ┌─────────────┐
-                                │  GOD agent  │  orchestrator / supervisor
-                                │ (captain's  │  roster · routing · adjudication
-                                │   chair)    │  blackboard · task ledger
-                                └──────┬──────┘
-                                       │ assigns · routes · escalates
-              ┌────────────────────────┼────────────────────────┐
-              ▼                         ▼                         ▼
-        ┌───────────┐            ┌───────────┐            ┌───────────┐
-        │  agent A  │  message   │  agent B  │  message   │  agent C  │
-        │ provider  │ ─────────► │ provider  │ ─────────► │ provider  │
-        │  + memory │            │  + memory │            │  + memory │
-        └───────────┘            └───────────┘            └───────────┘
-              └──────── shared hive: memory · mailbox · blackboard · log ───────┘
-```
-
-1. **You spawn agents** — each is a normal terminal process with its own working
-   directory, identity, and provider-specific lifecycle.
-2. **Agents collaborate through the hive** — a local folder of plain files. They write
-   to their own `outbox/`; the harness's router delivers into recipients' `inbox/`. The
-   hive is not a git repository: the harness runs no git there (since 1.1.53), and an
-   existing `hive/.git` from an older version is left untouched.
-3. **The GOD agent runs the floor** — it reads every request, resolves routine ones
-   itself, and only escalates *critical* items (spend, destructive ops, scope changes)
-   into an approvals queue you act on.
-4. **Everything is visible** — avatars, envelopes, the live terminal stream; you can type
-   back into any session, browse its files, and read its git history.
-
-See [`HIVE.md`](./HIVE.md) for the full multi-agent design, [`SPEC.md`](./SPEC.md) for
-the terminal/event plane, and [`DESIGN.md`](./DESIGN.md) for the visual system.
-
-## Getting started
-
-### Prerequisites
-
-- **Windows x64** for this fork's installer releases; the codebase also builds on macOS
-  and Linux (upstream ships all three).
-- **Node.js 18+** and npm, plus a C/C++ toolchain for `node-pty`'s native addon.
-- At least one supported agent CLI on your `PATH` — [Claude Code](https://claude.com/claude-code)
-  (`claude`, the default), Antigravity (`agy`), OpenAI Codex (`codex`), or xAI Grok (`grok`).
-
-### Install & run from source
-
-```bash
-git clone https://github.com/Prozzta/guppyos.git
-cd guppyos
-npm install        # postinstall rebuilds node-pty against Electron's ABI
-npm run dev        # launches the Electron app with hot reload
-```
-
-On first launch you'll go through the onboarding wizard, then land on the floor. Use
-**Add agent** to spawn your first session — the GOD agent takes the captain's chair
-automatically (Michael's office, in the office theme).
-
-### Other scripts
-
-```bash
-npm run build      # production build via electron-vite
-npm run typecheck  # type-check the node (main/preload) and web (renderer) projects
-node --test --test-concurrency=4 test/*.test.cjs   # the test suite
-```
-
-> If `node-pty` fails to load after an Electron upgrade, re-run `npm install` (the
-> `postinstall` hook runs `electron-rebuild` against the current Electron ABI). Note the
-> packaged installer ships natives rebuilt against Electron's ABI — an `npm ci
-> --ignore-scripts` build will not.
+The release-by-release story of the fork (1.1.45 to 1.1.103) is in the
+[CHANGELOG](./CHANGELOG.md#fork-milestones-1145--11103).
 
 ## Architecture
 
@@ -566,7 +364,7 @@ whose bundle is byte-identical to a keyless rebuild.
 
 The **source code** is licensed under the **MIT License** — see [`LICENSE`](./LICENSE).
 The MIT grant covers the code only; the bundled pixel art is licensed separately from
-LimeZu and is carved out in the `LICENSE` scope note, as is the TES theme artwork (below).
+LimeZu and is carved out in [`NOTICE.md`](./NOTICE.md), as is the TES theme artwork (below).
 *Munder Difflin* is an affectionate
 parody and is not affiliated with NBC's *The Office* or Dunder Mifflin.
 
@@ -587,7 +385,7 @@ parody and is not affiliated with NBC's *The Office* or Dunder Mifflin.
 
 ## Acknowledgements
 
-- **[chaitanyagiri/munder-difflin](https://github.com/chaitanyagiri/munder-difflin)** —
+- **[HarnessMD/munder-difflin](https://github.com/HarnessMD/munder-difflin)** —
   the upstream project this fork is built on: the concept, the office floor, the hive
   design, and the foundation of everything above.
 - [LimeZu](https://limezu.itch.io/) for the *Modern Interiors* pixel-art tilesets
