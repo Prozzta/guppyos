@@ -23,7 +23,7 @@ export const BLOB_COPY = {
   invisibleMainHelp: 'The same for the main window and every floor. Works even when the blob is off.',
   failed: 'The blob settings could not be saved.',
   dictation: `Dictation: hold ${DICTATION_CHORD} to talk`,
-  dictationHelp: 'In any app: hold to talk, release, and the transcript is typed into the focused field (Groq Whisper, using the Free Flow key; audio goes to Groq). Never presses Enter. Windows only.',
+  dictationHelp: 'In any app: hold to talk, release, and the transcript is typed into the focused field (Groq Whisper, using your Groq API key above; audio goes to Groq). Never presses Enter. Windows only.',
   dictationState: {
     off: 'Off', ready: 'Ready', listening: 'Listening', transcribing: 'Transcribing', typing: 'Typing', error: 'Last attempt failed', unavailable: 'Unavailable'
   } as Record<DictationState, string>
