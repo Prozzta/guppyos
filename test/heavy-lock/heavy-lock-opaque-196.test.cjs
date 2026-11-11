@@ -327,7 +327,9 @@ test('outer spawns a nested node --test', () => {
   const r = require('node:child_process').spawnSync(process.execPath, ['--test', ${JSON.stringify(path.join(FIX, 'leaf.test.cjs'))}], { env, encoding: 'utf8', timeout: 20000 });
   assert.equal(r.status, 0, r.stderr);
 });\n`);
-fs.writeFileSync(path.join(FIX, 'sleeper.test.cjs'), "require('node:test')('sleeps', () => new Promise((r) => setTimeout(r, 20000)));\n");
+// LOAD-FLAKES-105: the crashed lease holder runs until it is killed. A fixed 20 s sleep ended on its
+// own under load (the setup and two process-table queries outlived it): it exited and released.
+fs.writeFileSync(path.join(FIX, 'sleeper.test.cjs'), "require('node:test')('sleeps until killed', () => new Promise(() => setInterval(() => {}, 1 << 30)));\n");
 
 function cleanEnv(extra) {
   const env = { ...process.env };
@@ -457,6 +459,7 @@ K.e2eCrashAndDeadWaiter = async (t, M = HJ, preload = PRELOAD) => {
   const b = await broker(t, M, { probe: () => M.probeProcesses(require('../tools/ps-env.cjs').psEnv()), roots: () => [] });
   // A crashed lease holder: killed outright, so its exit handler never runs.
   const run = start([process.execPath, '--test', 'sleeper.test.cjs'], { url: b.url('a'), preload });
+  t.after(() => { if (run.child.exitCode === null) try { killTree(run); } catch { /* gone */ } });   // it never ends on its own
   await until(() => b.lock.snapshot().length === 1, 15_000, 'the lease');
   // b's wrapper waits behind it; c is denied at PreToolUse and queued after b.
   const wb = start([process.execPath, 'wrapper.cjs'], { url: b.url('b'), agent: 'b', preload });
@@ -466,6 +469,7 @@ K.e2eCrashAndDeadWaiter = async (t, M = HJ, preload = PRELOAD) => {
   // INT102-TEST-FOLLOWUPS (Jim, INT-1.1.102 MUST C): the lease holder (the node --test runner)
   // dies BEFORE its file child. Killed after, it could see the child die and exit on its own, and
   // its preload's release would log lease-end, not lease-gone.
+  assert.equal(run.child.exitCode, null, 'the lease holder is still running when it is killed (a crash, not an exit)');
   killTree(run, { rootFirst: true });
   await wb.done; await run.done;
   const t0 = Date.now();
