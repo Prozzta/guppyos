@@ -168,14 +168,10 @@ test('the worker scratch dir (rmSync recursive): a junction inside is removed as
 });
 
 test('worker scratch closes watched children before recursive removal', () => {
-  const src = readSource('src/main/index.ts');
-  const start = src.indexOf('function removeWorkerScratch(');
-  const end = src.indexOf('\n// A natural PTY exit', start);
-  assert.ok(start >= 0 && end > start, 'worker scratch remover is present');
-  const remove = src.slice(start, end);
-  const close = remove.indexOf('hive.closeOutboxWatcher(');
-  const reader = remove.indexOf('readerWatchers.stop(workerId)');
-  const rm = remove.indexOf('rmSync(dir, { recursive: true, force: true })');
+  const src = codeOnly(readSource('src/main/index.ts'));
+  const close = src.indexOf("hive.closeOutboxWatcher(join(dir, 'outbox'))");
+  const reader = src.indexOf('readerWatchers.stop(workerId)');
+  const rm = src.indexOf('rmSync(dir, { recursive: true, force: true })');
   assert.ok(close >= 0 && close < rm, 'outbox watcher closes before rmSync');
   assert.ok(reader >= 0 && reader < rm, 'reader watcher stops before rmSync');
 });
