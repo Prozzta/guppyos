@@ -211,3 +211,22 @@ test('the strip schema: a lead row opens with its own label, and a Weekly lead h
   assert.ok(bad((p) => { p.weekly = { reason: 'BELOW_DISPLAY_THRESHOLD', text: 'Weekly · 90% remaining', attribution: 'display-policy' }; })
     .some((e) => /no separate weekly row/.test(e)), 'the weekly figure shown twice');
 });
+
+test('a 5h row stated INAPPLICABLE is not a 5h window: Weekly leads, and the strip and the details dot agree (Jim nit)', () => {
+  const r = rig();
+  const at = r.now() + 1000;
+  r.advance(1000);
+  const w = (id, kind, remaining, applicability) => ({ windowId: id, kind, label: kind === 'FIVE_HOUR' ? '5h' : 'Weekly',
+    windowMinutes: kind === 'FIVE_HOUR' ? 300 : 10080, usedPercent: 100 - remaining, remainingPercent: remaining,
+    resetsAt: RESET_7D_S * 1000, applicability });
+  r.runtime.ingest('creed', { poolKey: 'claude:acct-x:subscription', provider: 'claude', accountScope: 'acct-x', limitId: 'subscription',
+    streamId: 'claude-status:acct-x', sourceSequence: 1, source: 'claude-status-line', observedAt: at, receivedAt: at,
+    windows: [w('five_hour', 'FIVE_HOUR', 40, 'INAPPLICABLE'), w('seven_day', 'SEVEN_DAY', 90, 'APPLICABLE')],
+    providerAttributedLimitingWindowId: null, providerReachedType: null, ordinaryUsageAllowed: null, planType: null });
+  const p = only(r.strip());
+  assert.deepEqual([p.fiveHour.label, p.fiveHour.text], ['Weekly', 'Weekly · 90% remaining']);
+  const d = r.detail(p.presentation);
+  assert.deepEqual(d.windows.map((x) => x.kind), ['SEVEN_DAY'], 'the details drop the inapplicable row');
+  assert.deepEqual(detailDotOf(d), { kind: 'PIE', percent: 90 });
+  assert.deepEqual(leadDotOf(presentPool(p, r.now())), detailDotOf(d), 'one mark for the pool everywhere');
+});
