@@ -108,6 +108,39 @@ K.single = async (M = HJ) => {
 };
 test('the single-file case still passes while another agent holds', () => K.single());
 
+// Jim M1 on cfb8b687: the preload makes one lease per process and parentImage is a process query, so
+// a parallel loop's leases arrive together. Both caps must hold for leases that are in flight at once.
+const together = (x, agentId, pids) => Promise.all(pids.map((pid, i) => ask(x, agentId, pid, { files: [`test/f${i}.test.cjs`] })));
+const lightOf = (rs) => rs.filter((r) => r.state === 'light').length;
+
+K.together = async (M = HJ) => {
+  // The fan-out cap: a parallel loop's processes are alive together, so one runs light.
+  {
+    const x = rig(M);
+    x.l.acquire('b', H, 'npm test', 'hb', false);
+    x.l.noteCall('a', 'c1', 'for f in a b c d; do $N --test test/$f.test.cjs & done; wait');
+    const pids = [101, 102, 103, 104]; pids.forEach((p) => x.alive.add(p));
+    assert.equal(lightOf(await together(x, 'a', pids)), 1, 'LEASES IN FLIGHT AT ONCE: A PARALLEL FAN-OUT RUNS ONE FILE LIGHT');
+  }
+  // The call cap: a parallel loop over the suite (node by name and by variable) runs at most MAX light.
+  for (const cmd of ['for f in $(ls test/*.test.cjs); do node --test "$f" & done; wait', 'for f in $(ls test/*.test.cjs); do $N --test "$f" & done; wait']) {
+    const x = rig(M);
+    x.l.acquire('b', H, 'npm test', 'hb', false);
+    x.l.noteCall('a', 'c1', cmd);
+    const pids = Array.from({ length: MAX + 4 }, (_, i) => 300 + i);
+    assert.ok(lightOf(await together(x, 'a', pids)) <= MAX, `LEASES IN FLIGHT AT ONCE: A PARALLEL SUITE LOOP RUNS AT MOST ${MAX} LIGHT (${cmd})`);
+  }
+  // The call cap on the shown path alone: short-lived processes (the fan-out cap never binds).
+  {
+    const x = rig(M);
+    x.l.acquire('b', H, 'npm test', 'hb', false);
+    x.l.noteCall('a', 'c1', SUITE_LOOPS[1][1]);
+    const rs = await together(x, 'a', Array.from({ length: MAX + 4 }, (_, i) => 400 + i));
+    assert.equal(lightOf(rs), MAX, `LEASES IN FLIGHT AT ONCE: THE SHOWN PATH RUNS EXACTLY ${MAX} LIGHT`);
+  }
+};
+test('leases in flight at once: the fan-out cap and the call cap both hold (Jim M1)', () => K.together());
+
 // ─── MUTANT CENSUS ──────────────────────────────────────────────────────────────────────────
 
 const MUTANTS = [
@@ -117,6 +150,8 @@ const MUTANTS = [
   { name: 'the loop path ignores the cap', edits: [['\n      && this.lightLeft(agentId, c.callId));', ');']], killer: 'suiteLease', dies: /A WHOLE-SUITE LOOP TAKES THE SLOT: .*\(a loop run/ },
   { name: 'the shown path ignores the cap', edits: [['this.callOpen(c, t) && this.lightLeft(agentId, c.callId)).pop();', 'this.callOpen(c, t)).pop();']], killer: 'suiteLease', dies: /A WHOLE-SUITE LOOP TAKES THE SLOT/ },
   { name: 'one count per agent, not per call', edits: [['  private lightLeft(agentId: string, callId: string): boolean {\n    return (this.callLight.get(`${agentId}\\0${callId}`)', '  private lightLeft(agentId: string, callId: string): boolean {\n    return (this.callLight.get(`${agentId}\\0x`)'], ['    const k = `${agentId}\\0${callId}`;', '    const k = `${agentId}\\0x`;'], ['!ids.has(k.slice(agentId.length + 1))) this.callLight.delete(k);', '!ids.has(k.slice(agentId.length + 1))) void k;']], killer: 'perCall', dies: /THE CAP IS PER CALL/ },
+  { name: 'no recheck after the await (Jim M1)', edits: [['    const call = pick();\n    if (!call || busy()) return false;', "    const call = pick() ?? { callId: 'late' };"]], killer: 'together', dies: /LEASES IN FLIGHT AT ONCE/ },
+  { name: 'the single run is registered after singleFile returns', edits: [['    this.runs.set(run, { agentId, held: this.holders.has(agentId), single: true });\n    return true;', '    return true;'], ["    if (!suite && await this.singleFile(agentId, r, run)) {\n", "    if (!suite && await this.singleFile(agentId, r, run)) {\n      this.runs.set(run, { agentId, held: this.holders.has(agentId), single: true });\n"]], killer: 'together', dies: /A PARALLEL FAN-OUT RUNS ONE FILE LIGHT/ },
   { name: 'a cap of one', edits: [['export const HEAVY_CALL_LIGHT_MAX = 10;', 'export const HEAVY_CALL_LIGHT_MAX = 1;']], killer: 'fewLight', dies: /A LOOP OF A FEW FILES STAYS LIGHT/ }
 ];
 

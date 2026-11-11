@@ -521,7 +521,7 @@ const MUTANTS = [
     edits: [['    if (!loop(c)) c.used = true;\n    this.spendLight(agentId, c.callId);', '    this.spendLight(agentId, c.callId);']],
     killer: 'visibleLight', dies: /A CALL IS CONSUMED BY ONE TEST PROCESS/ },
   { name: 'nothing is visible (every single file waits)', file: HJF, module: true,
-    edits: [["    if (!suite && await this.visible(agentId, r)) {", '    if (false) {']],
+    edits: [["    if (!suite && await this.visible(agentId, r, run, single)) {", '    if (false) {']],
     killer: 'visibleLight', dies: /THE CALL'S OWN SINGLE FILE IS LIGHT/ },
   { name: 'no inheritance (a nested run acquires on its own)', file: HJF, module: true,
     edits: [['    if (parent && parent.agentId === agentId && this.runAlive(r.parentRun!)) {', '    if (false) {']],

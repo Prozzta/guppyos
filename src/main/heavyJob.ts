@@ -3330,14 +3330,12 @@ export class HeavyJobLock {
       suite = true;
     }
     const single = Array.isArray(r.files) && r.files.length === 1;
-    if (!suite && await this.visible(agentId, r)) {
-      this.runs.set(run, { agentId, held: this.holders.has(agentId), single });
+    if (!suite && await this.visible(agentId, r, run, single)) {
       return { state: 'light', run, why: "the call's own node --test" };
     }
     // HEAVY-PRELOAD-SHORT-TEST: one named test file under a shell is light even when its call does not
     // show it (node by path or variable, a loop, `$(...)` beside it), one at a time per agent.
-    if (!suite && await this.singleFile(agentId, r)) {
-      this.runs.set(run, { agentId, held: this.holders.has(agentId), single: true });
+    if (!suite && await this.singleFile(agentId, r, run)) {
       this.log({ kind: 'heavy-lock', action: 'lease-single', agentId, pid });
       return { state: 'light', run, why: 'one test file under a shell' };
     }
@@ -3404,7 +3402,7 @@ export class HeavyJobLock {
 
   /** Jim MUST A: the test files match a recent call of this agent that IS that run, unused, and the
    *  test process's parent is the call's shell. Consumed once. */
-  private async visible(agentId: string, r: HeavyLeaseRequest): Promise<boolean> {
+  private async visible(agentId: string, r: HeavyLeaseRequest, run: string, single: boolean): Promise<boolean> {
     const files = Array.isArray(r.files) ? r.files.filter((f): f is string => typeof f === 'string').map(normFile) : [];
     if (!files.length) return false;
     const t = this.now();
@@ -3422,6 +3420,8 @@ export class HeavyJobLock {
     if (!c) return false;
     if (!loop(c)) c.used = true;
     this.spendLight(agentId, c.callId);
+    // Registered here, with no await after the spend, so a concurrent single-file lease counts it.
+    this.runs.set(run, { agentId, held: this.holders.has(agentId), single });
     return true;
   }
 
@@ -3430,21 +3430,29 @@ export class HeavyJobLock {
    *  single-file run of this agent is alive. A hidden wrapper (`bash x.sh`, `node gen-mut.cjs`: no
    *  `--test` in the call), a node or python parent, a glob, a directory, several files and a
    *  parallel fan-out stay heavy. */
-  private async singleFile(agentId: string, r: HeavyLeaseRequest): Promise<boolean> {
+  private async singleFile(agentId: string, r: HeavyLeaseRequest, run: string): Promise<boolean> {
     const files = Array.isArray(r.files) ? r.files : [];
     if (files.length !== 1 || typeof files[0] !== 'string' || !ONE_TEST_FILE(files[0])) return false;
     if (!this.d.parentImage || typeof r.ppid !== 'number') return false;
     const t = this.now();
     // HEAVY-LOOP-LIGHT-CAP: the newest open shown call with light runs left pays for this one.
-    const call = (this.testCalls.get(agentId) ?? []).filter((c) => c.files[0] === SHOWN_TEST && this.callOpen(c, t) && this.lightLeft(agentId, c.callId)).pop();
-    if (!call) return false;
-    let live = 0;
-    for (const [k, v] of this.runs) if (v.agentId === agentId && v.single && this.runAlive(k)) live++;
-    if (live >= SINGLE_FILE_LIGHT_MAX) { this.log({ kind: 'heavy-lock', action: 'lease-single-busy', agentId, live }); return false; }
+    const pick = (): { callId: string } | undefined => (this.testCalls.get(agentId) ?? []).filter((c) => c.files[0] === SHOWN_TEST && this.callOpen(c, t) && this.lightLeft(agentId, c.callId)).pop();
+    const busy = (): boolean => {
+      let live = 0;
+      for (const [k, v] of this.runs) if (v.agentId === agentId && v.single && this.runAlive(k)) live++;
+      if (live >= SINGLE_FILE_LIGHT_MAX) { this.log({ kind: 'heavy-lock', action: 'lease-single-busy', agentId, live }); return true; }
+      return false;
+    };
+    if (!pick() || busy()) return false;
     let image: string | null;
     try { image = await this.d.parentImage(r.ppid); } catch { image = null; }
     if (!CALL_PARENT.test((image ?? '').replace(/\\/g, '/').split('/').pop()!)) return false;
+    // Jim M1 (cfb8b687): leases that arrive together all passed the checks above before any of them
+    // spent or registered. Check again after the await, then spend and register with no await between.
+    const call = pick();
+    if (!call || busy()) return false;
     this.spendLight(agentId, call.callId);
+    this.runs.set(run, { agentId, held: this.holders.has(agentId), single: true });
     return true;
   }
 

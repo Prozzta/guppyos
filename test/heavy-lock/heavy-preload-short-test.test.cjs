@@ -200,10 +200,10 @@ test('E2E: through the real preload, a single file runs at once while another ag
 // ─── MUTANT CENSUS ──────────────────────────────────────────────────────────────────────────
 
 const MUTANTS = [
-  { name: 'no single-file rule (the old behaviour)', edits: [['    if (!suite && await this.singleFile(agentId, r)) {', '    if (false) {']], killer: 'singleLight', dies: /A SINGLE FILE PASSES WHILE ANOTHER AGENT HOLDS/ },
-  { name: 'no shown call needed', edits: [['.pop();\n    if (!call) return false;', ".pop() ?? { callId: 'none' };"]], killer: 'hiddenWaits', dies: /A HIDDEN SINGLE FILE STILL WAITS|A SHOWN CALL THAT HAS ENDED/ },
+  { name: 'no single-file rule (the old behaviour)', edits: [['    if (!suite && await this.singleFile(agentId, r, run)) {', '    if (false) {']], killer: 'singleLight', dies: /A SINGLE FILE PASSES WHILE ANOTHER AGENT HOLDS/ },
+  { name: 'no shown call needed', edits: [['.pop();\n    const busy', ".pop() ?? { callId: 'none' };\n    const busy"]], killer: 'hiddenWaits', dies: /A HIDDEN SINGLE FILE STILL WAITS|A SHOWN CALL THAT HAS ENDED/ },
   { name: 'no fan-out cap', edits: [["    if (live >= SINGLE_FILE_LIGHT_MAX) {", '    if (false) {']], killer: 'fanOut', dies: /IS A FAN-OUT/ },
-  { name: 'any parent counts', edits: [["    if (!CALL_PARENT.test((image ?? '').replace(/\\\\/g, '/').split('/').pop()!)) return false;\n    this.spendLight", '    this.spendLight']], killer: 'hiddenWaits', dies: /A HIDDEN SINGLE FILE STILL WAITS: a node wrapper/ },
+  { name: 'any parent counts', edits: [["    if (!CALL_PARENT.test((image ?? '').replace(/\\\\/g, '/').split('/').pop()!)) return false;\n    // Jim M1", '    // Jim M1']], killer: 'hiddenWaits', dies: /A HIDDEN SINGLE FILE STILL WAITS: a node wrapper/ },
   { name: 'a glob or directory counts as one file', edits: [['    if (files.length !== 1 || typeof files[0] !== \'string\' || !ONE_TEST_FILE(files[0])) return false;', "    if (files.length !== 1 || typeof files[0] !== 'string') return false;"]], killer: 'suiteWaits', dies: /A FULL SUITE STILL WAITS: a (glob|directory)/ },
   { name: 'several files count as one', edits: [['    if (files.length !== 1 || typeof files[0] !== \'string\' || !ONE_TEST_FILE(files[0])) return false;', "    if (!files.length || typeof files[0] !== 'string' || !ONE_TEST_FILE(files[0])) return false;"]], killer: 'suiteWaits', dies: /A FULL SUITE STILL WAITS: two files/ },
   { name: 'a call is not marked shown', edits: [['    if (shown) list.push({ callId, files: [SHOWN_TEST], start: t, end: null, used: false });\n', '']], killer: 'singleLight', dies: /A SINGLE FILE PASSES/ }
