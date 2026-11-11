@@ -19,7 +19,6 @@ const loadTs = require('./load-ts.cjs');
 const T = loadTs('src/main/startupTiming.ts');
 const { StartupTiming, STARTUP_TIMING_WINDOW_MS, STARTUP_LOOP_ROW_SAMPLES, STARTUP_MAX_RENDERER_ROWS } = T;
 const { NativeMemoryWiring } = loadTs('src/main/nativeMemory/mainWiring.ts');
-const { selfJobRate } = require('./tools/run-tests.cjs');
 
 const ROOT = path.join(__dirname, '..');
 const src = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
@@ -208,24 +207,35 @@ test('(1) REAL loop delay: Node\'s histogram sees a blocked main thread in the r
   const { monitorEventLoopDelay, performance } = require('node:perf_hooks');
   const rows = [];
   const origin = Date.now();
-  const rec = new StartupTiming({ origin, now: Date.now, log: (x) => rows.push(x), histogram: () => monitorEventLoopDelay({ resolution: 10 }), windowMs: 2_600 });
+  // LOAD-FLAKES-105: judge the block against the ACTUAL sample times, not the planned schedule. On a
+  // loaded machine this test's own timers fire late, so the block runs later than 1.15 s and the
+  // sample that sees it (often the stop's final one) is later than 2.7 s; and an unrelated stall can
+  // outgrow the block. Each sample's time is recorded where the recorder's interval calls it.
+  const sampledAt = [];
+  const rec = new StartupTiming({ origin, now: Date.now, log: (x) => rows.push(x), histogram: () => monitorEventLoopDelay({ resolution: 10 }), windowMs: 2_600,
+    setInterval: (fn, ms) => setInterval(() => { sampledAt.push(Date.now() - origin); fn(); }, ms) });
   rec.start();
   await new Promise((res) => setTimeout(res, 1_150));
+  const blockFrom = Date.now() - origin;
   const until = performance.now() + 400;
   while (performance.now() < until) { /* block the loop */ }
+  const blockTo = Date.now() - origin;
   await new Promise((res) => setTimeout(res, 1_700));
   assert.equal(rec.recording, false, 'it stopped by itself');
   const loop = rows.filter((x) => x.ev === 'loop').flatMap((x) => x.maxMs);
-  assert.ok(loop.length >= 2, `samples: ${loop}`);
-  assert.ok(Math.max(...loop) >= 300, `the 400 ms block shows (max ${Math.max(...loop)} ms)`);
   const end = rows.find((x) => x.ev === 'end');
-  // A Job Object hard cap limits CPU time, not wall time.  The assertion's scheduling allowance
-  // must therefore scale with the actual Job Object share: it still requires the same real 400 ms
-  // block, while a 50% capped process may be scheduled after the 2.6 s recorder deadline.
-  const rate = selfJobRate();
-  const scheduleScale = rate > 0 ? 10_000 / rate : 1;
-  const latestExpected = Math.ceil(2_700 * scheduleScale);
-  assert.ok(end.loopWorstMs >= 300 && end.loopWorstT >= 1_100 && end.loopWorstT <= latestExpected, `${JSON.stringify(end)} (rate ${rate || 'open'}, latest ${latestExpected})`);
+  const times = [...sampledAt, end.t];   // stop() takes one last sample at its own time
+  assert.equal(loop.length, times.length, `one maxMs per sample: ${loop} at ${times}`);
+  assert.ok(loop.length >= 2, `samples: ${loop}`);
+  // The first sample after the block ended is the one whose histogram spans it (no sample can run
+  // during the block: the loop is blocked), and the recording must still be open then.
+  const k = times.findIndex((t) => t >= blockTo);
+  const ctx = `block ${blockFrom}-${blockTo} ms; samples ${JSON.stringify(loop)} at ${JSON.stringify(times)}; ${JSON.stringify(end)}`;
+  assert.ok(k >= 0 && loop[k] >= 300, `the 400 ms block shows in the sample right after it: ${ctx}`);
+  // The summary is the true worst sample, attributed to that sample's own time.
+  assert.equal(end.loopWorstMs, Math.max(...loop), `loopWorstMs is the worst sample: ${ctx}`);
+  assert.equal(end.loopWorstT, times[loop.indexOf(end.loopWorstMs)], `loopWorstT is that sample's time: ${ctx}`);
+  assert.ok(end.loopWorstMs >= 300, `the worst is at least the block: ${ctx}`);
 });
 
 // ── the renderer half ───────────────────────────────────────────────────────

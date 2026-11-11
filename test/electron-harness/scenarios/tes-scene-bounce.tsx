@@ -96,14 +96,15 @@ window.__harnessRun = async () => {
     await window.harness.capture(W, H);
     await act(async () => { useStore.getState().setSidebarWidth(sidebar); });
     await act(async () => { await sleep(6000); });
-    const clicks: Array<{ who: string; found: boolean; selected: string | null; frames: Frame[] }> = [];
+    const clicks: Array<{ who: string; found: boolean; selected: string | null; clickAt: number; frames: Frame[] }> = [];
     for (const who of ['Jim', 'Creed', 'Andy', 'Dwight']) {
       rec = [];
       await act(async () => { await sleep(300); });
       const el = card(who);
+      const clickAt = Math.round(performance.now());
       await act(async () => { el?.click(); });
       await act(async () => { await sleep(2500); });
-      clicks.push({ who, found: !!el, selected: useStore.getState().selectedId, frames: rec });
+      clicks.push({ who, found: !!el, selected: useStore.getState().selectedId, clickAt, frames: rec });
       rec = null;
     }
     const shot = await window.harness.capture(W, H);

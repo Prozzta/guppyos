@@ -12,6 +12,12 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/guppyos/releases).
 
+### Fixed
+
+- **The agent roster no longer redraws itself every 5 seconds.** Its background check for task
+  badges and waiting messages redrew the whole roster strip on every check, even when nothing had
+  changed. Now it redraws only when the answer changes.
+
 ## [1.1.104] — 2026-11-11
 
 **The Guppy Blob: an on-screen helper with hold-to-talk dictation into any app, Guppy can keep running in the tray, and Settings checks what building from source needs.**
