@@ -19,7 +19,7 @@
  */
 import { DICTATION_CHORD, DICTATION_COPY, DICTATION_MAX_AUDIO_BYTES, DICTATION_OFF, normalizeTranscript, type DictationAudioPayload, type DictationStatus } from '../shared/dictation';
 import type { SttProvider } from './stt';
-import type { HookState, InputEvent, InputEventInfo, InputReply } from './win32Input';
+import type { FocusPoint, HookState, InputEvent, InputEventInfo, InputReply } from './win32Input';
 
 export const DICTATION_MIN_HOLD_MS = 300;
 export const DICTATION_MAX_HOLD_MS = 120_000;
@@ -80,13 +80,18 @@ export class DictationController {
   private clipTaken = false;
   /** F1: the foreground window at this session's chord-down ('' = unknown: nothing is typed). */
   private target = '';
+  /** BLOB-GAZE: where the user was typing at this session's chord-down (physical px), or null. */
+  private focus: FocusPoint | null = null;
 
   constructor(private readonly d: DictationDeps) {
-    d.helper.onEvent((ev, info) => { if (ev === 'down') this.onDown(info.hwnd); else this.onUp(info.synthetic === true); });
+    d.helper.onEvent((ev, info) => { if (ev === 'down') this.onDown(info.hwnd, info.focus); else this.onUp(info.synthetic === true); });
     d.helper.onHookState((s, err) => { this.hook = s; this.hookError = err; this.publish(); });
   }
 
   current(): DictationStatus { return this.status; }
+
+  /** BLOB-GAZE: the focused field's point (physical screen px) while a dictation is in flight, else null. */
+  focusPoint(): FocusPoint | null { return this.phase === 'idle' ? null : this.focus; }
 
   /** Turn the feature on or off (blob enabled AND dictation enabled). Idempotent. */
   apply(on: boolean): DictationStatus {
@@ -146,7 +151,7 @@ export class DictationController {
 
   // ---------------------------------------------------------------- internals
 
-  private onDown(hwnd: string | undefined): void {
+  private onDown(hwnd: string | undefined, focus?: FocusPoint): void {
     if (!this.enabled || this.phase !== 'idle') return;
     const ready = this.d.stt.ready();
     if (!ready.ok) {
@@ -157,6 +162,7 @@ export class DictationController {
     const session = ++this.session;
     this.clipTaken = false;
     this.target = typeof hwnd === 'string' && /^[1-9][0-9]*$/.test(hwnd) ? hwnd : '';
+    this.focus = focus ?? null;
     const r = this.d.capture.start(session);
     if (!r.ok) { this.fail(r.error); return; }
     this.clearError();

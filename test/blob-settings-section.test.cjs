@@ -48,12 +48,12 @@ test('CONFIG: a key-only save keeps freeflowEnabled and freeflowModel; the handl
   const h = main.match(/ipcMain\.handle\('freeflow:setConfig'[\s\S]*?\n\}\);/)[0];
   assert.match(h, /if \(typeof p\.enabled === 'boolean'\) next\.freeflowEnabled/);
   assert.match(h, /if \(typeof p\.model === 'string'\) next\.freeflowModel/);
+  assert.match(h, /if \(typeof p\.apiKey === 'string'\) next\.groqApiKey = p\.apiKey\.trim\(\)/, 'the key line itself (Jim N2)');
 });
 
 test('GUIDE: the link is the public set-up guide and passes openExternal\'s https-only rule', () => {
   const { BLOB_SETUP_GUIDE_URL } = loadTs('src/shared/blob.ts');
   assert.equal(BLOB_SETUP_GUIDE_URL, 'https://guppyos.com/blob/setup/');
-  assert.match(BLOB_SETUP_GUIDE_URL, /^(x-apple\.systempreferences:|https:\/\/)/);
 });
 
 test('RENDER: the Blob tab shows the guide button, a hidden key field, the Groq privacy line and the overlay settings', () => {
