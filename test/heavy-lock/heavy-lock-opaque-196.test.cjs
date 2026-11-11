@@ -92,9 +92,15 @@ K.loopLight = async (M = HJ) => {
   x.l.acquire('b', H, 'npm test', 'hb', false);
   x.images.set(50, 'bash.exe');
   x.l.noteCall('a', 'c1', 'for f in one two; do node --test test/$f.test.cjs | tail -3; done');
-  assert.equal((await ask(x, 'a', 1201, { files: ['test/one.test.cjs'] })).state, 'light', "A PER-FILE LOOP'S RUNS ARE LIGHT (while another agent holds)");
+  // HEAVY-PRELOAD-SHORT-TEST: the loop's runs are light by the call match itself (its `why`), not by the
+  // capped single-file rule, so they stay light even while an earlier run of the loop is alive.
+  x.alive.add(1201);
+  const one = await ask(x, 'a', 1201, { files: ['test/one.test.cjs'] });
+  assert.deepEqual([one.state, one.why], ['light', "the call's own node --test"], "A PER-FILE LOOP'S RUNS ARE LIGHT (while another agent holds)");
   x.tick(5 * 60_000);   // later in the same call: still open
-  assert.equal((await ask(x, 'a', 1202, { files: ['test/two.test.cjs'] })).state, 'light', 'EVERY RUN OF THE LOOP IS LIGHT, NOT ONLY THE FIRST');
+  const two = await ask(x, 'a', 1202, { files: ['test/two.test.cjs'] });
+  assert.deepEqual([two.state, two.why], ['light', "the call's own node --test"], 'EVERY RUN OF THE LOOP IS LIGHT, NOT ONLY THE FIRST');
+  x.alive.delete(1201);
   assert.equal((await ask(x, 'a', 1203, { files: ['a.cjs', 'b.cjs'] })).state, 'wait', 'a loop run matches single-file processes only');
   x.images.set(51, 'node.exe');
   assert.equal((await ask(x, 'a', 1204, { files: ['test/one.test.cjs'], ppid: 51 })).state, 'wait', "a process under another program is not the loop's");
@@ -111,10 +117,14 @@ K.visibleLight = async (M = HJ) => {
   x.l.noteCall('a', 'c1', 'node --test test/a.test.cjs');
   x.images.set(50, 'C:\\Program Files\\Git\\usr\\bin\\bash.exe');
   const a = await ask(x, 'a', 101, { files: ['test/a.test.cjs'] });
-  assert.equal(a.state, 'light', "THE CALL'S OWN SINGLE FILE IS LIGHT (while another agent holds)");
+  assert.deepEqual([a.state, a.why], ['light', "the call's own node --test"], "THE CALL'S OWN SINGLE FILE IS LIGHT (while another agent holds)");
   assert.equal(a.run, `101:${C0}`);
+  // HEAVY-PRELOAD-SHORT-TEST: the call's match is consumed; while its first run lives, a second
+  // single file of the same call is a fan-out and waits (after it, see heavy-preload-short-test).
+  x.alive.add(101);
   const again = await ask(x, 'a', 102, { files: ['test/a.test.cjs'] });
   assert.equal(again.state, 'wait', 'A CALL IS CONSUMED BY ONE TEST PROCESS');
+  x.alive.delete(101);
   x.l.noteCall('c', 'c2', 'node --test test/a.test.cjs');
   x.images.set(51, 'node.exe');
   const under = await ask(x, 'c', 103, { files: ['test/a.test.cjs'], ppid: 51 });

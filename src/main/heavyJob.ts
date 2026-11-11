@@ -399,6 +399,10 @@ export function testInvocation(command: string): string[][] | null {
   return r.launches || !r.runs.length ? null : r.runs;
 }
 export const ANY_TEST_FILE = '<any>';
+/** HEAVY-PRELOAD-SHORT-TEST: a call whose text shows a `--test` run, whatever testInvocation reads of it
+ *  (node by path or variable, `$(...)` beside it, a file run more than once). */
+export const SHOWN_TEST = '<shown>';
+const SHOWS_TEST = /(^|[\s"'])--test(?![-\w])/;
 /** Programs that never start a node --test of their own (beside a call's own run, they leave it its run). */
 const QUIET_BINS = new Set(['cd', 'pushd', 'popd', 'export', 'unset', 'set', 'local', 'read', 'shift', 'exit', 'return', 'break', 'continue',
   'echo', 'printf', 'date', 'sleep', 'true', 'false', 'test', '[', '[[', 'grep', 'egrep', 'fgrep', 'rg', 'tail', 'head', 'cat', 'wc', 'sed',
@@ -2478,6 +2482,12 @@ export const HEAVY_LEASE_POLL_MS = 25_000;
  *  prefix the classifier strips): Jim MUST A. A node, python or any other program is not. */
 const CALL_PARENT = /^(bash|sh|zsh|dash|cmd|powershell|pwsh|env|timeout|nice|nohup|setsid|time)(\.exe)?$/i;
 const normFile = (f: string): string => f.replace(/\\/g, '/').replace(/^(\.\/)+/, '').toLowerCase();
+/** HEAVY-PRELOAD-SHORT-TEST: how many light single-file test processes of one agent may run at once
+ *  without a call that shows them. One at a time is a short run; more at once is a fan-out (a script
+ *  backgrounding `node --test f &` per file), which is heavy. */
+export const SINGLE_FILE_LIGHT_MAX = 1;
+/** One named test file: a script path, not a directory or a glob node expands (both are suites). */
+const ONE_TEST_FILE = (f: string): boolean => /\.[cm]?[jt]sx?$/i.test(f) && !/[*?[\]{}]/.test(f);
 
 export const HEAVY_TTL_MS = 60 * 60_000;
 /** HEAVY-LOCK-SELF-WAIT: how long a freed slot is kept for the queued agent it was offered to.
@@ -2568,7 +2578,7 @@ export class HeavyJobLock {
   /** Held leases by id ('lease:<pid>:<createdMs>'): released by the preload at exit, or by the scan. */
   private readonly leases = new Map<string, { agentId: string; pid: number; createdMs: number; run: string }>();
   /** Classified runs ('<pid>:<createdMs>') a nested test process may name in GUPPY_TEST_RUN (MUST B). */
-  private readonly runs = new Map<string, { agentId: string; held: boolean }>();
+  private readonly runs = new Map<string, { agentId: string; held: boolean; single?: boolean }>();
   /** Agents queued only by a waiting test process (no PreToolUse deny told them to wait). */
   private readonly leaseOnly = new Set<string>();
   private timer: unknown = null;
@@ -3224,10 +3234,12 @@ export class HeavyJobLock {
   noteCall(agentId: string, callId: string, command: string): void {
     // A run with no files is node's own discovery (a suite): never VISIBLE.
     const runs = (testInvocation(command) ?? []).filter((files) => files.length);
-    if (!runs.length) return;
+    const shown = SHOWS_TEST.test(command);
+    if (!runs.length && !shown) return;
     const t = this.now();
     const list = (this.testCalls.get(agentId) ?? []).filter((c) => this.callOpen(c, t));
     for (const files of runs) list.push({ callId, files: files.map(normFile), start: t, end: null, used: false });
+    if (shown) list.push({ callId, files: [SHOWN_TEST], start: t, end: null, used: false });
     this.testCalls.set(agentId, list.slice(-16));
   }
 
@@ -3240,7 +3252,7 @@ export class HeavyJobLock {
   private callOpen(c: { start: number; end: number | null; files?: string[] }, t: number): boolean {
     // A loop's run (`node --test test/$f.test.cjs`) starts its processes all through the call, so it
     // matches while the call is open (bounded, if its PostToolUse never comes).
-    if (c.files?.length === 1 && c.files[0] === ANY_TEST_FILE) return c.end === null && t - c.start <= HEAVY_LOOP_CALL_MS;
+    if (c.files?.length === 1 && (c.files[0] === ANY_TEST_FILE || c.files[0] === SHOWN_TEST)) return c.end === null && t - c.start <= HEAVY_LOOP_CALL_MS;
     return t - c.start <= HEAVY_CALL_SPAWN_MS && (c.end === null || t - c.end <= HEAVY_CALL_SLACK_MS);
   }
 
@@ -3294,9 +3306,17 @@ export class HeavyJobLock {
       }
       suite = true;
     }
+    const single = Array.isArray(r.files) && r.files.length === 1;
     if (!suite && await this.visible(agentId, r)) {
-      this.runs.set(run, { agentId, held: this.holders.has(agentId) });
+      this.runs.set(run, { agentId, held: this.holders.has(agentId), single });
       return { state: 'light', run, why: "the call's own node --test" };
+    }
+    // HEAVY-PRELOAD-SHORT-TEST: one named test file under a shell is light even when its call does not
+    // show it (node by path or variable, a loop, `$(...)` beside it), one at a time per agent.
+    if (!suite && await this.singleFile(agentId, r)) {
+      this.runs.set(run, { agentId, held: this.holders.has(agentId), single: true });
+      this.log({ kind: 'heavy-lock', action: 'lease-single', agentId, pid });
+      return { state: 'light', run, why: 'one test file under a shell' };
     }
     const kind: HeavyKind = suite ? 'suite' : 'bench';
     const cls: HeavyClass = { heavy: true, kind, why: suite ? 'a suite run (heavy preload)' : 'a node --test its call does not show (heavy preload)' };
@@ -3378,6 +3398,25 @@ export class HeavyJobLock {
     if (!c) return false;
     if (!loop(c)) c.used = true;
     return true;
+  }
+
+  /** HEAVY-PRELOAD-SHORT-TEST: a test process of exactly one named file, while an open call of this
+   *  agent SHOWS a `--test` run, its parent is a shell (or a pass-through prefix), and no other light
+   *  single-file run of this agent is alive. A hidden wrapper (`bash x.sh`, `node gen-mut.cjs`: no
+   *  `--test` in the call), a node or python parent, a glob, a directory, several files and a
+   *  parallel fan-out stay heavy. */
+  private async singleFile(agentId: string, r: HeavyLeaseRequest): Promise<boolean> {
+    const files = Array.isArray(r.files) ? r.files : [];
+    if (files.length !== 1 || typeof files[0] !== 'string' || !ONE_TEST_FILE(files[0])) return false;
+    if (!this.d.parentImage || typeof r.ppid !== 'number') return false;
+    const t = this.now();
+    if (!(this.testCalls.get(agentId) ?? []).some((c) => c.files[0] === SHOWN_TEST && this.callOpen(c, t))) return false;
+    let live = 0;
+    for (const [k, v] of this.runs) if (v.agentId === agentId && v.single && this.runAlive(k)) live++;
+    if (live >= SINGLE_FILE_LIGHT_MAX) { this.log({ kind: 'heavy-lock', action: 'lease-single-busy', agentId, live }); return false; }
+    let image: string | null;
+    try { image = await this.d.parentImage(r.ppid); } catch { image = null; }
+    return CALL_PARENT.test((image ?? '').replace(/\\/g, '/').split('/').pop()!);
   }
 
   private runAlive(run: string): boolean {
