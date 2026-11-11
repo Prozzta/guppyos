@@ -2486,6 +2486,11 @@ const normFile = (f: string): string => f.replace(/\\/g, '/').replace(/^(\.\/)+/
  *  without a call that shows them. One at a time is a short run; more at once is a fan-out (a script
  *  backgrounding `node --test f &` per file), which is heavy. */
 export const SINGLE_FILE_LIGHT_MAX = 1;
+/** HEAVY-LOOP-LIGHT-CAP: how many test processes one call may run light, by every light path that
+ *  ties a process to its call (its own run, a loop's run, a shown single file). A loop over a few files
+ *  stays light; a loop over the suite turns its later files into leases, so the slot, not only the hook
+ *  layer's deny, stops a whole-suite loop. A count, not a runtime: a light run never says it ended. */
+export const HEAVY_CALL_LIGHT_MAX = 10;
 /** One named test file: a script path, not a directory or a glob node expands (both are suites). */
 const ONE_TEST_FILE = (f: string): boolean => /\.[cm]?[jt]sx?$/i.test(f) && !/[*?[\]{}]/.test(f);
 
@@ -2575,6 +2580,8 @@ export class HeavyJobLock {
   /** HEAVY-LOCK-OPAQUE-SCRIPT-196: each agent's recent calls that ARE one `node --test` of named files
    *  (testInvocation), each consumed by the one test process it starts (Jim MUST A). */
   private readonly testCalls = new Map<string, Array<{ callId: string; files: string[]; start: number; end: number | null; used: boolean }>>();
+  /** HEAVY-LOOP-LIGHT-CAP: light test processes granted per call, keyed `${agentId}\0${callId}`. */
+  private readonly callLight = new Map<string, number>();
   /** Held leases by id ('lease:<pid>:<createdMs>'): released by the preload at exit, or by the scan. */
   private readonly leases = new Map<string, { agentId: string; pid: number; createdMs: number; run: string }>();
   /** Classified runs ('<pid>:<createdMs>') a nested test process may name in GUPPY_TEST_RUN (MUST B). */
@@ -3240,7 +3247,23 @@ export class HeavyJobLock {
     const list = (this.testCalls.get(agentId) ?? []).filter((c) => this.callOpen(c, t));
     for (const files of runs) list.push({ callId, files: files.map(normFile), start: t, end: null, used: false });
     if (shown) list.push({ callId, files: [SHOWN_TEST], start: t, end: null, used: false });
-    this.testCalls.set(agentId, list.slice(-16));
+    const kept = list.slice(-16);
+    this.testCalls.set(agentId, kept);
+    // HEAVY-LOOP-LIGHT-CAP: forget the light counts of calls no longer kept.
+    const ids = new Set(kept.map((c) => c.callId));
+    for (const k of this.callLight.keys()) if (k.startsWith(`${agentId}\0`) && !ids.has(k.slice(agentId.length + 1))) this.callLight.delete(k);
+  }
+
+  /** HEAVY-LOOP-LIGHT-CAP: may this call run one more test process light? */
+  private lightLeft(agentId: string, callId: string): boolean {
+    return (this.callLight.get(`${agentId}\0${callId}`) ?? 0) < HEAVY_CALL_LIGHT_MAX;
+  }
+
+  private spendLight(agentId: string, callId: string): void {
+    const k = `${agentId}\0${callId}`;
+    const n = (this.callLight.get(k) ?? 0) + 1;
+    this.callLight.set(k, n);
+    if (n === HEAVY_CALL_LIGHT_MAX) this.log({ kind: 'heavy-lock', action: 'call-light-spent', agentId, callId, light: n });
   }
 
   /** PostToolUse: the call's window closes (a test process may still report for HEAVY_CALL_SLACK_MS). */
@@ -3387,8 +3410,9 @@ export class HeavyJobLock {
     const t = this.now();
     // Jim MUST 1 (b): a loop's run matches any single-file process while its call is open, never consumed.
     const loop = (c: { files: string[] }): boolean => c.files.length === 1 && c.files[0] === ANY_TEST_FILE && files.length === 1;
-    const match = (): { used: boolean; files: string[] } | undefined => (this.testCalls.get(agentId) ?? []).find((c) => this.callOpen(c, t)
-      && (loop(c) || (!c.used && c.files.length === files.length && c.files.every((f, i) => f === files[i]))));
+    const match = (): { callId: string; used: boolean; files: string[] } | undefined => (this.testCalls.get(agentId) ?? []).find((c) => this.callOpen(c, t)
+      && (loop(c) || (!c.used && c.files.length === files.length && c.files.every((f, i) => f === files[i])))
+      && this.lightLeft(agentId, c.callId));
     if (!match() || !this.d.parentImage || typeof r.ppid !== 'number') return false;
     let image: string | null;
     try { image = await this.d.parentImage(r.ppid); } catch { image = null; }
@@ -3397,6 +3421,7 @@ export class HeavyJobLock {
     const c = match();
     if (!c) return false;
     if (!loop(c)) c.used = true;
+    this.spendLight(agentId, c.callId);
     return true;
   }
 
@@ -3410,13 +3435,17 @@ export class HeavyJobLock {
     if (files.length !== 1 || typeof files[0] !== 'string' || !ONE_TEST_FILE(files[0])) return false;
     if (!this.d.parentImage || typeof r.ppid !== 'number') return false;
     const t = this.now();
-    if (!(this.testCalls.get(agentId) ?? []).some((c) => c.files[0] === SHOWN_TEST && this.callOpen(c, t))) return false;
+    // HEAVY-LOOP-LIGHT-CAP: the newest open shown call with light runs left pays for this one.
+    const call = (this.testCalls.get(agentId) ?? []).filter((c) => c.files[0] === SHOWN_TEST && this.callOpen(c, t) && this.lightLeft(agentId, c.callId)).pop();
+    if (!call) return false;
     let live = 0;
     for (const [k, v] of this.runs) if (v.agentId === agentId && v.single && this.runAlive(k)) live++;
     if (live >= SINGLE_FILE_LIGHT_MAX) { this.log({ kind: 'heavy-lock', action: 'lease-single-busy', agentId, live }); return false; }
     let image: string | null;
     try { image = await this.d.parentImage(r.ppid); } catch { image = null; }
-    return CALL_PARENT.test((image ?? '').replace(/\\/g, '/').split('/').pop()!);
+    if (!CALL_PARENT.test((image ?? '').replace(/\\/g, '/').split('/').pop()!)) return false;
+    this.spendLight(agentId, call.callId);
+    return true;
   }
 
   private runAlive(run: string): boolean {
