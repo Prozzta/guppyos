@@ -87,7 +87,31 @@ test('F1 (B3): keep-open is the DEFAULT; keepOpen:false holds no descriptor betw
 
 test('F1 (B1/B3): a HiveManager holds its log open by default; dispose() releases it so the hive folder can be deleted (reset) or copied', { skip: process.platform !== 'win32' }, async () => {
   const home = dir();
-  const hive = new HiveManager(() => home);
+  // The host-independent check (Jim M2 on GUPPY-NODE-LTS): every 'a' descriptor the manager opens
+  // under its home is seen open before dispose() and closed by it. appendLog.ts calls openSync and
+  // closeSync through the node:fs module object, so this spy sees them. The rm below only bites
+  // where an open file blocks a delete (Node 20, the app's Electron); on Node 24 this is the check.
+  const held = new Map();   // fd -> path, for append opens under home not yet closed
+  const { openSync, closeSync } = fs;
+  fs.openSync = function (p, flags, ...rest) {
+    const fd = openSync.call(this, p, flags, ...rest);
+    if (flags === 'a' && path.resolve(String(p)).startsWith(path.resolve(home) + path.sep)) held.set(fd, String(p));
+    return fd;
+  };
+  fs.closeSync = function (fd) { held.delete(fd); return closeSync.call(this, fd); };
+  let hive;
+  try {
+    hive = new HiveManager(() => home);
+    await hive.ensureAgent({ id: 'a1', name: 'A', provider: 'claude', cwd: home });
+    hive.appendLog({ kind: 'x' });
+    assert.ok([...held.values()].some((p) => path.basename(p) === 'log.jsonl'), 'the manager holds log.jsonl open (keepOpen is the default)');
+    hive.dispose();
+    assert.deepEqual([...held.values()], [], 'MUTANT: dispose() left append descriptors open (closeAppendFiles skipped)');
+  } finally {
+    fs.openSync = openSync; fs.closeSync = closeSync;
+  }
+  // A fresh manager for the delete check, which the spy has already proven releases on dispose.
+  hive = new HiveManager(() => home);
   await hive.ensureAgent({ id: 'a1', name: 'A', provider: 'claude', cwd: home });
   hive.appendLog({ kind: 'x' });
   // Without dispose, Windows leaves the open file delete-pending and the rm fails: the reset bug.
