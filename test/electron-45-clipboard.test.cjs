@@ -27,11 +27,13 @@ test('Electron 45 clipboard IPC awaits the main-process asynchronous API', () =>
   assert.doesNotMatch(main, /clipboard\.readImage\(|app:readClipboardSync|sendSync/);
 });
 
-test('sandboxed preload and terminal paste use only the asynchronous clipboard bridge', () => {
+test('sandboxed preload keeps the async bridge while terminal paste stays native', () => {
   assert.match(preload, /readClipboard: \(\): Promise<string> =>\s*ipcRenderer\.invoke\('app:readClipboard'\)/);
   assert.doesNotMatch(preload, /readClipboardSync:|app:readClipboardSync/);
   assert.doesNotMatch(terminalPool, /readClipboardSync|paste-sync/);
-  assert.match(terminalPool, /window\.cth\.readClipboard\(\)\.then\(\(t\) => \{[\s\S]*?markHumanOrigin\(ptyId, 'paste-async'\)/);
+  assert.doesNotMatch(terminalPool, /window\.cth\.readClipboard|paste-async/);
+  assert.match(terminalPool, /key === 'v' && ev\.shiftKey\)[\s\S]*?return true;/);
+  assert.match(terminalPool, /host\.addEventListener\('contextmenu',[\s\S]*?if \(copySelection\(\)\) \{[\s\S]*?ev\.preventDefault\(\)/);
 });
 
 test('Electron 45 display-capture permission is denied until Guppy owns a capture feature', () => {

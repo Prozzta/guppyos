@@ -26,7 +26,7 @@ import {
   classifyPathToken, isPathToken, pathTokenMatcher, stripPathToken, type PathAction
 } from '@shared/terminalPaths';
 import {
-  attachInputOrigin, classifyOutbound, endInputWindowForOutput, markHumanOrigin, resetInputWindow,
+  attachInputOrigin, classifyOutbound, endInputWindowForOutput, resetInputWindow,
   runInputOriginSelfTest, type ProbeConsumer
 } from './inputOrigin';
 import type { InputOrigin } from '@shared/inputOrigin';
@@ -281,19 +281,6 @@ export function acquireTerminal(ptyId: string, theme?: ThemeMap, fontSize = 14):
     if (text) void window.cth.copyToClipboard(text);
     return true;
   };
-  /** Paste through Electron's asynchronous clipboard API. */
-  const pasteClipboard = (): void => {
-    if (entry.exited) return;
-    // PROVENANCE, EXPLICITLY. `term.paste()` is a public method that
-    // makes xterm emit data with NO DOM paste event (browser/Terminal.ts:890-891 ->
-    // Clipboard.ts:54), so the DOM half of inputOrigin cannot see it. Mark the
-    // asynchronous emission at code we own, immediately before it is emitted.
-    void window.cth.readClipboard().then((t) => {
-      if (!t || entry.exited) return;
-      markHumanOrigin(ptyId, 'paste-async');
-      term.paste(t);
-    });
-  };
   term.attachCustomKeyEventHandler((ev) => {
     if (ev.type !== 'keydown') return true;
     if (!(ev.ctrlKey || ev.metaKey)) return true;
@@ -306,16 +293,22 @@ export function acquireTerminal(ptyId: string, theme?: ThemeMap, fontSize = 14):
       return false;
     }
     if (key === 'v' && ev.shiftKey) {
-      pasteClipboard();
-      ev.preventDefault();
-      return false;
+      // Do not bridge to main here. Dictation tools temporarily replace the
+      // clipboard, send this key, and restore it before an IPC promise can read.
+      // Chromium's trusted paste event reads clipboardData within this gesture;
+      // xterm owns that event on its textarea and classifies it as human input.
+      return true;
     }
     return true;
   });
   host.addEventListener('contextmenu', (ev) => {
-    ev.preventDefault();
-    if (copySelection()) { term.clearSelection(); return; }
-    pasteClipboard();
+    if (copySelection()) {
+      ev.preventDefault();
+      term.clearSelection();
+    }
+    // Without a selection, retain Chromium's native context menu. Its Paste
+    // command is a trusted native clipboard event, not a delayed IPC read, so an
+    // external dictation tool cannot race a restored clipboard value.
   });
 
   // Answer the terminal-colour queries (OSC 10 foreground, OSC 11 background).

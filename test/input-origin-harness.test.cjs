@@ -27,6 +27,25 @@ test('INPUT ORIGIN on a rendered terminal: regimes, exclusions, programmatic pas
   assert.equal(r.selfTest, 'pass', 'the startup self-test proves the reconstruction on this build');
   assert.equal(r.selfTestLeakedBytes, 0, 'NOT ONE BYTE from the self-test reached writePty');
 
+  // Dictation tools restore the clipboard immediately after Ctrl+Shift+V or a
+  // right-click.  A cancelled event followed by invoke('app:readClipboard') races
+  // that restore and pastes the old copy.  These gestures must reach Chromium's
+  // native paste route, which reads clipboardData inside the user gesture.
+  assert.equal(r.externalDictationPaste.shortcutAllowed, true,
+    'Ctrl+Shift+V is not cancelled for an asynchronous clipboard IPC read');
+  assert.equal(r.externalDictationPaste.shortcutReads, 0,
+    'Ctrl+Shift+V does not read the restored clipboard through the bridge');
+  assert.equal(r.externalDictationPaste.shortcutPasted, '',
+    'Ctrl+Shift+V does not inject the stale previous clipboard text');
+  assert.equal(r.externalDictationPaste.rightClickAllowed, true,
+    'right-click without a selection leaves Chromium’s native Paste menu available');
+  assert.equal(r.externalDictationPaste.rightClickReads, 0,
+    'right-click does not schedule an asynchronous clipboard read');
+  assert.equal(r.externalDictationPaste.rightClickPasted, '',
+    'right-click does not inject the stale previous clipboard text');
+  assert.equal(r.nativeCtrlVPasteAllowed, true, 'ordinary Ctrl+V remains native paste');
+  assert.equal(r.nativeCtrlVPasteReads, 0, 'ordinary Ctrl+V still bypasses the bridge');
+
   // Same-tick regime: a keyboard event classifies HUMAN and the window is shut a tick later.
   assert.equal(r.keyboard.origin, 'HUMAN', `keyboard -> HUMAN (data ${JSON.stringify(r.keyboard.data)})`);
   assert.equal(r.keyboardWindowClosed, true, 'and the same-tick window closed with its dispatch');
