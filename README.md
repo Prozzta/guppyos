@@ -1,3 +1,6 @@
+> [!WARNING]
+> **Do not install 1.1.104.** It can freeze at startup on setups with a lot of history. Use [1.1.103](https://github.com/Prozzta/guppyos/releases/tag/v1.1.103). If you already installed 1.1.104 and it freezes: download the 1.1.103 setup from [the 1.1.103 release](https://github.com/Prozzta/guppyos/releases/tag/v1.1.103) and run it over the top; your data is kept. A fixed release is coming.
+
 <div align="center">
 
 <img src="./.github/media/guppy-logo.png" alt="Guppy logo: Speck, from the TES theme" width="340">
@@ -12,7 +15,7 @@ the subscriptions you already pay for, on their hourly limits. It turns the term
 CLIs you already run into a crew that keeps working while you're away, coordinated by a
 captain on your own machine.
 
-**Actively maintained.** Latest release: **v1.1.104 (2026-11-11)**, with a Windows x64
+**Actively maintained.** Latest release: **v1.1.103 (2026-10-30)** (1.1.104 is paused), with a Windows x64
 installer; macOS and Linux build from source.<br>
 [Download](https://github.com/Prozzta/guppyos/releases/latest) ·
 [Website](https://guppyos.com) · [Changelog](./CHANGELOG.md)
@@ -29,7 +32,7 @@ product concept, the office floor, and the foundation are upstream's work.
 
 <p>
   <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-F4D35E.svg?style=flat-square&labelColor=6E1423"></a>
-  <img alt="Version: 1.1.104" src="https://img.shields.io/badge/version-1.1.104-F4D35E.svg?style=flat-square&labelColor=6E1423">
+  <img alt="Version: 1.1.103" src="https://img.shields.io/badge/version-1.1.103-F4D35E.svg?style=flat-square&labelColor=6E1423">
   <a href="https://github.com/HarnessMD/munder-difflin"><img alt="Fork of HarnessMD/munder-difflin" src="https://img.shields.io/badge/fork%20of-HarnessMD%2Fmunder--difflin-F4F1EA.svg?style=flat-square&labelColor=6E1423"></a>
 </p>
 
