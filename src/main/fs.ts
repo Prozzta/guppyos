@@ -156,6 +156,7 @@ const WRITE_FLAGS = constants.O_WRONLY | constants.O_CREAT | (constants.O_NOFOLL
  * deliberately no fallback to the path-only check: that check is the gap this closes.
  */
 const HANDLE_ADDON = 'guppy_fs_handle.node';
+const HARDLINK_REFUSED = 'file has more than one hard link: write refused';
 type HandleAddon = { finalPath(fd: number): string };
 let handleAddon: HandleAddon | null = null;
 let handleAddonError: string | null = null;
@@ -400,6 +401,14 @@ export async function writeFileText(root: string, rel: string, content: string):
     // The write itself is refused and nothing is written or truncated there. Removing that file
     // afterwards would be another path operation, raceable the same way, so it is left alone.
     fh = await openConfined(root, abs, WRITE_FLAGS, 0o666);
+    // FS-CONTAINMENT-HARDLINK: a hard link is the same file under a second name, so one planted
+    // in the workspace for a file outside it passes every path and handle check (the handle
+    // reports the name it was opened by). An ordinary user can make one on Windows and, for files
+    // they own, on POSIX. Writes refuse any file with more than one link, checked through the
+    // handle before anything is truncated. Reads stay allowed (god 772f98): package managers such
+    // as pnpm hard-link into ordinary trees, and refusing to show those would break browsing.
+    // RESIDUAL: a hard-linked file outside can still be READ through its in-workspace name.
+    if ((await fh.stat()).nlink > 1) throw new Error(HARDLINK_REFUSED);
     await fh.truncate(0);
     await fh.writeFile(content, 'utf8');
     return { ok: true, path: abs };

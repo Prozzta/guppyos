@@ -549,3 +549,28 @@ test('if the handle check cannot load, every confined open is refused, loudly', 
   assert.equal(errors.length, 1, 'the failure is logged once, not per call');
   assert.match(errors[0], /file access disabled: the handle check could not load/);
 }));
+
+// ─── FS-CONTAINMENT-HARDLINK: a hard link is the outside file under an inside name ──
+
+test('a write to a file with more than one hard link is refused, and nothing is touched', () =>
+  withWorkspace(KINDS[0], async ({ root, outside }) => {
+    // No privilege is needed for this on Windows (or on POSIX for one's own files), and no path
+    // or handle check can see it: the link IS a name inside the workspace.
+    const target = path.join(outside, 'linked.txt');
+    fs.writeFileSync(target, SECRET);
+    fs.linkSync(target, path.join(root, 'linked.txt'));
+    const res = await writeFileText(root, 'linked.txt', 'clobbered\n');
+    assert.equal(res.ok, false, 'a hard-linked file must not be written');
+    assert.equal(res.error, 'file has more than one hard link: write refused');
+    assert.equal(fs.readFileSync(target, 'utf8'), SECRET, 'the outside file must be neither truncated nor written');
+
+    // Reads stay allowed (god 772f98), so a hard-linked tree can still be browsed.
+    const read = await readFileText(root, 'linked.txt');
+    assert.equal(read.ok, true, read.ok ? '' : read.error);
+
+    // Once the second name is gone, the file is an ordinary single-link file again.
+    fs.unlinkSync(target);
+    const after = await writeFileText(root, 'linked.txt', 'mine now\n');
+    assert.equal(after.ok, true, after.ok ? '' : after.error);
+    assert.equal(fs.readFileSync(path.join(root, 'linked.txt'), 'utf8'), 'mine now\n');
+  }));
