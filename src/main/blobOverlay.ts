@@ -19,7 +19,7 @@
  * Electron is injected (deps), so this module loads and is tested without it.
  */
 import {
-  BLOB_COMING_SOON, BLOB_DISABLED, BLOB_SLOTS, blobSettingsFrom, sanitizeBlobPatch,
+  BLOB_COMING_SOON, isBlobAppAction, type BlobAppAction, BLOB_DISABLED, BLOB_SLOTS, blobSettingsFrom, sanitizeBlobPatch,
   type BlobActionResult, type BlobConfigFields, type BlobPosition, type BlobSettings, type BlobSlot, type BlobStatus,
 } from '../shared/blob';
 import { DICTATION_OFF, type DictationStatus } from '../shared/dictation';
@@ -68,6 +68,9 @@ export interface BlobOverlayDeps {
   log?(row: Record<string, unknown>): void;
   /** GUPPY-DICTATION-P2: called at the end of every apply() with the settings in force. */
   onApplied?(settings: BlobSettings): void;
+  /** BLOB-MESSAGE: show + focus the Guppy window and ask it to open `action`'s dialog. False when
+   *  there is no window to open it in. */
+  openInApp?(action: BlobAppAction): boolean;
 }
 
 /** The collapsed blob and the open ring, in DIPs. */
@@ -183,6 +186,13 @@ export class BlobOverlayController {
     const s = slot as BlobSlot;
     if (BLOB_DISABLED.includes(s)) return { ok: true, slot: s, state: 'disabled' };
     if (BLOB_COMING_SOON.includes(s)) return { ok: true, slot: s, state: 'coming-soon' };
+    if (isBlobAppAction(s)) {
+      if (!this.d.openInApp?.(s)) return { ok: false, error: 'the Guppy window is not available' };
+      this.d.log?.({ kind: 'blob-open-in-app', action: s });
+      this.setRing(false);
+      this.push();
+      return { ok: true, slot: s, state: 'done', status: this.status() };
+    }
     if (s === 'invisible') {
       this.d.writeConfig({ blobInvisible: !this.settings.invisible });
       this.settings = blobSettingsFrom(this.d.readConfig());
