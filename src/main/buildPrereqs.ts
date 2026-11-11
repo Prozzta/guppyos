@@ -10,6 +10,7 @@ import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import {
   buildToolCatalog,
+  BUILD_CLANGCL_ID,
   BUILD_NODE_MAJOR,
   BUILD_PYTHON,
   BUILD_VS_REQUIRES,
@@ -37,23 +38,36 @@ export interface BuildProbeDeps {
 }
 
 const PY_VERSION_ARGS = ['-c', 'import sys; print(sys.executable); print("%d.%d.%d" % sys.version_info[:3])'];
-const NODE_ARGS = ['-e', 'process.stdout.write(JSON.stringify([process.versions.node, !!(process.config.variables || {}).enable_pgo_use, process.execPath]))'];
+// node_with_ltcg is a boolean in process.config but a string in a headers config.gypi: both count.
+const NODE_ARGS = ['-e', 'const v = process.config.variables || {}; process.stdout.write(JSON.stringify([process.versions.node, !!v.enable_pgo_use, process.execPath, Number(v.clang) || 0, String(v.node_with_ltcg) === "true"]))'];
 
 type Row = Pick<ToolStatus, 'found' | 'path'> & Partial<Pick<ToolStatus, 'unknown' | 'detail' | 'warn'>> & { installCommand?: string };
 
-/** The Node on PATH: its major, and whether it was built with PGO (the Node 26 node.profdata break). */
-export async function probeNode(deps: BuildProbeDeps): Promise<Row> {
+/** The probed Node's build settings: clang decides the ClangCL row; null when the probe could not
+ *  tell (no Node, a timeout, or output without it), which keeps the row. */
+export type NodeProbe = Row & { clang: number | null };
+
+/** The Node on PATH: its major, whether it was built with PGO (the Node 26 node.profdata break),
+ *  and with clang-cl (process.config clang) plus LTCG (node_with_ltcg). */
+export async function probeNode(deps: BuildProbeDeps): Promise<NodeProbe> {
   const r = await deps.exec('node', NODE_ARGS);
-  if (r.timedOut) return { found: false, path: null, unknown: true };
-  if (!r.ok) return { found: false, path: null };
-  let version = '', pgo = false, execPath: string | null = null;
-  try { [version, pgo, execPath] = JSON.parse(r.stdout.trim()) as [string, boolean, string]; }
-  catch { return { found: false, path: null }; }
+  if (r.timedOut) return { found: false, path: null, unknown: true, clang: null };
+  if (!r.ok) return { found: false, path: null, clang: null };
+  let version = '', pgo = false, execPath: string | null = null, clang: unknown, ltcg = false;
+  try { [version, pgo, execPath, clang, ltcg] = JSON.parse(r.stdout.trim()) as [string, boolean, string, number, boolean]; }
+  catch { return { found: false, path: null, clang: null }; }
   const major = Number(String(version).split('.')[0]);
   const warns: string[] = [];
   if (major !== BUILD_NODE_MAJOR) warns.push(`Node ${version} is on PATH; the build needs Node ${BUILD_NODE_MAJOR}.`);
   if (pgo) warns.push('This Node was built with PGO (enable_pgo_use), which breaks native module builds.');
-  return { found: true, path: execPath || null, detail: `v${version}`, ...(warns.length ? { warn: warns.join(' ') } : {}) };
+  const clangNum = typeof clang === 'number' ? clang : null;
+  // Official Node 24 Windows: clang 1 + LTCG. node-gyp then hands /LTCG:INCREMENTAL to llvm-lib,
+  // which rejects it, so an addon with no prebuild for this Node fails. Guppy's own modules use
+  // prebuilds or Electron's headers, so this is information on the row, not a CHECK.
+  const lto = deps.platform === 'win32' && clangNum === 1 && ltcg === true
+    ? ' · clang-cl + LTCG: a native module with no prebuild for this Node will not link (llvm-lib rejects /LTCG)'
+    : '';
+  return { found: true, path: execPath || null, detail: `v${version}${lto}`, clang: clangNum, ...(warns.length ? { warn: warns.join(' ') } : {}) };
 }
 
 interface PyHit { exe: string; version: string; via: string }
@@ -187,11 +201,17 @@ export async function buildPrereqStatus(deps: BuildProbeDeps): Promise<ToolStatu
     ? `${deps.env['ProgramFiles(x86)']}\\Microsoft Visual Studio\\Installer\\setup.exe`
     : VS_SETUP_DEFAULT;
 
-  return Promise.all(specs.map(async (spec: ToolSpec): Promise<ToolStatus> => {
+  // The Node first: its clang setting decides whether the ClangCL row is shown at all.
+  let node: NodeProbe = { found: false, path: null, clang: null };
+  try { node = await probeNode(deps); } catch { /* a probe must never take the panel down */ }
+  const { clang, ...nodeRow } = node;
+  const shown = specs.filter((s) => s.id !== BUILD_CLANGCL_ID || clang !== 0);
+
+  return Promise.all(shown.map(async (spec: ToolSpec): Promise<ToolStatus> => {
     const installCommand = fill(win ? spec.install.win32 : spec.install.posix, setup, vsPath);
     let row: Row = { found: false, path: null };
     try {
-      if (spec.id === 'build:node') row = await probeNode(deps);
+      if (spec.id === 'build:node') row = nodeRow;
       else if (spec.id === 'build:python') row = await probePython(deps);
       else if (spec.id in BUILD_VS_REQUIRES) {
         if (hasVswhere) {
