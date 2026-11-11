@@ -17,8 +17,9 @@ test('Electron rebuild tooling is pinned and better-sqlite3 is on the Node 24 li
   assert.equal(pkg.devDependencies.electron, '45.3.0');
   assert.equal(pkg.devDependencies['@electron/rebuild'], '4.2.1');
   assert.equal(pkg.dependencies['better-sqlite3'], '13.0.3');
-  // npm installs Electron's package lifecycle itself; our root lifecycle must
-  // rebuild the native addons against that installed Electron ABI.
+  // Guppy's install-script policy may deliberately skip dependency lifecycle
+  // scripts, so our root lifecycle installs Electron before rebuilding addons.
+  assert.match(pkg.scripts.postinstall, /node node_modules\/electron\/install\.js/);
   assert.match(pkg.scripts.postinstall, /electron-rebuild -f/);
   assert.match(builder, /node_modules\/better-sqlite3\/\*\*/);
 });
