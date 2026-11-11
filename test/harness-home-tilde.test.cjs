@@ -31,7 +31,7 @@ require.cache[electron] = {
 
 const { ensureHarnessHome, readConfig } = loadTs('src/main/config.ts');
 
-test.after(() => { fs.rmSync(userData, { recursive: true, force: true }); });
+test.after(() => { require('./load-ts.cjs').closeConfigWatchers(); fs.rmSync(userData, { recursive: true, force: true }); });
 
 test('readConfig serves a pre-fix config with every ~ expanded (the upgrade path)', () => {
   const home = os.homedir();

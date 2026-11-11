@@ -39,7 +39,7 @@ const {
 const { ringSlotPosition, RING_SLOTS } = loadTs('src/renderer/src/blob/ring.ts');
 const { sanitizeBlobPatch, isValidBlobHotkey, blobSettingsFrom, BLOB_DEFAULT_HOTKEY, BLOB_SLOTS } = loadTs('src/shared/blob.ts');
 
-test.after(() => fs.rmSync(jail, { recursive: true, force: true }));
+test.after(() => { require('./load-ts.cjs').closeConfigWatchers(); fs.rmSync(jail, { recursive: true, force: true }); });
 
 const configFile = () => path.join(userData, 'config.json');
 const onDisk = () => JSON.parse(fs.readFileSync(configFile(), 'utf8'));
