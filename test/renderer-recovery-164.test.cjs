@@ -429,8 +429,15 @@ test('AUDIT (2) wiring: with the renderer gone, close and before-quit ask native
   const idx = read('src/main/index.ts');
   // Layer-b test infrastructure (MUNDER_HIDDEN, dev only): the focus goes through surfaceWindow, which a hidden run skips; otherwise unchanged.
   assert.match(idx, /if \(rendererGone\(wc\)\) \{ quitOrCancelNatively\(count, win\); return; \}\s*surfaceWindow\(win, \{ focus: true \}\);[^\n]*\s*wc\.send\('app:closeRequested'/);
-  assert.match(idx, /if \(rendererGone\(mainWindow\.webContents\)\) \{ quitOrCancelNatively\(count, mainWindow\); return; \}/);
-  assert.match(idx, /\} else quitOrCancelNatively\(count, null\);/, 'no window at all: still quittable');
+  // before-quit. Tray mode (922c0472) asks the PRIMARY window, since mainWindow can point at a focused
+  // floor. The renderer check, the native ask and the modal must all target that same window.
+  const bq = idx.slice(idx.indexOf("app.on('before-quit'"), idx.indexOf('quitting = true;', idx.indexOf("app.on('before-quit'")));
+  assert.ok(bq.length > 0 && bq.length < 1500, 'the before-quit handler is found');
+  assert.match(bq, /const quitWindow = primaryWindow \?\? mainWindow;\s*if \(quitWindow\) \{\s*if \(rendererGone\(quitWindow\.webContents\)\) \{ quitOrCancelNatively\(count, quitWindow\); return; \}\s*surfaceWindow\(quitWindow, [^\n]*\s*quitWindow\.webContents\.send\('app:closeRequested'/, 'with the renderer gone, before-quit asks natively for the window it would otherwise ask');
+  assert.match(bq, /\} else quitOrCancelNatively\(count, null\);/, 'no window at all: still quittable');
+  // A recreated primary (RENDERER-RECOVERY-164) becomes primaryWindow, and destroying the old one does not clear it.
+  assert.match(idx, /if \(!isFloor\) \{\s*mainWindow = win;\s*primaryWindow = win;/, 'a new primary window (a recreate included) is the quit window');
+  assert.match(idx, /if \(primaryWindow === win\) primaryWindow = null;/, 'only the closing primary itself clears it');
   // Jim LOW: the same effects as the renderer modal (app:confirmClose / app:cancelClose).
   assert.match(idx, /function quitOrCancelNatively\(ptyCount: number, parent: BrowserWindow \| null\): void \{\s*if \(confirmQuitNatively\(ptyCount, parent\)\) \{\s*try \{ closingTime\.cancel\(\); \}[^\n]*\n\s*teardownAndQuit\(\);\s*\} else \{\s*abortPendingRestart\(\);/);
   assert.match(idx, /function rendererGone\(wc: Electron\.WebContents\): boolean \{\s*try \{ return wc\.isDestroyed\(\) \|\| wc\.isCrashed\(\); \} catch \{ return true; \}/);
