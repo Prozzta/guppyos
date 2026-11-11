@@ -85,6 +85,10 @@ export interface BlobOverlayDeps {
 
 /** While the overlay is hidden the feed sends nothing and only checks this often. */
 export const BLOB_GAZE_HIDDEN_MS = 500;
+/** Jim N2: once the point has not changed for this many samples (about 2 s at BLOB_GAZE_MS), the feed
+ *  backs off to BLOB_GAZE_IDLE_MS until it changes again, so a still cursor costs ~4 samples a second. */
+export const BLOB_GAZE_STILL_TICKS = 60;
+export const BLOB_GAZE_IDLE_MS = 250;
 
 const realGazeTimers = {
   set: (fn: () => void, ms: number): unknown => { const t = setTimeout(fn, ms); (t as { unref?: () => void }).unref?.(); return t; },
@@ -127,6 +131,7 @@ export class BlobOverlayController {
   private gazeWanted = false;
   private gazeTimer: unknown = null;
   private lastGaze = '';
+  private gazeStill = 0;
 
   constructor(private readonly d: BlobOverlayDeps) {
     this.settings = blobSettingsFrom(d.readConfig());
@@ -192,7 +197,7 @@ export class BlobOverlayController {
   /** BLOB-GAZE: the overlay turns the cursor feed on or off. */
   setGaze(on: unknown): void {
     this.gazeWanted = on === true;
-    this.lastGaze = '';
+    this.lastGaze = ''; this.gazeStill = 0;
     this.syncGaze();
   }
 
@@ -218,7 +223,7 @@ export class BlobOverlayController {
     if (this.win.isVisible()) { this.setRing(false); this.win.hide(); } else this.win.showInactive();
     this.push();
     if (this.gazeTimer !== null) { (this.d.gazeTimers ?? realGazeTimers).clear(this.gazeTimer); this.gazeTimer = null; }
-    this.lastGaze = '';
+    this.lastGaze = ''; this.gazeStill = 0;
     this.syncGaze();   // re-paced for the new visibility
   }
 
@@ -285,7 +290,7 @@ export class BlobOverlayController {
     const timers = this.d.gazeTimers ?? realGazeTimers;
     if (!run) { if (this.gazeTimer !== null) { timers.clear(this.gazeTimer); this.gazeTimer = null; } return; }
     if (this.gazeTimer === null) {
-      const ms = this.win!.isVisible() ? BLOB_GAZE_MS : BLOB_GAZE_HIDDEN_MS;
+      const ms = !this.win!.isVisible() ? BLOB_GAZE_HIDDEN_MS : this.gazeStill >= BLOB_GAZE_STILL_TICKS ? BLOB_GAZE_IDLE_MS : BLOB_GAZE_MS;
       this.gazeTimer = timers.set(() => { this.gazeTimer = null; this.gazeTick(); }, ms);
     }
   }
@@ -304,8 +309,9 @@ export class BlobOverlayController {
     if (wc && this.gazeWanted && this.win?.isVisible()) {
       const p = this.gazePoint();
       const key = `${p.x},${p.y}`;
-      if (key !== this.lastGaze) {
-        this.lastGaze = key;
+      if (key === this.lastGaze) this.gazeStill++;
+      else {
+        this.lastGaze = key; this.gazeStill = 0;
         try { if (!wc.isDestroyed?.()) wc.send('blob:gaze', p); } catch { /* closing */ }
       }
     }
