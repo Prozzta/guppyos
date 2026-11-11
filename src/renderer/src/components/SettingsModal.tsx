@@ -17,7 +17,7 @@ import { PixelButton } from './PixelButton';
 import { ClaimLedgerSettings } from './ClaimLedgerSettings';
 import { CapacityDisplaySetting } from './CapacityDisplaySetting';
 import { GraphicsSetting } from './GraphicsSetting';
-import { BlobSetting } from './BlobSetting';
+import { BlobSection } from './BlobSection';
 import { CodexToolOutputSetting } from './CodexToolOutputSetting';
 import { CodexPluginsSetting } from './CodexPluginsSetting';
 import { CodexLayerOptInsSetting } from './CodexLayerNotice';
@@ -168,8 +168,8 @@ function clearLocalState(): void {
 // v0.3.4 redesign: six tabs, one topic each. 'AI Engines' folded into
 // Agents & Models; MCP + Slack + webhook + REST live together in Connections;
 // voice gets its own tab; Danger Zone became a red row at the bottom of General.
-export type Section = 'General' | 'Prerequisites' | 'Agents & Models' | 'Autonomy & Budgets' | 'Connections' | 'Voice' | 'Memory & Knowledge';
-const NAV_SECTIONS: Section[] = ['General', 'Prerequisites', 'Agents & Models', 'Autonomy & Budgets', 'Connections', 'Voice', 'Memory & Knowledge'];
+export type Section = 'General' | 'Blob' | 'Prerequisites' | 'Agents & Models' | 'Autonomy & Budgets' | 'Connections' | 'Voice' | 'Memory & Knowledge';
+const NAV_SECTIONS: Section[] = ['General', 'Blob', 'Prerequisites', 'Agents & Models', 'Autonomy & Budgets', 'Connections', 'Voice', 'Memory & Knowledge'];
 
 export function SettingsModal({ config, onClose, initialSection }: SettingsModalProps) {
   const claudeModels = useModelsForProvider('claude');
@@ -485,6 +485,7 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
   const [showGroqKey, setShowGroqKey] = useState(false);
   const [freeflowBusy, setFreeflowBusy] = useState(false);
   const [freeflowNote, setFreeflowNote] = useState('');
+  const [blobKeyNote, setBlobKeyNote] = useState('');
   // rt-9 idle-tunable: realtime voice idle auto-disconnect window (ms); 0 = never.
   const [idleDisconnectMs, setIdleDisconnectMs] = useState<number>(
     (config as HarnessConfig).realtimeIdleDisconnectMs ?? 180_000
@@ -714,6 +715,19 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
       setFreeflowNote('saved');
     } catch (e) {
       setFreeflowNote(e instanceof Error ? e.message : String(e));
+    } finally { setFreeflowBusy(false); }
+  };
+
+  /** BLOB-SETUP-GUIDE: Settings → Blob saves the shared Groq key ONLY (never Free Flow's on/off
+   *  or model), so a Blob user's Voice settings are left exactly as they were. */
+  const saveGroqKey = async () => {
+    setFreeflowBusy(true); setBlobKeyNote('');
+    try {
+      await window.cth.freeflowSetConfig({ apiKey: groqKey });
+      setHasGroqKeyStore(!!groqKey.trim());
+      setBlobKeyNote(groqKey.trim() ? 'saved' : 'key removed');
+    } catch (e) {
+      setBlobKeyNote(e instanceof Error ? e.message : String(e));
     } finally { setFreeflowBusy(false); }
   };
 
@@ -1040,11 +1054,6 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
 
                       {/* GPU-SETTING-188: Graphics (Auto / GPU / CPU only) and what is really rendering. */}
                       <GraphicsSetting />
-
-                      <div style={{ height: 1, background: 'var(--cth-ink-300)' }} />
-
-                      {/* GUPPY-BLOB-P01: the Guppy blob overlay (enable, hotkey, invisible). */}
-                      <BlobSetting />
 
                       <div style={{ height: 1, background: 'var(--cth-ink-300)' }} />
 
@@ -1993,6 +2002,19 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
                       </div>
 
                     </>
+                  )}
+
+                  {/* BLOB-SETUP-GUIDE: the Blob's own tab (guide link, the shared Groq key, the overlay settings). */}
+                  {activeSection === 'Blob' && (
+                    <BlobSection
+                      groqKey={groqKey}
+                      setGroqKey={setGroqKey}
+                      showGroqKey={showGroqKey}
+                      setShowGroqKey={setShowGroqKey}
+                      onSaveKey={() => void saveGroqKey()}
+                      busy={freeflowBusy}
+                      note={blobKeyNote}
+                    />
                   )}
 
                   {/* VOICE — Free Flow dictation + Realtime Michael (v0.3.4: its own tab) */}

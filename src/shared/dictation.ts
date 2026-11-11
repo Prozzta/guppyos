@@ -29,7 +29,7 @@ export interface DictationStatus {
 export const DICTATION_OFF: DictationStatus = { state: 'off', chord: DICTATION_CHORD };
 
 export const DICTATION_COPY = {
-  noKey: 'Dictation needs a Groq API key: add one under Settings > Free Flow.',
+  noKey: 'Dictation needs a Groq API key: add one under Settings > Blob.',
   noWindow: 'Dictation needs the Guppy window open (it records the mic).',
   hookFailed: 'The Ctrl+Alt+Space hook could not be armed.',
   helperMissing: 'The Windows input helper is missing from this build.',
