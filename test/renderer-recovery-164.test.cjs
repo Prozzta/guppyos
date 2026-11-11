@@ -435,6 +435,9 @@ test('AUDIT (2) wiring: with the renderer gone, close and before-quit ask native
   assert.ok(bq.length > 0 && bq.length < 1500, 'the before-quit handler is found');
   assert.match(bq, /const quitWindow = primaryWindow \?\? mainWindow;\s*if \(quitWindow\) \{\s*if \(rendererGone\(quitWindow\.webContents\)\) \{ quitOrCancelNatively\(count, quitWindow\); return; \}\s*surfaceWindow\(quitWindow, [^\n]*\s*quitWindow\.webContents\.send\('app:closeRequested'/, 'with the renderer gone, before-quit asks natively for the window it would otherwise ask');
   assert.match(bq, /\} else quitOrCancelNatively\(count, null\);/, 'no window at all: still quittable');
+  // Jim NIT: no second ask ahead of the pinned block (e.g. a floor-targeted mainWindow check).
+  assert.equal(bq.split('rendererGone(').length - 1, 1, 'before-quit checks the renderer exactly once');
+  assert.equal(bq.split('quitOrCancelNatively(').length - 1, 2, 'before-quit asks natively in exactly two places (quitWindow, no window)');
   // A recreated primary (RENDERER-RECOVERY-164) becomes primaryWindow, and destroying the old one does not clear it.
   assert.match(idx, /if \(!isFloor\) \{\s*mainWindow = win;\s*primaryWindow = win;/, 'a new primary window (a recreate included) is the quit window');
   assert.match(idx, /if \(primaryWindow === win\) primaryWindow = null;/, 'only the closing primary itself clears it');
