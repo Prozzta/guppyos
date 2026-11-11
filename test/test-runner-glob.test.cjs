@@ -432,8 +432,13 @@ test('every run carries the per-file wall-clock limit, the normal reporter, and 
   const tap = fakeSpawn({ status: 0 });
   run({ testDir: 'test', readdir: () => ['a.test.cjs'], spawn: tap.spawn, log: () => {}, isTTY: false, timeoutMs: 1234, eventsFile: 'ev.jsonl', readFile: () => '', removeFile: () => {} });
   const a = tap.calls[0].args;
-  assert.ok(a.includes(`--test-timeout=${runner.backstopMs(1234)}`), a.join(' '));
-  assert.ok(runner.backstopMs(1234) > 1234, 'node --test\'s own timeout is only the backstop, after the watchdog\'s tree kill');
+  // GUPPY-NODE-LTS: the backstop is the runner's own (Node 24's --test-timeout never kills a file whose
+  // tests passed but which does not exit), so node --test gets NO --test-timeout; the files get the preload.
+  assert.ok(!a.some((x) => x.startsWith('--test-timeout')), `MUTANT: the backstop leans on node's --test-timeout again: ${a.join(' ')}`);
+  const env = tap.calls[0].opts.env;
+  assert.ok(String(env.NODE_OPTIONS).includes(env.GUPPY_FILE_BACKSTOP_OPT) && env.GUPPY_FILE_BACKSTOP_OPT.includes('file-backstop-preload.cjs'), 'every file records itself for the backstop');
+  assert.strictEqual(env.GUPPY_FILE_BACKSTOP, 'ev.jsonl.starts');
+  assert.ok(runner.backstopMs(1234) > 1234, 'the backstop comes after the watchdog\'s tree kill');
   const reporters = a.flatMap((x, i) => (x === '--test-reporter' ? [a[i + 1]] : []));
   const dests = a.flatMap((x, i) => (x === '--test-reporter-destination' ? [a[i + 1]] : []));
   assert.strictEqual(reporters[0], 'tap', 'off a terminal the gate logs keep TAP (node --test\'s own default)');
@@ -560,8 +565,13 @@ test('GATE-178: the temp folder of a killed tree is removed once free, not after
   try {
     spawnSync(process.execPath, ['-e', 'setTimeout(()=>{},200)']);
     if (process.platform === 'win32') {
-      assert.throws(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }), (e) => e.code === 'EBUSY',
-        'the old cleanup (5 x 200 ms) fails on a folder that is in use for 2 s');
+      // GUPPY-NODE-LTS: Node 20 (the app's Electron runtime) refuses: the reason removeWhenFree exists.
+      // Node 24's rmSync removes a folder in use, so there the old cleanup may simply succeed.
+      let code = null;
+      try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch (e) { code = e.code; }
+      if (code !== null || Number(process.versions.node.split('.')[0]) <= 20) {
+        assert.equal(code, 'EBUSY', 'the old cleanup (5 x 200 ms) fails on a folder that is in use for 2 s');
+      }
     }
     const r = removeWhenFree(dir);
     assert.equal(r.removed, true, `A FOLDER FREED WITHIN THE BUDGET IS REMOVED (${JSON.stringify(r)})`);
@@ -761,8 +771,8 @@ test('PIN: against the REAL test directory discovery is root tests plus only fol
   // CLAIMS-FREEZE-GUARD (merged onto R10 for 1.1.103, not armed): + 1 (claims-freeze-guard).
   // INT 1.1.104: + 1 (win32-input-helper), + 1 (blob-overlay), + 1 (dictation-p2).
   // GUPPY-BUILD-PREREQS: + 1 (build-prereqs).
-  // GUPPY-NODE-LTS: + 1 (sqlite-engine-105).
-  assert.equal(files.length, 565,`the focused suite must retain its pre-fold file count, got ${files.length}`);
+  // GUPPY-NODE-LTS: + 1 (sqlite-engine-105), + 1 (runner-backstop-105).
+  assert.equal(files.length, 566,`the focused suite must retain its pre-fold file count, got ${files.length}`);
   assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
   assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');
   assert.ok(files.includes(path.join('start-fixes-163', 'start-fixes-163-boot-submit.test.cjs')), 'the start-fixes feature folder is included');
@@ -817,10 +827,16 @@ test('END TO END, the backstop alone (no watchdog): node --test\'s own file time
   try {
     fs.writeFileSync(path.join(dir, 'a-hung.test.cjs'), "require('node:test')('done', () => { setInterval(() => {}, 1000); });\n");
     const e = sink();
+    const t0 = Date.now();
     const spawn = (args, opts) => spawnSync(process.execPath, args, { ...opts, stdio: 'pipe', encoding: 'utf8' });
-    const code = run({ testDir: dir, cwd: dir, spawn, timeoutMs: 3_000, isTTY: false, log: () => {}, err: e.write, failureFile: () => path.join(dir, 'failures.json'), watchdog: () => ({ stop: () => {} }) });
+    // GUPPY-NODE-LTS: the REAL backstop (the runner's own), on every Node: an injected watchdog would
+    // otherwise turn it off, and Node 24's --test-timeout never kills this file.
+    const code = run({ testDir: dir, cwd: dir, spawn, timeoutMs: 3_000, isTTY: false, log: () => {}, err: e.write, failureFile: () => path.join(dir, 'failures.json'), watchdog: () => ({ stop: () => {} }), backstop: runner.startBackstop });
     assert.notStrictEqual(code, 0, 'a hung file fails the run');
-    assert.match(e.lines.join('\n'), /FILE TIMED OUT after 3000 ms .*a-hung\.test\.cjs/);
+    assert.match(e.lines.join('\n'), /FILE TIMED OUT after 3000 ms \(the runner's backstop killed it at 23000 ms\): .*a-hung\.test\.cjs/);
+    // (The kill's own outcome row may be lost: the kill ends node --test and the runner stops the
+    // backstop at once. The due row, written BEFORE the kill, is the record.)
+    assert.ok(Date.now() - t0 < 90_000, `the backstop ended the run (${Date.now() - t0} ms), it did not hang`);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
