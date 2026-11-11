@@ -57,6 +57,13 @@ jobs:
       - name: Package installers
         run: npx electron-builder ${{ matrix.args }} --publish never
 
+      # electron-builder writes latest-mac.yml only after its artifact hook.
+      # Keep this explicit for any future macOS matrix entry: a missing feed is
+      # an error, rather than an update that macOS 12 cannot open.
+      - name: Set macOS update floor
+        if: contains(matrix.args, '--mac')
+        run: node build/macUpdateFloor.cjs dist/latest-mac.yml
+
       - name: Generate checksums
         shell: bash
         run: |

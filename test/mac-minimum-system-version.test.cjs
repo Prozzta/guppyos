@@ -20,7 +20,10 @@ test('macOS 13 is the packaged app floor and Darwin 22 is the update-feed floor'
   assert.match(read('README.md'), /macOS 13\s*\n?\s*\(Ventura\) or newer/);
   assert.match(read('CONTRIBUTING.md'), /macOS 13 \(Ventura\) or newer/);
   const pkg = JSON.parse(read('package.json'));
+  assert.equal(pkg.scripts.dist, 'npm run build && electron-builder && node build/macUpdateFloor.cjs --when-darwin dist/latest-mac.yml');
   assert.equal(pkg.scripts['dist:mac'], 'npm run build && electron-builder --mac && node build/macUpdateFloor.cjs dist/latest-mac.yml');
+  const releaseWorkflow = read('.github/workflows/release.yml');
+  assert.match(releaseWorkflow, /name: Set macOS update floor\n\s+if: contains\(matrix\.args, '--mac'\)\n\s+run: node build\/macUpdateFloor\.cjs dist\/latest-mac\.yml/);
 
   const metadata = path.join(tmp, 'latest-mac.yml');
   fs.writeFileSync(metadata, 'version: 1.1.105\nminimumSystemVersion: 13.0\npath: Guppy.zip\n');
@@ -45,4 +48,6 @@ test('post-build floor rewrite only accepts the generated mac update feed', () =
   assert.match(fs.readFileSync(mac, 'utf8'), /^minimumSystemVersion: 22\.0\.0$/m);
   assert.throws(() => floor.main([windows]), /expected latest-mac\.yml/);
   assert.doesNotMatch(fs.readFileSync(windows, 'utf8'), /minimumSystemVersion/);
+  assert.equal(floor.main(['--when-darwin', mac], 'win32'), false);
+  assert.equal(floor.main(['--when-darwin', mac], 'darwin'), true);
 });

@@ -25,7 +25,7 @@
     "test": "node test/tools/run-tests.cjs",
     "test:focused": "node test/tools/run-tests.cjs",
     "check:links": "node tools/check-release-links.cjs",
-    "dist": "npm run build && electron-builder",
+    "dist": "npm run build && electron-builder && node build/macUpdateFloor.cjs --when-darwin dist/latest-mac.yml",
     "dist:trial": "node tools/build-trial.cjs",
     "dist:mac": "npm run build && electron-builder --mac && node build/macUpdateFloor.cjs dist/latest-mac.yml",
     "dist:win:raw": "npm run build && electron-builder --win",
