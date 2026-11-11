@@ -5,7 +5,7 @@
   "description": "Boldly code where no team has coded before. Your AI crew, on duty 24/7. A free, local-first multi-agent harness that turns the CLI coding agent you already run into a clone of you, coordinating an office of agents on your machine.",
   "main": "out/main/index.js",
   "engines": {
-    "node": ">=20 <21"
+    "node": ">=24 <25"
   },
   "author": "Chaitanya Giri",
   "repository": {
