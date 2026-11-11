@@ -12,6 +12,55 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/guppyos/releases).
 
+## [1.1.104] — 2026-11-11
+
+**The Guppy Blob: an on-screen helper with hold-to-talk dictation into any app, Guppy can keep running in the tray, and Settings checks what building from source needs.**
+Rollback: 1.1.103 (reinstall).
+
+### Added
+
+- **The Guppy Blob.** An optional always-on-top blob you can drag anywhere. Click it for a ring of
+  actions: record message, invisible and close; screenshot, record meeting and screen are shown
+  as coming soon. Turn it on in Settings > General > Blob, where you can also set its show/hide
+  hotkey and hide the Blob, or Guppy's own windows, from screen shares. It stays on screen when a
+  monitor is removed or the layout or DPI changes, and it recovers once if its window crashes.
+  Off by default.
+- **Hold-to-talk dictation (Windows).** Hold Ctrl+Alt+Space in any app and the Blob shows that it
+  is listening. Release, and the transcript (Groq speech-to-text, using the Groq key in
+  Settings > Voice) is typed into the field you were in. If you switched windows before it
+  finished, nothing is typed and the Blob says so. A microphone error shows at once. Clips run
+  from 0.3 s to 120 s, up to 25 MB. Off by default (Settings > General > Blob).
+- **Keep Guppy running in the tray on close (Windows).** With Settings > General > "Keep running
+  in the tray when closed" on, closing the window hides Guppy in the notification tray, and the
+  primary window stays reachable from the tray (Open Guppy, Show Blob, Quit Guppy). Agents keep
+  running and using tokens while hidden, and the PC does not sleep on its own until you quit
+  Guppy from the tray. Off by default.
+- **Settings > Prerequisites: "Build from source".** An opt-in group that checks what this PC
+  needs to build Guppy itself: Node 20, a Python that node-gyp can find, and the VS 2022 C++
+  build tools with Spectre-mitigated libraries. Each missing item shows the exact command to copy;
+  nothing installs on its own. The essential prerequisites are unchanged.
+
+### Changed
+
+- **Building from source is pinned to Node 20**, matching CI (`.nvmrc` and `engines`). Node 26's
+  PGO build broke the native modules (better-sqlite3).
+- **Docs:** the README, the MIT LICENSE and the release, telemetry and contribution docs from
+  `main` are carried into this release.
+
+### Fixed
+
+- Test-only: the path-containment tests run on Windows without the symlink privilege (they cover
+  junctions), and several wiring pins were fixed so the suite passes on a clean install.
+
+### Please check (live, on this release)
+
+- **Tray:** turn on "Keep running in the tray when closed", close the window, and confirm Guppy
+  stays in the tray. Open Guppy from the tray (click and menu), use Show Blob, then Quit Guppy
+  from the tray and confirm it exits.
+- **Dictation:** with a Groq key in Settings > Voice and dictation on, hold Ctrl+Alt+Space in
+  another app, speak, release, and confirm the text is typed into the focused field.
+- **Blob overlay:** enable it, drag it, open the ring, toggle invisible, and check hide-from-shares.
+
 ## [1.1.103] — 2026-10-30
 
 **New floors get the claims ledger with no setup, search sees a first claims sync while it runs, and replies no longer race the startup mail catch-up.**
@@ -2091,7 +2140,7 @@ palace, and starts far fewer processes for agent hooks.** Source `595dd3b5`; rol
   per ~170-byte chunk (a 3.26 MB burst: 20,683 messages → 197). Keystroke echo is still sent
   immediately.
 
-## Fork milestones (1.1.45 – 1.1.103)
+## Fork milestones (1.1.45 – 1.1.104)
 
 > Moved here from the README. This is the shape of the fork line, milestone by milestone; the
 > dated entries above and the [releases page](https://github.com/Prozzta/guppyos/releases) have the detail.
@@ -2296,9 +2345,12 @@ wholesale merges. The shape of the line, as evidence for the three ideas in the 
   jobs are hard-capped at 50% of the PC's CPU by default, closing an agent's terminal ends every
   process it started, Codex agents no longer reach into your own Codex folder, and the Settings
   hero card follows the current release.
-- **Claims ledger on for new floors** (1.1.103, the current release) — a floor created on 1.1.103
+- **Claims ledger on for new floors** (1.1.103) — a floor created on 1.1.103
   builds its claims ledger at first start with no setup, search sees a first claims sync while it
   runs, and replies no longer race the startup mail catch-up.
+- **The Guppy Blob, dictation and tray mode** (1.1.104, the current release) — an optional
+  on-screen Blob with an action ring, hold Ctrl+Alt+Space to dictate into any app, Guppy can keep
+  running in the tray on close, and Settings checks what building from source needs.
 
 Every milestone carries a dated human acceptance and evidence tag in the fork's
 internal mission ledger; this section keeps only the shape.

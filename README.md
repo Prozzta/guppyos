@@ -12,7 +12,7 @@ the subscriptions you already pay for, on their hourly limits. It turns the term
 CLIs you already run into a crew that keeps working while you're away, coordinated by a
 captain on your own machine.
 
-**Actively maintained.** Latest release: **v1.1.103 (2026-10-30)**, with a Windows x64
+**Actively maintained.** Latest release: **v1.1.104 (2026-11-11)**, with a Windows x64
 installer; macOS and Linux build from source.<br>
 [Download](https://github.com/Prozzta/guppyos/releases/latest) ·
 [Website](https://guppyos.com) · [Changelog](./CHANGELOG.md)
@@ -29,7 +29,7 @@ product concept, the office floor, and the foundation are upstream's work.
 
 <p>
   <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-F4D35E.svg?style=flat-square&labelColor=6E1423"></a>
-  <img alt="Version: 1.1.103" src="https://img.shields.io/badge/version-1.1.103-F4D35E.svg?style=flat-square&labelColor=6E1423">
+  <img alt="Version: 1.1.104" src="https://img.shields.io/badge/version-1.1.104-F4D35E.svg?style=flat-square&labelColor=6E1423">
   <a href="https://github.com/HarnessMD/munder-difflin"><img alt="Fork of HarnessMD/munder-difflin" src="https://img.shields.io/badge/fork%20of-HarnessMD%2Fmunder--difflin-F4F1EA.svg?style=flat-square&labelColor=6E1423"></a>
 </p>
 
@@ -240,8 +240,8 @@ work, and a change that fails audit goes back with a written finding and a requi
 It is slower than merging your own PRs, and it is why the guarantees above are stated
 as facts rather than hopes.
 
-The release-by-release story of the fork (1.1.45 to 1.1.103) is in the
-[CHANGELOG](./CHANGELOG.md#fork-milestones-1145--11103).
+The release-by-release story of the fork (1.1.45 to 1.1.104) is in the
+[CHANGELOG](./CHANGELOG.md#fork-milestones-1145--11104).
 
 ## Architecture
 
