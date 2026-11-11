@@ -25,6 +25,23 @@ test('psArgs: -EncodedCommand (UTF-16LE base64) that decodes back to the script,
   assert.throws(() => lb.psArgs('x'.repeat(20_000)), /command line too long/);
 });
 
+test('a stopped window watcher is judged at its stop, a running one at now (LOAD-FLAKES-105)', () => {
+  const line = JSON.stringify({ ok: true, tree: 1, visible: [], browsers: [], alerts: [] });
+  const running = new lb.WindowWatch(1, { onHit: () => {}, onBlind: () => {} });
+  running.ingest(line);
+  assert.equal(running.healthy(), true);
+  assert.equal(running.healthy(Date.now() + 15_000), false, 'silent 15 s while running: not healthy');
+  const stopped = new lb.WindowWatch(1, { onHit: () => {}, onBlind: () => {} });
+  stopped.ingest(line);
+  stopped.stop();   // no child: nothing to kill
+  assert.equal(stopped.healthy(Date.now() + 60_000), true, 'the time after stop (the kill) is not silence');
+  const late = new lb.WindowWatch(1, { onHit: () => {}, onBlind: () => {} });
+  late.ingest(line);
+  late.lastAt -= 15_000;   // its last line came 15 s before the stop
+  late.stop();
+  assert.equal(late.healthy(), false, 'silent 15 s before its stop: not healthy');
+});
+
 test('REAL: the window watcher runs for ~5 s on this process and reports ok:true lines with a tree of at least 1', T, async (t) => {
   const blind = [];
   const hits = [];
