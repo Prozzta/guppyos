@@ -22,7 +22,18 @@ export const INPUT_HELPER_TYPE_MS = 10_000;
 export const INPUT_HELPER_REARM_MS: readonly number[] = [250, 1_000, 4_000, 15_000, 30_000];
 export type InputEvent = 'down' | 'up';
 /** `hwnd`: the foreground window at a real 'down' (decimal), so `type` can refuse if focus moved (F1). */
-export interface InputEventInfo { synthetic?: boolean; hwnd?: string }
+/*  `focus` (BLOB-GAZE): where the user is typing at that 'down', in PHYSICAL screen pixels: the caret, else the
+ *  focused control's centre, else the window's. Absent when the helper could not tell. */
+export interface InputEventInfo { synthetic?: boolean; hwnd?: string; focus?: FocusPoint }
+export interface FocusPoint { x: number; y: number; kind: 'caret' | 'field' | 'window' }
+
+/** The helper's fx/fy/fk fields, or undefined unless all three are well formed. */
+export function focusFromRow(row: { fx?: unknown; fy?: unknown; fk?: unknown }): FocusPoint | undefined {
+  const { fx, fy, fk } = row;
+  if (typeof fx !== 'number' || typeof fy !== 'number' || !Number.isFinite(fx) || !Number.isFinite(fy)) return undefined;
+  if (fk !== 'caret' && fk !== 'field' && fk !== 'window') return undefined;
+  return { x: fx, y: fy, kind: fk };
+}
 export type HookState = 'armed' | 'rearming' | 'failed' | 'off';
 /** `restored: false`: the paste happened but the previous clipboard could not be put back. */
 export interface InputReply { ok?: boolean; error?: string; fallback?: boolean; restored?: boolean; op?: string }
@@ -103,9 +114,14 @@ export class Win32InputHelper {
     let at: number;
     while ((at = this.buffer.indexOf('\n')) >= 0) {
       const line = this.buffer.slice(0, at).trim(); this.buffer = this.buffer.slice(at + 1);
-      let row: InputReply & { ev?: unknown; hwnd?: unknown };
-      try { row = JSON.parse(line) as InputReply & { ev?: unknown; hwnd?: unknown }; } catch { row = {}; }
-      if (row.ev === 'down') this.emit('down', typeof row.hwnd === 'string' ? { hwnd: row.hwnd } : {});
+      let row: InputReply & { ev?: unknown; hwnd?: unknown; fx?: unknown; fy?: unknown; fk?: unknown };
+      try { row = JSON.parse(line) as typeof row; } catch { row = {}; }
+      if (row.ev === 'down') {
+        const info: InputEventInfo = typeof row.hwnd === 'string' ? { hwnd: row.hwnd } : {};
+        const focus = focusFromRow(row);
+        if (focus) info.focus = focus;
+        this.emit('down', info);
+      }
       else if (row.ev === 'up') this.emit('up', {});
       else {
         const byOp = typeof row.op === 'string' && row.op ? this.pending.findIndex((p) => p.op === row.op) : -1;

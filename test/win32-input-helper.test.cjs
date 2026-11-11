@@ -75,7 +75,10 @@ test('built helper accepts safe UTF-8 echo and hook transition self-test without
     child.stdin.write(JSON.stringify({ op: 'echo', text: 'café 日本 😀' }) + '\n'); assert.deepEqual(await wait(2), { ok: true, op: 'echo', text: 'café 日本 😀' });
     child.stdin.write('{"op":"selftest"}\n'); { const d = await wait(3); assert.equal(d.ev, 'down'); assert.match(d.hwnd, /^[0-9]+$/, 'a down names the foreground window'); } assert.deepEqual(await wait(4), { ev: 'up' }); assert.deepEqual(await wait(5), { ok: true, op: 'selftest', swallow: [false, false, true, true, false, false, false] });
     const exited = new Promise((resolve) => child.once('exit', resolve));
-    child.stdin.write('{"op":"quit"}\n'); assert.deepEqual(await wait(6), { ok: true, op: 'quit' });
+    // BLOB-GAZE: focuspoint answers with the foreground window and, when Windows can tell, a well-formed point.
+    child.stdin.write('{"op":"focuspoint"}\n'); { const f = await wait(6); assert.equal(f.ok, true); assert.equal(f.op, 'focuspoint'); assert.match(f.hwnd, /^[0-9]+$/);
+      if ('fx' in f || 'fy' in f || 'fk' in f) assert.ok(I.focusFromRow(f), 'a partial or malformed point: ' + JSON.stringify(f)); }
+    child.stdin.write('{"op":"quit"}\n'); assert.deepEqual(await wait(7), { ok: true, op: 'quit' });
     await exited;
   } finally { if (!child.killed) child.kill(); }
 });
@@ -165,7 +168,8 @@ test('S2/S5 source pins: only the writer thread touches stdout; hook commands ar
 
 test('F1 source pins: text goes only to the chord-down window; every reply names its op; a failed restore keeps ok', () => {
   const cs = fs.readFileSync(path.join(root, 'resources', 'input', 'guppy-input.cs'), 'utf8');
-  assert.match(cs, /Reply\("\{\\"ev\\":\\"down\\",\\"hwnd\\":\\"" \+ Foreground\(\) \+ "\\"\}"\);/, 'a real chord-down carries the foreground window');
+  // BLOB-GAZE: the same foreground window, read once, also gives the focus point (caret/field/window).
+  assert.match(cs, /IntPtr fg = GetForegroundWindow\(\); Reply\("\{\\"ev\\":\\"down\\",\\"hwnd\\":\\"" \+ fg\.ToInt64\(\) \+ "\\"" \+ FocusPoint\(fg\) \+ "\}"\);/, 'a real chord-down carries the foreground window and its focus point');
   assert.match(cs, /static string FocusRefusal\(long want, long now\) \{ if \(want == 0\) return "no target window"; if \(now != want\) return "focus changed"; return null; \}/);
   // In the type branch: focus is checked before the modifier wait AND after it, and only then is anything sent.
   const type = cs.slice(cs.indexOf('else if (op == "type")'), cs.indexOf('else if (op == "echo")'));
@@ -223,5 +227,27 @@ test('replies are matched by op (hook/unhook and the rest come from different he
   children[0].reply({ ev: 'down', hwnd: 77 });
   await tick();
   assert.deepEqual(infos, [['down', '123456'], ['up', undefined], ['down', undefined]], 'only a string hwnd on a down is passed on');
+  helper.kill();
+});
+
+// ---------------------------------------------------------------- BLOB-GAZE: the focus point on 'down'
+test('BLOB-GAZE: focusFromRow accepts only a complete, finite point with a known kind', () => {
+  assert.deepEqual(I.focusFromRow({ fx: 10, fy: -20, fk: 'caret' }), { x: 10, y: -20, kind: 'caret' });
+  assert.deepEqual(I.focusFromRow({ fx: 0, fy: 0, fk: 'window' }), { x: 0, y: 0, kind: 'window' });
+  for (const bad of [{}, { fx: 1, fy: 2 }, { fx: 1, fy: 2, fk: 'mouse' }, { fx: '1', fy: 2, fk: 'field' }, { fx: NaN, fy: 2, fk: 'field' }, { fx: 1, fy: Infinity, fk: 'field' }]) {
+    assert.equal(I.focusFromRow(bad), undefined, JSON.stringify(bad));
+  }
+});
+
+test('BLOB-GAZE: a down carries its focus point; a down without one, and every up, carry none', async () => {
+  const children = [];
+  const helper = new I.Win32InputHelper(() => 'C:/input/guppy-input.exe', () => { const c = new FakeChild(); children.push(c); return c; });
+  const seen = []; helper.onEvent((ev, info) => seen.push([ev, info]));
+  const armed = helper.startHook(); children[0].reply({ ok: true, op: 'hook' }); await armed;
+  children[0].reply({ ev: 'down', hwnd: '77', fx: 300, fy: 400, fk: 'field' });
+  children[0].reply({ ev: 'up' });
+  children[0].reply({ ev: 'down', hwnd: '78', fx: 1, fk: 'caret' });
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(seen, [['down', { hwnd: '77', focus: { x: 300, y: 400, kind: 'field' } }], ['up', {}], ['down', { hwnd: '78' }]]);
   helper.kill();
 });

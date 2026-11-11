@@ -37,6 +37,8 @@ html, body, #blob-root {
 .blob-face:hover { transform: scale(1.05); }
 .blob-face:active { cursor: grabbing; }
 .blob-face svg { pointer-events: none; }
+/* BLOB-GAZE: how far the eyes travel; gaze.css registers it at 0px, which would hold them still. */
+.blob-face .mo-eyes { --mo-track-travel: 3px; }
 
 /* GUPPY-DICTATION-P2: a halo says what dictation is doing (the window is only 96 px, so no text). */
 .blob-face::before {
