@@ -30,6 +30,7 @@ interface Sent { id: string; data: string; origin: string; binary?: boolean }
 const sent: Sent[] = [];
 const reported: unknown[] = [];
 let clipboardReads = 0;
+let clipboardText = 'previous-copy';
 
 function installBridgeStub(): void {
   const unsub = () => () => { /* nothing subscribed */ };
@@ -42,7 +43,12 @@ function installBridgeStub(): void {
     // External dictation tools can restore the previous clipboard contents as soon
     // as they have sent Ctrl+Shift+V. This is deliberately that stale value: the
     // keyboard gesture must not start an asynchronous IPC clipboard read.
-    readClipboard: () => { clipboardReads += 1; return Promise.resolve('previous-copy'); },
+    // Resolve from the mutable value next turn, rather than capturing at call time.
+    // This models an external tool restoring the user's clipboard after a paste key.
+    readClipboard: () => new Promise<string>((resolve) => {
+      clipboardReads += 1;
+      setTimeout(() => resolve(clipboardText), 0);
+    }),
     statAbs: () => Promise.resolve(null), revealPath: () => Promise.resolve(),
     // The mirror, recorded rather than dropped, so the mode arm can read what main would.
     reportTerminalInputState: (_id: string, state: unknown) => { reported.push(state); return Promise.resolve({ ok: true }); }
@@ -75,38 +81,42 @@ window.__harnessRun = async () => {
     result.selfTestLeakedBytes = sent.length;
     sent.length = 0;
 
-    // ARM 0 - external-dictation Ctrl+Shift+V is an atomic browser gesture, not
-    // an IPC round-trip. Muesli/Wispr-style tools temporarily put dictated text on
-    // the clipboard, send the key, then immediately restore `previous-copy`.
-    // Native Chromium paste reads ClipboardEvent.clipboardData in the gesture, so
-    // this shortcut must remain uncancelled and must schedule no bridge read.
-    const externalShortcut = new KeyboardEvent('keydown', {
-      key: 'V', code: 'KeyV', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true
-    });
-    const shortcutAllowed = ta.dispatchEvent(externalShortcut);
-    await tick();
-    const shortcutReads = clipboardReads;
-    const shortcutPasted = sent.map((x) => x.data).join('');
+    // ARM 0 - tool-driven clipboard swaps. The tool restores the user's old copy
+    // in the same turn after its key. Every terminal paste chord must stay native:
+    // an IPC read would resolve previous-copy and reproduce the S1 regression.
+    const chords: Array<[string, KeyboardEventInit]> = [
+      ['ctrl-v', { key: 'V', code: 'KeyV', ctrlKey: true }],
+      ['ctrl-shift-v', { key: 'V', code: 'KeyV', ctrlKey: true, shiftKey: true }],
+      ['shift-insert', { key: 'Insert', code: 'Insert', keyCode: 45, which: 45, shiftKey: true }]
+    ];
+    const keyboardSwap: Record<string, unknown> = {};
+    for (const [name, init] of chords) {
+      clipboardText = 'TRANSCRIPT';
+      sent.length = 0;
+      const readsBefore = clipboardReads;
+      const allowed = ta.dispatchEvent(new KeyboardEvent('keydown', { ...init, bubbles: true, cancelable: true }));
+      clipboardText = 'previous-copy'; // tool restores before an IPC promise resolves
+      await tick(); await tick();
+      keyboardSwap[name] = { allowed, reads: clipboardReads - readsBefore, pasted: sent.map((x) => x.data).join('') };
+    }
+    result.keyboardSwap = keyboardSwap;
+
+    // ARM 0b - right-click is human driven. Its explicit async contract is the
+    // clipboard value at promise resolution, not a stale value captured at click.
+    clipboardText = 'previous-copy';
     sent.length = 0;
-    const externalRightClick = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
-    const rightClickAllowed = entry.host.dispatchEvent(externalRightClick);
-    await tick();
-    result.externalDictationPaste = {
-      shortcutAllowed, shortcutReads, shortcutPasted,
-      rightClickAllowed, rightClickReads: clipboardReads - shortcutReads,
-      rightClickPasted: sent.map((x) => x.data).join(''),
-      rightClickOrigin: lastOrigin()
+    const readsBeforeRightClick = clipboardReads;
+    const humanRightClick = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
+    const rightClickAllowed = entry.host.dispatchEvent(humanRightClick);
+    clipboardText = 'NEWER';
+    await tick(); await tick();
+    result.humanRightClick = {
+      allowed: rightClickAllowed,
+      reads: clipboardReads - readsBeforeRightClick,
+      pasted: sent.map((x) => x.data).join(''),
+      origin: lastOrigin()
     };
     sent.length = 0;
-
-    // Ordinary Ctrl+V has always been xterm/Chromium native paste.  Pin that the
-    // special-case repair did not intercept it or add a bridge read.
-    const nativePaste = new KeyboardEvent('keydown', {
-      key: 'V', code: 'KeyV', ctrlKey: true, bubbles: true, cancelable: true
-    });
-    const readsBeforeNativeCtrlV = clipboardReads;
-    result.nativeCtrlVPasteAllowed = ta.dispatchEvent(nativePaste);
-    result.nativeCtrlVPasteReads = clipboardReads - readsBeforeNativeCtrlV;
 
     // ARM 1 - keyboard, same tick. Kills: "no capture listener / listener after xterm's".
     key(ta, 'ArrowRight', 39);
