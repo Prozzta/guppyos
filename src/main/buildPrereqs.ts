@@ -6,6 +6,8 @@
  * Pure over injected deps so the tests drive every branch without a toolchain; the IPC handler
  * in index.ts passes the real execFile/existsSync/env.
  */
+import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import {
   buildToolCatalog,
   BUILD_NODE_MAJOR,
@@ -35,7 +37,7 @@ export interface BuildProbeDeps {
 }
 
 const PY_VERSION_ARGS = ['-c', 'import sys; print(sys.executable); print("%d.%d.%d" % sys.version_info[:3])'];
-const NODE_ARGS = ['-p', 'JSON.stringify([process.versions.node, !!(process.config.variables || {}).enable_pgo_use, process.execPath])'];
+const NODE_ARGS = ['-e', 'process.stdout.write(JSON.stringify([process.versions.node, !!(process.config.variables || {}).enable_pgo_use, process.execPath]))'];
 
 type Row = Pick<ToolStatus, 'found' | 'path'> & Partial<Pick<ToolStatus, 'unknown' | 'detail' | 'warn'>> & { installCommand?: string };
 
@@ -150,6 +152,24 @@ async function vswhereFind(deps: BuildProbeDeps, ids: string[]): Promise<{ path:
   if (r.timedOut) return { path: null, timedOut: true };
   const first = r.ok ? r.stdout.split(/\r?\n/).map((s) => s.trim()).find(Boolean) : undefined;
   return { path: first || null };
+}
+
+/** One time-boxed child, no shell (the args reach the program as given). A time-out is reported
+ *  as such, so the row says "not checked" instead of "missing". */
+export function execBounded(file: string, args: string[], timeoutMs = 10_000): Promise<ExecResult> {
+  return new Promise((resolve) => {
+    try {
+      execFile(file, args, { timeout: timeoutMs, windowsHide: true, encoding: 'utf8' }, (err, stdout) => {
+        const e = err as (Error & { killed?: boolean; signal?: string | null }) | null;
+        resolve({ ok: !e, stdout: String(stdout ?? ''), ...(e && (e.killed || e.signal === 'SIGTERM') ? { timedOut: true } : {}) });
+      });
+    } catch { resolve({ ok: false, stdout: '' }); }
+  });
+}
+
+/** The real machine, for the IPC handler. */
+export function hostBuildProbeDeps(): BuildProbeDeps {
+  return { platform: process.platform, env: process.env, exists: existsSync, exec: (file, args) => execBounded(file, args) };
 }
 
 const fill = (cmd: string, setup: string, vsPath: string) =>

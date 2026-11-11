@@ -183,7 +183,9 @@ test('a probe that throws is a row, not a crash', async () => {
 
 test('wiring: IPC handler, preload bridge, opt-in panel section, no install from the app', () => {
   const main = read('src/main/index.ts');
-  assert.match(main, /ipcMain\.handle\('tools:buildStatus', async \(\): Promise<ToolStatus\[\]> => buildPrereqStatus\(/);
+  assert.match(main, /ipcMain\.handle\('tools:buildStatus', async \(\): Promise<ToolStatus\[\]> => buildPrereqStatus\(hostBuildProbeDeps\(\)\)\);/);
+  // the child glue lives in buildPrereqs.ts: index.ts gains no execFile of its own
+  assert.equal(/execFile\(/.test(main.slice(main.indexOf("ipcMain.handle('tools:buildStatus'"), main.indexOf('// ─── IPC: semantic memory'))), false);
   assert.match(read('src/preload/index.ts'), /toolsBuildStatus: \(\): Promise<ToolStatus\[\]> => ipcRenderer\.invoke\('tools:buildStatus'\)/);
   const panel = read('src/renderer/src/components/SetupPanel.tsx');
   assert.match(panel, /<BuildFromSourceSection \/>/);
