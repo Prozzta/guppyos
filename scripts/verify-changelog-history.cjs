@@ -24,8 +24,10 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 
 const RELEASED_RE = /^## \[(\d+\.\d+\.\d+)\]/;
-/** A whole line that is a Markdown link-reference definition: "[label]: url", nothing else. */
-const LINK_REF_RE = /^\[([^\]]+)\]: (\S+)$/;
+/** A whole line that is a Markdown link-reference definition: "[label]: url", nothing else. The
+ *  target must look like a link (http(s):, <...>, #anchor or a ./ or / path), so a note line such
+ *  as "[BREAKING]: removed" is prose, not a ref. */
+const LINK_REF_RE = /^\[([^\]]+)\]: ((?:https?:|<|#|\.?\/)\S*)$/;
 
 /** The released sections of a CHANGELOG, in file order: { version, heading, lines }. [Unreleased]
  *  and the preamble are not released, so they are not part of any section. */
