@@ -238,7 +238,7 @@ for (const [label, vars] of Object.entries(AMBIENTS)) {
     const env = { ...process.env, [RERUN]: '1' };
     delete env.NODE_TEST_CONTEXT; // set by the outer runner; a nested runner that inherits it reports nothing readable
     for (const [k, v] of Object.entries(vars)) { if (v === undefined) delete env[k]; else env[k] = v; }
-    const r = require('node:child_process').spawnSync(process.execPath, ['--test', __filename], { env, encoding: 'utf8' });
+    const r = require('node:child_process').spawnSync(process.execPath, ['--test', '--test-reporter=tap', __filename], { env, encoding: 'utf8' });
     const out = `${r.stdout}\n${r.stderr}`;
     assert.equal(r.status, 0, `the file is NOT HERMETIC under ${label}:\n${out.split('\n').filter((l) => /not ok|error:/.test(l)).join('\n')}`);
     assert.match(out, /# fail 0/);

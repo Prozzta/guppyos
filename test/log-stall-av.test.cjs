@@ -40,6 +40,16 @@ const { CostLedgerTotals } = loadTs('src/main/costLifetime.ts');
 const { planWakeRow, newWakeRowState, takeFolded, forgetWakeRows } = loadTs('src/main/wakeRowPolicy.ts');
 const { HiveManager } = loadTs('src/main/hive.ts');
 const dir = () => fs.mkdtempSync(path.join(JAIL, 'd-'));
+/** Does this runtime refuse to delete a folder holding a kept-open 'a' descriptor (Node 20 / the app)? */
+function openFileBlocksDelete() {
+  const d = dir(); fs.mkdirSync(path.join(d, 'h'));
+  const fd = fs.openSync(path.join(d, 'h', 'x.jsonl'), 'a');
+  let blocked = false;
+  try { fs.rmSync(path.join(d, 'h'), { recursive: true, force: true }); } catch { blocked = true; }
+  fs.closeSync(fd);
+  fs.rmSync(d, { recursive: true, force: true });
+  return blocked;
+}
 const rows = (p) => fs.readFileSync(p, 'utf8').split('\n').filter(Boolean);
 
 // ── F1 ────────────────────────────────────────────────────────────────────
@@ -81,7 +91,14 @@ test('F1 (B1/B3): a HiveManager holds its log open by default; dispose() release
   await hive.ensureAgent({ id: 'a1', name: 'A', provider: 'claude', cwd: home });
   hive.appendLog({ kind: 'x' });
   // Without dispose, Windows leaves the open file delete-pending and the rm fails: the reset bug.
-  assert.throws(() => fs.rmSync(path.join(home, 'hive'), { recursive: true, force: true }), /ENOTEMPTY|EBUSY|EPERM/);
+  // GUPPY-NODE-LTS: that holds on the app's runtime (Electron 32, Node 20). A newer host Node
+  // (24's libuv) opens files with FILE_SHARE_DELETE, so the same rm succeeds there; the host is
+  // calibrated on a plain kept-open 'a' descriptor (appendLog's open) rather than by version.
+  if (openFileBlocksDelete()) {
+    assert.throws(() => fs.rmSync(path.join(home, 'hive'), { recursive: true, force: true }), /ENOTEMPTY|EBUSY|EPERM/);
+  } else {
+    assert.ok(fs.existsSync(path.join(home, 'hive', 'log.jsonl')), 'the manager wrote its log before the check');
+  }
   hive.dispose();
   hive.dispose();   // idempotent
   fs.rmSync(path.join(home, 'hive'), { recursive: true, force: true });

@@ -85,7 +85,7 @@ test('MUTANT-JOURNAL-GATE NIT 1 (god 9cb49c, Jim 967fa3): new-floor-knowhow and 
   const journal = (file, owner = dead) => fs.writeFileSync(helper.journalPath(root), JSON.stringify({ owner, records: [{ file, original: Buffer.from('const CLAIM_VERBS = new Set([]);').toString('base64') }] }), 'utf8');
   const env = { ...process.env, NODE_PATH: path.join(REPO, 'node_modules'), MUTANT_RUNNER_PID: '' };
   delete env.NODE_OPTIONS; delete env.NODE_TEST_CONTEXT;
-  const suite = (rel) => spawnSync(process.execPath, ['--test', rel], { cwd: root, encoding: 'utf8', timeout: 60_000, env });
+  const suite = (rel) => spawnSync(process.execPath, ['--test', '--test-reporter=tap', rel], { cwd: root, encoding: 'utf8', timeout: 60_000, env });
   for (const rel of SUITES) {
     const gate = path.basename(rel);
     fs.writeFileSync(cli, 'const CLAIM_VERBS = new Set(["mutant"]);', 'utf8');
