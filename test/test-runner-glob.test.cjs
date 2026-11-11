@@ -778,7 +778,8 @@ test('PIN: against the REAL test directory discovery is root tests plus only fol
   // TRAY-MODE (release-1.1.104, pin not moved there): + 1 (tray-mode).
   // GUPPY-NODE-LTS: + 1 (sqlite-engine-105), + 1 (runner-backstop-105).
   // INT 1.1.105 group 2: + 1 (rel-escapes), + 1 (heavy-loop-light-cap), + 1 (heavy-preload-short-test).
-  assert.equal(files.length, 570,`the focused suite must retain its pre-fold file count, got ${files.length}`);
+  // INT 1.1.105 group 7 (BLOB-SETUP-GUIDE): + 1 (blob-settings-section).
+  assert.equal(files.length, 571,`the focused suite must retain its pre-fold file count, got ${files.length}`);
   assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
   assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');
   assert.ok(files.includes(path.join('start-fixes-163', 'start-fixes-163-boot-submit.test.cjs')), 'the start-fixes feature folder is included');
