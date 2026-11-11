@@ -2,11 +2,12 @@
  * CLAIM-LEDGER W1: the ledger store and write path (plan §3 W1; frozen types in shared/claims.ts).
  *
  * LAYOUT. One stream of records per agent, in monthly segments:
- *   agents/<id>/memory/claims/<YYYY-MM>.jsonl   (the month of the record's write time, UTC)
+ *   agents/<id>/memory/claims/<YYYY-MM>.jsonl   (the later of the record's write-time month, UTC, and the newest segment)
  *   agents/<id>/memory/claims.torn.jsonl        (quarantined torn tails)
  *   agents/<id>/memory/usage.jsonl              (the `used` verb; not chained)
  *   backups/claims/<id>/<YYYY-MM-DD>/           (a daily copy of the segments)
- * Closed months are never written again: an append goes to the month of its write time.
+ * Closed months are never written again: an append goes to the later of its write-time month and the
+ * newest segment (segmentFor), so a clock set back never opens an earlier-sorting file.
  *
  * ONE LINE = canonical JSON of one record + '\n', written with ONE write() of the complete line,
  * then fsync, then the ack (G1.1). Appends are serialised per agent in main (G1.2).
