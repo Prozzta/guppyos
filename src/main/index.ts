@@ -2386,7 +2386,13 @@ const blobOverlay: BlobOverlayController = new BlobOverlayController({
   cursor: () => screen.getCursorScreenPoint(),
   hidden: DEV_HIDDEN,
   log: (row) => { try { hive.appendLog(row); } catch { /* best-effort */ } },
-  onApplied: (s) => { dictation.apply(s.enabled && s.dictation); }   // only from apply(), after module init
+  onApplied: (s) => { dictation.apply(s.enabled && s.dictation); },   // only from apply(), after module init
+  // BLOB-GAZE: the helper reports the focused field in physical pixels; the overlay works in DIPs.
+  focusPoint: () => {
+    const f = dictation.focusPoint();
+    if (!f) return null;
+    return process.platform === 'win32' ? screen.screenToDipPoint({ x: f.x, y: f.y }) : { x: f.x, y: f.y };
+  }
 });
 registerBlobIpc(ipcMain as unknown as Parameters<typeof registerBlobIpc>[0], blobOverlay, (evt) => ledgerUiSender(evt as unknown as Electron.IpcMainInvokeEvent));
 

@@ -16,11 +16,20 @@
  * overlay even though it is a BrowserWindow (the GUPPY-STAPLER-HOOKS sender-gate caveat: index.ts
  * routes its app-window gate through isAppWindowSender).
  *
+ * BLOB-GAZE: the overlay is click-through outside the blob and never focused, so its renderer sees
+ * no pointer moves. While the overlay asks for it (blob:overlay:gaze, off under reduced motion) and
+ * is visible, main samples the screen cursor every BLOB_GAZE_MS and sends 'blob:gaze' with that
+ * point in the overlay's client coordinates, only when it changed. While dictating, the focused
+ * field's point (from the input helper) is sent instead, so the blob looks where the text will go.
+ * Only a point is sent: never what is under it.
+ *
+ * BLOB-ORCH-MOOD: setMood() is the one place the orchestrator's mood lands; it rides on blob:status.
+ *
  * Electron is injected (deps), so this module loads and is tested without it.
  */
 import {
-  BLOB_COMING_SOON, BLOB_DISABLED, BLOB_SLOTS, blobSettingsFrom, sanitizeBlobPatch,
-  type BlobActionResult, type BlobConfigFields, type BlobPosition, type BlobSettings, type BlobSlot, type BlobStatus,
+  BLOB_COMING_SOON, BLOB_DISABLED, BLOB_GAZE_MS, BLOB_SLOTS, blobSettingsFrom, isBlobMood, sanitizeBlobPatch,
+  type BlobActionResult, type BlobGazePoint, type BlobMood, type BlobConfigFields, type BlobPosition, type BlobSettings, type BlobSlot, type BlobStatus,
 } from '../shared/blob';
 import { DICTATION_OFF, type DictationStatus } from '../shared/dictation';
 
@@ -68,7 +77,19 @@ export interface BlobOverlayDeps {
   log?(row: Record<string, unknown>): void;
   /** GUPPY-DICTATION-P2: called at the end of every apply() with the settings in force. */
   onApplied?(settings: BlobSettings): void;
+  /** BLOB-GAZE: the focused field's point in screen DIPs while a dictation is in flight, else null. */
+  focusPoint?(): { x: number; y: number } | null;
+  /** BLOB-GAZE: the gaze feed's timer (tests inject it). */
+  gazeTimers?: { set(fn: () => void, ms: number): unknown; clear(h: unknown): void };
 }
+
+/** While the overlay is hidden the feed sends nothing and only checks this often. */
+export const BLOB_GAZE_HIDDEN_MS = 500;
+
+const realGazeTimers = {
+  set: (fn: () => void, ms: number): unknown => { const t = setTimeout(fn, ms); (t as { unref?: () => void }).unref?.(); return t; },
+  clear: (h: unknown): void => clearTimeout(h as ReturnType<typeof setTimeout>),
+};
 
 /** The collapsed blob and the open ring, in DIPs. */
 export const BLOB_SIZE = 96;
@@ -101,6 +122,11 @@ export class BlobOverlayController {
   private drag: { startCursor: { x: number; y: number }; startPos: BlobPosition } | null = null;
   private respawns = 0;
   private dictation: DictationStatus = DICTATION_OFF;
+  private mood: BlobMood = 'idle';
+  /** The overlay asked for gaze points (it stands down under reduced motion). */
+  private gazeWanted = false;
+  private gazeTimer: unknown = null;
+  private lastGaze = '';
 
   constructor(private readonly d: BlobOverlayDeps) {
     this.settings = blobSettingsFrom(d.readConfig());
@@ -118,6 +144,7 @@ export class BlobOverlayController {
       hotkeyRegistered: this.registered !== null,
       visible: !!this.win && !this.win.isDestroyed() && this.win.isVisible(),
       dictationStatus: this.dictation,
+      mood: this.mood,
     };
   }
 
@@ -155,6 +182,20 @@ export class BlobOverlayController {
     this.push();
   }
 
+  /** BLOB-ORCH-MOOD: the orchestrator's mood source calls this; an unknown mood is refused. */
+  setMood(m: unknown): boolean {
+    if (!isBlobMood(m)) return false;
+    if (m !== this.mood) { this.mood = m; this.push(); }
+    return true;
+  }
+
+  /** BLOB-GAZE: the overlay turns the cursor feed on or off. */
+  setGaze(on: unknown): void {
+    this.gazeWanted = on === true;
+    this.lastGaze = '';
+    this.syncGaze();
+  }
+
   private applied(): void {
     try { this.d.onApplied?.(this.settings); } catch (e) { this.d.log?.({ kind: 'blob-on-applied-failed', error: e instanceof Error ? e.message : String(e) }); }
   }
@@ -176,6 +217,9 @@ export class BlobOverlayController {
     if (!this.win || this.win.isDestroyed()) return;
     if (this.win.isVisible()) { this.setRing(false); this.win.hide(); } else this.win.showInactive();
     this.push();
+    if (this.gazeTimer !== null) { (this.d.gazeTimers ?? realGazeTimers).clear(this.gazeTimer); this.gazeTimer = null; }
+    this.lastGaze = '';
+    this.syncGaze();   // re-paced for the new visibility
   }
 
   action(slot: unknown): BlobActionResult {
@@ -230,6 +274,42 @@ export class BlobOverlayController {
   dispose(): void {
     this.unregisterHotkey();
     this.destroyWindow();
+  }
+
+  // ---------------------------------------------------------------- gaze feed
+
+  /** The feed runs only while it is wanted and an overlay exists; otherwise its timer is gone. While
+   *  the overlay is hidden (or not shown yet: it appears on ready-to-show) it only checks, slowly. */
+  private syncGaze(): void {
+    const run = this.gazeWanted && !!this.win && !this.win.isDestroyed();
+    const timers = this.d.gazeTimers ?? realGazeTimers;
+    if (!run) { if (this.gazeTimer !== null) { timers.clear(this.gazeTimer); this.gazeTimer = null; } return; }
+    if (this.gazeTimer === null) {
+      const ms = this.win!.isVisible() ? BLOB_GAZE_MS : BLOB_GAZE_HIDDEN_MS;
+      this.gazeTimer = timers.set(() => { this.gazeTimer = null; this.gazeTick(); }, ms);
+    }
+  }
+
+  /** One sample: the focused field while dictating, else the cursor, relative to the overlay. */
+  gazePoint(): BlobGazePoint {
+    let focus: { x: number; y: number } | null = null;
+    try { focus = this.d.focusPoint?.() ?? null; } catch { focus = null; }
+    const src = focus && Number.isFinite(focus.x) && Number.isFinite(focus.y) ? focus : this.d.cursor();
+    const b = this.bounds();
+    return { x: Math.round(src.x - b.x), y: Math.round(src.y - b.y) };
+  }
+
+  private gazeTick(): void {
+    const wc = this.overlayContents();
+    if (wc && this.gazeWanted && this.win?.isVisible()) {
+      const p = this.gazePoint();
+      const key = `${p.x},${p.y}`;
+      if (key !== this.lastGaze) {
+        this.lastGaze = key;
+        try { if (!wc.isDestroyed?.()) wc.send('blob:gaze', p); } catch { /* closing */ }
+      }
+    }
+    this.syncGaze();
   }
 
   // ---------------------------------------------------------------- internals
@@ -296,6 +376,8 @@ export class BlobOverlayController {
     this.win = null;
     this.ringOpen = false;
     this.drag = null;
+    this.gazeWanted = false;   // a new overlay renderer asks again
+    this.syncGaze();
     if (w && !w.isDestroyed()) { try { w.destroy(); } catch { /* gone */ } }
   }
 
@@ -335,6 +417,7 @@ export function registerBlobIpc(ipc: IpcMainLike, ctl: BlobOverlayController, is
     else return { ok: false, error: 'bad phase' };
     return { ok: true };
   }));
+  ipc.handle('blob:overlay:gaze', overlayOnly((on) => { ctl.setGaze(on); return { ok: true }; }));
   ipc.handle('blob:status', (evt) => (isAppSender(evt) ? { ok: true, status: ctl.status() } : REFUSED_NOT_APP));
   ipc.handle('blob:setConfig', (evt, patch) => (isAppSender(evt) ? ctl.setConfig(patch) : REFUSED_NOT_APP));
 }

@@ -6,6 +6,7 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import 'blobatar/motion.css';
+import 'blobatar/gaze.css';   // BLOB-GAZE: the eyes' track layer (BlobApp drives it)
 import './blob.css';
 import { BlobApp } from './BlobApp';
 

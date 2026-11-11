@@ -25,6 +25,23 @@ export const BLOB_SETUP_GUIDE_URL = 'https://guppyos.com/blob/setup/';
 
 export interface BlobPosition { x: number; y: number }
 
+/**
+ * BLOB-ORCH-MOOD: the orchestrator's mood, as one main-process source sets it (setMood) and the
+ * overlay, tray and toasts read it. Dictation states and ring reactions take priority on the face.
+ *   idle      nothing notable              working   god is busy (face: thinking)
+ *   sleepy    idle for a long time         waiting   an open ask for the Human (face: unsure)
+ *   sick      the circuit breaker tripped  happy     a card done or a release
+ *   sad       an error
+ */
+export const BLOB_MOODS = ['idle', 'working', 'sleepy', 'waiting', 'sick', 'happy', 'sad'] as const;
+export type BlobMood = (typeof BLOB_MOODS)[number];
+export function isBlobMood(m: unknown): m is BlobMood { return typeof m === 'string' && (BLOB_MOODS as readonly string[]).includes(m); }
+
+/** BLOB-GAZE: where the eyes look, in the overlay window's client coordinates (DIPs). */
+export interface BlobGazePoint { x: number; y: number }
+/** How often main samples the screen cursor for the overlay's eyes while the feed is on. */
+export const BLOB_GAZE_MS = 33;
+
 /** The persisted blob settings, as main applies them. */
 export interface BlobSettings {
   /** The blob overlay exists at all. Default off: zero behaviour change. */
@@ -62,6 +79,8 @@ export interface BlobStatus extends BlobSettings {
   visible: boolean;
   /** Where dictation is (off unless enabled, supported and armed). */
   dictationStatus: DictationStatus;
+  /** BLOB-ORCH-MOOD: the orchestrator's mood (idle until a source sets it). */
+  mood: BlobMood;
 }
 
 /** What main pushes to the overlay on `blob:status`. */
@@ -74,6 +93,10 @@ export interface BlobOverlayApi {
   ring(open: boolean): Promise<{ ok: true; status: BlobStatus } | { ok: false; error: string }>;
   drag(phase: 'start' | 'move' | 'end'): Promise<{ ok: boolean; error?: string }>;
   onStatus(cb: (s: BlobOverlayStatus) => void): () => void;
+  /** BLOB-GAZE: ask main to feed (or stop feeding) the cursor/focus point. Off under reduced motion. */
+  gaze(on: boolean): Promise<{ ok: boolean; error?: string }>;
+  /** BLOB-GAZE: each point main sends while the feed is on (only when it changes). */
+  onGaze(cb: (p: BlobGazePoint) => void): () => void;
 }
 
 export type BlobActionResult =
