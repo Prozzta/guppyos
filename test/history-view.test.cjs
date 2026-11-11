@@ -331,3 +331,16 @@ test('service: Codex with no recorded session falls back to the home\'s newest r
   // Not a Codex worker (no home): no transcript, and no walk of anything else.
   assert.deepEqual(service({ c3: { provider: 'codex' } }).page({ agentId: 'c3' }), { ok: false, reason: 'no-transcript' });
 });
+
+test('service: a hook transcript under a folder named "..x" is inside the brain; a real ".." step is not (DOTDOT-PREFIX-FALSE-REFUSAL)', () => {
+  const brain = path.join(HOME, '.gemini', 'antigravity-cli', 'brain');
+  const inDots = path.join(brain, '..g-dotdot', 'transcript.jsonl');
+  fs.mkdirSync(path.dirname(inDots), { recursive: true });
+  fs.copyFileSync(path.join(FIX, 'agy.jsonl'), inDots);
+  const page = service({ g2: { provider: 'antigravity' } }, { hookPaths: { g2: inDots } }).page({ agentId: 'g2' });
+  assert.equal(page.ok, true, 'a "..name" folder inside the brain is not a parent step');
+  const outside = path.join(brain, '..', 'outside-dotdot', 'transcript.jsonl');
+  fs.mkdirSync(path.dirname(outside), { recursive: true });
+  fs.copyFileSync(path.join(FIX, 'agy.jsonl'), outside);
+  assert.deepEqual(service({ g3: { provider: 'antigravity' } }, { hookPaths: { g3: outside } }).page({ agentId: 'g3' }), { ok: false, reason: 'no-transcript' });
+});

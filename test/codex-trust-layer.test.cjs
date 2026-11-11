@@ -237,6 +237,19 @@ test('6 linked worktree: hooks (config.toml AND hooks.json) come from MAIN (12i)
   assert.equal(run(r4root, w4.wt, { user: trustLine(w4.main), seed: false }).layers[0].trust, 'user');
 });
 
+test('6b linked worktree: a subfolder named "..sub" maps to MAIN\'s "..sub" (DOTDOT-PREFIX-FALSE-REFUSAL)', (t) => {
+  const root = tmp(t);
+  const { main, wt } = worktree(root, { mainCodex: { 'config.toml': 'model = "m"\n' } });
+  put(path.join(main, '..sub', '.codex', 'config.toml'), '[hooks.SessionStart]\ncommand = "main-sub"\n');
+  const cwd = path.join(wt, '..sub');
+  put(path.join(cwd, '.codex', 'config.toml'), 'model = "x"\n');
+  const r = run(root, cwd);
+  assert.equal(r.projectFolder, path.join(main, '..sub'), 'a "..name" folder is inside the worktree, not a parent step');
+  const f = r.layers.find((l) => l.dotCodex === path.join(cwd, '.codex'));
+  assert.ok(f, 'the hooks from main\'s "..sub" make a layer');
+  assert.equal(f.hooksFrom, path.join(main, '..sub', '.codex'));
+});
+
 // ── 7-11, 13: the decision ───────────────────────────────────────────────────────────────────
 
 test('7 PARSE in a layer that would load refuses, naming the error (T4)', (t) => {
