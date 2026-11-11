@@ -40,6 +40,14 @@ test('sandboxed preload keeps the async bridge while terminal paste stays native
   assert.match(terminalPool, /host\.addEventListener\('contextmenu',[\s\S]*?if \(copySelection\(\)\) \{[\s\S]*?ev\.preventDefault\(\)/);
 });
 
+test('Electron harness bridge fixtures expose no removed synchronous clipboard API', () => {
+  const scenarios = path.join(root, 'test', 'electron-harness', 'scenarios');
+  for (const file of fs.readdirSync(scenarios).filter((name) => name.endsWith('.ts'))) {
+    assert.doesNotMatch(fs.readFileSync(path.join(scenarios, file), 'utf8'), /readClipboardSync/,
+      `${file} must match Electron 45's promise-only clipboard bridge`);
+  }
+});
+
 test('Electron 45 display-capture permission is denied until Guppy owns a capture feature', () => {
   assert.match(main, /if \(permission === 'display-capture'\) \{\s*callback\(false\);\s*return;\s*\}/);
 });

@@ -32,7 +32,7 @@ function installBridgeStub(): void {
     writePty: (id: string, data: string, origin: string) => { sent.push({ id, data, origin }); return Promise.resolve({ ok: true }); },
     redrawPty: () => { /* no pty */ }, resizePty: () => { /* no pty */ },
     copyToClipboard: () => { /* unused */ },
-    readClipboard: () => Promise.resolve(''), readClipboardSync: () => '',
+    readClipboard: () => Promise.resolve(''),
     statAbs: () => Promise.resolve(null), revealPath: () => Promise.resolve(),
     reportTerminalInputState: () => Promise.resolve({ ok: true })
   };

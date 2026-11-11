@@ -42,7 +42,7 @@ function installBridgeStub(): void {
     // External dictation tools can restore the previous clipboard contents as soon
     // as they have sent Ctrl+Shift+V/right-click.  This is deliberately that stale
     // value: a terminal gesture must not start an asynchronous IPC clipboard read.
-    readClipboard: () => { clipboardReads += 1; return Promise.resolve('previous-copy'); }, readClipboardSync: () => '',
+    readClipboard: () => { clipboardReads += 1; return Promise.resolve('previous-copy'); },
     statAbs: () => Promise.resolve(null), revealPath: () => Promise.resolve(),
     // The mirror, recorded rather than dropped, so the mode arm can read what main would.
     reportTerminalInputState: (_id: string, state: unknown) => { reported.push(state); return Promise.resolve({ ok: true }); }

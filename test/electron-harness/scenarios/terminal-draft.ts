@@ -54,7 +54,6 @@ function installBridgeStub(): { writes: string[] } {
     resizePty: () => { /* no pty to resize */ },
     copyToClipboard: () => { /* not exercised */ },
     readClipboard: () => Promise.resolve(''),
-    readClipboardSync: () => '',
     statAbs: () => Promise.resolve(null),
     revealPath: () => Promise.resolve()
   };
