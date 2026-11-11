@@ -518,7 +518,7 @@ const MUTANTS = [
     edits: [['    if (!CALL_PARENT.test(name)) {', '    if (false) {']],
     killer: 'visibleLight', dies: /A TEST PROCESS UNDER ANOTHER PROGRAM IS NOT THE CALL'S OWN/ },
   { name: 'a call is never consumed', file: HJF, module: true,
-    edits: [['    if (!loop(c)) c.used = true;\n    return true;', '    return true;']],
+    edits: [['    if (!loop(c)) c.used = true;\n    this.spendLight(agentId, c.callId);', '    this.spendLight(agentId, c.callId);']],
     killer: 'visibleLight', dies: /A CALL IS CONSUMED BY ONE TEST PROCESS/ },
   { name: 'nothing is visible (every single file waits)', file: HJF, module: true,
     edits: [["    if (!suite && await this.visible(agentId, r)) {", '    if (false) {']],
