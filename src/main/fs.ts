@@ -1,6 +1,6 @@
-import { readdir, lstat, open, realpath, stat } from 'node:fs/promises';
+import { readdir, lstat, open, readlink, realpath, stat } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
-import { constants, realpathSync } from 'node:fs';
+import { constants, existsSync, realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
 import { imageMimeForPath } from '../shared/imageTypes';
@@ -123,8 +123,108 @@ export async function safeResolve(root: string, rel: string): Promise<string | n
  * own right and not merely a pre-filter.
  */
 const READ_FLAGS = constants.O_RDONLY | (constants.O_NOFOLLOW | 0) | (constants.O_NONBLOCK | 0);
-const WRITE_FLAGS =
-  constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | (constants.O_NOFOLLOW | 0);
+// No O_TRUNC (FS-CONTAINMENT-TOCTOU): truncating at open time would empty whatever the path
+// pointed at by then, before the handle check below could refuse it. The write truncates
+// through the handle once the handle is proven to be inside the workspace.
+const WRITE_FLAGS = constants.O_WRONLY | constants.O_CREAT | (constants.O_NOFOLLOW | 0);
+
+/**
+ * FS-CONTAINMENT-TOCTOU: where does an OPEN handle actually live?
+ *
+ * `safeResolve` decides on a path, and the open that follows makes the kernel look the same path
+ * up again. Anyone who can write inside the workspace (an agent process, a script in a cloned
+ * repo) can swap any directory component for a link out of it in between, and swap it back.
+ * O_NOFOLLOW guards only the final component on POSIX and is 0 on Windows, and any second
+ * look-up of the PATH can be raced the same way (OUT at the open, IN at the re-check, OUT
+ * again). The one answer that cannot be raced is a property of the handle itself: the kernel's
+ * record of the file it opened. So every confined open asks the handle where it is and checks
+ * THAT against the workspace root.
+ *
+ *   linux:  readlink(/proc/self/fd/<fd>)
+ *   win32:  GetFinalPathNameByHandleW   (resources/fs-handle, built by tools/build-fs-handle.cjs)
+ *   darwin: fcntl(F_GETPATH)            (same addon)
+ *
+ * If the addon cannot load, every confined open is REFUSED with an error that says so. There is
+ * deliberately no fallback to the path-only check: that check is the gap this closes.
+ */
+const HANDLE_ADDON = 'guppy_fs_handle.node';
+type HandleAddon = { finalPath(fd: number): string };
+let handleAddon: HandleAddon | null = null;
+let handleAddonError: string | null = null;
+
+function loadHandleAddon(): HandleAddon {
+  if (handleAddon) return handleAddon;
+  if (handleAddonError === null) {
+    // Packaged: <resources>/fs-handle (electron-builder extraResources). Dev and tests: the
+    // repo's resources/fs-handle/bin, two levels up from out/main (bundled) or src/main (tests).
+    const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath;
+    const candidates = [
+      ...(resourcesPath ? [join(resourcesPath, 'fs-handle', HANDLE_ADDON)] : []),
+      join(__dirname, '..', '..', 'resources', 'fs-handle', 'bin', HANDLE_ADDON)
+    ];
+    const found = candidates.find((p) => existsSync(p));
+    try {
+      if (!found) throw new Error(`not found at ${candidates.join(' or ')}`);
+      const mod = { exports: {} as { finalPath?: unknown } };
+      process.dlopen(mod, found);
+      if (typeof mod.exports.finalPath !== 'function') throw new Error(`${found} has no finalPath export`);
+      handleAddon = mod.exports as HandleAddon;
+      return handleAddon;
+    } catch (e) {
+      handleAddonError = e instanceof Error ? e.message : String(e);
+      console.error(`[fs] file access disabled: the handle check could not load (${handleAddonError})`);
+    }
+  }
+  throw new Error(`file access refused: the handle check could not load (${handleAddonError})`);
+}
+
+const WIN_UNC_PREFIX = '\\\\?\\UNC\\';
+const WIN_PREFIX = '\\\\?\\';
+
+async function handlePath(fh: FileHandle): Promise<string> {
+  if (process.platform === 'linux') {
+    const p = await readlink(`/proc/self/fd/${fh.fd}`);
+    // An unlinked file reads back as "<path> (deleted)", and an anonymous object as
+    // "pipe:[n]" and the like: neither is a location inside the workspace.
+    if (!isAbsolute(p) || p.endsWith(' (deleted)')) throw new Error('path escapes root');
+    return p;
+  }
+  if (process.platform !== 'win32' && process.platform !== 'darwin') {
+    throw new Error(`file access refused: no handle check on ${process.platform}`);
+  }
+  const p = loadHandleAddon().finalPath(fh.fd);
+  if (process.platform !== 'win32') return p;
+  // \\?\UNC\server\share\x -> \\server\share\x and \\?\C:\x -> C:\x: the forms realpath returns.
+  if (p.startsWith(WIN_UNC_PREFIX)) return '\\\\' + p.slice(WIN_UNC_PREFIX.length);
+  if (p.startsWith(WIN_PREFIX)) return p.slice(WIN_PREFIX.length);
+  return p;
+}
+
+/** Throws unless the open handle `fh` is `root` itself or lies inside it. */
+async function assertHandleInRoot(fh: FileHandle, root: string): Promise<void> {
+  const realRoot = await realpath(resolve(root));
+  const where = await handlePath(fh);
+  // Windows and macOS file systems fold case by default; both strings come from the kernel, but
+  // not necessarily with the same spelling of the root.
+  const fold = process.platform === 'win32' || process.platform === 'darwin';
+  const r = relative(fold ? realRoot.toLowerCase() : realRoot, fold ? where.toLowerCase() : where);
+  if (r.startsWith('..') || isAbsolute(r)) throw new Error('path escapes root');
+}
+
+/**
+ * Open `abs` (already cleared by `safeResolve(root, …)`) with `flags`, then prove the handle is
+ * inside `root`. On refusal the handle is closed and the error thrown.
+ */
+async function openConfined(root: string, abs: string, flags: number, mode?: number): Promise<FileHandle> {
+  const fh = await open(abs, flags, mode);
+  try {
+    await assertHandleInRoot(fh, root);
+    return fh;
+  } catch (e) {
+    await fh.close().catch(() => {});
+    throw e;
+  }
+}
 
 /**
  * Open a path that `safeResolve` has ALREADY cleared, for reading.
@@ -136,11 +236,15 @@ const WRITE_FLAGS =
  * open has to refuse it on its own — a caller that reaches for a plain `readFile`
  * after `safeResolve` has no final-component protection at all.
  *
+ * `root` is the workspace `abs` was cleared against: the handle is checked against it after the
+ * open (FS-CONTAINMENT-TOCTOU), so a component swapped for a link between the check and the open
+ * is refused rather than read.
+ *
  * Callers still have to check `fstat` THROUGH the returned handle (not `stat` on
  * the path, which resolves it a third time) before trusting what they opened.
  */
-export function openForRead(abs: string): Promise<FileHandle> {
-  return open(abs, READ_FLAGS);
+export function openForRead(root: string, abs: string): Promise<FileHandle> {
+  return openConfined(root, abs, READ_FLAGS);
 }
 
 export interface DirEntry {
@@ -155,6 +259,10 @@ export async function listDir(root: string, rel: string): Promise<{
 } | { ok: false; error: string }> {
   const abs = await safeResolve(root, rel);
   if (!abs) return { ok: false, error: 'path escapes root' };
+  // RESIDUAL (FS-CONTAINMENT-TOCTOU): a directory listing has no handle to check. Node cannot
+  // enumerate a directory through an fd, so a component swapped for a link between safeResolve
+  // and this readdir lists the outside directory. What leaks is names, sizes and mtimes, never
+  // contents: every read goes through openForRead, which checks its handle.
   try {
     const names = await readdir(abs);
     const entries = await Promise.all(names.map(async (name): Promise<DirEntry> => {
@@ -184,7 +292,7 @@ export async function readFileText(root: string, rel: string): Promise<{
   if (!abs) return { ok: false, error: 'path escapes root' };
   let fh;
   try {
-    fh = await openForRead(abs);
+    fh = await openForRead(root, abs);
     const s = await fh.stat();
     if (!s.isFile()) return { ok: false, error: 'not a regular file' };
     if (s.size > MAX_READ_BYTES) {
@@ -235,7 +343,7 @@ export async function readFileBinary(root: string, rel: string, maxBytes = MAX_B
   if (!abs) return { ok: false, error: 'path escapes root' };
   let fh;
   try {
-    fh = await openForRead(abs);
+    fh = await openForRead(root, abs);
     const s = await fh.stat();
     // Directories and FIFOs are the trap here: readFile on a directory throws
     // (fine) but on a FIFO it BLOCKS forever with no size to check against, which
@@ -279,7 +387,12 @@ export async function writeFileText(root: string, rel: string, content: string):
   if (!abs) return { ok: false, error: 'path escapes root' };
   let fh;
   try {
-    fh = await open(abs, WRITE_FLAGS, 0o666);
+    // RESIDUAL (FS-CONTAINMENT-TOCTOU): O_CREAT runs before the handle check, so a dangling link
+    // swapped in at exactly that moment leaves one EMPTY file at its target outside the workspace.
+    // The write itself is refused and nothing is written or truncated there. Removing that file
+    // afterwards would be another path operation, raceable the same way, so it is left alone.
+    fh = await openConfined(root, abs, WRITE_FLAGS, 0o666);
+    await fh.truncate(0);
     await fh.writeFile(content, 'utf8');
     return { ok: true, path: abs };
   } catch (e) {

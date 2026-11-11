@@ -135,6 +135,14 @@ extraResources:
     to: input
     filter:
       - guppy-input.exe
+  # FS-CONTAINMENT-TOCTOU: the handle-check addon (N-API, Electron headers), built by
+  # tools/build-fs-handle.cjs in postinstall. A .node cannot load from inside the asar, so it ships
+  # beside it; src/main/fs.ts loads it from <resources>/fs-handle and refuses all confined file
+  # access if it is missing. Linux needs no addon (it reads /proc/self/fd), so its folder is empty.
+  - from: resources/fs-handle/bin
+    to: fs-handle
+    filter:
+      - guppy_fs_handle.node
   - from: resources/models
     to: models
     filter:
