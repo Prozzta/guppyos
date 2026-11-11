@@ -89,7 +89,7 @@ function configChild(body) {
     'if (watchers.length !== 1 || watchers[0].closed) { console.error("no live config watcher", watchers.length); process.exit(4); }',
     body,
     // Long enough for the deletion to reach the watcher; then nothing else holds the process.
-    "setTimeout(() => {}, 500);",
+    "setTimeout(() => {}, 700);",
   ].join('\n');
   const t0 = Date.now();
   const r = spawnSync(process.execPath, ['-e', src], { cwd: path.resolve(__dirname, '..'), encoding: 'utf8', windowsHide: true, timeout: 20_000, killSignal: 'SIGKILL',
@@ -100,7 +100,15 @@ function configChild(body) {
 
 test('watcher: deleting the config folder closes its watcher, so the process still exits (Node 22+ never reports the error)', () => {
   // After a turn of the loop: a folder deleted in the same tick as the watch never reaches it.
-  const { r, ms } = configChild("setTimeout(() => fs.rmSync(ud, { recursive: true, force: true }), 100);");
+  // First only config.json goes: the folder is still there, so the watcher must stay (exit 6).
+  // Then the folder goes; once it is back, the next read must start a NEW watcher (exit 5): a
+  // self-close that leaves configWatcher set would leave the folder unwatched for good (Jim J1/J3).
+  const { r, ms } = configChild([
+    "setTimeout(() => fs.rmSync(require('node:path').join(ud, 'config.json')), 100);",
+    'setTimeout(() => { if (watchers[0].closed) { console.error("MUTANT: deleting config.json alone closed the watcher"); process.exit(6); } fs.rmSync(ud, { recursive: true, force: true }); }, 200);',
+    'setTimeout(() => { fs.mkdirSync(ud, { recursive: true }); cfg.writeConfig({ onboardingComplete: true }); cfg.__resetConfigCacheForTests(); cfg.readConfig();',
+    '  if (!watchers[0].closed || watchers.length !== 2 || watchers[1].closed) { console.error("MUTANT: no new watcher after the folder came back", watchers.length); process.exit(5); } }, 400);',
+  ].join('\n'));
   assert.notEqual((r.error && r.error.code), 'ETIMEDOUT', `MUTANT: THE PROCESS NEVER EXITED after its config folder was deleted (${ms} ms): the watcher spins`);
   assert.equal(r.status, 0, r.stderr);
 });
@@ -111,6 +119,10 @@ test('watcher: closeConfigWatcher() closes the live watcher before a delete', ()
   const { r, ms } = configChild([
     'cfg.closeConfigWatcher();',
     'if (!watchers[0].closed) { console.error("MUTANT: closeConfigWatcher() left the watcher open"); process.exit(3); }',
+    // The next read starts a new watcher (Jim J2: a close that keeps configWatcher set never re-watches).
+    'cfg.__resetConfigCacheForTests(); cfg.readConfig();',
+    'if (watchers.length !== 2 || watchers[1].closed) { console.error("MUTANT: no new watcher after closeConfigWatcher", watchers.length); process.exit(5); }',
+    'cfg.closeConfigWatcher();',
     'setTimeout(() => fs.rmSync(ud, { recursive: true, force: true }), 100);',
   ].join(' '));
   assert.notEqual((r.error && r.error.code), 'ETIMEDOUT', `THE PROCESS NEVER EXITED after closeConfigWatcher and the delete (${ms} ms)`);
