@@ -281,36 +281,13 @@ export function acquireTerminal(ptyId: string, theme?: ThemeMap, fontSize = 14):
     if (text) void window.cth.copyToClipboard(text);
     return true;
   };
-  /** Paste the clipboard into the terminal.
-   *
-   *  The read is SYNCHRONOUS on purpose. Dictation tools (muesli.works, Wispr
-   *  Flow, …) "type" by stashing the clipboard, writing the transcript, sending
-   *  the paste key, and restoring the old clipboard immediately after. The async
-   *  read this used to do came back a tick or two later — after the restore — so
-   *  the terminal pasted the text that had been on the clipboard BEFORE, and the
-   *  words the user had just spoken were dropped. Reading inside the keydown
-   *  handler closes that window entirely.
-   *
-   *  Falls back to the async read if the sync bridge is unavailable (an older
-   *  preload), so this degrades to the previous behaviour rather than to nothing. */
+  /** Paste through Electron's asynchronous clipboard API. */
   const pasteClipboard = (): void => {
     if (entry.exited) return;
-    // PROVENANCE, EXPLICITLY, ON BOTH PATHS. `term.paste()` is a public method that
+    // PROVENANCE, EXPLICITLY. `term.paste()` is a public method that
     // makes xterm emit data with NO DOM paste event (browser/Terminal.ts:890-891 ->
-    // Clipboard.ts:54), so the DOM half of inputOrigin cannot see it. The sync path
-    // happens to run inside the keydown that invoked us, so it would classify HUMAN
-    // by accident; the async fallback runs in a .then() long after that keydown, so
-    // it would classify CONTROL - a user's paste read as not-human, on the exact
-    // compatibility path built to be taken silently on an older preload (L0-FUSION
-    // rev 11 dimension 2; the human's constraint ii). Both are marked here, at code
-    // we own with known provenance, immediately before the call that emits.
-    try {
-      const text = window.cth.readClipboardSync?.();
-      if (typeof text === 'string') {
-        if (text) { markHumanOrigin(ptyId, 'paste-sync'); term.paste(text); }
-        return;
-      }
-    } catch { /* fall through to the async path */ }
+    // Clipboard.ts:54), so the DOM half of inputOrigin cannot see it. Mark the
+    // asynchronous emission at code we own, immediately before it is emitted.
     void window.cth.readClipboard().then((t) => {
       if (!t || entry.exited) return;
       markHumanOrigin(ptyId, 'paste-async');

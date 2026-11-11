@@ -4738,6 +4738,13 @@ function createWindow(opts: { floor?: boolean; partition?: string; recovery?: Re
   };
   const ses = win.webContents.session;
   ses.setPermissionRequestHandler((_wc, permission, callback, details) => {
+    // Electron 45 sends screen/window/tab requests as display-capture rather
+    // than media. Guppy has no capture feature, so do not accidentally grant it
+    // through the permissive default below.
+    if (permission === 'display-capture') {
+      callback(false);
+      return;
+    }
     if (permission === 'media') {
       const mediaTypes = details && 'mediaTypes' in details ? details.mediaTypes : undefined;
       const wantsAudio = !mediaTypes || mediaTypes.includes('audio');
@@ -4747,6 +4754,7 @@ function createWindow(opts: { floor?: boolean; partition?: string; recovery?: Re
     callback(true);
   });
   ses.setPermissionCheckHandler((_wc, permission) => {
+    if (permission === 'display-capture') return false;
     if (permission === 'media') return micFeatureLive();
     return true;
   });
@@ -5784,29 +5792,20 @@ ipcMain.handle('session:resolveCwd', (_evt, sessionId: unknown) =>
   (typeof sessionId === 'string' ? resolveSessionCwd(sessionId) : null));
 
 // ─── IPC: clipboard ─────────────────────────────────────────────────────────
-ipcMain.handle('app:copyToClipboard', (_evt, text: unknown) => {
+ipcMain.handle('app:copyToClipboard', async (_evt, text: unknown) => {
   if (typeof text !== 'string') return { ok: false, error: 'invalid text' };
-  try { clipboard.writeText(text); return { ok: true }; }
+  try { await clipboard.writeText(text); return { ok: true }; }
   catch (e) { return { ok: false, error: e instanceof Error ? e.message : String(e) }; }
 });
 // STARTUP-TIMING-162: the renderer's long tasks and first-redraw marks (validated in startupTiming).
 ipcMain.on('startup:timing', (_evt, batch: unknown) => startupTiming.fromRenderer(batch));
 // STALL-WATCH-198: the renderer's slow input and long tasks (validated and rate-capped in stallWatch).
 ipcMain.on('stall:watch', (_evt, batch: unknown) => stallWatch.fromRenderer(batch));
-ipcMain.handle('app:readClipboard', () => {
-  try { return clipboard.readText(); } catch { return ''; }
+ipcMain.handle('app:readClipboard', async () => {
+  try { return await clipboard.readText(); } catch { return ''; }
 });
-// Same read, SYNCHRONOUS, for the terminal's paste shortcut.
-//
-// Dictation tools (muesli.works, Wispr Flow, …) type by stashing the user's
-// clipboard, writing the transcript, sending the paste key, then restoring the
-// old clipboard immediately. An `invoke` read returns a tick or two later — by
-// which point the restore has already landed and we paste the PREVIOUS text.
-// A `sendSync` read completes inside the keydown handler, before the tool gets
-// a chance to put the old contents back.
-ipcMain.on('app:readClipboardSync', (evt) => {
-  try { evt.returnValue = clipboard.readText(); } catch { evt.returnValue = ''; }
-});
+// Electron 44 makes clipboard reads asynchronous; terminal paste marks the
+// eventual renderer emission as HUMAN.
 // NOTE: the terminal theme is mirrored into each agent's per-session Claude
 // settings at spawn (hive.ensureAgent theme option) — deliberately NOT via
 // `claude config set -g theme`, which would also restyle the user's own
@@ -6698,13 +6697,14 @@ ipcMain.handle('dialog:attachFiles', async (evt) => {
 // clipboard holds no image (e.g. a normal text paste).
 ipcMain.handle('clipboard:saveImage', async () => {
   try {
-    const img = clipboard.readImage();
-    if (img.isEmpty()) return { ok: false as const, error: 'no image in clipboard' };
+    const item = (await clipboard.read()).find((entry) => entry.types.includes('image/png'));
+    if (!item) return { ok: false as const, error: 'no image in clipboard' };
+    const png = await item.getType('image/png');
     const dir = join(app.getPath('temp'), 'cth-pastes');
     mkdirSync(dir, { recursive: true });
     const name = `paste-${Date.now()}.png`;
     const dest = join(dir, name);
-    writeFileSync(dest, img.toPNG());
+    writeFileSync(dest, Buffer.from(await png.arrayBuffer()));
     return { ok: true as const, file: { path: dest, name } };
   } catch (e) {
     return { ok: false as const, error: e instanceof Error ? e.message : String(e) };

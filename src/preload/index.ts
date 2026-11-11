@@ -870,21 +870,6 @@ const api = {
   /** Read the system clipboard as plain text ('' when empty/unreadable). */
   readClipboard: (): Promise<string> =>
     ipcRenderer.invoke('app:readClipboard'),
-  /** Clipboard text, read SYNCHRONOUSLY. Only for the terminal's paste shortcut,
-   *  where an async read loses a race against dictation tools that restore the
-   *  previous clipboard right after sending the paste key.
-   *
-   *  TRADEOFF, stated plainly because sendSync blocks the renderer until main
-   *  answers: this app has a history of main-thread stalls (iCloud-evicted files
-   *  wedging a spawnSync git call), and during such a stall this call freezes the
-   *  paste keystroke rather than merely delaying it. Accepted because a clipboard
-   *  read is a memory lookup with no I/O, and because the async alternative is
-   *  measurably WRONG — it pastes the user's previous clipboard. Do not reach for
-   *  sendSync elsewhere on this reasoning; it is justified by the race, not by
-   *  convenience. */
-  readClipboardSync: (): string => {
-    try { return ipcRenderer.sendSync('app:readClipboardSync') ?? ''; } catch { return ''; }
-  },
 
   // ─── Claim ledger (W7: the Human's ledger UI in Settings) ────────────────
   /** Main owns every write; revert, purge, export and a level drop from writer also need main's own confirm. */

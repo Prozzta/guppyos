@@ -79,7 +79,11 @@ const checks = [
   ['pty.node built', built('node-pty', 'pty.node').length > 0],
   ['conpty.node built', built('node-pty', 'conpty.node').length > 0],
   ['winpty-agent.exe built', built('node-pty', 'winpty-agent.exe').length > 0],
-  ['better_sqlite3.node built', built('better-sqlite3', 'better_sqlite3.node').length > 0],
+  // better-sqlite3 13 is N-API and resolves this bundled prebuild before build/Release.
+  ['better-sqlite3 loaded N-API prebuild', (() => {
+    const p = path.join(root, 'better-sqlite3', 'prebuilds', 'win32-x64.node');
+    return fs.existsSync(p) && fs.statSync(p).size > 0;
+  })()],
   // The packager may nest the platform package under sqlite-vec (the installed layout does).
   ['vec0.dll digest = manifest', !!vec && [path.join(root, vec.package, vec.file), path.join(root, 'sqlite-vec', 'node_modules', vec.package, vec.file)].some((p) => sha(p) === vec.sha256)],
   ['onnxruntime win32-x64 digests = manifest', !!ort && Object.entries(ort).every(([rel, want]) => sha(path.join(root, 'onnxruntime-node', ...rel.split('/'))) === want)],
