@@ -340,3 +340,181 @@ test('lexical traversal out of the root is still rejected', () => withWorkspace(
     assert.equal(res.error, ESCAPE);
   }
 }));
+
+// ─── FS-CONTAINMENT-TOCTOU: a component swapped between the check and the open ──
+//
+// `safeResolve` decides on the path; the open then makes the kernel look it up again. These tests
+// put an attacker in exactly that window, deterministically: `open` from node:fs/promises is
+// wrapped (fs.ts calls it through the module object at call time) so a hook runs right before the
+// real open, and right after it. The attacker swaps a REAL directory of the workspace for a link to
+// an outside directory holding a file of the same name. safeResolve canonicalizes links away, so
+// the race has to be on a component that is a real directory when it is checked, which is what is
+// done here. The open must be refused because of where the HANDLE is, whatever the path says by then.
+
+const fsp = require('node:fs/promises');
+const { safeResolve } = loadTs('src/main/fs.ts');
+
+/** A workspace whose `d/` can be flipped between its real self (IN) and a link to `outside/d` (OUT). */
+function makeFlipWorkspace(kind) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'path-toctou-'));
+  const root = path.join(dir, 'workspace');
+  const outside = path.join(dir, 'outside');
+  fs.mkdirSync(path.join(root, 'd'), { recursive: true });
+  fs.mkdirSync(path.join(outside, 'd'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'd', 'f.txt'), 'in-workspace\n');
+  fs.writeFileSync(path.join(outside, 'd', 'f.txt'), SECRET);
+  const live = path.join(root, 'd');
+  const parked = path.join(root, '.d-real');
+  let state = 'in';
+  return {
+    dir, root, outside,
+    get state() { return state; },
+    out() {
+      if (state === 'out') return;
+      fs.renameSync(live, parked);
+      fs.symlinkSync(path.join(outside, 'd'), live, kind === 'junction' ? 'junction' : 'dir');
+      state = 'out';
+    },
+    in() {
+      if (state === 'in') return;
+      fs.unlinkSync(live);
+      fs.renameSync(parked, live);
+      state = 'in';
+    }
+  };
+}
+
+/**
+ * Run `fn` with node:fs/promises `open` wrapped: `before(path)` runs right before the real open,
+ * and `after(path, fh)` right after it. Both see only opens of `onlyUnder`.
+ */
+async function withOpenHooks(onlyUnder, { before, after }, fn) {
+  const realOpen = fsp.open;
+  fsp.open = async function hookedOpen(p, ...rest) {
+    const mine = typeof p === 'string' && p.startsWith(onlyUnder);
+    if (mine && before) await before(p);
+    const fh = await realOpen.call(this, p, ...rest);
+    if (mine && after) await after(p, fh);
+    return fh;
+  };
+  try {
+    return await fn();
+  } finally {
+    fsp.open = realOpen;
+  }
+}
+
+function withFlipWorkspace(kind, fn) {
+  const ws = makeFlipWorkspace(kind);
+  return Promise.resolve(fn(ws)).finally(() => fs.rmSync(ws.dir, { recursive: true, force: true }));
+}
+
+const SWAP_KINDS = IS_WIN ? KINDS : ['symlink'];
+
+for (const kind of SWAP_KINDS) {
+  test(`[${kind}] a directory swapped for a link just before the open cannot be read`, () =>
+    withFlipWorkspace(kind, async (ws) => {
+      let opened = 0;
+      const hooks = { before: () => { ws.out(); opened++; } };
+      const text = await withOpenHooks(ws.dir, hooks, () => readFileText(ws.root, 'd/f.txt'));
+      ws.in();
+      const bytes = await withOpenHooks(ws.dir, hooks, () => readFileBinary(ws.root, 'd/f.txt'));
+      assert.equal(opened, 2, 'the swap must have run inside the window, once per read');
+      assert.equal(text.ok, false, 'the text read must refuse what the open actually reached');
+      assert.equal(text.error, ESCAPE);
+      assert.equal(text.content, undefined, 'the external file contents must never be returned');
+      assert.equal(bytes.ok, false, 'the byte read must refuse what the open actually reached');
+      assert.equal(bytes.error, ESCAPE);
+      assert.equal(bytes.bytes, undefined);
+    }));
+
+  test(`[${kind}] a directory swapped for a link just before the open cannot be written through`, () =>
+    withFlipWorkspace(kind, async (ws) => {
+      const target = path.join(ws.outside, 'd', 'f.txt');
+      const res = await withOpenHooks(ws.dir, { before: () => ws.out() }, () =>
+        writeFileText(ws.root, 'd/f.txt', 'clobbered\n'));
+      assert.equal(ws.state, 'out', 'the swap must have run inside the window');
+      assert.equal(res.ok, false, 'the write must refuse what the open actually reached');
+      assert.equal(res.error, ESCAPE);
+      // No O_TRUNC at open time: the refusal comes before anything touches the contents.
+      assert.equal(fs.readFileSync(target, 'utf8'), SECRET, 'the external file must be neither truncated nor written');
+      ws.in();
+      assert.equal(fs.readFileSync(path.join(ws.root, 'd', 'f.txt'), 'utf8'), 'in-workspace\n');
+    }));
+
+  test(`[${kind}] the git diff read refuses a directory swapped for a link just before the open`, () =>
+    withFlipWorkspace(kind, async (ws) => {
+      const res = await withOpenHooks(ws.dir, { before: () => ws.out() }, () => getDiff(ws.root, 'd/f.txt'));
+      assert.equal(ws.state, 'out', 'the swap must have run inside the window');
+      assert.equal(res.ok, true, res.ok ? '' : res.error);
+      assert.equal(res.workingExists, false, 'what the open reached is not the file the guard cleared');
+      assert.equal(res.working, '', 'the external file contents must never reach the renderer');
+    }));
+
+  test(`[${kind}] the handle check catches a flipper: OUT at the open, IN at the check, OUT after it`, () =>
+    withFlipWorkspace(kind, async (ws) => {
+      // The attack that beats any re-check of the PATH: the path is OUT when the kernel opens it,
+      // back IN by the time anything looks at the path again (so a second safeResolve, or a stat of
+      // the path, says "inside"), and OUT again for whatever comes after. Only the handle knows
+      // where the open really landed.
+      const log = [];
+      let recheck;
+      const hooks = {
+        before: () => { ws.out(); log.push('out@open'); },
+        after: async (_p, fh) => {
+          ws.in();
+          log.push('in@check');
+          recheck = await safeResolve(ws.root, 'd/f.txt');
+          const realStat = fh.stat.bind(fh);
+          fh.stat = async (...a) => { ws.out(); log.push('out@stat'); return realStat(...a); };
+        }
+      };
+      const res = await withOpenHooks(ws.dir, hooks, () => readFileText(ws.root, 'd/f.txt'));
+      assert.deepEqual(log, ['out@open', 'in@check'],
+        'the refusal must come from the handle check, before anything reads through the handle');
+      assert.equal(recheck, path.join(fs.realpathSync(ws.root), 'd', 'f.txt'),
+        'at check time the PATH resolves inside the workspace: a path re-check would have passed');
+      assert.equal(res.ok, false, 'the handle reached the outside file and must be refused');
+      assert.equal(res.error, ESCAPE);
+      assert.equal(res.content, undefined, 'the external file contents must never be returned');
+    }));
+}
+
+test('an ordinary in-workspace open is not disturbed by the hooks', () =>
+  withFlipWorkspace(SWAP_KINDS[0], async (ws) => {
+    // The control for the swap tests: with the same hooks and no swap, the read succeeds, so a
+    // refusal above is the handle check and not the hooks.
+    let opened = 0;
+    const res = await withOpenHooks(ws.dir, { before: () => { opened++; } }, () => readFileText(ws.root, 'd/f.txt'));
+    assert.equal(opened, 1);
+    assert.equal(res.ok, true, res.ok ? '' : res.error);
+    assert.equal(res.content, 'in-workspace\n');
+  }));
+
+test('if the handle check cannot load, every confined open is refused, loudly', {
+  skip: process.platform === 'linux' ? 'Linux reads /proc/self/fd and loads no addon' : false
+}, () => withFlipWorkspace(SWAP_KINDS[0], async (ws) => {
+  // A build that lost the addon must not quietly fall back to the path-only check: that check is
+  // the race this closes. Load fs.ts with the addon's file name pointed at nothing.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'fs.ts'), 'utf8');
+  const name = "const HANDLE_ADDON = 'guppy_fs_handle.node';";
+  assert.ok(src.includes(name), 'the addon name this test redirects must still be in fs.ts');
+  const broken = loadTs.fromText('src/main/fs.ts', src.replace(name, "const HANDLE_ADDON = 'no-such-addon.node';"));
+  const errors = [];
+  const realError = console.error;
+  console.error = (...a) => { errors.push(a.join(' ')); };
+  let read, write;
+  try {
+    read = await broken.readFileText(ws.root, 'd/f.txt');
+    write = await broken.writeFileText(ws.root, 'd/new.txt', 'x\n');
+  } finally {
+    console.error = realError;
+  }
+  for (const res of [read, write]) {
+    assert.equal(res.ok, false, 'no confined access without the handle check');
+    assert.match(res.error, /^file access refused: the handle check could not load \(not found at /);
+  }
+  assert.equal(fs.readFileSync(path.join(ws.root, 'd', 'f.txt'), 'utf8'), 'in-workspace\n');
+  assert.equal(errors.length, 1, 'the failure is logged once, not per call');
+  assert.match(errors[0], /file access disabled: the handle check could not load/);
+}));

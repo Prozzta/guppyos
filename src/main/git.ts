@@ -189,7 +189,7 @@ export async function getDiff(
   let workingBinary = false;
   let fh;
   try {
-    fh = await openForRead(abs);
+    fh = await openForRead(cwd, abs);
     // Stat THROUGH the handle: it describes what is actually open, where a second
     // `stat` on the path would resolve it again. A directory has no diffable
     // content, and a FIFO would park the read — and the IPC call behind it —
