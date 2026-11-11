@@ -111,8 +111,10 @@ export async function probePython(deps: BuildProbeDeps): Promise<Row> {
   const mm = BUILD_PYTHON.replace('.', '');
   const wanted = (v: string) => v.startsWith(`${BUILD_PYTHON}.`);
   if (hit && wanted(hit.version)) return { found: true, path: hit.exe, detail: `${hit.version} (via ${hit.via})` };
+  // node-gyp accepts any 3.6+, so another 3.x builds fine: information, not a warning.
+  if (hit) return { found: true, path: hit.exe, detail: `${hit.version} (via ${hit.via}) · builds fine; the floor uses ${BUILD_PYTHON}` };
 
-  // node-gyp's pick is missing or not 3.12: is a 3.12 installed where node-gyp does not look?
+  // node-gyp found no Python: is a 3.12 installed where node-gyp does not look?
   let p312: PyHit | null = null;
   if (win) {
     for (const loc of winDefaultLocations(deps.env, [mm]).filter((l) => !l.includes('-32'))) {
@@ -122,17 +124,10 @@ export async function probePython(deps: BuildProbeDeps): Promise<Row> {
     }
   }
   const pointAt = p312 ? (win ? `setx npm_config_python "${p312.exe}"` : `export npm_config_python="${p312.exe}"`) : '';
-  if (hit) {
-    return {
-      found: true, path: hit.exe, detail: `${hit.version} (via ${hit.via})`,
-      warn: `node-gyp will use Python ${hit.version}; the floor builds with ${BUILD_PYTHON}.${p312 ? ` Point it at ${p312.exe}.` : ''}`,
-      ...(pointAt ? { installCommand: pointAt } : {})
-    };
-  }
   if (p312) {
     return {
       found: true, path: p312.exe, detail: p312.version,
-      warn: `Python ${p312.version} is installed, but node-gyp will not find it (not on PATH, no npm_config_python). Set npm_config_python, then open a new terminal.`,
+      warn: `Python ${p312.version} is installed, but node-gyp will not find it (not on PATH, no npm_config_python). Set npm_config_python, then open a new terminal and restart Guppy (setx reaches only new processes).`,
       installCommand: pointAt
     };
   }
@@ -144,7 +139,9 @@ export function vswherePath(env: BuildProbeDeps['env']): string {
   return `${pf86}\\Microsoft Visual Studio\\Installer\\vswhere.exe`;
 }
 
-/** The VS 2022 install (Build Tools included: `-products *`) that has every id, or null. */
+/** The VS 2022 install (Build Tools included: `-products *`) that has every id, or null.
+ *  The range is pinned to 2022 on purpose: the node-gyp this build uses (@electron/node-gyp 10)
+ *  knows VS up to 2022 only, so a VS 2026 (version 18) install would not be used by the build. */
 async function vswhereFind(deps: BuildProbeDeps, ids: string[]): Promise<{ path: string | null; timedOut?: boolean }> {
   const r = await deps.exec(vswherePath(deps.env), [
     '-products', '*', '-version', '[17.0,18.0)', '-requires', ...ids, '-property', 'installationPath', '-format', 'value'

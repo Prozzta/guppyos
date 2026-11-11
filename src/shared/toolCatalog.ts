@@ -127,9 +127,8 @@ export const BUILD_PYTHON = '3.12';
 /** vswhere `-requires` ids per VS row (all must be present). The VC-tools row probes the MSVC
  *  x86/x64 compiler component (what node-gyp itself checks), which both the Build Tools VCTools
  *  workload and a full VS "Desktop development with C++" install provide. */
-export const BUILD_VS_REQUIRES: Record<'build:vs-vctools' | 'build:vs-clangcl' | 'build:vs-spectre', string[]> = {
+export const BUILD_VS_REQUIRES: Record<'build:vs-vctools' | 'build:vs-spectre', string[]> = {
   'build:vs-vctools': ['Microsoft.VisualStudio.Component.VC.Tools.x86.x64'],
-  'build:vs-clangcl': ['Microsoft.VisualStudio.Component.VC.Llvm.Clang', 'Microsoft.VisualStudio.Component.VC.Llvm.ClangToolset'],
   'build:vs-spectre': ['Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre']
 };
 
@@ -157,7 +156,7 @@ const BUILD_TOOLS: (ToolSpec & { platforms: Array<'win32' | 'posix'> })[] = [
     bin: 'node',
     label: `Node.js ${BUILD_NODE_MAJOR}`,
     kind: 'build',
-    why: `The build is pinned to Node ${BUILD_NODE_MAJOR} (.nvmrc). Another major, or a Node built with PGO (Node 26), breaks the native module builds.`,
+    why: `The build is pinned to Node ${BUILD_NODE_MAJOR} (.nvmrc). node-gyp builds with the running Node's own settings, so another major breaks the native builds: Node 26 (built with clang-cl and PGO) makes them ask for the ClangCL toolset and a PGO profile that is not there.`,
     essential: false,
     install: {
       posix: `nvm install ${BUILD_NODE_MAJOR} && nvm use ${BUILD_NODE_MAJOR}`,
@@ -193,17 +192,6 @@ const BUILD_TOOLS: (ToolSpec & { platforms: Array<'win32' | 'posix'> })[] = [
     },
     note: ADMIN_NOTE,
     docsUrl: 'https://visualstudio.microsoft.com/visual-cpp-build-tools/',
-    platforms: ['win32']
-  },
-  {
-    id: 'build:vs-clangcl',
-    bin: null,
-    label: 'ClangCL toolset',
-    kind: 'build',
-    why: 'node-pty\'s Windows build uses the ClangCL platform toolset.',
-    essential: false,
-    install: { posix: '', win32: vsModify(BUILD_VS_REQUIRES['build:vs-clangcl']) },
-    note: `${ADMIN_NOTE} Install the VS 2022 Build Tools first.`,
     platforms: ['win32']
   },
   {

@@ -51,9 +51,11 @@ function machine({ platform = 'win32', env = WIN_ENV, node = ['20.20.2', false, 
 const byId = (rows) => Object.fromEntries(rows.map((r) => [r.id, r]));
 const ALL_VS = [...new Set(Object.values(C.BUILD_VS_REQUIRES).flat())];
 
-test('catalog: Windows has the five build rows, posix only Node and Python; none essential', () => {
+test('catalog: Windows has the four build rows, posix only Node and Python; none essential', () => {
   const win = C.buildToolCatalog('win32').map((t) => t.id);
-  assert.deepEqual(win, ['build:node', 'build:python', 'build:vs-vctools', 'build:vs-clangcl', 'build:vs-spectre']);
+  assert.deepEqual(win, ['build:node', 'build:python', 'build:vs-vctools', 'build:vs-spectre']);
+  // node-pty 1.1.0 and better-sqlite3 build with MSVC v143; ClangCL was only a Node 26 symptom (Jim M1)
+  assert.equal(JSON.stringify(C.buildToolCatalog('win32')).includes('Llvm'), false, 'no LLVM/ClangCL row or install line');
   assert.deepEqual(C.buildToolCatalog('linux').map((t) => t.id), ['build:node', 'build:python']);
   assert.deepEqual(C.buildToolCatalog('darwin').map((t) => t.id), ['build:node', 'build:python']);
   for (const t of C.buildToolCatalog('win32')) {
@@ -76,9 +78,8 @@ test('catalog: the install text names the exact winget / VS Installer ids and sa
   const w = byId(C.buildToolCatalog('win32'));
   assert.match(w['build:python'].install.win32, /winget install --id Python\.Python\.3\.12 -e/);
   assert.match(w['build:vs-vctools'].install.win32, /Microsoft\.VisualStudio\.2022\.BuildTools.*--add Microsoft\.VisualStudio\.Workload\.VCTools/);
-  assert.match(w['build:vs-clangcl'].install.win32, /modify --installPath .*--add Microsoft\.VisualStudio\.Component\.VC\.Llvm\.Clang --add Microsoft\.VisualStudio\.Component\.VC\.Llvm\.ClangToolset/);
-  assert.match(w['build:vs-spectre'].install.win32, /--add Microsoft\.VisualStudio\.Component\.VC\.Runtimes\.x86\.x64\.Spectre/);
-  for (const id of ['build:vs-vctools', 'build:vs-clangcl', 'build:vs-spectre']) assert.match(w[id].note, /admin prompt/, id);
+  assert.match(w['build:vs-spectre'].install.win32, /modify --installPath .*--add Microsoft\.VisualStudio\.Component\.VC\.Runtimes\.x86\.x64\.Spectre/);
+  for (const id of ['build:vs-vctools', 'build:vs-spectre']) assert.match(w[id].note, /admin prompt/, id);
   assert.match(C.BUILD_GROUP.why, /better-sqlite3/);
   assert.match(C.BUILD_GROUP.why, /node-pty/);
   assert.match(C.BUILD_GROUP.posixNote, /xcode-select --install/);
@@ -121,17 +122,20 @@ test('python: a 3.12 node-gyp will not find (Python312 is not in its default lis
   const r = byId(await P.buildPrereqStatus(machine({ files: [PY312], pythons: { [PY312]: '3.12.7' } }).deps))['build:python'];
   assert.equal(r.found, true);
   assert.match(r.warn, /node-gyp will not find it/);
+  assert.match(r.warn, /restart Guppy/, 'setx reaches only new processes; the re-check reads Guppy\'s own env (Jim N1)');
   assert.equal(r.installCommand, `setx npm_config_python "${PY312}"`);
 });
 
-test('python: node-gyp picks another 3.x: warn, and point at an installed 3.12', async () => {
-  let r = byId(await P.buildPrereqStatus(machine({ pythons: { py: '3.13.1', 'py:exe': 'C:\\Py313\\python.exe', [PY312]: '3.12.7' } }).deps))['build:python'];
+test('python: node-gyp picks another working 3.x: ready, shown as information (no warn)', async () => {
+  const m1 = machine({ files: [PY312], pythons: { py: '3.13.1', 'py:exe': 'C:\\Py313\\python.exe', [PY312]: '3.12.7' } });
+  let r = byId(await P.buildPrereqStatus(m1.deps))['build:python'];
   assert.equal(r.found, true); assert.equal(r.path, 'C:\\Py313\\python.exe');
-  assert.match(r.warn, /node-gyp will use Python 3\.13\.1.*Point it at/);
-  assert.equal(r.installCommand, `setx npm_config_python "${PY312}"`);
-  // node-gyp's own default list (3.11) counts as a pick; no 3.12 anywhere: warn, keep winget text
+  assert.equal(r.warn, undefined, 'node-gyp accepts any 3.6+, so the build works (Jim N2)');
+  assert.match(r.detail, /3\.13\.1 .*builds fine; the floor uses 3\.12/);
+  assert.equal(m1.calls.some((c) => c[0] === PY312), false, 'a working pick needs no 3.12 search');
+  // node-gyp's own default list (3.11) counts as a pick
   r = byId(await P.buildPrereqStatus(machine({ pythons: { [PY311]: '3.11.9' } }).deps))['build:python'];
-  assert.equal(r.path, PY311); assert.match(r.warn, /3\.11\.9/); assert.match(r.installCommand, /winget install --id Python\.Python\.3\.12/);
+  assert.equal(r.path, PY311); assert.equal(r.warn, undefined); assert.match(r.detail, /3\.11\.9/);
 });
 
 test('python: none at all is missing with the winget command; posix never tries py or Windows paths', async () => {
@@ -146,10 +150,9 @@ test('python: none at all is missing with the winget command; posix never tries 
 });
 
 test('vs: each row asks vswhere -products * for VS 2022 with its own component ids', async () => {
-  const m = machine({ components: ['Microsoft.VisualStudio.Component.VC.Tools.x86.x64', 'Microsoft.VisualStudio.Component.VC.Llvm.Clang'] });
+  const m = machine({ components: ['Microsoft.VisualStudio.Component.VC.Tools.x86.x64'] });
   const r = byId(await P.buildPrereqStatus(m.deps));
   assert.equal(r['build:vs-vctools'].found, true); assert.equal(r['build:vs-vctools'].path, BT);
-  assert.equal(r['build:vs-clangcl'].found, false, 'ClangCL needs BOTH Llvm.Clang and Llvm.ClangToolset');
   assert.equal(r['build:vs-spectre'].found, false);
   const vs = m.calls.filter((c) => c[0] === VSWHERE);
   for (const c of vs) {
@@ -163,13 +166,13 @@ test('vs: each row asks vswhere -products * for VS 2022 with its own component i
 
 test('vs: everything installed is all ready; no vswhere means not found with the placeholders filled by defaults', async () => {
   let r = byId(await P.buildPrereqStatus(machine({ components: ALL_VS }).deps));
-  for (const id of ['build:vs-vctools', 'build:vs-clangcl', 'build:vs-spectre']) assert.equal(r[id].found, true, id);
+  for (const id of ['build:vs-vctools', 'build:vs-spectre']) assert.equal(r[id].found, true, id);
   const m = machine({ vswhere: false });
   r = byId(await P.buildPrereqStatus(m.deps));
-  for (const id of ['build:vs-vctools', 'build:vs-clangcl', 'build:vs-spectre']) assert.equal(r[id].found, false, id);
+  for (const id of ['build:vs-vctools', 'build:vs-spectre']) assert.equal(r[id].found, false, id);
   assert.equal(m.calls.some((c) => c[0] === VSWHERE), false, 'no vswhere, no spawn');
-  assert.ok(r['build:vs-clangcl'].installCommand.includes(`--installPath "${C.VS_PATH_DEFAULT}"`));
-  assert.equal(/\{vs(Setup|Path)\}/.test(r['build:vs-clangcl'].installCommand), false, 'no token left in the shown command');
+  assert.ok(r['build:vs-spectre'].installCommand.includes(`--installPath "${C.VS_PATH_DEFAULT}"`));
+  assert.equal(/\{vs(Setup|Path)\}/.test(r['build:vs-spectre'].installCommand), false, 'no token left in the shown command');
   r = byId(await P.buildPrereqStatus(machine({ timeouts: [VSWHERE] }).deps));
   assert.equal(r['build:vs-spectre'].unknown, true);
 });
@@ -177,7 +180,7 @@ test('vs: everything installed is all ready; no vswhere means not found with the
 test('a probe that throws is a row, not a crash', async () => {
   const deps = { ...machine().deps, exec: async () => { throw new Error('boom'); } };
   const rows = await P.buildPrereqStatus(deps);
-  assert.equal(rows.length, 5);
+  assert.equal(rows.length, 4);
   for (const r of rows) assert.equal(r.found, false, r.id);
 });
 
