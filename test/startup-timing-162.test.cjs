@@ -210,10 +210,13 @@ test('(1) REAL loop delay: Node\'s histogram sees a blocked main thread in the r
   // LOAD-FLAKES-105: judge the block against the ACTUAL sample times, not the planned schedule. On a
   // loaded machine this test's own timers fire late, so the block runs later than 1.15 s and the
   // sample that sees it (often the stop's final one) is later than 2.7 s; and an unrelated stall can
-  // outgrow the block. Each sample's time is recorded where the recorder's interval calls it.
+  // outgrow the block. Each sample's time is the recorder's OWN first clock read inside that sample
+  // (a separate Date.now() here can land a millisecond off it under load).
   const sampledAt = [];
-  const rec = new StartupTiming({ origin, now: Date.now, log: (x) => rows.push(x), histogram: () => monitorEventLoopDelay({ resolution: 10 }), windowMs: 2_600,
-    setInterval: (fn, ms) => setInterval(() => { sampledAt.push(Date.now() - origin); fn(); }, ms) });
+  let inSample = null;
+  const now = () => { const v = Date.now(); if (inSample && inSample.at === undefined) inSample.at = v; return v; };
+  const rec = new StartupTiming({ origin, now, log: (x) => rows.push(x), histogram: () => monitorEventLoopDelay({ resolution: 10 }), windowMs: 2_600,
+    setInterval: (fn, ms) => setInterval(() => { inSample = {}; fn(); if (inSample.at !== undefined) sampledAt.push(Math.round(inSample.at - origin)); inSample = null; }, ms) });
   rec.start();
   await new Promise((res) => setTimeout(res, 1_150));
   const blockFrom = Date.now() - origin;

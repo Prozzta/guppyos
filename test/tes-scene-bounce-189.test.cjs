@@ -26,6 +26,9 @@ test('NUDGE_MS is the camera nudge\'s real duration (the frame-coverage window, 
   assert.ok(cam.includes(`nudgeToward(worldX: number, worldY: number, duration = ${NUDGE_MS})`), 'Camera.nudgeToward defaults to NUDGE_MS');
   const floor = require('node:fs').readFileSync(join(__dirname, '..', 'src', 'renderer', 'src', 'scene', 'themes', 'StationFloor.tsx'), 'utf8');
   assert.match(floor, /camera\.nudgeToward\(p\.x, p\.y\)/, 'the select nudge uses the default duration');
+  // The coverage rule's arithmetic: a frame e ms into the nudge carries offset x (1 - e/NUDGE_MS).
+  assert.ok(cam.includes('const ease = 1 - t;'), 'the nudge eases linearly to 0 over its duration');
+  assert.ok(floor.includes('camera.update(Math.max(0, now - lastTickAt) / 1000);'), 'the TES camera clock is wall time between ticks');
 });
 
 test('RENDERED (DPR 1): clicking an agent card in the roster leaves the TES scene where it stands', { timeout: harnessTestTimeout(120_000) }, async (t) => {
@@ -37,18 +40,17 @@ test('RENDERED (DPR 1): clicking an agent card in the roster leaves the TES scen
   for (const { who, found, selected, clickAt, frames } of r.clicks) {
     assert.equal(found, true, `${who}'s card is in the roster`);
     assert.equal(selected, ids[who], `the click selected ${who}`);
-    // Not vacuous (LOAD-FLAKES-105): the frames must COVER the nudge, not number 30. A select's
-    // camera nudge (Camera.nudgeToward) eases over NUDGE_MS of wall time, so a bounce shows on any
-    // frame drawn in that window. The rest frame is from before the click, every quarter of the
-    // nudge holds a frame, and a frame lands after it. A count assumed a 60 fps timer, which a
-    // loaded machine does not give a hidden window (24 frames in g5, the window still covered).
+    // Not vacuous (LOAD-FLAKES-105): the frames must be able to SEE a bounce, not number 30. A select's
+    // camera nudge (Camera.nudgeToward) adds offset x (1 - e/NUDGE_MS) on a frame drawn e ms after it
+    // started (the TES camera's clock is wall time between ticks), so a frame in the first half of
+    // the nudge shows a bounce at half its full size or more. The rest frame is from before the
+    // click, such a frame exists, and a frame lands after the nudge. A count assumed a 60 fps timer,
+    // and a frame in every 300 ms assumed no stall: neither holds on a loaded machine (24 frames in
+    // g5; a 569 ms stall right after a click under 96 burners, its first frame 35 ms in).
     const at = frames.map((f) => f.t);
     const cover = `${who}: click at ${clickAt}, frames at ${JSON.stringify(at)}`;
     assert.ok(at[0] < clickAt, `the rest frame is from before the click: ${cover}`);
-    for (let q = 0; q < 4; q++) {
-      const from = clickAt + (q * NUDGE_MS) / 4, to = clickAt + ((q + 1) * NUDGE_MS) / 4;
-      assert.ok(at.some((t) => t >= from && t < to), `a frame in nudge quarter ${q + 1} (${from}-${to} ms): ${cover}`);
-    }
+    assert.ok(at.some((t) => t > clickAt && t <= clickAt + NUDGE_MS / 2), `a frame in the nudge's first half (bounce >= 1/2 size): ${cover}`);
     assert.ok(at[at.length - 1] >= clickAt + NUDGE_MS, `a frame after the nudge ended: ${cover}`);
     const f0 = frames[0];
     // Not vacuous: the 336-row semantic box gets the expected fractional height-limited fit.
