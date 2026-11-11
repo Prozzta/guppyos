@@ -329,7 +329,9 @@ test('outer spawns a nested node --test', () => {
 });\n`);
 // LOAD-FLAKES-105: the crashed lease holder runs until it is killed. A fixed 20 s sleep ended on its
 // own under load (the setup and two process-table queries outlived it): it exited and released.
-fs.writeFileSync(path.join(FIX, 'sleeper.test.cjs'), "require('node:test')('sleeps until killed', () => new Promise(() => setInterval(() => {}, 1 << 30)));\n");
+// Bounded at 10 min (Jim SHOULD): far past any kill, and the still-running assert below catches an
+// early end; but if the kill's process snapshot fails, the file child cannot live on forever.
+fs.writeFileSync(path.join(FIX, 'sleeper.test.cjs'), "require('node:test')('sleeps until killed (10 min bound)', () => new Promise((r) => setTimeout(r, 10 * 60_000)));\n");
 
 function cleanEnv(extra) {
   const env = { ...process.env };
