@@ -44,7 +44,7 @@ const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'md-cap-threshold-'));
 const electron = require.resolve('electron');
 require.cache[electron] = { id: electron, filename: electron, loaded: true, exports: { app: { getPath: () => userData } } };
 const { readConfig, writeConfig, setCapacityDisplayThreshold } = loadTs('src/main/config.ts');
-test.after(() => fs.rmSync(userData, { recursive: true, force: true }));
+test.after(() => { require('./load-ts.cjs').closeConfigWatchers(); fs.rmSync(userData, { recursive: true, force: true }); });
 
 test('persist: a valid value is written to disk and survives a restart (a fresh read of the file)', () => {
   writeConfig({ notifications: true });

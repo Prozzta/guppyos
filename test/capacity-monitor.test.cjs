@@ -108,7 +108,7 @@ const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'md-usage-display-'));
 const electron = require.resolve('electron');
 require.cache[electron] = { id: electron, filename: electron, loaded: true, exports: { app: { getPath: () => userData } } };
 const { readConfig, writeConfig, setAgentUsageDisplay } = loadTs('src/main/config.ts');
-test.after(() => fs.rmSync(userData, { recursive: true, force: true }));
+test.after(() => { require('./load-ts.cjs').closeConfigWatchers(); fs.rmSync(userData, { recursive: true, force: true }); });
 
 test('persist: 5H/Weekly are stored per agent against the latest config; Budget is stored as ABSENT', () => {
   writeConfig({ agentUsageDisplay: { existing: 'weekly' }, agentTokenCaps: { jim: 100 } });

@@ -22,7 +22,7 @@ const loadTs = require('./load-ts.cjs');
 const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'cb165-plg-data-'));
 const electron = require.resolve('electron');
 require.cache[electron] = { id: electron, filename: electron, loaded: true, exports: { app: { getPath: () => userData } } };
-test.after(() => fs.rmSync(userData, { recursive: true, force: true }));
+test.after(() => { require('./load-ts.cjs').closeConfigWatchers(); fs.rmSync(userData, { recursive: true, force: true }); });
 
 const { readConfig, writeConfig } = loadTs('src/main/config.ts');
 const { HiveManager } = loadTs('src/main/hive.ts');

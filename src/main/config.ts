@@ -733,18 +733,33 @@ function deepFreeze<T>(v: T): T {
 }
 
 /** fs.watch on the config folder marks the cache dirty (the next read stats). Best-effort: the
- *  stat revalidate is the authority, so a watcher that fails to start or dies changes nothing. */
+ *  stat revalidate is the authority, so a watcher that fails to start or dies changes nothing.
+ *
+ *  GUPPY-NODE-LTS: a watcher whose folder is deleted closes itself. Node 20 (libuv 1.46) reports that
+ *  as 'error' (EPERM, handled below). From Node 22 (libuv 1.51+) on Windows no error ever comes,
+ *  and the watcher spins the event loop at 100% CPU for ever, unref'd or not, so the process never
+ *  exits. The spinning watcher keeps calling the callback (tens of thousands of events a second,
+ *  measured on 24.22.2), so the callback checks the folder and closes on the first call that finds
+ *  it gone. That is the safety net: whoever deletes the folder calls closeConfigWatcher() first. */
 function watchConfig(p: string): void {
   if (configWatcher?.path === p) return;
   configWatcher?.close();
   configWatcher = null;
   try {
     const w = watch(dirname(p), { persistent: false }, (_event, name) => {
+      if (!existsSync(dirname(p))) { w.close(); if (configWatcher?.path === p) configWatcher = null; return; }
       if (!name || String(name) === basename(p)) { if (configCache?.path === p) configCache.checkedAt = -Infinity; }
     });
     w.on('error', () => { w.close(); if (configWatcher?.path === p) configWatcher = null; });
     configWatcher = { path: p, close: () => w.close() };
   } catch { /* no watcher: the stat revalidate still bounds the staleness */ }
+}
+
+/** Closes the config folder's watcher (the next read starts a new one). Call it before deleting
+ *  that folder: from Node 22, a watcher whose folder is deleted can spin for ever (watchConfig). */
+export function closeConfigWatcher(): void {
+  configWatcher?.close();
+  configWatcher = null;
 }
 
 /** Tests: drop the cache (the next read goes to disk), and/or drive the revalidate clock and the

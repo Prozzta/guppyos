@@ -49,7 +49,7 @@ RA.registerRealtimeActionIpc({
 const say = (verb, args) => handlers['realtime:action'](null, { verb, ...args });
 const confirm = () => handlers['realtime:action:confirm'](null, { phrase: 'confirm' });
 
-test.after(() => fs.rmSync(userData, { recursive: true, force: true }));
+test.after(() => { require('./load-ts.cjs').closeConfigWatchers(); fs.rmSync(userData, { recursive: true, force: true }); });
 
 test('readConfigForWrite reads through the window; readConfig keeps serving the cache', () => {
   start({ missions: [mission('A')] });

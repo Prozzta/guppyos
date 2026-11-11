@@ -29,6 +29,7 @@ function withConfig(fn) {
     return fn(loadTs('src/main/config.ts'), tmp);
   } finally {
     if (prev) require.cache[electron] = prev; else delete require.cache[electron];
+    loadTs.closeConfigWatchers();
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 }

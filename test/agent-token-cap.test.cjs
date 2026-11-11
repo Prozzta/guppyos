@@ -23,7 +23,7 @@ require.cache[electron] = {
 
 const { readConfig, setAgentTokenCap, writeConfig } = loadTs('src/main/config.ts');
 
-test.after(() => fs.rmSync(userData, { recursive: true, force: true }));
+test.after(() => { require('./load-ts.cjs').closeConfigWatchers(); fs.rmSync(userData, { recursive: true, force: true }); });
 
 test('consecutive agent caps survive an interleaved config update', () => {
   writeConfig({ agentTokenCaps: { existing: 50 } });

@@ -15,7 +15,7 @@ const electron = require.resolve('electron');
 require.cache[electron] = { id: electron, filename: electron, loaded: true, exports: { app: { getPath: () => userData } } };
 const { readConfig, writeConfig } = loadTs('src/main/config.ts');
 const { heavyLimit } = loadTs('src/main/heavyJob.ts');
-test.after(() => fs.rmSync(userData, { recursive: true, force: true }));
+test.after(() => { require('./load-ts.cjs').closeConfigWatchers(); fs.rmSync(userData, { recursive: true, force: true }); });
 
 const REPO = path.resolve(__dirname, '..');
 const read = (p) => fs.readFileSync(path.join(REPO, p), 'utf8');

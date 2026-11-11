@@ -17,7 +17,7 @@ const path = require('node:path');
 /** TEST-TEMP-HYGIENE: every temp entry this file makes, removed once at the end (the runner fails a leak). */
 const made = [];
 const tmp = (tag) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), `claims-ledger-default-${tag}-`)); made.push(d); return d; };
-test.after(() => { for (const d of made.reverse()) fs.rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); });
+test.after(() => { require('./load-ts.cjs').closeConfigWatchers(); for (const d of made.reverse()) fs.rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); });
 const userData = tmp('cfg');
 const electron = require.resolve('electron');
 require.cache[electron] = { id: electron, filename: electron, loaded: true, exports: { app: { getPath: () => userData } } };
