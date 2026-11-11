@@ -10,7 +10,7 @@ import type { GraphicsStatusView } from '../shared/graphicsMode';
 import type { Eligibility, TerminalInputState } from '../shared/inputProvenance';
 import type { TerminalPromptState } from '../shared/promptState';
 import type { HireManifest } from '../shared/hire';
-import type { BlobSettingsPatch, BlobStatus } from '../shared/blob';
+import type { BlobAppAction, BlobSettingsPatch, BlobStatus } from '../shared/blob';
 import type { DictationAudioPayload, DictationCaptureCommand } from '../shared/dictation';
 export type { HireManifest } from '../shared/hire';
 import type { LivenessV1 } from '../shared/livenessV1';
@@ -1674,6 +1674,12 @@ const api = {
     ipcRenderer.invoke('freeflow:transcribe', arg),
 
   // ─── GUPPY-BLOB-P01: the blob overlay's settings (main refuses these from the overlay) ──
+  /** BLOB-MESSAGE: the blob's ring asked this window to open a dialog (message / screenshot / meeting). */
+  onBlobOpenInApp: (cb: (action: BlobAppAction) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, action: BlobAppAction) => cb(action);
+    ipcRenderer.on('blob:openInApp', listener);
+    return () => ipcRenderer.removeListener('blob:openInApp', listener);
+  },
   blobStatus: (): Promise<{ ok: true; status: BlobStatus } | { ok: false; error: string }> =>
     ipcRenderer.invoke('blob:status'),
   blobSetConfig: (patch: BlobSettingsPatch): Promise<{ ok: true; status: BlobStatus } | { ok: false; error: string }> =>

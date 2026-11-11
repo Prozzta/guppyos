@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPoi
 import { Blobatar } from 'blobatar/react';
 import { happy, idle, shy, surprised, thinking, unsure, type Expression } from 'blobatar/expression';
 // shy: the brief reaction when the blob hides itself from shares; thinking when it shows again.
-import { BLOB_COMING_SOON, BLOB_DISABLED, type BlobOverlayApi, type BlobOverlayStatus, type BlobSlot } from '../../../shared/blob';
+import { BLOB_COMING_SOON, BLOB_DISABLED, isBlobAppAction, type BlobOverlayApi, type BlobOverlayStatus, type BlobSlot } from '../../../shared/blob';
 import { RING_SLOTS, ringSlotPosition } from './ring';
 
 declare global { interface Window { blob?: BlobOverlayApi } }
@@ -124,7 +124,7 @@ export function BlobApp(): ReactElement {
       toastTimer.current = window.setTimeout(() => setToast(null), TOAST_MS);
     } else if (r.state === 'done') {
       setStatus(r.status);
-      if (slot === 'close') { setRingOpen(false); setToast(null); }
+      if (slot === 'close' || isBlobAppAction(slot)) { setRingOpen(false); setToast(null); }
       if (slot === 'invisible') {
         setToast({ slot, text: r.status.invisible ? 'Hidden from shares' : 'Visible in shares' });
         setExpr(r.status.invisible ? shy : thinking);
