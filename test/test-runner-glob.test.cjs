@@ -855,14 +855,15 @@ test('END TO END, the backstop alone (no watchdog): node --test\'s own file time
   }
 });
 
-/** A file process a failed backstop left running: killed only when it is still ours (own-procs). */
+/** A file process a failed backstop left running: killed only when it is still ours (own-procs).
+ *  own-procs verifies ownership on win32 only, so elsewhere a leftover is left to the failing assert
+ *  rather than killed by a bare pid that may have been reused (own-procs-pid-recycle PIN). */
 function killLeftFile(pidFile) {
+  if (process.platform !== 'win32') return;
   try {
     const own = require('./tools/own-procs.cjs');
     const rec = own.readRec(pidFile, path.basename(process.execPath));
-    if (!rec) return;
-    if (process.platform === 'win32') { if (own.stillOurs(rec)) own.killOwnTree(rec); }
-    else process.kill(rec.pid, 'SIGKILL');
+    if (rec && own.stillOurs(rec)) own.killOwnTree(rec);
   } catch { /* gone, or no record */ }
 }
 
