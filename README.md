@@ -1,5 +1,5 @@
-> [!WARNING]
-> **Do not install 1.1.104.** It can freeze at startup on setups with a lot of history. Use [1.1.103](https://github.com/Prozzta/guppyos/releases/tag/v1.1.103). If you already installed 1.1.104 and it freezes: download the 1.1.103 setup from [the 1.1.103 release](https://github.com/Prozzta/guppyos/releases/tag/v1.1.103) and run it over the top; your data is kept. A fixed release is coming.
+> [!NOTE]
+> 1.1.104 is paused while we fix a startup issue. On setups with a lot of hive history, Guppy can stop responding for a while just after launch (1.1.103 can too). [1.1.103](https://github.com/Prozzta/guppyos/releases/tag/v1.1.103) stays the recommended download until the fix ships in the next release. If you are on 1.1.104 and it runs fine, there is nothing you need to do.
 
 <div align="center">
 
