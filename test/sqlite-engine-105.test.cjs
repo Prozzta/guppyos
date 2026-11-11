@@ -1,5 +1,8 @@
 'use strict';
 require('./tools/own-job.cjs');
+// MUTANT-JOURNAL-GATE (god 5cc045/ed8032): this suite loads electron-bin.cjs, a file a census mutates
+// in place; refuse a tree a killed census left mutated, before anything is read.
+require('./tools/mutant-runner-helper.cjs').gate(__filename);
 /**
  * GUPPY-NODE-LTS (god 7b2253): better-sqlite3 11.10 -> 12.11 moves SQLite 3.49 -> 3.53. The
  * memory store's engine behaviours, checked on the REAL shipped natives (the app's Electron-ABI
