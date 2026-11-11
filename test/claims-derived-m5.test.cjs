@@ -1315,3 +1315,27 @@ test('store: an append dated before the newest segment keeps the chain whole (no
   assert.deepEqual(logs.filter((x) => x.kind === 'claims-chain-broken'), []);
   assert.equal((await again.appendRecord(D, fact('after', { key: 'card.after.status' }), 'derived-internal')).ok, true);
 });
+
+// Jim S1: the purge leg of the same fix. A purge whose clock month is earlier than the newest segment writes its
+// event into the newest segment too, so the reopened ledger chains and has no earlier-month file.
+test('store: a purge dated before the newest segment keeps the chain whole (no earlier-month segment)', async () => {
+  const root = path.join(JAIL, `hive-${++n}`);
+  fs.mkdirSync(path.join(root, 'agents'), { recursive: true });
+  const logs = [];
+  const keys = new SandboxKeyProvider();
+  let clock = '2026-11-11T00:00:00Z';
+  const store = new ClaimStore({ hiveRoot: root, keys, keyRecord: new FileLedgerKeyRecord(path.join(`${root}-ud`, KEY_RECORD_FILE)), log: (row) => logs.push(row), now: () => new Date(clock) });
+  STORES.push(store);
+  const a = await store.appendRecord(D, fact('to purge', { key: 'card.purge.status' }), 'derived-internal');
+  assert.equal(a.ok, true);
+  clock = '2026-10-04T00:00:00Z';
+  const p = await store.purge(D, [a.id], true);
+  assert.equal(p.ok, true, p.ok ? '' : p.error);
+  store.close();
+  const again = new ClaimStore({ hiveRoot: root, keys, keyRecord: new FileLedgerKeyRecord(path.join(`${root}-ud`, KEY_RECORD_FILE)), log: (row) => logs.push(row) });
+  STORES.push(again);
+  assert.equal(again.readLedger(D).chain, 'ok');
+  assert.deepEqual(again.segments(D).map((f) => path.basename(f)), ['2026-11.jsonl']);
+  assert.deepEqual(logs.filter((x) => x.kind === 'claims-chain-broken'), []);
+  assert.equal((await again.appendRecord(D, fact('after purge', { key: 'card.after.status' }), 'derived-internal')).ok, true);
+});
