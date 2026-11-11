@@ -32,7 +32,7 @@ exports.default = async function afterPack(context) {
 };
 
 // REBRAND-GUPPY (1.1.82): electron-updater's download cache becomes %LOCALAPPDATA%\guppy-updater.
-// electron-builder 25.1.8 always writes app-update.yml's updaterCacheDirName as
+// electron-builder 26.18.0 always writes app-update.yml's updaterCacheDirName as
 // `<package.json name>-updater` (appInfo.updaterCacheDirName overrides any publish setting), and
 // the package name stays munder-difflin. It writes app-update.yml in its own afterPack handler,
 // which runs BEFORE this user hook (Packager.afterPack: "user handler should be last"), so the

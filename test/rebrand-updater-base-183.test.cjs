@@ -2,7 +2,7 @@
 require('./tools/own-job.cjs');
 /**
  * REBRAND-UPDATER-BASE (1.1.83): the installer stores its differential-update base where the
- * updater looks for it. electron-builder 25.1.8 names the store "<package name>-updater" =
+ * updater looks for it. electron-builder 26.18.0 names the store "<package name>-updater" =
  * munder-difflin-updater (APP_INSTALLER_STORE_FILE, passed as -D on the makensis command line),
  * while app-update.yml says guppy-updater since 1.1.82 (afterPack), and electron-updater takes the
  * base from <updater cache>\installer.exe. So 1.1.82 always downloaded updates in full and left
