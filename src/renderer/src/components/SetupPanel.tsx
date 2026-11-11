@@ -50,6 +50,24 @@ function ToolRow({ tool }: { tool: ToolStatus }) {
       () => { /* clipboard denied — the text is on screen to select by hand */ }
     );
   };
+  const installLine = (
+    <div style={{ display: 'flex', gap: 6, alignItems: 'stretch' }}>
+      <code style={{
+        flex: 1, minWidth: 0, fontFamily: 'var(--cth-font-mono)', fontSize: 11,
+        padding: '4px 6px', background: 'var(--cth-cream-100)',
+        boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)',
+        color: 'var(--cth-ink-900)', overflowX: 'auto', whiteSpace: 'pre'
+      }}>{tool.installCommand}</code>
+      <button
+        onClick={copy}
+        style={{
+          flexShrink: 0, fontFamily: 'var(--cth-font-ui)', fontSize: 11, padding: '0 8px',
+          background: 'var(--cth-cream-200)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)',
+          border: 'none', cursor: 'pointer', color: 'var(--cth-ink-900)'
+        }}
+      >{copied ? 'copied' : 'copy'}</button>
+    </div>
+  );
   return (
     <div style={{
       padding: 10, display: 'flex', flexDirection: 'column', gap: 6,
@@ -89,23 +107,12 @@ function ToolRow({ tool }: { tool: ToolStatus }) {
       )}
 
       {/* Missing WITH a scripted install: the exact command, one click to copy. */}
-      {(!tool.found || tool.warn) && !tool.unknown && tool.installCommand && (
-        <div style={{ display: 'flex', gap: 6, alignItems: 'stretch' }}>
-          <code style={{
-            flex: 1, minWidth: 0, fontFamily: 'var(--cth-font-mono)', fontSize: 11,
-            padding: '4px 6px', background: 'var(--cth-cream-100)',
-            boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)',
-            color: 'var(--cth-ink-900)', overflowX: 'auto', whiteSpace: 'pre'
-          }}>{tool.installCommand}</code>
-          <button
-            onClick={copy}
-            style={{
-              flexShrink: 0, fontFamily: 'var(--cth-font-ui)', fontSize: 11, padding: '0 8px',
-              background: 'var(--cth-cream-200)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)',
-              border: 'none', cursor: 'pointer', color: 'var(--cth-ink-900)'
-            }}
-          >{copied ? 'copied' : 'copy'}</button>
-        </div>
+      {!tool.found && !tool.unknown && tool.installCommand && (
+        installLine
+      )}
+      {/* GUPPY-BUILD-PREREQS: present with a warning: the fix, the same way. */}
+      {tool.found && tool.warn && tool.installCommand && (
+        installLine
       )}
 
       {(tool.note || tool.docsUrl) && (
