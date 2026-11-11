@@ -88,6 +88,14 @@ test('link reference: a deleted ref, a renamed label, a ref moved to another sec
   // A prose line that links inline is prose, not a reference definition.
   const prose = REF_BASE.replace('- Messages typed where the agent can take them.', `- See [0.1.0]: ${OLD_URL}`);
   assert.match(checkHistory(prose, prose.replace(OLD_URL, NEW_URL)).problems.join(), /\[1\.1\.97\] lost 1 line/, 'inline prose URL edit');
+  // Jim S1: order holds. A ref whose URL changed, moved above an earlier line of its section, FAILS.
+  const moved = REF_BASE.replace('- Messages typed where the agent can take them.\r\n\r\n', '').replace(`[0.1.0]: ${OLD_URL}`, `[0.1.0]: ${NEW_URL}\r\n- Messages typed where the agent can take them.`);
+  assert.ok(moved.indexOf(`[0.1.0]: ${NEW_URL}`) < moved.indexOf('- Messages typed where'), 'the fixture really moved the ref up');
+  assert.match(one(moved), /\[1\.1\.97\] lost 1 line\(s\), first: "\[0\.1\.0\]: /, 'ref moved above an earlier line');
+  // Jim N1: a "[word]: text" note line is not a ref; changing its text FAILS.
+  const note = REF_BASE.replace('- Messages typed where the agent can take them.', '- Messages typed where the agent can take them.\r\n[BREAKING]: removed');
+  const r = checkHistory(note, note.replace('[BREAKING]: removed', '[BREAKING]: kept'));
+  assert.equal(r.ok, false); assert.deepEqual(r.linkUrlChanges, []);
 });
 
 test('link reference: the CLI prints each allowed URL change; the real v1.1.103 -> int-1.1.104 CHANGELOG passes with exactly the [0.1.0] change', () => {
