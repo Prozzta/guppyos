@@ -6,6 +6,14 @@ import { homedir } from 'node:os';
 import { imageMimeForPath } from '../shared/imageTypes';
 
 /**
+ * Whether `relative(root, p)` leaves the root: a '..' path SEGMENT or another drive, never a
+ * plain '..' string prefix, so an in-root name like '..notes.txt' is not refused (Jim N1).
+ */
+function escapesRoot(r: string): boolean {
+  return r === '..' || r.startsWith(`..${sep}`) || isAbsolute(r);
+}
+
+/**
  * Lexical containment — pure string math, no filesystem access.
  *
  * PRIVATE on purpose. On its own this is NOT a containment guarantee: `resolve`,
@@ -17,7 +25,7 @@ function lexicalJoin(root: string, rel: string): { absRoot: string; absPath: str
   const absRoot = resolve(root);
   const absPath = isAbsolute(rel) ? normalize(rel) : resolve(absRoot, rel);
   const rel2 = relative(absRoot, absPath);
-  if (rel2.startsWith('..') || isAbsolute(rel2)) return null;
+  if (escapesRoot(rel2)) return null;
   return { absRoot, absPath };
 }
 
@@ -38,7 +46,7 @@ async function canonicalize(realRoot: string, absPath: string): Promise<string |
       const real = await realpath(probe);
       const full = tail.length ? resolve(real, ...tail) : real;
       const r = relative(realRoot, full);
-      if (r.startsWith('..') || isAbsolute(r)) return null;
+      if (escapesRoot(r)) return null;
       return full;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== 'ENOENT') return null;
@@ -208,7 +216,7 @@ async function assertHandleInRoot(fh: FileHandle, root: string): Promise<void> {
   // not necessarily with the same spelling of the root.
   const fold = process.platform === 'win32' || process.platform === 'darwin';
   const r = relative(fold ? realRoot.toLowerCase() : realRoot, fold ? where.toLowerCase() : where);
-  if (r.startsWith('..') || isAbsolute(r)) throw new Error('path escapes root');
+  if (escapesRoot(r)) throw new Error('path escapes root');
 }
 
 /**
