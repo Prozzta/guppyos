@@ -20,8 +20,9 @@
  *   - the frozen backup found a partial destination it must not overwrite (import only).
  * The report says why.
  */
-import { existsSync, mkdirSync, readFileSync, renameSync, watch, writeFileSync, type FSWatcher } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, type FSWatcher } from 'node:fs';
 import { join } from 'node:path';
+import { watchDirectorySafely } from '../safeDirectoryWatch';
 import { CLAIMS_IMPORT_SETTLED_FILE, type AppendResult, type ReadLedgerFn, type RecordDraft } from '../../shared/claims';
 import { frozenBackup, knownIdsFor, newLegacyImport, parseNewBulletsDetailed, type Refusal } from './migrate';
 
@@ -136,7 +137,7 @@ export class ReaderWatcher {
   start(): Promise<IngestReport> {
     const first = this.scan(true);
     try {
-      this.fsw = watch(agentDir(this.deps, this.agent), (_ev, name) => {
+      this.fsw = watchDirectorySafely(agentDir(this.deps, this.agent), (_ev, name) => {
         const n = name ? String(name).toLowerCase() : '';
         if (n === 'memory.md') this.schedule();
         // CL-READERWATCHER known limit 1: a rollover can move a bullet into an archive before the

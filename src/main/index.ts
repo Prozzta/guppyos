@@ -2735,6 +2735,10 @@ function removeWorkerScratch(workerId: string): void {
   const agentsRoot = join(root, 'agents');
   // Path-safety: the resolved dir must sit directly under agents/ with basename == id.
   if (resolve(dir) !== join(resolve(agentsRoot), basename(dir)) || basename(dir) !== workerId) return;
+  // Empty directory deletion may not emit an fs.watch event on Windows Node 22+.
+  // Close every main-owned watcher before removal, not after its callback.
+  hive.closeOutboxWatcher(join(dir, 'outbox'));
+  readerWatchers.stop(workerId);
   try { rmSync(dir, { recursive: true, force: true }); }
   catch (e) { console.error('[worker] removeWorkerScratch failed:', e); }
 }
@@ -6067,6 +6071,7 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
   try { integrationBroker.stop(); } catch (e) { console.error('[changeHome] broker.stop:', e); }
   try { hive.stopRouter(); } catch (e) { console.error('[changeHome] stopRouter:', e); }
   try { hive.stopLedgerGuard(); } catch (e) { console.error('[changeHome] stopLedgerGuard:', e); }
+  try { readerWatchers.stopAll(); } catch (e) { console.error('[changeHome] stopReaderWatchers:', e); }
   try { boardMonitor.stop(); } catch (e) { console.error('[changeHome] boardMonitor.stop:', e); }
   try { floorDigest.stop(); boardStatus.stop(); } catch (e) { console.error('[changeHome] floorDigest.stop:', e); }
   try { hive.stopAgyStatusline(); } catch (e) { console.error('[changeHome] stopAgyStatusline:', e); }
@@ -6746,6 +6751,7 @@ function teardownAndQuit(): void {
   try { integrationBroker.stop(); } catch (e) { console.error('[quit] broker.stop:', e); }
   try { hive.stopRouter(); } catch (e) { console.error('[quit] stopRouter:', e); }
   try { hive.stopLedgerGuard(); } catch (e) { console.error('[quit] stopLedgerGuard:', e); }
+  try { readerWatchers.stopAll(); } catch (e) { console.error('[quit] stopReaderWatchers:', e); }
   try { boardMonitor.stop(); } catch (e) { console.error('[quit] boardMonitor.stop:', e); }
   try { floorDigest.stop(); boardStatus.stop(); } catch (e) { console.error('[quit] floorDigest.stop:', e); }
   try { hive.stopAgyStatusline(); } catch (e) { console.error('[quit] stopAgyStatusline:', e); }
@@ -6832,6 +6838,7 @@ ipcMain.handle('app:resetAll', async () => {
   try { integrationBroker.stop(); } catch (e) { console.error('[reset] broker.stop:', e); }
   try { hive.stopRouter(); } catch (e) { console.error('[reset] stopRouter:', e); }
   try { hive.stopLedgerGuard(); } catch (e) { console.error('[reset] stopLedgerGuard:', e); }
+  try { readerWatchers.stopAll(); } catch (e) { console.error('[reset] stopReaderWatchers:', e); }
   try { boardMonitor.stop(); } catch (e) { console.error('[reset] boardMonitor.stop:', e); }
   try { floorDigest.stop(); boardStatus.stop(); } catch (e) { console.error('[reset] floorDigest.stop:', e); }
   try { hive.stopAgyStatusline(); } catch (e) { console.error('[reset] stopAgyStatusline:', e); }

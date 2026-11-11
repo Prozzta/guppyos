@@ -1,5 +1,5 @@
 import { app } from 'electron';
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, watch, writeFileSync, type Stats } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, type Stats } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
 import { DEV_ISOLATION, devDataRoot, devHarnessHome } from './devIsolation';
 import { basename, dirname, join } from 'node:path';
@@ -20,6 +20,7 @@ import { parseGraphicsMode, type GraphicsMode } from '../shared/graphicsMode';
 import { CODEX_TOOL_OUTPUT_LIMIT_DEFAULT, normalizeCodexToolOutputLimit } from '../shared/codexToolOutputLimit';
 import { expandTilde, normalizeHiveHome } from './fs';
 import { provenStatKey, statKey } from './statCacheKey';
+import { watchDirectorySafely } from './safeDirectoryWatch';
 import { isProjectThemeId, isProjectThemeSeed, isStoredProjectThemeId, projectThemeHomeKey, resolveProjectTheme, type ProjectThemeId, type ProjectThemeSeed } from '../shared/projectTheme';
 import type { IntegrationRecord } from '../shared/integrations';
 import type { BlobConfigFields } from '../shared/blob';
@@ -746,8 +747,7 @@ function watchConfig(p: string): void {
   configWatcher?.close();
   configWatcher = null;
   try {
-    const w = watch(dirname(p), { persistent: false }, (_event, name) => {
-      if (!existsSync(dirname(p))) { w.close(); if (configWatcher?.path === p) configWatcher = null; return; }
+    const w = watchDirectorySafely(dirname(p), (_event, name) => {
       if (!name || String(name) === basename(p)) { if (configCache?.path === p) configCache.checkedAt = -Infinity; }
     });
     w.on('error', () => { w.close(); if (configWatcher?.path === p) configWatcher = null; });
