@@ -38,7 +38,7 @@ const TESTS = ['test/capacity-strip-contract.test.cjs', 'test/capacity-strip-ui.
   'test/capacity-composer-note.test.cjs', 'test/capacity-copy-guards.test.cjs',
   'test/capacity-tidy-pins.test.cjs', 'test/capacity-usage-push.test.cjs',
   'test/capacity-piedot.test.cjs', 'test/capacity-impact-push.test.cjs', 'test/capacity-stale-retain.test.cjs',
-  'test/capacity-detail-tick.test.cjs', 'test/agy-monitor-14.test.cjs'];
+  'test/capacity-detail-tick.test.cjs', 'test/agy-monitor-14.test.cjs', 'test/capacity-no-5h-window.test.cjs'];
 
 const STRIP = 'src/main/capacityStrip.ts';
 const SHARED = 'src/shared/capacityStrip.ts';
@@ -76,9 +76,39 @@ const IMPACT_PUSH = 'src/main/agentImpactPush.ts';
 const DETAIL_BODY = 'src/renderer/src/components/CapacityDetailBody.tsx';
 const DETAIL_TICK = 'src/main/capacityDetailTick.ts';
 const PRELOAD = 'src/preload/index.ts';
+const PROVIDER_CAP = 'src/shared/providerCapacity.ts';
 
 /** [name, file, from, to] */
 const MUTANTS = [
+  // ── CAP-NO-5H-WINDOW: a reading with no 5h window leads with Weekly ──────────────
+  ['no5h the lead never moves to Weekly', PROVIDER_CAP,
+    "windows.some((w) => w.kind === 'SEVEN_DAY') ? 'SEVEN_DAY' : 'FIVE_HOUR';",
+    "windows.some((w) => w.kind === 'SEVEN_DAY') ? 'FIVE_HOUR' : 'FIVE_HOUR';"],
+  ['no5h Weekly leads with no weekly window behind it', PROVIDER_CAP,
+    "return !windows.some((w) => w.kind === 'FIVE_HOUR') && windows.some((w) => w.kind === 'SEVEN_DAY')",
+    "return !windows.some((w) => w.kind === 'FIVE_HOUR') && true"],
+  ['no5h the weekly row repeats under a Weekly lead', STRIP,
+    "    if (lead === 'SEVEN_DAY') {\n      return",
+    "    if (lead === 'NEVER') {\n      return"],
+  ['no5h the Weekly lead row keeps a 5h label', STRIP,
+    "const L: FiveHourStrip['label'] = lead === 'SEVEN_DAY' ? 'Weekly' : '5h';",
+    "const L: FiveHourStrip['label'] = '5h';"],
+  ['no5h the usage line ignores the lead', USAGE_MAIN,
+    "fiveHour: windowView(pool, pool ? leadWindowKind(pool.windows) : 'FIVE_HOUR', now, formatTime, family),",
+    "fiveHour: windowView(pool, 'FIVE_HOUR', now, formatTime, family),"],
+  ['no5h the details dot reads the 5h row only', PIE,
+    '  const lead = leadWindowKind(view.windows);',
+    "  const lead = 'FIVE_HOUR';"],
+  ['no5h a weekly last-known figure allowed beside a 5h row', DETAIL_SCHEMA,
+    '&& w.kind !== lead)) errors.push',
+    '&& w.kind !== lead && false)) errors.push'],
+  ['no5h the stale Weekly lead loses its last-known figure', DETAIL,
+    "if (retained && w.kind === lead && applicabilityOf(w) === 'APPLICABLE')",
+    "if (retained && w.kind === 'FIVE_HOUR' && applicabilityOf(w) === 'APPLICABLE')"],
+  ['no5h a lead row may read as another window', SHARED,
+    "  if (!five.text.startsWith(`${five.label} · `)) errors.push", "  if (false) errors.push"],
+  ['no5h a Weekly lead beside a weekly row', SHARED,
+    "    if (wk !== undefined) errors.push", "    if (false) errors.push"],
   // ── unit #1: presenter ────────────────────────────────────────────────────────
   ['u1 no hysteresis hold (weekly reveal and reset hints share the band)', STRIP,
     "else if (latch.shown && value < Math.min(100, T + HYSTERESIS_BAND)) out = 'HOLD';", ''],
@@ -142,7 +172,7 @@ const MUTANTS = [
     "    out.push({ kind: 'figure', key: 'five-hour', role: 'five-hour', text: pool.fiveHour.text, subordinate: true });\n    return out;",
     "    out.push({ kind: 'figure', key: 'five-hour', role: 'five-hour', text: pool.fiveHour.text, subordinate: true });\n    out.push({ kind: 'figure', key: 'five-hour-2', role: 'five-hour', text: pool.fiveHour.text, subordinate: false });\n    return out;"],
   ['tidy P3 the dead compact form comes back into the contract', SHARED,
-    "  { label: exactly('5h'), text },", "  { label: exactly('5h'), text, compactText: text },"],
+    "  { label: oneOf(['5h', 'Weekly']), text },", "  { label: oneOf(['5h', 'Weekly']), text, compactText: text },"],
   // ── unit #2 + strip-polish: view ─────────────────────────────────────────────
   ['u2 subordinate token in a positive colour', VIEW,
     "color: token.subordinate ? 'var(--cth-ink-500)' : 'var(--cth-ink-900)',",
@@ -181,11 +211,11 @@ const MUTANTS = [
     "        <span>{config.autoMode ? 'auto mode on' : 'auto mode off'}</span>\n        <CapacityStrip />"],
   // ── strip-polish: presenter ──────────────────────────────────────────────────
   ['polish 5h reset hint shown above the threshold', STRIP,
-    "\n        && this.band(`${pool.poolKey}|reset|five`, fiveRemaining, five.resetsAt, T) !== null", ''],
+    "\n        && this.band(`${pool.poolKey}|reset|${lead === 'SEVEN_DAY' ? 'weekly' : 'five'}`, fiveRemaining, five.resetsAt, T) !== null", ''],
   ['polish weekly reset hint ungated', STRIP,
     " && this.band(`${pool.poolKey}|reset|weekly`, remaining, r, T) !== null", ''],
   ['polish reset hints share the weekly latch (one key)', STRIP,
-    "this.band(`${pool.poolKey}|reset|five`, fiveRemaining", "this.band(pool.poolKey, fiveRemaining"],
+    "this.band(`${pool.poolKey}|reset|${lead === 'SEVEN_DAY' ? 'weekly' : 'five'}`, fiveRemaining", "this.band(pool.poolKey, fiveRemaining"],
   ['polish a second-account ordinal comes back', STRIP,
     '    const name = PROVIDER_LABEL[pool.provider];', '    const name = `${PROVIDER_LABEL[pool.provider]} 1`;'],
   ['polish emptyText not sent', STRIP,
@@ -198,8 +228,8 @@ const MUTANTS = [
     "text: (n) => `5h · ${n}% remaining · ordinary work held while Weekly is at 0%`,",
     "text: (n) => `5h · ${n}% remaining · unavailable while Weekly is exhausted`,"],
   ['a2 frame ignores the 5h-above-zero precondition', STRIP,
-    'const frame = known && fiveRemaining !== null && fiveRemaining > 0',
-    'const frame = known && fiveRemaining !== null'],
+    "const frame = lead === 'FIVE_HOUR' && known && fiveRemaining !== null && fiveRemaining > 0",
+    "const frame = lead === 'FIVE_HOUR' && known && fiveRemaining !== null"],
   // ── unit #5: agent-card impact ────────────────────────────────────────────────
   ['u5 wrong pool label (provider name instead of the strip label)', INDEX,
     'poolLabel: pool ? capacityStrip.labelOf(pool) : null', 'poolLabel: pool ? pool.provider : null'],

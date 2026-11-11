@@ -12,6 +12,14 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/guppyos/releases).
 
+### Fixed
+
+- **Plans with no 5-hour limit now show their weekly capacity instead of "Capacity unknown".**
+  Some Claude plans report only a weekly limit. The capacity strip used to look for a 5-hour figure,
+  find none and say "Capacity unknown". Now it shows the weekly figure, with its pie, in the strip,
+  the provider details and the agent usage line. If the plan reports a 5-hour limit again, the strip
+  goes back to showing it. Before the first live reading after a restart, it still says unknown.
+
 ## [1.1.104] — 2026-11-11
 
 **The Guppy Blob: an on-screen helper with hold-to-talk dictation into any app, Guppy can keep running in the tray, and Settings checks what building from source needs.**

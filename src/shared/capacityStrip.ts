@@ -87,9 +87,13 @@ export interface DisplayReadyMeter {
   displayPercent: number;
 }
 
-/** The permanent five-hour row. Always present, always labelled `5h` (C2.11 crit 1). */
+/**
+ * The permanent lead row. Always present, labelled `5h` (C2.11 crit 1) - or `Weekly` when the
+ * pool's reading has no five-hour window at all (CAP-NO-5H-WINDOW, Human 2026-11-11: a plan with
+ * no 5h limit). Main decides the label; the renderer draws whatever row it is sent.
+ */
 export interface FiveHourStrip {
-  label: '5h';
+  label: '5h' | 'Weekly';
   /** Full form. Label, value or status, and any blocker are inseparable in one string. */
   text: string;
   meter?: DisplayReadyMeter;
@@ -278,7 +282,7 @@ const meter: Check = (v, at, errors) => {
 };
 
 const fiveHour = object(
-  { label: exactly('5h'), text },
+  { label: oneOf(['5h', 'Weekly']), text },
   { meter, resetText: text, resetExpectedAt: instant }
 );
 
@@ -334,6 +338,21 @@ const pool = object(
  * Cross-field rules the property schema cannot express. Each one closes a way of
  * drawing a claim the variant forbids (C2.7, C2.6, §9).
  */
+/**
+ * CAP-NO-5H-WINDOW: the lead row says what it is. Its text opens with its own label, so a row
+ * cannot be labelled one window and read as another; a `Weekly` lead (a reading with no 5h window)
+ * never sits beside a weekly row, which would show the one weekly figure twice, and never takes
+ * the blocked frame, which holds a 5h figure under an exhausted weekly.
+ */
+function leadRowInvariants(five: unknown, wk: unknown, presentation: unknown, at: string, errors: string[]): void {
+  if (!isObj(five) || typeof five.label !== 'string' || typeof five.text !== 'string') return;
+  if (!five.text.startsWith(`${five.label} · `)) errors.push(`${at}.text: must open with its label (${five.label})`);
+  if (five.label === 'Weekly') {
+    if (wk !== undefined) errors.push(`${at}.label: a Weekly lead has no separate weekly row`);
+    if (presentation === 'BLOCKED_SUBORDINATE') errors.push(`${at}.label: a Weekly lead never takes the blocked frame`);
+  }
+}
+
 function poolInvariants(v: Record<string, unknown>, at: string, errors: string[]): void {
   const five = v.fiveHour as Record<string, unknown> | undefined;
   const wk = v.weekly as Record<string, unknown> | undefined;
@@ -342,6 +361,7 @@ function poolInvariants(v: Record<string, unknown>, at: string, errors: string[]
     if (wk && 'meter' in wk) errors.push(`${at}.weekly.meter: no meter outside NORMAL`);
   }
   if (v.presentation === 'BLOCKED_SUBORDINATE' && !wk) errors.push(`${at}.weekly: a blocked frame names its blocker`);
+  leadRowInvariants(five, wk, v.presentation, `${at}.fiveHour`, errors);
   const nt = v.notice as Record<string, unknown> | undefined;
   if (isObj(nt) && isObj(nt.banner)) {
     if (nt.kind !== 'LIMIT_REACHED') errors.push(`${at}.notice.banner: only an entry to LIMITED has a banner`);
@@ -373,6 +393,7 @@ function poolInvariants(v: Record<string, unknown>, at: string, errors: string[]
       // The expired view may only DEGRADE: it cannot disclose a weekly row the live
       // object keeps hidden (C2.9), or that would be a hidden weekly by another route.
       if (ew && !wk) errors.push(`${at}.freshness.expired.weekly: cannot reveal a weekly the strip hides`);
+      leadRowInvariants(ef, ew, exp.presentation, `${at}.freshness.expired.fiveHour`, errors);
     }
   }
 }
