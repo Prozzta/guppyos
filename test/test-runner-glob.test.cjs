@@ -565,17 +565,21 @@ test('GATE-178: the temp folder of a killed tree is removed once free, not after
   try {
     spawnSync(process.execPath, ['-e', 'setTimeout(()=>{},200)']);
     if (process.platform === 'win32') {
-      // GUPPY-NODE-LTS: Node 20 (the app's Electron runtime) refuses: the reason removeWhenFree exists.
-      // Node 24's rmSync removes a folder in use, so there the old cleanup may simply succeed.
+      // While the holder lives the folder cannot be removed: the reason removeWhenFree exists. Node 20
+      // says EBUSY, Node 24 EPERM (Jim, gate of 62c39414); neither removes it. One try, no retries: Node
+      // 24's rmSync retries EPERM, so a retrying call could outlast the 2 s holder and prove nothing.
       let code = null;
-      try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch (e) { code = e.code; }
-      if (code !== null || Number(process.versions.node.split('.')[0]) <= 20) {
-        assert.equal(code, 'EBUSY', 'the old cleanup (5 x 200 ms) fails on a folder that is in use for 2 s');
-      }
+      try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { code = e.code; }
+      assert.ok(['EBUSY', 'EPERM'].includes(code), `a folder in use is not removed (got ${code})`);
+      assert.equal(fs.existsSync(dir), true, 'the folder in use is still there');
     }
     const r = removeWhenFree(dir);
     assert.equal(r.removed, true, `A FOLDER FREED WITHIN THE BUDGET IS REMOVED (${JSON.stringify(r)})`);
     assert.equal(fs.existsSync(dir), false);
+    if (process.platform === 'win32') {
+      // ...and only once it was free: the holder had exited by then, on every Node.
+      assert.throws(() => process.kill(holder.pid, 0), /ESRCH/, 'removed only after the process using it exited');
+    }
     // ...and one that never frees is reported, not waited on for ever.
     let t = 0;
     const never = removeWhenFree('x', { budgetMs: 1_000, rm: () => { const e = new Error('busy'); e.code = 'EBUSY'; throw e; }, now: () => t, pause: () => { t += 250; } });
@@ -824,23 +828,43 @@ test('END TO END, the backstop alone (no watchdog): node --test\'s own file time
   const os = require('node:os');
   const { spawnSync } = require('node:child_process');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runner-backstop-'));
+  const pidFile = path.join(dir, 'file.pid');
   try {
-    fs.writeFileSync(path.join(dir, 'a-hung.test.cjs'), "require('node:test')('done', () => { setInterval(() => {}, 1000); });\n");
+    fs.writeFileSync(path.join(dir, 'a-hung.test.cjs'), [
+      `require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, process.pid + ' ' + Math.round(Date.now() - process.uptime() * 1000));`,
+      "require('node:test')('done', () => { setInterval(() => {}, 1000); });",
+    ].join('\n'));
     const e = sink();
     const t0 = Date.now();
-    const spawn = (args, opts) => spawnSync(process.execPath, args, { ...opts, stdio: 'pipe', encoding: 'utf8' });
+    // Bounded: spawnSync blocks the event loop, so the test's own timeout cannot fire; a backstop
+    // that never kills must FAIL this test, not hang the suite (Jim, gate of 62c39414, mutant A).
+    let timedOut = false;
+    const spawn = (args, opts) => { const r = spawnSync(process.execPath, args, { ...opts, stdio: 'pipe', encoding: 'utf8', timeout: 90_000, killSignal: 'SIGKILL' }); timedOut = timedOut || (r.error && r.error.code) === 'ETIMEDOUT'; return r; };
     // GUPPY-NODE-LTS: the REAL backstop (the runner's own), on every Node: an injected watchdog would
     // otherwise turn it off, and Node 24's --test-timeout never kills this file.
     const code = run({ testDir: dir, cwd: dir, spawn, timeoutMs: 3_000, isTTY: false, log: () => {}, err: e.write, failureFile: () => path.join(dir, 'failures.json'), watchdog: () => ({ stop: () => {} }), backstop: runner.startBackstop });
+    assert.equal(timedOut, false, 'THE BACKSTOP NEVER ENDED THE FILE: node --test was still running at 90 s');
     assert.notStrictEqual(code, 0, 'a hung file fails the run');
     assert.match(e.lines.join('\n'), /FILE TIMED OUT after 3000 ms \(the runner's backstop killed it at 23000 ms\): .*a-hung\.test\.cjs/);
     // (The kill's own outcome row may be lost: the kill ends node --test and the runner stops the
     // backstop at once. The due row, written BEFORE the kill, is the record.)
     assert.ok(Date.now() - t0 < 90_000, `the backstop ended the run (${Date.now() - t0} ms), it did not hang`);
   } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
+    killLeftFile(pidFile);
+    removeWhenFree(dir);
   }
 });
+
+/** A file process a failed backstop left running: killed only when it is still ours (own-procs). */
+function killLeftFile(pidFile) {
+  try {
+    const own = require('./tools/own-procs.cjs');
+    const rec = own.readRec(pidFile, path.basename(process.execPath));
+    if (!rec) return;
+    if (process.platform === 'win32') { if (own.stillOurs(rec)) own.killOwnTree(rec); }
+    else process.kill(rec.pid, 'SIGKILL');
+  } catch { /* gone, or no record */ }
+}
 
 test('watchdog: parses PowerShell\'s process rows (one row or many, /Date(ms)/ start times)', () => {
   const { parseRows } = require('./tools/file-watchdog.cjs');

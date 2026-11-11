@@ -22,12 +22,14 @@
  * Pure selection + injected effects, so the zero-match and exit-code paths are testable
  * without spawning anything.
  *
- * TEST-RUNNER-FILE-TIMEOUT (1.1.76): every file gets a wall-clock limit (`--test-timeout`,
- * FILE_TIMEOUT_MS, or TEST_FILE_TIMEOUT_MS from the environment). A file whose process never exits
- * (all its tests done, a handle left open: the rc/1.1.76 gate stalled two hours on one) is killed
- * by node --test, and its non-detached descendants go with it (libuv's kill-on-close job). node
- * --test counts it "cancelled", so a second reporter (file-timeout-reporter.cjs) records it and the
- * runner NAMES it after the run and fails the run, even if node's own exit code were 0.
+ * TEST-RUNNER-FILE-TIMEOUT (1.1.76): every file gets a wall-clock limit (FILE_TIMEOUT_MS, or
+ * TEST_FILE_TIMEOUT_MS from the environment). A file whose process never exits (all its tests done,
+ * a handle left open: the rc/1.1.76 gate stalled two hours on one) is killed with its tree by the
+ * per-file watchdog (win32) at the limit and, behind it, by the runner's own backstop
+ * (file-backstop.cjs, every platform) at backstopMs(limit). GUPPY-NODE-LTS: not by node's
+ * `--test-timeout`, which from Node 22/24 times out tests only and never such a file; never
+ * `--test-force-exit`, which would pass it. The run NAMES every killed file and FAILS, even if
+ * node's own exit code were 0 (file-timeout-reporter.cjs records node's own cancellations too).
  *
  * CLAIMS-PERF-LANE: wall-clock gates (frozen bounds) measured under the parallel run measured the
  * machine, not the code (W2's 200 ms derive gates: 203/279 ms in 2 of 3 full runs, green alone). So
@@ -643,7 +645,7 @@ function totals(code, counts, laneState, log, failures = [], {
   return code;
 }
 
-module.exports = { startBackstop, BACKSTOP_PRELOAD, prepareFileJob, pruneFileJobs, FILE_JOB_DIR, FILE_JOB_PRELOAD, fileJobStrict, jobJoinFailures, fileJobVerdict, prepareTempJail, TEMP_JAIL_PRELOAD, tempLeaks, reportTempLeaks,prepareStartGate, startSlots, cappedCores, selfJobRate, HEAVYJOB_HELPER, CPU_RATE_50_PERCENT, START_GATE_PRELOAD, burstLine, selectTestFiles, discoverTestFiles, renderLaneFiles, FEATURE_TEST_DIRS, run, runPerfLane, runCounts, failingTests, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
+module.exports = { startBackstop, BACKSTOP_PRELOAD, runNodeTest,prepareFileJob, pruneFileJobs, FILE_JOB_DIR, FILE_JOB_PRELOAD, fileJobStrict, jobJoinFailures, fileJobVerdict, prepareTempJail, TEMP_JAIL_PRELOAD, tempLeaks, reportTempLeaks,prepareStartGate, startSlots, cappedCores, selfJobRate, HEAVYJOB_HELPER, CPU_RATE_50_PERCENT, START_GATE_PRELOAD, burstLine, selectTestFiles, discoverTestFiles, renderLaneFiles, FEATURE_TEST_DIRS, run, runPerfLane, runCounts, failingTests, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
 
 if (require.main === module) {
   const repoRoot = path.resolve(__dirname, '..', '..');

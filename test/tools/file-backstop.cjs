@@ -18,6 +18,10 @@
  * this process at once, and a row written after a slow kill could be lost.
  * win32: through the file's job (file-job.cs kill <pid> <createdMs>), else its verified tree
  * (own-procs). Elsewhere: SIGKILL to the file's pid (no process table to verify a tree with).
+ * Known limit off win32 (Jim N1): only "is the pid alive" is checked, not its start time, so a pid
+ * reused within the poll interval after the file exited could be signalled. The exit row the
+ * preload writes on a normal exit takes the file out of the due list first, which narrows it to a
+ * file that died without exiting normally; CI's ubuntu legs are short-lived runners.
  *
  * Usage: node file-backstop.cjs <runnerPid> <limitMs> <startsJsonl> <outJsonl> [jobExe]
  * It exits on its own when the runner process is gone.
