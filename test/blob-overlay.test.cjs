@@ -34,7 +34,7 @@ const { readSource, codeOnly } = require('./read-source.cjs');
 const { readConfig, writeConfig, resetConfig: resetRealConfig } = loadTs('src/main/config.ts');
 const {
   BlobOverlayController, registerBlobIpc, isAppWindowSender, isOverlaySender,
-  REFUSED_NOT_APP, REFUSED_NOT_OVERLAY, BLOB_SIZE, RING_SIZE, BLOB_GAZE_HIDDEN_MS
+  REFUSED_NOT_APP, REFUSED_NOT_OVERLAY, BLOB_SIZE, RING_SIZE, BLOB_GAZE_HIDDEN_MS, BLOB_GAZE_STILL_TICKS, BLOB_GAZE_IDLE_MS
 } = loadTs('src/main/blobOverlay.ts');
 const { ringSlotPosition, RING_SLOTS } = loadTs('src/renderer/src/blob/ring.ts');
 const { sanitizeBlobPatch, isValidBlobHotkey, blobSettingsFrom, BLOB_DEFAULT_HOTKEY, BLOB_SLOTS } = loadTs('src/shared/blob.ts');
@@ -548,6 +548,30 @@ test('gaze: hidden overlay only checks slowly and sends nothing; destroy stops t
   writeConfig({ blobEnabled: false });
   hz.ctl.apply();
   assert.deepEqual(t.pending(), [], 'overlay gone: no timer left');
+});
+
+test('gaze: a still point backs off to BLOB_GAZE_IDLE_MS; a change returns to BLOB_GAZE_MS (Jim N2)', () => {
+  resetConfig(); writeConfig({ blobEnabled: true });
+  const t = manualTimers();
+  const hz = harness({ deps: { gazeTimers: t } });
+  hz.ctl.apply();
+  const w = hz.win();
+  hz.ctl.setGaze(true);
+  hz.setCursor({ x: w.bounds.x + 1, y: w.bounds.y + 1 });
+  t.fire();
+  for (let i = 1; i < BLOB_GAZE_STILL_TICKS; i++) t.fire();
+  assert.deepEqual(t.pending(), [BLOB_GAZE_MS], 'not yet still long enough');
+  t.fire();
+  assert.deepEqual(t.pending(), [BLOB_GAZE_IDLE_MS], 'still: backed off');
+  assert.ok(BLOB_GAZE_IDLE_MS > BLOB_GAZE_MS && BLOB_GAZE_IDLE_MS <= BLOB_GAZE_HIDDEN_MS);
+  t.fire();
+  assert.deepEqual(t.pending(), [BLOB_GAZE_IDLE_MS]);
+  assert.equal(gazeSent(w).length, 1, 'nothing resent while still');
+  hz.setCursor({ x: w.bounds.x + 2, y: w.bounds.y + 1 });
+  t.fire();
+  assert.equal(gazeSent(w).length, 2);
+  assert.deepEqual(t.pending(), [BLOB_GAZE_MS], 'moved: full rate again');
+  hz.ctl.setGaze(false);
 });
 
 test('mood: idle by default, setMood validates and pushes on change only', () => {
