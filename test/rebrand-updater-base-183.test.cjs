@@ -31,7 +31,8 @@ const tmp = (name) => { const d = path.join(tmpRoot, `${name}-${++tmpN}`); fs.mk
 test('electron-builder / electron-updater facts (pinned): the store follows the package name; the updater reads <cache>\\installer.exe', () => {
   const nsisTarget = fs.readFileSync(path.join(NM, 'app-builder-lib', 'out', 'targets', 'nsis', 'NsisTarget.js'), 'utf8');
   assert.match(nsisTarget, /defines\.APP_INSTALLER_STORE_FILE = `\$\{appInfo\.updaterCacheDirName\}\\\\\$\{builder_util_runtime_1\.CURRENT_APP_INSTALLER_FILE_NAME\}`;/);
-  assert.match(nsisTarget, /args\.push\(`-D\$\{name\}=\$\{value\}`\);/, 'defines go on the makensis command line, before any script');
+  assert.match(nsisTarget, /for \(const name of Object\.keys\(defines\)\) \{[\s\S]{0,2000}args\.push\(`-D\$\{name\}=\$\{\(0, nsisScriptGenerator_1\.nsisEscapeString\)\(String\(value\)\)\}`\);/,
+    'defines go on the makensis command line, with builder 26 escaping their values before any script');
   assert.match(nsisTarget, /scriptGenerator\.include\(customInclude\);/, 'nsis.include is prepended to the template');
   const appInfo = fs.readFileSync(path.join(NM, 'app-builder-lib', 'out', 'appInfo.js'), 'utf8');
   assert.match(appInfo, /get updaterCacheDirName\(\) \{\s+return this\.sanitizedName\.toLowerCase\(\) \+ "-updater";/);
@@ -43,7 +44,7 @@ test('electron-builder / electron-updater facts (pinned): the store follows the 
   assert.match(updater, /const cacheDir = path\.join\(this\.app\.baseCachePath, dirName \|\| this\.app\.name\);/);
   const rt = fs.readFileSync(path.join(NM, 'builder-util-runtime', 'out', 'index.js'), 'utf8');
   assert.match(rt, /CURRENT_APP_INSTALLER_FILE_NAME = "installer\.exe"/);
-  assert.equal(JSON.parse(fs.readFileSync(path.join(NM, 'app-builder-lib', 'package.json'), 'utf8')).version, '25.1.8',
+  assert.equal(JSON.parse(fs.readFileSync(path.join(NM, 'app-builder-lib', 'package.json'), 'utf8')).version, '26.18.0',
     're-read the templates before changing the electron-builder version');
 });
 
