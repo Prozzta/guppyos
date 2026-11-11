@@ -80,7 +80,9 @@ const checks = [
   ['conpty.node built', built('node-pty', 'conpty.node').length > 0],
   ['winpty-agent.exe built', built('node-pty', 'winpty-agent.exe').length > 0],
   // better-sqlite3 13 is N-API and resolves this bundled prebuild before build/Release.
-  ['better-sqlite3 loaded N-API prebuild', (() => {
+  // This release marker verifies staging presence only; the Electron native probe
+  // separately verifies which binary Node actually loaded.
+  ['better-sqlite3 N-API prebuild present', (() => {
     const p = path.join(root, 'better-sqlite3', 'prebuilds', 'win32-x64.node');
     return fs.existsSync(p) && fs.statSync(p).size > 0;
   })()],
