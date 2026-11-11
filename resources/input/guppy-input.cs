@@ -53,6 +53,8 @@ class GuppyInput
     [DllImport("user32.dll")] static extern bool ClientToScreen(IntPtr hwnd, ref POINT p);
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr hwnd, out RECT r);
     [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr ctx);
+    [DllImport("user32.dll")] static extern IntPtr GetWindowDpiAwarenessContext(IntPtr hwnd);
+    [DllImport("user32.dll")] static extern int GetAwarenessFromDpiAwarenessContext(IntPtr ctx);
     [DllImport("kernel32.dll")] static extern IntPtr GetModuleHandle(string name);
     [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
 
@@ -79,13 +81,21 @@ class GuppyInput
         try {
             var gi = new GUITHREADINFO(); gi.cbSize = Marshal.SizeOf(typeof(GUITHREADINFO));
             if (GetGUIThreadInfo(GetWindowThreadProcessId(fg, IntPtr.Zero), ref gi)) {
-                if (gi.hwndCaret != IntPtr.Zero) { var p = new POINT { x = (gi.rcCaret.left + gi.rcCaret.right) / 2, y = (gi.rcCaret.top + gi.rcCaret.bottom) / 2 }; if (ClientToScreen(gi.hwndCaret, ref p)) return Pt(p.x, p.y, "caret"); }
+                if (gi.hwndCaret != IntPtr.Zero && CaretTrusted(gi.hwndCaret, scoped)) { var p = new POINT { x = (gi.rcCaret.left + gi.rcCaret.right) / 2, y = (gi.rcCaret.top + gi.rcCaret.bottom) / 2 }; if (ClientToScreen(gi.hwndCaret, ref p)) return Pt(p.x, p.y, "caret"); }
                 RECT f; if (gi.hwndFocus != IntPtr.Zero && GetWindowRect(gi.hwndFocus, out f)) return Pt((f.left + f.right) / 2, (f.top + f.bottom) / 2, "field");
             }
             RECT w; if (GetWindowRect(fg, out w)) return Pt((w.left + w.right) / 2, (w.top + w.bottom) / 2, "window");
             return "";
         } catch { return ""; }
         finally { if (scoped) { try { SetThreadDpiAwarenessContext(prev); } catch { } } }
+    }
+    /** Jim N1: a DPI-unaware or system-aware window reports its caret in virtualised (scaled) client space, which
+     *  ClientToScreen in this per-monitor thread would misplace. Only a per-monitor-aware window's caret is used;
+     *  otherwise the focused control's centre (GetWindowRect is never virtualised here). Without the DPI APIs
+     *  (before Windows 10 1607) nothing is scaled for anyone, so the caret is kept. */
+    static bool CaretTrusted(IntPtr hwnd, bool scoped) {
+        if (!scoped) return true;
+        try { return GetAwarenessFromDpiAwarenessContext(GetWindowDpiAwarenessContext(hwnd)) == 2; } catch (EntryPointNotFoundException) { return true; }
     }
     static string Pt(int x, int y, string kind) { return ",\"fx\":" + x + ",\"fy\":" + y + ",\"fk\":\"" + kind + "\""; }
     static long ParseHwnd(string s) { long v; return s != null && long.TryParse(s, out v) && v > 0 ? v : 0; }
