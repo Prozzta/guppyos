@@ -341,6 +341,37 @@ test('lexical traversal out of the root is still rejected', () => withWorkspace(
   }
 }));
 
+test('a name that merely starts with ".." stays inside; a real parent segment still escapes (Jim N1)', () => withWorkspace(KINDS[0], async ({ root, dir }) => {
+  // The containment checks compare path.relative SEGMENTS: '..notes.txt' and '..d/x.txt' are names in
+  // the workspace, not its parent, and must read and write like any other file.
+  fs.writeFileSync(path.join(root, '..notes.txt'), 'dotted');
+  fs.mkdirSync(path.join(root, '..d'));
+  fs.writeFileSync(path.join(root, '..d', 'x.txt'), 'dotted dir');
+  for (const [rel, want] of [['..notes.txt', 'dotted'], ['..d/x.txt', 'dotted dir']]) {
+    const res = await readFileText(root, rel);
+    assert.equal(res.ok, true, res.ok ? '' : `${rel}: ${res.error}`);
+    assert.equal(res.content, want);
+    const w = await writeFileText(root, rel, 'rewritten');
+    assert.equal(w.ok, true, w.ok ? '' : `${rel}: ${w.error}`);
+    assert.equal(fs.readFileSync(path.join(root, ...rel.split('/')), 'utf8'), 'rewritten');
+  }
+  const created = await writeFileText(root, '..new.txt', 'new');
+  assert.equal(created.ok, true, created.ok ? '' : created.error);
+  assert.equal(fs.readFileSync(path.join(root, '..new.txt'), 'utf8'), 'new');
+  // And a real '..' segment is still refused, for reads and writes, even when the parent holds a
+  // '..'-prefixed sibling name.
+  fs.writeFileSync(path.join(dir, '..sibling.txt'), 'SECRET');
+  for (const rel of ['..', '../outside/secret.txt', '../..sibling.txt', '..d/../../outside/secret.txt']) {
+    const r = await readFileText(root, rel);
+    assert.equal(r.ok, false, `${rel} must not be readable`);
+    assert.equal(r.error, ESCAPE);
+  }
+  const w = await writeFileText(root, '../..sibling.txt', 'clobbered');
+  assert.equal(w.ok, false);
+  assert.equal(w.error, ESCAPE);
+  assert.equal(fs.readFileSync(path.join(dir, '..sibling.txt'), 'utf8'), 'SECRET');
+}));
+
 // ─── FS-CONTAINMENT-TOCTOU: a component swapped between the check and the open ──
 //
 // `safeResolve` decides on the path; the open then makes the kernel look it up again. These tests
