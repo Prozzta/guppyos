@@ -3,7 +3,7 @@
 ; nsis.include).
 ;
 ; What electron-builder's own script already does on an in-app update (--updated) from 1.1.81, read
-; from app-builder-lib 25.1.8 templates/nsis (installSection.nsh, include/installUtil.nsh,
+; from app-builder-lib 26.18.0 templates/nsis (installSection.nsh, include/installUtil.nsh,
 ; include/installer.nsh); test/rebrand-a-182.test.cjs pins it:
 ;   keepShortcuts is only "true" when "$INSTDIR\${APP_EXECUTABLE_FILENAME}" (= Guppy.exe) exists before
 ;   the copy, and in the old install folder it does not. So the old uninstaller runs WITHOUT
@@ -18,7 +18,7 @@
 ; menu for any renamed copy of the old shortcut the stock step does not know about.
 ; The target is read with PowerShell (hidden, nsExec); if that fails, nothing is changed.
 
-; REBRAND-UPDATER-BASE (1.1.83): electron-builder 25.1.8 passes APP_INSTALLER_STORE_FILE on the
+; REBRAND-UPDATER-BASE (1.1.83): electron-builder 26.18.0 passes APP_INSTALLER_STORE_FILE on the
 ; makensis command line as "<package name>-updater\installer.exe" (NsisTarget.js, appInfo
 ; updaterCacheDirName) = "munder-difflin-updater\installer.exe", and include/installer.nsh copies the
 ; running installer there ($LOCALAPPDATA) as the base for the next DIFFERENTIAL update. Since 1.1.82

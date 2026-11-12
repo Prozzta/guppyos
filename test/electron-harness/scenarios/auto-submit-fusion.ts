@@ -119,7 +119,7 @@ function installBridgeStub(): void {
     },
     redrawPty: () => { /* no pty */ }, resizePty: () => { /* no pty */ },
     copyToClipboard: () => { /* unused */ },
-    readClipboard: () => Promise.resolve(''), readClipboardSync: () => '',
+    readClipboard: () => Promise.resolve(''),
     statAbs: () => Promise.resolve(null), revealPath: () => Promise.resolve(),
     reportTerminalInputState: (id: string, state: unknown) => { pty(id).inputState = state; return Promise.resolve({ ok: true }); },
     // Validated exactly as main's handler validates it; a malformed report is dropped.

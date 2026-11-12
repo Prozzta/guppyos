@@ -1,7 +1,7 @@
 'use strict';
 /**
  * FS-CONTAINMENT-TOCTOU: build the handle-path addon (resources/fs-handle/guppy-fs-handle.c) for the
- * installed Electron, the same toolchain electron-rebuild uses for node-pty (@electron/node-gyp against
+ * installed Electron, the same toolchain electron-rebuild uses for node-pty (node-gyp against
  * the Electron headers in ~/.electron-gyp), into resources/fs-handle/bin, which electron-builder ships
  * as <resources>/fs-handle. Built from source on every install, locally and in the release job; no
  * prebuilt binary is committed. It is plain N-API, so the same file also loads in the Node that runs
@@ -13,7 +13,7 @@
  * anything.
  */
 const { mkdirSync, copyFileSync, rmSync, statSync } = require('node:fs');
-const { join, dirname } = require('node:path');
+const { join } = require('node:path');
 const { homedir } = require('node:os');
 const { spawnSync } = require('node:child_process');
 
@@ -29,7 +29,9 @@ if (process.platform === 'linux') {
 }
 
 const electronVersion = require('electron/package.json').version;
-const gyp = join(dirname(require.resolve('@electron/node-gyp/package.json')), 'bin', 'node-gyp.js');
+// electron-rebuild 4 uses the upstream node-gyp package. Resolving its executable from the
+// dependency tree keeps this build on the same toolchain as the native modules it ships with.
+const gyp = require.resolve('node-gyp/bin/node-gyp.js');
 const args = [
   gyp, 'rebuild',
   `--target=${electronVersion}`,

@@ -167,6 +167,15 @@ test('the worker scratch dir (rmSync recursive): a junction inside is removed as
   assert.equal(fs.existsSync(sentinel(shared)), true, 'THE TARGET SURVIVES');
 });
 
+test('worker scratch closes watched children before recursive removal', () => {
+  const src = codeOnly(readSource('src/main/index.ts'));
+  const close = src.indexOf("hive.closeOutboxWatcher(join(dir, 'outbox'))");
+  const reader = src.indexOf('readerWatchers.stop(workerId)');
+  const rm = src.indexOf('rmSync(dir, { recursive: true, force: true })');
+  assert.ok(close >= 0 && close < rm, 'outbox watcher closes before rmSync');
+  assert.ok(reader >= 0 && reader < rm, 'reader watcher stops before rmSync');
+});
+
 test('wiring: every removeWorktree caller in index.ts logs a worktree-remove-refused row on a refusal', () => {
   const src = codeOnly(readSource('src/main/index.ts'));
   const calls = src.match(/await removeWorktree\(|void removeWorktree\(/g) ?? [];

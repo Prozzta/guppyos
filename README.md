@@ -134,8 +134,8 @@ These tools surface recorded claims and history, not an accuracy guarantee. See 
 
 ### Prerequisites
 
-- **Windows x64** for this fork's installer releases; the codebase also builds on macOS
-  and Linux (upstream ships all three).
+- **Windows x64** for this fork's installer releases. Builds on macOS require **macOS 13
+  (Ventura) or newer**; the codebase also builds on Linux (upstream ships all three).
 - **Node.js 24** (`.nvmrc`, matching CI) and npm, plus a C/C++ toolchain for `node-pty`'s native addon.
 - At least one supported agent CLI on your `PATH` — [Claude Code](https://claude.com/claude-code)
   (`claude`, the default), Antigravity (`agy`), OpenAI Codex (`codex`), or xAI Grok (`grok`).

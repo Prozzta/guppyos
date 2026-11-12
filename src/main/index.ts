@@ -1,6 +1,7 @@
 import './packThemes'; // theme packs join the project-theme catalogue before any config is read
 import { app, BrowserWindow, clipboard, crashReporter, dialog, globalShortcut, ipcMain, Menu, powerMonitor, powerSaveBlocker, safeStorage, screen, session, shell, Notification, Tray, utilityProcess } from 'electron';
 import { runQuitSteps, type QuitReport } from './quitTeardown';
+import { copyClipboardText, readClipboardPng, readClipboardText } from './clipboard';
 import { NativeMemoryWiring, toUnpacked } from './nativeMemory/mainWiring';
 import { ClaimStore } from './claims/store';
 import { SearchResultLog } from './claims/searchLog';
@@ -2734,6 +2735,10 @@ function removeWorkerScratch(workerId: string): void {
   const agentsRoot = join(root, 'agents');
   // Path-safety: the resolved dir must sit directly under agents/ with basename == id.
   if (resolve(dir) !== join(resolve(agentsRoot), basename(dir)) || basename(dir) !== workerId) return;
+  // Electron 45 cannot recursively remove this parent while its child outbox is
+  // watched (ENOTEMPTY/EPERM), so close watchers before—not after—rmSync.
+  hive.closeOutboxWatcher(join(dir, 'outbox'));
+  readerWatchers.stop(workerId);
   try { rmSync(dir, { recursive: true, force: true }); }
   catch (e) { console.error('[worker] removeWorkerScratch failed:', e); }
 }
@@ -4738,6 +4743,13 @@ function createWindow(opts: { floor?: boolean; partition?: string; recovery?: Re
   };
   const ses = win.webContents.session;
   ses.setPermissionRequestHandler((_wc, permission, callback, details) => {
+    // Electron 45 sends screen/window/tab requests as display-capture rather
+    // than media. Guppy has no capture feature, so do not accidentally grant it
+    // through the permissive default below.
+    if (permission === 'display-capture') {
+      callback(false);
+      return;
+    }
     if (permission === 'media') {
       const mediaTypes = details && 'mediaTypes' in details ? details.mediaTypes : undefined;
       const wantsAudio = !mediaTypes || mediaTypes.includes('audio');
@@ -4747,6 +4759,7 @@ function createWindow(opts: { floor?: boolean; partition?: string; recovery?: Re
     callback(true);
   });
   ses.setPermissionCheckHandler((_wc, permission) => {
+    if (permission === 'display-capture') return false;
     if (permission === 'media') return micFeatureLive();
     return true;
   });
@@ -5784,29 +5797,18 @@ ipcMain.handle('session:resolveCwd', (_evt, sessionId: unknown) =>
   (typeof sessionId === 'string' ? resolveSessionCwd(sessionId) : null));
 
 // ─── IPC: clipboard ─────────────────────────────────────────────────────────
-ipcMain.handle('app:copyToClipboard', (_evt, text: unknown) => {
-  if (typeof text !== 'string') return { ok: false, error: 'invalid text' };
-  try { clipboard.writeText(text); return { ok: true }; }
-  catch (e) { return { ok: false, error: e instanceof Error ? e.message : String(e) }; }
+ipcMain.handle('app:copyToClipboard', async (_evt, text: unknown) => {
+  return copyClipboardText(clipboard, text);
 });
 // STARTUP-TIMING-162: the renderer's long tasks and first-redraw marks (validated in startupTiming).
 ipcMain.on('startup:timing', (_evt, batch: unknown) => startupTiming.fromRenderer(batch));
 // STALL-WATCH-198: the renderer's slow input and long tasks (validated and rate-capped in stallWatch).
 ipcMain.on('stall:watch', (_evt, batch: unknown) => stallWatch.fromRenderer(batch));
-ipcMain.handle('app:readClipboard', () => {
-  try { return clipboard.readText(); } catch { return ''; }
+ipcMain.handle('app:readClipboard', async () => {
+  return readClipboardText(clipboard);
 });
-// Same read, SYNCHRONOUS, for the terminal's paste shortcut.
-//
-// Dictation tools (muesli.works, Wispr Flow, …) type by stashing the user's
-// clipboard, writing the transcript, sending the paste key, then restoring the
-// old clipboard immediately. An `invoke` read returns a tick or two later — by
-// which point the restore has already landed and we paste the PREVIOUS text.
-// A `sendSync` read completes inside the keydown handler, before the tool gets
-// a chance to put the old contents back.
-ipcMain.on('app:readClipboardSync', (evt) => {
-  try { evt.returnValue = clipboard.readText(); } catch { evt.returnValue = ''; }
-});
+// Electron 44 makes clipboard reads asynchronous; terminal paste marks the
+// eventual renderer emission as HUMAN.
 // NOTE: the terminal theme is mirrored into each agent's per-session Claude
 // settings at spawn (hive.ensureAgent theme option) — deliberately NOT via
 // `claude config set -g theme`, which would also restyle the user's own
@@ -6069,6 +6071,7 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
   try { integrationBroker.stop(); } catch (e) { console.error('[changeHome] broker.stop:', e); }
   try { hive.stopRouter(); } catch (e) { console.error('[changeHome] stopRouter:', e); }
   try { hive.stopLedgerGuard(); } catch (e) { console.error('[changeHome] stopLedgerGuard:', e); }
+  try { readerWatchers.stopAll(); } catch (e) { console.error('[changeHome] stopReaderWatchers:', e); }
   try { boardMonitor.stop(); } catch (e) { console.error('[changeHome] boardMonitor.stop:', e); }
   try { floorDigest.stop(); boardStatus.stop(); } catch (e) { console.error('[changeHome] floorDigest.stop:', e); }
   try { hive.stopAgyStatusline(); } catch (e) { console.error('[changeHome] stopAgyStatusline:', e); }
@@ -6698,13 +6701,13 @@ ipcMain.handle('dialog:attachFiles', async (evt) => {
 // clipboard holds no image (e.g. a normal text paste).
 ipcMain.handle('clipboard:saveImage', async () => {
   try {
-    const img = clipboard.readImage();
-    if (img.isEmpty()) return { ok: false as const, error: 'no image in clipboard' };
+    const png = await readClipboardPng(clipboard);
+    if (!png) return { ok: false as const, error: 'no image in clipboard' };
     const dir = join(app.getPath('temp'), 'cth-pastes');
     mkdirSync(dir, { recursive: true });
     const name = `paste-${Date.now()}.png`;
     const dest = join(dir, name);
-    writeFileSync(dest, img.toPNG());
+    writeFileSync(dest, Buffer.from(png));
     return { ok: true as const, file: { path: dest, name } };
   } catch (e) {
     return { ok: false as const, error: e instanceof Error ? e.message : String(e) };
@@ -6748,6 +6751,7 @@ function teardownAndQuit(): void {
   try { integrationBroker.stop(); } catch (e) { console.error('[quit] broker.stop:', e); }
   try { hive.stopRouter(); } catch (e) { console.error('[quit] stopRouter:', e); }
   try { hive.stopLedgerGuard(); } catch (e) { console.error('[quit] stopLedgerGuard:', e); }
+  try { readerWatchers.stopAll(); } catch (e) { console.error('[quit] stopReaderWatchers:', e); }
   try { boardMonitor.stop(); } catch (e) { console.error('[quit] boardMonitor.stop:', e); }
   try { floorDigest.stop(); boardStatus.stop(); } catch (e) { console.error('[quit] floorDigest.stop:', e); }
   try { hive.stopAgyStatusline(); } catch (e) { console.error('[quit] stopAgyStatusline:', e); }
@@ -6834,6 +6838,7 @@ ipcMain.handle('app:resetAll', async () => {
   try { integrationBroker.stop(); } catch (e) { console.error('[reset] broker.stop:', e); }
   try { hive.stopRouter(); } catch (e) { console.error('[reset] stopRouter:', e); }
   try { hive.stopLedgerGuard(); } catch (e) { console.error('[reset] stopLedgerGuard:', e); }
+  try { readerWatchers.stopAll(); } catch (e) { console.error('[reset] stopReaderWatchers:', e); }
   try { boardMonitor.stop(); } catch (e) { console.error('[reset] boardMonitor.stop:', e); }
   try { floorDigest.stop(); boardStatus.stop(); } catch (e) { console.error('[reset] floorDigest.stop:', e); }
   try { hive.stopAgyStatusline(); } catch (e) { console.error('[reset] stopAgyStatusline:', e); }

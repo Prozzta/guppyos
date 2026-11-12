@@ -10,7 +10,7 @@
  * runs (main then gives a search a longer budget), and a search whose deadline passed while it
  * was queued is answered expired without running.
  */
-import { existsSync, readdirSync, readFileSync, statSync, watch as fsWatch, type FSWatcher } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync, type FSWatcher } from 'node:fs';
 import { join } from 'node:path';
 import { chunkMarkdown, CHUNKER_VERSION, type Chunk } from './chunker';
 import { discoverSources, ALLOW_LIST_VERSION, SOURCES_CONFIG_FILE, sha256, type Discovery, type SourceEntry } from './sources';
@@ -21,6 +21,7 @@ import { formatSearch, formatStatus, formatWakeUp, newestOrder, rankHits, WAKE_M
 import { withHistoryCommands } from '../claims/historyPointer';
 import { cardIdOfKey, EMPTY_CARD_LEADS, type CardLeadAsk, type CardLeadReply } from '../claims/get';
 import { pinnedSection, pinnedStatus, type PinnedStatus } from '../memoryRollover';
+import { watchDirectorySafely } from '../safeDirectoryWatch';
 
 export const PRIORITY = { search: 0, wake: 1, status: 1, ingest: 2, backfill: 3, compact: 4 } as const;
 /** Chunks embedded per queue step before yielding (spec section 3: <= 8). ONE: a search that
@@ -701,7 +702,7 @@ export class MemoryEngine {
 }
 
 function defaultWatch(dir: string, onChange: (file: string) => void): FSWatcher {
-  return fsWatch(dir, { persistent: false }, (_ev, f) => { if (f) onChange(String(f)); });
+  return watchDirectorySafely(dir, (_ev, f) => { if (f) onChange(f); });
 }
 
 /** Shadow diagnostics and JSON output carry no content: ids, sources, ranks, scores. */

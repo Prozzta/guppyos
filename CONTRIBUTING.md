@@ -19,6 +19,7 @@ participating, you agree to uphold it.
   Cross-platform smoke-testing and fixes are still very welcome (see
   [Good first areas](#good-first-areas)).
 - **Node.js 24** (`.nvmrc`) and npm, matching CI.
+- **macOS development requires macOS 13 (Ventura) or newer.**
 - A **C/C++ toolchain** to build `node-pty`'s native addon. On macOS:
   ```bash
   xcode-select --install

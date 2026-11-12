@@ -22,7 +22,7 @@ import {
   readdirSync, statSync, rmSync, appendFileSync, symlinkSync, copyFileSync, chmodSync,
   lstatSync, readlinkSync, unlinkSync,
   openSync, readSync, closeSync,
-  watch, type FSWatcher, type Stats
+  type FSWatcher, type Stats
 } from 'node:fs';
 import { basename, join, dirname, isAbsolute, win32, posix } from 'node:path';
 import { homedir } from 'node:os';
@@ -88,6 +88,7 @@ import { godHandoffFit } from './godStartup';
 import { MAIL_JOINED_BUDGET } from './mailSurface';
 import { FLOOR_DIGEST_FILE, recordBackstopClosed, recordFlaggedForHuman, type DigestModelHooks } from './floorDigest';
 import { BOARD_STATUS_FILE } from './boardStatus';
+import { watchDirectorySafely } from './safeDirectoryWatch';
 
 /** The subset of HarnessConfig the hive consumes for the default-MCP merge.
  *  Kept as a local shape so hive.ts never imports the foundation-owned config
@@ -586,7 +587,7 @@ export interface RouterRuntime {
 }
 
 const NODE_ROUTER_RUNTIME: RouterRuntime = {
-  watch: (dir, onHint) => watch(dir, { persistent: false }, () => onHint()),
+  watch: (dir, onHint) => watchDirectorySafely(dir, () => onHint()),
   setImmediate: (fn) => { setImmediate(fn); },
   setInterval: (fn, ms) => setInterval(fn, ms),
   clearInterval: (h) => clearInterval(h as NodeJS.Timeout)
@@ -3611,6 +3612,14 @@ export class HiveManager {
     return [...this.outboxWatchers.keys()].sort();
   }
 
+  /** Close an outbox watcher before lifecycle code removes its agent directory. */
+  closeOutboxWatcher(dir: string): void {
+    const watcher = this.outboxWatchers.get(dir);
+    if (!watcher) return;
+    this.outboxWatchers.delete(dir);
+    try { watcher.close(); } catch { /* already closed */ }
+  }
+
   /** Coalesce every hint in this turn into ONE authoritative scan (event scheduling, not a timer). */
   private scheduleRouteOnce(): void {
     if (this.routeQueued || !this.routerTimer) return;
@@ -6050,7 +6059,7 @@ export class HiveManager {
     const dir = dirname(p);
     if (this.authorityWatchers.has(dir)) return;
     try {
-      const w = watch(dir, { persistent: false }, (_event, name) => {
+      const w = watchDirectorySafely(dir, (_event, name) => {
         const full = name ? join(dir, String(name)) : null;
         for (const [file, entry] of this.authorityCache) if (dirname(file) === dir && (!full || full === file)) entry.checkedAt = -Infinity;
       });

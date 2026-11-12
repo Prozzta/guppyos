@@ -27,6 +27,19 @@ test('INPUT ORIGIN on a rendered terminal: regimes, exclusions, programmatic pas
   assert.equal(r.selfTest, 'pass', 'the startup self-test proves the reconstruction on this build');
   assert.equal(r.selfTestLeakedBytes, 0, 'NOT ONE BYTE from the self-test reached writePty');
 
+  // A tool restores previous-copy in the same turn after a paste key. An async
+  // bridge would then paste that stale value, so every tool chord must stay native.
+  for (const chord of ['ctrl-v', 'ctrl-shift-v', 'shift-insert']) {
+    assert.equal(r.keyboardSwap[chord].allowed, true, `${chord} remains native paste`);
+    assert.equal(r.keyboardSwap[chord].reads, 0, `${chord} makes no async clipboard read`);
+    assert.equal(r.keyboardSwap[chord].pasted, '', `${chord} injects no restored clipboard text`);
+  }
+  assert.equal(r.humanRightClick.allowed, false,
+    'human right-click is handled by Guppy, not Electron’s absent default menu');
+  assert.equal(r.humanRightClick.reads, 1, 'human right-click reads through the asynchronous bridge once');
+  assert.equal(r.humanRightClick.pasted, 'NEWER', 'human right-click pastes clipboard value at promise resolution');
+  assert.equal(r.humanRightClick.origin, 'HUMAN', 'right-click’s programmatic xterm paste is explicitly human-originated');
+
   // Same-tick regime: a keyboard event classifies HUMAN and the window is shut a tick later.
   assert.equal(r.keyboard.origin, 'HUMAN', `keyboard -> HUMAN (data ${JSON.stringify(r.keyboard.data)})`);
   assert.equal(r.keyboardWindowClosed, true, 'and the same-tick window closed with its dispatch');

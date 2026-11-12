@@ -121,6 +121,14 @@ export class ReaderWatchers {
     this.watchers.clear();
   }
 
+  /** Close one agent's directory watcher before lifecycle code removes its folder. */
+  stop(agent: string): void {
+    const watcher = this.watchers.get(agent);
+    if (!watcher) return;
+    watcher.stop();
+    this.watchers.delete(agent);
+  }
+
   /** The agents watched now (for tests and logs). */
   watching(): string[] {
     return [...this.watchers.keys()].sort();

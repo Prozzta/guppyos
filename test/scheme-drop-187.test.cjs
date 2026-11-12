@@ -35,11 +35,11 @@ const macro = (name) => {
 test('installer.nsh: the drop runs on install (customInstall) and on uninstall (customUnInstall)', () => {
   assert.match(macro('customInstall'), /^\s*!insertmacro guppyDropOldScheme$/m);
   assert.match(macro('customUnInstall'), /^\s*!insertmacro guppyDropOldScheme$/m);
-  // electron-builder 25.1.8 inserts both hooks (pinned; re-read the templates on a version change).
+  // electron-builder 26.18.0 inserts both hooks (pinned; re-read the templates on a version change).
   const tpl = (rel) => fs.readFileSync(path.join(ROOT, 'node_modules', 'app-builder-lib', 'templates', 'nsis', rel), 'utf8');
   assert.match(tpl('installSection.nsh'), /!ifmacrodef customInstall\r?\n\s+!insertmacro customInstall/);
   assert.match(tpl('uninstaller.nsh'), /!ifmacrodef customUnInstall\r?\n\s+!insertmacro customUnInstall/);
-  assert.equal(JSON.parse(fs.readFileSync(path.join(ROOT, 'node_modules', 'app-builder-lib', 'package.json'), 'utf8')).version, '25.1.8');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(ROOT, 'node_modules', 'app-builder-lib', 'package.json'), 'utf8')).version, '26.18.0');
 });
 
 test('installer.nsh: only HKCU\\Software\\Classes\\munderdifflin, and only after the Guppy.exe check', () => {
