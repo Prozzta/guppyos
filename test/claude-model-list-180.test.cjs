@@ -16,6 +16,12 @@ require('./tools/own-job.cjs');
  * accepted, C3 no tree kill, C4 no time box, C5 aliases kept as aliases, C6 the API key used although
  * Claude Code is installed, C7 `account` returned by the parser, C8 --verbose dropped, C9 label
  * without a version, C10 a silent exit 0 reported as "exit 0", C11 run in the caller's cwd; after Creed's audit C12 C13 third-party users called signed out, C14 the verdict on exit not close, C15 C16 no POSIX group kill.
+ *
+ * LOAD ENVELOPE (LOAD-FLAKES-105, god ruling (a) 2026-11-12): the REAL fake tests run through the
+ * product's own 10 s time box, which is never lengthened here. Bench 8 on 32 CPUs: 2/2 runs pass at
+ * 1.5x oversubscription (48 CPU burners); at 3x (96 burners) 1 run in 2 had 3 REAL tests read
+ * "timed out after 10 s", because the shim + fake node cold-starts took longer. That is the true
+ * verdict, not a flake. Between 1.5x and 3x is unmeasured. Bench this file at 1.5x, not 3x.
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -408,7 +414,11 @@ test('MUTANT CENSUS CLAUDE-MODEL-LIST: C1-C23 each apply once and die', { timeou
       const { died, left, orphaned } = await judge(killer, loadTs.fromText(SRC, source.replace(from, () => to)));
       assert.ok(died instanceof assert.AssertionError, `SURVIVED: ${name}${died ? ` (died of ${died.message})` : ''}`);
       assert.equal(left, 0, `${name}: every fake stopped after the mutant`);
-      assert.equal(orphaned, 0, `${name}: every fake left by its stop file, none only because its shim died`);
+      // C23 kills the shim and not its tree, so its own fake is the orphan, and the census must SEE it (1); stop()
+      // waits for that fake to leave by its hang guard, so it is said every time, at idle and under load
+      // (LOAD-FLAKES-105). Under every other mutant none is left that way (0).
+      const orphans = name.startsWith('C23 ') ? 1 : 0;
+      assert.equal(orphaned, orphans, `${name}: every fake left by its stop file, none only because its shim died (C23: its own orphan, said)`);
     });
   }
 });
@@ -482,8 +492,11 @@ async function stopFileChecks(fp) {
   const exit = new Promise((r) => c.once('exit', (code, sig) => r({ code, sig })));
   await fp.verdict(async () => {
     const t0 = Date.now();
-    while (!fs.existsSync(log) && Date.now() - t0 < 20_000) await new Promise((r) => setTimeout(r, 100));
-    const pid = JSON.parse(fs.readFileSync(log, 'utf8').split('\n')[0]).pid;
+    // the log exists before its first line is written (an empty file under load): wait for the pid itself
+    const logged = () => { try { return JSON.parse(fs.readFileSync(log, 'utf8').split('\n')[0]).pid; } catch { return undefined; } };
+    while (!logged() && Date.now() - t0 < 20_000) await new Promise((r) => setTimeout(r, 100));
+    const pid = logged();
+    assert.ok(Number.isInteger(pid), 'the fake started and logged its pid');
     assert.equal(await t.stop(), 0);
     assert.deepEqual(await exit, { code: 0, sig: null }, 'the fake left by itself (its stop file), not by the handle kill');
     assert.ok(await gone(pid), 'the fake below the shim is gone');
@@ -520,6 +533,35 @@ async function orphanChecks(fp) {
 }
 test('MASK (Jim MUST 1): a fake orphaned below its killed shim is counted as left, and cannot hang the file', { timeout: 60_000 }, () => orphanChecks(require(`./${FP}`)));
 
+async function lateOrphanChecks(fp) {
+  // LOAD-FLAKES-105: the shim killed (not its tree) BEFORE stop() is called, as C23 does. The handle has
+  // exited already, yet the fake below it is still ours: stop() must count it, not forget it.
+  const t = fp.tracker();
+  const js = path.join(JAIL, `late-orphan-${++n}.cjs`), pidFile = `${js}.pid`, out = `${js}.out`;
+  fs.writeFileSync(js, `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\n`
+    + `setInterval(() => { if (require('fs').existsSync(${JSON.stringify(out)})) process.exit(0); }, 100);\n`);
+  const shim = WIN ? path.join(JAIL, `late-orphan-${n}.cmd`) : null;
+  if (WIN) fs.writeFileSync(shim, `@"${process.execPath}" "${js}"\r\n`);
+  const pid = () => (fs.existsSync(pidFile) ? Number(fs.readFileSync(pidFile, 'utf8')) || undefined : undefined);
+  const c = WIN ? t.track(process.env.ComSpec || 'cmd.exe', ['/d', '/c', shim], { stdio: 'pipe', windowsHide: true }, null, pid)
+    : t.track(process.execPath, [js], { stdio: 'pipe' }, null, pid);
+  const exited = new Promise((r) => c.once('exit', r));
+  await fp.verdict(async () => {
+    const t0 = Date.now();
+    while (!pid() && Date.now() - t0 < 20_000) await new Promise((r) => setTimeout(r, 100));
+    assert.ok(pid(), 'the orphan-to-be started');
+    c.kill('SIGKILL');
+    await exited;
+    assert.equal(t.live.size, 0, 'the shim\'s handle is gone before stop() runs');
+    const left = await t.stop(500);
+    if (WIN) {
+      assert.equal(left, 1, 'the fake below the shim that died first is still counted as left, not 0');
+      assert.ok(alive(pid()), 'the fake still runs (the case to count)');
+    } else assert.equal(left, 0, 'POSIX: the handle is the fake itself');
+  }, async () => { fs.writeFileSync(out, ''); if (pid()) await gone(pid()); for (const s of [c.stdin, c.stdout, c.stderr]) { try { s.destroy(); } catch { /* closed */ } } });
+}
+test('MASK (LOAD-FLAKES-105): a fake whose shim died BEFORE stop() is still counted as left', { timeout: 60_000 }, () => lateOrphanChecks(require(`./${FP}`)));
+
 test('MASK (Jim SHOULD 1): a passing check with a fake left after the stop still fails', { timeout: 30_000 }, async () => {
   await assert.rejects(successChecks(P, { cleanup: () => cleanFakes(async () => { await stopFakes(); return 1; }) }), /1 fake claude\(s\) outlived the stop/);
 });
@@ -534,7 +576,7 @@ test('MASK pins: no pid lookup or WMI here; checks judge through verdict(); the 
   }
   assert.equal(code.match(/\}, cleanup\);/g).length, 2, 'successChecks and hangChecks clean up through verdict()');
   assert.match(code, /async function judge\(killer, R, opts\) \{\s*let died = null;\s*try \{ await killer\(R, opts\); \} catch \(e\) \{ died = e; \}\s*const left = await stopFakes\(\);\s*return \{ died, left, orphaned: orphanedFakes\(\) \};/);
-  assert.match(code, /assert\.equal\(orphaned, 0, `\$\{name\}: every fake left by its stop file/, 'the census fails a fake that left only by the hang guard');
+  assert.match(code, /const orphans = name\.startsWith\('C23 '\) \? 1 : 0;\s*assert\.equal\(orphaned, orphans, `\$\{name\}: every fake left by its stop file/, 'the census fails a fake that left only by the hang guard (only C23\'s own orphan is expected, and must be said)');
   assert.match(code, /if \(\+\+orphanPolls >= 3\) \{ fs\.appendFileSync\(log, JSON\.stringify\(\{ left: 'parent-gone' \}\)/, 'the hang guard says so in the log');
   assert.match(code, /const \{ died, left, orphaned \} = await judge\(killer, loadTs\.fromText/);
   assert.match(code, /const orphaned = orphanedFakes\(false\);/, 'a check\'s cleanup only looks; the census counts');
@@ -550,7 +592,8 @@ const FP_MUTANTS = [
   ['F4 unbounded wait', 'while (live.size && Date.now() - t0 < ms)', 'while (live.size)', handleKillChecks],
   ['F5 no stop file', "if (h.stopFile) fs.writeFileSync(h.stopFile, '');", 'void 0;', stopFileChecks],
   ['F6 orphan below the shim not counted', ' || (Number.isInteger(h.pid()) && alive(h.pid()))', '', orphanChecks],
-  ['F7 pipes left open', 'try { if (s) s.destroy(); }', 'try { void s; }', orphanChecks]
+  ['F7 pipes left open', 'try { if (s) s.destroy(); }', 'try { void s; }', orphanChecks],
+  ['F8 a fake whose shim died before stop() forgotten', 'const was = [...all].filter((h) => live.has(h) || orphan(h));', 'const was = [...live];', lateOrphanChecks]
 ];
 test('MUTANT CENSUS FAKE-PROCS: F1-F5 each apply once and die', { timeout: 180_000 }, async (t) => {
   const source = fs.readFileSync(path.join(__dirname, FP), 'utf8').replace(/\r\n/g, '\n');
