@@ -56,14 +56,19 @@ export function ThreadsPanel({ agentId }: ThreadsPanelProps) {
   const [openThreads, setOpenThreads] = useState<Record<string, boolean>>({});
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [drafts, setDrafts] = useState<Record<string, string>>({});
+  // hive:inbox runs off main in slices (SCALE-DONE-STAT): a cold first read of a big mailbox takes a
+  // moment, so until it answers the panel says it is loading rather than "No conversations yet".
+  const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
     let alive = true;
+    setLoaded(false);
     const load = async () => {
       try {
         const inbox = await window.cth.hiveInbox(agentId);
         if (alive) setMessages(inbox);
       } catch { /* keep last good state */ }
+      finally { if (alive) setLoaded(true); }
     };
     load();
     const t = setInterval(load, 3000);
@@ -86,7 +91,7 @@ export function ThreadsPanel({ agentId }: ThreadsPanelProps) {
     return (
       <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16, background: 'var(--cth-paper-200)' }}>
         <p style={{ margin: 0, fontSize: 13, color: 'var(--cth-ink-700)', textAlign: 'center', maxWidth: 280 }}>
-          No conversations yet. Messages this agent receives will appear here as threads.
+          {loaded ? 'No conversations yet. Messages this agent receives will appear here as threads.' : 'Loading conversations…'}
         </p>
       </div>
     );
