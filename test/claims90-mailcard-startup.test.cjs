@@ -167,7 +167,7 @@ test('the derived writer starts only once the catch-up settled, even a slowed on
   // a failed catch-up: the failure row, null, and the derived writer still starts
   const E = upgradedFloor(t, 'fail');
   // MAILCARD-CATCHUP-RACE adds the index's catch-up hooks (begin, deferred ids, settle) to the stub.
-  const broken = { linkOf: () => null, conversationCards: () => [], record: () => { throw new Error('disk full'); }, beginCatchUp: () => {}, isDeferred: () => false, endCatchUp: () => ({ queued: 0, recorded: 0, failed: 0 }) };
+  const broken = { linkOf: () => null, has: () => false, *primeSteps() {}, conversationCards: () => [], record: () => { throw new Error('disk full'); }, beginCatchUp: () => {}, isDeferred: () => false, endCatchUp: () => ({ queued: 0, recorded: 0, failed: 0 }) };
   const f = catchUp(E.root, { index: broken });
   let started = 0;
   await MC.startAfterMailCardCatchUp(f.promise, () => { started++; });
