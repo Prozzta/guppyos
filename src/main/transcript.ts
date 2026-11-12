@@ -1,9 +1,10 @@
-import { closeSync, cpSync, existsSync, fstatSync, mkdirSync, openSync, readSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { closeSync, cpSync, existsSync, fstatSync, mkdirSync, openSync, readSync, readdirSync, readFileSync, statSync, type FSWatcher } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { estimateCostUsd, normalizeModel } from './pricing';
+import { watchDirectorySafely } from './safeDirectoryWatch';
 // Type-only on purpose: this module is compiled standalone by test/transcript-usage,
-// so it takes no runtime import beyond node and ./pricing.
+// so it takes no runtime import beyond node, ./pricing and ./safeDirectoryWatch.
 import type { AgentProvider } from '../shared/agentProvider';
 
 /**
@@ -252,15 +253,20 @@ export interface ReadUsageOptions {
 
 /** Per-file incremental parse state for the usage cache. Transcripts are
  *  append-only JSONL, so a parsed byte range's totals never change — repeat
- *  reads only stat the file and parse the appended tail. Keyed by
- *  dir|file|sessionFilter since the filter changes what a range sums to. */
+ *  reads only stat the file and parse the appended tail. Keyed by the file's
+ *  PATH alone (SCALE-TRANSCRIPT-SCAN): one parse fills the unfiltered totals AND
+ *  each session's totals, so a new session filter reads nothing already parsed
+ *  (it used to be dir|file|sessionFilter, so every new session re-read every file). */
 interface FileUsageEntry {
   size: number;
   mtimeMs: number;
   /** Bytes parsed so far — always ends on a newline boundary, so a torn
    *  trailing line is simply re-read once the writer completes it. */
   offset: number;
+  /** Every assistant record's usage (no session filter). */
   totals: AgentUsage;
+  /** The same sums per record `sessionId` (string ids only: the filter is a strict ===). */
+  bySession: Map<string, AgentUsage>;
 }
 
 const usageCache = new Map<string, FileUsageEntry>();
@@ -268,8 +274,24 @@ const usageCache = new Map<string, FileUsageEntry>();
  *  rebuild on demand). Real fleets have tens of transcripts, not thousands. */
 const USAGE_CACHE_MAX = 2048;
 
-/** Parse complete JSONL lines into `acc` (the shared per-record logic). */
-function parseUsageLines(text: string, sessionId: string | undefined, acc: AgentUsage): void {
+/** Add one record's usage to `acc`: model, token sums, and the cost priced by THIS
+ *  record's own model (a mixed-model agent, rare, is still costed correctly). */
+function addRecordUsage(acc: AgentUsage, model: string | undefined, r: Omit<AgentUsage, 'estimatedCostUsd' | 'model'>, cost: number): void {
+  if (model) acc.model = model;
+  acc.inputTokens += r.inputTokens;
+  acc.outputTokens += r.outputTokens;
+  acc.cacheWriteTokens += r.cacheWriteTokens;
+  acc.cacheWrite5mTokens += r.cacheWrite5mTokens;
+  acc.cacheWrite1hTokens += r.cacheWrite1hTokens;
+  acc.cacheReadTokens += r.cacheReadTokens;
+  acc.estimatedCostUsd += cost;
+}
+
+/** Parse complete JSONL lines into `entry` (the shared per-record logic): every
+ *  assistant record with usage goes into the unfiltered totals and, when it carries
+ *  a string sessionId, into that session's totals — in file order, so each sum is
+ *  the one a filtered parse of the same lines would have made. */
+function parseUsageLines(text: string, entry: FileUsageEntry): void {
   for (const line of text.split('\n')) {
     const trimmed = line.trim();
     if (!trimmed) continue;
@@ -284,52 +306,43 @@ function parseUsageLines(text: string, sessionId: string | undefined, acc: Agent
       continue;
     }
     if (rec.type !== 'assistant') continue;
-    // Session filter: skip records that aren't this agent's session.
-    if (sessionId && rec.sessionId !== sessionId) continue;
     const u = rec.message?.usage;
     if (!u) continue;
     const model = typeof rec.message?.model === 'string' ? normalizeModel(rec.message.model) : undefined;
-    if (model) acc.model = model;
-    const rIn = num(u.input_tokens);
-    const rOut = num(u.output_tokens);
-    const rCacheWrite = num(u.cache_creation_input_tokens);
     const cacheCreation = u.cache_creation as Record<string, unknown> | undefined;
-    const rCacheWrite5m = num(cacheCreation?.ephemeral_5m_input_tokens);
-    const rCacheWrite1h = num(cacheCreation?.ephemeral_1h_input_tokens);
-    const rCacheRead = num(u.cache_read_input_tokens);
-    acc.inputTokens += rIn;
-    acc.outputTokens += rOut;
-    acc.cacheWriteTokens += rCacheWrite;
-    acc.cacheWrite5mTokens += rCacheWrite5m;
-    acc.cacheWrite1hTokens += rCacheWrite1h;
-    acc.cacheReadTokens += rCacheRead;
-    // Price THIS record by its own model, then accumulate — so a mixed-model
-    // agent (rare) is still costed correctly rather than at one flat rate.
-    acc.estimatedCostUsd += estimateCostUsd(model, {
-      inputTokens: rIn,
-      outputTokens: rOut,
-      cacheReadTokens: rCacheRead,
-      cacheWriteTokens: rCacheWrite,
-      cacheWrite5mTokens: rCacheWrite5m,
-      cacheWrite1hTokens: rCacheWrite1h
-    });
+    const r = {
+      inputTokens: num(u.input_tokens),
+      outputTokens: num(u.output_tokens),
+      cacheReadTokens: num(u.cache_read_input_tokens),
+      cacheWriteTokens: num(u.cache_creation_input_tokens),
+      cacheWrite5mTokens: num(cacheCreation?.ephemeral_5m_input_tokens),
+      cacheWrite1hTokens: num(cacheCreation?.ephemeral_1h_input_tokens)
+    };
+    const cost = estimateCostUsd(model, r);
+    addRecordUsage(entry.totals, model, r, cost);
+    // Session filter (readAgentUsage's sessionId): only records that carry this agent's session.
+    if (typeof rec.sessionId === 'string') {
+      let acc = entry.bySession.get(rec.sessionId);
+      if (!acc) { acc = zero(); entry.bySession.set(rec.sessionId, acc); }
+      addRecordUsage(acc, model, r, cost);
+    }
   }
 }
 
 /** Cached totals for one transcript file, refreshed incrementally: unchanged
  *  size+mtime → cache hit (no read at all); grown → parse only the appended
  *  tail; shrunk (rewritten) → full re-parse. Null when the file vanished. */
-function readFileUsage(dir: string, file: string, sessionId: string | undefined): FileUsageEntry | null {
-  const key = `${dir}|${file}|${sessionId ?? '*'}`;
+function readFileUsage(dir: string, file: string): FileUsageEntry | null {
   const full = path.join(dir, file);
+  const key = full;
   let st: { size: number; mtimeMs: number };
   try { st = statSync(full); } catch { usageCache.delete(key); return null; }
   const cached = usageCache.get(key);
   if (cached && cached.size === st.size && cached.mtimeMs === st.mtimeMs) return cached;
   const fromScratch = !cached || st.size < cached.offset;
   const entry: FileUsageEntry = fromScratch
-    ? { size: st.size, mtimeMs: st.mtimeMs, offset: 0, totals: zero() }
-    : { size: st.size, mtimeMs: st.mtimeMs, offset: cached!.offset, totals: { ...cached!.totals } };
+    ? { size: st.size, mtimeMs: st.mtimeMs, offset: 0, totals: zero(), bySession: new Map() }
+    : { size: st.size, mtimeMs: st.mtimeMs, offset: cached!.offset, totals: { ...cached!.totals }, bySession: new Map([...cached!.bySession].map(([k, v]) => [k, { ...v }])) };
   try {
     const fd = openSync(full, 'r');
     try {
@@ -344,7 +357,7 @@ function readFileUsage(dir: string, file: string, sessionId: string | undefined)
         const lastNl = text.lastIndexOf('\n');
         if (lastNl !== -1) {
           const complete = text.slice(0, lastNl + 1);
-          parseUsageLines(complete, sessionId, entry.totals);
+          parseUsageLines(complete, entry);
           entry.offset += Buffer.byteLength(complete, 'utf8');
         }
       }
@@ -360,6 +373,109 @@ function readFileUsage(dir: string, file: string, sessionId: string | undefined)
   return entry;
 }
 
+/**
+ * SCALE-TRANSCRIPT-SCAN (Jim's STARTUP-SCALE-YEAR audit A14): a beat must not stat every
+ * transcript a project dir has ever had. Each project dir read here gets ONE non-polling
+ * watch (watchDirectorySafely: it closes itself when the dir is gone, the Node 22+ Windows
+ * deleted-folder spin). A change event names a file; only those files are stat'ed and
+ * tail-read on the next call. A create/delete (rename) re-lists the dir once, so the
+ * summing order (readdir's) and so every float sum stays what the stat-all scan made.
+ * No watcher, a closed one, or an overflow (an event without a name) means a full scan
+ * (readdir + stat every file, as before) for that call; the watch is re-armed after it.
+ */
+interface DirWatch {
+  watcher: FSWatcher | null;
+  closed: boolean;
+  /** Stat every file on the next call (first sight, an overflow). */
+  all: boolean;
+  /** Re-list the dir on the next call (a file was created, deleted or renamed). */
+  relist: boolean;
+  /** Files a change event named since the last call. */
+  dirty: Set<string>;
+  /** The dir's .jsonl names in readdir order, from the last listing. */
+  files: string[];
+  lastUsed: number;
+}
+const dirWatches = new Map<string, DirWatch>();
+/** A dir no call has read for this long (an archived agent, a closed project) loses its watch. */
+const DIR_WATCH_IDLE_MS = 10 * 60_000;
+/** Test seam: events the dir watches took, full scans, and watches armed. */
+export const transcriptWatchStats = { events: 0, fullScans: 0, watchers: 0 };
+let watchListener: ((dir: string, event: string, filename: string | null) => void) | null = null;
+/** Tests: be told when a dir watch takes an event (await it instead of a sleep). */
+export function __onTranscriptWatchEvent(fn: ((dir: string, event: string, filename: string | null) => void) | null): void { watchListener = fn; }
+
+function closeDirWatch(dir: string): void {
+  const w = dirWatches.get(dir);
+  if (!w) return;
+  dirWatches.delete(dir);
+  w.closed = true;
+  try { w.watcher?.close(); } catch { /* already closed */ }
+}
+
+/** Close every transcript dir watch (app quit, tests). */
+export function closeTranscriptWatches(): void {
+  for (const dir of [...dirWatches.keys()]) closeDirWatch(dir);
+}
+
+/** Whether `cwd`'s project dir has a live watch (tests). */
+export function __transcriptWatchOpen(cwd: string): boolean {
+  const w = dirWatches.get(projectDir(cwd));
+  return !!w && !w.closed;
+}
+/** Tests: `cwd`'s dir watch (to emit an overflow or an error on it). */
+export function __transcriptWatcher(cwd: string): FSWatcher | null {
+  return dirWatches.get(projectDir(cwd))?.watcher ?? null;
+}
+
+function armDirWatch(dir: string, now: number): DirWatch {
+  const w: DirWatch = { watcher: null, closed: false, all: true, relist: true, dirty: new Set(), files: [], lastUsed: now };
+  try {
+    const watcher = watchDirectorySafely(dir, (event, filename) => {
+      transcriptWatchStats.events += 1;
+      if (filename === null) w.all = true;
+      else if (event === 'rename') { w.relist = true; w.dirty.add(filename); }
+      else w.dirty.add(filename);
+      watchListener?.(dir, event, filename);
+    });
+    watcher.on('close', () => { w.closed = true; });
+    watcher.on('error', () => { w.closed = true; });   // watchDirectorySafely closes it; 'close' comes a tick later
+    w.watcher = watcher;
+    transcriptWatchStats.watchers += 1;
+  } catch {
+    w.closed = true;   // no watch: this call scans everything and the next one tries again
+  }
+  dirWatches.set(dir, w);
+  return w;
+}
+
+/** The dir's transcript files with fresh usage: a full scan when the watch can't vouch for
+ *  them, else only the files an event named (the rest are unchanged cache entries). */
+function dirUsageEntries(dir: string): FileUsageEntry[] {
+  const now = Date.now();
+  for (const [d, other] of dirWatches) if (d !== dir && now - other.lastUsed > DIR_WATCH_IDLE_MS) closeDirWatch(d);
+  let w = dirWatches.get(dir);
+  if (w && w.closed) { closeDirWatch(dir); w = undefined; }
+  // Armed BEFORE the scan below: a write after the scan's stat is an event for the next call.
+  if (!w) w = armDirWatch(dir, now);
+  w.lastUsed = now;
+  const full = w.all || w.closed;
+  const dirty = w.dirty;
+  w.dirty = new Set();
+  w.all = false;
+  if (full || w.relist) { w.files = readdirSync(dir).filter((f) => f.endsWith('.jsonl')); w.relist = false; }
+  if (full) transcriptWatchStats.fullScans += 1;
+  const out: FileUsageEntry[] = [];
+  for (const file of w.files) {
+    const cached = full || dirty.has(file) ? undefined : usageCache.get(path.join(dir, file));
+    const entry = cached ?? readFileUsage(dir, file);
+    if (entry) out.push(entry);
+  }
+  // A watch that could not start (or closed) vouches for nothing: the next call re-arms.
+  if (w.closed) closeDirWatch(dir);
+  return out;
+}
+
 /** Sum real token usage across Claude Code transcripts for `cwd`, pricing each
  *  assistant record by ITS OWN model (fixes cost bug #1 — no more Sonnet for
  *  everyone) via the fallback price table. Optionally filtered to one session
@@ -369,19 +485,20 @@ function readFileUsage(dir: string, file: string, sessionId: string | undefined)
  *  the live source is the OTel collector (`telemetry.ts`).
  *
  *  Called from the ~30s breaker/cost beat for every agent without live OTel, so
- *  it must stay cheap on multi-MB transcript dirs: per-file incremental caching
- *  above means a steady-state call is a readdir + one stat per file. */
+ *  it must stay cheap on year-old transcript dirs: with the dir watch above, a
+ *  steady-state call is one existsSync of the dir plus a stat (and tail read) of
+ *  each file that changed since the last call (SCALE-TRANSCRIPT-SCAN). */
 export function readAgentUsage(cwd: string, opts: ReadUsageOptions = { provider: undefined }): AgentUsage {
   const usage = zero();
   if (!mayReadClaudeTranscripts(opts.provider)) return usage;
   transcriptReadStats.usageDirScans += 1;
   try {
     const dir = projectDir(cwd);
-    if (!existsSync(dir)) return usage;
-    const files = readdirSync(dir).filter((f) => f.endsWith('.jsonl'));
+    if (!existsSync(dir)) { closeDirWatch(dir); return usage; }
     let lastModel: string | undefined;
-    for (const file of files) {
-      const entry = readFileUsage(dir, file, opts.sessionId);
+    for (const file_ of dirUsageEntries(dir)) {
+      // A filter sums only that session's records (none in this file: nothing to add).
+      const entry = opts.sessionId ? (file_.bySession.has(opts.sessionId) ? { totals: file_.bySession.get(opts.sessionId)! } : null) : file_;
       if (!entry) continue;
       usage.inputTokens += entry.totals.inputTokens;
       usage.outputTokens += entry.totals.outputTokens;
