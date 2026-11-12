@@ -1907,9 +1907,10 @@ const nativeMemory = new NativeMemoryWiring({
 // writer each need main's own native confirm as well as the Human's click (G7.2).
 const ledgerUi = createLedgerUi({
   store: () => claimsEndpoint()?.store ?? null,
-  // Settings keeps the reserved derived ledger visible even before its first segment. This is
-  // deliberately not part of claimLedgerAgents(), the index/export/anchor census.
-  agents: () => (claimsEndpoint() ? [...claimLedgerAgents(), DERIVED_AGENT_ID] : []),
+  // Settings keeps the reserved derived ledger visible even before its first segment. It is
+  // display-only: exports and every operational action retain claimLedgerAgents().
+  agents: claimLedgerAgents,
+  rosterAgents: () => (claimsEndpoint() ? [...claimLedgerAgents(), DERIVED_AGENT_ID] : []),
   agentMeta: (agentId) => {
     if (agentId === DERIVED_AGENT_ID) return { system: true };
     try { return { archived: hive.registry().agents[agentId]?.archived === true }; } catch { return undefined; }
