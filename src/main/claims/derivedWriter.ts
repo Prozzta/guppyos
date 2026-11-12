@@ -66,8 +66,13 @@ const refsId = (refs: ClaimRec['refs']): string => JSON.stringify((refs ?? []).m
 
 export async function syncDerived(deps: DerivedWriterDeps, facts: readonly DerivedFact[]): Promise<SyncCounts> {
   const counts: SyncCounts = { facts: facts.length, appended: 0, unchanged: 0, superseded: 0, failed: 0 };
+  // A18 (Jim 939357e9: the facts, this derive and the first append's view were one 2.5 s block): the read and derive
+  // start in a turn of their own, and the appends in the next. Only the derived writer appends to this ledger, and its
+  // passes run one at a time, so nothing lands between.
+  await nextTurn();
   const read = deps.store.readLedgerCached ? deps.store.readLedgerCached(DERIVED_AGENT_ID) : deps.store.readLedger(DERIVED_AGENT_ID);
   const state = deps.derive(read.records);
+  await nextTurn();
   const live = new Map<string, ClaimRec[]>();
   for (const r of read.records) {
     if (r.t !== 'claim' || r.source !== 'derived' || state.claims[r.id]?.status !== 'live') continue;

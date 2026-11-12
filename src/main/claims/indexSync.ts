@@ -107,7 +107,12 @@ export class ClaimsIndexSync {
       this.d.log?.({ kind: 'claims-index-skipped', agentId, why });
       return { sent: false, why };
     }
+    // A18 (Jim 939357e9: one agent's read, derive and chunks were one 2 s block): the derive and the chunks each start
+    // in a turn of their own. This agent's syncs are serial (syncNow), and the read is a verified prefix, so the records
+    // and the state do not change between.
+    await new Promise<void>((resolve) => setImmediate(resolve));
     const state = derive(prefix.records, this.d.registry(), this.d.ruleConfig());
+    await new Promise<void>((resolve) => setImmediate(resolve));
     const chunks = withParts(chunksFor(prefix.records, state));
     const head = state.ledgerHead || (prefix.records.length ? prefix.records[prefix.records.length - 1].mac : '');
     const reply = await this.d.send({ wing: agentId, path: claimsSourcePath(agentId), head, chunks });
