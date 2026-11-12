@@ -245,7 +245,7 @@ test('PIN (all of test/): no tree walk by ParentProcessId alone outside own-proc
 });
 
 test('PIN: no process.kill of a recorded or listed pid in the fixed files (process.kill(pid, 0) only probes)', () => {
-  for (const f of ['test-runner-glob.test.cjs', 'claude-model-list-180.test.cjs', 'models-refresh-173.test.cjs', 'quit-sweep.electron.test.cjs']) {
+  for (const f of ['test-runner-glob.test.cjs', 'perf/claude-model-list-180.perf.cjs', 'models-refresh-173.test.cjs', 'quit-sweep.electron.test.cjs']) {
     const kills = (SOURCES.find((s) => s.file === f).code.match(/process\.kill\([^)]*\)/g) || []).filter((k) => !/,\s*0\)$/.test(k));
     assert.deepStrictEqual(kills, [], `${f}: no process.kill of a recorded or listed pid`);
   }
