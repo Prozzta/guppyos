@@ -148,7 +148,7 @@ export function* mergeSteps<T>(a: readonly T[], b: readonly T[], cmp: (x: T, y: 
     if (out.length % TICK_EVERY === 0) yield* tick();
   }
   while (i < a.length) { out.push(a[i++]); if (out.length % TICK_EVERY === 0) yield* tick(); }
-  while (j < b.length) out.push(b[j++]);
+  while (j < b.length) { out.push(b[j++]); if (out.length % TICK_EVERY === 0) yield* tick(); }
   return out;
 }
 
