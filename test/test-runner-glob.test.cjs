@@ -780,7 +780,8 @@ test('PIN: against the REAL test directory discovery is root tests plus only fol
   // INT 1.1.105 group 2: + 1 (rel-escapes), + 1 (heavy-loop-light-cap), + 1 (heavy-preload-short-test).
   // INT 1.1.105 group 7 (BLOB-SETUP-GUIDE): + 1 (blob-settings-section).
   // ELECTRON-UPGRADE: +1 (cut-cmd-natives-198).
-  assert.equal(files.length, 572,`the focused suite must retain its pre-fold file count, got ${files.length}`);
+  // CAP-NO-5H-WINDOW: + 1 (capacity-no-5h-window).
+  assert.equal(files.length, 573,`the focused suite must retain its pre-fold file count, got ${files.length}`);
   assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
   assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');
   assert.ok(files.includes(path.join('start-fixes-163', 'start-fixes-163-boot-submit.test.cjs')), 'the start-fixes feature folder is included');
