@@ -1964,6 +1964,13 @@ ipcMain.handle('claims-ui:set-level', (evt, level: unknown) => (ledgerUiSender(e
 ipcMain.handle('claims-ui:export', (evt, agentId: unknown) => (ledgerUiSender(evt) ? ledgerUi.exportNow(String(agentId)) : NOT_HERE));
 ipcMain.handle('claims-ui:keep-one', (evt, agentId: unknown, keep: unknown, retire: unknown) => (ledgerUiSender(evt) ? ledgerUi.keepOne(String(agentId), keep, retire) : NOT_HERE));
 ipcMain.handle('claims-ui:keep-all', (evt, agentId: unknown, ids: unknown) => (ledgerUiSender(evt) ? ledgerUi.keepAll(String(agentId), ids) : NOT_HERE));
+ipcMain.handle('claims-ui:bootstrap-status', (evt) => (ledgerUiSender(evt) ? claimsBootstrapStatus() : NOT_HERE));
+ipcMain.handle('claims-ui:bootstrap', async (evt) => {
+  if (!ledgerUiSender(evt)) return NOT_HERE;
+  // The window is the Human's request; attribute its floor-wide lock to god so CLI and Settings
+  // cannot run two imports beside one another.
+  return runClaimsBootstrap(hive.registry().godId ?? 'god');
+});
 /** CLAIMS-90 HISTORY-PTR: `memory history <id>`, claims/readWiring.ts (the answer child calls the same code). */
 function claimHistory(agentId: string, id: string): { ok: true; text: string; owner: string } | { ok: false; error: string } {
   const root = hive.root(); const ep = claimsEndpoint();
@@ -2168,25 +2175,35 @@ function claimsBootstrapFor(root: string, store: ClaimStore): ClaimsBootstrap {
   claimsBootstrap = { root, job };
   return job;
 }
+async function runClaimsBootstrap(lockOwner: string): Promise<{ ok: boolean; line: string; state: ReturnType<ClaimsBootstrap['status']> }> {
+  const root = hive.root(); const ep = claimsEndpoint();
+  if (!root || !ep) return { ok: false, line: 'refused: no active hive', state: null };
+  const job = claimsBootstrapFor(root, ep.store);
+  const callId = `claims-bootstrap:${Date.now()}`;
+  const lease = heavyLock.acquire(lockOwner, { heavy: true, kind: 'bench', why: 'claims bootstrap', exclusive: true }, 'claims bootstrap', callId, false);
+  if (!lease.allow) return { ok: false, line: `refused: ${lease.reason}`, state: job.status() };
+  try {
+    const state = await job.run();
+    return { ok: true, line: 'claims bootstrap complete', state };
+  } catch (e) {
+    return { ok: false, line: `refused: ${String(e).slice(0, 160)}`, state: job.status() };
+  } finally {
+    heavyLock.callDone(lockOwner, callId);
+  }
+}
+function claimsBootstrapStatus(): { ok: boolean; line: string; state: ReturnType<ClaimsBootstrap['status']> } {
+  const root = hive.root(); const ep = claimsEndpoint();
+  if (!root || !ep) return { ok: false, line: 'refused: no active hive', state: null };
+  const job = claimsBootstrapFor(root, ep.store);
+  return { ok: true, line: job.isRunning() ? 'claims bootstrap is running' : 'claims bootstrap is idle', state: job.status() };
+}
 hookServer.setClaimsHandler(async (agentId, body) => {
   if (!hive.isGod(agentId)) return { status: 403, body: { ok: false, line: 'refused: claims bootstrap is god-only' } };
   const action = body && typeof body === 'object' && !Array.isArray(body) ? (body as Record<string, unknown>).action : null;
-  const root = hive.root(); const ep = claimsEndpoint();
-  if (!root || !ep) return { status: 503, body: { ok: false, line: 'refused: no active hive' } };
-  const job = claimsBootstrapFor(root, ep.store);
-  if (action === 'status') return { status: 200, body: { ok: true, line: job.isRunning() ? 'claims bootstrap is running' : 'claims bootstrap is idle', state: job.status() } };
+  if (action === 'status') return { status: 200, body: claimsBootstrapStatus() };
   if (action !== 'run') return { status: 400, body: { ok: false, line: 'refused: action must be run or status' } };
-  const callId = `claims-bootstrap:${Date.now()}`;
-  const lease = heavyLock.acquire(agentId, { heavy: true, kind: 'bench', why: 'claims bootstrap', exclusive: true }, 'claims bootstrap', callId, false);
-  if (!lease.allow) return { status: 409, body: { ok: false, line: `refused: ${lease.reason}` } };
-  try {
-    const state = await job.run();
-    return { status: 200, body: { ok: true, line: 'claims bootstrap complete', state } };
-  } catch (e) {
-    return { status: 409, body: { ok: false, line: `refused: ${String(e).slice(0, 160)}`, state: job.status() } };
-  } finally {
-    heavyLock.callDone(agentId, callId);
-  }
+  const r = await runClaimsBootstrap(agentId);
+  return { status: r.ok ? 200 : 409, body: r };
 });
 // GTC M3: the Human's message box. Its writes carry origin HUMAN (it IS the Human's input), so
 // only the app window's own IPC reaches it ('messageBox:deliver', ledgerUiSender), and only
