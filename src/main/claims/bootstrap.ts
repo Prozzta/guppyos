@@ -57,6 +57,7 @@ export class ClaimsBootstrap {
   private running = false;
   constructor(private readonly d: BootstrapDeps) {}
 
+  isRunning(): boolean { return this.running; }
   status(): BootstrapState | null { return this.d.load(); }
 
   /** One serial, restart-safe pass. Busy agents receive a receipt and are retried on a later run. */
