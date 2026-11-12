@@ -1,7 +1,22 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
-const { ClaimsBootstrap } = loadTs('src/main/claims/bootstrap.ts');
+const { ClaimsBootstrap, bootstrapMarkerFile, loadBootstrapMarker, saveBootstrapMarker } = loadTs('src/main/claims/bootstrap.ts');
+
+test('bootstrap marker is retained atomically and ignores a malformed prior receipt', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'claims-bootstrap-'));
+  try {
+    const state = { version: 1, startedAt: 1, updatedAt: 2, agents: { a: { state: 'done', at: 2 } } };
+    saveBootstrapMarker(root, state);
+    assert.deepEqual(loadBootstrapMarker(root), state);
+    assert.ok(fs.existsSync(bootstrapMarkerFile(root)), 'the completed marker remains for a no-op rerun');
+    fs.writeFileSync(bootstrapMarkerFile(root), '{torn');
+    assert.equal(loadBootstrapMarker(root), null);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
 
 test('bootstrap records busy receipts, retries them, and never repeats completed imports', async () => {
   let state = null; let busy = new Set(['b']); const imports = []; let seeded = 0;
