@@ -23,19 +23,30 @@ test('bootstrap marker is retained atomically and ignores a malformed prior rece
 });
 
 test('bootstrap records busy receipts, retries them, and never repeats completed imports', async () => {
-  let state = null; let busy = new Set(['b']); const imports = []; let seeded = 0;
+  let state = null; let busy = new Set(['b']); const imports = []; const promoted = []; let seeded = 0;
   const b = new ClaimsBootstrap({ now: () => 10 + imports.length, activeAgents: () => ['b', 'a'], isIdle: (a) => !busy.has(a),
-    seedDefault: () => seeded++, importOne: async (a) => { imports.push(a); return {}; }, load: () => state, save: (s) => { state = structuredClone(s); }, log: () => {} });
+    promote: (a) => promoted.push(a), seedDefault: () => seeded++, importOne: async (a) => { imports.push(a); return {}; }, load: () => state, save: (s) => { state = structuredClone(s); }, log: () => {} });
   await b.run();
-  assert.deepEqual(imports, ['a']); assert.equal(state.agents.b.state, 'skipped');
+  assert.deepEqual(imports, ['a']); assert.deepEqual(promoted, ['a']); assert.equal(state.agents.b.state, 'skipped'); assert.equal(seeded, 0, 'a skipped legacy agent must remain searchable');
   busy = new Set(); await b.run();
-  assert.deepEqual(imports, ['a', 'b']); assert.equal(state.agents.b.state, 'done'); assert.equal(seeded, 2);
+  assert.deepEqual(imports, ['a', 'b']); assert.deepEqual(promoted, ['a', 'b']); assert.equal(state.agents.b.state, 'done'); assert.equal(seeded, 1);
+});
+
+test('bootstrap imports its busy requesting god, but leaves other busy agents at their old level', async () => {
+  let state = null; const imports = []; const promoted = [];
+  const b = new ClaimsBootstrap({ now: () => 1, activeAgents: () => ['god', 'busy'], isIdle: (a, requester) => a === requester,
+    promote: (a) => promoted.push(a), seedDefault: () => { throw new Error('default must wait for busy agent'); },
+    importOne: async (a) => { imports.push(a); return {}; }, load: () => state, save: (s) => { state = structuredClone(s); }, log: () => {} });
+  await b.run('god');
+  assert.deepEqual(imports, ['god']);
+  assert.deepEqual(promoted, ['god']);
+  assert.equal(state.agents.busy.state, 'skipped');
 });
 
 test('a live append may share ClaimStore serial work during import without duplicate bootstrap work', async () => {
   let state = null; const calls = []; let chain = Promise.resolve();
   const serial = (f) => { chain = chain.then(f); return chain; };
-  const b = new ClaimsBootstrap({ now: () => 1, activeAgents: () => ['x'], isIdle: () => true, seedDefault: () => {},
+  const b = new ClaimsBootstrap({ now: () => 1, activeAgents: () => ['x'], isIdle: () => true, promote: () => {}, seedDefault: () => {},
     importOne: () => serial(async () => { calls.push('import'); }), load: () => state, save: (s) => { state = structuredClone(s); }, log: () => {} });
   const run = b.run(); await serial(async () => { calls.push('live-append'); }); await run;
   assert.deepEqual(calls, ['import', 'live-append']); assert.equal(state.agents.x.state, 'done');
@@ -50,7 +61,7 @@ test('a live ClaimStore append remains intact when it arrives during the bootstr
     const store = new ClaimStore({ hiveRoot: root, keys: new SandboxKeyProvider(), keyRecord: new FileLedgerKeyRecord(path.join(`${root}-ud`, KEY_RECORD_FILE)), log: () => {}, alert: () => {} });
     const append = makeW6Append(store);
     const bootstrap = new ClaimsBootstrap({
-      now: () => 1, activeAgents: () => [agent], isIdle: () => true, seedDefault: () => {},
+      now: () => 1, activeAgents: () => [agent], isIdle: () => true, promote: () => {}, seedDefault: () => {},
       importOne: async (id) => { const r = await shadowImport({ hiveRoot: root, append, read: (a) => store.readLedger(a), log: () => {} }, id, { settle: true }); return { refused: r.refused.map((x) => x.error) }; },
       load: () => state, save: (next) => { state = structuredClone(next); }, log: () => {},
     });
@@ -64,4 +75,9 @@ test('a live ClaimStore append remains intact when it arrives during the bootstr
     assert.equal(state.agents[agent].state, 'done');
     store.close();
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('claims CLI is retained in packaged resources', () => {
+  const yml = fs.readFileSync(path.join(__dirname, '..', 'electron-builder.yml'), 'utf8');
+  assert.match(yml, /- from: resources\/claims-cli\.cjs\s+to: claims-cli\.cjs/);
 });
