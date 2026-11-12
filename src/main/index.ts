@@ -1661,13 +1661,11 @@ function claimsIndexSync(): ClaimsIndexSync | null {
   }
   return claimsIndex;
 }
-/** Agents with a segment, plus every anchored one (Jim A-2: a deleted ledger is read, so it alerts). */
+/** Agents with a segment, plus every anchored one (Jim A-2: a deleted ledger is read, so it alerts).
+ *  LAG-MAIN-SYNC-FIXES item 3: one census shared by every consumer (ClaimStore.ledgerAgents). */
 function claimLedgerAgents(): string[] {
   const root = hive.root(); if (!root) return [];
-  const store = (claimsEndpoint() as ClaimsEndpointDeps).store;
-  let withSegments: string[] = [];
-  try { withSegments = readdirSync(join(root, 'agents')).filter((a) => store.segments(a).length > 0); } catch { /* no agents */ }
-  return [...new Set([...withSegments, ...store.anchoredAgents()])];
+  return (claimsEndpoint() as ClaimsEndpointDeps).store.ledgerAgents();
 }
 // CLAIMS-90 M5: the derived claim writer (source 'derived', the reserved derived ledger). Started
 // with the claim store; config derivedClaims (absent = on), derivedClaimsRepo (git, optional).
