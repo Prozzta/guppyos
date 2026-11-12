@@ -147,6 +147,30 @@ async function setDropsCache(mods) {
   assert.equal(JSON.parse(fs.readFileSync(x.file, 'utf8')).hives[Object.keys(JSON.parse(fs.readFileSync(x.file, 'utf8')).hives)[0]].andy.head, 'e'.repeat(64));
 }
 
+/** LAG-2h (Jim SHOULD): the whole stat key is compared, not the mtime or size alone. A copy tool or
+ *  a Human's restore can replace the file by rename with its mtime kept and the same size; the new
+ *  file id and ctime still name it. */
+async function fullKeyCompared(mods) {
+  const x = setup(mods);
+  await ledgers(x, ['andy']);
+  const a = x.anchorsOf();
+  const text = fs.readFileSync(x.file, 'utf8');
+  // Whole seconds: utimes cannot set the sub-millisecond part a fresh write has.
+  const T = Math.floor(Date.now() / 1000) - 60;
+  fs.utimesSync(x.file, T, T);
+  const head = a.get(x.root, 'andy').head;
+  const old = fs.statSync(x.file);
+  const replaced = head.replace(/^./, head[0] === 'a' ? 'b' : 'a');
+  const tmp = `${x.file}.copy`;
+  fs.writeFileSync(tmp, text.replace(head, replaced));
+  fs.renameSync(tmp, x.file);
+  fs.utimesSync(x.file, T, T);
+  const now = fs.statSync(x.file);
+  assert.equal(now.mtimeMs, old.mtimeMs, 'the copy kept the old mtime');
+  assert.equal(now.size, old.size, 'and the old size');
+  assert.equal(a.get(x.root, 'andy').head, replaced, 'LAG-2h: a renamed-in copy with the old mtime and size is read');
+}
+
 /** LAG-2e: a batch checks the file once; after the batch every call revalidates again. */
 async function batchOnce(mods) {
   const x = setup(mods);
@@ -242,6 +266,34 @@ async function revalidateBound(mods) {
   assert.ok(s.ledgerAgents().includes('toby'), 'LAG-3d: a folder made elsewhere is listed once ROSTER_REVALIDATE_MS passed');
 }
 
+/** LAG-3f (Jim NIT): a restore that brings back a claims folder is in the next roster (the
+ *  segment half alone: this store has no anchors, so the anchored half cannot cover it). */
+async function restoreDirties(mods) {
+  const x = setup(mods);
+  let t = Date.parse('2026-10-30T09:00:00Z');
+  const s = x.mk({ headAnchor: undefined, now: () => new Date(t) });
+  await ok(s.appendRecord('andy', note('day one'), 'endpoint'));
+  t = Date.parse('2026-10-31T09:00:00Z');
+  await ok(s.appendRecord('andy', note('day two'), 'endpoint'));
+  s.close();
+  assert.deepEqual(s.ledgerAgents(), ['andy']);
+  fs.rmSync(x.claimsDir('andy'), { recursive: true });
+  x.tick(mods.store.ROSTER_REVALIDATE_MS);
+  assert.deepEqual(s.ledgerAgents(), [], 'the deleted folder left the roster');
+  await s.restoreBackup('andy', '2026-10-30');
+  assert.ok(fs.readdirSync(x.claimsDir('andy')).length > 0, 'the restore brought the folder back');
+  assert.deepEqual(s.ledgerAgents(), ['andy'], 'LAG-3f: a restored ledger is in the next roster');
+}
+
+/** LAG-3g (Jim NIT): the purge and the purge swap's finish dirty the roster. Their claims folder
+ *  is swapped, never added for an agent the roster lacks (the agent is anchored), so these are
+ *  pinned on the source. */
+async function purgeDirtiesPinned(mods) {
+  const src = mods.storeText ?? readSource(ST).split('\r\n').join('\n');
+  assert.ok(src.includes('return this.serial(agentId, () => { try { return this.purgeNow(agentId, ids, confirmedByHuman); } finally { this.rosterDirty(); } });'), 'LAG-3g: a purge dirties the roster');
+  assert.ok(src.includes('nodeFs.renameSync(fresh, dir); this.rosterDirty();'), 'LAG-3g: finishing a purge swap dirties the roster');
+}
+
 /** LAG-3e: the anchored half is fresh on every call (Jim A-2: a deleted ledger still alerts). */
 async function anchoredFresh(mods) {
   const x = setup(mods);
@@ -256,8 +308,9 @@ async function anchoredFresh(mods) {
 
 const CASES = [
   ['LAG-2a', parsedOnce], ['LAG-2b', externalWriteSeen], ['LAG-2c', racyRewriteSeen], ['LAG-2d', setDropsCache],
-  ['LAG-2e', batchOnce], ['LAG-2f', staleNeverVerifiesForged], ['LAG-2g', censusBatched],
+  ['LAG-2e', batchOnce], ['LAG-2f', staleNeverVerifiesForged], ['LAG-2g', censusBatched], ['LAG-2h', fullKeyCompared],
   ['LAG-3a', rosterShared], ['LAG-3b', ownAppendSeen], ['LAG-3c', agentsDirChangeSeen], ['LAG-3d', revalidateBound], ['LAG-3e', anchoredFresh],
+  ['LAG-3f', restoreDirties], ['LAG-3g', purgeDirtiesPinned],
 ];
 for (const [id, fn] of CASES) test(`${id}: ${fn.name}`, () => fn(real));
 
@@ -283,6 +336,11 @@ const MUTANTS = [
   { id: 'M9', what: 'an own append does not dirty the roster', file: ST, from: '        this.rosterDirty();\n        h = {', to: '        h = {', dies: ['LAG-3b'] },
   { id: 'M10', what: 'the agents/ stat key is ignored', file: ST, from: 'r.key !== null && r.key === key && mono()', to: 'mono()', dies: ['LAG-3c'] },
   { id: 'M11', what: 'the roster never expires', file: ST, from: "&& mono() - r.at < ROSTER_REVALIDATE_MS) return [...r.agents];", to: ") return [...r.agents];", dies: ['LAG-3d'] },
+  { id: 'M13', what: 'the cache compares the mtime only (Jim)', file: KP, from: 'if (c && c.key !== null && c.key === statKey(st))', to: "if (c && c.key !== null && c.key.split(':')[0] === String(st.mtimeMs))", dies: ['LAG-2h'] },
+  { id: 'M14', what: 'the cache compares the size only', file: KP, from: 'if (c && c.key !== null && c.key === statKey(st))', to: "if (c && c.key !== null && c.key.split(':')[2] === String(st.size))", dies: ['LAG-2h'] },
+  { id: 'M15', what: 'a restore does not dirty the roster (Jim)', file: ST, from: 'return this.serial(agentId, () => { try { return this.restoreBackupNow(agentId, day); } finally { this.rosterDirty(); } });', to: 'return this.serial(agentId, () => this.restoreBackupNow(agentId, day));', dies: ['LAG-3f'] },
+  { id: 'M16', what: 'a purge does not dirty the roster', file: ST, from: 'return this.serial(agentId, () => { try { return this.purgeNow(agentId, ids, confirmedByHuman); } finally { this.rosterDirty(); } });', to: 'return this.serial(agentId, () => this.purgeNow(agentId, ids, confirmedByHuman));', dies: ['LAG-3g'] },
+  { id: 'M17', what: 'finishing a purge swap does not dirty the roster', file: ST, from: 'nodeFs.renameSync(fresh, dir); this.rosterDirty();', to: 'nodeFs.renameSync(fresh, dir);', dies: ['LAG-3g'] },
   { id: 'M12', what: 'the anchored half is dropped from the roster', file: ST, from: 'return [...new Set([...withSegments, ...anchored])];', to: 'return [...new Set([...withSegments])];', dies: ['LAG-3e'] },
 ];
 
@@ -295,7 +353,7 @@ function mutated(m) {
     const keys = loadTs.fromText(KP, text);
     return { keys, store: real.store };
   }
-  return { keys: real.keys, store: loadTs.fromText(ST, text) };
+  return { keys: real.keys, store: loadTs.fromText(ST, text), storeText: text };
 }
 
 for (const m of MUTANTS) {
