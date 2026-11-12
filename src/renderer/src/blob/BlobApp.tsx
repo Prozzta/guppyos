@@ -3,7 +3,7 @@ import { Blobatar } from 'blobatar/react';
 import { happy, idle, sad, shy, sick, sleepy, surprised, thinking, unsure, type Expression } from 'blobatar/expression';
 import { gaze, type Gaze } from 'blobatar/gaze';
 // shy: the brief reaction when the blob hides itself from shares; thinking when it shows again.
-import { BLOB_COMING_SOON, BLOB_DISABLED, type BlobGazePoint, type BlobMood, type BlobOverlayApi, type BlobOverlayStatus, type BlobSlot } from '../../../shared/blob';
+import { BLOB_COMING_SOON, BLOB_DISABLED, BLOB_GAZE_DEAD, type BlobGazePoint, type BlobMood, type BlobOverlayApi, type BlobOverlayStatus, type BlobSlot } from '../../../shared/blob';
 import { RING_SLOTS, ringSlotPosition } from './ring';
 
 declare global { interface Window { blob?: BlobOverlayApi } }
@@ -75,6 +75,8 @@ export function faceExpression(toastExpr: Expression | null, dictExpr: Expressio
 }
 
 const REDUCED_MOTION = '(prefers-reduced-motion: reduce)';
+/** BLOB-GAZE diagnostic: how long after the first fed point the eyes must have been driven. */
+const GAZE_DEAD_CHECK_MS = 2000;
 
 export function BlobApp(): ReactElement {
   const api = window.blob;
@@ -120,8 +122,19 @@ export function BlobApp(): ReactElement {
       if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) return;
       lastPoint.current = { x: p.x, y: p.y };
       if (!hovered.current) gazeRef.current?.g.lookAt(lastPoint.current);
+      if (deadCheck === undefined) deadCheck = window.setTimeout(checkEyesDriven, GAZE_DEAD_CHECK_MS);
     });
-    return () => { mq.removeEventListener('change', sync); off(); void api.gaze(false); };
+    // Diagnostic: once a point has been fed, blobatar must have written the eye offsets. If its
+    // measure failed (e.g. an engine that rejects its isPointInFill(DOMPoint)), say so once.
+    let deadCheck: number | undefined;
+    const checkEyesDriven = (): void => {
+      const eyes = gazeRef.current?.svg.querySelector('.mo-eyes');
+      if (!eyes || mq.matches) return;
+      if (getComputedStyle(eyes).getPropertyValue('--mo-gz-dx1').trim() === '') {
+        console.warn(`${BLOB_GAZE_DEAD} blobatar wrote no eye offsets after lookAt (its measure failed)`);
+      }
+    };
+    return () => { window.clearTimeout(deadCheck); mq.removeEventListener('change', sync); off(); void api.gaze(false); };
   }, [api]);
 
   // The face moves inside the window when the ring opens or closes: re-measure it, and a slot that

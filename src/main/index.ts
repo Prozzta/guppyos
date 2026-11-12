@@ -234,6 +234,7 @@ import {
 import { buildMissingCliScript, chooseInstallRung } from './cliInstall';
 import { detectNodeVersion, nodeIsUsable, resolveNodeInstaller } from './nodeInstall';
 import { toolCatalog, type ToolStatus } from '../shared/toolCatalog';
+import { BLOB_GAZE_DEAD } from '../shared/blob';
 import { buildPrereqStatus, hostBuildProbeDeps } from './buildPrereqs';
 import { listLocalSkills, loadCatalog, installSkill, uninstallSkill, type LocalSkill } from './skills';
 import { loadHero } from './hero';
@@ -2515,6 +2516,12 @@ function createBlobOverlayWindow(bounds: BlobRect, onGone: (reason: string) => v
   // Not covered by watchWindowHealth (app windows only): a dead overlay renderer is destroyed and
   // re-created once by the controller, never left as an inert always-on-top box.
   w.webContents.on('render-process-gone', (_e, details) => { try { onGone(details.reason); } catch { /* best-effort */ } });
+  // BLOB-GAZE diagnostic: the overlay warns once when the driver runs but blobatar never moves the eyes
+  // (its measure failed); that one line lands in the app log. Nothing else from its console is kept.
+  (w.webContents as unknown as { on(ev: 'console-message', fn: (e: { message?: unknown }) => void): void }).on('console-message', (e) => {
+    const m = typeof e?.message === 'string' ? e.message : '';
+    if (m.startsWith(BLOB_GAZE_DEAD)) { try { hive.appendLog({ kind: 'blob-gaze-dead', detail: m.slice(BLOB_GAZE_DEAD.length, BLOB_GAZE_DEAD.length + 200).trim() }); } catch { /* best-effort */ } }
+  });
   w.once('ready-to-show', () => {
     if (DEV_HIDDEN || w.isDestroyed()) return;   // a hidden (harness) run never surfaces it (the controller never builds it there either)
     w.showInactive();

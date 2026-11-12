@@ -20,6 +20,9 @@ export const BLOB_DISABLED: readonly BlobSlot[] = ['screen'];
 /** Show/hide hotkey. Ctrl+Alt+Space stays free for phase-2 dictation. */
 export const BLOB_DEFAULT_HOTKEY = 'Control+Alt+G';
 
+/** BLOB-GAZE diagnostic: the overlay's one console line when the gaze driver runs but the eyes never move. */
+export const BLOB_GAZE_DEAD = '[blob-gaze] eyes not driven:';
+
 /** BLOB-SETUP-GUIDE: the public set-up guide, opened from Settings → Blob in the external browser. */
 export const BLOB_SETUP_GUIDE_URL = 'https://guppyos.com/blob/setup/';
 
