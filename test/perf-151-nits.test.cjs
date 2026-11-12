@@ -49,6 +49,13 @@ test('RENDERED: N ticks on a NON-selected agent render the strip, capacity detai
   assert.equal(a.AgentCard, r.N, `only the ticked agent's card may render (got ${a.AgentCard} for ${r.N} ticks; raw: ${JSON.stringify(r.rawA)})`);
 });
 
+test('RENDERED: a strip poll whose answer did not change costs the strip 0 renders (LOAD-FLAKES-105)', async () => {
+  const r = await result();
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.idlePoll.AgentStrip, 0, `an unchanged 5 s poll re-rendered the strip ${r.idlePoll.AgentStrip} times in 5.6 s (${JSON.stringify(r.idlePoll)})`);
+  assert.equal(r.idlePoll.StripAgent, 0, `nor any entry (${JSON.stringify(r.idlePoll)})`);
+});
+
 test('RENDERED: an OPEN task detail costs 0 per tick and renders on a rename', async () => {
   const r = await result();
   assert.equal(r.ok, true, r.error);
