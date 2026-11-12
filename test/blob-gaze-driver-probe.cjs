@@ -4,13 +4,17 @@
 // (the overlay's options) with the real gaze driver and stylesheets in an offscreen window, points
 // the eyes far left and far right, and prints what the driver wrote. Nothing is faked; no network.
 const { app, BrowserWindow } = require('electron');
+const { isolateAppPaths } = require('./electron-harness/isolate-paths.cjs');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'blob-gaze-driver-'));
-app.setPath('userData', path.join(tmp, 'userData'));
+// The test owns the sandbox: it makes it, passes it here and removes it after this process exits
+// (removing it from here while Electron still holds files under it throws EBUSY on Windows).
+const argOf = (n) => { const i = process.argv.indexOf(`--${n}`); return i >= 0 ? process.argv[i + 1] : null; };
+const tmp = argOf('sandbox');
+// HARNESS-CRASHPAD: every app path (crashDumps, appData, sessionData, logs, userData) in the sandbox.
+isolateAppPaths(app, tmp);
 app.disableHardwareAcceleration();
 const dist = path.join(__dirname, '..', 'node_modules', 'blobatar', 'dist');
 const url = (f) => pathToFileURL(path.join(dist, f)).href;
@@ -59,7 +63,6 @@ app.whenReady().then(async () => {
     console.error(e && e.stack || String(e));
     code = 1;
   } finally {
-    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best-effort */ }
     app.exit(code);
   }
 });
