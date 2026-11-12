@@ -1,4 +1,7 @@
 'use strict';
+// MUTANT-JOURNAL-GATE (god 5cc045/ed8032): this suite loads electron-harness/electron-bin.cjs, a file a census
+// mutates in place (one load-ts never sees); refuse a tree a killed census left mutated, before anything is read.
+require('./tools/mutant-runner-helper.cjs').gate(__filename);
 /*
  * ELECTRON-FUSES (1.1.105): the packaged binary's fuses (build/electronFuses.cjs, flipped in afterPack).
  *  - the state per build: a normal build and the layer-(b) seams build differ only in
@@ -84,7 +87,8 @@ test('executablePath per platform', () => {
 });
 
 // A real Electron binary, flipped and read back. On Windows the fuse wire is in electron.exe.
-const ELECTRON = require('electron');
+// HEAVY-CPU-OPTIONS-191: the shared harness executable (the same binary bytes, linked), never require('electron').
+const ELECTRON = require('./electron-harness/electron-bin.cjs').harnessElectron();
 for (const [label, env, want] of [['normal build', {}, NORMAL], ['layer-(b) seams build', { MUNDER_LAYERB_SEAMS: '1' }, SEAMS]]) {
   test(`a real Electron binary flipped as a ${label} reads back exactly that state`, { skip: process.platform !== 'win32' && 'the copy below is the Windows layout' }, async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'guppy-fuses-'));
