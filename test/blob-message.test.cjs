@@ -45,6 +45,8 @@ test('transcribe: no key, no audio, too large and no speech never reach Groq or 
   }
   assert.deepEqual(await M.transcribeBlobMessage(stt, { audio: new Uint8Array(SM.BLOB_MESSAGE_MAX_AUDIO_BYTES + 1) }), { ok: false, error: SM.BLOB_MESSAGE_COPY.tooLarge });
   assert.equal(stt.calls.length, 0, 'nothing invalid reaches the provider');
+  assert.deepEqual(await M.transcribeBlobMessage(stt, { audio: new Uint8Array(SM.BLOB_MESSAGE_MAX_AUDIO_BYTES) }), { ok: true, text: 'hello\nworld' }, 'exactly the cap is accepted');
+  assert.equal(stt.calls.length, 1);
   assert.deepEqual(await M.transcribeBlobMessage(fakeStt({ reply: { ok: true, text: ' \n ' } }), { audio: clip() }), { ok: false, error: SM.BLOB_MESSAGE_COPY.noSpeech });
   assert.deepEqual(await M.transcribeBlobMessage(fakeStt({ reply: { ok: false, error: 'Groq 500' } }), { audio: clip() }), { ok: false, error: 'Groq 500' });
   assert.deepEqual(await M.transcribeBlobMessage(fakeStt({ reply: { ok: false } }), { audio: clip() }), { ok: false, error: SM.BLOB_MESSAGE_COPY.failed });
@@ -65,6 +67,8 @@ test('shared: five-minute cap, Groq size cap, clock and transcript normalising',
   assert.equal(SM.formatMessageClock(300000), '5:00');
   assert.equal(SM.formatMessageClock(NaN), '0:00');
   assert.equal(SM.normalizeMessageTranscript('a\tb\u0000c  d \r\n\r\n\r\n e\u2028f'), 'a b c d\n\ne\nf');
+  assert.equal(SM.normalizeMessageTranscript('a\u2029b\u00a0\u00a0 \u00a0c\u00a0d'), 'a\nb c\u00a0d', 'U+2029 breaks; NBSP runs collapse; a single NBSP stays');
+  assert.equal(SM.normalizeMessageTranscript('\ufeffa\u200bb\u202ec\u2066d\u2069\u200f'), 'abcd', 'zero-width and bidi controls are removed');
   assert.equal(SM.normalizeMessageTranscript(7), '');
   const long = SM.normalizeMessageTranscript('x'.repeat(SM.BLOB_MESSAGE_MAX_CHARS - 1) + '\ud83d\ude00');
   assert.equal(long.length, SM.BLOB_MESSAGE_MAX_CHARS - 1, 'never ends on half a surrogate pair');
