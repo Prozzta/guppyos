@@ -8,7 +8,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
 const { OrchestratorMood, deriveMood, newlyDone, countOpenAsks, MOOD_HOLD_MS, MOOD_HAPPY_MS, MOOD_SLEEPY_MS } = loadTs('src/main/blobMood.ts');
-const { BLOB_FACES, MOOD_FACE, trayFace, toastFace, currentFace, BLOB_IDENTITY } = loadTs('src/shared/blobFace.ts');
+const { BLOB_FACES, MOOD_FACE, trayFace, trayTip, toastFace, currentFace, BLOB_IDENTITY } = loadTs('src/shared/blobFace.ts');
 const { BlobFaceRenderer, BLOB_RENDER_SIZES, BLOB_RENDER_STEP_MS, blobatarSvg, rasterScript } = loadTs('src/main/blobFaceRenderer.ts');
 const { TrayModeController } = loadTs('src/main/trayMode.ts');
 const { BLOB_MOODS } = loadTs('src/shared/blob.ts');
@@ -117,13 +117,12 @@ test('newlyDone seeds on the first beat and counts only fresh dones; countOpenAs
 });
 
 test('faces: tray, toast and saved face per state; MOOD_FACE matches BlobApp MOOD_EXPR', () => {
-  assert.equal(trayFace('idle', 'listening', true), 'thinking');
-  assert.equal(trayFace('sick', 'transcribing', false), 'thinking');
-  assert.equal(trayFace('happy', 'error', true), 'sad');
-  assert.equal(trayFace('working', 'ready', true), 'thinking', 'a non-idle mood shows even while invisible (the default)');
-  assert.equal(trayFace('idle', 'ready', true), 'shy');
-  assert.equal(trayFace('idle', 'off', false), 'idle');
-  assert.equal(trayFace('waiting', undefined, false), 'unsure');
+  assert.equal(trayFace('idle', 'listening'), 'thinking');
+  assert.equal(trayFace('sick', 'transcribing'), 'thinking');
+  assert.equal(trayFace('happy', 'error'), 'sad');
+  assert.equal(trayFace('working', 'ready'), 'thinking');
+  assert.equal(trayFace('idle', 'off'), 'idle');
+  assert.equal(trayFace('waiting', undefined), 'unsure');
   assert.equal(toastFace('done', 'sad'), 'happy');
   assert.equal(toastFace('error', 'happy'), 'sad');
   assert.equal(toastFace('info', 'sleepy'), 'sleepy');
@@ -264,4 +263,41 @@ test('index.ts wiring: one mood feeds overlay + tray; toasts carry faces; save I
   assert.match(beats, /blobFacesTimer = setTimeout\(\(\) => \{ void blobFaces\.render\(\)[\s\S]*\}, 10_000\);/);
   assert.match(read('src/main/hooks.ts'), /this\.notify\(agentId \?\? 'Agent', 'finished — idle', 'done'\);/, 'an agent done toast is happy');
   assert.match(read('src/preload/index.ts'), /blobSaveImage: \(\): Promise<BlobSaveImageResult> => ipcRenderer\.invoke\('blob:save-image'\)/);
+});
+
+test('tray at rest: idle whatever the invisible state (as the overlay); invisible is told by the tooltip', () => {
+  // The rest face takes no invisible argument: shy's heat tints the yellow head peach, and invisible
+  // is the default, so a shy rest face blushed the tray all the time while the overlay did not.
+  assert.equal(trayFace.length, 2, 'trayFace(mood, dictation): the invisible arg is gone');
+  for (const d of [undefined, 'off', 'ready']) assert.equal(trayFace('idle', d, true), 'idle', `at rest (${d}) the tray is idle, never shy`);
+  for (const m of Object.keys(MOOD_FACE)) assert.notEqual(trayFace(m, 'ready', true), 'shy');
+  assert.equal(trayTip(true), 'Guppy - Hidden from shares');
+  assert.equal(trayTip(false), 'Guppy');
+});
+
+test('tray: setTip sets the live hover text, a later tray starts with it, a failing set is kept quiet', async () => {
+  let enabled = true; const trays = [];
+  class TipTray { constructor() { this.tips = []; this.destroyed = false; } setContextMenu() {} on() {} destroy() { this.destroyed = true; } isDestroyed() { return this.destroyed; }
+    setToolTip(t) { if (t === 'throw') throw new Error('bad tip'); this.tips.push(t); } }
+  const ctl = new TrayModeController({ platform: () => 'win32', enabled: () => enabled, icon: async () => 'exe',
+    createTray: () => { const t = new TipTray(); trays.push(t); return t; }, buildMenu: (x) => x, toggleBlob() {}, quit() {} });
+  await ctl.sync();
+  assert.deepEqual(trays[0].tips, [], 'no tip until one is set');
+  ctl.setTip('Guppy - Hidden from shares'); ctl.setTip('Guppy - Hidden from shares');
+  assert.deepEqual(trays[0].tips, ['Guppy - Hidden from shares'], 'set once, not re-set');
+  ctl.setTip('throw');
+  ctl.setTip('Guppy');
+  assert.deepEqual(trays[0].tips, ['Guppy - Hidden from shares', 'Guppy']);
+  enabled = false; await ctl.sync(); enabled = true; await ctl.sync();
+  assert.deepEqual(trays[1].tips, ['Guppy'], 'a tray created later starts with the current tip');
+});
+
+test('index.ts wiring: the tray tip follows invisible (ring toggle and Settings apply), even before faces render', () => {
+  const src = read('src/main/index.ts');
+  assert.match(src, /function refreshTrayFace\(\): void \{\n  if \(process\.platform !== 'win32'\) return;\n  const st = blobOverlay\.status\(\);\n  trayMode\.setTip\(trayTip\(st\.invisible\)\);\n  if \(!blobFaces\.ready\(\)\) return;/);
+  assert.match(src, /trayFace\(orchestratorMood\.mood\(\), st\.dictationStatus\?\.state\)\)/);
+  assert.match(src, /onInvisible: \(\) => refreshTrayFace\(\),/);
+  assert.match(src, /onApplied: \(s\) => \{ dictation\.apply\(s\.enabled && s\.dictation\); refreshTrayFace\(\); \}/);
+  const ov = read('src/main/blobOverlay.ts');
+  assert.match(ov, /this\.d\.log\?\.\(\{ kind: 'blob-invisible', on: this\.settings\.invisible \}\);\n      try \{ this\.d\.onInvisible\?\.\(this\.settings\.invisible\); \}/);
 });

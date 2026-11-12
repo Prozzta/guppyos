@@ -72,7 +72,7 @@ import { initAutoUpdater, abortPendingRestart } from './updater';
 import { RealtimeFloorWatcher } from './realtimeFloorWatcher';
 import { BlobFaceRenderer, blobatarSvg } from './blobFaceRenderer';
 import { OrchestratorMood, countOpenAsks, newlyDone } from './blobMood';
-import { BLOB_SAVE_SIZE, BLOB_TOAST_SIZE, BLOB_TRAY_SIZES, currentFace, toastFace, trayFace, type BlobFace, type BlobSaveImageResult, type BlobToastKind } from '../shared/blobFace';
+import { BLOB_SAVE_SIZE, BLOB_TOAST_SIZE, BLOB_TRAY_SIZES, currentFace, toastFace, trayFace, trayTip, type BlobFace, type BlobSaveImageResult, type BlobToastKind } from '../shared/blobFace';
 import { BlobOverlayController, isAppWindowSender, registerBlobIpc, type BlobWindowLike, type Rect as BlobRect } from './blobOverlay';
 import { DictationController } from './dictation';
 import { GroqSttProvider } from './stt';
@@ -2546,7 +2546,8 @@ const blobOverlay: BlobOverlayController = new BlobOverlayController({
   cursor: () => screen.getCursorScreenPoint(),
   hidden: DEV_HIDDEN,
   log: (row) => { try { hive.appendLog(row); } catch { /* best-effort */ } },
-  onApplied: (s) => { dictation.apply(s.enabled && s.dictation); },   // only from apply(), after module init
+  onApplied: (s) => { dictation.apply(s.enabled && s.dictation); refreshTrayFace(); },   // only from apply(), after module init
+  onInvisible: () => refreshTrayFace(),
   // BLOB-GAZE: the helper reports the focused field in physical pixels; the overlay works in DIPs.
   focusPoint: () => {
     const f = dictation.focusPoint();
@@ -2668,9 +2669,11 @@ function blobFaceImage(face: BlobFace): Electron.NativeImage | null {
   return img;
 }
 function refreshTrayFace(): void {
-  if (process.platform !== 'win32' || !blobFaces.ready()) return;
+  if (process.platform !== 'win32') return;
   const st = blobOverlay.status();
-  const img = blobFaceImage(trayFace(orchestratorMood.mood(), st.dictationStatus?.state, st.invisible));
+  trayMode.setTip(trayTip(st.invisible));
+  if (!blobFaces.ready()) return;
+  const img = blobFaceImage(trayFace(orchestratorMood.mood(), st.dictationStatus?.state));
   if (img) trayMode.setFace(img);
 }
 /** A toast's Blob face (done = happy, error = sad, else the mood), or nothing before the render. */

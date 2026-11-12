@@ -38,14 +38,19 @@ export const DICTATION_FACE: Partial<Record<DictationState, BlobFace>> = {
   unavailable: 'unsure',
 };
 
-/** The tray icon's face. Dictation first (listening/transcribing = thinking, error = sad), then any
- *  mood that is not idle, then shy while the Blob is invisible (the default), else idle. Invisible
- *  sits under the mood so the tray still reflects the orchestrator with the default settings. */
-export function trayFace(mood: BlobMood, dictation: DictationState | undefined, invisible: boolean): BlobFace {
+/** The tray icon's face. Dictation first (listening/transcribing = thinking, error = sad), then the
+ *  orchestrator's mood. At rest it is idle whatever the invisible state, as on the overlay: shy's
+ *  heat tints the yellow head peach and invisible is the default, so a shy rest face would blush
+ *  all the time. Invisible is said by the tooltip instead (trayTip). */
+export function trayFace(mood: BlobMood, dictation: DictationState | undefined): BlobFace {
   if (dictation === 'error') return 'sad';
   if (dictation === 'listening' || dictation === 'transcribing') return 'thinking';
-  if (mood !== 'idle') return MOOD_FACE[mood];
-  return invisible ? 'shy' : 'idle';
+  return MOOD_FACE[mood];
+}
+
+/** The tray icon's tooltip: says when the Blob is hidden from shares (the invisible setting). */
+export function trayTip(invisible: boolean): string {
+  return invisible ? 'Guppy - Hidden from shares' : 'Guppy';
 }
 
 export type BlobToastKind = 'done' | 'error' | 'info';
