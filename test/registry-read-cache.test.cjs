@@ -6,7 +6,7 @@ require('./tools/own-job.cjs');
  * (~430 calls/min on Guppy main under a heavy run on 1.1.99). It now serves one deep-frozen parsed
  * roster from memory. Our own writes drop it (the next read sees them); a write by another process
  * is picked up by fs.watch or, as the authority, by a stat revalidate at most
- * AUTHORITY_REVALIDATE_MS (1 s) after the last check. Mutations still read the file fresh
+ * AUTHORITY_REVALIDATE_MS after the last check. Mutations still read the file fresh
  * (registryForMutation), and the missing, corrupt and unreadable paths are not cached.
  */
 const test = require('node:test');
@@ -75,8 +75,8 @@ test('a mutation reads the file fresh, never the frozen cache, and its write is 
   assert.deepEqual(after.result, JSON.parse(fs.readFileSync(file, 'utf8')), 'equal to a cold read');
 });
 
-test('an external edit is invisible inside the window and picked up by the stat revalidate at AUTHORITY_REVALIDATE_MS', (t) => {
-  assert.ok(WINDOW <= 1000, 'revalidate within 1 s');
+test('an external edit is invisible inside the window and picked up by the slow stat fallback at AUTHORITY_REVALIDATE_MS', (t) => {
+  assert.ok(WINDOW >= 30_000, 'watch is normal invalidation; stat is only an occasional backstop');
   const { hive, file, handEdit } = floor(t);
   assert.equal(hive.registry().godId, null);
   handEdit({ godId: 'g1', agents: { g1: agent('g1') } });

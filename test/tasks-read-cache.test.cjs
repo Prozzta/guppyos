@@ -7,7 +7,7 @@ require('./tools/own-job.cjs');
  * ~13 MB/min). It now serves one deep-frozen parsed ledger from memory, on the same cache as
  * registry(). Our own writes drop it (the next read sees them); a write by another process is
  * picked up by fs.watch or, as the authority, by a stat revalidate at most
- * AUTHORITY_REVALIDATE_MS (1 s) after the last check. Mutations still read the file fresh
+ * AUTHORITY_REVALIDATE_MS after the last check. Mutations still read the file fresh
  * (tasksForMutation, writeTasks), and the missing, corrupt and unreadable paths are not cached.
  */
 const test = require('node:test');
@@ -87,8 +87,8 @@ test('a mutation reads the file fresh, never the frozen cache, and its write is 
   assert.equal(w.tasks[0].status, 'doing');
 });
 
-test('an external edit is invisible inside the window and picked up by the stat revalidate at AUTHORITY_REVALIDATE_MS', (t) => {
-  assert.ok(WINDOW <= 1000, 'revalidate within 1 s');
+test('an external edit is invisible inside the window and picked up by the slow stat fallback at AUTHORITY_REVALIDATE_MS', (t) => {
+  assert.ok(WINDOW >= 30_000, 'watch is normal invalidation; stat is only an occasional backstop');
   const { hive, file, handEdit } = floor(t);
   assert.deepEqual(ids(hive.tasks()), ['T1']);
   handEdit([card('T1'), card('T5')]);

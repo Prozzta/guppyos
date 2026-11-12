@@ -88,6 +88,26 @@ test('A2 duplicate / coalesced hints in one turn produce ONE scan: one route, on
   assert.deepEqual(f.deliveries, [{ agentId: 'god-1', messageId: 'm2' }]);
 });
 
+test('A2b a watcher-driven steady-state drain scans only its dirty outbox, not agents again', async (t) => {
+  const f = await floor(t);
+  f.hive.startRouter();
+  assert.equal(f.rt.intervals[0].ms, HiveManager.ROUTER_RECONCILE_MS, 'the only timer is the slow missed-watch backstop');
+  f.write('jim-1', msg('m2b', 'god-1'));
+  const agentsDir = path.join(f.home, 'hive', 'agents');
+  const real = fs.readdirSync;
+  let agentReads = 0;
+  fs.readdirSync = function (dir, ...rest) {
+    if (String(dir) === agentsDir) agentReads++;
+    return real.call(this, dir, ...rest);
+  };
+  try {
+    f.rt.live(f.outbox('jim-1')).hint();
+    f.rt.flush();
+  } finally { fs.readdirSync = real; }
+  assert.equal(agentReads, 0, 'no sync agents readdir on the watcher tick');
+  assert.ok(fs.existsSync(path.join(f.inbox('god-1'), 'm2b.json')));
+});
+
 test('A3 a missed watch event is repaired by the reconciliation interval', async (t) => {
   const f = await floor(t);
   f.hive.startRouter();
