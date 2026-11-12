@@ -45,6 +45,9 @@ function put(file, msg, i) {
   const at = new Date(T0 + i * 60_000);
   fs.utimesSync(file, at, at);
 }
+/** Pins a folder's mtime (i minutes after T0): the moves this test makes never share a clock tick
+ *  with an earlier listing by accident (the racy case has its own test below). */
+const touchDir = (d, i) => { const at = new Date(T0 + i * 60_000); fs.utimesSync(d, at, at); };
 const mail = (id, i, extra = {}) => ({ id, from: 'god-1', to: 'andy-1', act: 'inform', subject: `s ${id}`, body: `b ${id} token=abcdef123456`, conversation: 'c', created_at: iso(i), ...extra });
 
 /** Records every path the product code stats, lists or reads while `fn` runs. */
@@ -104,6 +107,7 @@ test('SCALE-DONE-STAT: a repeat Threads poll stats no .done file; a new one is s
   const live = hive.send({ to: 'andy-1', act: 'inform', subject: 'live', body: 'l' }, 'god-1');
   // A stale .done copy of a still-live message: the live file is the row, the copy is skipped.
   put(path.join(done, `${live.id}.json`), { ...JSON.parse(fs.readFileSync(dir('andy-1', 'inbox', `${live.id}.json`), 'utf8')), subject: 'stale copy' }, 59);
+  touchDir(done, 0);
   const first = hive.mailHistory('andy-1', { limit: 10 });
   assert.equal(first.length, 9, 'the unparsable junk.json takes a slot and is dropped, as before');
   const liveRow = first.find((r) => r.id === live.id);
@@ -119,6 +123,7 @@ test('SCALE-DONE-STAT: a repeat Threads poll stats no .done file; a new one is s
 
   const fresh = path.join(done, 'm-new.json');
   put(fresh, mail('m-new', 500), 500);
+  touchDir(done, 1);
   const third = spy(() => hive.mailHistory('andy-1', { limit: 10 }));
   assert.deepEqual(third.seen.stat.filter(inDone), [fresh], 'only the new file is statted');
   assert.deepEqual(third.seen.read.filter(inDone), [fresh], 'only the new file is read');
@@ -127,6 +132,7 @@ test('SCALE-DONE-STAT: a repeat Threads poll stats no .done file; a new one is s
 
   // A file leaves .done: it leaves the panel.
   fs.rmSync(fresh);
+  touchDir(done, 2);
   const gone = hive.mailHistory('andy-1', { limit: 10 });
   assert.ok(!gone.some((r) => r.id === 'm-new'));
   assert.deepEqual(gone, cold().mailHistory('andy-1', { limit: 10 }));
@@ -148,6 +154,7 @@ test('SCALE-MESSAGES-INDEX: a repeat hive:messages reads and stats no archived m
   put(path.join(sent, 'zz-dup.json'), mail('old-1', 999, { subject: 'later copy' }), 0); // dup id: first seen wins
   put(path.join(dir('andy-1', 'outbox'), 'reply.json'), mail('reply-1', 70, { from: 'andy-1', to: 'god-1' }), 70); // live
   hive.send({ to: 'andy-1', act: 'request', subject: 'live ask', body: 'password=hunter2hunter2' }, 'god-1');
+  for (const d of [done, sent, dir('andy-1', 'outbox', '.sent')]) touchDir(d, 0);
 
   const cases = [{}, { limit: 40 }, { limit: 3 }, { agentId: 'andy-1', limit: 40 }, { includeArchived: false }, { id: 'old-1' }, { id: 'reply-1' }, { id: 'nope' }];
   for (const c of cases) assert.deepEqual(hive.voiceMessages(c), referenceVoice(hive, c), `cold call ${JSON.stringify(c)}`);
@@ -164,6 +171,7 @@ test('SCALE-MESSAGES-INDEX: a repeat hive:messages reads and stats no archived m
   const n = mail('fresh-1', 2_000_000); // after the live send's real date
   const nf = path.join(sent, 'fresh-1.json');
   put(nf, n, 2000);
+  touchDir(sent, 1);
   const r = spy(() => hive.voiceMessages({ limit: 40 }));
   assert.equal(r.out[0].id, 'fresh-1');
   assert.deepEqual(r.seen.stat.filter(archived), [nf]);
@@ -175,6 +183,46 @@ test('SCALE-MESSAGES-INDEX: a repeat hive:messages reads and stats no archived m
   assert.equal(hive.voiceMessages({ id: 'reply-1' })[0].subject, 'edited subject');
   // An archived file removed is gone.
   fs.rmSync(nf);
+  touchDir(sent, 2);
   for (const c of cases) assert.deepEqual(hive.voiceMessages(c), referenceVoice(hive, c), `after a removal ${JSON.stringify(c)}`);
   assert.deepEqual(hive.voiceMessages({ limit: 40 }), cold().voiceMessages({ limit: 40 }));
+});
+
+test('racy mtime (Jim B1): a listing, meta or body taken within RACY_MS of the mtime is not trusted; an older one keeps the fast path', async (t) => {
+  const { hive, dir } = await floor(t);
+  const done = dir('andy-1', 'inbox', '.done');
+  for (let i = 0; i < 5; i++) put(path.join(done, `m-${i}.json`), mail(`m-${i}`, i), i);
+  const T = Date.parse('2026-06-01T00:00:00.000Z');
+  const at = new Date(T);
+  fs.utimesSync(done, at, at);
+  let now = T + 500;
+  hive.mailClock = () => now; // the listing is taken in the same tick as the folder's mtime
+  const ids = () => hive.mailHistory('andy-1', { limit: 50 }).map((r) => r.id);
+  assert.equal(ids().length, 5);
+  // A second move in the same tick: NTFS leaves the folder mtime unchanged.
+  put(path.join(done, 'm-b.json'), mail('m-b', 10), 10);
+  fs.utimesSync(done, at, at);
+  assert.ok(ids().includes('m-b'), 'a file moved in within the same tick as the listed mtime is found');
+  // A listing RACY_MS past the mtime is trusted again: one stat of the folder, no readdir, no file stat.
+  now = T + 5000;
+  ids();
+  const warm = spy(ids);
+  assert.ok(warm.out.includes('m-b'));
+  assert.ok(!warm.seen.readdir.includes(done), 'a trusted listing is not relisted');
+  assert.deepEqual(warm.seen.stat.filter(under([done])), []);
+
+  // A live file rewritten in the same tick with the same size keeps its size+mtime key: its meta
+  // (order) and body (subject) must still be read again.
+  now = T + 500;
+  const out = dir('andy-1', 'outbox');
+  const live = (id, subject, when) => ({ ...mail(id, 0, { from: 'andy-1', to: 'god-1', subject }), created_at: when });
+  const write = (n, m) => { const p = path.join(out, n); fs.writeFileSync(p, JSON.stringify(m)); fs.utimesSync(p, at, at); };
+  write('x.json', live('r-x', 'aaaa', '2026-06-01T00:00:01.000Z'));
+  write('y.json', live('r-y', 'yyyy', '2026-06-01T00:00:02.000Z'));
+  const rows = () => hive.voiceMessages({ agentId: 'andy-1', includeArchived: false, limit: 40 }).map((r) => `${r.id}:${r.subject}`);
+  assert.deepEqual(rows(), ['r-y:yyyy', 'r-x:aaaa']);
+  const before = fs.statSync(path.join(out, 'x.json')).size;
+  write('x.json', live('r-x', 'bbbb', '2026-06-01T00:00:03.000Z'));
+  assert.equal(fs.statSync(path.join(out, 'x.json')).size, before, 'same size, same mtime: the key cannot tell');
+  assert.deepEqual(rows(), ['r-x:bbbb', 'r-y:yyyy'], 'the rewrite shows: new order (meta) and new subject (body)');
 });

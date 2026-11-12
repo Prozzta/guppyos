@@ -656,10 +656,20 @@ export function syncedClaudeSkillNames(home: string = homedir()): string[] {
 
 /** One mail file as last statted, with its parsed {id, created_at} once read (null = not a message). */
 type MailFileEntry = { mtimeMs: number; size: number; meta?: { id: unknown; created_at: unknown } | null };
-/** SCALE-DONE-STAT: a handled-mail folder's listing as of the folder mtime `mtimeMs`. */
+/**
+ * The racy-mtime rule (as git uses for its index): a directory or file mtime is not unique per change
+ * (NTFS often gives two moves in one clock tick the SAME folder mtime), so anything cached against an
+ * mtime is trusted only if it was taken at least RACY_MS after that mtime: any later change then has
+ * to carry a newer mtime. 2 s also covers FAT/SMB's 2 s timestamp granularity.
+ */
+const RACY_MS = 2000;
+/** SCALE-DONE-STAT: a handled-mail folder's listing as of the folder mtime `mtimeMs`, taken at
+ *  wall-clock `listedAt` (read before the folder was statted). */
 class ArchivedMailDir {
   private sorted: Array<[string, MailFileEntry]> | undefined;
-  constructor(readonly mtimeMs: number, readonly files: Map<string, MailFileEntry>) {}
+  constructor(readonly mtimeMs: number, readonly files: Map<string, MailFileEntry>, readonly listedAt = Number.NaN) {}
+  /** Whether this listing can stand for the folder while its mtime stays `mtimeMs` (racy-mtime rule). */
+  trusted(): boolean { return this.listedAt - this.mtimeMs >= RACY_MS; }
   /** Newest file first (a stable sort of the listing order, as the per-poll sort was), built once. */
   byMtimeDesc(): Array<[string, MailFileEntry]> {
     return (this.sorted ??= [...this.files].sort((a, b) => b[1].mtimeMs - a[1].mtimeMs));
@@ -4256,7 +4266,7 @@ export class HiveManager {
     // then read just the rows returned (a bounded cache keeps a repeat call from reading those
     // again). Same traversal, first-seen dedup, sort and slice as before.
     const seen = new Set<string>();
-    const picked: Array<{ path: string; key: string; owner: string; direction: 'inbox' | 'outbox'; archived: boolean; created_at: unknown }> = [];
+    const picked: Array<{ path: string; key: string; mtimeMs: number; owner: string; direction: 'inbox' | 'outbox'; archived: boolean; created_at: unknown }> = [];
     for (const owner of owners) {
       const base = this.agentDir(owner);
       const folders: Array<{ dir: string; direction: 'inbox' | 'outbox'; archived: boolean }> = [
@@ -4276,7 +4286,7 @@ export class HiveManager {
           if (!meta || typeof meta.id !== 'string' || seen.has(meta.id)) continue;
           seen.add(meta.id);
           if (wantId && meta.id !== wantId) continue;
-          picked.push({ path: p, key: `${file.size}|${file.mtimeMs}`, owner, direction: f.direction, archived: f.archived, created_at: meta.created_at });
+          picked.push({ path: p, key: `${file.size}|${file.mtimeMs}`, mtimeMs: file.mtimeMs, owner, direction: f.direction, archived: f.archived, created_at: meta.created_at });
         }
       }
     }
@@ -4288,7 +4298,7 @@ export class HiveManager {
       : 12;
     const out: VoiceMessage[] = [];
     for (const r of picked.slice(0, lim)) {
-      const m = this.voiceMessageBody(r.path, r.key);
+      const m = this.voiceMessageBody(r.path, r.key, r.mtimeMs);
       if (!m || typeof m.id !== 'string') continue; // moved or rewritten since it was indexed
       out.push({
         id: m.id,
@@ -4313,14 +4323,17 @@ export class HiveManager {
    * gains and loses files (the harness renames mail in; nothing rewrites it there), so its listing
    * is cached by the folder's own mtime: an unchanged folder costs one stat, a changed one a
    * readdir plus a stat of each NEW file only. The folder is statted BEFORE it is listed, so a file
-   * that lands in between changes the mtime the next call sees. Each file also caches its parsed
-   * {id, created_at} (mailFileMeta), so nothing old is read again.
+   * that lands in between changes the mtime the next call sees. A listing taken within RACY_MS of the
+   * folder's mtime is not trusted (a second move in the same tick can leave that mtime unchanged), so
+   * the next call lists again; old entries are still reused, so that costs one readdir. Each file also
+   * caches its parsed {id, created_at} (mailFileMeta), so nothing old is read again.
    */
   private archivedMailDir(dir: string): ArchivedMailDir {
+    const listedAt = this.mailClock();
     let st: Stats;
     try { st = statSync(dir); } catch { this.archivedMailDirs.delete(dir); return EMPTY_MAIL_DIR; }
     const prev = this.archivedMailDirs.get(dir);
-    if (prev && prev.mtimeMs === st.mtimeMs) return prev;
+    if (prev && prev.mtimeMs === st.mtimeMs && prev.trusted()) return prev;
     let names: string[];
     try { names = readdirSync(dir).filter((f) => f.endsWith('.json')); } catch { this.archivedMailDirs.delete(dir); return EMPTY_MAIL_DIR; }
     const files = new Map<string, MailFileEntry>();
@@ -4329,7 +4342,7 @@ export class HiveManager {
       if (old) { files.set(n, old); continue; }
       try { const s = statSync(join(dir, n)); if (s.isFile()) files.set(n, { mtimeMs: s.mtimeMs, size: s.size }); } catch { /* moved meanwhile */ }
     }
-    const next = new ArchivedMailDir(st.mtimeMs, files);
+    const next = new ArchivedMailDir(st.mtimeMs, files, listedAt);
     this.archivedMailDirs.set(dir, next);
     return next;
   }
@@ -4352,26 +4365,32 @@ export class HiveManager {
     return files;
   }
 
-  /** The {id, created_at} of one mail file, parsed once per entry; null = not a message. */
+  /** The {id, created_at} of one mail file, parsed once per entry; null = not a message. Kept only
+   *  when read at least RACY_MS after the file's mtime: a same-tick rewrite of the same size would
+   *  otherwise keep the size+mtime key and its stale meta. */
   private mailFileMeta(path: string, file: MailFileEntry): { id: unknown; created_at: unknown } | null {
     if (file.meta !== undefined) return file.meta;
+    const readAt = this.mailClock();
     let meta: { id: unknown; created_at: unknown } | null = null;
     try {
       const m = JSON.parse(readFileSync(path, 'utf8')) as { id?: unknown; created_at?: unknown } | null;
       if (m) meta = { id: m.id, created_at: m.created_at };
     } catch { meta = null; }
-    file.meta = meta;
+    if (readAt - file.mtimeMs >= RACY_MS) file.meta = meta;
     return meta;
   }
 
-  /** A returned row's full message, from a small cache keyed by path + size + mtime. */
-  private voiceMessageBody(path: string, key: string): HiveMessage | null {
+  /** A returned row's full message, from a small cache keyed by path + size + mtime; a body read
+   *  within RACY_MS of that mtime is not cached (racy-mtime rule, as mailFileMeta). */
+  private voiceMessageBody(path: string, key: string, mtimeMs: number): HiveMessage | null {
     const k = `${path}|${key}`;
     const hit = this.voiceBodyCache.get(k);
     if (hit !== undefined) { this.voiceBodyCache.delete(k); this.voiceBodyCache.set(k, hit); return hit; }
+    const readAt = this.mailClock();
     let m: HiveMessage | null = null;
     try { m = JSON.parse(readFileSync(path, 'utf8')) as HiveMessage | null; } catch { m = null; }
     if (m === null) return null;
+    if (readAt - mtimeMs < RACY_MS) return m;
     this.voiceBodyCache.set(k, m);
     if (this.voiceBodyCache.size > HiveManager.VOICE_BODY_CACHE_MAX) {
       const first = this.voiceBodyCache.keys().next().value;
@@ -4383,6 +4402,8 @@ export class HiveManager {
   private readonly archivedMailDirs = new Map<string, ArchivedMailDir>();
   private readonly liveMailDirs = new Map<string, Map<string, MailFileEntry>>();
   private readonly voiceBodyCache = new Map<string, HiveMessage | null>();
+  /** Wall clock for the racy-mtime rule (RACY_MS); a test injects a fixed one. */
+  private mailClock: () => number = () => Date.now();
   /**
    * ZT-I1-MAIL §7.1 / §11.12(c): the one-shot, idempotent upgrade pass (see mailMigration.ts).
    * Reads the registry for MUTATION, so a damaged registry throws and the pass waits for the next
