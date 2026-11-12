@@ -181,11 +181,11 @@ test('wiring: the run hands its files the gate before the job join, logs the bur
 
 // Real processes through the preload: 6 files, 2 slots, each holding its top level for 300 ms.
 const SLOW_TOP = "Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);\nprocess.stdout.write(String(process.env.NODE_OPTIONS || '') + '|' + String(process.env.GUPPY_START_GATE || ''));\n";
-async function liveRun(d, slots, n = 6, { gateFile = GATE_FILE, body = SLOW_TOP } = {}) {
+async function liveRun(d, slots, n = 6, { gateFile = GATE_FILE, body = SLOW_TOP, pre = null } = {}) {
   const gateDir = path.join(d, 'gate'); fs.mkdirSync(gateDir, { recursive: true });
   const file = path.join(d, 'slow.cjs');
   fs.writeFileSync(file, body);
-  const opt = `--require "${gateFile.split(path.sep).join('/')}"`;
+  const opt = [pre, gateFile].filter(Boolean).map((f) => `--require "${f.split(path.sep).join('/')}"`).join(' ');
   const env = { ...process.env, NODE_OPTIONS: opt, GUPPY_START_GATE: `${slots}|${gateDir}`, GUPPY_START_OPT: opt, NODE_TEST_CONTEXT: 'child-v8' };
   const outs = await Promise.all(Array.from({ length: n }, () => new Promise((resolve, reject) => {
     const p = spawn(process.execPath, [file], { env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
@@ -207,9 +207,18 @@ test('live: 6 files through the preload with 2 slots never have more than 2 past
 
 // The slot goes back once the top level has run, not at exit (Jim a5a246): 1 slot, 2 files whose
 // tests run 2 s AFTER a quick top level. Held to exit, the gate would cap the whole run, not its start.
-const LONG_TAIL = 'setTimeout(() => {}, 2000);\n';
+// LOAD-FLAKES-105: the 2 s tail starts once BOTH files have reached the gate (a preload ahead of it
+// marks each arrival), so the second always arrives while the first holds its slot. A fixed tail from
+// the top level let a loaded machine boot the second file after the first had exited, and a held-to-
+// exit slot then cost it no wait (g6: the mutant survived).
+const ARRIVE = "const fs = require('fs'), path = require('path'); const m = path.join(__dirname, 'arrived');\n"
+  + "fs.mkdirSync(m, { recursive: true }); fs.writeFileSync(path.join(m, String(process.pid)), '');\n";
+const LONG_TAIL = "const fs = require('fs'), path = require('path'); const m = path.join(__dirname, 'arrived');\n"
+  + 'const iv = setInterval(() => { if (fs.readdirSync(m).length >= 2) { clearInterval(iv); setTimeout(() => {}, 2000); } }, 20);\n';
 K.release = async (gateFile, d) => {
-  const { summary, text } = await liveRun(d, 1, 2, { gateFile, body: LONG_TAIL });
+  const pre = path.join(d, 'arrive.cjs');
+  fs.writeFileSync(pre, ARRIVE);
+  const { summary, text } = await liveRun(d, 1, 2, { gateFile, body: LONG_TAIL, pre });
   assert.equal(summary.files, 2);
   const waits = text.trim().split(/\r?\n/).map((l) => JSON.parse(l).waitMs);
   assert.ok(Math.max(...waits) < 1500, `THE SLOT IS GIVEN BACK ONCE THE TOP LEVEL HAS RUN, NOT AT EXIT (waits ${waits.join(', ')} ms)`);
