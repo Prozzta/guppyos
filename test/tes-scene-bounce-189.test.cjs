@@ -44,14 +44,17 @@ test('RENDERED (DPR 1): clicking an agent card in the roster leaves the TES scen
     assert.equal(selected, ids[who], `the click selected ${who}`);
     // Not vacuous (LOAD-FLAKES-105): the frames must be able to SEE a bounce, not number 30. Each frame
     // carries the select nudge's pull on the camera in the tick that drew it (f.kick, device px, as
-    // Camera.update applies it), so a frame with kick >= 1 is one on which a select that moved the scene
-    // would show as a moved origin. That is judged on the frames actually drawn, not on a 60 fps count
+    // Camera.update applies it), so a frame with kick >= KICK_MIN is one on which a select that moved the
+    // scene would show as a moved origin. KICK_MIN is 2 (Jim): ox/oy are ROUNDED device px and kick is
+    // hypot(x, y); at 2 one axis moves >= 1.41 px, and a shift >= 1 px always changes a rounded value
+    // (at 1, 0.67 px per axis could round to the same integer and hide the bounce). That is judged on the frames actually drawn, not on a 60 fps count
     // or wall-clock windows: a loaded machine starves the renderer for 250-850 ms at a time (traced
     // under 96 burners; the same click's render is < 15 ms idle).
     const at = frames.map((f) => f.t);
     const cover = `${who}: click at ${clickAt}, frames [t, kick] ${JSON.stringify(frames.map((f) => [f.t, f.kick]))}`;
     assert.ok(at[0] < clickAt && frames[0].kick === 0, `the rest frame is from before the click, with no nudge: ${cover}`);
-    assert.ok(frames.some((f) => f.t > clickAt && f.kick >= 1), `a frame drawn while the select's nudge pulled the camera >= 1 px: ${cover}`);
+    const KICK_MIN = 2;
+    assert.ok(frames.some((f) => f.t > clickAt && f.kick >= KICK_MIN), `a frame drawn while the select's nudge pulled the camera >= ${KICK_MIN} px: ${cover}`);
     assert.ok(at[at.length - 1] >= clickAt + NUDGE_MS && frames[frames.length - 1].kick === 0, `a frame after the nudge ended: ${cover}`);
     const f0 = frames[0];
     // Not vacuous: the 336-row semantic box gets the expected fractional height-limited fit.
