@@ -1,5 +1,5 @@
 import './packThemes'; // theme packs join the project-theme catalogue before any config is read
-import { app, BrowserWindow, clipboard, crashReporter, dialog, globalShortcut, ipcMain, Menu, powerMonitor, powerSaveBlocker, safeStorage, screen, session, shell, Notification, Tray, utilityProcess } from 'electron';
+import { app, BrowserWindow, clipboard, crashReporter, dialog, globalShortcut, ipcMain, Menu, powerMonitor, powerSaveBlocker, safeStorage, screen, session, shell, Notification, Tray, utilityProcess, nativeImage } from 'electron';
 import { runQuitSteps, type QuitReport } from './quitTeardown';
 import { copyClipboardText, readClipboardPng, readClipboardText } from './clipboard';
 import { NativeMemoryWiring, toUnpacked } from './nativeMemory/mainWiring';
@@ -64,6 +64,9 @@ import { resolveCommandAsync, invalidateCommandCache } from './commandResolver';
 import { daemonExecutable, headlessSpawnRefusal, missingCliAction, npmRungDecision, toolRowStatus } from './cliLookupPolicy';
 import { initAutoUpdater, abortPendingRestart } from './updater';
 import { RealtimeFloorWatcher } from './realtimeFloorWatcher';
+import { BlobFaceRenderer, blobatarSvg } from './blobFaceRenderer';
+import { OrchestratorMood, countOpenAsks, newlyDone } from './blobMood';
+import { BLOB_SAVE_SIZE, BLOB_TOAST_SIZE, BLOB_TRAY_SIZES, currentFace, toastFace, trayFace, type BlobFace, type BlobSaveImageResult, type BlobToastKind } from '../shared/blobFace';
 import { BlobOverlayController, isAppWindowSender, registerBlobIpc, type BlobWindowLike, type Rect as BlobRect } from './blobOverlay';
 import { DictationController } from './dictation';
 import { GroqSttProvider } from './stt';
@@ -702,6 +705,8 @@ const breaker = new CircuitBreaker(() => {
 // heartbeat mission is disabled (it ships off).
 let fleetTimer: ReturnType<typeof setInterval> | null = null;
 let breakerBeatTimer: ReturnType<typeof setInterval> | null = null;
+/** BLOB-ORCH-MOOD: the 5 s mood beat (armAlwaysOnBeats). */
+let moodTimer: ReturnType<typeof setInterval> | null = null;
 let staleRequestsTimer: ReturnType<typeof setInterval> | null = null;
 // Feed the breaker's api_error-storm trip from Oscar's OTel api_error spans —
 // Jim's one breaker input with no on-branch source (telemetry.onApiError seam).
@@ -2432,8 +2437,8 @@ const dictation: DictationController = new DictationController({
     cancel: (session) => { sendDictationCapture({ op: 'cancel', session }); }
   },
   supported: process.platform === 'win32' && !DEV_HIDDEN,
-  publish: (s) => blobOverlay.setDictationStatus(s),
-  notify: (body) => { if (DEV_HIDDEN) return; try { if (Notification.isSupported()) new Notification({ title: 'Blob dictation', body, silent: true }).show(); } catch { /* best-effort */ } },
+  publish: (s) => { blobOverlay.setDictationStatus(s); refreshTrayFace(); },
+  notify: (body) => { if (DEV_HIDDEN) return; try { if (Notification.isSupported()) new Notification({ title: 'Blob dictation', body, silent: true, ...blobToastIconOpt('info') }).show(); } catch { /* best-effort */ } },
   log: (row) => { try { hive.appendLog(row); } catch { /* best-effort */ } },
   now: () => Date.now(),
   timers: { set: (fn, ms) => setTimeout(fn, ms), clear: (h) => clearTimeout(h as ReturnType<typeof setTimeout>) }
@@ -2475,6 +2480,109 @@ const trayMode = new TrayModeController({
   // Route through Electron so a tray quit gets the same live-PTY warning as
   // every other quit path (including the updater's quitAndInstall()).
   quit: () => app.quit()
+});
+
+/** BLOB-ORCH-MOOD + BLOB-TRAY-TOASTS: one orchestrator mood (blobMood.ts) feeds the overlay
+ *  (setMood), the tray icon and the toasts. Faces are rendered to PNG once, lazily after startup
+ *  (armAlwaysOnBeats), in a hidden sandboxed window that blobFaceRenderer destroys in finally. */
+const blobFaces = new BlobFaceRenderer({
+  svgFor: blobatarSvg,
+  createWindow: () => {
+    // Its own in-memory session (no 'persist:'), and nothing but data:/about: is ever fetched.
+    const ses = session.fromPartition('blob-face-render');
+    ses.webRequest.onBeforeRequest((d, cb) => cb({ cancel: !/^(data|about):/i.test(d.url) }));
+    const w = new BrowserWindow({
+      show: false, width: 64, height: 64, skipTaskbar: true, focusable: false,
+      webPreferences: { session: ses, sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true, spellcheck: false, backgroundThrottling: false }
+    });
+    return {
+      loadURL: (u) => w.webContents.loadURL(u),
+      executeJavaScript: (code) => w.webContents.executeJavaScript(code, true),
+      destroy: () => w.destroy(),
+      isDestroyed: () => w.isDestroyed()
+    };
+  },
+  log: (row) => { try { hive.appendLog(row); } catch { /* best-effort */ } }
+});
+let blobFacesTimer: ReturnType<typeof setTimeout> | null = null;
+const trayFaceImages = new Map<BlobFace, Electron.NativeImage>();
+/** A face as a NativeImage with one representation per DPI scale (16 px = 1x). */
+function blobFaceImage(face: BlobFace): Electron.NativeImage | null {
+  const cached = trayFaceImages.get(face);
+  if (cached) return cached;
+  if (!blobFaces.ready()) return null;
+  const img = nativeImage.createEmpty();
+  for (const size of BLOB_TRAY_SIZES) {
+    const dataURL = blobFaces.png(face, size);
+    if (dataURL) img.addRepresentation({ scaleFactor: size / BLOB_TRAY_SIZES[0], dataURL });
+  }
+  if (img.isEmpty()) return null;
+  trayFaceImages.set(face, img);
+  return img;
+}
+function refreshTrayFace(): void {
+  if (process.platform !== 'win32' || !blobFaces.ready()) return;
+  const st = blobOverlay.status();
+  const img = blobFaceImage(trayFace(orchestratorMood.mood(), st.dictationStatus?.state, st.invisible));
+  if (img) trayMode.setFace(img);
+}
+/** A toast's Blob face (done = happy, error = sad, else the mood), or nothing before the render. */
+function blobToastIcon(kind: BlobToastKind): Electron.NativeImage | undefined {
+  const url = blobFaces.png(toastFace(kind, orchestratorMood.mood()), BLOB_TOAST_SIZE);
+  return url ? nativeImage.createFromDataURL(url) : undefined;
+}
+function blobToastIconOpt(kind: BlobToastKind): { icon?: Electron.NativeImage } {
+  const icon = blobToastIcon(kind);
+  return icon ? { icon } : {};
+}
+let moodDone: Set<string> | null = null;
+let moodAsks = 0;
+let moodBeats = 0;
+const orchestratorMood = new OrchestratorMood({
+  now: () => Date.now(),
+  read: () => {
+    const reg = hive.registry();
+    const rec = reg.godId ? agentLiveness.getLiveness(reg.godId) : undefined;
+    return {
+      god: rec ? { classification: rec.classification, classifiedSince: rec.classifiedSince, reason: rec.reason, lifecycle: rec.lifecycle } : null,
+      breakerLevels: Object.keys(reg.agents).map((id) => breaker.levelFor(id)),
+      openAsks: moodAsks
+    };
+  },
+  log: (row) => { try { hive.appendLog(row); } catch { /* best-effort */ } }
+});
+orchestratorMood.onChange((m) => { blobOverlay.setMood(m); refreshTrayFace(); });
+agentLiveness.onLivenessChange((rec) => { try { if (rec.agentId === hive.registry().godId) orchestratorMood.tick(); } catch { /* next beat */ } });
+hookServer.toastIcon = (kind) => blobToastIcon(kind);
+/** Every 5 s: god's liveness and the breaker (in memory); every 15 s also the cards (asks, new dones). */
+function runMoodBeat(): void {
+  if (moodBeats++ % 3 === 0) {
+    try {
+      const tasks = hive.allTasks().tasks;
+      const { done, fresh } = newlyDone(moodDone, tasks);
+      moodDone = done;
+      moodAsks = countOpenAsks(tasks);
+      if (fresh > 0) orchestratorMood.noteCardDone();
+    } catch (e) { try { hive.appendLog({ kind: 'blob-mood-cards-failed', error: e instanceof Error ? e.message : String(e) }); } catch { /* best-effort */ } }
+  }
+  orchestratorMood.tick();
+  refreshTrayFace();
+}
+ipcMain.handle('blob:save-image', async (evt): Promise<BlobSaveImageResult> => {
+  if (!ledgerUiSender(evt)) return { ok: false, error: 'refused: not from the app window' };
+  if (!blobFaces.ready() && !(await blobFaces.render())) return { ok: false, error: 'The Blob faces are not rendered yet.' };
+  const st = blobOverlay.status();
+  const face = currentFace(orchestratorMood.mood(), st.dictationStatus?.state);
+  const url = blobFaces.png(face, BLOB_SAVE_SIZE);
+  if (!url) return { ok: false, error: 'The Blob faces are not rendered yet.' };
+  const owner = BrowserWindow.fromWebContents(evt.sender);
+  const opts: Electron.SaveDialogOptions = { title: 'Save Blob image', defaultPath: join(app.getPath('pictures'), `blob-${orchestratorMood.mood()}.png`), filters: [{ name: 'PNG image', extensions: ['png'] }] };
+  const pick = owner ? await dialog.showSaveDialog(owner, opts) : await dialog.showSaveDialog(opts);
+  if (pick.canceled || !pick.filePath) return { ok: false, canceled: true };
+  try {
+    await fsModule.promises.writeFile(pick.filePath, Buffer.from(url.slice(url.indexOf(',') + 1), 'base64'));
+    return { ok: true, path: pick.filePath };
+  } catch (e) { return { ok: false, error: e instanceof Error ? e.message : String(e) }; }
 });
 
 /** Agents spawned with `isolate: true` get a dedicated git worktree; this maps
@@ -3419,7 +3527,7 @@ function capacityToast(toast: CapacityToast | null): NoticeDelivery {
     // MUNDER_HIDDEN (dev only): a hidden run never puts a toast on the desktop.
     notificationsOn: () => !DEV_HIDDEN && readConfig().notifications === true,
     supported: () => Notification.isSupported(),
-    show: (t) => { if (DEV_HIDDEN) return; new Notification({ title: t.title, body: t.body }).show(); }
+    show: (t) => { if (DEV_HIDDEN) return; new Notification({ title: t.title, body: t.body, ...blobToastIconOpt('info') }).show(); }
   });
 }
 
@@ -3525,7 +3633,7 @@ function pushAgentImpact(): void {
 /** A native toast for breaker constrain/stop, gated on the notifications setting. */
 function breakerToast(title: string, body: string): void {
   if (DEV_HIDDEN || !readConfig().notifications) return;   // MUNDER_HIDDEN: no toast
-  try { if (Notification.isSupported()) new Notification({ title, body }).show(); }
+  try { if (Notification.isSupported()) new Notification({ title, body, ...blobToastIconOpt('error') }).show(); }
   catch { /* unsupported platform */ }
 }
 
@@ -7850,7 +7958,7 @@ const completionWatcher = initCompletionWatcher({
     }
   },
   // MUNDER_HIDDEN (dev only): no toast from a hidden run.
-  onNotify: (evt) => { try { if (!DEV_HIDDEN && Notification.isSupported()) new Notification({ title: resolveGodNameFromRegistry(hive.registry()), body: evt.summary }).show(); } catch { /* best-effort */ } }
+  onNotify: (evt) => { try { if (!DEV_HIDDEN && Notification.isSupported()) new Notification({ title: resolveGodNameFromRegistry(hive.registry()), body: evt.summary, ...blobToastIconOpt('info') }).show(); } catch { /* best-effort */ } }
 });
 
 registerRealtimeActionIpc({
@@ -8675,6 +8783,12 @@ function armAlwaysOnBeats(): void {
   if (fleetTimer) clearInterval(fleetTimer);
   writeFleetSnapshot();
   fleetTimer = setInterval(writeFleetSnapshot, 8_000);
+  if (moodTimer) clearInterval(moodTimer);
+  moodTimer = setInterval(runMoodBeat, 5_000);
+  if (!blobFacesTimer) {
+    blobFacesTimer = setTimeout(() => { void blobFaces.render().then((ok) => { if (ok) { trayFaceImages.clear(); refreshTrayFace(); } }); }, 10_000);
+    (blobFacesTimer as { unref?: () => void }).unref?.();
+  }
   if (breakerBeatTimer) clearInterval(breakerBeatTimer);
   breakerBeatTimer = setInterval(() => { try { runBreakerBeat(300_000); } catch (e) { console.error('[breaker beat]', e); } }, 30_000);
   // REQUESTS-TAB-STALE (1.1.83): close the requests whose work is provably finished. Data only.

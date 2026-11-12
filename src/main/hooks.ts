@@ -2529,7 +2529,7 @@ export class HookServer {
       // coordinator's claim first). Otherwise inbox files remain durable; main's inbox-wake
       // bridge treats this Stop as a retry EDGE and wakes the agent after this response,
       // through the one guarded submit owner. This return stays non-blocking.
-      this.notify(agentId ?? 'Agent', 'finished — idle');
+      this.notify(agentId ?? 'Agent', 'finished — idle', 'done');
       this.emit(agentId, event, p);
       return {};
     }
@@ -2801,12 +2801,16 @@ export class HookServer {
   /** Fire a native desktop notification — gated on the user's `notifications`
    *  setting. Only the OS toast is gated; the hive:hookEvent emit is always sent
    *  so avatars/UI stay live regardless. Best-effort: never throw into the hook. */
-  private notify(title: string, body: string): void {
+  /** BLOB-TRAY-TOASTS: the Blob face for a toast (done = happy, else the mood); null before the faces render. */
+  toastIcon: ((kind: 'done' | 'info') => unknown) | null = null;
+
+  private notify(title: string, body: string, kind: 'done' | 'info' = 'info'): void {
     // MUNDER_HIDDEN (dev only, layer-b test infrastructure): a hidden run shows no toast.
     if (DEV_HIDDEN || !this.getConfig().notifications) return;
     try {
       if (!Notification.isSupported()) return;
-      new Notification({ title, body }).show();
+      const icon = this.toastIcon?.(kind) ?? undefined;
+      new Notification({ title, body, ...(icon ? { icon: icon as Electron.NativeImage } : {}) }).show();
     } catch { /* notifications unsupported on this platform — ignore */ }
   }
 
