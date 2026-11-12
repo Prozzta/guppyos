@@ -42,11 +42,14 @@ export class DerivedLive {
   private git: DerivedGit | null = null;
   private debounce: ReturnType<typeof setTimeout> | null = null;
   private timers: Array<ReturnType<typeof setTimeout>> = [];
+  /** start() was called (stop() does not reset it: a card change after stop still runs, as before). */
+  private started = false;
   constructor(private readonly d: DerivedLiveDeps) {}
 
   /** Once per app run (the claim store reopens on a new hive root; the passes follow hiveRoot()). */
   start(): void {
     if (this.timers.length) return;
+    this.started = true;
     const st = this.d.setTimeout ?? setTimeout;
     const si = this.d.setInterval ?? setInterval;
     const t1 = st(() => { void this.run('start', () => this.full()); }, DERIVED_START_DELAY_MS);
@@ -57,8 +60,13 @@ export class DerivedLive {
 
   stop(): void { for (const t of this.timers) clearTimeout(t); this.timers = []; if (this.debounce) clearTimeout(this.debounce); }
 
-  /** tasks.json changed. */
+  /**
+   * tasks.json changed. STARTUP-FREEZE-104 A16 (Jim's 10x profile of b6a92a59: a 1.5 s block at 6 s): before start()
+   * (which waits for the claims warm) a cards pass read the whole derived ledger synchronously. It is skipped: start()
+   * always runs the full pass, whose backfill syncs the same decisions, records and card fields.
+   */
   cardsChanged(): void {
+    if (!this.started) return;
     if (this.debounce) clearTimeout(this.debounce);
     this.debounce = (this.d.setTimeout ?? setTimeout)(() => { this.debounce = null; void this.run('cards', () => this.cards()); }, DERIVED_CARDS_DEBOUNCE_MS);
   }

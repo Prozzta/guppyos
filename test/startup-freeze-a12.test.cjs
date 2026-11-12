@@ -348,3 +348,27 @@ test('A14: with many texts and few digests, releaseFacts scans each text once, n
   // The per-version scan of every text was at least 24 x 400 = 9,600 runs.
   assert.ok(execs <= 400 + versions.length * 40, `regex runs ${execs}: texts without a labelled digest are scanned per version`);
 });
+
+// A16 (Jim 42dee4 item 2: a cards pass at 6 s read the whole derived ledger synchronously, before the claims warm).
+const { DerivedLive } = loadTs('src/main/claims/derivedLive.ts');
+test('A16: a tasks.json change before start() runs no cards pass; after start() (and after stop()) it does', async () => {
+  const timers = [];
+  let writers = 0;
+  const live = new DerivedLive({
+    hiveRoot: () => hiveDir(), writer: () => { writers++; return null; }, enabled: () => true, repo: () => null, changelog: () => null, log: () => {},
+    setTimeout: (fn) => { timers.push(fn); return { unref() {} }; }, setInterval: () => ({ unref() {} }),
+  });
+  const fire = async () => { const fns = timers.splice(0); for (const fn of fns) fn(); await live.run('probe', async () => {}); };
+  live.cardsChanged();
+  await fire();
+  assert.equal(writers, 0, 'no pass before start: the full pass at start covers the cards');
+  live.start();
+  timers.splice(0);   // the start timer (the full pass) is not this test's concern
+  live.cardsChanged();
+  await fire();
+  assert.equal(writers, 1, 'a change after start runs the cards pass');
+  live.stop();
+  live.cardsChanged();
+  await fire();
+  assert.equal(writers, 2, 'and after stop, as before');
+});
