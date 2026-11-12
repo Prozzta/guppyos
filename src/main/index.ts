@@ -1909,7 +1909,7 @@ const ledgerUi = createLedgerUi({
   store: () => claimsEndpoint()?.store ?? null,
   // Settings keeps the reserved derived ledger visible even before its first segment. It is
   // display-only: exports and every operational action retain claimLedgerAgents().
-  agents: claimLedgerAgents,
+  agents: () => (claimsEndpoint() ? claimLedgerAgents() : []),
   rosterAgents: () => (claimsEndpoint() ? [...claimLedgerAgents(), DERIVED_AGENT_ID] : []),
   agentMeta: (agentId) => {
     if (agentId === DERIVED_AGENT_ID) return { system: true };
