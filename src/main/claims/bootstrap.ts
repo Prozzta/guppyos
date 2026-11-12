@@ -10,6 +10,36 @@ export type BootstrapState = {
   agents: Record<string, { state: 'done' | 'skipped' | 'failed'; at: number; reason?: string }>;
 };
 
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+
+/** Retained restart marker; it records progress but never authorizes deletion of a ledger segment. */
+export const BOOTSTRAP_MARKER_FILE = 'claims-bootstrap.json';
+export const bootstrapMarkerFile = (hiveRoot: string): string => join(hiveRoot, BOOTSTRAP_MARKER_FILE);
+
+function validState(v: unknown): v is BootstrapState {
+  if (!v || typeof v !== 'object') return false;
+  const s = v as Partial<BootstrapState>;
+  return s.version === 1 && typeof s.startedAt === 'number' && typeof s.updatedAt === 'number'
+    && !!s.agents && typeof s.agents === 'object' && !Array.isArray(s.agents);
+}
+
+/** A malformed or torn marker is not trusted; the caller starts a fresh, idempotent S0 pass. */
+export function loadBootstrapMarker(hiveRoot: string): BootstrapState | null {
+  const file = bootstrapMarkerFile(hiveRoot);
+  if (!existsSync(file)) return null;
+  try { const parsed: unknown = JSON.parse(readFileSync(file, 'utf8')); return validState(parsed) ? parsed : null; } catch { return null; }
+}
+
+/** Atomic replacement prevents a crash from publishing a half-written receipt. */
+export function saveBootstrapMarker(hiveRoot: string, state: BootstrapState): void {
+  const file = bootstrapMarkerFile(hiveRoot);
+  mkdirSync(dirname(file), { recursive: true });
+  const temp = `${file}.${process.pid}.tmp`;
+  writeFileSync(temp, `${JSON.stringify(state)}\n`, 'utf8');
+  renameSync(temp, file);
+}
+
 export interface BootstrapDeps {
   now: () => number;
   activeAgents: () => string[];
