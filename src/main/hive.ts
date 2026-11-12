@@ -583,6 +583,8 @@ export interface InboxDelivery {
 export interface RouterRuntime {
   watch: (dir: string, onHint: () => void) => Pick<FSWatcher, 'close' | 'on'>;
   setImmediate: (fn: () => void) => void;
+  /** The node implementation unrefs this: a parse retry never keeps Guppy alive. */
+  setTimeout: (fn: () => void, ms: number) => unknown;
   setInterval: (fn: () => void, ms: number) => unknown;
   clearInterval: (handle: unknown) => void;
 }
@@ -590,6 +592,7 @@ export interface RouterRuntime {
 const NODE_ROUTER_RUNTIME: RouterRuntime = {
   watch: (dir, onHint) => watchDirectorySafely(dir, () => onHint()),
   setImmediate: (fn) => { setImmediate(fn); },
+  setTimeout: (fn, ms) => { const timer = setTimeout(fn, ms); timer.unref(); return timer; },
   setInterval: (fn, ms) => setInterval(fn, ms),
   clearInterval: (h) => clearInterval(h as NodeJS.Timeout)
 };
@@ -3713,6 +3716,15 @@ export class HiveManager {
     });
   }
 
+  /** Re-read a partial outbox file even when its writer emits no second watch hint. */
+  private scheduleRouteOnceAfter(outbox: string, delayMs: number): void {
+    const generation = this.routerGeneration;
+    this.routerRuntime.setTimeout(() => {
+      if (generation !== this.routerGeneration || !this.routerTimer) return;
+      this.scheduleRouteOnce(outbox);
+    }, Math.max(1, delayMs));
+  }
+
   /** Stable enough to recognise an unchanged file after a rejected-file archive fails. */
   private outboxFingerprint(full: string): string | null {
     try {
@@ -3876,18 +3888,26 @@ export class HiveManager {
           // a visible rejection.
           const now = Date.now();
           try {
-            if (now - statSync(full).mtimeMs < OUTBOX_FRESH_WRITE_GRACE_MS) continue;
+            const freshFor = now - statSync(full).mtimeMs;
+            if (freshFor < OUTBOX_FRESH_WRITE_GRACE_MS) {
+              this.scheduleRouteOnceAfter(outbox, OUTBOX_FRESH_WRITE_GRACE_MS - freshFor);
+              continue;
+            }
           } catch {
             continue; // writer removed or replaced it; a later scan sees the new state
           }
           const prior = this.outboxParseRetries.get(full);
           // fs.watch can report several chunks of one write in the same turn.
           // They are hints, not independent retries: wait before re-reading.
-          if (prior && now < prior.retryAfter) continue;
+          if (prior && now < prior.retryAfter) {
+            this.scheduleRouteOnceAfter(outbox, prior.retryAfter - now);
+            continue;
+          }
           const attempts = (prior?.attempts ?? 0) + 1;
           if (attempts < OUTBOX_PARSE_RETRY_LIMIT) {
             this.outboxParseRetries.set(full, { attempts, retryAfter: now + OUTBOX_PARSE_RETRY_DEBOUNCE_MS });
             this.appendLog({ kind: 'outbox-parse-retry', from: id, file: f, attempts });
+            this.scheduleRouteOnceAfter(outbox, OUTBOX_PARSE_RETRY_DEBOUNCE_MS);
             continue;
           }
           this.outboxParseRetries.delete(full);
