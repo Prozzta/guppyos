@@ -272,8 +272,9 @@ export class StallWatch {
     const b = this.budget;
     if (ready === null || b.done) return;
     const end = ready + STARTUP_WINDOW_MS;
-    // A block that ends after window-ready and starts before the window's end (one spanning ready counts).
-    if (late >= STARTUP_BUDGET_MS && STALL_MAX_MS > gap && t > ready && from < end) {
+    // Every beat seen here follows window-ready, and the first beat at or past the window end closes it (done),
+    // so each block checked overlaps the window (one spanning window-ready or the end counts).
+    if (late >= STARTUP_BUDGET_MS && STALL_MAX_MS > gap) {
       b.breaches++;
       if (late > b.worstMs) b.worstMs = late;
       if (b.rows < STARTUP_BREACH_ROWS) {
