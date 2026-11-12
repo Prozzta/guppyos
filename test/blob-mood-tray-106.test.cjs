@@ -9,7 +9,7 @@ const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
 const { OrchestratorMood, deriveMood, newlyDone, countOpenAsks, MOOD_HOLD_MS, MOOD_HAPPY_MS, MOOD_SLEEPY_MS } = loadTs('src/main/blobMood.ts');
 const { BLOB_FACES, MOOD_FACE, trayFace, toastFace, currentFace, BLOB_IDENTITY } = loadTs('src/shared/blobFace.ts');
-const { BlobFaceRenderer, BLOB_RENDER_SIZES, blobatarSvg, rasterScript } = loadTs('src/main/blobFaceRenderer.ts');
+const { BlobFaceRenderer, BLOB_RENDER_SIZES, BLOB_RENDER_STEP_MS, blobatarSvg, rasterScript } = loadTs('src/main/blobFaceRenderer.ts');
 const { TrayModeController } = loadTs('src/main/trayMode.ts');
 const { BLOB_MOODS } = loadTs('src/shared/blob.ts');
 
@@ -154,9 +154,10 @@ test('every face renders through blobatar with the Blob identity, each face dist
 
 function fakeWindow(behaviour) {
   const w = { destroyed: false, loaded: [], scripts: 0,
-    loadURL: async (u) => { w.loaded.push(u); if (behaviour === 'load-fails') throw new Error('load failed'); },
+    loadURL: (u) => { w.loaded.push(u); if (behaviour === 'load-hangs') return new Promise(() => {}); return behaviour === 'load-fails' ? Promise.reject(new Error('load failed')) : Promise.resolve(); },
     executeJavaScript: async (code) => {
       w.scripts += 1;
+      if (behaviour === 'script-hangs') return new Promise(() => {});
       if (behaviour === 'script-fails') throw new Error('script failed');
       const jobs = JSON.parse(code.slice(code.lastIndexOf('})(') + 3, code.lastIndexOf(')')));
       const out = {};
@@ -203,6 +204,19 @@ test('renderer: a failure leaves no window, logs, never throws, and a later rend
   const r3 = new BlobFaceRenderer({ svgFor: async () => 'data:image/svg+xml,x', createWindow: () => fakeWindow(fail ? 'script-fails' : 'ok') });
   assert.equal(await r3.render(), false); fail = false;
   assert.equal(await r3.render(), true, 'a retry after a failure works');
+});
+
+test('Jim SHOULD: a raster script (or load) that never settles fails the render at the step cap: false, destroyed, open 0, logged', async () => {
+  assert.equal(BLOB_RENDER_STEP_MS, 5_000);
+  for (const mode of ['script-hangs', 'load-hangs']) {
+    const wins = []; const rows = [];
+    const r = new BlobFaceRenderer({ svgFor: async () => 'data:image/svg+xml,x', createWindow: () => { const w = fakeWindow(mode); wins.push(w); return w; }, log: (x) => rows.push(x), stepMs: 50 });
+    assert.equal(await r.render(), false, `${mode}: THE RENDER NEVER ANSWERED`);
+    assert.equal(wins[0].destroyed, true, `${mode}: THE HUNG WINDOW WAS NOT DESTROYED`);
+    assert.deepEqual(r.stats, { windows: 1, open: 0 }, mode);
+    assert.equal(rows[0].kind, 'blob-faces-render-failed');
+    assert.match(rows[0].error, /did not settle in 50 ms/);
+  }
 });
 
 test('rasterScript is a self-contained page script with the jobs inlined (no network, no node)', () => {
