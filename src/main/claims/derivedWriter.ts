@@ -18,8 +18,10 @@
  * start; the CLAIMS-90 runner runs it over the frozen T_s copy (scripts/claims-derived-backfill.cjs).
  */
 import { readdirSync, readFileSync } from 'node:fs';
+import * as fsp from 'node:fs/promises';
+import { sliceTicker } from './migrate';
 import { join } from 'node:path';
-import { DERIVED_AGENT_ID, type AppendOrigin, type AppendResult, type ClaimRec, type ClaimsState, type LedgerRec, type ReadResult, type RecordDraft } from '../../shared/claims';
+import { DERIVED_AGENT_ID, type AppendOrigin, type AppendResult, type ClaimRec, type ClaimsState, type DeriveFn, type KeyRegistry, type LedgerRec, type ReadResult, type RecordDraft } from '../../shared/claims';
 import {
   cardFieldFacts, cardRecordFacts, decisionFacts, isRulingMail, rulingMailFacts, type RulingMailLike, type BumpMap, doneMailFacts, gitHistoryFacts, mergeFacts, parseChangelog, releaseFacts, shaMentions,
   type CardLike, type DerivedFact, type GitLogPort, type MailLike, type TagLike,
@@ -177,7 +179,16 @@ function readArchiveTimes(hiveRoot: string): Map<string, string> {
  * the subject rule. `seen` (agent/id) skips entries read before.
  */
 export function readDoneMails(hiveRoot: string, seen?: Set<string>, subjects?: Map<string, string>, opts: { proven?: boolean } = {}): MailLike[] {
-  const out: MailLike[] = readIndexDoneMails(hiveRoot, seen, subjects);
+  return addLedgerDoneMails(hiveRoot, readIndexDoneMails(hiveRoot, seen, subjects), seen, subjects, opts);
+}
+
+/** STARTUP-FREEZE-104 A12: readDoneMails with the index (its bulk: 1.4 s at 10x) read in slices. */
+export async function readDoneMailsAsync(hiveRoot: string, seen?: Set<string>, subjects?: Map<string, string>, opts: { proven?: boolean } = {}, tick: () => Promise<void> = sliceTicker()): Promise<MailLike[]> {
+  return addLedgerDoneMails(hiveRoot, await readIndexDoneMailsAsync(hiveRoot, seen, subjects, tick), seen, subjects, opts);
+}
+
+/** readDoneMails after the index: the MailLedger entries the index lacks, then (proven) the proven mail. */
+function addLedgerDoneMails(hiveRoot: string, out: MailLike[], seen: Set<string> | undefined, subjects: Map<string, string> | undefined, opts: { proven?: boolean }): MailLike[] {
   const byId = new Map(out.map((m) => [m.id as string, m]));
   const have = new Set(byId.keys());
   const mailDir = join(hiveRoot, 'state', 'mail');
@@ -234,29 +245,68 @@ export function readDoneMails(hiveRoot: string, seen?: Set<string>, subjects?: M
  * was linked to. The body counts only when it hashes to the row's bodyHash. `seen` holds idx/<id>.
  */
 export function readIndexDoneMails(hiveRoot: string, seen?: Set<string>, subjects?: Map<string, string>): MailLike[] {
+  const acc = doneIndexRows(seen, subjects);
+  eachIndexRow(hiveRoot, acc.row);
+  return acc.out;
+}
+
+/** STARTUP-FREEZE-104 A12: readIndexDoneMails, the files read with fs/promises and the rows taken in slices. */
+export async function readIndexDoneMailsAsync(hiveRoot: string, seen?: Set<string>, subjects?: Map<string, string>, tick: () => Promise<void> = sliceTicker()): Promise<MailLike[]> {
+  const acc = doneIndexRows(seen, subjects);
+  await eachIndexRowAsync(hiveRoot, acc.row, tick);
+  return acc.out;
+}
+
+const indexDir = (hiveRoot: string): string => join(hiveRoot, 'state', 'mail-cards');
+function indexFiles(dir: string): string[] | null {
+  try { return readdirSync(dir).filter((n) => n.endsWith('.jsonl') && !n.startsWith('_')).sort(); } catch { return null; }
+}
+function eachLine(text: string, onRow: (r: Record<string, unknown>) => void): void {
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue;
+    let r: Record<string, unknown>;
+    try { r = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
+    onRow(r);
+  }
+}
+/** A12: every parsed row of main's mail index, file by file in name order (an unreadable file is skipped). */
+function eachIndexRow(hiveRoot: string, onRow: (r: Record<string, unknown>) => void): void {
+  const dir = indexDir(hiveRoot);
+  for (const f of indexFiles(dir) ?? []) {
+    let text: string;
+    try { text = readFileSync(join(dir, f), 'utf8'); } catch { continue; }
+    eachLine(text, onRow);
+  }
+}
+/** A12: eachIndexRow with fs/promises reads and a tick before each file and each row (the ticker yields per slice). */
+async function eachIndexRowAsync(hiveRoot: string, onRow: (r: Record<string, unknown>) => void, tick: () => Promise<void>): Promise<void> {
+  const dir = indexDir(hiveRoot);
+  for (const f of indexFiles(dir) ?? []) {
+    await tick();
+    let text: string;
+    try { text = await fsp.readFile(join(dir, f), 'utf8'); } catch { continue; }
+    for (const line of text.split('\n')) {
+      await tick();
+      eachLine(line, onRow);
+    }
+  }
+}
+
+function doneIndexRows(seen?: Set<string>, subjects?: Map<string, string>): { out: MailLike[]; row: (r: Record<string, unknown>) => void } {
   const out: MailLike[] = [];
-  const dir = join(hiveRoot, 'state', 'mail-cards');
-  let files: string[] = [];
-  try { files = readdirSync(dir).filter((n) => n.endsWith('.jsonl') && !n.startsWith('_')).sort(); } catch { return out; }
   const got = new Set<string>();
-  for (const f of files) {
-    let lines: string[] = [];
-    try { lines = readFileSync(join(dir, f), 'utf8').split('\n'); } catch { continue; }
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      let r: Record<string, unknown>;
-      try { r = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
-      if (!r || typeof r.id !== 'string' || !isValidMailId(r.id)) continue;
+  return { out, row: (r) => {
+      if (!r || typeof r.id !== 'string' || !isValidMailId(r.id)) return;
       if (subjects && typeof r.subject === 'string' && !subjects.has(r.id)) subjects.set(r.id, r.subject);
-      if (r.act !== 'done' || got.has(r.id)) continue;
+      if (r.act !== 'done' || got.has(r.id)) return;
       // F1 (spec F): a mention-body (or unknown) link never gives a done mail its card. CLAIMS-WEAKLINK-DONESHA:
       // a mention-body row still carries the mail (subject, body, sender, time) with NO card and NO linked
       // cards, so doneMailFacts can read the cards its body names and let the commits it reports settle
       // the card (cardOfDoneMail); the weak link itself never becomes the card.
       const weak = r.cardFrom === 'mention-body';
-      if (!weak && !TRUSTED_METHODS.has(r.cardFrom as MailLinkMethod)) continue;
+      if (!weak && !TRUSTED_METHODS.has(r.cardFrom as MailLinkMethod)) return;
       got.add(r.id);
-      if (seen?.has(`idx/${r.id}`)) continue;
+      if (seen?.has(`idx/${r.id}`)) return;
       seen?.add(`idx/${r.id}`);
       const body = typeof r.bodyHash === 'string' && r.body !== undefined && mailBodyHash(r.body) === r.bodyHash ? { body: r.body } : {};
       out.push({
@@ -267,9 +317,7 @@ export function readIndexDoneMails(hiveRoot: string, seen?: Set<string>, subject
         ...(typeof r.created_at === 'string' ? { created_at: r.created_at } : Number.isFinite(r.deliveredAt) ? { created_at: new Date(r.deliveredAt as number).toISOString() } : {}),
         ...body,
       });
-    }
-  }
-  return out;
+  } };
 }
 
 /**
@@ -278,24 +326,28 @@ export function readIndexDoneMails(hiveRoot: string, seen?: Set<string>, subject
  * when it hashes to the row's bodyHash. god is the registry's godId (default 'god').
  */
 export function readIndexRulingMails(hiveRoot: string): RulingMailLike[] {
+  const acc = rulingIndexRows(hiveRoot);
+  eachIndexRow(hiveRoot, acc.row);
+  return [...acc.byId.values()];
+}
+
+/** STARTUP-FREEZE-104 A12: readIndexRulingMails, the files read with fs/promises and the rows taken in slices. */
+export async function readIndexRulingMailsAsync(hiveRoot: string, tick: () => Promise<void> = sliceTicker()): Promise<RulingMailLike[]> {
+  const acc = rulingIndexRows(hiveRoot);
+  await eachIndexRowAsync(hiveRoot, acc.row, tick);
+  return [...acc.byId.values()];
+}
+
+function rulingIndexRows(hiveRoot: string): { byId: Map<string, RulingMailLike>; row: (r: Record<string, unknown>) => void } {
   let godId = 'god';
   try {
     const g = (JSON.parse(readFileSync(join(hiveRoot, 'registry.json'), 'utf8')) as { godId?: unknown }).godId;
     if (typeof g === 'string' && g) godId = g;
   } catch { /* no registry: god */ }
-  const dir = join(hiveRoot, 'state', 'mail-cards');
-  let files: string[] = [];
-  try { files = readdirSync(dir).filter((n) => n.endsWith('.jsonl') && !n.startsWith('_')).sort(); } catch { return []; }
   const byId = new Map<string, RulingMailLike>();
-  for (const f of files) {
-    let lines: string[] = [];
-    try { lines = readFileSync(join(dir, f), 'utf8').split('\n'); } catch { continue; }
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      let r: Record<string, unknown>;
-      try { r = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
-      if (!r || typeof r.id !== 'string' || !isValidMailId(r.id) || typeof r.card !== 'string') continue;
-      if (!TRUSTED_METHODS.has(r.cardFrom as MailLinkMethod)) continue;
+  return { byId, row: (r) => {
+      if (!r || typeof r.id !== 'string' || !isValidMailId(r.id) || typeof r.card !== 'string') return;
+      if (!TRUSTED_METHODS.has(r.cardFrom as MailLinkMethod)) return;
       const body = typeof r.bodyHash === 'string' && typeof r.body === 'string' && mailBodyHash(r.body) === r.bodyHash ? r.body : undefined;
       const m: RulingMailLike = byId.get(r.id) ?? {
         id: r.id, from: String(r.from ?? ''), act: String(r.act ?? ''),
@@ -304,12 +356,10 @@ export function readIndexRulingMails(hiveRoot: string): RulingMailLike[] {
         cards: [],
         ...(typeof r.created_at === 'string' ? { at: r.created_at } : Number.isFinite(r.deliveredAt) ? { at: new Date(r.deliveredAt as number).toISOString() } : {}),
       };
-      if (!isRulingMail(m, godId)) continue;
+      if (!isRulingMail(m, godId)) return;
       if (!m.cards.includes(r.card)) m.cards.push(r.card);
       byId.set(r.id, m);
-    }
-  }
-  return [...byId.values()];
+  } };
 }
 
 /** The body of an inbox copy of message `id`, only when it hashes to the ledger's bodyHash. */
@@ -339,21 +389,47 @@ export interface BackfillCounts {
   doneSkipped: Record<string, number>; doneOlder: number; gitShas: SyncCounts;
 }
 
+/**
+ * STARTUP-FREEZE-104 A12 (Jim's 10x profile of c1db867a): main's derived writer derived its whole ledger once per
+ * syncDerived, up to ten times per backfill, mostly with nothing appended in between. readLedgerCached hands back the
+ * same records array while the ledger is unchanged (a new array after any append), and loadRegistryShared one frozen
+ * registry per file, so the last result is reused for the same derive, records and frozen registry.
+ */
+let lastDerive: { derive: DeriveFn; records: LedgerRec[]; registry: KeyRegistry; state: ClaimsState } | null = null;
+export function deriveOnce(derive: DeriveFn, records: LedgerRec[], registry: KeyRegistry): ClaimsState {
+  const last = lastDerive;
+  if (last && last.derive === derive && last.records === records && last.registry === registry) return last.state;
+  const state = derive(records, registry, { r4: false });
+  lastDerive = Object.isFrozen(registry) ? { derive, records, registry, state } : null;
+  return state;
+}
+
+/** A12: the rest of the backfill waits for the next turn of the event loop (timers, IPC and input run between). */
+const nextTurn = (): Promise<void> => new Promise<void>((resolve) => setImmediate(resolve));
+
 export async function runDerivedBackfill(deps: DerivedWriterDeps, input: BackfillInput): Promise<BackfillCounts> {
   const cards = readCards(input.hiveRoot);
   const subjects = new Map<string, string>();
   // Round 10 (must 5b): the full pass also reads proven done mails the index and the ledgers lack.
-  const mails = input.git ? readDoneMails(input.hiveRoot, undefined, subjects, { proven: true }) : [];
+  // A12 (Jim's 10x profile of c1db867a: one 6.1 s block): the index is read in slices and each step below is its own
+  // turn of the event loop. The steps, their order and their inputs are as before.
+  const mails = input.git ? await readDoneMailsAsync(input.hiveRoot, undefined, subjects, { proven: true }) : [];
   if (input.git && input.prefetch) {
     const shas = new Set<string>();
     for (const c of cards) for (const t of [c.result, c.notes]) for (const m of shaMentions(t)) shas.add(m.sha);
     for (const m of mails) for (const t of [m.subject, m.body]) for (const x of shaMentions(t)) shas.add(x.sha);
     await input.prefetch([...shas]);
   }
+  await nextTurn();
   const decisions = await syncDerived(deps, decisionFacts(cards));
+  await nextTurn();
   const records = await syncDerived(deps, cardRecordFacts(cards));
-  const rulings = await syncDerived(deps, rulingMailFacts(readIndexRulingMails(input.hiveRoot)));
+  const rulingMails = await readIndexRulingMailsAsync(input.hiveRoot);
+  await nextTurn();
+  const rulings = await syncDerived(deps, rulingMailFacts(rulingMails));
+  await nextTurn();
   const cardFields = await syncDerived(deps, await cardFieldFacts(cards, input.git));
+  await nextTurn();
   const releases = await syncDerived(deps, releaseFacts(parseChangelog(input.releases.changelog), input.releases.tags, input.releases.bumps, input.releases.heads, { cards, mails }));
   const cardIds = cards.map((c) => c.id).filter((id): id is string => typeof id === 'string');
   // Round 10 re-gate (Jim cf751a): the history is read BEFORE the done mails, so its messages and parents are
@@ -364,9 +440,12 @@ export async function runDerivedBackfill(deps: DerivedWriterDeps, input: Backfil
   for (const s of done.skips) deps.log?.({ kind: 'claims-derived-done-skip', mail: s.mail.slice(0, 120), reason: s.reason, ...(s.cards ? { cards: s.cards } : {}) });
   // Round 4b: every processed done mail's verdict, so `memory get`'s mail rule bridges only the derived lag.
   writeDoneMailStatus(input.hiveRoot, doneMailStatuses(mails, done));
+  await nextTurn();
   const doneShas = await syncDerived(deps, done.facts);
+  await nextTurn();
   const none = { facts: 0, appended: 0, unchanged: 0, superseded: 0, failed: 0 };
   const gitShas = log && input.git ? await syncDerived(deps, await gitHistoryFacts(log, cardIds, input.git)) : none;
+  await nextTurn();
   const merges = log && input.git ? await syncDerived(deps, await mergeFacts(log, cardIds, input.git)) : none;
   const counts = { cards: cards.length, doneMails: mails.length, decisions, records, rulings, cardFields, releases, doneShas, doneSkipped: done.skipped, doneOlder: done.older, gitShas, merges };
   deps.log?.({ kind: 'claims-derived-backfill', ...counts });

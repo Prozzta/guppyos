@@ -186,7 +186,8 @@ test('the derived writer starts only once the catch-up settled, even a slowed on
 test('index.ts: the claims startup block runs the catch-up through the router\'s own index (hive.mailCardIndexFor) and starts the derived writer only through the sequencer, never on a bare timer', () => {
   const src = fs.readFileSync(path.join(REPO, 'src', 'main', 'index.ts'), 'utf8');
   const run = src.indexOf("const mailCardCatchUp = startupMailCardCatchUp(root, { log: (row) => hive.appendLog(row), index: hive.mailCardIndexFor(root) });");
-  const seq = src.indexOf('void startAfterMailCardCatchUp(mailCardCatchUp, () => derivedClaims?.start());');
+  // STARTUP-FREEZE-104 A3: the writer also waits for the sliced claims warm (`warmed`), still after the catch-up.
+  const seq = src.indexOf('void startAfterMailCardCatchUp(Promise.allSettled([mailCardCatchUp, warmed]),() => derivedClaims?.start());');
   assert.ok(run > 0, 'MUTANT: the startup block runs the catch-up through the router\'s index');
   assert.ok(seq > run, 'MUTANT: the derived writer starts through the sequencer, after the catch-up line');
   assert.doesNotMatch(src, /setImmediate\(\(\) => derivedClaims\?\.start\(\)\)/, 'MUTANT: no bare timer starts the derived writer');
