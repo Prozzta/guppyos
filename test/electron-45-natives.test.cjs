@@ -1,10 +1,12 @@
 'use strict';
+require('./tools/own-job.cjs');
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const test = require('node:test');
+const { tempDir } = require('./tools/test-temp.cjs');
 
 const root = path.join(__dirname, '..');
 const electron = process.platform === 'win32'
@@ -14,7 +16,8 @@ const probe = path.join(__dirname, 'electron-45-native-probe.cjs');
 const available = fs.existsSync(electron);
 
 function run(runAsNode) {
-  const env = { ...process.env, MUNDER_HIDDEN: '1' };
+  // The probe's own folder (WAL database, isolated Electron app paths): removed when this file ends.
+  const env = { ...process.env, MUNDER_HIDDEN: '1', E45_PROBE_DIR: tempDir('electron45-probe-') };
   if (runAsNode) env.ELECTRON_RUN_AS_NODE = '1';
   else delete env.ELECTRON_RUN_AS_NODE;
   return spawnSync(electron, [probe], { cwd: root, env, encoding: 'utf8', windowsHide: true, timeout: 30_000 });

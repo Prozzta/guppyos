@@ -8,6 +8,13 @@ const os = require('node:os');
 const path = require('node:path');
 
 assert.ok(process.versions.electron, 'must run in Electron');
+// Everything this probe writes goes under the folder the test owns (and removes): the WAL database
+// and, under normal Electron, every app path (HARNESS-CRASHPAD). No folder, no run.
+const work = process.env.E45_PROBE_DIR;
+if (!work || !fs.existsSync(work)) {
+  process.stderr.write('electron-45-native-probe: E45_PROBE_DIR (a folder the test removes) is required\n');
+  process.exit(2);
+}
 const pty = require('node-pty');
 const Database = require('better-sqlite3');
 const ort = require('onnxruntime-node');
@@ -24,7 +31,7 @@ db.exec('create virtual table vectors using vec0(embedding float[2] distance_met
 db.prepare('insert into vectors(rowid, embedding) values (?, ?)').run(1n, Buffer.from(new Float32Array([1, 0]).buffer));
 assert.equal(db.prepare('select rowid from vectors where embedding match ? and k = 1').get(Buffer.from(new Float32Array([1, 0]).buffer)).rowid, 1, 'vec0 KNN queried');
 db.close();
-const walFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'electron45-sqlite-')), 'wal.sqlite');
+const walFile = path.join(work, 'wal.sqlite');
 const walDb = new Database(walFile);
 assert.equal(walDb.pragma('journal_mode = WAL', { simple: true }), 'wal', 'WAL enabled');
 walDb.close();
@@ -51,5 +58,7 @@ if (process.env.ELECTRON_RUN_AS_NODE === '1') {
 } else {
   // Do not create a window: this is a hidden native-loader smoke only.
   const { app } = require('electron');
+  const { isolateAppPaths } = require('./electron-harness/isolate-paths.cjs');
+  isolateAppPaths(app, path.join(work, 'electron'));
   app.whenReady().then(() => { console.log(report); app.exit(0); });
 }

@@ -43,9 +43,11 @@ function run() {
 }
 const close = (a, b, msg) => assert.ok(Math.abs(a - b) < 1e-5, `${msg}: ${a} vs ${b}`);
 
-test('engine: the shipped driver is better-sqlite3 12 on SQLite 3.53+, under Electron\'s ABI, with vec0', { skip: !HAVE_ELECTRON }, () => {
+test('engine: the shipped driver is better-sqlite3 13 on SQLite 3.53+, under Electron\'s ABI, with vec0', { skip: !HAVE_ELECTRON }, () => {
   const { versions: v } = run();
-  assert.match(v.driver, /^12\./);
+  // 075adc11 (Electron 45.3.0) moved the driver to 13.0.3, pinned exact in package.json: the version shipped.
+  assert.match(v.driver, /^13\./);
+  assert.equal(v.driver, require('../package.json').dependencies['better-sqlite3'], 'the driver package.json ships');
   const [maj, min] = v.sqlite.split('.').map(Number);
   assert.ok(maj === 3 && min >= 53, `SQLite ${v.sqlite}`);
   assert.ok(v.electron, 'ran under Electron as Node');
