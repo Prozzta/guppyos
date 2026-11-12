@@ -47,7 +47,7 @@ const MUTANTS = [
   ['A13 the ledger route reads hot only', INDEX, 'const t = hive.allTasks().tasks;', 'const t = (hive.tasks() as { tasks: unknown[] }).tasks;', at('readers that need')],
   ['A14 statusSince of a non-done status counts', ARCH, "if (at === null && meta && meta.status === 'done' && typeof meta.statusSince", 'if (at === null && meta && typeof meta.statusSince', at('planArchive')],
   ['A15 a torn archive line is fatal', ARCH, 'try { row = JSON.parse(line); } catch { continue; }', 'row = JSON.parse(line);', at('a torn last archive line')],
-  ['A16 the reader cache ignores a new archive file', HIVE, ' && this.archiveCache.stamp === stamp)', ')', at('a torn last archive line')],
+  ['A16 the reader cache ignores a new archive file', HIVE, ' && c.stamp === stamp) { c.checkedAt = now;', ') { c.checkedAt = now;', at('a torn last archive line')],
   ['A17 a torn tail is not ended before an append', ARCH, "writeSync(fd, (torn ? '\\n' : '') + lines", 'writeSync(fd, lines', at('Jim MUST: a torn archive tail')],
   ['A18 the pass drops cards that never read back', HIVE,
     'const landed = new Set(moving.filter((t) => JSON.stringify(back.get(t.id)) === JSON.stringify(t)).map((t) => t.id));',
@@ -60,7 +60,7 @@ const MUTANTS = [
 ];
 
 checkAnchors(ROOT, MUTANTS.map(([name, file, from]) => ({ name, file, from })));
-const run = () => spawnSync(process.execPath, ['--test', TEST], { cwd: ROOT, encoding: 'utf8', windowsHide: true, timeout: 300_000 });
+const run = () => spawnSync(process.execPath, ['--test', '--test-reporter=tap', TEST], { cwd: ROOT, encoding: 'utf8', windowsHide: true, timeout: 300_000 });
 if (run().status !== 0) {
   console.log(`BASELINE RED: ${TEST} fails unmutated, so no mutant proves anything.`);
   process.exit(2);
