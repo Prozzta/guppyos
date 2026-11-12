@@ -50,7 +50,7 @@ export class ClaimsBootstrap {
         }
         try {
           const result = await this.d.importOne(agentId);
-          state.agents[agentId] = { state: 'done', at: this.d.now(), ...(result.refused?.length ? { reason: `refused ${result.refused.length} legacy entries` } : {}) };
+          state.agents[agentId] = { state: 'done', at: this.d.now(), ...(result?.refused?.length ? { reason: `refused ${result.refused.length} legacy entries` } : {}) };
           this.d.log({ kind: 'claims-bootstrap-import', agentId, ok: true });
         } catch (e) {
           state.agents[agentId] = { state: 'failed', at: this.d.now(), reason: String(e).slice(0, 160) };
