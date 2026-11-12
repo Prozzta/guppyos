@@ -77,25 +77,39 @@ export function mirrorParseMs(): number | null {
 
 /**
  * MIRROR-STARTUP-196: times the real parse. @xterm/headless queues write() and parses in
- * WriteBuffer._innerWrite slices (setTimeout, about 12 ms each), so wall time around that
- * synchronous method is the mirror's main-thread cost. Guppy itself is not run in a capped job;
- * tests inject this clock when their test process is capped. Only the outermost call is timed (it can call itself
- * directly when a handler resumes). An xterm without the method is reported, never guessed: the
+ * WriteBuffer._innerWrite slices (setTimeout, about 12 ms each); that synchronous method has no
+ * off-CPU path, so its cost is the main thread's CPU time across it (threadCpuMs).
+ * MIRROR-GUARD-CPU-TIME (1.1.105): it was wall time (MIRROR-STARTUP-196, when Node 20 had no thread
+ * clock). Under machine load wall time also counts the seconds the thread waited for a core, so the
+ * guard turned god's mirrors off for load the mirror did not cause (32 burners: 0.034 share against
+ * the 0.02 bar, 0.0018 idle). Tests inject their own clock. Only the outermost call is timed (it can call itself
+ * directly when a handler resumes). An xterm without the method, or a runtime with no thread clock, is reported, never guessed: the
  * guard then cannot blame the mirror for lag (test/mirror-startup-196 pins the method on the
  * installed xterm, so an upgrade that drops it fails there).
  */
-// Keep the receiver: Node's Performance.now is not safely callable when passed as an unbound method.
-export function timeParse(t: unknown, add: (ms: number) => void, now: () => number = () => performance.now()): boolean {
+/**
+ * MIRROR-GUARD-CPU-TIME: this thread's CPU ms (user + system), process.threadCpuUsage (Node 23.9+,
+ * Electron 45; no native addon). On Windows it is GetThreadTimes, which advances in scheduler ticks
+ * (15.6 ms): one slice reads 0 or a tick, but the guard judges sums over a 10 s window, where the
+ * ticks average out to the parse's CPU. null when this runtime has no thread clock.
+ */
+export const threadCpuMs: (() => number) | null = typeof (process as { threadCpuUsage?: unknown }).threadCpuUsage === 'function'
+  ? () => { const u = process.threadCpuUsage(); return (u.user + u.system) / 1000; }
+  : null;
+
+export function timeParse(t: unknown, add: (ms: number) => void, now: (() => number) | null = threadCpuMs): boolean {
+  if (!now) return false;
+  const clock = now;
   const wb = (t as { _core?: { _writeBuffer?: Record<string, unknown> } })?._core?._writeBuffer;
   const inner = wb?._innerWrite;
   if (!wb || typeof inner !== 'function') return false;
   let depth = 0;
   wb._innerWrite = function timed(this: unknown, ...a: unknown[]): unknown {
     if (depth++ > 0) { try { return inner.apply(this, a); } finally { depth--; } }
-    const t0 = now();
+    const t0 = clock();
     try { return inner.apply(this, a); } finally {
       depth--;
-      add(now() - t0);
+      add(clock() - t0);
     }
   };
   return true;
