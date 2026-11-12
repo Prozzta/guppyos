@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 // BLOB-GAZE: the REAL blobatar gaze driver, under the app's own Electron, moves the eyes after lookAt.
 // Root cause this pins: blobatar measures the eye travel with isPointInFill(new DOMPoint(...)); the
 // Chromium in Electron 32 only took an SVGPoint, so the measure threw, no eye offsets were written and
@@ -6,6 +7,7 @@
 // measure, fails here instead of shipping a Blob with frozen eyes.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const test = require('node:test');
@@ -19,7 +21,15 @@ const read = (f) => fs.readFileSync(path.join(root, f), 'utf8');
 test('real blobatar gaze: lookAt left/right writes eye offsets of opposite sign and moves the eyes', { skip: !fs.existsSync(electron) && 'Electron not installed' }, () => {
   const env = { ...process.env, MUNDER_HIDDEN: '1' };
   delete env.ELECTRON_RUN_AS_NODE;
-  const r = spawnSync(electron, [path.join(__dirname, 'blob-gaze-driver-probe.cjs')], { cwd: root, env, encoding: 'utf8', windowsHide: true, timeout: 60_000 });
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'blob-gaze-driver-'));
+  let r;
+  try {
+    r = spawnSync(electron, [path.join(__dirname, 'blob-gaze-driver-probe.cjs'), '--sandbox', sandbox], { cwd: root, env, encoding: 'utf8', windowsHide: true, timeout: 60_000 });
+  } finally {
+    // The child has exited, so nothing holds files under the sandbox any more (no TEMP leak).
+    fs.rmSync(sandbox, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+  assert.equal(fs.existsSync(sandbox), false, 'the probe sandbox is removed');
   assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
   const out = JSON.parse(r.stdout.trim().split(/\r?\n/).at(-1));
   assert.equal(out.pif, true, 'the engine accepts blobatar\'s isPointInFill(DOMPoint)');
