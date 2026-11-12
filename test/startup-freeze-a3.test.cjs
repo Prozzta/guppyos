@@ -438,8 +438,10 @@ test('main wiring: the startup readers run after the warm, and read-only callers
   }
   assert.ok(!/setImmediate\((claimsAnchorCheck|syncReaderWatchers)\)/.test(block), 'no startup reader runs before the warm');
   assert.match(src, /claimsWarmReady\(\)\.then\(\(\) => importAtStart\(\{/, 'the import waits for the warm');
-  // The one full read left in main is the purge scrub (an integrity path); the rest use the cache.
-  assert.equal((src.match(/store\.readLedger\(/g) ?? []).length, 1);
+  // The full reads left in main are the purge scrub (an integrity path) and int's god-only bootstrap import (b247909c,
+  // under the heavy lock, not at startup); the rest use the cache.
+  assert.equal((src.match(/store\.readLedger\(/g) ?? []).length, 2);
+  assert.match(src, /importOne: async \(agentId\) => \{\s*\n\s*const report = await shadowImport\(\{ hiveRoot: root, append: makeW6Append\(store\), read: \(a\) => store\.readLedger\(a\),/);
   assert.match(src, /verifiedPrefix\(ep\.store\.readLedger\(agentId\)\);\s*\n\s*if \(!prefix\) return 0;/);
   assert.match(src, /checkpoint: \{\s*\n\s*load: \(\) => \{ try \{ return readFileSync\(join\(app\.getPath\('userData'\), CLAIMS_CHECKPOINT_FILE\)/);
 });

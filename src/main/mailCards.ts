@@ -442,7 +442,7 @@ const keyHash = (k: SentKey): string => createHash('sha256').update(k).digest('h
 // 5-25 s per folder (about 29k mail files, cold cache).
 
 /** One file operation a step generator asks its driver for; `tick` only offers a pause. */
-export type MailScanOp = { readdir: string } | { read: string } | { write: string; text: string } | { tick: true };
+export type MailScanOp = { readdir: string } | { read: string } | { save: string; text: string } | { tick: true };
 /** A step: a file op, or undefined (a pause point the startup catch-up always honours). */
 type Step = MailScanOp | undefined;
 type Steps<T> = Generator<Step, T, unknown>;
@@ -463,10 +463,10 @@ function runOpSync(op: Step): unknown {
   if (!op || 'tick' in op) return undefined;
   if ('readdir' in op) { try { return readdirSync(op.readdir); } catch { return []; } }
   if ('read' in op) { try { return readFileSync(op.read, 'utf8'); } catch { return undefined; } }
-  mkdirSync(dirname(op.write), { recursive: true });
-  const tmp = `${op.write}.tmp-${process.pid}`;
+  mkdirSync(dirname(op.save), { recursive: true });
+  const tmp = `${op.save}.tmp-${process.pid}`;
   writeFileSync(tmp, op.text);
-  renameSync(tmp, op.write);
+  renameSync(tmp, op.save);
   return undefined;
 }
 
@@ -475,10 +475,10 @@ async function runOpAsync(op: MailScanOp): Promise<unknown> {
   if ('tick' in op) return undefined;
   if ('readdir' in op) { try { return await fsp.readdir(op.readdir); } catch { return []; } }
   if ('read' in op) { try { return await fsp.readFile(op.read, 'utf8'); } catch { return undefined; } }
-  await fsp.mkdir(dirname(op.write), { recursive: true });
-  const tmp = `${op.write}.tmp-${process.pid}`;
+  await fsp.mkdir(dirname(op.save), { recursive: true });
+  const tmp = `${op.save}.tmp-${process.pid}`;
   await fsp.writeFile(tmp, op.text);
-  await fsp.rename(tmp, op.write);
+  await fsp.rename(tmp, op.save);
   return undefined;
 }
 
@@ -752,7 +752,7 @@ export function* backfillMailCardSteps(hiveRoot: string, now: string, index: Mai
   // the scan manifest, last, only where it changed (sorted, so one floor gives one file)
   for (const [a, s] of scans) {
     const text = JSON.stringify(sortedScan(s.now));
-    if (text !== s.text) yield { write: scanFile(hiveRoot, a), text };
+    if (text !== s.text) yield { save: scanFile(hiveRoot, a), text };
   }
   return counts;
 }

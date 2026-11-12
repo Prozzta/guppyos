@@ -133,7 +133,8 @@ test('F1 wiring (B1/B3): no opt-in call; dispose() runs before reset\'s rm, befo
   const idx = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'index.ts'), 'utf8').replace(/\r\n/g, '\n');
   assert.doesNotMatch(idx, /keepAppendFilesOpen\(/, 'the default is the app\'s path: nothing to turn on');
   // QUIT-HANG reshaped finish (quit-done row first); what matters: dispose, then app.exit.
-  assert.match(idx, /const finish = \(\): void => \{[\s\S]{0,300}?try \{ hive\.dispose\(\); \}[\s\S]{0,120}?app\.exit\(0\);/);
+  // STARTUP-FREEZE-104 A9 adds the key-registry flush before dispose (+ about 220 characters).
+  assert.match(idx, /const finish = \(\): void => \{[\s\S]{0,520}?try \{ hive\.dispose\(\); \}[\s\S]{0,120}?app\.exit\(0\);/);
   const reset = idx.slice(idx.indexOf("ipcMain.handle('app:resetAll'"));
   const disposeAt = reset.indexOf('hive.dispose();'), rmAt = reset.indexOf('rmSync(hiveDir,');
   assert.ok(disposeAt > 0 && rmAt > disposeAt, 'reset: dispose, then rm');

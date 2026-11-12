@@ -314,7 +314,9 @@ test('main wiring: the start-up export sync is syncAllAsync, the legacy cache is
   assert.equal(idx.split('legacyCache: claimsLegacyCache').length - 1, 2, 'the import and the reader watchers');
   assert.doesNotMatch(idx, /return root \? loadRegistry\(root\)/, 'no reader re-parses the registry');
   const store = fs.readFileSync(path.join(ROOT, 'src', 'main', 'claims', 'store.ts'), 'utf8');
-  assert.equal(store.split('registry = loadRegistryShared(this.d.hiveRoot)').length - 1, 3);
+  // + 1: purge derives over the shared registry too.
+  assert.equal(store.split('registry = loadRegistryShared(this.d.hiveRoot)').length - 1, 4);
+  assert.match(store, /let registry;\s*\n\s*try \{ registry = loadRegistryShared\(this\.d\.hiveRoot\); \} catch \{ registry = undefined; \}\s*\n\s*const state = derive\(read\.records, registry \?\? DEFAULT_KEY_REGISTRY, \{ r4: false \}\);\s*\n\s*for \(const id of ids\)/, 'purge');
   // A9 replaced the key check's own copy (a parse per new key) with the store's KeyRegistryWriter, whose check
   // leaves the working copy unchanged until commit (startup-freeze-a9).
   assert.match(store, /try \{ c = writer\.check\(draft\.key, agentId, wt\); \} catch \(e\) \{ return \{ error: `the key registry is unreadable/, 'the key check uses the writer');

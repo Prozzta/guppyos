@@ -69,7 +69,7 @@ async function start(root, extra = {}) {
     const counts = await MC.startupMailCardCatchUp(root, {
       log: (r) => rows.push(r), now: () => T, pause: async () => { pauses++; },
       runOp: async (op) => {
-        if ('read' in op) ops.read.push(op.read); else if ('readdir' in op) ops.readdir++; else if ('write' in op) ops.write.push(op.write);
+        if ('read' in op) ops.read.push(op.read); else if ('readdir' in op) ops.readdir++; else if ('save' in op) ops.write.push(op.save);
         return extra.runOp ? extra.runOp(op) : realOp(op);
       },
       ...(extra.clock ? { clock: extra.clock } : {}),
@@ -80,8 +80,8 @@ async function start(root, extra = {}) {
 async function realOp(op) {
   if ('readdir' in op) { try { return fs.readdirSync(op.readdir); } catch { return []; } }
   if ('read' in op) { try { return realReadFileSync(op.read, 'utf8'); } catch { return undefined; } }
-  fs.mkdirSync(path.dirname(op.write), { recursive: true });
-  fs.writeFileSync(op.write, op.text);
+  fs.mkdirSync(path.dirname(op.save), { recursive: true });
+  fs.writeFileSync(op.save, op.text);
   return undefined;
 }
 
