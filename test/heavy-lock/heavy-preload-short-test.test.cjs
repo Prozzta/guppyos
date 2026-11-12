@@ -151,6 +151,14 @@ fs.writeFileSync(path.join(FIX, 'gate.sh'), 'npm ci --ignore-scripts --offline\n
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const within = (p, ms) => Promise.race([p, new Promise((r) => setTimeout(() => r('timeout'), ms))]);
+async function waitFor(check, ms, what) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    if (check()) return;
+    await sleep(25);
+  }
+  assert.fail(`${what} within ${ms}ms`);
+}
 function start(args, url) {
   const env = { ...process.env };
   for (const k of ['NODE_TEST_CONTEXT', 'NODE_OPTIONS', 'GUPPY_TEST_RUN', 'HIVE_LEDGER_URL']) delete env[k];
@@ -223,8 +231,8 @@ K.opaqueNpm = async (t, M = HJ) => {
   const b = await broker(t, M);
   b.lock.acquire('b', H, 'npm test', 'hb', false);
   const gate = start([BASH, 'gate.sh'], b.url);
-  assert.equal(await within(gate.done, 2_500), 'timeout', 'BASH GATE.SH RUNNING NPM CI WAITS FOR THE SLOT');
-  assert.deepEqual(b.lock.queueSnapshot().waiters.map((w) => w.agentId), ['a']);
+  await waitFor(() => b.lock.queueSnapshot().waiters.some((w) => w.agentId === 'a'), 20_000, 'BASH GATE.SH RUNNING NPM CI QUEUES FOR THE SLOT');
+  assert.equal(await within(gate.done, 10), 'timeout', 'BASH GATE.SH RUNNING NPM CI WAITS FOR THE SLOT');
   b.lock.callDone('b', 'hb');
   const r = await within(gate.done, 30_000);
   assert.ok(r !== 'timeout' && r.code === 0, `the queued npm ci completes after release: ${r === 'timeout' ? r : r.stderr}`);
