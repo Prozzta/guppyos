@@ -23,7 +23,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { spawn } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const loadTs = require('../load-ts.cjs');
 const { readSource } = require('../read-source.cjs');
 
@@ -35,6 +35,7 @@ const HJF = 'src/main/heavyJob.ts';
 const HJ = loadTs(HJF);
 const { HookServer } = loadTs('src/main/hooks.ts');
 const PRELOAD = path.join(REPO, 'resources', 'heavy-preload.cjs');
+const NPM_CLI = path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js');
 const H = { heavy: true, kind: 'suite' };
 const C0 = 1_000_000 - 5_000;
 
@@ -140,9 +141,13 @@ test('a single file nobody shows still waits: a hidden script, a node parent, no
 const JAIL = fs.mkdtempSync(path.join(os.tmpdir(), 'hpst-'));
 test.after(() => { try { fs.rmSync(JAIL, { recursive: true, force: true }); } catch { /* best effort */ } });
 const FIX = path.join(JAIL, 'fix');
+const BASH = process.platform === 'win32' ? 'C:\\Program Files\\Git\\bin\\bash.exe' : 'bash';
 fs.mkdirSync(FIX);
 fs.writeFileSync(path.join(FIX, 'leaf.test.cjs'), "require('node:test')('leaf', () => {});\n");
 fs.writeFileSync(path.join(FIX, 'two.test.cjs'), "require('node:test')('two', () => {});\n");
+fs.writeFileSync(path.join(FIX, 'package.json'), JSON.stringify({ name: 'heavy-preload-fixture', version: '1.0.0' }));
+fs.writeFileSync(path.join(FIX, 'package-lock.json'), JSON.stringify({ name: 'heavy-preload-fixture', version: '1.0.0', lockfileVersion: 3, requires: true, packages: { '': { name: 'heavy-preload-fixture', version: '1.0.0' } } }));
+fs.writeFileSync(path.join(FIX, 'gate.sh'), 'npm ci --ignore-scripts --offline\n');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const within = (p, ms) => Promise.race([p, new Promise((r) => setTimeout(() => r('timeout'), ms))]);
@@ -156,6 +161,21 @@ function start(args, url) {
   child.stdout.resume();
   return { child, done: new Promise((resolve) => child.on('close', (code) => resolve({ code, stderr }))) };
 }
+
+function npmKind(args, preload = PRELOAD) {
+  const r = spawnSync(process.execPath, [preload, '--guppy-heavy-npm-command', NPM_CLI, ...args], { encoding: 'utf8', windowsHide: true });
+  assert.equal(r.status, 0, `npm parser helper exits cleanly: ${r.stderr}`);
+  return JSON.parse(r.stdout).preloadKind;
+}
+K.npmCommand = (preload = PRELOAD) => {
+  for (const args of [
+    ['--prefix', 'C:/x', 'ci'], ['-C', 'dir', 'install'], ['--workspace', 'w', 'i'],
+    ['clean-install'], ['ic'], ['install-clean'], ['in'], ['insta'], ['cit'], ['clean-install-test'], ['sit'],
+    ['it'], ['rb'], ['update'], ['up'], ['u'], ['upgrade'], ['udpate'], ['dedupe']
+  ]) assert.equal(npmKind(args, preload), 'install', `npm ${args.join(' ')} TAKES AN INSTALL LEASE`);
+  assert.equal(npmKind(['run', 'install'], preload), null, 'npm run install is not confused with the install command');
+};
+test('npm CLI options and npm aliases still take an install lease, without treating a run-script name as a command', () => K.npmCommand());
 async function broker(t, M) {
   const sock = process.platform === 'win32' ? `\\\\.\\pipe\\hpst-${process.pid}-${Math.random().toString(36).slice(2)}` : path.join(fs.mkdtempSync(path.join(JAIL, 's-')), 's.sock');
   const hive = {
@@ -196,6 +216,29 @@ K.e2e = async (t, M = HJ) => {
   assert.equal(b.lock.snapshot().length, 0, 'its lease is released at exit');
 };
 test('E2E: through the real preload, a single file runs at once while another agent holds; a full suite waits, then runs', { timeout: 120_000 }, (t) => K.e2e(t));
+
+K.opaqueNpm = async (t, M = HJ) => {
+  const b = await broker(t, M);
+  b.lock.acquire('b', H, 'npm test', 'hb', false);
+  const gate = start([BASH, 'gate.sh'], b.url);
+  assert.equal(await within(gate.done, 2_500), 'timeout', 'BASH GATE.SH RUNNING NPM CI WAITS FOR THE SLOT');
+  assert.deepEqual(b.lock.queueSnapshot().waiters.map((w) => w.agentId), ['a']);
+  b.lock.callDone('b', 'hb');
+  const r = await within(gate.done, 30_000);
+  assert.ok(r !== 'timeout' && r.code === 0, `the queued npm ci completes after release: ${r === 'timeout' ? r : r.stderr}`);
+  assert.match(r.stderr, /\[guppy\] waiting for the heavy-job slot \(held by b/);
+  assert.ok(b.logs.some((x) => x.action === 'lease' && x.agentId === 'a' && x.heavyKind === 'install'), 'the npm CLI holds an install lease');
+};
+test('E2E: an opaque bash gate.sh cannot bypass the slot with npm ci', { timeout: 120_000 }, (t) => K.opaqueNpm(t));
+
+test('MUTANT: the old first-non-option npm parse misses a prefix option value and aliases', () => {
+  const source = fs.readFileSync(PRELOAD, 'utf8');
+  const old = 'deref(String(arg).toLowerCase())';
+  assert.equal(source.split(old).length - 1, 1, 'mutant target appears once');
+  const mutant = path.join(JAIL, 'heavy-preload-old-npm-parse.cjs');
+  fs.writeFileSync(mutant, source.replace(old, "deref(String(args.find((arg) => !String(arg).startsWith('-'))).toLowerCase())"));
+  assert.throws(() => K.npmCommand(mutant), /TAKES AN INSTALL LEASE/);
+});
 
 // ─── MUTANT CENSUS ──────────────────────────────────────────────────────────────────────────
 

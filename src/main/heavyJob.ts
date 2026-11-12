@@ -2435,6 +2435,8 @@ export interface HeavyLeaseRequest {
   suite?: boolean;
   /** A suite runner's argv after node (argv[1] is run-tests.cjs): classified as PreToolUse would. */
   runner?: string[];
+  /** A non-test heavy program recognized by the preload itself, not a wrapper script name. */
+  preloadKind?: 'install' | 'build';
   /** HEAVY-LOCK-FALSE-NEGATIVES: the runner's working folder (its test files are listed there). */
   cwd?: string;
   /** GUPPY_TEST_RUN as the process inherited it: '<pid>:<createdMs>' of an enclosing classified run. */
@@ -3339,8 +3341,11 @@ export class HeavyJobLock {
       this.log({ kind: 'heavy-lock', action: 'lease-single', agentId, pid });
       return { state: 'light', run, why: 'one test file under a shell' };
     }
-    const kind: HeavyKind = suite ? 'suite' : 'bench';
-    const cls: HeavyClass = { heavy: true, kind, why: suite ? 'a suite run (heavy preload)' : 'a node --test its call does not show (heavy preload)' };
+    const kind: HeavyKind = suite ? 'suite' : r.preloadKind === 'install' || r.preloadKind === 'build' ? r.preloadKind : 'bench';
+    const why = suite ? 'a suite run (heavy preload)'
+      : r.preloadKind ? `a ${r.preloadKind} program (heavy preload)`
+        : 'a node --test its call does not show (heavy preload)';
+    const cls: HeavyClass = { heavy: true, kind, why };
     const id = `lease:${run}`;
     const deadline = this.now() + (this.d.leasePollMs ?? HEAVY_LEASE_POLL_MS);
     for (;;) {

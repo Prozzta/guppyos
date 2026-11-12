@@ -14,7 +14,41 @@
  * Every other node process (the agent CLIs' node launchers, npm, tsc, electron-as-node) leaves at the
  * first statement below: no require, no I/O.
  */
-if (require.main !== module && !((process.execArgv.includes('--test') && !process.env.NODE_TEST_CONTEXT) || /(^|[\\/])(run-?tests?|test-?runner|run-?all(-?tests)?)\.[cm]?[jt]s$/i.test(process.argv[1] || ''))) return;
+const entryPath = process.argv[1] || '';
+const entry = entryPath.replace(/\\/g, '/').toLowerCase();
+const NPM_HEAVY_COMMANDS = new Set(['ci', 'install', 'install-test', 'install-ci-test', 'rebuild', 'update', 'dedupe']);
+const NPM_FALLBACK_ALIASES = {
+  add: 'install', i: 'install', in: 'install', ins: 'install', inst: 'install', insta: 'install', instal: 'install',
+  isnt: 'install', isnta: 'install', isntal: 'install', isntall: 'install', it: 'install-test', cit: 'install-ci-test',
+  sit: 'install-ci-test', rb: 'rebuild', u: 'update', up: 'update', upgrade: 'update', udpate: 'update',
+  'clean-install': 'ci', 'install-clean': 'ci', 'isntall-clean': 'ci', ic: 'ci'
+};
+const npmFallbackDeref = (word) => NPM_HEAVY_COMMANDS.has(word) ? word : NPM_FALLBACK_ALIASES[word];
+/** The npm CLI chooses the first known command after options; option values are not commands. */
+function npmInstallKind(cli, args) {
+  let deref = npmFallbackDeref;
+  try {
+    const path = require('node:path');
+    const list = require(path.join(path.dirname(cli), '..', 'lib', 'utils', 'cmd-list.js'));
+    if (typeof list.deref === 'function') deref = list.deref;
+  } catch { /* npm changed layout: the pinned fallback covers install aliases */ }
+  for (const arg of args) {
+    const command = deref(String(arg).toLowerCase());
+    if (command !== undefined) return NPM_HEAVY_COMMANDS.has(command) ? 'install' : null;
+  }
+  return null;
+}
+if (require.main === module && process.argv[2] === '--guppy-heavy-npm-command') {
+  process.stdout.write(JSON.stringify({ preloadKind: npmInstallKind(process.argv[3], process.argv.slice(4)) }));
+  return;
+}
+const testRun = process.execArgv.includes('--test') && !process.env.NODE_TEST_CONTEXT;
+const suiteRunner = /(^|[\\/])(run-?tests?|test-?runner|run-?all(-?tests)?)\.[cm]?[jt]s$/i.test(entry);
+const npmCli = /(^|[\\/])npm(?:-cli)?\.js$/i.test(entry);
+const install = npmCli && npmInstallKind(entryPath, process.argv.slice(2)) === 'install';
+const builder = /(?:^|[\\/])node_modules[\\/](?:electron-builder|app-builder-lib)[\\/].+\.[cm]?[jt]s$/i.test(entry);
+const preloadKind = install ? 'install' : builder ? 'build' : null;
+if (require.main !== module && !(testRun || suiteRunner || preloadKind)) return;
 
 const HELPER = '--guppy-heavy-helper';
 // Synchronous: the process blocks in spawnSync right after, and a piped stderr is asynchronous on Windows.
@@ -65,7 +99,6 @@ function failOpen(why) {
   } catch { /* the stderr line stands */ }
 }
 
-const testRun = process.execArgv.includes('--test');
 const files = testRun ? process.argv.slice(1) : [];
 const req = {
   op: 'acquire',
@@ -74,8 +107,8 @@ const req = {
   ppid: process.ppid,
   files,
   suite: testRun && files.length === 0,
-  ...(testRun ? {} : { runner: process.argv.slice(1), cwd: process.cwd() }),
-  ...(process.env.GUPPY_TEST_RUN ? { parentRun: process.env.GUPPY_TEST_RUN } : {})
+  ...(testRun ? {} : suiteRunner ? { runner: process.argv.slice(1), cwd: process.cwd() } : { preloadKind }),
+  ...(testRun && process.env.GUPPY_TEST_RUN ? { parentRun: process.env.GUPPY_TEST_RUN } : {})
 };
 let told = false;
 for (;;) {
