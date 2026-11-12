@@ -9,14 +9,20 @@ import { existsSync, watch, type FSWatcher } from 'node:fs';
 
 export type DirectoryWatchListener = (event: string, filename: string | null) => void;
 
-/** Watch `dir`, closing the native handle when it disappears or reports an error. */
-export function watchDirectorySafely(dir: string, listener: DirectoryWatchListener): FSWatcher {
+/** Watch `dir`, closing the native handle when it disappears or reports an error.
+ *  `onSelfClose` runs once when THIS module closes the watcher (the folder went, or an error), never
+ *  on the owner's own close(): an owner that keeps "is this folder watched" state must drop it there,
+ *  or a folder that comes back is never watched again (E45-INT-REGRESSIONS item 6: from Node 22 no
+ *  'error' comes for a deleted folder, so an owner that dropped its state on 'error' only kept a
+ *  closed watcher for good). */
+export function watchDirectorySafely(dir: string, listener: DirectoryWatchListener, onSelfClose?: () => void): FSWatcher {
   let watcher: FSWatcher | null = null;
   let closed = false;
   const close = (): void => {
     if (closed) return;
     closed = true;
     try { watcher?.close(); } catch { /* already closed */ }
+    try { onSelfClose?.(); } catch { /* best effort: the owner's stat revalidate still bounds staleness */ }
   };
   const gone = (): boolean => {
     if (existsSync(dir)) return false;
