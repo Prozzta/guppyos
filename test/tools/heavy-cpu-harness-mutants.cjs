@@ -1,11 +1,10 @@
 'use strict';
 // HALFCORES-OVERSUBSCRIBE: the harness must reject a cmd-broken recovery child and a core-count-free M10 ratio.
 const fs = require('node:fs');
-const { spawnSync } = require('node:child_process');
 const path = require('node:path');
 const os = require('node:os');
 const root = path.join(__dirname, '..', '..');
-const { recover, mutateFile, restoreFile, checkAnchors } = require('./mutant-runner-helper.cjs');
+const { recover, mutateFile, restoreFile, checkAnchors, runTests, verdict } = require('./mutant-runner-helper.cjs');
 recover(root);
 if (process.argv.includes('--recover-only')) process.exit(0);
 const source = path.join(root, 'test', 'heavy-cpu-harness-191.test.cjs');
@@ -31,8 +30,9 @@ for (const [name, file, from, to] of mutants) {
     // from delivered CPU time versus the requested-rate ceiling.
     if (queryOriginal) mutateFile(root, source, queryOriginal, queryOriginal.replace('rate: 2500, affinity: null', 'rate: 5000, affinity: null'));
     mutateFile(root, file, original, original.replace(from, to));
-    const r = spawnSync(process.execPath, ['--test', 'test/heavy-cpu-harness-191.test.cjs'], { cwd: root, encoding: 'utf8', windowsHide: true, env: { ...process.env, LOCALAPPDATA: local } });
-    if (r.status === 0) throw new Error(`SURVIVED ${name}: ${r.stdout}\n${r.stderr}`);
+    const r = runTests(root, ['test/heavy-cpu-harness-191.test.cjs'], { timeout: 0, env: { ...process.env, LOCALAPPDATA: local } });
+    const v = verdict(r); // NO-RESULT (the run never reported) fails as loudly as a survivor
+    if (v !== 'KILLED') throw new Error(`${v} ${name}: ${v === 'NO-RESULT' ? `${r.why}\n` : ''}${r.stdout}\n${r.stderr}`);
     console.log(`KILLED ${name}`);
   } finally { restoreFile(root, file, original); if (queryOriginal) restoreFile(root, source, queryOriginal); fs.rmSync(local, { recursive: true, force: true }); }
 }

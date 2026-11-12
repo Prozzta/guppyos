@@ -11,8 +11,7 @@
 // restore in a finally), so a killed run is restored by the next one; --anchors-only checks the anchors.
 const fs = require('node:fs');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
-const { recover, mutateFile, restoreFile, checkAnchors } = require('./mutant-runner-helper.cjs');
+const { recover, mutateFile, restoreFile, checkAnchors, runTests, verdict } = require('./mutant-runner-helper.cjs');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const TEST = 'test/load-flakes-178-file-job.test.cjs';
@@ -33,8 +32,10 @@ const MUTANTS = [
   ['FJ-e the LIVE test builds its exe in a temp folder', TEST, 'dir: path.join(R.FILE_JOB_DIR, `fj-bc-${process.pid}`) });\n    assert.ok(a.exe', 'dir: path.join(os.tmpdir(), `fj-bc-${process.pid}`) });\n    assert.ok(a.exe', TEST, 'FJ-e'],
 ];
 
-const run = (file, pattern) => spawnSync(process.execPath, [`--test-name-pattern=${pattern}`, file], { cwd: ROOT, encoding: 'utf8', windowsHide: true, timeout: 300_000 });
-const failed = (r, pattern) => r.status !== 0 && new RegExp(`^not ok \\d+ - ${pattern}`, 'm').test(r.stdout);
+// MUTANT-RUNNERS-TAP-PARSE: this ran the file bare (no --test, no reporter), so under Node >= 23's spec
+// output neither '# pass' nor 'not ok' ever printed; it now runs under --test with TAP via the shared helper.
+const run = (file, pattern) => runTests(ROOT, [file], { timeout: 300_000, args: [`--test-name-pattern=${pattern}`] });
+const dies = (pattern) => new RegExp(`^not ok \\d+ - ${pattern}`, 'm');
 
 recover(ROOT);
 if (process.argv.includes('--recover-only')) process.exit(0);
@@ -43,8 +44,8 @@ checkAnchors(ROOT, MUTANTS.map(([name, file, from]) => ({ name, file, from })));
 let bad = 0;
 for (const [file, pattern] of [...new Set(MUTANTS.map((m) => `${m[4]}\0${m[5]}`))].map((k) => k.split('\0'))) {
   const r = run(file, pattern);
-  if (r.status !== 0 || !/^# pass [1-9]/m.test(r.stdout)) {
-    console.log(`BASELINE RED: ${file} "${pattern}" (status ${r.status}), so no mutant proves anything.`);
+  if (r.noResult || r.fail !== 0 || r.cancelled !== 0 || r.pass === 0) {
+    console.log(`BASELINE ${r.noResult ? `NO-RESULT (${r.why})` : 'RED'}: ${file} "${pattern}" (status ${r.status}, ${r.pass} passing), so no mutant proves anything.`);
     bad += 1;
   }
 }
@@ -69,9 +70,9 @@ for (const [name, rel, from, to, file, pattern] of MUTANTS) {
   } finally {
     restoreFile(ROOT, abs, original);
   }
-  const killed = failed(r, pattern);
-  if (!killed) bad += 1;
-  console.log(`${killed ? 'KILLED' : r.status !== 0 ? 'KILLED ELSEWHERE' : 'SURVIVED'} ${name}`);
+  const v = verdict(r, dies(pattern)); // NO-RESULT (the run never reported) is loud, never a kill
+  if (v !== 'KILLED') bad += 1;
+  console.log(`${v} ${name}${v === 'NO-RESULT' ? ` (${r.why})` : ''}`);
 }
 console.log(bad ? `${bad} of ${MUTANTS.length} not killed at their named test` : `all ${MUTANTS.length} killed`);
 process.exitCode = bad ? 1 : 0;

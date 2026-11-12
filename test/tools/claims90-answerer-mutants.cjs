@@ -11,7 +11,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { recover, mutateFile, restoreFile, checkAnchors } = require('./mutant-runner-helper.cjs');
+const { recover, mutateFile, restoreFile, checkAnchors, runTests, verdict, requireBaseline } = require('./mutant-runner-helper.cjs');
 
 const ROOT = path.join(__dirname, '..', '..');
 const CHILD = 'test/claims-90/answer-child.cjs';
@@ -103,17 +103,26 @@ const M = [
 recover(ROOT);
 if (process.argv.includes('--recover-only')) process.exit(0);
 const preArgs = process.argv.slice(2).filter((a) => a !== '--anchors-only');
+// MUTANT-RUNNERS-TAP-PARSE: a killer answers KILLED, SURVIVED or NO-RESULT. The unit killer reads its TAP summary
+// through the shared helper; the preflight killer is a CLI (not a test), so only a run that never exited (a signal,
+// a spawn error) is NO-RESULT there. A NO-RESULT is loud: it never counts as a kill.
+const UNIT = 'test/claims-90-answerer-get.test.cjs';
 function killer(k) {
-  if (k === 'unit') return spawnSync(process.execPath, ['--test', 'test/claims-90-answerer-get.test.cjs'], { cwd: ROOT, encoding: 'utf8' }).status;
+  if (k === 'unit') { const r = runTests(ROOT, [UNIT], { timeout: 0 }); const v = verdict(r); return v === 'NO-RESULT' ? `NO-RESULT (${r.why})` : v; }
   const out = fs.mkdtempSync(path.join(os.tmpdir(), 'c90-preflight-'));
-  try { return spawnSync(process.execPath, [ANS, ...preArgs, '--out', out, '--preflight-only'], { cwd: ROOT, encoding: 'utf8' }).status; } finally { fs.rmSync(out, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }); }
+  try {
+    const r = spawnSync(process.execPath, [ANS, ...preArgs, '--out', out, '--preflight-only'], { cwd: ROOT, encoding: 'utf8' });
+    if (r.error || r.status === null) return `NO-RESULT (${r.error?.code ?? r.error?.message ?? `killed by ${r.signal}`})`;
+    return r.status !== 0 ? 'KILLED' : 'SURVIVED';
+  } finally { fs.rmSync(out, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }); }
 }
 
 const lf = (s) => s.replace(/\r\n/g, '\n');
 checkAnchors(ROOT, M.map(([name, file, from]) => ({ name, file, from })));
 const base = {};
-for (const k of ['unit', 'preflight']) { base[k] = killer(k); console.log(`baseline ${k}: exit ${base[k]}`); }
-if (base.unit !== 0 || base.preflight !== 0) { console.log('baseline fails: no census'); process.exit(2); }
+base.unit = requireBaseline(runTests(ROOT, [UNIT], { timeout: 0 }), UNIT); console.log(`baseline unit: exit ${base.unit.status} (${base.unit.pass} passing)`);
+base.preflight = killer('preflight'); console.log(`baseline preflight: ${base.preflight === 'SURVIVED' ? 'exit 0' : base.preflight}`);
+if (base.preflight !== 'SURVIVED') { console.log('baseline fails: no census'); process.exit(2); }
 let killed = 0;
 for (const [name, file, from, to, killers] of M) {
   const f = path.join(ROOT, file);
@@ -124,7 +133,10 @@ for (const [name, file, from, to, killers] of M) {
     let mutated = t.replace(from, () => to);
     if (crlf) mutated = mutated.replace(/\n/g, '\r\n');
     mutateFile(ROOT, f, orig, mutated);
-    const by = killers.filter((k) => killer(k) !== 0);
+    const res = killers.map((k) => [k, killer(k)]);
+    const lost = res.filter(([, v]) => v.startsWith('NO-RESULT')).map(([k, v]) => `${k}: ${v}`);
+    const by = res.filter(([, v]) => v === 'KILLED').map(([k]) => k);
+    if (lost.length) { console.log(`NO-RESULT ${name} (${lost.join('; ')})`); continue; }
     if (by.length) killed++;
     console.log(`${by.length ? 'KILLED' : 'SURVIVED'} ${name}${by.length ? ` by ${by.join(', ')}` : ''}${by.length !== killers.length ? ` (not by ${killers.filter((k) => !by.includes(k)).join(', ')})` : ''}`);
   } finally { restoreFile(ROOT, f, orig); }

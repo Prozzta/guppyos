@@ -30,8 +30,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { spawnSync } = require('node:child_process');
-const { recover, mutateFile, restoreFile, checkAnchors } = require('./mutant-runner-helper.cjs');
+const { recover, mutateFile, restoreFile, checkAnchors, runTests } = require('./mutant-runner-helper.cjs');
 
 const REPO = path.resolve(__dirname, '..', '..');
 recover(REPO);
@@ -247,11 +246,11 @@ for (const m of chosen) {
   mutateFile(REPO, m.file, original, mutated);
   let failed = [];
   let ran = false;
+  let noResult = null;
   try {
-    const r = spawnSync(process.execPath, ['--test', '--test-reporter=tap', ...m.tests], {
-      cwd: REPO, encoding: 'utf8', timeout: 900_000
-    });
+    const r = runTests(REPO, m.tests, { timeout: 900_000 });
     ran = true;
+    noResult = r.noResult ? r.why : null;
     failed = (r.stdout || '').split('\n')
       .filter((l) => /^not ok \d+ - /.test(l))
       .map((l) => l.replace(/^not ok \d+ - /, '').trim());
@@ -259,6 +258,7 @@ for (const m of chosen) {
     // that still counts, but it is recorded so nobody mistakes it for an assertion.
     if (!failed.length && r.status !== 0 && m.alsoNeeds === 'compile-break') {
       failed = ['(module failed to load - the export it needs is gone)'];
+      noResult = null;
     }
   } finally {
     restoreFile(REPO, m.file, original);
@@ -271,17 +271,20 @@ for (const m of chosen) {
   // which is a finding, so it is reported as a failure in that direction too.
   const verdict = !restored ? 'RESTORE-FAILED'
     : !ran ? 'RUN-FAILED'
+      // A run that never reported (no TAP summary, a timeout, a signal) proves nothing either way: loud, never a
+      // kill and never an "expected" equivalent survivor (MUTANT-RUNNERS-TAP-PARSE).
+      : noResult ? 'NO-RESULT'
       : m.equivalent ? (failed.length ? 'EQUIVALENT-NOW-DIES' : 'EQUIVALENT (expected)')
         : named ? 'KILLED'
           : failed.length ? 'KILLED-ELSEWHERE' : 'SURVIVED';
-  results.push({ ...m, failed, verdict });
+  results.push({ ...m, failed, verdict, why: noResult });
 }
 
 let bad = 0;
 for (const r of results) {
   const ok = r.verdict === 'KILLED' || r.verdict === 'EQUIVALENT (expected)';
   if (!ok) bad += 1;
-  console.log(`${r.verdict.padEnd(18)} ${r.id.padEnd(6)} ${r.what}`);
+  console.log(`${r.verdict.padEnd(18)} ${r.id.padEnd(6)} ${r.what}${r.why ? ` (${r.why})` : ''}`);
   const hit = r.failed.find((n) => r.expect.test(n));
   console.log(`                          ${hit ? `named: ${hit}` : `failed: ${r.failed.join(' | ') || '(none)'}`}`);
 }
