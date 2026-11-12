@@ -573,7 +573,7 @@ const MUTANTS = [
     killer: 'wiring', dies: /EVERY PRETOOLUSE CALL IS NOTED/ },
   // The preload itself (a real process loads the mutated file).
   { name: 'preload: no fast path (every node process asks)', file: PRE, preload: true,
-    edits: [["if (require.main !== module && !((process.execArgv.includes('--test')", "if (require.main !== module && false && !((process.execArgv.includes('--test')"]],
+    edits: [["if (require.main !== module && !(testRun || suiteRunner || preloadKind)) return;", "if (require.main !== module && false && !(testRun || suiteRunner || preloadKind)) return;"]],
     killer: 'e2eNoop', dies: /A NODE PROCESS THAT IS NOT A TEST RUN NEVER ASKS/ },
   { name: 'preload: GUPPY_TEST_RUN not passed on (a nested run waits behind another agent)', file: PRE, preload: true,
     edits: [['    process.env.GUPPY_TEST_RUN = a.run;\n', '']],
