@@ -28,7 +28,13 @@ export interface IndexSyncDeps {
   level: (agentId: string) => LedgerLevel;
   /** Agents that have a ledger. */
   agents: () => string[];
-  send: (args: { wing: string; path: string; head: string; chunks: unknown[]; delta?: boolean }) => Promise<{ ok: boolean; error?: string; json?: unknown }>;
+  /** The chunks go as objects (in-process derive) or, from the derive worker (A19), as their JSON and count. */
+  send: (args: { wing: string; path: string; head: string; chunks?: unknown[]; chunksJson?: string; chunkCount?: number; delta?: boolean }) => Promise<{ ok: boolean; error?: string; json?: unknown }>;
+  /**
+   * STARTUP-FREEZE-104 A19 (god 424399): derive and chunksFor for a fully verified read in the derive worker thread:
+   * the head, the chunks as JSON and their count. Null (or absent): derive in-process, as before.
+   */
+  offMain?: (agentId: string, read: ReadResult) => Promise<{ head: string; chunksJson: string; count: number } | null>;
   /** Called after a verified snapshot is successfully indexed. */
   onIndexed?: (agentId: string) => void;
   log?: (row: Record<string, unknown>) => void;
@@ -134,6 +140,26 @@ export class ClaimsIndexSync {
       const why = read.chain !== 'ok' && read.chain.brokenAt === 'head-anchor' ? 'head-anchor' : 'key-missing';
       this.d.log?.({ kind: 'claims-index-skipped', agentId, why });
       return { sent: false, why };
+    }
+    // A19: a fully verified read derives in the worker thread; main only passes the JSON on. A read with a chain break
+    // (a verified prefix only), a delta (not the store's kept read), or a worker fallback derives here as before.
+    if (!delta && !prefix.truncatedAt && this.d.offMain) {
+      const off = await this.d.offMain(agentId, read);
+      if (off) {
+        const reply = await this.d.send({ wing: agentId, path: claimsSourcePath(agentId), head: off.head, chunksJson: off.chunksJson, chunkCount: off.count });
+        if (!reply.ok) this.d.log?.({ kind: 'claims-index-failed', agentId, error: String(reply.error ?? '').slice(0, 160) });
+        else {
+          // A full send with no chunk objects on main: no snapshot to extend (an older one would diff against rows the
+          // index no longer has), so the next sync reads again. The queued appends are in this read.
+          this.snapshots.delete(agentId);
+          this.deltasSinceVerify.set(agentId, 0);
+          const later = this.pending.get(agentId) ?? [];
+          if (later.length <= queued.length) this.pending.delete(agentId);
+          else this.pending.set(agentId, later.slice(queued.length));
+          this.d.onIndexed?.(agentId);
+        }
+        return { sent: true, records: prefix.records.length, chunks: off.count, reply };
+      }
     }
     // A18 (Jim 939357e9: one agent's read, derive and chunks were one 2 s block): the derive and the chunks each start
     // in a turn of their own. This agent's syncs are serial (syncNow), and the read is a verified prefix, so the records

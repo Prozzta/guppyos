@@ -58,6 +58,8 @@ import { redactSecrets } from './redact';
 import { normalizeTtl, parseStoredTtl, zonelessHint } from './ttl';
 import { DEFAULT_KEY_REGISTRY, KeyRegistryWriter, loadRegistryShared } from './registry';
 import { derive, keysTurnedSingle, singleKeyOf } from './derive';
+import { statusOfCode } from './deriveJob';
+import type { DeriveOffMain } from './deriveOffMain';
 import { clampSection, R1_LEGACY_REASON } from './migrate';
 
 /** The file operations an append uses; injectable so tests can spy on the order and simulate a crash. */
@@ -98,7 +100,26 @@ export interface ClaimStoreDeps {
   /** STARTUP-FREEZE-104 A3: main's verified-segment checkpoint text in user-data (never an agent folder). The store
    *  MACs it with the ledger key and binds it to this hive and key id; a missing, foreign or forged one is none. */
   checkpoint?: { load(): string | null; save(text: string): void };
+  /** STARTUP-FREEZE-104 A19: derive off main (DeriveOffMain); primeView uses it. Absent: primeView does nothing. */
+  offMain?: Pick<DeriveOffMain, 'run'>;
+  /** A19: records per turn when primeView installs the worker's codes (default PRIME_SLICE; tests use a few). */
+  primeSlice?: number;
 }
+
+/** A10: the ids a supersede, retract or (non-sighting) event names: their statuses depend on more than their own key. */
+function linkedOf(records: readonly LedgerRec[]): Set<string> {
+  return linkedInto(new Set<string>(), records, 0, records.length);
+}
+function linkedInto(linked: Set<string>, records: readonly LedgerRec[], from: number, to: number): Set<string> {
+  for (let i = from; i < to; i++) {
+    const r = records[i];
+    if (r.t === 'claim') { for (const id of r.supersedes ?? []) linked.add(id); for (const id of r.retracts ?? []) linked.add(id); }
+    else if (r.t === 'event' && r.ev !== 'sighting') for (const id of r.targets) linked.add(id);
+  }
+  return linked;
+}
+/** A19: records per turn when primeView builds a view's statuses from the worker's codes. */
+const PRIME_SLICE = 20000;
 
 const SEGMENT_RE = /^(\d{4})-(\d{2})\.jsonl$/;
 const AGENT_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/;
@@ -1213,16 +1234,63 @@ export class ClaimStore {
       this.log({ kind: 'claims-view-derive', agentId, reason, ...(!d ? { dropped: v.dropped ?? 'first' } : {}), records: v.records.length, ms: Math.round(performance.now() - t0) });
       status = new Map<string, Status>();
       for (const id of Object.keys(state.claims)) status.set(id, state.claims[id].status);
-      const linked = new Set<string>();
-      for (const r of v.records) {
-        if (r.t === 'claim') { for (const id of r.supersedes ?? []) linked.add(id); for (const id of r.retracts ?? []) linked.add(id); }
-        else if (r.t === 'event' && r.ev !== 'sighting') for (const id of r.targets) linked.add(id);
-      }
-      v.derived = { registry, status, linked, dirtyKeys: new Set(), linkedStale: false };
+      v.derived = { registry, status, linked: linkedOf(v.records), dirtyKeys: new Set(), linkedStale: false };
     }
     const out = new Map<string, Status | undefined>();
     for (const id of ids) out.set(id, status.get(id));
     return out;
+  }
+
+  /**
+   * STARTUP-FREEZE-104 A19 (god 424399): give this agent's view its statuses from one derive in the worker thread, so
+   * the next append's checks (statusesOf) reuse them instead of deriving on main. The statuses are installed only when
+   * the view is still the one posted, at the same head and length, with none of its own; otherwise (an append went in
+   * meanwhile, or the worker fell back) nothing changes and statusesOf derives in-process as before.
+   */
+  async primeView(agentId: string): Promise<void> {
+    const off = this.d.offMain;
+    const s = this.state.get(agentId);
+    if (!off || !s || !s.head) return;
+    const v = this.ledgerView(agentId, s);
+    if (v.derived) return;
+    const head = v.head;
+    const count = v.records.length;
+    let registry;
+    try { registry = loadRegistryShared(this.d.hiveRoot); } catch { registry = undefined; }
+    registry ??= DEFAULT_KEY_REGISTRY;
+    const t0 = performance.now();
+    const r = await off.run({ want: 'codes', agentId, files: this.segments(agentId), head, count, registry, r4: false });
+    const moved = (): boolean => this.views.get(agentId) !== v || v.head !== head || v.records.length !== count || !!v.derived;
+    if (!r || r.out.length !== count || moved()) return;
+    // The map and the linked ids in slices of PRIME_SLICE records, a turn between (one pass at 10x is over 50 ms);
+    // the view must be unmoved after every turn.
+    const status = new Map<string, Status>();
+    const linked = new Set<string>();
+    const slice = Math.max(1, this.d.primeSlice ?? PRIME_SLICE);
+    for (let from = 0; from < count; from += slice) {
+      if (from) { await new Promise<void>((resolve) => setImmediate(resolve)); if (moved()) return; }
+      const to = Math.min(count, from + slice);
+      for (let i = from; i < to; i++) {
+        const rec = v.records[i];
+        const st = statusOfCode(r.out[i]);
+        if (st && rec.t === 'claim') status.set(rec.id, st);
+      }
+      linkedInto(linked, v.records, from, to);
+    }
+    v.derived = { registry, status, linked, dirtyKeys: new Set(), linkedStale: false };
+    this.log({ kind: 'claims-view-derive', agentId, reason: 'prime', offMain: true, records: count, ms: Math.round(performance.now() - t0) });
+  }
+
+  /**
+   * A19: the derive worker's job for `read` when it is this agent's kept verified read (chain ok, untorn, its head the
+   * sha256 of its last line): the segment files, that head and the record count. Null otherwise (derive in-process).
+   */
+  verifiedJobFor(agentId: string, read: ReadResult): { files: string[]; head: string; count: number } | null {
+    const kept = this.verifiedReads.get(agentId);
+    // verifiedReads holds only chain-ok, untorn reads (keepRead, extendRead), so `read` being the kept one says so.
+    if (!kept || kept.result !== read || !read.records.length || !kept.head) return null;
+    if (sha256Hex(canonicalJson(read.records[read.records.length - 1])) !== kept.head) return null;
+    return { files: this.segments(agentId), head: kept.head, count: read.records.length };
   }
 
   /** A10: move this agent's view over our own acked append (`prev`: the head it went onto). See LedgerView. */

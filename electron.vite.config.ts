@@ -68,7 +68,9 @@ export default defineConfig({
         input: {
           index: resolve(__dirname, 'src/main/index.ts'),
           // NATIVE-MEMORY: the utility-process entry (forked lazily by main).
-          memoryWorker: resolve(__dirname, 'src/main/nativeMemory/worker.ts')
+          memoryWorker: resolve(__dirname, 'src/main/nativeMemory/worker.ts'),
+          // STARTUP-FREEZE-104 A19: the claims derive worker thread (started lazily by main's DeriveOffMain).
+          claimsDeriveWorker: resolve(__dirname, 'src/main/claims/deriveWorker.ts')
         }
       }
     }

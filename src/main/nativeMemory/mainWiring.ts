@@ -291,12 +291,13 @@ export class NativeMemoryWiring {
   }
 
   /** CLAIM-LEDGER W3: index one agent's verified claim chunks (main only; no HTTP route). */
-  async syncClaims(args: { wing: string; path: string; head: string; chunks: unknown[]; delta?: boolean }): Promise<Reply> {
+  /** STARTUP-FREEZE-104 A19: the chunks may come as their JSON (from the derive worker; the memory worker parses it). */
+  async syncClaims(args: { wing: string; path: string; head: string; chunks?: unknown[]; chunksJson?: string; chunkCount?: number; delta?: boolean }): Promise<Reply> {
     const why = this.unavailable();
     if (why) return { ok: false, exit: EXIT.unavailable, error: `memory is unavailable (${why})` };
     const push = this.pushClaimLedger();
     if (push) await push;
-    return this.client.request('claims-sync', { ...args, claimLedger: this.d.claimLedger?.() } as unknown as Record<string, unknown>, claimsSyncDeadlineMs(args.chunks.length));
+    return this.client.request('claims-sync', { ...args, claimLedger: this.d.claimLedger?.() } as unknown as Record<string, unknown>, claimsSyncDeadlineMs(args.chunks?.length ?? args.chunkCount ?? 0));
   }
 
   /** CLAIM-LEDGER W3: R5 candidates for a just-appended claim (the W3 side of R5CandidatesFn). */

@@ -795,7 +795,11 @@ test('PIN: against the REAL test directory discovery is root tests plus only fol
   // STARTUP-FREEZE-104: + 7 (startup-freeze-a1, -a3, -a4, -a5, -a9, -keyalias, startup-health-setting). Root 549 + folded 41.
   // STARTUP-FREEZE-104 A10: + 1 (startup-freeze-a10). Root 549 + folded 41.
   // STARTUP-FREEZE-104 A12: + 1 (startup-freeze-a12). Root 549 + folded 41.
-  assert.equal(files.length, 590,`the focused suite must retain its pre-fold file count, got ${files.length}`);
+  // STARTUP-FREEZE-104: + 7 (startup-freeze-a1, -a3, -a4, -a5, -a9, -keyalias, startup-health-setting). Root 550 + folded 41.
+  // STARTUP-FREEZE-104 A10: + 1 (startup-freeze-a10). Root 550 + folded 41.
+  // STARTUP-FREEZE-104 A12: + 1 (startup-freeze-a12). Root 550 + folded 41.
+  // STARTUP-FREEZE-104 A19: + 1 (startup-freeze-a19). Root 550 + folded 41.
+  assert.equal(files.length, 591,`the focused suite must retain its pre-fold file count, got ${files.length}`);
   assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
   assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');
   assert.ok(files.includes(path.join('start-fixes-163', 'start-fixes-163-boot-submit.test.cjs')), 'the start-fixes feature folder is included');
