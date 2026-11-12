@@ -69,6 +69,10 @@ test('shared: five-minute cap, Groq size cap, clock and transcript normalising',
   assert.equal(SM.normalizeMessageTranscript('a\tb\u0000c  d \r\n\r\n\r\n e\u2028f'), 'a b c d\n\ne\nf');
   assert.equal(SM.normalizeMessageTranscript('a\u2029b\u00a0\u00a0 \u00a0c\u00a0d'), 'a\nb c\u00a0d', 'U+2029 breaks; NBSP runs collapse; a single NBSP stays');
   assert.equal(SM.normalizeMessageTranscript('\ufeffa\u200bb\u202ec\u2066d\u2069\u200f'), 'abcd', 'zero-width and bidi controls are removed');
+  const fa = 'می‌خواهم';
+  assert.equal(SM.normalizeMessageTranscript(fa), fa, 'ZWNJ is kept (Persian/Urdu joining)');
+  const fam = '\u{1f468}‍\u{1f469}‍\u{1f467}';
+  assert.equal(SM.normalizeMessageTranscript(fam), fam, 'ZWJ is kept (emoji sequences)');
   assert.equal(SM.normalizeMessageTranscript(7), '');
   const long = SM.normalizeMessageTranscript('x'.repeat(SM.BLOB_MESSAGE_MAX_CHARS - 1) + '\ud83d\ude00');
   assert.equal(long.length, SM.BLOB_MESSAGE_MAX_CHARS - 1, 'never ends on half a surrogate pair');
