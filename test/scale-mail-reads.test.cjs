@@ -226,3 +226,120 @@ test('racy mtime (Jim B1): a listing, meta or body taken within RACY_MS of the m
   assert.equal(fs.statSync(path.join(out, 'x.json')).size, before, 'same size, same mtime: the key cannot tell');
   assert.deepEqual(rows(), ['r-x:bbbb', 'r-y:yyyy'], 'the rewrite shows: new order (meta) and new subject (body)');
 });
+
+// ── god 8d8fff: the IPC forms run off the caller's turn on fs/promises in 8 ms slices ──
+const MS = loadTs('src/main/mailSteps.ts');
+/** An async runner's deps that record every op path and every slice; `sliceMs` 1 = a pause at every tick. */
+function recorder(extra = {}) {
+  const r = { ops: [], pauses: 0, slices: [] };
+  r.deps = {
+    runOp: (op) => { const walk = (o) => ('batch' in o ? o.batch.forEach(walk) : r.ops.push(o)); walk(op); return MS.runMailOpAsync(op); },
+    pause: () => { r.pauses++; return new Promise((res) => setImmediate(res)); },
+    onSlice: (ms) => r.slices.push(ms),
+    ...extra,
+  };
+  return r;
+}
+const opPaths = (ops, kind) => ops.filter((o) => kind in o).map((o) => o[kind]);
+
+async function bigFloor(t, n) {
+  const f = await floor(t);
+  const done = f.dir('andy-1', 'inbox', '.done');
+  const sent = f.dir('god-1', 'outbox', '.sent');
+  for (let i = 0; i < n; i++) {
+    // created_at repeats every 7 files: ties must keep traversal order (the stable sort it replaces)
+    const m = mail(`2026-01-01T00-00-00-000Z-k${String(i).padStart(5, '0')}`, Math.floor(i / 7) % 300);
+    put(path.join(i % 2 ? done : sent, `${m.id}.json`), m, i % 500);
+  }
+  put(path.join(f.dir('andy-1', 'outbox'), 'reply.json'), mail('reply-1', 10, { from: 'andy-1', to: 'god-1' }), 10);
+  for (const d of [done, sent]) touchDir(d, 0);
+  return { ...f, done, sent };
+}
+
+test('sliced: nothing runs in the caller\'s turn; the async answers equal the sync ones and the pre-SCALE scan', async (t) => {
+  const { hive, cold } = await bigFloor(t, 600);
+  const rec = recorder();
+  const seen = spy(() => hive.voiceMessagesAsync({ limit: 40 }, rec.deps));
+  assert.equal(rec.ops.length, 0, 'no fs op before the first pause');
+  assert.equal(rec.pauses, 1, 'the run starts with a pause');
+  assert.deepEqual([...seen.seen.stat, ...seen.seen.read, ...seen.seen.readdir], [], 'no blocking fs call in the caller\'s turn');
+  const got = await seen.out;
+  const c = cold();
+  for (const o of [{}, { limit: 40 }, { limit: 3 }, { agentId: 'andy-1', limit: 40 }, { includeArchived: false }, { id: 'reply-1' }]) {
+    assert.deepEqual(await hive.voiceMessagesAsync(o), referenceVoice(hive, o), `async = pre-SCALE ${JSON.stringify(o)}`);
+    assert.deepEqual(await c.voiceMessagesAsync(o), c.voiceMessages(o), `cold async = sync ${JSON.stringify(o)}`);
+  }
+  assert.deepEqual(got, referenceVoice(hive, { limit: 40 }));
+  const h = recorder();
+  const hp = hive.mailHistoryAsync('andy-1', { limit: 50 }, h.deps);
+  assert.equal(h.ops.length, 0);
+  assert.deepEqual(await hp, cold().mailHistory('andy-1', { limit: 50 }));
+});
+
+test('sliced: a warm call does no fs/promises op on archived mail, and its in-memory walk yields (no single long turn)', async (t) => {
+  const { hive, done, sent } = await bigFloor(t, 3000);
+  await hive.voiceMessagesAsync({ limit: 40 });
+  await hive.mailHistoryAsync('andy-1', { limit: 200 });
+  const archived = under([done, sent]);
+  const rec = recorder({ sliceMs: 0 }); // a pause at every tick: counts the ticks
+  const rows = await hive.voiceMessagesAsync({ limit: 40 }, rec.deps);
+  assert.deepEqual(rows, referenceVoice(hive, { limit: 40 }));
+  assert.deepEqual(opPaths(rec.ops, 'read').filter(archived), [], 'no archived file read');
+  assert.deepEqual(opPaths(rec.ops, 'stat').filter(archived), [], 'no archived file statted');
+  assert.ok(rec.pauses >= Math.floor(3000 / MS.TICK_EVERY), `the walk over 3000 entries ticks (${rec.pauses} pauses)`);
+  const h = recorder();
+  await hive.mailHistoryAsync('andy-1', { limit: 200 }, h.deps);
+  assert.deepEqual(opPaths(h.ops, 'stat').filter(archived), [], 'a repeat Threads poll stats no .done file');
+  assert.deepEqual(opPaths(h.ops, 'read').filter(archived), []);
+});
+
+test('sliced: the runner hands main back once the 8 ms budget is spent, and a cold call on real files keeps every slice under the 50 ms bar', async (t) => {
+  // Deterministic: a clock that moves 1 ms per look; a 4000-item sort must pause about every 8 ticks.
+  let now = 0;
+  const rec = recorder({ clock: () => now++ });
+  const sorted = await MS.runMailSliced(MS.sortSteps(Array.from({ length: 4000 }, (_, i) => (i * 7919) % 4000), (a, b) => a - b), rec.deps);
+  assert.deepEqual(sorted, Array.from({ length: 4000 }, (_, i) => i));
+  assert.ok(rec.slices.every((ms) => ms <= MS.CATCHUP_SLICE_MS + 2), `every slice within budget: ${Math.max(...rec.slices)}`);
+  assert.ok(rec.pauses >= 8, `the sort pauses inside each pass, not only between passes (${rec.pauses})`);
+  // Measured: a cold run over 3000 real files.
+  const { hive } = await bigFloor(t, 3000);
+  const real = recorder({ pause: undefined });
+  delete real.deps.pause;
+  await hive.voiceMessagesAsync({ limit: 40 }, real.deps);
+  assert.ok(Math.max(...real.slices) < 50, `worst slice ${Math.max(...real.slices).toFixed(1)} ms`);
+});
+
+test('sliced: identical concurrent calls share one run; the order an incremental listing derives equals a fresh sort', async (t) => {
+  const { hive, done, cold } = await bigFloor(t, 400);
+  const a = hive.voiceMessagesAsync({ limit: 5 });
+  assert.equal(hive.voiceMessagesAsync({ limit: 5 }), a, 'one run');
+  assert.notEqual(hive.voiceMessagesAsync({ limit: 6 }), a);
+  await a;
+  await hive.mailHistoryAsync('andy-1', { limit: 1000 });
+  // New files (one ties an old mtime, one sorts before every name) and a removal: merged, not re-sorted.
+  put(path.join(done, '0000-first.json'), mail('first', 999), 3);
+  put(path.join(done, 'zzzz-last.json'), mail('last', 998), 3);
+  fs.rmSync(path.join(done, fs.readdirSync(done).filter((n) => n.includes('k0000'))[0] ?? 'none'), { force: true });
+  touchDir(done, 7);
+  for (const o of [{ limit: 40 }, { agentId: 'andy-1', limit: 40 }]) assert.deepEqual(await hive.voiceMessagesAsync(o), referenceVoice(hive, o));
+  assert.deepEqual(await hive.mailHistoryAsync('andy-1', { limit: 1000 }), cold().mailHistory('andy-1', { limit: 1000 }));
+});
+
+test('PIN: the hive:inbox and hive:messages handlers use the sliced async forms', () => {
+  const main = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'index.ts'), 'utf8');
+  assert.match(main, /return hive\.mailHistoryAsync\(id, \{ archived \}\);/);
+  assert.match(main, /ipcMain\.handle\('hive:messages', \(_evt, opts: unknown\) =>\s+hive\.voiceMessagesAsync\(/);
+});
+
+test('sliced: the in-memory walk itself ticks (pauses between the last fs op and the answer scale with the last folder)', async (t) => {
+  const { hive } = await bigFloor(t, 3000); // .sent (the last folder walked) holds 1500 files
+  await hive.voiceMessagesAsync({ agentId: 'god-1', limit: 1 });
+  let atLastOp = 0;
+  const rec = recorder({ sliceMs: 0 });
+  const inner = rec.deps.runOp;
+  rec.deps.runOp = (op) => { atLastOp = rec.pauses; return inner(op); };
+  await hive.voiceMessagesAsync({ agentId: 'god-1', limit: 1 }, rec.deps);
+  // after the .sent stat: its cached-meta pass ticks every 512 names, and so must the walk (+ one row tick)
+  const after = rec.pauses - atLastOp;
+  assert.ok(after >= 2 * Math.floor(1500 / MS.TICK_EVERY) + 2, `walk + meta pass both tick (${after} pauses after the last op)`);
+});
