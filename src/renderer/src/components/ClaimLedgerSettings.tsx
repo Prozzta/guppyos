@@ -47,11 +47,20 @@ function Message({ result }: { result: { text: string; ok: boolean } | null }) {
 const said = (r: LedgerUiResult, done: string): { text: string; ok: boolean } =>
   r.ok ? { text: r.note ? `${done} ${r.note}` : done, ok: true } : { text: r.error, ok: false };
 
+const bootstrapProgress = (state: unknown): string => {
+  const agents = state && typeof state === 'object' && 'agents' in state ? (state as { agents?: Record<string, { state?: string }> }).agents : null;
+  if (!agents) return 'Preparing the claims ledger…';
+  const rows = Object.values(agents); const done = rows.filter((a) => a.state === 'done').length;
+  const skipped = rows.filter((a) => a.state === 'skipped').length;
+  return `Creating claims ledger: ${done} imported${skipped ? `, ${skipped} busy (will retry)` : ''}.`;
+};
+
 export function ClaimLedgerSettings() {
   const api = window.cth.claimsUi;
   const [summary, setSummary] = useState<LedgerUiSummary | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [levelMsg, setLevelMsg] = useState<{ text: string; ok: boolean } | null>(null);
+  const [bootstrapMsg, setBootstrapMsg] = useState<{ text: string; ok: boolean } | null>(null);
   const [agentId, setAgentId] = useState<string | null>(null);
 
   const refresh = useCallback(async () => { try { setSummary(await api.summary()); } catch { setSummary(null); } }, [api]);
@@ -60,6 +69,15 @@ export function ClaimLedgerSettings() {
   const setLevel = async (level: string) => {
     setBusy('level'); setLevelMsg({ text: `Applying ${level}... (the memory worker re-reads every ledger; this can take a minute)`, ok: true });
     try { setLevelMsg(said(await api.setLevel(level), `The ledger level is now ${level}.`)); } finally { setBusy(null); void refresh(); }
+  };
+  const bootstrap = async () => {
+    setBusy('bootstrap'); setBootstrapMsg({ text: 'Creating the claims ledger. Floor work is paused while each idle agent imports...', ok: true });
+    const poll = setInterval(() => { void api.bootstrapStatus().then((s) => { if (s.ok) setBootstrapMsg({ text: s.line.includes('running') ? bootstrapProgress(s.state) : s.line, ok: true }); }).catch(() => undefined); }, 800);
+    try {
+      const r = await api.bootstrap();
+      setBootstrapMsg({ text: r.line, ok: r.ok });
+    } catch { setBootstrapMsg({ text: 'The claims bootstrap request failed.', ok: false }); }
+    finally { clearInterval(poll); setBusy(null); void refresh(); }
   };
 
   const saved = summary?.saved ?? 'off';
@@ -87,6 +105,14 @@ export function ClaimLedgerSettings() {
           <span>{summary.floor.derivedRepo
             ? `Derived facts read the git repo ${summary.floor.derivedRepo}.`
             : 'No git repo is set for derived facts: merge, tag and release facts are not derived on this floor.'}</span>
+        </div>
+      )}
+      {summary?.floor?.legacy && (
+        <div style={{ ...box, marginTop: 8 }} data-testid="claim-ledger-bootstrap">
+          <div style={label}>Create claims ledger</div>
+          <div style={{ ...hint, marginTop: 2 }}>Imports legacy memory one idle agent at a time. Busy agents are recorded and retried on the next request; nothing is deleted.</div>
+          <div style={{ marginTop: 6 }}><PixelButton size="sm" variant="primary" disabled={busy !== null} onClick={() => void bootstrap()}>{busy === 'bootstrap' ? 'creating…' : 'create claims ledger'}</PixelButton></div>
+          <Message result={bootstrapMsg} />
         </div>
       )}
 
