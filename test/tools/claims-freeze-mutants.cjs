@@ -9,8 +9,7 @@
 // restore in a finally), so a killed run is restored by the next one; --anchors-only checks the anchors.
 const fs = require('node:fs');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
-const { recover, mutateFile, restoreFile, checkAnchors } = require('./mutant-runner-helper.cjs');
+const { recover, mutateFile, restoreFile, checkAnchors, runTests, verdict, requireBaseline } = require('./mutant-runner-helper.cjs');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const TEST = 'test/claims-freeze-guard.test.cjs';
@@ -45,14 +44,11 @@ const MUTANTS = [
   ['C26 the authority is read by its short name', "git(['show', `${auth}:${FILE}`])", "git(['show', `${b}:${FILE}`])", /not ok \d+ - authority: only origin\/guppy\/int-<x> is an authority/],
 ];
 
-const run = () => spawnSync(process.execPath, ['--test', '--test-reporter=tap', TEST], { cwd: ROOT, encoding: 'utf8', windowsHide: true, timeout: 300_000 });
+const run = () => runTests(ROOT, [TEST], { timeout: 300_000 });
 recover(ROOT);
 if (process.argv.includes('--recover-only')) process.exit(0);
 checkAnchors(ROOT, MUTANTS.map(([name, from]) => ({ name, file: SRC, from })));
-if (run().status !== 0) {
-  console.log(`BASELINE RED: ${TEST} fails unmutated, so no mutant proves anything.`);
-  process.exit(2);
-}
+requireBaseline(run(), TEST);
 
 let bad = 0;
 for (const [name, from, to, dies] of MUTANTS) {
@@ -74,10 +70,9 @@ for (const [name, from, to, dies] of MUTANTS) {
   } finally {
     restoreFile(ROOT, abs, original);
   }
-  const named = dies.test(`${r.stdout}${r.stderr}`);
-  const killed = r.status !== 0 && named;
-  if (!killed) bad += 1;
-  console.log(`${killed ? 'KILLED' : r.status !== 0 ? 'KILLED ELSEWHERE' : 'SURVIVED'} ${name}`);
+  const v = verdict(r, dies); // NO-RESULT (the run never reported) is loud, never a kill
+  if (v !== 'KILLED') bad += 1;
+  console.log(`${v} ${name}${v === 'NO-RESULT' ? ` (${r.why})` : ''}`);
 }
 console.log(bad ? `${bad} of ${MUTANTS.length} not killed at their named test` : `all ${MUTANTS.length} killed`);
 process.exitCode = bad ? 1 : 0;

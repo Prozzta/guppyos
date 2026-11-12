@@ -3,10 +3,9 @@
 // Run manually (not a *.test.cjs): node test/tools/capped-render-lane-mutants.cjs
 const fs = require('node:fs');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
 
 const root = path.resolve(__dirname, '..', '..');
-const { recover, mutateFile, restoreFile, checkAnchors } = require('./mutant-runner-helper.cjs');
+const { recover, mutateFile, restoreFile, checkAnchors, runTests, verdict, requireBaseline } = require('./mutant-runner-helper.cjs');
 recover(root);
 if (process.argv.includes('--recover-only')) process.exit(0);
 const source = path.join(root, 'test', 'tools', 'run-tests.cjs');
@@ -28,8 +27,8 @@ const mutants = [
   }
 ];
 checkAnchors(root, mutants.map(({ name, from }) => ({ name, file: source, from })));
-const run = () => spawnSync(process.execPath, ['--test', contract], { cwd: root, encoding: 'utf8', windowsHide: true });
-if (run().status !== 0) throw new Error('BASELINE RED: capped render lane contract must pass before mutation');
+const run = () => runTests(root, [contract], { timeout: 0 });
+requireBaseline(run(), 'capped render lane contract');
 try {
   for (const mutant of mutants) {
     const hits = original.split(mutant.from).length - 1;
@@ -37,7 +36,8 @@ try {
     mutateFile(root, source, original, original.replace(mutant.from, mutant.to));
     const result = run();
     const output = `${result.stdout}\n${result.stderr}`;
-    if (result.status === 0 || !mutant.dies.test(output)) throw new Error(`SURVIVED ${mutant.name}: ${output}`);
+    const v = verdict(result, mutant.dies); // NO-RESULT and KILLED ELSEWHERE fail as loudly as a survivor
+    if (v !== 'KILLED') throw new Error(`${v} ${mutant.name}: ${v === 'NO-RESULT' ? `${result.why}\n` : ''}${output}`);
     console.log(`KILLED ${mutant.name}`);
     restoreFile(root, source, original);
   }

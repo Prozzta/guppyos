@@ -5,8 +5,7 @@
 // source mutant so a future refactor cannot silently disconnect the test.
 const fs = require('node:fs');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
-const { recover, mutateFile, restoreFile, checkAnchors } = require('./mutant-runner-helper.cjs');
+const { recover, mutateFile, restoreFile, checkAnchors, runTests, verdict, requireBaseline } = require('./mutant-runner-helper.cjs');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const FILE = 'src/main/nativeMemory/mainWiring.ts';
@@ -18,11 +17,8 @@ recover(ROOT);
 if (process.argv.includes('--recover-only')) process.exit(0);
 
 checkAnchors(ROOT, [{ name: 'wake-up claims use selected wing', file: FILE, from: FROM }]);
-const run = () => spawnSync(process.execPath, ['--test', TEST], { cwd: ROOT, encoding: 'utf8', timeout: 300_000 });
-if (run().status !== 0) {
-  console.log('BASELINE RED: the unmutated native-memory test fails, so this mutant proves nothing.');
-  process.exit(2);
-}
+const run = () => runTests(ROOT, [TEST], { timeout: 300_000 });
+requireBaseline(run(), 'the unmutated native-memory test');
 
 const abs = path.join(ROOT, FILE);
 const original = fs.readFileSync(abs, 'utf8');
@@ -38,12 +34,9 @@ if (crlf) mutated = mutated.replace(/\n/g, '\r\n');
 try {
   mutateFile(ROOT, abs, original, mutated);
   const result = run();
-  if (result.status !== 0) {
-    console.log('KILLED wake-up claims use caller instead of selected wing');
-  } else {
-    console.log('SURVIVED wake-up claims use caller instead of selected wing');
-  }
-  process.exitCode = result.status !== 0 ? 0 : 1;
+  const v = verdict(result); // NO-RESULT (the run never reported) is loud: neither a kill nor a survivor
+  console.log(`${v} wake-up claims use caller instead of selected wing${v === 'NO-RESULT' ? ` (${result.why})` : ''}`);
+  process.exitCode = v === 'KILLED' ? 0 : 1;
 } finally {
   restoreFile(ROOT, abs, original);
 }

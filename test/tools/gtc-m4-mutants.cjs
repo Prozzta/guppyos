@@ -8,10 +8,9 @@
  *
  *   node test/tools/gtc-m4-mutants.cjs [name-prefix]
  */
-const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
-const { recover, mutateFile, restoreFile, checkAnchors } = require('./mutant-runner-helper.cjs');
+const { recover, mutateFile, restoreFile, checkAnchors, runTests, verdict, requireBaseline } = require('./mutant-runner-helper.cjs');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 recover(ROOT);
@@ -136,11 +135,7 @@ const MUTANTS = [
 
 // THE BASELINE MUST BE GREEN.
 checkAnchors(ROOT, MUTANTS.map(([name, file, from]) => ({ name, file, from })));
-const baseline = spawnSync(process.execPath, ['--test', '--test-reporter=tap', ...TESTS], { cwd: ROOT, encoding: 'utf8' });
-if (baseline.status !== 0) {
-  console.log('BASELINE RED: the unmutated M4 tests fail, so no mutant result would mean anything.');
-  process.exit(2);
-}
+requireBaseline(runTests(ROOT, TESTS, { timeout: 0 }), 'the unmutated M4 tests');
 
 const only = process.argv[2];
 const selected = MUTANTS.filter(([name]) => !only || name.startsWith(only));
@@ -161,11 +156,10 @@ for (const [name, file, from, to] of selected) {
   if (crlf) mutated = mutated.replace(/\n/g, '\r\n');
   try {
     mutateFile(ROOT, abs, original, mutated);
-    const r = spawnSync(process.execPath, ['--test', '--test-reporter=tap', ...TESTS], { cwd: ROOT, encoding: 'utf8', timeout: 300_000 });
-    const fails = (String(r.stdout).match(/^# fail (\d+)/m) || [])[1] ?? '?';
-    const dead = r.status !== 0;
-    if (dead) killed++;
-    console.log(`${dead ? 'KILLED  ' : 'SURVIVED'}  ${name}  (failing tests: ${fails})`);
+    const r = runTests(ROOT, TESTS, { timeout: 300_000 });
+    const v = verdict(r); // NO-RESULT (the run never reported) is loud: neither a kill nor a survivor
+    if (v === 'KILLED') killed++;
+    console.log(`${v.padEnd(9)} ${name}  (${v === 'NO-RESULT' ? r.why : `failing tests: ${r.fail}`})`);
   } finally {
     restoreFile(ROOT, abs, original);
   }
