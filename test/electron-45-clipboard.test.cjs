@@ -22,6 +22,17 @@ test('Electron rebuild tooling is pinned and better-sqlite3 is on the Node 24 li
   assert.match(pkg.scripts.postinstall, /node node_modules\/electron\/install\.js/);
   assert.match(pkg.scripts.postinstall, /electron-rebuild -f/);
   assert.match(builder, /node_modules\/better-sqlite3\/\*\*/);
+  assert.deepEqual(pkg.allowScripts, {
+    'better-sqlite3@13.0.3': true,
+    'electron-winstaller@5.4.0': true,
+    'esbuild@0.21.5': true,
+    // Optional macOS watcher binary: include it so npm 11 does not skip it
+    // when a developer performs the same clean install on macOS.
+    'fsevents@2.3.3': true,
+    'node-pty@1.1.0': true,
+    'onnxruntime-node@1.21.0': true,
+    'tunnelmole@2.4.0': true
+  });
 });
 
 test('Electron 45 clipboard IPC uses the promise-only main-process API', () => {
@@ -30,7 +41,10 @@ test('Electron 45 clipboard IPC uses the promise-only main-process API', () => {
   assert.match(main, /readClipboardPng\(clipboard\)/);
   assert.match(clipboardHandlers, /await clipboard\.writeText\(text\)/);
   assert.match(clipboardHandlers, /await clipboard\.readText\(\)/);
-  assert.match(clipboardHandlers, /await clipboard\.read\(\)[\s\S]*?getType\('image\/png'\)[\s\S]*?arrayBuffer\(\)/);
+  assert.match(clipboardHandlers, /import type \{ Clipboard, ClipboardBookmark \} from 'electron';/);
+  assert.match(clipboardHandlers, /Pick<Clipboard, 'writeText' \| 'readText' \| 'read'>/);
+  assert.match(clipboardHandlers, /isClipboardBlob\(image\) \? image\.arrayBuffer\(\) : null/);
+  assert.doesNotMatch(clipboardHandlers, /as AsyncClipboard|as Clipboard/);
   assert.doesNotMatch(main, /clipboard\.readImage\(|app:readClipboardSync|sendSync/);
 });
 

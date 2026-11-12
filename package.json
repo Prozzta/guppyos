@@ -91,5 +91,14 @@
     "app-builder-lib": {
       "@electron/rebuild": "$@electron/rebuild"
     }
+  },
+  "allowScripts": {
+    "better-sqlite3@13.0.3": true,
+    "electron-winstaller@5.4.0": true,
+    "esbuild@0.21.5": true,
+    "fsevents@2.3.3": true,
+    "node-pty@1.1.0": true,
+    "onnxruntime-node@1.21.0": true,
+    "tunnelmole@2.4.0": true
   }
 }

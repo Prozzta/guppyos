@@ -1,12 +1,11 @@
+import type { Clipboard, ClipboardBookmark } from 'electron';
+
 /** The promise-only clipboard surface introduced by Electron 44, kept small so
  * IPC wiring can be tested without an Electron process or a real user clipboard. */
-export interface AsyncClipboard {
-  writeText(text: string): Promise<void>;
-  readText(): Promise<string>;
-  read(): Promise<ReadonlyArray<{
-    types: readonly string[];
-    getType(type: string): Promise<{ arrayBuffer(): Promise<ArrayBuffer> }>;
-  }>>;
+export type AsyncClipboard = Pick<Clipboard, 'writeText' | 'readText' | 'read'>;
+
+function isClipboardBlob(value: Blob | ClipboardBookmark): value is Blob {
+  return 'arrayBuffer' in value && typeof value.arrayBuffer === 'function';
 }
 
 export async function copyClipboardText(clipboard: AsyncClipboard, text: unknown): Promise<{ ok: boolean; error?: string }> {
@@ -23,5 +22,6 @@ export async function readClipboardText(clipboard: AsyncClipboard): Promise<stri
 export async function readClipboardPng(clipboard: AsyncClipboard): Promise<ArrayBuffer | null> {
   const item = (await clipboard.read()).find((entry) => entry.types.includes('image/png'));
   if (!item) return null;
-  return (await item.getType('image/png')).arrayBuffer();
+  const image = await item.getType('image/png');
+  return isClipboardBlob(image) ? image.arrayBuffer() : null;
 }

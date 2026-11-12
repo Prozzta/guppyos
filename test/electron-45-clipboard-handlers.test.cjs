@@ -20,16 +20,28 @@ test('Electron 45 clipboard handlers await text copy/read and preserve failures'
 });
 
 test('Electron 45 save-image handler reads ClipboardItem PNG bytes and rejects non-images', async () => {
-  const png = new Uint8Array([137, 80, 78, 71]).buffer;
+  const png = new Blob([new Uint8Array([137, 80, 78, 71])], { type: 'image/png' });
   const calls = [];
   const withPng = {
     writeText: async () => {}, readText: async () => '',
     read: async () => [{ types: ['text/plain'] }, {
       types: ['image/png'],
-      getType: async (type) => { calls.push(type); return { arrayBuffer: async () => png }; }
+      getType: async (type) => { calls.push(type); return png; }
     }]
   };
-  assert.strictEqual(await clipboard.readClipboardPng(withPng), png);
+  assert.deepEqual(new Uint8Array(await clipboard.readClipboardPng(withPng)), new Uint8Array([137, 80, 78, 71]));
   assert.deepEqual(calls, ['image/png']);
   assert.equal(await clipboard.readClipboardPng({ ...withPng, read: async () => [{ types: ['text/plain'] }] }), null);
+});
+
+test('Electron 45 save-image handler rejects a ClipboardBookmark at runtime', async () => {
+  const bookmark = { title: 'Guppy', url: 'file:///C:/Guppy' };
+  const withBookmark = {
+    writeText: async () => {}, readText: async () => '',
+    read: async () => [{
+      types: ['image/png'],
+      getType: async () => bookmark
+    }]
+  };
+  assert.equal(await clipboard.readClipboardPng(withBookmark), null);
 });
