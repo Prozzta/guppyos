@@ -1,5 +1,8 @@
 'use strict';
 require('./tools/own-job.cjs');
+// MUTANT-JOURNAL-GATE (god 5cc045/ed8032): this suite loads test-temp.cjs, a file a census mutates
+// in place; refuse a tree a killed census left mutated, before anything is read.
+require('./tools/mutant-runner-helper.cjs').gate(__filename);
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
