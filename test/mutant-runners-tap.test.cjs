@@ -65,6 +65,58 @@ test('verdict: a kill at the named test is KILLED, any other failure KILLED ELSE
   assert.equal(verdict(r, (failed) => failed.includes('a')), 'KILLED ELSEWHERE');
 });
 
+// MUTANT-DIES-FAILED-ONLY (Jim NIT on fa764993): a dies RegExp ran over the whole TAP output, which names
+// passing tests too ('# Subtest: <name>', 'ok N - <name>', nested rows), so a kill elsewhere read KILLED.
+const MIXED = [
+  'TAP version 13',
+  '# Subtest: outer group',
+  '    # Subtest: the named guard holds',
+  '    ok 1 - the named guard holds',
+  '      ---',
+  '      duration_ms: 1.1',
+  "      type: 'test'",
+  '      ...',
+  '    # Subtest: some other check',
+  '    not ok 2 - some other check',
+  '      ---',
+  '      duration_ms: 0.9',
+  "      error: 'GUARD MSG: the other check broke'",
+  '      ...',
+  '    1..2',
+  'not ok 1 - outer group',
+  '  ---',
+  "  error: '1 subtest failed'",
+  '  ...',
+  '# Subtest: the named guard top',
+  'ok 2 - the named guard top',
+  '  ---',
+  '  duration_ms: 0.5',
+  '  ...',
+  '1..2', '# tests 3', '# suites 0', '# pass 1', '# fail 2', '# cancelled 0', ''].join('\n');
+
+test('a passing test whose name matches can not count as a kill: dies sees failing tests only', () => {
+  const r = tapResult({ status: 1, signal: null, stdout: MIXED, stderr: 'the named guard holds\n' });
+  assert.equal(r.noResult, false, r.why);
+  // the passing tests' names are everywhere in the output, but they passed: a kill elsewhere
+  assert.equal(verdict(r, /the named guard holds/), 'KILLED ELSEWHERE');
+  assert.equal(verdict(r, /the named guard top/), 'KILLED ELSEWHERE');
+  assert.equal(verdict(r, /^ok \d+ - the named guard/m), 'KILLED ELSEWHERE');
+  // what the failing tests say does count: a nested row, its assertion message, the top-level row
+  assert.equal(verdict(r, /not ok \d+ - some other check/), 'KILLED');
+  assert.equal(verdict(r, /GUARD MSG: the other check broke/), 'KILLED');
+  assert.equal(verdict(r, /^not ok \d+ - outer group/m), 'KILLED');
+  // a passing test's YAML is not a failure's diagnostics
+  assert.equal(verdict(r, /duration_ms: 0\.5/), 'KILLED ELSEWHERE');
+  assert.match(r.failures, /GUARD MSG/);
+  assert.doesNotMatch(r.failures, /Subtest|^\s*ok /m);
+  // a sticky or global flag can not make the match depend on an earlier call
+  const g = /some other check/g;
+  assert.equal(verdict(r, g), 'KILLED');
+  assert.equal(verdict(r, g), 'KILLED');
+  // nor anchor it to the first failing row (a sticky regex only matches at index 0)
+  assert.equal(verdict(r, /GUARD MSG/y), 'KILLED');
+});
+
 test('runTests runs real node --test under TAP: pass, fail and a hang give SURVIVED, KILLED and NO-RESULT', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mutant-runners-tap-'));
   try {
@@ -77,6 +129,8 @@ test('runTests runs real node --test under TAP: pass, fail and a hang give SURVI
     const f = runTests(dir, ['fail.test.cjs'], { timeout: 120_000 });
     assert.equal(verdict(f, /not ok \d+ - breaks here/), 'KILLED', f.why ?? f.stdout);
     assert.deepEqual(f.failed, ['breaks here']);
+    assert.match(f.failures, /^not ok \d+ - breaks here/m);
+    assert.match(f.failures, /error: 'x'/, 'the real failing YAML (assertion message) is in failures');
     const h = runTests(dir, ['hang.test.cjs'], { timeout: 3_000 });
     assert.equal(verdict(h), 'NO-RESULT', h.stdout);
     assert.throws(() => runTests(dir, ['pass.test.cjs'], { args: ['--test-reporter=spec'] }), /picks the reporter/);
