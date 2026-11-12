@@ -184,7 +184,7 @@ test('FLEET-LIVENESS-BLIND: fleet.json, the card-badge IPC, the strip and the ca
   assert.match(idx, /if \(mail\.inboxHeld && mail\.heldUntil\) \{ inboxHeld\[id\] = mail\.inboxHeld; heldUntil\[id\] = mail\.heldUntil; \}/);
   assert.match(idx, /return \{ flags: boardMonitor\.flags\(\), inboxBacklog, inboxHeld, heldUntil, silentTurns \};/);
   const strip = readSource('src/renderer/src/components/AgentStrip.tsx');
-  assert.match(strip, /setSilentByAgent\(silent \?\? \{\}\);/);
+  assert.match(strip, /setSilentByAgent\(same\(silent \?\? \{\}\)\);/);
   assert.match(strip, /silentTurn=\{silentByAgent\[a\.id\]\}/);
   const card = readSource('src/renderer/src/components/AgentCard.tsx');
   const badge = card.slice(card.indexOf('data-badge="silent"'), card.indexOf('</span>', card.indexOf('data-badge="silent"')));

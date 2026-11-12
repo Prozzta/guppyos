@@ -83,7 +83,7 @@ test('AgentCard draws the chip from taskChipText and a distinct mail badge from 
 
 test('the strip feeds both badges from main (flags + messages waiting)', () => {
   const strip = codeOnly(readSource('src/renderer/src/components/AgentStrip.tsx'));
-  assert.match(strip, /setBadgeByAgent\(agentBadges\(raw, flags\)\)/);
+  assert.match(strip, /setBadgeByAgent\(same\(agentBadges\(raw, flags\)\)\)/);
   assert.match(strip, /inboxBacklog=\{inboxByAgent\[a\.id\] \?\? 0\}/);
   assert.match(strip, /inboxHeld=\{inboxHeldByAgent\[a\.id\] \?\? 0\}/);
   assert.match(strip, /heldUntil=\{heldUntilByAgent\[a\.id\]\}/);

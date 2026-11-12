@@ -19,6 +19,9 @@ All notable changes to this project are documented here. The format is based on
   find none and say "Capacity unknown". Now it shows the weekly figure, with its pie, in the strip,
   the provider details and the agent usage line. If the plan reports a 5-hour limit again, the strip
   goes back to showing it. Before the first live reading after a restart, it still says unknown.
+- **The agent roster no longer redraws itself every 5 seconds.** Its background check for task
+  badges and waiting messages redrew the whole roster strip on every check, even when nothing had
+  changed. Now it redraws only when the answer changes.
 
 ## [1.1.104] — 2026-11-11
 
