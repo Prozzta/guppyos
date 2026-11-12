@@ -80,7 +80,10 @@ export function archiveBackedIds(agentDir: string, records: LedgerRec[], state: 
 /** W4's RenderMemoryMdFn with the optional, additive exclude predicate (ruling 2). */
 export type RenderMemoryMdWithExcludeFn = (state: ClaimsState, view: WorldView, mode: 'view' | 'complete', opts?: { exclude?: (id: string) => boolean }) => string;
 
-const exportName = (month: string, part: number): string => `memory-ledger-export-${month}${part > 1 ? `-${part}` : ''}.md`;
+export const exportName = (month: string, part: number): string => `memory-ledger-export-${month}${part > 1 ? `-${part}` : ''}.md`;
+
+/** A new export part's heading. */
+export const exportHead = (agent: string, month: string): string => `# Memory ledger export - ${agent} - ${month}\n\n_A continuous, append-only export of this agent's claims ledger, for older app versions. Generated; do not edit._\n\n`;
 
 /** The export files of an agent folder, oldest first (month, then part). */
 export function exportFiles(agentDir: string): string[] {
@@ -141,7 +144,7 @@ function appendText(agentDir: string, agent: string, month: string, text: string
   const bytes = Buffer.byteLength(text, 'utf8');
   if (bytes > EXPORT_SPLIT_BYTES) throw new Error(`export: one line of ${bytes} bytes is over the split size`);
   const { name, fresh } = exportFileFor(agentDir, month, bytes);
-  const head = fresh ? `# Memory ledger export - ${agent} - ${month}\n\n_A continuous, append-only export of this agent's claims ledger, for older app versions. Generated; do not edit._\n\n` : '';
+  const head = fresh ? exportHead(agent, month) : '';
   appendDurable(join(agentDir, name), head + text, flush);
   return name;
 }
