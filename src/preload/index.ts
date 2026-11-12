@@ -7,6 +7,7 @@ import type { InputOrigin } from '../shared/inputOrigin';
 import type { LedgerUiAgentView, LedgerUiResult, LedgerUiSummary } from '../shared/claimsUi';
 import type { RendererErrorReport } from '../shared/rendererError';
 import type { GraphicsStatusView } from '../shared/graphicsMode';
+import type { StartupBudgetView } from '../shared/startupBudget';
 import type { Eligibility, TerminalInputState } from '../shared/inputProvenance';
 import type { TerminalPromptState } from '../shared/promptState';
 import type { HireManifest } from '../shared/hire';
@@ -912,6 +913,8 @@ const api = {
     ipcRenderer.invoke('config:setCapacityDisplayThreshold', value),
   /** GPU-SETTING-188: the mode in force, the saved one, and Chromium's GPU compositing status. */
   graphicsStatus: (): Promise<GraphicsStatusView> => ipcRenderer.invoke('graphics:status'),
+  /** STARTUP-FREEZE-104 A4: the last startup-budget verdict for Settings -> Startup health. */
+  startupBudget: (): Promise<StartupBudgetView> => ipcRenderer.invoke('health:startupBudget'),
   /** GPU-SETTING-188: save the Graphics mode (takes effect after a restart). Rejects an unknown mode. */
   setGraphicsMode: (mode: 'auto' | 'gpu' | 'cpu'): Promise<GraphicsStatusView> => ipcRenderer.invoke('graphics:setMode', mode),
   /** GPU-SETTING-188: restart Guppy to apply the Graphics mode (the normal teardown; running agents stop). */

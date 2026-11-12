@@ -70,6 +70,7 @@ import { DictationController } from './dictation';
 import { GroqSttProvider } from './stt';
 import { Win32InputHelper, inputHelperPath } from './win32Input';
 import { DICTATION_COPY, type DictationCaptureCommand } from '../shared/dictation';
+import { parseStartupVerdict, STARTUP_BUDGET_FILE, type StartupBudgetView } from '../shared/startupBudget';
 import { TrayModeController } from './trayMode';
 import { ProviderModelStore, defaultAdapters } from './providerModels';
 import {
@@ -1597,7 +1598,9 @@ const stallWatch = new StallWatch({
   now: () => performance.now(),
   origin: performance.timeOrigin,
   log: (row) => hive.appendLog(row),
-  profiler: stallMode.profile ? () => { const s = new InspectorSession(); s.connect(); return s; } : null
+  profiler: stallMode.profile ? () => { const s = new InspectorSession(); s.connect(); return s; } : null,
+  // STARTUP-FREEZE-104 A4: the verdict for Settings -> Startup health (main-only file, one async write per start).
+  onStartupVerdict: (v) => { void fsModule.promises.writeFile(join(app.getPath('userData'), STARTUP_BUDGET_FILE), JSON.stringify({ ...v, at: new Date().toISOString() })).catch(() => { /* best-effort */ }); }
 });
 if (stallMode.on) stallWatch.start({ ipcMain, fs: fsModule as unknown as Record<string, unknown> });
 // CLAIM-LEDGER W1: the ledger store, made on first use per hive root. Its MAC key lives in user-data,
@@ -6059,6 +6062,12 @@ function graphicsStatusView(): GraphicsStatusView {
   return { ...graphicsStatus(readConfig(), feature), runningAgents: ptyManager.list().length };
 }
 ipcMain.handle('graphics:status', () => graphicsStatusView());
+// STARTUP-FREEZE-104 A4: Settings -> Startup health (the last saved verdict; read async, off the main thread).
+ipcMain.handle('health:startupBudget', async (): Promise<StartupBudgetView> => {
+  let last = null;
+  try { last = parseStartupVerdict(JSON.parse(await fsModule.promises.readFile(join(app.getPath('userData'), STARTUP_BUDGET_FILE), 'utf8'))); } catch { last = null; }
+  return { enabled: stallMode.on, pending: stallMode.on && !stallWatch.startupBudget().done, last };
+});
 ipcMain.handle('graphics:setMode', (_evt, mode: unknown) => {
   setGraphicsMode(mode);
   try { hive.appendLog({ kind: 'graphics-set', mode, applied: appliedGraphicsMode() }); } catch { /* best-effort */ }
