@@ -3,7 +3,6 @@ import { readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { ClaimRec, ClaimsState, KeyRegistry, LedgerRec, R5Candidate, ReconcileItem } from '../../shared/claims';
 import { canonicalJson, sha256Hex } from './canonical';
-import { editDistance } from './registry';
 
 /** Provisional W8 replay threshold; tighten if floor reconcile injection exceeds 10k/day. */
 export const TAU2 = 0.80;
@@ -318,27 +317,71 @@ export function reconcilePromptText(item: ReconcileItem): string {
  *  misspelt (card.int-1.1.101 / card.int-1.1.102, release.1.1.99 / release.1.1.100): a typo-distance pairing must
  *  not propose them, and an open proposal must not merge them. Compared as the sequence of digit runs. */
 export function keysMayAlias(ka: string, kb: string): boolean {
-  const digits = (k: string): string => (k.match(/[0-9]+/g) ?? []).join('.');
-  return digits(ka) === digits(kb);
+  return keyDigits(ka) === keyDigits(kb);
+}
+function keyDigits(k: string): string { return (k.match(/[0-9]+/g) ?? []).join('.'); }
+
+/** editDistance(a, b) <= 2, in a band of width 5 around the diagonal: a cell further than 2 off it costs more
+ *  than 2, and once a whole row is over 2 every later one is (Levenshtein, as registry.ts editDistance). */
+export function withinEditDistance2(a: string, b: string): boolean {
+  const K = 2, BIG = K + 1;
+  if (Math.abs(a.length - b.length) > K) return false;
+  if (a === b) return true;
+  let prev = new Array<number>(b.length + 1), cur = new Array<number>(b.length + 1);
+  for (let j = 0; j <= b.length; j++) prev[j] = j <= K ? j : BIG;
+  for (let i = 1; i <= a.length; i++) {
+    const lo = Math.max(1, i - K), hi = Math.min(b.length, i + K);
+    cur.fill(BIG);
+    cur[0] = i <= K ? i : BIG;
+    let best = cur[0];
+    for (let j = lo; j <= hi; j++) {
+      const v = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      cur[j] = v > BIG ? BIG : v;
+      if (cur[j] < best) best = cur[j];
+    }
+    if (best > K) return false;
+    [prev, cur] = [cur, prev];
+  }
+  return prev[b.length] <= K;
 }
 
 /** Pure proposal-only census: same registered namespace, live owner claims, similar distinct keys (never two keys
- *  that differ in a number: keysMayAlias). */
+ *  that differ in a number: keysMayAlias).
+ *  STARTUP-FREEZE-104 (Jim's fb0536fe profile: 31.5 s of a 34.5 s main block at 10x): the pairs were O(rows^2), with
+ *  the namespace list rebuilt for every pair. Now each distinct key's namespace and digits are computed once, and
+ *  only distinct keys sharing both are compared (the pair rule requires both equal). A length gap over 2 is an
+ *  edit distance over 2. The claim pairs are then expanded in the old (i, j) order, so the output is the same. */
 export function keyAliasCandidates(agentId: string, records: ClaimRec[], state: ClaimsState, registry: KeyRegistry): ReconcileCandidate[] {
   const rows = records.filter((r) => r.agent === agentId && !!r.key && state.claims[r.id]?.status === 'live')
     .sort((a, b) => a.id.localeCompare(b.id));
-  const namespace = (key: string) => registry.namespaces
+  const prefixes = registry.namespaces
     .map((ns) => ns.pattern.endsWith('.*') ? ns.pattern.slice(0, -1).replace('<id>', agentId) : '')
-    .filter((prefix) => prefix && key.startsWith(prefix))
-    .sort((a, b) => b.length - a.length)[0] ?? '';
-  const out: ReconcileCandidate[] = [];
-  for (let i = 0; i < rows.length; i++) for (let j = i + 1; j < rows.length; j++) {
-    const a = rows[i], b = rows[j], ka = a.key!, kb = b.key!;
-    if (ka === kb || namespace(ka) === '' || namespace(ka) !== namespace(kb) || !keysMayAlias(ka, kb)) continue;
-    const na = ka.replace(/[-_]/g, ''), nb = kb.replace(/[-_]/g, '');
-    if (na !== nb && editDistance(ka, kb) > 2) continue;
-    const pair = [a.id, b.id].sort();
-    out.push({ itemId: reconcileItemId(agentId, 'key-alias', pair[0], pair[1]), kind: 'key-alias', a: pair[0], b: pair[1], text: `Possible key alias: ${ka} / ${kb}` });
+    .filter((prefix) => prefix)
+    .sort((a, b) => b.length - a.length);
+  const namespace = (key: string): string => prefixes.find((prefix) => key.startsWith(prefix)) ?? '';
+  // Distinct keys (first-seen order), each with the sorted row indices that carry it, bucketed by namespace + digits.
+  const byKey = new Map<string, number[]>();
+  rows.forEach((r, i) => { const at = byKey.get(r.key!); if (at) at.push(i); else byKey.set(r.key!, [i]); });
+  const buckets = new Map<string, string[]>();
+  for (const key of byKey.keys()) {
+    const ns = namespace(key);
+    if (ns === '') continue;
+    const b = `${ns}\0${keyDigits(key)}`;
+    const list = buckets.get(b); if (list) list.push(key); else buckets.set(b, [key]);
   }
-  return out;
+  const pairs: Array<[number, number]> = [];
+  for (const keys of buckets.values()) {
+    const bare = keys.map((k) => k.replace(/[-_]/g, ''));
+    for (let x = 0; x < keys.length; x++) for (let y = x + 1; y < keys.length; y++) {
+      const ka = keys[x], kb = keys[y];
+      if (bare[x] !== bare[y] && !withinEditDistance2(ka, kb)) continue;
+      for (const i of byKey.get(ka)!) for (const j of byKey.get(kb)!) pairs.push(i < j ? [i, j] : [j, i]);
+    }
+  }
+  pairs.sort((p, q) => p[0] - q[0] || p[1] - q[1]);
+  return pairs.map(([i, j]) => {
+    const a = rows[i], b = rows[j];
+    const pair = [a.id, b.id].sort();
+    return { itemId: reconcileItemId(agentId, 'key-alias', pair[0], pair[1]), kind: 'key-alias' as const, a: pair[0], b: pair[1], text: `Possible key alias: ${a.key!} / ${b.key!}` };
+  });
 }

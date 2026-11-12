@@ -1806,7 +1806,8 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
     // CL-READERWATCHER: watch memory.md for the agents whose ledger replaced it in search.
     void warmed.then(syncReaderWatchers);
     // W5 startup census. Successful index syncs repeat this after each indexed append.
-    void warmed.then(() => { for (const agentId of claimLedgerAgents()) { try { refreshReconcileQueueForHive(root, agentId, reconcileHiveDeps()); } catch (e) { hive.appendLog({ kind: 'claims-reconcile-refresh-failed', agentId, error: String(e).slice(0, 160) }); } } });
+    // STARTUP-FREEZE-104: one agent per event-loop turn, so the census never holds main for the whole hive.
+    void warmed.then(async () => { for (const agentId of claimLedgerAgents()) { await new Promise<void>((r) => setImmediate(r)); try { refreshReconcileQueueForHive(root, agentId, reconcileHiveDeps()); } catch (e) { hive.appendLog({ kind: 'claims-reconcile-refresh-failed', agentId, error: String(e).slice(0, 160) }); } } });
   }
   return {
     store: claimStore.store,
