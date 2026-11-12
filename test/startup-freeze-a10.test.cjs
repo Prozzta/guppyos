@@ -173,6 +173,47 @@ test('A10: a soft-supersede whose winner then loses R2 frees the loser (linked i
   assert.equal(at(), 'live', 'y lost R2, so the proposal no longer holds');
 });
 
+test('A11: a registry that only gained keys (the writer save) does not force a derive', async () => {
+  const root = hive();
+  const { store, logs } = mkStore(root);
+  await settleRegistry(store, root, 'a1', ['card.anchor']);
+  const first = { t: 'claim', kind: 'fact', text: 'anchor fact', key: 'card.anchor' };
+  await ok(store.appendRecord('a1', first, 'endpoint'));
+  await ok(store.appendRecord('a1', first, 'endpoint'));   // primes the view
+  const d0 = deriveCalls;
+  const regs = new Set();
+  for (let i = 0; i < 25; i++) {
+    await ok(store.appendRecord('a1', { t: 'claim', kind: 'fact', text: `grow ${i}`, key: `card.${(0x10000000 + i * 7919 * 104729).toString(16)}g${i}` }, 'endpoint'));
+    await ok(store.appendRecord('a1', { t: 'claim', kind: 'fact', text: `grow p ${i}`, key: `project.${(0x20000000 + i * 6007 * 99991).toString(16)}h${i}` }, 'endpoint'));
+    store.flushKeyRegistry();
+    regs.add(REG.loadRegistryShared(root));
+    await ok(store.appendRecord('a1', first, 'endpoint'));
+  }
+  assert.ok(regs.size >= 20, `the registry object changed ${regs.size} times`);
+  assert.equal(deriveCalls - d0, 0, 'no derive when the registry only gained keys');
+  assert.equal(sightings(logs).length, 26);
+});
+
+test('A11: sameStatusesUnder is false for any registry change derive reads differently', () => {
+  const base = structuredClone(REG.DEFAULT_KEY_REGISTRY);
+  base.keys['card.old'] = { cardinality: 'multi', addedAt: '2026-10-03T10:00:00.000Z', addedBy: 'a1' };
+  base.keys['project.old'] = { cardinality: 'single', addedAt: '2026-10-03T10:00:00.000Z', addedBy: 'a1' };
+  const v = (fn) => { const n = structuredClone(base); fn(n); return DERIVE.sameStatusesUnder(base, n); };
+  const add = (k, cardinality, extra = {}) => (n) => { n.keys[k] = { cardinality, addedAt: '2026-10-03T10:00:01.000Z', addedBy: 'a1', ...extra }; };
+  assert.equal(v(() => {}), true, 'unchanged');
+  assert.equal(v(add('card.new', 'multi')), true, 'an added key as its namespace has it');
+  assert.equal(v(add('project.new', 'single')), true, 'an added single key as its namespace has it');
+  assert.equal(v(add('nowhere.new', 'multi')), true, 'an added multi key under no namespace (not single either way)');
+  assert.equal(v(add('card.new', 'single')), false, 'an added key whose cardinality differs from its namespace');
+  assert.equal(v(add('nowhere.new', 'single')), false, 'an added single key under no namespace');
+  assert.equal(v(add('card.new', 'multi', { aliasOf: 'card.old' })), false, 'an added alias');
+  assert.equal(v((n) => { n.keys['card.old'].cardinality = 'single'; }), false, 'a kept key changed cardinality');
+  assert.equal(v((n) => { n.keys['card.old'].aliasOf = 'project.old'; }), false, 'a kept key became an alias');
+  assert.equal(v((n) => { delete n.keys['card.old']; }), false, 'a removed key');
+  assert.equal(v((n) => { delete n.keys['card.old']; n.keys['card.other'] = { cardinality: 'multi', addedAt: 'x', addedBy: 'a1' }; }), false, 'a removed key with as many added');
+  assert.equal(v((n) => { n.namespaces[0] = { ...n.namespaces[0], cardinality: n.namespaces[0].cardinality === 'single' ? 'multi' : 'single' }; }), false, 'a namespace changed');
+});
+
 function rng(seed) {
   let x = seed >>> 0 || 1;
   return () => { x ^= x << 13; x >>>= 0; x ^= x >>> 17; x ^= x << 5; x >>>= 0; return x / 0x100000000; };
@@ -183,7 +224,7 @@ for (const seed of [1, 2, 3, 7, 42, 1009]) {
     const root = hive();
     const { store } = mkStore(root);
     const KEYS = ['project.northwind', 'project.quartz', 'card.marble', 'card.lantern'];
-    const reg = await settleRegistry(store, root, 'a1', KEYS);
+    await settleRegistry(store, root, 'a1', KEYS);
     const r = rng(seed);
     const pick = (a) => a[Math.floor(r() * a.length)];
     const drafts = [];
@@ -193,11 +234,12 @@ for (const seed of [1, 2, 3, 7, 42, 1009]) {
     const eventIds = () => diskRecords(store, 'a1').filter((x) => x.t === 'event').map((x) => x.id);
     for (let step = 0; step < 160; step++) {
       const ids = claimIds();
-      const op = pick(['dup', 'dup', 'dup', 'multi', 'none', 'single', 'single', 'supersede', 'retract', 'event', 'event', 'soft', 'at']);
+      const op = pick(['dup', 'dup', 'dup', 'multi', 'none', 'single', 'single', 'supersede', 'retract', 'event', 'event', 'soft', 'at', 'newkey']);
       let draft;
       if (op === 'dup' && drafts.length) draft = pick(drafts);
       else if (op === 'multi') draft = { t: 'claim', kind: 'fact', text: `m ${step}`, key: pick(KEYS.slice(2)) };
       else if (op === 'none') draft = { t: 'claim', kind: 'fact', text: `n ${step}` };
+      else if (op === 'newkey') draft = { t: 'claim', kind: 'fact', text: `k ${step}`, key: `${pick(['card', 'project'])}.${Math.floor(r() * 0xffffffff).toString(16).padStart(8, 'q')}x${step}` };
       else if (op === 'single') draft = { t: 'claim', kind: 'fact', text: `s ${step % 7}`, key: pick(KEYS.slice(0, 2)) };
       else if (op === 'at') draft = { t: 'claim', kind: 'fact', text: `s ${step % 5}`, key: pick(KEYS.slice(0, 2)), at: new Date(Date.parse('2026-10-03T10:00:00Z') + Math.floor(r() * 400) * 1000).toISOString() };
       else if (op === 'supersede') draft = { t: 'claim', kind: 'fact', text: `r ${step}`, key: pick(KEYS), supersedes: [pick(ids)], supersedesReason: { category: 'changed' } };
@@ -219,12 +261,13 @@ for (const seed of [1, 2, 3, 7, 42, 1009]) {
       const all = claimIds();
       const ask = [...new Set([pick(all), pick(all), pick(all)])];
       const d0 = deriveCalls;
-      const got = store.statusesOf('a1', store.current('a1'), ask, reg);
+      const regNow = REG.loadRegistryShared(root);   // A11: grows as new keys are saved
+      const got = store.statusesOf('a1', store.current('a1'), ask, regNow);
       if (deriveCalls === d0) reused++;
-      const fresh = realDerive(diskRecords(store, 'a1'), reg, { r4: false });
+      const fresh = realDerive(diskRecords(store, 'a1'), regNow, { r4: false });
       for (const id of ask) assert.equal(got.get(id), fresh.claims[id]?.status, `seed ${seed} step ${step} op ${op}: ${id}`);
     }
-    for (const op of ['dup', 'multi', 'none', 'single', 'supersede', 'retract', 'event', 'soft', 'reconcile-answer', 'revert']) assert.ok(okBy[op] > 0, `no ${op} went in: ${JSON.stringify(okBy)}`);
+    for (const op of ['dup', 'multi', 'none', 'single', 'supersede', 'retract', 'event', 'soft', 'reconcile-answer', 'revert', 'newkey']) assert.ok(okBy[op] > 0, `no ${op} went in: ${JSON.stringify(okBy)}`);
     assert.ok(reused >= 40, `the view was reused only ${reused} times; the run proves nothing about reuse`);
   });
 }
