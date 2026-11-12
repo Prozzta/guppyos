@@ -480,7 +480,7 @@ test('Settings roster hides archived agents, labels derived as the system ledger
   const renderer = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'src', 'components', 'ClaimLedgerSettings.tsx'), 'utf8');
   assert.match(renderer, /system ledger/);
   const main = fs.readFileSync(path.join(ROOT, 'src', 'main', 'index.ts'), 'utf8');
-  assert.match(main, /agents: claimLedgerAgents,\s*rosterAgents: \(\) => \(claimsEndpoint\(\) \? \[\.\.\.claimLedgerAgents\(\), DERIVED_AGENT_ID\] : \[\]\),/);
+  assert.match(main, /agents: \(\) => \(claimsEndpoint\(\) \? claimLedgerAgents\(\) : \[\]\),\s*rosterAgents: \(\) => \(claimsEndpoint\(\) \? \[\.\.\.claimLedgerAgents\(\), DERIVED_AGENT_ID\] : \[\]\),/);
   assert.match(main, /agentMeta: \(agentId\) => \{/);
 });
 
