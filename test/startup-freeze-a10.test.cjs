@@ -271,6 +271,45 @@ test('A15: new agent.<id>.* keys saved during appends force no derive; a reason 
   store.statusesOf('a1', store.current('a1'), [old], aliased);
   assert.equal(logs.filter((l) => l.kind === 'claims-view-derive').at(-1).reason, 'registry');
 });
+test('A17: supersedes with a recheck (the derived writer import) force no derive; R3 targets and their linked ids are re-derived', async () => {
+  const root = hive();
+  const { store, logs } = mkStore(root);
+  const keys = ['amberwood', 'birchgrove', 'cobaltmine', 'deltaplain', 'fjordline', 'granitepeak', 'harborview', 'indigosea', 'juniperhill', 'kestrelnest', 'lagoonbay', 'meadowlark']
+    .map((w) => `project.${w}`);
+  const reg = await settleRegistry(store, root, 'a1', ['card.anchor17', ...keys]);
+  const first = { t: 'claim', kind: 'fact', text: 'anchor fact 17', key: 'card.anchor17' };
+  const prior = [];   // the slots' claims from an earlier run
+  for (const k of keys) prior.push(await ok(store.appendRecord('a1', { t: 'claim', kind: 'fact', text: `${k} v1`, key: k }, 'endpoint')));
+  await ok(store.appendRecord('a1', first, 'endpoint'));
+  await ok(store.appendRecord('a1', first, 'endpoint'));   // primes the view
+  const d0 = deriveCalls;
+  // As syncDerived does: each slot's live claim is superseded (with a reason, so the store rechecks it is live).
+  for (let i = 0; i < keys.length; i++) {
+    await ok(store.appendRecord('a1', { t: 'claim', kind: 'fact', text: `${keys[i]} v2`, key: keys[i], supersedes: [prior[i]], supersedesReason: { category: 'changed' } }, 'endpoint'));
+  }
+  assert.equal(deriveCalls - d0, 0, 'no derive per supersede');
+  const fresh = realDerive(diskRecords(store, 'a1'), reg, { r4: false });
+  const got = store.statusesOf('a1', store.current('a1'), prior, reg);
+  for (const id of prior) assert.equal(got.get(id), fresh.claims[id].status);
+  assert.equal(got.get(prior[0]), 'superseded', 'a target is re-derived (it is linked)');
+  // A linked id paired with a target by an event: z's soft-supersede by y stops holding once y is superseded.
+  const y = await ok(store.appendRecord('a1', { t: 'claim', kind: 'fact', text: 'loose y' }, 'endpoint'));
+  const z = await ok(store.appendRecord('a1', { t: 'claim', kind: 'fact', text: 'loose z' }, 'endpoint'));
+  await ok(store.appendSoftSupersede('a1', z, y, 'item-17'));
+  const at = (id) => store.statusesOf('a1', store.current('a1'), [id], reg).get(id);
+  assert.equal(at(z), 'superseded?');
+  const zDerives = deriveCalls;
+  await ok(store.appendRecord('a1', { t: 'claim', kind: 'fact', text: 'drop y', retracts: [y] }, 'endpoint'));
+  assert.equal(at(z), 'live', 'y was retracted, so the proposal no longer holds');
+  assert.equal(at(y), 'retracted');
+  assert.equal(deriveCalls - zDerives, 1, 'one derive, for the linked id asked about');
+  // Why the view was dropped: the first view, then an event that is not a sighting.
+  const rows = logs.filter((l) => l.kind === 'claims-view-derive');
+  assert.equal(rows[0].dropped, 'first');
+  assert.ok(rows.some((l) => l.reason === 'no-view' && l.dropped === 'event:soft-supersede'), JSON.stringify(rows));
+  assert.ok(rows.every((l) => (l.reason === 'no-view') === (l.dropped !== undefined)));
+});
+
 function deepFreezeLocal(o) { if (o && typeof o === 'object' && !Object.isFrozen(o)) { Object.freeze(o); for (const x of Object.values(o)) deepFreezeLocal(x); } return o; }
 
 function rng(seed) {
@@ -320,7 +359,8 @@ for (const seed of [1, 2, 3, 7, 42, 1009]) {
       if (res.ok) { okBy[op] = (okBy[op] ?? 0) + 1; if (draft?.t === 'claim' && !draft.supersedes && !draft.retracts) drafts.push(draft); }
       // Ask the store about a few claims, as R1 and the recheck do, and hold it to a fresh derive.
       const all = claimIds();
-      const ask = [...new Set([pick(all), pick(all), pick(all)])];
+      // A17: and about the ids a supersede/retract just named.
+      const ask = [...new Set([pick(all), pick(all), pick(all), ...(res.ok ? [...(draft?.supersedes ?? []), ...(draft?.retracts ?? [])] : [])])];
       const d0 = deriveCalls;
       const regNow = REG.loadRegistryShared(root);   // A11: grows as new keys are saved
       const got = store.statusesOf('a1', store.current('a1'), ask, regNow);

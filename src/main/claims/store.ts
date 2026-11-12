@@ -150,8 +150,11 @@ interface AgentState {
  *   - a claim with no supersedes/retracts and no single-cardinality key is 'live' (every writer refuses a target it
  *     does not hold, so nothing names a new id) and changes no other claim (R2 groups only single keys);
  *   - a claim with a single key K can change, by R2, the claims keyed K only; those ids are then not reused (dirty).
- * Anything else (another event, a supersede/retract, a re-read state, a registry derive reads differently) is a full
- * derive.
+ *   - A17 (Jim cdf8fec8: the derived writer's import supersedes, 36-42 full derives of 0.6 s per warm run): a claim
+ *     that supersedes/retracts changes, by R3, its targets only (R2 never reads a status, and no older claim's
+ *     supersedes chain can reach the new id), and through the events, the ids paired with a target (linked). The
+ *     targets join linked and no linked id is reused until the next derive (linkedStale).
+ * Anything else (another event, a re-read state, a registry derive reads differently) is a full derive.
  * Once a single-key claim went in, no id an event or a supersedes/retracts names (linked) is reused either: an event's
  * outcome can hang on another claim's status (soft-supersede, accept).
  */
@@ -166,7 +169,11 @@ interface LedgerView {
     status: Map<string, Status>;
     linked: Set<string>;
     dirtyKeys: Set<string>;
+    /** A17: a supersede/retract went in since the derive: no linked id is reused. */
+    linkedStale: boolean;
   };
+  /** A17 (Jim cdf8fec8): why `derived` was last dropped (for the claims-view-derive row). */
+  dropped?: string;
 }
 
 /**
@@ -354,6 +361,8 @@ export class ClaimStore {
   private readonly verifiedReads = new Map<string, VerifiedRead>();
   /** A10: per agent, the ledger's records and derive's statuses, kept current across our own appends (see ledgerView). */
   private readonly views = new Map<string, LedgerView>();
+  /** A17: why an agent's view was deleted (an append not on its head), for the next view's `dropped`. */
+  private readonly viewGone = new Map<string, string>();
   /** A3: bumped when a queued write (append, purge, restore, reset) starts and when it ends (odd while one runs); a
    *  warm that sees it odd or moved drops its read. */
   private readonly writeGen = new Map<string, number>();
@@ -1169,7 +1178,9 @@ export class ClaimStore {
     const records = this.ledgerRecords(agentId);
     const claims = new Map<string, ClaimRec>();
     for (const r of records) if (r.t === 'claim') claims.set(r.id, r);
-    const fresh: LedgerView = { s, head: s.head, records, claims, derived: null };
+    const dropped = v ? (v.s !== s ? 'reread' : 'head') : (this.viewGone.get(agentId) ?? 'first');
+    this.viewGone.delete(agentId);
+    const fresh: LedgerView = { s, head: s.head, records, claims, derived: null, dropped };
     this.views.set(agentId, fresh);
     return fresh;
   }
@@ -1186,7 +1197,7 @@ export class ClaimStore {
     }
     const reusable = (id: string): boolean => {
       if (!d || d.registry !== registry || !d.status.has(id)) return false;
-      if (d.dirtyKeys.size === 0) return true;
+      if (d.dirtyKeys.size === 0 && !d.linkedStale) return true;
       if (d.linked.has(id)) return false;
       const k = singleKeyOf(v.claims.get(id)?.key, registry);
       return k === null || !d.dirtyKeys.has(k);
@@ -1199,7 +1210,7 @@ export class ClaimStore {
         : miss === undefined || !d.status.has(miss) ? 'unknown-id' : d.linked.has(miss) ? 'linked' : 'dirty-key';
       const t0 = performance.now();
       const state = derive(v.records, registry, { r4: false });
-      this.log({ kind: 'claims-view-derive', agentId, reason, records: v.records.length, ms: Math.round(performance.now() - t0) });
+      this.log({ kind: 'claims-view-derive', agentId, reason, ...(!d ? { dropped: v.dropped ?? 'first' } : {}), records: v.records.length, ms: Math.round(performance.now() - t0) });
       status = new Map<string, Status>();
       for (const id of Object.keys(state.claims)) status.set(id, state.claims[id].status);
       const linked = new Set<string>();
@@ -1207,7 +1218,7 @@ export class ClaimStore {
         if (r.t === 'claim') { for (const id of r.supersedes ?? []) linked.add(id); for (const id of r.retracts ?? []) linked.add(id); }
         else if (r.t === 'event' && r.ev !== 'sighting') for (const id of r.targets) linked.add(id);
       }
-      v.derived = { registry, status, linked, dirtyKeys: new Set() };
+      v.derived = { registry, status, linked, dirtyKeys: new Set(), linkedStale: false };
     }
     const out = new Map<string, Status | undefined>();
     for (const id of ids) out.set(id, status.get(id));
@@ -1218,15 +1229,20 @@ export class ClaimStore {
   private viewAppend(agentId: string, s: AgentState, prev: string, line: string): void {
     const v = this.views.get(agentId);
     if (!v) return;
-    if (v.s !== s || v.head !== prev) { this.views.delete(agentId); return; }
+    if (v.s !== s || v.head !== prev) { this.views.delete(agentId); this.viewGone.set(agentId, v.s !== s ? 'append-reread' : 'append-off-head'); return; }
     const rec = JSON.parse(line) as LedgerRec;   // as ledgerRecords reads it back
     v.records.push(rec);
     if (rec.t === 'claim') v.claims.set(rec.id, rec);
     v.head = s.head;
     const d = v.derived;
     if (!d) return;
-    if (rec.t !== 'claim') { if (!(rec.t === 'event' && rec.ev === 'sighting')) v.derived = null; return; }
-    if (rec.supersedes?.length || rec.retracts?.length) { v.derived = null; return; }
+    if (rec.t !== 'claim') { if (!(rec.t === 'event' && rec.ev === 'sighting')) { v.derived = null; v.dropped = `event:${rec.ev}`; } return; }
+    // A17: R3 changes its targets (and so their linked partners) only; see LedgerView.
+    if (rec.supersedes?.length || rec.retracts?.length) {
+      for (const id of rec.supersedes ?? []) d.linked.add(id);
+      for (const id of rec.retracts ?? []) d.linked.add(id);
+      d.linkedStale = true;
+    }
     const k = singleKeyOf(rec.key, d.registry);
     if (k !== null) d.dirtyKeys.add(k);
     d.status.set(rec.id, 'live');
