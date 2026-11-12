@@ -91,6 +91,96 @@ export function findNewestRollout(codexHome: string, sessionId?: string): string
   return newest?.file ?? null;
 }
 
+/** SCALE-ROLLOUT-NEWEST: how often a home gets the exact full walk (god 4e1810). */
+export const ROLLOUT_FULL_WALK_MS = 10 * 60_000;
+
+interface RolloutDir { names: string[] }
+interface RolloutHomeIndex { dirs: Map<string, RolloutDir>; mtimes: Map<string, number>; best: string | null; fullAt: number }
+
+/**
+ * SCALE-ROLLOUT-NEWEST (Jim's STARTUP-SCALE-YEAR audit, A15): `findNewestRollout(home)` without a session id,
+ * kept per home so a repeat call stats no old rollout. The 15 s liveness beat asked it for every non-idle Codex
+ * agent, and each call walked every dated folder and statted every rollout the home ever had.
+ *
+ * The answer is the same: the newest `rollout-*.jsonl` by mtime, ties to the first in walk order. What is cached:
+ *  - each folder's listing. A repeat call re-lists only the newest spine (`sessions`, the newest year, month and
+ *    day: four small readdirs, no stat): Codex creates a rollout in the folder of the day its session starts, so a
+ *    new file or folder can only appear there. Folder mtimes are not used: NTFS stamps them at a coarse tick, so a
+ *    create in the same tick as a listing would be missed. A folder seen for the first time is always listed;
+ *  - each rollout's mtime. A repeat call restats only the current newest and the agent's registered session's file
+ *    (the resume key: `codex resume` appends to the OLD file, whose folder mtime does not change). A new name is
+ *    statted when it appears;
+ *  - every ROLLOUT_FULL_WALK_MS the home gets today's exact full walk, so anything else (a manual resume of another
+ *    session in the agent's home, a clock step) is picked up within 10 minutes.
+ */
+export class RolloutIndex {
+  private homes = new Map<string, RolloutHomeIndex>();
+
+  constructor(private readonly now: () => number = Date.now) {}
+
+  newest(codexHome: string, sessionId?: string): string | null {
+    const root = join(codexHome, 'sessions');
+    if (!existsSync(root)) { this.homes.delete(codexHome); return null; }
+    let h = this.homes.get(codexHome);
+    const full = !h || this.now() - h.fullAt >= ROLLOUT_FULL_WALK_MS;
+    if (!h || full) { h = { dirs: new Map(), mtimes: new Map(), best: h?.best ?? null, fullAt: this.now() }; this.homes.set(codexHome, h); }
+    const index = h;
+    const hot = (file: string, name: string) => file === index.best || (!!sessionId && name.endsWith(`-${sessionId}.jsonl`));
+    const seen = new Set<string>();
+    // Every known rollout in walk order, with its mtime and whether this call statted it.
+    const cands: { file: string; m: number; fresh: boolean; node: RolloutDir; name: string }[] = [];
+    // levels: 0 = sessions, 1 = YYYY, 2 = MM, 3 = DD (whose names are rollouts).
+    const visit = (dir: string, level: number, spine: boolean): void => {
+      let node = index.dirs.get(dir);
+      if (!node || spine) {
+        let names: string[] = [];
+        try {
+          names = level < 3
+            ? readdirSync(dir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name)
+            : readdirSync(dir).filter((n) => n.startsWith('rollout-') && n.endsWith('.jsonl'));
+        } catch { names = []; }
+        node = { names };
+        index.dirs.set(dir, node);
+      }
+      if (level < 3) {
+        const last = node.names.reduce<string | null>((m, n) => (m === null || n > m ? n : m), null);
+        for (const n of node.names) visit(join(dir, n), level + 1, spine && n === last);
+        return;
+      }
+      const dayNode = node;
+      for (const name of [...dayNode.names]) {
+        const file = join(dir, name);
+        let m = index.mtimes.get(file);
+        let fresh = false;
+        if (m === undefined || hot(file, name)) {
+          try { m = statSync(file).mtimeMs; fresh = true; index.mtimes.set(file, m); }
+          catch { index.mtimes.delete(file); dayNode.names = dayNode.names.filter((n) => n !== name); continue; }
+        }
+        seen.add(file);
+        cands.push({ file, m, fresh, node: dayNode, name });
+      }
+    };
+    visit(root, 0, true);
+    for (const f of [...index.mtimes.keys()]) if (!seen.has(f)) index.mtimes.delete(f);
+    // Strict '>' in walk order: the first of equal mtimes wins, as in findNewestRollout. A winner known only from
+    // the cache is statted before it is returned, so a deleted file is never handed out (the next one is tried).
+    for (;;) {
+      let win = -1;
+      for (let i = 0; i < cands.length; i++) if (win < 0 || cands[i].m > cands[win].m) win = i;
+      if (win < 0) { index.best = null; return null; }
+      const c = cands[win];
+      if (!c.fresh) {
+        try { c.m = statSync(c.file).mtimeMs; c.fresh = true; index.mtimes.set(c.file, c.m); continue; }
+        catch { index.mtimes.delete(c.file); c.node.names = c.node.names.filter((n) => n !== c.name); cands.splice(win, 1); continue; }
+      }
+      index.best = c.file;
+      return c.file;
+    }
+  }
+
+  forget(codexHome: string): void { this.homes.delete(codexHome); }
+}
+
 /** Read the last `TAIL_BYTES` of a file as text, without loading the whole rollout. */
 export function readTail(file: string, bytes = TAIL_BYTES): string {
   let fd: number | null = null;

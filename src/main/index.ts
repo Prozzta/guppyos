@@ -769,7 +769,8 @@ function livenessFactsFor(agentId: string): LivenessFacts | null {
   if (pf && a.provider === 'codex' && wake.lifecycle !== 'idle') {
     // The same mtime-cached bounded tail the WWR reads (re-read only when the file changed).
     const home = hive.codexHomeFor(agentId);
-    const probe = home ? codexLifecycle.probe(home) : undefined;
+    // SCALE-ROLLOUT-NEWEST: the registered session's file is restatted each beat (codex resume appends to it).
+    const probe = home ? codexLifecycle.probe(home, a.sessionId) : undefined;
     rollout = probe && probe.ok ? probe.latest : undefined;
   }
   let mailWaiting = 0;
@@ -1038,8 +1039,8 @@ const automaticSubmit = new AutomaticSubmitOwner(buildOwnerDeps({
     const agentId = ptyToAgent.get(ptyId);
     const home = agentId ? hive.codexHomeFor(agentId) : null;
     const spawnedAt = ptyManager.livenessFacts(ptyId)?.spawnedAt ?? 0;
-    if (!home || spawnedAt <= 0) return false;
-    return threadSettingsAppliedSince(codexLifecycle.threadSettingsAt(home), spawnedAt);
+    if (!agentId || !home || spawnedAt <= 0) return false;
+    return threadSettingsAppliedSince(codexLifecycle.threadSettingsAt(home, hive.lastSession(agentId)), spawnedAt);
   },
   // DWIGHT-INPUT-DEAD-179 F2: the startup reading's verdict and screen, once per incarnation and
   // reason (the owner dedupes), so a startup hold is explained from the log.
@@ -1165,7 +1166,7 @@ inboxWake = new InboxWakeBridge({
   // FALSEACTIVE-STALL-2 (B1): Codex's rollout closes a turn whose Stop was lost.
   codexTurnProbe: (agentId) => {
     const home = hive.codexHomeFor(agentId);
-    return home ? codexLifecycle.probe(home) : undefined;
+    return home ? codexLifecycle.probe(home, hive.lastSession(agentId)) : undefined;
   },
   // CODEX-FALSEACTIVE-153: the providers whose own turn start reaches main (Claude and Codex
   // UserPromptSubmit, Codex task_started, AGY PreInvocation). Only for these is a COMMITTED
