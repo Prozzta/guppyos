@@ -19,7 +19,7 @@
  */
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { DERIVED_AGENT_ID, type AppendOrigin, type AppendResult, type ClaimRec, type ClaimsState, type LedgerRec, type ReadResult, type RecordDraft } from '../../shared/claims';
+import { DERIVED_AGENT_ID, type AppendOrigin, type AppendResult, type ChainBreak, type ClaimRec, type ClaimsState, type LedgerRec, type ReadResult, type RecordDraft } from '../../shared/claims';
 import {
   cardFieldFacts, cardRecordFacts, decisionFacts, isRulingMail, rulingMailFacts, type RulingMailLike, type BumpMap, doneMailFacts, gitHistoryFacts, mergeFacts, parseChangelog, releaseFacts, shaMentions,
   type CardLike, type DerivedFact, type GitLogPort, type MailLike, type TagLike,
@@ -32,6 +32,8 @@ import { TRUSTED_METHODS, readProvenMail, type MailLinkMethod } from '../mailCar
 export interface DerivedStore {
   readLedger(agentId: string): ReadResult;
   appendRecord(agentId: string, draft: RecordDraft, origin: AppendOrigin): Promise<AppendResult>;
+  /** CLAIMS-READONLY-RETRY-STORM: why the store would refuse an append to this ledger, or null (ClaimStore.appendBlocked). */
+  appendBlocked?(agentId: string): ChainBreak | null;
 }
 
 export interface DerivedWriterDeps {
@@ -40,7 +42,29 @@ export interface DerivedWriterDeps {
   log?: (row: Record<string, unknown>) => void;
 }
 
-export interface SyncCounts { facts: number; appended: number; unchanged: number; superseded: number; failed: number; older?: number; noTime?: number; redated?: number; valued?: number }
+export interface SyncCounts { facts: number; appended: number; unchanged: number; superseded: number; failed: number; older?: number; noTime?: number; redated?: number; valued?: number; readOnly?: number }
+
+/**
+ * CLAIMS-READONLY-RETRY-STORM: a read-only derived ledger (its key missing, or its chain broken) used to
+ * be offered every changed slot, each append re-listing the segments and refused (9.3k refusals per run,
+ * ~79k claims folder listings a minute, on a key-missing hive). The writer now asks the store once per
+ * sync and writes nothing while the ledger is read-only; a refusal mid-sync that turns out to be the
+ * ledger's state ends that sync. One row is logged when the state changes (read-only, then writable
+ * again), never per slot. Writing resumes on the first sync after the store reports the ledger writable
+ * (the Human's rekey or restore, a claims bootstrap, the key loading at a restart). The store keeps
+ * refusing such appends itself: this changes what the writer attempts, not what the ledger accepts.
+ */
+const lastBlocked = new WeakMap<object, string>();
+function derivedBlocked(deps: DerivedWriterDeps): ChainBreak | null {
+  const b = deps.store.appendBlocked?.(DERIVED_AGENT_ID) ?? null;
+  const k = b ? `${b.reason} at ${b.brokenAt}` : '';
+  if (k !== (lastBlocked.get(deps.store) ?? '')) {
+    lastBlocked.set(deps.store, k);
+    if (b) deps.log?.({ kind: 'claims-derived-readonly', reason: b.reason, brokenAt: String(b.brokenAt).slice(0, 80), why: 'the derived ledger is read-only, so no derived claims are written until it is writable again (a key restore or rekey, or a claims bootstrap); the Human has been alerted by the store' });
+    else deps.log?.({ kind: 'claims-derived-writable' });
+  }
+  return b;
+}
 
 /** The sender a done-sha claim's text names (the writer's own template; M5's per-commit claims too). */
 const DONE_FROM_RE = /\bdone mail (?:\S+ )?from (\S+) /;
@@ -62,6 +86,7 @@ const refsId = (refs: ClaimRec['refs']): string => JSON.stringify((refs ?? []).m
 
 export async function syncDerived(deps: DerivedWriterDeps, facts: readonly DerivedFact[]): Promise<SyncCounts> {
   const counts: SyncCounts = { facts: facts.length, appended: 0, unchanged: 0, superseded: 0, failed: 0 };
+  if (facts.length && derivedBlocked(deps)) { counts.readOnly = facts.length; return counts; }
   const read = deps.store.readLedger(DERIVED_AGENT_ID);
   const state = deps.derive(read.records);
   const live = new Map<string, ClaimRec[]>();
@@ -74,7 +99,7 @@ export async function syncDerived(deps: DerivedWriterDeps, facts: readonly Deriv
     live.set(slot, list);
   }
   const done = new Set<string>();
-  for (const f of facts) {
+  for (const [i, f] of facts.entries()) {
     if (done.has(f.slot)) continue;   // one value per slot per sync: the first fact wins
     done.add(f.slot);
     // Valid time (god e551de): a fact with no source time is never written (the store would stamp the run's time).
@@ -101,6 +126,10 @@ export async function syncDerived(deps: DerivedWriterDeps, facts: readonly Deriv
       if (same && sameValue) counts.redated = (counts.redated ?? 0) + 1;
       if (same && !sameValue) counts.valued = (counts.valued ?? 0) + 1;
       if (prior.length) counts.superseded += prior.length;
+    } else if (derivedBlocked(deps)) {
+      // The ledger went read-only during this sync: the rest would only be refused the same way.
+      counts.readOnly = facts.length - i;
+      break;
     } else {
       counts.failed++;
       deps.log?.({ kind: 'claims-derived-append-failed', slot: f.slot.slice(0, 120), error: res.error.slice(0, 160) });
