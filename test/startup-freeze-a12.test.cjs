@@ -264,3 +264,87 @@ test('A13: syncAll starts each agent in its own event-loop turn, same agents, or
   assert.ok(reads[0][1] > t0, 'the first agent is not read in the caller\'s turn');
   for (let i = 1; i < reads.length; i++) assert.ok(reads[i][1] > reads[i - 1][1], `agents ${reads[i - 1][0]} and ${reads[i][0]} were synced in one turn: ${JSON.stringify(reads)}`);
 });
+
+// A14 (Jim 3e0c72: releaseFacts/digestFor 1.1 s at 159.5 s, a scan of every card and done mail per version).
+const F = loadTs('src/main/claims/derivedFacts.ts');
+/** The pre-A14 digestFor, verbatim in behaviour: the reference. */
+function oldDigestFor(version, sources) {
+  const escaped = version.replace(/\./g, '\\.');
+  const releaseCard = new RegExp('\\b(?:release|cut)-' + escaped + '(?![0-9.])', 'i');
+  const labelled = /\b(?:setup|installer)\s+(?:digest|sha256|sha-256)\s*[:=]?\s*([0-9a-f]{64})(?![0-9a-f])/i;
+  const anotherRelease = '\\b(?:release|cut)-\\d+(?:\\.\\d+)+(?![0-9.])';
+  const afterVersion = new RegExp(releaseCard.source + '(?:(?!' + anotherRelease + ')[\\s\\S]){0,240}?' + labelled.source, 'i');
+  const digestAfterVersion = (text) => typeof text === 'string' ? afterVersion.exec(text)?.[1]?.toLowerCase() ?? null : null;
+  const digest = (text) => typeof text === 'string' ? labelled.exec(text)?.[1]?.toLowerCase() ?? null : null;
+  for (const c of sources.cards ?? []) {
+    const text = [c.result, c.notes].filter((x) => typeof x === 'string').join('\n');
+    const hit = digestAfterVersion(text) ?? (typeof c.id === 'string' && releaseCard.test(c.id) ? digest(text) : null);
+    if (hit) return hit;
+  }
+  for (const m of sources.mails ?? []) {
+    if (m.act !== 'done') continue;
+    const hit = digestAfterVersion(`${m.subject ?? ''} ${m.body ?? ''}`);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+test('A14: releaseFacts gives each version the digest the per-version scan gave, reading each card once', () => {
+  let seed = 104;
+  const rnd = (n) => { seed = (Math.imul(seed, 1103515245) + 12345) & 0x7fffffff; return (seed >>> 8) % n; };
+  const hex = (n) => { let s = ''; for (let i = 0; i < n; i++) s += '0123456789abcdef'[rnd(16)]; return s; };
+  const versions = Array.from({ length: 24 }, (_, i) => `1.1.${i + 1}`);
+  const v = () => versions[rnd(versions.length)];
+  const label = () => ['setup digest', 'installer sha256:', 'Installer SHA-256 =', 'setup sha-256'][rnd(4)];
+  const piece = () => [
+    () => `release-${v()} shipped`, () => `cut-${v()}`, () => `${label()} ${hex(64)}`, () => `${label()} ${hex(64).toUpperCase()}`,
+    () => `${label()} ${hex(65)}`, () => 'branch guppy/x\n', () => 'x'.repeat(rnd(300)), () => `release-${v()}.9 ok`,
+  ][rnd(8)]();
+  const text = () => Array.from({ length: 1 + rnd(5) }, piece).join(rnd(2) ? '\n' : ' ');
+  let hits = 0;
+  let misses = 0;
+  for (let round = 0; round < 25; round++) {
+    let reads = 0;
+    const cards = Array.from({ length: 30 }, (_, i) => {
+      const c = { id: rnd(3) ? `SYN-${i}` : `release-${v()}`, notes: rnd(2) ? text() : undefined };
+      const result = rnd(4) ? text() : undefined;
+      Object.defineProperty(c, 'result', { enumerable: true, get: () => { reads++; return result; } });
+      return c;
+    });
+    const mails = Array.from({ length: 40 }, (_, i) => ({ id: `m${i}`, act: rnd(4) ? 'done' : 'inform', subject: rnd(2) ? text() : undefined, body: rnd(2) ? text() : undefined }));
+    const tags = versions.map((x) => ({ name: `v${x}`, commit: hex(40), date: '2026-10-01T00:00:00Z' }));
+    const facts = F.releaseFacts([], tags, undefined, [], { cards, mails });
+    assert.ok(reads <= cards.length, `each card's text is built once, not once per version (${reads} reads of ${cards.length} cards)`);
+    for (const x of versions) {
+      const f = facts.find((r) => r.key === `release.${x}`);
+      assert.ok(f, `release.${x}`);
+      const want = oldDigestFor(x, { cards, mails });
+      const got = /installer digest ([0-9a-f]{64})/.exec(f.text)?.[1] ?? null;
+      assert.equal(got, want, `round ${round} version ${x}`);
+      if (want) hits++; else misses++;
+    }
+  }
+  assert.ok(hits >= 50 && misses >= 50, `the fixture reaches digests and their absence (${hits} hits, ${misses} misses)`);
+});
+
+test('A14: with many texts and few digests, releaseFacts scans each text once, not once per version', () => {
+  const versions = Array.from({ length: 24 }, (_, i) => `1.1.${i + 1}`);
+  const h = (c) => c.repeat(64);
+  const cards = Array.from({ length: 200 }, (_, i) => ({ id: `SYN-${i}`, result: `release-1.1.${(i % 24) + 1} shipped, branch guppy/x, ${'word '.repeat(30)}` }));
+  cards[50].result = `release-1.1.7 shipped\nsetup digest ${h('a')}`;
+  const mails = Array.from({ length: 200 }, (_, i) => ({ id: `m${i}`, act: 'done', subject: `cut-1.1.${(i % 24) + 1} done`, body: 'all green '.repeat(20) }));
+  mails[9].body = `cut-1.1.3 installer sha256: ${h('b')}`;
+  const tags = versions.map((x, i) => ({ name: `v${x}`, commit: String(i % 10).repeat(40), date: '2026-10-01T00:00:00Z' }));
+  const realExec = RegExp.prototype.exec;
+  let execs = 0;
+  RegExp.prototype.exec = function (...a) { execs++; return realExec.apply(this, a); };
+  let facts;
+  try { facts = F.releaseFacts([], tags, undefined, [], { cards, mails }); } finally { RegExp.prototype.exec = realExec; }
+  const digestOf = (v) => /installer digest ([0-9a-f]{64})/.exec(facts.find((r) => r.key === `release.${v}`).text)?.[1] ?? null;
+  assert.equal(digestOf('1.1.7'), h('a'));
+  assert.equal(digestOf('1.1.3'), h('b'));
+  assert.equal(versions.filter((v) => digestOf(v)).length, 2);
+  // 400 texts: a filter run each, then per version 2 candidate texts (and per-version key and version checks).
+  // The per-version scan of every text was at least 24 x 400 = 9,600 runs.
+  assert.ok(execs <= 400 + versions.length * 40, `regex runs ${execs}: texts without a labelled digest are scanned per version`);
+});
