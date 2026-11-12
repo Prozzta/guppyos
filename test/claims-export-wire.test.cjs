@@ -320,6 +320,6 @@ test('main wires all three callers (index.ts loads only under Electron, so its w
   // The returned deps object is laid out one key per line since f4da7681 (note choice + supersedes
   // reasons); the pin reads the same keys in the same order, whatever the line breaks.
   assert.match(idx, /return \{\s*store: claimStore\.store,\s*level: claimLevel,\s*exportComplete: \(agentId\) => claimExport\(\)\.complete\(agentId\),\s*(?:claimHistory: \(agentId, id\) => claimHistory\(agentId, id\),\s*)?onReconcile: \(agentId, a, b\) => reconcileQueueForHive\(root\)\.answeredPair\(agentId, a, b\),/, 'memory export --complete and W5 reconcile answer callback');
-  assert.match(idx, /setImmediate\(\(\) => \{ try \{ claimExport\(\)\.syncAll\(claimLedgerAgents\(\)\); \}/, 'the start-up catch-up');
-  assert.match(idx, /createClaimExport\(\{[\s\S]{0,400}level: claimLevel,[\s\S]{0,200}readLedger: \(agentId\) => \(claimsEndpoint\(\) as ClaimsEndpointDeps\)\.store\.readLedger\(agentId\)/, 'the verified ledger, at the effective level');
+  assert.match(idx, /void warmed\.then\(\(\) => \{ try \{ claimExport\(\)\.syncAll\(claimLedgerAgents\(\)\); \}/, 'the start-up catch-up (after the A3 warm)');
+  assert.match(idx, /createClaimExport\(\{[\s\S]{0,400}level: claimLevel,[\s\S]{0,200}readLedger: \(agentId\) => \(claimsEndpoint\(\) as ClaimsEndpointDeps\)\.store\.readLedgerCached\(agentId\)/, 'the verified ledger (A3: the kept verified read), at the effective level');
 });
