@@ -19,6 +19,7 @@ import { scrubExport } from './claims/exportLedger';
 import { importAtStart } from './claims/startupImport';
 import { ClaimsBootstrap, loadBootstrapMarker, saveBootstrapMarker } from './claims/bootstrap';
 import { DerivedLive } from './claims/derivedLive';
+import { deriveOnce } from './claims/derivedWriter';
 import { startAfterMailCardCatchUp, startupMailCardCatchUp } from './mailCards';
 import { enableLedgerAgent, enableLedgerDefault, floorRepo, seedFloorSources } from './claims/floorSeed';
 import { makeW6Append } from './claims/w6Append';
@@ -1647,7 +1648,7 @@ derivedClaims = new DerivedLive({
     const ep = claimsEndpoint(); const root = hive.root();
     if (!ep || !root || !claimsDerive) return null;
     const registry = (): ReturnType<typeof loadRegistry> => { try { return loadRegistryShared(root); } catch { return DEFAULT_KEY_REGISTRY; } };
-    return { store: ep.store, derive: (records) => claimsDerive(records, registry(), { r4: false }), log: (row) => hive.appendLog(row) };
+    return { store: ep.store, derive: (records) => deriveOnce(claimsDerive, records, registry()), log: (row) => hive.appendLog(row) };
   },
   enabled: () => readConfig().derivedClaims !== false && claimLevel(DERIVED_AGENT_ID) !== 'off',
   repo: () => derivedRepoNow(),
