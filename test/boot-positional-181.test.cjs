@@ -17,6 +17,8 @@ require('./tools/own-job.cjs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
+const fs = require('node:fs');
+const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
 const { readSource } = require('./read-source.cjs');
 
@@ -66,15 +68,36 @@ test('the orientation text: what god is told (moved verbatim from the renderer)'
   assert.ok(!P.startsWith('-'), 'and it would be safe even without "--"');
 });
 
-test('Windows: node-pty\'s CRT command line carries the "--" and the orientation back byte for byte', { skip: process.platform !== 'win32' }, () => {
+/** Run node-pty's WHOLE command line for `exe` (the file included) verbatim, as CreateProcess gets it.
+ *  E45-INT-REGRESSIONS item 5: the test once dropped the file and let libuv put process.execPath in
+ *  front, UNQUOTED in verbatim mode, so a node under "C:\Program Files" split at the space. argv0 is
+ *  the whole line here, so the file's quoting is node-pty's own. */
+K.ptyLineArgv = (exe, args) => {
   const { argsToCommandLine } = require('node-pty/lib/windowsPtyAgent.js');
-  const args = GO.withGodOrientationArg(BASE, true).args;
   const script = 'process.stdout.write(JSON.stringify(process.argv.slice(1)))';
-  // The exact line node-pty would hand CreateProcess, minus the file, run verbatim by a real child.
-  const line = argsToCommandLine('x', ['-e', script, '--', ...args]).slice(2);
-  const r = spawnSync(process.execPath, [line], { windowsVerbatimArguments: true, encoding: 'utf8' });
-  assert.equal(r.status, 0, r.stderr);
-  assert.deepEqual(JSON.parse(r.stdout), args);
+  const line = argsToCommandLine(exe, ['-e', script, '--', ...args]);
+  const r = spawnSync(exe, [], { argv0: line, windowsVerbatimArguments: true, encoding: 'utf8', timeout: 30_000 });
+  assert.equal(r.status, 0, `${line}\n${r.stderr}`);
+  return JSON.parse(r.stdout);
+};
+
+test('Windows: node-pty\'s CRT command line carries the "--" and the orientation back byte for byte', { skip: process.platform !== 'win32' }, () => {
+  const args = GO.withGodOrientationArg(BASE, true).args;
+  assert.deepEqual(K.ptyLineArgv(process.execPath, args), args);
+});
+
+test('Windows: an agent CLI under a folder with a space (Program Files) is quoted by node-pty', { skip: process.platform !== 'win32' }, () => {
+  const { tempDir } = require('./tools/test-temp.cjs');
+  const exe = path.join(tempDir('pty spaced '), 'Program Files', 'nodejs', 'node.exe');
+  fs.mkdirSync(path.dirname(exe), { recursive: true });
+  try { fs.linkSync(process.execPath, exe); } catch { fs.copyFileSync(process.execPath, exe); }
+  assert.ok(/ /.test(exe));
+  const args = GO.withGodOrientationArg(BASE, true).args;
+  assert.deepEqual(K.ptyLineArgv(exe, args), args);
+  // The old spawn (file put by libuv, unquoted) splits here: this case would have caught it on any machine.
+  const { argsToCommandLine } = require('node-pty/lib/windowsPtyAgent.js');
+  const rest = argsToCommandLine('x', ['-e', '0', '--', ...args]).slice(2);
+  assert.notEqual(spawnSync(exe, [rest], { windowsVerbatimArguments: true, encoding: 'utf8', timeout: 30_000 }).status, 0, 'the unquoted exe path splits');
 });
 
 // ─── the wiring ─────────────────────────────────────────────────────────────────────────────
