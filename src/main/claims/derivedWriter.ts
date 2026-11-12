@@ -408,6 +408,9 @@ export function deriveOnce(derive: DeriveFn, records: LedgerRec[], registry: Key
 const nextTurn = (): Promise<void> => new Promise<void>((resolve) => setImmediate(resolve));
 
 export async function runDerivedBackfill(deps: DerivedWriterDeps, input: BackfillInput): Promise<BackfillCounts> {
+  // A17 (Jim cdf8fec8): the import's start and end in log.jsonl (its claims-key-added rows give the keys per 10 s).
+  const t0 = Date.now();
+  deps.log?.({ kind: 'claims-derived-backfill-start' });
   const cards = readCards(input.hiveRoot);
   const subjects = new Map<string, string>();
   // Round 10 (must 5b): the full pass also reads proven done mails the index and the ledgers lack.
@@ -448,6 +451,6 @@ export async function runDerivedBackfill(deps: DerivedWriterDeps, input: Backfil
   await nextTurn();
   const merges = log && input.git ? await syncDerived(deps, await mergeFacts(log, cardIds, input.git)) : none;
   const counts = { cards: cards.length, doneMails: mails.length, decisions, records, rulings, cardFields, releases, doneShas, doneSkipped: done.skipped, doneOlder: done.older, gitShas, merges };
-  deps.log?.({ kind: 'claims-derived-backfill', ...counts });
+  deps.log?.({ kind: 'claims-derived-backfill', ...counts, ms: Date.now() - t0 });
   return counts;
 }

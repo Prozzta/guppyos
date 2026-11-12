@@ -209,6 +209,30 @@ test('A12: with deriveOnce the backfill counts equal a plain derive, and an idem
   assert.equal(calls, 1, 'nothing appended: one derive for the whole rerun (was one per step)');
 });
 
+test('A17: a rerun that supersedes every changed card claim derives the view once, and logs its start and end', async () => {
+  const root = hiveDir();
+  const storeLogs = [];
+  const store = new ClaimStore({ hiveRoot: root, keys: new SandboxKeyProvider(), keyRecord: new FileLedgerKeyRecord(path.join(`${root}-ud`, KEY_RECORD_FILE)), log: (r) => storeLogs.push(r), alert: () => {} });
+  STORES.push(store);
+  const rows = [];
+  const deps = { store, derive: (records) => derive(records, FROZEN, { r4: false }), log: (r) => rows.push(r) };
+  const many = (tag) => ({ tasks: Array.from({ length: 12 }, (_, i) => ({ id: `SYN-R${i}`, title: `Card ${i} ${tag}`, status: 'done', assignee: 'agent-x', dependsOn: [], priority: 1,
+    createdAt: '2026-10-01T00:00:00Z', result: `result ${i} ${tag}`, notes: `note ${i} ${tag}` })) });
+  fs.writeFileSync(path.join(root, 'tasks.json'), JSON.stringify(many('one')));
+  await W.runDerivedBackfill(deps, input(root));
+  fs.writeFileSync(path.join(root, 'tasks.json'), JSON.stringify(many('two')));
+  storeLogs.length = 0;
+  rows.length = 0;
+  const c = await W.runDerivedBackfill(deps, input(root));
+  const sup = c.records.superseded + c.decisions.superseded + c.cardFields.superseded;
+  assert.ok(sup >= 12, `the rerun supersedes the changed claims (${sup})`);
+  const derives = storeLogs.filter((l) => l.kind === 'claims-view-derive');
+  assert.ok(derives.length <= 1, `one view derive for the rerun, not one per supersede: ${JSON.stringify(derives.map((d) => [d.reason, d.dropped]))}`);
+  assert.equal(rows[0].kind, 'claims-derived-backfill-start');
+  const end = rows.find((r) => r.kind === 'claims-derived-backfill');
+  assert.ok(end && Number.isFinite(end.ms) && end.ms >= 0);
+});
+
 test('A12: each backfill step runs in its own event-loop turn', async () => {
   const derives = [];
   let turn = 0;
