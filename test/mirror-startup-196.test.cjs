@@ -125,6 +125,42 @@ test('MIRROR-GUARD-CPU-TIME: the default clock is the thread\'s CPU: a waited sl
   assert.ok(calls[1] >= 120, `A COMPUTING SLICE WAS NOT CHARGED: ${calls[1]} ms of 120 ms CPU`);
 });
 
+// Jim SHOULD (deb435f8): in Electron main, process.cpuUsage sums EVERY thread of the browser process
+// (GC, compiler, libuv pool, Chromium IO): the load-charging this fix removes. Another thread computing
+// while the parse slice waits must not be charged to the parse.
+test('MIRROR-GUARD-CPU-TIME: another thread computing during a waited slice is not charged to the parse (process-CPU mutant)', async () => {
+  const { Worker } = require('node:worker_threads');
+  // [0] stop, [1] started, [2] the worker's own thread CPU ms.
+  const f = new Int32Array(new SharedArrayBuffer(12));
+  const w = new Worker(`
+    const f = new Int32Array(require('node:worker_threads').workerData);
+    const cpu = () => { const u = process.threadCpuUsage(); return (u.user + u.system) / 1000; };
+    Atomics.store(f, 1, 1); Atomics.notify(f, 1);
+    while (Atomics.load(f, 0) === 0) Atomics.store(f, 2, Math.floor(cpu()));`, { eval: true, workerData: f.buffer });
+  try {
+    Atomics.wait(f, 1, 0, 30_000);
+    assert.equal(Atomics.load(f, 1), 1, 'the worker started');
+    const calls = [];
+    let burned = 0;
+    const wb = { _innerWrite() {
+      // Wait (no CPU on this thread) until the worker has computed a fixed 120 ms of ITS CPU,
+      // so a loaded machine cannot shrink what a process-wide clock would wrongly charge.
+      const start = Atomics.load(f, 2);
+      const idle = new Int32Array(new SharedArrayBuffer(4));
+      const giveUp = performance.now() + 60_000;
+      while (Atomics.load(f, 2) - start < 120 && performance.now() < giveUp) Atomics.wait(idle, 0, 0, 5);
+      burned = Atomics.load(f, 2) - start;
+    } };
+    assert.equal(M.timeParse({ _core: { _writeBuffer: wb } }, (ms) => calls.push(ms)), true);
+    wb._innerWrite();
+    assert.ok(burned >= 120, `the worker computed ${burned} ms during the slice`);
+    assert.ok(calls[0] < 40, `ANOTHER THREAD'S CPU WAS CHARGED TO THE PARSE: ${calls[0]} ms (the worker burned ${burned} ms)`);
+  } finally {
+    Atomics.store(f, 0, 1);
+    await w.terminate();
+  }
+});
+
 test('MIRROR-GUARD-CPU-TIME: a runtime with no thread clock leaves the parse UNTIMED, never wall-timed', () => {
   const wb = { _innerWrite() {} };
   assert.equal(M.timeParse({ _core: { _writeBuffer: wb } }, () => {}, null), false);
