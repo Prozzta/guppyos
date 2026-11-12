@@ -1751,11 +1751,11 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
           // CL-READERWATCHER: a first claim of an unimported reader or writer starts its import now.
           try { const at = hive.root(); if (at && agentId !== DERIVED_AGENT_ID && memoryMdReplaced(claimLevel(agentId)) && !importSettled(at, agentId)) void claimsImportReady().then(() => readerWatchers.ensureImported(agentId)); } catch (e) { hive.appendLog({ kind: 'claims-watch-error', agentId, error: String(e).slice(0, 160) }); }
           claimExport().onAppend(agentId, id, rec);
-          if (!shouldRunR5(rec)) { claimsIndexSync()?.schedule(agentId); warmCardLeadsSoon(); return; }
+          if (!shouldRunR5(rec)) { claimsIndexSync()?.schedule(agentId, rec); warmCardLeadsSoon(); return; }
           warmCardLeadsSoon();
           const root = hive.root(); if (!root) return;
           void enqueueR5AfterIndex(agentId, id, {
-            syncIndex: () => claimsIndexSync()?.syncNow(agentId) ?? Promise.resolve(null),
+            syncIndex: () => claimsIndexSync()?.syncNow(agentId, rec) ?? Promise.resolve(null),
             candidates: async (a, claimId, tau2) => {
               const r = await nativeMemory.r5Candidates(a, claimId, tau2);
               return r.ok && Array.isArray(r.json) ? (r.json as Array<{ b: string; cosine: number }>).map((p) => ({ a: claimId, b: p.b, cosine: p.cosine, tau2 })) : [];

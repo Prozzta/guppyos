@@ -28,7 +28,7 @@ export interface IndexSyncDeps {
   level: (agentId: string) => LedgerLevel;
   /** Agents that have a ledger. */
   agents: () => string[];
-  send: (args: { wing: string; path: string; head: string; chunks: unknown[] }) => Promise<{ ok: boolean; error?: string; json?: unknown }>;
+  send: (args: { wing: string; path: string; head: string; chunks: unknown[]; delta?: boolean }) => Promise<{ ok: boolean; error?: string; json?: unknown }>;
   /** Called after a verified snapshot is successfully indexed. */
   onIndexed?: (agentId: string) => void;
   log?: (row: Record<string, unknown>) => void;
@@ -54,6 +54,11 @@ export function verifiedPrefix(r: ReadResult): { records: LedgerRec[]; truncated
 export class ClaimsIndexSync {
   private timers = new Map<string, unknown>();
   private running = new Map<string, Promise<SyncOutcome>>();
+  // A verified snapshot lets an acked store append avoid reading any old segment.  Calls without
+  // an acknowledged record (startup, a watcher/import or recovery) deliberately take the full,
+  // integrity-checking read path.
+  private snapshots = new Map<string, { records: LedgerRec[]; chunks: Array<{ claimId: string; part: number; contentSha256: string; status: string }> }>();
+  private pending = new Map<string, LedgerRec[]>();
   private noDeriveLogged = false;
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
   private readonly clearTimer: (t: unknown) => void;
@@ -64,7 +69,8 @@ export class ClaimsIndexSync {
   }
 
   /** After an append: sync this agent soon (debounced). */
-  schedule(agentId: string): void {
+  schedule(agentId: string, appended?: LedgerRec): void {
+    if (appended) this.pending.set(agentId, [...(this.pending.get(agentId) ?? []), appended]);
     const t = this.timers.get(agentId);
     if (t) this.clearTimer(t);
     this.timers.set(agentId, this.setTimer(() => { this.timers.delete(agentId); void this.syncNow(agentId); }, CLAIMS_SYNC_DEBOUNCE_MS));
@@ -75,7 +81,8 @@ export class ClaimsIndexSync {
     return Promise.all(this.d.agents().map((a) => this.syncNow(a)));
   }
 
-  syncNow(agentId: string): Promise<SyncOutcome> {
+  syncNow(agentId: string, appended?: LedgerRec): Promise<SyncOutcome> {
+    if (appended) this.pending.set(agentId, [...(this.pending.get(agentId) ?? []), appended]);
     const prior = this.running.get(agentId) ?? Promise.resolve(null);
     const run = prior.catch(() => null).then(() => this.syncOnce(agentId));
     this.running.set(agentId, run);
@@ -90,7 +97,14 @@ export class ClaimsIndexSync {
       if (!this.noDeriveLogged) { this.noDeriveLogged = true; this.d.log?.({ kind: 'claims-index-no-derive' }); }
       return { sent: false, why: 'no-derive' };
     }
-    const read = this.d.readLedger(agentId);
+    const queued = this.pending.get(agentId) ?? [];
+    const previous = this.snapshots.get(agentId);
+    // Only ClaimStore's fsync-acked callback supplies `queued`; it is safe to extend the already
+    // verified snapshot with it.  Every other reason to sync reads and verifies the ledger again.
+    const delta = !!previous && queued.length > 0;
+    const read: ReadResult = delta
+      ? { records: [...previous.records, ...queued], torn: null, chain: 'ok' }
+      : this.d.readLedger(agentId);
     const prefix = verifiedPrefix(read);
     if (!prefix) {
       const why = read.chain !== 'ok' && read.chain.brokenAt === 'head-anchor' ? 'head-anchor' : 'key-missing';
@@ -98,11 +112,22 @@ export class ClaimsIndexSync {
       return { sent: false, why };
     }
     const state = derive(prefix.records, this.d.registry(), this.d.ruleConfig());
-    const chunks = withParts(chunksFor(prefix.records, state));
+    const allChunks = withParts(chunksFor(prefix.records, state));
+    const old = new Map((previous?.chunks ?? []).map((c) => [`${c.claimId}\0${c.part}`, `${c.contentSha256}\0${c.status}`]));
+    // A delta carries additions and claims whose derived status changed.  The worker preserves
+    // omitted rows for this mode; a full verification remains authoritative for removals/recovery.
+    const chunks = delta ? allChunks.filter((c) => old.get(`${c.claimId}\0${c.part}`) !== `${c.contentSha256}\0${c.status}`) : allChunks;
     const head = state.ledgerHead || (prefix.records.length ? prefix.records[prefix.records.length - 1].mac : '');
-    const reply = await this.d.send({ wing: agentId, path: claimsSourcePath(agentId), head, chunks });
+    const reply = await this.d.send({ wing: agentId, path: claimsSourcePath(agentId), head, chunks, ...(delta ? { delta: true } : {}) });
     if (!reply.ok) this.d.log?.({ kind: 'claims-index-failed', agentId, error: String(reply.error ?? '').slice(0, 160) });
-    else this.d.onIndexed?.(agentId);
+    else {
+      this.snapshots.set(agentId, { records: prefix.records, chunks: allChunks });
+      // Do not discard an append that arrived while the worker request was in flight.
+      const later = this.pending.get(agentId) ?? [];
+      if (later.length <= queued.length) this.pending.delete(agentId);
+      else this.pending.set(agentId, later.slice(queued.length));
+      this.d.onIndexed?.(agentId);
+    }
     return { sent: true, records: prefix.records.length, chunks: chunks.length, ...(prefix.truncatedAt ? { truncatedAt: prefix.truncatedAt } : {}), reply };
   }
 }

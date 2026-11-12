@@ -125,6 +125,8 @@ export async function cardLeadsFor(hits: Array<Pick<SearchHit, 'claim' | 'conten
 
 /** CLAIM-LEDGER: one agent's verified claim chunks, sent by main after an append (A6). */
 export interface ClaimsSyncArgs { wing: string; path: string; head: string; chunks: ClaimPart[];
+  /** An acknowledged append over main's verified snapshot: omitted chunks are unchanged, not drops. */
+  delta?: boolean;
   /** The Settings level main holds now (W3-1): a sync never acts on a stale level. */
   claimLedger?: unknown }
 
@@ -529,7 +531,7 @@ export class MemoryEngine {
       // CL-S1 M3: a wing embedded under an older claim-vector recipe re-embeds all its parts once.
       const plan = await this.enqueue(PRIORITY.ingest, async () => {
         const reembed = this.d.store.meta(claimEmbedVersionKey(a.wing)) !== String(CLAIM_EMBED_VERSION);
-        return this.d.store.planClaims(a.wing, a.chunks, { reembed });
+        return this.d.store.planClaims(a.wing, a.chunks, { reembed, delta: a.delta });
       });
       const embedAll = async (parts: ClaimPart[]): Promise<Float32Array[]> => {
         const vectors: Float32Array[] = [];
