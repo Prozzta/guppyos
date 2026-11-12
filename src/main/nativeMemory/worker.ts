@@ -24,6 +24,18 @@ import { NativeMemoryStore, type StoreOpenOptions } from './store';
 import { discoverSources, sha256 } from './sources';
 import { WordPieceTokenizer, wordPieceConfigFromTokenizerJson } from './wordpiece';
 
+/**
+ * STARTUP-FREEZE-104 A19: the claims-sync args with `chunks` as objects. Main's derive worker sends them as one JSON
+ * string (`chunksJson`); a structured clone of 134k chunk objects cost main about 100 ms at 10x, a string about 15.
+ */
+export function claimsSyncArgsOf(a: Record<string, unknown>): ClaimsSyncArgs {
+  if (typeof a.chunksJson !== 'string') return a as unknown as ClaimsSyncArgs;
+  const { chunksJson, chunkCount: _count, ...rest } = a;
+  const chunks = JSON.parse(chunksJson) as unknown;
+  if (!Array.isArray(chunks)) throw new Error('claims-sync chunksJson is not an array');
+  return { ...rest, chunks } as unknown as ClaimsSyncArgs;
+}
+
 export interface WorkerConfig {
   hiveRoot: string;
   dbFile: string;
@@ -157,7 +169,8 @@ export async function runWorker(cfg: WorkerConfig, port: Port, deps: { Database:
         break;
       }
       case 'claims-sync':
-        guard(engine.syncClaims(a as unknown as ClaimsSyncArgs), (r) => ({ exit: 0, json: r }));
+        // STARTUP-FREEZE-104 A19: chunks from main's derive worker arrive as JSON, parsed here, off main.
+        guard(Promise.resolve().then(() => engine.syncClaims(claimsSyncArgsOf(a))), (r) => ({ exit: 0, json: r }));
         break;
       case 'claim-ledger':
         guard(engine.setClaimLedger(a.value, a.anchored), (r) => ({ exit: 0, json: r }));

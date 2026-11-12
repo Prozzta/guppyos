@@ -9,6 +9,9 @@ import { collectNoteCandidates, embedViaWorker, HiveCorpus, ledgerCandidateDeps,
 import { FileHeadAnchorStore, FileLedgerKeyRecord, HEAD_ANCHOR_FILE, KEY_RECORD_FILE, MAC_KEY_FILE, SafeStorageKeyProvider } from './claims/keyProvider';
 import type { ClaimsEndpointDeps } from './claims/endpoint';
 import { ClaimsIndexSync, verifiedPrefix } from './claims/indexSync';
+import { Worker as ThreadWorker } from 'node:worker_threads';
+import { DeriveOffMain, type DeriveWorkerLike } from './claims/deriveOffMain';
+import { STATUS_CODE, type DeriveWant } from './claims/deriveJob';
 import { derive as deriveClaims } from './claims/derive';
 import { worldView as buildClaimsWorldView } from './claims/world';
 import { buildClaimsWorldSnapshot } from './claims/worldSnapshot';
@@ -31,7 +34,7 @@ import { reconcileApiForHive as createReconcileApiForHive, refreshReconcileQueue
 import { WordPieceTokenizer, wordPieceConfigFromTokenizerJson } from './nativeMemory/wordpiece';
 import { readSourcesConfig } from './nativeMemory/sources';
 import { DEFAULT_KEY_REGISTRY, loadRegistry, loadRegistryShared } from './claims/registry';
-import { CLAIM_LEDGER_CLAMP_ROW, CLAIMS_ALERT_KEY_MISSING, DERIVED_AGENT_ID, effectiveLevel, IMPLEMENTED_LEVEL, manifestEntry, type DeriveFn, type LedgerLevel, type ReconcileItem, type UsageRec } from '../shared/claims';
+import { CLAIM_LEDGER_CLAMP_ROW, CLAIMS_ALERT_KEY_MISSING, DERIVED_AGENT_ID, effectiveLevel, IMPLEMENTED_LEVEL, manifestEntry, type DeriveFn, type LedgerLevel, type ReadResult, type ReconcileItem, type UsageRec } from '../shared/claims';
 import { CodexVersionLog, codexNoDaemonGate, readCodexVersion } from './codexCli';
 import { codexLayerOptInKey, type CodexLayerNotice } from './codexProjectLayers';
 import { StartupTiming } from './startupTiming';
@@ -1611,6 +1614,22 @@ let claimStore: { root: string; store: ClaimStore } | null = null;
 // an append and when the worker (re)starts. Derive is pure; the ledger reader below supplies only
 // the verified prefix, and the worker never reads ledger files.
 const claimsDerive: DeriveFn | null = deriveClaims;
+// STARTUP-FREEZE-104 A19 (god 424399): derive and chunksFor of a verified ledger run in a worker thread (a full derive
+// of the 10x derived ledger was one 0.6 s block on main). Main keeps the MAC verify and the single writer; any worker
+// failure falls back to the in-process derive (DeriveOffMain).
+const claimsDeriveOffMain = new DeriveOffMain({
+  spawn: () => new ThreadWorker(join(__dirname, 'claimsDeriveWorker.js')) as unknown as DeriveWorkerLike,
+  log: (row) => hive.appendLog(row),
+});
+/** A19: one derive-worker job for `read` when it is the store's kept verified read; null: derive in-process. */
+function claimsDeriveJob(want: DeriveWant, agentId: string, read: ReadResult) {
+  const root = hive.root(); const ep = claimsEndpoint();
+  if (!root || !ep) return Promise.resolve(null);
+  const job = (ep as ClaimsEndpointDeps).store.verifiedJobFor(agentId, read);
+  if (!job) return Promise.resolve(null);
+  let registry; try { registry = loadRegistryShared(root); } catch { registry = DEFAULT_KEY_REGISTRY; }
+  return claimsDeriveOffMain.run({ want, agentId, ...job, registry, r4: false });
+}
 let claimsIndex: ClaimsIndexSync | null = null;
 function claimsIndexSync(): ClaimsIndexSync | null {
   const ep = claimsEndpoint();
@@ -1624,6 +1643,7 @@ function claimsIndexSync(): ClaimsIndexSync | null {
       level: claimLevel,
       agents: claimLedgerAgents,
       send: (args) => claimsImportReady().then(() => nativeMemory.syncClaims(args)),
+      offMain: (agentId, read) => claimsDeriveJob('chunks', agentId, read).then((r) => (r ? { head: r.head ?? '', chunksJson: r.out, count: r.count ?? 0 } : null)),
       onIndexed: (agentId) => { const root = hive.root(); if (!root) return; try { refreshReconcileQueueForHive(root, agentId, reconcileHiveDeps()); } catch (e) { hive.appendLog({ kind: 'claims-reconcile-refresh-failed', agentId, error: String(e).slice(0, 160) }); } },
       log: (row) => hive.appendLog(row),
     });
@@ -1646,7 +1666,12 @@ derivedClaims = new DerivedLive({
     const ep = claimsEndpoint(); const root = hive.root();
     if (!ep || !root || !claimsDerive) return null;
     const registry = (): ReturnType<typeof loadRegistry> => { try { return loadRegistryShared(root); } catch { return DEFAULT_KEY_REGISTRY; } };
-    return { store: ep.store, derive: (records) => deriveOnce(claimsDerive, records, registry()), log: (row) => hive.appendLog(row) };
+    return {
+      store: ep.store,
+      derive: (records) => deriveOnce(claimsDerive, records, registry()),
+      codesOffMain: (read) => claimsDeriveJob('codes', DERIVED_AGENT_ID, read).then((r) => (r ? r.out : null)),
+      log: (row) => hive.appendLog(row),
+    };
   },
   enabled: () => readConfig().derivedClaims !== false && claimLevel(DERIVED_AGENT_ID) !== 'off',
   repo: () => derivedRepoNow(),
@@ -1764,6 +1789,7 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
           },
         },
         log: (row) => hive.appendLog(row),
+        offMain: claimsDeriveOffMain,
         // R1 (Jim R-2): a claim whose task TTL has ended is not live for an exact-duplicate sighting.
         taskStatus: (id) => (hive.taskById(id) as { status?: string } | undefined)?.status ?? null,   // SCALE-TASKS-MAP: O(1), not a .find over every card
         onAppend: (agentId, id, rec) => {
@@ -2031,6 +2057,16 @@ async function warmClaimCandidateVectors(): Promise<void> {
   const pool: Array<{ id: string; owner: string; wt: string; key: string | undefined; text: string; status: 'live' }> = [];
   for (const agentId of claimAgentLedgers()) {
     await new Promise<void>((resolve) => setImmediate(resolve));
+    // A19: the status codes from the derive worker thread when the read is fully verified (read by index: one letter
+    // per record); else the in-process view.
+    const ep = claimsEndpoint();
+    const read = ep ? (ep as ClaimsEndpointDeps).store.readLedgerCached(agentId) : null;
+    const off = read ? await claimsDeriveJob('codes', agentId, read) : null;
+    if (read && off && off.out.length === read.records.length) {
+      const codes = off.out;
+      for (let i = 0; i < codes.length; i++) { const c = read.records[i]; if (c.t === 'claim' && codes[i] === STATUS_CODE.live) pool.push({ id: c.id, owner: agentId, wt: c.wt, key: c.key, text: c.text, status: 'live' }); }
+      continue;
+    }
     const view = claimsLedgerView(agentId);
     if (view) for (const c of view.claims) if (view.status(c.id) === 'live') pool.push({ id: c.id, owner: agentId, wt: c.wt, key: c.key, text: c.text, status: 'live' });
   }

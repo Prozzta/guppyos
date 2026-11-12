@@ -167,6 +167,7 @@ test('A12: deriveOnce reuses only for the same derive, the same records array an
   assert.equal(calls2, 1, 'another derive is called');
   // A registry that can still change is never kept: it is derived every time.
   const live = structuredClone(DEFAULT_KEY_REGISTRY);
+  W.deriveOnce(d, recs, FROZEN);   // keep exactly the entry the check below would reuse
   calls = 0;
   W.deriveOnce(d, recs, live); W.deriveOnce(d, recs, live);
   assert.equal(calls, 2);
@@ -541,5 +542,7 @@ test('A18: main\'s candidate warm derives one agent per turn over the shared reg
   const view = idx.slice(idx.indexOf('function claimsLedgerView('), idx.indexOf('const hiveCandidateCorpus'));
   assert.ok(view.includes('loadRegistryShared(root)') && !/loadRegistry\(root\)/.test(view), 'claimsLedgerView derives over the shared frozen registry');
   const warm = idx.slice(idx.indexOf('async function warmClaimCandidateVectors('), idx.indexOf('function claimNoteCandidates('));
-  assert.match(warm, /for \(const agentId of claimAgentLedgers\(\)\) \{\s*await new Promise<void>\(\(resolve\) => setImmediate\(resolve\)\);\s*const view = claimsLedgerView\(agentId\);/);
+  // A19: the turn stays first; the worker's status codes come before the in-process view (its fallback).
+  assert.match(warm, /for \(const agentId of claimAgentLedgers\(\)\) \{\s*await new Promise<void>\(\(resolve\) => setImmediate\(resolve\)\);\s*\/\/ A19[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*const ep = claimsEndpoint\(\);/);
+  assert.match(warm, /continue;\s*\}\s*const view = claimsLedgerView\(agentId\);/);
 });

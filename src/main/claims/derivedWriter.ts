@@ -20,6 +20,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import { sliceTicker } from './migrate';
+import { STATUS_CODE } from './deriveJob';
 import { join } from 'node:path';
 import { DERIVED_AGENT_ID, type AppendOrigin, type AppendResult, type ClaimRec, type ClaimsState, type DeriveFn, type KeyRegistry, type LedgerRec, type ReadResult, type RecordDraft } from '../../shared/claims';
 import {
@@ -36,11 +37,18 @@ export interface DerivedStore {
   /** STARTUP-FREEZE-104 A3: the kept verified read (a stat and a tail read when nothing changed). */
   readLedgerCached?(agentId: string): ReadResult;
   appendRecord(agentId: string, draft: RecordDraft, origin: AppendOrigin): Promise<AppendResult>;
+  /** STARTUP-FREEZE-104 A19: the view's statuses from the derive worker, before a pass's first append. */
+  primeView?(agentId: string): Promise<void>;
 }
 
 export interface DerivedWriterDeps {
   store: DerivedStore;
   derive: (records: LedgerRec[]) => ClaimsState;
+  /**
+   * STARTUP-FREEZE-104 A19 (god 424399): the status codes of a verified read (one letter per record, deriveJob
+   * encodeCodes), from the derive worker thread. Null (or absent, or not one per record): `derive` in-process.
+   */
+  codesOffMain?: (read: ReadResult) => Promise<string | null>;
   log?: (row: Record<string, unknown>) => void;
 }
 
@@ -71,11 +79,16 @@ export async function syncDerived(deps: DerivedWriterDeps, facts: readonly Deriv
   // passes run one at a time, so nothing lands between.
   await nextTurn();
   const read = deps.store.readLedgerCached ? deps.store.readLedgerCached(DERIVED_AGENT_ID) : deps.store.readLedger(DERIVED_AGENT_ID);
-  const state = deps.derive(read.records);
+  // A19: the live ids from the worker thread when it can; the same derive in-process when not.
+  const off = deps.codesOffMain ? await deps.codesOffMain(read) : null;
+  const codes = off !== null && off.length === read.records.length ? off : null;
+  const state = codes !== null ? null : deps.derive(read.records);
   await nextTurn();
   const live = new Map<string, ClaimRec[]>();
-  for (const r of read.records) {
-    if (r.t !== 'claim' || r.source !== 'derived' || state.claims[r.id]?.status !== 'live') continue;
+  for (let i = 0; i < read.records.length; i++) {
+    const r = read.records[i];
+    if (r.t !== 'claim' || r.source !== 'derived') continue;
+    if (codes !== null ? codes[i] !== STATUS_CODE.live : state?.claims[r.id]?.status !== 'live') continue;
     const slot = slotOf(r);
     if (!slot) continue;
     const list = live.get(slot) ?? [];
@@ -83,6 +96,7 @@ export async function syncDerived(deps: DerivedWriterDeps, facts: readonly Deriv
     live.set(slot, list);
   }
   const done = new Set<string>();
+  let primed = false;
   for (const f of facts) {
     if (done.has(f.slot)) continue;   // one value per slot per sync: the first fact wins
     done.add(f.slot);
@@ -104,6 +118,8 @@ export async function syncDerived(deps: DerivedWriterDeps, facts: readonly Deriv
       ...(f.valueAgent !== undefined ? { valueAgent: f.valueAgent } : {}),
       ...(prior.length ? { supersedes: prior.map((c) => c.id), supersedesReason: same ? { category: 'corrected' as const, note: sameValue ? 'valid time' : 'structured value' } : { category: 'changed' as const } } : {}),
     };
+    // A19: the first append's checks need the view's statuses: derived in the worker thread, not on main.
+    if (!primed) { primed = true; await deps.store.primeView?.(DERIVED_AGENT_ID); }
     const res = await deps.store.appendRecord(DERIVED_AGENT_ID, draft, 'derived-internal');
     if (res.ok) {
       counts.appended++;
