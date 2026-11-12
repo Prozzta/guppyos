@@ -57,7 +57,7 @@ import { hiveIdOf, type HeadAnchorStore, type LedgerKeyRecord } from './keyProvi
 import { redactSecrets } from './redact';
 import { normalizeTtl, parseStoredTtl, zonelessHint } from './ttl';
 import { DEFAULT_KEY_REGISTRY, KeyRegistryWriter, loadRegistryShared } from './registry';
-import { derive, sameStatusesUnder, singleKeyOf } from './derive';
+import { derive, keysTurnedSingle, singleKeyOf } from './derive';
 import { clampSection, R1_LEGACY_REASON } from './migrate';
 
 /** The file operations an append uses; injectable so tests can spy on the order and simulate a crash. */
@@ -1179,7 +1179,11 @@ export class ClaimStore {
     const v = this.ledgerView(agentId, s);
     const d = v.derived;
     // A11: a registry that only gained keys derive reads the same way (the writer's once-a-second save) keeps the view.
-    if (d && d.registry !== registry && sameStatusesUnder(d.registry, registry)) d.registry = registry;
+    // A15: so does one whose added keys turned single (agent.<id>.* keys): those keys are dirty (re-derived on use).
+    if (d && d.registry !== registry) {
+      const turned = keysTurnedSingle(d.registry, registry);
+      if (turned) { for (const k of turned) d.dirtyKeys.add(k); d.registry = registry; }
+    }
     const reusable = (id: string): boolean => {
       if (!d || d.registry !== registry || !d.status.has(id)) return false;
       if (d.dirtyKeys.size === 0) return true;
@@ -1189,7 +1193,13 @@ export class ClaimStore {
     };
     let status = d?.status;
     if (!d || !status || !ids.every(reusable)) {
+      // A15 (Jim b6a92a59): why each full derive runs, for the gate's log.
+      const miss = d ? ids.find((id) => !reusable(id)) : undefined;
+      const reason = !d ? 'no-view' : d.registry !== registry ? 'registry'
+        : miss === undefined || !d.status.has(miss) ? 'unknown-id' : d.linked.has(miss) ? 'linked' : 'dirty-key';
+      const t0 = performance.now();
       const state = derive(v.records, registry, { r4: false });
+      this.log({ kind: 'claims-view-derive', agentId, reason, records: v.records.length, ms: Math.round(performance.now() - t0) });
       status = new Map<string, Status>();
       for (const id of Object.keys(state.claims)) status.set(id, state.claims[id].status);
       const linked = new Set<string>();

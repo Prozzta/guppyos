@@ -71,20 +71,39 @@ export function singleKeyOf(key: string | undefined, registry: KeyRegistry): str
  * single-or-not cardinality the namespaces gave it before (what the key writer adds). O(keys), no hashing.
  */
 export function sameStatusesUnder(prev: KeyRegistry, next: KeyRegistry): boolean {
-  if (prev === next) return true;
-  if (canonical(prev.namespaces) !== canonical(next.namespaces)) return false;
+  const turned = keysTurnedSingle(prev, next);
+  return turned !== null && turned.length === 0;
+}
+
+/**
+ * A15 (Jim's 10x profile of b6a92a59: full derives on registry saves still fired in the import): the keys that `next`
+ * makes single where `prev` did not, when that is the only difference derive reads; null for any other difference
+ * (as sameStatusesUnder). derive's namespace match does not substitute <id>, so an unregistered agent.<id>.* key is not
+ * single to derive, and the writer registers it single (its namespace). Such a key is added with no alias, so only claims
+ * whose canonical key is that key are read differently: the caller re-derives those (its dirty keys), not the ledger.
+ */
+export function keysTurnedSingle(prev: KeyRegistry, next: KeyRegistry): string[] | null {
+  if (prev === next) return [];
+  if (canonical(prev.namespaces) !== canonical(next.namespaces)) return null;
   const before = prev.keys;
   const after = next.keys;
   let kept = 0;
+  const turned: string[] = [];
   for (const key of Object.keys(after)) {
     const e = after[key];
     const old = before[key];
     if (old) {
-      if (old.cardinality !== e.cardinality || old.aliasOf !== e.aliasOf) return false;
+      if (old.cardinality !== e.cardinality || old.aliasOf !== e.aliasOf) return null;
       kept++;
-    } else if (e.aliasOf !== undefined || (e.cardinality === 'single') !== (cardinality(key, prev) === 'single')) return false;
+      continue;
+    }
+    if (e.aliasOf !== undefined) return null;
+    const was = cardinality(key, prev) === 'single';
+    const now = e.cardinality === 'single';
+    if (was && !now) return null;
+    if (now && !was) turned.push(key);
   }
-  return kept === Object.keys(before).length;
+  return kept === Object.keys(before).length ? turned : null;
 }
 
 function protectedFromMail(source: ClaimRec, target: ClaimRec): boolean {

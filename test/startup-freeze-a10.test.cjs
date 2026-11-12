@@ -214,6 +214,65 @@ test('A11: sameStatusesUnder is false for any registry change derive reads diffe
   assert.equal(v((n) => { n.namespaces[0] = { ...n.namespaces[0], cardinality: n.namespaces[0].cardinality === 'single' ? 'multi' : 'single' }; }), false, 'a namespace changed');
 });
 
+test('A15: keysTurnedSingle names the added keys that became single, and is null for any other difference', () => {
+  const base = structuredClone(REG.DEFAULT_KEY_REGISTRY);
+  base.keys['card.old'] = { cardinality: 'multi', addedAt: '2026-10-03T10:00:00.000Z', addedBy: 'a1' };
+  base.keys['project.old'] = { cardinality: 'single', addedAt: '2026-10-03T10:00:00.000Z', addedBy: 'a1' };
+  const v = (fn) => { const n = structuredClone(base); fn(n); return DERIVE.keysTurnedSingle(base, n); };
+  const add = (k, cardinality, extra = {}) => (n) => { n.keys[k] = { cardinality, addedAt: '2026-10-03T10:00:01.000Z', addedBy: 'a1', ...extra }; };
+  assert.deepEqual(DERIVE.keysTurnedSingle(base, base), []);
+  assert.deepEqual(v(() => {}), []);
+  assert.deepEqual(v(add('agent.a1.home', 'single')), ['agent.a1.home'], 'the writer registers agent.<id>.* single; derive did not read it single');
+  assert.deepEqual(v((n) => { add('agent.a1.x', 'single')(n); add('card.new', 'multi')(n); add('agent.a1.y', 'single')(n); }), ['agent.a1.x', 'agent.a1.y']);
+  assert.deepEqual(v(add('project.new', 'single')), [], 'single either way');
+  assert.deepEqual(v(add('card.new', 'single')), ['card.new']);
+  assert.equal(v(add('project.new', 'multi')), null, 'an added key that stops being single');
+  assert.equal(v(add('agent.a1.z', 'single', { aliasOf: 'project.old' })), null, 'an added alias');
+  assert.equal(v((n) => { n.keys['card.old'].cardinality = 'single'; }), null, 'a kept key changed');
+  assert.equal(v((n) => { delete n.keys['card.old']; add('agent.a1.w', 'single')(n); }), null, 'a removed key');
+  assert.equal(v((n) => { n.namespaces[1] = { ...n.namespaces[1], cardinality: 'multi' }; }), null, 'a namespace changed');
+  assert.equal(DERIVE.sameStatusesUnder(base, (() => { const n = structuredClone(base); add('agent.a1.q', 'single')(n); return n; })()), false, 'A11 itself is unchanged');
+});
+
+test('A15: new agent.<id>.* keys saved during appends force no derive; a reason row for each full derive', async () => {
+  const root = hive();
+  const { store, logs } = mkStore(root);
+  await settleRegistry(store, root, 'a1', ['card.anchor15']);
+  const first = { t: 'claim', kind: 'fact', text: 'anchor fact 15', key: 'card.anchor15' };
+  await ok(store.appendRecord('a1', first, 'endpoint'));
+  await ok(store.appendRecord('a1', first, 'endpoint'));   // primes the view
+  assert.deepEqual(logs.filter((l) => l.kind === 'claims-view-derive').map((l) => l.reason), ['no-view']);
+  const d0 = deriveCalls;
+  const regs = new Set();
+  for (let i = 0; i < 25; i++) {
+    await ok(store.appendRecord('a1', { t: 'claim', kind: 'fact', text: `own ${i}`, key: `agent.a1.${(0x30000000 + i * 7919 * 104729).toString(16)}k${i}` }, 'endpoint'));
+    store.flushKeyRegistry();
+    regs.add(REG.loadRegistryShared(root));
+    await ok(store.appendRecord('a1', first, 'endpoint'));
+  }
+  assert.ok(regs.size >= 20, `the registry object changed ${regs.size} times`);
+  assert.equal(deriveCalls - d0, 0, 'no derive when the registry only gained agent keys');
+  assert.equal(sightings(logs).length, 26);
+  // A claim of a key that turned single is re-derived when asked about (R2 now applies to it).
+  const k = 'agent.a1.harborlight';
+  const old = await ok(store.appendRecord('a1', { t: 'claim', kind: 'fact', text: 'harbor old', key: k }, 'endpoint'));
+  await ok(store.appendRecord('a1', { t: 'claim', kind: 'fact', text: 'harbor new', key: k }, 'endpoint'));
+  store.flushKeyRegistry();
+  const reg = REG.loadRegistryShared(root);
+  assert.equal(store.statusesOf('a1', store.current('a1'), [old], reg).get(old), realDerive(diskRecords(store, 'a1'), reg, { r4: false }).claims[old].status);
+  assert.equal(store.statusesOf('a1', store.current('a1'), [old], reg).get(old), 'superseded');
+  const reasons = logs.filter((l) => l.kind === 'claims-view-derive');
+  assert.equal(reasons.at(-1).reason, 'dirty-key');
+  assert.ok(reasons.every((l) => l.agentId === 'a1' && l.records > 0 && Number.isFinite(l.ms)));
+  // A registry another writer changed (an alias) is a full derive, logged as such.
+  const aliased = structuredClone(reg);
+  aliased.keys[k] = { ...aliased.keys[k], aliasOf: 'card.anchor15' };
+  deepFreezeLocal(aliased);
+  store.statusesOf('a1', store.current('a1'), [old], aliased);
+  assert.equal(logs.filter((l) => l.kind === 'claims-view-derive').at(-1).reason, 'registry');
+});
+function deepFreezeLocal(o) { if (o && typeof o === 'object' && !Object.isFrozen(o)) { Object.freeze(o); for (const x of Object.values(o)) deepFreezeLocal(x); } return o; }
+
 function rng(seed) {
   let x = seed >>> 0 || 1;
   return () => { x ^= x << 13; x >>>= 0; x ^= x >>> 17; x ^= x << 5; x >>>= 0; return x / 0x100000000; };
@@ -234,12 +293,14 @@ for (const seed of [1, 2, 3, 7, 42, 1009]) {
     const eventIds = () => diskRecords(store, 'a1').filter((x) => x.t === 'event').map((x) => x.id);
     for (let step = 0; step < 160; step++) {
       const ids = claimIds();
-      const op = pick(['dup', 'dup', 'dup', 'multi', 'none', 'single', 'single', 'supersede', 'retract', 'event', 'event', 'soft', 'at', 'newkey']);
+      const op = pick(['dup', 'dup', 'dup', 'multi', 'none', 'single', 'single', 'supersede', 'retract', 'event', 'event', 'soft', 'at', 'newkey', 'newkey', 'agentkey', 'agentkey']);
       let draft;
       if (op === 'dup' && drafts.length) draft = pick(drafts);
       else if (op === 'multi') draft = { t: 'claim', kind: 'fact', text: `m ${step}`, key: pick(KEYS.slice(2)) };
       else if (op === 'none') draft = { t: 'claim', kind: 'fact', text: `n ${step}` };
-      else if (op === 'newkey') draft = { t: 'claim', kind: 'fact', text: `k ${step}`, key: `${pick(['card', 'project'])}.${Math.floor(r() * 0xffffffff).toString(16).padStart(8, 'q')}x${step}` };
+      else if (op === 'newkey') draft = { t: 'claim', kind: 'fact', text: `k ${step}`, key: `${pick(['card', 'project', 'agent.a1'])}.${Math.floor(r() * 0xffffffff).toString(16).padStart(8, 'q')}x${step}` };
+      // A15: claims under agent keys already used (single once saved; R2 between them).
+      else if (op === 'agentkey') { const used = drafts.filter((x) => x.key?.startsWith('agent.a1.')); draft = used.length ? { t: 'claim', kind: 'fact', text: `ak ${step % 4}`, key: pick(used).key } : null; }
       else if (op === 'single') draft = { t: 'claim', kind: 'fact', text: `s ${step % 7}`, key: pick(KEYS.slice(0, 2)) };
       else if (op === 'at') draft = { t: 'claim', kind: 'fact', text: `s ${step % 5}`, key: pick(KEYS.slice(0, 2)), at: new Date(Date.parse('2026-10-03T10:00:00Z') + Math.floor(r() * 400) * 1000).toISOString() };
       else if (op === 'supersede') draft = { t: 'claim', kind: 'fact', text: `r ${step}`, key: pick(KEYS), supersedes: [pick(ids)], supersedesReason: { category: 'changed' } };
@@ -267,7 +328,7 @@ for (const seed of [1, 2, 3, 7, 42, 1009]) {
       const fresh = realDerive(diskRecords(store, 'a1'), regNow, { r4: false });
       for (const id of ask) assert.equal(got.get(id), fresh.claims[id]?.status, `seed ${seed} step ${step} op ${op}: ${id}`);
     }
-    for (const op of ['dup', 'multi', 'none', 'single', 'supersede', 'retract', 'event', 'soft', 'reconcile-answer', 'revert', 'newkey']) assert.ok(okBy[op] > 0, `no ${op} went in: ${JSON.stringify(okBy)}`);
+    for (const op of ['dup', 'multi', 'none', 'single', 'supersede', 'retract', 'event', 'soft', 'reconcile-answer', 'revert', 'newkey', 'agentkey']) assert.ok(okBy[op] > 0, `no ${op} went in: ${JSON.stringify(okBy)}`);
     assert.ok(reused >= 40, `the view was reused only ${reused} times; the run proves nothing about reuse`);
   });
 }
