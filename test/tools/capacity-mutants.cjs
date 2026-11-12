@@ -618,7 +618,7 @@ const MUTANTS = [
 // THE BASELINE MUST BE GREEN. Against already-failing tests every mutant "dies", and a
 // kill that the unmutated code would also have scored is not evidence of anything.
 checkAnchors(ROOT, MUTANTS.map(([name, file, from]) => ({ name, file, from })));
-const baseline = spawnSync(process.execPath, ['--test', ...TESTS], { cwd: ROOT, encoding: 'utf8' });
+const baseline = spawnSync(process.execPath, ['--test', '--test-reporter=tap', ...TESTS], { cwd: ROOT, encoding: 'utf8' });
 if (baseline.status !== 0) {
   console.log('BASELINE RED: the unmutated capacity tests fail, so no mutant result would mean anything.');
   process.exit(2);
@@ -643,7 +643,7 @@ for (const [name, file, from, to] of selected) {
   if (crlf) mutated = mutated.replace(/\n/g, '\r\n');
   try {
     mutateFile(ROOT, abs, original, mutated);
-    const r = spawnSync(process.execPath, ['--test', ...TESTS], { cwd: ROOT, encoding: 'utf8' });
+    const r = spawnSync(process.execPath, ['--test', '--test-reporter=tap', ...TESTS], { cwd: ROOT, encoding: 'utf8' });
     const fails = (String(r.stdout).match(/^# fail (\d+)/m) || [])[1] ?? '?';
     const dead = r.status !== 0;
     if (dead) killed++;
