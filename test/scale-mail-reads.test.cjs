@@ -343,3 +343,10 @@ test('sliced: the in-memory walk itself ticks (pauses between the last fs op and
   const after = rec.pauses - atLastOp;
   assert.ok(after >= 2 * Math.floor(1500 / MS.TICK_EVERY) + 2, `walk + meta pass both tick (${after} pauses after the last op)`);
 });
+
+test('PIN (god afa1f6): the Threads panel shows a loading state until the first sliced hive:inbox answers, not "No conversations yet"', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'src', 'components', 'ThreadsPanel.tsx'), 'utf8');
+  assert.match(src, /const \[loaded, setLoaded\] = useState\(false\);/);
+  assert.match(src, /finally \{ if \(alive\) setLoaded\(true\); \}/);
+  assert.match(src, /\{loaded \? 'No conversations yet\.[^']*' : 'Loading conversations…'\}/);
+});
