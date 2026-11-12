@@ -395,10 +395,21 @@ interface DirWatch {
   /** The dir's .jsonl names in readdir order, from the last listing. */
   files: string[];
   lastUsed: number;
+  /** When every file was last stat'ed (the N1 safety net below). */
+  lastFull: number;
 }
 const dirWatches = new Map<string, DirWatch>();
 /** A dir no call has read for this long (an archived agent, a closed project) loses its watch. */
 const DIR_WATCH_IDLE_MS = 10 * 60_000;
+/** N1 (Jim, measured on Windows): fs.watch fires no change event for appends through a HELD-OPEN
+ *  handle; the events arrive only on close. Claude Code today writes open-append-close (every live
+ *  transcript fired events in a 150 s watch), so the watch sees each append. This is a dependency on
+ *  the writer's style: if a writer holds a transcript open, its appends are missed until it closes.
+ *  The safety net stats every file once per DIR_FULL_RESCAN_MS, so such usage lags by at most that. */
+const DIR_FULL_RESCAN_MS = 5 * 60_000;
+let watchClock: () => number = () => Date.now();
+/** Tests: the clock the watch's idle close and full-rescan safety net read. */
+export function __setTranscriptWatchClock(fn: (() => number) | null): void { watchClock = fn ?? (() => Date.now()); }
 /** Test seam: events the dir watches took, full scans, and watches armed. */
 export const transcriptWatchStats = { events: 0, fullScans: 0, watchers: 0 };
 let watchListener: ((dir: string, event: string, filename: string | null) => void) | null = null;
@@ -429,7 +440,7 @@ export function __transcriptWatcher(cwd: string): FSWatcher | null {
 }
 
 function armDirWatch(dir: string, now: number): DirWatch {
-  const w: DirWatch = { watcher: null, closed: false, all: true, relist: true, dirty: new Set(), files: [], lastUsed: now };
+  const w: DirWatch = { watcher: null, closed: false, all: true, relist: true, dirty: new Set(), files: [], lastUsed: now, lastFull: now };
   try {
     const watcher = watchDirectorySafely(dir, (event, filename) => {
       transcriptWatchStats.events += 1;
@@ -452,19 +463,21 @@ function armDirWatch(dir: string, now: number): DirWatch {
 /** The dir's transcript files with fresh usage: a full scan when the watch can't vouch for
  *  them, else only the files an event named (the rest are unchanged cache entries). */
 function dirUsageEntries(dir: string): FileUsageEntry[] {
-  const now = Date.now();
+  const now = watchClock();
   for (const [d, other] of dirWatches) if (d !== dir && now - other.lastUsed > DIR_WATCH_IDLE_MS) closeDirWatch(d);
   let w = dirWatches.get(dir);
   if (w && w.closed) { closeDirWatch(dir); w = undefined; }
   // Armed BEFORE the scan below: a write after the scan's stat is an event for the next call.
   if (!w) w = armDirWatch(dir, now);
   w.lastUsed = now;
-  const full = w.all || w.closed;
+  const full = w.all || w.closed || now - w.lastFull >= DIR_FULL_RESCAN_MS;
+  // N2: list first. A readdir that throws (EPERM/EBUSY, an AV lock) keeps the pending dirty set
+  // and flags, so the next call retries them instead of serving stale entries.
+  if (full || w.relist) { w.files = readdirSync(dir).filter((f) => f.endsWith('.jsonl')); w.relist = false; }
   const dirty = w.dirty;
   w.dirty = new Set();
   w.all = false;
-  if (full || w.relist) { w.files = readdirSync(dir).filter((f) => f.endsWith('.jsonl')); w.relist = false; }
-  if (full) transcriptWatchStats.fullScans += 1;
+  if (full) { w.lastFull = now; transcriptWatchStats.fullScans += 1; }
   const out: FileUsageEntry[] = [];
   for (const file of w.files) {
     const cached = full || dirty.has(file) ? undefined : usageCache.get(path.join(dir, file));
