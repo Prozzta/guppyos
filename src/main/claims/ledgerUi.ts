@@ -36,7 +36,10 @@ export interface LedgerUiDeps {
     appendRecord(agentId: string, draft: RecordDraft, origin: AppendOrigin): Promise<AppendResult>;
     purge(agentId: string, ids: string[], confirmedByHuman: true): Promise<PurgeResult>;
   } | null;
+  /** Operational ledger census. It drives exports and every non-presentation action. */
   agents: () => string[];
+  /** Settings-only roster. It may include system entries which have no memory.md. */
+  rosterAgents?: () => string[];
   /** Presentation-only roster metadata. It must not change the ledger census used by index/export. */
   agentMeta?: (agentId: string) => { archived?: boolean; system?: boolean } | undefined;
   /** The agent's effective level (main's claimLevel). */
@@ -131,7 +134,8 @@ export function createLedgerUi(d: LedgerUiDeps) {
     summary(): LedgerUiSummary {
       const saved = d.savedLevel();
       const store = d.store();
-      const agents = store ? [...new Set(d.agents())].filter((a) => AGENT_RE.test(a)).filter((agentId) => !d.agentMeta?.(agentId)?.archived).sort().map((agentId) => {
+      const roster = d.rosterAgents ? d.rosterAgents() : d.agents();
+      const agents = store ? [...new Set(roster)].filter((a) => AGENT_RE.test(a)).filter((agentId) => !d.agentMeta?.(agentId)?.archived).sort().map((agentId) => {
         const r = store.readLedger(agentId);
         const meta = d.agentMeta?.(agentId);
         return { agentId, level: d.level(agentId), claims: r.records.filter((x) => x.t === 'claim').length, readOnly: r.chain !== 'ok', ...(meta?.system ? { system: true } : {}) };

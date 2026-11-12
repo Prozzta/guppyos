@@ -472,14 +472,15 @@ test('Settings roster hides archived agents, labels derived as the system ledger
   const x = setup();
   const store = x.mk();
   const u = ui(x, store, {
-    agents: () => ['active', 'archived', 'derived'],
+    agents: () => ['active'],
+    rosterAgents: () => ['active', 'archived', 'derived'],
     agentMeta: (id) => id === 'archived' ? { archived: true } : id === 'derived' ? { system: true } : undefined,
   });
   assert.deepEqual(u.api.summary().agents.map((a) => [a.agentId, a.system]), [['active', undefined], ['derived', true]]);
   const renderer = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'src', 'components', 'ClaimLedgerSettings.tsx'), 'utf8');
   assert.match(renderer, /system ledger/);
   const main = fs.readFileSync(path.join(ROOT, 'src', 'main', 'index.ts'), 'utf8');
-  assert.match(main, /agents: \(\) => \(claimsEndpoint\(\) \? \[\.\.\.claimLedgerAgents\(\), DERIVED_AGENT_ID\] : \[\]\),/);
+  assert.match(main, /agents: claimLedgerAgents,\s*rosterAgents: \(\) => \(claimsEndpoint\(\) \? \[\.\.\.claimLedgerAgents\(\), DERIVED_AGENT_ID\] : \[\]\),/);
   assert.match(main, /agentMeta: \(agentId\) => \{/);
 });
 
@@ -591,6 +592,19 @@ test('UI: setLevel saves and pushes the change; a drop from writer exports every
   u = ui(x, store); u.setLevel('reader');
   assert.match((await u.api.exportNow('andy')).error, /still its own file/);
   assert.deepEqual(u.calls.exported, []);
+});
+
+test('UI: setLevel never exports a Settings-only derived roster entry', async () => {
+  const x = setup();
+  const store = x.mk();
+  await seeded(x, store);
+  const u = ui(x, store, {
+    agents: () => ['andy'],
+    rosterAgents: () => ['andy', 'derived'],
+  });
+  const r = await u.api.setLevel('reader');
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.deepEqual(u.calls.exported, ['andy'], 'mutating setLevel to use rosterAgents would export derived');
 });
 
 test('UI: a read-only ledger shows why and accepts no revert or purge', async () => {
