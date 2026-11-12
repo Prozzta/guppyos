@@ -6,8 +6,7 @@
  */
 const fs = require('node:fs');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
-const { recover, mutateFile, restoreFile, checkAnchors } = require('./mutant-runner-helper.cjs');
+const { recover, mutateFile, restoreFile, checkAnchors, runTests, verdict, requireBaseline } = require('./mutant-runner-helper.cjs');
 
 const ROOT = path.join(__dirname, '..', '..');
 const LAB = 'test/claims-90/labeller.cjs';
@@ -20,7 +19,8 @@ const M = [
   ['L6 another labeller\'s jails are judged', 'const leftoverPrefix = (out) => `${G.projectSlug(path.resolve(out))}-jail-`;', 'const leftoverPrefix = (out) => `${G.projectSlug(path.dirname(path.resolve(out)))}-`;'],
 ];
 
-const unit = () => spawnSync(process.execPath, ['--test', 'test/claims-90-labeller.test.cjs'], { cwd: ROOT, encoding: 'utf8', env: process.env }).status;
+const UNIT = 'test/claims-90-labeller.test.cjs';
+const unit = () => runTests(ROOT, [UNIT], { timeout: 0 });
 const lf = (s) => s.replace(/\r\n/g, '\n');
 const f = path.join(ROOT, LAB);
 // INT 1.1.103 (MUTANT-JOURNAL-GATE): recover a killed run, check every anchor (--anchors-only stops there),
@@ -29,18 +29,18 @@ recover(ROOT);
 if (process.argv.includes('--recover-only')) process.exit(0);
 checkAnchors(ROOT, M.map(([name, from]) => ({ name, file: LAB, from })));
 const orig = fs.readFileSync(f, 'utf8');
-const base = unit();
-console.log(`baseline unit: exit ${base}`);
-if (base !== 0) { console.log('baseline fails: no census'); process.exit(2); }
+const base = requireBaseline(unit(), UNIT);
+console.log(`baseline unit: exit ${base.status} (${base.pass} passing)`);
 let killed = 0;
 for (const [name, from, to] of M) {
   try {
     let t = lf(orig).replace(from, () => to);
     if (orig.includes('\r\n')) t = t.replace(/\n/g, '\r\n');
     mutateFile(ROOT, f, orig, t);
-    const k = unit() !== 0;
-    if (k) killed++;
-    console.log(`${k ? 'KILLED' : 'SURVIVED'} ${name}`);
+    const r = unit();
+    const v = verdict(r); // NO-RESULT (the run never reported) is loud: neither a kill nor a survivor
+    if (v === 'KILLED') killed++;
+    console.log(`${v} ${name}${v === 'NO-RESULT' ? ` (${r.why})` : ''}`);
   } finally { restoreFile(ROOT, f, orig); }
 }
 console.log(`TOTAL ${killed}/${M.length}`);

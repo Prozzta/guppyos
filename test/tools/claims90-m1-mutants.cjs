@@ -8,10 +8,9 @@
  *
  *   node test/tools/claims90-m1-mutants.cjs [name-prefix]
  */
-const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
-const { recover, mutateFile, restoreFile, checkAnchors } = require('./mutant-runner-helper.cjs');
+const { recover, mutateFile, restoreFile, checkAnchors, runTests, verdict } = require('./mutant-runner-helper.cjs');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 recover(ROOT);
@@ -181,20 +180,19 @@ for (const [name, file, from, to] of selected) {
   try {
     mutateAny(file, abs, original, mutated);
     const t0 = Date.now();
-    const r = spawnSync(process.execPath, ['--test', '--test-reporter=tap', ...SUITES], { cwd: ROOT, encoding: 'utf8', timeout: 300_000, maxBuffer: 64 * 1024 * 1024 });
+    const r = runTests(ROOT, SUITES, { timeout: 300_000 });
     const secs = Math.round((Date.now() - t0) / 1000);
-    const fails = (String(r.stdout).match(/^# fail (\d+)/m) || [])[1] ?? null;
-    // A run that never printed its summary (the 300 s timeout, a signal, a buffer overflow) proves nothing about
-    // the mutant: it is neither KILLED nor SURVIVED; the last file lines name where it stopped.
-    if (fails === null) {
+    // A run that never printed its TAP summary (the 300 s timeout, a signal, a buffer overflow, a crash outside
+    // any test) proves nothing about the mutant: it is neither KILLED nor SURVIVED; the last lines name where it stopped.
+    const v = verdict(r);
+    if (v === 'NO-RESULT') {
       timedOut++;
-      const tail = String(r.stdout).split('\n').filter((l) => /^(not )?ok \d+ - /.test(l)).slice(-3).join(' | ');
-      console.log(`NO-RESULT  ${name}  (${r.error?.code ?? r.signal ?? `exit ${r.status}`} after ${secs}s; last: ${tail || '-'})`);
+      const tail = r.stdout.split('\n').filter((l) => /^(not )?ok \d+ - /.test(l)).slice(-3).join(' | ');
+      console.log(`NO-RESULT  ${name}  (${r.why} after ${secs}s; last: ${tail || '-'})`);
       continue;
     }
-    const dead = r.status !== 0;
-    if (dead) killed++;
-    console.log(`${dead ? 'KILLED  ' : 'SURVIVED'}  ${name}  (failing tests: ${fails}, ${secs}s)`);
+    if (v === 'KILLED') killed++;
+    console.log(`${v === 'KILLED' ? 'KILLED  ' : 'SURVIVED'}  ${name}  (failing tests: ${r.fail}, ${secs}s)`);
   } finally {
     restoreAny(file, abs, original);
   }

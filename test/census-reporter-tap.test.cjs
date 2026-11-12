@@ -53,9 +53,17 @@ test('the pin sees the censuses it was written for (not vacuous)', () => {
     const src = fs.readFileSync(f, 'utf8');
     return PARSES_TAP.test(src) && src.split(/\r?\n/).some((l) => SPAWNS_TEST.test(l));
   }).map((f) => path.basename(f));
+  // MUTANT-RUNNERS-TAP-PARSE: the censuses no longer spawn '--test' themselves; they all go through
+  // mutant-runner-helper.cjs's runTests, so that one spawn is what this pin must see, and each census
+  // written for it must still reach it (the full every-runner pin is test/mutant-runners-tap.test.cjs).
+  const helper = path.join(ROOT, 'test', 'tools', 'mutant-runner-helper.cjs');
+  const helperSrc = fs.readFileSync(helper, 'utf8');
+  assert.ok(PARSES_TAP.test(helperSrc) && helperSrc.split(/\r?\n/).some((l) => SPAWNS_TEST.test(l)), 'the shared helper spawn is in the pin\'s scope');
+  assert.deepEqual(offenders([helper]), [], 'the shared helper names its reporter');
   for (const name of ['agy', 'claims-freeze', 'halfcores-oversubscribe', 'heavy-cpu-shell', 'hook-type-guard', 'owed-continuation',
     'pty-exit-record', 'release-worktrees', 'tasks-json-split', 'wake-stale-loading']) {
-    assert.ok(covered.includes(`${name}-mutants.cjs`), `${name}-mutants.cjs is in the pin's scope`);
+    const src = fs.readFileSync(path.join(ROOT, 'test', 'tools', `${name}-mutants.cjs`), 'utf8');
+    assert.ok(covered.includes(`${name}-mutants.cjs`) || /\brunTests\(/.test(src), `${name}-mutants.cjs spawns through the pinned helper`);
   }
   // A line that spawns '--test' with no reporter, in a file that parses 'not ok', is caught.
   const tmp = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'census-reporter-'));

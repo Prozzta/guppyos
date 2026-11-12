@@ -10,11 +10,10 @@
 // This runner restores the file itself in a finally.
 const fs = require('node:fs');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
 const os = require('node:os');
 
 const ROOT = path.resolve(__dirname, '..', '..');
-const { recover, mutateFile, restoreFile, checkAnchors } = require('./mutant-runner-helper.cjs');
+const { recover, mutateFile, restoreFile, checkAnchors, runTests, verdict, requireBaseline } = require('./mutant-runner-helper.cjs');
 recover(ROOT);
 if (process.argv.includes('--recover-only')) process.exit(0);
 const TEST = 'test/heavy-cpu-options-191.test.cjs';
@@ -42,11 +41,8 @@ const MUTANTS = [
 
 checkAnchors(ROOT, MUTANTS.map(([name, file, from]) => ({ name, file, from })));
 const local = fs.mkdtempSync(path.join(os.tmpdir(), 'hcpu-shell-mutant-'));
-const run = () => spawnSync(process.execPath, ['--test', '--test-reporter=tap', TEST], { cwd: ROOT, encoding: 'utf8', windowsHide: true, timeout: 600_000, env: { ...process.env, LOCALAPPDATA: local } });
-if (run().status !== 0) {
-  console.log(`BASELINE RED: ${TEST} fails unmutated, so no mutant proves anything.`);
-  process.exit(2);
-}
+const run = () => runTests(ROOT, [TEST], { timeout: 600_000, env: { ...process.env, LOCALAPPDATA: local } });
+requireBaseline(run(), TEST);
 
 let bad = 0;
 for (const [name, file, from, to, dies] of MUTANTS) {
@@ -68,10 +64,9 @@ for (const [name, file, from, to, dies] of MUTANTS) {
   } finally {
     restoreFile(ROOT, abs, original);
   }
-  const named = dies.test(`${r.stdout}${r.stderr}`);
-  const killed = r.status !== 0 && named;
-  if (!killed) bad += 1;
-  console.log(`${killed ? 'KILLED' : r.status !== 0 ? 'KILLED ELSEWHERE' : 'SURVIVED'} ${name}`);
+  const v = verdict(r, dies); // NO-RESULT (the run never reported) is loud, never a kill
+  if (v !== 'KILLED') bad += 1;
+  console.log(`${v} ${name}${v === 'NO-RESULT' ? ` (${r.why})` : ''}`);
 }
 console.log(bad ? `${bad} of ${MUTANTS.length} not killed at their named test` : `all ${MUTANTS.length} killed`);
 fs.rmSync(local, { recursive: true, force: true });
