@@ -17,6 +17,7 @@ import { PixelButton } from './PixelButton';
 import { ClaimLedgerSettings } from './ClaimLedgerSettings';
 import { CapacityDisplaySetting } from './CapacityDisplaySetting';
 import { GraphicsSetting } from './GraphicsSetting';
+import { StartupHealthSetting } from './StartupHealthSetting';
 import { BlobSection } from './BlobSection';
 import { CodexToolOutputSetting } from './CodexToolOutputSetting';
 import { CodexPluginsSetting } from './CodexPluginsSetting';
@@ -1054,6 +1055,11 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
 
                       {/* GPU-SETTING-188: Graphics (Auto / GPU / CPU only) and what is really rendering. */}
                       <GraphicsSetting />
+
+                      <div style={{ height: 1, background: 'var(--cth-ink-300)' }} />
+
+                      {/* STARTUP-FREEZE-104 A4: the last startup-budget verdict (read only). */}
+                      <StartupHealthSetting />
 
                       <div style={{ height: 1, background: 'var(--cth-ink-300)' }} />
 

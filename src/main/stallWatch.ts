@@ -94,6 +94,8 @@ export interface StallWatchDeps {
   profiler?: (() => ProfilerSession | null) | null;
   setInterval?: (fn: () => void, ms: number) => unknown;
   clearInterval?: (h: unknown) => void;
+  /** A4: the startup-budget verdict, once per start (main saves it for Settings). */
+  onStartupVerdict?: (v: { ok: boolean; breaches: number; worstMs: number; budgetMs: number; windowMs: number }) => void;
 }
 
 /**
@@ -282,6 +284,7 @@ export class StallWatch {
     if (t >= end) {
       b.done = true;
       this.logRow('startup-budget', { ok: b.breaches === 0, breaches: b.breaches, worstMs: ms0(b.worstMs), budgetMs: STARTUP_BUDGET_MS, windowMs: STARTUP_WINDOW_MS, ...(this.startupTop ? { top: this.startupTop.top } : {}) });
+      try { this.d.onStartupVerdict?.({ ok: b.breaches === 0, breaches: b.breaches, worstMs: ms0(b.worstMs), budgetMs: STARTUP_BUDGET_MS, windowMs: STARTUP_WINDOW_MS }); } catch { /* best-effort */ }
     }
   }
 
