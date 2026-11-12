@@ -59,7 +59,7 @@ test('a live ClaimStore append remains intact when it arrives during the bootstr
     const [liveResult] = await Promise.all([live, importing]);
     assert.equal(liveResult.ok, true);
     const texts = store.readLedger(agent).records.filter((r) => r.t === 'claim').map((r) => r.text);
-    assert.ok(texts.some((text) => text.includes('imported legacy fact'));
+    assert.ok(texts.some((text) => text.includes('imported legacy fact')));
     assert.ok(texts.includes('live append during import'));
     assert.equal(state.agents[agent].state, 'done');
     store.close();
