@@ -4,6 +4,7 @@ import { happy, idle, sad, shy, sick, sleepy, surprised, thinking, unsure, type 
 import { gaze, type Gaze } from 'blobatar/gaze';
 // shy: the brief reaction when the blob hides itself from shares; thinking when it shows again.
 import { BLOB_COMING_SOON, BLOB_DISABLED, BLOB_GAZE_DEAD, type BlobGazePoint, type BlobMood, type BlobOverlayApi, type BlobOverlayStatus, type BlobSlot } from '../../../shared/blob';
+import { BLOB_IDENTITY } from '../../../shared/blobFace';
 import { RING_SLOTS, ringSlotPosition } from './ring';
 
 declare global { interface Window { blob?: BlobOverlayApi } }
@@ -14,9 +15,9 @@ const TOAST_MS = 1600;
 
 /** The reference's bright yellow blob. blobatar's own swatches are contrast-muted (OKLCH hue 90
  *  gives #c9a32e), so the head and eye colours are pinned; the name only seeds the rest. */
-const BLOB_NAME = 'guppy';
-const BLOB_PALETTE = { head: '#ffd84a', eye: '#1a1320' };
-const BLOB_TRAITS = { shape: 0.05 };
+const BLOB_NAME = BLOB_IDENTITY.name;
+const BLOB_PALETTE = { ...BLOB_IDENTITY.palette };
+const BLOB_TRAITS = { ...BLOB_IDENTITY.traits };
 
 function Icon({ slot, invisible }: { slot: BlobSlot; invisible: boolean }): ReactElement {
   const p = { width: 26, height: 26, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const, 'aria-hidden': true };

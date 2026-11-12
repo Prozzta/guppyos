@@ -12,6 +12,7 @@ import type { Eligibility, TerminalInputState } from '../shared/inputProvenance'
 import type { TerminalPromptState } from '../shared/promptState';
 import type { HireManifest } from '../shared/hire';
 import type { BlobSettingsPatch, BlobStatus } from '../shared/blob';
+import type { BlobSaveImageResult } from '../shared/blobFace';
 import type { DictationAudioPayload, DictationCaptureCommand } from '../shared/dictation';
 export type { HireManifest } from '../shared/hire';
 import type { LivenessV1 } from '../shared/livenessV1';
@@ -1683,6 +1684,8 @@ const api = {
     ipcRenderer.invoke('blob:status'),
   blobSetConfig: (patch: BlobSettingsPatch): Promise<{ ok: true; status: BlobStatus } | { ok: false; error: string }> =>
     ipcRenderer.invoke('blob:setConfig', patch),
+  /** BLOB-ORCH-MOOD: 'Save Blob image' (Settings > Blob): the current face as a 512 px PNG via a Save dialog. */
+  blobSaveImage: (): Promise<BlobSaveImageResult> => ipcRenderer.invoke('blob:save-image'),
   /** GUPPY-DICTATION-P2: main asks this window to record (start/stop/cancel a session). */
   onDictationCapture: (cb: (cmd: DictationCaptureCommand) => void): (() => void) => {
     const listener = (_e: IpcRendererEvent, cmd: DictationCaptureCommand) => cb(cmd);
