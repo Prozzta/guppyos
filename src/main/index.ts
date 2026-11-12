@@ -1745,6 +1745,8 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
   const root = hive.root();
   if (!root) return null;
   if (!claimStore || claimStore.root !== root) {
+    // A9: the old hive's acked keys are saved before its store is let go.
+    if (claimStore) { try { claimStore.store.flushKeyRegistry(); } catch (e) { console.error('[claims] flushKeyRegistry:', e); } }
     claimStore = {
       root,
       store: new ClaimStore({
@@ -9358,6 +9360,8 @@ app.on('will-quit', (e) => {
   let report: QuitReport | null = null;
   const finish = (): void => {
     try { hive.appendLog({ kind: 'quit-done', waitMs: Date.now() - t0, work: report }); } catch { /* best-effort */ }
+    // STARTUP-FREEZE-104 A9: keys acked in the last REGISTRY_SAVE_MS are saved before exit (agents are swept).
+    try { claimStore?.store.flushKeyRegistry(); } catch (e) { console.error('[quit] flushKeyRegistry:', e); }
     try { hive.dispose(); } catch { /* rows are on disk */ }
     app.exit(0);
   };
