@@ -858,7 +858,11 @@ export class HiveManager {
   private readonly authorityIssues = new Map<string, HiveIntegrityIssue>();
   /** TASKS-JSON-SPLIT: the hourly archive pass and the archive reader's cache. */
   private archiveTimer: ReturnType<typeof setInterval> | null = null;
-  private archiveCache: { root: string; stamp: string; cards: Map<string, Record<string, unknown>> } | null = null;
+  private archiveCache: { root: string; stamp: string; cards: Map<string, Record<string, unknown>>; checkedAt: number } | null = null;
+  /** SCALE-TASKS-MAP (Jim B1): archived() trusts its last stamp check this long, so a burst of
+   *  lookups (taskStatus per claim) costs no readdir/stat of tasks-archive/. Main's own archive
+   *  writes (archivePass, revive) drop the cache at once; only an OUTSIDE append waits <= this. */
+  static readonly ARCHIVE_REVALIDATE_MS = 2_000;
   private allTasksCache: { root: string | null; hot: unknown[]; archived: Map<string, Record<string, unknown>> | null; value: { tasks: unknown[] }; byId: Map<string, unknown> | null } | null = null;
   /** C90-MAILCARD: the per-card mail index of the current hive root (mailCards.ts). */
   private mailCardIndex: MailCardIndex | null = null;
@@ -4172,12 +4176,16 @@ export class HiveManager {
     return [...landed];
   }
 
-  /** The archived cards, cached by the archive's file stamp (it changes about once an hour). */
+  /** The archived cards, cached by the archive's file stamp (it changes about once an hour), which
+   *  is re-checked at most every ARCHIVE_REVALIDATE_MS (on the authority clock). */
   private archived(root: string): Map<string, Record<string, unknown>> {
+    const now = this.authorityNow();
+    const c = this.archiveCache;
+    if (c && c.root === root && now - c.checkedAt >= 0 && now - c.checkedAt < HiveManager.ARCHIVE_REVALIDATE_MS) return c.cards;
     const stamp = archiveStamp(root);
-    if (this.archiveCache && this.archiveCache.root === root && this.archiveCache.stamp === stamp) return this.archiveCache.cards;
+    if (c && c.root === root && c.stamp === stamp) { c.checkedAt = now; return c.cards; }
     const cards = readArchive(root);
-    this.archiveCache = { root, stamp, cards };
+    this.archiveCache = { root, stamp, cards, checkedAt: now };
     return cards;
   }
 
