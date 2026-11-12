@@ -53,6 +53,7 @@ import {
 } from '../../shared/claims';
 import { canonicalJson, keyIdOf, recordMac, sha256Hex } from './canonical';
 import type { HeadAnchorStore, LedgerKeyRecord } from './keyProvider';
+import { provenStatKey, statKey } from '../statCacheKey';
 import { redactSecrets } from './redact';
 import { normalizeTtl, parseStoredTtl, zonelessHint } from './ttl';
 import { checkKey, DEFAULT_KEY_REGISTRY, loadRegistry, saveRegistry } from './registry';
@@ -94,6 +95,10 @@ export interface ClaimStoreDeps {
   anchorDelayMs?: number;
   /** R1 (Jim R-2): a hive task's status, so a claim whose task TTL has ended is not live for R1. */
   taskStatus?: (taskId: string) => string | null;
+  /** LAG-MAIN-SYNC-FIXES: the monotonic clock the roster census revalidates by; tests drive it. */
+  monoNow?: () => number;
+  /** The wall clock the roster's racy-stat rule compares with (statCacheKey.ts); tests drive it. */
+  wallNow?: () => number;
 }
 
 const SEGMENT_RE = /^(\d{4})-(\d{2})\.jsonl$/;
@@ -105,6 +110,10 @@ const REF_TYPES = new Set<Ref['type']>(['file', 'commit', 'task', 'msg', 'url'])
 const LIST_MAX = 20;
 const FD_IDLE_MS = 30_000;
 const ANCHOR_DELAY_MS = 1_000;
+/** LAG-MAIN-SYNC-FIXES item 3: the longest a roster census is served without re-listing the agents'
+ *  claims folders, for a segment folder made by something other than this store (every change main
+ *  makes drops it at once). The same bound config.json's cache uses (CONFIG_REVALIDATE_MS). */
+export const ROSTER_REVALIDATE_MS = 1_000;
 const REF_VALUE_MAX = 500;
 
 const CLAIM_DRAFT_FIELDS = new Set(['t', 'kind', 'text', 'key', 'refs', 'ttl', 'pin', 'supersedes', 'supersedesReason', 'retracts', 'at', 'source', 'legacy', 'section', 'value', 'valueAgent']);
@@ -297,6 +306,46 @@ export class ClaimStore {
     let names: string[] = [];
     try { names = nodeFs.readdirSync(dir).filter((n) => SEGMENT_RE.test(n)).sort(); } catch { names = []; }
     return names.map((n) => join(dir, n));
+  }
+
+  /**
+   * LAG-MAIN-SYNC-FIXES item 3: every agent with a ledger (a segment, or an anchor: Jim A-2), as
+   * main's claimLedgerAgents served it to each consumer (reader watchers, export, reconcile, the
+   * ledger UI, get/history/card answers), each doing its own readdir of agents/ plus one of every
+   * agent's claims folder. One census is now shared:
+   *   - the anchored half is read fresh every call (one revalidated anchor snapshot, keyProvider);
+   *   - the segment half is cached and listed again when: this store created, swapped or restored a
+   *     claims folder or a segment (rosterDirty), the agents/ folder's stat key moved (an agent
+   *     added or archived), or ROSTER_REVALIDATE_MS passed (a folder another process made).
+   * Verification never reads this: readLedger lists the agent's own segments every time.
+   */
+  ledgerAgents(): string[] {
+    const withSegments = this.segmentAgents();
+    const run = (): string[] => this.anchoredAgents();
+    const anchored = this.d.headAnchor?.batch ? this.d.headAnchor.batch(run) : run();
+    return [...new Set([...withSegments, ...anchored])];
+  }
+
+  private roster: { gen: number; at: number; key: string | null; agents: string[] } | null = null;
+  private rosterGen = 0;
+  /** A claims folder or segment this store made, swapped or restored: the next census lists again. */
+  private rosterDirty(): void { this.rosterGen++; }
+
+  private segmentAgents(): string[] {
+    const mono = this.d.monoNow ?? (() => performance.now());
+    const agentsDir = join(this.d.hiveRoot, 'agents');
+    let key: string | null = null;
+    let st: nodeFs.Stats | null = null;
+    try { st = nodeFs.statSync(agentsDir); key = statKey(st); } catch { /* no agents folder: no ledgers */ }
+    const r = this.roster;
+    if (r && r.gen === this.rosterGen && r.key !== null && r.key === key && mono() - r.at < ROSTER_REVALIDATE_MS) return [...r.agents];
+    const gen = this.rosterGen;
+    const at = mono();
+    let names: string[] = [];
+    try { names = nodeFs.readdirSync(agentsDir); } catch { names = []; }
+    const agents = names.filter((a) => this.segments(a).length > 0);
+    this.roster = { gen, at, key: st ? provenStatKey(st, (this.d.wallNow ?? Date.now)()) : null, agents };
+    return [...agents];
   }
 
   /** Does any agent have a claims segment? (C2: "first use" means none anywhere.) */
@@ -522,7 +571,9 @@ export class ClaimStore {
    */
   checkAnchored(): string[] {
     const broken: string[] = [];
-    for (const a of this.anchoredAgents()) if (this.readLedger(a).chain !== 'ok') broken.push(a);
+    // LAG-MAIN-SYNC-FIXES: one anchor snapshot for the whole census (a set() inside writes through).
+    const run = (): void => { for (const a of this.anchoredAgents()) if (this.readLedger(a).chain !== 'ok') broken.push(a); };
+    if (this.d.headAnchor?.batch) this.d.headAnchor.batch(run); else run();
     return broken;
   }
 
@@ -879,6 +930,8 @@ export class ClaimStore {
       if (h && h.file !== file) { this.closeFd(agentId); h = undefined; }
       if (!h) {
         nodeFs.mkdirSync(dir, { recursive: true });
+        // Opening may create the folder or a new month's segment: the roster census lists again.
+        this.rosterDirty();
         h = { file, fd: this.fs.openSync(file, 'a'), idle: null, flushing: null };
         this.fds.set(agentId, h);
       }
@@ -1235,7 +1288,7 @@ export class ClaimStore {
    * Returns the purge event id. Only ids are logged, never text.
    */
   purge(agentId: string, ids: string[], confirmedByHuman: true): Promise<PurgeResult> {
-    return this.serial(agentId, () => this.purgeNow(agentId, ids, confirmedByHuman));
+    return this.serial(agentId, () => { try { return this.purgeNow(agentId, ids, confirmedByHuman); } finally { this.rosterDirty(); } });
   }
 
   private purgeNow(agentId: string, ids: string[], confirmedByHuman: true): PurgeResult {
@@ -1359,7 +1412,7 @@ export class ClaimStore {
       // purge-new/purge-old pair made by anything else is left alone, and the anchor check judges
       // the ledger as it is (a missing claims dir is a cut).
       const pending = !!this.d.headAnchor?.get(this.d.hiveRoot, agentId)?.pending;
-      if (!hasDir && hasFresh && hasOld && pending) { nodeFs.renameSync(fresh, dir); this.log({ kind: 'claims-purge-finished', agentId }); }
+      if (!hasDir && hasFresh && hasOld && pending) { nodeFs.renameSync(fresh, dir); this.rosterDirty(); this.log({ kind: 'claims-purge-finished', agentId }); }
       else if (hasDir && hasFresh) { nodeFs.rmSync(fresh, { recursive: true, force: true }); this.log({ kind: 'claims-purge-dropped', agentId }); }
       if (nodeFs.existsSync(dir) && hasOld) nodeFs.rmSync(old, { recursive: true, force: true });
     } catch (e) {
@@ -1406,7 +1459,7 @@ export class ClaimStore {
    * flight holds its handle open until the fsync completes, and Windows refuses the rename then.
    */
   restoreBackup(agentId: string, day: string): Promise<ReadResult> {
-    return this.serial(agentId, () => this.restoreBackupNow(agentId, day));
+    return this.serial(agentId, () => { try { return this.restoreBackupNow(agentId, day); } finally { this.rosterDirty(); } });
   }
 
   private restoreBackupNow(agentId: string, day: string): ReadResult {

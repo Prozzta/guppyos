@@ -273,7 +273,7 @@ test('Jim A-3: the app wiring pins: the anchor file in user-data, the anchored a
   const idx = fs.readFileSync(path.join(ROOT, 'src', 'main', 'index.ts'), 'utf8');
   assert.match(idx, /headAnchor: new FileHeadAnchorStore\(join\(app\.getPath\('userData'\), HEAD_ANCHOR_FILE\)\),/, 'in user-data, beside the key record');
   assert.match(idx, /anchoredAgents: \(\) => claimsEndpoint\(\)\?\.store\.anchoredAgents\(\) \?\? \[\],/, 'the worker is told the anchored agents');
-  assert.match(idx, /return \[\.\.\.new Set\(\[\.\.\.withSegments, \.\.\.store\.anchoredAgents\(\)\]\)\];/, 'the index sync covers anchored agents');
+  assert.match(idx, /return \(claimsEndpoint\(\) as ClaimsEndpointDeps\)\.store\.ledgerAgents\(\);/, 'the index sync covers anchored agents (ClaimStore.ledgerAgents; claims-lag-sync pins its anchored half)');
   assert.match(idx, /onWorkerReady: \(\) => \{ claimsAnchorCheck\(\); void claimsIndexSync\(\)\?\.syncAll\(\); \}/, 'a worker (re)start checks');
   assert.match(idx, /setImmediate\(claimsAnchorCheck\);/, 'claims start checks');
   assert.match(idx, /setInterval\(claimsAnchorCheck, CLAIMS_ANCHOR_CHECK_MS\)\.unref\?\.\(\);/, 'and periodically');
