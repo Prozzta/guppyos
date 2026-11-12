@@ -291,7 +291,7 @@ export class NativeMemoryWiring {
   }
 
   /** CLAIM-LEDGER W3: index one agent's verified claim chunks (main only; no HTTP route). */
-  async syncClaims(args: { wing: string; path: string; head: string; chunks: unknown[] }): Promise<Reply> {
+  async syncClaims(args: { wing: string; path: string; head: string; chunks: unknown[]; delta?: boolean }): Promise<Reply> {
     const why = this.unavailable();
     if (why) return { ok: false, exit: EXIT.unavailable, error: `memory is unavailable (${why})` };
     const push = this.pushClaimLedger();

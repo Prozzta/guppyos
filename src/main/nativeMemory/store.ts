@@ -431,7 +431,7 @@ export class NativeMemoryStore {
    *  parts are new (to embed), which claims' text changed (a purge rewrite: drop and re-add), and
    *  which statuses changed (rows only, never a re-embed: A4). `reembed`: the wing's vectors were made
    *  under another CLAIM_EMBED_VERSION, so every claim it keeps is dropped and re-added (one pass). */
-  planClaims(wing: string, parts: ClaimPart[], opts: { reembed?: boolean } = {}): ClaimPlan {
+  planClaims(wing: string, parts: ClaimPart[], opts: { reembed?: boolean; delta?: boolean } = {}): ClaimPlan {
     const have = new Map<string, Map<number, string>>();
     for (const r of this.db.prepare('SELECT claim_id, part, content_sha256 FROM claims WHERE wing = ?').all(wing) as Array<{ claim_id: string; part: number; content_sha256: string }>) {
       const m = have.get(r.claim_id) ?? new Map<number, string>();
@@ -445,7 +445,7 @@ export class NativeMemoryStore {
     const drop = new Set<string>();
     const add: ClaimPart[] = [];
     // A claim present in the index but not sent (purged, or past a chain break) goes.
-    for (const id of have.keys()) if (!incoming.has(id)) drop.add(id);
+    if (!opts.delta) for (const id of have.keys()) if (!incoming.has(id)) drop.add(id);
     for (const [id, ps] of incoming) {
       const h = have.get(id);
       if (!opts.reembed && h && h.size === ps.length && ps.every((p) => h.get(p.part) === p.contentSha256)) continue;

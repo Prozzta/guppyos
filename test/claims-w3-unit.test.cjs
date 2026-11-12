@@ -131,6 +131,22 @@ test('ClaimsIndexSync: a burst of appends is one debounced sync; syncAll covers 
   assert.deepEqual(x.sent.slice(1).map((s) => s.wing).sort(), ['a1', 'a2']);
 });
 
+test('ClaimsIndexSync: an acknowledged append uses its verified snapshot and sends only the delta', async () => {
+  let reads = 0;
+  const first = rec('c-000000000001', 'first');
+  const next = rec('c-000000000002', 'next');
+  const x = syncer({
+    readLedger: () => { reads++; return { records: [first], torn: null, chain: 'ok' }; },
+    derive: () => (records) => state(records.filter((r) => r.t === 'claim').map((r) => r.id)),
+  });
+  await x.s.syncNow('a1');
+  assert.equal(reads, 1);
+  await x.s.syncNow('a1', next);
+  assert.equal(reads, 1, 'an acked append does not re-read old ledger segments');
+  assert.equal(x.sent[1].delta, true);
+  assert.deepEqual(x.sent[1].chunks.map((c) => c.claimId), ['c-000000000002']);
+});
+
 function hiveWith(files) {
   const root = fs.mkdtempSync(path.join(JAIL, 'hive-'));
   for (const [rel, text] of Object.entries(files)) {
