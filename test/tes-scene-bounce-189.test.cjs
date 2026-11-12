@@ -18,6 +18,20 @@ const { runScenario, harnessTestTimeout } = require('./electron-harness/run.cjs'
 
 const TES = join(__dirname, '..', 'themes', 'tes');
 const SCENARIO = join(__dirname, 'electron-harness', 'scenarios', 'tes-scene-bounce.tsx');
+/** Camera.nudgeToward's default duration: the window in which a select could move the scene. */
+const NUDGE_MS = 1200;
+
+test('NUDGE_MS is the camera nudge\'s real duration (the frame-coverage window, LOAD-FLAKES-105)', () => {
+  const cam = require('node:fs').readFileSync(join(__dirname, '..', 'src', 'renderer', 'src', 'scene', 'office', 'Camera.ts'), 'utf8');
+  assert.ok(cam.includes(`nudgeToward(worldX: number, worldY: number, duration = ${NUDGE_MS})`), 'Camera.nudgeToward defaults to NUDGE_MS');
+  const floor = require('node:fs').readFileSync(join(__dirname, '..', 'src', 'renderer', 'src', 'scene', 'themes', 'StationFloor.tsx'), 'utf8');
+  assert.match(floor, /camera\.nudgeToward\(p\.x, p\.y\)/, 'the select nudge uses the default duration');
+  // The scenario's per-frame kick repeats Camera.update's nudge arithmetic (elapsed += dt; t = elapsed /
+  // duration, capped at 1; offset x (1 - t)): pin it, so a change there cannot quietly zero the kick.
+  for (const line of ['this.nudgeElapsed += dt;', 'const t = Math.min(this.nudgeElapsed / this.nudgeDuration, 1);', 'const ease = 1 - t;', 'this.currentX += this.nudgeOffsetX * ease;']) {
+    assert.ok(cam.includes(line), `Camera.update still has: ${line}`);
+  }
+});
 
 test('RENDERED (DPR 1): clicking an agent card in the roster leaves the TES scene where it stands', { timeout: harnessTestTimeout(120_000) }, async (t) => {
   const r = await runScenario(SCENARIO, { timeoutMs: 120_000, env: { HARNESS_DPR: '1', HARNESS_THEME_PACKS: JSON.stringify([{ dir: 'tes', from: TES }]) } });
@@ -25,10 +39,20 @@ test('RENDERED (DPR 1): clicking an agent card in the roster leaves the TES scen
   assert.equal(r.dpr, 1, 'the window has DPR 1');
   const ids = { Jim: 'jim', Creed: 'creed', Andy: 'andy', Dwight: 'dwight' };
   assert.deepEqual(r.clicks.map((c) => c.who), Object.keys(ids));
-  for (const { who, found, selected, frames } of r.clicks) {
+  for (const { who, found, selected, clickAt, frames } of r.clicks) {
     assert.equal(found, true, `${who}'s card is in the roster`);
     assert.equal(selected, ids[who], `the click selected ${who}`);
-    assert.ok(frames.length >= 30, `${who}: ${frames.length} frames recorded`);
+    // Not vacuous (LOAD-FLAKES-105): the frames must be able to SEE a bounce, not number 30. Each frame
+    // carries the select nudge's pull on the camera in the tick that drew it (f.kick, device px, as
+    // Camera.update applies it), so a frame with kick >= 1 is one on which a select that moved the scene
+    // would show as a moved origin. That is judged on the frames actually drawn, not on a 60 fps count
+    // or wall-clock windows: a loaded machine starves the renderer for 250-850 ms at a time (traced
+    // under 96 burners; the same click's render is < 15 ms idle).
+    const at = frames.map((f) => f.t);
+    const cover = `${who}: click at ${clickAt}, frames [t, kick] ${JSON.stringify(frames.map((f) => [f.t, f.kick]))}`;
+    assert.ok(at[0] < clickAt && frames[0].kick === 0, `the rest frame is from before the click, with no nudge: ${cover}`);
+    assert.ok(frames.some((f) => f.t > clickAt && f.kick >= 1), `a frame drawn while the select's nudge pulled the camera >= 1 px: ${cover}`);
+    assert.ok(at[at.length - 1] >= clickAt + NUDGE_MS && frames[frames.length - 1].kick === 0, `a frame after the nudge ended: ${cover}`);
     const f0 = frames[0];
     // Not vacuous: the 336-row semantic box gets the expected fractional height-limited fit.
     assert.ok(Math.abs(f0.n - 1.8020833333333333) < 1e-9, `${who}: fractional semantic-fit scale (${f0.n})`);
