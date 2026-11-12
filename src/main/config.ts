@@ -710,7 +710,8 @@ function writeConfigAtomically(p: string, data: unknown): void {
  * The value is frozen, never cloned per call (that would bring the cost back): a caller that
  * needs a changed config spreads it into a new object (writeConfig's `{ ...current, ...patch }`).
  */
-export const CONFIG_REVALIDATE_MS = 1_000;
+/** Watch events are the normal invalidation path; this is only the missed-event backstop. */
+export const CONFIG_REVALIDATE_MS = 60_000;
 type ConfigCache = { path: string; key: string | null; value: HarnessConfig; checkedAt: number };
 let configCache: ConfigCache | null = null;
 /** Bumped by every write, so a read whose migration wrote mid-build does not cache a stale value. */

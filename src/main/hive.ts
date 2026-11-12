@@ -840,6 +840,8 @@ export class HiveManager {
   private routerTimer: unknown = null;
   /** One non-recursive watcher per active outbox, keyed by its absolute path. */
   private readonly outboxWatchers = new Map<string, Pick<FSWatcher, 'close' | 'on'>>();
+  /** Outboxes named by watch hints; the immediate drain never re-enumerates agents. */
+  private readonly routeDirtyOutboxes = new Set<string>();
   /** Parse failures awaiting the next polling debounce, keyed by full outbox path. */
   private readonly outboxParseRetries = new Map<string, { attempts: number; retryAfter: number }>();
   /** A rejected file whose archival is temporarily locked has already notified its sender. */
@@ -3622,11 +3624,14 @@ export class HiveManager {
 
   /**
    * HYBRID router (pre-M1 event-wake bridge). The FILES are authoritative: an fs.watch
-   * callback on any outbox only schedules one whole-tree `routeOnce()`, and the existing
-   * interval stays as reconciliation (it also repairs lost or broken watchers). Starting
-   * runs one immediate catch-up scan, so a restart or power-resume routes what waited.
+   * callback on an outbox schedules that dirty outbox only; the slow interval is the
+   * whole-tree reconciliation that repairs lost or broken watchers. Starting runs one
+   * immediate catch-up scan, so a restart or power-resume routes what waited.
    */
-  startRouter(intervalMs = 1500): void {
+  /** Watch hints normally drain one dirty outbox.  This slow full scan is only
+   * the loss-recovery backstop for dropped/failed watchers. */
+  static readonly ROUTER_RECONCILE_MS = 30_000;
+  startRouter(intervalMs = HiveManager.ROUTER_RECONCILE_MS): void {
     if (this.routerTimer || !this.enabled()) return;
     this.routerGeneration++;
     this.routerTimer = this.routerRuntime.setInterval(() => {
@@ -3638,6 +3643,7 @@ export class HiveManager {
     if (this.routerTimer) { this.routerRuntime.clearInterval(this.routerTimer); this.routerTimer = null; }
     this.routerGeneration++;
     this.routeQueued = false;
+    this.routeDirtyOutboxes.clear();
     for (const w of this.outboxWatchers.values()) { try { w.close(); } catch { /* already closed */ } }
     this.outboxWatchers.clear();
   }
@@ -3663,7 +3669,7 @@ export class HiveManager {
     for (const dir of want) {
       if (this.outboxWatchers.has(dir)) continue;
       try {
-        const w = this.routerRuntime.watch(dir, () => this.scheduleRouteOnce());
+        const w = this.routerRuntime.watch(dir, () => this.scheduleRouteOnce(dir));
         // A broken watcher is dropped; the next reconciliation re-attaches it.
         const drop = (): void => {
           if (this.outboxWatchers.get(dir) !== w) return;
@@ -3691,15 +3697,19 @@ export class HiveManager {
   }
 
   /** Coalesce every hint in this turn into ONE authoritative scan (event scheduling, not a timer). */
-  private scheduleRouteOnce(): void {
-    if (this.routeQueued || !this.routerTimer) return;
+  private scheduleRouteOnce(outbox: string): void {
+    if (!this.routerTimer) return;
+    this.routeDirtyOutboxes.add(outbox);
+    if (this.routeQueued) return;
     this.routeQueued = true;
     const generation = this.routerGeneration;
     this.routerRuntime.setImmediate(() => {
       if (generation !== this.routerGeneration) return;
       this.routeQueued = false;
       if (!this.routerTimer) return;
-      try { this.routeOnce(); } catch { /* the interval retries */ }
+      const dirty = [...this.routeDirtyOutboxes];
+      this.routeDirtyOutboxes.clear();
+      try { this.routeOnce(dirty); } catch { /* the reconciliation retries */ }
     });
   }
 
@@ -3821,17 +3831,21 @@ export class HiveManager {
     }
   }
 
-  routeOnce(): number {
+  /** Drain all outboxes for reconciliation, or only watcher-dirtied outboxes. */
+  routeOnce(dirtyOutboxes?: Iterable<string>): number {
     const root = this.root();
     if (!root) return 0;
     const agentsDir = join(root, 'agents');
-    if (!existsSync(agentsDir)) return 0;
+    const fullScan = dirtyOutboxes === undefined;
+    if (fullScan && !existsSync(agentsDir)) return 0;
     let routed = 0;
     let rejected = 0;
     let archived = 0;
     const liveOutboxFiles = new Set<string>();
-    for (const id of readdirSync(agentsDir)) {
-      const outbox = join(agentsDir, id, 'outbox');
+    const outboxes: Array<[string, string]> = fullScan
+      ? readdirSync(agentsDir).map((id) => [id, join(agentsDir, id, 'outbox')])
+      : [...(dirtyOutboxes ?? [])].map((outbox) => [basename(dirname(outbox)), outbox]);
+    for (const [id, outbox] of outboxes) {
       if (!existsSync(outbox)) continue;
       for (const f of readdirSync(outbox)) {
         if (!f.endsWith('.json')) continue;
@@ -3968,6 +3982,7 @@ export class HiveManager {
     }
     // A file removed by its writer or routed successfully must not leave a stale
     // retry count that could punish a later file reusing the same name.
+    if (!fullScan) return routed;
     for (const full of this.outboxParseRetries.keys()) {
       if (!liveOutboxFiles.has(full)) this.outboxParseRetries.delete(full);
     }
@@ -6336,7 +6351,8 @@ export class HiveManager {
    * the disk once (statCacheKey.ts: same-size writes inside one tick share a key). Missing, corrupt
    * and unreadable files are never cached: readAuthoritativeJson handles them as before.
    */
-  static readonly AUTHORITY_REVALIDATE_MS = 1_000;
+  /** fs.watch invalidates normally; this slow stat is the missed-event safety net. */
+  static readonly AUTHORITY_REVALIDATE_MS = 60_000;
   private readonly authorityCache = new Map<string, { key: string | null; value: unknown; checkedAt: number }>();
   private readonly authorityWatchers = new Map<string, FSWatcher>();
   private authorityNow: () => number = () => Date.now();
