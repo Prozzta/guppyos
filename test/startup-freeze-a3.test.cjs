@@ -433,7 +433,7 @@ test('main wiring: the startup readers run after the warm, and read-only callers
   const block = src.slice(src.indexOf('const warmed = startClaimsWarm(root, claimStore.store);'), src.indexOf('// W5 startup census.') + 400);
   assert.ok(block.length > 400, 'the warm starts with the claim store');
   for (const pin of ['void warmed.then(claimsAnchorCheck);', 'startAfterMailCardCatchUp(Promise.allSettled([mailCardCatchUp, warmed]),',
-    'void warmed.then(() => claimExport().syncAllAsync(','void warmed.then(syncReaderWatchers);', 'void warmed.then(() => { for (const agentId of claimLedgerAgents())']) {
+    'void warmed.then(() => claimExport().syncAllAsync(','void warmed.then(syncReaderWatchers);', 'void warmed.then(async () => { for (const agentId of claimLedgerAgents())']) {
     assert.ok(block.includes(pin), `pinned: ${pin}`);
   }
   assert.ok(!/setImmediate\((claimsAnchorCheck|syncReaderWatchers)\)/.test(block), 'no startup reader runs before the warm');

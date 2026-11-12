@@ -15,12 +15,12 @@ test('W5 main wiring mutants: dropping answer, post-index refresh, or startup re
   const source = fs.readFileSync(file, 'utf8');
   const answerWired = (text) => text.includes('onReconcile: (agentId, a, b) => reconcileQueueForHive(root).answeredPair(agentId, a, b)');
   const postIndexWired = (text) => /onIndexed: \(agentId\) =>[^\n]*refreshReconcileQueueForHive\(root, agentId, reconcileHiveDeps\(\)\)/.test(text);
-  const startupWired = (text) => /W5 startup census[\s\S]{0,260}refreshReconcileQueueForHive\(root, agentId, reconcileHiveDeps\(\)\)/.test(text);
+  const startupWired = (text) => /W5 startup census[\s\S]{0,480}refreshReconcileQueueForHive\(root, agentId, reconcileHiveDeps\(\)\)/.test(text);
   assert.equal(answerWired(source) && postIndexWired(source) && startupWired(source), true);
   const mutants = [
     ['G1/onReconcile omitted', source.replace(/onReconcile: \(agentId, a, b\) => reconcileQueueForHive\(root\)\.answeredPair\(agentId, a, b\),?/, ''), answerWired],
     ['G2/post-index refresh omitted', source.replace(/onIndexed: \(agentId\) =>[^\n]+/, ''), postIndexWired],
-    ['G2/startup refresh omitted', source.replace(/(?:setImmediate|void warmed\.then)\(\(\) => \{ for \(const agentId of claimLedgerAgents\(\)\) \{ try \{ refreshReconcileQueueForHive\(root, agentId, reconcileHiveDeps\(\)\);[^\n]+/, ''), startupWired],
+    ['G2/startup refresh omitted', source.replace(/(?:setImmediate|void warmed\.then)\((?:async )?\(\) => \{ for \(const agentId of claimLedgerAgents\(\)\) \{ (?:await new Promise<void>\(\(r\) => setImmediate\(r\)\); )?try \{ refreshReconcileQueueForHive\(root, agentId, reconcileHiveDeps\(\)\);[^\n]+/, ''), startupWired],
   ];
   for (const [name, mutant, pin] of mutants) {
     assert.equal(pin(mutant), false, `${name} mutant must die`);
