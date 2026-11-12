@@ -1700,7 +1700,7 @@ function claimExport(): ClaimExport {
       // The complete rendering marks statuses from the state; world evidence unknown here is neutral.
       view: (_agentId, records, state) => buildClaimsWorldView(state, records, [], {
         now: new Date().toISOString(),
-        taskStatus: (id) => ((hive.allTasks() as { tasks?: Array<{ id: string; status: string }> }).tasks ?? []).find((t) => t.id === id)?.status ?? null,
+        taskStatus: (id) => (hive.taskById(id) as { status?: string } | undefined)?.status ?? null,   // SCALE-TASKS-MAP: O(1), not a .find over every card
         fileExists: () => true, commitExists: () => true, fileChangedSince: () => false, cardOutcomes: {},
       }),
       log: (row) => hive.appendLog(row),
@@ -1745,7 +1745,7 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
         headAnchor: new FileHeadAnchorStore(join(app.getPath('userData'), HEAD_ANCHOR_FILE)),
         log: (row) => hive.appendLog(row),
         // R1 (Jim R-2): a claim whose task TTL has ended is not live for an exact-duplicate sighting.
-        taskStatus: (id) => ((hive.allTasks() as { tasks?: Array<{ id: string; status: string }> }).tasks ?? []).find((t) => t.id === id)?.status ?? null,
+        taskStatus: (id) => (hive.taskById(id) as { status?: string } | undefined)?.status ?? null,   // SCALE-TASKS-MAP: O(1), not a .find over every card
         onAppend: (agentId, id, rec) => {
           // CL-READERWATCHER: a first claim of an unimported reader or writer starts its import now.
           try { const at = hive.root(); if (at && agentId !== DERIVED_AGENT_ID && memoryMdReplaced(claimLevel(agentId)) && !importSettled(at, agentId)) void claimsImportReady().then(() => readerWatchers.ensureImported(agentId)); } catch (e) { hive.appendLog({ kind: 'claims-watch-error', agentId, error: String(e).slice(0, 160) }); }
