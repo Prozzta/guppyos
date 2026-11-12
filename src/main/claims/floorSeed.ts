@@ -7,7 +7,7 @@
  * A seeded floor without `derivedRepo` resolves its repo on every pass (floorRepo): the project folder
  * may be registered after the hive was made, or become a git repo later (CLAIMS-DEFAULT-ON-103).
  */
-import { existsSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import type { LedgerLevel } from '../../shared/claims';
 import { SOURCES_CONFIG_FILE } from '../nativeMemory/sources';
@@ -47,5 +47,24 @@ export function seedFloorSources(hiveRoot: string, projectFolder: string | null 
   const file = join(hiveRoot, SOURCES_CONFIG_FILE);
   if (existsSync(file)) return false;
   writeFileSync(file, `${JSON.stringify(newFloorSources(projectFolder, isRepo), null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
+  return true;
+}
+
+/** Enable the default for a legacy floor, preserving every explicit agent entry and unknown field. */
+export function enableLedgerDefault(hiveRoot: string): boolean {
+  const file = join(hiveRoot, SOURCES_CONFIG_FILE);
+  let source: Record<string, unknown> = { topLevel: [], include: {}, ledger: {} };
+  if (existsSync(file)) {
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object');
+      source = parsed as Record<string, unknown>;
+    } catch { throw new Error('memory-sources.json is invalid; claims bootstrap did not change it'); }
+  }
+  if (source.ledgerDefault === NEW_FLOOR_LEDGER_DEFAULT) return false;
+  source.ledgerDefault = NEW_FLOOR_LEDGER_DEFAULT;
+  const temp = `${file}.${process.pid}.tmp`;
+  writeFileSync(temp, `${JSON.stringify(source, null, 2)}\n`, 'utf8');
+  renameSync(temp, file);
   return true;
 }

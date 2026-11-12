@@ -25,7 +25,7 @@ require.cache[electron] = { id: electron, filename: electron, loaded: true, expo
 const loadTs = require('./load-ts.cjs');
 const { manifestEntry, effectiveLevel, DERIVED_AGENT_ID } = loadTs('src/shared/claims.ts');
 const { readSourcesConfig, discoverSources, SOURCES_CONFIG_FILE } = loadTs('src/main/nativeMemory/sources.ts');
-const { newFloorSources, seedFloorSources, derivedRepoFor, floorRepo } = loadTs('src/main/claims/floorSeed.ts');
+const { newFloorSources, seedFloorSources, enableLedgerDefault, derivedRepoFor, floorRepo } = loadTs('src/main/claims/floorSeed.ts');
 const { HiveManager } = loadTs('src/main/hive.ts');
 const { createLedgerUi } = loadTs('src/main/claims/ledgerUi.ts');
 const cfg = loadTs('src/main/config.ts');
@@ -105,6 +105,17 @@ test('(g) an existing hive is never re-seeded: ensureHive again, or a hand-writt
   h2.setNewHiveSeed((r) => { seedFloorSources(r, null); });
   h2.ensureHive();
   assert.equal(readSourcesConfig(h2.root()).ledgerDefault, undefined);
+});
+
+test('legacy bootstrap enables the writer default without changing explicit entries or unknown fields', () => {
+  const root = tmp('legacy-enable'); const file = path.join(root, SOURCES_CONFIG_FILE);
+  const original = { topLevel: ['NOTE.md'], include: {}, ledger: { 'syn-off': 'off', 'syn-reader': 'reader' }, future: { kept: true } };
+  fs.writeFileSync(file, JSON.stringify(original));
+  assert.equal(enableLedgerDefault(root), true);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { ...original, ledgerDefault: 'writer' });
+  assert.equal(enableLedgerDefault(root), false, 'a rerun is a no-op');
+  fs.writeFileSync(file, '{broken');
+  assert.throws(() => enableLedgerDefault(root), /did not change/);
 });
 
 test('(h) main and the worker discovery give one level for the same inputs', () => {
