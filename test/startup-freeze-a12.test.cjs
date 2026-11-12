@@ -396,3 +396,45 @@ test('A16: a tasks.json change before start() runs no cards pass; after start() 
   await fire();
   assert.equal(writers, 2, 'and after stop, as before');
 });
+
+// god db1b97 (keep A16): a card change made before start() (during the mail-card catch-up) is not lost: the first pass after start() writes it.
+test('A16: a card change made before start() lands in the first pass after start(), as a pass with the change already in would', async () => {
+  const many = (tag) => ({ tasks: Array.from({ length: 6 }, (_, i) => ({ id: `SYN-G${i}`, title: `Gate card ${i} ${tag}`, status: 'done', assignee: 'agent-x', dependsOn: [], priority: 1,
+    createdAt: '2026-10-01T00:00:00Z', result: `gate result ${i} ${tag}`, notes: `gate note ${i} ${tag}` })) });
+  const mk = () => {
+    const root = hiveDir();
+    const store = new ClaimStore({ hiveRoot: root, keys: new SandboxKeyProvider(), keyRecord: new FileLedgerKeyRecord(path.join(`${root}-ud`, KEY_RECORD_FILE)), log: () => {}, alert: () => {} });
+    STORES.push(store);
+    return { root, store, deps: { store, derive: (records) => derive(records, FROZEN, { r4: false }), log: () => {} } };
+  };
+  const live = mk();
+  const ref = mk();
+  // Both hives have run once with the old cards (a previous app run).
+  for (const x of [live, ref]) { fs.writeFileSync(path.join(x.root, 'tasks.json'), JSON.stringify(many('old'))); await W.runDerivedBackfill(x.deps, input(x.root)); }
+  const timers = [];
+  const dl = new DerivedLive({
+    hiveRoot: () => live.root, writer: () => live.deps, enabled: () => true, repo: () => null, changelog: () => CHANGELOG, log: () => {},
+    setTimeout: (fn) => { timers.push(fn); return { unref() {} }; }, setInterval: () => ({ unref() {} }),
+  });
+  const fire = async () => { const fns = timers.splice(0); for (const fn of fns) fn(); await dl.run('probe', async () => {}); };
+  // The change lands while the catch-up runs (before start): no pass now.
+  fs.writeFileSync(path.join(live.root, 'tasks.json'), JSON.stringify(many('new')));
+  const before = live.store.readLedger(DERIVED_AGENT_ID).records.length;
+  dl.cardsChanged();
+  await fire();
+  assert.equal(live.store.readLedger(DERIVED_AGENT_ID).records.length, before, 'nothing written before start');
+  dl.start();
+  await fire();   // the start timer: the full pass
+  dl.stop();
+  fs.writeFileSync(path.join(ref.root, 'tasks.json'), JSON.stringify(many('new')));
+  await W.runDerivedBackfill(ref.deps, input(ref.root));
+  const liveNow = (x) => {
+    const r = x.store.readLedger(DERIVED_AGENT_ID).records;
+    const st = derive(r, FROZEN, { r4: false });
+    return r.filter((c) => c.t === 'claim' && st.claims[c.id].status === 'live').map((c) => [c.key, c.text]).sort();
+  };
+  const got = liveNow(live);
+  // Decision notes are keyed by their own text (a history), so the old ones stay live in both; every new value is in.
+  for (let i = 0; i < 6; i++) for (const w of [`gate result ${i} new`, `gate note ${i} new`]) assert.ok(got.some(([, t]) => t.includes(w)), `${w} is live`);
+  assert.deepEqual(got, liveNow(ref), 'the first pass after start() equals a pass with the change already made');
+});
