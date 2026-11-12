@@ -71,7 +71,7 @@ export function ClaimLedgerSettings() {
     try { setLevelMsg(said(await api.setLevel(level), `The ledger level is now ${level}.`)); } finally { setBusy(null); void refresh(); }
   };
   const bootstrap = async () => {
-    setBusy('bootstrap'); setBootstrapMsg({ text: 'Creating the claims ledger. Floor work is paused while each idle agent imports...', ok: true });
+    setBusy('bootstrap'); setBootstrapMsg({ text: 'Creating the claims ledger. Agents keep working; busy agents are retried on the next run...', ok: true });
     const poll = setInterval(() => { void api.bootstrapStatus().then((s) => { if (s.ok) setBootstrapMsg({ text: s.line.includes('running') ? bootstrapProgress(s.state) : s.line, ok: true }); }).catch(() => undefined); }, 800);
     try {
       const r = await api.bootstrap();

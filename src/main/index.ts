@@ -20,7 +20,7 @@ import { importAtStart } from './claims/startupImport';
 import { ClaimsBootstrap, loadBootstrapMarker, saveBootstrapMarker } from './claims/bootstrap';
 import { DerivedLive } from './claims/derivedLive';
 import { startAfterMailCardCatchUp, startupMailCardCatchUp } from './mailCards';
-import { enableLedgerDefault, floorRepo, seedFloorSources } from './claims/floorSeed';
+import { enableLedgerAgent, enableLedgerDefault, floorRepo, seedFloorSources } from './claims/floorSeed';
 import { makeW6Append } from './claims/w6Append';
 import { memoryMdReplaced, READER_WATCH_SYNC_MS, ReaderWatchers } from './claims/readerWatch';
 import { importSettled, shadowImport } from './claims/ingest';
@@ -2160,7 +2160,8 @@ function claimsBootstrapFor(root: string, store: ClaimStore): ClaimsBootstrap {
   const job = new ClaimsBootstrap({
     now: () => Date.now(),
     activeAgents: () => Object.entries(hive.registry().agents).filter(([, a]) => a.archived !== true).map(([id]) => id),
-    isIdle: (agentId) => workerWake.state(agentId).lifecycle === 'idle',
+    isIdle: (agentId, requester) => agentId === requester || workerWake.state(agentId).lifecycle === 'idle',
+    promote: (agentId) => { enableLedgerAgent(root, agentId); },
     seedDefault: () => { enableLedgerDefault(root); },
     importOne: async (agentId) => {
       const report = await shadowImport({ hiveRoot: root, append: makeW6Append(store), read: (a) => store.readLedger(a), log: (row) => hive.appendLog(row) }, agentId, { settle: true });
@@ -2181,7 +2182,7 @@ async function runClaimsBootstrap(lockOwner: string): Promise<{ ok: boolean; lin
   const lease = heavyLock.acquire(lockOwner, { heavy: true, kind: 'bench', why: 'claims bootstrap', exclusive: true }, 'claims bootstrap', callId, false);
   if (!lease.allow) return { ok: false, line: `refused: ${lease.reason}`, state: job.status() };
   try {
-    const state = await job.run();
+    const state = await job.run(lockOwner);
     return { ok: true, line: 'claims bootstrap complete', state };
   } catch (e) {
     return { ok: false, line: `refused: ${String(e).slice(0, 160)}`, state: job.status() };

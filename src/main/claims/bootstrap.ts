@@ -43,8 +43,10 @@ export function saveBootstrapMarker(hiveRoot: string, state: BootstrapState): vo
 export interface BootstrapDeps {
   now: () => number;
   activeAgents: () => string[];
-  isIdle: (agentId: string) => boolean;
-  /** Writes ledgerDefault writer while preserving all explicit entries. Idempotent. */
+  isIdle: (agentId: string, requester?: string) => boolean;
+  /** Promotes one agent only after its S0 import completed. */
+  promote: (agentId: string) => void;
+  /** Writes ledgerDefault writer only once every legacy agent is settled. */
   seedDefault: () => void;
   /** S0 through the app's live ClaimStore; it must never be a second process. */
   importOne: (agentId: string) => Promise<{ refused?: string[] }>;
@@ -61,19 +63,19 @@ export class ClaimsBootstrap {
   status(): BootstrapState | null { return this.d.load(); }
 
   /** One serial, restart-safe pass. Busy agents receive a receipt and are retried on a later run. */
-  async run(): Promise<BootstrapState> {
+  async run(requester?: string): Promise<BootstrapState> {
     if (this.running) throw new Error('claims bootstrap is already running');
     this.running = true;
     try {
       const now = this.d.now();
       const state = this.d.load() ?? { version: 1, startedAt: now, updatedAt: now, agents: {} };
       // The marker is intentionally retained: no completed ledger segment is ever deleted.
-      this.d.seedDefault();
-      for (const agentId of [...new Set(this.d.activeAgents())].sort()) {
+      const agents = [...new Set(this.d.activeAgents())].sort();
+      for (const agentId of agents) {
         const prior = state.agents[agentId];
         if (prior?.state === 'done') continue;
         // Recheck immediately before this agent's import, not merely once per pass.
-        if (!this.d.isIdle(agentId)) {
+        if (!this.d.isIdle(agentId, requester)) {
           state.agents[agentId] = { state: 'skipped', at: this.d.now(), reason: 'agent is busy' };
           state.updatedAt = this.d.now(); this.d.save(state);
           this.d.log({ kind: 'claims-bootstrap-skip', agentId, reason: 'busy' });
@@ -81,6 +83,7 @@ export class ClaimsBootstrap {
         }
         try {
           const result = await this.d.importOne(agentId);
+          this.d.promote(agentId);
           state.agents[agentId] = { state: 'done', at: this.d.now(), ...(result?.refused?.length ? { reason: `refused ${result.refused.length} legacy entries` } : {}) };
           this.d.log({ kind: 'claims-bootstrap-import', agentId, ok: true });
         } catch (e) {
@@ -89,6 +92,9 @@ export class ClaimsBootstrap {
         }
         state.updatedAt = this.d.now(); this.d.save(state);
       }
+      // The floor default would hide every remaining legacy memory.md.  Set it only when there
+      // are no busy/failed receipts; completed agents were promoted individually above.
+      if (agents.every((agentId) => state.agents[agentId]?.state === 'done')) this.d.seedDefault();
       return state;
     } finally { this.running = false; }
   }

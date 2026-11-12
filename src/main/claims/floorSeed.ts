@@ -68,3 +68,27 @@ export function enableLedgerDefault(hiveRoot: string): boolean {
   renameSync(temp, file);
   return true;
 }
+
+/** Promote one legacy-floor agent only after its S0 import has settled.  Bootstrap deliberately
+ * avoids the floor default until every agent has settled, so a busy agent's legacy markdown stays
+ * searchable rather than being hidden by an empty ledger. */
+export function enableLedgerAgent(hiveRoot: string, agentId: string): boolean {
+  const file = join(hiveRoot, SOURCES_CONFIG_FILE);
+  let source: Record<string, unknown> = { topLevel: [], include: {}, ledger: {} };
+  if (existsSync(file)) {
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object');
+      source = parsed as Record<string, unknown>;
+    } catch { throw new Error('memory-sources.json is invalid; claims bootstrap did not change it'); }
+  }
+  const ledger = source.ledger && typeof source.ledger === 'object' && !Array.isArray(source.ledger)
+    ? { ...(source.ledger as Record<string, unknown>) } : {};
+  if (ledger[agentId] === NEW_FLOOR_LEDGER_DEFAULT) return false;
+  ledger[agentId] = NEW_FLOOR_LEDGER_DEFAULT;
+  source.ledger = ledger;
+  const temp = `${file}.${process.pid}.tmp`;
+  writeFileSync(temp, `${JSON.stringify(source, null, 2)}\n`, 'utf8');
+  renameSync(temp, file);
+  return true;
+}

@@ -109,6 +109,9 @@ extraResources:
   # Electron-as-Node from <hive>/bin/ledger.
   - from: resources/ledger-cli.cjs
     to: ledger-cli.cjs
+  # CLAIMS-CREATE-LEDGER: god's `claims bootstrap` command, run on Electron-as-Node from <hive>/bin/claims.
+  - from: resources/claims-cli.cjs
+    to: claims-cli.cjs
   # GOD-TERMINAL-CONTROL: god's `term` command (read/type/keys/send another agent's terminal), run on
   # Electron-as-Node from <hive>/bin/term, on god's PATH only.
   - from: resources/term-cli.cjs
