@@ -154,7 +154,8 @@ const within = (p, ms) => Promise.race([p, new Promise((r) => setTimeout(() => r
 function start(args, url) {
   const env = { ...process.env };
   for (const k of ['NODE_TEST_CONTEXT', 'NODE_OPTIONS', 'GUPPY_TEST_RUN', 'HIVE_LEDGER_URL']) delete env[k];
-  Object.assign(env, { NODE_OPTIONS: `--require "${PRELOAD.replace(/\\/g, '/')}"`, HIVE_LEDGER_URL: url, HIVE_ROOT: JAIL, AGENT_ID: 'a' });
+  // npm 11 otherwise writes node-compile-cache under os.tmpdir() outside JAIL.
+  Object.assign(env, { NODE_DISABLE_COMPILE_CACHE: '1', NODE_OPTIONS: `--require "${PRELOAD.replace(/\\/g, '/')}"`, HIVE_LEDGER_URL: url, HIVE_ROOT: JAIL, AGENT_ID: 'a' });
   const child = spawn(args[0], args.slice(1), { cwd: FIX, env, windowsHide: true });
   let stderr = '';
   child.stderr.on('data', (d) => { stderr += d; });
