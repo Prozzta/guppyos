@@ -13,7 +13,7 @@ const original = fs.readFileSync(file, 'utf8');
 const from = 'try { rateNow = jobRate({ env }); }';
 if (original.indexOf(from) < 0 || original.indexOf(from) !== original.lastIndexOf(from)) throw new Error('mutant anchor missing or ambiguous');
 checkAnchors(root, [{ name: 'self-query ignored', file, from }]);
-const run = () => spawnSync(process.execPath, ['--test', '--test-name-pattern', 'self-queried hard-capped', test], { cwd: root, encoding: 'utf8', windowsHide: true });
+const run = () => spawnSync(process.execPath, ['--test', '--test-reporter=tap', '--test-name-pattern', 'self-queried hard-capped', test], { cwd: root, encoding: 'utf8', windowsHide: true });
 if (run().status !== 0) throw new Error('baseline red');
 try {
   mutateFile(root, file, original, original.replace(from, 'try { rateNow = 0; }'));

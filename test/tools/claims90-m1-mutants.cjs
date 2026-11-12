@@ -181,7 +181,7 @@ for (const [name, file, from, to] of selected) {
   try {
     mutateAny(file, abs, original, mutated);
     const t0 = Date.now();
-    const r = spawnSync(process.execPath, ['--test', ...SUITES], { cwd: ROOT, encoding: 'utf8', timeout: 300_000, maxBuffer: 64 * 1024 * 1024 });
+    const r = spawnSync(process.execPath, ['--test', '--test-reporter=tap', ...SUITES], { cwd: ROOT, encoding: 'utf8', timeout: 300_000, maxBuffer: 64 * 1024 * 1024 });
     const secs = Math.round((Date.now() - t0) / 1000);
     const fails = (String(r.stdout).match(/^# fail (\d+)/m) || [])[1] ?? null;
     // A run that never printed its summary (the 300 s timeout, a signal, a buffer overflow) proves nothing about

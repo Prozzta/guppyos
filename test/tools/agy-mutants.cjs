@@ -248,7 +248,7 @@ for (const m of chosen) {
   let failed = [];
   let ran = false;
   try {
-    const r = spawnSync(process.execPath, ['--test', ...m.tests], {
+    const r = spawnSync(process.execPath, ['--test', '--test-reporter=tap', ...m.tests], {
       cwd: REPO, encoding: 'utf8', timeout: 900_000
     });
     ran = true;
