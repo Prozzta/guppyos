@@ -14,6 +14,7 @@ import { App } from '../../../src/renderer/src/App';
 import { useStore } from '../../../src/renderer/src/store/store';
 import { registerPackThemes } from '../../../src/shared/projectTheme';
 import { BOUNCE_SIZE } from './tes-scene-bounce-size';
+import { Camera } from '../../../src/renderer/src/scene/office/Camera';
 
 declare global {
   interface Window {
@@ -61,9 +62,20 @@ const config = { onboardingComplete: true, harnessHome: home, recentHomes: [], o
   }
 });
 
-type Frame = { t: number; n: number; ox: number; oy: number; paneTop: number; paneH: number; canvasTop: number; canvasH: number };
+type Frame = { t: number; kick: number; n: number; ox: number; oy: number; paneTop: number; paneH: number; canvasTop: number; canvasH: number };
 let floorApp: any = null;
 let rec: Frame[] | null = null;
+// LOAD-FLAKES-105: each frame carries the select nudge's pull on the camera THIS tick (offset x ease, as
+// Camera.update applies it), so the test can require a frame that WOULD show a bounce from what was drawn,
+// not from wall-clock windows a loaded machine does not keep.
+const nudgePull = new Map<unknown, number>();
+const realUpdate = Camera.prototype.update;
+Camera.prototype.update = function (this: any, dt: number) {
+  const on = this.nudgeDuration > 0;
+  const t = on ? Math.min((this.nudgeElapsed + Math.max(0, Number.isFinite(dt) ? dt : 0)) / this.nudgeDuration, 1) : 1;
+  realUpdate.call(this, dt);
+  nudgePull.set(this.container, on ? Math.hypot(this.nudgeOffsetX ?? 0, this.nudgeOffsetY ?? 0) * (1 - t) : 0);
+};
 const proto = Application.prototype as unknown as { render: () => void };
 const realRender = proto.render;
 proto.render = function (this: any) {
@@ -73,7 +85,7 @@ proto.render = function (this: any) {
     const r = this.renderer.resolution, w = this.__tesScene.world;
     const canvas = this.canvas as HTMLCanvasElement, cr = canvas.getBoundingClientRect();
     const pr = canvas.parentElement!.parentElement!.getBoundingClientRect();
-    rec.push({ t: Math.round(performance.now()), n: w.scale.x * r, ox: Math.round(w.x * r), oy: Math.round(w.y * r), paneTop: pr.top, paneH: pr.height, canvasTop: cr.top, canvasH: cr.height });
+    rec.push({ t: Math.round(performance.now()), kick: Math.round((nudgePull.get(w) ?? 0) * w.scale.x * r * 10) / 10, n: w.scale.x * r, ox: Math.round(w.x * r), oy: Math.round(w.y * r), paneTop: pr.top, paneH: pr.height, canvasTop: cr.top, canvasH: cr.height });
   }
 };
 
@@ -96,14 +108,15 @@ window.__harnessRun = async () => {
     await window.harness.capture(W, H);
     await act(async () => { useStore.getState().setSidebarWidth(sidebar); });
     await act(async () => { await sleep(6000); });
-    const clicks: Array<{ who: string; found: boolean; selected: string | null; frames: Frame[] }> = [];
+    const clicks: Array<{ who: string; found: boolean; selected: string | null; clickAt: number; frames: Frame[] }> = [];
     for (const who of ['Jim', 'Creed', 'Andy', 'Dwight']) {
       rec = [];
       await act(async () => { await sleep(300); });
       const el = card(who);
+      const clickAt = Math.round(performance.now());
       await act(async () => { el?.click(); });
       await act(async () => { await sleep(2500); });
-      clicks.push({ who, found: !!el, selected: useStore.getState().selectedId, frames: rec });
+      clicks.push({ who, found: !!el, selected: useStore.getState().selectedId, clickAt, frames: rec });
       rec = null;
     }
     const shot = await window.harness.capture(W, H);
