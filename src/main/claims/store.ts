@@ -1081,6 +1081,21 @@ export class ClaimStore {
     return this.keyMissing && s.segments > 0 ? { brokenAt: s.lastId ?? 'key', reason: 'key-missing' } : null;
   }
 
+  /**
+   * CLAIMS-READONLY-RETRY-STORM: why an append to this agent's ledger would be refused for the
+   * ledger's own state, or null: the agent's chain is read-only (a break, or a key that does not
+   * verify it), or no key loads while ledgers exist. The checks appendNow makes before it writes,
+   * asked without writing, so a writer (derivedWriter) stops instead of being refused per record.
+   * It changes nothing: the store still refuses every such append itself.
+   */
+  appendBlocked(agentId: string): ChainBreak | null {
+    let s: AgentState;
+    try { s = this.current(agentId); } catch { return null; } // unreadable: the append reports it
+    if (s.readOnly) return s.readOnly;
+    if (!this.keys() && this.anySegmentAnywhere()) return { brokenAt: 'key', reason: 'key-missing' };
+    return null;
+  }
+
   /** What the store knows about a record id of this agent (W1's endpoint: a retract's kind). */
   lookup(agentId: string, id: string): Known | null {
     return this.current(agentId).known.get(id) ?? null;
