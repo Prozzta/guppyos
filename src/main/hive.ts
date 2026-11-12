@@ -859,6 +859,7 @@ export class HiveManager {
   /** TASKS-JSON-SPLIT: the hourly archive pass and the archive reader's cache. */
   private archiveTimer: ReturnType<typeof setInterval> | null = null;
   private archiveCache: { root: string; stamp: string; cards: Map<string, Record<string, unknown>> } | null = null;
+  private allTasksCache: { root: string | null; hot: unknown[]; archived: Map<string, Record<string, unknown>> | null; value: { tasks: unknown[] }; byId: Map<string, unknown> | null } | null = null;
   /** C90-MAILCARD: the per-card mail index of the current hive root (mailCards.ts). */
   private mailCardIndex: MailCardIndex | null = null;
   /** ZT-I3: watches tasks.json (never writes it) and keeps the per-card sidecar. */
@@ -4183,11 +4184,38 @@ export class HiveManager {
   /** TASKS-JSON-SPLIT: hot plus archive (hot wins), for readers that need any card ever made:
    *  id uniqueness, the ledger route, claim/webhook status, search, the archived board view. */
   allTasks(): { tasks: unknown[] } {
+    return this.allTasksView().value;
+  }
+
+  /** SCALE-TASKS-MAP: one card by id, from any card ever made (hot wins; the first occurrence,
+   *  as a `.find` over allTasks gives). O(1) while hot and archive are unchanged. */
+  taskById(id: string): unknown {
+    const view = this.allTasksView();
+    if (!view.byId) {
+      const byId = new Map<string, unknown>();
+      for (const c of view.value.tasks) {
+        const cid = c && typeof c === 'object' ? (c as { id?: unknown }).id : undefined;
+        if (typeof cid === 'string' && !byId.has(cid)) byId.set(cid, c);
+      }
+      view.byId = byId;
+    }
+    return view.byId.get(id);
+  }
+
+  /** SCALE-TASKS-MAP: the merged list is rebuilt only when the hot ledger object (shared and
+   *  re-read only on a file change) or the archive (cached by its stamp) is a new object; until
+   *  then every caller gets the same frozen list, so a per-claim status lookup is not O(all cards). */
+  private allTasksView(): { value: { tasks: unknown[] }; byId: Map<string, unknown> | null } {
     const root = this.root();
     const hot = (this.tasks() as { tasks?: unknown } | null)?.tasks;
     const list = Array.isArray(hot) ? hot : [];
-    if (!root) return { tasks: list };
-    return { tasks: mergeHotCold(list, this.archived(root)) };
+    const archived = root ? this.archived(root) : null;
+    const c = this.allTasksCache;
+    if (c && c.root === root && c.hot === list && c.archived === archived) return c;
+    const merged = archived ? mergeHotCold(list, archived) : list;
+    const value = { tasks: Object.isFrozen(merged) ? merged : Object.freeze(merged) as unknown[] };
+    this.allTasksCache = { root, hot: list, archived, value, byId: null };
+    return this.allTasksCache;
   }
 
   /** tasks-revive: move one archived card back to hot unchanged. False when it is not archived. */

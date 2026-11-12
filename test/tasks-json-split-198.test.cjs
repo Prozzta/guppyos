@@ -281,12 +281,72 @@ test('tasks-revive: refuses an id not archived, says so for a hot id, and goes t
   assert.equal(A.readArchive(r.root).has('R1'), true, 'the CLI never edits the files itself');
 });
 
+// SCALE-TASKS-MAP (Jim's STARTUP-SCALE-YEAR audit A13): a per-claim status lookup was a .find over a
+// fresh merge of every card ever made, on every call. The merged view is now rebuilt only when hot or
+// the archive changed, and taskById is a Map lookup over it.
+test('SCALE-TASKS-MAP: allTasks is one frozen view until hot or the archive changes; taskById = .find over it', (t) => {
+  const r = rig(t, [old('A1'), card('LIVE'), old('A2'), card('DUPE', { result: 'first' }), card('DUPE', { result: 'second' })]);
+  r.hive.archivePass(NOW);
+  const v1 = r.hive.allTasks();
+  assert.equal(r.hive.allTasks(), v1, 'unchanged hot and archive: the same view, not a new merge');
+  assert.ok(Object.isFrozen(v1.tasks), 'the shared list is frozen: no caller can mutate it under the others');
+  for (const id of ['A1', 'A2', 'LIVE', 'DUPE', 'NONE']) {
+    assert.equal(r.hive.taskById(id), v1.tasks.find((c) => c.id === id), `taskById(${id}) is the first match, as .find gave`);
+  }
+  assert.equal(r.hive.taskById('DUPE').result, 'first', 'a duplicate id resolves to its first occurrence');
+  // a hot change through the API: a new view with the new status
+  assert.ok(r.hive.patchTask('LIVE', { status: 'doing' }));
+  const v2 = r.hive.allTasks();
+  assert.notEqual(v2, v1);
+  assert.equal(r.hive.taskById('LIVE').status, 'doing');
+  // an archive change from outside the app (the CLI, a crash replay): a new view with the archived card
+  A.appendArchived(r.root, [old('A3')], NOW);
+  assert.equal(r.hive.taskById('A3')?.id, 'A3', 'the archive append shows');
+  assert.notEqual(r.hive.allTasks(), v2);
+  // a hot edit from outside the app (an agent's python edit), read fresh: the view follows it
+  fs.writeFileSync(r.hotPath, JSON.stringify({ tasks: [...r.hot(), card('NEW')] }, null, 2));
+  r.hive.tasks(true);
+  assert.equal(r.hive.taskById('NEW')?.id, 'NEW', 'a direct edit of hot shows');
+});
+
+test('SCALE-TASKS-MAP: a second lookup reads no file; it only stats the hot ledger and the archive months (fs spy)', (t) => {
+  const r = rig(t, [old('A1'), card('LIVE'), old('A2')]);
+  r.hive.archivePass(NOW);
+  r.hive.taskById('A1');   // first sight: reads hot and the archive
+  const seen = { read: [], stat: [], dir: [] };
+  const orig = { readFileSync: fs.readFileSync, statSync: fs.statSync, readdirSync: fs.readdirSync, openSync: fs.openSync };
+  fs.readFileSync = function (p, ...a) { seen.read.push(String(p)); return orig.readFileSync.call(this, p, ...a); };
+  fs.openSync = function (p, ...a) { seen.read.push(String(p)); return orig.openSync.call(this, p, ...a); };
+  fs.statSync = function (p, ...a) { seen.stat.push(String(p)); return orig.statSync.call(this, p, ...a); };
+  fs.readdirSync = function (p, ...a) { seen.dir.push(String(p)); return orig.readdirSync.call(this, p, ...a); };
+  let control = [];
+  try {
+    for (let i = 0; i < 50; i += 1) { r.hive.taskById('A1'); r.hive.taskById('LIVE'); r.hive.allTasks(); }
+    // positive control: the spy sees hive.ts's own fs calls (else this test would pass vacuously)
+    const steady = seen.read.splice(0);
+    A.appendArchived(r.root, [old('A9')], NOW);
+    seen.read.length = 0;
+    assert.equal(r.hive.taskById('A9')?.id, 'A9');
+    control = seen.read.splice(0);
+    seen.read.push(...steady);
+  } finally { Object.assign(fs, orig); }
+  assert.ok(control.some((p) => p.endsWith('2026-10.jsonl')), `the spy sees the archive re-read after a change: ${control}`);
+  assert.deepEqual(seen.read, [], 'no card file is read or opened again');
+  const archiveDir = path.join(r.root, 'tasks-archive');
+  const other = seen.stat.filter((p) => p !== r.hotPath && !p.startsWith(archiveDir));
+  assert.deepEqual(other, [], `only the hot ledger and the archive months are stat'ed: ${other}`);
+  assert.ok(seen.dir.every((p) => p === archiveDir), `only the archive folder is listed: ${seen.dir}`);
+});
+
 test('readers that need any card ever made read allTasks (source pins)', () => {
   const ix = fs.readFileSync(path.join(__dirname, '..', 'src/main/index.ts'), 'utf8');
   const hv = fs.readFileSync(path.join(__dirname, '..', 'src/main/hive.ts'), 'utf8');
   // A13: the ledger route (a patch or message.card may name an archived card)
   assert.match(ix, /readTasks: \(\) => \{\s*const t = hive\.allTasks\(\)\.tasks;/);
-  assert.equal(ix.split('taskStatus: (id) => ((hive.allTasks()').length - 1, 2, 'both claim world views');
+  // SCALE-TASKS-MAP: both claim world views look a card up by id over the SAME merged view.
+  assert.equal(ix.split('taskStatus: (id) => (hive.taskById(id) as { status?: string } | undefined)?.status ?? null,').length - 1, 2, 'both claim world views');
+  assert.match(hv, /allTasks\(\): \{ tasks: unknown\[\] \} \{\s*return this\.allTasksView\(\)\.value;/, 'allTasks is the merged view');
+  assert.match(hv, /taskById\(id: string\): unknown \{\s*const view = this\.allTasksView\(\);/, 'taskById reads the same merged view (hot wins, archive included)');
   assert.match(ix, /tasks: \(\) => \(hive\.allTasks\(\) as \{ tasks\?: TaskRow\[\] \}\)\.tasks \?\? \[\],/);
   assert.match(ix, /const wanted = Buffer\.from\(hash\);[\s\S]{0,200}hive\.allTasks\(\) as \{ tasks\?: HiveTask\[\] \}/);
   assert.match(ix, /ipcMain\.handle\('hive:allTasks', \(\) => hive\.allTasks\(\)\);/);
