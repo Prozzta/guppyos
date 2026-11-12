@@ -747,11 +747,12 @@ function watchConfig(p: string): void {
   configWatcher?.close();
   configWatcher = null;
   try {
+    // The folder went (or an error): forget THIS watcher, so the next read starts a new one.
+    const mine = { path: p, close: () => w.close() };
     const w = watchDirectorySafely(dirname(p), (_event, name) => {
       if (!name || String(name) === basename(p)) { if (configCache?.path === p) configCache.checkedAt = -Infinity; }
-    });
-    w.on('error', () => { w.close(); if (configWatcher?.path === p) configWatcher = null; });
-    configWatcher = { path: p, close: () => w.close() };
+    }, () => { if (configWatcher === mine) configWatcher = null; });
+    configWatcher = mine;
   } catch { /* no watcher: the stat revalidate still bounds the staleness */ }
 }
 
