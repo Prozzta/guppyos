@@ -16,7 +16,7 @@ function write(file, text) {
   fs.writeFileSync(file, text);
 }
 
-test('cut command scrubs cwd-search hardening for literal npm ci and the raw Windows build', () => {
+test('cut command scrubs cwd-search hardening and provisions the pinned model before each Windows build', () => {
   assert.match(cut, /key\.toLowerCase\(\) === 'nodefaultcurrentdirectoryinexepath'/);
   assert.match(cut, /run\(npm, \['ci'\]\)/);
   assert.equal(pkg.scripts['cut:win'], 'node scripts/cut-cmd-natives.cjs');
@@ -28,7 +28,17 @@ test('cut command scrubs cwd-search hardening for literal npm ci and the raw Win
     encoding: 'utf8', env: { ...process.env, nOdEfAuLtCuRrEnTdIrEcToRyInExEpAtH: '1' }
   });
   assert.equal(r.status, 0, r.stderr);
-  assert.deepEqual(JSON.parse(r.stdout), { npmCi: ['ci'], inheritedNoDefaultCurrentDirectoryInExePath: false });
+  assert.deepEqual(JSON.parse(r.stdout), {
+    npmCi: ['ci'],
+    modelProvision: [path.join('scripts', 'fetch-memory-model.cjs')],
+    inheritedNoDefaultCurrentDirectoryInExePath: false
+  });
+  const provision = "run(process.execPath, [path.join('scripts', 'fetch-memory-model.cjs')]);";
+  const rawBuild = "run(npm, ['run', 'dist:win:raw']);";
+  assert.equal((cut.match(new RegExp(provision.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length, 1);
+  assert.ok(cut.indexOf(provision) < cut.indexOf(rawBuild));
+  assert.match(cut, /--dist-only'\)\) \{\s+provisionModel\(\);\s+run\(npm, \['run', 'dist:win:raw'\]\);/);
+  assert.match(cut, /run\(npm, \['ci'\]\);\s+provisionModel\(\);\s+run\(npm, \['run', 'dist:win:raw'\]\);/);
   assert.match(cut, /release-markers\.cjs/);
 });
 
