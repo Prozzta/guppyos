@@ -24,6 +24,19 @@ export interface BlobFaceRendererDeps {
   /** The hidden, sandboxed, network-less render window. */
   createWindow(): FaceRenderWindow;
   log?(row: Record<string, unknown>): void;
+  /** Tests: the per-step cap (BLOB_RENDER_STEP_MS). */
+  stepMs?: number;
+}
+
+/** Jim SHOULD (dacbb59f): the cap on each window step (load, raster). A raster that never settles
+ *  (a hung image decode, a wedged renderer) fails the render, so the window is still destroyed and
+ *  a Save that awaits the render still answers. */
+export const BLOB_RENDER_STEP_MS = 5_000;
+
+function capped<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const cap = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`${what} did not settle in ${ms} ms`)), ms); });
+  return Promise.race([p, cap]).finally(() => clearTimeout(timer));
 }
 
 /** The SVG for one face, from blobatar (ESM: loaded on first use, never at startup). */
@@ -87,8 +100,9 @@ export class BlobFaceRenderer {
       for (const face of BLOB_FACES) for (const size of BLOB_RENDER_SIZES) jobs.push([keyOf(face, size), await this.d.svgFor(face, size), size]);
       win = this.d.createWindow();
       this.stats.windows += 1; this.stats.open += 1;
-      await win.loadURL('about:blank');
-      const out = await win.executeJavaScript(rasterScript(jobs));
+      const step = this.d.stepMs ?? BLOB_RENDER_STEP_MS;
+      await capped(win.loadURL('about:blank'), step, 'the render window load');
+      const out = await capped(win.executeJavaScript(rasterScript(jobs)), step, 'the raster script');
       const map = new Map<string, string>();
       for (const [key] of jobs) {
         const v = (out as Record<string, unknown> | null)?.[key];
