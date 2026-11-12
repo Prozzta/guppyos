@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { loadTs } = require('./tools/load-ts.cjs');
+const { loadTs } = require('./load-ts.cjs');
 const { ClaimsBootstrap } = loadTs('src/main/claims/bootstrap.ts');
 
 test('bootstrap records busy receipts, retries them, and never repeats completed imports', async () => {
