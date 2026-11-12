@@ -17,12 +17,13 @@ import { createClaimExport, type ClaimExport } from './claims/exportWiring';
 import { createLedgerUi } from './claims/ledgerUi';
 import { scrubExport } from './claims/exportLedger';
 import { importAtStart } from './claims/startupImport';
+import { ClaimsBootstrap, loadBootstrapMarker, saveBootstrapMarker } from './claims/bootstrap';
 import { DerivedLive } from './claims/derivedLive';
 import { startAfterMailCardCatchUp, startupMailCardCatchUp } from './mailCards';
-import { floorRepo, seedFloorSources } from './claims/floorSeed';
+import { enableLedgerDefault, floorRepo, seedFloorSources } from './claims/floorSeed';
 import { makeW6Append } from './claims/w6Append';
 import { memoryMdReplaced, READER_WATCH_SYNC_MS, ReaderWatchers } from './claims/readerWatch';
-import { importSettled } from './claims/ingest';
+import { importSettled, shadowImport } from './claims/ingest';
 import { enqueueR5AfterIndex, reconcileQueueForHive, ReconcileApi, shouldRunR5 } from './claims/reconcile';
 import { createClaimDelivery, WORKING_SET_MAX_CHARS, type TaskRow } from './claims/delivery';
 import { reconcileApiForHive as createReconcileApiForHive, refreshReconcileQueueForHive, type ReconcileHiveDeps } from './claims/reconcileHive';
@@ -2114,6 +2115,7 @@ function ledgerMemoryClaim(agentId: string): LedgerDeps['memoryClaim'] {
 /** READS-181 A: the `ledger` command's script, shipped like memory-cli.cjs (extraResources). */
 const HEAVY_PRELOAD = join(app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'resources'), 'heavy-preload.cjs');
 const LEDGER_CLI = join(app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'resources'), 'ledger-cli.cjs');
+const CLAIMS_CLI = join(app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'resources'), 'claims-cli.cjs');
 // HEAVY-LOCK-RESERVATION-RELEASE: the `heavy` command (status; give up a reserved slot), shipped the same way.
 const HEAVY_CLI = join(app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'resources'), 'heavy-cli.cjs');
 // TASKS-JSON-SPLIT: tasks-all / tasks-revive / tasks-unsplit (the archive's reader, revive, rollback).
@@ -2146,6 +2148,47 @@ const termControl = new TermControl({
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 });
 hookServer.setTermHandler((agentId, body) => termControl.handle(agentId, body));
+// CLAIMS-BOOTSTRAP: the destructive-ish floor import is a god-only command, executed in main so
+// it shares the canonical ClaimStore and the floor-wide heavy lock with every other heavy job.
+let claimsBootstrap: { root: string; job: ClaimsBootstrap } | null = null;
+function claimsBootstrapFor(root: string, store: ClaimStore): ClaimsBootstrap {
+  if (claimsBootstrap?.root === root) return claimsBootstrap.job;
+  const job = new ClaimsBootstrap({
+    now: () => Date.now(),
+    activeAgents: () => Object.entries(hive.registry().agents).filter(([, a]) => a.archived !== true).map(([id]) => id),
+    isIdle: (agentId) => workerWake.state(agentId).lifecycle === 'idle',
+    seedDefault: () => { enableLedgerDefault(root); },
+    importOne: async (agentId) => {
+      const report = await shadowImport({ hiveRoot: root, append: makeW6Append(store), read: (a) => store.readLedger(a), log: (row) => hive.appendLog(row) }, agentId, { settle: true });
+      return { refused: report.refused.map((r) => `${r.file}:${r.line}`) };
+    },
+    load: () => loadBootstrapMarker(root),
+    save: (state) => saveBootstrapMarker(root, state),
+    log: (row) => hive.appendLog(row),
+  });
+  claimsBootstrap = { root, job };
+  return job;
+}
+hookServer.setClaimsHandler(async (agentId, body) => {
+  if (!hive.isGod(agentId)) return { status: 403, body: { ok: false, line: 'refused: claims bootstrap is god-only' } };
+  const action = body && typeof body === 'object' && !Array.isArray(body) ? (body as Record<string, unknown>).action : null;
+  const root = hive.root(); const ep = claimsEndpoint();
+  if (!root || !ep) return { status: 503, body: { ok: false, line: 'refused: no active hive' } };
+  const job = claimsBootstrapFor(root, ep.store);
+  if (action === 'status') return { status: 200, body: { ok: true, line: job.isRunning() ? 'claims bootstrap is running' : 'claims bootstrap is idle', state: job.status() } };
+  if (action !== 'run') return { status: 400, body: { ok: false, line: 'refused: action must be run or status' } };
+  const callId = `claims-bootstrap:${Date.now()}`;
+  const lease = heavyLock.acquire(agentId, { heavy: true, kind: 'bench', why: 'claims bootstrap', exclusive: true }, 'claims bootstrap', callId, false);
+  if (!lease.allow) return { status: 409, body: { ok: false, line: `refused: ${lease.reason}` } };
+  try {
+    const state = await job.run();
+    return { status: 200, body: { ok: true, line: 'claims bootstrap complete', state } };
+  } catch (e) {
+    return { status: 409, body: { ok: false, line: `refused: ${String(e).slice(0, 160)}`, state: job.status() } };
+  } finally {
+    heavyLock.callDone(agentId, callId);
+  }
+});
 // GTC M3: the Human's message box. Its writes carry origin HUMAN (it IS the Human's input), so
 // only the app window's own IPC reaches it ('messageBox:deliver', ledgerUiSender), and only
 // `human: true` queue items (MessageQueueComposer) are sent there. Config `messageBoxPath: 'owner'`
@@ -5307,6 +5350,8 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
       if (opts.hive.isGod) {
         const termDir = hive.writeTermCommand(TERM_CLI);
         if (termDir) opts.pathPrepend = [...(opts.pathPrepend ?? []), termDir];
+        const claimsDir = hive.writeClaimsCommand(CLAIMS_CLI);
+        if (claimsDir) opts.pathPrepend = [...(opts.pathPrepend ?? []), claimsDir];
       }
       // HEAVY-CPU-OPTIONS-191: `guppy-heavyjob`, which a heavy call's rewritten command runs first.
       if (heavyJobExe()) opts.pathPrepend = [...(opts.pathPrepend ?? []), heavyJobDir()];
