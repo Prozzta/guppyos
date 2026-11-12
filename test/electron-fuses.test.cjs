@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /*
  * ELECTRON-FUSES (1.1.105): the packaged binary's fuses (build/electronFuses.cjs, flipped in afterPack).
  *  - the state per build: a normal build and the layer-(b) seams build differ only in

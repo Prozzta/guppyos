@@ -1,5 +1,7 @@
 /* Electron 45: Electron 44 made clipboard access asynchronous and removed the
  * synchronous/image helpers. Keep the main/preload boundary on the supported API. */
+'use strict';
+require('./tools/own-job.cjs');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
