@@ -234,3 +234,33 @@ test('A12: main wires deriveOnce with the shared registry, and the live pass rea
   assert.ok(live.includes('return readDoneMailsAsync(root, this.seenMail, this.subjects);'), 'newDoneMails is the async reader');
   assert.ok(!/\breadDoneMails\(|\breadIndexRulingMails\(/.test(live), 'no sync index reader is left in the live pass');
 });
+
+// A13 (Jim 3e0c72 item 3: the first index sync, syncOnce, was one 2.3 s block over all agents).
+const { ClaimsIndexSync } = loadTs('src/main/claims/indexSync.ts');
+test('A13: syncAll starts each agent in its own event-loop turn, same agents, order and outcomes', async () => {
+  let turn = 0;
+  let spinning = true;
+  const spin = () => { turn++; if (spinning) setImmediate(spin); };
+  const reads = [];
+  const sent = [];
+  const rec = (id) => ({ v: 1, id, t: 'claim', kind: 'fact', text: id, source: 'self', at: '2026-10-03T10:00:00.000Z', wt: '2026-10-03T10:00:00.000Z', agent: 'a1', prev: '', mac: `m-${id}` });
+  const agents = ['a1', 'a2', 'a3', 'a4'];
+  const s = new ClaimsIndexSync({
+    readLedger: (a) => { reads.push([a, turn]); return { records: [rec(`c-00000000000${agents.indexOf(a) + 1}`)], torn: null, chain: 'ok' }; },
+    derive: () => (records) => ({ v: 1, agent: 'a1', registryHash: '', ledgerHead: 'head', conflicts: [], claims: Object.fromEntries(records.map((r) => [r.id, { id: r.id, status: 'live', sightings: 0, firstAt: '', lastAt: '', pinned: false, reasons: [] }])) }),
+    registry: () => FROZEN,
+    ruleConfig: () => ({ r4: false }),
+    level: (a) => (a === 'a3' ? 'shadow' : 'reader'),
+    agents: () => agents,
+    send: async (args) => { sent.push(args.wing); return { ok: true }; },
+  });
+  setImmediate(spin);
+  const t0 = turn;
+  let out;
+  try { out = await s.syncAll(); } finally { spinning = false; }
+  assert.deepEqual(out.map((o) => (o.sent ? o.records : o.why)), [1, 1, 'level', 1], 'outcomes in agent order');
+  assert.deepEqual(reads.map(([a]) => a), ['a1', 'a2', 'a4']);
+  assert.deepEqual(sent, ['a1', 'a2', 'a4']);
+  assert.ok(reads[0][1] > t0, 'the first agent is not read in the caller\'s turn');
+  for (let i = 1; i < reads.length; i++) assert.ok(reads[i][1] > reads[i - 1][1], `agents ${reads[i - 1][0]} and ${reads[i][0]} were synced in one turn: ${JSON.stringify(reads)}`);
+});
