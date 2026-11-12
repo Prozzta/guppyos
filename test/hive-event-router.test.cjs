@@ -108,6 +108,19 @@ test('A2b a watcher-driven steady-state drain scans only its dirty outbox, not a
   assert.ok(fs.existsSync(path.join(f.inbox('god-1'), 'm2b.json')));
 });
 
+test('A2c coalesced hints from different outboxes drain every dirty outbox', async (t) => {
+  const f = await floor(t);
+  await f.hive.ensureAgent({ id: 'pam-1', name: 'Pam', provider: 'claude', cwd: f.home });
+  f.hive.startRouter();
+  f.write('jim-1', msg('m2c-jim', 'god-1'));
+  f.write('pam-1', msg('m2c-pam', 'god-1'));
+  f.rt.live(f.outbox('jim-1')).hint();
+  f.rt.live(f.outbox('pam-1')).hint();
+  assert.equal(f.rt.immediates.length, 1, 'one queued drain carries both dirty paths');
+  f.rt.flush();
+  assert.deepEqual(f.deliveries.map((d) => d.messageId).sort(), ['m2c-jim', 'm2c-pam']);
+});
+
 test('A3 a missed watch event is repaired by the reconciliation interval', async (t) => {
   const f = await floor(t);
   f.hive.startRouter();
