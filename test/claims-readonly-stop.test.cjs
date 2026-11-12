@@ -194,6 +194,31 @@ const CASES = [
     assert.equal(r.ok, false, 'RO-8 storeStillRefuses: the store refuses a read-only append itself');
     assert.match(r.error, /read-only/, 'RO-8 storeStillRefuses: and says why');
   }],
+  ['RO-9', async (mods) => {
+    // brokenChainStops (Jim 4bf2d3): the key loads, but the derived chain is broken (a record edited on disk).
+    const h = hive(mods);
+    const a = h.open();
+    const first = await mods.W.syncDerived(a.deps, facts(5));
+    assert.equal(first.appended, 5, 'RO-9 brokenChainStops: setup writes');
+    const dir = a.store.claimsDir(D);
+    a.store.close();
+    const seg = fs.readdirSync(dir).filter((x) => x.endsWith('.jsonl')).sort()[0];
+    const file = path.join(dir, seg);
+    const lines = fs.readFileSync(file, 'utf8').split('\n');
+    const i = lines.findIndex((l) => l.includes('SYN-1 status'));
+    assert.ok(i >= 0 && i < lines.length - 2, 'RO-9 brokenChainStops: setup finds a record before the head');
+    lines[i] = lines[i].replace('SYN-1 status', 'SYN-1 statux');
+    fs.writeFileSync(file, lines.join('\n'));
+    const b = h.open();
+    const blocked = b.store.appendBlocked(D);
+    assert.ok(blocked && blocked.reason !== 'key-missing', `RO-9 brokenChainStops: the store reports the break (${JSON.stringify(blocked)})`);
+    const r = await mods.W.syncDerived(b.deps, facts(40, 'done'));
+    assert.equal(b.calls.append, 0, 'RO-9 brokenChainStops: no append is attempted on a broken chain');
+    assert.equal(r.readOnly, 40, 'RO-9 brokenChainStops: every fact is read-only');
+    const ro = h.rows('claims-derived-readonly');
+    assert.equal(ro.length, 1, 'RO-9 brokenChainStops: one read-only row');
+    assert.equal(ro[0].reason, blocked.reason, 'RO-9 brokenChainStops: the row names the break');
+  }],
 ];
 
 for (const [id, fn] of CASES) test(id, () => fn(real));
@@ -205,6 +230,7 @@ const MUTANTS = [
   { id: 'M4', what: 'a row per sync, not per state change', file: WR, from: "if (k !== (lastBlocked.get(deps.store) ?? '')) {", to: 'if (true) {', dies: ['RO-1', 'RO-3'] },
   { id: 'M5', what: 'the writer remembers the block and never re-asks', file: WR, from: 'const b = deps.store.appendBlocked?.(DERIVED_AGENT_ID) ?? null;', to: "const b = lastBlocked.get(deps.store) ? { brokenAt: 'key', reason: 'key-missing' } as ChainBreak : (deps.store.appendBlocked?.(DERIVED_AGENT_ID) ?? null);", dies: ['RO-3'] },
   { id: 'M8', what: 'the writer remembers the block across a restart', file: WR, from: 'const b = deps.store.appendBlocked?.(DERIVED_AGENT_ID) ?? null;', to: "const b = (derivedBlocked as any).ever ? { brokenAt: 'key', reason: 'key-missing' } as ChainBreak : (deps.store.appendBlocked?.(DERIVED_AGENT_ID) ?? null); if (b) (derivedBlocked as any).ever = true;", dies: ['RO-2'] },
+  { id: 'M9', what: 'the store reports a broken chain as writable (Jim)', file: ST, from: '    if (s.readOnly) return s.readOnly;\n    if (!this.keys() && this.anySegmentAnywhere())', to: '    if (!this.keys() && this.anySegmentAnywhere())', dies: ['RO-9'] },
   { id: 'M6', what: 'the store ignores a key missing while ledgers exist', file: ST, from: "if (!this.keys() && this.anySegmentAnywhere()) return { brokenAt: 'key', reason: 'key-missing' };", to: '', dies: ['RO-7'] },
   { id: 'M7', what: 'the store calls first use read-only', file: ST, from: "if (!this.keys() && this.anySegmentAnywhere()) return { brokenAt: 'key', reason: 'key-missing' };", to: "if (!this.keys()) return { brokenAt: 'key', reason: 'key-missing' };", dies: ['RO-6'] },
 ];
