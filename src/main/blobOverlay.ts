@@ -77,6 +77,8 @@ export interface BlobOverlayDeps {
   log?(row: Record<string, unknown>): void;
   /** GUPPY-DICTATION-P2: called at the end of every apply() with the settings in force. */
   onApplied?(settings: BlobSettings): void;
+  /** BLOB-ORCH-MOOD: called after the ring's Invisible toggle, so the tray tooltip follows at once. */
+  onInvisible?(on: boolean): void;
   /** BLOB-GAZE: the focused field's point in screen DIPs while a dictation is in flight, else null. */
   focusPoint?(): { x: number; y: number } | null;
   /** BLOB-GAZE: the gaze feed's timer (tests inject it). */
@@ -237,6 +239,7 @@ export class BlobOverlayController {
       this.settings = blobSettingsFrom(this.d.readConfig());
       if (this.win && !this.win.isDestroyed()) this.protect(this.win, this.settings.invisible);
       this.d.log?.({ kind: 'blob-invisible', on: this.settings.invisible });
+      try { this.d.onInvisible?.(this.settings.invisible); } catch { /* best-effort */ }
     } else if (s === 'close') {
       this.setRing(false);
     }
