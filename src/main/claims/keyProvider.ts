@@ -10,7 +10,7 @@
  * is not usable before `app` is ready).
  */
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { MacKeyLoad, MacKeyProvider } from '../../shared/claims';
 import { keyIdOf } from './canonical';
@@ -110,9 +110,14 @@ export const HEAD_ANCHOR_FILE = 'claims-heads.json';
 
 export class FileHeadAnchorStore implements HeadAnchorStore {
   constructor(private readonly file: string) {}
+  /** STARTUP-FREEZE-104 A3: the parsed file, kept while its size and mtime are the ones parsed (every claims read asks
+   *  for an anchor; a parse per ask was 150 reads a minute at 10x). A copy is returned, so callers never edit it. */
+  private cached: { size: number; mtimeMs: number; text: string } | null = null;
   private read(): { v: 1; hives: Record<string, Record<string, { head: string; lastId: string; at: string; pending?: PendingAnchor }>> } {
     try {
-      const j = JSON.parse(readFileSync(this.file, 'utf8'));
+      const st = statSync(this.file);
+      if (!this.cached || this.cached.size !== st.size || this.cached.mtimeMs !== st.mtimeMs) this.cached = { size: st.size, mtimeMs: st.mtimeMs, text: readFileSync(this.file, 'utf8') };
+      const j = JSON.parse(this.cached.text);
       if (j && j.v === 1 && j.hives && typeof j.hives === 'object') return j;
     } catch { /* missing or unreadable: no anchors */ }
     return { v: 1, hives: {} };

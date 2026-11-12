@@ -3,7 +3,7 @@ import { app, BrowserWindow, clipboard, crashReporter, dialog, globalShortcut, i
 import { runQuitSteps, type QuitReport } from './quitTeardown';
 import { copyClipboardText, readClipboardPng, readClipboardText } from './clipboard';
 import { NativeMemoryWiring, toUnpacked } from './nativeMemory/mainWiring';
-import { ClaimStore } from './claims/store';
+import { ClaimStore, CLAIMS_CHECKPOINT_FILE } from './claims/store';
 import { SearchResultLog } from './claims/searchLog';
 import { collectNoteCandidates, embedViaWorker, HiveCorpus, ledgerCandidateDeps, makeLocalScorer, type CandidateResult } from './claims/candidates';
 import { FileHeadAnchorStore, FileLedgerKeyRecord, HEAD_ANCHOR_FILE, KEY_RECORD_FILE, MAC_KEY_FILE, SafeStorageKeyProvider } from './claims/keyProvider';
@@ -1615,7 +1615,7 @@ function claimsIndexSync(): ClaimsIndexSync | null {
   if (!ep) return null;
   if (!claimsIndex) {
     claimsIndex = new ClaimsIndexSync({
-      readLedger: (a) => (claimsEndpoint() as ClaimsEndpointDeps).store.readLedger(a),
+      readLedger: (a) => (claimsEndpoint() as ClaimsEndpointDeps).store.readLedgerCached(a),
       derive: () => claimsDerive,
       registry: () => { const root = hive.root(); try { return root ? loadRegistry(root) : DEFAULT_KEY_REGISTRY; } catch { return DEFAULT_KEY_REGISTRY; } },
       ruleConfig: () => ({ r4: false }),
@@ -1682,7 +1682,7 @@ const readerWatchers = new ReaderWatchers({
     const ep = claimsEndpoint();
     return ep ? makeW6Append(ep.store)(agentId, draft, origin, opts) : Promise.resolve({ ok: false, error: 'no hive' });
   },
-  read: (agentId) => (claimsEndpoint() as ClaimsEndpointDeps).store.readLedger(agentId),
+  read: (agentId) => (claimsEndpoint() as ClaimsEndpointDeps).store.readLedgerCached(agentId),
   log: (row) => hive.appendLog(row),
 });
 function syncReaderWatchers(): void {
@@ -1697,7 +1697,7 @@ function claimExport(): ClaimExport {
     claimExportApi = createClaimExport({
       level: claimLevel,
       agentDir: (agentId) => hive.agentHome(agentId),
-      readLedger: (agentId) => (claimsEndpoint() as ClaimsEndpointDeps).store.readLedger(agentId),
+      readLedger: (agentId) => (claimsEndpoint() as ClaimsEndpointDeps).store.readLedgerCached(agentId),
       registry: () => { const root = hive.root(); try { return root ? loadRegistry(root) : DEFAULT_KEY_REGISTRY; } catch { return DEFAULT_KEY_REGISTRY; } },
       derive: deriveClaims,
       // The complete rendering marks statuses from the state; world evidence unknown here is neutral.
@@ -1746,6 +1746,16 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
         keys: new SafeStorageKeyProvider(join(app.getPath('userData'), MAC_KEY_FILE), safeStorage),
         keyRecord: new FileLedgerKeyRecord(join(app.getPath('userData'), KEY_RECORD_FILE)),
         headAnchor: new FileHeadAnchorStore(join(app.getPath('userData'), HEAD_ANCHOR_FILE)),
+        // STARTUP-FREEZE-104 A3: the verified closed segments, MAC'd by the store; written off the event loop.
+        checkpoint: {
+          load: () => { try { return readFileSync(join(app.getPath('userData'), CLAIMS_CHECKPOINT_FILE), 'utf8'); } catch { return null; } },
+          save: (text) => {
+            const file = join(app.getPath('userData'), CLAIMS_CHECKPOINT_FILE);
+            const tmp = `${file}.${process.pid}.tmp`;
+            void fsModule.promises.writeFile(tmp, text).then(() => fsModule.promises.rename(tmp, file))
+              .catch((e) => hive.appendLog({ kind: 'claims-checkpoint-save-failed', error: String(e).slice(0, 160) }));
+          },
+        },
         log: (row) => hive.appendLog(row),
         // R1 (Jim R-2): a claim whose task TTL has ended is not live for an exact-duplicate sighting.
         taskStatus: (id) => (hive.taskById(id) as { status?: string } | undefined)?.status ?? null,   // SCALE-TASKS-MAP: O(1), not a .find over every card
@@ -1774,21 +1784,25 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
         },
       }),
     };
+    // STARTUP-FREEZE-104 A3: read and verify every ledger once, asynchronously and in slices (a full
+    // synchronous read of a year of ledgers blocks main for seconds). The startup readers below run
+    // after it and answer from its verified reads.
+    const warmed = startClaimsWarm(root, claimStore.store);
     // Jim A-2: claims start checks every anchored agent (a deleted or cut ledger alerts at once).
-    setImmediate(claimsAnchorCheck);
+    void warmed.then(claimsAnchorCheck);
     // MAILCARD catch-up (god 38f4b0): every start indexes the proven mail not yet in state/mail-cards
     // (mail delivered while the app was closed included) through the router's own index, pausing at
     // every step: the window never waits for it.
     const mailCardCatchUp = startupMailCardCatchUp(root, { log: (row) => hive.appendLog(row), index: hive.mailCardIndexFor(root) });
     // CLAIMS-90 M5: the derived writer's start backfill and passes (once per app run) start only once
     // the catch-up settled (Jim 414b4c): the derived writer reads the index's done mails.
-    void startAfterMailCardCatchUp(mailCardCatchUp, () => derivedClaims?.start());
+    void startAfterMailCardCatchUp(Promise.allSettled([mailCardCatchUp, warmed]),() => derivedClaims?.start());
     // W6: the switch to writer mode or a restart after a crash: catch every writer's export up.
-    setImmediate(() => { try { claimExport().syncAll(claimLedgerAgents()); } catch (e) { hive.appendLog({ kind: 'claims-export-failed', step: 'sync', error: String(e).slice(0, 160) }); } });
+    void warmed.then(() => { try { claimExport().syncAll(claimLedgerAgents()); } catch (e) { hive.appendLog({ kind: 'claims-export-failed', step: 'sync', error: String(e).slice(0, 160) }); } });
     // CL-READERWATCHER: watch memory.md for the agents whose ledger replaced it in search.
-    setImmediate(syncReaderWatchers);
+    void warmed.then(syncReaderWatchers);
     // W5 startup census. Successful index syncs repeat this after each indexed append.
-    setImmediate(() => { for (const agentId of claimLedgerAgents()) { try { refreshReconcileQueueForHive(root, agentId, reconcileHiveDeps()); } catch (e) { hive.appendLog({ kind: 'claims-reconcile-refresh-failed', agentId, error: String(e).slice(0, 160) }); } } });
+    void warmed.then(() => { for (const agentId of claimLedgerAgents()) { try { refreshReconcileQueueForHive(root, agentId, reconcileHiveDeps()); } catch (e) { hive.appendLog({ kind: 'claims-reconcile-refresh-failed', agentId, error: String(e).slice(0, 160) }); } } });
   }
   return {
     store: claimStore.store,
@@ -1817,6 +1831,19 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
     // CLAIMS-90 R2 (C90-GET): read-only, claims/readWiring.ts (the answer child calls the same code).
     get: (_agentId, args) => claimGetOver({ root, store: (claimsEndpoint() as ClaimsEndpointDeps).store, agents: claimLedgerAgents, tasks: () => ((hive.allTasks() as { tasks?: Array<Record<string, unknown>> }).tasks ?? []) }, args),
   };
+}
+/** STARTUP-FREEZE-104 A3: the claims warm of the open hive (claimsEndpoint starts it once per store). */
+let claimsWarm: { root: string; ready: Promise<void> } | null = null;
+function startClaimsWarm(root: string, store: ClaimStore): Promise<void> {
+  const ready = store.warm(store.ledgerAgents()).then(() => undefined, (e) => { hive.appendLog({ kind: 'claims-warm-failed', error: String(e).slice(0, 160) }); });
+  claimsWarm = { root, ready };
+  return ready;
+}
+/** Settles when the open hive's claims warm has (at once with no hive or claims store). */
+function claimsWarmReady(): Promise<void> {
+  const root = hive.root();
+  if (!root || !claimsEndpoint() || !claimsWarm || claimsWarm.root !== root) return Promise.resolve();
+  return claimsWarm.ready;
 }
 /** CLAIMS-HEAD-ANCHOR (Jim A-2): read every anchored agent of this hive; a break alerts once
  *  (claims start, a worker (re)start, and every CLAIMS_ANCHOR_CHECK_MS). */
@@ -1857,14 +1884,15 @@ function claimsImportReady(): Promise<void> {
   const root = hive.root(); const ep = claimsEndpoint();
   if (!root || !ep) return Promise.resolve();
   if (!claimsImport || claimsImport.root !== root) {
-    const run = importAtStart({
+    // A3: the import reads every ledger; it starts once the warm has verified them (then its reads are the cached ones).
+    const run = claimsWarmReady().then(() => importAtStart({
       hiveRoot: root,
       append: makeW6Append(ep.store),
-      read: (agentId) => ep.store.readLedger(agentId),
+      read: (agentId) => ep.store.readLedgerCached(agentId),
       log: (row) => hive.appendLog(row),
       agents: () => claimImportCandidates(root),
       level: claimLevel,
-    }).then(() => undefined, (e) => { hive.appendLog({ kind: 'claims-import-failed', error: String(e).slice(0, 160) }); });
+    })).then(() => undefined, (e) => { hive.appendLog({ kind: 'claims-import-failed', error: String(e).slice(0, 160) }); });
     const cap = new Promise<void>((resolve) => {
       const t = setTimeout(() => { hive.appendLog({ kind: 'claims-import-wait-capped', ms: CLAIMS_IMPORT_WAIT_MS }); resolve(); }, CLAIMS_IMPORT_WAIT_MS);
       t.unref?.();
@@ -1975,7 +2003,7 @@ function claimHistory(agentId: string, id: string): { ok: true; text: string; ow
 function claimsLedgerView(agentId: string) {
   const root = hive.root(); const ep = claimsEndpoint();
   if (!root || !ep) return null;
-  const prefix = verifiedPrefix(ep.store.readLedger(agentId));
+  const prefix = verifiedPrefix(ep.store.readLedgerCached(agentId));
   if (!prefix) return null;
   let reg; try { reg = loadRegistry(root); } catch { reg = DEFAULT_KEY_REGISTRY; }
   const state = deriveClaims(prefix.records, reg, { r4: false });
@@ -2011,7 +2039,7 @@ let claimsCountTokens: ((text: string) => number) | null = null;
 const claimDelivery = createClaimDelivery({
   hiveRoot: () => hive.root(),
   level: claimLevel,
-  readLedger: (agentId) => (claimsEndpoint() as ClaimsEndpointDeps).store.readLedger(agentId),
+  readLedger: (agentId) => (claimsEndpoint() as ClaimsEndpointDeps).store.readLedgerCached(agentId),
   registry: (root) => { try { return loadRegistry(root); } catch { return DEFAULT_KEY_REGISTRY; } },
   derive: deriveClaims,
   worldView: buildClaimsWorldView,

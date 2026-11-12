@@ -41,8 +41,9 @@
  *   - text limits and sources by origin (claims.ts AppendOrigin): external origins refuse `source`
  *     and `legacy` and anything over 400 characters; only 'w6-internal' may reach 4000.
  */
-import { randomBytes } from 'node:crypto';
+import { createHash, createHmac, randomBytes } from 'node:crypto';
 import * as nodeFs from 'node:fs';
+import * as fsp from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import {
   CLAIM_KINDS, CLAIM_TEXT_MAX, CLAIM_TEXT_MAX_LEGACY, CLAIM_VALUE_MAX, CLAIMS_ALERT_CHAIN_BROKEN, CLAIMS_ALERT_KEY_MISSING, SUPERSEDES_REASON_NOTE_MAX,
@@ -52,7 +53,7 @@ import {
   type UsageRec, type SupersedesReason,
 } from '../../shared/claims';
 import { canonicalJson, keyIdOf, recordMac, sha256Hex } from './canonical';
-import type { HeadAnchorStore, LedgerKeyRecord } from './keyProvider';
+import { hiveIdOf, type HeadAnchorStore, type LedgerKeyRecord } from './keyProvider';
 import { redactSecrets } from './redact';
 import { normalizeTtl, parseStoredTtl, zonelessHint } from './ttl';
 import { checkKey, DEFAULT_KEY_REGISTRY, loadRegistry, saveRegistry } from './registry';
@@ -94,6 +95,9 @@ export interface ClaimStoreDeps {
   anchorDelayMs?: number;
   /** R1 (Jim R-2): a hive task's status, so a claim whose task TTL has ended is not live for R1. */
   taskStatus?: (taskId: string) => string | null;
+  /** STARTUP-FREEZE-104 A3: main's verified-segment checkpoint text in user-data (never an agent folder). The store
+   *  MACs it with the ledger key and binds it to this hive and key id; a missing, foreign or forged one is none. */
+  checkpoint?: { load(): string | null; save(text: string): void };
 }
 
 const SEGMENT_RE = /^(\d{4})-(\d{2})\.jsonl$/;
@@ -177,7 +181,59 @@ function isObj(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
-type VerifiedRead = { seen: Array<{ file: string; buf: Buffer }>; result: ReadResult; head: string; reached: Set<string> };
+/** STARTUP-FREEZE-104 A3 (Jim audit A4): a segment as a verified read saw it: its size and its last TAIL_FP bytes.
+ *  In one running session, records already verified and held in memory are served while every kept segment still
+ *  has that size and tail (god + Jim, 2026-11-12); appended whole lines verify as before (extendRead). */
+type SegFp = { file: string; size: number; tail: Buffer };
+type VerifiedRead = { seen: SegFp[]; result: ReadResult; head: string; reached: Set<string> };
+const TAIL_FP = 4096;
+function segFp(file: string, buf: Buffer, size = buf.length): SegFp {
+  return { file, size, tail: Buffer.from(buf.subarray(Math.max(0, buf.length - TAIL_FP))) };
+}
+/** Bytes [pos, pos+len) of a file through one fd (never the whole file). */
+function readRange(file: string, pos: number, len: number): Buffer {
+  const fd = nodeFs.openSync(file, 'r');
+  try {
+    const out = Buffer.alloc(len);
+    let got = 0;
+    while (got < len) { const n = nodeFs.readSync(fd, out, got, len - got, pos + got); if (n <= 0) break; got += n; }
+    return got === len ? out : out.subarray(0, got);
+  } finally { nodeFs.closeSync(fd); }
+}
+
+/**
+ * STARTUP-FREEZE-104 A3: across launches, each agent's CLOSED segments (every segment but the newest) as the last
+ * chain-'ok' read verified them: name, size, the sha256 of the WHOLE file, its line count and the sha256 of its last
+ * line (Jim 3929e7, god 00422a). A later read hashes each closed segment's bytes (one sha256 per byte, not a sha256 and
+ * an HMAC per line) and, when the leading closed segments match exactly, verifies only the lines after them, chaining
+ * from the checkpoint's last line. Any difference (a byte, a size, a removed, added-before or renamed segment, another
+ * hive, dir or key id, a bad MAC) is a full verify. The newest segment is never trusted from it.
+ */
+type CpSeg = { name: string; size: number; sha: string; lines: number; last: string };
+type CpAgent = { segs: CpSeg[] };
+const CP_VERSION = 1;
+/** The checkpoint's file name in user-data (main wires load and save). */
+export const CLAIMS_CHECKPOINT_FILE = 'claims-checkpoint.json';
+/** Lines per step of a sliced read (the warm pauses between steps when its slice is spent). */
+const STEP_LINES = 512;
+/** Bytes per sha256 update of a sliced read. */
+const HASH_CHUNK = 1 << 20;
+/** Bytes read from disk, ready for the read core: the newest segment's torn tail already cut (or quarantined). */
+type CoreIn = { files: string[]; bufs: Buffer[]; torn: TornInfo | null; structural: ChainBreak | null };
+/** Run a stepped read to its end in this turn (the synchronous paths). */
+function drain<R>(g: Generator<void, R, void>): R {
+  for (;;) { const s = g.next(); if (s.done) return s.value; }
+}
+/** The checkpoint's MAC: HMAC-SHA256 under the ledger key, domain-separated from record MACs. */
+function cpMac(key: Uint8Array, body: Record<string, unknown>): string {
+  return createHmac('sha256', key).update('claims-checkpoint\n').update(canonicalJson(body)).digest('hex');
+}
+function validCpAgent(e: unknown): e is CpAgent {
+  return isObj(e) && Array.isArray(e.segs) && e.segs.every((s: unknown) => isObj(s)
+    && typeof s.name === 'string' && SEGMENT_RE.test(s.name) && Number.isSafeInteger(s.size) && (s.size as number) >= 0
+    && typeof s.sha === 'string' && /^[0-9a-f]{64}$/.test(s.sha) && Number.isSafeInteger(s.lines) && (s.lines as number) >= 0
+    && typeof s.last === 'string' && (s.last === '' || /^[0-9a-f]{64}$/.test(s.last)));
+}
 
 /** One ledger line as a record, or null (not JSON, not a claim or event, or a supersedesReason without supersedes). */
 function ledgerRec(line: string): LedgerRec | null {
@@ -268,6 +324,12 @@ export class ClaimStore {
   /** readLedgerCached: the last chain-'ok' read per agent, the segment bytes it parsed and verified, the sha256 of
    *  its last line, and the head anchors it showed the ledger reaches. */
   private readonly verifiedReads = new Map<string, VerifiedRead>();
+  /** A3: bumped when a queued write (append, purge, restore, reset) starts and when it ends (odd while one runs); a
+   *  warm that sees it odd or moved drops its read. */
+  private readonly writeGen = new Map<string, number>();
+  /** A3: the checkpoint as loaded (null: not loaded yet) and a save pending. */
+  private cp: Map<string, CpAgent> | null = null;
+  private cpSave: ReturnType<typeof setTimeout> | null = null;
   private readonly queues = new Map<string, Promise<unknown>>();
   private readonly alerted = new Set<string>();
   private keyMissing = false;
@@ -327,14 +389,10 @@ export class ClaimStore {
   readLedger(agentId: string): ReadResult {
     try {
       // The bytes kept are the very buffers this read parsed and verified (not a second read that could race an append).
-      const seen: Array<{ file: string; buf: Buffer }> = [];
+      const seen: SegFp[] = [];
       const before = this.anchorWant(agentId);
       const r = this.readInner(agentId, seen);
-      if (r.chain === 'ok' && !r.torn) {
-        // An ok read reached the anchor it was checked against and adopted its head (the anchor moves there).
-        const head = this.state.get(agentId)?.head ?? '';
-        this.verifiedReads.set(agentId, { seen, result: r, head, reached: new Set([before, head, this.anchorWant(agentId)].filter((h): h is string => !!h)) });
-      } else this.verifiedReads.delete(agentId);
+      this.keepRead(agentId, r, seen, before);
       return r;
     } catch (e) {
       this.verifiedReads.delete(agentId);
@@ -361,34 +419,57 @@ export class ClaimStore {
   readLedgerCached(agentId: string): ReadResult {
     const hit = this.verifiedReads.get(agentId);
     const grown = hit ? this.grownBytes(agentId, hit.seen) : null;
-    if (hit && grown && grown.added.length === 0) return hit.result;
-    if (hit && grown) { const r = this.extendRead(agentId, hit, grown); if (r) return r; }    return this.readLedger(agentId);
+    if (hit && grown && grown.added.length === 0) {
+      // The anchor main holds now must be one this read was shown to reach (a cut is caught on the next read).
+      const want = this.anchorWant(agentId);
+      if (!want || hit.reached.has(want)) return hit.result;
+    }
+    if (hit && grown) { const r = this.extendRead(agentId, hit, grown); if (r) return r; }
+    return this.readLedger(agentId);
   }
 
-  /** The agent's segments as these files with these bytes plus whole lines after them (`added`: the new bytes of
-   *  the last kept file, then any newer files), with the bytes now; null on any other difference. */
-  private grownBytes(agentId: string, seen: Array<{ file: string; buf: Buffer }>): { seen: Array<{ file: string; buf: Buffer }>; added: Buffer[] } | null {
+  /** Keep a chain-'ok', untorn read as this agent's verified read (an ok read reached the anchor it was checked
+   *  against and adopted its head, so the anchor moves there); drop the kept one otherwise. */
+  private keepRead(agentId: string, r: ReadResult, seen: SegFp[], before: string | null): void {
+    if (r.chain === 'ok' && !r.torn) {
+      const head = this.state.get(agentId)?.head ?? '';
+      this.verifiedReads.set(agentId, { seen, result: r, head, reached: new Set([before, head, this.anchorWant(agentId)].filter((h): h is string => !!h)) });
+    } else this.verifiedReads.delete(agentId);
+  }
+
+  /** The agent's segments as these files with this size and tail plus whole lines after them (`added`: the new
+   *  bytes of the last kept file, then any newer files), with their fingerprints now; null on any other difference.
+   *  A3: a stat and a read of each kept segment's tail and of the bytes after it, never a whole kept file. */
+  private grownBytes(agentId: string, seen: SegFp[]): { seen: SegFp[]; added: Buffer[] } | null {
     try {
       const files = this.segments(agentId);
       if (files.length < seen.length || seen.some(({ file }, i) => files[i] !== file)) return null;
-      const now: Array<{ file: string; buf: Buffer }> = [];
+      const now: SegFp[] = [];
       const added: Buffer[] = [];
       for (let i = 0; i < files.length; i++) {
-        const old = seen[i]?.buf;
-        const buf = nodeFs.readFileSync(files[i]);
-        if (old && i < seen.length - 1 && !buf.equals(old)) return null;
-        if (old && (buf.length < old.length || !buf.subarray(0, old.length).equals(old))) return null;
-        const fresh = old ? buf.subarray(old.length) : buf;
+        const old = seen[i];
+        let fresh: Buffer;
+        if (old) {
+          const size = nodeFs.statSync(files[i]).size;
+          if (size < old.size || (i < seen.length - 1 && size !== old.size)) return null;
+          const from = old.size - old.tail.length;
+          const buf = readRange(files[i], from, size - from);
+          if (buf.length !== size - from || !buf.subarray(0, old.tail.length).equals(old.tail)) return null;
+          fresh = buf.subarray(old.tail.length);
+          now.push(segFp(files[i], buf, size));
+        } else {
+          fresh = nodeFs.readFileSync(files[i]);
+          now.push(segFp(files[i], fresh));
+        }
         if (fresh.length && fresh[fresh.length - 1] !== 0x0a) return null;
         if (fresh.length) added.push(fresh);
-        now.push({ file: files[i], buf });
       }
       return { seen: now, added };
     } catch { return null; }
   }
 
   /** The kept read extended by the appended lines when every one verifies after the kept head; null otherwise. */
-  private extendRead(agentId: string, hit: VerifiedRead, grown: { seen: Array<{ file: string; buf: Buffer }>; added: Buffer[] }): ReadResult | null {
+  private extendRead(agentId: string, hit: VerifiedRead, grown: { seen: SegFp[]; added: Buffer[] }): ReadResult | null {
     const key = this.keys();
     if (!key || this.d.headAnchor?.get(this.d.hiveRoot, agentId)?.pending) return null;
     const recs: LedgerRec[] = [];
@@ -420,13 +501,13 @@ export class ClaimStore {
     return this.anchorTimers.get(agentId)?.head ?? stored?.head ?? null;
   }
 
-  private readInner(agentId: string, seen?: Array<{ file: string; buf: Buffer }>): ReadResult {
+  private readInner(agentId: string, seen?: SegFp[]): ReadResult {
     if (!AGENT_RE.test(agentId)) return { records: [], torn: null, chain: { brokenAt: 'agent', reason: 'parse' } };
     this.finishPurgeSwap(agentId);
     const files = this.segments(agentId);
     let torn: TornInfo | null = null;
-    const lines: Array<ParsedLine & { file: string }> = [];
     let structural: ChainBreak | null = null;
+    const bufs: Buffer[] = [];
     files.forEach((file, i) => {
       let buf = nodeFs.readFileSync(file);
       const last = i === files.length - 1;
@@ -439,31 +520,211 @@ export class ClaimStore {
           structural = { brokenAt: `${file}@${end}`, reason: 'parse' };
         }
       }
-      seen?.push({ file, buf });
+      seen?.push(segFp(file, buf));
+      bufs.push(buf);
+    });
+    return drain(this.readCore(agentId, { files, bufs, torn, structural }));
+  }
+
+  /**
+   * The read core over bytes already read (readInner reads them synchronously, warm() asynchronously): parse, verify,
+   * check the anchor, adopt. It yields between steps (STEP_LINES lines, HASH_CHUNK bytes) so warm() can pause; a
+   * synchronous read drains it. A3: the closed segments the checkpoint proves (whole-file sha256) are parsed but not
+   * re-verified line by line; the verify starts after them, chained on the checkpoint's last line.
+   */
+  private *readCore(agentId: string, inp: CoreIn): Generator<void, ReadResult, void> {
+    const { files, bufs, torn, structural } = inp;
+    const key = bufs.some((b) => b.length > 0) ? this.keys() : null;
+    const closed = Math.max(0, files.length - 1);
+    const shas: string[] = [];
+    if (key && !structural) {
+      for (let i = 0; i < closed; i++) {
+        const h = createHash('sha256');
+        for (let o = 0; o < bufs[i].length; o += HASH_CHUNK) { h.update(bufs[i].subarray(o, o + HASH_CHUNK)); yield; }
+        shas.push(h.digest('hex'));
+      }
+    }
+    const cp = key && shas.length ? this.cpFor(agentId, key) : null;
+    let trust = 0;
+    if (cp && cp.segs.length > 0) {
+      // Every checkpointed segment is the closed segment at its place, byte for byte (a newest or missing one has no sha).
+      if (cp.segs.every((s, i) => s.name === basename(files[i]) && s.size === bufs[i].length && s.sha === shas[i])) trust = cp.segs.length;
+      else this.log({ kind: 'claims-checkpoint-mismatch', agentId });
+    }
+
+    const lines: Array<ParsedLine & { file: string }> = [];
+    const segEnd: number[] = [];
+    for (let i = 0; i < files.length; i++) {
+      const buf = bufs[i];
       let off = 0;
       while (off < buf.length) {
         const nl = buf.indexOf(0x0a, off);
         const stop = nl < 0 ? buf.length : nl;
         const line = buf.subarray(off, stop).toString('utf8');
-        lines.push({ file, offset: off, bytes: stop - off, line, rec: ledgerRec(line) });
+        lines.push({ file: files[i], offset: off, bytes: stop - off, line, rec: ledgerRec(line) });
         off = stop + 1;
+        if (lines.length % STEP_LINES === 0) yield;
       }
-    });
+      segEnd.push(lines.length);
+    }
+    const start = trust ? segEnd[trust - 1] : 0;
+    const prev0 = trust && cp ? cp.segs[trust - 1].last : '';
 
     const records: LedgerRec[] = [];
     for (const l of lines) if (l.rec) records.push(l.rec);
-    let chain = structural ?? this.verify(agentId, lines);
+    const hashes: Array<string | undefined> = new Array(lines.length);
+    let chain: 'ok' | ChainBreak = structural ?? (yield* this.verifySteps(agentId, lines, start, prev0, hashes, key));
     // The anchor is structural, independent of the MAC key (Jim A-1): it is checked whenever the
     // prev chain holds (key-missing and mac included), and a cut reports the anchor break (the
     // Human's rekey refuses it then; a ledger a rekey left behind still shows the cut). The anchor
     // moves up only on a fully verified chain. A MAC failure stays the reported cause unless the
     // anchored record itself is gone (a cut): an edited last line is still `mac` at its id.
     if (chain === 'ok' || ((chain.reason === 'key-missing' || chain.reason === 'mac') && prevHolds(lines))) {
-      const anchored = this.checkAnchor(agentId, lines, chain === 'ok');
+      // Line hashes already known (the verify's, the checkpoint's segment ends) answer "reaches" without re-hashing.
+      const known = (): Set<string> => {
+        const s = new Set<string>();
+        for (const h of hashes) if (h) s.add(h);
+        if (cp) for (const seg of cp.segs.slice(0, trust)) s.add(seg.last);
+        return s;
+      };
+      const anchored = this.checkAnchor(agentId, lines, chain === 'ok', known);
       if (anchored !== 'ok' && (chain === 'ok' || chain.reason === 'key-missing' || !this.anchoredIdPresent(agentId, lines))) chain = anchored;
     }
-    this.adopt(agentId, lines, files, chain);
+    yield* this.adoptSteps(agentId, lines, files, chain, bufs.length ? bufs[bufs.length - 1].length : 0);
+    if (key && !structural) {
+      if (chain === 'ok' && !torn) {
+        const segs: CpSeg[] = [];
+        let last = '';
+        for (let i = 0; i < closed; i++) {
+          const from = i ? segEnd[i - 1] : 0;
+          if (i < trust && cp) last = cp.segs[i].last;
+          else if (segEnd[i] > from) last = hashes[segEnd[i] - 1] ?? sha256Hex(lines[segEnd[i] - 1].line);
+          segs.push({ name: basename(files[i]), size: bufs[i].length, sha: shas[i], lines: segEnd[i] - from, last });
+        }
+        this.noteCp(agentId, key, segs);
+      } else if (chain !== 'ok') this.noteCp(agentId, key, null);
+    }
     return { records, torn, chain };
+  }
+
+  /**
+   * STARTUP-FREEZE-104 A3: read and verify these agents' ledgers without blocking the event loop: each segment is read
+   * asynchronously, and the read core pauses whenever `sliceMs` of the clock is spent (and once before any work, so
+   * nothing runs in the caller's turn). It is not in the append queue (a 75 MB ledger would hold appends for its whole
+   * warm); instead a queued write that starts or ends between two slices (an append, or a purge that re-chains to the
+   * same size) moves writeGen and the warm drops that agent, so it never adopts a head older than the file. An agent already read, or whose segments end in a torn line (the synchronous read quarantines or reports it), is
+   * skipped. The result is kept as readLedger's would be, so later reads are the cached ones.
+   */
+  async warm(agents: string[], o: { clock?: () => number; pause?: () => Promise<void>; sliceMs?: number } = {}): Promise<{ warmed: string[]; skipped: string[]; pauses: number }> {
+    const clock = o.clock ?? (() => performance.now());
+    const pause = o.pause ?? (() => new Promise<void>((r) => setImmediate(r)));
+    const budget = o.sliceMs ?? 8;
+    const warmed: string[] = [];
+    const skipped: string[] = [];
+    let pauses = 0;
+    let slice = 0;
+    const tick = async (): Promise<void> => {
+      if (clock() - slice >= budget) { pauses++; await pause(); slice = clock(); }
+    };
+    const t0 = clock();
+    await pause();
+    pauses++;
+    slice = clock();
+    for (const agentId of agents) {
+      if (!AGENT_RE.test(agentId) || this.verifiedReads.has(agentId)) { skipped.push(agentId); continue; }
+      try {
+        const gen = this.writeGen.get(agentId) ?? 0;
+        const moved = (): boolean => (this.writeGen.get(agentId) ?? 0) !== gen || gen % 2 === 1; // odd: a write is in flight
+        await (async () => {
+          this.finishPurgeSwap(agentId);
+          const files = this.segments(agentId);
+          const bufs: Buffer[] = [];
+          for (const f of files) { bufs.push(await fsp.readFile(f)); await tick(); }
+          if (moved()) { skipped.push(agentId); return; }
+          if (bufs.some((b) => b.length > 0 && b[b.length - 1] !== 0x0a)) { skipped.push(agentId); return; }
+          const before = this.anchorWant(agentId);
+          const g = this.readCore(agentId, { files, bufs, torn: null, structural: null });
+          let r: ReadResult;
+          for (;;) {
+            // Checked before each step: a step runs to its end synchronously, and the last one adopts the write state.
+            if (moved()) { g.return(undefined as never); skipped.push(agentId); return; }
+            const s = g.next(); if (s.done) { r = s.value; break; } await tick();
+          }
+          this.keepRead(agentId, r, files.map((f, i) => segFp(f, bufs[i])), before);
+          warmed.push(agentId);
+        })();
+      } catch (e) {
+        skipped.push(agentId);
+        this.log({ kind: 'claims-warm-failed', agentId, error: String(e).slice(0, 160) });
+      }
+      await tick();
+    }
+    this.log({ kind: 'claims-warm', warmed: warmed.length, skipped: skipped.length, pauses, ms: Math.round(clock() - t0) });
+    return { warmed, skipped, pauses };
+  }
+
+  /** The agents a warm reads: every agent with a segment, and every anchored agent. */
+  ledgerAgents(): string[] {
+    let withSegments: string[] = [];
+    try { withSegments = nodeFs.readdirSync(join(this.d.hiveRoot, 'agents')).filter((a) => AGENT_RE.test(a) && this.segments(a).length > 0); } catch { /* none */ }
+    return [...new Set([...withSegments, ...this.anchoredAgents()])];
+  }
+
+  // ---------------------------------------------------------------- checkpoint (A3)
+
+  private cpKeyId = '';
+  /** The checkpoint for this hive and key, loaded once (a rekey starts an empty one). */
+  private cpLoad(key: Uint8Array): Map<string, CpAgent> {
+    const keyId = keyIdOf(key);
+    if (this.cp && this.cpKeyId === keyId) return this.cp;
+    const m = new Map<string, CpAgent>();
+    if (!this.cp) {
+      try {
+        const text = this.d.checkpoint?.load();
+        if (text) {
+          const j = JSON.parse(text) as Record<string, unknown>;
+          const { mac, ...body } = j;
+          if (body.v === CP_VERSION && body.hive === hiveIdOf(this.d.hiveRoot) && body.keyId === keyId && typeof mac === 'string'
+            && mac === cpMac(key, body) && isObj(body.agents)) {
+            for (const [a, e] of Object.entries(body.agents)) if (AGENT_RE.test(a) && validCpAgent(e)) m.set(a, e);
+          } else this.log({ kind: 'claims-checkpoint-ignored' });
+        }
+      } catch { this.log({ kind: 'claims-checkpoint-ignored' }); }
+    }
+    this.cp = m;
+    this.cpKeyId = keyId;
+    return m;
+  }
+
+  /** This agent's checkpoint (the file is bound to this hive, so to this agent's segment folder). */
+  private cpFor(agentId: string, key: Uint8Array): CpAgent | null {
+    return this.cpLoad(key).get(agentId) ?? null;
+  }
+
+  /** Record (or, with null, drop) an agent's verified closed segments; the file is written soon. */
+  private noteCp(agentId: string, key: Uint8Array, segs: CpSeg[] | null): void {
+    if (!this.d.checkpoint) return;
+    const m = this.cpLoad(key);
+    const prior = m.get(agentId);
+    if (segs === null) { if (!prior) return; m.delete(agentId); }
+    else {
+      const next: CpAgent = { segs };
+      if (prior && JSON.stringify(prior) === JSON.stringify(next)) return;
+      m.set(agentId, next);
+    }
+    if (this.cpSave) return;
+    this.cpSave = setTimeout(() => this.flushCheckpoint(), 1_000);
+    this.cpSave.unref?.();
+  }
+
+  /** Write the checkpoint now (close() and the save timer). */
+  flushCheckpoint(): void {
+    if (this.cpSave) { clearTimeout(this.cpSave); this.cpSave = null; }
+    const key = this.key;
+    if (!this.cp || !key || !this.d.checkpoint || this.cpKeyId !== keyIdOf(key)) return;
+    const body: Record<string, unknown> = { v: CP_VERSION, hive: hiveIdOf(this.d.hiveRoot), keyId: this.cpKeyId, agents: Object.fromEntries([...this.cp].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) };
+    try { this.d.checkpoint.save(JSON.stringify({ ...body, mac: cpMac(key, body) })); }
+    catch (e) { this.log({ kind: 'claims-checkpoint-save-failed', error: String(e).slice(0, 160) }); }
   }
 
   /**
@@ -475,11 +736,12 @@ export class ClaimStore {
    * yet (first run) adopts the current head. Recovery: a restore re-anchors; resetAnchor is the
    * Human's.
    */
-  private checkAnchor(agentId: string, lines: Array<{ line: string; rec: LedgerRec | null }>, advance: boolean): 'ok' | ChainBreak {
+  private checkAnchor(agentId: string, lines: Array<{ line: string; rec: LedgerRec | null }>, advance: boolean, known?: () => Set<string>): 'ok' | ChainBreak {
     const anchors = this.d.headAnchor;
     if (!anchors) return 'ok';
     const head = lines.length ? sha256Hex(lines[lines.length - 1].line) : '';
-    const reaches = (h: string): boolean => h === head || lines.some((l) => sha256Hex(l.line) === h);
+    let cheap: Set<string> | null = null;
+    const reaches = (h: string): boolean => h === head || (known ? (cheap ??= known()).has(h) : false) || lines.some((l) => sha256Hex(l.line) === h);
     // CL-W7 B1: a purge's re-anchor is main's own record in user-data (set before the swap), never a
     // file in the agent folder. The ledger reaching the purge's new head commits it; still reaching
     // the old head (the swap never happened) drops it; reaching neither is a cut.
@@ -522,7 +784,9 @@ export class ClaimStore {
    */
   checkAnchored(): string[] {
     const broken: string[] = [];
-    for (const a of this.anchoredAgents()) if (this.readLedger(a).chain !== 'ok') broken.push(a);
+    // A3: a kept verified read answers when the agent's segments still have its sizes and tails (and the anchor is
+    // one it reaches); a cut, a shrink or a changed tail is a full read, which alerts as before.
+    for (const a of this.anchoredAgents()) if (this.readLedgerCached(a).chain !== 'ok') broken.push(a);
     return broken;
   }
 
@@ -586,18 +850,25 @@ export class ClaimStore {
   /** Check prev and mac over every line; the first break, or 'ok'. */
   private verify(agentId: string, lines: ParsedLine[]): 'ok' | ChainBreak {
     if (lines.length === 0) return 'ok';
+    return drain(this.verifySteps(agentId, lines, 0, '', [], this.keys()));
+  }
+
+  /** verify from line `start` on, chained on `prev0` (A3: the lines before it are a checkpoint-proven prefix), noting
+   *  each verified line's sha256 in `hashes`; yields every STEP_LINES lines. */
+  private *verifySteps(agentId: string, lines: ParsedLine[], start: number, prev0: string, hashes: Array<string | undefined>, key: Uint8Array | null): Generator<void, 'ok' | ChainBreak, void> {
+    if (lines.length === 0) return 'ok';
     // MACs are checked from the last rekey on; before it the Human accepted the prev chain (C2).
     // A rekey line counts only when its OWN MAC verifies under this hive's key and it names that
-    // key: a forged rekey is an ordinary line that fails its MAC (Jim F1, god 2f8991).
-    const key = this.keys();
-    let macFrom = 0;
-    for (let i = lines.length - 1; i >= 0 && key; i--) {
+    // key: a forged rekey is an ordinary line that fails its MAC (Jim F1, god 2f8991). With a proven
+    // prefix, the last rekey before `start` leaves every line from `start` on MAC-checked, as here.
+    let macFrom = start;
+    for (let i = lines.length - 1; i >= start && key; i--) {
       const r = lines[i].rec;
       if (r && r.t === 'event' && r.ev === 'rekey' && r.keyId === keyIdOf(key)
         && recordMac(key, r as unknown as Record<string, unknown>) === r.mac) { macFrom = i; break; }
     }
-    let prev = '';
-    for (let i = 0; i < lines.length; i++) {
+    let prev = prev0;
+    for (let i = start; i < lines.length; i++) {
       const l = lines[i];
       const where = l.rec?.id ?? `${i}@${l.offset}`;
       if (!l.rec) return { brokenAt: where, reason: 'parse' };
@@ -614,6 +885,8 @@ export class ClaimStore {
         if (recordMac(key, l.rec as unknown as Record<string, unknown>) !== l.rec.mac) return { brokenAt: where, reason: 'mac' };
       }
       prev = sha256Hex(l.line);
+      hashes[i] = prev;
+      if ((i - start + 1) % STEP_LINES === 0) yield;
     }
     return 'ok';
   }
@@ -646,15 +919,19 @@ export class ClaimStore {
     return null;
   }
 
-  private adopt(agentId: string, lines: ParsedLine[], files: string[], chain: 'ok' | ChainBreak): void {
+  /** Adopt a read as the agent's write state. `tailSize`: the newest segment's size as read (A3: a warm's bytes may
+   *  be older than the file by the time it adopts them; a later append then sees the change and reads again). */
+  private *adoptSteps(agentId: string, lines: ParsedLine[], files: string[], chain: 'ok' | ChainBreak, tailSize: number): Generator<void, void, void> {
     const known = new Map<string, Known>();
     const exact = new Map<string, string[]>();
+    let n = 0;
     for (const l of lines) {
+      if (++n % STEP_LINES === 0) yield;
       const r = l.rec;
       if (!r) continue;
       if (r.t === 'claim') {
         known.set(r.id, { t: 'claim', source: r.source, kind: r.kind });
-        if (typeof r.text === 'string') { const k = r1Identity(r); exact.set(k, [...(exact.get(k) ?? []), r.id]); }
+        if (typeof r.text === 'string') { const k = r1Identity(r); const ids = exact.get(k); if (ids) ids.push(r.id); else exact.set(k, [r.id]); }
       } else known.set(r.id, { t: 'event', by: r.by });
     }
     const last = lines.length ? lines[lines.length - 1] : null;
@@ -664,7 +941,7 @@ export class ClaimStore {
       lastId: last?.rec?.id ?? null,
       known,
       tailFile,
-      tailSize: tailFile ? nodeFs.statSync(tailFile).size : 0,
+      tailSize: tailFile ? tailSize : 0,
       segments: files.length,
       readOnly: chain === 'ok' ? null : chain,
       exact,
@@ -708,7 +985,9 @@ export class ClaimStore {
 
   private serial<T>(agentId: string, fn: () => T | Promise<T>): Promise<T> {
     const prior = this.queues.get(agentId) ?? Promise.resolve();
-    const next = prior.then(fn, fn);
+    const bump = (): void => { this.writeGen.set(agentId, (this.writeGen.get(agentId) ?? 0) + 1); };
+    const run = async (): Promise<T> => { bump(); try { return await fn(); } finally { bump(); } };
+    const next = prior.then(run, run);
     this.queues.set(agentId, next.catch(() => undefined));
     return next;
   }
@@ -936,6 +1215,7 @@ export class ClaimStore {
   close(): void {
     for (const a of [...this.fds.keys()]) this.closeFd(a);
     for (const a of [...this.anchorTimers.keys()]) this.flushAnchor(a);
+    if (this.cpSave) this.flushCheckpoint();
   }
 
   private newId(t: 'claim' | 'event', s: AgentState): string {

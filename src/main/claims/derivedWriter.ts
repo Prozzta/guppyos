@@ -31,6 +31,8 @@ import { TRUSTED_METHODS, readProvenMail, type MailLinkMethod } from '../mailCar
 
 export interface DerivedStore {
   readLedger(agentId: string): ReadResult;
+  /** STARTUP-FREEZE-104 A3: the kept verified read (a stat and a tail read when nothing changed). */
+  readLedgerCached?(agentId: string): ReadResult;
   appendRecord(agentId: string, draft: RecordDraft, origin: AppendOrigin): Promise<AppendResult>;
 }
 
@@ -62,7 +64,7 @@ const refsId = (refs: ClaimRec['refs']): string => JSON.stringify((refs ?? []).m
 
 export async function syncDerived(deps: DerivedWriterDeps, facts: readonly DerivedFact[]): Promise<SyncCounts> {
   const counts: SyncCounts = { facts: facts.length, appended: 0, unchanged: 0, superseded: 0, failed: 0 };
-  const read = deps.store.readLedger(DERIVED_AGENT_ID);
+  const read = deps.store.readLedgerCached ? deps.store.readLedgerCached(DERIVED_AGENT_ID) : deps.store.readLedger(DERIVED_AGENT_ID);
   const state = deps.derive(read.records);
   const live = new Map<string, ClaimRec[]>();
   for (const r of read.records) {
