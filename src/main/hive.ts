@@ -654,6 +654,19 @@ export function syncedClaudeSkillNames(home: string = homedir()): string[] {
   return [...names].sort();
 }
 
+/** One mail file as last statted, with its parsed {id, created_at} once read (null = not a message). */
+type MailFileEntry = { mtimeMs: number; size: number; meta?: { id: unknown; created_at: unknown } | null };
+/** SCALE-DONE-STAT: a handled-mail folder's listing as of the folder mtime `mtimeMs`. */
+class ArchivedMailDir {
+  private sorted: Array<[string, MailFileEntry]> | undefined;
+  constructor(readonly mtimeMs: number, readonly files: Map<string, MailFileEntry>) {}
+  /** Newest file first (a stable sort of the listing order, as the per-poll sort was), built once. */
+  byMtimeDesc(): Array<[string, MailFileEntry]> {
+    return (this.sorted ??= [...this.files].sort((a, b) => b[1].mtimeMs - a[1].mtimeMs));
+  }
+}
+const EMPTY_MAIL_DIR = new ArchivedMailDir(Number.NaN, new Map());
+
 export class HiveManager {
   /**
    * @param getHome  Lazily resolve harnessHome so the hive follows config changes.
@@ -4202,8 +4215,12 @@ export class HiveManager {
       return [];
     }
 
+    // SCALE-MESSAGES-INDEX: select from each file's cached {id, created_at} (archived folders come
+    // from the dir-mtime cache; a live inbox/outbox is statted and re-read only for a changed file),
+    // then read just the rows returned (a bounded cache keeps a repeat call from reading those
+    // again). Same traversal, first-seen dedup, sort and slice as before.
     const seen = new Set<string>();
-    const out: VoiceMessage[] = [];
+    const picked: Array<{ path: string; key: string; owner: string; direction: 'inbox' | 'outbox'; archived: boolean; created_at: unknown }> = [];
     for (const owner of owners) {
       const base = this.agentDir(owner);
       const folders: Array<{ dir: string; direction: 'inbox' | 'outbox'; archived: boolean }> = [
@@ -4215,36 +4232,121 @@ export class HiveManager {
         folders.push({ dir: join(base, 'outbox', '.sent'), direction: 'outbox', archived: true });
       }
       for (const f of folders) {
-        for (const m of this.listMessages(f.dir)) {
-          if (!m || typeof m.id !== 'string' || seen.has(m.id)) continue;
-          seen.add(m.id);
-          if (wantId && m.id !== wantId) continue;
-          out.push({
-            id: m.id,
-            conversation: m.conversation,
-            from: m.from,
-            to: m.to,
-            act: m.act,
-            subject: redactSecrets(m.subject),
-            body: redactSecrets(m.body),
-            requires_reply: !!m.requires_reply,
-            direction: f.direction,
-            owner,
-            archived: f.archived,
-            created_at: m.created_at
-          });
+        const files = f.archived ? this.archivedMailDir(f.dir).files : this.liveMailDir(f.dir);
+        for (const n of [...files.keys()].sort()) {
+          const file = files.get(n)!;
+          const p = join(f.dir, n);
+          const meta = this.mailFileMeta(p, file);
+          if (!meta || typeof meta.id !== 'string' || seen.has(meta.id)) continue;
+          seen.add(meta.id);
+          if (wantId && meta.id !== wantId) continue;
+          picked.push({ path: p, key: `${file.size}|${file.mtimeMs}`, owner, direction: f.direction, archived: f.archived, created_at: meta.created_at });
         }
       }
     }
 
     // Newest first by ISO created_at (lexicographic == chronological for ISO-8601).
-    out.sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
-    if (wantId) return out.slice(0, 1);
-    const lim = typeof opts.limit === 'number' && isFinite(opts.limit)
+    picked.sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
+    const lim = wantId ? 1 : typeof opts.limit === 'number' && isFinite(opts.limit)
       ? Math.max(1, Math.min(40, Math.round(opts.limit)))
       : 12;
-    return out.slice(0, lim);
+    const out: VoiceMessage[] = [];
+    for (const r of picked.slice(0, lim)) {
+      const m = this.voiceMessageBody(r.path, r.key);
+      if (!m || typeof m.id !== 'string') continue; // moved or rewritten since it was indexed
+      out.push({
+        id: m.id,
+        conversation: m.conversation,
+        from: m.from,
+        to: m.to,
+        act: m.act,
+        subject: redactSecrets(m.subject),
+        body: redactSecrets(m.body),
+        requires_reply: !!m.requires_reply,
+        direction: r.direction,
+        owner: r.owner,
+        archived: r.archived,
+        created_at: m.created_at
+      });
+    }
+    return out;
   }
+
+  /**
+   * SCALE-DONE-STAT / SCALE-MESSAGES-INDEX: a handled-mail folder (inbox/.done, outbox/.sent) only
+   * gains and loses files (the harness renames mail in; nothing rewrites it there), so its listing
+   * is cached by the folder's own mtime: an unchanged folder costs one stat, a changed one a
+   * readdir plus a stat of each NEW file only. The folder is statted BEFORE it is listed, so a file
+   * that lands in between changes the mtime the next call sees. Each file also caches its parsed
+   * {id, created_at} (mailFileMeta), so nothing old is read again.
+   */
+  private archivedMailDir(dir: string): ArchivedMailDir {
+    let st: Stats;
+    try { st = statSync(dir); } catch { this.archivedMailDirs.delete(dir); return EMPTY_MAIL_DIR; }
+    const prev = this.archivedMailDirs.get(dir);
+    if (prev && prev.mtimeMs === st.mtimeMs) return prev;
+    let names: string[];
+    try { names = readdirSync(dir).filter((f) => f.endsWith('.json')); } catch { this.archivedMailDirs.delete(dir); return EMPTY_MAIL_DIR; }
+    const files = new Map<string, MailFileEntry>();
+    for (const n of names) {
+      const old = prev?.files.get(n);
+      if (old) { files.set(n, old); continue; }
+      try { const s = statSync(join(dir, n)); if (s.isFile()) files.set(n, { mtimeMs: s.mtimeMs, size: s.size }); } catch { /* moved meanwhile */ }
+    }
+    const next = new ArchivedMailDir(st.mtimeMs, files);
+    this.archivedMailDirs.set(dir, next);
+    return next;
+  }
+
+  /** A live inbox/ or outbox/ (small: unhandled mail only): listed and statted every call, as
+   *  before; a file whose size and mtime are unchanged keeps its cached meta. */
+  private liveMailDir(dir: string): Map<string, MailFileEntry> {
+    const files = new Map<string, MailFileEntry>();
+    let names: string[];
+    try { names = readdirSync(dir).filter((f) => f.endsWith('.json')); } catch { this.liveMailDirs.delete(dir); return files; }
+    const prev = this.liveMailDirs.get(dir);
+    for (const n of names) {
+      try {
+        const s = statSync(join(dir, n));
+        const old = prev?.get(n);
+        files.set(n, old && old.size === s.size && old.mtimeMs === s.mtimeMs ? old : { mtimeMs: s.mtimeMs, size: s.size });
+      } catch { /* moved meanwhile */ }
+    }
+    this.liveMailDirs.set(dir, files);
+    return files;
+  }
+
+  /** The {id, created_at} of one mail file, parsed once per entry; null = not a message. */
+  private mailFileMeta(path: string, file: MailFileEntry): { id: unknown; created_at: unknown } | null {
+    if (file.meta !== undefined) return file.meta;
+    let meta: { id: unknown; created_at: unknown } | null = null;
+    try {
+      const m = JSON.parse(readFileSync(path, 'utf8')) as { id?: unknown; created_at?: unknown } | null;
+      if (m) meta = { id: m.id, created_at: m.created_at };
+    } catch { meta = null; }
+    file.meta = meta;
+    return meta;
+  }
+
+  /** A returned row's full message, from a small cache keyed by path + size + mtime. */
+  private voiceMessageBody(path: string, key: string): HiveMessage | null {
+    const k = `${path}|${key}`;
+    const hit = this.voiceBodyCache.get(k);
+    if (hit !== undefined) { this.voiceBodyCache.delete(k); this.voiceBodyCache.set(k, hit); return hit; }
+    let m: HiveMessage | null = null;
+    try { m = JSON.parse(readFileSync(path, 'utf8')) as HiveMessage | null; } catch { m = null; }
+    if (m === null) return null;
+    this.voiceBodyCache.set(k, m);
+    if (this.voiceBodyCache.size > HiveManager.VOICE_BODY_CACHE_MAX) {
+      const first = this.voiceBodyCache.keys().next().value;
+      if (first !== undefined) this.voiceBodyCache.delete(first);
+    }
+    return m;
+  }
+  static readonly VOICE_BODY_CACHE_MAX = 200;
+  private readonly archivedMailDirs = new Map<string, ArchivedMailDir>();
+  private readonly liveMailDirs = new Map<string, Map<string, MailFileEntry>>();
+  private readonly voiceBodyCache = new Map<string, HiveMessage | null>();
   /**
    * ZT-I1-MAIL §7.1 / §11.12(c): the one-shot, idempotent upgrade pass (see mailMigration.ts).
    * Reads the registry for MUTATION, so a damaged registry throws and the pass waits for the next
@@ -4590,7 +4692,16 @@ export class HiveManager {
     };
     const live = list(inbox, false);
     const liveStems = new Set(live.map((f) => f.stem));
-    const done = list(join(inbox, '.done'), true).filter((f) => !liveStems.has(f.stem)).sort((a, b) => b.mtimeMs - a.mtimeMs);
+    // SCALE-DONE-STAT: .done only gains and loses files, so its listing comes from the dir-mtime
+    // cache (each file statted once, on first sight) and is walked newest-first until the limit.
+    const doneDir = join(inbox, '.done');
+    const want = Math.max(limit, 0) - live.length;
+    const done: typeof live = [];
+    for (const [n, f] of want > 0 ? this.archivedMailDir(doneDir).byMtimeDesc() : []) {
+      if (done.length >= want) break;
+      const stem = n.slice(0, -5);
+      if (!liveStems.has(stem)) done.push({ path: join(doneDir, n), stem, archived: true, mtimeMs: f.mtimeMs, size: f.size });
+    }
     const files = [...live.sort((a, b) => b.mtimeMs - a.mtimeMs), ...done].slice(0, Math.max(limit, 0));
     let entries: Record<string, { state: string }> = {};
     if (!opts.archived) {
