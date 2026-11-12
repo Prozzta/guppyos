@@ -83,6 +83,7 @@ export function ClaimLedgerSettings() {
           <span>{summary.floor.ledgerDefault
             ? `This floor: an agent without its own entry starts at ${summary.floor.ledgerDefault}.`
             : 'This floor: an agent without its own entry is off.'}</span>
+          {summary.floor.legacy && <span>Agents on this floor existed before claims ledger</span>}
           <span>{summary.floor.derivedRepo
             ? `Derived facts read the git repo ${summary.floor.derivedRepo}.`
             : 'No git repo is set for derived facts: merge, tag and release facts are not derived on this floor.'}</span>
@@ -96,7 +97,7 @@ export function ClaimLedgerSettings() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
             {summary.agents.map((a) => (
               <div key={a.agentId} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '2px 0' }}>
-                <span style={{ ...label, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>{a.agentId}</span>
+                <span style={{ ...label, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>{a.agentId}{a.system ? ' · system ledger' : ''}</span>
                 <span style={hint}>{a.level} · {a.claims} claims</span>
                 {a.readOnly && <span style={{ ...hint, color: 'var(--cth-status-blocked)' }}>read-only</span>}
                 <PixelButton size="sm" variant={agentId === a.agentId ? 'primary' : 'secondary'} onClick={() => setAgentId(agentId === a.agentId ? null : a.agentId)}>

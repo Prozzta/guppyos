@@ -468,6 +468,21 @@ function ui(x, store, over = {}) {
   return { api: createLedgerUi(deps), calls, answer: (a) => { answer = a; }, setLevel: (l) => { level = l; } };
 }
 
+test('Settings roster hides archived agents, labels derived as the system ledger, and leaves the ledger census to main', () => {
+  const x = setup();
+  const store = x.mk();
+  const u = ui(x, store, {
+    agents: () => ['active', 'archived', 'derived'],
+    agentMeta: (id) => id === 'archived' ? { archived: true } : id === 'derived' ? { system: true } : undefined,
+  });
+  assert.deepEqual(u.api.summary().agents.map((a) => [a.agentId, a.system]), [['active', undefined], ['derived', true]]);
+  const renderer = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'src', 'components', 'ClaimLedgerSettings.tsx'), 'utf8');
+  assert.match(renderer, /system ledger/);
+  const main = fs.readFileSync(path.join(ROOT, 'src', 'main', 'index.ts'), 'utf8');
+  assert.match(main, /agents: \(\) => \(claimsEndpoint\(\) \? \[\.\.\.claimLedgerAgents\(\), DERIVED_AGENT_ID\] : \[\]\),/);
+  assert.match(main, /agentMeta: \(agentId\) => \{/);
+});
+
 test('UI: a cancelled confirm writes nothing (revert, purge, export, a level drop)', async () => {
   const x = setup();
   const store = x.mk();
