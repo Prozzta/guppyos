@@ -63,6 +63,7 @@ export function ThreadsPanel({ agentId }: ThreadsPanelProps) {
   useEffect(() => {
     let alive = true;
     setLoaded(false);
+    setMessages([]); // another agent's threads must not show under this one while its first read runs
     const load = async () => {
       try {
         const inbox = await window.cth.hiveInbox(agentId);

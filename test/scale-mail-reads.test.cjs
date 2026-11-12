@@ -348,5 +348,6 @@ test('PIN (god afa1f6): the Threads panel shows a loading state until the first 
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'src', 'components', 'ThreadsPanel.tsx'), 'utf8');
   assert.match(src, /const \[loaded, setLoaded\] = useState\(false\);/);
   assert.match(src, /finally \{ if \(alive\) setLoaded\(true\); \}/);
+  assert.match(src, /setLoaded\(false\);\s+setMessages\(\[\]\);/, 'an agent switch clears the old threads (Jim 812640)');
   assert.match(src, /\{loaded \? 'No conversations yet\.[^']*' : 'Loading conversations…'\}/);
 });
