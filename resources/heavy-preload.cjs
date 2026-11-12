@@ -24,6 +24,21 @@ const NPM_FALLBACK_ALIASES = {
   'clean-install': 'ci', 'install-clean': 'ci', 'isntall-clean': 'ci', ic: 'ci'
 };
 const npmFallbackDeref = (word) => NPM_HEAVY_COMMANDS.has(word) ? word : NPM_FALLBACK_ALIASES[word];
+function npmValueTakingOption(cli) {
+  try {
+    const path = require('node:path');
+    const config = require(path.join(path.dirname(cli), '..', 'node_modules', '@npmcli', 'config', 'lib', 'definitions', 'index.js'));
+    const options = new Map();
+    for (const [name, definition] of Object.entries(config.definitions)) {
+      const types = Array.isArray(definition.type) ? definition.type : [definition.type];
+      // npm's Boolean options may stand alone; its other config definitions consume the next argv.
+      const takesValue = !types.includes(Boolean);
+      options.set(`--${name}`, takesValue);
+      for (const short of [].concat(definition.short || [])) options.set(`-${short}`, takesValue);
+    }
+    return (arg) => !String(arg).includes('=') && options.get(String(arg)) === true;
+  } catch { return () => false; /* npm changed layout: retain command-only fallback */ }
+}
 /** The npm CLI chooses the first known command after options; option values are not commands. */
 function npmInstallKind(cli, args) {
   let deref = npmFallbackDeref;
@@ -32,7 +47,14 @@ function npmInstallKind(cli, args) {
     const list = require(path.join(path.dirname(cli), '..', 'lib', 'utils', 'cmd-list.js'));
     if (typeof list.deref === 'function') deref = list.deref;
   } catch { /* npm changed layout: the pinned fallback covers install aliases */ }
-  for (const arg of args) {
+  const optionTakesValue = npmValueTakingOption(cli);
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index];
+    if (arg === '--') return null;
+    if (String(arg).startsWith('-')) {
+      if (optionTakesValue(arg)) index++;
+      continue;
+    }
     const command = deref(String(arg).toLowerCase());
     if (command !== undefined) return NPM_HEAVY_COMMANDS.has(command) ? 'install' : null;
   }

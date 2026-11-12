@@ -170,6 +170,7 @@ function npmKind(args, preload = PRELOAD) {
 K.npmCommand = (preload = PRELOAD) => {
   for (const args of [
     ['--prefix', 'C:/x', 'ci'], ['-C', 'dir', 'install'], ['--workspace', 'w', 'i'],
+    ['--loglevel', 'info', 'ci'], ['-w', 'docs', 'install'],
     ['clean-install'], ['ic'], ['install-clean'], ['in'], ['insta'], ['cit'], ['clean-install-test'], ['sit'],
     ['it'], ['rb'], ['update'], ['up'], ['u'], ['upgrade'], ['udpate'], ['dedupe']
   ]) assert.equal(npmKind(args, preload), 'install', `npm ${args.join(' ')} TAKES AN INSTALL LEASE`);
@@ -237,6 +238,15 @@ test('MUTANT: the old first-non-option npm parse misses a prefix option value an
   assert.equal(source.split(old).length - 1, 1, 'mutant target appears once');
   const mutant = path.join(JAIL, 'heavy-preload-old-npm-parse.cjs');
   fs.writeFileSync(mutant, source.replace(old, "deref(String(args.find((arg) => !String(arg).startsWith('-'))).toLowerCase())"));
+  assert.throws(() => K.npmCommand(mutant), /TAKES AN INSTALL LEASE/);
+});
+
+test('MUTANT: ignoring npm config option definitions mistakes a command-shaped option value for the command', () => {
+  const source = fs.readFileSync(PRELOAD, 'utf8');
+  const old = 'if (optionTakesValue(arg)) index++;';
+  assert.equal(source.split(old).length - 1, 1, 'mutant target appears once');
+  const mutant = path.join(JAIL, 'heavy-preload-no-npm-option-values.cjs');
+  fs.writeFileSync(mutant, source.replace(old, ''));
   assert.throws(() => K.npmCommand(mutant), /TAKES AN INSTALL LEASE/);
 });
 
