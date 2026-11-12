@@ -64,6 +64,29 @@ export function singleKeyOf(key: string | undefined, registry: KeyRegistry): str
   return cardinality(k, registry) === 'single' ? k : null;
 }
 
+/**
+ * A11 (Jim's 10x profile of c1db867a): whether derive gives every ledger the same statuses under `next` as under
+ * `prev`. derive reads a registry only through canonicalKey and cardinality(...) === 'single', so it holds when the
+ * namespaces are the same, every key of `prev` is in `next` unchanged, and every added key has no alias and the same
+ * single-or-not cardinality the namespaces gave it before (what the key writer adds). O(keys), no hashing.
+ */
+export function sameStatusesUnder(prev: KeyRegistry, next: KeyRegistry): boolean {
+  if (prev === next) return true;
+  if (canonical(prev.namespaces) !== canonical(next.namespaces)) return false;
+  const before = prev.keys;
+  const after = next.keys;
+  let kept = 0;
+  for (const key of Object.keys(after)) {
+    const e = after[key];
+    const old = before[key];
+    if (old) {
+      if (old.cardinality !== e.cardinality || old.aliasOf !== e.aliasOf) return false;
+      kept++;
+    } else if (e.aliasOf !== undefined || (e.cardinality === 'single') !== (cardinality(key, prev) === 'single')) return false;
+  }
+  return kept === Object.keys(before).length;
+}
+
 function protectedFromMail(source: ClaimRec, target: ClaimRec): boolean {
   return source.source.startsWith('mail:') && (target.source === 'self' || target.source === 'human' || target.source === 'legacy' || target.source === 'derived');
 }

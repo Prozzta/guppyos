@@ -57,7 +57,7 @@ import { hiveIdOf, type HeadAnchorStore, type LedgerKeyRecord } from './keyProvi
 import { redactSecrets } from './redact';
 import { normalizeTtl, parseStoredTtl, zonelessHint } from './ttl';
 import { DEFAULT_KEY_REGISTRY, KeyRegistryWriter, loadRegistryShared } from './registry';
-import { derive, singleKeyOf } from './derive';
+import { derive, sameStatusesUnder, singleKeyOf } from './derive';
 import { clampSection, R1_LEGACY_REASON } from './migrate';
 
 /** The file operations an append uses; injectable so tests can spy on the order and simulate a crash. */
@@ -150,7 +150,8 @@ interface AgentState {
  *   - a claim with no supersedes/retracts and no single-cardinality key is 'live' (every writer refuses a target it
  *     does not hold, so nothing names a new id) and changes no other claim (R2 groups only single keys);
  *   - a claim with a single key K can change, by R2, the claims keyed K only; those ids are then not reused (dirty).
- * Anything else (another event, a supersede/retract, a re-read state, another registry object) is a full derive.
+ * Anything else (another event, a supersede/retract, a re-read state, a registry derive reads differently) is a full
+ * derive.
  * Once a single-key claim went in, no id an event or a supersedes/retracts names (linked) is reused either: an event's
  * outcome can hang on another claim's status (soft-supersede, accept).
  */
@@ -1177,6 +1178,8 @@ export class ClaimStore {
   private statusesOf(agentId: string, s: AgentState, ids: readonly string[], registry: KeyRegistry): Map<string, Status | undefined> {
     const v = this.ledgerView(agentId, s);
     const d = v.derived;
+    // A11: a registry that only gained keys derive reads the same way (the writer's once-a-second save) keeps the view.
+    if (d && d.registry !== registry && sameStatusesUnder(d.registry, registry)) d.registry = registry;
     const reusable = (id: string): boolean => {
       if (!d || d.registry !== registry || !d.status.has(id)) return false;
       if (d.dirtyKeys.size === 0) return true;
