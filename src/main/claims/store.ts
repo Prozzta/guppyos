@@ -56,7 +56,7 @@ import { canonicalJson, keyIdOf, recordMac, sha256Hex } from './canonical';
 import { hiveIdOf, type HeadAnchorStore, type LedgerKeyRecord } from './keyProvider';
 import { redactSecrets } from './redact';
 import { normalizeTtl, parseStoredTtl, zonelessHint } from './ttl';
-import { checkKey, DEFAULT_KEY_REGISTRY, loadRegistry, saveRegistry } from './registry';
+import { checkKey, DEFAULT_KEY_REGISTRY, loadRegistry, loadRegistryShared, saveRegistry } from './registry';
 import { derive } from './derive';
 import { clampSection, R1_LEGACY_REASON } from './migrate';
 
@@ -1047,7 +1047,7 @@ export class ClaimStore {
     // both replace the same live claim.
     if (draft.t === 'claim' && draft.supersedesReason !== undefined && draft.supersedes?.length) {
       let registry;
-      try { registry = loadRegistry(this.d.hiveRoot); } catch { registry = undefined; }
+      try { registry = loadRegistryShared(this.d.hiveRoot); } catch { registry = undefined; }
       const state = derive(this.ledgerRecords(agentId), registry ?? DEFAULT_KEY_REGISTRY, { r4: false });
       for (const target of draft.supersedes) {
         const known = s.known.get(target);
@@ -1109,7 +1109,7 @@ export class ClaimStore {
     const candidates = s.exact.get(r1Identity(claim));
     if (!candidates?.length) return null;
     let registry;
-    try { registry = loadRegistry(this.d.hiveRoot); } catch { registry = undefined; }
+    try { registry = loadRegistryShared(this.d.hiveRoot); } catch { registry = undefined; }
     const state = derive(this.ledgerRecords(agentId), registry ?? DEFAULT_KEY_REGISTRY, { r4: false });
     const live = [...candidates].reverse().find((id) => state.claims[id]?.status === 'live');
     if (!live) return null;
@@ -1530,7 +1530,7 @@ export class ClaimStore {
     const key = this.keys();
     if (!key) return { ok: false, error: 'the ledger key is missing; nothing was purged' };
     let registry;
-    try { registry = loadRegistry(this.d.hiveRoot); } catch { registry = undefined; }
+    try { registry = loadRegistryShared(this.d.hiveRoot); } catch { registry = undefined; }
     const state = derive(read.records, registry ?? DEFAULT_KEY_REGISTRY, { r4: false });
     for (const id of ids) {
       const rec = read.records.find((r) => r.id === id);

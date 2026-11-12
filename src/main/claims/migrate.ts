@@ -31,6 +31,7 @@
  */
 import { createHash } from 'node:crypto';
 import { constants as fsConstants, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import * as fsp from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { CLAIM_TEXT_MAX_LEGACY } from '../../shared/claims';
 import type { ClaimKind, LedgerRec, RecordDraft } from '../../shared/claims';
@@ -289,6 +290,64 @@ export function newLegacyImport(agentDir: string, records: LedgerRec[]): { draft
     const r = entryDrafts(e, 'legacy');
     drafts.push(...r.drafts);
     if (r.refusal) refusals.push(r.refusal);
+  }
+  return { drafts, refusals };
+}
+
+/**
+ * STARTUP-FREEZE-104 A8 (Jim audit A8, SCALE-INGEST-ONCE): one legacy file's entries, kept per path while
+ * the file keeps the size and mtime it was split with. The racy rule: a file modified within RACY_MS of
+ * its read is not kept (a same-size write in the same tick would look unchanged).
+ */
+export type LegacyCache = Map<string, { size: number; mtimeMs: number; entries: Entry[] }>;
+const RACY_MS = 2000;
+const ENTRY_STEP = 512;
+
+/** A pause when `ms` of the slice is spent (setImmediate), for the sliced readers here. */
+export function sliceTicker(ms = 8, clock: () => number = () => performance.now(), pause: () => Promise<void> = () => new Promise<void>((r) => setImmediate(r))): () => Promise<void> {
+  let slice = clock();
+  return async () => { if (clock() - slice >= ms) { await pause(); slice = clock(); } };
+}
+
+/**
+ * newLegacyImport off the event loop: the same files in the same order (legacyFiles), the same
+ * entries (splitEntries) and the same count by hash, with fs/promises reads, the work in slices, and
+ * an unchanged file's entries taken from `cache` (no read). A file that cannot be read throws, as
+ * newLegacyImport does.
+ */
+export async function newLegacyImportAsync(agentDir: string, records: LedgerRec[], cache: LegacyCache, tick: () => Promise<void>): Promise<{ drafts: RecordDraft[]; refusals: Refusal[] }> {
+  let names: string[] = [];
+  try { names = await fsp.readdir(agentDir); } catch { names = []; }
+  const archives = names.filter((n) => ARCHIVE_RE.test(n)).sort();
+  const files = names.includes('memory.md') ? [...archives, 'memory.md'] : archives;
+  const have = ledgerEntryCounts(records);
+  await tick();
+  const seen = new Map<string, number>();
+  const drafts: RecordDraft[] = [];
+  const refusals: Refusal[] = [];
+  for (const f of files) {
+    const p = join(agentDir, f);
+    const st = await fsp.stat(p);
+    const hit = cache.get(p);
+    let entries: Entry[];
+    if (hit && hit.size === st.size && hit.mtimeMs === st.mtimeMs) entries = hit.entries;
+    else {
+      entries = splitEntries((await fsp.readFile(p)).toString('utf8'), f).entries;
+      if (Date.now() - st.mtimeMs >= RACY_MS) cache.set(p, { size: st.size, mtimeMs: st.mtimeMs, entries });
+      else cache.delete(p);
+    }
+    await tick();
+    for (let i = 0; i < entries.length; i++) {
+      const e = entries[i];
+      const n = (seen.get(e.sha256) ?? 0) + 1;
+      seen.set(e.sha256, n);
+      if (n > (have.get(e.sha256) ?? 0)) {
+        const r = entryDrafts(e, 'legacy');
+        drafts.push(...r.drafts);
+        if (r.refusal) refusals.push(r.refusal);
+      }
+      if (i % ENTRY_STEP === ENTRY_STEP - 1) await tick();
+    }
   }
   return { drafts, refusals };
 }

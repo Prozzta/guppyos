@@ -20,7 +20,7 @@ test('W5 main wiring mutants: dropping answer, post-index refresh, or startup re
   const mutants = [
     ['G1/onReconcile omitted', source.replace(/onReconcile: \(agentId, a, b\) => reconcileQueueForHive\(root\)\.answeredPair\(agentId, a, b\),?/, ''), answerWired],
     ['G2/post-index refresh omitted', source.replace(/onIndexed: \(agentId\) =>[^\n]+/, ''), postIndexWired],
-    ['G2/startup refresh omitted', source.replace(/setImmediate\(\(\) => \{ for \(const agentId of claimLedgerAgents\(\)\) \{ try \{ refreshReconcileQueueForHive\(root, agentId, reconcileHiveDeps\(\)\);[^\n]+/, ''), startupWired],
+    ['G2/startup refresh omitted', source.replace(/(?:setImmediate|void warmed\.then)\(\(\) => \{ for \(const agentId of claimLedgerAgents\(\)\) \{ try \{ refreshReconcileQueueForHive\(root, agentId, reconcileHiveDeps\(\)\);[^\n]+/, ''), startupWired],
   ];
   for (const [name, mutant, pin] of mutants) {
     assert.equal(pin(mutant), false, `${name} mutant must die`);

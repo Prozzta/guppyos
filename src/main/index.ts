@@ -22,13 +22,14 @@ import { startAfterMailCardCatchUp, startupMailCardCatchUp } from './mailCards';
 import { floorRepo, seedFloorSources } from './claims/floorSeed';
 import { makeW6Append } from './claims/w6Append';
 import { memoryMdReplaced, READER_WATCH_SYNC_MS, ReaderWatchers } from './claims/readerWatch';
+import type { LegacyCache } from './claims/migrate';
 import { importSettled } from './claims/ingest';
 import { enqueueR5AfterIndex, reconcileQueueForHive, ReconcileApi, shouldRunR5 } from './claims/reconcile';
 import { createClaimDelivery, WORKING_SET_MAX_CHARS, type TaskRow } from './claims/delivery';
 import { reconcileApiForHive as createReconcileApiForHive, refreshReconcileQueueForHive, type ReconcileHiveDeps } from './claims/reconcileHive';
 import { WordPieceTokenizer, wordPieceConfigFromTokenizerJson } from './nativeMemory/wordpiece';
 import { readSourcesConfig } from './nativeMemory/sources';
-import { DEFAULT_KEY_REGISTRY, loadRegistry } from './claims/registry';
+import { DEFAULT_KEY_REGISTRY, loadRegistry, loadRegistryShared } from './claims/registry';
 import { CLAIM_LEDGER_CLAMP_ROW, CLAIMS_ALERT_KEY_MISSING, DERIVED_AGENT_ID, effectiveLevel, IMPLEMENTED_LEVEL, manifestEntry, type DeriveFn, type LedgerLevel, type ReconcileItem, type UsageRec } from '../shared/claims';
 import { CodexVersionLog, codexNoDaemonGate, readCodexVersion } from './codexCli';
 import { codexLayerOptInKey, type CodexLayerNotice } from './codexProjectLayers';
@@ -1617,7 +1618,7 @@ function claimsIndexSync(): ClaimsIndexSync | null {
     claimsIndex = new ClaimsIndexSync({
       readLedger: (a) => (claimsEndpoint() as ClaimsEndpointDeps).store.readLedgerCached(a),
       derive: () => claimsDerive,
-      registry: () => { const root = hive.root(); try { return root ? loadRegistry(root) : DEFAULT_KEY_REGISTRY; } catch { return DEFAULT_KEY_REGISTRY; } },
+      registry: () => { const root = hive.root(); try { return root ? loadRegistryShared(root) : DEFAULT_KEY_REGISTRY; } catch { return DEFAULT_KEY_REGISTRY; } },
       ruleConfig: () => ({ r4: false }),
       level: claimLevel,
       agents: claimLedgerAgents,
@@ -1643,7 +1644,7 @@ derivedClaims = new DerivedLive({
   writer: () => {
     const ep = claimsEndpoint(); const root = hive.root();
     if (!ep || !root || !claimsDerive) return null;
-    const registry = (): ReturnType<typeof loadRegistry> => { try { return loadRegistry(root); } catch { return DEFAULT_KEY_REGISTRY; } };
+    const registry = (): ReturnType<typeof loadRegistry> => { try { return loadRegistryShared(root); } catch { return DEFAULT_KEY_REGISTRY; } };
     return { store: ep.store, derive: (records) => claimsDerive(records, registry(), { r4: false }), log: (row) => hive.appendLog(row) };
   },
   enabled: () => readConfig().derivedClaims !== false && claimLevel(DERIVED_AGENT_ID) !== 'off',
@@ -1672,7 +1673,10 @@ function claimAgentLedgers(): string[] {
 // a timer for a new ledger, a level change or a new hive root. An agent raised to reader or writer
 // mid-run (or given its first ledger) is imported first; its markdown leaves search only after that
 // (god 886ed8), when onSettled syncs its claims into the index.
+// STARTUP-FREEZE-104 A8: each legacy file's entries, kept while it is unchanged (the S0 import and the reader watchers).
+const claimsLegacyCache: LegacyCache = new Map();
 const readerWatchers = new ReaderWatchers({
+  legacyCache: claimsLegacyCache,
   hiveRoot: () => (claimsEndpoint() ? hive.root() : null),
   agents: () => (claimsEndpoint() ? claimAgentLedgers() : []),
   candidates: () => { const root = hive.root(); return root && claimsEndpoint() ? claimImportCandidates(root) : []; },
@@ -1698,7 +1702,7 @@ function claimExport(): ClaimExport {
       level: claimLevel,
       agentDir: (agentId) => hive.agentHome(agentId),
       readLedger: (agentId) => (claimsEndpoint() as ClaimsEndpointDeps).store.readLedgerCached(agentId),
-      registry: () => { const root = hive.root(); try { return root ? loadRegistry(root) : DEFAULT_KEY_REGISTRY; } catch { return DEFAULT_KEY_REGISTRY; } },
+      registry: () => { const root = hive.root(); try { return root ? loadRegistryShared(root) : DEFAULT_KEY_REGISTRY; } catch { return DEFAULT_KEY_REGISTRY; } },
       derive: deriveClaims,
       // The complete rendering marks statuses from the state; world evidence unknown here is neutral.
       view: (_agentId, records, state) => buildClaimsWorldView(state, records, [], {
@@ -1798,7 +1802,7 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
     // the catch-up settled (Jim 414b4c): the derived writer reads the index's done mails.
     void startAfterMailCardCatchUp(Promise.allSettled([mailCardCatchUp, warmed]),() => derivedClaims?.start());
     // W6: the switch to writer mode or a restart after a crash: catch every writer's export up.
-    void warmed.then(() => { try { claimExport().syncAll(claimLedgerAgents()); } catch (e) { hive.appendLog({ kind: 'claims-export-failed', step: 'sync', error: String(e).slice(0, 160) }); } });
+    void warmed.then(() => claimExport().syncAllAsync(claimLedgerAgents())).catch((e) => { hive.appendLog({ kind: 'claims-export-failed', step: 'sync', error: String(e).slice(0, 160) }); });
     // CL-READERWATCHER: watch memory.md for the agents whose ledger replaced it in search.
     void warmed.then(syncReaderWatchers);
     // W5 startup census. Successful index syncs repeat this after each indexed append.
@@ -1890,6 +1894,7 @@ function claimsImportReady(): Promise<void> {
       append: makeW6Append(ep.store),
       read: (agentId) => ep.store.readLedgerCached(agentId),
       log: (row) => hive.appendLog(row),
+      legacyCache: claimsLegacyCache,
       agents: () => claimImportCandidates(root),
       level: claimLevel,
     })).then(() => undefined, (e) => { hive.appendLog({ kind: 'claims-import-failed', error: String(e).slice(0, 160) }); });
@@ -1954,7 +1959,7 @@ const ledgerUi = createLedgerUi({
   },
   saveLevel: (level) => { writeConfig({ claimLedger: level }); },
   levelChanged: () => nativeMemory.claimLedgerChanged(),
-  registry: () => { const root = hive.root(); try { return root ? loadRegistry(root) : DEFAULT_KEY_REGISTRY; } catch { return DEFAULT_KEY_REGISTRY; } },
+  registry: () => { const root = hive.root(); try { return root ? loadRegistryShared(root) : DEFAULT_KEY_REGISTRY; } catch { return DEFAULT_KEY_REGISTRY; } },
   derive: deriveClaims,
   verifiedPrefix,
   exportComplete: (agentId) => claimExport().complete(agentId),

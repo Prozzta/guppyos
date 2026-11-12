@@ -15,7 +15,7 @@
  * removes true facts); the note offer lists same-key claims first and the writer chooses. Card ids are
  * distinct names (CL-W7 and CL-W8), so a new card key is never refused as a near miss.
  */
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DERIVED_AGENT_ID, type KeyRegistry } from '../../shared/claims';
 import { canonicalJson, sha256Hex } from './canonical';
@@ -64,6 +64,29 @@ export function loadRegistry(hiveRoot: string): KeyRegistry {
     if (!raw.namespaces.some((n) => n.pattern === ns.pattern)) raw.namespaces.push({ ...ns });
   }
   return raw;
+}
+
+/** STARTUP-FREEZE-104 (Jim, A3 gate): the parsed registry, kept per path while the file keeps the size and mtime it
+ *  was read with (1.87 MB at 10x was read 73 times a minute). The racy rule: a read within RACY_MS of the file's
+ *  mtime is not kept (a same-size write in the same tick would look unchanged). */
+const RACY_MS = 2000;
+const shared = new Map<string, { size: number; mtimeMs: number; reg: KeyRegistry }>();
+function deepFreeze<T>(o: T): T {
+  if (o && typeof o === 'object' && !Object.isFrozen(o)) { Object.freeze(o); for (const v of Object.values(o as object)) deepFreeze(v); }
+  return o;
+}
+/** loadRegistry for READERS: one frozen object while the file is unchanged. A caller that edits the registry
+ *  (checkKey before saveRegistry) uses loadRegistry, which returns its own copy. */
+export function loadRegistryShared(hiveRoot: string): KeyRegistry {
+  const p = registryPath(hiveRoot);
+  let st: { size: number; mtimeMs: number } | null = null;
+  try { const s = statSync(p); st = { size: s.size, mtimeMs: s.mtimeMs }; } catch { st = null; }
+  const hit = shared.get(p);
+  if (st && hit && hit.size === st.size && hit.mtimeMs === st.mtimeMs) return hit.reg;
+  const reg = deepFreeze(loadRegistry(hiveRoot));
+  if (st && Date.now() - st.mtimeMs >= RACY_MS) shared.set(p, { ...st, reg });
+  else shared.delete(p);
+  return reg;
 }
 
 export function saveRegistry(hiveRoot: string, reg: KeyRegistry): void {
