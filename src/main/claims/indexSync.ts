@@ -79,9 +79,19 @@ export class ClaimsIndexSync {
     this.timers.set(agentId, this.setTimer(() => { this.timers.delete(agentId); void this.syncNow(agentId); }, CLAIMS_SYNC_DEBOUNCE_MS));
   }
 
-  /** A (re)started worker: every agent with a ledger, now. */
-  syncAll(): Promise<SyncOutcome[]> {
-    return Promise.all(this.d.agents().map((a) => this.syncNow(a)));
+  /**
+   * A (re)started worker: every agent with a ledger, now. STARTUP-FREEZE-104 A13 (Jim's 10x profile of c1db867a: the
+   * first sync was one 2.3 s block): each agent's read, derive and chunks start in their own turn of the event loop
+   * (an agent's sync runs up to its send before the next turn), so timers, IPC and input run between agents. The
+   * same agents, in the same order, with the same outcomes.
+   */
+  async syncAll(): Promise<SyncOutcome[]> {
+    const runs: Promise<SyncOutcome>[] = [];
+    for (const a of this.d.agents()) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      runs.push(this.syncNow(a));
+    }
+    return Promise.all(runs);
   }
 
   syncNow(agentId: string, appended?: LedgerRec): Promise<SyncOutcome> {
