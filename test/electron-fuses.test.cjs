@@ -3,6 +3,7 @@ require('./tools/own-job.cjs');
 // MUTANT-JOURNAL-GATE (god 5cc045/ed8032): this suite loads electron-harness/electron-bin.cjs, a file a census
 // mutates in place (one load-ts never sees); refuse a tree a killed census left mutated, before anything is read.
 require('./tools/mutant-runner-helper.cjs').gate(__filename);
+// @heavy-lock live: it takes the harness Electron (harnessElectron) and copies and rewrites that binary's fuse wire. HEAVY-ELECTRON-TAG: one run of this file takes the heavy slot.
 /*
  * ELECTRON-FUSES (1.1.105): the packaged binary's fuses (build/electronFuses.cjs, flipped in afterPack).
  *  - the state per build: a normal build and the layer-(b) seams build differ only in
