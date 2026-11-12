@@ -638,7 +638,7 @@ test('G7.1: every UI write goes through appendRecord with origin ui-ipc, except 
 test('G7.2: the purge is reachable only from the app window\'s Settings IPC', () => {
   const idx = fs.readFileSync(path.join(ROOT, 'src/main/index.ts'), 'utf8');
   const handlers = idx.split('\n').filter((l) => l.includes("ipcMain.handle('claims-ui:"));
-  assert.equal(handlers.length, 9);   // W7's 7, and CL-M4-CHAINS-PANEL's keep-one / keep-all
+  assert.equal(handlers.length, 11);  // W7's 7, chains' 2, and legacy-floor bootstrap status/request
   for (const h of handlers) assert.match(h, /\(ledgerUiSender\(evt\) \?/, h);
   // GUPPY-BLOB-P01: the window + top-frame rule moved into isAppWindowSender (which also refuses the
   // blob overlay); its behaviour is pinned in test/blob-overlay.test.cjs.

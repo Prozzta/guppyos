@@ -1966,12 +1966,9 @@ ipcMain.handle('claims-ui:export', (evt, agentId: unknown) => (ledgerUiSender(ev
 ipcMain.handle('claims-ui:keep-one', (evt, agentId: unknown, keep: unknown, retire: unknown) => (ledgerUiSender(evt) ? ledgerUi.keepOne(String(agentId), keep, retire) : NOT_HERE));
 ipcMain.handle('claims-ui:keep-all', (evt, agentId: unknown, ids: unknown) => (ledgerUiSender(evt) ? ledgerUi.keepAll(String(agentId), ids) : NOT_HERE));
 ipcMain.handle('claims-ui:bootstrap-status', (evt) => (ledgerUiSender(evt) ? claimsBootstrapStatus() : NOT_HERE));
-ipcMain.handle('claims-ui:bootstrap', async (evt) => {
-  if (!ledgerUiSender(evt)) return NOT_HERE;
-  // The window is the Human's request; attribute its floor-wide lock to god so CLI and Settings
-  // cannot run two imports beside one another.
-  return runClaimsBootstrap(hive.registry().godId ?? 'god');
-});
+// The window is the Human's request; attribute its floor-wide lock to god so CLI and Settings
+// cannot run two imports beside one another.
+ipcMain.handle('claims-ui:bootstrap', (evt) => (ledgerUiSender(evt) ? runClaimsBootstrap(hive.registry().godId ?? 'god') : NOT_HERE));
 /** CLAIMS-90 HISTORY-PTR: `memory history <id>`, claims/readWiring.ts (the answer child calls the same code). */
 function claimHistory(agentId: string, id: string): { ok: true; text: string; owner: string } | { ok: false; error: string } {
   const root = hive.root(); const ep = claimsEndpoint();
