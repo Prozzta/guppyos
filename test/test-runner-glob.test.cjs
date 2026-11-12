@@ -781,7 +781,10 @@ test('PIN: against the REAL test directory discovery is root tests plus only fol
   // INT 1.1.105 group 7 (BLOB-SETUP-GUIDE): + 1 (blob-settings-section).
   // ELECTRON-UPGRADE: +1 (cut-cmd-natives-198).
   // CAP-NO-5H-WINDOW: + 1 (capacity-no-5h-window).
-  assert.equal(files.length, 573,`the focused suite must retain its pre-fold file count, got ${files.length}`);
+  // Corrected count: ELECTRON-UPGRADE added 5 root tests, not 1: electron-45-clipboard,
+  // electron-45-clipboard-handlers, electron-45-natives, electron-45-safe-directory-watch,
+  // mac-minimum-system-version (cut-cmd-natives-198 was already there). Root 536 + folded 41.
+  assert.equal(files.length, 577,`the focused suite must retain its pre-fold file count, got ${files.length}`);
   assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
   assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');
   assert.ok(files.includes(path.join('start-fixes-163', 'start-fixes-163-boot-submit.test.cjs')), 'the start-fixes feature folder is included');
