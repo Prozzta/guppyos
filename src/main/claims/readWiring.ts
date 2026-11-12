@@ -12,7 +12,7 @@ import { verifiedPrefix } from './indexSync';
 import { derive as deriveClaims } from './derive';
 import { renderClaimHistory } from './views';
 import { reconcileQueueForHive } from './reconcile';
-import { DEFAULT_KEY_REGISTRY, loadRegistryShared, registryPath } from './registry';
+import { DEFAULT_KEY_REGISTRY, flushRegistryWrites, loadRegistryShared, registryPath } from './registry';
 import { readDoneMailStatus } from './derivedDoneStatus';
 import { formatGet, leadBrief, resolveGet, resolveGetMany, warmGetIndex, type CardLeadAsk, type CardLeadReply, type GetDeps } from './get';
 import { targetIndex, targetsIn, type TargetIndex } from './searchTargets';
@@ -83,6 +83,7 @@ function getDeps(d: ClaimReadDeps): GetDeps {
   const ledgers: Record<string, LedgerRec[]> = {};
   for (const a of d.agents()) { const prefix = verifiedPrefix(read(a)); if (prefix) ledgers[a] = prefix.records; }
   // The registry by its file text: parsed only when the text changed (a parse and re-serialise per ask was ~14 ms).
+  flushRegistryWrites(root);   // A9: acked keys still waiting to be saved are in the text
   let regText: string | null; try { regText = readFileSync(registryPath(root), 'utf8'); } catch { regText = null; }
   const queue = reconcileQueueForHive(root);
   const reconcileItems = Object.keys(ledgers).flatMap((a) => queue.allItems(a));

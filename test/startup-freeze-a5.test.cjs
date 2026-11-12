@@ -315,7 +315,9 @@ test('main wiring: the start-up export sync is syncAllAsync, the legacy cache is
   assert.doesNotMatch(idx, /return root \? loadRegistry\(root\)/, 'no reader re-parses the registry');
   const store = fs.readFileSync(path.join(ROOT, 'src', 'main', 'claims', 'store.ts'), 'utf8');
   assert.equal(store.split('registry = loadRegistryShared(this.d.hiveRoot)').length - 1, 3);
-  assert.match(store, /reg = loadRegistry\(this\.d\.hiveRoot\); \} catch \(e\) \{ return \{ error: `the key registry is unreadable/, 'the key check keeps its own copy');
+  // A9 replaced the key check's own copy (a parse per new key) with the store's KeyRegistryWriter, whose check
+  // leaves the working copy unchanged until commit (startup-freeze-a9).
+  assert.match(store, /try \{ c = writer\.check\(draft\.key, agentId, wt\); \} catch \(e\) \{ return \{ error: `the key registry is unreadable/, 'the key check uses the writer');
   const rw = fs.readFileSync(path.join(ROOT, 'src', 'main', 'claims', 'readerWatch.ts'), 'utf8');
   assert.equal(rw.split('legacyCache: this.d.legacyCache').length - 1, 2);
 });

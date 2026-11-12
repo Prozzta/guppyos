@@ -56,7 +56,7 @@ import { canonicalJson, keyIdOf, recordMac, sha256Hex } from './canonical';
 import { hiveIdOf, type HeadAnchorStore, type LedgerKeyRecord } from './keyProvider';
 import { redactSecrets } from './redact';
 import { normalizeTtl, parseStoredTtl, zonelessHint } from './ttl';
-import { checkKey, DEFAULT_KEY_REGISTRY, loadRegistry, loadRegistryShared, saveRegistry } from './registry';
+import { DEFAULT_KEY_REGISTRY, KeyRegistryWriter, loadRegistryShared } from './registry';
 import { derive } from './derive';
 import { clampSection, R1_LEGACY_REASON } from './migrate';
 
@@ -330,6 +330,7 @@ export class ClaimStore {
   /** A3: the checkpoint as loaded (null: not loaded yet) and a save pending. */
   private cp: Map<string, CpAgent> | null = null;
   private cpSave: ReturnType<typeof setTimeout> | null = null;
+  private keyReg: { root: string; writer: KeyRegistryWriter } | null = null;
   private readonly queues = new Map<string, Promise<unknown>>();
   private readonly alerted = new Set<string>();
   private keyMissing = false;
@@ -1213,10 +1214,26 @@ export class ClaimStore {
 
   /** Close every append handle (quit, hive change). Appends after it reopen. */
   close(): void {
+    this.flushKeyRegistry();
     for (const a of [...this.fds.keys()]) this.closeFd(a);
     for (const a of [...this.anchorTimers.keys()]) this.flushAnchor(a);
     if (this.cpSave) this.flushCheckpoint();
   }
+
+  /** STARTUP-FREEZE-104 A9: the key registry writer for the current hive root. */
+  private keyRegistry(): KeyRegistryWriter {
+    const root = this.d.hiveRoot;
+    if (this.keyReg?.root !== root) {
+      this.keyReg?.writer.flush();
+      this.keyReg = { root, writer: new KeyRegistryWriter(root, (keys, e) => {
+        for (const key of keys) this.log({ kind: 'claims-key-save-failed', key, error: String(e).slice(0, 120) });
+      }) };
+    }
+    return this.keyReg.writer;
+  }
+
+  /** Save added keys now (quit, hive change; any registry reader does this through loadRegistry*). */
+  flushKeyRegistry(): void { this.keyReg?.writer.flush(); }
 
   private newId(t: 'claim' | 'event', s: AgentState): string {
     for (;;) {
@@ -1349,15 +1366,18 @@ export class ClaimStore {
     }
     let registryAdded: (() => void) | null = null;
     if (draft.key !== undefined) {
-      let reg;
-      try { reg = loadRegistry(this.d.hiveRoot); } catch (e) { return { error: `the key registry is unreadable (${String(e).slice(0, 120)})` }; }
-      const c = checkKey(reg, draft.key, agentId, wt);
+      // STARTUP-FREEZE-104 A9: one working registry per hive; an added key is saved with the others within 1 s.
+      const writer = this.keyRegistry();
+      let c;
+      try { c = writer.check(draft.key, agentId, wt); } catch (e) { return { error: `the key registry is unreadable (${String(e).slice(0, 120)})` }; }
       if (!c.ok) return { error: c.error, ...(c.didYouMean ? { didYouMean: c.didYouMean } : {}) };
-      if (c.added) {
+      const entry = c.added ? c.entry : undefined;
+      if (entry) {
         const key = draft.key;
+        const cardinality = c.cardinality;
         registryAdded = () => {
-          try { saveRegistry(this.d.hiveRoot, reg); } catch (e) { this.log({ kind: 'claims-key-save-failed', key, error: String(e).slice(0, 120) }); }
-          this.log({ kind: 'claims-key-added', agentId, key, cardinality: c.cardinality });
+          writer.commit(key, entry);
+          this.log({ kind: 'claims-key-added', agentId, key, cardinality });
         };
       }
     }
