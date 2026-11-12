@@ -232,7 +232,7 @@ test('B9 (Jim\'s pin): the cache re-reads on an mtime change, so a LATER lost St
 
 test('WIRING: main feeds the bridge a Codex-only probe, from a bounded reader', () => {
   const index = codeOnly(readSource('src/main/index.ts'));
-  assert.match(index, /codexTurnProbe: \(agentId\) => \{\s*const home = hive\.codexHomeFor\(agentId\);\s*return home \? codexLifecycle\.probe\(home\) : undefined;\s*\}/);
+  assert.match(index, /codexTurnProbe: \(agentId\) => \{\s*const home = hive\.codexHomeFor\(agentId\);\s*return home \? codexLifecycle\.probe\(home, hive\.lastSession\(agentId\)\) : undefined;\s*\}/);
   const bridge = codeOnly(readSource('src/main/inboxWakeBridge.ts'));
   // 1.1.53: the beat reads the inbox ONCE, reconciles, probes, runs the coordinator's beat, then claims with those ids.
   assert.match(bridge, /reconcileAll\(agentIds: readonly string\[\]\): void \{\s*for \(const agentId of agentIds\) \{\s*try \{\s*const ids = this\.deps\.inboxIds\(agentId\);\s*this\.deps\.coordinator\.reconcile\(agentId, ids, this\.openIds\(agentId\)\);\s*try \{ this\.closeLostCodexTurn\(agentId, ids\); \}[\s\S]*?this\.deps\.coordinator\.beat\(agentId, this\.deps\.now\(\)\)[\s\S]*?this\.requestInboxWake\(agentId, 'reconcile', 'reconcile', ids\);/, 'probed on the beat, before the claim');

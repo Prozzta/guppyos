@@ -17,7 +17,7 @@
  * stays active.
  */
 import { statSync } from 'node:fs';
-import { findNewestRollout, readTail } from './codexRolloutCapacity';
+import { RolloutIndex, readTail } from './codexRolloutCapacity';
 
 /** How much of the rollout tail is read. The newest turn boundary is normally in the last
  *  few KB (after task_complete Codex writes only a token count); a boundary beyond this
@@ -104,8 +104,12 @@ export class CodexRolloutLifecycleSource {
   private cache = new Map<string, { file: string; mtimeMs: number; latest: CodexTurnEvent | null }>();
   private settings = new Map<string, { file: string; mtimeMs: number; at: number | null }>();
 
-  probe(codexHome: string): CodexLifecycleProbe {
-    const file = findNewestRollout(codexHome);   // rotation / a new session file: re-resolved each probe
+  /** SCALE-ROLLOUT-NEWEST: the newest rollout per home, kept so a repeat probe stats no old rollout. */
+  constructor(private readonly rollouts: RolloutIndex = new RolloutIndex()) {}
+
+  /** `sessionId` is the agent's registered Codex session (the resume key): its file is restatted every probe. */
+  probe(codexHome: string, sessionId?: string): CodexLifecycleProbe {
+    const file = this.rollouts.newest(codexHome, sessionId);   // rotation / a new session file: re-resolved each probe
     if (!file) return { ok: false, why: 'no-rollout' };
     let mtimeMs: number;
     try { mtimeMs = statSync(file).mtimeMs; } catch { return { ok: false, why: 'unreadable' }; }
@@ -120,8 +124,8 @@ export class CodexRolloutLifecycleSource {
 
   /** DWIGHT-INPUT-DEAD-179 F4: when Codex last applied this home's thread settings (its newest
    *  rollout), or null. Fails CLOSED: no rollout, an unreadable file, or no such event = null. */
-  threadSettingsAt(codexHome: string): number | null {
-    const file = findNewestRollout(codexHome);
+  threadSettingsAt(codexHome: string, sessionId?: string): number | null {
+    const file = this.rollouts.newest(codexHome, sessionId);
     if (!file) return null;
     let mtimeMs: number;
     try { mtimeMs = statSync(file).mtimeMs; } catch { return null; }
@@ -137,5 +141,6 @@ export class CodexRolloutLifecycleSource {
   forget(codexHome: string): void {
     this.cache.delete(codexHome);
     this.settings.delete(codexHome);
+    this.rollouts.forget(codexHome);
   }
 }
