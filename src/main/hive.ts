@@ -1107,6 +1107,11 @@ export class HiveManager {
     return this.writeCommandDir('term', script);
   }
 
+  /** CLAIMS-BOOTSTRAP: god's floor-wide legacy claims import command. */
+  writeClaimsCommand(script: string): string | null {
+    return this.writeCommandDir('claims', script);
+  }
+
   /** HEAVY-LOCK-RESERVATION-RELEASE: `<root>/bin/heavy/`, the `heavy` command (`heavy status`,
    *  `heavy release`) on the heavy lock's route. Prepended to every hive agent's PATH. */
   writeHeavyCommand(script: string): string | null {
@@ -1593,6 +1598,7 @@ export class HiveManager {
         // GOD-TERMINAL-CONTROL: the `term` capability URL exists only in god's environment
         // (hygiene; the broker's request-time god check is the boundary).
         if (hookUrl && meta.isGod) env.HIVE_TERM_URL = hookUrl.replace('/hook/', '/term/');
+        if (hookUrl && meta.isGod) env.HIVE_CLAIMS_URL = hookUrl.replace('/hook/', '/claims/');
         try {
           if (desc.kind === 'hooks') {
             // The agy and grok bridges write GLOBAL config (~/.gemini/…/hooks.json,
@@ -1631,6 +1637,7 @@ export class HiveManager {
               if (codex.mcpUrl) env.HIVE_LEDGER_URL = codex.mcpUrl.replace('/mcp/', '/ledger/');
               // GOD-TERMINAL-CONTROL: env only, never written into Codex's config.toml.
               if (codex.mcpUrl && meta.isGod) env.HIVE_TERM_URL = codex.mcpUrl.replace('/mcp/', '/term/');
+              if (codex.mcpUrl && meta.isGod) env.HIVE_CLAIMS_URL = codex.mcpUrl.replace('/mcp/', '/claims/');
               if (codex.developerInstructions) developerInstructionsSet = true;
               // WAKE-SCREEN-GUARD R2-2: no startup update prompt on any Codex argv (fresh and
               // `codex resume` alike: `-c` is a global flag). The same key is in its config.toml.
@@ -1814,6 +1821,7 @@ export class HiveManager {
       if (hookUrl) env.HIVE_LEDGER_URL = hookUrl.replace('/hook/', '/ledger/');
       // GOD-TERMINAL-CONTROL: `term` uses the same token, and only god's environment has the URL.
       if (hookUrl && meta.isGod) env.HIVE_TERM_URL = hookUrl.replace('/hook/', '/term/');
+      if (hookUrl && meta.isGod) env.HIVE_CLAIMS_URL = hookUrl.replace('/hook/', '/claims/');
       args.push('--settings', settingsPath);
     }
     return { args, env };
