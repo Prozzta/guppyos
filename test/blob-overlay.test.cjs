@@ -325,7 +325,8 @@ test('ring: opens around the blob centre and closes back; coming-soon / disabled
   hz.ctl.setRing(true);
   const off = Math.round((RING_SIZE - BLOB_SIZE) / 2);
   assert.deepEqual(hz.win().bounds, { x: 800 - off, y: 600 - off, width: RING_SIZE, height: RING_SIZE });
-  for (const s of ['screenshot', 'meeting', 'message']) assert.deepEqual(hz.ctl.action(s), { ok: true, slot: s, state: 'coming-soon' });
+  for (const s of ['screenshot', 'meeting']) assert.deepEqual(hz.ctl.action(s), { ok: true, slot: s, state: 'coming-soon' });
+  assert.deepEqual([...BLOB_COMING_SOON], ['screenshot', 'meeting'], 'record message is built (BLOB-MESSAGE)');
   assert.deepEqual(hz.ctl.action('screen'), { ok: true, slot: 'screen', state: 'disabled' });
   assert.equal(hz.ctl.action('nope').ok, false);
   assert.equal(hz.ctl.action('close').state, 'done');
@@ -346,6 +347,25 @@ test('openInApp (BLOB-MESSAGE): a coming-soon app action never opens the app; ap
   assert.deepEqual([...BLOB_APP_ACTIONS].sort(), ['meeting', 'message', 'screenshot']);
   for (const s of BLOB_APP_ACTIONS) assert.equal(isBlobAppAction(s), true, s);
   for (const s of ['close', 'invisible', 'screen', '', null, 'Message']) assert.equal(isBlobAppAction(s), false, String(s));
+  hz.ctl.dispose();
+});
+
+test('openInApp (BLOB-MESSAGE): record message opens its dialog in the app and closes the ring; no window = an error, ring stays', () => {
+  resetConfig();
+  writeConfig({ blobEnabled: true, blobPosition: { x: 800, y: 600 } });
+  const calls = [];
+  let win = true;
+  const hz = harness({ openInApp: (a) => { calls.push(a); return win; } });
+  hz.ctl.apply();
+  hz.ctl.setRing(true);
+  const r = hz.ctl.action('message');
+  assert.equal(r.ok, true);
+  assert.equal(r.state, 'done');
+  assert.deepEqual(calls, ['message']);
+  assert.deepEqual(hz.win().bounds, { x: 800, y: 600, width: BLOB_SIZE, height: BLOB_SIZE }, 'ring closed');
+  hz.ctl.setRing(true);
+  win = false;
+  assert.deepEqual(hz.ctl.action('message'), { ok: false, error: 'the Guppy window is not available' });
   hz.ctl.dispose();
 });
 

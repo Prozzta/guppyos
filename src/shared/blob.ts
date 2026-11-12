@@ -13,7 +13,7 @@ export const BLOB_SLOTS = ['screenshot', 'meeting', 'invisible', 'close', 'scree
 export type BlobSlot = (typeof BLOB_SLOTS)[number];
 
 /** Slots whose action is not built yet: the ring shows them, a click says "coming soon". */
-export const BLOB_COMING_SOON: readonly BlobSlot[] = ['screenshot', 'meeting', 'message'];
+export const BLOB_COMING_SOON: readonly BlobSlot[] = ['screenshot', 'meeting'];
 /** Shown greyed out and never actionable (screen sharing is out of scope). */
 export const BLOB_DISABLED: readonly BlobSlot[] = ['screen'];
 

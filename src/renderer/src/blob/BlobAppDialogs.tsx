@@ -5,9 +5,12 @@
  */
 import { useEffect, useState } from 'react';
 import type { BlobAppAction } from '@shared/blob';
+import { BlobMessageDialog } from './BlobMessageDialog';
 
 export type BlobAppDialog = (p: { onClose(): void }) => JSX.Element;
-export const BLOB_APP_DIALOGS: Partial<Record<BlobAppAction, BlobAppDialog>> = {};
+export const BLOB_APP_DIALOGS: Partial<Record<BlobAppAction, BlobAppDialog>> = {
+  message: BlobMessageDialog,
+};
 
 export function BlobAppDialogs(): JSX.Element | null {
   const [open, setOpen] = useState<BlobAppAction | null>(null);
