@@ -73,7 +73,10 @@ function refuse(deps: IngestDeps, agent: string, report: IngestReport, refusal: 
 async function appendAll(deps: IngestDeps, agent: string, drafts: RecordDraft[], report: IngestReport, via: string, r5: boolean): Promise<void> {
   report.offered += drafts.length;
   // One at a time, in order: the parts of a split entry go in back to back.
+  // A10: in slices, as the legacy read is, so a run of appends whose acks chain on microtasks cannot hold main.
+  const tick = deps.tick ?? sliceTicker();
   for (const d of drafts) {
+    await tick();
     const r = await deps.append(agent, d, 'w6-internal', { r5 });
     if (r.ok) { report.appended++; continue; }
     const c = d as Extract<RecordDraft, { t: 'claim' }>;

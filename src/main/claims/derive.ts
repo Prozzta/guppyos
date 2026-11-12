@@ -16,8 +16,16 @@ function canonical(value: unknown): string {
   return `{${Object.keys(object).filter((key) => object[key] !== undefined).sort(compare).map((key) => `${JSON.stringify(key)}:${canonical(object[key])}`).join(',')}}`;
 }
 
+/** A10: one hash per registry object. loadRegistryShared hands out one frozen object while the file is unchanged, and
+ *  canonical JSON of the 10x registry (12.8 MB) was re-hashed on every derive. Only a frozen registry is kept: one that
+ *  can still change (a loadRegistry copy, the default) is hashed every time, as before. */
+const registryHashes = new WeakMap<KeyRegistry, string>();
 function registryHash(registry: KeyRegistry): string {
-  return createHash('sha256').update(canonical(registry)).digest('hex');
+  const hit = registryHashes.get(registry);
+  if (hit !== undefined) return hit;
+  const h = createHash('sha256').update(canonical(registry)).digest('hex');
+  if (Object.isFrozen(registry) && Object.isFrozen(registry.keys) && Object.isFrozen(registry.namespaces)) registryHashes.set(registry, h);
+  return h;
 }
 
 function chainHead(records: LedgerRec[]): string {
@@ -47,6 +55,13 @@ function cardinality(key: string, registry: KeyRegistry): 'single' | 'multi' | u
     if (key.startsWith(prefix) && key.endsWith(suffix) && key.length >= prefix.length + suffix.length) return namespace.cardinality;
   }
   return undefined;
+}
+
+/** A10: the canonical key R2 groups `key` under when that key is single-cardinality, else null (derive's own rule). */
+export function singleKeyOf(key: string | undefined, registry: KeyRegistry): string | null {
+  if (!key) return null;
+  const k = canonicalKey(key, registry);
+  return cardinality(k, registry) === 'single' ? k : null;
 }
 
 function protectedFromMail(source: ClaimRec, target: ClaimRec): boolean {

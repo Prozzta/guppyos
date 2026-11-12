@@ -50,14 +50,14 @@ import {
   DERIVED_AGENT_ID, EVENT_KINDS, LEDGER_RECORD_VERSION,
   type AppendOrigin, type AppendResult, type ChainBreak, type ClaimKind, type ClaimRec, type ClaimSource,
   type EventRec, type LedgerRec, type MacKeyProvider, type ReadResult, type RecordDraft, type Ref, type TornInfo,
-  type UsageRec, type SupersedesReason,
+  type UsageRec, type SupersedesReason, type KeyRegistry, type Status,
 } from '../../shared/claims';
 import { canonicalJson, keyIdOf, recordMac, sha256Hex } from './canonical';
 import { hiveIdOf, type HeadAnchorStore, type LedgerKeyRecord } from './keyProvider';
 import { redactSecrets } from './redact';
 import { normalizeTtl, parseStoredTtl, zonelessHint } from './ttl';
 import { DEFAULT_KEY_REGISTRY, KeyRegistryWriter, loadRegistryShared } from './registry';
-import { derive } from './derive';
+import { derive, singleKeyOf } from './derive';
 import { clampSection, R1_LEGACY_REASON } from './migrate';
 
 /** The file operations an append uses; injectable so tests can spy on the order and simulate a crash. */
@@ -139,6 +139,33 @@ interface AgentState {
   readOnly: ChainBreak | null;
   /** R1: claim ids by their exact identity (r1Identity), in ledger order. */
   exact: Map<string, string[]>;
+}
+
+/**
+ * STARTUP-FREEZE-104 A10 (Jim's 10x profile of 90b20a7b): R1 and the supersede recheck read and parsed every segment
+ * and ran derive over the whole ledger on EVERY append (58.8 s of a warm start). A view holds the records and derive's
+ * statuses for one adopted AgentState at one head. Our own append moves it forward in place. A status is reused only
+ * when the appended records cannot have changed it (derive's rules):
+ *   - a sighting event changes only sighting counts and times, never a status;
+ *   - a claim with no supersedes/retracts and no single-cardinality key is 'live' (every writer refuses a target it
+ *     does not hold, so nothing names a new id) and changes no other claim (R2 groups only single keys);
+ *   - a claim with a single key K can change, by R2, the claims keyed K only; those ids are then not reused (dirty).
+ * Anything else (another event, a supersede/retract, a re-read state, another registry object) is a full derive.
+ * Once a single-key claim went in, no id an event or a supersedes/retracts names (linked) is reused either: an event's
+ * outcome can hang on another claim's status (soft-supersede, accept).
+ */
+interface LedgerView {
+  s: AgentState;
+  head: string;
+  records: LedgerRec[];
+  claims: Map<string, ClaimRec>;
+  /** The statuses derive gave with `registry`, plus the inert claims appended since; null: not derived at this view. */
+  derived: null | {
+    registry: KeyRegistry;
+    status: Map<string, Status>;
+    linked: Set<string>;
+    dirtyKeys: Set<string>;
+  };
 }
 
 /**
@@ -324,6 +351,8 @@ export class ClaimStore {
   /** readLedgerCached: the last chain-'ok' read per agent, the segment bytes it parsed and verified, the sha256 of
    *  its last line, and the head anchors it showed the ledger reaches. */
   private readonly verifiedReads = new Map<string, VerifiedRead>();
+  /** A10: per agent, the ledger's records and derive's statuses, kept current across our own appends (see ledgerView). */
+  private readonly views = new Map<string, LedgerView>();
   /** A3: bumped when a queued write (append, purge, restore, reset) starts and when it ends (odd while one runs); a
    *  warm that sees it odd or moved drops its read. */
   private readonly writeGen = new Map<string, number>();
@@ -1049,11 +1078,12 @@ export class ClaimStore {
     if (draft.t === 'claim' && draft.supersedesReason !== undefined && draft.supersedes?.length) {
       let registry;
       try { registry = loadRegistryShared(this.d.hiveRoot); } catch { registry = undefined; }
-      const state = derive(this.ledgerRecords(agentId), registry ?? DEFAULT_KEY_REGISTRY, { r4: false });
+      const status = this.statusesOf(agentId, s, draft.supersedes, registry ?? DEFAULT_KEY_REGISTRY);
+      const claims = this.ledgerView(agentId, s).claims;
       for (const target of draft.supersedes) {
         const known = s.known.get(target);
-        const targetRec = this.ledgerRecords(agentId).find((r): r is ClaimRec => r.t === 'claim' && r.id === target);
-        if (known?.t !== 'claim' || state.claims[target]?.status !== 'live' || !targetRec || this.ttlEnded(targetRec.ttl, wt)) {
+        const targetRec = claims.get(target);
+        if (known?.t !== 'claim' || status.get(target) !== 'live' || !targetRec || this.ttlEnded(targetRec.ttl, wt)) {
           return { ok: false, error: 'supersedes target is no longer live; refresh candidates and choose again' };
         }
       }
@@ -1111,8 +1141,8 @@ export class ClaimStore {
     if (!candidates?.length) return null;
     let registry;
     try { registry = loadRegistryShared(this.d.hiveRoot); } catch { registry = undefined; }
-    const state = derive(this.ledgerRecords(agentId), registry ?? DEFAULT_KEY_REGISTRY, { r4: false });
-    const live = [...candidates].reverse().find((id) => state.claims[id]?.status === 'live');
+    const status = this.statusesOf(agentId, s, candidates, registry ?? DEFAULT_KEY_REGISTRY);
+    const live = [...candidates].reverse().find((id) => status.get(id) === 'live');
     if (!live) return null;
     // Jim R-2: an expired claim is not live for R1 (derive has no clock; R6 is view time). The TTL is
     // in the identity, so the candidate's TTL is the draft's: judged at the draft's wt, as worldView does.
@@ -1129,6 +1159,64 @@ export class ClaimStore {
       return status === 'done' || status === 'cancelled';
     }
     return Date.parse(ttl.at) <= Date.parse(wt);
+  }
+
+  /** A10: this agent's view at the adopted state's head; one full read when it has none (or the state was re-read). */
+  private ledgerView(agentId: string, s: AgentState): LedgerView {
+    const v = this.views.get(agentId);
+    if (v && v.s === s && v.head === s.head) return v;
+    const records = this.ledgerRecords(agentId);
+    const claims = new Map<string, ClaimRec>();
+    for (const r of records) if (r.t === 'claim') claims.set(r.id, r);
+    const fresh: LedgerView = { s, head: s.head, records, claims, derived: null };
+    this.views.set(agentId, fresh);
+    return fresh;
+  }
+
+  /** A10: derive's status of each of `ids` at the head with `registry`; derive runs only when one of them may differ. */
+  private statusesOf(agentId: string, s: AgentState, ids: readonly string[], registry: KeyRegistry): Map<string, Status | undefined> {
+    const v = this.ledgerView(agentId, s);
+    const d = v.derived;
+    const reusable = (id: string): boolean => {
+      if (!d || d.registry !== registry || !d.status.has(id)) return false;
+      if (d.dirtyKeys.size === 0) return true;
+      if (d.linked.has(id)) return false;
+      const k = singleKeyOf(v.claims.get(id)?.key, registry);
+      return k === null || !d.dirtyKeys.has(k);
+    };
+    let status = d?.status;
+    if (!d || !status || !ids.every(reusable)) {
+      const state = derive(v.records, registry, { r4: false });
+      status = new Map<string, Status>();
+      for (const id of Object.keys(state.claims)) status.set(id, state.claims[id].status);
+      const linked = new Set<string>();
+      for (const r of v.records) {
+        if (r.t === 'claim') { for (const id of r.supersedes ?? []) linked.add(id); for (const id of r.retracts ?? []) linked.add(id); }
+        else if (r.t === 'event' && r.ev !== 'sighting') for (const id of r.targets) linked.add(id);
+      }
+      v.derived = { registry, status, linked, dirtyKeys: new Set() };
+    }
+    const out = new Map<string, Status | undefined>();
+    for (const id of ids) out.set(id, status.get(id));
+    return out;
+  }
+
+  /** A10: move this agent's view over our own acked append (`prev`: the head it went onto). See LedgerView. */
+  private viewAppend(agentId: string, s: AgentState, prev: string, line: string): void {
+    const v = this.views.get(agentId);
+    if (!v) return;
+    if (v.s !== s || v.head !== prev) { this.views.delete(agentId); return; }
+    const rec = JSON.parse(line) as LedgerRec;   // as ledgerRecords reads it back
+    v.records.push(rec);
+    if (rec.t === 'claim') v.claims.set(rec.id, rec);
+    v.head = s.head;
+    const d = v.derived;
+    if (!d) return;
+    if (rec.t !== 'claim') { if (!(rec.t === 'event' && rec.ev === 'sighting')) v.derived = null; return; }
+    if (rec.supersedes?.length || rec.retracts?.length) { v.derived = null; return; }
+    const k = singleKeyOf(rec.key, d.registry);
+    if (k !== null) d.dirtyKeys.add(k);
+    d.status.set(rec.id, 'live');
   }
 
   /** This agent's parsed records, in ledger order (the chain was verified when the state was adopted). */
@@ -1189,7 +1277,9 @@ export class ClaimStore {
 
   private acked(agentId: string, s: AgentState, rec: LedgerRec, line: string, file: string, registryAdded: (() => void) | null): AppendResult {
     // Acked: remember it.
+    const prev = s.head;
     s.head = sha256Hex(line);
+    this.viewAppend(agentId, s, prev, line);
     s.lastId = rec.id;
     s.known.set(rec.id, rec.t === 'claim' ? { t: 'claim', source: rec.source, kind: rec.kind } : { t: 'event', by: rec.by });
     if (rec.t === 'claim') { const k = r1Identity(rec); s.exact.set(k, [...(s.exact.get(k) ?? []), rec.id]); }
