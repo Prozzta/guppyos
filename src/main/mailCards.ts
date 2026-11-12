@@ -22,8 +22,10 @@
  * marks floor-wide mail.
  * The Human's mail is linked by id only: its subject and body are never copied.
  */
-import { appendFileSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { appendFileSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
+import * as fsp from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { HUMAN_RELAY_RE } from '../shared/mailWakeClass';
 import { cardIdValue, isValidMailId, mailBodyHash, type MailLedgerDoc } from './mailLedger';
 import { mergeHotCold, readArchive } from './taskArchive';
@@ -205,6 +207,9 @@ export function cardFileName(card: string): string | null {
  * recorded ids, their links and the conversations' field cards, then keeps them current as it
  * appends. A torn line is skipped.
  */
+/** STARTUP-FREEZE-104 A1: the index load offers a pause every this many `_links.jsonl` lines. */
+const PRIME_LINES = 500;
+
 export class MailCardIndex {
   private links: Map<string, MailLinkRecord> | null = null;
   private convCards = new Map<string, Set<string>>();
@@ -221,24 +226,51 @@ export class MailCardIndex {
   private load(): Map<string, MailLinkRecord> {
     if (this.links) return this.links;
     const links = new Map<string, MailLinkRecord>();
+    const conv = new Map<string, Set<string>>();
     let text = '';
     try { text = readFileSync(join(this.dir, MAIL_LINKS_FILE), 'utf8'); } catch { /* none yet */ }
-    for (const line of text.split(/\r?\n/)) {
-      if (!line) continue;
-      try {
-        const r = JSON.parse(line) as MailLinkRecord;
-        if (r && typeof r.mailId === 'string' && Array.isArray(r.cards) && !links.has(r.mailId)) { links.set(r.mailId, r); this.noteConv(r); }
-      } catch { /* torn */ }
-    }
+    for (const line of text.split(/\r?\n/)) MailCardIndex.parseLine(line, links, conv);
     this.links = links;
+    this.convCards = conv;
     return links;
   }
 
-  private noteConv(r: MailLinkRecord): void {
+  /** One `_links.jsonl` line into the maps (the first record of an id wins; a torn line is skipped). */
+  private static parseLine(line: string, links: Map<string, MailLinkRecord>, conv: Map<string, Set<string>>): void {
+    if (!line) return;
+    try {
+      const r = JSON.parse(line) as MailLinkRecord;
+      if (r && typeof r.mailId === 'string' && Array.isArray(r.cards) && !links.has(r.mailId)) { links.set(r.mailId, r); MailCardIndex.noteConvInto(r, conv); }
+    } catch { /* torn */ }
+  }
+
+  /**
+   * STARTUP-FREEZE-104 A1: load the index as steps (the read is a yielded op, the parse offers a pause
+   * every PRIME_LINES lines), for the startup catch-up. A no-op once loaded; when the router loaded it
+   * meanwhile (a live delivery), its load stands and this one is dropped.
+   */
+  *primeSteps(): Generator<MailScanOp | undefined, void, unknown> {
+    if (this.links) return;
+    const text = yield { read: join(this.dir, MAIL_LINKS_FILE) };
+    const links = new Map<string, MailLinkRecord>();
+    const conv = new Map<string, Set<string>>();
+    const lines = typeof text === 'string' ? text.split(/\r?\n/) : [];
+    for (let i = 0; i < lines.length; i++) {
+      MailCardIndex.parseLine(lines[i], links, conv);
+      if (i % PRIME_LINES === PRIME_LINES - 1) { yield { tick: true }; if (this.links) return; }
+    }
+    if (this.links) return;
+    this.links = links;
+    this.convCards = conv;
+  }
+
+  private noteConv(r: MailLinkRecord): void { MailCardIndex.noteConvInto(r, this.convCards); }
+
+  private static noteConvInto(r: MailLinkRecord, conv: Map<string, Set<string>>): void {
     if (r.method !== 'field' || !r.conversation || r.cards.length !== 1) return;
-    const s = this.convCards.get(r.conversation) ?? new Set<string>();
+    const s = conv.get(r.conversation) ?? new Set<string>();
     s.add(r.cards[0]);
-    this.convCards.set(r.conversation, s);
+    conv.set(r.conversation, s);
   }
 
   has(mailId: string): boolean { return this.load().has(mailId); }
@@ -397,11 +429,116 @@ export interface MailCardBackfillCounts {
 type SentKey = string;
 const norm = (v: unknown): string => str(v).replace(/\r\n/g, '\n').trim();
 const sentKey = (from: string, to: string, subject: unknown, body: unknown): SentKey => JSON.stringify([from, to, norm(subject), norm(body)]);
+/** STARTUP-FREEZE-104 A1: a sent copy's key as the scan manifest keeps it (128 bits of its sha256). */
+const keyHash = (k: SentKey): string => createHash('sha256').update(k).digest('hex').slice(0, 32);
 
-function readJson(file: string): unknown {
-  try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return undefined; }
+// ———————————————————————————————————————————————————————————— file steps
+//
+// STARTUP-FREEZE-104 A1: the proven-mail read and the backfill never touch the disk themselves. They
+// YIELD each file operation and are resumed with its result, so one code path serves two drivers:
+// `drain` (the backfill script, readProvenMail, the tests) runs every op synchronously, and the startup
+// catch-up runs every op through node:fs/promises (off the main thread) and pauses whenever main has
+// worked for CATCHUP_SLICE_MS. On the Human's floor the old per-folder sync reads blocked main for
+// 5-25 s per folder (about 29k mail files, cold cache).
+
+/** One file operation a step generator asks its driver for; `tick` only offers a pause. */
+export type MailScanOp = { readdir: string } | { read: string } | { write: string; text: string } | { tick: true };
+/** A step: a file op, or undefined (a pause point the startup catch-up always honours). */
+type Step = MailScanOp | undefined;
+type Steps<T> = Generator<Step, T, unknown>;
+const TICK: MailScanOp = { tick: true };
+
+function* listJsonStep(dir: string): Steps<string[]> {
+  const r = yield { readdir: dir };
+  return Array.isArray(r) ? (r as string[]).filter((n) => typeof n === 'string' && n.endsWith('.json')).sort() : [];
 }
-const listJson = (dir: string): string[] => { try { return readdirSync(dir).filter((n) => n.endsWith('.json')); } catch { return []; } };
+function* readJsonStep(file: string): Steps<unknown> {
+  const t = yield { read: file };
+  if (typeof t !== 'string') return undefined;
+  try { return JSON.parse(t); } catch { return undefined; }
+}
+
+/** The op, synchronously (drain). A failed readdir is [], a failed read undefined; a write is atomic. */
+function runOpSync(op: Step): unknown {
+  if (!op || 'tick' in op) return undefined;
+  if ('readdir' in op) { try { return readdirSync(op.readdir); } catch { return []; } }
+  if ('read' in op) { try { return readFileSync(op.read, 'utf8'); } catch { return undefined; } }
+  mkdirSync(dirname(op.write), { recursive: true });
+  const tmp = `${op.write}.tmp-${process.pid}`;
+  writeFileSync(tmp, op.text);
+  renameSync(tmp, op.write);
+  return undefined;
+}
+
+/** The op through node:fs/promises (the startup catch-up): the read itself never runs on main. */
+async function runOpAsync(op: MailScanOp): Promise<unknown> {
+  if ('tick' in op) return undefined;
+  if ('readdir' in op) { try { return await fsp.readdir(op.readdir); } catch { return []; } }
+  if ('read' in op) { try { return await fsp.readFile(op.read, 'utf8'); } catch { return undefined; } }
+  await fsp.mkdir(dirname(op.write), { recursive: true });
+  const tmp = `${op.write}.tmp-${process.pid}`;
+  await fsp.writeFile(tmp, op.text);
+  await fsp.rename(tmp, op.write);
+  return undefined;
+}
+
+/** Runs a step generator to its end without pausing, every op synchronously (the script's and the tests' readers). */
+function drain<T>(g: Steps<T>): T {
+  let input: unknown;
+  for (;;) { const r = g.next(input); if (r.done) return r.value; input = runOpSync(r.value); }
+}
+
+// ———————————————————————————————————————————————————————————— scan manifest
+//
+// STARTUP-FREEZE-104 A1: state/mail-cards/_scan/<agent>.json keeps, per handled-mail file name, the
+// facts the proof needs: a sent copy's key hashes, an inbox copy's id, sender, act and the two key
+// hashes that would prove it. It is a cache of file contents (mail files are written once and never
+// edited), never a record of what was indexed: whether a mail is indexed is always the index's own
+// answer. So a start reads only files it has not seen, plus the proven files whose id the index lacks.
+// A missing, unreadable or other-version manifest is a full read of that agent, as before.
+
+export const MAIL_SCAN_DIR = '_scan';
+const MAIL_SCAN_VERSION = 1;
+/** One inbox copy the scan read: proven two-party when one of `k` is a sent key. */
+interface InboxScan { id: string; from: string; act: string; k: [string, string] }
+/** One inbox copy whose sender is its own agent (never proven). */
+interface SelfScan { x: 'self-mail' }
+interface AgentScan { v: typeof MAIL_SCAN_VERSION; sent: Record<string, string[]>; inbox: Record<string, InboxScan | SelfScan>; done: Record<string, InboxScan | SelfScan> }
+
+const emptyScan = (): AgentScan => ({ v: MAIL_SCAN_VERSION, sent: {}, inbox: {}, done: {} });
+const scanFile = (hiveRoot: string, agent: string): string => join(hiveRoot, MAIL_CARDS_DIR, MAIL_SCAN_DIR, `${agent}.json`);
+
+function validScan(v: unknown): AgentScan | null {
+  const s = v as AgentScan | null;
+  if (!s || typeof s !== 'object' || s.v !== MAIL_SCAN_VERSION) return null;
+  for (const k of ['sent', 'inbox', 'done'] as const) if (!s[k] || typeof s[k] !== 'object' || Array.isArray(s[k])) return null;
+  return s;
+}
+function validInbox(e: unknown): InboxScan | SelfScan | null {
+  const r = e as Record<string, unknown> | null;
+  if (!r || typeof r !== 'object') return null;
+  if (r.x === 'self-mail') return { x: 'self-mail' };
+  if (typeof r.id !== 'string' || !isValidMailId(r.id) || typeof r.from !== 'string' || typeof r.act !== 'string') return null;
+  if (!Array.isArray(r.k) || r.k.length !== 2 || !r.k.every((x) => typeof x === 'string')) return null;
+  return { id: r.id, from: r.from, act: r.act, k: [r.k[0] as string, r.k[1] as string] };
+}
+
+/** What the proven-mail steps also hand back: the scan manifest as the files are now, per agent. */
+interface ProvenMail {
+  mails: BackfillMail[];
+  excluded: Record<string, number>;
+  /** Per agent, the manifest of its handled-mail files as read now (written by the backfill). */
+  scans: Map<string, { now: AgentScan; text: string | null }>;
+}
+
+export interface ProvenMailOptions {
+  /**
+   * STARTUP-FREEZE-104 A1 (the startup catch-up): the ids the index already holds. With it, the scan
+   * manifest stands in for the files it has seen, and a proven copy whose id the index holds is taken
+   * from the manifest (id, sender, act), not read: the index records nothing for such an id anyway.
+   */
+  known?: (id: string) => boolean;
+}
 
 /**
  * The messages a hive's primary records prove were delivered (see the header): main's MailLedger
@@ -410,33 +547,56 @@ const listJson = (dir: string): string[] => { try { return readdirSync(dir).filt
  * sender and recipient different agents). Every other copy is counted in `excluded` by reason.
  */
 export function readProvenMail(hiveRoot: string): { mails: BackfillMail[]; excluded: Record<string, number> } {
-  return drain(provenMailSteps(hiveRoot));
-}
-
-/** Runs a step generator to its end without pausing (the script's and the tests' sync readers). */
-function drain<T>(g: Generator<void, T>): T {
-  for (;;) { const r = g.next(); if (r.done) return r.value; }
+  const { mails, excluded } = drain(provenMailSteps(hiveRoot));
+  return { mails, excluded };
 }
 
 /**
- * readProvenMail as steps: every `yield` is a point the startup catch-up pauses at (after each
- * agent's sent copies, each MailLedger file and each inbox folder), so the main loop keeps turning.
+ * readProvenMail as steps: every file op is yielded (see "file steps"), and every bare `yield` is a
+ * point the startup catch-up pauses at (after each agent's sent copies, each MailLedger file and each
+ * inbox folder), so the main loop keeps turning. With `o.known` (the startup catch-up), only files the
+ * scan manifest lacks are read, plus proven copies whose id the index lacks.
  */
-function* provenMailSteps(hiveRoot: string): Generator<void, { mails: BackfillMail[]; excluded: Record<string, number> }> {
+function* provenMailSteps(hiveRoot: string, o: ProvenMailOptions = {}): Steps<ProvenMail> {
   const excluded: Record<string, number> = {};
   const skip = (why: string): void => { excluded[why] = (excluded[why] ?? 0) + 1; };
   const agentsDir = join(hiveRoot, 'agents');
-  let agents: string[] = [];
-  try { agents = readdirSync(agentsDir).filter((a) => isValidMailId(a)); } catch { /* none */ }
-  const godId = ((): string => { const r = readJson(join(hiveRoot, 'registry.json')) as { godId?: unknown } | undefined; return typeof r?.godId === 'string' ? r.godId : 'god'; })();
+  const agents = ((yield { readdir: agentsDir }) as string[] | undefined ?? []).filter((a) => isValidMailId(a));
+  const godId = ((r) => (typeof (r as { godId?: unknown } | undefined)?.godId === 'string' ? (r as { godId: string }).godId : 'god'))(yield* readJsonStep(join(hiveRoot, 'registry.json')));
   const recipientOf = (to: unknown): string => (to === 'god' || to === 'human' ? godId : str(to));
-  // the senders' own copies
-  const sent = new Set<SentKey>();
+  const incremental = typeof o.known === 'function';
+  // the scan manifests of the last start (the startup catch-up only)
+  const prior = new Map<string, AgentScan>();
+  const scans = new Map<string, { now: AgentScan; text: string | null }>();
   for (const a of agents) {
-    for (const f of listJson(join(agentsDir, a, 'outbox', '.sent'))) {
-      const m = readJson(join(agentsDir, a, 'outbox', '.sent', f)) as Record<string, unknown> | undefined;
-      if (!m || typeof m !== 'object') continue;
-      for (const to of ([] as unknown[]).concat(m.to ?? [])) sent.add(sentKey(a, to === 'broadcast' ? 'broadcast' : recipientOf(to), m.subject, m.body));
+    let text: string | null = null;
+    if (incremental) {
+      const t = yield { read: scanFile(hiveRoot, a) };
+      if (typeof t === 'string') {
+        text = t;
+        let s: AgentScan | null = null;
+        try { s = validScan(JSON.parse(t)); } catch { s = null; }
+        if (s) prior.set(a, s);
+      }
+      yield TICK;
+    }
+    scans.set(a, { now: emptyScan(), text });
+  }
+  // the senders' own copies
+  const sent = new Set<string>();
+  for (const a of agents) {
+    const was = prior.get(a)?.sent ?? {};
+    const now = scans.get(a)!.now.sent;
+    for (const f of yield* listJsonStep(join(agentsDir, a, 'outbox', '.sent'))) {
+      let keys = Array.isArray(was[f]) && was[f].every((k) => typeof k === 'string') ? was[f] : null;
+      if (!keys) {
+        const m = (yield* readJsonStep(join(agentsDir, a, 'outbox', '.sent', f))) as Record<string, unknown> | undefined;
+        if (!m || typeof m !== 'object') continue;
+        keys = ([] as unknown[]).concat(m.to ?? []).map((to) => keyHash(sentKey(a, to === 'broadcast' ? 'broadcast' : recipientOf(to), m.subject, m.body)));
+      }
+      now[f] = keys;
+      for (const k of keys) sent.add(k);
+      yield TICK;
     }
     yield;
   }
@@ -450,18 +610,19 @@ function* provenMailSteps(hiveRoot: string): Generator<void, { mails: BackfillMa
   };
   // main's MailLedger
   const ledgered = new Set<string>();
-  for (const f of listJson(join(hiveRoot, 'state', 'mail'))) {
+  for (const f of yield* listJsonStep(join(hiveRoot, 'state', 'mail'))) {
     const agent = f.slice(0, -'.json'.length);
     if (!isValidMailId(agent)) continue;
-    const doc = readJson(join(hiveRoot, 'state', 'mail', f)) as MailLedgerDoc | undefined;
+    const doc = (yield* readJsonStep(join(hiveRoot, 'state', 'mail', f))) as MailLedgerDoc | undefined;
     if (!doc || typeof doc !== 'object' || !doc.entries || typeof doc.entries !== 'object') continue;
     for (const e of Object.values(doc.entries)) {
       if (!e || !isValidMailId(e.id)) continue;
       ledgered.add(`${agent}/${e.id}`);
       let body: unknown;
-      if (typeof e.bodyHash === 'string') {
+      // The body is looked up only for a mail the index does not hold (it records nothing for one it does).
+      if (typeof e.bodyHash === 'string' && !(incremental && o.known!(e.id))) {
         for (const file of [join(agentsDir, agent, 'inbox', `${e.id}.json`), join(agentsDir, agent, 'inbox', '.done', `${e.id}.json`)]) {
-          const m = readJson(file) as { body?: unknown } | undefined;
+          const m = (yield* readJsonStep(file)) as { body?: unknown } | undefined;
           if (m && typeof m === 'object' && mailBodyHash(m.body ?? '') === e.bodyHash) { body = m.body; break; }
         }
       }
@@ -475,22 +636,44 @@ function* provenMailSteps(hiveRoot: string): Generator<void, { mails: BackfillMa
         trust: 'mail-ledger',
         copies: [{ to: agent, ...(Number.isFinite(e.deliveredAt) ? { deliveredAt: e.deliveredAt } : {}) }],
       });
+      yield TICK;
     }
     yield;
   }
   // inbox copies, two-party only
   for (const a of agents) {
-    for (const dir of [join(agentsDir, a, 'inbox'), join(agentsDir, a, 'inbox', '.done')]) {
-      for (const f of listJson(dir)) {
-        const m = readJson(join(dir, f)) as Record<string, unknown> | undefined;
-        if (!m || typeof m !== 'object' || typeof m.id !== 'string' || !isValidMailId(m.id)) { skip('unreadable'); continue; }
-        if (ledgered.has(`${a}/${m.id}`)) continue;
-        const from = str(m.from);
-        if (!from || from === a) { skip('self-mail'); continue; }
-        if (!sent.has(sentKey(from, a, m.subject, m.body)) && !sent.has(sentKey(from, 'broadcast', m.subject, m.body))) { skip(agents.includes(from) ? 'no-sender-copy' : 'sender-not-an-agent'); continue; }
+    const was = prior.get(a);
+    const scan = scans.get(a)!.now;
+    for (const [dir, slot] of [[join(agentsDir, a, 'inbox'), 'inbox'], [join(agentsDir, a, 'inbox', '.done'), 'done']] as const) {
+      for (const f of yield* listJsonStep(dir)) {
+        // A copy moved from inbox to inbox/.done keeps its name: the manifest of either folder serves.
+        let e = validInbox(was?.[slot][f]) ?? validInbox(was?.[slot === 'done' ? 'inbox' : 'done'][f]);
+        let m: Record<string, unknown> | undefined;
+        if (!e) {
+          m = (yield* readJsonStep(join(dir, f))) as Record<string, unknown> | undefined;
+          if (!m || typeof m !== 'object' || typeof m.id !== 'string' || !isValidMailId(m.id)) { skip('unreadable'); continue; }
+          const from = str(m.from);
+          e = !from || from === a
+            ? { x: 'self-mail' }
+            : { id: m.id, from, act: str(m.act), k: [keyHash(sentKey(from, a, m.subject, m.body)), keyHash(sentKey(from, 'broadcast', m.subject, m.body))] };
+        }
+        scan[slot][f] = e;
+        yield TICK;
+        if ('x' in e) { skip('self-mail'); continue; }
+        if (ledgered.has(`${a}/${e.id}`)) continue;
+        if (!sent.has(e.k[0]) && !sent.has(e.k[1])) { skip(agents.includes(e.from) ? 'no-sender-copy' : 'sender-not-an-agent'); continue; }
+        if (!m && incremental && o.known!(e.id)) {
+          // Proven and already indexed: what the counts need comes from the manifest; nothing is recorded.
+          put({ id: e.id, from: e.from, act: e.act, subject: '', trust: 'two-party', copies: [{ to: a }] });
+          continue;
+        }
+        if (!m) {
+          m = (yield* readJsonStep(join(dir, f))) as Record<string, unknown> | undefined;
+          if (!m || typeof m !== 'object' || m.id !== e.id) { skip('unreadable'); delete scan[slot][f]; continue; }
+        }
         const at = typeof m.created_at === 'string' && !Number.isNaN(Date.parse(m.created_at)) ? new Date(Date.parse(m.created_at)).toISOString() : undefined;
         put({
-          id: m.id, from, act: str(m.act), subject: str(m.subject), body: m.body,
+          id: e.id, from: e.from, act: str(m.act), subject: str(m.subject), body: m.body,
           ...(m.card !== undefined ? { card: m.card } : {}),
           ...(typeof m.conversation === 'string' ? { conversation: m.conversation } : {}),
           ...(typeof m.in_reply_to === 'string' ? { in_reply_to: m.in_reply_to } : {}),
@@ -502,7 +685,7 @@ function* provenMailSteps(hiveRoot: string): Generator<void, { mails: BackfillMa
       yield;
     }
   }
-  return { mails: [...byId.values()], excluded };
+  return { mails: [...byId.values()], excluded, scans };
 }
 
 /**
@@ -516,14 +699,19 @@ export function backfillMailCards(hiveRoot: string, now: string): MailCardBackfi
 
 /** The startup catch-up pauses after this many linked messages. */
 export const CATCHUP_SLICE = 200;
+/** STARTUP-FREEZE-104 A1: the startup catch-up pauses once main has worked this long since its last pause. */
+export const CATCHUP_SLICE_MS = 8;
 
 /**
  * backfillMailCards as steps (the same code, so the startup catch-up and the script give one index):
  * the proven-mail steps, then a `yield` every CATCHUP_SLICE messages. `index` is the writer to record
- * through (main passes the router's own instance, so both see one set of recorded ids).
+ * through (main passes the router's own instance, so both see one set of recorded ids). With
+ * `incremental` (the startup catch-up), the scan manifest stands in for files already seen (see
+ * ProvenMailOptions). Either way the manifest is written last, for the agents whose files changed.
  */
-export function* backfillMailCardSteps(hiveRoot: string, now: string, index: MailCardIndex = new MailCardIndex(hiveRoot)): Generator<void, MailCardBackfillCounts> {
-  const { mails, excluded } = yield* provenMailSteps(hiveRoot);
+export function* backfillMailCardSteps(hiveRoot: string, now: string, index: MailCardIndex = new MailCardIndex(hiveRoot), incremental = false): Generator<Step, MailCardBackfillCounts, unknown> {
+  if (incremental) yield* index.primeSteps();
+  const { mails, excluded, scans } = yield* provenMailSteps(hiveRoot, incremental ? { known: (id) => index.has(id) } : {});
   const cardIds = registryCardIds(hiveRoot);
   const canon = new Map(cardIds.map((c) => [c.toLowerCase(), c]));
   const conv = new Map<string, Set<string>>();
@@ -535,7 +723,8 @@ export function* backfillMailCardSteps(hiveRoot: string, now: string, index: Mai
   const linked = new Map<string, MailLinkRecord>();
   const ctx = indexLinkContext({
     linkOf: (id) => linked.get(id) ?? index.linkOf(id),
-    conversationCards: (c) => [...(conv.get(c) ?? [])],
+    // Incremental: the indexed mails' field cards come from the index (a field link records its conversation).
+    conversationCards: (c) => [...new Set([...(conv.get(c) ?? []), ...(incremental ? index.conversationCards(c) : [])])],
   }, cardIds);
   const counts: MailCardBackfillCounts = { mails: mails.length, recorded: 0, already: 0, byMethod: {}, byAct: {}, byFrom: {}, byTrust: {}, excluded, unlinked: [], weak: 0, covered: 0, deferred: 0 };
   const bump = (o: Record<string, Record<string, number>>, k: string, method: string): void => { const r = (o[k] = o[k] ?? {}); r[method] = (r[method] ?? 0) + 1; };
@@ -543,14 +732,15 @@ export function* backfillMailCardSteps(hiveRoot: string, now: string, index: Mai
   let n = 0;
   for (const m of order) {
     if (n++ % CATCHUP_SLICE === CATCHUP_SLICE - 1) yield;
+    else yield TICK;
     // A live mail delivered during this catch-up is the router's: it is recorded once, at settle.
     if (index.isDeferred(m.id)) { counts.deferred++; continue; }
     const prior = index.linkOf(m.id);
     const link: MailLink = prior ? { cards: prior.cards, method: prior.method } : linkMail(m, ctx);
-    const { link: rec, rows } = indexEntries(m, link, m.trust, m.copies, now);
-    linked.set(m.id, prior ?? rec);
+    const fresh = prior ? null : indexEntries(m, link, m.trust, m.copies, now);
+    linked.set(m.id, prior ?? fresh!.link);
     if (prior) counts.already++;
-    else if (index.record(rec, rows)) counts.recorded++;
+    else if (index.record(fresh!.link, fresh!.rows)) counts.recorded++;
     counts.byMethod[link.method] = (counts.byMethod[link.method] ?? 0) + 1;
     counts.byTrust[m.trust] = (counts.byTrust[m.trust] ?? 0) + 1;
     bump(counts.byAct, m.act || '?', link.method);
@@ -559,8 +749,16 @@ export function* backfillMailCardSteps(hiveRoot: string, now: string, index: Mai
     if (link.method === 'mention-body') counts.weak++;
     if (TRUSTED_METHODS.has(link.method)) counts.covered++;
   }
+  // the scan manifest, last, only where it changed (sorted, so one floor gives one file)
+  for (const [a, s] of scans) {
+    const text = JSON.stringify(sortedScan(s.now));
+    if (text !== s.text) yield { write: scanFile(hiveRoot, a), text };
+  }
   return counts;
 }
+
+const sortedObj = <T>(o: Record<string, T>): Record<string, T> => Object.fromEntries(Object.keys(o).sort().map((k) => [k, o[k]]));
+const sortedScan = (s: AgentScan): AgentScan => ({ v: s.v, sent: sortedObj(s.sent), inbox: sortedObj(s.inbox), done: sortedObj(s.done) });
 
 // ———————————————————————————————————————————————————————————— startup catch-up
 
@@ -578,34 +776,53 @@ export interface MailCardCatchUpDeps {
   now?: () => string;
   /** What a step pause awaits (a macrotask turn: the window and the router keep going). */
   pause?: () => Promise<void>;
+  /** STARTUP-FREEZE-104 A1: runs one file op off main (node:fs/promises by default; tests count ops). */
+  runOp?: (op: MailScanOp) => Promise<unknown>;
+  /** The clock of the main-work budget (ms); performance.now by default. */
+  clock?: () => number;
 }
 
 /**
  * MAILCARD catch-up at every app start (god 38f4b0): indexes every proven message not yet in
  * state/mail-cards (mail delivered while the app was closed included) with the backfill's own link
  * rules and trust levels, through the router's index. Writes only state/mail-cards, never mail or
- * ledgers. Idempotent: a second start records nothing. Pauses at every step so startup is never
- * blocked. Logs one `mailcards-backfill` row with the counts; a failure logs `mailcards-backfill-failed`
- * and resolves null (never throws). The derived writer starts only once this settled (Jim 414b4c).
+ * ledgers. Idempotent: a second start records nothing. Logs one `mailcards-backfill` row with the
+ * counts; a failure logs `mailcards-backfill-failed` and resolves null (never throws). The derived
+ * writer starts only once this settled (Jim 414b4c).
+ * STARTUP-FREEZE-104 A1: nothing runs in the caller's turn (the first step waits a pause), every file
+ * op runs off main, main pauses once it has worked CATCHUP_SLICE_MS, and the scan manifest means a
+ * start reads only the mail files it has not seen.
  */
 export async function startupMailCardCatchUp(hiveRoot: string, d: MailCardCatchUpDeps): Promise<MailCardBackfillCounts | null> {
   const pause = d.pause ?? (() => new Promise<void>((r) => setImmediate(r)));
+  const runOp = d.runOp ?? runOpAsync;
+  const clock = d.clock ?? (() => performance.now());
   const t0 = Date.now();
   let steps = 0;
   const index = d.index ?? new MailCardIndex(hiveRoot);
   // MAILCARD-CATCHUP-RACE: the router holds its live records until this settles (success or failure).
   index.beginCatchUp();
   try {
-    const g = backfillMailCardSteps(hiveRoot, (d.now ?? (() => new Date().toISOString()))(), index);
+    // Never in the caller's turn (claimsEndpoint can be reached from an IPC handler).
+    await pause();
+    const g = backfillMailCardSteps(hiveRoot, (d.now ?? (() => new Date().toISOString()))(), index, true);
+    let input: unknown;
+    let slice = clock();
     for (;;) {
-      const r = g.next();
+      const r = g.next(input);
+      input = undefined;
       if (r.done) {
         const c = r.value;
         d.log({ kind: MAILCARDS_BACKFILL_ROW, mails: c.mails, recorded: c.recorded, already: c.already, covered: c.covered, weak: c.weak, unlinked: c.unlinked.length, byMethod: c.byMethod, byTrust: c.byTrust, excluded: c.excluded, steps, ms: Date.now() - t0 });
         return c;
       }
-      steps++;
-      await pause();
+      const op = r.value;
+      if (op && !('tick' in op)) input = await runOp(op);
+      if (!op || clock() - slice >= CATCHUP_SLICE_MS) {
+        steps++;
+        await pause();
+        slice = clock();
+      }
     }
   } catch (e) {
     d.log({ kind: MAILCARDS_BACKFILL_FAILED_ROW, error: String(e).slice(0, 200), steps, ms: Date.now() - t0 });
