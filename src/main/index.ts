@@ -67,6 +67,7 @@ import { RealtimeFloorWatcher } from './realtimeFloorWatcher';
 import { BlobOverlayController, isAppWindowSender, registerBlobIpc, type BlobWindowLike, type Rect as BlobRect } from './blobOverlay';
 import { DictationController } from './dictation';
 import { GroqSttProvider } from './stt';
+import { transcribeBlobMessage } from './blobMessage';
 import { Win32InputHelper, inputHelperPath } from './win32Input';
 import { DICTATION_COPY, type DictationCaptureCommand } from '../shared/dictation';
 import { TrayModeController } from './trayMode';
@@ -2421,9 +2422,11 @@ const dictationHelper = new Win32InputHelper(() => {
   const exe = inputHelperPath(app.getAppPath(), process.resourcesPath, app.isPackaged);
   return existsSync(exe) ? exe : null;
 });
+/** The user's own Groq key, read from main's config per call (dictation and BLOB-MESSAGE share it). */
+const groqStt = new GroqSttProvider(() => { const c = readConfig(); return { apiKey: c.groqApiKey, model: c.freeflowModel }; });
 const dictation: DictationController = new DictationController({
   helper: dictationHelper,
-  stt: new GroqSttProvider(() => { const c = readConfig(); return { apiKey: c.groqApiKey, model: c.freeflowModel }; }),
+  stt: groqStt,
   capture: {
     start: (session) => (sendDictationCapture({ op: 'start', session }) ? { ok: true } : { ok: false, error: DICTATION_COPY.noWindow }),
     stop: (session) => { sendDictationCapture({ op: 'stop', session }); },
@@ -2435,6 +2438,13 @@ const dictation: DictationController = new DictationController({
   log: (row) => { try { hive.appendLog(row); } catch { /* best-effort */ } },
   now: () => Date.now(),
   timers: { set: (fn, ms) => setTimeout(fn, ms), clear: (h) => clearTimeout(h as ReturnType<typeof setTimeout>) }
+});
+/** BLOB-MESSAGE: transcribe a recorded message, only for an app window (never the overlay). */
+ipcMain.handle('blob:message:transcribe', async (evt, arg: unknown) => {
+  if (!ledgerUiSender(evt)) return { ok: false, error: 'refused: not from the app window' };
+  const r = await transcribeBlobMessage(groqStt, arg);
+  try { hive.appendLog({ kind: 'blob-message-transcribe', ok: r.ok }); } catch { /* best-effort */ }
+  return r;
 });
 /** The clip for a session, only from the app window that was asked to record it. */
 ipcMain.handle('dictation:audio', (evt, arg: unknown) => {

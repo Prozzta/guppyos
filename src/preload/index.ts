@@ -1680,6 +1680,9 @@ const api = {
     ipcRenderer.on('blob:openInApp', listener);
     return () => ipcRenderer.removeListener('blob:openInApp', listener);
   },
+  /** BLOB-MESSAGE: transcribe a recorded message with the user's own Groq key (the key stays in main). */
+  blobMessageTranscribe: (arg: { audio: ArrayBuffer; mimeType?: string }): Promise<{ ok: true; text: string } | { ok: false; error: string }> =>
+    ipcRenderer.invoke('blob:message:transcribe', arg),
   blobStatus: (): Promise<{ ok: true; status: BlobStatus } | { ok: false; error: string }> =>
     ipcRenderer.invoke('blob:status'),
   blobSetConfig: (patch: BlobSettingsPatch): Promise<{ ok: true; status: BlobStatus } | { ok: false; error: string }> =>

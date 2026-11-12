@@ -1,7 +1,7 @@
 /**
  * BLOB-MESSAGE: the shared agent picker's pure logic. Record-a-message (UHera), screenshot (Dwight)
  * and meeting (Andy) all pick the agent through this, so one rule decides who can be sent to.
- * No store import here: the store-backed parts live in AgentPicker.tsx, which keeps this testable.
+ * No store import here: the store-backed parts live in AgentPickerField.tsx, which keeps this testable.
  */
 import type { Agent } from '@/store/store';
 
