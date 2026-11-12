@@ -1,3 +1,4 @@
+require('./tools/own-job.cjs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -54,11 +55,12 @@ test('a live append may share ClaimStore serial work during import without dupli
 
 test('a live ClaimStore append remains intact when it arrives during the bootstrap import', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'claims-bootstrap-live-'));
-  const agent = 'ag-1'; let state = null;
+  const keyRoot = `${root}-ud`;
+  const agent = 'ag-1'; let state = null; let store;
   try {
     const dir = path.join(root, 'agents', agent); fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, 'memory.md'), '# Memory\n\n## 2026-10-03\n- imported legacy fact\n');
-    const store = new ClaimStore({ hiveRoot: root, keys: new SandboxKeyProvider(), keyRecord: new FileLedgerKeyRecord(path.join(`${root}-ud`, KEY_RECORD_FILE)), log: () => {}, alert: () => {} });
+    store = new ClaimStore({ hiveRoot: root, keys: new SandboxKeyProvider(), keyRecord: new FileLedgerKeyRecord(path.join(keyRoot, KEY_RECORD_FILE)), log: () => {}, alert: () => {} });
     const append = makeW6Append(store);
     const bootstrap = new ClaimsBootstrap({
       now: () => 1, activeAgents: () => [agent], isIdle: () => true, promote: () => {}, seedDefault: () => {},
@@ -73,8 +75,11 @@ test('a live ClaimStore append remains intact when it arrives during the bootstr
     assert.ok(texts.some((text) => text.includes('imported legacy fact')));
     assert.ok(texts.includes('live append during import'));
     assert.equal(state.agents[agent].state, 'done');
-    store.close();
-  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  } finally {
+    store?.close();
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(keyRoot, { recursive: true, force: true });
+  }
 });
 
 test('claims CLI is retained in packaged resources', () => {
