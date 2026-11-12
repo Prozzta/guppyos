@@ -26,12 +26,15 @@ export const BLOB_MESSAGE_COPY = {
 
 /**
  * The transcript as an editable message: control characters other than line breaks become spaces,
- * line breaks are normalised to \n, space runs collapse, the ends are trimmed and the length capped.
+ * line breaks are normalised to \n, zero-width and bidi control characters are removed, runs of
+ * spaces/NBSPs collapse to one space (a single NBSP is kept as is), the ends are trimmed and the
+ * length capped.
  */
 export function normalizeMessageTranscript(text: unknown): string {
   if (typeof text !== 'string') return '';
   // eslint-disable-next-line no-control-regex
-  const flat = text.replace(/\r\n?|[\u2028\u2029]/g, '\n').replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]+/g, ' ')
+  const flat = text.replace(/\r\n?|[\u2028\u2029]/g, '\n').replace(/[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g, '')
+    .replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]+/g, ' ')
     .replace(/[ \u00a0]{2,}/g, ' ').replace(/ *\n */g, '\n').replace(/\n{3,}/g, '\n\n').trim();
   if (flat.length <= BLOB_MESSAGE_MAX_CHARS) return flat;
   let cut = flat.slice(0, BLOB_MESSAGE_MAX_CHARS);
