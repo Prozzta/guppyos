@@ -1175,7 +1175,7 @@ export class ClaimStore {
   private ledgerView(agentId: string, s: AgentState): LedgerView {
     const v = this.views.get(agentId);
     if (v && v.s === s && v.head === s.head) return v;
-    const records = this.ledgerRecords(agentId);
+    const records = this.keptRecordsAt(agentId, s.head) ?? this.ledgerRecords(agentId);
     const claims = new Map<string, ClaimRec>();
     for (const r of records) if (r.t === 'claim') claims.set(r.id, r);
     const dropped = v ? (v.s !== s ? 'reread' : 'head') : (this.viewGone.get(agentId) ?? 'first');
@@ -1246,6 +1246,19 @@ export class ClaimStore {
     const k = singleKeyOf(rec.key, d.registry);
     if (k !== null) d.dirtyKeys.add(k);
     d.status.set(rec.id, 'live');
+  }
+
+  /**
+   * A18 (Jim 939357e9: a view's first build re-read and re-parsed the whole derived ledger, 0.44 s inside a 2.5 s block):
+   * the kept verified read's records, copied, when its last line is the line `head` names. Every line of a chain-'ok'
+   * read is a record (a line that is not one breaks the chain), each line is canonicalJson of its record, and the chain
+   * fixes every earlier line, so these are exactly the records ledgerRecords would parse. Else null.
+   */
+  private keptRecordsAt(agentId: string, head: string): LedgerRec[] | null {
+    const kept = this.verifiedReads.get(agentId)?.result;
+    if (!kept || kept.chain !== 'ok' || kept.torn || !kept.records.length || !head) return null;
+    if (sha256Hex(canonicalJson(kept.records[kept.records.length - 1])) !== head) return null;
+    return kept.records.slice();
   }
 
   /** This agent's parsed records, in ledger order (the chain was verified when the state was adopted). */

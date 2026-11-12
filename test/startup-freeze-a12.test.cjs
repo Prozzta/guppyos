@@ -247,7 +247,11 @@ test('A12: each backfill step runs in its own event-loop turn', async () => {
   try { await W.runDerivedBackfill(x.deps, input(x.root)); } finally { spinning = false; }
   assert.ok(derives.length >= 5, `one derive per step (${derives.length})`);
   assert.ok(derives[0] > t0, 'the first step runs after a turn, not in the caller\'s');
-  for (let i = 1; i < derives.length; i++) assert.ok(derives[i] > derives[i - 1], `step ${i} ran in the same turn as step ${i - 1}: ${derives.join(',')}`);
+  // A18: syncDerived derives a turn after it is called and appends a turn after its derive. The step's own turn puts
+  // the step's facts in a turn of their own (not in the previous step's last turn), so a step's derive is at least two
+  // turns after the caller's and three after the previous derive (measured: 2, then 3 apart).
+  assert.ok(derives[0] - t0 >= 2, `the first step's facts ran in the caller's turn: ${t0}; ${derives.join(',')}`);
+  for (let i = 1; i < derives.length; i++) assert.ok(derives[i] - derives[i - 1] >= 3, `step ${i}'s facts ran in step ${i - 1}'s last turn: ${derives.join(',')}`);
 });
 
 test('A12: main wires deriveOnce with the shared registry, and the live pass reads the index async', () => {
@@ -437,4 +441,105 @@ test('A16: a card change made before start() lands in the first pass after start
   // Decision notes are keyed by their own text (a history), so the old ones stay live in both; every new value is in.
   for (let i = 0; i < 6; i++) for (const w of [`gate result ${i} new`, `gate note ${i} new`]) assert.ok(got.some(([, t]) => t.includes(w)), `${w} is live`);
   assert.deepEqual(got, liveNow(ref), 'the first pass after start() equals a pass with the change already made');
+});
+
+// A18 (Jim 939357e9): the remaining >1 s blocks. A view's first build reuses the verified read at its head; the backfill's
+// syncDerived and the index syncOnce take a turn around their derive; the candidate warm derives one agent per turn
+// over the shared frozen registry.
+function storeAt(root) {
+  const logs = [];
+  let t = Date.parse('2026-10-03T10:00:00Z');
+  const store = new ClaimStore({ hiveRoot: root, keys: new SandboxKeyProvider(), keyRecord: new FileLedgerKeyRecord(path.join(`${root}-ud`, KEY_RECORD_FILE)), now: () => new Date(t += 1000), log: (r) => logs.push(r), alert: () => {} });
+  STORES.push(store);
+  return store;
+}
+function segmentReads(store, agent, fn) {
+  const real = fs.readFileSync;
+  const dir = path.dirname(store.segments(agent)[0]);
+  let reads = 0;
+  fs.readFileSync = function (p, ...rest) { if (typeof p === 'string' && path.dirname(p) === dir) reads++; return real.call(this, p, ...rest); };
+  try { return { out: fn(), reads }; } finally { fs.readFileSync = real; }
+}
+test('A18: a view first built at the verified read\'s head reads no segment; at another head it reads them, and both equal a fresh derive', async () => {
+  const root = hiveDir();
+  const store = storeAt(root);
+  const ids = [];
+  for (let i = 0; i < 30; i++) {
+    const r = await store.appendRecord('a1', { t: 'claim', kind: 'fact', text: `fact ${i}`, ...(i % 3 === 0 ? { key: 'project.alpha' } : {}) }, 'endpoint');
+    assert.equal(r.ok, true, JSON.stringify(r));
+    ids.push(r.id);
+  }
+  assert.equal(store.readLedger('a1').chain, 'ok');   // the verified read, kept
+  const disk = () => store.segments('a1').flatMap((f) => fs.readFileSync(f, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)));
+  const fresh = () => derive(disk(), FROZEN, { r4: false });
+  const a = segmentReads(store, 'a1', () => store.statusesOf('a1', store.current('a1'), ids, FROZEN));
+  assert.equal(a.reads, 0, 'the first view comes from the verified read');
+  for (const id of ids) assert.equal(a.out.get(id), fresh().claims[id].status);
+  assert.ok(ids.some((id) => a.out.get(id) === 'superseded'), 'R2 ran over the reused records');
+  const late = await store.appendRecord('a1', { t: 'claim', kind: 'fact', text: 'late fact', key: 'project.alpha' }, 'endpoint');
+  assert.equal(late.ok, true);
+  // The view moved over that append in its own copy: the kept read is not grown by it (the next cached read is the disk).
+  assert.deepEqual(store.readLedgerCached('a1').records.map((r) => r.id), disk().map((r) => r.id));
+  // A kept read that does not end at the head: the view reads the segments.
+  const s = store.current('a1');
+  const st = store.verifiedReads.get('a1');
+  if (st) {
+    // Pin the kept read one line short of the head: the view must not take it.
+    store.verifiedReads.set('a1', { ...st, result: { ...st.result, records: st.result.records.slice(0, -1) } });
+  }
+  store.views.delete('a1');
+  const b = segmentReads(store, 'a1', () => store.statusesOf('a1', s, [...ids, late.id], FROZEN));
+  assert.ok(b.reads > 0, 'a kept read that does not end at the head is not used');
+  for (const id of [...ids, late.id]) assert.equal(b.out.get(id), fresh().claims[id].status, id);
+  assert.equal(b.out.get(late.id), 'live');
+});
+
+test('A18: syncDerived reads and derives in a turn after the caller\'s, and appends in a later one', async () => {
+  let turn = 0;
+  let spinning = true;
+  const spin = () => { turn++; if (spinning) setImmediate(spin); };
+  const x = setup((records) => { x.derived = turn; return derive(records, FROZEN, { r4: false }); });
+  cardsHive(x.root);
+  const realAppend = x.store.appendRecord.bind(x.store);
+  const appends = [];
+  x.store.appendRecord = (...a) => { appends.push(turn); return realAppend(...a); };
+  setImmediate(spin);
+  const t0 = turn;
+  let c;
+  try { c = await W.syncDerived(x.deps, F.cardRecordFacts(W.readCards(x.root))); } finally { spinning = false; }
+  assert.ok(c.appended > 0);
+  assert.ok(x.derived > t0, 'the read and derive are not in the caller\'s turn');
+  assert.ok(appends[0] > x.derived, 'the first append is not in the derive\'s turn');
+});
+
+test('A18: syncOnce derives and builds the chunks each in its own turn, after the read', async () => {
+  let turn = 0;
+  let spinning = true;
+  const spin = () => { turn++; if (spinning) setImmediate(spin); };
+  const marks = {};
+  const rec = { v: 1, id: 'c-000000000001', t: 'claim', kind: 'fact', text: 'one', source: 'self', at: '2026-10-03T10:00:00.000Z', wt: '2026-10-03T10:00:00.000Z', agent: 'a1', prev: '', mac: 'm-1' };
+  const s = new ClaimsIndexSync({
+    readLedger: () => { marks.read = turn; return { records: [rec], torn: null, chain: 'ok' }; },
+    derive: () => (records) => { marks.derive = turn; return { v: 1, agent: 'a1', registryHash: '', ledgerHead: 'head', conflicts: [], claims: Object.fromEntries(records.map((r) => [r.id, { id: r.id, status: 'live', sightings: 0, firstAt: '', lastAt: '', pinned: false, reasons: [] }])) }; },
+    registry: () => FROZEN,
+    ruleConfig: () => ({ r4: false }),
+    level: () => 'reader',
+    agents: () => ['a1'],
+    send: async (args) => { marks.send = turn; marks.chunks = args.chunks.length; return { ok: true }; },
+  });
+  setImmediate(spin);
+  let out;
+  try { out = await s.syncNow('a1'); } finally { spinning = false; }
+  assert.equal(out.sent, true);
+  assert.equal(marks.chunks, 1);
+  assert.ok(marks.derive > marks.read, 'the derive is not in the read\'s turn');
+  assert.ok(marks.send > marks.derive, 'the chunks are not built in the derive\'s turn');
+});
+
+test('A18: main\'s candidate warm derives one agent per turn over the shared registry', () => {
+  const idx = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'index.ts'), 'utf8');
+  const view = idx.slice(idx.indexOf('function claimsLedgerView('), idx.indexOf('const hiveCandidateCorpus'));
+  assert.ok(view.includes('loadRegistryShared(root)') && !/loadRegistry\(root\)/.test(view), 'claimsLedgerView derives over the shared frozen registry');
+  const warm = idx.slice(idx.indexOf('async function warmClaimCandidateVectors('), idx.indexOf('function claimNoteCandidates('));
+  assert.match(warm, /for \(const agentId of claimAgentLedgers\(\)\) \{\s*await new Promise<void>\(\(resolve\) => setImmediate\(resolve\)\);\s*const view = claimsLedgerView\(agentId\);/);
 });

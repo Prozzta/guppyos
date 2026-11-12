@@ -135,7 +135,12 @@ export class ClaimsIndexSync {
       this.d.log?.({ kind: 'claims-index-skipped', agentId, why });
       return { sent: false, why };
     }
+    // A18 (Jim 939357e9: one agent's read, derive and chunks were one 2 s block): the derive and the chunks each start
+    // in a turn of their own. This agent's syncs are serial (syncNow), and the read is a verified prefix, so the records
+    // and the state do not change between.
+    await new Promise<void>((resolve) => setImmediate(resolve));
     const state = derive(prefix.records, this.d.registry(), this.d.ruleConfig());
+    await new Promise<void>((resolve) => setImmediate(resolve));
     const allChunks = withParts(chunksFor(prefix.records, state));
     const old = new Map((previous?.chunks ?? []).map((c) => [`${c.claimId}\0${c.part}`, `${c.contentSha256}\0${c.status}`]));
     // A delta carries additions and claims whose derived status changed.  The worker preserves

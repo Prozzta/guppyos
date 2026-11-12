@@ -2020,7 +2020,9 @@ function claimsLedgerView(agentId: string) {
   if (!root || !ep) return null;
   const prefix = verifiedPrefix(ep.store.readLedgerCached(agentId));
   if (!prefix) return null;
-  let reg; try { reg = loadRegistry(root); } catch { reg = DEFAULT_KEY_REGISTRY; }
+  // A18 (Jim 939357e9: the warm's derives re-hashed the 12.8 MB registry each): the shared frozen registry, whose hash
+  // derive keeps (the same keys as a fresh load).
+  let reg; try { reg = loadRegistryShared(root); } catch { reg = DEFAULT_KEY_REGISTRY; }
   const state = deriveClaims(prefix.records, reg, { r4: false });
   const claims = prefix.records.filter((r) => r.t === 'claim');
   return { claims, status: (id: string) => state.claims[id]?.status };
@@ -2030,11 +2032,14 @@ const hiveCandidateCorpus = new HiveCorpus({ agents: () => Object.keys(hive.regi
 // is the whole ledger now).
 const claimCandidateScorer = makeLocalScorer(embedViaWorker((texts) => nativeMemory.embed(texts)), () => hiveCandidateCorpus.corpus());
 /** S1: off the interactive note path, fill the shared scorer with every live own-ledger claim. */
-function warmClaimCandidateVectors(): Promise<void> {
-  const pool = claimAgentLedgers().flatMap((agentId) => {
+async function warmClaimCandidateVectors(): Promise<void> {
+  // A18: one agent's read and derive per turn of the event loop (all of them were one block of 1.3 s).
+  const pool: Array<{ id: string; owner: string; wt: string; key: string | undefined; text: string; status: 'live' }> = [];
+  for (const agentId of claimAgentLedgers()) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
     const view = claimsLedgerView(agentId);
-    return view ? view.claims.filter((c) => view.status(c.id) === 'live').map((c) => ({ id: c.id, owner: agentId, wt: c.wt, key: c.key, text: c.text, status: 'live' as const })) : [];
-  });
+    if (view) for (const c of view.claims) if (view.status(c.id) === 'live') pool.push({ id: c.id, owner: agentId, wt: c.wt, key: c.key, text: c.text, status: 'live' });
+  }
   return claimCandidateScorer.warm(pool);
 }
 function claimNoteCandidates(agentId: string, text: string, o: { key?: string } = {}): Promise<CandidateResult> {

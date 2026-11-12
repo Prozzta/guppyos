@@ -124,7 +124,9 @@ test('ClaimsIndexSync: a burst of appends is one debounced sync; syncAll covers 
   const live = x.timers.filter(Boolean);
   assert.equal(live.length, 1);
   live[0]();
-  await new Promise((r) => setImmediate(r));
+  // STARTUP-FREEZE-104 A18: syncOnce runs its derive and its chunks each in a turn of their own, so the send lands a few
+  // turns after the timer; still exactly one sync for the burst.
+  for (let i = 0; i < 6; i++) await new Promise((r) => setImmediate(r));
   assert.equal(x.sent.length, 1);
   const all = await x.s.syncAll();
   assert.equal(all.length, 2);
