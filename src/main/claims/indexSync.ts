@@ -32,6 +32,8 @@ export interface IndexSyncDeps {
   /** Called after a verified snapshot is successfully indexed. */
   onIndexed?: (agentId: string) => void;
   log?: (row: Record<string, unknown>) => void;
+  /** Re-read and verify after this many deltas (default: 32), even in one long-lived session. */
+  fullVerifyEvery?: number;
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (t: unknown) => void;
 }
@@ -54,11 +56,12 @@ export function verifiedPrefix(r: ReadResult): { records: LedgerRec[]; truncated
 export class ClaimsIndexSync {
   private timers = new Map<string, unknown>();
   private running = new Map<string, Promise<SyncOutcome>>();
-  // A verified snapshot lets an acked store append avoid reading any old segment.  Calls without
-  // an acknowledged record (startup, a watcher/import or recovery) deliberately take the full,
-  // integrity-checking read path.
+  // A verified snapshot lets an acked *claim* append avoid reading any old segment.  Events can
+  // rewrite existing claim segments (notably purge), so they must discard the snapshot and take
+  // the full, integrity-checking path.
   private snapshots = new Map<string, { records: LedgerRec[]; chunks: Array<{ claimId: string; part: number; contentSha256: string; status: string }> }>();
   private pending = new Map<string, LedgerRec[]>();
+  private deltasSinceVerify = new Map<string, number>();
   private noDeriveLogged = false;
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
   private readonly clearTimer: (t: unknown) => void;
@@ -97,16 +100,27 @@ export class ClaimsIndexSync {
       if (!this.noDeriveLogged) { this.noDeriveLogged = true; this.d.log?.({ kind: 'claims-index-no-derive' }); }
       return { sent: false, why: 'no-derive' };
     }
-    const queued = this.pending.get(agentId) ?? [];
-    const previous = this.snapshots.get(agentId);
-    // Only ClaimStore's fsync-acked callback supplies `queued`; it is safe to extend the already
-    // verified snapshot with it.  Every other reason to sync reads and verifies the ledger again.
-    const delta = !!previous && queued.length > 0;
+    const queuedBefore = this.pending.get(agentId) ?? [];
+    // An event is not append-only: ClaimStore may rewrite the claim records it targets.  Never
+    // retain their former text/MACs in main or give the worker a delta that cannot remove them.
+    const rewritten = queuedBefore.some((r) => r.t === 'event');
+    if (rewritten) {
+      this.snapshots.delete(agentId);
+      this.pending.delete(agentId);
+    }
+    const queued = rewritten ? [] : queuedBefore;
+    const previous = rewritten ? undefined : this.snapshots.get(agentId);
+    // Only fsync-acked claim records may extend an already verified snapshot.  Every other reason
+    // to sync reads and verifies the ledger again.
+    const verifyEvery = Math.max(1, this.d.fullVerifyEvery ?? 32);
+    const delta = !!previous && queued.length > 0 && (this.deltasSinceVerify.get(agentId) ?? 0) < verifyEvery;
     const read: ReadResult = delta
       ? { records: [...previous.records, ...queued], torn: null, chain: 'ok' }
       : this.d.readLedger(agentId);
     const prefix = verifiedPrefix(read);
     if (!prefix) {
+      // A later append must not resurrect a snapshot that a fresh integrity read rejected.
+      this.snapshots.delete(agentId);
       const why = read.chain !== 'ok' && read.chain.brokenAt === 'head-anchor' ? 'head-anchor' : 'key-missing';
       this.d.log?.({ kind: 'claims-index-skipped', agentId, why });
       return { sent: false, why };
@@ -121,7 +135,10 @@ export class ClaimsIndexSync {
     const reply = await this.d.send({ wing: agentId, path: claimsSourcePath(agentId), head, chunks, ...(delta ? { delta: true } : {}) });
     if (!reply.ok) this.d.log?.({ kind: 'claims-index-failed', agentId, error: String(reply.error ?? '').slice(0, 160) });
     else {
-      this.snapshots.set(agentId, { records: prefix.records, chunks: allChunks });
+      // A broken-chain prefix is safe to send but not safe to extend with a future delta.
+      if (prefix.truncatedAt) this.snapshots.delete(agentId);
+      else this.snapshots.set(agentId, { records: prefix.records, chunks: allChunks });
+      this.deltasSinceVerify.set(agentId, delta ? (this.deltasSinceVerify.get(agentId) ?? 0) + 1 : 0);
       // Do not discard an append that arrived while the worker request was in flight.
       const later = this.pending.get(agentId) ?? [];
       if (later.length <= queued.length) this.pending.delete(agentId);
