@@ -288,6 +288,52 @@ test('SCALE-TRANSCRIPT-SCAN: an overflow (an event with no name) or a watch erro
   assert.equal(path.dirname(spy.seen.statSync[0]), dir);
 });
 
+test('SCALE-TRANSCRIPT-SCAN N1: an append through a held-open handle (Windows fires no event) is caught by the 5-min full rescan', () => {
+  let clock = 5_000_000;
+  T.__setTranscriptWatchClock(() => clock);
+  try {
+    const { cwd, dir } = yearDir(3);
+    readAgentUsage(cwd, { provider: 'claude' });
+    const file = path.join(dir, '001.jsonl');
+    const fd = fs.openSync(file, 'a');
+    try {
+      fs.writeSync(fd, rec(500, { sessionId: 'held' }) + '\n');
+      clock += 5 * 60_000 - 1;
+      let spy = spyFs();
+      try { readAgentUsage(cwd, { provider: 'claude' }); } finally { spy.restore(); }
+      // Inside the window only a file an event named may be stat'ed (none on Windows for a held-open write).
+      assert.ok(spy.seen.statSync.every((f) => f === file), `inside the window no other file is stat'ed: ${spy.seen.statSync.length}`);
+      assert.deepEqual(spy.seen.readdirSync, []);
+      clock += 1;
+      spy = spyFs();
+      let u;
+      try { u = readAgentUsage(cwd, { provider: 'claude' }); } finally { spy.restore(); }
+      assert.equal(spy.seen.statSync.length, 3, 'at 5 min every file is stat\'ed once');
+      assert.deepEqual(u, coldRead(cwd, { provider: 'claude' }), 'and the held-open append is counted');
+      assert.equal(readAgentUsage(cwd, { provider: 'claude', sessionId: 'held' }).outputTokens, 500);
+      spy = spyFs();
+      try { readAgentUsage(cwd, { provider: 'claude' }); } finally { spy.restore(); }
+      assert.deepEqual(spy.seen.statSync, [], 'the beat after the rescan is quiet again');
+    } finally { fs.closeSync(fd); }
+  } finally { T.__setTranscriptWatchClock(null); }
+});
+
+test('SCALE-TRANSCRIPT-SCAN N2: a listing that throws while the dir exists keeps the pending change for the next beat', async () => {
+  const { cwd, dir } = yearDir(3);
+  readAgentUsage(cwd, { provider: 'claude' });
+  // A changed old file (dirty) plus a new one (relist): losing the dirty set served the old file stale.
+  await changed(dir, '000.jsonl', () => fs.appendFileSync(path.join(dir, '000.jsonl'), rec(900, { sessionId: 'n2old' }) + '\n'));
+  await changed(dir, 'new.jsonl', () => fs.writeFileSync(path.join(dir, 'new.jsonl'), rec(77, { sessionId: 'n2' }) + '\n'));
+  const orig = fs.readdirSync;
+  fs.readdirSync = () => { const e = new Error('EBUSY: resource busy or locked'); e.code = 'EBUSY'; throw e; };
+  try { readAgentUsage(cwd, { provider: 'claude' }); } catch { /* the beat may surface it; the next one must recover */ }
+  finally { fs.readdirSync = orig; }
+  const u = readAgentUsage(cwd, { provider: 'claude' });
+  assert.deepEqual(u, coldRead(cwd, { provider: 'claude' }), 'the next beat lists again and counts the new file');
+  assert.equal(readAgentUsage(cwd, { provider: 'claude', sessionId: 'n2' }).outputTokens, 77);
+  assert.equal(readAgentUsage(cwd, { provider: 'claude', sessionId: 'n2old' }).outputTokens, 900, 'the dirty old file was re-read');
+});
+
 test('SCALE-TRANSCRIPT-SCAN: deleting a watched dir leaves the CPU idle, closes the watch, and the dir reads as zeros', async () => {
   const { cwd, dir } = yearDir(4);
   const before = readAgentUsage(cwd, { provider: 'claude' });
