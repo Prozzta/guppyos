@@ -6387,7 +6387,8 @@ ipcMain.handle('hive:inbox', (_evt, id: unknown) => {
   let archived = false;
   // Q32: an orphan or pty-exit archive keeps its ledger (mail is still delivered to it).
   try { archived = archivedForMail(hive.registry().agents[id]); } catch { /* unknown: not archived */ }
-  return hive.mailHistory(id, { archived });
+  // SCALE-DONE-STAT: off the caller's turn, in 8 ms slices (a cold .done listing is ~56k stats at 10x).
+  return hive.mailHistoryAsync(id, { archived });
 });
 // ZT-I1-MAIL §11.8 #16: the queue's "inbox-nonempty" precondition asks the LEDGER (the wake
 // coordinator's pending source: delivered, not yet surfaced), not the inbox listing.
@@ -6433,8 +6434,9 @@ ipcMain.handle('hive:requestInboxWake', (_evt, id: unknown) => {
 // Voice read-layer: recent message CONTENT (inbox/outbox bodies), REDACTED
 // main-side by hive.voiceMessages(). The renderer/voice layer never sees a raw
 // body — secrets are stripped here, before the result crosses IPC.
+// SCALE-MESSAGES-INDEX: off the caller's turn, in 8 ms slices (a cold call reads every mail file once).
 ipcMain.handle('hive:messages', (_evt, opts: unknown) =>
-  hive.voiceMessages(opts && typeof opts === 'object' ? (opts as Parameters<typeof hive.voiceMessages>[0]) : {})
+  hive.voiceMessagesAsync(opts && typeof opts === 'object' ? (opts as Parameters<typeof hive.voiceMessages>[0]) : {})
 );
 ipcMain.handle('hive:send', (_evt, partial: Partial<HiveMessage>, from: unknown) => {
   if (!hive.enabled()) return { ok: false, error: 'hive disabled (no harnessHome)' };
