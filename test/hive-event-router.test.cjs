@@ -21,9 +21,10 @@ const { HiveManager } = loadTs('src/main/hive.ts');
 function fakeRuntime() {
   const watchers = new Map();     // dir -> { hint, closed, handlers }
   const immediates = [];
+  const timeouts = [];
   const intervals = [];
   return {
-    watchers, immediates, intervals,
+    watchers, immediates, timeouts, intervals,
     runtime: {
       watch: (dir, onHint) => {
         const w = {
@@ -35,10 +36,12 @@ function fakeRuntime() {
         return w;
       },
       setImmediate: (fn) => { immediates.push(fn); },
+      setTimeout: (fn, ms) => { const h = { fn, ms }; timeouts.push(h); return h; },
       setInterval: (fn, ms) => { const h = { fn, ms, cleared: false }; intervals.push(h); return h; },
       clearInterval: (h) => { h.cleared = true; }
     },
     flush() { while (immediates.length) immediates.shift()(); },
+    fireNextTimeout() { const next = timeouts.shift(); assert.ok(next, 'expected a delayed retry'); next.fn(); },
     live(dir) { const w = watchers.get(dir); return w && !w.closed ? w : null; }
   };
 }
@@ -119,6 +122,28 @@ test('A2c coalesced hints from different outboxes drain every dirty outbox', asy
   assert.equal(f.rt.immediates.length, 1, 'one queued drain carries both dirty paths');
   f.rt.flush();
   assert.deepEqual(f.deliveries.map((d) => d.messageId).sort(), ['m2c-jim', 'm2c-pam']);
+});
+
+test('A2d a partial outbox is retried after grace and debounce without another watch hint', async (t) => {
+  const f = await floor(t);
+  f.hive.startRouter();
+  const file = path.join(f.outbox('jim-1'), 'partial.json');
+  fs.writeFileSync(file, '{"id":"partial"');
+  f.rt.live(f.outbox('jim-1')).hint();
+  f.rt.flush();
+  assert.equal(f.rt.timeouts.length, 1, 'fresh partial schedules its grace retry');
+  assert.ok(f.rt.timeouts[0].ms > 0 && f.rt.timeouts[0].ms <= 1000);
+
+  // The delayed read sees an old incomplete file, establishes the debounce, then
+  // the writer completes it without another directory event.
+  const old = new Date(Date.now() - 2000);
+  fs.utimesSync(file, old, old);
+  f.rt.fireNextTimeout(); f.rt.flush();
+  assert.equal(f.rt.timeouts.length, 1, 'the parse retry is also scheduled');
+  assert.equal(f.rt.timeouts[0].ms, 250);
+  fs.writeFileSync(file, JSON.stringify(msg('partial', 'god-1')));
+  f.rt.fireNextTimeout(); f.rt.flush();
+  assert.deepEqual(f.deliveries, [{ agentId: 'god-1', messageId: 'partial' }]);
 });
 
 test('A3 a missed watch event is repaired by the reconciliation interval', async (t) => {
