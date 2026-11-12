@@ -29,7 +29,7 @@ for (const dpr of ['1', '1.25']) {
   test(`RENDERED (DPR ${dpr}): semantic fit stays centred, one linear cached downscale, people in depth order`, { timeout: harnessTestTimeout(300_000) }, async (t) => {
     const r = await runScenario(SCENARIO, { width: 1240, height: 940, timeoutMs: 300_000, env: { HARNESS_THEME_PACKS: JSON.stringify([{ dir: 'tes', from: TES }]), HARNESS_DPR: dpr } });
     assert.equal(r.ok, true, r.error);
-    t.diagnostic(JSON.stringify({ frames: r.frames, fitBad: r.fitBad, fitAt: r.fitAt, cacheBad: r.cacheBad, builds: r.builds, blank: r.edgeBlank, texelBadMax: r.texelBadMax, badFrames: r.badFrames?.slice(0, 2), configs: r.configs }));
+    t.diagnostic(JSON.stringify({ frames: r.frames, fitBad: r.fitBad, fitAt: r.fitAt, cacheBad: r.cacheBad, builds: r.builds, blank: r.edgeBlank, texelBadMax: r.texelBadMax, texelMaxDelta: r.texelMaxDelta, texelBadFrames: r.badFrames?.length, badFrames: r.badFrames?.slice(0, 2), configs: r.configs }));
     t.diagnostic(JSON.stringify({ depthChecks: r.depthChecks, depthBadMax: r.depthBadMax, depthBadAt: r.depthBadAt, depthArea: r.depthArea, depthPixels: r.depthPixels, depthSamples: r.depthSamples, teethChecks: r.teethChecks, teethMax: r.teethMax }));
     t.diagnostic(JSON.stringify({ frames: r.frames, frontPlaced: r.frontPlaced, frontStale: r.frontStale, frontMovedSameK: r.frontMovedSameK }));
     t.diagnostic(JSON.stringify({ frontChecks: r.frontChecks, frontStatics: r.frontStatics, frontCovered: r.frontCovered, frontDiff: r.frontDiff, frontMaxDelta: r.frontMaxDelta, frontTeeth: r.frontTeeth, frontSamples: r.frontSamples, frontLog: r.frontLog }));
@@ -39,7 +39,12 @@ for (const dpr of ['1', '1.25']) {
     assert.equal(r.fitBad, 0, 'the lip-to-lip box is uniformly scaled, centred and maximally fitted');
     assert.equal(r.cacheBad, 0, 'cache scale is an integer ceil(scale), the source of one linear downscale');
     assert.ok(r.texelChecks >= r.frames - 3, `fit texel checks ran every frame (checks ${r.texelChecks}, frames ${r.frames})`);
-    assert.equal(r.texelBadMax, 0, `fit texel check is exact under its shared integer-cache + linear-downscale reference (${r.texelBadAt})`);
+    // E45-INT-REGRESSIONS item 7 (god 941bf3): exact on Electron 32.3.3 (20c7645a: 0 px, delta 0, both DPRs);
+    // on Electron 45.3.0 with the same floor code (1de167c4) 20/22 px of the 256 px crop differ by 1 level:
+    // SwiftShader's rounding of the linear sample, not a render change. A nearest cache or a half-texel
+    // shift differs by far more than 1 level (mutants N and H, checked before this commit).
+    assert.ok(r.texelMaxDelta <= 1, `fit texel check matches its shared integer-cache + linear-downscale reference within 1 level (max ${r.texelMaxDelta}; ${r.texelBadAt})`);
+    assert.ok(r.texelBadMax <= 32, `few crop px off by 1 (${r.texelBadMax} of 256; ${r.texelBadAt})`);
     // TES-HULL M1: the people against the statics in front of them, every frame, in the shot's own layout.
     assert.ok(r.depthChecks >= r.frames - 3, `depth checks ran every frame (checks ${r.depthChecks}, frames ${r.frames})`);
     assert.equal(r.depthBadMax, 0, `over the people's rects the stage is this frame drawn again in depth order (${r.depthBadAt} ${JSON.stringify(r.depthSamples)})`);
@@ -51,7 +56,10 @@ for (const dpr of ['1', '1.25']) {
     assert.ok(r.frontCovered > 10_000, `the statics checked cover px (${r.frontCovered})`);
     // Exact but for the GPU's own rounding of the two interpolated texture coordinates: 1 level at most.
     assert.ok(r.frontMaxDelta <= 1, `a static drawn again is the floor's own linear sampling of it, on every px (max ${r.frontMaxDelta}, ${r.frontDiff} px off by 1: ${JSON.stringify(r.frontSamples)})`);
-    assert.ok(r.frontDiff * 100 < r.frontCovered, `few px off by 1 (${r.frontDiff} of ${r.frontCovered})`);
+    // E45-INT-REGRESSIONS item 7 (god ea8385): the same SwiftShader rounding as the fit texel check. With the same
+    // floor code, Electron 32.3.3 (20c7645a) had 0.33% / 0.42% (DPR 1 / 1.25) off by 1, and Electron 45.3.0 (1de167c4)
+    // 1.52% / 0.58%. The delta stays 1 (above), and frontTeeth below still catches a nearest sprite.
+    assert.ok(r.frontDiff * 100 < 3 * r.frontCovered, `few px off by 1 (${r.frontDiff} of ${r.frontCovered}, under 3%)`);
     assert.ok(r.frontTeeth > 1000, `teeth: the old nearest front sprite differs from the floor's copy by more than 1 (${r.frontTeeth} px)`);
     // Jim S1 (mutant F): compose re-places the front statics for every view, a same-k one too.
     assert.equal(r.frontPlaced, r.frames, `the placement was compared on every frame (${r.frontPlaced} of ${r.frames})`);

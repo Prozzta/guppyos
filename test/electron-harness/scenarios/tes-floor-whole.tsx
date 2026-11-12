@@ -223,7 +223,7 @@ function frontStaticDiff(app: any, S: any, count: number): { statics: number; co
 
 const out = {
   frames: 0, fitBad: 0, fitAt: '' as string, cacheBad: 0, builds: 0, panned: 0, panAt: '' as string, selects: 0,
-  texelChecks: 0, texelBadMax: 0, texelBadAt: '' as string, offMap: 0,
+  texelChecks: 0, texelBadMax: 0, texelBadAt: '' as string, texelMaxDelta: 0, offMap: 0,
   teethChecks: 0, teethMax: 0, edgeBlank: 0,
   depthChecks: 0, depthBadMax: 0, depthBadAt: '' as string, depthPixels: 0, depthArea: 0, depthSamples: [] as unknown[],
   frontChecks: 0, frontStatics: 0, frontCovered: 0, frontDiff: 0, frontMaxDelta: 0, frontTeeth: 0, frontSamples: [] as unknown[], frontLog: [] as number[][],
@@ -319,6 +319,7 @@ proto.render = function (this: any) {
             const i = ((cropY + Y) * SW + cropX + X) * 4;
             if (shot[i] !== ref[i] || shot[i + 1] !== ref[i + 1] || shot[i + 2] !== ref[i + 2] || shot[i + 3] !== ref[i + 3]) {
               bad++;
+              for (let c = 0; c < 4; c++) out.texelMaxDelta = Math.max(out.texelMaxDelta, Math.abs(shot[i + c] - ref[i + c]));
               bb[0] = Math.min(bb[0], cropX + X); bb[1] = Math.min(bb[1], cropY + Y); bb[2] = Math.max(bb[2], cropX + X); bb[3] = Math.max(bb[3], cropY + Y);
               if (samples.length < 6 && bad % 97 === 1) samples.push([cropX + X, cropY + Y, [shot[i], shot[i + 1], shot[i + 2], shot[i + 3]], [ref[i], ref[i + 1], ref[i + 2], ref[i + 3]]]);
             }
