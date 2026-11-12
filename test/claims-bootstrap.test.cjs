@@ -46,7 +46,7 @@ test('a live ClaimStore append remains intact when it arrives during the bootstr
   const agent = 'ag-1'; let state = null;
   try {
     const dir = path.join(root, 'agents', agent); fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, 'memory.md'), '# Memory\n\n- imported legacy fact\n');
+    fs.writeFileSync(path.join(dir, 'memory.md'), '# Memory\n\n## 2026-10-03\n- imported legacy fact\n');
     const store = new ClaimStore({ hiveRoot: root, keys: new SandboxKeyProvider(), keyRecord: new FileLedgerKeyRecord(path.join(`${root}-ud`, KEY_RECORD_FILE)), log: () => {}, alert: () => {} });
     const append = makeW6Append(store);
     const bootstrap = new ClaimsBootstrap({
