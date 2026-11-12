@@ -15,6 +15,10 @@
  *   kind 'renderer-longtask'   (renderer) a long task of >= 200 ms: ms, name, attr
  *   kind 'main-stall-profile'  (part 5, config `stallWatch: { profile: true }`, default OFF) the top
  *                              self-time frames of a 30 s sampling window that held a >= 500 ms stall
+ *   kind 'startup-budget-breach' (STARTUP-FREEZE-104 A4) a main block of >= 250 ms inside the first
+ *                              120 s after window-ready: ms, sinceReadyMs, slices, sync (at most 20 rows)
+ *   kind 'startup-budget'      once, 120 s after window-ready: ok, breaches, worstMs, and the top
+ *                              frames of the worst profile window of that span when part 5 is on
  *
  * SLICES: ipcMain.handle/on listeners (once goes through on) are wrapped as they register (the synchronous part of a
  * handler is timed, so an async handler's awaits are not counted), and the sync fs calls are wrapped
@@ -43,6 +47,23 @@ export const PROFILE_INTERVAL_US = 10_000;
 /** A profile window is kept only when it held a stall at least this long. */
 export const PROFILE_KEEP_MS = 500;
 export const PROFILE_TOP = 12;
+
+/** STARTUP-FREEZE-104 A4: after window-ready, main never blocks this long during the first STARTUP_WINDOW_MS. */
+export const STARTUP_BUDGET_MS = 250;
+export const STARTUP_WINDOW_MS = 120_000;
+/** At most this many startup-budget-breach rows per start (the summary row still counts them all). */
+export const STARTUP_BREACH_ROWS = 20;
+
+/** The startup-budget check as it stands (main's own view; the summary row is its log form). */
+export interface StartupBudget {
+  /** window-ready was marked (the check runs only from then). */
+  armed: boolean;
+  /** STARTUP_WINDOW_MS passed since window-ready (the verdict is final). */
+  done: boolean;
+  breaches: number;
+  worstMs: number;
+  ok: boolean;
+}
 
 export const INPUT_EVENTS: ReadonlySet<string> = new Set(['keydown', 'keypress', 'beforeinput', 'input', 'pointerdown']);
 export const SYNC_FS_FNS = ['readFileSync', 'writeFileSync', 'appendFileSync', 'renameSync', 'readdirSync', 'statSync'] as const;
@@ -133,10 +154,26 @@ export class StallWatch {
   /** Current calendar-minute sync I/O totals, keyed by function and basename (see syncKey). */
   private sync = new Map<string, SyncCounter>();
   private syncMinute = -1;
+  /** STARTUP-FREEZE-104 A4: now() at window-ready (null until marked), and the check's tally. */
+  private readyAt: number | null = null;
+  private budget = { breaches: 0, worstMs: 0, rows: 0, done: false };
+  private startupTop: { worstMs: number; top: ReturnType<typeof topFrames> } | null = null;
 
   constructor(private readonly d: StallWatchDeps) {}
 
   get running(): boolean { return this.on; }
+
+  /** STARTUP-FREEZE-104 A4: the first window finished loading; the startup-budget check runs from now. Once. */
+  windowReady(): void {
+    if (!this.on || this.readyAt !== null) return;
+    this.readyAt = this.d.now();
+  }
+
+  /** The startup-budget check: no main block of >= STARTUP_BUDGET_MS in STARTUP_WINDOW_MS after window-ready. */
+  startupBudget(): StartupBudget {
+    const b = this.budget;
+    return { armed: this.readyAt !== null, done: b.done, breaches: b.breaches, worstMs: ms0(b.worstMs), ok: b.breaches === 0 };
+  }
 
   /** Arm the heartbeat and wrap the targets. Once; call it before the ipcMain handlers register. */
   start(targets: StallTargets = {}): void {
@@ -194,6 +231,7 @@ export class StallWatch {
       if (late > this.windowWorst) this.windowWorst = late;
       this.emit('main-stall', late, { at: ms0(this.d.origin + from), ms: ms0(late), eld: ms0(gap), slices: this.overlapping(from, t), sync: this.syncStats(t) }, t);
     }
+    this.checkStartup(from, t, late, gap);
     this.flushDue(t);
   }
 
@@ -225,6 +263,28 @@ export class StallWatch {
       }
     }
   }
+
+  /** A4: a block inside the startup window is a breach row; the window's end writes the verdict once. */
+  private checkStartup(from: number, t: number, late: number, gap: number): void {
+    const ready = this.readyAt;
+    const b = this.budget;
+    if (ready === null || b.done) return;
+    const end = ready + STARTUP_WINDOW_MS;
+    // A block that ends after window-ready and starts before the window's end (one spanning ready counts).
+    if (late >= STARTUP_BUDGET_MS && STALL_MAX_MS > gap && t > ready && from < end) {
+      b.breaches++;
+      if (late > b.worstMs) b.worstMs = late;
+      if (b.rows < STARTUP_BREACH_ROWS) {
+        b.rows++;
+        this.logRow('startup-budget-breach', { at: ms0(this.d.origin + from), ms: ms0(late), sinceReadyMs: ms0(from - ready), budgetMs: STARTUP_BUDGET_MS, slices: this.overlapping(from, t), sync: this.syncStats(t) });
+      }
+    }
+    if (t >= end) {
+      b.done = true;
+      this.logRow('startup-budget', { ok: b.breaches === 0, breaches: b.breaches, worstMs: ms0(b.worstMs), budgetMs: STARTUP_BUDGET_MS, windowMs: STARTUP_WINDOW_MS, ...(this.startupTop ? { top: this.startupTop.top } : {}) });
+    }
+  }
+
 
   private logRow(kind: string, row: Record<string, unknown>, folded = 0): void {
     try { this.d.log({ kind, ...row, ...(folded ? { folded } : {}) }); } catch { /* best-effort */ }
@@ -358,6 +418,8 @@ export class StallWatch {
         if (!err && worst >= PROFILE_KEEP_MS) {
           const top = topFrames((res as { profile?: unknown } | undefined)?.profile);
           this.logRow('main-stall-profile', { worstMs: ms0(worst), windowMs: PROFILE_WINDOW_MS, top });
+          // A4: the worst window of the startup span names the verdict's top frames.
+          if (this.readyAt !== null && !this.budget.done && worst >= STARTUP_BUDGET_MS && worst > (this.startupTop?.worstMs ?? 0)) this.startupTop = { worstMs: worst, top: top.slice(0, 5) };
         }
         if (this.on && this.session === s) { try { s.post('Profiler.start'); } catch { /* gone */ } }
       });
