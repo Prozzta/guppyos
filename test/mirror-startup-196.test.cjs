@@ -99,16 +99,40 @@ test('CENSUS MUTANT: injected slice clock measures one parse, never capped-job d
   assert.equal(M.timeParse(null, () => {}), false);
 });
 
-test('timeParse: the app default clock counts a real non-CPU parse stall (wall-clock mutant)', () => {
+// MIRROR-GUARD-CPU-TIME (1.1.105, god ruling A): this pin was the other way round (the default clock had
+// to charge a non-CPU stall: wall time). The parse has no off-CPU path, so a stall inside a slice is the
+// thread waiting for a core, which is machine load, not mirror cost. Now the default clock is the
+// thread's own CPU: a waited slice costs (almost) nothing, a computing slice costs its CPU.
+test('MIRROR-GUARD-CPU-TIME: the default clock is the thread\'s CPU: a waited slice is not charged, a computing one is (wall-clock mutant)', () => {
+  assert.equal(typeof M.threadCpuMs, 'function', 'Node 24 / Electron 45 have process.threadCpuUsage');
   const calls = [];
   const word = new Int32Array(new SharedArrayBuffer(4));
-  const wb = { _innerWrite() { Atomics.wait(word, 0, 0, 60); } };
+  let mode = 'wait';
+  const wb = { _innerWrite() {
+    if (mode === 'wait') { Atomics.wait(word, 0, 0, 200); return; }
+    // A fixed amount of CPU, not of wall time, so a loaded machine cannot shorten it.
+    const cpu = () => { const u = process.threadCpuUsage(); return (u.user + u.system) / 1000; };
+    const end = cpu() + 120; while (cpu() < end) { /* compute */ }
+  } };
   assert.equal(M.timeParse({ _core: { _writeBuffer: wb } }, (ms) => calls.push(ms)), true);
   wb._innerWrite();
-  assert.equal(calls.length, 1);
-  // process.cpuUsage() sees essentially none of Atomics.wait; the production clock must
-  // still charge the whole slice.  A little scheduler slack is deliberately tolerated.
-  assert.ok(calls[0] >= 40, `wall stall was not timed: ${calls[0]} ms`);
+  mode = 'spin';
+  wb._innerWrite();
+  assert.equal(calls.length, 2);
+  // Windows' thread clock moves in 15.6 ms ticks: a 200 ms wait reads at most a tick or two, a wall
+  // clock reads 200 or more. A slice that computes 120 ms of CPU reads at least that.
+  assert.ok(calls[0] < 40, `A WAITED SLICE WAS CHARGED: ${calls[0]} ms of a 200 ms wait (wall clock?)`);
+  assert.ok(calls[1] >= 120, `A COMPUTING SLICE WAS NOT CHARGED: ${calls[1]} ms of 120 ms CPU`);
+});
+
+test('MIRROR-GUARD-CPU-TIME: a runtime with no thread clock leaves the parse UNTIMED, never wall-timed', () => {
+  const wb = { _innerWrite() {} };
+  assert.equal(M.timeParse({ _core: { _writeBuffer: wb } }, () => {}, null), false);
+  assert.equal(wb._innerWrite.name, '_innerWrite', 'nothing was wrapped');
+  const tm = src('src/main/terminalMirror.ts');
+  assert.match(tm, /export function timeParse\(t: unknown, add: \(ms: number\) => void, now: \(\(\) => number\) \| null = threadCpuMs\): boolean \{\n  if \(!now\) return false;/);
+  assert.match(tm, /\? \(\) => \{ const u = process\.threadCpuUsage\(\); return \(u\.user \+ u\.system\) \/ 1000; \}\n  : null;/);
+  assert.match(tm, /if \(!timeParse\(t, \(ms\) => \{ parsedMs \+= ms; \}\)\) untimed = true;/, 'the real mirror takes the default clock');
 });
 
 // ─── 2. the replay of the 1.1.95 startup ───────────────────────────────────────────────────
