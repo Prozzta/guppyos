@@ -5,6 +5,7 @@
 // dependencies that are not installed off their own platform, so they need nothing.
 const fs = require('fs');
 const path = require('path');
+const { flipElectronFuses } = require('./electronFuses.cjs');
 
 const ARCH = { 0: 'ia32', 1: 'x64', 2: 'armv7l', 3: 'arm64', 4: 'universal' };
 
@@ -15,6 +16,8 @@ exports.default = async function afterPack(context) {
     ? path.join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`, 'Contents', 'Resources')
     : path.join(context.appOutDir, 'resources');
   guppyUpdaterCache(resources);
+  // ELECTRON-FUSES: before electron-builder's sign step (see build/electronFuses.cjs).
+  await flipElectronFuses(context);
   const bin = path.join(resources, 'app.asar.unpacked', 'node_modules', 'onnxruntime-node', 'bin', 'napi-v3');
   if (!fs.existsSync(bin)) return;
   let removed = 0;
