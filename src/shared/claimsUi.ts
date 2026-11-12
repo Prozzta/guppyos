@@ -40,10 +40,10 @@ export interface LedgerUiAgentView {
 export interface LedgerUiSummary {
   /** The saved Settings level (absent = off) and what this build makes of it. */
   saved: string | null; effective: LedgerLevel;
-  agents: Array<{ agentId: string; level: LedgerLevel; claims: number; readOnly: boolean }>;
+  agents: Array<{ agentId: string; level: LedgerLevel; claims: number; readOnly: boolean; system?: boolean }>;
   /** CLAIMS-DEFAULT C5: this floor's level for an agent with no entry (null = none: such an agent is off),
    *  and the repo its derived writer reads (null = none: no merge, tag or release facts from git). */
-  floor?: { ledgerDefault: LedgerLevel | null; derivedRepo: string | null };
+  floor?: { ledgerDefault: LedgerLevel | null; derivedRepo: string | null; legacy: boolean };
 }
 
 export type LedgerUiResult = { ok: true; id?: string; note?: string } | { ok: false; error: string; cancelled?: true };

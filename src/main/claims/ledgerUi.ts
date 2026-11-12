@@ -37,6 +37,8 @@ export interface LedgerUiDeps {
     purge(agentId: string, ids: string[], confirmedByHuman: true): Promise<PurgeResult>;
   } | null;
   agents: () => string[];
+  /** Presentation-only roster metadata. It must not change the ledger census used by index/export. */
+  agentMeta?: (agentId: string) => { archived?: boolean; system?: boolean } | undefined;
   /** The agent's effective level (main's claimLevel). */
   level: (agentId: string) => LedgerLevel;
   savedLevel: () => unknown;
@@ -129,12 +131,13 @@ export function createLedgerUi(d: LedgerUiDeps) {
     summary(): LedgerUiSummary {
       const saved = d.savedLevel();
       const store = d.store();
-      const agents = store ? d.agents().filter((a) => AGENT_RE.test(a)).sort().map((agentId) => {
+      const agents = store ? [...new Set(d.agents())].filter((a) => AGENT_RE.test(a)).filter((agentId) => !d.agentMeta?.(agentId)?.archived).sort().map((agentId) => {
         const r = store.readLedger(agentId);
-        return { agentId, level: d.level(agentId), claims: r.records.filter((x) => x.t === 'claim').length, readOnly: r.chain !== 'ok' };
+        const meta = d.agentMeta?.(agentId);
+        return { agentId, level: d.level(agentId), claims: r.records.filter((x) => x.t === 'claim').length, readOnly: r.chain !== 'ok', ...(meta?.system ? { system: true } : {}) };
       }) : [];
       const f = d.floor?.();
-      const floor = f ? { ledgerDefault: typeof f.ledgerDefault === 'string' && (LEDGER_LEVELS as readonly string[]).includes(f.ledgerDefault) ? f.ledgerDefault as LedgerLevel : null, derivedRepo: f.derivedRepo } : undefined;
+      const floor = f ? { ledgerDefault: typeof f.ledgerDefault === 'string' && (LEDGER_LEVELS as readonly string[]).includes(f.ledgerDefault) ? f.ledgerDefault as LedgerLevel : null, derivedRepo: f.derivedRepo, legacy: f.ledgerDefault === undefined } : undefined;
       return { saved: typeof saved === 'string' ? saved : null, effective: effectiveLevel(saved, saved).level, agents, ...(floor ? { floor } : {}) };
     },
 

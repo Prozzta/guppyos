@@ -174,12 +174,13 @@ test('main wiring: claimLevel reads the floor default, the derived writer reads 
 
 test('C5: the Settings summary shows the floor default and the derived repo (or that none is set)', () => {
   const ui = (floor) => createLedgerUi({ store: () => null, agents: () => [], level: () => 'off', savedLevel: () => 'writer', saveLevel: () => {}, levelChanged: () => null, registry: () => ({}), derive: () => ({}), verifiedPrefix: () => null, exportComplete: () => ({ ok: false, error: '' }), scrubExport: () => 0, confirm: async () => false, log: () => {}, floor });
-  assert.deepEqual(ui(() => ({ ledgerDefault: 'writer', derivedRepo: 'C:/p' })).summary().floor, { ledgerDefault: 'writer', derivedRepo: 'C:/p' });
-  assert.deepEqual(ui(() => ({ ledgerDefault: undefined, derivedRepo: null })).summary().floor, { ledgerDefault: null, derivedRepo: null });
+  assert.deepEqual(ui(() => ({ ledgerDefault: 'writer', derivedRepo: 'C:/p' })).summary().floor, { ledgerDefault: 'writer', derivedRepo: 'C:/p', legacy: false });
+  assert.deepEqual(ui(() => ({ ledgerDefault: undefined, derivedRepo: null })).summary().floor, { ledgerDefault: null, derivedRepo: null, legacy: true });
   assert.deepEqual(ui(() => ({ ledgerDefault: 'Writer', derivedRepo: null })).summary().floor.ledgerDefault, null, 'a garbled default shows as none');
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'src', 'components', 'ClaimLedgerSettings.tsx'), 'utf8');
   assert.match(src, /No git repo is set for derived facts/);
   assert.match(src, /an agent without its own entry is off/);
+  assert.match(src, /Agents on this floor existed before claims ledger/);
 });
 
 test('CLAIMS-DEFAULT-ON-103: floorRepo resolves a seeded floor\'s folder live; a floor made before 1.1.103 (no ledgerDefault) reads only derivedRepoFor', () => {
