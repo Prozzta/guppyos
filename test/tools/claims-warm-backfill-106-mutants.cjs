@@ -8,8 +8,8 @@
 // Every mutant goes through mutant-runner-helper.cjs (journal, then restore in a finally).
 const fs = require('node:fs');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
 const { recover, mutateFile, restoreFile, checkAnchors } = require('./mutant-runner-helper.cjs');
+const { runTests, verdict, requireBaseline } = require('./mutant-tap.cjs');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const TEST = 'test/claims-warm-backfill-106.test.cjs';
@@ -50,15 +50,12 @@ const MUTANTS = [
   ['W22 the default turn is synchronous', OFF, '((fn) => { setImmediate(fn); })', '((fn) => { fn(); })', /not ok \d+ - 106 drain wiring/],
 ];
 
-const run = () => spawnSync(process.execPath, ['--test', '--test-reporter=tap', TEST], { cwd: ROOT, encoding: 'utf8', windowsHide: true, timeout: 300_000, maxBuffer: 256 * 1024 * 1024 });
+const run = () => runTests(ROOT, [TEST], { timeout: 300_000 });
 recover(ROOT);
 if (process.argv.includes('--recover-only')) process.exit(0);
 checkAnchors(ROOT, MUTANTS.map(([name, file, from]) => ({ name, file, from })));
 if (process.argv.includes('--anchors-only')) { console.log('ANCHORS OK'); process.exit(0); }
-if (run().status !== 0) {
-  console.log(`BASELINE RED: ${TEST} fails unmutated, so no mutant proves anything.`);
-  process.exit(2);
-}
+requireBaseline(run(), TEST);
 
 let bad = 0;
 for (const [name, file, from, to, dies] of MUTANTS) {
@@ -80,10 +77,10 @@ for (const [name, file, from, to, dies] of MUTANTS) {
   } finally {
     restoreFile(ROOT, abs, original);
   }
-  const named = dies.test(`${r.stdout}${r.stderr}`);
-  const killed = r.status !== 0 && named;
+  const outcome = verdict(r, dies);
+  const killed = outcome === 'KILLED';
   if (!killed) bad += 1;
-  console.log(`${killed ? 'KILLED' : r.status !== 0 ? 'KILLED ELSEWHERE' : 'SURVIVED'} ${name}`);
+  console.log(`${outcome} ${name}`);
 }
 console.log(bad ? `CENSUS FAILED: ${bad} of ${MUTANTS.length}` : `CENSUS OK: ${MUTANTS.length}/${MUTANTS.length} killed at their named test`);
 process.exit(bad ? 1 : 0);
