@@ -28,6 +28,7 @@ function tapResult(r) {
   const cancelled = count('cancelled') ?? 0;
   const failed = stdout.split(/\r?\n/).filter((l) => /^not ok \d+ - /.test(l))
     .map((l) => l.replace(/^not ok \d+ - /, '').replace(/\s+#\s.*$/, '').trim());
+  const failures = failureText(stdout);
   let why = null;
   if (r.error) why = `${r.error.code ?? r.error.message}`;
   else if (r.signal) why = `killed by ${r.signal}`;
@@ -36,7 +37,25 @@ function tapResult(r) {
   else if (r.status !== 0 && fail === 0 && cancelled === 0) why = `exit ${r.status} with no failing test`;
   else if (r.status === 0 && (fail > 0 || cancelled > 0)) why = `exit 0 with ${fail} failing test(s)`;
   return { status: r.status, signal: r.signal ?? null, error: r.error ?? null, stdout, stderr,
-    tests, pass, fail, cancelled, failed, noResult: why !== null, why };
+    tests, pass, fail, cancelled, failed, failures, noResult: why !== null, why };
+}
+// MUTANT-DIES-FAILED-ONLY: the text a `dies` RegExp may match. Only what TAP says about FAILING tests, at any
+// depth: each 'not ok N - title' line and its YAML diagnostic block (the assertion message lives there). Never
+// an 'ok' row, a '# Subtest: <name>' header (printed for passing tests too), a passing test's YAML, or stderr,
+// so a passing test whose name matches can not turn a kill elsewhere into KILLED.
+function failureText(stdout) {
+  const out = [];
+  let close = null; // the '...' line that ends the current failing test's YAML block
+  for (const line of stdout.split(/\r?\n/)) {
+    if (close !== null) {
+      out.push(line);
+      if (line === close) close = null;
+      continue;
+    }
+    const m = /^(\s*)not ok \d+ - /.exec(line);
+    if (m) { out.push(line); close = `${m[1]}  ...`; }
+  }
+  return out.join('\n');
 }
 // files: test paths relative to root. args: extra node flags (--test-name-pattern ...), never a reporter.
 function runTests(root, files, { args = [], env, timeout = 600_000 } = {}) {
@@ -50,14 +69,14 @@ function runTests(root, files, { args = [], env, timeout = 600_000 } = {}) {
   });
   return tapResult(r);
 }
-// KILLED: the run failed (at the named test when `dies` is given: a RegExp on the TAP output, or a function
-// of the failing titles). KILLED ELSEWHERE: it failed, but not there. SURVIVED: it ran and passed.
+// KILLED: the run failed (at the named test when `dies` is given: a RegExp on the failing tests' TAP rows and
+// diagnostics only (see failureText), or a function of the failing titles). KILLED ELSEWHERE: it failed, but not there. SURVIVED: it ran and passed.
 // NO-RESULT: it never reported (see tapResult).
 function verdict(res, dies) {
   if (res.noResult) return 'NO-RESULT';
   if (res.fail === 0 && res.cancelled === 0) return 'SURVIVED';
   if (!dies) return 'KILLED';
-  const named = typeof dies === 'function' ? dies(res.failed) : dies.test(`${res.stdout}\n${res.stderr}`);
+  const named = typeof dies === 'function' ? dies(res.failed) : new RegExp(dies.source, dies.flags.replace(/[gy]/g, '')).test(res.failures);
   return named ? 'KILLED' : 'KILLED ELSEWHERE';
 }
 // A census proves nothing against a baseline that is red or never reported: say which and exit 2.
