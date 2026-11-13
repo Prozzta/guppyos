@@ -132,7 +132,7 @@ test('A2d a partial outbox is retried after grace and debounce without another w
   f.rt.live(f.outbox('jim-1')).hint();
   f.rt.flush();
   assert.equal(f.rt.timeouts.length, 1, 'fresh partial schedules its grace retry');
-  assert.ok(f.rt.timeouts[0].ms > 0 && f.rt.timeouts[0].ms <= 1000);
+  assert.ok(f.rt.timeouts[0].ms > 0 && f.rt.timeouts[0].ms <= 1000, `grace=${f.rt.timeouts[0].ms}`);
 
   // The delayed read sees an old incomplete file, establishes the debounce, then
   // the writer completes it without another directory event.

@@ -135,7 +135,7 @@ test('a read-modify-write inside the window builds on an outside edit, not on th
 });
 
 test('an external edit is invisible inside the window and picked up by the slow stat fallback at CONFIG_REVALIDATE_MS', () => {
-  assert.ok(CONFIG_REVALIDATE_MS >= 30_000, 'watch is normal invalidation; stat is only an occasional backstop');
+  assert.equal(CONFIG_REVALIDATE_MS, 5_000, 'the async missed-watch backstop is bounded to five seconds');
   fresh({ toolOutputCap: 100 });
   assert.equal(readConfig().toolOutputCap, 100);
   handEdit({ toolOutputCap: 200 });
