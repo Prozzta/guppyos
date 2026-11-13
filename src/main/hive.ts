@@ -24,6 +24,7 @@ import {
   openSync, readSync, closeSync,
   type FSWatcher, type Stats
 } from 'node:fs';
+import { promises as fsPromises } from 'node:fs';
 import { basename, join, dirname, isAbsolute, win32, posix } from 'node:path';
 import { homedir } from 'node:os';
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -841,6 +842,8 @@ export class HiveManager {
   static readonly MAIL_REBUILD_LOG_ROWS = 50_000;
 
   private routerTimer: unknown = null;
+  /** A slow recovery scan is allowed to run late, never concurrently. */
+  private routerReconciling = false;
   /** One non-recursive watcher per active outbox, keyed by its absolute path. */
   private readonly outboxWatchers = new Map<string, Pick<FSWatcher, 'close' | 'on'>>();
   /** Outboxes named by watch hints; the immediate drain never re-enumerates agents. */
@@ -3633,15 +3636,35 @@ export class HiveManager {
    */
   /** Watch hints normally drain one dirty outbox.  This slow full scan is only
    * the loss-recovery backstop for dropped/failed watchers. */
-  static readonly ROUTER_RECONCILE_MS = 30_000;
+  static readonly ROUTER_RECONCILE_MS = 10_000;
   startRouter(intervalMs = HiveManager.ROUTER_RECONCILE_MS): void {
     if (this.routerTimer || !this.enabled()) return;
     this.routerGeneration++;
-    this.routerTimer = this.routerRuntime.setInterval(() => {
-      try { this.refreshOutboxWatchers(); this.routeOnce(); } catch { /* keep the loop alive */ }
-    }, intervalMs);
+    this.routerTimer = this.routerRuntime.setInterval(() => this.reconcileRouterAsync(), intervalMs);
     try { this.refreshOutboxWatchers(); this.routeOnce(); } catch { /* the interval retries */ }
   }
+
+  /** The missed-watch safety net uses async directory I/O and never overlaps. */
+  private async reconcileRouterAsync(): Promise<void> {
+    if (this.routerReconciling || !this.routerTimer) return;
+    const root = this.root();
+    if (!root) return;
+    this.routerReconciling = true;
+    try {
+      const agentsDir = join(root, 'agents');
+      const ids = await fsPromises.readdir(agentsDir);
+      const agents = this.registry().agents;
+      for (const id of ids) {
+        if (agents[id]?.archived) continue;
+        const outbox = join(agentsDir, id, 'outbox');
+        try { await fsPromises.readdir(outbox); } catch { continue; }
+        this.scheduleRouteOnce(outbox);
+      }
+      await this.refreshOutboxWatchersAsync(agentsDir, agents);
+    } catch { /* a later bounded pass retries */ }
+    finally { this.routerReconciling = false; }
+  }
+
   stopRouter(): void {
     if (this.routerTimer) { this.routerRuntime.clearInterval(this.routerTimer); this.routerTimer = null; }
     this.routerGeneration++;
@@ -3687,6 +3710,36 @@ export class HiveManager {
   }
 
   /** The directories currently watched (diagnostics and tests). */
+  /** Async watcher refresh used only by the periodic missed-event backstop. */
+  private async refreshOutboxWatchersAsync(agentsDir: string, agents: Registry['agents']): Promise<void> {
+    let ids: string[];
+    try { ids = await fsPromises.readdir(agentsDir); } catch { ids = []; }
+    const want = new Set<string>();
+    for (const id of ids) {
+      if (agents[id]?.archived) continue;
+      const outbox = join(agentsDir, id, 'outbox');
+      try { if ((await fsPromises.stat(outbox)).isDirectory()) want.add(outbox); } catch { /* gone */ }
+    }
+    for (const [dir, w] of this.outboxWatchers) {
+      if (want.has(dir)) continue;
+      try { w.close(); } catch { /* already closed */ }
+      this.outboxWatchers.delete(dir);
+    }
+    for (const dir of want) {
+      if (this.outboxWatchers.has(dir)) continue;
+      try {
+        const w = this.routerRuntime.watch(dir, () => this.scheduleRouteOnce(dir));
+        const drop = (): void => {
+          if (this.outboxWatchers.get(dir) !== w) return;
+          this.outboxWatchers.delete(dir);
+          try { w.close(); } catch { /* already closed */ }
+        };
+        w.on('error', drop); w.on('close', drop);
+        this.outboxWatchers.set(dir, w);
+      } catch { /* retry next reconciliation */ }
+    }
+  }
+
   watchedOutboxes(): string[] {
     return [...this.outboxWatchers.keys()].sort();
   }
