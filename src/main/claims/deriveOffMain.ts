@@ -15,6 +15,10 @@
  * worker read, verify and derive, ~1.8 s at 10x). A18's deriveOnce reused the in-process result; this is its off-main
  * twin: an agent's last 'codes' answer is reused while the job's head, count, frozen registry and r4 are the same. A
  * verified chain with the same head and count is the same records, so the answer is the one the worker would give.
+ *
+ * 106 drain (Jim's SHOULD on c9cf16c6, god go): when a worker fails, the jobs it held settle null one per macrotask
+ * turn, so each caller's in-process fallback runs in its own turn, not one microtask chain (7 at 10x: one 1.96 s
+ * block). A job run() meanwhile waits for the drain and one more turn before it reaches the fresh worker.
  */
 import type { KeyRegistry } from '../../shared/claims';
 import type { DeriveJob, DeriveJobResult } from './deriveJob';
@@ -35,6 +39,8 @@ export interface DeriveOffMainDeps {
   maxFailures?: number;
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (t: unknown) => void;
+  /** 106: one macrotask turn for the fallback drain (default setImmediate). */
+  yieldTurn?: (fn: () => void) => void;
 }
 
 export const DERIVE_WORKER_TIMEOUT_MS = 30_000;
@@ -56,10 +62,14 @@ export class DeriveOffMain {
   private readonly codes = new Map<string, CodesMemo & { result: Ok }>();
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
   private readonly clearTimer: (t: unknown) => void;
+  /** 106: a failed worker's jobs still settling, one per turn (null when none). */
+  private drain: Promise<void> | null = null;
+  private readonly yieldTurn: (fn: () => void) => void;
 
   constructor(private readonly d: DeriveOffMainDeps) {
     this.setTimer = d.setTimer ?? ((fn, ms) => { const t = setTimeout(fn, ms); t.unref?.(); return t; });
     this.clearTimer = d.clearTimer ?? ((t) => clearTimeout(t as NodeJS.Timeout));
+    this.yieldTurn = d.yieldTurn ?? ((fn) => { setImmediate(fn); });
   }
 
   /** Whether jobs go to the worker (false once it failed `maxFailures` times). */
@@ -74,6 +84,7 @@ export class DeriveOffMain {
         return Promise.resolve(last.result);
       }
     }
+    if (this.drain) return this.drain.then(() => this.run(job));
     const w = this.worker();
     if (!w) return Promise.resolve(null);
     const id = this.nextId++;
@@ -140,9 +151,21 @@ export class DeriveOffMain {
     this.settleAll(null);
   }
 
+  /** 106: the held jobs settle one per turn (the first after one turn); the drain ends one turn after the last. */
   private settleAll(r: null): void {
     const all = [...this.pending.values()];
     this.pending.clear();
-    for (const p of all) { this.clearTimer(p.timer); p.resolve(r); }
+    for (const p of all) this.clearTimer(p.timer);
+    if (!all.length) return;
+    // No drain is running here: run() waits for a drain before it posts, so pending is empty during one.
+    this.drain = new Promise<void>((done) => {
+      const next = (): void => {
+        const p = all.shift();
+        if (!p) { this.drain = null; done(); return; }
+        p.resolve(r);
+        this.yieldTurn(next);
+      };
+      this.yieldTurn(next);
+    });
   }
 }

@@ -19,6 +19,9 @@ const MAIN = 'src/main/index.ts';
 
 const SAME = /not ok \d+ - 106: the same codes job/;
 const CHANGED = /not ok \d+ - 106: a changed head, count, registry or r4 posts again/;
+const DRAIN1 = /not ok \d+ - 106 drain: a failed worker's jobs settle one per turn/;
+const DRAIN2 = /not ok \d+ - 106 drain: a job run during the drain/;
+const DRAIN3 = /not ok \d+ - 106 drain: stop\(\) drains the same way/;
 const MUTANTS = [
   ['W1 the memo is never used', OFF, 'if (last && last.head === memo.head', 'if (false && last.head === memo.head', SAME],
   ['W2 head not compared', OFF, 'last.head === memo.head && last.count', 'last.count', CHANGED],
@@ -35,6 +38,16 @@ const MUTANTS = [
   ['W13 no offMain counts as on', SYNC, 'const workerOn = !!this.d.offMain && (', 'const workerOn = true && (', /not ok \d+ - 106: the worker off/],
   ['W14 the worker inherits execArgv', MAIN, "join(__dirname, 'claimsDeriveWorker.js'), { execArgv: [] })", "join(__dirname, 'claimsDeriveWorker.js'))", /not ok \d+ - 106 wiring/],
   ['W15 main passes no offMainEnabled', MAIN, '      offMainEnabled: () => claimsDeriveOffMain.enabled,\n', '', /not ok \d+ - 106 wiring/],
+  // The fallback drain (Jim's SHOULD on c9cf16c6, god go).
+  ['W16 the drain settles every job in one turn', OFF, '        p.resolve(r);\n        this.yieldTurn(next);', '        p.resolve(r);\n        next();', DRAIN1],
+  ['W17 the first job settles in the failing turn', OFF, '      };\n      this.yieldTurn(next);\n    });', '      };\n      next();\n    });', DRAIN1],
+  ['W18 a run during the drain does not wait', OFF, '    if (this.drain) return this.drain.then(() => this.run(job));\n', '', DRAIN2],
+  ['W19 the drain ends in the turn of the last settle', OFF, '        p.resolve(r);\n        this.yieldTurn(next);', '        p.resolve(r);\n        if (all.length) this.yieldTurn(next); else { this.drain = null; done(); }', DRAIN2],
+  // Not a row: a drain that never clears makes run() re-chain on the settled drain forever in microtasks, which starves
+  // every timer, so the file dies only at the runner's timeout, never at a named assert. DRAIN2's late-job post pins it.
+  ['W20 a memo hit waits for the drain', OFF, "    const memo: CodesMemo | null = job.want === 'codes'", "    if (this.drain) return this.drain.then(() => this.run(job));\n    const memo: CodesMemo | null = job.want === 'codes'", DRAIN3],
+  ['W21 stop settles at once', OFF, '    if (w) { try { w.terminate(); } catch { /* gone */ } }\n    this.settleAll(null);\n  }\n\n  private worker()', '    if (w) { try { w.terminate(); } catch { /* gone */ } }\n    for (const p of this.pending.values()) { this.clearTimer(p.timer); p.resolve(null); }\n    this.pending.clear();\n  }\n\n  private worker()', DRAIN3],
+  ['W22 the default turn is synchronous', OFF, '((fn) => { setImmediate(fn); })', '((fn) => { fn(); })', /not ok \d+ - 106 drain wiring/],
 ];
 
 const run = () => spawnSync(process.execPath, ['--test', '--test-reporter=tap', TEST], { cwd: ROOT, encoding: 'utf8', windowsHide: true, timeout: 300_000, maxBuffer: 256 * 1024 * 1024 });
