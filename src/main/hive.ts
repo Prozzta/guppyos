@@ -3728,7 +3728,7 @@ export class HiveManager {
     for (const dir of want) {
       if (this.outboxWatchers.has(dir)) continue;
       try {
-        const w = this.routerRuntime.watch(dir, () => this.scheduleRouteOnce(dir));
+        const w = this.routerRuntime.watch(dir, () => { this.scheduleRouteOnce(dir); });
         const drop = (): void => {
           if (this.outboxWatchers.get(dir) !== w) return;
           this.outboxWatchers.delete(dir);
@@ -3943,7 +3943,7 @@ export class HiveManager {
           try {
             const freshFor = now - statSync(full).mtimeMs;
             if (freshFor < OUTBOX_FRESH_WRITE_GRACE_MS) {
-              this.scheduleRouteOnceAfter(outbox, OUTBOX_FRESH_WRITE_GRACE_MS - freshFor);
+              this.scheduleRouteOnceAfter(outbox, Math.min(OUTBOX_FRESH_WRITE_GRACE_MS, Math.max(1, OUTBOX_FRESH_WRITE_GRACE_MS - freshFor)));
               continue;
             }
           } catch {
@@ -4055,18 +4055,22 @@ export class HiveManager {
     }
     // A file removed by its writer or routed successfully must not leave a stale
     // retry count that could punish a later file reusing the same name.
-    if (!fullScan) return routed;
+    // A periodic pass scans only dirty directories, but must still forget files
+    // removed from those directories. Otherwise a later same-named file inherits
+    // retry state and these small maps grow until a router restart.
+    const scannedOutboxes = new Set(outboxes.map(([, outbox]) => outbox));
+    const wasScanned = (full: string): boolean => fullScan || scannedOutboxes.has(dirname(full));
     for (const full of this.outboxParseRetries.keys()) {
-      if (!liveOutboxFiles.has(full)) this.outboxParseRetries.delete(full);
+      if (wasScanned(full) && !liveOutboxFiles.has(full)) this.outboxParseRetries.delete(full);
     }
     for (const full of this.outboxRejectNotices.keys()) {
-      if (!liveOutboxFiles.has(full)) this.outboxRejectNotices.delete(full);
+      if (wasScanned(full) && !liveOutboxFiles.has(full)) this.outboxRejectNotices.delete(full);
     }
     for (const full of this.outboxDeliveredArchives.keys()) {
-      if (!liveOutboxFiles.has(full)) this.outboxDeliveredArchives.delete(full);
+      if (wasScanned(full) && !liveOutboxFiles.has(full)) this.outboxDeliveredArchives.delete(full);
     }
     for (const full of this.outboxArchiveFailures.keys()) {
-      if (!liveOutboxFiles.has(full)) this.outboxArchiveFailures.delete(full);
+      if (wasScanned(full) && !liveOutboxFiles.has(full)) this.outboxArchiveFailures.delete(full);
     }
     if (routed > 0 || rejected > 0 || archived > 0) {
     }
@@ -6439,8 +6443,8 @@ export class HiveManager {
   __resetAuthorityCacheForTests(now?: () => number, wall?: () => number): void {
     this.authorityCache.clear();
     this.authorityTestClock = !!now;
-    if (now) this.authorityNow = now;
-    if (wall) this.authorityWall = wall;
+    this.authorityNow = now ?? (() => Date.now());
+    this.authorityWall = wall ?? (() => Date.now());
   }
   private readAuthoritativeJsonCached<T>(p: string, onMissing: () => T, fresh = false): T {
     const now = this.authorityNow();
@@ -6493,6 +6497,11 @@ export class HiveManager {
         else entry.checkedAt = this.authorityNow();
       }));
     } finally { this.authorityFallbackRunning = false; }
+  }
+  /** Test seam for the real production missed-watch verifier. */
+  async __revalidateAuthoritiesForTests(): Promise<void> {
+    if (!this.authorityFallbackTimer) throw new Error('authority missed-watch fallback is not armed');
+    await this.revalidateAuthoritiesAsync();
   }
   private writeJson(p: string, data: unknown): void {
     this.atomicWriteJson(p, data);

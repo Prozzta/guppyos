@@ -60,6 +60,14 @@ test('1000 reads inside the window reach disk once, return one deep-frozen objec
   assert.throws(() => { delete r.agents.a1; }, TypeError);
 });
 
+test('production missed-watch fallback invalidates registry asynchronously', async (t) => {
+  const { hive, handEdit } = floor(t); hive.__resetAuthorityCacheForTests();
+  assert.ok(hive.registry().agents.a1);
+  handEdit({ godId: null, agents: { a2: agent('a2') } });
+  await hive.__revalidateAuthoritiesForTests();
+  assert.ok(hive.registry().agents.a2);
+});
+
 test('a mutation reads the file fresh, never the frozen cache, and its write is seen by the next read', (t) => {
   const { hive, file, handEdit } = floor(t);
   hive.registry();

@@ -744,6 +744,11 @@ async function revalidateConfigAsync(): Promise<void> {
     else c.checkedAt = configNow();
   } finally { configFallbackRunning = false; }
 }
+/** Test seam for the real-clock-free missed-watch bound. */
+export async function __revalidateConfigForTests(): Promise<void> {
+  if (!configFallbackTimer) throw new Error('config missed-watch fallback is not armed');
+  await revalidateConfigAsync();
+}
 
 function statOrNull(p: string): Stats | null {
   // As existsSync: any error (ENOENT, EACCES, ...) is "no file".
@@ -795,8 +800,8 @@ export function closeConfigWatcher(): void {
 export function __resetConfigCacheForTests(now?: () => number, wall?: () => number): void {
   configCache = null;
   configTestClock = !!now;
-  if (now) configNow = now;
-  if (wall) configWall = wall;
+  configNow = now ?? (() => Date.now());
+  configWall = wall ?? (() => Date.now());
 }
 
 function noteCorruptConfig(p: string, raw: string, error: unknown): void {
