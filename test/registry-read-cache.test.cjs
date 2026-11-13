@@ -61,8 +61,9 @@ test('1000 reads inside the window reach disk once, return one deep-frozen objec
 });
 
 test('production missed-watch fallback invalidates registry asynchronously', async (t) => {
-  const { hive, handEdit } = floor(t); hive.__resetAuthorityCacheForTests();
+  const { hive, handEdit } = floor(t); hive.__resetAuthorityCacheForTests(undefined, () => Date.now() + 60_000);
   assert.ok(hive.registry().agents.a1);
+  hive.__dropAuthorityWatchersForTests();
   handEdit({ godId: null, agents: { a2: agent('a2') } });
   await hive.__revalidateAuthoritiesForTests();
   assert.ok(hive.registry().agents.a2);
