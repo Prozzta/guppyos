@@ -18,7 +18,7 @@
     "build": "electron-vite build && npm run copy:main-assets && node tools/build-heavyjob.cjs && node tools/build-input-helper.cjs",
     "copy:main-assets": "node tools/copy-main-assets.cjs",
     "preview": "electron-vite preview",
-    "postinstall": "node tools/patch-node-pty-race-fix.cjs && node tools/patch-node-pty-winpty-gyp.cjs && node node_modules/electron/install.js && electron-rebuild -f && node tools/build-fs-handle.cjs && node tools/ensure-pty-perms.cjs && node tools/patch-node-pty-conpty.cjs && node tools/record-node-pty-race-fix.cjs && node tools/patch-node-pty-winpty-gyp.cjs --check",
+    "postinstall": "node tools/patch-node-pty-race-fix.cjs && node tools/patch-node-pty-winpty-gyp.cjs && node node_modules/electron/install.js && electron-rebuild -f -w node-pty && node tools/build-fs-handle.cjs && node tools/ensure-pty-perms.cjs && node tools/patch-node-pty-conpty.cjs && node tools/record-node-pty-race-fix.cjs && node tools/patch-node-pty-winpty-gyp.cjs --check",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
