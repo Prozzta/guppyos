@@ -2721,6 +2721,7 @@ function runMoodBeat(): void {
 }
 ipcMain.handle('blob:save-image', async (evt): Promise<BlobSaveImageResult> => {
   if (!ledgerUiSender(evt)) return { ok: false, error: 'refused: not from the app window' };
+  if (DEV_HIDDEN) return { ok: false, canceled: true };   // MUNDER_HIDDEN: no dialog
   if (!blobFaces.ready() && !(await blobFaces.render())) return { ok: false, error: 'The Blob faces are not rendered yet.' };
   const st = blobOverlay.status();
   const face = currentFace(orchestratorMood.mood(), st.dictationStatus?.state);
