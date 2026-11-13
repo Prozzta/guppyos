@@ -94,7 +94,7 @@
     }
   },
   "allowScripts": {
-    "better-sqlite3@13.0.3": true,
+    "better-sqlite3@13.0.3": false,
     "electron-winstaller@5.4.0": true,
     "esbuild@0.21.5": true,
     "fsevents@2.3.3": true,

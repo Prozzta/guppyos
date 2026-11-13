@@ -26,7 +26,9 @@ test('Electron rebuild tooling is pinned and better-sqlite3 is on the Node 24 li
   assert.doesNotMatch(pkg.scripts.postinstall, /electron-rebuild -f(?:\s*&&|\s*$)/, 'only node-pty is rebuilt; better-sqlite3 keeps its N-API prebuild');
   assert.match(builder, /node_modules\/better-sqlite3\/\*\*/);
   assert.deepEqual(pkg.allowScripts, {
-    'better-sqlite3@13.0.3': true,
+    // It ships its N-API binary in prebuilds/.  Letting npm's implicit
+    // node-gyp lifecycle run creates build/ unnecessarily on clean installs.
+    'better-sqlite3@13.0.3': false,
     'electron-winstaller@5.4.0': true,
     'esbuild@0.21.5': true,
     // Optional macOS watcher binary: include it so npm 11 does not skip it
