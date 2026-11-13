@@ -164,6 +164,36 @@ const MUTANTS = [
 ];
 
 test('electron-builder.yml: the excludes drop every node-pty build leftover and keep its 5 runtime files', () => K.excludes());
+// BUILD-LEFTOVERS-USERNAME-105 (god 9dcfd2): better-sqlite3 13.0.3 is N-API and loads prebuilds/<platform>-<arch>.node,
+// but electron-rebuild -f still runs node-gyp on it; its build/ (the .vcxproj hold the user folder) shipped unpacked
+// in the first 1.1.105 build. Real paths from that build; the prebuild and the JS must stay.
+const BS3_LEFTOVERS = [
+  'node_modules/better-sqlite3/build/better_sqlite3.vcxproj',
+  'node_modules/better-sqlite3/build/better_sqlite3.vcxproj.filters',
+  'node_modules/better-sqlite3/build/test_extension.vcxproj',
+  'node_modules/better-sqlite3/build/test_extension.vcxproj.filters',
+  'node_modules/better-sqlite3/build/binding.sln',
+  'node_modules/better-sqlite3/build/config.gypi',
+  'node_modules/better-sqlite3/build/Release/obj/better_sqlite3/better_sqlite3.recipe',
+  'node_modules/better-sqlite3/build/Release/obj/better_sqlite3/better_sqlite3.tlog/Cl.items.tlog',
+  'node_modules/better-sqlite3/build/Release/obj/test_extension/test_extension.tlog/test_extension.lastbuildstate'
+];
+const BS3_KEEP = [
+  'node_modules/better-sqlite3/prebuilds/win32-x64.node',
+  'node_modules/better-sqlite3/lib/binding.js',
+  'node_modules/better-sqlite3/lib/database.js',
+  'node_modules/better-sqlite3/package.json'
+];
+test('electron-builder.yml: the excludes drop better-sqlite3 build/ and keep its prebuild and JS (BUILD-LEFTOVERS-USERNAME-105)', () => {
+  const minimatch = builderMinimatch();
+  const pats = builderExcludes();
+  const gone = (f) => pats.some((p) => minimatch(f, p, { dot: true }));
+  for (const f of BS3_LEFTOVERS) assert.ok(gone(f), `electron-builder.yml LEAVES A BETTER-SQLITE3 BUILD LEFTOVER IN: ${f}`);
+  for (const f of BS3_KEEP) assert.ok(!gone(f), `electron-builder.yml DROPS A BETTER-SQLITE3 RUNTIME FILE: ${f}`);
+  for (const f of BS3_LEFTOVERS.filter((x) => /\.(vcxproj|filters|tlog|recipe|lastbuildstate)$/.test(x))) {
+    assert.equal(C.leftoversOf([f]).length, 1, `THE RELEASE CHECK FLAGS IT TOO: ${f}`);
+  }
+});
 test('leftoversOf: only build/Release/<name>.{node,dll,exe} may ship from node-pty/build; MSBuild output nowhere', () => K.leftovers());
 test('identityWords: the user name, the profile folder and GUPPY_IDENTITY_WORDS, short words left out', () => K.words());
 test('hitsIn: latin1 and UTF-16 at either offset', () => K.hits());

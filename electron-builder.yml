@@ -77,6 +77,10 @@ files:
   - "!**/node_modules/node-pty/build/**/*.{vcxproj,filters,iobj,ipdb,ilk,pdb,exp,lib,tlog}"
   - "!**/node_modules/node-pty/node-addon-api/{Release,Debug}/**"
   - "!**/node_modules/node-pty/node-addon-api/*.{vcxproj,filters}"
+  # BUILD-LEFTOVERS-USERNAME-105: better-sqlite3 13 is N-API and loads prebuilds/<platform>-<arch>.node
+  # (lib/binding.js), but electron-rebuild -f still runs node-gyp on it, and its build/ (MSBuild
+  # projects holding the user folder, obj/ logs; no .node) shipped unpacked. Nothing loads from build/.
+  - "!**/node_modules/better-sqlite3/build/**"
 
 # Ship the standalone Slack reply helper as a plain file under the app's
 # resources dir (process.resourcesPath). It runs under `node`, NOT inside the
