@@ -219,11 +219,45 @@ const CASES = [
     assert.equal(ro.length, 1, 'RO-9 brokenChainStops: one read-only row');
     assert.equal(ro[0].reason, blocked.reason, 'RO-9 brokenChainStops: the row names the break');
   }],
+  ['RO-10', async (mods) => {
+    // blockedBeforeWork (Jim 65291b): a read-only ledger gets no read, no worker job and no derive, and the store is
+    // first asked in the writer's own turn (A18), never synchronously in the caller's.
+    const n = { blocked: 0, read: 0, cached: 0, codes: 0, derive: 0, append: 0 };
+    const store = {
+      readLedger: () => { n.read++; return { records: [], torn: null, chain: 'ok' }; },
+      readLedgerCached: () => { n.cached++; return { records: [], torn: null, chain: 'ok' }; },
+      appendRecord: async () => { n.append++; return { ok: false, error: 'refused' }; },
+      appendBlocked: () => { n.blocked++; return { brokenAt: 'key', reason: 'key-missing' }; },
+    };
+    const deps = {
+      store,
+      derive: (records) => { n.derive++; return derive(records, DEFAULT_KEY_REGISTRY, { r4: false }); },
+      codesOffMain: async () => { n.codes++; return null; },
+      log: () => {},
+    };
+    const p = mods.W.syncDerived(deps, facts(10));
+    assert.equal(n.blocked, 0, 'RO-10 blockedBeforeWork: the store is not asked in the caller\'s turn');
+    const r = await p;
+    assert.equal(n.blocked, 1, 'RO-10 blockedBeforeWork: the store is asked once');
+    assert.deepEqual({ read: n.read, cached: n.cached, codes: n.codes, derive: n.derive, append: n.append }, { read: 0, cached: 0, codes: 0, derive: 0, append: 0 },
+      'RO-10 blockedBeforeWork: a read-only ledger gets no read, no worker job, no derive, no append');
+    assert.equal(r.readOnly, 10, 'RO-10 blockedBeforeWork: every fact is read-only');
+  }],
 ];
 
 for (const [id, fn] of CASES) test(id, () => fn(real));
 
+const CHECK = '  if (facts.length && derivedBlocked(deps)) { counts.readOnly = facts.length; return counts; }\n';
+const CHECK_NOTE = '  // CLAIMS-READONLY-RETRY-STORM: a read-only ledger is offered nothing (no read, no derive, no append).\n';
+const READ = '  const read = deps.store.readLedgerCached ? deps.store.readLedgerCached(DERIVED_AGENT_ID) : deps.store.readLedger(DERIVED_AGENT_ID);\n';
+const WORK = READ + '  // A19: the live ids from the worker thread when it can; the same derive in-process when not.\n'
+  + '  const off = deps.codesOffMain ? await deps.codesOffMain(read) : null;\n'
+  + '  const codes = off !== null && off.length === read.records.length ? off : null;\n'
+  + '  const state = codes !== null ? null : deps.derive(read.records);\n';
 const MUTANTS = [
+  { id: 'D1', what: 'the check runs before A18\'s first turn (in the caller\'s turn) (Jim)', file: WR, from: '  await nextTurn();\n' + CHECK_NOTE + CHECK, to: CHECK_NOTE + CHECK + '  await nextTurn();\n', dies: ['RO-10'] },
+  { id: 'D2', what: 'the check runs after the ledger read (Jim)', file: WR, from: CHECK + READ, to: READ + CHECK, dies: ['RO-10'] },
+  { id: 'D4', what: 'the check runs after the worker job and the derive (Jim)', file: WR, from: CHECK + WORK, to: WORK + CHECK, dies: ['RO-10'] },
   { id: 'M1', what: 'the writer does not ask before a sync', file: WR, from: '  if (facts.length && derivedBlocked(deps)) { counts.readOnly = facts.length; return counts; }\n', to: '', dies: ['RO-1', 'RO-7'] },
   { id: 'M2', what: 'a read-only refusal does not end the sync', file: WR, from: '} else if (derivedBlocked(deps)) {', to: '} else if (false) {', dies: ['RO-4'] },
   { id: 'M3', what: 'every refusal ends the sync', file: WR, from: '} else if (derivedBlocked(deps)) {', to: '} else if (derivedBlocked(deps) || true) {', dies: ['RO-5'] },
