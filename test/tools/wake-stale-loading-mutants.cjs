@@ -11,7 +11,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const ROOT = path.resolve(__dirname, '..', '..');
-const { recover, mutateFile, restoreFile, checkAnchors, runTests, verdict, requireBaseline } = require('./mutant-runner-helper.cjs');
+const { recover, mutateFile, restoreFile, checkAnchors } = require('./mutant-runner-helper.cjs');
+const { runTests, verdict, requireBaseline } = require('./mutant-tap.cjs');
 recover(ROOT);
 if (process.argv.includes('--recover-only')) process.exit(0);
 const TEST = 'test/wake-stale-loading-header-197.test.cjs';

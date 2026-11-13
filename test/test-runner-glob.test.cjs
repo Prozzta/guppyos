@@ -127,7 +127,7 @@ test('MUTANT-JOURNAL-GATE NIT 2 (god 9cb49c, Jim 967fa3): release-worktrees-muta
   // A killed run: the journal names a dead owner and scripts/release-worktrees.cjs carries the mutant.
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'c90-nit2-'));
   fs.mkdirSync(path.join(root, 'scripts')); fs.mkdirSync(path.join(root, 'test', 'tools'), { recursive: true });
-  for (const rel of [runner, 'test/tools/mutant-runner-helper.cjs', 'test/tools/ps-env.cjs']) fs.copyFileSync(path.join(REPO, rel), path.join(root, rel));
+  for (const rel of [runner, 'test/tools/mutant-runner-helper.cjs', 'test/tools/mutant-tap.cjs', 'test/tools/ps-env.cjs']) fs.copyFileSync(path.join(REPO, rel), path.join(root, rel));
   const file = path.join(root, 'scripts', 'release-worktrees.cjs');
   fs.writeFileSync(file, 'if (false) rotated = 1;\r\n', 'utf8');
   fs.writeFileSync(helper.journalPath(root), JSON.stringify({ owner: { pid: 2147483000, start: '2026-10-25T15:23:08Z' }, records: [{ file, original: Buffer.from('if (newest) rotated = 1;\r\n').toString('base64') }] }), 'utf8');

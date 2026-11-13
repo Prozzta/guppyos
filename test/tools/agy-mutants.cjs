@@ -30,7 +30,8 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { recover, mutateFile, restoreFile, checkAnchors, runTests } = require('./mutant-runner-helper.cjs');
+const { recover, mutateFile, restoreFile, checkAnchors } = require('./mutant-runner-helper.cjs');
+const { runTests } = require('./mutant-tap.cjs');
 
 const REPO = path.resolve(__dirname, '..', '..');
 recover(REPO);

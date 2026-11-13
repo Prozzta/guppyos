@@ -54,9 +54,9 @@ test('the pin sees the censuses it was written for (not vacuous)', () => {
     return PARSES_TAP.test(src) && src.split(/\r?\n/).some((l) => SPAWNS_TEST.test(l));
   }).map((f) => path.basename(f));
   // MUTANT-RUNNERS-TAP-PARSE: the censuses no longer spawn '--test' themselves; they all go through
-  // mutant-runner-helper.cjs's runTests, so that one spawn is what this pin must see, and each census
+  // mutant-tap.cjs's runTests (split out of mutant-runner-helper.cjs by MUTANT-TAP-SPLIT), so that one spawn is what this pin must see, and each census
   // written for it must still reach it (the full every-runner pin is test/mutant-runners-tap.test.cjs).
-  const helper = path.join(ROOT, 'test', 'tools', 'mutant-runner-helper.cjs');
+  const helper = path.join(ROOT, 'test', 'tools', 'mutant-tap.cjs');
   const helperSrc = fs.readFileSync(helper, 'utf8');
   assert.ok(PARSES_TAP.test(helperSrc) && helperSrc.split(/\r?\n/).some((l) => SPAWNS_TEST.test(l)), 'the shared helper spawn is in the pin\'s scope');
   assert.deepEqual(offenders([helper]), [], 'the shared helper names its reporter');
