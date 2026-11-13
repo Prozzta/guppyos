@@ -1620,7 +1620,9 @@ const claimsDerive: DeriveFn | null = deriveClaims;
 // of the 10x derived ledger was one 0.6 s block on main). Main keeps the MAC verify and the single writer; any worker
 // failure falls back to the in-process derive (DeriveOffMain).
 const claimsDeriveOffMain = new DeriveOffMain({
-  spawn: () => new ThreadWorker(join(__dirname, 'claimsDeriveWorker.js')) as unknown as DeriveWorkerLike,
+  // CLAIMS-WARM-BACKFILL-106 (Jim's NIT on A19): no inherited execArgv. Under --inspect-brk a worker would wait for a
+  // debugger, time out and fall back without a word; the derive needs no node flag.
+  spawn: () => new ThreadWorker(join(__dirname, 'claimsDeriveWorker.js'), { execArgv: [] }) as unknown as DeriveWorkerLike,
   log: (row) => hive.appendLog(row),
 });
 /** A19: one derive-worker job for `read` when it is the store's kept verified read; null: derive in-process. */
@@ -1646,6 +1648,7 @@ function claimsIndexSync(): ClaimsIndexSync | null {
       agents: claimLedgerAgents,
       send: (args) => claimsImportReady().then(() => nativeMemory.syncClaims(args)),
       offMain: (agentId, read) => claimsDeriveJob('chunks', agentId, read).then((r) => (r ? { head: r.head ?? '', chunksJson: r.out, count: r.count ?? 0 } : null)),
+      offMainEnabled: () => claimsDeriveOffMain.enabled,
       onIndexed: (agentId) => { const root = hive.root(); if (!root) return; try { refreshReconcileQueueForHive(root, agentId, reconcileHiveDeps()); } catch (e) { hive.appendLog({ kind: 'claims-reconcile-refresh-failed', agentId, error: String(e).slice(0, 160) }); } },
       log: (row) => hive.appendLog(row),
     });
