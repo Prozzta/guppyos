@@ -12,8 +12,23 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/guppyos/releases).
 
+## [1.1.105] — 2026-11-13
+
+**Guppy no longer freezes at startup on a large hive, runs on Electron 45, and the claims ledger can be created from Settings.**
+Rollback: 1.1.103 (reinstall). 1.1.104 could freeze at startup on a large hive.
+
 ### Fixed
 
+- **Startup no longer freezes on a large hive.** 1.1.104 could freeze for many seconds at start on
+  a hive with tens of thousands of handled messages and a large claims ledger. It re-read every
+  handled message and the whole ledger on the main thread, in long blocks. Startup now reads only
+  what changed since the last run. The claims work (claim status, the search index, the legacy
+  import and the derived claims) runs in short slices or in a background worker thread. If the
+  worker cannot run, Guppy does the same work the old way and logs it. On a test hive ten times the
+  size of the one that froze, no pause after startup was longer than about 0.6 s.
+- **Large floors stay responsive.** Messages and Inbox read only new mail, in short slices off the
+  main thread, and Threads shows "Loading conversations…" until the first answer. The task list is
+  one cached view. The usage check looks only at the transcripts and Codex rollouts that changed.
 - **Plans with no 5-hour limit now show their weekly capacity instead of "Capacity unknown".**
   Some Claude plans report only a weekly limit. The capacity strip used to look for a 5-hour figure,
   find none and say "Capacity unknown". Now it shows the weekly figure, with its pie, in the strip,
@@ -22,6 +37,43 @@ All notable changes to this project are documented here. The format is based on
 - **The agent roster no longer redraws itself every 5 seconds.** Its background check for task
   badges and waiting messages redrew the whole roster strip on every check, even when nothing had
   changed. Now it redraws only when the answer changes.
+
+### Added
+
+- **Settings > General > Startup health.** A read-only line with the result of the last start.
+  For the first 2 minutes after the window opens, Guppy watches its own main thread. Any pause of a
+  quarter of a second or more counts as a slow moment and is written to the log with what was
+  running.
+- **Create the claims ledger from Settings.** Settings > Memory & Knowledge > Claim ledger >
+  "Create claims ledger" imports each agent's legacy memory, one idle agent at a time. Busy agents
+  are recorded and retried on the next request, and nothing is deleted. Progress is shown while it
+  runs.
+- **Settings > Blob.** The Blob has its own tab, with a link to a five-minute set-up guide, the Groq
+  API key (shared with the Voice tab) and the overlay settings.
+
+### Changed
+
+- **Guppy runs on Electron 45** (was 32). Terminal paste, the clipboard and the native modules
+  were moved to it.
+- **Building from source needs Node 24 LTS** (`.nvmrc`, `engines` and CI). Node 20 is end of life.
+  Settings > Prerequisites > "Build from source" checks for Node 24.
+
+### Security
+
+- **The file guard checks where an open file really is.** It compares the opened file's actual
+  location with the allowed folders, not only the requested path. It refuses files with more than
+  one hard link, and it compares paths folder by folder, so a name that starts with ".." is no
+  longer refused by mistake.
+- **The installed app's Electron fuses are set at build time.** The app loads only from its
+  checked app archive, and the release build does not accept Node inspector arguments.
+
+### Please check (live, on this release)
+
+- **Startup:** start Guppy on your own hive and confirm the window answers at once. Then open
+  Settings > General > Startup health after 2 minutes and check that it reports no slow moments.
+- **Claims ledger:** in Settings > Memory & Knowledge > Claim ledger, run "Create claims ledger"
+  and confirm the progress line finishes and agents' memory still answers.
+- **Terminal paste:** right-click paste and Ctrl+V in an agent terminal.
 
 ## [1.1.104] — 2026-11-11
 
@@ -2151,7 +2203,7 @@ palace, and starts far fewer processes for agent hooks.** Source `595dd3b5`; rol
   per ~170-byte chunk (a 3.26 MB burst: 20,683 messages → 197). Keystroke echo is still sent
   immediately.
 
-## Fork milestones (1.1.45 – 1.1.104)
+## Fork milestones (1.1.45 – 1.1.105)
 
 > Moved here from the README. This is the shape of the fork line, milestone by milestone; the
 > dated entries above and the [releases page](https://github.com/Prozzta/guppyos/releases) have the detail.
@@ -2359,9 +2411,12 @@ wholesale merges. The shape of the line, as evidence for the three ideas in the 
 - **Claims ledger on for new floors** (1.1.103) — a floor created on 1.1.103
   builds its claims ledger at first start with no setup, search sees a first claims sync while it
   runs, and replies no longer race the startup mail catch-up.
-- **The Guppy Blob, dictation and tray mode** (1.1.104, the current release) — an optional
+- **The Guppy Blob, dictation and tray mode** (1.1.104) — an optional
   on-screen Blob with an action ring, hold Ctrl+Alt+Space to dictate into any app, Guppy can keep
   running in the tray on close, and Settings checks what building from source needs.
+- **No startup freeze on large hives, Electron 45** (1.1.105, the current release) — startup reads
+  only what changed and moves the claims work into slices and a worker thread, Guppy runs on
+  Electron 45, and the claims ledger can be created from Settings.
 
 Every milestone carries a dated human acceptance and evidence tag in the fork's
 internal mission ledger; this section keeps only the shape.
