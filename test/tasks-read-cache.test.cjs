@@ -88,7 +88,7 @@ test('a mutation reads the file fresh, never the frozen cache, and its write is 
 });
 
 test('an external edit is invisible inside the window and picked up by the slow stat fallback at AUTHORITY_REVALIDATE_MS', (t) => {
-  assert.ok(WINDOW >= 30_000, 'watch is normal invalidation; stat is only an occasional backstop');
+  assert.equal(WINDOW, 5_000, 'the async missed-watch backstop is bounded to five seconds');
   const { hive, file, handEdit } = floor(t);
   assert.deepEqual(ids(hive.tasks()), ['T1']);
   handEdit([card('T1'), card('T5')]);

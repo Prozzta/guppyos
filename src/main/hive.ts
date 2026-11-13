@@ -6425,9 +6425,12 @@ export class HiveManager {
    * and unreadable files are never cached: readAuthoritativeJson handles them as before.
    */
   /** fs.watch invalidates normally; this slow stat is the missed-event safety net. */
-  static readonly AUTHORITY_REVALIDATE_MS = 60_000;
+  static readonly AUTHORITY_REVALIDATE_MS = 5_000;
   private readonly authorityCache = new Map<string, { key: string | null; value: unknown; checkedAt: number }>();
   private readonly authorityWatchers = new Map<string, FSWatcher>();
+  private authorityFallbackTimer: ReturnType<typeof setInterval> | null = null;
+  private authorityFallbackRunning = false;
+  private authorityTestClock = false;
   private authorityNow: () => number = () => Date.now();
   /** The wall clock the racy rule compares with file times (authorityNow is only the window's). */
   private authorityWall: () => number = () => Date.now();
@@ -6435,13 +6438,14 @@ export class HiveManager {
    *  rule's wall clock. */
   __resetAuthorityCacheForTests(now?: () => number, wall?: () => number): void {
     this.authorityCache.clear();
+    this.authorityTestClock = !!now;
     if (now) this.authorityNow = now;
     if (wall) this.authorityWall = wall;
   }
   private readAuthoritativeJsonCached<T>(p: string, onMissing: () => T, fresh = false): T {
     const now = this.authorityNow();
     const c = this.authorityCache.get(p);
-    if (c && !fresh && now - c.checkedAt >= 0 && now - c.checkedAt < HiveManager.AUTHORITY_REVALIDATE_MS) return c.value as T;
+    if (c && !fresh && (!this.authorityTestClock || (now - c.checkedAt >= 0 && now - c.checkedAt < HiveManager.AUTHORITY_REVALIDATE_MS))) return c.value as T;
     const st = authorityStat(p);
     if (st && c && c.key === statKey(st)) { c.checkedAt = now; return c.value as T; }
     this.authorityCache.delete(p);
@@ -6451,6 +6455,7 @@ export class HiveManager {
     const frozen = authorityDeepFreeze(value);
     // Racy-git rule: a change within STAT_RACY_MS of now may share this key with a later write.
     this.authorityCache.set(p, { key: provenStatKey(st, this.authorityWall()), value: frozen, checkedAt: now });
+    this.ensureAuthorityFallback();
     this.watchAuthority(p);
     return frozen;
   }
@@ -6468,6 +6473,26 @@ export class HiveManager {
   private closeAuthorityWatchers(): void {
     for (const w of this.authorityWatchers.values()) { try { w.close(); } catch { /* noop */ } }
     this.authorityWatchers.clear();
+    if (this.authorityFallbackTimer) clearInterval(this.authorityFallbackTimer);
+    this.authorityFallbackTimer = null;
+  }
+
+  /** Missed fs.watch events invalidate these tiny authority caches off-main-thread. */
+  private ensureAuthorityFallback(): void {
+    if (this.authorityFallbackTimer) return;
+    this.authorityFallbackTimer = setInterval(() => { void this.revalidateAuthoritiesAsync(); }, HiveManager.AUTHORITY_REVALIDATE_MS);
+    this.authorityFallbackTimer.unref?.();
+  }
+  private async revalidateAuthoritiesAsync(): Promise<void> {
+    if (this.authorityFallbackRunning || this.authorityTestClock || !this.authorityCache.size) return;
+    this.authorityFallbackRunning = true;
+    try {
+      await Promise.all([...this.authorityCache].map(async ([file, entry]) => {
+        const st = await fsPromises.stat(file).catch(() => null);
+        if (!st || entry.key === null || entry.key !== statKey(st)) this.authorityCache.delete(file);
+        else entry.checkedAt = this.authorityNow();
+      }));
+    } finally { this.authorityFallbackRunning = false; }
   }
   private writeJson(p: string, data: unknown): void {
     this.atomicWriteJson(p, data);
