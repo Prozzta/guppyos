@@ -415,7 +415,9 @@ test('the head-anchor store re-reads its file only when it changed (claims-heads
   const ud = path.join(JAIL, 'anchors-only');
   fs.mkdirSync(ud, { recursive: true });
   const file = path.join(ud, HEAD_ANCHOR_FILE);
-  const a = new FileHeadAnchorStore(file);
+  // LAG-MAIN-SYNC-FIXES (1.1.106): a map read within STAT_RACY_MS of the file's change is not cached (two same-size
+  // in-place writes in one tick share a stat key: claims-lag-sync LAG-2c). Here the wall clock is past that window.
+  const a = new FileHeadAnchorStore(file, () => Date.now() + 1000);
   a.set('C:/h', 'andy', { head: 'a'.repeat(64), lastId: 'c-000000000001' });
   const c = countReads([file], () => { for (let i = 0; i < 50; i++) a.get('C:/h', 'andy'); });
   assert.ok(c.c <= 1, `one read for 50 asks (${c.c})`);
