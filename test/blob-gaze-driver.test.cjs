@@ -7,10 +7,10 @@ require('./tools/own-job.cjs');
 // measure, fails here instead of shipping a Blob with frozen eyes.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const test = require('node:test');
+const { tempDir, removeDir } = require('./tools/test-temp.cjs');
 
 const root = path.join(__dirname, '..');
 const electron = process.platform === 'win32'
@@ -18,16 +18,17 @@ const electron = process.platform === 'win32'
   : path.join(root, 'node_modules', 'electron', 'dist', 'electron');
 const read = (f) => fs.readFileSync(path.join(root, f), 'utf8');
 
-test('real blobatar gaze: lookAt left/right writes eye offsets of opposite sign and moves the eyes', { skip: !fs.existsSync(electron) && 'Electron not installed' }, () => {
+test('real blobatar gaze: lookAt left/right writes eye offsets of opposite sign and moves the eyes', { skip: !fs.existsSync(electron) && 'Electron not installed' }, async () => {
   const env = { ...process.env, MUNDER_HIDDEN: '1' };
   delete env.ELECTRON_RUN_AS_NODE;
-  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'blob-gaze-driver-'));
+  // TEST-TEMP-HYGIENE: tempDir also removes it at process exit if an assert below throws first.
+  const sandbox = tempDir('blob-gaze-driver-');
   let r;
   try {
     r = spawnSync(electron, [path.join(__dirname, 'blob-gaze-driver-probe.cjs'), '--sandbox', sandbox], { cwd: root, env, encoding: 'utf8', windowsHide: true, timeout: 60_000 });
   } finally {
-    // The child has exited, so nothing holds files under the sandbox any more (no TEMP leak).
-    fs.rmSync(sandbox, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    // The child has exited; removeDir waits out a late Windows file lock (no TEMP leak).
+    await removeDir(sandbox);
   }
   assert.equal(fs.existsSync(sandbox), false, 'the probe sandbox is removed');
   assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);

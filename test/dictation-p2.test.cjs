@@ -345,7 +345,8 @@ test('wiring: the clip is accepted only from the app window that was asked to re
   const src = read('src/main/index.ts');
   assert.match(src, /ipcMain\.handle\('dictation:audio', \(evt, arg: unknown\) => \{\r?\n\s*if \(!ledgerUiSender\(evt\) \|\| !dictationTarget \|\| evt\.sender !== dictationTarget\) return \{ ok: false/);
   assert.match(src, /supported: process\.platform === 'win32' && !DEV_HIDDEN,/, 'never in a hidden run, never off Windows');
-  assert.match(src, /onApplied: \(s\) => \{ dictation\.apply\(s\.enabled && s\.dictation\); \}/, 'dictation needs the blob AND its own toggle');
+  // BLOB-ORCH-MOOD added the tray-face refresh after it; the gate itself is the same call, still first.
+  assert.match(src, /onApplied: \(s\) => \{ dictation\.apply\(s\.enabled && s\.dictation\); refreshTrayFace\(\); \}/, 'dictation needs the blob AND its own toggle');
   assert.match(src, /\|\| \(cfg\.blobEnabled === true && cfg\.blobDictation === true\)/, 'the mic gate opens for dictation only while it is on');
   assert.match(src, /try \{ dictation\.dispose\(\); \} catch/, 'quit kills the helper');
   const blob = read('src/main/blobOverlay.ts');
