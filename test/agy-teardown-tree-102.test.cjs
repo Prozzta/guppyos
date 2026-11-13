@@ -90,7 +90,7 @@ const heldTaskkill = (gate) => (args, rest) => {
  *  return whether root and inner were gone within the deadline, plus how often the ConPTY was
  *  closed (proc.kill calls). The finally ends the root and the PTY whatever the outcome, so a
  *  mutant that never closes the ConPTY fails instead of hanging the runner (Jim MINOR 3). */
-async function run(Pty, end, { after } = {}) {
+async function run(Pty, end, { after, beforeLiveness } = {}) {
   const dir = fs.mkdtempSync(path.join(DIR, 'run-'));
   const m = new Pty();
   const owner = { isDestroyed: () => false, send: () => {} };
@@ -113,10 +113,19 @@ async function run(Pty, end, { after } = {}) {
     proc.kill = (...a) => { closes.n += 1; return rawClose(...a); };
     const extra = await end(m, id, owner, closes);
     const t0 = Date.now();
+    const waitForClose = async () => {
+      while (closes.n === 0 && Date.now() - t0 < DEADLINE_MS) await sleep(25);
+    };
+    // M6 intentionally removes this close. Check that contract before its
+    // unrelated descendant census can mask it when taskkill is delayed by load.
+    if (beforeLiveness) {
+      await waitForClose();
+      await beforeLiveness(closes);
+    }
     while ((alive(inner) || alive(root)) && Date.now() - t0 < DEADLINE_MS) await sleep(100);
     // The tree can be gone before taskkill's close event runs closePty (INT 1.1.102 FULL: closed 0).
     const tGone = Date.now(); const lateClose = closes.n === 0;
-    while (closes.n === 0 && Date.now() - t0 < DEADLINE_MS) await sleep(25);
+    if (!beforeLiveness) await waitForClose();
     if (lateClose) process.stderr.write(`[agy-teardown] the close came ${Date.now() - tGone} ms after the tree was gone (${tGone - t0} ms)\n`);
     const out = { ...extra, innerGone: !alive(inner), rootGone: !alive(root) };
     if (after) Object.assign(out, await after(closes, out, m, root));
@@ -155,7 +164,10 @@ const settledChecks = (r, who) => {
 
 const K = {};
 K.kill = async (Pty) => {
-  const r = await run(Pty, (m, id) => assert.equal(m.kill(id).ok, true), { after: afterSettled });
+  const r = await run(Pty, (m, id) => assert.equal(m.kill(id).ok, true), {
+    after: afterSettled,
+    beforeLiveness: (closes) => assert.equal(closes.n, 1, 'KILL CLOSES THE CONPTY ONCE: the sweep alone ends the processes, not the pseudo-console'),
+  });
   assert.ok(r.rootGone, 'KILL: the PTY root is gone');
   assert.ok(r.innerGone, `KILL ENDS THE WHOLE TREE: a descendant off the pseudo-console is still alive ${DEADLINE_MS} ms after kill()`);
   assert.equal(r.closesAtSettle, 1, `KILL CLOSES THE CONPTY ONCE: closed ${r.closesAtSettle} times (the sweep alone ends the processes, not the pseudo-console)`);
@@ -242,7 +254,10 @@ const MUTANTS = [
     killer: 'quitKill', dies: /QUIT TAKES OVER A PENDING CLOSE/ },
   { name: 'M5 closePty closes every time it is reached', edits: [['    if (s.ptyClosed) return;\n', '']],
     killer: 'quitOwner', dies: /NO DOUBLE CLOSE/ },
-  { name: "M6 closeTree never closes the ConPTY (Jim's X1): must fail, not hang", edits: [[': undefined)).then(close, close);', ': undefined)).then(() => {}, () => {});']],
+  // Keep the sweep's bookkeeping settled: this mutant models precisely a missing
+  // ConPTY close, not an unrelated stuck `closingTrees` entry that makes the
+  // test's later cleanup race its wall-clock descendant check under suite load.
+  { name: "M6 closeTree never closes the ConPTY (Jim's X1): must fail, not hang", edits: [['const close = (): void => { this.closingTrees.delete(s); this.closePty(s); };', 'const close = (): void => { this.closingTrees.delete(s); };']],
     killer: 'kill', dies: /KILL CLOSES THE CONPTY ONCE/ },
   { name: "X9 a settled close stays in closingTrees (Jim's X9)", edits: [['const close = (): void => { this.closingTrees.delete(s); this.closePty(s); };', 'const close = (): void => { this.closePty(s); };']],
     killer: 'kill', dies: /A SETTLED CLOSE LEAVES closingTrees/ },
