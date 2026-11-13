@@ -1,5 +1,7 @@
 'use strict';
 require('./tools/own-job.cjs');
+// MUTANT-JOURNAL-GATE: this suite loads test-temp.cjs, which a census mutates in place.
+require('./tools/mutant-runner-helper.cjs').gate(__filename);
 // BLOB-GAZE: the REAL blobatar gaze driver, under the app's own Electron, moves the eyes after lookAt.
 // Root cause this pins: blobatar measures the eye travel with isPointInFill(new DOMPoint(...)); the
 // Chromium in Electron 32 only took an SVGPoint, so the measure threw, no eye offsets were written and
