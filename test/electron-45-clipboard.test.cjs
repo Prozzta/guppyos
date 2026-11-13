@@ -22,7 +22,7 @@ test('Electron rebuild tooling is pinned and better-sqlite3 is on the Node 24 li
   // Guppy's install-script policy may deliberately skip dependency lifecycle
   // scripts, so our root lifecycle installs Electron before rebuilding addons.
   assert.match(pkg.scripts.postinstall, /node node_modules\/electron\/install\.js/);
-  assert.match(pkg.scripts.postinstall, /electron-rebuild -f -w node-pty/);
+  assert.match(pkg.scripts.postinstall, /electron-rebuild -f -o node-pty/);
   assert.doesNotMatch(pkg.scripts.postinstall, /electron-rebuild -f(?:\s*&&|\s*$)/, 'only node-pty is rebuilt; better-sqlite3 keeps its N-API prebuild');
   assert.match(builder, /node_modules\/better-sqlite3\/\*\*/);
   assert.deepEqual(pkg.allowScripts, {
