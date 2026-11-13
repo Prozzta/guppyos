@@ -6480,6 +6480,11 @@ export class HiveManager {
     if (this.authorityFallbackTimer) clearInterval(this.authorityFallbackTimer);
     this.authorityFallbackTimer = null;
   }
+  /** Test seam: simulate dropped authority watches without stopping their fallback. */
+  __dropAuthorityWatchersForTests(): void {
+    for (const w of this.authorityWatchers.values()) { try { w.close(); } catch { /* noop */ } }
+    this.authorityWatchers.clear();
+  }
 
   /** Missed fs.watch events invalidate these tiny authority caches off-main-thread. */
   private ensureAuthorityFallback(): void {

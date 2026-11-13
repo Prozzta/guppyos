@@ -342,7 +342,7 @@ const ARCHIVE_LOG_NOISE_MUTANTS = [
   { name: 'ARCHIVE-LOG-NOISE-M2: never log a successful clear',
     edits: [['this.noteOutboxArchiveCleared(full, from, file);', '// clear omitted']], killer: archiveFailureLogKiller },
   { name: 'ARCHIVE-LOG-NOISE-M3: retain state for absent outbox files',
-    edits: [['for (const full of this.outboxArchiveFailures.keys()) {\n      if (!liveOutboxFiles.has(full)) this.outboxArchiveFailures.delete(full);\n    }', '// archive failure state is never pruned']],
+    edits: [['for (const full of this.outboxArchiveFailures.keys()) {\n      if (wasScanned(full) && !liveOutboxFiles.has(full)) this.outboxArchiveFailures.delete(full);\n    }', '// archive failure state is never pruned']],
     killer: prunedDuplicateArchiveFailureLogKiller },
   { name: 'ARCHIVE-LOG-NOISE-M4: replacement pre-marks its new fingerprint as already reported',
     edits: [['this.outboxDeliveredArchives.delete(full);\n          // Its earlier archive failure belongs to the replaced payload, not this one.\n          this.outboxArchiveFailures.delete(full);', 'this.outboxDeliveredArchives.delete(full);\n          this.outboxArchiveFailures.set(full, this.outboxFingerprint(full));']],

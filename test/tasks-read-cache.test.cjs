@@ -67,8 +67,9 @@ test('1000 reads inside the window reach disk once, return one deep-frozen objec
 });
 
 test('production missed-watch fallback invalidates tasks asynchronously', async (t) => {
-  const { hive, handEdit } = floor(t); hive.__resetAuthorityCacheForTests();
+  const { hive, handEdit } = floor(t); hive.__resetAuthorityCacheForTests(undefined, () => Date.now() + 60_000);
   assert.deepEqual(ids(hive.tasks()), ['T1']);
+  hive.__dropAuthorityWatchersForTests();
   handEdit([card('T2')]);
   await hive.__revalidateAuthoritiesForTests();
   assert.deepEqual(ids(hive.tasks()), ['T2']);

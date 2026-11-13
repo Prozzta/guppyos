@@ -795,6 +795,12 @@ export function closeConfigWatcher(): void {
   configFallbackTimer = null;
 }
 
+/** Test seam: simulate a lost watch while leaving the missed-watch timer armed. */
+export function __dropConfigWatcherForTests(): void {
+  configWatcher?.close();
+  configWatcher = null;
+}
+
 /** Tests: drop the cache (the next read goes to disk), and/or drive the revalidate clock and the
  *  racy rule's wall clock. */
 export function __resetConfigCacheForTests(now?: () => number, wall?: () => number): void {
