@@ -150,7 +150,8 @@ test('A3 a missed watch event is repaired by the reconciliation interval', async
   const f = await floor(t);
   f.hive.startRouter();
   f.write('jim-1', msg('m3', 'god-1'));
-  f.rt.intervals[0].fn();                     // no watch callback at all
+  await f.rt.intervals[0].fn();               // no watch callback at all
+  f.rt.flush();
   assert.ok(fs.existsSync(path.join(f.inbox('god-1'), 'm3.json')));
   assert.deepEqual(f.deliveries, [{ agentId: 'god-1', messageId: 'm3' }]);
 });
@@ -165,11 +166,11 @@ test('A4 a newly hired agent is watched at once; a removed or archived agent\'s 
   pam.hint(); f.rt.flush();
   assert.deepEqual(f.deliveries.map((d) => d.messageId), ['m4']);
   fs.rmSync(path.join(f.home, 'hive', 'agents', 'pam-1'), { recursive: true, force: true });
-  f.rt.intervals[0].fn();
+  await f.rt.intervals[0].fn(); f.rt.flush();
   assert.equal(pam.closed, true, 'a vanished outbox is unwatched');
   const jim = f.rt.live(f.outbox('jim-1'));
   f.hive.setArchived('jim-1', true);
-  f.rt.intervals[0].fn();
+  await f.rt.intervals[0].fn(); f.rt.flush();
   assert.equal(jim.closed, true, 'an archived agent is not watched');
 });
 
@@ -214,7 +215,7 @@ test('A6 watcher errors and stopRouter lose no files: a later scan or restart st
   w.handlers.error(new Error('EPERM'));
   assert.equal(w.closed, true, 'a broken watcher is dropped');
   f.write('jim-1', msg('m6', 'god-1'));
-  f.rt.intervals[0].fn();
+  await f.rt.intervals[0].fn(); f.rt.flush();
   assert.ok(fs.existsSync(path.join(f.inbox('god-1'), 'm6.json')), 'reconciliation routes it');
   assert.ok(f.rt.live(f.outbox('jim-1')), 'and re-attaches the watcher');
   // A hint queued, then the router stops: the queued scan never runs after the stop.
