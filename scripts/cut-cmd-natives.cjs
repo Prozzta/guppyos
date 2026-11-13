@@ -62,7 +62,8 @@ if (process.argv.includes('--install-only')) {
   gate();
 } else {
   // Keep this literal plain npm ci: --ignore-scripts makes a deceptively
-  // successful cut that omits the better-sqlite3 rebuild.
+  // successful cut that omits the root postinstall, including node-pty's
+  // Electron rebuild.
   run(npm, ['ci']);
   provisionModel();
   run(npm, ['run', 'dist:win:raw']);
