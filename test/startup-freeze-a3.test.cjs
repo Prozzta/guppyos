@@ -430,6 +430,27 @@ test('the head-anchor store re-reads its file only when it changed (claims-heads
   assert.equal(a.get('C:/h', 'andy').head, 'b'.repeat(64));
 });
 
+test('the head-anchor store inside the racy window: a repeat ask re-reads, a same-size rewrite in the tick is never served stale (god 762b07)', () => {
+  const ud = path.join(JAIL, 'anchors-racy');
+  fs.mkdirSync(ud, { recursive: true });
+  const file = path.join(ud, HEAD_ANCHOR_FILE);
+  const a = new FileHeadAnchorStore(file, () => fs.statSync(file).mtimeMs + 1); // the wall clock stays inside the window
+  a.set('C:/h', 'andy', { head: 'a'.repeat(64), lastId: 'c-000000000001' });
+  const c = countReads([file], () => { for (let i = 0; i < 5; i++) a.get('C:/h', 'andy'); });
+  assert.equal(c.c, 5, `inside the racy window every ask reads the file (${c.c} reads for 5 asks)`);
+  // Two writes in one timestamp tick: the file system reports the same stat for both (pinned, so the case is deterministic).
+  const text = fs.readFileSync(file, 'utf8');
+  const realStat = fs.statSync;
+  const frozen = realStat(file);
+  fs.statSync = function (p, ...rest) { return path.resolve(String(p)) === path.resolve(file) ? frozen : realStat.call(this, p, ...rest); };
+  try {
+    assert.equal(a.get('C:/h', 'andy').head, 'a'.repeat(64));
+    fs.writeFileSync(file, text.replace('a'.repeat(64), 'c'.repeat(64))); // same size, in place, same tick
+    assert.equal(fs.readFileSync(file, 'utf8').length, text.length, 'the rewrite keeps the size');
+    assert.equal(a.get('C:/h', 'andy').head, 'c'.repeat(64), 'a same-size in-place rewrite inside the tick is read, never served stale');
+  } finally { fs.statSync = realStat; }
+});
+
 test('main wiring: the startup readers run after the warm, and read-only callers use the kept verified reads', () => {
   const src = fs.readFileSync(path.join(ROOT, 'src/main/index.ts'), 'utf8');
   const block = src.slice(src.indexOf('const warmed = startClaimsWarm(root, claimStore.store);'), src.indexOf('// W5 startup census.') + 400);
