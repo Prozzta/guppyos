@@ -66,6 +66,14 @@ test('1000 reads inside the window reach disk once, return one deep-frozen objec
   assert.equal(all.tasks[0], l.tasks[0]);
 });
 
+test('production missed-watch fallback invalidates tasks asynchronously', async (t) => {
+  const { hive, handEdit } = floor(t); hive.__resetAuthorityCacheForTests();
+  assert.deepEqual(ids(hive.tasks()), ['T1']);
+  handEdit([card('T2')]);
+  await hive.__revalidateAuthoritiesForTests();
+  assert.deepEqual(ids(hive.tasks()), ['T2']);
+});
+
 test('a mutation reads the file fresh, never the frozen cache, and its write is seen by the next read', (t) => {
   const { hive, file, handEdit } = floor(t);
   hive.tasks();

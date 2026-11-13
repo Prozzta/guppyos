@@ -20,7 +20,7 @@ const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'md-config-read-cache-'))
 const electron = require.resolve('electron');
 require.cache[electron] = { id: electron, filename: electron, loaded: true, exports: { app: { getPath: () => userData } } };
 const cfg = loadTs('src/main/config.ts');
-const { readConfig, writeConfig, resetConfig, configIntegrityIssue, CONFIG_REVALIDATE_MS, __resetConfigCacheForTests } = cfg;
+const { readConfig, writeConfig, resetConfig, configIntegrityIssue, CONFIG_REVALIDATE_MS, __resetConfigCacheForTests, __revalidateConfigForTests } = cfg;
 const file = path.join(userData, 'config.json');
 const MIGRATED = { triggersMigratedV1: true, defaultModelCliMigratedV1: true };
 
@@ -42,6 +42,14 @@ const OLD = () => Date.now() + 60_000;
 const fresh = (obj) => { handEdit(obj); __resetConfigCacheForTests(() => clock, OLD); };
 
 test.after(() => fs.rmSync(userData, { recursive: true, force: true }));
+
+test('production missed-watch fallback invalidates asynchronously', async () => {
+  handEdit({ onboardingComplete: true, toolOutputCap: 701 }); __resetConfigCacheForTests();
+  assert.equal(readConfig().toolOutputCap, 701);
+  handEdit({ onboardingComplete: true, toolOutputCap: 702 });
+  await __revalidateConfigForTests();
+  assert.equal(readConfig().toolOutputCap, 702);
+});
 
 test('1000 reads inside the window reach disk once, return one deep-frozen object, and never stat again', () => {
   fresh({ onboardingComplete: true, recentHives: ['C:/h1'], missions: [] });
