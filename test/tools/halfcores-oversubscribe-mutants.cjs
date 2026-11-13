@@ -3,7 +3,8 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const root = path.resolve(__dirname, '..', '..');
-const { recover, mutateFile, restoreFile, checkAnchors, runTests, verdict, requireBaseline } = require('./mutant-runner-helper.cjs');
+const { recover, mutateFile, restoreFile, checkAnchors } = require('./mutant-runner-helper.cjs');
+const { runTests, verdict, requireBaseline } = require('./mutant-tap.cjs');
 recover(root);
 if (process.argv.includes('--recover-only')) process.exit(0);
 const file = path.join(root, 'test', 'tools', 'run-tests.cjs');

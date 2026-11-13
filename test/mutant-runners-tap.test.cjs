@@ -1,7 +1,7 @@
 'use strict';
 require('./tools/own-job.cjs');
 // MUTANT-RUNNERS-TAP-PARSE: every mutant runner reads its test runs through one parser,
-// test/tools/mutant-runner-helper.cjs (runTests + tapResult + verdict + requireBaseline). On Node >=23
+// test/tools/mutant-tap.cjs (runTests + tapResult + verdict + requireBaseline). On Node >=23
 // `node --test` defaults to the spec reporter, which prints no 'not ok' and no '# fail N', so a runner that
 // parsed those saw nothing; and a runner that read only the exit code counted a run that never reported
 // (a crash, a timeout, a refused slot) as a kill. A run with no TAP summary is NO-RESULT: never a kill,
@@ -11,7 +11,9 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { tapResult, verdict, runTests } = require('./tools/mutant-runner-helper.cjs');
+const { tapResult, verdict, runTests } = require('./tools/mutant-tap.cjs');
+// The classify-all pin below reads census-mutated code (src TS, run-tests.cjs): load-ts gates on the mutant journal.
+const loadTs = require('./load-ts.cjs');
 
 const ROOT = path.join(__dirname, '..');
 const TOOLS = path.join(ROOT, 'test', 'tools');
@@ -85,7 +87,7 @@ test('runTests runs real node --test under TAP: pass, fail and a hang give SURVI
 
 test('requireBaseline stops a census (exit 2) when the unmutated run never reported or is red', () => {
   const { spawnSync } = require('node:child_process');
-  const helper = JSON.stringify(path.join(TOOLS, 'mutant-runner-helper.cjs'));
+  const helper = JSON.stringify(path.join(TOOLS, 'mutant-tap.cjs'));
   const call = (res) => spawnSync(process.execPath, ['-e',
     `const { requireBaseline } = require(${helper}); const r = requireBaseline(${JSON.stringify(res)}, 'X'); console.log('RETURNED ' + r.pass);`],
   { encoding: 'utf8', windowsHide: true, timeout: 60_000 });
@@ -126,4 +128,46 @@ test('every mutant runner spawns through runTests and reads NO-RESULT as a failu
     fs.writeFileSync(f, "const r = runTests(ROOT, [T]);\nif (verdict(r) === 'KILLED') killed++;\n");
     assert.deepEqual(runnerProblems(f), []);
   } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+});
+
+// MUTANT-TAP-SPLIT (Jim d6a960): runTests spawns node --test on computed files, and the heavy-lock classifier
+// follows requires. While it sat in mutant-runner-helper.cjs (required by run-tests.cjs, which own-job.cjs and so
+// every test file requires), 555 of 593 single test files classified heavy and queued behind the one heavy slot.
+// It lives in mutant-tap.cjs now, which only the census runners and this file require. Pin both the cause and
+// the effect: no file is heavy BECAUSE of mutant-tap unless it requires it itself, and the floor-wide count of
+// heavy single-file runs stays near int's (90 of 582 on 6fc92d03; 91 here, this file being one).
+const HEAVY_SINGLE_FILE_CEILING = 110;
+test('a single test file run is not heavy just because the suite runner can reach the census TAP helper', () => {
+  const { classifyHeavy } = loadTs('src/main/heavyJob.ts');
+  const { HookServer } = loadTs('src/main/hooks.ts');
+  const ctx = HookServer.heavyScriptCtx(ROOT);
+  const rel = (p) => path.relative(ROOT, p).split(path.sep).join('/');
+  const files = [];
+  (function walk(dir) {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (e.name === 'node_modules' || e.name.startsWith('.')) continue;
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) walk(p); else if (e.name.endsWith('.test.cjs')) files.push(rel(p));
+    }
+  })(path.join(ROOT, 'test'));
+  assert.ok(files.length > 500, `the pin sees the suite (${files.length} files)`);
+  const heavy = [];
+  const viaTap = [];
+  for (const f of files) {
+    const g = classifyHeavy('Bash', { command: `node --test ${f}` }, ctx);
+    if (!g.heavy) continue;
+    heavy.push(f);
+    const direct = /require\([^)]*mutant-tap\.cjs/.test(fs.readFileSync(path.join(ROOT, f), 'utf8'));
+    if (/mutant-tap\.cjs/.test(g.why ?? '') && !direct) viaTap.push(`${f}: ${g.why}`);
+  }
+  assert.deepEqual(viaTap, [], 'heavy only through a require chain into mutant-tap.cjs (keep it off run-tests.cjs / own-job.cjs)');
+  assert.ok(heavy.length <= HEAVY_SINGLE_FILE_CEILING,
+    `${heavy.length} of ${files.length} single test files classify heavy (ceiling ${HEAVY_SINGLE_FILE_CEILING}): a shared require ` +
+    'probably pulled a node --test spawn into every file; raise the ceiling only for genuinely heavy new tests');
+  // not vacuous: the suite runner itself must stay light, and a plain test file must too
+  for (const f of ['test/census-reporter-tap.test.cjs', 'test/kg-core.test.cjs']) {
+    assert.equal(classifyHeavy('Bash', { command: `node --test ${f}` }, ctx).heavy, false, f);
+  }
+  assert.equal(classifyHeavy('Bash', { command: 'node --test test/mutant-runners-tap.test.cjs' }, ctx).heavy, true,
+    'a file that requires mutant-tap.cjs (it spawns node --test) is heavy, so the classifier does see the helper');
 });

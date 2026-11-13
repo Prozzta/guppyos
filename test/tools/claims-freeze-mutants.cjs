@@ -9,7 +9,8 @@
 // restore in a finally), so a killed run is restored by the next one; --anchors-only checks the anchors.
 const fs = require('node:fs');
 const path = require('node:path');
-const { recover, mutateFile, restoreFile, checkAnchors, runTests, verdict, requireBaseline } = require('./mutant-runner-helper.cjs');
+const { recover, mutateFile, restoreFile, checkAnchors } = require('./mutant-runner-helper.cjs');
+const { runTests, verdict, requireBaseline } = require('./mutant-tap.cjs');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const TEST = 'test/claims-freeze-guard.test.cjs';
