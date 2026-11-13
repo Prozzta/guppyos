@@ -9,6 +9,8 @@ require('./tools/own-job.cjs');
  *  - ClaimsIndexSync keeps no snapshot after an in-process (fallback) sync while the worker is enabled, so the next
  *    acked append is a full read for the worker, not a whole-ledger delta derive on main. With the worker off (or
  *    disabled) the snapshot and the main-thread delta stay as before; offMainEnabled absent counts as on.
+ *  - The fallback drain (Jim's SHOULD on c9cf16c6): a failed worker's jobs settle null one per turn, never in the
+ *    failing turn; a job run meanwhile reaches the fresh worker one turn after the drain; a memo hit does not wait.
  *  - Wiring: index.ts passes offMainEnabled from the DeriveOffMain and spawns the worker with execArgv: [].
  * No real worker, no hive: fakes only.
  */
@@ -167,4 +169,93 @@ test('106 wiring: index.ts passes offMainEnabled and spawns the worker with exec
   const src = fs.readFileSync(path.join(ROOT, 'src', 'main', 'index.ts'), 'utf8');
   assert.match(src, /offMainEnabled: \(\) => claimsDeriveOffMain\.enabled,/);
   assert.match(src, /new ThreadWorker\(join\(__dirname, 'claimsDeriveWorker\.js'\), \{ execArgv: \[\] \}\)/);
+});
+
+// ---------------------------------------------------------------- the fallback drain (Jim's SHOULD on c9cf16c6, god go)
+
+/** A DeriveOffMain whose worker never answers (a hang), with a manual turn queue and timers. */
+function drainRig() {
+  const turns = []; const timers = []; const workers = [];
+  const off = new DeriveOffMain({
+    spawn: () => {
+      const handlers = {};
+      const w = { posted: [], terminated: 0, postMessage(m) { w.posted.push(m); }, on(ev, fn) { handlers[ev] = fn; return w; }, terminate() { w.terminated++; }, emit(ev, a) { handlers[ev]?.(a); } };
+      workers.push(w); return w;
+    },
+    log: () => {}, maxFailures: 99,
+    setTimer: (fn) => { timers.push(fn); return timers.length; }, clearTimer: (t) => { timers[t - 1] = null; },
+    yieldTurn: (fn) => { turns.push(fn); },
+  });
+  /** Run one queued turn, then let its microtasks finish. */
+  const turn = async () => { const fn = turns.shift(); assert.ok(fn, 'a turn is queued'); fn(); for (let i = 0; i < 5; i++) await null; };
+  return { off, turns, timers, workers, turn };
+}
+const flush = async () => { for (let i = 0; i < 5; i++) await null; };
+/** A promise that must settle: 'held' after 2 s, so a mutant that never settles it fails the assert instead of hanging the file. */
+const within = (p, ms = 2000) => Promise.race([p, new Promise((r) => setTimeout(() => r('held'), ms))]);
+
+test('106 drain: a failed worker\'s jobs settle one per turn, in order, never in the failing turn', async () => {
+  const { off, workers, turn } = drainRig();
+  const settled = [];
+  const jobs = [0, 1, 2].map((i) => off.run({ ...JOB, want: 'chunks', head: `h${i}` }).then((r) => { settled.push([i, r]); }));
+  assert.equal(workers[0].posted.length, 3);
+  workers[0].emit('error', new Error('boom'));
+  await flush();
+  assert.deepEqual(settled, [], 'nothing settles in the failing turn');
+  for (let k = 1; k <= 3; k++) {
+    await turn();
+    assert.deepEqual(settled.map(([i]) => i), [0, 1, 2].slice(0, k), `turn ${k} settles job ${k - 1} only`);
+  }
+  assert.ok(settled.every(([, r]) => r === null));
+  await Promise.all(jobs);
+});
+
+test('106 drain: a job run during the drain reaches the fresh worker only one turn after the last held job settled', async () => {
+  const { off, workers, turn, timers } = drainRig();
+  const held = [0, 1].map((i) => off.run({ ...JOB, want: 'chunks', head: `h${i}` }));
+  timers[0]();                                    // a hang: the timeout fails the worker
+  assert.equal(workers[0].terminated, 1);
+  const late = off.run({ ...JOB, want: 'chunks', head: 'late' });
+  await flush();
+  assert.equal(workers.length, 1, 'no fresh worker while the drain runs');
+  await turn(); await turn();                     // both held jobs settle
+  assert.deepEqual(await within(Promise.all(held)), [null, null]);
+  assert.equal(workers.length, 1, 'not in the turn of the last settle either');
+  await turn();                                   // the drain ends: the late job is posted
+  assert.equal(workers.length, 2);
+  assert.equal(workers[1].posted.length, 1);
+  assert.equal(workers[1].posted[0].job.head, 'late');
+  workers[1].emit('message', { id: workers[1].posted[0].id, result: { ok: true, out: 'x' } });
+  assert.deepEqual(await within(late), { ok: true, out: 'x' });
+});
+
+test('106 drain: stop() drains the same way; a memo hit does not wait for the drain', async () => {
+  const { off, workers, turn } = drainRig();
+  const codes = off.run(JOB);
+  workers[0].emit('message', { id: workers[0].posted[0].id, result: { ok: true, out: 'c' } });
+  const answer = await codes;
+  const held = off.run({ ...JOB, want: 'chunks' });
+  workers[0].emit('exit', 1);
+  assert.equal(await within(off.run(JOB)), answer, 'the memo answers at once during the drain');
+  let done = false; held.then(() => { done = true; });
+  await flush();
+  assert.equal(done, false);
+  await turn();
+  assert.equal(done, true);
+  // stop(): the same one-per-turn drain.
+  const a = off.run({ ...JOB, want: 'chunks', head: 'a' });
+  await turn();                                    // the earlier drain ends; a is posted to a fresh worker
+  assert.equal(workers.length, 2);
+  let aDone = false; a.then(() => { aDone = true; });
+  off.stop();
+  await flush();
+  assert.equal(aDone, false, 'stop settles nothing in its own turn');
+  await turn();
+  assert.equal(aDone, true);
+  assert.equal(await within(a), null);
+});
+
+test('106 drain wiring: the default turn is setImmediate', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'src', 'main', 'claims', 'deriveOffMain.ts'), 'utf8');
+  assert.match(src, /this\.yieldTurn = d\.yieldTurn \?\? \(\(fn\) => \{ setImmediate\(fn\); \}\);/);
 });
