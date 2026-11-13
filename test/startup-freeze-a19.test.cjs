@@ -246,7 +246,8 @@ function fakeWorker(behave) {
 }
 /** A job that must settle: 'held' after 2 s, so a missing settle fails the assert instead of the test timeout. */
 const within = (p, ms = 2000) => Promise.race([p, new Promise((r) => setTimeout(() => r('held'), ms).unref())]);
-const JOB = { want: 'codes', agentId: 'a1', files: [], head: 'h', count: 1, registry: deepFreeze({ v: 1, namespaces: [], keys: {} }), r4: false };
+// CLAIMS-WARM-BACKFILL-106: 'chunks', which is never memoized, so every run of these failure tests reaches the worker.
+const JOB = { want: 'chunks', agentId: 'a1', files: [], head: 'h', count: 1, registry: deepFreeze({ v: 1, namespaces: [], keys: {} }), r4: false };
 
 test('A19: a crash, an exit, a hang, a failed spawn or post, or a non-ok answer resolves null, is logged, and the next job starts a fresh worker', async () => {
   const logs = []; const timers = [];
@@ -364,13 +365,16 @@ test('A19 on int 67732ccc: a delta stays on main; a worker send clears the snaps
   const sent = []; const asked = []; let reads = 0;
   let answer = null; let during = null;
   let read = { records: [r1], torn: null, chain: 'ok' };
+  // CLAIMS-WARM-BACKFILL-106: only a run with the worker OFF keeps a snapshot after an in-process sync (see the 106 suite).
+  let workerOn = false;
   const s = new ClaimsIndexSync({
     readLedger: () => { reads++; return read; }, derive: () => derive, registry: () => ({ v: 1, namespaces: [], keys: {} }), ruleConfig: () => ({ r4: false }),
     level: () => 'reader', agents: () => ['a1'], send: async (a) => { sent.push(a); return { ok: true }; },
     offMain: async (agentId, r) => { asked.push(r); if (during) { during(); during = null; } return answer; },
+    offMainEnabled: () => workerOn,
     setTimer: () => 0, clearTimer: () => {},
   });
-  // A fallback (in-process) full sync keeps a snapshot, so an acked append is a delta: it never goes to the worker.
+  // With the worker off, an in-process full sync keeps a snapshot, so an acked append is a delta: it never goes to the worker.
   await s.syncNow('a1');
   assert.equal(asked.length, 1);
   answer = { head: 'H', chunksJson: '[]', count: 0 };
@@ -380,6 +384,7 @@ test('A19 on int 67732ccc: a delta stays on main; a worker send clears the snaps
   assert.equal(sent[1].delta, true);
   assert.equal(reads, 1, 'the delta read nothing');
   // A worker send: the snapshot goes (no chunk objects on main), the sent appends leave the queue, one queued meanwhile stays.
+  workerOn = true;
   s.deltasSinceVerify.set('a1', 99);
   read = { records: [r1, r2, r3], torn: null, chain: 'ok' };
   during = () => s.schedule('a1', r4);
@@ -516,7 +521,7 @@ test('A19: the derived writer takes the live ids from the worker, primes the vie
 
 test('A19 wiring: main uses the worker for the store, the index sync, the derived writer and the warm; the build has the entry', () => {
   const src = fs.readFileSync(path.join(ROOT, 'src', 'main', 'index.ts'), 'utf8');
-  assert.match(src, /new ThreadWorker\(join\(__dirname, 'claimsDeriveWorker\.js'\)\)/);
+  assert.match(src, /new ThreadWorker\(join\(__dirname, 'claimsDeriveWorker\.js'\), \{ execArgv: \[\] \}\)/);
   assert.match(src, /offMain: claimsDeriveOffMain,/, 'the store');
   assert.match(src, /offMain: \(agentId, read\) => claimsDeriveJob\('chunks', agentId, read\)/, 'the index sync');
   assert.match(src, /codesOffMain: \(read\) => claimsDeriveJob\('codes', DERIVED_AGENT_ID, read\)/, 'the derived writer');
