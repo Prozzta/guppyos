@@ -28,8 +28,18 @@ export function loadTerminalFont(): Promise<void> {
   return loaded;
 }
 
+/** The weights xterm draws with (fontWeight 400, fontWeightBold 700). */
+const TERMINAL_FONT_WEIGHTS = ['400', '700'];
+
+/**
+ * True only when the BUNDLED faces (design/fonts.css) for both weights are loaded.
+ * Not document.fonts.check(): that returns true for a family with no @font-face at all
+ * (Chrome 156, Jim on 35bbbf72), so a missing fonts.css would read "ready", the load
+ * below would never run and its loud error would never fire.
+ */
 export function terminalFontReady(): boolean {
-  return document.fonts.check(`14px "${TERMINAL_FONT_FACE}"`) && document.fonts.check(`bold 14px "${TERMINAL_FONT_FACE}"`);
+  const faces = [...document.fonts].filter((f) => f.family.replace(/["']/g, '') === TERMINAL_FONT_FACE);
+  return TERMINAL_FONT_WEIGHTS.every((w) => faces.some((f) => f.weight === w && f.status === 'loaded'));
 }
 
 /**

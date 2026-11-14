@@ -3,7 +3,9 @@
    The terminal family is chosen in components/terminalFont.ts; swapping the terminal font
    means adding its files + @font-face here and changing TERMINAL_FONT_FACE there.
    font-display: block: the files are local, so the short block period never shows a
-   fallback face that xterm could measure first. */
+   fallback face that xterm could measure first.
+   400/700 are the terminal's weights; 500 is for the UI's --cth-font-mono labels
+   (tokens.css), which Google Fonts served at 400/500/700 before. */
 @font-face {
   font-family: "JetBrains Mono";
   font-style: normal;

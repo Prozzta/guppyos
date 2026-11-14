@@ -136,3 +136,68 @@ test('the terminal face is bundled, not fetched: local @font-face per weight, no
   assert.match(pool, /fontFamily: TERMINAL_FONT_FAMILY/);
   assert.doesNotMatch(pool, /options\.fontFamily = entry\.term\.options\.fontFamily/, 'the same-value re-apply is a no-op in xterm');
 });
+
+// ---- Jim's SHOULD on 35bbbf72: fix 2 had no runtime pin (all three call sites could go and the suite stayed green).
+const loadTs = require('./load-ts.cjs');
+const { readSource, codeOnly } = require('./read-source.cjs');
+const TF = loadTs('src/renderer/src/components/terminalFont.ts');
+
+/** A Terminal double with xterm 5.5's option semantics: the setter fires (and re-measures the cell)
+ *  only when the value CHANGES (`rawOptions[key] !== value`). */
+function fakeTerm(fontSize) {
+  const raw = { fontSize, fontFamily: 'f' };
+  const t = { measures: 0, atlasCleared: 0, clearTextureAtlas() { t.atlasCleared++; } };
+  t.options = new Proxy(raw, { set(o, k, v) { if (o[k] !== v) { o[k] = v; t.measures++; } return true; } });
+  return t;
+}
+
+test('remeasureTerminalFont really re-measures (the same-value re-apply does not), keeps the size and clears the atlas', () => {
+  const old = fakeTerm(12);
+  old.options.fontFamily = old.options.fontFamily;
+  old.options.fontSize = old.options.fontSize;
+  assert.equal(old.measures, 0, 'the pre-105 re-apply never reached xterm');
+  const t = fakeTerm(12);
+  TF.remeasureTerminalFont(t);
+  assert.ok(t.measures >= 1, 'at least one real option change, so xterm measures the cell again');
+  assert.equal(t.options.fontSize, 12, 'size restored');
+  assert.equal(t.atlasCleared, 1, 'glyph atlas re-rastered');
+});
+
+function withFonts(faces, loadResult, fn) {
+  const prev = globalThis.document;
+  globalThis.document = { fonts: Object.assign(faces, { check: () => true, load: async () => loadResult }) };
+  try { return fn(); } finally { globalThis.document = prev; }
+}
+
+test('terminalFontReady needs the BUNDLED faces loaded; document.fonts.check (true for an undeclared family) is not enough', () => {
+  const face = (family, weight, status) => ({ family, weight, status });
+  assert.equal(withFonts([], [], () => TF.terminalFontReady()), false, 'no @font-face (fonts.css missing): not ready, so the loud load runs');
+  assert.equal(withFonts([face(`"${TF.TERMINAL_FONT_FACE}"`, '400', 'loaded')], [], () => TF.terminalFontReady()), false, 'bold missing');
+  assert.equal(withFonts([face(TF.TERMINAL_FONT_FACE, '400', 'loaded'), face(TF.TERMINAL_FONT_FACE, '700', 'unloaded')], [], () => TF.terminalFontReady()), false, 'bold not loaded yet');
+  assert.equal(withFonts([face(`"${TF.TERMINAL_FONT_FACE}"`, '400', 'loaded'), face(`"${TF.TERMINAL_FONT_FACE}"`, '700', 'loaded')], [], () => TF.terminalFontReady()), true);
+});
+
+test('loadTerminalFont rejects loudly when the bundled face is missing', async () => {
+  const errors = [];
+  const prevErr = console.error;
+  console.error = (...a) => errors.push(a.join(' '));
+  const prev = globalThis.document;
+  globalThis.document = { fonts: { load: async () => [] } };
+  try {
+    const fresh = loadTs.fromText('src/renderer/src/components/terminalFont.ts', readSource('src/renderer/src/components/terminalFont.ts') + '\n// fresh module state\n');
+    await assert.rejects(fresh.loadTerminalFont(), /not bundled/);
+    await new Promise((r) => setImmediate(r));
+    assert.ok(errors.some((e) => /terminalFont/.test(e) && /not bundled/.test(e)), errors.join('\n'));
+  } finally { globalThis.document = prev; console.error = prevErr; }
+});
+
+test('fix 2 is wired at all three call sites: acquireTerminal (after the face loads), reflowTerminal, PtyTerminalView', () => {
+  const pool = codeOnly(readSource('src/renderer/src/components/terminalPool.ts'), 'terminalPool.ts');
+  const body = (src, head) => { const i = src.indexOf(head); assert.ok(i >= 0, head); const j = src.indexOf('\n}\n', i); return src.slice(i, j); };
+  const acquire = body(pool, 'export function acquireTerminal(');
+  assert.match(acquire, /openTerminalOnce\(entry\);[\s\S]*?if \(!terminalFontReady\(\)\)[\s\S]*?loadTerminalFont\(\)\.then\([\s\S]*?remeasureTerminalFont\(entry\.term\);[\s\S]*?reflowTerminal\(ptyId\)/);
+  assert.match(acquire, /pool\.get\(ptyId\) !== entry \|\| entry\.exited/, 'a recycled or exited entry is left alone');
+  assert.match(body(pool, 'export function reflowTerminal('), /remeasureTerminalFont\(entry\.term\)/);
+  const view = codeOnly(readSource('src/renderer/src/components/PtyTerminalView.tsx'), 'PtyTerminalView.tsx');
+  assert.match(view, /if \(!terminalFontReady\(\)\) \{\s*loadTerminalFont\(\)\s*\.then\(\(\) => \{[\s\S]*?remeasureTerminalFont\(entry\.term\);[\s\S]*?tryFit\(true\)/);
+});
