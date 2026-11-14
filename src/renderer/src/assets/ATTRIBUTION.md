@@ -38,3 +38,11 @@ reading old commits or an old copy of this file, that is the change you are look
 `maps/office.tmj` and `maps/brooklyn99.tmj` are Tiled JSON maps built on the LimeZu tilesets
 above. Both are imported by `themeRegistry.ts`; a map that nothing imports is not shipped, and
 should be deleted rather than left to imply an asset is in use.
+
+## Terminal font: JetBrains Mono
+
+`fonts/jetbrains-mono/` holds JetBrains Mono 2.304 (Regular, Medium, Bold as woff2), taken unmodified
+from the official release at https://github.com/JetBrains/JetBrainsMono. Copyright 2020 The JetBrains
+Mono Project Authors, licensed under the SIL Open Font License 1.1; the licence text ships beside the
+files as `fonts/jetbrains-mono/OFL.txt`. It is bundled so the terminal never fetches a font from the
+network (TERM-FONT-105); it is declared in `design/fonts.css`.

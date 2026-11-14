@@ -3,6 +3,7 @@ import type { CSSProperties } from 'react';
 import '@xterm/xterm/css/xterm.css';
 import { Icon } from './Icon';
 import { acquireTerminal, attachTerminal, detachTerminal, reflowTerminal, requestPtyResize } from './terminalPool';
+import { loadTerminalFont, remeasureTerminalFont, terminalFontReady } from './terminalFont';
 import {
   DEFAULT_TERMINAL_FONT_SIZE,
   MAX_TERMINAL_FONT_SIZE,
@@ -204,24 +205,21 @@ export function PtyTerminalView({ ptyId, onStreamData, onUserPrompt, onToggleFul
     // tab simply waits for the ResizeObserver below to fire the first fit.
     requestAnimationFrame(() => requestAnimationFrame(() => tryFit(true)));
     const retries = [setTimeout(() => tryFit(true), 60), setTimeout(() => tryFit(true), 240)];
-    if (typeof document !== 'undefined' && document.fonts?.ready) {
-      document.fonts.ready
+    // xterm measures the character cell at open(); if the bundled terminal face hadn't
+    // loaded yet, that cell is the fallback font's size, so every fit() proposes the wrong
+    // column count and the WebGL glyph atlas is rastered at the wrong metrics. Once the face
+    // is in, re-measure for real (TERM-FONT-105: re-assigning the same font option, the old
+    // code, is a no-op in xterm) and refit.
+    if (!terminalFontReady()) {
+      loadTerminalFont()
         .then(() => {
-          // xterm measures the character cell ONCE at open(); if VT323 hadn't
-          // loaded yet, that cached cell is the fallback font's size, so every
-          // fit() proposes the wrong column count and the WebGL glyph atlas is
-          // rastered at the wrong metrics — the banner renders oversized until a
-          // manual resize. Re-applying the font + clearing the texture atlas
-          // forces a re-measure / re-raster with the real font, then we refit.
           try {
-            const fam = entry.term.options.fontFamily;
-            entry.term.options.fontFamily = fam;
             entry.term.options.fontSize = fontSizeRef.current;
-            entry.term.clearTextureAtlas?.();
+            remeasureTerminalFont(entry.term);
           } catch { /* noop */ }
           tryFit(true);
         })
-        .catch(() => { /* noop */ });
+        .catch(() => { /* logged loudly by loadTerminalFont */ });
     }
 
     // The ResizeObserver is the authoritative trigger: it fires when the host

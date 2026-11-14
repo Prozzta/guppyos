@@ -2,6 +2,7 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from './App';
 import brandLogo from '@brand/logo.png?url';
+import './design/fonts.css';   // TERM-FONT-105: bundled monospace face, before any terminal opens
 import './design/global.css';
 import { startRendererStartupTiming } from './startupTiming';
 import { startRendererStallWatch } from './stallWatch';

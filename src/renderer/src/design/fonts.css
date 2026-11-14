@@ -1,0 +1,27 @@
+/* TERM-FONT-105: the monospace face ships WITH the app (no Google Fonts / network font).
+   JetBrains Mono 2.304, SIL Open Font License 1.1: assets/fonts/jetbrains-mono/OFL.txt.
+   The terminal family is chosen in components/terminalFont.ts; swapping the terminal font
+   means adding its files + @font-face here and changing TERMINAL_FONT_FACE there.
+   font-display: block: the files are local, so the short block period never shows a
+   fallback face that xterm could measure first. */
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url('../assets/fonts/jetbrains-mono/JetBrainsMono-Regular.woff2') format('woff2');
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: block;
+  src: url('../assets/fonts/jetbrains-mono/JetBrainsMono-Medium.woff2') format('woff2');
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 700;
+  font-display: block;
+  src: url('../assets/fonts/jetbrains-mono/JetBrainsMono-Bold.woff2') format('woff2');
+}
