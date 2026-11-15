@@ -141,6 +141,7 @@ test('a single file nobody shows still waits: a hidden script, a node parent, no
 const JAIL = fs.mkdtempSync(path.join(os.tmpdir(), 'hpst-'));
 test.after(() => { try { fs.rmSync(JAIL, { recursive: true, force: true }); } catch { /* best effort */ } });
 const FIX = path.join(JAIL, 'fix');
+const NPM_CACHE = path.join(JAIL, 'npm-cache');
 const BASH = process.platform === 'win32' ? 'C:\\Program Files\\Git\\bin\\bash.exe' : 'bash';
 fs.mkdirSync(FIX);
 fs.writeFileSync(path.join(FIX, 'leaf.test.cjs'), "require('node:test')('leaf', () => {});\n");
@@ -163,7 +164,10 @@ function start(args, url) {
   const env = { ...process.env };
   for (const k of ['NODE_TEST_CONTEXT', 'NODE_OPTIONS', 'GUPPY_TEST_RUN', 'HIVE_LEDGER_URL']) delete env[k];
   // npm 11 otherwise writes node-compile-cache under os.tmpdir() outside JAIL.
-  Object.assign(env, { NODE_DISABLE_COMPILE_CACHE: '1', NODE_OPTIONS: `--require "${PRELOAD.replace(/\\/g, '/')}"`, HIVE_LEDGER_URL: url, HIVE_ROOT: JAIL, AGENT_ID: 'a' });
+  // TEMP-LEAK-HEAVY-PRELOAD-NPMCACHE: on Windows npm's default cache is npm-cache under LOCALAPPDATA, and under
+  // the runner LOCALAPPDATA is this file's temp folder (temp-jail-preload.cjs), so gate.sh's `npm ci` left
+  // "npm-cache" there (a TEMP LEAK: the run exits 1). The cache is this file's own, in JAIL, removed with it.
+  Object.assign(env, { npm_config_cache: NPM_CACHE, NODE_DISABLE_COMPILE_CACHE: '1', NODE_OPTIONS: `--require "${PRELOAD.replace(/\\/g, '/')}"`, HIVE_LEDGER_URL: url, HIVE_ROOT: JAIL, AGENT_ID: 'a' });
   const child = spawn(args[0], args.slice(1), { cwd: FIX, env, windowsHide: true });
   let stderr = '';
   child.stderr.on('data', (d) => { stderr += d; });
@@ -238,6 +242,7 @@ K.opaqueNpm = async (t, M = HJ) => {
   assert.ok(r !== 'timeout' && r.code === 0, `the queued npm ci completes after release: ${r === 'timeout' ? r : r.stderr}`);
   assert.match(r.stderr, /\[guppy\] waiting for the heavy-job slot \(held by b/);
   assert.ok(b.logs.some((x) => x.action === 'lease' && x.agentId === 'a' && x.heavyKind === 'install'), 'the npm CLI holds an install lease');
+  assert.ok(fs.existsSync(NPM_CACHE), 'NPM WRITES ITS CACHE IN THE FOLDER THIS FILE REMOVES, not in the default under LOCALAPPDATA');
 };
 test('E2E: an opaque bash gate.sh cannot bypass the slot with npm ci', { timeout: 120_000 }, (t) => K.opaqueNpm(t));
 
