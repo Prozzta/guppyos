@@ -2,7 +2,8 @@
  * GOD-TERMINAL-CONTROL M1 (Jim SHOULD 9): the numeric bar for the headless mirrors' main-thread cost,
  * and the automatic flag-off past it.
  *
- * THE COST is measured: each real mirror times its own parse slices (terminalMirror.ts timeParse).
+ * THE COST is measured: each real mirror times its own parse slices in main-thread CPU time
+ * (terminalMirror.ts timeParse; MIRROR-GUARD-CPU-TIME: not wall time, which charges load it did not cause).
  * Only when that timing is unavailable does the share fall back to chars fed x a parse cost per
  * char calibrated at startup (a cold parse, so it over-estimates: the safe side). Measured 16:27Z:
  * the floor's peak minute (6.84 MB) parses in about 150 ms, roughly 0.3% of one core.

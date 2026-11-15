@@ -80,7 +80,7 @@ export class ReaderWatchers {
     for (const [agent, w] of this.watchers) if (!want.includes(agent)) { w.stop(); this.watchers.delete(agent); }
     for (const agent of want) {
       if (this.watchers.has(agent)) continue;
-      const w = new ReaderWatcher({ hiveRoot: root, append: this.d.append, read: this.d.read, log: this.d.log }, agent, this.d.debounceMs ?? READER_DEBOUNCE_MS);
+      const w = new ReaderWatcher({ hiveRoot: root, append: this.d.append, read: this.d.read, log: this.d.log, legacyCache: this.d.legacyCache }, agent, this.d.debounceMs ?? READER_DEBOUNCE_MS);
       this.watchers.set(agent, w);
       w.start().catch((e) => this.d.log({ kind: 'claims-watch-error', agent, error: String(e).slice(0, 160) }));
     }
@@ -103,7 +103,7 @@ export class ReaderWatchers {
     // folder is made for it); it would never settle and log a claims-import row every sync.
     if (!existsSync(join(root, 'agents', agent))) return Promise.resolve();
     const at = root;
-    const run = shadowImport({ hiveRoot: at, append: this.d.append, read: this.d.read, log: this.d.log }, agent)
+    const run = shadowImport({ hiveRoot: at, append: this.d.append, read: this.d.read, log: this.d.log, legacyCache: this.d.legacyCache }, agent)
       .then(() => {
         if (!importSettled(at, agent)) return;
         try { this.d.onSettled?.(agent); } catch (e) { this.d.log({ kind: 'claims-watch-error', agent, error: String(e).slice(0, 160) }); }
@@ -119,6 +119,14 @@ export class ReaderWatchers {
   stopAll(): void {
     for (const w of this.watchers.values()) w.stop();
     this.watchers.clear();
+  }
+
+  /** Close one agent's directory watcher before lifecycle code removes its folder. */
+  stop(agent: string): void {
+    const watcher = this.watchers.get(agent);
+    if (!watcher) return;
+    watcher.stop();
+    this.watchers.delete(agent);
   }
 
   /** The agents watched now (for tests and logs). */

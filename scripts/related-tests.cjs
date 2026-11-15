@@ -220,7 +220,7 @@ function runFile(cwd, file, extraEnv = {}) {
   // Run from inside a node --test (its own pin test), the child would report to that parent
   // instead of printing totals and exiting with its own rc.
   delete env.NODE_TEST_CONTEXT;
-  const r = spawnSync(process.execPath, ['--test', file], { cwd, env, encoding: 'utf8', timeout: FILE_TIMEOUT_MS, windowsHide: true, maxBuffer: 64 << 20 });
+  const r = spawnSync(process.execPath, ['--test', '--test-reporter=tap', file], { cwd, env, encoding: 'utf8', timeout: FILE_TIMEOUT_MS, windowsHide: true, maxBuffer: 64 << 20 });
   const out = `${r.stdout || ''}\n${r.stderr || ''}`;
   const counts = parseCounts(out);
   return { rc: r.status === null ? 'timeout' : r.status, ...(counts || { pass: 0, fail: 0 }), ...parseFailures(out, file) };

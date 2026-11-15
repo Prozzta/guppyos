@@ -128,7 +128,8 @@ test('S1: a warmed whole pool uses the full vector order; cold remains bounded',
 test('S1 wiring: startup warms the live ledger only, after native prewarm', () => {
   const src = fs.readFileSync(path.join(ROOT, 'src', 'main', 'index.ts'), 'utf8');
   assert.match(src, /nativeMemory\.prewarm\(\);[^\n]*warmClaimCandidateVectors\(\)/, 'candidate warm follows native prewarm');
-  assert.match(src, /view\.claims\.filter\(\(c\) => view\.status\(c\.id\) === 'live'\)/, 'only live claims enter startup warm pool');
+  // STARTUP-FREEZE-104 A18: the warm reads one agent per turn, so the filter is a loop, not .filter().
+  assert.match(src, /for \(const c of view\.claims\) if \(view\.status\(c\.id\) === 'live'\) pool\.push\(/, 'only live claims enter startup warm pool');
 });
 
 test('S1: an over-cap warm warns once that complete whole-pool caching is impossible', async () => {

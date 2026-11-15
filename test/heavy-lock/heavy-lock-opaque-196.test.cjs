@@ -92,9 +92,15 @@ K.loopLight = async (M = HJ) => {
   x.l.acquire('b', H, 'npm test', 'hb', false);
   x.images.set(50, 'bash.exe');
   x.l.noteCall('a', 'c1', 'for f in one two; do node --test test/$f.test.cjs | tail -3; done');
-  assert.equal((await ask(x, 'a', 1201, { files: ['test/one.test.cjs'] })).state, 'light', "A PER-FILE LOOP'S RUNS ARE LIGHT (while another agent holds)");
+  // HEAVY-PRELOAD-SHORT-TEST: the loop's runs are light by the call match itself (its `why`), not by the
+  // capped single-file rule, so they stay light even while an earlier run of the loop is alive.
+  x.alive.add(1201);
+  const one = await ask(x, 'a', 1201, { files: ['test/one.test.cjs'] });
+  assert.deepEqual([one.state, one.why], ['light', "the call's own node --test"], "A PER-FILE LOOP'S RUNS ARE LIGHT (while another agent holds)");
   x.tick(5 * 60_000);   // later in the same call: still open
-  assert.equal((await ask(x, 'a', 1202, { files: ['test/two.test.cjs'] })).state, 'light', 'EVERY RUN OF THE LOOP IS LIGHT, NOT ONLY THE FIRST');
+  const two = await ask(x, 'a', 1202, { files: ['test/two.test.cjs'] });
+  assert.deepEqual([two.state, two.why], ['light', "the call's own node --test"], 'EVERY RUN OF THE LOOP IS LIGHT, NOT ONLY THE FIRST');
+  x.alive.delete(1201);
   assert.equal((await ask(x, 'a', 1203, { files: ['a.cjs', 'b.cjs'] })).state, 'wait', 'a loop run matches single-file processes only');
   x.images.set(51, 'node.exe');
   assert.equal((await ask(x, 'a', 1204, { files: ['test/one.test.cjs'], ppid: 51 })).state, 'wait', "a process under another program is not the loop's");
@@ -111,10 +117,14 @@ K.visibleLight = async (M = HJ) => {
   x.l.noteCall('a', 'c1', 'node --test test/a.test.cjs');
   x.images.set(50, 'C:\\Program Files\\Git\\usr\\bin\\bash.exe');
   const a = await ask(x, 'a', 101, { files: ['test/a.test.cjs'] });
-  assert.equal(a.state, 'light', "THE CALL'S OWN SINGLE FILE IS LIGHT (while another agent holds)");
+  assert.deepEqual([a.state, a.why], ['light', "the call's own node --test"], "THE CALL'S OWN SINGLE FILE IS LIGHT (while another agent holds)");
   assert.equal(a.run, `101:${C0}`);
+  // HEAVY-PRELOAD-SHORT-TEST: the call's match is consumed; while its first run lives, a second
+  // single file of the same call is a fan-out and waits (after it, see heavy-preload-short-test).
+  x.alive.add(101);
   const again = await ask(x, 'a', 102, { files: ['test/a.test.cjs'] });
   assert.equal(again.state, 'wait', 'A CALL IS CONSUMED BY ONE TEST PROCESS');
+  x.alive.delete(101);
   x.l.noteCall('c', 'c2', 'node --test test/a.test.cjs');
   x.images.set(51, 'node.exe');
   const under = await ask(x, 'c', 103, { files: ['test/a.test.cjs'], ppid: 51 });
@@ -317,7 +327,11 @@ test('outer spawns a nested node --test', () => {
   const r = require('node:child_process').spawnSync(process.execPath, ['--test', ${JSON.stringify(path.join(FIX, 'leaf.test.cjs'))}], { env, encoding: 'utf8', timeout: 20000 });
   assert.equal(r.status, 0, r.stderr);
 });\n`);
-fs.writeFileSync(path.join(FIX, 'sleeper.test.cjs'), "require('node:test')('sleeps', () => new Promise((r) => setTimeout(r, 20000)));\n");
+// LOAD-FLAKES-105: the crashed lease holder runs until it is killed. A fixed 20 s sleep ended on its
+// own under load (the setup and two process-table queries outlived it): it exited and released.
+// Bounded at 10 min (Jim SHOULD): far past any kill, and the still-running assert below catches an
+// early end; but if the kill's process snapshot fails, the file child cannot live on forever.
+fs.writeFileSync(path.join(FIX, 'sleeper.test.cjs'), "require('node:test')('sleeps until killed (10 min bound)', () => new Promise((r) => setTimeout(r, 10 * 60_000)));\n");
 
 function cleanEnv(extra) {
   const env = { ...process.env };
@@ -447,6 +461,7 @@ K.e2eCrashAndDeadWaiter = async (t, M = HJ, preload = PRELOAD) => {
   const b = await broker(t, M, { probe: () => M.probeProcesses(require('../tools/ps-env.cjs').psEnv()), roots: () => [] });
   // A crashed lease holder: killed outright, so its exit handler never runs.
   const run = start([process.execPath, '--test', 'sleeper.test.cjs'], { url: b.url('a'), preload });
+  t.after(() => { if (run.child.exitCode === null) try { killTree(run); } catch { /* gone */ } });   // it never ends on its own
   await until(() => b.lock.snapshot().length === 1, 15_000, 'the lease');
   // b's wrapper waits behind it; c is denied at PreToolUse and queued after b.
   const wb = start([process.execPath, 'wrapper.cjs'], { url: b.url('b'), agent: 'b', preload });
@@ -456,6 +471,7 @@ K.e2eCrashAndDeadWaiter = async (t, M = HJ, preload = PRELOAD) => {
   // INT102-TEST-FOLLOWUPS (Jim, INT-1.1.102 MUST C): the lease holder (the node --test runner)
   // dies BEFORE its file child. Killed after, it could see the child die and exit on its own, and
   // its preload's release would log lease-end, not lease-gone.
+  assert.equal(run.child.exitCode, null, 'the lease holder is still running when it is killed (a crash, not an exit)');
   killTree(run, { rootFirst: true });
   await wb.done; await run.done;
   const t0 = Date.now();
@@ -508,10 +524,10 @@ const MUTANTS = [
     edits: [['    if (!CALL_PARENT.test(name)) {', '    if (false) {']],
     killer: 'visibleLight', dies: /A TEST PROCESS UNDER ANOTHER PROGRAM IS NOT THE CALL'S OWN/ },
   { name: 'a call is never consumed', file: HJF, module: true,
-    edits: [['    if (!loop(c)) c.used = true;\n    return true;', '    return true;']],
+    edits: [['    if (!loop(c)) c.used = true;\n    this.spendLight(agentId, c.callId);', '    this.spendLight(agentId, c.callId);']],
     killer: 'visibleLight', dies: /A CALL IS CONSUMED BY ONE TEST PROCESS/ },
   { name: 'nothing is visible (every single file waits)', file: HJF, module: true,
-    edits: [["    if (!suite && await this.visible(agentId, r)) {", '    if (false) {']],
+    edits: [["    if (!suite && await this.visible(agentId, r, run, single)) {", '    if (false) {']],
     killer: 'visibleLight', dies: /THE CALL'S OWN SINGLE FILE IS LIGHT/ },
   { name: 'no inheritance (a nested run acquires on its own)', file: HJF, module: true,
     edits: [['    if (parent && parent.agentId === agentId && this.runAlive(r.parentRun!)) {', '    if (false) {']],
@@ -557,7 +573,7 @@ const MUTANTS = [
     killer: 'wiring', dies: /EVERY PRETOOLUSE CALL IS NOTED/ },
   // The preload itself (a real process loads the mutated file).
   { name: 'preload: no fast path (every node process asks)', file: PRE, preload: true,
-    edits: [["if (require.main !== module && !((process.execArgv.includes('--test')", "if (require.main !== module && false && !((process.execArgv.includes('--test')"]],
+    edits: [["if (require.main !== module && !(testRun || suiteRunner || preloadKind)) return;", "if (require.main !== module && false && !(testRun || suiteRunner || preloadKind)) return;"]],
     killer: 'e2eNoop', dies: /A NODE PROCESS THAT IS NOT A TEST RUN NEVER ASKS/ },
   { name: 'preload: GUPPY_TEST_RUN not passed on (a nested run waits behind another agent)', file: PRE, preload: true,
     edits: [['    process.env.GUPPY_TEST_RUN = a.run;\n', '']],

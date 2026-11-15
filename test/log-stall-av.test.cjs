@@ -40,6 +40,16 @@ const { CostLedgerTotals } = loadTs('src/main/costLifetime.ts');
 const { planWakeRow, newWakeRowState, takeFolded, forgetWakeRows } = loadTs('src/main/wakeRowPolicy.ts');
 const { HiveManager } = loadTs('src/main/hive.ts');
 const dir = () => fs.mkdtempSync(path.join(JAIL, 'd-'));
+/** Does this runtime refuse to delete a folder holding a kept-open 'a' descriptor (Node 20 / the app)? */
+function openFileBlocksDelete() {
+  const d = dir(); fs.mkdirSync(path.join(d, 'h'));
+  const fd = fs.openSync(path.join(d, 'h', 'x.jsonl'), 'a');
+  let blocked = false;
+  try { fs.rmSync(path.join(d, 'h'), { recursive: true, force: true }); } catch { blocked = true; }
+  fs.closeSync(fd);
+  fs.rmSync(d, { recursive: true, force: true });
+  return blocked;
+}
 const rows = (p) => fs.readFileSync(p, 'utf8').split('\n').filter(Boolean);
 
 // ── F1 ────────────────────────────────────────────────────────────────────
@@ -77,11 +87,42 @@ test('F1 (B3): keep-open is the DEFAULT; keepOpen:false holds no descriptor betw
 
 test('F1 (B1/B3): a HiveManager holds its log open by default; dispose() releases it so the hive folder can be deleted (reset) or copied', { skip: process.platform !== 'win32' }, async () => {
   const home = dir();
-  const hive = new HiveManager(() => home);
+  // The host-independent check (Jim M2 on GUPPY-NODE-LTS): every 'a' descriptor the manager opens
+  // under its home is seen open before dispose() and closed by it. appendLog.ts calls openSync and
+  // closeSync through the node:fs module object, so this spy sees them. The rm below only bites
+  // where an open file blocks a delete (Node 20, the app's Electron); on Node 24 this is the check.
+  const held = new Map();   // fd -> path, for append opens under home not yet closed
+  const { openSync, closeSync } = fs;
+  fs.openSync = function (p, flags, ...rest) {
+    const fd = openSync.call(this, p, flags, ...rest);
+    if (flags === 'a' && path.resolve(String(p)).startsWith(path.resolve(home) + path.sep)) held.set(fd, String(p));
+    return fd;
+  };
+  fs.closeSync = function (fd) { held.delete(fd); return closeSync.call(this, fd); };
+  let hive;
+  try {
+    hive = new HiveManager(() => home);
+    await hive.ensureAgent({ id: 'a1', name: 'A', provider: 'claude', cwd: home });
+    hive.appendLog({ kind: 'x' });
+    assert.ok([...held.values()].some((p) => path.basename(p) === 'log.jsonl'), 'the manager holds log.jsonl open (keepOpen is the default)');
+    hive.dispose();
+    assert.deepEqual([...held.values()], [], 'MUTANT: dispose() left append descriptors open (closeAppendFiles skipped)');
+  } finally {
+    fs.openSync = openSync; fs.closeSync = closeSync;
+  }
+  // A fresh manager for the delete check, which the spy has already proven releases on dispose.
+  hive = new HiveManager(() => home);
   await hive.ensureAgent({ id: 'a1', name: 'A', provider: 'claude', cwd: home });
   hive.appendLog({ kind: 'x' });
   // Without dispose, Windows leaves the open file delete-pending and the rm fails: the reset bug.
-  assert.throws(() => fs.rmSync(path.join(home, 'hive'), { recursive: true, force: true }), /ENOTEMPTY|EBUSY|EPERM/);
+  // GUPPY-NODE-LTS: that holds on the app's runtime (Electron 32, Node 20). A newer host Node
+  // (24's libuv) opens files with FILE_SHARE_DELETE, so the same rm succeeds there; the host is
+  // calibrated on a plain kept-open 'a' descriptor (appendLog's open) rather than by version.
+  if (openFileBlocksDelete()) {
+    assert.throws(() => fs.rmSync(path.join(home, 'hive'), { recursive: true, force: true }), /ENOTEMPTY|EBUSY|EPERM/);
+  } else {
+    assert.ok(fs.existsSync(path.join(home, 'hive', 'log.jsonl')), 'the manager wrote its log before the check');
+  }
   hive.dispose();
   hive.dispose();   // idempotent
   fs.rmSync(path.join(home, 'hive'), { recursive: true, force: true });
@@ -92,7 +133,8 @@ test('F1 wiring (B1/B3): no opt-in call; dispose() runs before reset\'s rm, befo
   const idx = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'index.ts'), 'utf8').replace(/\r\n/g, '\n');
   assert.doesNotMatch(idx, /keepAppendFilesOpen\(/, 'the default is the app\'s path: nothing to turn on');
   // QUIT-HANG reshaped finish (quit-done row first); what matters: dispose, then app.exit.
-  assert.match(idx, /const finish = \(\): void => \{[\s\S]{0,300}?try \{ hive\.dispose\(\); \}[\s\S]{0,120}?app\.exit\(0\);/);
+  // STARTUP-FREEZE-104 A9 adds the key-registry flush before dispose (+ about 220 characters).
+  assert.match(idx, /const finish = \(\): void => \{[\s\S]{0,520}?try \{ hive\.dispose\(\); \}[\s\S]{0,120}?app\.exit\(0\);/);
   const reset = idx.slice(idx.indexOf("ipcMain.handle('app:resetAll'"));
   const disposeAt = reset.indexOf('hive.dispose();'), rmAt = reset.indexOf('rmSync(hiveDir,');
   assert.ok(disposeAt > 0 && rmAt > disposeAt, 'reset: dispose, then rm');

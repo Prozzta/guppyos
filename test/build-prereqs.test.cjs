@@ -28,7 +28,7 @@ const WIN_ENV = { 'ProgramFiles(x86)': PF86, ProgramFiles: 'C:\\Program Files', 
 
 /** A fake machine. `node`: [version, pgo, execPath] or null; `pythons`: { file: version };
  *  `components`: VS component ids installed (in BT); `files`: paths that exist. */
-function machine({ platform = 'win32', env = WIN_ENV, node = ['20.20.2', false, 'C:\\node20\\node.exe'], pythons = {}, components = [], files = [], vswhere = true, timeouts = [] } = {}) {
+function machine({ platform = 'win32', env = WIN_ENV, node = ['24.22.2', false, 'C:\\node24\\node.exe'], pythons = {}, components = [], files = [], vswhere = true, timeouts = [] } = {}) {
   const calls = [];
   const exists = (p) => files.includes(p) || (vswhere && p === VSWHERE) || Object.keys(pythons).includes(p);
   const exec = async (file, args) => {
@@ -54,7 +54,7 @@ const ALL_VS = [...new Set(Object.values(C.BUILD_VS_REQUIRES).flat())];
 test('catalog: Windows has the four build rows, posix only Node and Python; none essential', () => {
   const win = C.buildToolCatalog('win32').map((t) => t.id);
   assert.deepEqual(win, ['build:node', 'build:python', 'build:vs-vctools', 'build:vs-spectre']);
-  // node-pty 1.1.0 and better-sqlite3 build with MSVC v143; ClangCL was only a Node 26 symptom (Jim M1)
+  // Native builds use MSVC v143: npm's node-gyp (10.3+) forces clang 0 on Windows even under the clang-cl built Node 24, so ClangCL is never needed (Jim M1, M1 on GUPPY-NODE-LTS)
   assert.equal(JSON.stringify(C.buildToolCatalog('win32')).includes('Llvm'), false, 'no LLVM/ClangCL row or install line');
   assert.deepEqual(C.buildToolCatalog('linux').map((t) => t.id), ['build:node', 'build:python']);
   assert.deepEqual(C.buildToolCatalog('darwin').map((t) => t.id), ['build:node', 'build:python']);
@@ -86,22 +86,25 @@ test('catalog: the install text names the exact winget / VS Installer ids and sa
   assert.match(C.BUILD_GROUP.posixNote, /build-essential/);
 });
 
-test('the Node pin matches .nvmrc and every CI workflow', () => {
+test('the Node pin matches .nvmrc, and every CI workflow reads .nvmrc', () => {
   assert.equal(read('.nvmrc').trim(), String(C.BUILD_NODE_MAJOR));
+  assert.equal(C.BUILD_NODE_MAJOR, 24);
   for (const wf of ['.github/workflows/ci.yml', '.github/workflows/release.yml']) {
-    const pins = [...read(wf).matchAll(/node-version:\s*['"]?(\d+)/g)].map((m) => Number(m[1]));
-    assert.ok(pins.length > 0, `${wf} pins a node-version`);
-    for (const v of pins) assert.equal(v, C.BUILD_NODE_MAJOR, wf);
+    const text = read(wf);
+    const setups = (text.match(/uses: actions\/setup-node@/g) || []).length;
+    assert.ok(setups > 0, `${wf} sets up Node`);
+    assert.equal((text.match(/node-version-file: \.nvmrc/g) || []).length, setups, `${wf}: every setup-node reads .nvmrc`);
+    assert.equal(/node-version:/.test(text), false, `${wf}: no second, literal Node pin`);
   }
 });
 
 test('node: the pinned major is ready; another major or a PGO build warns with the install text', async () => {
   let r = byId(await P.buildPrereqStatus(machine({ components: ALL_VS }).deps))['build:node'];
-  assert.equal(r.found, true); assert.equal(r.warn, undefined); assert.equal(r.detail, 'v20.20.2');
-  assert.equal(r.path, 'C:\\node20\\node.exe');
+  assert.equal(r.found, true); assert.equal(r.warn, undefined); assert.equal(r.detail, 'v24.22.2');
+  assert.equal(r.path, 'C:\\node24\\node.exe');
   r = byId(await P.buildPrereqStatus(machine({ node: ['26.1.0', false, 'C:\\n\\node.exe'] }).deps))['build:node'];
-  assert.equal(r.found, true); assert.match(r.warn, /26\.1\.0.*needs Node 20/); assert.match(r.installCommand, /nvm install 20/);
-  r = byId(await P.buildPrereqStatus(machine({ node: ['20.20.2', true, 'C:\\n\\node.exe'] }).deps))['build:node'];
+  assert.equal(r.found, true); assert.match(r.warn, /26\.1\.0.*needs Node 24/); assert.match(r.installCommand, /nvm install 24/);
+  r = byId(await P.buildPrereqStatus(machine({ node: ['24.22.2', true, 'C:\\n\\node.exe'] }).deps))['build:node'];
   assert.match(r.warn, /PGO \(enable_pgo_use\)/);
   r = byId(await P.buildPrereqStatus(machine({ node: null }).deps))['build:node'];
   assert.equal(r.found, false); assert.equal(r.warn, undefined);

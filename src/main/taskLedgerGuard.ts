@@ -17,9 +17,10 @@
  * notice. The file is NOT reverted: the guard reports, god decides.
  */
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, watch, type FSWatcher } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, type FSWatcher } from 'node:fs';
 import { join } from 'node:path';
 import { atomicWriteJson } from './atomicJson';
+import { watchDirectorySafely } from './safeDirectoryWatch';
 import { firstOccurrenceById, validateLedger, type LedgerIssue } from '../shared/taskLedger';
 
 export type TaskEditSource = 'ipc' | 'voice' | 'webhook' | 'slack' | 'board-auto' | 'api' | 'ledger' | 'needs-human' | 'archive';
@@ -258,7 +259,7 @@ export class TaskLedgerGuard {
     if (!root || !existsSync(root)) return;
     this.check();
     try {
-      this.watcher = watch(root, (_event, file) => {
+      this.watcher = watchDirectorySafely(root, (_event, file) => {
         if (file && String(file) !== 'tasks.json') return;
         if (this.debounce) clearTimeout(this.debounce);
         this.debounce = setTimeout(() => { this.debounce = null; this.check(); }, GUARD_DEBOUNCE_MS);

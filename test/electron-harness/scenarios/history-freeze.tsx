@@ -74,10 +74,23 @@ async function scrollTrial(shape: 'short' | 'real', css: string) {
   const style = document.createElement('style');
   style.textContent = css;
   document.head.appendChild(style);
+  const before = errors.length;
   const root: Root = createRoot(host);
   root.render(<div style={{ width: 520, height: 600, display: 'flex' }}><HistoryView agentId="a1" /></div>);
   await sleep(1200);
-  const sc = host.querySelector('[data-history-view]') as HTMLElement;
+  // LOAD-FLAKES-105: the trial starts from the live end, as a person's scroll-back does. A loaded
+  // machine can take longer than 1.2 s to load the tail and stick to the bottom, and 40 steps up
+  // from scrollTop 0 cross no mount boundary: a trial that proves nothing (g6, M3 'real' did not loop).
+  // So wait until the view is at its bottom with a settled height (the harness bounds the run).
+  let sc = host.querySelector('[data-history-view]') as HTMLElement;
+  for (let lastH = -1; ; await sleep(50)) {
+    sc = host.querySelector('[data-history-view]') as HTMLElement;
+    const h = sc ? sc.scrollHeight : -1;
+    if (sc && h > sc.clientHeight && h === lastH && h - sc.scrollTop - sc.clientHeight < 2) break;
+    if (sc && loopError(before)) break; // looped before any step: do not wait forever (counted as before the fix)
+    lastH = h;
+  }
+  const startTop = Math.round(sc.scrollTop);
   const from = errors.length;
   let failStep = -1;
   for (let k = 0; k < 40; k += 1) {
@@ -94,7 +107,7 @@ async function scrollTrial(shape: 'short' | 'real', css: string) {
   let strideOff = 0;
   for (let i = 0; i + 1 < rows.length; i += 1) strideOff = Math.max(strideOff, Math.abs(rows[i + 1].offsetTop - rows[i].offsetTop - rows[i].offsetHeight));
   const out = {
-    loop: loopError(from), failStep, mounted: rows.length, scrollHeight: sc.scrollHeight,
+    loop: loopError(from), failStep, startTop, mounted: rows.length, scrollHeight: sc.scrollHeight,
     idleDistinctTops: new Set(tops).size, strideOff
   };
   root.unmount(); host.remove(); style.remove();

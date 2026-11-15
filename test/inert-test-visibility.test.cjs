@@ -99,7 +99,7 @@ function summarize(file) {
   // the very failure mode under test. Strip it so the child is a real, independent run.
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
-  const res = spawnSync(process.execPath, ['--test', file], { cwd: REPO, encoding: 'utf8', env });
+  const res = spawnSync(process.execPath, ['--test', '--test-reporter=tap', file], { cwd: REPO, encoding: 'utf8', env });
   const out = `${res.stdout || ''}${res.stderr || ''}`;
   const num = (k) => {
     const m = out.match(new RegExp(`^# ${k} (\\d+)$`, 'm'));

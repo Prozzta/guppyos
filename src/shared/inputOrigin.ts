@@ -44,16 +44,13 @@ export function isInputOrigin(value: unknown): value is InputOrigin {
  * Why a HUMAN tag was raised at a site we own. Named constants, never a boolean,
  * so a wrong classification is greppable to its reason.
  *   dom           a capture-phase DOM input event inside `term.element`
- *   paste-sync    `pasteClipboard` via the synchronous clipboard bridge
- *   paste-async   `pasteClipboard` via the async fallback — the path that would
- *                 otherwise have shipped green (rev 11 dimension 2)
+ *   paste-async   `pasteClipboard` via Electron's asynchronous clipboard API
  *   drop          drag-and-drop of paths into the terminal
  *   user-clear    the composer's own Ctrl-U (`clearTerminalDraft`)
  *   user-dismiss  the composer's own Escape (`dismissTerminalPicker`)
  */
 export type HumanOriginReason =
   | 'dom'
-  | 'paste-sync'
   | 'paste-async'
   | 'drop'
   | 'user-clear'

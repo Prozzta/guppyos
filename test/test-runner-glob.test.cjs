@@ -85,7 +85,7 @@ test('MUTANT-JOURNAL-GATE NIT 1 (god 9cb49c, Jim 967fa3): new-floor-knowhow and 
   const journal = (file, owner = dead) => fs.writeFileSync(helper.journalPath(root), JSON.stringify({ owner, records: [{ file, original: Buffer.from('const CLAIM_VERBS = new Set([]);').toString('base64') }] }), 'utf8');
   const env = { ...process.env, NODE_PATH: path.join(REPO, 'node_modules'), MUTANT_RUNNER_PID: '' };
   delete env.NODE_OPTIONS; delete env.NODE_TEST_CONTEXT;
-  const suite = (rel) => spawnSync(process.execPath, ['--test', rel], { cwd: root, encoding: 'utf8', timeout: 60_000, env });
+  const suite = (rel) => spawnSync(process.execPath, ['--test', '--test-reporter=tap', rel], { cwd: root, encoding: 'utf8', timeout: 60_000, env });
   for (const rel of SUITES) {
     const gate = path.basename(rel);
     fs.writeFileSync(cli, 'const CLAIM_VERBS = new Set(["mutant"]);', 'utf8');
@@ -432,8 +432,13 @@ test('every run carries the per-file wall-clock limit, the normal reporter, and 
   const tap = fakeSpawn({ status: 0 });
   run({ testDir: 'test', readdir: () => ['a.test.cjs'], spawn: tap.spawn, log: () => {}, isTTY: false, timeoutMs: 1234, eventsFile: 'ev.jsonl', readFile: () => '', removeFile: () => {} });
   const a = tap.calls[0].args;
-  assert.ok(a.includes(`--test-timeout=${runner.backstopMs(1234)}`), a.join(' '));
-  assert.ok(runner.backstopMs(1234) > 1234, 'node --test\'s own timeout is only the backstop, after the watchdog\'s tree kill');
+  // GUPPY-NODE-LTS: the backstop is the runner's own (Node 24's --test-timeout never kills a file whose
+  // tests passed but which does not exit), so node --test gets NO --test-timeout; the files get the preload.
+  assert.ok(!a.some((x) => x.startsWith('--test-timeout')), `MUTANT: the backstop leans on node's --test-timeout again: ${a.join(' ')}`);
+  const env = tap.calls[0].opts.env;
+  assert.ok(String(env.NODE_OPTIONS).includes(env.GUPPY_FILE_BACKSTOP_OPT) && env.GUPPY_FILE_BACKSTOP_OPT.includes('file-backstop-preload.cjs'), 'every file records itself for the backstop');
+  assert.strictEqual(env.GUPPY_FILE_BACKSTOP, 'ev.jsonl.starts');
+  assert.ok(runner.backstopMs(1234) > 1234, 'the backstop comes after the watchdog\'s tree kill');
   const reporters = a.flatMap((x, i) => (x === '--test-reporter' ? [a[i + 1]] : []));
   const dests = a.flatMap((x, i) => (x === '--test-reporter-destination' ? [a[i + 1]] : []));
   assert.strictEqual(reporters[0], 'tap', 'off a terminal the gate logs keep TAP (node --test\'s own default)');
@@ -560,12 +565,21 @@ test('GATE-178: the temp folder of a killed tree is removed once free, not after
   try {
     spawnSync(process.execPath, ['-e', 'setTimeout(()=>{},200)']);
     if (process.platform === 'win32') {
-      assert.throws(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }), (e) => e.code === 'EBUSY',
-        'the old cleanup (5 x 200 ms) fails on a folder that is in use for 2 s');
+      // While the holder lives the folder cannot be removed: the reason removeWhenFree exists. Node 20
+      // says EBUSY, Node 24 EPERM (Jim, gate of 62c39414); neither removes it. One try, no retries: Node
+      // 24's rmSync retries EPERM, so a retrying call could outlast the 2 s holder and prove nothing.
+      let code = null;
+      try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { code = e.code; }
+      assert.ok(['EBUSY', 'EPERM'].includes(code), `a folder in use is not removed (got ${code})`);
+      assert.equal(fs.existsSync(dir), true, 'the folder in use is still there');
     }
     const r = removeWhenFree(dir);
     assert.equal(r.removed, true, `A FOLDER FREED WITHIN THE BUDGET IS REMOVED (${JSON.stringify(r)})`);
     assert.equal(fs.existsSync(dir), false);
+    if (process.platform === 'win32') {
+      // ...and only once it was free: the holder had exited by then, on every Node.
+      assert.throws(() => process.kill(holder.pid, 0), /ESRCH/, 'removed only after the process using it exited');
+    }
     // ...and one that never frees is reported, not waited on for ever.
     let t = 0;
     const never = removeWhenFree('x', { budgetMs: 1_000, rm: () => { const e = new Error('busy'); e.code = 'EBUSY'; throw e; }, now: () => t, pause: () => { t += 250; } });
@@ -761,7 +775,31 @@ test('PIN: against the REAL test directory discovery is root tests plus only fol
   // CLAIMS-FREEZE-GUARD (merged onto R10 for 1.1.103, not armed): + 1 (claims-freeze-guard).
   // INT 1.1.104: + 1 (win32-input-helper), + 1 (blob-overlay), + 1 (dictation-p2).
   // GUPPY-BUILD-PREREQS: + 1 (build-prereqs).
-  assert.equal(files.length, 564,`the focused suite must retain its pre-fold file count, got ${files.length}`);
+  // TRAY-MODE (release-1.1.104, pin not moved there): + 1 (tray-mode).
+  // GUPPY-NODE-LTS: + 1 (sqlite-engine-105), + 1 (runner-backstop-105).
+  // INT 1.1.105 group 2: + 1 (rel-escapes), + 1 (heavy-loop-light-cap), + 1 (heavy-preload-short-test).
+  // INT 1.1.105 group 7 (BLOB-SETUP-GUIDE): + 1 (blob-settings-section).
+  // ELECTRON-UPGRADE: +1 (cut-cmd-natives-198).
+  // CAP-NO-5H-WINDOW: + 1 (capacity-no-5h-window).
+  // Corrected count: ELECTRON-UPGRADE added 5 root tests, not 1: electron-45-clipboard,
+  // electron-45-clipboard-handlers, electron-45-natives, electron-45-safe-directory-watch,
+  // mac-minimum-system-version (cut-cmd-natives-198 was already there). Root 536 + folded 41.
+  // ELECTRON-FUSES: + 1 (electron-fuses). Root 537 + folded 41.
+  // SCALE-MESSAGES-INDEX + SCALE-DONE-STAT: + 1 (scale-mail-reads). Root 538 + folded 41.
+  // LOAD-FLAKES-105 (god ruling): - 1, claude-model-list-180 moved to the perf lane (test/perf). Root 537 + folded 41.
+  // SCALE-ROLLOUT-NEWEST: + 1 (scale-rollout-newest); CLAIMS-CREATE-LEDGER: + 1 (claims-bootstrap). Root 539 + folded 41.
+  // MUTANT-CENSUS-REPORTER: + 1 (census-reporter-tap). Root 540 + folded 41.
+  // STARTUP-FREEZE-104: + 7 (startup-freeze-a1, -a3, -a4, -a5, -a9, -keyalias, startup-health-setting). Root 547 + folded 41.
+  // STARTUP-FREEZE-104: + 7 (startup-freeze-a1, -a3, -a4, -a5, -a9, -keyalias, startup-health-setting). Root 548 + folded 41.
+  // STARTUP-FREEZE-104 A10: + 1 (startup-freeze-a10). Root 548 + folded 41.
+  // STARTUP-FREEZE-104: + 7 (startup-freeze-a1, -a3, -a4, -a5, -a9, -keyalias, startup-health-setting). Root 549 + folded 41.
+  // STARTUP-FREEZE-104 A10: + 1 (startup-freeze-a10). Root 549 + folded 41.
+  // STARTUP-FREEZE-104 A12: + 1 (startup-freeze-a12). Root 549 + folded 41.
+  // STARTUP-FREEZE-104: + 7 (startup-freeze-a1, -a3, -a4, -a5, -a9, -keyalias, startup-health-setting). Root 550 + folded 41.
+  // STARTUP-FREEZE-104 A10: + 1 (startup-freeze-a10). Root 550 + folded 41.
+  // STARTUP-FREEZE-104 A12: + 1 (startup-freeze-a12). Root 550 + folded 41.
+  // STARTUP-FREEZE-104 A19: + 1 (startup-freeze-a19). Root 550 + folded 41.
+  assert.equal(files.length, 591,`the focused suite must retain its pre-fold file count, got ${files.length}`);
   assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
   assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');
   assert.ok(files.includes(path.join('start-fixes-163', 'start-fixes-163-boot-submit.test.cjs')), 'the start-fixes feature folder is included');
@@ -813,17 +851,44 @@ test('END TO END, the backstop alone (no watchdog): node --test\'s own file time
   const os = require('node:os');
   const { spawnSync } = require('node:child_process');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runner-backstop-'));
+  const pidFile = path.join(dir, 'file.pid');
   try {
-    fs.writeFileSync(path.join(dir, 'a-hung.test.cjs'), "require('node:test')('done', () => { setInterval(() => {}, 1000); });\n");
+    fs.writeFileSync(path.join(dir, 'a-hung.test.cjs'), [
+      `require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, process.pid + ' ' + Math.round(Date.now() - process.uptime() * 1000));`,
+      "require('node:test')('done', () => { setInterval(() => {}, 1000); });",
+    ].join('\n'));
     const e = sink();
-    const spawn = (args, opts) => spawnSync(process.execPath, args, { ...opts, stdio: 'pipe', encoding: 'utf8' });
-    const code = run({ testDir: dir, cwd: dir, spawn, timeoutMs: 3_000, isTTY: false, log: () => {}, err: e.write, failureFile: () => path.join(dir, 'failures.json'), watchdog: () => ({ stop: () => {} }) });
+    const t0 = Date.now();
+    // Bounded: spawnSync blocks the event loop, so the test's own timeout cannot fire; a backstop
+    // that never kills must FAIL this test, not hang the suite (Jim, gate of 62c39414, mutant A).
+    let timedOut = false;
+    const spawn = (args, opts) => { const r = spawnSync(process.execPath, args, { ...opts, stdio: 'pipe', encoding: 'utf8', timeout: 90_000, killSignal: 'SIGKILL' }); timedOut = timedOut || (r.error && r.error.code) === 'ETIMEDOUT'; return r; };
+    // GUPPY-NODE-LTS: the REAL backstop (the runner's own), on every Node: an injected watchdog would
+    // otherwise turn it off, and Node 24's --test-timeout never kills this file.
+    const code = run({ testDir: dir, cwd: dir, spawn, timeoutMs: 3_000, isTTY: false, log: () => {}, err: e.write, failureFile: () => path.join(dir, 'failures.json'), watchdog: () => ({ stop: () => {} }), backstop: runner.startBackstop });
+    assert.equal(timedOut, false, 'THE BACKSTOP NEVER ENDED THE FILE: node --test was still running at 90 s');
     assert.notStrictEqual(code, 0, 'a hung file fails the run');
-    assert.match(e.lines.join('\n'), /FILE TIMED OUT after 3000 ms .*a-hung\.test\.cjs/);
+    assert.match(e.lines.join('\n'), /FILE TIMED OUT after 3000 ms \(the runner's backstop killed it at 23000 ms\): .*a-hung\.test\.cjs/);
+    // (The kill's own outcome row may be lost: the kill ends node --test and the runner stops the
+    // backstop at once. The due row, written BEFORE the kill, is the record.)
+    assert.ok(Date.now() - t0 < 90_000, `the backstop ended the run (${Date.now() - t0} ms), it did not hang`);
   } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
+    killLeftFile(pidFile);
+    removeWhenFree(dir);
   }
 });
+
+/** A file process a failed backstop left running: killed only when it is still ours (own-procs).
+ *  own-procs verifies ownership on win32 only, so elsewhere a leftover is left to the failing assert
+ *  rather than killed by a bare pid that may have been reused (own-procs-pid-recycle PIN). */
+function killLeftFile(pidFile) {
+  if (process.platform !== 'win32') return;
+  try {
+    const own = require('./tools/own-procs.cjs');
+    const rec = own.readRec(pidFile, path.basename(process.execPath));
+    if (rec && own.stillOurs(rec)) own.killOwnTree(rec);
+  } catch { /* gone, or no record */ }
+}
 
 test('watchdog: parses PowerShell\'s process rows (one row or many, /Date(ms)/ start times)', () => {
   const { parseRows } = require('./tools/file-watchdog.cjs');

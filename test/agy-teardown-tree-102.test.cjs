@@ -40,12 +40,13 @@ fs.writeFileSync(path.join(DIR, 'root.js'), [
   "const { spawn } = require('child_process'); const fs = require('fs'); const path = require('path');",
   'const dir = process.argv[2];',
   "const c = spawn(process.execPath, [path.join(__dirname, 'inner.js'), dir], { windowsHide: true, stdio: 'ignore', detached: true });",
-  "fs.writeFileSync(path.join(dir, 'root.json'), JSON.stringify({ root: process.pid, inner: c.pid }));",
+  // AGY-TEARDOWN-LOAD-RACE: written to a temp name and renamed, so the test never reads it half-written.
+  "fs.writeFileSync(path.join(dir, 'root.json.tmp'), JSON.stringify({ root: process.pid, inner: c.pid })); fs.renameSync(path.join(dir, 'root.json.tmp'), path.join(dir, 'root.json'));",
   'setInterval(() => {}, 1000);'
 ].join('\n'));
 fs.writeFileSync(path.join(DIR, 'inner.js'), [
   "const fs = require('fs'); const path = require('path'); const dir = process.argv[2]; const t0 = Date.now();",
-  "fs.writeFileSync(path.join(dir, 'inner.json'), JSON.stringify({ pid: process.pid }));",
+  "fs.writeFileSync(path.join(dir, 'inner.json.tmp'), JSON.stringify({ pid: process.pid })); fs.renameSync(path.join(dir, 'inner.json.tmp'), path.join(dir, 'inner.json'));",
   "setInterval(() => { if (fs.existsSync(path.join(dir, 'go')) || Date.now() - t0 > 60000) process.exit(0); }, 20);"
 ].join('\n'));
 
@@ -76,10 +77,12 @@ const failingTaskkill = () => {
   process.nextTick(() => e.emit('error', new Error('forced first-sweep failure')));
   return e;
 };
-/** The real taskkill, started `ms` late: a sweep still running when the quit comes. */
-const slowTaskkill = (ms) => (args, rest) => {
+/** The real taskkill, held until `gate` resolves: a sweep still running when the quit comes.
+ *  AGY-TEARDOWN-LOAD-RACE: it was a 1.5 s timer, so under load a quit slower than 1.5 s let the late
+ *  close land BEFORE the quit resolved, and M5 died at the wrong assertion. An event, not a time. */
+const heldTaskkill = (gate) => (args, rest) => {
   const e = new EventEmitter();
-  setTimeout(() => { const c = realSpawn('taskkill', args, ...rest); c.once('close', (code) => e.emit('close', code)); c.once('error', (err) => e.emit('error', err)); }, ms);
+  gate.then(() => { const c = realSpawn('taskkill', args, ...rest); c.once('close', (code) => e.emit('close', code)); c.once('error', (err) => e.emit('error', err)); });
   return e;
 };
 
@@ -99,7 +102,8 @@ async function run(Pty, end, { after } = {}) {
   try {
     const r = await m.spawn({ id, cwd: dir, command: process.execPath, args: [path.join(DIR, 'root.js'), dir], cols: 80, rows: 24, env: {} }, owner);
     assert.ok(r.ok, `spawn: ${r.error}`);
-    for (let i = 0; i < 200 && !fs.existsSync(path.join(dir, 'inner.json')); i++) await sleep(25);
+    const both = () => fs.existsSync(path.join(dir, 'inner.json')) && fs.existsSync(path.join(dir, 'root.json'));
+    for (let i = 0; i < 200 && !both(); i++) await sleep(25);
     inner = JSON.parse(fs.readFileSync(path.join(dir, 'inner.json'), 'utf8')).pid;
     root = JSON.parse(fs.readFileSync(path.join(dir, 'root.json'), 'utf8')).root;
     assert.equal(m.list()[0].pid, root, 'the node root is the PTY process');
@@ -174,16 +178,34 @@ K.retry = async (Pty) => {
   assert.equal(r.closes, 1, `RETRY CLOSES THE CONPTY ONCE: closed ${r.closes} times`);
 };
 /** A quit (killAllAsync) while a kill's sweep is still running: the quit takes the close over (it
- *  has run when the quit resolves) and the kill's own late close then does nothing. */
+ *  has run when the quit resolves) and the kill's own late close then does nothing.
+ *  AGY-TEARDOWN-LOAD-RACE: the kill's sweep is held until the quit has resolved (an event, not a
+ *  1.5 s timer), and the run ends when that late close has REACHED closePty (not a 2.5 s sleep).
+ *  NO DOUBLE CLOSE is checked first: it holds in either order (killTreesAsync's own 5 s cap can still
+ *  let the late close in before a very slow quit), so a missing once guard dies there, by name. */
 const quitDuringSweep = (endOne) => async (Pty) => {
+  let release = () => {};
+  const gate = new Promise((res) => { release = res; });
+  let reached = 0;
   const r = await run(Pty, async (m, id, owner, closes) => {
-    firstTaskkill = slowTaskkill(1_500);
+    const realClosePty = m.closePty.bind(m);
+    m.closePty = (s) => { reached += 1; return realClosePty(s); };
+    firstTaskkill = heldTaskkill(gate);
     endOne(m, id, owner);
     await m.killAllAsync(5_000);
-    return { closesAtQuit: closes.n };
-  }, { after: () => sleep(2_500) });   // past the slow sweep and its late close
-  assert.equal(r.closesAtQuit, 1, `QUIT TAKES OVER A PENDING CLOSE: the ConPTY was closed ${r.closesAtQuit} times when killAllAsync resolved`);
+    const closesAtQuit = closes.n;
+    release();
+    return { closesAtQuit };
+  }, { after: async () => {
+    // The quit's close and the kill's late close both reach closePty (the once guard makes the
+    // second a no-op). The deadline only bounds a failing mutant, whose late close never comes.
+    const t0 = Date.now();
+    while (reached < 2 && Date.now() - t0 < DEADLINE_MS) await sleep(25);
+    return { reached };
+  } });
   assert.equal(r.closes, 1, `NO DOUBLE CLOSE: the ConPTY was closed ${r.closes} times once the late sweep finished`);
+  assert.equal(r.closesAtQuit, 1, `QUIT TAKES OVER A PENDING CLOSE: the ConPTY was closed ${r.closesAtQuit} times when killAllAsync resolved`);
+  assert.equal(r.reached, 2, `THE LATE CLOSE RAN: closePty was reached ${r.reached} times (the quit's and the kill's own)`);
   assert.ok(r.rootGone && r.innerGone, 'QUIT: the root and its descendant are gone');
 };
 K.quitKill = quitDuringSweep((m, id) => assert.equal(m.kill(id).ok, true));

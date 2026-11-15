@@ -45,7 +45,7 @@ const MUTANTS = [
   ['C26 the authority is read by its short name', "git(['show', `${auth}:${FILE}`])", "git(['show', `${b}:${FILE}`])", /not ok \d+ - authority: only origin\/guppy\/int-<x> is an authority/],
 ];
 
-const run = () => spawnSync(process.execPath, ['--test', TEST], { cwd: ROOT, encoding: 'utf8', windowsHide: true, timeout: 300_000 });
+const run = () => spawnSync(process.execPath, ['--test', '--test-reporter=tap', TEST], { cwd: ROOT, encoding: 'utf8', windowsHide: true, timeout: 300_000 });
 recover(ROOT);
 if (process.argv.includes('--recover-only')) process.exit(0);
 checkAnchors(ROOT, MUTANTS.map(([name, from]) => ({ name, file: SRC, from })));

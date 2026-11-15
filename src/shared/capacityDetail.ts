@@ -15,7 +15,7 @@
  * Every word is main's. A stale figure survives here ONLY as last-known, subordinate and
  * worded "not current" (§10), and never with a meter.
  */
-import { CAPACITY_STATES, PROVIDER_IDS, type CapacityState, type ProviderId } from './providerCapacity';
+import { CAPACITY_STATES, PROVIDER_IDS, leadWindowKind, type CapacityState, type ProviderId } from './providerCapacity';
 
 /** Invoke: the detail view for one poolId, or null when that pool is not in the collection. */
 export const CAPACITY_DETAIL_CHANNEL = 'capacity:detail';
@@ -80,7 +80,7 @@ function windowErrors(w: unknown, at: string): string[] {
   if ('lastKnownPercent' in w) {
     const r = w.lastKnownPercent;
     if (typeof r !== 'number' || !Number.isFinite(r) || r < 0 || r > 100) errors.push(`${at}.lastKnownPercent: not 0..100`);
-    if (w.kind !== 'FIVE_HOUR') errors.push(`${at}.lastKnownPercent: five-hour row only`);
+    if (w.kind !== 'FIVE_HOUR' && w.kind !== 'SEVEN_DAY') errors.push(`${at}.lastKnownPercent: the lead (5h or Weekly) row only`);
     if ('remainingPercent' in w) errors.push(`${at}.lastKnownPercent: never beside a current figure`);
   }
   if ('resetText' in w && !isText(w.resetText)) errors.push(`${at}.resetText: not text`);
@@ -128,6 +128,11 @@ export function validateCapacityDetail(v: unknown): string[] {
   if (isObj(v.freshness) && v.freshness.verdict !== 'STALE' && Array.isArray(v.windows)
     && v.windows.some((w) => isObj(w) && 'lastKnownPercent' in w)) {
     errors.push('$.windows: a last-known figure belongs to a stale pool only');
+  }
+  // CAP-NO-5H-WINDOW: the last-known figure is the LEAD row's - Weekly only when no 5h row exists.
+  if (Array.isArray(v.windows) && v.windows.every(isObj)) {
+    const lead = leadWindowKind(v.windows as { kind: string }[]);
+    if (v.windows.some((w) => isObj(w) && 'lastKnownPercent' in w && w.kind !== lead)) errors.push('$.windows: a last-known figure belongs to the lead row only');
   }
   return errors;
 }

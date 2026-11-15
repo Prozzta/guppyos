@@ -15,7 +15,7 @@
 import { cardFieldFacts, cardRecordFacts, decisionFacts, rulingMailFacts, doneMailFacts, parseChangelog, releaseFacts, type MailLike } from './derivedFacts';
 import { doneMailStatuses, writeDoneMailStatus } from './derivedDoneStatus';
 import { DerivedGit } from './derivedGit';
-import { readCards, readDoneMails, readIndexRulingMails, runDerivedBackfill, syncDerived, type DerivedWriterDeps } from './derivedWriter';
+import { readCards, readDoneMailsAsync, readIndexRulingMailsAsync, runDerivedBackfill, syncDerived, type DerivedWriterDeps } from './derivedWriter';
 
 export const DERIVED_START_DELAY_MS = 20_000;
 export const DERIVED_CARDS_DEBOUNCE_MS = 5_000;
@@ -42,11 +42,14 @@ export class DerivedLive {
   private git: DerivedGit | null = null;
   private debounce: ReturnType<typeof setTimeout> | null = null;
   private timers: Array<ReturnType<typeof setTimeout>> = [];
+  /** start() was called (stop() does not reset it: a card change after stop still runs, as before). */
+  private started = false;
   constructor(private readonly d: DerivedLiveDeps) {}
 
   /** Once per app run (the claim store reopens on a new hive root; the passes follow hiveRoot()). */
   start(): void {
     if (this.timers.length) return;
+    this.started = true;
     const st = this.d.setTimeout ?? setTimeout;
     const si = this.d.setInterval ?? setInterval;
     const t1 = st(() => { void this.run('start', () => this.full()); }, DERIVED_START_DELAY_MS);
@@ -57,8 +60,13 @@ export class DerivedLive {
 
   stop(): void { for (const t of this.timers) clearTimeout(t); this.timers = []; if (this.debounce) clearTimeout(this.debounce); }
 
-  /** tasks.json changed. */
+  /**
+   * tasks.json changed. STARTUP-FREEZE-104 A16 (Jim's 10x profile of b6a92a59: a 1.5 s block at 6 s): before start()
+   * (which waits for the claims warm) a cards pass read the whole derived ledger synchronously. It is skipped: start()
+   * always runs the full pass, whose backfill syncs the same decisions, records and card fields.
+   */
   cardsChanged(): void {
+    if (!this.started) return;
     if (this.debounce) clearTimeout(this.debounce);
     this.debounce = (this.d.setTimeout ?? setTimeout)(() => { this.debounce = null; void this.run('cards', () => this.cards()); }, DERIVED_CARDS_DEBOUNCE_MS);
   }
@@ -89,7 +97,7 @@ export class DerivedLive {
     const git = c.git && await c.git.ok() ? c.git : null;
     // Mark every recorded done mail seen first: the backfill reads them all (and any that land meanwhile); a
     // mail read twice is idempotent, a mail marked but never read would be lost.
-    this.newDoneMails(c.root);
+    await this.newDoneMails(c.root);
     await runDerivedBackfill(c.w, { hiveRoot: c.root, git, releases: await this.releaseSource(git), ...(git ? { prefetch: (s) => git.prefetch(s) } : {}) });
   }
 
@@ -107,9 +115,9 @@ export class DerivedLive {
     const c = this.ctx(); if (!c) return;
     const git = c.git && await c.git.ok() ? c.git : null;
     const rel = await this.releaseSource(git);
-    await syncDerived(c.w, rulingMailFacts(readIndexRulingMails(c.root)));
-    await syncDerived(c.w, releaseFacts(parseChangelog(rel.changelog), rel.tags, rel.bumps, rel.heads, { cards: readCards(c.root), mails: readDoneMails(c.root) }));
-    const mails = this.newDoneMails(c.root);
+    await syncDerived(c.w, rulingMailFacts(await readIndexRulingMailsAsync(c.root)));
+    await syncDerived(c.w, releaseFacts(parseChangelog(rel.changelog), rel.tags, rel.bumps, rel.heads, { cards: readCards(c.root), mails: await readDoneMailsAsync(c.root) }));
+    const mails = await this.newDoneMails(c.root);
     if (git && mails.length) {
       const ids = readCards(c.root).map((x) => x.id).filter((id): id is string => typeof id === 'string');
       const done = await doneMailFacts(mails, ids, git, { subjectOf: (id) => this.subjects.get(id) });
@@ -123,8 +131,8 @@ export class DerivedLive {
     return { changelog: this.d.changelog(), tags: git ? await git.tags() : [], ...(git ? { bumps: await git.bumps(), heads: await git.releaseHeads() } : {}) };
   }
 
-  /** The done mails the MailLedger recorded since the last pass (each remembered by agent/id). */
-  private newDoneMails(root: string): MailLike[] {
-    return readDoneMails(root, this.seenMail, this.subjects);
+  /** The done mails the MailLedger recorded since the last pass (each remembered by agent/id). A12: the index in slices. */
+  private newDoneMails(root: string): Promise<MailLike[]> {
+    return readDoneMailsAsync(root, this.seenMail, this.subjects);
   }
 }

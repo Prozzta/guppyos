@@ -63,6 +63,7 @@ test('with the neutral deck registered, main keeps its id through config normali
     assert.deepEqual(made.projectThemeSeedByHive[PT.projectThemeHomeKey(fresh)], { name: 'Lead', appearance: { bodyId: 'light' } });
   } finally {
     if (prev) require.cache[electron] = prev; else delete require.cache[electron];
+    loadTs.closeConfigWatchers();
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });

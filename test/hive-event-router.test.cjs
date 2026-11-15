@@ -115,6 +115,17 @@ test('A4 a newly hired agent is watched at once; a removed or archived agent\'s 
   assert.equal(jim.closed, true, 'an archived agent is not watched');
 });
 
+test('A4b agent archive closes its outbox watcher before deleting an empty folder', async (t) => {
+  const f = await floor(t);
+  f.hive.startRouter();
+  const outbox = f.outbox('jim-1');
+  const watcher = f.rt.live(outbox);
+  f.hive.closeOutboxWatcher(outbox);
+  fs.rmSync(path.dirname(outbox), { recursive: true, force: true });
+  assert.equal(watcher.closed, true, 'the watcher is closed before archive removal');
+  assert.equal(f.hive.watchedOutboxes().includes(outbox), false);
+});
+
 test('A5 the observer fires after a direct delivery and a bounce to god; never for a missing inbox or a terminal handoff', async (t) => {
   const f = await floor(t, { emit: () => true });   // the renderer accepts terminal handoffs
   await f.hive.ensureAgent({ id: 'kim-1', name: 'Kim', provider: 'custom', cwd: f.home });

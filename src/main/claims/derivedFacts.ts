@@ -929,10 +929,16 @@ export function releaseFacts(sections: readonly ChangelogSection[], tags: readon
   const versions = new Set<string>([...sections.map((s) => s.version), ...tagOf.keys()]);
   const secOf = new Map(sections.map((s) => [s.version, s]));
   const headOf = new Map(heads.filter((h) => VERSION_RE.test(h.version) && /^[0-9a-f]{40}$/i.test(h.commit)).map((h) => [h.version, h.commit.toLowerCase()]));
+  // STARTUP-FREEZE-104 A14 (Jim's 10x profile: releaseFacts/digestFor 1.1 s): a text can give a digest only where the
+  // labelled digest matches in it, so only those texts are scanned per version (same texts, same order, same result).
+  const labelled = /\b(?:setup|installer)\s+(?:digest|sha256|sha-256)\s*[:=]?\s*([0-9a-f]{64})(?![0-9a-f])/i;
+  const cardTexts = (sources.cards ?? [])
+    .map((c) => ({ id: c.id, text: [c.result, c.notes].filter((x): x is string => typeof x === 'string').join('\n') }))
+    .filter((c) => labelled.test(c.text));
+  const mailTexts = (sources.mails ?? []).filter((m) => m.act === 'done').map((m) => `${m.subject ?? ''} ${m.body ?? ''}`).filter((t) => labelled.test(t));
   const digestFor = (version: string): string | null => {
     const escaped = version.replace(/\./g, '\\.');
     const releaseCard = new RegExp('\\b(?:release|cut)-' + escaped + '(?![0-9.])', 'i');
-    const labelled = /\b(?:setup|installer)\s+(?:digest|sha256|sha-256)\s*[:=]?\s*([0-9a-f]{64})(?![0-9a-f])/i;
     // Keep the version beside its own digest: one done mail can report two releases.
     // A completion report commonly puts the branch and installer on separate lines.  Do not
     // walk past a later release mention, though: that digest belongs to that later version.
@@ -940,14 +946,12 @@ export function releaseFacts(sections: readonly ChangelogSection[], tags: readon
     const afterVersion = new RegExp(releaseCard.source + '(?:(?!' + anotherRelease + ')[\\s\\S]){0,240}?' + labelled.source, 'i');
     const digestAfterVersion = (text: unknown): string | null => typeof text === 'string' ? afterVersion.exec(text)?.[1]?.toLowerCase() ?? null : null;
     const digest = (text: unknown): string | null => typeof text === 'string' ? labelled.exec(text)?.[1]?.toLowerCase() ?? null : null;
-    for (const c of sources.cards ?? []) {
-      const text = [c.result, c.notes].filter((x): x is string => typeof x === 'string').join('\n');
-      const hit = digestAfterVersion(text) ?? (typeof c.id === 'string' && releaseCard.test(c.id) ? digest(text) : null);
+    for (const { id, text } of cardTexts) {
+      const hit = digestAfterVersion(text) ?? (typeof id === 'string' && releaseCard.test(id) ? digest(text) : null);
       if (hit) return hit;
     }
-    for (const m of sources.mails ?? []) {
-      if (m.act !== 'done') continue;
-      const hit = digestAfterVersion(`${m.subject ?? ''} ${m.body ?? ''}`);
+    for (const text of mailTexts) {
+      const hit = digestAfterVersion(text);
       if (hit) return hit;
     }
     return null;

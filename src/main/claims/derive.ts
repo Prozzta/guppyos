@@ -16,8 +16,16 @@ function canonical(value: unknown): string {
   return `{${Object.keys(object).filter((key) => object[key] !== undefined).sort(compare).map((key) => `${JSON.stringify(key)}:${canonical(object[key])}`).join(',')}}`;
 }
 
+/** A10: one hash per registry object. loadRegistryShared hands out one frozen object while the file is unchanged, and
+ *  canonical JSON of the 10x registry (12.8 MB) was re-hashed on every derive. Only a frozen registry is kept: one that
+ *  can still change (a loadRegistry copy, the default) is hashed every time, as before. */
+const registryHashes = new WeakMap<KeyRegistry, string>();
 function registryHash(registry: KeyRegistry): string {
-  return createHash('sha256').update(canonical(registry)).digest('hex');
+  const hit = registryHashes.get(registry);
+  if (hit !== undefined) return hit;
+  const h = createHash('sha256').update(canonical(registry)).digest('hex');
+  if (Object.isFrozen(registry) && Object.isFrozen(registry.keys) && Object.isFrozen(registry.namespaces)) registryHashes.set(registry, h);
+  return h;
 }
 
 function chainHead(records: LedgerRec[]): string {
@@ -47,6 +55,55 @@ function cardinality(key: string, registry: KeyRegistry): 'single' | 'multi' | u
     if (key.startsWith(prefix) && key.endsWith(suffix) && key.length >= prefix.length + suffix.length) return namespace.cardinality;
   }
   return undefined;
+}
+
+/** A10: the canonical key R2 groups `key` under when that key is single-cardinality, else null (derive's own rule). */
+export function singleKeyOf(key: string | undefined, registry: KeyRegistry): string | null {
+  if (!key) return null;
+  const k = canonicalKey(key, registry);
+  return cardinality(k, registry) === 'single' ? k : null;
+}
+
+/**
+ * A11 (Jim's 10x profile of c1db867a): whether derive gives every ledger the same statuses under `next` as under
+ * `prev`. derive reads a registry only through canonicalKey and cardinality(...) === 'single', so it holds when the
+ * namespaces are the same, every key of `prev` is in `next` unchanged, and every added key has no alias and the same
+ * single-or-not cardinality the namespaces gave it before (what the key writer adds). O(keys), no hashing.
+ */
+export function sameStatusesUnder(prev: KeyRegistry, next: KeyRegistry): boolean {
+  const turned = keysTurnedSingle(prev, next);
+  return turned !== null && turned.length === 0;
+}
+
+/**
+ * A15 (Jim's 10x profile of b6a92a59: full derives on registry saves still fired in the import): the keys that `next`
+ * makes single where `prev` did not, when that is the only difference derive reads; null for any other difference
+ * (as sameStatusesUnder). derive's namespace match does not substitute <id>, so an unregistered agent.<id>.* key is not
+ * single to derive, and the writer registers it single (its namespace). Such a key is added with no alias, so only claims
+ * whose canonical key is that key are read differently: the caller re-derives those (its dirty keys), not the ledger.
+ */
+export function keysTurnedSingle(prev: KeyRegistry, next: KeyRegistry): string[] | null {
+  if (prev === next) return [];
+  if (canonical(prev.namespaces) !== canonical(next.namespaces)) return null;
+  const before = prev.keys;
+  const after = next.keys;
+  let kept = 0;
+  const turned: string[] = [];
+  for (const key of Object.keys(after)) {
+    const e = after[key];
+    const old = before[key];
+    if (old) {
+      if (old.cardinality !== e.cardinality || old.aliasOf !== e.aliasOf) return null;
+      kept++;
+      continue;
+    }
+    if (e.aliasOf !== undefined) return null;
+    const was = cardinality(key, prev) === 'single';
+    const now = e.cardinality === 'single';
+    if (was && !now) return null;
+    if (now && !was) turned.push(key);
+  }
+  return kept === Object.keys(before).length ? turned : null;
 }
 
 function protectedFromMail(source: ClaimRec, target: ClaimRec): boolean {

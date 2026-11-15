@@ -77,6 +77,10 @@ files:
   - "!**/node_modules/node-pty/build/**/*.{vcxproj,filters,iobj,ipdb,ilk,pdb,exp,lib,tlog}"
   - "!**/node_modules/node-pty/node-addon-api/{Release,Debug}/**"
   - "!**/node_modules/node-pty/node-addon-api/*.{vcxproj,filters}"
+  # BUILD-LEFTOVERS-USERNAME-105: better-sqlite3 13 is N-API and loads prebuilds/<platform>-<arch>.node
+  # (lib/binding.js), but electron-rebuild -f still runs node-gyp on it, and its build/ (MSBuild
+  # projects holding the user folder, obj/ logs; no .node) shipped unpacked. Nothing loads from build/.
+  - "!**/node_modules/better-sqlite3/build/**"
 
 # Ship the standalone Slack reply helper as a plain file under the app's
 # resources dir (process.resourcesPath). It runs under `node`, NOT inside the
@@ -109,6 +113,9 @@ extraResources:
   # Electron-as-Node from <hive>/bin/ledger.
   - from: resources/ledger-cli.cjs
     to: ledger-cli.cjs
+  # CLAIMS-CREATE-LEDGER: god's `claims bootstrap` command, run on Electron-as-Node from <hive>/bin/claims.
+  - from: resources/claims-cli.cjs
+    to: claims-cli.cjs
   # GOD-TERMINAL-CONTROL: god's `term` command (read/type/keys/send another agent's terminal), run on
   # Electron-as-Node from <hive>/bin/term, on god's PATH only.
   - from: resources/term-cli.cjs
@@ -135,6 +142,14 @@ extraResources:
     to: input
     filter:
       - guppy-input.exe
+  # FS-CONTAINMENT-TOCTOU: the handle-check addon (N-API, Electron headers), built by
+  # tools/build-fs-handle.cjs in postinstall. A .node cannot load from inside the asar, so it ships
+  # beside it; src/main/fs.ts loads it from <resources>/fs-handle and refuses all confined file
+  # access if it is missing. Linux needs no addon (it reads /proc/self/fd), so its folder is empty.
+  - from: resources/fs-handle/bin
+    to: fs-handle
+    filter:
+      - guppy_fs_handle.node
   - from: resources/models
     to: models
     filter:
@@ -159,6 +174,10 @@ npmRebuild: true
 mac:
   category: public.app-category.developer-tools
   icon: build/icon.icns
+  # macOS 13 Ventura. electron-builder writes this as LSMinimumSystemVersion in
+  # the app's Info.plist; the update feed needs the corresponding Darwin 22
+  # value, which the afterAllArtifactBuild hook supplies below.
+  minimumSystemVersion: "13.0"
   # Declare WHY the app touches the user's folders. macOS shows these strings in
   # the privacy prompt and, for a signed app, remembers the grant — so the user
   # is asked ONCE instead of on every agent action.

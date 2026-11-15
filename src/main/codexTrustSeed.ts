@@ -31,6 +31,7 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { posix, win32 } from 'node:path';
+import { relEscapes } from './relEscapes';
 
 /**
  * THE switch. The Human's ruling for 1.1.75 ("go with the recommendations"): 'agent-cwd', i.e.
@@ -58,7 +59,7 @@ const stripVerbatim = (p: string): string => p.replace(/^\\\\\?\\(?!UNC\\)/, '')
 const inside = (child: string, parent: string, platform: NodeJS.Platform): boolean => {
   const P = pathApi(platform);
   const rel = P.relative(parent, child);
-  return rel !== '' && !rel.startsWith('..') && !P.isAbsolute(rel);
+  return rel !== '' && !relEscapes(rel, P);
 };
 
 /** THE predicate: should this Codex agent's own config trust its cwd? Only an absolute cwd. */

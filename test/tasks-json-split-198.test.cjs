@@ -196,11 +196,16 @@ test('a failed tombstone append still leaves the revived card hot (A10: hot firs
 
 test('a torn last archive line (crash mid-append) is skipped; a new month file invalidates the cache', (t) => {
   const r = rig(t, [old('M1'), card('LIVE')]);
+  let clock = 1_000_000;
+  r.hive.__resetAuthorityCacheForTests(() => clock);
   r.hive.archivePass(NOW);
   assert.equal(r.hive.allTasks().tasks.length, 2);
   fs.appendFileSync(path.join(r.root, 'tasks-archive', '2026-10.jsonl'), '{"v":1,"at":"x","card":{"id":"TOR');
+  clock += HiveManager.ARCHIVE_REVALIDATE_MS;   // SCALE-TASKS-MAP: an outside write is re-checked after the window
   assert.equal(r.hive.allTasks().tasks.length, 2);
   fs.writeFileSync(path.join(r.root, 'tasks-archive', '2026-11.jsonl'), JSON.stringify({ v: 1, at: 'x', card: old('M2') }) + '\n');
+  assert.deepEqual(r.ids(r.hive.allTasks().tasks), ['LIVE', 'M1'], 'inside the window the new month is not seen yet');
+  clock += HiveManager.ARCHIVE_REVALIDATE_MS;
   assert.deepEqual(r.ids(r.hive.allTasks().tasks), ['LIVE', 'M1', 'M2']);
 });
 
@@ -281,12 +286,83 @@ test('tasks-revive: refuses an id not archived, says so for a hot id, and goes t
   assert.equal(A.readArchive(r.root).has('R1'), true, 'the CLI never edits the files itself');
 });
 
+// SCALE-TASKS-MAP (Jim's STARTUP-SCALE-YEAR audit A13): a per-claim status lookup was a .find over a
+// fresh merge of every card ever made, on every call. The merged view is now rebuilt only when hot or
+// the archive changed, and taskById is a Map lookup over it.
+test('SCALE-TASKS-MAP: allTasks is one frozen view until hot or the archive changes; taskById = .find over it', (t) => {
+  const r = rig(t, [old('A1'), card('LIVE'), old('A2'), card('DUPE', { result: 'first' }), card('DUPE', { result: 'second' })]);
+  let clock = 1_000_000;
+  r.hive.__resetAuthorityCacheForTests(() => clock);
+  r.hive.archivePass(NOW);
+  const v1 = r.hive.allTasks();
+  assert.equal(r.hive.allTasks(), v1, 'unchanged hot and archive: the same view, not a new merge');
+  assert.ok(Object.isFrozen(v1.tasks), 'the shared list is frozen: no caller can mutate it under the others');
+  for (const id of ['A1', 'A2', 'LIVE', 'DUPE', 'NONE']) {
+    assert.equal(r.hive.taskById(id), v1.tasks.find((c) => c.id === id), `taskById(${id}) is the first match, as .find gave`);
+  }
+  assert.equal(r.hive.taskById('DUPE').result, 'first', 'a duplicate id resolves to its first occurrence');
+  // a hot change through the API: a new view with the new status
+  assert.ok(r.hive.patchTask('LIVE', { status: 'doing' }));
+  const v2 = r.hive.allTasks();
+  assert.notEqual(v2, v1);
+  assert.equal(r.hive.taskById('LIVE').status, 'doing');
+  // an archive change from outside the app (the CLI, a crash replay): a new view with the archived card
+  A.appendArchived(r.root, [old('A3')], NOW);
+  assert.equal(r.hive.taskById('A3'), undefined, 'inside the revalidate window the archive is not re-checked (Jim B1)');
+  clock += HiveManager.ARCHIVE_REVALIDATE_MS;
+  assert.equal(r.hive.taskById('A3')?.id, 'A3', 'the outside archive append shows once the window has passed');
+  assert.notEqual(r.hive.allTasks(), v2);
+  // a hot edit from outside the app (an agent's python edit), read fresh: the view follows it
+  fs.writeFileSync(r.hotPath, JSON.stringify({ tasks: [...r.hot(), card('NEW')] }, null, 2));
+  r.hive.tasks(true);
+  assert.equal(r.hive.taskById('NEW')?.id, 'NEW', 'a direct edit of hot shows');
+});
+
+test('SCALE-TASKS-MAP: lookups inside the revalidate window read, list and stat nothing; an archive write by main shows at once (fs spy)', (t) => {
+  const r = rig(t, [old('A1'), card('LIVE'), old('A2'), card('GOES')]);
+  let clock = 1_000_000;
+  r.hive.__resetAuthorityCacheForTests(() => clock);
+  r.hive.archivePass(NOW);
+  r.hive.taskById('A1');   // first sight: reads hot and the archive
+  const seen = { read: [], stat: [], dir: [] };
+  const orig = { readFileSync: fs.readFileSync, statSync: fs.statSync, readdirSync: fs.readdirSync, openSync: fs.openSync };
+  fs.readFileSync = function (p, ...a) { seen.read.push(String(p)); return orig.readFileSync.call(this, p, ...a); };
+  fs.openSync = function (p, ...a) { seen.read.push(String(p)); return orig.openSync.call(this, p, ...a); };
+  fs.statSync = function (p, ...a) { seen.stat.push(String(p)); return orig.statSync.call(this, p, ...a); };
+  fs.readdirSync = function (p, ...a) { seen.dir.push(String(p)); return orig.readdirSync.call(this, p, ...a); };
+  let control = null;
+  let steady = null;
+  try {
+    for (let i = 0; i < 50; i += 1) { r.hive.taskById('A1'); r.hive.taskById('LIVE'); r.hive.allTasks(); }
+    steady = { read: seen.read.splice(0), stat: seen.stat.splice(0), dir: seen.dir.splice(0) };
+    // positive control: the spy sees hive.ts's own fs calls (else this test would pass vacuously).
+    // An outside append shows after the window, with one listing of the archive and a read of the month.
+    A.appendArchived(r.root, [old('A9')], NOW);
+    clock += HiveManager.ARCHIVE_REVALIDATE_MS;
+    assert.equal(r.hive.taskById('A9')?.id, 'A9');
+    control = { read: seen.read.splice(0), dir: seen.dir.splice(0) };
+  } finally { Object.assign(fs, orig); }
+  const archiveDir = path.join(r.root, 'tasks-archive');
+  assert.ok(control.read.some((p) => p.endsWith('2026-10.jsonl')), `the spy sees the archive re-read after a change: ${control.read}`);
+  assert.ok(control.dir.length > 0 && control.dir.every((p) => p === archiveDir), `after the window: the archive is listed again (stamp + read): ${control.dir}`);
+  assert.deepEqual(steady, { read: [], stat: [], dir: [] }, '50 x 3 lookups inside the window: no read, no stat, no listing');
+  // Main's own archive write drops the cache: the moved card is visible with no clock advance
+  // (else it would be in neither hot nor the cached archive until the window passed).
+  assert.ok(r.hive.patchTask('GOES', { status: 'done', doneAt: iso(NOW - 60 * H) }));
+  assert.deepEqual(r.hive.archivePass(NOW), ['GOES']);
+  assert.equal(r.ids(r.hot()).includes('GOES'), false, 'it left hot');
+  assert.equal(r.hive.taskById('GOES')?.status, 'done', 'and is found in the archive at once');
+});
+
 test('readers that need any card ever made read allTasks (source pins)', () => {
   const ix = fs.readFileSync(path.join(__dirname, '..', 'src/main/index.ts'), 'utf8');
   const hv = fs.readFileSync(path.join(__dirname, '..', 'src/main/hive.ts'), 'utf8');
   // A13: the ledger route (a patch or message.card may name an archived card)
   assert.match(ix, /readTasks: \(\) => \{\s*const t = hive\.allTasks\(\)\.tasks;/);
-  assert.equal(ix.split('taskStatus: (id) => ((hive.allTasks()').length - 1, 2, 'both claim world views');
+  // SCALE-TASKS-MAP: both claim world views look a card up by id over the SAME merged view.
+  assert.equal(ix.split('taskStatus: (id) => (hive.taskById(id) as { status?: string } | undefined)?.status ?? null,').length - 1, 2, 'both claim world views');
+  assert.match(hv, /allTasks\(\): \{ tasks: unknown\[\] \} \{\s*return this\.allTasksView\(\)\.value;/, 'allTasks is the merged view');
+  assert.match(hv, /taskById\(id: string\): unknown \{\s*const view = this\.allTasksView\(\);/, 'taskById reads the same merged view (hot wins, archive included)');
   assert.match(ix, /tasks: \(\) => \(hive\.allTasks\(\) as \{ tasks\?: TaskRow\[\] \}\)\.tasks \?\? \[\],/);
   assert.match(ix, /const wanted = Buffer\.from\(hash\);[\s\S]{0,200}hive\.allTasks\(\) as \{ tasks\?: HiveTask\[\] \}/);
   assert.match(ix, /ipcMain\.handle\('hive:allTasks', \(\) => hive\.allTasks\(\)\);/);

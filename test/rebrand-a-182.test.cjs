@@ -260,8 +260,8 @@ test('electron-builder NSIS (pinned): with a renamed exe the update RECREATES St
   const inst = tpl('include/installer.nsh');
   assert.match(inst, /\$\{if\} \$keepShortcuts {2}== "false"[\s\S]{0,200}CreateShortCut "\$newStartMenuLink" "\$appExe"[\s\S]{0,120}WinShell::SetLnkAUMI "\$newStartMenuLink" "\$\{APP_ID\}"/);
   assert.match(inst, /\$\{if\} \$keepShortcuts == "false"\n\s+CreateShortCut "\$newDesktopLink" "\$appExe"[\s\S]{0,80}WinShell::SetLnkAUMI "\$newDesktopLink" "\$\{APP_ID\}"/);
-  assert.equal(JSON.parse(fs.readFileSync(path.join(ROOT, 'node_modules', 'app-builder-lib', 'package.json'), 'utf8')).version, '25.1.8',
-    'the analysis above is of app-builder-lib 25.1.8: re-read the templates before changing the version');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(ROOT, 'node_modules', 'app-builder-lib', 'package.json'), 'utf8')).version, '26.18.0',
+    'the analysis above is of app-builder-lib 26.18.0: re-read the templates before changing the version');
 });
 
 test('build/installer.nsh: customInstall re-targets old-exe links in the pin folder, desktop and Start menu', () => {

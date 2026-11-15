@@ -184,7 +184,7 @@ test('F4 only latches: a loading header, a resume line and a popup are still ref
 
 test('F4 wiring: main asks Codex\'s newest rollout, against THIS incarnation\'s spawn time', () => {
   const index = readSource('src/main/index.ts');
-  assert.match(index, /threadConfigured: \(ptyId\) => \{[\s\S]{0,400}const spawnedAt = ptyManager\.livenessFacts\(ptyId\)\?\.spawnedAt \?\? 0;[\s\S]{0,120}return threadSettingsAppliedSince\(codexLifecycle\.threadSettingsAt\(home\), spawnedAt\);/);
+  assert.match(index, /threadConfigured: \(ptyId\) => \{[\s\S]{0,400}const spawnedAt = ptyManager\.livenessFacts\(ptyId\)\?\.spawnedAt \?\? 0;[\s\S]{0,120}return threadSettingsAppliedSince\(codexLifecycle\.threadSettingsAt\(home, hive\.lastSession\(agentId\)\), spawnedAt\);/);
   assert.match(readSource('src/main/automaticSubmitWiring.ts'), /threadConfigured: w\.threadConfigured,/);
 });
 

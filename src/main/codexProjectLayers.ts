@@ -40,6 +40,7 @@ import * as nodeFs from 'node:fs';
 import { homedir } from 'node:os';
 import { posix, win32 } from 'node:path';
 import { asciiLower, sameCodexProjectKey } from './codexTrustSeed';
+import { relEscapes } from './relEscapes';
 
 /** The codex version this model of the loader was checked against. */
 export const CODEX_LAYER_MODEL_VERSION = '0.157.1';
@@ -503,7 +504,7 @@ export function codexProjectLayers(input: CodexLayerInput): CodexLayerReport {
     if (worktreeUnresolved) f.execute.push(`${dotCodex}: its hooks come from an unresolvable main checkout (counted as code that runs)`);
     else if (linked && checkoutRoot && repoRoot) {
       const rel = P.relative(checkoutRoot, dir);
-      if (!rel.startsWith('..') && !P.isAbsolute(rel)) { hooksDir = P.join(repoRoot, rel, '.codex'); f.hooksFrom = hooksDir; }
+      if (!relEscapes(rel, P)) { hooksDir = P.join(repoRoot, rel, '.codex'); f.hooksFrom = hooksDir; }
     }
     const hooksToml = hooksDir === dotCodex ? own : readToml(P.join(hooksDir, 'config.toml'));
     if (hooksDir !== dotCodex && hooksToml.error) f.parse.push(`${P.join(hooksDir, 'config.toml')}: ${hooksToml.error} (the main checkout's hooks file)`);
@@ -527,7 +528,7 @@ export function codexProjectLayers(input: CodexLayerInput): CodexLayerReport {
   let projectFolder = cwd;
   if (linked && checkoutRoot && repoRoot) {
     const rel = P.relative(checkoutRoot, cwd);
-    if (!rel.startsWith('..') && !P.isAbsolute(rel)) projectFolder = rel ? P.join(repoRoot, rel) : repoRoot;
+    if (!relEscapes(rel, P)) projectFolder = rel ? P.join(repoRoot, rel) : repoRoot;
   }
   return { layers, unknown, managedConfig: !!managed.cfg, projectFolder };
 }

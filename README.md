@@ -1,6 +1,3 @@
-> [!NOTE]
-> 1.1.104 is paused while we fix a startup issue. On setups with a lot of hive history, Guppy can stop responding for a while just after launch (1.1.103 can too). [1.1.103](https://github.com/Prozzta/guppyos/releases/tag/v1.1.103) stays the recommended download until the fix ships in the next release. If you are on 1.1.104 and it runs fine, there is nothing you need to do.
-
 <div align="center">
 
 <img src="./.github/media/guppy-logo.png" alt="Guppy logo: Speck, from the TES theme" width="340">
@@ -15,7 +12,7 @@ the subscriptions you already pay for, on their hourly limits. It turns the term
 CLIs you already run into a crew that keeps working while you're away, coordinated by a
 captain on your own machine.
 
-**Actively maintained.** Latest release: **v1.1.103 (2026-10-30)** (1.1.104 is paused), with a Windows x64
+**Actively maintained.** Latest release: **v1.1.105 (2026-11-13)**, with a Windows x64
 installer; macOS and Linux build from source.<br>
 [Download](https://github.com/Prozzta/guppyos/releases/latest) ·
 [Website](https://guppyos.com) · [Changelog](./CHANGELOG.md)
@@ -32,7 +29,7 @@ product concept, the office floor, and the foundation are upstream's work.
 
 <p>
   <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-F4D35E.svg?style=flat-square&labelColor=6E1423"></a>
-  <img alt="Version: 1.1.103" src="https://img.shields.io/badge/version-1.1.103-F4D35E.svg?style=flat-square&labelColor=6E1423">
+  <img alt="Version: 1.1.105" src="https://img.shields.io/badge/version-1.1.105-F4D35E.svg?style=flat-square&labelColor=6E1423">
   <a href="https://github.com/HarnessMD/munder-difflin"><img alt="Fork of HarnessMD/munder-difflin" src="https://img.shields.io/badge/fork%20of-HarnessMD%2Fmunder--difflin-F4F1EA.svg?style=flat-square&labelColor=6E1423"></a>
 </p>
 
@@ -137,9 +134,9 @@ These tools surface recorded claims and history, not an accuracy guarantee. See 
 
 ### Prerequisites
 
-- **Windows x64** for this fork's installer releases; the codebase also builds on macOS
-  and Linux (upstream ships all three).
-- **Node.js 18+** and npm, plus a C/C++ toolchain for `node-pty`'s native addon.
+- **Windows x64** for this fork's installer releases. Builds on macOS require **macOS 13
+  (Ventura) or newer**; the codebase also builds on Linux (upstream ships all three).
+- **Node.js 24** (`.nvmrc`, matching CI) and npm, plus a C/C++ toolchain for `node-pty`'s native addon.
 - At least one supported agent CLI on your `PATH` — [Claude Code](https://claude.com/claude-code)
   (`claude`, the default), Antigravity (`agy`), OpenAI Codex (`codex`), or xAI Grok (`grok`).
 
@@ -243,8 +240,8 @@ work, and a change that fails audit goes back with a written finding and a requi
 It is slower than merging your own PRs, and it is why the guarantees above are stated
 as facts rather than hopes.
 
-The release-by-release story of the fork (1.1.45 to 1.1.104) is in the
-[CHANGELOG](./CHANGELOG.md#fork-milestones-1145--11104).
+The release-by-release story of the fork (1.1.45 to 1.1.105) is in the
+[CHANGELOG](./CHANGELOG.md#fork-milestones-1145--11105).
 
 ## Architecture
 

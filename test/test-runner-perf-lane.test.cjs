@@ -161,7 +161,8 @@ test('the lane gets the main run\'s per-file timeout: watchdog, backstop, timeou
   assert.equal(code, 1, 'a timed-out lane file fails the run even when node --test exits 0');
   assert.equal(started, 2); assert.equal(stopped, 2);
   const lane = calls[1];
-  assert.ok(lane.includes(`--test-timeout=${R.backstopMs(5000)}`));
+  // GUPPY-NODE-LTS (god 57be0d): the runner's own backstop, not --test-timeout (Node 24 times out tests only).
+  assert.ok(!lane.some((a) => String(a).startsWith('--test-timeout')), 'no --test-timeout: the runner owns the backstop');
   const dests = lane.flatMap((x, i) => (x === '--test-reporter-destination' ? [lane[i + 1]] : []));
   assert.deepEqual(dests, ['stdout', 'ev.perf'], 'the lane writes its own record file');
   assert.match(errs.join('\n'), /perf lane FILE TIMED OUT after 5000 ms .*claims-derive-w2\.perf\.cjs/);

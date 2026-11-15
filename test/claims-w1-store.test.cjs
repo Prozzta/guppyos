@@ -438,6 +438,8 @@ test('G1.5 keys: near misses refused with a suggestion; new keys under a namespa
   const A = 'andy';
   await ok(store.appendRecord(A, note('1.1.83', { key: 'release.current' }), 'endpoint'));
   assert.ok(logs.some((l) => l.kind === 'claims-key-added' && l.key === 'release.current' && l.cardinality === 'single'));
+  // STARTUP-FREEZE-104 A9: added keys are saved together within 1 s; the raw file is read after a flush.
+  store.flushKeyRegistry();
   const reg = JSON.parse(fs.readFileSync(path.join(root, 'memory-keys.json'), 'utf8'));
   assert.equal(reg.keys['release.current'].cardinality, 'single');
   assert.equal(reg.keys['release.current'].addedBy, A);
@@ -453,6 +455,7 @@ test('G1.5 keys: near misses refused with a suggestion; new keys under a namespa
   await refused(store.appendRecord(A, note('x', { key: 'nodots' }), 'endpoint'), /bad key/);
   const m1 = await ok(store.appendRecord(A, note('one blocker', { key: 'list.blockers' }), 'endpoint'));
   const m2 = await ok(store.appendRecord(A, note('another blocker', { key: 'list.blockers' }), 'endpoint'));
+  store.flushKeyRegistry();
   const reg2 = JSON.parse(fs.readFileSync(path.join(root, 'memory-keys.json'), 'utf8'));
   assert.equal(reg2.keys['list.blockers'].cardinality, 'multi');
   const recs = store.readLedger(A).records;

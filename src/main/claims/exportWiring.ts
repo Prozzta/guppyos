@@ -15,13 +15,18 @@
  *   row says why. A chain or MAC break: only the records before it, and `claims-export-truncated` names
  *   it. `complete` refuses both: a complete memory.md must be the whole verified ledger.
  * - START-UP SYNC (the switch to writer mode, a restart after a crash): `syncAll` runs `syncExport` for
- *   every writer agent with a ledger. No markers: their moment is the append.
+ *   every writer agent with a ledger. No markers: their moment is the append. Main runs `syncAllAsync`
+ *   (A5: sliced, off the event loop, each agent in its export queue).
+ * - O(NEW) (STARTUP-FREEZE-104 A5): the export and the start-up sync go through exportCache.ts (the same
+ *   bytes, without re-reading old export files or unchanged archives), and an append derives the ledger
+ *   once (its "before" state is the previous append's "after"), not three times.
  * - COMPLETE EXPORT (`memory export --complete`, the planned downgrade path): `complete` replaces the
  *   agent's memory.md with W4's complete rendering, without the archive-backed entries (ruling 2).
  *   The export format is exportLedger.ts's and W4's; nothing here renders.
  */
 import { DERIVED_AGENT_ID, type ClaimsState, type DeriveFn, type KeyRegistry, type LedgerLevel, type LedgerRec, type ReadResult, type WorldView } from '../../shared/claims';
-import { appendStatusMarkers, archiveBackedIds, exportComplete, flushExport, syncExport, type ExportFlush } from './exportLedger';
+import { cachedStatusMarkers, cachedSyncExport, cachedSyncExportAsync, newExportCache, type ExportCache } from './exportCache';
+import { archiveBackedIds, exportComplete, flushExport, type ExportFlush } from './exportLedger';
 import { verifiedPrefix } from './indexSync';
 import { createClaimViews } from './views';
 
@@ -38,6 +43,9 @@ export interface ClaimExportDeps {
   log: (row: Record<string, unknown>) => void;
   /** Tests run the queued work at once; main defers it off the append's path. */
   defer?: (fn: () => void) => void;
+  /** syncAllAsync's slices (A5): the clock and the pause between two of them. */
+  clock?: () => number;
+  pause?: () => Promise<void>;
 }
 
 export type CompleteExportResult = { ok: true; file: string; bytes: number; note: string } | { ok: false; error: string };
@@ -47,6 +55,8 @@ export interface ClaimExport {
   onAppend: (agentId: string, id: string, rec: LedgerRec) => void;
   /** Catch up the continuous export of these agents (writer agents only); the number of lines added. */
   syncAll: (agents: string[]) => number;
+  /** STARTUP-FREEZE-104 A5: syncAll off the event loop, each agent in its export queue (main's start-up catch-up). */
+  syncAllAsync: (agents: string[], sliceMs?: number) => Promise<number>;
   /** `memory export --complete` for one agent. */
   complete: (agentId: string) => CompleteExportResult;
   /** Resolves when every queued export has run (tests, shutdown). */
@@ -86,6 +96,25 @@ export function createClaimExport(d: ClaimExportDeps): ClaimExport {
     return prefix;
   };
 
+  // A5: per agent, the exported ids, export sizes and archive hashes (exportCache.ts), and the derived state after
+  // the last record exported, keyed by the record objects it was derived from (a read that changed, a purge included,
+  // has new objects, so it never matches).
+  const caches = new Map<string, ExportCache>();
+  const cacheFor = (agentId: string): ExportCache => {
+    let c = caches.get(agentId);
+    if (!c) { c = newExportCache(); caches.set(agentId, c); }
+    return c;
+  };
+  const lastState = new Map<string, { n: number; first: LedgerRec; last: LedgerRec; state: ClaimsState }>();
+  const stateOf = (agentId: string, records: LedgerRec[], n: number): ClaimsState => {
+    const k = lastState.get(agentId);
+    if (k && n > 0 && k.n === n && k.first === records[0] && k.last === records[n - 1]) return k.state;
+    return derive(records.slice(0, n));
+  };
+  const keepState = (agentId: string, records: LedgerRec[], state: ClaimsState): void => {
+    if (records.length) lastState.set(agentId, { n: records.length, first: records[0], last: records[records.length - 1], state });
+  };
+
   const exportAppend = (agentId: string, id: string, rec: LedgerRec): void | Promise<void> => {
     if (d.level(agentId) !== 'writer') return;
     const dir = d.agentDir(agentId);
@@ -95,13 +124,37 @@ export function createClaimExport(d: ClaimExportDeps): ClaimExport {
     const records = prefix.records;
     // M-B: the states just before and just after THIS record, whatever was appended since.
     const at = records.findIndex((r) => r.id === id);
+    const before = at < 0 ? null : stateOf(agentId, records, at);
     const after = at < 0 ? null : derive(records.slice(0, at + 1));
     const state = after && at === records.length - 1 ? after : derive(records);
+    keepState(agentId, records, state);
     // CLAIMS-FSYNC-196: the lines are written now; each file they touched is fsynced once, off the loop.
     const flush: ExportFlush = new Set();
-    const lines = syncExport(dir, records, state, createClaimViews(records, NO_TOKENS).renderExportLine, undefined, flush);
-    const markers = after ? appendStatusMarkers(dir, agentId, derive(records.slice(0, at)), after, rec.wt, flush) : 0;
+    const c = cacheFor(agentId);
+    const lines = cachedSyncExport(dir, records, state, createClaimViews(records, NO_TOKENS).renderExportLine, c, flush);
+    const markers = after ? cachedStatusMarkers(dir, agentId, before, after, rec.wt, c, flush) : 0;
     return flushExport(flush).then(() => { d.log({ kind: 'claims-export-append', agentId, id, lines, markers }); });
+  };
+
+  /** One agent's start-up catch-up, sliced (A5). */
+  const syncOne = async (agentId: string, tick: () => Promise<void>): Promise<number> => {
+    if (d.level(agentId) !== 'writer') return 0;
+    const dir = d.agentDir(agentId);
+    if (!dir) return 0;
+    const read = d.readLedger(agentId);
+    const prefix = verified(agentId, 'sync');
+    if (!prefix?.records.length) return 0;
+    const records = prefix.records;
+    await tick();
+    const state = derive(records);
+    keepState(agentId, records, state);
+    await tick();
+    const flush: ExportFlush = new Set();
+    const n = await cachedSyncExportAsync(dir, records, state, createClaimViews(records, NO_TOKENS).renderExportLine, cacheFor(agentId), tick, () => d.readLedger(agentId) === read, flush);
+    await flushExport(flush);
+    if (n === null) d.log({ kind: 'claims-export-sync-deferred', agentId });
+    else if (n) d.log({ kind: 'claims-export-sync', agentId, lines: n });
+    return n ?? 0;
   };
 
   return {
@@ -120,10 +173,29 @@ export function createClaimExport(d: ClaimExportDeps): ClaimExport {
           const prefix = verified(agentId, 'sync');
           if (!prefix?.records.length) continue;
           const records = prefix.records;
-          const n = syncExport(dir, records, derive(records), createClaimViews(records, NO_TOKENS).renderExportLine);
+          const state = derive(records);
+          keepState(agentId, records, state);
+          const n = cachedSyncExport(dir, records, state, createClaimViews(records, NO_TOKENS).renderExportLine, cacheFor(agentId));
           if (n) d.log({ kind: 'claims-export-sync', agentId, lines: n });
           total += n;
         } catch (e) { fail(agentId, 'sync', e); }
+      }
+      return total;
+    },
+    syncAllAsync: async (agents, sliceMs = 8) => {
+      const clock = d.clock ?? (() => performance.now());
+      const pause = d.pause ?? (() => new Promise<void>((r) => setImmediate(r)));
+      let slice = clock();
+      const tick = async (): Promise<void> => { if (clock() - slice >= sliceMs) { await pause(); slice = clock(); } };
+      let total = 0;
+      for (const agentId of agents) {
+        if (agentId === DERIVED_AGENT_ID) continue;
+        // In the agent's export queue: its appends wait for its catch-up, and never run inside it.
+        await new Promise<void>((resolve) => {
+          enqueue(agentId, async () => {
+            try { slice = clock(); total += await syncOne(agentId, tick); } catch (e) { fail(agentId, 'sync', e); } finally { resolve(); }
+          });
+        });
       }
       return total;
     },

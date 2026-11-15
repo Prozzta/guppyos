@@ -39,3 +39,6 @@ test/electron-harness/.mutant-run-*.cjs
 # in resources/models/native-memory-manifest.json); the 90 MB binaries are never committed.
 resources/models/*/
 resources/input/bin/
+# FS-CONTAINMENT-TOCTOU: the handle-check addon, compiled by tools/build-fs-handle.cjs on npm install, never committed
+resources/fs-handle/bin/
+resources/fs-handle/build/

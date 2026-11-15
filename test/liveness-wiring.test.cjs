@@ -33,7 +33,7 @@ test('one monitor, fed by the existing facts; its sink is the hive log and nothi
   const ctor = between(INDEX, 'const agentLiveness = new AgentLivenessMonitor({', '});');
   assert.match(ctor, /sink: \(row\) => \{ try \{ hive\.appendLog\(row\); \}/);
   const factsFn = between(INDEX, 'function livenessFactsFor(agentId: string)', 'const agentLiveness = new AgentLivenessMonitor');
-  for (const source of ['ptyManager.livenessFacts(ptyId)', 'workerWake.livenessFacts(agentId)', 'control.snapshot(agentId)', 'codexLifecycle.probe(home)', 'mailPendingIds(agentId)']) {
+  for (const source of ['ptyManager.livenessFacts(ptyId)', 'workerWake.livenessFacts(agentId)', 'control.snapshot(agentId)', 'codexLifecycle.probe(home, a.sessionId)', 'mailPendingIds(agentId)']) {
     assert.ok(factsFn.includes(source), `facts from ${source}`);
   }
   // The rollout probe walks session folders synchronously: never for an idle agent.

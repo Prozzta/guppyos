@@ -16,7 +16,7 @@
  * survives here only as last-known, worded "not current", and is never offered to a meter
  * (§10). An unidentified window says "Additional limit status unknown" (C2.6).
  */
-import { applicabilityOf, type CapacityWindow, type PoolCapacitySnapshot } from '../shared/providerCapacity';
+import { applicabilityOf, leadWindowKind, type CapacityWindow, type PoolCapacitySnapshot } from '../shared/providerCapacity';
 import type { DetailWindow, ProviderCapacityDetailView } from '../shared/capacityDetail';
 import type { StripPresentation } from '../shared/capacityStrip';
 import { STATE_TEXT, blockedFrameNote, formatLocalTime } from './capacityStrip';
@@ -63,6 +63,8 @@ export function capacityDetailView(i: CapacityDetailInputs): ProviderCapacityDet
   // STALE-RETAIN: the same test the strip uses to keep a plain stale reading's figures.
   const retained = pool.freshness === 'STALE' && pool.state === 'UNKNOWN' && pool.stateReason === 'STALE_READING';
   const blocked = i.presentation === 'BLOCKED_SUBORDINATE' ? blockedFrameNote(pool.state) : null;
+  // CAP-NO-5H-WINDOW: the row the strip leads with (Weekly when the reading has no 5h window).
+  const lead = leadWindowKind(pool.windows);
 
   const windows: DetailWindow[] = [...pool.windows]
     .filter((w) => applicabilityOf(w) !== 'INAPPLICABLE')
@@ -75,7 +77,7 @@ export function capacityDetailView(i: CapacityDetailInputs): ProviderCapacityDet
       else if (current) { out.text = `${w.label} · ${Math.floor(r)}% remaining`; out.remainingPercent = r; }
       else {
         out.text = `${w.label} · ${Math.floor(r)}% remaining · not current`;
-        if (retained && w.kind === 'FIVE_HOUR' && applicabilityOf(w) === 'APPLICABLE') out.lastKnownPercent = r;
+        if (retained && w.kind === lead && applicabilityOf(w) === 'APPLICABLE') out.lastKnownPercent = r;
       }
       if (w.resetsAt !== null) {
         out.resetText = w.resetsAt > now ? `reset expected ~${fmt(w.resetsAt, now)}` : `reset was expected ~${fmt(w.resetsAt, now)}`;

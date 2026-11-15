@@ -42,7 +42,7 @@ const MUTANTS = [
 
 checkAnchors(ROOT, MUTANTS.map(([name, file, from]) => ({ name, file, from })));
 const local = fs.mkdtempSync(path.join(os.tmpdir(), 'hcpu-shell-mutant-'));
-const run = () => spawnSync(process.execPath, ['--test', TEST], { cwd: ROOT, encoding: 'utf8', windowsHide: true, timeout: 600_000, env: { ...process.env, LOCALAPPDATA: local } });
+const run = () => spawnSync(process.execPath, ['--test', '--test-reporter=tap', TEST], { cwd: ROOT, encoding: 'utf8', windowsHide: true, timeout: 600_000, env: { ...process.env, LOCALAPPDATA: local } });
 if (run().status !== 0) {
   console.log(`BASELINE RED: ${TEST} fails unmutated, so no mutant proves anything.`);
   process.exit(2);

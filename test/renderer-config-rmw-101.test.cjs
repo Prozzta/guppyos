@@ -43,7 +43,7 @@ const onDisk = () => JSON.parse(fs.readFileSync(file, 'utf8'));
 const N = (...ps) => ps.map((p) => path.normalize(p));
 const mission = (id, extra = {}) => ({ id, label: `${id} label`, intervalMs: 3_600_000, to: 'god', body: 'b', enabled: true, ...extra });
 
-test.after(() => fs.rmSync(userData, { recursive: true, force: true }));
+test.after(() => { require('./load-ts.cjs').closeConfigWatchers(); fs.rmSync(userData, { recursive: true, force: true }); });
 
 // ─── KILLERS (named assertions over a config module M; the census runs them on mutants) ──────
 const K = {};

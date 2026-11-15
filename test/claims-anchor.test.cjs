@@ -275,7 +275,7 @@ test('Jim A-3: the app wiring pins: the anchor file in user-data, the anchored a
   assert.match(idx, /anchoredAgents: \(\) => claimsEndpoint\(\)\?\.store\.anchoredAgents\(\) \?\? \[\],/, 'the worker is told the anchored agents');
   assert.match(idx, /return \[\.\.\.new Set\(\[\.\.\.withSegments, \.\.\.store\.anchoredAgents\(\)\]\)\];/, 'the index sync covers anchored agents');
   assert.match(idx, /onWorkerReady: \(\) => \{ claimsAnchorCheck\(\); void claimsIndexSync\(\)\?\.syncAll\(\); \}/, 'a worker (re)start checks');
-  assert.match(idx, /setImmediate\(claimsAnchorCheck\);/, 'claims start checks');
+  assert.match(idx, /void warmed\.then\(claimsAnchorCheck\);/, 'claims start checks (after the A3 warm)');
   assert.match(idx, /setInterval\(claimsAnchorCheck, CLAIMS_ANCHOR_CHECK_MS\)\.unref\?\.\(\);/, 'and periodically');
   assert.match(idx, /try \{ claimsEndpoint\(\)\?\.store\.checkAnchored\(\); \}/);
 });

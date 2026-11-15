@@ -5,6 +5,7 @@
 // dependencies that are not installed off their own platform, so they need nothing.
 const fs = require('fs');
 const path = require('path');
+const { flipElectronFuses } = require('./electronFuses.cjs');
 
 const ARCH = { 0: 'ia32', 1: 'x64', 2: 'armv7l', 3: 'arm64', 4: 'universal' };
 
@@ -15,6 +16,8 @@ exports.default = async function afterPack(context) {
     ? path.join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`, 'Contents', 'Resources')
     : path.join(context.appOutDir, 'resources');
   guppyUpdaterCache(resources);
+  // ELECTRON-FUSES: before electron-builder's sign step (see build/electronFuses.cjs).
+  await flipElectronFuses(context);
   const bin = path.join(resources, 'app.asar.unpacked', 'node_modules', 'onnxruntime-node', 'bin', 'napi-v3');
   if (!fs.existsSync(bin)) return;
   let removed = 0;
@@ -32,7 +35,7 @@ exports.default = async function afterPack(context) {
 };
 
 // REBRAND-GUPPY (1.1.82): electron-updater's download cache becomes %LOCALAPPDATA%\guppy-updater.
-// electron-builder 25.1.8 always writes app-update.yml's updaterCacheDirName as
+// electron-builder 26.18.0 always writes app-update.yml's updaterCacheDirName as
 // `<package.json name>-updater` (appInfo.updaterCacheDirName overrides any publish setting), and
 // the package name stays munder-difflin. It writes app-update.yml in its own afterPack handler,
 // which runs BEFORE this user hook (Packager.afterPack: "user handler should be last"), so the

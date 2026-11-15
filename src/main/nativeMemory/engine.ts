@@ -10,7 +10,7 @@
  * runs (main then gives a search a longer budget), and a search whose deadline passed while it
  * was queued is answered expired without running.
  */
-import { existsSync, readdirSync, readFileSync, statSync, watch as fsWatch, type FSWatcher } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync, type FSWatcher } from 'node:fs';
 import { join } from 'node:path';
 import { chunkMarkdown, CHUNKER_VERSION, type Chunk } from './chunker';
 import { discoverSources, ALLOW_LIST_VERSION, SOURCES_CONFIG_FILE, sha256, type Discovery, type SourceEntry } from './sources';
@@ -21,6 +21,7 @@ import { formatSearch, formatStatus, formatWakeUp, newestOrder, rankHits, WAKE_M
 import { withHistoryCommands } from '../claims/historyPointer';
 import { cardIdOfKey, EMPTY_CARD_LEADS, type CardLeadAsk, type CardLeadReply } from '../claims/get';
 import { pinnedSection, pinnedStatus, type PinnedStatus } from '../memoryRollover';
+import { watchDirectorySafely } from '../safeDirectoryWatch';
 
 export const PRIORITY = { search: 0, wake: 1, status: 1, ingest: 2, backfill: 3, compact: 4 } as const;
 /** Chunks embedded per queue step before yielding (spec section 3: <= 8). ONE: a search that
@@ -124,6 +125,8 @@ export async function cardLeadsFor(hits: Array<Pick<SearchHit, 'claim' | 'conten
 
 /** CLAIM-LEDGER: one agent's verified claim chunks, sent by main after an append (A6). */
 export interface ClaimsSyncArgs { wing: string; path: string; head: string; chunks: ClaimPart[];
+  /** An acknowledged append over main's verified snapshot: omitted chunks are unchanged, not drops. */
+  delta?: boolean;
   /** The Settings level main holds now (W3-1): a sync never acts on a stale level. */
   claimLedger?: unknown }
 
@@ -528,7 +531,7 @@ export class MemoryEngine {
       // CL-S1 M3: a wing embedded under an older claim-vector recipe re-embeds all its parts once.
       const plan = await this.enqueue(PRIORITY.ingest, async () => {
         const reembed = this.d.store.meta(claimEmbedVersionKey(a.wing)) !== String(CLAIM_EMBED_VERSION);
-        return this.d.store.planClaims(a.wing, a.chunks, { reembed });
+        return this.d.store.planClaims(a.wing, a.chunks, { reembed, delta: a.delta });
       });
       const embedAll = async (parts: ClaimPart[]): Promise<Float32Array[]> => {
         const vectors: Float32Array[] = [];
@@ -701,7 +704,7 @@ export class MemoryEngine {
 }
 
 function defaultWatch(dir: string, onChange: (file: string) => void): FSWatcher {
-  return fsWatch(dir, { persistent: false }, (_ev, f) => { if (f) onChange(String(f)); });
+  return watchDirectorySafely(dir, (_ev, f) => { if (f) onChange(f); });
 }
 
 /** Shadow diagnostics and JSON output carry no content: ids, sources, ranks, scores. */

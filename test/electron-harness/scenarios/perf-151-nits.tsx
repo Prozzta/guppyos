@@ -142,6 +142,13 @@ window.__harnessRun = async () => {
     await tick('a2');
     const a = renderCounts();
 
+    // P (LOAD-FLAKES-105): a full poll period of the strip (5 s) with nothing changed costs it
+    // nothing. Any 5.6 s window holds at least one poll, so an unchanged answer that still
+    // re-renders the strip fails here every time, idle or loaded.
+    await settleRenderCensus();
+    await settle(5600);
+    const idlePoll = pick(renderCounts());
+
     // T. the task detail is OPEN (no such card on the stub ledger, so it renders nothing, but it
     // is subscribed): ticks still cost it 0; a rename costs it a render.
     await act(async () => { useStore.getState().openTaskDetail('T-1'); });
@@ -214,7 +221,7 @@ window.__harnessRun = async () => {
     host.remove();
     window.harness.report({
       ok: true, N, floorMounted,
-      phaseA: pick(a), rawA: a, tOpenTicks, tRename, pins: selectorPins(),
+      phaseA: pick(a), rawA: a, idlePoll, tOpenTicks, tRename, pins: selectorPins(),
       n2: { stopBtnFound: !!stopBtn, errShown, errInfo, errStillShownAfter2s5, errAfterDismiss, okInfo, okAfter2s, ffInfo, ffAfterDismiss },
       n3: { sidebarWidth, rowRect, rowChildren }
     });

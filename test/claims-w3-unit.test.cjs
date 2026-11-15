@@ -124,11 +124,70 @@ test('ClaimsIndexSync: a burst of appends is one debounced sync; syncAll covers 
   const live = x.timers.filter(Boolean);
   assert.equal(live.length, 1);
   live[0]();
-  await new Promise((r) => setImmediate(r));
+  // STARTUP-FREEZE-104 A18: syncOnce runs its derive and its chunks each in a turn of their own, so the send lands a few
+  // turns after the timer; still exactly one sync for the burst.
+  for (let i = 0; i < 6; i++) await new Promise((r) => setImmediate(r));
   assert.equal(x.sent.length, 1);
   const all = await x.s.syncAll();
   assert.equal(all.length, 2);
   assert.deepEqual(x.sent.slice(1).map((s) => s.wing).sort(), ['a1', 'a2']);
+});
+
+test('ClaimsIndexSync: an acknowledged append uses its verified snapshot and sends only the delta', async () => {
+  let reads = 0;
+  const first = rec('c-000000000001', 'first');
+  const next = rec('c-000000000002', 'next');
+  const x = syncer({
+    readLedger: () => { reads++; return { records: [first], torn: null, chain: 'ok' }; },
+    derive: () => (records) => state(records.filter((r) => r.t === 'claim').map((r) => r.id)),
+  });
+  await x.s.syncNow('a1');
+  assert.equal(reads, 1);
+  await x.s.syncNow('a1', next);
+  assert.equal(reads, 1, 'an acked append does not re-read old ledger segments');
+  assert.equal(x.sent[1].delta, true);
+  assert.deepEqual(x.sent[1].chunks.map((c) => c.claimId), ['c-000000000002']);
+});
+
+test('ClaimsIndexSync: periodically re-verifies a long delta stream', async () => {
+  let reads = 0;
+  const first = rec('c-000000000001', 'first');
+  const second = rec('c-000000000002', 'second');
+  const third = rec('c-000000000003', 'third');
+  let records = [first];
+  const x = syncer({
+    fullVerifyEvery: 1,
+    readLedger: () => { reads++; return { records, torn: null, chain: 'ok' }; },
+    derive: () => (rows) => state(rows.filter((r) => r.t === 'claim').map((r) => r.id)),
+  });
+  await x.s.syncNow('a1');
+  records = [first, second];
+  await x.s.syncNow('a1', second);
+  records = [first, second, third];
+  await x.s.syncNow('a1', third);
+  assert.equal(reads, 2, 'the second append takes a fresh verified read');
+  assert.equal(x.sent[1].delta, true);
+  assert.equal(x.sent[2].delta, undefined);
+  assert.deepEqual(x.sent[2].chunks.map((c) => c.claimId), [first.id, second.id, third.id]);
+});
+
+test('ClaimsIndexSync: a purge event discards its snapshot and sends rewritten text as a full sync', async () => {
+  let reads = 0;
+  const original = rec('c-000000000001', 'secret that must be removed');
+  const purged = rec('c-000000000001', '[purged]');
+  let records = [original];
+  const x = syncer({
+    readLedger: () => { reads++; return { records, torn: null, chain: 'ok' }; },
+    derive: () => (rows) => state(rows.filter((r) => r.t === 'claim').map((r) => r.id)),
+  });
+  await x.s.syncNow('a1');
+  records = [purged, { t: 'event', id: 'e-000000000001', ev: 'purge', targets: [purged.id] }];
+  await x.s.syncNow('a1', records[1]);
+  assert.equal(reads, 2, 'a rewrite event re-verifies the on-disk ledger');
+  assert.equal(x.sent[1].delta, undefined, 'a mutant that routes purge through delta must fail');
+  assert.equal(x.sent[1].chunks.length, 1);
+  assert.ok(x.sent[1].chunks[0].content.includes('[purged]'));
+  assert.ok(!x.sent[1].chunks[0].content.includes('secret that must be removed'));
 });
 
 function hiveWith(files) {

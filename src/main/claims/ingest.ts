@@ -20,10 +20,11 @@
  *   - the frozen backup found a partial destination it must not overwrite (import only).
  * The report says why.
  */
-import { existsSync, mkdirSync, readFileSync, renameSync, watch, writeFileSync, type FSWatcher } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, type FSWatcher } from 'node:fs';
 import { join } from 'node:path';
+import { watchDirectorySafely } from '../safeDirectoryWatch';
 import { CLAIMS_IMPORT_SETTLED_FILE, type AppendResult, type ReadLedgerFn, type RecordDraft } from '../../shared/claims';
-import { frozenBackup, knownIdsFor, newLegacyImport, parseNewBulletsDetailed, type Refusal } from './migrate';
+import { frozenBackup, knownIdsFor, newLegacyImportAsync, parseNewBulletsDetailed, sliceTicker, type LegacyCache, type Refusal } from './migrate';
 
 export type { Refusal } from './migrate';
 
@@ -37,7 +38,14 @@ export interface IngestDeps {
   append: W6AppendFn;
   read: ReadLedgerFn;
   log: (row: Record<string, unknown>) => void;
+  /** A8: the legacy files' entries kept between runs (main holds one per hive); none: a fresh one per run. */
+  legacyCache?: LegacyCache;
+  /** A8: the pause between two slices of the legacy read; none: 8 ms slices on setImmediate. */
+  tick?: () => Promise<void>;
 }
+
+const legacyImport = (deps: IngestDeps, dir: string, records: Parameters<typeof newLegacyImportAsync>[1]): ReturnType<typeof newLegacyImportAsync> =>
+  newLegacyImportAsync(dir, records, deps.legacyCache ?? new Map(), deps.tick ?? sliceTicker());
 
 export interface IngestReport {
   agent: string;
@@ -65,7 +73,10 @@ function refuse(deps: IngestDeps, agent: string, report: IngestReport, refusal: 
 async function appendAll(deps: IngestDeps, agent: string, drafts: RecordDraft[], report: IngestReport, via: string, r5: boolean): Promise<void> {
   report.offered += drafts.length;
   // One at a time, in order: the parts of a split entry go in back to back.
+  // A10: in slices, as the legacy read is, so a run of appends whose acks chain on microtasks cannot hold main.
+  const tick = deps.tick ?? sliceTicker();
   for (const d of drafts) {
+    await tick();
     const r = await deps.append(agent, d, 'w6-internal', { r5 });
     if (r.ok) { report.appended++; continue; }
     const c = d as Extract<RecordDraft, { t: 'claim' }>;
@@ -88,7 +99,7 @@ export async function shadowImport(deps: IngestDeps, agent: string, opts: { sett
   } else if (led.chain !== 'ok') {
     report.readOnly = `${led.chain.reason} at ${led.chain.brokenAt}`;
   } else {
-    const plan = newLegacyImport(dir, led.records);
+    const plan = await legacyImport(deps, dir, led.records);
     for (const r of plan.refusals) refuse(deps, agent, report, r, 'import');
     await appendAll(deps, agent, plan.drafts, report, 'import', false);
   }
@@ -136,7 +147,7 @@ export class ReaderWatcher {
   start(): Promise<IngestReport> {
     const first = this.scan(true);
     try {
-      this.fsw = watch(agentDir(this.deps, this.agent), (_ev, name) => {
+      this.fsw = watchDirectorySafely(agentDir(this.deps, this.agent), (_ev, name) => {
         const n = name ? String(name).toLowerCase() : '';
         if (n === 'memory.md') this.schedule();
         // CL-READERWATCHER known limit 1: a rollover can move a bullet into an archive before the
@@ -203,7 +214,7 @@ export class ReaderWatcher {
         this.archives = false;
         // Every archive entry the ledger lacks (counted by hash, so a bullet already taken from
         // memory.md and then rolled over is not offered again); memory.md is the scan above's.
-        const arch = newLegacyImport(agentDir(this.deps, this.agent), this.deps.read(this.agent).records);
+        const arch = await legacyImport(this.deps, agentDir(this.deps, this.agent), this.deps.read(this.agent).records);
         // NIT-2 (Jim): an archive entry refused once is not offered (and logged) again at every
         // archive change, like the memory.md scan's refusals above.
         const keyOf = (d: RecordDraft): string => { const c = d as Extract<RecordDraft, { t: 'claim' }>; return `${c.legacy?.file ?? ''}\u0000${c.legacy?.line ?? 0}\u0000${c.text.length}`; };

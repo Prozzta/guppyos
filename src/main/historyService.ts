@@ -30,6 +30,7 @@ import {
   type HistoryProvider
 } from '../shared/history';
 import { normalizeLine } from './historyNormalize';
+import { relEscapes } from './relEscapes';
 import { readLinesBackward, readLinesForward, type LineRef, type TailLimits } from './historyTail';
 import { projectDir } from './transcript';
 import { findCodexRollout } from './codexThreadRotation';
@@ -58,7 +59,7 @@ function isFile(p: string): boolean {
 /** Is `child` inside `dir` (after resolution)? */
 function inside(dir: string, child: string): boolean {
   const rel = path.relative(path.resolve(dir), path.resolve(child));
-  return !!rel && !rel.startsWith('..') && !path.isAbsolute(rel);
+  return !!rel && !relEscapes(rel);
 }
 
 /**

@@ -22,7 +22,7 @@ const mkUserData = () => {
   tmpDirs.push(d);
   return d;
 };
-test.after(() => { for (const d of tmpDirs) fs.rmSync(d, { recursive: true, force: true }); });
+test.after(() => { require('./load-ts.cjs').closeConfigWatchers(); for (const d of tmpDirs) fs.rmSync(d, { recursive: true, force: true }); });
 
 // The in-process config module (one "launch"). Its userData is fixed at first load.
 const userData = mkUserData();

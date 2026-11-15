@@ -7,6 +7,7 @@ import type { InputOrigin } from '../shared/inputOrigin';
 import type { LedgerUiAgentView, LedgerUiResult, LedgerUiSummary } from '../shared/claimsUi';
 import type { RendererErrorReport } from '../shared/rendererError';
 import type { GraphicsStatusView } from '../shared/graphicsMode';
+import type { StartupBudgetView } from '../shared/startupBudget';
 import type { Eligibility, TerminalInputState } from '../shared/inputProvenance';
 import type { TerminalPromptState } from '../shared/promptState';
 import type { HireManifest } from '../shared/hire';
@@ -870,21 +871,6 @@ const api = {
   /** Read the system clipboard as plain text ('' when empty/unreadable). */
   readClipboard: (): Promise<string> =>
     ipcRenderer.invoke('app:readClipboard'),
-  /** Clipboard text, read SYNCHRONOUSLY. Only for the terminal's paste shortcut,
-   *  where an async read loses a race against dictation tools that restore the
-   *  previous clipboard right after sending the paste key.
-   *
-   *  TRADEOFF, stated plainly because sendSync blocks the renderer until main
-   *  answers: this app has a history of main-thread stalls (iCloud-evicted files
-   *  wedging a spawnSync git call), and during such a stall this call freezes the
-   *  paste keystroke rather than merely delaying it. Accepted because a clipboard
-   *  read is a memory lookup with no I/O, and because the async alternative is
-   *  measurably WRONG — it pastes the user's previous clipboard. Do not reach for
-   *  sendSync elsewhere on this reasoning; it is justified by the race, not by
-   *  convenience. */
-  readClipboardSync: (): string => {
-    try { return ipcRenderer.sendSync('app:readClipboardSync') ?? ''; } catch { return ''; }
-  },
 
   // ─── Claim ledger (W7: the Human's ledger UI in Settings) ────────────────
   /** Main owns every write; revert, purge, export and a level drop from writer also need main's own confirm. */
@@ -899,6 +885,8 @@ const api = {
     /** CL-M4-CHAINS-PANEL: possible duplicates. Keep one (the others set aside) or keep all; main confirms. */
     keepOne: (agentId: string, keep: string, retire: string[]): Promise<LedgerUiResult> => ipcRenderer.invoke('claims-ui:keep-one', agentId, keep, retire),
     keepAll: (agentId: string, ids: string[]): Promise<LedgerUiResult> => ipcRenderer.invoke('claims-ui:keep-all', agentId, ids),
+    bootstrapStatus: (): Promise<{ ok: boolean; line: string; state: unknown }> => ipcRenderer.invoke('claims-ui:bootstrap-status'),
+    bootstrap: (): Promise<{ ok: boolean; line: string; state: unknown }> => ipcRenderer.invoke('claims-ui:bootstrap'),
   },
 
   // ─── Config ──────────────────────────────────────────────────────────────
@@ -925,6 +913,8 @@ const api = {
     ipcRenderer.invoke('config:setCapacityDisplayThreshold', value),
   /** GPU-SETTING-188: the mode in force, the saved one, and Chromium's GPU compositing status. */
   graphicsStatus: (): Promise<GraphicsStatusView> => ipcRenderer.invoke('graphics:status'),
+  /** STARTUP-FREEZE-104 A4: the last startup-budget verdict for Settings -> Startup health. */
+  startupBudget: (): Promise<StartupBudgetView> => ipcRenderer.invoke('health:startupBudget'),
   /** GPU-SETTING-188: save the Graphics mode (takes effect after a restart). Rejects an unknown mode. */
   setGraphicsMode: (mode: 'auto' | 'gpu' | 'cpu'): Promise<GraphicsStatusView> => ipcRenderer.invoke('graphics:setMode', mode),
   /** GPU-SETTING-188: restart Guppy to apply the Graphics mode (the normal teardown; running agents stop). */

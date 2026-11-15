@@ -304,7 +304,7 @@ test('PIN #14: the completion watcher reads god\'s ledger entries as well as the
 });
 
 test('PIN #15/#16: hive:inbox returns mailHistory (inbox + .done + state); the queue precondition asks hive:mailPending', () => {
-  assert.match(fn("ipcMain.handle('hive:inbox'", "ipcMain.handle('hive:mailPending'"), /hive\.mailHistory\(id, \{ archived \}\)/);
+  assert.match(fn("ipcMain.handle('hive:inbox'", "ipcMain.handle('hive:mailPending'"), /hive\.mailHistoryAsync\(id, \{ archived \}\)/);
   assert.match(fn("ipcMain.handle('hive:mailPending'", '\n'), /mailPendingIds\(id\)/);
   const useHive = codeOnly(readSource('src/renderer/src/hooks/useHive.ts'), 'useHive.ts');
   assert.match(useHive, /checkPrecondition\(next, \(\) => window\.cth\.hiveMailPending\(srcId\)\)/);

@@ -87,8 +87,9 @@ test('guard: one tokenizer finds chains and substitutions; -O, -f, ~, HOME, ever
   for (const c of ['git tag newtag', 'git tag -a v9 -m x', 'git tag -d v1', 'git tag -l --del v1', 'git branch x', 'git branch -D x', 'git branch -m a b', 'git branch --set-upstream-to=o/x']) is(c, 'deny', 'jail');
 });
 
-test('guard hook: denies in the PreToolUse shape and writes the open log', () => {
+test('guard hook: denies in the PreToolUse shape and writes the open log', (ctx) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'c90-guard-'));
+  ctx.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const log = path.join(dir, 'open.jsonl');
   const run = (payload) => spawnSync(process.execPath, [path.join(__dirname, 'claims-90', 'labeller-guard.cjs'), jail, log, keyFile], { input: JSON.stringify(payload), encoding: 'utf8' });
   const deny = run({ tool_name: 'Read', tool_use_id: 't1', tool_input: { file_path: 'C:/Dunder/hive/tasks.json' } });
@@ -158,8 +159,9 @@ test('god 3ba8b6 R5 static: the session folder is moved out before the verdict a
   assert.ok(src.indexOf('const s = sessionOut(') < src.indexOf('fs.appendFileSync(keyOut, lines)'), 'before any key row is appended');
 });
 
-test('audit: a compaction or an out-of-jail call is caught; the key is judged', () => {
+test('audit: a compaction or an out-of-jail call is caught; the key is judged', (ctx) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'c90-audit-'));
+  ctx.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const t = path.join(dir, 't.jsonl');
   const use = (id, name, input) => ({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name, input }] } });
   fs.writeFileSync(t, [{ type: 'system', subtype: 'init', tools: L.TOOLS, plugins: [] }, use('a', 'Read', { file_path: 'hive/tasks.json' }), use('b', 'Read', { file_path: 'C:/Dunder/hive/agents/x/memory.md' }), { type: 'system', subtype: 'compact_boundary' }, { type: 'result', is_error: false, usage: { input_tokens: 1 } }].map((r) => JSON.stringify(r)).join('\n'));
@@ -202,8 +204,9 @@ test('LABELLER-GUARD-FALSEPOS (a): an unquoted operator ends a word, so a jail p
   assert.deepEqual(G.words('git log \\" ; echo x'), ['git', 'log', '\\"', 'echo', 'x']);
 });
 
-test('LABELLER-GUARD-FALSEPOS (b): a call the CLI rejected at input validation is not unlogged; any other call missing from the open log still voids', () => {
+test('LABELLER-GUARD-FALSEPOS (b): a call the CLI rejected at input validation is not unlogged; any other call missing from the open log still voids', (ctx) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'c90-audit-fp-'));
+  ctx.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const t = path.join(dir, 't.jsonl');
   const use = (id, name, input) => ({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name, input }] } });
   const res = (id, content, is_error) => ({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, content, ...(is_error ? { is_error: true } : {}) }] } });

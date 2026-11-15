@@ -36,7 +36,12 @@ export interface LedgerUiDeps {
     appendRecord(agentId: string, draft: RecordDraft, origin: AppendOrigin): Promise<AppendResult>;
     purge(agentId: string, ids: string[], confirmedByHuman: true): Promise<PurgeResult>;
   } | null;
+  /** Operational ledger census. It drives exports and every non-presentation action. */
   agents: () => string[];
+  /** Settings-only roster. It may include system entries which have no memory.md. */
+  rosterAgents?: () => string[];
+  /** Presentation-only roster metadata. It must not change the ledger census used by index/export. */
+  agentMeta?: (agentId: string) => { archived?: boolean; system?: boolean } | undefined;
   /** The agent's effective level (main's claimLevel). */
   level: (agentId: string) => LedgerLevel;
   savedLevel: () => unknown;
@@ -129,12 +134,14 @@ export function createLedgerUi(d: LedgerUiDeps) {
     summary(): LedgerUiSummary {
       const saved = d.savedLevel();
       const store = d.store();
-      const agents = store ? d.agents().filter((a) => AGENT_RE.test(a)).sort().map((agentId) => {
+      const roster = d.rosterAgents ? d.rosterAgents() : d.agents();
+      const agents = store ? [...new Set(roster)].filter((a) => AGENT_RE.test(a)).filter((agentId) => !d.agentMeta?.(agentId)?.archived).sort().map((agentId) => {
         const r = store.readLedger(agentId);
-        return { agentId, level: d.level(agentId), claims: r.records.filter((x) => x.t === 'claim').length, readOnly: r.chain !== 'ok' };
+        const meta = d.agentMeta?.(agentId);
+        return { agentId, level: d.level(agentId), claims: r.records.filter((x) => x.t === 'claim').length, readOnly: r.chain !== 'ok', ...(meta?.system ? { system: true } : {}) };
       }) : [];
       const f = d.floor?.();
-      const floor = f ? { ledgerDefault: typeof f.ledgerDefault === 'string' && (LEDGER_LEVELS as readonly string[]).includes(f.ledgerDefault) ? f.ledgerDefault as LedgerLevel : null, derivedRepo: f.derivedRepo } : undefined;
+      const floor = f ? { ledgerDefault: typeof f.ledgerDefault === 'string' && (LEDGER_LEVELS as readonly string[]).includes(f.ledgerDefault) ? f.ledgerDefault as LedgerLevel : null, derivedRepo: f.derivedRepo, legacy: f.ledgerDefault === undefined } : undefined;
       return { saved: typeof saved === 'string' ? saved : null, effective: effectiveLevel(saved, saved).level, agents, ...(floor ? { floor } : {}) };
     },
 

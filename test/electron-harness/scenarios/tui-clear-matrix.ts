@@ -48,7 +48,7 @@ function installBridgeStub(): void {
     onPtyData: unsub(), onPtyExit: unsub(), onPtyRelaunch: unsub(),
     writePty: () => { /* no pty */ }, redrawPty: () => { /* no pty */ },
     resizePty: () => { /* no pty */ }, copyToClipboard: () => { /* unused */ },
-    readClipboard: () => Promise.resolve(''), readClipboardSync: () => '',
+    readClipboard: () => Promise.resolve(''),
     statAbs: () => Promise.resolve(null), revealPath: () => Promise.resolve()
   };
 }

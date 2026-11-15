@@ -79,20 +79,24 @@ export const AgentStrip = memo(function AgentStrip({ config }: AgentStripProps) 
   const [silentByAgent, setSilentByAgent] = useState<Record<string, SilentTurnView>>({});
   useEffect(() => {
     let cancelled = false;
+    // LOAD-FLAKES-105: a poll whose answer did not change keeps the previous state object, so React
+    // bails out. Fresh objects re-rendered the whole strip every 5 s for nothing (and, on a loaded
+    // machine, inside perf-151's render census windows).
+    const same = <T,>(next: T) => (prev: T): T => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next);
     const poll = async () => {
       try {
         const [raw, extra] = await Promise.all([window.cth.hiveTasks(), window.cth.hiveCardBadges()]);
         if (cancelled) return;
         const flags = (extra && Array.isArray((extra as { flags?: unknown }).flags) ? (extra as { flags: BadgeFlag[] }).flags : []);
-        setBadgeByAgent(agentBadges(raw, flags));
+        setBadgeByAgent(same(agentBadges(raw, flags)));
         const inbox = extra && typeof (extra as { inboxBacklog?: unknown }).inboxBacklog === 'object' ? (extra as { inboxBacklog: Record<string, number> }).inboxBacklog : {};
-        setInboxByAgent(inbox ?? {});
+        setInboxByAgent(same(inbox ?? {}));
         const inboxHeld = extra && typeof (extra as { inboxHeld?: unknown }).inboxHeld === 'object' ? (extra as { inboxHeld: Record<string, number> }).inboxHeld : {};
         const heldUntil = extra && typeof (extra as { heldUntil?: unknown }).heldUntil === 'object' ? (extra as { heldUntil: Record<string, number> }).heldUntil : {};
-        setInboxHeldByAgent(inboxHeld ?? {});
-        setHeldUntilByAgent(heldUntil ?? {});
+        setInboxHeldByAgent(same(inboxHeld ?? {}));
+        setHeldUntilByAgent(same(heldUntil ?? {}));
         const silent = extra && typeof (extra as { silentTurns?: unknown }).silentTurns === 'object' ? (extra as { silentTurns: Record<string, SilentTurnView> }).silentTurns : {};
-        setSilentByAgent(silent ?? {});
+        setSilentByAgent(same(silent ?? {}));
       } catch { /* keep last good */ }
     };
     void poll();

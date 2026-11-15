@@ -119,8 +119,8 @@ export interface ToolStatus extends ToolSpec {
 // needed to RUN the app, so the group is opt-in (probed only when the user opens it) and no row
 // is essential. Nothing here installs anything: the rows show the command, the user runs it.
 
-/** The Node major the build is pinned to: .nvmrc and the CI workflows say the same (test-pinned). */
-export const BUILD_NODE_MAJOR = 20;
+/** The Node major the build is pinned to: .nvmrc says the same and the CI workflows read .nvmrc (test-pinned). */
+export const BUILD_NODE_MAJOR = 24;
 /** The Python the floor builds with. node-gyp accepts any 3.6+, so another 3.x is a warning. */
 export const BUILD_PYTHON = '3.12';
 
@@ -156,7 +156,7 @@ const BUILD_TOOLS: (ToolSpec & { platforms: Array<'win32' | 'posix'> })[] = [
     bin: 'node',
     label: `Node.js ${BUILD_NODE_MAJOR}`,
     kind: 'build',
-    why: `The build is pinned to Node ${BUILD_NODE_MAJOR} (.nvmrc). node-gyp builds with the running Node's own settings, so another major breaks the native builds: Node 26 (built with clang-cl and PGO) makes them ask for the ClangCL toolset and a PGO profile that is not there.`,
+    why: `The build is pinned to Node ${BUILD_NODE_MAJOR} (.nvmrc). node-gyp builds with the running Node's own settings, so another major can break the native builds: Node 26 (built with PGO) makes them ask for a PGO profile that is not there.`,
     essential: false,
     install: {
       posix: `nvm install ${BUILD_NODE_MAJOR} && nvm use ${BUILD_NODE_MAJOR}`,

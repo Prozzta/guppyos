@@ -17,9 +17,8 @@ const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
 
 const T = loadTs('src/main/startupTiming.ts');
-const { StartupTiming, STARTUP_TIMING_WINDOW_MS, STARTUP_LOOP_ROW_SAMPLES, STARTUP_MAX_RENDERER_ROWS } = T;
+const { StartupTiming, STARTUP_TIMING_WINDOW_MS, STARTUP_LOOP_ROW_SAMPLES, STARTUP_MAX_RENDERER_ROWS, STARTUP_BLIND_PROBE_MS } = T;
 const { NativeMemoryWiring } = loadTs('src/main/nativeMemory/mainWiring.ts');
-const { selfJobRate } = require('./tools/run-tests.cjs');
 
 const ROOT = path.join(__dirname, '..');
 const src = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
@@ -29,7 +28,8 @@ const code = (p) => src(p).replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '');
 function rig({ origin = 1_000_000, startAt = origin + 500, windowMs } = {}) {
   let now = startAt;
   const rows = [];
-  const timers = { interval: null, timeout: null, cleared: [] };
+  // `timeout` is the stop timer; `probe` the latest blind-tick probe (STARTUP_BLIND_PROBE_MS), apart
+  const timers = { interval: null, timeout: null, probe: null, probes: 0, cleared: [] };
   const hist = { enabled: false, max: 0, p99: 0, resets: 0,
     enable() { this.enabled = true; }, disable() { this.enabled = false; },
     reset() { this.resets++; this.max = 0; this.p99 = 0; }, percentile(p) { assert.equal(p, 99); return this.p99; } };
@@ -37,7 +37,10 @@ function rig({ origin = 1_000_000, startAt = origin + 500, windowMs } = {}) {
     origin, now: () => now, log: (r) => rows.push(r), histogram: () => hist, windowMs,
     setInterval: (fn, ms) => { timers.interval = { fn, ms }; return 'I'; },
     clearInterval: (h) => timers.cleared.push(h),
-    setTimeout: (fn, ms) => { timers.timeout = { fn, ms }; return 'T'; },
+    setTimeout: (fn, ms) => {
+      if (ms === STARTUP_BLIND_PROBE_MS) { timers.probe = { fn, ms }; timers.probes++; return 'P'; }
+      timers.timeout = { fn, ms }; return 'T';
+    },
     clearTimeout: (h) => timers.cleared.push(h)
   });
   const tick = (maxMs, p99Ms = maxMs / 2) => { now += 1000; hist.max = maxMs * 1e6; hist.p99 = p99Ms * 1e6; timers.interval.fn(); };
@@ -118,8 +121,65 @@ test('(1) stop: flushes the partial loop row, writes ONE end row naming the wors
   assert.equal(ends[0].longtaskMaxMs, 1733);
   assert.equal(ends[0].longtaskMaxT, 12_345);
   assert.equal(r.hist.enabled, false);
-  assert.deepEqual(r.timers.cleared.sort(), ['I', 'T']);
+  assert.deepEqual(r.timers.cleared.sort(), ['I', 'P', 'T'], 'the sampler, the blind-tick probe and the stop timer');
   assert.equal(r.rec.recording, false);
+});
+
+test('(1) LOAD-FLAKES-105: a block in the blind tick after a reset (the probe fired late) is the next second\'s max', () => {
+  const r = rig();
+  r.rec.start();
+  assert.equal(r.timers.probes, 1, 'enable() starts blind too: armed at start');
+  assert.equal(r.timers.probe.ms, STARTUP_BLIND_PROBE_MS);
+  assert.equal(STARTUP_BLIND_PROBE_MS, 20, 'twice the 10 ms histogram resolution');
+  r.tick(12);
+  assert.equal(r.timers.probes, 2, 'and re-armed after every reset');
+  // the loop blocks for 400 ms straight after the reset: the histogram drops that interval (it reads
+  // ~18 ms on Node 24), the probe due 20 ms out fires 400 ms late
+  r.advance(STARTUP_BLIND_PROBE_MS + 400);
+  r.timers.probe.fn();
+  r.tick(18);
+  r.tick(15);
+  r.rec.stop();
+  const loop = r.rows.find((x) => x.ev === 'loop');
+  assert.deepEqual(loop.maxMs.slice(0, 3), [12, 400, 15], 'the probe\'s lateness counts once, in the second after it');
+  assert.equal(r.rows.find((x) => x.ev === 'end').loopWorstMs, 400);
+});
+
+test('(1) LOAD-FLAKES-105: a sample\'s time is its FIRST clock read (the thread can be descheduled before the probe is armed)', () => {
+  // bench 8 at 96 burners: armProbe read the clock first, the sample's time ~690 ms later, so the worst
+  // second was stamped where no sample ran. Here every clock read inside a sample costs 700 ms.
+  const origin = 1_000_000;
+  let now = origin + 500; let inSample = false; let firstRead = null;
+  const hist = { max: 0, enable() {}, disable() {}, reset() { this.max = 0; }, percentile() { return 0; } };
+  let fn = null;
+  const rows = [];
+  const rec = new StartupTiming({
+    origin, log: (r) => rows.push(r), histogram: () => hist,
+    now: () => { const v = now; if (inSample) { if (firstRead === null) firstRead = v - origin; now += 700; } return v; },
+    setInterval: (f) => { fn = f; return 'I'; }, clearInterval() {},
+    setTimeout: () => 'T', clearTimeout() {}
+  });
+  rec.start();
+  now += 1000; hist.max = 400e6; inSample = true; fn(); inSample = false;
+  rec.stop();
+  const end = rows.find((x) => x.ev === 'end');
+  assert.equal(end.loopWorstMs, 400);
+  assert.equal(end.loopWorstT, firstRead, `the worst second is stamped at the sample's first clock read (${firstRead}): ${JSON.stringify(end)}`);
+});
+
+test('(1) LOAD-FLAKES-105: a probe on time adds nothing, and a probe after stop writes nothing', () => {
+  const r = rig();
+  r.rec.start();
+  r.advance(STARTUP_BLIND_PROBE_MS);
+  r.timers.probe.fn();
+  r.tick(7);
+  const late = r.timers.probe;
+  r.rec.stop();
+  const n = r.rows.length;
+  r.advance(5_000);
+  late.fn();
+  assert.equal(r.rows.length, n);
+  assert.deepEqual(r.rows.find((x) => x.ev === 'loop').maxMs[0], 7);
 });
 
 test('(1) the stop timer is what ends it: firing it writes the end row', () => {
@@ -208,24 +268,56 @@ test('(1) REAL loop delay: Node\'s histogram sees a blocked main thread in the r
   const { monitorEventLoopDelay, performance } = require('node:perf_hooks');
   const rows = [];
   const origin = Date.now();
-  const rec = new StartupTiming({ origin, now: Date.now, log: (x) => rows.push(x), histogram: () => monitorEventLoopDelay({ resolution: 10 }), windowMs: 2_600 });
+  // LOAD-FLAKES-105: judge the block against the ACTUAL sample times, not the planned schedule. On a
+  // loaded machine this test's own timers fire late, so the block runs later than 1.15 s and the
+  // sample that sees it (often the stop's final one) is later than 2.7 s; and an unrelated stall can
+  // outgrow the block. Each sample's time is the recorder's OWN first clock read inside that sample
+  // (a separate Date.now() here can land a millisecond off it under load).
+  const sampledAt = [];
+  let inSample = null;
+  const now = () => { const v = Date.now(); if (inSample && inSample.at === undefined) inSample.at = v; return v; };
+  const rec = new StartupTiming({ origin, now, log: (x) => rows.push(x), histogram: () => monitorEventLoopDelay({ resolution: 10 }), windowMs: 2_600,
+    setInterval: (fn, ms) => setInterval(() => { inSample = {}; fn(); if (inSample.at !== undefined) sampledAt.push(Math.round(inSample.at - origin)); inSample = null; }, ms) });
   rec.start();
   await new Promise((res) => setTimeout(res, 1_150));
+  const blockFrom = Date.now() - origin;
   const until = performance.now() + 400;
   while (performance.now() < until) { /* block the loop */ }
+  const blockTo = Date.now() - origin;
   await new Promise((res) => setTimeout(res, 1_700));
   assert.equal(rec.recording, false, 'it stopped by itself');
   const loop = rows.filter((x) => x.ev === 'loop').flatMap((x) => x.maxMs);
-  assert.ok(loop.length >= 2, `samples: ${loop}`);
-  assert.ok(Math.max(...loop) >= 300, `the 400 ms block shows (max ${Math.max(...loop)} ms)`);
   const end = rows.find((x) => x.ev === 'end');
-  // A Job Object hard cap limits CPU time, not wall time.  The assertion's scheduling allowance
-  // must therefore scale with the actual Job Object share: it still requires the same real 400 ms
-  // block, while a 50% capped process may be scheduled after the 2.6 s recorder deadline.
-  const rate = selfJobRate();
-  const scheduleScale = rate > 0 ? 10_000 / rate : 1;
-  const latestExpected = Math.ceil(2_700 * scheduleScale);
-  assert.ok(end.loopWorstMs >= 300 && end.loopWorstT >= 1_100 && end.loopWorstT <= latestExpected, `${JSON.stringify(end)} (rate ${rate || 'open'}, latest ${latestExpected})`);
+  const times = [...sampledAt, end.t];   // stop() takes one last sample at its own time
+  assert.equal(loop.length, times.length, `one maxMs per sample: ${loop} at ${times}`);
+  assert.ok(loop.length >= 2, `samples: ${loop}`);
+  // The first sample after the block ended is the one whose histogram spans it (no sample can run
+  // during the block: the loop is blocked), and the recording must still be open then.
+  const k = times.findIndex((t) => t >= blockTo);
+  const ctx = `block ${blockFrom}-${blockTo} ms; samples ${JSON.stringify(loop)} at ${JSON.stringify(times)}; ${JSON.stringify(end)}`;
+  assert.ok(k >= 0 && loop[k] >= 300, `the 400 ms block shows in the sample right after it: ${ctx}`);
+  // The summary is the true worst sample, attributed to that sample's own time.
+  assert.equal(end.loopWorstMs, Math.max(...loop), `loopWorstMs is the worst sample: ${ctx}`);
+  assert.equal(end.loopWorstT, times[loop.indexOf(end.loopWorstMs)], `loopWorstT is that sample's time: ${ctx}`);
+  assert.ok(end.loopWorstMs >= 300, `the worst is at least the block: ${ctx}`);
+});
+
+test('(1) REAL loop delay, LOAD-FLAKES-105: a block straight after a sample (the histogram\'s blind tick) still shows', async () => {
+  const { monitorEventLoopDelay, performance } = require('node:perf_hooks');
+  const rows = [];
+  let blocked = false;
+  // the block runs INSIDE the first sample's own callback, right after its reset(): the interval
+  // Node's histogram never records, every time, at idle as under load
+  const rec = new StartupTiming({ origin: Date.now(), now: Date.now, log: (x) => rows.push(x), histogram: () => monitorEventLoopDelay({ resolution: 10 }), windowMs: 2_600,
+    setInterval: (fn, ms) => setInterval(() => { fn(); if (!blocked) { blocked = true; const until = performance.now() + 400; while (performance.now() < until) { /* block */ } } }, ms) });
+  rec.start();
+  while (rec.recording) await new Promise((res) => setTimeout(res, 100));
+  assert.ok(blocked, 'the block ran');
+  const loop = rows.filter((x) => x.ev === 'loop').flatMap((x) => x.maxMs);
+  const end = rows.find((x) => x.ev === 'end');
+  assert.ok(loop.length >= 2, `samples: ${loop}`);
+  assert.ok(loop.slice(1).some((m) => m >= 300), `the 400 ms block in the blind tick shows in a later sample: ${JSON.stringify(loop)}; ${JSON.stringify(end)}`);
+  assert.ok(end.loopWorstMs >= 300, `and is the worst: ${JSON.stringify(end)}`);
 });
 
 // ── the renderer half ───────────────────────────────────────────────────────
@@ -422,15 +514,15 @@ test('R1: terminal-open is a renderer mark (once per terminal); R3: renderer tim
   assert.deepEqual(r.rows.filter((x) => x.ev === 'longtask').map((x) => x.t), [0, STARTUP_TIMING_WINDOW_MS]);
 });
 
-test('R4: both timers are unref\'d (they never hold the process open)', () => {
+test('R4: every timer is unref\'d (they never hold the process open)', () => {
   const handles = [];
   const mk = () => { const h = { unrefd: false, unref() { this.unrefd = true; } }; handles.push(h); return h; };
   const hist = { enable() {}, disable() {}, reset() {}, max: 0, percentile: () => 0 };
   const rec = new StartupTiming({ origin: 0, now: () => 10, log: () => {}, histogram: () => hist,
     setInterval: mk, clearInterval: () => {}, setTimeout: mk, clearTimeout: () => {} });
   rec.start();
-  assert.equal(handles.length, 2, 'the sampler and the stop timer');
-  assert.ok(handles.every((h) => h.unrefd), 'both unref\'d');
+  assert.equal(handles.length, 3, 'the blind-tick probe (LOAD-FLAKES-105), the sampler and the stop timer');
+  assert.ok(handles.every((h) => h.unrefd), 'all unref\'d');
 });
 
 test('R1 (Jim, CUT-162-AUDIT): stop() flushes the final pty-bytes segment itself, even with no loop rows (no histogram)', () => {

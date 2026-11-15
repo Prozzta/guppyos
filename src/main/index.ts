@@ -1,13 +1,17 @@
 import './packThemes'; // theme packs join the project-theme catalogue before any config is read
 import { app, BrowserWindow, clipboard, crashReporter, dialog, globalShortcut, ipcMain, Menu, powerMonitor, powerSaveBlocker, safeStorage, screen, session, shell, Notification, Tray, utilityProcess } from 'electron';
 import { runQuitSteps, type QuitReport } from './quitTeardown';
+import { copyClipboardText, readClipboardPng, readClipboardText } from './clipboard';
 import { NativeMemoryWiring, toUnpacked } from './nativeMemory/mainWiring';
-import { ClaimStore } from './claims/store';
+import { ClaimStore, CLAIMS_CHECKPOINT_FILE } from './claims/store';
 import { SearchResultLog } from './claims/searchLog';
 import { collectNoteCandidates, embedViaWorker, HiveCorpus, ledgerCandidateDeps, makeLocalScorer, type CandidateResult } from './claims/candidates';
 import { FileHeadAnchorStore, FileLedgerKeyRecord, HEAD_ANCHOR_FILE, KEY_RECORD_FILE, MAC_KEY_FILE, SafeStorageKeyProvider } from './claims/keyProvider';
 import type { ClaimsEndpointDeps } from './claims/endpoint';
 import { ClaimsIndexSync, verifiedPrefix } from './claims/indexSync';
+import { Worker as ThreadWorker } from 'node:worker_threads';
+import { DeriveOffMain, type DeriveWorkerLike } from './claims/deriveOffMain';
+import { STATUS_CODE, type DeriveWant } from './claims/deriveJob';
 import { derive as deriveClaims } from './claims/derive';
 import { worldView as buildClaimsWorldView } from './claims/world';
 import { buildClaimsWorldSnapshot } from './claims/worldSnapshot';
@@ -16,19 +20,22 @@ import { createClaimExport, type ClaimExport } from './claims/exportWiring';
 import { createLedgerUi } from './claims/ledgerUi';
 import { scrubExport } from './claims/exportLedger';
 import { importAtStart } from './claims/startupImport';
+import { ClaimsBootstrap, loadBootstrapMarker, saveBootstrapMarker } from './claims/bootstrap';
 import { DerivedLive } from './claims/derivedLive';
+import { deriveOnce } from './claims/derivedWriter';
 import { startAfterMailCardCatchUp, startupMailCardCatchUp } from './mailCards';
-import { floorRepo, seedFloorSources } from './claims/floorSeed';
+import { enableLedgerAgent, enableLedgerDefault, floorRepo, seedFloorSources } from './claims/floorSeed';
 import { makeW6Append } from './claims/w6Append';
 import { memoryMdReplaced, READER_WATCH_SYNC_MS, ReaderWatchers } from './claims/readerWatch';
-import { importSettled } from './claims/ingest';
+import type { LegacyCache } from './claims/migrate';
+import { importSettled, shadowImport } from './claims/ingest';
 import { enqueueR5AfterIndex, reconcileQueueForHive, ReconcileApi, shouldRunR5 } from './claims/reconcile';
 import { createClaimDelivery, WORKING_SET_MAX_CHARS, type TaskRow } from './claims/delivery';
 import { reconcileApiForHive as createReconcileApiForHive, refreshReconcileQueueForHive, type ReconcileHiveDeps } from './claims/reconcileHive';
 import { WordPieceTokenizer, wordPieceConfigFromTokenizerJson } from './nativeMemory/wordpiece';
 import { readSourcesConfig } from './nativeMemory/sources';
-import { DEFAULT_KEY_REGISTRY, loadRegistry } from './claims/registry';
-import { CLAIM_LEDGER_CLAMP_ROW, CLAIMS_ALERT_KEY_MISSING, DERIVED_AGENT_ID, effectiveLevel, IMPLEMENTED_LEVEL, manifestEntry, type DeriveFn, type LedgerLevel, type ReconcileItem, type UsageRec } from '../shared/claims';
+import { DEFAULT_KEY_REGISTRY, loadRegistry, loadRegistryShared } from './claims/registry';
+import { CLAIM_LEDGER_CLAMP_ROW, CLAIMS_ALERT_KEY_MISSING, DERIVED_AGENT_ID, effectiveLevel, IMPLEMENTED_LEVEL, manifestEntry, type DeriveFn, type LedgerLevel, type ReadResult, type ReconcileItem, type UsageRec } from '../shared/claims';
 import { CodexVersionLog, codexNoDaemonGate, readCodexVersion } from './codexCli';
 import { codexLayerOptInKey, type CodexLayerNotice } from './codexProjectLayers';
 import { StartupTiming } from './startupTiming';
@@ -68,6 +75,7 @@ import { DictationController } from './dictation';
 import { GroqSttProvider } from './stt';
 import { Win32InputHelper, inputHelperPath } from './win32Input';
 import { DICTATION_COPY, type DictationCaptureCommand } from '../shared/dictation';
+import { parseStartupVerdict, STARTUP_BUDGET_FILE, type StartupBudgetView } from '../shared/startupBudget';
 import { TrayModeController } from './trayMode';
 import { ProviderModelStore, defaultAdapters } from './providerModels';
 import {
@@ -768,7 +776,8 @@ function livenessFactsFor(agentId: string): LivenessFacts | null {
   if (pf && a.provider === 'codex' && wake.lifecycle !== 'idle') {
     // The same mtime-cached bounded tail the WWR reads (re-read only when the file changed).
     const home = hive.codexHomeFor(agentId);
-    const probe = home ? codexLifecycle.probe(home) : undefined;
+    // SCALE-ROLLOUT-NEWEST: the registered session's file is restatted each beat (codex resume appends to it).
+    const probe = home ? codexLifecycle.probe(home, a.sessionId) : undefined;
     rollout = probe && probe.ok ? probe.latest : undefined;
   }
   let mailWaiting = 0;
@@ -1037,8 +1046,8 @@ const automaticSubmit = new AutomaticSubmitOwner(buildOwnerDeps({
     const agentId = ptyToAgent.get(ptyId);
     const home = agentId ? hive.codexHomeFor(agentId) : null;
     const spawnedAt = ptyManager.livenessFacts(ptyId)?.spawnedAt ?? 0;
-    if (!home || spawnedAt <= 0) return false;
-    return threadSettingsAppliedSince(codexLifecycle.threadSettingsAt(home), spawnedAt);
+    if (!agentId || !home || spawnedAt <= 0) return false;
+    return threadSettingsAppliedSince(codexLifecycle.threadSettingsAt(home, hive.lastSession(agentId)), spawnedAt);
   },
   // DWIGHT-INPUT-DEAD-179 F2: the startup reading's verdict and screen, once per incarnation and
   // reason (the owner dedupes), so a startup hold is explained from the log.
@@ -1164,7 +1173,7 @@ inboxWake = new InboxWakeBridge({
   // FALSEACTIVE-STALL-2 (B1): Codex's rollout closes a turn whose Stop was lost.
   codexTurnProbe: (agentId) => {
     const home = hive.codexHomeFor(agentId);
-    return home ? codexLifecycle.probe(home) : undefined;
+    return home ? codexLifecycle.probe(home, hive.lastSession(agentId)) : undefined;
   },
   // CODEX-FALSEACTIVE-153: the providers whose own turn start reaches main (Claude and Codex
   // UserPromptSubmit, Codex task_started, AGY PreInvocation). Only for these is a COMMITTED
@@ -1594,7 +1603,9 @@ const stallWatch = new StallWatch({
   now: () => performance.now(),
   origin: performance.timeOrigin,
   log: (row) => hive.appendLog(row),
-  profiler: stallMode.profile ? () => { const s = new InspectorSession(); s.connect(); return s; } : null
+  profiler: stallMode.profile ? () => { const s = new InspectorSession(); s.connect(); return s; } : null,
+  // STARTUP-FREEZE-104 A4: the verdict for Settings -> Startup health (main-only file, one async write per start).
+  onStartupVerdict: (v) => { void fsModule.promises.writeFile(join(app.getPath('userData'), STARTUP_BUDGET_FILE), JSON.stringify({ ...v, at: new Date().toISOString() })).catch(() => { /* best-effort */ }); }
 });
 if (stallMode.on) stallWatch.start({ ipcMain, fs: fsModule as unknown as Record<string, unknown> });
 // CLAIM-LEDGER W1: the ledger store, made on first use per hive root. Its MAC key lives in user-data,
@@ -1605,19 +1616,36 @@ let claimStore: { root: string; store: ClaimStore } | null = null;
 // an append and when the worker (re)starts. Derive is pure; the ledger reader below supplies only
 // the verified prefix, and the worker never reads ledger files.
 const claimsDerive: DeriveFn | null = deriveClaims;
+// STARTUP-FREEZE-104 A19 (god 424399): derive and chunksFor of a verified ledger run in a worker thread (a full derive
+// of the 10x derived ledger was one 0.6 s block on main). Main keeps the MAC verify and the single writer; any worker
+// failure falls back to the in-process derive (DeriveOffMain).
+const claimsDeriveOffMain = new DeriveOffMain({
+  spawn: () => new ThreadWorker(join(__dirname, 'claimsDeriveWorker.js')) as unknown as DeriveWorkerLike,
+  log: (row) => hive.appendLog(row),
+});
+/** A19: one derive-worker job for `read` when it is the store's kept verified read; null: derive in-process. */
+function claimsDeriveJob(want: DeriveWant, agentId: string, read: ReadResult) {
+  const root = hive.root(); const ep = claimsEndpoint();
+  if (!root || !ep) return Promise.resolve(null);
+  const job = (ep as ClaimsEndpointDeps).store.verifiedJobFor(agentId, read);
+  if (!job) return Promise.resolve(null);
+  let registry; try { registry = loadRegistryShared(root); } catch { registry = DEFAULT_KEY_REGISTRY; }
+  return claimsDeriveOffMain.run({ want, agentId, ...job, registry, r4: false });
+}
 let claimsIndex: ClaimsIndexSync | null = null;
 function claimsIndexSync(): ClaimsIndexSync | null {
   const ep = claimsEndpoint();
   if (!ep) return null;
   if (!claimsIndex) {
     claimsIndex = new ClaimsIndexSync({
-      readLedger: (a) => (claimsEndpoint() as ClaimsEndpointDeps).store.readLedger(a),
+      readLedger: (a) => (claimsEndpoint() as ClaimsEndpointDeps).store.readLedgerCached(a),
       derive: () => claimsDerive,
-      registry: () => { const root = hive.root(); try { return root ? loadRegistry(root) : DEFAULT_KEY_REGISTRY; } catch { return DEFAULT_KEY_REGISTRY; } },
+      registry: () => { const root = hive.root(); try { return root ? loadRegistryShared(root) : DEFAULT_KEY_REGISTRY; } catch { return DEFAULT_KEY_REGISTRY; } },
       ruleConfig: () => ({ r4: false }),
       level: claimLevel,
       agents: claimLedgerAgents,
       send: (args) => claimsImportReady().then(() => nativeMemory.syncClaims(args)),
+      offMain: (agentId, read) => claimsDeriveJob('chunks', agentId, read).then((r) => (r ? { head: r.head ?? '', chunksJson: r.out, count: r.count ?? 0 } : null)),
       onIndexed: (agentId) => { const root = hive.root(); if (!root) return; try { refreshReconcileQueueForHive(root, agentId, reconcileHiveDeps()); } catch (e) { hive.appendLog({ kind: 'claims-reconcile-refresh-failed', agentId, error: String(e).slice(0, 160) }); } },
       log: (row) => hive.appendLog(row),
     });
@@ -1639,8 +1667,13 @@ derivedClaims = new DerivedLive({
   writer: () => {
     const ep = claimsEndpoint(); const root = hive.root();
     if (!ep || !root || !claimsDerive) return null;
-    const registry = (): ReturnType<typeof loadRegistry> => { try { return loadRegistry(root); } catch { return DEFAULT_KEY_REGISTRY; } };
-    return { store: ep.store, derive: (records) => claimsDerive(records, registry(), { r4: false }), log: (row) => hive.appendLog(row) };
+    const registry = (): ReturnType<typeof loadRegistry> => { try { return loadRegistryShared(root); } catch { return DEFAULT_KEY_REGISTRY; } };
+    return {
+      store: ep.store,
+      derive: (records) => deriveOnce(claimsDerive, records, registry()),
+      codesOffMain: (read) => claimsDeriveJob('codes', DERIVED_AGENT_ID, read).then((r) => (r ? r.out : null)),
+      log: (row) => hive.appendLog(row),
+    };
   },
   enabled: () => readConfig().derivedClaims !== false && claimLevel(DERIVED_AGENT_ID) !== 'off',
   repo: () => derivedRepoNow(),
@@ -1668,7 +1701,10 @@ function claimAgentLedgers(): string[] {
 // a timer for a new ledger, a level change or a new hive root. An agent raised to reader or writer
 // mid-run (or given its first ledger) is imported first; its markdown leaves search only after that
 // (god 886ed8), when onSettled syncs its claims into the index.
+// STARTUP-FREEZE-104 A8: each legacy file's entries, kept while it is unchanged (the S0 import and the reader watchers).
+const claimsLegacyCache: LegacyCache = new Map();
 const readerWatchers = new ReaderWatchers({
+  legacyCache: claimsLegacyCache,
   hiveRoot: () => (claimsEndpoint() ? hive.root() : null),
   agents: () => (claimsEndpoint() ? claimAgentLedgers() : []),
   candidates: () => { const root = hive.root(); return root && claimsEndpoint() ? claimImportCandidates(root) : []; },
@@ -1678,7 +1714,7 @@ const readerWatchers = new ReaderWatchers({
     const ep = claimsEndpoint();
     return ep ? makeW6Append(ep.store)(agentId, draft, origin, opts) : Promise.resolve({ ok: false, error: 'no hive' });
   },
-  read: (agentId) => (claimsEndpoint() as ClaimsEndpointDeps).store.readLedger(agentId),
+  read: (agentId) => (claimsEndpoint() as ClaimsEndpointDeps).store.readLedgerCached(agentId),
   log: (row) => hive.appendLog(row),
 });
 function syncReaderWatchers(): void {
@@ -1693,13 +1729,13 @@ function claimExport(): ClaimExport {
     claimExportApi = createClaimExport({
       level: claimLevel,
       agentDir: (agentId) => hive.agentHome(agentId),
-      readLedger: (agentId) => (claimsEndpoint() as ClaimsEndpointDeps).store.readLedger(agentId),
-      registry: () => { const root = hive.root(); try { return root ? loadRegistry(root) : DEFAULT_KEY_REGISTRY; } catch { return DEFAULT_KEY_REGISTRY; } },
+      readLedger: (agentId) => (claimsEndpoint() as ClaimsEndpointDeps).store.readLedgerCached(agentId),
+      registry: () => { const root = hive.root(); try { return root ? loadRegistryShared(root) : DEFAULT_KEY_REGISTRY; } catch { return DEFAULT_KEY_REGISTRY; } },
       derive: deriveClaims,
       // The complete rendering marks statuses from the state; world evidence unknown here is neutral.
       view: (_agentId, records, state) => buildClaimsWorldView(state, records, [], {
         now: new Date().toISOString(),
-        taskStatus: (id) => ((hive.allTasks() as { tasks?: Array<{ id: string; status: string }> }).tasks ?? []).find((t) => t.id === id)?.status ?? null,
+        taskStatus: (id) => (hive.taskById(id) as { status?: string } | undefined)?.status ?? null,   // SCALE-TASKS-MAP: O(1), not a .find over every card
         fileExists: () => true, commitExists: () => true, fileChangedSince: () => false, cardOutcomes: {},
       }),
       log: (row) => hive.appendLog(row),
@@ -1735,6 +1771,8 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
   const root = hive.root();
   if (!root) return null;
   if (!claimStore || claimStore.root !== root) {
+    // A9: the old hive's acked keys are saved before its store is let go.
+    if (claimStore) { try { claimStore.store.flushKeyRegistry(); } catch (e) { console.error('[claims] flushKeyRegistry:', e); } }
     claimStore = {
       root,
       store: new ClaimStore({
@@ -1742,18 +1780,29 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
         keys: new SafeStorageKeyProvider(join(app.getPath('userData'), MAC_KEY_FILE), safeStorage),
         keyRecord: new FileLedgerKeyRecord(join(app.getPath('userData'), KEY_RECORD_FILE)),
         headAnchor: new FileHeadAnchorStore(join(app.getPath('userData'), HEAD_ANCHOR_FILE)),
+        // STARTUP-FREEZE-104 A3: the verified closed segments, MAC'd by the store; written off the event loop.
+        checkpoint: {
+          load: () => { try { return readFileSync(join(app.getPath('userData'), CLAIMS_CHECKPOINT_FILE), 'utf8'); } catch { return null; } },
+          save: (text) => {
+            const file = join(app.getPath('userData'), CLAIMS_CHECKPOINT_FILE);
+            const tmp = `${file}.${process.pid}.tmp`;
+            void fsModule.promises.writeFile(tmp, text).then(() => fsModule.promises.rename(tmp, file))
+              .catch((e) => hive.appendLog({ kind: 'claims-checkpoint-save-failed', error: String(e).slice(0, 160) }));
+          },
+        },
         log: (row) => hive.appendLog(row),
+        offMain: claimsDeriveOffMain,
         // R1 (Jim R-2): a claim whose task TTL has ended is not live for an exact-duplicate sighting.
-        taskStatus: (id) => ((hive.allTasks() as { tasks?: Array<{ id: string; status: string }> }).tasks ?? []).find((t) => t.id === id)?.status ?? null,
+        taskStatus: (id) => (hive.taskById(id) as { status?: string } | undefined)?.status ?? null,   // SCALE-TASKS-MAP: O(1), not a .find over every card
         onAppend: (agentId, id, rec) => {
           // CL-READERWATCHER: a first claim of an unimported reader or writer starts its import now.
           try { const at = hive.root(); if (at && agentId !== DERIVED_AGENT_ID && memoryMdReplaced(claimLevel(agentId)) && !importSettled(at, agentId)) void claimsImportReady().then(() => readerWatchers.ensureImported(agentId)); } catch (e) { hive.appendLog({ kind: 'claims-watch-error', agentId, error: String(e).slice(0, 160) }); }
           claimExport().onAppend(agentId, id, rec);
-          if (!shouldRunR5(rec)) { claimsIndexSync()?.schedule(agentId); warmCardLeadsSoon(); return; }
+          if (!shouldRunR5(rec)) { claimsIndexSync()?.schedule(agentId, rec); warmCardLeadsSoon(); return; }
           warmCardLeadsSoon();
           const root = hive.root(); if (!root) return;
           void enqueueR5AfterIndex(agentId, id, {
-            syncIndex: () => claimsIndexSync()?.syncNow(agentId) ?? Promise.resolve(null),
+            syncIndex: () => claimsIndexSync()?.syncNow(agentId, rec) ?? Promise.resolve(null),
             candidates: async (a, claimId, tau2) => {
               const r = await nativeMemory.r5Candidates(a, claimId, tau2);
               return r.ok && Array.isArray(r.json) ? (r.json as Array<{ b: string; cosine: number }>).map((p) => ({ a: claimId, b: p.b, cosine: p.cosine, tau2 })) : [];
@@ -1770,21 +1819,26 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
         },
       }),
     };
+    // STARTUP-FREEZE-104 A3: read and verify every ledger once, asynchronously and in slices (a full
+    // synchronous read of a year of ledgers blocks main for seconds). The startup readers below run
+    // after it and answer from its verified reads.
+    const warmed = startClaimsWarm(root, claimStore.store);
     // Jim A-2: claims start checks every anchored agent (a deleted or cut ledger alerts at once).
-    setImmediate(claimsAnchorCheck);
+    void warmed.then(claimsAnchorCheck);
     // MAILCARD catch-up (god 38f4b0): every start indexes the proven mail not yet in state/mail-cards
     // (mail delivered while the app was closed included) through the router's own index, pausing at
     // every step: the window never waits for it.
     const mailCardCatchUp = startupMailCardCatchUp(root, { log: (row) => hive.appendLog(row), index: hive.mailCardIndexFor(root) });
     // CLAIMS-90 M5: the derived writer's start backfill and passes (once per app run) start only once
     // the catch-up settled (Jim 414b4c): the derived writer reads the index's done mails.
-    void startAfterMailCardCatchUp(mailCardCatchUp, () => derivedClaims?.start());
+    void startAfterMailCardCatchUp(Promise.allSettled([mailCardCatchUp, warmed]),() => derivedClaims?.start());
     // W6: the switch to writer mode or a restart after a crash: catch every writer's export up.
-    setImmediate(() => { try { claimExport().syncAll(claimLedgerAgents()); } catch (e) { hive.appendLog({ kind: 'claims-export-failed', step: 'sync', error: String(e).slice(0, 160) }); } });
+    void warmed.then(() => claimExport().syncAllAsync(claimLedgerAgents())).catch((e) => { hive.appendLog({ kind: 'claims-export-failed', step: 'sync', error: String(e).slice(0, 160) }); });
     // CL-READERWATCHER: watch memory.md for the agents whose ledger replaced it in search.
-    setImmediate(syncReaderWatchers);
+    void warmed.then(syncReaderWatchers);
     // W5 startup census. Successful index syncs repeat this after each indexed append.
-    setImmediate(() => { for (const agentId of claimLedgerAgents()) { try { refreshReconcileQueueForHive(root, agentId, reconcileHiveDeps()); } catch (e) { hive.appendLog({ kind: 'claims-reconcile-refresh-failed', agentId, error: String(e).slice(0, 160) }); } } });
+    // STARTUP-FREEZE-104: one agent per event-loop turn, so the census never holds main for the whole hive.
+    void warmed.then(async () => { for (const agentId of claimLedgerAgents()) { await new Promise<void>((r) => setImmediate(r)); try { refreshReconcileQueueForHive(root, agentId, reconcileHiveDeps()); } catch (e) { hive.appendLog({ kind: 'claims-reconcile-refresh-failed', agentId, error: String(e).slice(0, 160) }); } } });
   }
   return {
     store: claimStore.store,
@@ -1813,6 +1867,19 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
     // CLAIMS-90 R2 (C90-GET): read-only, claims/readWiring.ts (the answer child calls the same code).
     get: (_agentId, args) => claimGetOver({ root, store: (claimsEndpoint() as ClaimsEndpointDeps).store, agents: claimLedgerAgents, tasks: () => ((hive.allTasks() as { tasks?: Array<Record<string, unknown>> }).tasks ?? []) }, args),
   };
+}
+/** STARTUP-FREEZE-104 A3: the claims warm of the open hive (claimsEndpoint starts it once per store). */
+let claimsWarm: { root: string; ready: Promise<void> } | null = null;
+function startClaimsWarm(root: string, store: ClaimStore): Promise<void> {
+  const ready = store.warm(store.ledgerAgents()).then(() => undefined, (e) => { hive.appendLog({ kind: 'claims-warm-failed', error: String(e).slice(0, 160) }); });
+  claimsWarm = { root, ready };
+  return ready;
+}
+/** Settles when the open hive's claims warm has (at once with no hive or claims store). */
+function claimsWarmReady(): Promise<void> {
+  const root = hive.root();
+  if (!root || !claimsEndpoint() || !claimsWarm || claimsWarm.root !== root) return Promise.resolve();
+  return claimsWarm.ready;
 }
 /** CLAIMS-HEAD-ANCHOR (Jim A-2): read every anchored agent of this hive; a break alerts once
  *  (claims start, a worker (re)start, and every CLAIMS_ANCHOR_CHECK_MS). */
@@ -1853,14 +1920,16 @@ function claimsImportReady(): Promise<void> {
   const root = hive.root(); const ep = claimsEndpoint();
   if (!root || !ep) return Promise.resolve();
   if (!claimsImport || claimsImport.root !== root) {
-    const run = importAtStart({
+    // A3: the import reads every ledger; it starts once the warm has verified them (then its reads are the cached ones).
+    const run = claimsWarmReady().then(() => importAtStart({
       hiveRoot: root,
       append: makeW6Append(ep.store),
-      read: (agentId) => ep.store.readLedger(agentId),
+      read: (agentId) => ep.store.readLedgerCached(agentId),
       log: (row) => hive.appendLog(row),
+      legacyCache: claimsLegacyCache,
       agents: () => claimImportCandidates(root),
       level: claimLevel,
-    }).then(() => undefined, (e) => { hive.appendLog({ kind: 'claims-import-failed', error: String(e).slice(0, 160) }); });
+    })).then(() => undefined, (e) => { hive.appendLog({ kind: 'claims-import-failed', error: String(e).slice(0, 160) }); });
     const cap = new Promise<void>((resolve) => {
       const t = setTimeout(() => { hive.appendLog({ kind: 'claims-import-wait-capped', ms: CLAIMS_IMPORT_WAIT_MS }); resolve(); }, CLAIMS_IMPORT_WAIT_MS);
       t.unref?.();
@@ -1906,7 +1975,14 @@ const nativeMemory = new NativeMemoryWiring({
 // writer each need main's own native confirm as well as the Human's click (G7.2).
 const ledgerUi = createLedgerUi({
   store: () => claimsEndpoint()?.store ?? null,
+  // Settings keeps the reserved derived ledger visible even before its first segment. It is
+  // display-only: exports and every operational action retain claimLedgerAgents().
   agents: () => (claimsEndpoint() ? claimLedgerAgents() : []),
+  rosterAgents: () => (claimsEndpoint() ? [...claimLedgerAgents(), DERIVED_AGENT_ID] : []),
+  agentMeta: (agentId) => {
+    if (agentId === DERIVED_AGENT_ID) return { system: true };
+    try { return { archived: hive.registry().agents[agentId]?.archived === true }; } catch { return undefined; }
+  },
   level: (agentId) => claimLevel(agentId),
   savedLevel: () => readConfig().claimLedger,
   floor: () => {
@@ -1915,7 +1991,7 @@ const ledgerUi = createLedgerUi({
   },
   saveLevel: (level) => { writeConfig({ claimLedger: level }); },
   levelChanged: () => nativeMemory.claimLedgerChanged(),
-  registry: () => { const root = hive.root(); try { return root ? loadRegistry(root) : DEFAULT_KEY_REGISTRY; } catch { return DEFAULT_KEY_REGISTRY; } },
+  registry: () => { const root = hive.root(); try { return root ? loadRegistryShared(root) : DEFAULT_KEY_REGISTRY; } catch { return DEFAULT_KEY_REGISTRY; } },
   derive: deriveClaims,
   verifiedPrefix,
   exportComplete: (agentId) => claimExport().complete(agentId),
@@ -1955,6 +2031,10 @@ ipcMain.handle('claims-ui:set-level', (evt, level: unknown) => (ledgerUiSender(e
 ipcMain.handle('claims-ui:export', (evt, agentId: unknown) => (ledgerUiSender(evt) ? ledgerUi.exportNow(String(agentId)) : NOT_HERE));
 ipcMain.handle('claims-ui:keep-one', (evt, agentId: unknown, keep: unknown, retire: unknown) => (ledgerUiSender(evt) ? ledgerUi.keepOne(String(agentId), keep, retire) : NOT_HERE));
 ipcMain.handle('claims-ui:keep-all', (evt, agentId: unknown, ids: unknown) => (ledgerUiSender(evt) ? ledgerUi.keepAll(String(agentId), ids) : NOT_HERE));
+ipcMain.handle('claims-ui:bootstrap-status', (evt) => (ledgerUiSender(evt) ? claimsBootstrapStatus() : NOT_HERE));
+// The window is the Human's request; attribute its floor-wide lock to god so CLI and Settings
+// cannot run two imports beside one another.
+ipcMain.handle('claims-ui:bootstrap', (evt) => (ledgerUiSender(evt) ? runClaimsBootstrap(hive.registry().godId ?? 'god') : NOT_HERE));
 /** CLAIMS-90 HISTORY-PTR: `memory history <id>`, claims/readWiring.ts (the answer child calls the same code). */
 function claimHistory(agentId: string, id: string): { ok: true; text: string; owner: string } | { ok: false; error: string } {
   const root = hive.root(); const ep = claimsEndpoint();
@@ -1964,9 +2044,11 @@ function claimHistory(agentId: string, id: string): { ok: true; text: string; ow
 function claimsLedgerView(agentId: string) {
   const root = hive.root(); const ep = claimsEndpoint();
   if (!root || !ep) return null;
-  const prefix = verifiedPrefix(ep.store.readLedger(agentId));
+  const prefix = verifiedPrefix(ep.store.readLedgerCached(agentId));
   if (!prefix) return null;
-  let reg; try { reg = loadRegistry(root); } catch { reg = DEFAULT_KEY_REGISTRY; }
+  // A18 (Jim 939357e9: the warm's derives re-hashed the 12.8 MB registry each): the shared frozen registry, whose hash
+  // derive keeps (the same keys as a fresh load).
+  let reg; try { reg = loadRegistryShared(root); } catch { reg = DEFAULT_KEY_REGISTRY; }
   const state = deriveClaims(prefix.records, reg, { r4: false });
   const claims = prefix.records.filter((r) => r.t === 'claim');
   return { claims, status: (id: string) => state.claims[id]?.status };
@@ -1976,11 +2058,24 @@ const hiveCandidateCorpus = new HiveCorpus({ agents: () => Object.keys(hive.regi
 // is the whole ledger now).
 const claimCandidateScorer = makeLocalScorer(embedViaWorker((texts) => nativeMemory.embed(texts)), () => hiveCandidateCorpus.corpus());
 /** S1: off the interactive note path, fill the shared scorer with every live own-ledger claim. */
-function warmClaimCandidateVectors(): Promise<void> {
-  const pool = claimAgentLedgers().flatMap((agentId) => {
+async function warmClaimCandidateVectors(): Promise<void> {
+  // A18: one agent's read and derive per turn of the event loop (all of them were one block of 1.3 s).
+  const pool: Array<{ id: string; owner: string; wt: string; key: string | undefined; text: string; status: 'live' }> = [];
+  for (const agentId of claimAgentLedgers()) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    // A19: the status codes from the derive worker thread when the read is fully verified (read by index: one letter
+    // per record); else the in-process view.
+    const ep = claimsEndpoint();
+    const read = ep ? (ep as ClaimsEndpointDeps).store.readLedgerCached(agentId) : null;
+    const off = read ? await claimsDeriveJob('codes', agentId, read) : null;
+    if (read && off && off.out.length === read.records.length) {
+      const codes = off.out;
+      for (let i = 0; i < codes.length; i++) { const c = read.records[i]; if (c.t === 'claim' && codes[i] === STATUS_CODE.live) pool.push({ id: c.id, owner: agentId, wt: c.wt, key: c.key, text: c.text, status: 'live' }); }
+      continue;
+    }
     const view = claimsLedgerView(agentId);
-    return view ? view.claims.filter((c) => view.status(c.id) === 'live').map((c) => ({ id: c.id, owner: agentId, wt: c.wt, key: c.key, text: c.text, status: 'live' as const })) : [];
-  });
+    if (view) for (const c of view.claims) if (view.status(c.id) === 'live') pool.push({ id: c.id, owner: agentId, wt: c.wt, key: c.key, text: c.text, status: 'live' });
+  }
   return claimCandidateScorer.warm(pool);
 }
 function claimNoteCandidates(agentId: string, text: string, o: { key?: string } = {}): Promise<CandidateResult> {
@@ -2000,7 +2095,7 @@ let claimsCountTokens: ((text: string) => number) | null = null;
 const claimDelivery = createClaimDelivery({
   hiveRoot: () => hive.root(),
   level: claimLevel,
-  readLedger: (agentId) => (claimsEndpoint() as ClaimsEndpointDeps).store.readLedger(agentId),
+  readLedger: (agentId) => (claimsEndpoint() as ClaimsEndpointDeps).store.readLedgerCached(agentId),
   registry: (root) => { try { return loadRegistry(root); } catch { return DEFAULT_KEY_REGISTRY; } },
   derive: deriveClaims,
   worldView: buildClaimsWorldView,
@@ -2105,6 +2200,7 @@ function ledgerMemoryClaim(agentId: string): LedgerDeps['memoryClaim'] {
 /** READS-181 A: the `ledger` command's script, shipped like memory-cli.cjs (extraResources). */
 const HEAVY_PRELOAD = join(app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'resources'), 'heavy-preload.cjs');
 const LEDGER_CLI = join(app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'resources'), 'ledger-cli.cjs');
+const CLAIMS_CLI = join(app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'resources'), 'claims-cli.cjs');
 // HEAVY-LOCK-RESERVATION-RELEASE: the `heavy` command (status; give up a reserved slot), shipped the same way.
 const HEAVY_CLI = join(app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'resources'), 'heavy-cli.cjs');
 // TASKS-JSON-SPLIT: tasks-all / tasks-revive / tasks-unsplit (the archive's reader, revive, rollback).
@@ -2137,6 +2233,58 @@ const termControl = new TermControl({
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 });
 hookServer.setTermHandler((agentId, body) => termControl.handle(agentId, body));
+// CLAIMS-BOOTSTRAP: the destructive-ish floor import is a god-only command, executed in main so
+// it shares the canonical ClaimStore and the floor-wide heavy lock with every other heavy job.
+let claimsBootstrap: { root: string; job: ClaimsBootstrap } | null = null;
+function claimsBootstrapFor(root: string, store: ClaimStore): ClaimsBootstrap {
+  if (claimsBootstrap?.root === root) return claimsBootstrap.job;
+  const job = new ClaimsBootstrap({
+    now: () => Date.now(),
+    activeAgents: () => Object.entries(hive.registry().agents).filter(([, a]) => a.archived !== true).map(([id]) => id),
+    isIdle: (agentId, requester) => agentId === requester || workerWake.state(agentId).lifecycle === 'idle',
+    promote: (agentId) => { enableLedgerAgent(root, agentId); },
+    seedDefault: () => { enableLedgerDefault(root); },
+    importOne: async (agentId) => {
+      const report = await shadowImport({ hiveRoot: root, append: makeW6Append(store), read: (a) => store.readLedger(a), log: (row) => hive.appendLog(row) }, agentId, { settle: true });
+      return { refused: report.refused.map((r) => `${r.file}:${r.line}`) };
+    },
+    load: () => loadBootstrapMarker(root),
+    save: (state) => saveBootstrapMarker(root, state),
+    log: (row) => hive.appendLog(row),
+  });
+  claimsBootstrap = { root, job };
+  return job;
+}
+async function runClaimsBootstrap(lockOwner: string): Promise<{ ok: boolean; line: string; state: ReturnType<ClaimsBootstrap['status']> }> {
+  const root = hive.root(); const ep = claimsEndpoint();
+  if (!root || !ep) return { ok: false, line: 'refused: no active hive', state: null };
+  const job = claimsBootstrapFor(root, ep.store);
+  const callId = `claims-bootstrap:${Date.now()}`;
+  const lease = heavyLock.acquire(lockOwner, { heavy: true, kind: 'bench', why: 'claims bootstrap', exclusive: true }, 'claims bootstrap', callId, false);
+  if (!lease.allow) return { ok: false, line: `refused: ${lease.reason}`, state: job.status() };
+  try {
+    const state = await job.run(lockOwner);
+    return { ok: true, line: 'claims bootstrap complete', state };
+  } catch (e) {
+    return { ok: false, line: `refused: ${String(e).slice(0, 160)}`, state: job.status() };
+  } finally {
+    heavyLock.callDone(lockOwner, callId);
+  }
+}
+function claimsBootstrapStatus(): { ok: boolean; line: string; state: ReturnType<ClaimsBootstrap['status']> } {
+  const root = hive.root(); const ep = claimsEndpoint();
+  if (!root || !ep) return { ok: false, line: 'refused: no active hive', state: null };
+  const job = claimsBootstrapFor(root, ep.store);
+  return { ok: true, line: job.isRunning() ? 'claims bootstrap is running' : 'claims bootstrap is idle', state: job.status() };
+}
+hookServer.setClaimsHandler(async (agentId, body) => {
+  if (!hive.isGod(agentId)) return { status: 403, body: { ok: false, line: 'refused: claims bootstrap is god-only' } };
+  const action = body && typeof body === 'object' && !Array.isArray(body) ? (body as Record<string, unknown>).action : null;
+  if (action === 'status') return { status: 200, body: claimsBootstrapStatus() };
+  if (action !== 'run') return { status: 400, body: { ok: false, line: 'refused: action must be run or status' } };
+  const r = await runClaimsBootstrap(agentId);
+  return { status: r.ok ? 200 : 409, body: r };
+});
 // GTC M3: the Human's message box. Its writes carry origin HUMAN (it IS the Human's input), so
 // only the app window's own IPC reaches it ('messageBox:deliver', ledgerUiSender), and only
 // `human: true` queue items (MessageQueueComposer) are sent there. Config `messageBoxPath: 'owner'`
@@ -2734,6 +2882,10 @@ function removeWorkerScratch(workerId: string): void {
   const agentsRoot = join(root, 'agents');
   // Path-safety: the resolved dir must sit directly under agents/ with basename == id.
   if (resolve(dir) !== join(resolve(agentsRoot), basename(dir)) || basename(dir) !== workerId) return;
+  // Electron 45 cannot recursively remove this parent while its child outbox is
+  // watched (ENOTEMPTY/EPERM), so close watchers before—not after—rmSync.
+  hive.closeOutboxWatcher(join(dir, 'outbox'));
+  readerWatchers.stop(workerId);
   try { rmSync(dir, { recursive: true, force: true }); }
   catch (e) { console.error('[worker] removeWorkerScratch failed:', e); }
 }
@@ -4738,6 +4890,13 @@ function createWindow(opts: { floor?: boolean; partition?: string; recovery?: Re
   };
   const ses = win.webContents.session;
   ses.setPermissionRequestHandler((_wc, permission, callback, details) => {
+    // Electron 45 sends screen/window/tab requests as display-capture rather
+    // than media. Guppy has no capture feature, so do not accidentally grant it
+    // through the permissive default below.
+    if (permission === 'display-capture') {
+      callback(false);
+      return;
+    }
     if (permission === 'media') {
       const mediaTypes = details && 'mediaTypes' in details ? details.mediaTypes : undefined;
       const wantsAudio = !mediaTypes || mediaTypes.includes('audio');
@@ -4747,6 +4906,7 @@ function createWindow(opts: { floor?: boolean; partition?: string; recovery?: Re
     callback(true);
   });
   ses.setPermissionCheckHandler((_wc, permission) => {
+    if (permission === 'display-capture') return false;
     if (permission === 'media') return micFeatureLive();
     return true;
   });
@@ -5286,6 +5446,8 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
       if (opts.hive.isGod) {
         const termDir = hive.writeTermCommand(TERM_CLI);
         if (termDir) opts.pathPrepend = [...(opts.pathPrepend ?? []), termDir];
+        const claimsDir = hive.writeClaimsCommand(CLAIMS_CLI);
+        if (claimsDir) opts.pathPrepend = [...(opts.pathPrepend ?? []), claimsDir];
       }
       // HEAVY-CPU-OPTIONS-191: `guppy-heavyjob`, which a heavy call's rewritten command runs first.
       if (heavyJobExe()) opts.pathPrepend = [...(opts.pathPrepend ?? []), heavyJobDir()];
@@ -5784,29 +5946,18 @@ ipcMain.handle('session:resolveCwd', (_evt, sessionId: unknown) =>
   (typeof sessionId === 'string' ? resolveSessionCwd(sessionId) : null));
 
 // ─── IPC: clipboard ─────────────────────────────────────────────────────────
-ipcMain.handle('app:copyToClipboard', (_evt, text: unknown) => {
-  if (typeof text !== 'string') return { ok: false, error: 'invalid text' };
-  try { clipboard.writeText(text); return { ok: true }; }
-  catch (e) { return { ok: false, error: e instanceof Error ? e.message : String(e) }; }
+ipcMain.handle('app:copyToClipboard', async (_evt, text: unknown) => {
+  return copyClipboardText(clipboard, text);
 });
 // STARTUP-TIMING-162: the renderer's long tasks and first-redraw marks (validated in startupTiming).
 ipcMain.on('startup:timing', (_evt, batch: unknown) => startupTiming.fromRenderer(batch));
 // STALL-WATCH-198: the renderer's slow input and long tasks (validated and rate-capped in stallWatch).
 ipcMain.on('stall:watch', (_evt, batch: unknown) => stallWatch.fromRenderer(batch));
-ipcMain.handle('app:readClipboard', () => {
-  try { return clipboard.readText(); } catch { return ''; }
+ipcMain.handle('app:readClipboard', async () => {
+  return readClipboardText(clipboard);
 });
-// Same read, SYNCHRONOUS, for the terminal's paste shortcut.
-//
-// Dictation tools (muesli.works, Wispr Flow, …) type by stashing the user's
-// clipboard, writing the transcript, sending the paste key, then restoring the
-// old clipboard immediately. An `invoke` read returns a tick or two later — by
-// which point the restore has already landed and we paste the PREVIOUS text.
-// A `sendSync` read completes inside the keydown handler, before the tool gets
-// a chance to put the old contents back.
-ipcMain.on('app:readClipboardSync', (evt) => {
-  try { evt.returnValue = clipboard.readText(); } catch { evt.returnValue = ''; }
-});
+// Electron 44 makes clipboard reads asynchronous; terminal paste marks the
+// eventual renderer emission as HUMAN.
 // NOTE: the terminal theme is mirrored into each agent's per-session Claude
 // settings at spawn (hive.ensureAgent theme option) — deliberately NOT via
 // `claude config set -g theme`, which would also restyle the user's own
@@ -5989,6 +6140,12 @@ function graphicsStatusView(): GraphicsStatusView {
   return { ...graphicsStatus(readConfig(), feature), runningAgents: ptyManager.list().length };
 }
 ipcMain.handle('graphics:status', () => graphicsStatusView());
+// STARTUP-FREEZE-104 A4: Settings -> Startup health (the last saved verdict; read async, off the main thread).
+ipcMain.handle('health:startupBudget', async (): Promise<StartupBudgetView> => {
+  let last = null;
+  try { last = parseStartupVerdict(JSON.parse(await fsModule.promises.readFile(join(app.getPath('userData'), STARTUP_BUDGET_FILE), 'utf8'))); } catch { last = null; }
+  return { enabled: stallMode.on, pending: stallMode.on && !stallWatch.startupBudget().done, last };
+});
 ipcMain.handle('graphics:setMode', (_evt, mode: unknown) => {
   setGraphicsMode(mode);
   try { hive.appendLog({ kind: 'graphics-set', mode, applied: appliedGraphicsMode() }); } catch { /* best-effort */ }
@@ -6069,6 +6226,7 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
   try { integrationBroker.stop(); } catch (e) { console.error('[changeHome] broker.stop:', e); }
   try { hive.stopRouter(); } catch (e) { console.error('[changeHome] stopRouter:', e); }
   try { hive.stopLedgerGuard(); } catch (e) { console.error('[changeHome] stopLedgerGuard:', e); }
+  try { readerWatchers.stopAll(); } catch (e) { console.error('[changeHome] stopReaderWatchers:', e); }
   try { boardMonitor.stop(); } catch (e) { console.error('[changeHome] boardMonitor.stop:', e); }
   try { floorDigest.stop(); boardStatus.stop(); } catch (e) { console.error('[changeHome] floorDigest.stop:', e); }
   try { hive.stopAgyStatusline(); } catch (e) { console.error('[changeHome] stopAgyStatusline:', e); }
@@ -6384,7 +6542,8 @@ ipcMain.handle('hive:inbox', (_evt, id: unknown) => {
   let archived = false;
   // Q32: an orphan or pty-exit archive keeps its ledger (mail is still delivered to it).
   try { archived = archivedForMail(hive.registry().agents[id]); } catch { /* unknown: not archived */ }
-  return hive.mailHistory(id, { archived });
+  // SCALE-DONE-STAT: off the caller's turn, in 8 ms slices (a cold .done listing is ~56k stats at 10x).
+  return hive.mailHistoryAsync(id, { archived });
 });
 // ZT-I1-MAIL §11.8 #16: the queue's "inbox-nonempty" precondition asks the LEDGER (the wake
 // coordinator's pending source: delivered, not yet surfaced), not the inbox listing.
@@ -6430,8 +6589,9 @@ ipcMain.handle('hive:requestInboxWake', (_evt, id: unknown) => {
 // Voice read-layer: recent message CONTENT (inbox/outbox bodies), REDACTED
 // main-side by hive.voiceMessages(). The renderer/voice layer never sees a raw
 // body — secrets are stripped here, before the result crosses IPC.
+// SCALE-MESSAGES-INDEX: off the caller's turn, in 8 ms slices (a cold call reads every mail file once).
 ipcMain.handle('hive:messages', (_evt, opts: unknown) =>
-  hive.voiceMessages(opts && typeof opts === 'object' ? (opts as Parameters<typeof hive.voiceMessages>[0]) : {})
+  hive.voiceMessagesAsync(opts && typeof opts === 'object' ? (opts as Parameters<typeof hive.voiceMessages>[0]) : {})
 );
 ipcMain.handle('hive:send', (_evt, partial: Partial<HiveMessage>, from: unknown) => {
   if (!hive.enabled()) return { ok: false, error: 'hive disabled (no harnessHome)' };
@@ -6698,13 +6858,13 @@ ipcMain.handle('dialog:attachFiles', async (evt) => {
 // clipboard holds no image (e.g. a normal text paste).
 ipcMain.handle('clipboard:saveImage', async () => {
   try {
-    const img = clipboard.readImage();
-    if (img.isEmpty()) return { ok: false as const, error: 'no image in clipboard' };
+    const png = await readClipboardPng(clipboard);
+    if (!png) return { ok: false as const, error: 'no image in clipboard' };
     const dir = join(app.getPath('temp'), 'cth-pastes');
     mkdirSync(dir, { recursive: true });
     const name = `paste-${Date.now()}.png`;
     const dest = join(dir, name);
-    writeFileSync(dest, img.toPNG());
+    writeFileSync(dest, Buffer.from(png));
     return { ok: true as const, file: { path: dest, name } };
   } catch (e) {
     return { ok: false as const, error: e instanceof Error ? e.message : String(e) };
@@ -6748,6 +6908,7 @@ function teardownAndQuit(): void {
   try { integrationBroker.stop(); } catch (e) { console.error('[quit] broker.stop:', e); }
   try { hive.stopRouter(); } catch (e) { console.error('[quit] stopRouter:', e); }
   try { hive.stopLedgerGuard(); } catch (e) { console.error('[quit] stopLedgerGuard:', e); }
+  try { readerWatchers.stopAll(); } catch (e) { console.error('[quit] stopReaderWatchers:', e); }
   try { boardMonitor.stop(); } catch (e) { console.error('[quit] boardMonitor.stop:', e); }
   try { floorDigest.stop(); boardStatus.stop(); } catch (e) { console.error('[quit] floorDigest.stop:', e); }
   try { hive.stopAgyStatusline(); } catch (e) { console.error('[quit] stopAgyStatusline:', e); }
@@ -6834,6 +6995,7 @@ ipcMain.handle('app:resetAll', async () => {
   try { integrationBroker.stop(); } catch (e) { console.error('[reset] broker.stop:', e); }
   try { hive.stopRouter(); } catch (e) { console.error('[reset] stopRouter:', e); }
   try { hive.stopLedgerGuard(); } catch (e) { console.error('[reset] stopLedgerGuard:', e); }
+  try { readerWatchers.stopAll(); } catch (e) { console.error('[reset] stopReaderWatchers:', e); }
   try { boardMonitor.stop(); } catch (e) { console.error('[reset] boardMonitor.stop:', e); }
   try { floorDigest.stop(); boardStatus.stop(); } catch (e) { console.error('[reset] floorDigest.stop:', e); }
   try { hive.stopAgyStatusline(); } catch (e) { console.error('[reset] stopAgyStatusline:', e); }
@@ -8898,6 +9060,8 @@ app.whenReady().then(() => {
   // REL-184 S0: either way the claims import runs first (claimsImportReady); the worker forks after it.
   mainWindow?.webContents.once('did-finish-load', () => {
     startupTiming.mark('window-ready');
+    // STARTUP-FREEZE-104 A4: the startup-budget check (no main block >= 250 ms in the next 120 s).
+    stallWatch.windowReady();
     const t = setTimeout(() => { void claimsImportReady().then(() => { try { nativeMemory.prewarm(); } catch (e) { console.error('[native-memory] prewarm failed:', e); } void warmClaimCandidateVectors().catch((e) => console.error('[claims] candidate vector warm failed:', e)); }); }, NATIVE_MEMORY_PREWARM_DELAY_MS);
     t.unref?.();
     // CODEX-WAKE-161 (b): the app-start row, off the start-up path (resolving a command can
@@ -9238,6 +9402,8 @@ app.on('will-quit', (e) => {
   let report: QuitReport | null = null;
   const finish = (): void => {
     try { hive.appendLog({ kind: 'quit-done', waitMs: Date.now() - t0, work: report }); } catch { /* best-effort */ }
+    // STARTUP-FREEZE-104 A9: keys acked in the last REGISTRY_SAVE_MS are saved before exit (agents are swept).
+    try { claimStore?.store.flushKeyRegistry(); } catch (e) { console.error('[quit] flushKeyRegistry:', e); }
     try { hive.dispose(); } catch { /* rows are on disk */ }
     app.exit(0);
   };

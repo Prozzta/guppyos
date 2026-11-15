@@ -24,6 +24,13 @@
 
 export const STARTUP_TIMING_WINDOW_MS = 60_000;
 export const STARTUP_LOOP_SAMPLE_MS = 1_000;
+/** LOAD-FLAKES-105: Node's histogram reset() also forgets its last tick, so the interval from a
+ *  reset to the histogram's next tick is never recorded: a block that starts in the same timers
+ *  phase as a sample was invisible (a 400 ms block read as ~18 ms). After each reset one timer
+ *  this far out (twice the 10 ms resolution, so past that next tick) measures how late it fires;
+ *  that lateness is the blind interval's delay and joins the next sample's max. One callback a
+ *  second, not one per tick. */
+export const STARTUP_BLIND_PROBE_MS = 20;
 /** Loop samples per row. */
 export const STARTUP_LOOP_ROW_SAMPLES = 10;
 /** Only renderer tasks at least this long are kept (the Long Tasks API floor). */
@@ -77,6 +84,9 @@ export class StartupTiming {
   private hist: DelayHistogram | null = null;
   private interval: unknown = null;
   private stopTimer: unknown = null;
+  /** The blind-tick probe (STARTUP_BLIND_PROBE_MS) and the delay it measured, for the next sample. */
+  private probeTimer: unknown = null;
+  private probeMs = 0;
   private rowStart = 0;
   private maxMs: number[] = [];
   private p99Ms: number[] = [];
@@ -119,6 +129,7 @@ export class StartupTiming {
     const setT = this.d.setTimeout ?? ((fn, ms) => setTimeout(fn, ms));
     this.rowStart = this.t();
     if (this.hist) {
+      this.armProbe();   // enable() starts blind as a reset does
       this.interval = setI(() => this.sample(), STARTUP_LOOP_SAMPLE_MS);
       (this.interval as { unref?: () => void })?.unref?.();
     }
@@ -129,15 +140,30 @@ export class StartupTiming {
   private sample(): void {
     const h = this.hist;
     if (!this.open || !h) return;
-    const max = h.max / 1e6;
+    const at = this.t();   // the sample's time is its first clock read; the probe armed below reads after it
+    const max = Math.max(h.max / 1e6, this.probeMs);
     const p99 = h.percentile(99) / 1e6;
     h.reset();
-    const at = this.t();
+    this.probeMs = 0;
+    this.armProbe();
     const m = r1(Number.isFinite(max) ? max : 0);
     this.maxMs.push(m);
     this.p99Ms.push(r1(Number.isFinite(p99) ? p99 : 0));
     if (m > this.worst.ms) this.worst = { ms: m, t: at };
     if (this.maxMs.length >= STARTUP_LOOP_ROW_SAMPLES) this.flushLoop();
+  }
+
+  /** Covers the blind interval after a reset (STARTUP_BLIND_PROBE_MS): its lateness joins the next sample. */
+  private armProbe(): void {
+    const setT = this.d.setTimeout ?? ((fn, ms) => setTimeout(fn, ms));
+    const due = this.d.now() + STARTUP_BLIND_PROBE_MS;
+    this.probeTimer = setT(() => {
+      this.probeTimer = null;
+      if (!this.open) return;
+      const late = this.d.now() - due;
+      if (Number.isFinite(late) && late > this.probeMs) this.probeMs = late;
+    }, STARTUP_BLIND_PROBE_MS);
+    (this.probeTimer as { unref?: () => void })?.unref?.();
   }
 
   private flushLoop(): void {
@@ -223,6 +249,7 @@ export class StartupTiming {
     const clearT = this.d.clearTimeout ?? ((h) => clearTimeout(h as NodeJS.Timeout));
     if (this.interval !== null) { clearI(this.interval); this.interval = null; }
     if (this.stopTimer !== null) { clearT(this.stopTimer); this.stopTimer = null; }
+    if (this.probeTimer !== null) { clearT(this.probeTimer); this.probeTimer = null; }
     this.row('end', {
       t: this.t(),
       loopWorstMs: this.worst.ms, loopWorstT: this.worst.t,

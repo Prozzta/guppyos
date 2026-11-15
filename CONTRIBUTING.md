@@ -13,12 +13,13 @@ participating, you agree to uphold it.
 
 ### Prerequisites
 
-> Current releases are Windows x64 only (installer and portable); download them from the [guppyos releases page](https://github.com/Prozzta/guppyos/releases). CI uses Node.js 20.
+> Current releases are Windows x64 only (installer and portable); download them from the [guppyos releases page](https://github.com/Prozzta/guppyos/releases). CI uses Node.js 24 (the version in `.nvmrc`).
 
 - **macOS, Windows, or Linux** — all are valid development platforms.
   Cross-platform smoke-testing and fixes are still very welcome (see
   [Good first areas](#good-first-areas)).
-- **Node.js 20** and npm (matching CI).
+- **Node.js 24** (`.nvmrc`) and npm, matching CI.
+- **macOS development requires macOS 13 (Ventura) or newer.**
 - A **C/C++ toolchain** to build `node-pty`'s native addon. On macOS:
   ```bash
   xcode-select --install

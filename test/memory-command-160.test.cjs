@@ -27,7 +27,7 @@ const HIVE = read('src/main/hive.ts');
 const between = (src, a, b) => { const i = src.indexOf(a); assert.ok(i >= 0, a); const j = src.indexOf(b, i + a.length); assert.ok(j > i, b); return src.slice(i, j); };
 
 const JAIL = fs.mkdtempSync(path.join(os.tmpdir(), 'memcmd160-'));
-test.after(() => fs.rmSync(JAIL, { recursive: true, force: true }));
+test.after(() => { require('./load-ts.cjs').closeConfigWatchers(); fs.rmSync(JAIL, { recursive: true, force: true }); });
 const dir = (p) => fs.mkdtempSync(path.join(JAIL, p));
 
 // config.ts reads <userData>/config.json through electron's app; hive.ts loads it too, and load-ts

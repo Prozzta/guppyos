@@ -4,7 +4,9 @@ import { verifiedPrefix } from './indexSync';
 import { ReconcileApi, keyAliasCandidates, reconcileItemId, type ReconcileQueue } from './reconcile';
 import type { ClaimStore } from './store';
 
-type RuntimeStore = Pick<ClaimStore, 'readLedger' | 'appendSoftSupersede'>;
+type RuntimeStore = Pick<ClaimStore, 'readLedger' | 'appendSoftSupersede'> & Partial<Pick<ClaimStore, 'readLedgerCached'>>;
+/** STARTUP-FREEZE-104 A3: the census reads the store's kept verified read when it has one. */
+const readVerified = (s: RuntimeStore, agentId: string) => (s.readLedgerCached ? s.readLedgerCached(agentId) : s.readLedger(agentId));
 export interface ReconcileHiveDeps {
   endpoint: () => { store: RuntimeStore } | null;
   queue: (root: string) => ReconcileQueue;
@@ -20,7 +22,7 @@ export function refreshReconcileQueueForHive(root: string, agentId: string, deps
   if (agentId === DERIVED_AGENT_ID) return 0;
   const endpoint = deps.endpoint();
   if (!endpoint) return 0;
-  const prefix = verifiedPrefix(endpoint.store.readLedger(agentId));
+  const prefix = verifiedPrefix(readVerified(endpoint.store, agentId));
   if (!prefix) return 0;
   const registry = deps.registry(root);
   const state = derive(prefix.records, registry, { r4: false });
@@ -74,7 +76,7 @@ export function reconcileApiForHive(root: string, deps: ReconcileHiveDeps): Reco
   const endpoint = deps.endpoint();
   if (!endpoint) return null;
   const live = createReconcileLiveClaims((item) => {
-    const prefix = verifiedPrefix(endpoint.store.readLedger(item.agent));
+    const prefix = verifiedPrefix(readVerified(endpoint.store, item.agent));
     if (!prefix) return { live: new Set(), direction: null };
     const state: ClaimsState = derive(prefix.records, deps.registry(root), { r4: false });
     const claims = prefix.records.filter((rec): rec is Extract<LedgerRec, { t: 'claim' }> => rec.t === 'claim');

@@ -531,7 +531,7 @@ function post(url, body) {
 }
 
 test('broker: /term/<agent>/<token> reaches the handler with the token-proved id; a wrong token is 403; no handler is 404', async (t) => {
-  assert.match(src('src/main/hooks.ts'), /HOOK_ROUTE = \/\^\\\/\(hook\|mcp\|status\|ledger\|term\)\\\//);
+  assert.match(src('src/main/hooks.ts'), /HOOK_ROUTE = \/\^\\\/\(hook\|mcp\|status\|ledger\|term\|claims\)\\\//);
   const s = await broker(t);
   const url = s.hookUrl('god').replace('/hook/', '/term/');
   assert.equal((await post(url, { action: 'read', agent: 'a1' })).status, 404, 'no term handler wired: 404');
@@ -545,6 +545,16 @@ test('broker: /term/<agent>/<token> reaches the handler with the token-proved id
   const forged = a1.replace('/term/a1/', '/term/god/');
   assert.equal((await post(forged, { action: 'read', agent: 'a1' })).status, 403);
   assert.ok(TERM_HTTP_BODY_MAX >= 64 * 1024);
+});
+
+test('broker: /claims is token-bound and its handler refuses a non-god', async (t) => {
+  const s = await broker(t);
+  s.setClaimsHandler((agentId) => agentId === 'god' ? { status: 200, body: { ok: true } } : { status: 403, body: { ok: false } });
+  const god = s.hookUrl('god').replace('/hook/', '/claims/');
+  assert.equal((await post(god, { action: 'status' })).status, 200);
+  assert.equal((await post(god.replace(/[0-9a-f]{32}$/, '0'.repeat(32)), { action: 'status' })).status, 403, 'wrong claims token');
+  const a1 = s.hookUrl('a1').replace('/hook/', '/claims/');
+  assert.equal((await post(a1, { action: 'status' })).status, 403, 'claims handler refuses non-god');
 });
 
 const CLI = path.join(ROOT, 'resources', 'term-cli.cjs');

@@ -66,7 +66,7 @@ const MUTANTS = [
 ];
 
 checkAnchors(ROOT, MUTANTS.map(([name, file, from]) => ({ name, file, from })));
-const run = () => spawnSync(process.execPath, ['--test', TEST], { cwd: ROOT, encoding: 'utf8', windowsHide: true, timeout: 300_000 });
+const run = () => spawnSync(process.execPath, ['--test', '--test-reporter=tap', TEST], { cwd: ROOT, encoding: 'utf8', windowsHide: true, timeout: 300_000 });
 if (run().status !== 0) {
   console.log(`BASELINE RED: ${TEST} fails unmutated, so no mutant proves anything.`);
   process.exit(2);

@@ -72,6 +72,21 @@ module.exports = function loadTs(relativePath) {
   return loadFile(path.resolve(__dirname, '..', relativePath));
 };
 
+/**
+ * GUPPY-NODE-LTS: close the config-folder watcher of every config.ts this process loaded (the real
+ * one and any mutated copy). Call it BEFORE deleting a userData folder: on Node 22+ (Windows) a
+ * watcher whose folder is deleted reports no error and spins the event loop at 100% CPU, so the file
+ * never exits (config.ts closes it itself too; this is the order a caller must keep). Loads nothing.
+ */
+module.exports.closeConfigWatchers = function closeConfigWatchers() {
+  const real = path.resolve(__dirname, '..', 'src/main/config.ts');
+  for (const [key, mod] of cache) {
+    if (key !== real && !key.startsWith(`virtual:${real}:`)) continue;
+    const close = mod.exports && mod.exports.closeConfigWatcher;
+    if (typeof close === 'function') close();
+  }
+};
+
 /** Load altered test-only TypeScript without writing it into the source tree. */
 module.exports.fromText = function loadTsFromText(relativePath, source) {
   return loadFile(path.resolve(__dirname, '..', relativePath), source);

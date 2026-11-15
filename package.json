@@ -1,11 +1,11 @@
 {
   "name": "munder-difflin",
-  "version": "1.1.104",
+  "version": "1.1.105",
   "private": true,
   "description": "Boldly code where no team has coded before. Your AI crew, on duty 24/7. A free, local-first multi-agent harness that turns the CLI coding agent you already run into a clone of you, coordinating an office of agents on your machine.",
   "main": "out/main/index.js",
   "engines": {
-    "node": ">=20 <21"
+    "node": ">=24 <25"
   },
   "author": "Chaitanya Giri",
   "repository": {
@@ -18,16 +18,16 @@
     "build": "electron-vite build && npm run copy:main-assets && node tools/build-heavyjob.cjs && node tools/build-input-helper.cjs",
     "copy:main-assets": "node tools/copy-main-assets.cjs",
     "preview": "electron-vite preview",
-    "postinstall": "node tools/patch-node-pty-race-fix.cjs && node tools/patch-node-pty-winpty-gyp.cjs && electron-rebuild -f && node tools/ensure-pty-perms.cjs && node tools/patch-node-pty-conpty.cjs && node tools/record-node-pty-race-fix.cjs && node tools/patch-node-pty-winpty-gyp.cjs --check",
+    "postinstall": "node tools/patch-node-pty-race-fix.cjs && node tools/patch-node-pty-winpty-gyp.cjs && node node_modules/electron/install.js && electron-rebuild -f && node tools/build-fs-handle.cjs && node tools/ensure-pty-perms.cjs && node tools/patch-node-pty-conpty.cjs && node tools/record-node-pty-race-fix.cjs && node tools/patch-node-pty-winpty-gyp.cjs --check",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
     "test": "node test/tools/run-tests.cjs",
     "test:focused": "node test/tools/run-tests.cjs",
     "check:links": "node tools/check-release-links.cjs",
-    "dist": "npm run build && electron-builder",
+    "dist": "npm run build && node scripts/dist.cjs",
     "dist:trial": "node tools/build-trial.cjs",
-    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:mac": "npm run build && electron-builder --mac && node build/macUpdateFloor.cjs dist/latest-mac.yml",
     "dist:win:raw": "npm run build && electron-builder --win",
     "dist:win": "node scripts/cut-cmd-natives.cjs --dist-only",
     "cut:win": "node scripts/cut-cmd-natives.cjs",
@@ -54,7 +54,7 @@
     "@xterm/addon-webgl": "^0.19.0",
     "@xterm/headless": "5.5.0",
     "@xterm/xterm": "^5.5.0",
-    "better-sqlite3": "^11.10.0",
+    "better-sqlite3": "13.0.3",
     "blobatar": "2.7.0",
     "commit-graph": "^2.4.0",
     "electron-updater": "^6.8.9",
@@ -73,16 +73,17 @@
     "zustand": "^4.5.5"
   },
   "devDependencies": {
+    "@electron/fuses": "1.8.0",
     "@electron/notarize": "^2.5.0",
-    "@electron/rebuild": "^3.7.0",
+    "@electron/rebuild": "4.2.1",
     "@types/better-sqlite3": "^7.6.13",
     "@types/localtunnel": "^2.0.4",
     "@types/node": "^22.7.5",
     "@types/react": "^18.3.11",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.2",
-    "electron": "^32.2.0",
-    "electron-builder": "^25.1.8",
+    "electron": "45.3.0",
+    "electron-builder": "26.18.0",
     "electron-vite": "^2.3.0",
     "typescript": "^5.6.3",
     "vite": "^5.4.8"
@@ -91,5 +92,14 @@
     "app-builder-lib": {
       "@electron/rebuild": "$@electron/rebuild"
     }
+  },
+  "allowScripts": {
+    "better-sqlite3@13.0.3": true,
+    "electron-winstaller@5.4.0": true,
+    "esbuild@0.21.5": true,
+    "fsevents@2.3.3": true,
+    "node-pty@1.1.0": true,
+    "onnxruntime-node@1.21.0": true,
+    "tunnelmole@2.4.0": true
   }
 }

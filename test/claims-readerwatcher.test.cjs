@@ -181,7 +181,7 @@ test('CL-READERWATCHER wiring: main starts the watchers after the S0 import, at 
   assert.match(src, /claimsImportReady\(\)\.then\(\(\) => readerWatchers\.sync\(\)/, 'only after the S0 import has settled');
   assert.match(src, /setInterval\(syncReaderWatchers, READER_WATCH_SYNC_MS\)/);
   const start = src.slice(src.indexOf('function claimsEndpoint('), src.indexOf('function claimsEndpoint(') + 6000);
-  assert.match(start, /setImmediate\(syncReaderWatchers\)/, 'at claims start');
+  assert.match(start, /void warmed\.then\(syncReaderWatchers\)/, 'at claims start (after the A3 warm)');
 });
 
 // god 886ed8: an agent raised to reader or writer mid-run, or given its first ledger.

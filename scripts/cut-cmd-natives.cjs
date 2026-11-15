@@ -13,7 +13,7 @@ for (const key of Object.keys(env)) {
 }
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 if (process.argv.includes('--print-plan')) {
-  console.log(JSON.stringify({ npmCi: ['ci'], inheritedNoDefaultCurrentDirectoryInExePath: Object.keys(env).some((key) => key.toLowerCase() === 'nodefaultcurrentdirectoryinexepath') }));
+  console.log(JSON.stringify({ npmCi: ['ci'], modelProvision: [path.join('scripts', 'fetch-memory-model.cjs')], inheritedNoDefaultCurrentDirectoryInExePath: Object.keys(env).some((key) => key.toLowerCase() === 'nodefaultcurrentdirectoryinexepath') }));
   process.exit(0);
 }
 function run(command, args) {
@@ -22,6 +22,11 @@ function run(command, args) {
   const r = spawnSync(command, args, { cwd: root, env, stdio: 'inherit', windowsHide: true, shell: command === npm && process.platform === 'win32' });
   if (r.error) throw r.error;
   if (r.status !== 0) process.exit(r.status || 1);
+}
+function provisionModel() {
+  // The model binaries are intentionally gitignored. Provision and verify them
+  // here so both supported Windows build entry points package the pinned model.
+  run(process.execPath, [path.join('scripts', 'fetch-memory-model.cjs')]);
 }
 function check() {
   run(process.execPath, [
@@ -51,6 +56,7 @@ if (process.argv.includes('--install-only')) {
   // Evidence/recovery mode: the same plain install the full cut starts with.
   run(npm, ['ci']);
 } else if (process.argv.includes('--dist-only')) {
+  provisionModel();
   run(npm, ['run', 'dist:win:raw']);
   check();
   gate();
@@ -58,6 +64,7 @@ if (process.argv.includes('--install-only')) {
   // Keep this literal plain npm ci: --ignore-scripts makes a deceptively
   // successful cut that omits the better-sqlite3 rebuild.
   run(npm, ['ci']);
+  provisionModel();
   run(npm, ['run', 'dist:win:raw']);
   check();
   gate();

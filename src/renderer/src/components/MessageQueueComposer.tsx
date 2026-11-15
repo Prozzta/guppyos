@@ -724,7 +724,7 @@ function FreeFlowButton({ agentId, hasGroqKey }: { agentId: string; hasGroqKey: 
   const openKeySettings = (e: ReactMouseEvent): void => {
     e.stopPropagation();
     setHint(null);
-    window.dispatchEvent(new CustomEvent('cth:open-settings', { detail: { section: 'Voice' } }));
+    window.dispatchEvent(new CustomEvent('cth:open-settings', { detail: { section: 'Blob' } }));
   };
 
   return (
@@ -804,7 +804,7 @@ function FreeFlowButton({ agentId, hasGroqKey }: { agentId: string; hasGroqKey: 
                     style={{ color: 'var(--cth-ink-900)' }}
                   >console.groq.com/keys</a>
                 </li>
-                <li>Paste it into Settings → Voice → Groq API key</li>
+                <li>Paste it into Settings → Blob → Groq API key</li>
                 <li>Click <strong>voice</strong>, or hold the <strong>right Option</strong> key to talk</li>
               </ol>
 

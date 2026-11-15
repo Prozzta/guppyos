@@ -22,7 +22,7 @@ import {
   readdirSync, statSync, rmSync, appendFileSync, symlinkSync, copyFileSync, chmodSync,
   lstatSync, readlinkSync, unlinkSync,
   openSync, readSync, closeSync,
-  watch, type FSWatcher, type Stats
+  type FSWatcher, type Stats
 } from 'node:fs';
 import { basename, join, dirname, isAbsolute, win32, posix } from 'node:path';
 import { homedir } from 'node:os';
@@ -72,6 +72,7 @@ import {
   ARCHIVE_DIR, ARCHIVE_PASS_MS, appendArchived, appendRevived, archiveStamp, mergeHotCold, planArchive, readArchive
 } from './taskArchive';
 import { expandTilde } from './fs';
+import { CATCHUP_SLICE_MS, MAIL_BATCH, TICK_EVERY, batchOp, byCodeUnit, drainMail, filterSteps, listOp, mergeSteps, runMailSliced, sortSteps, statOp, tick, type MailSliceDeps, type MailStat, type MailSteps } from './mailSteps';
 import { provenStatKey, statKey } from './statCacheKey';
 import {
   AgyStatuslineOwner, PROCESS_STARTED_AT, buildStatuslineCommand, newOwnerToken, osLiveness,
@@ -88,6 +89,7 @@ import { godHandoffFit } from './godStartup';
 import { MAIL_JOINED_BUDGET } from './mailSurface';
 import { FLOOR_DIGEST_FILE, recordBackstopClosed, recordFlaggedForHuman, type DigestModelHooks } from './floorDigest';
 import { BOARD_STATUS_FILE } from './boardStatus';
+import { watchDirectorySafely } from './safeDirectoryWatch';
 
 /** The subset of HarnessConfig the hive consumes for the default-MCP merge.
  *  Kept as a local shape so hive.ts never imports the foundation-owned config
@@ -586,7 +588,7 @@ export interface RouterRuntime {
 }
 
 const NODE_ROUTER_RUNTIME: RouterRuntime = {
-  watch: (dir, onHint) => watch(dir, { persistent: false }, () => onHint()),
+  watch: (dir, onHint) => watchDirectorySafely(dir, () => onHint()),
   setImmediate: (fn) => { setImmediate(fn); },
   setInterval: (fn, ms) => setInterval(fn, ms),
   clearInterval: (h) => clearInterval(h as NodeJS.Timeout)
@@ -652,6 +654,62 @@ export function syncedClaudeSkillNames(home: string = homedir()): string[] {
   } catch { /* no synced skills */ }
   return [...names].sort();
 }
+
+/** One mail file as last statted, with its parsed {id, created_at} once read (null = not a message). */
+type MailFileEntry = { mtimeMs: number; size: number; meta?: { id: unknown; created_at: unknown } | null };
+/**
+ * The racy-mtime rule (as git uses for its index): a directory or file mtime is not unique per change
+ * (NTFS often gives two moves in one clock tick the SAME folder mtime), so anything cached against an
+ * mtime is trusted only if it was taken at least RACY_MS after that mtime: any later change then has
+ * to carry a newer mtime. 2 s also covers FAT/SMB's 2 s timestamp granularity.
+ */
+const RACY_MS = 2000;
+/** Newest file first; equal mtimes by name, so an order merged from an older listing is the same as
+ *  a fresh sort (a total order: no tie is left to the readdir order). */
+const byMtimeDescName = (a: [string, MailFileEntry], b: [string, MailFileEntry]): number => b[1].mtimeMs - a[1].mtimeMs || byCodeUnit(a[0], b[0]);
+/** SCALE-DONE-STAT: a handled-mail folder's listing as of the folder mtime `mtimeMs`, taken at
+ *  wall-clock `listedAt` (read before the folder was statted). Its two orders (by name for
+ *  hive:messages, newest first for hive:inbox) are built on first use, and a listing that follows an
+ *  earlier one derives them from that one's orders: keep the surviving entries, sort only the new
+ *  ones, merge. So a folder that gains a file costs O(n) sliced steps, never a full re-sort. */
+class ArchivedMailDir {
+  private names: string[] | undefined;
+  private byMtime: Array<[string, MailFileEntry]> | undefined;
+  constructor(readonly mtimeMs: number, readonly files: Map<string, MailFileEntry>, readonly listedAt = Number.NaN, private base?: ArchivedMailDir) {
+    if (base) base.base = undefined; // one level only: the chain never grows
+  }
+  /** Whether this listing can stand for the folder while its mtime stays `mtimeMs` (racy-mtime rule). */
+  trusted(): boolean { return this.listedAt - this.mtimeMs >= RACY_MS; }
+  /** File names in code-unit order (the order Array#sort() gives). */
+  *namesSteps(): MailSteps<string[]> {
+    if (this.names) return this.names;
+    const keys = [...this.files.keys()];
+    const prev = this.base?.names;
+    let out: string[];
+    if (prev) {
+      const was = this.base!.files;
+      const kept = yield* filterSteps(prev, (n) => this.files.has(n));
+      const fresh = yield* sortSteps(yield* filterSteps(keys, (n) => !was.has(n)), byCodeUnit);
+      out = yield* mergeSteps(kept, fresh, byCodeUnit);
+    } else out = yield* sortSteps(keys, byCodeUnit);
+    return (this.names = out);
+  }
+  /** Newest file first (byMtimeDescName). */
+  *byMtimeSteps(): MailSteps<Array<[string, MailFileEntry]>> {
+    if (this.byMtime) return this.byMtime;
+    const entries = [...this.files];
+    const prev = this.base?.byMtime;
+    let out: Array<[string, MailFileEntry]>;
+    if (prev) {
+      const was = this.base!.files;
+      const kept = yield* filterSteps(prev, ([n, f]) => this.files.get(n) === f);
+      const fresh = yield* sortSteps(yield* filterSteps(entries, ([n, f]) => was.get(n) !== f), byMtimeDescName);
+      out = yield* mergeSteps(kept, fresh, byMtimeDescName);
+    } else out = yield* sortSteps(entries, byMtimeDescName);
+    return (this.byMtime = out);
+  }
+}
+const EMPTY_MAIL_DIR = new ArchivedMailDir(Number.NaN, new Map());
 
 export class HiveManager {
   /**
@@ -800,7 +858,12 @@ export class HiveManager {
   private readonly authorityIssues = new Map<string, HiveIntegrityIssue>();
   /** TASKS-JSON-SPLIT: the hourly archive pass and the archive reader's cache. */
   private archiveTimer: ReturnType<typeof setInterval> | null = null;
-  private archiveCache: { root: string; stamp: string; cards: Map<string, Record<string, unknown>> } | null = null;
+  private archiveCache: { root: string; stamp: string; cards: Map<string, Record<string, unknown>>; checkedAt: number } | null = null;
+  /** SCALE-TASKS-MAP (Jim B1): archived() trusts its last stamp check this long, so a burst of
+   *  lookups (taskStatus per claim) costs no readdir/stat of tasks-archive/. Main's own archive
+   *  writes (archivePass, revive) drop the cache at once; only an OUTSIDE append waits <= this. */
+  static readonly ARCHIVE_REVALIDATE_MS = 2_000;
+  private allTasksCache: { root: string | null; hot: unknown[]; archived: Map<string, Record<string, unknown>> | null; value: { tasks: unknown[] }; byId: Map<string, unknown> | null } | null = null;
   /** C90-MAILCARD: the per-card mail index of the current hive root (mailCards.ts). */
   private mailCardIndex: MailCardIndex | null = null;
   /** ZT-I3: watches tasks.json (never writes it) and keeps the per-card sidecar. */
@@ -1104,6 +1167,11 @@ export class HiveManager {
    *  agent's terminal). Prepended to god's PATH only; the broker refuses every other caller. */
   writeTermCommand(script: string): string | null {
     return this.writeCommandDir('term', script);
+  }
+
+  /** CLAIMS-BOOTSTRAP: god's floor-wide legacy claims import command. */
+  writeClaimsCommand(script: string): string | null {
+    return this.writeCommandDir('claims', script);
   }
 
   /** HEAVY-LOCK-RESERVATION-RELEASE: `<root>/bin/heavy/`, the `heavy` command (`heavy status`,
@@ -1592,6 +1660,7 @@ export class HiveManager {
         // GOD-TERMINAL-CONTROL: the `term` capability URL exists only in god's environment
         // (hygiene; the broker's request-time god check is the boundary).
         if (hookUrl && meta.isGod) env.HIVE_TERM_URL = hookUrl.replace('/hook/', '/term/');
+        if (hookUrl && meta.isGod) env.HIVE_CLAIMS_URL = hookUrl.replace('/hook/', '/claims/');
         try {
           if (desc.kind === 'hooks') {
             // The agy and grok bridges write GLOBAL config (~/.gemini/…/hooks.json,
@@ -1630,6 +1699,7 @@ export class HiveManager {
               if (codex.mcpUrl) env.HIVE_LEDGER_URL = codex.mcpUrl.replace('/mcp/', '/ledger/');
               // GOD-TERMINAL-CONTROL: env only, never written into Codex's config.toml.
               if (codex.mcpUrl && meta.isGod) env.HIVE_TERM_URL = codex.mcpUrl.replace('/mcp/', '/term/');
+              if (codex.mcpUrl && meta.isGod) env.HIVE_CLAIMS_URL = codex.mcpUrl.replace('/mcp/', '/claims/');
               if (codex.developerInstructions) developerInstructionsSet = true;
               // WAKE-SCREEN-GUARD R2-2: no startup update prompt on any Codex argv (fresh and
               // `codex resume` alike: `-c` is a global flag). The same key is in its config.toml.
@@ -1813,6 +1883,7 @@ export class HiveManager {
       if (hookUrl) env.HIVE_LEDGER_URL = hookUrl.replace('/hook/', '/ledger/');
       // GOD-TERMINAL-CONTROL: `term` uses the same token, and only god's environment has the URL.
       if (hookUrl && meta.isGod) env.HIVE_TERM_URL = hookUrl.replace('/hook/', '/term/');
+      if (hookUrl && meta.isGod) env.HIVE_CLAIMS_URL = hookUrl.replace('/hook/', '/claims/');
       args.push('--settings', settingsPath);
     }
     return { args, env };
@@ -3611,6 +3682,14 @@ export class HiveManager {
     return [...this.outboxWatchers.keys()].sort();
   }
 
+  /** Close an outbox watcher before lifecycle code removes its agent directory. */
+  closeOutboxWatcher(dir: string): void {
+    const watcher = this.outboxWatchers.get(dir);
+    if (!watcher) return;
+    this.outboxWatchers.delete(dir);
+    try { watcher.close(); } catch { /* already closed */ }
+  }
+
   /** Coalesce every hint in this turn into ONE authoritative scan (event scheduling, not a timer). */
   private scheduleRouteOnce(): void {
     if (this.routeQueued || !this.routerTimer) return;
@@ -4105,23 +4184,54 @@ export class HiveManager {
     return [...landed];
   }
 
-  /** The archived cards, cached by the archive's file stamp (it changes about once an hour). */
+  /** The archived cards, cached by the archive's file stamp (it changes about once an hour), which
+   *  is re-checked at most every ARCHIVE_REVALIDATE_MS (on the authority clock). */
   private archived(root: string): Map<string, Record<string, unknown>> {
+    const now = this.authorityNow();
+    const c = this.archiveCache;
+    if (c && c.root === root && now - c.checkedAt >= 0 && now - c.checkedAt < HiveManager.ARCHIVE_REVALIDATE_MS) return c.cards;
     const stamp = archiveStamp(root);
-    if (this.archiveCache && this.archiveCache.root === root && this.archiveCache.stamp === stamp) return this.archiveCache.cards;
+    if (c && c.root === root && c.stamp === stamp) { c.checkedAt = now; return c.cards; }
     const cards = readArchive(root);
-    this.archiveCache = { root, stamp, cards };
+    this.archiveCache = { root, stamp, cards, checkedAt: now };
     return cards;
   }
 
   /** TASKS-JSON-SPLIT: hot plus archive (hot wins), for readers that need any card ever made:
    *  id uniqueness, the ledger route, claim/webhook status, search, the archived board view. */
   allTasks(): { tasks: unknown[] } {
+    return this.allTasksView().value;
+  }
+
+  /** SCALE-TASKS-MAP: one card by id, from any card ever made (hot wins; the first occurrence,
+   *  as a `.find` over allTasks gives). O(1) while hot and archive are unchanged. */
+  taskById(id: string): unknown {
+    const view = this.allTasksView();
+    if (!view.byId) {
+      const byId = new Map<string, unknown>();
+      for (const c of view.value.tasks) {
+        const cid = c && typeof c === 'object' ? (c as { id?: unknown }).id : undefined;
+        if (typeof cid === 'string' && !byId.has(cid)) byId.set(cid, c);
+      }
+      view.byId = byId;
+    }
+    return view.byId.get(id);
+  }
+
+  /** SCALE-TASKS-MAP: the merged list is rebuilt only when the hot ledger object (shared and
+   *  re-read only on a file change) or the archive (cached by its stamp) is a new object; until
+   *  then every caller gets the same frozen list, so a per-claim status lookup is not O(all cards). */
+  private allTasksView(): { value: { tasks: unknown[] }; byId: Map<string, unknown> | null } {
     const root = this.root();
     const hot = (this.tasks() as { tasks?: unknown } | null)?.tasks;
     const list = Array.isArray(hot) ? hot : [];
-    if (!root) return { tasks: list };
-    return { tasks: mergeHotCold(list, this.archived(root)) };
+    const archived = root ? this.archived(root) : null;
+    const c = this.allTasksCache;
+    if (c && c.root === root && c.hot === list && c.archived === archived) return c;
+    const merged = archived ? mergeHotCold(list, archived) : list;
+    const value = { tasks: Object.isFrozen(merged) ? merged : Object.freeze(merged) as unknown[] };
+    this.allTasksCache = { root, hot: list, archived, value, byId: null };
+    return this.allTasksCache;
   }
 
   /** tasks-revive: move one archived card back to hot unchanged. False when it is not archived. */
@@ -4175,26 +4285,59 @@ export class HiveManager {
    * by message id so each appears once.
    */
   voiceMessages(opts: { agentId?: string; id?: string; limit?: number; includeArchived?: boolean } = {}): VoiceMessage[] {
+    return drainMail(this.voiceMessagesSteps(opts));
+  }
+
+  /**
+   * The IPC form of voiceMessages (hive:messages): the same steps run off the caller's turn on
+   * fs/promises in CATCHUP_SLICE_MS slices, so a cold call over a year of mail never blocks main.
+   * Identical concurrent calls share one run.
+   */
+  voiceMessagesAsync(opts: { agentId?: string; id?: string; limit?: number; includeArchived?: boolean } = {}, deps?: MailSliceDeps): Promise<VoiceMessage[]> {
+    return this.sharedMailRun(`voice|${JSON.stringify([opts.agentId, opts.id, opts.limit, opts.includeArchived])}`, () => runMailSliced(this.voiceMessagesSteps(opts), deps));
+  }
+
+  private sharedMailRun<T>(key: string, run: () => Promise<T>): Promise<T> {
+    const hit = this.mailRuns.get(key);
+    if (hit) return hit as Promise<T>;
+    const p = run().finally(() => { this.mailRuns.delete(key); });
+    this.mailRuns.set(key, p);
+    return p;
+  }
+  private readonly mailRuns = new Map<string, Promise<unknown>>();
+
+  private *voiceMessagesSteps(opts: { agentId?: string; id?: string; limit?: number; includeArchived?: boolean }): MailSteps<VoiceMessage[]> {
     const root = this.root();
     if (!root) return [];
     const agentsDir = join(root, 'agents');
-    if (!existsSync(agentsDir)) return [];
+    if (!(yield* statOp(agentsDir))) return [];
 
     const wantId = typeof opts.id === 'string' ? opts.id.trim() : '';
     const onlyAgent = typeof opts.agentId === 'string' ? opts.agentId.trim() : '';
     const includeArchived = opts.includeArchived !== false; // default true
 
     let owners: string[];
-    try {
-      owners = onlyAgent
-        ? [onlyAgent]
-        : readdirSync(agentsDir).filter((id) => !id.startsWith('.') && existsSync(this.agentDir(id)));
-    } catch {
-      return [];
+    if (onlyAgent) owners = [onlyAgent];
+    else {
+      const ids = (yield* listOp(agentsDir))?.filter((id) => !id.startsWith('.'));
+      if (!ids) return [];
+      const there = yield* batchOp(ids.map((id) => ({ stat: this.agentDir(id) })));
+      owners = ids.filter((_, i) => there[i] !== null);
     }
+    const lim = wantId ? 1 : typeof opts.limit === 'number' && isFinite(opts.limit)
+      ? Math.max(1, Math.min(40, Math.round(opts.limit)))
+      : 12;
 
+    // SCALE-MESSAGES-INDEX: select from each file's cached {id, created_at} (archived folders come
+    // from the dir-mtime cache with their name order; a live inbox/outbox is statted and re-read only
+    // for a changed file), keeping only the newest `lim` rows as it goes (the stable sort + slice it
+    // replaces: newest created_at first, ties in traversal order), then read just those rows (a bounded
+    // cache keeps a repeat call from reading them again). Same traversal and first-seen dedup.
+    type Picked = { path: string; key: string; mtimeMs: number; owner: string; direction: 'inbox' | 'outbox'; archived: boolean; created_at: unknown };
+    const newer = (a: Picked, b: Picked): boolean => String(a.created_at || '').localeCompare(String(b.created_at || '')) > 0;
     const seen = new Set<string>();
-    const out: VoiceMessage[] = [];
+    const top: Picked[] = [];
+    let walked = 0;
     for (const owner of owners) {
       const base = this.agentDir(owner);
       const folders: Array<{ dir: string; direction: 'inbox' | 'outbox'; archived: boolean }> = [
@@ -4206,36 +4349,180 @@ export class HiveManager {
         folders.push({ dir: join(base, 'outbox', '.sent'), direction: 'outbox', archived: true });
       }
       for (const f of folders) {
-        for (const m of this.listMessages(f.dir)) {
-          if (!m || typeof m.id !== 'string' || seen.has(m.id)) continue;
-          seen.add(m.id);
-          if (wantId && m.id !== wantId) continue;
-          out.push({
-            id: m.id,
-            conversation: m.conversation,
-            from: m.from,
-            to: m.to,
-            act: m.act,
-            subject: redactSecrets(m.subject),
-            body: redactSecrets(m.body),
-            requires_reply: !!m.requires_reply,
-            direction: f.direction,
-            owner,
-            archived: f.archived,
-            created_at: m.created_at
-          });
+        let files: Map<string, MailFileEntry>;
+        let names: string[];
+        if (f.archived) {
+          const d = yield* this.archivedMailDirSteps(f.dir);
+          files = d.files;
+          names = yield* d.namesSteps();
+        } else {
+          files = yield* this.liveMailDirSteps(f.dir);
+          names = yield* sortSteps([...files.keys()], byCodeUnit);
+        }
+        const metas = yield* this.mailFileMetasSteps(f.dir, names, files);
+        for (const n of names) {
+          if (++walked % TICK_EVERY === 0) yield* tick();
+          const file = files.get(n)!;
+          const meta = metas.get(n);
+          if (!meta || typeof meta.id !== 'string' || seen.has(meta.id)) continue;
+          seen.add(meta.id);
+          if (wantId && meta.id !== wantId) continue;
+          const row: Picked = { path: join(f.dir, n), key: `${file.size}|${file.mtimeMs}`, mtimeMs: file.mtimeMs, owner, direction: f.direction, archived: f.archived, created_at: meta.created_at };
+          if (top.length >= lim && !newer(row, top[top.length - 1])) continue;
+          let at = top.length;
+          while (at > 0 && newer(row, top[at - 1])) at--;
+          top.splice(at, 0, row);
+          if (top.length > lim) top.pop();
         }
       }
     }
 
-    // Newest first by ISO created_at (lexicographic == chronological for ISO-8601).
-    out.sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
-    if (wantId) return out.slice(0, 1);
-    const lim = typeof opts.limit === 'number' && isFinite(opts.limit)
-      ? Math.max(1, Math.min(40, Math.round(opts.limit)))
-      : 12;
-    return out.slice(0, lim);
+    const bodies = yield* this.voiceMessageBodiesSteps(top);
+    const out: VoiceMessage[] = [];
+    for (let i = 0; i < top.length; i++) {
+      const r = top[i];
+      const m = bodies[i];
+      if (!m || typeof m.id !== 'string') continue; // moved or rewritten since it was indexed
+      out.push({
+        id: m.id,
+        conversation: m.conversation,
+        from: m.from,
+        to: m.to,
+        act: m.act,
+        subject: redactSecrets(m.subject),
+        body: redactSecrets(m.body),
+        requires_reply: !!m.requires_reply,
+        direction: r.direction,
+        owner: r.owner,
+        archived: r.archived,
+        created_at: m.created_at
+      });
+      yield* tick();
+    }
+    return out;
   }
+
+  /**
+   * SCALE-DONE-STAT / SCALE-MESSAGES-INDEX: a handled-mail folder (inbox/.done, outbox/.sent) only
+   * gains and loses files (the harness renames mail in; nothing rewrites it there), so its listing
+   * is cached by the folder's own mtime: an unchanged folder costs one stat, a changed one a
+   * readdir plus a stat of each NEW file only. The folder is statted BEFORE it is listed, so a file
+   * that lands in between changes the mtime the next call sees. A listing taken within RACY_MS of the
+   * folder's mtime is not trusted (a second move in the same tick can leave that mtime unchanged), so
+   * the next call lists again; old entries are still reused, so that costs one readdir. Each file also
+   * caches its parsed {id, created_at} (mailFileMetasSteps), so nothing old is read again.
+   */
+  private *archivedMailDirSteps(dir: string): MailSteps<ArchivedMailDir> {
+    const listedAt = this.mailClock();
+    const st = yield* statOp(dir);
+    if (!st) { this.archivedMailDirs.delete(dir); return EMPTY_MAIL_DIR; }
+    const prev = this.archivedMailDirs.get(dir);
+    if (prev && prev.mtimeMs === st.mtimeMs && prev.trusted()) return prev;
+    const listed = yield* listOp(dir);
+    if (!listed) { this.archivedMailDirs.delete(dir); return EMPTY_MAIL_DIR; }
+    const names = yield* filterSteps(listed, (f) => f.endsWith('.json'));
+    const files = new Map<string, MailFileEntry>();
+    const fresh: string[] = [];
+    for (let i = 0; i < names.length; i++) {
+      const old = prev?.files.get(names[i]);
+      if (old) files.set(names[i], old); else fresh.push(names[i]);
+      if ((i + 1) % TICK_EVERY === 0) yield* tick();
+    }
+    for (let i = 0; i < fresh.length; i += MAIL_BATCH) {
+      const chunk = fresh.slice(i, i + MAIL_BATCH);
+      const stats = yield* batchOp(chunk.map((n) => ({ stat: join(dir, n) })));
+      chunk.forEach((n, j) => { const s = stats[j] as MailStat | null; if (s && s.isFile) files.set(n, { mtimeMs: s.mtimeMs, size: s.size }); });
+    }
+    const next = new ArchivedMailDir(st.mtimeMs, files, listedAt, prev);
+    this.archivedMailDirs.set(dir, next);
+    return next;
+  }
+
+  /** A live inbox/ or outbox/ (small: unhandled mail only): listed and statted every call, as
+   *  before; a file whose size and mtime are unchanged keeps its cached meta. */
+  private *liveMailDirSteps(dir: string): MailSteps<Map<string, MailFileEntry>> {
+    const files = new Map<string, MailFileEntry>();
+    const listed = yield* listOp(dir);
+    if (!listed) { this.liveMailDirs.delete(dir); return files; }
+    const names = listed.filter((f) => f.endsWith('.json'));
+    const prev = this.liveMailDirs.get(dir);
+    for (let i = 0; i < names.length; i += MAIL_BATCH) {
+      const chunk = names.slice(i, i + MAIL_BATCH);
+      const stats = yield* batchOp(chunk.map((n) => ({ stat: join(dir, n) })));
+      chunk.forEach((n, j) => {
+        const s = stats[j] as MailStat | null;
+        if (!s) return; // moved meanwhile
+        const old = prev?.get(n);
+        files.set(n, old && old.size === s.size && old.mtimeMs === s.mtimeMs ? old : { mtimeMs: s.mtimeMs, size: s.size });
+      });
+    }
+    this.liveMailDirs.set(dir, files);
+    return files;
+  }
+
+  /** The {id, created_at} of each named file (null = not a message), parsed once per entry: only
+   *  entries not parsed yet are read, MAIL_BATCH at a time. A parse is kept on the entry only when
+   *  read at least RACY_MS after the file's mtime: a same-tick rewrite of the same size would
+   *  otherwise keep the size+mtime key and its stale meta. */
+  private *mailFileMetasSteps(dir: string, names: readonly string[], files: Map<string, MailFileEntry>): MailSteps<Map<string, { id: unknown; created_at: unknown } | null>> {
+    const out = new Map<string, { id: unknown; created_at: unknown } | null>();
+    const todo: string[] = [];
+    for (let i = 0; i < names.length; i++) {
+      const meta = files.get(names[i])?.meta;
+      if (meta !== undefined) out.set(names[i], meta); else todo.push(names[i]);
+      if ((i + 1) % TICK_EVERY === 0) yield* tick();
+    }
+    for (let i = 0; i < todo.length; i += MAIL_BATCH) {
+      const chunk = todo.slice(i, i + MAIL_BATCH);
+      const readAt = this.mailClock();
+      const texts = yield* batchOp(chunk.map((n) => ({ read: join(dir, n) })));
+      chunk.forEach((n, j) => {
+        let meta: { id: unknown; created_at: unknown } | null = null;
+        try {
+          const m = JSON.parse(texts[j] as string) as { id?: unknown; created_at?: unknown } | null;
+          if (m) meta = { id: m.id, created_at: m.created_at };
+        } catch { meta = null; }
+        out.set(n, meta);
+        const file = files.get(n)!;
+        if (readAt - file.mtimeMs >= RACY_MS) file.meta = meta;
+      });
+      yield* tick();
+    }
+    return out;
+  }
+
+  /** Each returned row's full message, from a small cache keyed by path + size + mtime; a body read
+   *  within RACY_MS of that mtime is not cached (racy-mtime rule, as the metas). */
+  private *voiceMessageBodiesSteps(rows: ReadonlyArray<{ path: string; key: string; mtimeMs: number }>): MailSteps<Array<HiveMessage | null>> {
+    const out: Array<HiveMessage | null> = rows.map(() => null);
+    const todo: number[] = [];
+    rows.forEach((r, i) => {
+      const k = `${r.path}|${r.key}`;
+      const hit = this.voiceBodyCache.get(k);
+      if (hit !== undefined) { this.voiceBodyCache.delete(k); this.voiceBodyCache.set(k, hit); out[i] = hit; } else todo.push(i);
+    });
+    const readAt = this.mailClock();
+    const texts = yield* batchOp(todo.map((i) => ({ read: rows[i].path })));
+    todo.forEach((i, j) => {
+      let m: HiveMessage | null = null;
+      try { m = JSON.parse(texts[j] as string) as HiveMessage | null; } catch { m = null; }
+      if (m === null) return;
+      out[i] = m;
+      if (readAt - rows[i].mtimeMs < RACY_MS) return;
+      this.voiceBodyCache.set(`${rows[i].path}|${rows[i].key}`, m);
+      if (this.voiceBodyCache.size > HiveManager.VOICE_BODY_CACHE_MAX) {
+        const first = this.voiceBodyCache.keys().next().value;
+        if (first !== undefined) this.voiceBodyCache.delete(first);
+      }
+    });
+    return out;
+  }
+  static readonly VOICE_BODY_CACHE_MAX = 200;
+  private readonly archivedMailDirs = new Map<string, ArchivedMailDir>();
+  private readonly liveMailDirs = new Map<string, Map<string, MailFileEntry>>();
+  private readonly voiceBodyCache = new Map<string, HiveMessage | null>();
+  /** Wall clock for the racy-mtime rule (RACY_MS); a test injects a fixed one. */
+  private mailClock: () => number = () => Date.now();
   /**
    * ZT-I1-MAIL §7.1 / §11.12(c): the one-shot, idempotent upgrade pass (see mailMigration.ts).
    * Reads the registry for MUTATION, so a damaged registry throws and the pass waits for the next
@@ -4567,47 +4854,79 @@ export class HiveManager {
    * not loaded (see inboxBacklog).
    */
   mailHistory(agentId: string, opts: { limit?: number; archived?: boolean } = {}): Array<HiveMessage & { mail_state: string; archived: boolean }> {
+    return drainMail(this.mailHistorySteps(agentId, opts));
+  }
+
+  /** The IPC form of mailHistory (hive:inbox, polled every ~3 s): the same steps off the caller's
+   *  turn in CATCHUP_SLICE_MS slices; identical concurrent polls share one run. */
+  mailHistoryAsync(agentId: string, opts: { limit?: number; archived?: boolean } = {}, deps?: MailSliceDeps): Promise<Array<HiveMessage & { mail_state: string; archived: boolean }>> {
+    return this.sharedMailRun(`inbox|${JSON.stringify([agentId, opts.limit, !!opts.archived])}`, () => runMailSliced(this.mailHistorySteps(agentId, opts), deps));
+  }
+
+  private *mailHistorySteps(agentId: string, opts: { limit?: number; archived?: boolean }): MailSteps<Array<HiveMessage & { mail_state: string; archived: boolean }>> {
     const limit = Math.max(1, Math.min(1000, Math.round(opts.limit ?? HiveManager.MAIL_HISTORY_LIMIT)));
     const inbox = join(this.agentDir(agentId), 'inbox');
-    const list = (dir: string, archived: boolean): Array<{ path: string; stem: string; archived: boolean; mtimeMs: number; size: number }> => {
-      let names: string[];
-      try { names = readdirSync(dir).filter((f) => f.endsWith('.json')); } catch { return []; }
-      const out: Array<{ path: string; stem: string; archived: boolean; mtimeMs: number; size: number }> = [];
-      for (const n of names) {
-        const p = join(dir, n);
-        try { const st = statSync(p); if (st.isFile()) out.push({ path: p, stem: n.slice(0, -5), archived, mtimeMs: st.mtimeMs, size: st.size }); } catch { /* moved meanwhile */ }
-      }
-      return out;
-    };
-    const live = list(inbox, false);
+    type Listed = { path: string; stem: string; archived: boolean; mtimeMs: number; size: number };
+    const live: Listed[] = [];
+    const liveNames = (yield* listOp(inbox))?.filter((f) => f.endsWith('.json')) ?? [];
+    for (let i = 0; i < liveNames.length; i += MAIL_BATCH) {
+      const chunk = liveNames.slice(i, i + MAIL_BATCH);
+      const stats = yield* batchOp(chunk.map((n) => ({ stat: join(inbox, n) })));
+      chunk.forEach((n, j) => {
+        const st = stats[j] as MailStat | null;
+        if (st && st.isFile) live.push({ path: join(inbox, n), stem: n.slice(0, -5), archived: false, mtimeMs: st.mtimeMs, size: st.size });
+      });
+    }
     const liveStems = new Set(live.map((f) => f.stem));
-    const done = list(join(inbox, '.done'), true).filter((f) => !liveStems.has(f.stem)).sort((a, b) => b.mtimeMs - a.mtimeMs);
+    // SCALE-DONE-STAT: .done only gains and loses files, so its listing comes from the dir-mtime
+    // cache (each file statted once, on first sight) and is walked newest-first until the limit.
+    const doneDir = join(inbox, '.done');
+    const want = Math.max(limit, 0) - live.length;
+    const done: Listed[] = [];
+    if (want > 0) {
+      const byMtime = yield* (yield* this.archivedMailDirSteps(doneDir)).byMtimeSteps();
+      for (const [n, f] of byMtime) {
+        if (done.length >= want) break;
+        const stem = n.slice(0, -5);
+        if (!liveStems.has(stem)) done.push({ path: join(doneDir, n), stem, archived: true, mtimeMs: f.mtimeMs, size: f.size });
+      }
+    }
     const files = [...live.sort((a, b) => b.mtimeMs - a.mtimeMs), ...done].slice(0, Math.max(limit, 0));
     let entries: Record<string, { state: string }> = {};
     if (!opts.archived) {
       try { entries = this.mail.ledger(agentId).entries; } catch { entries = {}; }
     }
-    const seen = new Set<string>();
-    const out: Array<HiveMessage & { mail_state: string; archived: boolean }> = [];
-    for (const f of files.sort((a, b) => a.mtimeMs - b.mtimeMs)) {
-      const key = `${f.path}|${f.size}|${f.mtimeMs}`;
-      let msg = this.mailHistoryCache.get(f.path);
-      if (!msg || msg.key !== key) {
+    files.sort((a, b) => a.mtimeMs - b.mtimeMs);
+    const keyOf = (f: Listed): string => `${f.path}|${f.size}|${f.mtimeMs}`;
+    const got = new Map<string, { key: string; msg: HiveMessage | null }>();
+    const todo = files.filter((f) => { const c = this.mailHistoryCache.get(f.path); return !c || c.key !== keyOf(f); });
+    for (let i = 0; i < todo.length; i += MAIL_BATCH) {
+      const chunk = todo.slice(i, i + MAIL_BATCH);
+      const texts = yield* batchOp(chunk.filter((f) => f.size <= HiveManager.INBOX_MESSAGE_MAX_BYTES).map((f) => ({ read: f.path })));
+      let t = 0;
+      for (const f of chunk) {
         let parsed: HiveMessage | null = null;
-        try {
-          if (f.size <= HiveManager.INBOX_MESSAGE_MAX_BYTES) {
-            const m = JSON.parse(readFileSync(f.path, 'utf8')) as unknown;
+        if (f.size <= HiveManager.INBOX_MESSAGE_MAX_BYTES) {
+          try {
+            const m = JSON.parse(texts[t++] as string) as unknown;
             if (m && typeof m === 'object' && !Array.isArray(m)) parsed = m as HiveMessage;
-          }
-        } catch { parsed = null; }
-        msg = { key, msg: parsed };
-        this.mailHistoryCache.set(f.path, msg);
+          } catch { parsed = null; }
+        }
+        const entry = { key: keyOf(f), msg: parsed };
+        got.set(f.path, entry);
+        this.mailHistoryCache.set(f.path, entry);
         if (this.mailHistoryCache.size > HiveManager.MAIL_HISTORY_CACHE_MAX) {
           const first = this.mailHistoryCache.keys().next().value;
           if (first !== undefined) this.mailHistoryCache.delete(first);
         }
       }
-      if (!msg.msg) continue;
+      yield* tick();
+    }
+    const seen = new Set<string>();
+    const out: Array<HiveMessage & { mail_state: string; archived: boolean }> = [];
+    for (const f of files) {
+      const msg = got.get(f.path) ?? this.mailHistoryCache.get(f.path);
+      if (!msg || msg.key !== keyOf(f) || !msg.msg) continue;
       const id = typeof msg.msg.id === 'string' && msg.msg.id ? msg.msg.id : f.stem;
       if (seen.has(id)) continue;
       seen.add(id);
@@ -6050,11 +6369,10 @@ export class HiveManager {
     const dir = dirname(p);
     if (this.authorityWatchers.has(dir)) return;
     try {
-      const w = watch(dir, { persistent: false }, (_event, name) => {
+      const w = watchDirectorySafely(dir, (_event, name) => {
         const full = name ? join(dir, String(name)) : null;
         for (const [file, entry] of this.authorityCache) if (dirname(file) === dir && (!full || full === file)) entry.checkedAt = -Infinity;
-      });
-      w.on('error', () => { w.close(); this.authorityWatchers.delete(dir); });
+      }, () => { if (this.authorityWatchers.get(dir) === w) this.authorityWatchers.delete(dir); });
       this.authorityWatchers.set(dir, w);
     } catch { /* the stat revalidate is the authority */ }
   }

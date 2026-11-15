@@ -26,7 +26,7 @@
  * here feeds back into the tracker, admission, the notifier or scheduling.
  */
 import { createHmac, randomBytes } from 'node:crypto';
-import { applicabilityOf, type CapacityCollectionSnapshot, type CapacityState, type CapacityWindow,
+import { applicabilityOf, leadWindowKind, type CapacityCollectionSnapshot, type CapacityState, type CapacityWindow,
   type PoolCapacitySnapshot, type ProviderId } from '../shared/providerCapacity';
 import type {
   CapacityBanner, CapacityFreshnessView, CapacityNotice, CapacityStripCollection, CapacityStripPool, DisplayReadyMeter, FiveHourStrip,
@@ -385,38 +385,49 @@ export class CapacityStripPresenter {
     // evidence restored across a restart is not a reading this run has seen.
     const retained = !fresh && pool.state === 'UNKNOWN' && pool.stateReason === 'STALE_READING';
     const known = (fresh && pool.state !== 'UNKNOWN') || retained;
-    const five = pool.windows.find((w) => w.kind === 'FIVE_HOUR' && applicabilityOf(w) === 'APPLICABLE') ?? null;
+    // CAP-NO-5H-WINDOW: a reading with no five-hour window at all (Claude ultra) leads with
+    // Weekly - the lead row, its pie and its reset are the weekly window's, and no separate
+    // weekly row is sent (it would repeat the lead). A pool with no reading keeps 5h/unknown.
+    const lead = leadWindowKind(pool.windows);
+    const L: FiveHourStrip['label'] = lead === 'SEVEN_DAY' ? 'Weekly' : '5h';
+    const five = pool.windows.find((w) => w.kind === lead && applicabilityOf(w) === 'APPLICABLE') ?? null;
     const weekly = this.weekly(pool, fresh || retained, T, retained);
     const fiveRemaining = known && five ? validRemaining(five.remainingPercent) : null;
 
     // C2.7: the blocked frame needs MAIN evidence that weekly blocks ordinary use -
     // a pool in a BLOCKED_FRAME state whose weekly the provider named, or a fresh
-    // reading shows at zero. The state table below is the whole trigger.
-    const frame = known && fiveRemaining !== null && fiveRemaining > 0
+    // reading shows at zero. The state table below is the whole trigger. A Weekly-led
+    // pool has no five-hour figure to hold under it, so it never takes the frame.
+    const frame = lead === 'FIVE_HOUR' && known && fiveRemaining !== null && fiveRemaining > 0
       && (weekly?.reason === 'PROVIDER_ATTRIBUTED_LIMITING' || weekly?.reason === 'NUMERICALLY_EXHAUSTED')
       ? BLOCKED_FRAME[pool.state] : undefined;
     const presentation: StripPresentation = !known ? 'UNKNOWN' : frame ? 'BLOCKED_SUBORDINATE' : 'NORMAL';
 
     const fiveHour: FiveHourStrip = {
-      label: '5h',
+      label: L,
       text: pool.stateReason === 'RESTORED_UNCONFIRMED'
-        ? '5h · Capacity unknown · no live reading since restart'
-        : `5h · Capacity unknown · last update ${this.formatTime(pool.observedAt, now)}`
+        ? `${L} · Capacity unknown · no live reading since restart`
+        : `${L} · Capacity unknown · last update ${this.formatTime(pool.observedAt, now)}`
     };
     if (frame && fiveRemaining !== null) {
       const shown = Math.floor(fiveRemaining);
       fiveHour.text = frame.text(shown);
+    } else if (lead === 'SEVEN_DAY' && presentation === 'NORMAL' && weekly?.reason === 'PROVIDER_ATTRIBUTED_LIMITING') {
+      fiveHour.text = weeklyText(weekly.reason, null);
     } else if (presentation === 'NORMAL' && fiveRemaining !== null && five) {
       const m = meterOf(fiveRemaining);
-      fiveHour.text = `5h · ${m.displayPercent}% remaining`;
+      fiveHour.text = `${L} · ${m.displayPercent}% remaining`;
       fiveHour.meter = m;
       if (five.resetsAt !== null && five.resetsAt > now
-        && this.band(`${pool.poolKey}|reset|five`, fiveRemaining, five.resetsAt, T) !== null) {
+        && this.band(`${pool.poolKey}|reset|${lead === 'SEVEN_DAY' ? 'weekly' : 'five'}`, fiveRemaining, five.resetsAt, T) !== null) {
         fiveHour.resetText = `reset expected ~${this.formatTime(five.resetsAt, now)}`;
         fiveHour.resetExpectedAt = five.resetsAt;
       }
     } else if (known) {
-      fiveHour.text = '5h · Capacity unknown';
+      fiveHour.text = `${L} · Capacity unknown`;
+    }
+    if (lead === 'SEVEN_DAY') {
+      return { presentation, fiveHour, fiveWindowId: five?.windowId ?? null, weeklyWindowId: null };
     }
 
     let visibleWeekly: VisibleWeeklyStrip | undefined;

@@ -28,10 +28,18 @@ export interface IndexSyncDeps {
   level: (agentId: string) => LedgerLevel;
   /** Agents that have a ledger. */
   agents: () => string[];
-  send: (args: { wing: string; path: string; head: string; chunks: unknown[] }) => Promise<{ ok: boolean; error?: string; json?: unknown }>;
+  /** The chunks go as objects (in-process derive) or, from the derive worker (A19), as their JSON and count. */
+  send: (args: { wing: string; path: string; head: string; chunks?: unknown[]; chunksJson?: string; chunkCount?: number; delta?: boolean }) => Promise<{ ok: boolean; error?: string; json?: unknown }>;
+  /**
+   * STARTUP-FREEZE-104 A19 (god 424399): derive and chunksFor for a fully verified read in the derive worker thread:
+   * the head, the chunks as JSON and their count. Null (or absent): derive in-process, as before.
+   */
+  offMain?: (agentId: string, read: ReadResult) => Promise<{ head: string; chunksJson: string; count: number } | null>;
   /** Called after a verified snapshot is successfully indexed. */
   onIndexed?: (agentId: string) => void;
   log?: (row: Record<string, unknown>) => void;
+  /** Re-read and verify after this many deltas (default: 32), even in one long-lived session. */
+  fullVerifyEvery?: number;
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (t: unknown) => void;
 }
@@ -54,6 +62,12 @@ export function verifiedPrefix(r: ReadResult): { records: LedgerRec[]; truncated
 export class ClaimsIndexSync {
   private timers = new Map<string, unknown>();
   private running = new Map<string, Promise<SyncOutcome>>();
+  // A verified snapshot lets an acked *claim* append avoid reading any old segment.  Events can
+  // rewrite existing claim segments (notably purge), so they must discard the snapshot and take
+  // the full, integrity-checking path.
+  private snapshots = new Map<string, { records: LedgerRec[]; chunks: Array<{ claimId: string; part: number; contentSha256: string; status: string }> }>();
+  private pending = new Map<string, LedgerRec[]>();
+  private deltasSinceVerify = new Map<string, number>();
   private noDeriveLogged = false;
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
   private readonly clearTimer: (t: unknown) => void;
@@ -64,18 +78,30 @@ export class ClaimsIndexSync {
   }
 
   /** After an append: sync this agent soon (debounced). */
-  schedule(agentId: string): void {
+  schedule(agentId: string, appended?: LedgerRec): void {
+    if (appended) this.pending.set(agentId, [...(this.pending.get(agentId) ?? []), appended]);
     const t = this.timers.get(agentId);
     if (t) this.clearTimer(t);
     this.timers.set(agentId, this.setTimer(() => { this.timers.delete(agentId); void this.syncNow(agentId); }, CLAIMS_SYNC_DEBOUNCE_MS));
   }
 
-  /** A (re)started worker: every agent with a ledger, now. */
-  syncAll(): Promise<SyncOutcome[]> {
-    return Promise.all(this.d.agents().map((a) => this.syncNow(a)));
+  /**
+   * A (re)started worker: every agent with a ledger, now. STARTUP-FREEZE-104 A13 (Jim's 10x profile of c1db867a: the
+   * first sync was one 2.3 s block): each agent's read, derive and chunks start in their own turn of the event loop
+   * (an agent's sync runs up to its send before the next turn), so timers, IPC and input run between agents. The
+   * same agents, in the same order, with the same outcomes.
+   */
+  async syncAll(): Promise<SyncOutcome[]> {
+    const runs: Promise<SyncOutcome>[] = [];
+    for (const a of this.d.agents()) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      runs.push(this.syncNow(a));
+    }
+    return Promise.all(runs);
   }
 
-  syncNow(agentId: string): Promise<SyncOutcome> {
+  syncNow(agentId: string, appended?: LedgerRec): Promise<SyncOutcome> {
+    if (appended) this.pending.set(agentId, [...(this.pending.get(agentId) ?? []), appended]);
     const prior = this.running.get(agentId) ?? Promise.resolve(null);
     const run = prior.catch(() => null).then(() => this.syncOnce(agentId));
     this.running.set(agentId, run);
@@ -90,19 +116,76 @@ export class ClaimsIndexSync {
       if (!this.noDeriveLogged) { this.noDeriveLogged = true; this.d.log?.({ kind: 'claims-index-no-derive' }); }
       return { sent: false, why: 'no-derive' };
     }
-    const read = this.d.readLedger(agentId);
+    const queuedBefore = this.pending.get(agentId) ?? [];
+    // An event is not append-only: ClaimStore may rewrite the claim records it targets.  Never
+    // retain their former text/MACs in main or give the worker a delta that cannot remove them.
+    const rewritten = queuedBefore.some((r) => r.t === 'event');
+    if (rewritten) {
+      this.snapshots.delete(agentId);
+      this.pending.delete(agentId);
+    }
+    const queued = rewritten ? [] : queuedBefore;
+    const previous = rewritten ? undefined : this.snapshots.get(agentId);
+    // Only fsync-acked claim records may extend an already verified snapshot.  Every other reason
+    // to sync reads and verifies the ledger again.
+    const verifyEvery = Math.max(1, this.d.fullVerifyEvery ?? 32);
+    const delta = !!previous && queued.length > 0 && (this.deltasSinceVerify.get(agentId) ?? 0) < verifyEvery;
+    const read: ReadResult = delta
+      ? { records: [...previous.records, ...queued], torn: null, chain: 'ok' }
+      : this.d.readLedger(agentId);
     const prefix = verifiedPrefix(read);
     if (!prefix) {
+      // A later append must not resurrect a snapshot that a fresh integrity read rejected.
+      this.snapshots.delete(agentId);
       const why = read.chain !== 'ok' && read.chain.brokenAt === 'head-anchor' ? 'head-anchor' : 'key-missing';
       this.d.log?.({ kind: 'claims-index-skipped', agentId, why });
       return { sent: false, why };
     }
+    // A19: a fully verified read derives in the worker thread; main only passes the JSON on. A read with a chain break
+    // (a verified prefix only), a delta (not the store's kept read), or a worker fallback derives here as before.
+    if (!delta && !prefix.truncatedAt && this.d.offMain) {
+      const off = await this.d.offMain(agentId, read);
+      if (off) {
+        const reply = await this.d.send({ wing: agentId, path: claimsSourcePath(agentId), head: off.head, chunksJson: off.chunksJson, chunkCount: off.count });
+        if (!reply.ok) this.d.log?.({ kind: 'claims-index-failed', agentId, error: String(reply.error ?? '').slice(0, 160) });
+        else {
+          // A full send with no chunk objects on main: no snapshot to extend (an older one would diff against rows the
+          // index no longer has), so the next sync reads again. The queued appends are in this read.
+          this.snapshots.delete(agentId);
+          this.deltasSinceVerify.set(agentId, 0);
+          const later = this.pending.get(agentId) ?? [];
+          if (later.length <= queued.length) this.pending.delete(agentId);
+          else this.pending.set(agentId, later.slice(queued.length));
+          this.d.onIndexed?.(agentId);
+        }
+        return { sent: true, records: prefix.records.length, chunks: off.count, reply };
+      }
+    }
+    // A18 (Jim 939357e9: one agent's read, derive and chunks were one 2 s block): the derive and the chunks each start
+    // in a turn of their own. This agent's syncs are serial (syncNow), and the read is a verified prefix, so the records
+    // and the state do not change between.
+    await new Promise<void>((resolve) => setImmediate(resolve));
     const state = derive(prefix.records, this.d.registry(), this.d.ruleConfig());
-    const chunks = withParts(chunksFor(prefix.records, state));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const allChunks = withParts(chunksFor(prefix.records, state));
+    const old = new Map((previous?.chunks ?? []).map((c) => [`${c.claimId}\0${c.part}`, `${c.contentSha256}\0${c.status}`]));
+    // A delta carries additions and claims whose derived status changed.  The worker preserves
+    // omitted rows for this mode; a full verification remains authoritative for removals/recovery.
+    const chunks = delta ? allChunks.filter((c) => old.get(`${c.claimId}\0${c.part}`) !== `${c.contentSha256}\0${c.status}`) : allChunks;
     const head = state.ledgerHead || (prefix.records.length ? prefix.records[prefix.records.length - 1].mac : '');
-    const reply = await this.d.send({ wing: agentId, path: claimsSourcePath(agentId), head, chunks });
+    const reply = await this.d.send({ wing: agentId, path: claimsSourcePath(agentId), head, chunks, ...(delta ? { delta: true } : {}) });
     if (!reply.ok) this.d.log?.({ kind: 'claims-index-failed', agentId, error: String(reply.error ?? '').slice(0, 160) });
-    else this.d.onIndexed?.(agentId);
+    else {
+      // A broken-chain prefix is safe to send but not safe to extend with a future delta.
+      if (prefix.truncatedAt) this.snapshots.delete(agentId);
+      else this.snapshots.set(agentId, { records: prefix.records, chunks: allChunks });
+      this.deltasSinceVerify.set(agentId, delta ? (this.deltasSinceVerify.get(agentId) ?? 0) + 1 : 0);
+      // Do not discard an append that arrived while the worker request was in flight.
+      const later = this.pending.get(agentId) ?? [];
+      if (later.length <= queued.length) this.pending.delete(agentId);
+      else this.pending.set(agentId, later.slice(queued.length));
+      this.d.onIndexed?.(agentId);
+    }
     return { sent: true, records: prefix.records.length, chunks: chunks.length, ...(prefix.truncatedAt ? { truncatedAt: prefix.truncatedAt } : {}), reply };
   }
 }

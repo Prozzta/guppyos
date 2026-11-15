@@ -140,23 +140,37 @@ test('settle: when quiet() runs out, the step holds for the stubs instead of mov
   assert.equal(b.calls.filter((c) => c.cmd === 'advance').length, 0);
 });
 
-test('stubsIdle: not idle while a wake is in flight, while a COMMITTED prompt is unread, or while a stub has a pending job', async () => {
+test('stubsIdle: the completed all-exit127 shim case may advance fake time, but a stuck coordinator remains held', async () => {
   const fs = require('node:fs'); const os = require('node:os'); const path = require('node:path');
   const box = fs.mkdtempSync(path.join(os.tmpdir(), 'stubs-idle-'));
   const rig = new Rig(box);
   rig.agentIds = ['a-1'];
+  const calls = [];
   let inFlight = false; let committed = 1; let read = 1; let pending = 0;
   rig.call = async (cmd) => {
+    calls.push(cmd);
     if (cmd === 'inFlight') return inFlight;
+    if (cmd === 'inFlightIds') return inFlight ? ['a-1'] : [];
     if (cmd === 'outcomes') return Array.from({ length: committed }, () => ({ agentId: 'a-1', outcome: { kind: 'COMMITTED' } }));
     return true;
   };
   rig.prompts = () => Array.from({ length: read }, () => ({ kind: 'prompt' }));
   const setPending = () => { fs.mkdirSync(rig.stubDir('a-1'), { recursive: true }); fs.writeFileSync(path.join(rig.stubDir('a-1'), 'composer.json'), JSON.stringify({ pending })); };
+  const setTranscript = (rows) => fs.writeFileSync(path.join(rig.stubDir('a-1'), 'transcript.jsonl'), rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
   try {
     setPending();
     assert.equal(await rig.stubsIdle(), true, 'idle: nothing in flight, every prompt read, no job');
-    inFlight = true; assert.equal(await rig.stubsIdle(), false, 'a wake in flight'); inFlight = false;
+    inFlight = true;
+    setTranscript([{ kind: 'start' }, { kind: 'hook', transport: 'none', exit: 127 }, { kind: 'hook', transport: 'none', exit: 127 }, { kind: 'turn-end' }]);
+    assert.equal(await rig.stubsIdle(), true, 'only the completed exit-127 shim turn may release the simulated clock');
+    setTranscript([{ kind: 'start' }, { kind: 'hook', transport: 'none', exit: 127 }, { kind: 'hook', transport: 'none', exit: 127 }]);
+    assert.equal(await rig.stubsIdle(), false, 'MUTANT: exit-127 hooks without the turn end are still real work');
+    setTranscript([{ kind: 'start' }, { kind: 'hook', transport: 'none', exit: 0 }, { kind: 'turn-end' }]);
+    assert.equal(await rig.stubsIdle(), false, 'MUTANT: a coordinator stuck in flight is not waived without all-exit127 evidence');
+    calls.length = 0;
+    await assert.rejects(rig.beatUntil(() => false, { what: 'the stuck coordinator mutant', settle: false, holdForStubs: true, busyTimeoutMs: 150, pauseMs: 0 }), /the stuck coordinator mutant never held, and the stubs stayed busy for 150 ms/);
+    assert.equal(calls.includes('advance'), false, 'the stuck coordinator mutant fails boundedly instead of advancing fake time');
+    inFlight = false;
     committed = 2; assert.equal(await rig.stubsIdle(), false, 'a COMMITTED prompt the stub has not read yet'); committed = 1;
     pending = 1; setPending(); assert.equal(await rig.stubsIdle(), false, 'a queued or running job in the stub'); pending = 0; setPending();
     assert.equal(await rig.stubsIdle(), true);

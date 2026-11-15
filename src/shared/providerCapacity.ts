@@ -315,6 +315,24 @@ export function windowKindFromMinutes(minutes: number | null | undefined): Windo
   return 'OTHER';
 }
 
+/**
+ * CAP-NO-5H-WINDOW (Human 2026-11-11): the window a pool leads with. A plan with no five-hour
+ * limit (Claude ultra) sends a reading whose ONLY rate window is seven_day: the five_hour entry
+ * is absent, not null or 0. A pool whose windows have no FIVE_HOUR row and do have a SEVEN_DAY
+ * row leads with Weekly, so the strip, its pie, the details and the usage line are driven by the
+ * figure the plan really has. The next reading that carries five_hour again leads with 5h again.
+ * It is decided from the windows of the reading itself, never from the absence of a reading: a
+ * pool with no windows (or no reading at all) keeps leading with 5h and stays unknown.
+ */
+export function leadWindowKind(windows: readonly { kind: WindowKind | string; applicability?: WindowApplicability }[]): 'FIVE_HOUR' | 'SEVEN_DAY' {
+  // A row stated INAPPLICABLE is not a window this plan has (Jim, 03dc6556 nit): it neither keeps
+  // the 5h lead nor gives Weekly one. An UNKNOWN-applicability 5h row still keeps 5h (and the pool
+  // UNKNOWN): we cannot say the plan has no 5h limit. The details' view windows have INAPPLICABLE
+  // rows filtered out already, so main and the details dot compute the same lead.
+  const has = (kind: string) => windows.some((w) => w.kind === kind && w.applicability !== 'INAPPLICABLE');
+  return !has('FIVE_HOUR') && has('SEVEN_DAY') ? 'SEVEN_DAY' : 'FIVE_HOUR';
+}
+
 /** User-safe label, main-owned. */
 export function windowLabel(kind: WindowKind, minutes: number | null): string {
   if (kind === 'FIVE_HOUR') return '5h';

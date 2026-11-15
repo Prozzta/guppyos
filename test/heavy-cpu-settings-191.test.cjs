@@ -19,7 +19,7 @@ require.cache[electron] = { id: electron, filename: electron, loaded: true, expo
 const { readConfig, writeConfig, __resetConfigCacheForTests } = loadTs('src/main/config.ts');
 const { heavyCpuOptions } = loadTs('src/main/heavyCpu.ts');
 
-test.after(() => fs.rmSync(userData, { recursive: true, force: true }));
+test.after(() => { require('./load-ts.cjs').closeConfigWatchers(); fs.rmSync(userData, { recursive: true, force: true }); });
 // INT 1.1.102: an edit behind the config module's back drops its read cache (CONFIG-READ-CACHE, 1.1.101),
 // as a hand edit would be picked up at the next revalidate.
 const handEdit = (text) => { fs.writeFileSync(path.join(userData, 'config.json'), text); __resetConfigCacheForTests(); };
