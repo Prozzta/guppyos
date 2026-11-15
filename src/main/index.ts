@@ -195,7 +195,8 @@ import { RosterStore } from './roster';
 import { buildWorkerLaunch } from './workerLaunch';
 import { ControlRegistry } from './control';
 import { WORKER_WAKE_HITL_REARM_MS, WorkerWakeWatchdog, type WakeClaim } from './workerWake';
-import { OwedContinuation, type OwedSent } from './owedContinuation';
+import { OwedContinuation, type OwedSent, type OwedSuppressFacts } from './owedContinuation';
+import { OwedStopContinue } from './owedStop';
 import { floorHoldWords, parseFloorHold } from './floorHold';
 import { owesWork } from './mailLedger';
 import { HeldInterferenceWatch, HELD_TICK_MS, heldWakesOf } from './heldInterference';
@@ -2375,6 +2376,7 @@ hookServer.setStopContinue({
   stopClaim: (agentId) => wakeSender?.stopClaim(agentId) ?? null,
   stopSettle: (agentId, requestId, blocked, chars) => wakeSender?.stopSettle(agentId, requestId, blocked, chars)
 });
+hookServer.setOwedStop({ decide: (agentId, provider, segmentTools) => decideOwedStop(agentId, provider, segmentTools) });
 hookServer.setTurnObserver((agentId, event, f) => {
   messageBox?.noteHook(agentId, event, f);
   try { wakeSender?.noteHook(agentId, event, f); } catch { /* never breaks a hook */ }
@@ -8849,39 +8851,70 @@ let heldInterferenceTimer: ReturnType<typeof setInterval> | null = null;
  *  reconcile on the same beat. Its mail goes through hive.send + wake:'now', so the claim path's
  *  own guards still apply on top of the watcher's suppressors. */
 const owedContinuation = new OwedContinuation(Date.now(), () => hive.registry().godId ?? null);
+/** Messages each of `from` sent, as the recipients' ledgers record them. */
+function owedSentBy(from: string[]): Map<string, OwedSent[]> {
+  const sent = new Map<string, OwedSent[]>();
+  for (const owner of Object.keys(hive.registry().agents ?? {})) {
+    for (const e of Object.values(hive.mail.ledger(owner).entries)) {
+      if (!from.includes(e.from)) continue;
+      const list = sent.get(e.from) ?? [];
+      list.push({ id: e.id, to: owner, act: e.act, at: e.deliveredAt, open: owesWork(e) });
+      sent.set(e.from, list);
+    }
+  }
+  return sent;
+}
+/** The legitimate-wait facts both owed watchers read (owedSuppressor), for one agent. */
+function owedWaitFacts(agentId: string, now: number, sent: OwedSent[]): Omit<OwedSuppressFacts, 'now' | 'entries'> & { pendingMail: number } {
+  const snap = control.snapshot(agentId);
+  const lf = workerWake.livenessFacts(agentId);
+  const q = heavyLock.queueSnapshot();
+  return {
+    pendingMail: mailPendingIds(agentId).length,
+    paused: snap.paused,
+    halted: snap.halted,
+    autoDeliveryPaused: snap.autoDeliveryPaused,
+    hitl: lf.lastHumanNeedsAt > 0 && now - lf.lastHumanNeedsAt < WORKER_WAKE_HITL_REARM_MS,
+    heavyQueued: q.waiters.some((w) => w.agentId === agentId) || q.reserved.some((r) => r.agentId === agentId),
+    heavyHolder: heavyLock.snapshot().some((h) => h.agentId === agentId),
+    floorHeld: parseFloorHold(readConfig().floorHold) !== null,
+    sent
+  };
+}
+/** CODEX-TURN-ENDS-EARLY P1: the owed-work Stop-continue (owedStop.ts), inside the agent's own Stop. */
+const owedStopContinue = new OwedStopContinue(Date.now());
+function decideOwedStop(agentId: string, provider: string | undefined, segmentTools: number): string | null {
+  const now = Date.now();
+  const d = owedStopContinue.decide(agentId, provider, readConfig().owedStopContinue, segmentTools, now,
+    Object.values(hive.mail.ledger(agentId).entries), () => {
+      const ptyId = ptyForAgent(agentId);
+      const s = ptyId ? ptyManager.promptState(ptyId) : undefined;
+      return {
+        ...owedWaitFacts(agentId, now, owedSentBy([agentId]).get(agentId) ?? []),
+        pty: !!ptyId,
+        inhibited: !!ptyId && automaticSubmit.inhibition(ptyId) !== null,
+        ...(s?.block ? { promptBlock: s.block } : {}),
+        ...(ptyId && ptyManager.lastHumanInputAt(ptyId) !== undefined ? { lastHumanInputAt: ptyManager.lastHumanInputAt(ptyId) } : {})
+      };
+    });
+  if (d.row) { try { hive.appendLog(d.row); } catch { /* logging only */ } }
+  return d.reason;
+}
 function runOwedContinuation(live: string[]): void {
   try {
     const now = Date.now();
-    const sent = new Map<string, OwedSent[]>();
-    for (const owner of Object.keys(hive.registry().agents ?? {})) {
-      for (const e of Object.values(hive.mail.ledger(owner).entries)) {
-        if (!live.includes(e.from)) continue;
-        const list = sent.get(e.from) ?? [];
-        list.push({ id: e.id, to: owner, act: e.act, at: e.deliveredAt, open: owesWork(e) });
-        sent.set(e.from, list);
-      }
-    }
-    const q = heavyLock.queueSnapshot();
-    const holders = heavyLock.snapshot();
-    const floorHeld = parseFloorHold(readConfig().floorHold) !== null;
+    const sent = owedSentBy(live);
     for (const agentId of live) {
-      const snap = control.snapshot(agentId);
       const lf = workerWake.livenessFacts(agentId);
       const d = owedContinuation.tick(agentId, {
         now,
         lifecycle: lf.lifecycle,
         lastTurnEndAt: lf.lastTurnEndAt,
         inFlight: !!workerWake.state(agentId).inFlight,
-        pendingMail: mailPendingIds(agentId).length,
-        paused: snap.paused,
-        halted: snap.halted,
-        autoDeliveryPaused: snap.autoDeliveryPaused,
-        hitl: lf.lastHumanNeedsAt > 0 && now - lf.lastHumanNeedsAt < WORKER_WAKE_HITL_REARM_MS,
-        heavyQueued: q.waiters.some((w) => w.agentId === agentId) || q.reserved.some((r) => r.agentId === agentId),
-        heavyHolder: holders.some((h) => h.agentId === agentId),
-        floorHeld,
+        ...owedWaitFacts(agentId, now, sent.get(agentId) ?? []),
         entries: Object.values(hive.mail.ledger(agentId).entries),
-        sent: sent.get(agentId) ?? []
+        provider: hookServer.mailChannel(agentId).provider ?? null,
+        toolCalls: hookServer.toolCallCount(agentId)
       });
       for (const row of d.rows) { try { hive.appendLog(row); } catch { /* logging only */ } }
       if (d.nudge) { try { hive.send(d.nudge.message as Partial<HiveMessage>, 'system'); } catch { /* best effort */ } }
