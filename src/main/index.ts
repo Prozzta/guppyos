@@ -9084,6 +9084,12 @@ app.whenReady().then(() => {
     }).then((ok) => app.exit(ok ? 0 : 1), () => app.exit(1));
     return;
   }
+  // RESTORE-ORPHAN-FLAG (2026-11-15): a Stable instance that lost the single-instance lock is
+  // quitting (app.quit() above is asynchronous), but this callback still ran its whole bootstrap:
+  // it logged app-start and ran archiveOrphanedAgents, and since THIS process owns no PTY it
+  // archived the running instance's live team as 'orphan' (log.jsonl 20:56:38Z, no spawn after,
+  // so nothing cleared it). The lock owner's hive is not ours to touch: do nothing here.
+  if (!gotInstanceLock) return;
   // MUNDER_DEV=1 — second, LIVE isolation check. The bootstrap above checked the
   // paths we intended to use; this checks the paths the app actually resolved
   // (config clamp, hive root, palace, pipe) now that config/hive are wired. A
