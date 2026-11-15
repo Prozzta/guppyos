@@ -69,6 +69,20 @@ function entryCount(s: RosterSnapshot): number {
   return s.agents.length + s.archived.length + s.restorable.length;
 }
 
+function isGodEntry(v: unknown): boolean {
+  if (!v || typeof v !== 'object') return false;
+  const a = v as { id?: unknown; isGod?: unknown };
+  return a.isGod === true || a.id === 'god';
+}
+
+/** The team a floor can bring back: every non-god entry on the floor or in the
+ *  restorable list. God is left out because a renderer with no roster at all
+ *  still boots with one, and archived entries are left out because an archive
+ *  alone restores nobody. */
+function workerCount(s: RosterSnapshot): number {
+  return [...s.agents, ...s.restorable].filter((a) => !isGodEntry(a)).length;
+}
+
 /**
  * Reads and writes one home folder's roster.
  *
@@ -122,6 +136,13 @@ export class RosterStore {
    * because the first refusal disarmed the guard, the second empty write went
    * through and flattened the file (seen live 2026-08-16 20:40:03). The previous
    * file is backed up either way, so even a wrong call here is recoverable.
+   *
+   * A snapshot that holds no workers counts as empty for the same reason. The
+   * renderer always boots with god, so a renderer that lost its storage sends
+   * a roster of god alone, and that write flattened a six-agent team (seen live
+   * 2026-11-15, after an antivirus removed Local Storage). While the file holds
+   * workers, a first write without any is refused, and only a write that
+   * carries workers (or lands on a file with none) disarms the guard.
    */
   write(snap: unknown): RosterWriteResult {
     const home = this.home();
@@ -132,12 +153,16 @@ export class RosterStore {
       mkdirSync(home, { recursive: true });
       const existing = this.read();
 
-      if (!this.wrote && existing && entryCount(existing) > 0 && entryCount(snap) === 0) {
+      const emptied = existing !== null && entryCount(existing) > 0 && entryCount(snap) === 0;
+      const teamDropped = existing !== null && workerCount(existing) > 0 && workerCount(snap) === 0;
+      if (!this.wrote && (emptied || teamDropped)) {
         // Back it up anyway: what is on disk right now is exactly what we are
         // protecting, and a copy of it costs nothing. `wrote` stays false: the
         // guard disarms only when a non-empty write lands, never on a refusal.
         this.backup(home, p, 'declined');
-        console.warn('[roster] refused to overwrite a non-empty roster with an empty one');
+        console.warn(emptied
+          ? '[roster] refused to overwrite a non-empty roster with an empty one'
+          : '[roster] refused to overwrite a roster that has workers with one that has none');
         return { ok: false, skipped: 'empty-first-write' };
       }
 
