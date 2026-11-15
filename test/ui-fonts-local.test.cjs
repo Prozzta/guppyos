@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * UI-FONTS-LOCAL (god 249216, 691c20): the UI's faces (Inter, Press Start 2P) and the release
  * drop's faces (Geist, JetBrains Mono) ship with the app, so nothing in it asks Google Fonts

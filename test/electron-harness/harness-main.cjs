@@ -103,14 +103,15 @@ function finish(payload) {
 async function bundleScenario(entry) {
   const esbuild = require('esbuild');
   // Vite-style asset imports (`x.png?url`, `x.tmj?raw`) and the `@brand` alias, so a scenario can
-  // mount the REAL App (RR-164): ?url resolves to a file URL, ?raw to the file's text.
+  // mount the REAL App (RR-164): ?url resolves to a file URL, ?raw to the file's text, and
+  // ?datauri (UI-FONTS-LOCAL, the release drop's faces) to the same data: URI the app build inlines.
   const viteAssets = {
     name: 'vite-assets',
     setup(build) {
       const { dirname, resolve: res, join: j } = require('node:path');
       const { pathToFileURL } = require('node:url');
       const root = j(__dirname, '..', '..');
-      build.onResolve({ filter: /\?(url|raw|worker)$/ }, (args) => {
+      build.onResolve({ filter: /\?(url|raw|worker|datauri)$/ }, (args) => {
         const [spec, kind] = args.path.split('?');
         const p = spec.startsWith('@brand/') ? res(root, 'src', 'renderer', 'src', 'assets', 'brand', spec.slice(7))
           : spec.startsWith('@/') ? res(root, 'src', 'renderer', 'src', spec.slice(2))
@@ -121,6 +122,7 @@ async function bundleScenario(entry) {
       build.onLoad({ filter: /.*/, namespace: 'vite-worker' }, () => ({ contents: 'export default class { postMessage() {} terminate() {} addEventListener() {} removeEventListener() {} }', loader: 'js' }));
       build.onLoad({ filter: /.*/, namespace: 'vite-url' }, (args) => ({ contents: `export default ${JSON.stringify(pathToFileURL(args.path).href)};`, loader: 'js' }));
       build.onLoad({ filter: /.*/, namespace: 'vite-raw' }, async (args) => ({ contents: `export default ${JSON.stringify(await require('node:fs/promises').readFile(args.path, 'utf8'))};`, loader: 'js' }));
+      build.onLoad({ filter: /\.woff2$/, namespace: 'vite-datauri' }, async (args) => ({ contents: `export default ${JSON.stringify('data:font/woff2;base64,' + (await require('node:fs/promises').readFile(args.path)).toString('base64'))};`, loader: 'js' }));
     }
   };
   const cssAsStyleTag = {
