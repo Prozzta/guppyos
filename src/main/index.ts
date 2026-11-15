@@ -6612,9 +6612,10 @@ ipcMain.handle('liveness:reoffer', (_evt, agentId: unknown) => {
   return ok;
 });
 // MIRROR-STARTUP-196: a mirror auto-off is a notice on the floor while it lasts.
-ipcMain.handle('hive:integrity', () => {
+ipcMain.handle('hive:integrity', async () => {
   const off = mirrorGuard?.status() ?? null;
-  return off ? [...hive.integrityIssues(), mirrorOffNotice(off, Date.now())] : hive.integrityIssues();
+  const issues = await hive.integrityIssuesAsync();
+  return off ? [...issues, mirrorOffNotice(off, Date.now())] : issues;
 });
 ipcMain.handle('config:integrity', () => configIntegrityIssue());
 ipcMain.handle('hive:renameAgent', (_evt, id: unknown, name: unknown) => {

@@ -428,6 +428,6 @@ test('WIRING: measured parse, ELU, spawn grace, re-arm, and the off surfaced to 
   assert.match(idx, /function mirrorSurfaced\(\): void \{\n  try \{ floorDigest\.run\(\); \}/);
   assert.ok(idx.indexOf('let mirrorGuard: MirrorCostGuard | null = null;') < idx.indexOf('const floorDigest = new FloorDigest({'), 'declared before the digest that reads it');
   assert.match(idx, /mirrorOff: \(\) => mirrorGuard\?\.status\(\) \?\? null,\n  send: \(msg, from\)/, 'the digest host');
-  assert.match(idx, /ipcMain\.handle\('hive:integrity', \(\) => \{\n  const off = mirrorGuard\?\.status\(\) \?\? null;\n  return off \? \[\.\.\.hive\.integrityIssues\(\), mirrorOffNotice\(off, Date\.now\(\)\)\] : hive\.integrityIssues\(\);/, 'the floor banner');
+  assert.match(idx, /ipcMain\.handle\('hive:integrity', async \(\) => \{\n  const off = mirrorGuard\?\.status\(\) \?\? null;\n  const issues = await hive\.integrityIssuesAsync\(\);\n  return off \? \[\.\.\.issues, mirrorOffNotice\(off, Date\.now\(\)\)\] : issues;/, 'the floor banner uses the off-main integrity scan');
   assert.match(idx, /mirrorOff: \(\) => \{ const off = mirrorGuard\?\.status\(\) \?\? null; return off \? mirrorOffWords\(off, Date\.now\(\)\) : null; \},/, 'term read');
 });

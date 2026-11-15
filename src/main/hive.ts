@@ -891,7 +891,7 @@ export class HiveManager {
     // opts.onChange runs before every onChange() listener.
     onChange: () => {
       const root = this.root();
-      if (root) this.authorityCache.delete(join(root, 'tasks.json'));
+      if (root) this.invalidateAuthorityCache(join(root, 'tasks.json'));
     }
   });
   /** At most one queued scan; hints arriving in the same turn coalesce into it. */
@@ -4117,6 +4117,37 @@ export class HiveManager {
   integrityIssues(): HiveIntegrityIssue[] {
     this.registry(true);
     this.tasks(true);
+    return this.integrityIssuesSnapshot();
+  }
+
+  /**
+   * The IPC/UI form of integrityIssues().  Keep the synchronous form above for
+   * the (many) synchronous callers, but never make the renderer's two-second
+   * banner poll wait on a filesystem stat or authority read on Electron main.
+   * MailLedger's notices are process-local state, so this has precisely the
+   * same result as integrityIssues() after refreshing the two file authorities.
+   */
+  async integrityIssuesAsync(): Promise<HiveIntegrityIssue[]> {
+    const root = this.root();
+    if (root) {
+      await Promise.all([
+        this.readAuthoritativeJsonCachedAsync(join(root, 'registry.json'), () => this.emptyRegistry())
+          .catch((error) => {
+            if (error instanceof HiveAuthorityCorruptError) return this.emptyRegistry();
+            throw error;
+          }),
+        this.readAuthoritativeJsonCachedAsync(join(root, 'tasks.json'), () => ({ tasks: [] }))
+          .catch((error) => {
+            if (error instanceof HiveAuthorityCorruptError) return { tasks: [] };
+            throw error;
+          })
+      ]);
+    }
+    return this.integrityIssuesSnapshot();
+  }
+
+  /** The in-memory portion shared by the synchronous and asynchronous scans. */
+  private integrityIssuesSnapshot(): HiveIntegrityIssue[] {
     // ZT-I3: a ledger error (duplicate id, unknown status) is a NOTICE: nothing is paused,
     // the file is not reverted, god fixes it by hand. Jim S1: the CACHED result; the banner
     // polls every 2 s and the guard already re-checks on watch, its poll and every API write.
@@ -6422,6 +6453,48 @@ export class HiveManager {
       throw new HiveAuthorityCorruptError(issue);
     }
   }
+  /** Async equivalent for the renderer's integrity poll; see integrityIssuesAsync(). */
+  private async readAuthoritativeJsonAsync<T>(p: string, onMissing: () => T): Promise<T> {
+    let raw: string;
+    try {
+      raw = await fsPromises.readFile(p, 'utf8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        this.quarantinedJsonFingerprints.delete(p);
+        this.authorityIssues.delete(p);
+        return onMissing();
+      }
+      throw new Error(`Hive authority ${basename(p)} could not be read: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    try {
+      const parsed = JSON.parse(raw) as T;
+      this.quarantinedJsonFingerprints.delete(p);
+      this.authorityIssues.delete(p);
+      return parsed;
+    } catch (error) {
+      const fingerprint = createHash('sha256').update(raw).digest('hex');
+      let quarantine: string | null = this.authorityIssues.get(p)?.quarantine ?? null;
+      if (this.quarantinedJsonFingerprints.get(p) !== fingerprint) {
+        quarantine = `${p}.corrupt-${Date.now()}-${shortRand()}`;
+        try {
+          await fsPromises.copyFile(p, quarantine);
+          this.quarantinedJsonFingerprints.set(p, fingerprint);
+        } catch (copyError) {
+          quarantine = null;
+          console.error(`[hive] could not quarantine corrupt ${basename(p)}:`, copyError);
+        }
+      }
+      const detail = error instanceof Error ? error.message : String(error);
+      const issue: HiveIntegrityIssue = { file: basename(p), quarantine: quarantine ? basename(quarantine) : null, error: detail };
+      this.authorityIssues.set(p, issue);
+      try {
+        this.appendLog({ kind: 'hive-authority-corrupt', file: basename(p), quarantine: quarantine ? basename(quarantine) : null, error: detail });
+      } catch (logError) {
+        console.error(`[hive] could not log corrupt authority ${basename(p)}:`, logError);
+      }
+      throw new HiveAuthorityCorruptError(issue);
+    }
+  }
   /**
    * MAIN-SYNC-LOG-LEDGER (registry, tasks): registry() and tasks() were a disk read + parse on
    * every call (~430 and ~40 calls/min on Guppy main under a heavy run on 1.1.99; tasks.json is
@@ -6436,6 +6509,8 @@ export class HiveManager {
   /** fs.watch invalidates normally; this slow stat is the missed-event safety net. */
   static readonly AUTHORITY_REVALIDATE_MS = 5_000;
   private readonly authorityCache = new Map<string, { key: string | null; value: unknown; checkedAt: number }>();
+  /** Every known authority invalidation advances this so an in-flight async read cannot revive old bytes. */
+  private readonly authorityGeneration = new Map<string, number>();
   private readonly authorityWatchers = new Map<string, FSWatcher>();
   private authorityFallbackTimer: ReturnType<typeof setInterval> | null = null;
   private authorityFallbackRunning = false;
@@ -6447,6 +6522,7 @@ export class HiveManager {
    *  rule's wall clock. */
   __resetAuthorityCacheForTests(now?: () => number, wall?: () => number): void {
     this.authorityCache.clear();
+    this.authorityGeneration.clear();
     this.authorityTestClock = !!now;
     this.authorityNow = now ?? (() => Date.now());
     this.authorityWall = wall ?? (() => Date.now());
@@ -6457,12 +6533,39 @@ export class HiveManager {
     if (c && !fresh && (!this.authorityTestClock || (now - c.checkedAt >= 0 && now - c.checkedAt < HiveManager.AUTHORITY_REVALIDATE_MS))) return c.value as T;
     const st = authorityStat(p);
     if (st && c && c.key === statKey(st)) { c.checkedAt = now; return c.value as T; }
-    this.authorityCache.delete(p);
+    this.invalidateAuthorityCache(p);
     // The key is taken BEFORE the read: a change between the two re-reads at the next revalidate.
     const value = this.readAuthoritativeJson<T>(p, onMissing);
     if (!st) return value;
     const frozen = authorityDeepFreeze(value);
     // Racy-git rule: a change within STAT_RACY_MS of now may share this key with a later write.
+    this.authorityCache.set(p, { key: provenStatKey(st, this.authorityWall()), value: frozen, checkedAt: now });
+    this.ensureAuthorityFallback();
+    this.watchAuthority(p);
+    return frozen;
+  }
+  /**
+   * Async counterpart used exclusively by hive:integrity. It deliberately
+   * follows the synchronous cache's forced-read behavior: a stat comes first,
+   * unchanged cached authorities retain identity, and missing/corrupt files
+   * remain uncached. The disk work runs in libuv instead of Electron main.
+   */
+  private async readAuthoritativeJsonCachedAsync<T>(p: string, onMissing: () => T): Promise<T> {
+    const now = this.authorityNow();
+    // This method yields for stat/read. Capture the generation before either yield so an
+    // intervening write, guard, watcher, or fallback invalidation cannot revive old bytes.
+    let generation = this.authorityGeneration.get(p) ?? 0;
+    const cached = this.authorityCache.get(p);
+    const st = await fsPromises.stat(p).catch(() => null);
+    if (st && cached && cached.key === statKey(st) && (this.authorityGeneration.get(p) ?? 0) === generation) {
+      cached.checkedAt = now;
+      return cached.value as T;
+    }
+    generation = this.invalidateAuthorityCache(p);
+    const value = await this.readAuthoritativeJsonAsync<T>(p, onMissing);
+    if (!st) return value;
+    const frozen = authorityDeepFreeze(value);
+    if ((this.authorityGeneration.get(p) ?? 0) !== generation) return frozen;
     this.authorityCache.set(p, { key: provenStatKey(st, this.authorityWall()), value: frozen, checkedAt: now });
     this.ensureAuthorityFallback();
     this.watchAuthority(p);
@@ -6474,7 +6577,7 @@ export class HiveManager {
     try {
       const w = watchDirectorySafely(dir, (_event, name) => {
         const full = name ? join(dir, String(name)) : null;
-        for (const [file, entry] of this.authorityCache) if (dirname(file) === dir && (!full || full === file)) entry.checkedAt = -Infinity;
+        for (const file of this.authorityCache.keys()) if (dirname(file) === dir && (!full || full === file)) this.invalidateAuthorityCache(file, true);
       }, () => { if (this.authorityWatchers.get(dir) === w) this.authorityWatchers.delete(dir); });
       this.authorityWatchers.set(dir, w);
     } catch { /* the stat revalidate is the authority */ }
@@ -6503,7 +6606,8 @@ export class HiveManager {
     try {
       await Promise.all([...this.authorityCache].map(async ([file, entry]) => {
         const st = await fsPromises.stat(file).catch(() => null);
-        if (!st || entry.key === null || entry.key !== statKey(st)) this.authorityCache.delete(file);
+        if (this.authorityCache.get(file) !== entry) return;
+        if (!st || entry.key === null || entry.key !== statKey(st)) this.invalidateAuthorityCache(file);
         else entry.checkedAt = this.authorityNow();
       }));
     } finally { this.authorityFallbackRunning = false; }
@@ -6518,7 +6622,17 @@ export class HiveManager {
   }
   private atomicWriteJson(p: string, data: unknown): void {
     // Dropped on success AND on failure: the file may or may not have changed.
-    try { atomicWriteJsonFile(p, data); } finally { this.authorityCache.delete(p); }
+    try { atomicWriteJsonFile(p, data); } finally { this.invalidateAuthorityCache(p); }
+  }
+  /** Invalidate a path and advance its epoch, retaining an entry only for watcher revalidation. */
+  private invalidateAuthorityCache(p: string, retain = false): number {
+    const generation = (this.authorityGeneration.get(p) ?? 0) + 1;
+    this.authorityGeneration.set(p, generation);
+    if (retain) {
+      const entry = this.authorityCache.get(p);
+      if (entry) entry.checkedAt = -Infinity;
+    } else this.authorityCache.delete(p);
+    return generation;
   }
 
 }
