@@ -1,0 +1,5 @@
+# UI-FONTS-LOCAL: the bundled font licences are sha256-pinned as upstream bytes (LF). Without this,
+# core.autocrlf=true checks them out as CRLF and the pins fail in a fresh Windows worktree.
+src/renderer/src/assets/**/*.txt text eol=lf
+src/renderer/src/assets/fonts/**/*.woff2 binary
+src/renderer/src/assets/fonts/**/*.ttf binary
