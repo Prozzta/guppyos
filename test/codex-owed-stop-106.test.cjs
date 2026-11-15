@@ -304,6 +304,13 @@ test('P1 HookServer: a subagent Stop, a straggler Stop for another turn, a one-w
   w2.tool();
   assert.notEqual(w2.fire('Stop', { transport: 'pipe-oneway' })?.decision, 'block');
   assert.deepEqual(w2.calls, [], 'a one-way pipe cannot carry a block');
+  const w3 = await rig(t, 'codex');
+  await turnWithRequest(w3);
+  w3.tool();
+  w3.hive.mail.setChannelOverride(A, { mode: 'legacy-read', reason: 'zero-hook-traffic', since: Date.now() });
+  assert.equal(w3.server.mailChannel(A).mode, 'legacy-read');
+  assert.notEqual(w3.fire('Stop')?.decision, 'block');
+  assert.deepEqual(w3.calls, [], 'a Codex agent degraded to legacy-read is never asked');
 });
 
 // ————————————————————————————————————————————————— P2: the Codex continuation cadence
@@ -401,7 +408,7 @@ test('wiring: main hands the HookServer the owed-stop decision with the setting,
   const idx = codeOnly(readSource('src/main/index.ts'));
   assert.match(idx, /hookServer\.setOwedStop\(\{ decide: \(agentId, provider, segmentTools\) => decideOwedStop\(agentId, provider, segmentTools\) \}\)/);
   const fn = idx.slice(idx.indexOf('function decideOwedStop'), idx.indexOf('function runOwedContinuation'));
-  for (const re of [/readConfig\(\)\.owedStopContinue/, /hive\.mail\.ledger\(agentId\)\.entries/, /owedWaitFacts\(agentId, now, owedSentBy\(\[agentId\]\)/, /automaticSubmit\.inhibition\(ptyId\)/, /promptState\(ptyId\)/, /lastHumanInputAt\(ptyId\)/, /hive\.appendLog\(d\.row\)/]) assert.match(fn, re);
+  for (const re of [/readConfig\(\)\.owedStopContinue/, /hive\.mail\.ledger\(agentId\)\.entries/, /owedWaitFacts\(agentId, now, owedSentBy\(\[agentId\]\)/, /automaticSubmit\.inhibition\(ptyId\)/, /promptState\(ptyId\)/, /\bpty: !!ptyId,/, /\.\.\.\(s\?\.block \? \{ promptBlock: s\.block \} : \{\}\)/, /lastHumanInputAt\(ptyId\)/, /hive\.appendLog\(d\.row\)/]) assert.match(fn, re);
   const run = idx.slice(idx.indexOf('function runOwedContinuation'), idx.indexOf('function runWorkerWakeBeat'));
   assert.match(run, /provider: hookServer\.mailChannel\(agentId\)\.provider \?\? null/);
   assert.match(run, /toolCalls: hookServer\.toolCallCount\(agentId\)/);

@@ -703,11 +703,13 @@ export class HookServer {
    *  with stop_hook_active set (a continued segment): owedStop's own per-obligation cap bounds it. */
   private owedStopReason(agentId: string, p: HookPayload, segmentTools: number): string | null {
     const os = this.owedStop;
-    if (!os || p.fully_idle === false || p.transport === 'pipe-oneway') return null;
+    // No fully_idle or shouldHalt check: fully_idle is AGY-only (owedStopOn is off for AGY) and a
+    // halt reaches decide() as owedSuppressor's halted fact (the same control flag).
+    if (!os || p.transport === 'pipe-oneway') return null;
     const t = this.turns.get(agentId);
     const turnId = typeof p.turn_id === 'string' && p.turn_id ? p.turn_id : null;
     if (!t?.open || (turnId && t.epoch !== turnId)) return null;
-    if (this.control?.shouldHalt(agentId)) return null;
+    // A Codex agent degraded to legacy-read (§11.10) reads its inbox itself: no injected continuation.
     const channel = this.mailChannel(agentId);
     if (channel.mode !== 'inject') return null;
     return os.decide(agentId, channel.provider, segmentTools);

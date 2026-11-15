@@ -111,6 +111,7 @@ async function buildFloor() {
   const { InboxWakeBridge } = loadTs('src/main/inboxWakeBridge.ts');
   const { WorkerWakeWatchdog, WORKER_WAKE_HITL_REARM_MS } = loadTs('src/main/workerWake.ts');
   const { OwedContinuation } = loadTs('src/main/owedContinuation.ts');
+  const { OwedStopContinue } = loadTs('src/main/owedStop.ts');
   const { owesWork } = loadTs('src/main/mailLedger.ts');
   const wakeClass = loadTs('src/shared/mailWakeClass.ts');
   const { ControlRegistry } = loadTs('src/main/control.ts');
@@ -137,7 +138,7 @@ async function buildFloor() {
   };
   const diags = [];
   const outcomes = [];
-  const rig = { clock, diags, outcomes, llm, bootSeen: new Set(), echoSeen: new Map(), stall: new Map(), interfere: new Map(), humanDirty: new Set(), capacityHold: false, quietHoldMin: 0, holdArchives: false, settleDelay: new Map(), heldProviderStatus: new Map() };
+  const rig = { clock, diags, outcomes, llm, bootSeen: new Set(), echoSeen: new Map(), stall: new Map(), interfere: new Map(), humanDirty: new Set(), capacityHold: false, owedWait: {}, owedStopSetting: undefined, quietHoldMin: 0, holdArchives: false, settleDelay: new Map(), heldProviderStatus: new Map() };
 
   // index.ts:361 - the ONE hive; this sandbox's harness home is the "live" home of THIS instance,
   // so the per-provider global writers (AGY hooks.json, statusline) write into the jailed HOME.
@@ -409,6 +410,33 @@ async function buildFloor() {
     onEpochClosed: (agentId, outcome, reason, redelivered) => inboxWake?.onMailEpochClosed(agentId, outcome, reason, redelivered),
     onMailBlock: (agentId) => inboxWake?.onMailBlock(agentId)
   });
+  // index.ts decideOwedStop + setOwedStop (CODEX-TURN-ENDS-EARLY P1). The ledger keeps real time, so
+  // the decision does too. The rig has no heavy lock or floor hold: rig.owedWait overrides those
+  // facts (and any other wait) so the driver can turn each suppressor on.
+  const owedStopContinue = new OwedStopContinue(Date.now());
+  hookServer.setOwedStop({
+    decide: (agentId, provider, segmentTools) => {
+      const now = Date.now();
+      const d = owedStopContinue.decide(agentId, provider, rig.owedStopSetting, segmentTools, now,
+        Object.values(hive.mail.ledger(agentId).entries), () => {
+          const ptyId = ptyForAgent(agentId);
+          const st = ptyId ? ptyManager.promptState(ptyId) : undefined;
+          const hb = ptyId ? composerOf(ptyId) : undefined;
+          const block = hb && hb.draft && rig.humanDirty.has(ptyId) ? 'draft' : (st && st.block) || null;
+          const h = ptyId ? ptyManager.lastHumanInputAt(ptyId) : undefined;
+          return {
+            ...owedWaitFacts(agentId, now, owedSentBy([agentId]).get(agentId) ?? []),
+            pty: !!ptyId,
+            inhibited: !!ptyId && automaticSubmit.inhibition(ptyId) !== null,
+            ...(block ? { promptBlock: block } : {}),
+            ...(h !== undefined ? { lastHumanInputAt: h } : {}),
+            ...rig.owedWait
+          };
+        });
+      if (d.row) { try { hive.appendLog(d.row); } catch { /* logging only */ } }
+      return d.reason;
+    }
+  });
   // index.ts:757
   hive.setHookBroker({ urlFor: (id) => hookServer.hookUrl(id), mcpFor: (id) => hookServer.mcpEndpoint(id), tokenFor: (id) => hookServer.hookToken(id), revoke: (id) => hookServer.revokeHookToken(id) });
   // index.ts:6376 hive.setDeliveryObserver (bootstrapHiveServices)
@@ -486,36 +514,49 @@ async function buildFloor() {
   // index.ts runOwedContinuation (HIVE-DWIGHT-BG-REINVOKE). The rig has no heavy lock. The
   // coordinator's Stop stamp is already on the simulated clock; the ledger keeps real time.
   const owedContinuation = new OwedContinuation(Date.now(), () => hive.registry().godId ?? null);
+  // index.ts owedSentBy / owedWaitFacts. heavy and floor are rig.owedWait seams (no heavy lock here).
+  function owedSentBy(from) {
+    const sent = new Map();
+    for (const owner of Object.keys(hive.registry().agents ?? {})) {
+      for (const e of Object.values(hive.mail.ledger(owner).entries)) {
+        if (!from.includes(e.from)) continue;
+        const list = sent.get(e.from) ?? [];
+        list.push({ id: e.id, to: owner, act: e.act, at: e.deliveredAt, open: owesWork(e) });
+        sent.set(e.from, list);
+      }
+    }
+    return sent;
+  }
+  function owedWaitFacts(agentId, now, sent) {
+    const snap = control.snapshot(agentId);
+    const lf = workerWake.livenessFacts(agentId);
+    return {
+      pendingMail: mailPendingIds(agentId).length,
+      paused: snap.paused,
+      halted: snap.halted,
+      autoDeliveryPaused: snap.autoDeliveryPaused,
+      hitl: lf.lastHumanNeedsAt > 0 && now - lf.lastHumanNeedsAt < WORKER_WAKE_HITL_REARM_MS,
+      heavyQueued: false,
+      heavyHolder: false,
+      floorHeld: false,
+      sent
+    };
+  }
   function runOwedContinuation(live) {
     try {
       const now = clock.now();
-      const sent = new Map();
-      for (const owner of Object.keys(hive.registry().agents ?? {})) {
-        for (const e of Object.values(hive.mail.ledger(owner).entries)) {
-          if (!live.includes(e.from)) continue;
-          const list = sent.get(e.from) ?? [];
-          list.push({ id: e.id, to: owner, act: e.act, at: e.deliveredAt, open: owesWork(e) });
-          sent.set(e.from, list);
-        }
-      }
+      const sent = owedSentBy(live);
       for (const agentId of live) {
-        const snap = control.snapshot(agentId);
         const lf = workerWake.livenessFacts(agentId);
         const d = owedContinuation.tick(agentId, {
           now,
           lifecycle: lf.lifecycle,
           lastTurnEndAt: lf.lastTurnEndAt,
           inFlight: !!workerWake.state(agentId).inFlight,
-          pendingMail: mailPendingIds(agentId).length,
-          paused: snap.paused,
-          halted: snap.halted,
-          autoDeliveryPaused: snap.autoDeliveryPaused,
-          hitl: lf.lastHumanNeedsAt > 0 && Date.now() - lf.lastHumanNeedsAt < WORKER_WAKE_HITL_REARM_MS,
-          heavyQueued: false,
-          heavyHolder: false,
-          floorHeld: false,
-          entries: Object.values(hive.mail.ledger(agentId).entries),
-          sent: sent.get(agentId) ?? []
+          ...owedWaitFacts(agentId, Date.now(), sent.get(agentId) ?? []),
+          provider: hookServer.mailChannel(agentId).provider ?? null,
+          toolCalls: hookServer.toolCallCount(agentId),
+          entries: Object.values(hive.mail.ledger(agentId).entries)
         });
         for (const row of d.rows) { try { hive.appendLog(row); } catch { /* logging only */ } }
         if (d.nudge) { try { hive.send(d.nudge.message, 'system'); } catch { /* best effort */ } }
@@ -616,6 +657,9 @@ async function main() {
     pause: ({ id, on }) => { control.pause(id, on); return control.snapshot(id); },
     resume: ({ id }) => { control.resume(id); return control.snapshot(id); },
     steer: ({ id, text }) => { control.steer(id, text); return true; },
+    // CODEX-TURN-ENDS-EARLY: override owed wait facts ({heavyHolder:true}, {floorHeld:true}, ...) and the setting.
+    owedWait: (o = {}) => { rig.owedWait = o; return o; },
+    owedStopSetting: ({ setting }) => { rig.owedStopSetting = setting; return setting ?? null; },
     capacityHold: ({ on }) => { rig.capacityHold = on; if (!on) f.inboxWake.onCapacityChange(); return on; },
     // QUIET-HOLD-ACT-ONLY: config.quietMailHoldMin for this rig (minutes; 0 = off).
     quietHold: ({ min }) => { rig.quietHoldMin = Number(min) || 0; return rig.quietHoldMin; },

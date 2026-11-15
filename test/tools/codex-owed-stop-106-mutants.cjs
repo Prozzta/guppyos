@@ -47,8 +47,9 @@ const MUTANTS = [
   ['H4 a straggler Stop moves the mark', HOOKS, '      if (!straggler) this.segmentMark.set', '      this.segmentMark.set', /not ok \d+ - P1 HookServer: a subagent Stop/],
   // No 'a straggler Stop is asked' row: owedStopReason already refuses a Stop naming another turn
   // (turnId vs epoch), so a guard on the call was redundant and is gone (a mutant could only kill a pin).
-  ['H6 a one-way pipe is asked', HOOKS, "    if (!os || p.fully_idle === false || p.transport === 'pipe-oneway') return null;", '    if (!os || p.fully_idle === false) return null;', /not ok \d+ - P1 HookServer: a subagent Stop/],
-  ['H7 a Stop with no open turn is asked', HOOKS, "    if (!t?.open || (turnId && t.epoch !== turnId)) return null;\n    if (this.control?.shouldHalt(agentId)) return null;\n    const channel = this.mailChannel(agentId);\n    if (channel.mode !== 'inject') return null;\n    return os.decide", "    if (turnId && t && t.epoch !== turnId) return null;\n    if (this.control?.shouldHalt(agentId)) return null;\n    const channel = this.mailChannel(agentId);\n    if (channel.mode !== 'inject') return null;\n    return os.decide", /not ok \d+ - P1 HookServer: a subagent Stop/],
+  ['H6 a one-way pipe is asked', HOOKS, "    if (!os || p.transport === 'pipe-oneway') return null;", '    if (!os) return null;', /not ok \d+ - P1 HookServer: a subagent Stop/],
+  ['H7 a Stop with no open turn is asked', HOOKS, "    if (!t?.open || (turnId && t.epoch !== turnId)) return null;\n    // A Codex agent degraded", "    if (turnId && t && t.epoch !== turnId) return null;\n    // A Codex agent degraded", /not ok \d+ - P1 HookServer: a subagent Stop/],
+  ['H9 a legacy-read Codex channel is asked', HOOKS, "    if (channel.mode !== 'inject') return null;\n    return os.decide", '    return os.decide', /not ok \d+ - P1 HookServer: a subagent Stop/],
   ['H8 the M4 mail block can be overridden', HOOKS, '      if (stopReason === null) {\n        try { stopReason = this.owedStopReason', '      if (true) {\n        try { stopReason = this.owedStopReason', /not ok \d+ - wiring:/],
   // P2: the Codex cadence
   ['P1 no 5 min repeat', OWED, '(working(t) ? OWED_REPEAT_CODEX_MS : OWED_REPEAT_MS)', 'OWED_REPEAT_MS', /not ok \d+ - P2: a working Codex agent/],
@@ -63,6 +64,8 @@ const MUTANTS = [
   ['I1 the beat passes no provider', INDEX, '        provider: hookServer.mailChannel(agentId).provider ?? null,', '        provider: null,', /not ok \d+ - wiring:/],
   ['I2 the beat passes no tool calls', INDEX, '        toolCalls: hookServer.toolCallCount(agentId)', '        toolCalls: 0', /not ok \d+ - wiring:/],
   ['I3 the setting is never read', INDEX, 'readConfig().owedStopContinue', 'undefined', /not ok \d+ - wiring:/],
+  ['I5 an agent with no PTY counts as having one', INDEX, '        pty: !!ptyId,', '        pty: true,', /not ok \d+ - wiring:/],
+  ['I6 the prompt block (draft/picker/exited) is never passed', INDEX, '        ...(s?.block ? { promptBlock: s.block } : {}),\n', '', /not ok \d+ - wiring:/],
   ['I4 the decision is never wired', INDEX, 'hookServer.setOwedStop({ decide: (agentId, provider, segmentTools) => decideOwedStop(agentId, provider, segmentTools) });', '', /not ok \d+ - wiring:/]
 ];
 
