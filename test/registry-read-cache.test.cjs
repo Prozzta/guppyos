@@ -164,6 +164,80 @@ test('async integrity cannot re-install pre-write registry bytes after an own at
   assert.equal(hive.registry().agents.a1.onHold, true, 'the async reader must not cache bytes from before the write');
 });
 
+test('async integrity cannot re-install pre-guard tasks after a hand edit', async (t) => {
+  const { hive } = floor(t);
+  const tasks = path.join(hive.root(), 'tasks.json');
+  fs.writeFileSync(tasks, JSON.stringify({ tasks: [{ id: 'T1', title: 'old', status: 'todo' }] }), 'utf8');
+  hive.ledgerGuard.check();
+  let readStarted;
+  const started = new Promise((resolve) => { readStarted = resolve; });
+  let releaseRead;
+  const release = new Promise((resolve) => { releaseRead = resolve; });
+  const readFile = fs.promises.readFile;
+  fs.promises.readFile = async function (p, ...rest) {
+    const raw = await readFile.call(this, p, ...rest);
+    if (String(p) === tasks) {
+      readStarted();
+      await release;
+    }
+    return raw;
+  };
+  try {
+    const scan = hive.integrityIssuesAsync();
+    await started;
+    fs.writeFileSync(tasks, JSON.stringify({ tasks: [{ id: 'T1', title: 'edited', status: 'todo' }] }), 'utf8');
+    assert.ok(hive.ledgerGuard.check(), 'the guard detects the hand edit and invalidates the authority cache');
+    releaseRead();
+    await scan;
+  } finally {
+    releaseRead?.();
+    fs.promises.readFile = readFile;
+  }
+  assert.equal(hive.tasks().tasks[0].title, 'edited', 'the guarded invalidation must block the stale async cache set');
+});
+
+test('M2: async integrity guard invalidation rejects a forced same-key, restored-mtime hand edit', async (t) => {
+  const { hive } = floor(t);
+  const tasks = path.join(hive.root(), 'tasks.json');
+  const before = { tasks: [{ id: 'T1', title: 'old', status: 'todo' }] };
+  const after = { tasks: [{ id: 'T1', title: 'new', status: 'todo' }] };
+  fs.writeFileSync(tasks, JSON.stringify(before), 'utf8');
+  hive.ledgerGuard.check();
+  const beforeStat = fs.statSync(tasks);
+  let readStarted;
+  const started = new Promise((resolve) => { readStarted = resolve; });
+  let releaseRead;
+  const release = new Promise((resolve) => { releaseRead = resolve; });
+  const readFile = fs.promises.readFile;
+  const stat = fs.promises.stat;
+  fs.promises.stat = async function (p, ...rest) {
+    const actual = await stat.call(this, p, ...rest);
+    return String(p) === tasks ? { ...actual, mtimeMs: beforeStat.mtimeMs, ctimeMs: beforeStat.ctimeMs, size: beforeStat.size, ino: beforeStat.ino } : actual;
+  };
+  fs.promises.readFile = async function (p, ...rest) {
+    const raw = await readFile.call(this, p, ...rest);
+    if (String(p) === tasks) {
+      readStarted();
+      await release;
+    }
+    return raw;
+  };
+  try {
+    const scan = hive.integrityIssuesAsync();
+    await started;
+    fs.writeFileSync(tasks, JSON.stringify(after), 'utf8');
+    fs.utimesSync(tasks, beforeStat.atime, beforeStat.mtime);
+    assert.ok(hive.ledgerGuard.check(), 'the guard detects the hand edit and invalidates the authority cache');
+    releaseRead();
+    await scan;
+  } finally {
+    releaseRead?.();
+    fs.promises.readFile = readFile;
+    fs.promises.stat = stat;
+  }
+  assert.equal(hive.tasks().tasks[0].title, 'new', 'the guarded invalidation must block the stale same-key async cache set');
+});
+
 test('fs.watch marks the cache dirty: an external edit is seen before the window ends', async (t) => {
   const { hive, handEdit } = floor(t);
   assert.equal(hive.registry().godId, null);
@@ -231,8 +305,8 @@ test('wiring: readers use the cache, mutations read the file, every registry wri
   assert.match(body('  private registryForMutation(): Registry {'), /this\.readAuthoritativeJson\(join\(root, 'registry\.json'\)/);
   assert.ok(!/readAuthoritativeJsonCached/.test(body('  private registryForMutation(): Registry {')));
   assert.match(body('  integrityIssues(): HiveIntegrityIssue[] {'), /this\.registry\(true\);/);
-  assert.match(body('  private atomicWriteJson(p: string, data: unknown): void {'), /this\.authorityCache\.delete\(p\);/);
-  assert.match(body('  private atomicWriteJson(p: string, data: unknown): void {'), /this\.authorityWriteGeneration\.set\(p,/);
+  assert.match(body('  private atomicWriteJson(p: string, data: unknown): void {'), /this\.invalidateAuthorityCache\(p\)/);
+  assert.match(body('  private invalidateAuthorityCache\(p: string, retain = false\): number {'), /this\.authorityGeneration\.set\(p,/);
   // registry.json is only ever written through writeJson / atomicWriteJson.
   const direct = src.split('\n').filter((l) => /registry\.json/.test(l) && /writeFileSync|renameSync|atomicWriteJsonFile\(/.test(l));
   assert.deepEqual(direct, []);

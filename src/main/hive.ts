@@ -891,7 +891,7 @@ export class HiveManager {
     // opts.onChange runs before every onChange() listener.
     onChange: () => {
       const root = this.root();
-      if (root) this.authorityCache.delete(join(root, 'tasks.json'));
+      if (root) this.invalidateAuthorityCache(join(root, 'tasks.json'));
     }
   });
   /** At most one queued scan; hints arriving in the same turn coalesce into it. */
@@ -6504,8 +6504,8 @@ export class HiveManager {
   /** fs.watch invalidates normally; this slow stat is the missed-event safety net. */
   static readonly AUTHORITY_REVALIDATE_MS = 5_000;
   private readonly authorityCache = new Map<string, { key: string | null; value: unknown; checkedAt: number }>();
-  /** Own writes advance this so an in-flight async read cannot put their old bytes back. */
-  private readonly authorityWriteGeneration = new Map<string, number>();
+  /** Every known authority invalidation advances this so an in-flight async read cannot revive old bytes. */
+  private readonly authorityGeneration = new Map<string, number>();
   private readonly authorityWatchers = new Map<string, FSWatcher>();
   private authorityFallbackTimer: ReturnType<typeof setInterval> | null = null;
   private authorityFallbackRunning = false;
@@ -6517,7 +6517,7 @@ export class HiveManager {
    *  rule's wall clock. */
   __resetAuthorityCacheForTests(now?: () => number, wall?: () => number): void {
     this.authorityCache.clear();
-    this.authorityWriteGeneration.clear();
+    this.authorityGeneration.clear();
     this.authorityTestClock = !!now;
     this.authorityNow = now ?? (() => Date.now());
     this.authorityWall = wall ?? (() => Date.now());
@@ -6528,7 +6528,7 @@ export class HiveManager {
     if (c && !fresh && (!this.authorityTestClock || (now - c.checkedAt >= 0 && now - c.checkedAt < HiveManager.AUTHORITY_REVALIDATE_MS))) return c.value as T;
     const st = authorityStat(p);
     if (st && c && c.key === statKey(st)) { c.checkedAt = now; return c.value as T; }
-    this.authorityCache.delete(p);
+    this.invalidateAuthorityCache(p);
     // The key is taken BEFORE the read: a change between the two re-reads at the next revalidate.
     const value = this.readAuthoritativeJson<T>(p, onMissing);
     if (!st) return value;
@@ -6547,20 +6547,20 @@ export class HiveManager {
    */
   private async readAuthoritativeJsonCachedAsync<T>(p: string, onMissing: () => T): Promise<T> {
     const now = this.authorityNow();
-    // atomicWriteJson is synchronous, but this method yields for stat/read.  Capture the
-    // generation before either yield so its pre-write bytes never re-enter the cache.
-    const writeGeneration = this.authorityWriteGeneration.get(p) ?? 0;
+    // This method yields for stat/read. Capture the generation before either yield so an
+    // intervening write, guard, watcher, or fallback invalidation cannot revive old bytes.
+    let generation = this.authorityGeneration.get(p) ?? 0;
     const cached = this.authorityCache.get(p);
     const st = await fsPromises.stat(p).catch(() => null);
-    if (st && cached && cached.key === statKey(st) && (this.authorityWriteGeneration.get(p) ?? 0) === writeGeneration) {
+    if (st && cached && cached.key === statKey(st) && (this.authorityGeneration.get(p) ?? 0) === generation) {
       cached.checkedAt = now;
       return cached.value as T;
     }
-    this.authorityCache.delete(p);
+    generation = this.invalidateAuthorityCache(p);
     const value = await this.readAuthoritativeJsonAsync<T>(p, onMissing);
     if (!st) return value;
     const frozen = authorityDeepFreeze(value);
-    if ((this.authorityWriteGeneration.get(p) ?? 0) !== writeGeneration) return frozen;
+    if ((this.authorityGeneration.get(p) ?? 0) !== generation) return frozen;
     this.authorityCache.set(p, { key: provenStatKey(st, this.authorityWall()), value: frozen, checkedAt: now });
     this.ensureAuthorityFallback();
     this.watchAuthority(p);
@@ -6572,7 +6572,7 @@ export class HiveManager {
     try {
       const w = watchDirectorySafely(dir, (_event, name) => {
         const full = name ? join(dir, String(name)) : null;
-        for (const [file, entry] of this.authorityCache) if (dirname(file) === dir && (!full || full === file)) entry.checkedAt = -Infinity;
+        for (const file of this.authorityCache.keys()) if (dirname(file) === dir && (!full || full === file)) this.invalidateAuthorityCache(file, true);
       }, () => { if (this.authorityWatchers.get(dir) === w) this.authorityWatchers.delete(dir); });
       this.authorityWatchers.set(dir, w);
     } catch { /* the stat revalidate is the authority */ }
@@ -6601,7 +6601,8 @@ export class HiveManager {
     try {
       await Promise.all([...this.authorityCache].map(async ([file, entry]) => {
         const st = await fsPromises.stat(file).catch(() => null);
-        if (!st || entry.key === null || entry.key !== statKey(st)) this.authorityCache.delete(file);
+        if (this.authorityCache.get(file) !== entry) return;
+        if (!st || entry.key === null || entry.key !== statKey(st)) this.invalidateAuthorityCache(file);
         else entry.checkedAt = this.authorityNow();
       }));
     } finally { this.authorityFallbackRunning = false; }
@@ -6616,10 +6617,17 @@ export class HiveManager {
   }
   private atomicWriteJson(p: string, data: unknown): void {
     // Dropped on success AND on failure: the file may or may not have changed.
-    try { atomicWriteJsonFile(p, data); } finally {
-      this.authorityCache.delete(p);
-      this.authorityWriteGeneration.set(p, (this.authorityWriteGeneration.get(p) ?? 0) + 1);
-    }
+    try { atomicWriteJsonFile(p, data); } finally { this.invalidateAuthorityCache(p); }
+  }
+  /** Invalidate a path and advance its epoch, retaining an entry only for watcher revalidation. */
+  private invalidateAuthorityCache(p: string, retain = false): number {
+    const generation = (this.authorityGeneration.get(p) ?? 0) + 1;
+    this.authorityGeneration.set(p, generation);
+    if (retain) {
+      const entry = this.authorityCache.get(p);
+      if (entry) entry.checkedAt = -Infinity;
+    } else this.authorityCache.delete(p);
+    return generation;
   }
 
 }
