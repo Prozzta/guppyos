@@ -3,7 +3,7 @@ import type { CSSProperties } from 'react';
 import '@xterm/xterm/css/xterm.css';
 import { Icon } from './Icon';
 import { acquireTerminal, attachTerminal, detachTerminal, reflowTerminal, requestPtyResize } from './terminalPool';
-import { loadTerminalFont, remeasureTerminalFont, terminalFontReady } from './terminalFont';
+import { loadTerminalFont, remeasureTerminalFont, applyTerminalFontSize, terminalFontReady } from './terminalFont';
 import {
   DEFAULT_TERMINAL_FONT_SIZE,
   MAX_TERMINAL_FONT_SIZE,
@@ -140,7 +140,7 @@ export function PtyTerminalView({ ptyId, onStreamData, onUserPrompt, onToggleFul
     if (!container) return;
     const entry = acquireTerminal(ptyId, xtermTheme(ptyThemeRef.current), fontSizeRef.current);
     entry.term.options.theme = xtermTheme(ptyThemeRef.current);
-    entry.term.options.fontSize = fontSizeRef.current;
+    applyTerminalFontSize(entry.term, fontSizeRef.current);
     attachTerminal(entry, container);
     entry.onData = (chunk) => onStreamDataRef.current?.(chunk);
     entry.onPrompt = (text) => onUserPromptRef.current?.(text);
@@ -214,7 +214,7 @@ export function PtyTerminalView({ ptyId, onStreamData, onUserPrompt, onToggleFul
       loadTerminalFont()
         .then(() => {
           try {
-            entry.term.options.fontSize = fontSizeRef.current;
+            applyTerminalFontSize(entry.term, fontSizeRef.current);
             remeasureTerminalFont(entry.term);
           } catch { /* noop */ }
           tryFit(true);
@@ -275,7 +275,7 @@ export function PtyTerminalView({ ptyId, onStreamData, onUserPrompt, onToggleFul
   useEffect(() => {
     fontSizeRef.current = fontSize;
     const entry = acquireTerminal(ptyId, xtermTheme(ptyThemeRef.current), fontSize);
-    entry.term.options.fontSize = fontSize;
+    applyTerminalFontSize(entry.term, fontSize);
     // The same guard as tryFit: never fit a host with no real size. A view mounted inside a
     // display:none tab has a 0x0 host, and fitting it proposed a phantom grid and resized the
     // pty to it (MEMSPIKE-168: one needless pty resize, a full Codex repaint, per hidden

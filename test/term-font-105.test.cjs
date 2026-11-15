@@ -152,7 +152,19 @@ function fakeTerm(fontSize) {
   return t;
 }
 
-test('remeasureTerminalFont really re-measures (the same-value re-apply does not), keeps the size and clears the atlas', () => {
+/** Martian Mono's real advances (packaged probe, Chrome 156): 0.7em, measured as xterm does. */
+const MARTIAN_W = { 10: 7, 12: 8.399993896484375, 14: 9.79998779296875, 16: 11.199996948242188 };
+/** Run fn with a canvas whose measureText('W') returns the Martian advance for the px in ctx.font. */
+function withCanvas(dpr, fn, fonts = []) {
+  const prevC = globalThis.OffscreenCanvas, prevW = globalThis.window;
+  globalThis.OffscreenCanvas = class { getContext() { return { font: '', measureText(t) { fonts.push(this.font); assert.equal(t, 'W'); return { width: MARTIAN_W[parseInt(this.font, 10)] }; } }; } };
+  globalThis.window = { devicePixelRatio: dpr };
+  try { return fn(); } finally { globalThis.OffscreenCanvas = prevC; globalThis.window = prevW; }
+}
+/** xterm 5.5's WebGL/DOM cell: floor(advance x dpr) + round(letterSpacing) device px. */
+const xtermCell = (adv, dpr, ls) => Math.floor(adv * dpr) + Math.round(ls);
+
+test('remeasureTerminalFont really re-measures (the same-value re-apply does not), keeps the size and clears the atlas', () => withCanvas(1, () => {
   const old = fakeTerm(12);
   old.options.fontFamily = old.options.fontFamily;
   old.options.fontSize = old.options.fontSize;
@@ -162,6 +174,42 @@ test('remeasureTerminalFont really re-measures (the same-value re-apply does not
   assert.ok(t.measures >= 1, 'at least one real option change, so xterm measures the cell again');
   assert.equal(t.options.fontSize, 12, 'size restored');
   assert.equal(t.atlasCleared, 1, 'glyph atlas re-rastered');
+  assert.equal(t.options.letterSpacing, 1, 'the re-measure also sets the whole-pixel cell pad (12px: 8.4 -> 9)');
+}));
+
+test('cells are whole px and never narrower than the glyph: ceil(advance), not floor, at 10/12/14/16px and dpr 1/1.25/1.5/2', () => {
+  for (const dpr of [1, 1.25, 1.5, 2]) {
+    for (const [px, adv] of Object.entries(MARTIAN_W)) {
+      const pad = TF.terminalCellPadFor(adv, dpr);
+      const cell = xtermCell(adv, dpr, pad);
+      assert.ok(cell >= adv * dpr - 0.01, `px ${px} dpr ${dpr}: cell ${cell} >= glyph ${adv * dpr}`);
+      assert.ok(cell - adv * dpr < 1, `px ${px} dpr ${dpr}: at most one device px of slack`);
+    }
+  }
+  assert.deepEqual([10, 12, 14, 16].map((px) => xtermCell(MARTIAN_W[px], 1, TF.terminalCellPadFor(MARTIAN_W[px], 1))), [7, 9, 10, 12]);
+  assert.equal(TF.terminalCellPadFor(7.004, 1), 0, 'an advance within 1/100 px of a whole pixel needs no pad');
+});
+
+test('the pad is measured like xterm (measureText W on "<px>px <family>") with the terminal family', () => {
+  const fonts = [];
+  const fresh = loadTs.fromText('src/renderer/src/components/terminalFont.ts', readSource('src/renderer/src/components/terminalFont.ts') + '\n// fresh canvas\n');
+  withCanvas(1, () => {
+    assert.deepEqual([10, 12, 14, 16].map((px) => fresh.terminalCellPad(px)), [0, 1, 1, 1]);
+    const t = fakeTerm(12);
+    fresh.applyTerminalFontSize(t, 10);
+    assert.equal(t.options.fontSize, 10); assert.equal(t.options.letterSpacing, 0, 'zooming to 10px drops the pad');
+    fresh.applyTerminalFontSize(t, 14);
+    assert.equal(t.options.letterSpacing, 1);
+  }, fonts);
+  assert.ok(fonts.length && fonts.every((f) => f === `${parseInt(f, 10)}px ${TF.TERMINAL_FONT_FAMILY}`), fonts.join(' | '));
+});
+
+test('every terminal size change goes through the pad: pool construction, zoom, font-load and attach paths', () => {
+  const pool = codeOnly(readSource('src/renderer/src/components/terminalPool.ts'), 'terminalPool.ts');
+  assert.match(pool, /new Terminal\(\{[\s\S]*?fontSize,\s*letterSpacing: terminalCellPad\(fontSize\),/);
+  const view = codeOnly(readSource('src/renderer/src/components/PtyTerminalView.tsx'), 'PtyTerminalView.tsx');
+  assert.doesNotMatch(view, /options\.fontSize\s*=/, 'no raw fontSize write that would skip the pad');
+  assert.equal((view.match(/applyTerminalFontSize\(entry\.term, /g) || []).length, 3);
 });
 
 function withFonts(faces, loadResult, fn) {

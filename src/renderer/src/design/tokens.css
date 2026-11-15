@@ -67,8 +67,9 @@
   --cth-space-8: 64px;
 
   /* Type — v0.3.4: Press Start 2P stays as the BRAND face for small caps
-     labels; everything the user actually reads is Inter (UI) and JetBrains
-     Mono (code/terminal). Pixelify/VT323 were the main readability drag. */
+     labels; everything the user actually reads is Inter (UI), JetBrains
+     Mono (code) and, since TERM-FONT-105, Martian Mono in the agent
+     terminals (components/terminalFont.ts). Pixelify/VT323 were the main readability drag. */
   --cth-font-display: "Press Start 2P", monospace;
   --cth-font-ui:      "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   --cth-font-mono:    "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
