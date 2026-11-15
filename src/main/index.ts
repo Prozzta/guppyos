@@ -9492,6 +9492,10 @@ app.on('before-quit', (e) => {
 // preventDefault-ed by the running-terminals warning above, so the flush hangs off
 // `will-quit`, which only fires once the quit is actually going ahead.
 app.on('will-quit', () => {
+  // RESTORE-ORPHAN-FLAG (Jim nit): a process that lost the single-instance lock never bootstrapped
+  // (whenReady returns early); its capacity snapshot, AGY lease and quit sweep belong to the live
+  // instance, so it writes none of them.
+  if (!gotInstanceLock) return;
   trayMode.dispose();
   try { blobOverlay.dispose(); } catch (e) { console.error('[quit] blobOverlay.dispose:', e); }
   try { dictation.dispose(); } catch (e) { console.error('[quit] dictation.dispose:', e); }   // kills the helper: no hook left behind
@@ -9533,6 +9537,9 @@ app.on('window-all-closed', () => {
 // exactly what's left to do.
 let analyticsFlushed = false;
 app.on('will-quit', (e) => {
+  // RESTORE-ORPHAN-FLAG (Jim nit): no quit-done row, key-registry flush or capacity settle into the
+  // live instance's hive from a process that lost the lock; its quit goes ahead untouched.
+  if (!gotInstanceLock) return;
   if (analyticsFlushed) return;
   analyticsFlushed = true;
   e.preventDefault();

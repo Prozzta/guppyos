@@ -72,6 +72,17 @@ test('a process without the single-instance lock never runs the hive bootstrap (
   assert.ok(boot > guard, 'the guard comes before bootstrapHiveServices');
   const head = src.slice(ready, guard);
   assert.doesNotMatch(head, /\bhive\.|archiveOrphanedAgents|bootstrapHiveServices/, 'nothing before the guard touches the hive');
+  // Jim nit: both will-quit handlers return first in a lost-lock process (no capacity snapshot,
+  // quit sweep, quit-done row or key-registry flush into the live instance's hive).
+  const quits = [];
+  for (let i = src.indexOf("app.on('will-quit'"); i >= 0; i = src.indexOf("app.on('will-quit'", i + 1)) quits.push(i);
+  assert.equal(quits.length, 2, 'two will-quit handlers');
+  for (const q of quits) {
+    const body = src.slice(q, src.indexOf('});', q));
+    assert.match(body, /^app\.on\('will-quit', \((?:e)?\) => \{\s*if \(!gotInstanceLock\) return;/, 'the lock guard is the first statement');
+  }
+  const flush = src.slice(quits[1], src.indexOf("kind: 'quit-done'", quits[1]));
+  assert.match(flush, /if \(!gotInstanceLock\) return;/, 'quit-done is behind the guard');
   // The sweep itself is unchanged for agents that really are dead (lock owner, no live PTY).
   assert.match(src, /if \(ptyForAgent\(id\)\) continue;\s*hive\.setArchived\(id, true, 'orphan'\);/);
 });
