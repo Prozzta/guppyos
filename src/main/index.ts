@@ -6599,7 +6599,7 @@ ipcMain.on('roster:homeSync', (evt) => { evt.returnValue = readConfig().harnessH
 // ...and the cache it will not use, kept in this home's roster-backups/ before the renderer clears it.
 ipcMain.on('roster:backupForeignSync', (evt, snap: unknown) => { evt.returnValue = roster.backupSnapshot(snap, 'foreign-cache'); });
 ipcMain.handle('roster:read', () => roster.read());
-ipcMain.handle('roster:write', (_evt, snap: unknown) => roster.write(snap));
+ipcMain.handle('roster:write', (_evt, snap: unknown) => roster.writeAsync(snap));
 
 // ─── IPC: hive (multi-agent coordination) ───────────────────────────────────
 ipcMain.handle('hive:registry', () => hive.registry());
