@@ -27,7 +27,7 @@ require('./tools/own-job.cjs');
  * an AVAILABLE->LIMITED observation in the first yield after the check and requires the
  * record never to read `enter:LIMITED`, whatever the source looks like.
  *
- * LINE ENDINGS. This repo is `core.autocrlf=true` with no `.gitattributes`: a file is LF
+ * LINE ENDINGS. This repo is `core.autocrlf=true` with no `.gitattributes` rule for source files: a file is LF
  * in the tree it was authored in and CRLF in a fresh checkout. Every read of source text
  * here goes through `./read-source.cjs`, the static test runs against BOTH renderings,
  * and a registered test forbids this file from reading source any other way.
