@@ -120,6 +120,78 @@ test('a refusal does not disarm the guard: repeated empty writes stay refused', 
   assert.equal(nextRun.read().agents.length, 0);
 });
 
+const GOD = { id: 'god', name: 'Michael', isGod: true };
+const TEAM = ['jim', 'andy', 'dwight', 'creed', 'sele', 'uhera'].map((id) => ({ id, name: id }));
+
+test('a god-only first write cannot wipe a team that is already on disk', () => {
+  // Seen live 2026-11-15: an antivirus removed the renderer's Local Storage, the
+  // store booted with god alone (it always has god), and its first mirror write
+  // replaced a six-agent roster. One entry is not "empty", so the guard let it by.
+  const home = tmpHome();
+  storeAt(home).write(snapshot([GOD, ...TEAM]));
+
+  const nextRun = storeAt(home);
+  const res = nextRun.write(snapshot([GOD]));
+  assert.equal(res.ok, false);
+  assert.equal(res.skipped, 'empty-first-write');
+  assert.equal(nextRun.read().agents.length, 7, 'god and all six workers survived');
+  assert.equal(backupsIn(home).filter((f) => f.includes('declined')).length, 1,
+    'the refused write still backed up the roster it protected');
+
+  // A reload re-sends the same snapshot: the refusal must not disarm the guard.
+  assert.equal(nextRun.write(snapshot([GOD])).skipped, 'empty-first-write');
+  assert.equal(nextRun.read().agents.length, 7);
+
+  // Once the renderer proves it holds the team, removing every worker is a real edit.
+  assert.equal(nextRun.write(snapshot([GOD, ...TEAM])).ok, true);
+  assert.equal(nextRun.write(snapshot([GOD])).ok, true);
+  assert.equal(nextRun.read().agents.length, 1);
+});
+
+test('the god-only guard counts restorable workers and ignores archived ones', () => {
+  // Workers that are only restorable on disk are still a team to protect.
+  const parked = tmpHome();
+  storeAt(parked).write(snapshot([GOD], { restorable: TEAM }));
+  assert.equal(storeAt(parked).write(snapshot([GOD])).skipped, 'empty-first-write');
+  assert.equal(storeAt(parked).read().restorable.length, 6);
+
+  // A first write that still carries them, on the floor or restorable, goes through.
+  assert.equal(storeAt(parked).write(snapshot([GOD], { restorable: TEAM.slice(0, 1) })).ok, true);
+  const live = tmpHome();
+  storeAt(live).write(snapshot([GOD, ...TEAM]));
+  assert.equal(storeAt(live).write(snapshot([GOD, TEAM[0]])).ok, true);
+
+  // An archive alone brings nobody back, so it does not stand in for the team.
+  const kept = tmpHome();
+  storeAt(kept).write(snapshot([GOD, ...TEAM]));
+  assert.equal(storeAt(kept).write(snapshot([GOD], { archived: TEAM })).skipped, 'empty-first-write');
+  assert.equal(storeAt(kept).read().agents.length, 7);
+});
+
+test('a god-only first write is fine when the file holds no workers', () => {
+  // A floor whose roster really is god alone (or god plus an archive) must keep saving.
+  const home = tmpHome();
+  storeAt(home).write(snapshot([GOD], { archived: TEAM }));
+  const nextRun = storeAt(home);
+  assert.equal(nextRun.write(snapshot([GOD])).ok, true);
+  assert.equal(nextRun.read().archived.length, 0);
+  assert.equal(backupsIn(home).some((f) => f.includes('declined')), false);
+});
+
+test('god is told apart by its flag or by its id, and never counts as a worker', () => {
+  // The renderer marks god with isGod; an older roster may only carry the id.
+  for (const god of [{ id: 'god' }, { id: 'michael', isGod: true }]) {
+    const home = tmpHome();
+    storeAt(home).write(snapshot([god, ...TEAM]));
+    assert.equal(storeAt(home).write(snapshot([god])).skipped, 'empty-first-write', JSON.stringify(god));
+    assert.equal(storeAt(home).read().agents.length, 7);
+  }
+  // A malformed entry is not god: it counts as a worker, so the write is kept.
+  const odd = tmpHome();
+  storeAt(odd).write(snapshot([GOD, ...TEAM]));
+  assert.equal(storeAt(odd).write(snapshot([GOD, null])).ok, true);
+});
+
 test('a corrupt file reads as "no opinion" rather than as an empty roster', () => {
   // The renderer treats null as "use localStorage". Returning an empty roster
   // instead would show a blank floor and then mirror that blank back to disk.
