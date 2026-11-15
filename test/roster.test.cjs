@@ -191,3 +191,14 @@ test('queues and selection round-trip, and a bad queues field degrades to empty'
   assert.deepEqual(coerced.queues, {});
   assert.equal(coerced.selectedId, null);
 });
+
+test('writeAsync serializes overlapping flushes so the newest note wins', async () => {
+  const home = tmpHome();
+  const store = storeAt(home);
+  const older = snapshot([{ id: 'a', note: 'older' }]);
+  const newest = snapshot([{ id: 'a', note: 'newest' }]);
+  const [a, b] = await Promise.all([store.writeAsync(older), store.writeAsync(newest)]);
+  assert.equal(a.ok, true);
+  assert.equal(b.ok, true);
+  assert.equal(store.read().agents[0].note, 'newest');
+});

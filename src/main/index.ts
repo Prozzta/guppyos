@@ -9551,5 +9551,9 @@ app.on('will-quit', (e) => {
     // INT 1.1.99 fixup 4: an async capacity rename already in flight at saveNow lands first, then the
     // quit snapshot is written again (bounded), so an older snapshot never sits over the quit write.
     capacityStore.settleQuit(CAPACITY_QUIT_JOIN_MS).catch(() => undefined)
+    ,Promise.race([
+      roster.settleAsyncWrite(),
+      new Promise<void>((resolve) => setTimeout(resolve, CAPACITY_QUIT_JOIN_MS))
+    ]).catch(() => undefined)
   ]).then(finish, finish);
 });

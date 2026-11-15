@@ -86,6 +86,8 @@ export class RosterStore {
    *  tick used to produce the same filename, and the second silently replaced
    *  the first — a backup folder that quietly loses backups is worse than none. */
   private backupSeq = 0;
+  /** All async IPC writes share one temp name; preserve call order and atomicity. */
+  private asyncQueue: Promise<void> = Promise.resolve();
 
   constructor(private readonly getHome: () => string | null) {}
 
@@ -167,7 +169,16 @@ export class RosterStore {
   }
 
   /** Async IPC path: same guards and atomic temp+rename, without main-thread disk I/O. */
-  async writeAsync(snap: unknown): Promise<RosterWriteResult> {
+  writeAsync(snap: unknown): Promise<RosterWriteResult> {
+    const run = this.asyncQueue.then(() => this.doWriteAsync(snap));
+    this.asyncQueue = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  /** Joined by the bounded quit path so a fire-and-forget renderer flush lands. */
+  settleAsyncWrite(): Promise<void> { return this.asyncQueue; }
+
+  private async doWriteAsync(snap: unknown): Promise<RosterWriteResult> {
     const home = this.home();
     if (!home) return { ok: false, error: 'no harnessHome' };
     if (!isSnapshot(snap)) return { ok: false, error: 'invalid snapshot' };
