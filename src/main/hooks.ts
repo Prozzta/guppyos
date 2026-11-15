@@ -69,6 +69,13 @@ export interface StopContinue {
   stopSettle(agentId: string, requestId: string, blocked: boolean, reasonChars: number): void;
 }
 
+/** CODEX-TURN-ENDS-EARLY P1: the owed-work Stop-continue (owedStop.ts). Main gathers the facts
+ *  and decides; null = the Stop goes through. Called only for the agent's own Stop of an open
+ *  turn, after the M4 mail Stop-continue declined it. */
+export interface OwedStopHook {
+  decide(agentId: string, provider: AgentProvider | undefined, segmentTools: number): string | null;
+}
+
 /**
  * ZT-I1-MAIL slice 2: one hook response that carried mail bodies. The ids are `surfacing`
  * (tentative) from the moment the response is built; the transport settles the claim when the
@@ -685,6 +692,34 @@ export class HookServer {
   setStopContinue(s: StopContinue | null): void {
     this.stopContinue = s;
   }
+  private owedStop: OwedStopHook | null = null;
+  setOwedStop(s: OwedStopHook | null): void {
+    this.owedStop = s;
+  }
+  /** P1: the tool-call count at the agent's last Stop, so a Stop knows its segment's tool calls. */
+  private readonly segmentMark = new Map<string, number>();
+
+  /** The owed-work block for the agent's own Stop (P1), or null. Unlike the M4 mail block it runs
+   *  with stop_hook_active set (a continued segment): owedStop's own per-obligation cap bounds it. */
+  private owedStopReason(agentId: string, p: HookPayload, segmentTools: number): string | null {
+    const os = this.owedStop;
+    // No fully_idle or shouldHalt check: fully_idle is AGY-only (owedStopOn is off for AGY) and a
+    // halt reaches decide() as owedSuppressor's halted fact (the same control flag).
+    if (!os || p.transport === 'pipe-oneway') return null;
+    const t = this.turns.get(agentId);
+    const turnId = typeof p.turn_id === 'string' && p.turn_id ? p.turn_id : null;
+    if (!t?.open || (turnId && t.epoch !== turnId)) return null;
+    // A Codex agent degraded to legacy-read (§11.10) reads its inbox itself: no injected continuation.
+    const channel = this.mailChannel(agentId);
+    if (channel.mode !== 'inject') return null;
+    return os.decide(agentId, channel.provider, segmentTools);
+  }
+
+  /** The agent's tool calls since the app started (PostToolUse + PostToolUseFailure). */
+  toolCallCount(agentId: string): number {
+    return this.toolCalls.get(agentId) ?? 0;
+  }
+
   /** Guard 4 (15.10 INFO 1): the turn epoch a Stop-continue already blocked. One block per turn:
    *  a real Stop closes the turn, and the next turn's snapshot carries a new epoch. */
   private readonly stopBlocked = new Map<string, string>();
@@ -2325,9 +2360,23 @@ export class HookServer {
     this.mailClaims = [];
     // GTC M4: a Stop continued with mail is not a turn end. Its epoch stays open (the surfaced ids
     // are acted at the continued turn's own Stop) and the coordinator sees it as mid-chain.
+    // CODEX-TURN-ENDS-EARLY P1: a Stop the mail block declined may be continued for owed work. It is
+    // not a turn end either (same path below), but it carried no mail (no onMailBlock).
     let stopReason: string | null = null;
+    let owedBlock = false;
     if (agentId && !fromSubagent && event === 'Stop') {
       try { stopReason = this.stopContinueReason(agentId, p); } catch { stopReason = null; }
+      // A straggler Stop naming another turn (#45) is not this segment's end: the mark stays.
+      const cur = this.turns.get(agentId);
+      const stopTurn = typeof p.turn_id === 'string' && p.turn_id ? p.turn_id : null;
+      const straggler = !!(stopTurn && cur && cur.epoch !== stopTurn);
+      const tools = this.toolCalls.get(agentId) ?? 0;
+      const segmentTools = tools - (this.segmentMark.get(agentId) ?? 0);
+      if (!straggler) this.segmentMark.set(agentId, tools);
+      if (stopReason === null) {
+        try { stopReason = this.owedStopReason(agentId, p, segmentTools); } catch { stopReason = null; }
+        owedBlock = stopReason !== null;
+      }
     }
     // MIDTURN-MAIL-BLIND L1: turn boundaries, before any early return below.
     if (agentId && !fromSubagent && stopReason === null) this.trackTurn(agentId, event, p);
@@ -2385,7 +2434,7 @@ export class HookServer {
     // GTC M4: a Stop continued with mail returns here, after the observers above (the incarnation
     // latch, the transcript path, compact-health): a blocked Stop still ends a provider request.
     if (stopReason !== null && agentId) {
-      try { this.coordination?.onMailBlock?.(agentId); } catch { /* never breaks a hook */ }
+      if (!owedBlock) { try { this.coordination?.onMailBlock?.(agentId); } catch { /* never breaks a hook */ } }
       return { decision: 'block', reason: stopReason };
     }
     // §11.1: the record of an earlier response lands after it, so every later hook of the agent

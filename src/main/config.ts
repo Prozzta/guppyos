@@ -368,6 +368,10 @@ export interface HarnessConfig extends BlobConfigFields {
    *  reason (the turn continues) instead of ending and getting a typed wake. Unset = off. Honoured
    *  only with wakePath 'term'. Read at every Stop. */
   stopContinue?: { claude?: boolean; codex?: boolean; antigravity?: boolean };
+  /** CODEX-TURN-ENDS-EARLY P1: a Codex Stop with a request still owed is continued with a short
+   *  "still owed, do the next step" reason (owedStop.ts). On unless `codex` is literally false;
+   *  never for Claude or AGY. Independent of wakePath. Read at every Stop. */
+  owedStopContinue?: { codex?: boolean };
   /** Agent ids whose automatic inbox/queue delivery is paused. Pending messages
    *  stay durable until the operator explicitly resumes delivery. */
   autoDeliveryPausedAgents?: string[];

@@ -459,7 +459,23 @@ class FakeAgent {
     if (!turn) { this.rec('turn-end', { how, turn: null }); return; }
     if (how === 'stop') {
       if (this.flavour === 'claude') await this.hook('Stop', { stop_hook_active: false });
-      else if (this.flavour === 'codex') { await this.hook('Stop', { turn_id: turn.id, stop_hook_active: false }); this.rollout({ type: 'event_msg', payload: { type: 'task_complete', turn_id: turn.id } }); }
+      else if (this.flavour === 'codex') {
+        // Codex runs a Stop {decision:'block', reason} as the next prompt in the SAME turn (same
+        // turn_id, stop_hook_active true on the next Stop). Manual turns wait for the driver's next
+        // cues; a scripted turn runs `scenario.onBlock` (tools/replies) and stops again.
+        const r = await this.hook('Stop', { turn_id: turn.id, stop_hook_active: !!turn.stopBlocked });
+        const res = r && (r.response || r);
+        if (res && res.decision === 'block' && typeof res.reason === 'string') {
+          turn.stopBlocked = (turn.stopBlocked || 0) + 1;
+          this.rec('stop-blocked', { reason: res.reason, turn: turn.id, block: turn.stopBlocked });
+          if (this.manual()) return;
+          const ob = this.scenario.onBlock || {};
+          for (let i = 0; i < (ob.tools ?? 0); i++) await this.toolCall('Bash', { command: 'echo continue' }, false);
+          for (const rp of (ob.repliesAt?.[turn.stopBlocked] ?? [])) await this.writeOutbox(rp);
+          return this.endTurn('stop');
+        }
+        this.rollout({ type: 'event_msg', payload: { type: 'task_complete', turn_id: turn.id } });
+      }
       else if (this.flavour === 'agy') await this.hook('Stop', { fullyIdle: true });
       else if (this.flavour === 'gemini') await this.hook('AfterAgent', {});
     } else if (how === 'stop-failure') {
