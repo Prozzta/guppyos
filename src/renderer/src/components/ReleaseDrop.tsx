@@ -35,6 +35,7 @@
  */
 import { useEffect, useMemo } from 'react';
 import { buildDropSrcDoc } from '../../../shared/releaseDrop';
+import { DROP_FONT_CSS } from '../dropFonts';
 
 export interface ReleaseDropProps {
   version: string;
@@ -53,7 +54,7 @@ const YELLOW = '#FFCA54';
 const MONO = '"JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace';
 
 export function ReleaseDrop({ version, html, onDismiss }: ReleaseDropProps) {
-  const srcDoc = useMemo(() => buildDropSrcDoc(html), [html]);
+  const srcDoc = useMemo(() => buildDropSrcDoc(html, DROP_FONT_CSS), [html]);
 
   // Esc dismisses. "Later" is always a legitimate answer to an update.
   useEffect(() => {
