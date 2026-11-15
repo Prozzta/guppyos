@@ -196,30 +196,30 @@ test('async integrity cannot re-install pre-guard tasks after a hand edit', asyn
   assert.equal(hive.tasks().tasks[0].title, 'edited', 'the guarded invalidation must block the stale async cache set');
 });
 
-test('M2: async integrity guard invalidation rejects a forced same-key, restored-mtime hand edit', async (t) => {
+test('M2: warmed async fast path re-reads after guard invalidation under a forced same-key hand edit', async (t) => {
   const { hive } = floor(t);
   const tasks = path.join(hive.root(), 'tasks.json');
   const before = { tasks: [{ id: 'T1', title: 'old', status: 'todo' }] };
   const after = { tasks: [{ id: 'T1', title: 'new', status: 'todo' }] };
   fs.writeFileSync(tasks, JSON.stringify(before), 'utf8');
   hive.ledgerGuard.check();
+  assert.equal(hive.tasks().tasks[0].title, 'old', 'warm the synchronous authority cache first');
   const beforeStat = fs.statSync(tasks);
-  let readStarted;
-  const started = new Promise((resolve) => { readStarted = resolve; });
-  let releaseRead;
-  const release = new Promise((resolve) => { releaseRead = resolve; });
+  let statStarted;
+  const started = new Promise((resolve) => { statStarted = resolve; });
+  let releaseStat;
+  const release = new Promise((resolve) => { releaseStat = resolve; });
   const readFile = fs.promises.readFile;
   const stat = fs.promises.stat;
-  fs.promises.stat = async function (p, ...rest) {
-    const actual = await stat.call(this, p, ...rest);
-    return String(p) === tasks ? { ...actual, mtimeMs: beforeStat.mtimeMs, ctimeMs: beforeStat.ctimeMs, size: beforeStat.size, ino: beforeStat.ino } : actual;
+  const taskReads = [];
+  fs.promises.stat = function (p, ...rest) {
+    if (String(p) !== tasks) return stat.call(this, p, ...rest);
+    statStarted();
+    return release.then(() => beforeStat);
   };
   fs.promises.readFile = async function (p, ...rest) {
     const raw = await readFile.call(this, p, ...rest);
-    if (String(p) === tasks) {
-      readStarted();
-      await release;
-    }
+    if (String(p) === tasks) taskReads.push(raw);
     return raw;
   };
   try {
@@ -228,13 +228,14 @@ test('M2: async integrity guard invalidation rejects a forced same-key, restored
     fs.writeFileSync(tasks, JSON.stringify(after), 'utf8');
     fs.utimesSync(tasks, beforeStat.atime, beforeStat.mtime);
     assert.ok(hive.ledgerGuard.check(), 'the guard detects the hand edit and invalidates the authority cache');
-    releaseRead();
+    releaseStat();
     await scan;
   } finally {
-    releaseRead?.();
+    releaseStat?.();
     fs.promises.readFile = readFile;
     fs.promises.stat = stat;
   }
+  assert.deepEqual(taskReads, [JSON.stringify(after)], 'the generation mismatch must force readFile to observe post-edit bytes');
   assert.equal(hive.tasks().tasks[0].title, 'new', 'the guarded invalidation must block the stale same-key async cache set');
 });
 
