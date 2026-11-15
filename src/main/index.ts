@@ -9084,6 +9084,12 @@ app.whenReady().then(() => {
     }).then((ok) => app.exit(ok ? 0 : 1), () => app.exit(1));
     return;
   }
+  // RESTORE-ORPHAN-FLAG (2026-11-15): a Stable instance that lost the single-instance lock is
+  // quitting (app.quit() above is asynchronous), but this callback still ran its whole bootstrap:
+  // it logged app-start and ran archiveOrphanedAgents, and since THIS process owns no PTY it
+  // archived the running instance's live team as 'orphan' (log.jsonl 20:56:38Z, no spawn after,
+  // so nothing cleared it). The lock owner's hive is not ours to touch: do nothing here.
+  if (!gotInstanceLock) return;
   // MUNDER_DEV=1 — second, LIVE isolation check. The bootstrap above checked the
   // paths we intended to use; this checks the paths the app actually resolved
   // (config clamp, hive root, palace, pipe) now that config/hive are wired. A
@@ -9486,6 +9492,10 @@ app.on('before-quit', (e) => {
 // preventDefault-ed by the running-terminals warning above, so the flush hangs off
 // `will-quit`, which only fires once the quit is actually going ahead.
 app.on('will-quit', () => {
+  // RESTORE-ORPHAN-FLAG (Jim nit): a process that lost the single-instance lock never bootstrapped
+  // (whenReady returns early); its capacity snapshot, AGY lease and quit sweep belong to the live
+  // instance, so it writes none of them.
+  if (!gotInstanceLock) return;
   trayMode.dispose();
   try { blobOverlay.dispose(); } catch (e) { console.error('[quit] blobOverlay.dispose:', e); }
   try { dictation.dispose(); } catch (e) { console.error('[quit] dictation.dispose:', e); }   // kills the helper: no hook left behind
@@ -9527,6 +9537,9 @@ app.on('window-all-closed', () => {
 // exactly what's left to do.
 let analyticsFlushed = false;
 app.on('will-quit', (e) => {
+  // RESTORE-ORPHAN-FLAG (Jim nit): no quit-done row, key-registry flush or capacity settle into the
+  // live instance's hive from a process that lost the lock; its quit goes ahead untouched.
+  if (!gotInstanceLock) return;
   if (analyticsFlushed) return;
   analyticsFlushed = true;
   e.preventDefault();

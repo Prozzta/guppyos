@@ -1574,7 +1574,12 @@ export class HiveManager {
     // (re)written by a spawn, respawn or relaunch; a reader's cached copy is stale NOW.
     for (const cb of this.provisionedListeners) { try { cb(meta.id); } catch { /* a listener never breaks a spawn */ } }
     // ZERO-TOKEN-LIVENESS (Dwight F2): a (re)spawn of an ARCHIVED agent is a restore edge.
-    if (prev?.archived === true) this.emitArchiveChange(meta.id, false);
+    if (prev?.archived === true) {
+      // LOG-ARCHIVE-CLEAR: the restore's flag clear gets its own row, so log.jsonl shows the
+      // boot sweep's archived:true being undone (the 'spawn' row alone did not say so).
+      this.appendLog({ kind: 'archive', agentId: meta.id, archived: false, via: 'spawn', ...(prev.archiveReason ? { prevReason: prev.archiveReason } : {}) });
+      this.emitArchiveChange(meta.id, false);
+    }
 
     this.appendLog({ kind: 'spawn', agentId: meta.id, name: meta.name, isGod: !!meta.isGod });
     // Q32 refinement (god 0f1672): a restore brings back mail set aside in inbox/.undelivered/.
