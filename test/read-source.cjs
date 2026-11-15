@@ -3,7 +3,7 @@
 /**
  * Read a SOURCE file for a test that inspects its text — LINE-ENDING INDEPENDENT.
  *
- * WHY THIS EXISTS. This repo has `core.autocrlf=true` and no `.gitattributes`, so the
+ * WHY THIS EXISTS. This repo has `core.autocrlf=true` and no `.gitattributes` rule for source files, so the
  * same committed file is LF in the working tree it was authored in and CRLF in a fresh
  * checkout. A test that searches source for a literal containing `\n` therefore passes in
  * its author's tree and fails — or worse, passes for a different reason — everywhere else.

@@ -470,6 +470,27 @@ export const DEFAULT_DROP_HTML = `<style>
 
 </div>`;
 
+/** One embedded drop face (UI-FONTS-LOCAL): a weight of a family as a data: URI. */
+export interface DropFontFace {
+  family: string;
+  weight: number;
+  dataUri: string;
+}
+
+/**
+ * The @font-face rules for the drop's embedded faces. A face that is not an inline
+ * woff2 (an asset URL because the build stopped inlining it, or an empty import) throws:
+ * the frame's CSP would block a URL and the drop would quietly render in a fallback face.
+ */
+export function dropFontFaceCss(faces: readonly DropFontFace[]): string {
+  return faces.map(({ family, weight, dataUri }) => {
+    if (!/^data:font\/woff2;base64,[A-Za-z0-9+/]+=*$/.test(dataUri)) {
+      throw new Error(`release drop font ${family} ${weight} is not an inline woff2 data: URI`);
+    }
+    return `@font-face { font-family: "${family}"; font-style: normal; font-weight: ${weight}; font-display: swap; src: url(${dataUri}) format("woff2"); }`;
+  }).join('\n');
+}
+
 /**
  * Wrap authored HTML into a complete, self-contained document for `srcdoc`.
  *
@@ -477,8 +498,12 @@ export const DEFAULT_DROP_HTML = `<style>
  * directive denies rather than allows, so script-src, connect-src, frame-src and
  * object-src are all closed without being named. Only the media a launch page
  * needs is opened back up, and only over https or data:.
+ *
+ * `fontCss` is the frame's own faces (renderer/src/dropFonts.ts: Geist and JetBrains
+ * Mono as data: URIs, UI-FONTS-LOCAL). It is required so no caller can build a drop that
+ * silently falls back to system fonts; the frame itself links nothing.
  */
-export function buildDropSrcDoc(html: string): string {
+export function buildDropSrcDoc(html: string, fontCss: string): string {
   const csp = [
     "default-src 'none'",
     'img-src https: data: blob:',
@@ -499,9 +524,7 @@ export function buildDropSrcDoc(html: string): string {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="${csp}">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>${fontCss}</style>
 <style>${FRAME_BASE_CSS}</style>
 </head>
 <body>

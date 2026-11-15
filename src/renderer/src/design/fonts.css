@@ -8,7 +8,17 @@
 
    UI: JetBrains Mono 2.304, SIL Open Font License 1.1: assets/fonts/jetbrains-mono/OFL.txt.
    Not the terminal's face any more; it stays for the UI's --cth-font-mono labels (tokens.css),
-   Monaco and ReleaseDrop, which Google Fonts served at 400/500/700 before 35bbbf72. */
+   Monaco and ReleaseDrop, which Google Fonts served at 400/500/700 before 35bbbf72.
+   600 (SemiBold) is bundled for the release drop's data: URIs (renderer/src/dropFonts.ts).
+
+   UI-FONTS-LOCAL: the UI faces Google Fonts used to serve, now bundled too, so the app
+   makes no font request at all (index.html's CSP allows fonts from 'self' only).
+   Inter 4.1, SIL OFL 1.1: assets/fonts/inter/OFL.txt (upstream LICENSE.txt). The static
+   text cuts (opsz 14), not InterVariable: Google serves Inter with the optical size fixed
+   at 14 and one instance per listed weight (400/500/600/700), and so do these files; the
+   variable file would switch the optical size with the font size and render differently.
+   Press Start 2P 3.000, SIL OFL 1.1: assets/fonts/press-start-2p/OFL.txt (google/fonts).
+   font-display: swap, as Google's display=swap was: text never waits on the UI faces. */
 @font-face {
   font-family: "Martian Mono";
   font-style: normal;
@@ -43,4 +53,39 @@
   font-weight: 700;
   font-display: block;
   src: url('../assets/fonts/jetbrains-mono/JetBrainsMono-Bold.woff2') format('woff2');
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('../assets/fonts/inter/Inter-Regular.woff2') format('woff2');
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('../assets/fonts/inter/Inter-Medium.woff2') format('woff2');
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('../assets/fonts/inter/Inter-SemiBold.woff2') format('woff2');
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('../assets/fonts/inter/Inter-Bold.woff2') format('woff2');
+}
+@font-face {
+  font-family: "Press Start 2P";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('../assets/fonts/press-start-2p/PressStart2P-Regular.ttf') format('truetype');
 }
