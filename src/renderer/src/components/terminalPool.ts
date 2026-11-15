@@ -162,9 +162,9 @@ export function acquireTerminal(ptyId: string, theme?: ThemeMap, fontSize = 14):
 
   const term = new Terminal({
     theme,
-    // v0.3.4: JetBrains Mono replaces VT323 — the narrow CRT face strained at
-    // data density. lineHeight stays 1.0 so TUI box-drawing rows stay joined.
-    // TERM-FONT-105: the face is bundled and chosen in terminalFont.ts (no network font).
+    // v0.3.4: a real monospace face replaces VT323 (the narrow CRT face strained at
+    // data density). lineHeight stays 1.0 so TUI box-drawing rows stay joined.
+    // TERM-FONT-105: the face (Martian Mono) is bundled and chosen in terminalFont.ts.
     fontFamily: TERMINAL_FONT_FAMILY,
     fontSize,
     lineHeight: 1.0,

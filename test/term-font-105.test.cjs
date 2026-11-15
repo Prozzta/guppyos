@@ -114,13 +114,14 @@ test('postinstall patches first and checks just before the winpty --check; build
   assert.equal(scripts.build.split('&&')[0].trim(), 'node tools/patch-xterm-webgl-font.cjs --check');
 });
 
-test('the terminal face is bundled, not fetched: local @font-face per weight, no Google JetBrains Mono, Consolas before monospace', () => {
+test('the terminal face is bundled Martian Mono, not fetched: local @font-face per weight, no Google JetBrains Mono, then Consolas, then monospace', () => {
   const R = (...p) => fs.readFileSync(path.join(ROOT, 'src', 'renderer', ...p), 'utf8');
   const css = R('src', 'design', 'fonts.css');
   const font = R('src', 'components', 'terminalFont.ts');
   const face = font.match(/TERMINAL_FONT_FACE = '([^']+)'/)[1];
   const fam = font.match(/TERMINAL_FONT_FAMILY = `([^`]+)`/)[1];
-  assert.ok(fam.indexOf('Consolas') > 0 && fam.indexOf('Consolas') < fam.indexOf('monospace'), fam);
+  assert.equal(face, 'Martian Mono');
+  assert.equal(fam, '"${TERMINAL_FONT_FACE}", Consolas, monospace', 'the face first, then Consolas, then monospace');
   const faces = [...css.matchAll(/@font-face\s*{([^}]*)}/g)].map((m) => m[1]);
   for (const w of ['400', '700']) {
     const f = faces.find((b) => b.includes(`font-family: "${face}"`) && b.includes(`font-weight: ${w}`));
@@ -200,4 +201,22 @@ test('fix 2 is wired at all three call sites: acquireTerminal (after the face lo
   assert.match(body(pool, 'export function reflowTerminal('), /remeasureTerminalFont\(entry\.term\)/);
   const view = codeOnly(readSource('src/renderer/src/components/PtyTerminalView.tsx'), 'PtyTerminalView.tsx');
   assert.match(view, /if \(!terminalFontReady\(\)\) \{\s*loadTerminalFont\(\)\s*\.then\(\(\) => \{[\s\S]*?remeasureTerminalFont\(entry\.term\);[\s\S]*?tryFit\(true\)/);
+});
+
+test('Martian Mono is the unmodified upstream release, with its OFL text and an ATTRIBUTION entry', () => {
+  const dir = path.join(ROOT, 'src', 'renderer', 'src', 'assets', 'fonts', 'martian-mono');
+  // sha256 of the files inside martian-mono-1.1.0-woff2.zip (github.com/evilmartians/mono, v1.1.0).
+  const pinned = {
+    'MartianMono-StdRg.woff2': '5253fe61c5aecbcf8ea63cf4e61fe563c9f6bf0a05eeb311a5bac21617246054',
+    'MartianMono-StdBd.woff2': '4510942de3a96564d8f7e14de5b7352ae03cb72251d6943bfb71b28eda7df5e0'
+  };
+  for (const [f, sha] of Object.entries(pinned)) {
+    assert.equal(crypto.createHash('sha256').update(fs.readFileSync(path.join(dir, f))).digest('hex'), sha, f);
+  }
+  assert.deepEqual(fs.readdirSync(dir).sort(), ['MartianMono-StdBd.woff2', 'MartianMono-StdRg.woff2', 'OFL.txt']);
+  const ofl = fs.readFileSync(path.join(dir, 'OFL.txt'), 'utf8');
+  assert.match(ofl, /^Copyright 2021 The Martian Mono Project Authors/);
+  assert.match(ofl, /SIL OPEN FONT LICENSE Version 1\.1/);
+  const attr = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'src', 'assets', 'ATTRIBUTION.md'), 'utf8');
+  assert.match(attr, /## Terminal font: Martian Mono[\s\S]*1\.1\.0[\s\S]*evilmartians\/mono[\s\S]*SIL Open Font License 1\.1/);
 });

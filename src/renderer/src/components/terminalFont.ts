@@ -1,15 +1,18 @@
 import type { Terminal } from '@xterm/xterm';
 
 /**
- * TERM-FONT-105: the one place the terminal font is chosen.
+ * TERM-FONT-105: the one place the terminal font is chosen: Martian Mono (the Human's pick).
  *
- * The face is bundled (design/fonts.css), never fetched. Consolas sits before the generic
+ * The face is bundled (design/fonts.css), never fetched. Martian Mono is a WIDE face (its
+ * advance is about 0.7em against 0.6em for most monospace fonts), so the cell must be
+ * measured with the face itself, never with a fallback: see remeasureTerminalFont below.
+ * Consolas sits before the generic
  * `monospace` so that, on Windows, a missing face falls back to a real monospace font of
  * known width instead of whatever Chromium's default monospace is this release (Courier New
  * in Chrome 128, Consolas in Chrome 156 — the change that exposed the cell-width bug).
  */
-export const TERMINAL_FONT_FACE = 'JetBrains Mono';
-export const TERMINAL_FONT_FAMILY = `"${TERMINAL_FONT_FACE}", "SF Mono", Menlo, Consolas, monospace`;
+export const TERMINAL_FONT_FACE = 'Martian Mono';
+export const TERMINAL_FONT_FAMILY = `"${TERMINAL_FONT_FACE}", Consolas, monospace`;
 
 let loaded: Promise<void> | null = null;
 
