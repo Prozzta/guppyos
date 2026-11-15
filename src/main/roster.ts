@@ -29,6 +29,7 @@
  *   3. Never let an empty renderer erase a full roster. See `write`.
  */
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 /** What the renderer mirrors to disk. The inner agent shape is deliberately
@@ -165,6 +166,32 @@ export class RosterStore {
     }
   }
 
+  /** Async IPC path: same guards and atomic temp+rename, without main-thread disk I/O. */
+  async writeAsync(snap: unknown): Promise<RosterWriteResult> {
+    const home = this.home();
+    if (!home) return { ok: false, error: 'no harnessHome' };
+    if (!isSnapshot(snap)) return { ok: false, error: 'invalid snapshot' };
+    const p = rosterPath(home);
+    try {
+      await mkdir(home, { recursive: true });
+      let existing: RosterSnapshot | null = null;
+      try { const parsed = JSON.parse(await readFile(p, 'utf8')); existing = isSnapshot(parsed) ? parsed : null; } catch { /* no usable prior roster */ }
+      if (!this.wrote && existing && entryCount(existing) > 0 && entryCount(snap) === 0) {
+        await this.backupAsync(home, p, 'declined');
+        return { ok: false, skipped: 'empty-first-write' };
+      }
+      await this.backupAsync(home, p, this.wrote ? 'write' : 'run-start');
+      const body: RosterSnapshot = { version: 1, savedAt: new Date().toISOString(), agents: snap.agents, archived: snap.archived, restorable: snap.restorable, queues: snap.queues && typeof snap.queues === 'object' ? snap.queues : {}, selectedId: typeof snap.selectedId === 'string' ? snap.selectedId : null };
+      await writeFile(`${p}.tmp`, JSON.stringify(body, null, 2), 'utf8');
+      await rename(`${p}.tmp`, p);
+      this.wrote = true;
+      return { ok: true };
+    } catch (e) {
+      try { await rm(`${p}.tmp`, { force: true }); } catch { /* noop */ }
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
   /**
    * Retire the active roster during a full reset: copied into `roster-backups/`
    * first, then the live file is removed.
@@ -221,6 +248,16 @@ export class RosterStore {
       const stamp = new Date().toISOString().replace(/[:.]/g, '-');
       this.backupSeq += 1;
       copyFileSync(p, join(dir, `roster-${stamp}-${this.backupSeq}-${reason}.json`));
+    } catch { /* a failed backup must never block the write */ }
+  }
+
+  private async backupAsync(home: string, p: string, reason: string): Promise<void> {
+    try {
+      const dir = rosterBackupDir(home);
+      await mkdir(dir, { recursive: true });
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      this.backupSeq += 1;
+      await copyFile(p, join(dir, `roster-${stamp}-${this.backupSeq}-${reason}.json`));
     } catch { /* a failed backup must never block the write */ }
   }
 }

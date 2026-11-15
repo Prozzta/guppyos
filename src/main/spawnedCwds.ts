@@ -7,13 +7,15 @@
  * An unreadable or malformed file is an empty list: the other known sources still stand.
  * A failed write keeps this run's list in memory.
  */
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
+import { mkdir, rename, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 
 export const SPAWNED_CWDS_MAX = 200;
 
 export class SpawnedCwds {
   private cwds: string[] | null = null;
+  private persist: Promise<void> = Promise.resolve();
 
   constructor(private readonly file: () => string, private readonly max = SPAWNED_CWDS_MAX) {}
 
@@ -21,19 +23,25 @@ export class SpawnedCwds {
     return [...this.load()];
   }
 
-  add(cwd: string): void {
-    if (typeof cwd !== 'string' || !cwd) return;
+  add(cwd: string): Promise<void> {
+    if (typeof cwd !== 'string' || !cwd) return this.persist;
     const key = resolve(cwd);
     const same = (c: string): boolean => (process.platform === 'win32' ? c.toLowerCase() === key.toLowerCase() : c === key);
     const next = this.load().filter((c) => !same(c));
     next.push(key);
     this.cwds = next.slice(-this.max);
-    try {
-      const f = this.file();
-      mkdirSync(dirname(f), { recursive: true });
-      writeFileSync(`${f}.tmp`, JSON.stringify({ v: 1, cwds: this.cwds }));
-      renameSync(`${f}.tmp`, f);
-    } catch { /* this run's list stands */ }
+    // Keep the in-memory trust set synchronous, but never make a successful
+    // spawn wait for persistence.  Each queued write keeps temp+rename atomic.
+    const snapshot = [...this.cwds];
+    this.persist = this.persist.catch(() => undefined).then(async () => {
+      try {
+        const f = this.file();
+        await mkdir(dirname(f), { recursive: true });
+        await writeFile(`${f}.tmp`, JSON.stringify({ v: 1, cwds: snapshot }));
+        await rename(`${f}.tmp`, f);
+      } catch { /* this run's list stands */ }
+    });
+    return this.persist;
   }
 
   private load(): string[] {
