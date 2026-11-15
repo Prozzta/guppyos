@@ -9525,10 +9525,10 @@ app.on('before-quit', (e) => {
 // The last chance to flush a coalesced capacity write. `before-quit` can be
 // preventDefault-ed by the running-terminals warning above, so the flush hangs off
 // `will-quit`, which only fires once the quit is actually going ahead.
+// RESTORE-ORPHAN-FLAG (Jim nit): a process that lost the single-instance lock never bootstrapped
+// (whenReady returns early); its capacity snapshot, AGY lease and quit sweep belong to the live
+// instance, so it writes none of them. (Comment kept outside: blob-overlay pins an 80-char window.)
 app.on('will-quit', () => {
-  // RESTORE-ORPHAN-FLAG (Jim nit): a process that lost the single-instance lock never bootstrapped
-  // (whenReady returns early); its capacity snapshot, AGY lease and quit sweep belong to the live
-  // instance, so it writes none of them.
   if (!gotInstanceLock) return;
   trayMode.dispose();
   try { blobOverlay.dispose(); } catch (e) { console.error('[quit] blobOverlay.dispose:', e); }
