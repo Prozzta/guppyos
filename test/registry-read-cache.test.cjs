@@ -136,6 +136,34 @@ test('async integrity preserves the corrupt-authority repair banner and clears i
   assert.ok(hive.registry().agents.repaired);
 });
 
+test('async integrity cannot re-install pre-write registry bytes after an own atomic write', async (t) => {
+  const { hive, file } = floor(t);
+  let readStarted;
+  const started = new Promise((resolve) => { readStarted = resolve; });
+  let releaseRead;
+  const release = new Promise((resolve) => { releaseRead = resolve; });
+  const readFile = fs.promises.readFile;
+  fs.promises.readFile = async function (p, ...rest) {
+    const raw = await readFile.call(this, p, ...rest);
+    if (String(p) === file) {
+      readStarted();
+      await release;
+    }
+    return raw;
+  };
+  try {
+    const scan = hive.integrityIssuesAsync();
+    await started;
+    assert.deepEqual(hive.setAgentHold('a1', true), { ok: true, onHold: true });
+    releaseRead();
+    await scan;
+  } finally {
+    releaseRead?.();
+    fs.promises.readFile = readFile;
+  }
+  assert.equal(hive.registry().agents.a1.onHold, true, 'the async reader must not cache bytes from before the write');
+});
+
 test('fs.watch marks the cache dirty: an external edit is seen before the window ends', async (t) => {
   const { hive, handEdit } = floor(t);
   assert.equal(hive.registry().godId, null);
@@ -203,7 +231,8 @@ test('wiring: readers use the cache, mutations read the file, every registry wri
   assert.match(body('  private registryForMutation(): Registry {'), /this\.readAuthoritativeJson\(join\(root, 'registry\.json'\)/);
   assert.ok(!/readAuthoritativeJsonCached/.test(body('  private registryForMutation(): Registry {')));
   assert.match(body('  integrityIssues(): HiveIntegrityIssue[] {'), /this\.registry\(true\);/);
-  assert.match(body('  private atomicWriteJson(p: string, data: unknown): void {'), /finally \{ this\.authorityCache\.delete\(p\); \}/);
+  assert.match(body('  private atomicWriteJson(p: string, data: unknown): void {'), /this\.authorityCache\.delete\(p\);/);
+  assert.match(body('  private atomicWriteJson(p: string, data: unknown): void {'), /this\.authorityWriteGeneration\.set\(p,/);
   // registry.json is only ever written through writeJson / atomicWriteJson.
   const direct = src.split('\n').filter((l) => /registry\.json/.test(l) && /writeFileSync|renameSync|atomicWriteJsonFile\(/.test(l));
   assert.deepEqual(direct, []);

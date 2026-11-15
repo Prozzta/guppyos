@@ -6504,6 +6504,8 @@ export class HiveManager {
   /** fs.watch invalidates normally; this slow stat is the missed-event safety net. */
   static readonly AUTHORITY_REVALIDATE_MS = 5_000;
   private readonly authorityCache = new Map<string, { key: string | null; value: unknown; checkedAt: number }>();
+  /** Own writes advance this so an in-flight async read cannot put their old bytes back. */
+  private readonly authorityWriteGeneration = new Map<string, number>();
   private readonly authorityWatchers = new Map<string, FSWatcher>();
   private authorityFallbackTimer: ReturnType<typeof setInterval> | null = null;
   private authorityFallbackRunning = false;
@@ -6515,6 +6517,7 @@ export class HiveManager {
    *  rule's wall clock. */
   __resetAuthorityCacheForTests(now?: () => number, wall?: () => number): void {
     this.authorityCache.clear();
+    this.authorityWriteGeneration.clear();
     this.authorityTestClock = !!now;
     this.authorityNow = now ?? (() => Date.now());
     this.authorityWall = wall ?? (() => Date.now());
@@ -6544,9 +6547,12 @@ export class HiveManager {
    */
   private async readAuthoritativeJsonCachedAsync<T>(p: string, onMissing: () => T): Promise<T> {
     const now = this.authorityNow();
+    // atomicWriteJson is synchronous, but this method yields for stat/read.  Capture the
+    // generation before either yield so its pre-write bytes never re-enter the cache.
+    const writeGeneration = this.authorityWriteGeneration.get(p) ?? 0;
     const cached = this.authorityCache.get(p);
     const st = await fsPromises.stat(p).catch(() => null);
-    if (st && cached && cached.key === statKey(st)) {
+    if (st && cached && cached.key === statKey(st) && (this.authorityWriteGeneration.get(p) ?? 0) === writeGeneration) {
       cached.checkedAt = now;
       return cached.value as T;
     }
@@ -6554,6 +6560,7 @@ export class HiveManager {
     const value = await this.readAuthoritativeJsonAsync<T>(p, onMissing);
     if (!st) return value;
     const frozen = authorityDeepFreeze(value);
+    if ((this.authorityWriteGeneration.get(p) ?? 0) !== writeGeneration) return frozen;
     this.authorityCache.set(p, { key: provenStatKey(st, this.authorityWall()), value: frozen, checkedAt: now });
     this.ensureAuthorityFallback();
     this.watchAuthority(p);
@@ -6609,7 +6616,10 @@ export class HiveManager {
   }
   private atomicWriteJson(p: string, data: unknown): void {
     // Dropped on success AND on failure: the file may or may not have changed.
-    try { atomicWriteJsonFile(p, data); } finally { this.authorityCache.delete(p); }
+    try { atomicWriteJsonFile(p, data); } finally {
+      this.authorityCache.delete(p);
+      this.authorityWriteGeneration.set(p, (this.authorityWriteGeneration.get(p) ?? 0) + 1);
+    }
   }
 
 }
