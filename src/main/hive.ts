@@ -4112,6 +4112,37 @@ export class HiveManager {
   integrityIssues(): HiveIntegrityIssue[] {
     this.registry(true);
     this.tasks(true);
+    return this.integrityIssuesSnapshot();
+  }
+
+  /**
+   * The IPC/UI form of integrityIssues().  Keep the synchronous form above for
+   * the (many) synchronous callers, but never make the renderer's two-second
+   * banner poll wait on a filesystem stat or authority read on Electron main.
+   * MailLedger's notices are process-local state, so this has precisely the
+   * same result as integrityIssues() after refreshing the two file authorities.
+   */
+  async integrityIssuesAsync(): Promise<HiveIntegrityIssue[]> {
+    const root = this.root();
+    if (root) {
+      await Promise.all([
+        this.readAuthoritativeJsonCachedAsync(join(root, 'registry.json'), () => this.emptyRegistry())
+          .catch((error) => {
+            if (error instanceof HiveAuthorityCorruptError) return this.emptyRegistry();
+            throw error;
+          }),
+        this.readAuthoritativeJsonCachedAsync(join(root, 'tasks.json'), () => ({ tasks: [] }))
+          .catch((error) => {
+            if (error instanceof HiveAuthorityCorruptError) return { tasks: [] };
+            throw error;
+          })
+      ]);
+    }
+    return this.integrityIssuesSnapshot();
+  }
+
+  /** The in-memory portion shared by the synchronous and asynchronous scans. */
+  private integrityIssuesSnapshot(): HiveIntegrityIssue[] {
     // ZT-I3: a ledger error (duplicate id, unknown status) is a NOTICE: nothing is paused,
     // the file is not reverted, god fixes it by hand. Jim S1: the CACHED result; the banner
     // polls every 2 s and the guard already re-checks on watch, its poll and every API write.
@@ -6417,6 +6448,48 @@ export class HiveManager {
       throw new HiveAuthorityCorruptError(issue);
     }
   }
+  /** Async equivalent for the renderer's integrity poll; see integrityIssuesAsync(). */
+  private async readAuthoritativeJsonAsync<T>(p: string, onMissing: () => T): Promise<T> {
+    let raw: string;
+    try {
+      raw = await fsPromises.readFile(p, 'utf8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        this.quarantinedJsonFingerprints.delete(p);
+        this.authorityIssues.delete(p);
+        return onMissing();
+      }
+      throw new Error(`Hive authority ${basename(p)} could not be read: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    try {
+      const parsed = JSON.parse(raw) as T;
+      this.quarantinedJsonFingerprints.delete(p);
+      this.authorityIssues.delete(p);
+      return parsed;
+    } catch (error) {
+      const fingerprint = createHash('sha256').update(raw).digest('hex');
+      let quarantine: string | null = this.authorityIssues.get(p)?.quarantine ?? null;
+      if (this.quarantinedJsonFingerprints.get(p) !== fingerprint) {
+        quarantine = `${p}.corrupt-${Date.now()}-${shortRand()}`;
+        try {
+          await fsPromises.copyFile(p, quarantine);
+          this.quarantinedJsonFingerprints.set(p, fingerprint);
+        } catch (copyError) {
+          quarantine = null;
+          console.error(`[hive] could not quarantine corrupt ${basename(p)}:`, copyError);
+        }
+      }
+      const detail = error instanceof Error ? error.message : String(error);
+      const issue: HiveIntegrityIssue = { file: basename(p), quarantine: quarantine ? basename(quarantine) : null, error: detail };
+      this.authorityIssues.set(p, issue);
+      try {
+        this.appendLog({ kind: 'hive-authority-corrupt', file: basename(p), quarantine: quarantine ? basename(quarantine) : null, error: detail });
+      } catch (logError) {
+        console.error(`[hive] could not log corrupt authority ${basename(p)}:`, logError);
+      }
+      throw new HiveAuthorityCorruptError(issue);
+    }
+  }
   /**
    * MAIN-SYNC-LOG-LEDGER (registry, tasks): registry() and tasks() were a disk read + parse on
    * every call (~430 and ~40 calls/min on Guppy main under a heavy run on 1.1.99; tasks.json is
@@ -6458,6 +6531,29 @@ export class HiveManager {
     if (!st) return value;
     const frozen = authorityDeepFreeze(value);
     // Racy-git rule: a change within STAT_RACY_MS of now may share this key with a later write.
+    this.authorityCache.set(p, { key: provenStatKey(st, this.authorityWall()), value: frozen, checkedAt: now });
+    this.ensureAuthorityFallback();
+    this.watchAuthority(p);
+    return frozen;
+  }
+  /**
+   * Async counterpart used exclusively by hive:integrity. It deliberately
+   * follows the synchronous cache's forced-read behavior: a stat comes first,
+   * unchanged cached authorities retain identity, and missing/corrupt files
+   * remain uncached. The disk work runs in libuv instead of Electron main.
+   */
+  private async readAuthoritativeJsonCachedAsync<T>(p: string, onMissing: () => T): Promise<T> {
+    const now = this.authorityNow();
+    const cached = this.authorityCache.get(p);
+    const st = await fsPromises.stat(p).catch(() => null);
+    if (st && cached && cached.key === statKey(st)) {
+      cached.checkedAt = now;
+      return cached.value as T;
+    }
+    this.authorityCache.delete(p);
+    const value = await this.readAuthoritativeJsonAsync<T>(p, onMissing);
+    if (!st) return value;
+    const frozen = authorityDeepFreeze(value);
     this.authorityCache.set(p, { key: provenStatKey(st, this.authorityWall()), value: frozen, checkedAt: now });
     this.ensureAuthorityFallback();
     this.watchAuthority(p);

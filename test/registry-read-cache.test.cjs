@@ -103,6 +103,39 @@ test('an external edit is invisible inside the window and picked up by the slow 
   assert.equal(io(file, () => hive.registry()).stats, 1, 'a clock that went back revalidates');
 });
 
+test('async integrity refreshes both authorities without a synchronous stat or read on Electron main', async (t) => {
+  const { hive, file, handEdit } = floor(t);
+  const tasks = path.join(hive.root(), 'tasks.json');
+  hive.registry();
+  hive.tasks();
+  handEdit({ godId: 'g-async', agents: { 'g-async': agent('g-async') } });
+  fs.writeFileSync(tasks, JSON.stringify({ tasks: [{ id: 'ASYNC', title: 'async', status: 'doing' }] }), 'utf8');
+  const { readFileSync, statSync } = fs;
+  const calls = [];
+  fs.readFileSync = function (p, ...rest) { if (String(p) === file || String(p) === tasks) calls.push(`read:${path.basename(p)}`); return readFileSync.call(this, p, ...rest); };
+  fs.statSync = function (p, ...rest) { if (String(p) === file || String(p) === tasks) calls.push(`stat:${path.basename(p)}`); return statSync.call(this, p, ...rest); };
+  try {
+    assert.deepEqual(await hive.integrityIssuesAsync(), []);
+  } finally {
+    fs.readFileSync = readFileSync;
+    fs.statSync = statSync;
+  }
+  assert.deepEqual(calls, [], 'hive:integrity uses fs.promises, never main-thread sync authority I/O');
+  assert.equal(hive.registry().godId, 'g-async', 'the async refresh installs the same cache visible to synchronous callers');
+  assert.deepEqual(hive.tasks(), { tasks: [{ id: 'ASYNC', title: 'async', status: 'doing' }] });
+});
+
+test('async integrity preserves the corrupt-authority repair banner and clears it after a repair', async (t) => {
+  const { hive, file, handEdit } = floor(t);
+  fs.writeFileSync(file, '{"agents":', 'utf8');
+  const issues = await hive.integrityIssuesAsync();
+  assert.match(issues.find((i) => i.file === 'registry.json').quarantine, /^registry\.json\.corrupt-/);
+  assert.equal(fs.readdirSync(hive.root()).filter((n) => n.startsWith('registry.json.corrupt-')).length, 1);
+  handEdit({ godId: null, agents: { repaired: agent('repaired') } });
+  assert.deepEqual(await hive.integrityIssuesAsync(), []);
+  assert.ok(hive.registry().agents.repaired);
+});
+
 test('fs.watch marks the cache dirty: an external edit is seen before the window ends', async (t) => {
   const { hive, handEdit } = floor(t);
   assert.equal(hive.registry().godId, null);
