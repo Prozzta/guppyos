@@ -86,7 +86,7 @@ test('P1: a shown request still owed blocks the Stop with the fixed reason namin
   const os1 = new S.OwedStopContinue(0);
   const d = decide(os1, { tools: 3 });
   assert.equal(d.reason, `Request ${Q1} from god is still owed. Do the next step now. End your turn only after you send done or refuse (in_reply_to ${Q1}), or a query or request naming what you wait on.`);
-  assert.deepEqual(d.row, { kind: 'wake-stop', agentId: A, provider: 'codex', outcome: 'OWED_BLOCKED', id: Q1, block: 1, max: 4, segmentTools: 3, reasonChars: d.reason.length });
+  assert.deepEqual(d.row, { kind: 'wake-stop', agentId: A, provider: 'codex', outcome: 'OWED_BLOCKED', id: Q1, block: 1, max: 4, chainBlock: 1, chainMax: 8, segmentTools: 3, reasonChars: d.reason.length });
   assert.equal(S.OWED_STOP_MAX, 4);
 });
 
@@ -113,6 +113,19 @@ test('P1: with two obligations, the oldest with blocks left is named; past 4 the
   assert.deepEqual(named.slice(0, 8).map((r) => r.id), [Q1, Q1, Q1, Q1, Q2, Q2, Q2, Q2]);
   assert.equal(named[8].why, 'cap');
   assert.deepEqual(named[8].ids, [Q1, Q2]);
+});
+
+test('P1: the chain cap is 8 blocks in all across obligations; the 9th Stop goes through chain-cap and a new chain starts', () => {
+  const Q3 = '2026-11-15T03-02-00-000Z-q33333';
+  const doc = shownDoc([{ id: Q1, at: T0 }, { id: Q2, at: T0 + MIN }, { id: Q3, at: T0 + 2 * MIN }]);
+  const os1 = new S.OwedStopContinue(0);
+  const rows = [];
+  for (let i = 0; i < 9; i++) rows.push(decide(os1, { doc, now: T0 + 3 * MIN }).row);
+  assert.equal(S.OWED_STOP_CHAIN_MAX, 8);
+  assert.deepEqual(rows.slice(0, 8).map((r) => [r.id, r.block, r.chainBlock]), [[Q1, 1, 1], [Q1, 2, 2], [Q1, 3, 3], [Q1, 4, 4], [Q2, 1, 5], [Q2, 2, 6], [Q2, 3, 7], [Q2, 4, 8]]);
+  assert.deepEqual([rows[8].outcome, rows[8].why, rows[8].ids], ['OWED_NOT_BLOCKED', 'chain-cap', [Q1, Q2, Q3]], 'Q3 has blocks left, but the chain has spent 8');
+  const again = decide(os1, { doc, now: T0 + 3 * MIN });
+  assert.deepEqual([again.row.outcome, again.row.id, again.row.block, again.row.chainBlock], ['OWED_BLOCKED', Q1, 1, 1], 'the Stop that went through ended the chain');
 });
 
 test('P1: a tool-free segment is never blocked (an answer or a real wait), and it ends the chain', () => {

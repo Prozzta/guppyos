@@ -100,6 +100,23 @@ test('CAP 4 blocks per obligation per chain, the 5th Stop goes through; the next
   t.diagnostic(`CAP turn1 stops=5 blocked=4 notBlocked=1(cap); turn2 block=1 then done`);
 });
 
+test('CHAIN-CAP three owed requests: 8 blocks in all (4 + 4), the 9th Stop goes through chain-cap', T, async (t) => {
+  const rig = await startRig(t);
+  await rig.setup(SPEC);
+  const reqs = [];
+  for (const n of [1, 2, 3]) reqs.push(await rig.call('send', { to: ID, act: 'request', subject: `job ${n}`, body: `do job ${n}` }));
+  await rig.beatUntil(() => reqs.every((m) => rig.contexts(ID).some((c) => c.ids.includes(m.id))), { what: 'all three surfaced', ...BEAT });
+  assert.equal(new Set(rig.contexts(ID).map((c) => c.turn)).size, 1, 'one turn shows all three');
+  for (let i = 1; i <= 9; i++) { await cue(rig, { cue: 'tool' }); await cue(rig, { cue: 'stop' }); }
+  await waitFor(() => rig.turnEnds(ID).length === 1, { what: 'turn ended at the chain cap' });
+  assert.equal(kinds(rig, 'stop-blocked').length, 8, 'exactly 8 blocks');
+  const rows = await owedRows(rig);
+  const [a, b, c] = reqs.map((m) => m.id);
+  assert.deepEqual(rows.map((r) => r.outcome === 'OWED_BLOCKED' ? [r.id, r.block, r.chainBlock] : [r.why, r.ids]),
+    [[a, 1, 1], [a, 2, 2], [a, 3, 3], [a, 4, 4], [b, 1, 5], [b, 2, 6], [b, 3, 7], [b, 4, 8], ['chain-cap', [a, b, c]]]);
+  t.diagnostic('CHAIN-CAP 9 Stops, 8 blocked (4 + 4), the 9th chain-cap with the third request still having blocks left');
+});
+
 test('NO-TOOLS a Stop with no tool call in its segment goes through, first Stop and right after a block', T, async (t) => {
   const rig = await startRig(t);
   await rig.setup(SPEC);

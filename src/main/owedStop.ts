@@ -11,7 +11,8 @@
  * nothing (the GTC M4 Stop-continue carries waiting mail; that one goes first). Bounds:
  *  - only while the segment just ended made at least one tool call: a tool-free segment is an
  *    answer or a real wait, and that Stop goes through (OwedContinuation and STALL as before);
- *  - at most OWED_STOP_MAX blocks per obligation per chain (a chain ends at a Stop that goes through);
+ *  - at most OWED_STOP_MAX blocks per obligation per chain (a chain ends at a Stop that goes through),
+ *    and OWED_STOP_CHAIN_MAX blocks in all per chain, so a stale backlog of owed requests is bounded;
  *  - every legitimate wait OwedContinuation knows (owedSuppressor), mail waiting to be delivered
  *    (the wake brings it, and it may change the work), plus the human guards of the M4 stopClaim:
  *    no PTY, an inhibited PTY, a draft, a picker or an exited prompt, a person's key within
@@ -25,6 +26,8 @@ import { OWED_WINDOW_MS, owedSuppressor, type OwedSuppressFacts, type OwedSuppre
 
 /** Owed blocks per obligation in one chain of continued Stops. */
 export const OWED_STOP_MAX = 4;
+/** Owed blocks in all, across every obligation, in one chain (god, NIT 4). */
+export const OWED_STOP_CHAIN_MAX = 8;
 /** A person's key this recently holds the block back (automaticSubmit HUMAN_QUIET_MS). */
 export const OWED_STOP_HUMAN_QUIET_MS = 1_500;
 
@@ -48,7 +51,7 @@ export interface OwedStopFacts extends OwedSuppressFacts {
   lastHumanInputAt?: number;
 }
 
-export type OwedStopWhy = OwedSuppressor | 'off' | 'no-tools' | 'pending-mail' | 'no-pty' | 'inhibited' | 'draft' | 'picker' | 'exited' | 'human-input' | 'cap';
+export type OwedStopWhy = OwedSuppressor | 'off' | 'no-tools' | 'pending-mail' | 'no-pty' | 'inhibited' | 'draft' | 'picker' | 'exited' | 'human-input' | 'cap' | 'chain-cap';
 
 export interface OwedStopDecision {
   /** The block reason, or null: the Stop goes through. */
@@ -104,10 +107,12 @@ export class OwedStopContinue {
     if (f.lastHumanInputAt !== undefined && f.now - f.lastHumanInputAt < OWED_STOP_HUMAN_QUIET_MS) return pass('human-input');
     const e = owed.find((o) => (chain.get(o.id) ?? 0) < OWED_STOP_MAX);
     if (!e) return pass('cap');
+    const total = [...chain.values()].reduce((a, b) => a + b, 0);
+    if (total >= OWED_STOP_CHAIN_MAX) return pass('chain-cap');
     const n = (chain.get(e.id) ?? 0) + 1;
     chain.set(e.id, n);
     this.chains.set(agentId, chain);
     const reason = owedStopReason(e);
-    return { reason, row: { kind: 'wake-stop', agentId, provider, outcome: 'OWED_BLOCKED', id: e.id, block: n, max: OWED_STOP_MAX, segmentTools, reasonChars: reason.length } };
+    return { reason, row: { kind: 'wake-stop', agentId, provider, outcome: 'OWED_BLOCKED', id: e.id, block: n, max: OWED_STOP_MAX, chainBlock: total + 1, chainMax: OWED_STOP_CHAIN_MAX, segmentTools, reasonChars: reason.length } };
   }
 }
