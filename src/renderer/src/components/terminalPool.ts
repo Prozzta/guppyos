@@ -15,7 +15,7 @@
  */
 import { createPoolTimer } from './poolTimer';
 import { TERMINAL_SCROLLBACK_LINES } from './terminalScrollback';
-import { TERMINAL_FONT_FAMILY, loadTerminalFont, remeasureTerminalFont, terminalCellPad, terminalFontReady } from './terminalFont';
+import { TERMINAL_FONT_FAMILY, loadTerminalFont, remeasureTerminalFont, TERMINAL_CELL_PAD, terminalFontReady } from './terminalFont';
 import { createPtyResizeCoalescer, type Grid, type PtyResizeCoalescer } from './ptyResizeCoalescer';
 import { useEffect, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
@@ -167,9 +167,9 @@ export function acquireTerminal(ptyId: string, theme?: ThemeMap, fontSize = 14):
     // TERM-FONT-105: the face (Martian Mono) is bundled and chosen in terminalFont.ts.
     fontFamily: TERMINAL_FONT_FAMILY,
     fontSize,
-    // Whole-px cells never narrower than the glyph (terminalFont.ts terminalCellPad); the
-    // font-load re-measure recomputes it if the face was not loaded yet.
-    letterSpacing: terminalCellPad(fontSize),
+    // Cell = floor(advance) + 1 device px at every size: air around every glyph (terminalFont.ts
+    // TERMINAL_CELL_PAD); every later size change keeps it via applyTerminalFontSize.
+    letterSpacing: TERMINAL_CELL_PAD,
     lineHeight: 1.0,
     cursorBlink: true,
     cursorStyle: 'block',

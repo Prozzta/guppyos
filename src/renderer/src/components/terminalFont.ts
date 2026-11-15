@@ -56,41 +56,27 @@ export function terminalFontReady(): boolean {
  */
 export function remeasureTerminalFont(term: Terminal): void {
   const size = term.options.fontSize ?? 14;
-  term.options.letterSpacing = terminalCellPad(size);
+  term.options.letterSpacing = TERMINAL_CELL_PAD;
   term.options.fontSize = size + 1;
   term.options.fontSize = size;
   term.clearTextureAtlas();
 }
 
 /**
- * Whole-pixel cells that are never narrower than the glyph (TERM-FONT-105: readability).
+ * Whole-pixel cells with air around every glyph (TERM-FONT-105: readability is the bar).
  *
  * xterm's cell width is floor(advance x dpr) + round(letterSpacing) device px. Martian Mono's
  * advance is 0.7em, fractional at most sizes (8.4px at 12px), so the floor alone made 8px
- * cells for 8.4px glyphs and W/m were drawn squeezed. The pad is the 0 or 1 device px that
- * turns that floor into a ceil: 12px -> 9, 14px -> 10, 16px -> 12; 10px (7.0) stays 7.
- * The advance is measured exactly as xterm measures it (canvas measureText('W') on
- * `${fontSize}px ${fontFamily}`), so the two always agree on which face is in use.
+ * cells for 8.4px glyphs and W/m were drawn squeezed; where the advance is whole (7.0 at
+ * 10px) the glyphs fit but W/m touch their neighbours. The rule (god 5f0f8b) is
+ * cell = floor(advance) + 1 at every size: 10px -> 8, 12px -> 9, 14px -> 10, 16px -> 12.
+ * So the pad is always one device px, never measured: it cannot disagree with xterm's own
+ * measurement, and every size change must carry it (see applyTerminalFontSize).
  */
-const CELL_EPSILON = 0.01; // an advance within 1/100 px of a whole pixel already fits
+export const TERMINAL_CELL_PAD = 1;
 
-export function terminalCellPadFor(advanceCss: number, dpr: number): number {
-  const device = advanceCss * dpr;
-  return device - Math.floor(device) > CELL_EPSILON ? 1 : 0;
-}
-
-let measureCtx: OffscreenCanvasRenderingContext2D | null = null;
-
-/** The pad (xterm letterSpacing) for the terminal face at this px size on this screen. */
-export function terminalCellPad(fontSize: number): number {
-  measureCtx ??= new OffscreenCanvas(100, 100).getContext('2d');
-  if (!measureCtx) return 0;
-  measureCtx.font = `${fontSize}px ${TERMINAL_FONT_FAMILY}`;
-  return terminalCellPadFor(measureCtx.measureText('W').width, window.devicePixelRatio || 1);
-}
-
-/** Change the terminal's px size (zoom) with the matching whole-pixel cell pad. */
+/** Change the terminal's px size (zoom) and keep the one-pixel cell pad with it. */
 export function applyTerminalFontSize(term: Terminal, fontSize: number): void {
-  term.options.letterSpacing = terminalCellPad(fontSize);
+  term.options.letterSpacing = TERMINAL_CELL_PAD;
   term.options.fontSize = fontSize;
 }
