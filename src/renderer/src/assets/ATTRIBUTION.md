@@ -38,3 +38,21 @@ reading old commits or an old copy of this file, that is the change you are look
 `maps/office.tmj` and `maps/brooklyn99.tmj` are Tiled JSON maps built on the LimeZu tilesets
 above. Both are imported by `themeRegistry.ts`; a map that nothing imports is not shipped, and
 should be deleted rather than left to imply an asset is in use.
+
+## Terminal font: Martian Mono
+
+`fonts/martian-mono/` holds Martian Mono 1.1.0, Standard width, Regular and Bold
+(`MartianMono-StdRg.woff2`, `MartianMono-StdBd.woff2`), taken unmodified from the official release
+asset `martian-mono-1.1.0-woff2.zip` at https://github.com/evilmartians/mono (tag v1.1.0).
+Copyright 2021 The Martian Mono Project Authors, licensed under the SIL Open Font License 1.1; the
+licence text (`OFL.txt` from the repo at v1.1.0) ships beside the files as `fonts/martian-mono/OFL.txt`.
+It is bundled so the terminal never fetches a font from the network (TERM-FONT-105); it is declared
+in `design/fonts.css` and chosen in `components/terminalFont.ts`.
+
+## UI monospace font: JetBrains Mono
+
+`fonts/jetbrains-mono/` holds JetBrains Mono 2.304 (Regular, Medium, Bold as woff2), taken unmodified
+from the official release at https://github.com/JetBrains/JetBrainsMono. Copyright 2020 The JetBrains
+Mono Project Authors, licensed under the SIL Open Font License 1.1; the licence text ships beside the
+files as `fonts/jetbrains-mono/OFL.txt`. It serves the UI's `--cth-font-mono` labels (`design/tokens.css`),
+so they no longer need a font from the network (TERM-FONT-105); it is declared in `design/fonts.css`.

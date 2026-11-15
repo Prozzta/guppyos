@@ -1,0 +1,46 @@
+/* TERM-FONT-105: the monospace faces ship WITH the app (no Google Fonts / network font).
+   font-display: block: the files are local, so the short block period never shows a
+   fallback face that xterm could measure first.
+
+   Terminal: Martian Mono 1.1.0 (Standard width), SIL Open Font License 1.1:
+   assets/fonts/martian-mono/OFL.txt. Chosen in components/terminalFont.ts (TERMINAL_FONT_FACE);
+   xterm draws at 400 (fontWeight) and 700 (fontWeightBold).
+
+   UI: JetBrains Mono 2.304, SIL Open Font License 1.1: assets/fonts/jetbrains-mono/OFL.txt.
+   Not the terminal's face any more; it stays for the UI's --cth-font-mono labels (tokens.css),
+   Monaco and ReleaseDrop, which Google Fonts served at 400/500/700 before 35bbbf72. */
+@font-face {
+  font-family: "Martian Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url('../assets/fonts/martian-mono/MartianMono-StdRg.woff2') format('woff2');
+}
+@font-face {
+  font-family: "Martian Mono";
+  font-style: normal;
+  font-weight: 700;
+  font-display: block;
+  src: url('../assets/fonts/martian-mono/MartianMono-StdBd.woff2') format('woff2');
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url('../assets/fonts/jetbrains-mono/JetBrainsMono-Regular.woff2') format('woff2');
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: block;
+  src: url('../assets/fonts/jetbrains-mono/JetBrainsMono-Medium.woff2') format('woff2');
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 700;
+  font-display: block;
+  src: url('../assets/fonts/jetbrains-mono/JetBrainsMono-Bold.woff2') format('woff2');
+}
