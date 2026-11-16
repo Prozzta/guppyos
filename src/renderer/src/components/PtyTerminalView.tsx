@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import '@xterm/xterm/css/xterm.css';
 import { Icon } from './Icon';
-import { acquireTerminal, attachTerminal, detachTerminal, reflowTerminal, requestPtyResize } from './terminalPool';
+import { acquireTerminal, attachTerminal, detachTerminal, reflowTerminal, requestPtyResize, setTerminalTheme } from './terminalPool';
 import { loadTerminalFont, remeasureTerminalFont, applyTerminalFontSize, terminalFontReady } from './terminalFont';
 import {
   DEFAULT_TERMINAL_FONT_SIZE,
@@ -268,7 +268,9 @@ export function PtyTerminalView({ ptyId, onStreamData, onUserPrompt, onToggleFul
   // tokens in design/uiTheme.ts).
   const termPalette = useUiPalette(ptyTheme);
   useEffect(() => {
-    acquireTerminal(ptyId, xtermTheme(ptyTheme), fontSizeRef.current).term.options.theme = xtermTheme(ptyTheme);
+    const palette = xtermTheme(ptyTheme);
+    acquireTerminal(ptyId, palette, fontSizeRef.current);
+    setTerminalTheme(ptyId, palette);
   }, [ptyTheme, ptyId, termPalette]);
 
   // Apply font-size (zoom) changes to the pooled terminal and re-fit cols/rows.

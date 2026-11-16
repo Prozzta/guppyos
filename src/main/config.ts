@@ -465,6 +465,8 @@ export interface HarnessConfig extends BlobConfigFields {
    *  ("theme" key) at spawn so the TUI's truecolor palette matches. Scoped to
    *  harness agents only; the user's global Claude theme is never touched. */
   terminalTheme?: 'light' | 'dark';
+  /** Highlight recognizable terminal output without changing the pty stream. Default ON. */
+  terminalPatternColoring?: boolean;
   /** Anonymous product analytics (PostHog) — the exact events/properties are
    *  documented in TELEMETRY.md. Default ON (opt-out, like autoUpdate); builds
    *  without an injected key and environments with DO_NOT_TRACK set never send
@@ -608,6 +610,7 @@ const DEFAULTS: HarnessConfig = {
   keepInTray: false,
   telemetryEnabled: true,
   multiWindow: true,
+  terminalPatternColoring: true,
   tvShowOffices: false,
   officeTheme: 'office',
   slackEnabled: false,

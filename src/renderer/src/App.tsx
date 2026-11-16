@@ -36,6 +36,7 @@ import { Icon } from '@/components/Icon';
 import { SidebarSplitter } from '@/components/SidebarSplitter';
 import { FLOOR_PANE_BLEED, framedSidebarWidth, packFrame } from '@/scene/themes/framing';
 import { acquireTerminal, notifyThemeChangeAll } from '@/components/terminalPool';
+import { setTerminalPatternColoringEnabled } from '@/components/terminalPatternColor';
 import { FullscreenTerminal } from '@/components/FullscreenTerminal';
 import { TaskDetailOverlay } from '@/components/TaskDetailOverlay';
 import { IdePanel } from '@/ide/IdePanel';
@@ -151,6 +152,7 @@ export function App() {
     window.cth.getConfig().then(c => {
       if (cancelled) return;
       setConfig(c);
+      setTerminalPatternColoringEnabled(c.terminalPatternColoring !== false);
       // Mirror the Free Flow flag into the store so the composer mic button shows
       // only when enabled (Settings keeps this in sync on save).
       useStore.getState().setFreeflowEnabled(!!c.freeflowEnabled);

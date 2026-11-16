@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- **Terminal pattern colouring.** Agent terminals now recognise paths, git IDs,
+  statuses, errors, roster names, URLs and semantic versions without altering
+  the pty output. The new Terminal setting is on by default; an all-default-
+  foreground error line is coloured as a whole, while a line containing ANSI
+  foreground colours keeps those cells untouched.
+
 > **The fork line.** From here up, entries are this fork's (Prozzta/guppyos) independently
 > versioned 1.1.x releases, taken from their GitHub release notes (published releases begin at
 > v1.1.79). The fork is based on upstream
