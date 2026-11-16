@@ -79,7 +79,11 @@ window.__harnessRun = async () => {
     };
 
     const ctx = document.createElement('canvas').getContext('2d')!;
-    const measure = (step: string) => {
+    // The pty hears a new grid through a settle timer (ptyResizeCoalescer), so wait for the
+    // grid it was last told to be the grid xterm has, instead of guessing a delay.
+    const ptyGrid = () => [...resizes].reverse().find((r) => r.id === 'pty-a');
+    const measure = async (step: string) => {
+      for (let i = 0; i < 100 && ptyGrid()?.cols !== entry.term.cols; i++) await wait(50);
       const face = getTerminalFontFace();
       const size = getTerminalFontSize();
       const dims = (entry.term as unknown as XtermCore)._core._renderService.dimensions;
@@ -105,7 +109,7 @@ window.__harnessRun = async () => {
         cssCell: dims.css.cell.width,
         advance, inkLeft, inkRight,
         cols: entry.term.cols,
-        resizes: resizes.length
+        ptyCols: ptyGrid()?.cols ?? null
       };
     };
 
@@ -114,15 +118,15 @@ window.__harnessRun = async () => {
       for (const size of [10, 12, 14, 16]) {
         await act(async () => { setTerminalFontSize(size); });
         await wait(300);
-        rows.push(measure(step));
+        rows.push(await measure(step));
       }
     };
     await sweep('default');
     await pick('Martian Mono');
-    rows.push(measure('picked at 16px, no size change'));
+    rows.push(await measure('picked at 16px, no size change'));
     await sweep('picked Martian Mono');
     await pick('JetBrains Mono');
-    rows.push(measure('picked back at 16px, no size change'));
+    rows.push(await measure('picked back at 16px, no size change'));
     await sweep('picked JetBrains Mono');
 
     window.harness.report({

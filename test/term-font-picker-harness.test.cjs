@@ -62,6 +62,7 @@ for (const dpr of [1, 1.25, 1.5]) {
       assert.equal(x.family, family(x.face), where);
       assert.equal(x.pooledFamily, family(x.face), `${where}: the terminal no view shows follows too`);
       assert.equal(x.selectValue, x.face, where);
+      assert.equal(x.ptyCols, x.cols, `${where}: the pty was told the grid xterm has`);
     }
     for (const face of FACES) {
       assert.deepEqual(r.rows.filter((x) => x.step === `picked ${face}`).map((x) => x.size), SIZES, `${face} swept`);
@@ -80,7 +81,7 @@ for (const dpr of [1, 1.25, 1.5]) {
     assert.equal(picked.stored, 'Martian Mono');
     assert.ok(picked.cell > before.cell, `the wider face got a wider cell with no size change (${before.cell} -> ${picked.cell})`);
     assert.ok(picked.cols < before.cols, `and the grid was refitted (${before.cols} -> ${picked.cols} cols)`);
-    assert.equal(picked.resizes, before.resizes + 1, 'the pty heard the new grid once');
+    assert.equal(picked.ptyCols, picked.cols, 'and the pty was told the new grid');
     const [back] = by('picked back at 16px, no size change');
     assert.equal(back.face, 'JetBrains Mono');
     assert.equal(back.stored, 'JetBrains Mono');
