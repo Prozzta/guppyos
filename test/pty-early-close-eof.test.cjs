@@ -21,6 +21,8 @@ require('./tools/own-job.cjs');
  *   E1 no restore: the unconnected socket keeps readable = false (the pre-fix code)
  *   E2 the restore ignores the connect state (a connected socket is made readable again)
  *   E3 the restore runs before _close()/_agent.kill() (they clear it again)
+ *   E5 (Jim) the early close waits for the socket connect (sock.once('connect', close + agent.kill)):
+ *      the pseudoconsole is no longer closed at the kill (the PTY-EARLY-KILL-LEAK guarantee)
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -85,7 +87,13 @@ if (process.platform !== 'win32') {
     const sock = proc._socket;
     const connected = new Promise((res) => sock.once('ready_datapipe', res));
     const exited = new Promise((res) => proc.onExit(res));
+    // PTY-EARLY-KILL-LEAK: the pseudoconsole closes AT the kill, not when the pipe connects.
+    let agentKills = 0;
+    const agentKill = proc._agent.kill;
+    proc._agent.kill = function (...a) { agentKills++; return agentKill.apply(this, a); };
     proc.kill();   // the armed early kill (what closePty/killAllAsync run)
+    assert.equal(agentKills, 1, 'the agent kill (ClosePseudoConsole) ran synchronously inside kill()');
+    assert.equal(proc._writable, false, '_close() ran synchronously inside kill()');
     assert.equal(sock._handle, null, 'the lever holds: the kill ran before the connect');
     assert.equal(proc._isReady, true, 'the early close ran (node-pty would have queued it)');
     await within(connected, 'ready_datapipe');
