@@ -186,6 +186,30 @@ export function armEarlyKill(proc: pty.IPty, platform: NodeJS.Platform = process
   return true;
 }
 
+/**
+ * PTY-CLOSETREE-PIDREUSE: is this terminal's root process still the owner of its pid?
+ *
+ * A pid says nothing about WHICH process has it: Windows hands a dead process's pid to the next
+ * process created, within milliseconds. `isAlive(pid)` therefore answers "is anything alive under
+ * this number", and a `taskkill /T /F` that follows it can end an unrelated process and its tree.
+ *
+ * node-pty's ConPTY agent is the one party that knows the root by HANDLE: conpty.cc keeps the
+ * process handle from CreateProcess open until the process exits (a pid cannot be reused while a
+ * handle to its process is open), then closes it and reports the exit, which the agent stores as
+ * `_exitCode`. So:
+ *   'running'  no exit reported: the handle is open and the pid is the root's;
+ *   'exited'   the exit was reported: the pid is no longer ours, whatever is alive under it;
+ *   'unknown'  not the ConPTY agent this was written against (winpty, another node-pty version):
+ *              nothing binds the pid to the root. The pin test fails then.
+ * Not covered: the instant inside node-pty's wait thread between closing the handle and queueing
+ * the exit report. Closing that needs a kill by handle, which node-pty does not expose.
+ */
+export function rootState(proc: pty.IPty): 'running' | 'exited' | 'unknown' {
+  const agent = (proc as unknown as { _agent?: { _useConpty?: unknown; _exitCode?: unknown; _$onProcessExit?: unknown } })._agent;
+  if (!agent || agent._useConpty !== true || typeof agent._$onProcessExit !== 'function') return 'unknown';
+  return agent._exitCode === undefined ? 'running' : 'exited';
+}
+
 export interface SpawnOptions {
   id: string;
   cwd: string;
@@ -524,10 +548,16 @@ export class PtyManager {
     }
     const close = (): void => { this.closingTrees.delete(s); this.closePty(s); };
     if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) { close(); return; }
+    // PTY-CLOSETREE-PIDREUSE: a sweep names the root by pid, so it runs only while the pid is known
+    // to be the root's (rootState). A root that already exited has nothing left for taskkill to walk
+    // (the known gap above), and its pid may belong to a stranger by now.
+    if (rootState(s.proc) === 'exited') { close(); return; }
     this.closingTrees.add(s);
     // Jim MINOR 1: re-verify after the sweep. A taskkill that failed or hit its cap leaves the root
-    // alive, and the root still holds the tree, so one more sweep runs before the close.
-    void killTreesAsync([pid]).then(() => (isAlive(pid) ? killTreesAsync([pid]) : undefined)).then(close, close);
+    // alive, and the root still holds the tree, so one more sweep runs before the close. The first
+    // sweep normally ENDS the root, which frees its pid: "something is alive under this pid" is then
+    // a stranger, so the second sweep needs the root itself to be running, not just the pid.
+    void killTreesAsync([pid]).then(() => (rootState(s.proc) === 'running' && isAlive(pid) ? killTreesAsync([pid]) : undefined)).then(close, close);
   }
 
   /** Close a session's ConPTY once: closeTree's late close and a quit can both reach the same one. */
