@@ -8,7 +8,9 @@
 //
 // Accepted input states (by SHA-256 of src/win/conpty.cc, see node-pty-race-fix-pins.cjs):
 //   pristine 1.1.0 -> patch, then require the result to equal the pinned patched digest
-//   already patched -> no-op (second npm ci / npm rebuild / npm run postinstall)
+//   already patched -> no-op (second npm ci / npm rebuild / npm run postinstall); so is the
+//                      form after patch-node-pty-root-handle.cjs, which runs next and builds
+//                      on this one (CONPTY_CC_BUILT_SHA256)
 //   anything else  -> throw (different node-pty, partial patch, line-ending change, ...)
 // `--root <node-pty dir>` targets another tree (used by the self-test only).
 //
@@ -49,11 +51,11 @@ if (!fs.existsSync(file)) fail('node-pty src/win/conpty.cc missing');
 const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
 let source = fs.readFileSync(file, 'utf8');
 const inputSha = sha(source);
-if (inputSha === pins.CONPTY_CC_PATCHED_SHA256) {
+if (inputSha === pins.CONPTY_CC_PATCHED_SHA256 || inputSha === pins.CONPTY_CC_BUILT_SHA256) {
   console.log('[patch-node-pty-race-fix] node-pty #922 already applied');
   process.exit(0);
 }
-if (inputSha !== pins.CONPTY_CC_PRISTINE_SHA256) fail(`conpty.cc is neither pristine 1.1.0 nor the pinned patched form (sha256 ${inputSha})`);
+if (inputSha !== pins.CONPTY_CC_PRISTINE_SHA256) fail(`conpty.cc is neither pristine 1.1.0 nor a pinned patched form (sha256 ${inputSha})`);
 
 const replaceOnce = (before, after, label) => {
   const at = source.indexOf(before);

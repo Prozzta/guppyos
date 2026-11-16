@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 'use strict';
 
-// Emit evidence only when electron-rebuild compiled a #922-patched source:
-// node-pty is the pinned 1.1.0, conpty.cc is byte-for-byte the pinned patched
-// form, and build/Release/conpty.node is newer than that patched source (a
+// Emit evidence only when electron-rebuild compiled the fully patched source
+// (#922, then the PTY-HOLD-NODEPTY-HANDOFF root-handle handoff):
+// node-pty is the pinned 1.1.0, conpty.cc is byte-for-byte the pinned built
+// form (CONPTY_CC_BUILT_SHA256), lib/windowsPtyAgent.js is its pinned handoff form, and build/Release/conpty.node is newer than that patched source (a
 // binary built before the patch, or a stale copy, is refused rather than
 // blessed). scripts/release-markers.cjs re-checks the recorded digests.
 const fs = require('node:fs');
@@ -22,7 +23,10 @@ if (!fs.existsSync(pkgPath) || !fs.existsSync(sourcePath)) fail('node-pty source
 const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
 if (pkg.version !== pins.NODE_PTY_VERSION) fail(`node-pty ${pins.NODE_PTY_VERSION} required, got ${pkg.version}`);
 const sourceSha256 = hash(sourcePath);
-if (sourceSha256 !== pins.CONPTY_CC_PATCHED_SHA256) fail(`conpty.cc is not the pinned #922-patched source (sha256 ${sourceSha256})`);
+if (sourceSha256 !== pins.CONPTY_CC_BUILT_SHA256) fail(`conpty.cc is not the pinned #922 + root-handle source (sha256 ${sourceSha256})`);
+const agentPath = path.join(root, 'lib', 'windowsPtyAgent.js');
+const agentSha256 = fs.existsSync(agentPath) ? hash(agentPath) : 'missing';
+if (agentSha256 !== pins.AGENT_JS_HANDOFF_SHA256) fail(`lib/windowsPtyAgent.js is not the pinned root-handle form (sha256 ${agentSha256})`);
 const sourceStat = fs.statSync(sourcePath);
 // node-pty loads this Electron-ABI build; npm's prebuilds are for stock Node
 // and cannot be rebuilt against Electron here.
@@ -31,6 +35,8 @@ if (!fs.existsSync(binaries[0])) fail('electron-rebuild did not produce build/Re
 if (binaries.some((p) => fs.statSync(p).mtimeMs <= sourceStat.mtimeMs)) fail('conpty.node is not newer than patched conpty.cc (stale binary; rerun electron-rebuild -f)');
 // mtime alone can be faked by a plain copy; the lock imports are a property of the #922 code.
 if (!binaries.every(pins.hasMutexImports)) fail(`conpty.node lacks the #922 mutex imports (${pins.MUTEX_IMPORTS.join(', ')}): not built from the patched source`);
+// The same for the handoff: only its code calls DuplicateHandle.
+if (!binaries.every(pins.hasHandoffImports)) fail(`conpty.node lacks the root-handle import (${pins.HANDOFF_IMPORTS.join(', ')}): not built from the handoff source`);
 const files = Object.fromEntries(binaries.map((p) => [path.relative(root, p).replaceAll('\\', '/'), { sha256: hash(p), mtimeMs: fs.statSync(p).mtimeMs }]));
 fs.writeFileSync(markerPath, `${JSON.stringify({ version: pkg.version, sourceSha256, sourceMtimeMs: sourceStat.mtimeMs, files }, null, 2)}\n`);
 console.log(`[record-node-pty-race-fix] ${pkg.version}; recorded ${binaries.length} rebuilt conpty.node digest(s)`);

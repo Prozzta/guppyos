@@ -441,7 +441,7 @@ if (!WIN) {
   MUTANTS.push(
     { file: PTYF, name: 'K1 the sweeps do not ask the hold (closeTree as it was at 057e5ae6)', edits: [[HOLD_RULE, '']],
       run: (mod) => W.window(mod.PtyManager), dies: /IN THE WINDOW NO SWEEP NAMES THE PID/ },
-    { file: PTYF, name: 'K2 spawn takes no hold', edits: [['const hold = holdRoot(proc.pid);', 'const hold = null;']],
+    { file: PTYF, name: 'K2 spawn takes no hold', edits: [['const hold = holdRoot(proc.pid, process.platform, rootHandoff(proc));', 'const hold = null;']],
       run: (mod) => W.window(mod.PtyManager), dies: /IN THE WINDOW NO SWEEP NAMES THE PID/ },
     { file: PTYF, name: 'K3 the quit names every session (killAllAsync as it was at 057e5ae6)', edits: [['sessions.filter((s) => mayNamePid(s, false)).map((s) => s.proc.pid)', 'sessions.map((s) => s.proc.pid)']],
       run: (mod) => W.quitExited(mod.PtyManager), dies: /QUIT NEVER NAMES A PID ITS ROOT NO LONGER OWNS/ },

@@ -9,7 +9,7 @@ import type { WebContents } from 'electron';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { delimiter, join, win32 } from 'node:path';
 import { ensureKilled, isAlive, killTreesAsync } from './procKill';
-import { holdRoot, pidIdentity, type PidIdentity, type RootHold } from './procIdentity';
+import { holdRoot, pidIdentity, rootHandoff, type PidIdentity, type RootHold } from './procIdentity';
 import { expandTilde } from './fs';
 import { buildPtyEnv } from './ptyEnv';
 import { createPtyDataBatcher, type PtyDataBatcher } from './ptyDataBatcher';
@@ -1040,8 +1040,9 @@ export class PtyManager {
       // PTY-EARLY-KILL-LEAK: a kill before the first output must close the pseudoconsole now.
       armEarlyKill(proc);
       // PTY-KILL-PID-IDENTITY: bind the pid to this root in the spawn's own turn, before anything
-      // else can run: a handle of our own on Windows, the start stamp elsewhere.
-      const hold = holdRoot(proc.pid);
+      // else can run: a handle of our own on Windows (node-pty's own, handed over:
+      // PTY-HOLD-NODEPTY-HANDOFF), the start stamp elsewhere.
+      const hold = holdRoot(proc.pid, process.platform, rootHandoff(proc));
       const rootId = process.platform === 'win32' ? undefined : pidIdentity(proc.pid);
 
       // Capture THIS session object so the proc's callbacks can tell whether the

@@ -12,6 +12,13 @@
  * so a kill that names it reaches the root or nobody, and "is the root alive" is asked of the
  * handle. The hold is released only after the last kill of that terminal.
  *
+ * PTY-HOLD-NODEPTY-HANDOFF: opening by pid still came after node-pty's CreateProcess, and node-pty
+ * closes its own handle as soon as the root exits, so a root that died at once could have lost its
+ * pid before procOpen ran. The patched node-pty (tools/patch-node-pty-root-handle.cjs) now hands
+ * over a duplicate of the handle CreateProcess returned (rootHandoff), and holdRoot adopts THAT
+ * (procAdopt): there is no moment at which the pid was unreserved. Opening by pid remains only as
+ * the fallback for a node-pty or an addon without the handoff, and says so once.
+ *
  * POSIX: nothing can reserve a pid from JS (node-pty reaps the root itself), so the root is
  * recognised by its start time instead, read at spawn and again just before the group kill
  * (pidIdentity). That is a check followed by a kill, not a hold. What it leaves open is said at
@@ -33,6 +40,8 @@ type HoldAddon = {
   procOpen(pid: number): unknown;
   procAlive(hold: unknown): boolean;
   procClose(hold: unknown): void;
+  /** PTY-HOLD-NODEPTY-HANDOFF. Absent from an addon built before it. */
+  procAdopt?(rootHandle: unknown, pid: number): unknown;
 };
 
 const HOLD_ADDON = 'guppy_fs_handle.node';
@@ -64,16 +73,48 @@ function loadHoldAddon(): HoldAddon | null {
 }
 
 /**
- * Hold a just-spawned root by handle. Call it in the SAME synchronous turn as the spawn. Null when
- * there is nothing to hold with (not Windows, addon missing) or the pid is not a live child of this
- * process: the caller then falls back to node-pty's exit report (pty.ts rootState).
+ * The root handle the patched node-pty kept for us at spawn (Windows): `_rootHandle` on its
+ * WindowsPtyAgent, an opaque external. Undefined on any other node-pty, platform or shape.
  */
-export function holdRoot(pid: number | undefined, platform: NodeJS.Platform = process.platform): RootHold | null {
+export function rootHandoff(proc: unknown): unknown {
+  try {
+    const agent = (proc as { _agent?: { _rootHandle?: unknown } } | null | undefined)?._agent;
+    const handle = agent?._rootHandle;
+    return handle === null ? undefined : handle;
+  } catch { return undefined; }
+}
+
+let handoffFallbackSaid = false;
+function sayHandoffFallback(why: string): void {
+  if (handoffFallbackSaid) return;
+  handoffFallbackSaid = true;
+  console.error(`[pty] node-pty's root handle was not adopted; roots are opened by pid, after the spawn (${why})`);
+}
+
+/**
+ * Hold a just-spawned root by handle. Call it in the SAME synchronous turn as the spawn, with
+ * rootHandoff(proc): the hold is then a duplicate of node-pty's own handle to the root, valid even
+ * if the root has already exited. Without a handoff (or when it is refused) the root is opened by
+ * pid instead. Null when there is nothing to hold with (not Windows, addon missing) or, opening by
+ * pid, the pid is not a live child of this process: the caller then falls back to node-pty's exit
+ * report (pty.ts rootState).
+ */
+export function holdRoot(pid: number | undefined, platform: NodeJS.Platform = process.platform, handoff?: unknown): RootHold | null {
   if (platform !== 'win32' || typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return null;
   const addon = loadHoldAddon();
   if (!addon) return null;
   let handle: unknown;
-  try { handle = addon.procOpen(pid); } catch { return null; }
+  let adopted = false;
+  if (handoff === undefined) sayHandoffFallback('node-pty returned none: built without tools/patch-node-pty-root-handle.cjs');
+  else if (typeof addon.procAdopt !== 'function') sayHandoffFallback('the addon lacks procAdopt: run tools/build-fs-handle.cjs');
+  else {
+    try { handle = addon.procAdopt(handoff, pid); adopted = true; } catch (e) {
+      sayHandoffFallback(e instanceof Error ? e.message : String(e));
+    }
+  }
+  if (!adopted) {
+    try { handle = addon.procOpen(pid); } catch { return null; }
+  }
   let open = true;
   return {
     alive: () => {
