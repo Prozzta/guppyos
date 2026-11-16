@@ -164,6 +164,9 @@ interface ConoutConnectionInternals {
   _worker?: { terminate?: () => Promise<number> };
 }
 
+/** Said once: guardLateReady met a node-pty it does not fit. */
+let lateReadyGuardMissingSaid = false;
+
 /**
  * PTY-LATE-READY-ENOENT. After an early close the data socket is still unconnected, and node-pty's
  * `_agent.kill()` has started the conout worker's 1 s flush timer, which TERMINATES the worker: the
@@ -187,7 +190,14 @@ function guardLateReady(t: WindowsTerminalInternals): void {
   const conn = t._agent?._conoutSocketWorker;
   const worker = conn?._worker;
   if (!sock || !conn || !worker || typeof conn.connectSocket !== 'function' || typeof worker.terminate !== 'function'
-    || typeof sock.destroy !== 'function' || typeof t.emit !== 'function') return;   // another node-pty: the test fails
+    || typeof sock.destroy !== 'function' || typeof t.emit !== 'function') {
+    // Another node-pty: the pin test fails. Here the terminal is left as it was before this guard.
+    if (!lateReadyGuardMissingSaid) {
+      lateReadyGuardMissingSaid = true;
+      console.warn('[pty] late-READY guard not installed: this node-pty lacks the conout internals it gates; an early-killed terminal may throw connect ENOENT or report no exit');
+    }
+    return;
+  }
   const connect = conn.connectSocket.bind(conn);
   const terminate = worker.terminate.bind(worker);
   // Whether the connect was started is remembered here, not read from the socket: a pipe that

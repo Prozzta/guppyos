@@ -32,6 +32,11 @@ require('./tools/own-job.cjs');
  *   L8 the socket that will never connect is not destroyed
  *   L9 the exit reported at the terminate does not carry the agent's exit code
  *   L10 a started connect is not remembered (the terminate ends a terminal whose pipe came up)
+ *   A7 (Jim) the exit code is read when the guard is installed, not at the terminate
+ *   W1 the missing-guard line is said for every terminal; W2 it is never said
+ *
+ * A worker this file leaks would keep the process alive with every test passed; FILE_CAP_MS ends
+ * it as a failure instead (Jim's A6/A8 hung the file).
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -45,6 +50,13 @@ const LATE_READY_MS = FLUSH_MS + 500;
 const EARLY_READY_MS = 300;
 const STALL_MS = FLUSH_MS + 300;
 const CAP_MS = 10_000;
+/** The whole file. Unref'd: it only ever fires in a process that something else keeps alive. */
+const FILE_CAP_MS = 120_000;
+setTimeout(() => {
+  process.stderr.write(`pty-late-ready-enoent: still running after ${FILE_CAP_MS} ms: a worker or a socket was leaked
+`);
+  process.exit(1);
+}, FILE_CAP_MS).unref();
 
 /** Settle within CAP_MS or fail: a mutant must never hang this file. */
 function within(p, what) {
@@ -175,7 +187,8 @@ if (process.platform !== 'win32') {
     t._socket = { readable: true, _handle: handle, destroy: () => { rec.destroys++; } };
     const worker = { terminate: () => { rec.terminates++; return Promise.resolve(0); } };
     const conn = { connectSocket: () => { rec.connects++; }, _worker: worker };
-    t._agent = { kill: () => { t._socket.readable = false; }, exitCode: 7, _conoutSocketWorker: conn };
+    // No exit code yet: node-pty's agent learns it from the exit callback, which can come after the kill.
+    t._agent = { kill: () => { t._socket.readable = false; }, exitCode: undefined, _conoutSocketWorker: conn };
     t.emit = (name, ...a) => { if (name === 'exit') rec.exits.push(a[0]); };
     return { t, rec, conn, worker, own: { connectSocket: conn.connectSocket, terminate: worker.terminate } };
   }
@@ -186,6 +199,7 @@ if (process.platform !== 'win32') {
     assert.equal(armEarlyKill(late.t, 'win32'), true);
     late.t.kill();
     assert.deepEqual(late.rec, { connects: 0, terminates: 0, destroys: 0, exits: [] }, 'the kill alone ends nothing');
+    late.t._agent.exitCode = 7;   // between the kill and the terminate: the code is read AT the terminate (A7)
     assert.equal(await late.worker.terminate(), 0, 'the terminate\'s own result is passed on');
     assert.deepEqual(late.rec, { connects: 0, terminates: 1, destroys: 1, exits: [7] }, 'terminate: worker terminated, socket destroyed, exit reported with the agent\'s code');
     late.conn.connectSocket(late.t._socket);
@@ -210,11 +224,21 @@ if (process.platform !== 'win32') {
     assert.equal(up.conn.connectSocket, up.own.connectSocket, 'connectSocket is node-pty\'s own');
     assert.equal(up.worker.terminate, up.own.terminate, 'terminate is the worker\'s own');
 
-    // Another node-pty (no conout connection): the early kill still runs, and nothing throws.
-    const bare = terminal({ handle: null });
-    delete bare.t._agent._conoutSocketWorker;
-    armEarlyKill(bare.t, 'win32');
-    bare.t.kill();
-    assert.equal(bare.t._socket.readable, true, 'PTY-EARLY-CLOSE-EOF still holds without it');
+    // Another node-pty (no conout connection): the early kill still runs, nothing throws, and the
+    // missing guard is said once, however many terminals meet it.
+    const warns = [];
+    const ownWarn = console.warn;
+    console.warn = (...a) => { warns.push(a.join(' ')); };
+    try {
+      for (let i = 0; i < 2; i++) {
+        const bare = terminal({ handle: null });
+        delete bare.t._agent._conoutSocketWorker;
+        armEarlyKill(bare.t, 'win32');
+        bare.t.kill();
+        assert.equal(bare.t._socket.readable, true, 'PTY-EARLY-CLOSE-EOF still holds without it');
+      }
+    } finally { console.warn = ownWarn; }
+    assert.equal(warns.length, 1, `one line for a node-pty the guard does not fit (${JSON.stringify(warns)})`);
+    assert.match(warns[0], /^\[pty\] late-READY guard not installed/, 'and it names the guard');
   });
 }
