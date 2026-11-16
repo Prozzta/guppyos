@@ -109,7 +109,11 @@ window.__harnessRun = async () => {
         letterSpacing: entry.term.options.letterSpacing,
         pooledLetterSpacing: pooled.term.options.letterSpacing,
         cell: dims.device.cell.width,
+        // A terminal no view shows keeps the size it was made with (a view applies the size when
+        // it attaches) and has no WebGL renderer yet, so it is measured at its own size.
         pooledCell: pooledDims.device.cell.width,
+        pooledSize: pooled.term.options.fontSize,
+        pooledAdvance: (() => { ctx.font = `${pooled.term.options.fontSize}px "${face}"`; return ctx.measureText('W').width; })(),
         cssCell: dims.css.cell.width,
         advance, inkLeft, inkRight,
         cols: entry.term.cols,

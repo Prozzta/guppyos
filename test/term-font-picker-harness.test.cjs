@@ -57,7 +57,12 @@ for (const dpr of [1, 1.25, 1.5]) {
       assert.ok(Math.abs(x.advance - EM[x.face] * x.size) < 0.001, `${where}: measured with the face itself (${x.advance}), not a fallback`);
       assert.equal(x.cell, Math.floor(x.advance * dpr) + 1, `${where}: cell`);
       assert.ok(x.cell > x.advance * dpr, `${where}: cell ${x.cell} is wider than the glyph ${x.advance * dpr}`);
-      assert.equal(x.pooledCell, Math.floor(x.advance * dpr) + 1, `${where}: cell of the terminal no view shows`);
+      // The terminal no view shows has its own size and no WebGL renderer yet, so its cell is
+      // not floored: pin that it was measured with the picked face at that size, pad included.
+      const need = x.pooledAdvance * dpr;
+      assert.ok(Math.abs(x.pooledAdvance - EM[x.face] * x.pooledSize) < 0.001, `${where}: pooled advance ${x.pooledAdvance} at ${x.pooledSize}px`);
+      assert.ok(x.pooledCell > need, `${where}: the terminal no view shows has a cell ${x.pooledCell} wider than its glyph ${need}`);
+      assert.ok(x.pooledCell <= need + Math.max(1, dpr) + 0.001, `${where}: and not one measured with the other face (${x.pooledCell} for ${need})`);
       assert.equal(x.letterSpacing, 1, `${where}: pad`);
       assert.equal(x.pooledLetterSpacing, 1, `${where}: pad on the terminal no view shows`);
       assert.equal(x.family, family(x.face), where);
