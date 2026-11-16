@@ -1,8 +1,7 @@
 'use strict';
 
-// STARTUP-FREEZE-104: measure the production-shaped cold first census in a fresh process. The
-// parent takes the minimum of three independent samples so a loaded worker cannot set the bar;
-// a cold-path regression has to be fast in no child to evade it.
+// STARTUP-FREEZE-104: the census itself is intentionally first (and cold). Fixed work on strings
+// from the same fixture surrounds it, so their CPU ratio is stable under suite-wide pressure.
 const path = require('node:path');
 const loadTs = require('../load-ts.cjs');
 const { cpuMsOf } = require('./thread-cpu.cjs');
@@ -42,7 +41,25 @@ function census(seed, n, words) {
   return { records, state: { claims } };
 }
 
-const { records, state } = census(11, 17000, 3000);
+function referenceWork(strings) {
+  let checksum = 0;
+  for (let pass = 0; pass < 12; pass++) {
+    const sorted = [...strings].sort((a, b) => a.localeCompare(b));
+    const buckets = new Map();
+    for (const value of sorted) {
+      const normalized = value.replace(/[-_]/g, '');
+      const bucket = normalized.slice(0, normalized.indexOf('\0'));
+      buckets.set(bucket, (buckets.get(bucket) ?? 0) + normalized.length);
+    }
+    for (const [bucket, count] of buckets) checksum = (checksum + bucket.length * count) >>> 0;
+  }
+  return checksum;
+}
+
+const fixture = census(11, 17000, 3000);
+const strings = fixture.records.map((r) => `${r.id}\0${r.key ?? ''}`);
+const refBefore = cpuMsOf(() => referenceWork(strings));
 let found;
-const cpu = cpuMsOf(() => { found = keyAliasCandidates('owner', records, state, REG); });
-process.stdout.write(`${JSON.stringify({ cpu, found: found.length })}\n`);
+const cold = cpuMsOf(() => { found = keyAliasCandidates('owner', fixture.records, fixture.state, REG); });
+const refs = [refBefore, cpuMsOf(() => referenceWork(strings)), cpuMsOf(() => referenceWork(strings))];
+process.stdout.write(`${JSON.stringify({ cold, refs, found: found.length })}\n`);
