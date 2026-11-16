@@ -16,15 +16,19 @@
  *   node tools/worktree-setup.cjs --teardown                    unlink every junction/symlink in
  *                                                               the tree (before `git worktree remove`)
  *
- * Natives: --copy-from copies the binary only when every source file under its resources folder
- * (bin/ and build/ excluded) is byte-identical in both trees; otherwise, or with no --copy-from,
- * the item's own build tool runs. xterm: a node_modules / @xterm / addon-webgl that is a link into
+ * Natives: every copy or build records the digest of the sources it came from in .worktree-setup.json
+ * (gitignored; not under bin/, which ships). A binary whose stamp is missing or differs from the
+ * current sources is STALE, a gap like a missing one. --copy-from copies a binary only when the
+ * source tree's stamp matches its sources AND those sources are byte-identical to this tree's
+ * (bin/ and build/ excluded); otherwise, or with no --copy-from, the item's own build tool runs. xterm: a node_modules / @xterm / addon-webgl that is a link into
  * another tree is split (a real folder of per-entry junctions, files copied) down to a REAL local
- * copy of addon-webgl, which is then patched. Nothing is ever written through a link: every write
- * target is checked to resolve inside this tree first.
+ * copy of addon-webgl; any link below the addon (lib/, a file) is replaced by a dereferenced copy;
+ * then the local copy is patched. Nothing is ever written through a link: every write target is
+ * checked to resolve inside this tree, and no link may remain under the addon before the patch.
  *
  * test/tools/run-tests.cjs calls preflight() before a suite and refuses to start on a gap
- * (GUPPY_ALLOW_INCOMPLETE_TREE=1 runs anyway, with the gaps printed).
+ * (GUPPY_ALLOW_INCOMPLETE_TREE=1 runs anyway, with the gaps printed before the run and repeated
+ * after its summary).
  */
 const fs = require('node:fs');
 const path = require('node:path');
@@ -38,6 +42,7 @@ const NATIVES = [
 ];
 const ADDON = path.join('node_modules', '@xterm', 'addon-webgl');
 const XTERM_PATCH = 'tools/patch-xterm-webgl-font.cjs';
+const STAMP = '.worktree-setup.json';
 
 function isLink(p) { try { return fs.lstatSync(p).isSymbolicLink(); } catch { return false; } }
 
@@ -76,6 +81,45 @@ function sameSources(rootA, rootB, dir) {
   return keys.length > 0 && keys.length === Object.keys(b).length && keys.every((k) => a[k] === b[k]);
 }
 
+/** One digest over a folder's sources: what a native binary was built from. */
+function sourcesDigest(root, dir) {
+  const d = sourceDigests(root, dir);
+  const keys = Object.keys(d).sort();
+  if (!keys.length) return null;
+  return crypto.createHash('sha256').update(keys.map((k) => `${k}:${d[k]}\n`).join('')).digest('hex');
+}
+
+function readStamp(root) {
+  try { const j = JSON.parse(fs.readFileSync(path.join(root, STAMP), 'utf8')); return j && typeof j === 'object' ? j : {}; } catch { return {}; }
+}
+
+function writeStamp(root, id, digest) {
+  const p = path.join(root, STAMP);
+  if (fs.existsSync(p)) assertWritable(p, root);
+  const j = readStamp(root);
+  j[id] = digest;
+  fs.writeFileSync(p, `${JSON.stringify(j, null, 2)}\n`);
+}
+
+/** True when the native's binary exists and its stamp matches the tree's current sources. */
+function nativeFresh(n, root) {
+  if (!fs.existsSync(path.join(root, n.out))) return false;
+  const digest = sourcesDigest(root, n.dir);
+  return digest !== null && readStamp(root)[n.id] === digest;
+}
+
+/** Every link (junction/symlink) at or below `p`, never following one. */
+function linksUnder(p) {
+  const found = [];
+  const walk = (q) => {
+    if (isLink(q)) { found.push(q); return; }
+    let st; try { st = fs.lstatSync(q); } catch { return; }
+    if (st.isDirectory()) for (const e of fs.readdirSync(q)) walk(path.join(q, e));
+  };
+  walk(p);
+  return found;
+}
+
 function xtermState(root, { spawnSyncFn = spawnSync } = {}) {
   const addon = path.join(root, ADDON);
   if (!fs.existsSync(addon)) return { ok: false, problem: `${ADDON} is missing (no node_modules: npm ci, or link a built tree's and run this tool)` };
@@ -83,15 +127,17 @@ function xtermState(root, { spawnSyncFn = spawnSync } = {}) {
   if (!fs.existsSync(tool)) return { ok: true };
   const r = spawnSyncFn(process.execPath, [tool, '--check', '--root', addon], { encoding: 'utf8', windowsHide: true });
   if (r.status === 0) return { ok: true };
-  const shared = !resolvesInside(addon, root);
-  return { ok: false, shared, problem: `${ADDON} is not TERM-FONT-105 patched${shared ? ' (it resolves into another tree)' : ''}` };
+  const shared = !resolvesInside(addon, root) || linksUnder(addon).length > 0;
+  return { ok: false, shared, problem: `${ADDON} is not TERM-FONT-105 patched${shared ? ' (it, or a link under it, resolves into another tree)' : ''}` };
 }
 
 /** Every gap that would make the suite wrong in this tree: [{ id, problem }]. */
 function inspect(root = REPO, { platform = process.platform, spawnSyncFn = spawnSync } = {}) {
   const gaps = [];
   for (const n of NATIVES) {
-    if (n.platforms.includes(platform) && !fs.existsSync(path.join(root, n.out))) gaps.push({ id: n.id, problem: `${n.out} is not built (${n.build})` });
+    if (!n.platforms.includes(platform)) continue;
+    if (!fs.existsSync(path.join(root, n.out))) gaps.push({ id: n.id, problem: `${n.out} is not built (${n.build})` });
+    else if (!nativeFresh(n, root)) gaps.push({ id: n.id, stale: true, problem: `${n.out} is stale: ${STAMP} does not record it as built from the current ${n.dir} sources (${n.build})` });
   }
   const x = xtermState(root, { spawnSyncFn });
   if (!x.ok) gaps.push({ id: 'xterm', problem: x.problem });
@@ -127,6 +173,16 @@ function localizeXterm(root, { spawnSyncFn = spawnSync, log = console.log } = {}
     log(`[worktree-setup] ${ADDON}: local copy of ${target}`);
   }
   assertWritable(addon, root);
+  // A real addon folder can still hold a link (lib/ junctioned to a shared copy): replace each with
+  // a dereferenced copy so the patch writes only this tree's bytes.
+  for (const link of linksUnder(addon)) {
+    const target = fs.realpathSync.native(link);
+    fs.unlinkSync(link);
+    fs.cpSync(target, link, { recursive: true, dereference: true });
+    log(`[worktree-setup] ${path.relative(root, link)}: local copy of ${target}`);
+  }
+  const left = linksUnder(addon);
+  if (left.length) throw new Error(`[worktree-setup] refusing to patch: ${left[0]} is still a link`);
   const tool = path.join(root, XTERM_PATCH);
   const r = spawnSyncFn(process.execPath, [tool, '--root', addon], { encoding: 'utf8', windowsHide: true });
   if (r.status !== 0) throw new Error(`[worktree-setup] ${XTERM_PATCH} failed (${r.status}): ${String(r.stderr || r.stdout || '').trim()}`);
@@ -134,19 +190,25 @@ function localizeXterm(root, { spawnSyncFn = spawnSync, log = console.log } = {}
 
 function fillNative(n, root, { copyFrom, spawnSyncFn = spawnSync, log = console.log } = {}) {
   const out = path.join(root, n.out);
+  const digest = sourcesDigest(root, n.dir);
   if (copyFrom) {
     const src = path.join(copyFrom, n.out);
-    if (fs.existsSync(src) && sameSources(root, copyFrom, n.dir)) {
+    const why = !fs.existsSync(src) ? 'is not built in'
+      : !nativeFresh(n, copyFrom) ? `is not stamped as built from its own ${n.dir} sources in`
+        : !sameSources(root, copyFrom, n.dir) ? `was built from ${n.dir} sources that differ in` : '';
+    if (!why) {
       fs.mkdirSync(path.dirname(out), { recursive: true });
       assertWritable(path.dirname(out), root);
       fs.copyFileSync(src, out);
-      log(`[worktree-setup] ${n.out}: copied from ${copyFrom} (sources under ${n.dir} identical)`);
+      writeStamp(root, n.id, digest);
+      log(`[worktree-setup] ${n.out}: copied from ${copyFrom} (stamped, sources under ${n.dir} identical)`);
       return;
     }
-    log(`[worktree-setup] ${n.out}: ${fs.existsSync(src) ? `sources under ${n.dir} differ from` : 'not built in'} ${copyFrom}; building instead`);
+    log(`[worktree-setup] ${n.out} ${why} ${copyFrom}; building instead`);
   }
   const r = spawnSyncFn(process.execPath, [path.join(root, n.build)], { cwd: root, encoding: 'utf8', windowsHide: true, stdio: 'inherit' });
   if (r.status !== 0 || !fs.existsSync(out)) throw new Error(`[worktree-setup] ${n.build} did not produce ${n.out} (status ${r.status})`);
+  writeStamp(root, n.id, digest);
 }
 
 /** Fill every gap inspect() reports; returns the gaps left afterwards. */
@@ -173,20 +235,24 @@ function teardown(root = REPO, { log = console.log } = {}) {
   return n;
 }
 
-/** run-tests.cjs gate: 0 = go, 2 = refuse. */
-function preflight({ root = REPO, env = process.env, log = (l) => process.stderr.write(`${l}\n`), inspectFn = inspect } = {}) {
+/** run-tests.cjs gate: 0 = go, 2 = refuse. On the opt-out, the gap ids are pushed to `optedOut`. */
+function preflight({ root = REPO, env = process.env, log = (l) => process.stderr.write(`${l}\n`), inspectFn = inspect, optedOut = [] } = {}) {
   const gaps = inspectFn(root);
   if (!gaps.length) return 0;
   for (const g of gaps) log(`[test-runner] TREE GAP ${g.id}: ${g.problem}`);
   if (env.GUPPY_ALLOW_INCOMPLETE_TREE === '1') {
     log('[test-runner] GUPPY_ALLOW_INCOMPLETE_TREE=1: running anyway; expect reds and an uncapped run from the gaps above');
+    optedOut.push(...gaps.map((g) => g.id));
     return 0;
   }
   log('[test-runner] this tree is incomplete; fix it with: node tools/worktree-setup.cjs [--copy-from <built tree>]  (or GUPPY_ALLOW_INCOMPLETE_TREE=1 to run anyway)');
   return 2;
 }
 
-module.exports = { NATIVES, ADDON, inspect, setup, preflight, teardown, localizeXterm, splitLink, sameSources, sourceDigests, resolvesInside };
+/** The line run-tests.cjs repeats after its summary on an opted-out run. */
+function optOutLine(ids) { return `[test-runner] INCOMPLETE TREE (opt-out): ${ids.join(', ')}`; }
+
+module.exports = { NATIVES, ADDON, STAMP, inspect, optOutLine, sourcesDigest, readStamp, linksUnder, setup, preflight, teardown, localizeXterm, splitLink, sameSources, sourceDigests, resolvesInside };
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
