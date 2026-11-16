@@ -83,6 +83,25 @@ async function scrollTrial(shape: 'short' | 'real', css: string) {
   // from scrollTop 0 cross no mount boundary: a trial that proves nothing (g6, M3 'real' did not loop).
   // So wait until the view is at its bottom with a settled height (the harness bounds the run).
   let sc = host.querySelector('[data-history-view]') as HTMLElement;
+  // SUITE-LOAD-FLAKES-106I: and wait until the view has had its first size observation. HistoryView
+  // drops every measured height when its ResizeObserver first reports the width, and a hidden
+  // window delivers that with its first rendering update: ~0.8 s after mount on a quiet machine
+  // (before the 1.2 s above), later than the start under full-suite load. The height looked settled,
+  // the trial began, and the observation landed between two steps: the heights were thrown away
+  // mid-scroll and the 40 steps no longer crossed the rows that loop (train-106i: M3 'real' did not
+  // loop, startTop 18904 instead of 12250). Observers are notified in creation order, so when this
+  // one (created after the view's) has run, the view's has too. A person scrolls a view they can
+  // see, which is one that has been through this.
+  while (!sc && !loopError(before)) { await sleep(50); sc = host.querySelector('[data-history-view]') as HTMLElement; }
+  if (sc) {
+    const el = sc;
+    await new Promise<void>((done) => {
+      const finish = () => { ro.disconnect(); clearInterval(poll); done(); };
+      const ro = new ResizeObserver(finish);
+      const poll = setInterval(() => { if (loopError(before)) finish(); }, 50); // root already gone: nothing to observe
+      ro.observe(el);
+    });
+  }
   for (let lastH = -1; ; await sleep(50)) {
     sc = host.querySelector('[data-history-view]') as HTMLElement;
     const h = sc ? sc.scrollHeight : -1;
