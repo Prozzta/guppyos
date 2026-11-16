@@ -58,6 +58,10 @@ module.exports = {
   // lib/windowsPtyAgent.js: from the same tarball, and after the handoff patch.
   AGENT_JS_PRISTINE_SHA256: '8636d16b38266112204061a22b135734177c242837982fd3a4055be726efa64a',
   AGENT_JS_HANDOFF_SHA256: '33390ba2cc9bc5bbf78d6123abb914f627445fadb89745de466a5eab8bbb197e',
+  // lib/utils.js (NODEPTY-PACKAGED-PROOF): from the same tarball, and after the loader patch that
+  // stops Windows from falling back to node-pty's unpatched prebuilt binaries.
+  UTILS_JS_PRISTINE_SHA256: 'f75ad341c13fbf1a9a6605d7ee42dff5bbc5d43b7b381e413fb97eb1b8300beb',
+  UTILS_JS_BUILT_ONLY_SHA256: 'c53c55c4b8f87f08ee89c7a01b150ccfaee0f6effca9e4fc9686c806cf236d49',
   HANDOFF_IMPORTS,
   hasHandoffImports,
   MARKER_FILE: 'munder-conpty-race-fix.json',
