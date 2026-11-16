@@ -30,6 +30,7 @@ const { spawn, spawnSync } = require('node:child_process');
 const loadTs = require('../load-ts.cjs');
 const { readSource } = require('../read-source.cjs');
 const own = require('../tools/own-procs.cjs');
+const { gitBash } = require('../tools/git-bash.cjs');
 
 const electron = require.resolve('electron');
 require.cache[electron] = { id: electron, filename: electron, loaded: true, exports: { Notification: class { show() {} static isSupported() { return false; } } } };
@@ -382,9 +383,10 @@ async function broker(t, M, deps = {}) {
 }
 
 K.e2eOpaque = async (t, M = HJ, preload = PRELOAD) => {
-  const shapes = [['node wrapper', [process.execPath, 'wrapper.cjs']]];
-  const bash = spawnSync('bash', ['--version'], { windowsHide: true });
-  if (!bash.error && bash.status === 0) shapes.push(['bash wrapper', ['bash', 'x.sh']]);
+  // TEST-BASH-PATH-197: the bash shape always runs, with Git Bash found by path (it throws, naming
+  // what it probed, when there is none). It used to be dropped without a word whenever a bare `bash`
+  // was not on PATH, which is every run started from PowerShell.
+  const shapes = [['node wrapper', [process.execPath, 'wrapper.cjs']], ['bash wrapper', [gitBash(), 'x.sh']]];
   for (const [what, args] of shapes) {
     const b = await broker(t, M);
     b.lock.acquire('b', H, 'npm test', 'hb', false);
