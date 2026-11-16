@@ -92,14 +92,15 @@ test('preflight refuses a gap with the fix named; GUPPY_ALLOW_INCOMPLETE_TREE=1 
   assert.equal(W.preflight({ root: '.', env: {}, log: quiet, inspectFn: () => [] }), 0, 'no gap: go');
 });
 
-test('run-tests.cjs gates its CLI run on preflight before run(), repeats an opt-out after the summary, and only the CLI gates (fixtures calling run() are untouched)', () => {
+test('run-tests.cjs gates its CLI run on preflight before run(), repeats an opt-out at exit (after the summary), and only the CLI gates (fixtures calling run() are untouched)', () => {
   const src = fs.readFileSync(path.join(REPO, 'test', 'tools', 'run-tests.cjs'), 'utf8').replace(/\r\n/g, '\n');
   const main = src.slice(src.indexOf('if (require.main === module)'));
   const gate = main.search(/const treeSetup = require\('\.\.\/\.\.\/tools\/worktree-setup\.cjs'\);\s*const optedOut = \[\];\s*const gate = treeSetup\.preflight\(\{ root: repoRoot, optedOut \}\);\s*if \(gate\) process\.exit\(gate\);/);
   assert.ok(gate > 0, 'the CLI block calls preflight and exits on a refusal');
   assert.ok(gate < main.indexOf('run({'), 'the gate comes before the suite starts');
-  const repeat = main.search(/if \(optedOut\.length\) process\.stderr\.write\(`\$\{treeSetup\.optOutLine\(optedOut\)\}\\n`\);\s*process\.exit\(code\);/);
-  assert.ok(repeat > main.indexOf('run({'), 'the opt-out line is printed after the run, just before the exit');
+  const repeat = main.search(/if \(optedOut\.length\) process\.once\('exit', \(\) => fs\.writeSync\(2, `\$\{treeSetup\.optOutLine\(optedOut\)\}\\n`\)\);/);
+  assert.ok(repeat > gate && repeat < main.indexOf('run({'), 'the opt-out repeat is an exit hook registered once the gate passed, so it prints after the summary');
+  assert.match(main, /require\('\.\/ps-env\.cjs'\)\.sweepPsTempDirs\(\);\s*process\.exit\(code\);/, 'nothing sits between the temp-folder sweep and the exit');
   assert.equal(src.slice(0, src.indexOf('if (require.main === module)')).includes('worktree-setup'), false, 'run() itself does not gate');
 });
 
@@ -248,11 +249,10 @@ cp.spawnSync = function () { if (!done) { done = true; fs.appendFileSync(${JSON.
   }
 });
 
-test('a junctioned shared node_modules: the tree gets its own patched addon, the shared tree is not written', (t) => {
+test('a junctioned shared node_modules is refused untouched: no link is created, the shared tree is not written, the fix is npm ci', (t) => {
   const shared = jail(t);
   const root = jail(t);
   put(shared, 'node_modules/left-pad/index.js', 'LP');
-  put(shared, 'node_modules/.package-lock.json', '{"lock":1}');
   put(shared, 'node_modules/@xterm/xterm/lib/xterm.js', 'XT');
   put(shared, 'node_modules/@xterm/addon-webgl/lib/addon-webgl.js', 'PRISTINE');
   put(root, 'tools/patch-xterm-webgl-font.cjs', '//\n');
@@ -260,23 +260,17 @@ test('a junctioned shared node_modules: the tree gets its own patched addon, the
   fs.symlinkSync(path.join(shared, 'node_modules'), path.join(root, 'node_modules'), 'junction');
   const gaps = W.inspect(root, { platform: 'win32', spawnSyncFn: fakeSpawn(root) });
   assert.deepEqual(gaps.map((g) => g.id), ['xterm']);
-  assert.match(gaps[0].problem, /resolves into another tree/, 'the gap says the addon is shared');
+  assert.match(gaps[0].problem, /resolves into another tree.*npm ci/, 'the gap says the addon is shared and names the fix');
 
-  assert.deepEqual(W.setup(root, { platform: 'win32', spawnSyncFn: fakeSpawn(root), log: quiet }), [], 'setup leaves no gap');
-  const nm = path.join(root, 'node_modules');
+  const left = W.setup(root, { platform: 'win32', spawnSyncFn: fakeSpawn(root), log: quiet });
+  assert.deepEqual(left.map((g) => g.id), ['xterm'], 'setup cannot fix a shared node_modules: the gap stays');
   assert.equal(fs.readFileSync(path.join(shared, 'node_modules/@xterm/addon-webgl/lib/addon-webgl.js'), 'utf8'), 'PRISTINE', 'THE SHARED ADDON IS NOT PATCHED');
-  assert.equal(isLink(nm), false, 'node_modules is a real folder now');
-  assert.equal(isLink(path.join(nm, 'left-pad')), true, 'other packages stay junctions');
-  assert.equal(fs.readFileSync(path.join(nm, '.package-lock.json'), 'utf8'), '{"lock":1}', 'top-level files are copied');
-  assert.equal(isLink(path.join(nm, '@xterm')), false);
-  assert.equal(isLink(path.join(nm, '@xterm', 'xterm')), true);
-  assert.equal(isLink(path.join(nm, '@xterm', 'addon-webgl')), false, 'the addon is a real local copy');
-  assert.equal(fs.readFileSync(path.join(nm, '@xterm/addon-webgl/lib/addon-webgl.js'), 'utf8'), 'PATCHED');
-  assert.equal(W.resolvesInside(path.join(nm, '@xterm', 'addon-webgl'), root), true);
-  assert.equal(W.resolvesInside(path.join(nm, 'left-pad'), root), false);
+  assert.equal(isLink(path.join(root, 'node_modules')), true, 'node_modules is left as it was');
+  assert.deepEqual(fs.readdirSync(path.join(shared, 'node_modules')).sort(), ['@xterm', 'left-pad'], 'nothing is written into the shared tree');
+  assert.equal(W.linksUnder(root).length, 1, 'setup created no link: the one the test made is the only one');
+  assert.equal(W.localizeXterm(root, { spawnSyncFn: fakeSpawn(root), log: quiet }), false, 'localizeXterm refuses directly too');
 
-  assert.equal(W.teardown(root, { log: quiet }), 2, 'teardown unlinks left-pad, @xterm/xterm and nothing else');
-  assert.equal(fs.existsSync(path.join(nm, '@xterm/addon-webgl/lib/addon-webgl.js')), true, 'the local addon copy is a real folder, kept');
+  assert.equal(W.teardown(root, { log: quiet }), 1, 'teardown unlinks the one link and nothing else');
   assert.equal(fs.readFileSync(path.join(shared, 'node_modules/left-pad/index.js'), 'utf8'), 'LP', 'teardown never reaches a link target');
   assert.equal(fs.readFileSync(path.join(shared, 'node_modules/@xterm/xterm/lib/xterm.js'), 'utf8'), 'XT');
 });
@@ -288,9 +282,10 @@ test('a link straight to the addon becomes a local copy; a tree that owns its no
   put(root, 'tools/patch-xterm-webgl-font.cjs', '//\n');
   fs.mkdirSync(path.join(root, 'node_modules', '@xterm'), { recursive: true });
   fs.symlinkSync(path.join(shared, 'addon-webgl'), path.join(root, W.ADDON), 'junction');
-  W.localizeXterm(root, { spawnSyncFn: fakeSpawn(root), log: quiet });
+  assert.equal(W.localizeXterm(root, { spawnSyncFn: fakeSpawn(root), log: quiet }), true);
   assert.equal(fs.readFileSync(path.join(shared, 'addon-webgl/lib/addon-webgl.js'), 'utf8'), 'PRISTINE', 'the link target is not patched');
   assert.equal(isLink(path.join(root, W.ADDON)), false);
+  assert.deepEqual(W.linksUnder(root), [], 'the link was replaced by a copy and no link was created');
   assert.equal(fs.readFileSync(path.join(root, W.ADDON, 'lib/addon-webgl.js'), 'utf8'), 'PATCHED');
 
   const own = jail(t);
@@ -299,34 +294,49 @@ test('a link straight to the addon becomes a local copy; a tree that owns its no
   assert.equal(fs.readFileSync(path.join(own, W.ADDON, 'lib/addon-webgl.js'), 'utf8'), 'PATCHED', 'an owned addon is patched where it is');
 });
 
-test('the real patch tool, run by setup on a junctioned tree, patches only the local copy', (t) => {
+test('the real patch tool, run by setup on a tree whose addon is a link, patches only the local copy and leaves no link', (t) => {
   let src;
   try { src = path.dirname(require.resolve('@xterm/addon-webgl/package.json', { paths: [REPO] })); } catch { return t.skip('no @xterm/addon-webgl installed'); }
   const shared = jail(t);
   const root = jail(t);
-  fs.cpSync(src, path.join(shared, 'node_modules', '@xterm', 'addon-webgl'), { recursive: true, dereference: true });
+  fs.cpSync(src, path.join(shared, 'addon-webgl'), { recursive: true, dereference: true });
+  // This repo's own addon is already patched: undo the pinned edits so the shared copy is pristine
+  // and setup really has to patch (otherwise --check passes and nothing runs).
+  const { FILES } = require(path.join(REPO, 'tools', 'patch-xterm-webgl-font.cjs'));
+  const sha = (b) => require('node:crypto').createHash('sha256').update(b).digest('hex');
+  for (const [rel, pin] of Object.entries(FILES)) {
+    const file = path.join(shared, 'addon-webgl', rel);
+    let text = fs.readFileSync(file, 'utf8');
+    if (sha(text) === pin.patched) for (const [before, after] of pin.edits) text = text.replace(after, () => before);
+    fs.writeFileSync(file, text);
+    assert.equal(sha(text), pin.pristine, `${rel}: the fixture's shared copy is pristine`);
+  }
   fs.copyFileSync(path.join(REPO, 'tools', 'patch-xterm-webgl-font.cjs'), put(root, 'tools/patch-xterm-webgl-font.cjs', ''));
   builtNatives(root);
-  fs.symlinkSync(path.join(shared, 'node_modules'), path.join(root, 'node_modules'), 'junction');
-  const before = fs.readFileSync(path.join(shared, 'node_modules/@xterm/addon-webgl/lib/addon-webgl.js'));
+  fs.mkdirSync(path.join(root, 'node_modules', '@xterm'), { recursive: true });
+  fs.symlinkSync(path.join(shared, 'addon-webgl'), path.join(root, W.ADDON), 'junction');
+  const before = fs.readFileSync(path.join(shared, 'addon-webgl/lib/addon-webgl.js'));
   assert.deepEqual(W.setup(root, { platform: 'win32', log: quiet }), [], 'the real --check passes after setup');
-  assert.deepEqual(fs.readFileSync(path.join(shared, 'node_modules/@xterm/addon-webgl/lib/addon-webgl.js')), before, 'the shared copy is byte-identical');
+  assert.deepEqual(fs.readFileSync(path.join(shared, 'addon-webgl/lib/addon-webgl.js')), before, 'the shared copy is byte-identical (still pristine)');
+  assert.equal(sha(fs.readFileSync(path.join(root, W.ADDON, 'lib/addon-webgl.js'), 'utf8')), FILES['lib/addon-webgl.js'].patched, 'the local copy is the pinned patched form');
+  assert.deepEqual(W.linksUnder(root), [], 'no link left or created');
 });
 
-test('resolvesInside sees through links; an @xterm junction out of the tree is split, its addon copied, never patched through', (t) => {
+test('resolvesInside sees through links; an @xterm junction out of the tree is refused, nothing written, never patched through', (t) => {
   const other = jail(t);
   const root = jail(t);
   fs.mkdirSync(path.join(other, 'x'));
   fs.symlinkSync(path.join(other, 'x'), path.join(root, 'x'), 'junction');
   assert.equal(W.resolvesInside(path.join(root, 'x'), root), false);
   assert.equal(W.resolvesInside(root, root), true);
-  addon(root, 'PRISTINE');
-  fs.rmSync(path.join(root, 'node_modules'), { recursive: true });
+  fs.rmSync(path.join(root, 'x'));
   fs.mkdirSync(path.join(root, 'node_modules'));
   fs.symlinkSync(path.join(other, 'x'), path.join(root, 'node_modules', '@xterm'), 'junction');
   fs.mkdirSync(path.join(other, 'x', 'addon-webgl', 'lib'), { recursive: true });
   fs.writeFileSync(path.join(other, 'x', 'addon-webgl', 'lib', 'addon-webgl.js'), 'PRISTINE');
-  // @xterm is split, so the addon resolves outside only through the split's own junction: copied locally
-  W.localizeXterm(root, { spawnSyncFn: fakeSpawn(root), log: quiet });
+  assert.equal(W.localizeXterm(root, { spawnSyncFn: fakeSpawn(root), log: quiet }), false, 'refused');
   assert.equal(fs.readFileSync(path.join(other, 'x', 'addon-webgl', 'lib', 'addon-webgl.js'), 'utf8'), 'PRISTINE', 'never patched through a link');
+  assert.equal(isLink(path.join(root, 'node_modules', '@xterm')), true, '@xterm is left as it was');
+  assert.deepEqual(fs.readdirSync(path.join(other, 'x')), ['addon-webgl'], 'nothing written into the other tree');
+  assert.equal(W.linksUnder(root).length, 1, 'no link created');
 });

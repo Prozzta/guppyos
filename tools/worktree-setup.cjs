@@ -21,11 +21,13 @@
  * (gitignored; not under bin/, which ships). A binary whose stamp is missing or differs from the
  * current sources is STALE, a gap like a missing one. --copy-from copies a binary only when the
  * source tree's stamp matches its sources AND those sources are byte-identical to this tree's
- * (bin/ and build/ excluded); otherwise, or with no --copy-from, the item's own build tool runs. xterm: a node_modules / @xterm / addon-webgl that is a link into
- * another tree is split (a real folder of per-entry junctions, files copied) down to a REAL local
- * copy of addon-webgl; any link below the addon (lib/, a file) is replaced by a dereferenced copy;
- * then the local copy is patched. Nothing is ever written through a link: every write target is
- * checked to resolve inside this tree, and no link may remain under the addon before the patch.
+ * (bin/ and build/ excluded); otherwise, or with no --copy-from, the item's own build tool runs.
+ * xterm: this tool never creates a link (no new junction debt, test/no-nm-junction-198). A
+ * node_modules or @xterm that is a link into another tree is refused untouched: give the tree its
+ * own `npm ci`. An addon-webgl that is itself a link, or a real addon holding a link (lib/, a
+ * file), has each link replaced by a dereferenced copy; then the local copy is patched. Nothing is
+ * ever written through a link: every write target is checked to resolve inside this tree, and no
+ * link may remain under the addon before the patch.
  *
  * test/tools/run-tests.cjs calls preflight() before a suite and refuses to start on a gap
  * (GUPPY_ALLOW_INCOMPLETE_TREE=1 runs anyway, with the gaps printed before the run and repeated
@@ -135,13 +137,13 @@ function linksUnder(p) {
 
 function xtermState(root, { spawnSyncFn = spawnSync } = {}) {
   const addon = path.join(root, ADDON);
-  if (!fs.existsSync(addon)) return { ok: false, problem: `${ADDON} is missing (no node_modules: npm ci, or link a built tree's and run this tool)` };
+  if (!fs.existsSync(addon)) return { ok: false, problem: `${ADDON} is missing (no node_modules: run npm ci in this tree)` };
   const tool = path.join(root, XTERM_PATCH);
   if (!fs.existsSync(tool)) return { ok: true };
   const r = spawnSyncFn(process.execPath, [tool, '--check', '--root', addon], { encoding: 'utf8', windowsHide: true });
   if (r.status === 0) return { ok: true };
   const shared = !resolvesInside(addon, root) || linksUnder(addon).length > 0;
-  return { ok: false, shared, problem: `${ADDON} is not TERM-FONT-105 patched${shared ? ' (it, or a link under it, resolves into another tree)' : ''}` };
+  return { ok: false, shared, problem: `${ADDON} is not TERM-FONT-105 patched${shared ? ' (it, or a link under it, resolves into another tree; a shared node_modules or @xterm needs this tree\'s own npm ci)' : ''}` };
 }
 
 /** Every gap that would make the suite wrong in this tree: [{ id, problem }]. */
@@ -157,27 +159,19 @@ function inspect(root = REPO, { platform = process.platform, spawnSyncFn = spawn
   return gaps;
 }
 
-/** Replace the link `dir` with a real folder: sub-folders become junctions to the link's target, files are copied. */
-function splitLink(dir, root) {
-  const target = fs.realpathSync.native(dir);
-  fs.unlinkSync(dir); // removes the link only, never the target
-  if (!fs.existsSync(target)) throw new Error(`[worktree-setup] ${target} vanished when ${dir} was unlinked`);
-  fs.mkdirSync(dir);
-  assertWritable(dir, root);
-  for (const e of fs.readdirSync(target, { withFileTypes: true })) {
-    const src = path.join(target, e.name);
-    const dst = path.join(dir, e.name);
-    let isDir = e.isDirectory();
-    if (e.isSymbolicLink()) { try { isDir = fs.statSync(src).isDirectory(); } catch { continue; } }
-    if (isDir) fs.symlinkSync(fs.realpathSync.native(src), dst, 'junction');
-    else fs.copyFileSync(src, dst);
-  }
-}
-
-/** Give this tree its own patched addon-webgl without writing into a shared node_modules. */
+/**
+ * Give this tree its own patched addon-webgl without writing into a shared node_modules. Returns
+ * false, having written nothing, when node_modules or @xterm is a link (or resolves out of the
+ * tree): only a real install of this tree's own can fix that, and this tool creates no links.
+ */
 function localizeXterm(root, { spawnSyncFn = spawnSync, log = console.log } = {}) {
-  const chain = ['node_modules', path.join('node_modules', '@xterm')].map((p) => path.join(root, p));
-  for (const dir of chain) if (isLink(dir)) { splitLink(dir, root); log(`[worktree-setup] ${path.relative(root, dir)}: now a real folder of junctions`); }
+  for (const rel of ['node_modules', path.join('node_modules', '@xterm')]) {
+    const dir = path.join(root, rel);
+    if (isLink(dir) || !resolvesInside(dir, root)) {
+      log(`[worktree-setup] refusing to patch: ${rel} is a link or resolves into another tree; run npm ci in this tree`);
+      return false;
+    }
+  }
   const addon = path.join(root, ADDON);
   if (isLink(addon)) {
     const target = fs.realpathSync.native(addon);
@@ -199,6 +193,7 @@ function localizeXterm(root, { spawnSyncFn = spawnSync, log = console.log } = {}
   const tool = path.join(root, XTERM_PATCH);
   const r = spawnSyncFn(process.execPath, [tool, '--root', addon], { encoding: 'utf8', windowsHide: true });
   if (r.status !== 0) throw new Error(`[worktree-setup] ${XTERM_PATCH} failed (${r.status}): ${String(r.stderr || r.stdout || '').trim()}`);
+  return true;
 }
 
 function fillNative(n, root, { copyFrom, spawnSyncFn = spawnSync, log = console.log } = {}) {
@@ -265,7 +260,7 @@ function preflight({ root = REPO, env = process.env, log = (l) => process.stderr
 /** The line run-tests.cjs repeats after its summary on an opted-out run. */
 function optOutLine(ids) { return `[test-runner] INCOMPLETE TREE (opt-out): ${ids.join(', ')}`; }
 
-module.exports = { NATIVES, ADDON, STAMP, buildStamp, inspect, optOutLine, sourcesDigest, readStamp, linksUnder, setup, preflight, teardown, localizeXterm, splitLink, sameSources, sourceDigests, resolvesInside };
+module.exports = { NATIVES, ADDON, STAMP, buildStamp, inspect, optOutLine, sourcesDigest, readStamp, linksUnder, setup, preflight, teardown, localizeXterm, sameSources, sourceDigests, resolvesInside };
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
