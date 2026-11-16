@@ -77,7 +77,8 @@ function startCwdHolder(dir) {
   const wait = new Int32Array(new SharedArrayBuffer(4));
   while (!fs.existsSync(ready) && Date.now() < until) Atomics.wait(wait, 0, 0, 25);
   assert.ok(fs.existsSync(ready), 'cwd holder started');
-  return { child, ready, release: () => child.stdin.end('release\n') };
+  let released = false;
+  return { child, ready, release: () => { if (!released) { released = true; child.stdin.end('release\n'); } } };
 }
 
 function stopCwdHolder(holder) {
