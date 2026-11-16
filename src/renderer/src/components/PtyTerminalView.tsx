@@ -395,7 +395,7 @@ export function PtyTerminalView({ ptyId, onStreamData, onUserPrompt, onToggleFul
               app. Only the EXIT affordance stays here, in fullscreen. */}
           <select
             value={fontFace}
-            onChange={(e) => setTerminalFontFace(e.target.value)}
+            onChange={(e) => { setTerminalFontFace(e.target.value); acquireTerminal(ptyId).term.focus(); }}
             title="Terminal font"
             aria-label="Terminal font"
             style={{ ...zoomBtnStyle, width: 'auto', padding: '0 2px', marginRight: 4 }}

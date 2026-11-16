@@ -71,6 +71,7 @@ window.__harnessRun = async () => {
       gapPx: zoomOut.getBoundingClientRect().left - select.getBoundingClientRect().right
     };
     const pick = async (face: string) => {
+      select.focus(); // a real pick leaves the keyboard on the <select>
       await act(async () => {
         Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!.call(select, face);
         select.dispatchEvent(new Event('change', { bubbles: true }));
@@ -87,6 +88,7 @@ window.__harnessRun = async () => {
       const face = getTerminalFontFace();
       const size = getTerminalFontSize();
       const dims = (entry.term as unknown as XtermCore)._core._renderService.dimensions;
+      const pooledDims = (pooled.term as unknown as XtermCore)._core._renderService.dimensions;
       ctx.font = `${size}px "${face}"`;
       const advance = ctx.measureText('W').width;
       let inkLeft = 0;
@@ -100,12 +102,14 @@ window.__harnessRun = async () => {
         step, face, size,
         ready: terminalFontReady(),
         selectValue: select.value,
+        focus: document.activeElement === select ? 'select' : document.activeElement === entry.term.textarea ? 'terminal' : 'other',
         stored: window.localStorage.getItem('cth.ptyFontFace'),
         family: entry.term.options.fontFamily,
         pooledFamily: pooled.term.options.fontFamily,
         letterSpacing: entry.term.options.letterSpacing,
         pooledLetterSpacing: pooled.term.options.letterSpacing,
         cell: dims.device.cell.width,
+        pooledCell: pooledDims.device.cell.width,
         cssCell: dims.css.cell.width,
         advance, inkLeft, inkRight,
         cols: entry.term.cols,

@@ -115,7 +115,8 @@ test('postinstall patches first and checks just before the winpty --check; build
 });
 
 test('both terminal faces are bundled, not fetched: local @font-face per face and weight, no Google font, then Consolas, then monospace', () => {
-  const R = (...p) => fs.readFileSync(path.join(ROOT, 'src', 'renderer', ...p), 'utf8');
+  // A Windows checkout (core.autocrlf) has CRLF sources: read them as LF, like readSource does.
+  const R = (...p) => fs.readFileSync(path.join(ROOT, 'src', 'renderer', ...p), 'utf8').replace(/\r\n/g, '\n');
   const css = R('src', 'design', 'fonts.css');
   const font = R('src', 'components', 'terminalFont.ts');
   const offered = JSON.parse(font.match(/TERMINAL_FONT_FACES = (\[[^\]]+\]) as const/)[1].replace(/'/g, '"'));
@@ -394,7 +395,7 @@ test('the pick is wired: the pool applies it to every terminal after the face lo
   assert.ok(sel > 0 && view.indexOf('<select', sel + 1) < 0, 'one selector');
   const tag = view.slice(sel, view.indexOf('</select>', sel));
   assert.match(tag, /value=\{fontFace\}/);
-  assert.match(tag, /onChange=\{\(e\) => setTerminalFontFace\(e\.target\.value\)\}/);
+  assert.match(tag, /onChange=\{\(e\) => \{ setTerminalFontFace\(e\.target\.value\); acquireTerminal\(ptyId\)\.term\.focus\(\); \}\}/, 'the pick applies and typing goes back to the terminal');
   assert.match(tag, /aria-label="Terminal font"/);
   assert.match(tag, /TERMINAL_FONT_FACES\.map\(/, 'one option per face offered, from the same list');
   assert.doesNotMatch(view, /options\.fontFamily\s*=/);

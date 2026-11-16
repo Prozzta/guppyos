@@ -57,6 +57,7 @@ for (const dpr of [1, 1.25, 1.5]) {
       assert.ok(Math.abs(x.advance - EM[x.face] * x.size) < 0.001, `${where}: measured with the face itself (${x.advance}), not a fallback`);
       assert.equal(x.cell, Math.floor(x.advance * dpr) + 1, `${where}: cell`);
       assert.ok(x.cell > x.advance * dpr, `${where}: cell ${x.cell} is wider than the glyph ${x.advance * dpr}`);
+      assert.equal(x.pooledCell, Math.floor(x.advance * dpr) + 1, `${where}: cell of the terminal no view shows`);
       assert.equal(x.letterSpacing, 1, `${where}: pad`);
       assert.equal(x.pooledLetterSpacing, 1, `${where}: pad on the terminal no view shows`);
       assert.equal(x.family, family(x.face), where);
@@ -82,6 +83,7 @@ for (const dpr of [1, 1.25, 1.5]) {
     assert.ok(picked.cell > before.cell, `the wider face got a wider cell with no size change (${before.cell} -> ${picked.cell})`);
     assert.ok(picked.cols < before.cols, `and the grid was refitted (${before.cols} -> ${picked.cols} cols)`);
     assert.equal(picked.ptyCols, picked.cols, 'and the pty was told the new grid');
+    assert.equal(picked.focus, 'terminal', 'typing goes back to the terminal after a pick');
     const [back] = by('picked back at 16px, no size change');
     assert.equal(back.face, 'JetBrains Mono');
     assert.equal(back.stored, 'JetBrains Mono');
