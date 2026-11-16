@@ -274,11 +274,17 @@ if (!WIN) {
       letReport = () => { holding = false; const p = pending; pending = null; if (p) p(); };
       rawClose = proc.kill.bind(proc);
       proc.kill = (...a) => { closes += 1; onClose(); return rawClose(...a); };
+      // node-pty's kill() asks for the root's console process list and kills its entries when it
+      // arrives: a use of the pid that ends after the close (PTY-HOLD-NODEPTY-HANDOFF follow-up).
+      let sweep = null;
+      const list = agent._getConsoleProcessList;
+      agent._getConsoleProcessList = function consoleProcessList(...a) { sweep = list.apply(this, a); return sweep; };
+      const swept = async () => { assert.ok(sweep, "node-pty's close asked for the console process list"); await within(sweep, "node-pty's own by-pid sweep"); await turns(3); };
       let releases = 0;
       if (session.hold) { const release = session.hold.release; session.hold.release = () => { releases += 1; release(); }; }
       /** End the root for real. It is running, so the pid is its own. */
       const endRoot = () => { assert.equal(REAL.rootState(proc), 'running', 'the root is running when the scenario ends it'); realKill.call(process, root); };
-      return await scenario({ m, id, root, proc, session, dead, reported, exited, closed, endRoot, letReport, atReport: (h) => hooks.push(h), closes: () => closes, releases: () => releases });
+      return await scenario({ m, id, root, proc, session, dead, reported, exited, closed, endRoot, letReport, atReport: (h) => hooks.push(h), closes: () => closes, releases: () => releases, swept });
     } finally {
       reused.delete(root); vacant.delete(root);
       answers = [];
@@ -337,17 +343,18 @@ if (!WIN) {
       assert.equal(sweepsOf(root), 0, `QUIT IN THE WINDOW NEVER NAMES THE PID: the root was dead, its exit not yet reported, and the quit's taskkill /T /F named pid ${root}`);
     }),
     /** (c) The quit still sweeps a live root, once, and the hold outlives that sweep. */
-    quitLive: (Pty) => withTerminal(Pty, {}, async ({ m, root, session, exited, endRoot, releases }) => {
+    quitLive: (Pty) => withTerminal(Pty, {}, async ({ m, root, session, exited, endRoot, releases, swept }) => {
       assert.ok(session.hold, 'the session holds its root');
       let atExit = -1;
       answers = [(e) => { endRoot(); void exited.then(() => { atExit = releases(); e.emit('close', 0); }); }];
       await within(m.killAllAsync(5_000), 'the quit');
       assert.equal(sweepsOf(root), 1, `QUIT STILL SWEEPS A LIVE ROOT ONCE: ${sweepsOf(root)} sweep(s) of a running root`);
       assert.equal(atExit, 0, "THE HOLD OUTLIVES THE QUIT'S SWEEP: the root exited while taskkill was still running, and the hold was released under it (the pid was free while taskkill named it)");
+      await swept();   // the last use of the pid: node-pty's own sweep, started by the close
       assert.ok(releases() >= 1, 'THE HOLD IS RELEASED WHEN THE QUIT IS DONE WITH THE PID');
     }),
     /** The hold reserves the pid until closeTree's last sweep is over, and not longer. */
-    holdLife: (Pty) => withTerminal(Pty, {}, async ({ m, id, session, exited, closed, endRoot, releases }) => {
+    holdLife: (Pty) => withTerminal(Pty, {}, async ({ m, id, session, exited, closed, endRoot, releases, swept }) => {
       assert.ok(session.hold, 'the session holds its root');
       let atExit = -1;
       answers = [(e) => { endRoot(); void exited.then(() => { atExit = releases(); e.emit('close', 0); }); }];
@@ -355,6 +362,7 @@ if (!WIN) {
       await within(closed, 'the ConPTY close after the sweep');
       await turns(3);
       assert.equal(atExit, 0, 'THE HOLD OUTLIVES THE SWEEP: the root exited while taskkill was still running, and the hold was released under it (the pid was free while taskkill named it)');
+      await swept();   // the last kill is node-pty's own sweep, started by the close
       assert.ok(releases() >= 1, 'THE HOLD IS RELEASED AFTER THE LAST KILL: a hold kept for ever keeps a dead process object for ever');
     }),
     /** A root that exits on its own, with no kill in sight, is let go at its exit. */
@@ -441,7 +449,7 @@ if (!WIN) {
   MUTANTS.push(
     { file: PTYF, name: 'K1 the sweeps do not ask the hold (closeTree as it was at 057e5ae6)', edits: [[HOLD_RULE, '']],
       run: (mod) => W.window(mod.PtyManager), dies: /IN THE WINDOW NO SWEEP NAMES THE PID/ },
-    { file: PTYF, name: 'K2 spawn takes no hold', edits: [['const hold = holdRoot(proc.pid);', 'const hold = null;']],
+    { file: PTYF, name: 'K2 spawn takes no hold', edits: [['const hold = holdRoot(proc.pid, process.platform, rootHandoff(proc));', 'const hold = null;']],
       run: (mod) => W.window(mod.PtyManager), dies: /IN THE WINDOW NO SWEEP NAMES THE PID/ },
     { file: PTYF, name: 'K3 the quit names every session (killAllAsync as it was at 057e5ae6)', edits: [['sessions.filter((s) => mayNamePid(s, false)).map((s) => s.proc.pid)', 'sessions.map((s) => s.proc.pid)']],
       run: (mod) => W.quitExited(mod.PtyManager), dies: /QUIT NEVER NAMES A PID ITS ROOT NO LONGER OWNS/ },

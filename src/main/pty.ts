@@ -9,7 +9,7 @@ import type { WebContents } from 'electron';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { delimiter, join, win32 } from 'node:path';
 import { ensureKilled, isAlive, killTreesAsync } from './procKill';
-import { holdRoot, pidIdentity, type PidIdentity, type RootHold } from './procIdentity';
+import { holdRoot, pidIdentity, rootHandoff, type PidIdentity, type RootHold } from './procIdentity';
 import { expandTilde } from './fs';
 import { buildPtyEnv } from './ptyEnv';
 import { createPtyDataBatcher, type PtyDataBatcher } from './ptyDataBatcher';
@@ -299,6 +299,34 @@ export function rootState(proc: pty.IPty): 'running' | 'exited' | 'unknown' {
   const agent = (proc as unknown as { _agent?: { _useConpty?: unknown; _exitCode?: unknown; _$onProcessExit?: unknown } })._agent;
   if (!agent || agent._useConpty !== true || typeof agent._$onProcessExit !== 'function') return 'unknown';
   return agent._exitCode === undefined ? 'running' : 'exited';
+}
+
+/**
+ * PTY-HOLD-NODEPTY-HANDOFF. node-pty's kill() of a ConPTY terminal does not end with the call: it
+ * forks a helper that lists the console processes OF THE ROOT'S PID, and when the list arrives it
+ * calls process.kill on each entry. That runs after kill() returned (a process start later, 5 s at
+ * node-pty's own bound), and on a root that is already dead it names a pid that is the root's only
+ * while something reserves it. This watches the one kill() about to be made: started() gives the
+ * promise of that list when the kill asked for it, null when it did not (no ConPTY sweep, another
+ * node-pty, or a kill node-pty deferred because the terminal was not ready and not armed).
+ *
+ * The caller chains on it AFTER kill() returned. node-pty chained its kills on the same promise
+ * inside kill(), and reactions of one promise run in the order they were added, so the caller's
+ * runs when the kills are done: tied to the sweep itself, no delay involved.
+ */
+export function watchKillSweep(proc: pty.IPty): { started: () => Promise<unknown> | null } {
+  const agent = (proc as unknown as { _agent?: { _getConsoleProcessList?: unknown } })._agent;
+  const list = agent?._getConsoleProcessList;
+  let sweep: Promise<unknown> | null = null;
+  let watching = true;
+  if (agent && typeof list === 'function') {
+    agent._getConsoleProcessList = function consoleProcessList(this: unknown, ...a: unknown[]): unknown {
+      const p: unknown = (list as (...x: unknown[]) => unknown).apply(this, a);
+      if (watching && p instanceof Promise) sweep = p;
+      return p;
+    };
+  }
+  return { started: () => { watching = false; return sweep; } };
 }
 
 /**
@@ -683,7 +711,17 @@ export class PtyManager {
   private closePty(s: PtySession): void {
     if (s.ptyClosed) return;
     s.ptyClosed = true;
+    const sweep = watchKillSweep(s.proc);
     try { s.proc.kill(); } catch { /* already gone */ }
+    // node-pty's own kill names the root by pid once more, later (watchKillSweep). That sweep is
+    // one more user of the hold, until it has ended: the pid stays the root's for as long.
+    // What is left: a terminal with no hold at all (no handoff, and its root died before the open
+    // by pid, or no addon) has nothing to keep, and its sweep names a pid nobody reserves.
+    const pending = sweep.started();
+    if (!pending) return;
+    s.holdUsers = (s.holdUsers ?? 0) + 1;
+    const done = (): void => this.dropHold(s);
+    pending.then(done, done);
   }
 
   /** Register the natural-exit teardown callback. Invoked from inside node-pty's
@@ -1122,8 +1160,9 @@ export class PtyManager {
       // PTY-EARLY-KILL-LEAK: a kill before the first output must close the pseudoconsole now.
       armEarlyKill(proc);
       // PTY-KILL-PID-IDENTITY: bind the pid to this root in the spawn's own turn, before anything
-      // else can run: a handle of our own on Windows, the start stamp elsewhere.
-      const hold = holdRoot(proc.pid);
+      // else can run: a handle of our own on Windows (node-pty's own, handed over:
+      // PTY-HOLD-NODEPTY-HANDOFF), the start stamp elsewhere.
+      const hold = holdRoot(proc.pid, process.platform, rootHandoff(proc));
       const rootId = process.platform === 'win32' ? undefined : pidIdentity(proc.pid);
 
       // Capture THIS session object so the proc's callbacks can tell whether the

@@ -149,5 +149,5 @@ test('release marker 13: OK only for the patched gyp AND a GenVersion.h written 
   for (const [want, t] of cases) {
     try { assert.equal(line(t), want); } finally { rm(t); }
   }
-  assert.match(fs.readFileSync(markers, 'utf8'), /Prints ALL 13 MARKERS OK/);
+  assert.match(fs.readFileSync(markers, 'utf8'), /Prints ALL 15 MARKERS OK/);
 });

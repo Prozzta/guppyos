@@ -12,7 +12,8 @@
  *   darwin: fcntl(F_GETPATH).
  *
  * finalPath(fd: number) -> string. Any failure throws; the caller refuses the access.
- * Windows also exports the process holds of PTY-KILL-PID-IDENTITY (procOpen/procAlive/procClose, below).
+ * Windows also exports the process holds of PTY-KILL-PID-IDENTITY (procOpen/procAlive/procClose) and
+ * PTY-HOLD-NODEPTY-HANDOFF (procAdopt), below.
  * Plain N-API (ABI-stable), so one build loads in Electron and in the Node that runs the tests.
  */
 #define NAPI_VERSION 8
@@ -97,10 +98,26 @@ static napi_value final_path(napi_env env, napi_callback_info info) {
  * The parent check: between CreateProcess and procOpen the root could already have died and its
  * pid gone to a stranger. A stranger that is not our own child is refused here. What is left is a
  * child Chromium itself launched under that pid in those microseconds.
+ *
+ * PTY-HOLD-NODEPTY-HANDOFF closes that too:
+ *   procAdopt(rootHandle, pid) -> hold
+ * rootHandle is what the patched node-pty returns from its connect (tools/patch-node-pty-root-handle.cjs):
+ * a duplicate of the handle CreateProcess itself returned, made before anything could close it. So
+ * there is no moment at which the pid was free, and nothing to check a parent for: the handle IS the
+ * root, alive or dead. procAdopt duplicates it once more for the hold and leaves node-pty's copy to
+ * node-pty (its external closes it). It throws unless the value carries node-pty's handoff type tag
+ * and the handle's process id is pid; an exited root is adopted (its pid stays reserved).
+ *
+ * Both kinds of external are type-tagged, so a hold cannot be mistaken for a handoff or the reverse:
+ * one is a pointer to a proc_hold, the other a raw HANDLE.
  */
 #include <stdlib.h>
 
 typedef struct { HANDLE h; } proc_hold;
+
+/* The same two numbers as guppyRootHandoffTag in the patched node-pty conpty.cc. */
+static const napi_type_tag ROOT_HANDOFF_TAG = { 0x4755505059524f4fULL, 0x5448414e444f4646ULL };
+static const napi_type_tag PROC_HOLD_TAG = { 0x47555050595f4653ULL, 0x50524f435f484f4cULL };
 
 typedef struct {
   PVOID Reserved1;
@@ -125,13 +142,34 @@ static proc_hold *hold_arg(napi_env env, napi_callback_info info, const char *wh
   napi_value argv[1];
   void *data = NULL;
   napi_valuetype t;
+  bool ours = false;
   if (napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok || argc < 1 ||
       napi_typeof(env, argv[0], &t) != napi_ok || t != napi_external ||
+      napi_check_object_type_tag(env, argv[0], &PROC_HOLD_TAG, &ours) != napi_ok || !ours ||
       napi_get_value_external(env, argv[0], &data) != napi_ok || !data) {
     napi_throw_error(env, NULL, what);
     return NULL;
   }
   return (proc_hold *)data;
+}
+
+/* Wrap an open handle as a hold. Takes the handle: on failure it is closed and an error is pending. */
+static napi_value hold_new(napi_env env, HANDLE h, const char *what) {
+  proc_hold *p = (proc_hold *)malloc(sizeof(proc_hold));
+  if (!p) {
+    CloseHandle(h);
+    return fail(env, what);
+  }
+  p->h = h;
+  napi_value out;
+  if (napi_create_external(env, p, hold_finalize, NULL, &out) != napi_ok) {
+    CloseHandle(h);
+    free(p);
+    return fail(env, what);
+  }
+  /* From here the external owns the handle: its finalizer closes it. */
+  if (napi_type_tag_object(env, out, &PROC_HOLD_TAG) != napi_ok) return fail(env, what);
+  return out;
 }
 
 static napi_value proc_open(napi_env env, napi_callback_info info) {
@@ -154,24 +192,41 @@ static napi_value proc_open(napi_env env, napi_callback_info info) {
   else if (!query) why = "procOpen: NtQueryInformationProcess is not available";
   else if (query(h, 0 /* ProcessBasicInformation */, &pbi, sizeof(pbi), &got) < 0) why = "procOpen: the parent could not be read";
   else if (pbi.InheritedFromUniqueProcessId != (ULONG_PTR)GetCurrentProcessId()) why = "procOpen: not a child of this process";
-  proc_hold *p = why ? NULL : (proc_hold *)malloc(sizeof(proc_hold));
-  if (!why && !p) why = "procOpen: out of memory";
   if (why) {
     CloseHandle(h);
     return fail(env, why);
   }
-  p->h = h;
-  napi_value out;
-  if (napi_create_external(env, p, hold_finalize, NULL, &out) != napi_ok) {
-    CloseHandle(h);
-    free(p);
-    return fail(env, "procOpen: the hold could not be created");
+  return hold_new(env, h, "procOpen: the hold could not be created");
+}
+
+static napi_value proc_adopt(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value argv[2];
+  napi_valuetype t;
+  bool handoff = false;
+  void *data = NULL;
+  int64_t pid;
+  if (napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok || argc < 2 ||
+      napi_typeof(env, argv[0], &t) != napi_ok || t != napi_external ||
+      napi_check_object_type_tag(env, argv[0], &ROOT_HANDOFF_TAG, &handoff) != napi_ok || !handoff ||
+      napi_get_value_external(env, argv[0], &data) != napi_ok || !data) {
+    return fail(env, "procAdopt(rootHandle, pid): rootHandle must be the handle node-pty handed over");
   }
-  return out;
+  if (napi_get_value_int64(env, argv[1], &pid) != napi_ok || pid <= 0 || pid > 0xFFFFFFFFLL) {
+    return fail(env, "procAdopt(rootHandle, pid): pid must be a positive integer");
+  }
+  /* The handoff's own handle answers for which process it is; the pid is only compared. */
+  if (GetProcessId((HANDLE)data) != (DWORD)pid) return fail(env, "procAdopt: the handle is not the process with that pid");
+  HANDLE h = NULL;
+  if (!DuplicateHandle(GetCurrentProcess(), (HANDLE)data, GetCurrentProcess(), &h,
+                       SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, 0) || !h) {
+    return fail(env, "procAdopt: the handle could not be duplicated");
+  }
+  return hold_new(env, h, "procAdopt: the hold could not be created");
 }
 
 static napi_value proc_alive(napi_env env, napi_callback_info info) {
-  proc_hold *p = hold_arg(env, info, "procAlive(hold): a hold from procOpen required");
+  proc_hold *p = hold_arg(env, info, "procAlive(hold): a hold from procOpen or procAdopt required");
   if (!p) return NULL;
   if (!p->h) return fail(env, "procAlive: the hold was closed");
   DWORD w = WaitForSingleObject(p->h, 0);
@@ -182,7 +237,7 @@ static napi_value proc_alive(napi_env env, napi_callback_info info) {
 }
 
 static napi_value proc_close(napi_env env, napi_callback_info info) {
-  proc_hold *p = hold_arg(env, info, "procClose(hold): a hold from procOpen required");
+  proc_hold *p = hold_arg(env, info, "procClose(hold): a hold from procOpen or procAdopt required");
   if (!p) return NULL;
   if (p->h) {
     CloseHandle(p->h);
@@ -204,7 +259,7 @@ NAPI_MODULE_INIT() {
   if (napi_set_named_property(env, exports, "finalPath", fn) != napi_ok) return NULL;
 #ifdef _WIN32
   if (!export_fn(env, exports, "procOpen", proc_open) || !export_fn(env, exports, "procAlive", proc_alive) ||
-      !export_fn(env, exports, "procClose", proc_close)) {
+      !export_fn(env, exports, "procClose", proc_close) || !export_fn(env, exports, "procAdopt", proc_adopt)) {
     return NULL;
   }
 #endif
