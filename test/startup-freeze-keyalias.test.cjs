@@ -16,8 +16,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 const loadTs = require('./load-ts.cjs');
-const { cpuMsOf } = require('./tools/thread-cpu.cjs');
 const { keyAliasCandidates, keysMayAlias, reconcileItemId, withinEditDistance2 } = loadTs(path.join(__dirname, '../src/main/claims/reconcile.ts'));
 const { editDistance } = loadTs(path.join(__dirname, '../src/main/claims/registry.ts'));
 
@@ -110,14 +110,14 @@ test('the namespace list is read once per census, not once per pair (MUTANT: per
   assert.equal(reads, 1, `namespaces read ${reads} times`);
 });
 
-// Several Windows scheduler ticks: enough resolution for threadCpuUsage, and ample room above the
-// current census while rejecting a slow distinct-key-work mutant.
+// This child warms the census then collects before it measures. The bar is the census's CPU, not
+// garbage left by earlier generated-census assertions in this test worker or machine contention.
 const CENSUS_CPU_LIMIT_MS = 500;
 test('a 10x-sized census (17,000 rows, 3,000 keys) takes under 500 ms of thread CPU', () => {
-  const { records, state } = census(11, 17000, 3000);
-  let found;
-  const cpu = cpuMsOf(() => { found = keyAliasCandidates('owner', records, state, REG); });
-  assert.ok(found.length > 0);
+  const child = spawnSync(process.execPath, ['--expose-gc', path.join(__dirname, 'tools/keyalias-cpu-child.cjs')], { encoding: 'utf8' });
+  assert.equal(child.status, 0, child.stderr);
+  const { cpu, found } = JSON.parse(child.stdout);
+  assert.ok(found > 0);
   assert.ok(cpu < CENSUS_CPU_LIMIT_MS, `${cpu.toFixed(0)} ms of thread CPU (the old census took tens of seconds at this size)`);
 });
 

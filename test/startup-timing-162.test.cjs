@@ -276,8 +276,18 @@ test('(1) REAL loop delay: Node\'s histogram sees a blocked main thread in the r
   const sampledAt = [];
   let inSample = null;
   const now = () => { const v = Date.now(); if (inSample && inSample.at === undefined) inSample.at = v; return v; };
+  const captureSample = (fn) => {
+    inSample = {};
+    try { fn(); } finally {
+      if (inSample.at !== undefined) sampledAt.push(Math.round(inSample.at - origin));
+      inSample = null;
+    }
+  };
   const rec = new StartupTiming({ origin, now, log: (x) => rows.push(x), histogram: () => monitorEventLoopDelay({ resolution: 10 }), windowMs: 2_600,
-    setInterval: (fn, ms) => setInterval(() => { inSample = {}; fn(); if (inSample.at !== undefined) sampledAt.push(Math.round(inSample.at - origin)); inSample = null; }, ms) });
+    setInterval: (fn, ms) => setInterval(() => captureSample(fn), ms),
+    // stop() takes a last sample before it writes end. Capture its own first clock read too;
+    // end.t is a later clock read and can legitimately differ by one millisecond under load.
+    setTimeout: (fn, ms) => setTimeout(() => { if (ms === 2_600) captureSample(fn); else fn(); }, ms) });
   rec.start();
   await new Promise((res) => setTimeout(res, 1_150));
   const blockFrom = Date.now() - origin;
@@ -288,7 +298,7 @@ test('(1) REAL loop delay: Node\'s histogram sees a blocked main thread in the r
   assert.equal(rec.recording, false, 'it stopped by itself');
   const loop = rows.filter((x) => x.ev === 'loop').flatMap((x) => x.maxMs);
   const end = rows.find((x) => x.ev === 'end');
-  const times = [...sampledAt, end.t];   // stop() takes one last sample at its own time
+  const times = sampledAt;
   assert.equal(loop.length, times.length, `one maxMs per sample: ${loop} at ${times}`);
   assert.ok(loop.length >= 2, `samples: ${loop}`);
   // The first sample after the block ended is the one whose histogram spans it (no sample can run
