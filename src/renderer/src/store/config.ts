@@ -148,6 +148,8 @@ export interface HarnessConfig {
   circuitBreaker?: CircuitBreakerConfig;
   /** Enterprise Knowledge Graph (multimodal context for agents). Default OFF. */
   knowledgeGraph?: KnowledgeGraphConfig;
+  /** Renderer-only terminal output pattern colours. Default ON. */
+  terminalPatternColoring?: boolean;
   /** TV-show office themes feature flag (Settings picker + switch flow). Default OFF. */
   tvShowOffices?: boolean;
   /** Legacy global office theme: the fallback for a project with no entry in officeThemeByHive. */

@@ -447,6 +447,8 @@ export interface HarnessConfig {
   knowledgeGraph?: KnowledgeGraphConfig;
   /** Terminal theme, mirrored into each agent's per-session Claude settings. */
   terminalTheme?: 'light' | 'dark';
+  /** Renderer-only terminal output pattern colours. Default ON. */
+  terminalPatternColoring?: boolean;
   /** TV-show office themes feature flag (Settings picker + switch flow). Default OFF. */
   tvShowOffices?: boolean;
   /** Legacy global office theme: the fallback for a project with no entry in officeThemeByHive. */

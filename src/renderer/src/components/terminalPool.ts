@@ -50,6 +50,7 @@ import {
   type TerminalAutomationBlock
 } from './terminalAutomation';
 import { sanitizeTerminalSelection } from './terminalSelection';
+import { findTerminalPatterns, registerTerminalUrlLinkProvider, TerminalPatternHighlighter } from './terminalPatternColor';
 import { codexReading, needleReading } from '@shared/screenReading';   // GTC M2: shared with main's mirror
 import '@xterm/xterm/css/xterm.css';
 
@@ -118,6 +119,8 @@ export interface TerminalEntry {
    * mutate a newer entry, nor report stale state under a REUSED ptyId (a fail-open). */
   generation: number;
   webgl?: WebglAddon;
+  /** Renderer-only marker decorations for output patterns; never touches pty bytes. */
+  patternHighlighter: TerminalPatternHighlighter;
 }
 
 const pool = new Map<string, TerminalEntry>();
@@ -202,6 +205,7 @@ export function acquireTerminal(ptyId: string, theme?: ThemeMap, fontSize = 14):
   term.loadAddon(new Unicode11Addon());
   term.unicode.activeVersion = '11';
   registerMarkdownLinkProvider(term, ptyId);
+  registerTerminalUrlLinkProvider(term, (url) => { void window.cth.openExternal(url); });
 
   const entry: TerminalEntry = {
     ptyId,
@@ -222,7 +226,8 @@ export function acquireTerminal(ptyId: string, theme?: ThemeMap, fontSize = 14):
     automationSettleUntil: 0,
     lineBuf: '',
     inputSelfTest: 'unknown',
-    generation: 0
+    generation: 0,
+    patternHighlighter: new TerminalPatternHighlighter(term, theme ?? {})
   };
 
   // Subscribe to the pty stream ONCE for the terminal's whole lifetime, so the
@@ -237,6 +242,11 @@ export function acquireTerminal(ptyId: string, theme?: ThemeMap, fontSize = 14):
     const firstWrite = startupRedrawPending(ptyId);
     term.write(chunk, () => {
       if (firstWrite) noteFirstAgentRedraw(ptyId);
+      // The highlighter advances from its last cursor line, plus the mutable
+      // cursor line. It never walks the terminal's existing scrollback.
+      entry.patternHighlighter.scanNewOutput(
+        storeApi?.getState().agents.map((agent) => agent.name ?? '') ?? []
+      );
       if (follow) {
         try { term.scrollToBottom(); } catch { /* terminal may be detaching */ }
       }
@@ -261,6 +271,7 @@ export function acquireTerminal(ptyId: string, theme?: ThemeMap, fontSize = 14):
   entry.unsub.push(window.cth.onPtyRelaunch(ptyId, () => {
     entry.exited = false;
     try { term.reset(); } catch { /* not yet open */ }
+    entry.patternHighlighter.reset();
     // Same-id respawn: main has a fresh session at NO_STATE and the old window may be
     // mid-drain. Clear the transient window and re-run state + self-test for the new
     // incarnation, or eligibility stays NO_STATE forever (Dwight 23.3).
@@ -493,6 +504,15 @@ export function acquireTerminal(ptyId: string, theme?: ThemeMap, fontSize = 14):
   promptMirror.sync(pool.size);
   ensureScreenReadResponder();
   return entry;
+}
+
+/** Apply a renderer theme to both xterm and its marker decorations. The palette
+ * originates in design tokens (via PtyTerminalView), not hard-coded terminal UI. */
+export function setTerminalTheme(ptyId: string, theme?: ThemeMap): void {
+  const entry = pool.get(ptyId);
+  if (!entry) return;
+  entry.term.options.theme = theme;
+  entry.patternHighlighter.setPalette(theme ?? {});
 }
 
 /** Whether queued automation can safely own this terminal's input line. A PTY
@@ -1109,6 +1129,7 @@ export function resetTerminal(
   // Re-arm input — a prior exit (or the kill that precedes the respawn) may have
   // latched `exited`, which otherwise makes onData drop keystrokes silently.
   entry.exited = false;
+  entry.patternHighlighter.reset();
   entry.inputDirty = false;
   entry.inputDirtyAt = 0;
   // The old process's prompt is gone with it — drop our model of that line and
@@ -1143,6 +1164,7 @@ export function disposeTerminal(ptyId: string): void {
   entry.inputOriginProbe = undefined;
   entry.unsub.forEach((u) => { try { u(); } catch { /* noop */ } });
   try { entry.webgl?.dispose(); } catch { /* noop */ }
+  try { entry.patternHighlighter.dispose(); } catch { /* noop */ }
   try { entry.term.dispose(); } catch { /* noop */ }
   entry.host.remove();
   resizeCoalescers.get(ptyId)?.cancel(); // the pty is going away: a late resize has no target
@@ -1167,9 +1189,18 @@ export function disposeTerminal(ptyId: string): void {
 // find tokens on a line and how to run the three verdicts.
 const mdStatCache = new Map<string, { isFile: boolean; path: string }>();
 
+function terminalPathToken(raw: string): string {
+  // A renderer pattern may include a source position (`:line[:column]`),
+  // while the existing IDE opener expects the filesystem path alone.
+  return stripPathToken(raw.replace(/:\d+(?::\d+)?$/, ''));
+}
+
 function resolvePathCandidate(ptyId: string, raw: string): string | null {
-  const p = stripPathToken(raw);
-  if (!isPathToken(p)) return null;
+  const p = terminalPathToken(raw);
+  const absolute = p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p);
+  // `terminalPaths` keeps old relative-token false positives out. The new
+  // recognizer also intentionally supports extensionless absolute file paths.
+  if (!isPathToken(p) && !absolute) return null;
   if (p.startsWith('~/') || p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p)) return p;
   // relative → resolve against the owning agent's cwd. Async store import keeps
   // this module usable in the node test harness (no zustand/react at load).
@@ -1183,7 +1214,7 @@ function resolvePathCandidate(ptyId: string, raw: string): string | null {
 // pure automation helpers that share this file's import graph.
 interface MdStoreShape {
   getState: () => {
-    agents: Array<{ ptyId?: string; cwd: string }>;
+    agents: Array<{ ptyId?: string; cwd: string; name?: string }>;
     openFileInIde: (absPath: string) => void;
   };
 }
@@ -1222,19 +1253,25 @@ function registerMarkdownLinkProvider(term: Terminal, ptyId: string): void {
       provideLinks(bufferLineNumber, callback) {
         const line = term.buffer.active.getLine(bufferLineNumber - 1);
         const text = line ? line.translateToString(true) : '';
-        if (!text || !text.includes('.')) { callback(undefined); return; }
+        if (!text) { callback(undefined); return; }
         const links: Parameters<typeof callback>[0] = [];
+        const candidates = new Map<number, string>();
         const re = pathTokenMatcher();
         let m: RegExpExecArray | null;
-        while ((m = re.exec(text)) !== null) {
-          const raw = m[0];
+        while ((m = re.exec(text)) !== null) candidates.set(m.index, m[0]);
+        // Keep the mature relative-path matcher, and add absolute Windows/POSIX
+        // paths with `:line[:column]` from the renderer pattern recognizer.
+        for (const match of findTerminalPatterns(text)) {
+          if (match.kind === 'path') candidates.set(match.start, match.text);
+        }
+        for (const [index, raw] of candidates) {
           const abs = resolvePathCandidate(ptyId, raw);
           if (!abs) continue;
-          const action = classifyPathToken(stripPathToken(raw));
+          const action = classifyPathToken(terminalPathToken(raw));
           links!.push({
             range: {
-              start: { x: m.index + 1, y: bufferLineNumber },
-              end: { x: m.index + raw.length, y: bufferLineNumber }
+              start: { x: index + 1, y: bufferLineNumber },
+              end: { x: index + raw.length, y: bufferLineNumber }
             },
             text: raw,
             decorations: { underline: true, pointerCursor: true },
