@@ -16,7 +16,8 @@
  *   node tools/worktree-setup.cjs --teardown                    unlink every junction/symlink in
  *                                                               the tree (before `git worktree remove`)
  *
- * Natives: every copy or build records the digest of the sources it came from in .worktree-setup.json
+ * Natives: every copy or build (this tool's, and the canonical build tools' own: postinstall's
+ * build-fs-handle, `npm run build`'s build-heavyjob) records the digest of the sources it came from in .worktree-setup.json
  * (gitignored; not under bin/, which ships). A binary whose stamp is missing or differs from the
  * current sources is STALE, a gap like a missing one. --copy-from copies a binary only when the
  * source tree's stamp matches its sources AND those sources are byte-identical to this tree's
@@ -99,6 +100,18 @@ function writeStamp(root, id, digest) {
   const j = readStamp(root);
   j[id] = digest;
   fs.writeFileSync(p, `${JSON.stringify(j, null, 2)}\n`);
+}
+
+/**
+ * The ONE stamp path, shared by this tool and the canonical build tools (tools/build-fs-handle.cjs,
+ * tools/build-heavyjob.cjs): digest the native's sources now, before the build, and return the call
+ * that records that digest once the build has succeeded.
+ */
+function buildStamp(root, id) {
+  const n = NATIVES.find((x) => x.id === id);
+  if (!n) throw new Error(`[worktree-setup] unknown native ${id}`);
+  const digest = sourcesDigest(root, n.dir);
+  return () => writeStamp(root, id, digest);
 }
 
 /** True when the native's binary exists and its stamp matches the tree's current sources. */
@@ -190,7 +203,7 @@ function localizeXterm(root, { spawnSyncFn = spawnSync, log = console.log } = {}
 
 function fillNative(n, root, { copyFrom, spawnSyncFn = spawnSync, log = console.log } = {}) {
   const out = path.join(root, n.out);
-  const digest = sourcesDigest(root, n.dir);
+  const stamp = buildStamp(root, n.id);
   if (copyFrom) {
     const src = path.join(copyFrom, n.out);
     const why = !fs.existsSync(src) ? 'is not built in'
@@ -200,7 +213,7 @@ function fillNative(n, root, { copyFrom, spawnSyncFn = spawnSync, log = console.
       fs.mkdirSync(path.dirname(out), { recursive: true });
       assertWritable(path.dirname(out), root);
       fs.copyFileSync(src, out);
-      writeStamp(root, n.id, digest);
+      stamp();
       log(`[worktree-setup] ${n.out}: copied from ${copyFrom} (stamped, sources under ${n.dir} identical)`);
       return;
     }
@@ -208,7 +221,7 @@ function fillNative(n, root, { copyFrom, spawnSyncFn = spawnSync, log = console.
   }
   const r = spawnSyncFn(process.execPath, [path.join(root, n.build)], { cwd: root, encoding: 'utf8', windowsHide: true, stdio: 'inherit' });
   if (r.status !== 0 || !fs.existsSync(out)) throw new Error(`[worktree-setup] ${n.build} did not produce ${n.out} (status ${r.status})`);
-  writeStamp(root, n.id, digest);
+  stamp(); // the build tool stamps too (same helper, same digest); this covers an injected spawn
 }
 
 /** Fill every gap inspect() reports; returns the gaps left afterwards. */
@@ -252,7 +265,7 @@ function preflight({ root = REPO, env = process.env, log = (l) => process.stderr
 /** The line run-tests.cjs repeats after its summary on an opted-out run. */
 function optOutLine(ids) { return `[test-runner] INCOMPLETE TREE (opt-out): ${ids.join(', ')}`; }
 
-module.exports = { NATIVES, ADDON, STAMP, inspect, optOutLine, sourcesDigest, readStamp, linksUnder, setup, preflight, teardown, localizeXterm, splitLink, sameSources, sourceDigests, resolvesInside };
+module.exports = { NATIVES, ADDON, STAMP, buildStamp, inspect, optOutLine, sourcesDigest, readStamp, linksUnder, setup, preflight, teardown, localizeXterm, splitLink, sameSources, sourceDigests, resolvesInside };
 
 if (require.main === module) {
   const argv = process.argv.slice(2);

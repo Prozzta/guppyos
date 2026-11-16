@@ -185,6 +185,45 @@ test('a link BELOW a real addon-webgl (lib/ junctioned to a shared copy) is repl
   assert.deepEqual(W.linksUnder(path.join(root, W.ADDON)), [], 'no link is left under the addon');
 });
 
+/** A jail tree holding the REAL canonical build tool and the stamp helper it requires. */
+function toolTree(t, tool) {
+  const root = jail(t);
+  for (const f of [tool, 'tools/worktree-setup.cjs']) put(root, f, fs.readFileSync(path.join(REPO, f), 'utf8'));
+  return root;
+}
+const runTool = (root, tool) => require('node:child_process').spawnSync(process.execPath, [path.join(root, tool)], { cwd: root, encoding: 'utf8', windowsHide: true });
+const gapOf = (root, id) => W.inspect(root, { platform: 'win32', spawnSyncFn: fakeSpawn(root) }).find((g) => g.id === id);
+
+test('postinstall-style build: the real tools/build-fs-handle.cjs stamps its binary fresh; a source change after it reads stale', { skip: process.platform === 'linux' && 'no addon on Linux' }, (t) => {
+  const root = toolTree(t, 'tools/build-fs-handle.cjs');
+  put(root, 'resources/fs-handle/guppy-fs-handle.c', 'int a;');
+  // node-gyp and electron resolve from the jail's own node_modules: a fake gyp that "builds" the addon
+  put(root, 'node_modules/electron/package.json', JSON.stringify({ name: 'electron', version: '0.0.0' }));
+  put(root, 'node_modules/node-gyp/bin/node-gyp.js', "require('fs').mkdirSync('build/Release',{recursive:true});require('fs').writeFileSync('build/Release/guppy_fs_handle.node','GYP');\n");
+  const r = runTool(root, 'tools/build-fs-handle.cjs');
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(fs.readFileSync(path.join(root, 'resources/fs-handle/bin/guppy_fs_handle.node'), 'utf8'), 'GYP');
+  assert.equal(W.readStamp(root)['fs-handle'], W.sourcesDigest(root, 'resources/fs-handle'), 'the build tool wrote its stamp');
+  assert.equal(gapOf(root, 'fs-handle'), undefined, 'a canonical build leaves the native fresh');
+  put(root, 'resources/fs-handle/guppy-fs-handle.c', 'int a; int b;');
+  assert.equal(gapOf(root, 'fs-handle')?.stale, true, 'a source change after the build reads stale');
+});
+
+test('npm-run-build-style build: the real tools/build-heavyjob.cjs (csc) stamps on success only; a .cs change after it reads stale', { skip: process.platform !== 'win32' && 'csc is Windows-only' }, (t) => {
+  const root = toolTree(t, 'tools/build-heavyjob.cjs');
+  put(root, 'resources/heavyjob/guppy-heavyjob.cs', 'class P { static void Main() {} }');
+  const bad = runTool(root, 'tools/build-heavyjob.cjs');
+  put(root, 'resources/heavyjob/guppy-heavyjob.cs', 'class P { static void Main() { BROKEN } }');
+  const broken = runTool(root, 'tools/build-heavyjob.cjs');
+  assert.equal(bad.status, 0, bad.stdout + bad.stderr);
+  assert.equal(broken.status, 1, 'a failed compile fails');
+  assert.equal(gapOf(root, 'heavyjob')?.stale, true, 'a failed build stamps nothing: the old binary reads stale for the new sources');
+  put(root, 'resources/heavyjob/guppy-heavyjob.cs', 'class P { static void Main() {} }');
+  assert.equal(gapOf(root, 'heavyjob'), undefined, 'the successful build stamped its own sources: fresh');
+  put(root, 'resources/heavyjob/guppy-heavyjob.cs', 'class P { static void Main() { int x = 1; } }');
+  assert.equal(gapOf(root, 'heavyjob')?.stale, true, 'a .cs change after the build reads stale');
+});
+
 test('a junctioned shared node_modules: the tree gets its own patched addon, the shared tree is not written', (t) => {
   const shared = jail(t);
   const root = jail(t);

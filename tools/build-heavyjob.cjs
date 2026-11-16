@@ -11,6 +11,10 @@ const { join } = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const ROOT = join(__dirname, '..');
+// WORKTREE-NATIVE-BUILD-GAP: the sources' digest is taken before the compile and recorded in the
+// (gitignored, unshipped) root .worktree-setup.json after it succeeds, so the test runner reads this
+// binary as fresh until those sources change.
+const stampBuilt = require('./worktree-setup.cjs').buildStamp(ROOT, 'heavyjob');
 const SRC = join(ROOT, 'resources', 'heavyjob', 'guppy-heavyjob.cs');
 const OUT_DIR = join(ROOT, 'resources', 'heavyjob', 'bin');
 const OUT = join(OUT_DIR, 'guppy-heavyjob.exe');
@@ -30,4 +34,5 @@ if (r.status !== 0) {
   console.error(`[build-heavyjob] csc failed (${r.status}):\n${r.stdout || ''}${r.stderr || ''}`);
   process.exit(1);
 }
+stampBuilt();
 console.log(`[build-heavyjob] ${OUT} (${statSync(OUT).size} bytes)`);
