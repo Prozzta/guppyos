@@ -383,6 +383,26 @@ if (!WIN) {
     }
   };
 
+  // J1 (Jim): release() is the end of a hold in the product's own code, not only in the addon. The
+  // addon here is a recording fake that would say alive for ever, so only holdRoot's own latch can
+  // make a released hold say dead, and a released hold must not hand the closed handle back to it.
+  W.released = async (id) => {
+    const calls = [];
+    const dlopen = process.dlopen;
+    process.dlopen = (mod) => { mod.exports = { procOpen: () => ({}), procAlive: () => { calls.push('alive'); return true; }, procClose: () => { calls.push('close'); } }; };
+    try {
+      const hold = id.holdRoot(4242, 'win32');
+      assert.ok(hold && hold.alive(), 'the fake addon says alive while the hold is open');
+      hold.release();
+      const asked = calls.length;
+      assert.equal(hold.alive(), false, 'A RELEASED HOLD SAYS DEAD ON ITS OWN: the addon would still say alive');
+      assert.equal(calls.length, asked, 'A RELEASED HOLD DOES NOT ASK THE ADDON ABOUT A CLOSED HANDLE');
+      hold.release();
+      assert.deepEqual(calls.filter((c) => c === 'close'), ['close'], 'the handle is closed once');
+    } finally { process.dlopen = dlopen; }
+  };
+  // A fresh instance of the real source: the shared one has the real addon loaded already.
+  test('J1: a released hold says dead by itself and never asks the addon again', () => W.released(loadTs.fromText(IDF, readSource(IDF) + '\n// fresh instance: J1\n')));
   test('THE ADDON: a hold opens only on a live child of this process and follows its death', async () => {
     const { holdRoot } = loadTs(IDF);
     const child = realSpawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
@@ -392,6 +412,9 @@ if (!WIN) {
       assert.ok(hold, 'NO PROCESS HOLD: resources/fs-handle/bin/guppy_fs_handle.node is missing or was built before PTY-KILL-PID-IDENTITY. Run `node tools/build-fs-handle.cjs` in this tree (npm install does).');
       assert.equal(hold.alive(), true, 'a running child reads alive');
       assert.equal(holdRoot(process.ppid), null, 'A PROCESS THAT IS NOT OUR CHILD IS NOT HELD (a stranger that took the pid before the open)');
+      const spare = holdRoot(child.pid);
+      spare.release();
+      assert.equal(spare.alive(), false, 'a hold released while its child still runs says dead (J1)');
       const gone = new Promise((resolve) => child.once('exit', resolve));
       child.kill();
       await within(gone, 'the child to exit');
@@ -439,7 +462,9 @@ if (!WIN) {
     { file: PTYF, name: 'H4 the quit does not count itself as a user of the hold', edits: [['    for (const s of sessions) s.holdUsers = (s.holdUsers ?? 0) + 1;\n', '']],
       run: (mod) => W.quitLive(mod.PtyManager), dies: /THE HOLD OUTLIVES THE QUIT'S SWEEP/ },
     { file: PTYF, name: 'H5 kill() does not count itself as a user of the hold', edits: [['    s.holdUsers = (s.holdUsers ?? 0) + 1;\n    const close', '    const close']],
-      run: (mod) => W.holdLife(mod.PtyManager), dies: /THE HOLD OUTLIVES THE SWEEP/ }
+      run: (mod) => W.holdLife(mod.PtyManager), dies: /THE HOLD OUTLIVES THE SWEEP/ },
+    { file: IDF, name: 'J1 (Jim) alive() after release() asks the addon', edits: [['      if (!open) return false;\n', '']],
+      run: (mod) => W.released(mod), dies: /A RELEASED HOLD SAYS DEAD ON ITS OWN/ }
   );
 }
 
