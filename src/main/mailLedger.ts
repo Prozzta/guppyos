@@ -27,6 +27,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { HUMAN_RELAY_RE } from '../shared/mailWakeClass';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync } from 'node:fs';
+import { stat as statAsync } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { atomicWriteJson, renameWithRetry } from './atomicJson';
 import { codexPopupAdvice, popupInReason } from '../shared/codexScreen';
@@ -812,6 +813,13 @@ export function backlogEntries(doc: MailLedgerDoc): MailEntry[] {
 }
 
 export interface MailObligation { entry: MailEntry; ageMs: number }
+
+/** The three ledger queries the open-request view reads (MailLedger.obligationReader). */
+export interface MailObligationReader {
+  backlog(agentId: string): MailEntry[];
+  awaitingReply(agentId: string): MailObligation[];
+  openRequests(agentId: string): MailObligation[];
+}
 
 /** §4.3 `awaitingReply`: acted, requires_reply, not replied; age since delivery. */
 export function awaitingReplyEntries(doc: MailLedgerDoc, now: number): MailObligation[] {
@@ -2043,6 +2051,45 @@ export class MailLedger {
   // — queries (load lazily; a non-agent has an empty ledger and none is created) —
   private docOrEmpty(agentId: string): MailLedgerDoc {
     return this.hasAgent(agentId) ? this.state(agentId).doc : emptyLedger(agentId);
+  }
+  /**
+   * LAG-SYNC-IO-107: `backlog`, `awaitingReply` and `openRequests` for these agents with no
+   * synchronous fs on the main thread once their ledgers are loaded. Each of the three queries
+   * runs `hasAgent`, an existsSync of the agent's inbox: three per agent per `hive:mailObligations`
+   * call, which held main for 1278 ms under disk load (1.1.106 stall row). Here the inbox of
+   * each agent is stat'ed once, off the main thread and in parallel, and the queries then read
+   * the ledgers in memory. The answers are the synchronous ones: no inbox = the empty ledger; a
+   * ledger that cannot be had = the query throws.
+   *
+   * A ledger not loaded yet this session still loads synchronously (`state`: the import, restart
+   * recovery and repair are one ordered step), once per agent, each in its own turn of the loop.
+   */
+  async obligationReader(agentIds: string[]): Promise<MailObligationReader> {
+    const present = new Map<string, boolean>();
+    await Promise.all([...new Set(agentIds)].map(async (id) => {
+      const inbox = isValidMailId(id) ? this.inboxDir(id) : null;
+      present.set(id, !!inbox && await statAsync(inbox).then(() => true, () => false));
+    }));
+    const failed = new Set<string>();
+    for (const [id, here] of present) {
+      if (!here) continue;
+      const file = this.ledgerFile(id);
+      if (file && this.ledgers.has(file)) continue;
+      await new Promise<void>((resolve) => { setImmediate(resolve); });
+      try { this.state(id); } catch { failed.add(id); }
+    }
+    const doc = (id: string): MailLedgerDoc => {
+      if (!present.get(id)) return emptyLedger(id);
+      const file = this.ledgerFile(id);
+      const st = file && !failed.has(id) ? this.ledgers.get(file) : undefined;
+      if (!st) throw new Error(`mail ledger: no ledger for ${id}`);
+      return st.doc;
+    };
+    return {
+      backlog: (id) => backlogEntries(doc(id)),
+      awaitingReply: (id) => awaitingReplyEntries(doc(id), this.now()),
+      openRequests: (id) => openRequestEntries(doc(id), this.now())
+    };
   }
   pending(agentId: string): MailEntry[] { return pendingEntries(this.docOrEmpty(agentId)); }
   n1Due(agentId: string): string[] { return n1DueIds(this.docOrEmpty(agentId)); }

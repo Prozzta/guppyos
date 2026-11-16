@@ -15,7 +15,7 @@
 import { cardFieldFacts, cardRecordFacts, decisionFacts, rulingMailFacts, doneMailFacts, parseChangelog, releaseFacts, type MailLike } from './derivedFacts';
 import { doneMailStatuses, writeDoneMailStatus } from './derivedDoneStatus';
 import { DerivedGit } from './derivedGit';
-import { readCards, readDoneMailsAsync, readIndexRulingMailsAsync, runDerivedBackfill, syncDerived, type DerivedWriterDeps } from './derivedWriter';
+import { readCardsAsync, readDoneMailsAsync, readIndexRulingMailsAsync, runDerivedBackfill, syncDerived, type DerivedWriterDeps } from './derivedWriter';
 
 export const DERIVED_START_DELAY_MS = 20_000;
 export const DERIVED_CARDS_DEBOUNCE_MS = 5_000;
@@ -103,7 +103,7 @@ export class DerivedLive {
 
   private async cards(): Promise<void> {
     const c = this.ctx(); if (!c) return;
-    const cards = readCards(c.root);
+    const cards = await readCardsAsync(c.root);
     const git = c.git && await c.git.ok() ? c.git : null;
     await syncDerived(c.w, decisionFacts(cards));
     await syncDerived(c.w, cardRecordFacts(cards));
@@ -116,10 +116,10 @@ export class DerivedLive {
     const git = c.git && await c.git.ok() ? c.git : null;
     const rel = await this.releaseSource(git);
     await syncDerived(c.w, rulingMailFacts(await readIndexRulingMailsAsync(c.root)));
-    await syncDerived(c.w, releaseFacts(parseChangelog(rel.changelog), rel.tags, rel.bumps, rel.heads, { cards: readCards(c.root), mails: await readDoneMailsAsync(c.root) }));
+    await syncDerived(c.w, releaseFacts(parseChangelog(rel.changelog), rel.tags, rel.bumps, rel.heads, { cards: await readCardsAsync(c.root), mails: await readDoneMailsAsync(c.root) }));
     const mails = await this.newDoneMails(c.root);
     if (git && mails.length) {
-      const ids = readCards(c.root).map((x) => x.id).filter((id): id is string => typeof id === 'string');
+      const ids = (await readCardsAsync(c.root)).map((x) => x.id).filter((id): id is string => typeof id === 'string');
       const done = await doneMailFacts(mails, ids, git, { subjectOf: (id) => this.subjects.get(id) });
       for (const s of done.skips) this.d.log({ kind: 'claims-derived-done-skip', mail: s.mail.slice(0, 120), reason: s.reason, ...(s.cards ? { cards: s.cards } : {}) });
       writeDoneMailStatus(c.root, doneMailStatuses(mails, done));

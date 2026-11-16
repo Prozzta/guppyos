@@ -168,11 +168,26 @@ export async function syncDerived(deps: DerivedWriterDeps, facts: readonly Deriv
 
 /** tasks.json's cards, then the archived cards it lacks (taskArchive: the hot copy wins). */
 export function readCards(hiveRoot: string): CardLike[] {
+  let raw: string | null = null;
+  try { raw = readFileSync(join(hiveRoot, 'tasks.json'), 'utf8'); } catch { /* no tasks.json */ }
+  return cardsFromLedger(hiveRoot, raw);
+}
+
+/** LAG-SYNC-IO-107: `readCards` with tasks.json (~670 KB) read off the main thread. The live
+ *  derived writer and the backfill use it: both run on Electron main, where the synchronous
+ *  read held the thread for 529 ms under disk load (1.1.106 stall row). */
+export async function readCardsAsync(hiveRoot: string): Promise<CardLike[]> {
+  let raw: string | null = null;
+  try { raw = await fsp.readFile(join(hiveRoot, 'tasks.json'), 'utf8'); } catch { /* no tasks.json */ }
+  return cardsFromLedger(hiveRoot, raw);
+}
+
+function cardsFromLedger(hiveRoot: string, raw: string | null): CardLike[] {
   let hot: unknown[] = [];
   try {
-    const j = JSON.parse(readFileSync(join(hiveRoot, 'tasks.json'), 'utf8')) as { tasks?: unknown };
+    const j = (raw === null ? null : JSON.parse(raw)) as { tasks?: unknown } | null;
     if (Array.isArray(j?.tasks)) hot = j.tasks;
-  } catch { /* no tasks.json */ }
+  } catch { /* not JSON: as for no tasks.json */ }
   let archived: ReturnType<typeof readArchive> = new Map();
   try { archived = readArchive(hiveRoot); } catch { /* no archive */ }
   const meta = readTaskMeta(hiveRoot);
@@ -462,7 +477,7 @@ export async function runDerivedBackfill(deps: DerivedWriterDeps, input: Backfil
   // A17 (Jim cdf8fec8): the import's start and end in log.jsonl (its claims-key-added rows give the keys per 10 s).
   const t0 = Date.now();
   deps.log?.({ kind: 'claims-derived-backfill-start' });
-  const cards = readCards(input.hiveRoot);
+  const cards = await readCardsAsync(input.hiveRoot);
   const subjects = new Map<string, string>();
   // Round 10 (must 5b): the full pass also reads proven done mails the index and the ledgers lack.
   // A12 (Jim's 10x profile of c1db867a: one 6.1 s block): the index is read in slices and each step below is its own

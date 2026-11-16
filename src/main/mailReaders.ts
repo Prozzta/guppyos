@@ -19,7 +19,7 @@
  *
  * Pure over a small ledger interface (the MailLedger satisfies it); no I/O of its own.
  */
-import type { MailEntry, MailObligation } from './mailLedger';
+import type { MailEntry, MailObligation, MailObligationReader } from './mailLedger';
 
 /** The inputs of the coordinator's pending source (index.ts wires them to the HookServer and
  *  the hive). */
@@ -150,7 +150,7 @@ function obligation(o: MailObligation): FleetObligation {
 }
 
 /** #6: the ledger part of one agent's fleet.json row. */
-export function fleetMailFields(mail: MailReaderLedger, agentId: string, max = FLEET_OBLIGATIONS_MAX): FleetMailFields {
+export function fleetMailFields(mail: MailObligationReader, agentId: string, max = FLEET_OBLIGATIONS_MAX): FleetMailFields {
   const awaiting = mail.awaitingReply(agentId);
   const open = mail.openRequests(agentId);
   return {
@@ -207,7 +207,7 @@ export const UI_OBLIGATIONS_MAX = 50;
  * agents that owe something are listed. An agent whose ledger cannot be read is skipped (the
  * fleet row keeps its file backlog; the UI shows no guess). Zero-token: data only, no wake.
  */
-export function mailObligationsView(mail: MailReaderLedger, agents: Array<{ id: string; name?: string }>, max = UI_OBLIGATIONS_MAX): MailObligationsAgent[] {
+export function mailObligationsView(mail: MailObligationReader, agents: Array<{ id: string; name?: string }>, max = UI_OBLIGATIONS_MAX): MailObligationsAgent[] {
   const out: MailObligationsAgent[] = [];
   for (const a of agents) {
     let f: FleetMailFields;

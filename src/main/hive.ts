@@ -68,7 +68,7 @@ import { selectBroadcastTargets } from '../shared/broadcast';
 import { normalizeWakeField } from '../shared/mailWakeClass';
 import { preferredAgentRole } from '../shared/agentRole';
 import { introducedErrors, mergeTaskLedger, validateLedger, type LedgerIssue } from '../shared/taskLedger';
-import { TaskLedgerGuard, type CardMeta, type TaskEditSource } from './taskLedgerGuard';
+import { TaskLedgerGuard, type CardMeta, type TaskEditSource, type TaskLedgerRead } from './taskLedgerGuard';
 import {
   ARCHIVE_DIR, ARCHIVE_PASS_MS, appendArchived, appendRevived, archiveStamp, mergeHotCold, planArchive, readArchive
 } from './taskArchive';
@@ -889,10 +889,17 @@ export class HiveManager {
     // tick, board status, the ASSIGNEE_ARCHIVED auto-move) call tasks(), so drop the cached entry
     // first: they see at least what the guard saw, never the value from before the change.
     // opts.onChange runs before every onChange() listener.
-    onChange: () => {
+    // LAG-SYNC-IO-107: a change the guard got from readLedger is already IN the cache (that read
+    // installed it before the guard announced), so the listeners' tasks() is served from memory.
+    // Dropping the entry here made each of them re-read ~670 KB synchronously on main.
+    onChange: (_change, info) => {
+      if (info?.primed) return;
       const root = this.root();
       if (root) this.invalidateAuthorityCache(join(root, 'tasks.json'));
-    }
+    },
+    // LAG-SYNC-IO-107: the guard's watch and poll read tasks.json through the authority cache's
+    // async load: one read off the main thread serves the guard and refreshes the cache.
+    readLedger: (root, known) => this.loadAuthorityAsync(join(root, 'tasks.json'), true, known)
   });
   /** At most one queued scan; hints arriving in the same turn coalesce into it. */
   private routeQueued = false;
@@ -4692,11 +4699,34 @@ export class HiveManager {
    * registry agents (the agent listed owes the reply). Data only: nothing here ever wakes anyone.
    */
   mailObligations(): MailObligationsAgent[] {
-    const reg = this.registry();
-    const agents = Object.keys(reg.agents ?? {})
+    return mailObligationsView(this.mail, this.obligationAgents(this.registry()));
+  }
+  /**
+   * LAG-SYNC-IO-107: `mailObligations` for the `hive:mailObligations` poll, with no synchronous
+   * fs on the main thread: the roster comes from the authority cache (refreshed off-thread when
+   * it has expired) and the ledgers through `MailLedger.obligationReader`. Same view.
+   */
+  async mailObligationsAsync(): Promise<MailObligationsAgent[]> {
+    const agents = this.obligationAgents(await this.registryAsync());
+    return mailObligationsView(await this.mail.obligationReader(agents.map((a) => a.id)), agents);
+  }
+  private obligationAgents(reg: Registry): Array<{ id: string; name?: string }> {
+    return Object.keys(reg.agents ?? {})
       .filter((id) => Object.prototype.hasOwnProperty.call(reg.agents, id) && !reg.agents[id]?.archived)
       .map((id) => ({ id, name: reg.agents[id]?.name }));
-    return mailObligationsView(this.mail, agents);
+  }
+  /** `registry()` without a synchronous stat or read while the roster is cached: an expired
+   *  entry is revalidated off the main thread first. A missing, corrupt or unreadable roster is
+   *  not cached, so `registry()` then answers for it exactly as it always did. */
+  private async registryAsync(): Promise<Registry> {
+    const root = this.root();
+    if (root) {
+      const p = join(root, 'registry.json');
+      const c = this.authorityCache.get(p);
+      const age = c ? this.authorityNow() - c.checkedAt : -1;
+      if (!c || age < 0 || age >= HiveManager.AUTHORITY_REVALIDATE_MS) await this.refreshAuthority(p);
+    }
+    return this.registry();
   }
 
   /**
@@ -6571,13 +6601,91 @@ export class HiveManager {
     this.watchAuthority(p);
     return frozen;
   }
+  /**
+   * LAG-SYNC-IO-107: read `p` into the cache with no synchronous fs. A watch event and the
+   * missed-watch fallback used to mark the entry dirty (or drop it), which made the NEXT reader,
+   * on the main thread, pay a statSync and a readFileSync of the whole file (tasks.json: 529 ms
+   * under disk load on 1.1.106). They now call this instead, and the reader keeps being served
+   * the entry it had until the new value is installed, for at most AUTHORITY_REVALIDATE_MS after
+   * that entry's last check: the bound an outside write always had. A missing, corrupt or
+   * unreadable file drops the entry, so the synchronous reader handles it exactly as before
+   * (defaults, quarantine and notice, throw). Any invalidation during an await discards the pass.
+   *
+   * `wantContent` (the ledger guard): return the bytes too. 'unchanged' = the file still has the
+   * proven key of the cached value (and, for the guard, of the bytes it last handled: `known`).
+   */
+  private async loadAuthorityAsync(p: string, wantContent: boolean, known: string | null): Promise<TaskLedgerRead | 'unchanged' | null> {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const generation = this.authorityGeneration.get(p) ?? 0;
+      const overtaken = (): boolean => (this.authorityGeneration.get(p) ?? 0) !== generation;
+      // The key is taken BEFORE the read: a change between the two re-reads at the next revalidate.
+      const st = await fsPromises.stat(p).catch(() => null);
+      if (overtaken()) continue;
+      if (!st) { this.invalidateAuthorityCache(p); return null; }
+      const key = statKey(st);
+      const entry = this.authorityCache.get(p);
+      if (entry && entry.key === key) {
+        entry.checkedAt = this.authorityNow();
+        if (!wantContent || known === key) return 'unchanged';
+      }
+      let raw: string;
+      try {
+        raw = await fsPromises.readFile(p, 'utf8');
+      } catch {
+        if (overtaken()) continue;
+        this.invalidateAuthorityCache(p);
+        return null;
+      }
+      if (overtaken()) continue;
+      let parsed: unknown;
+      try { parsed = JSON.parse(raw); } catch { this.invalidateAuthorityCache(p); return null; }
+      this.quarantinedJsonFingerprints.delete(p);
+      this.authorityIssues.delete(p);
+      const frozen = authorityDeepFreeze(parsed);
+      const proven = provenStatKey(st, this.authorityWall());
+      // Advance the epoch with the install: an async read that started before it holds older bytes.
+      this.authorityGeneration.set(p, generation + 1);
+      this.authorityCache.set(p, { key: proven, value: frozen, checkedAt: this.authorityNow() });
+      this.ensureAuthorityFallback();
+      this.watchAuthority(p);
+      return { content: raw, parsed: frozen, key: proven, primed: true };
+    }
+    return null;
+  }
+  private readonly authorityRefreshes = new Map<string, Promise<void>>();
+  private readonly authorityRefreshAgain = new Set<string>();
+  /** Refresh `p` off the main thread: one flight per file, and a request during it runs one more.
+   *  tasks.json goes through the ledger guard while it runs, so the guard sees the same bytes
+   *  and announces the change to its listeners. */
+  private refreshAuthority(p: string): Promise<void> {
+    const root = this.root();
+    if (root && p === join(root, 'tasks.json') && this.ledgerGuard.running()) return this.ledgerGuard.checkSoon();
+    const flying = this.authorityRefreshes.get(p);
+    if (flying) { this.authorityRefreshAgain.add(p); return flying; }
+    const run: Promise<void> = (async () => {
+      do {
+        this.authorityRefreshAgain.delete(p);
+        await this.loadAuthorityAsync(p, false, null);
+      } while (this.authorityRefreshAgain.has(p));
+    })().catch(() => { /* the next event or the fallback refreshes again */ }).finally(() => {
+      if (this.authorityRefreshes.get(p) === run) this.authorityRefreshes.delete(p);
+    });
+    this.authorityRefreshes.set(p, run);
+    return run;
+  }
   private watchAuthority(p: string): void {
     const dir = dirname(p);
     if (this.authorityWatchers.has(dir)) return;
     try {
       const w = watchDirectorySafely(dir, (_event, name) => {
         const full = name ? join(dir, String(name)) : null;
-        for (const file of this.authorityCache.keys()) if (dirname(file) === dir && (!full || full === file)) this.invalidateAuthorityCache(file, true);
+        for (const file of this.authorityCache.keys()) {
+          if (dirname(file) !== dir || (full && full !== file)) continue;
+          // LAG-SYNC-IO-107: new epoch (a read already in flight may hold the old bytes), then
+          // an async refresh. The entry is kept, not marked dirty: see loadAuthorityAsync.
+          this.authorityGeneration.set(file, (this.authorityGeneration.get(file) ?? 0) + 1);
+          void this.refreshAuthority(file);
+        }
       }, () => { if (this.authorityWatchers.get(dir) === w) this.authorityWatchers.delete(dir); });
       this.authorityWatchers.set(dir, w);
     } catch { /* the stat revalidate is the authority */ }
@@ -6594,10 +6702,14 @@ export class HiveManager {
     this.authorityWatchers.clear();
   }
 
-  /** Missed fs.watch events invalidate these tiny authority caches off-main-thread. */
+  /** LAG-SYNC-IO-107: the fallback's period. Shorter than AUTHORITY_REVALIDATE_MS, so an entry's
+   *  last check is renewed (async stat) before a synchronous reader finds it expired and stats
+   *  the file itself on the main thread. */
+  static readonly AUTHORITY_FALLBACK_MS = 2_000;
+  /** Missed fs.watch events refresh these tiny authority caches off-main-thread. */
   private ensureAuthorityFallback(): void {
     if (this.authorityFallbackTimer) return;
-    this.authorityFallbackTimer = setInterval(() => { void this.revalidateAuthoritiesAsync(); }, HiveManager.AUTHORITY_REVALIDATE_MS);
+    this.authorityFallbackTimer = setInterval(() => { void this.revalidateAuthoritiesAsync(); }, HiveManager.AUTHORITY_FALLBACK_MS);
     this.authorityFallbackTimer.unref?.();
   }
   private async revalidateAuthoritiesAsync(): Promise<void> {
@@ -6607,7 +6719,9 @@ export class HiveManager {
       await Promise.all([...this.authorityCache].map(async ([file, entry]) => {
         const st = await fsPromises.stat(file).catch(() => null);
         if (this.authorityCache.get(file) !== entry) return;
-        if (!st || entry.key === null || entry.key !== statKey(st)) this.invalidateAuthorityCache(file);
+        if (!st) this.invalidateAuthorityCache(file);
+        // LAG-SYNC-IO-107: changed or unproven: re-read here, not in the next reader on main.
+        else if (entry.key === null || entry.key !== statKey(st)) await this.refreshAuthority(file);
         else entry.checkedAt = this.authorityNow();
       }));
     } finally { this.authorityFallbackRunning = false; }
