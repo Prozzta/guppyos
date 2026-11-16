@@ -110,15 +110,21 @@ test('the namespace list is read once per census, not once per pair (MUTANT: per
   assert.equal(reads, 1, `namespaces read ${reads} times`);
 });
 
-// This child warms the census then collects before it measures. The bar is the census's CPU, not
-// garbage left by earlier generated-census assertions in this test worker or machine contention.
+// The production census runs once, cold, for each agent. Take three independent cold measurements
+// and use their minimum: a loaded machine can charge unrelated runtime work to this thread, but a
+// cold-only regression must slow every fresh child. The 500-ms boundary is unchanged.
 const CENSUS_CPU_LIMIT_MS = 500;
 test('a 10x-sized census (17,000 rows, 3,000 keys) takes under 500 ms of thread CPU', () => {
-  const child = spawnSync(process.execPath, ['--expose-gc', path.join(__dirname, 'tools/keyalias-cpu-child.cjs')], { encoding: 'utf8' });
-  assert.equal(child.status, 0, child.stderr);
-  const { cpu, found } = JSON.parse(child.stdout);
-  assert.ok(found > 0);
-  assert.ok(cpu < CENSUS_CPU_LIMIT_MS, `${cpu.toFixed(0)} ms of thread CPU (the old census took tens of seconds at this size)`);
+  const samples = Array.from({ length: 3 }, () => {
+    const child = spawnSync(process.execPath, [path.join(__dirname, 'tools/keyalias-cpu-child.cjs')], { encoding: 'utf8' });
+    assert.equal(child.status, 0, child.stderr);
+    return JSON.parse(child.stdout);
+  });
+  assert.ok(samples.every(({ found }) => found > 0));
+  const cpu = samples.map(({ cpu: n }) => n).sort((a, b) => a - b);
+  const median = cpu[1];
+  assert.ok(cpu[0] < CENSUS_CPU_LIMIT_MS,
+    `minimum cold census CPU ${cpu[0].toFixed(0)} ms (median ${median.toFixed(0)} ms; samples ${cpu.map((n) => n.toFixed(0))}; old census took tens of seconds at this size)`);
 });
 
 test('main runs the start-up census one agent per event-loop turn', () => {

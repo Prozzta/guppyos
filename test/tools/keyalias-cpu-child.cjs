@@ -1,8 +1,8 @@
 'use strict';
 
-// STARTUP-FREEZE-104: an isolated, settled heap makes this a cost of the census, not a delayed
-// collection from earlier assertions in the test worker. The first call warms its generated code;
-// the second is the measured census on the same 17,000-row fixture.
+// STARTUP-FREEZE-104: measure the production-shaped cold first census in a fresh process. The
+// parent takes the minimum of three independent samples so a loaded worker cannot set the bar;
+// a cold-path regression has to be fast in no child to evade it.
 const path = require('node:path');
 const loadTs = require('../load-ts.cjs');
 const { cpuMsOf } = require('./thread-cpu.cjs');
@@ -42,10 +42,7 @@ function census(seed, n, words) {
   return { records, state: { claims } };
 }
 
-if (typeof global.gc !== 'function') throw new Error('keyalias CPU child needs --expose-gc');
 const { records, state } = census(11, 17000, 3000);
-keyAliasCandidates('owner', records, state, REG);
-global.gc();
 let found;
 const cpu = cpuMsOf(() => { found = keyAliasCandidates('owner', records, state, REG); });
 process.stdout.write(`${JSON.stringify({ cpu, found: found.length })}\n`);
