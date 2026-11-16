@@ -27,6 +27,7 @@ const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
 const { readSource } = require('./read-source.cjs');
 const { tempDir } = require('./tools/test-temp.cjs');
+const { pidHolder } = require('./tools/pid-hold.cjs');
 
 if (process.platform !== 'win32') {
   require('./tools/inert.cjs').announceInert('AGY-TEARDOWN tree sweep order', 'POSIX keeps SIGHUP plus the group sweep; the ConPTY order is Windows only');
@@ -63,7 +64,24 @@ const { EventEmitter } = require('node:events');
 const realSpawn = cp.spawn;
 let firstTaskkill = null;   // (args) => fake child, used once
 let taskkillArgs = null;    // when an array, every taskkill's args are recorded in it
+// SUITE-LOAD-FLAKES-1027: every taskkill here is REAL, and several run on purpose after the root has
+// died: M1/M2 restore the 1.1.101 sweep 4 s after the close, X9 sweeps a settled session at the quit.
+// Windows reuses a dead pid within seconds under suite load, so those sweeps force-killed whichever
+// process had the pid by then, tree and all: another test file or one of its children, dead with
+// exit code 1 and no output. Each root and inner pid is now HELD (tools/pid-hold.cjs) from before
+// the kill to the end of the file, so it cannot be reused and a late sweep finds no process.
+const holder = pidHolder();
+const heldPids = new Set();
+const unheldSweeps = [];    // a real taskkill of a pid this file does not hold: must stay empty
+test.after(async () => {
+  await holder.release();
+  assert.deepEqual(unheldSweeps, [], 'EVERY REAL taskkill NAMES ONLY HELD PIDS: a sweep of any other pid can hit a stranger that reused it');
+});
 cp.spawn = function spawn(cmd, args, ...rest) {
+  if (cmd === 'taskkill') {
+    const pids = args.filter((_a, i) => String(args[i - 1]).toLowerCase() === '/pid').map(Number);
+    if (!pids.every((p) => heldPids.has(p))) unheldSweeps.push([...args]);
+  }
   if (cmd === 'taskkill' && taskkillArgs) taskkillArgs.push([...args]);
   if (cmd === 'taskkill' && firstTaskkill) {
     const f = firstTaskkill; firstTaskkill = null;
@@ -108,6 +126,11 @@ async function run(Pty, end, { after, beforeLiveness } = {}) {
     root = JSON.parse(fs.readFileSync(path.join(dir, 'root.json'), 'utf8')).root;
     assert.equal(m.list()[0].pid, root, 'the node root is the PTY process');
     assert.ok(alive(inner), 'the inner child is running before the kill');
+    // Held while alive and known to be ours (the PTY process, and the pid the inner wrote itself).
+    for (const pid of [root, inner]) {
+      assert.equal(await holder.hold(pid), true, `pid ${pid} is held before the kill`);
+      heldPids.add(pid);
+    }
     const proc = m.sessions.get(id).proc;
     rawClose = proc.kill.bind(proc);
     proc.kill = (...a) => { closes.n += 1; return rawClose(...a); };
