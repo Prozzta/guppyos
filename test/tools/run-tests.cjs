@@ -649,6 +649,12 @@ module.exports = { startBackstop, BACKSTOP_PRELOAD, runNodeTest,prepareFileJob, 
 
 if (require.main === module) {
   const repoRoot = path.resolve(__dirname, '..', '..');
+  // WORKTREE-NATIVE-BUILD-GAP: a tree missing its native builds or the patched xterm addon
+  // produced false reds and an uncapped run; refuse it up front (tools/worktree-setup.cjs fixes it).
+  const treeSetup = require('../../tools/worktree-setup.cjs');
+  const optedOut = [];
+  const gate = treeSetup.preflight({ root: repoRoot, optedOut });
+  if (gate) process.exit(gate);
   const code = run({
     testDir: path.join(repoRoot, 'test'),
     filters: process.argv.slice(2),
@@ -658,5 +664,7 @@ if (require.main === module) {
   // PS-POLICY-TEMP-LEAK: a file this run ended (hung, timed out) never ran its exit handler; its
   // guppy-pstemp-<pid>-* folder in the real temp folder goes here.
   require('./ps-env.cjs').sweepPsTempDirs();
+  // An opted-out run says so again under its summary, where a reader looks for the verdict.
+  if (optedOut.length) process.stderr.write(`${treeSetup.optOutLine(optedOut)}\n`);
   process.exit(code);
 }

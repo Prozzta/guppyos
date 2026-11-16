@@ -42,3 +42,5 @@ resources/input/bin/
 # FS-CONTAINMENT-TOCTOU: the handle-check addon, compiled by tools/build-fs-handle.cjs on npm install, never committed
 resources/fs-handle/bin/
 resources/fs-handle/build/
+# WORKTREE-NATIVE-BUILD-GAP: tools/worktree-setup.cjs records which sources each native was built from
+.worktree-setup.json

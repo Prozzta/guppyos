@@ -18,6 +18,10 @@ const { homedir } = require('node:os');
 const { spawnSync } = require('node:child_process');
 
 const ROOT = join(__dirname, '..');
+// WORKTREE-NATIVE-BUILD-GAP: the sources' digest is taken before the build and recorded in the
+// (gitignored, unshipped) root .worktree-setup.json after it succeeds, so the test runner reads this
+// binary as fresh until those sources change.
+const stampBuilt = require('./worktree-setup.cjs').buildStamp(ROOT, 'fs-handle');
 const SRC_DIR = join(ROOT, 'resources', 'fs-handle');
 const OUT_DIR = join(SRC_DIR, 'bin');
 const NAME = 'guppy_fs_handle.node';
@@ -49,4 +53,5 @@ copyFileSync(join(SRC_DIR, 'build', 'Release', NAME), OUT);
 // The intermediates (MSBuild projects, obj, logs) hold the build machine's user folder; only the
 // binary is kept, and only bin/ is shipped.
 rmSync(join(SRC_DIR, 'build'), { recursive: true, force: true });
+stampBuilt();
 console.log(`[build-fs-handle] ${OUT} for Electron ${electronVersion} (${statSync(OUT).size} bytes)`);
