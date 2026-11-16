@@ -318,18 +318,19 @@ test('warm(): nothing in the caller\'s turn, sliced by the clock, then reads are
   fs.readFileSync = function (q, ...a) { if (mine(q) && String(q).endsWith('.jsonl')) syncSeg++; return realRead.call(this, q, ...a); };
   try { await p; } finally { fs.readFileSync = realRead; }
   assert.equal(syncSeg, 0, 'no synchronous segment read during the warm');
-  // Real 4 ms slices: count this thread's CPU between pauses, not scheduler delay.  A full suite
+  // Real 4 ms slices: count this thread's CPU between pauses, not scheduler delay. A full suite
   // can defer setImmediate for tens of ms while this thread is off-core; that is not a main-thread
-  // block.  The injected-clock check below still kills a mutant which stops slicing altogether.
-  let lastCpu = 0; let worstCpu = 0; let pauses = 0;
+  // block. A separate, deliberately generous wall bar still catches a gross synchronous block.
+  let lastCpu = 0; let worstCpu = 0; let lastWall = 0; let worstWall = 0; let pauses = 0;
   const y = setup();
   await writeLedger(y, 'andy', { '2026-09.jsonl': 3000, '2026-10.jsonl': 3000, '2026-11.jsonl': 1000 });
   const s2 = y.mk().store;
-  lastCpu = threadCpuMs();
-  const res = await s2.warm(['andy'], { sliceMs: 4, pause: () => new Promise((r) => setImmediate(() => { const t = threadCpuMs(); worstCpu = Math.max(worstCpu, t - lastCpu); pauses++; lastCpu = t; r(); })) });
+  lastCpu = threadCpuMs(); lastWall = performance.now();
+  const res = await s2.warm(['andy'], { sliceMs: 4, pause: () => new Promise((r) => setImmediate(() => { const cpu = threadCpuMs(); const wall = performance.now(); worstCpu = Math.max(worstCpu, cpu - lastCpu); worstWall = Math.max(worstWall, wall - lastWall); pauses++; lastCpu = cpu; lastWall = wall; r(); })) });
   assert.deepEqual(res.warmed, ['andy']);
   assert.ok(pauses >= 3, `the warm paused between slices (${pauses})`);
   assert.ok(worstCpu < 50, `no slice used 50 ms of this thread's CPU (${worstCpu.toFixed(1)} ms)`);
+  assert.ok(worstWall < 500, `no slice blocked the event loop for 500 ms (${worstWall.toFixed(1)} ms)`);
   // Afterwards a read is the cached one: no whole-file read, no MAC.
   const hit = countReads(files, () => countHmacs(() => store.readLedgerCached('andy')));
   assert.equal(hit.c, 0);

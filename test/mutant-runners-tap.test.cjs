@@ -45,6 +45,23 @@ function stopAndWaitForWorker(rec) {
   assert.fail(`timed-out node --test worker ${rec.pid} did not exit before fixture cleanup`);
 }
 
+test('stopAndWaitForWorker waits for a killed worker to become absent (Y2)', { skip: process.platform !== 'win32' && 'Windows process identity helper' }, () => {
+  const rec = { pid: 12345, bornMs: 1, name: 'node.exe' };
+  const saved = { processTable: own.processTable, ownTreeOrThrow: own.ownTreeOrThrow, killOwnTree: own.killOwnTree, stillOurs: own.stillOurs };
+  let kills = 0; let polls = 0;
+  try {
+    own.processTable = () => [];
+    own.ownTreeOrThrow = () => ({ root: { pid: rec.pid }, tree: [] });
+    own.killOwnTree = () => { kills++; return { attempted: [{ pid: rec.pid }] }; };
+    own.stillOurs = () => (++polls === 1 ? { pid: rec.pid } : null);
+    stopAndWaitForWorker(rec);
+  } finally {
+    Object.assign(own, saved);
+  }
+  assert.equal(kills, 1, 'the recorded worker was handed to the verified kill');
+  assert.equal(polls, 2, 'the wait loop observed it live, then observed its exit');
+});
+
 // An exited Windows process can still be closing its cwd handle. Every retry is reported to the
 // caller; exhaustion says the final OS code and attempt count rather than hiding a temp leak.
 const FIXTURE_REMOVE_RETRY_MS = 25;
