@@ -6530,7 +6530,7 @@ export class HiveManager {
   private readAuthoritativeJsonCached<T>(p: string, onMissing: () => T, fresh = false): T {
     const now = this.authorityNow();
     const c = this.authorityCache.get(p);
-    if (c && !fresh && (!this.authorityTestClock || (now - c.checkedAt >= 0 && now - c.checkedAt < HiveManager.AUTHORITY_REVALIDATE_MS))) return c.value as T;
+    if (c && !fresh && now - c.checkedAt >= 0 && now - c.checkedAt < HiveManager.AUTHORITY_REVALIDATE_MS) return c.value as T;
     const st = authorityStat(p);
     if (st && c && c.key === statKey(st)) { c.checkedAt = now; return c.value as T; }
     this.invalidateAuthorityCache(p);

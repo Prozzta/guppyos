@@ -249,6 +249,17 @@ test('fs.watch marks the cache dirty: an external edit is seen before the window
   assert.equal(hive.registry().godId, 'g2', 'the frozen test clock never reached the window: only the watcher can have done it');
 });
 
+test('production fs.watch marks the sync cache dirty before its 5s fallback', async (t) => {
+  const { hive, handEdit } = floor(t);
+  hive.__resetAuthorityCacheForTests();
+  assert.equal(hive.registry().godId, null);
+  await new Promise((r) => setTimeout(r, 100));
+  handEdit({ godId: 'g2', agents: { g2: agent('g2') } });
+  const until = Date.now() + 1000;
+  while (hive.registry().godId !== 'g2' && Date.now() < until) await new Promise((r) => setTimeout(r, 25));
+  assert.equal(hive.registry().godId, 'g2', 'the watcher dirty mark must make production sync readers revalidate, not wait for fallback');
+});
+
 test('corrupt registry: not cached, quarantined once, mutations refused; integrityIssues sees it inside the window; a repair is seen at once', (t) => {
   const { hive, file, handEdit } = floor(t);
   hive.registry();
