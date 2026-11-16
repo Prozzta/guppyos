@@ -3,7 +3,10 @@ import type { CSSProperties } from 'react';
 import '@xterm/xterm/css/xterm.css';
 import { Icon } from './Icon';
 import { acquireTerminal, attachTerminal, detachTerminal, reflowTerminal, requestPtyResize } from './terminalPool';
-import { loadTerminalFont, remeasureTerminalFont, applyTerminalFontSize, terminalFontReady } from './terminalFont';
+import {
+  loadTerminalFont, remeasureTerminalFont, applyTerminalFontSize, terminalFontReady,
+  TERMINAL_FONT_FACES, setTerminalFontFace, useTerminalFontFace
+} from './terminalFont';
 import {
   DEFAULT_TERMINAL_FONT_SIZE,
   MAX_TERMINAL_FONT_SIZE,
@@ -127,6 +130,9 @@ export function PtyTerminalView({ ptyId, onStreamData, onUserPrompt, onToggleFul
   onUserPromptRef.current = onUserPrompt;
   const fontSize = useTerminalFontSize();
   const fontSizeRef = useRef(fontSize);
+  // The face is applied to every pooled terminal by terminalPool (it subscribes to the
+  // pick); this view only shows the selector.
+  const fontFace = useTerminalFontFace();
   const ptyTheme: PtyTheme = useAppTheme();
   const ptyThemeRef = useRef(ptyTheme);
   ptyThemeRef.current = ptyTheme;
@@ -387,6 +393,15 @@ export function PtyTerminalView({ ptyId, onStreamData, onUserPrompt, onToggleFul
           {/* v0.3.4: the theme + enter-fullscreen buttons moved to the TITLE BAR
               (top right) — more accessible, and the theme now darkens the whole
               app. Only the EXIT affordance stays here, in fullscreen. */}
+          <select
+            value={fontFace}
+            onChange={(e) => setTerminalFontFace(e.target.value)}
+            title="Terminal font"
+            aria-label="Terminal font"
+            style={{ ...zoomBtnStyle, width: 'auto', padding: '0 2px', marginRight: 4 }}
+          >
+            {TERMINAL_FONT_FACES.map((f) => <option key={f} value={f}>{f}</option>)}
+          </select>
           <button
             onClick={() => zoom(-1)}
             disabled={fontSize <= MIN_FONT_SIZE}
