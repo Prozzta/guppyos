@@ -224,6 +224,30 @@ test('npm-run-build-style build: the real tools/build-heavyjob.cjs (csc) stamps 
   assert.equal(gapOf(root, 'heavyjob')?.stale, true, 'a .cs change after the build reads stale');
 });
 
+test('the stamp records the sources the build STARTED from: a source edited during the build (after the digest) reads stale', (t) => {
+  // A -r hook makes the tool's first spawnSync (node-gyp / csc) append to the source first: the
+  // digest must already have been taken, so the recorded stamp no longer matches the sources.
+  const cases = [['fs-handle', 'tools/build-fs-handle.cjs', 'resources/fs-handle/guppy-fs-handle.c', 'int a;']];
+  if (process.platform === 'win32') cases.push(['heavyjob', 'tools/build-heavyjob.cjs', 'resources/heavyjob/guppy-heavyjob.cs', 'class P { static void Main() {} }']);
+  if (process.platform === 'linux') cases.shift(); // no addon on Linux
+  for (const [id, tool, src, text] of cases) {
+    const root = toolTree(t, tool);
+    put(root, src, text);
+    put(root, 'node_modules/electron/package.json', JSON.stringify({ name: 'electron', version: '0.0.0' }));
+    put(root, 'node_modules/node-gyp/bin/node-gyp.js', "require('fs').mkdirSync('build/Release',{recursive:true});require('fs').writeFileSync('build/Release/guppy_fs_handle.node','GYP');\n");
+    const hook = put(root, 'mid-build-edit.cjs', `const cp = require('child_process'); const fs = require('fs');
+const real = cp.spawnSync; let done = false;
+cp.spawnSync = function () { if (!done) { done = true; fs.appendFileSync(${JSON.stringify(path.join(root, src))}, '\\n// edited mid-build\\n'); } return real.apply(this, arguments); };
+`);
+    const r = require('node:child_process').spawnSync(process.execPath, ['-r', hook, path.join(root, tool)], { cwd: root, encoding: 'utf8', windowsHide: true });
+    assert.equal(r.status, 0, `${id}: ${r.stdout}${r.stderr}`);
+    assert.match(fs.readFileSync(path.join(root, src), 'utf8'), /edited mid-build/, `${id}: the hook edited the source during the build`);
+    assert.ok(W.readStamp(root)[id], `${id}: the build stamped`);
+    assert.notEqual(W.readStamp(root)[id], W.sourcesDigest(root, path.dirname(src)), `${id}: the stamp is the pre-build digest, not the edited sources'`);
+    assert.equal(gapOf(root, id)?.stale, true, `${id}: a source edited mid-build reads STALE`);
+  }
+});
+
 test('a junctioned shared node_modules: the tree gets its own patched addon, the shared tree is not written', (t) => {
   const shared = jail(t);
   const root = jail(t);
