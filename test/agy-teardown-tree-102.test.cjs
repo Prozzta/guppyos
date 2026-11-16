@@ -271,7 +271,7 @@ const MUTANTS = [
     killer: 'kill', dies: /KILL ENDS THE WHOLE TREE/ },
   { name: 'M2 killByOwner() closes the ConPTY before the sweep', edits: [['        try { this.closeTree(s); } catch', `        try { ${OLD_ORDER} } catch`]],
     killer: 'owner', dies: /KILLBYOWNER ENDS THE WHOLE TREE/ },
-  { name: 'M3 no re-verify: one sweep, then the close', edits: [['.then(() => (isAlive(pid) ? killTreesAsync([pid]) : undefined)).then(close, close)', '.then(close, close)']],
+  { name: 'M3 no re-verify: one sweep, then the close', edits: [[".then(() => (rootState(s.proc) === 'running' && isAlive(pid) ? killTreesAsync([pid]) : undefined)).then(close, close)", '.then(close, close)']],
     killer: 'retry', dies: /A FAILED FIRST SWEEP IS RETRIED/ },
   { name: 'M4 the quit ignores trees still being swept', edits: [['[...new Set([...this.sessions.values(), ...this.closingTrees])]', '[...this.sessions.values()]']],
     killer: 'quitKill', dies: /QUIT TAKES OVER A PENDING CLOSE/ },
