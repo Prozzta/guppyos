@@ -17,6 +17,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
+const { cpuMsOf } = require('./tools/thread-cpu.cjs');
 const { keyAliasCandidates, keysMayAlias, reconcileItemId, withinEditDistance2 } = loadTs(path.join(__dirname, '../src/main/claims/reconcile.ts'));
 const { editDistance } = loadTs(path.join(__dirname, '../src/main/claims/registry.ts'));
 
@@ -109,13 +110,15 @@ test('the namespace list is read once per census, not once per pair (MUTANT: per
   assert.equal(reads, 1, `namespaces read ${reads} times`);
 });
 
-test('a 10x-sized census (17,000 rows, 3,000 keys) takes well under a second', () => {
+// Several Windows scheduler ticks: enough resolution for threadCpuUsage, and ample room above the
+// current census while rejecting a slow distinct-key-work mutant.
+const CENSUS_CPU_LIMIT_MS = 500;
+test('a 10x-sized census (17,000 rows, 3,000 keys) takes under 500 ms of thread CPU', () => {
   const { records, state } = census(11, 17000, 3000);
-  const t0 = performance.now();
-  const found = keyAliasCandidates('owner', records, state, REG);
-  const ms = performance.now() - t0;
+  let found;
+  const cpu = cpuMsOf(() => { found = keyAliasCandidates('owner', records, state, REG); });
   assert.ok(found.length > 0);
-  assert.ok(ms < 1000, `${ms.toFixed(0)} ms (the old census took tens of seconds at this size)`);
+  assert.ok(cpu < CENSUS_CPU_LIMIT_MS, `${cpu.toFixed(0)} ms of thread CPU (the old census took tens of seconds at this size)`);
 });
 
 test('main runs the start-up census one agent per event-loop turn', () => {

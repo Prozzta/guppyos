@@ -12,11 +12,49 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const { tapResult, verdict, runTests } = require('./tools/mutant-tap.cjs');
+const own = require('./tools/own-procs.cjs');
 // The classify-all pin below reads census-mutated code (src TS, run-tests.cjs): load-ts gates on the mutant journal.
 const loadTs = require('./load-ts.cjs');
 
 const ROOT = path.join(__dirname, '..');
 const TOOLS = path.join(ROOT, 'test', 'tools');
+
+/** A timed-out node --test parent can leave its test worker alive.  That worker's cwd keeps the
+ * fixture directory open on Windows, so wait for the recorded worker itself before rmSync. */
+function stopAndWaitForWorker(rec) {
+  if (process.platform === 'win32') {
+    const before = own.ownTreeOrThrow(own.processTable(), rec);
+    if (before.root) {
+      const killed = own.killOwnTree(rec);
+      assert.ok(killed.attempted.some((p) => p.pid === rec.pid), `the timed-out worker was killed (${rec.pid})`);
+    }
+  } else {
+    process.kill(rec.pid, 'SIGTERM');
+  }
+  const wait = new Int32Array(new SharedArrayBuffer(4));
+  const until = Date.now() + 5_000;
+  while (Date.now() < until) {
+    const live = process.platform === 'win32'
+      ? own.stillOurs(rec)
+      : (() => { try { process.kill(rec.pid, 0); return true; } catch { return false; } })();
+    if (!live) return;
+    Atomics.wait(wait, 0, 0, 25);
+  }
+  assert.fail(`timed-out node --test worker ${rec.pid} did not exit before fixture cleanup`);
+}
+
+// An exited Windows process can still be closing its cwd handle.  Retry only while that release is
+// observable; the final rmSync error deliberately escapes rather than being hidden as a temp leak.
+function removeFixture(dir) {
+  const wait = new Int32Array(new SharedArrayBuffer(4));
+  const until = Date.now() + 5_000;
+  for (;;) {
+    try { fs.rmSync(dir, { recursive: true, force: true }); return; } catch (e) {
+      if (Date.now() >= until) throw e;
+      Atomics.wait(wait, 0, 0, 25);
+    }
+  }
+}
 
 const tap = (rows, { tests, pass, fail, cancelled = 0 } = {}) => [
   'TAP version 13', ...rows,
@@ -121,10 +159,11 @@ test('a passing test whose name matches can not count as a kill: dies sees faili
 
 test('runTests runs real node --test under TAP: pass, fail and a hang give SURVIVED, KILLED and NO-RESULT', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mutant-runners-tap-'));
+  const hangPid = path.join(dir, 'hang.pid');
   try {
     fs.writeFileSync(path.join(dir, 'pass.test.cjs'), "require('node:test')('fine', () => {});\n");
     fs.writeFileSync(path.join(dir, 'fail.test.cjs'), "require('node:test')('breaks here', () => { throw new Error('x'); });\n");
-    fs.writeFileSync(path.join(dir, 'hang.test.cjs'), "require('node:test')('never ends', () => new Promise(() => setInterval(() => {}, 1000)));\n");
+    fs.writeFileSync(path.join(dir, 'hang.test.cjs'), `const fs = require('node:fs');\nfs.writeFileSync(${JSON.stringify(hangPid)}, \`${'${process.pid}'} ${'${Date.now()}'}\`);\nrequire('node:test')('never ends', () => new Promise(() => setInterval(() => {}, 1000)));\n`);
     const p = runTests(dir, ['pass.test.cjs'], { timeout: 120_000 });
     assert.equal(verdict(p), 'SURVIVED', p.why ?? p.stdout);
     assert.equal(p.pass, 1);
@@ -135,8 +174,12 @@ test('runTests runs real node --test under TAP: pass, fail and a hang give SURVI
     assert.match(f.failures, /error: 'x'/, 'the real failing YAML (assertion message) is in failures');
     const h = runTests(dir, ['hang.test.cjs'], { timeout: 3_000 });
     assert.equal(verdict(h), 'NO-RESULT', h.stdout);
+    assert.ok(fs.existsSync(hangPid), 'the hung node --test worker recorded its owned pid');
     assert.throws(() => runTests(dir, ['pass.test.cjs'], { args: ['--test-reporter=spec'] }), /picks the reporter/);
-  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  } finally {
+    if (fs.existsSync(hangPid)) stopAndWaitForWorker(own.readRec(hangPid, path.basename(process.execPath)));
+    removeFixture(dir);
+  }
 });
 
 test('requireBaseline stops a census (exit 2) when the unmutated run never reported or is red', () => {
