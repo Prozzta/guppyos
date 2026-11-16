@@ -152,6 +152,8 @@ interface WindowsTerminalInternals {
   _deferreds?: unknown[];
   _close?: () => void;
   _agent?: { kill?: () => void };
+  /** The agent's outSocket (net.Socket); `_handle` stays null until its connect() runs. */
+  _socket?: { readable: boolean; _handle?: unknown };
 }
 
 /**
@@ -167,6 +169,15 @@ interface WindowsTerminalInternals {
  * resizes for a terminal that is going away). Once ready, kill() is node-pty's own, unchanged. A
  * signal argument keeps node-pty's behaviour (it throws on Windows). Windows only; a terminal that
  * lacks these internals (another node-pty version) is left untouched, and the pin test fails.
+ *
+ * PTY-EARLY-CLOSE-EOF: both `_close()` and `_agent.kill()` set the data socket `readable = false`.
+ * node-pty's own kill only runs after the data pipe connected; this early one can run BEFORE the
+ * conout worker's READY, while the socket has no handle yet. Node's connect() then runs
+ * `_undestroy()`, which marks a `readable === false` stream ENDED, so the first start-up chunk is
+ * ERR_STREAM_PUSH_AFTER_EOF and node-pty's socket error handler rethrows it (uncaught, outside any
+ * caller). So for a socket whose connect is still to come, the flag goes back to readable: the pipe
+ * then connects, drains and closes like that of any terminal killed after its pipe came up, and
+ * that close is what emits the terminal's exit.
  */
 export function armEarlyKill(proc: pty.IPty, platform: NodeJS.Platform = process.platform): boolean {
   const t = proc as unknown as WindowsTerminalInternals & { kill: (signal?: string) => void };
@@ -180,8 +191,12 @@ export function armEarlyKill(proc: pty.IPty, platform: NodeJS.Platform = process
     closedEarly = true;
     t._isReady = true;       // nothing queued may run later against a closed terminal
     t._deferreds = [];
+    const sock = t._socket;
+    const connectPending = sock != null && sock._handle == null;
     t._close!();
     t._agent!.kill!();
+    // PTY-EARLY-CLOSE-EOF: an unconnected socket must not reach connect() marked unreadable.
+    if (connectPending) sock.readable = true;
   };
   return true;
 }
