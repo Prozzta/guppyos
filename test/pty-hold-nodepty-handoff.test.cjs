@@ -44,6 +44,21 @@ const WIN = process.platform === 'win32';
 const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
 
 const CAP_MS = 20_000;   // a failure bound for an event that never comes; no scenario waits it out
+/** The whole file, counted from here (the heavy-slot wait is over by the time this line runs).
+ *  Unref'd: it only ever fires in a process that something else keeps alive, a leaked terminal,
+ *  handle or worker, and ends it as a failure instead of a stall.
+ *  It runs on a thread of its own, because a timer of this thread is not enough here: Jim's C4
+ *  (the addon closes node-pty's own handle) leaves this thread blocked inside node-pty's native
+ *  code, where no timer of it ever fires (seen: the file sat for 7 minutes past a plain 120 s
+ *  timer). process.exit in a worker ends only the worker, so the bound ends the process by pid. */
+const FILE_CAP_MS = 120_000;
+new (require('node:worker_threads').Worker)(`
+  const d = require('node:worker_threads').workerData;
+  setTimeout(() => {
+    try { require('node:fs').writeSync(2, 'pty-hold-nodepty-handoff: still running after ' + d.ms + ' ms: a terminal, a handle or a worker was leaked, or the main thread is blocked\\n'); } catch { /* no stderr */ }
+    process.kill(d.pid);
+  }, d.ms);
+`, { eval: true, workerData: { pid: process.pid, ms: FILE_CAP_MS } }).unref();
 const within = (p, what) => {
   let t;
   return Promise.race([p, new Promise((_, rej) => { t = setTimeout(() => rej(new Error(`TIMED OUT waiting for ${what}`)), CAP_MS); })]).finally(() => clearTimeout(t));
@@ -129,6 +144,29 @@ test('holdRoot adopts a handoff, falls back to the open by pid, and says the fal
 test('an addon built before the handoff still holds by pid', () => F.oldAddon(freshId()));
 test("rootHandoff reads the handle node-pty kept, and nothing else", () => F.reader(freshId()));
 
+// ---------------------------------------------------------------------------------------------
+// watchKillSweep: which promise is "this kill's sweep". Plain logic, a recording terminal.
+// ---------------------------------------------------------------------------------------------
+test("watchKillSweep gives the list promise the kill asked for, and nothing when it asked for none", () => {
+  const { watchKillSweep } = loadTs(PTYF);
+  assert.equal(watchKillSweep({}).started(), null, 'no agent (another node-pty): nothing to wait for');
+  assert.equal(watchKillSweep({ _agent: {} }).started(), null, 'no list helper: nothing to wait for');
+  const list = Promise.resolve([1]);
+  const calls = [];
+  const agent = { _getConsoleProcessList(...a) { calls.push([this, a]); return list; } };
+  const quiet = watchKillSweep({ _agent: agent });
+  assert.equal(quiet.started(), null, 'A KILL THAT ASKED FOR NO LIST HAS NO SWEEP');
+  const w = watchKillSweep({ _agent: agent });
+  const got = agent._getConsoleProcessList('x');
+  assert.equal(got, list, "node-pty gets its own promise back, so its kills chain on it first");
+  assert.deepEqual(calls, [[agent, ['x']]], 'the helper is called once, as the agent, with its arguments');
+  assert.equal(w.started(), list, 'THE SWEEP IS THE PROMISE THE KILL ASKED FOR');
+  const sync = { _getConsoleProcessList: () => [1] };
+  const s = watchKillSweep({ _agent: sync });
+  assert.deepEqual(sync._getConsoleProcessList(), [1]);
+  assert.equal(s.started(), null, 'a helper that returns no promise has nothing to wait for');
+});
+
 const MUTANTS = [
   { file: IDF, name: 'A2 a refused handoff holds nothing', edits: [['  if (!adopted) {\n    try { handle = addon.procOpen(pid); } catch { return null; }\n  }\n', '  if (!adopted) return null;\n']],
     run: (mod) => F.choice(mod), dies: /A REFUSED HANDOFF FALLS BACK TO THE OPEN BY PID/ },
@@ -212,6 +250,21 @@ if (!WIN) {
     const half = tree(builtCc, pristineJs);
     assert.equal(run(TOOL, half).status, 0);
     assert.deepEqual(shas(half), [pins.CONPTY_CC_BUILT_SHA256, pins.AGENT_JS_HANDOFF_SHA256]);
+  });
+
+  test('TOOL: --check fails when either file alone is unpatched, and names it (Jim T4)', () => {
+    const cases = [
+      ['only lib/windowsPtyAgent.js unpatched', tree(builtCc, pristineJs), /windowsPtyAgent\.js is not the pinned root-handle form/],
+      ['only src/win/conpty.cc unpatched', tree(race922Cc, handoffJs), /conpty\.cc is not the pinned root-handle form/]
+    ];
+    for (const [name, dir, why] of cases) {
+      const before = shas(dir);
+      const r = run(TOOL, dir, '--check');
+      assert.notEqual(r.status, 0, `--CHECK MUST FAIL: ${name} (stdout: ${r.stdout})`);
+      assert.equal(r.status, 1, `${name}: a refusal, not a crash: ${r.stderr}`);
+      assert.match(r.stderr, why, `${name}: the file is named`);
+      assert.deepEqual(shas(dir), before, `--check writes nothing: ${name}`);
+    }
   });
 
   test('TOOL: anything it does not know is refused, and a refusal writes nothing', () => {
@@ -439,6 +492,55 @@ if (!WIN) {
         if (gone) await within(gone, 'the exit of the dead root');
         if (raw && !closedByProduct) dispose(raw);
       }
+    },
+    /** The product's close of a live terminal, with node-pty's by-pid sweep in the test's hands:
+     *  no helper is forked, the list arrives when the test says, and "kill each entry" is recorded. */
+    sweep: async (Pty) => {
+      const m = new Pty();
+      const owner = { isDestroyed: () => false, send: () => {} };
+      const order = [];
+      let arrive = () => {};
+      let raw = null;
+      let gone = null;
+      let up = null;
+      let closedByProduct = false;
+      nodePty.spawn = function spawn(...a) {
+        const proc = realPtySpawn.apply(this, a);
+        raw = proc;
+        gone = exitOf(proc);
+        let seen = '';
+        up = new Promise((resolve) => { const sub = proc.onData((d) => { seen += d; if (seen.includes('phnh-root-up')) { sub.dispose(); resolve(); } }); });
+        proc._agent._getConsoleProcessList = () => new Promise((resolve) => {
+          order.push('asked');
+          arrive = () => resolve({ forEach: () => { order.push('swept'); } });
+        });
+        return proc;
+      };
+      const turns = async () => { for (let i = 0; i < 3; i++) await new Promise((resolve) => setImmediate(resolve)); };
+      try {
+        const r = await m.spawn({ id: 'phnh-sweep', cwd: DIR, command: process.execPath, args: [path.join(DIR, 'idle.js')], cols: 80, rows: 24, env: {} }, owner);
+        assert.ok(r.ok, `spawn: ${r.error}`);
+        const session = m.sessions.get('phnh-sweep');
+        assert.ok(session && session.hold, 'the terminal holds its root');
+        const release = session.hold.release;
+        session.hold.release = () => { order.push('released'); return release(); };
+        await within(up, "the root's first output");
+        assert.ok(m.kill('phnh-sweep').ok, 'kill()');
+        closedByProduct = true;
+        // The close ends the root. Its exit is reported with the sweep still out.
+        await within(gone, 'the exit after the close');
+        await turns();
+        assert.deepEqual(order, ['asked'], "THE HOLD OUTLIVES NODE-PTY'S SWEEP: nothing releases it while the by-pid list is still out, not the kill's own end and not the root's exit");
+        assert.equal(session.hold.alive(), false, 'the root is dead, and its pid is still reserved by the hold');
+        arrive();
+        await turns();
+        assert.deepEqual(order, ['asked', 'swept', 'released'], 'THE HOLD IS RELEASED WHEN THE SWEEP HAS RUN: after the kills of the list, once');
+      } finally {
+        nodePty.spawn = realPtySpawn;
+        arrive();
+        if (gone && closedByProduct) await within(gone, 'the exit of the closed terminal');
+        if (raw && !closedByProduct) dispose(raw);
+      }
     }
   };
 
@@ -453,8 +555,17 @@ if (!WIN) {
     { file: IDF, name: 'A1 holdRoot opens by pid although it was handed the handle (the code before this card)', edits: [['handle = addon.procAdopt(handoff, pid); adopted = true;', 'handle = addon.procOpen(pid); adopted = true;']],
       run: (mod) => G.identity(mod), dies: /A ROOT THAT DIED BEFORE THE HOLD IS HELD BY ITS OWN HANDLE/ },
     { file: PTYF, name: 'A6 spawn does not pass the handoff (the code before this card)', edits: [['holdRoot(proc.pid, process.platform, rootHandoff(proc))', 'holdRoot(proc.pid, process.platform)']],
-      run: (mod) => G.spawn(mod.PtyManager), dies: /THE GAP: a terminal whose root died before the hold still holds it/ }
+      run: (mod) => G.spawn(mod.PtyManager), dies: /THE GAP: a terminal whose root died before the hold still holds it/ },
+    { file: PTYF, name: "S1 node-pty's sweep is not a user of the hold (the code before this follow-up)", edits: [['    if (!pending) return;\n', '    return;\n']],
+      run: (mod) => G.sweep(mod.PtyManager), dies: /THE HOLD OUTLIVES NODE-PTY'S SWEEP/ },
+    { file: PTYF, name: 'S2 the sweep is counted, and dropped without waiting for it', edits: [['    pending.then(done, done);\n', '    done();\n']],
+      run: (mod) => G.sweep(mod.PtyManager), dies: /THE HOLD OUTLIVES NODE-PTY'S SWEEP/ },
+    { file: PTYF, name: "S3 the root's exit releases the hold whoever still uses it", edits: [['        if (!session.holdUsers) session.hold?.release();\n', '        session.hold?.release();\n']],
+      run: (mod) => G.sweep(mod.PtyManager), dies: /THE HOLD OUTLIVES NODE-PTY'S SWEEP/ },
+    { file: PTYF, name: 'S4 the hold is released when the list arrives, before the kills of it', edits: [['    try { s.proc.kill(); } catch { /* already gone */ }\n    // node-pty', '    const agent = (s.proc as any)._agent; const early = agent._getConsoleProcessList;\n    agent._getConsoleProcessList = () => { const p = early.call(agent); p.then(() => this.dropHold(s)); return p; };\n    try { s.proc.kill(); } catch { /* already gone */ }\n    // node-pty']],
+      run: (mod) => G.sweep(mod.PtyManager), dies: /THE HOLD IS RELEASED WHEN THE SWEEP HAS RUN/ }
   );
+  test("THE SWEEP, pty.ts: the hold is kept until node-pty's by-pid kill sweep has run", () => G.sweep(loadTs(PTYF).PtyManager));
 }
 
 test('MUTANT CENSUS: every mutant applies once and dies at the assertion that names its guarantee', async (t) => {

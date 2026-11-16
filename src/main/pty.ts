@@ -220,6 +220,34 @@ export function rootState(proc: pty.IPty): 'running' | 'exited' | 'unknown' {
 }
 
 /**
+ * PTY-HOLD-NODEPTY-HANDOFF. node-pty's kill() of a ConPTY terminal does not end with the call: it
+ * forks a helper that lists the console processes OF THE ROOT'S PID, and when the list arrives it
+ * calls process.kill on each entry. That runs after kill() returned (a process start later, 5 s at
+ * node-pty's own bound), and on a root that is already dead it names a pid that is the root's only
+ * while something reserves it. This watches the one kill() about to be made: started() gives the
+ * promise of that list when the kill asked for it, null when it did not (no ConPTY sweep, another
+ * node-pty, or a kill node-pty deferred because the terminal was not ready and not armed).
+ *
+ * The caller chains on it AFTER kill() returned. node-pty chained its kills on the same promise
+ * inside kill(), and reactions of one promise run in the order they were added, so the caller's
+ * runs when the kills are done: tied to the sweep itself, no delay involved.
+ */
+export function watchKillSweep(proc: pty.IPty): { started: () => Promise<unknown> | null } {
+  const agent = (proc as unknown as { _agent?: { _getConsoleProcessList?: unknown } })._agent;
+  const list = agent?._getConsoleProcessList;
+  let sweep: Promise<unknown> | null = null;
+  let watching = true;
+  if (agent && typeof list === 'function') {
+    agent._getConsoleProcessList = function consoleProcessList(this: unknown, ...a: unknown[]): unknown {
+      const p: unknown = (list as (...x: unknown[]) => unknown).apply(this, a);
+      if (watching && p instanceof Promise) sweep = p;
+      return p;
+    };
+  }
+  return { started: () => { watching = false; return sweep; } };
+}
+
+/**
  * PTY-KILL-PID-IDENTITY: may a tree kill name this root's pid right now? The one question every
  * Windows kill path asks (closeTree's two sweeps, killAllAsync's batch), immediately before it
  * spawns taskkill.
@@ -601,7 +629,17 @@ export class PtyManager {
   private closePty(s: PtySession): void {
     if (s.ptyClosed) return;
     s.ptyClosed = true;
+    const sweep = watchKillSweep(s.proc);
     try { s.proc.kill(); } catch { /* already gone */ }
+    // node-pty's own kill names the root by pid once more, later (watchKillSweep). That sweep is
+    // one more user of the hold, until it has ended: the pid stays the root's for as long.
+    // What is left: a terminal with no hold at all (no handoff, and its root died before the open
+    // by pid, or no addon) has nothing to keep, and its sweep names a pid nobody reserves.
+    const pending = sweep.started();
+    if (!pending) return;
+    s.holdUsers = (s.holdUsers ?? 0) + 1;
+    const done = (): void => this.dropHold(s);
+    pending.then(done, done);
   }
 
   /** Register the natural-exit teardown callback. Invoked from inside node-pty's
