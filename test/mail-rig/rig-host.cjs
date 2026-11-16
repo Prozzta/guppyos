@@ -138,7 +138,7 @@ async function buildFloor() {
   };
   const diags = [];
   const outcomes = [];
-  const rig = { clock, diags, outcomes, llm, bootSeen: new Set(), echoSeen: new Map(), stall: new Map(), interfere: new Map(), humanDirty: new Set(), capacityHold: false, owedWait: {}, owedStopSetting: undefined, quietHoldMin: 0, holdArchives: false, settleDelay: new Map(), heldProviderStatus: new Map() };
+  const rig = { clock, diags, outcomes, llm, bootSeen: new Set(), afterBoot: new Map(), echoSeen: new Map(), stall: new Map(), interfere: new Map(), humanDirty: new Set(), capacityHold: false, owedWait: {}, owedStopSetting: undefined, quietHoldMin: 0, holdArchives: false, settleDelay: new Map(), heldProviderStatus: new Map() };
 
   // index.ts:361 - the ONE hive; this sandbox's harness home is the "live" home of THIS instance,
   // so the per-provider global writers (AGY hooks.json, statusline) write into the jailed HOME.
@@ -475,7 +475,14 @@ async function buildFloor() {
         if (n > (rig.echoSeen.get(id) || 0)) rig.echoSeen.set(id, n);
       }
       echoTail.set(id, scan.slice(-48));
-      if (rig.bootSeen.has(id)) return;
+      if (rig.bootSeen.has(id)) {
+        // SUITE-LOAD-FLAKES-1027: what the PTY delivered AFTER the boot sentinel, for diagnose(): a wake
+        // refused as not-quiescent names the output that made the PTY look busy.
+        const log = rig.afterBoot.get(id) || []; rig.afterBoot.set(id, log);
+        log.push({ real: Date.now(), sim: clock.now(), bytes: data.length, head: data.slice(0, 60) });
+        if (log.length > 40) log.shift();
+        return;
+      }
       const buf = ((bootBuf.get(id) || '') + data.replace(/\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\x1b[()][A-Za-z0-9]|[\r\n]/g, '')).slice(-200);
       if (buf.includes('[rig-boot-complete]')) { rig.bootSeen.add(id); bootBuf.delete(id); } else bootBuf.set(id, buf);
     }
@@ -693,6 +700,9 @@ async function main() {
     hasPty: ({ id }) => !!f.ptyForAgent(id),
     // Has this agent's CURRENT PTY carried the stub's boot-complete sentinel (the last bytes it
     // writes at boot)? The driver moves the simulated clock only after it has (Rig.settleBoot).
+    // The PTY as the wake coordinator sees it: its last output (real and simulated), the clock's last
+    // move, and the chunks delivered after the boot sentinel (diagnose prints it).
+    ptyTrace: ({ id }) => { const p = f.ptyForAgent(id); const out = p ? (f.ptyManager.lastOutputAt(p) ?? 0) : 0; return { real: Date.now(), sim: rig.clock.now(), lastOutputReal: out, lastOutputSim: out > 0 ? rig.clock.at(out) : 0, clockMovedReal: rig.clock.changes[rig.clock.changes.length - 1].realAt, echoSeen: rig.echoSeen.get(p) || 0, chunks: rig.afterBoot.get(p) || [] }; },
     bootSeen: ({ id }) => { const p = f.ptyForAgent(id); return !!p && rig.bootSeen.has(p); },
     stallNextHook: ({ id, ms, event }) => { rig.stall.set(id, { ms, event }); return true; },
     holdProviderStatus: ({ id }) => { rig.heldProviderStatus.set(id, []); return true; },

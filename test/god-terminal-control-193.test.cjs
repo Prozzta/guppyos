@@ -873,18 +873,22 @@ test('cost bar: the 6-agent resume burst (6 x 48k chars inside 3 s) is under the
   cal.dispose();
   const mirrors = Array.from({ length: 6 }, () => M.createTerminalMirror(160, 40));
   const burst = COST.calibrationSample(48_000);
-  const b0 = performance.now();
+  const b0 = M.mirrorParseMs();
+  assert.notEqual(b0, null, 'the real mirror times its parse (no timing: the guard would fall back to the estimate)');
   for (const m of mirrors) m.write(burst);
   await Promise.all(mirrors.map((m) => m.read(1)));
-  const burstMs = performance.now() - b0;
+  const burstMs = M.mirrorParseMs() - b0;
   for (const m of mirrors) m.dispose();
   const r = costRig(msPerChar);
-  // MIRROR-STARTUP-196: the guard is charged the MEASURED parse (here the burst's wall time, an
-  // upper bound), not chars x the cold calibration (under suite load that estimate alone passed 2%).
+  // MIRROR-STARTUP-196: the guard is charged the MEASURED parse, not chars x the cold calibration
+  // (under suite load that estimate alone passed 2%). SUITE-LOAD-FLAKES-1027: the measured parse is
+  // what main charges, mirrorParseMs (the parse's thread CPU time since MIRROR-GUARD-CPU-TIME). This
+  // test fed the burst's WALL time instead, which in a full run counted the wait for a core (252 ms:
+  // a 2.5% share, 'share' auto-off) for load the mirrors did not cause.
   for (let s = 0; s < 3; s++) r.second((6 * 48_000) / 3, burstMs / 3);
   for (let s = 0; s < 7; s++) r.second(500);
   assert.deepEqual(r.off, [], `the burst stays on (calibrated ${msPerChar.toExponential(2)} ms/char, burst parsed in ${burstMs.toFixed(0)} ms)`);
-  assert.ok(burstMs < 3000 * 0.25, `six 48k resumes parse in ${burstMs.toFixed(0)} ms, well inside their 3 s`);
+  assert.ok(burstMs < 3000 * 0.25, `six 48k resumes parse in ${burstMs.toFixed(0)} ms of CPU, well inside their 3 s`);
 });
 
 test('cost wiring: calibrated at ready, sampled per second, auto-off drops every mirror and stops new ones; config can turn it off', () => {

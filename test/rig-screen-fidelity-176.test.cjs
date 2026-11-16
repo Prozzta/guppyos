@@ -50,3 +50,36 @@ test('RIG FIDELITY n1: a received echo that fell out of the stub\'s window gives
   assert.equal(screenDraftOf([{ seq: 0, draft: '' }], '', 0), '');
   assert.equal(screenDraftOf(undefined, 'live', 5), 'live');
 });
+
+// SUITE-LOAD-FLAKES-1027: the stub's composer.json is the screen the host reads. On Windows the
+// stub's rename onto it is refused (EPERM) while any process has the file open, and the stub used
+// to swallow that: the file kept the EMPTY composer, the host read an empty prompt row for text
+// whose echo it had received, and every commit was refused as `empty-composer` until the wake gave
+// up (INTERFERED, 0 Enters). Under full-suite load the host's own reads made that collision often
+// enough to fail a different rig test each run. Here the collision is certain: this process holds
+// the file open until the stub reports the refused write, so no load is needed to see it.
+test('RIG FIDELITY write: a composer write refused while a reader has the file open is retried until it lands, never dropped (the staged text is read, ONE Enter)', { timeout: 180_000 }, async (t) => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const { waitFor } = require('./mail-rig/driver.cjs');
+  const rig = await startRig(t);
+  await rig.setup([{ id: ID, flavour: 'codex' }]);
+  const recs = (kind) => rig.transcript(ID).filter((r) => r.kind === kind);
+  let fd = fs.openSync(path.join(rig.stubDir(ID), 'composer.json'), 'r');
+  t.after(() => { if (fd !== null) fs.closeSync(fd); });
+  await rig.call('send', { to: ID, subject: 'held', body: 'hello' });
+  const outcomes = async () => (await rig.call('outcomes')).filter((o) => o.agentId === ID).map((o) => o.outcome);
+  await rig.beat();
+  if (process.platform === 'win32') {
+    await waitFor(() => recs('composer-write-blocked').length > 0, { what: 'the stub reported its composer write refused (the file is held open here)', timeoutMs: 60_000, diag: () => rig.diagnose(ID) });
+  }
+  fs.closeSync(fd); fd = null;
+  for (let i = 0; i < 40 && !(await outcomes()).length; i += 1) { await rig.beat(); await sleep(1000); }
+  const sg = (await rig.call('diags')).filter((d) => d.agentId === ID && d.stage === 'screen-guard').map((d) => d.why);
+  const why = `outcomes ${JSON.stringify(await outcomes())}\n  screen-guard: ${sg.join(' ; ')}`;
+  assert.deepEqual(recs('composer-write-failed'), [], `no composer write was given up on\n  ${why}`);
+  if (process.platform === 'win32') assert.ok(recs('composer-write-retried').length > 0, `the refused write was retried until it landed\n  ${why}`);
+  const enters = recs('pty-input').reduce((n, r) => n + (String(r.data).match(/\r/g) || []).length, 0);
+  assert.equal(enters, 1, `THE STUB RECEIVES EXACTLY ONE ENTER, got ${enters}\n  ${why}`);
+  assert.ok((await outcomes()).some((o) => o.kind === 'COMMITTED'), `COMMITTED\n  ${why}`);
+});

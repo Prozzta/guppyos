@@ -17,6 +17,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const loadTs = require('../load-ts.cjs');
 const { readSource } = require('../read-source.cjs');
+const { threadCpuMs } = require('../tools/thread-cpu.cjs');
 
 const HJF = 'src/main/heavyJob.ts';
 const HJ = loadTs(HJF);
@@ -108,12 +109,15 @@ K.cap = (M = HJ) => {
     return s;
   };
   const vars = Array.from({ length: 6 }, (_, l) => `$v${l}`).join('');
-  const t0 = Date.now();
+  // SUITE-LOAD-FLAKES-1027: thread CPU time. The bar is on the plan's work; Date.now() also counted
+  // the wait for a core in a full run (236 ms there, a few ms alone).
+  const t0 = threadCpuMs();
   assert.equal(c(nest(6, `echo ${vars}`)).heavy, false);
-  assert.ok(Date.now() - t0 < 100, `A DEEP NEST IS PLANNED IN A FIXED TIME: 6 levels of 19 words took ${Date.now() - t0} ms`);
+  const cpu = threadCpuMs() - t0;
+  assert.ok(cpu < 100, `A DEEP NEST IS PLANNED IN A FIXED TIME: 6 levels of 19 words took ${cpu.toFixed(0)} ms of CPU`);
   assert.equal(c(nest(6, `node --test test/a${vars}.test.cjs`)).kind, 'suite', 'and its node --test runs still count');
 };
-test('the loop plan is capped: a 6-level nest of 19-word lists classifies in under 100 ms', () => K.cap());
+test('the loop plan is capped: a 6-level nest of 19-word lists classifies in under 100 ms of CPU', () => K.cap());
 
 /** The cap itself, by size: a 3-level nest of 19 words would plan 19^3 = 6859 segments uncapped
  *  (milliseconds either way, so the census can kill the uncapped mutant here, never in K.cap). */

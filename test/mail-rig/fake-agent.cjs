@@ -45,6 +45,10 @@ function main(flavour) {
 
 const now = () => Date.now();
 const uuid = () => crypto.randomUUID();
+// writeComposer: the Windows codes for "another process has the target open", and how long to keep trying.
+const COMPOSER_WRITE_RETRY = new Set(['EPERM', 'EBUSY', 'EACCES']);
+const COMPOSER_WRITE_GIVE_UP_MS = 15_000;
+const COMPOSER_WRITE_NAP = new Int32Array(new SharedArrayBuffer(4));
 const isLoopbackUrl = (u) => { try { const h = new URL(u).hostname; return h === '127.0.0.1' || h === 'localhost' || h === '::1'; } catch { return false; } };
 
 class FakeAgent {
@@ -82,11 +86,33 @@ class FakeAgent {
   }
 
   writeComposer() {
-    try {
-      const tmp = `${this.composerFile}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify({ draft: this.draft, t: now(), busy: !!this.turn, pending: this.pending, shown: this.shown, hung: this.hung }));
-      fs.renameSync(tmp, this.composerFile);
-    } catch { /* best effort */ }
+    // SUITE-LOAD-FLAKES-1027: this file IS the stub's screen as the host reads it, so it must be on disk
+    // before the echo that announces it goes out. On Windows the rename is refused (EPERM/EBUSY/EACCES)
+    // for as long as the host has composer.json open for a read. That error used to be swallowed, which
+    // left the old (empty) composer on disk: the host then read an empty prompt row for a draft the stub
+    // had echoed, and refused the commit as `empty-composer` until the wake gave up. Retry until the
+    // reader lets go; a write that still cannot land is recorded, never silent.
+    const tmp = `${this.composerFile}.tmp`;
+    const body = JSON.stringify({ draft: this.draft, t: now(), busy: !!this.turn, pending: this.pending, shown: this.shown, hung: this.hung });
+    const giveUpAt = Date.now() + COMPOSER_WRITE_GIVE_UP_MS;
+    let tries = 0;
+    for (;;) {
+      tries += 1;
+      try {
+        fs.writeFileSync(tmp, body);
+        fs.renameSync(tmp, this.composerFile);
+        if (tries > 1) this.rec('composer-write-retried', { tries, seq: this.echoSeq });
+        return;
+      } catch (e) {
+        const code = e && e.code;
+        if (!COMPOSER_WRITE_RETRY.has(code) || Date.now() >= giveUpAt) {
+          this.rec('composer-write-failed', { code, tries, seq: this.echoSeq, error: String(e) });
+          return;
+        }
+        if (tries === 1) this.rec('composer-write-blocked', { code, seq: this.echoSeq });
+        Atomics.wait(COMPOSER_WRITE_NAP, 0, 0, 2);   // a reader holds the file for well under a ms
+      }
+    }
   }
 
   out(text) {
