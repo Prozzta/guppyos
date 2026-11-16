@@ -41,10 +41,25 @@ function peImports(file) {
 const MUTEX_IMPORTS = ['KERNEL32.DLL!AcquireSRWLockExclusive', 'KERNEL32.DLL!ReleaseSRWLockExclusive'];
 const hasMutexImports = (file) => { const imp = peImports(file); return MUTEX_IMPORTS.every((n) => imp.includes(n)); };
 
+// PTY-HOLD-NODEPTY-HANDOFF (tools/patch-node-pty-root-handle.cjs), applied on top of #922.
+// Binary fingerprint: neither node-pty 1.1.0's conpty.node nor the #922 build calls
+// DuplicateHandle; the handoff does, to duplicate the root's process handle for its caller.
+const HANDOFF_IMPORTS = ['KERNEL32.DLL!DuplicateHandle'];
+const hasHandoffImports = (file) => { const imp = peImports(file); return HANDOFF_IMPORTS.every((n) => imp.includes(n)); };
+
 module.exports = {
   NODE_PTY_VERSION: '1.1.0',
   CONPTY_CC_PRISTINE_SHA256: '52c893b689ab3210c0961e2a6aa805a82350003767b21069b164926b5becd4e2',
   CONPTY_CC_PATCHED_SHA256: 'a000a53daa90506662e4747c6585a403b93431d1fe46f99895aa6d58faaa9082',
+  // conpty.cc after BOTH patches (#922, then the root-handle handoff): the only source
+  // conpty.node may be built from, and what the record and the release markers require.
+  // CONPTY_CC_PATCHED_SHA256 above is the state in between.
+  CONPTY_CC_BUILT_SHA256: '7f9d90c35006328d4ac0dec08bafb4d7ac31cf35cc2363bde4dd9b0f375d160c',
+  // lib/windowsPtyAgent.js: from the same tarball, and after the handoff patch.
+  AGENT_JS_PRISTINE_SHA256: '8636d16b38266112204061a22b135734177c242837982fd3a4055be726efa64a',
+  AGENT_JS_HANDOFF_SHA256: '33390ba2cc9bc5bbf78d6123abb914f627445fadb89745de466a5eab8bbb197e',
+  HANDOFF_IMPORTS,
+  hasHandoffImports,
   MARKER_FILE: 'munder-conpty-race-fix.json',
   MUTEX_IMPORTS,
   peImports,

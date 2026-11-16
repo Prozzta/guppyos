@@ -221,6 +221,8 @@ class Rig {
     }
     const diags = await call('diags', {});
     lines.push('wake: ' + (Array.isArray(diags) ? diags : []).filter((d) => d.agentId === agentId && !['enter', 'facts', 'schedule'].includes(d.stage)).map((d) => `${d.stage}:${d.why ?? d.outcome ?? d.event ?? ''}`).join(' '));
+    const pt = await call('ptyTrace', { id: agentId });
+    if (pt && !pt.error) lines.push(`pty: last output ${pt.lastOutputSim ? pt.sim - pt.lastOutputSim : 'never'} ms ago on the simulated clock (real: ${pt.lastOutputReal - pt.clockMovedReal} ms after the clock last moved); after the boot sentinel: ${pt.chunks.length ? pt.chunks.map((c) => `${pt.sim - c.sim} ms ago ${c.bytes}b ${JSON.stringify(c.head)}`).join(' ; ') : 'nothing'}`);
     const outs = await call('outcomes', {});
     for (const o of (Array.isArray(outs) ? outs : [])) if (o.agentId === agentId) lines.push('outcome ' + o.cls + ' ' + JSON.stringify(o.outcome));
     for (const r of this.transcript(agentId)) {

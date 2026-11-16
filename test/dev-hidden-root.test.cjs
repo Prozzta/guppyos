@@ -243,7 +243,12 @@ test('SOURCE: every window-surfacing call in main is behind DEV_HIDDEN (structur
   assert.match(ctor, /backgroundThrottling: false,/, 'hidden timers are not throttled');
   // GUPPY-BLOB-P01: the second constructor is the blob overlay's, built hidden and surfaced
   // (showInactive) only behind DEV_HIDDEN, which the structural check above enforces.
-  assert.equal((idx.match(/new BrowserWindow\(/g) || []).length, 2, 'two window constructors: the app window and the blob overlay');
+  // BLOB-ORCH-MOOD: the third is the Blob face renderer, a hidden sandboxed window that is never surfaced.
+  assert.equal((idx.match(/new BrowserWindow\(/g) || []).length, 3, 'three window constructors: the app window, the blob overlay and the blob face renderer');
+  const faceCtor = idx.slice(idx.indexOf('const blobFaces = new BlobFaceRenderer({'), idx.indexOf('let blobFacesTimer'));
+  assert.equal((faceCtor.match(/new BrowserWindow\(/g) || []).length, 1, 'the third is the blob face renderer');
+  assert.match(faceCtor, /show: false,/, 'the face renderer is built hidden');
+  assert.doesNotMatch(faceCtor, /\.(show|showInactive|focus|restore|moveTop)\(/, 'and never surfaced');
   const blobCtor = idx.slice(idx.indexOf('function createBlobOverlayWindow('), idx.indexOf('const blobOverlay: BlobOverlayController'));
   assert.equal((blobCtor.match(/new BrowserWindow\(/g) || []).length, 1, 'the second is the blob overlay');
   assert.match(blobCtor, /show: false,/, 'the overlay is built hidden');

@@ -18,6 +18,7 @@
  * tool) must survive its parent session.
  */
 import { spawn } from 'node:child_process';
+import type { PidVerdict } from './procIdentity';
 
 /** Grace between the polite signal and the SIGKILL escalation. */
 export const KILL_GRACE_MS = 4_000;
@@ -70,15 +71,36 @@ export function killTreesAsync(pids: readonly number[], capMs = KILL_TREES_ASYNC
   });
 }
 
+/** SIGKILL the process GROUP led by `pid` and nothing else: no fallback to the pid itself, which
+ *  is what killTreesAsync does when the group is gone. POSIX only (Windows has no groups to name). */
+export function killGroupOnly(pid: number): void {
+  if (process.platform === 'win32' || !Number.isInteger(pid) || pid <= 0) return;
+  try { process.kill(-pid, 'SIGKILL'); } catch { /* no such group */ }
+}
+
 /** After a graceful kill (node-pty's SIGHUP), make sure the PIDs actually get
  *  released: wait a short grace, then sweep the process tree. Runs even when
  *  the leader died promptly — the sweep is what reaps grandchildren the polite
  *  signal never reached. The timer is unref'd so it can never keep the app
- *  alive during quit. */
-export function ensureKilled(pid: number | undefined, graceMs = KILL_GRACE_MS): void {
+ *  alive during quit.
+ *
+ *  PTY-KILL-PID-IDENTITY: the grace is seconds in which the leader can die and its pid go to a
+ *  stranger, so the caller passes `verdict` (procIdentity.ts pidIdentity) and it is asked when
+ *  the grace is over, immediately before the kill:
+ *    'other'  the pid is somebody else's now: nothing is killed;
+ *    'gone'   no process under the pid: the GROUP only (the leader's leftovers), never the pid;
+ *    'same' / 'unknown' / no verdict given: the sweep as before. */
+export function ensureKilled(pid: number | undefined, graceMs = KILL_GRACE_MS, verdict?: () => Promise<PidVerdict>): void {
   if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return;
   // QUIT-HANG follow-up: the async sweep, not the old hardKillTree's sync taskkill, which
   // stalled the UI 0.3-1.5 s on every archive/restart/respawn on Windows.
-  const t = setTimeout(() => { void killTreesAsync([pid]); }, graceMs);
+  const t = setTimeout(() => {
+    const asked: Promise<PidVerdict> = verdict ? verdict().catch((): PidVerdict => 'unknown') : Promise.resolve('unknown');
+    void asked.then((v) => {
+      if (v === 'other') return undefined;
+      if (v === 'gone') { killGroupOnly(pid); return undefined; }
+      return killTreesAsync([pid]);
+    });
+  }, graceMs);
   t.unref?.();
 }

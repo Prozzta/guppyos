@@ -130,6 +130,7 @@ test('postinstall: the gyp is patched before electron-rebuild, and --check is th
   const patch = steps.indexOf('node tools/patch-node-pty-winpty-gyp.cjs');
   const rebuild = steps.findIndex((s) => s.startsWith('electron-rebuild'));
   assert.ok(patch >= 0 && rebuild > patch, `patch (${patch}) must run before electron-rebuild (${rebuild})`);
+  assert.equal(steps[rebuild], 'electron-rebuild -f -o node-pty', 'only node-pty needs an Electron rebuild');
   assert.equal(steps[steps.length - 1], 'node tools/patch-node-pty-winpty-gyp.cjs --check');
   assert.ok(steps.indexOf('node tools/patch-node-pty-race-fix.cjs') < rebuild, 'the #922 backport order is unchanged');
 });
@@ -148,5 +149,5 @@ test('release marker 13: OK only for the patched gyp AND a GenVersion.h written 
   for (const [want, t] of cases) {
     try { assert.equal(line(t), want); } finally { rm(t); }
   }
-  assert.match(fs.readFileSync(markers, 'utf8'), /Prints ALL 13 MARKERS OK/);
+  assert.match(fs.readFileSync(markers, 'utf8'), /Prints ALL 15 MARKERS OK/);
 });

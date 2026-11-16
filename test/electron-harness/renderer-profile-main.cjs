@@ -40,7 +40,11 @@ const page = (name) => {
   const { ipcRenderer } = require('electron');
   function runawayAllocator(maxMb) {
     const keep = [];
-    for (;;) { if (keep.length * 2 < maxMb) keep.push(new Array(262144).fill(keep.length)); else keep[keep.length - 1][0] += 1; }
+    while (keep.length * 2 < maxMb) keep.push(new Array(262144).fill(keep.length));
+    // SUITE-LOAD-FLAKES-106I: the page says when its heap is at the bound, so a capture reads a
+    // renderer that IS stuck holding a big heap, however slowly a loaded machine got it there.
+    ipcRenderer.send('page:at-bound', '${name}');
+    for (;;) keep[keep.length - 1][0] += 1;
   }
   function stopsAtDebugger() { debugger; ipcRenderer.send('page:after-debugger'); }
   ipcRenderer.on('page:busy', () => setTimeout(() => runawayAllocator(${MAX_MB}), 20));
@@ -64,6 +68,7 @@ app.on('window-all-closed', () => { /* each scenario opens its own window */ });
 const waiters = new Map();
 const once = (ch) => new Promise((r) => { waiters.set(ch, r); });
 ipcMain.on('page:ready', (_e, name) => { const r = waiters.get(`ready:${name}`); if (r) r(); });
+ipcMain.on('page:at-bound', (_e, name) => { const r = waiters.get(`at-bound:${name}`); if (r) r(); });
 ipcMain.on('page:after-debugger', () => { const r = waiters.get('after-debugger'); if (r) r(); });
 
 /** main's worst event-loop gap while `fn` runs (a 20 ms ticker). */
@@ -89,7 +94,11 @@ async function scenario(name, { arm = true, busy = false, timeoutMs = undefined 
   win.loadFile(page(name));
   await up;
   const armed = arm ? await probe.arm() : false;
-  if (busy) { wc.send('page:busy'); await new Promise((r) => setTimeout(r, 700)); }
+  // SUITE-LOAD-FLAKES-106I: wait for the STATE the capture is about (the loop holds its whole heap
+  // and spins), not for 700 ms. Under full-suite load the allocator had reached only 47.8 MB after
+  // 700 ms, so the metrics of a truly stuck renderer read under the 50 MB the test asks for. The
+  // harness-wide timeout above bounds the wait.
+  if (busy) { const atBound = once(`at-bound:${name}`); wc.send('page:busy'); await atBound; }
   const pid = wc.getOSProcessId();
   const dir = join(sandbox, 'renderer-profiles');
   const { r, worstGapMs } = await measured(() => probe.capture({ write: (json) => R.saveRendererProfile(dir, pid, json), ...(timeoutMs === undefined ? {} : { timeoutMs }) }));

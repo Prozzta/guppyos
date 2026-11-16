@@ -9,6 +9,16 @@
  *   - the worker answers 'stale' (the files no longer reach the verified head), 'no-registry' or 'error'.
  * Each null is logged as claims-derive-fallback with its reason.
  * The registry (megabytes at 10x) is posted only when it is not the object the live worker already holds.
+ *
+ * CLAIMS-WARM-BACKFILL-106 (Jim's SHOULD on the A19 gate: warm backfill 16-17 s against A18's 4.5-5.5 s): a warm
+ * backfill runs nine syncDerived passes over an unchanged derived ledger, and each posted the same 'codes' job (one
+ * worker read, verify and derive, ~1.8 s at 10x). A18's deriveOnce reused the in-process result; this is its off-main
+ * twin: an agent's last 'codes' answer is reused while the job's head, count, frozen registry and r4 are the same. A
+ * verified chain with the same head and count is the same records, so the answer is the one the worker would give.
+ *
+ * 106 drain (Jim's SHOULD on c9cf16c6, god go): when a worker fails, the jobs it held settle null one per macrotask
+ * turn, so each caller's in-process fallback runs in its own turn, not one microtask chain (7 at 10x: one 1.96 s
+ * block). A job run() meanwhile waits for the drain and one more turn before it reaches the fresh worker.
  */
 import type { KeyRegistry } from '../../shared/claims';
 import type { DeriveJob, DeriveJobResult } from './deriveJob';
@@ -29,13 +39,17 @@ export interface DeriveOffMainDeps {
   maxFailures?: number;
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (t: unknown) => void;
+  /** 106: one macrotask turn for the fallback drain (default setImmediate). */
+  yieldTurn?: (fn: () => void) => void;
 }
 
 export const DERIVE_WORKER_TIMEOUT_MS = 30_000;
 export const DERIVE_WORKER_MAX_FAILURES = 3;
 
 type Ok = Extract<DeriveJobResult, { ok: true }>;
-interface Pending { resolve: (r: Ok | null) => void; timer: unknown; agentId: string; want: string }
+interface Pending { resolve: (r: Ok | null) => void; timer: unknown; agentId: string; want: string; memo: CodesMemo | null }
+/** 106: what an agent's last 'codes' answer was for (registry by identity: loadRegistryShared's frozen object). */
+interface CodesMemo { head: string; count: number; registry: KeyRegistry; r4: boolean; result?: Ok }
 
 export class DeriveOffMain {
   private w: DeriveWorkerLike | null = null;
@@ -44,12 +58,18 @@ export class DeriveOffMain {
   private sentRegistry: KeyRegistry | null = null;
   private failures = 0;
   private disabled = false;
+  /** 106: per agent, the last 'codes' answer and the job it answered. */
+  private readonly codes = new Map<string, CodesMemo & { result: Ok }>();
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
   private readonly clearTimer: (t: unknown) => void;
+  /** 106: a failed worker's jobs still settling, one per turn (null when none). */
+  private drain: Promise<void> | null = null;
+  private readonly yieldTurn: (fn: () => void) => void;
 
   constructor(private readonly d: DeriveOffMainDeps) {
     this.setTimer = d.setTimer ?? ((fn, ms) => { const t = setTimeout(fn, ms); t.unref?.(); return t; });
     this.clearTimer = d.clearTimer ?? ((t) => clearTimeout(t as NodeJS.Timeout));
+    this.yieldTurn = d.yieldTurn ?? ((fn) => { setImmediate(fn); });
   }
 
   /** Whether jobs go to the worker (false once it failed `maxFailures` times). */
@@ -57,12 +77,20 @@ export class DeriveOffMain {
 
   run(job: Omit<DeriveJob, 'registry'> & { registry: KeyRegistry }): Promise<Ok | null> {
     if (this.disabled) return Promise.resolve(null);
+    const memo: CodesMemo | null = job.want === 'codes' ? { head: job.head, count: job.count, registry: job.registry, r4: !!job.r4 } : null;
+    if (memo) {
+      const last = this.codes.get(job.agentId);
+      if (last && last.head === memo.head && last.count === memo.count && last.registry === memo.registry && last.r4 === memo.r4) {
+        return Promise.resolve(last.result);
+      }
+    }
+    if (this.drain) return this.drain.then(() => this.run(job));
     const w = this.worker();
     if (!w) return Promise.resolve(null);
     const id = this.nextId++;
     return new Promise<Ok | null>((resolve) => {
       const timer = this.setTimer(() => this.fail(w, 'timeout'), this.d.timeoutMs ?? DERIVE_WORKER_TIMEOUT_MS);
-      this.pending.set(id, { resolve, timer, agentId: job.agentId, want: job.want });
+      this.pending.set(id, { resolve, timer, agentId: job.agentId, want: job.want, memo });
       const registry = job.registry === this.sentRegistry ? null : job.registry;
       try {
         w.postMessage({ id, job: { ...job, registry } });
@@ -78,6 +106,7 @@ export class DeriveOffMain {
     const w = this.w;
     this.w = null;
     this.sentRegistry = null;
+    this.codes.clear();
     if (w) { try { w.terminate(); } catch { /* gone */ } }
     this.settleAll(null);
   }
@@ -95,7 +124,11 @@ export class DeriveOffMain {
       this.pending.delete(msg.id);
       this.clearTimer(p.timer);
       const r = msg.result;
-      if (r && r.ok) { p.resolve(r); return; }
+      if (r && r.ok) {
+        if (p.memo && Object.isFrozen(p.memo.registry)) this.codes.set(p.agentId, { ...p.memo, result: r });
+        p.resolve(r);
+        return;
+      }
       this.d.log?.({ kind: 'claims-derive-fallback', agentId: p.agentId, want: p.want, why: r ? r.why : 'no-result', ...(r && !r.ok && r.error ? { error: r.error } : {}) });
       p.resolve(null);
     });
@@ -118,9 +151,21 @@ export class DeriveOffMain {
     this.settleAll(null);
   }
 
+  /** 106: the held jobs settle one per turn (the first after one turn); the drain ends one turn after the last. */
   private settleAll(r: null): void {
     const all = [...this.pending.values()];
     this.pending.clear();
-    for (const p of all) { this.clearTimer(p.timer); p.resolve(r); }
+    for (const p of all) this.clearTimer(p.timer);
+    if (!all.length) return;
+    // No drain is running here: run() waits for a drain before it posts, so pending is empty during one.
+    this.drain = new Promise<void>((done) => {
+      const next = (): void => {
+        const p = all.shift();
+        if (!p) { this.drain = null; done(); return; }
+        p.resolve(r);
+        this.yieldTurn(next);
+      };
+      this.yieldTurn(next);
+    });
   }
 }

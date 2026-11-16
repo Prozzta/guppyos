@@ -31,6 +31,7 @@ const ROOT = path.join(__dirname, '..');
 const { ClaimStore } = loadTs(path.join(ROOT, 'src/main/claims/store.ts'));
 const { SandboxKeyProvider, FileLedgerKeyRecord, FileHeadAnchorStore, KEY_RECORD_FILE, HEAD_ANCHOR_FILE } = loadTs(path.join(ROOT, 'src/main/claims/keyProvider.ts'));
 const { canonicalJson, recordMac, sha256Hex } = loadTs(path.join(ROOT, 'src/main/claims/canonical.ts'));
+const { threadCpuMs } = require('./tools/thread-cpu.cjs');
 
 const KEY = crypto.randomBytes(32);
 let TEMPLATE = null;
@@ -317,16 +318,19 @@ test('warm(): nothing in the caller\'s turn, sliced by the clock, then reads are
   fs.readFileSync = function (q, ...a) { if (mine(q) && String(q).endsWith('.jsonl')) syncSeg++; return realRead.call(this, q, ...a); };
   try { await p; } finally { fs.readFileSync = realRead; }
   assert.equal(syncSeg, 0, 'no synchronous segment read during the warm');
-  // Real clock, 4 ms slices: the longest stretch between two pauses stays far under the 50 ms block budget.
-  let last = 0; let worst = 0; let pauses = 0;
+  // Real 4 ms slices: count this thread's CPU between pauses, not scheduler delay. A full suite
+  // can defer setImmediate for tens of ms while this thread is off-core; that is not a main-thread
+  // block. A separate, deliberately generous wall bar still catches a gross synchronous block.
+  let lastCpu = 0; let worstCpu = 0; let lastWall = 0; let worstWall = 0; let pauses = 0;
   const y = setup();
   await writeLedger(y, 'andy', { '2026-09.jsonl': 3000, '2026-10.jsonl': 3000, '2026-11.jsonl': 1000 });
   const s2 = y.mk().store;
-  last = performance.now();
-  const res = await s2.warm(['andy'], { sliceMs: 4, pause: () => new Promise((r) => setImmediate(() => { const t = performance.now(); worst = Math.max(worst, t - last); pauses++; r(); last = performance.now(); })) });
+  lastCpu = threadCpuMs(); lastWall = performance.now();
+  const res = await s2.warm(['andy'], { sliceMs: 4, pause: () => new Promise((r) => setImmediate(() => { const cpu = threadCpuMs(); const wall = performance.now(); worstCpu = Math.max(worstCpu, cpu - lastCpu); worstWall = Math.max(worstWall, wall - lastWall); pauses++; lastCpu = cpu; lastWall = wall; r(); })) });
   assert.deepEqual(res.warmed, ['andy']);
   assert.ok(pauses >= 3, `the warm paused between slices (${pauses})`);
-  assert.ok(worst < 50, `no stretch between pauses reached 50 ms (${worst.toFixed(1)} ms)`);
+  assert.ok(worstCpu < 50, `no slice used 50 ms of this thread's CPU (${worstCpu.toFixed(1)} ms)`);
+  assert.ok(worstWall < 500, `no slice blocked the event loop for 500 ms (${worstWall.toFixed(1)} ms)`);
   // Afterwards a read is the cached one: no whole-file read, no MAC.
   const hit = countReads(files, () => countHmacs(() => store.readLedgerCached('andy')));
   assert.equal(hit.c, 0);
@@ -415,7 +419,9 @@ test('the head-anchor store re-reads its file only when it changed (claims-heads
   const ud = path.join(JAIL, 'anchors-only');
   fs.mkdirSync(ud, { recursive: true });
   const file = path.join(ud, HEAD_ANCHOR_FILE);
-  const a = new FileHeadAnchorStore(file);
+  // LAG-MAIN-SYNC-FIXES (1.1.106): a map read within STAT_RACY_MS of the file's change is not cached (two same-size
+  // in-place writes in one tick share a stat key: claims-lag-sync LAG-2c). Here the wall clock is past that window.
+  const a = new FileHeadAnchorStore(file, () => Date.now() + 1000);
   a.set('C:/h', 'andy', { head: 'a'.repeat(64), lastId: 'c-000000000001' });
   const c = countReads([file], () => { for (let i = 0; i < 50; i++) a.get('C:/h', 'andy'); });
   assert.ok(c.c <= 1, `one read for 50 asks (${c.c})`);
@@ -426,6 +432,27 @@ test('the head-anchor store re-reads its file only when it changed (claims-heads
   // A returned value is a copy.
   a.get('C:/h', 'andy').head = 'x';
   assert.equal(a.get('C:/h', 'andy').head, 'b'.repeat(64));
+});
+
+test('the head-anchor store inside the racy window: a repeat ask re-reads, a same-size rewrite in the tick is never served stale (god 762b07)', () => {
+  const ud = path.join(JAIL, 'anchors-racy');
+  fs.mkdirSync(ud, { recursive: true });
+  const file = path.join(ud, HEAD_ANCHOR_FILE);
+  const a = new FileHeadAnchorStore(file, () => fs.statSync(file).mtimeMs + 1); // the wall clock stays inside the window
+  a.set('C:/h', 'andy', { head: 'a'.repeat(64), lastId: 'c-000000000001' });
+  const c = countReads([file], () => { for (let i = 0; i < 5; i++) a.get('C:/h', 'andy'); });
+  assert.equal(c.c, 5, `inside the racy window every ask reads the file (${c.c} reads for 5 asks)`);
+  // Two writes in one timestamp tick: the file system reports the same stat for both (pinned, so the case is deterministic).
+  const text = fs.readFileSync(file, 'utf8');
+  const realStat = fs.statSync;
+  const frozen = realStat(file);
+  fs.statSync = function (p, ...rest) { return path.resolve(String(p)) === path.resolve(file) ? frozen : realStat.call(this, p, ...rest); };
+  try {
+    assert.equal(a.get('C:/h', 'andy').head, 'a'.repeat(64));
+    fs.writeFileSync(file, text.replace('a'.repeat(64), 'c'.repeat(64))); // same size, in place, same tick
+    assert.equal(fs.readFileSync(file, 'utf8').length, text.length, 'the rewrite keeps the size');
+    assert.equal(a.get('C:/h', 'andy').head, 'c'.repeat(64), 'a same-size in-place rewrite inside the tick is read, never served stale');
+  } finally { fs.statSync = realStat; }
 });
 
 test('main wiring: the startup readers run after the warm, and read-only callers use the kept verified reads', () => {

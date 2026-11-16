@@ -38,3 +38,52 @@ reading old commits or an old copy of this file, that is the change you are look
 `maps/office.tmj` and `maps/brooklyn99.tmj` are Tiled JSON maps built on the LimeZu tilesets
 above. Both are imported by `themeRegistry.ts`; a map that nothing imports is not shipped, and
 should be deleted rather than left to imply an asset is in use.
+
+## Terminal font: Martian Mono
+
+`fonts/martian-mono/` holds Martian Mono 1.1.0, Standard width, Regular and Bold
+(`MartianMono-StdRg.woff2`, `MartianMono-StdBd.woff2`), taken unmodified from the official release
+asset `martian-mono-1.1.0-woff2.zip` at https://github.com/evilmartians/mono (tag v1.1.0).
+Copyright 2021 The Martian Mono Project Authors, licensed under the SIL Open Font License 1.1; the
+licence text (`OFL.txt` from the repo at v1.1.0) ships beside the files as `fonts/martian-mono/OFL.txt`.
+It is bundled so the terminal never fetches a font from the network (TERM-FONT-105); it is declared
+in `design/fonts.css` and chosen in `components/terminalFont.ts`.
+
+## UI monospace font: JetBrains Mono
+
+`fonts/jetbrains-mono/` holds JetBrains Mono 2.304 (Regular, Medium, Bold as woff2), taken unmodified
+from the official release at https://github.com/JetBrains/JetBrainsMono. Copyright 2020 The JetBrains
+Mono Project Authors, licensed under the SIL Open Font License 1.1; the licence text ships beside the
+files as `fonts/jetbrains-mono/OFL.txt`. It serves the UI's `--cth-font-mono` labels (`design/tokens.css`),
+so they no longer need a font from the network (TERM-FONT-105); it is declared in `design/fonts.css`.
+SemiBold (`JetBrainsMono-SemiBold.woff2`, same release) was added for the release drop (UI-FONTS-LOCAL).
+
+## UI font: Inter
+
+`fonts/inter/` holds Inter 4.1, the static text cuts Regular, Medium, SemiBold and Bold
+(`web/Inter-*.woff2`), taken unmodified from the official release asset `Inter-4.1.zip` at
+https://github.com/rsms/inter (tag v4.1, zip SHA-256 9883fdd4a49d4fb66bd8177ba6625ef9a64aa45899767dde3d36aa425756b11e).
+Copyright (c) 2016 The Inter Project Authors, licensed under the SIL Open Font License 1.1; the
+licence text (the zip's `LICENSE.txt`, unmodified) ships beside the files as `fonts/inter/OFL.txt`.
+It is the UI's `--cth-font-ui` face, bundled so the app never fetches it from Google Fonts
+(UI-FONTS-LOCAL); it is declared in `design/fonts.css`.
+
+## Brand display font: Press Start 2P
+
+`fonts/press-start-2p/` holds Press Start 2P 3.000 (`PressStart2P-Regular.ttf`) and its `OFL.txt`,
+taken unmodified from https://github.com/google/fonts at `ofl/pressstart2p/` (commit
+dbd72d6ef9ebea750d33c02c7189633e972d6a40). Copyright 2012 The Press Start 2P Project Authors
+(cody@zone38.net), with Reserved Font Name "Press Start 2P", licensed under the SIL Open Font
+License 1.1. It is distributed unmodified under its own name, as the licence requires. It is the
+UI's `--cth-font-display` face, bundled so the app never fetches it from Google Fonts
+(UI-FONTS-LOCAL); it is declared in `design/fonts.css`.
+
+## Release drop font: Geist
+
+`fonts/geist/` holds Geist 1.9.2, Regular, Medium and SemiBold (`Geist/webfonts/Geist-*.woff2`), taken
+unmodified from the official release asset `geist-font-v1.9.2.zip` at https://github.com/vercel/geist-font
+(tag v1.9.2, zip SHA-256 15f066d58dcb99fb10014a49913009fdaf41e464cfb8851a44b44e593c95d3d8). Copyright 2026
+The Geist Project Authors, licensed under the SIL Open Font License 1.1; the licence text (the zip's
+`OFL.txt`) ships beside the files as `fonts/geist/OFL.txt`. It is the release drop's sans face, embedded
+in the drop's frame as data: URIs (`dropFonts.ts`) so the drop never fetches it (UI-FONTS-LOCAL).
+

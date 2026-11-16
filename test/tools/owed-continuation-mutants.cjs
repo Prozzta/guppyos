@@ -8,10 +8,10 @@
 // Each file is restored in a finally (CRLF kept).
 const fs = require('node:fs');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const { recover, mutateFile, restoreFile, checkAnchors } = require('./mutant-runner-helper.cjs');
+const { runTests, verdict, requireBaseline } = require('./mutant-tap.cjs');
 recover(ROOT);
 if (process.argv.includes('--recover-only')) process.exit(0);
 const TEST = 'test/owed-continuation-198.test.cjs';
@@ -44,7 +44,7 @@ const MUTANTS = [
   ['M18 an answered request still holds it back', OWED, " && !f.entries.some((e) => e.from !== 'system' && e.deliveredAt > newest.at)) return 'newest-sent-request';", ") return 'newest-sent-request';", /not ok \d+ - OWED SUPPRESS: an older request/],
   ['M19 a suppressed row every beat', OWED, '      if (this.lastSuppressed.get(agentId) === key) return { rows: [] };\n', '', /not ok \d+ - OWED SUPPRESS: a legitimate wait/],
   ['M20 a repeat without a new Stop', OWED, '(!t.gaveUp && f.lastTurnEndAt > t.lastAt && ', '(!t.gaveUp && ', /not ok \d+ - OWED CAP: one per obligation per hour/],
-  ['M21 a third continuation', OWED, '(tallies.get(e.id)?.count ?? 0) >= OWED_MAX);', '(tallies.get(e.id)?.count ?? 0) > OWED_MAX);', /not ok \d+ - OWED CAP: one per obligation per hour/],
+  ['M21 a third continuation', OWED, '(tallies.get(e.id)?.count ?? 0) >= maxOf(tallies.get(e.id)));', '(tallies.get(e.id)?.count ?? 0) > maxOf(tallies.get(e.id)));', /not ok \d+ - OWED CAP: one per obligation per hour/],
   ['M22 the backlog floods at upgrade', OWED, ' && (e.actedAt ?? 0) >= since', '', /not ok \d+ - OWED SCOPE/],
   ['M23 system mail counts', OWED, "e.act === 'request' && e.from !== 'system' && ", "e.act === 'request' && ", /not ok \d+ - OWED SCOPE/],
   ['M24 god told about itself', OWED, '      if (god && god !== agentId) {', '      if (god) {', /not ok \d+ - OWED CAP: no god notice/],
@@ -53,8 +53,8 @@ const MUTANTS = [
   // Jim 0dbf11 / god 911143: the floor hold, the heavy holder, the protocol rule.
   ['M27 the floor hold is ignored', OWED, "  if (f.floorHeld) return 'floor-paused';\n", '', /not ok \d+ - OWED FLOOR HOLD 12:26Z/],
   ['M28 the heavy holder is ignored', OWED, "  if (f.heavyHolder) return 'heavy-holder';\n", '', /not ok \d+ - OWED SUPPRESS: a legitimate wait/],
-  ['M29 the beat never sees a holder', INDEX, 'heavyHolder: holders.some((h) => h.agentId === agentId),', 'heavyHolder: false,', /not ok \d+ - OWED WIRING/],
-  ['M30 the beat never sees the hold', INDEX, 'const floorHeld = parseFloorHold(readConfig().floorHold) !== null;', 'const floorHeld = false;', /not ok \d+ - OWED WIRING/],
+  ['M29 the beat never sees a holder', INDEX, 'heavyHolder: heavyLock.snapshot().some((h) => h.agentId === agentId),', 'heavyHolder: false,', /not ok \d+ - OWED WIRING/],
+  ['M30 the beat never sees the hold', INDEX, '\n    floorHeld: parseFloorHold(readConfig().floorHold) !== null,\n    sent\n', '\n    floorHeld: false,\n    sent\n', /not ok \d+ - OWED WIRING/],
   ['M31 term hold saves nothing', TERM, 'try { store.set(next); }', 'try { void next; }', /not ok \d+ - OWED FLOOR HOLD: god-only, persisted/],
   ['M32 term hold is not god-only', TERM, "    if (!god || callerId !== god) return refuse(403, 'term is god-only');\n    if (b.action === 'hold')", "    if (b.action === 'hold') return Promise.resolve(this.hold(callerId, b, refuse));\n    if (!god || callerId !== god) return refuse(403, 'term is god-only');\n    if (b.action === 'hold')", /not ok \d+ - OWED FLOOR HOLD: god-only, persisted/],
   ['M33 a repeat on restarts the hold', TERM, "if (b.state === 'on' && cur) {", 'if (false) {', /not ok \d+ - OWED FLOOR HOLD: god-only, persisted/],
@@ -66,11 +66,8 @@ const MUTANTS = [
 ];
 
 checkAnchors(ROOT, MUTANTS.map(([name, file, from]) => ({ name, file, from })));
-const run = () => spawnSync(process.execPath, ['--test', '--test-reporter=tap', TEST], { cwd: ROOT, encoding: 'utf8', windowsHide: true, timeout: 300_000 });
-if (run().status !== 0) {
-  console.log(`BASELINE RED: ${TEST} fails unmutated, so no mutant proves anything.`);
-  process.exit(2);
-}
+const run = () => runTests(ROOT, [TEST], { timeout: 300_000 });
+requireBaseline(run(), TEST);
 
 let bad = 0;
 for (const [name, rel, from, to, dies] of MUTANTS) {
@@ -92,10 +89,9 @@ for (const [name, rel, from, to, dies] of MUTANTS) {
   } finally {
     restoreFile(ROOT, abs, original);
   }
-  const named = dies.test(`${r.stdout}${r.stderr}`);
-  const killed = r.status !== 0 && named;
-  if (!killed) bad += 1;
-  console.log(`${killed ? 'KILLED' : r.status !== 0 ? 'KILLED ELSEWHERE' : 'SURVIVED'} ${name}`);
+  const v = verdict(r, dies); // NO-RESULT (the run never reported) is loud, never a kill
+  if (v !== 'KILLED') bad += 1;
+  console.log(`${v} ${name}${v === 'NO-RESULT' ? ` (${r.why})` : ''}`);
 }
 console.log(bad ? `${bad} of ${MUTANTS.length} not killed at their named test` : `all ${MUTANTS.length} killed`);
 process.exitCode = bad ? 1 : 0;

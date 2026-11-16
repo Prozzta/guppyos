@@ -154,11 +154,7 @@ function inProcessFork(runWorker, deps, tap = null) {
     ...(spec.served && spec.now ? { now: () => new Date(spec.now) } : {}),
   });
   const endpoint = { root: hive, store, level: claimLevel };
-  const ledgerAgents = () => {
-    let withSegments = [];
-    try { withSegments = fs.readdirSync(path.join(hive, 'agents')).filter((a) => store.segments(a).length > 0); } catch { /* none */ }
-    return [...new Set([...withSegments, ...store.anchoredAgents()])];
-  };
+  const ledgerAgents = () => store.ledgerAgents();
 
   // god b6624e (step 3 fix 1): the preflight child builds the served state the way the app's start does
   // (index.ts claims block): the mail-card catch-up, then the derived writer's start backfill once it settled.

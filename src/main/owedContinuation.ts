@@ -31,6 +31,11 @@ export const OWED_REPEAT_MS = 60 * 60_000;
 export const OWED_MAX = 2;
 /** Obligations (and outgoing requests) older than this are not followed. */
 export const OWED_WINDOW_MS = 6 * 60 * 60_000;
+/** CODEX-TURN-ENDS-EARLY P2: a Codex agent that made tool calls since its last continuation is
+ *  working, just stopping early: it is continued again after this, up to OWED_MAX_CODEX in all.
+ *  No tool call since the last continuation = the hourly repeat and OWED_MAX, as for any agent. */
+export const OWED_REPEAT_CODEX_MS = 5 * 60_000;
+export const OWED_MAX_CODEX = 6;
 
 /** A message the agent sent, as seen in the recipient's ledger. */
 export interface OwedSent {
@@ -42,12 +47,9 @@ export interface OwedSent {
   open: boolean;
 }
 
-export interface OwedFacts {
+/** The facts owedSuppressor reads (owedStop.ts uses them too). */
+export interface OwedSuppressFacts {
   now: number;
-  lifecycle: string;
-  lastTurnEndAt: number;
-  inFlight: boolean;
-  pendingMail: number;
   paused: boolean;
   halted: boolean;
   autoDeliveryPaused: boolean;
@@ -63,6 +65,17 @@ export interface OwedFacts {
   entries: MailEntry[];
   /** Messages the agent sent (from the other agents' ledgers). */
   sent: OwedSent[];
+}
+
+export interface OwedFacts extends OwedSuppressFacts {
+  lifecycle: string;
+  lastTurnEndAt: number;
+  inFlight: boolean;
+  pendingMail: number;
+  /** P2: the agent's provider (only 'codex' changes the cadence). */
+  provider?: string | null;
+  /** P2: the agent's tool calls so far (HookServer's counter); progress = it grew since a continuation. */
+  toolCalls?: number;
 }
 
 export type OwedSuppressor = 'floor-paused' | 'paused' | 'halted' | 'auto-delivery-paused' | 'hitl' | 'heavy-holder' | 'heavy-queued' | 'outgoing-request' | 'newest-sent-request';
@@ -81,7 +94,7 @@ export interface OwedDecision {
   notice?: OwedNudge;
 }
 
-interface Tally { count: number; lastAt: number; gaveUp: boolean }
+interface Tally { count: number; lastAt: number; gaveUp: boolean; toolsAt: number }
 
 /** The obligations this agent still owes work on, oldest first. */
 export function owedEntries(agentId: string, entries: MailEntry[], since: number, now: number): MailEntry[] {
@@ -97,7 +110,7 @@ export function owedEntries(agentId: string, entries: MailEntry[], since: number
  * the owed work itself, would have): the 07:18Z replay has an audit request Jim had already
  * answered before the owed work arrived.
  */
-export function owedSuppressor(f: OwedFacts): OwedSuppressor | null {
+export function owedSuppressor(f: OwedSuppressFacts): OwedSuppressor | null {
   if (f.floorHeld) return 'floor-paused';
   if (f.paused) return 'paused';
   if (f.halted) return 'halted';
@@ -135,9 +148,13 @@ export class OwedContinuation {
     if (!owed.length) { this.lastSuppressed.delete(agentId); return { rows: [] }; }
     // The agent is not idle past the grace after a Stop: nothing is owed yet (no row).
     if (f.lifecycle !== 'idle' || f.inFlight || f.pendingMail > 0 || !f.lastTurnEndAt || f.now - f.lastTurnEndAt < OWED_GRACE_MS) return { rows: [] };
+    const tools = f.toolCalls ?? 0;
+    // P2: a Codex agent that worked (tool calls) since this obligation's last continuation.
+    const working = (t: Tally): boolean => f.provider === 'codex' && tools > t.toolsAt;
+    const maxOf = (t: Tally | undefined): number => (t && working(t) ? OWED_MAX_CODEX : OWED_MAX);
     const due = owed.filter((e) => {
       const t = tallies.get(e.id);
-      return !t || (!t.gaveUp && f.lastTurnEndAt > t.lastAt && f.now - t.lastAt >= OWED_REPEAT_MS);
+      return !t || (!t.gaveUp && f.lastTurnEndAt > t.lastAt && f.now - t.lastAt >= (working(t) ? OWED_REPEAT_CODEX_MS : OWED_REPEAT_MS));
     });
     if (!due.length) return { rows: [] };
     const why = owedSuppressor(f);
@@ -148,23 +165,24 @@ export class OwedContinuation {
       return { rows: [{ kind: 'wake', stage: 'continuation', agentId, ids: due.map((e) => e.id), graceMs: OWED_GRACE_MS, suppressedBy: why }] };
     }
     this.lastSuppressed.delete(agentId);
-    const spent = due.filter((e) => (tallies.get(e.id)?.count ?? 0) >= OWED_MAX);
-    const send = due.filter((e) => (tallies.get(e.id)?.count ?? 0) < OWED_MAX);
+    const spent = due.filter((e) => (tallies.get(e.id)?.count ?? 0) >= maxOf(tallies.get(e.id)));
+    const send = due.filter((e) => (tallies.get(e.id)?.count ?? 0) < maxOf(tallies.get(e.id)));
     const rows: Array<Record<string, unknown>> = [];
     const out: OwedDecision = { rows };
     if (spent.length) {
       for (const e of spent) tallies.set(e.id, { ...(tallies.get(e.id) as Tally), gaveUp: true });
       const ids = spent.map((e) => e.id);
-      rows.push({ kind: 'wake', stage: 'continuation-gave-up', agentId, ids, continuations: OWED_MAX, idleMs: f.now - f.lastTurnEndAt });
+      const continuations = Math.max(...spent.map((e) => tallies.get(e.id)?.count ?? 0));
+      rows.push({ kind: 'wake', stage: 'continuation-gave-up', agentId, ids, continuations, idleMs: f.now - f.lastTurnEndAt });
       const god = this.godId();
       if (god && god !== agentId) {
-        const subject = `STALL: ${agentId} is idle with work still owed after ${OWED_MAX} continuations`;
-        const body = `${agentId} was sent ${OWED_MAX} continuation mails for these requests and is idle again without discharging them:\n${spent.map((e) => `- ${e.id} from ${e.from}`).join('\n')}\n\nGuppy will not send it more continuations for them. Check on it (a term read of its screen), or close the requests if they are no longer needed.`;
+        const subject = `STALL: ${agentId} is idle with work still owed after ${continuations} continuations`;
+        const body = `${agentId} was sent ${continuations} continuation mails for these requests and is idle again without discharging them:\n${spent.map((e) => `- ${e.id} from ${e.from}`).join('\n')}\n\nGuppy will not send it more continuations for them. Check on it (a term read of its screen), or close the requests if they are no longer needed.`;
         out.notice = { message: { to: god, act: 'inform', requires_reply: false, subject, body, wake: 'now' }, from: 'system' };
       }
     }
     if (send.length) {
-      for (const e of send) tallies.set(e.id, { count: (tallies.get(e.id)?.count ?? 0) + 1, lastAt: f.now, gaveUp: false });
+      for (const e of send) tallies.set(e.id, { count: (tallies.get(e.id)?.count ?? 0) + 1, lastAt: f.now, gaveUp: false, toolsAt: tools });
       rows.push({ kind: 'wake', stage: 'continuation', agentId, ids: send.map((e) => e.id), graceMs: OWED_GRACE_MS, idleMs: f.now - f.lastTurnEndAt });
       out.nudge = owedNudge(agentId, send);
     }

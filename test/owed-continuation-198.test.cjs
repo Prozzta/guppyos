@@ -330,14 +330,15 @@ test('OWED CAP: no god notice when there is no god or the agent is god', () => {
 test('OWED WIRING: the 15 s beat runs it after the wake reconcile, with the live guards and heavy queue (source pin)', () => {
   const src = fs.readFileSync(path.join(ROOT, 'src/main/index.ts'), 'utf8').replace(/\r\n/g, '\n');
   assert.match(src, /inboxWake\.reconcileAll\(live\);\n  runOwedContinuation\(live\);\n  \/\/ ZERO-TOKEN-LIVENESS/);
-  const fn = src.slice(src.indexOf('function runOwedContinuation('), src.indexOf('/** Inbox-wake RECONCILIATION'));
+  const fn = src.slice(src.indexOf('function owedSentBy('), src.indexOf('/** Inbox-wake RECONCILIATION'));
   for (const re of [
     /paused: snap\.paused,/, /halted: snap\.halted,/, /autoDeliveryPaused: snap\.autoDeliveryPaused,/,
     /inFlight: !!workerWake\.state\(agentId\)\.inFlight,/, /pendingMail: mailPendingIds\(agentId\)\.length,/,
     /lifecycle: lf\.lifecycle,/, /lastTurnEndAt: lf\.lastTurnEndAt,/,
     /heavyQueued: q\.waiters\.some\(\(w\) => w\.agentId === agentId\) \|\| q\.reserved\.some\(\(r\) => r\.agentId === agentId\),/,
-    /const holders = heavyLock\.snapshot\(\);/, /heavyHolder: holders\.some\(\(h\) => h\.agentId === agentId\),/,
-    /const floorHeld = parseFloorHold\(readConfig\(\)\.floorHold\) !== null;/, /\n        floorHeld,\n/,
+    /heavyHolder: heavyLock\.snapshot\(\)\.some\(\(h\) => h\.agentId === agentId\),/,
+    /floorHeld: parseFloorHold\(readConfig\(\)\.floorHold\) !== null,/,
+    /\.\.\.owedWaitFacts\(agentId, now, sent\.get\(agentId\) \?\? \[\]\),/,
     /open: owesWork\(e\)/,
     /hive\.send\(d\.nudge\.message as Partial<HiveMessage>, 'system'\)/,
     /hive\.send\(d\.notice\.message as Partial<HiveMessage>, 'system'\)/,

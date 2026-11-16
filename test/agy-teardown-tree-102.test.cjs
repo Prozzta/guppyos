@@ -27,6 +27,7 @@ const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
 const { readSource } = require('./read-source.cjs');
 const { tempDir } = require('./tools/test-temp.cjs');
+const { pidHolder } = require('./tools/pid-hold.cjs');
 
 if (process.platform !== 'win32') {
   require('./tools/inert.cjs').announceInert('AGY-TEARDOWN tree sweep order', 'POSIX keeps SIGHUP plus the group sweep; the ConPTY order is Windows only');
@@ -63,7 +64,24 @@ const { EventEmitter } = require('node:events');
 const realSpawn = cp.spawn;
 let firstTaskkill = null;   // (args) => fake child, used once
 let taskkillArgs = null;    // when an array, every taskkill's args are recorded in it
+// SUITE-LOAD-FLAKES-1027: every taskkill here is REAL, and several run on purpose after the root has
+// died: M1/M2 restore the 1.1.101 sweep 4 s after the close, X9 sweeps a settled session at the quit.
+// Windows reuses a dead pid within seconds under suite load, so those sweeps force-killed whichever
+// process had the pid by then, tree and all: another test file or one of its children, dead with
+// exit code 1 and no output. Each root and inner pid is now HELD (tools/pid-hold.cjs) from before
+// the kill to the end of the file, so it cannot be reused and a late sweep finds no process.
+const holder = pidHolder();
+const heldPids = new Set();
+const unheldSweeps = [];    // a real taskkill of a pid this file does not hold: must stay empty
+test.after(async () => {
+  await holder.release();
+  assert.deepEqual(unheldSweeps, [], 'EVERY REAL taskkill NAMES ONLY HELD PIDS: a sweep of any other pid can hit a stranger that reused it');
+});
 cp.spawn = function spawn(cmd, args, ...rest) {
+  if (cmd === 'taskkill') {
+    const pids = args.filter((_a, i) => String(args[i - 1]).toLowerCase() === '/pid').map(Number);
+    if (!pids.every((p) => heldPids.has(p))) unheldSweeps.push([...args]);
+  }
   if (cmd === 'taskkill' && taskkillArgs) taskkillArgs.push([...args]);
   if (cmd === 'taskkill' && firstTaskkill) {
     const f = firstTaskkill; firstTaskkill = null;
@@ -90,7 +108,7 @@ const heldTaskkill = (gate) => (args, rest) => {
  *  return whether root and inner were gone within the deadline, plus how often the ConPTY was
  *  closed (proc.kill calls). The finally ends the root and the PTY whatever the outcome, so a
  *  mutant that never closes the ConPTY fails instead of hanging the runner (Jim MINOR 3). */
-async function run(Pty, end, { after } = {}) {
+async function run(Pty, end, { after, beforeLiveness } = {}) {
   const dir = fs.mkdtempSync(path.join(DIR, 'run-'));
   const m = new Pty();
   const owner = { isDestroyed: () => false, send: () => {} };
@@ -108,15 +126,29 @@ async function run(Pty, end, { after } = {}) {
     root = JSON.parse(fs.readFileSync(path.join(dir, 'root.json'), 'utf8')).root;
     assert.equal(m.list()[0].pid, root, 'the node root is the PTY process');
     assert.ok(alive(inner), 'the inner child is running before the kill');
+    // Held while alive and known to be ours (the PTY process, and the pid the inner wrote itself).
+    for (const pid of [root, inner]) {
+      assert.equal(await holder.hold(pid), true, `pid ${pid} is held before the kill`);
+      heldPids.add(pid);
+    }
     const proc = m.sessions.get(id).proc;
     rawClose = proc.kill.bind(proc);
     proc.kill = (...a) => { closes.n += 1; return rawClose(...a); };
     const extra = await end(m, id, owner, closes);
     const t0 = Date.now();
+    const waitForClose = async () => {
+      while (closes.n === 0 && Date.now() - t0 < DEADLINE_MS) await sleep(25);
+    };
+    // M6 intentionally removes this close. Check that contract before its
+    // unrelated descendant census can mask it when taskkill is delayed by load.
+    if (beforeLiveness) {
+      await waitForClose();
+      await beforeLiveness(closes);
+    }
     while ((alive(inner) || alive(root)) && Date.now() - t0 < DEADLINE_MS) await sleep(100);
     // The tree can be gone before taskkill's close event runs closePty (INT 1.1.102 FULL: closed 0).
     const tGone = Date.now(); const lateClose = closes.n === 0;
-    while (closes.n === 0 && Date.now() - t0 < DEADLINE_MS) await sleep(25);
+    if (!beforeLiveness) await waitForClose();
     if (lateClose) process.stderr.write(`[agy-teardown] the close came ${Date.now() - tGone} ms after the tree was gone (${tGone - t0} ms)\n`);
     const out = { ...extra, innerGone: !alive(inner), rootGone: !alive(root) };
     if (after) Object.assign(out, await after(closes, out, m, root));
@@ -155,7 +187,10 @@ const settledChecks = (r, who) => {
 
 const K = {};
 K.kill = async (Pty) => {
-  const r = await run(Pty, (m, id) => assert.equal(m.kill(id).ok, true), { after: afterSettled });
+  const r = await run(Pty, (m, id) => assert.equal(m.kill(id).ok, true), {
+    after: afterSettled,
+    beforeLiveness: (closes) => assert.equal(closes.n, 1, 'KILL CLOSES THE CONPTY ONCE: the sweep alone ends the processes, not the pseudo-console'),
+  });
   assert.ok(r.rootGone, 'KILL: the PTY root is gone');
   assert.ok(r.innerGone, `KILL ENDS THE WHOLE TREE: a descendant off the pseudo-console is still alive ${DEADLINE_MS} ms after kill()`);
   assert.equal(r.closesAtSettle, 1, `KILL CLOSES THE CONPTY ONCE: closed ${r.closesAtSettle} times (the sweep alone ends the processes, not the pseudo-console)`);
@@ -236,17 +271,20 @@ const MUTANTS = [
     killer: 'kill', dies: /KILL ENDS THE WHOLE TREE/ },
   { name: 'M2 killByOwner() closes the ConPTY before the sweep', edits: [['        try { this.closeTree(s); } catch', `        try { ${OLD_ORDER} } catch`]],
     killer: 'owner', dies: /KILLBYOWNER ENDS THE WHOLE TREE/ },
-  { name: 'M3 no re-verify: one sweep, then the close', edits: [['.then(() => (isAlive(pid) ? killTreesAsync([pid]) : undefined)).then(close, close)', '.then(close, close)']],
+  { name: 'M3 no re-verify: one sweep, then the close', edits: [[".then(() => (mayNamePid(s, true) ? killTreesAsync([pid]) : undefined)).then(close, close)", '.then(close, close)']],
     killer: 'retry', dies: /A FAILED FIRST SWEEP IS RETRIED/ },
   { name: 'M4 the quit ignores trees still being swept', edits: [['[...new Set([...this.sessions.values(), ...this.closingTrees])]', '[...this.sessions.values()]']],
     killer: 'quitKill', dies: /QUIT TAKES OVER A PENDING CLOSE/ },
   { name: 'M5 closePty closes every time it is reached', edits: [['    if (s.ptyClosed) return;\n', '']],
     killer: 'quitOwner', dies: /NO DOUBLE CLOSE/ },
-  { name: "M6 closeTree never closes the ConPTY (Jim's X1): must fail, not hang", edits: [[': undefined)).then(close, close);', ': undefined)).then(() => {}, () => {});']],
+  // Keep the sweep's bookkeeping settled: this mutant models precisely a missing
+  // ConPTY close, not an unrelated stuck `closingTrees` entry that makes the
+  // test's later cleanup race its wall-clock descendant check under suite load.
+  { name: "M6 closeTree never closes the ConPTY (Jim's X1): must fail, not hang", edits: [['const close = (): void => { this.closingTrees.delete(s); this.closePty(s); this.dropHold(s); };', 'const close = (): void => { this.closingTrees.delete(s); this.dropHold(s); };']],
     killer: 'kill', dies: /KILL CLOSES THE CONPTY ONCE/ },
-  { name: "X9 a settled close stays in closingTrees (Jim's X9)", edits: [['const close = (): void => { this.closingTrees.delete(s); this.closePty(s); };', 'const close = (): void => { this.closePty(s); };']],
+  { name: "X9 a settled close stays in closingTrees (Jim's X9)", edits: [['const close = (): void => { this.closingTrees.delete(s); this.closePty(s); this.dropHold(s); };', 'const close = (): void => { this.closePty(s); this.dropHold(s); };']],
     killer: 'kill', dies: /A SETTLED CLOSE LEAVES closingTrees/ },
-  { name: "X9 under killByOwner()", edits: [['const close = (): void => { this.closingTrees.delete(s); this.closePty(s); };', 'const close = (): void => { this.closePty(s); };']],
+  { name: "X9 under killByOwner()", edits: [['const close = (): void => { this.closingTrees.delete(s); this.closePty(s); this.dropHold(s); };', 'const close = (): void => { this.closePty(s); this.dropHold(s); };']],
     killer: 'owner', dies: /A SETTLED CLOSE LEAVES closingTrees/ },
 ];
 

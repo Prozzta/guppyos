@@ -1,5 +1,5 @@
 import './packThemes'; // theme packs join the project-theme catalogue before any config is read
-import { app, BrowserWindow, clipboard, crashReporter, dialog, globalShortcut, ipcMain, Menu, powerMonitor, powerSaveBlocker, safeStorage, screen, session, shell, Notification, Tray, utilityProcess } from 'electron';
+import { app, BrowserWindow, clipboard, crashReporter, dialog, globalShortcut, ipcMain, Menu, powerMonitor, powerSaveBlocker, safeStorage, screen, session, shell, Notification, Tray, utilityProcess, nativeImage } from 'electron';
 import { runQuitSteps, type QuitReport } from './quitTeardown';
 import { copyClipboardText, readClipboardPng, readClipboardText } from './clipboard';
 import { NativeMemoryWiring, toUnpacked } from './nativeMemory/mainWiring';
@@ -70,6 +70,9 @@ import { resolveCommandAsync, invalidateCommandCache } from './commandResolver';
 import { daemonExecutable, headlessSpawnRefusal, missingCliAction, npmRungDecision, toolRowStatus } from './cliLookupPolicy';
 import { initAutoUpdater, abortPendingRestart } from './updater';
 import { RealtimeFloorWatcher } from './realtimeFloorWatcher';
+import { BlobFaceRenderer, blobatarSvg } from './blobFaceRenderer';
+import { OrchestratorMood, countOpenAsks, newlyDone } from './blobMood';
+import { BLOB_SAVE_SIZE, BLOB_TOAST_SIZE, BLOB_TRAY_SIZES, currentFace, toastFace, trayFace, trayTip, type BlobFace, type BlobSaveImageResult, type BlobToastKind } from '../shared/blobFace';
 import { BlobOverlayController, isAppWindowSender, registerBlobIpc, type BlobWindowLike, type Rect as BlobRect } from './blobOverlay';
 import { DictationController } from './dictation';
 import { GroqSttProvider } from './stt';
@@ -192,7 +195,8 @@ import { RosterStore } from './roster';
 import { buildWorkerLaunch } from './workerLaunch';
 import { ControlRegistry } from './control';
 import { WORKER_WAKE_HITL_REARM_MS, WorkerWakeWatchdog, type WakeClaim } from './workerWake';
-import { OwedContinuation, type OwedSent } from './owedContinuation';
+import { OwedContinuation, type OwedSent, type OwedSuppressFacts } from './owedContinuation';
+import { OwedStopContinue } from './owedStop';
 import { floorHoldWords, parseFloorHold } from './floorHold';
 import { owesWork } from './mailLedger';
 import { HeldInterferenceWatch, HELD_TICK_MS, heldWakesOf } from './heldInterference';
@@ -234,6 +238,7 @@ import {
 import { buildMissingCliScript, chooseInstallRung } from './cliInstall';
 import { detectNodeVersion, nodeIsUsable, resolveNodeInstaller } from './nodeInstall';
 import { toolCatalog, type ToolStatus } from '../shared/toolCatalog';
+import { BLOB_GAZE_DEAD } from '../shared/blob';
 import { buildPrereqStatus, hostBuildProbeDeps } from './buildPrereqs';
 import { listLocalSkills, loadCatalog, installSkill, uninstallSkill, type LocalSkill } from './skills';
 import { loadHero } from './hero';
@@ -708,6 +713,8 @@ const breaker = new CircuitBreaker(() => {
 // heartbeat mission is disabled (it ships off).
 let fleetTimer: ReturnType<typeof setInterval> | null = null;
 let breakerBeatTimer: ReturnType<typeof setInterval> | null = null;
+/** BLOB-ORCH-MOOD: the 5 s mood beat (armAlwaysOnBeats). */
+let moodTimer: ReturnType<typeof setInterval> | null = null;
 let staleRequestsTimer: ReturnType<typeof setInterval> | null = null;
 // Feed the breaker's api_error-storm trip from Oscar's OTel api_error spans —
 // Jim's one breaker input with no on-branch source (telemetry.onApiError seam).
@@ -1620,7 +1627,9 @@ const claimsDerive: DeriveFn | null = deriveClaims;
 // of the 10x derived ledger was one 0.6 s block on main). Main keeps the MAC verify and the single writer; any worker
 // failure falls back to the in-process derive (DeriveOffMain).
 const claimsDeriveOffMain = new DeriveOffMain({
-  spawn: () => new ThreadWorker(join(__dirname, 'claimsDeriveWorker.js')) as unknown as DeriveWorkerLike,
+  // CLAIMS-WARM-BACKFILL-106 (Jim's NIT on A19): no inherited execArgv. Under --inspect-brk a worker would wait for a
+  // debugger, time out and fall back without a word; the derive needs no node flag.
+  spawn: () => new ThreadWorker(join(__dirname, 'claimsDeriveWorker.js'), { execArgv: [] }) as unknown as DeriveWorkerLike,
   log: (row) => hive.appendLog(row),
 });
 /** A19: one derive-worker job for `read` when it is the store's kept verified read; null: derive in-process. */
@@ -1646,19 +1655,18 @@ function claimsIndexSync(): ClaimsIndexSync | null {
       agents: claimLedgerAgents,
       send: (args) => claimsImportReady().then(() => nativeMemory.syncClaims(args)),
       offMain: (agentId, read) => claimsDeriveJob('chunks', agentId, read).then((r) => (r ? { head: r.head ?? '', chunksJson: r.out, count: r.count ?? 0 } : null)),
+      offMainEnabled: () => claimsDeriveOffMain.enabled,
       onIndexed: (agentId) => { const root = hive.root(); if (!root) return; try { refreshReconcileQueueForHive(root, agentId, reconcileHiveDeps()); } catch (e) { hive.appendLog({ kind: 'claims-reconcile-refresh-failed', agentId, error: String(e).slice(0, 160) }); } },
       log: (row) => hive.appendLog(row),
     });
   }
   return claimsIndex;
 }
-/** Agents with a segment, plus every anchored one (Jim A-2: a deleted ledger is read, so it alerts). */
+/** Agents with a segment, plus every anchored one (Jim A-2: a deleted ledger is read, so it alerts).
+ *  LAG-MAIN-SYNC-FIXES item 3: one census shared by every consumer (ClaimStore.ledgerAgents). */
 function claimLedgerAgents(): string[] {
   const root = hive.root(); if (!root) return [];
-  const store = (claimsEndpoint() as ClaimsEndpointDeps).store;
-  let withSegments: string[] = [];
-  try { withSegments = readdirSync(join(root, 'agents')).filter((a) => store.segments(a).length > 0); } catch { /* no agents */ }
-  return [...new Set([...withSegments, ...store.anchoredAgents()])];
+  return (claimsEndpoint() as ClaimsEndpointDeps).store.ledgerAgents();
 }
 // CLAIMS-90 M5: the derived claim writer (source 'derived', the reserved derived ledger). Started
 // with the claim store; config derivedClaims (absent = on), derivedClaimsRepo (git, optional).
@@ -2368,6 +2376,7 @@ hookServer.setStopContinue({
   stopClaim: (agentId) => wakeSender?.stopClaim(agentId) ?? null,
   stopSettle: (agentId, requestId, blocked, chars) => wakeSender?.stopSettle(agentId, requestId, blocked, chars)
 });
+hookServer.setOwedStop({ decide: (agentId, provider, segmentTools) => decideOwedStop(agentId, provider, segmentTools) });
 hookServer.setTurnObserver((agentId, event, f) => {
   messageBox?.noteHook(agentId, event, f);
   try { wakeSender?.noteHook(agentId, event, f); } catch { /* never breaks a hook */ }
@@ -2515,6 +2524,12 @@ function createBlobOverlayWindow(bounds: BlobRect, onGone: (reason: string) => v
   // Not covered by watchWindowHealth (app windows only): a dead overlay renderer is destroyed and
   // re-created once by the controller, never left as an inert always-on-top box.
   w.webContents.on('render-process-gone', (_e, details) => { try { onGone(details.reason); } catch { /* best-effort */ } });
+  // BLOB-GAZE diagnostic: the overlay warns once when the driver runs but blobatar never moves the eyes
+  // (its measure failed); that one line lands in the app log. Nothing else from its console is kept.
+  (w.webContents as unknown as { on(ev: 'console-message', fn: (e: { message?: unknown }) => void): void }).on('console-message', (e) => {
+    const m = typeof e?.message === 'string' ? e.message : '';
+    if (m.startsWith(BLOB_GAZE_DEAD)) { try { hive.appendLog({ kind: 'blob-gaze-dead', detail: m.slice(BLOB_GAZE_DEAD.length, BLOB_GAZE_DEAD.length + 200).trim() }); } catch { /* best-effort */ } }
+  });
   w.once('ready-to-show', () => {
     if (DEV_HIDDEN || w.isDestroyed()) return;   // a hidden (harness) run never surfaces it (the controller never builds it there either)
     w.showInactive();
@@ -2534,7 +2549,14 @@ const blobOverlay: BlobOverlayController = new BlobOverlayController({
   cursor: () => screen.getCursorScreenPoint(),
   hidden: DEV_HIDDEN,
   log: (row) => { try { hive.appendLog(row); } catch { /* best-effort */ } },
-  onApplied: (s) => { dictation.apply(s.enabled && s.dictation); }   // only from apply(), after module init
+  onApplied: (s) => { dictation.apply(s.enabled && s.dictation); refreshTrayFace(); },   // only from apply(), after module init
+  onInvisible: () => refreshTrayFace(),
+  // BLOB-GAZE: the helper reports the focused field in physical pixels; the overlay works in DIPs.
+  focusPoint: () => {
+    const f = dictation.focusPoint();
+    if (!f) return null;
+    return process.platform === 'win32' ? screen.screenToDipPoint({ x: f.x, y: f.y }) : { x: f.x, y: f.y };
+  }
 });
 registerBlobIpc(ipcMain as unknown as Parameters<typeof registerBlobIpc>[0], blobOverlay, (evt) => ledgerUiSender(evt as unknown as Electron.IpcMainInvokeEvent));
 
@@ -2566,8 +2588,8 @@ const dictation: DictationController = new DictationController({
     cancel: (session) => { sendDictationCapture({ op: 'cancel', session }); }
   },
   supported: process.platform === 'win32' && !DEV_HIDDEN,
-  publish: (s) => blobOverlay.setDictationStatus(s),
-  notify: (body) => { if (DEV_HIDDEN) return; try { if (Notification.isSupported()) new Notification({ title: 'Blob dictation', body, silent: true }).show(); } catch { /* best-effort */ } },
+  publish: (s) => { blobOverlay.setDictationStatus(s); refreshTrayFace(); },
+  notify: (body) => { if (DEV_HIDDEN) return; try { if (Notification.isSupported()) new Notification({ title: 'Blob dictation', body, silent: true, ...blobToastIconOpt('info') }).show(); } catch { /* best-effort */ } },
   log: (row) => { try { hive.appendLog(row); } catch { /* best-effort */ } },
   now: () => Date.now(),
   timers: { set: (fn, ms) => setTimeout(fn, ms), clear: (h) => clearTimeout(h as ReturnType<typeof setTimeout>) }
@@ -2609,6 +2631,112 @@ const trayMode = new TrayModeController({
   // Route through Electron so a tray quit gets the same live-PTY warning as
   // every other quit path (including the updater's quitAndInstall()).
   quit: () => app.quit()
+});
+
+/** BLOB-ORCH-MOOD + BLOB-TRAY-TOASTS: one orchestrator mood (blobMood.ts) feeds the overlay
+ *  (setMood), the tray icon and the toasts. Faces are rendered to PNG once, lazily after startup
+ *  (armAlwaysOnBeats), in a hidden sandboxed window that blobFaceRenderer destroys in finally. */
+const blobFaces = new BlobFaceRenderer({
+  svgFor: blobatarSvg,
+  createWindow: () => {
+    // Its own in-memory session (no 'persist:'), and nothing but data:/about: is ever fetched.
+    const ses = session.fromPartition('blob-face-render');
+    ses.webRequest.onBeforeRequest((d, cb) => cb({ cancel: !/^(data|about):/i.test(d.url) }));
+    const w = new BrowserWindow({
+      show: false, width: 64, height: 64, skipTaskbar: true, focusable: false,
+      webPreferences: { session: ses, sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true, spellcheck: false, backgroundThrottling: false }
+    });
+    return {
+      loadURL: (u) => w.webContents.loadURL(u),
+      executeJavaScript: (code) => w.webContents.executeJavaScript(code, true),
+      destroy: () => w.destroy(),
+      isDestroyed: () => w.isDestroyed()
+    };
+  },
+  log: (row) => { try { hive.appendLog(row); } catch { /* best-effort */ } }
+});
+let blobFacesTimer: ReturnType<typeof setTimeout> | null = null;
+const trayFaceImages = new Map<BlobFace, Electron.NativeImage>();
+/** A face as a NativeImage with one representation per DPI scale (16 px = 1x). */
+function blobFaceImage(face: BlobFace): Electron.NativeImage | null {
+  const cached = trayFaceImages.get(face);
+  if (cached) return cached;
+  if (!blobFaces.ready()) return null;
+  const img = nativeImage.createEmpty();
+  for (const size of BLOB_TRAY_SIZES) {
+    const dataURL = blobFaces.png(face, size);
+    if (dataURL) img.addRepresentation({ scaleFactor: size / BLOB_TRAY_SIZES[0], dataURL });
+  }
+  if (img.isEmpty()) return null;
+  trayFaceImages.set(face, img);
+  return img;
+}
+function refreshTrayFace(): void {
+  if (process.platform !== 'win32') return;
+  const st = blobOverlay.status();
+  trayMode.setTip(trayTip(st.invisible));
+  if (!blobFaces.ready()) return;
+  const img = blobFaceImage(trayFace(orchestratorMood.mood(), st.dictationStatus?.state));
+  if (img) trayMode.setFace(img);
+}
+/** A toast's Blob face (done = happy, error = sad, else the mood), or nothing before the render. */
+function blobToastIcon(kind: BlobToastKind): Electron.NativeImage | undefined {
+  const url = blobFaces.png(toastFace(kind, orchestratorMood.mood()), BLOB_TOAST_SIZE);
+  return url ? nativeImage.createFromDataURL(url) : undefined;
+}
+function blobToastIconOpt(kind: BlobToastKind): { icon?: Electron.NativeImage } {
+  const icon = blobToastIcon(kind);
+  return icon ? { icon } : {};
+}
+let moodDone: Set<string> | null = null;
+let moodAsks = 0;
+let moodBeats = 0;
+const orchestratorMood = new OrchestratorMood({
+  now: () => Date.now(),
+  read: () => {
+    const reg = hive.registry();
+    const rec = reg.godId ? agentLiveness.getLiveness(reg.godId) : undefined;
+    return {
+      god: rec ? { classification: rec.classification, classifiedSince: rec.classifiedSince, reason: rec.reason, lifecycle: rec.lifecycle } : null,
+      breakerLevels: Object.keys(reg.agents).map((id) => breaker.levelFor(id)),
+      openAsks: moodAsks
+    };
+  },
+  log: (row) => { try { hive.appendLog(row); } catch { /* best-effort */ } }
+});
+orchestratorMood.onChange((m) => { blobOverlay.setMood(m); refreshTrayFace(); });
+agentLiveness.onLivenessChange((rec) => { try { if (rec.agentId === hive.registry().godId) orchestratorMood.tick(); } catch { /* next beat */ } });
+hookServer.toastIcon = (kind) => blobToastIcon(kind);
+/** Every 5 s: god's liveness and the breaker (in memory); every 15 s also the cards (asks, new dones). */
+function runMoodBeat(): void {
+  if (moodBeats++ % 3 === 0) {
+    try {
+      const tasks = hive.allTasks().tasks;
+      const { done, fresh } = newlyDone(moodDone, tasks);
+      moodDone = done;
+      moodAsks = countOpenAsks(tasks);
+      if (fresh > 0) orchestratorMood.noteCardDone();
+    } catch (e) { try { hive.appendLog({ kind: 'blob-mood-cards-failed', error: e instanceof Error ? e.message : String(e) }); } catch { /* best-effort */ } }
+  }
+  orchestratorMood.tick();
+  refreshTrayFace();
+}
+ipcMain.handle('blob:save-image', async (evt): Promise<BlobSaveImageResult> => {
+  if (!ledgerUiSender(evt)) return { ok: false, error: 'refused: not from the app window' };
+  if (DEV_HIDDEN) return { ok: false, canceled: true };   // MUNDER_HIDDEN: no dialog
+  if (!blobFaces.ready() && !(await blobFaces.render())) return { ok: false, error: 'The Blob faces are not rendered yet.' };
+  const st = blobOverlay.status();
+  const face = currentFace(orchestratorMood.mood(), st.dictationStatus?.state);
+  const url = blobFaces.png(face, BLOB_SAVE_SIZE);
+  if (!url) return { ok: false, error: 'The Blob faces are not rendered yet.' };
+  const owner = BrowserWindow.fromWebContents(evt.sender);
+  const opts: Electron.SaveDialogOptions = { title: 'Save Blob image', defaultPath: join(app.getPath('pictures'), `blob-${orchestratorMood.mood()}.png`), filters: [{ name: 'PNG image', extensions: ['png'] }] };
+  const pick = owner ? await dialog.showSaveDialog(owner, opts) : await dialog.showSaveDialog(opts);
+  if (pick.canceled || !pick.filePath) return { ok: false, canceled: true };
+  try {
+    await fsModule.promises.writeFile(pick.filePath, Buffer.from(url.slice(url.indexOf(',') + 1), 'base64'));
+    return { ok: true, path: pick.filePath };
+  } catch (e) { return { ok: false, error: e instanceof Error ? e.message : String(e) }; }
 });
 
 /** Agents spawned with `isolate: true` get a dedicated git worktree; this maps
@@ -3553,7 +3681,7 @@ function capacityToast(toast: CapacityToast | null): NoticeDelivery {
     // MUNDER_HIDDEN (dev only): a hidden run never puts a toast on the desktop.
     notificationsOn: () => !DEV_HIDDEN && readConfig().notifications === true,
     supported: () => Notification.isSupported(),
-    show: (t) => { if (DEV_HIDDEN) return; new Notification({ title: t.title, body: t.body }).show(); }
+    show: (t) => { if (DEV_HIDDEN) return; new Notification({ title: t.title, body: t.body, ...blobToastIconOpt('info') }).show(); }
   });
 }
 
@@ -3659,7 +3787,7 @@ function pushAgentImpact(): void {
 /** A native toast for breaker constrain/stop, gated on the notifications setting. */
 function breakerToast(title: string, body: string): void {
   if (DEV_HIDDEN || !readConfig().notifications) return;   // MUNDER_HIDDEN: no toast
-  try { if (Notification.isSupported()) new Notification({ title, body }).show(); }
+  try { if (Notification.isSupported()) new Notification({ title, body, ...blobToastIconOpt('error') }).show(); }
   catch { /* unsupported platform */ }
 }
 
@@ -6486,9 +6614,10 @@ ipcMain.handle('liveness:reoffer', (_evt, agentId: unknown) => {
   return ok;
 });
 // MIRROR-STARTUP-196: a mirror auto-off is a notice on the floor while it lasts.
-ipcMain.handle('hive:integrity', () => {
+ipcMain.handle('hive:integrity', async () => {
   const off = mirrorGuard?.status() ?? null;
-  return off ? [...hive.integrityIssues(), mirrorOffNotice(off, Date.now())] : hive.integrityIssues();
+  const issues = await hive.integrityIssuesAsync();
+  return off ? [...issues, mirrorOffNotice(off, Date.now())] : issues;
 });
 ipcMain.handle('config:integrity', () => configIntegrityIssue());
 ipcMain.handle('hive:renameAgent', (_evt, id: unknown, name: unknown) => {
@@ -7994,7 +8123,7 @@ const completionWatcher = initCompletionWatcher({
     }
   },
   // MUNDER_HIDDEN (dev only): no toast from a hidden run.
-  onNotify: (evt) => { try { if (!DEV_HIDDEN && Notification.isSupported()) new Notification({ title: resolveGodNameFromRegistry(hive.registry()), body: evt.summary }).show(); } catch { /* best-effort */ } }
+  onNotify: (evt) => { try { if (!DEV_HIDDEN && Notification.isSupported()) new Notification({ title: resolveGodNameFromRegistry(hive.registry()), body: evt.summary, ...blobToastIconOpt('info') }).show(); } catch { /* best-effort */ } }
 });
 
 registerRealtimeActionIpc({
@@ -8723,39 +8852,70 @@ let heldInterferenceTimer: ReturnType<typeof setInterval> | null = null;
  *  reconcile on the same beat. Its mail goes through hive.send + wake:'now', so the claim path's
  *  own guards still apply on top of the watcher's suppressors. */
 const owedContinuation = new OwedContinuation(Date.now(), () => hive.registry().godId ?? null);
+/** Messages each of `from` sent, as the recipients' ledgers record them. */
+function owedSentBy(from: string[]): Map<string, OwedSent[]> {
+  const sent = new Map<string, OwedSent[]>();
+  for (const owner of Object.keys(hive.registry().agents ?? {})) {
+    for (const e of Object.values(hive.mail.ledger(owner).entries)) {
+      if (!from.includes(e.from)) continue;
+      const list = sent.get(e.from) ?? [];
+      list.push({ id: e.id, to: owner, act: e.act, at: e.deliveredAt, open: owesWork(e) });
+      sent.set(e.from, list);
+    }
+  }
+  return sent;
+}
+/** The legitimate-wait facts both owed watchers read (owedSuppressor), for one agent. */
+function owedWaitFacts(agentId: string, now: number, sent: OwedSent[]): Omit<OwedSuppressFacts, 'now' | 'entries'> & { pendingMail: number } {
+  const snap = control.snapshot(agentId);
+  const lf = workerWake.livenessFacts(agentId);
+  const q = heavyLock.queueSnapshot();
+  return {
+    pendingMail: mailPendingIds(agentId).length,
+    paused: snap.paused,
+    halted: snap.halted,
+    autoDeliveryPaused: snap.autoDeliveryPaused,
+    hitl: lf.lastHumanNeedsAt > 0 && now - lf.lastHumanNeedsAt < WORKER_WAKE_HITL_REARM_MS,
+    heavyQueued: q.waiters.some((w) => w.agentId === agentId) || q.reserved.some((r) => r.agentId === agentId),
+    heavyHolder: heavyLock.snapshot().some((h) => h.agentId === agentId),
+    floorHeld: parseFloorHold(readConfig().floorHold) !== null,
+    sent
+  };
+}
+/** CODEX-TURN-ENDS-EARLY P1: the owed-work Stop-continue (owedStop.ts), inside the agent's own Stop. */
+const owedStopContinue = new OwedStopContinue(Date.now());
+function decideOwedStop(agentId: string, provider: string | undefined, segmentTools: number): string | null {
+  const now = Date.now();
+  const d = owedStopContinue.decide(agentId, provider, readConfig().owedStopContinue, segmentTools, now,
+    Object.values(hive.mail.ledger(agentId).entries), () => {
+      const ptyId = ptyForAgent(agentId);
+      const s = ptyId ? ptyManager.promptState(ptyId) : undefined;
+      return {
+        ...owedWaitFacts(agentId, now, owedSentBy([agentId]).get(agentId) ?? []),
+        pty: !!ptyId,
+        inhibited: !!ptyId && automaticSubmit.inhibition(ptyId) !== null,
+        ...(s?.block ? { promptBlock: s.block } : {}),
+        ...(ptyId && ptyManager.lastHumanInputAt(ptyId) !== undefined ? { lastHumanInputAt: ptyManager.lastHumanInputAt(ptyId) } : {})
+      };
+    });
+  if (d.row) { try { hive.appendLog(d.row); } catch { /* logging only */ } }
+  return d.reason;
+}
 function runOwedContinuation(live: string[]): void {
   try {
     const now = Date.now();
-    const sent = new Map<string, OwedSent[]>();
-    for (const owner of Object.keys(hive.registry().agents ?? {})) {
-      for (const e of Object.values(hive.mail.ledger(owner).entries)) {
-        if (!live.includes(e.from)) continue;
-        const list = sent.get(e.from) ?? [];
-        list.push({ id: e.id, to: owner, act: e.act, at: e.deliveredAt, open: owesWork(e) });
-        sent.set(e.from, list);
-      }
-    }
-    const q = heavyLock.queueSnapshot();
-    const holders = heavyLock.snapshot();
-    const floorHeld = parseFloorHold(readConfig().floorHold) !== null;
+    const sent = owedSentBy(live);
     for (const agentId of live) {
-      const snap = control.snapshot(agentId);
       const lf = workerWake.livenessFacts(agentId);
       const d = owedContinuation.tick(agentId, {
         now,
         lifecycle: lf.lifecycle,
         lastTurnEndAt: lf.lastTurnEndAt,
         inFlight: !!workerWake.state(agentId).inFlight,
-        pendingMail: mailPendingIds(agentId).length,
-        paused: snap.paused,
-        halted: snap.halted,
-        autoDeliveryPaused: snap.autoDeliveryPaused,
-        hitl: lf.lastHumanNeedsAt > 0 && now - lf.lastHumanNeedsAt < WORKER_WAKE_HITL_REARM_MS,
-        heavyQueued: q.waiters.some((w) => w.agentId === agentId) || q.reserved.some((r) => r.agentId === agentId),
-        heavyHolder: holders.some((h) => h.agentId === agentId),
-        floorHeld,
+        ...owedWaitFacts(agentId, now, sent.get(agentId) ?? []),
         entries: Object.values(hive.mail.ledger(agentId).entries),
-        sent: sent.get(agentId) ?? []
+        provider: hookServer.mailChannel(agentId).provider ?? null,
+        toolCalls: hookServer.toolCallCount(agentId)
       });
       for (const row of d.rows) { try { hive.appendLog(row); } catch { /* logging only */ } }
       if (d.nudge) { try { hive.send(d.nudge.message as Partial<HiveMessage>, 'system'); } catch { /* best effort */ } }
@@ -8819,6 +8979,12 @@ function armAlwaysOnBeats(): void {
   if (fleetTimer) clearInterval(fleetTimer);
   writeFleetSnapshot();
   fleetTimer = setInterval(writeFleetSnapshot, 8_000);
+  if (moodTimer) clearInterval(moodTimer);
+  moodTimer = setInterval(runMoodBeat, 5_000);
+  if (!blobFacesTimer) {
+    blobFacesTimer = setTimeout(() => { void blobFaces.render().then((ok) => { if (ok) { trayFaceImages.clear(); refreshTrayFace(); } }); }, 10_000);
+    (blobFacesTimer as { unref?: () => void }).unref?.();
+  }
   if (breakerBeatTimer) clearInterval(breakerBeatTimer);
   breakerBeatTimer = setInterval(() => { try { runBreakerBeat(300_000); } catch (e) { console.error('[breaker beat]', e); } }, 30_000);
   // REQUESTS-TAB-STALE (1.1.83): close the requests whose work is provably finished. Data only.
@@ -8952,6 +9118,12 @@ app.whenReady().then(() => {
     }).then((ok) => app.exit(ok ? 0 : 1), () => app.exit(1));
     return;
   }
+  // RESTORE-ORPHAN-FLAG (2026-11-15): a Stable instance that lost the single-instance lock is
+  // quitting (app.quit() above is asynchronous), but this callback still ran its whole bootstrap:
+  // it logged app-start and ran archiveOrphanedAgents, and since THIS process owns no PTY it
+  // archived the running instance's live team as 'orphan' (log.jsonl 20:56:38Z, no spawn after,
+  // so nothing cleared it). The lock owner's hive is not ours to touch: do nothing here.
+  if (!gotInstanceLock) return;
   // MUNDER_DEV=1 — second, LIVE isolation check. The bootstrap above checked the
   // paths we intended to use; this checks the paths the app actually resolved
   // (config clamp, hive root, palace, pipe) now that config/hive are wired. A
@@ -9353,7 +9525,11 @@ app.on('before-quit', (e) => {
 // The last chance to flush a coalesced capacity write. `before-quit` can be
 // preventDefault-ed by the running-terminals warning above, so the flush hangs off
 // `will-quit`, which only fires once the quit is actually going ahead.
+// RESTORE-ORPHAN-FLAG (Jim nit): a process that lost the single-instance lock never bootstrapped
+// (whenReady returns early); its capacity snapshot, AGY lease and quit sweep belong to the live
+// instance, so it writes none of them. (Comment kept outside: blob-overlay pins an 80-char window.)
 app.on('will-quit', () => {
+  if (!gotInstanceLock) return;
   trayMode.dispose();
   try { blobOverlay.dispose(); } catch (e) { console.error('[quit] blobOverlay.dispose:', e); }
   try { dictation.dispose(); } catch (e) { console.error('[quit] dictation.dispose:', e); }   // kills the helper: no hook left behind
@@ -9395,6 +9571,9 @@ app.on('window-all-closed', () => {
 // exactly what's left to do.
 let analyticsFlushed = false;
 app.on('will-quit', (e) => {
+  // RESTORE-ORPHAN-FLAG (Jim nit): no quit-done row, key-registry flush or capacity settle into the
+  // live instance's hive from a process that lost the lock; its quit goes ahead untouched.
+  if (!gotInstanceLock) return;
   if (analyticsFlushed) return;
   analyticsFlushed = true;
   e.preventDefault();

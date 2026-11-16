@@ -11,6 +11,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
+const { threadCpuMs } = require('./tools/thread-cpu.cjs');
 
 const JAIL = fs.mkdtempSync(path.join(os.tmpdir(), 'md-scale-mail-'));
 const prior = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE, CODEX_HOME: process.env.CODEX_HOME, GEMINI_CLI_HOME: process.env.GEMINI_CLI_HOME };
@@ -303,10 +304,20 @@ test('sliced: the runner hands main back once the 8 ms budget is spent, and a co
   assert.ok(rec.pauses >= 8, `the sort pauses inside each pass, not only between passes (${rec.pauses})`);
   // Measured: a cold run over 3000 real files.
   const { hive } = await bigFloor(t, 3000);
-  const real = recorder({ pause: undefined });
-  delete real.deps.pause;
+  // SUITE-LOAD-FLAKES-1027: a slice is the synchronous stretch between two hand-backs, so its cost
+  // is this thread's CPU time across it. The runner keeps its own wall clock for the budget; the test
+  // times each slice itself, from the moment a pause or an op hands control back to the moment the
+  // runner ends the slice. Wall time also counted the wait for a core (86.5 ms in a full run).
+  let mark = 0;
+  const cpu = [];
+  const real = recorder({
+    pause: () => new Promise((res) => setImmediate(() => { mark = threadCpuMs(); res(); })),
+    runOp: async (op) => { const v = await MS.runMailOpAsync(op); mark = threadCpuMs(); return v; },
+    onSlice: () => cpu.push(threadCpuMs() - mark),
+  });
   await hive.voiceMessagesAsync({ limit: 40 }, real.deps);
-  assert.ok(Math.max(...real.slices) < 50, `worst slice ${Math.max(...real.slices).toFixed(1)} ms`);
+  assert.ok(cpu.length > 1, `the cold call ran in slices (${cpu.length})`);
+  assert.ok(Math.max(...cpu) < 50, `worst slice ${Math.max(...cpu).toFixed(1)} ms of CPU`);
 });
 
 test('sliced: identical concurrent calls share one run; the order an incremental listing derives equals a fresh sort', async (t) => {

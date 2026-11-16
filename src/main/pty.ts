@@ -9,6 +9,7 @@ import type { WebContents } from 'electron';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { delimiter, join, win32 } from 'node:path';
 import { ensureKilled, isAlive, killTreesAsync } from './procKill';
+import { holdRoot, pidIdentity, rootHandoff, type PidIdentity, type RootHold } from './procIdentity';
 import { expandTilde } from './fs';
 import { buildPtyEnv } from './ptyEnv';
 import { createPtyDataBatcher, type PtyDataBatcher } from './ptyDataBatcher';
@@ -107,6 +108,13 @@ interface PtySession {
   explicitTeardown?: boolean;
   /** AGY-TEARDOWN r2: the ConPTY was closed (closePty), so a second close is a no-op. */
   ptyClosed?: boolean;
+  /** PTY-KILL-PID-IDENTITY (Windows): our own handle to the root, opened in the spawn's turn. While
+   *  it is open the root's pid cannot go to another process. Null: nothing to hold with. */
+  hold?: RootHold | null;
+  /** How many kills (closeTree, killAllAsync) may still name the pid: the hold outlives them all. */
+  holdUsers?: number;
+  /** PTY-KILL-PID-IDENTITY (POSIX): the root's start stamp, taken in the spawn's turn. */
+  rootId?: PidIdentity;
   /** GOD-TERMINAL-CONTROL M1: this incarnation's headless screen (terminalMirror.ts), fed every
    *  accepted chunk. Absent when the mirror is off or could not be made. Dies with the session. */
   mirror?: TerminalMirror;
@@ -151,7 +159,72 @@ interface WindowsTerminalInternals {
   _isReady?: boolean;
   _deferreds?: unknown[];
   _close?: () => void;
-  _agent?: { kill?: () => void };
+  _agent?: { kill?: () => void; exitCode?: number; _conoutSocketWorker?: ConoutConnectionInternals };
+  /** The agent's outSocket (net.Socket); `_handle` stays null until its connect() runs. */
+  _socket?: { readable: boolean; _handle?: unknown; destroy?: () => void };
+  /** Terminal events ride on the socket; 'exit' is what onExit listens to. */
+  emit?: (event: string, ...args: unknown[]) => unknown;
+}
+
+/** node-pty 1.1.0 ConoutConnection: the worker thread that serves the data pipe, and the connect its READY runs. */
+interface ConoutConnectionInternals {
+  connectSocket?: (socket: unknown) => void;
+  _worker?: { terminate?: () => Promise<number> };
+}
+
+/** Said once: guardLateReady met a node-pty it does not fit. */
+let lateReadyGuardMissingSaid = false;
+
+/**
+ * PTY-LATE-READY-ENOENT. After an early close the data socket is still unconnected, and node-pty's
+ * `_agent.kill()` has started the conout worker's 1 s flush timer, which TERMINATES the worker: the
+ * only server of the pipe the socket would connect to. node-pty connects whenever the worker's READY
+ * is handled, with no look at that. A READY handled after the terminate (the main thread was busy
+ * for that second: both are then due in the same turn) connects to a pipe that no longer exists, and
+ * the socket has no error listener yet (node-pty adds its own on 'ready_datapipe'), so the
+ * 'connect ENOENT' is thrown outside any caller. And a worker terminated before the pipe came up,
+ * READY or not, leaves a terminal that never reports its exit: node-pty reports it from the pipe's
+ * close.
+ *
+ * So, for a terminal closed early with its connect still to come, the terminate is where the pipe's
+ * fate is known. If the socket has not started its connect by then, it never will: a later READY
+ * connects nothing, the socket is destroyed, and the exit node-pty would have reported from the
+ * pipe's close is reported here, once. A socket that did start its connect is left to node-pty
+ * (Windows completes a pipe connect inside the call, so that one reaches the still-listening worker).
+ * No error is caught or handled anywhere: the connect that would fail is not made.
+ */
+function guardLateReady(t: WindowsTerminalInternals): void {
+  const sock = t._socket;
+  const conn = t._agent?._conoutSocketWorker;
+  const worker = conn?._worker;
+  if (!sock || !conn || !worker || typeof conn.connectSocket !== 'function' || typeof worker.terminate !== 'function'
+    || typeof sock.destroy !== 'function' || typeof t.emit !== 'function') {
+    // Another node-pty: the pin test fails. Here the terminal is left as it was before this guard.
+    if (!lateReadyGuardMissingSaid) {
+      lateReadyGuardMissingSaid = true;
+      console.warn('[pty] late-READY guard not installed: this node-pty lacks the conout internals it gates; an early-killed terminal may throw connect ENOENT or report no exit');
+    }
+    return;
+  }
+  const connect = conn.connectSocket.bind(conn);
+  const terminate = worker.terminate.bind(worker);
+  // Whether the connect was started is remembered here, not read from the socket: a pipe that
+  // connected, drained and closed has no handle again by the time its worker is terminated.
+  let connectStarted = false;
+  let pipeGone = false;
+  conn.connectSocket = (socket: unknown): void => {
+    if (pipeGone) return;
+    connectStarted = true;
+    connect(socket);
+  };
+  worker.terminate = (): Promise<number> => {
+    if (!pipeGone && !connectStarted) {
+      pipeGone = true;
+      sock.destroy!();
+      t.emit!('exit', t._agent?.exitCode);
+    }
+    return terminate();
+  };
 }
 
 /**
@@ -167,6 +240,15 @@ interface WindowsTerminalInternals {
  * resizes for a terminal that is going away). Once ready, kill() is node-pty's own, unchanged. A
  * signal argument keeps node-pty's behaviour (it throws on Windows). Windows only; a terminal that
  * lacks these internals (another node-pty version) is left untouched, and the pin test fails.
+ *
+ * PTY-EARLY-CLOSE-EOF: both `_close()` and `_agent.kill()` set the data socket `readable = false`.
+ * node-pty's own kill only runs after the data pipe connected; this early one can run BEFORE the
+ * conout worker's READY, while the socket has no handle yet. Node's connect() then runs
+ * `_undestroy()`, which marks a `readable === false` stream ENDED, so the first start-up chunk is
+ * ERR_STREAM_PUSH_AFTER_EOF and node-pty's socket error handler rethrows it (uncaught, outside any
+ * caller). So for a socket whose connect is still to come, the flag goes back to readable: the pipe
+ * then connects, drains and closes like that of any terminal killed after its pipe came up, and
+ * that close is what emits the terminal's exit.
  */
 export function armEarlyKill(proc: pty.IPty, platform: NodeJS.Platform = process.platform): boolean {
   const t = proc as unknown as WindowsTerminalInternals & { kill: (signal?: string) => void };
@@ -180,10 +262,89 @@ export function armEarlyKill(proc: pty.IPty, platform: NodeJS.Platform = process
     closedEarly = true;
     t._isReady = true;       // nothing queued may run later against a closed terminal
     t._deferreds = [];
+    const sock = t._socket;
+    const connectPending = sock != null && sock._handle == null;
     t._close!();
     t._agent!.kill!();
+    // PTY-EARLY-CLOSE-EOF: an unconnected socket must not reach connect() marked unreadable.
+    if (connectPending) {
+      sock.readable = true;
+      // PTY-LATE-READY-ENOENT: and it must not connect once its pipe's server has been terminated.
+      guardLateReady(t);
+    }
   };
   return true;
+}
+
+/**
+ * PTY-CLOSETREE-PIDREUSE: is this terminal's root process still the owner of its pid?
+ *
+ * A pid says nothing about WHICH process has it: Windows hands a dead process's pid to the next
+ * process created, within milliseconds. `isAlive(pid)` therefore answers "is anything alive under
+ * this number", and a `taskkill /T /F` that follows it can end an unrelated process and its tree.
+ *
+ * node-pty's ConPTY agent is the one party that knows the root by HANDLE: conpty.cc keeps the
+ * process handle from CreateProcess open until the process exits (a pid cannot be reused while a
+ * handle to its process is open), then closes it and reports the exit, which the agent stores as
+ * `_exitCode`. So:
+ *   'running'  no exit reported: the handle is open and the pid is the root's;
+ *   'exited'   the exit was reported: the pid is no longer ours, whatever is alive under it;
+ *   'unknown'  not the ConPTY agent this was written against (winpty, another node-pty version):
+ *              nothing binds the pid to the root. The pin test fails then.
+ * Not covered by this alone: from node-pty closing its handle until the exit report RUNS in JS
+ * (a main-loop turn or more) the pid is free and this still says 'running'. PTY-KILL-PID-IDENTITY
+ * closes that with a handle of our own (procIdentity.ts holdRoot); see mayNamePid below.
+ */
+export function rootState(proc: pty.IPty): 'running' | 'exited' | 'unknown' {
+  const agent = (proc as unknown as { _agent?: { _useConpty?: unknown; _exitCode?: unknown; _$onProcessExit?: unknown } })._agent;
+  if (!agent || agent._useConpty !== true || typeof agent._$onProcessExit !== 'function') return 'unknown';
+  return agent._exitCode === undefined ? 'running' : 'exited';
+}
+
+/**
+ * PTY-HOLD-NODEPTY-HANDOFF. node-pty's kill() of a ConPTY terminal does not end with the call: it
+ * forks a helper that lists the console processes OF THE ROOT'S PID, and when the list arrives it
+ * calls process.kill on each entry. That runs after kill() returned (a process start later, 5 s at
+ * node-pty's own bound), and on a root that is already dead it names a pid that is the root's only
+ * while something reserves it. This watches the one kill() about to be made: started() gives the
+ * promise of that list when the kill asked for it, null when it did not (no ConPTY sweep, another
+ * node-pty, or a kill node-pty deferred because the terminal was not ready and not armed).
+ *
+ * The caller chains on it AFTER kill() returned. node-pty chained its kills on the same promise
+ * inside kill(), and reactions of one promise run in the order they were added, so the caller's
+ * runs when the kills are done: tied to the sweep itself, no delay involved.
+ */
+export function watchKillSweep(proc: pty.IPty): { started: () => Promise<unknown> | null } {
+  const agent = (proc as unknown as { _agent?: { _getConsoleProcessList?: unknown } })._agent;
+  const list = agent?._getConsoleProcessList;
+  let sweep: Promise<unknown> | null = null;
+  let watching = true;
+  if (agent && typeof list === 'function') {
+    agent._getConsoleProcessList = function consoleProcessList(this: unknown, ...a: unknown[]): unknown {
+      const p: unknown = (list as (...x: unknown[]) => unknown).apply(this, a);
+      if (watching && p instanceof Promise) sweep = p;
+      return p;
+    };
+  }
+  return { started: () => { watching = false; return sweep; } };
+}
+
+/**
+ * PTY-KILL-PID-IDENTITY: may a tree kill name this root's pid right now? The one question every
+ * Windows kill path asks (closeTree's two sweeps, killAllAsync's batch), immediately before it
+ * spawns taskkill.
+ *   - node-pty reported the exit: never. With a hold still saying alive this also catches a hold
+ *     that was opened on the wrong process.
+ *   - a hold: the handle's answer. Alive means the pid is the root's and stays reserved for as
+ *     long as the hold is open, so the kill reaches the root or nobody.
+ *   - no hold (addon missing, or the root was not ours to open): the PTY-CLOSETREE-PIDREUSE rule.
+ *     A first sweep runs; a repeat needs node-pty's 'running' and something alive under the pid.
+ */
+export function mayNamePid(s: { proc: pty.IPty; hold?: RootHold | null }, repeat: boolean): boolean {
+  const state = rootState(s.proc);
+  if (state === 'exited') return false;
+  if (s.hold) return s.hold.alive();
+  return repeat ? state === 'running' && isAlive(s.proc.pid) : true;
 }
 
 export interface SpawnOptions {
@@ -519,22 +680,48 @@ export class PtyManager {
     const pid = s.proc.pid;
     if (process.platform !== 'win32') {
       s.proc.kill();
-      ensureKilled(pid); // verify + sweep the process group so no PID leaks
+      // verify + sweep the process group so no PID leaks; the pid is re-identified after the grace
+      ensureKilled(pid, undefined, s.rootId ? () => s.rootId!.verdict() : undefined);
       return;
     }
-    const close = (): void => { this.closingTrees.delete(s); this.closePty(s); };
+    s.holdUsers = (s.holdUsers ?? 0) + 1;
+    const close = (): void => { this.closingTrees.delete(s); this.closePty(s); this.dropHold(s); };
     if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) { close(); return; }
+    // PTY-CLOSETREE-PIDREUSE: a sweep names the root by pid, so it runs only while the pid is known
+    // to be the root's (rootState). A root that already exited has nothing left for taskkill to walk
+    // (the known gap above), and its pid may belong to a stranger by now.
+    // PTY-KILL-PID-IDENTITY: asked of our own handle to the root when there is one (mayNamePid).
+    if (!mayNamePid(s, false)) { close(); return; }
     this.closingTrees.add(s);
     // Jim MINOR 1: re-verify after the sweep. A taskkill that failed or hit its cap leaves the root
-    // alive, and the root still holds the tree, so one more sweep runs before the close.
-    void killTreesAsync([pid]).then(() => (isAlive(pid) ? killTreesAsync([pid]) : undefined)).then(close, close);
+    // alive, and the root still holds the tree, so one more sweep runs before the close. The first
+    // sweep normally ENDS the root, which frees its pid: "something is alive under this pid" is then
+    // a stranger, so the second sweep needs the root itself to be running, not just the pid.
+    void killTreesAsync([pid]).then(() => (mayNamePid(s, true) ? killTreesAsync([pid]) : undefined)).then(close, close);
+  }
+
+  /** One kill path is done with the pid. The hold is released when the last one is: releasing it
+   *  under a taskkill still in flight would free the pid that taskkill names. */
+  private dropHold(s: PtySession): void {
+    s.holdUsers = Math.max(0, (s.holdUsers ?? 0) - 1);
+    if (s.holdUsers === 0) s.hold?.release();
   }
 
   /** Close a session's ConPTY once: closeTree's late close and a quit can both reach the same one. */
   private closePty(s: PtySession): void {
     if (s.ptyClosed) return;
     s.ptyClosed = true;
+    const sweep = watchKillSweep(s.proc);
     try { s.proc.kill(); } catch { /* already gone */ }
+    // node-pty's own kill names the root by pid once more, later (watchKillSweep). That sweep is
+    // one more user of the hold, until it has ended: the pid stays the root's for as long.
+    // What is left: a terminal with no hold at all (no handoff, and its root died before the open
+    // by pid, or no addon) has nothing to keep, and its sweep names a pid nobody reserves.
+    const pending = sweep.started();
+    if (!pending) return;
+    s.holdUsers = (s.holdUsers ?? 0) + 1;
+    const done = (): void => this.dropHold(s);
+    pending.then(done, done);
   }
 
   /** Register the natural-exit teardown callback. Invoked from inside node-pty's
@@ -972,6 +1159,11 @@ export class PtyManager {
       });
       // PTY-EARLY-KILL-LEAK: a kill before the first output must close the pseudoconsole now.
       armEarlyKill(proc);
+      // PTY-KILL-PID-IDENTITY: bind the pid to this root in the spawn's own turn, before anything
+      // else can run: a handle of our own on Windows (node-pty's own, handed over:
+      // PTY-HOLD-NODEPTY-HANDOFF), the start stamp elsewhere.
+      const hold = holdRoot(proc.pid, process.platform, rootHandoff(proc));
+      const rootId = process.platform === 'win32' ? undefined : pidIdentity(proc.pid);
 
       // Capture THIS session object so the proc's callbacks can tell whether the
       // id still belongs to them. A model change / restart does kill()+spawn()
@@ -992,7 +1184,9 @@ export class PtyManager {
         owner,
         humanInputGeneration: 0,
         incarnation: (incarnationSeq += 1),
-        spawnedAt: Date.now()
+        spawnedAt: Date.now(),
+        hold,
+        rootId
       };
       // Route to the session's owner window (multi-window owner routing), read at SEND
       // time. Batched: one IPC message per burst, not per ~170-byte conpty chunk.
@@ -1010,6 +1204,9 @@ export class PtyManager {
       proc.onData((data) => this.deliverData(opts.id, session, data));
       if (this.startupHooks) { try { this.startupHook()?.spawned(opts.id); } catch { /* best-effort */ } }
       proc.onExit(({ exitCode, signal }) => {
+        // PTY-KILL-PID-IDENTITY: the root is gone. Unless a kill may still name the pid (it
+        // releases the hold itself when it is done), stop reserving it.
+        if (!session.holdUsers) session.hold?.release();
         // Stale exit from a process whose id was reclaimed (kill()+respawn) — do
         // NOT touch the live session or tell the renderer the new pty died.
         if (this.sessions.get(opts.id) !== session) return;
@@ -1236,7 +1433,7 @@ export class PtyManager {
     if (process.platform !== 'win32') {
       for (const s of sessions) {
         try { s.proc.kill(); } catch { /* noop */ }
-        ensureKilled(s.proc.pid);
+        ensureKilled(s.proc.pid, undefined, s.rootId ? () => s.rootId!.verdict() : undefined);
       }
       return Promise.resolve();
     }
@@ -1252,14 +1449,19 @@ export class PtyManager {
         const sub = s.proc.onExit(() => { try { sub?.dispose?.(); } catch { /* noop */ } done(); });
       } catch { done(); }
     }));
+    for (const s of sessions) s.holdUsers = (s.holdUsers ?? 0) + 1;
     const closePtys = (): void => {
-      for (const s of sessions) this.closePty(s);
+      for (const s of sessions) { this.closePty(s); this.dropHold(s); }
     };
     const allExited = (): Promise<void> => Promise.race([
       Promise.all(exited).then(() => undefined),
       new Promise<void>((resolve) => { setTimeout(resolve, PtyManager.EXIT_WAIT_MS); })
     ]);
-    return killTreesAsync(sessions.map((s) => s.proc.pid), capMs).then(closePtys, closePtys).then(allExited);
+    // PTY-KILL-PID-IDENTITY: the batch names only roots whose pid is still theirs. A terminal whose
+    // root already died (its exit event trails by up to a second, so it is still listed) is closed
+    // without a sweep: taskkill /T has nothing to walk from a dead root, and the pid may be anyone's.
+    const owned = sessions.filter((s) => mayNamePid(s, false)).map((s) => s.proc.pid);
+    return killTreesAsync(owned, capMs).then(closePtys, closePtys).then(allExited);
   }
 
   /** SYNC-CHILD-CALLS (Jim's audit NIT): set by reset/changeHome BEFORE their awaited bulk kill.

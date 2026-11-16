@@ -118,6 +118,7 @@ const KNOWN = {
   'electron-harness/electron-bin.cjs': 1,
   'heavy-cpu-options-191.test.cjs': 2, // INT 1.1.102: + cap-199's known-folder query (B1)
   'heavy-job-lock.test.cjs': 1,
+  'mutant-runners-tap.test.cjs': 1,
   'ps-policy-temp-leak-198.test.cjs': 2,
   'rebrand-a-182.test.cjs': 1,
   'rebrand-updater-base-183.test.cjs': 1,
@@ -126,7 +127,8 @@ const KNOWN = {
   'tools/file-watchdog.cjs': 1,
   'tools/layer-b-core.cjs': 4,
   'tools/mutant-runner-helper.cjs': 1,
-  'tools/own-procs.cjs': 1
+  'tools/own-procs.cjs': 1,
+  'tools/pid-hold.cjs': 1
 };
 
 test('CENSUS: every PowerShell spawn under test/ passes psEnv (the census itself catches one that does not)', () => {

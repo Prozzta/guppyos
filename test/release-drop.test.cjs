@@ -23,7 +23,10 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const loadTs = require('./load-ts.cjs');
 
-const { extractDropHtml, buildDropSrcDoc } = loadTs('src/shared/releaseDrop.ts');
+const { extractDropHtml, buildDropSrcDoc: buildWithFonts } = loadTs('src/shared/releaseDrop.ts');
+// UI-FONTS-LOCAL: the faces are a required argument now; these suites are about the CSP and
+// the stripping, so a stand-in face block is enough (test/ui-fonts-local.test.cjs covers fonts).
+const buildDropSrcDoc = (html) => buildWithFonts(html, '/* drop faces */');
 
 const wrap = (inner) => `# Release\n\nblurb\n\n<!-- drop -->\n${inner}\n<!-- /drop -->\n\nfooter`;
 

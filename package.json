@@ -1,6 +1,6 @@
 {
   "name": "munder-difflin",
-  "version": "1.1.105",
+  "version": "1.1.106",
   "private": true,
   "description": "Boldly code where no team has coded before. Your AI crew, on duty 24/7. A free, local-first multi-agent harness that turns the CLI coding agent you already run into a clone of you, coordinating an office of agents on your machine.",
   "main": "out/main/index.js",
@@ -15,10 +15,10 @@
   "scripts": {
     "dev": "electron-vite dev",
     "dev:isolated": "node tools/dev-isolated.cjs",
-    "build": "electron-vite build && npm run copy:main-assets && node tools/build-heavyjob.cjs && node tools/build-input-helper.cjs",
+    "build": "node tools/patch-xterm-webgl-font.cjs --check && electron-vite build && npm run copy:main-assets && node tools/build-heavyjob.cjs && node tools/build-input-helper.cjs",
     "copy:main-assets": "node tools/copy-main-assets.cjs",
     "preview": "electron-vite preview",
-    "postinstall": "node tools/patch-node-pty-race-fix.cjs && node tools/patch-node-pty-winpty-gyp.cjs && node node_modules/electron/install.js && electron-rebuild -f && node tools/build-fs-handle.cjs && node tools/ensure-pty-perms.cjs && node tools/patch-node-pty-conpty.cjs && node tools/record-node-pty-race-fix.cjs && node tools/patch-node-pty-winpty-gyp.cjs --check",
+    "postinstall": "node tools/patch-xterm-webgl-font.cjs && node tools/patch-node-pty-race-fix.cjs && node tools/patch-node-pty-root-handle.cjs && node tools/patch-node-pty-winpty-gyp.cjs && node node_modules/electron/install.js && electron-rebuild -f -o node-pty && node tools/build-fs-handle.cjs && node tools/ensure-pty-perms.cjs && node tools/patch-node-pty-conpty.cjs && node tools/record-node-pty-race-fix.cjs && node tools/patch-node-pty-root-handle.cjs --check && node tools/patch-xterm-webgl-font.cjs --check && node tools/patch-node-pty-winpty-gyp.cjs --check",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
@@ -94,7 +94,7 @@
     }
   },
   "allowScripts": {
-    "better-sqlite3@13.0.3": true,
+    "better-sqlite3@13.0.3": false,
     "electron-winstaller@5.4.0": true,
     "esbuild@0.21.5": true,
     "fsevents@2.3.3": true,

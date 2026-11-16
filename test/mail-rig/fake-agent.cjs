@@ -45,6 +45,10 @@ function main(flavour) {
 
 const now = () => Date.now();
 const uuid = () => crypto.randomUUID();
+// writeComposer: the Windows codes for "another process has the target open", and how long to keep trying.
+const COMPOSER_WRITE_RETRY = new Set(['EPERM', 'EBUSY', 'EACCES']);
+const COMPOSER_WRITE_GIVE_UP_MS = 15_000;
+const COMPOSER_WRITE_NAP = new Int32Array(new SharedArrayBuffer(4));
 const isLoopbackUrl = (u) => { try { const h = new URL(u).hostname; return h === '127.0.0.1' || h === 'localhost' || h === '::1'; } catch { return false; } };
 
 class FakeAgent {
@@ -82,11 +86,33 @@ class FakeAgent {
   }
 
   writeComposer() {
-    try {
-      const tmp = `${this.composerFile}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify({ draft: this.draft, t: now(), busy: !!this.turn, pending: this.pending, shown: this.shown, hung: this.hung }));
-      fs.renameSync(tmp, this.composerFile);
-    } catch { /* best effort */ }
+    // SUITE-LOAD-FLAKES-1027: this file IS the stub's screen as the host reads it, so it must be on disk
+    // before the echo that announces it goes out. On Windows the rename is refused (EPERM/EBUSY/EACCES)
+    // for as long as the host has composer.json open for a read. That error used to be swallowed, which
+    // left the old (empty) composer on disk: the host then read an empty prompt row for a draft the stub
+    // had echoed, and refused the commit as `empty-composer` until the wake gave up. Retry until the
+    // reader lets go; a write that still cannot land is recorded, never silent.
+    const tmp = `${this.composerFile}.tmp`;
+    const body = JSON.stringify({ draft: this.draft, t: now(), busy: !!this.turn, pending: this.pending, shown: this.shown, hung: this.hung });
+    const giveUpAt = Date.now() + COMPOSER_WRITE_GIVE_UP_MS;
+    let tries = 0;
+    for (;;) {
+      tries += 1;
+      try {
+        fs.writeFileSync(tmp, body);
+        fs.renameSync(tmp, this.composerFile);
+        if (tries > 1) this.rec('composer-write-retried', { tries, seq: this.echoSeq });
+        return;
+      } catch (e) {
+        const code = e && e.code;
+        if (!COMPOSER_WRITE_RETRY.has(code) || Date.now() >= giveUpAt) {
+          this.rec('composer-write-failed', { code, tries, seq: this.echoSeq, error: String(e) });
+          return;
+        }
+        if (tries === 1) this.rec('composer-write-blocked', { code, seq: this.echoSeq });
+        Atomics.wait(COMPOSER_WRITE_NAP, 0, 0, 2);   // a reader holds the file for well under a ms
+      }
+    }
   }
 
   out(text) {
@@ -459,7 +485,23 @@ class FakeAgent {
     if (!turn) { this.rec('turn-end', { how, turn: null }); return; }
     if (how === 'stop') {
       if (this.flavour === 'claude') await this.hook('Stop', { stop_hook_active: false });
-      else if (this.flavour === 'codex') { await this.hook('Stop', { turn_id: turn.id, stop_hook_active: false }); this.rollout({ type: 'event_msg', payload: { type: 'task_complete', turn_id: turn.id } }); }
+      else if (this.flavour === 'codex') {
+        // Codex runs a Stop {decision:'block', reason} as the next prompt in the SAME turn (same
+        // turn_id, stop_hook_active true on the next Stop). Manual turns wait for the driver's next
+        // cues; a scripted turn runs `scenario.onBlock` (tools/replies) and stops again.
+        const r = await this.hook('Stop', { turn_id: turn.id, stop_hook_active: !!turn.stopBlocked });
+        const res = r && (r.response || r);
+        if (res && res.decision === 'block' && typeof res.reason === 'string') {
+          turn.stopBlocked = (turn.stopBlocked || 0) + 1;
+          this.rec('stop-blocked', { reason: res.reason, turn: turn.id, block: turn.stopBlocked });
+          if (this.manual()) return;
+          const ob = this.scenario.onBlock || {};
+          for (let i = 0; i < (ob.tools ?? 0); i++) await this.toolCall('Bash', { command: 'echo continue' }, false);
+          for (const rp of (ob.repliesAt?.[turn.stopBlocked] ?? [])) await this.writeOutbox(rp);
+          return this.endTurn('stop');
+        }
+        this.rollout({ type: 'event_msg', payload: { type: 'task_complete', turn_id: turn.id } });
+      }
       else if (this.flavour === 'agy') await this.hook('Stop', { fullyIdle: true });
       else if (this.flavour === 'gemini') await this.hook('AfterAgent', {});
     } else if (how === 'stop-failure') {

@@ -6,7 +6,7 @@ require('./tools/own-job.cjs');
  * (~2,900 calls/min on Guppy main under a heavy run on 1.1.99). It now serves one deep-frozen
  * parsed config from memory. Our own writes drop it (one disk read per write: Jim P1), and this
  * module's read-modify-writes read fresh; an external edit is picked up by fs.watch or, as the
- * authority, by a stat revalidate at most CONFIG_REVALIDATE_MS (1 s) after the last check. The
+ * authority, by a slow stat fallback at most CONFIG_REVALIDATE_MS after the last check. The
  * missing, corrupt and unreadable paths are not cached and behave as before.
  */
 const test = require('node:test');
@@ -20,7 +20,7 @@ const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'md-config-read-cache-'))
 const electron = require.resolve('electron');
 require.cache[electron] = { id: electron, filename: electron, loaded: true, exports: { app: { getPath: () => userData } } };
 const cfg = loadTs('src/main/config.ts');
-const { readConfig, writeConfig, resetConfig, configIntegrityIssue, CONFIG_REVALIDATE_MS, __resetConfigCacheForTests } = cfg;
+const { readConfig, writeConfig, resetConfig, configIntegrityIssue, CONFIG_REVALIDATE_MS, __resetConfigCacheForTests, __revalidateConfigForTests, __dropConfigWatcherForTests } = cfg;
 const file = path.join(userData, 'config.json');
 const MIGRATED = { triggersMigratedV1: true, defaultModelCliMigratedV1: true };
 
@@ -42,6 +42,15 @@ const OLD = () => Date.now() + 60_000;
 const fresh = (obj) => { handEdit(obj); __resetConfigCacheForTests(() => clock, OLD); };
 
 test.after(() => fs.rmSync(userData, { recursive: true, force: true }));
+
+test('production missed-watch fallback invalidates asynchronously', async () => {
+  handEdit({ onboardingComplete: true, toolOutputCap: 701 }); __resetConfigCacheForTests(undefined, OLD);
+  assert.equal(readConfig().toolOutputCap, 701);
+  __dropConfigWatcherForTests();
+  handEdit({ onboardingComplete: true, toolOutputCap: 702 });
+  await __revalidateConfigForTests();
+  assert.equal(readConfig().toolOutputCap, 702);
+});
 
 test('1000 reads inside the window reach disk once, return one deep-frozen object, and never stat again', () => {
   fresh({ onboardingComplete: true, recentHives: ['C:/h1'], missions: [] });
@@ -134,8 +143,8 @@ test('a read-modify-write inside the window builds on an outside edit, not on th
   assert.deepEqual([disk.toolOutputCap, disk.notifications], [31, true], 'the outside edit survives our write');
 });
 
-test('an external edit is invisible inside the window and picked up by the stat revalidate at CONFIG_REVALIDATE_MS', () => {
-  assert.ok(CONFIG_REVALIDATE_MS <= 1000, 'revalidate within 1 s');
+test('an external edit is invisible inside the window and picked up by the slow stat fallback at CONFIG_REVALIDATE_MS', () => {
+  assert.equal(CONFIG_REVALIDATE_MS, 5_000, 'the async missed-watch backstop is bounded to five seconds');
   fresh({ toolOutputCap: 100 });
   assert.equal(readConfig().toolOutputCap, 100);
   handEdit({ toolOutputCap: 200 });

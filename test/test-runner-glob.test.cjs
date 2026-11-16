@@ -127,7 +127,7 @@ test('MUTANT-JOURNAL-GATE NIT 2 (god 9cb49c, Jim 967fa3): release-worktrees-muta
   // A killed run: the journal names a dead owner and scripts/release-worktrees.cjs carries the mutant.
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'c90-nit2-'));
   fs.mkdirSync(path.join(root, 'scripts')); fs.mkdirSync(path.join(root, 'test', 'tools'), { recursive: true });
-  for (const rel of [runner, 'test/tools/mutant-runner-helper.cjs', 'test/tools/ps-env.cjs']) fs.copyFileSync(path.join(REPO, rel), path.join(root, rel));
+  for (const rel of [runner, 'test/tools/mutant-runner-helper.cjs', 'test/tools/mutant-tap.cjs', 'test/tools/ps-env.cjs']) fs.copyFileSync(path.join(REPO, rel), path.join(root, rel));
   const file = path.join(root, 'scripts', 'release-worktrees.cjs');
   fs.writeFileSync(file, 'if (false) rotated = 1;\r\n', 'utf8');
   fs.writeFileSync(helper.journalPath(root), JSON.stringify({ owner: { pid: 2147483000, start: '2026-10-25T15:23:08Z' }, records: [{ file, original: Buffer.from('if (newest) rotated = 1;\r\n').toString('base64') }] }), 'utf8');
@@ -799,7 +799,20 @@ test('PIN: against the REAL test directory discovery is root tests plus only fol
   // STARTUP-FREEZE-104 A10: + 1 (startup-freeze-a10). Root 550 + folded 41.
   // STARTUP-FREEZE-104 A12: + 1 (startup-freeze-a12). Root 550 + folded 41.
   // STARTUP-FREEZE-104 A19: + 1 (startup-freeze-a19). Root 550 + folded 41.
-  assert.equal(files.length, 591,`the focused suite must retain its pre-fold file count, got ${files.length}`);
+  // CLAIMS-WARM-BACKFILL-106: + 1 (claims-warm-backfill-106).
+  // TRAIN-106A: + 5 (blob-gaze-driver, blob-mood-tray-106, mutant-runners-tap, claims-lag-sync, claims-readonly-stop). v1.1.105 591 + 6 = 597.
+  // CODEX-TURN-ENDS-EARLY: + 2 (codex-owed-stop-106, mail-rig-owed-stop-106).
+  // TRAIN-106B: + 1 (restore-orphan-flag-106). 597 + 2 + 1 = 600.
+  // TERM-FONT-105: + 1 (term-font-105). TRAIN-106C: 600 + 1 = 601.
+  // UI-FONTS-LOCAL: + 1 (ui-fonts-local). TRAIN-106C: 601 + 1 = 602.
+  // WORKTREE-NATIVE-BUILD-GAP: + 1 (worktree-native-build-gap) = 603.
+  // PTY-CLOSETREE-PIDREUSE: + 1 (pty-closetree-pidreuse). TRAIN-106G: 603 + 1 = 604.
+  // CLAIMS-LEDGER-W6-SILENT-EXIT: + 1 (runner-killed-file-106). TRAIN-106G: 604 + 1 = 605.
+  // PTY-EARLY-CLOSE-EOF: + 1 (pty-early-close-eof). TRAIN-106G: 605 + 1 = 606.
+  // PTY-KILL-PID-IDENTITY: + 1 (pty-kill-pid-identity). TRAIN-106H: 606 + 1 = 607.
+  // PTY-LATE-READY-ENOENT: + 1 (pty-late-ready-enoent). TRAIN-106H: 607 + 1 = 608.
+  // PTY-HOLD-NODEPTY-HANDOFF: + 1 (pty-hold-nodepty-handoff). TRAIN-106I: 608 + 1 = 609.
+  assert.equal(files.length, 609,`the focused suite must retain its pre-fold file count, got ${files.length}`);
   assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
   assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');
   assert.ok(files.includes(path.join('start-fixes-163', 'start-fixes-163-boot-submit.test.cjs')), 'the start-fixes feature folder is included');

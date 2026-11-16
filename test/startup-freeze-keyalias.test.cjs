@@ -16,6 +16,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 const loadTs = require('./load-ts.cjs');
 const { keyAliasCandidates, keysMayAlias, reconcileItemId, withinEditDistance2 } = loadTs(path.join(__dirname, '../src/main/claims/reconcile.ts'));
 const { editDistance } = loadTs(path.join(__dirname, '../src/main/claims/registry.ts'));
@@ -109,13 +110,27 @@ test('the namespace list is read once per census, not once per pair (MUTANT: per
   assert.equal(reads, 1, `namespaces read ${reads} times`);
 });
 
-test('a 10x-sized census (17,000 rows, 3,000 keys) takes well under a second', () => {
-  const { records, state } = census(11, 17000, 3000);
-  const t0 = performance.now();
-  const found = keyAliasCandidates('owner', records, state, REG);
-  const ms = performance.now() - t0;
-  assert.ok(found.length > 0);
-  assert.ok(ms < 1000, `${ms.toFixed(0)} ms (the old census took tens of seconds at this size)`);
+// The first product call remains the cold production census. Full-suite cache/runtime pressure
+// moves its absolute CPU amount, so each child compares it with a fixed fixture-string workload
+// (sort, Map bucketing and separator normalization) bracketing the call. The ratio is calibrated
+// both quiet and under suite-like load; it still exposes a cold-only or whole-function slowdown.
+const CENSUS_REFERENCE_RATIO_MAX = 3.0;
+const CENSUS_RUNAWAY_MS = 3_000;
+test('a cold 10x-sized census stays within its same-child reference workload', () => {
+  const samples = Array.from({ length: 3 }, () => {
+    const child = spawnSync(process.execPath, [path.join(__dirname, 'tools/keyalias-cpu-child.cjs')], { encoding: 'utf8' });
+    assert.equal(child.status, 0, child.stderr);
+    return JSON.parse(child.stdout);
+  });
+  assert.ok(samples.every(({ found }) => found > 0));
+  const minCold = Math.min(...samples.map(({ cold }) => cold));
+  const ratios = samples.map(({ cold, refs }) => cold / Math.min(...refs));
+  const ratio = Math.min(...ratios);
+  const detail = samples.map(({ cold, refs }) => `${cold.toFixed(0)}/${refs.map((n) => n.toFixed(0)).join(',')}`).join('; ');
+  assert.ok(minCold < CENSUS_RUNAWAY_MS,
+    `minimum cold 10x census ${minCold.toFixed(0)} ms exceeds the ${CENSUS_RUNAWAY_MS} ms runaway backstop`);
+  assert.ok(ratio < CENSUS_REFERENCE_RATIO_MAX,
+    `minimum cold/reference ${ratio.toFixed(2)}x (cold/ref samples ${detail})`);
 });
 
 test('main runs the start-up census one agent per event-loop turn', () => {

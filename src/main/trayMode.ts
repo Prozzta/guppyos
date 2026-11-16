@@ -7,6 +7,10 @@ export interface TrayLike {
   on(event: 'click', listener: () => void): void;
   destroy(): void;
   isDestroyed?(): boolean;
+  /** BLOB-TRAY-TOASTS: swap the icon in place (the Blob's face). */
+  setImage?(icon: unknown): void;
+  /** BLOB-ORCH-MOOD: the hover text (trayTip). */
+  setToolTip?(tip: string): void;
 }
 
 export interface TrayWindowLike {
@@ -36,6 +40,10 @@ export class TrayModeController {
   private creating = false;
   /** The primary window, never a most-recently-focused Floor window. */
   private primary: TrayWindowLike | null = null;
+  /** BLOB-TRAY-TOASTS: the Blob face the tray shows; null = the exe icon (faces not rendered, or failed). */
+  private face: unknown = null;
+  /** BLOB-ORCH-MOOD: the tooltip the tray shows (trayTip); null = none set yet. */
+  private tip: string | null = null;
 
   constructor(private readonly d: TrayModeDeps) {}
 
@@ -50,17 +58,37 @@ export class TrayModeController {
     if (this.tray || this.creating) return;
     this.creating = true;
     try {
-      const icon = await this.d.icon();
+      const icon = this.face ?? await this.d.icon();
       if (!this.wanted() || this.tray) return;
-      const tray = this.d.createTray(icon);
+      const tray = this.d.createTray(this.face ?? icon);
       tray.on('click', () => this.open());
       tray.setContextMenu(this.d.buildMenu([
         { label: 'Open Guppy', click: () => this.open() },
         { label: 'Show Blob', click: () => this.d.toggleBlob() },
         { label: 'Quit Guppy', click: () => this.d.quit() }
       ]));
+      if (this.tip !== null) { try { tray.setToolTip?.(this.tip); } catch { /* best-effort */ } }
       this.tray = tray;
     } finally { this.creating = false; }
+  }
+
+  /** BLOB-TRAY-TOASTS: show `icon` (a Blob face) on the tray now and on any tray created later.
+   *  A failing swap keeps the icon the tray already has. */
+  setFace(icon: unknown): void {
+    if (icon === null || icon === undefined || icon === this.face) return;
+    this.face = icon;
+    const tray = this.tray;
+    if (!tray || (tray.isDestroyed && tray.isDestroyed())) return;
+    try { tray.setImage?.(icon); } catch { /* keep the current icon */ }
+  }
+
+  /** BLOB-ORCH-MOOD: show `tip` as the tray's hover text now and on any tray created later. */
+  setTip(tip: string): void {
+    if (tip === this.tip) return;
+    this.tip = tip;
+    const tray = this.tray;
+    if (!tray || (tray.isDestroyed && tray.isDestroyed())) return;
+    try { tray.setToolTip?.(tip); } catch { /* keep the current tip */ }
   }
 
   /** Returns true exactly when the close became a hide. */

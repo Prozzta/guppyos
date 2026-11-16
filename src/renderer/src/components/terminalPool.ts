@@ -15,6 +15,7 @@
  */
 import { createPoolTimer } from './poolTimer';
 import { TERMINAL_SCROLLBACK_LINES } from './terminalScrollback';
+import { TERMINAL_FONT_FAMILY, loadTerminalFont, remeasureTerminalFont, TERMINAL_CELL_PAD, terminalFontReady } from './terminalFont';
 import { createPtyResizeCoalescer, type Grid, type PtyResizeCoalescer } from './ptyResizeCoalescer';
 import { useEffect, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
@@ -161,10 +162,14 @@ export function acquireTerminal(ptyId: string, theme?: ThemeMap, fontSize = 14):
 
   const term = new Terminal({
     theme,
-    // v0.3.4: JetBrains Mono replaces VT323 — the narrow CRT face strained at
-    // data density. lineHeight stays 1.0 so TUI box-drawing rows stay joined.
-    fontFamily: '"JetBrains Mono", "SF Mono", Menlo, monospace',
+    // v0.3.4: a real monospace face replaces VT323 (the narrow CRT face strained at
+    // data density). lineHeight stays 1.0 so TUI box-drawing rows stay joined.
+    // TERM-FONT-105: the face (Martian Mono) is bundled and chosen in terminalFont.ts.
+    fontFamily: TERMINAL_FONT_FAMILY,
     fontSize,
+    // Cell = floor(advance) + 1 device px at every size: air around every glyph (terminalFont.ts
+    // TERMINAL_CELL_PAD); every later size change keeps it via applyTerminalFontSize.
+    letterSpacing: TERMINAL_CELL_PAD,
     lineHeight: 1.0,
     cursorBlink: true,
     cursorStyle: 'block',
@@ -476,6 +481,15 @@ export function acquireTerminal(ptyId: string, theme?: ThemeMap, fontSize = 14):
   // Tab; and every pooled terminal adds a live "Terminal input" textbox to the accessibility
   // tree with nothing on screen. Detached keeps fit() inert, which is what those paths rely on.
   openTerminalOnce(entry);
+  // TERM-FONT-105: open() measured the cell with whatever face was usable at that moment.
+  // If the bundled face was still loading, measure again (and re-raster) once it is in.
+  if (!terminalFontReady()) {
+    void loadTerminalFont().then(() => {
+      if (pool.get(ptyId) !== entry || entry.exited) return;
+      remeasureTerminalFont(entry.term);
+      reflowTerminal(ptyId);
+    }).catch(() => { /* logged loudly by loadTerminalFont */ });
+  }
   promptMirror.sync(pool.size);
   ensureScreenReadResponder();
   return entry;
@@ -1026,8 +1040,8 @@ function repaintTerminalAfterRendererLoss(entry: TerminalEntry): void {
  * of the still-intact buffer is scrollable — the user otherwise has to zoom to
  * force a fit() and reveal the rest.
  *
- * Mirrors the document.fonts.ready re-measure in PtyTerminalView: re-applying the
- * SAME font invalidates xterm's cached cell metrics, clearTextureAtlas re-rasters
+ * Mirrors the font-load re-measure in PtyTerminalView: remeasureTerminalFont makes
+ * xterm measure its cell again (TERM-FONT-105), clearTextureAtlas re-rasters
  * the WebGL glyph atlas at the right size, then fit() recomputes cols/rows and
  * rebuilds the viewport. Preserves scroll position (NO scrollToBottom) so a user
  * reading history isn't yanked down. No-op until the terminal is opened and its
@@ -1043,12 +1057,10 @@ export function reflowTerminal(ptyId: string): void {
   // tiny grid and resize the pty to it (clipped/oversized banner).
   if (!host.isConnected || !host.clientWidth || !host.clientHeight) return;
   try {
-    // Re-apply the SAME font options to force xterm's CharSizeService to
-    // re-measure the cell against the now-correct (woken) layout, then drop the
-    // glyph atlas so it re-rasters at the corrected metrics.
-    entry.term.options.fontFamily = entry.term.options.fontFamily;
-    entry.term.options.fontSize = entry.term.options.fontSize;
-    entry.term.clearTextureAtlas?.();
+    // Make xterm re-measure the cell against the now-correct (woken) layout and drop the
+    // glyph atlas so it re-rasters at the corrected metrics. Re-assigning the SAME font
+    // options (the old code) is a no-op in xterm: its setter fires only on a change.
+    remeasureTerminalFont(entry.term);
     const before = { cols: entry.term.cols, rows: entry.term.rows };
     entry.fit.fit();
     // Only poke the pty when the grid actually changed (every resize repaints

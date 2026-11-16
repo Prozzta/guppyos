@@ -59,6 +59,27 @@ function copyMainSidecars() {
   };
 }
 
+// UI-FONTS-LOCAL: `import x from './face.woff2?datauri'` gives the file, byte for byte, as a
+// `data:font/woff2;base64,...` string. The release drop is a sandboxed srcdoc frame with an opaque
+// origin, so its faces cannot be fetched by URL. Vite 5's own `?inline` does not inline a font
+// (it still emits the file and exports its URL), so this is explicit: woff2 only, never a URL,
+// and a missing or empty file fails the build rather than shipping a fallback face.
+function fontDataUri() {
+  const QUERY = '?datauri';
+  return {
+    name: 'font-data-uri',
+    enforce: 'pre' as const,
+    load(id: string) {
+      if (!id.endsWith(QUERY)) return null;
+      const file = id.slice(0, -QUERY.length);
+      if (!file.endsWith('.woff2')) throw new Error(`?datauri is for .woff2 faces only: ${file}`);
+      const bytes = readFileSync(file);
+      if (bytes.length === 0) throw new Error(`?datauri face is empty: ${file}`);
+      return `export default ${JSON.stringify(`data:font/woff2;base64,${bytes.toString('base64')}`)};`;
+    }
+  };
+}
+
 export default defineConfig({
   main: {
     plugins: [externalizeDepsPlugin(), copyMainSidecars()],
@@ -100,7 +121,7 @@ export default defineConfig({
         }
       }
     },
-    plugins: [react()],
+    plugins: [react(), fontDataUri()],
     resolve: {
       alias: {
         '@': resolve(__dirname, 'src/renderer/src'),

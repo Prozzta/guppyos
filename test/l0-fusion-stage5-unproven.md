@@ -116,7 +116,7 @@ what IS known, what is not, and what would settle it. Nothing here is a claim of
     (L0-HIDDENCLAUDE); declared at the site; not in this contract. *Closed since:* the hidden
     condense and `src/main/hiddenClaude.ts` were retired in 1.1.98 (ZT-I2-CONDENSE, `143b32f8`), so
     no such path remains.
-18. **Line endings.** The repo has `core.autocrlf=true` and no `.gitattributes`; every stage-5
+18. **Line endings.** The repo has `core.autocrlf=true` and no `.gitattributes` rule for source files; every stage-5
     pin is verified in a fresh CRLF checkout because of it. Its own card.
 
 ## Not validated

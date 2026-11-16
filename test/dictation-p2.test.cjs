@@ -345,7 +345,8 @@ test('wiring: the clip is accepted only from the app window that was asked to re
   const src = read('src/main/index.ts');
   assert.match(src, /ipcMain\.handle\('dictation:audio', \(evt, arg: unknown\) => \{\r?\n\s*if \(!ledgerUiSender\(evt\) \|\| !dictationTarget \|\| evt\.sender !== dictationTarget\) return \{ ok: false/);
   assert.match(src, /supported: process\.platform === 'win32' && !DEV_HIDDEN,/, 'never in a hidden run, never off Windows');
-  assert.match(src, /onApplied: \(s\) => \{ dictation\.apply\(s\.enabled && s\.dictation\); \}/, 'dictation needs the blob AND its own toggle');
+  // BLOB-ORCH-MOOD added the tray-face refresh after it; the gate itself is the same call, still first.
+  assert.match(src, /onApplied: \(s\) => \{ dictation\.apply\(s\.enabled && s\.dictation\); refreshTrayFace\(\); \}/, 'dictation needs the blob AND its own toggle');
   assert.match(src, /\|\| \(cfg\.blobEnabled === true && cfg\.blobDictation === true\)/, 'the mic gate opens for dictation only while it is on');
   assert.match(src, /try \{ dictation\.dispose\(\); \} catch/, 'quit kills the helper');
   const blob = read('src/main/blobOverlay.ts');
@@ -427,4 +428,19 @@ test('nit: the length cap never splits a surrogate pair; C1 controls become spac
   assert.equal(whole, 'a'.repeat(SD.DICTATION_MAX_CHARS - 2) + emoji, 'a pair that fits is kept');
   for (const code of [0x80, 0x85, 0x90, 0x9b, 0x9f]) assert.equal(SD.normalizeTranscript(`x${String.fromCharCode(code)}y`), 'x y', `U+${code.toString(16)}`);
   assert.equal(SD.normalizeTranscript('caf' + String.fromCharCode(0xe9)), 'caf' + String.fromCharCode(0xe9), 'Latin-1 letters are kept');
+});
+
+test('BLOB-GAZE: focusPoint() is the chord-down focus during a session and null when idle', async () => {
+  const r = rig({ stt: { ok: true, text: 'hi' } });
+  r.ctl.apply(true); await flush();
+  assert.equal(r.ctl.focusPoint(), null, 'idle: none');
+  r.down({ hwnd: '4242', focus: { x: 120, y: 340, kind: 'caret' } });
+  assert.deepEqual(r.ctl.focusPoint(), { x: 120, y: 340, kind: 'caret' });
+  r.advance(1500); r.up();
+  const session = r.calls.capture[0][1];
+  r.audio(session); await flush(); await flush();
+  assert.equal(r.ctl.current().state, 'ready');
+  assert.equal(r.ctl.focusPoint(), null, 'back to idle: the eyes return to the cursor');
+  r.down({ hwnd: '4242' });
+  assert.equal(r.ctl.focusPoint(), null, 'a down without a point gives none (no stale point)');
 });

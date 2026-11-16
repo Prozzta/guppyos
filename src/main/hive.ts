@@ -24,6 +24,7 @@ import {
   openSync, readSync, closeSync,
   type FSWatcher, type Stats
 } from 'node:fs';
+import { promises as fsPromises } from 'node:fs';
 import { basename, join, dirname, isAbsolute, win32, posix } from 'node:path';
 import { homedir } from 'node:os';
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -583,6 +584,8 @@ export interface InboxDelivery {
 export interface RouterRuntime {
   watch: (dir: string, onHint: () => void) => Pick<FSWatcher, 'close' | 'on'>;
   setImmediate: (fn: () => void) => void;
+  /** The node implementation unrefs this: a parse retry never keeps Guppy alive. */
+  setTimeout: (fn: () => void, ms: number) => unknown;
   setInterval: (fn: () => void, ms: number) => unknown;
   clearInterval: (handle: unknown) => void;
 }
@@ -590,6 +593,7 @@ export interface RouterRuntime {
 const NODE_ROUTER_RUNTIME: RouterRuntime = {
   watch: (dir, onHint) => watchDirectorySafely(dir, () => onHint()),
   setImmediate: (fn) => { setImmediate(fn); },
+  setTimeout: (fn, ms) => { const timer = setTimeout(fn, ms); timer.unref(); return timer; },
   setInterval: (fn, ms) => setInterval(fn, ms),
   clearInterval: (h) => clearInterval(h as NodeJS.Timeout)
 };
@@ -838,8 +842,12 @@ export class HiveManager {
   static readonly MAIL_REBUILD_LOG_ROWS = 50_000;
 
   private routerTimer: unknown = null;
+  /** A slow recovery scan is allowed to run late, never concurrently. */
+  private routerReconciling = false;
   /** One non-recursive watcher per active outbox, keyed by its absolute path. */
   private readonly outboxWatchers = new Map<string, Pick<FSWatcher, 'close' | 'on'>>();
+  /** Outboxes named by watch hints; the immediate drain never re-enumerates agents. */
+  private readonly routeDirtyOutboxes = new Set<string>();
   /** Parse failures awaiting the next polling debounce, keyed by full outbox path. */
   private readonly outboxParseRetries = new Map<string, { attempts: number; retryAfter: number }>();
   /** A rejected file whose archival is temporarily locked has already notified its sender. */
@@ -883,7 +891,7 @@ export class HiveManager {
     // opts.onChange runs before every onChange() listener.
     onChange: () => {
       const root = this.root();
-      if (root) this.authorityCache.delete(join(root, 'tasks.json'));
+      if (root) this.invalidateAuthorityCache(join(root, 'tasks.json'));
     }
   });
   /** At most one queued scan; hints arriving in the same turn coalesce into it. */
@@ -1566,7 +1574,12 @@ export class HiveManager {
     // (re)written by a spawn, respawn or relaunch; a reader's cached copy is stale NOW.
     for (const cb of this.provisionedListeners) { try { cb(meta.id); } catch { /* a listener never breaks a spawn */ } }
     // ZERO-TOKEN-LIVENESS (Dwight F2): a (re)spawn of an ARCHIVED agent is a restore edge.
-    if (prev?.archived === true) this.emitArchiveChange(meta.id, false);
+    if (prev?.archived === true) {
+      // LOG-ARCHIVE-CLEAR: the restore's flag clear gets its own row, so log.jsonl shows the
+      // boot sweep's archived:true being undone (the 'spawn' row alone did not say so).
+      this.appendLog({ kind: 'archive', agentId: meta.id, archived: false, via: 'spawn', ...(prev.archiveReason ? { prevReason: prev.archiveReason } : {}) });
+      this.emitArchiveChange(meta.id, false);
+    }
 
     this.appendLog({ kind: 'spawn', agentId: meta.id, name: meta.name, isGod: !!meta.isGod });
     // Q32 refinement (god 0f1672): a restore brings back mail set aside in inbox/.undelivered/.
@@ -3622,22 +3635,46 @@ export class HiveManager {
 
   /**
    * HYBRID router (pre-M1 event-wake bridge). The FILES are authoritative: an fs.watch
-   * callback on any outbox only schedules one whole-tree `routeOnce()`, and the existing
-   * interval stays as reconciliation (it also repairs lost or broken watchers). Starting
-   * runs one immediate catch-up scan, so a restart or power-resume routes what waited.
+   * callback on an outbox schedules that dirty outbox only; the slow interval is the
+   * whole-tree reconciliation that repairs lost or broken watchers. Starting runs one
+   * immediate catch-up scan, so a restart or power-resume routes what waited.
    */
-  startRouter(intervalMs = 1500): void {
+  /** Watch hints normally drain one dirty outbox.  This slow full scan is only
+   * the loss-recovery backstop for dropped/failed watchers. */
+  static readonly ROUTER_RECONCILE_MS = 10_000;
+  startRouter(intervalMs = HiveManager.ROUTER_RECONCILE_MS): void {
     if (this.routerTimer || !this.enabled()) return;
     this.routerGeneration++;
-    this.routerTimer = this.routerRuntime.setInterval(() => {
-      try { this.refreshOutboxWatchers(); this.routeOnce(); } catch { /* keep the loop alive */ }
-    }, intervalMs);
+    this.routerTimer = this.routerRuntime.setInterval(() => this.reconcileRouterAsync(), intervalMs);
     try { this.refreshOutboxWatchers(); this.routeOnce(); } catch { /* the interval retries */ }
   }
+
+  /** The missed-watch safety net uses async directory I/O and never overlaps. */
+  private async reconcileRouterAsync(): Promise<void> {
+    if (this.routerReconciling || !this.routerTimer) return;
+    const root = this.root();
+    if (!root) return;
+    this.routerReconciling = true;
+    try {
+      const agentsDir = join(root, 'agents');
+      const ids = await fsPromises.readdir(agentsDir);
+      const agents = this.registry().agents;
+      for (const id of ids) {
+        if (agents[id]?.archived) continue;
+        const outbox = join(agentsDir, id, 'outbox');
+        try { await fsPromises.readdir(outbox); } catch { continue; }
+        this.scheduleRouteOnce(outbox);
+      }
+      await this.refreshOutboxWatchersAsync(agentsDir, agents);
+    } catch { /* a later bounded pass retries */ }
+    finally { this.routerReconciling = false; }
+  }
+
   stopRouter(): void {
     if (this.routerTimer) { this.routerRuntime.clearInterval(this.routerTimer); this.routerTimer = null; }
     this.routerGeneration++;
     this.routeQueued = false;
+    this.routeDirtyOutboxes.clear();
     for (const w of this.outboxWatchers.values()) { try { w.close(); } catch { /* already closed */ } }
     this.outboxWatchers.clear();
   }
@@ -3663,7 +3700,7 @@ export class HiveManager {
     for (const dir of want) {
       if (this.outboxWatchers.has(dir)) continue;
       try {
-        const w = this.routerRuntime.watch(dir, () => this.scheduleRouteOnce());
+        const w = this.routerRuntime.watch(dir, () => this.scheduleRouteOnce(dir));
         // A broken watcher is dropped; the next reconciliation re-attaches it.
         const drop = (): void => {
           if (this.outboxWatchers.get(dir) !== w) return;
@@ -3678,6 +3715,36 @@ export class HiveManager {
   }
 
   /** The directories currently watched (diagnostics and tests). */
+  /** Async watcher refresh used only by the periodic missed-event backstop. */
+  private async refreshOutboxWatchersAsync(agentsDir: string, agents: Registry['agents']): Promise<void> {
+    let ids: string[];
+    try { ids = await fsPromises.readdir(agentsDir); } catch { ids = []; }
+    const want = new Set<string>();
+    for (const id of ids) {
+      if (agents[id]?.archived) continue;
+      const outbox = join(agentsDir, id, 'outbox');
+      try { if ((await fsPromises.stat(outbox)).isDirectory()) want.add(outbox); } catch { /* gone */ }
+    }
+    for (const [dir, w] of this.outboxWatchers) {
+      if (want.has(dir)) continue;
+      try { w.close(); } catch { /* already closed */ }
+      this.outboxWatchers.delete(dir);
+    }
+    for (const dir of want) {
+      if (this.outboxWatchers.has(dir)) continue;
+      try {
+        const w = this.routerRuntime.watch(dir, () => { this.scheduleRouteOnce(dir); });
+        const drop = (): void => {
+          if (this.outboxWatchers.get(dir) !== w) return;
+          this.outboxWatchers.delete(dir);
+          try { w.close(); } catch { /* already closed */ }
+        };
+        w.on('error', drop); w.on('close', drop);
+        this.outboxWatchers.set(dir, w);
+      } catch { /* retry next reconciliation */ }
+    }
+  }
+
   watchedOutboxes(): string[] {
     return [...this.outboxWatchers.keys()].sort();
   }
@@ -3691,16 +3758,29 @@ export class HiveManager {
   }
 
   /** Coalesce every hint in this turn into ONE authoritative scan (event scheduling, not a timer). */
-  private scheduleRouteOnce(): void {
-    if (this.routeQueued || !this.routerTimer) return;
+  private scheduleRouteOnce(outbox: string): void {
+    if (!this.routerTimer) return;
+    this.routeDirtyOutboxes.add(outbox);
+    if (this.routeQueued) return;
     this.routeQueued = true;
     const generation = this.routerGeneration;
     this.routerRuntime.setImmediate(() => {
       if (generation !== this.routerGeneration) return;
       this.routeQueued = false;
       if (!this.routerTimer) return;
-      try { this.routeOnce(); } catch { /* the interval retries */ }
+      const dirty = [...this.routeDirtyOutboxes];
+      this.routeDirtyOutboxes.clear();
+      try { this.routeOnce(dirty); } catch { /* the reconciliation retries */ }
     });
+  }
+
+  /** Re-read a partial outbox file even when its writer emits no second watch hint. */
+  private scheduleRouteOnceAfter(outbox: string, delayMs: number): void {
+    const generation = this.routerGeneration;
+    this.routerRuntime.setTimeout(() => {
+      if (generation !== this.routerGeneration || !this.routerTimer) return;
+      this.scheduleRouteOnce(outbox);
+    }, Math.max(1, delayMs));
   }
 
   /** Stable enough to recognise an unchanged file after a rejected-file archive fails. */
@@ -3821,17 +3901,21 @@ export class HiveManager {
     }
   }
 
-  routeOnce(): number {
+  /** Drain all outboxes for reconciliation, or only watcher-dirtied outboxes. */
+  routeOnce(dirtyOutboxes?: Iterable<string>): number {
     const root = this.root();
     if (!root) return 0;
     const agentsDir = join(root, 'agents');
-    if (!existsSync(agentsDir)) return 0;
+    const fullScan = dirtyOutboxes === undefined;
+    if (fullScan && !existsSync(agentsDir)) return 0;
     let routed = 0;
     let rejected = 0;
     let archived = 0;
     const liveOutboxFiles = new Set<string>();
-    for (const id of readdirSync(agentsDir)) {
-      const outbox = join(agentsDir, id, 'outbox');
+    const outboxes: Array<[string, string]> = fullScan
+      ? readdirSync(agentsDir).map((id) => [id, join(agentsDir, id, 'outbox')])
+      : [...(dirtyOutboxes ?? [])].map((outbox) => [basename(dirname(outbox)), outbox]);
+    for (const [id, outbox] of outboxes) {
       if (!existsSync(outbox)) continue;
       for (const f of readdirSync(outbox)) {
         if (!f.endsWith('.json')) continue;
@@ -3862,18 +3946,26 @@ export class HiveManager {
           // a visible rejection.
           const now = Date.now();
           try {
-            if (now - statSync(full).mtimeMs < OUTBOX_FRESH_WRITE_GRACE_MS) continue;
+            const freshFor = now - statSync(full).mtimeMs;
+            if (freshFor < OUTBOX_FRESH_WRITE_GRACE_MS) {
+              this.scheduleRouteOnceAfter(outbox, Math.min(OUTBOX_FRESH_WRITE_GRACE_MS, Math.max(1, OUTBOX_FRESH_WRITE_GRACE_MS - freshFor)));
+              continue;
+            }
           } catch {
             continue; // writer removed or replaced it; a later scan sees the new state
           }
           const prior = this.outboxParseRetries.get(full);
           // fs.watch can report several chunks of one write in the same turn.
           // They are hints, not independent retries: wait before re-reading.
-          if (prior && now < prior.retryAfter) continue;
+          if (prior && now < prior.retryAfter) {
+            this.scheduleRouteOnceAfter(outbox, prior.retryAfter - now);
+            continue;
+          }
           const attempts = (prior?.attempts ?? 0) + 1;
           if (attempts < OUTBOX_PARSE_RETRY_LIMIT) {
             this.outboxParseRetries.set(full, { attempts, retryAfter: now + OUTBOX_PARSE_RETRY_DEBOUNCE_MS });
             this.appendLog({ kind: 'outbox-parse-retry', from: id, file: f, attempts });
+            this.scheduleRouteOnceAfter(outbox, OUTBOX_PARSE_RETRY_DEBOUNCE_MS);
             continue;
           }
           this.outboxParseRetries.delete(full);
@@ -3968,17 +4060,22 @@ export class HiveManager {
     }
     // A file removed by its writer or routed successfully must not leave a stale
     // retry count that could punish a later file reusing the same name.
+    // A periodic pass scans only dirty directories, but must still forget files
+    // removed from those directories. Otherwise a later same-named file inherits
+    // retry state and these small maps grow until a router restart.
+    const scannedOutboxes = new Set(outboxes.map(([, outbox]) => outbox));
+    const wasScanned = (full: string): boolean => fullScan || scannedOutboxes.has(dirname(full));
     for (const full of this.outboxParseRetries.keys()) {
-      if (!liveOutboxFiles.has(full)) this.outboxParseRetries.delete(full);
+      if (wasScanned(full) && !liveOutboxFiles.has(full)) this.outboxParseRetries.delete(full);
     }
     for (const full of this.outboxRejectNotices.keys()) {
-      if (!liveOutboxFiles.has(full)) this.outboxRejectNotices.delete(full);
+      if (wasScanned(full) && !liveOutboxFiles.has(full)) this.outboxRejectNotices.delete(full);
     }
     for (const full of this.outboxDeliveredArchives.keys()) {
-      if (!liveOutboxFiles.has(full)) this.outboxDeliveredArchives.delete(full);
+      if (wasScanned(full) && !liveOutboxFiles.has(full)) this.outboxDeliveredArchives.delete(full);
     }
     for (const full of this.outboxArchiveFailures.keys()) {
-      if (!liveOutboxFiles.has(full)) this.outboxArchiveFailures.delete(full);
+      if (wasScanned(full) && !liveOutboxFiles.has(full)) this.outboxArchiveFailures.delete(full);
     }
     if (routed > 0 || rejected > 0 || archived > 0) {
     }
@@ -4020,6 +4117,37 @@ export class HiveManager {
   integrityIssues(): HiveIntegrityIssue[] {
     this.registry(true);
     this.tasks(true);
+    return this.integrityIssuesSnapshot();
+  }
+
+  /**
+   * The IPC/UI form of integrityIssues().  Keep the synchronous form above for
+   * the (many) synchronous callers, but never make the renderer's two-second
+   * banner poll wait on a filesystem stat or authority read on Electron main.
+   * MailLedger's notices are process-local state, so this has precisely the
+   * same result as integrityIssues() after refreshing the two file authorities.
+   */
+  async integrityIssuesAsync(): Promise<HiveIntegrityIssue[]> {
+    const root = this.root();
+    if (root) {
+      await Promise.all([
+        this.readAuthoritativeJsonCachedAsync(join(root, 'registry.json'), () => this.emptyRegistry())
+          .catch((error) => {
+            if (error instanceof HiveAuthorityCorruptError) return this.emptyRegistry();
+            throw error;
+          }),
+        this.readAuthoritativeJsonCachedAsync(join(root, 'tasks.json'), () => ({ tasks: [] }))
+          .catch((error) => {
+            if (error instanceof HiveAuthorityCorruptError) return { tasks: [] };
+            throw error;
+          })
+      ]);
+    }
+    return this.integrityIssuesSnapshot();
+  }
+
+  /** The in-memory portion shared by the synchronous and asynchronous scans. */
+  private integrityIssuesSnapshot(): HiveIntegrityIssue[] {
     // ZT-I3: a ledger error (duplicate id, unknown status) is a NOTICE: nothing is paused,
     // the file is not reverted, god fixes it by hand. Jim S1: the CACHED result; the banner
     // polls every 2 s and the guard already re-checks on watch, its poll and every API write.
@@ -6325,6 +6453,48 @@ export class HiveManager {
       throw new HiveAuthorityCorruptError(issue);
     }
   }
+  /** Async equivalent for the renderer's integrity poll; see integrityIssuesAsync(). */
+  private async readAuthoritativeJsonAsync<T>(p: string, onMissing: () => T): Promise<T> {
+    let raw: string;
+    try {
+      raw = await fsPromises.readFile(p, 'utf8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        this.quarantinedJsonFingerprints.delete(p);
+        this.authorityIssues.delete(p);
+        return onMissing();
+      }
+      throw new Error(`Hive authority ${basename(p)} could not be read: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    try {
+      const parsed = JSON.parse(raw) as T;
+      this.quarantinedJsonFingerprints.delete(p);
+      this.authorityIssues.delete(p);
+      return parsed;
+    } catch (error) {
+      const fingerprint = createHash('sha256').update(raw).digest('hex');
+      let quarantine: string | null = this.authorityIssues.get(p)?.quarantine ?? null;
+      if (this.quarantinedJsonFingerprints.get(p) !== fingerprint) {
+        quarantine = `${p}.corrupt-${Date.now()}-${shortRand()}`;
+        try {
+          await fsPromises.copyFile(p, quarantine);
+          this.quarantinedJsonFingerprints.set(p, fingerprint);
+        } catch (copyError) {
+          quarantine = null;
+          console.error(`[hive] could not quarantine corrupt ${basename(p)}:`, copyError);
+        }
+      }
+      const detail = error instanceof Error ? error.message : String(error);
+      const issue: HiveIntegrityIssue = { file: basename(p), quarantine: quarantine ? basename(quarantine) : null, error: detail };
+      this.authorityIssues.set(p, issue);
+      try {
+        this.appendLog({ kind: 'hive-authority-corrupt', file: basename(p), quarantine: quarantine ? basename(quarantine) : null, error: detail });
+      } catch (logError) {
+        console.error(`[hive] could not log corrupt authority ${basename(p)}:`, logError);
+      }
+      throw new HiveAuthorityCorruptError(issue);
+    }
+  }
   /**
    * MAIN-SYNC-LOG-LEDGER (registry, tasks): registry() and tasks() were a disk read + parse on
    * every call (~430 and ~40 calls/min on Guppy main under a heavy run on 1.1.99; tasks.json is
@@ -6336,9 +6506,15 @@ export class HiveManager {
    * the disk once (statCacheKey.ts: same-size writes inside one tick share a key). Missing, corrupt
    * and unreadable files are never cached: readAuthoritativeJson handles them as before.
    */
-  static readonly AUTHORITY_REVALIDATE_MS = 1_000;
+  /** fs.watch invalidates normally; this slow stat is the missed-event safety net. */
+  static readonly AUTHORITY_REVALIDATE_MS = 5_000;
   private readonly authorityCache = new Map<string, { key: string | null; value: unknown; checkedAt: number }>();
+  /** Every known authority invalidation advances this so an in-flight async read cannot revive old bytes. */
+  private readonly authorityGeneration = new Map<string, number>();
   private readonly authorityWatchers = new Map<string, FSWatcher>();
+  private authorityFallbackTimer: ReturnType<typeof setInterval> | null = null;
+  private authorityFallbackRunning = false;
+  private authorityTestClock = false;
   private authorityNow: () => number = () => Date.now();
   /** The wall clock the racy rule compares with file times (authorityNow is only the window's). */
   private authorityWall: () => number = () => Date.now();
@@ -6346,8 +6522,10 @@ export class HiveManager {
    *  rule's wall clock. */
   __resetAuthorityCacheForTests(now?: () => number, wall?: () => number): void {
     this.authorityCache.clear();
-    if (now) this.authorityNow = now;
-    if (wall) this.authorityWall = wall;
+    this.authorityGeneration.clear();
+    this.authorityTestClock = !!now;
+    this.authorityNow = now ?? (() => Date.now());
+    this.authorityWall = wall ?? (() => Date.now());
   }
   private readAuthoritativeJsonCached<T>(p: string, onMissing: () => T, fresh = false): T {
     const now = this.authorityNow();
@@ -6355,13 +6533,41 @@ export class HiveManager {
     if (c && !fresh && now - c.checkedAt >= 0 && now - c.checkedAt < HiveManager.AUTHORITY_REVALIDATE_MS) return c.value as T;
     const st = authorityStat(p);
     if (st && c && c.key === statKey(st)) { c.checkedAt = now; return c.value as T; }
-    this.authorityCache.delete(p);
+    this.invalidateAuthorityCache(p);
     // The key is taken BEFORE the read: a change between the two re-reads at the next revalidate.
     const value = this.readAuthoritativeJson<T>(p, onMissing);
     if (!st) return value;
     const frozen = authorityDeepFreeze(value);
     // Racy-git rule: a change within STAT_RACY_MS of now may share this key with a later write.
     this.authorityCache.set(p, { key: provenStatKey(st, this.authorityWall()), value: frozen, checkedAt: now });
+    this.ensureAuthorityFallback();
+    this.watchAuthority(p);
+    return frozen;
+  }
+  /**
+   * Async counterpart used exclusively by hive:integrity. It deliberately
+   * follows the synchronous cache's forced-read behavior: a stat comes first,
+   * unchanged cached authorities retain identity, and missing/corrupt files
+   * remain uncached. The disk work runs in libuv instead of Electron main.
+   */
+  private async readAuthoritativeJsonCachedAsync<T>(p: string, onMissing: () => T): Promise<T> {
+    const now = this.authorityNow();
+    // This method yields for stat/read. Capture the generation before either yield so an
+    // intervening write, guard, watcher, or fallback invalidation cannot revive old bytes.
+    let generation = this.authorityGeneration.get(p) ?? 0;
+    const cached = this.authorityCache.get(p);
+    const st = await fsPromises.stat(p).catch(() => null);
+    if (st && cached && cached.key === statKey(st) && (this.authorityGeneration.get(p) ?? 0) === generation) {
+      cached.checkedAt = now;
+      return cached.value as T;
+    }
+    generation = this.invalidateAuthorityCache(p);
+    const value = await this.readAuthoritativeJsonAsync<T>(p, onMissing);
+    if (!st) return value;
+    const frozen = authorityDeepFreeze(value);
+    if ((this.authorityGeneration.get(p) ?? 0) !== generation) return frozen;
+    this.authorityCache.set(p, { key: provenStatKey(st, this.authorityWall()), value: frozen, checkedAt: now });
+    this.ensureAuthorityFallback();
     this.watchAuthority(p);
     return frozen;
   }
@@ -6371,7 +6577,7 @@ export class HiveManager {
     try {
       const w = watchDirectorySafely(dir, (_event, name) => {
         const full = name ? join(dir, String(name)) : null;
-        for (const [file, entry] of this.authorityCache) if (dirname(file) === dir && (!full || full === file)) entry.checkedAt = -Infinity;
+        for (const file of this.authorityCache.keys()) if (dirname(file) === dir && (!full || full === file)) this.invalidateAuthorityCache(file, true);
       }, () => { if (this.authorityWatchers.get(dir) === w) this.authorityWatchers.delete(dir); });
       this.authorityWatchers.set(dir, w);
     } catch { /* the stat revalidate is the authority */ }
@@ -6379,13 +6585,54 @@ export class HiveManager {
   private closeAuthorityWatchers(): void {
     for (const w of this.authorityWatchers.values()) { try { w.close(); } catch { /* noop */ } }
     this.authorityWatchers.clear();
+    if (this.authorityFallbackTimer) clearInterval(this.authorityFallbackTimer);
+    this.authorityFallbackTimer = null;
+  }
+  /** Test seam: simulate dropped authority watches without stopping their fallback. */
+  __dropAuthorityWatchersForTests(): void {
+    for (const w of this.authorityWatchers.values()) { try { w.close(); } catch { /* noop */ } }
+    this.authorityWatchers.clear();
+  }
+
+  /** Missed fs.watch events invalidate these tiny authority caches off-main-thread. */
+  private ensureAuthorityFallback(): void {
+    if (this.authorityFallbackTimer) return;
+    this.authorityFallbackTimer = setInterval(() => { void this.revalidateAuthoritiesAsync(); }, HiveManager.AUTHORITY_REVALIDATE_MS);
+    this.authorityFallbackTimer.unref?.();
+  }
+  private async revalidateAuthoritiesAsync(): Promise<void> {
+    if (this.authorityFallbackRunning || this.authorityTestClock || !this.authorityCache.size) return;
+    this.authorityFallbackRunning = true;
+    try {
+      await Promise.all([...this.authorityCache].map(async ([file, entry]) => {
+        const st = await fsPromises.stat(file).catch(() => null);
+        if (this.authorityCache.get(file) !== entry) return;
+        if (!st || entry.key === null || entry.key !== statKey(st)) this.invalidateAuthorityCache(file);
+        else entry.checkedAt = this.authorityNow();
+      }));
+    } finally { this.authorityFallbackRunning = false; }
+  }
+  /** Test seam for the real production missed-watch verifier. */
+  async __revalidateAuthoritiesForTests(): Promise<void> {
+    if (!this.authorityFallbackTimer) throw new Error('authority missed-watch fallback is not armed');
+    await this.revalidateAuthoritiesAsync();
   }
   private writeJson(p: string, data: unknown): void {
     this.atomicWriteJson(p, data);
   }
   private atomicWriteJson(p: string, data: unknown): void {
     // Dropped on success AND on failure: the file may or may not have changed.
-    try { atomicWriteJsonFile(p, data); } finally { this.authorityCache.delete(p); }
+    try { atomicWriteJsonFile(p, data); } finally { this.invalidateAuthorityCache(p); }
+  }
+  /** Invalidate a path and advance its epoch, retaining an entry only for watcher revalidation. */
+  private invalidateAuthorityCache(p: string, retain = false): number {
+    const generation = (this.authorityGeneration.get(p) ?? 0) + 1;
+    this.authorityGeneration.set(p, generation);
+    if (retain) {
+      const entry = this.authorityCache.get(p);
+      if (entry) entry.checkedAt = -Infinity;
+    } else this.authorityCache.delete(p);
+    return generation;
   }
 
 }

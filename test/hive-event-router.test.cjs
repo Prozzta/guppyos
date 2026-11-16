@@ -21,9 +21,10 @@ const { HiveManager } = loadTs('src/main/hive.ts');
 function fakeRuntime() {
   const watchers = new Map();     // dir -> { hint, closed, handlers }
   const immediates = [];
+  const timeouts = [];
   const intervals = [];
   return {
-    watchers, immediates, intervals,
+    watchers, immediates, timeouts, intervals,
     runtime: {
       watch: (dir, onHint) => {
         const w = {
@@ -35,10 +36,12 @@ function fakeRuntime() {
         return w;
       },
       setImmediate: (fn) => { immediates.push(fn); },
+      setTimeout: (fn, ms) => { const h = { fn, ms }; timeouts.push(h); return h; },
       setInterval: (fn, ms) => { const h = { fn, ms, cleared: false }; intervals.push(h); return h; },
       clearInterval: (h) => { h.cleared = true; }
     },
     flush() { while (immediates.length) immediates.shift()(); },
+    fireNextTimeout() { const next = timeouts.shift(); assert.ok(next, 'expected a delayed retry'); next.fn(); },
     live(dir) { const w = watchers.get(dir); return w && !w.closed ? w : null; }
   };
 }
@@ -88,11 +91,67 @@ test('A2 duplicate / coalesced hints in one turn produce ONE scan: one route, on
   assert.deepEqual(f.deliveries, [{ agentId: 'god-1', messageId: 'm2' }]);
 });
 
+test('A2b a watcher-driven steady-state drain scans only its dirty outbox, not agents again', async (t) => {
+  const f = await floor(t);
+  f.hive.startRouter();
+  assert.equal(f.rt.intervals[0].ms, HiveManager.ROUTER_RECONCILE_MS, 'the only timer is the slow missed-watch backstop');
+  f.write('jim-1', msg('m2b', 'god-1'));
+  const agentsDir = path.join(f.home, 'hive', 'agents');
+  const real = fs.readdirSync;
+  let agentReads = 0;
+  fs.readdirSync = function (dir, ...rest) {
+    if (String(dir) === agentsDir) agentReads++;
+    return real.call(this, dir, ...rest);
+  };
+  try {
+    f.rt.live(f.outbox('jim-1')).hint();
+    f.rt.flush();
+  } finally { fs.readdirSync = real; }
+  assert.equal(agentReads, 0, 'no sync agents readdir on the watcher tick');
+  assert.ok(fs.existsSync(path.join(f.inbox('god-1'), 'm2b.json')));
+});
+
+test('A2c coalesced hints from different outboxes drain every dirty outbox', async (t) => {
+  const f = await floor(t);
+  await f.hive.ensureAgent({ id: 'pam-1', name: 'Pam', provider: 'claude', cwd: f.home });
+  f.hive.startRouter();
+  f.write('jim-1', msg('m2c-jim', 'god-1'));
+  f.write('pam-1', msg('m2c-pam', 'god-1'));
+  f.rt.live(f.outbox('jim-1')).hint();
+  f.rt.live(f.outbox('pam-1')).hint();
+  assert.equal(f.rt.immediates.length, 1, 'one queued drain carries both dirty paths');
+  f.rt.flush();
+  assert.deepEqual(f.deliveries.map((d) => d.messageId).sort(), ['m2c-jim', 'm2c-pam']);
+});
+
+test('A2d a partial outbox is retried after grace and debounce without another watch hint', async (t) => {
+  const f = await floor(t);
+  f.hive.startRouter();
+  const file = path.join(f.outbox('jim-1'), 'partial.json');
+  fs.writeFileSync(file, '{"id":"partial"');
+  f.rt.live(f.outbox('jim-1')).hint();
+  f.rt.flush();
+  assert.equal(f.rt.timeouts.length, 1, 'fresh partial schedules its grace retry');
+  assert.ok(f.rt.timeouts[0].ms > 0 && f.rt.timeouts[0].ms <= 1000, `grace=${f.rt.timeouts[0].ms}`);
+
+  // The delayed read sees an old incomplete file, establishes the debounce, then
+  // the writer completes it without another directory event.
+  const old = new Date(Date.now() - 2000);
+  fs.utimesSync(file, old, old);
+  f.rt.fireNextTimeout(); f.rt.flush();
+  assert.equal(f.rt.timeouts.length, 1, 'the parse retry is also scheduled');
+  assert.equal(f.rt.timeouts[0].ms, 250);
+  fs.writeFileSync(file, JSON.stringify(msg('partial', 'god-1')));
+  f.rt.fireNextTimeout(); f.rt.flush();
+  assert.deepEqual(f.deliveries, [{ agentId: 'god-1', messageId: 'partial' }]);
+});
+
 test('A3 a missed watch event is repaired by the reconciliation interval', async (t) => {
   const f = await floor(t);
   f.hive.startRouter();
   f.write('jim-1', msg('m3', 'god-1'));
-  f.rt.intervals[0].fn();                     // no watch callback at all
+  await f.rt.intervals[0].fn();               // no watch callback at all
+  f.rt.flush();
   assert.ok(fs.existsSync(path.join(f.inbox('god-1'), 'm3.json')));
   assert.deepEqual(f.deliveries, [{ agentId: 'god-1', messageId: 'm3' }]);
 });
@@ -107,11 +166,11 @@ test('A4 a newly hired agent is watched at once; a removed or archived agent\'s 
   pam.hint(); f.rt.flush();
   assert.deepEqual(f.deliveries.map((d) => d.messageId), ['m4']);
   fs.rmSync(path.join(f.home, 'hive', 'agents', 'pam-1'), { recursive: true, force: true });
-  f.rt.intervals[0].fn();
+  await f.rt.intervals[0].fn(); f.rt.flush();
   assert.equal(pam.closed, true, 'a vanished outbox is unwatched');
   const jim = f.rt.live(f.outbox('jim-1'));
   f.hive.setArchived('jim-1', true);
-  f.rt.intervals[0].fn();
+  await f.rt.intervals[0].fn(); f.rt.flush();
   assert.equal(jim.closed, true, 'an archived agent is not watched');
 });
 
@@ -156,7 +215,7 @@ test('A6 watcher errors and stopRouter lose no files: a later scan or restart st
   w.handlers.error(new Error('EPERM'));
   assert.equal(w.closed, true, 'a broken watcher is dropped');
   f.write('jim-1', msg('m6', 'god-1'));
-  f.rt.intervals[0].fn();
+  await f.rt.intervals[0].fn(); f.rt.flush();
   assert.ok(fs.existsSync(path.join(f.inbox('god-1'), 'm6.json')), 'reconciliation routes it');
   assert.ok(f.rt.live(f.outbox('jim-1')), 'and re-attaches the watcher');
   // A hint queued, then the router stops: the queued scan never runs after the stop.

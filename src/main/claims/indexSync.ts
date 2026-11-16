@@ -35,6 +35,11 @@ export interface IndexSyncDeps {
    * the head, the chunks as JSON and their count. Null (or absent): derive in-process, as before.
    */
   offMain?: (agentId: string, read: ReadResult) => Promise<{ head: string; chunksJson: string; count: number } | null>;
+  /**
+   * CLAIMS-WARM-BACKFILL-106: whether the derive worker still takes jobs (DeriveOffMain.enabled; absent: true when
+   * offMain is set). While it does, an in-process sync keeps no snapshot, so the next append goes to the worker.
+   */
+  offMainEnabled?: () => boolean;
   /** Called after a verified snapshot is successfully indexed. */
   onIndexed?: (agentId: string) => void;
   log?: (row: Record<string, unknown>) => void;
@@ -177,7 +182,12 @@ export class ClaimsIndexSync {
     if (!reply.ok) this.d.log?.({ kind: 'claims-index-failed', agentId, error: String(reply.error ?? '').slice(0, 160) });
     else {
       // A broken-chain prefix is safe to send but not safe to extend with a future delta.
-      if (prefix.truncatedAt) this.snapshots.delete(agentId);
+      // CLAIMS-WARM-BACKFILL-106 (Andy bf6a15): a snapshot makes every later append a delta, and a delta derives the
+      // whole ledger here on main (0.5-0.9 s at 10x). An in-process sync while the derive worker still takes jobs was a
+      // worker fallback (or a read it could not take), so it keeps no snapshot: the next append goes to the worker.
+      // Only with no worker (absent, or off after its failures) does the delta stay on main.
+      const workerOn = !!this.d.offMain && (this.d.offMainEnabled?.() ?? true);
+      if (prefix.truncatedAt || workerOn) this.snapshots.delete(agentId);
       else this.snapshots.set(agentId, { records: prefix.records, chunks: allChunks });
       this.deltasSinceVerify.set(agentId, delta ? (this.deltasSinceVerify.get(agentId) ?? 0) + 1 : 0);
       // Do not discard an append that arrived while the worker request was in flight.

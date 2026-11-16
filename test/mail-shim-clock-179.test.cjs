@@ -115,6 +115,17 @@ async function agyRound(t, deschedule) {
     const handle = f.server.handle.bind(f.server);
     f.server.handle = (p) => { const res = handle(p); setImmediate(() => fs.writeFileSync(sentinel, '1')); return res; };
   }
+  if (deschedule.replyAfterShimClose) {
+    const sockets = [];
+    f.server.server.on('connection', (socket) => sockets.push(socket));
+    const handle = f.server.handleWithClaimContext.bind(f.server);
+    f.server.handleWithClaimContext = async (p) => {
+      const socket = sockets.at(-1);
+      assert.ok(socket, 'the real shim connection reached the pipe server');
+      await new Promise((resolve) => socket.once('close', resolve));
+      return handle(p);
+    };
+  }
   const r = await runShim(AGY_HOOK_SHIM, ['PreInvocation'], { AGENT_ID: 'ag-1', HIVE_SOCK: f.hive.sockPath(), HIVE_HOOK_TOKEN: f.tokens['ag-1'] }, JSON.stringify({ conversationId: 'conv-1', workspacePaths: [f.home] }), { ...deschedule, sentinel });
   const late = () => f.logRows().find((x) => x.kind === 'mail-hook-late' && x.ids.includes(m.id));
   for (let i = 0; i < 400 && f.entryOf(m.id).state !== 'surfaced' && !late(); i++) await new Promise((res) => setTimeout(res, 5));
@@ -169,8 +180,9 @@ test('TEST-FLAKE-GATE179-SHIM: the GATE-179 shape holds with the server stalled 
 });
 
 test('TEST-FLAKE-GATE179-SHIM: a server stalled past the shim\'s give-up (the flake\'s cause) is LATE with no flush: re-surfaced, never surfaced unprinted', async (t) => {
-  // The shim's 3.5 s + 2 s blocks end at ~5.5 s; a 2.5 s stall puts the reply after its give-up.
-  const r = await agyRound(t, { pre: 3_500, post: 2_000, stallMs: 2_500 });
+  // Wait for the REAL shim socket to close before the server answers. This proves it gave up
+  // without betting that a 3.5 s + 2 s wall-clock block wins an event-loop race under suite load.
+  const r = await agyRound(t, { replyAfterShimClose: true });
   neverSurfacedUnprinted(r, 'stalled server');
   assert.ok(r.late, `a mail-hook-late row (${JSON.stringify(r)})`);
   assert.equal(r.late.latencyMs, null, 'never flushed: the shim had given up (close before finish)');

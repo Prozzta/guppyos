@@ -1,5 +1,6 @@
 import { app } from 'electron';
 import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, type Stats } from 'node:fs';
+import { promises as fsPromises } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
 import { DEV_ISOLATION, devDataRoot, devHarnessHome } from './devIsolation';
 import { basename, dirname, join } from 'node:path';
@@ -367,6 +368,10 @@ export interface HarnessConfig extends BlobConfigFields {
    *  reason (the turn continues) instead of ending and getting a typed wake. Unset = off. Honoured
    *  only with wakePath 'term'. Read at every Stop. */
   stopContinue?: { claude?: boolean; codex?: boolean; antigravity?: boolean };
+  /** CODEX-TURN-ENDS-EARLY P1: a Codex Stop with a request still owed is continued with a short
+   *  "still owed, do the next step" reason (owedStop.ts). On unless `codex` is literally false;
+   *  never for Claude or AGY. Independent of wakePath. Read at every Stop. */
+  owedStopContinue?: { codex?: boolean };
   /** Agent ids whose automatic inbox/queue delivery is paused. Pending messages
    *  stay durable until the operator explicitly resumes delivery. */
   autoDeliveryPausedAgents?: string[];
@@ -710,7 +715,8 @@ function writeConfigAtomically(p: string, data: unknown): void {
  * The value is frozen, never cloned per call (that would bring the cost back): a caller that
  * needs a changed config spreads it into a new object (writeConfig's `{ ...current, ...patch }`).
  */
-export const CONFIG_REVALIDATE_MS = 1_000;
+/** Watch events are the normal invalidation path; this is only the missed-event backstop. */
+export const CONFIG_REVALIDATE_MS = 5_000;
 type ConfigCache = { path: string; key: string | null; value: HarnessConfig; checkedAt: number };
 let configCache: ConfigCache | null = null;
 /** Bumped by every write, so a read whose migration wrote mid-build does not cache a stale value. */
@@ -719,6 +725,34 @@ let configNow = (): number => Date.now();
 /** The wall clock the racy rule compares with file times (configNow is only the window's clock). */
 let configWall = (): number => Date.now();
 let configWatcher: { path: string; close: () => void } | null = null;
+let configFallbackTimer: ReturnType<typeof setInterval> | null = null;
+let configFallbackRunning = false;
+/** Injected clocks are test-only; their synchronous model remains deterministic. */
+let configTestClock = false;
+
+/** The missed-watch backstop runs off-main-thread. It invalidates only: the next
+ * normal reader does the existing validated synchronous cold read. */
+function ensureConfigFallback(): void {
+  if (configFallbackTimer) return;
+  configFallbackTimer = setInterval(() => { void revalidateConfigAsync(); }, CONFIG_REVALIDATE_MS);
+  configFallbackTimer.unref?.();
+}
+async function revalidateConfigAsync(): Promise<void> {
+  if (configFallbackRunning || !configCache || configTestClock) return;
+  configFallbackRunning = true;
+  try {
+    const c = configCache;
+    if (!c) return;
+    const st = await fsPromises.stat(c.path).catch(() => null);
+    if (!st || c.key === null || c.key !== statKey(st)) configCache = null;
+    else c.checkedAt = configNow();
+  } finally { configFallbackRunning = false; }
+}
+/** Test seam for the real-clock-free missed-watch bound. */
+export async function __revalidateConfigForTests(): Promise<void> {
+  if (!configFallbackTimer) throw new Error('config missed-watch fallback is not armed');
+  await revalidateConfigAsync();
+}
 
 function statOrNull(p: string): Stats | null {
   // As existsSync: any error (ENOENT, EACCES, ...) is "no file".
@@ -761,14 +795,23 @@ function watchConfig(p: string): void {
 export function closeConfigWatcher(): void {
   configWatcher?.close();
   configWatcher = null;
+  if (configFallbackTimer) clearInterval(configFallbackTimer);
+  configFallbackTimer = null;
+}
+
+/** Test seam: simulate a lost watch while leaving the missed-watch timer armed. */
+export function __dropConfigWatcherForTests(): void {
+  configWatcher?.close();
+  configWatcher = null;
 }
 
 /** Tests: drop the cache (the next read goes to disk), and/or drive the revalidate clock and the
  *  racy rule's wall clock. */
 export function __resetConfigCacheForTests(now?: () => number, wall?: () => number): void {
   configCache = null;
-  if (now) configNow = now;
-  if (wall) configWall = wall;
+  configTestClock = !!now;
+  configNow = now ?? (() => Date.now());
+  configWall = wall ?? (() => Date.now());
 }
 
 function noteCorruptConfig(p: string, raw: string, error: unknown): void {
@@ -989,7 +1032,7 @@ function readConfigCached(fresh: boolean): HarnessConfig {
   const p = configPath();
   const now = configNow();
   const c = configCache;
-  if (c && !fresh && c.path === p && now - c.checkedAt >= 0 && now - c.checkedAt < CONFIG_REVALIDATE_MS) return c.value;
+  if (c && !fresh && c.path === p && (!configTestClock || (now - c.checkedAt >= 0 && now - c.checkedAt < CONFIG_REVALIDATE_MS))) return c.value;
   const st = statOrNull(p);
   // No file yet = a first run with nothing to migrate; the defaults ARE the
   // post-migration shape. Deliberately does not persist — a bare read must not
@@ -1031,7 +1074,10 @@ function readConfigCached(fresh: boolean): HarnessConfig {
   const value = deepFreeze(structuredClone(built));
   // A migration that persisted mid-build changed the file after the stat: leave it uncached.
   // Racy-git rule: a change within STAT_RACY_MS of now may share this key with a later write.
-  if (gen === configWriteGen) configCache = { path: p, key: provenStatKey(st, configWall()), value, checkedAt: now };
+  if (gen === configWriteGen) {
+    configCache = { path: p, key: provenStatKey(st, configWall()), value, checkedAt: now };
+    ensureConfigFallback();
+  }
   watchConfig(p);
   return value;
 }
