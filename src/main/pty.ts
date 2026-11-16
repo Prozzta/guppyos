@@ -159,9 +159,72 @@ interface WindowsTerminalInternals {
   _isReady?: boolean;
   _deferreds?: unknown[];
   _close?: () => void;
-  _agent?: { kill?: () => void };
+  _agent?: { kill?: () => void; exitCode?: number; _conoutSocketWorker?: ConoutConnectionInternals };
   /** The agent's outSocket (net.Socket); `_handle` stays null until its connect() runs. */
-  _socket?: { readable: boolean; _handle?: unknown };
+  _socket?: { readable: boolean; _handle?: unknown; destroy?: () => void };
+  /** Terminal events ride on the socket; 'exit' is what onExit listens to. */
+  emit?: (event: string, ...args: unknown[]) => unknown;
+}
+
+/** node-pty 1.1.0 ConoutConnection: the worker thread that serves the data pipe, and the connect its READY runs. */
+interface ConoutConnectionInternals {
+  connectSocket?: (socket: unknown) => void;
+  _worker?: { terminate?: () => Promise<number> };
+}
+
+/** Said once: guardLateReady met a node-pty it does not fit. */
+let lateReadyGuardMissingSaid = false;
+
+/**
+ * PTY-LATE-READY-ENOENT. After an early close the data socket is still unconnected, and node-pty's
+ * `_agent.kill()` has started the conout worker's 1 s flush timer, which TERMINATES the worker: the
+ * only server of the pipe the socket would connect to. node-pty connects whenever the worker's READY
+ * is handled, with no look at that. A READY handled after the terminate (the main thread was busy
+ * for that second: both are then due in the same turn) connects to a pipe that no longer exists, and
+ * the socket has no error listener yet (node-pty adds its own on 'ready_datapipe'), so the
+ * 'connect ENOENT' is thrown outside any caller. And a worker terminated before the pipe came up,
+ * READY or not, leaves a terminal that never reports its exit: node-pty reports it from the pipe's
+ * close.
+ *
+ * So, for a terminal closed early with its connect still to come, the terminate is where the pipe's
+ * fate is known. If the socket has not started its connect by then, it never will: a later READY
+ * connects nothing, the socket is destroyed, and the exit node-pty would have reported from the
+ * pipe's close is reported here, once. A socket that did start its connect is left to node-pty
+ * (Windows completes a pipe connect inside the call, so that one reaches the still-listening worker).
+ * No error is caught or handled anywhere: the connect that would fail is not made.
+ */
+function guardLateReady(t: WindowsTerminalInternals): void {
+  const sock = t._socket;
+  const conn = t._agent?._conoutSocketWorker;
+  const worker = conn?._worker;
+  if (!sock || !conn || !worker || typeof conn.connectSocket !== 'function' || typeof worker.terminate !== 'function'
+    || typeof sock.destroy !== 'function' || typeof t.emit !== 'function') {
+    // Another node-pty: the pin test fails. Here the terminal is left as it was before this guard.
+    if (!lateReadyGuardMissingSaid) {
+      lateReadyGuardMissingSaid = true;
+      console.warn('[pty] late-READY guard not installed: this node-pty lacks the conout internals it gates; an early-killed terminal may throw connect ENOENT or report no exit');
+    }
+    return;
+  }
+  const connect = conn.connectSocket.bind(conn);
+  const terminate = worker.terminate.bind(worker);
+  // Whether the connect was started is remembered here, not read from the socket: a pipe that
+  // connected, drained and closed has no handle again by the time its worker is terminated.
+  let connectStarted = false;
+  let pipeGone = false;
+  conn.connectSocket = (socket: unknown): void => {
+    if (pipeGone) return;
+    connectStarted = true;
+    connect(socket);
+  };
+  worker.terminate = (): Promise<number> => {
+    if (!pipeGone && !connectStarted) {
+      pipeGone = true;
+      sock.destroy!();
+      t.emit!('exit', t._agent?.exitCode);
+    }
+    return terminate();
+  };
 }
 
 /**
@@ -204,7 +267,11 @@ export function armEarlyKill(proc: pty.IPty, platform: NodeJS.Platform = process
     t._close!();
     t._agent!.kill!();
     // PTY-EARLY-CLOSE-EOF: an unconnected socket must not reach connect() marked unreadable.
-    if (connectPending) sock.readable = true;
+    if (connectPending) {
+      sock.readable = true;
+      // PTY-LATE-READY-ENOENT: and it must not connect once its pipe's server has been terminated.
+      guardLateReady(t);
+    }
   };
   return true;
 }
