@@ -235,7 +235,7 @@ test('fixture cleanup waits through a cwd-holder EPERM (MUTANT: one attempt fail
     assert.ok(retries.length >= 1, 'the fixed cleanup recorded its blocked first delete');
     assert.equal(retries[0].try, 1);
     assert.notEqual(retries[0].code, 'UNKNOWN');
-    holder = null; // it was released by the first recorded retry and its cwd is gone with the dir
+    stopCwdHolder(holder); holder = null; // release marker too; its cwd is gone with the fixture
   } finally {
     if (holder) stopCwdHolder(holder);
     if (fs.existsSync(dir)) removeFixture(dir);
