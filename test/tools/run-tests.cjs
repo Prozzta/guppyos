@@ -649,6 +649,15 @@ module.exports = { startBackstop, BACKSTOP_PRELOAD, runNodeTest,prepareFileJob, 
 
 if (require.main === module) {
   const repoRoot = path.resolve(__dirname, '..', '..');
+  // WORKTREE-NATIVE-BUILD-GAP: a tree missing its native builds or the patched xterm addon
+  // produced false reds and an uncapped run; refuse it up front (tools/worktree-setup.cjs fixes it).
+  const treeSetup = require('../../tools/worktree-setup.cjs');
+  const optedOut = [];
+  const gate = treeSetup.preflight({ root: repoRoot, optedOut });
+  if (gate) process.exit(gate);
+  // An opted-out run says so again under its summary, where a reader looks for the verdict. It is
+  // an exit hook, so nothing sits between the temp-folder sweep and the exit (ps-policy pin).
+  if (optedOut.length) process.once('exit', () => fs.writeSync(2, `${treeSetup.optOutLine(optedOut)}\n`));
   const code = run({
     testDir: path.join(repoRoot, 'test'),
     filters: process.argv.slice(2),
