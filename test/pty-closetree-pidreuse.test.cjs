@@ -38,7 +38,7 @@ if (process.platform !== 'win32') {
 const PTYF = 'src/main/pty.ts';
 const REAL = loadTs(PTYF);
 const DIR = tempDir('ptpr-');
-fs.writeFileSync(path.join(DIR, 'root.js'), 'setInterval(() => {}, 1000);\n');
+fs.writeFileSync(path.join(DIR, 'root.js'), "process.stdout.write('ptpr-root-up'); setInterval(() => {}, 1000);\n");
 
 // Every taskkill is answered here. `answers` is consumed one per sweep; with none left the sweep
 // "finishes" having ended nothing.
@@ -88,6 +88,11 @@ async function withTerminal(Pty, scenario) {
     assert.ok(r.ok, `spawn: ${r.error}`);
     const proc = m.sessions.get(id).proc;
     root = proc.pid;
+    // The scenario starts once the root has spoken. A ConPTY closed in its first milliseconds can
+    // still deliver its start-up output after node-pty has ended the socket ("stream.push() after
+    // EOF", thrown outside any test). That is node-pty's, and not what this file is about.
+    let seen = '';
+    await within(new Promise((resolve) => { const sub = proc.onData((d) => { seen += d; if (seen.includes('ptpr-root-up')) { sub.dispose(); resolve(); } }); }), "the root's first output");
     let onReport = null;
     const reported = new Promise((resolve) => { onReport = resolve; });
     const agent = proc._agent;
