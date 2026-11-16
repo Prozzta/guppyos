@@ -320,17 +320,20 @@ test('warm(): nothing in the caller\'s turn, sliced by the clock, then reads are
   assert.equal(syncSeg, 0, 'no synchronous segment read during the warm');
   // Real 4 ms slices: count this thread's CPU between pauses, not scheduler delay. A full suite
   // can defer setImmediate for tens of ms while this thread is off-core; that is not a main-thread
-  // block. A separate, deliberately generous wall bar still catches a gross synchronous block.
-  let lastCpu = 0; let worstCpu = 0; let lastWall = 0; let worstWall = 0; let pauses = 0;
+  // block. STARTUP-FREEZE-A3-WALL: the generous 500 ms wall bar for a gross synchronous block is a
+  // wall-clock gate, so it runs in the serial perf lane (test/perf/startup-freeze-a3-wall.perf.cjs, pinned below).
+  let lastCpu = 0; let worstCpu = 0; let pauses = 0;
   const y = setup();
   await writeLedger(y, 'andy', { '2026-09.jsonl': 3000, '2026-10.jsonl': 3000, '2026-11.jsonl': 1000 });
   const s2 = y.mk().store;
-  lastCpu = threadCpuMs(); lastWall = performance.now();
-  const res = await s2.warm(['andy'], { sliceMs: 4, pause: () => new Promise((r) => setImmediate(() => { const cpu = threadCpuMs(); const wall = performance.now(); worstCpu = Math.max(worstCpu, cpu - lastCpu); worstWall = Math.max(worstWall, wall - lastWall); pauses++; lastCpu = cpu; lastWall = wall; r(); })) });
+  lastCpu = threadCpuMs();
+  const res = await s2.warm(['andy'], { sliceMs: 4, pause: () => new Promise((r) => setImmediate(() => { const cpu = threadCpuMs(); worstCpu = Math.max(worstCpu, cpu - lastCpu); pauses++; lastCpu = cpu; r(); })) });
   assert.deepEqual(res.warmed, ['andy']);
   assert.ok(pauses >= 3, `the warm paused between slices (${pauses})`);
   assert.ok(worstCpu < 50, `no slice used 50 ms of this thread's CPU (${worstCpu.toFixed(1)} ms)`);
-  assert.ok(worstWall < 500, `no slice blocked the event loop for 500 ms (${worstWall.toFixed(1)} ms)`);
+  const lane = fs.readFileSync(path.join(__dirname, 'perf', 'startup-freeze-a3-wall.perf.cjs'), 'utf8');
+  assert.equal((lane.match(/assert\.ok\(worstWall < 500,/g) || []).length, 1, 'the 500 ms wall bar lives in the serial perf lane');
+  assert.ok(lane.includes("s2.warm(['andy'], { sliceMs: 4, pause:"), 'the perf lane times the same warm');
   // Afterwards a read is the cached one: no whole-file read, no MAC.
   const hit = countReads(files, () => countHmacs(() => store.readLedgerCached('andy')));
   assert.equal(hit.c, 0);
