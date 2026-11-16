@@ -99,7 +99,7 @@ test(`a ${MAIL_FILES}-file floor: the first start reads it all once; a second st
   assert.equal(second.mailReads.length, 0, `MUTANT: a second start reads 0 old mail files (read ${second.mailReads.length}: ${second.mailReads.slice(0, 3).join(', ')})`);
   assert.equal(second.syncMailReads.length, 0, 'MUTANT: and none synchronously');
   assert.deepEqual(second.ops.write, [], 'an unchanged floor writes nothing');
-  assert.ok(second.ops.read.length <= AGENTS.length + 2, `only the manifests, _links.jsonl and registry.json are read (${second.ops.read.length})`);
+  assert.ok(second.ops.read.length <= AGENTS.length + 3, `only the manifests, _links.jsonl, registry.json and tasks.json (LAG-SYNC-IO-107: read through the driver now, not synchronously on main) are read (${second.ops.read.length}: ${second.ops.read.filter((p) => !/_scan/.test(p)).join(', ')})`);
 
   // mail delivered while the app was closed, and one copy moved from inbox to inbox/.done
   const fresh = [deliver(root, mails), deliver(root, mails + 1, { folder: '' })];

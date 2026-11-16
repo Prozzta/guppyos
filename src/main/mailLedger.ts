@@ -27,7 +27,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { HUMAN_RELAY_RE } from '../shared/mailWakeClass';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync } from 'node:fs';
-import { stat as statAsync } from 'node:fs/promises';
+import { readFile as readFileAsync, readdir as readdirAsync, stat as statAsync } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { atomicWriteJson, renameWithRetry } from './atomicJson';
 import { codexPopupAdvice, popupInReason } from '../shared/codexScreen';
@@ -1588,19 +1588,92 @@ export class MailLedger {
     return st;
   }
 
-  private load(st: AgentLedger): void {
+  /**
+   * LAG-SYNC-IO-107: `state`, with a first load's file reads done off the main thread: the ledger
+   * file, the inbox listing and every inbox message (stat and read). `load` then runs as one
+   * ordered synchronous step over what was read, exactly as it does over its own reads. Concurrent
+   * callers share one flight per ledger. The synchronous `state` stays the last word: if it loaded
+   * this ledger while the files were being read (a delivery, any ledger call for the agent), what
+   * was read is dropped and its ledger is the answer. Every write to a ledger or by the ledger to
+   * an inbox goes through `state`, so nothing read here can be older than a loaded ledger.
+   * The rare repairs inside `load` (a corrupt ledger's rebuild, a missing body that came back)
+   * still read synchronously.
+   */
+  private stateAsync(agentId: string): Promise<AgentLedger> {
+    if (!isValidMailId(agentId)) return Promise.reject(new Error(`mail ledger: invalid agent id ${JSON.stringify(agentId).slice(0, 80)}`));
+    const file = this.ledgerFile(agentId);
+    if (!file) return Promise.reject(new Error('mail ledger: hive is not enabled'));
+    const cached = this.ledgers.get(file);
+    if (cached) return Promise.resolve(cached);
+    const flying = this.loading.get(file);
+    if (flying) return flying;
+    const flight: Promise<AgentLedger> = (async () => {
+      const inboxDir = this.inboxDir(agentId)!;
+      if (!await statAsync(inboxDir).then(() => true, () => false)) return this.state(agentId);
+      let raw: string | null = null;
+      let failure: string | null = null;
+      try {
+        raw = await readFileAsync(file, 'utf8');
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') failure = `unreadable: ${error instanceof Error ? error.message : String(error)}`;
+      }
+      const dir = await this.readDirAsync(inboxDir);
+      // The hive moved, or the synchronous loader got there first: its answer stands.
+      if (this.ledgerFile(agentId) !== file || this.ledgers.has(file)) return this.state(agentId);
+      const st: AgentLedger = {
+        agentId, file, doc: emptyLedger(agentId), dirty: false, timer: null, lastWriteAt: 0,
+        archive: new Set(), archiveTimer: null, archiveAttempt: 0, archiveFailLogged: new Set(), writeFailLogged: false
+      };
+      this.ledgers.set(file, st);
+      this.load(st, { raw, failure, inbox: dir.msgs, names: dir.names });
+      return st;
+    })().finally(() => { if (this.loading.get(file) === flight) this.loading.delete(file); });
+    this.loading.set(file, flight);
+    return flight;
+  }
+  private readonly loading = new Map<string, Promise<AgentLedger>>();
+
+  /** `readDir` through node:fs/promises, plus every name in the folder (for `load`'s existence checks). */
+  private async readDirAsync(dir: string): Promise<{ msgs: DiskMessage[]; names: Set<string> }> {
+    let names: string[];
+    try { names = await readdirAsync(dir); } catch { return { msgs: [], names: new Set() }; }
+    const read = await Promise.all(names.map(async (n): Promise<DiskMessage | null> => {
+      if (!n.endsWith('.json')) return null;
+      const full = join(dir, n);
+      let mtimeMs = 0;
+      let msg: Partial<MailMessageLike> | null = null;
+      try {
+        const st = await statAsync(full);
+        if (!st.isFile()) return null;
+        mtimeMs = st.mtimeMs;
+        if (st.size <= MESSAGE_FILE_MAX_BYTES) {
+          const parsed = JSON.parse(await readFileAsync(full, 'utf8')) as unknown;
+          if (parsed && typeof parsed === 'object') msg = parsed as Partial<MailMessageLike>;
+        }
+      } catch { /* unparseable: still a message file on disk */ }
+      return { id: n.slice(0, -'.json'.length), msg, mtimeMs };
+    }));
+    return { msgs: read.filter((m): m is DiskMessage => m !== null), names: new Set(names) };
+  }
+
+  /** `pre` (stateAsync): the ledger file's text or read failure, the inbox's messages and its
+   *  names, already read; without it they are read here. */
+  private load(st: AgentLedger, pre?: { raw: string | null; failure: string | null; inbox: DiskMessage[]; names: Set<string> }): void {
     const now = this.now();
     const inboxDir = this.inboxDir(st.agentId)!;
     let raw: string | null = null;
     let failure: string | null = null;
-    try {
-      raw = readFileSync(st.file, 'utf8');
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') failure = `unreadable: ${error instanceof Error ? error.message : String(error)}`;
+    if (pre) { raw = pre.raw; failure = pre.failure; }
+    else {
+      try {
+        raw = readFileSync(st.file, 'utf8');
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') failure = `unreadable: ${error instanceof Error ? error.message : String(error)}`;
+      }
     }
     if (raw === null && failure === null) {
       // No ledger yet: the one-shot §7.1 import (idempotent: once written, never repeated).
-      const inbox = this.readDir(inboxDir);
+      const inbox = pre ? pre.inbox : this.readDir(inboxDir);
       st.doc = migrateFromInbox(st.agentId, inbox, now);
       if (inbox.length) this.log({ kind: 'mail-ledger-migrated', agentId: st.agentId, imported: inbox.length });
       this.markDirty(st);
@@ -1617,14 +1690,15 @@ export class MailLedger {
     this.commit(st, applyRestartRecovery(st.doc, now));
     // Crash between an inbox write and the ledger write: the file is the evidence.
     const known = new Set(Object.keys(st.doc.entries));
-    for (const f of this.readDir(inboxDir)) {
+    for (const f of pre ? pre.inbox : this.readDir(inboxDir)) {
       if (known.has(f.id)) continue;
       this.commit(st, applyDelivered(st.doc, diskEntryMessage(f), now, { harness: true, reason: 'recovered' }));
     }
+    const inInbox = (id: string): boolean => pre ? pre.names.has(`${id}.json`) : existsSync(join(inboxDir, `${id}.json`));
     // Crash between the ledger write and the .done rename: finish the rename (idempotent). A
     // body-missing entry (Q15) whose file is back in inbox/ is redelivered instead.
     for (const e of Object.values(st.doc.entries)) {
-      if (e.state !== 'acted' || e.via !== 'inbox' || !existsSync(join(inboxDir, `${e.id}.json`))) continue;
+      if (e.state !== 'acted' || e.via !== 'inbox' || !inInbox(e.id)) continue;
       if (e.missingAt) { if (this.unparseableRecovered(st.agentId, e)) this.commit(st, applyReappeared(st.doc, e.id, now)); }
       else st.archive.add(e.id);
     }
@@ -2061,8 +2135,8 @@ export class MailLedger {
    * the ledgers in memory. The answers are the synchronous ones: no inbox = the empty ledger; a
    * ledger that cannot be had = the query throws.
    *
-   * A ledger not loaded yet this session still loads synchronously (`state`: the import, restart
-   * recovery and repair are one ordered step), once per agent, each in its own turn of the loop.
+   * A ledger not loaded yet this session loads through `stateAsync`: its files are read off the
+   * main thread, then the import, restart recovery and repair run as the one ordered step they are.
    */
   async obligationReader(agentIds: string[]): Promise<MailObligationReader> {
     const present = new Map<string, boolean>();
@@ -2076,7 +2150,7 @@ export class MailLedger {
       const file = this.ledgerFile(id);
       if (file && this.ledgers.has(file)) continue;
       await new Promise<void>((resolve) => { setImmediate(resolve); });
-      try { this.state(id); } catch { failed.add(id); }
+      try { await this.stateAsync(id); } catch { failed.add(id); }
     }
     const doc = (id: string): MailLedgerDoc => {
       if (!present.get(id)) return emptyLedger(id);
@@ -2092,6 +2166,15 @@ export class MailLedger {
     };
   }
   pending(agentId: string): MailEntry[] { return pendingEntries(this.docOrEmpty(agentId)); }
+  /** LAG-SYNC-IO-107: this agent's ledger if it is loaded, with no file access at all (null when
+   *  it is not loaded). The object is replaced whenever the ledger changes, so two calls that
+   *  return the same object saw no change between them. */
+  loadedDoc(agentId: string): MailLedgerDoc | null {
+    const file = isValidMailId(agentId) ? this.ledgerFile(agentId) : null;
+    return (file ? this.ledgers.get(file)?.doc : null) ?? null;
+  }
+  /** `pending` over a ledger from `loadedDoc`. */
+  pendingIn(doc: MailLedgerDoc): MailEntry[] { return pendingEntries(doc); }
   n1Due(agentId: string): string[] { return n1DueIds(this.docOrEmpty(agentId)); }
   openNotDelivered(agentId: string): string[] { return openNotDeliveredIds(this.docOrEmpty(agentId)); }
   backlog(agentId: string): MailEntry[] { return backlogEntries(this.docOrEmpty(agentId)); }
