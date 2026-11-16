@@ -541,9 +541,19 @@ function runNodeTest({ rel, extraArgs = [], label, spawn, cwd, timeoutMs, isTTY,
     if (h.by === 'backstop' && !failures.some((f) => path.resolve(f.file) === path.resolve(h.file))) failures.push({ file: h.file, name: h.file });
   }
   const bsRows = timedOutFiles(readFile(backstopFile));
+  // CLAIMS-LEDGER-W6-SILENT-EXIT: a file that started and never wrote its exit row, and that no
+  // timeout of the runner's ended: it was killed from outside (or crashed too hard to run its exit
+  // hook). node --test shows only "exitCode: 1" for it, so the cause is said here.
+  const lost = backstop ? endedWithoutExit(readFile(startsFile), readFile(`${startsFile}.kills`))
+    .filter((l) => !hung.some((h) => path.resolve(h.file) === path.resolve(l.file))) : [];
   removeFile(eventsFile);
   removeFile(watchFile);
-  if (backstop) { removeFile(backstopFile); removeFile(startsFile); }
+  if (backstop) { removeFile(backstopFile); removeFile(startsFile); removeFile(`${startsFile}.kills`); }
+  for (const l of lost) {
+    err(`[test-runner] ${label}FILE ENDED WITHOUT EXITING (pid ${l.pid}): it was killed from outside or crashed hard, which node --test shows only as an exit code with no test output: ${l.file}`);
+    for (const k of l.kills) err(`[test-runner] ${label}  its pid ${l.pid} was named by a kill (${k.via}) from ${k.self ? 'the file itself' : `${k.file || 'an unnamed file'} (pid ${k.pid})`}, ${k.afterMs} ms after it started`);
+    if (!l.kills.length) err(`[test-runner] ${label}  no recorded kill names its pid ${l.pid} (a kill made by a process a test file started is not recorded)`);
+  }
   for (const h of hung) {
     const how = h.by === 'backstop' ? `the runner's backstop killed it at ${backstopMs(timeoutMs)} ms`
       : h.by === 'watchdog' ? 'it never finished; the watchdog killed it' : 'it never finished';
@@ -552,6 +562,33 @@ function runNodeTest({ rel, extraArgs = [], label, spawn, cwd, timeoutMs, isTTY,
   for (const r of bsRows) if (r.kill) err(`[test-runner] ${label}${r.message}: ${r.file}`);
   if (hung.length) err(`[test-runner] ${label}${hung.length} test file(s) timed out - the run FAILS (node --test lists them as cancelled, not failed)`);
   return { res, hung, counts: runCounts(events), failures };
+}
+
+/**
+ * CLAIMS-LEDGER-W6-SILENT-EXIT: the files that started (file-backstop-preload's { pid, bornMs, file }
+ * row) and never wrote their exit row ({ pid, exited }), each with the recorded kills that named its
+ * pid while it had it (the preload's <starts>.kills rows). A later start under the same pid ends the
+ * earlier file's hold on the number. Unreadable or empty text: none.
+ */
+function endedWithoutExit(startsText, killsText = '') {
+  const rows = (text) => String(text || '').split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+  const live = new Map();
+  const lost = [];
+  for (const r of rows(startsText)) {
+    if (!Number.isInteger(r.pid)) continue;
+    if (r.exited) { live.delete(r.pid); continue; }
+    if (!Number.isFinite(r.bornMs)) continue;
+    const before = live.get(r.pid);
+    if (before) lost.push({ ...before, untilMs: r.bornMs });
+    live.set(r.pid, { pid: r.pid, bornMs: r.bornMs, file: String(r.file || ''), untilMs: Infinity });
+  }
+  lost.push(...live.values());
+  const kills = rows(killsText).filter((k) => Array.isArray(k.targets) && Number.isFinite(k.t));
+  return lost.map((l) => ({
+    pid: l.pid, file: l.file,
+    kills: kills.filter((k) => k.targets.includes(l.pid) && k.t >= l.bornMs && k.t <= l.untilMs)
+      .map((k) => ({ via: String(k.via || 'kill'), file: String(k.file || ''), pid: k.pid, self: k.pid === l.pid, afterMs: Math.round(k.t - l.bornMs) })),
+  }));
 }
 
 /** A spawn error or a signal death: logged, and true (the run failed). */
@@ -645,7 +682,7 @@ function totals(code, counts, laneState, log, failures = [], {
   return code;
 }
 
-module.exports = { startBackstop, BACKSTOP_PRELOAD, runNodeTest,prepareFileJob, pruneFileJobs, FILE_JOB_DIR, FILE_JOB_PRELOAD, fileJobStrict, jobJoinFailures, fileJobVerdict, prepareTempJail, TEMP_JAIL_PRELOAD, tempLeaks, reportTempLeaks,prepareStartGate, startSlots, cappedCores, selfJobRate, HEAVYJOB_HELPER, CPU_RATE_50_PERCENT, START_GATE_PRELOAD, burstLine, selectTestFiles, discoverTestFiles, renderLaneFiles, FEATURE_TEST_DIRS, run, runPerfLane, runCounts, failingTests, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
+module.exports = { startBackstop, BACKSTOP_PRELOAD, runNodeTest, endedWithoutExit,prepareFileJob, pruneFileJobs, FILE_JOB_DIR, FILE_JOB_PRELOAD, fileJobStrict, jobJoinFailures, fileJobVerdict, prepareTempJail, TEMP_JAIL_PRELOAD, tempLeaks, reportTempLeaks,prepareStartGate, startSlots, cappedCores, selfJobRate, HEAVYJOB_HELPER, CPU_RATE_50_PERCENT, START_GATE_PRELOAD, burstLine, selectTestFiles, discoverTestFiles, renderLaneFiles, FEATURE_TEST_DIRS, run, runPerfLane, runCounts, failingTests, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
 
 if (require.main === module) {
   const repoRoot = path.resolve(__dirname, '..', '..');
