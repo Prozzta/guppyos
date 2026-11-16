@@ -18,6 +18,7 @@ const http = require('node:http');
 const { spawn } = require('node:child_process');
 const loadTs = require('./load-ts.cjs');
 const { readSource, codeOnly, normaliseEol } = require('./read-source.cjs');
+const { gitBash } = require('./tools/git-bash.cjs');
 
 const ROOT = path.join(__dirname, '..');
 const JAIL = fs.mkdtempSync(path.join(os.tmpdir(), 'reads-181-'));
@@ -473,13 +474,6 @@ function run(cmd, args, { input, env } = {}) {
   });
 }
 const CLI = path.join(ROOT, 'resources', 'ledger-cli.cjs');
-// A POSIX bash that shares this filesystem's paths (Git Bash / MSYS on Windows, never WSL's).
-const HAS_BASH = (() => {
-  try {
-    const r = require('node:child_process').spawnSync('bash', ['-c', 'uname -o'], { encoding: 'utf8' });
-    return r.status === 0 && (process.platform !== 'win32' || /msys|cygwin/i.test(r.stdout));
-  } catch { return false; }
-})();
 
 async function cliBroker(t) {
   const { s } = await broker(t);
@@ -508,12 +502,15 @@ test('A (MSG-COMPOSE-SHELL-INJECTION): the CLI refuses inline arguments; a body 
   assert.equal(unavailable.code, 3);
 });
 
-test('A (MSG-COMPOSE-SHELL-INJECTION): the documented bash form (a quoted heredoc) runs NOTHING in the body', { skip: !HAS_BASH && 'no bash' }, async (t) => {
+test('A (MSG-COMPOSE-SHELL-INJECTION): the documented bash form (a quoted heredoc) runs NOTHING in the body', async (t) => {
+  // TEST-BASH-PATH-197: a POSIX bash that shares this filesystem's paths (Git Bash on Windows, never
+  // WSL's), found by path. This test used to skip itself when a bare `bash` was not on PATH.
+  const bash = gitBash();
   const { f, env } = await cliBroker(t);
   const canary = path.join(f.agentDir, 'CANARY').replace(/\\/g, '/');
   const body = `ran \`touch ${canary}\` and $(touch ${canary}) and \${HOME}`;
   const script = `"${process.execPath.replace(/\\/g, '/')}" "${CLI.replace(/\\/g, '/')}" <<'EOF'\n${JSON.stringify({ op: 'bash-1', message: { to: 'god', act: 'inform', subject: 's', body } })}\nEOF\n`;
-  const r = await run('bash', ['-c', script], { env });
+  const r = await run(bash, ['-c', script], { env });
   assert.equal(r.code, 0, r.err);
   assert.equal(fs.existsSync(canary), false, 'the canary command never ran');
   assert.equal(JSON.parse(fs.readFileSync(path.join(f.agentDir, 'outbox', 'ledger-bash-1.json'), 'utf8')).body, body);

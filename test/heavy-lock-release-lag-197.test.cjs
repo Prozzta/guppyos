@@ -26,6 +26,7 @@ const path = require('node:path');
 const { removeDir } = require('./tools/test-temp.cjs');
 const { spawn, spawnSync } = require('node:child_process');
 const loadTs = require('./load-ts.cjs');
+const { gitBash, findGitBash, candidates } = require('./tools/git-bash.cjs');
 
 const root = path.join(__dirname, '..');
 const CPU_FILE = 'src/main/heavyCpu.ts';
@@ -298,7 +299,9 @@ async function liveRelease(t, o) {
   // file's own, removed with the helpers (it was a TEMP LEAK, "Munder Difflin", under the runner's jail).
   const local = fs.mkdtempSync(path.join(os.tmpdir(), 'hlr197-local-'));
   helperDirs.push(local);
-  const sh = spawn('bash', ['-c', `"${exe.replace(/\\/g, '/')}" join ${id} 0 0; ${o.body}`], { stdio: 'ignore', windowsHide: true, env: { ...process.env, LOCALAPPDATA: local } });
+  // TEST-BASH-PATH-197: Git Bash by path. A bare `bash` is found only when the suite was started
+  // from a Git Bash shell; from PowerShell (a Codex agent) it was `spawn bash ENOENT`.
+  const sh = spawn(gitBash(), ['-c', `"${exe.replace(/\\/g, '/')}" join ${id} 0 0; ${o.body}`], { stdio: 'ignore', windowsHide: true, env: { ...process.env, LOCALAPPDATA: local } });
   const t0 = Date.now();
   // A kill ends every process of the job (what stopping a background task does to its tree; a tree
   // kill from the Git Bash launcher alone misses the MSYS children, which then keep the job running).
@@ -353,6 +356,69 @@ test('LIVE: a job still running keeps the slot (a sequential command after the f
   const r = await liveRelease(t, { body: 'node -e "setTimeout(()=>{},300)"; sleep 2; exit 0' });
   assert.ok(r.heldMs >= r.runMs - 50, `A JOB STILL RUNNING KEEPS THE SLOT (held ${r.heldMs} ms of a ${r.runMs} ms run)`);
   assertFreed(r, 'sequential');
+});
+
+// ─── TEST-BASH-PATH-197: the Git Bash locator ────────────────────────────────
+
+const PF = 'C:\\Program Files';
+const STD = PF + '\\Git\\bin\\bash.exe';
+const only = (...files) => { const set = new Set(files.map((x) => x.toLowerCase())); return (p) => set.has(p.toLowerCase()); };
+
+test('BASH: the LIVE tests take Git Bash by path, never a bare name from PATH', () => {
+  const me = fs.readFileSync(__filename, 'utf8');
+  assert.doesNotMatch(me, new RegExp('spawn(Sync)?\\(' + "'(ba)?sh'"), 'no spawn of a bare shell name in this file');
+  const file = gitBash();
+  if (process.platform !== 'win32') return assert.equal(file, 'bash');
+  assert.ok(path.win32.isAbsolute(file), file);
+  assert.ok(fs.existsSync(file), file);
+  // Found with no PATH at all: what a process started from PowerShell has to work with, and less.
+  const noPath = Object.fromEntries(Object.entries(process.env).filter(([k]) => k.toLowerCase() !== 'path'));
+  assert.equal(findGitBash({ env: noPath }).file, file);
+  // And it is a bash of this filesystem (MSYS), not WSL's.
+  const r = spawnSync(file, ['-c', 'uname -o'], { encoding: 'utf8', windowsHide: true, env: { ...noPath, PATH: process.env.SystemRoot + '\\System32' } });
+  assert.equal(r.status, 0, String(r.error || r.stderr));
+  assert.match(r.stdout, /msys|cygwin/i);
+});
+
+test('BASH: probe order is the named variable, the standard installs, beside git.exe, then PATH', () => {
+  const env = { CLAUDE_CODE_GIT_BASH_PATH: 'D:\\G\\bin\\bash.exe', ProgramFiles: PF, 'ProgramFiles(x86)': 'C:\\Program Files (x86)', LOCALAPPDATA: 'C:\\U\\L', PATH: 'C:\\Windows\\System32;E:\\Git\\cmd;F:\\msys\\usr\\bin' };
+  const w = { platform: 'win32', env };
+  assert.equal(findGitBash({ ...w, exists: () => true }).file, 'D:\\G\\bin\\bash.exe');
+  assert.equal(findGitBash({ ...w, exists: () => true }).why, 'CLAUDE_CODE_GIT_BASH_PATH');
+  // A variable that names no file is passed over, not trusted.
+  assert.equal(findGitBash({ ...w, exists: only(STD) }).file, STD);
+  assert.equal(findGitBash({ ...w, exists: only('C:\\Program Files (x86)\\Git\\bin\\bash.exe') }).file, 'C:\\Program Files (x86)\\Git\\bin\\bash.exe');
+  assert.equal(findGitBash({ ...w, exists: only('C:\\U\\L\\Programs\\Git\\bin\\bash.exe') }).file, 'C:\\U\\L\\Programs\\Git\\bin\\bash.exe');
+  // Beside git.exe: only where a git.exe is.
+  assert.equal(findGitBash({ ...w, exists: only('E:\\Git\\cmd\\git.exe', 'E:\\Git\\bin\\bash.exe') }).file, 'E:\\Git\\bin\\bash.exe');
+  assert.equal(findGitBash({ ...w, exists: only('E:\\Git\\bin\\bash.exe') }).file, null, 'a ..\\bin\\bash.exe beside no git.exe is not Git Bash');
+  // A bash on PATH: the install's launcher before its usr\bin, and the standard install before both.
+  assert.equal(findGitBash({ ...w, exists: only('F:\\msys\\usr\\bin\\bash.exe', 'F:\\msys\\bin\\bash.exe') }).file, 'F:\\msys\\bin\\bash.exe');
+  assert.equal(findGitBash({ ...w, exists: only('F:\\msys\\usr\\bin\\bash.exe') }).file, 'F:\\msys\\usr\\bin\\bash.exe');
+  assert.equal(findGitBash({ ...w, exists: only('F:\\msys\\usr\\bin\\bash.exe', STD) }).file, STD);
+  // Env names are matched as Windows matches them (a spread copy of process.env is case-sensitive).
+  assert.equal(findGitBash({ platform: 'win32', env: { PROGRAMFILES: PF, Path: '' }, exists: only(STD) }).file, STD);
+  assert.equal(findGitBash({ platform: 'linux', env: {}, exists: () => false }).file, 'bash');
+});
+
+test('BASH: the bash of WSL (System32, WindowsApps) is never taken', () => {
+  for (const dir of ['C:\\Windows\\System32', 'C:\\WINDOWS\\system32\\', 'C:\\Windows\\Sysnative', 'C:\\U\\AppData\\Local\\Microsoft\\WindowsApps']) {
+    const env = { PATH: dir };
+    const inDir = (p) => /bash\.exe$/i.test(p) && p.toLowerCase().startsWith(dir.replace(/\\$/, '').toLowerCase() + '\\');
+    assert.equal(findGitBash({ platform: 'win32', env, exists: inDir }).file, null, dir);
+    assert.ok(!candidates(env).some((c) => /^PATH /.test(c.why)), dir);
+  }
+});
+
+test('BASH: no Git Bash is a failure that says what was probed, never a skip', () => {
+  const env = { ProgramFiles: PF, LOCALAPPDATA: 'C:\\U\\L', PATH: 'C:\\Windows\\System32;C:\\tools' };
+  assert.throws(() => gitBash({ platform: 'win32', env, exists: () => false }), (e) => {
+    assert.match(e.message, /^Git Bash not found: /);
+    assert.match(e.message, /CLAUDE_CODE_GIT_BASH_PATH/);
+    assert.ok(e.message.endsWith('Probed (3): C:\\Program Files\\Git\\bin\\bash.exe; C:\\U\\L\\Programs\\Git\\bin\\bash.exe; C:\\tools\\bash.exe'), e.message);
+    return true;
+  });
+  assert.throws(() => gitBash({ platform: 'win32', env: {}, exists: () => false }), /Probed \(0\): nothing: no ProgramFiles, LOCALAPPDATA or PATH/);
 });
 
 // ─── MUTANT CENSUS ──────────────────────────────────────────────────────────────────────────
