@@ -78,7 +78,7 @@ function startCwdHolder(dir) {
   while (!fs.existsSync(ready) && Date.now() < until) Atomics.wait(wait, 0, 0, 25);
   assert.ok(fs.existsSync(ready), 'cwd holder started');
   let released = false;
-  return { child, ready, release: () => { if (!released) { released = true; child.stdin.end('release\n'); } } };
+  return { child, ready, held, release: () => { if (!released) { released = true; child.stdin.end('release\n'); } } };
 }
 
 function stopCwdHolder(holder) {
@@ -198,7 +198,7 @@ test('runTests runs real node --test under TAP: pass, fail and a hang give SURVI
   try {
     fs.writeFileSync(path.join(dir, 'pass.test.cjs'), "require('node:test')('fine', () => {});\n");
     fs.writeFileSync(path.join(dir, 'fail.test.cjs'), "require('node:test')('breaks here', () => { throw new Error('x'); });\n");
-    fs.writeFileSync(path.join(dir, 'hang.test.cjs'), `const fs = require('node:fs');\nfs.writeFileSync(${JSON.stringify(hangPid)}, \`${'${process.pid}'} ${'${Date.now()}'}\`);\nrequire('node:test')('never ends', () => new Promise(() => setInterval(() => {}, 1000)));\n`);
+    fs.writeFileSync(path.join(dir, 'hang.test.cjs'), `const fs = require('node:fs'); const { spawn } = require('node:child_process');\nconst survivor = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { cwd: process.cwd(), detached: true, stdio: 'ignore' }); survivor.unref();\nfs.writeFileSync(${JSON.stringify(hangPid)}, \`${'${survivor.pid}'} ${'${Date.now()}'}\`);\nrequire('node:test')('never ends', () => new Promise(() => setInterval(() => {}, 1000)));\n`);
     const p = runTests(dir, ['pass.test.cjs'], { timeout: 120_000 });
     assert.equal(verdict(p), 'SURVIVED', p.why ?? p.stdout);
     assert.equal(p.pass, 1);
@@ -212,7 +212,12 @@ test('runTests runs real node --test under TAP: pass, fail and a hang give SURVI
     assert.ok(fs.existsSync(hangPid), 'the hung node --test worker recorded its owned pid');
     assert.throws(() => runTests(dir, ['pass.test.cjs'], { args: ['--test-reporter=spec'] }), /picks the reporter/);
   } finally {
-    if (fs.existsSync(hangPid)) stopAndWaitForWorker(own.readRec(hangPid, path.basename(process.execPath)));
+    if (fs.existsSync(hangPid)) {
+      const rec = own.readRec(hangPid, path.basename(process.execPath));
+      if (process.platform === 'win32') assert.ok(own.stillOurs(rec), 'the parentless fixture worker survives the timed-out test parent');
+      stopAndWaitForWorker(rec);
+      if (process.platform === 'win32') assert.equal(own.stillOurs(rec), null, 'fixture cleanup waited for the recorded worker to exit');
+    }
     removeFixture(dir);
   }
 });
@@ -222,6 +227,7 @@ test('fixture cleanup waits through a cwd-holder EPERM (MUTANT: one attempt fail
   let holder;
   try {
     holder = startCwdHolder(dir);
+    assert.throws(() => fs.openSync(holder.held, 'r+'), { code: 'EBUSY' }, 'FileShare.None denies a competing write open');
     let one;
     assert.throws(() => removeFixture(dir, { maxTries: 1 }), (e) => { one = e; return true; });
     assert.match(one.message, new RegExp(`failed with ${one.code} after 1 tries: ${dir.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&')}`));
@@ -231,6 +237,7 @@ test('fixture cleanup waits through a cwd-holder EPERM (MUTANT: one attempt fail
     stopCwdHolder(holder); holder = null;
 
     holder = startCwdHolder(dir);
+    assert.throws(() => fs.openSync(holder.held, 'r+'), { code: 'EBUSY' }, 'FileShare.None is held again for the retry path');
     const retries = [];
     removeFixture(dir, { onRetry: (retry) => { retries.push(retry); if (retry.try === 1) holder.release(); } });
     assert.ok(retries.length >= 1, 'the fixed cleanup recorded its blocked first delete');

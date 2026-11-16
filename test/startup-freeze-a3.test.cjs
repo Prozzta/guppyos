@@ -31,6 +31,7 @@ const ROOT = path.join(__dirname, '..');
 const { ClaimStore } = loadTs(path.join(ROOT, 'src/main/claims/store.ts'));
 const { SandboxKeyProvider, FileLedgerKeyRecord, FileHeadAnchorStore, KEY_RECORD_FILE, HEAD_ANCHOR_FILE } = loadTs(path.join(ROOT, 'src/main/claims/keyProvider.ts'));
 const { canonicalJson, recordMac, sha256Hex } = loadTs(path.join(ROOT, 'src/main/claims/canonical.ts'));
+const { threadCpuMs } = require('./tools/thread-cpu.cjs');
 
 const KEY = crypto.randomBytes(32);
 let TEMPLATE = null;
@@ -317,16 +318,18 @@ test('warm(): nothing in the caller\'s turn, sliced by the clock, then reads are
   fs.readFileSync = function (q, ...a) { if (mine(q) && String(q).endsWith('.jsonl')) syncSeg++; return realRead.call(this, q, ...a); };
   try { await p; } finally { fs.readFileSync = realRead; }
   assert.equal(syncSeg, 0, 'no synchronous segment read during the warm');
-  // Real clock, 4 ms slices: the longest stretch between two pauses stays far under the 50 ms block budget.
-  let last = 0; let worst = 0; let pauses = 0;
+  // Real 4 ms slices: count this thread's CPU between pauses, not scheduler delay.  A full suite
+  // can defer setImmediate for tens of ms while this thread is off-core; that is not a main-thread
+  // block.  The injected-clock check below still kills a mutant which stops slicing altogether.
+  let lastCpu = 0; let worstCpu = 0; let pauses = 0;
   const y = setup();
   await writeLedger(y, 'andy', { '2026-09.jsonl': 3000, '2026-10.jsonl': 3000, '2026-11.jsonl': 1000 });
   const s2 = y.mk().store;
-  last = performance.now();
-  const res = await s2.warm(['andy'], { sliceMs: 4, pause: () => new Promise((r) => setImmediate(() => { const t = performance.now(); worst = Math.max(worst, t - last); pauses++; r(); last = performance.now(); })) });
+  lastCpu = threadCpuMs();
+  const res = await s2.warm(['andy'], { sliceMs: 4, pause: () => new Promise((r) => setImmediate(() => { const t = threadCpuMs(); worstCpu = Math.max(worstCpu, t - lastCpu); pauses++; lastCpu = t; r(); })) });
   assert.deepEqual(res.warmed, ['andy']);
   assert.ok(pauses >= 3, `the warm paused between slices (${pauses})`);
-  assert.ok(worst < 50, `no stretch between pauses reached 50 ms (${worst.toFixed(1)} ms)`);
+  assert.ok(worstCpu < 50, `no slice used 50 ms of this thread's CPU (${worstCpu.toFixed(1)} ms)`);
   // Afterwards a read is the cached one: no whole-file read, no MAC.
   const hit = countReads(files, () => countHmacs(() => store.readLedgerCached('andy')));
   assert.equal(hit.c, 0);
