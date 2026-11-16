@@ -361,7 +361,7 @@ async function mailFloor(t) {
 }
 const plain = (v) => JSON.parse(JSON.stringify(v));
 /** Ages move with the clock between two calls: compare everything else exactly. */
-const ageless = (view) => JSON.parse(JSON.stringify(view, (k, v) => (/^age(Ms)?$/i.test(k) ? 0 : v)));
+const ageless = (view) => JSON.parse(JSON.stringify(view, (k, v) => (/^age(Ms|Sec)?$/i.test(k) ? 0 : v)));
 
 test('mail obligations (async): the synchronous view, with no synchronous fs once the ledgers are loaded', async (t) => {
   const { hive, home, q, lost } = await mailFloor(t);
