@@ -83,6 +83,8 @@ test('ZT-I2 (3): no upkeep path in src/main or src/shared spawns claude in print
     ['src/main/heavyJob.ts', "const e = args.findIndex((a) => a === '-e' || a === '--eval' || a === '-p' || a === '--print');"],
     // HEAVY-LOCK-OPAQUE-SCRIPT-196's processImage: `ps -p <pid>` names a process id, not claude's print mode.
     ['src/main/heavyJob.ts', ": ['ps', ['-o', 'comm=', '-p', String(pid)]];"],
+    // PTY-KILL-PID-IDENTITY's darwinStamp: `ps -p <pid>` again, a process id.
+    ['src/main/procIdentity.ts', "run('ps', ['-o', 'lstart=', '-p', String(pid)], { timeout: 2_000, windowsHide: true }, (err, stdout) => {"],
     // Copilot's visible worker session takes its brief this way: an agent the Human sees, not upkeep.
     ['src/shared/agentProvider.ts', "initialPromptFlag: '-p',"],
     // CLAIMS-90 M5 derivedGit.ts: git's patch flag (`git log -p`, `git diff-tree -p`), not claude's print mode.

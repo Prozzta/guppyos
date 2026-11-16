@@ -191,13 +191,15 @@ function mutateText(rel, edits, tag) {
   return text;
 }
 
-const SECOND = "(rootState(s.proc) === 'running' && isAlive(pid) ? killTreesAsync([pid]) : undefined)";
+// PTY-KILL-PID-IDENTITY moved both sweep conditions into mayNamePid; the mutants follow them there.
+const SECOND = '(mayNamePid(s, true) ? killTreesAsync([pid]) : undefined)';
+const NO_HOLD = "return repeat ? state === 'running' && isAlive(s.proc.pid) : true;";
 const MUTANTS = [
   { name: 'P1 the second sweep trusts the pid alone (the code before this card)', edits: [[SECOND, '(isAlive(pid) ? killTreesAsync([pid]) : undefined)']],
     killer: 'reuse', dies: /A SWEEP NEVER NAMES A PID THE ROOT NO LONGER OWNS/ },
-  { name: 'P2 the second sweep runs when the root state is unknown', edits: [[SECOND, "(rootState(s.proc) !== 'exited' && isAlive(pid) ? killTreesAsync([pid]) : undefined)"]],
+  { name: 'P2 the second sweep runs when the root state is unknown', edits: [[NO_HOLD, 'return repeat ? isAlive(s.proc.pid) : true;']],
     killer: 'unknown', dies: /NO SECOND SWEEP WITHOUT PROOF/ },
-  { name: 'P3 a root that already exited is swept anyway', edits: [["    if (rootState(s.proc) === 'exited') { close(); return; }\n", '']],
+  { name: 'P3 a root that already exited is swept anyway', edits: [['    if (!mayNamePid(s, false)) { close(); return; }\n', '']],
     killer: 'exited', dies: /A ROOT THAT ALREADY EXITED IS NOT SWEPT/ },
   { name: 'P4 rootState reads the exit report backwards', edits: [["return agent._exitCode === undefined ? 'running' : 'exited';", "return agent._exitCode === undefined ? 'exited' : 'running';"]],
     killer: 'pin', dies: /ROOT STATE PIN: a live ConPTY terminal/ },
