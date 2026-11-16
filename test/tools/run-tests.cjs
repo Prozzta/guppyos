@@ -649,6 +649,10 @@ module.exports = { startBackstop, BACKSTOP_PRELOAD, runNodeTest,prepareFileJob, 
 
 if (require.main === module) {
   const repoRoot = path.resolve(__dirname, '..', '..');
+  // WORKTREE-NATIVE-BUILD-GAP: a tree missing its native builds or the patched xterm addon
+  // produced false reds and an uncapped run; refuse it up front (tools/worktree-setup.cjs fixes it).
+  const gate = require('../../tools/worktree-setup.cjs').preflight({ root: repoRoot });
+  if (gate) process.exit(gate);
   const code = run({
     testDir: path.join(repoRoot, 'test'),
     filters: process.argv.slice(2),
