@@ -126,7 +126,8 @@ const KNOWN = {
   'tools/file-watchdog.cjs': 1,
   'tools/layer-b-core.cjs': 4,
   'tools/mutant-runner-helper.cjs': 1,
-  'tools/own-procs.cjs': 1
+  'tools/own-procs.cjs': 1,
+  'tools/pid-hold.cjs': 1
 };
 
 test('CENSUS: every PowerShell spawn under test/ passes psEnv (the census itself catches one that does not)', () => {
