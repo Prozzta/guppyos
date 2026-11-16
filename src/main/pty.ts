@@ -9,6 +9,7 @@ import type { WebContents } from 'electron';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { delimiter, join, win32 } from 'node:path';
 import { ensureKilled, isAlive, killTreesAsync } from './procKill';
+import { holdRoot, pidIdentity, type PidIdentity, type RootHold } from './procIdentity';
 import { expandTilde } from './fs';
 import { buildPtyEnv } from './ptyEnv';
 import { createPtyDataBatcher, type PtyDataBatcher } from './ptyDataBatcher';
@@ -107,6 +108,13 @@ interface PtySession {
   explicitTeardown?: boolean;
   /** AGY-TEARDOWN r2: the ConPTY was closed (closePty), so a second close is a no-op. */
   ptyClosed?: boolean;
+  /** PTY-KILL-PID-IDENTITY (Windows): our own handle to the root, opened in the spawn's turn. While
+   *  it is open the root's pid cannot go to another process. Null: nothing to hold with. */
+  hold?: RootHold | null;
+  /** How many kills (closeTree, killAllAsync) may still name the pid: the hold outlives them all. */
+  holdUsers?: number;
+  /** PTY-KILL-PID-IDENTITY (POSIX): the root's start stamp, taken in the spawn's turn. */
+  rootId?: PidIdentity;
   /** GOD-TERMINAL-CONTROL M1: this incarnation's headless screen (terminalMirror.ts), fed every
    *  accepted chunk. Absent when the mirror is off or could not be made. Dies with the session. */
   mirror?: TerminalMirror;
@@ -201,13 +209,32 @@ export function armEarlyKill(proc: pty.IPty, platform: NodeJS.Platform = process
  *   'exited'   the exit was reported: the pid is no longer ours, whatever is alive under it;
  *   'unknown'  not the ConPTY agent this was written against (winpty, another node-pty version):
  *              nothing binds the pid to the root. The pin test fails then.
- * Not covered: the instant inside node-pty's wait thread between closing the handle and queueing
- * the exit report. Closing that needs a kill by handle, which node-pty does not expose.
+ * Not covered by this alone: from node-pty closing its handle until the exit report RUNS in JS
+ * (a main-loop turn or more) the pid is free and this still says 'running'. PTY-KILL-PID-IDENTITY
+ * closes that with a handle of our own (procIdentity.ts holdRoot); see mayNamePid below.
  */
 export function rootState(proc: pty.IPty): 'running' | 'exited' | 'unknown' {
   const agent = (proc as unknown as { _agent?: { _useConpty?: unknown; _exitCode?: unknown; _$onProcessExit?: unknown } })._agent;
   if (!agent || agent._useConpty !== true || typeof agent._$onProcessExit !== 'function') return 'unknown';
   return agent._exitCode === undefined ? 'running' : 'exited';
+}
+
+/**
+ * PTY-KILL-PID-IDENTITY: may a tree kill name this root's pid right now? The one question every
+ * Windows kill path asks (closeTree's two sweeps, killAllAsync's batch), immediately before it
+ * spawns taskkill.
+ *   - node-pty reported the exit: never. With a hold still saying alive this also catches a hold
+ *     that was opened on the wrong process.
+ *   - a hold: the handle's answer. Alive means the pid is the root's and stays reserved for as
+ *     long as the hold is open, so the kill reaches the root or nobody.
+ *   - no hold (addon missing, or the root was not ours to open): the PTY-CLOSETREE-PIDREUSE rule.
+ *     A first sweep runs; a repeat needs node-pty's 'running' and something alive under the pid.
+ */
+export function mayNamePid(s: { proc: pty.IPty; hold?: RootHold | null }, repeat: boolean): boolean {
+  const state = rootState(s.proc);
+  if (state === 'exited') return false;
+  if (s.hold) return s.hold.alive();
+  return repeat ? state === 'running' && isAlive(s.proc.pid) : true;
 }
 
 export interface SpawnOptions {
@@ -543,21 +570,31 @@ export class PtyManager {
     const pid = s.proc.pid;
     if (process.platform !== 'win32') {
       s.proc.kill();
-      ensureKilled(pid); // verify + sweep the process group so no PID leaks
+      // verify + sweep the process group so no PID leaks; the pid is re-identified after the grace
+      ensureKilled(pid, undefined, s.rootId ? () => s.rootId!.verdict() : undefined);
       return;
     }
-    const close = (): void => { this.closingTrees.delete(s); this.closePty(s); };
+    s.holdUsers = (s.holdUsers ?? 0) + 1;
+    const close = (): void => { this.closingTrees.delete(s); this.closePty(s); this.dropHold(s); };
     if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) { close(); return; }
     // PTY-CLOSETREE-PIDREUSE: a sweep names the root by pid, so it runs only while the pid is known
     // to be the root's (rootState). A root that already exited has nothing left for taskkill to walk
     // (the known gap above), and its pid may belong to a stranger by now.
-    if (rootState(s.proc) === 'exited') { close(); return; }
+    // PTY-KILL-PID-IDENTITY: asked of our own handle to the root when there is one (mayNamePid).
+    if (!mayNamePid(s, false)) { close(); return; }
     this.closingTrees.add(s);
     // Jim MINOR 1: re-verify after the sweep. A taskkill that failed or hit its cap leaves the root
     // alive, and the root still holds the tree, so one more sweep runs before the close. The first
     // sweep normally ENDS the root, which frees its pid: "something is alive under this pid" is then
     // a stranger, so the second sweep needs the root itself to be running, not just the pid.
-    void killTreesAsync([pid]).then(() => (rootState(s.proc) === 'running' && isAlive(pid) ? killTreesAsync([pid]) : undefined)).then(close, close);
+    void killTreesAsync([pid]).then(() => (mayNamePid(s, true) ? killTreesAsync([pid]) : undefined)).then(close, close);
+  }
+
+  /** One kill path is done with the pid. The hold is released when the last one is: releasing it
+   *  under a taskkill still in flight would free the pid that taskkill names. */
+  private dropHold(s: PtySession): void {
+    s.holdUsers = Math.max(0, (s.holdUsers ?? 0) - 1);
+    if (s.holdUsers === 0) s.hold?.release();
   }
 
   /** Close a session's ConPTY once: closeTree's late close and a quit can both reach the same one. */
@@ -1000,6 +1037,10 @@ export class PtyManager {
         // ptyEnv.ts for why the strip exists and why it is prefix-based.
         env: buildPtyEnv(process.env, userPath, opts.env, process.platform, opts.pathPrepend, opts.nodeRequire)
       });
+      // PTY-KILL-PID-IDENTITY: bind the pid to this root NOW, before anything else can run: a
+      // handle of our own on Windows, the start stamp elsewhere.
+      const hold = holdRoot(proc.pid);
+      const rootId = process.platform === 'win32' ? undefined : pidIdentity(proc.pid);
       // PTY-EARLY-KILL-LEAK: a kill before the first output must close the pseudoconsole now.
       armEarlyKill(proc);
 
@@ -1022,7 +1063,9 @@ export class PtyManager {
         owner,
         humanInputGeneration: 0,
         incarnation: (incarnationSeq += 1),
-        spawnedAt: Date.now()
+        spawnedAt: Date.now(),
+        hold,
+        rootId
       };
       // Route to the session's owner window (multi-window owner routing), read at SEND
       // time. Batched: one IPC message per burst, not per ~170-byte conpty chunk.
@@ -1040,6 +1083,9 @@ export class PtyManager {
       proc.onData((data) => this.deliverData(opts.id, session, data));
       if (this.startupHooks) { try { this.startupHook()?.spawned(opts.id); } catch { /* best-effort */ } }
       proc.onExit(({ exitCode, signal }) => {
+        // PTY-KILL-PID-IDENTITY: the root is gone. Unless a kill may still name the pid (it
+        // releases the hold itself when it is done), stop reserving it.
+        if (!session.holdUsers) session.hold?.release();
         // Stale exit from a process whose id was reclaimed (kill()+respawn) — do
         // NOT touch the live session or tell the renderer the new pty died.
         if (this.sessions.get(opts.id) !== session) return;
@@ -1266,7 +1312,7 @@ export class PtyManager {
     if (process.platform !== 'win32') {
       for (const s of sessions) {
         try { s.proc.kill(); } catch { /* noop */ }
-        ensureKilled(s.proc.pid);
+        ensureKilled(s.proc.pid, undefined, s.rootId ? () => s.rootId!.verdict() : undefined);
       }
       return Promise.resolve();
     }
@@ -1282,14 +1328,19 @@ export class PtyManager {
         const sub = s.proc.onExit(() => { try { sub?.dispose?.(); } catch { /* noop */ } done(); });
       } catch { done(); }
     }));
+    for (const s of sessions) s.holdUsers = (s.holdUsers ?? 0) + 1;
     const closePtys = (): void => {
-      for (const s of sessions) this.closePty(s);
+      for (const s of sessions) { this.closePty(s); this.dropHold(s); }
     };
     const allExited = (): Promise<void> => Promise.race([
       Promise.all(exited).then(() => undefined),
       new Promise<void>((resolve) => { setTimeout(resolve, PtyManager.EXIT_WAIT_MS); })
     ]);
-    return killTreesAsync(sessions.map((s) => s.proc.pid), capMs).then(closePtys, closePtys).then(allExited);
+    // PTY-KILL-PID-IDENTITY: the batch names only roots whose pid is still theirs. A terminal whose
+    // root already died (its exit event trails by up to a second, so it is still listed) is closed
+    // without a sweep: taskkill /T has nothing to walk from a dead root, and the pid may be anyone's.
+    const owned = sessions.filter((s) => mayNamePid(s, false)).map((s) => s.proc.pid);
+    return killTreesAsync(owned, capMs).then(closePtys, closePtys).then(allExited);
   }
 
   /** SYNC-CHILD-CALLS (Jim's audit NIT): set by reset/changeHome BEFORE their awaited bulk kill.

@@ -248,7 +248,7 @@ const MUTANTS = [
     killer: 'kill', dies: /KILL ENDS THE WHOLE TREE/ },
   { name: 'M2 killByOwner() closes the ConPTY before the sweep', edits: [['        try { this.closeTree(s); } catch', `        try { ${OLD_ORDER} } catch`]],
     killer: 'owner', dies: /KILLBYOWNER ENDS THE WHOLE TREE/ },
-  { name: 'M3 no re-verify: one sweep, then the close', edits: [[".then(() => (rootState(s.proc) === 'running' && isAlive(pid) ? killTreesAsync([pid]) : undefined)).then(close, close)", '.then(close, close)']],
+  { name: 'M3 no re-verify: one sweep, then the close', edits: [[".then(() => (mayNamePid(s, true) ? killTreesAsync([pid]) : undefined)).then(close, close)", '.then(close, close)']],
     killer: 'retry', dies: /A FAILED FIRST SWEEP IS RETRIED/ },
   { name: 'M4 the quit ignores trees still being swept', edits: [['[...new Set([...this.sessions.values(), ...this.closingTrees])]', '[...this.sessions.values()]']],
     killer: 'quitKill', dies: /QUIT TAKES OVER A PENDING CLOSE/ },
@@ -257,11 +257,11 @@ const MUTANTS = [
   // Keep the sweep's bookkeeping settled: this mutant models precisely a missing
   // ConPTY close, not an unrelated stuck `closingTrees` entry that makes the
   // test's later cleanup race its wall-clock descendant check under suite load.
-  { name: "M6 closeTree never closes the ConPTY (Jim's X1): must fail, not hang", edits: [['const close = (): void => { this.closingTrees.delete(s); this.closePty(s); };', 'const close = (): void => { this.closingTrees.delete(s); };']],
+  { name: "M6 closeTree never closes the ConPTY (Jim's X1): must fail, not hang", edits: [['const close = (): void => { this.closingTrees.delete(s); this.closePty(s); this.dropHold(s); };', 'const close = (): void => { this.closingTrees.delete(s); this.dropHold(s); };']],
     killer: 'kill', dies: /KILL CLOSES THE CONPTY ONCE/ },
-  { name: "X9 a settled close stays in closingTrees (Jim's X9)", edits: [['const close = (): void => { this.closingTrees.delete(s); this.closePty(s); };', 'const close = (): void => { this.closePty(s); };']],
+  { name: "X9 a settled close stays in closingTrees (Jim's X9)", edits: [['const close = (): void => { this.closingTrees.delete(s); this.closePty(s); this.dropHold(s); };', 'const close = (): void => { this.closePty(s); this.dropHold(s); };']],
     killer: 'kill', dies: /A SETTLED CLOSE LEAVES closingTrees/ },
-  { name: "X9 under killByOwner()", edits: [['const close = (): void => { this.closingTrees.delete(s); this.closePty(s); };', 'const close = (): void => { this.closePty(s); };']],
+  { name: "X9 under killByOwner()", edits: [['const close = (): void => { this.closingTrees.delete(s); this.closePty(s); this.dropHold(s); };', 'const close = (): void => { this.closePty(s); this.dropHold(s); };']],
     killer: 'owner', dies: /A SETTLED CLOSE LEAVES closingTrees/ },
 ];
 
