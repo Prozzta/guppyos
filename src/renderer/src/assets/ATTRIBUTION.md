@@ -47,7 +47,8 @@ asset `martian-mono-1.1.0-woff2.zip` at https://github.com/evilmartians/mono (ta
 Copyright 2021 The Martian Mono Project Authors, licensed under the SIL Open Font License 1.1; the
 licence text (`OFL.txt` from the repo at v1.1.0) ships beside the files as `fonts/martian-mono/OFL.txt`.
 It is bundled so the terminal never fetches a font from the network (TERM-FONT-105); it is declared
-in `design/fonts.css` and chosen in `components/terminalFont.ts`.
+in `design/fonts.css` and offered in the terminal's font selector (`components/terminalFont.ts`),
+where JetBrains Mono is the default.
 
 ## UI monospace font: JetBrains Mono
 
@@ -56,6 +57,7 @@ from the official release at https://github.com/JetBrains/JetBrainsMono. Copyrig
 Mono Project Authors, licensed under the SIL Open Font License 1.1; the licence text ships beside the
 files as `fonts/jetbrains-mono/OFL.txt`. It serves the UI's `--cth-font-mono` labels (`design/tokens.css`),
 so they no longer need a font from the network (TERM-FONT-105); it is declared in `design/fonts.css`.
+Its Regular and Bold are also the terminal's default face (`components/terminalFont.ts`).
 SemiBold (`JetBrainsMono-SemiBold.woff2`, same release) was added for the release drop (UI-FONTS-LOCAL).
 
 ## UI font: Inter

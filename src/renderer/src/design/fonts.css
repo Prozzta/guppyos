@@ -2,12 +2,14 @@
    font-display: block: the files are local, so the short block period never shows a
    fallback face that xterm could measure first.
 
-   Terminal: Martian Mono 1.1.0 (Standard width), SIL Open Font License 1.1:
-   assets/fonts/martian-mono/OFL.txt. Chosen in components/terminalFont.ts (TERMINAL_FONT_FACE);
-   xterm draws at 400 (fontWeight) and 700 (fontWeightBold).
+   Terminal: the user picks the face in the terminal header (components/terminalFont.ts,
+   TERMINAL_FONT_FACES): JetBrains Mono (the default) or Martian Mono. xterm draws at 400
+   (fontWeight) and 700 (fontWeightBold), so each terminal face needs both weights here.
+   Martian Mono 1.1.0 (Standard width), SIL Open Font License 1.1:
+   assets/fonts/martian-mono/OFL.txt.
 
-   UI: JetBrains Mono 2.304, SIL Open Font License 1.1: assets/fonts/jetbrains-mono/OFL.txt.
-   Not the terminal's face any more; it stays for the UI's --cth-font-mono labels (tokens.css),
+   JetBrains Mono 2.304, SIL Open Font License 1.1: assets/fonts/jetbrains-mono/OFL.txt.
+   The terminal's default face, and the UI's --cth-font-mono labels (tokens.css),
    Monaco and ReleaseDrop, which Google Fonts served at 400/500/700 before 35bbbf72.
    600 (SemiBold) is bundled for the release drop's data: URIs (renderer/src/dropFonts.ts).
 

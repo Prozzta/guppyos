@@ -15,7 +15,10 @@
  */
 import { createPoolTimer } from './poolTimer';
 import { TERMINAL_SCROLLBACK_LINES } from './terminalScrollback';
-import { TERMINAL_FONT_FAMILY, loadTerminalFont, remeasureTerminalFont, TERMINAL_CELL_PAD, terminalFontReady } from './terminalFont';
+import {
+  terminalFontFamily, loadTerminalFont, remeasureTerminalFont, TERMINAL_CELL_PAD, terminalFontReady,
+  applyTerminalFontFace, getTerminalFontFace, subscribeTerminalFontFace
+} from './terminalFont';
 import { createPtyResizeCoalescer, type Grid, type PtyResizeCoalescer } from './ptyResizeCoalescer';
 import { useEffect, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
@@ -167,8 +170,9 @@ export function acquireTerminal(ptyId: string, theme?: ThemeMap, fontSize = 14):
     theme,
     // v0.3.4: a real monospace face replaces VT323 (the narrow CRT face strained at
     // data density). lineHeight stays 1.0 so TUI box-drawing rows stay joined.
-    // TERM-FONT-105: the face (Martian Mono) is bundled and chosen in terminalFont.ts.
-    fontFamily: TERMINAL_FONT_FAMILY,
+    // TERM-FONT-105: the face is bundled and chosen in terminalFont.ts (the user's pick:
+    // JetBrains Mono by default, or Martian Mono).
+    fontFamily: terminalFontFamily(),
     fontSize,
     // Cell = floor(advance) + 1 device px at every size: air around every glyph (terminalFont.ts
     // TERMINAL_CELL_PAD); every later size change keeps it via applyTerminalFontSize.
@@ -1091,6 +1095,27 @@ export function reflowTerminal(ptyId: string): void {
     entry.term.refresh(0, Math.max(0, entry.term.rows - 1));
   } catch { /* host may not be sized yet */ }
 }
+
+/**
+ * TERM-FONT-JETBRAINS: the user picked another terminal face (the selector in the terminal
+ * header). Switch EVERY pooled terminal, on screen or not, with no restart: load the bundled
+ * face first (xterm measures its cell the moment fontFamily changes, and an unloaded face
+ * would be measured as Consolas), then set it with the cell pad and refit. reflowTerminal
+ * re-measures, re-rasters the glyph atlas and resizes the pty when the grid changed; it
+ * no-ops for a terminal that is detached or unsized, which keeps the new face and is fitted
+ * by its view when it is next shown.
+ */
+export function applyTerminalFontFaceToPool(): Promise<void> {
+  const face = getTerminalFontFace();
+  return loadTerminalFont(face).then(() => {
+    if (getTerminalFontFace() !== face) return; // picked again while this face was loading
+    for (const [ptyId, entry] of pool) {
+      applyTerminalFontFace(entry.term, face);
+      reflowTerminal(ptyId);
+    }
+  }).catch(() => { /* logged loudly by loadTerminalFont */ });
+}
+subscribeTerminalFontFace(() => { void applyTerminalFontFaceToPool(); });
 
 // LAG-150: one coalescer per pty, so a burst of local fits reaches the pty as at most one
 // resize, and none at all if the grid settles back where it started. See

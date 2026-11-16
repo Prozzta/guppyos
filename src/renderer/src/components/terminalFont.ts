@@ -1,34 +1,88 @@
+import { useSyncExternalStore } from 'react';
 import type { Terminal } from '@xterm/xterm';
 
 /**
- * TERM-FONT-105: the one place the terminal font is chosen: Martian Mono (the Human's pick).
+ * The one place the terminal font is chosen (TERM-FONT-105, TERM-FONT-JETBRAINS).
  *
- * The face is bundled (design/fonts.css), never fetched. Martian Mono is a WIDE face (its
- * advance is about 0.7em against 0.6em for most monospace fonts), so the cell must be
- * measured with the face itself, never with a fallback: see remeasureTerminalFont below.
+ * The user picks the face in the terminal header, beside the size buttons: JetBrains Mono
+ * (the default) or Martian Mono. Both are bundled (design/fonts.css), never fetched. Their
+ * widths differ (JetBrains Mono's advance is 0.6em, Martian Mono's 0.7em), so the cell must
+ * be measured with the chosen face itself, never with a fallback or with the other face:
+ * see remeasureTerminalFont and applyTerminalFontFace below.
  * Consolas sits before the generic
  * `monospace` so that, on Windows, a missing face falls back to a real monospace font of
  * known width instead of whatever Chromium's default monospace is this release (Courier New
  * in Chrome 128, Consolas in Chrome 156 — the change that exposed the cell-width bug).
  */
-export const TERMINAL_FONT_FACE = 'Martian Mono';
-export const TERMINAL_FONT_FAMILY = `"${TERMINAL_FONT_FACE}", Consolas, monospace`;
+export const TERMINAL_FONT_FACES = ['JetBrains Mono', 'Martian Mono'] as const;
+export type TerminalFontFace = (typeof TERMINAL_FONT_FACES)[number];
+export const DEFAULT_TERMINAL_FONT_FACE: TerminalFontFace = 'JetBrains Mono';
 
-let loaded: Promise<void> | null = null;
+const LS_FONT_FACE = 'cth.ptyFontFace';
 
-/** Load the bundled terminal face (regular + bold, the two weights xterm draws).
- *  Resolves once both are usable; rejects loudly if the bundled files are missing. */
-export function loadTerminalFont(): Promise<void> {
-  if (!loaded) {
-    loaded = Promise.all([
-      document.fonts.load(`14px "${TERMINAL_FONT_FACE}"`),
-      document.fonts.load(`bold 14px "${TERMINAL_FONT_FACE}"`)
+function isTerminalFontFace(v: unknown): v is TerminalFontFace {
+  return (TERMINAL_FONT_FACES as readonly unknown[]).includes(v);
+}
+
+/** The stored pick; anything else (nothing stored, a face we no longer ship) is the default. */
+function load(): TerminalFontFace {
+  try {
+    const v = window.localStorage.getItem(LS_FONT_FACE);
+    if (isTerminalFontFace(v)) return v;
+  } catch { /* noop */ }
+  return DEFAULT_TERMINAL_FONT_FACE;
+}
+
+let current: TerminalFontFace = load();
+const listeners = new Set<() => void>();
+
+export function getTerminalFontFace(): TerminalFontFace {
+  return current;
+}
+
+/** Pick the terminal face and persist it (same pattern as terminalFontSize). An unknown
+ *  face and an unchanged one are no-ops. Subscribers (terminalPool) apply it to every
+ *  pooled terminal; this module only holds the choice. */
+export function setTerminalFontFace(next: string): TerminalFontFace {
+  if (!isTerminalFontFace(next) || next === current) return current;
+  current = next;
+  try { window.localStorage.setItem(LS_FONT_FACE, next); } catch { /* noop */ }
+  for (const l of [...listeners]) l();
+  return current;
+}
+
+export function subscribeTerminalFontFace(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => { listeners.delete(listener); };
+}
+
+/** Live terminal face. Re-renders the caller whenever the pick changes. */
+export function useTerminalFontFace(): TerminalFontFace {
+  return useSyncExternalStore(subscribeTerminalFontFace, getTerminalFontFace, getTerminalFontFace);
+}
+
+/** The xterm fontFamily for a face: the face first, then Consolas, then monospace. */
+export function terminalFontFamily(face: TerminalFontFace = current): string {
+  return `"${face}", Consolas, monospace`;
+}
+
+const loaded = new Map<TerminalFontFace, Promise<void>>();
+
+/** Load a bundled terminal face (regular + bold, the two weights xterm draws); the chosen
+ *  one by default. Resolves once both are usable; rejects loudly if the bundled files are missing. */
+export function loadTerminalFont(face: TerminalFontFace = current): Promise<void> {
+  let p = loaded.get(face);
+  if (!p) {
+    p = Promise.all([
+      document.fonts.load(`14px "${face}"`),
+      document.fonts.load(`bold 14px "${face}"`)
     ]).then((faces) => {
-      if (faces.some((f) => f.length === 0)) throw new Error(`terminal font "${TERMINAL_FONT_FACE}" is not bundled`);
+      if (faces.some((f) => f.length === 0)) throw new Error(`terminal font "${face}" is not bundled`);
     });
-    loaded.catch((err) => console.error('[terminalFont]', err));
+    p.catch((err) => console.error('[terminalFont]', err));
+    loaded.set(face, p);
   }
-  return loaded;
+  return p;
 }
 
 /** The weights xterm draws with (fontWeight 400, fontWeightBold 700). */
@@ -40,8 +94,8 @@ const TERMINAL_FONT_WEIGHTS = ['400', '700'];
  * (Chrome 156, Jim on 35bbbf72), so a missing fonts.css would read "ready", the load
  * below would never run and its loud error would never fire.
  */
-export function terminalFontReady(): boolean {
-  const faces = [...document.fonts].filter((f) => f.family.replace(/["']/g, '') === TERMINAL_FONT_FACE);
+export function terminalFontReady(face: TerminalFontFace = current): boolean {
+  const faces = [...document.fonts].filter((f) => f.family.replace(/["']/g, '') === face);
   return TERMINAL_FONT_WEIGHTS.every((w) => faces.some((f) => f.weight === w && f.status === 'loaded'));
 }
 
@@ -65,13 +119,18 @@ export function remeasureTerminalFont(term: Terminal): void {
 /**
  * Whole-pixel cells with air around every glyph (TERM-FONT-105: readability is the bar).
  *
- * xterm's cell width is floor(advance x dpr) + round(letterSpacing) device px. Martian Mono's
- * advance is 0.7em, fractional at most sizes (8.4px at 12px), so the floor alone made 8px
- * cells for 8.4px glyphs and W/m were drawn squeezed; where the advance is whole (7.0 at
- * 10px) the glyphs fit but W/m touch their neighbours. The rule (god 5f0f8b) is
- * cell = floor(advance) + 1 at every size: 10px -> 8, 12px -> 9, 14px -> 10, 16px -> 12.
- * So the pad is always one device px, never measured: it cannot disagree with xterm's own
- * measurement, and every size change must carry it (see applyTerminalFontSize).
+ * xterm's cell width is floor(advance x dpr) + round(letterSpacing) device px, and a face's
+ * advance is fractional at most sizes: Martian Mono (0.7em) is 8.4px at 12px, JetBrains Mono
+ * (0.6em) is 7.2px. The floor alone makes cells narrower than their glyphs whenever the
+ * fraction is lost (8px cells for 8.4px glyphs: W/m drawn squeezed); where the advance is
+ * whole the glyphs fit but W/m touch their neighbours. The rule (god 5f0f8b) is
+ * cell = floor(advance) + 1 at every size, for every face:
+ *   Martian Mono   10px -> 8, 12px -> 9, 14px -> 10, 16px -> 12
+ *   JetBrains Mono 10px -> 7, 12px -> 8, 14px -> 9,  16px -> 10
+ * floor(a) + 1 is wider than a for any advance, so the rule needs no per-face constant: the
+ * pad is always one device px, never measured. It cannot disagree with xterm's own
+ * measurement, and every size or face change must carry it (see applyTerminalFontSize and
+ * applyTerminalFontFace).
  */
 export const TERMINAL_CELL_PAD = 1;
 
@@ -79,4 +138,15 @@ export const TERMINAL_CELL_PAD = 1;
 export function applyTerminalFontSize(term: Terminal, fontSize: number): void {
   term.options.letterSpacing = TERMINAL_CELL_PAD;
   term.options.fontSize = fontSize;
+}
+
+/**
+ * Switch a terminal to a face and keep the one-pixel cell pad with it. Call it only once
+ * the face is loaded (loadTerminalFont): the fontFamily change makes xterm measure its cell
+ * right away, and an unloaded face would be measured as Consolas. The caller refits the
+ * grid (terminalPool's reflowTerminal).
+ */
+export function applyTerminalFontFace(term: Terminal, face: TerminalFontFace): void {
+  term.options.letterSpacing = TERMINAL_CELL_PAD;
+  term.options.fontFamily = terminalFontFamily(face);
 }

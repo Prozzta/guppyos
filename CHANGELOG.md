@@ -13,6 +13,7 @@ All notable changes to this project are documented here. The format is based on
   the pty output. The new Terminal setting is on by default; an all-default-
   foreground error line is coloured as a whole, while a line containing ANSI
   foreground colours keeps those cells untouched.
+- **Pick the terminal font.** A font selector sits at the top of every terminal, beside the size buttons: JetBrains Mono or Martian Mono. JetBrains Mono is now the default. The choice applies to every open terminal at once, with no restart, and is remembered the next time Guppy starts. Both fonts ship with the app, so nothing is downloaded, and both keep the whole-pixel character cells from 1.1.106, so text is not clipped or overlapped in either.
 
 > **The fork line.** From here up, entries are this fork's (Prozzta/guppyos) independently
 > versioned 1.1.x releases, taken from their GitHub release notes (published releases begin at
