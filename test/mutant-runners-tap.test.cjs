@@ -14,6 +14,7 @@ const test = require('node:test');
 const { spawn } = require('node:child_process');
 const { tapResult, verdict, runTests } = require('./tools/mutant-tap.cjs');
 const own = require('./tools/own-procs.cjs');
+const { psEnv } = require('./tools/ps-env.cjs');
 // The classify-all pin below reads census-mutated code (src TS, run-tests.cjs): load-ts gates on the mutant journal.
 const loadTs = require('./load-ts.cjs');
 
@@ -71,8 +72,7 @@ function startCwdHolder(dir) {
   // A cwd alone may allow a Windows delete. FileShare.None makes the holder observable: the first
   // recursive rmSync must report its OS error until this child receives the release line.
   const program = "$f=[IO.File]::Open($env:CWD_HOLDER_FILE,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None); [IO.File]::WriteAllText($env:CWD_HOLDER_READY,$PID); [Console]::In.ReadLine() | Out-Null; $f.Dispose()";
-  const encoded = Buffer.from(program, 'utf16le').toString('base64');
-  const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { cwd: dir, windowsHide: true, stdio: ['pipe', 'ignore', 'ignore'], env: { ...process.env, CWD_HOLDER_FILE: held, CWD_HOLDER_READY: ready } });
+  const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', program], { cwd: dir, windowsHide: true, stdio: ['pipe', 'ignore', 'ignore'], env: psEnv({ ...process.env, CWD_HOLDER_FILE: held, CWD_HOLDER_READY: ready }) });
   const until = Date.now() + 5_000;
   const wait = new Int32Array(new SharedArrayBuffer(4));
   while (!fs.existsSync(ready) && Date.now() < until) Atomics.wait(wait, 0, 0, 25);
