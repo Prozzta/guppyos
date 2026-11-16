@@ -20,6 +20,7 @@ const React = require('react');
 const { renderToStaticMarkup } = require('react-dom/server');
 const loadTs = require('./load-ts.cjs');
 const { readSource, codeOnly } = require('./read-source.cjs');
+const { threadCpuMs } = require('./tools/thread-cpu.cjs');
 
 const M = loadTs('src/renderer/src/components/cardsReview.ts');
 const { firstOccurrenceById } = loadTs('src/shared/taskLedger.ts');
@@ -278,21 +279,23 @@ const bigLedger = (n) => ({
 
 test('MUST 2: 900 cards with done on: the model builds once, the list renders the first 50 with SHOW MORE, in time', () => {
   const raw = bigLedger(900);
-  const t0 = performance.now();
+  // SUITE-LOAD-FLAKES-1027: thread CPU time, not wall time. Both stretches are synchronous, and in
+  // a full run wall time also counted the wait for a core (model: 13 ms alone, 744 ms loaded).
+  const t0 = threadCpuMs();
   const many = M.reviewCards(parseTasks(raw), M.rawById(raw), {});
-  const t1 = performance.now();
+  const t1 = threadCpuMs();
   const html = renderToStaticMarkup(React.createElement(CardsView, { cards: many, nameFor, now: NOW, initialFilter: { ...M.DEFAULT_FILTER, showDone: true } }));
-  const t2 = performance.now();
+  const t2 = threadCpuMs();
   assert.equal(many.length, 900);
   assert.equal((html.match(/class="cth-card-review"/g) || []).length, 50, 'only the first page is rendered');
   assert.ok(html.includes('900 of 900 cards'));
   assert.ok(html.includes('SHOW 50 MORE · 850 NOT SHOWN'));
   assert.ok(html.includes('data-card="PERF-899"'), 'the newest first');
-  // 953f6fec rendered every card: ~1.95 s for 738. A page of 50 is ~0.15 s; the bound leaves
-  // room for a loaded suite run and still fails a list that renders them all.
-  console.log(`# 900 cards: model ${(t1 - t0).toFixed(0)} ms, render ${(t2 - t1).toFixed(0)} ms, html ${(html.length / 1024).toFixed(0)} KB`);
-  assert.ok(t2 - t1 < 1000, `render took ${(t2 - t1).toFixed(0)} ms`);
-  assert.ok(t1 - t0 < 500, `model took ${(t1 - t0).toFixed(0)} ms`);
+  // 953f6fec rendered every card: ~1.95 s for 738. A page of 50 is ~0.15 s; the bound is CPU
+  // time, so a loaded suite run does not move it, and it still fails a list that renders them all.
+  console.log(`# 900 cards (thread CPU): model ${(t1 - t0).toFixed(0)} ms, render ${(t2 - t1).toFixed(0)} ms, html ${(html.length / 1024).toFixed(0)} KB`);
+  assert.ok(t2 - t1 < 1000, `render took ${(t2 - t1).toFixed(0)} ms of CPU`);
+  assert.ok(t1 - t0 < 500, `model took ${(t1 - t0).toFixed(0)} ms of CPU`);
 });
 
 test('MUST 2: memoised cards, a memoised model, unchanged polls keep identity, a debounced search', () => {

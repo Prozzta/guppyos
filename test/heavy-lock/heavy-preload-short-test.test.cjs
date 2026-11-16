@@ -163,6 +163,11 @@ function start(args, url) {
   const env = { ...process.env };
   for (const k of ['NODE_TEST_CONTEXT', 'NODE_OPTIONS', 'GUPPY_TEST_RUN', 'HIVE_LEDGER_URL']) delete env[k];
   // npm 11 otherwise writes node-compile-cache under os.tmpdir() outside JAIL.
+  // SUITE-LOAD-FLAKES-1027: npm's default cache on Windows is %LOCALAPPDATA%\npm-cache, and the
+  // runner's temp jail points LOCALAPPDATA at this file's temp folder, so an `npm ci` child that
+  // got as far as opening its cache left `npm-cache` there and the run failed on TEMP LEAK with
+  // 0 test failures. The cache belongs in JAIL, which test.after removes.
+  env.npm_config_cache = path.join(JAIL, 'npm-cache');
   Object.assign(env, { NODE_DISABLE_COMPILE_CACHE: '1', NODE_OPTIONS: `--require "${PRELOAD.replace(/\\/g, '/')}"`, HIVE_LEDGER_URL: url, HIVE_ROOT: JAIL, AGENT_ID: 'a' });
   const child = spawn(args[0], args.slice(1), { cwd: FIX, env, windowsHide: true });
   let stderr = '';
