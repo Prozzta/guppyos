@@ -53,7 +53,7 @@ function loadHoldAddon(): HoldAddon | null {
     process.dlopen(mod, found);
     const { procOpen, procAlive, procClose } = mod.exports;
     if (typeof procOpen !== 'function' || typeof procAlive !== 'function' || typeof procClose !== 'function') {
-      throw new Error(`${found} has no process holds (built before PTY-KILL-PID-IDENTITY: run tools/build-fs-handle.cjs)`);
+      throw new Error(`${found} lacks procOpen (built before PTY-KILL-PID-IDENTITY: run tools/build-fs-handle.cjs)`);
     }
     holdAddon = mod.exports as HoldAddon;
   } catch (e) {

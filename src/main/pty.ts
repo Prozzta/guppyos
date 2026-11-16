@@ -1037,12 +1037,12 @@ export class PtyManager {
         // ptyEnv.ts for why the strip exists and why it is prefix-based.
         env: buildPtyEnv(process.env, userPath, opts.env, process.platform, opts.pathPrepend, opts.nodeRequire)
       });
-      // PTY-KILL-PID-IDENTITY: bind the pid to this root NOW, before anything else can run: a
-      // handle of our own on Windows, the start stamp elsewhere.
-      const hold = holdRoot(proc.pid);
-      const rootId = process.platform === 'win32' ? undefined : pidIdentity(proc.pid);
       // PTY-EARLY-KILL-LEAK: a kill before the first output must close the pseudoconsole now.
       armEarlyKill(proc);
+      // PTY-KILL-PID-IDENTITY: bind the pid to this root in the spawn's own turn, before anything
+      // else can run: a handle of our own on Windows, the start stamp elsewhere.
+      const hold = holdRoot(proc.pid);
+      const rootId = process.platform === 'win32' ? undefined : pidIdentity(proc.pid);
 
       // Capture THIS session object so the proc's callbacks can tell whether the
       // id still belongs to them. A model change / restart does kill()+spawn()
