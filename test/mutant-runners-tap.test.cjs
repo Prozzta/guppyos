@@ -11,6 +11,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { spawn } = require('node:child_process');
 const { tapResult, verdict, runTests } = require('./tools/mutant-tap.cjs');
 const own = require('./tools/own-procs.cjs');
 // The classify-all pin below reads census-mutated code (src TS, run-tests.cjs): load-ts gates on the mutant journal.
@@ -43,17 +44,50 @@ function stopAndWaitForWorker(rec) {
   assert.fail(`timed-out node --test worker ${rec.pid} did not exit before fixture cleanup`);
 }
 
-// An exited Windows process can still be closing its cwd handle.  Retry only while that release is
-// observable; the final rmSync error deliberately escapes rather than being hidden as a temp leak.
-function removeFixture(dir) {
+// An exited Windows process can still be closing its cwd handle. Every retry is reported to the
+// caller; exhaustion says the final OS code and attempt count rather than hiding a temp leak.
+const FIXTURE_REMOVE_RETRY_MS = 25;
+const FIXTURE_REMOVE_MAX_TRIES = 200;
+function removeFixture(dir, { maxTries = FIXTURE_REMOVE_MAX_TRIES, onRetry = () => {} } = {}) {
   const wait = new Int32Array(new SharedArrayBuffer(4));
-  const until = Date.now() + 5_000;
-  for (;;) {
+  const retries = [];
+  for (let tries = 1; tries <= maxTries; tries++) {
     try { fs.rmSync(dir, { recursive: true, force: true }); return; } catch (e) {
-      if (Date.now() >= until) throw e;
-      Atomics.wait(wait, 0, 0, 25);
+      const retry = { try: tries, code: e && e.code ? e.code : 'UNKNOWN' };
+      retries.push(retry); onRetry(retry);
+      if (tries === maxTries) {
+        const failure = new Error(`fixture cleanup failed with ${retry.code} after ${tries} tries: ${dir}`);
+        failure.code = retry.code; failure.tries = tries; failure.retries = retries;
+        throw failure;
+      }
+      Atomics.wait(wait, 0, 0, FIXTURE_REMOVE_RETRY_MS);
     }
   }
+}
+
+function startCwdHolder(dir) {
+  const ready = path.join(os.tmpdir(), `mutant-runners-cwd-${process.pid}-${Math.random().toString(36).slice(2)}`);
+  const held = path.join(dir, 'cwd-holder.lock');
+  // A cwd alone may allow a Windows delete. FileShare.None makes the holder observable: the first
+  // recursive rmSync must report its OS error until this child receives the release line.
+  const program = "$f=[IO.File]::Open($env:CWD_HOLDER_FILE,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None); [IO.File]::WriteAllText($env:CWD_HOLDER_READY,$PID); [Console]::In.ReadLine() | Out-Null; $f.Dispose()";
+  const encoded = Buffer.from(program, 'utf16le').toString('base64');
+  const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { cwd: dir, windowsHide: true, stdio: ['pipe', 'ignore', 'ignore'], env: { ...process.env, CWD_HOLDER_FILE: held, CWD_HOLDER_READY: ready } });
+  const until = Date.now() + 5_000;
+  const wait = new Int32Array(new SharedArrayBuffer(4));
+  while (!fs.existsSync(ready) && Date.now() < until) Atomics.wait(wait, 0, 0, 25);
+  assert.ok(fs.existsSync(ready), 'cwd holder started');
+  return { child, ready, release: () => child.stdin.end('release\n') };
+}
+
+function stopCwdHolder(holder) {
+  try { holder.release(); } catch { /* process already gone */ }
+  const wait = new Int32Array(new SharedArrayBuffer(4));
+  const until = Date.now() + 5_000;
+  const live = () => { try { process.kill(holder.child.pid, 0); return true; } catch { return false; } };
+  while (live() && Date.now() < until) Atomics.wait(wait, 0, 0, 25);
+  if (live()) throw new Error(`cwd holder ${holder.child.pid} did not exit`);
+  fs.rmSync(holder.ready, { force: true });
 }
 
 const tap = (rows, { tests, pass, fail, cancelled = 0 } = {}) => [
@@ -179,6 +213,32 @@ test('runTests runs real node --test under TAP: pass, fail and a hang give SURVI
   } finally {
     if (fs.existsSync(hangPid)) stopAndWaitForWorker(own.readRec(hangPid, path.basename(process.execPath)));
     removeFixture(dir);
+  }
+});
+
+test('fixture cleanup waits through a cwd-holder EPERM (MUTANT: one attempt fails loudly)', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mutant-runners-cwd-'));
+  let holder;
+  try {
+    holder = startCwdHolder(dir);
+    let one;
+    assert.throws(() => removeFixture(dir, { maxTries: 1 }), (e) => { one = e; return true; });
+    assert.match(one.message, new RegExp(`failed with ${one.code} after 1 tries: ${dir.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&')}`));
+    assert.equal(one.tries, 1);
+    assert.deepEqual(one.retries, [{ try: 1, code: one.code }]);
+    assert.ok(fs.existsSync(dir), 'the one-attempt mutant left the held directory');
+    stopCwdHolder(holder); holder = null;
+
+    holder = startCwdHolder(dir);
+    const retries = [];
+    removeFixture(dir, { onRetry: (retry) => { retries.push(retry); if (retry.try === 1) holder.release(); } });
+    assert.ok(retries.length >= 1, 'the fixed cleanup recorded its blocked first delete');
+    assert.equal(retries[0].try, 1);
+    assert.notEqual(retries[0].code, 'UNKNOWN');
+    holder = null; // it was released by the first recorded retry and its cwd is gone with the dir
+  } finally {
+    if (holder) stopCwdHolder(holder);
+    if (fs.existsSync(dir)) removeFixture(dir);
   }
 });
 
