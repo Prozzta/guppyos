@@ -70,9 +70,10 @@ test('runNodeTest says the cause on stderr, and never for a file one of the runn
   assert.ok(removed.includes('ev.jsonl.starts.kills'), 'the kills record is cleaned up');
 });
 
-test('END TO END: one test file force-kills another by pid; the run fails and names the victim, the kill and the killer', { timeout: 120_000 }, () => {
+test('END TO END: two test files force-kill two others by pid (taskkill, process.kill); the run fails and names each victim, kill and killer', { timeout: 120_000 }, () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runner-killed106-'));
   const pidFile = path.join(dir, 'victim.pid');
+  const pidFile2 = path.join(dir, 'victim2.pid');
   try {
     // The victim writes its pid and waits; it is alive and known when the killer names it, so this
     // kill by number hits the process it means.
@@ -89,6 +90,22 @@ test('END TO END: one test file force-kills another by pid; the run fails and na
       "  if (process.platform === 'win32') cp.spawnSync('taskkill', ['/F', '/PID', String(pid)], { windowsHide: true }); else process.kill(pid, 'SIGKILL');",
       '});',
     ].join('\n'));
+    // Jim 357a88 MINOR: the second pair goes through the process.kill wrapper for real, by number.
+    // The killer's own test fails unless the wrapper hands back the real call's true (MUTANTS: the
+    // process.kill row is dropped / the wrapper drops the return value).
+    fs.writeFileSync(path.join(dir, 'd-victim2.test.cjs'), [
+      `require('node:fs').writeFileSync(${JSON.stringify(pidFile2)}, String(process.pid));`,
+      "require('node:test')('never finishes either', () => new Promise((r) => setTimeout(r, 60_000)));",
+    ].join('\n'));
+    fs.writeFileSync(path.join(dir, 'e-killer2.test.cjs'), [
+      "const fs = require('node:fs'); const assert = require('node:assert/strict');",
+      "require('node:test')('process.kill ends the second file and returns true', async () => {",
+      `  let pid = 0; for (let i = 0; i < 300 && !pid; i++) { try { pid = Number(fs.readFileSync(${JSON.stringify(pidFile2)}, 'utf8')); } catch { /* not yet */ } if (!pid) await new Promise((r) => setTimeout(r, 100)); }`,
+      "  if (!pid) throw new Error('the second victim never wrote its pid');",
+      "  await new Promise((r) => setTimeout(r, 500));",
+      "  assert.equal(process.kill(pid, 'SIGKILL'), true, 'THE WRAPPER RETURNS WHAT THE REAL process.kill RETURNED');",
+      '});',
+    ].join('\n'));
     fs.writeFileSync(path.join(dir, 'c-ok.test.cjs'), "require('node:test')('ok', () => {});\n");
     const e = []; let out = '';
     const spawn = (args, opts) => { const r = spawnSync(process.execPath, args, { ...opts, stdio: 'pipe', encoding: 'utf8', timeout: 100_000, killSignal: 'SIGKILL' }); out = r.stdout; return r; };
@@ -101,7 +118,11 @@ test('END TO END: one test file force-kills another by pid; the run fails and na
     assert.match(errs, /FILE ENDED WITHOUT EXITING \(pid \d+\): .*a-victim\.test\.cjs/, `THE KILLED FILE IS NAMED WITH ITS CAUSE:\n${errs}`);
     const via = process.platform === 'win32' ? 'taskkill' : 'process\\.kill';
     assert.match(errs, new RegExp(`its pid \\d+ was named by a kill \\(${via}\\) from .*b-killer\\.test\\.cjs \\(pid \\d+\\), \\d+ ms after it started`), `THE KILL AND THE FILE THAT MADE IT ARE NAMED:\n${errs}`);
-    assert.doesNotMatch(errs, /(b-killer|c-ok)\.test\.cjs$/m, 'ONLY THE KILLED FILE IS REPORTED: files that exited are not');
+    assert.match(out, /^ok \d+ - process\.kill ends the second file and returns true$/m, `THE process.kill KILLER PASSED, SO THE WRAPPER RETURNED true:\n${out}`);
+    assert.doesNotMatch(out, /never finishes either/, 'the second victim left no test output');
+    assert.match(errs, /FILE ENDED WITHOUT EXITING \(pid \d+\): .*d-victim2\.test\.cjs/, `THE FILE process.kill ENDED IS NAMED:\n${errs}`);
+    assert.match(errs, /its pid \d+ was named by a kill \(process\.kill\) from .*e-killer2\.test\.cjs \(pid \d+\), \d+ ms after it started/, `THE process.kill AND THE FILE THAT MADE IT ARE NAMED:\n${errs}`);
+    assert.doesNotMatch(errs, /(b-killer|c-ok|e-killer2)\.test\.cjs$/m, 'ONLY THE KILLED FILE IS REPORTED: files that exited are not');
     assert.deepEqual(fs.readdirSync(dir).filter((n) => n.startsWith('ev.jsonl')), [], 'the record files (the kills record among them) are cleaned up');
   } finally {
     for (let i = 0; i < 50; i++) { try { fs.rmSync(dir, { recursive: true, force: true }); break; } catch { spawnSync(process.execPath, ['-e', 'setTimeout(()=>{},200)']); } }
