@@ -340,3 +340,93 @@ test('resolvesInside sees through links; an @xterm junction out of the tree is r
   assert.deepEqual(fs.readdirSync(path.join(other, 'x')), ['addon-webgl'], 'nothing written into the other tree');
   assert.equal(W.linksUnder(root).length, 1, 'no link created');
 });
+
+// SUITE-LOAD-FLAKES-106H: a tree whose node_modules is a junction into an older tree ran the suite
+// on a node-pty without the PTY-HOLD-NODEPTY-HANDOFF patch. The preflight did not look, and
+// pty-hold-nodepty-handoff went red in 10 tests that read as a defect in that file.
+/** A node-pty fixture: `source` is what the fake --check reads, `binary` the built conpty.node (or none). */
+function nodePty(base, { source = 'HANDOFF', binary = 'MZ..DuplicateHandle..' } = {}) {
+  put(base, 'node_modules/node-pty/src/win/conpty.cc', source);
+  if (binary !== null) put(base, 'node_modules/node-pty/build/Release/conpty.node', binary);
+}
+/** fakeSpawn, plus the node-pty --check: it passes only on a source that reads HANDOFF. */
+function fakeSpawnPty(root, calls = []) {
+  const rest = fakeSpawn(root, calls);
+  return (cmd, args) => {
+    if (args[0] !== path.join(root, W.NODE_PTY_PATCH)) return rest(cmd, args);
+    calls.push(args.map((a) => (typeof a === 'string' ? a.replace(root, '<root>') : a)));
+    assert.deepEqual(args.slice(1, 3), ['--check', '--root'], 'THE NODE-PTY TOOL IS ONLY EVER ASKED TO CHECK: it rewrites files otherwise');
+    return { status: fs.readFileSync(path.join(args[3], 'src', 'win', 'conpty.cc'), 'utf8') === 'HANDOFF' ? 0 : 1, stdout: '', stderr: '' };
+  };
+}
+function ptyTree(t, opts) {
+  const root = jail(t);
+  builtNatives(root);
+  addon(root, 'PATCHED');
+  put(root, W.NODE_PTY_PATCH, '// fake: the spawn is injected\n');
+  if (opts !== null) nodePty(root, opts);
+  return root;
+}
+const ids = (root, platform = 'win32', calls = []) => W.inspect(root, { platform, spawnSyncFn: fakeSpawnPty(root, calls) }).map((g) => g.id);
+
+test('NODE-PTY GAP: an unpatched node-pty, or a patched one whose binary was not rebuilt, is a gap; the installed form is none', (t) => {
+  assert.deepEqual(ids(ptyTree(t, {})), [], 'patched source and a binary that imports DuplicateHandle: complete');
+
+  const unpatched = ptyTree(t, { source: 'RACE-FIX ONLY' });
+  const gap = W.inspect(unpatched, { platform: 'win32', spawnSyncFn: fakeSpawnPty(unpatched) });
+  assert.deepEqual(gap.map((g) => g.id), ['node-pty'], 'AN UNPATCHED NODE-PTY IS A GAP');
+  assert.match(gap[0].problem, /node-pty is not PTY-HOLD-NODEPTY-HANDOFF patched \(run `npm run postinstall` in this tree\)/);
+
+  const stale = ptyTree(t, { binary: 'MZ..an older build..' });
+  const g2 = W.inspect(stale, { platform: 'win32', spawnSyncFn: fakeSpawnPty(stale) });
+  assert.deepEqual(g2.map((g) => g.id), ['node-pty'], 'A PATCHED SOURCE WITH AN OLD BINARY IS A GAP: the suite runs the binary');
+  assert.match(g2[0].problem, /conpty\.node was not rebuilt from the patched source/);
+  assert.deepEqual(ids(ptyTree(t, { binary: null })), ['node-pty'], 'no binary at all is the same gap');
+
+  assert.deepEqual(ids(unpatched, 'linux'), [], 'the patch is Windows-only: no gap elsewhere');
+  assert.deepEqual(ids(ptyTree(t, null)), [], 'no node-pty folder: not this check (a tree with no node_modules is the xterm gap)');
+  const older = ptyTree(t, { source: 'RACE-FIX ONLY' });
+  fs.rmSync(path.join(older, W.NODE_PTY_PATCH));
+  assert.deepEqual(ids(older), [], 'a base from before the patch has no tool and no gap');
+});
+
+test('NODE-PTY GAP: a junction into an older tree is named as shared; setup reports it and writes nothing; the preflight stops the suite', (t) => {
+  const shared = jail(t);
+  const root = jail(t);
+  put(shared, 'node_modules/@xterm/addon-webgl/lib/addon-webgl.js', 'PATCHED');
+  nodePty(shared, { source: 'RACE-FIX ONLY', binary: 'MZ..an older build..' });
+  builtNatives(root);
+  put(root, 'tools/patch-xterm-webgl-font.cjs', '//\n');
+  put(root, W.NODE_PTY_PATCH, '//\n');
+  fs.symlinkSync(path.join(shared, 'node_modules'), path.join(root, 'node_modules'), 'junction');
+
+  const gaps = W.inspect(root, { platform: 'win32', spawnSyncFn: fakeSpawnPty(root) });
+  assert.deepEqual(gaps.map((g) => g.id), ['node-pty'], 'the xterm patch is there, so node-pty is the ONLY gap: what the 106h tree looked like');
+  assert.match(gaps[0].problem, /resolves into another tree.*npm ci/, 'the gap names the shared tree and the fix');
+
+  const calls = [];
+  const left = W.setup(root, { platform: 'win32', spawnSyncFn: fakeSpawnPty(root, calls), log: quiet });
+  assert.deepEqual(left.map((g) => g.id), ['node-pty'], 'setup cannot fix it: the gap stays');
+  assert.ok(calls.length > 0 && calls.every((c) => c[1] === '--check'), 'setup only checked');
+  assert.equal(fs.readFileSync(path.join(shared, 'node_modules/node-pty/src/win/conpty.cc'), 'utf8'), 'RACE-FIX ONLY', 'THE SHARED NODE-PTY IS NOT PATCHED');
+  assert.equal(fs.readFileSync(path.join(shared, 'node_modules/node-pty/build/Release/conpty.node'), 'utf8'), 'MZ..an older build..');
+
+  const lines = [];
+  const code = W.preflight({ root, env: {}, log: (l) => lines.push(l), inspectFn: (r) => W.inspect(r, { platform: 'win32', spawnSyncFn: fakeSpawnPty(r) }) });
+  assert.notEqual(code, 0, 'THE SUITE DOES NOT START ON AN UNPATCHED NODE-PTY');
+  assert.ok(lines.some((l) => /TREE GAP node-pty: /.test(l)), lines.join(' | '));
+});
+
+test('NODE-PTY GAP: the real patch tool takes the check as inspect sends it, and fails a node-pty that is not the pinned form', { skip: process.platform !== 'win32' && 'the tool is a no-op off Windows' }, (t) => {
+  const root = jail(t);
+  for (const f of [W.NODE_PTY_PATCH, 'tools/node-pty-race-fix-pins.cjs']) put(root, f, fs.readFileSync(path.join(REPO, f)));
+  const pins = require('../tools/node-pty-race-fix-pins.cjs');
+  put(root, 'node_modules/node-pty/package.json', JSON.stringify({ name: 'node-pty', version: pins.NODE_PTY_VERSION }));
+  put(root, 'node_modules/node-pty/src/win/conpty.cc', '// not the pinned source\n');
+  put(root, 'node_modules/node-pty/lib/windowsPtyAgent.js', '// not the pinned agent\n');
+  put(root, 'node_modules/node-pty/build/Release/conpty.node', 'MZ..DuplicateHandle..');
+  const state = W.nodePtyState(root, { platform: 'win32' });
+  assert.equal(state.ok, false, 'the real --check exits nonzero');
+  assert.match(state.problem, /not PTY-HOLD-NODEPTY-HANDOFF patched/);
+  assert.equal(fs.readFileSync(path.join(root, 'node_modules/node-pty/src/win/conpty.cc'), 'utf8'), '// not the pinned source\n', 'the check changed nothing');
+});

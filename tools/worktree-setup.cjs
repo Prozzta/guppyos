@@ -9,7 +9,10 @@
  *   - resources/heavyjob/bin/guppy-heavyjob.exe (tools/build-heavyjob.cjs, `npm run build` only):
  *     the runner ran uncapped ("CPU cap unknown, using visible-core concurrency");
  *   - a patched @xterm/addon-webgl (tools/patch-xterm-webgl-font.cjs, postinstall): term-font-105
- *     red, and patching a shared node_modules would change every other tree that junctions it.
+ *     red, and patching a shared node_modules would change every other tree that junctions it;
+ *   - a root-handle patched and rebuilt node-pty (tools/patch-node-pty-root-handle.cjs,
+ *     postinstall): pty-hold-nodepty-handoff red in 10 tests on a junction into an older tree.
+ *     Reported, never filled here: it needs the tree's own `npm ci`.
  *
  *   node tools/worktree-setup.cjs [--copy-from <built tree>]   fill the gaps, then re-check
  *   node tools/worktree-setup.cjs --check                       report only (exit 1 on a gap)
@@ -45,6 +48,9 @@ const NATIVES = [
 ];
 const ADDON = path.join('node_modules', '@xterm', 'addon-webgl');
 const XTERM_PATCH = 'tools/patch-xterm-webgl-font.cjs';
+const NODE_PTY = path.join('node_modules', 'node-pty');
+const NODE_PTY_PATCH = 'tools/patch-node-pty-root-handle.cjs';
+const NODE_PTY_BINARY = path.join(NODE_PTY, 'build', 'Release', 'conpty.node');
 const STAMP = '.worktree-setup.json';
 
 function isLink(p) { try { return fs.lstatSync(p).isSymbolicLink(); } catch { return false; } }
@@ -146,6 +152,28 @@ function xtermState(root, { spawnSyncFn = spawnSync } = {}) {
   return { ok: false, shared, problem: `${ADDON} is not TERM-FONT-105 patched${shared ? ' (it, or a link under it, resolves into another tree; a shared node_modules or @xterm needs this tree\'s own npm ci)' : ''}` };
 }
 
+/**
+ * PTY-HOLD-NODEPTY-HANDOFF: is this tree's node-pty the one postinstall leaves (root-handle patched
+ * source and agent, and a conpty.node rebuilt from them)? A tree that junctions an older tree's
+ * node_modules is not, and nothing said so: pty-hold-nodepty-handoff alone went red in 10 tests.
+ * Report only. The fix rebuilds a native module, which is this tree's own `npm ci`.
+ */
+function nodePtyState(root, { platform = process.platform, spawnSyncFn = spawnSync } = {}) {
+  const tool = path.join(root, NODE_PTY_PATCH);
+  const np = path.join(root, NODE_PTY);
+  if (platform !== 'win32' || !fs.existsSync(tool) || !fs.existsSync(np)) return { ok: true };
+  const shared = !resolvesInside(np, root);
+  const fix = shared
+    ? " (it resolves into another tree; a shared node_modules needs this tree's own npm ci)"
+    : ' (run `npm run postinstall` in this tree)';
+  const r = spawnSyncFn(process.execPath, [tool, '--check', '--root', np], { encoding: 'utf8', windowsHide: true });
+  if (r.status !== 0) return { ok: false, shared, problem: `${NODE_PTY} is not PTY-HOLD-NODEPTY-HANDOFF patched${fix}` };
+  const binary = path.join(root, NODE_PTY_BINARY);
+  const rebuilt = fs.existsSync(binary) && fs.readFileSync(binary).includes('DuplicateHandle');
+  if (!rebuilt) return { ok: false, shared, problem: `${NODE_PTY_BINARY} was not rebuilt from the patched source${fix}` };
+  return { ok: true };
+}
+
 /** Every gap that would make the suite wrong in this tree: [{ id, problem }]. */
 function inspect(root = REPO, { platform = process.platform, spawnSyncFn = spawnSync } = {}) {
   const gaps = [];
@@ -156,6 +184,8 @@ function inspect(root = REPO, { platform = process.platform, spawnSyncFn = spawn
   }
   const x = xtermState(root, { spawnSyncFn });
   if (!x.ok) gaps.push({ id: 'xterm', problem: x.problem });
+  const p = nodePtyState(root, { platform, spawnSyncFn });
+  if (!p.ok) gaps.push({ id: 'node-pty', problem: p.problem });
   return gaps;
 }
 
@@ -223,6 +253,7 @@ function fillNative(n, root, { copyFrom, spawnSyncFn = spawnSync, log = console.
 function setup(root = REPO, { copyFrom, platform = process.platform, spawnSyncFn = spawnSync, log = console.log } = {}) {
   for (const gap of inspect(root, { platform, spawnSyncFn })) {
     if (gap.id === 'xterm') { if (fs.existsSync(path.join(root, ADDON))) localizeXterm(root, { spawnSyncFn, log }); continue; }
+    if (gap.id === 'node-pty') continue; // report only: see nodePtyState
     fillNative(NATIVES.find((n) => n.id === gap.id), root, { copyFrom, spawnSyncFn, log });
   }
   return inspect(root, { platform, spawnSyncFn });
@@ -260,7 +291,7 @@ function preflight({ root = REPO, env = process.env, log = (l) => process.stderr
 /** The line run-tests.cjs repeats after its summary on an opted-out run. */
 function optOutLine(ids) { return `[test-runner] INCOMPLETE TREE (opt-out): ${ids.join(', ')}`; }
 
-module.exports = { NATIVES, ADDON, STAMP, buildStamp, inspect, optOutLine, sourcesDigest, readStamp, linksUnder, setup, preflight, teardown, localizeXterm, sameSources, sourceDigests, resolvesInside };
+module.exports = { NATIVES, ADDON, NODE_PTY, NODE_PTY_PATCH, NODE_PTY_BINARY, nodePtyState, STAMP, buildStamp, inspect, optOutLine, sourcesDigest, readStamp, linksUnder, setup, preflight, teardown, localizeXterm, sameSources, sourceDigests, resolvesInside };
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
