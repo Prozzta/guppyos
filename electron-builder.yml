@@ -77,6 +77,11 @@ files:
   - "!**/node_modules/node-pty/build/**/*.{vcxproj,filters,iobj,ipdb,ilk,pdb,exp,lib,tlog}"
   - "!**/node_modules/node-pty/node-addon-api/{Release,Debug}/**"
   - "!**/node_modules/node-pty/node-addon-api/*.{vcxproj,filters}"
+  # NODEPTY-PACKAGED-PROOF: node-pty's prebuilt Windows binaries are plain 1.1.0 (no #922 lock, no
+  # root handle). The app loads the ones built at install from the patched source (build/Release),
+  # and the patched loader never looks here; do not ship them at all.
+  # `node tools/patch-node-pty-root-handle.cjs --packaged dist/win-unpacked` checks the build.
+  - "!**/node_modules/node-pty/prebuilds/win32-*/**"
   # BUILD-LEFTOVERS-USERNAME-105: better-sqlite3 13 is N-API and loads prebuilds/<platform>-<arch>.node
     # (lib/binding.js).  The install policy skips its implicit node-gyp lifecycle, but keep this
     # defence in depth: a future rebuild must not ship build/ (MSBuild projects holding the user

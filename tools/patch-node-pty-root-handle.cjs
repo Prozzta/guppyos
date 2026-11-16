@@ -26,7 +26,22 @@
 //   windowsPtyAgent.js  pristine -> patch -> must equal AGENT_JS_HANDOFF_SHA256
 //                       already patched -> no-op;  anything else -> fail
 // So it runs AFTER patch-node-pty-race-fix.cjs and BEFORE electron-rebuild.
-//   --check          change nothing; exit 1 unless both files are in their patched form
+//
+// NODEPTY-PACKAGED-PROOF adds a third edit and a mode.
+//   lib/utils.js             node-pty's loader tries build/Release, build/Debug and then
+//                            prebuilds/<platform>-<arch>, and swallows each failure. On Windows the
+//                            prebuilt conpty.node is plain 1.1.0: no #922 lock, no rootHandle. A
+//                            build that failed to load was replaced by it without a word. Patched,
+//                            the loader never looks in prebuilds/ on Windows and its error says so.
+//                            pristine -> patch -> must equal UTILS_JS_BUILT_ONLY_SHA256.
+//   --packaged <dir>         change nothing; prove the patch on a PACKAGED app (dist/win-unpacked,
+//                            or its resources folder): the unpacked node-pty beside app.asar is the
+//                            patched one, its conpty.node is the recorded build and duplicates the
+//                            root handle, no prebuilt Windows binary ships, and app.asar holds no
+//                            second copy. Prints one line per check, then PACKAGED NODE-PTY OK
+//                            (exit 0) or PACKAGED NODE-PTY FAILED (exit 1). Runs on any platform.
+//
+//   --check          change nothing; exit 1 unless all three files are in their patched form
 //   --root <dir>     another node-pty tree (the self-test only)
 // Any other argument is refused: this tool rewrites files, so it never guesses.
 const fs = require('node:fs');
@@ -38,13 +53,19 @@ const TAG = '[patch-node-pty-root-handle]';
 const fail = (msg) => { console.error(`${TAG} FAILED: ${msg}`); process.exit(1); };
 
 let check = false;
+let packaged = null;
+let rootGiven = false;
 let root = path.join(__dirname, '..', 'node_modules', 'node-pty');
 const argv = process.argv.slice(2);
+const USAGE = '(usage: [--check] [--root <node-pty dir>] | --packaged <win-unpacked or resources dir>)';
 for (let i = 0; i < argv.length; i += 1) {
   if (argv[i] === '--check') check = true;
-  else if (argv[i] === '--root' && typeof argv[i + 1] === 'string' && argv[i + 1] !== '') { root = path.resolve(argv[i + 1]); i += 1; }
-  else fail(`unknown argument ${JSON.stringify(argv[i])} (usage: [--check] [--root <node-pty dir>])`);
+  else if (argv[i] === '--root' && typeof argv[i + 1] === 'string' && argv[i + 1] !== '') { root = path.resolve(argv[i + 1]); rootGiven = true; i += 1; }
+  else if (argv[i] === '--packaged' && packaged === null && typeof argv[i + 1] === 'string' && argv[i + 1] !== '') { packaged = path.resolve(argv[i + 1]); i += 1; }
+  else fail(`unknown argument ${JSON.stringify(argv[i])} ${USAGE}`);
 }
+if (packaged !== null && (check || rootGiven)) fail(`--packaged stands alone ${USAGE}`);
+if (packaged !== null) process.exit(require('./check-packaged-node-pty.cjs').report(packaged) ? 0 : 1);
 if (process.platform !== 'win32') process.exit(0);
 
 const pkgPath = path.join(root, 'package.json');
@@ -99,13 +120,34 @@ const AGENT_EDITS = [
     '            // GUPPY PTY-HOLD-NODEPTY-HANDOFF (tools/patch-node-pty-root-handle.cjs): the root\'s own handle.\n' +
     '            this._rootHandle = connect.rootHandle;\n']
 ];
+// NODEPTY-PACKAGED-PROOF: on Windows the loader takes the binaries built in this tree, or throws.
+const UTILS_EDITS = [
+  ['never look in prebuilds/ on Windows',
+    '    var dirs = [\'build/Release\', \'build/Debug\', "prebuilds/" + process.platform + "-" + process.arch];\n',
+    '    var dirs = [\'build/Release\', \'build/Debug\', "prebuilds/" + process.platform + "-" + process.arch];\n' +
+    '    // GUPPY NODEPTY-PACKAGED-PROOF (tools/patch-node-pty-root-handle.cjs): on Windows only the\n' +
+    '    // binaries built in this tree, from the source Guppy patches, may load. The prebuilt ones are\n' +
+    '    // plain node-pty (no #922 lock, no root handle), and this loop swallows every failure: a\n' +
+    '    // build that did not load would be replaced by them without a word.\n' +
+    '    var guppyBuiltOnly = process.platform === \'win32\';\n' +
+    '    if (guppyBuiltOnly) {\n' +
+    '        dirs = [\'build/Release\', \'build/Debug\'];\n' +
+    '    }\n'],
+  ['say so when the built binary does not load',
+    '    throw new Error("Failed to load native module: " + name + ".node, checked: " + dirs.join(\', \') + ": " + lastError);\n',
+    '    if (guppyBuiltOnly) {\n' +
+    '        throw new Error("Guppy: node-pty native module " + name + ".node did not load from " + dirs.join(\' or \') + ". Guppy patches node-pty and builds it at install, and it never falls back to the unpatched prebuilt binary that node-pty ships. In a source tree run `npm run postinstall`; for an installed Guppy, reinstall it. Cause: " + lastError);\n' +
+    '    }\n' +
+    '    throw new Error("Failed to load native module: " + name + ".node, checked: " + dirs.join(\', \') + ": " + lastError);\n']
+];
 
 const targets = [
   { rel: ['src', 'win', 'conpty.cc'], from: pins.CONPTY_CC_PATCHED_SHA256, fromName: 'the #922-patched form (run patch-node-pty-race-fix.cjs first)', to: pins.CONPTY_CC_BUILT_SHA256, edits: CONPTY_EDITS },
-  { rel: ['lib', 'windowsPtyAgent.js'], from: pins.AGENT_JS_PRISTINE_SHA256, fromName: 'pristine 1.1.0', to: pins.AGENT_JS_HANDOFF_SHA256, edits: AGENT_EDITS }
+  { rel: ['lib', 'windowsPtyAgent.js'], from: pins.AGENT_JS_PRISTINE_SHA256, fromName: 'pristine 1.1.0', to: pins.AGENT_JS_HANDOFF_SHA256, edits: AGENT_EDITS },
+  { rel: ['lib', 'utils.js'], from: pins.UTILS_JS_PRISTINE_SHA256, fromName: 'pristine 1.1.0', to: pins.UTILS_JS_BUILT_ONLY_SHA256, edits: UTILS_EDITS }
 ];
 
-// Decide everything first, write afterwards: a refusal leaves both files as they were.
+// Decide everything first, write afterwards: a refusal leaves every file as it was.
 const writes = [];
 for (const t of targets) {
   const name = t.rel.join('/');
@@ -126,6 +168,6 @@ for (const t of targets) {
   writes.push([file, source]);
 }
 for (const [file, source] of writes) fs.writeFileSync(file, source, 'utf8');
-if (check) console.log(`${TAG} node-pty hands over the root handle (conpty.cc, windowsPtyAgent.js)`);
+if (check) console.log(`${TAG} node-pty hands over the root handle and loads built binaries only (conpty.cc, windowsPtyAgent.js, utils.js)`);
 else if (writes.length === 0) console.log(`${TAG} root-handle handoff already applied`);
 else console.log(`${TAG} applied the root-handle handoff to node-pty ${version} (${writes.length} file(s))`);

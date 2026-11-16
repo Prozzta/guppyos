@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+
+- **Terminals never fall back to an unpatched terminal library.** node-pty ships ready-made Windows
+  binaries beside the ones Guppy builds from its patched source, and it used them without a word
+  whenever the built ones did not load. That would have dropped the protection against killing a
+  program that reused a closed terminal's process id. Guppy now loads the built binaries only and
+  says why if they do not load, and the ready-made Windows ones are no longer packaged. A release
+  build is checked for this: `node tools/patch-node-pty-root-handle.cjs --packaged <app folder>`.
+
 > **The fork line.** From here up, entries are this fork's (Prozzta/guppyos) independently
 > versioned 1.1.x releases, taken from their GitHub release notes (published releases begin at
 > v1.1.79). The fork is based on upstream

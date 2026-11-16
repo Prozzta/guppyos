@@ -39,6 +39,12 @@ function check() {
     path.join('dist', 'win-unpacked', 'resources', 'app.asar.unpacked', 'node_modules'),
     path.join('dist', 'win-unpacked', 'resources', 'models')
   ]);
+  // NODEPTY-PACKAGED-PROOF: the packaged node-pty is the patched build, and no prebuilt one ships.
+  run(process.execPath, [
+    path.join('tools', 'patch-node-pty-root-handle.cjs'),
+    '--packaged',
+    path.join('dist', 'win-unpacked')
+  ]);
   run(process.execPath, [
     path.join('scripts', 'check-cut-natives.cjs'),
     path.join('dist', 'win-unpacked', 'Guppy.exe'),
