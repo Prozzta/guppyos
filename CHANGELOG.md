@@ -12,6 +12,57 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/guppyos/releases).
 
+## [1.1.106] — 2026-11-16
+
+**Closing an agent terminal can no longer kill an unrelated program, the terminal font is fixed on Electron 45, and Guppy makes no font requests.**
+Rollback: 1.1.105 (reinstall).
+
+### Fixed
+
+- **Closing a terminal kills only that terminal's processes.** On Windows, closing or restarting
+  an agent terminal killed its processes by process id. If the terminal's shell had already
+  exited, Windows could have given that id to another program, and the kill could reach it. Guppy
+  now holds the terminal's own process from the moment it starts (node-pty hands over its process
+  handle), so the id cannot be reused while any kill might still name it. Every kill path checks
+  that the id still belongs to that terminal, including node-pty's own clean-up after a close.
+- **A terminal closed very early no longer fails.** Closing an agent terminal before its first
+  output could raise an error, or try to connect to a pipe that was already gone (ENOENT). Both
+  cases now close quietly.
+- **Terminal text is no longer clipped or overlapped.** The 1.1.105 terminal font was measured
+  wrongly on Electron 45. The terminal now uses the bundled Martian Mono (then Consolas, then
+  monospace), with whole-pixel cells that are never narrower than a character.
+- **A floor can no longer lose its team on disk.** A first write that held only god could replace
+  the saved team. It is now refused.
+- **A second Guppy that lost the instance lock writes nothing**, at start or on quit, and does not
+  run the startup orphan sweep.
+- **Claims:** the derived-claims writer stops on a read-only ledger instead of retrying, and a
+  failed background worker no longer stalls the queue behind it.
+
+### Added
+
+- **Codex agents finish what they started.** When a Codex agent ends its turn while a request is
+  still owed, Guppy continues it (at most 8 times per chain), and a Codex continuation waits up to
+  5 minutes.
+- **The Blob looks around.** Its eyes follow the cursor, a hovered ring slot, and the text field
+  while you dictate. The overlay, the tray icon and notifications share one mood, the tray is idle
+  at rest, and Blob faces can be saved as images.
+
+### Changed
+
+- **Every UI font is bundled.** Guppy no longer requests fonts from the internet.
+- **Faster main process on big floors.** Watch and integrity checks, and the router's catch-up for
+  missed changes, now run asynchronously instead of blocking the main thread.
+- **Installing from source** rebuilds only node-pty for Electron and patches node-pty during
+  install (`npm ci`). A worktree check (`tools/worktree-setup.cjs --check`) names a missing or
+  unpatched native build before the tests run.
+
+### Please check (live, on this release)
+
+- **Terminals:** open and close several agent terminals, including one closed straight after
+  opening. Confirm that nothing else on the PC closes and no error appears.
+- **Terminal font:** confirm that the terminal text is sharp and that no characters overlap.
+- **Codex:** give a Codex agent a build request and confirm that it carries on past planning.
+
 ## [1.1.105] — 2026-11-13
 
 **Guppy no longer freezes at startup on a large hive, runs on Electron 45, and the claims ledger can be created from Settings.**
@@ -2203,7 +2254,7 @@ palace, and starts far fewer processes for agent hooks.** Source `595dd3b5`; rol
   per ~170-byte chunk (a 3.26 MB burst: 20,683 messages → 197). Keystroke echo is still sent
   immediately.
 
-## Fork milestones (1.1.45 – 1.1.105)
+## Fork milestones (1.1.45 – 1.1.106)
 
 > Moved here from the README. This is the shape of the fork line, milestone by milestone; the
 > dated entries above and the [releases page](https://github.com/Prozzta/guppyos/releases) have the detail.
@@ -2414,9 +2465,12 @@ wholesale merges. The shape of the line, as evidence for the three ideas in the 
 - **The Guppy Blob, dictation and tray mode** (1.1.104) — an optional
   on-screen Blob with an action ring, hold Ctrl+Alt+Space to dictate into any app, Guppy can keep
   running in the tray on close, and Settings checks what building from source needs.
-- **No startup freeze on large hives, Electron 45** (1.1.105, the current release) — startup reads
+- **No startup freeze on large hives, Electron 45** (1.1.105) — startup reads
   only what changed and moves the claims work into slices and a worker thread, Guppy runs on
   Electron 45, and the claims ledger can be created from Settings.
+- **Terminal kills bound to their own process** (1.1.106, the current release) — Guppy holds
+  each terminal's process from its start, so no kill can reach a reused process id; the terminal
+  font is fixed on Electron 45, and every UI font is bundled.
 
 Every milestone carries a dated human acceptance and evidence tag in the fork's
 internal mission ledger; this section keeps only the shape.
