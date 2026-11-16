@@ -208,6 +208,58 @@ test('tasks.json: an outside edit reaches the guard and its listeners with no sy
   assert.deepEqual(calls.filter((c) => c !== 'writeFileSync:tasks.json'), [], 'no synchronous fs on tasks.json besides this test\'s own write');
 });
 
+test('tasks.json: the guard\'s sidecar for an outside edit is written off the main thread, before its listeners hear of it', async (t) => {
+  const { hive, handEdit } = tasksFloor(t);
+  hive.startLedgerGuard();
+  const state = path.join(hive.root(), 'state');
+  const sidecar = () => Object.keys(JSON.parse(fs.readFileSync(path.join(state, 'task-meta.json'), 'utf8')).cards);
+  assert.deepEqual(sidecar(), ['T1'], 'the first check at start wrote it');
+  const seen = [];
+  let onDisk = null;
+  hive.ledgerGuard.onChange((change) => { seen.push(change.added); });
+  const { calls } = await syncCalls(state, async () => {
+    handEdit([card('T1'), card('T2')]);
+    await until(() => seen.length > 0, 'the guard to announce the edit');
+  });
+  onDisk = sidecar();
+  assert.deepEqual(calls.filter((c) => /task-meta|^mkdirSync:state$/.test(c)), [], 'no synchronous write, rename or mkdir for the sidecar');
+  assert.deepEqual(onDisk, ['T1', 'T2'], 'the sidecar on disk holds the change when the listener is told (derived card facts read it from disk)');
+  assert.deepEqual(Object.keys(hive.ledgerGuard.taskMeta().cards), ['T1', 'T2']);
+  assert.deepEqual(fs.readdirSync(state).filter((n) => n.includes('.tmp-')), [], 'no temp file left');
+});
+
+test('tasks.json: an API write that lands during the async sidecar write is the last word on disk', async (t) => {
+  const { hive, handEdit } = tasksFloor(t);
+  hive.startLedgerGuard();
+  const state = path.join(hive.root(), 'state');
+  const sidecar = () => Object.keys(JSON.parse(fs.readFileSync(path.join(state, 'task-meta.json'), 'utf8')).cards).sort();
+  const fsp = require('node:fs/promises');
+  // Land our own (synchronous) write inside the async sidecar write: once while the temp file
+  // is being written (the async write must withdraw), once just as it renames (it must repeat).
+  for (const [round, hook] of [[0, 'writeFile'], [1, 'rename']]) {
+    const outside = `F${round}`; const ours = `A${round}`;
+    const orig = fsp[hook];
+    let fired = 0;
+    fsp[hook] = function (...args) {
+      if (fired === 0 && args.some((a) => typeof a === 'string' && /task-meta\.json/.test(a))) {
+        fired++;
+        hive.addTask({ id: ours, title: 'ours', status: 'todo' });
+      }
+      return orig.apply(this, args);
+    };
+    try {
+      handEdit([...hive.tasks().tasks, card(outside)]);
+      await hive.ledgerGuard.checkSoon();
+      await hive.ledgerGuard.checkSoon();
+    } finally { fsp[hook] = orig; }
+    assert.equal(fired, 1, `${hook}: the async sidecar write ran and our write landed inside it`);
+    const want = Object.keys(hive.ledgerGuard.taskMeta().cards).sort();
+    assert.ok(want.includes(ours) && want.includes(outside), `${hook}: both cards are in the guard's record: ${want}`);
+    assert.deepEqual(sidecar(), want, `${hook}: the sidecar on disk is the guard's newest record`);
+  }
+  assert.deepEqual(fs.readdirSync(state).filter((n) => n.includes('.tmp-')), [], 'no temp file left');
+});
+
 test('tasks.json: readers past the revalidate window are still served from memory (the fallback renews the entry off-thread)', async (t) => {
   assert.ok(HiveManager.AUTHORITY_FALLBACK_MS < HiveManager.AUTHORITY_REVALIDATE_MS, 'the fallback renews before a reader finds the entry expired');
   const { hive, file } = tasksFloor(t);

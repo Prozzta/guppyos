@@ -18,9 +18,9 @@
  */
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, type FSWatcher } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { atomicWriteJson } from './atomicJson';
+import { atomicWriteJson, atomicWriteTextAsync } from './atomicJson';
 import { watchDirectorySafely } from './safeDirectoryWatch';
 import { firstOccurrenceById, validateLedger, type LedgerIssue } from '../shared/taskLedger';
 
@@ -132,6 +132,10 @@ export class TaskLedgerGuard {
   private epoch = 0;
   /** The stat key of the last content the async check handled (see TaskLedgerRead.key). */
   private lastKey: string | null = null;
+  /** Bumped by every synchronous sidecar write: an async write it overtook withdraws or repeats. */
+  private persistSeq = 0;
+  /** Set by a deferred apply (the async check): the sidecar write and the notices it still owes. */
+  private owed: { root: string; change: TaskLedgerChange; primed: boolean } | null = null;
 
   private readonly listeners = new Set<(change: TaskLedgerChange) => void>();
 
@@ -197,7 +201,7 @@ export class TaskLedgerGuard {
 
   /** Apply `content` if it differs from the last applied content. `parsed` is `content` parsed
    *  already, or undefined to parse here. */
-  private applyContent(content: string, parsed: unknown, primed: boolean): TaskLedgerChange | null {
+  private applyContent(content: string, parsed: unknown, primed: boolean, defer = false): TaskLedgerChange | null {
     const hash = sha256(content);
     if (hash === this.lastHash) return null;
     if (parsed === undefined) {
@@ -206,7 +210,7 @@ export class TaskLedgerGuard {
     const tasks = parsed && typeof parsed === 'object' && Array.isArray((parsed as { tasks?: unknown }).tasks)
       ? (parsed as { tasks: unknown[] }).tasks : [];
     const ours = this.apiRing.find((r) => r.hash === hash);
-    return this.apply(hash, tasks, ours ? `api:${ours.source}` : 'file', primed);
+    return this.apply(hash, tasks, ours ? `api:${ours.source}` : 'file', primed, defer);
   }
 
   /**
@@ -247,13 +251,51 @@ export class TaskLedgerGuard {
       // older ones, and applying them would attribute our own write's undoing to 'file'.
       if (seq !== this.applySeq) continue;
       if (!read || read === 'unchanged') return;
-      this.applyContent(read.content, read.parsed, read.primed === true);
+      this.applyContent(read.content, read.parsed, read.primed === true, true);
       this.lastKey = read.key ?? null;
+      const owed = this.owed;
+      this.owed = null;
+      if (owed) {
+        // The sidecar first, then the notices, as in the synchronous apply: a listener that
+        // reads state/task-meta.json from disk (the derived card facts) finds this change in it.
+        await this.persistAsync(owed.root);
+        this.notify(owed.change, owed.primed);
+      }
       return;
     }
   }
 
-  private apply(hash: string, tasks: unknown[], by: string, primed = false): TaskLedgerChange | null {
+  /**
+   * LAG-SYNC-IO-107: the sidecar write off the main thread, for a change the async check found
+   * (the synchronous write held main for 90 ms under disk load in the load test). The text is
+   * taken when the write starts. A synchronous write that lands during it (an API write, a
+   * synchronous check) holds newer content: this one is withdrawn before its rename when it can
+   * be, and in any case one more write follows, so the newest content is the last on disk.
+   */
+  private async persistAsync(root: string): Promise<void> {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const seq = this.persistSeq;
+      const meta = this.meta;
+      if (!meta || this.opts.root() !== root) return;
+      try {
+        await mkdir(join(root, 'state'), { recursive: true });
+        await atomicWriteTextAsync(this.metaPath(root), JSON.stringify(meta, null, 2), () => seq === this.persistSeq);
+      } catch (error) {
+        try { this.opts.appendLog({ kind: 'task-meta-write-failed', error: String(error) }); } catch { /* noop */ }
+        return;
+      }
+      if (seq === this.persistSeq) return;
+    }
+  }
+
+  private notify(change: TaskLedgerChange, primed: boolean): void {
+    try { this.opts.onChange?.(change, { primed }); } catch { /* a listener never breaks the guard */ }
+    for (const listener of this.listeners) {
+      try { listener(change); } catch { /* a listener never breaks the guard */ }
+    }
+  }
+
+  private apply(hash: string, tasks: unknown[], by: string, primed = false, defer = false): TaskLedgerChange | null {
     const root = this.opts.root();
     if (!root) return null;
     this.applySeq++;
@@ -309,17 +351,17 @@ export class TaskLedgerGuard {
     }
     this.validate(tasks, by);
     const touched = firstRun || change.added.length + change.removed.length + change.edited.length > 0;
-    if (touched) {
+    if (touched && defer) {
+      this.owed = { root, change, primed };
+    } else if (touched) {
+      this.persistSeq++;
       try {
         mkdirSync(join(root, 'state'), { recursive: true });
         atomicWriteJson(this.metaPath(root), meta);
       } catch (error) {
         try { this.opts.appendLog({ kind: 'task-meta-write-failed', error: String(error) }); } catch { /* noop */ }
       }
-      try { this.opts.onChange?.(change, { primed }); } catch { /* a listener never breaks the guard */ }
-      for (const listener of this.listeners) {
-        try { listener(change); } catch { /* a listener never breaks the guard */ }
-      }
+      this.notify(change, primed);
     }
     return change;
   }
