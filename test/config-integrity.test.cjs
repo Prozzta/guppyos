@@ -79,7 +79,7 @@ function configChild(body) {
     `const ud = ${JSON.stringify(ud)};`,
     // Records every fs.watch config.ts starts and whether it was closed.
     "const watchers = []; const realWatch = fs.watch;",
-    "fs.watch = (...a) => { const w = realWatch(...a); const rec = { closed: false }; const c = w.close.bind(w); w.close = () => { rec.closed = true; return c(); }; watchers.push(rec); return w; };",
+    "fs.watch = (...a) => { const w = realWatch(...a); const rec = { closed: false, onClose: null }; const c = w.close.bind(w); w.close = () => { rec.closed = true; const r = c(); rec.onClose?.(); return r; }; watchers.push(rec); return w; };",
     "const electron = require.resolve('electron');",
     "require.cache[electron] = { id: electron, filename: electron, loaded: true, exports: { app: { getPath: () => ud } } };",
     `const cfg = require(${JSON.stringify(path.join(__dirname, 'load-ts.cjs'))})('src/main/config.ts');`,
@@ -101,13 +101,14 @@ function configChild(body) {
 test('watcher: deleting the config folder closes its watcher, so the process still exits (Node 22+ never reports the error)', () => {
   // After a turn of the loop: a folder deleted in the same tick as the watch never reaches it.
   // First only config.json goes: the folder is still there, so the watcher must stay (exit 6).
-  // Then the folder goes; once it is back, the next read must start a NEW watcher (exit 5): a
+  // Then the folder goes. Its observed close schedules the re-open, rather than assuming a loaded
+  // Windows watch callback ran inside a fixed wall-clock window; once it is back, the next read must start a NEW watcher (exit 5): a
   // self-close that leaves configWatcher set would leave the folder unwatched for good (Jim J1/J3).
   const { r, ms } = configChild([
     "setTimeout(() => fs.rmSync(require('node:path').join(ud, 'config.json')), 100);",
     'setTimeout(() => { if (watchers[0].closed) { console.error("MUTANT: deleting config.json alone closed the watcher"); process.exit(6); } fs.rmSync(ud, { recursive: true, force: true }); }, 200);',
-    'setTimeout(() => { fs.mkdirSync(ud, { recursive: true }); cfg.writeConfig({ onboardingComplete: true }); cfg.__resetConfigCacheForTests(); cfg.readConfig();',
-    '  if (!watchers[0].closed || watchers.length !== 2 || watchers[1].closed) { console.error("MUTANT: no new watcher after the folder came back", watchers.length); process.exit(5); } }, 400);',
+    'setTimeout(() => { watchers[0].onClose = () => setImmediate(() => { fs.mkdirSync(ud, { recursive: true }); cfg.writeConfig({ onboardingComplete: true }); cfg.__resetConfigCacheForTests(); cfg.readConfig();',
+    '  if (watchers.length !== 2 || watchers[1].closed) { console.error("MUTANT: no new watcher after the folder came back", watchers.length); process.exit(5); } }); fs.rmSync(ud, { recursive: true, force: true }); }, 200);',
   ].join('\n'));
   assert.notEqual((r.error && r.error.code), 'ETIMEDOUT', `MUTANT: THE PROCESS NEVER EXITED after its config folder was deleted (${ms} ms): the watcher spins`);
   assert.equal(r.status, 0, r.stderr);
