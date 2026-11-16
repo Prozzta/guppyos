@@ -30,6 +30,8 @@ require('./tools/own-job.cjs');
  *   L6 the guard is installed for a socket that was already connected at the kill
  *   L7 the terminate is not latched (a second terminate reports a second exit)
  *   L8 the socket that will never connect is not destroyed
+ *   L9 the exit reported at the terminate does not carry the agent's exit code
+ *   L10 a started connect is not remembered (the terminate ends a terminal whose pipe came up)
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
