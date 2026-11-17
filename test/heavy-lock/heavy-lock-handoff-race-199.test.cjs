@@ -332,6 +332,74 @@ K.wordsAgree = async (M = HJ) => {
 };
 test('(c) the deny text, the notices and heavy status say the same thing', () => K.wordsAgree());
 
+// ── (d) HEAVY-RESERVATION-BIND-108: a reservation binds ──────────────────────────────────────
+
+const INSTALL = { heavy: true, kind: 'install' };
+const BUILD = { heavy: true, kind: 'build' };
+
+K.reservationBinds = async (M = HJ) => {
+  // Live, 2026-11-17: Andy was denied at PreToolUse and also had a test process waiting. The slot
+  // freed, he was told HEAVY SLOT FREE, and 4 ms later his own waiting process took the slot and
+  // spent the reservation; when that process ended the slot passed to the next agent.
+  const x = rig(M);
+  x.l.acquire('h', H, 'npm test', 'h1', false);
+  assert.equal(x.l.acquire('andy', H, 'npm test', 'a1', false).allow, false);
+  assert.equal(x.l.acquire('andy', H, 'node --test (pid 7)', 'lease:7:1', false).allow, false);
+  assert.equal(x.l.acquire('uhera', INSTALL, 'npm ci', 'u1', false).allow, false);
+  x.l.callDone('h', 'h1');
+  assert.deepEqual(reservedFor(x), ['andy']);
+  assert.equal(x.l.acquire('andy', H, 'node --test (pid 7)', 'lease:7:1', false).allow, true, 'its waiting test process runs');
+  assert.deepEqual(reservedFor(x), ['andy'], "THE OWNER'S OWN TEST PROCESS DOES NOT SPEND A RESERVATION IT WAS TOLD OF");
+  assert.equal(x.l.acquire('andy', H, 'node --test (pid 8)', 'lease:8:1', false).allow, true, 'a second test process of the owner joins');
+  assert.deepEqual(reservedFor(x), ['andy'], 'A SECOND TEST PROCESS OF THE OWNER DOES NOT SPEND IT EITHER');
+  x.l.callDone('andy', 'lease:8:1');
+  x.l.callDone('andy', 'lease:7:1');
+  assert.deepEqual(reservedFor(x), ['andy'], 'THE RESERVATION OUTLIVES THAT PROCESS');
+  assert.equal(x.l.acquire('uhera', INSTALL, 'npm ci', 'u2', false).allow, false, "A RESERVATION BINDS ANOTHER AGENT'S INSTALL");
+  assert.equal(x.l.acquire('dwight', H, 'npm test', 'd1', false).allow, false, "A RESERVATION BINDS ANOTHER AGENT'S SUITE");
+  assert.deepEqual(x.l.snapshot().map((s) => s.agentId), [], 'nobody took the slot');
+  assert.equal(x.l.acquire('andy', H, 'npm test', 'a2', false).allow, true, 'THE OWNER TAKES ITS RESERVED SLOT');
+  assert.deepEqual(reservedFor(x), [], "the owner's call spends the reservation");
+  assert.deepEqual(waiters(x), ['uhera', 'dwight']);
+
+  // The owner's call arriving while its test process still holds spends it too.
+  const y = rig(M);
+  y.l.acquire('h', H, 'npm test', 'h1', false);
+  y.l.acquire('andy', H, 'npm test', 'a1', false);
+  y.l.acquire('andy', H, 'node --test (pid 7)', 'lease:7:1', false);
+  y.l.callDone('h', 'h1');
+  y.l.acquire('andy', H, 'node --test (pid 7)', 'lease:7:1', false);
+  assert.equal(y.l.acquire('andy', H, 'npm test', 'a2', false).allow, true);
+  assert.deepEqual(reservedFor(y), [], "THE OWNER'S CALL SPENDS THE RESERVATION WHILE ITS PROCESS HOLDS");
+
+  // A reservation nobody was told of (the owner waits only as a test process) is spent by that process.
+  const z = rig(M);
+  z.l.acquire('h', H, 'npm test', 'h1', false);
+  z.l.acquire('p', H, 'node --test (pid 5)', 'lease:5:1', false);
+  z.l.callDone('h', 'h1');
+  assert.deepEqual(reservedFor(z), ['p']);
+  assert.equal(z.l.acquire('p', H, 'node --test (pid 5)', 'lease:5:1', false).allow, true);
+  assert.deepEqual(reservedFor(z), [], 'A LEASE-ONLY RESERVATION IS SPENT BY ITS PROCESS');
+};
+test('(d) a reservation the owner was told of survives its own waiting test process and binds another agent\'s install and suite', () => K.reservationBinds());
+
+K.reservedOnce = async (M = HJ) => {
+  // Two slots. The owner holds through its test process and keeps its reservation: one slot, not two.
+  const x = rig(M, { limit: () => 2 });
+  x.l.acquire('h1', BUILD, 'npm run build', 'c1', false);
+  x.l.acquire('h2', BUILD, 'npm run build', 'c2', false);
+  assert.equal(x.l.acquire('andy', BUILD, 'npm run build', 'a1', false).allow, false);
+  assert.equal(x.l.acquire('andy', BUILD, 'node build.cjs (pid 7)', 'lease:7:1', false).allow, false);
+  x.l.callDone('h1', 'c1');
+  assert.deepEqual(reservedFor(x), ['andy']);
+  assert.equal(x.l.acquire('andy', BUILD, 'node build.cjs (pid 7)', 'lease:7:1', false).allow, true);
+  assert.deepEqual(reservedFor(x), ['andy']);
+  assert.equal(x.l.acquire('c', BUILD, 'npm run build', 'c3', false).allow, false, 'both slots are taken (h2 and the owner)');
+  x.l.callDone('h2', 'c2');
+  assert.equal(x.l.acquire('c', BUILD, 'npm run build', 'c4', false).allow, true, 'A HOLDER THAT KEEPS ITS RESERVATION TAKES ONE SLOT, NOT TWO');
+};
+test('(d) a holder that keeps its reservation counts as one slot', () => K.reservedOnce());
+
 // ── the CLI ─────────────────────────────────────────────────────────────────────────────────
 
 test('the heavy CLI: `heavy next <agent>`, and the `you:` line of `heavy status`', () => {
@@ -407,6 +475,15 @@ function mutateText(rel, edits, tag) {
 }
 
 const MUTANTS = [
+  // (d)
+  { name: "the owner's test process spends the reservation (before HEAVY-RESERVATION-BIND-108)", edits: [['    const keep = lease && !!this.reservations.get(agentId)?.hooked;', '    const keep = false;']],
+    killer: 'reservationBinds', dies: /THE OWNER'S OWN TEST PROCESS DOES NOT SPEND A RESERVATION IT WAS TOLD OF/ },
+  { name: 'a second test process of the owner spends it', edits: [['      if (reserved && !keep && (excl || !lease)) {', '      if (reserved && (excl || !lease)) {']],
+    killer: 'reservationBinds', dies: /A SECOND TEST PROCESS OF THE OWNER DOES NOT SPEND IT EITHER/ },
+  { name: 'a lease-only reservation is kept too', edits: [['    const keep = lease && !!this.reservations.get(agentId)?.hooked;', '    const keep = lease;']],
+    killer: 'reservationBinds', dies: /A LEASE-ONLY RESERVATION IS SPENT BY ITS PROCESS/ },
+  { name: 'a holder with a reservation counts twice', edits: [['      if (!this.holders.has(a)) taken++;', '      taken++;']],
+    killer: 'reservedOnce', dies: /A HOLDER THAT KEEPS ITS RESERVATION TAKES ONE SLOT, NOT TWO/ },
   // (a)
   { name: 'the grant ignores the name (required: it is re-read at every grant)', edits: [['    const ni = this.nextUp ? this.waiters.findIndex((w) => w.agentId === this.nextUp) : -1;', '    const ni = -1;']],
     killer: 'nextHonoured', dies: /THE AUTO-RELEASE HONOURS heavy next over release --to/ },

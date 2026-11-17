@@ -113,10 +113,11 @@ K.suiteWaits = async (M = HJ) => {
 test('a full suite still waits for the slot: no files, a glob, a directory, several files, the suite runner', () => K.suiteWaits());
 
 K.hiddenWaits = async (M = HJ) => {
+  // HEAVY-RESERVATION-BIND-108: a script's own single file is light now (K.scriptLight). What still
+  // waits is a single file with NO open call of its agent.
   const cases = [
-    ['a bash script (no --test in its call)', 'bash muts.sh', 50],
-    ['a node wrapper beside a shown run', 'node gen-mut.cjs m.json r test/a.test.cjs && node --test test/a.test.cjs', 51],
-    ['no call at all', null, 50]
+    ['no call at all', null, 50],
+    ['no call at all, under a node parent', null, 51]
   ];
   for (const [what, cmd, ppid] of cases) {
     const x = rig(M);
@@ -126,15 +127,43 @@ K.hiddenWaits = async (M = HJ) => {
     assert.equal((await ask(x, 'a', 400, { files: ['test/a.test.cjs'] })).state, 'light');
     x.l.noteCallEnd('a', 'c0');
     x.tick(HJ.HEAVY_CALL_SLACK_MS + 1);
-    assert.equal((await ask(x, 'a', 401, { files: ['test/a.test.cjs'], ppid })).state, 'wait', `A HIDDEN SINGLE FILE STILL WAITS: ${what}`);
+    assert.equal((await ask(x, 'a', 401, { files: ['test/a.test.cjs'], ppid })).state, 'wait', `A SINGLE FILE WITH NO OPEN CALL STILL WAITS: ${what}`);
   }
   const x = rig(M);
   x.l.acquire('b', H, 'npm test', 'hb', false);
   x.l.noteCall('a', 'c1', '$N --test test/a.test.cjs');
   x.l.noteCallEnd('a', 'c1');
   assert.equal((await ask(x, 'a', 402, { files: ['test/a.test.cjs'] })).state, 'wait', 'A SHOWN CALL THAT HAS ENDED SHOWS NOTHING');
+  x.l.noteCall('a', 'c2', 'bash muts.sh');
+  x.l.noteCallEnd('a', 'c2');   // as the hook does for a call it denied
+  assert.equal((await ask(x, 'a', 403, { files: ['test/a.test.cjs'] })).state, 'wait', 'A SCRIPT CALL THAT HAS ENDED (OR WAS DENIED) COVERS NOTHING');
 };
-test('a single file nobody shows still waits: a hidden script, a node parent, no call, a call that ended', () => K.hiddenWaits());
+test('a single file with no open call still waits: no call at all, a call that ended', () => K.hiddenWaits());
+
+// HEAVY-RESERVATION-BIND-108 (god, 2026-11-17): one test file started by a script (`node mut.cjs`,
+// `bash x.sh`) is light. The count bounds a hidden wrapper: a second one alive at once is heavy.
+K.scriptLight = async (M = HJ) => {
+  const cases = [
+    ['a bash script', 'bash muts.sh', 50],
+    ['a node wrapper', 'node gen-mut.cjs m.json r', 51]
+  ];
+  for (const [what, cmd, ppid] of cases) {
+    const x = rig(M);
+    x.l.acquire('b', H, 'npm test', 'hb', false);
+    x.l.noteCall('a', 'c1', cmd);
+    const one = await ask(x, 'a', 500, { files: ['test/a.test.cjs'], ppid });
+    assert.deepEqual([one.state, one.why], ['light', 'one test file, one at a time'], `A SCRIPT-STARTED SINGLE FILE IS LIGHT: ${what}`);
+    x.alive.add(500);
+    assert.equal((await ask(x, 'a', 501, { files: ['test/b.test.cjs'], ppid })).state, 'wait', `A SECOND SCRIPT-STARTED SINGLE FILE AT ONCE IS HEAVY: ${what}`);
+    assert.ok(x.logs.some((r) => r.action === 'lease-single-busy' && r.agentId === 'a'), 'the fan-out is logged');
+  }
+  // Several files under a script stay heavy, whatever is alive.
+  const y = rig(M);
+  y.l.acquire('b', H, 'npm test', 'hb', false);
+  y.l.noteCall('a', 'c1', 'node gen-mut.cjs m.json r');
+  assert.equal((await ask(y, 'a', 510, { files: ['test/a.test.cjs', 'test/b.test.cjs'], ppid: 51 })).state, 'wait', 'A SCRIPT-STARTED RUN OF SEVERAL FILES IS HEAVY');
+};
+test('a single file started by a script is light, one at a time: a second one alive at once is heavy (HEAVY-RESERVATION-BIND-108)', () => K.scriptLight());
 
 // ─── E2E: the real preload in a real test process ─────────────────────────────────────────────
 
@@ -268,12 +297,15 @@ test('MUTANT: ignoring npm config option definitions mistakes a command-shaped o
 
 const MUTANTS = [
   { name: 'no single-file rule (the old behaviour)', edits: [['    if (!suite && await this.singleFile(agentId, r, run)) {', '    if (false) {']], killer: 'singleLight', dies: /A SINGLE FILE PASSES WHILE ANOTHER AGENT HOLDS/ },
-  { name: 'no shown call needed', edits: [['.pop();\n    const busy', ".pop() ?? { callId: 'none' };\n    const busy"]], killer: 'hiddenWaits', dies: /A HIDDEN SINGLE FILE STILL WAITS|A SHOWN CALL THAT HAS ENDED/ },
+  { name: 'no open call needed', edits: [['.pop();\n    if (!call) return false;\n    let live = 0;', ".pop() ?? { callId: 'none' };\n    let live = 0;"]], killer: 'hiddenWaits', dies: /A SINGLE FILE WITH NO OPEN CALL STILL WAITS/ },
+  { name: 'an ended call still covers a single file', edits: [['    if (c.files?.length === 1 && (c.files[0] === ANY_TEST_FILE || CALL_MARK(c))) return c.end === null && t - c.start <= HEAVY_LOOP_CALL_MS;', '    if (c.files?.length === 1 && (c.files[0] === ANY_TEST_FILE || CALL_MARK(c))) return t - c.start <= HEAVY_LOOP_CALL_MS;']], killer: 'hiddenWaits', dies: /A SINGLE FILE WITH NO OPEN CALL STILL WAITS|A SHOWN CALL THAT HAS ENDED SHOWS NOTHING/ },
   { name: 'no fan-out cap', edits: [["    if (live >= SINGLE_FILE_LIGHT_MAX) {", '    if (false) {']], killer: 'fanOut', dies: /IS A FAN-OUT/ },
-  { name: 'any parent counts', edits: [["    if (!CALL_PARENT.test((image ?? '').replace(/\\\\/g, '/').split('/').pop()!)) return false;\n    // Jim M1", '    // Jim M1']], killer: 'hiddenWaits', dies: /A HIDDEN SINGLE FILE STILL WAITS: a node wrapper/ },
+  { name: 'no fan-out cap (a script fans out unbounded)', edits: [["    if (live >= SINGLE_FILE_LIGHT_MAX) {", '    if (false) {']], killer: 'scriptLight', dies: /A SECOND SCRIPT-STARTED SINGLE FILE AT ONCE IS HEAVY/ },
+  { name: 'only a call that shows the run counts (before HEAVY-RESERVATION-BIND-108)', edits: [['(c.files[0] === SHOWN_TEST || c.files[0] === OPEN_CALL);', '(c.files[0] === SHOWN_TEST);']], killer: 'scriptLight', dies: /A SCRIPT-STARTED SINGLE FILE IS LIGHT/ },
+  { name: 'a call that shows no run is not noted', edits: [['    list.push({ callId, files: [shown ? SHOWN_TEST : OPEN_CALL], start: t, end: null, used: false });', '    if (shown) list.push({ callId, files: [SHOWN_TEST], start: t, end: null, used: false });']], killer: 'scriptLight', dies: /A SCRIPT-STARTED SINGLE FILE IS LIGHT/ },
   { name: 'a glob or directory counts as one file', edits: [['    if (files.length !== 1 || typeof files[0] !== \'string\' || !ONE_TEST_FILE(files[0])) return false;', "    if (files.length !== 1 || typeof files[0] !== 'string') return false;"]], killer: 'suiteWaits', dies: /A FULL SUITE STILL WAITS: a (glob|directory)/ },
   { name: 'several files count as one', edits: [['    if (files.length !== 1 || typeof files[0] !== \'string\' || !ONE_TEST_FILE(files[0])) return false;', "    if (!files.length || typeof files[0] !== 'string' || !ONE_TEST_FILE(files[0])) return false;"]], killer: 'suiteWaits', dies: /A FULL SUITE STILL WAITS: two files/ },
-  { name: 'a call is not marked shown', edits: [['    if (shown) list.push({ callId, files: [SHOWN_TEST], start: t, end: null, used: false });\n', '']], killer: 'singleLight', dies: /A SINGLE FILE PASSES/ }
+  { name: 'a call is not noted at all', edits: [['    list.push({ callId, files: [shown ? SHOWN_TEST : OPEN_CALL], start: t, end: null, used: false });\n', '']], killer: 'singleLight', dies: /A SINGLE FILE PASSES/ }
 ];
 
 test('MUTANT CENSUS: every mutant applies once and dies at the assertion that names its guarantee', async (t) => {

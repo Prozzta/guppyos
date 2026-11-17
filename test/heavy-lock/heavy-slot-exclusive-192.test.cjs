@@ -296,13 +296,13 @@ function mutateText(rel, edits, tag) {
 }
 const MUTANTS = [
   { name: 'an exclusive is counted like any job (no drain)',
-    edits: [['    return exclusive ? others === 0 : this.holders.size + this.reservations.size < limit;', '    return this.holders.size + this.reservations.size < limit;']],
+    edits: [['    return exclusive ? others === 0 : taken < limit;', '    return taken < limit;']],
     killer: 'drain', dies: /EXCLUSIVE WAITS FOR DRAIN/ },
   { name: 'an exclusive holder does not block the others',
     edits: [['    for (const h of this.holders.values()) { if (h.agentId === agentId) continue; if (h.exclusive) return false; others++; }', '    for (const h of this.holders.values()) { if (h.agentId === agentId) continue; others++; }']],
     killer: 'nothingJoins', dies: /NOTHING JOINS AN EXCLUSIVE HOLDER/ },
   { name: 'an exclusive reservation does not block the others',
-    edits: [['    for (const [a, r] of this.reservations) { if (a === agentId) continue; if (r.exclusive) return false; others++; }', '    for (const [a, r] of this.reservations) { if (a === agentId) continue; others++; }']],
+    edits: [['      if (r.exclusive) return false;\n', '']],
     killer: 'nothingJoins', dies: /NOTHING JOINS A RESERVED EXCLUSIVE/ },
   { name: 'a newcomer may pass the queue (exclusive starves)',
     edits: [['    if ((at < 0 ? this.waiters.length : at) > 0) return false;\n', '']],

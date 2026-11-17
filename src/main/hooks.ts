@@ -2728,6 +2728,9 @@ export class HookServer {
         const unpaired = p.transport === 'mcp' || p.payload_degraded === true;
         const d = this.heavyLock.acquire(agentId, cls, command, callId, isBackground(p.tool_input) || unpaired);
         if (!d.allow) {
+          // HEAVY-RESERVATION-BIND-108: a denied call never runs, so it is no open call a test
+          // process could be counted against.
+          this.heavyLock.noteCallEnd(agentId, callId);
           this.emitControl(agentId, p.tool_name, d.reason);
           this.emit(agentId, event, p);
           return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: d.reason } };

@@ -15,6 +15,18 @@ All notable changes to this project are documented here. The format is based on
   turn later, with the same code 97 (0 in 3000). The single-instance refusal (exit 96) runs before
   ready and was measured clean (0 in 3000), so it is unchanged.
 
+- **A reserved heavy slot now stays reserved for the agent that was told about it.** When a suite
+  or an install had to wait, Guppy told the agent "HEAVY SLOT FREE" once the slot was its turn.
+  If that agent also had a test process of its own waiting, that process took the slot a few
+  milliseconds later and used up the reservation. When it ended, the slot went to the next agent,
+  and the suite the agent had been told to run was refused again (seen three times in a row). The
+  reservation now survives the agent's own test processes and is used only by the call the agent
+  makes for it, so another agent's install or suite waits until then.
+  A single test file started by a script (`node mut.cjs`, `bash x.sh`) no longer waits for the
+  slot either: it runs at once, like a single file typed directly. This is limited to one such
+  run at a time per agent; a second one alive at the same time, a run of several files and a whole
+  suite still wait. (HEAVY-RESERVATION-BIND-108)
+
 - **The Electron native-module check no longer crashes now and then as it exits.** The test that
   loads every native module under Electron 45 ended with `app.exit()` the moment the app was
   ready. About once in a thousand runs on a busy machine, Electron then crashed in its own

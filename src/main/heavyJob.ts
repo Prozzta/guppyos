@@ -403,6 +403,11 @@ export const ANY_TEST_FILE = '<any>';
  *  (node by path or variable, `$(...)` beside it, a file run more than once). */
 export const SHOWN_TEST = '<shown>';
 const SHOWS_TEST = /(^|[\s"'])--test(?![-\w])/;
+/** HEAVY-RESERVATION-BIND-108: any other open call. A script it runs may start ONE test file at a
+ *  time light (Andy, 2026-11-17: `node mut.cjs <tree> <mutant>`, whose child is `node --test` of one
+ *  file, waited ~2 min for the slot each time instead of running ~3 s). */
+export const OPEN_CALL = '<call>';
+const CALL_MARK = (c: { files?: string[] }): boolean => c.files?.length === 1 && (c.files[0] === SHOWN_TEST || c.files[0] === OPEN_CALL);
 /** Programs that never start a node --test of their own (beside a call's own run, they leave it its run). */
 const QUIET_BINS = new Set(['cd', 'pushd', 'popd', 'export', 'unset', 'set', 'local', 'read', 'shift', 'exit', 'return', 'break', 'continue',
   'echo', 'printf', 'date', 'sleep', 'true', 'false', 'test', '[', '[[', 'grep', 'egrep', 'fgrep', 'rg', 'tail', 'head', 'cat', 'wc', 'sed',
@@ -2663,6 +2668,13 @@ export class HeavyJobLock {
     // HEAVY-LOCK-SELF-WAIT: a slot reserved for THIS agent is its own; the others count as taken.
     const reserved = this.reservations.has(agentId);
     const mine = this.holders.get(agentId);
+    // HEAVY-RESERVATION-BIND-108 (2026-11-17 14:47-15:16Z, four times): a slot reserved for a call
+    // DENIED AT THE HOOK was spent 4 ms later by a waiting test process of the same agent (a one-file
+    // run a script started); it ran 1 s, and its release passed the slot to the next agent with the
+    // denied call no longer queued. A test process (a lease) now USES such a slot and leaves the
+    // reservation standing: the hook call still finds it until it lapses.
+    const lease = callId.startsWith('lease:');
+    const keep = lease && !!this.reservations.get(agentId)?.hooked;
     if (mine) {
       // HEAVY-SLOT-EXCLUSIVE-192: an exclusive call of an agent that holds a shared slot waits, like
       // anyone's, until the other holders are done (its own slot stays held meanwhile). fits(), not
@@ -2671,7 +2683,7 @@ export class HeavyJobLock {
       // Re-entrant: an agent's heavy calls share its one slot (and refresh its TTL).
       const flipped = background && !mine.background;
       const alone = excl && !mine.exclusive;
-      if (excl && reserved) { this.reservations.delete(agentId); this.dequeue(agentId); }
+      if (reserved && !keep && (excl || !lease)) { this.reservations.delete(agentId); this.dequeue(agentId); }
       mine.calls.add(callId); mine.background = mine.background || background; mine.touched = this.now(); mine.misses = 0;
       if (alone) mine.exclusive = true;
       if (cls.provisional) mine.provisional.add(callId); else mine.definite = true;
@@ -2692,12 +2704,12 @@ export class HeavyJobLock {
       this.waiters.unshift({ agentId, kind: cls.kind as HeavyKind, since: this.now(), procs: r.procs, hooked: r.hooked, exclusive: true, lapsed: r.lapsed });
       return this.deny(agentId, cls, limit, callId);
     }
-    if (reserved) this.reservations.delete(agentId);
+    if (reserved && !keep) this.reservations.delete(agentId);
     this.dequeue(agentId);
     this.leaseOnly.delete(agentId);
     if (this.nextUp === agentId) this.nextUp = null;
     this.holders.set(agentId, { agentId, kind: cls.kind, command: command.slice(0, 200), since: this.now(), touched: this.now(), calls: new Set([callId]), background, provisional: new Set(cls.provisional ? [callId] : []), definite: !cls.provisional, misses: 0, seenRunning: false, seenAt: null, attributed: new Map(), windows: [{ callId, start: this.now(), end: null }], lastProbe: null, jobs: new Map(), exclusive: excl });
-    this.log({ kind: 'heavy-lock', action: 'acquire', agentId, heavyKind: cls.kind, command: command.slice(0, 200), background, limit, ...(reserved ? { reserved: true } : {}), ...(excl ? { exclusive: true } : {}) });
+    this.log({ kind: 'heavy-lock', action: 'acquire', agentId, heavyKind: cls.kind, command: command.slice(0, 200), background, limit, ...(reserved ? (keep ? { reservedKept: true } : { reserved: true }) : {}), ...(excl ? { exclusive: true } : {}) });
     this.changed();
     this.arm();
     return { allow: true, acquired: true };
@@ -2720,8 +2732,15 @@ export class HeavyJobLock {
   private fits(agentId: string, exclusive: boolean, limit: number): boolean {
     let others = 0;
     for (const h of this.holders.values()) { if (h.agentId === agentId) continue; if (h.exclusive) return false; others++; }
-    for (const [a, r] of this.reservations) { if (a === agentId) continue; if (r.exclusive) return false; others++; }
-    return exclusive ? others === 0 : this.holders.size + this.reservations.size < limit;
+    // HEAVY-RESERVATION-BIND-108: an agent that holds AND still has its reservation takes one slot.
+    let taken = this.holders.size;
+    for (const [a, r] of this.reservations) {
+      if (!this.holders.has(a)) taken++;
+      if (a === agentId) continue;
+      if (r.exclusive) return false;
+      if (!this.holders.has(a)) others++;
+    }
+    return exclusive ? others === 0 : taken < limit;
   }
 
   private deny(agentId: string, cls: HeavyClass, limit: number, callId: string): HeavyDecision {
@@ -3244,11 +3263,10 @@ export class HeavyJobLock {
     // A run with no files is node's own discovery (a suite): never VISIBLE.
     const runs = (testInvocation(command) ?? []).filter((files) => files.length);
     const shown = SHOWS_TEST.test(command);
-    if (!runs.length && !shown) return;
     const t = this.now();
     const list = (this.testCalls.get(agentId) ?? []).filter((c) => this.callOpen(c, t));
     for (const files of runs) list.push({ callId, files: files.map(normFile), start: t, end: null, used: false });
-    if (shown) list.push({ callId, files: [SHOWN_TEST], start: t, end: null, used: false });
+    list.push({ callId, files: [shown ? SHOWN_TEST : OPEN_CALL], start: t, end: null, used: false });
     const kept = list.slice(-16);
     this.testCalls.set(agentId, kept);
     // HEAVY-LOOP-LIGHT-CAP: forget the light counts of calls no longer kept.
@@ -3277,7 +3295,7 @@ export class HeavyJobLock {
   private callOpen(c: { start: number; end: number | null; files?: string[] }, t: number): boolean {
     // A loop's run (`node --test test/$f.test.cjs`) starts its processes all through the call, so it
     // matches while the call is open (bounded, if its PostToolUse never comes).
-    if (c.files?.length === 1 && (c.files[0] === ANY_TEST_FILE || c.files[0] === SHOWN_TEST)) return c.end === null && t - c.start <= HEAVY_LOOP_CALL_MS;
+    if (c.files?.length === 1 && (c.files[0] === ANY_TEST_FILE || CALL_MARK(c))) return c.end === null && t - c.start <= HEAVY_LOOP_CALL_MS;
     return t - c.start <= HEAVY_CALL_SPAWN_MS && (c.end === null || t - c.end <= HEAVY_CALL_SLACK_MS);
   }
 
@@ -3335,11 +3353,11 @@ export class HeavyJobLock {
     if (!suite && await this.visible(agentId, r, run, single)) {
       return { state: 'light', run, why: "the call's own node --test" };
     }
-    // HEAVY-PRELOAD-SHORT-TEST: one named test file under a shell is light even when its call does not
-    // show it (node by path or variable, a loop, `$(...)` beside it), one at a time per agent.
+    // HEAVY-PRELOAD-SHORT-TEST: one named test file is light even when its call does not show it (node
+    // by path or variable, a loop, `$(...)` beside it, a script that starts it), one at a time per agent.
     if (!suite && await this.singleFile(agentId, r, run)) {
       this.log({ kind: 'heavy-lock', action: 'lease-single', agentId, pid });
-      return { state: 'light', run, why: 'one test file under a shell' };
+      return { state: 'light', run, why: 'one test file, one at a time' };
     }
     const kind: HeavyKind = suite ? 'suite' : r.preloadKind === 'install' || r.preloadKind === 'build' ? r.preloadKind : 'bench';
     const why = suite ? 'a suite run (heavy preload)'
@@ -3430,32 +3448,24 @@ export class HeavyJobLock {
     return true;
   }
 
-  /** HEAVY-PRELOAD-SHORT-TEST: a test process of exactly one named file, while an open call of this
-   *  agent SHOWS a `--test` run, its parent is a shell (or a pass-through prefix), and no other light
-   *  single-file run of this agent is alive. A hidden wrapper (`bash x.sh`, `node gen-mut.cjs`: no
-   *  `--test` in the call), a node or python parent, a glob, a directory, several files and a
-   *  parallel fan-out stay heavy. */
+  /** HEAVY-PRELOAD-SHORT-TEST: a test process of exactly one named file, while a call of this agent
+   *  is open and no other light single-file run of this agent is alive. HEAVY-RESERVATION-BIND-108
+   *  (god, 2026-11-17): the call need not show the run and the parent need not be a shell, so a script
+   *  that starts one test file (`node mut.cjs`, `bash x.sh`) runs it light. What bounds a hidden
+   *  wrapper is the count: ONE alive per agent (SINGLE_FILE_LIGHT_MAX; a second at once is heavy) and
+   *  HEAVY_CALL_LIGHT_MAX per call. No open call, a glob, a directory and several files stay heavy. */
   private async singleFile(agentId: string, r: HeavyLeaseRequest, run: string): Promise<boolean> {
     const files = Array.isArray(r.files) ? r.files : [];
     if (files.length !== 1 || typeof files[0] !== 'string' || !ONE_TEST_FILE(files[0])) return false;
-    if (!this.d.parentImage || typeof r.ppid !== 'number') return false;
     const t = this.now();
-    // HEAVY-LOOP-LIGHT-CAP: the newest open shown call with light runs left pays for this one.
-    const pick = (): { callId: string } | undefined => (this.testCalls.get(agentId) ?? []).filter((c) => c.files[0] === SHOWN_TEST && this.callOpen(c, t) && this.lightLeft(agentId, c.callId)).pop();
-    const busy = (): boolean => {
-      let live = 0;
-      for (const [k, v] of this.runs) if (v.agentId === agentId && v.single && this.runAlive(k)) live++;
-      if (live >= SINGLE_FILE_LIGHT_MAX) { this.log({ kind: 'heavy-lock', action: 'lease-single-busy', agentId, live }); return true; }
-      return false;
-    };
-    if (!pick() || busy()) return false;
-    let image: string | null;
-    try { image = await this.d.parentImage(r.ppid); } catch { image = null; }
-    if (!CALL_PARENT.test((image ?? '').replace(/\\/g, '/').split('/').pop()!)) return false;
-    // Jim M1 (cfb8b687): leases that arrive together all passed the checks above before any of them
-    // spent or registered. Check again after the await, then spend and register with no await between.
-    const call = pick();
-    if (!call || busy()) return false;
+    // HEAVY-LOOP-LIGHT-CAP: the newest open call with light runs left pays for this one.
+    const call = (this.testCalls.get(agentId) ?? []).filter((c) => CALL_MARK(c) && this.callOpen(c, t) && this.lightLeft(agentId, c.callId)).pop();
+    if (!call) return false;
+    let live = 0;
+    for (const [k, v] of this.runs) if (v.agentId === agentId && v.single && this.runAlive(k)) live++;
+    if (live >= SINGLE_FILE_LIGHT_MAX) { this.log({ kind: 'heavy-lock', action: 'lease-single-busy', agentId, live }); return false; }
+    // Jim M1 (cfb8b687): no await between the checks and the spend, so leases that arrive together
+    // count each other.
     this.spendLight(agentId, call.callId);
     this.runs.set(run, { agentId, held: this.holders.has(agentId), single: true });
     return true;

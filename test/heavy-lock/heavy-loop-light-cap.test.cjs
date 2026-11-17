@@ -104,7 +104,7 @@ K.single = async (M = HJ) => {
   assert.deepEqual([a.state, a.why], ['light', "the call's own node --test"], 'THE SINGLE-FILE CASE STILL PASSES');
   x.l.noteCall('a', 'c2', 'N=C:/n/node.exe; timeout -k 5 40 $N --test test/b.test.cjs');
   const b = await ask(x, 'a', 102, { files: ['test/b.test.cjs'] });
-  assert.deepEqual([b.state, b.why], ['light', 'one test file under a shell'], 'THE SINGLE-FILE CASE STILL PASSES (node by variable)');
+  assert.deepEqual([b.state, b.why], ['light', 'one test file, one at a time'], 'THE SINGLE-FILE CASE STILL PASSES (node by variable)');
 };
 test('the single-file case still passes while another agent holds', () => K.single());
 
@@ -150,7 +150,7 @@ const MUTANTS = [
   { name: 'the loop path ignores the cap', edits: [['\n      && this.lightLeft(agentId, c.callId));', ');']], killer: 'suiteLease', dies: /A WHOLE-SUITE LOOP TAKES THE SLOT: .*\(a loop run/ },
   { name: 'the shown path ignores the cap', edits: [['this.callOpen(c, t) && this.lightLeft(agentId, c.callId)).pop();', 'this.callOpen(c, t)).pop();']], killer: 'suiteLease', dies: /A WHOLE-SUITE LOOP TAKES THE SLOT/ },
   { name: 'one count per agent, not per call', edits: [['  private lightLeft(agentId: string, callId: string): boolean {\n    return (this.callLight.get(`${agentId}\\0${callId}`)', '  private lightLeft(agentId: string, callId: string): boolean {\n    return (this.callLight.get(`${agentId}\\0x`)'], ['    const k = `${agentId}\\0${callId}`;', '    const k = `${agentId}\\0x`;'], ['!ids.has(k.slice(agentId.length + 1))) this.callLight.delete(k);', '!ids.has(k.slice(agentId.length + 1))) void k;']], killer: 'perCall', dies: /THE CAP IS PER CALL/ },
-  { name: 'no recheck after the await (Jim M1)', edits: [['    const call = pick();\n    if (!call || busy()) return false;', "    const call = pick() ?? { callId: 'late' };"]], killer: 'together', dies: /LEASES IN FLIGHT AT ONCE/ },
+  { name: 'an await between the checks and the spend (Jim M1)', edits: [['    this.spendLight(agentId, call.callId);\n    this.runs.set(run, { agentId, held: this.holders.has(agentId), single: true });', '    await Promise.resolve();\n    this.spendLight(agentId, call.callId);\n    this.runs.set(run, { agentId, held: this.holders.has(agentId), single: true });']], killer: 'together', dies: /LEASES IN FLIGHT AT ONCE/ },
   { name: 'the single run is registered after singleFile returns', edits: [['    this.runs.set(run, { agentId, held: this.holders.has(agentId), single: true });\n    return true;', '    return true;'], ["    if (!suite && await this.singleFile(agentId, r, run)) {\n", "    if (!suite && await this.singleFile(agentId, r, run)) {\n      this.runs.set(run, { agentId, held: this.holders.has(agentId), single: true });\n"]], killer: 'together', dies: /A PARALLEL FAN-OUT RUNS ONE FILE LIGHT/ },
   { name: 'a cap of one', edits: [['export const HEAVY_CALL_LIGHT_MAX = 10;', 'export const HEAVY_CALL_LIGHT_MAX = 1;']], killer: 'fewLight', dies: /A LOOP OF A FEW FILES STAYS LIGHT/ }
 ];
