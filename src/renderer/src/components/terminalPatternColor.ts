@@ -52,7 +52,9 @@ const WINDOWS_PATH_RE = /(?<![\w])(?:[A-Za-z]:[\\/](?:[^\r\n<>"|?*]*?\.[A-Za-z][
 // Requiring a second slash rejects ubiquitous Claude/Codex slash commands such
 // as `/clear` while retaining ordinary absolute POSIX file paths.
 const POSIX_PATH_RE = /(?<![\w])(?:\/(?:[^\s:()<>]+\/)+[^\s:()<>]+)(?::\d+(?::\d+)?)?(?=$|[\s),\]}"])/g;
-const SHA_RE = /(?<![0-9a-f-])(?=[0-9a-f]*[a-f])(?!(?:[a-f]{7})(?![0-9a-f]))[0-9a-f]{7,40}(?![0-9a-f-])/gi;
+// A sha is a whole word: no letter, digit, underscore or dash on either side (TERM-SHA-WORDBOUND-107),
+// so 'claudeeb75033b' never colours its tail. Path separators, spaces, parens and quotes still bound it.
+const SHA_RE = /(?<![\w-])(?=[0-9a-f]*[a-f])(?!(?:[a-f]{7})(?![0-9a-f]))[0-9a-f]{7,40}(?![\w-])/gi;
 const STATUS_RE = /\b(PASS|FAIL|ERROR|WARN(?:ING)?)\b/gi;
 const VERSION_RE = /(?<![\w.])v?\d+\.\d+\.\d+(?![\w.])/gi;
 const ERROR_LINE_RE = /\b(?:error|exception|fatal|traceback)\s*(?::|\bat\b)/i;

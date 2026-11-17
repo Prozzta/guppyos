@@ -68,6 +68,20 @@ test('git SHA recognition is bounded and never colours a plain number', () => {
   assert.ok(!kinds('build 1234567890 and 123456 and defaced and 550e8400-e29b').includes('sha'));
 });
 
+test('TERM-SHA-WORDBOUND-107: a sha is never the tail or head of a longer word', () => {
+  const shas = (value) => texts(value).filter((_, index) => kinds(value)[index] === 'sha');
+  // Between backslashes (a Windows path fragment with no drive) the sha still colours, alone.
+  assert.deepEqual(shas('Temp\\claude\\eb75033b6603bfd5\\x'), ['eb75033b6603bfd5']);
+  // Glued to a word on the left: the old lookbehind let 'deeb75033b' start inside 'claude'.
+  assert.deepEqual(shas('claudeeb75033b'), []);
+  assert.deepEqual(shas('Temp\\claudeeb75033b6603bfd5'), []);
+  // Right side, and underscore/digit/dash on either side.
+  assert.deepEqual(shas('eb75033bzz'), []);
+  assert.deepEqual(shas('x_eb75033b eb75033b_x 9-eb75033b eb75033b-9'), []);
+  // Ordinary boundaries keep working.
+  assert.deepEqual(shas('merged f92d798e (66e79e30) "f92d798e" /f92d798e/ f92d798e, 66e79e30.'), ['f92d798e', '66e79e30', 'f92d798e', 'f92d798e', 'f92d798e', '66e79e30']);
+});
+
 test('status words and error lines have deliberate positive and negative matches', () => {
   assert.deepEqual(kinds('PASS FAIL ERROR WARN WARNING'), ['PASS', 'FAIL', 'ERROR', 'WARN', 'WARN']);
   assert.ok(!kinds('PASSING warnings ERRORLESS').some((kind) => ['PASS', 'FAIL', 'ERROR', 'WARN'].includes(kind)));
