@@ -312,6 +312,113 @@ export function* ledgerTextChunks(doc: MailLedgerDoc, size = 64 * 1024): Generat
   yield buf;
 }
 
+// ————————————————————————————————————————————————————————————————— query index
+
+/**
+ * LAG-LEDGER-SCANS-108: what two queries would otherwise rebuild with a scan of every entry. The
+ * router's classifyIncoming looked up sender_id aliases for each incoming message, and every fleet
+ * write sorted the backlog.
+ *
+ * It is keyed by the `entries` object, which is never changed once a transition has returned it.
+ * Every write in this file goes through `Draft.put` / `Draft.remove` or `putInPlace` (a source pin
+ * checks this), and each of them drops the index of the object it writes. A transition derives the
+ * next index from the previous one in O(changed) (`deriveIndex`), so the router's
+ * classify-then-deliver loop never rescans. A ledger with no index builds it on its first query.
+ */
+interface LedgerIndex {
+  /** sender_id -> ids of the entries that carry it, in key order (the order `Object.values` gives).
+   *  Versions whose senders did not change share the map. null = not built yet. */
+  bySender: Map<string, readonly string[]> | null;
+  /** backlogEntries' result for this version. */
+  backlog: readonly MailEntry[] | null;
+  /** An earlier version's backlog, plus every id that may have changed since. Each id outside
+   *  `backlogDirty` has the same entry object in both versions. `backlogDirty` may be shared and grow
+   *  after this version is made; extra ids only cost a lookup. */
+  backlogBase: readonly MailEntry[] | null;
+  backlogDirty: Set<string> | null;
+}
+
+const ledgerIndexes = new WeakMap<object, LedgerIndex>();
+/** For tests: how often each index was built by a full scan of the entries. */
+export const ledgerIndexStats = { senderBuilds: 0, backlogBuilds: 0 };
+/** An array-index key ("0", "17") is ordered before every other key in an object, so a new one
+ *  does not go last in key order. Mail ids never look like that; if one does, the sender map is rebuilt. */
+const ARRAY_INDEX_KEY_RE = /^(?:0|[1-9]\d*)$/;
+const hasOwn = (o: object, k: string): boolean => Object.prototype.hasOwnProperty.call(o, k);
+
+function indexOf(entries: object): LedgerIndex {
+  let ix = ledgerIndexes.get(entries);
+  if (!ix) { ix = { bySender: null, backlog: null, backlogBase: null, backlogDirty: null }; ledgerIndexes.set(entries, ix); }
+  return ix;
+}
+
+/** Called before an `entries` object is written in place. */
+function dropIndex(entries: object): void {
+  ledgerIndexes.delete(entries);
+}
+
+/** Write one entry into a document under construction (migration / rebuild), which no transition owns. */
+function putInPlace(doc: MailLedgerDoc, entry: MailEntry): void {
+  dropIndex(doc.entries);
+  doc.entries[entry.id] = entry;
+}
+
+/** A transition made `next` from `prev` and changed exactly `changed`: carry the index over. */
+function deriveIndex(prev: Record<string, MailEntry>, next: Record<string, MailEntry>, changed: readonly string[]): void {
+  const p = ledgerIndexes.get(prev);
+  if (!p) return;
+  const n: LedgerIndex = { bySender: null, backlog: null, backlogBase: null, backlogDirty: null };
+  if (p.bySender) {
+    let map: Map<string, readonly string[]> | null = p.bySender;
+    let copied = false;
+    for (const id of changed) {
+      const was = hasOwn(prev, id) ? prev[id] : undefined;
+      const now = hasOwn(next, id) ? next[id] : undefined;
+      const a = was?.senderId;
+      const b = now?.senderId;
+      if (a === b) continue;
+      // A kept key whose sender_id changes keeps its place in key order, which an append cannot
+      // express; so would an array-index id. Neither happens; if one does, rebuild on the next query.
+      if ((was && now) || ARRAY_INDEX_KEY_RE.test(id)) { map = null; break; }
+      if (!copied) { map = new Map(map); copied = true; }
+      if (a !== undefined) {
+        const rest = (map.get(a) ?? []).filter((x) => x !== id);
+        if (rest.length) map.set(a, rest); else map.delete(a);
+      }
+      if (b !== undefined) map.set(b, [...(map.get(b) ?? []), id]);
+    }
+    n.bySender = map;
+  }
+  const base = p.backlog ?? p.backlogBase;
+  if (base) {
+    const dirty = p.backlog ? new Set<string>() : p.backlogDirty!;
+    for (const id of changed) dirty.add(id);
+    if (dirty.size <= 256 + (base.length >> 2)) { n.backlogBase = base; n.backlogDirty = dirty; }
+  }
+  ledgerIndexes.set(next, n);
+}
+
+/** The entries whose sender_id is `ref`, in key order (`Object.values(..).filter(senderId === ref)`). */
+function senderEntries(doc: MailLedgerDoc, ref: string): MailEntry[] {
+  const ix = indexOf(doc.entries);
+  if (!ix.bySender) {
+    const map = new Map<string, string[]>();
+    for (const e of Object.values(doc.entries)) {
+      if (e.senderId === undefined) continue;
+      const l = map.get(e.senderId);
+      if (l) l.push(e.id); else map.set(e.senderId, [e.id]);
+    }
+    ix.bySender = map;
+    ledgerIndexStats.senderBuilds++;
+  }
+  const out: MailEntry[] = [];
+  for (const id of ix.bySender.get(ref) ?? []) {
+    const e = hasOwn(doc.entries, id) ? doc.entries[id] : undefined;
+    if (e && e.senderId === ref) out.push(e);
+  }
+  return out;
+}
+
 // ————————————————————————————————————————————————————————————————— pure transitions
 
 class Draft {
@@ -320,12 +427,22 @@ class Draft {
   readonly logs: Record<string, unknown>[] = [];
   readonly events: MailEvent[] = [];
   readonly archive: string[] = [];
+  private readonly prevEntries: Record<string, MailEntry>;
   constructor(prev: MailLedgerDoc, readonly now: number) {
+    this.prevEntries = prev.entries;
     this.doc = { ...prev, entries: { ...prev.entries } };
   }
+  private reordered = false;
   put(entry: MailEntry): void {
+    dropIndex(this.doc.entries);
+    if (!hasOwn(this.doc.entries, entry.id) && hasOwn(this.prevEntries, entry.id)) this.reordered = true;
     this.doc.entries[entry.id] = entry;
     if (!this.changed.includes(entry.id)) this.changed.push(entry.id);
+  }
+  remove(id: string): void {
+    dropIndex(this.doc.entries);
+    delete this.doc.entries[id];
+    if (!this.changed.includes(id)) this.changed.push(id);
   }
   event(entry: MailEntry, stage: MailEvent['stage'], harness: boolean, reason?: string): void {
     this.events.push({ agentId: this.doc.agentId, id: entry.id, stage, state: entry.state, at: this.now, harness, ...(reason ? { reason } : {}), entry });
@@ -335,6 +452,9 @@ class Draft {
     this.logs.push({ agentId: this.doc.agentId, ...row });
   }
   step(): MailStep {
+    // A removed key put back goes last in key order: the sender map cannot follow that.
+    if (this.reordered) dropIndex(this.doc.entries);
+    else deriveIndex(this.prevEntries, this.doc.entries, this.changed);
     return { doc: this.doc, changed: this.changed, logs: this.logs, events: this.events, archive: this.archive };
   }
 }
@@ -738,7 +858,7 @@ export function applyReplied(doc: MailLedgerDoc, ref: string, replyId: string, n
   const exact = doc.entries[ref];
   // HIVE-DWIGHT-BG-REINVOKE (A): a discharging reply also upgrades an interim-replied entry.
   const discharging = !!replyAct && DISCHARGING_REPLY_ACTS.has(replyAct);
-  const candidates = [...(exact ? [exact] : []), ...Object.values(doc.entries).filter((e) => e.senderId === ref && e.id !== ref).sort(bySeq)]
+  const candidates = [...(exact ? [exact] : []), ...senderEntries(doc, ref).filter((e) => e.id !== ref).sort(bySeq)]
     .filter((e) => isOpenObligation(e) || (discharging && isInterimReplied(e)));
   const e = (replyTo ? candidates.find((c) => c.from === replyTo) : undefined) ?? candidates[0];
   if (!e) return unchanged(doc);
@@ -788,8 +908,7 @@ export function applyPrune(doc: MailLedgerDoc, now: number, retentionMs = MAIL_A
     && Math.max(e.actedAt ?? e.updatedAt, e.repliedAt ?? 0, e.closedAt ?? 0) < now - retentionMs);
   if (!stale.length) return unchanged(doc);
   const d = new Draft(doc, now);
-  for (const e of stale) delete d.doc.entries[e.id];
-  d.changed.push(...stale.map((e) => e.id));
+  for (const e of stale) d.remove(e.id);
   return d.step();
 }
 
@@ -813,7 +932,7 @@ function bySeq(a: MailEntry, b: MailEntry): number {
 export function resolveEntries(doc: MailLedgerDoc, ref: string): MailEntry[] {
   const exact = doc.entries[ref];
   if (exact) return [exact];
-  return Object.values(doc.entries).filter((e) => e.senderId === ref).sort(bySeq);
+  return senderEntries(doc, ref).sort(bySeq);
 }
 
 /** `ref` plus every id/sender_id it is an alias of in this ledger (§4.1 "resolve against either"). */
@@ -861,7 +980,34 @@ export function applySetAside(doc: MailLedgerDoc, ids: Iterable<string>, on: boo
 
 /** fleet `inboxBacklog` (§3 #6): not acted. Work orders are acted by definition (N2). */
 export function backlogEntries(doc: MailLedgerDoc): MailEntry[] {
-  return Object.values(doc.entries).filter((e) => e.state !== 'acted').sort(bySeq);
+  const ix = indexOf(doc.entries);
+  if (!ix.backlog) {
+    let out: MailEntry[] | null = null;
+    if (ix.backlogBase && ix.backlogDirty) {
+      // LAG-LEDGER-SCANS-108: patch an earlier version's backlog with the ids changed since.
+      const dirty = ix.backlogDirty;
+      const kept = ix.backlogBase.filter((e) => !dirty.has(e.id));
+      const add: MailEntry[] = [];
+      for (const id of dirty) {
+        const e = hasOwn(doc.entries, id) ? doc.entries[id] : undefined;
+        if (e && e.state !== 'acted') add.push(e);
+      }
+      const merged = kept.concat(add.sort(bySeq)).sort(bySeq);
+      // Two entries that compare equal keep their key order in a full scan, which a patch cannot know:
+      // fall back to the scan. Sequence numbers are unique, so this does not happen.
+      let tie = false;
+      for (let i = 1; i < merged.length && !tie; i++) tie = bySeq(merged[i - 1], merged[i]) === 0;
+      if (!tie) out = merged;
+    }
+    if (!out) {
+      out = Object.values(doc.entries).filter((e) => e.state !== 'acted').sort(bySeq);
+      ledgerIndexStats.backlogBuilds++;
+    }
+    ix.backlog = out;
+    ix.backlogBase = null;
+    ix.backlogDirty = null;
+  }
+  return ix.backlog.slice();
 }
 
 export interface MailObligation { entry: MailEntry; ageMs: number }
@@ -1143,7 +1289,7 @@ export type IncomingClass = { kind: 'free' } | { kind: 'dup'; existingId: string
  */
 export function classifyIncoming(doc: MailLedgerDoc, msg: MailMessageLike, readExisting: (id: string) => ExistingMessage): IncomingClass {
   const content = mailContentHash(msg.subject ?? '', msg.body ?? '');
-  const inLedger = [doc.entries[msg.id], ...Object.values(doc.entries).filter((e) => e.senderId === msg.id && e.id !== msg.id)].filter(Boolean) as MailEntry[];
+  const inLedger = [doc.entries[msg.id], ...senderEntries(doc, msg.id).filter((e) => e.id !== msg.id)].filter(Boolean) as MailEntry[];
   for (const e of inLedger) {
     // No content key (a restored work order, whose body is unknown): never a duplicate.
     if (e.from === msg.from && typeof e.contentHash === 'string' && e.contentHash === content) return { kind: 'dup', existingId: e.id };
@@ -1186,7 +1332,7 @@ export function migrateFromInbox(agentId: string, inbox: DiskMessage[], now: num
   let doc = emptyLedger(agentId);
   for (const f of [...inbox].sort((a, b) => a.mtimeMs - b.mtimeMs || (a.id < b.id ? -1 : 1))) {
     doc = applyDelivered(doc, diskEntryMessage(f), now, { legacy: true, harness: true }).doc;
-    doc.entries[f.id] = { ...doc.entries[f.id], deliveredAt: Math.min(now, f.mtimeMs || now) };
+    putInPlace(doc, { ...doc.entries[f.id], deliveredAt: Math.min(now, f.mtimeMs || now) });
   }
   return doc;
 }
@@ -1233,7 +1379,7 @@ export function rebuildLedger(agentId: string, input: { inbox: DiskMessage[]; do
   }
   let doc = emptyLedger(agentId);
   const inboxIds = new Set(input.inbox.map((f) => f.id));
-  const put = (entry: MailEntry): void => { doc.entries[entry.id] = entry; doc.nextSeq = Math.max(doc.nextSeq, entry.seq + 1); };
+  const put = (entry: MailEntry): void => { putInPlace(doc, entry); doc.nextSeq = Math.max(doc.nextSeq, entry.seq + 1); };
   for (const f of [...input.inbox].sort((a, b) => a.mtimeMs - b.mtimeMs || (a.id < b.id ? -1 : 1))) {
     const e = ev.get(f.id);
     const base = entryFromMessage(diskEntryMessage(f), doc.nextSeq, f.mtimeMs || now, 'inbox', !e?.delivered || e.delivered.legacy === true);
@@ -1254,7 +1400,7 @@ export function rebuildLedger(agentId: string, input: { inbox: DiskMessage[]; do
   }
   for (const [id, e] of ev) {
     const entry = doc.entries[id];
-    if (entry && e.replied) doc.entries[id] = { ...entry, repliedAt: e.replied.at, replyId: e.replied.replyId, ...(e.replied.replyAct ? { replyAct: e.replied.replyAct } : {}) };
+    if (entry && e.replied) putInPlace(doc, { ...entry, repliedAt: e.replied.at, replyId: e.replied.replyId, ...(e.replied.replyAct ? { replyAct: e.replied.replyAct } : {}) });
   }
   const lastTs = Math.max(0, ...[...ev.values()].map((e) => e.lastTs));
   doc = { ...doc, lastActivityAt: lastTs || null };
