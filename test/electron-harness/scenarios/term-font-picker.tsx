@@ -16,9 +16,11 @@
  * when the face's load ends (terminalPool waits on loadTerminalFont), and how long that takes
  * is the machine's business: under a full suite the first load of a face took longer than the
  * 700 ms this scenario used to wait, so it measured the old face. pick() now waits on that
- * same load, then on the state it is about to measure. The first pick also HOLDS the load
- * (document.fonts.load is gated here; so does the start, for the starting face) for HELD_MS, longer than any delay the scenario ever
- * guessed, and reports what the terminals showed meanwhile: the old face and the old cell.
+ * same load, then on the state it is about to measure. The start and the first pick also HOLD
+ * that load shut (document.fonts.load is gated here) for HELD_MS, longer than any delay the
+ * scenario ever guessed, and the hold opens by itself, on a timer. So a scenario that measured
+ * after a fixed delay would measure the old face on every run, not only on a loaded machine;
+ * the first pick also reports what the terminals showed meanwhile: the old face and cell.
  */
 import { createRoot } from 'react-dom/client';
 import { act } from 'react';
@@ -65,7 +67,7 @@ const wait = (ms: number) => act(async () => { await new Promise((r) => setTimeo
 /** How long the first pick's font load is held shut: well past the 700 ms the scenario once waited. */
 const HELD_MS = 1500;
 // The gate on document.fonts.load: while gate.face is set, a load of that face does not even
-// start until gate.open() is called, so the face cannot become usable behind the scenario's back.
+// start until the gate opens, so the face cannot become usable behind the scenario's back.
 const gate: { face: string | null; opened: Promise<void>; open: () => void } = { face: null, opened: Promise.resolve(), open: () => {} };
 const realFontLoad = document.fonts.load.bind(document.fonts);
 document.fonts.load = ((font: string, text?: string) => (
@@ -73,8 +75,11 @@ document.fonts.load = ((font: string, text?: string) => (
 )) as typeof document.fonts.load;
 // The starting face's load is held shut from the start: the scenario lets it through itself, so
 // its first measurement cannot depend on how long that load takes either.
-gate.face = getTerminalFontFace();
-gate.opened = new Promise<void>((r) => { gate.open = r; });
+const hold = (face: string) => { gate.face = face; gate.opened = new Promise<void>((r) => { gate.open = r; }); };
+/** The held load opens by itself HELD_MS from now. Nothing in the scenario opens it by hand:
+ *  whatever measures the face has to outwait the hold, and only a wait on the load can know to. */
+const releaseHeld = () => { const open = gate.open; setTimeout(() => { gate.face = null; open(); }, HELD_MS); };
+hold(getTerminalFontFace());
 const INK_CHARS = ['W', 'M', 'm', '@', '#', '%', '&', 'w', 'Q'];
 
 type XtermCore = { _core: { _renderService: { dimensions: { device: { cell: { width: number; height: number } }; css: { cell: { width: number } } } } } };
@@ -102,17 +107,17 @@ window.__harnessRun = async () => {
     // The first measurement is the same case as a pick: a terminal opened before the starting
     // face had loaded is measured again when that load ends (terminalPool, TERM-FONT-105), and
     // the section shows the stored font once it has read the config. Wait on those, not on a delay:
-    // the load is held shut for HELD_MS first, then let through and waited on.
-    await wait(HELD_MS);
-    const startHeld = { face: initialFace, ready: terminalFontReady(initialFace) };
-    gate.face = null;
-    gate.open();
+    // the load has been held shut since this file loaded and opens HELD_MS from here.
+    releaseHeld();
+    const startedAt = performance.now();
+    const startHeld: { face: string; ready: boolean; waitedMs?: number } = { face: initialFace, ready: terminalFontReady(initialFace) };
     await act(async () => { await loadTerminalFont(initialFace); });
     const started = () => terminalFontReady(initialFace) && entry.term.options.fontFamily === terminalFontFamily(initialFace)
       && pooled.term.options.fontFamily === terminalFontFamily(initialFace)
       && (settingsWrap.querySelector('select') as HTMLSelectElement | null)?.value === initialFace;
     for (let i = 0; i < 200 && !started(); i++) await wait(25);
     if (!started()) throw new Error(`the scenario did not start on ${initialFace}`);
+    startHeld.waitedMs = performance.now() - startedAt;
     entry.term.write('WWWWMMMMmmmm@@@@####iiii\r\n');
 
     let select = settingsWrap.querySelector('select') as HTMLSelectElement;
@@ -146,8 +151,12 @@ window.__harnessRun = async () => {
       for (let i = 0; i < 200 && !settled(shown, alert); i++) await wait(25);
       if (!settled(shown, alert)) throw new Error(`the pick of ${picked} did not settle on ${shown}`);
     };
-    const pick = async (face: TerminalFontFace, shown: TerminalFontFace = face, alert = false) => {
+    /** Every pick takes this one path. With `whileHeld`, the picked face's load is held shut
+     *  (it opens by itself after HELD_MS) and `whileHeld` runs a third of the way into the hold. */
+    const pick = async (face: TerminalFontFace, shown: TerminalFontFace = face, alert = false, whileHeld?: () => void) => {
+      if (whileHeld) { hold(face); releaseHeld(); }
       await change(face);
+      if (whileHeld) { await wait(HELD_MS / 3); whileHeld(); }
       await landed(face, shown, alert);
     };
 
@@ -203,24 +212,20 @@ window.__harnessRun = async () => {
     await sweep('default');
     const cellNow = () => (entry.term as unknown as XtermCore)._core._renderService.dimensions.device.cell.width;
     const cellBeforePick = cellNow();
-    let held: unknown = null;
+    let held: Record<string, unknown> | null = null;
     for (const face of TERMINAL_FONT_FACES.filter((f) => f !== initialFace)) {
       if (!held) {
         // The first pick, with its font load held shut: the pick is taken and saved, and every
         // terminal stays on the old face and cell until the load is let through.
-        gate.face = face;
-        gate.opened = new Promise<void>((r) => { gate.open = r; });
         const t0 = performance.now();
-        await change(face);
-        await wait(HELD_MS);
-        held = {
-          picked: face, face: getTerminalFontFace(), selectValue: select.value, stored: cfg.terminalFont ?? null,
-          ready: terminalFontReady(), family: entry.term.options.fontFamily, pooledFamily: pooled.term.options.fontFamily,
-          cellBefore: cellBeforePick, cell: cellNow(), heldMs: performance.now() - t0
-        };
-        gate.face = null;
-        gate.open();
-        await landed(face);
+        await pick(face, face, false, () => {
+          held = {
+            picked: face, face: getTerminalFontFace(), selectValue: select.value, stored: cfg.terminalFont ?? null,
+            ready: terminalFontReady(), family: entry.term.options.fontFamily, pooledFamily: pooled.term.options.fontFamily,
+            cellBefore: cellBeforePick, cell: cellNow()
+          };
+        });
+        (held as unknown as Record<string, unknown>).landedMs = performance.now() - t0;
       } else await pick(face);
       rows.push(await measure(`picked ${face} at 16px, no size change`));
       await sweep(`picked ${face}`);
