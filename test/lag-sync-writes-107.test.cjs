@@ -670,7 +670,8 @@ test('MAIL-LEDGER-FLUSH-LAG-108: a timer save that finds another write of the fi
     // Jim SHOULD 2: each re-arm waits a whole coalesce period, so the wait is no busy loop on main.
     const rearms = waits.slice(1);
     assert.ok(rearms.length >= 2, `the timer re-armed while it waited (${waits.join(',')})`);
-    assert.ok(rearms.every((ms) => ms === 5), `every re-arm waits the coalesce period: ${waits.join(',')}`);
+    // 4 or 5: the line reads Date.now twice (lastWriteAt, then arm's wait), and a ms may tick between.
+    assert.ok(rearms.every((ms) => ms >= 4 && ms <= 5), `every re-arm waits the coalesce period: ${waits.join(',')}`);
     g.open();
     assert.equal(await bounded(older, 'the other write'), 'published', 'the other write was not overtaken');
     await until(() => diskIds(root).includes('m-1'), 'our save, after it');
