@@ -304,6 +304,7 @@ export interface HarnessConfig extends BlobConfigFields {
     enabled?: boolean;
     digestEveryMs?: number;
     wakeBatchMs?: number;
+    scratchDiskBudgetBytes?: number;
     staleAfterMs?: number;
     downAfterMs?: number;
     downDecisionMs?: number;

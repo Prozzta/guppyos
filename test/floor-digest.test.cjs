@@ -80,6 +80,14 @@ test('the digest markdown lists decisions, in-flight age, blocked, flags and ros
   assert.equal((markdown.match(/- jim: A/g) ?? []).length, 1, 'a duplicate id is listed once (first copy)');
 });
 
+test('managed scratch disk is visible and over-budget space becomes one dedupable god decision', () => {
+  const disk = { bytes: 201 * 1024 ** 3, budgetBytes: 200 * 1024 ** 3, measuredAt: NOW - MIN };
+  const r = buildFloorDigest({ tasks: [], meta: {}, flags: [], ledgerIssues: [], agents: [], now: NOW, scratchDisk: disk });
+  assert.match(r.markdown, /Managed _work disk: 201\.0 GiB \/ 200\.0 GiB/);
+  assert.deepEqual(r.decisionItems.map((i) => i.id), [`scratch-disk:${disk.budgetBytes}`]);
+  assert.match(r.decisionItems[0].line, /reclaim\/review scratch trees/);
+});
+
 test('the digest sender is NOT a system sender: a decision wake is actionable mail (M25)', () => {
   assert.equal(DIGEST_SENDER, 'digest');
   assert.equal(SYSTEM_SENDERS.has(DIGEST_SENDER), false);
