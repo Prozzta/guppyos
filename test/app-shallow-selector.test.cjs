@@ -23,6 +23,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const { readSource, codeOnly } = require('./read-source.cjs');
+const loadTs = require('./load-ts.cjs');
 const { runScenario } = require('./electron-harness/run.cjs');
 
 const scenario = path.join(__dirname, 'electron-harness', 'scenarios', 'app-shallow-renders.tsx');
@@ -32,6 +33,9 @@ const result = () => (run ??= runScenario(scenario, { timeoutMs: 180_000 }));
 test('RENDERED: N real ticks on a NON-selected agent render App and its memo children 0 times', async (t) => {
   const r = await result();
   assert.equal(r.ok, true, r.error);
+  // APP-SHALLOW-LATE-RENDER-107: the once-at-startup render the scenario waits for by name.
+  if (r.resized) t.diagnostic(`first resize answer ${r.resized.ms} ms after the selection; it rendered: ${JSON.stringify(r.resized.causes)}`);
+  if (r.strayA) t.diagnostic(`phase A ran ${r.strayA.fromMs}..${r.strayA.toMs} ms; renders not per tick, with their cause: ${JSON.stringify(r.strayA.causes)}`);
   if (r.settled) t.diagnostic(`census settled in ${r.settled.ms} ms; late renders before phase A: ${JSON.stringify(r.settled.late)}`);
   assert.equal(r.floorMounted, true, 'the real floor (a canvas) must be mounted: this measures the live tree');
   const a = r.phaseA;
@@ -70,6 +74,53 @@ test('U: the selectors change exactly when the roster changes', async () => {
     countSame: true, keySameOnTick: true, keyOnAdd: true, keyOnRemove: true, keyOnReorder: true,
     keyOnPty: true, keyOnIdSwap: true, countOnAdd: true
   });
+});
+
+// APP-SHALLOW-LATE-RENDER-107. Two late renders used to land in phase A under load:
+//   1. the detail panel's first resize answer (once at startup): the scenario waits for it by name;
+//   2. the integrity banner, every 2 s for good: a product fault, a poll with no news now keeps its state.
+test('RENDERED: phase A starts after the first resize answer, and nothing but the ticks renders in it', async () => {
+  const r = await result();
+  assert.equal(r.ok, true, r.error);
+  assert.deepEqual(r.strayA.causes, [], 'A RENDER IN PHASE A THAT NO TICK CAUSED');
+  for (const c of r.resized.causes) {
+    assert.ok(c.hooks.length > 0 && c.props.length === 0, `the first resize answer renders from the component's own width state, got ${JSON.stringify(c)}`);
+  }
+  const sc = readSource('test/electron-harness/scenarios/app-shallow-renders.tsx');
+  assert.match(sc, /selectedId: 'a1' \} as never\); \}\);\s*await firstResize\(host\);/, 'THE SCENARIO WAITS FOR THE FIRST RESIZE ANSWER BY NAME, RIGHT AFTER THE SELECTION');
+});
+
+const K = {};
+K.sameIssues = (B) => {
+  const one = { file: 'tasks.json', error: 'bad', quarantine: 'q1' };
+  assert.equal(B.sameIssues([], []), true, 'AN EMPTY POLL ANSWER IS THE LIST ALREADY SHOWN');
+  assert.equal(B.sameIssues([one], [{ ...one }]), true, 'the same issue in a fresh object is the same list');
+  assert.equal(B.sameIssues([], [one]), false, 'A NEW ISSUE IS NEWS');
+  assert.equal(B.sameIssues([one], []), false, 'a cleared issue is news');
+  for (const [field, value] of [['file', 'x'], ['error', 'worse'], ['quarantine', 'q2'], ['repaired', true], ['notice', 'n'], ['title', 't'], ['details', 'd'], ['raisedAt', 5]]) {
+    assert.equal(B.sameIssues([one], [{ ...one, [field]: value }]), false, `A CHANGED ${field} IS NEWS`);
+  }
+};
+K.bannerKeepsState = (src) => {
+  assert.match(src, /if \(alive\) setIssues\(\(shown\) => \(sameIssues\(shown, list\) \? shown : list\)\);/, 'A POLL WITH NO NEWS KEEPS THE BANNER STATE');
+  assert.doesNotMatch(src, /setIssues\(list\)/);
+};
+const BANNER_TS = 'src/shared/integrityBanner.ts';
+const BANNER_TSX = 'src/renderer/src/components/IntegrityRepairBanner.tsx';
+test('U: a poll answer equal to the list shown is not news (every shown field compared)', () => K.sameIssues(loadTs(BANNER_TS)));
+test('STATIC: the integrity banner keeps its state for a poll with no news', () => K.bannerKeepsState(readSource(BANNER_TSX)));
+
+test('MUTANT CENSUS: each banner guarantee has a mutant that dies', () => {
+  const ts = readSource(BANNER_TS);
+  const tsx = readSource(BANNER_TSX);
+  const swap = (text, from, to) => { assert.ok(text.includes(from), `mutant target missing: ${from}`); return text.replace(from, to); };
+  const dies = (fn, re, name) => assert.throws(fn, re, `MUTANT LIVED: ${name}`);
+  dies(() => K.sameIssues(loadTs.fromText(BANNER_TS, swap(ts, 'a.length === b.length && ', ''))), /A NEW ISSUE IS NEWS/, 'length not compared');
+  for (const [field, expr] of [['file', 'i.file, '], ['raisedAt', ', i.raisedAt ?? null'], ['error', 'i.error, '], ['quarantine', 'i.quarantine ?? null, '], ['repaired', 'i.repaired === true, '], ['notice', 'i.notice ?? null, '], ['title', 'i.title ?? null, '], ['details', 'i.details ?? null, ']]) {
+    dies(() => K.sameIssues(loadTs.fromText(BANNER_TS, swap(ts, expr, ''))), new RegExp(`A CHANGED ${field} IS NEWS`), `${field} not compared`);
+  }
+  dies(() => K.sameIssues(loadTs.fromText(BANNER_TS, swap(ts, 'fields(issue) === fields(b[k])', 'false'))), /AN EMPTY POLL ANSWER|the same issue in a fresh object/, 'never the same');
+  dies(() => K.bannerKeepsState(swap(tsx, 'setIssues((shown) => (sameIssues(shown, list) ? shown : list));', 'setIssues(list);')), /A POLL WITH NO NEWS KEEPS THE BANNER STATE/, 'the banner sets every poll answer (the defect)');
 });
 
 test('STATIC: App.tsx has no whole-array subscription and keys its effects on the roster key', () => {

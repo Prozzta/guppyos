@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { IntegrityIssue } from '../../../preload';
-import { isDismissible, issueKey, visibleIssues } from '@shared/integrityBanner';
+import { isDismissible, issueKey, sameIssues, visibleIssues } from '@shared/integrityBanner';
 
 /** A damaged authority file must be noticeable before a human tries a write.
  * Main deliberately keeps read-only views alive with safe defaults, while this
@@ -21,7 +21,8 @@ export function IntegrityRepairBanner() {
           // keep only well-formed issues.
           const valid = (x: unknown): x is IntegrityIssue => !!x && typeof x === 'object' && typeof (x as IntegrityIssue).file === 'string';
           const list = [...(Array.isArray(hive) ? hive : []), ...(config ? [config] : [])].filter(valid);
-          if (alive) setIssues(list);
+          // The same list as shown keeps the state object: no render for a poll with no news.
+          if (alive) setIssues((shown) => (sameIssues(shown, list) ? shown : list));
         })
         .catch(() => { /* IPC recovery must not disturb the office UI */ });
     };

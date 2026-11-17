@@ -17,6 +17,12 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **The data-repair notice no longer redraws itself every two seconds.** The notice that warns
+  about a damaged hive file checks for news every two seconds, and it redrew on every check even
+  when there was nothing to show. It now redraws only when the list of problems changes. (This
+  was also one of two late redraws that made the app-shallow-selector test fail now and then on a
+  busy machine; the other was the agent panel's first width measurement, which the test now waits
+  for by name.)
 - **Terminals never fall back to an unpatched terminal library.** node-pty ships ready-made Windows
   binaries beside the ones Guppy builds from its patched source, and it used them without a word
   whenever the built ones did not load. That would have dropped the protection against killing a
