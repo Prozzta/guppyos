@@ -26,6 +26,15 @@ test('managed path only permits direct, non-hidden children of _work', () => {
   assert.equal(scratch.managedScratchPath(root, path.join(root, '..', 'outside')), false);
 });
 
+test('fixtures are stamped direct cache children and are not scratch paths', () => {
+  const hive = path.join(jail, 'fixture-path'); const fixture = path.join(hive, 'cache', 'fixtures', 'guppy-v1.1.83');
+  fs.mkdirSync(fixture, { recursive: true });
+  assert.equal(scratch.managedFixturePath(hive, fixture), false);
+  fs.writeFileSync(path.join(fixture, '.guppy-fixture.json'), '{"tag":"v1.1.83"}');
+  assert.equal(scratch.managedFixturePath(hive, fixture), true);
+  assert.equal(scratch.managedFixturePath(hive, path.join(fixture, 'nested')), false);
+});
+
 test('reap policy is fail-closed: dirty, unpushed, live and inbound links all win over done/idle', () => {
   assert.equal(scratch.planScratchReap(facts({ cardDone: true })).action, 'reap');
   assert.equal(scratch.planScratchReap(facts({ idle: true })).action, 'reap');
@@ -62,6 +71,18 @@ test('manager authenticates owner, refuses a common repo, and only reaps a regis
   assert.equal(fs.existsSync(jailRoot), false);
 });
 
+test('registered fixtures are permanently protected, even for a done card', async () => {
+  const base = path.join(jail, 'fixture-manager'); const hive = path.join(base, 'hive');
+  const fixture = path.join(hive, 'cache', 'fixtures', 'guppy-v1.1.83');
+  fs.mkdirSync(fixture, { recursive: true }); fs.writeFileSync(path.join(fixture, '.guppy-fixture.json'), '{"tag":"v1.1.83"}');
+  const manager = new scratch.ScratchDiskManager(() => hive, () => true, async () => []);
+  assert.equal(manager.registerFixture('creed', fixture, 'DRILL-TREE-SELF-BUILD-108').ok, true);
+  const result = await manager.sweep();
+  assert.deepEqual(result.reaped, []);
+  assert.deepEqual(result.kept, [{ path: path.resolve(fixture), owner: 'creed', reason: 'fixture-protected' }]);
+  assert.equal(fs.existsSync(fixture), true);
+});
+
 test('install key changes for patch inputs and is stable for unchanged project inputs', () => {
   const project = path.join(jail, 'project');
   fs.mkdirSync(path.join(project, 'tools'), { recursive: true });
@@ -86,5 +107,5 @@ test('inbound scan finds a scoped node_modules junction and never follows it for
 
 test('mutant pins: each never-reap guard and source-input key is present', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'scratchDisk.ts'), 'utf8');
-  for (const token of ['if (f.dirty)', 'if (!f.onOrigin)', 'if (f.live)', 'if (f.inboundLinks.length)', 'package-lock.json', 'package.json', 'const tools = join(project, \'tools\')', 'path-changed-or-missing']) assert.ok(src.includes(token), token);
+  for (const token of ['if (f.dirty)', 'if (!f.onOrigin)', 'if (f.live)', 'if (f.inboundLinks.length)', 'package-lock.json', 'package.json', 'const tools = join(project, \'tools\')', 'path-changed-or-missing', 'fixture-protected']) assert.ok(src.includes(token), token);
 });
