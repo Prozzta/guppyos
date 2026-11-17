@@ -68,9 +68,10 @@ import { selectBroadcastTargets } from '../shared/broadcast';
 import { normalizeWakeField } from '../shared/mailWakeClass';
 import { preferredAgentRole } from '../shared/agentRole';
 import { introducedErrors, mergeTaskLedger, validateLedger, type LedgerIssue } from '../shared/taskLedger';
-import { TaskLedgerGuard, type CardMeta, type TaskEditSource } from './taskLedgerGuard';
+import { TaskLedgerGuard, type CardMeta, type TaskEditSource, type TaskLedgerRead } from './taskLedgerGuard';
 import {
-  ARCHIVE_DIR, ARCHIVE_PASS_MS, appendArchived, appendRevived, archiveStamp, mergeHotCold, planArchive, readArchive
+  ARCHIVE_DIR, ARCHIVE_PASS_MS, appendArchived, appendRevived, archiveStamp, archiveWriteGen, landedCards, mergeHotCold, parseArchive, planArchive,
+  readArchive, readArchiveTextsAsync
 } from './taskArchive';
 import { expandTilde } from './fs';
 import { CATCHUP_SLICE_MS, MAIL_BATCH, TICK_EVERY, batchOp, byCodeUnit, drainMail, filterSteps, listOp, mergeSteps, runMailSliced, sortSteps, statOp, tick, type MailSliceDeps, type MailStat, type MailSteps } from './mailSteps';
@@ -866,7 +867,15 @@ export class HiveManager {
   private readonly authorityIssues = new Map<string, HiveIntegrityIssue>();
   /** TASKS-JSON-SPLIT: the hourly archive pass and the archive reader's cache. */
   private archiveTimer: ReturnType<typeof setInterval> | null = null;
-  private archiveCache: { root: string; stamp: string; cards: Map<string, Record<string, unknown>>; checkedAt: number } | null = null;
+  /** `stamp` is null after one of main's own archive writes was applied to the cards in memory:
+   *  the files' stamp is then unknown until the asynchronous revalidation reads it. */
+  private archiveCache: { root: string; stamp: string | null; cards: Map<string, Record<string, unknown>>; checkedAt: number } | null = null;
+  private archiveFallbackTimer: ReturnType<typeof setInterval> | null = null;
+  private archiveRevalidating = false;
+  /** LAG-SYNC-IO-107: the archive revalidation's period. Shorter than ARCHIVE_REVALIDATE_MS, so
+   *  the cache's last check is renewed (async stats) before a reader finds it expired and stats or
+   *  reads the archive itself on the main thread. */
+  static readonly ARCHIVE_FALLBACK_MS = 1_000;
   /** SCALE-TASKS-MAP (Jim B1): archived() trusts its last stamp check this long, so a burst of
    *  lookups (taskStatus per claim) costs no readdir/stat of tasks-archive/. Main's own archive
    *  writes (archivePass, revive) drop the cache at once; only an OUTSIDE append waits <= this. */
@@ -889,10 +898,17 @@ export class HiveManager {
     // tick, board status, the ASSIGNEE_ARCHIVED auto-move) call tasks(), so drop the cached entry
     // first: they see at least what the guard saw, never the value from before the change.
     // opts.onChange runs before every onChange() listener.
-    onChange: () => {
+    // LAG-SYNC-IO-107: a change the guard got from readLedger is already IN the cache (that read
+    // installed it before the guard announced), so the listeners' tasks() is served from memory.
+    // Dropping the entry here made each of them re-read ~670 KB synchronously on main.
+    onChange: (_change, info) => {
+      if (info?.primed) return;
       const root = this.root();
       if (root) this.invalidateAuthorityCache(join(root, 'tasks.json'));
-    }
+    },
+    // LAG-SYNC-IO-107: the guard's watch and poll read tasks.json through the authority cache's
+    // async load: one read off the main thread serves the guard and refreshes the cache.
+    readLedger: (root, known) => this.loadAuthorityAsync(join(root, 'tasks.json'), true, known)
   });
   /** At most one queued scan; hints arriving in the same turn coalesce into it. */
   private routeQueued = false;
@@ -1025,6 +1041,40 @@ export class HiveManager {
     // until the restore brings it back.
     if (!transient && existsSync(join(inbox, UNDELIVERED_DIR, `${id}.json`))) return { ok: false, reason: 'set-aside', sig: sig() };
     return { ok: false, reason: transient ? 'transient' : 'missing', sig: sig() };
+  }
+
+  /**
+   * LAG-SYNC-IO-107: `mailBody` through node:fs/promises, decision for decision. The hook server
+   * reads the bodies a hook will show with this before it handles the hook, so the read of a mail
+   * file (readFileSync:<mail id>.json held Electron main for 817 ms under disk load, 1.1.106
+   * stall row) is no longer on the main thread.
+   */
+  async mailBodyAsync(agentId: string, id: string): Promise<ReturnType<HiveManager['mailBody']>> {
+    const inbox = join(this.agentDir(agentId), 'inbox');
+    const sig = async (): Promise<string> => (await Promise.all([join(inbox, `${id}.json`), join(inbox, '.done', `${id}.json`)].map(async (p) => {
+      try { const s = await fsPromises.stat(p); return `${s.size}:${s.mtimeMs}`; } catch { return '-'; }
+    }))).join('|');
+    if ((!isValidMailId(id) && !/^[^\\/:*?"<>|]+$/.test(id)) || id.includes('..')) return { ok: false, reason: 'unreadable', sig: 'invalid' };
+    let transient = false;
+    for (const [path, moved] of [[join(inbox, `${id}.json`), false], [join(inbox, '.done', `${id}.json`), true]] as const) {
+      let raw: string;
+      try {
+        if ((await fsPromises.stat(path)).size > HiveManager.INBOX_MESSAGE_MAX_BYTES) return { ok: false, reason: 'unreadable', sig: await sig() };
+        raw = await fsPromises.readFile(path, 'utf8');
+      } catch (e) {
+        const code = (e as NodeJS.ErrnoException)?.code;
+        if (code === 'ENOENT' || code === 'ENOTDIR') continue;
+        transient = true;
+        continue;
+      }
+      try {
+        const msg = JSON.parse(raw) as unknown;
+        if (msg && typeof msg === 'object' && !Array.isArray(msg)) return { ok: true, path, msg: msg as Partial<HiveMessage>, moved };
+      } catch { /* unparseable */ }
+      return { ok: false, reason: 'unreadable', sig: await sig() };
+    }
+    if (!transient && await fsPromises.stat(join(inbox, UNDELIVERED_DIR, `${id}.json`)).then(() => true, () => false)) return { ok: false, reason: 'set-aside', sig: await sig() };
+    return { ok: false, reason: transient ? 'transient' : 'missing', sig: await sig() };
   }
 
   /** The inbox/ and .done/ files of one message (size + mtime, or absent), as one string. */
@@ -4239,7 +4289,7 @@ export class HiveManager {
       const now = Date.now();
       this.writeTasks([...tasks, { ...(old as unknown as HiveTask), revivedAt: new Date(now).toISOString(), ...patch, id }], source);
       appendRevived(root, id, now);
-      this.archiveCache = null;
+      this.noteArchiveWrite(root, null, (cards) => { cards.delete(id); });
       return true;
     }
     const next = tasks.slice();
@@ -4267,6 +4317,9 @@ export class HiveManager {
     // TASKS-JSON-SPLIT: after the guard's first check (fresh statusSince), then hourly.
     this.stopArchivePass();
     try { this.archivePass(); } catch (e) { try { this.appendLog({ kind: 'task-archive-failed', error: String(e) }); } catch { /* noop */ } }
+    // LAG-SYNC-IO-107: read the archive off-thread now, so the first reader finds it cached.
+    const root = this.root();
+    if (root) { this.ensureArchiveFallback(); void this.revalidateArchiveAsync(root); }
     this.archiveTimer = setInterval(() => {
       try { this.archivePass(); } catch (e) { try { this.appendLog({ kind: 'task-archive-failed', error: String(e) }); } catch { /* noop */ } }
     }, ARCHIVE_PASS_MS);
@@ -4278,6 +4331,7 @@ export class HiveManager {
   }
   private stopArchivePass(): void {
     if (this.archiveTimer) { clearInterval(this.archiveTimer); this.archiveTimer = null; }
+    if (this.archiveFallbackTimer) { clearInterval(this.archiveFallbackTimer); this.archiveFallbackTimer = null; }
   }
 
   /**
@@ -4301,12 +4355,19 @@ export class HiveManager {
       this.appendLog({ kind: 'task-archive-migrate', backup, cards: tasks.length });
     }
     const moving = tasks.filter((t) => ids.has(t.id));
-    appendArchived(root, moving, now);
-    this.archiveCache = null;
+    const mark = appendArchived(root, moving, now);
     // Only a card that reads back from the archive exactly as it was leaves hot: an append
     // that did not land whole (torn, partial, unreadable) keeps the card hot (Jim MUST).
-    const back = readArchive(root);
-    const landed = new Set(moving.filter((t) => JSON.stringify(back.get(t.id)) === JSON.stringify(t)).map((t) => t.id));
+    // LAG-SYNC-IO-107: landedCards reads back the appended bytes, and the whole archive only when
+    // they do not settle it.
+    let landed: Set<string>;
+    try {
+      const read = landedCards(root, mark, moving);
+      landed = read.landed;
+      this.noteArchiveWrite(root, read.full as Map<string, Record<string, unknown>> | null, (cards) => {
+        for (const t of moving) if (landed.has(t.id)) cards.set(t.id, JSON.parse(JSON.stringify(t)) as Record<string, unknown>);
+      });
+    } catch (e) { this.archiveCache = null; throw e; }
     if (landed.size > 0) this.writeTasks(tasks.filter((t) => !landed.has(t.id)), 'archive');
     this.appendLog({ kind: 'task-archive', moved: landed.size, ...(landed.size < ids.size ? { kept: [...ids].filter((id) => !landed.has(id)) } : {}) });
     return [...landed];
@@ -4322,7 +4383,63 @@ export class HiveManager {
     if (c && c.root === root && c.stamp === stamp) { c.checkedAt = now; return c.cards; }
     const cards = readArchive(root);
     this.archiveCache = { root, stamp, cards, checkedAt: now };
+    this.ensureArchiveFallback();
     return cards;
+  }
+
+  /**
+   * LAG-SYNC-IO-107: one of main's own archive writes, applied to the cached cards in memory.
+   * The cache used to be dropped here, so the next reader on Electron main read the whole archive
+   * again (megabytes, synchronously). `full` is the archive as just read back, when the write's
+   * caller had to read it; otherwise `apply` makes the write's change on a copy of the cached
+   * cards, exactly as the archive's lines would (a card line sets its id, a tombstone deletes
+   * it). The map is always a new one: readers compare it by identity. With no fresh cache to
+   * apply to, the cache is dropped as before. The files are then re-read off-thread.
+   */
+  private noteArchiveWrite(root: string, full: Map<string, Record<string, unknown>> | null, apply: (cards: Map<string, Record<string, unknown>>) => void): void {
+    const now = this.authorityNow();
+    const c = this.archiveCache;
+    if (full) this.archiveCache = { root, stamp: null, cards: full, checkedAt: now };
+    else if (c && c.root === root && now - c.checkedAt >= 0 && now - c.checkedAt < HiveManager.ARCHIVE_REVALIDATE_MS) {
+      const cards = new Map(c.cards);
+      apply(cards);
+      this.archiveCache = { root, stamp: null, cards, checkedAt: now };
+    } else this.archiveCache = null;
+    this.ensureArchiveFallback();
+    void this.revalidateArchiveAsync(root);
+  }
+
+  private ensureArchiveFallback(): void {
+    if (this.archiveFallbackTimer) return;
+    this.archiveFallbackTimer = setInterval(() => { void this.revalidateArchiveAsync(); }, HiveManager.ARCHIVE_FALLBACK_MS);
+    this.archiveFallbackTimer.unref?.();
+  }
+
+  /**
+   * LAG-SYNC-IO-107: check the archive's stamp, and re-read the archive when it changed, off the
+   * main thread; `prime` names the root when nothing is cached yet. An unchanged stamp renews the
+   * cache's last check. The result is dropped when the cache was replaced meanwhile (a reader's
+   * own synchronous read, an archive write) or this process appended during the read: the write
+   * is the last word. Tests that drive the authority clock revalidate synchronously, as before.
+   */
+  private async revalidateArchiveAsync(prime?: string): Promise<void> {
+    if (this.archiveRevalidating || this.authorityTestClock) return;
+    const c = this.archiveCache;
+    const root = c?.root ?? prime;
+    if (!root) return;
+    this.archiveRevalidating = true;
+    try {
+      const gen = archiveWriteGen();
+      const got = await readArchiveTextsAsync(root).catch(() => null);
+      if (!got || this.archiveCache !== c || gen !== archiveWriteGen()) return;
+      if (c && c.stamp === got.stamp) { c.checkedAt = this.authorityNow(); return; }
+      this.archiveCache = { root, stamp: got.stamp, cards: parseArchive(got.texts) as Map<string, Record<string, unknown>>, checkedAt: this.authorityNow() };
+      this.ensureArchiveFallback();
+    } finally { this.archiveRevalidating = false; }
+  }
+  /** Test seam: one archive revalidation, awaited. */
+  async __revalidateArchiveForTests(): Promise<void> {
+    await this.revalidateArchiveAsync(this.root() ?? undefined);
   }
 
   /** TASKS-JSON-SPLIT: hot plus archive (hot wins), for readers that need any card ever made:
@@ -4692,11 +4809,34 @@ export class HiveManager {
    * registry agents (the agent listed owes the reply). Data only: nothing here ever wakes anyone.
    */
   mailObligations(): MailObligationsAgent[] {
-    const reg = this.registry();
-    const agents = Object.keys(reg.agents ?? {})
+    return mailObligationsView(this.mail, this.obligationAgents(this.registry()));
+  }
+  /**
+   * LAG-SYNC-IO-107: `mailObligations` for the `hive:mailObligations` poll, with no synchronous
+   * fs on the main thread: the roster comes from the authority cache (refreshed off-thread when
+   * it has expired) and the ledgers through `MailLedger.obligationReader`. Same view.
+   */
+  async mailObligationsAsync(): Promise<MailObligationsAgent[]> {
+    const agents = this.obligationAgents(await this.registryAsync());
+    return mailObligationsView(await this.mail.obligationReader(agents.map((a) => a.id)), agents);
+  }
+  private obligationAgents(reg: Registry): Array<{ id: string; name?: string }> {
+    return Object.keys(reg.agents ?? {})
       .filter((id) => Object.prototype.hasOwnProperty.call(reg.agents, id) && !reg.agents[id]?.archived)
       .map((id) => ({ id, name: reg.agents[id]?.name }));
-    return mailObligationsView(this.mail, agents);
+  }
+  /** `registry()` without a synchronous stat or read while the roster is cached: an expired
+   *  entry is revalidated off the main thread first. A missing, corrupt or unreadable roster is
+   *  not cached, so `registry()` then answers for it exactly as it always did. */
+  private async registryAsync(): Promise<Registry> {
+    const root = this.root();
+    if (root) {
+      const p = join(root, 'registry.json');
+      const c = this.authorityCache.get(p);
+      const age = c ? this.authorityNow() - c.checkedAt : -1;
+      if (!c || age < 0 || age >= HiveManager.AUTHORITY_REVALIDATE_MS) await this.refreshAuthority(p);
+    }
+    return this.registry();
   }
 
   /**
@@ -6571,13 +6711,91 @@ export class HiveManager {
     this.watchAuthority(p);
     return frozen;
   }
+  /**
+   * LAG-SYNC-IO-107: read `p` into the cache with no synchronous fs. A watch event and the
+   * missed-watch fallback used to mark the entry dirty (or drop it), which made the NEXT reader,
+   * on the main thread, pay a statSync and a readFileSync of the whole file (tasks.json: 529 ms
+   * under disk load on 1.1.106). They now call this instead, and the reader keeps being served
+   * the entry it had until the new value is installed, for at most AUTHORITY_REVALIDATE_MS after
+   * that entry's last check: the bound an outside write always had. A missing, corrupt or
+   * unreadable file drops the entry, so the synchronous reader handles it exactly as before
+   * (defaults, quarantine and notice, throw). Any invalidation during an await discards the pass.
+   *
+   * `wantContent` (the ledger guard): return the bytes too. 'unchanged' = the file still has the
+   * proven key of the cached value (and, for the guard, of the bytes it last handled: `known`).
+   */
+  private async loadAuthorityAsync(p: string, wantContent: boolean, known: string | null): Promise<TaskLedgerRead | 'unchanged' | null> {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const generation = this.authorityGeneration.get(p) ?? 0;
+      const overtaken = (): boolean => (this.authorityGeneration.get(p) ?? 0) !== generation;
+      // The key is taken BEFORE the read: a change between the two re-reads at the next revalidate.
+      const st = await fsPromises.stat(p).catch(() => null);
+      if (overtaken()) continue;
+      if (!st) { this.invalidateAuthorityCache(p); return null; }
+      const key = statKey(st);
+      const entry = this.authorityCache.get(p);
+      if (entry && entry.key === key) {
+        entry.checkedAt = this.authorityNow();
+        if (!wantContent || known === key) return 'unchanged';
+      }
+      let raw: string;
+      try {
+        raw = await fsPromises.readFile(p, 'utf8');
+      } catch {
+        if (overtaken()) continue;
+        this.invalidateAuthorityCache(p);
+        return null;
+      }
+      if (overtaken()) continue;
+      let parsed: unknown;
+      try { parsed = JSON.parse(raw); } catch { this.invalidateAuthorityCache(p); return null; }
+      this.quarantinedJsonFingerprints.delete(p);
+      this.authorityIssues.delete(p);
+      const frozen = authorityDeepFreeze(parsed);
+      const proven = provenStatKey(st, this.authorityWall());
+      // Advance the epoch with the install: an async read that started before it holds older bytes.
+      this.authorityGeneration.set(p, generation + 1);
+      this.authorityCache.set(p, { key: proven, value: frozen, checkedAt: this.authorityNow() });
+      this.ensureAuthorityFallback();
+      this.watchAuthority(p);
+      return { content: raw, parsed: frozen, key: proven, primed: true };
+    }
+    return null;
+  }
+  private readonly authorityRefreshes = new Map<string, Promise<void>>();
+  private readonly authorityRefreshAgain = new Set<string>();
+  /** Refresh `p` off the main thread: one flight per file, and a request during it runs one more.
+   *  tasks.json goes through the ledger guard while it runs, so the guard sees the same bytes
+   *  and announces the change to its listeners. */
+  private refreshAuthority(p: string): Promise<void> {
+    const root = this.root();
+    if (root && p === join(root, 'tasks.json') && this.ledgerGuard.running()) return this.ledgerGuard.checkSoon();
+    const flying = this.authorityRefreshes.get(p);
+    if (flying) { this.authorityRefreshAgain.add(p); return flying; }
+    const run: Promise<void> = (async () => {
+      do {
+        this.authorityRefreshAgain.delete(p);
+        await this.loadAuthorityAsync(p, false, null);
+      } while (this.authorityRefreshAgain.has(p));
+    })().catch(() => { /* the next event or the fallback refreshes again */ }).finally(() => {
+      if (this.authorityRefreshes.get(p) === run) this.authorityRefreshes.delete(p);
+    });
+    this.authorityRefreshes.set(p, run);
+    return run;
+  }
   private watchAuthority(p: string): void {
     const dir = dirname(p);
     if (this.authorityWatchers.has(dir)) return;
     try {
       const w = watchDirectorySafely(dir, (_event, name) => {
         const full = name ? join(dir, String(name)) : null;
-        for (const file of this.authorityCache.keys()) if (dirname(file) === dir && (!full || full === file)) this.invalidateAuthorityCache(file, true);
+        for (const file of this.authorityCache.keys()) {
+          if (dirname(file) !== dir || (full && full !== file)) continue;
+          // LAG-SYNC-IO-107: new epoch (a read already in flight may hold the old bytes), then
+          // an async refresh. The entry is kept, not marked dirty: see loadAuthorityAsync.
+          this.authorityGeneration.set(file, (this.authorityGeneration.get(file) ?? 0) + 1);
+          void this.refreshAuthority(file);
+        }
       }, () => { if (this.authorityWatchers.get(dir) === w) this.authorityWatchers.delete(dir); });
       this.authorityWatchers.set(dir, w);
     } catch { /* the stat revalidate is the authority */ }
@@ -6594,10 +6812,14 @@ export class HiveManager {
     this.authorityWatchers.clear();
   }
 
-  /** Missed fs.watch events invalidate these tiny authority caches off-main-thread. */
+  /** LAG-SYNC-IO-107: the fallback's period. Shorter than AUTHORITY_REVALIDATE_MS, so an entry's
+   *  last check is renewed (async stat) before a synchronous reader finds it expired and stats
+   *  the file itself on the main thread. */
+  static readonly AUTHORITY_FALLBACK_MS = 2_000;
+  /** Missed fs.watch events refresh these tiny authority caches off-main-thread. */
   private ensureAuthorityFallback(): void {
     if (this.authorityFallbackTimer) return;
-    this.authorityFallbackTimer = setInterval(() => { void this.revalidateAuthoritiesAsync(); }, HiveManager.AUTHORITY_REVALIDATE_MS);
+    this.authorityFallbackTimer = setInterval(() => { void this.revalidateAuthoritiesAsync(); }, HiveManager.AUTHORITY_FALLBACK_MS);
     this.authorityFallbackTimer.unref?.();
   }
   private async revalidateAuthoritiesAsync(): Promise<void> {
@@ -6607,7 +6829,9 @@ export class HiveManager {
       await Promise.all([...this.authorityCache].map(async ([file, entry]) => {
         const st = await fsPromises.stat(file).catch(() => null);
         if (this.authorityCache.get(file) !== entry) return;
-        if (!st || entry.key === null || entry.key !== statKey(st)) this.invalidateAuthorityCache(file);
+        if (!st) this.invalidateAuthorityCache(file);
+        // LAG-SYNC-IO-107: changed or unproven: re-read here, not in the next reader on main.
+        else if (entry.key === null || entry.key !== statKey(st)) await this.refreshAuthority(file);
         else entry.checkedAt = this.authorityNow();
       }));
     } finally { this.authorityFallbackRunning = false; }

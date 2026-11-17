@@ -18,8 +18,9 @@
  */
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, type FSWatcher } from 'node:fs';
+import { mkdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { atomicWriteJson } from './atomicJson';
+import { atomicWriteJson, atomicWriteTextAsync } from './atomicJson';
 import { watchDirectorySafely } from './safeDirectoryWatch';
 import { firstOccurrenceById, validateLedger, type LedgerIssue } from '../shared/taskLedger';
 
@@ -56,15 +57,37 @@ export interface TaskLedgerChange {
   edited: string[];
 }
 
+/** What an async ledger read hands the guard (LAG-SYNC-IO-107). */
+export interface TaskLedgerRead {
+  /** The exact bytes of `tasks.json`. */
+  content: string;
+  /** `content` parsed, when the reader already parsed it (the guard then does not parse again). */
+  parsed?: unknown;
+  /** A proven stat key of the file these bytes came from, or null: the guard passes it back as
+   *  `known`, and the reader may answer 'unchanged' while the file still has that key. */
+  key?: string | null;
+  /** The reader's own cache already holds these bytes, so `onChange` need not drop it. */
+  primed?: boolean;
+}
+
 export interface TaskLedgerGuardOptions {
   root: () => string | null;
+  /**
+   * LAG-SYNC-IO-107: how the watch and the poll read `tasks.json`, off the main thread. The hive
+   * passes the read that also refreshes its own ledger cache, so one async read serves both and
+   * the guard's listeners find that cache holding what the guard saw. null = the file cannot be
+   * read or parsed (the guard does nothing, as for a failed synchronous read). Absent: the
+   * guard reads the file itself with fs.promises.
+   */
+  readLedger?: (root: string, known: string | null) => Promise<TaskLedgerRead | 'unchanged' | null>;
   agentIds: () => ReadonlySet<string>;
   /** TASKS-JSON-SPLIT: ids in tasks-archive/, so a dependency on an archived card is no warning. */
   archivedIds?: () => ReadonlySet<string>;
   appendLog: (row: Record<string, unknown>) => void;
   now?: () => number;
-  /** Called after every applied change (a file edit or an API write). */
-  onChange?: (change: TaskLedgerChange) => void;
+  /** Called after every applied change (a file edit or an API write). `info.primed`: the change
+   *  came from `readLedger`, whose cache already holds the new content. */
+  onChange?: (change: TaskLedgerChange, info?: { primed: boolean }) => void;
 }
 
 export function sha256(text: string): string {
@@ -100,6 +123,19 @@ export class TaskLedgerGuard {
   private watcher: FSWatcher | null = null;
   private debounce: ReturnType<typeof setTimeout> | null = null;
   private poll: ReturnType<typeof setInterval> | null = null;
+  /** The async check in flight, if any (one at a time; a request during it runs one more). */
+  private checking: Promise<void> | null = null;
+  private recheck = false;
+  /** Bumped by every apply: an async read that an apply overtook may hold older bytes. */
+  private applySeq = 0;
+  /** Bumped by stop/reset: an async read that returns after either is dropped. */
+  private epoch = 0;
+  /** The stat key of the last content the async check handled (see TaskLedgerRead.key). */
+  private lastKey: string | null = null;
+  /** Bumped by every synchronous sidecar write: an async write it overtook withdraws or repeats. */
+  private persistSeq = 0;
+  /** Set by a deferred apply (the async check): the sidecar write and the notices it still owes. */
+  private owed: { root: string; change: TaskLedgerChange; primed: boolean } | null = null;
 
   private readonly listeners = new Set<(change: TaskLedgerChange) => void>();
 
@@ -160,19 +196,110 @@ export class TaskLedgerGuard {
     if (!root) return null;
     let content: string;
     try { content = readFileSync(join(root, 'tasks.json'), 'utf8'); } catch { return null; }
+    return this.applyContent(content, undefined, false);
+  }
+
+  /** Apply `content` if it differs from the last applied content. `parsed` is `content` parsed
+   *  already, or undefined to parse here. */
+  private applyContent(content: string, parsed: unknown, primed: boolean, defer = false): TaskLedgerChange | null {
     const hash = sha256(content);
     if (hash === this.lastHash) return null;
-    let parsed: unknown;
-    try { parsed = JSON.parse(content); } catch { return null; } // the hive's corrupt-file quarantine owns this case
+    if (parsed === undefined) {
+      try { parsed = JSON.parse(content); } catch { return null; } // the hive's corrupt-file quarantine owns this case
+    }
     const tasks = parsed && typeof parsed === 'object' && Array.isArray((parsed as { tasks?: unknown }).tasks)
       ? (parsed as { tasks: unknown[] }).tasks : [];
     const ours = this.apiRing.find((r) => r.hash === hash);
-    return this.apply(hash, tasks, ours ? `api:${ours.source}` : 'file');
+    return this.apply(hash, tasks, ours ? `api:${ours.source}` : 'file', primed, defer);
   }
 
-  private apply(hash: string, tasks: unknown[], by: string): TaskLedgerChange | null {
+  /**
+   * LAG-SYNC-IO-107: `check()` with the read off the main thread. The watch and the poll use it:
+   * `tasks.json` is ~670 KB, and a synchronous read of it held main for 529 ms under disk load
+   * (1.1.106 stall row). One check runs at a time; a request that arrives during one runs one
+   * more after it, so the last change is never missed. Resolves when no check is pending.
+   */
+  checkSoon(): Promise<void> {
+    if (this.checking) { this.recheck = true; return this.checking; }
+    const run: Promise<void> = (async () => {
+      do {
+        this.recheck = false;
+        await this.checkOnce();
+      } while (this.recheck);
+    })().catch(() => { /* the next watch event or poll checks again */ }).finally(() => {
+      if (this.checking === run) this.checking = null;
+    });
+    this.checking = run;
+    return run;
+  }
+
+  private async checkOnce(): Promise<void> {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const root = this.opts.root();
+      if (!root) return;
+      const epoch = this.epoch;
+      const seq = this.applySeq;
+      let read: TaskLedgerRead | 'unchanged' | null;
+      try {
+        read = this.opts.readLedger
+          ? await this.opts.readLedger(root, this.lastKey)
+          : { content: await readFile(join(root, 'tasks.json'), 'utf8') };
+      } catch { return; }
+      // Stopped, reset or re-rooted during the read: these bytes belong to nothing now.
+      if (epoch !== this.epoch || this.opts.root() !== root) return;
+      // An API write or a synchronous check applied during the read: these bytes may be the
+      // older ones, and applying them would attribute our own write's undoing to 'file'.
+      if (seq !== this.applySeq) continue;
+      if (!read || read === 'unchanged') return;
+      this.applyContent(read.content, read.parsed, read.primed === true, true);
+      this.lastKey = read.key ?? null;
+      const owed = this.owed;
+      this.owed = null;
+      if (owed) {
+        // The sidecar first, then the notices, as in the synchronous apply: a listener that
+        // reads state/task-meta.json from disk (the derived card facts) finds this change in it.
+        await this.persistAsync(owed.root);
+        this.notify(owed.change, owed.primed);
+      }
+      return;
+    }
+  }
+
+  /**
+   * LAG-SYNC-IO-107: the sidecar write off the main thread, for a change the async check found
+   * (the synchronous write held main for 90 ms under disk load in the load test). The text is
+   * taken when the write starts. A synchronous write that lands during it (an API write, a
+   * synchronous check) holds newer content: this one is withdrawn before its rename when it can
+   * be, and in any case one more write follows, so the newest content is the last on disk.
+   */
+  private async persistAsync(root: string): Promise<void> {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const seq = this.persistSeq;
+      const meta = this.meta;
+      if (!meta || this.opts.root() !== root) return;
+      try {
+        await mkdir(join(root, 'state'), { recursive: true });
+        await atomicWriteTextAsync(this.metaPath(root), JSON.stringify(meta, null, 2), () => seq === this.persistSeq);
+      } catch (error) {
+        try { this.opts.appendLog({ kind: 'task-meta-write-failed', error: String(error) }); } catch { /* noop */ }
+        return;
+      }
+      if (seq === this.persistSeq) return;
+    }
+  }
+
+  private notify(change: TaskLedgerChange, primed: boolean): void {
+    try { this.opts.onChange?.(change, { primed }); } catch { /* a listener never breaks the guard */ }
+    for (const listener of this.listeners) {
+      try { listener(change); } catch { /* a listener never breaks the guard */ }
+    }
+  }
+
+  private apply(hash: string, tasks: unknown[], by: string, primed = false, defer = false): TaskLedgerChange | null {
     const root = this.opts.root();
     if (!root) return null;
+    this.applySeq++;
+    this.lastKey = null;
     const at = this.now();
     const meta = this.loadMeta(root);
     // Not watching yet (app start): a card the sidecar lacks appeared while nobody watched,
@@ -224,16 +351,17 @@ export class TaskLedgerGuard {
     }
     this.validate(tasks, by);
     const touched = firstRun || change.added.length + change.removed.length + change.edited.length > 0;
-    if (touched) {
+    if (touched && defer) {
+      this.owed = { root, change, primed };
+    } else if (touched) {
+      this.persistSeq++;
       try {
         mkdirSync(join(root, 'state'), { recursive: true });
         atomicWriteJson(this.metaPath(root), meta);
       } catch (error) {
         try { this.opts.appendLog({ kind: 'task-meta-write-failed', error: String(error) }); } catch { /* noop */ }
       }
-      for (const listener of [this.opts.onChange, ...this.listeners]) {
-        try { listener?.(change); } catch { /* a listener never breaks the guard */ }
-      }
+      this.notify(change, primed);
     }
     return change;
   }
@@ -252,7 +380,8 @@ export class TaskLedgerGuard {
   }
 
   /** Watch the hive root for `tasks.json` changes (debounced), with a poll as a fallback for
-   *  missed Windows watch events. The first check runs at once. */
+   *  missed Windows watch events. The first check runs at once (synchronously, once per start:
+   *  callers read the sidecar and the issues right after). Every later check is `checkSoon`. */
   start(): void {
     this.stop();
     const root = this.opts.root();
@@ -261,17 +390,27 @@ export class TaskLedgerGuard {
     try {
       this.watcher = watchDirectorySafely(root, (_event, file) => {
         if (file && String(file) !== 'tasks.json') return;
-        if (this.debounce) clearTimeout(this.debounce);
-        this.debounce = setTimeout(() => { this.debounce = null; this.check(); }, GUARD_DEBOUNCE_MS);
-        this.debounce.unref?.();
+        this.kick();
       });
       this.watcher.on('error', () => { /* the poll still covers it */ });
     } catch { this.watcher = null; }
-    this.poll = setInterval(() => this.check(), GUARD_POLL_MS);
+    this.poll = setInterval(() => { void this.checkSoon(); }, GUARD_POLL_MS);
     this.poll.unref?.();
   }
 
+  /** Started and not stopped (the poll is the marker: the watcher may have failed to start). */
+  running(): boolean { return this.poll !== null; }
+
+  /** `tasks.json` may have changed: check after the debounce (events in a burst make one check). */
+  kick(): void {
+    if (!this.running()) return;
+    if (this.debounce) clearTimeout(this.debounce);
+    this.debounce = setTimeout(() => { this.debounce = null; void this.checkSoon(); }, GUARD_DEBOUNCE_MS);
+    this.debounce.unref?.();
+  }
+
   stop(): void {
+    this.epoch++;
     try { this.watcher?.close(); } catch { /* noop */ }
     this.watcher = null;
     if (this.debounce) { clearTimeout(this.debounce); this.debounce = null; }
@@ -283,6 +422,7 @@ export class TaskLedgerGuard {
     this.stop();
     this.meta = null;
     this.lastHash = null;
+    this.lastKey = null;
     this.apiRing.length = 0;
     this.errorKeys.clear();
     this.currentIssues = [];

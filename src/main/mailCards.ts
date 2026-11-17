@@ -28,7 +28,7 @@ import * as fsp from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { HUMAN_RELAY_RE } from '../shared/mailWakeClass';
 import { cardIdValue, isValidMailId, mailBodyHash, type MailLedgerDoc } from './mailLedger';
-import { mergeHotCold, readArchive } from './taskArchive';
+import { ARCHIVE_DIR, archiveWriteGen, isArchiveFile, mergeHotCold, parseArchive, readArchive } from './taskArchive';
 
 export const MAIL_CARDS_DIR = join('state', 'mail-cards');
 export const MAIL_LINKS_FILE = '_links.jsonl';
@@ -175,13 +175,50 @@ export function registryMentions(cardIds: Iterable<string>): (text: string) => s
 
 /** Every card id ever made (tasks.json, then the archive), registry spelling. */
 export function registryCardIds(hiveRoot: string): string[] {
+  return drain(registryCardIdsSteps(hiveRoot));
+}
+
+/**
+ * `registryCardIds` as steps, so the startup catch-up reads tasks.json and the archive through its
+ * own driver (node:fs/promises) like every other file it reads. LAG-SYNC-IO-107: they were read
+ * synchronously in the middle of that asynchronous scan, megabytes on Electron main.
+ * An archive append by this process during the reads restarts them (a pass moves cards out of
+ * tasks.json, a revive moves one back; a mix of before and after could miss a card); after three
+ * overtaken reads the files are read synchronously, as before.
+ */
+export function* registryCardIdsSteps(hiveRoot: string): Generator<MailScanOp | undefined, string[], unknown> {
   let hot: unknown[] = [];
-  try {
-    const j = JSON.parse(readFileSync(join(hiveRoot, 'tasks.json'), 'utf8')) as { tasks?: unknown };
-    if (Array.isArray(j?.tasks)) hot = j.tasks;
-  } catch { /* no tasks.json */ }
   let archived: ReturnType<typeof readArchive> = new Map();
-  try { archived = readArchive(hiveRoot); } catch { /* no archive */ }
+  let settled = false;
+  for (let attempt = 0; attempt < 3 && !settled; attempt++) {
+    const gen = archiveWriteGen();
+    hot = [];
+    const text = yield { read: join(hiveRoot, 'tasks.json') };
+    try {
+      const j = (typeof text === 'string' ? JSON.parse(text) : null) as { tasks?: unknown } | null;
+      if (Array.isArray(j?.tasks)) hot = j.tasks;
+    } catch { /* not JSON: as for no tasks.json */ }
+    const dir = join(hiveRoot, ARCHIVE_DIR);
+    const listed = yield { readdir: dir };
+    const names = Array.isArray(listed) ? (listed as unknown[]).filter((n): n is string => typeof n === 'string' && isArchiveFile(n)).sort() : [];
+    const texts: string[] = [];
+    for (const name of names) {
+      const t = yield { read: join(dir, name) };
+      if (typeof t === 'string') texts.push(t);
+    }
+    if (gen !== archiveWriteGen()) continue;
+    archived = parseArchive(texts);
+    settled = true;
+  }
+  if (!settled) {
+    hot = [];
+    try {
+      const j = JSON.parse(readFileSync(join(hiveRoot, 'tasks.json'), 'utf8')) as { tasks?: unknown };
+      if (Array.isArray(j?.tasks)) hot = j.tasks;
+    } catch { /* no tasks.json */ }
+    archived = new Map();
+    try { archived = readArchive(hiveRoot); } catch { /* no archive */ }
+  }
   const ids: string[] = [];
   for (const c of mergeHotCold(hot, archived)) {
     const id = (c as { id?: unknown } | null)?.id;
@@ -712,7 +749,7 @@ export const CATCHUP_SLICE_MS = 8;
 export function* backfillMailCardSteps(hiveRoot: string, now: string, index: MailCardIndex = new MailCardIndex(hiveRoot), incremental = false): Generator<Step, MailCardBackfillCounts, unknown> {
   if (incremental) yield* index.primeSteps();
   const { mails, excluded, scans } = yield* provenMailSteps(hiveRoot, incremental ? { known: (id) => index.has(id) } : {});
-  const cardIds = registryCardIds(hiveRoot);
+  const cardIds = yield* registryCardIdsSteps(hiveRoot);
   const canon = new Map(cardIds.map((c) => [c.toLowerCase(), c]));
   const conv = new Map<string, Set<string>>();
   for (const m of mails) {

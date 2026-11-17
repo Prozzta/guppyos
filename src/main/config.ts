@@ -724,6 +724,8 @@ type ConfigCache = { path: string; key: string | null; value: HarnessConfig; che
 let configCache: ConfigCache | null = null;
 /** Bumped by every write, so a read whose migration wrote mid-build does not cache a stale value. */
 let configWriteGen = 0;
+/** Bumped by every synchronous cold read, so an async integrity pass overtaken by one yields to it. */
+let configColdReadSeq = 0;
 let configNow = (): number => Date.now();
 /** The wall clock the racy rule compares with file times (configNow is only the window's clock). */
 let configWall = (): number => Date.now();
@@ -817,12 +819,16 @@ export function __resetConfigCacheForTests(now?: () => number, wall?: () => numb
   configWall = wall ?? (() => Date.now());
 }
 
+function corruptCandidate(p: string): string {
+  return `${p}.corrupt-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
 function noteCorruptConfig(p: string, raw: string, error: unknown): void {
   configCache = null;
   const fingerprint = createHash('sha256').update(raw).digest('hex');
   let quarantine: string | null = configIntegrity?.quarantine ?? null;
   if (configCorruptFingerprint !== fingerprint) {
-    const candidate = `${p}.corrupt-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const candidate = corruptCandidate(p);
     try {
       copyFileSync(p, candidate);
       quarantine = candidate.split(/[\\/]/).pop() ?? candidate;
@@ -832,6 +838,10 @@ function noteCorruptConfig(p: string, raw: string, error: unknown): void {
       console.error('[config] could not quarantine corrupt config.json:', copyError);
     }
   }
+  recordCorruptConfig(quarantine, error);
+}
+
+function recordCorruptConfig(quarantine: string | null, error: unknown): void {
   configIntegrity = {
     file: 'config.json',
     quarantine,
@@ -844,6 +854,91 @@ function noteCorruptConfig(p: string, raw: string, error: unknown): void {
 export function configIntegrityIssue(): ConfigIntegrityIssue | null {
   readConfigCached(true);
   return configIntegrity;
+}
+
+let configIntegrityFlight: Promise<ConfigIntegrityIssue | null> | null = null;
+
+/**
+ * LAG-SYNC-IO-107: `configIntegrityIssue` for the renderer banner's poll (`config:integrity`, about
+ * every 2 s), with no synchronous fs on the main thread. Under disk load the fresh read's statSync
+ * alone held main for 202 and 468 ms (1.1.106 stall rows). Same decisions as the fresh synchronous
+ * read, in the same order: the stat decides; an unchanged key serves the cache; a changed file is
+ * read, then parsed, migrated and cached by the shared `configFromRaw`; a corrupt file is
+ * quarantined once per content and reported; an unreadable one rejects. Concurrent polls share
+ * one flight.
+ */
+export function configIntegrityIssueAsync(): Promise<ConfigIntegrityIssue | null> {
+  if (configIntegrityFlight) return configIntegrityFlight;
+  const flight = configIntegrityRead().finally(() => {
+    if (configIntegrityFlight === flight) configIntegrityFlight = null;
+  });
+  configIntegrityFlight = flight;
+  return flight;
+}
+
+async function configIntegrityRead(): Promise<ConfigIntegrityIssue | null> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const p = configPath();
+    const gen = configWriteGen;
+    const seq = configColdReadSeq;
+    // A write or a synchronous cold read during an await holds newer state than this pass.
+    const overtaken = (): boolean => gen !== configWriteGen || seq !== configColdReadSeq || p !== configPath();
+    const st = await fsPromises.stat(p).catch(() => null);
+    if (overtaken()) continue;
+    if (!st) {
+      configCache = null;
+      configIntegrity = null;
+      configCorruptFingerprint = null;
+      return null;
+    }
+    const key = statKey(st);
+    const c = configCache;
+    if (c && c.path === p && c.key === key) {
+      c.checkedAt = configNow();
+      return configIntegrity;
+    }
+    let raw: string;
+    try {
+      raw = await fsPromises.readFile(p, 'utf8');
+    } catch (error) {
+      if (overtaken()) continue;
+      configCache = null;
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return configIntegrity;
+      throw new Error(`config.json could not be read: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (overtaken()) continue;
+    // A newly corrupt file's quarantine copy is taken here, off the main thread; content that
+    // was already quarantined goes through the shared build, which only records the issue.
+    const invalid = configCorruptFingerprint === null || configCorruptFingerprint !== sha256Hex(raw) ? jsonError(raw) : null;
+    if (invalid) {
+      const candidate = corruptCandidate(p);
+      const copied = await fsPromises.copyFile(p, candidate).then(() => true, (copyError) => {
+        console.error('[config] could not quarantine corrupt config.json:', copyError);
+        return false;
+      });
+      if (overtaken()) {
+        if (copied) await fsPromises.rm(candidate, { force: true }).catch(() => { /* a spare copy is harmless */ });
+        continue;
+      }
+      configCache = null;
+      if (copied) configCorruptFingerprint = sha256Hex(raw);
+      recordCorruptConfig(copied ? (candidate.split(/[\\/]/).pop() ?? candidate) : null, invalid.error);
+      return configIntegrity;
+    }
+    configFromRaw(p, st, raw, gen, configNow());
+    return configIntegrity;
+  }
+  // Three passes overtaken by writes: the synchronous read is the authority.
+  return configIntegrityIssue();
+}
+
+function sha256Hex(text: string): string {
+  return createHash('sha256').update(text).digest('hex');
+}
+
+/** The parse error of `raw`, or null when it is valid JSON. */
+function jsonError(raw: string): { error: unknown } | null {
+  try { JSON.parse(raw); return null; } catch (error) { return { error }; }
 }
 
 function assertConfigWritable(): void {
@@ -1055,10 +1150,24 @@ function readConfigCached(fresh: boolean): HarnessConfig {
     return c.value;
   }
   const gen = configWriteGen;
-  let raw: string | undefined;
-  let built: HarnessConfig;
+  configColdReadSeq++;
+  let raw: string;
   try {
     raw = readFileSync(p, 'utf8');
+  } catch (error) {
+    configCache = null;
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return configDefaults();
+    throw new Error(`config.json could not be read: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return configFromRaw(p, st, raw, gen, now);
+}
+
+/** The cold read once the bytes are in hand: parse, migrate, record integrity, cache. Shared by
+ *  the synchronous read and `configIntegrityIssueAsync` (LAG-SYNC-IO-107), so both decide alike.
+ *  `st` and `gen` were taken BEFORE the bytes were read. */
+function configFromRaw(p: string, st: Stats, raw: string, gen: number, now: number): HarnessConfig {
+  let built: HarnessConfig;
+  try {
     const parsed = migrateHeavyJobsCpuCap(JSON.parse(raw));
     for (const k of RETIRED_CONFIG_KEYS) delete parsed[k];
     configIntegrity = null;
@@ -1066,12 +1175,8 @@ function readConfigCached(fresh: boolean): HarnessConfig {
     built = normalizeStoredHomes(migrateDefaultModelCliV1(migrateTriggersV1(withTriggerDefaults({ ...DEFAULTS, ...parsed }))));
   } catch (error) {
     configCache = null;
-    if (typeof raw === 'string') {
-      noteCorruptConfig(p, raw, error);
-      return configDefaults();
-    }
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return configDefaults();
-    throw new Error(`config.json could not be read: ${error instanceof Error ? error.message : String(error)}`);
+    noteCorruptConfig(p, raw, error);
+    return configDefaults();
   }
   // A clone, so freezing never reaches the DEFAULTS objects a shallow merge shares.
   const value = deepFreeze(structuredClone(built));

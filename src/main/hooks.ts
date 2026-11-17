@@ -1842,7 +1842,11 @@ export class HookServer {
       return { body: typeof got.msg.body === 'string' ? got.msg.body : JSON.stringify(got.msg.body ?? '') ?? '', path: got.path };
     }
     let got: ReturnType<HiveManager['mailBody']>;
-    try { got = read.call(this.hive, agentId, id); } catch { return null; }
+    const pre = this.prefetchedBodies?.agentId === agentId ? this.prefetchedBodies.bodies.get(id) : undefined;
+    // Only a body that was read whole is taken from the read-ahead: every failure is decided by the
+    // synchronous read below, as it always was.
+    if (pre?.ok) got = pre;
+    else { try { got = read.call(this.hive, agentId, id); } catch { return null; } }
     if (!got.ok) {
       // God db52b8: set aside by an explicit archive: never missing, never counted, not remembered.
       if (got.reason === 'transient' || got.reason === 'set-aside') return null;
@@ -2300,11 +2304,65 @@ export class HookServer {
       try { claimWorkingSet = await this.claimWorkingSet?.(p.agent_id, p.source) ?? null; } catch { claimWorkingSet = null; }
       this.preparedClaimWorkingSets.set(p.agent_id, claimWorkingSet);
     }
-    const out = this.handle(p);
+    let bodies: HookServer['prefetchedBodies'] = null;
+    if (!fromSubagent) { try { bodies = await this.prefetchMailBodies(p); } catch { bodies = null; } }
+    let out: unknown;
+    // Only for this one synchronous handle: nothing else can run between the set and the clear.
+    this.prefetchedBodies = bodies;
+    try { out = this.handle(p); } finally { this.prefetchedBodies = null; }
     const wrap = this.heavyWrap;
     this.heavyWrap = null;
     if (!wrap || !this.heavyJobs) return out;
     return this.withHeavyJob(out, wrap);
+  }
+
+  /** The hook events whose answer can carry mail bodies (surfaceMail, the Stop reason, reinjectMail). */
+  private static readonly MAIL_BODY_EVENTS: ReadonlySet<string> = new Set(['UserPromptSubmit', 'PreInvocation', 'PostToolUse', 'Stop', 'SessionStart']);
+
+  /** LAG-SYNC-IO-107: the mail bodies read ahead for the hook being handled (readMailBody). */
+  private prefetchedBodies: { agentId: string; bodies: Map<string, ReturnType<HiveManager['mailBody']>> } | null = null;
+
+  /**
+   * LAG-SYNC-IO-107: read, off the main thread, the mail bodies this hook may put in its
+   * <hive-mail> block: the agent's pending mail (at most 50, as mailItems), or on a compact
+   * SessionStart what the open epoch surfaced (reinjectMail). readMailBody then takes a body from
+   * here and reads only what is not here itself, so what a hook shows, logs and records is
+   * decided by the same code on the same answer.
+   *
+   * The ledger is the generation check: every delivery, redelivery and close replaces the ledger
+   * object. If it changed while the files were being read, they are read again; after three
+   * overtaken reads nothing is read ahead and the hook reads synchronously, as before. A ledger
+   * not loaded yet is left to the hook itself.
+   */
+  private async prefetchMailBodies(p: HookPayload): Promise<HookServer['prefetchedBodies']> {
+    const agentId = p.agent_id;
+    const event = p.hook_event_name;
+    const mail = this.hive.mail;
+    if (!agentId || !mail || typeof mail.loadedDoc !== 'function' || typeof this.hive.mailBodyAsync !== 'function') return null;
+    if (p.transport === 'pipe-oneway' || !event || !HookServer.MAIL_BODY_EVENTS.has(event)) return null;
+    if (event === 'SessionStart' && p.source !== 'compact') return null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const doc = mail.loadedDoc(agentId);
+      if (!doc) return null;
+      const t = this.turns.get(agentId);
+      let ids: string[];
+      if (event === 'SessionStart') {
+        if (!t?.open) return null;
+        ids = Object.values(doc.entries).filter((e) => e.epoch === t.epoch && (e.state === 'surfaced' || e.state === 'surfacing')).map((e) => e.id);
+      } else {
+        // A turn start may open a new epoch, whose `injected` is empty: read all of them then.
+        const midTurn = event === 'PostToolUse' || event === 'Stop';
+        const skip = this.mailUnreadable.get(agentId);
+        ids = mail.pendingIn(doc).map((e) => e.id).filter((id) => !(midTurn && t?.injected.has(id)) && !skip?.has(id)).slice(0, 50);
+      }
+      if (!ids.length) return null;
+      const bodies = new Map<string, ReturnType<HiveManager['mailBody']>>();
+      await Promise.all(ids.map(async (id) => {
+        try { bodies.set(id, await this.hive.mailBodyAsync(agentId, id)); } catch { /* read by the hook itself */ }
+      }));
+      if (mail.loadedDoc(agentId) === doc) return { agentId, bodies };
+    }
+    return null;
   }
 
   /**

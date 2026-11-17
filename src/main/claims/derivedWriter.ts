@@ -27,7 +27,7 @@ import {
   cardFieldFacts, cardRecordFacts, decisionFacts, isRulingMail, rulingMailFacts, type RulingMailLike, type BumpMap, doneMailFacts, gitHistoryFacts, mergeFacts, parseChangelog, releaseFacts, shaMentions,
   type CardLike, type DerivedFact, type GitLogPort, type MailLike, type TagLike,
 } from './derivedFacts';
-import { mergeHotCold, readArchive } from '../taskArchive';
+import { archiveWriteGen, mergeHotCold, parseArchive, readArchive, readArchiveTextsAsync } from '../taskArchive';
 import { doneMailStatuses, writeDoneMailStatus } from './derivedDoneStatus';
 import { isValidMailId, mailBodyHash, type MailLedgerDoc } from '../mailLedger';
 import { TRUSTED_METHODS, readProvenMail, type MailLinkMethod } from '../mailCards';
@@ -168,15 +168,44 @@ export async function syncDerived(deps: DerivedWriterDeps, facts: readonly Deriv
 
 /** tasks.json's cards, then the archived cards it lacks (taskArchive: the hot copy wins). */
 export function readCards(hiveRoot: string): CardLike[] {
+  let raw: string | null = null;
+  try { raw = readFileSync(join(hiveRoot, 'tasks.json'), 'utf8'); } catch { /* no tasks.json */ }
+  return cardsFromLedger(hiveRoot, raw);
+}
+
+/** LAG-SYNC-IO-107: `readCards` with every file read off the main thread: tasks.json (~670 KB;
+ *  the synchronous read held the thread for 529 ms under disk load, 1.1.106 stall row), the
+ *  archive (megabytes, read twice per call: the cards and their archive times) and task-meta.json.
+ *  The live derived writer and the backfill use it; both run on Electron main.
+ *  An archive append by this process during the reads (a pass moves cards out of tasks.json, a
+ *  revive moves one back) restarts them, so the answer is never a mix of before and after; after
+ *  three overtaken reads, or when the archive folder cannot be listed, `readCards` answers. */
+export async function readCardsAsync(hiveRoot: string): Promise<CardLike[]> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const gen = archiveWriteGen();
+    let raw: string | null = null;
+    try { raw = await fsp.readFile(join(hiveRoot, 'tasks.json'), 'utf8'); } catch { /* no tasks.json */ }
+    const archive = await readArchiveTextsAsync(hiveRoot);
+    if (!archive) break;
+    let metaText: string | null = null;
+    try { metaText = await fsp.readFile(join(hiveRoot, 'state', 'task-meta.json'), 'utf8'); } catch { /* no task-meta.json */ }
+    if (gen !== archiveWriteGen()) continue;
+    return cardsFromLedger(hiveRoot, raw, { texts: archive.texts, metaText });
+  }
+  return readCards(hiveRoot);
+}
+
+function cardsFromLedger(hiveRoot: string, raw: string | null, pre?: { texts: string[]; metaText: string | null }): CardLike[] {
   let hot: unknown[] = [];
   try {
-    const j = JSON.parse(readFileSync(join(hiveRoot, 'tasks.json'), 'utf8')) as { tasks?: unknown };
+    const j = (raw === null ? null : JSON.parse(raw)) as { tasks?: unknown } | null;
     if (Array.isArray(j?.tasks)) hot = j.tasks;
-  } catch { /* no tasks.json */ }
+  } catch { /* not JSON: as for no tasks.json */ }
   let archived: ReturnType<typeof readArchive> = new Map();
-  try { archived = readArchive(hiveRoot); } catch { /* no archive */ }
-  const meta = readTaskMeta(hiveRoot);
-  const archivedAt = readArchiveTimes(hiveRoot);
+  if (pre) archived = parseArchive(pre.texts);
+  else { try { archived = readArchive(hiveRoot); } catch { /* no archive */ } }
+  const meta = pre ? parseTaskMeta(pre.metaText) : readTaskMeta(hiveRoot);
+  const archivedAt = pre ? archiveTimes(pre.texts) : readArchiveTimes(hiveRoot);
   return mergeHotCold(hot, archived).filter((c): c is CardLike => !!c && typeof c === 'object').map((c) => {
     const id = typeof c.id === 'string' ? c.id : '';
     const m = meta.get(id);
@@ -190,21 +219,35 @@ export function readCards(hiveRoot: string): CardLike[] {
 
 /** The harness's per-card status record (state/task-meta.json): status, statusSince and lastEditAt (ms). */
 function readTaskMeta(hiveRoot: string): Map<string, { status?: unknown; statusSince?: unknown; lastEditAt?: unknown }> {
+  let text: string | null = null;
+  try { text = readFileSync(join(hiveRoot, 'state', 'task-meta.json'), 'utf8'); } catch { /* no task-meta.json */ }
+  return parseTaskMeta(text);
+}
+
+function parseTaskMeta(text: string | null): Map<string, { status?: unknown; statusSince?: unknown; lastEditAt?: unknown }> {
   try {
-    const j = JSON.parse(readFileSync(join(hiveRoot, 'state', 'task-meta.json'), 'utf8')) as { cards?: Record<string, unknown> };
+    if (text === null) return new Map();
+    const j = JSON.parse(text) as { cards?: Record<string, unknown> };
     return new Map(Object.entries(j?.cards ?? {}).filter(([, v]) => !!v && typeof v === 'object') as Array<[string, { status?: unknown; statusSince?: unknown; lastEditAt?: unknown }]>);
   } catch { return new Map(); }
 }
 
 /** Each archived card's newest archive row time (tasks-archive/YYYY-MM.jsonl rows {at, card}). */
 function readArchiveTimes(hiveRoot: string): Map<string, string> {
-  const out = new Map<string, string>();
   const dir = join(hiveRoot, 'tasks-archive');
   let files: string[] = [];
-  try { files = readdirSync(dir).filter((f) => /^\d{4}-\d{2}\.jsonl$/.test(f)).sort(); } catch { return out; }
+  try { files = readdirSync(dir).filter((f) => /^\d{4}-\d{2}\.jsonl$/.test(f)).sort(); } catch { return new Map(); }
+  const texts: string[] = [];
   for (const f of files) {
-    let text = '';
-    try { text = readFileSync(join(dir, f), 'utf8'); } catch { continue; }
+    try { texts.push(readFileSync(join(dir, f), 'utf8')); } catch { continue; }
+  }
+  return archiveTimes(texts);
+}
+
+/** `readArchiveTimes` over the archive files' texts, in file-name order. */
+function archiveTimes(texts: readonly string[]): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const text of texts) {
     for (const line of text.split('\n')) {
       if (!line.trim()) continue;
       try {
@@ -462,7 +505,7 @@ export async function runDerivedBackfill(deps: DerivedWriterDeps, input: Backfil
   // A17 (Jim cdf8fec8): the import's start and end in log.jsonl (its claims-key-added rows give the keys per 10 s).
   const t0 = Date.now();
   deps.log?.({ kind: 'claims-derived-backfill-start' });
-  const cards = readCards(input.hiveRoot);
+  const cards = await readCardsAsync(input.hiveRoot);
   const subjects = new Map<string, string>();
   // Round 10 (must 5b): the full pass also reads proven done mails the index and the ledgers lack.
   // A12 (Jim's 10x profile of c1db867a: one 6.1 s block): the index is read in slices and each step below is its own

@@ -83,7 +83,7 @@ import { TrayModeController } from './trayMode';
 import { ProviderModelStore, defaultAdapters } from './providerModels';
 import {
   readConfig, readConfigForWrite, writeConfig, pruneRetiredConfigKeys, setAgentTokenCap, registerRepo, unregisterRepo, patchMission, setProjectThemeForHome, resolveProjectThemeForHome, setAgentUsageDisplay, setCapacityDisplayThreshold, setGraphicsMode, resetConfig, ensureHarnessHome, homeHasNoProject, ensureClaudePermissionsAccepted,
-  modelForHiveSpawn, takeClearedDefaultModel, configIntegrityIssue, OPS_STANDUP_MISSION, HEARTBEAT_MISSION, COMPACT_MAINTENANCE_MISSION, type HarnessConfig, type ScheduledMission
+  modelForHiveSpawn, takeClearedDefaultModel, configIntegrityIssueAsync, OPS_STANDUP_MISSION, HEARTBEAT_MISSION, COMPACT_MAINTENANCE_MISSION, type HarnessConfig, type ScheduledMission
 } from './config';
 import { effectiveModel, modelFlagValue, resolveSpawnArgs } from '../shared/modelPin';
 import { AUTO_COMPACT_WINDOW_ENV, autoCompactWindowFor, autoCompactWindowIgnored } from '../shared/autoCompactWindow';
@@ -6619,7 +6619,7 @@ ipcMain.handle('hive:integrity', async () => {
   const issues = await hive.integrityIssuesAsync();
   return off ? [...issues, mirrorOffNotice(off, Date.now())] : issues;
 });
-ipcMain.handle('config:integrity', () => configIntegrityIssue());
+ipcMain.handle('config:integrity', () => configIntegrityIssueAsync());
 ipcMain.handle('hive:renameAgent', (_evt, id: unknown, name: unknown) => {
   if (typeof id !== 'string' || typeof name !== 'string') {
     return { ok: false, error: 'Invalid rename request' };
@@ -6682,7 +6682,8 @@ ipcMain.handle('hive:mailPending', (_evt, id: unknown) => (typeof id === 'string
 ipcMain.handle('hive:mailObligations', async () => {
   if (!hive.enabled()) return { agents: [], undelivered: null };
   let agents: ReturnType<typeof hive.mailObligations> = [];
-  try { agents = hive.mailObligations(); } catch { /* ledger trouble: the banner says so */ }
+  // LAG-SYNC-IO-107: async, so the poll runs no synchronous fs on the main thread.
+  try { agents = await hive.mailObligationsAsync(); } catch { /* ledger trouble: the banner says so */ }
   let undelivered: Awaited<ReturnType<typeof hive.undeliveredReportAsync>> = null;
   try { undelivered = await hive.undeliveredReportAsync(); } catch { /* no report */ }
   return { agents, undelivered };
