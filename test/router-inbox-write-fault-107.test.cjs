@@ -119,3 +119,56 @@ test('R9: a route pass that rejects does not poison the passes queued behind it'
   assert.equal(f.inboxJson('god-1').length, 1);
   await f.hive.routerIdle();
 });
+
+/** LAG-SYNC-FS-LOG-108: the synchronous existsSync calls on `<agent>/inbox` made while fn runs. */
+async function inboxProbes(f, fn) {
+  const real = fs.existsSync;
+  const seen = [];
+  const inboxes = new Set(['god-1', 'jim-1', 'nobody-9'].map((id) => path.resolve(f.agentDir(id), 'inbox')));
+  // The mail ledger's hasAgent (closeAnsweredAsks) asks about an inbox too: another call site,
+  // not the delivery's question, so it is not counted here.
+  fs.existsSync = (p) => { if (typeof p === 'string' && inboxes.has(path.resolve(p)) && !/MailLedger\./.test(new Error('x').stack)) seen.push(path.basename(path.dirname(path.resolve(p)))); return real(p); };
+  try { await fn(); } finally { fs.existsSync = real; }
+  return seen;
+}
+
+test('LAG-SYNC-FS-LOG-108: routeOnce asks whether the recipient has an inbox off the main thread; send() still asks on its own thread', async (t) => {
+  const f = await floor(t);
+  const outbox = path.join(f.agentDir('jim-1'), 'outbox');
+  fs.writeFileSync(path.join(outbox, 'probe.json'), JSON.stringify(MSG));
+  const stats = [];
+  const realStat = fs.promises.stat;
+  fs.promises.stat = (p, ...rest) => { stats.push(String(p)); return realStat(p, ...rest); };
+  let routed;
+  let seen;
+  try { seen = await inboxProbes(f, async () => { routed = await f.hive.routeOnce(); }); } finally { fs.promises.stat = realStat; }
+  assert.equal(routed, 1);
+  assert.equal(f.inboxJson('god-1').length, 1, 'delivered');
+  assert.deepEqual(seen, [], 'no synchronous existsSync on an inbox folder during the route');
+  assert.ok(stats.includes(path.join(f.agentDir('god-1'), 'inbox')), 'the inbox was asked for through fs.promises');
+  assert.equal(f.woken.filter((d) => d.agentId === 'god-1').length, 1, 'and the wake followed the write');
+
+  // The synchronous runner is unchanged: the answer and the delivery are there when send() returns.
+  const seenSync = await inboxProbes(f, () => { f.hive.send({ ...MSG, subject: 'invented: sent on-thread' }, 'jim-1'); });
+  assert.deepEqual(seenSync, ['god-1']);
+  assert.equal(f.inboxJson('god-1').length, 2);
+});
+
+test('LAG-SYNC-FS-LOG-108: a recipient with no inbox is still reported to the sender on both runners, and nothing is written for it', async (t) => {
+  const f = await floor(t);
+  // Known to the registry, its folder gone: deliverSteps answers false and the router bounces.
+  await f.hive.ensureAgent({ id: 'nobody-9', name: 'Nobody', provider: 'claude', cwd: f.home });
+  fs.rmSync(path.join(f.agentDir('nobody-9'), 'inbox'), { recursive: true, force: true });
+  const lost = { to: 'nobody-9', act: 'inform', subject: 'invented: no inbox', body: 'invented body for a recipient without an inbox' };
+  const before = f.woken.length;
+  fs.writeFileSync(path.join(f.agentDir('jim-1'), 'outbox', 'lost.json'), JSON.stringify(lost));
+  await f.hive.routeOnce();
+  assert.equal(fs.existsSync(path.join(f.agentDir('nobody-9'), 'inbox')), false, 'the missing inbox was not created');
+  assert.deepEqual(f.woken.slice(before).filter((d) => d.agentId === 'nobody-9'), [], 'no delivery to it');
+  const afterAsync = f.woken.length;
+  assert.ok(afterAsync > before, 'someone was told (the bounce)');
+  f.hive.send({ ...lost, subject: 'invented: no inbox, on-thread' }, 'jim-1');
+  assert.equal(fs.existsSync(path.join(f.agentDir('nobody-9'), 'inbox')), false);
+  assert.deepEqual(f.woken.slice(afterAsync).filter((d) => d.agentId === 'nobody-9'), []);
+  assert.ok(f.woken.length > afterAsync, 'the same bounce from send()');
+});

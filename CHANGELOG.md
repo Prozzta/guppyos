@@ -30,6 +30,17 @@ All notable changes to this project are documented here. The format is based on
   repeated message that is set aside and for a rejected file), and the key list
   is built and written in small pieces. A delivered message is still never delivered twice or
   lost, and the saved key list is the same file, byte for byte. (LAG-SYNC-FS-TAIL-108)
+- **Three more short freezes on a slow disk are gone.** Once a second, when Guppy wrote a row to
+  its log, it first asked the disk whether the log file had been deleted, and waited for the
+  answer (seen holding the app for 0.6 s). Before delivering a message it asked the disk whether
+  the recipient has an inbox, and waited (0.25 s). And when it added up the lifetime cost it
+  listed the cost-ledger folder and waited (0.2 s). All three questions are now asked in the
+  background. Log rows are still written at once, in order, and none is lost or written twice:
+  if the log turns out to have been deleted, the rows written while the question was open are
+  written again into the new file. The log still rotates at 8 MB. One difference: if the log has
+  been deleted and Guppy is killed before the answer arrives, the rows written while it waited
+  are lost with the deleted file (before, only rows from the second before the check were).
+  (LAG-SYNC-FS-LOG-108)
 - **The claims drill's key reader no longer crashes now and then as it exits.** The drill reads its
   key through a small windowless Electron app that called `app.exit()` straight from Electron's
   "ready" callback, before Electron had finished starting up. About once in a hundred fast runs on a
