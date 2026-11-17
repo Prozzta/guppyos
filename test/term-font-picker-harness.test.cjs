@@ -10,6 +10,10 @@ require('./tools/own-job.cjs');
  * section's <select> and the zoom store. Each row is what xterm measured (device cell width)
  * beside what the face needs (its advance), so a cell narrower than its glyph (clipped or
  * overlapping text) fails here. window.cth is a double whose config is an object in the page.
+ *
+ * TERM-FONT-PICKER-DPR15-RACE: the scenario holds the first pick's font load shut for 1.5 s and
+ * waits for a pick on the load itself, never on a fixed delay (the old 700 ms was shorter than
+ * a first load under a full suite: 'the bundled face is loaded' false, cell 15 -> 15).
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -109,6 +113,26 @@ for (const dpr of [1, 1.25, 1.5]) {
     for (const face of FACES.filter((f) => EM[f] > EM['JetBrains Mono'])) assert.notDeepEqual(grid(by(`picked ${face}`)), grid(by('default')), face);
     assert.deepEqual(r.saves, [...FACES.slice(1), FACES[0]].map((terminalFont) => ({ terminalFont })),
       'one save per pick, of the font key only; a size change saves nothing');
+  });
+
+  test(`dpr ${dpr}: a pick whose face is still loading leaves every terminal on the old face and cell, and lands when the load ends (MUTANT: the face set before it is loaded; MUTANT: the scenario measures after a fixed delay)`, async () => {
+    const r = await result(dpr);
+    assert.equal(r.ok, true, `scenario failed: ${r.error ?? ''}`);
+    const h = r.held;
+    assert.ok(h, 'the first pick ran with its load held');
+    assert.ok(h.heldMs >= 1500, `HELD: the load was held ${h.heldMs} ms, longer than any delay the scenario used to wait`);
+    assert.equal(h.picked, 'Martian Mono');
+    assert.equal(h.face, 'Martian Mono', 'HELD: the pick is taken at once');
+    assert.equal(h.selectValue, 'Martian Mono');
+    assert.equal(h.stored, 'Martian Mono', 'HELD: and saved at once');
+    assert.equal(h.ready, false, 'HELD: the face is not loaded yet');
+    assert.equal(h.family, family('JetBrains Mono'), 'HELD: the terminal is still on the old face (an unloaded face would be measured as Consolas)');
+    assert.equal(h.pooledFamily, family('JetBrains Mono'), 'HELD: and so is the terminal no view shows');
+    assert.equal(h.cell, h.cellBefore, 'HELD: the cell is the old one');
+    const [picked] = r.rows.filter((x) => x.step === 'picked Martian Mono at 16px, no size change');
+    assert.equal(picked.ready, true, 'LANDED: once the load ended the face is loaded');
+    assert.equal(picked.family, family('Martian Mono'), 'LANDED: and on the terminal');
+    assert.ok(picked.cell > h.cell, `LANDED: with its own wider cell (${h.cell} -> ${picked.cell})`);
   });
 
   test(`dpr ${dpr}: a failed save puts the list and the terminals back; the colours toggle saves its own key; a re-opened section shows the stored font`, async () => {

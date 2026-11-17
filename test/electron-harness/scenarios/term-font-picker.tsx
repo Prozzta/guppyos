@@ -10,6 +10,14 @@
  * design/fonts.css is loaded as text and its `../assets/` urls are pointed at the source
  * tree: the harness injects CSS as a <style> tag, so the urls would otherwise resolve
  * against page.html and no face would load.
+ *
+ * TERM-FONT-PICKER-DPR15-RACE: nothing here measures a pick after a fixed delay. A pick lands
+ * when the face's load ends (terminalPool waits on loadTerminalFont), and how long that takes
+ * is the machine's business: under a full suite the first load of a face took longer than the
+ * 700 ms this scenario used to wait, so it measured the old face. pick() now waits on that
+ * same load, then on the state it is about to measure. The first pick also HOLDS the load
+ * (document.fonts.load is gated here) for HELD_MS, longer than any delay the scenario ever
+ * guessed, and reports what the terminals showed meanwhile: the old face and the old cell.
  */
 import { createRoot } from 'react-dom/client';
 import { act } from 'react';
@@ -19,7 +27,9 @@ import { PtyTerminalView } from '../../../src/renderer/src/components/PtyTermina
 import { TerminalSetting } from '../../../src/renderer/src/components/TerminalSetting';
 import { acquireTerminal } from '../../../src/renderer/src/components/terminalPool';
 import { getTerminalFontSize, setTerminalFontSize } from '../../../src/renderer/src/components/terminalFontSize';
-import { getTerminalFontFace, terminalFontReady, TERMINAL_FONT_FACES } from '../../../src/renderer/src/components/terminalFont';
+import {
+  getTerminalFontFace, loadTerminalFont, terminalFontFamily, terminalFontReady, TERMINAL_FONT_FACES, type TerminalFontFace
+} from '../../../src/renderer/src/components/terminalFont';
 
 declare global {
   interface Window {
@@ -51,6 +61,15 @@ let failSave = false;
 });
 
 const wait = (ms: number) => act(async () => { await new Promise((r) => setTimeout(r, ms)); });
+/** How long the first pick's font load is held shut: well past the 700 ms the scenario once waited. */
+const HELD_MS = 1500;
+// The gate on document.fonts.load: while gate.face is set, a load of that face does not even
+// start until gate.open() is called, so the face cannot become usable behind the scenario's back.
+const gate: { face: string | null; opened: Promise<void>; open: () => void } = { face: null, opened: Promise.resolve(), open: () => {} };
+const realFontLoad = document.fonts.load.bind(document.fonts);
+document.fonts.load = ((font: string, text?: string) => (
+  gate.face && font.includes(`"${gate.face}"`) ? gate.opened.then(() => realFontLoad(font, text)) : realFontLoad(font, text)
+)) as typeof document.fonts.load;
 const INK_CHARS = ['W', 'M', 'm', '@', '#', '%', '&', 'w', 'Q'];
 
 type XtermCore = { _core: { _renderService: { dimensions: { device: { cell: { width: number; height: number } }; css: { cell: { width: number } } } } } };
@@ -92,12 +111,26 @@ window.__harnessRun = async () => {
         && coloring().getBoundingClientRect().top >= select.getBoundingClientRect().bottom,
       coloringLabel: coloring().textContent
     };
-    const pick = async (face: string) => {
-      await act(async () => {
-        Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!.call(select, face);
-        select.dispatchEvent(new Event('change', { bubbles: true }));
-      });
-      await wait(700);
+    const change = (face: string) => act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!.call(select, face);
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    const alertShown = () => !!settingsWrap.querySelector('[role="alert"]');
+    /** The pick is over: `shown` is the face in use, loaded, and on both terminals (and the
+     *  failed-save alert is up when one is expected). */
+    const settled = (shown: TerminalFontFace, alert: boolean) => getTerminalFontFace() === shown && terminalFontReady(shown)
+      && entry.term.options.fontFamily === terminalFontFamily(shown) && pooled.term.options.fontFamily === terminalFontFamily(shown)
+      && (!alert || alertShown());
+    /** Wait for a pick to land: first on the loads the pool itself waits on (however long they
+     *  take), then on the settled state, which follows them within a few promise turns. */
+    const landed = async (picked: TerminalFontFace, shown: TerminalFontFace = picked, alert = false) => {
+      await act(async () => { await loadTerminalFont(picked); await loadTerminalFont(shown); });
+      for (let i = 0; i < 200 && !settled(shown, alert); i++) await wait(25);
+      if (!settled(shown, alert)) throw new Error(`the pick of ${picked} did not settle on ${shown}`);
+    };
+    const pick = async (face: TerminalFontFace, shown: TerminalFontFace = face, alert = false) => {
+      await change(face);
+      await landed(face, shown, alert);
     };
 
     const ctx = document.createElement('canvas').getContext('2d')!;
@@ -150,8 +183,27 @@ window.__harnessRun = async () => {
       }
     };
     await sweep('default');
+    const cellNow = () => (entry.term as unknown as XtermCore)._core._renderService.dimensions.device.cell.width;
+    const cellBeforePick = cellNow();
+    let held: unknown = null;
     for (const face of TERMINAL_FONT_FACES.filter((f) => f !== initialFace)) {
-      await pick(face);
+      if (!held) {
+        // The first pick, with its font load held shut: the pick is taken and saved, and every
+        // terminal stays on the old face and cell until the load is let through.
+        gate.face = face;
+        gate.opened = new Promise<void>((r) => { gate.open = r; });
+        const t0 = performance.now();
+        await change(face);
+        await wait(HELD_MS);
+        held = {
+          picked: face, face: getTerminalFontFace(), selectValue: select.value, stored: cfg.terminalFont ?? null,
+          ready: terminalFontReady(), family: entry.term.options.fontFamily, pooledFamily: pooled.term.options.fontFamily,
+          cellBefore: cellBeforePick, cell: cellNow(), heldMs: performance.now() - t0
+        };
+        gate.face = null;
+        gate.open();
+        await landed(face);
+      } else await pick(face);
       rows.push(await measure(`picked ${face} at 16px, no size change`));
       await sweep(`picked ${face}`);
     }
@@ -162,7 +214,7 @@ window.__harnessRun = async () => {
 
     // A save that fails: the list and the terminals go back to what is stored.
     failSave = true;
-    await pick('Martian Mono');
+    await pick('Martian Mono', initialFace, true);
     const failed = {
       face: getTerminalFontFace(), selectValue: select.value, family: entry.term.options.fontFamily,
       alert: settingsWrap.querySelector('[role="alert"]')?.textContent ?? null,
@@ -189,7 +241,11 @@ window.__harnessRun = async () => {
     cfg = { ...cfg, terminalFont: 'Cascadia Mono' };
     settingsRoot = createRoot(settingsWrap);
     await act(async () => { settingsRoot.render(<TerminalSetting config={{}} />); });
-    await wait(900);
+    // The section reads the config, then the pool waits on the face's load: wait on those, not on a delay.
+    const reshown = () => (settingsWrap.querySelector('select') as HTMLSelectElement | null)?.value === 'Cascadia Mono';
+    for (let i = 0; i < 200 && !reshown(); i++) await wait(25);
+    if (!reshown()) throw new Error('the re-opened section did not show the stored font');
+    await landed('Cascadia Mono');
     select = settingsWrap.querySelector('select') as HTMLSelectElement;
     const reopened = {
       selectValue: select.value, face: getTerminalFontFace(), family: entry.term.options.fontFamily,
@@ -199,7 +255,7 @@ window.__harnessRun = async () => {
 
     window.harness.report({
       ok: true, dpr: window.devicePixelRatio, faces: [...TERMINAL_FONT_FACES], initialFace, selector, rows,
-      saves: savesAfterPicks, failed, failedToggle, toggled, reopened
+      saves: savesAfterPicks, failed, failedToggle, toggled, reopened, held
     });
   } catch (e) {
     window.harness.report({ ok: false, error: e instanceof Error ? `${e.message}\n${e.stack}` : String(e) });
