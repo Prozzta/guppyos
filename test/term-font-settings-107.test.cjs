@@ -93,6 +93,8 @@ test('the section saves each control under its own key and applies it live; Sett
   assert.match(ui, /setTerminalFontFace\(next\);\s*try \{ await window\.cth\.updateConfig\(\{ terminalFont: next \}\); \}\s*catch \{\s*setFont\(prev\);[\s\S]*?if \(getTerminalFontFace\(\) === next\) setTerminalFontFace\(prev\);\s*setError\(TERMINAL_COPY\.fontFailed\);/,
     'apply, save the font key only, and put both back when the save fails');
   assert.match(ui, /setTerminalPatternColoringEnabled\(next\);\s*try \{ await window\.cth\.updateConfig\(\{ terminalPatternColoring: next \}\); \}/);
+  assert.match(ui, /updateConfig\(\{ terminalPatternColoring: next \}\); \}\s*catch \{ setColoring\(!next\); setTerminalPatternColoringEnabled\(!next\); \}/,
+    'a colours save that fails puts the toggle and the live colouring back');
   assert.equal((ui.match(/updateConfig\(/g) || []).length, 2, 'two saves, one per control');
   assert.doesNotMatch(ui, /localStorage/);
   const modal = codeOnly(readSource('src/renderer/src/components/SettingsModal.tsx'), 'SettingsModal.tsx');
@@ -114,6 +116,25 @@ test('a pick reaches every window: main broadcasts the saved face, preload relay
   const config = codeOnly(readSource('src/main/config.ts'), 'config.ts');
   assert.match(config, /\n  terminalFont\?: string;/);
   assert.match(config, /\n  terminalFont: 'JetBrains Mono',/);
+});
+
+test('each terminal face maps its weights to its own files: regular text is never drawn from a bold file', () => {
+  const css = readSource('src/renderer/src/design/fonts.css');
+  const faces = [...css.matchAll(/@font-face\s*\{([^}]*)\}/g)].map((m) => m[1]).map((b) => [
+    (/font-family:\s*"([^"]+)"/.exec(b) || [])[1], Number((/font-weight:\s*(\d+)/.exec(b) || [])[1]),
+    (/font-style:\s*(\w+)/.exec(b) || [])[1], (/src:\s*url\('\.\.\/assets\/fonts\/([^']+)'\) format\('woff2'\);/.exec(b) || [])[1]
+  ]).filter((f) => FACES.includes(f[0]));
+  assert.deepEqual(faces, [
+    ['Martian Mono', 400, 'normal', 'martian-mono/MartianMono-StdRg.woff2'],
+    ['Martian Mono', 700, 'normal', 'martian-mono/MartianMono-StdBd.woff2'],
+    ['JetBrains Mono', 400, 'normal', 'jetbrains-mono/JetBrainsMono-Regular.woff2'],
+    ['JetBrains Mono', 500, 'normal', 'jetbrains-mono/JetBrainsMono-Medium.woff2'],
+    ['JetBrains Mono', 700, 'normal', 'jetbrains-mono/JetBrainsMono-Bold.woff2'],
+    ['Cascadia Mono', 400, 'normal', 'cascadia-mono/CascadiaMono-Regular.woff2'],
+    ['Cascadia Mono', 700, 'normal', 'cascadia-mono/CascadiaMono-Bold.woff2'],
+    ['Atkinson Hyperlegible Mono', 400, 'normal', 'atkinson-hyperlegible-mono/AtkinsonHyperlegibleMono-Regular.woff2'],
+    ['Atkinson Hyperlegible Mono', 700, 'normal', 'atkinson-hyperlegible-mono/AtkinsonHyperlegibleMono-Bold.woff2']
+  ]);
 });
 
 test('the terminal header has no font control: the size buttons only, as in v1.1.106', () => {

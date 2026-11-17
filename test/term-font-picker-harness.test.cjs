@@ -118,6 +118,7 @@ for (const dpr of [1, 1.25, 1.5]) {
       face: 'JetBrains Mono', selectValue: 'JetBrains Mono', family: family('JetBrains Mono'),
       alert: 'The terminal font could not be saved. The current one is unchanged.', saves: 0, stored: 'JetBrains Mono'
     });
+    assert.deepEqual(r.failedToggle, { label: 'on', saves: 0, stored: null }, 'a colours save that fails: the toggle is back on, nothing stored');
     assert.deepEqual(r.toggled, { label: 'off', save: { terminalPatternColoring: false }, face: 'JetBrains Mono' });
     assert.deepEqual(r.reopened, {
       selectValue: 'Cascadia Mono', face: 'Cascadia Mono', family: family('Cascadia Mono'),

@@ -168,6 +168,14 @@ window.__harnessRun = async () => {
       alert: settingsWrap.querySelector('[role="alert"]')?.textContent ?? null,
       saves: saves.length - savesAfterPicks.length, stored: cfg.terminalFont ?? null
     };
+
+    // The colours toggle, same failing save: it goes back to what is stored.
+    await act(async () => { coloring().click(); });
+    await wait(100);
+    const failedToggle = {
+      label: coloring().textContent, saves: saves.length - savesAfterPicks.length,
+      stored: cfg.terminalPatternColoring ?? null
+    };
     failSave = false;
 
     // The colours toggle under the list saves its own key only.
@@ -191,7 +199,7 @@ window.__harnessRun = async () => {
 
     window.harness.report({
       ok: true, dpr: window.devicePixelRatio, faces: [...TERMINAL_FONT_FACES], initialFace, selector, rows,
-      saves: savesAfterPicks, failed, toggled, reopened
+      saves: savesAfterPicks, failed, failedToggle, toggled, reopened
     });
   } catch (e) {
     window.harness.report({ ok: false, error: e instanceof Error ? `${e.message}\n${e.stack}` : String(e) });
