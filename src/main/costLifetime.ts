@@ -40,7 +40,7 @@
 
 import { createReadStream } from 'fs';
 import { open } from 'fs/promises';
-import { filesInOrder } from './appendLog';
+import { filesInOrderAsync } from './appendLog';
 
 /** Per (agent, session) fold state: closed segments plus the open one. */
 interface Segment {
@@ -128,7 +128,8 @@ export class CostLedgerTotals {
   }
 
   private async fold(ledgerPath: string): Promise<void> {
-    const files = filesInOrder(ledgerPath);
+    // LAG-SYNC-FS-LOG-108: the folder is listed off the main thread (readdirSync stalled it 191 ms).
+    const files = await filesInOrderAsync(ledgerPath);
     let seenCur = this.curId === null;
     for (let i = 0; i < files.length; i++) {
       const live = i === files.length - 1;

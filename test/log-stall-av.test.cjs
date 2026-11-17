@@ -405,8 +405,23 @@ test('F3 wiring: wakeDiag counts EVERY row in telemetry first, then the breadcru
   assert.match(idx, /try \{ workerWake\.forget\(agentId, id\); \} catch \{[^}]*\}\s*try \{ forgetWakeRows\(wakeRows, agentId\); \}/, 'N4: an agent that leaves the floor is forgotten by the row policy too');
 });
 
-test('RESIDUAL (Jim PERF-153-FINAL): a live log DELETED under a kept-open file is noticed within a second and recreated; no rows go to the ghost after that', () => {
-  const { APPEND_LINK_CHECK_MS } = loadTs('src/main/appendLog.ts');
+const { APPEND_LINK_CHECK_MS } = loadTs('src/main/appendLog.ts');
+const seq = (p) => rows(p).map((l) => JSON.parse(l).a);
+/** Count the fstat calls (both kinds) made while fn runs; `hold: true` keeps every asynchronous
+ *  answer back until `release()` (a slow disk). */
+function watchFstat({ hold = false } = {}) {
+  const real = { fstat: fs.fstat, fstatSync: fs.fstatSync };
+  const w = { sync: 0, asked: 0, answered: 0, held: [], release() { for (const go of w.held.splice(0)) go(); }, restore() { fs.fstat = real.fstat; fs.fstatSync = real.fstatSync; } };
+  fs.fstatSync = (...a) => { w.sync += 1; return real.fstatSync(...a); };
+  fs.fstat = (fd, cb) => {
+    w.asked += 1;
+    // The answer is taken now (while the descriptor is this file's) and handed over later.
+    real.fstat(fd, (err, st) => { const go = () => { w.answered += 1; cb(err, st); }; if (hold) w.held.push(go); else go(); });
+  };
+  return w;
+}
+
+test('RESIDUAL (Jim PERF-153-FINAL): a live log DELETED under a kept-open file is noticed within a second and recreated; no rows go to the ghost after that', async () => {
   const d = dir(); const p = path.join(d, 'log.jsonl');
   let t = 1_000_000;
   const f = new AppendFile(p, { now: () => t });
@@ -414,13 +429,137 @@ test('RESIDUAL (Jim PERF-153-FINAL): a live log DELETED under a kept-open file i
   fs.rmSync(p);                                   // someone deletes the live log
   t += APPEND_LINK_CHECK_MS;
   f.append('{"a":2}\n');
-  assert.ok(fs.existsSync(p), 'recreated by path');
-  assert.deepEqual(rows(p).map((l) => JSON.parse(l).a), [2], 'the row landed in the new file, not the ghost');
+  f.append('{"a":3}\n');                          // written while the check is still being answered
+  assert.ok(await until(() => fs.existsSync(p)), 'recreated by path');
+  assert.deepEqual(seq(p), [2, 3], 'the row that started the check and the one after it are in the new file, in order');
+  f.append('{"a":4}\n');
+  assert.deepEqual(seq(p), [2, 3, 4], 'later rows follow, on disk the moment append returns');
   // Throttled: within the interval no fstat is made (and nothing is lost when nothing was deleted).
-  const real = fs.fstatSync; let fstats = 0;
-  fs.fstatSync = (...a) => { fstats += 1; return real(...a); };
-  try { for (let i = 0; i < 20; i++) f.append('{"a":3}\n'); } finally { fs.fstatSync = real; }
-  assert.equal(fstats, 0, 'at most one check a second');
+  const w = watchFstat();
+  try { for (let i = 0; i < 20; i++) f.append('{"a":5}\n'); } finally { w.restore(); }
+  assert.equal(w.sync + w.asked, 0, 'at most one check a second');
   f.close();
-  assert.equal(rows(p).length, 21);
+  assert.equal(rows(p).length, 23);
+});
+
+test('LAG-SYNC-FS-LOG-108: the once-a-second deleted-file check never calls fstatSync on the append path; a row written during a slow check lands once', async () => {
+  const p = path.join(dir(), 'log.jsonl');
+  let t = 1_000_000;
+  const f = new AppendFile(p, { now: () => t });
+  f.append('{"a":1}\n');                          // the open (its own fstat for the size) is behind us
+  const w = watchFstat({ hold: true });
+  try {
+    for (let a = 2; a <= 7; a++) { t += APPEND_LINK_CHECK_MS; f.append(`{"a":${a}}\n`); }
+    assert.equal(w.sync, 0, 'no synchronous fstat on the main thread');
+    assert.equal(w.asked, 1, 'one check asked for, and no second one while it is unanswered');
+    assert.deepEqual(seq(p), [1, 2, 3, 4, 5, 6, 7], 'every row is on disk the moment append returns');
+    assert.ok(await until(() => w.held.length === 1), 'the slow answer is ready');
+    w.release();
+    assert.equal(w.answered, 1);
+    assert.deepEqual(seq(p), [1, 2, 3, 4, 5, 6, 7], 'the file was not deleted: nothing is written twice');
+    t += APPEND_LINK_CHECK_MS; f.append('{"a":8}\n');
+    assert.equal(w.asked, 2, 'the next second checks again');
+    assert.equal(w.sync, 0);
+  } finally { w.release(); w.restore(); }
+  f.close();
+  assert.deepEqual(seq(p), [1, 2, 3, 4, 5, 6, 7, 8]);
+});
+
+test('LAG-SYNC-FS-LOG-108: the rows remembered during one check are bounded (a check that is never answered is taken on the spot)', () => {
+  const { APPEND_LINK_HELD_MAX } = loadTs('src/main/appendLog.ts');
+  const p = path.join(dir(), 'log.jsonl');
+  let t = 1_000_000;
+  const f = new AppendFile(p, { now: () => t });
+  f.append('{"a":0}\n');
+  t += APPEND_LINK_CHECK_MS;
+  const w = watchFstat({ hold: true });
+  try {
+    for (let a = 1; a < APPEND_LINK_HELD_MAX; a++) f.append(`{"a":${a}}\n`);
+    assert.equal(w.sync, 0);
+    assert.equal(f.sinceCheck.length, APPEND_LINK_HELD_MAX - 1);
+    f.append('{"a":-1}\n');
+    assert.equal(w.sync, 1, 'answered on this thread once the bound is reached');
+    assert.equal(f.sinceCheck, null);
+  } finally { w.release(); w.restore(); }
+  f.close();
+  assert.equal(rows(p).length, APPEND_LINK_HELD_MAX + 1, 'every row once');
+});
+
+test('LAG-SYNC-FS-LOG-108: close() during a check on a deleted log still puts the rows in the new file; the late answer changes nothing', async () => {
+  const p = path.join(dir(), 'log.jsonl');
+  let t = 1_000_000;
+  const f = new AppendFile(p, { now: () => t });
+  f.append('{"a":1}\n');
+  fs.rmSync(p);
+  t += APPEND_LINK_CHECK_MS;
+  const w = watchFstat({ hold: true });
+  try {
+    f.append('{"a":2}\n');
+    f.append('{"a":3}\n');
+    assert.equal(w.asked, 1);
+    f.close();                                    // a quit: the answer has not come
+    assert.equal(f.isOpen, false);
+    assert.deepEqual(seq(p), [2, 3], 'the rows written since the check began are in the file at the path');
+    assert.ok(await until(() => w.held.length === 1));
+    w.release();                                  // the answer for a descriptor that is gone
+    assert.deepEqual(seq(p), [2, 3], 'not written a second time');
+    assert.equal(f.isOpen, false, 'and nothing reopened');
+  } finally { w.release(); w.restore(); }
+});
+
+test('LAG-SYNC-FS-LOG-108: a row that reaches the cap during a check keeps every row once, in order, deleted log or not', async () => {
+  // Not deleted: the row that reaches the cap rotates as before, and the late answer is dropped.
+  {
+    const p = path.join(dir(), 'log.jsonl');
+    let t = 1_000_000;
+    const f = new AppendFile(p, { capBytes: 300, keep: Infinity, now: () => t });
+    f.append('{"a":1}\n');
+    const w = watchFstat({ hold: true });
+    try {
+      t += APPEND_LINK_CHECK_MS;
+      for (let a = 2; a <= 60; a++) { t += 1; f.append(`{"a":${a},"pad":"xxxxxxxxxxxxxxxxxxxx"}\n`); }
+      assert.ok(rotatedFiles(p).length >= 3, 'it rotated while the answer was held');
+      assert.ok(await until(() => w.held.length === 1), 'the answer for the first descriptor arrives late');
+      w.release();
+    } finally { w.release(); w.restore(); }
+    f.close();
+    assert.deepEqual(filesInOrder(p).flatMap((x) => seq(x)), Array.from({ length: 60 }, (_, i) => i + 1));
+  }
+  // Deleted, and the row that reaches the cap arrives before the answer.
+  {
+    const p = path.join(dir(), 'log.jsonl');
+    let t = 1_000_000;
+    const f = new AppendFile(p, { capBytes: 300, keep: Infinity, now: () => t });
+    f.append('{"a":1}\n');
+    fs.rmSync(p);
+    t += APPEND_LINK_CHECK_MS;
+    const w = watchFstat({ hold: true });
+    try {
+      f.append('{"a":2}\n');
+      f.append(`{"a":3,"pad":"${'x'.repeat(400)}"}\n`);   // over the cap on the ghost
+      assert.ok(fs.existsSync(p), 'recreated by path without waiting for the answer');
+    } finally { w.release(); w.restore(); }
+    f.close();
+    assert.deepEqual(filesInOrder(p).flatMap((x) => seq(x)), [2, 3], 'no row lost to the ghost, none written twice');
+  }
+});
+
+test('LAG-SYNC-FS-LOG-108: the lifetime-cost fold lists the ledger folder off the main thread (no readdirSync), with the same totals', async () => {
+  const d = dir(); const p = path.join(d, 'cost-ledger.jsonl');
+  let t = 0;
+  const f = new AppendFile(p, { capBytes: 400, keep: Infinity, now: () => ++t });
+  for (let i = 1; i <= 40; i++) f.append(JSON.stringify({ agent_id: i % 2 ? 'a' : 'b', session_id: 's', usd: i / 100 }) + '\n');
+  f.close();
+  assert.ok(rotatedFiles(p).length >= 2, 'the ledger is spread over rotated files');
+  const real = fs.readdirSync; const listed = [];
+  fs.readdirSync = (dirPath, ...rest) => { if (path.resolve(String(dirPath)) === path.resolve(d)) listed.push(String(dirPath)); return real(dirPath, ...rest); };
+  const got = new CostLedgerTotals();
+  try { await got.refreshFully(p); await got.refresh(p); } finally { fs.readdirSync = real; }
+  assert.deepEqual(listed, [], 'no synchronous listing of the ledger folder');
+  assert.equal(got.ready, true);
+  assert.ok(Math.abs(got.usdFor('a') - 0.39) < 1e-9 && Math.abs(got.usdFor('b') - 0.40) < 1e-9, `${got.usdFor('a')} ${got.usdFor('b')}`);
+  // An unreadable folder is the live file alone, as before: nothing folded, the totals stand.
+  const none = new CostLedgerTotals();
+  await none.refresh(path.join(d, 'absent', 'cost-ledger.jsonl'));
+  assert.equal(none.ready, false);
 });

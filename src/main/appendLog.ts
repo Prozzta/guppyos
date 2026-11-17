@@ -32,13 +32,17 @@
  * at 8 MB) happens off the main thread. The rename works with the old descriptor still open
  * (Node opens with share-delete on Windows).
  */
-import { close, closeSync, fstatSync, openSync, readdirSync, renameSync, rmSync, writeSync } from 'node:fs';
+import { close, closeSync, fstat, fstatSync, openSync, readdirSync, renameSync, rmSync, writeSync } from 'node:fs';
+import { readdir } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 
 /** Rotate a live append file at this size. */
 export const APPEND_ROTATE_BYTES = 8 * 1024 * 1024;
 /** How often a kept-open file is checked for having been deleted underneath it. */
 export const APPEND_LINK_CHECK_MS = 1_000;
+/** Rows remembered while one deleted-file check is being answered; at this many the check is
+ *  answered on the spot (a disk that never answers must not grow the list without bound). */
+export const APPEND_LINK_HELD_MAX = 1_024;
 /** Rotated log files kept (the legacy file is extra and never deleted). */
 export const LOG_KEEP_ROTATED = 8;
 
@@ -46,11 +50,16 @@ export interface RotatedFile { path: string; stamp: number; legacy: boolean }
 
 /** `<base>.jsonl` -> its rotated siblings, oldest first (the live file is not included). */
 export function rotatedFiles(livePath: string): RotatedFile[] {
+  let names: string[];
+  try { names = readdirSync(dirname(livePath)); } catch { return []; }
+  return pickRotated(livePath, names);
+}
+
+/** The rotated siblings of `livePath` among a folder listing, oldest first. */
+function pickRotated(livePath: string, names: string[]): RotatedFile[] {
   const dir = dirname(livePath);
   const base = basename(livePath).replace(/\.jsonl$/, '');
   const re = new RegExp(`^${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.(legacy-)?(\\d+)\\.jsonl$`);
-  let names: string[];
-  try { names = readdirSync(dir); } catch { return []; }
   const out: RotatedFile[] = [];
   for (const n of names) {
     const m = re.exec(n);
@@ -62,6 +71,15 @@ export function rotatedFiles(livePath: string): RotatedFile[] {
 /** Every file of a rotated set in write order: rotated (oldest first), then the live one. */
 export function filesInOrder(livePath: string): string[] {
   return [...rotatedFiles(livePath).map((r) => r.path), livePath];
+}
+
+/** LAG-SYNC-FS-LOG-108: filesInOrder with the folder listed off the main thread, for a caller
+ *  that is already asynchronous (the lifetime-cost fold, on a timer). The same order and the
+ *  same answer for an unreadable folder (the live file alone). */
+export async function filesInOrderAsync(livePath: string): Promise<string[]> {
+  let names: string[];
+  try { names = await readdir(dirname(livePath)); } catch { names = []; }
+  return [...pickRotated(livePath, names).map((r) => r.path), livePath];
 }
 
 export interface AppendFileOptions {
@@ -81,6 +99,12 @@ export class AppendFile {
   private firstOpen = true;
   /** When the kept-open file was last checked for having been deleted underneath us. */
   private linkCheckedAt = 0;
+  /** LAG-SYNC-FS-LOG-108: the rows written since a link check was started, in order; null when
+   *  none is in flight. If the check finds the file deleted, they are written again by path. */
+  private sinceCheck: string[] | null = null;
+  /** Changes whenever a link check stops being wanted (the descriptor closed, or the check was
+   *  answered on this thread), so a late answer is dropped. */
+  private checkGen = 0;
   /** After a rotation that could not rename (the file is busy), wait this far before retrying. */
   private nextRotateAt = 0;
   private readonly cap: number;
@@ -100,18 +124,27 @@ export class AppendFile {
       // takes writes into a ghost (nlink 0) that nobody can read, and the path cannot be
       // reopened while we hold it. Checked at most once a second: an fstat on the open fd,
       // which no antivirus scans. Then close the ghost and reopen by path.
-      if (this.fd !== null) {
+      // LAG-SYNC-FS-LOG-108: the fstat is asked for here and answered off the main thread (it
+      // stalled main for 604 ms on a slow disk). The rows written meanwhile are remembered, and
+      // written again by path if the answer is "deleted": the same rows reach the new file as
+      // when the check ran before the write.
+      if (this.fd !== null && this.sinceCheck === null) {
         const t = this.now();
         if (t - this.linkCheckedAt >= APPEND_LINK_CHECK_MS) {
           this.linkCheckedAt = t;
-          if (fstatSync(this.fd).nlink === 0) this.closeFd();
+          this.startLinkCheck(this.fd);
         }
       }
       if (this.fd === null) this.open();
       if (this.fd === null) return;
       const n = writeSync(this.fd, line, null, 'utf8');
       this.size += n;
-      if (this.size >= Math.max(this.cap, this.nextRotateAt)) this.rotate(false);
+      this.sinceCheck?.push(line);
+      const full = this.size >= Math.max(this.cap, this.nextRotateAt);
+      // A rotation cannot wait for the answer, and the rows remembered for one check are bounded:
+      // in both cases it is taken here. A deleted file is reopened by path, not rotated.
+      if ((full || (this.sinceCheck?.length ?? 0) >= APPEND_LINK_HELD_MAX) && this.settleLinkCheck()) return;
+      if (full) this.rotate(false);
       else if (this.opts.keepOpen === false) this.closeFd();
     } catch {
       // A failed write drops the descriptor; the next row reopens (and so recovers from a
@@ -122,7 +155,41 @@ export class AppendFile {
 
   /** Close the descriptor (quit, a hive switch). The next append reopens. */
   close(): void {
+    // A link check still in flight is answered now: a quit must not leave its rows in a ghost.
+    try { this.settleLinkCheck(); } catch { /* best-effort, as append */ }
     this.closeFd();
+  }
+
+  /** Ask, off the main thread, whether the kept-open file was deleted underneath us. */
+  private startLinkCheck(fd: number): void {
+    const held: string[] = [];
+    this.sinceCheck = held;
+    const gen = this.checkGen;
+    fstat(fd, (err, st) => {
+      if (gen !== this.checkGen) return; // closed, rotated or answered on main meanwhile
+      this.sinceCheck = null;
+      // A descriptor that cannot be read is dropped; the next row reopens (as a failed write).
+      if (err) { this.closeFd(); return; }
+      if (st.nlink === 0) this.reopenWith(held);
+    });
+  }
+
+  /** Answer a link check in flight on this thread. True when the file was deleted: the ghost is
+   *  closed and the rows written since the check began are in the new file. */
+  private settleLinkCheck(): boolean {
+    const held = this.sinceCheck;
+    if (held === null || this.fd === null) return false;
+    this.sinceCheck = null;
+    this.checkGen += 1;
+    if (fstatSync(this.fd).nlink !== 0) return false;
+    this.reopenWith(held);
+    return true;
+  }
+
+  /** Close the ghost and write its rows again, in order, into the file reopened by path. */
+  private reopenWith(lines: string[]): void {
+    this.closeFd();
+    for (const line of lines) this.append(line);
   }
 
   /** Is a descriptor held right now? (diagnostics, tests) */
@@ -143,9 +210,16 @@ export class AppendFile {
     }
   }
 
+  /** The descriptor a link check asked about is going away: its answer no longer applies. */
+  private dropLinkCheck(): void {
+    this.sinceCheck = null;
+    this.checkGen += 1;
+  }
+
   private rotate(legacy: boolean): void {
     const old = this.fd;
     this.fd = null;
+    this.dropLinkCheck();
     const stamp = this.now();
     const base = this.path.replace(/\.jsonl$/, '');
     const target = `${base}.${legacy ? 'legacy-' : ''}${stamp}.jsonl`;
@@ -180,6 +254,7 @@ export class AppendFile {
 
   private closeFd(): void {
     if (this.fd === null) return;
+    this.dropLinkCheck();
     try { closeSync(this.fd); } catch { /* already gone */ }
     this.fd = null;
   }

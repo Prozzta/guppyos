@@ -596,7 +596,11 @@ export interface InboxDelivery {
  *  themselves: a runner does, sync (send()) or awaited (routeOnce), then resumes them, so nothing
  *  after the write (the ledger entry, the wake, the .sent rename) runs before the file is on disk. */
 interface InboxWrite { file: string; msg: HiveMessage }
-type RouteSteps<T> = Generator<InboxWrite, T, void>;
+/** LAG-SYNC-FS-LOG-108: "does this folder exist?", asked of the runner for the same reason: on
+ *  routeOnce the answer comes from off the main thread (existsSync stalled it for 253 ms on a slow
+ *  disk); send() answers on its own thread. The steps resume with the answer. */
+interface InboxProbe { exists: string }
+type RouteSteps<T> = Generator<InboxWrite | InboxProbe, T, boolean | void>;
 
 export interface RouterRuntime {
   watch: (dir: string, onHint: () => void) => Pick<FSWatcher, 'close' | 'on'>;
@@ -3301,7 +3305,7 @@ export class HiveManager {
    *  the ledger entry and the wake run only once it has landed. A failed write throws here. */
   private *deliverSteps(original: HiveMessage, toId: string): RouteSteps<boolean> {
     const inbox = join(this.agentDir(toId), 'inbox');
-    if (!existsSync(inbox)) return false; // unknown recipient — the caller reports it
+    if (!(yield { exists: inbox })) return false; // unknown recipient — the caller reports it
     // ZT-I1-MAIL §4.1: admission against the recipient's ledger, inbox/ and .done/. A duplicate
     // (same from, same body) was already delivered: dropped idempotently. An invalid or colliding
     // id gets a fresh one for THIS copy, the sender's value kept as sender_id.
@@ -3365,9 +3369,11 @@ export class HiveManager {
   private runRouteSync<T>(steps: RouteSteps<T>): T {
     let r = steps.next();
     while (!r.done) {
+      const step = r.value;
+      if ('exists' in step) { r = steps.next(existsSync(step.exists)); continue; }
       let failed = false;
       let err: unknown;
-      try { this.atomicWriteJson(r.value.file, r.value.msg); } catch (e) { failed = true; err = e; }
+      try { this.atomicWriteJson(step.file, step.msg); } catch (e) { failed = true; err = e; }
       r = failed ? steps.throw(err) : steps.next();
     }
     return r.value;
@@ -3378,11 +3384,17 @@ export class HiveManager {
   private async runRouteAsync<T>(steps: RouteSteps<T>): Promise<T> {
     let r = steps.next();
     while (!r.done) {
+      const step = r.value;
+      if ('exists' in step) {
+        // existsSync's answer (true for anything at the path, false on any error), off main.
+        r = steps.next(await fsPromises.stat(step.exists).then(() => true, () => false));
+        continue;
+      }
       let failed = false;
       let err: unknown;
       try {
-        await atomicWriteJsonAsync(r.value.file, r.value.msg);
-      } catch (e) { failed = true; err = e; } finally { this.invalidateAuthorityCache(r.value.file); }
+        await atomicWriteJsonAsync(step.file, step.msg);
+      } catch (e) { failed = true; err = e; } finally { this.invalidateAuthorityCache(step.file); }
       r = failed ? steps.throw(err) : steps.next();
     }
     return r.value;
