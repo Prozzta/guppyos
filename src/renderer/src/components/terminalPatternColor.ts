@@ -1,4 +1,21 @@
 import type { IDecoration, IDisposable, ILink, IMarker, Terminal } from '@xterm/xterm';
+import { VENDORED_FILE_EXTENSIONS, VENDORED_TLDS } from './terminalPathData';
+
+/*! The line/column suffix forms in TERMINAL_PATH_SUFFIX are ported from Visual Studio Code,
+ * src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts at commit
+ * 6b7ba7ebf1906f2851a1351f63086533ce772b73 (TERM-PATH-EXT-107).
+ * Copyright (c) Microsoft Corporation. Licensed under the MIT License:
+ * Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+ * associated documentation files (the "Software"), to deal in the Software without restriction,
+ * including without limitation the rights to use, copy, modify, merge, publish, distribute,
+ * sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions: The above copyright notice and this
+ * permission notice shall be included in all copies or substantial portions of the Software.
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT
+ * NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+ * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
 
 /** A scan result is deliberately a plain string range so the recognizer can be
  * tested without a DOM or xterm. All patterns are ASCII-shaped: their offsets
@@ -47,16 +64,93 @@ export function setTerminalPatternColoringEnabled(enabled: boolean): void {
   if (!enabled) for (const highlighter of highlighters) highlighter.reset();
 }
 
+/** TERM-PATH-EXT-107: line/column suffix forms ported from VS Code terminalLinkParsing.ts (see the
+ * header): foo:339, foo:339:12, foo:339:12-789, foo:339:12-341.789, foo:339.12, foo#339 (and #339:12),
+ * foo(339), foo(339,12), foo(339, 12), foo(339:12), foo:(339) and the same with [ ]. Left out on
+ * purpose, because they collide with prose: the space-separated forms ('foo 339', 'foo, 339',
+ * 'foo (339)'), the quoted '"foo",339' form and the 'line 339, column 12' word forms. */
+const TERMINAL_PATH_SUFFIX = String.raw`(?:[:#]\d+(?:[:.]\d+(?:-(?:\d+\.)?\d+)?)?|:?[[(]\d+(?:(?:, ?|:)\d+)?[\])])?`;
+
 const URL_RE = /\bhttps?:\/\/[^\s<>'"`]+/gi;
-const WINDOWS_PATH_RE = /(?<![\w])(?:[A-Za-z]:[\\/](?:[^\r\n<>"|?*]*?\.[A-Za-z][A-Za-z0-9]{0,7}|[^\s<>"|?*]+))(?::\d+(?::\d+)?)?(?=$|[\s),\]}"])/g;
+const WINDOWS_PATH_RE = new RegExp(String.raw`(?<![\w])(?:[A-Za-z]:[\\/](?:[^\r\n<>"|?*]*?\.[A-Za-z][A-Za-z0-9]{0,7}|[^\s<>"|?*]+))` + TERMINAL_PATH_SUFFIX + String.raw`(?=$|[\s),\]}"])`, 'g');
 // Requiring a second slash rejects ubiquitous Claude/Codex slash commands such
 // as `/clear` while retaining ordinary absolute POSIX file paths.
-const POSIX_PATH_RE = /(?<![\w])(?:\/(?:[^\s:()<>]+\/)+[^\s:()<>]+)(?::\d+(?::\d+)?)?(?=$|[\s),\]}"])/g;
+const POSIX_PATH_RE = new RegExp(String.raw`(?<![\w])(?:\/(?:[^\s:()<>]+\/)+[^\s:()<>]+)` + TERMINAL_PATH_SUFFIX + String.raw`(?=$|[\s),\]}"])`, 'g');
 // A sha is a whole word: no letter, digit, underscore or dash on either side (TERM-SHA-WORDBOUND-107),
 // so 'claudeeb75033b' never colours its tail. Path separators, spaces, parens and quotes still bound it.
 const SHA_RE = /(?<![\w-])(?=[0-9a-f]*[a-f])(?!(?:[a-f]{7})(?![0-9a-f]))[0-9a-f]{7,40}(?![\w-])/gi;
 const STATUS_RE = /\b(PASS|FAIL|ERROR|WARN(?:ING)?)\b/gi;
-const VERSION_RE = /(?<![\w.])v?\d+\.\d+\.\d+(?![\w.])/gi;
+// A full stop straight after a version ends the sentence ('for 1.1.107.'), so it is allowed when
+// whitespace or the end of the line follows; '1.1.107.4' is still not a version (TERM-PATH-EXT-107).
+const VERSION_RE = /(?<![\w.])v?\d+\.\d+\.\d+(?!\w|\.(?=\S))/gi;
+
+/** Vendored TLDs that are still files when bare (Human decision via god b11dd5: where a TLD clashes
+ * with an extension, treat it as a file). Reviewed by hand from the 45 clashes; the rest (ai, info,
+ * so, as, ...) stay plain because a domain is the likelier reading. */
+export const TERMINAL_PATH_TLD_FILE_CLASHES: ReadonlySet<string> = new Set([
+  'cab', 'cc', 'coffee', 'dds', 'fish', 'inc', 'java', 'map', 'md', 'mk', 'ml', 'mm', 'mov', 'pl', 'pm',
+  'properties', 'py', 'rs', 'sh', 'sv', 'zip'
+]);
+
+/** Extensions the vendored lists lack but Guppy output uses; none is a TLD. */
+const TERMINAL_PATH_EXTRA_EXTENSIONS = [
+  'asar', 'blockmap', 'env', 'jsonc', 'jsonl', 'lock', 'node', 'out', 'output', 'ps1', 'svelte', 'toml',
+  'tsbuildinfo'
+];
+
+const VENDORED_TLD_SET: ReadonlySet<string> = new Set(VENDORED_TLDS);
+
+/** TERM-PATH-EXT-107: extensions that make a BARE name (no slash or backslash) a file, e.g.
+ * PROTOCOL.md. One constant, built from the vendored text-extensions + binary-extensions lists
+ * (terminalPathData.ts) minus every vendored TLD, plus the reviewed clashes and the Guppy extras.
+ * A span with a slash or backslash is a path whatever its extension; this set gates bare names only,
+ * so github.com / guppyos.com stay plain. Lower case; looked up case-insensitively. */
+export const TERMINAL_PATH_EXTENSIONS: ReadonlySet<string> = new Set([
+  ...VENDORED_FILE_EXTENSIONS.filter((ext) => !VENDORED_TLD_SET.has(ext) || TERMINAL_PATH_TLD_FILE_CLASHES.has(ext)),
+  ...TERMINAL_PATH_EXTRA_EXTENSIONS
+]);
+
+/** TERM-PATH-EXT-107 (Human decision): bare names that are never paths although their extension
+ * is listed, matched case-insensitively on the whole bare token. A span with a slash or backslash
+ * (src/node.js) is still a path. */
+export const TERMINAL_PATH_EXCEPTIONS: ReadonlySet<string> = new Set([
+  'node.js', 'vue.js', 'next.js', 'nuxt.js', 'react.js', 'express.js', 'three.js', 'chart.js',
+  'd3.js', 'deno.js'
+]);
+
+// An extension (at least one letter) with an optional :line:col, ending at whitespace, a closing
+// bracket or quote, or sentence punctuation that is itself followed by one of those. The span is
+// then walked back from the dot to the first whitespace, ( [ { < or quote: the Human's design.
+const RELATIVE_PATH_EXT_RE = new RegExp(String.raw`\.(?=\d*[A-Za-z])([A-Za-z0-9]{1,24})` + TERMINAL_PATH_SUFFIX +
+  String.raw`(?=$|[\s)\]}>"'\x60]|[.,;:!?]+(?=$|[\s)\]}>"'\x60]))`, 'g');
+const PATH_WALK_STOP = /[\s([{<"'`]/;
+
+/** TERM-PATH-EXT-107: the relative/bare path matcher, kept self-contained (with the two sets
+ * above) so a better source can replace it. 'taken' spans (drive/POSIX paths, URLs) are never
+ * split or coloured twice. */
+export function findRelativePaths(text: string, taken: readonly { start: number; end: number }[] = []): TerminalPatternMatch[] {
+  const found: TerminalPatternMatch[] = [];
+  RELATIVE_PATH_EXT_RE.lastIndex = 0;
+  let hit: RegExpExecArray | null;
+  while ((hit = RELATIVE_PATH_EXT_RE.exec(text)) !== null) {
+    const dot = hit.index;
+    let start = dot;
+    while (start > 0 && !PATH_WALK_STOP.test(text[start - 1])) start--;
+    if (start === dot) continue; // nothing before the dot: '.md' alone, or 'x .md'
+    const end = dot + hit[0].length;
+    const span = text.slice(start, end);
+    const name = text.slice(start, dot + 1 + hit[1].length);
+    if (!/[\\/]/.test(span)) {
+      if (!TERMINAL_PATH_EXTENSIONS.has(hit[1].toLowerCase())) continue;
+      if (TERMINAL_PATH_EXCEPTIONS.has(name.toLowerCase())) continue;
+      if (!/^[\w.-]+$/.test(name)) continue; // a bare file name is one word: not 'x=a.md' or 'a,b.md'
+    }
+    if (taken.some((m) => start < m.end && end > m.start)) continue;
+    found.push({ kind: 'path', start, end, text: span });
+  }
+  return found;
+}
+
 const ERROR_LINE_RE = /\b(?:error|exception|fatal|traceback)\s*(?::|\bat\b)/i;
 
 function addMatches(matches: TerminalPatternMatch[], kind: TerminalPatternKind, re: RegExp, text: string): void {
@@ -78,6 +172,8 @@ export function findTerminalPatterns(text: string, agentNames: readonly string[]
   addMatches(matches, 'URL', URL_RE, text);
   addMatches(matches, 'path', WINDOWS_PATH_RE, text);
   addMatches(matches, 'path', POSIX_PATH_RE, text);
+  // Drive and POSIX paths (they handle spaces) and URLs keep their own matches.
+  matches.push(...findRelativePaths(text, matches.filter((m) => m.kind === 'path' || m.kind === 'URL')));
   addMatches(matches, 'sha', SHA_RE, text);
   STATUS_RE.lastIndex = 0;
   let status: RegExpExecArray | null;
