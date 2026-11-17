@@ -227,11 +227,12 @@ async function writeInboundIndex(file: string, index: InboundLinkIndex): Promise
 }
 
 /** Build/refresh the persisted whole-floor index. `error` is deliberately a deletion veto. */
-export async function refreshInboundLinkIndex(hiveRoot: string, workRoot: string): Promise<{ index: InboundLinkIndex | null; error: string | null }> {
+export async function refreshInboundLinkIndex(hiveRoot: string, workRoot: string): Promise<{ index: InboundLinkIndex | null; error: string | null; rebuilt: boolean }> {
   const floor = dirname(resolve(workRoot)); const file = inboundIndexFile(hiveRoot);
   try {
     const deadline = Date.now() + SCRATCH_INBOUND_INDEX_TIMEOUT_MS;
     const prior = await readInboundIndex(file, floor); const dirs = prior ? { ...prior.dirs } : {};
+    let rebuilt = !prior;
     if (!prior) await scanInboundDir(floor, dirs, deadline);
     else {
       const changed: string[] = [];
@@ -252,11 +253,12 @@ export async function refreshInboundLinkIndex(hiveRoot: string, workRoot: string
         for (const old of Object.keys(dirs)) if (under(old, path)) delete dirs[old];
         await scanInboundDir(path, dirs, deadline);
       }
+      rebuilt = changed.length > 0;
     }
     const index: InboundLinkIndex = { v: 1, floor, dirs, targets: indexTargets(dirs) };
     await writeInboundIndex(file, index);
-    return { index, error: null };
-  } catch (e) { return { index: null, error: String(e instanceof Error ? e.message : e) }; }
+    return { index, error: null, rebuilt };
+  } catch (e) { return { index: null, error: String(e instanceof Error ? e.message : e), rebuilt: false }; }
 }
 
 /** Resolve all recorded incoming links (including gitdir files) to a target subtree. */
@@ -467,11 +469,11 @@ export class ScratchDiskManager {
     if (!root || !work) return { reaped: [], kept: [] };
     const state = readScratchState(root); const rows = await this.processes(); const result: ScratchSweepResult = { reaped: [], kept: [] };
     const initialIndex = await refreshInboundLinkIndex(root, work);
-    if (!initialIndex.index) {
+    if (!initialIndex.index || initialIndex.rebuilt) {
       // Scanning is an all-or-nothing safety proof. A stale, partial, timed-out
       // or unreadable floor must never be treated as an empty inbound-link set.
       for (const record of state.records) {
-        const reason = `inbound-index-unavailable:${initialIndex.error ?? 'unknown'}`;
+        const reason = initialIndex.index ? 'inbound-index-rebuilt-no-delete-this-sweep' : `inbound-index-unavailable:${initialIndex.error ?? 'unknown'}`;
         result.kept.push({ path: record.path, owner: record.owner, reason });
         this.notify(record.owner, record.card, record.path, reason);
       }
@@ -504,7 +506,7 @@ export class ScratchDiskManager {
       // Last-moment recheck: a changed directory or failed scan vetoes this
       // deletion, even though the initial full-floor index was clean.
       const finalIndex = await refreshInboundLinkIndex(root, work);
-      if (!finalIndex.index) { result.kept.push({ path: record.path, owner: record.owner, reason: `inbound-index-unavailable:${finalIndex.error ?? 'unknown'}` }); keptRecords.push(record); continue; }
+      if (!finalIndex.index || finalIndex.rebuilt) { result.kept.push({ path: record.path, owner: record.owner, reason: finalIndex.index ? 'inbound-index-rebuilt-no-delete-this-sweep' : `inbound-index-unavailable:${finalIndex.error ?? 'unknown'}` }); keptRecords.push(record); continue; }
       const finalFacts = { ...facts, inboundLinks: inboundLinksFromIndex(finalIndex.index, record.path), live: processUses(record.path, await this.processes()) };
       const finalPlan = planScratchReap(finalFacts);
       if (finalPlan.action !== 'reap') { result.kept.push({ path: record.path, owner: record.owner, reason: finalPlan.reason }); keptRecords.push(record); continue; }
