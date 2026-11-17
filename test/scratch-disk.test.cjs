@@ -94,19 +94,23 @@ test('manager authenticates owner, refuses a common repo, and only reaps a regis
   assert.equal(fs.existsSync(jailRoot), false);
 });
 
-test('a partial inbound scan failure vetoes every deletion in that sweep', { skip: process.platform !== 'win32' }, async () => {
-  const base = path.join(jail, 'partial-scan-veto'); const hive = path.join(base, 'hive'); const work = path.join(base, '_work');
-  const candidate = path.join(work, 'dwight-safe'); const brokenParent = path.join(base, 'MunderDev'); const broken = path.join(brokenParent, 'gone');
-  fs.mkdirSync(candidate, { recursive: true }); fs.mkdirSync(brokenParent, { recursive: true });
+test('a broken link protects its candidate but not an unrelated done tree, and is reported', { skip: process.platform !== 'win32' }, async () => {
+  const base = path.join(jail, 'broken-link-scope'); const hive = path.join(base, 'hive'); const work = path.join(base, '_work');
+  const candidate = path.join(work, 'dwight-broken'); const unrelated = path.join(work, 'dwight-clean'); const broken = path.join(candidate, 'nested', 'gone');
+  fs.mkdirSync(path.dirname(broken), { recursive: true }); fs.mkdirSync(unrelated, { recursive: true });
   fs.symlinkSync(path.join(base, 'does-not-exist'), broken, 'junction');
   const manager = new scratch.ScratchDiskManager(() => hive, () => true, async () => []);
   assert.equal(manager.register('dwight', candidate, 'CARD-1').ok, true);
-  const result = await manager.sweep();
-  assert.deepEqual(result.reaped, []);
-  assert.equal(result.kept.length, 1);
-  assert.match(result.kept[0].reason, /^inbound-index-unavailable:broken-link:/);
+  assert.equal(manager.register('dwight', unrelated, 'CARD-1').ok, true);
+  let result;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    result = await manager.sweep();
+    if (result.reaped.length) break;
+  }
+  assert.deepEqual(result.reaped, [path.resolve(unrelated)]);
+  assert.deepEqual(result.brokenLinks, [{ path: broken, target: null }]);
+  assert.match(result.kept.find((row) => row.path === path.resolve(candidate)).reason, /inbound-node-modules-link/);
   assert.equal(fs.existsSync(candidate), true);
-  // Keep this deliberately broken junction out of later full-floor fixtures.
   fs.rmdirSync(broken);
 });
 
@@ -127,6 +131,16 @@ test('link-safe scratch removal preserves top, scoped and deep junction targets 
   await scratch.removeScratchRoot(fixture.work, fixture.tree);
   assert.equal(fs.existsSync(fixture.tree), false);
   assertLiveFixture(fixture.live);
+});
+
+test('a junction injected after the initial walk is never recursively followed', { skip: process.platform !== 'win32' }, async () => {
+  const base = path.join(jail, 'late-junction'); const root = path.join(base, 'tree'); const live = path.join(base, 'live');
+  fs.mkdirSync(root, { recursive: true }); fs.mkdirSync(live, { recursive: true });
+  fs.writeFileSync(path.join(root, 'listed-first'), 'remove'); fs.writeFileSync(path.join(live, 'keep'), 'live');
+  await assert.rejects(scratch.safeRemoveTree(root, async () => fs.symlinkSync(live, path.join(root, 'late'), 'junction')));
+  assert.equal(fs.readFileSync(path.join(live, 'keep'), 'utf8'), 'live');
+  assert.equal(fs.existsSync(path.join(root, 'late')), true);
+  fs.rmdirSync(path.join(root, 'late')); fs.rmdirSync(root);
 });
 
 test('link-safe scratch removal preserves junction targets under installed Electron as Node', { skip: process.platform !== 'win32' }, () => {
@@ -194,5 +208,6 @@ test('mutant pins: each never-reap guard and source-input key is present', () =>
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'scratchDisk.ts'), 'utf8');
   const safe = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'fsSafeRemove.ts'), 'utf8');
   for (const token of ['if (f.dirty)', 'if (!f.onOrigin)', 'if (f.live)', 'if (f.inboundLinks.length)', 'package-lock.json', 'package.json', 'const tools = join(project, \'tools\')', 'path-changed-or-missing', 'fixture-protected', 'worktreeGitdirPointsInto', 'inbound-index-rebuilt-no-delete-this-sweep', 'scan-timeout']) assert.ok(src.includes(token), token);
-  for (const token of ['removeReparsePointSync', 'unlinkReparsePointsUnderSync', 'findReparsePointsSync', 'refused: reparse point remained']) assert.ok(safe.includes(token), token);
+  for (const token of ['removeReparsePointSync', 'unlinkReparsePointsUnderSync', 'findReparsePointsSync', 'beforeRootRmdir', 'directory changed during removal']) assert.ok(safe.includes(token), token);
+  assert.equal(safe.includes('rm(path, { recursive'), false, 'safe removal must not delegate to recursive rm');
 });
