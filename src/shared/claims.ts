@@ -200,7 +200,11 @@ export type MacKeyLoad =
 export interface MacKeyProvider {
   /** Never creates a key. */
   load(): MacKeyLoad;
-  /** Creates and stores a new key. Main calls it on first use (no ledger anywhere yet) and for a Human rekey only. */
+  /**
+   * Creates and stores a new key when none exists. Main calls it on first use (no ledger anywhere
+   * yet) and for a Human rekey when no key loads. A file-backed key shared by several floors is
+   * never replaced: a key file that exists but does not decrypt is refused (CLAIMS-REKEY-SHARED-KEY).
+   */
   create(): MacKeyLoad;
 }
 
