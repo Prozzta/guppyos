@@ -589,7 +589,27 @@ if (!WIN) {
   const DIR = tempDir('phnh-');
   fs.writeFileSync(path.join(DIR, 'idle.js'), "process.stdout.write('phnh-root-up'); setInterval(() => {}, 1000);\n");
   fs.writeFileSync(path.join(DIR, 'gone.js'), '\n');
-  const realPtySpawn = nodePty.spawn;
+  // TEST-TEMP-LEAK-UNDER-LOAD: every real terminal of this file is spawned here, and its root
+  // (cwd = DIR) is held by handle at once, from node-pty's handoff: a hold of this file's own, so a
+  // root that dies before any other hold (THE GAP) is still held and its pid stays its own. DIR is
+  // removed only once every root has EXITED (a close or an exit report does not wait for the
+  // process), with no swallow: a root that will not exit, or a DIR that will not go, fails here.
+  const { awaitHeldExit } = require('./tools/await-exit.cjs');
+  const idHold = loadTs(IDF);
+  const holds = [];
+  const ptySpawn = nodePty.spawn;
+  const realPtySpawn = function spawn(...a) {
+    const proc = ptySpawn.apply(this, a);
+    const hold = idHold.holdRoot(proc.pid, 'win32', idHold.rootHandoff(proc));
+    assert.ok(hold, `the root is held by handle from node-pty's handoff. ${HINT}`);
+    holds.push({ pid: proc.pid, hold });
+    return proc;
+  };
+  test.after(async () => {
+    for (const { pid, hold } of holds) { if (hold.alive()) { try { process.kill(pid); } catch { /* gone */ } } }
+    try { await awaitHeldExit(holds); } finally { for (const h of holds) h.hold.release(); }
+    fs.rmSync(DIR, { recursive: true, force: true });
+  });
   const { armEarlyKill } = loadTs(PTYF);
   const pause = new Int32Array(new SharedArrayBuffer(4));
 

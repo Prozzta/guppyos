@@ -123,6 +123,7 @@ const KNOWN = {
   'rebrand-a-182.test.cjs': 1,
   'rebrand-updater-base-183.test.cjs': 1,
   'test-runner-glob.test.cjs': 1,
+  'tools/await-exit.cjs': 1, // TEST-TEMP-LEAK-UNDER-LOAD: the wait by handle for an exited child's orphans
   'tools/codex-exit-repro.cjs': 1,
   'tools/file-watchdog.cjs': 1,
   'tools/layer-b-core.cjs': 4,

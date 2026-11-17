@@ -55,6 +55,8 @@ if (process.platform !== 'win32') {
   assert.equal(os.homedir(), JAIL, 'home is redirected before any hive object is built');
   const loadTs = require('./load-ts.cjs');
   const { armEarlyKill, PtyManager } = loadTs('src/main/pty.ts');
+  const { holdRoot, rootHandoff } = loadTs('src/main/procIdentity.ts');
+  const { awaitHeldExit } = require('./tools/await-exit.cjs');
   const NODE_PTY = path.dirname(require.resolve('node-pty/package.json'));
   const { WindowsTerminal } = require(path.join(NODE_PTY, 'lib', 'windowsTerminal.js'));
   const ROOT = path.join(JAIL, 'root.js');
@@ -64,13 +66,19 @@ if (process.platform !== 'win32') {
   process.on('uncaughtException', (e) => { uncaught.push(e); });
   const owner = { isDestroyed: () => false, send: () => {} };
   const m = new PtyManager();
-  const pids = [];
   let seq = 0;
 
+  // TEST-TEMP-LEAK-UNDER-LOAD: each root is held by handle from its spawn (its pid stays its own, so
+  // the kill below can never reach a stranger), and the jail is removed only once every root has
+  // EXITED: killAllAsync waits for node-pty's exit report, not the process, and a root still exiting
+  // under suite load held the jail (EPERM, swallowed: TEMP LEAK). A root that will not exit, or a jail
+  // that still will not go, fails this hook, naming it.
+  const holds = [];
   test.after(async () => {
     await m.killAllAsync(2000).catch(() => {});
-    for (const pid of pids) { try { process.kill(pid); } catch { /* gone */ } }
-    try { fs.rmSync(JAIL, { recursive: true, force: true }); } catch { /* a pipe may still hold it */ }
+    for (const { pid } of holds) { try { process.kill(pid); } catch { /* gone */ } }
+    try { await awaitHeldExit(holds); } finally { for (const h of holds) h.hold.release(); }
+    fs.rmSync(JAIL, { recursive: true, force: true });
   });
 
   async function spawnSilent() {
@@ -78,7 +86,9 @@ if (process.platform !== 'win32') {
     const r = await m.spawn({ id, cwd: JAIL, command: process.execPath, args: [ROOT], cols: 80, rows: 24, env: {} }, owner);
     assert.equal(r.ok, true, `spawn: ${r.error}`);
     const proc = m.sessions.get(id).proc;
-    pids.push(proc.pid);
+    const hold = holdRoot(proc.pid, 'win32', rootHandoff(proc));
+    assert.ok(hold, 'the root is held by handle (resources/fs-handle built)');
+    holds.push({ pid: proc.pid, hold });
     return proc;
   }
 

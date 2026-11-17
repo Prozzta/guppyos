@@ -73,8 +73,26 @@ let taskkillArgs = null;    // when an array, every taskkill's args are recorded
 const holder = pidHolder();
 const heldPids = new Set();
 const unheldSweeps = [];    // a real taskkill of a pid this file does not hold: must stay empty
+// TEST-TEMP-LEAK-UNDER-LOAD: every run's root and inner have their cwd in DIR, and the run's finally
+// does not wait for either to EXIT (alive() polls a pid; the close and the exit report do not wait
+// for the process). Each root is held by handle at its spawn (procIdentity, from node-pty's
+// handoff). The inner is the root's detached child, not ours, so no hold of this process can open
+// it: its own-procs row (pid, CreationDate, name) is recorded while it runs as ours, and it is waited
+// for by handle in PowerShell, identity checked again (await-exit awaitRowsExit). DIR goes only
+// after both waits, with no swallow: a process that will not exit, or a DIR that will not go, fails.
+const { holdRoot, rootHandoff } = loadTs('src/main/procIdentity.ts');
+const { awaitHeldExit, awaitRowsExit } = require('./tools/await-exit.cjs');
+const { lookupPids, childrenOf } = require('./tools/own-procs.cjs');
+const holds = [];
+const innerRows = [];
 test.after(async () => {
+  for (const { pid, hold } of holds) { if (hold.alive()) { try { process.kill(pid); } catch { /* gone */ } } }
+  try {
+    await awaitHeldExit(holds);
+    await awaitRowsExit(innerRows);
+  } finally { for (const h of holds) h.hold.release(); }
   await holder.release();
+  fs.rmSync(DIR, { recursive: true, force: true });
   assert.deepEqual(unheldSweeps, [], 'EVERY REAL taskkill NAMES ONLY HELD PIDS: a sweep of any other pid can hit a stranger that reused it');
 });
 cp.spawn = function spawn(cmd, args, ...rest) {
@@ -120,7 +138,11 @@ async function run(Pty, end, { after, beforeLiveness } = {}) {
   try {
     const r = await m.spawn({ id, cwd: dir, command: process.execPath, args: [path.join(DIR, 'root.js'), dir], cols: 80, rows: 24, env: {} }, owner);
     assert.ok(r.ok, `spawn: ${r.error}`);
-    const both = () => fs.existsSync(path.join(dir, 'inner.json')) && fs.existsSync(path.join(dir, 'root.json'));
+    const rootProc = m.sessions.get(id).proc;
+    const own = holdRoot(rootProc.pid, 'win32', rootHandoff(rootProc));
+    assert.ok(own, 'the root is held by handle (resources/fs-handle built)');
+    holds.push({ pid: rootProc.pid, hold: own });
+    const both =() => fs.existsSync(path.join(dir, 'inner.json')) && fs.existsSync(path.join(dir, 'root.json'));
     for (let i = 0; i < 200 && !both(); i++) await sleep(25);
     inner = JSON.parse(fs.readFileSync(path.join(dir, 'inner.json'), 'utf8')).pid;
     root = JSON.parse(fs.readFileSync(path.join(dir, 'root.json'), 'utf8')).root;
@@ -131,6 +153,13 @@ async function run(Pty, end, { after, beforeLiveness } = {}) {
       assert.equal(await holder.hold(pid), true, `pid ${pid} is held before the kill`);
       heldPids.add(pid);
     }
+    // The inner's row, read while its pid is held and it runs as the root's child: the identity the
+    // teardown's wait checks again.
+    const ids = lookupPids([root, inner]);
+    const rootRow = ids.find((row) => row.pid === root);
+    const innerRow = rootRow && childrenOf(ids, rootRow).find((row) => row.pid === inner);
+    assert.ok(innerRow, `the inner ${inner} is listed as the root's child while it runs`);
+    innerRows.push(innerRow);
     const proc = m.sessions.get(id).proc;
     rawClose = proc.kill.bind(proc);
     proc.kill = (...a) => { closes.n += 1; return rawClose(...a); };

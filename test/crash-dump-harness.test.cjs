@@ -16,6 +16,7 @@ const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
 const { join } = require('node:path');
 const { createSandbox, removeSandbox } = require('./electron-harness/run.cjs');
+const { awaitOrphansExit } = require('./tools/await-exit.cjs');
 
 const MARKER = '__CRASHDUMP_RESULT__';
 function run(args) {
@@ -25,11 +26,19 @@ function run(args) {
     const child = spawn(electron, [join(__dirname, 'electron-harness', 'crash-dump-main.cjs'), '--sandbox', sandbox, ...args], {
       cwd: join(__dirname, '..'), env: { ...process.env, MUNDER_DEV: '' }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true
     });
+    const bornMs = Date.now();
     let out = ''; let err = '';
     child.stdout.on('data', (d) => { out += d; });
     child.stderr.on('data', (d) => { err += d; });
     child.on('close', (code) => {
-      removeSandbox(sandbox).then(() => {
+      // TEST-TEMP-LEAK-UNDER-LOAD: 'close' is the Electron MAIN's exit. Its own children (Crashpad
+      // handler, GPU, utility) can outlive it under suite load, with the sandbox in their paths, and
+      // put it back after removeSandbox found it gone (TEMP LEAK rr164dump-* in a passing run). So the
+      // sandbox is removed only once they have exited too; one that will not exit fails the run.
+      awaitOrphansExit({ pid: child.pid, bornMs, goneBy: Date.now() }).then((left) => {
+        if (left.length) console.log(`# electron left ${left.length} process(es) running at its exit: ${left.map((r) => r.name).join(', ')}`);
+        return removeSandbox(sandbox);
+      }).then(() => {
         const at = out.lastIndexOf(MARKER);
         if (at < 0) { reject(new Error(`no result (exit ${code})\n${out}\n${err}`)); return; }
         resolve(JSON.parse(out.slice(at + MARKER.length).split('\n')[0]));
