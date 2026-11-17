@@ -267,7 +267,10 @@ test('(1) a log that throws never escapes (best-effort rows)', () => {
 test('(1) REAL loop delay: Node\'s histogram sees a blocked main thread in the right second', async () => {
   const { monitorEventLoopDelay, performance } = require('node:perf_hooks');
   const rows = [];
-  const origin = Date.now();
+  // STARTUP-TIMING-162-LOAD-FLAKE-108: the recorder starts a few ms after its origin here, on
+  // purpose, as it does on a loaded machine (and in the app). So the stop timer's delay is never
+  // the round window, and nothing below may recognise that timer by its delay.
+  const origin = Date.now() - 7;
   // LOAD-FLAKES-105: judge the block against the ACTUAL sample times, not the planned schedule. On a
   // loaded machine this test's own timers fire late, so the block runs later than 1.15 s and the
   // sample that sees it (often the stop's final one) is later than 2.7 s; and an unrelated stall can
@@ -284,10 +287,14 @@ test('(1) REAL loop delay: Node\'s histogram sees a blocked main thread in the r
     }
   };
   const rec = new StartupTiming({ origin, now, log: (x) => rows.push(x), histogram: () => monitorEventLoopDelay({ resolution: 10 }), windowMs: 2_600,
-    setInterval: (fn, ms) => setInterval(() => captureSample(fn), ms),
-    // stop() takes a last sample before it writes end. Capture its own first clock read too;
-    // end.t is a later clock read and can legitimately differ by one millisecond under load.
-    setTimeout: (fn, ms) => setTimeout(() => { if (ms === 2_600) captureSample(fn); else fn(); }, ms) });
+    setInterval: (fn, ms) => setInterval(() => captureSample(fn), ms) });
+  // stop() takes a last sample before it writes end. Capture its own first clock read too;
+  // end.t is a later clock read and can legitimately differ by one millisecond under load.
+  // The capture is on stop() itself, whichever timer calls it: the stop timer's delay is the
+  // window minus the time start() ran after the origin (2 599 ms when that is 1 ms), so a
+  // capture keyed on a 2 600 ms delay missed the last sample whenever start() ran late.
+  const stop = rec.stop.bind(rec);
+  rec.stop = () => captureSample(stop);
   rec.start();
   await new Promise((res) => setTimeout(res, 1_150));
   const blockFrom = Date.now() - origin;
