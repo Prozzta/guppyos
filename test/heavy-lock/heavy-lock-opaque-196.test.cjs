@@ -541,13 +541,15 @@ const MUTANTS = [
     edits: [["    if (!suite && await this.visible(agentId, r, run, single)) {", '    if (false) {']],
     killer: 'visibleLight', dies: /THE CALL'S OWN SINGLE FILE IS LIGHT/ },
   { name: 'no inheritance (a nested run acquires on its own)', file: HJF, module: true,
-    edits: [['    if (parent && parent.agentId === agentId && this.runAlive(r.parentRun!)) {', '    if (false) {']],
+    // HEAVY-LOCK-SCRIPT-ELECTRON-LIGHT-108 appended an Electron clause to this condition: these three
+    // anchors stop before it (that clause has its own census in heavy-lock-script-electron-108).
+    edits: [['    if (parent && parent.agentId === agentId && this.runAlive(r.parentRun!) && ', '    if (false && ']],
     killer: 'nested', dies: /A NESTED RUN OF A HOLDER SHARES/ },
   { name: 'a stale run is inherited (no liveness check)', file: HJF, module: true,
-    edits: [['    if (parent && parent.agentId === agentId && this.runAlive(r.parentRun!)) {', '    if (parent && parent.agentId === agentId) {']],
+    edits: [['    if (parent && parent.agentId === agentId && this.runAlive(r.parentRun!) && ', '    if (parent && parent.agentId === agentId && ']],
     killer: 'nested', dies: /A STALE GUPPY_TEST_RUN \(ITS RUN HAS EXITED\) GRANTS NOTHING/ },
   { name: "another agent's run is inherited", file: HJF, module: true,
-    edits: [['    if (parent && parent.agentId === agentId && this.runAlive(r.parentRun!)) {', '    if (parent && this.runAlive(r.parentRun!)) {']],
+    edits: [['    if (parent && parent.agentId === agentId && this.runAlive(r.parentRun!) && ', '    if (parent && this.runAlive(r.parentRun!) && ']],
     killer: 'nested', dies: /ANOTHER AGENT'S RUN IS NOT INHERITED/ },
   { name: 'a lease does not keep its agent busy (only call windows do)', file: HJF, module: true,
     edits: [['    for (const l of this.leases.values()) if (procLive(byPid, l.pid, l.createdMs)) busy.add(l.agentId);\n', '']],
@@ -587,10 +589,12 @@ const MUTANTS = [
     killer: 'wiring', dies: /EVERY PRETOOLUSE CALL IS NOTED/ },
   // The preload itself (a real process loads the mutated file).
   { name: 'preload: no fast path (every node process asks)', file: PRE, preload: true,
-    edits: [["if (require.main !== module && !(testRun || suiteRunner || preloadKind)) return;", "if (require.main !== module && false && !(testRun || suiteRunner || preloadKind)) return;"]],
+    // HEAVY-LOCK-SCRIPT-ELECTRON-LIGHT-108: a hive process passes the first return (its spawn guard);
+    // what keeps a non-test process from asking is the return before the lease.
+    edits: [["if (!leasing) return;\n", ""]],
     killer: 'e2eNoop', dies: /A NODE PROCESS THAT IS NOT A TEST RUN NEVER ASKS/ },
   { name: 'preload: GUPPY_TEST_RUN not passed on (a nested run waits behind another agent)', file: PRE, preload: true,
-    edits: [['    process.env.GUPPY_TEST_RUN = a.run;\n', '']],
+    edits: [['if (grant) process.env.GUPPY_TEST_RUN = grant.run;\n', '']],
     killer: 'e2eNested', dies: /A NESTED RUN OF A VISIBLE FILE RUNS AT ONCE/ },
   { name: 'preload: the lease is not released at exit', file: PRE, preload: true,
     edits: [["      process.on('exit', () => { ask({ op: 'release', leaseId }, 5_000); });\n", '']],
