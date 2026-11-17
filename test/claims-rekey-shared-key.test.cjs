@@ -15,8 +15,15 @@ require('./tools/own-job.cjs');
  *   R7 a lock held by a live holder is waited for a bounded time, then the write fails visibly.
  *   R8 an anchor set inside a census batch reads the file fresh: another instance's entry survives.
  *   plus: 4 processes x 40 concurrent record and anchor writes keep every entry (real sources).
+ * Jim's d94d42a3 audit (SHOULD 1/2, NIT 1):
+ *   R9 the unreadable-key alert names the key file path, the recovery step and what a rekey does to ledgers.
+ *   R10 the publish under the lock survives a reader holding the file open and transient EPERM, and a
+ *      persistent EPERM fails bounded with no tmp or lock left (from Jim's rk-probe.cjs).
+ *   R11 a record or anchor write that throws never escapes the store: append/rekey/resetAnchor/readLedger
+ *      return their result shape and log.
+ *   R12 a key file that vanishes between create()'s check and its load is 'missing', not 'unreadable'.
  * Then a mutant census: rename-over, lock dropped, rekey mints, batch snapshot reused under the lock,
- * and rename-over + rekey mints together (int 4e39b652's behaviour).
+ * rename-over + rekey mints together (int 4e39b652's behaviour), then K6-K10 for R9-R12.
  * Synthetic floors (FLOOR-A/B/C) in temp dirs only. HOME and USERPROFILE are jailed and asserted
  * before any product code loads.
  */
@@ -72,12 +79,13 @@ function floor(name) {
   fs.mkdirSync(path.join(root, 'agents'), { recursive: true });
   return root;
 }
-function open(mods, root, u, keys = u.keys) {
+function open(mods, root, u, keys = u.keys, over = {}) {
   const alerts = [];
+  const logs = [];
   let t = Date.parse('2026-11-10T08:00:00Z');
-  const store = new mods.store.ClaimStore({ hiveRoot: root, keys, keyRecord: u.record, headAnchor: u.anchors, now: () => new Date(t += 1000), alert: (r) => alerts.push(r) });
+  const store = new mods.store.ClaimStore({ hiveRoot: root, keys, keyRecord: u.record, headAnchor: u.anchors, now: () => new Date(t += 1000), alert: (r) => alerts.push(r), log: (r) => logs.push(r), ...over });
   STORES.push(store);
-  return { store, alerts };
+  return { store, alerts, logs };
 }
 const note = (text) => ({ t: 'claim', kind: 'fact', text });
 async function ok(p) { const r = await p; assert.equal(r.ok, true, JSON.stringify(r)); return r.id; }
@@ -252,9 +260,197 @@ function batchSetReadsFresh(mods) {
   assert.equal(after.get(X, 'andy')?.head, '3'.repeat(64));
 }
 
+/** Jim SHOULD 1: the unreadable-key alert names the full key path and the recovery, for first use and rekey. */
+async function unreadableAlertNamesFileAndRecovery(mods) {
+  const u = userData(mods);
+  fs.writeFileSync(u.keyFile, 'not a key this profile can decrypt');
+  const { store, alerts } = open(mods, floor('FLOOR-D'), u);
+  assert.equal((await store.appendRecord('andy', note('first'), 'endpoint')).ok, false);
+  store.close();
+  const { B } = await lostFloors(mods, ['B']);
+  const { store: rs, alerts: ra } = open(mods, B, u);
+  assert.equal((await rs.rekey(true)).ok, false);
+  rs.close();
+  for (const [where, list] of [['first use', alerts], ['rekey', ra]]) {
+    const row = list.find((x) => /does not decrypt/.test(x.reason ?? ''));
+    assert.ok(row, `${where}: alerted`);
+    assert.equal(row.file, u.keyFile, `${where}: the row names the full key path`);
+    assert.ok(row.reason.includes(u.keyFile), `${where}: the reason names the full key path`);
+    assert.equal(typeof row.recovery, 'string', `${where}: the row carries the recovery`);
+    assert.ok(row.recovery.includes(`move ${u.keyFile} out of that folder`), `${where}: the exact step names the file`);
+    assert.match(row.recovery, /quit every Guppy instance/);
+    assert.match(row.recovery, /Keep the file/);
+    assert.match(row.recovery, /ask god to run it for that floor/);
+    assert.match(row.recovery, /Until a floor is rekeyed, all of its claim ledgers stay read-only/);
+    assert.match(row.recovery, /accepted on their prev chain only/);
+  }
+  assert.ok(fs.readFileSync(u.keyFile, 'utf8').startsWith('not a key'), 'no auto-replace');
+}
+
+/** EPERM as a rename over a file someone holds open fails on Windows (Jim's eperm probe). */
+const eperm = () => Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' });
+const atomic = loadTs(path.join(ROOT, 'src/main/atomicJson.ts'));
+/**
+ * This tree's fs-handle addon, pinned. Under ELECTRON_RUN_AS_NODE atomicJson looks in the runtime's
+ * resourcesPath first, and an installed Guppy older than ASYNC-RENAME-POSIX-107 ships an addon with no
+ * posixRename; the case tests what this branch ships.
+ */
+function treeAddon() {
+  if (process.platform !== 'win32') return null;
+  const m = { exports: {} };
+  process.dlopen(m, path.join(ROOT, 'resources', 'fs-handle', 'bin', 'guppy_fs_handle.node'));
+  assert.equal(typeof m.exports.posixRename, 'function', "this tree's addon has posixRename");
+  return m.exports;
+}
+
+/** Jim SHOULD 2a: the locked rename retries (POSIX rename, then bounded EPERM/EBUSY retry) and leaves no tmp. */
+async function renameRetriesUnderLock(mods) {
+  atomic.__setRenameAddonForTest(treeAddon());
+  try { await renameRetriesUnderLockWith(mods); } finally { atomic.__setRenameAddonForTest(undefined); }
+}
+async function renameRetriesUnderLockWith(mods) {
+  const u = userData(mods);
+  const X = floor('FLOOR-X');
+  const file = path.join(u.ud, HEAD_ANCHOR_FILE);
+  u.anchors.set(X, 'andy', { head: 'a'.repeat(64), lastId: 'c-0' });
+  const leftovers = () => fs.readdirSync(u.ud).filter((f) => f.endsWith('.tmp') || f.endsWith('.lock'));
+  // 1. A reader holding the file open (Windows: a plain rename over it is EPERM).
+  if (process.platform === 'win32') {
+    const fd = fs.openSync(file, 'r');
+    try { assert.doesNotThrow(() => u.anchors.set(X, 'andy', { head: 'b'.repeat(64), lastId: 'c-1' }), 'a set over a reader holding the file open'); } finally { fs.closeSync(fd); }
+    assert.equal(new mods.keys.FileHeadAnchorStore(file).get(X, 'andy')?.head, 'b'.repeat(64), 'set over an open reader');
+  }
+  // 2. Without the POSIX rename: two EPERMs then success is retried; EPERM every time fails bounded, no tmp left.
+  const realRename = fs.renameSync;
+  atomic.__setRenameAddonForTest(null);
+  let calls = 0;
+  try {
+    fs.renameSync = (...a) => { if (++calls <= 2) throw eperm(); return realRename(...a); };
+    u.record.set(X, 'key-retried');
+    assert.equal(new mods.keys.FileLedgerKeyRecord(path.join(u.ud, KEY_RECORD_FILE)).get(X), 'key-retried', 'a transient EPERM was retried');
+    calls = 0;
+    fs.renameSync = () => { calls++; throw eperm(); };
+    assert.throws(() => u.anchors.set(X, 'andy', { head: 'c'.repeat(64), lastId: 'c-2' }), /EPERM/);
+    assert.ok(calls > 1 && calls <= 6, `the retry is bounded (${calls} attempts)`);
+  } finally { fs.renameSync = realRename; atomic.__setRenameAddonForTest(treeAddon()); }
+  assert.deepEqual(leftovers(), [], 'no tmp or lock left after a failed publish');
+  // 3. Jim's eperm probe, short: a reader process in a tight readFileSync loop while sets run.
+  const src = `const fs=require('fs');const e=Date.now()+1800;let n=0;while(Date.now()<e){try{fs.readFileSync(${JSON.stringify(file)});n++}catch{}}process.stdout.write(String(n))`; // write, not console.log: FORCE_COLOR would colour a number
+  const rd = spawn(process.execPath, ['-e', src], { env: { ...process.env, HOME: JAIL, USERPROFILE: JAIL }, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+  let reads = '';
+  rd.stdout.on('data', (d) => { reads += d; });
+  const exited = new Promise((r) => rd.on('close', r)); // close: stdout drained too
+  await new Promise((r) => setTimeout(r, 400));
+  let sets = 0;
+  const fails = {};
+  for (const end = Date.now() + 1000; Date.now() < end;) {
+    try { u.anchors.set(X, 'andy', { head: (sets + 1).toString(16).padStart(64, '0'), lastId: `c-${sets}` }); sets++; }
+    catch (e) { fails[e.code ?? e.message.slice(0, 40)] = (fails[e.code ?? e.message.slice(0, 40)] ?? 0) + 1; }
+  }
+  await exited;
+  assert.ok(Number(reads) > 0, 'the reader ran');
+  assert.deepEqual(fails, {}, `every set over a busy reader succeeded (${sets} ok)`);
+  assert.deepEqual(leftovers(), []);
+}
+
+/** A store whose set() throws, as a busy lock or an exhausted rename does. */
+function throwingSet(target, isBroken) {
+  return new Proxy(target, { get(t, k) {
+    if (k === 'set') return (...a) => { if (isBroken()) throw eperm(); return t.set(...a); };
+    const v = t[k];
+    return typeof v === 'function' ? v.bind(t) : v;
+  } });
+}
+const failedRows = (logs, kind) => logs.filter((r) => r.kind === kind).map((r) => r.at);
+
+/** Jim SHOULD 2b: every anchor and key-record write a store makes returns its result shape and logs; nothing throws. */
+async function storeSitesNeverThrow(mods) {
+  let broken = false;
+  const isBroken = () => broken;
+  // keys() first use (store.ts keys) and appendNow's record after create(): append returns {ok:false}.
+  for (const keyFirst of [true, false]) {
+    const u = userData(mods);
+    if (keyFirst) assert.equal(u.keys.create().ok, true);
+    const F = floor('FLOOR-F');
+    broken = true;
+    const { store, logs } = open(mods, F, u, u.keys, { keyRecord: throwingSet(u.record, isBroken) });
+    const r = await store.appendRecord('andy', note('first'), 'endpoint').catch((e) => ({ threw: String(e) }));
+    assert.equal(r.ok, false, `append (key file ${keyFirst ? 'present' : 'absent'}): ${JSON.stringify(r)}`);
+    assert.match(r.error, /the ledger key id could not be recorded \(Error: EPERM/);
+    assert.deepEqual(failedRows(logs, 'claims-key-record-failed'), keyFirst ? ['first-use', 'first-use'] : ['first-use']);
+    broken = false;
+    await ok(store.appendRecord('andy', note('after'), 'endpoint'));
+    store.close();
+  }
+  // rekey: every line written, then the record fails: a refusal naming why, and a retry works.
+  const { B } = await lostFloors(mods, ['B']);
+  const u = userData(mods);
+  broken = true;
+  const rec = throwingSet(u.record, isBroken);
+  const { store: rs, logs: rl } = open(mods, B, u, u.keys, { keyRecord: rec });
+  const rk = await rs.rekey(true).catch((e) => ({ threw: String(e) }));
+  assert.equal(rk.ok, false, JSON.stringify(rk));
+  assert.deepEqual(rk.rekeyed.sort(), ['andy', 'dwight']);
+  assert.deepEqual(rk.refused.map((x) => x.agentId).sort(), ['andy', 'dwight']);
+  assert.ok(rk.refused.every((x) => /the new key id could not be recorded .*retry the rekey/.test(x.why)), JSON.stringify(rk.refused));
+  assert.deepEqual(failedRows(rl, 'claims-key-record-failed'), ['rekey']);
+  assert.equal(rl.find((r) => r.kind === 'claims-rekey')?.recorded, false);
+  assert.equal(rs.readLedger('andy').chain.reason, 'key-missing', 'unrecorded: still read-only');
+  broken = false;
+  const rk2 = await rs.rekey(true);
+  assert.equal(rk2.ok, true, JSON.stringify(rk2));
+  rs.close();
+  assert.equal(chain(mods, B, u, 'andy'), 'ok');
+  // Anchors: the Human's reset returns false; a pending purge's commit or drop on read is logged.
+  const A = floor('FLOOR-A');
+  const ua = userData(mods);
+  const anchors = throwingSet(ua.anchors, isBroken);
+  const { store: as } = open(mods, A, ua, ua.keys, { headAnchor: anchors });
+  await ok(as.appendRecord('andy', note('one'), 'endpoint'));
+  await ok(as.appendRecord('andy', note('two'), 'endpoint'));
+  as.close();
+  const segs = fs.readdirSync(path.join(A, 'agents', 'andy', 'memory', 'claims')).filter((f) => f.endsWith('.jsonl')).map((f) => path.join(A, 'agents', 'andy', 'memory', 'claims', f));
+  const lines = segs.flatMap((f) => fs.readFileSync(f, 'utf8').split('\n').filter(Boolean));
+  const sha = (s) => require('node:crypto').createHash('sha256').update(s).digest('hex');
+  const head = sha(lines[lines.length - 1]);
+  const mid = sha(lines[0]);
+  const lastId = JSON.parse(lines[lines.length - 1]).id;
+  broken = true;
+  {
+    const { store, logs } = open(mods, A, ua, ua.keys, { headAnchor: anchors });
+    assert.equal(await store.resetAnchor('andy', true).catch((e) => `threw ${e}`), false, 'reset reports the failed write');
+    assert.deepEqual(failedRows(logs, 'claims-anchor-failed'), ['reset']);
+    store.close();
+  }
+  for (const [pending, at] of [[{ head, lastId }, 'purge-commit'], [{ head: 'f'.repeat(64), lastId: 'c-gone' }, 'purge-drop']]) {
+    ua.anchors.set(A, 'andy', { head: at === 'purge-commit' ? mid : head, lastId, pending });
+    const { store, logs } = open(mods, A, ua, ua.keys, { headAnchor: anchors });
+    let c;
+    assert.doesNotThrow(() => { c = store.readLedger('andy').chain; }, `${at}: a failed anchor write never throws out of a read`);
+    assert.equal(c, 'ok', at);
+    assert.ok(failedRows(logs, 'claims-anchor-failed').includes(at), `${at}: logged ${JSON.stringify(logs.filter((r) => r.kind === 'claims-anchor-failed'))}`);
+    store.close();
+  }
+  broken = false;
+}
+
+/** Jim NIT 1: the key file vanishing between create()'s existence check and its load is 'missing', so create makes one. */
+function vanishedKeyIsMissing(mods) {
+  const u = userData(mods);
+  assert.equal(u.keys.create().ok, true);
+  let calls = 0;
+  const safe = { ...fakeSafe(), isEncryptionAvailable: () => { if (++calls === 2) fs.rmSync(u.keyFile); return true; } };
+  const kp = new mods.keys.SafeStorageKeyProvider(u.keyFile, safe);
+  const r = kp.create();
+  assert.equal(r.ok, true, `a vanished key file is not 'decrypt-failed': ${JSON.stringify(r)}`);
+  assert.equal(kp.load().keyId, r.keyId, 'the new key is on disk');
+  assert.deepEqual(fs.readdirSync(u.ud).sort(), [mods.keys.MAC_KEY_FILE]);
+}
+
 const CASES = [
   ['R1', threeFloorsRekeyed], ['R2', freshFloorAdopts], ['R3', undecryptableLeftAlone], ['R4', providerCreate],
   ['R5', rekeyNeverCreates], ['R6', lockHeldAndStaleBroken], ['R7', busyLockFailsVisibly], ['R8', batchSetReadsFresh],
+  ['R9', unreadableAlertNamesFileAndRecovery], ['R10', renameRetriesUnderLock], ['R11', storeSitesNeverThrow], ['R12', vanishedKeyIsMissing],
 ];
 /** An assertion failure names its case, so the census can tell where a mutant died. */
 async function runCase(id, fn, mods) {
@@ -302,8 +498,8 @@ test('concurrent record and anchor writes from several instances keep every entr
 // Each edit is [file, from, to]. R1 is guarded twice (create() never replaces, and rekey adopts a
 // loading key), so only both halves together (K5, int's old behaviour) reach it.
 const RENAME_OVER = [
-  [KP, '    if (existsSync(this.file)) return this.existing();\n    const key = randomBytes(KEY_BYTES);', '    const key = randomBytes(KEY_BYTES);'],
-  [KP, '      linkSync(tmp, this.file);', '      renameSync(tmp, this.file);'],
+  [KP, '    if (existsSync(this.file)) return this.existing(retry);\n    const key = randomBytes(KEY_BYTES);', '    const key = randomBytes(KEY_BYTES);'],
+  [KP, '      linkSync(tmp, this.file);', "      require('node:fs').renameSync(tmp, this.file);"],
 ];
 const REKEY_MINTS = [[ST, "const made = cur.ok ? cur : cur.reason === 'missing' ? this.d.keys.create() : cur;", 'const made = this.d.keys.create();']];
 const MUTANTS = [
@@ -314,7 +510,28 @@ const MUTANTS = [
   { id: 'K4', what: 'a locked anchor set reuses the batch snapshot',
     edits: [[KP, '    // may have written since, and its entries must survive this write.\n    this.cache = null;\n    this.batchFresh = false;\n', '    // may have written since, and its entries must survive this write.\n']], dies: ['R8'] },
   { id: 'K5', what: "int's old behaviour: rekey mints and create() renames over", edits: [...RENAME_OVER, ...REKEY_MINTS], dies: ['R1', 'R3', 'R4', 'R5'] },
+  // Jim's 2 SHOULD + 2 NIT (god 350c1c).
+  { id: 'K6', what: 'the unreadable-key alert drops the path and recovery',
+    edits: [[ST, '      kind: CLAIMS_ALERT_KEY_MISSING, file, to: [\'god\', \'human\'],', '      kind: CLAIMS_ALERT_KEY_MISSING, to: [\'god\', \'human\'],'], [ST, '      recovery: unreadableKeyRecovery(file),\n', '']], dies: ['R9'] },
+  { id: 'K7', what: 'the locked rename is a plain renameSync (no POSIX rename, no retry)',
+    edits: [[KP, "import { renameWithRetry } from '../atomicJson';", "import { renameSync as renameWithRetry } from 'node:fs';"]], dies: ['R10'] },
+  { id: 'K8', what: 'a failed key-record write throws out of the store',
+    edits: [[ST, '    catch (e) {\n      const error = String(e).slice(0, 160);', '    catch (e) {\n      if (e) throw e;\n      const error = String(e).slice(0, 160);']], dies: ['R11'] },
+  { id: 'K9', what: 'a failed anchor write throws out of the store',
+    edits: [[ST, "    catch (e) { this.log({ kind: 'claims-anchor-failed', agentId, at,", "    catch (e) { if (e) throw e; this.log({ kind: 'claims-anchor-failed', agentId, at,"]], dies: ['R11'] },
+  { id: 'K10', what: "existing() maps a vanished file to 'decrypt-failed'",
+    edits: [[KP, "    if (l.ok || l.reason !== 'missing') return l;\n    return retry ? this.create(false) : l;", "    return l.ok || l.reason === 'unavailable' ? l : { ok: false, reason: 'decrypt-failed' };"]], dies: ['R12'] },
 ];
+
+test('Jim SHOULD 1 (source pin): main sends the row\'s own recovery for an unreadable key', () => {
+  const src = readSource('src/main/index.ts').split('\r\n').join('\n');
+  assert.ok(src.includes("const what = row.kind === CLAIMS_ALERT_KEY_MISSING && typeof row.recovery === 'string'\n            ? row.recovery\n"), 'index.ts alert uses row.recovery');
+});
+
+test('Jim NIT 2 (source pin): the main-thread lock wait says why it must stay short', () => {
+  const src = readSource(KP).split('\r\n').join('\n');
+  assert.match(src, /\/\/ This blocks the calling thread \(main\) for up to LOCK_WAIT_MS[^\n]*\n[^\n]*\n\s*\/\/ Never widen what runs under withUserDataLock[^\n]*\n\s*Atomics\.wait\(lockSleep/);
+});
 
 function mutated(m) {
   const texts = {};
