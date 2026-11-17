@@ -57,7 +57,14 @@ export function safeRemoveTreeSync(path: string, beforeRootRmdir?: () => void): 
     const current = lstatSync(p);
     if (current.isSymbolicLink()) { if (root) throw new Error('refused: root became a reparse point'); removeReparsePointSync(p); return; }
     if (!current.isDirectory()) throw new Error('refused: directory changed during removal');
-    rmdirSync(p);
+    try { rmdirSync(p); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOTEMPTY') throw error;
+      // A creator raced the listing. Re-walk with lstat; do not substitute a
+      // recursive rm, because Electron would follow a just-planted junction.
+      for (const name of readdirSync(p)) walk(join(p, name), false);
+      rmdirSync(p);
+    }
   };
   walk(path, true);
 }
@@ -102,7 +109,13 @@ export async function safeRemoveTree(path: string, beforeRootRmdir?: () => void 
     const current = await lstat(p);
     if (current.isSymbolicLink()) { if (root) throw new Error('refused: root became a reparse point'); await removeReparsePoint(p); return; }
     if (!current.isDirectory()) throw new Error('refused: directory changed during removal');
-    await rmdir(p);
+    try { await rmdir(p); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOTEMPTY') throw error;
+      // Match the sync path: re-lstat every late entry before retrying rmdir.
+      for (const name of await readdir(p)) await walk(join(p, name), false);
+      await rmdir(p);
+    }
   };
   await walk(path, true);
 }
