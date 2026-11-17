@@ -46,6 +46,32 @@ function io(file, fn) {
   return n;
 }
 
+/**
+ * The folder watcher hive.ts starts is the real fs.watch, tapped: `delivery(file, fn)` resolves with
+ * what fn returns, once fn has run inside the first delivery of an event for `file`. fn gets
+ * `deliver`, which hands the event to hive.ts. The test arms it and edits the file in one
+ * synchronous step, so the file is the edit by the time any event is delivered, however late the
+ * OS delivers under load. No sleep, no poll.
+ */
+const realWatch = fs.watch;
+let onDelivery = null;
+fs.watch = function (dir, options, listener) {
+  return realWatch.call(this, dir, options, (event, name) => {
+    const tap = onDelivery;
+    if (!tap || path.join(String(dir), String(name)) !== tap.file) return listener(event, name);
+    onDelivery = null;
+    try { tap.resolve(tap.fn(() => listener(event, name))); } catch (error) { tap.reject(error); }
+  });
+};
+const delivery = (file, fn) => new Promise((resolve, reject) => { onDelivery = { file, fn, resolve, reject }; });
+test.after(() => { fs.watch = realWatch; });
+/** The off-main refresh a watch event starts for `file`, in flight. It settles when the cache holds the disk. */
+const refreshOf = (hive, file) => {
+  const flight = hive.authorityRefreshes.get(file);
+  assert.ok(flight, 'the event started a refresh of the file, off the main thread');
+  return flight;
+};
+
 test('1000 reads inside the window reach disk once, return one deep-frozen object, and never stat again', (t) => {
   const { hive, file } = floor(t);
   const first = io(file, () => hive.registry());
@@ -246,24 +272,33 @@ test('M2: warmed async fast path re-reads after guard invalidation under a force
 });
 
 test('fs.watch marks the cache dirty: an external edit is seen before the window ends', async (t) => {
-  const { hive, handEdit } = floor(t);
+  const { hive, file, handEdit } = floor(t);
   assert.equal(hive.registry().godId, null);
-  await new Promise((r) => setTimeout(r, 100));
-  handEdit({ godId: 'g2', agents: { g2: agent('g2') } });
-  const until = Date.now() + 5000;
-  while (hive.registry().godId !== 'g2' && Date.now() < until) await new Promise((r) => setTimeout(r, 25));
-  assert.equal(hive.registry().godId, 'g2', 'the frozen test clock never reached the window: only the watcher can have done it');
+  const refreshed = delivery(file, (deliver) => {
+    const before = io(file, () => hive.registry());
+    assert.deepEqual([before.stats, before.result.godId], [0, null], 'until the event is delivered the cached roster is served');
+    deliver();
+    return refreshOf(hive, file);
+  });
+  // A different size: the fixture's +60 s wall marks every key proven, so a same-size edit inside the
+  // first write's timestamp tick keeps the key and is rightly unseen (the racy rule is defeated here).
+  handEdit({ godId: 'g2', agents: { g2: agent('g2'), g3: agent('g3') } });
+  await refreshed;
+  const after = io(file, () => hive.registry());
+  assert.deepEqual([after.reads, after.stats, after.result.godId], [0, 0, 'g2'], 'the frozen test clock never reached the window: only the watcher can have done it, and the reader paid no disk call');
 });
 
 test('production fs.watch marks the sync cache dirty before its 5s fallback', async (t) => {
-  const { hive, handEdit } = floor(t);
+  const { hive, file, handEdit } = floor(t);
   hive.__resetAuthorityCacheForTests();
   assert.equal(hive.registry().godId, null);
-  await new Promise((r) => setTimeout(r, 100));
-  handEdit({ godId: 'g2', agents: { g2: agent('g2') } });
-  const until = Date.now() + 1000;
-  while (hive.registry().godId !== 'g2' && Date.now() < until) await new Promise((r) => setTimeout(r, 25));
-  assert.equal(hive.registry().godId, 'g2', 'the watcher dirty mark must make production sync readers revalidate, not wait for fallback');
+  // The production clocks: the refresh is started by the event itself, in its delivery, not left to
+  // the fallback timer. A different size, so the racy rule (real wall clock) is not what shows it.
+  const refreshed = delivery(file, (deliver) => { deliver(); return refreshOf(hive, file); });
+  handEdit({ godId: 'g2', agents: { g2: agent('g2'), g3: agent('g3') } });
+  await refreshed;
+  const after = io(file, () => hive.registry());
+  assert.deepEqual([after.reads, after.result.godId], [0, 'g2'], 'the watcher event must refresh the cache for production sync readers, not wait for fallback');
 });
 
 test('corrupt registry: not cached, quarantined once, mutations refused; integrityIssues sees it inside the window; a repair is seen at once', (t) => {
