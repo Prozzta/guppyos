@@ -352,7 +352,7 @@ async function buildFloor() {
         if (!(holdMs > 0)) return new Map();
         try {
           const entries = hive.mail.ledger(agentId).entries;
-          const ledgers = { entries: (holder) => Object.values(hive.mail.ledger(holder).entries) };
+          const ledgers = wakeClass.indexWakeLedgers({ entries: (holder) => Object.values(hive.mail.ledger(holder).entries) });
           return wakeClass.quietHolds(ids.map((id) => entries[id]).filter((e) => !!e), hookServer.mailChannel(agentId).mode, holdMs, now,
             (e) => wakeClass.solicitedQuietMail(e, agentId, ledgers));
         } catch (e) {

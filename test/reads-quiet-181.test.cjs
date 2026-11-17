@@ -119,7 +119,7 @@ test('Jim B1: an agree or inform answering the recipient\'s OWN ask wakes it; FY
 test('Jim B1 wiring: main looks the original up in the answering agent\'s ledger (id or sender_id)', () => {
   const index = readSource('src/main/index.ts');
   // QUIET-HOLD-ACT-ONLY (1.1.98): the lookup became a reader over every ledger (solicitedQuietMail resolves the id or sender_id alias itself).
-  assert.match(index, /const ledgers = \{ entries: \(holder: string\) => Object\.values\(hive\.mail\.ledger\(holder\)\.entries\) \};/);
+  assert.match(index, /const ledgers = indexWakeLedgers\(\{ entries: \(holder: string\) => Object\.values\(hive\.mail\.ledger\(holder\)\.entries\) \}\);/);   // LAG-QUIET-PENDING-108: one index per pass
   assert.match(index, /\(e\) => solicitedQuietMail\(e, agentId, ledgers\)\);/);   // QUIET-HOLD-ACT-ONLY widened B1
 });
 

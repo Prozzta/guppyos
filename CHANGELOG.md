@@ -17,6 +17,11 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **A large mail backlog no longer freezes the app for up to a second at a time.** When an agent
+  had many messages waiting, Guppy decided which of them could wait quietly by reading through
+  whole mail records again for every single message, on every check. It now reads each mail
+  record once per check, however many messages are waiting. Which messages wake an agent and
+  which wait is unchanged. (LAG-QUIET-PENDING-108)
 - **A terminal closed right after it starts always reports that it ended.** On a busy machine, a
   terminal killed before it had printed anything could be left with no end reported at all, so
   Guppy kept waiting for it until a time limit ran out. The terminal library closes its data pipe

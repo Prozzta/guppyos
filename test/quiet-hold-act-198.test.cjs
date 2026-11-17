@@ -196,18 +196,144 @@ K.metaReplay = (cls = real.cls, L = real.ledger) => (t) => {
 };
 test('META REPLAY (2026-10-22, real ledgers): every held answer, correction, relay, fact and result wakes; the three routine FYIs still wait', (t) => K.metaReplay()(t));
 
+// ─── LAG-QUIET-PENDING-108: one ledger walk per holder per pass ───────────────────
+
+/** Ledgers that count every read (a call of entries) and every entry a walk steps over. */
+function countedLedgers(docs) {
+  const count = { reads: 0, steps: 0, byHolder: {} };
+  const entries = (holder) => {
+    count.reads++;
+    count.byHolder[holder] = (count.byHolder[holder] ?? 0) + 1;
+    const list = docs[holder] ?? [];
+    return { [Symbol.iterator]: function* () { for (const x of list) { count.steps++; yield x; } } };
+  };
+  return { ledgers: { entries }, count };
+}
+/** One quietUntil pass as main/index.ts runs it: one index, then every pending entry through quietHolds. */
+function pass(cls, docs, recipient, pending) {
+  const { ledgers, count } = countedLedgers(docs);
+  const index = cls.indexWakeLedgers(ledgers);
+  const holds = cls.quietHolds(pending, 'inject', HOLD, NOW, (e) => cls.solicitedQuietMail(e, recipient, index));
+  return { holds, count };
+}
+/** A backlog of n quiet informs to god from three senders, each one a miss on every rule (the worst case: all three lookups). */
+function backlog(n) {
+  return Array.from({ length: n }, (_, k) => inform('p' + k, { from: ['speck', 'mccey', 'sele'][k % 3], inReplyTo: 'gone-' + k, cardId: 'NOT-OPEN', conversation: 'conv-none-' + k }));
+}
+/** A floor whose four ledgers hold size entries each, none of them an open ask on NOT-OPEN. */
+function bigFloor(size) {
+  const fill = (holder) => Array.from({ length: size }, (_, k) => ask(holder + '-' + k, 'god', { cardId: 'CARD-' + k, closedAt: k % 2 ? NOW : undefined }));
+  return { god: fill('god'), speck: fill('speck'), mccey: fill('mccey'), sele: fill('sele') };
+}
+
+K.oneWalkPerHolder = (cls = real.cls) => {
+  for (const size of [10, 4000]) {
+    for (const n of [3, 30, 300]) {
+      const { holds, count } = pass(cls, bigFloor(size), 'god', backlog(n));
+      assert.equal(holds.size, n, 'every miss is held (the pass really asked each one)');
+      assert.equal(count.reads, 4, 'ONE LEDGER READ PER HOLDER PER PASS: ' + n + ' pending over ledgers of ' + size + ' cost ' + count.reads + ' reads (' + JSON.stringify(count.byHolder) + ')');
+      assert.equal(count.steps, 4 * size, 'EACH LEDGER IS WALKED ONCE: ' + n + ' pending over ledgers of ' + size + ' stepped over ' + count.steps + ' entries');
+    }
+  }
+  // Only the holders a pending id asks about are read: one sender, and the recipient.
+  const one = pass(cls, bigFloor(50), 'god', backlog(1));
+  assert.deepEqual(one.count.byHolder, { speck: 1, god: 1 }, 'A HOLDER NOBODY ASKS ABOUT IS NOT READ');
+  // No pending id reaches the rules (all wake by act): no ledger is read at all.
+  const none = pass(cls, bigFloor(50), 'god', [ask('q1', 'speck'), ask('q2', 'mccey')]);
+  assert.equal(none.count.reads, 0, 'A PASS WITH NO QUIET CANDIDATE READS NO LEDGER');
+};
+test('LAG-QUIET-PENDING-108: a pass costs one ledger read and one walk per holder, flat in the pending count; the walk is the ledger size, once', () => K.oneWalkPerHolder());
+
+/** The 1.1.98 rules as they were written, a scan per rule per id: the reference the index must match. */
+function scanSolicited(e, recipientId, ledgers) {
+  const owed = (x) => {
+    if (!(x.requiresReply || ['request', 'query', 'propose'].includes(String(x.act ?? '')))) return false;
+    if (x.closedAt) return false;
+    return !x.repliedAt || (!!x.replyAct && !['done', 'refuse', 'blocked'].includes(x.replyAct));
+  };
+  if (e.inReplyTo) {
+    const orig = ledgers.entries(e.from).find((x) => x.id === e.inReplyTo || (!!x.senderId && x.senderId === e.inReplyTo));
+    if (orig && orig.from === recipientId) return true;
+  }
+  if (e.humanRelay === true) return true;
+  if (e.broadcast === true && real.cls.HOLD_NOTICE_RE.test(String(e.subject ?? ''))) return true;
+  const sameThread = (x) => (!!x.cardId && x.cardId === e.cardId) || (!!x.conversation && x.conversation === e.conversation);
+  const toSender = ledgers.entries(e.from).filter((x) => x.from === recipientId && owed(x));
+  if (toSender.length && (!e.cardId || toSender.some(sameThread))) return true;
+  return ledgers.entries(recipientId).some((x) => owed(x) && sameThread(x));
+}
+
+K.sameAnswersAsTheScan = (cls = real.cls) => {
+  let seed = 108;
+  const rnd = (n) => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; };
+  const pick = (list) => list[rnd(list.length)];
+  const who = ['god', 'speck', 'mccey', 'sele'];
+  const ids = ['m0', 'm1', 'm2', 'm3', 'm4', 'm5'];
+  const cards = [undefined, 'C1', 'C2', 'C3'];
+  const convs = [undefined, 'conv-1', 'conv-2', 'conv-3'];
+  let woke = 0;
+  let held = 0;
+  for (let round = 0; round < 400; round++) {
+    const docs = {};
+    for (const holder of who) {
+      docs[holder] = Array.from({ length: rnd(7) }, () => ({
+        id: pick(ids), senderId: pick([undefined, undefined, ...ids]), from: pick(who),
+        act: pick(['inform', 'request', 'query', 'agree', 'done']), requiresReply: rnd(3) === 0,
+        cardId: pick(cards), conversation: pick(convs), closedAt: pick([undefined, undefined, NOW]),
+        repliedAt: pick([undefined, null, NOW]), replyAct: pick([undefined, 'inform', 'done', 'blocked'])
+      }));
+    }
+    const L = { entries: (h) => docs[h] ?? [] };
+    const index = cls.indexWakeLedgers(L);
+    for (let k = 0; k < 12; k++) {
+      const e = inform('e' + k, {
+        from: pick(who), inReplyTo: pick([undefined, ...ids]), cardId: pick(cards), conversation: pick(convs),
+        humanRelay: rnd(12) === 0 ? true : undefined, broadcast: rnd(12) === 0 ? true : undefined, subject: pick(['FYI', 'Floor paused'])
+      });
+      const recipient = pick(who);
+      const want = scanSolicited(e, recipient, L);
+      const at = 'round ' + round + ': ' + JSON.stringify(e) + ' to ' + recipient + ' over ' + JSON.stringify(docs);
+      assert.equal(cls.solicitedQuietMail(e, recipient, index), want, 'THE INDEX ANSWERS AS THE SCAN DID (one index for the pass), ' + at);
+      assert.equal(cls.solicitedQuietMail(e, recipient, L), want, 'THE INDEX ANSWERS AS THE SCAN DID (bare ledgers), ' + at);
+      if (want) woke++; else held++;
+    }
+  }
+  assert.ok(woke > 500 && held > 500, 'the replay must cover both answers well (woke ' + woke + ', held ' + held + ')');
+  // The id lookup is the scan's find: the FIRST entry in ledger order with that id or that sender_id.
+  const first = (list) => cls.solicitedQuietMail(inform('g1', { inReplyTo: 'k' }), 'sele', { entries: (h) => (h === 'god' ? list : []) });
+  assert.equal(first([inform('a', { from: 'sele', senderId: 'k' }), inform('k', { from: 'andy' })]), true, 'THE FIRST ENTRY IN LEDGER ORDER ANSWERS FOR AN ID (an alias before an id)');
+  assert.equal(first([inform('k', { from: 'andy' }), inform('a', { from: 'sele', senderId: 'k' })]), false, 'THE FIRST ENTRY IN LEDGER ORDER ANSWERS FOR AN ID (an id before an alias)');
+  assert.equal(first([inform('k', { from: 'sele' }), inform('k', { from: 'andy' })]), true, 'THE FIRST ENTRY IN LEDGER ORDER ANSWERS FOR AN ID (the same id twice)');
+};
+test('LAG-QUIET-PENDING-108: behaviour is identical: the index gives the answers the per-id scans gave (replay of 4800 cases) and keeps "first in ledger order"', () => K.sameAnswersAsTheScan());
+
+K.throwingReaderIsAskedAgain = (cls = real.cls) => {
+  let reads = 0;
+  const index = cls.indexWakeLedgers({ entries: (h) => { if (h !== 'sele') return []; reads++; throw new Error('ledger unreadable'); } });
+  const e = inform('g1', { from: 'sele', inReplyTo: 'x' });
+  assert.throws(() => cls.solicitedQuietMail(e, 'god', index), /ledger unreadable/);
+  assert.throws(() => cls.solicitedQuietMail(e, 'god', index), /ledger unreadable/, 'A READER THAT THREW IS ASKED AGAIN, NOT REMEMBERED AS EMPTY');
+  assert.equal(reads, 2);
+  // Through the hook's path the pass fails open: both wake.
+  const holds = cls.quietHolds([e, inform('g2', { from: 'sele' })], 'inject', HOLD, NOW, (m) => cls.solicitedQuietMail(m, 'god', index));
+  assert.equal(holds.size, 0, 'AN UNREADABLE LEDGER WAKES EVERY ID OF THE PASS');
+};
+test('LAG-QUIET-PENDING-108: a reader that throws is not cached: every id of the pass fails open, as before', () => K.throwingReaderIsAskedAgain());
+
 // ─── 3. the wiring ──────────────────────────────────────────────────────────────
 
 test('main: quietUntil asks solicitedQuietMail over every ledger (the asks this agent sent sit in the receivers\' ledgers)', () => {
   const index = readSource('src/main/index.ts');
-  assert.match(index, /import \{ quietHolds, quietMailHoldMs, solicitedQuietMail \} from '\.\.\/shared\/mailWakeClass';/);
-  assert.match(index, /const ledgers = \{ entries: \(holder: string\) => Object\.values\(hive\.mail\.ledger\(holder\)\.entries\) \};\n      return quietHolds\(ids\.map\(\(id\) => entries\[id\]\)\.filter\(\(e\) => !!e\), hookServer\.mailChannel\(agentId\)\.mode, holdMs, now,\n        \(e\) => solicitedQuietMail\(e, agentId, ledgers\)\);/);
+  assert.match(index, /import \{ indexWakeLedgers, quietHolds, quietMailHoldMs, solicitedQuietMail \} from '\.\.\/shared\/mailWakeClass';/);
+  // LAG-QUIET-PENDING-108: ONE index, made before the pass, outside the per-id callback.
+  assert.match(index, /const ledgers = indexWakeLedgers\(\{ entries: \(holder: string\) => Object\.values\(hive\.mail\.ledger\(holder\)\.entries\) \}\);\n      return quietHolds\(ids\.map\(\(id\) => entries\[id\]\)\.filter\(\(e\) => !!e\), hookServer\.mailChannel\(agentId\)\.mode, holdMs, now,\n        \(e\) => solicitedQuietMail\(e, agentId, ledgers\)\);/);
   const ledger = readSource(LEDGER);
   assert.match(ledger, /\.\.\.\(msg\.to === 'broadcast' \? \{ broadcast: true \} : \{\}\),/);
   assert.match(ledger, /\.\.\.\(HUMAN_RELAY_RE\.test\(String\(msg\.subject \?\? ''\)\) \|\| \(msg\.to === 'broadcast' && typeof msg\.body === 'string' && HUMAN_RELAY_RE\.test\(msg\.body\)\) \? \{ humanRelay: true \} : \{\}\),/);
   // The rig host carries the same dep, so mail-rig-quiet-198 exercises the product wiring.
   const host = readSource('test/mail-rig/rig-host.cjs');
   assert.match(host, /\(e\) => wakeClass\.solicitedQuietMail\(e, agentId, ledgers\)\);/);
+  assert.match(host, /const ledgers = wakeClass\.indexWakeLedgers\(\{ entries: \(holder\) => Object\.values\(hive\.mail\.ledger\(holder\)\.entries\) \}\);/);
 });
 
 // ─── MUTANT CENSUS ──────────────────────────────────────────────────────────────
@@ -230,16 +356,16 @@ const MUTANTS = [
     edits: [['    if (orig && orig.from === recipientId) return true;', '    if (orig) return true;']],
     killer: 'replyToOwnMessageWakes', dies: /A REPLY TO SOMEONE ELSE'S MESSAGE STAYS QUIET/ },
   { name: 'a1: the sender_id alias is not resolved', file: CLASS,
-    edits: [['(!!x.senderId && x.senderId === e.inReplyTo)', 'false']],
+    edits: [['      if (x.senderId && !h.byId.has(x.senderId)) h.byId.set(x.senderId, x);\n', '']],
     killer: 'replyToOwnMessageWakes', dies: /A REPLY VIA THE SENDER_ID ALIAS WAKES ME/ },
   { name: 'a2: the asks the recipient is working are ignored', file: CLASS,
-    edits: [['  return ledgers.entries(recipientId).some((x) => stillOwed(x) && sameThread(x));', '  return false;']],
+    edits: [['  return sameThread(index.of(recipientId).owed);', '  return false;']],
     killer: 'factOnOpenAskWakes', dies: /A FACT ON THE CARD I AM WORKING WAKES ME/ },
   { name: 'a2: the thread is not matched, only the card', file: CLASS,
-    edits: [['(!!x.conversation && x.conversation === e.conversation)', 'false']],
+    edits: [['(!!e.conversation && x.conversations.has(e.conversation))', 'false']],
     killer: 'factOnOpenAskWakes', dies: /A FACT IN THE THREAD OF MY OPEN ASK WAKES ME/ },
   { name: 'a2: any open ask solicits everything (the card is not matched)', file: CLASS,
-    edits: [['  return ledgers.entries(recipientId).some((x) => stillOwed(x) && sameThread(x));', '  return ledgers.entries(recipientId).some((x) => stillOwed(x));']],
+    edits: [['  return sameThread(index.of(recipientId).owed);', '  return index.of(recipientId).owed.cards.size + index.of(recipientId).owed.conversations.size > 0;']],
     killer: 'factOnOpenAskWakes', dies: /A FACT ON ANOTHER CARD STAYS QUIET/ },
   { name: 'a2: a closed ask still solicits', file: CLASS,
     edits: [['  if (x.closedAt) return false;\n', '']],
@@ -263,14 +389,35 @@ const MUTANTS = [
     edits: [["  if (e.broadcast === true && HOLD_NOTICE_RE.test(String(e.subject ?? ''))) return true;", "  if (HOLD_NOTICE_RE.test(String(e.subject ?? ''))) return true;"]],
     killer: 'humanRelayAndHoldWake', dies: /A PAUSE WORD IN AN ADDRESSED FYI IS NOT A HOLD NOTICE/ },
   { name: 'c: a result sent as inform is held', file: CLASS,
-    edits: [['  if (toSender.length && (!e.cardId || toSender.some(sameThread))) return true;\n', '']],
+    edits: [['  if (toSender && (!e.cardId || sameThread(toSender))) return true;\n', '']],
     killer: 'resultAsInformWakes', dies: /A RESULT SENT AS INFORM WAKES ITS ASKER/ },
   { name: 'c: an inform about another card wakes the asker too', file: CLASS,
-    edits: [['(!e.cardId || toSender.some(sameThread))', 'true']],
+    edits: [['(!e.cardId || sameThread(toSender))', 'true']],
     killer: 'resultAsInformWakes', dies: /AN INFORM NAMING ANOTHER CARD STAYS QUIET/ },
   { name: 'c: any agent\'s inform wakes (the asker is not matched)', file: CLASS,
-    edits: [['.filter((x) => x.from === recipientId && stillOwed(x));', '.filter((x) => stillOwed(x));']],
+    edits: [['index.of(e.from).owedFrom.get(recipientId);', 'index.of(e.from).owedFrom.values().next().value;']],
     killer: 'resultAsInformWakes', dies: /AN INFORM FROM AN AGENT I ASKED NOTHING OF STAYS QUIET/ },
+  { name: '108: the index is not kept (a walk per lookup, the defect)', file: CLASS,
+    edits: [['    if (have) return have;\n', '']],
+    killer: 'oneWalkPerHolder', dies: /ONE LEDGER READ PER HOLDER PER PASS/ },
+  { name: '108: every holder is walked up front, asked about or not', file: CLASS,
+    edits: [['  return { of, [WAKE_LEDGER_INDEX]: true } as WakeLedgerIndex;', "  for (const h of ['god', 'speck', 'mccey', 'sele']) of(h);\n  return { of, [WAKE_LEDGER_INDEX]: true } as WakeLedgerIndex;"]],
+    killer: 'oneWalkPerHolder', dies: /A HOLDER NOBODY ASKS ABOUT IS NOT READ/ },
+  { name: '108: an index handed in is indexed again (the brand is not read)', file: CLASS,
+    edits: [['  const index = isWakeLedgerIndex(ledgers) ? ledgers : indexWakeLedgers(ledgers);', '  const index = indexWakeLedgers(isWakeLedgerIndex(ledgers) ? { entries: () => [] } : ledgers);']],
+    killer: 'sameAnswersAsTheScan', dies: /THE INDEX ANSWERS AS THE SCAN DID \(one index for the pass\)/ },
+  { name: '108: the LAST entry with an id answers for it', file: CLASS,
+    edits: [['      if (!h.byId.has(x.id)) h.byId.set(x.id, x);', '      h.byId.set(x.id, x);']],
+    killer: 'sameAnswersAsTheScan', dies: /THE INDEX ANSWERS AS THE SCAN DID|THE FIRST ENTRY IN LEDGER ORDER ANSWERS FOR AN ID/ },
+  { name: '108: an alias displaces an earlier id', file: CLASS,
+    edits: [['      if (x.senderId && !h.byId.has(x.senderId)) h.byId.set(x.senderId, x);', '      if (x.senderId) h.byId.set(x.senderId, x);']],
+    killer: 'sameAnswersAsTheScan', dies: /THE INDEX ANSWERS AS THE SCAN DID|THE FIRST ENTRY IN LEDGER ORDER ANSWERS FOR AN ID/ },
+  { name: '108: an ask that is not owed still counts for its sender', file: CLASS,
+    edits: [['      if (!stillOwed(x)) continue;\n      note(h.owed, x);', '      if (stillOwed(x)) note(h.owed, x);']],
+    killer: 'sameAnswersAsTheScan', dies: /THE INDEX ANSWERS AS THE SCAN DID/ },
+  { name: '108: a reader that threw is remembered as an empty ledger', file: CLASS,
+    edits: [['    const h: HolderIndex = { byId: new Map(), owedFrom: new Map(), owed: threads() };\n', '    const h: HolderIndex = { byId: new Map(), owedFrom: new Map(), owed: threads() };\n    made.set(holder, h);\n']],
+    killer: 'throwingReaderIsAskedAgain', dies: /A READER THAT THREW IS ASKED AGAIN/ },
   { name: 'ledger: the broadcast flag is never set', file: LEDGER,
     edits: [["    ...(msg.to === 'broadcast' ? { broadcast: true } : {}),\n", '']],
     killer: 'ledgerFlags', dies: /A BROADCAST COPY IS FLAGGED/ },
@@ -301,7 +448,7 @@ test('MUTANT CENSUS: every mutant applies once and dies at the assertion that na
   // The replay itself, against the three rules the Meta rows most needed, dies at the named agent.
   for (const [name, edits, dies] of [
     ['replay: a1 off', [['    if (orig && orig.from === recipientId) return true;', '    if (false) return true;']], /SELE: GOD'S ANSWER/],
-    ['replay: c off', [['  if (toSender.length && (!e.cardId || toSender.some(sameThread))) return true;\n', '']], /GOD: MCCEY'S RESULTS/],
+    ['replay: c off', [['  if (toSender && (!e.cardId || sameThread(toSender))) return true;\n', '']], /GOD: MCCEY'S RESULTS/],
     ['replay: b off', [['  if (e.humanRelay === true) return true;\n', '']], /SPECK: THE RAYB-4 FACT, THE HUMAN CORRECTION AND THE BROADCASTS WAKE/]
   ]) {
     await t.test(`mutant: ${name}`, () => {
