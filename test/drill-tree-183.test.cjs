@@ -1,5 +1,7 @@
 'use strict';
 require('./tools/own-job.cjs');
+// Loads test-temp.cjs, which a mutant census mutates: the journal check runs before anything else.
+require('./tools/mutant-runner-helper.cjs').gate(__filename);
 /**
  * DRILL-TREE-SELF-BUILD-108: the 1.1.83 drill tree is a fixture test/tools/drill-tree-183.cjs builds.
  * This file checks the parts that need no build: where the tree lives, that a tree which is absent or
