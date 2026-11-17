@@ -104,7 +104,10 @@ K.loopLight = async (M = HJ) => {
   x.alive.delete(1201);
   assert.equal((await ask(x, 'a', 1203, { files: ['a.cjs', 'b.cjs'] })).state, 'wait', 'a loop run matches single-file processes only');
   x.images.set(51, 'node.exe');
-  assert.equal((await ask(x, 'a', 1204, { files: ['test/one.test.cjs'], ppid: 51 })).state, 'wait', "a process under another program is not the loop's");
+  // HEAVY-RESERVATION-BIND-108: under another program it is not the loop's run, but one test file
+  // started by a script is light too (one at a time).
+  const under = await ask(x, 'a', 1204, { files: ['test/one.test.cjs'], ppid: 51 });
+  assert.deepEqual([under.state, under.why], ['light', 'one test file, one at a time'], "a process under another program is not the loop's (light by the single-file rule)");
   x.l.noteCallEnd('a', 'c1');
   assert.equal((await ask(x, 'a', 1205, { files: ['test/one.test.cjs'] })).state, 'wait', 'A LOOP RUN MATCHES ONLY WHILE ITS CALL IS OPEN');
   x.l.noteCall('a', 'c2', 'npx tsc --noEmit && node --test test/a.test.cjs');
@@ -129,7 +132,8 @@ K.visibleLight = async (M = HJ) => {
   x.l.noteCall('c', 'c2', 'node --test test/a.test.cjs');
   x.images.set(51, 'node.exe');
   const under = await ask(x, 'c', 103, { files: ['test/a.test.cjs'], ppid: 51 });
-  assert.equal(under.state, 'wait', "A TEST PROCESS UNDER ANOTHER PROGRAM IS NOT THE CALL'S OWN");
+  // HEAVY-RESERVATION-BIND-108: light all the same, by the single-file rule (one at a time).
+  assert.deepEqual([under.state, under.why], ['light', 'one test file, one at a time'], "A TEST PROCESS UNDER ANOTHER PROGRAM IS NOT THE CALL'S OWN");
   x.l.noteCall('d', 'c3', 'node --test test/a.test.cjs');
   x.l.noteCallEnd('d', 'c3');
   x.tick(HJ.HEAVY_CALL_SLACK_MS + 1);
@@ -153,16 +157,19 @@ K.opaqueWaits = async (M = HJ) => {
   x.l.acquire('b', H, 'npm test', 'hb', false);
   x.images.set(50, 'bash.exe');
   x.l.noteCall('a', 'c1', 'node scratch.cjs');
-  const a = await ask(x, 'a', 301, { files: ['test/a.test.cjs'] });
+  // HEAVY-RESERVATION-BIND-108: a wrapper's run of ONE file is light (heavy-preload-short-test);
+  // its run of several files still waits.
+  const TWO = ['test/a.test.cjs', 'test/b.test.cjs'];
+  const a = await ask(x, 'a', 301, { files: TWO });
   assert.deepEqual(a, { state: 'wait', position: 1, holders: ['b'] }, "AN OPAQUE NODE WRAPPER'S TEST RUN WAITS");
   x.l.noteCall('c', 'c2', 'bash x.sh');
-  assert.equal((await ask(x, 'c', 302, { files: ['test/a.test.cjs'] })).state, 'wait', "A BASH WRAPPER'S TEST RUN WAITS");
+  assert.equal((await ask(x, 'c', 302, { files: TWO })).state, 'wait', "A BASH WRAPPER'S TEST RUN WAITS");
   assert.equal(x.logs.filter((r) => r.action === 'deny' && r.agentId === 'a').length, 1);
-  assert.equal((await ask(x, 'a', 301, { files: ['test/a.test.cjs'] })).state, 'wait');
+  assert.equal((await ask(x, 'a', 301, { files: TWO })).state, 'wait');
   assert.equal(x.logs.filter((r) => r.action === 'deny' && r.agentId === 'a').length, 1, 'a waiting process asking again is no new deny row');
   x.l.callDone('b', 'hb');
   assert.deepEqual(x.notes, [], 'A WAITING TEST PROCESS IS NOT MAILED (it takes the slot itself)');
-  const b = await ask(x, 'a', 301, { files: ['test/a.test.cjs'] });
+  const b = await ask(x, 'a', 301, { files: TWO });
   assert.equal(b.state, 'held', 'the reserved slot is taken by the waiting process');
 };
 test('HIDDEN: a test run under an opaque node or bash wrapper waits while another agent holds, then takes the slot', () => K.opaqueWaits());
@@ -306,6 +313,8 @@ K.wiring = (idx = readSource('src/main/index.ts'), hooks = readSource('src/main/
   assert.match(pty, /buildPtyEnv\(process\.env, userPath, opts\.env, process\.platform, opts\.pathPrepend, opts\.nodeRequire\)/);
   assert.match(hooks, /      if \(command\) this\.heavyLock\.noteCall\(agentId, callId, command\);\n      if \(cls\.heavy\) \{/, 'EVERY PRETOOLUSE CALL IS NOTED');
   assert.match(hooks, /      this\.heavyLock\.callDone\(agentId, HookServer\.heavyCallId\(p\)\);\n      this\.heavyLock\.noteCallEnd\(agentId, HookServer\.heavyCallId\(p\)\);/);
+  // HEAVY-RESERVATION-BIND-108: a denied call never runs, so no test process is counted against it.
+  assert.match(hooks, /        if \(!d\.allow\) \{\n(?:\s*\/\/[^\n]*\n)*          this\.heavyLock\.noteCallEnd\(agentId, callId\);\n/, 'A DENIED CALL IS NOT AN OPEN CALL');
   assert.match(hooks, /HOOK_ROUTE\.exec\(req\.url\) \?\? HEAVY_ROUTE\.exec\(req\.url\)/);
   assert.match(builder, /  - from: resources\/heavy-preload\.cjs\n    to: heavy-preload\.cjs\n/, 'THE PRELOAD IS PACKAGED');
 };
@@ -570,6 +579,9 @@ const MUTANTS = [
   { name: 'the preload REPLACES NODE_OPTIONS', file: 'src/main/ptyEnv.ts', env: true,
     edits: [['[baseOptions.trim(), ...requires]', '[...requires]']],
     killer: 'env', dies: /NODE_OPTIONS IS APPENDED TO, NEVER REPLACED/ },
+  { name: 'a denied call stays open', file: 'src/main/hooks.ts', wiring: true,
+    edits: [['          this.heavyLock.noteCallEnd(agentId, callId);\n', '']],
+    killer: 'wiring', dies: /A DENIED CALL IS NOT AN OPEN CALL/ },
   { name: 'PreToolUse does not note calls', file: 'src/main/hooks.ts', wiring: true,
     edits: [['      if (command) this.heavyLock.noteCall(agentId, callId, command);\n', '']],
     killer: 'wiring', dies: /EVERY PRETOOLUSE CALL IS NOTED/ },
