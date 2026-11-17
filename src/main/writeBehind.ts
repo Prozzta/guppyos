@@ -204,9 +204,20 @@ export function flushAppendsSync(): void {
   }
 }
 
-/** Wait, at most `capMs`, for every write in flight and for the append lane to empty. */
+const joiners: Array<() => Promise<unknown>> = [];
+/**
+ * A store with its own async write queue (the roster, the spawned-folder list) names it here, so the
+ * one bounded wait on quit, reset and a home change covers it too. Not gated by the write-behind flag.
+ */
+export function joinOnSettle(pending: () => Promise<unknown>): () => void {
+  joiners.push(pending);
+  return () => { const i = joiners.indexOf(pending); if (i >= 0) joiners.splice(i, 1); };
+}
+
+/** Wait, at most `capMs`, for every write in flight, the append lane and every joined store. */
 export async function settleWrites(capMs: number): Promise<void> {
-  const waits: Promise<void>[] = [...flights.values()].map((f) => f.done);
+  const waits: Promise<unknown>[] = [...flights.values()].map((f) => f.done);
+  for (const pending of joiners) { try { waits.push(pending().catch(() => undefined)); } catch { /* go on */ } }
   if (drain) waits.push(drain.catch(() => undefined));
   if (!waits.length) return;
   let timer: ReturnType<typeof setTimeout> | undefined;

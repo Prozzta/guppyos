@@ -666,6 +666,66 @@ test('mail-cards: with write-behind off (a bare class) record() is the synchrono
   } finally { WB.enableWriteBehind(); }
 });
 
+// ───────────────────────────────────────────────────────── LAG-MAIN-PERSIST-OFFMAIN: one settle for every store
+
+test('settleWrites waits for a joined store, is bounded by its cap, and survives a joiner that throws or rejects', async () => {
+  let open; let calls = 0;
+  const gate = new Promise((r) => { open = r; });
+  const off = [WB.joinOnSettle(() => { calls += 1; return gate; })];
+  off.push(WB.joinOnSettle(() => { throw new Error('a broken joiner'); }));
+  off.push(WB.joinOnSettle(() => Promise.reject(new Error('a failed write'))));
+  let done = false;
+  const settled = WB.settleWrites(5_000).then(() => { done = true; });
+  await sleep(60);
+  assert.equal(done, false, 'SETTLE WAITS FOR THE JOINED STORE');
+  open();
+  await settled;
+  assert.equal(calls, 1);
+  // the cap: a store that never settles does not hold quit
+  off.push(WB.joinOnSettle(() => new Promise(() => {})));
+  const t0 = Date.now();
+  await WB.settleWrites(80);
+  const took = Date.now() - t0;
+  assert.ok(took >= 60 && took < 2_000, `bounded by the cap (${took} ms)`);
+  for (const f of off) f();
+  const t1 = Date.now();
+  await WB.settleWrites(5_000);
+  assert.ok(Date.now() - t1 < 1_000, 'a store that left is no longer waited for');
+});
+
+test('the roster and the spawned-folder list: async writes in order, each joined to the one settle, no second quit path', async () => {
+  const { RosterStore } = loadTs('src/main/roster.ts');
+  const { SpawnedCwds } = loadTs('src/main/spawnedCwds.ts');
+  const home = dirOf('roster');
+  const store = new RosterStore(() => home);
+  const snap = (note) => ({ version: 1, savedAt: '', agents: [{ id: 'a', note }], archived: [], restorable: [], queues: {}, selectedId: null });
+  const sync = [];
+  const names = ['writeFileSync', 'renameSync', 'copyFileSync', 'mkdirSync'];
+  const real = names.map((n) => fs[n]);
+  names.forEach((n, i) => { fs[n] = (...a) => { if (String(a[0]).startsWith(home) || String(a[1]).startsWith(home)) sync.push(n); return real[i](...a); }; });
+  try {
+    void store.writeAsync(snap('older'));
+    void store.writeAsync(snap('newest'));
+    const file = path.join(home, 'cwds.json');
+    const cwds = new SpawnedCwds(() => file);
+    void cwds.add(path.join(home, 'p1'));
+    void cwds.add(path.join(home, 'p2'));
+    assert.deepEqual(cwds.list(), [path.join(home, 'p1'), path.join(home, 'p2')], 'the trust list is in memory at once');
+    assert.equal(fs.existsSync(file), false, 'nothing written in the caller\'s turn');
+    await Promise.all([store.settleAsyncWrite(), cwds.settle()]);
+    assert.equal(store.read().agents[0].note, 'newest');
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).cwds, [path.join(home, 'p1'), path.join(home, 'p2')]);
+    assert.deepEqual(sync, [], 'NO SYNCHRONOUS WRITE ON EITHER PATH');
+  } finally { names.forEach((n, i) => { fs[n] = real[i]; }); }
+
+  const index = codeOnly(readSource('src/main/index.ts'));
+  assert.match(index, /const roster = new RosterStore\([^\n]*\n\s*joinOnSettle\(\(\) => roster\.settleAsyncWrite\(\)\);/);
+  assert.match(index, /const fsSpawnedCwds = new SpawnedCwds\([^\n]*\n\s*joinOnSettle\(\(\) => fsSpawnedCwds\.settle\(\)\);/);
+  assert.match(index, /ipcMain\.handle\('roster:write', \(_evt, snap: unknown\) => roster\.writeAsync\(snap\)\);/);
+  assert.equal(index.split('roster.settleAsyncWrite()').length - 1, 1, 'ONE QUIT PATH: the roster is joined through settleWrites only');
+  assert.equal(index.split('roster.write(').length - 1, 0, 'no synchronous roster write left in the app');
+});
+
 // ───────────────────────────────────────────────────────── the app's wiring (index.ts cannot be loaded here)
 
 test('the app turns write-behind on before the hive exists, and quit, reset and a home change settle then flush', () => {

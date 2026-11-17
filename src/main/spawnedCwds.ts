@@ -44,6 +44,9 @@ export class SpawnedCwds {
     return this.persist;
   }
 
+  /** The writes queued so far (joined by the bounded settle on quit). Never rejects. */
+  settle(): Promise<void> { return this.persist; }
+
   private load(): string[] {
     if (this.cwds) return this.cwds;
     let cwds: string[] = [];

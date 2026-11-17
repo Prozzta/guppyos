@@ -24,7 +24,7 @@ import { ClaimsBootstrap, loadBootstrapMarker, saveBootstrapMarker } from './cla
 import { DerivedLive } from './claims/derivedLive';
 import { deriveOnce } from './claims/derivedWriter';
 import { startAfterMailCardCatchUp, startupMailCardCatchUp } from './mailCards';
-import { enableWriteBehind, settleWrites } from './writeBehind';
+import { enableWriteBehind, joinOnSettle, settleWrites } from './writeBehind';
 import { enableLedgerAgent, enableLedgerDefault, floorRepo, seedFloorSources } from './claims/floorSeed';
 import { makeW6Append } from './claims/w6Append';
 import { memoryMdReplaced, READER_WATCH_SYNC_MS, ReaderWatchers } from './claims/readerWatch';
@@ -729,6 +729,8 @@ telemetry.onApiError((agentId) => breaker.recordError(agentId));
 // Shared roster on disk — created early so HookServer can re-read standing goals
 // on every UserPromptSubmit (Edit Agent saves land here via persistAgents).
 const roster = new RosterStore(() => readConfig().harnessHome);
+// LAG-MAIN-PERSIST-OFFMAIN: the roster's async writes join the one bounded settle (quit, reset, home change).
+joinOnSettle(() => roster.settleAsyncWrite());
 function standingGoalFromRoster(agentId: string): string | null {
   const snap = roster.read();
   if (!snap || !Array.isArray(snap.agents)) return null;
@@ -6435,6 +6437,7 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
 // Jim INFO 1: this guards against renderer bugs and bad roots. It is NOT a boundary against a
 // compromised renderer, which can pty:spawn any command in any cwd (and that cwd is then known).
 const fsSpawnedCwds = new SpawnedCwds(() => join(app.getPath('userData'), 'fs-spawned-cwds.json'));
+joinOnSettle(() => fsSpawnedCwds.settle());
 const FS_ROOT_REFUSED = 'not an agent folder';
 function fsRootKnown(root: string): boolean {
   const known: string[] = fsSpawnedCwds.list();
@@ -9610,9 +9613,5 @@ app.on('will-quit', (e) => {
     // INT 1.1.99 fixup 4: an async capacity rename already in flight at saveNow lands first, then the
     // quit snapshot is written again (bounded), so an older snapshot never sits over the quit write.
     capacityStore.settleQuit(CAPACITY_QUIT_JOIN_MS).catch(() => undefined)
-    ,Promise.race([
-      roster.settleAsyncWrite(),
-      new Promise<void>((resolve) => setTimeout(resolve, CAPACITY_QUIT_JOIN_MS))
-    ]).catch(() => undefined)
   ]).then(finish, finish);
 });
