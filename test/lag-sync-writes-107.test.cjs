@@ -83,8 +83,14 @@ async function withAsync(name, hook, fn) {
 function gate() {
   let open; let reached = false;
   const p = new Promise((r) => { open = r; });
-  return { wait: () => { reached = true; return p; }, open: () => open(), get reached() { return reached; } };
+  const g = { wait: () => { reached = true; return p; }, open: () => open(), get reached() { return reached; } };
+  gates.push(g);
+  return g;
 }
+// A case that fails before it opens its gate would leave a write held for good, and every later
+// settleWrites would then wait its whole cap (minutes for the file). So each case ends with its gates open.
+const gates = [];
+test.afterEach(async () => { for (const g of gates.splice(0)) g.open(); await WB.settleWrites(5_000); });
 
 // ───────────────────────────────────────────────────────── writeBehind: whole files
 
@@ -734,7 +740,7 @@ test('closeWrites: a rename already under way at the cap is waited for, so the q
       const flight = WB.writeFileBehind(p, 'async-older');
       await until(() => g.reached, 'the rename');
       let closedAt = 0;
-      const closing = WB.closeWrites(40).then(() => { closedAt = Date.now(); });
+      const closing = WB.closeWrites(40, 5_000).then(() => { closedAt = Date.now(); });
       await sleep(200);
       assert.equal(closedAt, 0, 'THE CAP DOES NOT CUT OFF A RENAME UNDER WAY');
       g.open();
@@ -749,6 +755,61 @@ test('closeWrites: a rename already under way at the cap is waited for, so the q
     assert.equal(fs.readFileSync(p, 'utf8'), 'sync-newer');
     assert.deepEqual(tmpsIn(dir), [], 'no tmp file left behind');
   } finally { g.open(); WB.enableWriteBehind(); }
+});
+
+// god 621026: a rename that never settles (a filter driver, a dead network home) must not hold the quit,
+// and must not land older text over the quit flush afterwards.
+test('closeWrites: a rename that never settles does not hold the quit, and what it lands later is the quit flush', async () => {
+  const dir = dirOf('cw');
+  const p = path.join(dir, 'a.json');
+  const g = gate();
+  let carried = null;
+  try {
+    await withAsync('rename', async (a, real) => { await g.wait(); carried = fs.readFileSync(String(a[0]), 'utf8'); return real(); }, async () => {
+      const flight = WB.writeFileBehind(p, 'async-older');
+      await until(() => g.reached, 'the rename');
+      const t0 = Date.now();
+      await bounded(WB.closeWrites(40, 80), 'closeWrites with a rename that never settles', 3_000);
+      const took = Date.now() - t0;
+      assert.ok(took >= 100 && took < 2_000, `THE RENAME WAIT IS BOUNDED (${took} ms)`);
+      assert.equal(WB.writeInFlight(p), true, 'the rename is still out');
+      // what finish does next: the owner's synchronous write
+      fs.writeFileSync(p, 'sync-newer, and longer than the older text');
+      WB.noteSyncWrite(p, 'sync-newer, and longer than the older text');
+      fs.writeFileSync(p, 'sync');
+      WB.noteSyncWrite(p, 'sync');
+      g.open();
+      assert.equal(await flight, 'overtaken');
+    });
+    assert.equal(carried, 'sync', 'THE LATE RENAME CARRIES THE NEWEST TEXT, NOT THE OLDER ONE');
+    assert.equal(fs.readFileSync(p, 'utf8'), 'sync');
+    assert.deepEqual(tmpsIn(dir), []);
+  } finally { g.open(); WB.enableWriteBehind(); }
+});
+
+test('closeWrites: a late rename that landed over the quit flush is put right at once, not when the write ends', async () => {
+  const dir = dirOf('cw');
+  const p = path.join(dir, 'a.json');
+  const g = gate();
+  const after = gate();
+  try {
+    await withAsync('rename', async (_a, real) => { await g.wait(); await real(); await after.wait(); }, async () => {
+      const flight = WB.writeFileBehind(p, 'async-older');
+      await until(() => g.reached, 'the rename');
+      await bounded(WB.closeWrites(40, 80), 'closeWrites with a rename that never settles', 3_000);
+      fs.writeFileSync(p, 'sync-newer');
+      g.open();                                   // the rename lands between the owner's write and its report
+      await until(() => after.reached, 'the rename to land');
+      assert.equal(fs.readFileSync(p, 'utf8'), 'async-older');
+      WB.noteSyncWrite(p, 'sync-newer');
+      assert.equal(fs.readFileSync(p, 'utf8'), 'sync-newer', 'PUT RIGHT BEFORE THE APP EXITS: THE WRITE IN FLIGHT HAS NOT ENDED');
+      assert.equal(WB.writeInFlight(p), true);
+      after.open();
+      assert.equal(await flight, 'overtaken');
+    });
+    assert.equal(fs.readFileSync(p, 'utf8'), 'sync-newer');
+    assert.deepEqual(tmpsIn(dir), []);
+  } finally { g.open(); after.open(); WB.enableWriteBehind(); }
 });
 
 test('closeWrites: bounded for a write still in its tmp phase, which then never renames; whole files go synchronous', async () => {

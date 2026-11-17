@@ -17,11 +17,12 @@
  * row is readable from the moment it is queued.
  *
  * QUIT: closeWrites waits (bounded) for what is in flight, then closes whole-file write-behind: no new
- * flight starts, none still writing its tmp may rename, and a rename already under way is waited for.
- * Then the owners write synchronously (flushAppendsSync here; the registry and ledger flushes in their
- * own classes), and no older rename can land over that write after the app has exited.
+ * flight starts, none still writing its tmp may rename, and a rename already under way is waited for,
+ * bounded as well. Then the owners write synchronously (flushAppendsSync here; the registry and ledger
+ * flushes in their own classes). A rename that outlasted its wait is given the owner's text to carry
+ * (noteSyncWrite), so no older text can land over that write after the app has exited.
  */
-import { appendFileSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, ftruncateSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync, writeSync } from 'node:fs';
 import { appendFile, mkdir } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { basename, dirname, resolve } from 'node:path';
@@ -40,7 +41,7 @@ const keyOf = (p: string): string => { const r = resolve(p); return process.plat
 
 // ---- whole files ----
 
-interface Flight { redo: string | null; done: Promise<void>; /** the guard said yes: the rename is under way */ renaming: boolean }
+interface Flight { redo: string | null; done: Promise<void>; /** the guard said yes: the rename is under way */ renaming: boolean; /** the file being renamed */ tmp: string | null }
 const flights = new Map<string, Flight>();
 
 export type WriteBehindResult = 'published' | 'withdrawn' | 'overtaken';
@@ -51,7 +52,9 @@ export function writeInFlight(p: string): boolean { return flights.has(keyOf(p))
 /** A synchronous writer has just written `text` to `p`. An asynchronous write of `p` in flight gives way to it. */
 export function noteSyncWrite(p: string, text: string | (() => string)): void {
   const f = flights.get(keyOf(p));
-  if (f) f.redo = typeof text === 'string' ? text : text();
+  if (!f) return;
+  f.redo = typeof text === 'string' ? text : text();
+  if (closed && f.renaming && f.tmp) supersede(f.tmp, p, f.redo);
 }
 
 /** The text a synchronous writer wrote while an asynchronous write of `p` is still in flight (the disk may
@@ -65,6 +68,20 @@ function writeTextSync(p: string, text: string): void {
 }
 
 /**
+ * QUIT, a rename that outlasted closeWrites' wait: the app exits next, so the flight's own put-back may
+ * never run. The file being renamed is given `text`, so the rename lands the newest text whenever it
+ * lands. If it has landed already, over the synchronous write, that write is done again.
+ */
+function supersede(tmp: string, p: string, text: string): void {
+  try {
+    const fd = openSync(tmp, 'r+');   // never creates: a tmp that is gone has been renamed
+    try { const b = Buffer.from(text, 'utf8'); writeSync(fd, b, 0, b.length, 0); ftruncateSync(fd, b.length); }
+    finally { closeSync(fd); }
+  } catch { /* gone or locked: the check below covers a rename that landed */ }
+  try { if (readFileSync(p, 'utf8') !== text) writeTextSync(p, text); } catch { /* the owner's own write stands */ }
+}
+
+/**
  * Write `text` to `p` (tmp + rename) off the main thread. `guard` is asked just before the rename; false
  * withdraws. One flight per path: the caller starts the next write only when this one has ended.
  *   published: `text` is the file.
@@ -75,13 +92,13 @@ function writeTextSync(p: string, text: string): void {
 export function writeFileBehind(p: string, text: string, guard?: () => boolean): Promise<WriteBehindResult> {
   const k = keyOf(p);
   if (flights.has(k)) return Promise.reject(new Error(`write-behind: ${basename(p)} is already being written`));
-  const f: Flight = { redo: null, done: Promise.resolve(), renaming: false };
+  const f: Flight = { redo: null, done: Promise.resolve(), renaming: false, tmp: null };
   flights.set(k, f);
   const run = (async (): Promise<WriteBehindResult> => {
     let landed = false;
     let failure: { error: unknown } | null = null;
     const commit = (): boolean => { f.renaming = !closed && f.redo === null && (!guard || guard()); return f.renaming; };
-    try { landed = await atomicWriteTextAsync(p, text, commit); }
+    try { landed = await atomicWriteTextAsync(p, text, commit, (tmp) => { f.tmp = tmp; }); }
     catch (error) { failure = { error }; }
     f.renaming = false;
     try {
@@ -236,17 +253,17 @@ export async function settleWrites(capMs: number): Promise<void> {
 /**
  * QUIT: wait as settleWrites, then close whole-file write-behind for good. A flight still writing its tmp
  * at the cap withdraws (its owner stays dirty and flushes synchronously). A rename already under way
- * cannot be called back, so it is waited for without a cap: the synchronous write that follows goes to
- * the same disk and would wait there anyway, and written before the rename lands it would be passed by
- * the older text once the app has exited. After this resolves no asynchronous rename is in flight and
- * none can start.
+ * cannot be called back, so it gets a second wait, at most `renameCapMs`: a rename is short, and the
+ * synchronous write that follows is then the last word. A rename that does not settle even then (a
+ * filter driver, a dead network home) does not hold the quit: noteSyncWrite gives it the owner's text
+ * to carry, so it cannot land older text after the app has exited. No new rename starts after this.
  */
-export async function closeWrites(capMs: number): Promise<void> {
+export async function closeWrites(capMs: number, renameCapMs = capMs): Promise<void> {
   await settleWrites(capMs);
   closed = true;
-  for (;;) {
-    const renaming = [...flights.values()].filter((f) => f.renaming);
-    if (!renaming.length) return;
-    await Promise.all(renaming.map((f) => f.done));
-  }
+  const renaming = [...flights.values()].filter((f) => f.renaming).map((f) => f.done);
+  if (!renaming.length) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([Promise.all(renaming), new Promise<void>((r) => { timer = setTimeout(r, renameCapMs); })]);
+  if (timer) clearTimeout(timer);
 }

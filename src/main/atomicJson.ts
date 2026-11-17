@@ -43,9 +43,11 @@ export function atomicWriteJson(p: string, data: unknown): void {
 /** Async sibling for timer/IPC persistence paths; preserves atomic temp+rename semantics.
  *  `commit` (UI-CRAWL fix, the capacity quit race) is asked just before the rename: false withdraws
  *  the write (the temp file is removed, nothing is published, the result is false) because a newer
- *  write, such as the sync one at will-quit, has already been published and must stay the last word. */
-export async function atomicWriteTextAsync(p: string, text: string, commit?: () => boolean): Promise<boolean> {
+ *  write, such as the sync one at will-quit, has already been published and must stay the last word.
+ *  `onTmp` is told the temp file's path before anything is written (write-behind's quit path). */
+export async function atomicWriteTextAsync(p: string, text: string, commit?: () => boolean, onTmp?: (tmp: string) => void): Promise<boolean> {
   const tmp = `${p}.tmp-${randomBytes(3).toString('hex')}`;
+  onTmp?.(tmp);
   let last: unknown;
   try {
     await writeFile(tmp, text, 'utf8');
