@@ -158,11 +158,31 @@ function build(tree, env, log) {
     step('npm ci', node, [npmCli, 'ci', '--ignore-scripts', '--no-audit', '--no-fund'], { cwd: work, env: cenv });
 
     log('Electron binary');
-    step('electron install', node, [path.join(work, 'node_modules', 'electron', 'install.js')], { cwd: work, env: cenv });
+    // Not the package's own install.js: its extract-zip 2.0.1 on a current Node ends with exit 0 and
+    // nothing extracted (measured on Node 26: no error, no files). The tree's own downloader fetches the
+    // zip against the package's checksums; the system's archive tool unpacks it; path.txt is what
+    // install.js would have written.
+    const edir = path.join(work, 'node_modules', 'electron');
+    const fetchZip = "const {downloadArtifact}=require('@electron/get');const v=require('./node_modules/electron/package.json').version;"
+      + "downloadArtifact({version:v,artifactName:'electron',checksums:require('./node_modules/electron/checksums.json')})"
+      + ".then((z)=>process.stdout.write('ZIP='+z),(e)=>{console.error(e&&e.stack||e);process.exitCode=1;});";
+    const zip = (/ZIP=(.+)/.exec(step('electron download', node, ['-e', fetchZip], { cwd: work, env: cenv }).stdout) || [])[1];
+    if (!zip || !fs.existsSync(zip.trim())) throw new Error('the Electron download gave no zip');
+    const dist = path.join(edir, 'dist');
+    fs.mkdirSync(dist, { recursive: true });
+    if (process.platform === 'win32') step('electron unpack', path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe'), ['-xf', zip.trim(), '-C', dist], { env: cenv });
+    else step('electron unpack', 'unzip', ['-q', '-o', zip.trim(), '-d', dist], { env: cenv });
+    const exeRel = process.platform === 'win32' ? 'electron.exe' : process.platform === 'darwin' ? 'Electron.app/Contents/MacOS/Electron' : 'electron';
+    if (!fs.existsSync(path.join(dist, exeRel))) throw new Error(`the Electron zip unpacked without ${exeRel}`);
+    fs.writeFileSync(path.join(edir, 'path.txt'), exeRel);
 
     log('better-sqlite3 for that Electron');
     const rebuild = path.join(work, 'node_modules', '@electron', 'rebuild', 'lib', 'cli.js');
-    step('electron-rebuild better-sqlite3', node, [rebuild, '-f', '-o', 'better-sqlite3'], { cwd: work, env: cenv });
+    // On the tree's own Electron as Node (Node 20), not the host's: the 1.1.83 rebuild command loads
+    // yargs 17 through an extensionless file in a "type": "module" package, which a current Node reads
+    // as an ES module ("require is not defined in ES module scope"). The old toolchain runs on its runtime.
+    const electronExe = require(path.join(work, 'node_modules', 'electron'));
+    step('electron-rebuild better-sqlite3', electronExe, [rebuild, '-f', '-o', 'better-sqlite3'], { cwd: work, env: { ...cenv, ELECTRON_RUN_AS_NODE: '1' } });
 
     const manifest = JSON.parse(fs.readFileSync(path.join(work, 'resources', 'models', 'native-memory-manifest.json'), 'utf8'));
     const from = localModel(manifest, env);
