@@ -35,7 +35,7 @@ import { REALTIME_MODEL } from '@shared/realtimePricing';
 import { RealtimeDevicePicker } from '@/realtime/DevicePicker';
 import { CostHud } from '@/realtime/CostHud';
 import { useOrchestratorName } from '@/hooks/useOrchestratorName';
-import { setTerminalPatternColoringEnabled } from './terminalPatternColor';
+import { TerminalSetting } from './TerminalSetting';
 
 export interface SettingsModalProps {
   config: HarnessConfig;
@@ -200,14 +200,6 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
     catch { setNotifications(!next); /* revert on failure */ }
   };
 
-  const [terminalPatternColoring, setTerminalPatternColoring] = useState<boolean>(config.terminalPatternColoring !== false);
-  const toggleTerminalPatternColoring = async () => {
-    const next = !terminalPatternColoring;
-    setTerminalPatternColoring(next);
-    setTerminalPatternColoringEnabled(next);
-    try { await window.cth.updateConfig({ terminalPatternColoring: next } as Partial<HarnessConfig>); }
-    catch { setTerminalPatternColoring(!next); setTerminalPatternColoringEnabled(!next); }
-  };
 
   // ─── v0.3.4 redesign: settings that were onboarding-trapped or UI-less ────
   const cfgX = config as HarnessConfig & {
@@ -511,8 +503,6 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
       if (!alive) return;
       const cc = c as BreakerCfgView;
       setNotifications(cc.notifications === true);
-      setTerminalPatternColoring(cc.terminalPatternColoring !== false);
-      setTerminalPatternColoringEnabled(cc.terminalPatternColoring !== false);
       setAgentBudget(cc.costCapTokens != null ? String(cc.costCapTokens) : '');
       setVelocityCeiling(cc.circuitBreaker?.tokenVelocityPerMin != null ? String(cc.circuitBreaker.tokenVelocityPerMin) : '');
       setSlackEnabled(cc.slackEnabled ?? false);
@@ -1065,31 +1055,8 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
 
                       <div style={{ height: 1, background: 'var(--cth-ink-300)' }} />
 
-                      <div>
-                        <div style={{
-                          fontFamily: 'var(--cth-font-display)', fontSize: 8, lineHeight: '12px',
-                          color: 'var(--cth-ink-500)', textTransform: 'uppercase', marginBottom: 10
-                        }}>
-                          Terminal
-                        </div>
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-                          <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                            <span style={{ fontSize: 13, lineHeight: '20px', color: 'var(--cth-ink-900)' }}>
-                              Colour recognizable output
-                            </span>
-                            <span style={{ fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-500)' }}>
-                              Highlight paths, links, git IDs, status words and agent names. Terminal output is unchanged.
-                            </span>
-                          </div>
-                          <PixelButton
-                            variant={terminalPatternColoring ? 'primary' : 'secondary'}
-                            size="sm"
-                            onClick={toggleTerminalPatternColoring}
-                          >
-                            {terminalPatternColoring ? 'on' : 'off'}
-                          </PixelButton>
-                        </div>
-                      </div>
+                      {/* TERM-FONT-SETTINGS-107: the terminal font, and the colours toggle under it. */}
+                      <TerminalSetting config={config} />
 
                       <div style={{ height: 1, background: 'var(--cth-ink-300)' }} />
 

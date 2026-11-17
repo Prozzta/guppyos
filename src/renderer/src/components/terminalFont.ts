@@ -1,52 +1,50 @@
-import { useSyncExternalStore } from 'react';
 import type { Terminal } from '@xterm/xterm';
 
 /**
  * The one place the terminal font is chosen (TERM-FONT-105, TERM-FONT-JETBRAINS).
  *
- * The user picks the face in the terminal header, beside the size buttons: JetBrains Mono
- * (the default) or Martian Mono. Both are bundled (design/fonts.css), never fetched. Their
- * widths differ (JetBrains Mono's advance is 0.6em, Martian Mono's 0.7em), so the cell must
- * be measured with the chosen face itself, never with a fallback or with the other face:
- * see remeasureTerminalFont and applyTerminalFontFace below.
+ * The user picks the face in Settings -> General -> Terminal (TerminalSetting.tsx,
+ * TERM-FONT-SETTINGS-107): JetBrains Mono (the default), Martian Mono, Cascadia Mono or
+ * Atkinson Hyperlegible Mono. All are bundled (design/fonts.css), never fetched. The pick is
+ * saved in config.json as `terminalFont` (main owns the file); this module only holds the
+ * face in use in this window. It is set from the config at app start (App.tsx), by the
+ * Settings section, and by main's `terminal:fontChanged` push when another window picks.
+ * Their widths differ (advance: JetBrains Mono 0.6em, Martian Mono 0.7em, Cascadia Mono
+ * 0.586em, Atkinson Hyperlegible Mono 0.632em), so the cell must be measured with the
+ * chosen face itself, never with a fallback or with another face: see
+ * remeasureTerminalFont and applyTerminalFontFace below.
  * Consolas sits before the generic
  * `monospace` so that, on Windows, a missing face falls back to a real monospace font of
  * known width instead of whatever Chromium's default monospace is this release (Courier New
  * in Chrome 128, Consolas in Chrome 156 — the change that exposed the cell-width bug).
  */
-export const TERMINAL_FONT_FACES = ['JetBrains Mono', 'Martian Mono'] as const;
+export const TERMINAL_FONT_FACES = ['JetBrains Mono', 'Martian Mono', 'Cascadia Mono', 'Atkinson Hyperlegible Mono'] as const;
 export type TerminalFontFace = (typeof TERMINAL_FONT_FACES)[number];
 export const DEFAULT_TERMINAL_FONT_FACE: TerminalFontFace = 'JetBrains Mono';
-
-const LS_FONT_FACE = 'cth.ptyFontFace';
 
 function isTerminalFontFace(v: unknown): v is TerminalFontFace {
   return (TERMINAL_FONT_FACES as readonly unknown[]).includes(v);
 }
 
-/** The stored pick; anything else (nothing stored, a face we no longer ship) is the default. */
-function load(): TerminalFontFace {
-  try {
-    const v = window.localStorage.getItem(LS_FONT_FACE);
-    if (isTerminalFontFace(v)) return v;
-  } catch { /* noop */ }
-  return DEFAULT_TERMINAL_FONT_FACE;
+/** The face a saved `terminalFont` config value means: the value itself when it is a face we
+ *  ship; anything else (no key, a face we no longer ship, a hand-edited value) is the default. */
+export function parseTerminalFontFace(v: unknown): TerminalFontFace {
+  return isTerminalFontFace(v) ? v : DEFAULT_TERMINAL_FONT_FACE;
 }
 
-let current: TerminalFontFace = load();
+let current: TerminalFontFace = DEFAULT_TERMINAL_FONT_FACE;
 const listeners = new Set<() => void>();
 
 export function getTerminalFontFace(): TerminalFontFace {
   return current;
 }
 
-/** Pick the terminal face and persist it (same pattern as terminalFontSize). An unknown
- *  face and an unchanged one are no-ops. Subscribers (terminalPool) apply it to every
- *  pooled terminal; this module only holds the choice. */
+/** Use a terminal face in this window. An unknown face and an unchanged one are no-ops.
+ *  Subscribers (terminalPool) apply it to every pooled terminal. Nothing is saved here:
+ *  the Settings section saves the pick to config.json through main. */
 export function setTerminalFontFace(next: string): TerminalFontFace {
   if (!isTerminalFontFace(next) || next === current) return current;
   current = next;
-  try { window.localStorage.setItem(LS_FONT_FACE, next); } catch { /* noop */ }
   for (const l of [...listeners]) l();
   return current;
 }
@@ -57,9 +55,6 @@ export function subscribeTerminalFontFace(listener: () => void): () => void {
 }
 
 /** Live terminal face. Re-renders the caller whenever the pick changes. */
-export function useTerminalFontFace(): TerminalFontFace {
-  return useSyncExternalStore(subscribeTerminalFontFace, getTerminalFontFace, getTerminalFontFace);
-}
 
 /** The xterm fontFamily for a face: the face first, then Consolas, then monospace. */
 export function terminalFontFamily(face: TerminalFontFace = current): string {

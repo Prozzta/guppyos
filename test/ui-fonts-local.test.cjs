@@ -104,6 +104,17 @@ test('every bundled face is the unmodified upstream file, with its OFL text and 
       'JetBrainsMono-Medium.woff2': '086c48dfbea9ddaff1320f7e09399b8e2924e88ce67453721255db3bdbb5a353',
       'JetBrainsMono-SemiBold.woff2': '918edad542a1da608fd2ba8daebaff9ac802309103fe760eed465b8b4e47faf1',
       'JetBrainsMono-Bold.woff2': 'c503cc5ec5f8b2c7666b7ecda1adf44bd45f2e6579b2eba0fc292150416588a2'
+    },
+    // TERM-FONT-SETTINGS-107: the two terminal faces added to Settings, Terminal, Font.
+    'cascadia-mono': {
+      'CascadiaMono-Regular.woff2': 'abbf67cceb200508c9590ac9b75b37dd2211f58ea56279f1fa6ec87265f9d713',
+      'CascadiaMono-Bold.woff2': 'd84776a2893f382b96c8bfe085d438dc07f2fdd98210fa9f2d3ac62d82a7aef4',
+      'OFL.txt': '51882cd3cdba4e16f220f44ddb08a635c38c44ea6e0975db2574f4be6f958238'
+    },
+    'atkinson-hyperlegible-mono': {
+      'AtkinsonHyperlegibleMono-Regular.woff2': '3b916de5c5247c5fa9736aad6c2673f1b0b0381ab306dcddfcee4a184a842a51',
+      'AtkinsonHyperlegibleMono-Bold.woff2': '039936edaa268366426a7f0ca8014da637b8bf8da24859afbd85a5b313e9315e',
+      'OFL.txt': '1ebb31cf7393164f20d10c1d48406cddb5314feff8465531cf1e4ba37e9dd740'
     }
   };
   for (const [dir, files] of Object.entries(pinned)) {
@@ -114,7 +125,11 @@ test('every bundled face is the unmodified upstream file, with its OFL text and 
   assert.match(read(FONTS, 'inter', 'OFL.txt'), /^Copyright \(c\) 2016 The Inter Project Authors[\s\S]*SIL OPEN FONT LICENSE Version 1\.1/);
   assert.match(read(FONTS, 'press-start-2p', 'OFL.txt'), /^Copyright 2012 The Press Start 2P Project Authors[\s\S]*Reserved Font Name "Press Start 2P"[\s\S]*SIL OPEN FONT LICENSE Version 1\.1/);
   assert.match(read(FONTS, 'geist', 'OFL.txt'), /^Copyright 2026 The Geist Project Authors[\s\S]*SIL OPEN FONT LICENSE Version 1\.1/);
+  assert.match(read(FONTS, 'cascadia-mono', 'OFL.txt'), /^Copyright \(c\) 2019 - Present, Microsoft Corporation,\r?\nwith Reserved Font Name Cascadia Code\.[\s\S]*SIL OPEN FONT LICENSE Version 1\.1/);
+  assert.match(read(FONTS, 'atkinson-hyperlegible-mono', 'OFL.txt'), /^Copyright 2020-2024 The Atkinson Hyperlegible Mono Project Authors[\s\S]*SIL OPEN FONT LICENSE Version 1\.1/);
   const attr = read(RENDERER, 'src', 'assets', 'ATTRIBUTION.md');
+  assert.match(attr, /## Terminal font: Cascadia Mono[\s\S]*2407\.24[\s\S]*microsoft\/cascadia-code[\s\S]*SIL Open Font License 1\.1/);
+  assert.match(attr, /## Terminal font: Atkinson Hyperlegible Mono[\s\S]*googlefonts\/atkinson-hyperlegible-next-mono[\s\S]*154d50362016cc3e873eb21d242cd0772384c8f9[\s\S]*SIL Open Font\s+License 1\.1/);
   assert.match(attr, /## UI font: Inter[\s\S]*Inter 4\.1[\s\S]*rsms\/inter[\s\S]*SIL Open Font License 1\.1/);
   assert.match(attr, /## Brand display font: Press Start 2P[\s\S]*3\.000[\s\S]*google\/fonts[\s\S]*SIL Open Font[\s\S]*License 1\.1/);
   assert.match(attr, /## Release drop font: Geist[\s\S]*1\.9\.2[\s\S]*vercel\/geist-font[\s\S]*SIL Open Font License 1\.1/);
