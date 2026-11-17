@@ -35,9 +35,9 @@ export async function readFileTracked(p: string, encoding: BufferEncoding): Prom
 /** True while one of this process's readFileTracked reads of `p` is open. */
 export function hasInflightRead(p: string): boolean { return inflightReads.has(readKey(p)); }
 
-type RenameAddon = { posixRename(src: string, dst: string): void };
+type RenameAddon = { posixRename(src: string, dst: string): void; posixRenameAsync?(src: string, dst: string): Promise<void> };
 let renameAddon: RenameAddon | null | undefined;
-/** The fs-handle addon's posixRename (Windows), or null when it cannot load. Never throws. */
+/** The fs-handle addon's posixRename and posixRenameAsync (Windows), or null when it cannot load. Never throws. */
 function loadRenameAddon(): RenameAddon | null {
   if (renameAddon !== undefined) return renameAddon;
   renameAddon = null;
@@ -111,15 +111,27 @@ export function atomicWriteJson(p: string, data: unknown): void {
  *  write, such as the sync one at will-quit, has already been published and must stay the last word.
  *  `onTmp` is told the temp file's path before anything is written (write-behind's quit path).
  *  LAG-ROUTE-WRITES-108: `text` may be an iterable of string pieces. Each piece is encoded and written
- *  in its own turn, so a large file never holds the main thread for one whole-text encode. */
+ *  in its own turn, so a large file never holds the main thread for one whole-text encode.
+ *  ASYNC-RENAME-POSIX-107: on Windows the rename is first the addon's posixRenameAsync, the POSIX rename
+ *  of renameWithRetry run on a libuv pool thread, so it publishes while a reader holds the target open
+ *  and the main thread never waits for it (the sync posixRename is never called here). If it fails or
+ *  is not there, the plain rename and its retries run as before, after `commit` is asked again. */
 export async function atomicWriteTextAsync(p: string, text: string | Iterable<string>, commit?: () => boolean, onTmp?: (tmp: string) => void): Promise<boolean> {
   const tmp = `${p}.tmp-${randomBytes(3).toString('hex')}`;
   onTmp?.(tmp);
   let last: unknown;
   try {
     await writeFile(tmp, text, 'utf8');
+    const addon = loadRenameAddon();
+    let viaPool = typeof addon?.posixRenameAsync === 'function';
     for (let attempt = 0; attempt < 5; attempt++) {
       if (commit && !commit()) { await rm(tmp, { force: true }); return false; }
+      if (viaPool && addon?.posixRenameAsync) {
+        // One try, which is not one of the plain rename's five: a failure goes back to the commit check.
+        viaPool = false;
+        attempt--;
+        try { await addon.posixRenameAsync(resolve(tmp), resolve(p)); return true; } catch { continue; }
+      }
       try { await rename(tmp, p); return true; } catch (error) {
         last = error;
         const code = (error as NodeJS.ErrnoException).code;

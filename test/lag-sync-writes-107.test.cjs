@@ -31,6 +31,9 @@ const L = loadTs('src/main/mailLedger.ts');
 const MC = loadTs('src/main/mailCards.ts');
 const DW = loadTs('src/main/claims/derivedWriter.ts');
 WB.enableWriteBehind();
+// ASYNC-RENAME-POSIX-107: these cases watch, hold and fail the plain fs/promises rename, which on Windows
+// is now the fallback. The addon's rename is switched off here; async-rename-posix-107 covers it.
+loadTs('src/main/atomicJson.ts').__setRenameAddonForTest(null);
 
 let seq = 0;
 const dirOf = (name) => { const d = path.join(JAIL, `${name}-${++seq}`); fs.mkdirSync(d, { recursive: true }); return d; };

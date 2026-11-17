@@ -235,6 +235,10 @@ test('tasks.json: an API write that lands during the async sidecar write is the 
   const state = path.join(hive.root(), 'state');
   const sidecar = () => Object.keys(JSON.parse(fs.readFileSync(path.join(state, 'task-meta.json'), 'utf8')).cards).sort();
   const fsp = require('node:fs/promises');
+  // ASYNC-RENAME-POSIX-107: the hook below is on the plain rename, so the addon rename is switched off here.
+  const atomic = loadTs('src/main/atomicJson.ts');
+  atomic.__setRenameAddonForTest(null);
+  t.after(() => atomic.__setRenameAddonForTest(undefined));
   // Land our own (synchronous) write inside the async sidecar write: once while the temp file
   // is being written (the async write must withdraw), once just as it renames (it must repeat).
   for (const [round, hook] of [[0, 'writeFile'], [1, 'rename']]) {

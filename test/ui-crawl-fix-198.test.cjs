@@ -42,6 +42,9 @@ const C = loadTs(CAP);
 const A = loadTs(AJ);
 const S = loadTs(SW);
 const B = loadTs(BS);
+// ASYNC-RENAME-POSIX-107: the quit-race cases park and fail the plain fs/promises rename, which on Windows
+// is now the fallback. The addon's rename is switched off here; async-rename-posix-107 covers it.
+A.__setRenameAddonForTest(null);
 
 const between = (src, from, to) => {
   const a = src.indexOf(from);
@@ -278,6 +281,7 @@ const K = {
   /** q (Jim's U2): a rename that fails EPERM and retries re-asks the commit check, so a saveNow that ran
    *  during the backoff wins over the retry. */
   async retryRecheck(mod = A) {
+    mod.__setRenameAddonForTest(null);   // a mutated copy of the module has its own addon slot
     const d = tmp('qretry');
     const real = fsp.rename;
     try {

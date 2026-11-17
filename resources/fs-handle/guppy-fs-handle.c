@@ -13,7 +13,8 @@
  *
  * finalPath(fd: number) -> string. Any failure throws; the caller refuses the access.
  * Windows also exports the process holds of PTY-KILL-PID-IDENTITY (procOpen/procAlive/procClose) and
- * PTY-HOLD-NODEPTY-HANDOFF (procAdopt), below.
+ * PTY-HOLD-NODEPTY-HANDOFF (procAdopt), below, and the renames of REGISTRY-RENAME-EPERM-107
+ * (posixRename) and ASYNC-RENAME-POSIX-107 (posixRenameAsync).
  * Plain N-API (ABI-stable), so one build loads in Electron and in the Node that runs the tests.
  */
 #define NAPI_VERSION 8
@@ -290,37 +291,141 @@ static napi_value throw_win32(napi_env env, const char *msg, DWORD code) {
   return NULL;
 }
 
-static napi_value posix_rename(napi_env env, napi_callback_info info) {
+/* The two paths of a rename call, as the source path and a filled FileRenameInfoEx block (both to be
+ * freed by the caller). Returns NULL, or the message of the error to throw. */
+static const char *rename_args(napi_env env, napi_callback_info info, WCHAR **src_out, guppy_rename_info_ex **ri_out, size_t *size_out) {
   size_t argc = 2;
   napi_value argv[2];
   if (napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok || argc < 2) {
-    return fail(env, "posixRename(src, dst): both paths required");
+    return "posixRename(src, dst): both paths required";
   }
   WCHAR *src = utf16_arg(env, argv[0]);
   WCHAR *dst = utf16_arg(env, argv[1]);
-  if (!src || !dst) { free(src); free(dst); return fail(env, "posixRename(src, dst): paths must be non-empty strings"); }
+  if (!src || !dst) { free(src); free(dst); return "posixRename(src, dst): paths must be non-empty strings"; }
   size_t dlen = wcslen(dst);
   size_t size = sizeof(guppy_rename_info_ex) + dlen * sizeof(WCHAR);
   guppy_rename_info_ex *ri = (guppy_rename_info_ex *)calloc(1, size);
-  if (!ri) { free(src); free(dst); return fail(env, "posixRename: out of memory"); }
+  if (!ri) { free(src); free(dst); return "posixRename: out of memory"; }
   ri->Flags = GUPPY_RENAME_REPLACE_IF_EXISTS | GUPPY_RENAME_POSIX_SEMANTICS;
   ri->RootDirectory = NULL;
   ri->FileNameLength = (DWORD)(dlen * sizeof(WCHAR));
   memcpy(ri->FileName, dst, dlen * sizeof(WCHAR));
+  free(dst);
+  *src_out = src;
+  *ri_out = ri;
+  *size_out = size;
+  return NULL;
+}
+
+/* The rename itself. No N-API call, so it may run on any thread. On failure `code` is the Win32
+ * error and `opened` says whether the source was opened at all. */
+static BOOL rename_by_handle(const WCHAR *src, guppy_rename_info_ex *ri, size_t size, DWORD *code, int *opened) {
   HANDLE h = CreateFileW(src, DELETE | SYNCHRONIZE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                          NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
-  DWORD code = 0;
-  BOOL ok = FALSE;
+  *code = 0;
+  *opened = h != INVALID_HANDLE_VALUE;
   if (h == INVALID_HANDLE_VALUE) {
-    code = GetLastError();
-  } else {
-    ok = SetFileInformationByHandle(h, (FILE_INFO_BY_HANDLE_CLASS)GUPPY_FILE_RENAME_INFO_EX, ri, (DWORD)size);
-    if (!ok) code = GetLastError();
-    CloseHandle(h);
+    *code = GetLastError();
+    return FALSE;
   }
-  free(ri); free(src); free(dst);
-  if (!ok) return throw_win32(env, h == INVALID_HANDLE_VALUE ? "posixRename: the source could not be opened" : "posixRename: SetFileInformationByHandle(FileRenameInfoEx) failed", code);
+  BOOL ok = SetFileInformationByHandle(h, (FILE_INFO_BY_HANDLE_CLASS)GUPPY_FILE_RENAME_INFO_EX, ri, (DWORD)size);
+  if (!ok) *code = GetLastError();
+  CloseHandle(h);
+  return ok;
+}
+
+static const char *rename_msg(int opened) {
+  return opened ? "posixRename: SetFileInformationByHandle(FileRenameInfoEx) failed" : "posixRename: the source could not be opened";
+}
+
+static napi_value posix_rename(napi_env env, napi_callback_info info) {
+  WCHAR *src = NULL;
+  guppy_rename_info_ex *ri = NULL;
+  size_t size = 0;
+  const char *bad = rename_args(env, info, &src, &ri, &size);
+  if (bad) return fail(env, bad);
+  DWORD code = 0;
+  int opened = 0;
+  BOOL ok = rename_by_handle(src, ri, size, &code, &opened);
+  free(ri); free(src);
+  if (!ok) return throw_win32(env, rename_msg(opened), code);
   return NULL;
+}
+
+/*
+ * ASYNC-RENAME-POSIX-107: posixRenameAsync(src, dst) -> Promise<void>. The same rename, run on a
+ * libuv pool thread (N-API async work), for the async writers: the main thread only queues the work
+ * and settles the promise, it never waits for the file system. Bad arguments throw at the call; a
+ * failed rename rejects with the same Error (`errno` = the Win32 code) the sync call throws.
+ */
+typedef struct {
+  napi_async_work work;
+  napi_deferred deferred;
+  WCHAR *src;
+  guppy_rename_info_ex *ri;
+  size_t size;
+  DWORD code;
+  int opened;
+  BOOL ok;
+} rename_job;
+
+static void rename_job_free(napi_env env, rename_job *job) {
+  if (job->work) napi_delete_async_work(env, job->work);
+  free(job->ri); free(job->src); free(job);
+}
+
+/* On a pool thread: no N-API here. */
+static void rename_execute(napi_env env, void *data) {
+  (void)env;
+  rename_job *job = (rename_job *)data;
+  job->ok = rename_by_handle(job->src, job->ri, job->size, &job->code, &job->opened);
+}
+
+/* Back on the main thread: settle the promise. */
+static void rename_complete(napi_env env, napi_status status, void *data) {
+  rename_job *job = (rename_job *)data;
+  napi_value v;
+  if (status == napi_ok && job->ok) {
+    if (napi_get_undefined(env, &v) == napi_ok) napi_resolve_deferred(env, job->deferred, v);
+  } else {
+    const char *msg = status == napi_ok ? rename_msg(job->opened) : "posixRenameAsync: the rename was cancelled";
+    DWORD code = status == napi_ok ? job->code : ERROR_OPERATION_ABORTED;
+    napi_value text, num;
+    if (napi_create_string_utf8(env, msg, NAPI_AUTO_LENGTH, &text) == napi_ok &&
+        napi_create_error(env, NULL, text, &v) == napi_ok) {
+      if (napi_create_uint32(env, code, &num) == napi_ok) napi_set_named_property(env, v, "errno", num);
+      napi_reject_deferred(env, job->deferred, v);
+    }
+  }
+  rename_job_free(env, job);
+}
+
+static napi_value posix_rename_async(napi_env env, napi_callback_info info) {
+  WCHAR *src = NULL;
+  guppy_rename_info_ex *ri = NULL;
+  size_t size = 0;
+  const char *bad = rename_args(env, info, &src, &ri, &size);
+  if (bad) return fail(env, bad);
+  rename_job *job = (rename_job *)calloc(1, sizeof(rename_job));
+  if (!job) { free(ri); free(src); return fail(env, "posixRename: out of memory"); }
+  job->src = src;
+  job->ri = ri;
+  job->size = size;
+  napi_value name, promise;
+  if (napi_create_string_utf8(env, "guppy.posixRenameAsync", NAPI_AUTO_LENGTH, &name) != napi_ok ||
+      napi_create_async_work(env, NULL, name, rename_execute, rename_complete, job, &job->work) != napi_ok) {
+    rename_job_free(env, job);
+    return fail(env, "posixRenameAsync: the work could not be created");
+  }
+  if (napi_create_promise(env, &job->deferred, &promise) != napi_ok) {
+    rename_job_free(env, job);
+    return fail(env, "posixRenameAsync: the promise could not be created");
+  }
+  if (napi_queue_async_work(env, job->work) != napi_ok) {
+    rename_job_free(env, job);
+    return fail(env, "posixRenameAsync: the work could not be queued");
+  }
+  return promise;
 }
 
 static int export_fn(napi_env env, napi_value exports, const char *name, napi_callback cb) {
@@ -337,7 +442,8 @@ NAPI_MODULE_INIT() {
 #ifdef _WIN32
   if (!export_fn(env, exports, "procOpen", proc_open) || !export_fn(env, exports, "procAlive", proc_alive) ||
       !export_fn(env, exports, "procClose", proc_close) || !export_fn(env, exports, "procAdopt", proc_adopt) ||
-      !export_fn(env, exports, "posixRename", posix_rename)) {
+      !export_fn(env, exports, "posixRename", posix_rename) ||
+      !export_fn(env, exports, "posixRenameAsync", posix_rename_async)) {
     return NULL;
   }
 #endif
