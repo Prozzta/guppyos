@@ -8,6 +8,14 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **A mail ledger save never writes the whole file on the main thread while another save of it is
+  still running.** Ledger saves already run off the main thread (tmp file, then rename). The one
+  exception was a save that found an older write of the same file still under way, for example the
+  last save of a ledger that was just reset or moved to a new home. That save wrote the whole file
+  on the main thread, which for god's ledger (3.4 MB) held the app for about 20 to 30 ms. It now
+  waits one coalesce period and tries again, so it starts after the older write ends and lands
+  after it. Quit, reset and home change still write synchronously, as before.
+
 - **A DEV build that refuses to start (exit 97) no longer crashes on the way out.** When the live
   isolation check found DEV paths overlapping Stable, Guppy called `app.exit(97)` inside its
   whenReady startup callback. Electron 45 can crash tearing down from inside a startup callback
