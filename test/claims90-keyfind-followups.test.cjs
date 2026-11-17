@@ -76,12 +76,16 @@ test('(a) wiring: NativeMemoryWiring.syncClaims posts the request with deadline 
   wk.reply({ event: 'ready' });
   await tick(); await tick();
   const sync = wk.posted.find((m) => m.op === 'claims-sync');
+  const after = Date.now();
   assert.ok(sync, `a claims-sync was posted: ${wk.posted.map((m) => m.op).join(',')}`);
   assert.equal(sync.args.chunks.length, 7);
   // The wiring uses the client's real clock: the posted deadline is now + the scaled budget (121,050 ms for 7 chunks),
-  // which a fixed 120,000 ms budget can never reach.
-  const left = sync.deadline - before;
-  assert.ok(left <= claimsSyncDeadlineMs(7) + 50 && left > 120_000 + 500, `deadline ${left} ms ahead: the scaled budget, not the fixed 120 s`);
+  // which a fixed 120,000 ms budget can never reach. TEST-FLAKE-KEYFIND-DEADLINE: the client reads "now" somewhere
+  // between `before` and the post, and the ticks and the fake ready in between can take any time under load (a fixed
+  // +50 ms bound flaked at 198 ms). So bracket the post: the deadline minus the scaled budget lies in [before, after].
+  const start = sync.deadline - claimsSyncDeadlineMs(7);
+  assert.ok(start >= before && start <= after, `deadline ${sync.deadline} = a read of now in [${before}, ${after}] + claimsSyncDeadlineMs(7)`);
+  assert.ok(claimsSyncDeadlineMs(7) > 120_000 + 500, 'the scaled budget, not the fixed 120 s');
   wk.reply({ id: sync.id, ok: true, exit: 0, json: { embedded: 7 } });
   assert.equal((await p).ok, true);
   await w.shutdown?.();
