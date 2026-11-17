@@ -19,7 +19,7 @@ import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from 'n
 import { join } from 'node:path';
 import { DERIVED_AGENT_ID, type KeyRegistry } from '../../shared/claims';
 import { canonicalJson, sha256Hex } from './canonical';
-import { noteSyncWrite, overtakenText, writeBehindOn, writeFileBehind, writeInFlight } from '../writeBehind';
+import { fileWriteBehindOn, noteSyncWrite, overtakenText, writeBehindOn, writeFileBehind, writeInFlight } from '../writeBehind';
 
 export const KEY_REGISTRY_FILE = 'memory-keys.json';
 
@@ -242,7 +242,7 @@ export class KeyRegistryWriter {
 
   private arm(): void {
     if (this.timer || this.unsaved.size === 0) return;
-    this.timer = setTimeout(() => { this.timer = null; if (writeBehindOn()) this.flushBehind(); else this.flush(); }, this.saveMs);
+    this.timer = setTimeout(() => { this.timer = null; if (fileWriteBehindOn()) this.flushBehind(); else this.flush(); }, this.saveMs);
     this.timer.unref?.();
   }
 

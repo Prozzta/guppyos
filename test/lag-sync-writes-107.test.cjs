@@ -139,6 +139,27 @@ test('writeFileBehind: a synchronous write before the rename wins (the write in 
   assert.deepEqual(tmpsIn(dir), []);
 });
 
+// Jim J6 (audit of ec6a36a4): the older text must never be on disk after the synchronous write, not even briefly.
+test('writeFileBehind: after a synchronous write the write in flight does not rename at all (no other process reads the older text)', async () => {
+  const dir = dirOf('wf');
+  const p = path.join(dir, 'a.json');
+  const g = gate();
+  await withAsync('rename', async (_a, real) => real(), async (renames) => {
+    const result = await withAsync('writeFile', async (_a, real) => { await real(); await g.wait(); }, async () => {
+      const flight = WB.writeFileBehind(p, 'async-older');
+      await until(() => g.reached, 'the tmp write');
+      fs.writeFileSync(p, 'sync-newer');
+      WB.noteSyncWrite(p, 'sync-newer');
+      g.open();
+      return flight;
+    });
+    assert.equal(result, 'overtaken');
+    assert.deepEqual(renames, [], 'THE OLDER TEXT IS NEVER RENAMED OVER THE SYNCHRONOUS WRITE');
+  });
+  assert.equal(fs.readFileSync(p, 'utf8'), 'sync-newer');
+  assert.deepEqual(tmpsIn(dir), []);
+});
+
 test('writeFileBehind: a synchronous write while the rename is on its way is put back, and read from memory meanwhile', async () => {
   const dir = dirOf('wf');
   const p = path.join(dir, 'a.json');
@@ -550,6 +571,37 @@ test('ledger: an inbox file moves to .done only after the save that records it h
   ml.dispose();
 });
 
+// Jim J2 (audit of ec6a36a4): the save's own set of acted ids is what runArchives may move.
+test('ledger: a mail acted on DURING a save stays in the inbox until the next save, which records it, has landed', async () => {
+  const root = ledgerHive();
+  const ml = mkLedger(root);
+  const inbox = path.join(root, 'agents', AGENT, 'inbox');
+  for (const id of ['m-a', 'm-b']) deliver(ml, root, id);
+  ml.claimSurfacing(AGENT, ['m-a', 'm-b'], 'turn-1', 'UserPromptSubmit');
+  ml.confirmSurfaced(AGENT, ['m-a', 'm-b'], 'turn-1', 'evidence');
+  await until(() => diskIds(root).length === 2, 'the first save');
+  await WB.settleWrites(10_000);
+  const gates = [gate(), gate()];
+  let n = 0;
+  await withAsync('rename', async (_a, real) => { const g = gates[n++]; if (g) await g.wait(); return real(); }, async () => {
+    ml.markActed(AGENT, ['m-a'], 'turn-1');
+    await until(() => gates[0].reached, 'the save that records A');
+    ml.markActed(AGENT, ['m-b'], 'turn-1');   // B is acted while A's save is in flight
+    gates[0].open();
+    await until(() => fs.existsSync(path.join(inbox, '.done', 'm-a.json')), 'A moves once its save landed');
+    await until(() => gates[1].reached, 'the save that records B');
+    assert.equal(readJson(ledgerPath(root)).entries['m-a'].state, 'acted');
+    assert.notEqual(readJson(ledgerPath(root)).entries['m-b'].state, 'acted', 'B is not durable yet');
+    assert.equal(fs.existsSync(path.join(inbox, 'm-b.json')), true, 'B STAYS IN THE INBOX UNTIL ITS OWN SAVE HAS LANDED');
+    assert.equal(fs.existsSync(path.join(inbox, '.done', 'm-b.json')), false);
+    gates[1].open();
+    await until(() => fs.existsSync(path.join(inbox, '.done', 'm-b.json')), 'B moves after the next save');
+  }).finally(() => { for (const g of gates) g.open(); });
+  assert.equal(readJson(ledgerPath(root)).entries['m-b'].state, 'acted');
+  assert.equal(fs.existsSync(path.join(inbox, 'm-b.json')), false);
+  ml.dispose();
+});
+
 test('ledger: a failed save is logged once and tried again', async () => {
   const root = ledgerHive();
   const logs = [];
@@ -666,6 +718,76 @@ test('mail-cards: with write-behind off (a bare class) record() is the synchrono
   } finally { WB.enableWriteBehind(); }
 });
 
+// ───────────────────────────────────────────────────────── quit: no rename outlives the exit (Jim's residual)
+
+test('closeWrites: a rename already under way at the cap is waited for, so the quit flush goes after it', async () => {
+  const dir = dirOf('cw');
+  const p = path.join(dir, 'a.json');
+  const g = gate();
+  try {
+    await withAsync('rename', async (_a, real) => { await g.wait(); return real(); }, async () => {
+      const flight = WB.writeFileBehind(p, 'async-older');
+      await until(() => g.reached, 'the rename');
+      let closedAt = 0;
+      const closing = WB.closeWrites(40).then(() => { closedAt = Date.now(); });
+      await sleep(200);
+      assert.equal(closedAt, 0, 'THE CAP DOES NOT CUT OFF A RENAME UNDER WAY');
+      g.open();
+      await closing;
+      assert.equal(WB.writeInFlight(p), false, 'no write in flight once it is closed');
+      assert.equal(await flight, 'published');
+    });
+    // what finish does next: the synchronous write. Nothing older is left to land over it.
+    fs.writeFileSync(p, 'sync-newer');
+    WB.noteSyncWrite(p, 'sync-newer');
+    await sleep(30);
+    assert.equal(fs.readFileSync(p, 'utf8'), 'sync-newer');
+    assert.deepEqual(tmpsIn(dir), [], 'no tmp file left behind');
+  } finally { g.open(); WB.enableWriteBehind(); }
+});
+
+test('closeWrites: bounded for a write still in its tmp phase, which then never renames; whole files go synchronous', async () => {
+  const dir = dirOf('cw');
+  const p = path.join(dir, 'a.json');
+  const g = gate();
+  try {
+    await withAsync('rename', async (_a, real) => real(), async (renames) => {
+      await withAsync('writeFile', async (_a, real) => { await real(); await g.wait(); }, async () => {
+        const flight = WB.writeFileBehind(p, 'async-older');
+        await until(() => g.reached, 'the tmp write');
+        assert.equal(WB.fileWriteBehindOn(), true);
+        const t0 = Date.now();
+        await WB.closeWrites(60);
+        const took = Date.now() - t0;
+        assert.ok(took >= 50 && took < 2_000, `bounded by the cap (${took} ms)`);
+        assert.equal(WB.fileWriteBehindOn(), false, 'CLOSED: THE TIMERS SAVE SYNCHRONOUSLY FROM HERE');
+        assert.equal(WB.writeBehindOn(), true, 'the append lane keeps its order');
+        g.open();
+        assert.equal(await flight, 'withdrawn');
+      });
+      assert.deepEqual(renames, [], 'A WRITE CUT OFF AT THE CAP NEVER RENAMES AFTER IT');
+    });
+    assert.equal(fs.existsSync(p), false);
+    assert.deepEqual(tmpsIn(dir), []);
+  } finally { g.open(); WB.enableWriteBehind(); }
+  assert.equal(WB.fileWriteBehindOn(), true, 'enableWriteBehind opens it again (tests)');
+});
+
+test('closeWrites: after it the ledger and the key registry save synchronously from their timers', async () => {
+  const root = ledgerHive();
+  const ml = mkLedger(root);
+  try {
+    await WB.closeWrites(1_000);
+    deliver(ml, root, 'm-c');
+    const { calls } = await syncWrites(root, async () => {
+      ml.claimSurfacing(AGENT, ['m-c'], 'turn-1', 'UserPromptSubmit');
+      await until(() => diskIds(root).includes('m-c'), 'the save after close');
+    });
+    assert.ok(calls.some((c) => c.startsWith('renameSync:')), `THE LEDGER TIMER SAVES SYNCHRONOUSLY ONCE CLOSED (${calls.join(', ')})`);
+  } finally { WB.enableWriteBehind(); ml.dispose(); }
+  assert.match(codeOnly(readSource('src/main/claims/registry.ts')), /if \(fileWriteBehindOn\(\)\) this\.flushBehind\(\); else this\.flush\(\);/);
+});
+
 // ───────────────────────────────────────────────────────── LAG-MAIN-PERSIST-OFFMAIN: one settle for every store
 
 test('settleWrites waits for a joined store, is bounded by its cap, and survives a joiner that throws or rejects', async () => {
@@ -734,7 +856,8 @@ test('the app turns write-behind on before the hive exists, and quit, reset and 
   assert.ok(on > 0 && on < index.indexOf('const hive = new HiveManager('), 'enableWriteBehind() before the HiveManager');
   // quit: wait for the writes in flight, then finish (flushKeyRegistry + hive.dispose) writes the rest
   const join = index.slice(index.indexOf('let analyticsFlushed = false;'), index.indexOf(']).then(finish, finish);'));
-  assert.match(join, /Promise\.all\(\[[\s\S]*\n\s*settleWrites\(WRITE_BEHIND_SETTLE_MS\)\.catch\(\(\) => undefined\),/, 'will-quit joins the writes in flight');
+  assert.match(join, /Promise\.all\(\[[\s\S]*\n\s*closeWrites\(WRITE_BEHIND_SETTLE_MS\)\.catch\(\(\) => undefined\),/, 'will-quit joins the writes in flight and closes write-behind');
+  assert.equal(join.includes('settleWrites('), false, 'quit never uses the wait that a rename can outlive');
   const finish = index.slice(index.indexOf('const finish = (): void => {'));
   assert.ok(finish.indexOf('flushKeyRegistry()') > 0 && finish.indexOf('flushKeyRegistry()') < finish.indexOf('hive.dispose()'));
   // reset and home change: no write lands in the old hive after it was closed

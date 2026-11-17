@@ -30,7 +30,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameS
 import { readFile as readFileAsync, readdir as readdirAsync, stat as statAsync } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { atomicWriteJson, renameWithRetry } from './atomicJson';
-import { noteSyncWrite, overtakenText, writeBehindOn, writeFileBehind, writeInFlight } from './writeBehind';
+import { fileWriteBehindOn, noteSyncWrite, overtakenText, writeFileBehind, writeInFlight } from './writeBehind';
 import { codexPopupAdvice, popupInReason } from '../shared/codexScreen';
 
 // ————————————————————————————————————————————————————————————————— ids (§4.1)
@@ -1761,7 +1761,7 @@ export class MailLedger {
     const wait = Math.max(0, st.lastWriteAt + this.writeDelayMs - this.now());
     st.timer = this.setTimer(() => {
       st.timer = null;
-      if (writeBehindOn()) this.flushBehind(st); else this.flushState(st);
+      if (fileWriteBehindOn()) this.flushBehind(st); else this.flushState(st);
     }, wait);
   }
 

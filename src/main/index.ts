@@ -24,7 +24,7 @@ import { ClaimsBootstrap, loadBootstrapMarker, saveBootstrapMarker } from './cla
 import { DerivedLive } from './claims/derivedLive';
 import { deriveOnce } from './claims/derivedWriter';
 import { startAfterMailCardCatchUp, startupMailCardCatchUp } from './mailCards';
-import { enableWriteBehind, joinOnSettle, settleWrites } from './writeBehind';
+import { closeWrites, enableWriteBehind, joinOnSettle, settleWrites } from './writeBehind';
 import { enableLedgerAgent, enableLedgerDefault, floorRepo, seedFloorSources } from './claims/floorSeed';
 import { makeW6Append } from './claims/w6Append';
 import { memoryMdReplaced, READER_WATCH_SYNC_MS, ReaderWatchers } from './claims/readerWatch';
@@ -546,7 +546,8 @@ const liveRotationLast = new Map<string, string>();
 const liveCodexRollouts = new Map<string, CodexRolloutCacheEntry>();
 // LAG-SYNC-WRITES-107: the key registry, the mail ledgers and the mail-card index save off the main thread
 // in the app (a bare class in a test keeps its synchronous write). Quit, reset and a home change wait for
-// what is in flight (settleWrites), then flush synchronously.
+// what is in flight (settleWrites; quit: closeWrites, which also lets no rename outlive the exit), then
+// flush synchronously.
 enableWriteBehind();
 /** How long quit, reset and a home change wait for writes in flight before they flush synchronously. */
 const WRITE_BEHIND_SETTLE_MS = 1_000;
@@ -9608,8 +9609,10 @@ app.on('will-quit', (e) => {
     ]),
     // NATIVE-MEMORY: drain in-flight memory requests, then stop the worker (bounded).
     nativeMemory.shutdown().catch(() => undefined),
-    // LAG-SYNC-WRITES-107: writes in flight land (bounded); finish then flushes the rest synchronously.
-    settleWrites(WRITE_BEHIND_SETTLE_MS).catch(() => undefined),
+    // LAG-SYNC-WRITES-107: writes in flight land (bounded) and write-behind closes: a rename already under
+    // way is waited for, no other can start. finish then flushes the rest synchronously, with no older
+    // rename left to land over it after app.exit.
+    closeWrites(WRITE_BEHIND_SETTLE_MS).catch(() => undefined),
     // INT 1.1.99 fixup 4: an async capacity rename already in flight at saveNow lands first, then the
     // quit snapshot is written again (bounded), so an older snapshot never sits over the quit write.
     capacityStore.settleQuit(CAPACITY_QUIT_JOIN_MS).catch(() => undefined)

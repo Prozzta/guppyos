@@ -16,8 +16,10 @@
  * the order queued. A reader adds what is still queued to the disk text (withPendingAppends), so a
  * row is readable from the moment it is queued.
  *
- * QUIT: settleWrites waits (bounded) for what is in flight; then the owners write synchronously
- * (flushAppendsSync here; the registry and ledger flushes in their own classes).
+ * QUIT: closeWrites waits (bounded) for what is in flight, then closes whole-file write-behind: no new
+ * flight starts, none still writing its tmp may rename, and a rename already under way is waited for.
+ * Then the owners write synchronously (flushAppendsSync here; the registry and ledger flushes in their
+ * own classes), and no older rename can land over that write after the app has exited.
  */
 import { appendFileSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { appendFile, mkdir } from 'node:fs/promises';
@@ -26,15 +28,19 @@ import { basename, dirname, resolve } from 'node:path';
 import { atomicWriteTextAsync, renameWithRetry } from './atomicJson';
 
 let enabled = false;
-/** Turn write-behind on (the app, once at start) or off (tests). */
-export function enableWriteBehind(on = true): void { enabled = on; }
+/** Set by closeWrites (quit): whole files are written synchronously from then on. */
+let closed = false;
+/** Turn write-behind on (the app, once at start) or off (tests). Opens it again after closeWrites. */
+export function enableWriteBehind(on = true): void { enabled = on; closed = false; }
 export function writeBehindOn(): boolean { return enabled; }
+/** May a whole file be written behind? Not after closeWrites: the owner's timer then saves synchronously. */
+export function fileWriteBehindOn(): boolean { return enabled && !closed; }
 
 const keyOf = (p: string): string => { const r = resolve(p); return process.platform === 'win32' ? r.toLowerCase() : r; };
 
 // ---- whole files ----
 
-interface Flight { redo: string | null; done: Promise<void> }
+interface Flight { redo: string | null; done: Promise<void>; /** the guard said yes: the rename is under way */ renaming: boolean }
 const flights = new Map<string, Flight>();
 
 export type WriteBehindResult = 'published' | 'withdrawn' | 'overtaken';
@@ -69,13 +75,15 @@ function writeTextSync(p: string, text: string): void {
 export function writeFileBehind(p: string, text: string, guard?: () => boolean): Promise<WriteBehindResult> {
   const k = keyOf(p);
   if (flights.has(k)) return Promise.reject(new Error(`write-behind: ${basename(p)} is already being written`));
-  const f: Flight = { redo: null, done: Promise.resolve() };
+  const f: Flight = { redo: null, done: Promise.resolve(), renaming: false };
   flights.set(k, f);
   const run = (async (): Promise<WriteBehindResult> => {
     let landed = false;
     let failure: { error: unknown } | null = null;
-    try { landed = await atomicWriteTextAsync(p, text, () => f.redo === null && (!guard || guard())); }
+    const commit = (): boolean => { f.renaming = !closed && f.redo === null && (!guard || guard()); return f.renaming; };
+    try { landed = await atomicWriteTextAsync(p, text, commit); }
     catch (error) { failure = { error }; }
+    f.renaming = false;
     try {
       if (f.redo !== null) {
         // The rename was already on its way when the synchronous writer came: put its text back.
@@ -223,4 +231,22 @@ export async function settleWrites(capMs: number): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   await Promise.race([Promise.all(waits), new Promise<void>((r) => { timer = setTimeout(r, capMs); })]);
   if (timer) clearTimeout(timer);
+}
+
+/**
+ * QUIT: wait as settleWrites, then close whole-file write-behind for good. A flight still writing its tmp
+ * at the cap withdraws (its owner stays dirty and flushes synchronously). A rename already under way
+ * cannot be called back, so it is waited for without a cap: the synchronous write that follows goes to
+ * the same disk and would wait there anyway, and written before the rename lands it would be passed by
+ * the older text once the app has exited. After this resolves no asynchronous rename is in flight and
+ * none can start.
+ */
+export async function closeWrites(capMs: number): Promise<void> {
+  await settleWrites(capMs);
+  closed = true;
+  for (;;) {
+    const renaming = [...flights.values()].filter((f) => f.renaming);
+    if (!renaming.length) return;
+    await Promise.all(renaming.map((f) => f.done));
+  }
 }
