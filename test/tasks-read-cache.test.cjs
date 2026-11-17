@@ -71,9 +71,11 @@ test('production missed-watch fallback invalidates tasks asynchronously', async 
   const { hive, handEdit } = floor(t); hive.__resetAuthorityCacheForTests(undefined, () => Date.now() + 60_000);
   assert.deepEqual(ids(hive.tasks()), ['T1']);
   hive.__dropAuthorityWatchersForTests();
-  handEdit([card('T2')]);
+  // A different size: the fixture's +60 s wall marks every key proven, so a same-size in-place
+  // edit inside the first write's timestamp tick keeps the key and is rightly unseen (racy rule).
+  handEdit([card('T2'), card('T3')]);
   await hive.__revalidateAuthoritiesForTests();
-  assert.deepEqual(ids(hive.tasks()), ['T2']);
+  assert.deepEqual(ids(hive.tasks()), ['T2', 'T3']);
 });
 
 test('a mutation reads the file fresh, never the frozen cache, and its write is seen by the next read', (t) => {
