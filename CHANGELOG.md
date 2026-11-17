@@ -17,6 +17,12 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Archiving an agent, and other registry and task saves, are no longer lost.** A save that
+  landed while Guppy was re-reading the same file in the background failed with a Windows
+  "permission denied" and was silently dropped: closing an agent's tab could leave it unarchived,
+  with its mail neither bounced nor set aside. Guppy now replaces the file in a way Windows allows
+  even while it is open (a reader still gets the old file, whole), and if that is not available it
+  stops at once instead of freezing the app for its retries.
 - **Terminals never fall back to an unpatched terminal library.** node-pty ships ready-made Windows
   binaries beside the ones Guppy builds from its patched source, and it used them without a word
   whenever the built ones did not load. That would have dropped the protection against killing a

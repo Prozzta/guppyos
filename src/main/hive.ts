@@ -30,7 +30,7 @@ import { homedir } from 'node:os';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { AppendFile, LOG_KEEP_ROTATED, rotatedFiles } from './appendLog';
 import { MailCardIndex, NO_CARD, indexEntries, indexLinkContext, isNoCard, linkMail, replyChainGap, TRUSTED_METHODS, type LinkContext, type MailLink } from './mailCards';
-import { atomicWriteJson as atomicWriteJsonFile, atomicWriteJsonAsync } from './atomicJson';
+import { atomicWriteJson as atomicWriteJsonFile, atomicWriteJsonAsync, readFileTracked } from './atomicJson';
 import { ASK_BACKSTOP_MS, ASK_CLOSE_REASON_MAX, MailLedger, answeredByMessage, cardIdValue, freshMailId, isValidMailId, owesWork, replyTracked, staleObligations, supersededByMessage, type CardEvidence, type MailLedgerDoc, type ReleaseRun, type StaleObligation } from './mailLedger';
 import { mailObligationsView, type MailObligationsAgent } from './mailReaders';
 import { UNDELIVERED_DIR, dropUndeliveredItems, mailMigrationDone, markUndeliveredSeen, readUndeliveredReport, readUndeliveredReportAsync, restoreUndeliveredFiles, runMailMigration, setAsideUndelivered, type MailMigrationResult, type UndeliveredReport } from './mailMigration';
@@ -6597,7 +6597,7 @@ export class HiveManager {
   private async readAuthoritativeJsonAsync<T>(p: string, onMissing: () => T): Promise<T> {
     let raw: string;
     try {
-      raw = await fsPromises.readFile(p, 'utf8');
+      raw = await readFileTracked(p, 'utf8');
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         this.quarantinedJsonFingerprints.delete(p);
@@ -6740,7 +6740,7 @@ export class HiveManager {
       }
       let raw: string;
       try {
-        raw = await fsPromises.readFile(p, 'utf8');
+        raw = await readFileTracked(p, 'utf8');
       } catch {
         if (overtaken()) continue;
         this.invalidateAuthorityCache(p);

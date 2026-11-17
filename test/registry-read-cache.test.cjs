@@ -17,6 +17,7 @@ const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
 
 const { HiveManager } = loadTs('src/main/hive.ts');
+const AJ = loadTs('src/main/atomicJson.ts');
 const WINDOW = HiveManager.AUTHORITY_REVALIDATE_MS;
 const agent = (id, extra = {}) => ({ id, name: id, role: 'worker', status: 'idle', lastSeen: 1, capabilities: ['a'], ...extra });
 
@@ -302,6 +303,10 @@ test('an unreadable registry still throws, and is not cached', (t) => {
 test('a failed write drops the cache: the next read goes to disk and returns what is there', (t) => {
   const { hive, file } = floor(t);
   hive.registry();
+  // REGISTRY-RENAME-EPERM-107: renameWithRetry tries the POSIX rename first, which never calls
+  // fs.renameSync; the injected rename fault below is for the plain-rename path, so turn POSIX off.
+  AJ.__setRenameAddonForTest(null);
+  t.after(() => AJ.__setRenameAddonForTest(undefined));
   const { renameSync } = fs;
   fs.renameSync = () => { const e = new Error('denied'); e.code = 'EACCES'; throw e; };
   try { assert.equal(hive.setAgentHold('a1', true).ok, false); } finally { fs.renameSync = renameSync; }

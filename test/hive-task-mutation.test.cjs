@@ -17,6 +17,7 @@ const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
 
 const { HiveManager } = loadTs('src/main/hive.ts');
+const AJ = loadTs('src/main/atomicJson.ts');
 
 function floor(t) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'md-task-mutate-'));
@@ -142,6 +143,10 @@ test('Windows rename retries publish after transient locks and leave no temp fil
   const hive = floor(t);
   hive.writeTasks([card('old')]);
   const file = path.join(hive.root(), 'tasks.json');
+  // REGISTRY-RENAME-EPERM-107: renameWithRetry tries the POSIX rename first, which never calls
+  // fs.renameSync; the injected rename fault below is for the plain-rename path, so turn POSIX off.
+  AJ.__setRenameAddonForTest(null);
+  t.after(() => AJ.__setRenameAddonForTest(undefined));
   const renameSync = fs.renameSync;
   let attempts = 0;
   fs.renameSync = (...args) => {
