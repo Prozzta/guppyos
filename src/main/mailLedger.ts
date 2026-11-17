@@ -30,6 +30,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameS
 import { readFile as readFileAsync, readdir as readdirAsync, stat as statAsync } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { atomicWriteJson, renameWithRetry } from './atomicJson';
+import { noteSyncWrite, overtakenText, writeBehindOn, writeFileBehind, writeInFlight } from './writeBehind';
 import { codexPopupAdvice, popupInReason } from '../shared/codexScreen';
 
 // ————————————————————————————————————————————————————————————————— ids (§4.1)
@@ -1363,6 +1364,10 @@ interface AgentLedger {
   archiveAttempt: number;
   archiveFailLogged: Set<string>;
   writeFailLogged: boolean;
+  /** LAG-SYNC-WRITES-107: counts changes to `doc`; a write-behind save clears `dirty` only for the doc it wrote. */
+  rev: number;
+  /** A write-behind save of this ledger is in flight (it re-arms the timer when it ends). */
+  flying: boolean;
 }
 
 export class MailLedger {
@@ -1581,7 +1586,7 @@ export class MailLedger {
     if (!this.hasAgent(agentId)) throw new Error(`mail ledger: no agent ${agentId} on this floor`);
     const st: AgentLedger = {
       agentId, file, doc: emptyLedger(agentId), dirty: false, timer: null, lastWriteAt: 0,
-      archive: new Set(), archiveTimer: null, archiveAttempt: 0, archiveFailLogged: new Set(), writeFailLogged: false
+      archive: new Set(), archiveTimer: null, archiveAttempt: 0, archiveFailLogged: new Set(), writeFailLogged: false, rev: 0, flying: false
     };
     this.ledgers.set(file, st);
     this.load(st);
@@ -1613,7 +1618,8 @@ export class MailLedger {
       let raw: string | null = null;
       let failure: string | null = null;
       try {
-        raw = await readFileAsync(file, 'utf8');
+        // LAG-SYNC-WRITES-107: a flush that overtook a save still in flight is read from memory.
+        raw = overtakenText(file) ?? await readFileAsync(file, 'utf8');
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') failure = `unreadable: ${error instanceof Error ? error.message : String(error)}`;
       }
@@ -1622,7 +1628,7 @@ export class MailLedger {
       if (this.ledgerFile(agentId) !== file || this.ledgers.has(file)) return this.state(agentId);
       const st: AgentLedger = {
         agentId, file, doc: emptyLedger(agentId), dirty: false, timer: null, lastWriteAt: 0,
-        archive: new Set(), archiveTimer: null, archiveAttempt: 0, archiveFailLogged: new Set(), writeFailLogged: false
+        archive: new Set(), archiveTimer: null, archiveAttempt: 0, archiveFailLogged: new Set(), writeFailLogged: false, rev: 0, flying: false
       };
       this.ledgers.set(file, st);
       this.load(st, { raw, failure, inbox: dir.msgs, names: dir.names });
@@ -1666,7 +1672,8 @@ export class MailLedger {
     if (pre) { raw = pre.raw; failure = pre.failure; }
     else {
       try {
-        raw = readFileSync(st.file, 'utf8');
+        // LAG-SYNC-WRITES-107: a flush that overtook a save still in flight is read from memory.
+        raw = overtakenText(st.file) ?? readFileSync(st.file, 'utf8');
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') failure = `unreadable: ${error instanceof Error ? error.message : String(error)}`;
       }
@@ -1745,9 +1752,66 @@ export class MailLedger {
 
   private markDirty(st: AgentLedger): void {
     st.dirty = true;
-    if (st.timer !== null) return;
+    st.rev++;
+    this.arm(st);
+  }
+
+  private arm(st: AgentLedger): void {
+    if (st.timer !== null || st.flying) return;
     const wait = Math.max(0, st.lastWriteAt + this.writeDelayMs - this.now());
-    st.timer = this.setTimer(() => { st.timer = null; this.flushState(st); }, wait);
+    st.timer = this.setTimer(() => {
+      st.timer = null;
+      if (writeBehindOn()) this.flushBehind(st); else this.flushState(st);
+    }, wait);
+  }
+
+  /** The root whose state/mail directory flushBehind has made. */
+  private mailDirFor: string | null = null;
+
+  /**
+   * LAG-SYNC-WRITES-107: the coalesce timer's save, off the main thread (tmp + rename, as flushState).
+   * The ledger in memory stays the truth, so nothing reads the file meanwhile. One save per ledger at a
+   * time; a change made during it keeps the ledger dirty and the timer is armed again when it ends. A
+   * synchronous flush during it (quit, dispose, flush()) wins: the save gives way. The `.done` renames
+   * run after the save, for the ids it recorded.
+   */
+  private flushBehind(st: AgentLedger): void {
+    if (st.flying) return;
+    if (!st.dirty || writeInFlight(st.file)) { this.flushState(st); return; }
+    st.doc = applyPrune(st.doc, this.now()).doc;
+    const root = this.rootDir();
+    // A hive removed under us (tests, reset): never re-create it from a timer.
+    if (!root || !existsSync(root) || !st.file.startsWith(root)) { st.dirty = false; return; }
+    const failed = (error: unknown): void => {
+      if (!st.writeFailLogged) this.log({ kind: 'mail-ledger-write-failed', agentId: st.agentId, error: String(error) });
+      st.writeFailLogged = true;
+      st.lastWriteAt = this.now();
+      this.mailDirFor = null;
+      this.markDirty(st);
+    };
+    let text: string;
+    try {
+      if (this.mailDirFor !== root) { mkdirSync(join(root, 'state', 'mail'), { recursive: true }); this.mailDirFor = root; }
+      text = JSON.stringify(st.doc, null, 2);
+    } catch (error) { failed(error); return; }
+    const rev = st.rev;
+    const acted = new Set(st.archive);
+    st.flying = true;
+    writeFileBehind(st.file, text).then((result) => {
+      st.flying = false;
+      if (this.ledgers.get(st.file) !== st) return;   // disposed: its flush was the last word
+      if (result === 'published') {
+        st.lastWriteAt = this.now();
+        st.writeFailLogged = false;
+        if (st.rev === rev) st.dirty = false;
+        this.runArchives(st, acted);
+      }
+      if (st.dirty) this.arm(st);
+    }, (error) => {
+      st.flying = false;
+      if (this.ledgers.get(st.file) !== st) return;
+      failed(error);
+    });
   }
 
   private flushState(st: AgentLedger): void {
@@ -1760,6 +1824,7 @@ export class MailLedger {
       try {
         mkdirSync(join(root, 'state', 'mail'), { recursive: true });
         atomicWriteJson(st.file, st.doc);
+        noteSyncWrite(st.file, () => JSON.stringify(st.doc, null, 2));   // a save in flight gives way
         st.dirty = false;
         st.lastWriteAt = this.now();
         st.writeFailLogged = false;
@@ -1777,12 +1842,13 @@ export class MailLedger {
   /** The harness `.done` rename, after the ledger that records `acted` is on disk. Idempotent;
    *  a failure retries only the rename with backoff (`mail-archive-failed`, once per id), never
    *  re-surfaces: the ledger is authoritative. */
-  private runArchives(st: AgentLedger): void {
+  private runArchives(st: AgentLedger, only?: ReadonlySet<string>): void {
     if (!st.archive.size) return;
     const inboxDir = this.inboxDir(st.agentId);
     if (!inboxDir) return;
     const failed: string[] = [];
     for (const id of [...st.archive]) {
+      if (only && !only.has(id)) continue;   // acted after the save that just landed: the next save's
       const src = join(inboxDir, `${id}.json`);
       try {
         if (existsSync(src)) {

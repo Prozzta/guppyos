@@ -31,6 +31,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { AppendFile, LOG_KEEP_ROTATED, rotatedFiles } from './appendLog';
 import { MailCardIndex, NO_CARD, indexEntries, indexLinkContext, isNoCard, linkMail, replyChainGap, TRUSTED_METHODS, type LinkContext, type MailLink } from './mailCards';
 import { atomicWriteJson as atomicWriteJsonFile, atomicWriteJsonAsync } from './atomicJson';
+import { flushAppendsSync } from './writeBehind';
 import { ASK_BACKSTOP_MS, ASK_CLOSE_REASON_MAX, MailLedger, answeredByMessage, cardIdValue, freshMailId, isValidMailId, owesWork, replyTracked, staleObligations, supersededByMessage, type CardEvidence, type MailLedgerDoc, type ReleaseRun, type StaleObligation } from './mailLedger';
 import { mailObligationsView, type MailObligationsAgent } from './mailReaders';
 import { UNDELIVERED_DIR, dropUndeliveredItems, mailMigrationDone, markUndeliveredSeen, readUndeliveredReport, readUndeliveredReportAsync, restoreUndeliveredFiles, runMailMigration, setAsideUndelivered, type MailMigrationResult, type UndeliveredReport } from './mailMigration';
@@ -825,6 +826,8 @@ export class HiveManager {
   dispose(): void {
     // ZT-I1-MAIL: the coalesced ledger writes land before the log closes (quit, home change).
     try { this.mail.dispose(); } catch (e) { try { this.appendLog({ kind: 'mail-ledger-write-failed', error: String(e) }); } catch { /* noop */ } }
+    // LAG-SYNC-WRITES-107: mail-card rows still queued for a write-behind append land now.
+    try { flushAppendsSync(); } catch (e) { try { this.appendLog({ kind: 'mail-card-error', op: 'flush', error: String(e) }); } catch { /* noop */ } }
     this.closeAppendFiles();
     this.closeAuthorityWatchers();
   }
@@ -3114,7 +3117,13 @@ export class HiveManager {
   private mailCards(): MailCardIndex | null {
     const root = this.root();
     if (!root) return null;
-    if (this.mailCardIndex?.hiveRoot !== root) this.mailCardIndex = new MailCardIndex(root);
+    if (this.mailCardIndex?.hiveRoot !== root) {
+      this.mailCardIndex = new MailCardIndex(root);
+      // LAG-SYNC-WRITES-107: a queued index append that failed is logged as the sync append's throw was.
+      this.mailCardIndex.onWriteFailed = (id, e) => {
+        try { this.appendLog({ kind: 'mail-card-error', id, op: 'index', error: String(e) }); } catch { /* noop */ }
+      };
+    }
     return this.mailCardIndex;
   }
 

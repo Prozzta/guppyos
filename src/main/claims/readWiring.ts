@@ -12,7 +12,8 @@ import { verifiedPrefix } from './indexSync';
 import { derive as deriveClaims } from './derive';
 import { renderClaimHistory } from './views';
 import { reconcileQueueForHive } from './reconcile';
-import { DEFAULT_KEY_REGISTRY, flushRegistryWrites, loadRegistryShared, registryPath } from './registry';
+import { DEFAULT_KEY_REGISTRY, loadRegistryShared, registryText } from './registry';
+import { withPendingAppends } from '../writeBehind';
 import { readDoneMailStatus } from './derivedDoneStatus';
 import { formatGet, leadBrief, resolveGet, resolveGetMany, warmGetIndex, type CardLeadAsk, type CardLeadReply, type GetDeps } from './get';
 import { targetIndex, targetsIn, type TargetIndex } from './searchTargets';
@@ -83,8 +84,7 @@ function getDeps(d: ClaimReadDeps): GetDeps {
   const ledgers: Record<string, LedgerRec[]> = {};
   for (const a of d.agents()) { const prefix = verifiedPrefix(read(a)); if (prefix) ledgers[a] = prefix.records; }
   // The registry by its file text: parsed only when the text changed (a parse and re-serialise per ask was ~14 ms).
-  flushRegistryWrites(root);   // A9: acked keys still waiting to be saved are in the text
-  let regText: string | null; try { regText = readFileSync(registryPath(root), 'utf8'); } catch { regText = null; }
+  const regText = registryText(root);   // A9: acked keys still waiting to be saved are in the text
   const queue = reconcileQueueForHive(root);
   const reconcileItems = Object.keys(ledgers).flatMap((a) => queue.allItems(a));
   const tasks = d.tasks();
@@ -98,7 +98,10 @@ function getDeps(d: ClaimReadDeps): GetDeps {
   else { try { reg = loadRegistryShared(root); } catch { reg = DEFAULT_KEY_REGISTRY; } }
   const mailRows = (card: string): string[] | null => {
     if (!/^[a-z0-9][a-z0-9._-]{0,119}$/.test(card)) return null;
-    try { return readFileSync(join(root, 'state', 'mail-cards', `${card}.jsonl`), 'utf8').split('\n'); } catch { return null; }
+    // LAG-SYNC-WRITES-107: rows queued for the file and not on disk yet are part of it.
+    const file = join(root, 'state', 'mail-cards', `${card}.jsonl`);
+    let disk: string | null; try { disk = readFileSync(file, 'utf8'); } catch { disk = null; }
+    return withPendingAppends(file, disk)?.split('\n') ?? null;
   };
   const deps: GetDeps = { ledgers, registry: reg, reconcileItems, tasks, mailRows, doneMailStatus: readDoneMailStatus(root), ruleConfig: { r4: false } };
   kept = { sig, deps, targets: null };

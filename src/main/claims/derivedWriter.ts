@@ -20,6 +20,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import { sliceTicker } from './migrate';
+import { pendingAppendNames, withPendingAppends } from '../writeBehind';
 import { STATUS_CODE } from './deriveJob';
 import { join } from 'node:path';
 import { DERIVED_AGENT_ID, type AppendOrigin, type AppendResult, type ChainBreak, type ClaimRec, type ClaimsState, type DeriveFn, type KeyRegistry, type LedgerRec, type ReadResult, type RecordDraft } from '../../shared/claims';
@@ -353,7 +354,11 @@ export async function readIndexDoneMailsAsync(hiveRoot: string, seen?: Set<strin
 
 const indexDir = (hiveRoot: string): string => join(hiveRoot, 'state', 'mail-cards');
 function indexFiles(dir: string): string[] | null {
-  try { return readdirSync(dir).filter((n) => n.endsWith('.jsonl') && !n.startsWith('_')).sort(); } catch { return null; }
+  // LAG-SYNC-WRITES-107: a file with rows queued and not on disk yet is listed too.
+  const queued = pendingAppendNames(dir);
+  let names: string[];
+  try { names = readdirSync(dir); } catch { if (!queued.length) return null; names = []; }
+  return [...new Set([...names, ...queued])].filter((n) => n.endsWith('.jsonl') && !n.startsWith('_')).sort();
 }
 function eachLine(text: string, onRow: (r: Record<string, unknown>) => void): void {
   for (const line of text.split('\n')) {
@@ -367,8 +372,10 @@ function eachLine(text: string, onRow: (r: Record<string, unknown>) => void): vo
 function eachIndexRow(hiveRoot: string, onRow: (r: Record<string, unknown>) => void): void {
   const dir = indexDir(hiveRoot);
   for (const f of indexFiles(dir) ?? []) {
-    let text: string;
-    try { text = readFileSync(join(dir, f), 'utf8'); } catch { continue; }
+    let disk: string | null;
+    try { disk = readFileSync(join(dir, f), 'utf8'); } catch { disk = null; }
+    const text = withPendingAppends(join(dir, f), disk);
+    if (text === null) continue;
     eachLine(text, onRow);
   }
 }
@@ -377,8 +384,10 @@ async function eachIndexRowAsync(hiveRoot: string, onRow: (r: Record<string, unk
   const dir = indexDir(hiveRoot);
   for (const f of indexFiles(dir) ?? []) {
     await tick();
-    let text: string;
-    try { text = await fsp.readFile(join(dir, f), 'utf8'); } catch { continue; }
+    let disk: string | null;
+    try { disk = await fsp.readFile(join(dir, f), 'utf8'); } catch { disk = null; }
+    const text = withPendingAppends(join(dir, f), disk);
+    if (text === null) continue;
     for (const line of text.split('\n')) {
       await tick();
       eachLine(line, onRow);

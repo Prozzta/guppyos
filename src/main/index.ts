@@ -24,6 +24,7 @@ import { ClaimsBootstrap, loadBootstrapMarker, saveBootstrapMarker } from './cla
 import { DerivedLive } from './claims/derivedLive';
 import { deriveOnce } from './claims/derivedWriter';
 import { startAfterMailCardCatchUp, startupMailCardCatchUp } from './mailCards';
+import { enableWriteBehind, settleWrites } from './writeBehind';
 import { enableLedgerAgent, enableLedgerDefault, floorRepo, seedFloorSources } from './claims/floorSeed';
 import { makeW6Append } from './claims/w6Append';
 import { memoryMdReplaced, READER_WATCH_SYNC_MS, ReaderWatchers } from './claims/readerWatch';
@@ -543,6 +544,12 @@ const pendingCodexLiveRotationDeadline = new Map<string, ReturnType<typeof setTi
 const liveSpawnOptions = new Map<string, { opts: AgentSpawnOptions; owner: Electron.WebContents | null }>();
 const liveRotationLast = new Map<string, string>();
 const liveCodexRollouts = new Map<string, CodexRolloutCacheEntry>();
+// LAG-SYNC-WRITES-107: the key registry, the mail ledgers and the mail-card index save off the main thread
+// in the app (a bare class in a test keeps its synchronous write). Quit, reset and a home change wait for
+// what is in flight (settleWrites), then flush synchronously.
+enableWriteBehind();
+/** How long quit, reset and a home change wait for writes in flight before they flush synchronously. */
+const WRITE_BEHIND_SETTLE_MS = 1_000;
 const hive = new HiveManager(
   () => readConfig().harnessHome,
   (channel, payload) => {
@@ -6366,6 +6373,7 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
   const oldIndex = nativeMemory.dbFile();
   const memoryStopped = nativeMemory.shutdown().catch(() => undefined);
   // Close the hive's kept-open log and ledger before the copy (and the relaunch).
+  await settleWrites(WRITE_BEHIND_SETTLE_MS);   // LAG-SYNC-WRITES-107: no late write into the old home
   try { hive.dispose(); } catch (e) { console.error('[changeHome] hive.dispose:', e); }
 
   await memoryStopped;
@@ -7141,6 +7149,7 @@ ipcMain.handle('app:resetAll', async () => {
   ptyManager.refuseNewSpawns('The app is resetting; agents cannot start now.');
   try { await ptyManager.killAllAsync(); } catch (e) { console.error('[reset] killAllAsync:', e); }
   // The hive's kept-open log and ledger: an open file makes the rm below fail (ENOTEMPTY).
+  await settleWrites(WRITE_BEHIND_SETTLE_MS);   // LAG-SYNC-WRITES-107: no late write into the erased hive
   try { hive.dispose(); } catch (e) { console.error('[reset] hive.dispose:', e); }
   // Erase the hive (Michael's + every agent's memory, inboxes, tasks, board,
   // git history) and the memory engine's index of it. Only harness-created data
@@ -9599,5 +9608,8 @@ app.on('will-quit', (e) => {
     // INT 1.1.99 fixup 4: an async capacity rename already in flight at saveNow lands first, then the
     // quit snapshot is written again (bounded), so an older snapshot never sits over the quit write.
     capacityStore.settleQuit(CAPACITY_QUIT_JOIN_MS).catch(() => undefined)
-  ]).then(finish, finish);
+  ])
+    // LAG-SYNC-WRITES-107: writes in flight land (bounded); finish then flushes the rest synchronously.
+    .then(() => settleWrites(WRITE_BEHIND_SETTLE_MS), () => settleWrites(WRITE_BEHIND_SETTLE_MS))
+    .then(finish, finish);
 });
