@@ -338,13 +338,14 @@ test('a delivered message retries only its archive when .sent is temporarily una
 /**
  * LAG-SYNC-FS-TAIL-108: the archive rename runs off the main thread and the pass waits for it.
  * The rename is made slow (fault injection, not a wait for a result): a pass that did not await it
- * would settle with the file still in the outbox.
+ * would settle with the file still in the outbox. `held` runs at the end of the hold, just before the
+ * real rename: what it returns (seen.held) is the state while the file had not moved yet.
  */
-async function slowArchive(outbox, name, fn, archivedAs = (base) => base === name) {
+async function slowArchive(outbox, name, fn, archivedAs = (base) => base === name, held = null) {
   const fsp = require('node:fs/promises');
   const realRename = fsp.rename;
   const realSync = fs.renameSync;
-  const seen = { sync: [], async: 0, turnsDuring: 0 };
+  const seen = { sync: [], async: 0, turnsDuring: 0, held: [] };
   let counting = false;
   let spin = true;
   const tick = () => { if (counting) seen.turnsDuring++; if (spin) setImmediate(tick); };
@@ -355,7 +356,11 @@ async function slowArchive(outbox, name, fn, archivedAs = (base) => base === nam
     if (!mine(from, to)) return realRename(from, to);
     seen.async++;
     counting = true;
-    try { await new Promise((resolve) => setTimeout(resolve, 150)); return await realRename(from, to); }
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      if (held) seen.held.push(held());
+      return await realRename(from, to);
+    }
     finally { counting = false; }
   };
   try { await fn(seen); } finally { spin = false; fs.renameSync = realSync; fsp.rename = realRename; }
@@ -413,7 +418,12 @@ test('LAG-SYNC-FS-TAIL-108: a rejected outbox file is moved to bad- off the main
     assert.equal(await hive.routeOnce(), 0);
     assert.equal(fs.existsSync(file), false, 'ARCHIVE AWAIT: the pass settled with the rejected file still in the outbox');
     assert.equal(fs.existsSync(path.join(outbox, '.sent', `bad-${name}`)), true, 'ARCHIVE AWAIT: the file is bad- in .sent when the pass settles');
-  }, (base) => base === `bad-${name}`);
+  }, (base) => base === `bad-${name}`, () => ({
+    notices: hive.inbox('jim-1').filter((message) => message.subject.endsWith(name)).length,
+    rows: hive.logTail(100).filter((entry) => entry.kind === 'outbox-rejected' && entry.file === name).length,
+    inOutbox: fs.existsSync(file)
+  }));
+  assert.deepEqual(seen.held, [{ notices: 0, rows: 0, inOutbox: true }], 'NOTICE ORDER: while the bad- rename was held the sender had no notice and no rejection row (Jim S1, MUTANT noticeFirst)');
   assert.deepEqual(seen.sync, [], 'ARCHIVE SYNC: no renameSync on the main thread for the rejection');
   assert.equal(seen.async, 1, 'ARCHIVE SYNC: one fs.promises.rename');
   assert.ok(seen.turnsDuring > 0, 'ARCHIVE SYNC: main ran while the rename was held');
@@ -440,7 +450,11 @@ test('LAG-SYNC-FS-TAIL-108: an exact repeat is kept aside off the main thread, b
     assert.equal(await hive.routeOnce(), 0, 'the repeat is not delivered');
     assert.equal(fs.existsSync(file), false, 'ARCHIVE AWAIT: the pass settled with the repeat still in the outbox');
     assert.equal(keptNames().length, 1, 'ARCHIVE AWAIT: the repeat is kept in .sent when the pass settles');
-  }, (base) => base.startsWith(`${name}.duplicate-`));
+  }, (base) => base.startsWith(`${name}.duplicate-`), () => ({
+    notices: hive.inbox('jim-1').filter((entry) => entry.subject === `[duplicate not delivered] ${name}`).length,
+    inOutbox: fs.existsSync(file)
+  }));
+  assert.deepEqual(seen.held, [{ notices: 0, inOutbox: true }], 'NOTICE ORDER: while the rename was held the sender had no duplicate notice');
   assert.deepEqual(seen.sync, [], 'ARCHIVE SYNC: no renameSync on the main thread for the repeat');
   assert.equal(seen.async, 1, 'ARCHIVE SYNC: one fs.promises.rename');
   assert.ok(seen.turnsDuring > 0, 'ARCHIVE SYNC: main ran while the rename was held');
@@ -449,6 +463,46 @@ test('LAG-SYNC-FS-TAIL-108: an exact repeat is kept aside off the main thread, b
   assert.ok(notices[0].body.includes(`kept as outbox/.sent/${keptNames()[0]}.`), 'ARCHIVE AWAIT: the notice is written after the move, and names the kept file');
   assert.equal(hive.inbox('god-1').length, 1, 'delivered once');
   assert.equal(hive.logTail(100).filter((entry) => entry.kind === 'outbox-archive-failed').length, 0);
+});
+
+test('LAG-SYNC-FS-TAIL-108: a rejected outbox file whose bad- move fails is reported as not archived, once, and is archived when .sent is back (Jim S2)', async (t) => {
+  const { hive, outbox } = await floor(t);
+  const sent = path.join(outbox, '.sent');
+  const heldSent = path.join(outbox, '.sent-held');
+  fs.renameSync(sent, heldSent);
+  t.after(() => { if (fs.existsSync(heldSent) && !fs.existsSync(sent)) fs.renameSync(heldSent, sent); });
+  const name = 'rejected-held.json';
+  const file = path.join(outbox, name);
+  fs.writeFileSync(file, JSON.stringify({ to: ['god-1'] }));
+  const notices = () => hive.inbox('jim-1').filter((message) => message.subject.endsWith(name));
+  const rows = (kind) => hive.logTail(200).filter((entry) => entry.kind === kind && entry.file === name);
+  assert.equal(await hive.routeOnce(), 0);
+  assert.equal(fs.existsSync(file), true, 'the move failed (no .sent): the file stays in the outbox');
+  assert.equal(notices().length, 1, 'one notice to the sender');
+  assert.match(notices()[0].body, /It could not be archived yet as bad-rejected-held\.json/, 'ARCHIVED FLAG: the notice says the file was not archived (MUTANT archivedTrue)');
+  assert.doesNotMatch(notices()[0].body, /was archived/);
+  const failed = rows('outbox-reject-archive-failed');
+  assert.equal(failed.length, 1, 'FAIL ROW: the failed move is logged (MUTANT noFailLog)');
+  assert.equal(failed[0].from, 'jim-1');
+  assert.equal(failed[0].reason, rows('outbox-rejected')[0].reason, 'the failure row carries the rejection reason');
+  assert.match(String(failed[0].error), /ENOENT/);
+  assert.deepEqual(rows('outbox-rejected').map((row) => [row.archived, row.notified]), [[false, true]], 'ARCHIVED FLAG: one rejection row, archived false');
+  assert.equal(await hive.routeOnce(), 0);
+  assert.equal(await hive.routeOnce(), 0);
+  assert.equal(notices().length, 1, 'REJECT ONCE: the unchanged stranded file is not rejected again (MUTANT no fingerprint kept)');
+  assert.equal(rows('outbox-rejected').length, 1, 'REJECT ONCE: no second rejection row');
+  assert.equal(rows('outbox-reject-archive-failed').length, 1, 'REJECT ONCE: no second failure row');
+  assert.equal(fs.existsSync(file), true);
+  // The sender rewrites the stranded file (still invalid) once .sent is back: a new payload is judged again and archived.
+  fs.renameSync(heldSent, sent);
+  fs.writeFileSync(file, JSON.stringify({ to: ['god-1'], subject: 'rewritten, still no act' }));
+  assert.equal(await hive.routeOnce(), 0);
+  assert.equal(fs.existsSync(file), false, 'the rewritten file left the outbox');
+  assert.equal(fs.existsSync(path.join(sent, `bad-${name}`)), true, 'and is bad- in .sent');
+  assert.equal(notices().length, 2, 'a changed payload gets its own notice');
+  assert.match(notices()[1].body, /It was archived as bad-rejected-held\.json/);
+  assert.deepEqual(rows('outbox-rejected').map((row) => row.archived), [false, true]);
+  assert.equal(rows('outbox-reject-archive-failed').length, 1);
 });
 
 const ARCHIVE_LOG_NOISE_MUTANTS = [
