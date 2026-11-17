@@ -673,7 +673,8 @@ test('the app turns write-behind on before the hive exists, and quit, reset and 
   const on = index.indexOf('enableWriteBehind();');
   assert.ok(on > 0 && on < index.indexOf('const hive = new HiveManager('), 'enableWriteBehind() before the HiveManager');
   // quit: wait for the writes in flight, then finish (flushKeyRegistry + hive.dispose) writes the rest
-  assert.match(index, /\.then\(\(\) => settleWrites\(WRITE_BEHIND_SETTLE_MS\), \(\) => settleWrites\(WRITE_BEHIND_SETTLE_MS\)\)\s*\.then\(finish, finish\)/);
+  const join = index.slice(index.indexOf('let analyticsFlushed = false;'), index.indexOf(']).then(finish, finish);'));
+  assert.match(join, /Promise\.all\(\[[\s\S]*\n\s*settleWrites\(WRITE_BEHIND_SETTLE_MS\)\.catch\(\(\) => undefined\),/, 'will-quit joins the writes in flight');
   const finish = index.slice(index.indexOf('const finish = (): void => {'));
   assert.ok(finish.indexOf('flushKeyRegistry()') > 0 && finish.indexOf('flushKeyRegistry()') < finish.indexOf('hive.dispose()'));
   // reset and home change: no write lands in the old hive after it was closed

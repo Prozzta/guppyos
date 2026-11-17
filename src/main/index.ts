@@ -9605,11 +9605,10 @@ app.on('will-quit', (e) => {
     ]),
     // NATIVE-MEMORY: drain in-flight memory requests, then stop the worker (bounded).
     nativeMemory.shutdown().catch(() => undefined),
+    // LAG-SYNC-WRITES-107: writes in flight land (bounded); finish then flushes the rest synchronously.
+    settleWrites(WRITE_BEHIND_SETTLE_MS).catch(() => undefined),
     // INT 1.1.99 fixup 4: an async capacity rename already in flight at saveNow lands first, then the
     // quit snapshot is written again (bounded), so an older snapshot never sits over the quit write.
     capacityStore.settleQuit(CAPACITY_QUIT_JOIN_MS).catch(() => undefined)
-  ])
-    // LAG-SYNC-WRITES-107: writes in flight land (bounded); finish then flushes the rest synchronously.
-    .then(() => settleWrites(WRITE_BEHIND_SETTLE_MS), () => settleWrites(WRITE_BEHIND_SETTLE_MS))
-    .then(finish, finish);
+  ]).then(finish, finish);
 });
