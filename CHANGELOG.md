@@ -19,6 +19,14 @@ All notable changes to this project are documented here. The format is based on
   light. Not covered: Electron named only inside a shell line, which the command-line classifier
   still reads.
 
+- **A mail ledger save never writes the whole file on the main thread while another save of it is
+  still running.** Ledger saves already run off the main thread (tmp file, then rename). The one
+  exception was a save that found an older write of the same file still under way, for example the
+  last save of a ledger that was just reset or moved to a new home. That save wrote the whole file
+  on the main thread, which for god's ledger (3.4 MB) held the app for about 20 to 30 ms. It now
+  waits one coalesce period and tries again, so it starts after the older write ends and lands
+  after it. Quit, reset and home change still write synchronously, as before.
+
 - **A DEV build that refuses to start (exit 97) no longer crashes on the way out.** When the live
   isolation check found DEV paths overlapping Stable, Guppy called `app.exit(97)` inside its
   whenReady startup callback. Electron 45 can crash tearing down from inside a startup callback
@@ -76,6 +84,12 @@ All notable changes to this project are documented here. The format is based on
   was still waiting. With a few thousand records, each search took more than half a second. Guppy
   now keeps both answers up to date as mail changes, so each check takes about the same time
   however long the history is. The answers are exactly the same as before. (LAG-LEDGER-SCANS-108)
+- **Each mail change no longer gets slower as an agent's mail history grows.** Every time a message
+  was delivered, read or closed, Guppy copied the agent's whole mail record before changing one
+  entry: about 1 ms per change at 4,200 records, on the thread that draws the window. Now each new
+  version of the record shares the previous one and stores only what changed, so a change costs the
+  same at any size. Older versions are never changed, and the record reads exactly as before.
+  (LAG-LEDGER-DRAFT-COPY-108)
 - **A large mail backlog no longer freezes the app for up to a second at a time.** When an agent
   had many messages waiting, Guppy decided which of them could wait quietly by reading through
   whole mail records again for every single message, on every check. It now reads each mail

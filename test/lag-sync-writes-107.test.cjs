@@ -640,6 +640,51 @@ test('ledger: dispose during a save, then a reload, reads the flushed ledger and
   assert.deepEqual(diskIds(root), ['m-1', 'm-2']);
 });
 
+test('MAIL-LEDGER-FLUSH-LAG-108: a timer save that finds another write of the file in flight waits for it, never writing the whole file on main', async () => {
+  const root = ledgerHive();
+  fs.mkdirSync(path.join(root, 'state', 'mail'), { recursive: true });
+  const T0 = Date.now();
+  const logs = [];
+  const waits = [];   // every arm's wait, so a re-arm that spins (wait 0) shows
+  const ml = new L.MailLedger({
+    // A clock that moves only when the test moves it (it never does here), so each re-arm's wait is
+    // exactly lastWriteAt + 5 - now = 5, with no ms tick between the two reads.
+    root: () => root, appendLog: (r) => logs.push(r), readLogRows: () => [], writeDelayMs: 5, clock: () => T0,
+    setTimer: (fn, ms) => { waits.push(ms); const t = setTimeout(fn, ms); t.unref(); return t; }
+  });
+  ml.ledger(AGENT);
+  const g = gate();
+  let timerSaves = 0;
+  const { calls } = await syncWrites(path.join(root, 'state'), () => withAsync('writeFile', async (args, real) => {
+    if (path.basename(String(args[0])).startsWith(`${AGENT}.json.tmp-`) && !g.reached) await g.wait();
+    else timerSaves++;
+    return real();
+  }, async () => {
+    // A disposed ledger's last save of the same file, held in its tmp write.
+    const older = WB.writeFileBehind(ledgerPath(root), JSON.stringify({ older: true }));
+    await until(() => g.reached, 'the other write in flight');
+    ml.markDelivered(AGENT, msg('m-1'));
+    await sleep(60);   // the 5 ms coalesce timer has fired several times meanwhile
+    assert.equal(timerSaves, 0, 'no save of ours started while the other one is in flight');
+    assert.ok(WB.writeInFlight(ledgerPath(root)), 'the other write is still in flight');
+    // Jim SHOULD 1: the timer never tried to start a second flight (that is rejected, and would log a
+    // false write failure and set writeFailLogged, hiding a real one).
+    assert.deepEqual(logs.filter((r) => /fail/.test(String(r.kind))), [], 'no write-failed row while it waits');
+    // Jim SHOULD 2: each re-arm waits a whole coalesce period, so the wait is no busy loop on main.
+    const rearms = waits.slice(1);
+    assert.ok(rearms.length >= 2, `the timer re-armed while it waited (${waits.join(',')})`);
+    assert.ok(rearms.every((ms) => ms === 5), `every re-arm waits the coalesce period: ${waits.join(',')}`);
+    g.open();
+    assert.equal(await bounded(older, 'the other write'), 'published', 'the other write was not overtaken');
+    await until(() => diskIds(root).includes('m-1'), 'our save, after it');
+    await WB.settleWrites(10_000);
+  }));
+  assert.deepEqual(calls, [], 'no synchronous write or rename of the ledger on main');
+  assert.deepEqual(readJson(ledgerPath(root)), JSON.parse(JSON.stringify(ml.ledger(AGENT))), 'the newest ledger is the file');
+  assert.deepEqual(tmpsIn(path.join(root, 'state', 'mail')), []);
+  ml.dispose();
+});
+
 test('ledger: an inbox file moves to .done only after the save that records it has landed', async () => {
   const root = ledgerHive();
   const ml = mkLedger(root);

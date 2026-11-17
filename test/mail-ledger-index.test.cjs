@@ -183,12 +183,18 @@ test('the index is carried from version to version: the router loop and fleet wr
 
 test('every write to an entries object in mailLedger.ts goes through a writer that drops the index', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'mailLedger.ts'), 'utf8');
+  // LAG-LEDGER-DRAFT-COPY-108: entries live in a store shared between versions; storeSet is its
+  // only writer, and every caller drops the index of the store it writes first.
   const assigns = src.match(/entries\[[^\]]+\]\s*=(?!=)/g) || [];
   const deletes = src.match(/delete\s+[\w.]*entries\[/g) || [];
-  assert.deepEqual(assigns, ['entries[entry.id] =', 'entries[entry.id] ='], 'only Draft.put and putInPlace assign an entry');
-  assert.equal(deletes.length, 1, 'only Draft.remove deletes one');
-  assert.match(src, /put\(entry: MailEntry\): void \{\s*dropIndex\(this\.doc\.entries\);/, 'Draft.put drops the index first');
-  assert.match(src, /remove\(id: string\): void \{\s*dropIndex\(this\.doc\.entries\);/, 'Draft.remove drops the index first');
-  assert.match(src, /function putInPlace\(doc: MailLedgerDoc, entry: MailEntry\): void \{\s*dropIndex\(doc\.entries\);/, 'putInPlace drops the index first');
+  assert.deepEqual(assigns, [], 'no code assigns into an entries object');
+  assert.equal(deletes.length, 0, 'no code deletes from an entries object');
+  const matWrites = src.match(/\.mat\[[^\]]+\]\s*=(?!=)|delete\s+[\w.]*\.mat\[/g) || [];
+  assert.equal(matWrites.length, 2, 'only storeSet writes into a built entries object');
+  const calls = src.match(/storeSet\(/g) || [];
+  assert.equal(calls.length, 4, 'storeSet is defined once and called by Draft.put, Draft.remove and putInPlace');
+  assert.match(src, /put\(entry: MailEntry\): void \{\s*dropIndex\(this\.store\);/, 'Draft.put drops the index first');
+  assert.match(src, /remove\(id: string\): void \{\s*dropIndex\(this\.store\);/, 'Draft.remove drops the index first');
+  assert.match(src, /function putInPlace\(doc: MailLedgerDoc, entry: MailEntry\): void \{\s*const s = storeOf\(doc\);\s*dropIndex\(s\);/, 'putInPlace drops the index first');
   assert.doesNotMatch(src, /Object\.values\([\w.]*entries\)\.filter\(\(e\) => e\.senderId ===/, 'no sender_id query scans the entries');
 });
