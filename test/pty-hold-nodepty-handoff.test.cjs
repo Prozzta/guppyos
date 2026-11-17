@@ -687,9 +687,10 @@ if (!WIN) {
       assert.equal(addon.procAlive(byPid), true, 'the open by pid still works for a live child');
       proc.kill();
       await within(gone, 'the exit after the close');
-      // node-pty reports 'exit' when the output pipe closes. kill() closes the pseudoconsole at once
-      // and ends the root only after it has listed the console's processes (a helper process), so
-      // under load the report can come while the root is still alive (seen 2026-11-17, full suite).
+      // node-pty reports 'exit' when the output pipe closes, and that follows the console's end,
+      // not the root's. Measured 2026-11-17 with a root that is slow to finish exiting: kill()
+      // returns, the console closed, while the root still reads alive, and the report comes about
+      // 55 ms later. Under load the root's last steps can outlast that (seen once, full suite).
       // The root's own end is what the hold follows: wait for the kernel to say so.
       await within(new Promise((resolve) => { const t = setInterval(() => { if (!addon.procAlive(hold)) { clearInterval(t); resolve(); } }, 5); t.unref(); }), 'the root to end after kill() (THE HOLD FOLLOWS THE ROOT)');
       assert.equal(addon.procAlive(hold), false, 'THE HOLD FOLLOWS THE ROOT: dead once it exited');
