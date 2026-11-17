@@ -8,6 +8,12 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **A background save is no longer lost when something is reading the file (Windows).** The async
+  writers (write-behind files, capacity, the task ledger guard) published with a plain rename, which
+  Windows refuses while a reader holds the file open. They retried for about 200 ms and then gave up:
+  with a reader holding the file for 300 ms, 20 of 20 writes failed. They now use the same POSIX
+  rename as the sync writers, run on a worker thread so the main thread never waits for it: 20 of 20
+  land, with no retry. The plain rename stays as the fallback.
 - **A mail ledger save never writes the whole file on the main thread while another save of it is
   still running.** Ledger saves already run off the main thread (tmp file, then rename). The one
   exception was a save that found an older write of the same file still under way, for example the

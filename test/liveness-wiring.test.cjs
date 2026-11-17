@@ -182,6 +182,10 @@ test('M16: fleet.json is written atomically (temp file, then rename): a reader n
   // UI-CRAWL (d41157ff): the publish is deferred off the caller's turn and goes through the async
   // temp+rename (fs/promises); the pin awaits the flush rather than reverting the deferral.
   const fsp = require('node:fs/promises');
+  // ASYNC-RENAME-POSIX-107: the pin watches the plain rename, so the addon rename is switched off here.
+  const atomic = loadTs('src/main/atomicJson.ts');
+  atomic.__setRenameAddonForTest(null);
+  t.after(() => atomic.__setRenameAddonForTest(undefined));
   const writes = [];
   const renames = [];
   const realWrite = fsp.writeFile; const realRename = fsp.rename;
