@@ -34,6 +34,7 @@ test.after(() => {
 });
 
 const { HiveManager, archivedForMail } = loadTs('src/main/hive.ts');
+const AJ = loadTs('src/main/atomicJson.ts');
 const { coordinatorPendingIds } = loadTs('src/main/mailReaders.ts');
 const { readSource, codeOnly } = require('./read-source.cjs');
 
@@ -353,6 +354,10 @@ test('Jim M1: one archived agent fails mid-move: no marker, the report still lis
   writeMsg(dir('jim-1', 'inbox'), 'j0');
   patchReg((r) => { r.agents['pam-1'].archived = true; r.agents['jim-1'].archived = true; });
   hive.mail.dispose();
+  // REGISTRY-RENAME-EPERM-107: renameWithRetry tries the POSIX rename first, which never calls
+  // fs.renameSync; the injected rename fault below is for the plain-rename path, so turn POSIX off.
+  AJ.__setRenameAddonForTest(null);
+  t.after(() => AJ.__setRenameAddonForTest(undefined));
   const real = fs.renameSync;
   fs.renameSync = function (src, dst, ...rest) {
     if (String(src).endsWith(`${path.sep}p1.json`) && String(dst).includes('.undelivered')) { const e = new Error('EACCES: av lock'); e.code = 'EACCES'; throw e; }

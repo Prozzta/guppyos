@@ -18,6 +18,7 @@ const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
 
 const { HiveManager } = loadTs('src/main/hive.ts');
+const AJ = loadTs('src/main/atomicJson.ts');
 const WINDOW = HiveManager.AUTHORITY_REVALIDATE_MS;
 const card = (id, extra = {}) => ({ id, title: `card ${id}`, status: 'todo', tags: ['x'], ...extra });
 
@@ -70,9 +71,11 @@ test('production missed-watch fallback invalidates tasks asynchronously', async 
   const { hive, handEdit } = floor(t); hive.__resetAuthorityCacheForTests(undefined, () => Date.now() + 60_000);
   assert.deepEqual(ids(hive.tasks()), ['T1']);
   hive.__dropAuthorityWatchersForTests();
-  handEdit([card('T2')]);
+  // A different size: the fixture's +60 s wall marks every key proven, so a same-size in-place
+  // edit inside the first write's timestamp tick keeps the key and is rightly unseen (racy rule).
+  handEdit([card('T2'), card('T3')]);
   await hive.__revalidateAuthoritiesForTests();
-  assert.deepEqual(ids(hive.tasks()), ['T2']);
+  assert.deepEqual(ids(hive.tasks()), ['T2', 'T3']);
 });
 
 test('a mutation reads the file fresh, never the frozen cache, and its write is seen by the next read', (t) => {
@@ -182,6 +185,10 @@ test('an unreadable tasks.json still throws, and is not cached', (t) => {
 test('a failed write drops the cache: the next read goes to disk and returns what is there', (t) => {
   const { hive, file } = floor(t);
   hive.tasks();
+  // REGISTRY-RENAME-EPERM-107: renameWithRetry tries the POSIX rename first, which never calls
+  // fs.renameSync; the injected rename fault below is for the plain-rename path, so turn POSIX off.
+  AJ.__setRenameAddonForTest(null);
+  t.after(() => AJ.__setRenameAddonForTest(undefined));
   const { renameSync } = fs;
   fs.renameSync = () => { const e = new Error('denied'); e.code = 'EACCES'; throw e; };
   try { assert.throws(() => hive.addTask(card('T9'))); } finally { fs.renameSync = renameSync; }

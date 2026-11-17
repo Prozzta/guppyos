@@ -50,10 +50,10 @@ async function floor(t) {
   const surfaced = [];
   hive.setNeedsHumanObserver((e) => surfaced.push(e));
   let n = 0;
-  const post = (from, to, msg) => {
+  const post = async (from, to, msg) => {
     const subject = msg.subject ?? `invented ${++n}`;
     fs.writeFileSync(path.join(hive.root(), 'agents', from, 'outbox', `m${++n}.json`), JSON.stringify({ to, subject, body: `invented body ${n}`, ...msg }));
-    hive.routeOnce();
+    await hive.routeOnce();
     return hive.inbox(to === 'god' ? 'god-1' : to).find((m) => m.subject === subject) ?? null;
   };
   const qa = (id) => hive.tasks().tasks.find((c) => c.id === id)?.humanQA ?? [];
@@ -68,7 +68,7 @@ async function floor(t) {
 
 test('an ask with needs_human and a card: one ASK ME entry on the card, its status untouched, god still mailed', async (t) => {
   const f = await floor(t);
-  const m = f.post('jim-1', 'god', { act: 'request', card: 'ASK-1', needs_human: true, subject: 'invented: which colour?', body: 'invented detail' });
+  const m = await f.post('jim-1', 'god', { act: 'request', card: 'ASK-1', needs_human: true, subject: 'invented: which colour?', body: 'invented detail' });
   assert.ok(m, 'god still gets the message');
   assert.equal(m.needs_human, true);
   const q = f.qa('ASK-1');
@@ -91,13 +91,13 @@ test('an ask with needs_human and a card: one ASK ME entry on the card, its stat
 
 test('Jim SHOULD-1: an ask its sender supersedes leaves ASK ME (dismissed, kept on the card); nobody else can', async (t) => {
   const f = await floor(t);
-  const first = f.post('jim-1', 'god', { act: 'request', card: 'ASK-1', needs_human: true, subject: 'invented: blue or green?' });
-  const other = f.post('jim-1', 'god', { act: 'query', card: 'ASK-1', needs_human: true, subject: 'invented: unrelated ask' });
+  const first = await f.post('jim-1', 'god', { act: 'request', card: 'ASK-1', needs_human: true, subject: 'invented: blue or green?' });
+  const other = await f.post('jim-1', 'god', { act: 'query', card: 'ASK-1', needs_human: true, subject: 'invented: unrelated ask' });
   // god naming jim's ask in its own supersedes does not touch it
-  f.post('god-1', 'jim-1', { act: 'inform', supersedes: [first.id], subject: 'invented: god supersedes' });
+  await f.post('god-1', 'jim-1', { act: 'inform', supersedes: [first.id], subject: 'invented: god supersedes' });
   assert.equal(f.qa('ASK-1').filter((e) => e.dismissedAt).length, 0);
   // jim corrects it: the old entry is dismissed, the corrected one is open, the unrelated one untouched
-  const fixed = f.post('jim-1', 'god', { act: 'request', card: 'ASK-1', needs_human: true, supersedes: [first.id], subject: 'invented: blue, green or red?' });
+  const fixed = await f.post('jim-1', 'god', { act: 'request', card: 'ASK-1', needs_human: true, supersedes: [first.id], subject: 'invented: blue, green or red?' });
   const q = f.qa('ASK-1');
   assert.equal(q.length, 3);
   const by = (id) => q.find((e) => e.msgId === id);
@@ -112,12 +112,12 @@ test('Jim SHOULD-1: an ask its sender supersedes leaves ASK ME (dismissed, kept 
 
 test('D3: a query, a propose and a requires_reply inform surface; an inform or done does not reach ASK ME', async (t) => {
   const f = await floor(t);
-  f.post('jim-1', 'god', { act: 'query', card: 'ASK-1', needs_human: true });
-  f.post('jim-1', 'god', { act: 'propose', card: 'ASK-1', needs_human: true });
-  f.post('jim-1', 'god', { act: 'inform', requires_reply: true, card: 'ASK-1', needs_human: true });
+  await f.post('jim-1', 'god', { act: 'query', card: 'ASK-1', needs_human: true });
+  await f.post('jim-1', 'god', { act: 'propose', card: 'ASK-1', needs_human: true });
+  await f.post('jim-1', 'god', { act: 'inform', requires_reply: true, card: 'ASK-1', needs_human: true });
   assert.equal(f.qa('ASK-1').length, 3);
-  f.post('jim-1', 'god', { act: 'done', card: 'TODO-1', needs_human: true, subject: 'invented: finding the Human should see' });
-  f.post('jim-1', 'god', { act: 'inform', needs_human: true, subject: 'invented: cardless finding' });
+  await f.post('jim-1', 'god', { act: 'done', card: 'TODO-1', needs_human: true, subject: 'invented: finding the Human should see' });
+  await f.post('jim-1', 'god', { act: 'inform', needs_human: true, subject: 'invented: cardless finding' });
   assert.equal(f.qa('TODO-1').length, 0, 'an FYI is never an ASK ME entry');
   assert.equal(f.notices().length, 0, 'an FYI needs no card, so no notice');
   assert.equal(f.surfaced.length, 3);
@@ -136,11 +136,11 @@ test('D3: a query, a propose and a requires_reply inform surface; an inform or d
 
 test('no card on the ask: an ancestor\'s card, then the conversation\'s card', async (t) => {
   const f = await floor(t);
-  const ask = f.post('god-1', 'jim-1', { act: 'request', card: 'ASK-1', conversation: 'conv-inv1', subject: 'invented: please build' });
-  f.post('jim-1', 'god', { act: 'query', in_reply_to: ask.id, needs_human: true, subject: 'invented: via reply chain' });
+  const ask = await f.post('god-1', 'jim-1', { act: 'request', card: 'ASK-1', conversation: 'conv-inv1', subject: 'invented: please build' });
+  await f.post('jim-1', 'god', { act: 'query', in_reply_to: ask.id, needs_human: true, subject: 'invented: via reply chain' });
   assert.deepEqual(f.qa('ASK-1').map((e) => e.q.split('\n')[0]), ['Jim asks: invented: via reply chain']);
-  f.post('god-1', 'jim-1', { act: 'request', card: 'TODO-1', conversation: 'conv-inv2', subject: 'invented: second job' });
-  f.post('jim-1', 'god', { act: 'query', conversation: 'conv-inv2', needs_human: true, subject: 'invented: via conversation' });
+  await f.post('god-1', 'jim-1', { act: 'request', card: 'TODO-1', conversation: 'conv-inv2', subject: 'invented: second job' });
+  await f.post('jim-1', 'god', { act: 'query', conversation: 'conv-inv2', needs_human: true, subject: 'invented: via conversation' });
   assert.deepEqual(f.qa('TODO-1').map((e) => e.q.split('\n')[0]), ['Jim asks: invented: via conversation']);
   assert.equal(f.notices().length, 0);
 });
@@ -149,7 +149,7 @@ test('no card found, a done card or an unknown card: delivered to god as before,
   const f = await floor(t);
   for (const [extra, why] of [[{}, /no card/], [{ card: 'DONE-1' }, /DONE-1 is done/], [{ card: 'NOPE-9' }, /NOPE-9 is not a card/]]) {
     const before = f.notices().length;
-    const m = f.post('jim-1', 'god', { act: 'request', needs_human: true, ...extra });
+    const m = await f.post('jim-1', 'god', { act: 'request', needs_human: true, ...extra });
     assert.ok(m, 'god still gets it');
     const got = f.notices().slice(before);
     assert.equal(got.length, 1, JSON.stringify(extra));
@@ -167,7 +167,7 @@ test('only an agent surfaces (system and the Human do not), and the body excerpt
   f.hive.send({ to: 'god', act: 'request', card: 'ASK-1', needs_human: true, subject: 'invented system ask' }, 'system');
   assert.equal(f.qa('ASK-1').length, 0);
   const long = 'x'.repeat(5000);
-  const m = f.post('jim-1', 'god', { act: 'request', card: 'ASK-1', needs_human: true, subject: 'invented: long', body: long });
+  const m = await f.post('jim-1', 'god', { act: 'request', card: 'ASK-1', needs_human: true, subject: 'invented: long', body: long });
   const q = f.qa('ASK-1')[0].q;
   assert.ok(q.length < 800, `q is ${q.length} chars`);
   assert.ok(q.includes(`(the rest is in the message ${m.id})`));
