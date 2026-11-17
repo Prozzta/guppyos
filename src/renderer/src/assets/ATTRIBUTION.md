@@ -47,8 +47,31 @@ asset `martian-mono-1.1.0-woff2.zip` at https://github.com/evilmartians/mono (ta
 Copyright 2021 The Martian Mono Project Authors, licensed under the SIL Open Font License 1.1; the
 licence text (`OFL.txt` from the repo at v1.1.0) ships beside the files as `fonts/martian-mono/OFL.txt`.
 It is bundled so the terminal never fetches a font from the network (TERM-FONT-105); it is declared
-in `design/fonts.css` and offered in the terminal's font selector (`components/terminalFont.ts`),
+in `design/fonts.css` and offered in Settings, Terminal, Font (`components/terminalFont.ts`),
 where JetBrains Mono is the default.
+
+## Terminal font: Cascadia Mono
+
+`fonts/cascadia-mono/` holds Cascadia Mono 2407.24, Regular and Bold (`CascadiaMono-Regular.woff2`,
+`CascadiaMono-Bold.woff2`), taken unmodified from `woff2/static/` in the official release asset
+`CascadiaCode-2407.24.zip` at https://github.com/microsoft/cascadia-code (tag v2407.24).
+Copyright (c) 2019 - Present, Microsoft Corporation, with Reserved Font Name Cascadia Code, licensed
+under the SIL Open Font License 1.1; the licence text (`LICENSE` from the repo at v2407.24) ships
+beside the files as `fonts/cascadia-mono/OFL.txt`. It is bundled so the terminal never fetches a font
+from the network; it is declared in `design/fonts.css` and offered in Settings, Terminal, Font
+(TERM-FONT-SETTINGS-107).
+
+## Terminal font: Atkinson Hyperlegible Mono
+
+`fonts/atkinson-hyperlegible-mono/` holds Atkinson Hyperlegible Mono, Regular and Bold
+(`AtkinsonHyperlegibleMono-Regular.woff2`, `AtkinsonHyperlegibleMono-Bold.woff2`), taken unmodified
+from `fonts/webfonts/` at https://github.com/googlefonts/atkinson-hyperlegible-next-mono (commit
+154d50362016cc3e873eb21d242cd0772384c8f9; the project publishes no tagged release).
+Copyright 2020-2024 The Atkinson Hyperlegible Mono Project Authors, licensed under the SIL Open Font
+License 1.1; the licence text (`OFL.txt` from the same commit) ships beside the files as
+`fonts/atkinson-hyperlegible-mono/OFL.txt`. It is bundled so the terminal never fetches a font from
+the network; it is declared in `design/fonts.css` and offered in Settings, Terminal, Font
+(TERM-FONT-SETTINGS-107).
 
 ## UI monospace font: JetBrains Mono
 
