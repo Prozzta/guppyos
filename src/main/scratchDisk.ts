@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, symlinkSync } from 'node:fs';
 import { lstat, readdir } from 'node:fs/promises';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { atomicWriteJson } from './atomicJson';
 import { findReparsePointsSync, removeReparsePointSync, safeRemoveTreeSync, unlinkReparsePointsUnderSync } from './fsSafeRemove';
 
@@ -204,6 +204,8 @@ function git(path: string, args: string[]): string | null {
 
 /** A worktree is acceptable only when its exact HEAD equals its origin tracking ref. */
 export function gitScratchFacts(path: string): Pick<ScratchFacts, 'dirty' | 'onOrigin'> {
+  // A stale local tracking ref is not evidence that deletion is safe.
+  if (git(path, ['fetch', '--quiet', 'origin']) === null) return { dirty: true, onOrigin: false };
   const status = git(path, ['status', '--porcelain=v1', '--untracked-files=all']);
   const head = git(path, ['rev-parse', 'HEAD']);
   const upstream = git(path, ['rev-parse', '@{upstream}']);
@@ -237,6 +239,12 @@ export function worktreeGitdirPointsInto(workRoot: string, candidate: string): b
       return !!m && under(resolve(dirname(dotGit), m[1]), candidate);
     } catch { return false; }
   });
+}
+
+/** A scratch root must visibly belong to the authenticated agent that registers it. */
+export function scratchPathOwnedBy(owner: string, path: string): boolean {
+  const prefix = owner.split('-', 1)[0].toLowerCase();
+  return !!prefix && basename(path).toLowerCase().startsWith(`${prefix}-`);
 }
 
 function processUses(path: string, rows: readonly ScratchProcess[] | null): boolean {
@@ -304,6 +312,7 @@ export class ScratchDiskManager {
     const state = readScratchState(root);
     const existing = state.records.find((r) => resolve(r.path) === path);
     if (existing && existing.owner !== owner) return { ok: false, line: 'refused: scratch is owned by another agent' };
+    if (!scratchPathOwnedBy(owner, path)) return { ok: false, line: 'refused: scratch path does not have your owner prefix' };
     const at = this.now();
     const record: ScratchRecord = existing ? { ...existing, card, kind, touchedAt: at } : { path, owner, card, kind, createdAt: at, touchedAt: at };
     writeScratchState(root, { v: 1, records: [...state.records.filter((r) => resolve(r.path) !== path), record] });
