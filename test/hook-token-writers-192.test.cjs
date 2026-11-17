@@ -43,6 +43,7 @@ function childEnv(extra) {
 async function fakeSock(t) {
   const sock = process.platform === 'win32' ? `\\\\.\\pipe\\md-token-writers-${process.pid}-${Math.random().toString(36).slice(2)}` : path.join(fs.mkdtempSync(path.join(JAIL, 's-')), 's.sock');
   const frames = [];
+  let waiters = [];
   const server = net.createServer((c) => {
     let buf = '';
     c.setEncoding('utf8');
@@ -50,13 +51,19 @@ async function fakeSock(t) {
     c.on('data', (d) => {
       buf += d;
       const i = buf.indexOf('\n');
-      if (i !== -1) { frames.push(JSON.parse(buf.slice(0, i))); buf = ''; c.end('{}\n'); }
+      if (i !== -1) { frames.push(JSON.parse(buf.slice(0, i))); buf = ''; c.end('{}\n'); waiters = waiters.filter((w) => !w()); }
     });
     c.on('error', () => {});
   });
   await new Promise((r) => server.listen(sock, r));
   t.after(() => server.close());
-  return { sock, frames };
+  /** Resolves when `n` frames have arrived: an event, not a sleep (the guard only ends a hang). */
+  const arrived = (n) => new Promise((resolve, reject) => {
+    const guard = setTimeout(() => reject(new Error(`${frames.length} of ${n} frames after 30 s: ${frames.map((f) => f.hook_event_name)}`)), 30_000);
+    const check = () => { if (frames.length < n) return false; clearTimeout(guard); resolve(); return true; };
+    if (!check()) waiters.push(check);
+  });
+  return { sock, frames, arrived };
 }
 
 /** Run `file` with node; resolves with its stderr once it exits (a hang guard kills it). */
@@ -86,8 +93,13 @@ async function runOpencode(env) {
   const driver = write('drive.mjs', `const m = await import(${JSON.stringify(pathToFileURL(plugin).href)}); const h = await m.default(); await h.event({ event: { type: 'session.idle' } }); await h['tool.execute.after']({ tool: 'bash' });`);
   return run(driver, env);
 }
-/** The proxy sidecar forwards one chat completion to a fake upstream and emits its usage. */
-async function runProxy(t, env) {
+/**
+ * The proxy sidecar forwards one chat completion to a fake upstream and emits its usage. The reply has no
+ * tool call, so the shim also arms its idle Stop (a timer inside the shim). `arrived`, when given, holds the
+ * shim alive until all `expect` frames are in, the Stop included: the frame list does not depend on how
+ * long the kill takes to land.
+ */
+async function runProxy(t, env, arrived, expect) {
   const upstream = http.createServer((req, res) => {
     req.resume();
     req.on('end', () => { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ model: 'gpt-4o', usage: { prompt_tokens: 5, completion_tokens: 2 } })); });
@@ -106,7 +118,7 @@ async function runProxy(t, env) {
     req.on('error', reject);
     req.end(JSON.stringify({ model: 'gpt-4o', messages: [] }));
   });
-  await settle();
+  if (arrived) await arrived(expect); else await settle();
   ch.kill(); await exited;
   return { err };
 }
@@ -114,15 +126,18 @@ async function runProxy(t, env) {
 const WRITERS = [
   ['PI_EXTENSION', (t, env) => runPi(env), ['Stop', 'PostToolUse']],
   ['OPENCODE_PLUGIN', (t, env) => runOpencode(env), ['Stop', 'PostToolUse']],
-  ['PROXY_BRIDGE_SHIM', (t, env) => runProxy(t, env), ['Status', 'CostSample']],
+  ['PROXY_BRIDGE_SHIM', (t, env, arrived) => runProxy(t, env, arrived, 3), ['Status', 'CostSample', 'Stop']],
   ['GEMINI_HOOK_SHIM', (t, env) => run(write('gemini-hook.cjs', GEMINI_HOOK_SHIM), env, JSON.stringify({ hook_event_name: 'AfterAgent' })), ['Stop']],
   ['GROK_HOOK_SHIM', (t, env) => run(write('grok-hook.cjs', GROK_HOOK_SHIM), env, JSON.stringify({ hookEventName: 'stop' })), ['Stop']]
 ];
 
 for (const [name, go, events] of WRITERS) {
   test(`${name}: every frame carries the spawn's HIVE_HOOK_TOKEN as hook_token`, async (t) => {
-    const { sock, frames } = await fakeSock(t);
-    const r = await go(t, childEnv({ HIVE_SOCK: sock, AGENT_ID: 'ag-1', HIVE_HOOK_TOKEN: TOKEN }));
+    const { sock, frames, arrived } = await fakeSock(t);
+    const r = await go(t, childEnv({ HIVE_SOCK: sock, AGENT_ID: 'ag-1', HIVE_HOOK_TOKEN: TOKEN }), arrived);
+    // Every expected frame is waited for as an event. The settle after it only gives a frame too many
+    // the chance to show: it can miss one under load, it cannot fail a correct writer.
+    await arrived(events.length);
     await settle();
     assert.deepEqual(frames.map((f) => f.hook_event_name).sort(), [...events].sort(), `the frames ${name} writes`);
     for (const f of frames) { assert.equal(f.hook_token, TOKEN, `${f.hook_event_name} carries the token`); assert.equal(f.agent_id, 'ag-1'); }
