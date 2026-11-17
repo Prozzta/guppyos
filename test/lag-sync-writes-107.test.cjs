@@ -42,6 +42,11 @@ const until = async (cond, what, ms = 10_000) => {
     await sleep(5);
   }
 };
+/** A wait that fails instead of hanging the file (a write left in flight by an earlier failed case). */
+const bounded = (pending, what, ms = 8_000) => {
+  let t;
+  return Promise.race([pending, new Promise((_r, rej) => { t = setTimeout(() => rej(new Error(`timed out waiting for ${what}`)), ms); })]).finally(() => clearTimeout(t));
+};
 const readJson = (p) => JSON.parse(fs.readFileSync(p, 'utf8'));
 const tmpsIn = (dir) => fs.readdirSync(dir).filter((n) => /\.tmp/.test(n));
 
@@ -733,7 +738,7 @@ test('closeWrites: a rename already under way at the cap is waited for, so the q
       await sleep(200);
       assert.equal(closedAt, 0, 'THE CAP DOES NOT CUT OFF A RENAME UNDER WAY');
       g.open();
-      await closing;
+      await bounded(closing, 'closeWrites after the rename landed');
       assert.equal(WB.writeInFlight(p), false, 'no write in flight once it is closed');
       assert.equal(await flight, 'published');
     });
@@ -757,7 +762,7 @@ test('closeWrites: bounded for a write still in its tmp phase, which then never 
         await until(() => g.reached, 'the tmp write');
         assert.equal(WB.fileWriteBehindOn(), true);
         const t0 = Date.now();
-        await WB.closeWrites(60);
+        await bounded(WB.closeWrites(60), 'closeWrites at its cap');
         const took = Date.now() - t0;
         assert.ok(took >= 50 && took < 2_000, `bounded by the cap (${took} ms)`);
         assert.equal(WB.fileWriteBehindOn(), false, 'CLOSED: THE TIMERS SAVE SYNCHRONOUSLY FROM HERE');
@@ -777,7 +782,7 @@ test('closeWrites: after it the ledger and the key registry save synchronously f
   const root = ledgerHive();
   const ml = mkLedger(root);
   try {
-    await WB.closeWrites(1_000);
+    await bounded(WB.closeWrites(1_000), 'closeWrites with nothing of its own in flight');
     deliver(ml, root, 'm-c');
     const { calls } = await syncWrites(root, async () => {
       ml.claimSurfacing(AGENT, ['m-c'], 'turn-1', 'UserPromptSubmit');
