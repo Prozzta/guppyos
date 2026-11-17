@@ -430,3 +430,135 @@ test('NODE-PTY GAP: the real patch tool takes the check as inspect sends it, and
   assert.match(state.problem, /not PTY-HOLD-NODEPTY-HANDOFF patched/);
   assert.equal(fs.readFileSync(path.join(root, 'node_modules/node-pty/src/win/conpty.cc'), 'utf8'), '// not the pinned source\n', 'the check changed nothing');
 });
+
+// WORKTREE-SETUP-MODEL-108: the embedding model is gitignored (resources/models/*/), so a fresh
+// tree has none, and setup still said 'tree complete': the claims drill then failed after 350 s on
+// 'missing model (onnx/model.onnx)'. The model is a gap, checked file for file against the
+// manifest's SHA-256, and filled only from a VERIFIED local source through the real
+// scripts/fetch-memory-model.cjs --from; never downloaded.
+// literal paths, not the tool's exports, so this file is red (not a TypeError) on a base without the check
+const MANIFEST_REL = 'resources/models/native-memory-manifest.json';
+const FETCH_REL = 'scripts/fetch-memory-model.cjs';
+const sha256 = (b) => require('node:crypto').createHash('sha256').update(b).digest('hex');
+const MODEL = { 'onnx/model.onnx': 'ONNX-BYTES', 'tokenizer.json': '{"t":1}' };
+/** A model folder holding MODEL (or `over` in place of some files; null drops a file). */
+function modelDir(dir, over = {}) {
+  for (const [rel, text] of Object.entries({ ...MODEL, ...over })) if (text !== null) put(dir, rel, text);
+  return dir;
+}
+/** A tree whose other gaps are closed (Linux: no natives; patched addon), holding the model
+ *  manifest of MODEL and the REAL fetch script, and no model. */
+function modelTree(t) {
+  const root = jail(t);
+  addon(root, 'PATCHED');
+  const files = Object.fromEntries(Object.entries(MODEL).map(([rel, text]) => [rel, sha256(text)]));
+  put(root, MANIFEST_REL, JSON.stringify({ model: { dir: 'mini', source: 'https://invalid.example/never', files } }));
+  put(root, FETCH_REL, fs.readFileSync(path.join(REPO, FETCH_REL)));
+  return root;
+}
+const modelIds = (root) => W.inspect(root, { platform: 'linux', spawnSyncFn: fakeSpawn(root) }).map((g) => g.id);
+/** The real spawnSync with https/http disarmed in the child, recording each fetch call's args. */
+function noNetSpawn(t, root, calls) {
+  const guard = put(jail(t), 'no-net.cjs', "for (const m of ['https', 'http']) { const x = require(m); x.get = x.request = () => { throw new Error('NETWORK USED'); }; }\n");
+  const rest = fakeSpawn(root);
+  return (cmd, args, opts) => {
+    if (args[0] !== path.join(root, FETCH_REL)) return rest(cmd, args, opts);
+    calls.push(args.slice(1));
+    return require('node:child_process').spawnSync(cmd, ['-r', guard, ...args], opts);
+  };
+}
+const modelSetup = (root, spawnSyncFn, o = {}) => W.setup(root, { platform: 'linux', spawnSyncFn, log: o.log || quiet, env: o.env || {}, releaseCache: o.releaseCache === undefined ? null : o.releaseCache, copyFrom: o.copyFrom });
+
+test('MODEL GAP: no model is a gap (the preflight refuses); a corrupt or missing file is a gap; the manifest\'s exact files are complete', (t) => {
+  const root = modelTree(t);
+  assert.deepEqual(modelIds(root), ['model'], 'A TREE WITH NO MODEL IS NOT COMPLETE');
+  const gap = W.inspect(root, { platform: 'linux', spawnSyncFn: fakeSpawn(root) })[0];
+  assert.match(gap.problem, /resources\/models\/mini is not the manifest's model \(onnx\/model\.onnx: missing\).*never downloads/);
+  const lines = [];
+  assert.equal(W.preflight({ root, env: {}, log: (l) => lines.push(l), inspectFn: (r) => W.inspect(r, { platform: 'linux', spawnSyncFn: fakeSpawn(r) }) }), 2, 'the suite does not start without the model');
+  assert.ok(lines.some((l) => /TREE GAP model: /.test(l)), lines.join(' | '));
+
+  const own = path.join(root, 'resources/models/mini');
+  modelDir(own, { 'tokenizer.json': '{"t":2}' });
+  assert.deepEqual(modelIds(root), ['model'], 'A CORRUPT FILE IS A GAP');
+  assert.match(W.modelState(root).problem, /tokenizer\.json: sha256 differs from the manifest/);
+  fs.rmSync(own, { recursive: true });
+  modelDir(own, { 'tokenizer.json': null });
+  assert.match(W.modelState(root).problem, /tokenizer\.json: missing/, 'a missing second file is a gap too');
+  fs.rmSync(own, { recursive: true });
+  modelDir(own);
+  assert.deepEqual(modelIds(root), [], 'every file = manifest: complete');
+
+  put(root, MANIFEST_REL, '{ not json');
+  assert.match(W.modelState(root).problem, /native-memory-manifest\.json is unreadable/, 'an unreadable manifest is a gap, not a pass');
+  fs.rmSync(path.join(root, MANIFEST_REL));
+  assert.deepEqual(modelIds(root), [], 'a base from before NATIVE-MEMORY (no manifest) has no model gap');
+});
+
+test('MODEL GAP: the real manifest names onnx/model.onnx missing in a tree without the model', (t) => {
+  assert.deepEqual([W.MODEL_MANIFEST, W.MODEL_FETCH], [MANIFEST_REL, FETCH_REL], 'the tool checks the paths these fixtures build');
+  const root = jail(t);
+  put(root, MANIFEST_REL, fs.readFileSync(path.join(REPO, MANIFEST_REL)));
+  const m = JSON.parse(fs.readFileSync(path.join(REPO, MANIFEST_REL), 'utf8')).model;
+  assert.ok(Object.keys(m.files).length >= 4, 'the real manifest pins the model files');
+  assert.match(W.modelState(root).problem, new RegExp(`resources/models/${m.dir} is not the manifest's model \\(onnx/model\\.onnx: missing\\)`));
+});
+
+test('MODEL FILL: a verified MUNDER_MODEL_CACHE fills the model through the real fetch script --from, with the network disarmed; then complete', (t) => {
+  const root = modelTree(t);
+  const cache = modelDir(jail(t));
+  const calls = [];
+  assert.deepEqual(modelSetup(root, noNetSpawn(t, root, calls), { env: { MUNDER_MODEL_CACHE: cache } }), [], 'A PROVIDED MODEL CLEARS THE GAP');
+  assert.deepEqual(calls, [['--from', cache]], 'one fetch, always with --from (no download path)');
+  for (const [rel, text] of Object.entries(MODEL)) assert.equal(fs.readFileSync(path.join(root, 'resources/models/mini', rel), 'utf8'), text);
+});
+
+test('MODEL FILL: --copy-from <tree> comes first, then MUNDER_MODEL_CACHE, then <dir of the tree>/release-cache/models; a corrupt file in the tree is replaced', (t) => {
+  const root = modelTree(t);
+  modelDir(path.join(root, 'resources/models/mini'), { 'onnx/model.onnx': 'CORRUPT' });
+  const built = jail(t);
+  modelDir(path.join(built, 'resources/models/mini'));
+  const cache = modelDir(jail(t));
+  const calls = [];
+  assert.deepEqual(modelSetup(root, noNetSpawn(t, root, calls), { copyFrom: built, env: { MUNDER_MODEL_CACHE: cache } }), []);
+  assert.deepEqual(calls, [['--from', path.join(built, 'resources/models/mini')]], '--copy-from wins');
+  assert.equal(fs.readFileSync(path.join(root, 'resources/models/mini/onnx/model.onnx'), 'utf8'), MODEL['onnx/model.onnx'], 'THE CORRUPT FILE IS REPLACED');
+
+  const r2 = modelTree(t);
+  const rc = jail(t);
+  modelDir(path.join(rc, 'mini'));
+  const c2 = [];
+  assert.deepEqual(modelSetup(r2, noNetSpawn(t, r2, c2), { releaseCache: rc }), [], 'the release cache fills it');
+  assert.deepEqual(c2, [['--from', path.join(rc, 'mini')]]);
+  assert.deepEqual(W.modelSources(path.resolve('wroot', 'tree'), 'mini', { env: {} }).map((s) => s.dir), [path.resolve('wroot', 'release-cache', 'models', 'mini')], 'the default cache is the cut prune\'s <root>/release-cache/models beside the tree');
+});
+
+test('MODEL FILL: an unverified source is refused and nothing downloads; the gap stays and names the fix', (t) => {
+  const root = modelTree(t);
+  const bad = modelDir(jail(t), { 'tokenizer.json': '{"t":"tampered"}' });
+  const calls = [];
+  const lines = [];
+  const left = modelSetup(root, noNetSpawn(t, root, calls), { env: { MUNDER_MODEL_CACHE: bad }, log: (l) => lines.push(l) });
+  assert.deepEqual(left.map((g) => g.id), ['model'], 'AN UNVERIFIED CACHE DOES NOT CLEAR THE GAP');
+  assert.deepEqual(calls, [], 'THE FETCH SCRIPT IS NEVER RUN WITHOUT A VERIFIED SOURCE (it would download)');
+  assert.ok(lines.some((l) => /MUNDER_MODEL_CACHE .*tokenizer\.json: sha256 differs.*not downloading/.test(l)), lines.join(' | '));
+  assert.equal(fs.existsSync(path.join(root, 'resources/models/mini')), false, 'nothing written');
+
+  const none = [];
+  assert.deepEqual(modelSetup(root, noNetSpawn(t, root, none)).map((g) => g.id), ['model'], 'no source at all: the gap stays');
+  assert.deepEqual(none, [], 'and nothing ran');
+});
+
+test('MODEL FILL: a resources/models that is a junction into another tree is refused untouched', (t) => {
+  const root = modelTree(t);
+  const other = jail(t);
+  fs.renameSync(path.join(root, 'resources/models'), path.join(other, 'models'));
+  fs.symlinkSync(path.join(other, 'models'), path.join(root, 'resources/models'), 'junction');
+  const cache = modelDir(jail(t));
+  const calls = [];
+  const lines = [];
+  assert.deepEqual(modelSetup(root, noNetSpawn(t, root, calls), { env: { MUNDER_MODEL_CACHE: cache }, log: (l) => lines.push(l) }).map((g) => g.id), ['model']);
+  assert.deepEqual(calls, [], 'never written through the link');
+  assert.deepEqual(fs.readdirSync(path.join(other, 'models')), ['native-memory-manifest.json'], 'the other tree is untouched');
+  assert.ok(lines.some((l) => /refusing to write .*resolves outside/.test(l)), lines.join(' | '));
+});
