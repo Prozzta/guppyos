@@ -447,6 +447,10 @@ export interface HarnessConfig {
   knowledgeGraph?: KnowledgeGraphConfig;
   /** Terminal theme, mirrored into each agent's per-session Claude settings. */
   terminalTheme?: 'light' | 'dark';
+  /** Renderer-only terminal output pattern colours. Default ON. */
+  terminalPatternColoring?: boolean;
+  /** The terminal font face picked in Settings; one of the renderer's bundled faces. */
+  terminalFont?: string;
   /** TV-show office themes feature flag (Settings picker + switch flow). Default OFF. */
   tvShowOffices?: boolean;
   /** Legacy global office theme: the fallback for a project with no entry in officeThemeByHive. */
@@ -1123,6 +1127,12 @@ const api = {
     const listener = (_e: IpcRendererEvent, file: ModelsCatalog) => cb(file);
     ipcRenderer.on('models:catalogChanged', listener);
     return () => ipcRenderer.removeListener('models:catalogChanged', listener);
+  },
+  /** TERM-FONT-SETTINGS-107: the terminal font was picked in Settings (in any window). */
+  onTerminalFontChanged: (cb: (face: string) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, face: string) => cb(face);
+    ipcRenderer.on('terminal:fontChanged', listener);
+    return () => ipcRenderer.removeListener('terminal:fontChanged', listener);
   },
   /** Settings hero payload — plan + sponsor, fetched from the repo and cached. */
   heroPayload: (force?: boolean): Promise<{ hero: HeroPayload; fetchedAt: number; stale: boolean; ref: string | null }> =>

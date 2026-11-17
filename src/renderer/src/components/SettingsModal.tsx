@@ -35,6 +35,7 @@ import { REALTIME_MODEL } from '@shared/realtimePricing';
 import { RealtimeDevicePicker } from '@/realtime/DevicePicker';
 import { CostHud } from '@/realtime/CostHud';
 import { useOrchestratorName } from '@/hooks/useOrchestratorName';
+import { TerminalSetting } from './TerminalSetting';
 
 export interface SettingsModalProps {
   config: HarnessConfig;
@@ -198,6 +199,7 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
     try { await window.cth.setNotifications(next); }
     catch { setNotifications(!next); /* revert on failure */ }
   };
+
 
   // ─── v0.3.4 redesign: settings that were onboarding-trapped or UI-less ────
   const cfgX = config as HarnessConfig & {
@@ -1050,6 +1052,11 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
                       {/* v1.1.45 unit #8 (C2.8): Capacity display, directly after Notifications,
                           in its own section with its own save lifecycle. */}
                       <CapacityDisplaySetting onOpenDetails={() => { if (openFirstCapacityDetail()) onClose(); }} />
+
+                      <div style={{ height: 1, background: 'var(--cth-ink-300)' }} />
+
+                      {/* TERM-FONT-SETTINGS-107: the terminal font, and the colours toggle under it. */}
+                      <TerminalSetting config={config} />
 
                       <div style={{ height: 1, background: 'var(--cth-ink-300)' }} />
 

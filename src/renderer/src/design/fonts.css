@@ -2,12 +2,18 @@
    font-display: block: the files are local, so the short block period never shows a
    fallback face that xterm could measure first.
 
-   Terminal: Martian Mono 1.1.0 (Standard width), SIL Open Font License 1.1:
-   assets/fonts/martian-mono/OFL.txt. Chosen in components/terminalFont.ts (TERMINAL_FONT_FACE);
-   xterm draws at 400 (fontWeight) and 700 (fontWeightBold).
+   Terminal: the user picks the face in Settings (components/TerminalSetting.tsx; the list is
+   TERMINAL_FONT_FACES in components/terminalFont.ts): JetBrains Mono (the default), Martian
+   Mono, Cascadia Mono or Atkinson Hyperlegible Mono. xterm draws at 400 (fontWeight) and
+   700 (fontWeightBold), so each terminal face needs both weights here.
+   Cascadia Mono 2407.24, SIL Open Font License 1.1: assets/fonts/cascadia-mono/OFL.txt.
+   Atkinson Hyperlegible Mono (googlefonts/atkinson-hyperlegible-next-mono), SIL Open Font
+   License 1.1: assets/fonts/atkinson-hyperlegible-mono/OFL.txt.
+   Martian Mono 1.1.0 (Standard width), SIL Open Font License 1.1:
+   assets/fonts/martian-mono/OFL.txt.
 
-   UI: JetBrains Mono 2.304, SIL Open Font License 1.1: assets/fonts/jetbrains-mono/OFL.txt.
-   Not the terminal's face any more; it stays for the UI's --cth-font-mono labels (tokens.css),
+   JetBrains Mono 2.304, SIL Open Font License 1.1: assets/fonts/jetbrains-mono/OFL.txt.
+   The terminal's default face, and the UI's --cth-font-mono labels (tokens.css),
    Monaco and ReleaseDrop, which Google Fonts served at 400/500/700 before 35bbbf72.
    600 (SemiBold) is bundled for the release drop's data: URIs (renderer/src/dropFonts.ts).
 
@@ -53,6 +59,34 @@
   font-weight: 700;
   font-display: block;
   src: url('../assets/fonts/jetbrains-mono/JetBrainsMono-Bold.woff2') format('woff2');
+}
+@font-face {
+  font-family: "Cascadia Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url('../assets/fonts/cascadia-mono/CascadiaMono-Regular.woff2') format('woff2');
+}
+@font-face {
+  font-family: "Cascadia Mono";
+  font-style: normal;
+  font-weight: 700;
+  font-display: block;
+  src: url('../assets/fonts/cascadia-mono/CascadiaMono-Bold.woff2') format('woff2');
+}
+@font-face {
+  font-family: "Atkinson Hyperlegible Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url('../assets/fonts/atkinson-hyperlegible-mono/AtkinsonHyperlegibleMono-Regular.woff2') format('woff2');
+}
+@font-face {
+  font-family: "Atkinson Hyperlegible Mono";
+  font-style: normal;
+  font-weight: 700;
+  font-display: block;
+  src: url('../assets/fonts/atkinson-hyperlegible-mono/AtkinsonHyperlegibleMono-Bold.woff2') format('woff2');
 }
 @font-face {
   font-family: "Inter";

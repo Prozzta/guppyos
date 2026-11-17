@@ -3,3 +3,5 @@
 src/renderer/src/assets/**/*.txt text eol=lf
 src/renderer/src/assets/fonts/**/*.woff2 binary
 src/renderer/src/assets/fonts/**/*.ttf binary
+# TERM-FONT-SETTINGS-107: the Cascadia Mono licence is CRLF upstream; keep those bytes (its pin is of the release file).
+src/renderer/src/assets/fonts/cascadia-mono/OFL.txt -text
