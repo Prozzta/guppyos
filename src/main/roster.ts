@@ -154,19 +154,13 @@ export class RosterStore {
     const p = rosterPath(home);
     try {
       mkdirSync(home, { recursive: true });
-      const existing = this.read();
-
-      const emptied = existing !== null && entryCount(existing) > 0 && entryCount(snap) === 0;
-      const teamDropped = existing !== null && workerCount(existing) > 0 && workerCount(snap) === 0;
-      if (!this.wrote && (emptied || teamDropped)) {
+      const refused = this.refusal(this.read(), snap);
+      if (refused) {
         // Back it up anyway: what is on disk right now is exactly what we are
         // protecting, and a copy of it costs nothing. `wrote` stays false: the
         // guard disarms only when a non-empty write lands, never on a refusal.
         this.backup(home, p, 'declined');
-        console.warn(emptied
-          ? '[roster] refused to overwrite a non-empty roster with an empty one'
-          : '[roster] refused to overwrite a roster that has workers with one that has none');
-        return { ok: false, skipped: 'empty-first-write' };
+        return refused;
       }
 
       this.backup(home, p, this.wrote ? 'write' : 'run-start');
@@ -193,6 +187,19 @@ export class RosterStore {
     }
   }
 
+  /** The first-write guard, one rule for `write` and `writeAsync`: null lets the write through. */
+  private refusal(existing: RosterSnapshot | null, snap: RosterSnapshot): RosterWriteResult | null {
+    const emptied = existing !== null && entryCount(existing) > 0 && entryCount(snap) === 0;
+    const teamDropped = existing !== null && workerCount(existing) > 0 && workerCount(snap) === 0;
+    if (!this.wrote && (emptied || teamDropped)) {
+      console.warn(emptied
+        ? '[roster] refused to overwrite a non-empty roster with an empty one'
+        : '[roster] refused to overwrite a roster that has workers with one that has none');
+      return { ok: false, skipped: 'empty-first-write' };
+    }
+    return null;
+  }
+
   /** Async IPC path: same guards and atomic temp+rename, without main-thread disk I/O. */
   writeAsync(snap: unknown): Promise<RosterWriteResult> {
     const run = this.asyncQueue.then(() => this.doWriteAsync(snap));
@@ -212,10 +219,8 @@ export class RosterStore {
       await mkdir(home, { recursive: true });
       let existing: RosterSnapshot | null = null;
       try { const parsed = JSON.parse(await readFile(p, 'utf8')); existing = isSnapshot(parsed) ? parsed : null; } catch { /* no usable prior roster */ }
-      if (!this.wrote && existing && entryCount(existing) > 0 && entryCount(snap) === 0) {
-        await this.backupAsync(home, p, 'declined');
-        return { ok: false, skipped: 'empty-first-write' };
-      }
+      const declined = this.refusal(existing, snap);
+      if (declined) { await this.backupAsync(home, p, 'declined'); return declined; }
       await this.backupAsync(home, p, this.wrote ? 'write' : 'run-start');
       const body: RosterSnapshot = { version: 1, savedAt: new Date().toISOString(), agents: snap.agents, archived: snap.archived, restorable: snap.restorable, queues: snap.queues && typeof snap.queues === 'object' ? snap.queues : {}, selectedId: typeof snap.selectedId === 'string' ? snap.selectedId : null };
       await writeFile(`${p}.tmp`, JSON.stringify(body, null, 2), 'utf8');

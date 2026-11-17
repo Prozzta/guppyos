@@ -1,7 +1,8 @@
 'use strict';
 
 // ROSTER-GUARD-GODONLY: the hand-mutant census of the roster empty-guard's worker rule
-// (src/main/roster.ts: isGodEntry, workerCount and the refusal in RosterStore.write). Each mutant
+// (src/main/roster.ts: isGodEntry, workerCount and the refusal shared by RosterStore.write and
+// writeAsync, the path the renderer's mirror write takes). Each mutant
 // damages ONE source line at a unique anchor and must make test/roster.test.cjs fail AT ITS OWN
 // NAMED TEST; a survivor, a kill elsewhere or a missing anchor fails the census.
 //   node test/tools/roster-guard-godonly-mutants.cjs
@@ -19,6 +20,7 @@ const WIPE = at('a god-only first write cannot wipe a team that is already on di
 const LISTS = at('the god-only guard counts restorable workers and ignores archived ones');
 const NO_TEAM = at('a god-only first write is fine when the file holds no workers');
 const GOD = at('god is told apart by its flag or by its id, and never counts as a worker');
+const ASYNC = at('writeAsync holds the first-write guard: a god-only or empty first write cannot wipe a team on disk');
 
 const IS_GOD = "return a.isGod === true || a.id === 'god';";
 const LISTED = 'return [...s.agents, ...s.restorable].filter(';
@@ -42,6 +44,11 @@ const MUTANTS = [
   ['R12 the refused write keeps no backup', DECLINED, '', WIPE],
   ['R13 the refusal is not reported as skipped', "return { ok: false, skipped: 'empty-first-write' };", 'return { ok: false };', WIPE],
   ['R14 the guard stays armed after a good write', GUARD, 'if (emptied || teamDropped) {', WIPE],
+  ['R15 the async path does not ask the guard', 'const declined = this.refusal(existing, snap);', 'const declined = null as RosterWriteResult | null;', ASYNC],
+  ['R16 the async path keeps only the empty rule', 'const declined = this.refusal(existing, snap);',
+    "const declined = !this.wrote && existing && entryCount(existing) > 0 && entryCount(snap) === 0 ? { ok: false, skipped: 'empty-first-write' } as RosterWriteResult : null;", ASYNC],
+  ['R17 the async refusal keeps no backup', "await this.backupAsync(home, p, 'declined');", '', ASYNC],
+  ['R18 the async refusal disarms the guard', "await this.backupAsync(home, p, 'declined');", "await this.backupAsync(home, p, 'declined'); this.wrote = true;", ASYNC],
 ];
 
 const run = () => runTests(ROOT, [TEST], { timeout: 300_000 });
