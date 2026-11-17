@@ -75,7 +75,7 @@ test('registry round trip rejects malformed rows and preserves owner/card/timest
 
 test('manager authenticates owner, refuses a common repo, and only reaps a registered idle jail', async () => {
   const base = path.join(jail, 'managed'); const hive = path.join(base, 'hive'); const work = path.join(base, '_work');
-  const jailRoot = path.join(work, 'jail-a'); const common = path.join(work, 'common-repo');
+  const jailRoot = path.join(work, 'dwight-jail-a'); const common = path.join(work, 'common-repo');
   fs.mkdirSync(jailRoot, { recursive: true }); fs.mkdirSync(path.join(common, '.git'), { recursive: true });
   let clock = 100;
   const manager = new scratch.ScratchDiskManager(() => hive, (card) => card === 'CARD-1', async () => [], undefined, () => clock);
@@ -122,11 +122,13 @@ test('jails that are bare/common git dirs or worktree gitdir targets are refused
   const base = path.join(jail, 'git-dir-refusal'); const hive = path.join(base, 'hive'); const work = path.join(base, '_work');
   const bare = path.join(work, 'bare'); fs.mkdirSync(path.join(bare, 'objects'), { recursive: true }); fs.mkdirSync(path.join(bare, 'refs'), { recursive: true }); fs.writeFileSync(path.join(bare, 'HEAD'), 'ref: refs/heads/main\n');
   assert.equal(scratch.scratchKind(bare), null);
-  const target = path.join(work, 'common'); fs.mkdirSync(target, { recursive: true });
-  const linked = path.join(work, 'linked'); fs.mkdirSync(linked, { recursive: true }); fs.writeFileSync(path.join(linked, '.git'), 'gitdir: ../common/worktrees/linked\n');
+  const target = path.join(work, 'dwight-common'); fs.mkdirSync(target, { recursive: true });
+  const linked = path.join(work, 'linked'); fs.mkdirSync(linked, { recursive: true }); fs.writeFileSync(path.join(linked, '.git'), 'gitdir: ../dwight-common/worktrees/linked\n');
   const manager = new scratch.ScratchDiskManager(() => hive, () => false, async () => []);
   assert.match(manager.register('dwight', bare, 'CARD-1').line, /common repository/);
   assert.match(manager.register('dwight', target, 'CARD-1').line, /referenced by a worktree gitdir/);
+  const foreign = path.join(work, 'jim-foreign'); fs.mkdirSync(foreign, { recursive: true });
+  assert.match(manager.register('dwight', foreign, 'CARD-1').line, /owner prefix/);
 });
 
 test('install key changes for patch inputs and is stable for unchanged project inputs', () => {
