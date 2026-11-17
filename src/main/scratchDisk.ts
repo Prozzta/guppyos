@@ -40,6 +40,7 @@ export interface ScratchFacts {
   inboundLinks: string[];
   cardDone: boolean;
   idle: boolean;
+  ignoredFiles?: number;
 }
 export interface ScratchPlan extends ScratchFacts { action: 'keep' | 'reap'; reason: string }
 
@@ -171,29 +172,33 @@ function under(child: string, parent: string): boolean {
   const r = relative(resolve(parent), resolve(child)); return r === '' || (!r.startsWith('..') && !isAbsolute(r));
 }
 
-/** Find junctions/symlinks in all worktree node_modules (including @scope entries) targeting `target`. */
+/**
+ * Find every link into `target` from the floor root, not just node_modules.
+ * Git's `.git` gitdir files are treated as incoming references too. Any
+ * unreadable location is reported as an unsafe reference so deletion fails
+ * closed rather than assuming the scan saw everything.
+ */
 export function inboundNodeModulesLinks(workRoot: string, target: string): string[] {
-  const out: string[] = []; const root = resolve(workRoot); const wanted = resolve(target);
-  let roots: string[] = [];
-  try { roots = readdirSync(root).map((n) => join(root, n)); } catch { return out; }
-  for (const tree of roots) {
-    if (!managedScratchPath(root, tree)) continue;
-    const nm = join(tree, 'node_modules');
-    if (!existsSync(nm)) continue;
-    const inspect = (p: string): void => {
-      if (!isLink(p)) return;
-      try { if (under(realpathSync(p), wanted)) out.push(p); } catch { /* dead links are reported by status, never made safe */ }
-    };
-    inspect(nm);
-    if (isLink(nm)) continue;
-    let entries: string[] = [];
-    try { entries = readdirSync(nm); } catch { continue; }
-    for (const entry of entries) {
-      const p = join(nm, entry); inspect(p);
-      if (!entry.startsWith('@') || isLink(p)) continue;
-      try { for (const child of readdirSync(p)) inspect(join(p, child)); } catch { /* unreadable means no destructive action elsewhere */ }
+  const out: string[] = []; const wanted = resolve(target); const floor = dirname(resolve(workRoot));
+  const visit = (p: string): void => {
+    let st; try { st = lstatSync(p); } catch { out.push(`unreadable:${p}`); return; }
+    if (st.isSymbolicLink()) {
+      try { if (under(realpathSync(p), wanted)) out.push(p); } catch { out.push(`broken-link:${p}`); }
+      return;
     }
-  }
+    if (st.isFile()) {
+      if (basename(p) !== '.git') return;
+      try {
+        const m = /^gitdir:\s*(.+)\s*$/im.exec(readFileSync(p, 'utf8'));
+        if (m && under(resolve(dirname(p), m[1]), wanted)) out.push(`gitdir:${p}`);
+      } catch { out.push(`unreadable:${p}`); }
+      return;
+    }
+    if (!st.isDirectory()) return;
+    let names: string[]; try { names = readdirSync(p); } catch { out.push(`unreadable:${p}`); return; }
+    for (const name of names) visit(join(p, name));
+  };
+  visit(floor);
   return out.sort();
 }
 
@@ -203,13 +208,14 @@ function git(path: string, args: string[]): string | null {
 }
 
 /** A worktree is acceptable only when its exact HEAD equals its origin tracking ref. */
-export function gitScratchFacts(path: string): Pick<ScratchFacts, 'dirty' | 'onOrigin'> {
+export function gitScratchFacts(path: string): Pick<ScratchFacts, 'dirty' | 'onOrigin' | 'ignoredFiles'> {
   // A stale local tracking ref is not evidence that deletion is safe.
-  if (git(path, ['fetch', '--quiet', 'origin']) === null) return { dirty: true, onOrigin: false };
+  if (git(path, ['fetch', '--quiet', 'origin']) === null) return { dirty: true, onOrigin: false, ignoredFiles: 0 };
   const status = git(path, ['status', '--porcelain=v1', '--untracked-files=all']);
+  const ignored = git(path, ['status', '--porcelain=v1', '--ignored']);
   const head = git(path, ['rev-parse', 'HEAD']);
   const upstream = git(path, ['rev-parse', '@{upstream}']);
-  return { dirty: status === null || status !== '', onOrigin: !!head && !!upstream && head === upstream };
+  return { dirty: status === null || status !== '', onOrigin: !!head && !!upstream && head === upstream, ignoredFiles: ignored?.split(/\r?\n/).filter((line) => line.startsWith('!! ')).length ?? 0 };
 }
 
 /** A `.git` directory is a shared repository and is never a disposable worktree. */
@@ -404,7 +410,7 @@ export class ScratchDiskManager {
       }
       const kind = scratchKind(record.path);
       if (!managedScratchPath(work, record.path) || kind !== record.kind) { result.kept.push({ path: record.path, owner: record.owner, reason: 'path-changed-or-missing' }); keptRecords.push(record); continue; }
-      const gitFacts = record.kind === 'worktree' ? gitScratchFacts(record.path) : { dirty: false, onOrigin: true };
+      const gitFacts = record.kind === 'worktree' ? gitScratchFacts(record.path) : { dirty: false, onOrigin: true, ignoredFiles: 0 };
       const facts: ScratchFacts = {
         path: record.path, ...gitFacts, live: processUses(record.path, rows),
         inboundLinks: inboundNodeModulesLinks(work, record.path), cardDone: this.cardDone(record.card), idle: this.now() - record.touchedAt >= SCRATCH_IDLE_MS
@@ -422,6 +428,7 @@ export class ScratchDiskManager {
       const finalFacts = { ...facts, inboundLinks: inboundNodeModulesLinks(work, record.path), live: processUses(record.path, await this.processes()) };
       const finalPlan = planScratchReap(finalFacts);
       if (finalPlan.action !== 'reap') { result.kept.push({ path: record.path, owner: record.owner, reason: finalPlan.reason }); keptRecords.push(record); continue; }
+      if (facts.ignoredFiles) this.notify(record.owner, record.card, record.path, `ignored-files-will-be-lost:${facts.ignoredFiles}`);
       try { removeScratchRoot(work, record.path); result.reaped.push(record.path); }
       catch { result.kept.push({ path: record.path, owner: record.owner, reason: 'remove-failed' }); keptRecords.push(record); }
     }
