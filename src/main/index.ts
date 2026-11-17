@@ -1837,7 +1837,8 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
           const what = row.kind === CLAIMS_ALERT_KEY_MISSING && typeof row.recovery === 'string'
             ? row.recovery
             : row.kind === CLAIMS_ALERT_KEY_MISSING
-            ? 'The claim ledger key is missing or cannot be decrypted: every claim ledger is read-only. Recovery is the Human rekey in Settings; nothing is fixed automatically.'
+            // CLAIMS-KEYMISSING-TEXT-108: no Settings button runs the rekey yet (claimsUi.ts), so name who does.
+            ? 'The claim ledger key is missing or cannot be decrypted: every claim ledger is read-only. Nothing is fixed automatically. Recovery is the Human rekey for each floor; there is no Settings button for it yet, so ask god to run it for this floor. The rekey writes one rekey line on each ledger; records before that line are accepted on their prev chain only.'
             : `${String(row.agentId)}'s claim ledger failed verification (${String(row.reason)} at ${String(row.brokenAt)}) and is read-only. Nothing was repaired; the Human decides.`;
           hive.send({ to: 'god', act: 'inform', wake: 'now', subject: `Claim ledger alert: ${String(row.kind)}`, body: `${what}\nFor god and the Human.` }, 'claims');
         },
