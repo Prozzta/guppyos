@@ -424,6 +424,8 @@ export class ClaimStore {
   private keyReg: { root: string; writer: KeyRegistryWriter } | null = null;
   private readonly queues = new Map<string, Promise<unknown>>();
   private readonly alerted = new Set<string>();
+  /** Paths whose failure was already logged this session (logOnce). */
+  private readonly loggedOnce = new Set<string>();
   private keyMissing = false;
   /** One open append handle per agent, on its newest segment: a close per append costs ~7 ms on
    *  Windows (an antivirus scan). Closed on a failure, a new month, a restore, close(), and after
@@ -502,6 +504,19 @@ export class ClaimStore {
 
   private log(row: Record<string, unknown>): void {
     try { this.d.log?.(row); } catch { /* best effort */ }
+  }
+
+  /**
+   * Log a failure once per path per session. For the clean-ups that run on every ledger read or
+   * append and fail closed when an agent keeps a link in the way (finishPurgeSwap, backupIfDue):
+   * refusing is right, a log row on every pass is not. The row says `once: true`, so a reader
+   * knows later failures on that path were not logged.
+   */
+  private logOnce(path: string, row: Record<string, unknown>): void {
+    const key = `${String(row.kind)}:${path}`;
+    if (this.loggedOnce.has(key)) return;
+    this.loggedOnce.add(key);
+    this.log({ ...row, once: true });
   }
 
   /** CLAIMS-REKEY-SHARED-KEY: the shared key file exists but does not decrypt; it is left as is. */
@@ -2038,7 +2053,7 @@ export class ClaimStore {
       else if (hasDir && hasFresh) { removePathLinkSafeSync(fresh); this.log({ kind: 'claims-purge-dropped', agentId }); }
       if (nodeFs.existsSync(dir) && hasOld) removePathLinkSafeSync(old);
     } catch (e) {
-      this.log({ kind: 'claims-purge-failed', agentId, step: 'finish', error: String(e).slice(0, 160) });
+      this.logOnce(dir, { kind: 'claims-purge-failed', agentId, step: 'finish', error: String(e).slice(0, 160) });
     }
   }
 
@@ -2069,7 +2084,7 @@ export class ClaimStore {
       this.log({ kind: 'claims-backup', agentId, day });
       return dir;
     } catch (e) {
-      this.log({ kind: 'claims-backup-failed', agentId, day, error: String(e).slice(0, 160) });
+      this.logOnce(dir, { kind: 'claims-backup-failed', agentId, day, error: String(e).slice(0, 160) });
       return null;
     }
   }

@@ -5,7 +5,7 @@
  * at go too. This is the one call for a caller that has a path and does not know what it is:
  *   missing                nothing to do
  *   a junction or symlink  the link entry is removed, its target is left alone
- *   a real directory       links under it are removed as links first, then the tree
+ *   a real directory       walked bottom-up; a link in it is removed as a link, never followed
  *   a file                 removed
  * The link handling is fsSafeRemove's; nothing here walks a tree itself.
  *
@@ -15,7 +15,7 @@
  * Do not shorten either one to a bare recursive rm. Measured on Electron 45.3.0 and pinned in
  * test/electron-rmsync-link-safe.test.cjs (RUNTIME PIN): rmSync on a junction empties its target;
  * fs.promises.rm on a junction removed the link only. That second result is one runtime version
- * and one shape, not a contract, so the async path takes the same link pass first.
+ * and one shape, not a contract, so the async path takes the same walk.
  *
  * Not covered: a Windows volume mount point (a junction to \??\Volume{...}) is reported by
  * lstat as a directory, not a link, so it is walked like a real folder.
