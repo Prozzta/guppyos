@@ -24,6 +24,9 @@
 /* uv.h first: it pulls in winsock2.h, which must precede windows.h. */
 #include <uv.h>
 #include <windows.h>
+#include <stdlib.h>
+#include <string.h>
+#include <wchar.h>
 #elif defined(__APPLE__)
 #include <fcntl.h>
 #include <errno.h>
@@ -246,6 +249,80 @@ static napi_value proc_close(napi_env env, napi_callback_info info) {
   return NULL;
 }
 
+/*
+ * REGISTRY-RENAME-EPERM-107: posixRename(src, dst) replaces dst even while another handle has it
+ * open. A plain MoveFileEx over a file that a reader holds fails with ERROR_ACCESS_DENIED (EPERM):
+ * Node's async fs.readFile keeps registry.json open across several main-thread turns, so a sync
+ * writer on that thread could never publish. FileRenameInfoEx with POSIX_SEMANTICS (Windows 10
+ * 1607+) unlinks the old file's name at once and the reader keeps reading the old, whole bytes;
+ * libuv opens with FILE_SHARE_DELETE, so the open reader does not block it. Any failure throws an
+ * Error whose `errno` is the Win32 error code, and the caller falls back to its old rename.
+ */
+typedef struct {
+  DWORD Flags;
+  HANDLE RootDirectory;
+  DWORD FileNameLength;
+  WCHAR FileName[1];
+} guppy_rename_info_ex;
+#define GUPPY_FILE_RENAME_INFO_EX 22 /* FileRenameInfoEx */
+#define GUPPY_RENAME_REPLACE_IF_EXISTS 0x1
+#define GUPPY_RENAME_POSIX_SEMANTICS 0x2
+
+static WCHAR *utf16_arg(napi_env env, napi_value v) {
+  size_t n = 0;
+  if (napi_get_value_string_utf16(env, v, NULL, 0, &n) != napi_ok || n == 0) return NULL;
+  WCHAR *s = (WCHAR *)calloc(n + 1, sizeof(WCHAR));
+  if (!s) return NULL;
+  if (napi_get_value_string_utf16(env, v, (char16_t *)s, n + 1, &n) != napi_ok) { free(s); return NULL; }
+  return s;
+}
+
+static napi_value throw_win32(napi_env env, const char *msg, DWORD code) {
+  napi_value text, err, num;
+  if (napi_create_string_utf8(env, msg, NAPI_AUTO_LENGTH, &text) == napi_ok &&
+      napi_create_error(env, NULL, text, &err) == napi_ok &&
+      napi_create_uint32(env, code, &num) == napi_ok &&
+      napi_set_named_property(env, err, "errno", num) == napi_ok) {
+    napi_throw(env, err);
+  } else {
+    napi_throw_error(env, NULL, msg);
+  }
+  return NULL;
+}
+
+static napi_value posix_rename(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value argv[2];
+  if (napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok || argc < 2) {
+    return fail(env, "posixRename(src, dst): both paths required");
+  }
+  WCHAR *src = utf16_arg(env, argv[0]);
+  WCHAR *dst = utf16_arg(env, argv[1]);
+  if (!src || !dst) { free(src); free(dst); return fail(env, "posixRename(src, dst): paths must be non-empty strings"); }
+  size_t dlen = wcslen(dst);
+  size_t size = sizeof(guppy_rename_info_ex) + dlen * sizeof(WCHAR);
+  guppy_rename_info_ex *ri = (guppy_rename_info_ex *)calloc(1, size);
+  if (!ri) { free(src); free(dst); return fail(env, "posixRename: out of memory"); }
+  ri->Flags = GUPPY_RENAME_REPLACE_IF_EXISTS | GUPPY_RENAME_POSIX_SEMANTICS;
+  ri->RootDirectory = NULL;
+  ri->FileNameLength = (DWORD)(dlen * sizeof(WCHAR));
+  memcpy(ri->FileName, dst, dlen * sizeof(WCHAR));
+  HANDLE h = CreateFileW(src, DELETE | SYNCHRONIZE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                         NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+  DWORD code = 0;
+  BOOL ok = FALSE;
+  if (h == INVALID_HANDLE_VALUE) {
+    code = GetLastError();
+  } else {
+    ok = SetFileInformationByHandle(h, (FILE_INFO_BY_HANDLE_CLASS)GUPPY_FILE_RENAME_INFO_EX, ri, (DWORD)size);
+    if (!ok) code = GetLastError();
+    CloseHandle(h);
+  }
+  free(ri); free(src); free(dst);
+  if (!ok) return throw_win32(env, h == INVALID_HANDLE_VALUE ? "posixRename: the source could not be opened" : "posixRename: SetFileInformationByHandle(FileRenameInfoEx) failed", code);
+  return NULL;
+}
+
 static int export_fn(napi_env env, napi_value exports, const char *name, napi_callback cb) {
   napi_value fn;
   return napi_create_function(env, name, NAPI_AUTO_LENGTH, cb, NULL, &fn) == napi_ok &&
@@ -259,7 +336,8 @@ NAPI_MODULE_INIT() {
   if (napi_set_named_property(env, exports, "finalPath", fn) != napi_ok) return NULL;
 #ifdef _WIN32
   if (!export_fn(env, exports, "procOpen", proc_open) || !export_fn(env, exports, "procAlive", proc_alive) ||
-      !export_fn(env, exports, "procClose", proc_close) || !export_fn(env, exports, "procAdopt", proc_adopt)) {
+      !export_fn(env, exports, "procClose", proc_close) || !export_fn(env, exports, "procAdopt", proc_adopt) ||
+      !export_fn(env, exports, "posixRename", posix_rename)) {
     return NULL;
   }
 #endif

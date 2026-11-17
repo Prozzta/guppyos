@@ -27,7 +27,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { HUMAN_RELAY_RE } from '../shared/mailWakeClass';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync } from 'node:fs';
-import { readFile as readFileAsync, readdir as readdirAsync, stat as statAsync } from 'node:fs/promises';
+import { mkdir as mkdirAsync, readFile as readFileAsync, readdir as readdirAsync, stat as statAsync } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { atomicWriteJson, renameWithRetry } from './atomicJson';
 import { fileWriteBehindOn, noteSyncWrite, overtakenText, writeFileBehind, writeInFlight } from './writeBehind';
@@ -259,6 +259,57 @@ const MESSAGE_FILE_MAX_BYTES = 1024 * 1024;
 
 export function emptyLedger(agentId: string): MailLedgerDoc {
   return { version: MAIL_LEDGER_VERSION, agentId, nextSeq: 1, lastActivityAt: null, lastActedAt: null, entries: {} };
+}
+
+/** LAG-ROUTE-WRITES-108: each entry's text in the ledger file, indented as it sits under "entries".
+ *  An entry is never changed in place (a transition puts a new object), so its text is kept with it. */
+const entryText = new WeakMap<object, string>();
+
+/**
+ * LAG-ROUTE-WRITES-108: `JSON.stringify(doc, null, 2)` byte for byte, as pieces of about `size` chars,
+ * made one at a time as they are asked for. The write-behind save writes them one per turn, so a 3.5 MB
+ * ledger never holds the main thread for a whole stringify and encode. An entry's text is made once and
+ * reused by every later save. `doc` must not change while the pieces are read: a published ledger never
+ * does (every transition builds a new document).
+ */
+export function* ledgerTextChunks(doc: MailLedgerDoc, size = 64 * 1024): Generator<string, void, undefined> {
+  const entries = doc.entries as unknown;
+  if (!entries || typeof entries !== 'object' || Array.isArray(entries) || typeof (entries as { toJSON?: unknown }).toJSON === 'function' || typeof (doc as { toJSON?: unknown }).toJSON === 'function') {
+    yield JSON.stringify(doc, null, 2);
+    return;
+  }
+  let buf = '';
+  let firstKey = true;
+  for (const key of Object.keys(doc)) {
+    const value = (doc as unknown as Record<string, unknown>)[key];
+    if (key !== 'entries') {
+      const s = JSON.stringify(value, null, 2) as string | undefined;
+      if (s === undefined) continue;
+      buf += `${firstKey ? '{\n  ' : ',\n  '}${JSON.stringify(key)}: ${s.replace(/\n/g, '\n  ')}`;
+      firstKey = false;
+      continue;
+    }
+    buf += `${firstKey ? '{\n  ' : ',\n  '}"entries": `;
+    firstKey = false;
+    let firstEntry = true;
+    const map = entries as Record<string, unknown>;
+    for (const id of Object.keys(map)) {
+      const e = map[id];
+      let s: string | undefined = e !== null && typeof e === 'object' ? entryText.get(e) : undefined;
+      if (s === undefined) {
+        s = JSON.stringify(e, null, 2) as string | undefined;
+        if (s === undefined) continue;
+        s = s.replace(/\n/g, '\n    ');
+        if (e !== null && typeof e === 'object') entryText.set(e, s);
+      }
+      buf += `${firstEntry ? '{\n    ' : ',\n    '}${JSON.stringify(id)}: ${s}`;
+      firstEntry = false;
+      if (buf.length >= size) { yield buf; buf = ''; }
+    }
+    buf += firstEntry ? '{}' : '\n  }';
+  }
+  buf += firstKey ? '{}' : '\n}';
+  yield buf;
 }
 
 // ————————————————————————————————————————————————————————————————— pure transitions
@@ -1765,41 +1816,54 @@ export class MailLedger {
     }, wait);
   }
 
-  /** The root whose state/mail directory flushBehind has made. */
-  private mailDirFor: string | null = null;
-
   /**
    * LAG-SYNC-WRITES-107: the coalesce timer's save, off the main thread (tmp + rename, as flushState).
    * The ledger in memory stays the truth, so nothing reads the file meanwhile. One save per ledger at a
    * time; a change made during it keeps the ledger dirty and the timer is armed again when it ends. A
    * synchronous flush during it (quit, dispose, flush()) wins: the save gives way. The `.done` renames
    * run after the save, for the ids it recorded.
+   * LAG-ROUTE-WRITES-108: main only prunes and takes the snapshot. The hive check and the state/mail
+   * mkdir run inside the flight (async; neither mkdir can create the hive root), and the text is
+   * written in pieces (ledgerTextChunks), one per turn, byte for byte the flushState text.
    */
   private flushBehind(st: AgentLedger): void {
     if (st.flying) return;
     if (!st.dirty || writeInFlight(st.file)) { this.flushState(st); return; }
     st.doc = applyPrune(st.doc, this.now()).doc;
     const root = this.rootDir();
-    // A hive removed under us (tests, reset): never re-create it from a timer.
-    if (!root || !existsSync(root) || !st.file.startsWith(root)) { st.dirty = false; return; }
+    if (!root || !st.file.startsWith(root)) { st.dirty = false; return; }
     const failed = (error: unknown): void => {
       if (!st.writeFailLogged) this.log({ kind: 'mail-ledger-write-failed', agentId: st.agentId, error: String(error) });
       st.writeFailLogged = true;
       st.lastWriteAt = this.now();
-      this.mailDirFor = null;
       this.markDirty(st);
     };
-    let text: string;
-    try {
-      if (this.mailDirFor !== root) { mkdirSync(join(root, 'state', 'mail'), { recursive: true }); this.mailDirFor = root; }
-      text = JSON.stringify(st.doc, null, 2);
-    } catch (error) { failed(error); return; }
+    const doc = st.doc;
     const rev = st.rev;
     const acted = new Set(st.archive);
+    // A hive removed under us (tests, reset): never re-create it from a timer. mkdir without
+    // `recursive` fails ENOENT when the root is gone, and never makes it.
+    let gone = false;
+    const before = async (): Promise<boolean> => {
+      for (const dir of [join(root, 'state'), join(root, 'state', 'mail')]) {
+        try { await mkdirAsync(dir); } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          if (code === 'EEXIST') continue;
+          if (code === 'ENOENT') { gone = true; return false; }
+          throw error;
+        }
+      }
+      return true;
+    };
     st.flying = true;
-    writeFileBehind(st.file, text).then((result) => {
+    writeFileBehind(st.file, ledgerTextChunks(doc), undefined, before).then((result) => {
       st.flying = false;
       if (this.ledgers.get(st.file) !== st) return;   // disposed: its flush was the last word
+      if (gone && result === 'withdrawn') {
+        if (st.rev === rev) st.dirty = false;
+        else this.arm(st);
+        return;
+      }
       if (result === 'published') {
         st.lastWriteAt = this.now();
         st.writeFailLogged = false;

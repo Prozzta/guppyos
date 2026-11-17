@@ -95,7 +95,7 @@ test('#6: fleetMailFields: awaitingReply (acted, requires_reply, not replied) an
   assert.equal(typeof f.openRequests[0].ageSec, 'number');
   // A reply closes it (router: in_reply_to from the recipient).
   fs.writeFileSync(path.join(hive.root(), 'agents', 'andy-1', 'outbox', 'r.json'), JSON.stringify({ to: 'god', act: 'inform', subject: 'Z built', in_reply_to: r.id }));
-  hive.routeOnce();
+  await hive.routeOnce();
   f = R.fleetMailFields(hive.mail, 'andy-1');
   assert.deepEqual(f.openRequests, []);
   assert.deepEqual(f.awaitingReply.map((o) => o.id), [q.id]);
@@ -243,7 +243,7 @@ test('#5 (L2): "unread" is the sender\'s LEDGER: a cancel already SURFACED into 
   hive.mail.confirmSurfaced('andy-1', [cancel.id], 'turn-1', 'evidence');
   assert.ok(fs.existsSync(dir('andy-1', 'inbox', `${cancel.id}.json`)), 'still in inbox/ (acted only at Stop)');
   fs.writeFileSync(dir('andy-1', 'outbox', 'r1.json'), JSON.stringify({ to: 'god', act: 'inform', subject: 'X anyway', in_reply_to: ask.id }));
-  hive.routeOnce();
+  await hive.routeOnce();
   const got = hive.inbox('god-1').find((m) => m.in_reply_to === ask.id);
   assert.equal(got.superseded_by, undefined, 'the reply was sent knowingly');
   assert.equal(got.subject, 'X anyway');
@@ -256,7 +256,7 @@ test('#5 (L2): a cancel still DELIVERED in the ledger flags the reply; the route
   // Corrupt the file body: the ledger alone carries id/from/subject/supersedes.
   fs.writeFileSync(dir('andy-1', 'inbox', `${cancel.id}.json`), '{ not json');
   fs.writeFileSync(dir('andy-1', 'outbox', 'r2.json'), JSON.stringify({ to: 'god', act: 'inform', subject: 'X done', in_reply_to: ask.id }));
-  hive.routeOnce();
+  await hive.routeOnce();
   const got = hive.inbox('god-1').find((m) => m.in_reply_to === ask.id);
   assert.equal(got.superseded_by, cancel.id);
   assert.match(got.subject, /^\[superseded by .* \(god-1: cancel X\): sent before andy-1 read it\] X done$/);

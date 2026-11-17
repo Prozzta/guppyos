@@ -185,7 +185,7 @@ test('an outbox file with a traversal id is routed safely by routeOnce', async (
   const { hive, root, files } = await floor(t);
   const outbox = path.join(root, 'agents', 'god-1', 'outbox');
   fs.writeFileSync(path.join(outbox, 'm.json'), JSON.stringify({ id: '..\\..\\..\\pwn', to: 'jim-1', subject: 's', body: 'b' }));
-  assert.equal(hive.routeOnce(), 1);
+  assert.equal(await hive.routeOnce(), 1);
   const [m] = hive.inbox('jim-1');
   assert.equal(m.sender_id, '..\\..\\..\\pwn');
   assert.equal(files('jim-1').length, 1);

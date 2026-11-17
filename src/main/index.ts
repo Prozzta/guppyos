@@ -9087,8 +9087,9 @@ function onSystemResume(reason: string): void {
   try {
     hive.stopRouter();
     hive.startRouter();
-    const drained = hive.routeOnce();
-    if (drained > 0) console.log(`[power] ${reason} — flushed ${drained} queued hive message(s)`);
+    void hive.routeOnce().then((drained) => {
+      if (drained > 0) console.log(`[power] ${reason} — flushed ${drained} queued hive message(s)`);
+    }).catch((e) => console.error('[power] router drain on resume', e));
   } catch (e) { console.error('[power] router re-arm on resume', e); }
   try { syncKeepAwake(); } catch (e) { console.error('[power] syncKeepAwake on resume', e); }
   const awayMs = lastSuspendAt != null ? Date.now() - lastSuspendAt : null;

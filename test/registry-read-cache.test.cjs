@@ -17,6 +17,7 @@ const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
 
 const { HiveManager } = loadTs('src/main/hive.ts');
+const AJ = loadTs('src/main/atomicJson.ts');
 const WINDOW = HiveManager.AUTHORITY_REVALIDATE_MS;
 const agent = (id, extra = {}) => ({ id, name: id, role: 'worker', status: 'idle', lastSeen: 1, capabilities: ['a'], ...extra });
 
@@ -64,7 +65,9 @@ test('production missed-watch fallback invalidates registry asynchronously', asy
   const { hive, handEdit } = floor(t); hive.__resetAuthorityCacheForTests(undefined, () => Date.now() + 60_000);
   assert.ok(hive.registry().agents.a1);
   hive.__dropAuthorityWatchersForTests();
-  handEdit({ godId: null, agents: { a2: agent('a2') } });
+  // A different size: the fixture's +60 s wall marks every key proven, so a same-size in-place
+  // edit inside the first write's timestamp tick keeps the key and is rightly unseen (racy rule).
+  handEdit({ godId: null, agents: { a2: agent('a2'), a3: agent('a3') } });
   await hive.__revalidateAuthoritiesForTests();
   assert.ok(hive.registry().agents.a2);
 });
@@ -88,7 +91,10 @@ test('an external edit is invisible inside the window and picked up by the slow 
   assert.equal(WINDOW, 5_000, 'the async missed-watch backstop is bounded to five seconds');
   const { hive, file, handEdit } = floor(t);
   assert.equal(hive.registry().godId, null);
-  handEdit({ godId: 'g1', agents: { g1: agent('g1') } });
+  // A different size: the fixture's +60 s wall marks every key proven, so a same-size in-place
+  // edit ('g1' and null are both 4 chars) inside the first write's timestamp tick keeps the key and
+  // is rightly unseen (the racy rule is defeated here, not broken); about 1 run in 10 on idle NTFS.
+  handEdit({ godId: 'g1', agents: { g1: agent('g1'), g2: agent('g2') } });
   tick(WINDOW - 1);
   assert.equal(hive.registry().godId, null, 'inside the window (no event loop turn, so no watcher yet)');
   tick(1);
@@ -302,6 +308,10 @@ test('an unreadable registry still throws, and is not cached', (t) => {
 test('a failed write drops the cache: the next read goes to disk and returns what is there', (t) => {
   const { hive, file } = floor(t);
   hive.registry();
+  // REGISTRY-RENAME-EPERM-107: renameWithRetry tries the POSIX rename first, which never calls
+  // fs.renameSync; the injected rename fault below is for the plain-rename path, so turn POSIX off.
+  AJ.__setRenameAddonForTest(null);
+  t.after(() => AJ.__setRenameAddonForTest(undefined));
   const { renameSync } = fs;
   fs.renameSync = () => { const e = new Error('denied'); e.code = 'EACCES'; throw e; };
   try { assert.equal(hive.setAgentHold('a1', true).ok, false); } finally { fs.renameSync = renameSync; }

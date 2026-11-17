@@ -88,8 +88,11 @@ function supersede(tmp: string, p: string, text: string): void {
  *   withdrawn: the guard said no; nothing was written.
  *   overtaken: a synchronous writer wrote meanwhile, and its text is the file.
  * Rejects when the write failed and no synchronous writer took over.
+ * LAG-ROUTE-WRITES-108: `text` may be an iterable of pieces, written one per turn (atomicWriteTextAsync).
+ * `before` runs inside the flight, before the tmp is written (so a synchronous writer that comes during
+ * it still wins); false withdraws with nothing written.
  */
-export function writeFileBehind(p: string, text: string, guard?: () => boolean): Promise<WriteBehindResult> {
+export function writeFileBehind(p: string, text: string | Iterable<string>, guard?: () => boolean, before?: () => Promise<boolean>): Promise<WriteBehindResult> {
   const k = keyOf(p);
   if (flights.has(k)) return Promise.reject(new Error(`write-behind: ${basename(p)} is already being written`));
   const f: Flight = { redo: null, done: Promise.resolve(), renaming: false, tmp: null };
@@ -98,7 +101,8 @@ export function writeFileBehind(p: string, text: string, guard?: () => boolean):
     let landed = false;
     let failure: { error: unknown } | null = null;
     const commit = (): boolean => { f.renaming = !closed && f.redo === null && (!guard || guard()); return f.renaming; };
-    try { landed = await atomicWriteTextAsync(p, text, commit, (tmp) => { f.tmp = tmp; }); }
+    // A synchronous writer that came during `before` has the last word already: write nothing.
+    try { landed = (!before || await before()) && f.redo === null && await atomicWriteTextAsync(p, text, commit, (tmp) => { f.tmp = tmp; }); }
     catch (error) { failure = { error }; }
     f.renaming = false;
     try {
