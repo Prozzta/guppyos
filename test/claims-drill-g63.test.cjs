@@ -15,6 +15,8 @@ require('./tools/own-job.cjs');
  * must survive the old rollover.
  *
  * THIS GATE FAILS, NEVER SKIPS (F7): no runner, no Electron, no model or no 1.1.83 tree is a failure.
+ * The tree is the fixture test/tools/drill-tree-183.cjs builds and verifies (DRILL-TREE-SELF-BUILD-108):
+ * absent, it is built here first; unbuildable or unverified, the first test fails with the reason.
  *
  * Data: an invented corpus by default (three agents; the largest is about 400 KB, like the largest
  * real agent). For the gate run on the bed snapshot, set CLAIMS_DRILL_SOURCE to a folder of agent
@@ -35,7 +37,7 @@ const G = loadTs(path.join(ROOT, 'src', 'main', 'claims', 'generated.ts'));
 const V = loadTs(path.join(ROOT, 'src', 'main', 'claims', 'views.ts'));
 const RUNNER = path.join(ROOT, 'test', 'claims-drill', 'runner.cjs');
 const SCRIPT = path.join(ROOT, 'test', 'claims-drill', 'g63-downgrade.cjs');
-const TREE_183 = process.env.CLAIMS_DRILL_TREE_183 || 'C:/Dunder/_work/drill-trees/v1.1.83';
+const { drillTree } = require('./tools/drill-tree-183.cjs');
 const ABSENT = ['zq9absent4x1', 'zq9absent4x2'];
 
 const LESSONS = ['- an invented standing lesson about checking the lock first', '- an invented standing lesson about base branches'];
@@ -144,7 +146,7 @@ function baseline(src) {
     fs.mkdirSync(path.join(base, 'hive', 'agents'), { recursive: true });
     fs.cpSync(src, path.join(base, 'hive', 'agents'), { recursive: true });
     const { runDrill } = require(RUNNER);
-    const r = await runDrill({ tree: TREE_183, hive: path.join(base, 'hive'), home: path.join(base, 'home'), script: SCRIPT, out: path.join(base, 'result.json'), args: { checklist: cand.checklist, lessons: {}, absent: [] } });
+    const r = await runDrill({ tree: drillTree(), hive: path.join(base, 'hive'), home: path.join(base, 'home'), script: SCRIPT, out: path.join(base, 'result.json'), args: { checklist: cand.checklist, lessons: {}, absent: [] } });
     if (!r.ok) return { error: `the baseline drill failed: ${r.reason}` };
     const missed = new Set(r.missing.map((m) => m.query));
     const checklist = [];
@@ -194,10 +196,14 @@ function sandbox(scenario, real = null) {
   return { base, hive, home, checklist, lessons };
 }
 
+test('the 1.1.83 tree is there and verified (built now if it was absent); a failure here is the reason for the ones below', { timeout: 30 * 60_000 }, () => {
+  assert.ok(fs.existsSync(path.join(drillTree(), 'package.json')));
+});
+
 for (const scenario of ['planned', 'unplanned']) {
   test(`G6.3 ${scenario} downgrade to 1.1.83: the old build's own search finds 100% of the checklist`, async (t) => {
     assert.ok(fs.existsSync(RUNNER), `the Electron-as-Node runner is missing (${RUNNER}; W3/C4, Andy). This gate fails until it exists; it never skips.`);
-    assert.ok(fs.existsSync(path.join(TREE_183, 'node_modules')), `the 1.1.83 tree is not ready: ${TREE_183}`);
+    const TREE_183 = drillTree();
     const { runDrill } = require(RUNNER);
     const src = process.env.CLAIMS_DRILL_SOURCE;
     let real = null;
