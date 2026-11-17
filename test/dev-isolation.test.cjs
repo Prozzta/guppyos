@@ -53,6 +53,20 @@ test('G2 updater and G4 login-item IPC explicitly refuse under DEV_ISOLATION', (
   assert.match(loginItem, /if \(DEV_ISOLATION\) return false;[\s\S]{0,300}app\.setLoginItemSettings/);
 });
 
+test('E45-EXIT-STARTUP-SHAPES-108: the live isolation refusal exits 97 one loop turn after the whenReady callback', () => {
+  // Electron 45 can crash on an app.exit() made synchronously inside a startup callback
+  // (fault on ThreadPoolSingleThreadForegroundBlocking). The refusal must defer the exit
+  // with setImmediate, keep the exact code 97, and return without running the bootstrap.
+  const index = fs.readFileSync(path.resolve(__dirname, '../src/main/index.ts'), 'utf8').replace(/\r\n/g, '\n');
+  const at = index.indexOf("const violations = checkIsolation(live, devStableForbidden);");
+  assert.ok(at > 0, 'live isolation check not found');
+  const block = index.slice(at, index.indexOf('\n    }\n', at));
+  assert.match(block, /allowQuit = true;[\s\S]{0,400}\n\s*setImmediate\(\(\) => app\.exit\(97\)\);\n\s*return;$/);
+  const calls = index.match(/app\.exit\(97\)/g) || [];
+  assert.equal(calls.length, 1, 'exactly one app.exit(97) in index.ts');
+  assert.doesNotMatch(index, /^\s*app\.exit\(97\);/m, 'a direct app.exit(97) statement');
+});
+
 test('devDataRoot is FIXED on win32 and ignores the environment (no MUNDER_DEV_DATA override)', () => {
   assert.equal(iso.devDataRoot(WIN), 'C:\\Dunder\\MunderDevData');
   const saved = process.env.MUNDER_DEV_DATA;

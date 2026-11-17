@@ -9167,7 +9167,10 @@ app.whenReady().then(() => {
       console.error('[dev-isolation] ' + msg);
       if (!DEV_HIDDEN) { try { dialog.showErrorBox('Guppy DEV — isolation guard', msg); } catch { /* headless */ } }
       allowQuit = true;
-      app.exit(97);
+      // E45-EXIT-STARTUP-SHAPES-108: exit one loop turn later, never inside this whenReady
+      // callback. Electron 45 can crash tearing down from inside a startup callback while
+      // Chromium startup work is still on its thread pool; the code stays exactly 97.
+      setImmediate(() => app.exit(97));
       return;
     }
     console.warn(`[dev-isolation] live check OK — hive=${live.hiveRoot} palace=${live.palace} pipe=${live.pipeName}`);

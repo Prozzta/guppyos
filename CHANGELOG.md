@@ -8,6 +8,13 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **A DEV build that refuses to start (exit 97) no longer crashes on the way out.** When the live
+  isolation check found DEV paths overlapping Stable, Guppy called `app.exit(97)` inside its
+  whenReady startup callback. Electron 45 can crash tearing down from inside a startup callback
+  (0xC0000005; 1 in 3000 runs of the same shape on a loaded machine). The exit now runs one loop
+  turn later, with the same code 97 (0 in 3000). The single-instance refusal (exit 96) runs before
+  ready and was measured clean (0 in 3000), so it is unchanged.
+
 - **The Electron native-module check no longer crashes now and then as it exits.** The test that
   loads every native module under Electron 45 ended with `app.exit()` the moment the app was
   ready. About once in a thousand runs on a busy machine, Electron then crashed in its own
