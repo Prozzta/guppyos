@@ -381,12 +381,19 @@ static void rename_execute(napi_env env, void *data) {
   job->ok = rename_by_handle(job->src, job->ri, job->size, &job->code, &job->opened);
 }
 
-/* Back on the main thread: settle the promise. */
+/* A value that needs no allocation, for settling when the proper one cannot be made. */
+static int plain_value(napi_env env, napi_value *v) {
+  return napi_get_undefined(env, v) == napi_ok || napi_get_null(env, v) == napi_ok ||
+         napi_get_boolean(env, false, v) == napi_ok;
+}
+
+/* Back on the main thread: settle the promise. It is always settled: an awaiting write must end.
+   If the Error cannot be created (out of memory), the rejection carries a plain value instead. */
 static void rename_complete(napi_env env, napi_status status, void *data) {
   rename_job *job = (rename_job *)data;
   napi_value v;
   if (status == napi_ok && job->ok) {
-    if (napi_get_undefined(env, &v) == napi_ok) napi_resolve_deferred(env, job->deferred, v);
+    if (plain_value(env, &v)) napi_resolve_deferred(env, job->deferred, v);
   } else {
     const char *msg = status == napi_ok ? rename_msg(job->opened) : "posixRenameAsync: the rename was cancelled";
     DWORD code = status == napi_ok ? job->code : ERROR_OPERATION_ABORTED;
@@ -394,6 +401,8 @@ static void rename_complete(napi_env env, napi_status status, void *data) {
     if (napi_create_string_utf8(env, msg, NAPI_AUTO_LENGTH, &text) == napi_ok &&
         napi_create_error(env, NULL, text, &v) == napi_ok) {
       if (napi_create_uint32(env, code, &num) == napi_ok) napi_set_named_property(env, v, "errno", num);
+      napi_reject_deferred(env, job->deferred, v);
+    } else if (plain_value(env, &v)) {
       napi_reject_deferred(env, job->deferred, v);
     }
   }

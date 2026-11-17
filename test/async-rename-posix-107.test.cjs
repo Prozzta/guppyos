@@ -18,6 +18,8 @@ require('./tools/own-job.cjs');
  *       sync posixRename is never called on the async path.
  *   A6  `commit` is asked before the addon rename, and again before the fallback.
  *   A7  the addon rejects with the Win32 code as `errno`; bad arguments throw at the call.
+ *   A8  quit while the addon rename is parked (write-behind's closeWrites, then the owner's sync
+ *       write): the late rename carries the newest text, or is put right at once if it landed.
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -267,4 +269,85 @@ test('A7 the addon rejects with the Win32 code as errno, and bad arguments throw
   assert.throws(() => addon.posixRenameAsync('', target), /paths must be non-empty strings/);
   // The sync call keeps its errors.
   assert.throws(() => addon.posixRename(path.join(dir, 'missing.tmp'), target), (e) => e.errno === 2 && /the source could not be opened/.test(e.message));
+});
+
+// Jim SHOULD 1: the addon try is not one of the plain rename's five.
+test('A5 fallback: after a rejected addon rename the plain rename still gets all five tries', async (t) => {
+  let viaAddon = 0;
+  useAddon(t, { posixRename() { assert.fail('the sync rename was called'); }, posixRenameAsync() { viaAddon++; return Promise.reject(new Error('refused')); } });
+  const { dir, target } = scratch(t, 'a5five');
+  const real = fsp.rename;
+  let plain = 0;
+  fsp.rename = () => { plain++; return Promise.reject(Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' })); };
+  t.after(() => { fsp.rename = real; });
+  await assert.rejects(AJ.atomicWriteTextAsync(target, 'new'), /Could not atomically publish state\.json after Windows rename retries: EPERM/);
+  assert.equal(viaAddon, 1, 'the addon rename was tried once');
+  assert.equal(plain, 5, 'FIVE PLAIN RENAMES AFTER THE ADDON TRY, NOT FOUR');
+  assert.equal(fs.readFileSync(target, 'utf8'), 'old');
+  assert.deepEqual(fs.readdirSync(dir), ['state.json'], 'the temp file is removed');
+});
+
+// Jim SHOULD 2: the quit race on the path Windows takes. The write-behind rename goes through
+// posixRenameAsync; here it parks across the quit, then does the real rename (the addon's on Windows).
+function gate() {
+  let open; const opened = new Promise((r) => { open = r; });
+  const g = { reached: false, open, wait() { g.reached = true; return opened; } };
+  return g;
+}
+async function until(cond, what) {
+  for (let i = 0; i < 1000; i++) { if (cond()) return; await sleep(5); }
+  assert.fail(`timed out waiting for ${what}`);
+}
+const moveFile = win ? (src, dst) => realAddon().posixRenameAsync(src, dst) : (src, dst) => fsp.rename(src, dst);
+
+test('A8 quit while the addon rename is parked: the late rename carries the quit flush, not the older text', async (t) => {
+  const { dir, target } = scratch(t, 'a8');
+  const g = gate();
+  let carried = null;
+  useAddon(t, {
+    posixRename(src, dst) { fs.renameSync(src, dst); },
+    async posixRenameAsync(src, dst) { await g.wait(); carried = fs.readFileSync(src, 'utf8'); await moveFile(src, dst); }
+  });
+  const plain = plainRenames(t);
+  WB.enableWriteBehind();
+  t.after(() => { g.open(); WB.enableWriteBehind(false); });
+  const flight = WB.writeFileBehind(target, 'async-older');
+  await until(() => g.reached, 'the addon rename');
+  await WB.closeWrites(40, 80);
+  assert.equal(WB.writeInFlight(target), true, 'the addon rename is still out when the quit goes on');
+  // what quit does next: the owner's synchronous write, and its report
+  fs.writeFileSync(target, 'sync');
+  WB.noteSyncWrite(target, 'sync');
+  g.open();
+  assert.equal(await flight, 'overtaken');
+  assert.equal(carried, 'sync', 'THE PARKED ADDON RENAME CARRIES THE NEWEST TEXT, NOT THE OLDER ONE');
+  assert.equal(fs.readFileSync(target, 'utf8'), 'sync');
+  assert.deepEqual(plain, [], 'the publish went through the addon rename only');
+  assert.deepEqual(fs.readdirSync(dir), ['state.json'], 'no temp file is left');
+});
+
+test('A8 quit: an addon rename that landed over the quit flush is put right at once', async (t) => {
+  const { dir, target } = scratch(t, 'a8b');
+  const g = gate();
+  const after = gate();
+  useAddon(t, {
+    posixRename(src, dst) { fs.renameSync(src, dst); },
+    async posixRenameAsync(src, dst) { await g.wait(); await moveFile(src, dst); await after.wait(); }
+  });
+  WB.enableWriteBehind();
+  t.after(() => { g.open(); after.open(); WB.enableWriteBehind(false); });
+  const flight = WB.writeFileBehind(target, 'async-older');
+  await until(() => g.reached, 'the addon rename');
+  await WB.closeWrites(40, 80);
+  fs.writeFileSync(target, 'sync-newer');
+  g.open();                                   // the rename lands between the owner's write and its report
+  await until(() => after.reached, 'the addon rename to land');
+  assert.equal(fs.readFileSync(target, 'utf8'), 'async-older');
+  WB.noteSyncWrite(target, 'sync-newer');
+  assert.equal(fs.readFileSync(target, 'utf8'), 'sync-newer', 'PUT RIGHT BEFORE THE APP EXITS: THE WRITE IN FLIGHT HAS NOT ENDED');
+  assert.equal(WB.writeInFlight(target), true);
+  after.open();
+  assert.equal(await flight, 'overtaken');
+  assert.equal(fs.readFileSync(target, 'utf8'), 'sync-newer');
+  assert.deepEqual(fs.readdirSync(dir), ['state.json']);
 });
