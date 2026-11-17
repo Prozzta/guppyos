@@ -640,6 +640,36 @@ test('ledger: dispose during a save, then a reload, reads the flushed ledger and
   assert.deepEqual(diskIds(root), ['m-1', 'm-2']);
 });
 
+test('MAIL-LEDGER-FLUSH-LAG-108: a timer save that finds another write of the file in flight waits for it, never writing the whole file on main', async () => {
+  const root = ledgerHive();
+  fs.mkdirSync(path.join(root, 'state', 'mail'), { recursive: true });
+  const ml = mkLedger(root);
+  ml.ledger(AGENT);
+  const g = gate();
+  let timerSaves = 0;
+  const { calls } = await syncWrites(path.join(root, 'state'), () => withAsync('writeFile', async (args, real) => {
+    if (path.basename(String(args[0])).startsWith(`${AGENT}.json.tmp-`) && !g.reached) await g.wait();
+    else timerSaves++;
+    return real();
+  }, async () => {
+    // A disposed ledger's last save of the same file, held in its tmp write.
+    const older = WB.writeFileBehind(ledgerPath(root), JSON.stringify({ older: true }));
+    await until(() => g.reached, 'the other write in flight');
+    ml.markDelivered(AGENT, msg('m-1'));
+    await sleep(60);   // the 5 ms coalesce timer has fired several times meanwhile
+    assert.equal(timerSaves, 0, 'no save of ours started while the other one is in flight');
+    assert.ok(WB.writeInFlight(ledgerPath(root)), 'the other write is still in flight');
+    g.open();
+    assert.equal(await bounded(older, 'the other write'), 'published', 'the other write was not overtaken');
+    await until(() => diskIds(root).includes('m-1'), 'our save, after it');
+    await WB.settleWrites(10_000);
+  }));
+  assert.deepEqual(calls, [], 'no synchronous write or rename of the ledger on main');
+  assert.deepEqual(readJson(ledgerPath(root)), JSON.parse(JSON.stringify(ml.ledger(AGENT))), 'the newest ledger is the file');
+  assert.deepEqual(tmpsIn(path.join(root, 'state', 'mail')), []);
+  ml.dispose();
+});
+
 test('ledger: an inbox file moves to .done only after the save that records it has landed', async () => {
   const root = ledgerHive();
   const ml = mkLedger(root);

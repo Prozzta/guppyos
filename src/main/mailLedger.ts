@@ -1974,7 +1974,12 @@ export class MailLedger {
    */
   private flushBehind(st: AgentLedger): void {
     if (st.flying) return;
-    if (!st.dirty || writeInFlight(st.file)) { this.flushState(st); return; }
+    if (!st.dirty) { this.flushState(st); return; }   // nothing to write: only the pending archives
+    // MAIL-LEDGER-FLUSH-LAG-108: another write of this file is under way (a disposed ledger's last
+    // save, after a reset or a home change). The timer never writes the whole file on main for it:
+    // it waits one coalesce period and tries again, so this save starts after that one ends and
+    // its rename is the later one. quit, dispose and flush() stay the synchronous writers.
+    if (writeInFlight(st.file)) { st.lastWriteAt = this.now(); this.arm(st); return; }
     st.doc = applyPrune(st.doc, this.now()).doc;
     const root = this.rootDir();
     if (!root || !st.file.startsWith(root)) { st.dirty = false; return; }
