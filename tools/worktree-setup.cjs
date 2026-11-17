@@ -13,6 +13,14 @@
  *   - a root-handle patched and rebuilt node-pty (tools/patch-node-pty-root-handle.cjs,
  *     postinstall): pty-hold-nodepty-handoff red in 10 tests on a junction into an older tree.
  *     Reported, never filled here: it needs the tree's own `npm ci`.
+ *   - the gitignored embedding model resources/models/<dir>/ (WORKTREE-SETUP-MODEL-108): the
+ *     claims drill failed after 350 s on 'missing model (onnx/model.onnx)' in a tree this tool had
+ *     called complete. Every file must match its SHA-256 in resources/models/native-memory-manifest.json
+ *     (a missing or corrupt file is a gap). It is filled by scripts/fetch-memory-model.cjs --from
+ *     the first VERIFIED local source: --copy-from <tree>/resources/models/<dir>, MUNDER_MODEL_CACHE,
+ *     then <dir of this tree>/release-cache/models/<dir> (npm run cut:prune -- --seed-cache). This
+ *     tool never downloads: with no verified source the gap stays and names the fix. A base with no
+ *     manifest (from before NATIVE-MEMORY) has no model gap.
  *
  *   node tools/worktree-setup.cjs [--copy-from <built tree>]   fill the gaps, then re-check
  *   node tools/worktree-setup.cjs --check                       report only (exit 1 on a gap)
@@ -52,6 +60,8 @@ const NODE_PTY = path.join('node_modules', 'node-pty');
 const NODE_PTY_PATCH = 'tools/patch-node-pty-root-handle.cjs';
 const NODE_PTY_BINARY = path.join(NODE_PTY, 'build', 'Release', 'conpty.node');
 const STAMP = '.worktree-setup.json';
+const MODEL_MANIFEST = 'resources/models/native-memory-manifest.json';
+const MODEL_FETCH = 'scripts/fetch-memory-model.cjs';
 
 function isLink(p) { try { return fs.lstatSync(p).isSymbolicLink(); } catch { return false; } }
 
@@ -174,6 +184,73 @@ function nodePtyState(root, { platform = process.platform, spawnSyncFn = spawnSy
   return { ok: true };
 }
 
+/** The manifest's model section, or { error } when the tree's manifest cannot be used; null = no manifest. */
+function readModelManifest(root) {
+  const p = path.join(root, MODEL_MANIFEST);
+  if (!fs.existsSync(p)) return null;
+  let j;
+  try { j = JSON.parse(fs.readFileSync(p, 'utf8')); } catch (e) { return { error: `${MODEL_MANIFEST} is unreadable: ${e.message}` }; }
+  const m = j && j.model;
+  if (!m || typeof m.dir !== 'string' || !m.dir || !m.files || typeof m.files !== 'object' || !Object.keys(m.files).length) return { error: `${MODEL_MANIFEST} has no model.dir/model.files` };
+  return { manifest: j, dir: m.dir };
+}
+
+/** Every manifest file of the model under `dir` against its pinned SHA-256 (the cut prune's own check). */
+function verifyModelDir(dir, manifest) {
+  return require('../scripts/release-worktrees.cjs').verifyModel(dir, manifest);
+}
+
+/** WORKTREE-SETUP-MODEL-108: is resources/models/<dir>/ the manifest's model, file for file? */
+function modelState(root) {
+  const m = readModelManifest(root);
+  if (m === null) return { ok: true };
+  if (m.error) return { ok: false, problem: m.error };
+  const rel = `resources/models/${m.dir}`;
+  const v = verifyModelDir(path.join(root, rel), m.manifest);
+  if (v.ok) return { ok: true };
+  return { ok: false, problem: `${rel} is not the manifest's model (${v.why}); fill it with node tools/worktree-setup.cjs --copy-from <tree with the model>, or MUNDER_MODEL_CACHE=<verified model dir> (this tool never downloads)` };
+}
+
+/** The local places a verified model may come from, in order. Never a download. */
+function modelSources(root, dir, { copyFrom, env = process.env, releaseCache } = {}) {
+  const cache = releaseCache === undefined ? path.join(path.dirname(path.resolve(root)), 'release-cache', 'models') : releaseCache;
+  const out = [];
+  if (copyFrom) out.push({ from: '--copy-from', dir: path.join(copyFrom, 'resources', 'models', dir) });
+  if (env.MUNDER_MODEL_CACHE) out.push({ from: 'MUNDER_MODEL_CACHE', dir: path.resolve(env.MUNDER_MODEL_CACHE) });
+  if (cache) out.push({ from: 'release-cache', dir: path.join(cache, dir) });
+  return out;
+}
+
+/**
+ * Fill the model gap: scripts/fetch-memory-model.cjs --from the first source whose every file
+ * verifies (the script checks each digest again as it copies). Returns false, having spawned
+ * nothing, when no source verifies or the target resolves out of the tree.
+ */
+function fillModel(root, { copyFrom, env = process.env, releaseCache, spawnSyncFn = spawnSync, log = console.log } = {}) {
+  const m = readModelManifest(root);
+  if (!m || m.error) { log(`[worktree-setup] model: ${m ? m.error : 'no manifest'}; nothing to fill`); return false; }
+  const fetch = path.join(root, MODEL_FETCH);
+  if (!fs.existsSync(fetch)) { log(`[worktree-setup] model: ${MODEL_FETCH} is missing in this tree`); return false; }
+  // the target, or its nearest folder that exists, must be this tree's own: never write through a link
+  const own = path.join(root, 'resources', 'models', m.dir);
+  let target = own;
+  while (!fs.existsSync(target) && path.dirname(target) !== target) target = path.dirname(target);
+  if (!resolvesInside(target, root)) { log(`[worktree-setup] model: refusing to write ${own}: ${target} resolves outside ${root}`); return false; }
+  const tried = [];
+  for (const s of modelSources(root, m.dir, { copyFrom, env, releaseCache })) {
+    if (path.resolve(s.dir) === path.resolve(own)) continue;
+    const v = verifyModelDir(s.dir, m.manifest);
+    if (!v.ok) { tried.push(`${s.from} ${s.dir}: ${v.why}`); continue; }
+    // the source dir is passed explicitly, so the script has no path to a download
+    const r = spawnSyncFn(process.execPath, [fetch, '--from', s.dir], { cwd: root, encoding: 'utf8', windowsHide: true });
+    if (r.status !== 0) throw new Error(`[worktree-setup] ${MODEL_FETCH} --from ${s.dir} failed (${r.status}): ${String(r.stderr || r.stdout || '').trim()}`);
+    log(`[worktree-setup] resources/models/${m.dir}: copied from ${s.from} ${s.dir} (every file = manifest)`);
+    return true;
+  }
+  log(`[worktree-setup] model: no verified local source${tried.length ? ` (${tried.join('; ')})` : ''}; not downloading`);
+  return false;
+}
+
 /** Every gap that would make the suite wrong in this tree: [{ id, problem }]. */
 function inspect(root = REPO, { platform = process.platform, spawnSyncFn = spawnSync } = {}) {
   const gaps = [];
@@ -186,6 +263,8 @@ function inspect(root = REPO, { platform = process.platform, spawnSyncFn = spawn
   if (!x.ok) gaps.push({ id: 'xterm', problem: x.problem });
   const p = nodePtyState(root, { platform, spawnSyncFn });
   if (!p.ok) gaps.push({ id: 'node-pty', problem: p.problem });
+  const mo = modelState(root);
+  if (!mo.ok) gaps.push({ id: 'model', problem: mo.problem });
   return gaps;
 }
 
@@ -250,10 +329,11 @@ function fillNative(n, root, { copyFrom, spawnSyncFn = spawnSync, log = console.
 }
 
 /** Fill every gap inspect() reports; returns the gaps left afterwards. */
-function setup(root = REPO, { copyFrom, platform = process.platform, spawnSyncFn = spawnSync, log = console.log } = {}) {
+function setup(root = REPO, { copyFrom, platform = process.platform, spawnSyncFn = spawnSync, log = console.log, env = process.env, releaseCache } = {}) {
   for (const gap of inspect(root, { platform, spawnSyncFn })) {
     if (gap.id === 'xterm') { if (fs.existsSync(path.join(root, ADDON))) localizeXterm(root, { spawnSyncFn, log }); continue; }
     if (gap.id === 'node-pty') continue; // report only: see nodePtyState
+    if (gap.id === 'model') { fillModel(root, { copyFrom, env, releaseCache, spawnSyncFn, log }); continue; }
     fillNative(NATIVES.find((n) => n.id === gap.id), root, { copyFrom, spawnSyncFn, log });
   }
   return inspect(root, { platform, spawnSyncFn });
@@ -291,7 +371,7 @@ function preflight({ root = REPO, env = process.env, log = (l) => process.stderr
 /** The line run-tests.cjs repeats after its summary on an opted-out run. */
 function optOutLine(ids) { return `[test-runner] INCOMPLETE TREE (opt-out): ${ids.join(', ')}`; }
 
-module.exports = { NATIVES, ADDON, NODE_PTY, NODE_PTY_PATCH, NODE_PTY_BINARY, nodePtyState, STAMP, buildStamp, inspect, optOutLine, sourcesDigest, readStamp, linksUnder, setup, preflight, teardown, localizeXterm, sameSources, sourceDigests, resolvesInside };
+module.exports = { NATIVES, ADDON, NODE_PTY, NODE_PTY_PATCH, NODE_PTY_BINARY, nodePtyState, MODEL_MANIFEST, MODEL_FETCH, modelState, modelSources, fillModel, STAMP, buildStamp, inspect, optOutLine, sourcesDigest, readStamp, linksUnder, setup, preflight, teardown, localizeXterm, sameSources, sourceDigests, resolvesInside };
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
