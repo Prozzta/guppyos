@@ -53,6 +53,12 @@ All notable changes to this project are documented here. The format is based on
   was still waiting. With a few thousand records, each search took more than half a second. Guppy
   now keeps both answers up to date as mail changes, so each check takes about the same time
   however long the history is. The answers are exactly the same as before. (LAG-LEDGER-SCANS-108)
+- **Each mail change no longer gets slower as an agent's mail history grows.** Every time a message
+  was delivered, read or closed, Guppy copied the agent's whole mail record before changing one
+  entry: about 1 ms per change at 4,200 records, on the thread that draws the window. Now each new
+  version of the record shares the previous one and stores only what changed, so a change costs the
+  same at any size. Older versions are never changed, and the record reads exactly as before.
+  (LAG-LEDGER-DRAFT-COPY-108)
 - **A large mail backlog no longer freezes the app for up to a second at a time.** When an agent
   had many messages waiting, Guppy decided which of them could wait quietly by reading through
   whole mail records again for every single message, on every check. It now reads each mail

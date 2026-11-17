@@ -2053,10 +2053,9 @@ export class HookServer {
     if (!list?.length || !mail) return [];
     const confirmed: string[] = [];
     try {
-      const doc = mail.ledger(agentId);
       for (const w of list) {
         for (const id of [...w.ids]) {
-          const e = doc.entries[id];
+          const e = mail.entry(agentId, id);
           if (!e || e.state !== 'surfacing' || e.epoch !== w.epoch) w.ids.delete(id);
         }
         if (!w.ids.size) continue;

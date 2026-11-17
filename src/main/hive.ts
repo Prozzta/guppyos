@@ -2111,13 +2111,13 @@ export class HiveManager {
       this.mail.ledger(id);
       // df70e4: a NOT-acted entry of the same stem is this very message (set aside by an explicit
       // archive after 1.1.75): it takes its name back and its entry is reused; an acted one is not.
-      const moved = restoreUndeliveredFiles(root, id, (stem) => this.mail.ledger(id).entries[stem]?.state === 'acted');
+      const moved = restoreUndeliveredFiles(root, id, (stem) => this.mail.entry(id, stem)?.state === 'acted');
       if (!moved.length) return [];
       // God db52b8: the returned entries are no longer set aside.
       this.mail.setAside(id, moved.map((m) => m.id), false);
       const ids = this.mail.admitRestored(id, moved.map((m) => m.id));
       // An entry still surfacing/surfaced from before the archive goes back to delivered (re-shown).
-      const open = moved.map((m) => m.id).filter((m) => { const st = this.mail.ledger(id).entries[m]?.state; return st === 'surfacing' || st === 'surfaced'; });
+      const open = moved.map((m) => m.id).filter((m) => { const st = this.mail.entry(id, m)?.state; return st === 'surfacing' || st === 'surfaced'; });
       if (open.length) this.mail.redeliver(id, open, 'undelivered-restored');
       try { dropUndeliveredItems(root, id, moved.map((m) => m.file)); } catch { /* the report is informational */ }
       this.appendLog({ kind: 'mail-undelivered-restored', agentId: id, count: moved.length, ids: moved.map((m) => m.id).slice(0, 50) });
@@ -3189,7 +3189,7 @@ export class HiveManager {
       // A parent older than the index: its MailLedger entry (main-written), never an inbox file,
       // so a file written straight into an inbox cannot lend its card to a reply.
       for (const agent of Object.keys(reg.agents)) {
-        const parent = this.mail.ledger(agent).entries[id];
+        const parent = this.mail.entry(agent, id);
         if (!parent) continue;
         const own = cardIdValue(parent.cardId);
         const card = own ? ctx.cardOf(own) : null;
@@ -5049,7 +5049,7 @@ export class HiveManager {
     const ask = (agentId: string): MailLedgerDoc['entries'][string] | null => {
       try {
         if (!this.mail.hasAgent(agentId)) return null;
-        const e = this.mail.ledger(agentId).entries[id];
+        const e = this.mail.entry(agentId, id);
         return e && replyTracked(e) ? e : null;
       } catch { return null; }
     };
@@ -5174,7 +5174,7 @@ export class HiveManager {
     const agents = Object.keys(this.registry().agents ?? {});
     for (const id of ids) {
       for (const agentId of agents) {
-        if (!this.mail.ledger(agentId).entries[id]) continue;
+        if (!this.mail.entry(agentId, id)) continue;
         for (const c of this.mail.autoCloseObligation(agentId, id, CLEANUP_183_REASON)) closed.push({ agentId, id: c });
       }
     }

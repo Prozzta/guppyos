@@ -338,6 +338,149 @@ interface LedgerIndex {
   backlogDirty: Set<string> | null;
 }
 
+// ————————————————————————————————————————————————————————————————— entries store
+
+/**
+ * LAG-LEDGER-DRAFT-COPY-108: the entries of a ledger version, shared between versions.
+ *
+ * A transition used to copy `{...prev.entries}` before writing, O(ledger) per change: about 1.1 ms
+ * on main at 4,200 entries for each delivery. Now a version is an older entries object (`base`)
+ * plus the writes made since (`log`, a list of id/value pairs, append-only and shared by the
+ * versions that follow one another). A point lookup is O(1). The plain `entries` object is built
+ * only when someone asks for `doc.entries` (a full scan, the file writer), once per version, and
+ * the next version starts from it. Published versions are still never written (replace-not-mutate):
+ * a version reads only the first `len` writes of the log, and a later write goes after them.
+ */
+interface EntryLog {
+  ids: string[];
+  /** undefined = removed. */
+  vals: (MailEntry | undefined)[];
+  /** id -> the positions in the log that write it, ascending. */
+  at: Map<string, number[]>;
+}
+interface EntryStore {
+  base: Record<string, MailEntry>;
+  log: EntryLog | null;
+  len: number;
+  /** The plain entries object of this version, once built (then `base` is it and `log` is null). */
+  mat: Record<string, MailEntry> | null;
+}
+/** A version whose log is this long is built into a plain object before the next write, which
+ *  bounds the log and its lookups. The cost is O(ledger) per this many writes. */
+const ENTRY_LOG_MAX = 4096;
+/** Docs made by a transition: their entries store (their `entries` is a getter over it). */
+const docStores = new WeakMap<object, EntryStore>();
+/** Docs read from disk or made by hand: their store, for as long as `entries` is that object. */
+const plainStores = new WeakMap<object, EntryStore>();
+/** For tests: how often a plain entries object was built from a store. */
+export const entryStoreStats = { built: 0 };
+
+function storeOf(doc: MailLedgerDoc): EntryStore {
+  const own = docStores.get(doc);
+  if (own) return own;
+  const entries = doc.entries;
+  let s = plainStores.get(doc);
+  if (!s || s.mat !== entries) { s = { base: entries, log: null, len: 0, mat: entries }; plainStores.set(doc, s); }
+  return s;
+}
+
+function storeGet(s: EntryStore, id: string): MailEntry | undefined {
+  if (s.log) {
+    const ps = s.log.at.get(id);
+    if (ps) {
+      for (let i = ps.length - 1; i >= 0; i--) if (ps[i] < s.len) return s.log.vals[ps[i]];
+    }
+  }
+  return hasOwn(s.base, id) ? s.base[id] : undefined;
+}
+
+/** The plain entries object of this version (built once; O(ledger)). */
+function storeEntries(s: EntryStore): Record<string, MailEntry> {
+  if (s.mat) return s.mat;
+  const o: Record<string, MailEntry> = { ...s.base };
+  const log = s.log!;
+  for (let i = 0; i < s.len; i++) {
+    const v = log.vals[i];
+    if (v === undefined) delete o[log.ids[i]];
+    else o[log.ids[i]] = v;
+  }
+  entryStoreStats.built++;
+  s.mat = o; s.base = o; s.log = null; s.len = 0;
+  return o;
+}
+
+/** A new, empty-of-writes store over `prev`'s entries, for a version under construction. */
+function storeAfter(prev: EntryStore): EntryStore {
+  if (prev.log && prev.len >= ENTRY_LOG_MAX) storeEntries(prev);
+  // The log is shared; if another version was made from `prev` already, the first write copies it.
+  return { base: prev.base, log: prev.log, len: prev.len, mat: null };
+}
+
+function copyLog(from: EntryLog, len: number): EntryLog {
+  const log: EntryLog = { ids: from.ids.slice(0, len), vals: from.vals.slice(0, len), at: new Map() };
+  for (let i = 0; i < len; i++) {
+    const ps = log.at.get(log.ids[i]);
+    if (ps) ps.push(i); else log.at.set(log.ids[i], [i]);
+  }
+  return log;
+}
+
+/** Write into a store no published version reads past `len` of (a version under construction). */
+function storeSet(s: EntryStore, id: string, v: MailEntry | undefined): void {
+  if (s.mat) {
+    if (v === undefined) delete s.mat[id]; else s.mat[id] = v;
+    return;
+  }
+  let log = s.log;
+  if (!log) { log = s.log = { ids: [], vals: [], at: new Map() }; }
+  // Writes past `len` belong to another version made from the same one: copy the part this one reads.
+  else if (log.ids.length !== s.len) s.log = log = copyLog(log, s.len);
+  const i = log.ids.length;
+  log.ids.push(id); log.vals.push(v);
+  const ps = log.at.get(id);
+  if (ps) ps.push(i); else log.at.set(id, [i]);
+  s.len = i + 1;
+}
+
+function storeHas(s: EntryStore, id: string): boolean {
+  return storeGet(s, id) !== undefined;
+}
+
+/** A doc whose `entries` is the store's (built on first read). The fields keep `prev`'s order. */
+function docOverStore(prev: MailLedgerDoc, s: EntryStore): MailLedgerDoc {
+  const doc = {} as MailLedgerDoc;
+  const keys = Object.keys(prev);
+  if (!keys.includes('entries')) keys.push('entries');
+  for (const k of keys) {
+    if (k === 'entries') {
+      Object.defineProperty(doc, 'entries', {
+        enumerable: true,
+        configurable: true,
+        get: () => storeEntries(s),
+        set(v: Record<string, MailEntry>) {
+          docStores.delete(doc);
+          Object.defineProperty(doc, 'entries', { value: v, enumerable: true, configurable: true, writable: true });
+        }
+      });
+    } else {
+      (doc as unknown as Record<string, unknown>)[k] = (prev as unknown as Record<string, unknown>)[k];
+    }
+  }
+  docStores.set(doc, s);
+  return doc;
+}
+
+/** For tests: a version's store, read only. */
+export function __entryStoreForTest(doc: MailLedgerDoc): { readonly base: object; readonly logLength: number; readonly len: number; readonly built: boolean } {
+  const s = storeOf(doc);
+  return { base: s.base, logLength: s.log ? s.log.ids.length : 0, len: s.len, built: s.mat !== null };
+}
+
+/** One entry of a ledger version, without building its entries object. */
+export function entryOf(doc: MailLedgerDoc, id: string): MailEntry | undefined {
+  return storeGet(storeOf(doc), id);
+}
+
 const ledgerIndexes = new WeakMap<object, LedgerIndex>();
 /** For tests: how often each index was built by a full scan of the entries. */
 export const ledgerIndexStats = { senderBuilds: 0, backlogBuilds: 0 };
@@ -346,25 +489,26 @@ export const ledgerIndexStats = { senderBuilds: 0, backlogBuilds: 0 };
 const ARRAY_INDEX_KEY_RE = /^(?:0|[1-9]\d*)$/;
 const hasOwn = (o: object, k: string): boolean => Object.prototype.hasOwnProperty.call(o, k);
 
-function indexOf(entries: object): LedgerIndex {
-  let ix = ledgerIndexes.get(entries);
-  if (!ix) { ix = { bySender: null, backlog: null, backlogBase: null, backlogDirty: null }; ledgerIndexes.set(entries, ix); }
+function indexOf(store: EntryStore): LedgerIndex {
+  let ix = ledgerIndexes.get(store);
+  if (!ix) { ix = { bySender: null, backlog: null, backlogBase: null, backlogDirty: null }; ledgerIndexes.set(store, ix); }
   return ix;
 }
 
-/** Called before an `entries` object is written in place. */
-function dropIndex(entries: object): void {
-  ledgerIndexes.delete(entries);
+/** Called before a store is written in place. */
+function dropIndex(store: EntryStore): void {
+  ledgerIndexes.delete(store);
 }
 
 /** Write one entry into a document under construction (migration / rebuild), which no transition owns. */
 function putInPlace(doc: MailLedgerDoc, entry: MailEntry): void {
-  dropIndex(doc.entries);
-  doc.entries[entry.id] = entry;
+  const s = storeOf(doc);
+  dropIndex(s);
+  storeSet(s, entry.id, entry);
 }
 
 /** A transition made `next` from `prev` and changed exactly `changed`: carry the index over. */
-function deriveIndex(prev: Record<string, MailEntry>, next: Record<string, MailEntry>, changed: readonly string[]): void {
+function deriveIndex(prev: EntryStore, next: EntryStore, changed: readonly string[]): void {
   const p = ledgerIndexes.get(prev);
   if (!p) return;
   const n: LedgerIndex = { bySender: null, backlog: null, backlogBase: null, backlogDirty: null };
@@ -372,8 +516,8 @@ function deriveIndex(prev: Record<string, MailEntry>, next: Record<string, MailE
     let map: Map<string, readonly string[]> | null = p.bySender;
     let copied = false;
     for (const id of changed) {
-      const was = hasOwn(prev, id) ? prev[id] : undefined;
-      const now = hasOwn(next, id) ? next[id] : undefined;
+      const was = storeGet(prev, id);
+      const now = storeGet(next, id);
       const a = was?.senderId;
       const b = now?.senderId;
       if (a === b) continue;
@@ -400,7 +544,8 @@ function deriveIndex(prev: Record<string, MailEntry>, next: Record<string, MailE
 
 /** The entries whose sender_id is `ref`, in key order (`Object.values(..).filter(senderId === ref)`). */
 function senderEntries(doc: MailLedgerDoc, ref: string): MailEntry[] {
-  const ix = indexOf(doc.entries);
+  const s = storeOf(doc);
+  const ix = indexOf(s);
   if (!ix.bySender) {
     const map = new Map<string, string[]>();
     for (const e of Object.values(doc.entries)) {
@@ -413,7 +558,7 @@ function senderEntries(doc: MailLedgerDoc, ref: string): MailEntry[] {
   }
   const out: MailEntry[] = [];
   for (const id of ix.bySender.get(ref) ?? []) {
-    const e = hasOwn(doc.entries, id) ? doc.entries[id] : undefined;
+    const e = storeGet(s, id);
     if (e && e.senderId === ref) out.push(e);
   }
   return out;
@@ -427,21 +572,28 @@ class Draft {
   readonly logs: Record<string, unknown>[] = [];
   readonly events: MailEvent[] = [];
   readonly archive: string[] = [];
-  private readonly prevEntries: Record<string, MailEntry>;
+  private readonly prevStore: EntryStore;
+  private readonly store: EntryStore;
   constructor(prev: MailLedgerDoc, readonly now: number) {
-    this.prevEntries = prev.entries;
-    this.doc = { ...prev, entries: { ...prev.entries } };
+    // LAG-LEDGER-DRAFT-COPY-108: no copy of the entries; the new version shares prev's.
+    this.prevStore = storeOf(prev);
+    this.store = storeAfter(this.prevStore);
+    this.doc = docOverStore(prev, this.store);
   }
   private reordered = false;
+  /** An entry of the version under construction. */
+  get(id: string): MailEntry | undefined {
+    return storeGet(this.store, id);
+  }
   put(entry: MailEntry): void {
-    dropIndex(this.doc.entries);
-    if (!hasOwn(this.doc.entries, entry.id) && hasOwn(this.prevEntries, entry.id)) this.reordered = true;
-    this.doc.entries[entry.id] = entry;
+    dropIndex(this.store);
+    if (!storeHas(this.store, entry.id) && storeHas(this.prevStore, entry.id)) this.reordered = true;
+    storeSet(this.store, entry.id, entry);
     if (!this.changed.includes(entry.id)) this.changed.push(entry.id);
   }
   remove(id: string): void {
-    dropIndex(this.doc.entries);
-    delete this.doc.entries[id];
+    dropIndex(this.store);
+    storeSet(this.store, id, undefined);
     if (!this.changed.includes(id)) this.changed.push(id);
   }
   event(entry: MailEntry, stage: MailEvent['stage'], harness: boolean, reason?: string): void {
@@ -453,8 +605,8 @@ class Draft {
   }
   step(): MailStep {
     // A removed key put back goes last in key order: the sender map cannot follow that.
-    if (this.reordered) dropIndex(this.doc.entries);
-    else deriveIndex(this.prevEntries, this.doc.entries, this.changed);
+    if (this.reordered) dropIndex(this.store);
+    else deriveIndex(this.prevStore, this.store, this.changed);
     return { doc: this.doc, changed: this.changed, logs: this.logs, events: this.events, archive: this.archive };
   }
 }
@@ -527,7 +679,7 @@ export function owesWork(e: MailEntry): boolean {
  * `opts.harness` marks a recovery/migration import (no activity, no per-message row).
  */
 export function applyDelivered(doc: MailLedgerDoc, msg: MailMessageLike, now: number, opts: { legacy?: boolean; harness?: boolean; reason?: string } = {}): MailStep {
-  if (doc.entries[msg.id]) return unchanged(doc);
+  if (entryOf(doc, msg.id)) return unchanged(doc);
   const d = new Draft(doc, now);
   const entry = entryFromMessage(msg, doc.nextSeq, now, 'inbox', opts.legacy === true);
   d.doc.nextSeq = doc.nextSeq + 1;
@@ -549,7 +701,7 @@ export function applyDelivered(doc: MailLedgerDoc, msg: MailMessageLike, now: nu
  * is in the typed text. Recorded as acted `via:"work-order"`; never in the backlog; no file.
  */
 export function applyWorkOrder(doc: MailLedgerDoc, msg: MailMessageLike, now: number, opts: { restored?: boolean } = {}): MailStep {
-  if (doc.entries[msg.id]) return unchanged(doc);
+  if (entryOf(doc, msg.id)) return unchanged(doc);
   const d = new Draft(doc, now);
   const base = entryFromMessage(msg, doc.nextSeq, now, 'work-order', false);
   // Q14: confirmed after a restart, the body is unknown: no hash (it can never match a duplicate).
@@ -574,7 +726,7 @@ export function applyWorkOrder(doc: MailLedgerDoc, msg: MailMessageLike, now: nu
  * `stage:"acted"` row with `reason:"work-order-leftover"`.
  */
 export function applyWorkOrderLeftover(doc: MailLedgerDoc, msg: MailMessageLike, now: number): MailStep {
-  const e = doc.entries[msg.id];
+  const e = entryOf(doc, msg.id);
   if (e?.state === 'acted') return unchanged(doc);
   const d = new Draft(doc, now);
   let entry: MailEntry;
@@ -603,7 +755,7 @@ export function applyWorkOrderLeftover(doc: MailLedgerDoc, msg: MailMessageLike,
 export function applyClaimSurfacing(doc: MailLedgerDoc, ids: Iterable<string>, epoch: string, hookKind: string, now: number): MailStep {
   const d = new Draft(doc, now);
   for (const id of ids) {
-    const e = d.doc.entries[id];
+    const e = d.get(id)!;
     if (!e || e.state !== 'delivered') continue;
     const next: MailEntry = { ...e, state: 'surfacing', epoch, hookKind, surfacingAt: now, surfaceCount: e.surfaceCount + 1, updatedAt: now };
     d.put(next);
@@ -618,14 +770,14 @@ export function applyConfirmSurfaced(doc: MailLedgerDoc, ids: Iterable<string>, 
   const d = new Draft(doc, now);
   const done: string[] = [];
   for (const id of ids) {
-    const e = d.doc.entries[id];
+    const e = d.get(id)!;
     if (!e || e.state !== 'surfacing' || e.epoch !== epoch) continue;
     const next: MailEntry = { ...e, state: 'surfaced', surfacedAt: now, confirmMethod: method, unconfirmedSurfacings: 0, redelivered: false, updatedAt: now };
     d.put(next);
     d.event(next, 'surfaced', false, method);
     done.push(id);
   }
-  if (done.length) d.row({ kind: 'mail', stage: 'surfaced', ids: done, epoch, method, hookKind: d.doc.entries[done[0]].hookKind ?? null });
+  if (done.length) d.row({ kind: 'mail', stage: 'surfaced', ids: done, epoch, method, hookKind: d.get(done[0])!.hookKind ?? null });
   return d.step();
 }
 
@@ -637,7 +789,7 @@ export function applyMarkActed(doc: MailLedgerDoc, ids: Iterable<string>, epoch:
   const d = new Draft(doc, now);
   const done: string[] = [];
   for (const id of ids) {
-    const e = d.doc.entries[id];
+    const e = d.get(id)!;
     if (!e || e.state !== 'surfaced' || e.epoch !== epoch || e.setAsideAt) continue;
     const next: MailEntry = { ...e, state: 'acted', actedAt: now, updatedAt: now };
     d.put(next);
@@ -661,7 +813,7 @@ export function applyMarkActed(doc: MailLedgerDoc, ids: Iterable<string>, epoch:
 export function applyReinject(doc: MailLedgerDoc, ids: Iterable<string>, epoch: string, hookKind: string, now: number): MailStep {
   const d = new Draft(doc, now);
   for (const id of ids) {
-    const e = d.doc.entries[id];
+    const e = d.get(id)!;
     if (!e || e.epoch !== epoch || (e.state !== 'surfaced' && e.state !== 'surfacing')) continue;
     const next: MailEntry = { ...e, state: 'surfacing', hookKind, surfacingAt: now, surfaceCount: e.surfaceCount + 1, updatedAt: now };
     d.put(next);
@@ -694,7 +846,7 @@ export function applyLegacyActed(doc: MailLedgerDoc, ids: Iterable<string>, mode
   const d = new Draft(doc, now);
   const done: string[] = [];
   for (const id of ids) {
-    const e = d.doc.entries[id];
+    const e = d.get(id)!;
     if (!e || e.state !== 'delivered' || e.via !== 'inbox' || done.includes(id) || e.setAsideAt) continue;
     const next: MailEntry = { ...e, state: 'acted', actedAt: now, updatedAt: now, epoch: null, hookKind: null, surfacingAt: null };
     d.put(next);
@@ -719,7 +871,7 @@ export function applyLegacyActed(doc: MailLedgerDoc, ids: Iterable<string>, mode
  * act:"request") stays on the open lists, flagged missing.
  */
 export function applyBodyMissing(doc: MailLedgerDoc, id: string, why: string, now: number): MailStep {
-  const e = doc.entries[id];
+  const e = entryOf(doc, id);
   if (!e || e.via !== 'inbox' || e.state !== 'delivered' || e.setAsideAt) return unchanged(doc);
   const d = new Draft(doc, now);
   const next: MailEntry = {
@@ -747,7 +899,7 @@ export const MAIL_MISSING_UNPARSEABLE = 'unparseable';
  * caused: not activity. The count itself writes no row.
  */
 export function applyParseFailed(doc: MailLedgerDoc, id: string, sig: string, now: number): MailStep {
-  const e = doc.entries[id];
+  const e = entryOf(doc, id);
   if (!e || e.via !== 'inbox' || e.state !== 'delivered' || e.setAsideAt) return unchanged(doc);
   const fresh = e.parseFailSig !== sig || !e.parseFails || e.parseFailSince == null;
   const fails = fresh ? 1 : (e.parseFails ?? 0) + 1;
@@ -772,7 +924,7 @@ export function applyParseFailed(doc: MailLedgerDoc, id: string, sig: string, no
  *  (row `reason:"reappeared"`), so it is surfaced like any delivered message. Harness-caused: not
  *  activity. */
 export function applyReappeared(doc: MailLedgerDoc, id: string, now: number): MailStep {
-  const e = doc.entries[id];
+  const e = entryOf(doc, id);
   if (!e || e.state !== 'acted' || !e.missingAt) return unchanged(doc);
   const d = new Draft(doc, now);
   const next: MailEntry = { ...e, state: 'delivered', actedAt: null, missingAt: null, missingReason: null, parseFails: 0, parseFailSince: null, parseFailSig: null, updatedAt: now };
@@ -830,14 +982,14 @@ export function applyCloseEpoch(doc: MailLedgerDoc, epoch: string, outcome: Epoc
   d.archive.push(...acted.archive);
   const late = new Set(opts.late ?? []);
   const tentative = open.filter((e) => e.state === 'surfacing');
-  backEdge(d, tentative.filter((e) => !late.has(e.id)).map((e) => d.doc.entries[e.id]), 'unconfirmed', true, 'mail-surface-unconfirmed', epoch);
+  backEdge(d, tentative.filter((e) => !late.has(e.id)).map((e) => d.get(e.id)!), 'unconfirmed', true, 'mail-surface-unconfirmed', epoch);
   // Q8: one `mail-surface-late` row per distinct (transport, elapsed ms), so each row names both.
   const groups = new Map<string, { detail: MailLateDetail | null; entries: MailEntry[] }>();
   for (const e of tentative.filter((x) => late.has(x.id))) {
     const detail = opts.lateDetail?.[e.id] ?? null;
     const key = detail ? `${detail.transport}|${detail.latencyMs}` : '-';
     const g = groups.get(key) ?? { detail, entries: [] };
-    g.entries.push(d.doc.entries[e.id]);
+    g.entries.push(d.get(e.id)!);
     groups.set(key, g);
   }
   for (const g of groups.values()) {
@@ -855,7 +1007,7 @@ export function applyCloseEpoch(doc: MailLedgerDoc, epoch: string, outcome: Epoc
  * not changed. Idempotent.
  */
 export function applyReplied(doc: MailLedgerDoc, ref: string, replyId: string, now: number, replyTo?: string | null, replyAct?: string | null): MailStep {
-  const exact = doc.entries[ref];
+  const exact = entryOf(doc, ref);
   // HIVE-DWIGHT-BG-REINVOKE (A): a discharging reply also upgrades an interim-replied entry.
   const discharging = !!replyAct && DISCHARGING_REPLY_ACTS.has(replyAct);
   const candidates = [...(exact ? [exact] : []), ...senderEntries(doc, ref).filter((e) => e.id !== ref).sort(bySeq)]
@@ -930,7 +1082,7 @@ function bySeq(a: MailEntry, b: MailEntry): number {
 
 /** The entries a reference names: the exact id first, else every sender_id alias match. */
 export function resolveEntries(doc: MailLedgerDoc, ref: string): MailEntry[] {
-  const exact = doc.entries[ref];
+  const exact = entryOf(doc, ref);
   if (exact) return [exact];
   return senderEntries(doc, ref).sort(bySeq);
 }
@@ -971,7 +1123,7 @@ export function openNotDeliveredIds(doc: MailLedgerDoc): string[] {
 export function applySetAside(doc: MailLedgerDoc, ids: Iterable<string>, on: boolean, now: number): MailStep {
   const d = new Draft(doc, now);
   for (const id of ids) {
-    const e = d.doc.entries[id];
+    const e = d.get(id)!;
     if (!e || e.state === 'acted' || !!e.setAsideAt === on) continue;
     d.put({ ...e, setAsideAt: on ? now : null, updatedAt: now });
   }
@@ -980,7 +1132,8 @@ export function applySetAside(doc: MailLedgerDoc, ids: Iterable<string>, on: boo
 
 /** fleet `inboxBacklog` (§3 #6): not acted. Work orders are acted by definition (N2). */
 export function backlogEntries(doc: MailLedgerDoc): MailEntry[] {
-  const ix = indexOf(doc.entries);
+  const store = storeOf(doc);
+  const ix = indexOf(store);
   if (!ix.backlog) {
     let out: MailEntry[] | null = null;
     if (ix.backlogBase && ix.backlogDirty) {
@@ -989,7 +1142,7 @@ export function backlogEntries(doc: MailLedgerDoc): MailEntry[] {
       const kept = ix.backlogBase.filter((e) => !dirty.has(e.id));
       const add: MailEntry[] = [];
       for (const id of dirty) {
-        const e = hasOwn(doc.entries, id) ? doc.entries[id] : undefined;
+        const e = storeGet(store, id);
         if (e && e.state !== 'acted') add.push(e);
       }
       const merged = kept.concat(add.sort(bySeq)).sort(bySeq);
@@ -1289,7 +1442,7 @@ export type IncomingClass = { kind: 'free' } | { kind: 'dup'; existingId: string
  */
 export function classifyIncoming(doc: MailLedgerDoc, msg: MailMessageLike, readExisting: (id: string) => ExistingMessage): IncomingClass {
   const content = mailContentHash(msg.subject ?? '', msg.body ?? '');
-  const inLedger = [doc.entries[msg.id], ...senderEntries(doc, msg.id).filter((e) => e.id !== msg.id)].filter(Boolean) as MailEntry[];
+  const inLedger = [entryOf(doc, msg.id), ...senderEntries(doc, msg.id).filter((e) => e.id !== msg.id)].filter(Boolean) as MailEntry[];
   for (const e of inLedger) {
     // No content key (a restored work order, whose body is unknown): never a duplicate.
     if (e.from === msg.from && typeof e.contentHash === 'string' && e.contentHash === content) return { kind: 'dup', existingId: e.id };
@@ -1332,7 +1485,7 @@ export function migrateFromInbox(agentId: string, inbox: DiskMessage[], now: num
   let doc = emptyLedger(agentId);
   for (const f of [...inbox].sort((a, b) => a.mtimeMs - b.mtimeMs || (a.id < b.id ? -1 : 1))) {
     doc = applyDelivered(doc, diskEntryMessage(f), now, { legacy: true, harness: true }).doc;
-    putInPlace(doc, { ...doc.entries[f.id], deliveredAt: Math.min(now, f.mtimeMs || now) });
+    putInPlace(doc, { ...entryOf(doc, f.id)!, deliveredAt: Math.min(now, f.mtimeMs || now) });
   }
   return doc;
 }
@@ -1393,13 +1546,13 @@ export function rebuildLedger(agentId: string, input: { inbox: DiskMessage[]; do
     put({ ...base, state: 'acted', actedAt: f.mtimeMs, updatedAt: f.mtimeMs });
   }
   for (const [id, e] of ev) {
-    if (doc.entries[id] || !e.workOrder || (e.workOrder.ts ?? 0) < now - retentionMs) continue;
+    if (entryOf(doc, id) || !e.workOrder || (e.workOrder.ts ?? 0) < now - retentionMs) continue;
     const r = e.workOrder;
     const base = entryFromMessage({ id, from: typeof r.from === 'string' ? r.from : '?', act: typeof r.act === 'string' ? r.act : undefined, requires_reply: typeof r.requiresReply === 'boolean' ? r.requiresReply : undefined, sender_id: typeof r.senderId === 'string' ? r.senderId : undefined }, doc.nextSeq, r.ts ?? now, 'work-order', false);
     put({ ...base, actedAt: r.ts ?? now, updatedAt: r.ts ?? now });
   }
   for (const [id, e] of ev) {
-    const entry = doc.entries[id];
+    const entry = entryOf(doc, id);
     if (entry && e.replied) putInPlace(doc, { ...entry, repliedAt: e.replied.at, replyId: e.replied.replyId, ...(e.replied.replyAct ? { replyAct: e.replied.replyAct } : {}) });
   }
   const lastTs = Math.max(0, ...[...ev.values()].map((e) => e.lastTs));
@@ -2110,6 +2263,12 @@ export class MailLedger {
     return this.docOrEmpty(agentId);
   }
 
+  /** LAG-LEDGER-DRAFT-COPY-108: one entry of an agent's ledger (loads it). A point lookup: unlike
+   *  `ledger(id).entries[x]`, it does not build the version's entries object. */
+  entry(agentId: string, id: string): MailEntry | undefined {
+    return entryOf(this.docOrEmpty(agentId), id);
+  }
+
   /**
    * §4.1 admission, BEFORE the inbox write. An invalid id, or an id colliding with different
    * content, gets a fresh `<ts>-<rand>` id with the sender's value kept as `sender_id`
@@ -2123,7 +2282,7 @@ export class MailLedger {
     let reassigned = false;
     const reassign = (reason: string): void => {
       let id = freshMailId(this.now());
-      for (let i = 0; i < 8 && (st.doc.entries[id] || existsSync(join(inboxDir, `${id}.json`)) || existsSync(join(inboxDir, '.done', `${id}.json`))); i++) id = freshMailId(this.now());
+      for (let i = 0; i < 8 && (entryOf(st.doc, id) || existsSync(join(inboxDir, `${id}.json`)) || existsSync(join(inboxDir, '.done', `${id}.json`))); i++) id = freshMailId(this.now());
       const senderId = cur.sender_id ?? senderIdValue(cur.id);
       this.log({ kind: 'mail-id-reassigned', agentId, from: cur.from, senderId, id, reason });
       cur = { ...cur, id, sender_id: senderId };
@@ -2168,7 +2327,7 @@ export class MailLedger {
    *  only the rename was left, e.g. a crash in between; never for a Q15/Q28 closed entry). */
   recordWorkOrderLeftover(agentId: string, msg: MailMessageLike): void {
     const st = this.state(agentId);
-    const e = st.doc.entries[msg.id];
+    const e = entryOf(st.doc, msg.id);
     if (e?.state === 'acted') {
       if (!e.missingAt) { st.archive.add(msg.id); this.markDirty(st); }
       return;
@@ -2187,7 +2346,7 @@ export class MailLedger {
    *  `staleObligations` found finished. Like the Human's close: no reply, no wake, not activity.
    *  Returns the ids closed. */
   autoCloseObligation(agentId: string, id: string, reason: string): string[] {
-    if (!id || !this.hasAgent(agentId) || !this.docOrEmpty(agentId).entries[id]) return [];
+    if (!id || !this.hasAgent(agentId) || !entryOf(this.docOrEmpty(agentId), id)) return [];
     const st = this.state(agentId);
     return this.commit(st, applyCloseObligation(st.doc, id, this.now(), reason)).changed;
   }
@@ -2285,7 +2444,7 @@ export class MailLedger {
     const st = this.state(agentId);
     const step = this.commit(st, applyParseFailed(st.doc, id, this.inboxFileSig(agentId, id) ?? '-', this.now()));
     if (!step.changed.length) return 'none';
-    if (st.doc.entries[id]?.state !== 'acted') return 'counted';
+    if (entryOf(st.doc, id)?.state !== 'acted') return 'counted';
     this.notices.set(`${agentId}|body-unparseable`, {
       file: `agents/${agentId}/inbox/${id}.json`, quarantine: null, error: 'mail-body-unparseable',
       notice: `A hive message for ${agentId} (${id}) could not be read (its file is damaged or too large) after ${MAIL_UNPARSEABLE_AFTER} tries, so it was closed without reaching the agent. It comes back if the file is repaired (see mail-body-unparseable in the log).`
@@ -2314,7 +2473,7 @@ export class MailLedger {
     const now = this.now();
     const reappeared: string[] = [];
     for (const id of onDisk) {
-      const known = st.doc.entries[id];
+      const known = entryOf(st.doc, id);
       // Q15: a body-missing entry whose file is back: a new delivered transition.
       if (known?.missingAt && known.state === 'acted') {
         // Q28: an unparseable-closed file comes back only when it changed AND now parses.
