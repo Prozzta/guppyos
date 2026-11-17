@@ -32,6 +32,7 @@ import { AppendFile, LOG_KEEP_ROTATED, rotatedFiles } from './appendLog';
 import { MailCardIndex, NO_CARD, indexEntries, indexLinkContext, isNoCard, linkMail, replyChainGap, TRUSTED_METHODS, type LinkContext, type MailLink } from './mailCards';
 import { atomicWriteJson as atomicWriteJsonFile, atomicWriteJsonAsync, atomicWriteTextAsync, readFileTracked } from './atomicJson';
 import { flushAppendsSync } from './writeBehind';
+import { removePathLinkSafeSync } from './linkSafeRemove';
 import { ASK_BACKSTOP_MS, ASK_CLOSE_REASON_MAX, MailLedger, answeredByMessage, cardIdValue, freshMailId, isValidMailId, owesWork, replyTracked, staleObligations, supersededByMessage, type CardEvidence, type MailLedgerDoc, type ReleaseRun, type StaleObligation } from './mailLedger';
 import { mailObligationsView, type MailObligationsAgent } from './mailReaders';
 import { UNDELIVERED_DIR, dropUndeliveredItems, mailMigrationDone, markUndeliveredSeen, readUndeliveredReport, readUndeliveredReportAsync, restoreUndeliveredFiles, runMailMigration, setAsideUndelivered, type MailMigrationResult, type UndeliveredReport } from './mailMigration';
@@ -1321,7 +1322,7 @@ export class HiveManager {
       const keep = new Set(files.map(([f]) => f));
       for (const f of readdirSync(dir)) {
         if (keep.has(f)) continue;
-        try { rmSync(join(dir, f), { force: true, recursive: true }); } catch { /* in use: retried at the next spawn */ }
+        try { removePathLinkSafeSync(join(dir, f)); } catch { /* in use: retried at the next spawn */ }
       }
       for (const [f, content, mode] of files) {
         const p = join(dir, f);
@@ -5439,7 +5440,7 @@ export class HiveManager {
       try {
         const f = join(dir, n, 'agent.md');
         if (!readFileSync(f, 'utf8').includes(HiveManager.AGY_AGENT_MARK)) continue;
-        rmSync(join(dir, n), { recursive: true, force: true });
+        removePathLinkSafeSync(join(dir, n));
         removed++;
       } catch { /* not ours / unreadable: leave it */ }
     }
@@ -5562,7 +5563,7 @@ export class HiveManager {
     try {
       if (!existsSync(file)) return;
       if (!readFileSync(file, 'utf8').includes(HiveManager.AGY_AGENT_MARK)) return;
-      rmSync(dir, { recursive: true, force: true });
+      removePathLinkSafeSync(dir);
     } catch (e) {
       console.error('[hive] removeAgyAgent failed:', e);
     }
