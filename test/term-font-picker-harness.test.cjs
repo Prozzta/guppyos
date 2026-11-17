@@ -118,6 +118,7 @@ for (const dpr of [1, 1.25, 1.5]) {
   test(`dpr ${dpr}: a pick whose face is still loading leaves every terminal on the old face and cell, and lands when the load ends (MUTANT: the face set before it is loaded; MUTANT: the scenario measures after a fixed delay)`, async () => {
     const r = await result(dpr);
     assert.equal(r.ok, true, `scenario failed: ${r.error ?? ''}`);
+    assert.deepEqual(r.startHeld, { face: 'JetBrains Mono', ready: false }, 'START: the starting face was held unloaded past any delay the scenario used to wait; the default rows above were measured after its load, not after a delay');
     const h = r.held;
     assert.ok(h, 'the first pick ran with its load held');
     assert.ok(h.heldMs >= 1500, `HELD: the load was held ${h.heldMs} ms, longer than any delay the scenario used to wait`);
