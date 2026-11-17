@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * The release markers (runbook Appendix B steps 4 and 7), now SIXTEEN: the 9 postinstall markers
+ * The release markers (runbook Appendix B steps 4 and 7), now SEVENTEEN: the 9 postinstall markers
  * (node-pty's conpty patch, its #922 backport source and rebuilt-binary provenance, native builds,
  * better-sqlite3) plus the 3 native-memory artifacts
  * (NATIVE-MEMORY spec section 5.5, Jim fix 5), each checked by SHA-256 against
@@ -15,13 +15,15 @@
  *   15 lib/windowsPtyAgent.js keeps the handle node-pty hands over
  * and the one of NODEPTY-PACKAGED-PROOF (same tool):
  *   16 lib/utils.js loads built binaries only (no fallback to the unpatched prebuilt conpty.node)
+ * and the one of PTY-EARLY-KILL-EPIPE-108 (same tool):
+ *   17 lib/worker/conoutSocketWorker.js handles socket errors (a destroyed data socket is a quiet end)
  * On a build, `node tools/patch-node-pty-root-handle.cjs --packaged dist/win-unpacked` goes further:
  * it reads app.asar as well, and fails when a prebuilt Windows binary of node-pty ships at all.
  *
  *   node scripts/release-markers.cjs <node_modules root> <models dir>
  *     source:  node_modules                                        resources/models
  *     build:   dist/win-unpacked/resources/app.asar.unpacked/node_modules   dist/win-unpacked/resources/models
- * Prints ALL 16 MARKERS OK, or MARKERS FAILED (exit 1).
+ * Prints ALL 17 MARKERS OK, or MARKERS FAILED (exit 1).
  */
 'use strict';
 const fs = require('fs');
@@ -73,6 +75,7 @@ const handoffBinary = () => {
   return !!record && record.sha256 === sha(p) && racePins.hasHandoffImports(p);
 };
 const builtOnlyLoader = () => sha(path.join(ptyRoot, 'lib', 'utils.js')) === racePins.UTILS_JS_BUILT_ONLY_SHA256;
+const quietWorker = () => sha(path.join(ptyRoot, 'lib', 'worker', 'conoutSocketWorker.js')) === racePins.WORKER_JS_QUIET_SHA256;
 const handoffAgent = () => sha(path.join(ptyRoot, 'lib', 'windowsPtyAgent.js')) === racePins.AGENT_JS_HANDOFF_SHA256;
 // AGENT-ENV-NODEFAULTCWD-193 (tools/patch-node-pty-winpty-gyp.cjs): winpty.gyp calls its batch
 // files by a qualified .\ path. Both trees keep deps/winpty/src: the gyp must be the pinned
@@ -111,7 +114,8 @@ const checks = [
   ['winpty.gyp batch calls qualified', winptyGypQualified()],
   ['conpty.node built with the root-handle handoff', handoffBinary()],
   ['windowsPtyAgent.js keeps the root handle', handoffAgent()],
-  ['node-pty loader takes built binaries only', builtOnlyLoader()]
+  ['node-pty loader takes built binaries only', builtOnlyLoader()],
+  ['node-pty output worker handles socket errors', quietWorker()]
 ];
 let ok = true;
 for (const [n, v] of checks) { console.log((v ? 'OK   ' : 'FAIL ') + n); ok = ok && v; }

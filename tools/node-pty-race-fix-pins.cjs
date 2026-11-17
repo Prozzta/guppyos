@@ -47,8 +47,55 @@ const hasMutexImports = (file) => { const imp = peImports(file); return MUTEX_IM
 const HANDOFF_IMPORTS = ['KERNEL32.DLL!DuplicateHandle'];
 const hasHandoffImports = (file) => { const imp = peImports(file); return HANDOFF_IMPORTS.every((n) => imp.includes(n)); };
 
+// PTY-EARLY-KILL-EPIPE-108 (tools/patch-node-pty-root-handle.cjs): node-pty's output worker
+// (lib/worker/conoutSocketWorker.js) pipes the console's output to the data socket and listens for
+// no error, on either end. A data socket destroyed before the worker writes to it gives EPIPE,
+// uncaught in the worker thread; Node ends the worker and emits the error on the Worker object in
+// the main thread, where node-pty does not listen either: thrown outside any caller.
+// The edits live here, not in the tool, so that a test can take them back out and run the
+// unpatched worker as its control.
+const WORKER_JS_EDITS = [
+  ['the console pipe: an error listener',
+    'conoutSocket.setEncoding(\'utf8\');\n',
+    'conoutSocket.setEncoding(\'utf8\');\n' +
+    '// GUPPY PTY-EARLY-KILL-EPIPE-108 (tools/patch-node-pty-root-handle.cjs): neither end of this\n' +
+    '// worker had an error listener, so a write to a data socket that was destroyed before the\n' +
+    '// write (EPIPE) ended the worker, and the main thread threw it outside any caller. A reader\n' +
+    '// that has gone is a normal end: EPIPE or ECONNRESET on a socket that is destroyed is torn\n' +
+    '// down quietly. Anything else is thrown again, as it was before.\n' +
+    'var guppyDataSockets = [];\n' +
+    'function guppyPeerGone(err, socket) {\n' +
+    '    return !!err && (err.code === \'EPIPE\' || err.code === \'ECONNRESET\') && socket.destroyed === true;\n' +
+    '}\n' +
+    'conoutSocket.on(\'error\', function (err) {\n' +
+    '    if (!guppyPeerGone(err, conoutSocket)) {\n' +
+    '        throw err;\n' +
+    '    }\n' +
+    '    // The console is gone: end the data sockets, as the pipe does when the console ends.\n' +
+    '    guppyDataSockets.slice().forEach(function (dataSocket) { dataSocket.end(); });\n' +
+    '});\n'],
+  ['the data socket: an error listener',
+    '        conoutSocket.pipe(workerSocket);\n',
+    '        // GUPPY PTY-EARLY-KILL-EPIPE-108: see guppyPeerGone above.\n' +
+    '        guppyDataSockets.push(workerSocket);\n' +
+    '        workerSocket.on(\'close\', function () {\n' +
+    '            guppyDataSockets.splice(guppyDataSockets.indexOf(workerSocket), 1);\n' +
+    '        });\n' +
+    '        workerSocket.on(\'error\', function (err) {\n' +
+    '            conoutSocket.unpipe(workerSocket);\n' +
+    '            if (!guppyPeerGone(err, workerSocket)) {\n' +
+    '                throw err;\n' +
+    '            }\n' +
+    '        });\n' +
+    '        conoutSocket.pipe(workerSocket);\n']
+];
+
 module.exports = {
   NODE_PTY_VERSION: '1.1.0',
+  // lib/worker/conoutSocketWorker.js: from the same tarball, and with the error listeners.
+  WORKER_JS_PRISTINE_SHA256: '3e4bac095ac3870c3248a7302f5d10217de625f30c32b7000fe48a34788e47ac',
+  WORKER_JS_QUIET_SHA256: 'c878b1b0ce5a301d3ad752a006221a4b5646dd073a5c914bc80b96daa87e4713',
+  WORKER_JS_EDITS,
   CONPTY_CC_PRISTINE_SHA256: '52c893b689ab3210c0961e2a6aa805a82350003767b21069b164926b5becd4e2',
   CONPTY_CC_PATCHED_SHA256: 'a000a53daa90506662e4747c6585a403b93431d1fe46f99895aa6d58faaa9082',
   // conpty.cc after BOTH patches (#922, then the root-handle handoff): the only source

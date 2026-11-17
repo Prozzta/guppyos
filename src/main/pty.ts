@@ -169,7 +169,7 @@ interface WindowsTerminalInternals {
 /** node-pty 1.1.0 ConoutConnection: the worker thread that serves the data pipe, and the connect its READY runs. */
 interface ConoutConnectionInternals {
   connectSocket?: (socket: unknown) => void;
-  _worker?: { terminate?: () => Promise<number>; on?: (event: 'error', fn: (err: unknown) => void) => unknown };
+  _worker?: { terminate?: () => Promise<number> };
 }
 
 /** Said once: guardLateReady met a node-pty it does not fit. */
@@ -246,38 +246,6 @@ function guardLateReady(t: WindowsTerminalInternals): void {
     }
     return terminate();
   };
-}
-
-/**
- * PTY-EARLY-KILL-EPIPE-108. node-pty serves a terminal's output from a worker thread: the worker
- * reads the console's output pipe and pipes it to a pipe of its own, which the data socket here
- * connects to (`conoutSocket.pipe(workerSocket)`, worker/conoutSocketWorker.js). Its end of that
- * pipe has no 'error' listener. When the data socket is destroyed while the worker still has output
- * to hand over (node-pty's `_cleanUpProcess`, or guardLateReady, destroying it between connect() and
- * its 'connect' event: the worker accepts the connection and writes what it had buffered to a reader
- * that is already gone), the worker's write fails with EPIPE, uncaught in the worker. Node ends the
- * worker and hands the error to the Worker object on this thread as an 'error' event, node-pty does
- * not listen for it, and so it was thrown here outside any caller (measured 2026-11-17 with the real
- * worker file: connect() then destroy() in one turn, with output buffered, gives it every time).
- *
- * That EPIPE says only what this side already did: the reader is gone, on purpose. The worker has
- * nobody to serve (the one socket that connects to it is destroyed), and how the terminal's exit is
- * reported does not change: that rides on the socket's close. So this listens on the worker and takes
- * exactly that error: EPIPE, with the data socket destroyed. Anything else a worker dies of is
- * thrown again, from the listener, as it was before: it is not this function's to judge.
- * Returns false, changing nothing, for a terminal without these internals (not Windows, another
- * node-pty): the pin test fails.
- */
-export function guardConoutWorker(proc: pty.IPty): boolean {
-  const t = proc as unknown as WindowsTerminalInternals;
-  const sock = t._socket as (WindowsTerminalInternals['_socket'] & { destroyed?: boolean }) | undefined;
-  const worker = t._agent?._conoutSocketWorker?._worker;
-  if (!sock || !worker || typeof worker.on !== 'function') return false;
-  worker.on('error', (err: unknown): void => {
-    if ((err as { code?: unknown } | null)?.code === 'EPIPE' && sock.destroyed === true) return;
-    throw err;
-  });
-  return true;
 }
 
 /**
@@ -1217,8 +1185,6 @@ export class PtyManager {
       // PTY-HOLD-NODEPTY-HANDOFF), the start stamp elsewhere.
       const hold = holdRoot(proc.pid, process.platform, rootHandoff(proc));
       const rootId = process.platform === 'win32' ? undefined : pidIdentity(proc.pid);
-      // PTY-EARLY-KILL-EPIPE-108: the output worker's EPIPE for a data socket destroyed here is taken.
-      guardConoutWorker(proc);
 
       // Capture THIS session object so the proc's callbacks can tell whether the
       // id still belongs to them. A model change / restart does kill()+spawn()

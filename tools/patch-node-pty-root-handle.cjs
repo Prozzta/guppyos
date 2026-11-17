@@ -41,7 +41,16 @@
 //                            second copy. Prints one line per check, then PACKAGED NODE-PTY OK
 //                            (exit 0) or PACKAGED NODE-PTY FAILED (exit 1). Runs on any platform.
 //
-//   --check          change nothing; exit 1 unless all three files are in their patched form
+// PTY-EARLY-KILL-EPIPE-108 adds a fourth edit.
+//   lib/worker/conoutSocketWorker.js   the output worker pipes the console's output to the data
+//                            socket with no error listener on either end. A data socket destroyed
+//                            before the worker's write gave EPIPE, uncaught in the worker, and the
+//                            main thread threw it outside any caller. Patched, both ends have a
+//                            listener: EPIPE or ECONNRESET on a destroyed socket is a quiet end,
+//                            anything else is thrown as before. The edits are in the pins module.
+//                            pristine -> patch -> must equal WORKER_JS_QUIET_SHA256.
+//
+//   --check          change nothing; exit 1 unless all four files are in their patched form
 //   --root <dir>     another node-pty tree (the self-test only)
 // Any other argument is refused: this tool rewrites files, so it never guesses.
 const fs = require('node:fs');
@@ -144,7 +153,8 @@ const UTILS_EDITS = [
 const targets = [
   { rel: ['src', 'win', 'conpty.cc'], from: pins.CONPTY_CC_PATCHED_SHA256, fromName: 'the #922-patched form (run patch-node-pty-race-fix.cjs first)', to: pins.CONPTY_CC_BUILT_SHA256, edits: CONPTY_EDITS },
   { rel: ['lib', 'windowsPtyAgent.js'], from: pins.AGENT_JS_PRISTINE_SHA256, fromName: 'pristine 1.1.0', to: pins.AGENT_JS_HANDOFF_SHA256, edits: AGENT_EDITS },
-  { rel: ['lib', 'utils.js'], from: pins.UTILS_JS_PRISTINE_SHA256, fromName: 'pristine 1.1.0', to: pins.UTILS_JS_BUILT_ONLY_SHA256, edits: UTILS_EDITS }
+  { rel: ['lib', 'utils.js'], from: pins.UTILS_JS_PRISTINE_SHA256, fromName: 'pristine 1.1.0', to: pins.UTILS_JS_BUILT_ONLY_SHA256, edits: UTILS_EDITS },
+  { rel: ['lib', 'worker', 'conoutSocketWorker.js'], from: pins.WORKER_JS_PRISTINE_SHA256, fromName: 'pristine 1.1.0', to: pins.WORKER_JS_QUIET_SHA256, edits: pins.WORKER_JS_EDITS }
 ];
 
 // Decide everything first, write afterwards: a refusal leaves every file as it was.
@@ -168,6 +178,6 @@ for (const t of targets) {
   writes.push([file, source]);
 }
 for (const [file, source] of writes) fs.writeFileSync(file, source, 'utf8');
-if (check) console.log(`${TAG} node-pty hands over the root handle and loads built binaries only (conpty.cc, windowsPtyAgent.js, utils.js)`);
+if (check) console.log(`${TAG} node-pty hands over the root handle, loads built binaries only and its output worker handles socket errors (conpty.cc, windowsPtyAgent.js, utils.js, worker/conoutSocketWorker.js)`);
 else if (writes.length === 0) console.log(`${TAG} root-handle handoff already applied`);
 else console.log(`${TAG} applied the root-handle handoff to node-pty ${version} (${writes.length} file(s))`);
