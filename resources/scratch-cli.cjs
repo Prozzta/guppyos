@@ -3,7 +3,7 @@
 'use strict';
 const http = require('http');
 const EXIT = { ok: 0, refused: 1, usage: 2, unavailable: 3, timeout: 4 };
-const USAGE = 'usage: scratch register <path> --card CARD-ID | scratch touch <path> | scratch detach --private <path> | scratch status | scratch reap\n';
+const USAGE = 'usage: scratch register <path> --card CARD-ID | scratch register-fixture <path> --card CARD-ID | scratch touch <path> | scratch detach --private <path> | scratch status | scratch reap\n';
 
 function parseArgs(argv) {
   if (argv.length === 1 && /^(?:-h|--help)$/.test(argv[0])) return { help: true };
@@ -11,6 +11,7 @@ function parseArgs(argv) {
   if (argv.length === 2 && argv[0] === 'touch' && argv[1]) return { op: 'touch', path: argv[1] };
   if (argv.length === 3 && argv[0] === 'detach' && argv[1] === '--private' && argv[2]) return { op: 'detach-private', path: argv[2] };
   if (argv.length === 4 && argv[0] === 'register' && argv[1] && argv[2] === '--card' && argv[3]) return { op: 'register', path: argv[1], card: argv[3] };
+  if (argv.length === 4 && argv[0] === 'register-fixture' && argv[1] && argv[2] === '--card' && argv[3]) return { op: 'register-fixture', path: argv[1], card: argv[3] };
   throw new Error('expected a managed scratch command');
 }
 function post(urlText, data) {
