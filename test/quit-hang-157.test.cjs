@@ -332,7 +332,7 @@ test('R1 / M1: reset and changeHome shut the memory worker down and AWAIT it bef
   const rStop = reset.indexOf('memoryStopped = nativeMemory.shutdown()');
   const rAwait = reset.indexOf('await memoryStopped;');
   const rIdx = reset.indexOf('deleteMemoryIndex(memoryIndex)');
-  const rRm = reset.indexOf('rmSync(hiveDir');
+  const rRm = reset.indexOf('await removePathLinkSafe(hiveDir)');
   assert.ok(rStop > 0 && rAwait > rStop && rIdx > rAwait && rRm > rAwait, 'shutdown -> await -> delete the index and the hive');
   const change = between(INDEX, "ipcMain.handle('config:changeHome', async", '\n});\n');
   const cStop = change.indexOf('memoryStopped = nativeMemory.shutdown()');

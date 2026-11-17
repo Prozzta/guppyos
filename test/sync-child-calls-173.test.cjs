@@ -248,7 +248,8 @@ test('WIRING: reset awaits killAllAsync, still BEFORE hive.dispose and the rm', 
   const kill = body.indexOf('await ptyManager.killAllAsync()');
   assert.ok(kill > 0, 'reset awaits the async bulk kill');
   assert.ok(kill < body.indexOf('hive.dispose()'), 'kill before hive.dispose');
-  assert.ok(kill < body.indexOf('rmSync(hiveDir'), 'kill before the rm');
+  const rm = body.indexOf('await removePathLinkSafe(hiveDir)');
+  assert.ok(rm > 0 && kill < rm, 'kill before the rm');
   assert.ok(kill < body.indexOf('app.exit('), 'kill before the exit');
   assert.doesNotMatch(body, /killAll\(\)/);
 });

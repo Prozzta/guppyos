@@ -49,40 +49,40 @@ test('a skill folder name that could escape its directory is refused', () => {
   assert.equal(safeSkillDirName('a/../../b'), 'b');
 });
 
-test('uninstall refuses anything outside a managed skills root', (t) => {
+test('uninstall refuses anything outside a managed skills root', async (t) => {
   const tmp = tmpdir(t);
   const victim = path.join(tmp, 'important-work');
   fs.mkdirSync(victim, { recursive: true });
-  const res = uninstallSkill(victim, { cwds: [] });
+  const res = await uninstallSkill(victim, { cwds: [] });
   assert.equal(res.ok, false);
   assert.match(res.error, /not inside a skills directory/i);
   assert.ok(fs.existsSync(victim), 'the folder must still be there');
 });
 
-test('uninstall refuses a folder inside a skills root with no SKILL.md', (t) => {
+test('uninstall refuses a folder inside a skills root with no SKILL.md', async (t) => {
   const tmp = tmpdir(t);
   const notASkill = path.join(tmp, '.claude', 'skills', 'src');
   fs.mkdirSync(notASkill, { recursive: true });
   fs.writeFileSync(path.join(notASkill, 'index.ts'), 'export {}');
-  const res = uninstallSkill(notASkill, { cwds: [tmp] });
+  const res = await uninstallSkill(notASkill, { cwds: [tmp] });
   assert.equal(res.ok, false);
   assert.match(res.error, /SKILL/i);
   assert.ok(fs.existsSync(notASkill));
 });
 
-test('uninstall removes a real skill folder inside a project root', (t) => {
+test('uninstall removes a real skill folder inside a project root', async (t) => {
   const tmp = tmpdir(t);
   const skill = path.join(tmp, '.claude', 'skills', 'demo');
   fs.mkdirSync(skill, { recursive: true });
   fs.writeFileSync(path.join(skill, 'SKILL.md'), '---\nname: demo\n---\n');
-  assert.equal(uninstallSkill(skill, { cwds: [tmp] }).ok, true);
+  assert.equal((await uninstallSkill(skill, { cwds: [tmp] })).ok, true);
   assert.ok(!fs.existsSync(skill));
 });
 
-test('uninstall will not delete the skills root itself', (t) => {
+test('uninstall will not delete the skills root itself', async (t) => {
   const tmp = tmpdir(t);
   const root = path.join(tmp, '.claude', 'skills');
   fs.mkdirSync(root, { recursive: true });
-  assert.equal(uninstallSkill(root, { cwds: [tmp] }).ok, false);
+  assert.equal((await uninstallSkill(root, { cwds: [tmp] })).ok, false);
   assert.ok(fs.existsSync(root));
 });
