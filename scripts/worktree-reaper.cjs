@@ -259,6 +259,40 @@ function removeLinks(dir, ops) {
   return n;
 }
 
+const RETRY_CODES = new Set(['EBUSY', 'ENOTEMPTY', 'EPERM', 'EACCES', 'EMFILE', 'ENFILE']);
+function pause(ms) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }
+/** `fn`, tried again twice (100 ms, 200 ms) on the codes a busy Windows folder gives; then it throws. */
+function retrying(fn) {
+  for (let i = 0; ; i++) {
+    try { return fn(); } catch (err) { if (i >= 2 || !RETRY_CODES.has(err && err.code)) throw err; pause(100 * (i + 1)); }
+  }
+}
+
+/**
+ * Delete the tree at `p` WITHOUT ever following a link (ELECTRON-RMSYNC-REAPER-108).
+ * Agents run this script through $HIVE_NODE or the shim, which is Electron as Node, and Electron's
+ * recursive fs.rmSync deletes THROUGH a Windows junction: it empties the folder the link points at
+ * (measured on 45.3.0; RUNTIME PIN in test/electron-rmsync-link-safe.test.cjs). So there is no
+ * recursive rm here: every entry is lstat'ed, a link is removed as a link, a folder is emptied and
+ * then removed, a file is unlinked. removeLinks() still runs first (it counts the links); this
+ * walk does not depend on it. Plain CommonJS on purpose: the script cannot import src/main.
+ */
+function removeTree(p, ops) {
+  const st = ops.lstatSync(p);
+  if (st.isSymbolicLink()) { try { ops.unlinkSync(p); } catch { ops.rmdirSync(p); } return; }
+  if (st.isDirectory()) {
+    for (const nm of ops.readdirSync(p)) removeTree(path.join(p, nm), ops);
+    retrying(() => ops.rmdirSync(p));
+    return;
+  }
+  retrying(() => {
+    try { ops.unlinkSync(p); } catch (err) {
+      if (!err || (err.code !== 'EPERM' && err.code !== 'EACCES')) throw err;
+      ops.chmodSync(p, 0o666); ops.unlinkSync(p);   // a read-only file (git objects are)
+    }
+  });
+}
+
 function applyReap(plan, { root, repos = [], now = Date.now(), ops = fs, prune = (r) => gitOk(r, ['worktree', 'prune']), exes = runningExes } = {}) {
   const results = [];
   const running = plan.some((e) => e.action === 'reap') ? exes() : [];   // re-listed: an app may have started since the plan
@@ -279,7 +313,7 @@ function applyReap(plan, { root, repos = [], now = Date.now(), ops = fs, prune =
         }
       } else md = archiveMd(tomb, dest, ops);
       links = removeLinks(tomb, ops);
-      ops.rmSync(tomb, { recursive: true, force: false, maxRetries: 2 });
+      removeTree(tomb, ops);
       results.push({ name: e.name, result: 'deleted', md, links });
     } catch (err) {
       results.push({ name: e.name, result: 'partial', md, links, error: err.code || String(err) });
@@ -329,7 +363,7 @@ function main(argv, out = (s) => process.stdout.write(s + '\n'), opts = {}) {
   return { plan, results };
 }
 
-module.exports = { parseVersion, shippedVersions, shippedTags, runningExes, isBare, planReap, collectFacts, applyReap, archiveMd, removeLinks, main, DAY_MS, DEFAULT_KEEP, ARCHIVE_DIR };
+module.exports = { parseVersion, shippedVersions, shippedTags, runningExes, isBare, planReap, collectFacts, applyReap, archiveMd, removeLinks, removeTree, main, DAY_MS, DEFAULT_KEEP, ARCHIVE_DIR };
 
 if (require.main === module) {
   try { main(process.argv.slice(2)); } catch (e) { process.stderr.write(`${e.message}\n`); process.exit(2); }

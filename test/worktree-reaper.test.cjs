@@ -254,7 +254,7 @@ test('REAL fixture: an exe that started after the plan keeps its folder (re-list
 function partialChecks(R) {
   const fx = fixture();
   const plan = R.planReap(R.collectFacts({ root: fx.work, repos: [fx.repo], now: fx.now, exes: [] }));
-  const ops = { ...fs, rmSync: (p, o) => { if (path.basename(p).startsWith('andy-cut175.reaping-')) throw Object.assign(new Error('locked'), { code: 'EBUSY' }); return fs.rmSync(p, o); } };
+  const ops = { ...fs, rmdirSync: (p, o) => { if (path.basename(p).startsWith('andy-cut175.reaping-')) throw Object.assign(new Error('locked'), { code: 'EBUSY' }); return fs.rmdirSync(p, o); } };
   const results = R.applyReap(plan, { root: fx.work, repos: [fx.repo], now: fx.now, ops, exes: () => [] });
   const res = Object.fromEntries(results.map((r) => [r.name, r]));
   assert.equal(res['andy-cut175'].result, 'partial');
