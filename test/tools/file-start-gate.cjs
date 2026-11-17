@@ -59,7 +59,7 @@ function claim(p) {
   }
 }
 
-/** This process's claim folder, when it goes on without a slot. */
+/** Removes this process's claim folder: take() calls it when the file goes on without a slot. */
 function unclaim(dir) {
   try { fs.rmSync(path.join(dir, `claim-${process.pid}`), { recursive: true, force: true }); } catch { /* the gate is gone */ }
 }
@@ -110,17 +110,19 @@ function tryTake(dir, slots, now = Date.now, make = claim) {
  * Waits for a slot, up to waitMs; returns the slot (or -1) and the time waited. A create fault on every
  * slot is a pending delete for a moment; FAULT_POLLS of them in a row is a gate folder that cannot be
  * written (EACCES, EPERM), and waiting the full waitMs in every file would add that to every wave.
+ * A file that goes on without a slot leaves no claim folder behind.
  */
 function take(dir, slots, { waitMs = WAIT_MS, now = Date.now, sleep = pause, make = claim } = {}) {
   const t0 = now();
   if (slots <= 0) return { slot: -1, waitMs: 0, timedOut: false };
   let faulted = 0;
+  const out = (r) => { if (r.slot < 0) unclaim(dir); return r; };
   for (;;) {
     const slot = tryTake(dir, slots, now, make);
     faulted = slot === -3 ? faulted + 1 : 0;
-    if (faulted >= FAULT_POLLS) return { slot: -1, waitMs: now() - t0, timedOut: false, faulted: true };
-    if (slot !== -1 && slot !== -3) return { slot: Math.max(slot, -1), waitMs: now() - t0, timedOut: false };
-    if (now() - t0 >= waitMs) return { slot: -1, waitMs: now() - t0, timedOut: true };
+    if (faulted >= FAULT_POLLS) return out({ slot: -1, waitMs: now() - t0, timedOut: false, faulted: true });
+    if (slot !== -1 && slot !== -3) return out({ slot: Math.max(slot, -1), waitMs: now() - t0, timedOut: false });
+    if (now() - t0 >= waitMs) return out({ slot: -1, waitMs: now() - t0, timedOut: true });
     sleep(POLL_MS);
   }
 }
@@ -147,7 +149,6 @@ function gate(env = process.env) {
   const bornMs = Math.round(Date.now() - process.uptime() * 1000);
   const gateMs = Date.now();
   const got = take(dir, slots);
-  if (got.slot < 0) unclaim(dir);
   const file = path.relative(process.cwd(), process.argv[1] || '') || '?';
   if (got.timedOut) process.stderr.write(`[test-runner] ${file} waited ${got.waitMs} ms for a start slot (LOAD-BURST-196) and starts without one\n`);
   if (got.faulted) process.stderr.write(`[test-runner] ${file}: no start slot can be created in ${dir} (LOAD-BURST-196); it starts without one\n`);

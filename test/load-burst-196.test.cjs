@@ -156,6 +156,7 @@ K.waits = (g = G, d) => {
   assert.equal(r.slot, -1);
   assert.equal(r.timedOut, true, 'A FULL GATE WAITS A BOUNDED TIME, THEN STARTS WITHOUT A SLOT');
   assert.ok(r.waitMs >= 1000 && r.waitMs < 1100);
+  assert.deepEqual(fs.readdirSync(d).filter((f) => f.startsWith('claim-')), [], 'A FILE THAT GOES ON WITHOUT A SLOT LEAVES NO CLAIM FOLDER BEHIND');
   // No gate folder: nothing to wait for.
   clock = 0;
   const gone = g.take(path.join(d, 'nope'), 2, { waitMs: 1000, now, sleep });
@@ -309,10 +310,11 @@ const MUTANTS = [
   { name: 'a waiter removes a slot folder that is not empty', file: GATE_FILE, edits: [["  try { fs.rmdirSync(p); } catch { /* held (not empty), or gone meanwhile */ }", "  try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* held (not empty), or gone meanwhile */ }"]], killer: 'takeover', dies: /A WAITER NEVER REMOVES A NEWER HOLDER/ },
   { name: 'a cleared slot folder is left behind', file: GATE_FILE, edits: [["  try { fs.rmdirSync(p); } catch { /* held (not empty), or gone meanwhile */ }", '']], killer: 'takeover', dies: /A DEAD HOLDER IS TAKEN OVER/ },
   { name: 'the slot is made, then marked (two steps)', file: GATE_FILE, edits: [['  try { fs.renameSync(mine, p); } catch (e) {', "  try { fs.mkdirSync(p); fs.writeFileSync(path.join(p, String(process.pid)), ''); } catch (e) {"]], killer: 'takeover', dies: /A SLOT NEVER EXISTS WITHOUT ITS HOLDER IN IT/ },
+  { name: 'a file without a slot leaves its claim folder (Jim G2)', file: GATE_FILE, edits: [['  const out = (r) => { if (r.slot < 0) unclaim(dir); return r; };', '  const out = (r) => r;']], killer: 'waits', dies: /A FILE THAT GOES ON WITHOUT A SLOT LEAVES NO CLAIM FOLDER BEHIND/ },
   { name: 'the wait is unbounded', file: GATE_FILE, edits: [['    if (now() - t0 >= waitMs) return', '    if (now() - t0 >= Infinity) return']], killer: 'waits', dies: /A FULL GATE WAITS A BOUNDED TIME|Infinity|timed out/, guard: true },
   { name: 'a missing gate folder is waited on', file: GATE_FILE, edits: [["      if (e.code === 'ENOENT' || e.code === 'ENOTDIR') return -2;", '']], killer: 'waits', dies: /A MISSING GATE FOLDER IS NO WAIT/ },
   { name: 'any failed create is a missing gate (the after FULL: starts without a slot)', file: GATE_FILE, edits: [["      if (e.code !== 'EEXIST') { faults++; continue; }", "      if (e.code !== 'EEXIST') return -2;"]], killer: 'waits', dies: /A SLOT THAT CANNOT BE CREATED IS BUSY, NOT A MISSING GATE/ },
-  { name: 'a persistent create fault waits the full time', file: GATE_FILE, edits: [['    if (faulted >= FAULT_POLLS) return { slot: -1, waitMs: now() - t0, timedOut: false, faulted: true };\n', '']], killer: 'waits', dies: /A CREATE FAULT THAT PERSISTS ENDS THE WAIT EARLY/ },
+  { name: 'a persistent create fault waits the full time', file: GATE_FILE, edits: [['    if (faulted >= FAULT_POLLS) return out({ slot: -1, waitMs: now() - t0, timedOut: false, faulted: true });\n', '']], killer: 'waits', dies: /A CREATE FAULT THAT PERSISTS ENDS THE WAIT EARLY/ },
   { name: 'a passing create fault ends the wait', file: GATE_FILE, edits: [['if (faulted >= FAULT_POLLS)', 'if (faulted >= 1)']], killer: 'waits', dies: /A PASSING CREATE FAULT IS WAITED OUT/ },
   // Live: the preload runs from a mutated copy of the gate file (it requires only fs and path).
   { name: 'the slot is given back at exit (Jim a5a246)', file: GATE_FILE, live: true, edits: [['  setImmediate(finish);', "  process.once('beforeExit', finish);"]], killer: 'release', dies: /THE SLOT IS GIVEN BACK ONCE THE TOP LEVEL HAS RUN, NOT AT EXIT/ },
