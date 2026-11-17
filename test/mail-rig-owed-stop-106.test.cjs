@@ -43,7 +43,10 @@ const request = (rig) => surface(rig, { act: 'request', subject: 'three steps', 
 // decision. A key typed before the stop cue ages by the whole cue -> fake agent -> Stop hook path, which
 // under suite load outlasted the window (MAIL-RIG-OWED-STOP-TIMEOUT-108): the Stop was blocked and the
 // manual turn never ended. So the key is armed here and typed (real pty HUMAN write) at the decision.
-const humanInput = (rig) => ({ on: () => rig.call('humanTypeAtStop', { id: ID, text: '\x15' }), off: async () => {} });
+// The window boundary itself (a key just inside / just past it) is pinned in codex-owed-stop-106.
+// off() disarms a key no decision consumed, so a case whose Stop never reaches decide cannot leak it
+// into the next case.
+const humanInput = (rig) => ({ on: () => rig.call('humanTypeAtStop', { id: ID, text: '\x15' }), off: () => rig.call('humanTypeAtStopClear', { id: ID }) });
 const HUMAN_QUIET_MS = Number(/OWED_STOP_HUMAN_QUIET_MS = ([\d_]+);/.exec(require('node:fs').readFileSync(require('node:path').join(__dirname, '../src/main/owedStop.ts'), 'utf8'))[1].replace(/_/g, ''));
 async function done(rig, reqId) {
   await cue(rig, { cue: 'reply', to: 'god-1', act: 'done', in_reply_to: reqId, subject: 'done', body: 'all three steps done' });
