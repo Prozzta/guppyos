@@ -135,17 +135,71 @@ function stillOwed(x: LedgerEntryLike): boolean {
  * Only an unsolicited status FYI is left to the hold. The ledgers are read, never written; a reader
  * that throws is caught by mailWakeClass and fails open (it wakes).
  */
-export function solicitedQuietMail(e: MailWakeFacts, recipientId: string, ledgers: WakeLedgers): boolean {
+export function solicitedQuietMail(e: MailWakeFacts, recipientId: string, ledgers: WakeLedgers | WakeLedgerIndex): boolean {
+  const index = isWakeLedgerIndex(ledgers) ? ledgers : indexWakeLedgers(ledgers);
   if (e.inReplyTo) {
-    const orig = ledgers.entries(e.from).find((x) => x.id === e.inReplyTo || (!!x.senderId && x.senderId === e.inReplyTo));
+    const orig = index.of(e.from).byId.get(e.inReplyTo);
     if (orig && orig.from === recipientId) return true;
   }
   if (e.humanRelay === true) return true;
   if (e.broadcast === true && HOLD_NOTICE_RE.test(String(e.subject ?? ''))) return true;
-  const sameThread = (x: LedgerEntryLike) => (!!x.cardId && x.cardId === e.cardId) || (!!x.conversation && x.conversation === e.conversation);
-  const toSender = ledgers.entries(e.from).filter((x) => x.from === recipientId && stillOwed(x));
-  if (toSender.length && (!e.cardId || toSender.some(sameThread))) return true;
-  return ledgers.entries(recipientId).some((x) => stillOwed(x) && sameThread(x));
+  const sameThread = (x: OwedThreads | undefined) => !!x && ((!!e.cardId && x.cards.has(e.cardId)) || (!!e.conversation && x.conversations.has(e.conversation)));
+  const toSender = index.of(e.from).owedFrom.get(recipientId);
+  if (toSender && (!e.cardId || sameThread(toSender))) return true;
+  return sameThread(index.of(recipientId).owed);
+}
+
+/** The cards and conversations of a set of asks still owed (a set is made only when it has an ask). */
+interface OwedThreads { cards: Set<string>; conversations: Set<string> }
+
+/** One holder's ledger, walked once: what the solicited rules ask of it, each answered by a lookup. */
+interface HolderIndex {
+  /** The first entry in ledger order with this id or this sender_id (rule a1's `find`). */
+  byId: Map<string, LedgerEntryLike>;
+  /** The asks the holder still owes, by who sent them (rule c). */
+  owedFrom: Map<string, OwedThreads>;
+  /** Every ask the holder still owes (rule a2). */
+  owed: OwedThreads;
+}
+
+/**
+ * LAG-QUIET-PENDING-108: the ledgers as solicitedQuietMail reads them, each holder's ledger read
+ * and walked at most ONCE for the life of the index. The hook makes one per pass, so a pass over
+ * N pending ids costs one walk per distinct holder (the recipient and each sender) instead of up to
+ * three walks per id. The answers are the ones the walks gave. A reader that throws is not kept:
+ * it is asked again for the next id, and throws again (mailWakeClass fails open, as before).
+ */
+export interface WakeLedgerIndex { of(holder: string): HolderIndex }
+
+const WAKE_LEDGER_INDEX = Symbol('wakeLedgerIndex');
+function isWakeLedgerIndex(x: WakeLedgers | WakeLedgerIndex): x is WakeLedgerIndex {
+  return (x as { [WAKE_LEDGER_INDEX]?: true })[WAKE_LEDGER_INDEX] === true;
+}
+
+export function indexWakeLedgers(ledgers: WakeLedgers): WakeLedgerIndex {
+  const made = new Map<string, HolderIndex>();
+  const threads = (): OwedThreads => ({ cards: new Set(), conversations: new Set() });
+  const note = (t: OwedThreads, x: LedgerEntryLike) => {
+    if (x.cardId) t.cards.add(x.cardId);
+    if (x.conversation) t.conversations.add(x.conversation);
+  };
+  const of = (holder: string): HolderIndex => {
+    const have = made.get(holder);
+    if (have) return have;
+    const h: HolderIndex = { byId: new Map(), owedFrom: new Map(), owed: threads() };
+    for (const x of ledgers.entries(holder)) {
+      if (!h.byId.has(x.id)) h.byId.set(x.id, x);
+      if (x.senderId && !h.byId.has(x.senderId)) h.byId.set(x.senderId, x);
+      if (!stillOwed(x)) continue;
+      note(h.owed, x);
+      let t = h.owedFrom.get(x.from);
+      if (!t) h.owedFrom.set(x.from, t = threads());
+      note(t, x);
+    }
+    made.set(holder, h);
+    return h;
+  };
+  return { of, [WAKE_LEDGER_INDEX]: true } as WakeLedgerIndex;
 }
 
 export type MailWakeClass = 'wake' | 'quiet';

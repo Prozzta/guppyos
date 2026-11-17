@@ -222,7 +222,7 @@ import { newBreadcrumbMemory, shouldLogBreadcrumb } from './wakeBreadcrumb';
 import { forgetWakeRows, newWakeRowState, planWakeRow, takeFolded } from './wakeRowPolicy';
 import { WakeTelemetry } from './wakeTelemetry';
 import { inboxWakeTextForProvider } from '../shared/hiveNudge';
-import { quietHolds, quietMailHoldMs, solicitedQuietMail } from '../shared/mailWakeClass';
+import { indexWakeLedgers, quietHolds, quietMailHoldMs, solicitedQuietMail } from '../shared/mailWakeClass';
 import { mailNudgeMode, type MailNudgeMode } from './mailSurface';
 import { fetchHireManifest, readHireManifestFiles } from './hire';
 import { HIRE_LINK_SCHEMES, isHireLinkArg, parseHireDeepLink, type HireManifest } from '../shared/hire';
@@ -1231,7 +1231,9 @@ inboxWake = new InboxWakeBridge({
       // Jim B1 + QUIET-HOLD-ACT-ONLY (1.1.98): solicited mail wakes (solicitedQuietMail): a reply
       // to anything this agent sent, a Human relay or hold broadcast, or an inform on a card or
       // thread with an open ask between the two. The asks it sent sit in the RECEIVERS' ledgers.
-      const ledgers = { entries: (holder: string) => Object.values(hive.mail.ledger(holder).entries) };
+      // LAG-QUIET-PENDING-108: one index for the pass. Each holder's ledger is read (an existsSync
+      // of its inbox) and walked once, however many pending ids ask about it.
+      const ledgers = indexWakeLedgers({ entries: (holder: string) => Object.values(hive.mail.ledger(holder).entries) });
       return quietHolds(ids.map((id) => entries[id]).filter((e) => !!e), hookServer.mailChannel(agentId).mode, holdMs, now,
         (e) => solicitedQuietMail(e, agentId, ledgers));
     }
