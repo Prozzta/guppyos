@@ -137,10 +137,13 @@ test('a junction injected after the initial walk is never recursively followed',
   const base = path.join(jail, 'late-junction'); const root = path.join(base, 'tree'); const live = path.join(base, 'live');
   fs.mkdirSync(root, { recursive: true }); fs.mkdirSync(live, { recursive: true });
   fs.writeFileSync(path.join(root, 'listed-first'), 'remove'); fs.writeFileSync(path.join(live, 'keep'), 'live');
-  await assert.rejects(scratch.safeRemoveTree(root, async () => fs.symlinkSync(live, path.join(root, 'late'), 'junction')));
+  await scratch.safeRemoveTree(root, async () => fs.symlinkSync(live, path.join(root, 'late'), 'junction'));
   assert.equal(fs.readFileSync(path.join(live, 'keep'), 'utf8'), 'live');
-  assert.equal(fs.existsSync(path.join(root, 'late')), true);
-  fs.rmdirSync(path.join(root, 'late')); fs.rmdirSync(root);
+  assert.equal(fs.existsSync(root), false);
+  const syncRoot = path.join(base, 'sync-tree'); fs.mkdirSync(syncRoot, { recursive: true }); fs.writeFileSync(path.join(syncRoot, 'listed-first'), 'remove');
+  scratch.safeRemoveTreeSync(syncRoot, () => fs.symlinkSync(live, path.join(syncRoot, 'late'), 'junction'));
+  assert.equal(fs.readFileSync(path.join(live, 'keep'), 'utf8'), 'live');
+  assert.equal(fs.existsSync(syncRoot), false);
 });
 
 test('link-safe scratch removal preserves junction targets under installed Electron as Node', { skip: process.platform !== 'win32' }, () => {
