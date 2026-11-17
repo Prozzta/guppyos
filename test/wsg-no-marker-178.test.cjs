@@ -157,7 +157,7 @@ test('fix 4: a damaged file that pauses changes is never dismissible', () => K.p
 
 test('fix 4 wiring: the banner filters through visibleIssues and offers Dismiss only for dismissible issues', () => {
   const b = readSource('src/renderer/src/components/IntegrityRepairBanner.tsx');
-  assert.match(b, /import \{ isDismissible, issueKey, visibleIssues \} from '@shared\/integrityBanner';/);
+  assert.match(b, /import \{ isDismissible, issueKey, sameIssues, visibleIssues \} from '@shared\/integrityBanner';/);
   assert.match(b, /const issues = visibleIssues\(allIssues, dismissed\);/);
   assert.match(b, /\{isDismissible\(issue\) && \(\s*<button[\s\S]{0,120}data-integrity-dismiss=""\s*onClick=\{\(\) => dismiss\(issue\)\}/);
   assert.match(b, /\{issue\.title && <span[^>]*>\{issue\.title\}<\/span>\}/);

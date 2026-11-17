@@ -18,7 +18,7 @@
  *   U. the selectors themselves, against the real store: equal across a status/action/progress/
  *      runningTools/contextTokens patch, different on add/remove/reorder/ptyId/id change.
  */
-import { renderCounts, resetRenderCounts } from './render-counter';
+import { renderCounts, resetRenderCounts, traceRenders, renderCauses } from './render-counter';
 import { createRoot } from 'react-dom/client';
 import { act } from 'react';
 import { App } from '../../../src/renderer/src/App';
@@ -58,6 +58,17 @@ window.setInterval = ((fn: TimerHandler, ms?: number, ...rest: unknown[]) => (/\
 
 const N = 50;
 const settle = (ms = 300) => act(async () => { await new Promise((r) => setTimeout(r, ms)); });
+/**
+ * APP-SHALLOW-LATE-RENDER-107: the first resize delivery, by name. The detail panel and its tab
+ * row each learn their width from a ResizeObserver, and the first answer is one render of each at
+ * startup (compactHeader / compact, false -> true at the default sidebar width). The browser
+ * delivers it with a rendering frame, which a loaded machine gives a hidden window late: it used
+ * to land in phase A, past every quiet window. Observers are told in the order they were made,
+ * in one round, so an observer made after the panel mounted hears no sooner than the panel's.
+ */
+const firstResize = (el: Element) => act(async () => {
+  await new Promise<void>((done) => { const ro = new ResizeObserver(() => { ro.disconnect(); done(); }); ro.observe(el); });
+});
 const mk = (id: string, extra: Partial<Agent> = {}): Agent => ({
   id, name: id.toUpperCase(), character: 'michael', accent: 'blue', description: '', project: 'p', tmuxTarget: '', cwd: 'C:/x',
   status: 'idle', action: 'idle', progress: 0, ...extra
@@ -108,7 +119,17 @@ window.__harnessRun = async () => {
     await settle(600);
     // Seed the roster after the hive hooks settled so nothing replaces it; no ptyIds, so no
     // terminal pre-warm is attempted against the stub bridge.
+    traceRenders(true);
+    const tSel = performance.now();
     await act(async () => { useStore.setState({ agents: [mk('god', { isGod: true }), mk('a1'), mk('a2')], selectedId: 'a1' } as never); });
+    await firstResize(host);
+    // What the first resize answer rendered (not a mount), with the state that changed for it.
+    const changed = (h: string) => { const [was, now] = h.slice(h.indexOf(': ') + 2).split(' -> '); return was !== now; };
+    const resized = {
+      ms: Math.round(performance.now() - tSel),
+      causes: renderCauses().filter((c) => !c.mount && /^(AgentDetailPanel|SidebarTabs)\d*$/.test(c.name)).map((c) => ({ ...c, hooks: c.hooks.filter(changed) }))
+    };
+    traceRenders(false);
     await settle(600);
     const floorMounted = !!host.querySelector('canvas');
 
@@ -125,8 +146,13 @@ window.__harnessRun = async () => {
     }
     settled.ms = Math.round(performance.now() - t0);
     resetRenderCounts();
+    traceRenders(true);
+    const tA0 = Math.round(performance.now());
     await tick('a2');
     const a = renderCounts();
+    traceRenders(false);
+    // Every render in phase A that is not one of the N per tick, with what changed for it.
+    const strayA = { fromMs: tA0, toMs: Math.round(performance.now()), causes: renderCauses().filter((c) => (a[c.name] ?? 0) < N) };
     resetRenderCounts();
     await tick('a1');
     const b = renderCounts();
@@ -137,7 +163,7 @@ window.__harnessRun = async () => {
 
     await act(async () => { root.unmount(); });
     host.remove();
-    window.harness.report({ ok: true, N, floorMounted, phaseA: pick(a), phaseB: pick(b), phaseC: pick(c), rawA: a, rawB: b, pins: selectorPins(), settled });
+    window.harness.report({ ok: true, N, floorMounted, phaseA: pick(a), phaseB: pick(b), phaseC: pick(c), rawA: a, rawB: b, strayA, resized, pins: selectorPins(), settled });
   } catch (e) {
     window.harness.report({ ok: false, error: e instanceof Error ? `${e.message}\n${e.stack}` : String(e) });
   }

@@ -34,3 +34,13 @@ export function isDismissible(issue: BannerIssue): boolean {
 export function visibleIssues<T extends BannerIssue>(issues: readonly T[], dismissed: ReadonlySet<string>): T[] {
   return issues.filter((issue) => !(isDismissible(issue) && dismissed.has(issueKey(issue))));
 }
+
+/**
+ * Is a fresh poll answer the list already shown (APP-SHALLOW-LATE-RENDER-107)? The banner polls
+ * every 2 s and each answer is a new array of new objects, so setting it as it came re-rendered
+ * the banner every 2 s for good, with nothing changed. Compared on every field the banner shows.
+ */
+export function sameIssues(a: readonly BannerIssue[], b: readonly BannerIssue[]): boolean {
+  const fields = (i: BannerIssue): string => JSON.stringify([i.file, i.quarantine ?? null, i.error, i.repaired === true, i.notice ?? null, i.title ?? null, i.details ?? null, i.raisedAt ?? null]);
+  return a.length === b.length && a.every((issue, k) => fields(issue) === fields(b[k]));
+}
