@@ -112,6 +112,22 @@ test('TERM-PATH-EXT-107: relative paths colour whole, bare names only with a lis
   assert.deepEqual(paths(mixed).filter((p) => !p.startsWith('C:') && !p.startsWith('/srv') && !p.startsWith('//')), []);
 });
 
+test('TERM-PATH-EXT-107 audit cases: case, dot-first, partial overlap, drive suffix, numbers', () => {
+  const paths = (value) => texts(value).filter((_, index) => kinds(value)[index] === 'path');
+  // S1: the bare-name extension lookup is case-insensitive.
+  assert.deepEqual(paths('see README.MD and SETUP.PS1'), ['README.MD', 'SETUP.PS1']);
+  // S2: a token that starts with the dot has no name, so it is not a path.
+  for (const plain of ['.md files', 'see .env']) assert.deepEqual(paths(plain), [], plain);
+  // S3: a span that only partly overlaps a URL is skipped, not just one the URL contains.
+  const glued = 'abc/https://x.io/a.md';
+  assert.ok(!paths(glued).includes(glued), paths(glued).join(' | '));
+  // S4: the drive rule takes the VS Code suffixes too, so a spaced drive path stays whole.
+  assert.deepEqual(paths('at C:\\Program Files\\a.ts(339,12) now'), ['C:\\Program Files\\a.ts(339,12)']);
+  assert.deepEqual(paths('at C:\\x\\a.ts(339, 12) now'), ['C:\\x\\a.ts(339, 12)']);
+  // S5: an extension needs a letter, so fractions and numbers after a slash stay plain.
+  for (const plain of ['50/50.5', 'v1/2.0', '3/4.5 cups']) assert.deepEqual(paths(plain), [], plain);
+});
+
 test('TERM-PATH-EXT-107: line/column suffix forms ported from VS Code colour with the path', () => {
   const paths = (value) => texts(value).filter((_, index) => kinds(value)[index] === 'path');
   for (const suffix of [':339', ':339:12', ':339:12-789', ':339:12-341.789', ':339.12', '#339', '#339:12',
