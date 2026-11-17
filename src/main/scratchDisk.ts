@@ -6,10 +6,13 @@
  */
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync } from 'node:fs';
+import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, symlinkSync } from 'node:fs';
 import { lstat, readdir } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { atomicWriteJson } from './atomicJson';
+import { findReparsePointsSync, removeReparsePointSync, safeRemoveTreeSync, unlinkReparsePointsUnderSync } from './fsSafeRemove';
+
+export { findReparsePointsSync, removeReparsePointSync, unlinkReparsePointsUnderSync } from './fsSafeRemove';
 
 export const SCRATCH_IDLE_MS = 48 * 60 * 60_000;
 export const SCRATCH_STATE_FILE = 'scratch-disk.json';
@@ -40,7 +43,7 @@ export interface ScratchFacts {
 }
 export interface ScratchPlan extends ScratchFacts { action: 'keep' | 'reap'; reason: string }
 
-export interface ScratchProcess { commandLine?: string | null }
+export interface ScratchProcess { commandLine?: string | null; cwd?: string | null }
 export interface ScratchSweepResult { reaped: string[]; kept: Array<{ path: string; owner: string; reason: string }> }
 
 /** True only for a direct child of `_work`; cache/state directories never qualify. */
@@ -141,9 +144,9 @@ export function detachPrivateNodeModules(hiveRoot: string, project: string, key:
   let target: string;
   try { target = realpathSync(nm); } catch { throw new Error('refused: node_modules junction is broken'); }
   if (resolve(target) !== resolve(entry)) throw new Error('refused: node_modules points at a different cache entry');
-  // Node removes a junction itself rather than traversing it; only after that succeeds
-  // do we copy the immutable cache into this caller's private tree.
-  rmSync(nm, { recursive: true, force: false, maxRetries: 3, retryDelay: 200 });
+  // Electron's rmSync follows a junction recursively.  Remove the link entry
+  // itself before copying, never its cache target.
+  removeReparsePointSync(nm);
   cpSync(entry, nm, { recursive: true, dereference: false, errorOnExist: true });
 }
 
@@ -153,7 +156,7 @@ export function refreshManagedNodeModules(hiveRoot: string, project: string, old
   if (oldKey) {
     const old = scratchCacheEntry(hiveRoot, oldKey);
     if (!isLink(nm) || resolve(realpathSync(nm)) !== resolve(old)) throw new Error('refused: prior managed cache junction changed');
-    rmSync(nm, { recursive: true, force: false, maxRetries: 3, retryDelay: 200 });
+    removeReparsePointSync(nm);
   }
   attachManagedNodeModules(hiveRoot, project, nextKey);
 }
@@ -208,13 +211,32 @@ export function gitScratchFacts(path: string): Pick<ScratchFacts, 'dirty' | 'onO
 }
 
 /** A `.git` directory is a shared repository and is never a disposable worktree. */
+function looksLikeGitDir(path: string): boolean {
+  try { return lstatSync(join(path, 'HEAD')).isFile() && lstatSync(join(path, 'objects')).isDirectory() && lstatSync(join(path, 'refs')).isDirectory(); }
+  catch { return false; }
+}
+
+/** A common repo, bare repo, or a `.git` directory is never a disposable jail. */
 export function scratchKind(path: string): 'worktree' | 'jail' | null {
   try {
     const dotGit = lstatSync(join(path, '.git'));
     return dotGit.isFile() ? 'worktree' : null;
   } catch {
-    try { return lstatSync(path).isDirectory() ? 'jail' : null; } catch { return null; }
+    try { return lstatSync(path).isDirectory() && !looksLikeGitDir(path) ? 'jail' : null; } catch { return null; }
   }
+}
+
+/** Refuse a candidate that is the common gitdir referenced by any `_work` worktree. */
+export function worktreeGitdirPointsInto(workRoot: string, candidate: string): boolean {
+  let names: string[]; try { names = readdirSync(workRoot); } catch { return false; }
+  return names.some((name) => {
+    const dotGit = join(workRoot, name, '.git');
+    try {
+      if (!lstatSync(dotGit).isFile()) return false;
+      const m = /^gitdir:\s*(.+)\s*$/im.exec(readFileSync(dotGit, 'utf8'));
+      return !!m && under(resolve(dirname(dotGit), m[1]), candidate);
+    } catch { return false; }
+  });
 }
 
 function processUses(path: string, rows: readonly ScratchProcess[] | null): boolean {
@@ -223,14 +245,13 @@ function processUses(path: string, rows: readonly ScratchProcess[] | null): bool
   // into a destructive operation.
   if (!rows) return true;
   const needle = resolve(path).replace(/\\/g, '/').toLowerCase();
-  return rows.some((p) => String(p.commandLine ?? '').replace(/\\/g, '/').toLowerCase().includes(needle));
+  return rows.some((p) => [p.commandLine, p.cwd].some((v) => String(v ?? '').replace(/\\/g, '/').toLowerCase().includes(needle)));
 }
 
-/** Remove links as links, then the verified root.  Caller must have planned/rechecked first. */
+/** Remove links as links, re-scan, then the verified link-free root.  Caller planned/rechecked first. */
 export function removeScratchRoot(workRoot: string, path: string): void {
   if (!managedScratchPath(workRoot, path)) throw new Error('refused: path is not a managed _work child');
-  // rmSync does not traverse a directory junction; its lstat semantics are the desired boundary.
-  rmSync(path, { recursive: true, force: false, maxRetries: 3, retryDelay: 200 });
+  safeRemoveTreeSync(path);
 }
 
 /**
@@ -242,6 +263,7 @@ export class ScratchDiskManager {
   private notified = new Set<string>();
   private disk: { bytes: number; measuredAt: number } | null = null;
   private measuring: Promise<void> | null = null;
+  private sweepTail: Promise<void> = Promise.resolve();
   constructor(
     private readonly hiveRoot: () => string | null,
     private readonly cardDone: (card: string) => boolean,
@@ -278,6 +300,7 @@ export class ScratchDiskManager {
     if (!managedScratchPath(work, path)) return { ok: false, line: 'refused: scratch must be a direct _work child' };
     const kind = scratchKind(path);
     if (!kind) return { ok: false, line: 'refused: path is missing or is a common repository (.git directory)' };
+    if (kind === 'jail' && worktreeGitdirPointsInto(work, path)) return { ok: false, line: 'refused: jail is referenced by a worktree gitdir file' };
     const state = readScratchState(root);
     const existing = state.records.find((r) => resolve(r.path) === path);
     if (existing && existing.owner !== owner) return { ok: false, line: 'refused: scratch is owned by another agent' };
@@ -351,6 +374,14 @@ export class ScratchDiskManager {
   }
 
   async sweep(owner?: string): Promise<ScratchSweepResult> {
+    let release!: () => void;
+    const previous = this.sweepTail;
+    this.sweepTail = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try { return await this.sweepNow(owner); } finally { release(); }
+  }
+
+  private async sweepNow(owner?: string): Promise<ScratchSweepResult> {
     const root = this.hiveRoot(); const work = this.workRoot();
     if (!root || !work) return { reaped: [], kept: [] };
     const state = readScratchState(root); const rows = await this.processes(); const result: ScratchSweepResult = { reaped: [], kept: [] };
