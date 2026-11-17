@@ -52,8 +52,12 @@ const STALL_MS = FLUSH_MS + 300;
 const CAP_MS = 10_000;
 /** The whole file. Unref'd: it only ever fires in a process that something else keeps alive. */
 const FILE_CAP_MS = 120_000;
+/** Every terminal this file spawned, as { id, state() }: what the file cap names. */
+const terminals = [];
 setTimeout(() => {
   process.stderr.write(`pty-late-ready-enoent: still running after ${FILE_CAP_MS} ms: a worker or a socket was leaked
+  kept alive by: ${process.getActiveResourcesInfo().join(', ')}
+${terminals.map((t) => `  ${t.id}: ${t.state()}`).join('\n')}
 `);
   process.exit(1);
 }, FILE_CAP_MS).unref();
@@ -63,6 +67,18 @@ function within(p, what) {
   let t;
   return Promise.race([p, new Promise((_, rej) => { t = setTimeout(() => rej(new Error(`timed out: ${what}`)), CAP_MS); })])
     .finally(() => clearTimeout(t));
+}
+/**
+ * Every named event within CAP_MS, or fail NAMING the ones that never came, with what the terminal
+ * did see (TEST-TEMP-LEAK-UNDER-LOAD: "timed out: the exit and the worker's end" did not say which).
+ */
+function withinAll(parts, s, what) {
+  const pending = new Set(Object.keys(parts));
+  const all = Promise.all(Object.entries(parts).map(([name, p]) => p.then(() => { pending.delete(name); })));
+  let t;
+  return Promise.race([all, new Promise((_, rej) => {
+    t = setTimeout(() => rej(new Error(`timed out: ${what}: never came: ${[...pending].join(', ')}; ${s.state()}`)), CAP_MS);
+  })]).finally(() => clearTimeout(t));
 }
 const turn = () => new Promise((res) => setImmediate(res));
 const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
@@ -127,13 +143,24 @@ if (process.platform !== 'win32') {
     const sock = proc._socket;
     const worker = proc._agent._conoutSocketWorker._worker;
     const seen = { events: [], exits: 0, connects: 0 };
-    proc.onExit(() => { seen.exits++; seen.events.push('exit'); });
+    const t0 = Date.now();
+    const at = [];
+    const note = (name) => { at.push(`${name}@${Date.now() - t0}`); seen.events.push(name); };
+    proc.onExit(() => { seen.exits++; note('exit'); });
     const connect = sock.connect;
-    sock.connect = function (...a) { seen.connects++; seen.events.push('connect'); return connect.apply(this, a); };
-    const readyHandled = new Promise((res) => { onReadyHandled = () => { seen.events.push('ready'); res(); }; });
-    const workerEnded = new Promise((res) => worker.once('exit', () => { seen.events.push('worker-exit'); res(); }));
+    sock.connect = function (...a) { seen.connects++; note('connect'); return connect.apply(this, a); };
+    const readyHandled = new Promise((res) => { onReadyHandled = () => { note('ready'); res(); }; });
+    const workerEnded = new Promise((res) => worker.once('exit', () => { note('worker-exit'); res(); }));
     const exited = new Promise((res) => proc.onExit(res));
-    return { proc, sock, worker, seen, readyHandled, workerEnded, exited };
+    sock.on('end', () => { at.push(`socket-end@${Date.now() - t0}`); });
+    sock.on('close', () => { at.push(`socket-close@${Date.now() - t0}`); });
+    /** What this terminal has seen so far, for a wait that timed out. */
+    const state = () => `seen [${at.join(' ')}] ${Date.now() - t0} ms after the spawn; root ${hold.alive() ? 'running' : 'exited'}; `
+      + `agent exit code ${proc._agent.exitCode}; socket destroyed=${sock.destroyed} connecting=${sock.connecting} `
+      + `handle=${sock._handle ? 'open' : 'none'} readable=${sock.readable} flowing=${sock.readableFlowing} `
+      + `ended=${sock.readableEnded}; thrown [${thrown().join(' | ')}]`;
+    terminals.push({ id, state });
+    return { proc, sock, worker, seen, readyHandled, workerEnded, exited, state };
   }
 
   test('the lever matches node-pty: its flush interval is 1000 ms and READY connects with no look at the worker', () => {
@@ -152,7 +179,7 @@ if (process.platform !== 'win32') {
     await within(s.exited, 'the terminal exit (reported when its pipe\'s server is terminated)');
     assert.deepEqual(s.seen.events, ['exit'], 'the exit comes at the terminate, before the late READY');
     assert.equal(s.sock.destroyed, true, 'the socket that will never connect is destroyed');
-    await within(Promise.all([s.readyHandled, s.workerEnded]), 'the late READY and the worker\'s end');
+    await withinAll({ 'the late READY': s.readyHandled, 'the worker\'s end': s.workerEnded }, s, 'READY after the terminate');
     await sleep(200);   // a connect made here fails in a later turn
     assert.equal(s.seen.connects, 0, 'the late READY connected to a pipe whose server was terminated');
     assert.deepEqual(thrown(), [], 'nothing thrown outside a caller (connect ENOENT)');
@@ -164,7 +191,7 @@ if (process.platform !== 'win32') {
     const s = await spawnSilent(EARLY_READY_MS);
     s.proc.kill();
     assert.equal(s.sock._handle, null, 'the lever holds: the kill ran before the connect');
-    await within(Promise.all([s.exited, s.workerEnded]), 'the exit and the worker\'s end');
+    await withinAll({ 'the terminal exit': s.exited, 'the worker\'s end': s.workerEnded }, s, 'READY inside the flush second');
     await turn();
     assert.equal(s.seen.connects, 1, 'a READY before the terminate still connects');
     assert.equal(s.seen.events.indexOf('connect') < s.seen.events.indexOf('exit'), true, `the exit follows the connect: ${s.seen.events}`);
@@ -181,7 +208,7 @@ if (process.platform !== 'win32') {
       s.proc.kill();
       assert.equal(s.sock._handle, null, 'the kill ran before the connect');
       Atomics.wait(hold, 0, 0, STALL_MS);   // blocks this thread; the worker and the ConPTY carry on
-      await within(Promise.all([s.exited, s.workerEnded]), `terminal ${i}: the exit and the worker's end`);
+      await withinAll({ 'the terminal exit': s.exited, 'the worker\'s end': s.workerEnded }, s, `terminal ${i}`);
       await sleep(100);
       assert.equal(s.seen.exits, 1, `terminal ${i}: exactly one exit (${s.seen.events})`);
       assert.deepEqual(thrown(), [], `terminal ${i}: nothing thrown outside a caller`);
