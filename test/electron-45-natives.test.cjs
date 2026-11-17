@@ -37,3 +37,13 @@ for (const [label, runAsNode] of [['normal Electron', false], ['ELECTRON_RUN_AS_
     });
   });
 }
+
+// ELECTRON-EXIT-AV: Electron 45's app.exit() called right after ready crashes in browser teardown
+// about 1 in 1000 runs under load, with or without natives (bisect 3000 runs per variant). The
+// race is too rare to catch in one run, so pin the shape: the probe quits normally and never
+// calls app.exit.
+test('the native probe quits normally (no app.exit right after ready)', () => {
+  const src = fs.readFileSync(probe, 'utf8').replace(/^\s*\/\/.*$/gm, '');
+  assert.doesNotMatch(src, /app\.exit\s*\(/, 'app.exit() right after ready races Electron startup');
+  assert.match(src, /whenReady\(\)\.then\(\(\) => \{ console\.log\(report\); app\.quit\(\); \}\)/);
+});
