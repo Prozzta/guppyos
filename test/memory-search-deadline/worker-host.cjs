@@ -4,7 +4,7 @@
  * utility process): forked by scenario.cjs with the drill's jailed env (Electron as Node). It runs
  * the tree's real runWorker over this process's IPC channel, with a fake ONNX session that takes
  * stepMs per run (a loaded machine) or, after {host:'hang'}, never answers; after {host:'hold'}
- * each run waits for {host:'release'}.
+ * each run waits for {host:'release'}; {host:'stall', ms} blocks this process's event loop for ms.
  * Host-control messages carry `host`; everything else is the worker protocol.
  */
 const fs = require('node:fs');
@@ -25,6 +25,9 @@ process.on('message', (m) => {
   if (m && m.host === 'hold') { let release; hold = new Promise((r) => { release = r; }); hold.release = release; return; }
   if (m && m.host === 'release') { const h = hold; hold = null; if (h) h.release(); return; }
   if (m && m.host === 'runs') { process.send({ hostRuns: runs }); return; }
+  // A starved or busy worker process: its event loop takes nothing for ms, so whatever was sent
+  // behind this message is received that much later than it was sent.
+  if (m && m.host === 'stall') { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, m.ms); return; }
   for (const fn of listeners) fn({ data: m });
 });
 
