@@ -29,6 +29,7 @@
  *   3. Never let an empty renderer erase a full roster. See `write`.
  */
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 /** What the renderer mirrors to disk. The inner agent shape is deliberately
@@ -99,6 +100,8 @@ export class RosterStore {
    *  tick used to produce the same filename, and the second silently replaced
    *  the first — a backup folder that quietly loses backups is worse than none. */
   private backupSeq = 0;
+  /** All async IPC writes share one temp name; preserve call order and atomicity. */
+  private asyncQueue: Promise<void> = Promise.resolve();
 
   constructor(private readonly getHome: () => string | null) {}
 
@@ -151,19 +154,13 @@ export class RosterStore {
     const p = rosterPath(home);
     try {
       mkdirSync(home, { recursive: true });
-      const existing = this.read();
-
-      const emptied = existing !== null && entryCount(existing) > 0 && entryCount(snap) === 0;
-      const teamDropped = existing !== null && workerCount(existing) > 0 && workerCount(snap) === 0;
-      if (!this.wrote && (emptied || teamDropped)) {
+      const refused = this.refusal(this.read(), snap);
+      if (refused) {
         // Back it up anyway: what is on disk right now is exactly what we are
         // protecting, and a copy of it costs nothing. `wrote` stays false: the
         // guard disarms only when a non-empty write lands, never on a refusal.
         this.backup(home, p, 'declined');
-        console.warn(emptied
-          ? '[roster] refused to overwrite a non-empty roster with an empty one'
-          : '[roster] refused to overwrite a roster that has workers with one that has none');
-        return { ok: false, skipped: 'empty-first-write' };
+        return refused;
       }
 
       this.backup(home, p, this.wrote ? 'write' : 'run-start');
@@ -186,6 +183,52 @@ export class RosterStore {
       return { ok: true };
     } catch (e) {
       try { rmSync(`${p}.tmp`, { force: true }); } catch { /* noop */ }
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  /** The first-write guard, one rule for `write` and `writeAsync`: null lets the write through. */
+  private refusal(existing: RosterSnapshot | null, snap: RosterSnapshot): RosterWriteResult | null {
+    const emptied = existing !== null && entryCount(existing) > 0 && entryCount(snap) === 0;
+    const teamDropped = existing !== null && workerCount(existing) > 0 && workerCount(snap) === 0;
+    if (!this.wrote && (emptied || teamDropped)) {
+      console.warn(emptied
+        ? '[roster] refused to overwrite a non-empty roster with an empty one'
+        : '[roster] refused to overwrite a roster that has workers with one that has none');
+      return { ok: false, skipped: 'empty-first-write' };
+    }
+    return null;
+  }
+
+  /** Async IPC path: same guards and atomic temp+rename, without main-thread disk I/O. */
+  writeAsync(snap: unknown): Promise<RosterWriteResult> {
+    const run = this.asyncQueue.then(() => this.doWriteAsync(snap));
+    this.asyncQueue = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  /** Joined by the bounded quit path so a fire-and-forget renderer flush lands. */
+  settleAsyncWrite(): Promise<void> { return this.asyncQueue; }
+
+  private async doWriteAsync(snap: unknown): Promise<RosterWriteResult> {
+    const home = this.home();
+    if (!home) return { ok: false, error: 'no harnessHome' };
+    if (!isSnapshot(snap)) return { ok: false, error: 'invalid snapshot' };
+    const p = rosterPath(home);
+    try {
+      await mkdir(home, { recursive: true });
+      let existing: RosterSnapshot | null = null;
+      try { const parsed = JSON.parse(await readFile(p, 'utf8')); existing = isSnapshot(parsed) ? parsed : null; } catch { /* no usable prior roster */ }
+      const declined = this.refusal(existing, snap);
+      if (declined) { await this.backupAsync(home, p, 'declined'); return declined; }
+      await this.backupAsync(home, p, this.wrote ? 'write' : 'run-start');
+      const body: RosterSnapshot = { version: 1, savedAt: new Date().toISOString(), agents: snap.agents, archived: snap.archived, restorable: snap.restorable, queues: snap.queues && typeof snap.queues === 'object' ? snap.queues : {}, selectedId: typeof snap.selectedId === 'string' ? snap.selectedId : null };
+      await writeFile(`${p}.tmp`, JSON.stringify(body, null, 2), 'utf8');
+      await rename(`${p}.tmp`, p);
+      this.wrote = true;
+      return { ok: true };
+    } catch (e) {
+      try { await rm(`${p}.tmp`, { force: true }); } catch { /* noop */ }
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
   }
@@ -246,6 +289,16 @@ export class RosterStore {
       const stamp = new Date().toISOString().replace(/[:.]/g, '-');
       this.backupSeq += 1;
       copyFileSync(p, join(dir, `roster-${stamp}-${this.backupSeq}-${reason}.json`));
+    } catch { /* a failed backup must never block the write */ }
+  }
+
+  private async backupAsync(home: string, p: string, reason: string): Promise<void> {
+    try {
+      const dir = rosterBackupDir(home);
+      await mkdir(dir, { recursive: true });
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      this.backupSeq += 1;
+      await copyFile(p, join(dir, `roster-${stamp}-${this.backupSeq}-${reason}.json`));
     } catch { /* a failed backup must never block the write */ }
   }
 }

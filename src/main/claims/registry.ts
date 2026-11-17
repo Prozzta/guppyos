@@ -19,6 +19,7 @@ import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from 'n
 import { join } from 'node:path';
 import { DERIVED_AGENT_ID, type KeyRegistry } from '../../shared/claims';
 import { canonicalJson, sha256Hex } from './canonical';
+import { fileWriteBehindOn, noteSyncWrite, overtakenText, writeBehindOn, writeFileBehind, writeInFlight } from '../writeBehind';
 
 export const KEY_REGISTRY_FILE = 'memory-keys.json';
 
@@ -54,14 +55,20 @@ export function registryPath(hiveRoot: string): string {
  *  (never silently replaced: it would fork every slot). Keys a KeyRegistryWriter holds unsaved are saved first,
  *  so a reader sees every acked key (STARTUP-FREEZE-104 A9). */
 export function loadRegistry(hiveRoot: string): KeyRegistry {
-  flushRegistryWrites(hiveRoot);
-  return readRegistryFile(hiveRoot);
+  const held = heldKeys(hiveRoot);
+  if (!held) { flushRegistryWrites(hiveRoot); return readRegistryFile(hiveRoot); }
+  // LAG-SYNC-WRITES-107: a write-behind writer's acked keys are added in memory, not saved first.
+  const reg = readRegistryFile(hiveRoot);
+  for (const [k, e] of held.keys) reg.keys[k] = { ...e };
+  return reg;
 }
 
 function readRegistryFile(hiveRoot: string): KeyRegistry {
   const p = registryPath(hiveRoot);
-  if (!existsSync(p)) return structuredClone(DEFAULT_KEY_REGISTRY);
-  const raw = JSON.parse(readFileSync(p, 'utf8').replace(/^﻿/, '')) as KeyRegistry;
+  // LAG-SYNC-WRITES-107: a save that overtook a write still in flight is read from memory, not the disk.
+  const over = overtakenText(p);
+  if (over === null && !existsSync(p)) return structuredClone(DEFAULT_KEY_REGISTRY);
+  const raw = JSON.parse((over ?? readFileSync(p, 'utf8')).replace(/^﻿/, '')) as KeyRegistry;
   if (!raw || raw.v !== 1 || !Array.isArray(raw.namespaces) || typeof raw.keys !== 'object' || raw.keys === null) {
     throw new Error(`${KEY_REGISTRY_FILE} is not a v1 key registry`);
   }
@@ -84,23 +91,39 @@ function deepFreeze<T>(o: T): T {
 /** loadRegistry for READERS: one frozen object while the file is unchanged. A caller that edits the registry
  *  (checkKey before saveRegistry) uses loadRegistry, which returns its own copy. */
 export function loadRegistryShared(hiveRoot: string): KeyRegistry {
-  flushRegistryWrites(hiveRoot);
   const p = registryPath(hiveRoot);
+  const held = heldKeys(hiveRoot);
+  if (!held) flushRegistryWrites(hiveRoot);
+  if (overtakenText(p) !== null) { shared.delete(p); return deepFreeze(loadRegistry(hiveRoot)); }
   let st: { size: number; mtimeMs: number } | null = null;
   try { const s = statSync(p); st = { size: s.size, mtimeMs: s.mtimeMs }; } catch { st = null; }
   const hit = shared.get(p);
-  if (st && hit && hit.size === st.size && hit.mtimeMs === st.mtimeMs) return hit.reg;
-  const reg = deepFreeze(loadRegistry(hiveRoot));
-  if (st && Date.now() - st.mtimeMs >= RACY_MS) shared.set(p, { ...st, reg });
-  else shared.delete(p);
+  let base: KeyRegistry;
+  if (st && hit && hit.size === st.size && hit.mtimeMs === st.mtimeMs) base = hit.reg;
+  else {
+    base = deepFreeze(readRegistryFile(hiveRoot));
+    if (st && Date.now() - st.mtimeMs >= RACY_MS) shared.set(p, { ...st, reg: base });
+    else shared.delete(p);
+  }
+  if (!held) return base;
+  // LAG-SYNC-WRITES-107: the file's registry plus the held keys, one frozen object per (file, held set).
+  const m = merged.get(p);
+  if (m && m.base === base && m.gen === held.gen) return m.reg;
+  const keys: KeyRegistry['keys'] = { ...base.keys };
+  for (const [k, e] of held.keys) keys[k] = { ...e };
+  const reg = deepFreeze({ ...base, keys });
+  merged.set(p, { base, gen: held.gen, reg });
   return reg;
 }
+const merged = new Map<string, { base: KeyRegistry; gen: number; reg: KeyRegistry }>();
 
 export function saveRegistry(hiveRoot: string, reg: KeyRegistry): void {
   const p = registryPath(hiveRoot);
   const tmp = `${p}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(reg, null, 2) + '\n', 'utf8');
+  const text = JSON.stringify(reg, null, 2) + '\n';
+  writeFileSync(tmp, text, 'utf8');
   renameSync(tmp, p);
+  noteSyncWrite(p, text);   // LAG-SYNC-WRITES-107: a write-behind save in flight gives way to this one
 }
 
 /** STARTUP-FREEZE-104 A9 (Jim's 10x gate of 5b4db994): how long added keys wait to be saved together. */
@@ -116,6 +139,27 @@ export function flushRegistryWrites(hiveRoot: string): void {
 }
 
 type KeyEntry = KeyRegistry['keys'][string];
+
+/** LAG-SYNC-WRITES-107: the acked keys a write-behind KeyRegistryWriter has not saved yet, per registry path.
+ *  A reader adds them to what it read instead of forcing the save. `gen` changes whenever the set does. */
+interface HeldKeys { keys: Map<string, KeyEntry>; gen: number }
+const heldByPath = new Map<string, HeldKeys>();
+let heldSeq = 0;
+function heldKeys(hiveRoot: string): HeldKeys | null {
+  const h = heldByPath.get(registryPath(hiveRoot));
+  return h && h.keys.size ? h : null;
+}
+
+/** The registry file's text for a reader that only compares it (get's deps signature): acked keys still held
+ *  by a write-behind writer show as a changed text; any other unsaved keys are saved first. Null: no file. */
+export function registryText(hiveRoot: string): string | null {
+  const p = registryPath(hiveRoot);
+  const held = heldKeys(hiveRoot);
+  if (!held) flushRegistryWrites(hiveRoot);
+  let text: string | null = overtakenText(p);
+  if (text === null) { try { text = readFileSync(p, 'utf8'); } catch { text = null; } }
+  return held ? `${text ?? ''}\n#held:${held.gen}` : text;
+}
 type FileStamp = { size: number; mtimeMs: number } | 'missing';
 
 /**
@@ -140,6 +184,11 @@ export class KeyRegistryWriter {
   private unsaved = new Map<string, KeyEntry>();
   private timer: ReturnType<typeof setTimeout> | null = null;
   private readonly path: string;
+  /** LAG-SYNC-WRITES-107: what readers add while the keys are unsaved (write-behind), and the write in flight. */
+  private readonly held: HeldKeys = { keys: this.unsaved, gen: 0 };
+  private writing = false;
+  /** The file's stamp at the last working() call. */
+  private seen: FileStamp | null = null;
 
   constructor(private readonly hiveRoot: string, private readonly onSaveFailed: (keys: string[], error: unknown) => void,
     private readonly saveMs = REGISTRY_SAVE_MS) {
@@ -160,6 +209,7 @@ export class KeyRegistryWriter {
   /** The file's registry plus the acked unsaved keys. Throws when the file is unreadable (as loadRegistry). */
   private working(): KeyRegistry {
     const now = this.statFile();
+    this.seen = now;
     if (this.reg && KeyRegistryWriter.same(this.stamp, now)) return this.reg;
     this.reg = null;
     const reg = readRegistryFile(this.hiveRoot);
@@ -185,9 +235,59 @@ export class KeyRegistryWriter {
     this.unsaved.set(key, entry);
     if (this.reg) this.reg.keys[key] = entry;
     pendingWrites.set(this.path, () => this.flush());
-    if (this.timer) return;
-    this.timer = setTimeout(() => { this.timer = null; this.flush(); }, this.saveMs);
+    if (writeBehindOn()) heldByPath.set(this.path, this.held);
+    this.heldChanged();
+    this.arm();
+  }
+
+  private arm(): void {
+    if (this.timer || this.unsaved.size === 0) return;
+    this.timer = setTimeout(() => { this.timer = null; if (fileWriteBehindOn()) this.flushBehind(); else this.flush(); }, this.saveMs);
     this.timer.unref?.();
+  }
+
+  private heldChanged(): void {
+    this.held.gen = ++heldSeq;
+    if (this.unsaved.size === 0 && heldByPath.get(this.path) === this.held) heldByPath.delete(this.path);
+  }
+
+  /** Drop the keys of `snap` that are still the entries it saw (a key committed again meanwhile stays). */
+  private saved(snap: Map<string, KeyEntry>): void {
+    for (const [k, e] of snap) if (this.unsaved.get(k) === e) this.unsaved.delete(k);
+    this.heldChanged();
+  }
+
+  /**
+   * LAG-SYNC-WRITES-107: the timer's save, off the main thread (tmp + rename, as flush). The keys stay held
+   * until the rename has landed, so readers add them meanwhile. A flush() during the write wins (the write
+   * gives way); another writer's change to the file withdraws it and the next timer saves on top of that.
+   */
+  private flushBehind(): void {
+    if (this.unsaved.size === 0) { pendingWrites.delete(this.path); return; }
+    if (this.writing) return;   // the write in flight re-arms when it ends
+    if (writeInFlight(this.path)) { this.flush(); return; }
+    const snap = new Map(this.unsaved);
+    let text: string;
+    try { text = JSON.stringify(this.working(), null, 2) + '\n'; }
+    catch (e) { this.dropFailed(snap, e); return; }
+    const before = this.seen;
+    const done = (failure: { error: unknown } | null, published: boolean): void => {
+      this.writing = false;
+      if (failure) this.dropFailed(snap, failure.error);
+      else if (published) { this.saved(snap); this.stamp = this.statFile(); }
+      if (this.unsaved.size === 0) pendingWrites.delete(this.path);
+      this.arm();
+    };
+    this.writing = true;
+    writeFileBehind(this.path, text, () => before === null || KeyRegistryWriter.same(before, this.statFile()))
+      .then((r) => done(null, r === 'published'), (error) => done({ error }, false));
+  }
+
+  private dropFailed(snap: Map<string, KeyEntry>, e: unknown): void {
+    this.reg = null;
+    this.stamp = null;
+    this.saved(snap);
+    this.onSaveFailed([...snap.keys()], e);
   }
 
   /** Save the acked unsaved keys now (atomic tmp + rename). */
@@ -203,10 +303,12 @@ export class KeyRegistryWriter {
       this.reg = null;
       this.stamp = null;
       this.unsaved.clear();
+      this.heldChanged();
       this.onSaveFailed(keys, e);
       return;
     }
     this.unsaved.clear();
+    this.heldChanged();
   }
 }
 

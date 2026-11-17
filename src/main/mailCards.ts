@@ -28,6 +28,7 @@ import * as fsp from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { HUMAN_RELAY_RE } from '../shared/mailWakeClass';
 import { cardIdValue, isValidMailId, mailBodyHash, type MailLedgerDoc } from './mailLedger';
+import { appendBehind, withPendingAppends, writeBehindOn, type AppendPart } from './writeBehind';
 import { ARCHIVE_DIR, archiveWriteGen, isArchiveFile, mergeHotCold, parseArchive, readArchive } from './taskArchive';
 
 export const MAIL_CARDS_DIR = join('state', 'mail-cards');
@@ -256,6 +257,9 @@ export class MailCardIndex {
   private deferred: Array<{ id: string; entries: () => { link: MailLinkRecord; rows: MailCardRow[] } | null }> = [];
   private deferredIds = new Set<string>();
 
+  /** LAG-SYNC-WRITES-107: told when a record queued for a write-behind append could not be written. */
+  onWriteFailed: ((mailId: string, error: unknown) => void) | null = null;
+
   constructor(readonly hiveRoot: string) {}
 
   get dir(): string { return join(this.hiveRoot, MAIL_CARDS_DIR); }
@@ -265,7 +269,9 @@ export class MailCardIndex {
     const links = new Map<string, MailLinkRecord>();
     const conv = new Map<string, Set<string>>();
     let text = '';
-    try { text = readFileSync(join(this.dir, MAIL_LINKS_FILE), 'utf8'); } catch { /* none yet */ }
+    const file = join(this.dir, MAIL_LINKS_FILE);
+    try { text = readFileSync(file, 'utf8'); } catch { /* none yet */ }
+    text = withPendingAppends(file, text) ?? '';   // LAG-SYNC-WRITES-107: records queued, not on disk yet
     for (const line of text.split(/\r?\n/)) MailCardIndex.parseLine(line, links, conv);
     this.links = links;
     this.convCards = conv;
@@ -288,7 +294,9 @@ export class MailCardIndex {
    */
   *primeSteps(): Generator<MailScanOp | undefined, void, unknown> {
     if (this.links) return;
-    const text = yield { read: join(this.dir, MAIL_LINKS_FILE) };
+    const file = join(this.dir, MAIL_LINKS_FILE);
+    const read = yield { read: file };
+    const text = withPendingAppends(file, typeof read === 'string' ? read : null);   // LAG-SYNC-WRITES-107
     const links = new Map<string, MailLinkRecord>();
     const conv = new Map<string, Set<string>>();
     const lines = typeof text === 'string' ? text.split(/\r?\n/) : [];
@@ -361,11 +369,17 @@ export class MailCardIndex {
    * link record. A message id already recorded appends nothing (false). Rows are written before the
    * link record, so a crash in between re-writes rows on the next try (readers dedupe by id), never
    * leaves a link without its rows.
+   *
+   * LAG-SYNC-WRITES-107: with write-behind on (the app), the appends are queued on one serial lane, in the
+   * same order, and written off the main thread. The record is known in memory at once, and every reader
+   * in this process adds the queued text to the file it read (withPendingAppends). A failed append
+   * forgets the record again (onWriteFailed), so the next start's catch-up records it.
    */
   record(link: MailLinkRecord, rows: readonly MailCardRow[]): boolean {
     const links = this.load();
     if (!isValidMailId(link.mailId) || links.has(link.mailId)) return false;
-    mkdirSync(this.dir, { recursive: true });
+    const behind = writeBehindOn();
+    if (!behind) mkdirSync(this.dir, { recursive: true });
     const byFile = new Map<string, string[]>();
     for (const row of rows) {
       const f = cardFileName(row.card);
@@ -373,6 +387,24 @@ export class MailCardIndex {
       const list = byFile.get(f) ?? [];
       list.push(`${JSON.stringify(row)}\n`);
       byFile.set(f, list);
+    }
+    if (behind) {
+      const parts: AppendPart[] = [];
+      for (const [f, lines] of byFile) parts.push({ file: join(this.dir, f), text: lines.join('') });
+      parts.push({ file: join(this.dir, MAIL_LINKS_FILE), text: `${JSON.stringify(link)}\n` });
+      links.set(link.mailId, link);
+      this.noteConv(link);
+      appendBehind(parts, (error) => {
+        const now = this.links;
+        if (now && now.get(link.mailId) === link) {
+          now.delete(link.mailId);
+          const conv = new Map<string, Set<string>>();
+          for (const r of now.values()) MailCardIndex.noteConvInto(r, conv);
+          this.convCards = conv;
+        }
+        this.onWriteFailed?.(link.mailId, error);
+      });
+      return true;
     }
     for (const [f, lines] of byFile) appendFileSync(join(this.dir, f), lines.join(''));
     appendFileSync(join(this.dir, MAIL_LINKS_FILE), `${JSON.stringify(link)}\n`);

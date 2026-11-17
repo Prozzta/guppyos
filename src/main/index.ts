@@ -24,6 +24,7 @@ import { ClaimsBootstrap, loadBootstrapMarker, saveBootstrapMarker } from './cla
 import { DerivedLive } from './claims/derivedLive';
 import { deriveOnce } from './claims/derivedWriter';
 import { startAfterMailCardCatchUp, startupMailCardCatchUp } from './mailCards';
+import { closeWrites, enableWriteBehind, joinOnSettle, settleWrites } from './writeBehind';
 import { enableLedgerAgent, enableLedgerDefault, floorRepo, seedFloorSources } from './claims/floorSeed';
 import { makeW6Append } from './claims/w6Append';
 import { memoryMdReplaced, READER_WATCH_SYNC_MS, ReaderWatchers } from './claims/readerWatch';
@@ -543,6 +544,13 @@ const pendingCodexLiveRotationDeadline = new Map<string, ReturnType<typeof setTi
 const liveSpawnOptions = new Map<string, { opts: AgentSpawnOptions; owner: Electron.WebContents | null }>();
 const liveRotationLast = new Map<string, string>();
 const liveCodexRollouts = new Map<string, CodexRolloutCacheEntry>();
+// LAG-SYNC-WRITES-107: the key registry, the mail ledgers and the mail-card index save off the main thread
+// in the app (a bare class in a test keeps its synchronous write). Quit, reset and a home change wait for
+// what is in flight (settleWrites; quit: closeWrites, which also lets no rename outlive the exit), then
+// flush synchronously.
+enableWriteBehind();
+/** How long quit, reset and a home change wait for writes in flight before they flush synchronously. */
+const WRITE_BEHIND_SETTLE_MS = 1_000;
 const hive = new HiveManager(
   () => readConfig().harnessHome,
   (channel, payload) => {
@@ -722,6 +730,8 @@ telemetry.onApiError((agentId) => breaker.recordError(agentId));
 // Shared roster on disk — created early so HookServer can re-read standing goals
 // on every UserPromptSubmit (Edit Agent saves land here via persistAgents).
 const roster = new RosterStore(() => readConfig().harnessHome);
+// LAG-MAIN-PERSIST-OFFMAIN: the roster's async writes join the one bounded settle (quit, reset, home change).
+joinOnSettle(() => roster.settleAsyncWrite());
 function standingGoalFromRoster(agentId: string): string | null {
   const snap = roster.read();
   if (!snap || !Array.isArray(snap.agents)) return null;
@@ -6366,6 +6376,7 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
   const oldIndex = nativeMemory.dbFile();
   const memoryStopped = nativeMemory.shutdown().catch(() => undefined);
   // Close the hive's kept-open log and ledger before the copy (and the relaunch).
+  await settleWrites(WRITE_BEHIND_SETTLE_MS);   // LAG-SYNC-WRITES-107: no late write into the old home
   try { hive.dispose(); } catch (e) { console.error('[changeHome] hive.dispose:', e); }
 
   await memoryStopped;
@@ -6427,6 +6438,7 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
 // Jim INFO 1: this guards against renderer bugs and bad roots. It is NOT a boundary against a
 // compromised renderer, which can pty:spawn any command in any cwd (and that cwd is then known).
 const fsSpawnedCwds = new SpawnedCwds(() => join(app.getPath('userData'), 'fs-spawned-cwds.json'));
+joinOnSettle(() => fsSpawnedCwds.settle());
 const FS_ROOT_REFUSED = 'not an agent folder';
 function fsRootKnown(root: string): boolean {
   const known: string[] = fsSpawnedCwds.list();
@@ -6591,7 +6603,7 @@ ipcMain.on('roster:homeSync', (evt) => { evt.returnValue = readConfig().harnessH
 // ...and the cache it will not use, kept in this home's roster-backups/ before the renderer clears it.
 ipcMain.on('roster:backupForeignSync', (evt, snap: unknown) => { evt.returnValue = roster.backupSnapshot(snap, 'foreign-cache'); });
 ipcMain.handle('roster:read', () => roster.read());
-ipcMain.handle('roster:write', (_evt, snap: unknown) => roster.write(snap));
+ipcMain.handle('roster:write', (_evt, snap: unknown) => roster.writeAsync(snap));
 
 // ─── IPC: hive (multi-agent coordination) ───────────────────────────────────
 ipcMain.handle('hive:registry', () => hive.registry());
@@ -7141,6 +7153,7 @@ ipcMain.handle('app:resetAll', async () => {
   ptyManager.refuseNewSpawns('The app is resetting; agents cannot start now.');
   try { await ptyManager.killAllAsync(); } catch (e) { console.error('[reset] killAllAsync:', e); }
   // The hive's kept-open log and ledger: an open file makes the rm below fail (ENOTEMPTY).
+  await settleWrites(WRITE_BEHIND_SETTLE_MS);   // LAG-SYNC-WRITES-107: no late write into the erased hive
   try { hive.dispose(); } catch (e) { console.error('[reset] hive.dispose:', e); }
   // Erase the hive (Michael's + every agent's memory, inboxes, tasks, board,
   // git history) and the memory engine's index of it. Only harness-created data
@@ -9596,6 +9609,10 @@ app.on('will-quit', (e) => {
     ]),
     // NATIVE-MEMORY: drain in-flight memory requests, then stop the worker (bounded).
     nativeMemory.shutdown().catch(() => undefined),
+    // LAG-SYNC-WRITES-107: writes in flight land (bounded) and write-behind closes: a rename already under
+    // way is waited for, no other can start. finish then flushes the rest synchronously, with no older
+    // rename left to land over it after app.exit.
+    closeWrites(WRITE_BEHIND_SETTLE_MS).catch(() => undefined),
     // INT 1.1.99 fixup 4: an async capacity rename already in flight at saveNow lands first, then the
     // quit snapshot is written again (bounded), so an older snapshot never sits over the quit write.
     capacityStore.settleQuit(CAPACITY_QUIT_JOIN_MS).catch(() => undefined)

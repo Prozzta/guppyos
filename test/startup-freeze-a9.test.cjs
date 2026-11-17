@@ -121,7 +121,12 @@ test('every registry reader sees an acked key without a flush; the get path flus
   await ok(store.appendRecord('andy', note('y', 'agent.andy.second'), 'endpoint'));
   assert.equal(REG.loadRegistryShared(root).keys['agent.andy.second']?.cardinality, 'single', 'not the stale cached object');
   const rw = fs.readFileSync(path.join(ROOT, 'src/main/claims/readWiring.ts'), 'utf8');
-  assert.match(rw, /flushRegistryWrites\(root\);[^\n]*\n\s*let regText: string \| null; try \{ regText = readFileSync\(registryPath\(root\), 'utf8'\)/);
+  // LAG-SYNC-WRITES-107: get reads the text through registryText, which saves unsaved keys first unless a
+  // write-behind writer holds them (then the text shows them as changed; test/lag-sync-writes-107.test.cjs).
+  assert.match(rw, /const regText = registryText\(root\);/);
+  assert.doesNotMatch(rw, /readFileSync\(registryPath\(root\)/, 'no raw registry read beside it');
+  const reg = fs.readFileSync(path.join(ROOT, 'src/main/claims/registry.ts'), 'utf8');
+  assert.match(reg, /export function registryText\(hiveRoot: string\): string \| null \{\r?\n[^\n]*\r?\n\s*const held = heldKeys\(hiveRoot\);\r?\n\s*if \(!held\) flushRegistryWrites\(hiveRoot\);/);
 });
 
 test('main saves acked keys at quit (after the agent sweep, before exit) and on a hive change', () => {

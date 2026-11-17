@@ -263,3 +263,40 @@ test('queues and selection round-trip, and a bad queues field degrades to empty'
   assert.deepEqual(coerced.queues, {});
   assert.equal(coerced.selectedId, null);
 });
+
+// The renderer's mirror write reaches the store through writeAsync (the roster:write handler), so the
+// guard that matters live is the one on this path.
+test('writeAsync holds the first-write guard: a god-only or empty first write cannot wipe a team on disk', async () => {
+  const home = tmpHome();
+  await storeAt(home).writeAsync(snapshot([GOD, ...TEAM]));
+
+  const nextRun = storeAt(home);
+  const res = await nextRun.writeAsync(snapshot([GOD]));
+  assert.equal(res.ok, false, 'A GOD-ONLY FIRST WRITE IS REFUSED ON THE ASYNC PATH');
+  assert.equal(res.skipped, 'empty-first-write');
+  assert.equal(nextRun.read().agents.length, 7, 'god and all six workers survived');
+  assert.equal(backupsIn(home).filter((f) => f.includes('declined')).length, 1,
+    'the refused write still backed up the roster it protected');
+
+  // An empty one is refused as before, and a refusal does not disarm the guard.
+  assert.equal((await nextRun.writeAsync(snapshot([]))).skipped, 'empty-first-write');
+  assert.equal((await nextRun.writeAsync(snapshot([GOD]))).skipped, 'empty-first-write');
+  assert.equal(nextRun.read().agents.length, 7);
+  assert.equal(backupsIn(home).filter((f) => f.includes('declined')).length, 3);
+
+  // Once the renderer proves it holds the team, removing every worker is a real edit.
+  assert.equal((await nextRun.writeAsync(snapshot([GOD, ...TEAM]))).ok, true);
+  assert.equal((await nextRun.writeAsync(snapshot([GOD]))).ok, true);
+  assert.equal(nextRun.read().agents.length, 1);
+});
+
+test('writeAsync serializes overlapping flushes so the newest note wins', async () => {
+  const home = tmpHome();
+  const store = storeAt(home);
+  const older = snapshot([{ id: 'a', note: 'older' }]);
+  const newest = snapshot([{ id: 'a', note: 'newest' }]);
+  const [a, b] = await Promise.all([store.writeAsync(older), store.writeAsync(newest)]);
+  assert.equal(a.ok, true);
+  assert.equal(b.ok, true);
+  assert.equal(store.read().agents[0].note, 'newest');
+});
