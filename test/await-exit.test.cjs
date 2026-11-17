@@ -88,11 +88,13 @@ test('awaitRowsExit with no row, or off Windows, starts no wait', async () => {
 
 test('awaitRowsExit, real PowerShell: an exited row resolves, a running one rejects naming it', { skip: process.platform !== 'win32' }, async () => {
   const { spawn } = require('node:child_process');
-  const { lookupPids } = require('./tools/own-procs.cjs');
+  const { lookupPids, childrenOf } = require('./tools/own-procs.cjs');
   const start = async () => {
     const c = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true });
     await new Promise((resolve, reject) => { c.once('spawn', resolve); c.once('error', reject); });
-    const row = lookupPids([c.pid]).find((r) => r.pid === c.pid && r.ppid === process.pid);
+    const ids = lookupPids([process.pid, c.pid]);
+    const self = ids.find((r) => r.pid === process.pid);
+    const row = self && childrenOf(ids, self).find((r) => r.pid === c.pid);
     assert.ok(row, 'the child is listed as ours');
     return { c, row, exited: new Promise((resolve) => c.once('exit', resolve)) };
   };

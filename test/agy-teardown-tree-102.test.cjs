@@ -82,7 +82,7 @@ const unheldSweeps = [];    // a real taskkill of a pid this file does not hold:
 // after both waits, with no swallow: a process that will not exit, or a DIR that will not go, fails.
 const { holdRoot, rootHandoff } = loadTs('src/main/procIdentity.ts');
 const { awaitHeldExit, awaitRowsExit } = require('./tools/await-exit.cjs');
-const { lookupPids } = require('./tools/own-procs.cjs');
+const { lookupPids, childrenOf } = require('./tools/own-procs.cjs');
 const holds = [];
 const innerRows = [];
 test.after(async () => {
@@ -155,7 +155,9 @@ async function run(Pty, end, { after, beforeLiveness } = {}) {
     }
     // The inner's row, read while its pid is held and it runs as the root's child: the identity the
     // teardown's wait checks again.
-    const innerRow = lookupPids([inner]).find((row) => row.pid === inner && row.ppid === root);
+    const ids = lookupPids([root, inner]);
+    const rootRow = ids.find((row) => row.pid === root);
+    const innerRow = rootRow && childrenOf(ids, rootRow).find((row) => row.pid === inner);
     assert.ok(innerRow, `the inner ${inner} is listed as the root's child while it runs`);
     innerRows.push(innerRow);
     const proc = m.sessions.get(id).proc;
