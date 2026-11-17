@@ -11,8 +11,10 @@
  * Cooperative, not enforcement: an agent can unset NODE_OPTIONS. A broker it cannot reach fails OPEN,
  * and every fail-open is one hive row (heavy-lock / lease-fail-open), so a broken token shows up.
  *
- * Every other node process (the agent CLIs' node launchers, npm, tsc, electron-as-node) leaves at the
- * first statement below: no require, no I/O.
+ * HEAVY-LOCK-SCRIPT-ELECTRON-LIGHT-108: a hive agent's other node processes (the agent CLIs' node
+ * launchers, npm, tsc, a script) only wrap child_process: a child that is an Electron executable asks
+ * the app first (see the spawn guard below). No I/O unless one does. A node process outside the hive,
+ * and an Electron process, leaves at the first statement below.
  */
 const entryPath = process.argv[1] || '';
 const entry = entryPath.replace(/\\/g, '/').toLowerCase();
@@ -70,7 +72,13 @@ const npmCli = /(^|[\\/])npm(?:-cli)?\.js$/i.test(entry);
 const install = npmCli && npmInstallKind(entryPath, process.argv.slice(2)) === 'install';
 const builder = /(?:^|[\\/])node_modules[\\/](?:electron-builder|app-builder-lib)[\\/].+\.[cm]?[jt]s$/i.test(entry);
 const preloadKind = install ? 'install' : builder ? 'build' : null;
-if (require.main !== module && !(testRun || suiteRunner || preloadKind)) return;
+const leasing = testRun || suiteRunner || preloadKind;
+// HEAVY-LOCK-SCRIPT-ELECTRON-LIGHT-108: every hive agent node process (not an Electron one) also
+// guards its child processes: one that starts an Electron executable asks for the slot first.
+const url = (process.env.HIVE_LEDGER_URL || '').replace('/ledger/', '/heavy/');
+const hive = /^http:\/\/127\.0\.0\.1:\d+\/heavy\//.test(url);
+const guard = hive && !process.versions.electron;
+if (require.main !== module && !(leasing || guard)) return;
 
 const HELPER = '--guppy-heavy-helper';
 // Synchronous: the process blocks in spawnSync right after, and a piped stderr is asynchronous on Windows.
@@ -100,9 +108,10 @@ if (require.main === module) {
   return;
 }
 
-const url = (process.env.HIVE_LEDGER_URL || '').replace('/ledger/', '/heavy/');
-if (!/^http:\/\/127\.0\.0\.1:\d+\/heavy\//.test(url)) return;   // not a hive agent's process
-const { spawnSync } = require('node:child_process');
+if (!hive) return;   // not a hive agent's process
+const childProcess = require('node:child_process');
+// Taken before the spawn guard wraps the module's functions: the helper is never guarded.
+const { spawnSync } = childProcess;
 
 /** One request through the helper (the waiting is synchronous: no test may start meanwhile). */
 function ask(req, timeoutMs) {
@@ -121,36 +130,88 @@ function failOpen(why) {
   } catch { /* the stderr line stands */ }
 }
 
+const createdMs = Math.round(Date.now() - process.uptime() * 1000);
+
+/** Ask until the lock answers light or held (waiting in its queue meanwhile). A held lease is
+ *  released at exit. Returns the grant, or null when the lock failed open. */
+function hold(req, what) {
+  let told = false;
+  for (;;) {
+    const a = ask(req, 30_000);
+    if (a && (a.state === 'light' || a.state === 'held') && typeof a.run === 'string') {
+      if (a.leaseId) {
+        const leaseId = a.leaseId;
+        process.on('exit', () => { ask({ op: 'release', leaseId }, 5_000); });
+      }
+      return a;
+    }
+    if (a && a.state === 'wait') {
+      if (!told) say(`[guppy] waiting for the heavy-job slot${what} (held by ${(a.holders || []).join(', ') || 'a reservation'}; queue position ${a.position})\n`);
+      told = true;
+      continue;
+    }
+    // Jim SHOULD 1: the status names a version skew (an older app has no /heavy route: 404).
+    const why = a && a.line ? a.line : `unexpected answer ${JSON.stringify(a).slice(0, 120)}`;
+    failOpen(a && a.status ? `status ${a.status}: ${why}` : why);
+    return null;
+  }
+}
+
+if (guard) {
+  // HEAVY-LOCK-SCRIPT-ELECTRON-LIGHT-108 (Jim 2026-11-17 16:50Z: `node repro.cjs` started a hidden
+  // Electron twice while another agent held the slot; the call looked light). Judged by what runs:
+  // a child whose executable is electron(.exe) is an Electron launch, however the script named it,
+  // unless ELECTRON_RUN_AS_NODE makes it node. This process asks once, before its first such child,
+  // and keeps what it gets until it exits (so each later launch is covered too). Inside a held run
+  // (a suite) the answer is at once; otherwise it waits in the queue like any heavy job.
+  // Not covered: a shell line (`exec('electron .')`: the shell resolves the name, and the agent CLI's
+  // own shell calls would match on any text), which the PreToolUse classifier reads; and programs
+  // that are not node (an `electron` shim on PATH runs node_modules/electron/cli.js, which IS guarded).
+  const ELECTRON_EXE = /(?:^|[\\/])electron(?:\.exe)?$/i;
+  const asNode = (env) => {
+    if (Array.isArray(env)) return env.some((p) => /^ELECTRON_RUN_AS_NODE=./i.test(String(p)));
+    if (!env || typeof env !== 'object') env = process.env;
+    for (const k of Object.keys(env)) if (k.toUpperCase() === 'ELECTRON_RUN_AS_NODE' && env[k] != null && String(env[k]) !== '') return true;
+    return false;
+  };
+  let asked = false;
+  const electronSlot = (file, shell, env) => {
+    if (asked || shell || typeof file !== 'string' || !ELECTRON_EXE.test(file) || asNode(env)) return;
+    asked = true;
+    hold({
+      op: 'acquire', pid: process.pid, createdMs, ppid: process.ppid, files: [], preloadKind: 'electron',
+      ...(process.env.GUPPY_TEST_RUN ? { parentRun: process.env.GUPPY_TEST_RUN } : {})
+    }, ' to start Electron');
+  };
+  // spawn, exec, execFile and fork all start through ChildProcess#spawn (options.file, envPairs).
+  const protoSpawn = childProcess.ChildProcess.prototype.spawn;
+  childProcess.ChildProcess.prototype.spawn = function guppyHeavySpawn(options) {
+    if (options && typeof options === 'object') electronSlot(options.file, false, options.envPairs);
+    return protoSpawn.apply(this, arguments);
+  };
+  // The synchronous ones do not; they take (file, args?, options?).
+  const syncOptions = (args) => (args[1] && typeof args[1] === 'object' && !Array.isArray(args[1]) ? args[1] : args[2]) || {};
+  for (const name of ['spawnSync', 'execFileSync']) {
+    const original = childProcess[name];
+    childProcess[name] = function guppyHeavySync(file) {
+      const o = syncOptions(arguments);
+      electronSlot(file, !!o.shell, o.env);
+      return original.apply(this, arguments);
+    };
+  }
+}
+
+if (!leasing) return;
 const files = testRun ? process.argv.slice(1) : [];
-const req = {
+const grant = hold({
   op: 'acquire',
   pid: process.pid,
-  createdMs: Math.round(Date.now() - process.uptime() * 1000),
+  createdMs,
   ppid: process.ppid,
   files,
   suite: testRun && files.length === 0,
   ...(testRun ? {} : suiteRunner ? { runner: process.argv.slice(1), cwd: process.cwd() } : { preloadKind }),
   ...(testRun && process.env.GUPPY_TEST_RUN ? { parentRun: process.env.GUPPY_TEST_RUN } : {})
-};
-let told = false;
-for (;;) {
-  const a = ask(req, 30_000);
-  if (a && (a.state === 'light' || a.state === 'held') && typeof a.run === 'string') {
-    // A nested `node --test` this run spawns says it is part of this run (checked live by the app).
-    process.env.GUPPY_TEST_RUN = a.run;
-    if (a.leaseId) {
-      const leaseId = a.leaseId;
-      process.on('exit', () => { ask({ op: 'release', leaseId }, 5_000); });
-    }
-    break;
-  }
-  if (a && a.state === 'wait') {
-    if (!told) say(`[guppy] waiting for the heavy-job slot (held by ${(a.holders || []).join(', ') || 'a reservation'}; queue position ${a.position})\n`);
-    told = true;
-    continue;
-  }
-  // Jim SHOULD 1: the status names a version skew (an older app has no /heavy route: 404).
-  const why = a && a.line ? a.line : `unexpected answer ${JSON.stringify(a).slice(0, 120)}`;
-  failOpen(a && a.status ? `status ${a.status}: ${why}` : why);
-  break;
-}
+}, '');
+// A nested `node --test` this run spawns says it is part of this run (checked live by the app).
+if (grant) process.env.GUPPY_TEST_RUN = grant.run;

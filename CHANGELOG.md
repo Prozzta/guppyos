@@ -16,6 +16,17 @@ All notable changes to this project are documented here. The format is based on
   waits one coalesce period and tries again, so it starts after the older write ends and lands
   after it. Quit, reset and home change still write synchronously, as before.
 
+- **A script that starts Electron now waits for the heavy-job slot.** The lock judged a call by its
+  command line, so `node repro.cjs` looked light even when the script started a hidden Electron run.
+  Two such runs went ahead while another agent held the slot. The heavy preload now watches what
+  every agent node process actually starts. Before the first child whose executable is
+  electron(.exe) (not ELECTRON_RUN_AS_NODE), it asks for the slot once and keeps it until the process
+  exits. This covers spawn, exec, execFile, fork, spawnSync and execFileSync. Inside the agent's own
+  held run (a suite) it shares that run's slot at once. Inside a light run (a single test file) it
+  waits, and the single-file run stays counted. A single test file that starts no Electron stays
+  light. Not covered: Electron named only inside a shell line, which the command-line classifier
+  still reads.
+
 - **A DEV build that refuses to start (exit 97) no longer crashes on the way out.** When the live
   isolation check found DEV paths overlapping Stable, Guppy called `app.exit(97)` inside its
   whenReady startup callback. Electron 45 can crash tearing down from inside a startup callback

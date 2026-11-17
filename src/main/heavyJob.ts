@@ -2440,8 +2440,10 @@ export interface HeavyLeaseRequest {
   suite?: boolean;
   /** A suite runner's argv after node (argv[1] is run-tests.cjs): classified as PreToolUse would. */
   runner?: string[];
-  /** A non-test heavy program recognized by the preload itself, not a wrapper script name. */
-  preloadKind?: 'install' | 'build';
+  /** A non-test heavy program recognized by the preload itself, not a wrapper script name.
+   *  HEAVY-LOCK-SCRIPT-ELECTRON-LIGHT-108: 'electron' is a process about to start an Electron
+   *  executable (the preload's spawn guard); pid/createdMs are the process that starts it. */
+  preloadKind?: 'install' | 'build' | 'electron';
   /** HEAVY-LOCK-FALSE-NEGATIVES: the runner's working folder (its test files are listed there). */
   cwd?: string;
   /** GUPPY_TEST_RUN as the process inherited it: '<pid>:<createdMs>' of an enclosing classified run. */
@@ -3331,10 +3333,15 @@ export class HeavyJobLock {
     const pid = Number(r.pid);
     const createdMs = Math.round(Number(r.createdMs));
     if (!Number.isInteger(pid) || pid <= 0 || !Number.isFinite(createdMs)) throw new Error('a lease needs pid and createdMs');
-    const run = `${pid}:${createdMs}`;
+    // HEAVY-LOCK-SCRIPT-ELECTRON-LIGHT-108: an Electron launch is a run of its own (the process that
+    // starts it may itself be a light single-file run, whose entry must stay counted).
+    const electron = r.preloadKind === 'electron';
+    const run = electron ? `${pid}:${createdMs}:electron` : `${pid}:${createdMs}`;
     this.pruneRuns();
     const parent = typeof r.parentRun === 'string' ? this.runs.get(r.parentRun) : undefined;
-    if (parent && parent.agentId === agentId && this.runAlive(r.parentRun!)) {
+    // Inside a held run (a suite, a bench) an Electron launch shares its slot; inside a LIGHT run it
+    // does not inherit: a light test file or script whose tree starts Electron needs the slot.
+    if (parent && parent.agentId === agentId && this.runAlive(r.parentRun!) && (!electron || (parent.held && this.holders.has(agentId)))) {
       const held = parent.held && this.holders.has(agentId);
       this.runs.set(run, { agentId, held });
       this.log({ kind: 'heavy-lock', action: 'lease-inherit', agentId, pid, held });
@@ -3365,6 +3372,7 @@ export class HeavyJobLock {
     }
     const kind: HeavyKind = suite ? 'suite' : r.preloadKind === 'install' || r.preloadKind === 'build' ? r.preloadKind : 'bench';
     const why = suite ? 'a suite run (heavy preload)'
+      : electron ? 'an Electron launch (heavy preload)'
       : r.preloadKind ? `a ${r.preloadKind} program (heavy preload)`
         : 'a node --test its call does not show (heavy preload)';
     const cls: HeavyClass = { heavy: true, kind, why };
@@ -3378,7 +3386,7 @@ export class HeavyJobLock {
       const full = limit !== 'off' && !this.fits(agentId, heavyExclusive(cls), limit);
       if (!(queued && full && !this.reservations.has(agentId) && !this.holders.has(agentId))) {
         const shared = this.holders.has(agentId);
-        const d = this.acquire(agentId, cls, `node --test (pid ${pid})`, id, false);
+        const d = this.acquire(agentId, cls, electron ? `electron (started by pid ${pid})` : `node --test (pid ${pid})`, id, false);
         if (d.allow) {
           // 'off' (or nothing held after all): nothing to release.
           if (!this.holders.get(agentId)?.calls.has(id)) { this.runs.set(run, { agentId, held: false }); return { state: 'light', run, why: 'heavy jobs are unlimited' }; }
