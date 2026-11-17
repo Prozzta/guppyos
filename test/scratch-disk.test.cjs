@@ -94,6 +94,20 @@ test('manager authenticates owner, refuses a common repo, and only reaps a regis
   assert.equal(fs.existsSync(jailRoot), false);
 });
 
+test('a partial inbound scan failure vetoes every deletion in that sweep', { skip: process.platform !== 'win32' }, async () => {
+  const base = path.join(jail, 'partial-scan-veto'); const hive = path.join(base, 'hive'); const work = path.join(base, '_work');
+  const candidate = path.join(work, 'dwight-safe'); const brokenParent = path.join(base, 'MunderDev'); const broken = path.join(brokenParent, 'gone');
+  fs.mkdirSync(candidate, { recursive: true }); fs.mkdirSync(brokenParent, { recursive: true });
+  fs.symlinkSync(path.join(base, 'does-not-exist'), broken, 'junction');
+  const manager = new scratch.ScratchDiskManager(() => hive, () => true, async () => []);
+  assert.equal(manager.register('dwight', candidate, 'CARD-1').ok, true);
+  const result = await manager.sweep();
+  assert.deepEqual(result.reaped, []);
+  assert.equal(result.kept.length, 1);
+  assert.match(result.kept[0].reason, /^inbound-index-unavailable:broken-link:/);
+  assert.equal(fs.existsSync(candidate), true);
+});
+
 test('registered fixtures are permanently protected, even for a done card', async () => {
   const base = path.join(jail, 'fixture-manager'); const hive = path.join(base, 'hive');
   const fixture = path.join(hive, 'cache', 'fixtures', 'guppy-v1.1.83');
