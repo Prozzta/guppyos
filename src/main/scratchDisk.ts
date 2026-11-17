@@ -52,7 +52,7 @@ export interface ScratchSweepResult { reaped: string[]; kept: Array<{ path: stri
 
 interface InboundRef { source: string; target: string; }
 interface InboundDir { mtimeMs: number; refs: InboundRef[]; children: string[]; }
-interface InboundLinkIndex { v: 1; floor: string; dirs: Record<string, InboundDir>; targets: Record<string, string[]>; }
+interface InboundLinkIndex { v: 1; floor: string; dirs: Record<string, InboundDir>; targets: Record<string, string[]>; issues: string[]; }
 
 /** True only for a direct child of `_work`; cache/state directories never qualify. */
 export function managedScratchPath(workRoot: string, candidate: string): boolean {
@@ -192,7 +192,7 @@ function indexTargets(dirs: Record<string, InboundDir>): Record<string, string[]
 
 function ensureBefore(deadline: number): void { if (Date.now() > deadline) throw new Error('scan-timeout'); }
 
-async function scanInboundDir(path: string, dirs: Record<string, InboundDir>, deadline: number): Promise<void> {
+async function scanInboundDir(path: string, dirs: Record<string, InboundDir>, issues: string[], deadline: number): Promise<void> {
   ensureBefore(deadline);
   const st = await lstat(path);
   if (!st.isDirectory() || st.isSymbolicLink()) throw new Error(`not-directory:${path}`);
@@ -201,7 +201,9 @@ async function scanInboundDir(path: string, dirs: Record<string, InboundDir>, de
     ensureBefore(deadline);
     const child = join(path, name); const childStat = await lstat(child);
     if (childStat.isSymbolicLink()) {
-      let target: string; try { target = await realpath(child); } catch { throw new Error(`broken-link:${child}`); }
+      let target: string;
+      try { target = await realpath(child); }
+      catch { issues.push(`broken-link:${child}`); continue; }
       refs.push({ source: child, target: resolve(target) });
     } else if (childStat.isDirectory()) children.push(child);
     else if (childStat.isFile() && name === '.git') {
@@ -210,14 +212,14 @@ async function scanInboundDir(path: string, dirs: Record<string, InboundDir>, de
     }
   }
   dirs[path] = { mtimeMs: st.mtimeMs, refs, children };
-  for (const child of children) await scanInboundDir(child, dirs, deadline);
+  for (const child of children) await scanInboundDir(child, dirs, issues, deadline);
 }
 
 async function readInboundIndex(file: string, floor: string): Promise<InboundLinkIndex | null> {
   try {
     const parsed = JSON.parse(await readFile(file, 'utf8')) as Partial<InboundLinkIndex>;
     if (parsed.v !== 1 || parsed.floor !== floor || !parsed.dirs || typeof parsed.dirs !== 'object') return null;
-    return { v: 1, floor, dirs: parsed.dirs as Record<string, InboundDir>, targets: parsed.targets && typeof parsed.targets === 'object' ? parsed.targets as Record<string, string[]> : indexTargets(parsed.dirs as Record<string, InboundDir>) };
+    return { v: 1, floor, dirs: parsed.dirs as Record<string, InboundDir>, targets: parsed.targets && typeof parsed.targets === 'object' ? parsed.targets as Record<string, string[]> : indexTargets(parsed.dirs as Record<string, InboundDir>), issues: Array.isArray(parsed.issues) ? parsed.issues.filter((issue): issue is string => typeof issue === 'string') : [] };
   } catch { return null; }
 }
 
@@ -231,9 +233,9 @@ export async function refreshInboundLinkIndex(hiveRoot: string, workRoot: string
   const floor = dirname(resolve(workRoot)); const file = inboundIndexFile(hiveRoot);
   try {
     const deadline = Date.now() + SCRATCH_INBOUND_INDEX_TIMEOUT_MS;
-    const prior = await readInboundIndex(file, floor); const dirs = prior ? { ...prior.dirs } : {};
+    const prior = await readInboundIndex(file, floor); const dirs = prior ? { ...prior.dirs } : {}; let issues = prior ? [...prior.issues] : [];
     let rebuilt = !prior;
-    if (!prior) await scanInboundDir(floor, dirs, deadline);
+    if (!prior) await scanInboundDir(floor, dirs, issues, deadline);
     else {
       const changed: string[] = [];
       for (const [path, cached] of Object.entries(dirs)) {
@@ -251,13 +253,14 @@ export async function refreshInboundLinkIndex(hiveRoot: string, workRoot: string
       for (const path of [...new Set(changed)].sort((a, b) => a.length - b.length)) {
         if (!dirs[path]) continue;
         for (const old of Object.keys(dirs)) if (under(old, path)) delete dirs[old];
-        await scanInboundDir(path, dirs, deadline);
+        issues = issues.filter((issue) => !issue.startsWith('broken-link:') || !under(issue.slice('broken-link:'.length), path));
+        await scanInboundDir(path, dirs, issues, deadline);
       }
       rebuilt = changed.length > 0;
     }
-    const index: InboundLinkIndex = { v: 1, floor, dirs, targets: indexTargets(dirs) };
+    const index: InboundLinkIndex = { v: 1, floor, dirs, targets: indexTargets(dirs), issues };
     await writeInboundIndex(file, index);
-    return { index, error: null, rebuilt };
+    return { index, error: issues[0] ?? null, rebuilt };
   } catch (e) { return { index: null, error: String(e instanceof Error ? e.message : e), rebuilt: false }; }
 }
 
@@ -468,12 +471,15 @@ export class ScratchDiskManager {
     const root = this.hiveRoot(); const work = this.workRoot();
     if (!root || !work) return { reaped: [], kept: [] };
     const state = readScratchState(root); const rows = await this.processes(); const result: ScratchSweepResult = { reaped: [], kept: [] };
-    const initialIndex = await refreshInboundLinkIndex(root, work);
-    if (!initialIndex.index || initialIndex.rebuilt) {
+    const needsInboundCheck = state.records.some((record) => (!owner || record.owner === owner) && record.kind !== 'fixture');
+    const initialIndex = needsInboundCheck ? await refreshInboundLinkIndex(root, work) : null;
+    if (initialIndex && (!initialIndex.index || initialIndex.rebuilt || initialIndex.error)) {
       // Scanning is an all-or-nothing safety proof. A stale, partial, timed-out
       // or unreadable floor must never be treated as an empty inbound-link set.
       for (const record of state.records) {
-        const reason = initialIndex.index ? 'inbound-index-rebuilt-no-delete-this-sweep' : `inbound-index-unavailable:${initialIndex.error ?? 'unknown'}`;
+        const reason = record.kind === 'fixture'
+          ? (managedFixturePath(root, record.path) ? 'fixture-protected' : 'fixture-path-changed-or-missing')
+          : (initialIndex.error ? `inbound-index-unavailable:${initialIndex.error}` : initialIndex.index ? 'inbound-index-rebuilt-no-delete-this-sweep' : 'inbound-index-unavailable:unknown');
         result.kept.push({ path: record.path, owner: record.owner, reason });
         this.notify(record.owner, record.card, record.path, reason);
       }
@@ -487,6 +493,7 @@ export class ScratchDiskManager {
         keptRecords.push(record);
         continue;
       }
+      if (!initialIndex?.index) { result.kept.push({ path: record.path, owner: record.owner, reason: 'inbound-index-unavailable:unknown' }); keptRecords.push(record); continue; }
       const kind = scratchKind(record.path);
       if (!managedScratchPath(work, record.path) || kind !== record.kind) { result.kept.push({ path: record.path, owner: record.owner, reason: 'path-changed-or-missing' }); keptRecords.push(record); continue; }
       const gitFacts = record.kind === 'worktree' ? await gitScratchFacts(record.path) : { dirty: false, onOrigin: true, ignoredFiles: 0 };
@@ -506,7 +513,7 @@ export class ScratchDiskManager {
       // Last-moment recheck: a changed directory or failed scan vetoes this
       // deletion, even though the initial full-floor index was clean.
       const finalIndex = await refreshInboundLinkIndex(root, work);
-      if (!finalIndex.index || finalIndex.rebuilt) { result.kept.push({ path: record.path, owner: record.owner, reason: finalIndex.index ? 'inbound-index-rebuilt-no-delete-this-sweep' : `inbound-index-unavailable:${finalIndex.error ?? 'unknown'}` }); keptRecords.push(record); continue; }
+      if (!finalIndex.index || finalIndex.rebuilt || finalIndex.error) { result.kept.push({ path: record.path, owner: record.owner, reason: finalIndex.error ? `inbound-index-unavailable:${finalIndex.error}` : finalIndex.index ? 'inbound-index-rebuilt-no-delete-this-sweep' : 'inbound-index-unavailable:unknown' }); keptRecords.push(record); continue; }
       const finalFacts = { ...facts, inboundLinks: inboundLinksFromIndex(finalIndex.index, record.path), live: processUses(record.path, await this.processes()) };
       const finalPlan = planScratchReap(finalFacts);
       if (finalPlan.action !== 'reap') { result.kept.push({ path: record.path, owner: record.owner, reason: finalPlan.reason }); keptRecords.push(record); continue; }
