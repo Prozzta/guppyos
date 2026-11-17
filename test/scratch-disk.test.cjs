@@ -106,6 +106,8 @@ test('a partial inbound scan failure vetoes every deletion in that sweep', { ski
   assert.equal(result.kept.length, 1);
   assert.match(result.kept[0].reason, /^inbound-index-unavailable:broken-link:/);
   assert.equal(fs.existsSync(candidate), true);
+  // Keep this deliberately broken junction out of later full-floor fixtures.
+  fs.rmdirSync(broken);
 });
 
 test('registered fixtures are permanently protected, even for a done card', async () => {
