@@ -129,8 +129,16 @@ module.exports = async (drill) => {
       // Jim N2: the first search's model step has started (and is held) before the others go.
       for (let i = 0; i < 1_000 && (await runsNow()) <= runsBefore; i++) await pause(10);
       const t0 = Date.now();
+      // args.stallMs: the worker process takes nothing for that long (a starved process), so it
+      // receives the two searches below that much later than they were sent.
+      if (drill.args.stallMs > 0) child.send({ host: 'stall', ms: drill.args.stallMs });
       send(RAW_ID + 2, t0 + HOLD_MS / 2);
       send(RAW_ID + 3, t0 + 30_000);
+      // TEST-FLAKE-MEMSEARCH-DEADLINE-T3: the worker counts a search's wait from when it TAKES the
+      // message, not from when it was sent. The hold therefore starts only once the worker has
+      // answered a message sent behind the two searches (the channel keeps order): both are in its
+      // queue for the whole hold, however late a starved worker process took them.
+      if ((await runsNow()) === null) return { ok: false, reason: 'the worker never answered behind the queued searches' };
       await pause(HOLD_MS);
       child.send({ host: 'release' });
       for (let i = 0; i < 1_000 && raw.size < 3; i++) await pause(10);

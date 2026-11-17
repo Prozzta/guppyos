@@ -283,11 +283,11 @@ test('T2 (B): the engine reports indexing on and off around a backfill, a claims
 const { runDrill } = require('./claims-drill/runner.cjs');
 const TREE = path.join(__dirname, '..');
 let n = 0;
-async function drill(leg) {
+async function drill(leg, extra = {}) {
   const dir = path.join(JAIL, `drill-${++n}`);
   const hive = path.join(dir, 'hive');
   fs.mkdirSync(hive, { recursive: true });
-  const res = await runDrill({ tree: TREE, hive, home: path.join(dir, 'home'), script: path.join(__dirname, 'memory-search-deadline', 'scenario.cjs'), needModel: false, args: { leg }, timeoutMs: 180_000 });
+  const res = await runDrill({ tree: TREE, hive, home: path.join(dir, 'home'), script: path.join(__dirname, 'memory-search-deadline', 'scenario.cjs'), needModel: false, args: { leg, ...extra }, timeoutMs: 180_000 });
   assert.equal(res.ok, true, JSON.stringify(res, null, 2).slice(0, 3000));
   return res;
 }
@@ -296,7 +296,19 @@ async function drill(leg) {
 // serially in the perf lane, test/perf/memory-search-deadline-189-t3.perf.cjs.
 
 test('T3 (C, worker wiring): the worker passes each search deadline to the engine: one that expires behind a held step is answered expired with timing and never run; ok replies carry timing', async () => {
-  const r = await drill('queue');
+  queueWiring(await drill('queue'));
+});
+
+// TEST-FLAKE-MEMSEARCH-DEADLINE-T3: the timing a reply carries counts from when the WORKER took
+// the search, not from when it was sent. A worker process that takes nothing for 550 ms of the
+// 600 ms hold (a starved process in a full run; here its event loop is blocked) receives the two
+// queued searches that late. The drill starts the hold only once the worker has answered a
+// message sent behind them, so they are in its queue for the whole hold whatever the stall.
+test('T3 (C, worker wiring): the same when the worker process takes the queued searches 550 ms late (a stalled process)', async () => {
+  queueWiring(await drill('queue', { stallMs: 550 }));
+});
+
+function queueWiring(r) {
   assert.equal(r.cold.exit, 0, JSON.stringify(r.cold));
   const half = r.holdMs / 2;
   assert.deepEqual([r.held.ok, r.held.exit], [true, 0], JSON.stringify(r.held));
@@ -309,7 +321,7 @@ test('T3 (C, worker wiring): the worker passes each search deadline to the engin
   assert.deepEqual([r.after.ok, r.after.exit], [true, 0], JSON.stringify(r.after));
   assert.ok(r.after.timing && r.after.timing.waitMs >= half, `the one behind it waited and says so: ${JSON.stringify(r.after.timing)}`);
   assert.equal(r.stepRuns, 2, 'the model ran for the held search and the last one, never for the expired one');
-});
+}
 
 test('T3: a wedged worker during a claims sync: each timed-out search writes a degraded row (deadline, indexing, 1000 ms)', async () => {
   const r = await drill('hang');
