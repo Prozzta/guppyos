@@ -29,6 +29,12 @@ All notable changes to this project are documented here. The format is based on
   program that reused a closed terminal's process id. Guppy now loads the built binaries only and
   says why if they do not load, and the ready-made Windows ones are no longer packaged. A release
   build is checked for this: `node tools/patch-node-pty-root-handle.cjs --packaged <app folder>`.
+- **The test runner's start gate never lets one file too many through.** The runner lets only a few
+  test files load at once. On a busy machine a waiting file could clear the wrong start slot: it
+  saw a slot held by a file that had ended, and removed it a moment after another file had taken
+  it. One file more than the limit then loaded at the same time, and a full run could fail on it.
+  A waiting file now clears only the holder it saw, never a newer one.
+  (TEST-GATE-SLOT-TAKEOVER-107)
 
 > **The fork line.** From here up, entries are this fork's (Prozzta/guppyos) independently
 > versioned 1.1.x releases, taken from their GitHub release notes (published releases begin at

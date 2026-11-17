@@ -43,6 +43,15 @@ function fromText(file, text) {
 
 const K = {};
 
+/** Another process holding slot k: its folder with a marker named by that pid (the gate's own layout). */
+const holdAs = (d, k, pid) => {
+  const p = path.join(d, `slot-${k}`);
+  fs.rmSync(p, { recursive: true, force: true });
+  fs.mkdirSync(p);
+  fs.writeFileSync(path.join(p, String(pid)), '');
+  return p;
+};
+
 K.slots = (g = G, d) => {
   assert.equal(g.tryTake(d, 2), 0);
   assert.equal(g.tryTake(d, 2), 1, 'A TAKEN SLOT IS NOT TAKEN AGAIN');
@@ -50,19 +59,65 @@ K.slots = (g = G, d) => {
   g.give(d, 0);
   assert.equal(g.tryTake(d, 2), 0, 'A GIVEN-BACK SLOT IS TAKEN AGAIN');
   // A holder that is gone is taken over: a dead pid, or held past STALE_MS.
-  fs.writeFileSync(path.join(d, 'slot-1'), '999999');
+  holdAs(d, 1, 999999);
   assert.equal(g.tryTake(d, 2), -1, 'the pass that finds a dead holder clears it');
   assert.equal(g.tryTake(d, 2), 1, 'A DEAD HOLDER IS TAKEN OVER');
   const old = (Date.now() - g.STALE_MS - 1000) / 1000;
-  fs.utimesSync(path.join(d, 'slot-0'), old, old);
+  fs.utimesSync(path.join(d, 'slot-0', String(process.pid)), old, old);
   g.tryTake(d, 2);
   assert.equal(g.tryTake(d, 2), 0, 'A STALE HOLDER IS TAKEN OVER');
   // Only the holder gives a slot back.
-  fs.writeFileSync(path.join(d, 'slot-0'), '4');
+  holdAs(d, 0, 4);
   g.give(d, 0);
-  assert.ok(fs.existsSync(path.join(d, 'slot-0')), 'ANOTHER PROCESS DOES NOT GIVE BACK A SLOT IT DOES NOT HOLD');
+  assert.deepEqual(fs.existsSync(path.join(d, 'slot-0')) ? fs.readdirSync(path.join(d, 'slot-0')) : null, ['4'], 'ANOTHER PROCESS DOES NOT GIVE BACK A SLOT IT DOES NOT HOLD');
 };
 test('slots: exclusive, given back, a dead or stale holder taken over, only the holder gives back', (t) => K.slots(G, tmp(t)));
+
+// TEST-GATE-SLOT-TAKEOVER-107: the full suite once had 3 files past a 2-slot gate. A waiter B read
+// slot-k and saw holder A. Before B looked at A, A gave the slot back and exited, and C took slot-k.
+// B then found A dead and removed slot-k by its path: C's. The window is the two fs calls between
+// B's read and B's remove, so the step is made here by hand: the swap runs inside B's last look at A.
+K.takeover = (g = G, d) => {
+  const slot = path.join(d, 'slot-0');
+  const A = 999999;           // dead
+  const C = process.ppid;     // alive, and not this process (B)
+  holdAs(d, 0, A);
+  const real = { readdirSync: fs.readdirSync, statSync: fs.statSync };
+  let swaps = 0;
+  // The waiter's last look at the old holder (its stat) still finds A; C is in place when it returns.
+  fs.statSync = function (p, ...rest) {
+    const out = real.statSync.call(fs, p, ...rest);
+    if (String(p).startsWith(slot) && !swaps++) holdAs(d, 0, C);
+    return out;
+  };
+  let got;
+  try { got = g.tryTake(d, 1); } finally { Object.assign(fs, real); }
+  assert.equal(swaps, 1, 'the waiter looked at the old holder (the step this test makes)');
+  assert.equal(got, -1, 'the waiter finds the slot held on this pass');
+  assert.deepEqual(fs.existsSync(slot) ? fs.readdirSync(slot) : null, [String(C)], 'A WAITER NEVER REMOVES A NEWER HOLDER');
+  assert.equal(g.tryTake(d, 1), -1, 'A WAITER NEVER REMOVES A NEWER HOLDER (the slot stays held on the next pass)');
+  // The holder that is really gone is still cleared, in one pass, and the slot taken on the next.
+  holdAs(d, 0, A);
+  assert.equal(g.tryTake(d, 1), -1);
+  assert.equal(g.tryTake(d, 1), 0, 'A DEAD HOLDER IS TAKEN OVER');
+  g.give(d, 0);
+  // A slot never exists without its holder in it: a slot seen empty could be removed by a waiter
+  // and taken by another file, and the first holder's marker would then land in the other's slot.
+  const seen = [];
+  const watch = (name) => {
+    const orig = fs[name];
+    fs[name] = function (...a) { const out = orig.apply(fs, a); if (fs.existsSync(slot)) seen.push(`${name}: ${JSON.stringify(real.readdirSync.call(fs, slot))}`); return out; };
+    return () => { fs[name] = orig; };
+  };
+  const undo = ['mkdirSync', 'writeFileSync', 'renameSync'].map(watch);
+  try { got = g.tryTake(d, 1); } finally { undo.forEach((u) => u()); }
+  assert.equal(got, 0);
+  assert.ok(seen.length > 0, 'the slot was seen being taken');
+  for (const s of seen) assert.ok(s.endsWith(`: ["${process.pid}"]`), `A SLOT NEVER EXISTS WITHOUT ITS HOLDER IN IT, saw ${seen.join(' | ')}`);
+  g.give(d, 0);
+  assert.deepEqual(fs.readdirSync(d).filter((f) => f.startsWith('slot-') || f.startsWith('claim-')), [], 'a given-back slot leaves nothing behind');
+};
+test('takeover: a waiter that read the old holder never removes the newer one; a slot never exists without its holder', (t) => K.takeover(G, tmp(t)));
 
 // The rig's tree kill: own-procs' process table (a PowerShell CIM query) can time out in the burst.
 // A fake kill on this live pid (never the real one: it would kill this process).
@@ -101,6 +156,7 @@ K.waits = (g = G, d) => {
   assert.equal(r.slot, -1);
   assert.equal(r.timedOut, true, 'A FULL GATE WAITS A BOUNDED TIME, THEN STARTS WITHOUT A SLOT');
   assert.ok(r.waitMs >= 1000 && r.waitMs < 1100);
+  assert.deepEqual(fs.readdirSync(d).filter((f) => f.startsWith('claim-')), [], 'A FILE THAT GOES ON WITHOUT A SLOT LEAVES NO CLAIM FOLDER BEHIND');
   // No gate folder: nothing to wait for.
   clock = 0;
   const gone = g.take(path.join(d, 'nope'), 2, { waitMs: 1000, now, sleep });
@@ -112,7 +168,7 @@ K.waits = (g = G, d) => {
   // A fault on every slot for a moment is waited out; FAULT_POLLS in a row is a gate that cannot be written.
   const sub = (n) => { const p = path.join(d, n); fs.mkdirSync(p); return p; };
   let faults = 0;
-  const passing = (p) => { if (++faults <= 5) eperm(); fs.writeFileSync(p, String(process.pid), { flag: 'wx' }); };
+  const passing = (p) => { if (++faults <= 5) eperm(); g.claim(p); };
   clock = 0;
   assert.equal(g.take(sub('passing'), 1, { now, sleep, make: passing }).slot, 0, 'A PASSING CREATE FAULT IS WAITED OUT');
   clock = 0;
@@ -245,14 +301,20 @@ function mutatedText(file, edits, tag) {
 const mutate = (file, edits, tag) => fromText(file, mutatedText(file, edits, tag));
 
 const MUTANTS = [
-  { name: 'slots are not exclusive', file: GATE_FILE, edits: [["{ flag: 'wx' }", "{ flag: 'w' }"]], killer: 'slots', dies: /A TAKEN SLOT IS NOT TAKEN AGAIN/ },
+  { name: 'slots are not exclusive', file: GATE_FILE, edits: [['  try { fs.renameSync(mine, p); } catch (e) {', '  try { fs.renameSync(mine, p); } catch (e) { return;']], killer: 'slots', dies: /A TAKEN SLOT IS NOT TAKEN AGAIN/ },
   { name: 'a dead holder is never taken over', file: GATE_FILE, edits: [['if ((pid > 0 && !alive(pid)) || held > STALE_MS)', 'if (held > STALE_MS)']], killer: 'slots', dies: /A DEAD HOLDER IS TAKEN OVER/ },
   { name: 'a stale holder is never taken over', file: GATE_FILE, edits: [['if ((pid > 0 && !alive(pid)) || held > STALE_MS)', 'if (pid > 0 && !alive(pid))']], killer: 'slots', dies: /A STALE HOLDER IS TAKEN OVER/ },
-  { name: 'any process gives a slot back', file: GATE_FILE, edits: [['  try { if (Number(fs.readFileSync(p, \'utf8\')) === process.pid) fs.rmSync(p, { force: true }); } catch { /* taken over */ }', '  try { fs.rmSync(p, { force: true }); } catch { /* taken over */ }']], killer: 'slots', dies: /ANOTHER PROCESS DOES NOT GIVE BACK/ },
+  { name: 'any process gives a slot back', file: GATE_FILE, edits: [["  try { fs.rmSync(path.join(p, String(process.pid)), { force: true }); fs.rmdirSync(p); } catch { /* taken over */ }", "  try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* taken over */ }"]], killer: 'slots', dies: /ANOTHER PROCESS DOES NOT GIVE BACK/ },
+  // TEST-GATE-SLOT-TAKEOVER-107.
+  { name: 'a waiter clears a gone holder by the slot path (the defect)', file: GATE_FILE, edits: [['|| held > STALE_MS) fs.rmSync(m, { force: true });', '|| held > STALE_MS) fs.rmSync(p, { recursive: true, force: true });']], killer: 'takeover', dies: /A WAITER NEVER REMOVES A NEWER HOLDER/ },
+  { name: 'a waiter removes a slot folder that is not empty', file: GATE_FILE, edits: [["  try { fs.rmdirSync(p); } catch { /* held (not empty), or gone meanwhile */ }", "  try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* held (not empty), or gone meanwhile */ }"]], killer: 'takeover', dies: /A WAITER NEVER REMOVES A NEWER HOLDER/ },
+  { name: 'a cleared slot folder is left behind', file: GATE_FILE, edits: [["  try { fs.rmdirSync(p); } catch { /* held (not empty), or gone meanwhile */ }", '']], killer: 'takeover', dies: /A DEAD HOLDER IS TAKEN OVER/ },
+  { name: 'the slot is made, then marked (two steps)', file: GATE_FILE, edits: [['  try { fs.renameSync(mine, p); } catch (e) {', "  try { fs.mkdirSync(p); fs.writeFileSync(path.join(p, String(process.pid)), ''); } catch (e) {"]], killer: 'takeover', dies: /A SLOT NEVER EXISTS WITHOUT ITS HOLDER IN IT/ },
+  { name: 'a file without a slot leaves its claim folder (Jim G2)', file: GATE_FILE, edits: [['  const out = (r) => { if (r.slot < 0) unclaim(dir); return r; };', '  const out = (r) => r;']], killer: 'waits', dies: /A FILE THAT GOES ON WITHOUT A SLOT LEAVES NO CLAIM FOLDER BEHIND/ },
   { name: 'the wait is unbounded', file: GATE_FILE, edits: [['    if (now() - t0 >= waitMs) return', '    if (now() - t0 >= Infinity) return']], killer: 'waits', dies: /A FULL GATE WAITS A BOUNDED TIME|Infinity|timed out/, guard: true },
   { name: 'a missing gate folder is waited on', file: GATE_FILE, edits: [["      if (e.code === 'ENOENT' || e.code === 'ENOTDIR') return -2;", '']], killer: 'waits', dies: /A MISSING GATE FOLDER IS NO WAIT/ },
   { name: 'any failed create is a missing gate (the after FULL: starts without a slot)', file: GATE_FILE, edits: [["      if (e.code !== 'EEXIST') { faults++; continue; }", "      if (e.code !== 'EEXIST') return -2;"]], killer: 'waits', dies: /A SLOT THAT CANNOT BE CREATED IS BUSY, NOT A MISSING GATE/ },
-  { name: 'a persistent create fault waits the full time', file: GATE_FILE, edits: [['    if (faulted >= FAULT_POLLS) return { slot: -1, waitMs: now() - t0, timedOut: false, faulted: true };\n', '']], killer: 'waits', dies: /A CREATE FAULT THAT PERSISTS ENDS THE WAIT EARLY/ },
+  { name: 'a persistent create fault waits the full time', file: GATE_FILE, edits: [['    if (faulted >= FAULT_POLLS) return out({ slot: -1, waitMs: now() - t0, timedOut: false, faulted: true });\n', '']], killer: 'waits', dies: /A CREATE FAULT THAT PERSISTS ENDS THE WAIT EARLY/ },
   { name: 'a passing create fault ends the wait', file: GATE_FILE, edits: [['if (faulted >= FAULT_POLLS)', 'if (faulted >= 1)']], killer: 'waits', dies: /A PASSING CREATE FAULT IS WAITED OUT/ },
   // Live: the preload runs from a mutated copy of the gate file (it requires only fs and path).
   { name: 'the slot is given back at exit (Jim a5a246)', file: GATE_FILE, live: true, edits: [['  setImmediate(finish);', "  process.once('beforeExit', finish);"]], killer: 'release', dies: /THE SLOT IS GIVEN BACK ONCE THE TOP LEVEL HAS RUN, NOT AT EXIT/ },
