@@ -6,11 +6,11 @@
  */
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, symlinkSync } from 'node:fs';
-import { lstat, readdir } from 'node:fs/promises';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { cp, lstat, readdir, symlink } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { atomicWriteJson } from './atomicJson';
-import { findReparsePointsSync, removeReparsePointSync, safeRemoveTreeSync, unlinkReparsePointsUnderSync } from './fsSafeRemove';
+import { findReparsePointsSync, removeReparsePoint, removeReparsePointSync, safeRemoveTree, unlinkReparsePointsUnderSync } from './fsSafeRemove';
 
 export { findReparsePointsSync, removeReparsePointSync, unlinkReparsePointsUnderSync } from './fsSafeRemove';
 
@@ -131,15 +131,15 @@ export function publishedScratchCache(hiveRoot: string, key: string): boolean {
  * published. Existing untracked links are intentionally left alone: they may be
  * an old hand-made sharing arrangement and are reported, never overwritten.
  */
-export function attachManagedNodeModules(hiveRoot: string, project: string, key: string): void {
+export async function attachManagedNodeModules(hiveRoot: string, project: string, key: string): Promise<void> {
   const entry = scratchCacheEntry(hiveRoot, key); const nm = join(project, 'node_modules');
   if (!existsSync(entry)) throw new Error('managed cache entry is not published');
   if (existsSync(nm) || isLink(nm)) throw new Error('refused: node_modules already exists or is a handmade link');
-  symlinkSync(entry, nm, process.platform === 'win32' ? 'junction' : 'dir');
+  await symlink(entry, nm, process.platform === 'win32' ? 'junction' : 'dir');
 }
 
 /** Copy a cache junction to a private writable node_modules without touching the cache. */
-export function detachPrivateNodeModules(hiveRoot: string, project: string, key: string): void {
+export async function detachPrivateNodeModules(hiveRoot: string, project: string, key: string): Promise<void> {
   const entry = scratchCacheEntry(hiveRoot, key); const nm = join(project, 'node_modules');
   if (!isLink(nm)) throw new Error('refused: node_modules is not a managed junction');
   let target: string;
@@ -147,19 +147,19 @@ export function detachPrivateNodeModules(hiveRoot: string, project: string, key:
   if (resolve(target) !== resolve(entry)) throw new Error('refused: node_modules points at a different cache entry');
   // Electron's rmSync follows a junction recursively.  Remove the link entry
   // itself before copying, never its cache target.
-  removeReparsePointSync(nm);
-  cpSync(entry, nm, { recursive: true, dereference: false, errorOnExist: true });
+  await removeReparsePoint(nm);
+  await cp(entry, nm, { recursive: true, dereference: false, errorOnExist: true });
 }
 
 /** Replace only a previously recorded managed junction; handmade links remain inviolate. */
-export function refreshManagedNodeModules(hiveRoot: string, project: string, oldKey: string | undefined, nextKey: string): void {
+export async function refreshManagedNodeModules(hiveRoot: string, project: string, oldKey: string | undefined, nextKey: string): Promise<void> {
   const nm = join(project, 'node_modules');
   if (oldKey) {
     const old = scratchCacheEntry(hiveRoot, oldKey);
     if (!isLink(nm) || resolve(realpathSync(nm)) !== resolve(old)) throw new Error('refused: prior managed cache junction changed');
-    removeReparsePointSync(nm);
+    await removeReparsePoint(nm);
   }
-  attachManagedNodeModules(hiveRoot, project, nextKey);
+  await attachManagedNodeModules(hiveRoot, project, nextKey);
 }
 
 /** Entries with any `_work` junction into them are in use and cannot be garbage-collected. */
@@ -263,9 +263,9 @@ function processUses(path: string, rows: readonly ScratchProcess[] | null): bool
 }
 
 /** Remove links as links, re-scan, then the verified link-free root.  Caller planned/rechecked first. */
-export function removeScratchRoot(workRoot: string, path: string): void {
+export async function removeScratchRoot(workRoot: string, path: string): Promise<void> {
   if (!managedScratchPath(workRoot, path)) throw new Error('refused: path is not a managed _work child');
-  safeRemoveTreeSync(path);
+  await safeRemoveTree(path);
 }
 
 /**
@@ -351,13 +351,13 @@ export class ScratchDiskManager {
     return { ok: true, line: `touched ${record.path}` };
   }
 
-  detachPrivate(owner: string, candidate: unknown): { ok: boolean; line: string } {
+  async detachPrivate(owner: string, candidate: unknown): Promise<{ ok: boolean; line: string }> {
     if (typeof candidate !== 'string') return { ok: false, line: 'refused: detach needs a path' };
     const root = this.hiveRoot(); const work = this.workRoot();
     if (!root || !work) return { ok: false, line: 'refused: hive scratch is unavailable' };
     const path = resolve(candidate); const record = this.recordFor(owner, path);
     if (!record || !record.cacheKey || !managedScratchPath(work, path)) return { ok: false, line: 'refused: scratch has no managed cache to detach' };
-    try { detachPrivateNodeModules(root, path, record.cacheKey); }
+    try { await detachPrivateNodeModules(root, path, record.cacheKey); }
     catch (e) { return { ok: false, line: String(e instanceof Error ? e.message : e) }; }
     const state = readScratchState(root);
     const saved = state.records.find((r) => r.owner === owner && resolve(r.path) === path);
@@ -374,14 +374,14 @@ export class ScratchDiskManager {
     return { ok: true, line: publishedScratchCache(root, key) ? `cache ${key} is ready` : `build cache ${key}`, key, published: publishedScratchCache(root, key) };
   }
 
-  attachCache(owner: string, candidate: unknown, key: unknown): { ok: boolean; line: string } {
+  async attachCache(owner: string, candidate: unknown, key: unknown): Promise<{ ok: boolean; line: string }> {
     if (typeof candidate !== 'string' || typeof key !== 'string') return { ok: false, line: 'refused: attach needs a path and cache key' };
     const root = this.hiveRoot(); const work = this.workRoot(); const path = resolve(candidate); const record = this.recordFor(owner, path);
     if (!root || !work || !record || !managedScratchPath(work, path)) return { ok: false, line: 'refused: scratch is not registered to you' };
     if (!publishedScratchCache(root, key)) return { ok: false, line: 'refused: cache entry is incomplete or not published' };
     let expected: string; try { expected = managedInstallKey(path); } catch { return { ok: false, line: 'refused: cannot read package inputs for cache key' }; }
     if (key !== expected) return { ok: false, line: 'refused: cache key is stale; rebuild for current package inputs' };
-    try { refreshManagedNodeModules(root, path, record.cacheKey, key); }
+    try { await refreshManagedNodeModules(root, path, record.cacheKey, key); }
     catch (e) { return { ok: false, line: String(e instanceof Error ? e.message : e) }; }
     const state = readScratchState(root); const saved = state.records.find((r) => r.owner === owner && resolve(r.path) === path);
     if (saved) { saved.cacheKey = key; saved.touchedAt = this.now(); writeScratchState(root, state); }
@@ -429,7 +429,7 @@ export class ScratchDiskManager {
       const finalPlan = planScratchReap(finalFacts);
       if (finalPlan.action !== 'reap') { result.kept.push({ path: record.path, owner: record.owner, reason: finalPlan.reason }); keptRecords.push(record); continue; }
       if (facts.ignoredFiles) this.notify(record.owner, record.card, record.path, `ignored-files-will-be-lost:${facts.ignoredFiles}`);
-      try { removeScratchRoot(work, record.path); result.reaped.push(record.path); }
+      try { await removeScratchRoot(work, record.path); result.reaped.push(record.path); }
       catch { result.kept.push({ path: record.path, owner: record.owner, reason: 'remove-failed' }); keptRecords.push(record); }
     }
     writeScratchState(root, { v: 1, records: keptRecords });
@@ -442,9 +442,9 @@ export class ScratchDiskManager {
     if (b.op === 'register') { const r = this.register(owner, b.path, b.card); return { status: r.ok ? 200 : 400, body: r }; }
     if (b.op === 'register-fixture') { const r = this.registerFixture(owner, b.path, b.card); return { status: r.ok ? 200 : 400, body: r }; }
     if (b.op === 'touch') { const r = this.touch(owner, b.path); return { status: r.ok ? 200 : 400, body: r }; }
-    if (b.op === 'detach-private') { const r = this.detachPrivate(owner, b.path); return { status: r.ok ? 200 : 400, body: r }; }
+    if (b.op === 'detach-private') { const r = await this.detachPrivate(owner, b.path); return { status: r.ok ? 200 : 400, body: r }; }
     if (b.op === 'prepare-cache') { const r = this.prepareCache(owner, b.path); return { status: r.ok ? 200 : 400, body: r }; }
-    if (b.op === 'attach-cache') { const r = this.attachCache(owner, b.path, b.key); return { status: r.ok ? 200 : 400, body: r }; }
+    if (b.op === 'attach-cache') { const r = await this.attachCache(owner, b.path, b.key); return { status: r.ok ? 200 : 400, body: r }; }
     if (b.op === 'reap') { const r = await this.sweep(owner); return { status: 200, body: { ok: true, line: `reaped ${r.reaped.length}; kept ${r.kept.length}`, ...r } }; }
     if (b.op === 'status') {
       const root = this.hiveRoot(); const records = root ? readScratchState(root).records.filter((r) => r.owner === owner) : [];

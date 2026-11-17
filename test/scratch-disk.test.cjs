@@ -100,9 +100,9 @@ test('registered fixtures are permanently protected, even for a done card', asyn
   assert.equal(fs.existsSync(fixture), true);
 });
 
-test('link-safe scratch removal preserves top, scoped and deep junction targets under system node', () => {
+test('link-safe scratch removal preserves top, scoped and deep junction targets under system node', async () => {
   const fixture = linkRemovalFixture(path.join(jail, 'link-safe-system'));
-  scratch.removeScratchRoot(fixture.work, fixture.tree);
+  await scratch.removeScratchRoot(fixture.work, fixture.tree);
   assert.equal(fs.existsSync(fixture.tree), false);
   assertLiveFixture(fixture.live);
 });
