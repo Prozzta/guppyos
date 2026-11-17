@@ -83,7 +83,13 @@ test('manager authenticates owner, refuses a common repo, and only reaps a regis
   assert.equal(manager.register('dwight', jailRoot, 'CARD-1').ok, true);
   assert.match(manager.register('jim', jailRoot, 'CARD-1').line, /another agent/);
   clock += scratch.SCRATCH_IDLE_MS + 1;
-  const r = await manager.sweep();
+  // A new or rebuilt persisted index deliberately vetoes its own sweep; once
+  // the next unchanged validation confirms it, the otherwise-safe jail reaps.
+  let r;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    r = await manager.sweep();
+    if (r.reaped.length) break;
+  }
   assert.deepEqual(r.reaped, [path.resolve(jailRoot)]);
   assert.equal(fs.existsSync(jailRoot), false);
 });
@@ -171,6 +177,6 @@ test('persisted whole-floor inbound index finds nested, outside and gitdir refer
 test('mutant pins: each never-reap guard and source-input key is present', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'scratchDisk.ts'), 'utf8');
   const safe = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'fsSafeRemove.ts'), 'utf8');
-  for (const token of ['if (f.dirty)', 'if (!f.onOrigin)', 'if (f.live)', 'if (f.inboundLinks.length)', 'package-lock.json', 'package.json', 'const tools = join(project, \'tools\')', 'path-changed-or-missing', 'fixture-protected', 'worktreeGitdirPointsInto']) assert.ok(src.includes(token), token);
+  for (const token of ['if (f.dirty)', 'if (!f.onOrigin)', 'if (f.live)', 'if (f.inboundLinks.length)', 'package-lock.json', 'package.json', 'const tools = join(project, \'tools\')', 'path-changed-or-missing', 'fixture-protected', 'worktreeGitdirPointsInto', 'inbound-index-rebuilt-no-delete-this-sweep', 'scan-timeout']) assert.ok(src.includes(token), token);
   for (const token of ['removeReparsePointSync', 'unlinkReparsePointsUnderSync', 'findReparsePointsSync', 'refused: reparse point remained']) assert.ok(safe.includes(token), token);
 });
