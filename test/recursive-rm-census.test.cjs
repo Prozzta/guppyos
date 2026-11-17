@@ -2,18 +2,27 @@
 require('./tools/own-job.cjs');
 
 /**
- * ELECTRON-RMSYNC-AGENT-WRITABLE-108: no recursive remove in src/main outside the two modules that
- * exist to make one safely.
+ * ELECTRON-RMSYNC-AGENT-WRITABLE-108: no recursive remove anywhere in src/main, the two remover
+ * modules included.
  *
  * Under Electron 45 a recursive rmSync deletes THROUGH a Windows junction: the files the link
  * points at go too (pinned in electron-rmsync-link-safe.test.cjs, RUNTIME PIN). Every remove of a
  * folder in the main process therefore goes through src/main/linkSafeRemove.ts (a path that may be
- * anything) or src/main/fsSafeRemove.ts (a tree known to be a real folder). This census reads the
- * source, so a new site is caught without a fixture for it.
+ * anything) or src/main/fsSafeRemove.ts (a real folder). fsSafeRemove walks the tree bottom-up
+ * and removes each entry by itself, so it holds no recursive remove either (since f18d624d), and
+ * nothing is exempt. This census reads the source, so a new site is caught without a fixture.
  *
  * A call is counted when it is rm, rmSync, rmdir or rmdirSync (bare or as a member) and either
  * names `recursive` in its arguments or takes options that are not an object literal (they cannot
  * be read here, so they are assumed recursive).
+ *
+ * A second pattern (NIT 1 of Jim's audit of 2edbe77f) counts the ways a remove can be reached
+ * under another name, which the first pattern would not see called:
+ *   const zap = fs.rmSync          a remove assigned to a name
+ *   { rmSync: zap }, rm as zap     renamed in a destructuring, an object or an import
+ *   fs['rmSync']                   bracket access
+ *   promisify(fs.rm), rm.bind(..)  handed on as a value
+ * A plain `import { rmSync }` keeps its name, so its calls are read by the first pattern.
  *
  * A site that must stay goes in ALLOW with the reason. An entry that matches nothing fails too.
  */
@@ -23,7 +32,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const SRC = path.join(__dirname, '..', 'src', 'main');
-/** The two modules that hold the recursive removes, by path under src/main. */
+/** The two remover modules, by path under src/main. They are read like any other file. */
 const REMOVERS = ['fsSafeRemove.ts', 'linkSafeRemove.ts'];
 /** { file (under src/main, forward slashes), call (the text of the call, whitespace collapsed), reason }. */
 const ALLOW = [];
@@ -62,6 +71,26 @@ function recursiveRemoves(text) {
   return found;
 }
 
+const NAMES = '(?:rm|rmSync|rmdir|rmdirSync)';
+const ALIAS_PATTERNS = [
+  new RegExp(`=\\s*(?:[\\w$]+\\s*\\.\\s*)*${NAMES}\\s*(?=[;,)\\]}\\r\\n]|$)`, 'g'),          // = fs.rmSync;
+  new RegExp(`\\b${NAMES}\\s*:\\s*[A-Za-z_$][\\w$]*\\s*(?=[,}=])`, 'g'),                        // { rmSync: zap }
+  new RegExp(`\\b${NAMES}\\s+as\\s+[\\w$]+`, 'g'),                                              // rmSync as zap
+  new RegExp(`\\[\\s*(['"\`])${NAMES}\\1\\s*\\]`, 'g'),                                         // fs['rmSync']
+  new RegExp(`[(,]\\s*(?:[\\w$]+\\s*\\.\\s*)+${NAMES}\\s*(?=[,)])`, 'g'),                       // promisify(fs.rm)
+  new RegExp(`\\b${NAMES}\\s*\\.\\s*(?:bind|call|apply)\\b`, 'g')                               // rmSync.bind(fs)
+];
+
+/** Every place `text` reaches a remove under another name: { line, call }. */
+function aliasedRemoves(text) {
+  const found = [];
+  for (const re of ALIAS_PATTERNS) {
+    re.lastIndex = 0;
+    for (let m; (m = re.exec(text));) found.push({ line: text.slice(0, m.index).split('\n').length, call: m[0].replace(/\s+/g, ' ').trim() });
+  }
+  return found.sort((a, b) => a.line - b.line);
+}
+
 function sourceFiles(dir, out = []) {
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
     const p = path.join(dir, e.name);
@@ -87,7 +116,31 @@ test('the census itself: what it counts as a recursive remove, and what it does 
   assert.deepEqual(recursiveRemoves('a();\nb();\nrmSync(x,\n {recursive:true});'), [{ line: 3, call: 'rmSync(x, {recursive:true})' }]);
 });
 
-test('no recursive remove in src/main outside fsSafeRemove.ts and linkSafeRemove.ts', () => {
+test('the census itself: a remove reached under another name is counted, a plain import is not', () => {
+  const hits = (src) => aliasedRemoves(src).map((h) => h.call);
+  assert.deepEqual(hits('const zap = fs.rmSync;'), ['= fs.rmSync']);
+  assert.deepEqual(hits('const zap = rmSync\nzap(p, o);'), ['= rmSync']);
+  assert.deepEqual(hits('let del = nodeFs.promises.rm, x = 1;'), ['= nodeFs.promises.rm']);
+  assert.deepEqual(hits('const { rmSync: zap } = require("node:fs");'), ['rmSync: zap']);
+  assert.deepEqual(hits('const { a, rmdirSync : gone, b } = fs;'), ['rmdirSync : gone']);
+  assert.deepEqual(hits('const ops = { rm: remove, x };'), ['rm: remove']);
+  assert.deepEqual(hits('import { rmSync as zap, readFileSync } from "node:fs";'), ['rmSync as zap']);
+  assert.deepEqual(hits("fs['rmSync'](p, o);"), ["['rmSync']"]);
+  assert.deepEqual(hits('fs["rm"](p, o); fs[ `rmdir` ](p);'), ['["rm"]', '[ `rmdir` ]']);
+  assert.deepEqual(hits('const del = promisify(fs.rm);'), ['(fs.rm']);
+  assert.deepEqual(hits('retry(3, nodeFs.rmSync, p);'), [', nodeFs.rmSync']);
+  assert.deepEqual(hits('const zap = rmSync.bind(null);'), ['rmSync.bind']);
+  assert.deepEqual(hits('fs.rm.call(fs, p, o);'), ['rm.call']);
+  for (const fine of [
+    'import { existsSync, rmSync, writeFileSync } from "node:fs";', 'import { lstat, rm } from "node:fs/promises";',
+    'const { rm, rmSync } = require("node:fs");', 'rmSync(p, { force: true }); await fs.promises.rm(p);',
+    'for (const rm of root.resourceMetrics) { use(rm.resource); }', 'interface D { rmdir: (p: string) => Promise<void> }',
+    "type F = Pick<typeof nodeFs, 'statSync' | 'rmSync'>;", "const SAFE = ['mkdir', 'rm', 'cp'];", 'x = { rmSync: typeof fs.rmSync };',
+    '// const zap was rmSync once'
+  ]) assert.deepEqual(hits(fine), [], fine);
+});
+
+test('no recursive remove in src/main, and no remove reached under another name', () => {
   for (const r of REMOVERS) assert.equal(fs.existsSync(path.join(SRC, r)), true, `${r} exists`);
   const files = sourceFiles(SRC);
   assert.ok(files.length > 100, `the walk saw src/main (${files.length} files)`);
@@ -95,21 +148,25 @@ test('no recursive remove in src/main outside fsSafeRemove.ts and linkSafeRemove
   const offenders = [];
   for (const f of files) {
     const rel = path.relative(SRC, f).split(path.sep).join('/');
-    if (REMOVERS.includes(rel)) continue;
-    for (const { line, call } of recursiveRemoves(fs.readFileSync(f, 'utf8'))) {
+    const text = fs.readFileSync(f, 'utf8');
+    for (const { line, call } of [...recursiveRemoves(text), ...aliasedRemoves(text)]) {
       const i = ALLOW.findIndex((a) => a.file === rel && a.call === call);
       if (i >= 0) used.add(i); else offenders.push(`${rel}:${line} ${call}`);
     }
   }
-  assert.deepEqual(offenders, [], 'USE removePathLinkSafe / removePathLinkSafeSync (src/main/linkSafeRemove.ts), OR ADD AN ALLOW ENTRY WITH ITS REASON');
+  assert.deepEqual(offenders, [], 'USE removePathLinkSafe / removePathLinkSafeSync (src/main/linkSafeRemove.ts) AND CALL A REMOVE BY ITS OWN NAME, OR ADD AN ALLOW ENTRY WITH ITS REASON');
   ALLOW.forEach((a, i) => {
     assert.ok(typeof a.reason === 'string' && a.reason.length >= 30, `ALLOW ${a.file}: a reason is given`);
     assert.ok(used.has(i), `ALLOW ${a.file} ${a.call}: still matches a call (remove a stale entry)`);
   });
 });
 
-test('the removers are where the recursive removes are: fsSafeRemove has them, linkSafeRemove has none of its own', () => {
-  const body = (f) => { const s = fs.readFileSync(path.join(SRC, f), 'utf8'); return s.slice(s.indexOf('*/')); };
-  assert.ok(recursiveRemoves(body('fsSafeRemove.ts')).length >= 1, 'fsSafeRemove.ts removes the tree after its link pass');
-  assert.deepEqual(recursiveRemoves(body('linkSafeRemove.ts')), [], 'linkSafeRemove.ts only chooses; it never removes a tree itself');
+test('the removers hold no recursive remove: fsSafeRemove walks bottom-up, linkSafeRemove only chooses', () => {
+  const body = (f) => fs.readFileSync(path.join(SRC, f), 'utf8');
+  for (const r of REMOVERS) {
+    assert.deepEqual(recursiveRemoves(body(r)), [], `${r} has no recursive remove`);
+    assert.deepEqual(aliasedRemoves(body(r)), [], `${r} reaches no remove under another name`);
+  }
+  assert.match(body('fsSafeRemove.ts'), /\brmdirSync\(p\);/, 'fsSafeRemove.ts removes a folder by itself, after its entries');
+  assert.doesNotMatch(body('fsSafeRemove.ts'), /^import .*\brm(?:Sync)?\b/m, 'fsSafeRemove.ts does not import rm or rmSync at all');
 });

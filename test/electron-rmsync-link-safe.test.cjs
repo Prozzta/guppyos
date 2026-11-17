@@ -199,7 +199,7 @@ test('RUNTIME PIN, installed Electron as Node: rmSync EMPTIES the junction\'s ta
   buildRuntimeRm(base);
   const out = inElectron('runtime-rm', base);
   // Measured on Electron 45.3.0. If either line changes with a new Electron, read
-  // src/main/linkSafeRemove.ts again before changing the pin: its link pass exists because of the
+  // src/main/linkSafeRemove.ts again before changing the pin: its link handling exists because of the
   // first line, and is kept on the async path whatever the second says.
   assert.deepEqual(out.sync, { linkGone: true, target: [] }, 'rmSync(recursive) on a junction deletes what the link points at');
   assert.deepEqual(out.async, { linkGone: true, target: UNTOUCHED }, 'fs.promises.rm(recursive) on a junction leaves the target alone');
