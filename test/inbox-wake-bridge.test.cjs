@@ -77,6 +77,7 @@ async function floor(t, { decide } = {}) {
   const flush = async () => {
     for (let i = 0; i < 20; i++) {
       while (immediates.length) immediates.shift()();
+      await hive.routerIdle();                       // routing passes are async (ROUTER-ASYNC-DELIVER-107)
       await new Promise((r) => setImmediate(r));   // let settled promises land
       if (!immediates.length) return;
     }
