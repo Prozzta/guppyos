@@ -86,6 +86,11 @@ test('PIN: containment before product code, and no answer over a ledger that doe
   assert.match(run, /fs\.copyFileSync\(path\.join\(snap, f\.path\), dest\)/, 'the snapshot is copied, never used in place');
   const key = codeOnly(readSource('test/claims-90/key-unwrap.cjs'));
   assert.match(key, /new SafeStorageKeyProvider\(path\.join\(userData, MAC_KEY_FILE\), safeStorage\)\.load\(\)/, 'the product\'s own key provider');
+  // E45-EXIT-KEYUNWRAP: an app.exit() made synchronously inside 'ready' (or any startup callback) crashes
+  // Electron 45 in teardown about 1 in 100 fast runs under load. The only app.exit runs from setImmediate.
+  assert.equal((key.match(/app\.exit\(/g) || []).length, 1, 'one app.exit, inside finish');
+  assert.match(key, /function finish\(code\) \{\s*setImmediate\(\(\) => app\.exit\(code\)\);\s*\}/, 'the exit runs on the next loop turn');
+  for (const c of ['finish(4)', '() => finish(0)', 'finish(5)']) assert.ok(key.includes(c), `exit code via ${c}`);
   assert.doesNotMatch(key + run, /writeFileSync\([^)]*key\b/, 'the key is never written to a file');
 });
 

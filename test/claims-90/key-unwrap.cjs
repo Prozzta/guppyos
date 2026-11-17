@@ -18,15 +18,28 @@ const { isolateAppPaths } = require('../electron-harness/isolate-paths.cjs');
 const [tree, userData] = process.argv.slice(-2);
 isolateAppPaths(app, userData);
 app.disableHardwareAcceleration();
+// ELECTRON-EXIT-AV / E45-EXIT-KEYUNWRAP: never call app.exit() synchronously from 'ready' (or any
+// callback Electron runs while it is still starting up). 'ready' fires before Chromium's main loop
+// runs; an exit from inside it tears down while startup work is still running on Chromium's thread
+// pool, and that crashes (0xC0000005 / 0xFFFF7002 on ThreadPoolSingleThreadForegroundBlocking,
+// about 1 in 100 runs on the fast error path under load), replacing the code below. Exiting from
+// will-quit inside the same call stack crashes just the same. setImmediate runs the exit from
+// Node's own loop turn, which Electron drives from a task on the running main loop: measured
+// 0/1000 against 106/1000 for the same exit made directly inside a startup callback. Not a delay:
+// no timer, just the next loop turn. The code still reaches the parent through app.exit (Electron
+// ignores process.exitCode on a normal quit).
+function finish(code) {
+  setImmediate(() => app.exit(code));
+}
 app.whenReady().then(() => {
   try {
     const loadTs = require(path.join(tree, 'test', 'load-ts.cjs'));
     const { SafeStorageKeyProvider, MAC_KEY_FILE } = loadTs(path.join(tree, 'src', 'main', 'claims', 'keyProvider.ts'));
     const r = new SafeStorageKeyProvider(path.join(userData, MAC_KEY_FILE), safeStorage).load();
-    if (!r.ok) { process.stderr.write(`key: ${r.reason}\n`); app.exit(4); return; }
-    process.stdout.write(`${r.key.toString('base64')}\n`, () => app.exit(0));
+    if (!r.ok) { process.stderr.write(`key: ${r.reason}\n`); finish(4); return; }
+    process.stdout.write(`${r.key.toString('base64')}\n`, () => finish(0));
   } catch (e) {
     process.stderr.write(`key: ${String(e && e.message || e).slice(0, 300)}\n`);
-    app.exit(5);
+    finish(5);
   }
 });
