@@ -251,6 +251,9 @@ function isObj(v: unknown): v is Record<string, unknown> {
  *  has that size and tail (god + Jim, 2026-11-12); appended whole lines verify as before (extendRead). */
 type SegFp = { file: string; size: number; tail: Buffer };
 type VerifiedRead = { seen: SegFp[]; result: ReadResult; head: string; reached: Set<string> };
+/** LAG-CLAIMS-READ-108: a full read's BROKEN verdict with everything it was decided from: the segments as read, the
+ *  anchor main held (stored and unflushed) and the key (null: key-missing). */
+type BrokenRead = { seen: SegFp[]; result: ReadResult; anchor: string; key: Uint8Array | null };
 const TAIL_FP = 4096;
 function segFp(file: string, buf: Buffer, size = buf.length): SegFp {
   return { file, size, tail: Buffer.from(buf.subarray(Math.max(0, buf.length - TAIL_FP))) };
@@ -389,6 +392,9 @@ export class ClaimStore {
   /** readLedgerCached: the last chain-'ok' read per agent, the segment bytes it parsed and verified, the sha256 of
    *  its last line, and the head anchors it showed the ledger reaches. */
   private readonly verifiedReads = new Map<string, VerifiedRead>();
+  /** LAG-CLAIMS-READ-108: the last full read's broken verdict per agent (never in verifiedReads, which holds ok reads
+   *  only). See keepRead and brokenStill. */
+  private readonly brokenReads = new Map<string, BrokenRead>();
   /** A10: per agent, the ledger's records and derive's statuses, kept current across our own appends (see ledgerView). */
   private readonly views = new Map<string, LedgerView>();
   /** A17: why an agent's view was deleted (an append not on its head), for the next view's `dropped`. */
@@ -501,11 +507,13 @@ export class ClaimStore {
       // The bytes kept are the very buffers this read parsed and verified (not a second read that could race an append).
       const seen: SegFp[] = [];
       const before = this.anchorWant(agentId);
+      const held = this.anchorHeld(agentId);
       const r = this.readInner(agentId, seen);
-      this.keepRead(agentId, r, seen, before);
+      this.keepRead(agentId, r, seen, before, held);
       return r;
     } catch (e) {
       this.verifiedReads.delete(agentId);
+      this.brokenReads.delete(agentId);
       const chain: ChainBreak = { brokenAt: 'read', reason: 'parse' };
       this.log({ kind: 'claims-read-failed', agentId, error: String(e).slice(0, 200) });
       return { records: [], torn: null, chain };
@@ -525,6 +533,11 @@ export class ClaimStore {
    * was shown to reach. Anything else (a rekey line, a pending purge, a torn tail, no key, any changed earlier byte)
    * is a full readLedger, which reports and alerts as before. Re-verifying the 11.6k-line derived ledger on every
    * claims-sync append cost ~365 ms of the next brief.
+   * LAG-CLAIMS-READ-108 (god 88a9b0): a BROKEN ledger was re-read and re-verified in full by every ask (the periodic
+   * anchor check, each claims sync: 1578 ms on main for an 8.5 MB ledger cut at its head anchor), because only an ok
+   * read was kept. A full read's broken verdict is now kept beside it and answers while nothing that verdict was
+   * decided from has changed (brokenStill); the answer is the same break, so the ledger stays read-only. Any
+   * difference is a full readLedger, which reports and alerts as before.
    */
   readLedgerCached(agentId: string): ReadResult {
     const hit = this.verifiedReads.get(agentId);
@@ -535,16 +548,44 @@ export class ClaimStore {
       if (!want || hit.reached.has(want)) return hit.result;
     }
     if (hit && grown) { const r = this.extendRead(agentId, hit, grown); if (r) return r; }
+    const bad = hit ? undefined : this.brokenReads.get(agentId);
+    if (bad && this.brokenStill(agentId, bad)) return bad.result;
     return this.readLedger(agentId);
+  }
+
+  /** The anchor main holds for this agent, stored and unflushed, as one string; null while a purge's re-anchor is
+   *  pending or with no anchor store (a broken verdict is then neither kept nor served). */
+  private anchorHeld(agentId: string): string | null {
+    if (!this.d.headAnchor) return null;
+    const stored = this.d.headAnchor.get(this.d.hiveRoot, agentId);
+    if (stored?.pending) return null;
+    const soon = this.anchorTimers.get(agentId);
+    return JSON.stringify([stored?.head ?? null, stored?.lastId ?? null, soon?.head ?? null, soon?.lastId ?? null]);
+  }
+
+  /** A kept broken verdict still stands: the same segment files with the same sizes and tails and nothing after them,
+   *  the same anchor held, the same key (or still none). Every check a full read makes was made on exactly these. */
+  private brokenStill(agentId: string, bad: BrokenRead): boolean {
+    const grown = this.grownBytes(agentId, bad.seen);
+    if (!grown || grown.added.length !== 0 || grown.seen.length !== bad.seen.length) return false;
+    if (this.anchorHeld(agentId) !== bad.anchor) return false;
+    return this.keys() === bad.key;
   }
 
   /** Keep a chain-'ok', untorn read as this agent's verified read (an ok read reached the anchor it was checked
    *  against and adopted its head, so the anchor moves there); drop the kept one otherwise. */
-  private keepRead(agentId: string, r: ReadResult, seen: SegFp[], before: string | null): void {
+  private keepRead(agentId: string, r: ReadResult, seen: SegFp[], before: string | null, held: string | null): void {
+    this.brokenReads.delete(agentId);
     if (r.chain === 'ok' && !r.torn) {
       const head = this.state.get(agentId)?.head ?? '';
       this.verifiedReads.set(agentId, { seen, result: r, head, reached: new Set([before, head, this.anchorWant(agentId)].filter((h): h is string => !!h)) });
-    } else this.verifiedReads.delete(agentId);
+      return;
+    }
+    this.verifiedReads.delete(agentId);
+    // LAG-CLAIMS-READ-108: a broken verdict is kept only from a read of whole lines in existing segments (a torn
+    // tail was quarantined, a missing ledger is cheap to read), under the anchor held BEFORE the read: one that moved since is another anchor to brokenStill.
+    if (r.chain === 'ok' || r.torn || held === null || !seen.some((f) => f.size > 0)) return;
+    this.brokenReads.set(agentId, { seen, result: r, anchor: held, key: this.keys() });
   }
 
   /** The agent's segments as these files with this size and tail plus whole lines after them (`added`: the new
@@ -741,7 +782,7 @@ export class ClaimStore {
     pauses++;
     slice = clock();
     for (const agentId of agents) {
-      if (!AGENT_RE.test(agentId) || this.verifiedReads.has(agentId)) { skipped.push(agentId); continue; }
+      if (!AGENT_RE.test(agentId) || this.verifiedReads.has(agentId) || this.brokenReads.has(agentId)) { skipped.push(agentId); continue; }
       try {
         const gen = this.writeGen.get(agentId) ?? 0;
         const moved = (): boolean => (this.writeGen.get(agentId) ?? 0) !== gen || gen % 2 === 1; // odd: a write is in flight
@@ -753,6 +794,7 @@ export class ClaimStore {
           if (moved()) { skipped.push(agentId); return; }
           if (bufs.some((b) => b.length > 0 && b[b.length - 1] !== 0x0a)) { skipped.push(agentId); return; }
           const before = this.anchorWant(agentId);
+          const held = this.anchorHeld(agentId);
           const g = this.readCore(agentId, { files, bufs, torn: null, structural: null });
           let r: ReadResult;
           for (;;) {
@@ -760,7 +802,7 @@ export class ClaimStore {
             if (moved()) { g.return(undefined as never); skipped.push(agentId); return; }
             const s = g.next(); if (s.done) { r = s.value; break; } await tick();
           }
-          this.keepRead(agentId, r, files.map((f, i) => segFp(f, bufs[i])), before);
+          this.keepRead(agentId, r, files.map((f, i) => segFp(f, bufs[i])), before, held);
           warmed.push(agentId);
         })();
       } catch (e) {
@@ -1105,7 +1147,8 @@ export class ClaimStore {
 
   private serial<T>(agentId: string, fn: () => T | Promise<T>): Promise<T> {
     const prior = this.queues.get(agentId) ?? Promise.resolve();
-    const bump = (): void => { this.writeGen.set(agentId, (this.writeGen.get(agentId) ?? 0) + 1); };
+    // LAG-CLAIMS-READ-108: a queued write (append, purge, restore, reset) drops the kept broken verdict.
+    const bump = (): void => { this.writeGen.set(agentId, (this.writeGen.get(agentId) ?? 0) + 1); this.brokenReads.delete(agentId); };
     const run = async (): Promise<T> => { bump(); try { return await fn(); } finally { bump(); } };
     const next = prior.then(run, run);
     this.queues.set(agentId, next.catch(() => undefined));
