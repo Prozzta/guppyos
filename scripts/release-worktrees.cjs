@@ -190,7 +190,8 @@ function verifyModel(dir, manifest, sha = sha256File) {
 
 /** ELECTRON-RMSYNC-LINK-SAFE-108: Electron 45's recursive rmSync deletes through a junction, so the
  *  cache folders go through the app's link-safe remover (a link is removed as a link). Loaded on
- *  first use: only a seed needs it. */
+ *  first use: only a seed needs it. The loader needs typescript and refuses while a mutant runner
+ *  holds this tree, so a seed refuses then too: a mutated remover must not delete a model cache. */
 function removeLinkSafe(p) {
   require(path.join(__dirname, '..', 'test', 'load-ts.cjs'))('src/main/linkSafeRemove.ts').removePathLinkSafeSync(p);
 }
