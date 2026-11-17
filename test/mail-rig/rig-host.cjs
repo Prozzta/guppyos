@@ -701,6 +701,7 @@ async function main() {
     workOrders: ({ id }) => (rig.workOrders.get(id) || []).map((w) => w.payload.id),
     // A human key typed when this agent's next owed-Stop decision is made (see decide above).
     humanTypeAtStop: ({ id, text }) => { rig.humanAtStop.set(id, text); return true; },
+    humanTypeAtStopClear: ({ id }) => rig.humanAtStop.delete(id),
     humanType: ({ id, text }) => { const p = ptyOf(id); const r = ptyManager.write(p, text, 'HUMAN'); if (/[^\r\x15\x03]/.test(text)) rig.humanDirty.add(p); return r; },
     // The `pty:kill` IPC (index.ts:3937): kill, then the shared teardown.
     killPty: ({ id }) => { const p = ptyOf(id); const r = ptyManager.kill(p); f.teardownPty(p); return r; },
