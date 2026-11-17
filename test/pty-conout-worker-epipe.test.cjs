@@ -51,18 +51,25 @@ const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
 const HINT = 'Run `npm run postinstall` in this tree (tools/patch-node-pty-root-handle.cjs patches node-pty).';
 
 const INSTALLED = fs.readFileSync(WORKER_JS, 'utf8');
-/** The installed worker with the pinned edits taken back out: node-pty 1.1.0's own file. */
+/**
+ * Every worker text the tests run is built from the pins, never from the installed file as it happens
+ * to be: a tree that missed postinstall then fails on the first test, with its hint, and nowhere else.
+ * PRISTINE is the installed worker with the pinned edits taken back out (node-pty 1.1.0's own file; a
+ * no-op on an unpatched one) and PATCHED is that plus the edits. The first test pins both digests.
+ */
 const PRISTINE = pins.WORKER_JS_EDITS.reduce((s, [, before, after]) => s.replace(after, () => before), INSTALLED);
+const PATCHED = pins.WORKER_JS_EDITS.reduce((s, [, before, after]) => s.replace(before, () => after), PRISTINE);
+const IS_PINNED = sha(INSTALLED) === pins.WORKER_JS_QUIET_SHA256;
 /** One exact replacement; a text that does not have `from` exactly once is a broken test. */
 function swap(text, from, to, what) {
   assert.equal(text.split(from).length - 1, 1, `${what}: the text to change is there once`);
   return text.replace(from, () => to);
 }
-const DATA_EDIT = pins.WORKER_JS_EDITS[1];
-/** W2: the patched worker without the data socket's part of the patch. */
-const NO_DATA_LISTENER = swap(INSTALLED, DATA_EDIT[2], DATA_EDIT[1], 'W2');
+const CONSOLE_EDIT = pins.WORKER_JS_EDITS[0];
+/** W2: the patched worker without the data socket's part of the patch (the console pipe's edit only). */
+const noDataListener = () => swap(PRISTINE, CONSOLE_EDIT[1], CONSOLE_EDIT[2], 'W2');
 /** The patched worker, reporting what its data socket's listener saw (the listener is otherwise as it is). */
-const REPORTING = swap(INSTALLED, "        workerSocket.on('error', function (err) {\n",
+const reporting = () => swap(PATCHED, "        workerSocket.on('error', function (err) {\n",
   "        workerSocket.on('error', function (err) {\n" +
   '            worker_threads_1.parentPort.postMessage({ saw: err.code, destroyed: workerSocket.destroyed });\n', 'the reporting twin');
 
@@ -83,6 +90,7 @@ test('A MISSED POSTINSTALL FAILS HERE: the installed worker is the pinned patche
     `node_modules/node-pty/lib/worker/conoutSocketWorker.js is not the patched worker (an unpatched one throws EPIPE in the main process). ${HINT}`);
   assert.equal(sha(PRISTINE), pins.WORKER_JS_PRISTINE_SHA256, 'the control\'s worker is the published file, byte for byte');
   assert.notEqual(PRISTINE, INSTALLED);
+  assert.equal(PATCHED, INSTALLED, 'the tests below run the pinned patched text, which is the installed file');
   assert.doesNotMatch(PRISTINE, /\.on\('error'/, 'node-pty\'s own worker handles no socket error');
   assert.equal(INSTALLED.split(".on('error'").length - 1, 2, 'the patched one: the console pipe and the data socket');
 });
@@ -147,7 +155,7 @@ function quietOnlyForAPeerThatHasGone(text) {
 }
 
 test('the patched worker is quiet for a reader that has gone, and for nothing else', () => {
-  quietOnlyForAPeerThatHasGone(INSTALLED);
+  quietOnlyForAPeerThatHasGone(PATCHED);
 });
 
 const GONE = "    return !!err && (err.code === 'EPIPE' || err.code === 'ECONNRESET') && socket.destroyed === true;\n";
@@ -157,12 +165,12 @@ const MUTANTS = [
   ['M3 the console pipe keeps writing to the dead socket', (t) => swap(t, '            conoutSocket.unpipe(workerSocket);\n', '', 'M3')],
   ['M4 closed data sockets are kept', (t) => swap(t, '            guppyDataSockets.splice(guppyDataSockets.indexOf(workerSocket), 1);\n', '', 'M4')],
   ['M5 a console that has gone leaves the data sockets open', (t) => swap(t, '    guppyDataSockets.slice().forEach(function (dataSocket) { dataSocket.end(); });\n', '', 'M5')],
-  ['M6 no listener on the data socket (W2)', () => NO_DATA_LISTENER],
+  ['M6 no listener on the data socket (W2)', () => noDataListener()],
   ['M7 the unpatched worker (W1)', () => PRISTINE]
 ];
 test('each named change to the patched worker is refused by that check', () => {
   for (const [name, change] of MUTANTS) {
-    assert.throws(() => quietOnlyForAPeerThatHasGone(change(INSTALLED)), assert.AssertionError, `${name} MUST FAIL the behaviour check`);
+    assert.throws(() => quietOnlyForAPeerThatHasGone(change(PATCHED)), assert.AssertionError, `${name} MUST FAIL the behaviour check`);
   }
 });
 
@@ -238,9 +246,9 @@ if (process.platform !== 'win32') {
     try { return await destroyedBeforeTheWrite(file, mustEnd); } finally { remove(); }
   }
 
-  const CONTROLS = { pristine: PRISTINE, 'no-data-listener': NO_DATA_LISTENER };
+  const CONTROLS = { pristine: () => PRISTINE, 'no-data-listener': noDataListener };
   if (CONTROL) {
-    withText(CONTROLS[CONTROL], true).then(
+    Promise.resolve().then(() => withText(CONTROLS[CONTROL](), true)).then(
       (r) => { process.stdout.write(JSON.stringify(r)); },
       (e) => { process.stderr.write(String((e && e.stack) || e)); process.exitCode = 2; });
   }
@@ -271,12 +279,14 @@ if (process.platform !== 'win32') {
   };
 
   test('the patched worker, reporting: the same lever gives its listener EPIPE on a destroyed socket, and it stays quiet', async () => {
-    const r = await withText(REPORTING, false);
+    const r = await withText(reporting(), false);
     assert.deepEqual(r.reports, [{ saw: 'EPIPE', destroyed: true }], 'the EPIPE did happen, once, and the socket was destroyed by then');
     quiet(r);
   });
 
-  test('THE INSTALLED WORKER, as node-pty runs it: data socket destroyed before the write, nothing is thrown, the worker serves the next socket', async () => {
+  test('THE INSTALLED WORKER, as node-pty runs it: data socket destroyed before the write, nothing is thrown, the worker serves the next socket', async (t) => {
+    // An unpatched tree is the first test's failure (with the hint); running that file here would only repeat it.
+    if (!IS_PINNED) return t.skip('the installed worker is not the pinned patched one: see the first test');
     const r = await destroyedBeforeTheWrite(WORKER_JS, false);
     assert.deepEqual(r.reports, [], 'the installed file reports nothing (it is not the twin)');
     quiet(r);
