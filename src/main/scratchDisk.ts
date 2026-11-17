@@ -5,7 +5,7 @@
  * clean, pushed, inactive and either finished or idle.
  */
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { cp, lstat, readdir, symlink } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
@@ -202,19 +202,18 @@ export function inboundNodeModulesLinks(workRoot: string, target: string): strin
   return out.sort();
 }
 
-function git(path: string, args: string[]): string | null {
-  try { return execFileSync('git', ['-C', path, ...args], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'], timeout: 15_000 }).trim(); }
-  catch { return null; }
+function gitAsync(path: string, args: string[]): Promise<string | null> {
+  return new Promise((resolve) => execFile('git', ['-C', path, ...args], { encoding: 'utf8', windowsHide: true, windowsVerbatimArguments: false, timeout: 15_000 }, (error, stdout) => resolve(error ? null : String(stdout).trim())));
 }
 
 /** A worktree is acceptable only when its exact HEAD equals its origin tracking ref. */
-export function gitScratchFacts(path: string): Pick<ScratchFacts, 'dirty' | 'onOrigin' | 'ignoredFiles'> {
+export async function gitScratchFacts(path: string): Promise<Pick<ScratchFacts, 'dirty' | 'onOrigin' | 'ignoredFiles'>> {
   // A stale local tracking ref is not evidence that deletion is safe.
-  if (git(path, ['fetch', '--quiet', 'origin']) === null) return { dirty: true, onOrigin: false, ignoredFiles: 0 };
-  const status = git(path, ['status', '--porcelain=v1', '--untracked-files=all']);
-  const ignored = git(path, ['status', '--porcelain=v1', '--ignored']);
-  const head = git(path, ['rev-parse', 'HEAD']);
-  const upstream = git(path, ['rev-parse', '@{upstream}']);
+  if (await gitAsync(path, ['fetch', '--quiet', 'origin']) === null) return { dirty: true, onOrigin: false, ignoredFiles: 0 };
+  const [status, ignored, head, upstream] = await Promise.all([
+    gitAsync(path, ['status', '--porcelain=v1', '--untracked-files=all']), gitAsync(path, ['status', '--porcelain=v1', '--ignored']),
+    gitAsync(path, ['rev-parse', 'HEAD']), gitAsync(path, ['rev-parse', '@{upstream}'])
+  ]);
   return { dirty: status === null || status !== '', onOrigin: !!head && !!upstream && head === upstream, ignoredFiles: ignored?.split(/\r?\n/).filter((line) => line.startsWith('!! ')).length ?? 0 };
 }
 
@@ -410,7 +409,7 @@ export class ScratchDiskManager {
       }
       const kind = scratchKind(record.path);
       if (!managedScratchPath(work, record.path) || kind !== record.kind) { result.kept.push({ path: record.path, owner: record.owner, reason: 'path-changed-or-missing' }); keptRecords.push(record); continue; }
-      const gitFacts = record.kind === 'worktree' ? gitScratchFacts(record.path) : { dirty: false, onOrigin: true, ignoredFiles: 0 };
+      const gitFacts = record.kind === 'worktree' ? await gitScratchFacts(record.path) : { dirty: false, onOrigin: true, ignoredFiles: 0 };
       const facts: ScratchFacts = {
         path: record.path, ...gitFacts, live: processUses(record.path, rows),
         inboundLinks: inboundNodeModulesLinks(work, record.path), cardDone: this.cardDone(record.card), idle: this.now() - record.touchedAt >= SCRATCH_IDLE_MS
