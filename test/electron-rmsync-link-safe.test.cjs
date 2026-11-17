@@ -29,6 +29,10 @@ require('./tools/mutant-runner-helper.cjs').gate(__filename);
  *   M6 linkSafeRemove.ts removePathLinkSafe: a recursive rmSync -> worker-scratch and reset, Electron
  *   M7 linkSafeRemove.ts removePathLinkSafeSync: the same      -> seed-model, Electron
  *   M8 index.ts: removeWorkerScratch is not awaited            -> WIRING worker scratch
+ *
+ * RUNTIME PIN: what the runtime's own recursive rm does to a path that IS a junction, with no
+ * product code in the way. It is the measurement the remover's design rests on, so a new
+ * Electron that behaves differently turns it red and the remover is looked at again.
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -145,6 +149,17 @@ const SITES = {
 };
 
 const exe = process.env.GUPPY_PACKAGED_EXE || path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Guppy', 'Guppy.exe');
+/** Run one child site in the installed Guppy.exe as Node; what it returned. */
+const inElectron = (site, base) => {
+  assert.equal(fs.existsSync(exe), true, `installed Guppy executable missing: ${exe}`);
+  const r = child.spawnSync(exe, [path.join(__dirname, 'electron-rmsync-link-safe-child.cjs'), site, base],
+    { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, encoding: 'utf8', timeout: 60_000 });
+  assert.equal(r.status, 0, `child exit ${r.status}: ${r.stderr || r.stdout}`);
+  const res = JSON.parse(r.stdout);
+  assert.equal(res.ok, true, res.error);
+  assert.match(res.electron, /^\d+\./, 'the child really ran in Electron');
+  return res.out;
+};
 
 for (const [site, { build, check }] of Object.entries(SITES)) {
   test(`${site}: links are removed as links, their targets survive (this process)`, async () => {
@@ -156,16 +171,39 @@ for (const [site, { build, check }] of Object.entries(SITES)) {
   test(`${site}: links are removed as links, their targets survive, in the installed Electron as Node`, { skip: process.platform !== 'win32' }, () => {
     const base = path.join(jail, `${site}-electron`);
     build(base);
-    assert.equal(fs.existsSync(exe), true, `installed Guppy executable missing: ${exe}`);
-    const r = child.spawnSync(exe, [path.join(__dirname, 'electron-rmsync-link-safe-child.cjs'), site, base],
-      { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, encoding: 'utf8', timeout: 60_000 });
-    assert.equal(r.status, 0, `child exit ${r.status}: ${r.stderr || r.stdout}`);
-    const res = JSON.parse(r.stdout);
-    assert.equal(res.ok, true, res.error);
-    assert.match(res.electron, /^\d+\./, 'the child really ran in Electron');
-    check(base, res.out);
+    check(base, inElectron(site, base));
   });
 }
+
+// ─── RUNTIME PIN: the runtime's own recursive rm on a path that is a junction ────────────────────
+
+const buildRuntimeRm = (base) => {
+  for (const name of ['sync', 'async']) {
+    write(path.join(live(base, name), 'sub', 'x.txt'), 'x');
+    link(path.join(base, 'live', name), path.join(base, `link-${name}`));
+  }
+};
+const UNTOUCHED = ['keep.txt', 'sub'];
+
+test('RUNTIME PIN, plain Node: a recursive rm of a junction removes the link only, sync and async', async () => {
+  const base = path.join(jail, 'runtime-rm-node');
+  buildRuntimeRm(base);
+  assert.deepEqual(await run('runtime-rm', base), {
+    sync: { linkGone: true, target: UNTOUCHED },
+    async: { linkGone: true, target: UNTOUCHED }
+  });
+});
+
+test('RUNTIME PIN, installed Electron as Node: rmSync EMPTIES the junction\'s target; fs.promises.rm removes the link only', { skip: process.platform !== 'win32' }, () => {
+  const base = path.join(jail, 'runtime-rm-electron');
+  buildRuntimeRm(base);
+  const out = inElectron('runtime-rm', base);
+  // Measured on Electron 45.3.0. If either line changes with a new Electron, read
+  // src/main/linkSafeRemove.ts again before changing the pin: its link pass exists because of the
+  // first line, and is kept on the async path whatever the second says.
+  assert.deepEqual(out.sync, { linkGone: true, target: [] }, 'rmSync(recursive) on a junction deletes what the link points at');
+  assert.deepEqual(out.async, { linkGone: true, target: UNTOUCHED }, 'fs.promises.rm(recursive) on a junction leaves the target alone');
+});
 
 // ─── WIRING: the two index.ts sites make the call run above ──────────────────────────────────────
 
