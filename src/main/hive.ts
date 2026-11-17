@@ -30,7 +30,7 @@ import { homedir } from 'node:os';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { AppendFile, LOG_KEEP_ROTATED, rotatedFiles } from './appendLog';
 import { MailCardIndex, NO_CARD, indexEntries, indexLinkContext, isNoCard, linkMail, replyChainGap, TRUSTED_METHODS, type LinkContext, type MailLink } from './mailCards';
-import { atomicWriteJson as atomicWriteJsonFile, atomicWriteJsonAsync, readFileTracked } from './atomicJson';
+import { atomicWriteJson as atomicWriteJsonFile, atomicWriteJsonAsync, atomicWriteTextAsync, readFileTracked } from './atomicJson';
 import { ASK_BACKSTOP_MS, ASK_CLOSE_REASON_MAX, MailLedger, answeredByMessage, cardIdValue, freshMailId, isValidMailId, owesWork, replyTracked, staleObligations, supersededByMessage, type CardEvidence, type MailLedgerDoc, type ReleaseRun, type StaleObligation } from './mailLedger';
 import { mailObligationsView, type MailObligationsAgent } from './mailReaders';
 import { UNDELIVERED_DIR, dropUndeliveredItems, mailMigrationDone, markUndeliveredSeen, readUndeliveredReport, readUndeliveredReportAsync, restoreUndeliveredFiles, runMailMigration, setAsideUndelivered, type MailMigrationResult, type UndeliveredReport } from './mailMigration';
@@ -432,9 +432,18 @@ const OUTBOX_FRESH_WRITE_GRACE_MS = 1_000;
  * agent that checks "is my file still in outbox/?" sees it gone (it was delivered and moved) and
  * writes it again; one sender did so 22 times in a month. The window survives a router restart:
  * recent keys are kept in <root>/OUTBOX_DEDUP_FILE.
+ * ROUTER-ASYNC-DELIVER-107: that file is an append-only log, one JSON line per delivery. The old
+ * file was the whole window rewritten on every delivery (at 60 mails a minute, 600 entries and
+ * 80 KB per write: the cost grew with the square of the mail rate). A line is appended (awaited
+ * before the .sent rename); expired lines are dropped when it is loaded, and it is compacted to the
+ * live window only when its dead lines outnumber the live ones.
  */
 export const OUTBOX_DEDUP_WINDOW_MS = 10 * 60_000;
-export const OUTBOX_DEDUP_FILE = 'outbox-dedup.json';
+export const OUTBOX_DEDUP_FILE = 'outbox-dedup.jsonl';
+/** The pre-1.1.107 whole-window file: read once into the log, then removed by the first compaction. */
+export const OUTBOX_DEDUP_LEGACY_FILE = 'outbox-dedup.json';
+/** The log is compacted once it holds at least this many lines and more dead lines than live ones. */
+export const OUTBOX_DEDUP_COMPACT_MIN_LINES = 64;
 /** A recorded delivery further than this in the future means the clock went back: it is dropped. */
 export const OUTBOX_DEDUP_CLOCK_SLACK_MS = 60_000;
 /** Tests only: the router's clock for the duplicate window. */
@@ -582,6 +591,12 @@ export interface InboxDelivery {
  * all. `watch` is only a LATENCY HINT: its callback never carries meaning (no filename,
  * no count), it only asks for one authoritative whole-tree scan.
  */
+/** ROUTER-ASYNC-DELIVER-107: one inbox write the routing steps ask for. The steps never write
+ *  themselves: a runner does, sync (send()) or awaited (routeOnce), then resumes them, so nothing
+ *  after the write (the ledger entry, the wake, the .sent rename) runs before the file is on disk. */
+interface InboxWrite { file: string; msg: HiveMessage }
+type RouteSteps<T> = Generator<InboxWrite, T, void>;
+
 export interface RouterRuntime {
   watch: (dir: string, onHint: () => void) => Pick<FSWatcher, 'close' | 'on'>;
   setImmediate: (fn: () => void) => void;
@@ -591,8 +606,18 @@ export interface RouterRuntime {
   clearInterval: (handle: unknown) => void;
 }
 
+/** ROUTER-ASYNC-DELIVER-107: a watch hint names the entry that changed. Only a *.json file can be
+ *  mail, so a hint for anything else (a writer's temp file, the .sent/ directory) schedules no scan.
+ *  A hint with no name is kept: the platform could not say what changed. The 10 s reconcile stays
+ *  the backstop for a hint that was dropped. */
+export function outboxHintMatters(filename: string | Buffer | null | undefined): boolean {
+  if (filename === null || filename === undefined) return true;
+  const name = String(filename);
+  return name === '' || name.endsWith('.json');
+}
+
 const NODE_ROUTER_RUNTIME: RouterRuntime = {
-  watch: (dir, onHint) => watchDirectorySafely(dir, () => onHint()),
+  watch: (dir, onHint) => watchDirectorySafely(dir, (_event, name) => { if (outboxHintMatters(name)) onHint(); }),
   setImmediate: (fn) => { setImmediate(fn); },
   setTimeout: (fn, ms) => { const timer = setTimeout(fn, ms); timer.unref(); return timer; },
   setInterval: (fn, ms) => setInterval(fn, ms),
@@ -858,7 +883,16 @@ export class HiveManager {
   /** Archive failures already reported for the current contents of each live outbox file. */
   private readonly outboxArchiveFailures = new Map<string, string | null>();
   /** HIVE-DUP-DONE-MAIL: recent deliveries by outboxDedupKey, loaded from the hive root's OUTBOX_DEDUP_FILE. */
-  private outboxDedup: { root: string; entries: Map<string, { id: string; ts: number }> } | null = null;
+  private outboxDedup: {
+    root: string;
+    entries: Map<string, { id: string; ts: number }>;
+    /** Lines in the log file now (live and dead), to decide a compaction. */
+    lines: number;
+    /** The file ends without a newline (a torn append): the next append starts a new line. */
+    torn: boolean;
+    /** The legacy whole-window file still exists: the next pass compacts, which removes it. */
+    legacy: boolean;
+  } | null = null;
   /** A corrupt authority file is copied aside once per bad contents. Repeating a
    *  read must still fail closed, but must not fill the hive with identical copies. */
   private readonly quarantinedJsonFingerprints = new Map<string, string>();
@@ -910,8 +944,12 @@ export class HiveManager {
     // async load: one read off the main thread serves the guard and refreshes the cache.
     readLedger: (root, known) => this.loadAuthorityAsync(join(root, 'tasks.json'), true, known)
   });
-  /** At most one queued scan; hints arriving in the same turn coalesce into it. */
+  /** At most one queued scan; hints arriving before it starts (in this turn, or while an earlier
+   *  pass is still awaiting its writes) coalesce into it. */
   private routeQueued = false;
+  /** ROUTER-ASYNC-DELIVER-107: the tail of the routeOnce passes. A pass starts only when the one
+   *  before it has settled, so two passes never overlap or deliver one file twice. */
+  private routeChain: Promise<unknown> = Promise.resolve();
   /** Bumped by start/stop, so a scan queued before a stop never runs after it. */
   private routerGeneration = 0;
 
@@ -2986,7 +3024,7 @@ export class HiveManager {
    *  entry on its card, the card's status untouched (the board is god's); no usable card, and the
    *  sender is told (god still gets the message). An inform or done with needs_human is recorded
    *  for god's floor digest. Only a registered agent surfaces; never throws into the router. */
-  private surfaceNeedsHuman(msg: HiveMessage, reg: Registry, to: string): void {
+  private *surfaceNeedsHumanSteps(msg: HiveMessage, reg: Registry, to: string): RouteSteps<void> {
     try {
       const agent = Object.prototype.hasOwnProperty.call(reg.agents, msg.from) ? reg.agents[msg.from] : undefined;
       if (!agent) return;
@@ -3027,7 +3065,7 @@ export class HiveManager {
         subject: `[needs_human not surfaced] ${msg.subject}`.slice(0, 200),
         body: `Your ${msg.act} "${msg.subject}" (${msg.id}) was sent to ${msg.to}, but it is not in front of the Human: ${why}. A needs_human ask reaches ASK ME only on a card that is not done: resend it with its card if the Human must answer it.`
       }, 'system');
-      const notified = this.deliver(notice, msg.from);
+      const notified = yield* this.deliverSteps(notice, msg.from);
       this.emitMessage(notice, notified ? [msg.from] : []);
     } catch (e) {
       try { this.appendLog({ kind: 'needs-human-error', from: msg.from, id: msg.id, error: String(e) }); } catch { /* noop */ }
@@ -3149,7 +3187,7 @@ export class HiveManager {
     return { ctx, cardIds };
   }
 
-  private linkCard(msg: HiveMessage, reg: Registry, godId: string): MailLink | 'bounced' | 'deferred' | null {
+  private *linkCardSteps(msg: HiveMessage, reg: Registry, godId: string): RouteSteps<MailLink | 'bounced' | 'deferred' | null> {
     let link: MailLink;
     let cardIds: string[];
     try {
@@ -3191,7 +3229,7 @@ export class HiveManager {
       subject: `[card required] ${msg.subject}`.slice(0, 200),
       body: `The hive router did not deliver your ${msg.act} to ${msg.to} ("${msg.subject}"): ${why}. Every message names the card it is about, so the card (its claims and its mail) is the history. Send it again with "card": "<CARD-ID>" (a tasks.json card id), or as a reply (in_reply_to) to a message on that card. Floor-wide mail to broadcast uses "card": "none". Nothing is lost: it is in your outbox/.sent/.`
     }, 'system');
-    const notified = this.deliver(notice, msg.from);
+    const notified = yield* this.deliverSteps(notice, msg.from);
     this.emitMessage(notice, notified ? [msg.from] : []);
     return 'bounced';
   }
@@ -3249,8 +3287,10 @@ export class HiveManager {
 
   /** Atomically deliver a message into a recipient agent's inbox.
    *  Returns false when the recipient has no inbox, so the caller can bounce and
-   *  log the drop rather than let the message vanish. */
-  private deliver(original: HiveMessage, toId: string): boolean {
+   *  log the drop rather than let the message vanish.
+   *  ROUTER-ASYNC-DELIVER-107: the write is yielded to the runner (runRouteSync or runRouteAsync);
+   *  the ledger entry and the wake run only once it has landed. A failed write throws here. */
+  private *deliverSteps(original: HiveMessage, toId: string): RouteSteps<boolean> {
     const inbox = join(this.agentDir(toId), 'inbox');
     if (!existsSync(inbox)) return false; // unknown recipient — the caller reports it
     // ZT-I1-MAIL §4.1: admission against the recipient's ledger, inbox/ and .done/. A duplicate
@@ -3268,7 +3308,7 @@ export class HiveManager {
     // Nothing is ever written outside the inbox: a valid id cannot leave it, and this re-checks.
     const file = join(inbox, `${msg.id}.json`);
     if (!isValidMailId(msg.id) || dirname(file) !== inbox) throw new Error(`refusing to deliver outside ${toId}'s inbox`);
-    this.atomicWriteJson(file, msg);
+    yield { file, msg };
     try { this.mail.markDelivered(toId, msg); } catch (e) {
       try { this.appendLog({ kind: 'mail-ledger-error', agentId: toId, id: msg.id, op: 'delivered', error: String(e) }); } catch { /* noop */ }
     }
@@ -3311,14 +3351,43 @@ export class HiveManager {
     this.deliveryObserver = cb;
   }
 
-  /** Inject a message directly (used by the orchestrator / UI / tests). */
+  /** ROUTER-ASYNC-DELIVER-107: run routing steps writing each inbox file on this thread (send()).
+   *  A failed write is thrown back into the steps, so their own try/catch sees it as before. */
+  private runRouteSync<T>(steps: RouteSteps<T>): T {
+    let r = steps.next();
+    while (!r.done) {
+      let failed = false;
+      let err: unknown;
+      try { this.atomicWriteJson(r.value.file, r.value.msg); } catch (e) { failed = true; err = e; }
+      r = failed ? steps.throw(err) : steps.next();
+    }
+    return r.value;
+  }
+
+  /** ROUTER-ASYNC-DELIVER-107: the same steps with each inbox write awaited off the main thread
+   *  (routeOnce). The steps resume only once the file is on disk. */
+  private async runRouteAsync<T>(steps: RouteSteps<T>): Promise<T> {
+    let r = steps.next();
+    while (!r.done) {
+      let failed = false;
+      let err: unknown;
+      try {
+        await atomicWriteJsonAsync(r.value.file, r.value.msg);
+      } catch (e) { failed = true; err = e; } finally { this.invalidateAuthorityCache(r.value.file); }
+      r = failed ? steps.throw(err) : steps.next();
+    }
+    return r.value;
+  }
+
+  /** Inject a message directly (used by the orchestrator / UI / tests). Its inbox writes are
+   *  synchronous (god b2e5d2: system sends stay on-thread); routeOnce awaits the same steps. */
   send(partial: Partial<HiveMessage>, from = 'system'): HiveMessage {
     const msg = this.normalize(partial, from);
-    this.routeMessage(msg);
+    this.runRouteSync(this.routeMessageSteps(msg));
     return msg;
   }
 
-  private routeMessage(msg: HiveMessage): void {
+  private *routeMessageSteps(msg: HiveMessage): RouteSteps<void> {
     // The router alone sets superseded_by: a sender cannot pre-mark its own mail.
     delete msg.superseded_by;
     // ZT-I1-MAIL §4.1: ...and sender_id. An id that is not filename-safe (traversal, overlong,
@@ -3360,7 +3429,7 @@ export class HiveManager {
           subject: `[loop stopped] ${msg.subject}`.slice(0, 200),
           body: `The hive router did not deliver your ${msg.act} to ${msg.to} ("${msg.subject}"): it would make ${msg.hops} messages in a row (more than ${HOP_CAP}) that answer each other without asking for a reply, which is how a loop of acknowledgements looks. Nothing is lost: it is in your outbox/.sent/. Do not acknowledge an acknowledgement; if it carries something new, send it as a fresh message (no in_reply_to) or as a request.`
         }, 'system');
-        const notified = this.deliver(notice, msg.from);
+        const notified = yield* this.deliverSteps(notice, msg.from);
         this.emitMessage(notice, notified ? [msg.from] : []);
       }
       return;
@@ -3369,14 +3438,14 @@ export class HiveManager {
     const godId = reg.godId ?? 'god';
     // C90-MAILCARD: every message names its card (field, reply chain, conversation or one mention);
     // an agent's message that names none is bounced to it before anything else happens.
-    const link = this.linkCard(msg, reg, godId);
+    const link = yield* this.linkCardSteps(msg, reg, godId);
     if (link === 'bounced') return;
     // The hive has no separate human-approval queue — approvals are native to
     // each agent's Claude Code session (and approvable remotely). A message aimed
     // at "human" is handled by the god/orchestrator, the human's proxy here.
     const resolveTo = (to: string): string => (to === 'human' || to === 'god' ? godId : to);
     if (msg.supersedes?.length) this.dismissSupersededAsks(msg, reg);
-    if (msg.needs_human === true) this.surfaceNeedsHuman(msg, reg, resolveTo(msg.to));
+    if (msg.needs_human === true) yield* this.surfaceNeedsHumanSteps(msg, reg, resolveTo(msg.to));
     // ZT-I1-MAIL §4.3 + §11.13(B): a reply from an agent closes the reply/outcome obligation it
     // answers in that agent's ledger (id or sender_id alias). Zero-token: tracking only, no wake.
     if (msg.in_reply_to) {
@@ -3412,7 +3481,7 @@ export class HiveManager {
         // Unknown id: the no-inbox bounce (#24), without resolving it to any directory.
         this.appendLog({ kind: 'drop', reason: 'no-inbox', from: msg.from, to: t, id: msg.id });
         if (t !== godId) {
-          this.deliver({
+          yield* this.deliverSteps({
             ...msg,
             to: godId,
             subject: `[undeliverable — no agent "${t}" on this floor; check the id against the roster] ${msg.subject}`
@@ -3435,12 +3504,12 @@ export class HiveManager {
         if (toSender) {
           // A `system` notice carrying the original subject and body, so the sender can resend.
           // Not a request of its own (no reply obligation) and not a reply to anything.
-          this.deliver({
+          yield* this.deliverSteps({
             ...msg, from: 'system', to: msg.from, act: 'inform', requires_reply: false, in_reply_to: null,
             supersedes: undefined, superseded_by: undefined, subject: `${notice} ${msg.subject}`
           }, msg.from);
         } else {
-          this.deliver({ ...msg, to: godId, subject: `${notice} ${msg.subject}` }, godId);
+          yield* this.deliverSteps({ ...msg, to: godId, subject: `${notice} ${msg.subject}` }, godId);
         }
         continue;
       }
@@ -3450,7 +3519,7 @@ export class HiveManager {
       // unread for hours). Bounce such mail to god instead, so the sender's intent
       // surfaces immediately and nothing is silently lost.
       if (reg.agents[t]?.isAssistant) {
-        this.deliver({
+        yield* this.deliverSteps({
           ...msg,
           to: godId,
           subject: `[bounced — "${t}" is the send-only prep assistant; route work to a real agent] ${msg.subject}`
@@ -3465,7 +3534,7 @@ export class HiveManager {
       // (the bounce target).
       if (t !== godId && !canReceiveInbox(reg.agents[t]?.provider)) {
         if (!this.emitTerminalHandoff(msg, t)) {
-          this.deliver({
+          yield* this.deliverSteps({
             ...msg,
             to: godId,
             subject: `[undeliverable — "${t}" runs ${reg.agents[t]?.provider ?? 'a hookless CLI'} and the terminal handoff failed (renderer unavailable); relay this to it] ${msg.subject}`
@@ -3481,7 +3550,7 @@ export class HiveManager {
       const proxyDesc = bridgeOf(reg.agents[t]?.provider);
       if (t !== godId && proxyDesc?.kind === 'proxy' && proxyDesc.inboxDelivery === 'terminal') {
         if (!this.emitTerminalHandoff(msg, t)) {
-          this.deliver({
+          yield* this.deliverSteps({
             ...msg,
             to: godId,
             subject: `[undeliverable — "${t}" runs ${reg.agents[t]?.provider ?? 'a proxy-tier CLI'} and the terminal handoff failed (renderer unavailable); relay this to it] ${msg.subject}`
@@ -3489,14 +3558,14 @@ export class HiveManager {
         } else delivered.push(t);
         continue;
       }
-      if (this.deliver(msg, t)) { delivered.push(t); continue; }
+      if (yield* this.deliverSteps(msg, t)) { delivered.push(t); continue; }
       // No agents/<t>/inbox — an id that isn't on the floor. This was the one
       // delivery failure with neither bounce nor log, so the sender saw a routed
       // message and the mail simply ceased to exist. Record the drop beside the
       // hop-cap one and bounce to god, mirroring the undeliverable bounces above.
       this.appendLog({ kind: 'drop', reason: 'no-inbox', from: msg.from, to: t, id: msg.id });
       if (t !== godId) {
-        this.deliver({
+        yield* this.deliverSteps({
           ...msg,
           to: godId,
           subject: `[undeliverable — no agent "${t}" on this floor; check the id against the roster] ${msg.subject}`
@@ -3696,7 +3765,7 @@ export class HiveManager {
     if (this.routerTimer || !this.enabled()) return;
     this.routerGeneration++;
     this.routerTimer = this.routerRuntime.setInterval(() => this.reconcileRouterAsync(), intervalMs);
-    try { this.refreshOutboxWatchers(); this.routeOnce(); } catch { /* the interval retries */ }
+    try { this.refreshOutboxWatchers(); void this.routeOnce().catch(() => { /* the interval retries */ }); } catch { /* the interval retries */ }
   }
 
   /** The missed-watch safety net uses async directory I/O and never overlaps. */
@@ -3709,11 +3778,11 @@ export class HiveManager {
       const agentsDir = join(root, 'agents');
       const ids = await fsPromises.readdir(agentsDir);
       const agents = this.registry().agents;
+      // ROUTER-ASYNC-DELIVER-107: no existence read here: the pass reads each outbox once and
+      // skips one that is missing, so a probe read doubled every idle outbox's reads.
       for (const id of ids) {
         if (agents[id]?.archived) continue;
-        const outbox = join(agentsDir, id, 'outbox');
-        try { await fsPromises.readdir(outbox); } catch { continue; }
-        this.scheduleRouteOnce(outbox);
+        this.scheduleRouteOnce(join(agentsDir, id, 'outbox'));
       }
       await this.refreshOutboxWatchersAsync(agentsDir, agents);
     } catch { /* a later bounded pass retries */ }
@@ -3816,11 +3885,16 @@ export class HiveManager {
     const generation = this.routerGeneration;
     this.routerRuntime.setImmediate(() => {
       if (generation !== this.routerGeneration) return;
-      this.routeQueued = false;
-      if (!this.routerTimer) return;
-      const dirty = [...this.routeDirtyOutboxes];
-      this.routeDirtyOutboxes.clear();
-      try { this.routeOnce(dirty); } catch { /* the reconciliation retries */ }
+      // The dirty set is taken when the pass starts, not now: hints that arrive while an earlier
+      // pass is still awaiting its writes join this one queued pass instead of queueing more.
+      void this.enqueueRoutePass(() => {
+        if (generation !== this.routerGeneration) return null;
+        this.routeQueued = false;
+        if (!this.routerTimer) return null;
+        const dirty = [...this.routeDirtyOutboxes];
+        this.routeDirtyOutboxes.clear();
+        return dirty;
+      }).catch(() => { /* the reconciliation retries */ });
     });
   }
 
@@ -3848,7 +3922,7 @@ export class HiveManager {
    * reports the failure to the sender and floor; an archive failure is remembered
    * by fingerprint so an unchanged locked file cannot spam the log or its sender.
    */
-  private rejectOutboxFile(
+  private *rejectOutboxFileSteps(
     outbox: string,
     full: string,
     from: string,
@@ -3856,7 +3930,7 @@ export class HiveManager {
     reason: 'parse-failed' | 'route-failed',
     detail: string,
     error: unknown
-  ): boolean {
+  ): RouteSteps<boolean> {
     let archived = false;
     try {
       renameSync(full, join(outbox, '.sent', `bad-${file}`));
@@ -3870,7 +3944,7 @@ export class HiveManager {
       subject: `[outbox rejected — ${detail}] ${file}`,
       body: `The hive router rejected this outbox file: ${detail}. It${archived ? ' was archived' : ' could not be archived yet'} as bad-${file}; rewrite and resend it if it is still needed.`
     }, 'system');
-    const notified = this.deliver(notice, from);
+    const notified = yield* this.deliverSteps(notice, from);
     this.emitMessage(notice, notified ? [from] : []);
     this.appendLog({ kind: 'outbox-rejected', from, file, reason, detail, error: String(error), notified, archived });
     if (!archived) this.outboxRejectNotices.set(full, this.outboxFingerprint(full));
@@ -3878,19 +3952,38 @@ export class HiveManager {
   }
 
   /** HIVE-DUP-DONE-MAIL: the recent-delivery keys for `root`, pruned to the window (loaded once per root). */
-  private outboxDedupEntries(root: string): Map<string, { id: string; ts: number }> {
+  private async outboxDedupEntries(root: string): Promise<Map<string, { id: string; ts: number }>> {
     if (this.outboxDedup?.root !== root) {
       const entries = new Map<string, { id: string; ts: number }>();
+      const take = (e: unknown): void => {
+        const x = (e ?? {}) as { key?: unknown; id?: unknown; ts?: unknown };
+        if (typeof x.key === 'string' && typeof x.id === 'string' && typeof x.ts === 'number') entries.set(x.key, { id: x.id, ts: x.ts });
+      };
+      let legacy = false;
       try {
-        const raw = JSON.parse(readFileSync(join(root, OUTBOX_DEDUP_FILE), 'utf8')) as { entries?: unknown };
-        for (const e of Array.isArray(raw.entries) ? raw.entries : []) {
-          const x = e as { key?: unknown; id?: unknown; ts?: unknown };
-          if (typeof x.key === 'string' && typeof x.id === 'string' && typeof x.ts === 'number') entries.set(x.key, { id: x.id, ts: x.ts });
+        const raw = JSON.parse(await fsPromises.readFile(join(root, OUTBOX_DEDUP_LEGACY_FILE), 'utf8')) as { entries?: unknown };
+        legacy = true;
+        for (const e of Array.isArray(raw.entries) ? raw.entries : []) take(e);
+      } catch (e) {
+        // present but unreadable: still the legacy file, removed by the first compaction
+        if ((e as NodeJS.ErrnoException)?.code !== 'ENOENT') legacy = true;
+      }
+      let lines = 0;
+      let torn = false;
+      try {
+        const text = await fsPromises.readFile(join(root, OUTBOX_DEDUP_FILE), 'utf8');
+        torn = text.length > 0 && !text.endsWith('\n');
+        for (const line of text.split('\n')) {
+          if (!line.trim()) continue;
+          lines++;
+          // a torn or corrupt line is a dead line: skipped, and gone at the next compaction
+          try { take(JSON.parse(line)); } catch { /* skip */ }
         }
       } catch { /* none yet, or unreadable: start empty (a missed suppression only delivers, as before) */ }
-      this.outboxDedup = { root, entries };
+      // another pass for this root may have loaded it while this one awaited its reads
+      if (this.outboxDedup?.root !== root) this.outboxDedup = { root, entries, lines, torn, legacy };
     }
-    const entries = this.outboxDedup.entries;
+    const entries = this.outboxDedup!.entries;
     const now = outboxDedupClock.now();
     // Jim S1: an entry stamped well in the future (the clock went back) would suppress for longer
     // than the window; drop it (a missed suppression only delivers, as before).
@@ -3898,14 +3991,42 @@ export class HiveManager {
     return entries;
   }
 
-  /** Persist the window at once (atomic), so a router restart cannot deliver a repeat. */
-  private saveOutboxDedup(root: string, entries: Map<string, { id: string; ts: number }>): void {
-    const file = join(root, OUTBOX_DEDUP_FILE);
+  /** Record one delivery: set it in the window and append its line (awaited by the caller before
+   *  the .sent rename), so a router restart cannot deliver a repeat. */
+  private async recordOutboxDedup(root: string, key: string, v: { id: string; ts: number }): Promise<void> {
+    const state = this.outboxDedup;
+    if (!state || state.root !== root) return;
+    state.entries.set(key, v);
+    const line = `${state.torn ? '\n' : ''}${JSON.stringify({ key, ...v })}\n`;
     try {
-      writeFileSync(`${file}.tmp`, JSON.stringify({ v: 1, windowMs: OUTBOX_DEDUP_WINDOW_MS, entries: [...entries].map(([key, v]) => ({ key, ...v })) }));
-      renameSync(`${file}.tmp`, file);
+      await fsPromises.appendFile(join(root, OUTBOX_DEDUP_FILE), line, 'utf8');
+      state.torn = false;
+      state.lines++;
     } catch (error) {
       this.appendLog({ kind: 'outbox-dedup-save-failed', error: String(error) });
+    }
+  }
+
+  /** Rewrite the log as the live window, only when its dead lines outnumber the live ones (or the
+   *  legacy file is still there). Runs at the end of a pass, after every .sent rename, and inside the
+   *  single-flight chain, so no append can interleave with it. */
+  private async compactOutboxDedup(root: string): Promise<void> {
+    const state = this.outboxDedup;
+    if (!state || state.root !== root) return;
+    const live = state.entries.size;
+    if (!state.legacy && !(state.lines >= OUTBOX_DEDUP_COMPACT_MIN_LINES && state.lines - live > live)) return;
+    const text = [...state.entries].map(([key, v]) => `${JSON.stringify({ key, ...v })}\n`).join('');
+    try {
+      await atomicWriteTextAsync(join(root, OUTBOX_DEDUP_FILE), text);
+      state.lines = live;
+      state.torn = false;
+      if (state.legacy) {
+        await fsPromises.rm(join(root, OUTBOX_DEDUP_LEGACY_FILE), { force: true });
+        state.legacy = false;
+      }
+      this.appendLog({ kind: 'outbox-dedup-compacted', live });
+    } catch (error) {
+      this.appendLog({ kind: 'outbox-dedup-save-failed', op: 'compact', error: String(error) });
     }
   }
 
@@ -3951,23 +4072,51 @@ export class HiveManager {
     }
   }
 
-  /** Drain all outboxes for reconciliation, or only watcher-dirtied outboxes. */
-  routeOnce(dirtyOutboxes?: Iterable<string>): number {
+  /** Drain all outboxes for reconciliation, or only watcher-dirtied outboxes. Resolves to the
+   *  number routed. ROUTER-ASYNC-DELIVER-107: passes are single-flight (routeChain): this one
+   *  starts once every earlier pass has settled. Every inbox write is awaited before its ledger
+   *  entry, its wake and the outbox file's rename to .sent. */
+  routeOnce(dirtyOutboxes?: Iterable<string>): Promise<number> {
+    const dirty = dirtyOutboxes === undefined ? undefined : [...dirtyOutboxes];
+    return this.enqueueRoutePass(() => dirty);
+  }
+
+  /** Chain one pass behind the earlier ones. `take` runs when the pass starts and names its
+   *  outboxes (undefined: all of them; null: skip the pass). */
+  private enqueueRoutePass(take: () => string[] | undefined | null): Promise<number> {
+    const pass = this.routeChain.then(() => {
+      const dirty = take();
+      return dirty === null ? 0 : this.routePass(dirty);
+    });
+    this.routeChain = pass.catch(() => undefined);
+    return pass;
+  }
+
+  /** Settles once every pass queued so far has finished (shutdown and tests). */
+  routerIdle(): Promise<void> {
+    return this.routeChain.then(() => undefined);
+  }
+
+  private async routePass(dirtyOutboxes?: string[]): Promise<number> {
     const root = this.root();
     if (!root) return 0;
     const agentsDir = join(root, 'agents');
     const fullScan = dirtyOutboxes === undefined;
-    if (fullScan && !existsSync(agentsDir)) return 0;
+    let agentIds: string[] = [];
+    if (fullScan) {
+      try { agentIds = await fsPromises.readdir(agentsDir); } catch { return 0; }
+    }
     let routed = 0;
     let rejected = 0;
     let archived = 0;
     const liveOutboxFiles = new Set<string>();
     const outboxes: Array<[string, string]> = fullScan
-      ? readdirSync(agentsDir).map((id) => [id, join(agentsDir, id, 'outbox')])
+      ? agentIds.map((id) => [id, join(agentsDir, id, 'outbox')])
       : [...(dirtyOutboxes ?? [])].map((outbox) => [basename(dirname(outbox)), outbox]);
     for (const [id, outbox] of outboxes) {
-      if (!existsSync(outbox)) continue;
-      for (const f of readdirSync(outbox)) {
+      let names: string[];
+      try { names = await fsPromises.readdir(outbox); } catch { continue; }
+      for (const f of names) {
         if (!f.endsWith('.json')) continue;
         const full = join(outbox, f);
         liveOutboxFiles.add(full);
@@ -3989,7 +4138,7 @@ export class HiveManager {
         }
         let partial: Partial<HiveMessage>;
         try {
-          partial = JSON.parse(readFileSync(full, 'utf8')) as Partial<HiveMessage>;
+          partial = JSON.parse(await fsPromises.readFile(full, 'utf8')) as Partial<HiveMessage>;
         } catch (error) {
           // A non-atomic writer may still be streaming this file. Leave it in
           // place for subsequent polling passes; only a bounded failure becomes
@@ -4019,12 +4168,12 @@ export class HiveManager {
             continue;
           }
           this.outboxParseRetries.delete(full);
-          rejected += Number(this.rejectOutboxFile(
+          rejected += Number(await this.runRouteAsync(this.rejectOutboxFileSteps(
             outbox, full, id, f,
             'parse-failed',
             `malformed JSON after ${attempts} attempts`,
             error
-          ));
+          )));
           continue;
         }
         this.outboxParseRetries.delete(full);
@@ -4072,7 +4221,7 @@ export class HiveManager {
           // set its own id is left to the mail ledger's §4.1 admission, which already drops a
           // same-id same-content resend (mail-dedup) and reassigns a colliding id; this check covers
           // the case §4.1 cannot see: no id, so every rewrite of the file got a fresh one.
-          const dedup = this.outboxDedupEntries(root);
+          const dedup = await this.outboxDedupEntries(root);
           const key = outboxDedupKey(id, msg);
           const prior = partial.id === undefined || partial.id === null ? dedup.get(key) : undefined;
           if (prior) {
@@ -4087,22 +4236,21 @@ export class HiveManager {
               subject: `[duplicate not delivered] ${f}`,
               body: `The hive router did not deliver ${f}: it repeats ${prior.id} (delivered ${firstAt}) exactly (same to, act, reply-to, subject and body, within ${OUTBOX_DEDUP_WINDOW_MS / 60_000} minutes). The first one WAS delivered: a file gone from outbox/ was delivered (it moves to outbox/.sent/). This repeat is kept as outbox/.sent/${kept ?? f}. To send it again on purpose, change its text.`
             }, 'system');
-            const notified = this.deliver(notice, id);
+            const notified = await this.runRouteAsync(this.deliverSteps(notice, id));
             this.emitMessage(notice, notified ? [id] : []);
             this.appendLog({ kind: 'outbox-duplicate', from: id, to: msg.to, act: msg.act, file: f, firstId: prior.id, duplicateId: msg.id, firstAt, notified, noticeId: notice.id });
             continue;
           }
-          this.routeMessage(msg);
+          await this.runRouteAsync(this.routeMessageSteps(msg));
           routed++;
           if (partial.id === undefined || partial.id === null) {
-            dedup.set(key, { id: msg.id, ts: outboxDedupClock.now() });
-            this.saveOutboxDedup(root, dedup);
+            await this.recordOutboxDedup(root, key, { id: msg.id, ts: outboxDedupClock.now() });
           }
         } catch (error) {
           // A parsed payload that cannot route is terminal too: keep it visible,
           // rather than retrying it forever on every watcher hint and poll.
           const reason = error instanceof Error ? error.message : String(error);
-          rejected += Number(this.rejectOutboxFile(outbox, full, id, f, 'route-failed', reason, error));
+          rejected += Number(await this.runRouteAsync(this.rejectOutboxFileSteps(outbox, full, id, f, 'route-failed', reason, error)));
           continue;
         }
         this.archiveDeliveredOutbox(outbox, full, id, f);
@@ -4129,6 +4277,7 @@ export class HiveManager {
     }
     if (routed > 0 || rejected > 0 || archived > 0) {
     }
+    await this.compactOutboxDedup(root);
     return routed;
   }
 

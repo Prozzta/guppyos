@@ -52,15 +52,15 @@ test('a partial outbox write remains pending and routes after the writer finishe
   const file = path.join(outbox, 'partial.json');
   fs.writeFileSync(file, '{"to":"god-1","act":"inform"');
 
-  assert.equal(hive.routeOnce(), 0);
+  assert.equal(await hive.routeOnce(), 0);
   assert.equal(fs.existsSync(file), true, 'a first partial read must not be quarantined');
   assert.equal(fs.existsSync(path.join(outbox, '.sent', 'bad-partial.json')), false);
   assert.equal(hive.inbox('god-1').length, 0);
-  assert.equal(hive.routeOnce(), 0, 'rapid watcher hints must not consume another retry');
+  assert.equal(await hive.routeOnce(), 0, 'rapid watcher hints must not consume another retry');
   assert.equal(fs.existsSync(file), true);
 
   fs.writeFileSync(file, JSON.stringify({ to: 'god-1', act: 'inform', subject: 'writer finished', body: 'delivered' }));
-  assert.equal(hive.routeOnce(), 1);
+  assert.equal(await hive.routeOnce(), 1);
   assert.equal(fs.existsSync(path.join(outbox, '.sent', 'partial.json')), true);
   assert.equal(hive.inbox('god-1').length, 1);
   assert.equal(hive.inbox('god-1')[0].subject, 'writer finished');
@@ -71,13 +71,13 @@ test('a writer that remains partial for more than one second is still delivered 
   const file = path.join(outbox, 'slow.json');
   fs.writeFileSync(file, '{"to":"god-1"');
 
-  assert.equal(hive.routeOnce(), 0, 'a fresh file spends no parse retry budget');
+  assert.equal(await hive.routeOnce(), 0, 'a fresh file spends no parse retry budget');
   await new Promise((resolve) => setTimeout(resolve, 1_100));
-  assert.equal(hive.routeOnce(), 0, 'the first eligible parse is still only one retry');
+  assert.equal(await hive.routeOnce(), 0, 'the first eligible parse is still only one retry');
   assert.equal(fs.existsSync(file), true);
   fs.writeFileSync(file, JSON.stringify({ to: 'god-1', act: 'inform', subject: 'slow writer finished' }));
 
-  assert.equal(hive.routeOnce(), 1);
+  assert.equal(await hive.routeOnce(), 1);
   assert.equal(fs.existsSync(path.join(outbox, '.sent', 'slow.json')), true);
   assert.equal(fs.existsSync(path.join(outbox, '.sent', 'bad-slow.json')), false);
   assert.equal(hive.inbox('god-1')[0].subject, 'slow writer finished');
@@ -89,14 +89,14 @@ test('a final malformed outbox rejection is logged, surfaced, and notices the se
   fs.writeFileSync(file, '{ definitely not JSON');
   olderThanFreshWriteGrace(file);
 
-  assert.equal(hive.routeOnce(), 0);
+  assert.equal(await hive.routeOnce(), 0);
   await afterDebounce();
-  assert.equal(hive.routeOnce(), 0);
+  assert.equal(await hive.routeOnce(), 0);
   assert.equal(fs.existsSync(file), true, 'the bounded retry still leaves the writer time to finish');
   assert.equal(hive.inbox('jim-1').length, 0);
 
   await afterDebounce();
-  assert.equal(hive.routeOnce(), 0);
+  assert.equal(await hive.routeOnce(), 0);
   assert.equal(fs.existsSync(path.join(outbox, '.sent', 'bad-broken.json')), true);
   const [notice] = hive.inbox('jim-1');
   assert.match(notice.subject, /^\[outbox rejected — malformed JSON after 3 attempts\] broken\.json$/);
@@ -122,7 +122,7 @@ test('parseable but unroutable files are rejected once with a sender notice', as
 
   for (const [name, content, reason] of cases) {
     fs.writeFileSync(path.join(outbox, name), content);
-    assert.equal(hive.routeOnce(), 0);
+    assert.equal(await hive.routeOnce(), 0);
     assert.equal(fs.existsSync(path.join(outbox, '.sent', `bad-${name}`)), true, name);
     const matching = hive.inbox('jim-1').filter((message) => message.subject.endsWith(name));
     assert.equal(matching.length, 1, `${name} must notify exactly once`);
@@ -133,7 +133,7 @@ test('parseable but unroutable files are rejected once with a sender notice', as
     assert.match(rows[0].detail, reason);
   }
 
-  assert.equal(hive.routeOnce(), 0, 'archived files cannot repeatedly reject');
+  assert.equal(await hive.routeOnce(), 0, 'archived files cannot repeatedly reject');
   assert.equal(hive.inbox('jim-1').length, cases.length);
   assert.equal(events.filter(({ channel, payload }) => channel === 'hive:message' && payload.to === 'jim-1').length, cases.length);
 });
@@ -154,7 +154,7 @@ async function replyLinkGapKiller(t, Manager) {
     fs.writeFileSync(outboxFile, JSON.stringify(payload));
     olderThanFreshWriteGrace(outboxFile);
   }
-  assert.equal(hive.routeOnce(), 4, 'REPLY-LINK GAP: known synonyms normalise and route; only the truly unknown act rejects');
+  assert.equal(await hive.routeOnce(), 4, 'REPLY-LINK GAP: known synonyms normalise and route; only the truly unknown act rejects');
   const delivered = hive.inbox('god-1');
   assert.equal(delivered.find((m) => m.subject === 'built').act, 'done', 'REPLY-LINK GAP: reply with camelCase link becomes done');
   assert.equal(delivered.find((m) => m.subject === 'built').in_reply_to, replyRequest.id, 'REPLY-LINK GAP: camelCase link is canonicalised');
@@ -236,7 +236,7 @@ async function emptyMailKiller(t, Manager, L) {
     fs.writeFileSync(f, JSON.stringify(payload));
     olderThanFreshWriteGrace(f);
   }
-  assert.equal(hive.routeOnce(), routed.length, 'EMPTY MAIL: only the messages that say something route');
+  assert.equal(await hive.routeOnce(), routed.length, 'EMPTY MAIL: only the messages that say something route');
   for (const [file, , reason] of refused) {
     assert.equal(fs.existsSync(path.join(outbox, '.sent', `bad-${file}`)), true, `EMPTY MAIL: ${file} goes to the failed state`);
     const notice = hive.inbox('jim-1').find((m) => m.subject.endsWith(file));
@@ -303,22 +303,22 @@ async function archiveFailureLogKiller(t, Manager = HiveManager) {
   const file = path.join(outbox, 'delivered-before-archive.json');
   fs.writeFileSync(file, JSON.stringify({ to: 'god-1', act: 'inform', subject: 'delivered before archive' }));
 
-  assert.equal(hive.routeOnce(), 1, 'the message must be delivered before archive retry state is recorded');
+  assert.equal(await hive.routeOnce(), 1, 'the message must be delivered before archive retry state is recorded');
   assert.equal(hive.inbox('god-1').length, 1);
   assert.equal(hive.inbox('jim-1').length, 0);
   assert.equal(fs.existsSync(file), true, 'a failed archive leaves the delivered source file in place');
   assert.equal(hive.logTail(100).filter((entry) => entry.kind === 'outbox-archive-failed').length, 1);
 
-  assert.equal(hive.routeOnce(), 0, 'an unchanged delivered file must only retry archival');
-  assert.equal(hive.routeOnce(), 0, 'a third scan must still only retry archival');
-  assert.equal(hive.routeOnce(), 0, 'a fourth scan must still only retry archival');
+  assert.equal(await hive.routeOnce(), 0, 'an unchanged delivered file must only retry archival');
+  assert.equal(await hive.routeOnce(), 0, 'a third scan must still only retry archival');
+  assert.equal(await hive.routeOnce(), 0, 'a fourth scan must still only retry archival');
   assert.equal(hive.logTail(100).filter((entry) => entry.kind === 'outbox-archive-failed').length, 1,
     'ARCHIVE LOG NOISE: a held archive is reported once across repeated scans');
   assert.equal(hive.inbox('god-1').length, 1, 'archive retry must never redeliver');
   assert.equal(hive.inbox('jim-1').length, 0, 'archive failure must not reject the sender');
 
   fs.renameSync(heldSent, sent);
-  assert.equal(hive.routeOnce(), 0, 'successful archive retry is not a new route');
+  assert.equal(await hive.routeOnce(), 0, 'successful archive retry is not a new route');
   assert.equal(fs.existsSync(path.join(sent, 'delivered-before-archive.json')), true);
   assert.equal(hive.inbox('god-1').length, 1, 'successful archive retry still must not redeliver');
   assert.equal(hive.inbox('jim-1').length, 0);
@@ -382,9 +382,9 @@ async function replacedArchiveFailureLogKiller(t, Manager = HiveManager) {
   });
   const file = path.join(outbox, 'replaced-stuck.json');
   fs.writeFileSync(file, JSON.stringify({ to: 'god-1', act: 'inform', subject: 'first held payload' }));
-  assert.equal(hive.routeOnce(), 1);
+  assert.equal(await hive.routeOnce(), 1);
   fs.writeFileSync(file, JSON.stringify({ to: 'god-1', act: 'inform', subject: 'replacement held payload', body: 'different contents' }));
-  assert.equal(hive.routeOnce(), 1, 'the replacement is a new delivery before its archive fails');
+  assert.equal(await hive.routeOnce(), 1, 'the replacement is a new delivery before its archive fails');
   assert.equal(hive.logTail(100).filter((entry) => entry.kind === 'outbox-archive-failed').length, 2,
     'ARCHIVE FINGERPRINT: changed contents become a newly reported stuck archive');
   assert.equal(hive.logTail(100).filter((entry) => entry.kind === 'outbox-archive-cleared').length, 0,
@@ -399,10 +399,10 @@ async function replacedThenArchivedKiller(t, Manager = HiveManager) {
   t.after(() => { if (fs.existsSync(heldSent) && !fs.existsSync(sent)) fs.renameSync(heldSent, sent); });
   const file = path.join(outbox, 'replaced-then-archived.json');
   fs.writeFileSync(file, JSON.stringify({ to: 'god-1', act: 'inform', subject: 'held original' }));
-  assert.equal(hive.routeOnce(), 1);
+  assert.equal(await hive.routeOnce(), 1);
   fs.writeFileSync(file, JSON.stringify({ to: 'god-1', act: 'inform', subject: 'replacement archives first try', body: 'new' }));
   fs.renameSync(heldSent, sent);
-  assert.equal(hive.routeOnce(), 1);
+  assert.equal(await hive.routeOnce(), 1);
   assert.equal(hive.logTail(100).filter((entry) => entry.kind === 'outbox-archive-cleared').length, 0,
     'ARCHIVE REPLACE CLEAR: a replacement that never stuck must not clear the old failure');
 }
@@ -429,15 +429,15 @@ async function prunedDuplicateArchiveFailureLogKiller(t, Manager = HiveManager) 
   const stableTime = new Date(Math.floor(Date.now() / 1_000) * 1_000);
   fs.utimesSync(file, stableTime, stableTime);
   const first = fs.statSync(file);
-  assert.equal(hive.routeOnce(), 1);
+  assert.equal(await hive.routeOnce(), 1);
   fs.rmSync(file);
-  assert.equal(hive.routeOnce(), 0, 'the absent file prunes its archive-failure state');
+  assert.equal(await hive.routeOnce(), 0, 'the absent file prunes its archive-failure state');
   fs.writeFileSync(file, payload);
   fs.utimesSync(file, new Date(first.mtimeMs), new Date(first.mtimeMs));
   assert.equal(`${fs.statSync(file).size}:${fs.statSync(file).mtimeMs}`, `${first.size}:${first.mtimeMs}`,
     'FIXTURE: the recreated file must retain the old fingerprint to prove pruning');
-  assert.equal(hive.routeOnce(), 0, 'the same bytes are an exact duplicate, whose archive is held');
-  assert.equal(hive.routeOnce(), 0, 'a held duplicate retry must not add another failure row');
+  assert.equal(await hive.routeOnce(), 0, 'the same bytes are an exact duplicate, whose archive is held');
+  assert.equal(await hive.routeOnce(), 0, 'a held duplicate retry must not add another failure row');
   assert.equal(hive.logTail(100).filter((entry) => entry.kind === 'outbox-archive-failed').length, 2,
     'ARCHIVE PRUNE: removal permits the recreated name to report once, including the duplicate path');
 }
@@ -472,7 +472,7 @@ test('a stranded delivered file REPLACED by a new message routes the new payload
   //    remembers this exact file by fingerprint.
   const file = path.join(outbox, 'reused-name.json');
   fs.writeFileSync(file, JSON.stringify({ to: 'god-1', act: 'inform', subject: 'the first message' }));
-  assert.equal(hive.routeOnce(), 1, 'the first message must be delivered before it can be stranded');
+  assert.equal(await hive.routeOnce(), 1, 'the first message must be delivered before it can be stranded');
   assert.equal(hive.inbox('god-1').length, 1);
   assert.equal(fs.existsSync(file), true, 'a failed archive leaves the delivered source in place');
 
@@ -490,7 +490,7 @@ test('a stranded delivered file REPLACED by a new message routes the new payload
 
   // 3. .sent comes back. The new payload must be DELIVERED, not archived as the old one.
   fs.renameSync(heldSent, sent);
-  assert.equal(hive.routeOnce(), 1, 'the replacement is a NEW route, not an archive retry');
+  assert.equal(await hive.routeOnce(), 1, 'the replacement is a NEW route, not an archive retry');
   assert.equal(hive.inbox('god-1').length, 2, 'the second message must REACH the recipient');
   assert.equal(hive.inbox('god-1')[1].subject, 'the SECOND message, same filename',
     'the payload delivered must be the replacement, not a re-send of the first');

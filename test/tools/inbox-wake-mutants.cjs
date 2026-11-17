@@ -92,8 +92,8 @@ const MUTANTS = [
     '      return false;\n    }\n    // FALSEACTIVE-STALL-2.'],
   // ── the router and the control edges ──
   ['w the delivery edge fires before the durable write', HIVE,
-    "    this.atomicWriteJson(file, msg);\n",
-    "    try { this.deliveryObserver?.({ agentId: toId, messageId: msg.id }); } catch { /* */ }\n    this.atomicWriteJson(file, msg);\n"],
+    "    yield { file, msg };\n",
+    "    try { this.deliveryObserver?.({ agentId: toId, messageId: msg.id }); } catch { /* */ }\n    yield { file, msg };\n"],
   ['w a watch hint no longer schedules a scan', HIVE,
     '        const w = this.routerRuntime.watch(dir, () => this.scheduleRouteOnce(dir));',
     '        const w = this.routerRuntime.watch(dir, () => {});'],

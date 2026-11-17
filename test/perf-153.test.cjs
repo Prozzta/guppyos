@@ -324,7 +324,7 @@ test('NO-GIT: a new hive, agents, mail (send + outbox routing), tasks, role, ren
     for (let i = 0; i < 5; i++) hive.send({ to: 'b2', act: 'inform', subject: `m${i}`, body: 'hi' }, 'a1');
     // an agent-written outbox message, routed the way the router does it
     fs.writeFileSync(path.join(home, 'hive', 'agents', 'a1', 'outbox', 'x.json'), JSON.stringify({ id: 'x', to: 'b2', act: 'inform', subject: 's', body: 'b', from: 'a1' }));
-    hive.routeOnce();
+    await hive.routeOnce();
     hive.writeTasks([{ id: 't1', title: 'T', status: 'todo', dependsOn: [], priority: 3, createdAt: new Date().toISOString() }]);
     hive.patchAgentRole('a1', 'builder');
     hive.renameAgent('a1', 'Alpha');
