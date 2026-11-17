@@ -126,6 +126,48 @@ export function saveRegistry(hiveRoot: string, reg: KeyRegistry): void {
   noteSyncWrite(p, text);   // LAG-SYNC-WRITES-107: a write-behind save in flight gives way to this one
 }
 
+/**
+ * LAG-SYNC-FS-TAIL-108: `JSON.stringify(reg, null, 2) + '\n'` (saveRegistry's text) byte for byte, as pieces
+ * of about `size` chars. The write-behind save writes them one per turn, so a registry of several MB never
+ * holds the main thread for one whole stringify. The registry is taken as it is NOW: the key list and every
+ * other top-level value are read before this returns, so a key added to `reg` while the pieces are being
+ * written is not in this text (it goes out with the next save), and the text is never torn. An entry is
+ * never changed in place (commit puts the object checkKey made).
+ */
+export function registryTextChunks(reg: KeyRegistry, size = 64 * 1024): Iterable<string> {
+  const keys = reg.keys as unknown;
+  if (!keys || typeof keys !== 'object' || Array.isArray(keys) || typeof (keys as { toJSON?: unknown }).toJSON === 'function' || typeof (reg as { toJSON?: unknown }).toJSON === 'function') {
+    return [JSON.stringify(reg, null, 2) + '\n'];
+  }
+  const entries = Object.entries(keys as Record<string, unknown>);
+  const parts: Array<string | null> = [];   // null: the keys go here
+  let first = true;
+  for (const name of Object.keys(reg)) {
+    const open = `${first ? '{\n  ' : ',\n  '}${JSON.stringify(name)}: `;
+    if (name === 'keys') { parts.push(open, null); first = false; continue; }
+    const s = JSON.stringify((reg as unknown as Record<string, unknown>)[name], null, 2) as string | undefined;
+    if (s === undefined) continue;
+    parts.push(open + s.replace(/\n/g, '\n  '));
+    first = false;
+  }
+  return (function* (): Generator<string, void, undefined> {
+    let buf = '';
+    for (const part of parts) {
+      if (part !== null) { buf += part; continue; }
+      let firstEntry = true;
+      for (const [k, e] of entries) {
+        const s = JSON.stringify(e, null, 2) as string | undefined;
+        if (s === undefined) continue;
+        buf += `${firstEntry ? '{\n    ' : ',\n    '}${JSON.stringify(k)}: ${s.replace(/\n/g, '\n    ')}`;
+        firstEntry = false;
+        if (buf.length >= size) { yield buf; buf = ''; }
+      }
+      buf += firstEntry ? '{}' : '\n  }';
+    }
+    yield `${buf}${first ? '{}' : '\n}'}\n`;
+  })();
+}
+
 /** STARTUP-FREEZE-104 A9 (Jim's 10x gate of 5b4db994): how long added keys wait to be saved together. */
 export const REGISTRY_SAVE_MS = 1_000;
 
@@ -261,14 +303,16 @@ export class KeyRegistryWriter {
    * LAG-SYNC-WRITES-107: the timer's save, off the main thread (tmp + rename, as flush). The keys stay held
    * until the rename has landed, so readers add them meanwhile. A flush() during the write wins (the write
    * gives way); another writer's change to the file withdraws it and the next timer saves on top of that.
+   * LAG-SYNC-FS-TAIL-108: the text is made and written in pieces (registryTextChunks), one per turn. It is
+   * the registry as it is when the save starts; a key acked during the write stays unsaved and re-arms.
    */
   private flushBehind(): void {
     if (this.unsaved.size === 0) { pendingWrites.delete(this.path); return; }
     if (this.writing) return;   // the write in flight re-arms when it ends
     if (writeInFlight(this.path)) { this.flush(); return; }
     const snap = new Map(this.unsaved);
-    let text: string;
-    try { text = JSON.stringify(this.working(), null, 2) + '\n'; }
+    let text: Iterable<string>;
+    try { text = registryTextChunks(this.working()); }
     catch (e) { this.dropFailed(snap, e); return; }
     const before = this.seen;
     const done = (failure: { error: unknown } | null, published: boolean): void => {

@@ -15,6 +15,14 @@ All notable changes to this project are documented here. The format is based on
   happens with no native module loaded at all, so it is in Electron, not in our modules. The check
   now quits normally, which does not crash. Guppy's own quit was tested the same way and was not
   affected. (ELECTRON-EXIT-AV)
+- **Two more short freezes while mail is being delivered are gone.** After delivering a message,
+  Guppy moved the sender's file into its sent folder and waited for the disk before doing anything
+  else; one such move was seen holding the app for half a second. And when it saved the list of
+  memory keys, it built the whole file's text in one go, which takes longer as the list grows.
+  The move now happens in the background while the delivery pass waits for it (the same for a
+  repeated message that is set aside and for a rejected file), and the key list
+  is built and written in small pieces. A delivered message is still never delivered twice or
+  lost, and the saved key list is the same file, byte for byte. (LAG-SYNC-FS-TAIL-108)
 - **A large mail backlog no longer freezes the app for up to a second at a time.** When an agent
   had many messages waiting, Guppy decided which of them could wait quietly by reading through
   whole mail records again for every single message, on every check. It now reads each mail

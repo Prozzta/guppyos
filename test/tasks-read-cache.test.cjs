@@ -46,6 +46,32 @@ function io(file, fn) {
   try { n.result = fn(); } finally { fs.readFileSync = readFileSync; fs.statSync = statSync; }
   return n;
 }
+
+/**
+ * The folder watcher hive.ts starts is the real fs.watch, tapped: `delivery(file, fn)` resolves with
+ * what fn returns, once fn has run inside the first delivery of an event for `file`. fn gets
+ * `deliver`, which hands the event to hive.ts. The test arms it and edits the file in one
+ * synchronous step, so the file is the edit by the time any event is delivered, however late the
+ * OS delivers under load. No sleep, no poll.
+ */
+const realWatch = fs.watch;
+let onDelivery = null;
+fs.watch = function (dir, options, listener) {
+  return realWatch.call(this, dir, options, (event, name) => {
+    const tap = onDelivery;
+    if (!tap || path.join(String(dir), String(name)) !== tap.file) return listener(event, name);
+    onDelivery = null;
+    try { tap.resolve(tap.fn(() => listener(event, name))); } catch (error) { tap.reject(error); }
+  });
+};
+const delivery = (file, fn) => new Promise((resolve, reject) => { onDelivery = { file, fn, resolve, reject }; });
+test.after(() => { fs.watch = realWatch; });
+/** The off-main refresh a watch event starts for `file`, in flight. It settles when the cache holds the disk. */
+const refreshOf = (hive, file) => {
+  const flight = hive.authorityRefreshes.get(file);
+  assert.ok(flight, 'the event started a refresh of the file, off the main thread');
+  return flight;
+};
 const ids = (ledger) => ledger.tasks.map((c) => c.id);
 
 test('1000 reads inside the window reach disk once, return one deep-frozen object, and never stat again', (t) => {
@@ -121,13 +147,20 @@ test('an external edit is invisible inside the window and picked up by the slow 
 });
 
 test('fs.watch marks the cache dirty: an external edit is seen before the window ends', async (t) => {
-  const { hive, handEdit } = floor(t);
+  const { hive, file, handEdit } = floor(t);
   assert.deepEqual(ids(hive.tasks()), ['T1']);
-  await new Promise((r) => setTimeout(r, 100));
-  handEdit([card('T6')]);
-  const until = Date.now() + 5000;
-  while (ids(hive.tasks())[0] !== 'T6' && Date.now() < until) await new Promise((r) => setTimeout(r, 25));
-  assert.deepEqual(ids(hive.tasks()), ['T6'], 'the frozen test clock never reached the window: only the watcher can have done it');
+  const refreshed = delivery(file, (deliver) => {
+    const before = io(file, () => hive.tasks());
+    assert.deepEqual([before.stats, ids(before.result)], [0, ['T1']], 'until the event is delivered the cached ledger is served');
+    deliver();
+    return refreshOf(hive, file);
+  });
+  // A different size: the fixture's +60 s wall marks every key proven, so a same-size edit inside the
+  // first write's timestamp tick keeps the key and is rightly unseen (the racy rule is defeated here).
+  handEdit([card('T6'), card('T7')]);
+  await refreshed;
+  const after = io(file, () => hive.tasks());
+  assert.deepEqual([after.reads, after.stats, ids(after.result)], [0, 0, ['T6', 'T7']], 'the frozen test clock never reached the window: only the watcher can have done it, and the reader paid no disk call');
 });
 
 test('registry and tasks are cached separately: a registry write leaves the tasks cache alone', (t) => {
