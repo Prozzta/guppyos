@@ -8,6 +8,12 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **The claims drill's key reader no longer crashes now and then as it exits.** The drill reads its
+  key through a small windowless Electron app that called `app.exit()` straight from Electron's
+  "ready" callback, before Electron had finished starting up. About once in a hundred fast runs on a
+  busy machine, Electron then crashed in its own shutdown (0xC0000005 or 0xFFFF7002), which
+  replaced the reader's real exit code. It now exits one event-loop turn later, once startup is
+  done, with the same exit code (0, 4 or 5). (E45-EXIT-KEYUNWRAP-108)
 - **A large mail backlog no longer freezes the app for up to a second at a time.** When an agent
   had many messages waiting, Guppy decided which of them could wait quietly by reading through
   whole mail records again for every single message, on every check. It now reads each mail
