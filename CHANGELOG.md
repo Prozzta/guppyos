@@ -13,6 +13,14 @@ All notable changes to this project are documented here. The format is based on
   whole mail records again for every single message, on every check. It now reads each mail
   record once per check, however many messages are waiting. Which messages wake an agent and
   which wait is unchanged. (LAG-QUIET-PENDING-108)
+- **A damaged memory ledger no longer freezes the app about once a minute.** When an agent's
+  memory ledger failed its integrity check (for example, it no longer reached the last point
+  Guppy had recorded for it), Guppy read and checked the whole ledger again every time anything
+  asked about it, including its own once-a-minute check. On a large ledger that held the app for
+  up to a second and a half each time. Guppy now checks a damaged ledger in full once and keeps
+  that result for as long as the ledger files, the recorded point and the key are all unchanged.
+  Any change to any of them is a full check again. The ledger stays read-only and the alert is
+  unchanged; a healthy ledger was already handled this way. (LAG-CLAIMS-READ-108)
 - **A terminal closed right after it starts always reports that it ended.** On a busy machine, a
   terminal killed before it had printed anything could be left with no end reported at all, so
   Guppy kept waiting for it until a time limit ran out. The terminal library closes its data pipe

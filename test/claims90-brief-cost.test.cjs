@@ -4,7 +4,9 @@ require('./tools/own-job.cjs');
  * CLAIMS-90 brief cost (god 986e89): a search brief must fit the warm search deadline (SEARCH_DEADLINE_WARM_MS, 500 ms since the Human's ruling of 2026-10-28; 250 ms when the card was cut). It re-read and
  * re-verified every ledger and re-derived every agent per ask (~230 ms raw on the step-3 hive, more with MACs).
  *  - STORE: readLedgerCached returns readLedger's last chain-'ok' result while the segment files are unchanged;
- *    never a record the MAC check did not pass, and a broken read is never kept.
+ *    never a record the MAC check did not pass, and a broken read is never kept as a verified one.
+ *  - LAG-CLAIMS-READ-108 (god 88a9b0): a full read's BROKEN verdict answers the next asks only while the segments,
+ *    the anchor main holds and the key are all what that read was decided from; anything else is a full read.
  *  - WIRING: while no input changed, a brief touches no ledger record (getDeps, get's index and the target index
  *    are kept); any changed input (an agent's records, tasks) gives the fresh answer.
  * Timing over a real hive copy: test/tools/claims90-brief-bench.cjs.
@@ -223,6 +225,160 @@ test('STORE: a line chained on the head but written into an older segment is nev
   r.mac = recordMac(g.key, r);
   fs.appendFileSync(older, JSON.stringify(r) + '\n');
   assert.notEqual(g.store.readLedgerCached('andy').chain, 'ok');
+});
+
+// LAG-CLAIMS-READ-108 (god 88a9b0): a broken ledger is verified in full once, not on every ask.
+/** A ledger of `n` hand-signed lines read by a fresh store (no unflushed anchor), with a count of full reads. */
+async function cutStore(n = 3, keys) {
+  const root = hive(); const ud = `${root}-ud`;
+  const key = randomBytes(32);
+  const provider = keys ?? new SandboxKeyProvider(key);
+  let t = Date.parse('2026-10-27T10:00:00Z');
+  const anchors = new FileHeadAnchorStore(path.join(ud, HEAD_ANCHOR_FILE));
+  const alerts = [];
+  const mk = () => { const st = new ClaimStore({ hiveRoot: root, keys: provider, keyRecord: new FileLedgerKeyRecord(path.join(ud, KEY_RECORD_FILE)), headAnchor: anchors, now: () => new Date(t += 1000), alert: (row) => alerts.push(row) }); STORES.push(st); return st; };
+  const w = mk();
+  for (let i = 0; i < n; i++) await ok(w.appendRecord('andy', note(`fact ${i}`), 'endpoint'));
+  w.close();
+  const store = mk();
+  const full = store.readInner.bind(store);
+  const counts = { full: 0 };
+  store.readInner = (...a) => { counts.full++; return full(...a); };
+  const dir = path.join(root, 'agents', 'andy', 'memory', 'claims');
+  const seg = () => path.join(dir, fs.readdirSync(dir).sort().pop());
+  const good = anchors.get(root, 'andy');
+  const cut = (c = 'f') => anchors.set(root, 'andy', { head: c.repeat(64), lastId: 'c-000000000000' });
+  return { root, store, counts, anchors, seg, good, cut, alerts, provider, mk };
+}
+const HEAD_CUT = { brokenAt: 'head-anchor', reason: 'prev' };
+
+test('LAG-CLAIMS-READ-108: a ledger cut at its head anchor is verified in full once; later asks and the periodic anchor check answer the same break without a full read (MUTANT: a broken verdict never kept)', async () => {
+  const g = await cutStore();
+  g.cut();
+  const a = g.store.readLedgerCached('andy');
+  assert.deepEqual(a.chain, HEAD_CUT);
+  assert.equal(g.counts.full, 1);
+  for (let i = 0; i < 5; i++) assert.equal(g.store.readLedgerCached('andy'), a, 'the same verdict');
+  assert.deepEqual(g.store.checkAnchored(), ['andy'], 'the periodic check still reports the agent broken');
+  assert.equal(g.counts.full, 1, 'no full read while nothing changed');
+  assert.equal(g.alerts.filter((r) => r.agentId === 'andy').length, 1, 'one alert, as before');
+  assert.equal(g.store.verifiedJobFor('andy', a), null, 'a broken read is never a verified read');
+  assert.equal(g.store.readLedger('andy').chain.brokenAt, 'head-anchor', 'the integrity read is always a full one');
+  assert.equal(g.counts.full, 2);
+  const ack = await g.store.appendRecord('andy', note('refused'), 'endpoint');
+  assert.equal(ack.ok, false, 'the ledger stays read-only');
+});
+
+test('LAG-CLAIMS-READ-108: any change to the anchor is a full read: mended is ok at once, a different cut is judged again, a pending purge re-anchor is never served from the kept verdict (MUTANT: the anchor left out of the check)', async () => {
+  const g = await cutStore();
+  g.cut();
+  assert.deepEqual(g.store.readLedgerCached('andy').chain, HEAD_CUT);
+  g.cut('e');
+  assert.deepEqual(g.store.readLedgerCached('andy').chain, HEAD_CUT);
+  assert.equal(g.counts.full, 2, 'another anchor: verified again');
+  g.anchors.set(g.root, 'andy', { head: 'e'.repeat(64), lastId: 'c-000000000001' });
+  g.store.readLedgerCached('andy');
+  assert.equal(g.counts.full, 3, 'the anchored id is part of the verdict (MUTANT: only the head compared)');
+  g.anchors.set(g.root, 'andy', { head: 'e'.repeat(64), lastId: 'c-000000000001', pending: { head: 'a'.repeat(64), lastId: 'c-000000000000' } });
+  g.store.readLedgerCached('andy');
+  g.store.readLedgerCached('andy');
+  assert.equal(g.counts.full, 5, 'a pending re-anchor: every ask is a full read (MUTANT: pending ignored)');
+  g.anchors.set(g.root, 'andy', g.good);
+  assert.equal(g.store.readLedgerCached('andy').chain, 'ok', 'mended: ok on the next ask');
+  assert.equal(g.counts.full, 6);
+});
+
+test('LAG-CLAIMS-READ-108: any change to the segments is a full read: an edit in place, an appended line, a new segment, a removed ledger (MUTANT: the kept verdict served past a file change)', async () => {
+  const g = await cutStore();
+  g.cut();
+  const a = g.store.readLedgerCached('andy');
+  const seg = g.seg();
+  const whole = fs.readFileSync(seg);
+  const st = fs.statSync(seg);
+  fs.writeFileSync(seg, whole.toString('utf8').replace('fact 2', 'fact X'));
+  fs.utimesSync(seg, st.atime, st.mtime);
+  assert.equal(fs.statSync(seg).size, st.size);
+  const b = g.store.readLedgerCached('andy');
+  assert.notEqual(b, a, 'same size and mtime, another tail: read again');
+  assert.equal(g.counts.full, 2);
+  fs.writeFileSync(seg, whole);
+  g.store.readLedgerCached('andy');
+  assert.equal(g.counts.full, 3);
+  fs.appendFileSync(seg, whole.toString('utf8').trimEnd().split('\n').pop() + '\n');
+  const c = g.store.readLedgerCached('andy');
+  assert.equal(g.counts.full, 4, 'bytes after the kept ones: read again (MUTANT: a grown file taken as unchanged)');
+  assert.equal(c.records.length, a.records.length + 1);
+  fs.writeFileSync(seg, whole);
+  g.store.readLedgerCached('andy');
+  assert.equal(g.counts.full, 5, 'cut back: read again');
+  fs.writeFileSync(path.join(path.dirname(seg), '2099-01.jsonl'), '');
+  g.store.readLedgerCached('andy');
+  assert.equal(g.counts.full, 6, 'a new segment file, even an empty one (MUTANT: only the kept files compared)');
+  fs.rmSync(path.dirname(seg), { recursive: true, force: true });
+  const gone = g.store.readLedgerCached('andy');
+  assert.equal(gone.records.length, 0);
+  assert.equal(g.counts.full, 7);
+  g.store.readLedgerCached('andy');
+  assert.equal(g.counts.full, 8, 'a missing ledger is never a kept verdict');
+});
+
+test('LAG-CLAIMS-READ-108: a key-missing verdict is kept only while the key stays missing; the key back is a full read and ok (MUTANT: the key left out of the check)', async () => {
+  const provider = new SandboxKeyProvider();
+  const g = await cutStore(3, provider);
+  const loaded = provider.load();
+  provider.drop();
+  const a = g.store.readLedgerCached('andy');
+  assert.equal(a.chain.reason, 'key-missing');
+  assert.equal(g.store.readLedgerCached('andy'), a);
+  assert.equal(g.counts.full, 1, 'still no key: the same verdict');
+  provider.key = loaded.key;
+  assert.equal(g.store.readLedgerCached('andy').chain, 'ok', 'the key is back: verified in full');
+  assert.equal(g.counts.full, 2);
+});
+
+test('LAG-CLAIMS-READ-108: a forged line (MAC break) is verified once and stays reported; a queued write drops the kept verdict; the Human\'s anchor reset is judged afresh (MUTANT: a write keeps the verdict)', async () => {
+  const g = await cutStore();
+  const seg = g.seg();
+  const whole = fs.readFileSync(seg);
+  fs.writeFileSync(seg, whole.toString('utf8').replace('fact 1', 'fact Y'));
+  const a = g.store.readLedgerCached('andy');
+  assert.equal(a.chain.reason, 'mac');
+  assert.equal(g.store.readLedgerCached('andy'), a);
+  assert.equal(g.counts.full, 1);
+  const ack = await g.store.appendRecord('andy', note('refused'), 'endpoint');
+  assert.equal(ack.ok, false);
+  const fulls = g.counts.full;
+  assert.equal(g.store.readLedgerCached('andy').chain.reason, 'mac');
+  assert.equal(g.counts.full, fulls + 1, 'after a queued write the next ask is a full read');
+  fs.writeFileSync(seg, whole);
+  g.cut();
+  assert.deepEqual(g.store.readLedgerCached('andy').chain, HEAD_CUT);
+  assert.equal(await g.store.resetAnchor('andy', true), true);
+  assert.equal(g.store.readLedgerCached('andy').chain, 'ok', 'after the reset the ledger is read and verified again');
+});
+
+test('LAG-CLAIMS-READ-108: a torn read is never kept, and warm() keeps a broken verdict so the first ask after start is not a full read on main (MUTANT: warm drops the broken verdict)', async () => {
+  const g = await cutStore();
+  g.cut();
+  const seg = g.seg();
+  const whole = fs.readFileSync(seg);
+  fs.appendFileSync(seg, '{"t":"claim","id":"c-half');
+  assert.ok(g.store.readLedgerCached('andy').torn);
+  fs.writeFileSync(seg, whole);
+  const fulls = g.counts.full;
+  assert.deepEqual(g.store.readLedgerCached('andy').chain, HEAD_CUT);
+  assert.equal(g.counts.full, fulls + 1, 'the torn read was not served again');
+  const s2 = g.mk();
+  let n = 0; const full = s2.readInner.bind(s2); s2.readInner = (...a) => { n++; return full(...a); };
+  const w = await s2.warm(['andy']);
+  assert.deepEqual(w.warmed, ['andy']);
+  assert.deepEqual(s2.readLedgerCached('andy').chain, HEAD_CUT);
+  assert.deepEqual(s2.checkAnchored(), ['andy']);
+  assert.equal(n, 0, 'the warm verified it off the caller\'s turn; no synchronous full read after');
+  assert.deepEqual((await s2.warm(['andy'])).skipped, ['andy'], 'and a second warm does not verify it again');
+  g.anchors.set(g.root, 'andy', g.good);
+  assert.equal(s2.readLedgerCached('andy').chain, 'ok');
+  assert.equal(n, 1);
 });
 
 // Wiring fixtures: a stub store whose records arrays the test controls (the same array while "unchanged").
