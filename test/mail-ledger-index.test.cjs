@@ -84,7 +84,9 @@ function randomStep(doc, rand, now, n) {
   const msg = () => {
     const r = rand();
     // Some message ids are another message's sender_id, so the exact id and the alias both match.
-    const id = r < 0.1 ? SENDERS[Math.floor(rand() * SENDERS.length)] : `m${n}`;
+    // Some are all digits ("17"; MAIL_ID_RE accepts them): integer-like keys sort first in key
+    // order, so an index that appended them would order a sender's ids wrongly (Jim S1).
+    const id = r < 0.1 ? SENDERS[Math.floor(rand() * SENDERS.length)] : r < 0.2 ? String(n) : `m${n}`;
     return {
       id, from: FROMS[Math.floor(rand() * FROMS.length)], act: rand() < 0.4 ? 'request' : 'inform',
       subject: 'subj', body: BODIES[Math.floor(rand() * BODIES.length)],
