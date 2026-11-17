@@ -467,8 +467,8 @@ test('ledger: the coalesced save writes <agent>.json with no synchronous write (
     await until(() => diskIds(root).includes('m-1'), 'the save');
     await WB.settleWrites(10_000);
   }));
-  // mkdirSync of state/mail is asked once per hive, before the first save; the file write is not synchronous
-  assert.deepEqual(calls.filter((c) => !c.startsWith('mkdirSync:')), [], 'no synchronous file write');
+  // LAG-ROUTE-WRITES-108: the state/mail mkdir runs in the flight too, so nothing here is synchronous
+  assert.deepEqual(calls, [], 'no synchronous file write or mkdir');
   assert.ok(renames.some((r) => /^jim-1\.json\.tmp-[0-9a-f]{6}$/.test(r[0]) && r[1] === 'jim-1.json'), `tmp + rename: ${JSON.stringify(renames)}`);
   assert.deepEqual(tmpsIn(path.join(root, 'state', 'mail')), []);
   ml.dispose();
@@ -634,6 +634,124 @@ const link = (id, card) => ({ v: 1, mailId: id, cards: [card], method: 'field', 
 const row = (id, card, extra = {}) => ({ v: 1, id, card, cards: [card], cardFrom: 'field', from: 'god-1', to: AGENT, act: 'inform', subject: `s-${id}`, at: '2026-11-17T10:00:00.000Z', ...extra });
 const cardsDir = (root) => path.join(root, 'state', 'mail-cards');
 const lines = (p) => { try { return fs.readFileSync(p, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
+
+// ───────────────────────────────────────────────────────── LAG-ROUTE-WRITES-108: the ledger save off main
+// Jim's undrained jail (god's ledger 3.5 MB, 4209 entries): flushBehind held main for a whole
+// JSON.stringify and its utf8 encode, plus existsSync and mkdirSync. Now main only prunes and takes the
+// snapshot; the text is made and written in pieces, one per turn, and the folder checks run in the flight.
+
+test('LAG-ROUTE-WRITES-108: ledgerTextChunks is JSON.stringify(doc, null, 2) byte for byte, at every piece size, across transitions', () => {
+  let seed = 108;
+  const rnd = (n) => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; };
+  const sizes = [1, 97, 4096, 64 * 1024];
+  const same = (doc, what) => {
+    const want = JSON.stringify(doc, null, 2);
+    for (const size of sizes) assert.equal([...L.ledgerTextChunks(doc, size)].join(''), want, `${what} (pieces of ${size})`);
+  };
+  same(L.emptyLedger(AGENT), 'an empty ledger');
+  same({ ...L.emptyLedger(AGENT), lastActivityAt: undefined, extra: { a: [1, { b: 'x\ny' }], c: [] } }, 'undefined, nested and odd top-level values');
+  let doc = L.emptyLedger(AGENT);
+  let now = 1_700_000_000_000;
+  const ids = [];
+  const some = () => ids.filter(() => rnd(3) === 0);
+  for (let step = 0; step < 400; step++) {
+    now += 1 + rnd(5_000);
+    const op = rnd(8);
+    let next;
+    if (op < 3 || !ids.length) {
+      const id = `m-${step}`;
+      ids.push(id);
+      next = L.applyDelivered(doc, msg(id, { subject: `s "${step}" é中\n\t\\`, act: ['inform', 'request', 'query'][rnd(3)], supersedes: rnd(4) ? undefined : ['a', 'b'], card: rnd(2) ? 'CARD-1' : undefined }), now);
+    } else if (op === 3) next = L.applyClaimSurfacing(doc, some(), `e-${step}`, 'UserPromptSubmit', now);
+    else if (op === 4) next = L.applyConfirmSurfaced(doc, some(), `e-${step - 1}`, 'evidence', now);
+    else if (op === 5) next = L.applyMarkActed(doc, some(), `e-${step - 2}`, now);
+    else if (op === 6) next = L.applySetAside(doc, some(), rnd(2) === 0, now);
+    else next = L.applyPrune(doc, now, rnd(2) ? 60_000 : 0);
+    doc = next.doc;
+    same(doc, `after step ${step} (op ${op})`);   // later saves reuse the entry texts the earlier ones made
+  }
+  assert.ok(Object.keys(doc.entries).length > 20, 'the walk built a real ledger');
+  same(JSON.parse(JSON.stringify(doc)), 'a fresh copy (no entry text kept yet)');
+});
+
+test('LAG-ROUTE-WRITES-108: the save writes a large ledger in pieces, and main runs between them', async () => {
+  const root = ledgerHive();
+  const ml = mkLedger(root);
+  ml.ledger(AGENT);
+  const pieces = [];
+  let turns = 0;
+  let spin = true;
+  const tick = () => { turns++; if (spin) setImmediate(tick); };
+  setImmediate(tick);
+  try {
+    await withAsync('writeFile', (args, real) => {
+      if (!String(args[0]).includes(`${AGENT}.json.tmp-`)) return real();
+      assert.equal(typeof args[1], 'object', 'the ledger is not handed to writeFile as one string');
+      const it = args[1];
+      const watched = (function* () { for (const s of it) { pieces.push({ len: s.length, turn: turns }); yield s; } })();
+      return real(args[0], watched, ...args.slice(2));
+    }, async () => {
+      for (let i = 0; i < 300; i++) ml.markDelivered(AGENT, msg(`m-${i}`, { body: 'x'.repeat(10), subject: 'y'.repeat(150) }));
+      await until(() => diskIds(root).length === 300, 'the save of 300 entries');
+      await WB.settleWrites(10_000);
+    });
+  } finally { spin = false; }
+  const text = fs.readFileSync(ledgerPath(root), 'utf8');
+  assert.equal(text, JSON.stringify(ml.ledger(AGENT), null, 2), 'the file is the synchronous text, byte for byte');
+  assert.ok(text.length > 3 * 64 * 1024, `fixture: a ledger of several pieces (${text.length} chars)`);
+  assert.ok(pieces.length >= 3, `written in pieces (${pieces.length})`);
+  assert.ok(pieces.every((p) => p.len < 64 * 1024 + 4096), `no piece much over 64 KiB (${pieces.map((p) => p.len)})`);
+  for (let i = 1; i < pieces.length; i++) assert.ok(pieces[i].turn > pieces[i - 1].turn, `main ran between piece ${i - 1} and piece ${i}`);
+  ml.dispose();
+});
+
+test('LAG-ROUTE-WRITES-108: a hive removed while the save checks its folders is never re-created, and the ledger stops trying', async () => {
+  const root = ledgerHive();
+  const logs = [];
+  const ml = mkLedger(root, logs);
+  ml.ledger(AGENT);
+  const g = gate();
+  const opts = [];
+  await withAsync('mkdir', async (args, real) => { opts.push(args[1]); await g.wait(); return real(); }, async () => {
+    const { calls } = await syncWrites(root, async () => {
+      ml.markDelivered(AGENT, msg('m-1'));
+      await until(() => g.reached, 'the save\'s folder check');
+    });
+    assert.deepEqual(calls, [], 'not even the folder check is synchronous');
+    fs.rmSync(root, { recursive: true, force: true });
+    g.open();
+    await WB.settleWrites(10_000);
+  });
+  assert.equal(fs.existsSync(root), false, 'the hive root was not re-created');
+  assert.ok(opts.every((o) => !(o && o.recursive)), `no recursive mkdir from the timer (${JSON.stringify(opts)})`);
+  assert.deepEqual(logs.filter((r) => r.kind === 'mail-ledger-write-failed'), [], 'a removed hive is not a failed write');
+  const before = opts.length;
+  await new Promise((r) => setTimeout(r, 50));   // a timer re-armed by mistake would ask again within this
+  assert.equal(opts.length, before, 'the ledger stopped saving into the removed hive');
+  ml.dispose();
+});
+
+test('LAG-ROUTE-WRITES-108: flushAll during the save\'s folder check wins; the save never lands', async () => {
+  const root = ledgerHive();
+  const ml = mkLedger(root);
+  ml.ledger(AGENT);
+  const g = gate();
+  let wrote = 0;
+  await withAsync('writeFile', (args, real) => { if (String(args[0]).includes(`${AGENT}.json.tmp-`)) wrote++; return real(); }, () =>
+    withAsync('mkdir', async (_a, real) => { await g.wait(); return real(); }, async () => {
+      ml.markDelivered(AGENT, msg('m-1'));
+      await until(() => g.reached, 'the save\'s folder check');
+      ml.markDelivered(AGENT, msg('m-2'));
+      ml.flushAll();
+      assert.deepEqual(diskIds(root), ['m-1', 'm-2'], 'on disk when the flush returns');
+      g.open();
+      await WB.settleWrites(10_000);
+    }));
+  assert.equal(wrote, 0, 'the save gave way before writing its tmp');
+  assert.deepEqual(diskIds(root), ['m-1', 'm-2']);
+  assert.deepEqual(tmpsIn(path.join(root, 'state', 'mail')), []);
+  ml.dispose();
+});
 
 test('mail-cards: record() appends with no synchronous write, and the record is known at once', async () => {
   const root = dirOf('mc');
@@ -849,7 +967,9 @@ test('closeWrites: after it the ledger and the key registry save synchronously f
       ml.claimSurfacing(AGENT, ['m-c'], 'turn-1', 'UserPromptSubmit');
       await until(() => diskIds(root).includes('m-c'), 'the save after close');
     });
-    assert.ok(calls.some((c) => c.startsWith('renameSync:')), `THE LEDGER TIMER SAVES SYNCHRONOUSLY ONCE CLOSED (${calls.join(', ')})`);
+    // REGISTRY-RENAME-EPERM-107 renames through the fs-handle addon (no fs.renameSync), so the
+    // synchronous save shows as its synchronous tmp write.
+    assert.ok(calls.some((c) => /^writeFileSync:jim-1\.json\.tmp-[0-9a-f]{6}$/.test(c)), `THE LEDGER TIMER SAVES SYNCHRONOUSLY ONCE CLOSED (${calls.join(', ')})`);
   } finally { WB.enableWriteBehind(); ml.dispose(); }
   assert.match(codeOnly(readSource('src/main/claims/registry.ts')), /if \(fileWriteBehindOn\(\)\) this\.flushBehind\(\); else this\.flush\(\);/);
 });

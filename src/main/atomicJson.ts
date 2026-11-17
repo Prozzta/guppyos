@@ -109,8 +109,10 @@ export function atomicWriteJson(p: string, data: unknown): void {
  *  `commit` (UI-CRAWL fix, the capacity quit race) is asked just before the rename: false withdraws
  *  the write (the temp file is removed, nothing is published, the result is false) because a newer
  *  write, such as the sync one at will-quit, has already been published and must stay the last word.
- *  `onTmp` is told the temp file's path before anything is written (write-behind's quit path). */
-export async function atomicWriteTextAsync(p: string, text: string, commit?: () => boolean, onTmp?: (tmp: string) => void): Promise<boolean> {
+ *  `onTmp` is told the temp file's path before anything is written (write-behind's quit path).
+ *  LAG-ROUTE-WRITES-108: `text` may be an iterable of string pieces. Each piece is encoded and written
+ *  in its own turn, so a large file never holds the main thread for one whole-text encode. */
+export async function atomicWriteTextAsync(p: string, text: string | Iterable<string>, commit?: () => boolean, onTmp?: (tmp: string) => void): Promise<boolean> {
   const tmp = `${p}.tmp-${randomBytes(3).toString('hex')}`;
   onTmp?.(tmp);
   let last: unknown;
