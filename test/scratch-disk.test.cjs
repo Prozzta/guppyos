@@ -40,11 +40,26 @@ test('reap policy is fail-closed: dirty, unpushed, live and inbound links all wi
 
 test('registry round trip rejects malformed rows and preserves owner/card/timestamps', () => {
   const hive = path.join(jail, 'hive');
-  const state = { v: 1, records: [{ path: 'C:/work/a', owner: 'dwight', card: 'CARD-1', createdAt: 11, touchedAt: 12 }] };
+  const state = { v: 1, records: [{ path: 'C:/work/a', owner: 'dwight', card: 'CARD-1', kind: 'worktree', createdAt: 11, touchedAt: 12 }] };
   scratch.writeScratchState(hive, state);
   assert.deepEqual(scratch.readScratchState(hive), state);
   fs.writeFileSync(scratch.stateFile(hive), JSON.stringify({ v: 1, records: [{ nope: true }] }));
   assert.deepEqual(scratch.readScratchState(hive), { v: 1, records: [] });
+});
+
+test('manager authenticates owner, refuses a common repo, and only reaps a registered idle jail', async () => {
+  const base = path.join(jail, 'managed'); const hive = path.join(base, 'hive'); const work = path.join(base, '_work');
+  const jailRoot = path.join(work, 'jail-a'); const common = path.join(work, 'common-repo');
+  fs.mkdirSync(jailRoot, { recursive: true }); fs.mkdirSync(path.join(common, '.git'), { recursive: true });
+  let clock = 100;
+  const manager = new scratch.ScratchDiskManager(() => hive, (card) => card === 'CARD-1', async () => [], undefined, () => clock);
+  assert.match(manager.register('dwight', common, 'CARD-1').line, /common repository/);
+  assert.equal(manager.register('dwight', jailRoot, 'CARD-1').ok, true);
+  assert.match(manager.register('jim', jailRoot, 'CARD-1').line, /another agent/);
+  clock += scratch.SCRATCH_IDLE_MS + 1;
+  const r = await manager.sweep();
+  assert.deepEqual(r.reaped, [path.resolve(jailRoot)]);
+  assert.equal(fs.existsSync(jailRoot), false);
 });
 
 test('install key changes for patch inputs and is stable for unchanged project inputs', () => {
@@ -71,5 +86,5 @@ test('inbound scan finds a scoped node_modules junction and never follows it for
 
 test('mutant pins: each never-reap guard and source-input key is present', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'scratchDisk.ts'), 'utf8');
-  for (const token of ['if (f.dirty)', 'if (!f.onOrigin)', 'if (f.live)', 'if (f.inboundLinks.length)', 'package-lock.json', 'package.json', 'const tools = join(project, \'tools\')']) assert.ok(src.includes(token), token);
+  for (const token of ['if (f.dirty)', 'if (!f.onOrigin)', 'if (f.live)', 'if (f.inboundLinks.length)', 'package-lock.json', 'package.json', 'const tools = join(project, \'tools\')', 'path-changed-or-missing']) assert.ok(src.includes(token), token);
 });

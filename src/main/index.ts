@@ -139,6 +139,7 @@ import { MirrorCostGuard, calibrationSample, mirrorOffNotice, mirrorOffWords } f
 import { ShadowDiff } from './termShadow';
 import { createScreenGate, screenGateSourceOf } from './screenGate';
 import { HeavyJobLock, heavyLimit, heavySlotFreeNotice, heavyWaitLapsedNotice, heavyUnlimitedNotice, probeProcesses, processImage } from './heavyJob';
+import { ScratchDiskManager } from './scratchDisk';
 import { HeavyJobs, approvesWithoutAsking, heavyCpuOptions } from './heavyCpu';
 import { tokenizeCommand } from '../shared/commandLine';
 import { heavyActivity, heavyFleetField, type HeavyLockView } from '../shared/activityView';
@@ -612,6 +613,8 @@ let mirrorGuard: MirrorCostGuard | null = null;
 let messageBox: MessageBox | null = null;
 /** GTC M4: the wake sender (built with the message box below); null only during module start-up. */
 let wakeSender: WakeSender | null = null;
+// Assigned once managed scratch is constructed below; keeps the digest's timer read-only.
+let scratchDiskUsageForDigest: () => { bytes: number; measuredAt: number } | null = () => null;
 /** ZT-I4: the floor digest (hive/floor-digest.md) and the decision-only wake of god. */
 const floorDigest = new FloorDigest({
   root: () => hive.root(),
@@ -631,6 +634,7 @@ const floorDigest = new FloorDigest({
   messageBox: () => (messageBox?.attentionItems() ?? []).map((m) => ({ ...m, name: agentDisplayName(m.agentId) })),
   // RULE-FIX-HOOK-NO-MODEL: model-invoking hooks in files Guppy does not own (warn only).
   modelHooks: () => hive.modelHookWarnings(),
+  scratchDisk: () => scratchDiskUsageForDigest(),
   // SCREEN-GUARD-ALERT-FLOOR-193: every live agent's pending mail, less the quiet mail still inside
   // its hold, then the stall. Deliberate is LIVE state only (paused/halted/auto-delivery paused, a
   // HITL prompt inside its re-arm window), never a past refusal's reason (Jim MUST 1).
@@ -2204,6 +2208,34 @@ hookServer.setLedgerHandler((agentId, body) => ledgerQueue(agentId, () => {
     closeAsk: (id, by, reason) => hive.closeAsk(agentId, id, by, reason)
   });
 }));
+// SCRATCH-DISK-REAP-108: only the broker-authenticated agent identity reaches the
+// manager; an argv cannot nominate an owner or another agent's root.
+const scratchDisk = new ScratchDiskManager(
+  () => hive.root(),
+  (card) => {
+    const tasks = hive.allTasks().tasks;
+    return Array.isArray(tasks) && tasks.some((t) => !!t && typeof t === 'object' && (t as { id?: unknown }).id === card && (t as { status?: unknown }).status === 'done');
+  },
+  probeProcesses,
+  (owner, card, path, reason) => hive.send({ to: owner, act: 'inform', subject: `Scratch retained: ${reason}`, body: `${path} was not reaped for ${card}: ${reason}. Push/clean it, then run scratch reap.` }, 'scratch-reaper')
+);
+scratchDiskUsageForDigest = () => scratchDisk.diskUsage();
+hookServer.setScratchHandler((agentId, body) => scratchDisk.command(agentId, body));
+let scratchReaperTimer: ReturnType<typeof setInterval> | null = null;
+function startScratchReaper(): void {
+  if (scratchReaperTimer) return;
+  const run = (): void => {
+    void scratchDisk.sweep().catch((e) => console.error('[scratch-reaper]', e));
+    void scratchDisk.refreshDiskUsage().catch((e) => console.error('[scratch-disk]', e));
+  };
+  run();
+  scratchReaperTimer = setInterval(run, 20 * 60_000);
+  scratchReaperTimer.unref?.();
+}
+function stopScratchReaper(): void {
+  if (scratchReaperTimer) clearInterval(scratchReaperTimer);
+  scratchReaperTimer = null;
+}
 // ZT-I2-CONDENSE (replaces the hidden Haiku condense): at each turn end, through the same per-agent
 // queue as the ledger, so a ledger memory note and the rollover never interleave.
 hookServer.setMemoryUpkeepListener((agentId) => { void ledgerQueue(agentId, () => hive.rolloverMemoryAtStop(agentId)); });
@@ -2226,6 +2258,7 @@ function ledgerMemoryClaim(agentId: string): LedgerDeps['memoryClaim'] {
 /** READS-181 A: the `ledger` command's script, shipped like memory-cli.cjs (extraResources). */
 const HEAVY_PRELOAD = join(app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'resources'), 'heavy-preload.cjs');
 const LEDGER_CLI = join(app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'resources'), 'ledger-cli.cjs');
+const SCRATCH_CLI = join(app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'resources'), 'scratch-cli.cjs');
 const CLAIMS_CLI = join(app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'resources'), 'claims-cli.cjs');
 // HEAVY-LOCK-RESERVATION-RELEASE: the `heavy` command (status; give up a reserved slot), shipped the same way.
 const HEAVY_CLI = join(app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'resources'), 'heavy-cli.cjs');
@@ -5615,6 +5648,8 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
       // MUNDER_LEDGER_URL the Claude spawn sets; elsewhere it says it is unavailable).
       const ledgerDir = hive.writeLedgerCommand(LEDGER_CLI);
       if (ledgerDir) opts.pathPrepend = [...(opts.pathPrepend ?? []), ledgerDir];
+      const scratchDir = hive.writeScratchCommand(SCRATCH_CLI);
+      if (scratchDir) opts.pathPrepend = [...(opts.pathPrepend ?? []), scratchDir];
       // TASKS-JSON-SPLIT: tasks-all (pass-sweep, old cards), tasks-revive, tasks-unsplit on every hive agent's PATH.
       const tasksDir = hive.writeTasksCommands(TASKS_CLI);
       if (tasksDir) opts.pathPrepend = [...(opts.pathPrepend ?? []), tasksDir];
@@ -7098,7 +7133,7 @@ function teardownAndQuit(): void {
   try { hive.stopLedgerGuard(); } catch (e) { console.error('[quit] stopLedgerGuard:', e); }
   try { readerWatchers.stopAll(); } catch (e) { console.error('[quit] stopReaderWatchers:', e); }
   try { boardMonitor.stop(); } catch (e) { console.error('[quit] boardMonitor.stop:', e); }
-  try { floorDigest.stop(); boardStatus.stop(); } catch (e) { console.error('[quit] floorDigest.stop:', e); }
+  try { floorDigest.stop(); boardStatus.stop(); stopScratchReaper(); } catch (e) { console.error('[quit] floorDigest.stop:', e); }
   try { hive.stopAgyStatusline(); } catch (e) { console.error('[quit] stopAgyStatusline:', e); }
   try { hookServer.stop(); } catch (e) { console.error('[quit] hookServer.stop:', e); }
   try { telemetry.stop(); } catch (e) { console.error('[quit] telemetry.stop:', e); }
@@ -7185,7 +7220,7 @@ ipcMain.handle('app:resetAll', async () => {
   try { hive.stopLedgerGuard(); } catch (e) { console.error('[reset] stopLedgerGuard:', e); }
   try { readerWatchers.stopAll(); } catch (e) { console.error('[reset] stopReaderWatchers:', e); }
   try { boardMonitor.stop(); } catch (e) { console.error('[reset] boardMonitor.stop:', e); }
-  try { floorDigest.stop(); boardStatus.stop(); } catch (e) { console.error('[reset] floorDigest.stop:', e); }
+  try { floorDigest.stop(); boardStatus.stop(); stopScratchReaper(); } catch (e) { console.error('[reset] floorDigest.stop:', e); }
   try { hive.stopAgyStatusline(); } catch (e) { console.error('[reset] stopAgyStatusline:', e); }
   try { hookServer.stop(); } catch (e) { console.error('[reset] hookServer.stop:', e); }
   try { telemetry.stop(); } catch (e) { console.error('[reset] telemetry.stop:', e); }
@@ -8863,6 +8898,7 @@ function bootstrapHiveServices(): void {
   boardLivenessUnsub?.();
   boardLivenessUnsub = agentLiveness.onLivenessChange(() => { try { boardMonitor.tick(); } catch (e) { console.error('[board-monitor]', e); } });
   try { floorDigest.start(); boardStatus.request(); } catch (e) { console.error('[hive] floorDigest.start:', e); }
+  startScratchReaper();
   startEphemeralWorkerWatcher(); // poll HIVE_ROOT/spawn-requests → ephemeral workers
   // Phase 2: the loopback secret broker. Bind it BEFORE workers spawn so each spawn can
   // be granted a capability token + the broker URL in its env. Loopback-only, idempotent.
