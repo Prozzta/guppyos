@@ -39,6 +39,12 @@ async function surface(rig, msg) {
   return { m, turn: rig.contexts(ID).find((c) => c.ids.includes(m.id)).turn };
 }
 const request = (rig) => surface(rig, { act: 'request', subject: 'three steps', body: 'step 1, step 2, step 3, then send done' });
+// The human-input wait is a time window (owedStop.ts OWED_STOP_HUMAN_QUIET_MS) measured at the Stop
+// decision. A key typed before the stop cue ages by the whole cue -> fake agent -> Stop hook path, which
+// under suite load outlasted the window (MAIL-RIG-OWED-STOP-TIMEOUT-108): the Stop was blocked and the
+// manual turn never ended. So the key is armed here and typed (real pty HUMAN write) at the decision.
+const humanInput = (rig) => ({ on: () => rig.call('humanTypeAtStop', { id: ID, text: '\x15' }), off: async () => {} });
+const HUMAN_QUIET_MS = Number(/OWED_STOP_HUMAN_QUIET_MS = ([\d_]+);/.exec(require('node:fs').readFileSync(require('node:path').join(__dirname, '../src/main/owedStop.ts'), 'utf8'))[1].replace(/_/g, ''));
 async function done(rig, reqId) {
   await cue(rig, { cue: 'reply', to: 'god-1', act: 'done', in_reply_to: reqId, subject: 'done', body: 'all three steps done' });
   await waitFor(async () => (await rig.entry(ID, reqId))?.repliedAt, { what: 'done routed' });
@@ -158,7 +164,7 @@ test('WAITS each suppression lets the Stop through with its own why; the setting
     ['picker', seam({ promptBlock: 'picker' })],
     ['exited', seam({ promptBlock: 'exited' })],
     ['draft', { on: () => rig.call('humanType', { id: ID, text: 'abc' }), off: () => rig.call('humanType', { id: ID, text: '\x15' }) }],
-    ['human-input', { on: () => rig.call('humanType', { id: ID, text: '\x15' }), off: async () => {} }],
+    ['human-input', humanInput(rig)],
     ['off', { on: () => rig.call('owedStopSetting', { setting: { codex: false } }), off: () => rig.call('owedStopSetting', { setting: undefined }) }],
     ['outgoing-request', { on: async () => {
       await cue(rig, { cue: 'reply', to: 'god-1', act: 'request', subject: 'need input', body: 'which db?' });
@@ -183,4 +189,20 @@ test('WAITS each suppression lets the Stop through with its own why; the setting
   assert.equal(kinds(rig, 'stop-blocked').length, 0, 'no wait was blocked');
   assert.equal(rig.turnEnds(ID).length, cases.length, 'one Stop per turn, each went through');
   t.diagnostic(`WAITS ${seen.length} turns, 0 blocked: ${seen.join(', ')}`);
+});
+
+test('WAITS human-input holds however slow the Stop path is (a Stop past the quiet window after the case is armed)', T, async (t) => {
+  const rig = await startRig(t);
+  await rig.setup(SPEC);
+  const { m: req } = await request(rig);
+  await cue(rig, { cue: 'tool' });
+  const before = (await owedRows(rig)).length;
+  const stops = rig.hooks(ID, 'Stop').length;
+  await humanInput(rig).on();
+  // A Stop path slower than the window, as the loaded suite produced.
+  await new Promise((r) => setTimeout(r, HUMAN_QUIET_MS + 300));
+  await cue(rig, { cue: 'stop' });
+  await waitFor(() => rig.hooks(ID, 'Stop').length > stops && (kinds(rig, 'stop-blocked').length > 0 || rig.turnEnds(ID).length === 1), { what: 'the Stop decided' });
+  assert.equal(kinds(rig, 'stop-blocked').length, 0, `the human-input Stop was blocked: the key aged past ${HUMAN_QUIET_MS} ms before the decision`);
+  assert.deepEqual((await owedRows(rig)).slice(before).map((r) => [r.outcome, r.why, r.ids]), [['OWED_NOT_BLOCKED', 'human-input', [req.id]]]);
 });

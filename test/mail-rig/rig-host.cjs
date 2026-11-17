@@ -138,7 +138,7 @@ async function buildFloor() {
   };
   const diags = [];
   const outcomes = [];
-  const rig = { clock, diags, outcomes, llm, bootSeen: new Set(), afterBoot: new Map(), echoSeen: new Map(), stall: new Map(), interfere: new Map(), humanDirty: new Set(), capacityHold: false, owedWait: {}, owedStopSetting: undefined, quietHoldMin: 0, holdArchives: false, settleDelay: new Map(), heldProviderStatus: new Map() };
+  const rig = { clock, diags, outcomes, llm, bootSeen: new Set(), afterBoot: new Map(), echoSeen: new Map(), stall: new Map(), interfere: new Map(), humanDirty: new Set(), humanAtStop: new Map(), capacityHold: false, owedWait: {}, owedStopSetting: undefined, quietHoldMin: 0, holdArchives: false, settleDelay: new Map(), heldProviderStatus: new Map() };
 
   // index.ts:361 - the ONE hive; this sandbox's harness home is the "live" home of THIS instance,
   // so the per-provider global writers (AGY hooks.json, statusline) write into the jailed HOME.
@@ -416,6 +416,11 @@ async function buildFloor() {
   const owedStopContinue = new OwedStopContinue(Date.now());
   hookServer.setOwedStop({
     decide: (agentId, provider, segmentTools) => {
+      // rig.humanAtStop: a human key the driver armed lands here, on the real pty write path, so its age
+      // at the decision is ~0 however long the cue -> fake agent -> Stop hook path took. Under suite load
+      // that path can outlast OWED_STOP_HUMAN_QUIET_MS (MAIL-RIG-OWED-STOP-TIMEOUT-108).
+      const armed = rig.humanAtStop.get(agentId);
+      if (armed !== undefined) { rig.humanAtStop.delete(agentId); const p = ptyForAgent(agentId); if (p) ptyManager.write(p, armed, 'HUMAN'); }
       const now = Date.now();
       const d = owedStopContinue.decide(agentId, provider, rig.owedStopSetting, segmentTools, now,
         Object.values(hive.mail.ledger(agentId).entries), () => {
@@ -694,6 +699,8 @@ async function main() {
     },
     sendNow: ({ id }) => rig.sendNow(id),
     workOrders: ({ id }) => (rig.workOrders.get(id) || []).map((w) => w.payload.id),
+    // A human key typed when this agent's next owed-Stop decision is made (see decide above).
+    humanTypeAtStop: ({ id, text }) => { rig.humanAtStop.set(id, text); return true; },
     humanType: ({ id, text }) => { const p = ptyOf(id); const r = ptyManager.write(p, text, 'HUMAN'); if (/[^\r\x15\x03]/.test(text)) rig.humanDirty.add(p); return r; },
     // The `pty:kill` IPC (index.ts:3937): kill, then the shared teardown.
     killPty: ({ id }) => { const p = ptyOf(id); const r = ptyManager.kill(p); f.teardownPty(p); return r; },
