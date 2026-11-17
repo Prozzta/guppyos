@@ -51,6 +51,17 @@ const SITES = {
       verifyReal: P.verifyModel(cacheDir, manifest),
       verifyLinked: P.verifyModel(linkedCache, manifest)
     };
+  },
+  /** No product code: what the runtime's own recursive rm does to a path that is a junction.
+   *  One per call, each on its own link to its own folder. */
+  async 'runtime-rm'(base) {
+    const state = (name) => ({
+      linkGone: !fs.existsSync(path.join(base, `link-${name}`)),
+      target: fs.readdirSync(path.join(base, 'live', name)).sort()
+    });
+    fs.rmSync(path.join(base, 'link-sync'), { recursive: true, force: true });
+    await fs.promises.rm(path.join(base, 'link-async'), { recursive: true, force: true });
+    return { sync: state('sync'), async: state('async') };
   }
 };
 

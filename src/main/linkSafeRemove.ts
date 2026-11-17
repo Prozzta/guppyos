@@ -11,6 +11,14 @@
  *
  * removePathLinkSafe is the one for the main process (it never blocks the loop on a large
  * tree). removePathLinkSafeSync is for a caller that is synchronous itself: the release script.
+ *
+ * Do not shorten either one to a bare recursive rm. Measured on Electron 45.3.0 and pinned in
+ * test/electron-rmsync-link-safe.test.cjs (RUNTIME PIN): rmSync on a junction empties its target;
+ * fs.promises.rm on a junction removed the link only. That second result is one runtime version
+ * and one shape, not a contract, so the async path takes the same link pass first.
+ *
+ * Not covered: a Windows volume mount point (a junction to \??\Volume{...}) is reported by
+ * lstat as a directory, not a link, so it is walked like a real folder.
  */
 import { lstatSync, rmSync, type Stats } from 'node:fs';
 import { lstat, rm } from 'node:fs/promises';
