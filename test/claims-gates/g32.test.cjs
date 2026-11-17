@@ -1,11 +1,12 @@
 'use strict';
+// @heavy-lock live: sustained work: two full-corpus embeds with the real model, and the 1.1.83 tree's build when it is absent. DRILL-TREE-SELF-BUILD-108.
 /**
  * CLAIM-LEDGER G3.2 latency gate (frozen: the full-corpus default-search p95 <= 1.5x today's).
  * An EXPLICIT gate run, not part of the default suite (two full-corpus embeds with the real model):
  *   node --test test/claims-gates/g32.test.cjs        (under the heavy lock)
  * The corpus is a READ-ONLY copy of the live hive's indexable Markdown (CLAIMS_G32_SOURCE, default
  * C:\Dunder\hive) into a sandbox; nothing in the live hive is written. "Today" is 1.1.83's engine
- * (_work/drill-trees/v1.1.83); "new" is this tree with every agent at reader and its memory.md
+ * (the fixture test/tools/drill-tree-183.cjs builds and verifies, or CLAIMS_DRILL_TREE_183); "new" is this tree with every agent at reader and its memory.md
  * bullets as claims. Same queries (deterministic, from the corpus), same model, warm, k = 5.
  * It fails, never skips, when a tree, Electron or the model is missing. Writes the numbers to
  * CLAIMS_G32_REPORT (default <sandbox>/g32.json).
@@ -17,7 +18,8 @@ const os = require('node:os');
 const path = require('node:path');
 
 const SOURCE = process.env.CLAIMS_G32_SOURCE || 'C:\\Dunder\\hive';
-const OLD = process.env.CLAIMS_DRILL_TREE_183 || 'C:\\Dunder\\_work\\drill-trees\\v1.1.83';
+// DRILL-TREE-SELF-BUILD-108: built here when absent; unbuildable or unverified, this throws with the reason.
+const OLD = require('../tools/drill-tree-183.cjs').drillTree();
 const NEW = path.join(__dirname, '..', '..');
 const JAIL = fs.mkdtempSync(path.join(os.tmpdir(), 'md-g32-'));
 test.after(() => fs.rmSync(JAIL, { recursive: true, force: true }));

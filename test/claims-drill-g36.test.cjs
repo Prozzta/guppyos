@@ -1,12 +1,14 @@
 'use strict';
 require('./tools/own-job.cjs');
+// @heavy-lock live: sustained work: runs the 1.1.83 tree, and builds it first when it is absent (minutes). DRILL-TREE-SELF-BUILD-108.
 /**
  * CLAIM-LEDGER G3.6 (F6, C4): the OLD build (1.1.83) runs its own engine, under Electron as Node,
  * against a user-data memory folder that holds the new build's v2 index file and its own STALE index.
  * It reconciles its own file cleanly, and the v2 file is byte-unchanged.
  *
- * The 1.1.83 tree is _work/drill-trees/v1.1.83 (the v1.1.83 commit with its node_modules and model),
- * or CLAIMS_DRILL_TREE_183. A missing tree, Electron or model FAILS this test; it never skips (F7).
+ * The 1.1.83 tree is the fixture test/tools/drill-tree-183.cjs builds and verifies (the v1.1.83 commit,
+ * its node_modules and model), or CLAIMS_DRILL_TREE_183. A tree that is absent is built here; one that
+ * cannot be built or does not verify FAILS this file with the reason; it never skips (F7).
  * HOME and USERPROFILE are jailed and asserted before anything else.
  */
 const test = require('node:test');
@@ -27,7 +29,14 @@ test.after(() => {
 });
 
 const { runDrill } = require('./claims-drill/runner.cjs');
-const TREE = process.env.CLAIMS_DRILL_TREE_183 || 'C:\\Dunder\\_work\\drill-trees\\v1.1.83';
+const { drillTree } = require('./tools/drill-tree-183.cjs');
+// The build's children (npm, node-gyp) get the real home, not this file's jailed one.
+const BUILD_ENV = { ...process.env, HOME: prior.HOME, USERPROFILE: prior.USERPROFILE };
+const tree183 = () => drillTree({ env: BUILD_ENV });
+
+test('the 1.1.83 tree is there and verified (built now if it was absent); a failure here is the reason for the ones below', { timeout: 30 * 60_000 }, () => {
+  assert.ok(fs.existsSync(path.join(tree183(), 'package.json')));
+});
 
 function write(root, rel, text) {
   const p = path.join(root, ...rel.split('/'));
@@ -56,7 +65,7 @@ test('G3.6: 1.1.83 reconciles its own stale index next to a v2 index, and never 
   const v2Sha = crypto.createHash('sha256').update(fs.readFileSync(v2File)).digest('hex');
 
   const res = await runDrill({
-    tree: TREE, hive, home, script: path.join(__dirname, 'claims-drill', 'g36-old-build.cjs'),
+    tree: tree183(), hive, home, script: path.join(__dirname, 'claims-drill', 'g36-old-build.cjs'),
     args: {
       oldDb, v2File,
       steps: { remove: ['agents/a2/memory.md'], append: { rel: 'agents/a1/memory.md', text: '\n## 2026-10-03\n- the frobnicator calibration offset is 9350\n' } },
@@ -83,12 +92,12 @@ test('F7: a drill that does not assert the model (or the jail) fails, whatever i
   fs.mkdirSync(hive, { recursive: true });
   const lazy = path.join(JAIL, 'lazy.cjs');
   fs.writeFileSync(lazy, "module.exports = async (drill) => { drill.assert.harnessStarted(); drill.assert.homeJailed(); return { found: 50, total: 50 }; };\n");
-  const res = await runDrill({ tree: TREE, hive, home: path.join(JAIL, 'home-f7'), script: lazy });
+  const res = await runDrill({ tree: tree183(), hive, home: path.join(JAIL, 'home-f7'), script: lazy });
   assert.equal(res.ok, false);
   assert.match(res.reason, /F7 checks not asserted: modelLoaded/);
   const thrower = path.join(JAIL, 'thrower.cjs');
   fs.writeFileSync(thrower, "module.exports = async () => { throw new Error('boom'); };\n");
-  const t = await runDrill({ tree: TREE, hive, home: path.join(JAIL, 'home-f7b'), script: thrower });
+  const t = await runDrill({ tree: tree183(), hive, home: path.join(JAIL, 'home-f7b'), script: thrower });
   assert.equal(t.ok, false);
   assert.match(t.reason, /the drill threw/);
 });
