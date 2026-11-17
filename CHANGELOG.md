@@ -8,6 +8,12 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Mail arrives and fleet status updates without pausing the app on a long mail history.** For
+  every message it delivered, Guppy searched an agent's whole mail record to check whether the
+  message was already there. On every status update, it searched that record again to count what
+  was still waiting. With a few thousand records, each search took more than half a second. Guppy
+  now keeps both answers up to date as mail changes, so each check takes about the same time
+  however long the history is. The answers are exactly the same as before. (LAG-LEDGER-SCANS-108)
 - **A large mail backlog no longer freezes the app for up to a second at a time.** When an agent
   had many messages waiting, Guppy decided which of them could wait quietly by reading through
   whole mail records again for every single message, on every check. It now reads each mail
