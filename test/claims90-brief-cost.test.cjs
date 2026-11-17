@@ -381,6 +381,25 @@ test('LAG-CLAIMS-READ-108: a torn read is never kept, and warm() keeps a broken 
   assert.equal(n, 1);
 });
 
+test('LAG-CLAIMS-READ-108: a full read that finds the ledger broken drops the kept verified read: the next ask answers the break, never the earlier ok (MUTANT: the verified read survives a broken full read)', async () => {
+  const g = await cutStore(60);
+  const okRead = g.store.readLedgerCached('andy');
+  assert.equal(okRead.chain, 'ok');
+  const seg = g.seg();
+  const whole = fs.readFileSync(seg);
+  assert.ok(whole.length > 3 * 4096, 'the edit below is outside the fingerprinted tail');
+  const st = fs.statSync(seg);
+  fs.writeFileSync(seg, whole.toString('utf8').replace('fact 0', 'fact Z'));
+  fs.utimesSync(seg, st.atime, st.mtime);
+  assert.equal(fs.statSync(seg).size, st.size);
+  const full = g.store.readLedger('andy');
+  assert.equal(full.chain.reason, 'mac', 'the integrity read sees the forged early line');
+  const after = g.store.readLedgerCached('andy');
+  assert.notEqual(after, okRead);
+  assert.equal(after.chain.reason, 'mac', 'the ask after a broken full read is the break');
+  assert.equal(g.store.verifiedJobFor('andy', after), null);
+});
+
 // Wiring fixtures: a stub store whose records arrays the test controls (the same array while "unchanged").
 const BUMP1 = '57ae9b25' + 'a'.repeat(32);
 const BUMP2 = '0badf00d' + 'b'.repeat(32);
