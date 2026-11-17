@@ -3930,8 +3930,10 @@ export class HiveManager {
    * The single terminal path for malformed or unroutable outbox files. It always
    * reports the failure to the sender and floor; an archive failure is remembered
    * by fingerprint so an unchanged locked file cannot spam the log or its sender.
+   * LAG-SYNC-FS-TAIL-108: the move to bad- is off the main thread and awaited here, inside the
+   * single-flight pass, before the notice that says whether it was archived.
    */
-  private *rejectOutboxFileSteps(
+  private async rejectOutboxFile(
     outbox: string,
     full: string,
     from: string,
@@ -3939,14 +3941,25 @@ export class HiveManager {
     reason: 'parse-failed' | 'route-failed',
     detail: string,
     error: unknown
-  ): RouteSteps<boolean> {
+  ): Promise<boolean> {
     let archived = false;
     try {
-      renameSync(full, join(outbox, '.sent', `bad-${file}`));
+      await fsPromises.rename(full, join(outbox, '.sent', `bad-${file}`));
       archived = true;
     } catch (archiveError) {
       this.appendLog({ kind: 'outbox-reject-archive-failed', from, file, reason, detail, error: String(archiveError) });
     }
+    return this.runRouteAsync(this.rejectOutboxFileSteps(full, from, file, reason, detail, error, archived));
+  }
+  private *rejectOutboxFileSteps(
+    full: string,
+    from: string,
+    file: string,
+    reason: 'parse-failed' | 'route-failed',
+    detail: string,
+    error: unknown,
+    archived: boolean
+  ): RouteSteps<boolean> {
     const notice = this.normalize({
       to: from,
       act: 'inform',
@@ -4040,11 +4053,12 @@ export class HiveManager {
   }
 
   /** An exact repeat is kept (renamed aside in .sent, not a .json there) and never delivered.
-   *  Returns the kept name, or null when the rename is held. */
-  private archiveDuplicateOutbox(outbox: string, full: string, from: string, file: string): string | null {
+   *  Returns the kept name, or null when the rename is held.
+   *  LAG-SYNC-FS-TAIL-108: off the main thread, awaited by the pass (as archiveDeliveredOutbox). */
+  private async archiveDuplicateOutbox(outbox: string, full: string, from: string, file: string): Promise<string | null> {
     const kept = `${file}.duplicate-${outboxDedupClock.now()}`;
     try {
-      renameSync(full, join(outbox, '.sent', kept));
+      await fsPromises.rename(full, join(outbox, '.sent', kept));
       return kept;
     } catch (error) {
       // Held: the next scan retries only the archive (same as a delivered file whose archive failed).
@@ -4179,12 +4193,12 @@ export class HiveManager {
             continue;
           }
           this.outboxParseRetries.delete(full);
-          rejected += Number(await this.runRouteAsync(this.rejectOutboxFileSteps(
+          rejected += Number(await this.rejectOutboxFile(
             outbox, full, id, f,
             'parse-failed',
             `malformed JSON after ${attempts} attempts`,
             error
-          )));
+          ));
           continue;
         }
         this.outboxParseRetries.delete(full);
@@ -4236,7 +4250,7 @@ export class HiveManager {
           const key = outboxDedupKey(id, msg);
           const prior = partial.id === undefined || partial.id === null ? dedup.get(key) : undefined;
           if (prior) {
-            const kept = this.archiveDuplicateOutbox(outbox, full, id, f);
+            const kept = await this.archiveDuplicateOutbox(outbox, full, id, f);
             const firstAt = new Date(prior.ts).toISOString();
             // Jim M1: never silent. Tell the sender, as a rejection does: an intended identical repeat
             // must be resent with changed text, and "it vanished from outbox/" is answered at its source.
@@ -4261,7 +4275,7 @@ export class HiveManager {
           // A parsed payload that cannot route is terminal too: keep it visible,
           // rather than retrying it forever on every watcher hint and poll.
           const reason = error instanceof Error ? error.message : String(error);
-          rejected += Number(await this.runRouteAsync(this.rejectOutboxFileSteps(outbox, full, id, f, 'route-failed', reason, error)));
+          rejected += Number(await this.rejectOutboxFile(outbox, full, id, f, 'route-failed', reason, error));
           continue;
         }
         await this.archiveDeliveredOutbox(outbox, full, id, f);

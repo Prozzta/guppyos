@@ -12,7 +12,8 @@ All notable changes to this project are documented here. The format is based on
   Guppy moved the sender's file into its sent folder and waited for the disk before doing anything
   else; one such move was seen holding the app for half a second. And when it saved the list of
   memory keys, it built the whole file's text in one go, which takes longer as the list grows.
-  The move now happens in the background while the delivery pass waits for it, and the key list
+  The move now happens in the background while the delivery pass waits for it (the same for a
+  repeated message that is set aside and for a rejected file), and the key list
   is built and written in small pieces. A delivered message is still never delivered twice or
   lost, and the saved key list is the same file, byte for byte. (LAG-SYNC-FS-TAIL-108)
 - **A large mail backlog no longer freezes the app for up to a second at a time.** When an agent
