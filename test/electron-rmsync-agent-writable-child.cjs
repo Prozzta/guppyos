@@ -49,6 +49,24 @@ const SITES = {
     try { made = store.backupIfDue('evil', `${DAY}T10:00:00.000Z`); } finally { store.close(); }
     return { made: made === dayDir, failed: logs.filter((r) => r.kind === 'claims-backup-failed').map((r) => r.error) };
   },
+  /**
+   * store.ts logOnce: a clean-up that fails on every pass is logged once per path. Three ledger
+   * reads with purge-old undeletable (this process's working folder is inside it; Windows refuses
+   * to remove that), and three backup attempts on each of two days with the backup folder's
+   * parent a file.
+   */
+  'refusal-log'(base) {
+    const held = path.join(base, 'hive', 'agents', 'evil', 'memory', 'claims.purge-old', 'held');
+    const { store, logs } = openStore(base);
+    const cwd = process.cwd();
+    try {
+      process.chdir(held);
+      for (let i = 0; i < 3; i++) store.readLedger('evil');
+      for (const day of [DAY, '2026-11-18']) for (let i = 0; i < 3; i++) store.backupIfDue('evil', `${day}T10:00:00.000Z`);
+    } finally { process.chdir(cwd); store.close(); }
+    const rows = (kind) => logs.filter((r) => r.kind === kind).map((r) => ({ step: r.step, day: r.day, once: r.once }));
+    return { purge: rows('claims-purge-failed'), backup: rows('claims-backup-failed'), oldStillThere: fs.existsSync(held) };
+  },
   /** kg-core.cjs removeDoc: a doc folder that is a link, and a real one with a link inside it. */
   'kg-remove'(base) {
     const core = require(path.join(ROOT, 'src', 'main', 'kg-core.cjs'));

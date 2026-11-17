@@ -19,6 +19,10 @@ require('./tools/own-job.cjs');
  * userDataMigration.ts, skills.ts install cleanup) need a whole hive or a private function to
  * reach; test/recursive-rm-census.test.cjs holds them, and every site here, by source.
  *
+ * NIT 2 (Jim's audit of 2edbe77f): those clean-ups fail closed, on every ledger read or append
+ * for as long as an agent keeps something in the way. The failure is logged once per path per
+ * session (store.ts logOnce); the last test here holds that. Mutant L1 (logOnce -> always log).
+ *
  * HOME is a temp jail before any product code loads; every fixture, and every folder a link
  * points at, is inside it.
  *
@@ -124,6 +128,19 @@ const SITES = {
     }
   }
 };
+
+test('refusal log: a clean-up that fails on every pass is logged once per path per session', { skip: process.platform !== 'win32' }, () => {
+  const base = path.join(jail, 'refusal-log');
+  const mem = path.join(base, 'hive', 'agents', 'evil', 'memory');
+  write(path.join(mem, 'claims', '2026-11.jsonl'), '{"segment":1}\n');
+  write(path.join(mem, 'claims.purge-old', 'held', 'x.txt'), 'x');
+  write(path.join(base, 'hive', 'backups', 'claims', 'evil'), 'a file where the backup folder goes');
+  const out = run('refusal-log', base);
+  assert.equal(out.oldStillThere, true, 'the purge-old clean-up really failed on every read');
+  assert.deepEqual(out.purge, [{ step: 'finish', day: undefined, once: true }], 'three failed clean-ups, one claims-purge-failed row');
+  assert.deepEqual(out.backup, [{ step: undefined, day: DAY, once: true }, { step: undefined, day: '2026-11-18', once: true }],
+    'three failed backups a day, one claims-backup-failed row per day folder');
+});
 
 const exe = process.env.GUPPY_PACKAGED_EXE || path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Guppy', 'Guppy.exe');
 
