@@ -60,5 +60,11 @@ if (process.env.ELECTRON_RUN_AS_NODE === '1') {
   const { app } = require('electron');
   const { isolateAppPaths } = require('./electron-harness/isolate-paths.cjs');
   isolateAppPaths(app, path.join(work, 'electron'));
-  app.whenReady().then(() => { console.log(report); app.exit(0); });
+  // ELECTRON-EXIT-AV: quit normally, never app.exit() here. Electron 45's app.exit() called right
+  // after ready races its own startup threads and crashes in browser teardown (0xC0000005 /
+  // 0xFFFF7002 / 0x80000003, about 1 in 1000 under load) with NO native loaded. The natives were
+  // ruled out by bisect: 3000 runs each under load, app.exit gave 3 crashes with no natives and
+  // 4 with all of them; app.quit gave 0 with all of them. With no window open, app.quit()
+  // completes on its own and exits 0. An assertion failure above still fails the run.
+  app.whenReady().then(() => { console.log(report); app.quit(); });
 }

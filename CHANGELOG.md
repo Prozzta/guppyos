@@ -8,6 +8,13 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **The Electron native-module check no longer crashes now and then as it exits.** The test that
+  loads every native module under Electron 45 ended with `app.exit()` the moment the app was
+  ready. About once in a thousand runs on a busy machine, Electron then crashed in its own
+  shutdown (0xC0000005), and the check failed even though every module had loaded. The crash
+  happens with no native module loaded at all, so it is in Electron, not in our modules. The check
+  now quits normally, which does not crash. Guppy's own quit was tested the same way and was not
+  affected. (ELECTRON-EXIT-AV)
 - **A large mail backlog no longer freezes the app for up to a second at a time.** When an agent
   had many messages waiting, Guppy decided which of them could wait quietly by reading through
   whole mail records again for every single message, on every check. It now reads each mail
