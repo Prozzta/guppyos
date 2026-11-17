@@ -27,12 +27,15 @@ export interface FloorDigestConfig {
   enabled: boolean;
   digestEveryMs: number;
   wakeBatchMs: number;
+  /** Wake god once while managed `_work` exceeds this non-following byte budget. */
+  scratchDiskBudgetBytes: number;
 }
 
 export const FLOOR_DIGEST_DEFAULTS: FloorDigestConfig = {
   enabled: true,
   digestEveryMs: 5 * 60_000,
-  wakeBatchMs: 10 * 60_000
+  wakeBatchMs: 10 * 60_000,
+  scratchDiskBudgetBytes: 200 * 1024 * 1024 * 1024
 };
 
 export const FLOOR_DIGEST_FILE = 'floor-digest.md';
@@ -124,6 +127,7 @@ export interface FloorDigestInput {
   /** HIVE-DWIGHT-BG-REINVOKE: the floor hold god set (floorHold.ts), shown under the title. */
   floorHold?: FloorHold | null;
   modelHooks?: DigestModelHooks[];
+  scratchDisk?: { bytes: number; measuredAt: number; budgetBytes: number } | null;
   tasks: unknown;
   meta: Record<string, { statusSince: number; statusSinceExact?: boolean } | undefined>;
   flags: BoardFlag[];
@@ -133,6 +137,7 @@ export interface FloorDigestInput {
 }
 
 const day = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
+const diskBytes = (n: number): string => n >= 1024 ** 3 ? `${(n / 1024 ** 3).toFixed(1)} GiB` : `${Math.ceil(n / 1024 ** 2)} MiB`;
 
 export { ageText };
 
@@ -290,6 +295,11 @@ export function buildFloorDigest(input: FloorDigestInput): { markdown: string; d
     return firstOccurrenceById(raw.filter((c): c is Card => !!c && typeof c === 'object' && typeof (c as { id?: unknown }).id === 'string'), (c) => c.id);
   })();
   const items = decisionItems(input.flags, input.ledgerIssues, now, input.heldWakes ?? [], input.silentTurns ?? [], input.quietStalls ?? [], input.wakeStalls ?? [], input.refusedSettles ?? []);
+  const disk = input.scratchDisk;
+  if (disk && disk.bytes > disk.budgetBytes) items.unshift({
+    id: `scratch-disk:${disk.budgetBytes}`, cardId: null,
+    line: `managed _work uses ${diskBytes(disk.bytes)} (budget ${diskBytes(disk.budgetBytes)}, measured ${ageText(now - disk.measuredAt)} ago) - reclaim/review scratch trees`
+  });
   if (input.floorStall) items.unshift(floorStallItem(input.floorStall, now));
   if (input.mirrorOff) items.unshift(mirrorOffItem(input.mirrorOff, now));
   for (const m of input.messageBox ?? []) items.push(messageBoxItem(m, now));
@@ -304,6 +314,8 @@ export function buildFloorDigest(input: FloorDigestInput): { markdown: string; d
   const who = (c: Card): string => (typeof c.assignee === 'string' && c.assignee && c.assignee !== 'unassigned' ? c.assignee : 'unassigned');
   const out: string[] = [`# Floor digest`, '', `_Written by the harness at ${new Date(now).toISOString()}. Zero model tokens; do not edit._`, ''];
   if (input.floorHold) out.push(`**${floorHoldWords(input.floorHold, now)}**`, '');
+
+  if (disk) out.push(`_Managed _work disk: ${diskBytes(disk.bytes)} / ${diskBytes(disk.budgetBytes)} (non-following scan, ${ageText(now - disk.measuredAt)} ago)._`, '');
 
   out.push('## Decisions needed', '');
   if (items.length === 0) out.push('None.');
@@ -449,6 +461,8 @@ export interface FloorDigestHost {
   floorHold?(): FloorHold | null;
   /** RULE-FIX-HOOK-NO-MODEL: model-invoking hooks in files Guppy does not own. Optional. */
   modelHooks?(): DigestModelHooks[];
+  /** Async scratch scanner's cached result; reading it is always main-thread cheap. */
+  scratchDisk?(): { bytes: number; measuredAt: number } | null;
   send(msg: { to: string; act: 'inform'; subject: string; body: string }, from: string): void;
   appendLog(row: Record<string, unknown>): void;
 }
@@ -500,6 +514,7 @@ export class FloorDigest {
       floorStall: (() => { try { return this.host.floorStall?.() ?? null; } catch { return null; } })(),
       floorHold: (() => { try { return this.host.floorHold?.() ?? null; } catch { return null; } })(),
       modelHooks: (() => { try { return this.host.modelHooks?.() ?? []; } catch { return []; } })(),
+      scratchDisk: (() => { try { const d = this.host.scratchDisk?.() ?? null; return d ? { ...d, budgetBytes: this.cfg().scratchDiskBudgetBytes } : null; } catch { return null; } })(),
       backstopClosed: readBackstopClosed(root),
       flaggedForHuman: readFlaggedForHuman(root)
     });

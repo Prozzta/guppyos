@@ -1283,6 +1283,11 @@ export class HiveManager {
     return this.writeCommandDir('heavy', script);
   }
 
+  /** Managed _work lifecycle command, authenticated through the hook broker. */
+  writeScratchCommand(script: string): string | null {
+    return this.writeCommandDir('scratch', script);
+  }
+
   /** TASKS-JSON-SPLIT: `<root>/bin/tasks/`, the `tasks-all`, `tasks-revive` and `tasks-unsplit`
    *  commands (resources/tasks-cli.cjs), each bound to this hive's root. On every hive agent's PATH. */
   writeTasksCommands(script: string): string | null {

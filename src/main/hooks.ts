@@ -308,7 +308,7 @@ export const HOOK_HTTP_RELISTEN_DELAYS_MS = [250, 1_000, 2_000, 5_000, 10_000, 1
 /** The broker's URLs: /hook/<agentId>/<32-hex token> (Claude HTTP hooks),
  *  /mcp/<agentId>/<token> (Codex mcp_tool hooks, P3) and /ledger/<agentId>/<token> (the
  *  `ledger` command, READS-181 A: the same per-spawn token, so the caller cannot be forged). */
-const HOOK_ROUTE = /^\/(hook|mcp|status|ledger|term|claims)\/([^/?#]+)\/([0-9a-f]{32})$/;
+const HOOK_ROUTE = /^\/(hook|mcp|status|ledger|scratch|term|claims)\/([^/?#]+)\/([0-9a-f]{32})$/;
 /** HEAVY-LOCK-OPAQUE-SCRIPT-196: /heavy/<agentId>/<token>, the heavy preload's lease requests (the same
  *  per-spawn token; the preload derives it from HIVE_LEDGER_URL). */
 const HEAVY_ROUTE = /^\/(heavy)\/([^/?#]+)\/([0-9a-f]{32})$/;
@@ -666,6 +666,12 @@ export class HookServer {
     this.ledgerHandler = h;
   }
 
+  /** SCRATCH-DISK-REAP-108: managed _work lifecycle, on the per-spawn token. */
+  private scratchHandler: LedgerHttpHandler | null = null;
+  setScratchHandler(h: LedgerHttpHandler | null): void {
+    this.scratchHandler = h;
+  }
+
   /** GOD-TERMINAL-CONTROL: set by main; null = the term route answers 404. The caller is the agent
    *  the per-spawn token in the URL proves; main decides (at request time) whether it is god. */
   private termHandler: LedgerHttpHandler | null = null;
@@ -799,6 +805,17 @@ export class HookServer {
     }
     // CLAIM-LEDGER W6 (G6.6): at level 'writer' the memory part is an async claim append.
     const failed = (e: unknown): void => reply(500, { ok: false, line: `refused: the ledger failed (${String(e).slice(0, 160)})` });
+    try { Promise.resolve(handler(agentId, body)).then((r) => reply(r.status, r.body), failed); } catch (e) { failed(e); }
+  }
+
+  private onScratch(agentId: string, raw: Buffer, reply: (status: number, body: unknown) => void): void {
+    const handler = this.scratchHandler;
+    if (!handler) { reply(404, { ok: false, line: 'refused: scratch is not available in this build' }); return; }
+    let body: unknown;
+    try { body = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(raw).replace(/^\uFEFF/, '')); } catch {
+      reply(400, { ok: false, line: 'refused: the input is not valid UTF-8 JSON' }); return;
+    }
+    const failed = (e: unknown): void => reply(500, { ok: false, line: `refused: scratch failed (${String(e).slice(0, 160)})` });
     try { Promise.resolve(handler(agentId, body)).then((r) => reply(r.status, r.body), failed); } catch (e) { failed(e); }
   }
 
@@ -995,7 +1012,7 @@ export class HookServer {
     const chunks: Buffer[] = [];
     let size = 0;
     let tooBig = false;
-    const bodyMax = route === 'ledger' ? LEDGER_HTTP_BODY_MAX : route === 'term' ? TERM_HTTP_BODY_MAX : route === 'claims' ? CLAIMS_HTTP_BODY_MAX : HOOK_HTTP_BODY_MAX;
+    const bodyMax = route === 'ledger' || route === 'scratch' ? LEDGER_HTTP_BODY_MAX : route === 'term' ? TERM_HTTP_BODY_MAX : route === 'claims' ? CLAIMS_HTTP_BODY_MAX : HOOK_HTTP_BODY_MAX;
     req.on('data', (d: Buffer) => {
       if (tooBig) return;
       size += d.length;
@@ -1018,6 +1035,7 @@ export class HookServer {
         return;
       }
       if (route === 'ledger') { this.onLedger(agentId, Buffer.concat(chunks), reply); return; }
+      if (route === 'scratch') { this.onScratch(agentId, Buffer.concat(chunks), reply); return; }
       if (route === 'term') { this.onTerm(agentId, Buffer.concat(chunks), reply); return; }
       if (route === 'claims') { this.onClaims(agentId, Buffer.concat(chunks), reply); return; }
       if (route === 'heavy') { this.onHeavy(agentId, Buffer.concat(chunks), reply, () => res.destroyed || res.writableEnded); return; }
