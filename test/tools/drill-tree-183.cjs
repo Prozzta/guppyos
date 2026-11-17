@@ -8,8 +8,17 @@
  *   node test/tools/drill-tree-183-build.cjs            build if absent or broken, verify, print the path
  *   node test/tools/drill-tree-183-build.cjs --check    verify only (exit 1 with the reason; builds nothing)
  *   node test/tools/drill-tree-183-build.cjs --path     print where the tree lives
+ *   node test/tools/drill-tree-183-build.cjs --rebuild  build a new tree and replace the one there (by hand only)
  *
- * WHERE. The first of:
+ * WHEN IT BUILDS. Only on a structural fault: the tree is absent, has no stamp or another recipe's
+ * stamp, is the wrong version, lacks a required file, or a model file does not match its digest. A
+ * stamped tree whose native modules fail to load is NOT rebuilt: a loaded machine fails that probe
+ * now and then (a slow spawn, a scanner holding a .node file), and a rebuild would delete the tree
+ * from under another test file that is running from it. The probe is tried once more; if it still
+ * fails this throws, deletes nothing, and names the by-hand command (--rebuild).
+ *
+ * WHERE. Never under a _work folder (the scratch reaper manages those): such a location is refused.
+ * The first of:
  *   CLAIMS_DRILL_TREE_183   a tree of the caller's own: verified, NEVER built or repaired here;
  *   GUPPY_FIXTURE_ROOT      <that>/guppy-v1.1.83;
  *   HIVE_ROOT               <hive>/cache/fixtures/guppy-v1.1.83 (outside _work: the scratch reaper
@@ -21,7 +30,10 @@
  * tree's own fetch script (digest-checked against its manifest), from a local copy when one matches
  * and from the manifest's source otherwise. It is built in a sibling folder, verified there, stamped
  * last and renamed into place, so a half-built tree is never at the fixture path. A lock folder keeps
- * two test files from building it at once.
+ * two test files from building it at once; a lock older than LOCK_STALE_MS is taken over whatever
+ * its owner's pid says (a dead owner's pid can belong to a live process). If the old tree cannot be
+ * moved aside because something has it open, the finished build stays in its .building-* folder,
+ * the error names it, and the next run adopts it instead of building again.
  *
  * A tree that cannot be built or does not verify THROWS with the reason. Nothing here skips.
  */
@@ -39,8 +51,13 @@ const NAME = `guppy-${TAG}`;
 const STAMP = '.guppy-fixture.json';
 /** Bump when the recipe changes: a tree stamped by another recipe is rebuilt. */
 const RECIPE = 1;
-const LOCK_WAIT_MS = 25 * 60_000;
 const STEP_MS = 20 * 60_000;
+/** Longer than the longest build seen (about 10 minutes cold) by a wide margin. A lock older than this is taken over. */
+const LOCK_STALE_MS = 40 * 60_000;
+/** Longer than LOCK_STALE_MS, so a waiter takes a stale lock over before it gives up. */
+const LOCK_WAIT_MS = 45 * 60_000;
+/** What Windows answers when a folder or a file in it is open elsewhere. */
+const HELD = new Set(['EBUSY', 'EPERM', 'EACCES', 'ENOTEMPTY']);
 
 const sha256 = (file) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -48,16 +65,46 @@ const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 
 /** Where the tree lives, and whether this file owns it (builds and repairs it). */
 function treeLocation(env = process.env) {
   if (env.CLAIMS_DRILL_TREE_183) return { tree: path.resolve(env.CLAIMS_DRILL_TREE_183), managed: false, from: 'CLAIMS_DRILL_TREE_183' };
-  if (env.GUPPY_FIXTURE_ROOT) return { tree: path.resolve(env.GUPPY_FIXTURE_ROOT, NAME), managed: true, from: 'GUPPY_FIXTURE_ROOT' };
-  if (env.HIVE_ROOT) return { tree: path.resolve(env.HIVE_ROOT, 'cache', 'fixtures', NAME), managed: true, from: 'HIVE_ROOT' };
+  if (env.GUPPY_FIXTURE_ROOT) return managedAt(path.resolve(env.GUPPY_FIXTURE_ROOT, NAME), 'GUPPY_FIXTURE_ROOT');
+  if (env.HIVE_ROOT) return managedAt(path.resolve(env.HIVE_ROOT, 'cache', 'fixtures', NAME), 'HIVE_ROOT');
   // The suite's temp jail moves LOCALAPPDATA into a per-file folder and keeps the real one here.
   const local = env.GUPPY_SHARED_LOCALAPPDATA || env.LOCALAPPDATA;
-  if (local) return { tree: path.resolve(local, 'guppy-test-fixtures', NAME), managed: true, from: 'LOCALAPPDATA' };
+  if (local) return managedAt(path.resolve(local, 'guppy-test-fixtures', NAME), 'LOCALAPPDATA');
   throw new Error(`the ${VERSION} drill tree has no location: set GUPPY_FIXTURE_ROOT (or HIVE_ROOT, or CLAIMS_DRILL_TREE_183 for a tree of your own)`);
 }
 
-/** The first thing wrong with the tree, or null. `stamped`: the tree must carry this recipe's stamp. */
-function treeFault(tree, { stamped = true } = {}) {
+/** The path with its nearest existing folder resolved through links, so a junction into _work is seen. */
+function realish(p) {
+  const rest = [];
+  let at = path.resolve(p);
+  for (;;) {
+    try { return path.join(fs.realpathSync.native(at), ...rest); } catch { /* not there yet */ }
+    const up = path.dirname(at);
+    if (up === at) return path.resolve(p);
+    rest.unshift(path.basename(at));
+    at = up;
+  }
+}
+
+/** A tree this file builds. Refused under any _work folder: the scratch reaper manages those and would take it. */
+function managedAt(tree, from) {
+  const under = (p) => p.split(/[\\/]+/).some((seg) => seg.toLowerCase() === '_work');
+  if (under(tree) || under(realish(tree))) {
+    throw new Error(`${from} puts the ${VERSION} drill tree at ${tree}, which is under a _work folder. The scratch reaper manages _work and would delete the fixture: point ${from === 'LOCALAPPDATA' ? 'GUPPY_FIXTURE_ROOT' : from} at a folder outside _work.`);
+  }
+  return { tree, managed: true, from };
+}
+
+/** The first thing wrong with the tree, or null: structure first, then the natives (`nativeProbe`). */
+function treeFault(tree, { stamped = true, nativeProbe = nativeFault } = {}) {
+  return structuralFault(tree, { stamped }) || nativeProbe(tree);
+}
+
+/**
+ * The first thing wrong with what the tree HOLDS, or null; nothing is run. `stamped`: the tree must
+ * carry this recipe's stamp. These are the faults a build repairs.
+ */
+function structuralFault(tree, { stamped = true } = {}) {
   const { treeProblem } = require('../claims-drill/runner.cjs');
   if (!fs.existsSync(tree)) return 'the tree is absent';
   if (stamped) {
@@ -77,7 +124,7 @@ function treeFault(tree, { stamped = true } = {}) {
     const got = sha256(f);
     if (got !== want) return `model file ${rel} is ${got}, the manifest pins ${want}`;
   }
-  return nativeFault(tree);
+  return null;
 }
 
 /** The tree's own Electron, as Node, opens a database and loads the vector extension; or why not. */
@@ -135,7 +182,76 @@ function localModel(manifest, env) {
 
 function rmTree(p) { fs.rmSync(p, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 }); }
 
+/**
+ * Put the finished, stamped build at the fixture path. The old tree is moved aside in one rename, so
+ * it is whole or gone, never half deleted. When it cannot be moved because something has it open, or
+ * the build cannot be moved in, the build is KEPT where it is and the error names it (`keptBuild`).
+ */
+function replaceTree(work, tree, { rename = fs.renameSync, pause = sleep, log = () => {} } = {}) {
+  const kept = (why) => Object.assign(new Error(`${why}. The finished build is kept at ${work}; the next run adopts it instead of building again.`), { keptBuild: work });
+  let old = null;
+  if (fs.existsSync(tree)) {
+    old = path.join(path.dirname(tree), `.old-${NAME}-${process.pid}-${Date.now()}`);
+    let err = null;
+    for (let i = 0; i < 6; i++) {
+      try { rename(tree, old); err = null; break; } catch (e) { err = e; if (!HELD.has(e.code)) break; pause(500); }
+    }
+    if (err && HELD.has(err.code)) throw kept(`the tree at ${tree} is in use and could not be replaced (${err.code}: another process has it open)`);
+    if (err) throw err;
+  }
+  let moved = null;
+  for (let i = 0; i < 20 && moved !== true; i++) {
+    try { rename(work, tree); moved = true; } catch (e) { moved = e; pause(500); } // a scanner can hold a new folder for a moment
+  }
+  if (moved !== true) {
+    if (old) { try { rename(old, tree); } catch { /* the kept build is the way back */ } }
+    throw kept(`could not move the built tree into place at ${tree} (${moved.code || moved.message})`);
+  }
+  if (old) { try { rmTree(old); } catch (e) { log(`the replaced tree is left at ${old} (${e.code || e.message}); the next build clears it`); } }
+}
+
+const leftoverPid = (name) => Number((/-(\d+)(?:-\d+)?$/.exec(name) || [])[1]) || null;
+
+/**
+ * Under the lock: adopt a finished build an earlier run had to keep (replaceTree), and clear what dead
+ * runs left beside the tree. Returns true when a kept build is now the tree. A leftover whose process
+ * is alive is left alone unless it is a finished build: under the lock nobody else is building.
+ */
+function adoptOrClear(tree, { adopt, nativeProbe = nativeFault, log = () => {}, rename } = {}) {
+  const parent = path.dirname(tree);
+  let names = [];
+  try { names = fs.readdirSync(parent); } catch { return false; }
+  let adopted = false;
+  for (const name of names.sort()) {
+    const p = path.join(parent, name);
+    if (name.startsWith(`.building-${NAME}-`)) {
+      if (adopt && !adopted && !treeFault(p, { nativeProbe })) {
+        log(`adopting the finished build an earlier run kept: ${p}`);
+        replaceTree(p, tree, { rename, log });
+        adopted = true;
+        continue;
+      }
+    } else if (!name.startsWith(`.tmp-${NAME}-`) && !name.startsWith(`.old-${NAME}-`)) continue;
+    const pid = leftoverPid(name);
+    if (pid && pid !== process.pid && alive(pid)) continue;
+    try { rmTree(p); } catch (e) { log(`could not clear ${p} (${e.code || e.message})`); }
+  }
+  return adopted;
+}
+
+/**
+ * The build's npm and download steps run on this process's own executable with ELECTRON_RUN_AS_NODE
+ * taken out of their environment (baseEnv). Under Electron as Node that executable is Electron, so each
+ * step would open an Electron app instead of running a script (seen: a hung window process, no output).
+ * The build is refused there, before anything is written; using a tree that is ready needs no build.
+ */
+function hostFault(versions = process.versions) {
+  return versions.electron ? 'the 1.1.83 tree is built on node, not on Electron as Node. Build it first: node test/tools/drill-tree-183-build.cjs' : null;
+}
+
 function build(tree, env, log) {
+  const host = hostFault();
+  if (host) throw new Error(host);
   assertSource();
   const parent = path.dirname(tree);
   const work = path.join(parent, `.building-${NAME}-${process.pid}`);
@@ -145,6 +261,7 @@ function build(tree, env, log) {
   const cenv = baseEnv(env, { TEMP: tmp, TMP: tmp, TMPDIR: tmp });
   const node = process.execPath;
   const t0 = Date.now();
+  let keep = false;
   try {
     log(`exporting ${TAG} (${COMMIT.slice(0, 8)}) to ${work}`);
     const genv = { ...cenv, GIT_INDEX_FILE: path.join(tmp, 'index') };
@@ -192,43 +309,54 @@ function build(tree, env, log) {
     const fault = treeFault(work, { stamped: false });
     if (fault) throw new Error(`the built tree does not verify: ${fault}`);
     fs.writeFileSync(path.join(work, STAMP), JSON.stringify({ v: 1, recipe: RECIPE, tag: TAG, commit: COMMIT, builtAt: new Date().toISOString(), node: process.version }, null, 2));
-    rmTree(tree);
-    let moved = null;
-    for (let i = 0; i < 20 && moved !== true; i++) {
-      try { fs.renameSync(work, tree); moved = true; } catch (e) { moved = e; sleep(500); } // a scanner can hold a new folder for a moment
-    }
-    if (moved !== true) throw new Error(`could not move the built tree into place: ${moved.message}`);
+    try { replaceTree(work, tree, { log }); } catch (e) { keep = !!e.keptBuild; throw e; }
     log(`built in ${Math.round((Date.now() - t0) / 1000)} s: ${tree}`);
   } finally {
     rmTree(tmp);
-    try { rmTree(work); } catch { /* reported by the next build, which clears it first */ }
+    if (!keep) { try { rmTree(work); } catch { /* cleared under the lock by the next build */ } }
   }
 }
 
 function alive(pid) { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } }
 
-/** One builder at a time. A lock whose owner has gone is taken over. */
-function withLock(tree, log, fn) {
+/**
+ * One builder at a time. owner.json records who holds the lock and WHEN IT STARTED. The lock is taken
+ * over when its owner's process has gone, and also once it is older than `staleMs` whatever the pid
+ * says: a dead owner's pid can have been given to another live process, and no build takes that long.
+ */
+function withLock(tree, log, fn, { waitMs = LOCK_WAIT_MS, staleMs = LOCK_STALE_MS, now = Date.now, pause = sleep } = {}) {
   const lock = path.join(path.dirname(tree), `.lock-${NAME}`);
   const owner = path.join(lock, 'owner.json');
+  const token = `${process.pid}-${crypto.randomBytes(8).toString('hex')}`;
   fs.mkdirSync(path.dirname(tree), { recursive: true });
-  const t0 = Date.now();
+  const t0 = now();
   let said = false;
   for (;;) {
     try { fs.mkdirSync(lock); break; } catch (e) { if (e.code !== 'EEXIST') throw e; }
-    let pid = null;
-    try { pid = JSON.parse(fs.readFileSync(owner, 'utf8')).pid; } catch { /* just made, or left half-made */ }
+    let o = null;
+    try { o = JSON.parse(fs.readFileSync(owner, 'utf8')); } catch { /* just made, or left half-made */ }
+    const pid = o && Number.isInteger(o.pid) ? o.pid : null;
     let age = 0;
-    try { age = Date.now() - fs.statSync(lock).mtimeMs; } catch { continue; }
+    try { age = now() - fs.statSync(lock).mtimeMs; } catch { continue; }
+    const held = o && Number.isFinite(o.startedMs) ? now() - o.startedMs : age;
+    if (held > staleMs) {
+      log(`the build lock of pid ${pid} is ${Math.round(held / 60_000)} minutes old, over the ${Math.round(staleMs / 60_000)} minute limit: taking it over`);
+      rmTree(lock); continue;
+    }
     if ((pid && !alive(pid)) || (!pid && age > 30_000)) { rmTree(lock); continue; }
-    if (Date.now() - t0 > LOCK_WAIT_MS) throw new Error(`another process (pid ${pid}) has been building the ${VERSION} tree for over ${LOCK_WAIT_MS / 60_000} minutes (${lock})`);
+    if (now() - t0 > waitMs) throw new Error(`another process (pid ${pid}) has been building the ${VERSION} tree for over ${Math.round(waitMs / 60_000)} minutes (${lock})`);
     if (!said) { log(`waiting for pid ${pid}, which is building the tree`); said = true; }
-    sleep(1000);
+    pause(1000);
   }
   try {
-    fs.writeFileSync(owner, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }));
+    fs.writeFileSync(owner, JSON.stringify({ pid: process.pid, token, startedMs: now(), at: new Date(now()).toISOString() }));
     return fn();
-  } finally { rmTree(lock); }
+  } finally {
+    // Only a lock that is still this run's: one taken over as stale belongs to the process that took it.
+    let mine = false;
+    try { mine = JSON.parse(fs.readFileSync(owner, 'utf8')).token === token; } catch { /* gone, or another's */ }
+    if (mine) rmTree(lock);
+  }
 }
 
 /**
@@ -246,27 +374,51 @@ function drillTree(opts = {}) {
   return s.tree;
 }
 
-function ensureTree({ env = process.env, log = (m) => process.stderr.write(`[drill-tree-183] ${m}\n`), build: mayBuild = true } = {}) {
+/**
+ * `rebuild`: build a new tree and replace the one there, whatever its state (the by-hand command only).
+ * `nativeProbe`, `builder`, `lock`, `pause`: seams for the tests; the defaults are the real ones.
+ */
+function ensureTree({ env = process.env, log = (m) => process.stderr.write(`[drill-tree-183] ${m}\n`), build: mayBuild = true, rebuild = false, nativeProbe = nativeFault, builder = build, lock = {}, pause = sleep } = {}) {
   const { tree, managed, from } = treeLocation(env);
   if (!managed) {
-    const fault = treeFault(tree, { stamped: false });
+    if (rebuild) throw new Error(`${from}=${tree} is the caller's own tree and is not built here; unset ${from} to rebuild the self-building fixture.`);
+    const fault = treeFault(tree, { stamped: false, nativeProbe });
     if (fault) throw new Error(`${from}=${tree} is not a usable ${VERSION} tree: ${fault}. It is the caller's own tree and is not built here; unset ${from} to use the self-building fixture.`);
     return tree;
   }
-  let fault = treeFault(tree);
-  if (!fault) return tree;
-  if (!mayBuild) throw new Error(`the ${VERSION} drill tree at ${tree} is not ready: ${fault}. Build it: node test/tools/drill-tree-183-build.cjs`);
+  // { structural } is repaired by a build. { native } on a stamped tree never is: see WHEN IT BUILDS.
+  const look = () => {
+    const structural = structuralFault(tree);
+    if (structural) return { structural };
+    let native = nativeProbe(tree);
+    if (native) {
+      log(`${tree} is stamped but its native probe failed (${native}); trying once more`);
+      pause(2000);
+      native = nativeProbe(tree);
+    }
+    return native ? { native } : null;
+  };
+  const nativeError = (native) => new Error(`the ${VERSION} drill tree at ${tree} is stamped but its native modules do not load: ${native}. Nothing was deleted: another test may be running from this tree. If it keeps failing, rebuild it by hand: node test/tools/drill-tree-183-build.cjs --rebuild`);
+  let bad = rebuild ? { structural: 'a rebuild was asked for' } : look();
+  if (!bad) return tree;
+  if (bad.native) throw nativeError(bad.native);
+  if (!mayBuild) throw new Error(`the ${VERSION} drill tree at ${tree} is not ready: ${bad.structural}. Build it: node test/tools/drill-tree-183-build.cjs`);
   return withLock(tree, log, () => {
-    fault = treeFault(tree); // another process may have just built it
-    if (!fault) return tree;
-    log(`${tree}: ${fault}; building`);
-    try { build(tree, env, log); } catch (e) { throw new Error(`the ${VERSION} drill tree could not be built at ${tree}: ${e.message}`); }
-    fault = treeFault(tree);
+    if (!rebuild) {
+      bad = look(); // another process may have just built it
+      if (!bad) return tree;
+      if (bad.native) throw nativeError(bad.native);
+    }
+    log(`building the ${VERSION} tree at ${tree} (location from ${from}): ${bad.structural}`);
+    try {
+      if (!adoptOrClear(tree, { adopt: !rebuild, nativeProbe, log })) builder(tree, env, log);
+    } catch (e) { throw new Error(`the ${VERSION} drill tree could not be built at ${tree}: ${e.message}`); }
+    const fault = treeFault(tree, { nativeProbe });
     if (fault) throw new Error(`the ${VERSION} drill tree was built at ${tree} and does not verify: ${fault}`);
     // The reaper never manages cache/fixtures; the registry entry (SCRATCH-DISK-REAP-108) records who owns it.
     if (from === 'HIVE_ROOT') log(`register it once: scratch register-fixture "${tree}" --card DRILL-TREE-SELF-BUILD-108`);
     return tree;
-  });
+  }, lock);
 }
 
-module.exports = { drillTree, ensureTree, treeLocation, treeFault, baseEnv, TAG, COMMIT, VERSION, NAME, STAMP, RECIPE };
+module.exports = { drillTree, ensureTree, treeLocation, treeFault, structuralFault, replaceTree, adoptOrClear, withLock, baseEnv, hostFault, TAG, COMMIT, VERSION, NAME, STAMP, RECIPE, LOCK_STALE_MS, LOCK_WAIT_MS };
