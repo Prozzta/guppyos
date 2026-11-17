@@ -17,6 +17,12 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **A terminal closed right after it starts always reports that it ended.** On a busy machine, a
+  terminal killed before it had printed anything could be left with no end reported at all, so
+  Guppy kept waiting for it until a time limit ran out. The terminal library closes its data pipe
+  one second after the program ends, and under load that could land in the instant between the
+  pipe starting to connect and finishing, which is the one moment nothing was listening for it.
+  Guppy now watches that moment and reports the end itself, once. (PTY-LATE-READY-EXIT-107)
 - **Terminals never fall back to an unpatched terminal library.** node-pty ships ready-made Windows
   binaries beside the ones Guppy builds from its patched source, and it used them without a word
   whenever the built ones did not load. That would have dropped the protection against killing a

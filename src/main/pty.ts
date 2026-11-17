@@ -161,7 +161,7 @@ interface WindowsTerminalInternals {
   _close?: () => void;
   _agent?: { kill?: () => void; exitCode?: number; _conoutSocketWorker?: ConoutConnectionInternals };
   /** The agent's outSocket (net.Socket); `_handle` stays null until its connect() runs. */
-  _socket?: { readable: boolean; _handle?: unknown; destroy?: () => void };
+  _socket?: { readable: boolean; _handle?: unknown; destroy?: () => void; once?: (event: string, fn: () => void) => unknown };
   /** Terminal events ride on the socket; 'exit' is what onExit listens to. */
   emit?: (event: string, ...args: unknown[]) => unknown;
 }
@@ -192,13 +192,23 @@ let lateReadyGuardMissingSaid = false;
  * pipe's close is reported here, once. A socket that did start its connect is left to node-pty
  * (Windows completes a pipe connect inside the call, so that one reaches the still-listening worker).
  * No error is caught or handled anywhere: the connect that would fail is not made.
+ *
+ * PTY-LATE-READY-EXIT-107. "Left to node-pty" holds only once the socket's 'connect' event has come:
+ * that event is where node-pty adds the 'close' listener that reports the exit. node-pty has a SECOND
+ * 1 s timer, the agent's `_closeTimeout`, armed when the root process exits; its `_cleanUpProcess`
+ * destroys the data socket. Under load the READY is handled about a second after the kill, in the
+ * same turn as that timer: the socket is destroyed between its connect() and its 'connect' event, with
+ * no error, 'connect' never comes, and the terminal never reports its exit (seen 1 to 2 runs in 144
+ * under load). So a started connect is watched: a socket that closes before its 'connect' gets its
+ * exit reported here. The two reports cannot both happen: the terminate reports only when no connect
+ * was started, this one only after a connect was started, and each of them reports once.
  */
 function guardLateReady(t: WindowsTerminalInternals): void {
   const sock = t._socket;
   const conn = t._agent?._conoutSocketWorker;
   const worker = conn?._worker;
   if (!sock || !conn || !worker || typeof conn.connectSocket !== 'function' || typeof worker.terminate !== 'function'
-    || typeof sock.destroy !== 'function' || typeof t.emit !== 'function') {
+    || typeof sock.destroy !== 'function' || typeof sock.once !== 'function' || typeof t.emit !== 'function') {
     // Another node-pty: the pin test fails. Here the terminal is left as it was before this guard.
     if (!lateReadyGuardMissingSaid) {
       lateReadyGuardMissingSaid = true;
@@ -212,16 +222,27 @@ function guardLateReady(t: WindowsTerminalInternals): void {
   // connected, drained and closed has no handle again by the time its worker is terminated.
   let connectStarted = false;
   let pipeGone = false;
+  // The guard reports at most one exit: at the terminate only if no connect was started (latched by
+  // pipeGone), at the socket's close only if one was (a once listener, added with the first connect).
+  const reportExit = (): void => { t.emit!('exit', t._agent?.exitCode); };
   conn.connectSocket = (socket: unknown): void => {
     if (pipeGone) return;
-    connectStarted = true;
+    if (!connectStarted) {
+      connectStarted = true;
+      // PTY-LATE-READY-EXIT-107: node-pty reports the exit from a 'close' listener it adds on
+      // 'connect'. A socket closed before that event (the agent's own close timer destroyed it) has
+      // no such listener, so its close is the exit, reported here.
+      let connected = false;
+      sock.once!('connect', () => { connected = true; });
+      sock.once!('close', () => { if (!connected) reportExit(); });
+    }
     connect(socket);
   };
   worker.terminate = (): Promise<number> => {
     if (!pipeGone && !connectStarted) {
       pipeGone = true;
       sock.destroy!();
-      t.emit!('exit', t._agent?.exitCode);
+      reportExit();
     }
     return terminate();
   };
