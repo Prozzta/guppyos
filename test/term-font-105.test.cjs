@@ -114,13 +114,13 @@ test('postinstall patches first and checks just before the winpty --check; build
   assert.equal(scripts.build.split('&&')[0].trim(), 'node tools/patch-xterm-webgl-font.cjs --check');
 });
 
-test('both terminal faces are bundled, not fetched: local @font-face per face and weight, no Google font, then Consolas, then monospace', () => {
+test('every terminal face is bundled, not fetched: local @font-face per face and weight, no Google font, then Consolas, then monospace', () => {
   // A Windows checkout (core.autocrlf) has CRLF sources: read them as LF, like readSource does.
   const R = (...p) => fs.readFileSync(path.join(ROOT, 'src', 'renderer', ...p), 'utf8').replace(/\r\n/g, '\n');
   const css = R('src', 'design', 'fonts.css');
   const font = R('src', 'components', 'terminalFont.ts');
   const offered = JSON.parse(font.match(/TERMINAL_FONT_FACES = (\[[^\]]+\]) as const/)[1].replace(/'/g, '"'));
-  assert.deepEqual(offered, ['JetBrains Mono', 'Martian Mono'], 'the two faces the selector offers, the default first');
+  assert.deepEqual(offered, ['JetBrains Mono', 'Martian Mono', 'Cascadia Mono', 'Atkinson Hyperlegible Mono'], 'the faces Settings offers, the default first');
   const fam = font.match(/return `([^`]+)`;\n}\n\nconst loaded/)[1];
   assert.equal(fam, '"${face}", Consolas, monospace', 'the face first, then Consolas, then monospace');
   const faces = [...css.matchAll(/@font-face\s*{([^}]*)}/g)].map((m) => m[1]);
@@ -157,10 +157,16 @@ function fakeTerm(fontSize) {
 }
 
 /** Each face's real advances, measured as xterm does (Chrome 156; Martian Mono from the packaged
- *  probe, JetBrains Mono from the term-font-picker harness scenario): 0.7em and 0.6em. */
+ *  probe, JetBrains Mono from the term-font-picker harness scenario): 0.7em and 0.6em.
+ *  TERM-FONT-SETTINGS-107: Cascadia Mono (1200/2048 = 0.5859375em) and Atkinson Hyperlegible
+ *  Mono (0.632em) are computed from the font's own advance the way Chrome reports one (16.16
+ *  fixed point, truncated); the harness test pins the measured ones against the same em. */
+const fx = (v) => Math.floor(v * 65536) / 65536;
 const FACE_W = {
   'Martian Mono': { 10: 7, 12: 8.399993896484375, 14: 9.79998779296875, 16: 11.199996948242188 },
-  'JetBrains Mono': { 10: 6, 12: 7.1999969482421875, 14: 8.399993896484375, 16: 9.599990844726562 }
+  'JetBrains Mono': { 10: 6, 12: 7.1999969482421875, 14: 8.399993896484375, 16: 9.599990844726562 },
+  'Cascadia Mono': { 10: 5.859375, 12: 7.03125, 14: 8.203125, 16: 9.375 },
+  'Atkinson Hyperlegible Mono': { 10: fx(6.32), 12: fx(7.584), 14: fx(8.848), 16: fx(10.112) }
 };
 const MARTIAN_W = FACE_W['Martian Mono'];
 /** xterm 5.5's WebGL/DOM cell: floor(advance x dpr) + round(letterSpacing) device px. */
@@ -281,76 +287,66 @@ test('Martian Mono is the unmodified upstream release, with its OFL text and an 
   assert.match(attr, /## Terminal font: Martian Mono[\s\S]*1\.1\.0[\s\S]*evilmartians\/mono[\s\S]*SIL Open Font License 1\.1/);
 });
 
-// ---- TERM-FONT-JETBRAINS: the face is the user's pick (JetBrains Mono unless they chose), stored like the size.
+// ---- TERM-FONT-JETBRAINS / TERM-FONT-SETTINGS-107: the face is the user's pick (JetBrains Mono
+// unless they chose). The pick is saved in config.json by Settings; this module only holds the
+// face in use, and never touches localStorage.
 const FONT_TS = 'src/renderer/src/components/terminalFont.ts';
 let freshN = 0;
-/** A fresh terminalFont module (a new app start) over a fake window.localStorage. */
-function startApp(store, fn, storage) {
+/** A fresh terminalFont module (a new app start) over a window.localStorage that records every call. */
+function startApp(fn) {
   const prev = globalThis.window;
-  const writes = [];
-  globalThis.window = { localStorage: storage || {
-    getItem: (k) => (Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null),
-    setItem: (k, v) => { writes.push([k, v]); store[k] = v; }
+  const calls = [];
+  globalThis.window = { localStorage: {
+    getItem: (k) => { calls.push(['get', k]); return 'Martian Mono'; },
+    setItem: (k, v) => { calls.push(['set', k, v]); }
   } };
   try {
-    return fn(loadTs.fromText(FONT_TS, readSource(FONT_TS) + `\n// app start ${++freshN}\n`), writes);
+    return fn(loadTs.fromText(FONT_TS, readSource(FONT_TS) + `\n// app start ${++freshN}\n`), calls);
   } finally { globalThis.window = prev; }
 }
 
-test('JetBrains Mono is the terminal face for anyone who has not picked, or whose stored pick is not a face we ship', () => {
-  startApp({}, (m, writes) => {
+test('JetBrains Mono is the terminal face until the config says otherwise; a saved value that is not a face we ship reads as the default', () => {
+  startApp((m, calls) => {
     assert.equal(m.DEFAULT_TERMINAL_FONT_FACE, 'JetBrains Mono');
-    assert.equal(m.getTerminalFontFace(), 'JetBrains Mono');
+    assert.equal(m.getTerminalFontFace(), 'JetBrains Mono', 'a face left in localStorage by 617d8be8 is not read');
     assert.equal(m.terminalFontFamily(), '"JetBrains Mono", Consolas, monospace');
-    assert.deepEqual(writes, [], 'reading the default stores nothing');
+    for (const face of m.TERMINAL_FONT_FACES) assert.equal(m.parseTerminalFontFace(face), face);
+    for (const junk of ['Comic Sans MS', '', 'martian mono', 'null', undefined, null, 7, {}, ['Martian Mono']]) {
+      assert.equal(m.parseTerminalFontFace(junk), 'JetBrains Mono', JSON.stringify(junk));
+    }
+    assert.deepEqual(calls, [], 'localStorage is never touched');
   });
-  for (const junk of ['Comic Sans MS', '', 'martian mono', 'null']) {
-    startApp({ 'cth.ptyFontFace': junk }, (m) => assert.equal(m.getTerminalFontFace(), 'JetBrains Mono', JSON.stringify(junk)));
-  }
-  // The size key is a different key: a stored size is never read as a face.
-  startApp({ 'cth.ptyFontSize': 'Martian Mono' }, (m) => assert.equal(m.getTerminalFontFace(), 'JetBrains Mono'));
-  const broken = { getItem() { throw new Error('storage blocked'); }, setItem() { throw new Error('storage blocked'); } };
-  startApp({}, (m) => {
-    assert.equal(m.getTerminalFontFace(), 'JetBrains Mono');
-    assert.equal(m.setTerminalFontFace('Martian Mono'), 'Martian Mono', 'the pick still applies for this run');
-  }, broken);
 });
 
-test('a pick is stored under cth.ptyFontFace and read back by the next app start', () => {
-  const store = {};
-  startApp(store, (m, writes) => {
+test('a pick is held for this window and named in the family; nothing is stored by this module', () => {
+  startApp((m, calls) => {
     assert.equal(m.setTerminalFontFace('Martian Mono'), 'Martian Mono');
     assert.equal(m.getTerminalFontFace(), 'Martian Mono');
     assert.equal(m.terminalFontFamily(), '"Martian Mono", Consolas, monospace');
     assert.equal(m.terminalFontFamily('JetBrains Mono'), '"JetBrains Mono", Consolas, monospace', 'a named face, whatever is chosen');
-    assert.deepEqual(writes, [['cth.ptyFontFace', 'Martian Mono']]);
+    for (const face of m.TERMINAL_FONT_FACES) assert.equal(m.setTerminalFontFace(face), face);
+    assert.deepEqual(calls, [], 'the pick is saved by Settings through main, not here');
   });
-  assert.deepEqual(store, { 'cth.ptyFontFace': 'Martian Mono' });
-  startApp(store, (m, writes) => {
-    assert.equal(m.getTerminalFontFace(), 'Martian Mono', 'restart: the stored pick, not the default');
-    m.setTerminalFontFace('JetBrains Mono');
-    assert.deepEqual(writes, [['cth.ptyFontFace', 'JetBrains Mono']], 'picking the default back is stored too');
-  });
-  startApp(store, (m) => assert.equal(m.getTerminalFontFace(), 'JetBrains Mono'));
+  startApp((m) => assert.equal(m.getTerminalFontFace(), 'JetBrains Mono', 'a new start holds the default until App.tsx applies the config'));
+  assert.doesNotMatch(codeOnly(readSource(FONT_TS), 'terminalFont.ts'), /localStorage|ptyFontFace/);
 });
 
-test('subscribers hear each real change once; an unknown or unchanged face is a no-op (no write, no notify)', () => {
-  startApp({}, (m, writes) => {
+test('subscribers hear each real change once; an unknown or unchanged face is a no-op (no notify)', () => {
+  startApp((m) => {
     let heard = 0;
     const seen = [];
     const off = m.subscribeTerminalFontFace(() => { heard++; seen.push(m.getTerminalFontFace()); });
     assert.equal(m.setTerminalFontFace('JetBrains Mono'), 'JetBrains Mono');
     assert.equal(m.setTerminalFontFace('Courier New'), 'JetBrains Mono');
     assert.equal(heard, 0);
-    assert.deepEqual(writes, []);
     m.setTerminalFontFace('Martian Mono');
     m.setTerminalFontFace('Martian Mono');
+    m.setTerminalFontFace('Cascadia Mono');
     m.setTerminalFontFace('JetBrains Mono');
-    assert.deepEqual(seen, ['Martian Mono', 'JetBrains Mono'], 'the listener reads the new face');
+    assert.deepEqual(seen, ['Martian Mono', 'Cascadia Mono', 'JetBrains Mono'], 'the listener reads the new face');
     off();
-    m.setTerminalFontFace('Martian Mono');
-    assert.equal(heard, 2, 'unsubscribed');
-    assert.equal(writes.length, 3);
+    m.setTerminalFontFace('Atkinson Hyperlegible Mono');
+    assert.equal(heard, 3, 'unsubscribed');
   });
 });
 
@@ -380,7 +376,7 @@ test('loadTerminalFont loads the regular and bold of the face asked for, once pe
   } finally { globalThis.document = prev; }
 });
 
-test('the pick is wired: the pool applies it to every terminal after the face loads, the header shows the selector beside the size buttons', () => {
+test('the pick is wired: the pool applies it to every terminal after the face loads; the terminal header has no font control, only the size buttons', () => {
   const pool = codeOnly(readSource('src/renderer/src/components/terminalPool.ts'), 'terminalPool.ts');
   const at = pool.indexOf('export function applyTerminalFontFaceToPool(');
   assert.ok(at > 0);
@@ -389,14 +385,11 @@ test('the pick is wired: the pool applies it to every terminal after the face lo
     'load first, drop a superseded pick, then family + pad and a refit for EVERY pooled terminal');
   assert.match(pool, /\nsubscribeTerminalFontFace\(\(\) => \{ void applyTerminalFontFaceToPool\(\); \}\);/);
   assert.equal((pool.match(/options\.fontFamily\s*=/g) || []).length, 0, 'no raw fontFamily write that would skip the pad or the load');
+  // TERM-FONT-SETTINGS-107: the list moved to Settings (TerminalSetting.tsx).
   const view = codeOnly(readSource('src/renderer/src/components/PtyTerminalView.tsx'), 'PtyTerminalView.tsx');
-  assert.match(view, /const fontFace = useTerminalFontFace\(\);/);
-  const sel = view.indexOf('<select');
-  assert.ok(sel > 0 && view.indexOf('<select', sel + 1) < 0, 'one selector');
-  const tag = view.slice(sel, view.indexOf('</select>', sel));
-  assert.match(tag, /value=\{fontFace\}/);
-  assert.match(tag, /onChange=\{\(e\) => \{ setTerminalFontFace\(e\.target\.value\); acquireTerminal\(ptyId\)\.term\.focus\(\); \}\}/, 'the pick applies and typing goes back to the terminal');
-  assert.match(tag, /aria-label="Terminal font"/);
-  assert.match(tag, /TERMINAL_FONT_FACES\.map\(/, 'one option per face offered, from the same list');
+  assert.doesNotMatch(view, /<select|<option/, 'no list in the terminal header');
+  assert.doesNotMatch(view, /useTerminalFontFace|setTerminalFontFace|TERMINAL_FONT_FACES|aria-label="Terminal font"/);
   assert.doesNotMatch(view, /options\.fontFamily\s*=/);
+  for (const title of ['Zoom out (Cmd -)', 'Zoom in (Cmd +)']) assert.ok(view.includes(`title="${title}"`), `${title} stays`);
+  assert.match(view, /onClick=\{resetZoom\}/, 'the size reset stays');
 });

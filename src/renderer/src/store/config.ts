@@ -150,6 +150,8 @@ export interface HarnessConfig {
   knowledgeGraph?: KnowledgeGraphConfig;
   /** Renderer-only terminal output pattern colours. Default ON. */
   terminalPatternColoring?: boolean;
+  /** The terminal font face picked in Settings; one of the bundled faces (terminalFont.ts). */
+  terminalFont?: string;
   /** TV-show office themes feature flag (Settings picker + switch flow). Default OFF. */
   tvShowOffices?: boolean;
   /** Legacy global office theme: the fallback for a project with no entry in officeThemeByHive. */

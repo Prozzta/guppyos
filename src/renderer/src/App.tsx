@@ -37,6 +37,7 @@ import { SidebarSplitter } from '@/components/SidebarSplitter';
 import { FLOOR_PANE_BLEED, framedSidebarWidth, packFrame } from '@/scene/themes/framing';
 import { acquireTerminal, notifyThemeChangeAll } from '@/components/terminalPool';
 import { setTerminalPatternColoringEnabled } from '@/components/terminalPatternColor';
+import { setTerminalFontFace, parseTerminalFontFace } from '@/components/terminalFont';
 import { FullscreenTerminal } from '@/components/FullscreenTerminal';
 import { TaskDetailOverlay } from '@/components/TaskDetailOverlay';
 import { IdePanel } from '@/ide/IdePanel';
@@ -153,6 +154,8 @@ export function App() {
       if (cancelled) return;
       setConfig(c);
       setTerminalPatternColoringEnabled(c.terminalPatternColoring !== false);
+      // TERM-FONT-SETTINGS-107: the saved terminal font; the pool applies it to every terminal.
+      setTerminalFontFace(parseTerminalFontFace(c.terminalFont));
       // Mirror the Free Flow flag into the store so the composer mic button shows
       // only when enabled (Settings keeps this in sync on save).
       useStore.getState().setFreeflowEnabled(!!c.freeflowEnabled);
@@ -192,6 +195,9 @@ export function App() {
   // once) and any later save. The TV-show maps are gated on tvShowOffices; a pack is not.
   const floorScene = config ? floorSceneTheme(resolveProjectTheme(config, config.harnessHome), config.tvShowOffices) : null;
   useEffect(() => { if (floorScene) useStore.getState().setOfficeTheme(floorScene as ThemeId); }, [floorScene]);
+
+  // TERM-FONT-SETTINGS-107: a font picked in any window's Settings applies here at once.
+  useEffect(() => window.cth.onTerminalFontChanged((face) => setTerminalFontFace(parseTerminalFontFace(face))), []);
 
   // Quit warning subscription
   useEffect(() => window.cth.onCloseRequested((info) => setQuitWarn(info)), []);

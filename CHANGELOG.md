@@ -6,15 +6,6 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
-### Added
-
-- **Terminal pattern colouring.** Agent terminals now recognise paths, git IDs,
-  statuses, errors, roster names, URLs and semantic versions without altering
-  the pty output. The new Terminal setting is on by default; an all-default-
-  foreground error line is coloured as a whole, while a line containing ANSI
-  foreground colours keeps those cells untouched.
-- **Pick the terminal font.** A font selector sits at the top of every terminal, beside the size buttons: JetBrains Mono or Martian Mono. JetBrains Mono is now the default. The choice applies to every open terminal at once, with no restart, and is remembered the next time Guppy starts. Both fonts ship with the app, so nothing is downloaded, and both keep the whole-pixel character cells from 1.1.106, so text is not clipped or overlapped in either.
-
 ### Fixed
 
 - **A terminal closed right after it starts always reports that it ended.** On a busy machine, a
@@ -47,6 +38,50 @@ All notable changes to this project are documented here. The format is based on
 > v1.1.79). The fork is based on upstream
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/guppyos/releases).
+
+## [1.1.107] — 2026-11-17
+
+**Agent terminals colour what they recognise, and the terminal font is picked in Settings from four bundled faces.**
+Rollback: 1.1.106 (reinstall).
+
+### Added
+
+- **Terminal pattern colouring.** Agent terminals now recognise paths, git IDs,
+  statuses, errors, roster names, URLs and semantic versions without altering
+  the pty output. An all-default-foreground error line is coloured as a whole, while a line
+  containing ANSI foreground colours keeps those cells untouched.
+- **Colours toggle in the Terminal section.** Settings, General, Terminal has a switch,
+  "Colour recognizable output", directly under the font list. It is on by default.
+- **Pick the terminal font in Settings.** Settings, General, Terminal has a Font list:
+  JetBrains Mono, Martian Mono, Cascadia Mono or Atkinson Hyperlegible Mono. JetBrains Mono is
+  now the default. The choice applies to every open terminal at once, with no restart, and is
+  remembered the next time Guppy starts. The font list is no longer in the terminal header,
+  which keeps its size buttons.
+- **Two more terminal fonts: Cascadia Mono and Atkinson Hyperlegible Mono.** Both ship with the
+  app, unmodified and with their OFL licences, so nothing is downloaded. All four fonts keep the
+  whole-pixel character cells from 1.1.106, so text is not clipped or overlapped in any of them.
+- **Relative paths are coloured.** A name with an extension is coloured as a path back to the
+  nearest space, bracket or quote: `src/app.ts`, `docs/notes.md:12` and `README.md` all colour.
+  A span with a slash or backslash is a path with any extension; a bare name needs a known file
+  extension. Names in the Node.js style (Node.js, Vue.js, Next.js and similar) are left plain,
+  as are domain names. Line and column suffixes such as `:12:5` and `(339,12)` are part of the
+  path, and a full stop or comma that ends a sentence is not. The extension and domain lists
+  are vendored from MIT-licensed data, so nothing new is installed.
+
+### Fixed
+
+- **A commit ID is coloured only as a whole word.** An ID inside a longer word (for example
+  `claudeeb75033b`) was partly coloured. It now needs a word boundary on both sides.
+- **A version followed by a full stop is coloured.** "Released in 1.1.107." now colours the
+  version; `1.1.107.4` is still not taken as a version.
+
+### Please check (live, on this release)
+
+- **Terminal font:** pick each of the four fonts in Settings, General, Terminal, and confirm
+  that every open terminal changes at once, that no characters overlap, and that the pick
+  survives a restart.
+- **Colours:** turn the colours switch off and on, and confirm that relative paths, commit IDs
+  and versions are coloured, and that Node.js-style names stay plain.
 
 ## [1.1.106] — 2026-11-16
 
@@ -2290,7 +2325,7 @@ palace, and starts far fewer processes for agent hooks.** Source `595dd3b5`; rol
   per ~170-byte chunk (a 3.26 MB burst: 20,683 messages → 197). Keystroke echo is still sent
   immediately.
 
-## Fork milestones (1.1.45 – 1.1.106)
+## Fork milestones (1.1.45 – 1.1.107)
 
 > Moved here from the README. This is the shape of the fork line, milestone by milestone; the
 > dated entries above and the [releases page](https://github.com/Prozzta/guppyos/releases) have the detail.
@@ -2504,9 +2539,12 @@ wholesale merges. The shape of the line, as evidence for the three ideas in the 
 - **No startup freeze on large hives, Electron 45** (1.1.105) — startup reads
   only what changed and moves the claims work into slices and a worker thread, Guppy runs on
   Electron 45, and the claims ledger can be created from Settings.
-- **Terminal kills bound to their own process** (1.1.106, the current release) — Guppy holds
+- **Terminal kills bound to their own process** (1.1.106) — Guppy holds
   each terminal's process from its start, so no kill can reach a reused process id; the terminal
   font is fixed on Electron 45, and every UI font is bundled.
+- **Terminal colours and fonts in Settings** (1.1.107, the current release) — agent terminals
+  colour paths (relative ones too), commit IDs, versions and errors without changing the pty
+  output, and the terminal font is picked in Settings from four bundled faces.
 
 Every milestone carries a dated human acceptance and evidence tag in the fork's
 internal mission ledger; this section keeps only the shape.

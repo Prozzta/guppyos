@@ -6219,6 +6219,11 @@ ipcMain.handle('config:update', (_evt, patch: Partial<HarnessConfig>) => {
   if (patch && 'heavyJobsAtOnce' in patch) heavyLock.limitChanged();
   // Live opt-in/out from Settings → Privacy (TELEMETRY.md).
   if (typeof patch?.telemetryEnabled === 'boolean') analytics.setEnabled(patch.telemetryEnabled);
+  // TERM-FONT-SETTINGS-107: the terminal font is one setting for the whole app, so a pick in
+  // one window's Settings reaches the open terminals of every window now.
+  if (typeof patch?.terminalFont === 'string') {
+    for (const w of BrowserWindow.getAllWindows()) { try { if (!w.isDestroyed()) w.webContents.send('terminal:fontChanged', next.terminalFont); } catch { /* gone */ } }
+  }
   // Keep the hive's mirror of the spawn gate current. The queue itself reads
   // config per tick so it gates immediately; this is for the PROMPT, which is
   // built per spawn, so flipping the toggle reaches god the next time he starts.
