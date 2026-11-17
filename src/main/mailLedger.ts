@@ -442,10 +442,6 @@ function storeSet(s: EntryStore, id: string, v: MailEntry | undefined): void {
   s.len = i + 1;
 }
 
-function storeHas(s: EntryStore, id: string): boolean {
-  return storeGet(s, id) !== undefined;
-}
-
 /** A doc whose `entries` is the store's (built on first read). The fields keep `prev`'s order. */
 function docOverStore(prev: MailLedgerDoc, s: EntryStore): MailLedgerDoc {
   const doc = {} as MailLedgerDoc;
@@ -580,17 +576,20 @@ class Draft {
     this.store = storeAfter(this.prevStore);
     this.doc = docOverStore(prev, this.store);
   }
-  private reordered = false;
   /** An entry of the version under construction. */
   get(id: string): MailEntry | undefined {
     return storeGet(this.store, id);
   }
   put(entry: MailEntry): void {
     dropIndex(this.store);
-    if (!storeHas(this.store, entry.id) && storeHas(this.prevStore, entry.id)) this.reordered = true;
     storeSet(this.store, entry.id, entry);
     if (!this.changed.includes(entry.id)) this.changed.push(entry.id);
   }
+  /**
+   * No transition removes a key and puts it back in the same draft (the only caller is prune).
+   * step() relies on that: deriveIndex keeps the key order of the previous version, and a key
+   * removed and re-put would move to the end. A later transition that re-adds a key is fine.
+   */
   remove(id: string): void {
     dropIndex(this.store);
     storeSet(this.store, id, undefined);
@@ -604,9 +603,7 @@ class Draft {
     this.logs.push({ agentId: this.doc.agentId, ...row });
   }
   step(): MailStep {
-    // A removed key put back goes last in key order: the sender map cannot follow that.
-    if (this.reordered) dropIndex(this.store);
-    else deriveIndex(this.prevStore, this.store, this.changed);
+    deriveIndex(this.prevStore, this.store, this.changed);
     return { doc: this.doc, changed: this.changed, logs: this.logs, events: this.events, archive: this.archive };
   }
 }
