@@ -3201,6 +3201,10 @@ export class HeavyJobLock {
       this.reservations.delete(agentId);
       this.log({ kind: 'heavy-lock', action: 'reserve-expired', agentId, heavyKind: r.kind, ...(r.lapsed ? { again: true } : {}) });
       this.changed();
+      // HEAVY-RESERVATION-BIND-108 (Jim SHOULD): a reservation kept under the owner's own test
+      // process can lapse while that process still holds the slot. The owner HAS the slot: it is
+      // not queued again and not told anything; its call, when it comes, joins its own slot.
+      if (this.holders.has(agentId)) { passed = true; continue; }
       // HEAVY-HANDOFF-RACE (c) (2026-10-23T04:33Z: Creed's reservation lapsed while he was idle; he was
       // dropped and kept waiting for a notice that never came). The owner is QUEUED AGAIN at the back,
       // once (`lapsed`): told so, or told "HEAVY SLOT FREE" again when the slot is still free (grant()

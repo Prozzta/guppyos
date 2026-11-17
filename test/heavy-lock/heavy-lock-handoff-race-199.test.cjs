@@ -400,6 +400,28 @@ K.reservedOnce = async (M = HJ) => {
 };
 test('(d) a holder that keeps its reservation counts as one slot', () => K.reservedOnce());
 
+K.reservedLapseHeld = async (M = HJ) => {
+  // Jim's SHOULD on 5d3d59bb: the kept reservation lapses while the owner's test process still holds.
+  // The owner has the slot, so it is not queued again and not told "requeued".
+  const x = rig(M);
+  x.l.acquire('h', H, 'npm test', 'h1', false);
+  assert.equal(x.l.acquire('andy', H, 'npm test', 'a1', false).allow, false);
+  assert.equal(x.l.acquire('andy', H, 'node --test (pid 7)', 'lease:7:1', false).allow, false);
+  assert.equal(x.l.acquire('uhera', H, 'npm test', 'u1', false).allow, false);
+  x.l.callDone('h', 'h1');
+  assert.equal(x.l.acquire('andy', H, 'node --test (pid 7)', 'lease:7:1', false).allow, true);
+  assert.deepEqual([reservedFor(x), waiters(x)], [['andy'], ['uhera']], 'the test process holds; the reservation is kept');
+  x.tick(M.HEAVY_RESERVE_MS);
+  assert.deepEqual([reservedFor(x), waiters(x)], [[], ['uhera']], 'A RESERVATION THAT LAPSES UNDER ITS OWNER\'S OWN HOLD DOES NOT QUEUE THE OWNER AGAIN');
+  assert.deepEqual(x.lapses, [], 'A HOLDER IS NOT TOLD ITS RESERVATION LAPSED');
+  assert.equal(x.l.acquire('andy', H, 'npm test', 'a2', false).allow, true, 'its call joins its own slot');
+  x.l.callDone('andy', 'lease:7:1');
+  x.l.callDone('andy', 'a2');
+  assert.deepEqual([x.l.snapshot().map((s) => s.agentId), reservedFor(x), waiters(x)], [[], ['uhera'], []], 'THE SLOT PASSES ON AND THE OWNER IS NOT LEFT IN THE QUEUE');
+  assert.deepEqual(x.notes.map((n) => n.a), ['andy', 'uhera'], 'the owner is told HEAVY SLOT FREE once, never again for a call it already ran');
+};
+test('(d) a kept reservation that lapses while its owner holds does not queue the owner again', () => K.reservedLapseHeld());
+
 // ── the CLI ─────────────────────────────────────────────────────────────────────────────────
 
 test('the heavy CLI: `heavy next <agent>`, and the `you:` line of `heavy status`', () => {
@@ -484,6 +506,8 @@ const MUTANTS = [
     killer: 'reservationBinds', dies: /A LEASE-ONLY RESERVATION IS SPENT BY ITS PROCESS/ },
   { name: 'a holder with a reservation counts twice', edits: [['      if (!this.holders.has(a)) taken++;', '      taken++;']],
     killer: 'reservedOnce', dies: /A HOLDER THAT KEEPS ITS RESERVATION TAKES ONE SLOT, NOT TWO/ },
+  { name: 'a reservation lapsing under its owner\'s hold queues the owner again', edits: [['      if (this.holders.has(agentId)) { passed = true; continue; }', '']],
+    killer: 'reservedLapseHeld', dies: /A RESERVATION THAT LAPSES UNDER ITS OWNER'S OWN HOLD DOES NOT QUEUE THE OWNER AGAIN/ },
   // (a)
   { name: 'the grant ignores the name (required: it is re-read at every grant)', edits: [['    const ni = this.nextUp ? this.waiters.findIndex((w) => w.agentId === this.nextUp) : -1;', '    const ni = -1;']],
     killer: 'nextHonoured', dies: /THE AUTO-RELEASE HONOURS heavy next over release --to/ },
