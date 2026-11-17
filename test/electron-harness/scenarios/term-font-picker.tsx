@@ -11,12 +11,13 @@
  * tree: the harness injects CSS as a <style> tag, so the urls would otherwise resolve
  * against page.html and no face would load.
  *
- * TERM-FONT-PICKER-DPR15-RACE: nothing here measures a pick after a fixed delay. A pick lands
+ * TERM-FONT-PICKER-DPR15-RACE: nothing here measures a face after a fixed delay, the starting
+ * face included. A pick lands
  * when the face's load ends (terminalPool waits on loadTerminalFont), and how long that takes
  * is the machine's business: under a full suite the first load of a face took longer than the
  * 700 ms this scenario used to wait, so it measured the old face. pick() now waits on that
  * same load, then on the state it is about to measure. The first pick also HOLDS the load
- * (document.fonts.load is gated here) for HELD_MS, longer than any delay the scenario ever
+ * (document.fonts.load is gated here; so does the start, for the starting face) for HELD_MS, longer than any delay the scenario ever
  * guessed, and reports what the terminals showed meanwhile: the old face and the old cell.
  */
 import { createRoot } from 'react-dom/client';
@@ -70,6 +71,10 @@ const realFontLoad = document.fonts.load.bind(document.fonts);
 document.fonts.load = ((font: string, text?: string) => (
   gate.face && font.includes(`"${gate.face}"`) ? gate.opened.then(() => realFontLoad(font, text)) : realFontLoad(font, text)
 )) as typeof document.fonts.load;
+// The starting face's load is held shut from the start: the scenario lets it through itself, so
+// its first measurement cannot depend on how long that load takes either.
+gate.face = getTerminalFontFace();
+gate.opened = new Promise<void>((r) => { gate.open = r; });
 const INK_CHARS = ['W', 'M', 'm', '@', '#', '%', '&', 'w', 'Q'];
 
 type XtermCore = { _core: { _renderService: { dimensions: { device: { cell: { width: number; height: number } }; css: { cell: { width: number } } } } } };
@@ -92,9 +97,22 @@ window.__harnessRun = async () => {
     document.body.appendChild(settingsWrap);
     let settingsRoot = createRoot(settingsWrap);
     await act(async () => { settingsRoot.render(<TerminalSetting config={{}} />); });
-    await wait(900);
     const entry = acquireTerminal('pty-a');
     const pooled = acquireTerminal('pty-pooled'); // in the pool, never attached to a view
+    // The first measurement is the same case as a pick: a terminal opened before the starting
+    // face had loaded is measured again when that load ends (terminalPool, TERM-FONT-105), and
+    // the section shows the stored font once it has read the config. Wait on those, not on a delay:
+    // the load is held shut for HELD_MS first, then let through and waited on.
+    await wait(HELD_MS);
+    const startHeld = { face: initialFace, ready: terminalFontReady(initialFace) };
+    gate.face = null;
+    gate.open();
+    await act(async () => { await loadTerminalFont(initialFace); });
+    const started = () => terminalFontReady(initialFace) && entry.term.options.fontFamily === terminalFontFamily(initialFace)
+      && pooled.term.options.fontFamily === terminalFontFamily(initialFace)
+      && (settingsWrap.querySelector('select') as HTMLSelectElement | null)?.value === initialFace;
+    for (let i = 0; i < 200 && !started(); i++) await wait(25);
+    if (!started()) throw new Error(`the scenario did not start on ${initialFace}`);
     entry.term.write('WWWWMMMMmmmm@@@@####iiii\r\n');
 
     let select = settingsWrap.querySelector('select') as HTMLSelectElement;
@@ -255,7 +273,7 @@ window.__harnessRun = async () => {
 
     window.harness.report({
       ok: true, dpr: window.devicePixelRatio, faces: [...TERMINAL_FONT_FACES], initialFace, selector, rows,
-      saves: savesAfterPicks, failed, failedToggle, toggled, reopened, held
+      saves: savesAfterPicks, failed, failedToggle, toggled, reopened, held, startHeld
     });
   } catch (e) {
     window.harness.report({ ok: false, error: e instanceof Error ? `${e.message}\n${e.stack}` : String(e) });
