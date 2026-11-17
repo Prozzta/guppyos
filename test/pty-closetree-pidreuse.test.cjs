@@ -37,6 +37,8 @@ if (process.platform !== 'win32') {
 
 const PTYF = 'src/main/pty.ts';
 const REAL = loadTs(PTYF);
+const { holdRoot, rootHandoff } = loadTs('src/main/procIdentity.ts');
+const { awaitHeldExit } = require('./tools/await-exit.cjs');
 const DIR = tempDir('ptpr-');
 fs.writeFileSync(path.join(DIR, 'root.js'), "process.stdout.write('ptpr-root-up'); setInterval(() => {}, 1000);\n");
 
@@ -72,6 +74,17 @@ const within = (p, what) => {
 };
 let seq = 0;
 
+// TEST-TEMP-LEAK-UNDER-LOAD: each root (cwd = DIR) is held by handle from its spawn, its own hold
+// apart from the product's, so its pid stays its own and the kill below reaches no stranger. DIR is
+// removed only once every root has EXITED (the close and the exit report do not wait for the
+// process), with no swallow: a root that will not exit, or a DIR that will not go, fails this hook.
+const holds = [];
+test.after(async () => {
+  for (const { pid, hold } of holds) { if (hold.alive()) { try { realKill.call(process, pid); } catch { /* gone */ } } }
+  try { await awaitHeldExit(holds); } finally { for (const h of holds) h.hold.release(); }
+  fs.rmSync(DIR, { recursive: true, force: true });
+});
+
 /** A real terminal whose root idles. Gives the scenario its manager, id, root pid, the promise of
  *  node-pty's exit REPORT (the moment the product can know the root is gone) and of the ConPTY
  *  close; ends everything afterwards whatever happened. */
@@ -88,6 +101,9 @@ async function withTerminal(Pty, scenario) {
     assert.ok(r.ok, `spawn: ${r.error}`);
     const proc = m.sessions.get(id).proc;
     root = proc.pid;
+    const hold = holdRoot(root, 'win32', rootHandoff(proc));
+    assert.ok(hold, 'the root is held by handle (resources/fs-handle built)');
+    holds.push({ pid: root, hold });
     // The scenario starts once the root has spoken. A ConPTY closed in its first milliseconds can
     // still deliver its start-up output after node-pty has ended the socket ("stream.push() after
     // EOF", thrown outside any test). That is node-pty's, and not what this file is about.

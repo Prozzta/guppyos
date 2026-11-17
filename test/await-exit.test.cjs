@@ -4,7 +4,7 @@ require('./tools/own-job.cjs');
 // process they wait for still runs, and reject (naming it) at the cap instead of hanging or passing.
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { awaitHeldExit, awaitOrphansExit, waitScript } = require('./tools/await-exit.cjs');
+const { awaitHeldExit, awaitOrphansExit, awaitRowsExit, waitScript } =require('./tools/await-exit.cjs');
 
 function clock() {
   let t = 0;
@@ -71,11 +71,48 @@ test('awaitOrphansExit is a no-op off Windows', async () => {
   assert.deepEqual(await awaitOrphansExit(ROOT, { table: () => { throw new Error('no table'); }, platform: 'linux' }), []);
 });
 
+test('awaitRowsExit waits for exactly the recorded rows and rejects naming each one LIVE', async () => {
+  let script = null;
+  const rows = [{ pid: 201, created: 7000, name: 'node.exe' }];
+  assert.deepEqual(await awaitRowsExit(rows, { platform: 'win32', ps: async (s) => { script = s; return ''; } }), rows);
+  assert.match(script, /"pid":201,"created":7000,"name":"node.exe"/);
+  await assert.rejects(awaitRowsExit(rows, { platform: 'win32', capMs: 60, ps: async () => 'LIVE 201 node.exe\r\n' }),
+    (e) => /still running 60 ms after the kill: 201 node\.exe$/.test(e.message));
+});
+
+test('awaitRowsExit with no row, or off Windows, starts no wait', async () => {
+  const ps = async () => { throw new Error('no wait expected'); };
+  assert.deepEqual(await awaitRowsExit([], { platform: 'win32', ps }), []);
+  assert.deepEqual(await awaitRowsExit([{ pid: 1, created: 1, name: 'x' }], { platform: 'linux', ps }), []);
+});
+
+test('awaitRowsExit, real PowerShell: an exited row resolves, a running one rejects naming it', { skip: process.platform !== 'win32' }, async () => {
+  const { spawn } = require('node:child_process');
+  const { lookupPids } = require('./tools/own-procs.cjs');
+  const start = async () => {
+    const c = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true });
+    await new Promise((resolve, reject) => { c.once('spawn', resolve); c.once('error', reject); });
+    const row = lookupPids([c.pid]).find((r) => r.pid === c.pid && r.ppid === process.pid);
+    assert.ok(row, 'the child is listed as ours');
+    return { c, row, exited: new Promise((resolve) => c.once('exit', resolve)) };
+  };
+  const a = await start();
+  const b = await start();
+  try {
+    a.c.kill();
+    await a.exited;
+    // the LAST row is the gone one: PowerShell's own exit code must not fail the wait
+    await assert.rejects(awaitRowsExit([b.row, a.row], { capMs: 300 }), (e) => new RegExp(`after the kill: ${b.row.pid} node\\.exe$`).test(e.message));
+    assert.deepEqual(await awaitRowsExit([a.row], { capMs: 300 }), [a.row]);
+  } finally { a.c.kill(); b.c.kill(); await b.exited; }
+});
+
 test('waitScript re-checks identity and waits within the cap', () => {
   const s = waitScript([{ pid: 5, created: 77, name: "o'k.exe", extra: 1 }], 1234);
   assert.match(s, /AddMilliseconds\(1234\)/);
   assert.match(s, /o''k\.exe/);
   assert.match(s, /ToUnixTimeMilliseconds\(\) -ne \$t\.created/);
   assert.match(s, /WaitForExit\(\$left\)/);
+  assert.match(s, /\nexit 0$/, 'a row already gone (caught) does not make the wait exit 1');
   assert.doesNotMatch(s, /extra/);
 });

@@ -21,6 +21,7 @@
  *   identity rules), waited for by handle in ONE PowerShell (the name and CreationDate are checked again
  *   once the handle is open). Resolves with the rows it waited for; REJECTS, naming them, if one still
  *   runs at capMs.
+ * awaitRowsExit(rows): that wait for recorded rows (a detached grandchild: agy-teardown's inner).
  * A reject is a test failure that names the process. The caller never swallows it.
  */
 const { execFile } = require('node:child_process');
@@ -44,7 +45,9 @@ async function awaitHeldExit(holds, { capMs = CAP_MS, stepMs = 20, now = Date.no
 /** The PowerShell that waits, by handle, for each row that is still the same process. */
 function waitScript(rows, capMs) {
   const json = JSON.stringify(rows.map((r) => ({ pid: r.pid, created: r.created, name: r.name }))).replace(/'/g, "''");
-  // assigned first: PowerShell 5.1 passes ConvertFrom-Json's array down a pipeline as ONE object
+  // assigned first: PowerShell 5.1 passes ConvertFrom-Json's array down a pipeline as ONE object.
+  // `exit 0`: a row already gone is caught in the loop, but -Command still exits 1 when its last
+  // statement saw an error; only the LIVE lines say a wait failed.
   return `$ProgressPreference = 'SilentlyContinue'
 $list = '${json}' | ConvertFrom-Json
 $end = [DateTime]::UtcNow.AddMilliseconds(${Number(capMs)})
@@ -54,7 +57,8 @@ foreach ($t in $list) {
   if (-not $q -or $q.Name -ne $t.name -or ([DateTimeOffset]$q.CreationDate).ToUnixTimeMilliseconds() -ne $t.created) { continue }
   $left = [int][Math]::Max(0, ($end - [DateTime]::UtcNow).TotalMilliseconds)
   if (-not $p.WaitForExit($left)) { "LIVE $($t.pid) $($t.name)" }
-}`;
+}
+exit 0`;
 }
 
 function runPs(script) {
@@ -73,10 +77,20 @@ async function awaitOrphansExit(rec, { capMs = CAP_MS, table = processTable, ps 
   if (platform !== 'win32') return [];
   const { tree } = ownTree(table(), rec);
   const rows = tree.filter((r) => r.pid !== rec.pid);
-  if (!rows.length) return [];
+  return awaitRowsExit(rows, { capMs, ps, after: `pid ${rec.pid} exited` });
+}
+
+/**
+ * Processes this one cannot hold itself (not its children: a detached grandchild), each recorded as
+ * an own-procs row ({ pid, created, name }) while it ran as ours, waited for by handle in ONE
+ * PowerShell (the identity is checked again once the handle is open). Resolves with the rows;
+ * REJECTS, naming each one still running, at capMs.
+ */
+async function awaitRowsExit(rows, { capMs = CAP_MS, ps = runPs, platform = process.platform, after = 'the kill' } = {}) {
+  if (platform !== 'win32' || !rows.length) return [];
   const live = String(await ps(waitScript(rows, capMs))).split(/\r?\n/).filter((l) => l.startsWith('LIVE '));
-  if (live.length) throw new Error(`await-exit: still running ${capMs} ms after pid ${rec.pid} exited: ${live.map((l) => l.slice(5)).join(', ')}`);
+  if (live.length) throw new Error(`await-exit: still running ${capMs} ms after ${after}: ${live.map((l) => l.slice(5)).join(', ')}`);
   return rows;
 }
 
-module.exports = { awaitHeldExit, awaitOrphansExit, waitScript, CAP_MS };
+module.exports = { awaitHeldExit, awaitOrphansExit, awaitRowsExit, waitScript, CAP_MS };

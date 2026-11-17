@@ -222,6 +222,19 @@ if (!WIN) {
   fs.writeFileSync(path.join(DIR, 'root.js'), "process.stdout.write('pkpi-root-up'); setInterval(() => {}, 1000);\n");
   let seq = 0;
 
+  // TEST-TEMP-LEAK-UNDER-LOAD: each root (cwd = DIR) is held by handle from its spawn, a hold of this
+  // file's own beside the session's, so its pid stays its own and the kill below reaches no stranger.
+  // DIR is removed only once every root has EXITED (the close and the exit report do not wait for
+  // the process), with no swallow: a root that will not exit, or a DIR that will not go, fails here.
+  const { awaitHeldExit } = require('./tools/await-exit.cjs');
+  const idHold = loadTs(IDF);
+  const holds = [];
+  test.after(async () => {
+    for (const { pid, hold } of holds) { if (hold.alive()) { try { realKill.call(process, pid); } catch { /* gone */ } } }
+    try { await awaitHeldExit(holds); } finally { for (const h of holds) h.hold.release(); }
+    fs.rmSync(DIR, { recursive: true, force: true });
+  });
+
   /**
    * A real terminal whose root idles. `holdBack`: node-pty's exit report is kept from the product
    * until letReport() (the window). Gives the scenario:
@@ -245,6 +258,9 @@ if (!WIN) {
       const session = m.sessions.get(id);
       const proc = session.proc;
       root = proc.pid;
+      const own = idHold.holdRoot(root, 'win32', idHold.rootHandoff(proc));
+      assert.ok(own, 'the root is held by handle (resources/fs-handle built)');
+      holds.push({ pid: root, hold: own });
       // Start once the root has spoken (a ConPTY closed in its first milliseconds can throw
       // node-pty's "stream.push() after EOF" outside any test).
       let seen = '';
