@@ -485,6 +485,37 @@ test('LAG-SYNC-FS-LOG-108: the rows remembered during one check are bounded (a c
   assert.equal(rows(p).length, APPEND_LINK_HELD_MAX + 1, 'every row once');
 });
 
+// Jim's NIT on 73bd9d3c (mutant settleNoGen): the bound settles a check on this thread and finds
+// the file still there, so nothing closes the descriptor. The slow answer of THAT check arrives
+// later, while a newer check is in flight. It must be dropped: taken as the newer check's answer
+// it would stop the remembering, and a row written after it would stay in the deleted file.
+test('LAG-SYNC-FS-LOG-108: the slow answer of a check the bound already settled does not end the next check (a row after it still reaches the new file)', async () => {
+  const { APPEND_LINK_HELD_MAX } = loadTs('src/main/appendLog.ts');
+  const p = path.join(dir(), 'log.jsonl');
+  let t = 1_000_000;
+  const f = new AppendFile(p, { now: () => t });
+  f.append('{"a":0}\n');
+  t += APPEND_LINK_CHECK_MS;
+  const w = watchFstat({ hold: true });
+  try {
+    for (let a = 0; a < APPEND_LINK_HELD_MAX; a++) f.append('{"a":0}\n');   // check A, settled by the bound
+    assert.deepEqual([w.asked, w.sync, f.sinceCheck], [1, 1, null], 'the bound answered check A on this thread: not deleted');
+    assert.ok(await until(() => w.held.length === 1), "check A's own answer is still on its way");
+    fs.rmSync(p);                                 // now the live log is deleted
+    t += APPEND_LINK_CHECK_MS;
+    f.append('{"a":1}\n');                        // starts check B
+    f.append('{"a":2}\n');
+    assert.equal(w.asked, 2);
+    assert.ok(await until(() => w.held.length === 2));
+    w.held.shift()();                             // check A's slow answer ("not deleted") arrives
+    assert.notEqual(f.sinceCheck, null, "A SETTLED CHECK'S LATE ANSWER DOES NOT END THE NEXT CHECK");
+    f.append('{"a":3}\n');                        // written to the ghost, remembered for check B
+    w.release();                                  // check B: deleted
+    assert.deepEqual(seq(p), [1, 2, 3], 'every row since check B began is in the new file, once, in order');
+  } finally { w.release(); w.restore(); }
+  f.close();
+});
+
 test('LAG-SYNC-FS-LOG-108: close() during a check on a deleted log still puts the rows in the new file; the late answer changes nothing', async () => {
   const p = path.join(dir(), 'log.jsonl');
   let t = 1_000_000;
