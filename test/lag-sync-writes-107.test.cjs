@@ -643,10 +643,13 @@ test('ledger: dispose during a save, then a reload, reads the flushed ledger and
 test('MAIL-LEDGER-FLUSH-LAG-108: a timer save that finds another write of the file in flight waits for it, never writing the whole file on main', async () => {
   const root = ledgerHive();
   fs.mkdirSync(path.join(root, 'state', 'mail'), { recursive: true });
+  const T0 = Date.now();
   const logs = [];
   const waits = [];   // every arm's wait, so a re-arm that spins (wait 0) shows
   const ml = new L.MailLedger({
-    root: () => root, appendLog: (r) => logs.push(r), readLogRows: () => [], writeDelayMs: 5,
+    // A clock that moves only when the test moves it (it never does here), so each re-arm's wait is
+    // exactly lastWriteAt + 5 - now = 5, with no ms tick between the two reads.
+    root: () => root, appendLog: (r) => logs.push(r), readLogRows: () => [], writeDelayMs: 5, clock: () => T0,
     setTimer: (fn, ms) => { waits.push(ms); const t = setTimeout(fn, ms); t.unref(); return t; }
   });
   ml.ledger(AGENT);
@@ -670,8 +673,7 @@ test('MAIL-LEDGER-FLUSH-LAG-108: a timer save that finds another write of the fi
     // Jim SHOULD 2: each re-arm waits a whole coalesce period, so the wait is no busy loop on main.
     const rearms = waits.slice(1);
     assert.ok(rearms.length >= 2, `the timer re-armed while it waited (${waits.join(',')})`);
-    // 4 or 5: the line reads Date.now twice (lastWriteAt, then arm's wait), and a ms may tick between.
-    assert.ok(rearms.every((ms) => ms >= 4 && ms <= 5), `every re-arm waits the coalesce period: ${waits.join(',')}`);
+    assert.ok(rearms.every((ms) => ms === 5), `every re-arm waits the coalesce period: ${waits.join(',')}`);
     g.open();
     assert.equal(await bounded(older, 'the other write'), 'published', 'the other write was not overtaken');
     await until(() => diskIds(root).includes('m-1'), 'our save, after it');
