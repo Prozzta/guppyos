@@ -48,11 +48,12 @@ export interface ScratchFacts {
 export interface ScratchPlan extends ScratchFacts { action: 'keep' | 'reap'; reason: string }
 
 export interface ScratchProcess { commandLine?: string | null; cwd?: string | null }
-export interface ScratchSweepResult { reaped: string[]; kept: Array<{ path: string; owner: string; reason: string }> }
+export interface BrokenInboundLink { path: string; target: null; }
+export interface ScratchSweepResult { reaped: string[]; kept: Array<{ path: string; owner: string; reason: string }>; brokenLinks: BrokenInboundLink[] }
 
 interface InboundRef { source: string; target: string; }
 interface InboundDir { mtimeMs: number; refs: InboundRef[]; children: string[]; }
-interface InboundLinkIndex { v: 1; floor: string; dirs: Record<string, InboundDir>; targets: Record<string, string[]>; issues: string[]; }
+interface InboundLinkIndex { v: 1; floor: string; dirs: Record<string, InboundDir>; targets: Record<string, string[]>; brokenLinks: BrokenInboundLink[]; }
 
 /** True only for a direct child of `_work`; cache/state directories never qualify. */
 export function managedScratchPath(workRoot: string, candidate: string): boolean {
@@ -192,7 +193,7 @@ function indexTargets(dirs: Record<string, InboundDir>): Record<string, string[]
 
 function ensureBefore(deadline: number): void { if (Date.now() > deadline) throw new Error('scan-timeout'); }
 
-async function scanInboundDir(path: string, dirs: Record<string, InboundDir>, issues: string[], deadline: number): Promise<void> {
+async function scanInboundDir(path: string, dirs: Record<string, InboundDir>, brokenLinks: BrokenInboundLink[], deadline: number): Promise<void> {
   ensureBefore(deadline);
   const st = await lstat(path);
   if (!st.isDirectory() || st.isSymbolicLink()) throw new Error(`not-directory:${path}`);
@@ -203,7 +204,7 @@ async function scanInboundDir(path: string, dirs: Record<string, InboundDir>, is
     if (childStat.isSymbolicLink()) {
       let target: string;
       try { target = await realpath(child); }
-      catch { issues.push(`broken-link:${child}`); continue; }
+      catch { brokenLinks.push({ path: child, target: null }); continue; }
       refs.push({ source: child, target: resolve(target) });
     } else if (childStat.isDirectory()) children.push(child);
     else if (childStat.isFile() && name === '.git') {
@@ -212,14 +213,14 @@ async function scanInboundDir(path: string, dirs: Record<string, InboundDir>, is
     }
   }
   dirs[path] = { mtimeMs: st.mtimeMs, refs, children };
-  for (const child of children) await scanInboundDir(child, dirs, issues, deadline);
+  for (const child of children) await scanInboundDir(child, dirs, brokenLinks, deadline);
 }
 
 async function readInboundIndex(file: string, floor: string): Promise<InboundLinkIndex | null> {
   try {
     const parsed = JSON.parse(await readFile(file, 'utf8')) as Partial<InboundLinkIndex>;
     if (parsed.v !== 1 || parsed.floor !== floor || !parsed.dirs || typeof parsed.dirs !== 'object') return null;
-    return { v: 1, floor, dirs: parsed.dirs as Record<string, InboundDir>, targets: parsed.targets && typeof parsed.targets === 'object' ? parsed.targets as Record<string, string[]> : indexTargets(parsed.dirs as Record<string, InboundDir>), issues: Array.isArray(parsed.issues) ? parsed.issues.filter((issue): issue is string => typeof issue === 'string') : [] };
+    return { v: 1, floor, dirs: parsed.dirs as Record<string, InboundDir>, targets: parsed.targets && typeof parsed.targets === 'object' ? parsed.targets as Record<string, string[]> : indexTargets(parsed.dirs as Record<string, InboundDir>), brokenLinks: Array.isArray(parsed.brokenLinks) ? parsed.brokenLinks.filter((link): link is BrokenInboundLink => !!link && typeof link.path === 'string' && link.target === null) : [] };
   } catch { return null; }
 }
 
@@ -233,9 +234,9 @@ export async function refreshInboundLinkIndex(hiveRoot: string, workRoot: string
   const floor = dirname(resolve(workRoot)); const file = inboundIndexFile(hiveRoot);
   try {
     const deadline = Date.now() + SCRATCH_INBOUND_INDEX_TIMEOUT_MS;
-    const prior = await readInboundIndex(file, floor); const dirs = prior ? { ...prior.dirs } : {}; let issues = prior ? [...prior.issues] : [];
+    const prior = await readInboundIndex(file, floor); const dirs = prior ? { ...prior.dirs } : {}; let brokenLinks = prior ? [...prior.brokenLinks] : [];
     let rebuilt = !prior;
-    if (!prior) await scanInboundDir(floor, dirs, issues, deadline);
+    if (!prior) await scanInboundDir(floor, dirs, brokenLinks, deadline);
     else {
       const changed: string[] = [];
       for (const [path, cached] of Object.entries(dirs)) {
@@ -253,14 +254,14 @@ export async function refreshInboundLinkIndex(hiveRoot: string, workRoot: string
       for (const path of [...new Set(changed)].sort((a, b) => a.length - b.length)) {
         if (!dirs[path]) continue;
         for (const old of Object.keys(dirs)) if (under(old, path)) delete dirs[old];
-        issues = issues.filter((issue) => !issue.startsWith('broken-link:') || !under(issue.slice('broken-link:'.length), path));
-        await scanInboundDir(path, dirs, issues, deadline);
+        brokenLinks = brokenLinks.filter((link) => !under(link.path, path));
+        await scanInboundDir(path, dirs, brokenLinks, deadline);
       }
       rebuilt = changed.length > 0;
     }
-    const index: InboundLinkIndex = { v: 1, floor, dirs, targets: indexTargets(dirs), issues };
+    const index: InboundLinkIndex = { v: 1, floor, dirs, targets: indexTargets(dirs), brokenLinks };
     await writeInboundIndex(file, index);
-    return { index, error: issues[0] ?? null, rebuilt };
+    return { index, error: null, rebuilt };
   } catch (e) { return { index: null, error: String(e instanceof Error ? e.message : e), rebuilt: false }; }
 }
 
@@ -268,6 +269,7 @@ export async function refreshInboundLinkIndex(hiveRoot: string, workRoot: string
 export function inboundLinksFromIndex(index: InboundLinkIndex, target: string): string[] {
   const wanted = resolve(target); const out: string[] = [];
   for (const [linkTarget, sources] of Object.entries(index.targets)) if (under(linkTarget, wanted)) out.push(...sources);
+  for (const link of index.brokenLinks) if (under(link.path, wanted)) out.push(`broken-link:${link.path}:target-unreadable`);
   return out.sort();
 }
 
@@ -469,10 +471,11 @@ export class ScratchDiskManager {
 
   private async sweepNow(owner?: string): Promise<ScratchSweepResult> {
     const root = this.hiveRoot(); const work = this.workRoot();
-    if (!root || !work) return { reaped: [], kept: [] };
-    const state = readScratchState(root); const rows = await this.processes(); const result: ScratchSweepResult = { reaped: [], kept: [] };
+    if (!root || !work) return { reaped: [], kept: [], brokenLinks: [] };
+    const state = readScratchState(root); const rows = await this.processes(); const result: ScratchSweepResult = { reaped: [], kept: [], brokenLinks: [] };
     const needsInboundCheck = state.records.some((record) => (!owner || record.owner === owner) && record.kind !== 'fixture');
     const initialIndex = needsInboundCheck ? await refreshInboundLinkIndex(root, work) : null;
+    if (initialIndex?.index) result.brokenLinks = initialIndex.index.brokenLinks;
     if (initialIndex && (!initialIndex.index || initialIndex.rebuilt || initialIndex.error)) {
       // Scanning is an all-or-nothing safety proof. A stale, partial, timed-out
       // or unreadable floor must never be treated as an empty inbound-link set.
