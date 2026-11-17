@@ -437,6 +437,88 @@ test('registry: with write-behind off (a bare class) the timer save is the synch
   } finally { WB.enableWriteBehind(); }
 });
 
+test('LAG-SYNC-FS-TAIL-108: registryTextChunks is saveRegistry\'s text byte for byte, at every piece size, and is the registry as it was when asked', () => {
+  const sizes = [1, 97, 4096, 64 * 1024];
+  const entry = (i) => ({ cardinality: i % 3 ? 'single' : 'multi', addedAt: `2026-11-17T10:00:${String(i % 60).padStart(2, '0')}Z`, addedBy: `andy "${i}" é中\n\t\\` });
+  const same = (reg, what) => {
+    const want = JSON.stringify(reg, null, 2) + '\n';
+    for (const size of sizes) assert.equal([...REG.registryTextChunks(reg, size)].join(''), want, `${what} (pieces of ${size})`);
+  };
+  same(structuredClone(REG.DEFAULT_KEY_REGISTRY), 'the default registry (no keys)');
+  const big = structuredClone(REG.DEFAULT_KEY_REGISTRY);
+  for (let i = 0; i < 500; i++) big.keys[`list.bulk.k${i}`] = entry(i);
+  same(big, '500 keys');
+  same({ keys: { 'list.a.b': entry(1) }, v: 1, namespaces: [] }, 'keys first');
+  same({ v: 1, gone: undefined, namespaces: [], extra: { a: [1, { b: 'x\ny' }], c: [] }, keys: { 'list.a.b': entry(2), 'list.a.none': undefined } }, 'undefined and nested values');
+  same({ v: 1, namespaces: [], keys: [] }, 'keys that are not a map');
+  same({}, 'an empty object');
+  // The text is the registry at the call, whatever happens to it before the pieces are read.
+  const want = JSON.stringify(big, null, 2) + '\n';
+  const pieces = REG.registryTextChunks(big, 4096);
+  big.keys['list.bulk.late'] = entry(7);
+  delete big.keys['list.bulk.k3'];
+  big.v = 2;
+  assert.equal([...pieces].join(''), want, 'a key added, a key removed and a value changed after the call are not in the text');
+});
+
+test('LAG-SYNC-FS-TAIL-108: the timer save writes a large registry in pieces, main runs between them, and a key acked between two pieces goes out with the next save', async () => {
+  const root = regRoot();
+  const seeded = structuredClone(REG.DEFAULT_KEY_REGISTRY);
+  for (let i = 0; i < 3000; i++) seeded.keys[`list.bulk.k${String(i).padStart(5, '0')}`] = { cardinality: 'multi', addedAt: '2026-11-17T09:00:00Z', addedBy: 'x'.repeat(40) };
+  fs.mkdirSync(path.dirname(REG.registryPath(root)), { recursive: true });
+  fs.writeFileSync(REG.registryPath(root), JSON.stringify(seeded, null, 2) + '\n');
+  const w = new REG.KeyRegistryWriter(root, () => assert.fail('save failed'), 5);
+  const file = path.basename(REG.registryPath(root));
+  const pieces = [];
+  const landed = [];
+  let turns = 0;
+  let spin = true;
+  let firstEntry;
+  const tick = () => { turns++; if (spin) setImmediate(tick); };
+  setImmediate(tick);
+  let calls;
+  try {
+    ({ calls } = await syncWrites(root, () => withAsync('rename', async (args, real) => {
+      const r = await real();
+      if (path.basename(String(args[1])) === file) landed.push(fs.readFileSync(REG.registryPath(root), 'utf8'));
+      return r;
+    }, () => withAsync('writeFile', (args, real) => {
+      if (!String(args[0]).includes(`${file}.tmp-`)) return real();
+      assert.equal(typeof args[1], 'object', 'the registry is not handed to writeFile as one string');
+      const it = args[1];
+      const first = pieces.length === 0;
+      const watched = (function* () {
+        let n = 0;
+        for (const s of it) {
+          if (first && n++ === 1) addKey(w, 'agent.andy.late');   // acked while the save is being written
+          pieces.push({ len: s.length, turn: turns, first });
+          yield s;
+        }
+      })();
+      return real(args[0], watched, ...args.slice(2));
+    }, async () => {
+      firstEntry = addKey(w, 'agent.andy.first');
+      await until(() => regKeys(root).length === 2, 'both keys saved');
+      await WB.settleWrites(10_000);
+    }))));
+  } finally { spin = false; }
+  assert.deepEqual(calls, [], 'no synchronous write under the hive');
+  const atStart = structuredClone(seeded);
+  atStart.keys['agent.andy.first'] = firstEntry;
+  assert.equal(landed.length, 2, 'two saves');
+  assert.equal(landed[0], JSON.stringify(atStart, null, 2) + '\n', 'the first save is the registry as it was when the save started, byte for byte');
+  const text = fs.readFileSync(REG.registryPath(root), 'utf8');
+  assert.equal(text, JSON.stringify(REG.loadRegistry(root), null, 2) + '\n', 'the file is saveRegistry\'s text, byte for byte');
+  assert.deepEqual(regKeys(root), ['agent.andy.first', 'agent.andy.late']);
+  const one = pieces.filter((p) => p.first);
+  assert.ok(text.length > 3 * 64 * 1024, `fixture: a registry of several pieces (${text.length} chars)`);
+  assert.ok(one.length >= 3, `written in pieces (${one.length})`);
+  assert.ok(pieces.every((p) => p.len < 64 * 1024 + 4096), `no piece much over 64 KiB (${pieces.map((p) => p.len)})`);
+  for (let i = 1; i < one.length; i++) assert.ok(one[i].turn > one[i - 1].turn, `main ran between piece ${i - 1} and piece ${i}`);
+  assert.equal(REG.registryText(root), text, 'nothing held any more');
+  assert.deepEqual(tmpsIn(path.dirname(REG.registryPath(root))), []);
+});
+
 // ───────────────────────────────────────────────────────── 2. state/mail/<agent>.json
 
 const AGENT = 'jim-1';

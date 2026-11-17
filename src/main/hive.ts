@@ -4068,9 +4068,11 @@ export class HiveManager {
   }
 
   /** Archive after delivery; a transient archive lock is never a route failure. */
-  private archiveDeliveredOutbox(outbox: string, full: string, from: string, file: string): boolean {
+  private async archiveDeliveredOutbox(outbox: string, full: string, from: string, file: string): Promise<boolean> {
     try {
-      renameSync(full, join(outbox, '.sent', file));
+      // LAG-SYNC-FS-TAIL-108: off the main thread (one rename held it for 540 ms). The pass awaits it, and
+      // passes are single-flight, so no later pass sees the file before it is in .sent or held below.
+      await fsPromises.rename(full, join(outbox, '.sent', file));
       this.outboxDeliveredArchives.delete(full);
       this.noteOutboxArchiveCleared(full, from, file);
       return true;
@@ -4132,7 +4134,7 @@ export class HiveManager {
         const deliveredFingerprint = this.outboxDeliveredArchives.get(full);
         if (deliveredFingerprint !== undefined) {
           if (deliveredFingerprint === this.outboxFingerprint(full)) {
-            archived += Number(this.archiveDeliveredOutbox(outbox, full, id, f));
+            archived += Number(await this.archiveDeliveredOutbox(outbox, full, id, f));
             continue;
           }
           // The sender replaced the stranded file, so route the new payload normally.
@@ -4262,7 +4264,7 @@ export class HiveManager {
           rejected += Number(await this.runRouteAsync(this.rejectOutboxFileSteps(outbox, full, id, f, 'route-failed', reason, error)));
           continue;
         }
-        this.archiveDeliveredOutbox(outbox, full, id, f);
+        await this.archiveDeliveredOutbox(outbox, full, id, f);
       }
     }
     // A file removed by its writer or routed successfully must not leave a stale
