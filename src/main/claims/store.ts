@@ -55,6 +55,7 @@ import {
 import { canonicalJson, keyIdOf, recordMac, sha256Hex } from './canonical';
 import { hiveIdOf, type HeadAnchorStore, type LedgerKeyRecord } from './keyProvider';
 import { provenStatKey, statKey } from '../statCacheKey';
+import { removePathLinkSafeSync } from '../linkSafeRemove';
 import { redactSecrets } from './redact';
 import { REKEY_COMMAND } from './rekeyCommand';
 import { normalizeTtl, parseStoredTtl, zonelessHint } from './ttl';
@@ -1960,10 +1961,10 @@ export class ClaimStore {
     try { this.d.headAnchor?.set(this.d.hiveRoot, agentId, { head: cur?.head ?? '', lastId: cur?.lastId ?? '', pending: { head, lastId: ev.id } }); }
     catch (e) { this.log({ kind: 'claims-purge-failed', agentId, step: 'anchor', error: String(e).slice(0, 160) }); return { ok: false, error: 'the re-anchor could not be recorded; nothing was purged' }; }
     try {
-      nodeFs.rmSync(newDir, { recursive: true, force: true });
+      removePathLinkSafeSync(newDir);
       nodeFs.mkdirSync(newDir, { recursive: true });
       for (const [name, text] of files) writeDurable(join(newDir, name), text);
-      nodeFs.rmSync(old, { recursive: true, force: true });
+      removePathLinkSafeSync(old);
       nodeFs.renameSync(dir, old);
       nodeFs.renameSync(newDir, dir);
     } catch (e) {
@@ -2025,14 +2026,17 @@ export class ClaimStore {
     const fresh = `${dir}.purge-new`;
     const old = `${dir}.purge-old`;
     try {
+      // ELECTRON-RMSYNC-AGENT-WRITABLE-108: both names are in the agent's own folder, so either can
+      // be a junction an agent made. They are removed link-safe: a recursive rmSync under Electron
+      // would empty the folder the link points at, on any read of this agent's ledger.
       const hasDir = nodeFs.existsSync(dir), hasFresh = nodeFs.existsSync(fresh), hasOld = nodeFs.existsSync(old);
       // CL-W7 B1: only a swap main recorded (a pending re-anchor in user-data) is finished; a
       // purge-new/purge-old pair made by anything else is left alone, and the anchor check judges
       // the ledger as it is (a missing claims dir is a cut).
       const pending = !!this.d.headAnchor?.get(this.d.hiveRoot, agentId)?.pending;
       if (!hasDir && hasFresh && hasOld && pending) { nodeFs.renameSync(fresh, dir); this.rosterDirty(); this.log({ kind: 'claims-purge-finished', agentId }); }
-      else if (hasDir && hasFresh) { nodeFs.rmSync(fresh, { recursive: true, force: true }); this.log({ kind: 'claims-purge-dropped', agentId }); }
-      if (nodeFs.existsSync(dir) && hasOld) nodeFs.rmSync(old, { recursive: true, force: true });
+      else if (hasDir && hasFresh) { removePathLinkSafeSync(fresh); this.log({ kind: 'claims-purge-dropped', agentId }); }
+      if (nodeFs.existsSync(dir) && hasOld) removePathLinkSafeSync(old);
     } catch (e) {
       this.log({ kind: 'claims-purge-failed', agentId, step: 'finish', error: String(e).slice(0, 160) });
     }
@@ -2058,7 +2062,7 @@ export class ClaimStore {
     try {
       if (nodeFs.existsSync(dir)) return null;
       const tmp = `${dir}.tmp-${process.pid}`;
-      nodeFs.rmSync(tmp, { recursive: true, force: true });
+      removePathLinkSafeSync(tmp);
       nodeFs.mkdirSync(tmp, { recursive: true });
       for (const f of this.segments(agentId)) nodeFs.copyFileSync(f, join(tmp, basename(f)));
       nodeFs.renameSync(tmp, dir);

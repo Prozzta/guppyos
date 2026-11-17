@@ -22,6 +22,7 @@
 import { existsSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync, appendFileSync, unlinkSync, truncateSync, linkSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { isGeneratedMemory } from './claims/generated';
+import { removePathLinkSafeSync } from './linkSafeRemove';
 
 /** memory.md above this many bytes is rolled over. */
 export const MEMORY_ROLLOVER_BYTES = 32 * 1024;
@@ -437,7 +438,7 @@ function rolloverOnce(dir: string, file: string, flags: MoveFlags, now: number, 
   // Whenever memory.md is NOT replaced, undo this archive append: the text is still in memory.md,
   // and the next spawn's rollover must not archive it twice. Returns why the undo did not happen.
   const undo = (): string | undefined => {
-    try { rmSync(tmp, { force: true, recursive: true }); } catch { /* best effort: an antivirus may hold it */ }
+    try { removePathLinkSafeSync(tmp); } catch { /* best effort: an antivirus may hold it */ }
     try {
       // Andy M1 (02bfc587 audit): undo only OUR append. If the archive is no longer exactly the size it
       // had after it, another rollover of this dir (another process) has appended since and may already
