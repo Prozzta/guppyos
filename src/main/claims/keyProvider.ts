@@ -11,9 +11,10 @@
  * is not usable before `app` is ready).
  */
 import { createHash, randomBytes } from 'node:crypto';
-import { closeSync, existsSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
+import { closeSync, existsSync, linkSync, mkdirSync, openSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { MacKeyLoad, MacKeyProvider } from '../../shared/claims';
+import { renameWithRetry } from '../atomicJson';
 import { provenStatKey, statKey } from '../statCacheKey';
 import { keyIdOf } from './canonical';
 
@@ -47,6 +48,9 @@ export function withUserDataLock<T>(file: string, fn: () => T): T {
       if (code !== 'EEXIST' && code !== 'EPERM' && code !== 'EACCES') throw e;
       try { if (Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) { unlinkSync(lock); continue; } } catch { /* gone or busy: retry */ }
       if (Date.now() > deadline) throw new Error(`the user-data lock stayed busy: ${lock}`);
+      // This blocks the calling thread (main) for up to LOCK_WAIT_MS while another process holds the
+      // lock. That is fine only because a holder runs a read, a small write and a rename (milliseconds).
+      // Never widen what runs under withUserDataLock: no I/O on big files, no awaits, no IPC.
       Atomics.wait(lockSleep, 0, 0, 5);
     }
   }
@@ -59,8 +63,27 @@ export function withUserDataLock<T>(file: string, fn: () => T): T {
   }
 }
 
+/**
+ * Jim SHOULD 2 (CLAIMS-REKEY-SHARED-KEY): the rename that publishes a shared record file, under its
+ * lock. A plain rename over a file another process is reading fails with EPERM on Windows (measured:
+ * about 35% of sets with one reader in a tight loop). renameWithRetry (ASYNC-RENAME-POSIX-107) uses the
+ * POSIX rename, which replaces a file a reader holds open, then a bounded EPERM/EBUSY retry
+ * (5 attempts, 20-80 ms apart). A tmp file is never left behind when it still fails.
+ */
+function publishLocked(file: string, text: string): void {
+  const tmp = `${file}.${process.pid}.tmp`;
+  try {
+    writeFileSync(tmp, text);
+    renameWithRetry(tmp, file);
+  } catch (e) {
+    try { rmSync(tmp, { force: true }); } catch { /* keep the publish error */ }
+    throw e;
+  }
+}
+
 export class SafeStorageKeyProvider implements MacKeyProvider {
-  constructor(private readonly file: string, private readonly safe: SafeStorageLike) {}
+  /** `file` is public so the unreadable-key alert can name it (Jim SHOULD 1). */
+  constructor(readonly file: string, private readonly safe: SafeStorageLike) {}
 
   load(): MacKeyLoad {
     if (!this.safe.isEncryptionAvailable()) return { ok: false, reason: 'unavailable' };
@@ -80,9 +103,9 @@ export class SafeStorageKeyProvider implements MacKeyProvider {
    * returned as is, one that does not decrypt is refused ('decrypt-failed', the caller alerts).
    * The new file is linked in exclusively, so two instances that both found none end on one key.
    */
-  create(): MacKeyLoad {
+  create(retry = true): MacKeyLoad {
     if (!this.safe.isEncryptionAvailable()) return { ok: false, reason: 'unavailable' };
-    if (existsSync(this.file)) return this.existing();
+    if (existsSync(this.file)) return this.existing(retry);
     const key = randomBytes(KEY_BYTES);
     mkdirSync(dirname(this.file), { recursive: true });
     const tmp = `${this.file}.${process.pid}.tmp`;
@@ -90,7 +113,7 @@ export class SafeStorageKeyProvider implements MacKeyProvider {
     try {
       linkSync(tmp, this.file);
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === 'EEXIST') return this.existing();
+      if ((e as NodeJS.ErrnoException).code === 'EEXIST') return this.existing(retry);
       throw e;
     } finally {
       try { unlinkSync(tmp); } catch { /* gone */ }
@@ -98,9 +121,15 @@ export class SafeStorageKeyProvider implements MacKeyProvider {
     return { ok: true, key, keyId: keyIdOf(key) };
   }
 
-  private existing(): MacKeyLoad {
+  /**
+   * The key file was seen, so load it. Jim NIT 1: if it vanished in between (another instance's
+   * Human moved it aside), that is 'missing', not 'decrypt-failed' (which would raise the
+   * unreadable-key alert): create once more, then pass 'missing' through.
+   */
+  private existing(retry: boolean): MacKeyLoad {
     const l = this.load();
-    return l.ok || l.reason === 'unavailable' ? l : { ok: false, reason: 'decrypt-failed' };
+    if (l.ok || l.reason !== 'missing') return l;
+    return retry ? this.create(false) : l;
   }
 }
 
@@ -140,9 +169,7 @@ export class FileLedgerKeyRecord implements LedgerKeyRecord {
     withUserDataLock(this.file, () => {
       const j = this.read();
       j.hives[hiveIdOf(hiveRoot)] = { keyId, at: new Date().toISOString() };
-      const tmp = `${this.file}.${process.pid}.tmp`;
-      writeFileSync(tmp, JSON.stringify(j, null, 2) + '\n');
-      renameSync(tmp, this.file);
+      publishLocked(this.file, JSON.stringify(j, null, 2) + '\n');
     });
   }
 }
@@ -241,9 +268,7 @@ export class FileHeadAnchorStore implements HeadAnchorStore {
     this.batchFresh = false;
     const h = (j.hives[hiveIdOf(hiveRoot)] ??= {});
     h[agentId] = { head: a.head, lastId: a.lastId, at: new Date().toISOString(), ...(a.pending ? { pending: { head: a.pending.head, lastId: a.pending.lastId } } : {}) };
-    const tmp = `${this.file}.${process.pid}.tmp`;
-    writeFileSync(tmp, JSON.stringify(j, null, 2));
-    renameSync(tmp, this.file);
+    publishLocked(this.file, JSON.stringify(j, null, 2));
   }
 }
 

@@ -1832,7 +1832,11 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
           });
         },
         alert: (row) => {
-          const what = row.kind === CLAIMS_ALERT_KEY_MISSING
+          // Jim SHOULD 1: an unreadable key file carries its own path and recovery (store.ts
+          // unreadableKeyRecovery); the generic text below is for a missing key.
+          const what = row.kind === CLAIMS_ALERT_KEY_MISSING && typeof row.recovery === 'string'
+            ? row.recovery
+            : row.kind === CLAIMS_ALERT_KEY_MISSING
             ? 'The claim ledger key is missing or cannot be decrypted: every claim ledger is read-only. Recovery is the Human rekey in Settings; nothing is fixed automatically.'
             : `${String(row.agentId)}'s claim ledger failed verification (${String(row.reason)} at ${String(row.brokenAt)}) and is read-only. Nothing was repaired; the Human decides.`;
           hive.send({ to: 'god', act: 'inform', wake: 'now', subject: `Claim ledger alert: ${String(row.kind)}`, body: `${what}\nFor god and the Human.` }, 'claims');

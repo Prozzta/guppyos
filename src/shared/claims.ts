@@ -206,6 +206,8 @@ export interface MacKeyProvider {
    * never replaced: a key file that exists but does not decrypt is refused (CLAIMS-REKEY-SHARED-KEY).
    */
   create(): MacKeyLoad;
+  /** The full path of a file-backed key, named in the unreadable-key alert (Jim SHOULD 1). */
+  readonly file?: string;
 }
 
 /** hive/memory-keys.json */

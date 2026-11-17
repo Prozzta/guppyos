@@ -126,6 +126,20 @@ function linkedInto(linked: Set<string>, records: readonly LedgerRec[], from: nu
 /** A19: records per turn when primeView builds a view's statuses from the worker's codes. */
 const PRIME_SLICE = 20000;
 
+/**
+ * Jim SHOULD 1 (CLAIMS-REKEY-SHARED-KEY): the exact way out when the shared key file exists but
+ * does not decrypt (create() and rekey both refuse it), and what the ledgers do afterwards.
+ */
+export function unreadableKeyRecovery(file: string): string {
+  return [
+    `The shared claim ledger key file does not decrypt: ${file}`,
+    'Nothing replaces it automatically: every floor that uses this Guppy user-data folder shares it.',
+    `Recovery (the Human): quit every Guppy instance, then move ${file} out of that folder. Keep the file: if it decrypts again later (for example under the Windows account that wrote it), putting it back makes the old ledgers verify again.`,
+    'After that, Guppy reports the key as missing. Each floor then needs the Human rekey; there is no Settings button for it yet, so ask god to run it for that floor.',
+    'Until a floor is rekeyed, all of its claim ledgers stay read-only. The rekey makes a new key and writes one rekey line on each ledger under it. Records written before that line are accepted on their prev chain only: without the old key their MACs cannot be checked.',
+  ].join('\n');
+}
+
 const SEGMENT_RE = /^(\d{4})-(\d{2})\.jsonl$/;
 const AGENT_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/;
 const ID_RE = /^[ce]-[0-9a-f]{12,32}$/;
@@ -491,8 +505,13 @@ export class ClaimStore {
   /** CLAIMS-REKEY-SHARED-KEY: the shared key file exists but does not decrypt; it is left as is. */
   private alertUnreadableKey(reason: string): void {
     if (reason !== 'decrypt-failed') return;
+    const file = this.d.keys.file ?? 'claims-mac.key in the Guppy user-data folder';
+    // Jim SHOULD 1: name the file and the one way out. Nothing replaces the key automatically: it is
+    // shared by every floor of this user-data folder, and replacing it orphans their ledgers.
     this.alertOnce('key-unreadable', {
-      kind: CLAIMS_ALERT_KEY_MISSING, reason: 'the shared ledger key file exists but does not decrypt; it was not replaced', to: ['god', 'human'],
+      kind: CLAIMS_ALERT_KEY_MISSING, file, to: ['god', 'human'],
+      reason: `the shared ledger key file exists but does not decrypt; it was not replaced: ${file}`,
+      recovery: unreadableKeyRecovery(file),
     });
   }
 
@@ -902,12 +921,13 @@ export class ClaimStore {
     if (stored?.pending && !this.anchorTimers.has(agentId)) {
       const to = stored.pending;
       if (reaches(to.head)) {
-        if (advance) anchors.set(this.d.hiveRoot, agentId, { head: to.head, lastId: to.lastId });
+        // Jim SHOULD 2: a failed anchor write is logged; the pending purge stays and the next check commits it.
+        if (advance) this.setAnchor(agentId, { head: to.head, lastId: to.lastId }, 'purge-commit');
         if (advance && head !== to.head) this.anchorSoon(agentId, head, lines[lines.length - 1].rec?.id ?? '');
         return 'ok';
       }
       if (stored.head && !reaches(stored.head)) return { brokenAt: 'head-anchor', reason: 'prev' };
-      if (advance) anchors.set(this.d.hiveRoot, agentId, { head: stored.head, lastId: stored.lastId });
+      if (advance) this.setAnchor(agentId, { head: stored.head, lastId: stored.lastId }, 'purge-drop');
     }
     // A head written by this process but not yet flushed is the newer anchor (Jim's note: a cut
     // inside the debounce window is caught in-process too).
@@ -960,8 +980,26 @@ export class ClaimStore {
     if (!p) return;
     clearTimeout(p.t);
     this.anchorTimers.delete(agentId);
-    try { this.d.headAnchor?.set(this.d.hiveRoot, agentId, { head: p.head, lastId: p.lastId }); }
-    catch (e) { this.log({ kind: 'claims-anchor-failed', agentId, error: String(e).slice(0, 160) }); }
+    this.setAnchor(agentId, { head: p.head, lastId: p.lastId }, 'flush');
+  }
+
+  /**
+   * Jim SHOULD 2: every head-anchor write. The store behind it renames under a lock that can stay
+   * busy (5 s) or fail with EPERM after its retries; that is logged and reported, never thrown.
+   */
+  private setAnchor(agentId: string, a: { head: string; lastId: string }, at: string): boolean {
+    try { this.d.headAnchor?.set(this.d.hiveRoot, agentId, a); return true; }
+    catch (e) { this.log({ kind: 'claims-anchor-failed', agentId, at, error: String(e).slice(0, 160) }); return false; }
+  }
+
+  /** Jim SHOULD 2: the key-id record write; null when written, else the error (logged, never thrown). */
+  private recordKeyId(keyId: string, at: string): string | null {
+    try { this.d.keyRecord.set(this.d.hiveRoot, keyId); return null; }
+    catch (e) {
+      const error = String(e).slice(0, 160);
+      this.log({ kind: 'claims-key-record-failed', keyId, at, error });
+      return error;
+    }
   }
 
   /**
@@ -983,7 +1021,7 @@ export class ClaimStore {
       head = sha256Hex(line);
       try { lastId = (JSON.parse(line) as LedgerRec).id; } catch { /* the chain check reports it */ }
     }
-    this.d.headAnchor.set(this.d.hiveRoot, agentId, { head, lastId });
+    if (!this.setAnchor(agentId, { head, lastId }, 'reset')) return false;
     this.anchorTimers.delete(agentId);
     this.state.delete(agentId);
     this.alerted.forEach((k) => { if (k.startsWith(`chain:${agentId}:head-anchor`)) this.alerted.delete(k); });
@@ -1062,7 +1100,8 @@ export class ClaimStore {
       const expected = this.d.keyRecord.get(this.d.hiveRoot);
       if (expected === k.keyId) { this.keyMissing = false; this.key = k.key; return k.key; }
       if (!this.anySegmentAnywhere()) {
-        this.d.keyRecord.set(this.d.hiveRoot, k.keyId);
+        // No ledger exists yet, so nothing is unverifiable: a failed record is retried on the next use.
+        if (this.recordKeyId(k.keyId, 'first-use') !== null) return null;
         this.keyMissing = false; this.key = k.key; return k.key;
       }
       reason = expected ? 'the loaded key is not this ledger key' : 'no record of this ledger key';
@@ -1206,8 +1245,9 @@ export class ClaimStore {
         this.alertUnreadableKey(made.reason);
         return { ok: false, error: `no ledger key could be created (${made.reason})` };
       }
+      const recErr = this.recordKeyId(made.keyId, 'first-use');
+      if (recErr !== null) return { ok: false, error: `the ledger key id could not be recorded (${recErr}); nothing was written` };
       key = made.key;
-      this.d.keyRecord.set(this.d.hiveRoot, made.keyId);
       this.key = made.key;
       this.keyMissing = false;
       this.log({ kind: 'claims-key-created', keyId: made.keyId });
@@ -1795,16 +1835,19 @@ export class ClaimStore {
       });
       if (done) rekeyed.push(a); else { failed.push(a); refused.push({ agentId: a, why: 'the rekey append failed' }); }
     }
-    if (failed.length === 0) {
-      this.d.keyRecord.set(this.d.hiveRoot, made.keyId);
+    // Jim SHOULD 2: a failed record write is a refusal, never a throw. The lines stay written; the
+    // record still names the old key, so every ledger reads key-missing and a retry is safe (F5).
+    const recErr = failed.length === 0 ? this.recordKeyId(made.keyId, 'rekey') : 'skipped';
+    if (recErr === null) {
       this.key = made.key;
       this.keyMissing = false;
       this.alerted.delete('key-missing');
     } else {
+      if (failed.length === 0) for (const a of rekeyed) refused.push({ agentId: a, why: `the new key id could not be recorded (${recErr}); retry the rekey` });
       this.keyMissing = true;
       for (const a of eligible) this.state.delete(a);
     }
-    this.log({ kind: 'claims-rekey', keyId: made.keyId, recorded: failed.length === 0, rekeyed, refused });
+    this.log({ kind: 'claims-rekey', keyId: made.keyId, recorded: recErr === null, rekeyed, refused });
     return { ok: refused.length === 0, keyId: made.keyId, rekeyed, refused };
   }
 
