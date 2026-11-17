@@ -144,12 +144,27 @@ test('install key changes for patch inputs and is stable for unchanged project i
   assert.notEqual(a, scratch.managedInstallKey(project, '23.0.0', 'win32', 'x64'));
 });
 
-test('inbound scan finds a scoped node_modules junction and never follows it for disk size', { skip: process.platform !== 'win32' }, () => {
+test('persisted whole-floor inbound index finds nested, outside and gitdir references without following links', { skip: process.platform !== 'win32' }, async () => {
   const work = path.join(jail, 'links'); const victim = path.join(work, 'victim'); const user = path.join(work, 'user');
   fs.mkdirSync(path.join(victim, 'pkg'), { recursive: true }); fs.mkdirSync(path.join(user, 'node_modules', '@scope'), { recursive: true });
+  const outside = path.join(jail, 'MunderDev', 'consumer'); fs.mkdirSync(path.join(outside, 'nested', 'modules'), { recursive: true });
+  const gitUser = path.join(jail, 'other-worktree'); fs.mkdirSync(gitUser, { recursive: true });
   fs.writeFileSync(path.join(victim, 'pkg', 'payload'), crypto.randomBytes(64));
   fs.symlinkSync(path.join(victim, 'pkg'), path.join(user, 'node_modules', '@scope', 'pkg'), 'junction');
-  assert.deepEqual(scratch.inboundNodeModulesLinks(work, victim), [path.join(user, 'node_modules', '@scope', 'pkg')]);
+  fs.symlinkSync(path.join(victim, 'pkg'), path.join(outside, 'nested', 'modules', 'pkg'), 'junction');
+  fs.writeFileSync(path.join(gitUser, '.git'), 'gitdir: ../links/victim/git-meta\\n');
+  const hive = path.join(jail, 'links-hive');
+  const cold = await scratch.refreshInboundLinkIndex(hive, work);
+  assert.equal(cold.error, null);
+  const expected = [
+    path.join(user, 'node_modules', '@scope', 'pkg'),
+    path.join(outside, 'nested', 'modules', 'pkg'),
+    `gitdir:${path.join(gitUser, '.git')}`
+  ].sort();
+  assert.deepEqual(scratch.inboundLinksFromIndex(cold.index, victim), expected);
+  const warm = await scratch.refreshInboundLinkIndex(hive, work);
+  assert.equal(warm.error, null);
+  assert.deepEqual(scratch.inboundLinksFromIndex(warm.index, victim), expected);
   assert.ok(scratch.scratchBytes(work) < 256, 'junction target is not counted through the user tree');
 });
 

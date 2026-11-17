@@ -7,7 +7,7 @@
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
-import { cp, lstat, readdir, symlink } from 'node:fs/promises';
+import { cp, lstat, mkdir, readdir, readFile, realpath, symlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { atomicWriteJson } from './atomicJson';
 import { findReparsePointsSync, removeReparsePoint, removeReparsePointSync, safeRemoveTree, unlinkReparsePointsUnderSync } from './fsSafeRemove';
@@ -19,6 +19,8 @@ export const SCRATCH_STATE_FILE = 'scratch-disk.json';
 export const SCRATCH_CACHE_DIR = '.scratch-node-modules';
 export const SCRATCH_FIXTURE_DIR = 'fixtures';
 export const SCRATCH_FIXTURE_STAMP = '.guppy-fixture.json';
+export const SCRATCH_INBOUND_INDEX_FILE = 'scratch-inbound-links.json';
+export const SCRATCH_INBOUND_INDEX_TIMEOUT_MS = 120_000;
 
 export interface ScratchRecord {
   path: string;
@@ -41,11 +43,16 @@ export interface ScratchFacts {
   cardDone: boolean;
   idle: boolean;
   ignoredFiles?: number;
+  ignoredPaths?: string[];
 }
 export interface ScratchPlan extends ScratchFacts { action: 'keep' | 'reap'; reason: string }
 
 export interface ScratchProcess { commandLine?: string | null; cwd?: string | null }
 export interface ScratchSweepResult { reaped: string[]; kept: Array<{ path: string; owner: string; reason: string }> }
+
+interface InboundRef { source: string; target: string; }
+interface InboundDir { mtimeMs: number; refs: InboundRef[]; children: string[]; }
+interface InboundLinkIndex { v: 1; floor: string; dirs: Record<string, InboundDir>; targets: Record<string, string[]>; }
 
 /** True only for a direct child of `_work`; cache/state directories never qualify. */
 export function managedScratchPath(workRoot: string, candidate: string): boolean {
@@ -162,43 +169,100 @@ export async function refreshManagedNodeModules(hiveRoot: string, project: strin
   await attachManagedNodeModules(hiveRoot, project, nextKey);
 }
 
-/** Entries with any `_work` junction into them are in use and cannot be garbage-collected. */
-export function cacheEntryInUse(workRoot: string, entry: string): boolean {
-  return inboundNodeModulesLinks(workRoot, entry).length > 0;
-}
-
 function isLink(p: string): boolean { try { return lstatSync(p).isSymbolicLink(); } catch { return false; } }
 function under(child: string, parent: string): boolean {
   const r = relative(resolve(parent), resolve(child)); return r === '' || (!r.startsWith('..') && !isAbsolute(r));
 }
 
 /**
- * Find every link into `target` from the floor root, not just node_modules.
- * Git's `.git` gitdir files are treated as incoming references too. Any
- * unreadable location is reported as an unsafe reference so deletion fails
- * closed rather than assuming the scan saw everything.
+ * The inbound-reference index is persisted under hive state.  A cold build
+ * walks the entire floor with lstat only; links are recorded and never
+ * descended.  A warm refresh lstats every known directory and re-walks only a
+ * directory whose mtime changed.  Any error makes the index unusable, which
+ * vetoes the complete sweep rather than quietly deleting on partial evidence.
  */
-export function inboundNodeModulesLinks(workRoot: string, target: string): string[] {
-  const out: string[] = []; const wanted = resolve(target); const floor = dirname(resolve(workRoot));
-  const visit = (p: string): void => {
-    let st; try { st = lstatSync(p); } catch { out.push(`unreadable:${p}`); return; }
-    if (st.isSymbolicLink()) {
-      try { if (under(realpathSync(p), wanted)) out.push(p); } catch { out.push(`broken-link:${p}`); }
-      return;
+export function inboundIndexFile(hiveRoot: string): string { return join(hiveRoot, 'state', SCRATCH_INBOUND_INDEX_FILE); }
+
+function indexTargets(dirs: Record<string, InboundDir>): Record<string, string[]> {
+  const targets: Record<string, string[]> = {};
+  for (const dir of Object.values(dirs)) for (const ref of dir.refs) (targets[ref.target] ??= []).push(ref.source);
+  for (const sources of Object.values(targets)) sources.sort();
+  return targets;
+}
+
+function ensureBefore(deadline: number): void { if (Date.now() > deadline) throw new Error('scan-timeout'); }
+
+async function scanInboundDir(path: string, dirs: Record<string, InboundDir>, deadline: number): Promise<void> {
+  ensureBefore(deadline);
+  const st = await lstat(path);
+  if (!st.isDirectory() || st.isSymbolicLink()) throw new Error(`not-directory:${path}`);
+  const refs: InboundRef[] = []; const children: string[] = [];
+  for (const name of await readdir(path)) {
+    ensureBefore(deadline);
+    const child = join(path, name); const childStat = await lstat(child);
+    if (childStat.isSymbolicLink()) {
+      let target: string; try { target = await realpath(child); } catch { throw new Error(`broken-link:${child}`); }
+      refs.push({ source: child, target: resolve(target) });
+    } else if (childStat.isDirectory()) children.push(child);
+    else if (childStat.isFile() && name === '.git') {
+      const raw = await readFile(child, 'utf8'); const m = /^gitdir:\s*(.+)\s*$/im.exec(raw);
+      if (m) refs.push({ source: `gitdir:${child}`, target: resolve(dirname(child), m[1]) });
     }
-    if (st.isFile()) {
-      if (basename(p) !== '.git') return;
-      try {
-        const m = /^gitdir:\s*(.+)\s*$/im.exec(readFileSync(p, 'utf8'));
-        if (m && under(resolve(dirname(p), m[1]), wanted)) out.push(`gitdir:${p}`);
-      } catch { out.push(`unreadable:${p}`); }
-      return;
+  }
+  dirs[path] = { mtimeMs: st.mtimeMs, refs, children };
+  for (const child of children) await scanInboundDir(child, dirs, deadline);
+}
+
+async function readInboundIndex(file: string, floor: string): Promise<InboundLinkIndex | null> {
+  try {
+    const parsed = JSON.parse(await readFile(file, 'utf8')) as Partial<InboundLinkIndex>;
+    if (parsed.v !== 1 || parsed.floor !== floor || !parsed.dirs || typeof parsed.dirs !== 'object') return null;
+    return { v: 1, floor, dirs: parsed.dirs as Record<string, InboundDir>, targets: parsed.targets && typeof parsed.targets === 'object' ? parsed.targets as Record<string, string[]> : indexTargets(parsed.dirs as Record<string, InboundDir>) };
+  } catch { return null; }
+}
+
+async function writeInboundIndex(file: string, index: InboundLinkIndex): Promise<void> {
+  await mkdir(dirname(file), { recursive: true });
+  await writeFile(file, JSON.stringify(index), 'utf8');
+}
+
+/** Build/refresh the persisted whole-floor index. `error` is deliberately a deletion veto. */
+export async function refreshInboundLinkIndex(hiveRoot: string, workRoot: string): Promise<{ index: InboundLinkIndex | null; error: string | null }> {
+  const floor = dirname(resolve(workRoot)); const file = inboundIndexFile(hiveRoot);
+  try {
+    const deadline = Date.now() + SCRATCH_INBOUND_INDEX_TIMEOUT_MS;
+    const prior = await readInboundIndex(file, floor); const dirs = prior ? { ...prior.dirs } : {};
+    if (!prior) await scanInboundDir(floor, dirs, deadline);
+    else {
+      const changed: string[] = [];
+      for (const [path, cached] of Object.entries(dirs)) {
+        ensureBefore(deadline);
+        try {
+          const st = await lstat(path);
+          if (!st.isDirectory() || st.isSymbolicLink()) throw new Error(`not-directory:${path}`);
+          if (st.mtimeMs !== cached.mtimeMs) changed.push(path);
+        } catch (e) {
+          // A vanished child is harmless only after its surviving parent is rescanned.
+          if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+          const parent = dirname(path); if (dirs[parent]) changed.push(parent); else delete dirs[path];
+        }
+      }
+      for (const path of [...new Set(changed)].sort((a, b) => a.length - b.length)) {
+        if (!dirs[path]) continue;
+        for (const old of Object.keys(dirs)) if (under(old, path)) delete dirs[old];
+        await scanInboundDir(path, dirs, deadline);
+      }
     }
-    if (!st.isDirectory()) return;
-    let names: string[]; try { names = readdirSync(p); } catch { out.push(`unreadable:${p}`); return; }
-    for (const name of names) visit(join(p, name));
-  };
-  visit(floor);
+    const index: InboundLinkIndex = { v: 1, floor, dirs, targets: indexTargets(dirs) };
+    await writeInboundIndex(file, index);
+    return { index, error: null };
+  } catch (e) { return { index: null, error: String(e instanceof Error ? e.message : e) }; }
+}
+
+/** Resolve all recorded incoming links (including gitdir files) to a target subtree. */
+export function inboundLinksFromIndex(index: InboundLinkIndex, target: string): string[] {
+  const wanted = resolve(target); const out: string[] = [];
+  for (const [linkTarget, sources] of Object.entries(index.targets)) if (under(linkTarget, wanted)) out.push(...sources);
   return out.sort();
 }
 
@@ -207,14 +271,17 @@ function gitAsync(path: string, args: string[]): Promise<string | null> {
 }
 
 /** A worktree is acceptable only when its exact HEAD equals its origin tracking ref. */
-export async function gitScratchFacts(path: string): Promise<Pick<ScratchFacts, 'dirty' | 'onOrigin' | 'ignoredFiles'>> {
+export async function gitScratchFacts(path: string): Promise<Pick<ScratchFacts, 'dirty' | 'onOrigin' | 'ignoredFiles' | 'ignoredPaths'>> {
   // A stale local tracking ref is not evidence that deletion is safe.
   if (await gitAsync(path, ['fetch', '--quiet', 'origin']) === null) return { dirty: true, onOrigin: false, ignoredFiles: 0 };
+  // Remove only Git's stale metadata; a failure leaves this root non-reapable.
+  if (await gitAsync(path, ['worktree', 'prune']) === null) return { dirty: true, onOrigin: false, ignoredFiles: 0 };
   const [status, ignored, head, upstream] = await Promise.all([
     gitAsync(path, ['status', '--porcelain=v1', '--untracked-files=all']), gitAsync(path, ['status', '--porcelain=v1', '--ignored']),
     gitAsync(path, ['rev-parse', 'HEAD']), gitAsync(path, ['rev-parse', '@{upstream}'])
   ]);
-  return { dirty: status === null || status !== '', onOrigin: !!head && !!upstream && head === upstream, ignoredFiles: ignored?.split(/\r?\n/).filter((line) => line.startsWith('!! ')).length ?? 0 };
+  const ignoredPaths = ignored?.split(/\r?\n/).filter((line) => line.startsWith('!! ')).map((line) => line.slice(3)).sort() ?? [];
+  return { dirty: status === null || status !== '', onOrigin: !!head && !!upstream && head === upstream, ignoredFiles: ignoredPaths.length, ignoredPaths };
 }
 
 /** A `.git` directory is a shared repository and is never a disposable worktree. */
@@ -399,6 +466,17 @@ export class ScratchDiskManager {
     const root = this.hiveRoot(); const work = this.workRoot();
     if (!root || !work) return { reaped: [], kept: [] };
     const state = readScratchState(root); const rows = await this.processes(); const result: ScratchSweepResult = { reaped: [], kept: [] };
+    const initialIndex = await refreshInboundLinkIndex(root, work);
+    if (!initialIndex.index) {
+      // Scanning is an all-or-nothing safety proof. A stale, partial, timed-out
+      // or unreadable floor must never be treated as an empty inbound-link set.
+      for (const record of state.records) {
+        const reason = `inbound-index-unavailable:${initialIndex.error ?? 'unknown'}`;
+        result.kept.push({ path: record.path, owner: record.owner, reason });
+        this.notify(record.owner, record.card, record.path, reason);
+      }
+      return result;
+    }
     const keptRecords: ScratchRecord[] = [];
     for (const record of state.records) {
       if (owner && record.owner !== owner) { keptRecords.push(record); continue; }
@@ -412,7 +490,7 @@ export class ScratchDiskManager {
       const gitFacts = record.kind === 'worktree' ? await gitScratchFacts(record.path) : { dirty: false, onOrigin: true, ignoredFiles: 0 };
       const facts: ScratchFacts = {
         path: record.path, ...gitFacts, live: processUses(record.path, rows),
-        inboundLinks: inboundNodeModulesLinks(work, record.path), cardDone: this.cardDone(record.card), idle: this.now() - record.touchedAt >= SCRATCH_IDLE_MS
+        inboundLinks: inboundLinksFromIndex(initialIndex.index, record.path), cardDone: this.cardDone(record.card), idle: this.now() - record.touchedAt >= SCRATCH_IDLE_MS
       };
       const plan = planScratchReap(facts);
       if (plan.action !== 'reap') {
@@ -423,11 +501,14 @@ export class ScratchDiskManager {
         }
         continue;
       }
-      // Last-moment recheck: another install could have made a link after the plan.
-      const finalFacts = { ...facts, inboundLinks: inboundNodeModulesLinks(work, record.path), live: processUses(record.path, await this.processes()) };
+      // Last-moment recheck: a changed directory or failed scan vetoes this
+      // deletion, even though the initial full-floor index was clean.
+      const finalIndex = await refreshInboundLinkIndex(root, work);
+      if (!finalIndex.index) { result.kept.push({ path: record.path, owner: record.owner, reason: `inbound-index-unavailable:${finalIndex.error ?? 'unknown'}` }); keptRecords.push(record); continue; }
+      const finalFacts = { ...facts, inboundLinks: inboundLinksFromIndex(finalIndex.index, record.path), live: processUses(record.path, await this.processes()) };
       const finalPlan = planScratchReap(finalFacts);
       if (finalPlan.action !== 'reap') { result.kept.push({ path: record.path, owner: record.owner, reason: finalPlan.reason }); keptRecords.push(record); continue; }
-      if (facts.ignoredFiles) this.notify(record.owner, record.card, record.path, `ignored-files-will-be-lost:${facts.ignoredFiles}`);
+      if (facts.ignoredFiles) this.notify(record.owner, record.card, record.path, `ignored-files-will-be-lost:${facts.ignoredPaths?.join(',')}`);
       try { await removeScratchRoot(work, record.path); result.reaped.push(record.path); }
       catch { result.kept.push({ path: record.path, owner: record.owner, reason: 'remove-failed' }); keptRecords.push(record); }
     }
