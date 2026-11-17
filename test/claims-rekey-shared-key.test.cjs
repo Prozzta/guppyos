@@ -528,6 +528,13 @@ test('Jim SHOULD 1 (source pin): main sends the row\'s own recovery for an unrea
   assert.ok(src.includes("const what = row.kind === CLAIMS_ALERT_KEY_MISSING && typeof row.recovery === 'string'\n            ? row.recovery\n"), 'index.ts alert uses row.recovery');
 });
 
+test('CLAIMS-KEYMISSING-TEXT-108 (source pin): the missing-key alert names no Settings rekey that does not exist', () => {
+  const src = readSource('src/main/index.ts');
+  assert.ok(!/rekey in Settings/i.test(src), 'index.ts still points at a Settings rekey');
+  assert.ok(src.includes("Recovery is the Human rekey for each floor; there is no Settings button for it yet, so ask god to run it for this floor."), 'the missing-key text names who runs the rekey');
+  assert.ok(!/rekey in Settings/i.test(readSource('src/main/claims/store.ts')), 'store.ts recovery text has no Settings rekey either');
+});
+
 test('Jim NIT 2 (source pin): the main-thread lock wait says why it must stay short', () => {
   const src = readSource(KP).split('\r\n').join('\n');
   assert.match(src, /\/\/ This blocks the calling thread \(main\) for up to LOCK_WAIT_MS[^\n]*\n[^\n]*\n\s*\/\/ Never widen what runs under withUserDataLock[^\n]*\n\s*Atomics\.wait\(lockSleep/);
