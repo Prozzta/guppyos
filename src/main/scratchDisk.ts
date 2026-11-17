@@ -14,13 +14,15 @@ import { atomicWriteJson } from './atomicJson';
 export const SCRATCH_IDLE_MS = 48 * 60 * 60_000;
 export const SCRATCH_STATE_FILE = 'scratch-disk.json';
 export const SCRATCH_CACHE_DIR = '.scratch-node-modules';
+export const SCRATCH_FIXTURE_DIR = 'fixtures';
+export const SCRATCH_FIXTURE_STAMP = '.guppy-fixture.json';
 
 export interface ScratchRecord {
   path: string;
   owner: string;
   card: string;
-  /** Worktrees have a `.git` file; jails deliberately do not. */
-  kind: 'worktree' | 'jail';
+  /** Worktrees have a `.git` file; jails deliberately do not. Fixtures are protected cache trees. */
+  kind: 'worktree' | 'jail' | 'fixture';
   createdAt: number;
   touchedAt: number;
   /** The immutable dependency cache key, when node_modules is managed. */
@@ -49,6 +51,18 @@ export function managedScratchPath(workRoot: string, candidate: string): boolean
   return dirname(p) === root && name !== '' && !name.startsWith('.') && !name.endsWith('.reaping');
 }
 
+/** True only for a direct, stamped child of `<hive>/cache/fixtures`. Fixtures are never reap candidates. */
+export function managedFixturePath(hiveRoot: string, candidate: string): boolean {
+  const root = resolve(hiveRoot, 'cache', SCRATCH_FIXTURE_DIR);
+  const p = resolve(candidate);
+  const name = p.slice(Math.max(p.lastIndexOf('\\'), p.lastIndexOf('/')) + 1);
+  if (dirname(p) !== root || name === '' || name.startsWith('.')) return false;
+  try {
+    const folder = lstatSync(p); const stamp = lstatSync(join(p, SCRATCH_FIXTURE_STAMP));
+    return folder.isDirectory() && !folder.isSymbolicLink() && stamp.isFile() && !stamp.isSymbolicLink();
+  } catch { return false; }
+}
+
 /** The reaper's pure, fail-closed policy.  The order is part of the safety contract. */
 export function planScratchReap(f: ScratchFacts): ScratchPlan {
   if (f.dirty) return { ...f, action: 'keep', reason: 'dirty' };
@@ -66,7 +80,7 @@ export function readScratchState(hiveRoot: string): ScratchState {
     const raw = JSON.parse(readFileSync(stateFile(hiveRoot), 'utf8')) as Partial<ScratchState>;
     if (raw?.v !== 1 || !Array.isArray(raw.records)) return { v: 1, records: [] };
     return { v: 1, records: raw.records.filter((r): r is ScratchRecord => !!r && typeof r.path === 'string' && typeof r.owner === 'string'
-      && typeof r.card === 'string' && (r.kind === 'worktree' || r.kind === 'jail')
+      && typeof r.card === 'string' && (r.kind === 'worktree' || r.kind === 'jail' || r.kind === 'fixture')
       && typeof r.createdAt === 'number' && typeof r.touchedAt === 'number') };
   } catch { return { v: 1, records: [] }; }
 }
@@ -273,6 +287,22 @@ export class ScratchDiskManager {
     return { ok: true, line: `registered ${path} (${kind}, ${card})`, record };
   }
 
+  /** Register an already-built, stamped fixture. It is kept forever by sweep. */
+  registerFixture(owner: string, candidate: unknown, card: unknown): { ok: boolean; line: string; record?: ScratchRecord } {
+    const root = this.hiveRoot();
+    if (!root) return { ok: false, line: 'refused: hive scratch is unavailable' };
+    if (typeof candidate !== 'string' || typeof card !== 'string' || !/^[A-Z][A-Z0-9-]{2,120}$/.test(card)) return { ok: false, line: 'refused: register-fixture needs a stamped cache/fixtures path and CARD-ID' };
+    const path = resolve(candidate);
+    if (!managedFixturePath(root, path)) return { ok: false, line: `refused: fixture must be a stamped direct child of cache/${SCRATCH_FIXTURE_DIR}` };
+    const state = readScratchState(root);
+    const existing = state.records.find((r) => resolve(r.path) === path);
+    if (existing && existing.owner !== owner) return { ok: false, line: 'refused: fixture is owned by another agent' };
+    const at = this.now();
+    const record: ScratchRecord = existing ? { ...existing, card, kind: 'fixture', touchedAt: at } : { path, owner, card, kind: 'fixture', createdAt: at, touchedAt: at };
+    writeScratchState(root, { v: 1, records: [...state.records.filter((r) => resolve(r.path) !== path), record] });
+    return { ok: true, line: `registered protected fixture ${path} (${card})`, record };
+  }
+
   touch(owner: string, candidate: unknown): { ok: boolean; line: string } {
     if (typeof candidate !== 'string') return { ok: false, line: 'refused: touch needs a path' };
     const root = this.hiveRoot(); if (!root) return { ok: false, line: 'refused: hive scratch is unavailable' };
@@ -327,6 +357,11 @@ export class ScratchDiskManager {
     const keptRecords: ScratchRecord[] = [];
     for (const record of state.records) {
       if (owner && record.owner !== owner) { keptRecords.push(record); continue; }
+      if (record.kind === 'fixture') {
+        result.kept.push({ path: record.path, owner: record.owner, reason: managedFixturePath(root, record.path) ? 'fixture-protected' : 'fixture-path-changed-or-missing' });
+        keptRecords.push(record);
+        continue;
+      }
       const kind = scratchKind(record.path);
       if (!managedScratchPath(work, record.path) || kind !== record.kind) { result.kept.push({ path: record.path, owner: record.owner, reason: 'path-changed-or-missing' }); keptRecords.push(record); continue; }
       const gitFacts = record.kind === 'worktree' ? gitScratchFacts(record.path) : { dirty: false, onOrigin: true };
@@ -358,6 +393,7 @@ export class ScratchDiskManager {
     if (!body || typeof body !== 'object' || Array.isArray(body)) return { status: 400, body: { ok: false, line: 'refused: scratch input must be an object' } };
     const b = body as { op?: unknown; path?: unknown; card?: unknown; key?: unknown };
     if (b.op === 'register') { const r = this.register(owner, b.path, b.card); return { status: r.ok ? 200 : 400, body: r }; }
+    if (b.op === 'register-fixture') { const r = this.registerFixture(owner, b.path, b.card); return { status: r.ok ? 200 : 400, body: r }; }
     if (b.op === 'touch') { const r = this.touch(owner, b.path); return { status: r.ok ? 200 : 400, body: r }; }
     if (b.op === 'detach-private') { const r = this.detachPrivate(owner, b.path); return { status: r.ok ? 200 : 400, body: r }; }
     if (b.op === 'prepare-cache') { const r = this.prepareCache(owner, b.path); return { status: r.ok ? 200 : 400, body: r }; }
