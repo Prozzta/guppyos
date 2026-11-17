@@ -333,11 +333,29 @@ function getDoc(kgRoot, docId) {
   return { meta, text };
 }
 
+/**
+ * Remove a doc folder with no recursive remove: under Electron that deletes through a junction
+ * (ELECTRON-RMSYNC-AGENT-WRITABLE-108). This file ships as plain CommonJS for the kg CLI, so it
+ * cannot use src/main/linkSafeRemove.ts. Every entry is removed as what it is: a link (in place of
+ * the folder, or inside it) as a link, a file as a file, a folder only once it is empty.
+ */
+function removeDocDir(p) {
+  const st = fs.lstatSync(p);
+  if (st.isSymbolicLink()) {
+    try { fs.rmdirSync(p); } catch { fs.unlinkSync(p); }
+  } else if (st.isDirectory()) {
+    for (const name of fs.readdirSync(p)) removeDocDir(path.join(p, name));
+    fs.rmdirSync(p);
+  } else {
+    fs.unlinkSync(p);
+  }
+}
+
 /** Delete one artifact's folder and drop its lines from the index. */
 function removeDoc(kgRoot, docId) {
   const docDir = path.join(kgRoot, 'docs', String(docId || ''));
   if (!docId || !fs.existsSync(docDir)) return false;
-  fs.rmSync(docDir, { recursive: true, force: true });
+  removeDocDir(docDir);
   const idxPath = path.join(kgRoot, 'index.jsonl');
   if (fs.existsSync(idxPath)) {
     const kept = fs.readFileSync(idxPath, 'utf8').split('\n').filter((line) => {

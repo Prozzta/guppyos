@@ -20,7 +20,7 @@
  * third-party skill means running someone else's instructions inside an agent
  * that has the user's tools, and that decision stays with the user.
  */
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, basename, dirname, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
 import { getText } from './fetchText';
@@ -413,7 +413,7 @@ export async function installSkill(
       written.push(target);
     }
   } catch (e) {
-    try { rmSync(dest, { recursive: true, force: true }); } catch { /* best effort */ }
+    try { await removePathLinkSafe(dest); } catch { /* best effort */ }
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
   return { ok: true, path: dest };

@@ -28,8 +28,9 @@
  * Deliberately free of any `electron` import, so it is unit-testable on temp folders
  * (test/rebrand-a-182.test.cjs).
  */
-import { closeSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
+import { closeSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
 import { basename, join, relative, sep } from 'node:path';
+import { removePathLinkSafeSync } from './linkSafeRemove';
 
 /** The data folder's name under appData from 1.1.82 on. */
 export const USERDATA_DIR = 'Guppy';
@@ -195,7 +196,7 @@ export function migrateUserData(appData: string, opts: MigrationOptions = {}): M
 function copyOnce(from: string, to: string, staging: string, platform: NodeJS.Platform, opts: MigrationOptions): MigrationResult {
   const base = { from, to };
   // A staging folder left by a failed start is ours (only this function makes it, under the lock): start over.
-  if (existsSync(staging)) rmSync(staging, { recursive: true, force: true });
+  if (existsSync(staging)) removePathLinkSafeSync(staging);
 
   let files = 0;
   let bytes = 0;
