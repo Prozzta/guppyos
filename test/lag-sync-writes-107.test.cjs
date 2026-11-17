@@ -712,7 +712,8 @@ test('LAG-ROUTE-WRITES-108: a hive removed while the save checks its folders is 
   ml.ledger(AGENT);
   const g = gate();
   const opts = [];
-  await withAsync('mkdir', async (args, real) => { opts.push(args[1]); await g.wait(); return real(); }, async () => {
+  let asked = 0;
+  await withAsync('mkdir', async (args, real) => { asked++; opts.push(args[1]); await g.wait(); return real(); }, async () => {
     const { calls } = await syncWrites(root, async () => {
       ml.markDelivered(AGENT, msg('m-1'));
       await until(() => g.reached, 'the save\'s folder check');
@@ -721,13 +722,13 @@ test('LAG-ROUTE-WRITES-108: a hive removed while the save checks its folders is 
     fs.rmSync(root, { recursive: true, force: true });
     g.open();
     await WB.settleWrites(10_000);
+    const settled = asked;
+    await new Promise((r) => setTimeout(r, 50));   // 10 write delays: a save re-armed by mistake asks again within this
+    assert.equal(asked, settled, 'the ledger stopped saving into the removed hive');
   });
   assert.equal(fs.existsSync(root), false, 'the hive root was not re-created');
   assert.ok(opts.every((o) => !(o && o.recursive)), `no recursive mkdir from the timer (${JSON.stringify(opts)})`);
   assert.deepEqual(logs.filter((r) => r.kind === 'mail-ledger-write-failed'), [], 'a removed hive is not a failed write');
-  const before = opts.length;
-  await new Promise((r) => setTimeout(r, 50));   // a timer re-armed by mistake would ask again within this
-  assert.equal(opts.length, before, 'the ledger stopped saving into the removed hive');
   ml.dispose();
 });
 
