@@ -378,7 +378,7 @@ function deriveIndex(prev: Record<string, MailEntry>, next: Record<string, MailE
       const b = now?.senderId;
       if (a === b) continue;
       // A kept key whose sender_id changes keeps its place in key order, which an append cannot
-      // express; so would an array-index id. Neither happens; if one does, rebuild on the next query.
+      // express; so would an array-index id (an all-digit id: these do occur). Rebuild on the next query.
       if ((was && now) || ARRAY_INDEX_KEY_RE.test(id)) { map = null; break; }
       if (!copied) { map = new Map(map); copied = true; }
       if (a !== undefined) {
