@@ -41,7 +41,25 @@ const handEdit = (obj) => fs.writeFileSync(file, JSON.stringify({ ...MIGRATED, .
 const OLD = () => Date.now() + 60_000;
 const fresh = (obj) => { handEdit(obj); __resetConfigCacheForTests(() => clock, OLD); };
 
-test.after(() => fs.rmSync(userData, { recursive: true, force: true }));
+/**
+ * The folder watcher config.ts starts is the real fs.watch, tapped: `delivery(name, fn)` resolves once
+ * fn has run inside the first delivery of an event for `name`. fn gets `deliver`, which hands the
+ * event to config.ts. Everything fn does is one synchronous step of that delivery, so no other
+ * event can land between its checks, however late the OS delivers under load.
+ */
+const realWatch = fs.watch;
+let onDelivery = null;
+fs.watch = function (dir, options, listener) {
+  return realWatch.call(this, dir, options, (event, name) => {
+    const tap = onDelivery;
+    if (!tap || String(name) !== tap.name) return listener(event, name);
+    onDelivery = null;
+    try { tap.fn(() => listener(event, name)); tap.resolve(); } catch (error) { tap.reject(error); }
+  });
+};
+const delivery = (name, fn) => new Promise((resolve, reject) => { onDelivery = { name, fn, resolve, reject }; });
+
+test.after(() => { fs.watch = realWatch; fs.rmSync(userData, { recursive: true, force: true }); });
 
 test('production missed-watch fallback invalidates asynchronously', async () => {
   handEdit({ onboardingComplete: true, toolOutputCap: 701 }); __resetConfigCacheForTests(undefined, OLD);
@@ -166,21 +184,34 @@ test('an external edit is invisible inside the window and picked up by the slow 
 });
 
 test('fs.watch marks the cache dirty: an external edit is seen before the window ends', async () => {
-  fresh({ toolOutputCap: 300 });
-  assert.equal(readConfig().toolOutputCap, 300);
-  // Let fresh()'s own config.json events land (a watcher from an earlier test may already exist),
-  // then re-arm the window: a key match renews it.
-  await new Promise((r) => setTimeout(r, 300));
-  assert.equal(readConfig().toolOutputCap, 300);
-  // Churn on another file in the folder does not mark the cache dirty (the name filter).
+  // The worst case for the stat: the key is pinned, so no edit ever moves it, and every read lands
+  // inside the racy margin (cached unproven). Only the watcher's dirty mark can show the edit.
+  handEdit({ toolOutputCap: 300 });
+  __resetConfigCacheForTests(() => clock, () => T + 40);
+  const read = () => fakeStat(KEY, () => io(() => readConfig()));
+  assert.equal(read().result.toolOutputCap, 300);
+  // Churn on another file in the folder does not mark the cache dirty (the name filter). The read
+  // before `deliver` re-arms the window, whatever config.json events landed earlier.
+  const other = delivery('other.json', (deliver) => {
+    read();
+    assert.equal(read().stats, 0, 'armed: served from memory');
+    deliver();
+    assert.equal(read().stats, 0, 'another file\'s events leave the window alone');
+  });
   fs.writeFileSync(path.join(userData, 'other.json'), '{}', 'utf8');
-  fs.writeFileSync(path.join(userData, 'other.json'), '{"a":1}', 'utf8');
-  await new Promise((r) => setTimeout(r, 300));
-  assert.equal(io(() => readConfig()).stats, 0, 'another file\'s events leave the window alone');
+  await other;
+  // A same-size edit under the same key, with the clock frozen: until a config.json event is
+  // delivered the cached value is served, and the first read after it is the edit.
+  read();
+  const edit = delivery('config.json', (deliver) => {
+    const before = read();
+    assert.deepEqual([before.stats, before.result.toolOutputCap], [0, 300], 'the frozen test clock never reaches the window');
+    deliver();
+    const after = read();
+    assert.deepEqual([after.reads, after.stats, after.result.toolOutputCap], [1, 1, 301], 'only the watcher can have done it');
+  });
   handEdit({ toolOutputCap: 301 });
-  const until = Date.now() + 5000;
-  while (readConfig().toolOutputCap !== 301 && Date.now() < until) await new Promise((r) => setTimeout(r, 25));
-  assert.equal(readConfig().toolOutputCap, 301, 'the frozen test clock never reached the window: only the watcher can have done it');
+  await edit;
 });
 
 test('corrupt config: not cached, quarantined, writes refused; a repair is seen on the next read', () => {
