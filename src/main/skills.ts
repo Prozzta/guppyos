@@ -24,6 +24,7 @@ import { existsSync, readFileSync, readdirSync, statSync, writeFileSync, mkdirSy
 import { join, basename, dirname, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
 import { getText } from './fetchText';
+import { removePathLinkSafe } from './linkSafeRemove';
 
 export interface LocalSkill {
   id: string;
@@ -423,10 +424,10 @@ export async function installSkill(
  * inside a skills root — the failure mode of getting this wrong is deleting a
  * directory of the user's work.
  */
-export function uninstallSkill(
+export async function uninstallSkill(
   skillPath: string,
   opts: { cwds: string[] }
-): { ok: true } | { ok: false; error: string } {
+): Promise<{ ok: true } | { ok: false; error: string }> {
   if (typeof skillPath !== 'string' || !skillPath.trim()) return { ok: false, error: 'no path given' };
   let target: string;
   try { target = resolve(skillPath); } catch { return { ok: false, error: 'unreadable path' }; }
@@ -447,6 +448,8 @@ export function uninstallSkill(
   if (!existsSync(target)) return { ok: false, error: 'Already gone.' };
 
   // A directory must look like a skill; a plugin entry must be a plain file.
+  // statSync follows a link, so a skill that is a junction or symlink passes here on what its
+  // target looks like. The removal below then removes the link itself, never the target.
   try {
     const st = statSync(target);
     if (st.isDirectory()) {
@@ -459,7 +462,9 @@ export function uninstallSkill(
   } catch { return { ok: false, error: 'could not inspect that path' }; }
 
   try {
-    rmSync(target, { recursive: true, force: true });
+    // ELECTRON-RMSYNC-LINK-SAFE-108: Electron 45's recursive rmSync deletes through a junction.
+    // Async: this runs in the main process, and a skill folder can be large.
+    await removePathLinkSafe(target);
     return { ok: true };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };

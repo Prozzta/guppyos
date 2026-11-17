@@ -188,20 +188,27 @@ function verifyModel(dir, manifest, sha = sha256File) {
   return { ok: true, why: `${Object.keys(manifest.model.files).length} files = manifest` };
 }
 
+/** ELECTRON-RMSYNC-LINK-SAFE-108: Electron 45's recursive rmSync deletes through a junction, so the
+ *  cache folders go through the app's link-safe remover (a link is removed as a link). Loaded on
+ *  first use: only a seed needs it. */
+function removeLinkSafe(p) {
+  require(path.join(__dirname, '..', 'test', 'load-ts.cjs'))('src/main/linkSafeRemove.ts').removePathLinkSafeSync(p);
+}
+
 /** Fill `cacheDir` from the first source whose model verifies; the copy is verified again. */
 function seedModel(cacheDir, manifest, sources) {
   for (const src of sources) {
     if (!verifyModel(src, manifest).ok) continue;
     const tmp = `${cacheDir}.seeding-${process.pid}`;
-    fs.rmSync(tmp, { recursive: true, force: true });
+    removeLinkSafe(tmp);
     for (const rel of Object.keys(manifest.model.files)) {
       const to = path.join(tmp, ...rel.split('/'));
       fs.mkdirSync(path.dirname(to), { recursive: true });
       fs.copyFileSync(path.join(src, ...rel.split('/')), to);
     }
     const v = verifyModel(tmp, manifest);
-    if (!v.ok) { fs.rmSync(tmp, { recursive: true, force: true }); continue; }
-    fs.rmSync(cacheDir, { recursive: true, force: true });
+    if (!v.ok) { removeLinkSafe(tmp); continue; }
+    removeLinkSafe(cacheDir);
     fs.mkdirSync(path.dirname(cacheDir), { recursive: true });
     fs.renameSync(tmp, cacheDir);
     return { ok: true, why: `seeded from ${src}`, from: src };

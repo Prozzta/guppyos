@@ -139,6 +139,7 @@ import { ShadowDiff } from './termShadow';
 import { createScreenGate, screenGateSourceOf } from './screenGate';
 import { HeavyJobLock, heavyLimit, heavySlotFreeNotice, heavyWaitLapsedNotice, heavyUnlimitedNotice, probeProcesses, processImage } from './heavyJob';
 import { ScratchDiskManager } from './scratchDisk';
+import { removePathLinkSafe } from './linkSafeRemove';
 import { HeavyJobs, approvesWithoutAsking, heavyCpuOptions } from './heavyCpu';
 import { tokenizeCommand } from '../shared/commandLine';
 import { heavyActivity, heavyFleetField, type HeavyLockView } from '../shared/activityView';
@@ -3047,7 +3048,7 @@ function workerScratchDir(workerId: string): string | null {
 /** Best-effort removal of a worker's scratch (hive agent) dir. Guarded to ONLY ever
  *  delete a path that resolves to exactly HIVE_ROOT/agents/<workerId> and never a
  *  still-live worker — so a crafted/mismatched id can't escape the agents root. */
-function removeWorkerScratch(workerId: string): void {
+async function removeWorkerScratch(workerId: string): Promise<void> {
   if (liveWorkers.has(workerId)) return; // never wipe a live worker's mailbox
   const dir = workerScratchDir(workerId);
   const root = hive.root();
@@ -3056,10 +3057,12 @@ function removeWorkerScratch(workerId: string): void {
   // Path-safety: the resolved dir must sit directly under agents/ with basename == id.
   if (resolve(dir) !== join(resolve(agentsRoot), basename(dir)) || basename(dir) !== workerId) return;
   // Electron 45 cannot recursively remove this parent while its child outbox is
-  // watched (ENOTEMPTY/EPERM), so close watchers before—not after—rmSync.
+  // watched (ENOTEMPTY/EPERM), so close watchers before, not after, the removal.
+  // ELECTRON-RMSYNC-LINK-SAFE-108: its recursive rmSync also deletes through a junction (an
+  // agent folder can hold a node_modules link), so links are removed as links.
   hive.closeOutboxWatcher(join(dir, 'outbox'));
   readerWatchers.stop(workerId);
-  try { rmSync(dir, { recursive: true, force: true }); }
+  try { await removePathLinkSafe(dir); }
   catch (e) { console.error('[worker] removeWorkerScratch failed:', e); }
 }
 // A natural PTY exit must run the same teardown as an explicit kill — EXCEPT when
@@ -7204,7 +7207,8 @@ ipcMain.handle('app:resetAll', async () => {
   deleteMemoryIndex(memoryIndex);
   const hiveDir = hive.root();
   if (hiveDir) {
-    try { rmSync(hiveDir, { recursive: true, force: true }); }
+    // ELECTRON-RMSYNC-LINK-SAFE-108: links in the hive are removed as links, never through them.
+    try { await removePathLinkSafe(hiveDir); }
     catch (e) { console.error('[reset] rm', hiveDir, e); }
   }
   // The roster is the renderer's half of the same state, so it retires with the
@@ -8576,7 +8580,7 @@ async function gcPreservedWorktrees(): Promise<void> {
       // (a) Worktree already gone (removed at clean teardown, or god removed it by
       //     hand per the preserve note) → just reclaim the scratch dir + drop tracking.
       if (!existsSync(e.wtPath)) {
-        removeWorkerScratch(e.workerId);
+        await removeWorkerScratch(e.workerId);
         preservedWorktrees.delete(key);
         console.log(`[worker gc] ${e.workerId}: worktree already gone — reclaimed scratch`);
         continue;
@@ -8588,7 +8592,7 @@ async function gcPreservedWorktrees(): Promise<void> {
       if (!safe.gc) continue; // keep — fail-safe
       const r = await removeWorktree(e.origCwd, e.wtPath);
       if (!r.ok) { noteWorktreeRemove(r, { agent: e.workerId, wtPath: e.wtPath, origCwd: e.origCwd, site: 'worker-gc' }); continue; }
-      removeWorkerScratch(e.workerId);
+      await removeWorkerScratch(e.workerId);
       preservedWorktrees.delete(key);
       console.log(`[worker gc] reclaimed ${e.workerId} (${safe.detail})`);
       informGod(
