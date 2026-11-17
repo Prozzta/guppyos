@@ -205,7 +205,11 @@ if (!WIN) {
     .replace(/ {4}if \(guppyBuiltOnly\) \{\n {8}throw new Error\("Guppy: [^\n]*\n {4}\}\n/, '');
   const pristineJs = handoffJs.split('\n').filter((l) => !/GUPPY PTY-HOLD-NODEPTY-HANDOFF|this\._rootHandle = connect\.rootHandle;/.test(l)).join('\n');
 
-  const tree = (cc, js, { version = pins.NODE_PTY_VERSION, utils = pristineUtils } = {}) => {
+  // PTY-EARLY-KILL-EPIPE-108: the output worker, and the same with the pinned edits taken back out.
+  const builtWorker = fs.readFileSync(path.join(NP, 'lib', 'worker', 'conoutSocketWorker.js'), 'utf8');
+  const pristineWorker = pins.WORKER_JS_EDITS.reduce((s, [, before, after]) => s.replace(after, () => before), builtWorker);
+
+  const tree = (cc, js, { version = pins.NODE_PTY_VERSION, utils = pristineUtils, worker = pristineWorker } = {}) => {
     const dir = tempDir('phnh-tree-');
     fs.mkdirSync(path.join(dir, 'src', 'win'), { recursive: true });
     fs.mkdirSync(path.join(dir, 'lib'), { recursive: true });
@@ -213,10 +217,12 @@ if (!WIN) {
     fs.writeFileSync(path.join(dir, 'src', 'win', 'conpty.cc'), cc);
     fs.writeFileSync(path.join(dir, 'lib', 'windowsPtyAgent.js'), js);
     fs.writeFileSync(path.join(dir, 'lib', 'utils.js'), utils);
+    fs.mkdirSync(path.join(dir, 'lib', 'worker'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'lib', 'worker', 'conoutSocketWorker.js'), worker);
     return dir;
   };
-  const shas = (dir) => [['src', 'win', 'conpty.cc'], ['lib', 'windowsPtyAgent.js'], ['lib', 'utils.js']].map((rel) => sha(fs.readFileSync(path.join(dir, ...rel))));
-  const DONE = [pins.CONPTY_CC_BUILT_SHA256, pins.AGENT_JS_HANDOFF_SHA256, pins.UTILS_JS_BUILT_ONLY_SHA256];
+  const shas = (dir) => [['src', 'win', 'conpty.cc'], ['lib', 'windowsPtyAgent.js'], ['lib', 'utils.js'], ['lib', 'worker', 'conoutSocketWorker.js']].map((rel) => sha(fs.readFileSync(path.join(dir, ...rel))));
+  const DONE = [pins.CONPTY_CC_BUILT_SHA256, pins.AGENT_JS_HANDOFF_SHA256, pins.UTILS_JS_BUILT_ONLY_SHA256, pins.WORKER_JS_QUIET_SHA256];
   const run = (tool, dir, ...args) => spawnSync(process.execPath, [tool, '--root', dir, ...args], { encoding: 'utf8' });
 
   test('PINS: the installed node-pty is the patched one, and the patch is only its own lines', () => {
@@ -226,6 +232,8 @@ if (!WIN) {
     assert.equal(sha(pristineJs), pins.AGENT_JS_PRISTINE_SHA256, 'windowsPtyAgent.js without the handoff lines is pristine 1.1.0, byte for byte');
     assert.equal(sha(builtUtils), pins.UTILS_JS_BUILT_ONLY_SHA256, `lib/utils.js is not the pinned built-only loader. ${HINT}`);
     assert.equal(sha(pristineUtils), pins.UTILS_JS_PRISTINE_SHA256, 'utils.js without the loader lines is pristine 1.1.0, byte for byte');
+    assert.equal(sha(builtWorker), pins.WORKER_JS_QUIET_SHA256, `lib/worker/conoutSocketWorker.js is not the pinned worker with the socket error listeners. ${HINT}`);
+    assert.equal(sha(pristineWorker), pins.WORKER_JS_PRISTINE_SHA256, 'the worker without the pinned edits is pristine 1.1.0, byte for byte');
     assert.ok(pins.hasHandoffImports(CONPTY_NODE), `THE BINARY IS NOT BUILT FROM THE HANDOFF SOURCE: conpty.node does not import DuplicateHandle. ${HINT}`);
     assert.ok(pins.hasMutexImports(CONPTY_NODE), 'and it still carries #922');
     // The duplicate is made before the thread that can close the original exists, with query rights only.
@@ -240,11 +248,11 @@ if (!WIN) {
     const dir = tree(race922Cc, pristineJs);
     const check0 = run(TOOL, dir, '--check');
     assert.equal(check0.status, 1, '--check fails on an unpatched tree');
-    assert.deepEqual(shas(dir), [pins.CONPTY_CC_PATCHED_SHA256, pins.AGENT_JS_PRISTINE_SHA256, pins.UTILS_JS_PRISTINE_SHA256], '--check changes nothing');
+    assert.deepEqual(shas(dir), [pins.CONPTY_CC_PATCHED_SHA256, pins.AGENT_JS_PRISTINE_SHA256, pins.UTILS_JS_PRISTINE_SHA256, pins.WORKER_JS_PRISTINE_SHA256], '--check changes nothing');
     const first = run(TOOL, dir);
     assert.equal(first.status, 0, first.stderr);
-    assert.match(first.stdout, /applied the root-handle handoff to node-pty 1\.1\.0 \(3 file\(s\)\)/);
-    assert.deepEqual(shas(dir), DONE, 'all three files are the pinned forms');
+    assert.match(first.stdout, /applied the root-handle handoff to node-pty 1\.1\.0 \(4 file\(s\)\)/);
+    assert.deepEqual(shas(dir), DONE, 'all four files are the pinned forms');
     const again = run(TOOL, dir);
     assert.equal(again.status, 0, again.stderr);
     assert.match(again.stdout, /already applied/);
@@ -262,15 +270,21 @@ if (!WIN) {
     // A tree from before NODEPTY-PACKAGED-PROOF (the handoff applied, the loader not) is finished too.
     const older = tree(builtCc, handoffJs);
     const olderRun = run(TOOL, older);
-    assert.match(olderRun.stdout, /\(1 file\(s\)\)/, olderRun.stderr);
+    assert.match(olderRun.stdout, /\(2 file\(s\)\)/, olderRun.stderr);
     assert.deepEqual(shas(older), DONE);
+    // And a tree from before PTY-EARLY-KILL-EPIPE-108 (only the output worker is still pristine).
+    const before108 = tree(builtCc, handoffJs, { utils: builtUtils });
+    const before108Run = run(TOOL, before108);
+    assert.match(before108Run.stdout, /\(1 file\(s\)\)/, before108Run.stderr);
+    assert.deepEqual(shas(before108), DONE);
   });
 
   test('TOOL: --check fails when any one file alone is unpatched, and names it (Jim T4)', () => {
     const cases = [
-      ['only lib/windowsPtyAgent.js unpatched', tree(builtCc, pristineJs, { utils: builtUtils }), /windowsPtyAgent\.js is not the pinned root-handle form/],
-      ['only src/win/conpty.cc unpatched', tree(race922Cc, handoffJs, { utils: builtUtils }), /conpty\.cc is not the pinned root-handle form/],
-      ['only lib/utils.js unpatched (the prebuilt fallback is back)', tree(builtCc, handoffJs), /utils\.js is not the pinned root-handle form/]
+      ['only lib/windowsPtyAgent.js unpatched', tree(builtCc, pristineJs, { utils: builtUtils, worker: builtWorker }), /windowsPtyAgent\.js is not the pinned root-handle form/],
+      ['only src/win/conpty.cc unpatched', tree(race922Cc, handoffJs, { utils: builtUtils, worker: builtWorker }), /conpty\.cc is not the pinned root-handle form/],
+      ['only lib/utils.js unpatched (the prebuilt fallback is back)', tree(builtCc, handoffJs, { worker: builtWorker }), /utils\.js is not the pinned root-handle form/],
+      ['only lib/worker/conoutSocketWorker.js unpatched (A MISSED POSTINSTALL: the EPIPE is back)', tree(builtCc, handoffJs, { utils: builtUtils }), /conoutSocketWorker\.js is not the pinned root-handle form/]
     ];
     for (const [name, dir, why] of cases) {
       const before = shas(dir);
@@ -289,6 +303,7 @@ if (!WIN) {
       ['conpty.cc with CRLF', tree(race922Cc.replace(/\n/g, '\r\n'), pristineJs), [], /conpty\.cc is neither/],
       ['windowsPtyAgent.js changed', tree(race922Cc, pristineJs.replace('_innerPid', '_innerPidX')), [], /windowsPtyAgent\.js is neither pristine 1\.1\.0/],
       ['utils.js changed', tree(race922Cc, pristineJs, { utils: pristineUtils.replace('Check build, debug', 'Check  build, debug') }), [], /utils\.js is neither pristine 1\.1\.0/],
+      ['the output worker changed', tree(race922Cc, pristineJs, { worker: pristineWorker.replace('workerSocket', 'workerSocketX') }), [], /conoutSocketWorker\.js is neither pristine 1\.1\.0/],
       ['another node-pty', tree(race922Cc, pristineJs, { version: '1.2.0' }), [], /node-pty 1\.1\.0 required, got 1\.2\.0/],
       ['an unknown argument', tree(race922Cc, pristineJs), ['--help'], /unknown argument "--help"/],
       ['--root without a value', tree(race922Cc, pristineJs), ['--root'], /unknown argument "--root"/]
@@ -321,7 +336,7 @@ if (!WIN) {
     assert.ok(at > 0, 'the import name is in the binary');
     const without = Buffer.from(bin);
     without[at] = 'X'.charCodeAt(0);   // a binary that imports "XuplicateHandle": parses, lacks the call
-    const fake = ({ binary = bin, record = sha(binary), js = handoffJs, utils = builtUtils, marker = true }) => {
+    const fake = ({ binary = bin, record = sha(binary), js = handoffJs, utils = builtUtils, worker = builtWorker, marker = true }) => {
       const dir = tempDir('phnh-markers-');
       const np = path.join(dir, 'node-pty');
       fs.mkdirSync(path.join(np, 'build', 'Release'), { recursive: true });
@@ -330,19 +345,22 @@ if (!WIN) {
       fs.writeFileSync(path.join(np, 'build', 'Release', 'conpty.node'), binary);
       fs.writeFileSync(path.join(np, 'lib', 'windowsPtyAgent.js'), js);
       fs.writeFileSync(path.join(np, 'lib', 'utils.js'), utils);
+      fs.mkdirSync(path.join(np, 'lib', 'worker'), { recursive: true });
+      fs.writeFileSync(path.join(np, 'lib', 'worker', 'conoutSocketWorker.js'), worker);
       if (marker) fs.writeFileSync(path.join(np, pins.MARKER_FILE), JSON.stringify({ version: pins.NODE_PTY_VERSION, sourceSha256: pins.CONPTY_CC_BUILT_SHA256, files: { 'build/Release/conpty.node': { sha256: record } } }));
       const out = spawnSync(process.execPath, [MARKERS, dir, path.join(dir, 'models')], { encoding: 'utf8' }).stdout.split(/\r?\n/);
       const of = (label) => (out.find((l) => l.endsWith(label)) || '').slice(0, 5).trim();
-      return [of('conpty.node built with the root-handle handoff'), of('windowsPtyAgent.js keeps the root handle'), of('node-pty loader takes built binaries only')];
+      return [of('conpty.node built with the root-handle handoff'), of('windowsPtyAgent.js keeps the root handle'), of('node-pty loader takes built binaries only'), of('node-pty output worker handles socket errors')];
     };
     assert.equal(pins.hasHandoffImports(CONPTY_NODE), true);
-    assert.deepEqual(fake({}), ['OK', 'OK', 'OK'], 'the installed build passes both');
-    assert.deepEqual(fake({ binary: without }), ['FAIL', 'OK', 'OK'], 'A BINARY WITHOUT DuplicateHandle FAILS, even with a matching record');
-    assert.deepEqual(fake({ record: '0'.repeat(64) }), ['FAIL', 'OK', 'OK'], 'a binary that is not the recorded one fails');
-    assert.deepEqual(fake({ marker: false }), ['FAIL', 'OK', 'OK'], 'no record fails');
-    assert.deepEqual(fake({ js: pristineJs }), ['OK', 'FAIL', 'OK'], 'A windowsPtyAgent.js THAT DROPS THE HANDLE FAILS');
-    assert.deepEqual(fake({ utils: pristineUtils }), ['OK', 'OK', 'FAIL'], 'A LOADER THAT FALLS BACK TO THE PREBUILT BINARY FAILS');
-    assert.match(fs.readFileSync(MARKERS, 'utf8'), /Prints ALL 16 MARKERS OK/);
+    assert.deepEqual(fake({}), ['OK', 'OK', 'OK', 'OK'], 'the installed build passes all four');
+    assert.deepEqual(fake({ binary: without }), ['FAIL', 'OK', 'OK', 'OK'], 'A BINARY WITHOUT DuplicateHandle FAILS, even with a matching record');
+    assert.deepEqual(fake({ record: '0'.repeat(64) }), ['FAIL', 'OK', 'OK', 'OK'], 'a binary that is not the recorded one fails');
+    assert.deepEqual(fake({ marker: false }), ['FAIL', 'OK', 'OK', 'OK'], 'no record fails');
+    assert.deepEqual(fake({ js: pristineJs }), ['OK', 'FAIL', 'OK', 'OK'], 'A windowsPtyAgent.js THAT DROPS THE HANDLE FAILS');
+    assert.deepEqual(fake({ utils: pristineUtils }), ['OK', 'OK', 'FAIL', 'OK'], 'A LOADER THAT FALLS BACK TO THE PREBUILT BINARY FAILS');
+    assert.deepEqual(fake({ worker: pristineWorker }), ['OK', 'OK', 'OK', 'FAIL'], 'AN OUTPUT WORKER WITHOUT THE ERROR LISTENERS FAILS (marker 17)');
+    assert.match(fs.readFileSync(MARKERS, 'utf8'), /Prints ALL 17 MARKERS OK/);
   });
 
   // ---- NODEPTY-PACKAGED-PROOF: the packaged check, and the loader ---------------------------
@@ -370,13 +388,14 @@ if (!WIN) {
     return Buffer.concat([head, json]);
   };
   /** extra: files on disk AND listed unpacked; diskOnly: on disk, not listed; asar(list): the list, a Buffer, or null for none. */
-  const packaged = ({ version = pins.NODE_PTY_VERSION, js = handoffJs, utils = builtUtils, binary = conptyBin, record = sha(binary), marker = true, cc = null, extra = [], diskOnly = [], asar = (l) => l } = {}) => {
+  const packaged = ({ version = pins.NODE_PTY_VERSION, js = handoffJs, utils = builtUtils, worker = builtWorker, binary = conptyBin, record = sha(binary), marker = true, cc = null, extra = [], diskOnly = [], asar = (l) => l } = {}) => {
     const dir = tempDir('phnh-pkg-');
     const resources = path.join(dir, 'resources');
     const listed = [
       [`${NPP}/package.json`, JSON.stringify({ name: 'node-pty', version })],
       [`${NPP}/lib/windowsPtyAgent.js`, js],
       [`${NPP}/lib/utils.js`, utils],
+      [`${NPP}/lib/worker/conoutSocketWorker.js`, worker],
       [`${NPP}/build/Release/conpty.node`, binary],
       ...(marker ? [[`${NPP}/${pins.MARKER_FILE}`, JSON.stringify({ version: pins.NODE_PTY_VERSION, sourceSha256: pins.CONPTY_CC_BUILT_SHA256, files: { 'build/Release/conpty.node': { sha256: record } } })]] : []),
       ...(cc === null ? [] : [[`${NPP}/src/win/conpty.cc`, cc]]),
@@ -398,7 +417,7 @@ if (!WIN) {
   const P = {
     good(mod) {
       const dir = packaged();
-      assert.deepEqual(mod.inspect(dir).checks.map((c) => c.ok), Array(8).fill(true), `a patched packaged app passes all 8: ${JSON.stringify(mod.inspect(dir).checks.filter((c) => !c.ok))}`);
+      assert.deepEqual(mod.inspect(dir).checks.map((c) => c.ok), Array(9).fill(true), `a patched packaged app passes all 9: ${JSON.stringify(mod.inspect(dir).checks.filter((c) => !c.ok))}`);
       assert.deepEqual(failing(mod, path.join(dir, 'resources')), [], 'the resources folder may be named instead');
       assert.deepEqual(failing(mod, packaged({ cc: builtCc })), [], 'the patched source may ship');
       assert.deepEqual(failing(mod, packaged({ extra: [[`${NPP}/prebuilds/darwin-arm64/pty.node`, stray]] })), [], 'a prebuilt binary of another platform is not the Windows fallback');
@@ -413,6 +432,12 @@ if (!WIN) {
       assert.match(whyOf(mod, utils, 2), /UNPATCHED 1\.1\.0 loader: it falls back to prebuilds\/ silently/);
       const cc = packaged({ cc: race922Cc });
       assert.deepEqual(failing(mod, cc), [5], 'a shipped conpty.cc without the handoff fails');
+      const worker = packaged({ worker: pristineWorker });
+      assert.deepEqual(failing(mod, worker), [8], 'AN UNPATCHED OUTPUT WORKER FAILS THE PACKAGED CHECK');
+      assert.match(whyOf(mod, worker, 8), /UNPATCHED 1\.1\.0 worker: a destroyed data socket throws EPIPE in the main process/);
+      const noWorker = packaged({ asar: (l) => l.filter(([p]) => p !== `${NPP}/lib/worker/conoutSocketWorker.js`) });
+      assert.deepEqual(failing(mod, noWorker), [7], 'an archive that does not list the worker fails');
+      assert.match(whyOf(mod, noWorker, 7), /does not list node_modules\/node-pty\/lib\/worker\/conoutSocketWorker\.js/);
     },
     binary(mod) {
       const wrong = packaged({ record: '0'.repeat(64) });
@@ -451,12 +476,12 @@ if (!WIN) {
       const say = (dir) => { const lines = []; return [mod.report(dir, (l) => lines.push(l)), lines]; };
       const [ok, good] = say(packaged());
       assert.equal(ok, true);
-      assert.equal(good[good.length - 1], 'PACKAGED NODE-PTY OK (8 checks)');
+      assert.equal(good[good.length - 1], 'PACKAGED NODE-PTY OK (9 checks)');
       const [bad, lines] = say(packaged({ utils: pristineUtils }));
       assert.equal(bad, false, 'REPORT RETURNS FALSE WHEN A CHECK FAILS');
       assert.equal(lines[lines.length - 1], 'PACKAGED NODE-PTY FAILED');
       assert.ok(lines.includes('FAIL lib/utils.js loads built binaries only: it is the UNPATCHED 1.1.0 loader: it falls back to prebuilds/ silently'), lines.join('\n'));
-      assert.equal(lines.filter((l) => l.startsWith('OK   ')).length, 7);
+      assert.equal(lines.filter((l) => l.startsWith('OK   ')).length, 8);
     }
   };
   const checker = require(CHECKER);
@@ -470,7 +495,7 @@ if (!WIN) {
     const before = everyFile(good);
     const ok = cli('--packaged', good);
     assert.equal(ok.status, 0, ok.stdout + ok.stderr);
-    assert.match(ok.stdout, /PACKAGED NODE-PTY OK \(8 checks\)/);
+    assert.match(ok.stdout, /PACKAGED NODE-PTY OK \(9 checks\)/);
     assert.deepEqual(everyFile(good), before, 'the check writes nothing');
     const bad = cli('--packaged', packaged({ utils: pristineUtils, extra: [[`${NPP}/prebuilds/win32-x64/conpty.node`, stray]] }));
     assert.equal(bad.status, 1, 'AN UNPATCHED PACKAGED APP EXITS 1');
@@ -525,7 +550,7 @@ if (!WIN) {
     for (const f of ['prebuilds/win32-x64/conpty.node', 'prebuilds/win32-x64/conpty/OpenConsole.exe', 'prebuilds/win32-arm64/pty.node', 'prebuilds/win32-x64/winpty-agent.exe']) {
       assert.ok(gone(`node_modules/node-pty/${f}`), `electron-builder.yml SHIPS A PREBUILT WINDOWS BINARY: ${f}`);
     }
-    for (const f of ['build/Release/conpty.node', 'build/Release/conpty/OpenConsole.exe', 'build/Release/conpty/conpty.dll', 'build/Release/winpty-agent.exe', 'lib/utils.js', 'lib/windowsPtyAgent.js', 'package.json', pins.MARKER_FILE, 'prebuilds/darwin-arm64/pty.node']) {
+    for (const f of ['build/Release/conpty.node', 'build/Release/conpty/OpenConsole.exe', 'build/Release/conpty/conpty.dll', 'build/Release/winpty-agent.exe', 'lib/utils.js', 'lib/windowsPtyAgent.js', 'lib/worker/conoutSocketWorker.js', 'lib/shared/conout.js', 'package.json', pins.MARKER_FILE, 'prebuilds/darwin-arm64/pty.node']) {
       assert.ok(!gone(`node_modules/node-pty/${f}`), `electron-builder.yml DROPS A FILE THE APP NEEDS: ${f}`);
     }
     const cut = fs.readFileSync(path.join(ROOT, 'scripts', 'cut-cmd-natives.cjs'), 'utf8');
@@ -562,7 +587,8 @@ if (!WIN) {
     { name: 'P8 the report always says OK', edits: [['const ok = checks.every((c) => c.ok);', 'const ok = true;']], run: P.report, dies: /REPORT RETURNS FALSE WHEN A CHECK FAILS/ },
     { name: 'P9 only prebuilds/ is searched on disk', edits: [[' || (p.endsWith(\'/conpty.node\') && p !== `${NP}/${BUILT}`));', ');']], run: P.strays, dies: /ANOTHER conpty\.node ON DISK FAILS/ },
     { name: 'P10 a prebuilt binary in the archive passes', edits: [[': prebuilt.length ? ', ': false ? ']], run: P.asar, dies: /A PREBUILT WINDOWS BINARY IN THE ARCHIVE FAILS/ },
-    { name: 'P11 only conpty.node counts as prebuilt on disk', edits: [['WIN_PREBUILT.test(`/${p}`) || (p.endsWith', '(p.endsWith']], run: P.strays, dies: /A PREBUILT WINDOWS FILE ON DISK FAILS/ }
+    { name: 'P11 only conpty.node counts as prebuilt on disk', edits: [['WIN_PREBUILT.test(`/${p}`) || (p.endsWith', '(p.endsWith']], run: P.strays, dies: /A PREBUILT WINDOWS FILE ON DISK FAILS/ },
+    { name: 'P12 any output worker passes', edits: [['workerSha === pins.WORKER_JS_QUIET_SHA256,', 'true,']], run: P.files, dies: /AN UNPATCHED OUTPUT WORKER FAILS THE PACKAGED CHECK/ }
   ];
   test('MUTANT CENSUS (packaged check, loader): every mutant applies once and dies at the assertion that names its guarantee', async (t) => {
     const source = fs.readFileSync(CHECKER, 'utf8');

@@ -18,6 +18,8 @@
 // and in <resources>/app.asar:
 //   8 node-pty is listed, every file of it is unpacked (so the files read above are the ones the
 //     app loads), and no other conpty.node is packed anywhere in the archive.
+// and, again in the unpacked node-pty (PTY-EARLY-KILL-EPIPE-108):
+//   9 lib/worker/conoutSocketWorker.js is the pinned form with the socket error listeners
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
@@ -135,7 +137,7 @@ function inspect(dir) {
   if (entries) {
     const mine = entries.filter(([p]) => p.startsWith(`${NP}/`));
     const packed = mine.filter(([, e]) => e.unpacked !== true).map(([p]) => p);
-    const need = ['package.json', 'lib/windowsPtyAgent.js', 'lib/utils.js', BUILT].filter((rel) => !mine.some(([p]) => p === `${NP}/${rel}`));
+    const need = ['package.json', 'lib/windowsPtyAgent.js', 'lib/utils.js', 'lib/worker/conoutSocketWorker.js', BUILT].filter((rel) => !mine.some(([p]) => p === `${NP}/${rel}`));
     const others = entries.filter(([p]) => (p === 'conpty.node' || p.endsWith('/conpty.node')) && p !== `${NP}/${BUILT}`).map(([p]) => p);
     const prebuilt = entries.filter(([p]) => WIN_PREBUILT.test(`/${p}`)).map(([p]) => p);
     asarWhy = need.length ? `app.asar does not list ${NP}/${need[0]}: the app would not load the files checked above`
@@ -145,6 +147,10 @@ function inspect(dir) {
             : '';
   }
   add('app.asar loads node-pty from the unpacked files only', asarWhy === '', asarWhy);
+
+  const workerSha = sha(at('lib/worker/conoutSocketWorker.js'));
+  add('lib/worker/conoutSocketWorker.js handles socket errors', workerSha === pins.WORKER_JS_QUIET_SHA256,
+    workerSha === pins.WORKER_JS_PRISTINE_SHA256 ? 'it is the UNPATCHED 1.1.0 worker: a destroyed data socket throws EPIPE in the main process' : `sha256 ${short(workerSha)} is not the pinned worker`);
   return { resources, checks };
 }
 
