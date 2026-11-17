@@ -151,8 +151,14 @@ function cleanEnv(extra) {
   for (const k of ['NODE_TEST_CONTEXT', 'NODE_OPTIONS', 'GUPPY_TEST_RUN', 'HIVE_LEDGER_URL', 'ELECTRON_RUN_AS_NODE']) delete env[k];
   return { ...env, ...extra };
 }
-function start(args, { url, agent = 'a', preload = PRELOAD } = {}) {
-  const env = cleanEnv({ NODE_OPTIONS: `--require "${preload.replace(/\\/g, '/')}"`, HIVE_LEDGER_URL: url, HIVE_ROOT: JAIL, AGENT_ID: agent });
+// Jim SHOULD 1: an Electron main process (a dev or harness app an agent started inherits NODE_OPTIONS)
+// is not guarded: a self-spawn there would block the app's main thread in a synchronous slot wait.
+// No real Electron starts here either: this makes node say it is Electron before the preload loads.
+const AS_ELECTRON = path.join(FIX, 'as-electron.cjs');
+fs.writeFileSync(AS_ELECTRON, "Object.defineProperty(process, 'versions', { value: { ...process.versions, electron: '45.0.0' }, configurable: true });\n");
+function start(args, { url, agent = 'a', preload = PRELOAD, asElectron = false } = {}) {
+  const req = (p) => `--require "${p.replace(/\\/g, '/')}"`;
+  const env = cleanEnv({ NODE_OPTIONS: `${asElectron ? `${req(AS_ELECTRON)} ` : ''}${req(preload)}`, HIVE_LEDGER_URL: url, HIVE_ROOT: JAIL, AGENT_ID: agent });
   const child = spawn(args[0], args.slice(1), { cwd: FIX, env, windowsHide: true });
   const bornMs = Date.now();
   let stderr = ''; let stdout = '';
@@ -241,6 +247,16 @@ K.e2eNotElectron = async (t, M = HJ, preload = PRELOAD) => {
 };
 test('E2E: a script that starts node, or Electron with ELECTRON_RUN_AS_NODE, never asks', { timeout: 60_000 }, (t) => K.e2eNotElectron(t));
 
+K.e2eInElectron = async (t, M = HJ, preload = PRELOAD) => {
+  const c = await counter(t);
+  const r = await within(start([process.execPath, 'launch-sync.cjs'], { url: c.url, preload, asElectron: true }).done, 30_000);
+  assert.notEqual(r, 'timeout');
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /launched 0/, 'the stand-in Electron ran');
+  assert.deepEqual(c.hits, [], 'AN ELECTRON PROCESS IS NOT GUARDED (its main thread never blocks in a slot wait)');
+};
+test('E2E: inside an Electron process (versions.electron set) an Electron child never asks', { timeout: 60_000 }, (t) => K.e2eInElectron(t));
+
 K.e2eSingleFile = async (t, M = HJ, preload = PRELOAD) => {
   const b = await broker(t, M);
   b.lock.acquire('b', H, 'npm test', 'hb', false);
@@ -284,6 +300,9 @@ const MUTANTS = [
   { name: 'preload: every child asks (not only an Electron executable)', file: PRE, preload: true,
     edits: [['!ELECTRON_EXE.test(file)', 'false']],
     killer: 'e2eNotElectron', dies: /NEVER ASKS/ },
+  { name: 'preload: an Electron process is guarded too (Jim SHOULD 1)', file: PRE, preload: true,
+    edits: [['const guard = hive && !process.versions.electron;', 'const guard = hive;']],
+    killer: 'e2eInElectron', dies: /AN ELECTRON PROCESS IS NOT GUARDED/ },
   { name: 'preload: ELECTRON_RUN_AS_NODE ignored', file: PRE, preload: true,
     edits: [[' || asNode(env)) return;', ') return;']],
     killer: 'e2eNotElectron', dies: /NEVER ASKS/ },
