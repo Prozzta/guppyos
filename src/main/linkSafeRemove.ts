@@ -6,7 +6,7 @@
  *   missing                nothing to do
  *   a junction or symlink  the link entry is removed, its target is left alone
  *   a real directory       walked bottom-up; a link in it is removed as a link, never followed
- *   a file                 removed
+ *   a file                 unlinked (never rm: unlink cannot recurse, whatever is there by then)
  * The link handling is fsSafeRemove's; nothing here walks a tree itself.
  *
  * removePathLinkSafe is the one for the main process (it never blocks the loop on a large
@@ -17,12 +17,26 @@
  * fs.promises.rm on a junction removed the link only. That second result is one runtime version
  * and one shape, not a contract, so the async path takes the same walk.
  *
+ * A link planted WHILE a folder is being removed is not followed either: fsSafeRemove removes
+ * each entry by itself, bottom-up, and never hands a folder to a recursive rm (which under
+ * Electron follows a junction that appears while it runs; test/electron-rmsync-jitter.test.cjs).
+ *
+ * What remains open: between the lstat and the readdir of one folder, a process that can write
+ * the parent can rename that real folder away and put a junction of the same name in its place;
+ * the entries then listed are the target's. Only handle-based opens (FILE_FLAG_OPEN_REPARSE_POINT
+ * on the folder, then listing by that handle) close it, and Node's fs has no such call.
+ *
  * Not covered: a Windows volume mount point (a junction to \??\Volume{...}) is reported by
  * lstat as a directory, not a link, so it is walked like a real folder.
  */
-import { lstatSync, rmSync, type Stats } from 'node:fs';
-import { lstat, rm } from 'node:fs/promises';
+import { lstatSync, unlinkSync, type Stats } from 'node:fs';
+import { lstat, unlink } from 'node:fs/promises';
 import { removeReparsePoint, removeReparsePointSync, safeRemoveTree, safeRemoveTreeSync } from './fsSafeRemove';
+
+/** A path that went away between the lstat and the remove is already removed. */
+function ignoreMissing(e: unknown): void {
+  if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+}
 
 export async function removePathLinkSafe(path: string): Promise<void> {
   let st: Stats;
@@ -33,7 +47,7 @@ export async function removePathLinkSafe(path: string): Promise<void> {
   }
   if (st.isSymbolicLink()) await removeReparsePoint(path);
   else if (st.isDirectory()) await safeRemoveTree(path);
-  else await rm(path, { force: true });
+  else await unlink(path).catch(ignoreMissing);
 }
 
 export function removePathLinkSafeSync(path: string): void {
@@ -45,5 +59,5 @@ export function removePathLinkSafeSync(path: string): void {
   }
   if (st.isSymbolicLink()) removeReparsePointSync(path);
   else if (st.isDirectory()) safeRemoveTreeSync(path);
-  else rmSync(path, { force: true });
+  else { try { unlinkSync(path); } catch (e) { ignoreMissing(e); } }
 }

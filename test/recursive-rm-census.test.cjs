@@ -168,5 +168,5 @@ test('the removers hold no recursive remove: fsSafeRemove walks bottom-up, linkS
     assert.deepEqual(aliasedRemoves(body(r)), [], `${r} reaches no remove under another name`);
   }
   assert.match(body('fsSafeRemove.ts'), /\brmdirSync\(p\);/, 'fsSafeRemove.ts removes a folder by itself, after its entries');
-  assert.doesNotMatch(body('fsSafeRemove.ts'), /^import .*\brm(?:Sync)?\b/m, 'fsSafeRemove.ts does not import rm or rmSync at all');
+  for (const r of REMOVERS) assert.doesNotMatch(body(r), /^import .*\brm(?:Sync)?\b/m, `${r} does not import rm or rmSync at all`);
 });
