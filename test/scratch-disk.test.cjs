@@ -7,6 +7,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const child = require('node:child_process');
 const loadTs = require('./load-ts.cjs');
 const scratch = loadTs('src/main/scratchDisk.ts');
 
@@ -15,6 +16,22 @@ test.after(() => fs.rmSync(jail, { recursive: true, force: true }));
 
 function facts(extra = {}) {
   return { path: 'C:/work/a', dirty: false, onOrigin: true, live: false, inboundLinks: [], cardDone: false, idle: false, ...extra };
+}
+
+function linkRemovalFixture(base) {
+  const work = path.join(base, 'work'); const tree = path.join(work, 'tree'); const live = path.join(base, 'live');
+  fs.mkdirSync(path.join(live, 'top'), { recursive: true }); fs.mkdirSync(path.join(live, 'scoped'), { recursive: true }); fs.mkdirSync(path.join(live, 'deep'), { recursive: true });
+  fs.writeFileSync(path.join(live, 'top', 'a'), 'top'); fs.writeFileSync(path.join(live, 'scoped', 'b'), 'scoped'); fs.writeFileSync(path.join(live, 'deep', 'c'), 'deep');
+  fs.mkdirSync(path.join(tree, 'node_modules', '@scope'), { recursive: true }); fs.mkdirSync(path.join(tree, 'resources', 'x', 'y'), { recursive: true });
+  fs.symlinkSync(path.join(live, 'top'), path.join(tree, 'top-link'), 'junction');
+  fs.symlinkSync(path.join(live, 'scoped'), path.join(tree, 'node_modules', '@scope', 'pkg'), 'junction');
+  fs.symlinkSync(path.join(live, 'deep'), path.join(tree, 'resources', 'x', 'y', 'models'), 'junction');
+  return { work, tree, live };
+}
+function assertLiveFixture(live) {
+  assert.equal(fs.readFileSync(path.join(live, 'top', 'a'), 'utf8'), 'top');
+  assert.equal(fs.readFileSync(path.join(live, 'scoped', 'b'), 'utf8'), 'scoped');
+  assert.equal(fs.readFileSync(path.join(live, 'deep', 'c'), 'utf8'), 'deep');
 }
 
 test('managed path only permits direct, non-hidden children of _work', () => {
@@ -83,6 +100,35 @@ test('registered fixtures are permanently protected, even for a done card', asyn
   assert.equal(fs.existsSync(fixture), true);
 });
 
+test('link-safe scratch removal preserves top, scoped and deep junction targets under system node', () => {
+  const fixture = linkRemovalFixture(path.join(jail, 'link-safe-system'));
+  scratch.removeScratchRoot(fixture.work, fixture.tree);
+  assert.equal(fs.existsSync(fixture.tree), false);
+  assertLiveFixture(fixture.live);
+});
+
+test('link-safe scratch removal preserves junction targets under installed Electron as Node', { skip: process.platform !== 'win32' }, () => {
+  const fixtureBase = path.join(jail, 'link-safe-electron'); const fixture = linkRemovalFixture(fixtureBase);
+  const exe = process.env.GUPPY_PACKAGED_EXE || path.join(process.env.LOCALAPPDATA || 'C:\\Users\\FiercePC\\AppData\\Local', 'Programs', 'Guppy', 'Guppy.exe');
+  assert.equal(fs.existsSync(exe), true, `installed Guppy executable missing: ${exe}`);
+  const result = child.spawnSync(exe, [path.join(__dirname, 'scratch-disk-electron-child.cjs'), fixtureBase], { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, encoding: 'utf8', timeout: 30_000 });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /"ok":true/);
+  assert.equal(fs.existsSync(fixture.tree), false);
+  assertLiveFixture(fixture.live);
+});
+
+test('jails that are bare/common git dirs or worktree gitdir targets are refused', () => {
+  const base = path.join(jail, 'git-dir-refusal'); const hive = path.join(base, 'hive'); const work = path.join(base, '_work');
+  const bare = path.join(work, 'bare'); fs.mkdirSync(path.join(bare, 'objects'), { recursive: true }); fs.mkdirSync(path.join(bare, 'refs'), { recursive: true }); fs.writeFileSync(path.join(bare, 'HEAD'), 'ref: refs/heads/main\n');
+  assert.equal(scratch.scratchKind(bare), null);
+  const target = path.join(work, 'common'); fs.mkdirSync(target, { recursive: true });
+  const linked = path.join(work, 'linked'); fs.mkdirSync(linked, { recursive: true }); fs.writeFileSync(path.join(linked, '.git'), 'gitdir: ../common/worktrees/linked\n');
+  const manager = new scratch.ScratchDiskManager(() => hive, () => false, async () => []);
+  assert.match(manager.register('dwight', bare, 'CARD-1').line, /common repository/);
+  assert.match(manager.register('dwight', target, 'CARD-1').line, /referenced by a worktree gitdir/);
+});
+
 test('install key changes for patch inputs and is stable for unchanged project inputs', () => {
   const project = path.join(jail, 'project');
   fs.mkdirSync(path.join(project, 'tools'), { recursive: true });
@@ -107,5 +153,7 @@ test('inbound scan finds a scoped node_modules junction and never follows it for
 
 test('mutant pins: each never-reap guard and source-input key is present', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'scratchDisk.ts'), 'utf8');
-  for (const token of ['if (f.dirty)', 'if (!f.onOrigin)', 'if (f.live)', 'if (f.inboundLinks.length)', 'package-lock.json', 'package.json', 'const tools = join(project, \'tools\')', 'path-changed-or-missing', 'fixture-protected']) assert.ok(src.includes(token), token);
+  const safe = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'fsSafeRemove.ts'), 'utf8');
+  for (const token of ['if (f.dirty)', 'if (!f.onOrigin)', 'if (f.live)', 'if (f.inboundLinks.length)', 'package-lock.json', 'package.json', 'const tools = join(project, \'tools\')', 'path-changed-or-missing', 'fixture-protected', 'worktreeGitdirPointsInto']) assert.ok(src.includes(token), token);
+  for (const token of ['removeReparsePointSync', 'unlinkReparsePointsUnderSync', 'findReparsePointsSync', 'refused: reparse point remained']) assert.ok(safe.includes(token), token);
 });
