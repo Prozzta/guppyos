@@ -6,7 +6,8 @@ require('./tools/own-job.cjs');
  * every other floor goes key-missing (read-only). The record files are shared too, and two app
  * instances must not lose each other's entries.
  *   R1 floors A, B and C share one user-data folder; rekeying them in turn leaves all three verifying.
- *   R2 a fresh floor joining a working folder adopts the shared key.
+ *   R2 a fresh floor joining a working folder adopts the shared key. (Already true on 4e39b652: a regression
+ *      guard with no mutant; first use only creates when no key loads.)
  *   R3 an existing key file that does not decrypt is left as is by a first use and a rekey, and alerts.
  *   R4 the provider: create() makes a key only when no file exists, and leaves no tmp.
  *   R5 a rekey while the shared key loads never calls create().
@@ -14,7 +15,8 @@ require('./tools/own-job.cjs');
  *   R7 a lock held by a live holder is waited for a bounded time, then the write fails visibly.
  *   R8 an anchor set inside a census batch reads the file fresh: another instance's entry survives.
  *   plus: 4 processes x 40 concurrent record and anchor writes keep every entry (real sources).
- * Then a mutant census: rename-over, lock dropped, rekey mints, batch snapshot reused under the lock.
+ * Then a mutant census: rename-over, lock dropped, rekey mints, batch snapshot reused under the lock,
+ * and rename-over + rekey mints together (int 4e39b652's behaviour).
  * Synthetic floors (FLOOR-A/B/C) in temp dirs only. HOME and USERPROFILE are jailed and asserted
  * before any product code loads.
  */
@@ -297,26 +299,35 @@ test('concurrent record and anchor writes from several instances keep every entr
   assert.ok(!fs.readdirSync(u.ud).some((f) => f.endsWith('.lock') || f.endsWith('.tmp')), 'no lock or tmp left behind');
 });
 
+// Each edit is [file, from, to]. R1 is guarded twice (create() never replaces, and rekey adopts a
+// loading key), so only both halves together (K5, int's old behaviour) reach it.
+const RENAME_OVER = [
+  [KP, '    if (existsSync(this.file)) return this.existing();\n    const key = randomBytes(KEY_BYTES);', '    const key = randomBytes(KEY_BYTES);'],
+  [KP, '      linkSync(tmp, this.file);', '      renameSync(tmp, this.file);'],
+];
+const REKEY_MINTS = [[ST, "const made = cur.ok ? cur : cur.reason === 'missing' ? this.d.keys.create() : cur;", 'const made = this.d.keys.create();']];
 const MUTANTS = [
-  { id: 'K1', what: 'create() renames a new key over the shared file (the old behaviour)', file: KP,
-    edits: [['    if (existsSync(this.file)) return this.existing();\n    const key = randomBytes(KEY_BYTES);', '    const key = randomBytes(KEY_BYTES);'],
-      ['      linkSync(tmp, this.file);', '      renameSync(tmp, this.file);']], dies: ['R1', 'R2', 'R3', 'R4'] },
-  { id: 'K2', what: 'the user-data lock is dropped', file: KP,
-    edits: [['  const lock = `${file}.lock`;\n  mkdirSync(dirname(file), { recursive: true });', '  if (file) return fn();\n  const lock = `${file}.lock`;\n  mkdirSync(dirname(file), { recursive: true });']], dies: ['R6', 'R7'] },
-  { id: 'K3', what: 'rekey mints through create() even while the shared key loads', file: ST,
-    edits: [["const made = cur.ok ? cur : cur.reason === 'missing' ? this.d.keys.create() : cur;", 'const made = this.d.keys.create();']], dies: ['R5'] },
-  { id: 'K4', what: 'a locked anchor set reuses the batch snapshot', file: KP,
-    edits: [['    // may have written since, and its entries must survive this write.\n    this.cache = null;\n    this.batchFresh = false;\n', '    // may have written since, and its entries must survive this write.\n']], dies: ['R8'] },
+  { id: 'K1', what: 'create() renames a new key over the shared file', edits: RENAME_OVER, dies: ['R3', 'R4'] },
+  { id: 'K2', what: 'the user-data lock is dropped',
+    edits: [[KP, '  const lock = `${file}.lock`;\n  mkdirSync(dirname(file), { recursive: true });', '  if (file) return fn();\n  const lock = `${file}.lock`;\n  mkdirSync(dirname(file), { recursive: true });']], dies: ['R6', 'R7'] },
+  { id: 'K3', what: 'rekey mints through create() even while the shared key loads', edits: REKEY_MINTS, dies: ['R5'] },
+  { id: 'K4', what: 'a locked anchor set reuses the batch snapshot',
+    edits: [[KP, '    // may have written since, and its entries must survive this write.\n    this.cache = null;\n    this.batchFresh = false;\n', '    // may have written since, and its entries must survive this write.\n']], dies: ['R8'] },
+  { id: 'K5', what: "int's old behaviour: rekey mints and create() renames over", edits: [...RENAME_OVER, ...REKEY_MINTS], dies: ['R1', 'R3', 'R4', 'R5'] },
 ];
 
 function mutated(m) {
-  let text = readSource(m.file).split('\r\n').join('\n');
-  for (const [from, to] of m.edits) {
+  const texts = {};
+  for (const [file, from, to] of m.edits) {
+    const text = texts[file] ?? readSource(file).split('\r\n').join('\n');
     assert.equal(text.split(from).length - 1, 1, `${m.id}: the mutant edit applies exactly once`);
-    text = text.split(from).join(to);
+    texts[file] = text.split(from).join(to);
   }
-  // Only the mutated file is swapped; the store takes its providers by injection.
-  return m.file === KP ? { keys: loadTs.fromText(KP, text), store: real.store } : { keys: real.keys, store: loadTs.fromText(ST, text) };
+  // Only the mutated files are swapped; the store takes its providers by injection.
+  return {
+    keys: texts[KP] ? loadTs.fromText(KP, texts[KP]) : real.keys,
+    store: texts[ST] ? loadTs.fromText(ST, texts[ST]) : real.store,
+  };
 }
 
 for (const m of MUTANTS) {
@@ -334,9 +345,9 @@ for (const m of MUTANTS) {
 test('MUTANT CENSUS: every mutant applies once and names a case that exists; every case has a mutant', () => {
   const ids = new Set(CASES.map(([c]) => c));
   for (const m of MUTANTS) {
-    for (const [from] of m.edits) assert.equal(readSource(m.file).split('\r\n').join('\n').split(from).length - 1, 1, `${m.id} applies once`);
+    for (const [file, from] of m.edits) assert.equal(readSource(file).split('\r\n').join('\n').split(from).length - 1, 1, `${m.id} applies once`);
     for (const id of m.dies) assert.ok(ids.has(id), `${m.id} names ${id}`);
   }
   const killed = new Set(MUTANTS.flatMap((m) => m.dies));
-  for (const id of CASES.map(([c]) => c)) assert.ok(killed.has(id), `${id} has a mutant`);
+  for (const id of CASES.map(([c]) => c).filter((c) => c !== 'R2')) assert.ok(killed.has(id), `${id} has a mutant`);
 });
