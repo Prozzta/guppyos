@@ -532,7 +532,7 @@ function post(url, body) {
 }
 
 test('broker: /term/<agent>/<token> reaches the handler with the token-proved id; a wrong token is 403; no handler is 404', async (t) => {
-  assert.match(src('src/main/hooks.ts'), /HOOK_ROUTE = \/\^\\\/\(hook\|mcp\|status\|ledger\|term\|claims\)\\\//);
+  assert.match(src('src/main/hooks.ts'), /HOOK_ROUTE = \/\^\\\/\(hook\|mcp\|status\|ledger\|scratch\|term\|claims\)\\\//);
   const s = await broker(t);
   const url = s.hookUrl('god').replace('/hook/', '/term/');
   assert.equal((await post(url, { action: 'read', agent: 'a1' })).status, 404, 'no term handler wired: 404');
