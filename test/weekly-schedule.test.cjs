@@ -119,3 +119,52 @@ test('the clocks moving does not move the appointment', () => {
     if (tz === undefined) delete process.env.TZ; else process.env.TZ = tz;
   }
 });
+
+// MISSION-WEEKLY-DOUBLEFIRE-108: a slot fires exactly once. The scheduler in index.ts fires,
+// stamps lastFiredAt = now, and re-arms with weeklyDelayMs(w, now, now). This drives that
+// loop on a fake clock: the first timer wakes earlyMs before its deadline, later ones on time.
+function drive(w, startMs, lastFiredAt, earlyMs, untilMs) {
+  const fires = [];
+  let now = startMs;
+  let last = lastFiredAt;
+  for (let i = 0; i < 20; i++) {
+    const d = weeklyDelayMs(w, now, last);
+    if (d === null) break;
+    now = now + Math.max(0, d - (i === 0 ? earlyMs : 0));
+    if (now > untilMs) break;
+    fires.push(now);
+    last = now;
+  }
+  return fires;
+}
+
+test('a timer that wakes just before the slot fires that slot once, not twice', () => {
+  const mon9 = { days: [1], minute: 540 };
+  const slot = at(2026, 8, 24, 9, 0); // Mon 24 Aug 2026, 09:00
+  for (const earlyMs of [1, 15, 250, 2000]) {
+    const fires = drive(mon9, slot - 3600000, slot - 7 * 86400000, earlyMs, slot + 86400000);
+    assert.equal(fires.length, 1, `woke ${earlyMs} ms early: fired at ${fires.map((t) => t - slot).join(', ')} ms from the slot`);
+  }
+  // A timer that wakes on time still fires once, and the next fire is next week's slot.
+  const onTime = drive(mon9, slot - 3600000, slot - 7 * 86400000, 0, slot + 8 * 86400000);
+  assert.deepEqual(onTime.map((t) => t - slot), [0, 7 * 86400000]);
+});
+
+test('an app restarted just after an early fire does not fire the same slot again', () => {
+  // Fired 40 ms before the slot (lastFiredAt persisted), then the app restarted 10 ms before it.
+  const mon9 = { days: [1], minute: 540 };
+  const slot = at(2026, 8, 24, 9, 0);
+  const d = weeklyDelayMs(mon9, slot - 10, slot - 40);
+  assert.equal(d, 7 * 86400000 + 10, 'the next fire is next week, not the slot 10 ms away');
+  // And restarted just AFTER the slot: the slot is covered, so no catch-up fire.
+  assert.equal(weeklyDelayMs(mon9, slot + 500, slot - 40), 7 * 86400000 - 500);
+});
+
+test('a run well before the slot does not cover it', () => {
+  // The early-wake allowance is narrow: a fire an hour before (e.g. a manual run) still lets
+  // the slot fire on time.
+  const mon9 = { days: [1], minute: 540 };
+  const slot = at(2026, 8, 24, 9, 0);
+  assert.equal(weeklyDelayMs(mon9, slot - 3600000, slot - 3600000), 3600000);
+  assert.equal(weeklyDelayMs(mon9, slot + 60000, slot - 3600000), 0, 'missed slot still catches up');
+});
