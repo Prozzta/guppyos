@@ -462,6 +462,10 @@ export interface NpmShimTarget {
  *  not seen) resolves to null and falls back to the cmd.exe path — never worse
  *  than today's behaviour. */
 const SHIM_INTERPRETERS = new Set(['node', 'bun', 'deno']);
+/** The cmd.exe command line for a Windows `shellScript` spawn (the missing-CLI installer). */
+export function winShellScriptArgs(script: string): string {
+  return `/d /s /c "${script}"`;
+}
 /** PROBE-REISSUE (B): how much raw output each PTY keeps for a diagnostic tail line. */
 export const PTY_TAIL_CHARS = 4096;
 /** The shim's target must look like a JS entry point. A shim that points at
@@ -1112,7 +1116,7 @@ export class PtyManager {
         // script is one argv element, so no shell-quoting is needed here.
         if (isWin) {
           file = process.env.ComSpec || 'cmd.exe';
-          spawnArgs = `/d /s /c "${opts.shellScript}"`;
+          spawnArgs = winShellScriptArgs(opts.shellScript);
         } else {
           file = process.env.SHELL || '/bin/sh';
           spawnArgs = ['-lc', opts.shellScript];
