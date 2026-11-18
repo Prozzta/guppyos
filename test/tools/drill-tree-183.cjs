@@ -184,8 +184,17 @@ function localModel(manifest, env) {
  * Remove a folder WITHOUT following links. Not fs.rmSync: under Electron its recursive delete goes
  * through a junction and empties the folder it points at, and the fixture folder is one agents can write
  * to. Every entry is lstat'ed just before it is touched; a link (junction, symlink) is unlinked, never
- * entered. A folder that turns into a link between its lstat and its listing stops the removal. What
- * stays open is a swap after that second look and before an entry under it is removed.
+ * entered.
+ *
+ * A folder is first moved, in one rename, to a tomb name only this call knows (`.rm-<NAME>-<pid>-<n>`
+ * beside it), and the tomb is what gets walked: no other run renames a name it does not know. Every
+ * path under a folder resolves through that folder again, so a folder swapped for a junction partway
+ * through would send every remaining name into the junction's target (measured by Jim: victim files
+ * lost in 25 of 150 runs). So before EACH child the folder is lstat'ed again (bigint file id: a
+ * double rounds a 64-bit NTFS id) and the removal stops (ESWAPPED) on a link or another folder; a
+ * child folder is entered only if it is still the one that was just looked at. What stays open is one
+ * entry: a swap after that look and before the single unlink or rmdir that follows it.
+ * A removal that fails moves the tomb back to its name, so the leftover keeps the name callers report.
  */
 const RM_RETRY = new Set(['EBUSY', 'EPERM', 'EACCES', 'ENOTEMPTY', 'EMFILE', 'ENFILE']);
 function dropEntry(p, isLink) {
@@ -197,28 +206,52 @@ function dropEntry(p, isLink) {
   fs.chmodSync(p, 0o666); // a read-only file
   try { fs.unlinkSync(p); } catch (e) { if (e.code !== 'ENOENT') throw e; }
 }
-function rmNoFollow(p) {
-  let st;
-  try { st = fs.lstatSync(p); } catch (e) { if (e.code === 'ENOENT') return; throw e; }
-  if (st.isSymbolicLink() || !st.isDirectory()) { dropEntry(p, st.isSymbolicLink()); return; }
+const entryAt = (p) => { try { return fs.lstatSync(p, { bigint: true }); } catch (e) { if (e.code === 'ENOENT') return null; throw e; } };
+const isFolder = (st) => st.isDirectory() && !st.isSymbolicLink();
+const sameEntry = (a, b) => a.ino === b.ino && a.dev === b.dev;
+const swapped = (p) => Object.assign(new Error(`${p} was swapped for another entry while it was being removed; the removal stopped there`), { code: 'ESWAPPED' });
+/** `was`: what the caller saw at p just before. `beforeChild(folder, name)`: a test seam, called before each child. */
+function rmNoFollow(p, was, beforeChild) {
+  const st = entryAt(p);
+  if (!st) { if (was) throw swapped(p); return; }
+  if (was && !sameEntry(st, was)) throw swapped(p);
+  if (!isFolder(st)) { dropEntry(p, st.isSymbolicLink()); return; }
+  const still = () => { const now = entryAt(p); if (!now || !isFolder(now) || !sameEntry(now, st)) throw swapped(p); };
   let names;
-  try { names = fs.readdirSync(p); } catch (e) { if (e.code === 'ENOENT') return; throw e; }
-  const again = fs.lstatSync(p);
-  if (again.isSymbolicLink() || !again.isDirectory() || again.ino !== st.ino) {
-    throw Object.assign(new Error(`${p} was swapped for another entry while it was being removed; nothing under it was touched`), { code: 'ESWAPPED' });
+  try { names = fs.readdirSync(p); } catch (e) { throw e.code === 'ENOENT' ? swapped(p) : e; } // it was there a moment ago
+  for (const n of names) {
+    const c = path.join(p, n);
+    const cst = entryAt(c);
+    if (beforeChild) beforeChild(p, n);
+    still(); // p is still the folder that was listed, so c is still under it
+    if (!cst) continue;
+    if (isFolder(cst)) rmNoFollow(c, cst, beforeChild); else dropEntry(c, cst.isSymbolicLink());
   }
-  for (const n of names) rmNoFollow(path.join(p, n));
-  try { fs.rmdirSync(p); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+  still();
+  try { fs.rmdirSync(p); } catch (e) { throw e.code === 'ENOENT' ? swapped(p) : e; }
 }
-function rmTree(p) {
+let rmSeq = 0;
+function rmTree(p, { tries = 10, beforeChild = null } = {}) {
   const hadNoAsar = process.noAsar;
   process.noAsar = true; // on Electron an .asar file would otherwise be listed as a folder
   try {
-    let err = null;
-    for (let i = 0; i < 10; i++) {
-      try { rmNoFollow(p); return; } catch (e) { err = e; if (!RM_RETRY.has(e.code)) throw e; sleep(300); }
+    const retry = (fn) => {
+      for (let i = 1; ; i++) {
+        try { return fn(); } catch (e) { if (!RM_RETRY.has(e.code) || i >= tries) throw e; sleep(300); }
+      }
+    };
+    const st = entryAt(p);
+    if (!st) return;
+    if (!isFolder(st)) { retry(() => dropEntry(p, st.isSymbolicLink())); return; }
+    const tomb = path.join(path.dirname(p), `.rm-${NAME}-${process.pid}-${Date.now()}${++rmSeq}`);
+    try { retry(() => fs.renameSync(p, tomb)); } catch (e) { if (e.code === 'ENOENT') return; throw e; }
+    try {
+      // Whatever was moved is checked again inside: a link is unlinked, and only the folder seen above is walked.
+      retry(() => { if (entryAt(tomb)) rmNoFollow(tomb, st, beforeChild); });
+    } catch (e) {
+      try { if (!entryAt(p)) fs.renameSync(tomb, p); else e.message += ` (what is left of it is at ${tomb})`; } catch { e.message += ` (what is left of it is at ${tomb})`; }
+      throw e;
     }
-    throw err;
   } finally { process.noAsar = hadNoAsar; }
 }
 
@@ -250,6 +283,8 @@ function replaceTree(work, tree, { rename = fs.renameSync, pause = sleep, log = 
   if (old) { try { rmTree(old); } catch (e) { log(`the replaced tree is left at ${old} (${e.code || e.message}); the next build clears it`); } }
 }
 
+/** What runs leave beside the tree: a build, its temp folder, a replaced tree, a removal's tomb, a lock moved aside. */
+const LEFTOVERS = [`.building-${NAME}-`, `.tmp-${NAME}-`, `.old-${NAME}-`, `.rm-${NAME}-`, `.lock-${NAME}.dead-`];
 const leftoverPid = (name) => Number((/-(\d+)(?:-\d+)?$/.exec(name) || [])[1]) || null;
 
 /**
@@ -257,7 +292,7 @@ const leftoverPid = (name) => Number((/-(\d+)(?:-\d+)?$/.exec(name) || [])[1]) |
  * runs left beside the tree. Returns true when a kept build is now the tree. A leftover whose process
  * is alive is left alone unless it is a finished build: under the lock nobody else is building.
  */
-function adoptOrClear(tree, { adopt, nativeProbe = nativeFault, log = () => {}, rename } = {}) {
+function adoptOrClear(tree, { adopt, nativeProbe = nativeFault, log = () => {}, rename, tries } = {}) {
   const parent = path.dirname(tree);
   let names = [];
   try { names = fs.readdirSync(parent); } catch { return false; }
@@ -271,10 +306,10 @@ function adoptOrClear(tree, { adopt, nativeProbe = nativeFault, log = () => {}, 
         adopted = true;
         continue;
       }
-    } else if (!name.startsWith(`.tmp-${NAME}-`) && !name.startsWith(`.old-${NAME}-`)) continue;
+    } else if (!LEFTOVERS.slice(1).some((pre) => name.startsWith(pre))) continue;
     const pid = leftoverPid(name);
     if (pid && pid !== process.pid && alive(pid)) continue;
-    try { rmTree(p); } catch (e) { log(`could not clear ${p} (${e.code || e.message})`); }
+    try { rmTree(p, { tries }); } catch (e) { log(`could not clear ${p} (${e.code || e.message})`); }
   }
   return adopted;
 }
@@ -389,7 +424,9 @@ function withLock(tree, log, fn, { waitMs = LOCK_WAIT_MS, staleMs = LOCK_STALE_M
     const tomb = `${lock}.dead-${token}`;
     try { fs.renameSync(lock, tomb); } catch { return; }
     if (lockId(tomb) !== judged) {
-      try { fs.renameSync(tomb, lock); return; } catch { /* a newer lock is there already: this one is nobody's now */ }
+      // Not removed: it may be a live run's lock. A later run that finds the tree ready clears it.
+      try { fs.renameSync(tomb, lock); } catch (e) { log(`a lock that was not the stale one got moved aside and could not be put back (${e.code || e.message}); it is left at ${tomb}`); }
+      return;
     }
     try { rmTree(tomb); } catch { /* an empty leftover name; it is not the lock */ }
   };
@@ -471,11 +508,12 @@ function ensureTree({ env = process.env, log = (m) => process.stderr.write(`[dri
     if (host || !mayBuild) return;
     const parent = path.dirname(tree);
     try {
-      const mine = (n) => [`.building-${NAME}-`, `.tmp-${NAME}-`, `.old-${NAME}-`].some((p) => n.startsWith(p));
+      const mine = (n) => LEFTOVERS.some((p) => n.startsWith(p));
       if (fs.existsSync(path.join(parent, `.lock-${NAME}`)) || !fs.readdirSync(parent).some(mine)) return;
       withLock(tree, log, () => {
         log(`clearing what earlier runs left beside the ready tree at ${tree}`);
-        adoptOrClear(tree, { adopt: false, nativeProbe, log });
+        // One try each: a leftover something still has open is logged and left for a later run, not waited for.
+        adoptOrClear(tree, { adopt: false, nativeProbe, log, tries: 1 });
       }, { ...lock, waitMs: 0 });
     } catch (e) { log(`leftovers beside ${tree} were not cleared (${e.code || e.message})`); }
   };

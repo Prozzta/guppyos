@@ -353,6 +353,47 @@ test('Jim SHOULD: rmTree unlinks a link and never enters it; an .asar file is a 
   D.rmTree(path.join(jail, 'rm-absent')); // absent: nothing to do, no error
 });
 
+// Jim's measured SHOULD on 98b5c07b: every child path resolves through the folder again, so a folder
+// swapped for a junction partway through sent the remaining names into the junction's target.
+test('Jim SHOULD 2: a folder swapped for a junction between two children stops the removal; the target keeps every file', () => {
+  const names = ['d0', 'd1', 'd2', 'd3'];
+  const fill = (dir) => { for (const d of names) { fs.mkdirSync(path.join(dir, d, 'deep'), { recursive: true }); for (const f of ['f0', 'f1']) { fs.writeFileSync(path.join(dir, d, f), 'x'); fs.writeFileSync(path.join(dir, d, 'deep', f), 'x'); } } };
+  const whole = (dir) => names.every((d) => ['f0', 'f1'].every((f) => fs.existsSync(path.join(dir, d, f)) && fs.existsSync(path.join(dir, d, 'deep', f))));
+  const swapRun = (label, when) => {
+    const base = path.join(jail, `swap-${label}`);
+    const p = path.join(base, 'p'), victim = path.join(base, 'victim');
+    fill(p); fill(victim);
+    let top = null, calls = 0, swappedAt = null;
+    const beforeChild = (folder, name) => {
+      if (top === null) top = folder; // the first call is for the folder being removed (where rmTree moved it)
+      if (swappedAt || !when(folder === top, folder, name, ++calls)) return;
+      fs.renameSync(top, path.join(base, 'moved-away'));
+      fs.symlinkSync(victim, top, 'junction');
+      swappedAt = `${path.relative(top, folder) || '.'} before ${name}`;
+    };
+    assert.throws(() => D.rmTree(p, { beforeChild }), (e) => e.code === 'ESWAPPED', label);
+    assert.ok(swappedAt, `${label}: the swap happened`);
+    assert.notEqual(path.basename(top), 'p', 'the folder is walked under a name only this removal knows');
+    assert.ok(whole(victim), `${label}: every file in the junction's target is still there (swapped at ${swappedAt})`);
+  };
+  swapRun('top', (isTop, folder, name) => isTop && name === 'd1'); // between the first and the second child of the folder itself
+  swapRun('nested', (isTop, folder, name) => !isTop && path.basename(folder) === 'd1' && name !== 'deep'); // while a child folder is walked
+  swapRun('last', (isTop, folder, name) => !isTop && path.basename(folder) === 'deep' && path.basename(path.dirname(folder)) === 'd3' && name === 'f1');
+  // no swap: the folder goes, and no tomb is left beside it
+  const clean = path.join(jail, 'swap-none', 'p');
+  fill(clean);
+  const seen = [];
+  D.rmTree(clean, { beforeChild: (folder, name) => seen.push(name) });
+  assert.deepEqual(fs.readdirSync(path.dirname(clean)), []);
+  assert.equal(seen.length, 4 + 12 + 8, 'the seam is called before every child');
+  // a removal that fails puts what is left back under the name the caller knows
+  const back = path.join(jail, 'swap-back', 'p');
+  fill(back);
+  assert.throws(() => D.rmTree(back, { tries: 1, beforeChild: (folder, name) => { if (name === 'd2') throw Object.assign(new Error('busy'), { code: 'EBUSY' }); } }), (e) => e.code === 'EBUSY');
+  assert.deepEqual(fs.readdirSync(path.dirname(back)), ['p']);
+  assert.deepEqual(fs.readdirSync(back).sort(), ['d2', 'd3']);
+});
+
 test('Jim NIT a: a waiter that judged a lock stale does not remove the fresh lock another waiter made meanwhile', () => {
   const root = path.join(jail, 'race-root');
   const tree = path.join(root, D.NAME);
@@ -400,6 +441,8 @@ test('Jim NIT d: a run that finds the tree ready clears what earlier runs left b
     fakeTree(path.join(root, `.building-${D.NAME}-4194300`), { mark: 'kept' });
     fs.mkdirSync(path.join(root, `.tmp-${D.NAME}-4194300`), { recursive: true });
     fs.mkdirSync(path.join(root, `.old-${D.NAME}-4194300-1700000000000`), { recursive: true });
+    fs.mkdirSync(path.join(root, `.rm-${D.NAME}-4194300-17000000000001`, 'half'), { recursive: true }); // a removal that died
+    fs.mkdirSync(path.join(root, `.lock-${D.NAME}.dead-4194300-0123456789abcdef`), { recursive: true }); // a lock moved aside and not put back
     fakeTree(path.join(root, `.building-${D.NAME}-${process.ppid}`), { mark: 'live' }); // a run that is alive
     return fs.readdirSync(root).sort();
   };
