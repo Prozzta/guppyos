@@ -1,4 +1,18 @@
 import { spawn } from 'node:child_process';
+import { resolveExe } from './resolveExe';
+
+/**
+ * BARE-SPAWN-CWD-HIJACK-108: the full path of gh. A bare 'gh' with cwd = the repo would run a gh.exe or
+ * gh.com the repo carries (Windows looks in the child's working directory first). cwd stays the repo,
+ * which gh needs to find it; the program comes from the absolute folders of PATH only.
+ */
+function ghProgram(): { ok: true; program: string } | { ok: false; error: string } {
+  try {
+    return { ok: true, program: resolveExe('gh', { exts: ['.com', '.exe'] }) };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
 
 /** A GitHub issue, normalized for the renderer (labels/assignees flattened to names). */
 export interface GHIssue {
@@ -30,8 +44,10 @@ interface RawGHIssue {
  */
 export function listIssues(cwd: string): Promise<{ ok: boolean; issues?: GHIssue[]; error?: string }> {
   return new Promise((resolve) => {
+    const gh = ghProgram();
+    if (!gh.ok) { resolve({ ok: false, error: gh.error }); return; }
     const proc = spawn(
-      'gh',
+      gh.program,
       ['issue', 'list', '--json', 'number,title,body,assignees,labels,url,state', '--limit', '30'],
       { cwd }
     );
@@ -90,8 +106,10 @@ interface RawCIRun {
  */
 export function listCIRuns(cwd: string): Promise<{ ok: boolean; runs?: CIRun[]; error?: string }> {
   return new Promise((resolve) => {
+    const gh = ghProgram();
+    if (!gh.ok) { resolve({ ok: false, error: gh.error }); return; }
     const proc = spawn(
-      'gh',
+      gh.program,
       ['run', 'list', '--limit', '5', '--json', 'name,status,conclusion,url,databaseId'],
       { cwd }
     );
