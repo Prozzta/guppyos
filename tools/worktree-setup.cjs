@@ -200,13 +200,39 @@ function verifyModelDir(dir, manifest) {
   return require('../scripts/release-worktrees.cjs').verifyModel(dir, manifest);
 }
 
+/** verifyModelDir, but a file that cannot be read (EISDIR, EBUSY, EPERM) is a failed check, not a throw. */
+function safeVerify(dir, manifest) {
+  try { return verifyModelDir(dir, manifest); } catch (e) { return { ok: false, why: `cannot read it (${e.code || e.message})` }; }
+}
+
+/**
+ * The first level of the model target that resolves out of `root`, or null: resources/, models/,
+ * the model dir, then each manifest file's folders and the file itself (Jim NIT on 3c5ca488: old
+ * setups junctioned onnx/ to another tree, and checking only the nearest existing ancestor wrote
+ * through it). A link whose target cannot be resolved counts as outside.
+ */
+function modelLevelOutside(root, own, manifest) {
+  const levels = [path.join(root, 'resources'), path.join(root, 'resources', 'models'), own];
+  for (const rel of Object.keys(manifest.model.files)) {
+    const parts = rel.split('/');
+    for (let i = 1; i <= parts.length; i++) levels.push(path.join(own, ...parts.slice(0, i)));
+  }
+  for (const p of levels) {
+    const link = isLink(p);
+    if (!link && !fs.existsSync(p)) continue;
+    if (link) { try { fs.realpathSync.native(p); } catch { return p; } }
+    if (!resolvesInside(p, root)) return p;
+  }
+  return null;
+}
+
 /** WORKTREE-SETUP-MODEL-108: is resources/models/<dir>/ the manifest's model, file for file? */
 function modelState(root) {
   const m = readModelManifest(root);
   if (m === null) return { ok: true };
   if (m.error) return { ok: false, problem: m.error };
   const rel = `resources/models/${m.dir}`;
-  const v = verifyModelDir(path.join(root, rel), m.manifest);
+  const v = safeVerify(path.join(root, rel), m.manifest);
   if (v.ok) return { ok: true };
   return { ok: false, problem: `${rel} is not the manifest's model (${v.why}); fill it with node tools/worktree-setup.cjs --copy-from <tree with the model>, or MUNDER_MODEL_CACHE=<verified model dir> (this tool never downloads)` };
 }
@@ -231,15 +257,14 @@ function fillModel(root, { copyFrom, env = process.env, releaseCache, spawnSyncF
   if (!m || m.error) { log(`[worktree-setup] model: ${m ? m.error : 'no manifest'}; nothing to fill`); return false; }
   const fetch = path.join(root, MODEL_FETCH);
   if (!fs.existsSync(fetch)) { log(`[worktree-setup] model: ${MODEL_FETCH} is missing in this tree`); return false; }
-  // the target, or its nearest folder that exists, must be this tree's own: never write through a link
+  // every level of the target must be this tree's own: never write through a link at any depth
   const own = path.join(root, 'resources', 'models', m.dir);
-  let target = own;
-  while (!fs.existsSync(target) && path.dirname(target) !== target) target = path.dirname(target);
-  if (!resolvesInside(target, root)) { log(`[worktree-setup] model: refusing to write ${own}: ${target} resolves outside ${root}`); return false; }
+  const outside = modelLevelOutside(root, own, m.manifest);
+  if (outside) { log(`[worktree-setup] model: refusing to write ${own}: ${outside} resolves outside ${root}`); return false; }
   const tried = [];
   for (const s of modelSources(root, m.dir, { copyFrom, env, releaseCache })) {
     if (path.resolve(s.dir) === path.resolve(own)) continue;
-    const v = verifyModelDir(s.dir, m.manifest);
+    const v = safeVerify(s.dir, m.manifest);
     if (!v.ok) { tried.push(`${s.from} ${s.dir}: ${v.why}`); continue; }
     // the source dir is passed explicitly, so the script has no path to a download
     const r = spawnSyncFn(process.execPath, [fetch, '--from', s.dir], { cwd: root, encoding: 'utf8', windowsHide: true });
@@ -356,7 +381,13 @@ function teardown(root = REPO, { log = console.log } = {}) {
 
 /** run-tests.cjs gate: 0 = go, 2 = refuse. On the opt-out, the gap ids are pushed to `optedOut`. */
 function preflight({ root = REPO, env = process.env, log = (l) => process.stderr.write(`${l}\n`), inspectFn = inspect, optedOut = [] } = {}) {
-  const gaps = inspectFn(root);
+  // a check that throws refuses cleanly (2), never a crash of run-tests (Jim NIT on 3c5ca488)
+  let gaps;
+  try { gaps = inspectFn(root); } catch (e) {
+    log(`[test-runner] TREE CHECK FAILED: ${e.message}`);
+    log('[test-runner] this tree cannot be checked; fix it with: node tools/worktree-setup.cjs [--copy-from <built tree>]');
+    return 2;
+  }
   if (!gaps.length) return 0;
   for (const g of gaps) log(`[test-runner] TREE GAP ${g.id}: ${g.problem}`);
   if (env.GUPPY_ALLOW_INCOMPLETE_TREE === '1') {
@@ -371,7 +402,7 @@ function preflight({ root = REPO, env = process.env, log = (l) => process.stderr
 /** The line run-tests.cjs repeats after its summary on an opted-out run. */
 function optOutLine(ids) { return `[test-runner] INCOMPLETE TREE (opt-out): ${ids.join(', ')}`; }
 
-module.exports = { NATIVES, ADDON, NODE_PTY, NODE_PTY_PATCH, NODE_PTY_BINARY, nodePtyState, MODEL_MANIFEST, MODEL_FETCH, modelState, modelSources, fillModel, STAMP, buildStamp, inspect, optOutLine, sourcesDigest, readStamp, linksUnder, setup, preflight, teardown, localizeXterm, sameSources, sourceDigests, resolvesInside };
+module.exports = { NATIVES, ADDON, NODE_PTY, NODE_PTY_PATCH, NODE_PTY_BINARY, nodePtyState, MODEL_MANIFEST, MODEL_FETCH, modelState, modelSources, fillModel, modelLevelOutside, STAMP, buildStamp, inspect, optOutLine, sourcesDigest, readStamp, linksUnder, setup, preflight, teardown, localizeXterm, sameSources, sourceDigests, resolvesInside };
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
