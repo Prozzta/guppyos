@@ -5,7 +5,7 @@
  * path and then opening it are two separate lookups, and a link swapped in between is what the open
  * really gets. The only answer that cannot be raced is a property of the handle itself, so after
  * every confined open fs.ts asks the handle for its final path and checks that against the
- * workspace root. Linux reads /proc/self/fd in JS and never loads this module.
+ * workspace root. Linux reads /proc/self/fd in JS and does not call finalPath.
  *
  *   win32:  GetFinalPathNameByHandleW on the fd's OS handle (uv_get_osfhandle: the fd belongs to
  *           the host's C runtime, not to ours, so _get_osfhandle here would look in the wrong table).
@@ -14,9 +14,14 @@
  * finalPath(fd: number) -> string. Any failure throws; the caller refuses the access.
  * Windows also exports the process holds of PTY-KILL-PID-IDENTITY (procOpen/procAlive/procClose) and
  * PTY-HOLD-NODEPTY-HANDOFF (procAdopt), below.
+ * Every platform exports removeTree / removeTreeAsync / removeTreeApi (FS-REMOVE-READDIR-GAP-108,
+ * below): the link-safe tree delete, on Windows, Linux and macOS.
  * Plain N-API (ABI-stable), so one build loads in Electron and in the Node that runs the tests.
  */
 #define NAPI_VERSION 8
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE /* openat, fdopendir, O_NOFOLLOW, O_CLOEXEC (removeTree) */
+#endif
 #include <node_api.h>
 #include <stdint.h>
 
@@ -323,17 +328,567 @@ static napi_value posix_rename(napi_env env, napi_callback_info info) {
   return NULL;
 }
 
+#endif
+
+/*
+ * FS-REMOVE-READDIR-GAP-108: removeTree(path, keepRoot) deletes a folder tree without ever
+ * resolving a name twice.
+ *
+ * A walk made of lstat, readdir, unlink and rmdir calls on PATHS resolves the path again on every
+ * call. A process that can write the tree can put a link where a folder was between two of those
+ * calls (on Windows a junction is even a plain empty folder for a moment while it is being made),
+ * and the next call then lists or deletes the link's TARGET. No re-check in JS closes that: there
+ * is always one more lookup after the check.
+ *
+ * Here every folder is opened ONCE, without following a link, and everything after that is asked
+ * of the open HANDLE (Windows) or file descriptor (Linux, macOS), never of a path:
+ *   - what it holds: the listing is read from the handle;
+ *   - its children: opened or removed by their bare name INSIDE the folder the handle is, wherever
+ *     that folder's path now points (NtCreateFile with RootDirectory; openat / unlinkat);
+ *   - Windows: a child's type is read from its own handle and it is deleted through that handle.
+ *   - POSIX: a child that is not a folder is removed with unlinkat, which never follows; a folder
+ *     is opened with O_NOFOLLOW | O_DIRECTORY, which fails on a link, emptied through that
+ *     descriptor and removed with unlinkat(AT_REMOVEDIR), which fails on a link and on a folder
+ *     that is not empty.
+ * So a link that appears at any moment is either removed as a link, or it was put on a name whose
+ * folder we already hold, and the handle still is the old folder. On Windows a folder that is
+ * turned into a junction in place while we hold it must be empty for that, lists as empty from our
+ * handle and is removed through the handle: the junction goes, its target is not touched.
+ *
+ * Not covered, on purpose: the folders ABOVE the root. The root's own path is resolved by the
+ * system as usual, so a caller must hand in a root whose parents it trusts. On POSIX the emptied
+ * root is removed by rmdir(path): that removes a link's target never (rmdir does not follow) and a
+ * folder only when it is empty.
+ *
+ * removeTree(path, keepRoot?) -> links             synchronous; links = how many links it removed
+ * removeTreeAsync(path, keepRoot?) -> Promise      same walk on a worker thread
+ * removeTreeApi                                    GUPPY_REMOVE_TREE_API; callers refuse any other value
+ * keepRoot empties the folder and leaves it.
+ * The root must be a real folder: a link or a file is refused (message starts with "refused:",
+ * code EREFUSED). Other errors carry `errno` (the Win32 code or errno), `code` (ENOENT, EPERM,
+ * EACCES, EBUSY, ENOTEMPTY or EIO), `links` (removed before the error) and the failing entry's
+ * name in the message. The walk stops at the first error.
+ */
+#define GUPPY_REMOVE_TREE_API 1
+#define RT_MAX_DEPTH 2048   /* nested folders; deeper than any real tree, and bounds the C stack */
+#define RT_MAX_PASSES 64    /* listings of one folder before "it keeps refilling" */
+#define RT_RMDIR_TRIES 5    /* remove, and on "not empty" pause and re-walk; the same in every caller */
+#define RT_REFUSED_LINK 0xE0000001u
+#define RT_REFUSED_NOT_DIR 0xE0000002u
+
+#ifdef _WIN32
+#define RT_BUF_BYTES 65536
+#define RT_OPEN_REPARSE_POINT 0x00200000u
+#define RT_OPEN_FOR_BACKUP_INTENT 0x00004000u
+#define RT_SYNCHRONOUS_IO_NONALERT 0x00000020u
+#define RT_FILE_OPEN 1u
+#define RT_OBJ_CASE_INSENSITIVE 0x40u
+#define RT_DISPOSITION_INFO_EX 21 /* FileDispositionInfoEx */
+#define RT_DISPOSITION_DELETE 0x1u
+#define RT_DISPOSITION_POSIX_SEMANTICS 0x2u
+#define RT_DISPOSITION_IGNORE_READONLY 0x10u
+/* A symlink or a junction: a reparse point that stands for another name. */
+#define RT_IS_LINK(attrs, tag) (((attrs) & FILE_ATTRIBUTE_REPARSE_POINT) && ((tag) & 0x20000000u))
+
+typedef WCHAR rt_char;
+typedef struct { USHORT Length; USHORT MaximumLength; PWSTR Buffer; } rt_unicode_string;
+typedef struct {
+  ULONG Length;
+  HANDLE RootDirectory;
+  rt_unicode_string *ObjectName;
+  ULONG Attributes;
+  PVOID SecurityDescriptor;
+  PVOID SecurityQualityOfService;
+} rt_object_attributes;
+typedef struct { union { LONG Status; PVOID Pointer; } u; ULONG_PTR Information; } rt_io_status_block;
+typedef LONG (NTAPI *rt_nt_create_file)(PHANDLE, ACCESS_MASK, rt_object_attributes *, rt_io_status_block *,
+                                        PLARGE_INTEGER, ULONG, ULONG, ULONG, ULONG, PVOID, ULONG);
+typedef ULONG (NTAPI *rt_nt_status_to_dos)(LONG);
+
+typedef struct {
+  rt_nt_create_file create;
+  rt_nt_status_to_dos to_dos;
+  uint32_t code;     /* 0 = no error yet */
+  const char *step;  /* what failed */
+  char name[800];    /* the entry it failed on, UTF-8 ("" = the root) */
+  uint32_t links;    /* links removed so far */
+} rt_ctx;
+
+static int rt_fail(rt_ctx *c, DWORD code, const char *step, const WCHAR *name, size_t chars) {
+  if (c->code) return 0; /* the first error is the one reported */
+  c->code = code ? code : ERROR_GEN_FAILURE;
+  c->step = step;
+  c->name[0] = 0;
+  if (name && chars) {
+    int n = WideCharToMultiByte(CP_UTF8, 0, name, (int)(chars > 255 ? 255 : chars), c->name, (int)sizeof(c->name) - 1, NULL, NULL);
+    c->name[n > 0 ? n : 0] = 0;
+  }
+  return 0;
+}
+
+/* What the HANDLE is. Never asks a path. */
+static int rt_kind(HANDLE h, DWORD *attrs, DWORD *tag) {
+  FILE_ATTRIBUTE_TAG_INFO ti;
+  if (!GetFileInformationByHandleEx(h, FileAttributeTagInfo, &ti, sizeof(ti))) return 0;
+  *attrs = ti.FileAttributes;
+  *tag = ti.ReparseTag;
+  return 1;
+}
+
+/* Remove the object the handle is. Returns 0 on success, else the Win32 code. */
+static DWORD rt_delete(HANDLE h, DWORD attrs) {
+  DWORD flags = RT_DISPOSITION_DELETE | RT_DISPOSITION_POSIX_SEMANTICS | RT_DISPOSITION_IGNORE_READONLY;
+  if (SetFileInformationByHandle(h, (FILE_INFO_BY_HANDLE_CLASS)RT_DISPOSITION_INFO_EX, &flags, sizeof(flags))) return 0;
+  DWORD e = GetLastError();
+  /* Only a file system that does not know the Ex class gets the old one (FAT, some network drives). */
+  if (e != ERROR_INVALID_PARAMETER && e != ERROR_INVALID_FUNCTION && e != ERROR_NOT_SUPPORTED) return e;
+  if (attrs & FILE_ATTRIBUTE_READONLY) {
+    FILE_BASIC_INFO bi;
+    memset(&bi, 0, sizeof(bi)); /* zero times: leave them */
+    bi.FileAttributes = attrs & ~(DWORD)FILE_ATTRIBUTE_READONLY;
+    if (!bi.FileAttributes) bi.FileAttributes = FILE_ATTRIBUTE_NORMAL;
+    if (!SetFileInformationByHandle(h, FileBasicInfo, &bi, sizeof(bi))) return GetLastError();
+  }
+  FILE_DISPOSITION_INFO di;
+  di.DeleteFile = TRUE;
+  if (!SetFileInformationByHandle(h, FileDispositionInfo, &di, sizeof(di))) return GetLastError();
+  return 0;
+}
+
+/* Open `name` INSIDE the folder `parent` is, without following a link. *code is 0 on success. */
+static HANDLE rt_open_child(rt_ctx *c, HANDLE parent, const WCHAR *name, USHORT bytes, int list, DWORD *code) {
+  rt_unicode_string us;
+  rt_object_attributes oa;
+  rt_io_status_block io;
+  HANDLE h = NULL;
+  us.Length = bytes;
+  us.MaximumLength = bytes;
+  us.Buffer = (PWSTR)name;
+  memset(&oa, 0, sizeof(oa));
+  oa.Length = sizeof(oa);
+  oa.RootDirectory = parent;
+  oa.ObjectName = &us;
+  oa.Attributes = RT_OBJ_CASE_INSENSITIVE;
+  ACCESS_MASK want = DELETE | SYNCHRONIZE | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | (list ? FILE_LIST_DIRECTORY : 0);
+  LONG st = 0;
+  for (int i = 0; i < 2; i++) {
+    memset(&io, 0, sizeof(io));
+    st = c->create(&h, want, &oa, &io, NULL, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, RT_FILE_OPEN,
+                   RT_OPEN_REPARSE_POINT | RT_OPEN_FOR_BACKUP_INTENT | RT_SYNCHRONOUS_IO_NONALERT, NULL, 0);
+    if (st >= 0) { *code = 0; return h; }
+    /* Write-attributes is only needed by the old delete class on a read-only file: try once without. */
+    if (i == 0 && c->to_dos(st) == ERROR_ACCESS_DENIED) { want &= ~(ACCESS_MASK)FILE_WRITE_ATTRIBUTES; continue; }
+    break;
+  }
+  *code = c->to_dos(st);
+  if (!*code) *code = ERROR_GEN_FAILURE;
+  return INVALID_HANDLE_VALUE;
+}
+
+static int rt_empty(rt_ctx *c, HANDLE dir, int depth);
+
+/* Delete the folder `h` is, after emptying it. On "not empty" (a creator raced us): pause, re-walk, retry. */
+static int rt_remove_dir(rt_ctx *c, HANDLE h, DWORD attrs, int depth, const WCHAR *name, size_t chars) {
+  for (int i = 0; i < RT_RMDIR_TRIES; i++) {
+    if (i) Sleep(10 * (DWORD)i);
+    if (!rt_empty(c, h, depth)) return 0;
+    DWORD e = rt_delete(h, attrs);
+    if (!e) return 1;
+    if (e != ERROR_DIR_NOT_EMPTY) return rt_fail(c, e, "delete folder", name, chars);
+  }
+  return rt_fail(c, ERROR_DIR_NOT_EMPTY, "delete folder (it kept refilling)", name, chars);
+}
+
+/* One listed entry of the folder `parent` is. */
+static int rt_entry(rt_ctx *c, HANDLE parent, const WCHAR *name, USHORT bytes, DWORD listed_attrs, int depth) {
+  size_t chars = bytes / sizeof(WCHAR);
+  /* The listing is only a hint for which access to ask for. The handle decides. */
+  int list = (listed_attrs & FILE_ATTRIBUTE_DIRECTORY) && !(listed_attrs & FILE_ATTRIBUTE_REPARSE_POINT);
+  for (int attempt = 0; attempt < 3; attempt++) {
+    DWORD code = 0, attrs = 0, tag = 0;
+    HANDLE h = rt_open_child(c, parent, name, bytes, list, &code);
+    if (h == INVALID_HANDLE_VALUE) {
+      if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND) return 1; /* someone else removed it */
+      return rt_fail(c, code, "open entry", name, chars);
+    }
+    if (!rt_kind(h, &attrs, &tag)) {
+      DWORD e = GetLastError();
+      CloseHandle(h);
+      return rt_fail(c, e, "read entry type", name, chars);
+    }
+    int folder = (attrs & FILE_ATTRIBUTE_DIRECTORY) && !RT_IS_LINK(attrs, tag);
+    if (folder && !list) { /* a real folder where the listing showed something else: reopen able to list it */
+      CloseHandle(h);
+      list = 1;
+      continue;
+    }
+    int ok;
+    if (folder) {
+      ok = rt_remove_dir(c, h, attrs, depth + 1, name, chars);
+    } else { /* a file or a link: removed as itself, never looked into */
+      DWORD e = rt_delete(h, attrs);
+      ok = e ? rt_fail(c, e, "delete entry", name, chars) : 1;
+      if (ok && RT_IS_LINK(attrs, tag)) c->links++;
+    }
+    CloseHandle(h);
+    return ok;
+  }
+  return rt_fail(c, ERROR_RETRY, "open entry (its type kept changing)", name, chars);
+}
+
+/* Remove everything inside the folder `dir` is. The listing comes from the handle. */
+static int rt_empty(rt_ctx *c, HANDLE dir, int depth) {
+  if (depth > RT_MAX_DEPTH) return rt_fail(c, ERROR_FILENAME_EXCED_RANGE, "walk (tree too deep)", NULL, 0);
+  BYTE *buf = (BYTE *)malloc(RT_BUF_BYTES);
+  if (!buf) return rt_fail(c, ERROR_NOT_ENOUGH_MEMORY, "walk", NULL, 0);
+  int ok = 1;
+  for (int pass = 0; ok; pass++) {
+    if (pass >= RT_MAX_PASSES) { ok = rt_fail(c, ERROR_DIR_NOT_EMPTY, "empty folder (it kept refilling)", NULL, 0); break; }
+    int seen = 0;
+    FILE_INFO_BY_HANDLE_CLASS cls = FileIdBothDirectoryRestartInfo; /* each pass lists from the start */
+    while (ok) {
+      if (!GetFileInformationByHandleEx(dir, cls, buf, RT_BUF_BYTES)) {
+        DWORD e = GetLastError();
+        if (e != ERROR_NO_MORE_FILES) ok = rt_fail(c, e, "list folder", NULL, 0);
+        break;
+      }
+      cls = FileIdBothDirectoryInfo;
+      FILE_ID_BOTH_DIR_INFO *fi = (FILE_ID_BOTH_DIR_INFO *)buf;
+      for (;;) {
+        DWORD n = fi->FileNameLength / sizeof(WCHAR);
+        int dots = (n == 1 && fi->FileName[0] == L'.') || (n == 2 && fi->FileName[0] == L'.' && fi->FileName[1] == L'.');
+        if (!dots) {
+          seen++;
+          if (fi->FileNameLength > 0xFFFE) { ok = rt_fail(c, ERROR_FILENAME_EXCED_RANGE, "open entry", fi->FileName, n); break; }
+          if (!rt_entry(c, dir, fi->FileName, (USHORT)fi->FileNameLength, fi->FileAttributes, depth)) { ok = 0; break; }
+        }
+        if (!fi->NextEntryOffset) break;
+        fi = (FILE_ID_BOTH_DIR_INFO *)((BYTE *)fi + fi->NextEntryOffset);
+      }
+    }
+    if (!seen) break; /* a full pass that listed nothing: the folder is empty */
+  }
+  free(buf);
+  return ok;
+}
+
+/* The whole job, no N-API in it (it also runs on a worker thread). Returns 1 on success; else c holds the error. */
+static int rt_remove(rt_ctx *c, const WCHAR *path, int keep_root) {
+  memset(c, 0, sizeof(*c));
+  HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+  c->create = ntdll ? (rt_nt_create_file)GetProcAddress(ntdll, "NtCreateFile") : NULL;
+  c->to_dos = ntdll ? (rt_nt_status_to_dos)GetProcAddress(ntdll, "RtlNtStatusToDosError") : NULL;
+  if (!c->create || !c->to_dos) return rt_fail(c, ERROR_PROC_NOT_FOUND, "find NtCreateFile", NULL, 0);
+  HANDLE h = CreateFileW(path, DELETE | SYNCHRONIZE | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | FILE_LIST_DIRECTORY,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                         FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+  if (h == INVALID_HANDLE_VALUE) return rt_fail(c, GetLastError(), "open root", NULL, 0);
+  DWORD attrs = 0, tag = 0;
+  int ok;
+  if (!rt_kind(h, &attrs, &tag)) ok = rt_fail(c, GetLastError(), "read root type", NULL, 0);
+  else if (RT_IS_LINK(attrs, tag)) ok = rt_fail(c, RT_REFUSED_LINK, "refused: root is a reparse point", NULL, 0);
+  else if (!(attrs & FILE_ATTRIBUTE_DIRECTORY)) ok = rt_fail(c, RT_REFUSED_NOT_DIR, "refused: root is not a directory", NULL, 0);
+  else if (keep_root) ok = rt_empty(c, h, 0);
+  else ok = rt_remove_dir(c, h, attrs, 0, NULL, 0);
+  CloseHandle(h);
+  return ok;
+}
+
+static const char *rt_code(uint32_t code) {
+  if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND) return "ENOENT";
+  if (code == ERROR_ACCESS_DENIED) return "EPERM";
+  if (code == ERROR_SHARING_VIOLATION || code == ERROR_LOCK_VIOLATION) return "EBUSY";
+  if (code == ERROR_DIR_NOT_EMPTY) return "ENOTEMPTY";
+  return "EIO";
+}
+#define RT_ERRNO_LABEL "win32"
+
+static rt_char *rt_path_arg(napi_env env, napi_value v) { return utf16_arg(env, v); }
+#else
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+typedef char rt_char;
+typedef struct {
+  uint32_t code;     /* 0 = no error yet; else an errno or RT_REFUSED_* */
+  const char *step;  /* what failed */
+  char name[800];    /* the entry it failed on ("" = the root) */
+  uint32_t links;    /* links removed so far */
+} rt_ctx;
+
+#define RT_OPEN_DIR (O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+/* What open(O_NOFOLLOW | O_DIRECTORY) and unlinkat give when the name is not (or no longer) a real folder. */
+#define RT_NOT_A_FOLDER(e) ((e) == ELOOP || (e) == ENOTDIR || (e) == EMLINK)
+
+static int rt_fail(rt_ctx *c, int code, const char *step, const char *name) {
+  if (c->code) return 0; /* the first error is the one reported */
+  c->code = code ? (uint32_t)code : (uint32_t)EIO;
+  c->step = step;
+  snprintf(c->name, sizeof(c->name), "%s", name ? name : "");
+  return 0;
+}
+
+static int rt_empty(rt_ctx *c, int dfd, int depth);
+
+/*
+ * Remove the folder `name` inside the folder `dfd` is. Returns 1 done, 0 failed, 2 "it is not a
+ * folder now" (the caller looks again). On "not empty" (a creator raced us): pause, re-walk, retry.
+ */
+static int rt_remove_dir(rt_ctx *c, int dfd, const char *name, int depth) {
+  for (int i = 0; i < RT_RMDIR_TRIES; i++) {
+    if (i) usleep(10000u * (unsigned)i);
+    int fd = openat(dfd, name, RT_OPEN_DIR); /* fails on a link: O_NOFOLLOW */
+    if (fd < 0) {
+      if (errno == ENOENT) return 1; /* someone else removed it */
+      if (RT_NOT_A_FOLDER(errno)) return 2;
+      return rt_fail(c, errno, "open folder", name);
+    }
+    int ok = rt_empty(c, fd, depth + 1);
+    close(fd);
+    if (!ok) return 0;
+    /* By name inside dfd: removes an empty folder only. A link there now fails with ENOTDIR. */
+    if (unlinkat(dfd, name, AT_REMOVEDIR) == 0 || errno == ENOENT) return 1;
+    if (errno == ENOTDIR) return 2;
+    if (errno != ENOTEMPTY && errno != EEXIST) return rt_fail(c, errno, "delete folder", name);
+  }
+  return rt_fail(c, ENOTEMPTY, "delete folder (it kept refilling)", name);
+}
+
+/* One listed entry of the folder `dfd` is. Every call here takes (dfd, bare name) and never follows. */
+static int rt_entry(rt_ctx *c, int dfd, const char *name, int depth) {
+  for (int attempt = 0; attempt < 3; attempt++) {
+    struct stat st;
+    if (fstatat(dfd, name, &st, AT_SYMLINK_NOFOLLOW) != 0) {
+      if (errno == ENOENT) return 1; /* someone else removed it */
+      return rt_fail(c, errno, "read entry type", name);
+    }
+    if (S_ISDIR(st.st_mode)) {
+      int r = rt_remove_dir(c, dfd, name, depth);
+      if (r != 2) return r;
+      continue; /* it stopped being a folder: look again */
+    }
+    /* A file, a link or anything else: unlinkat removes the name itself and never what a link points at. */
+    if (unlinkat(dfd, name, 0) == 0) {
+      if (S_ISLNK(st.st_mode)) c->links++;
+      return 1;
+    }
+    if (errno == ENOENT) return 1;
+    if (errno == EISDIR || errno == EPERM) { /* it may be a folder now (Linux says EISDIR, macOS EPERM): look again */
+      int e = errno;
+      struct stat again;
+      if (fstatat(dfd, name, &again, AT_SYMLINK_NOFOLLOW) == 0 && S_ISDIR(again.st_mode)) continue;
+      return rt_fail(c, e, "delete entry", name);
+    }
+    return rt_fail(c, errno, "delete entry", name);
+  }
+  return rt_fail(c, EAGAIN, "delete entry (its type kept changing)", name);
+}
+
+/* Remove everything inside the folder `dfd` is. The listing comes from the descriptor. */
+static int rt_empty(rt_ctx *c, int dfd, int depth) {
+  if (depth > RT_MAX_DEPTH) return rt_fail(c, ENAMETOOLONG, "walk (tree too deep)", NULL);
+  int ok = 1;
+  for (int pass = 0; ok; pass++) {
+    if (pass >= RT_MAX_PASSES) { ok = rt_fail(c, ENOTEMPTY, "empty folder (it kept refilling)", NULL); break; }
+    /* "." inside dfd is the folder dfd is, whatever its path is now. A fresh descriptor lists from the start. */
+    int lfd = openat(dfd, ".", RT_OPEN_DIR);
+    if (lfd < 0) { ok = rt_fail(c, errno, "list folder", NULL); break; }
+    DIR *dir = fdopendir(lfd);
+    if (!dir) { int e = errno; close(lfd); ok = rt_fail(c, e, "list folder", NULL); break; }
+    int seen = 0;
+    for (;;) {
+      errno = 0;
+      struct dirent *de = readdir(dir);
+      if (!de) { if (errno) ok = rt_fail(c, errno, "list folder", NULL); break; }
+      if (de->d_name[0] == '.' && (de->d_name[1] == 0 || (de->d_name[1] == '.' && de->d_name[2] == 0))) continue;
+      seen++;
+      if (!rt_entry(c, dfd, de->d_name, depth)) { ok = 0; break; }
+    }
+    closedir(dir); /* closes lfd */
+    if (!seen) break; /* a full pass that listed nothing: the folder is empty */
+  }
+  return ok;
+}
+
+/* The whole job, no N-API in it (it also runs on a worker thread). Returns 1 on success; else c holds the error. */
+static int rt_remove(rt_ctx *c, const char *path, int keep_root) {
+  memset(c, 0, sizeof(*c));
+  for (int i = 0; i < RT_RMDIR_TRIES; i++) {
+    if (i) usleep(10000u * (unsigned)i);
+    int fd = open(path, RT_OPEN_DIR);
+    if (fd < 0) {
+      int e = errno;
+      if (RT_NOT_A_FOLDER(e)) {
+        struct stat st; /* only to word the refusal; nothing is done on its answer */
+        if (lstat(path, &st) == 0 && S_ISLNK(st.st_mode)) return rt_fail(c, (int)RT_REFUSED_LINK, "refused: root is a reparse point", NULL);
+        return rt_fail(c, (int)RT_REFUSED_NOT_DIR, "refused: root is not a directory", NULL);
+      }
+      if (e == ENOENT && i > 0) return 1; /* gone between two tries */
+      return rt_fail(c, e, "open root", NULL);
+    }
+    int ok = rt_empty(c, fd, 0);
+    close(fd);
+    if (!ok) return 0;
+    if (keep_root) return 1;
+    /* rmdir never follows a link and removes a folder only when it is empty. */
+    if (rmdir(path) == 0 || errno == ENOENT) return 1;
+    if (errno == ENOTDIR) return rt_fail(c, (int)RT_REFUSED_LINK, "refused: root became a reparse point", NULL);
+    if (errno != ENOTEMPTY && errno != EEXIST) return rt_fail(c, errno, "delete root", NULL);
+  }
+  return rt_fail(c, ENOTEMPTY, "delete root (it kept refilling)", NULL);
+}
+
+static const char *rt_code(uint32_t code) {
+  if (code == ENOENT) return "ENOENT";
+  if (code == EPERM) return "EPERM";
+  if (code == EACCES) return "EACCES";
+  if (code == EBUSY) return "EBUSY";
+  if (code == ENOTEMPTY || code == EEXIST) return "ENOTEMPTY";
+  return "EIO";
+}
+#define RT_ERRNO_LABEL "errno"
+
+/* The argument as UTF-8, malloc'd; NULL when it is not a non-empty string. */
+static rt_char *rt_path_arg(napi_env env, napi_value v) {
+  size_t len = 0;
+  if (napi_get_value_string_utf8(env, v, NULL, 0, &len) != napi_ok || len == 0) return NULL;
+  char *out = (char *)malloc(len + 1);
+  if (!out) return NULL;
+  if (napi_get_value_string_utf8(env, v, out, len + 1, &len) != napi_ok) { free(out); return NULL; }
+  return out;
+}
+#endif
+
+/* ---- N-API glue, the same on every platform ---- */
+
+static napi_value rt_error(napi_env env, const rt_ctx *c) {
+  char msg[1200];
+  const char *code;
+  if (c->code == RT_REFUSED_LINK || c->code == RT_REFUSED_NOT_DIR) {
+    code = "EREFUSED";
+    snprintf(msg, sizeof(msg), "%s", c->step);
+  } else {
+    code = rt_code(c->code);
+    snprintf(msg, sizeof(msg), "removeTree: %s failed (" RT_ERRNO_LABEL " %lu)%s%s", c->step ? c->step : "walk",
+             (unsigned long)c->code, c->name[0] ? " at " : "", c->name);
+  }
+  napi_value text, err, num, str;
+  if (napi_create_string_utf8(env, msg, NAPI_AUTO_LENGTH, &text) != napi_ok || napi_create_error(env, NULL, text, &err) != napi_ok) return NULL;
+  if (napi_create_uint32(env, c->code, &num) == napi_ok) napi_set_named_property(env, err, "errno", num);
+  if (napi_create_string_utf8(env, code, NAPI_AUTO_LENGTH, &str) == napi_ok) napi_set_named_property(env, err, "code", str);
+  if (napi_create_uint32(env, c->links, &num) == napi_ok) napi_set_named_property(env, err, "links", num);
+  return err;
+}
+
+/* (path, keepRoot?) -> the path in the platform's form (caller frees), or NULL with an error pending. */
+static rt_char *rt_args(napi_env env, napi_callback_info info, const char *usage, int *keep_root) {
+  size_t argc = 2;
+  napi_value argv[2];
+  napi_valuetype t;
+  bool keep = false;
+  if (napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok || argc < 1 ||
+      napi_typeof(env, argv[0], &t) != napi_ok || t != napi_string) { fail(env, usage); return NULL; }
+  if (argc >= 2 && napi_typeof(env, argv[1], &t) == napi_ok && t == napi_boolean) napi_get_value_bool(env, argv[1], &keep);
+  rt_char *path = rt_path_arg(env, argv[0]);
+  if (!path) { fail(env, usage); return NULL; }
+  *keep_root = keep ? 1 : 0;
+  return path;
+}
+
+static napi_value remove_tree(napi_env env, napi_callback_info info) {
+  int keep_root = 0;
+  rt_char *path = rt_args(env, info, "removeTree(path, keepRoot?): path must be a non-empty string", &keep_root);
+  if (!path) return NULL;
+  rt_ctx c;
+  int ok = rt_remove(&c, path, keep_root);
+  free(path);
+  napi_value v = NULL;
+  if (!ok) {
+    v = rt_error(env, &c);
+    if (v) napi_throw(env, v); else napi_throw_error(env, NULL, "removeTree failed");
+    return NULL;
+  }
+  if (napi_create_uint32(env, c.links, &v) != napi_ok) return NULL;
+  return v;
+}
+
+typedef struct {
+  napi_async_work work;
+  napi_deferred deferred;
+  rt_char *path;
+  int keep_root;
+  int ok;
+  rt_ctx c;
+} rt_job;
+
+static void rt_job_run(napi_env env, void *data) {
+  (void)env;
+  rt_job *j = (rt_job *)data;
+  j->ok = rt_remove(&j->c, j->path, j->keep_root);
+}
+
+static void rt_job_done(napi_env env, napi_status status, void *data) {
+  rt_job *j = (rt_job *)data;
+  napi_value v = NULL;
+  if (status == napi_ok && j->ok && napi_create_uint32(env, j->c.links, &v) == napi_ok) {
+    napi_resolve_deferred(env, j->deferred, v);
+  } else {
+    if (!j->c.code) { j->c.code = 1; j->c.step = "worker"; j->c.name[0] = 0; }
+    v = rt_error(env, &j->c);
+    if (!v) napi_get_undefined(env, &v);
+    napi_reject_deferred(env, j->deferred, v);
+  }
+  napi_delete_async_work(env, j->work);
+  free(j->path);
+  free(j);
+}
+
+static napi_value remove_tree_async(napi_env env, napi_callback_info info) {
+  int keep_root = 0;
+  rt_char *path = rt_args(env, info, "removeTreeAsync(path, keepRoot?): path must be a non-empty string", &keep_root);
+  if (!path) return NULL;
+  rt_job *j = (rt_job *)calloc(1, sizeof(rt_job));
+  napi_value promise, label;
+  if (!j) { free(path); return fail(env, "removeTreeAsync: out of memory"); }
+  j->path = path;
+  j->keep_root = keep_root;
+  if (napi_create_promise(env, &j->deferred, &promise) != napi_ok ||
+      napi_create_string_utf8(env, "guppyRemoveTree", NAPI_AUTO_LENGTH, &label) != napi_ok ||
+      napi_create_async_work(env, NULL, label, rt_job_run, rt_job_done, j, &j->work) != napi_ok) {
+    free(path); free(j);
+    return fail(env, "removeTreeAsync: the job could not be created");
+  }
+  if (napi_queue_async_work(env, j->work) != napi_ok) {
+    napi_delete_async_work(env, j->work);
+    free(path); free(j);
+    return fail(env, "removeTreeAsync: the job could not be queued");
+  }
+  return promise;
+}
+
 static int export_fn(napi_env env, napi_value exports, const char *name, napi_callback cb) {
   napi_value fn;
   return napi_create_function(env, name, NAPI_AUTO_LENGTH, cb, NULL, &fn) == napi_ok &&
          napi_set_named_property(env, exports, name, fn) == napi_ok;
 }
-#endif
 
 NAPI_MODULE_INIT() {
   napi_value fn;
   if (napi_create_function(env, "finalPath", NAPI_AUTO_LENGTH, final_path, NULL, &fn) != napi_ok) return NULL;
   if (napi_set_named_property(env, exports, "finalPath", fn) != napi_ok) return NULL;
+  napi_value api;
+  if (napi_create_uint32(env, GUPPY_REMOVE_TREE_API, &api) != napi_ok ||
+      napi_set_named_property(env, exports, "removeTreeApi", api) != napi_ok ||
+      !export_fn(env, exports, "removeTree", remove_tree) ||
+      !export_fn(env, exports, "removeTreeAsync", remove_tree_async)) {
+    return NULL;
+  }
 #ifdef _WIN32
   if (!export_fn(env, exports, "procOpen", proc_open) || !export_fn(env, exports, "procAlive", proc_alive) ||
       !export_fn(env, exports, "procClose", proc_close) || !export_fn(env, exports, "procAdopt", proc_adopt) ||

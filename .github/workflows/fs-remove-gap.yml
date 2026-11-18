@@ -1,0 +1,66 @@
+name: fs-remove-gap
+
+# FS-REMOVE-READDIR-GAP-108: the link-safe tree delete (the fs-handle addon's removeTree) built and
+# raced on Linux and macOS, where the development machine cannot run it. Per runner:
+#   1. build the addon
+#   2. the fixed cases (test/fs-handle-remove-tree.test.cjs)
+#   3. the pin: RACERS x RUNS raced deletes by each of the three callers at 0 losses, while a second
+#      process swaps the tree's folders for links to a victim folder
+#   4. the control: the old JS walk in the same race must LOSE the victim's files
+# It ships nothing and publishes nothing.
+
+on:
+  workflow_dispatch:
+    inputs:
+      racers:
+        description: Races at once for each caller
+        default: '4'
+      runs:
+        description: Runs per race
+        default: '7000'
+  push:
+    branches: ['guppy/fs-remove-readdir-gap-108']
+    paths:
+      - resources/fs-handle/**
+      - src/main/fsSafeRemove.ts
+      - scripts/worktree-reaper.cjs
+      - test/fs-remove-gap-race.cjs
+      - test/fs-handle-remove-tree.test.cjs
+      - tools/build-fs-handle.cjs
+      - .github/workflows/fs-remove-gap.yml
+
+permissions:
+  contents: read
+
+env:
+  RACERS: ${{ inputs.racers || '4' }}
+  RUNS: ${{ inputs.runs || '7000' }}
+
+jobs:
+  race:
+    name: removeTree on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      # No install scripts: this job needs node-gyp, typescript and electron's package.json (for the
+      # header version), not the Electron binary or the node-pty rebuild.
+      - name: Install dependencies (no scripts)
+        run: npm ci --ignore-scripts
+      - name: Build the fs-handle addon
+        run: node tools/build-fs-handle.cjs
+      - name: Fixed cases
+        run: node --test test/fs-handle-remove-tree.test.cjs
+      - name: Pin (0 losses in 3 x RACERS x RUNS raced deletes)
+        shell: bash
+        run: node test/fs-remove-gap-race.cjs pin "$RACERS" "$RUNS" 3600
+      - name: Control (the old JS walk must lose)
+        shell: bash
+        run: node test/fs-remove-gap-race.cjs control 4 100000 900

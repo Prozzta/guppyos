@@ -17,9 +17,9 @@ require('./tools/own-job.cjs');
  * every run. A run where the remover throws (refused, ENOTEMPTY: the agent planted after the
  * folder was read) is fine: it failed closed.
  *
- * What the walk cannot close, and this test does not claim: between lstat and readdir of one
- * folder an agent can rename that real folder away and put a junction of the same name there.
- * Only handle-based opens close that (see the header of src/main/linkSafeRemove.ts).
+ * The swap this planter does not make (a real folder renamed away and a junction of the same name
+ * put there between two steps of the delete) is test/fs-remove-gap.test.cjs; the remover is the
+ * fs-handle addon's removeTree since FS-REMOVE-READDIR-GAP-108, which closes both.
  *
  * Red on the remover as at 2edbe77f (a link check, then a recursive rmSync).
  */
