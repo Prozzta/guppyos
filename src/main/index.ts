@@ -2189,7 +2189,7 @@ hookServer.setLedgerHandler((agentId, body) => ledgerQueue(agentId, () => {
   return applyLedgerOp(body, {
     agentId,
     agentDir,
-    isRecipient: (to) => to === 'god' || to === 'broadcast' || !!hive.registry().agents[to],
+    isRecipient: (to) => hive.isRecipient(to),
     readTasks: () => {
       const t = hive.allTasks().tasks;
       return Array.isArray(t) ? (t as HiveTask[]) : [];

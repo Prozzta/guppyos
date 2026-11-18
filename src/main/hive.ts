@@ -418,6 +418,14 @@ export interface SpawnInjection {
 }
 
 const HOP_CAP = 12;
+
+/** Addresses that are not agent ids and reach god: 'god' itself, 'human' (god is the Human's
+ *  proxy here) and 'breaker'. BREAKER-REPLY-UNDELIVERABLE-108: the circuit breaker's mails are
+ *  requests from the sender id 'breaker' and tell the agent to take its answer to god, so an
+ *  answer addressed to that sender goes to god (it used to bounce as "no agent breaker"). */
+const GOD_ADDRESSES: ReadonlySet<string> = new Set(['god', 'human', 'breaker']);
+/** The agent id a direct `to` is delivered to. */
+const resolveMailTo = (to: string, godId: string): string => (GOD_ADDRESSES.has(to) ? godId : to);
 /**
  * Agents normally write mail atomically, but the protocol also permits ordinary
  * file writers. A poll can see one of those files between its create and close;
@@ -3403,6 +3411,14 @@ export class HiveManager {
     return r.value;
   }
 
+  /** Whether `to` is an address the router delivers: a registry agent id, 'broadcast', or one of
+   *  GOD_ADDRESSES. The `ledger` command checks a message's `to` with this at send time, so the
+   *  two send paths cannot disagree about an address. */
+  isRecipient(to: unknown): boolean {
+    if (typeof to !== 'string') return false;
+    return to === 'broadcast' || GOD_ADDRESSES.has(to) || Object.prototype.hasOwnProperty.call(this.registry().agents, to);
+  }
+
   /** Inject a message directly (used by the orchestrator / UI / tests). Its inbox writes are
    *  synchronous (god b2e5d2: system sends stay on-thread); routeOnce awaits the same steps. */
   send(partial: Partial<HiveMessage>, from = 'system'): HiveMessage {
@@ -3467,7 +3483,7 @@ export class HiveManager {
     // The hive has no separate human-approval queue — approvals are native to
     // each agent's Claude Code session (and approvable remotely). A message aimed
     // at "human" is handled by the god/orchestrator, the human's proxy here.
-    const resolveTo = (to: string): string => (to === 'human' || to === 'god' ? godId : to);
+    const resolveTo = (to: string): string => resolveMailTo(to, godId);
     if (msg.supersedes?.length) this.dismissSupersededAsks(msg, reg);
     if (msg.needs_human === true) yield* this.surfaceNeedsHumanSteps(msg, reg, resolveTo(msg.to));
     // ZT-I1-MAIL §4.3 + §11.13(B): a reply from an agent closes the reply/outcome obligation it
@@ -3494,8 +3510,9 @@ export class HiveManager {
       : [resolveTo(msg.to)].filter((t) => t !== msg.from);
     // ZT-I1-MAIL §11.18 #6 (god's ruling): a direct `to` must be EXACTLY a registry agent id,
     // checked here, before anything turns it into a path. 'broadcast', 'god' and 'human' keep
-    // their routing meaning; everything else is an agent id or nothing (no path semantics).
-    const direct = msg.to !== 'broadcast' && msg.to !== 'god' && msg.to !== 'human';
+    // their routing meaning, and so does 'breaker' (GOD_ADDRESSES); everything else is an agent
+    // id or nothing (no path semantics).
+    const direct = msg.to !== 'broadcast' && !GOD_ADDRESSES.has(msg.to);
     const knownAgent = (id: unknown): boolean => typeof id === 'string' && Object.prototype.hasOwnProperty.call(reg.agents, id);
     // Targets that actually took delivery. The log below reports these instead of
     // intent, so a bounced or dropped message can never read as delivered.

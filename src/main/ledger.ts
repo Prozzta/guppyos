@@ -334,7 +334,7 @@ export function applyLedgerOp(raw: unknown, deps: LedgerDeps): LedgerReply | Pro
     if (!card.create && !exists) return { status: 404, body: { ok: false, line: `refused: no card ${card.id} (use create)` } };
   }
   if (op.message && !rec?.message && !deps.isRecipient(op.message.to)) {
-    return { status: 400, body: { ok: false, line: `refused: message.to "${op.message.to}" is not a registered agent, "god" or "broadcast"` } };
+    return { status: 400, body: { ok: false, line: `refused: message.to "${op.message.to}" is not a registered agent, "god", "human", "breaker" or "broadcast"` } };
   }
   // REQUESTS-BADGE-84 A: a message's card must exist (the op's own card is checked above).
   const msgCard = op.message?.card;
