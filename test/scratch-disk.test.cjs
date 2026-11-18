@@ -129,6 +129,27 @@ test('unrelated floor churn rebuilds the index without starving a clean candidat
   assert.equal(fs.existsSync(candidate), false);
 });
 
+test('jailed floor simulation reaps a clean root amid inbox/outbox/log churn and keeps protected roots', { skip: process.platform !== 'win32' }, async () => {
+  const base = path.join(jail, 'floor-churn'); const hive = path.join(base, 'hive'); const work = path.join(base, '_work');
+  const clean = path.join(work, 'dwight-clean'); const linked = path.join(work, 'dwight-linked'); const active = path.join(work, 'dwight-active');
+  fs.mkdirSync(path.join(hive, 'inbox'), { recursive: true }); fs.mkdirSync(path.join(hive, 'outbox'), { recursive: true });
+  for (const [root, text] of [[clean, 'clean'], [linked, 'linked'], [active, 'active']]) { fs.mkdirSync(root, { recursive: true }); fs.writeFileSync(path.join(root, 'payload'), text); }
+  fs.symlinkSync(linked, path.join(hive, 'inbox', 'managed-link'), 'junction');
+  const manager = new scratch.ScratchDiskManager(() => hive, (card) => card === 'DONE', async () => []);
+  assert.equal(manager.register('dwight', clean, 'DONE').ok, true);
+  assert.equal(manager.register('dwight', linked, 'DONE').ok, true);
+  assert.equal(manager.register('dwight', active, 'LIVE').ok, true);
+  assert.ok(scratch.scratchBytes(work) > 0);
+  await manager.sweep(); // cold baseline
+  fs.writeFileSync(path.join(hive, 'inbox', 'arrival'), 'inbox');
+  fs.writeFileSync(path.join(hive, 'outbox', 'delivery'), 'outbox');
+  fs.writeFileSync(path.join(hive, 'log.jsonl'), 'log');
+  const result = await manager.sweep();
+  assert.deepEqual(result.reaped, [path.resolve(clean)]);
+  assert.deepEqual(result.kept.map((row) => row.reason).sort(), ['card-active', 'inbound-node-modules-link']);
+  assert.equal(fs.existsSync(linked), true); assert.equal(fs.existsSync(active), true);
+});
+
 test('a broken link protects its candidate but not an unrelated done tree, and is reported', { skip: process.platform !== 'win32' }, async () => {
   const base = path.join(jail, 'broken-link-scope'); const hive = path.join(base, 'hive'); const work = path.join(base, '_work');
   const candidate = path.join(work, 'dwight-broken'); const unrelated = path.join(work, 'dwight-clean'); const broken = path.join(candidate, 'nested', 'gone');
