@@ -27,6 +27,11 @@ require('./tools/own-job.cjs');
  *   R7  an assignee who is not registered is not sent to and not recorded; once registered, sent.
  *   R8  a registered assignee with no inbox (undeliverable) is not recorded; once the inbox
  *       exists, it fires.
+ *   R9  a send that THROWS is logged and not recorded, so the next start sends it (Jim MUST 1:
+ *       recording a failed send would be a silent loss).
+ *   R10 the triggers run AFTER the flags are published, and a trigger pass that throws never
+ *       breaks the monitor: the SHIPPED_INSTALLED flag is on disk and install-trigger-error is
+ *       logged (Jim MUST 2).
  *   G1  guards: a done card, an unarmed card, a fixVersion not reached yet: never sent.
  */
 
@@ -50,12 +55,13 @@ function rig(t, agents, tasks) {
   let monitor = null;
   const stop = () => { try { monitor?.stop(); } catch { /* noop */ } try { hive?.dispose(); } catch { /* noop */ } monitor = null; hive = null; };
   t.after(() => { stop(); fs.rmSync(home, { recursive: true, force: true }); });
-  /** A fresh process: new HiveManager + new BoardMonitor, running `version`. */
-  const boot = (version) => {
+  /** A fresh process: new HiveManager + new BoardMonitor, running `version`. `prep(hive)` runs before the first tick. */
+  const boot = (version, prep) => {
     stop();
     hive = new HiveManager(() => home);
     hive.ensureHive();
     hive.ledgerGuard.check();
+    if (prep) prep(hive);
     monitor = new BoardMonitor({ hive, now: () => NOW, runningVersion: () => version });
     monitor.tick();
     return { hive, monitor };
@@ -168,6 +174,41 @@ test('R8 an undeliverable send (no inbox) is not recorded as fired; once the inb
   fs.mkdirSync(path.join(r.root, 'agents', 'jim', 'inbox'), { recursive: true });
   r.boot('1.1.108');
   assert.equal(triggers(r.inbox('jim')).length, 1, 'never recorded while undeliverable, so it fires once the inbox exists');
+});
+
+test('R9 a send that throws is logged, NOT recorded, and sent on the next start (never a silent loss)', (t) => {
+  const r = rig(t, { jim: agent('jim') }, [ARMED()]);
+  let throws = 0;
+  r.boot('1.1.108', (hive) => {
+    const real = hive.send.bind(hive);
+    hive.send = (msg, from) => { if (throws === 0) { throws++; throw new Error('send failed (test)'); } return real(msg, from); };
+  });
+  assert.equal(throws, 1, 'the send was attempted');
+  assert.equal(triggers(r.inbox('jim')).length, 0);
+  assert.ok(r.log().some((l) => l.kind === 'install-trigger-send-failed' && l.cardId === 'POST-INSTALL-161'), 'the failed send is logged');
+  let rec = {};
+  try { rec = JSON.parse(fs.readFileSync(path.join(r.root, 'state', 'install-triggers.json'), 'utf8')).fired ?? {}; } catch { /* no record yet */ }
+  assert.equal(rec['POST-INSTALL-161@1.1.108'], undefined, 'a failed send is not recorded as fired');
+  r.boot('1.1.108');
+  assert.equal(triggers(r.inbox('jim')).length, 1, 'not recorded, so the next start sends it');
+});
+
+test('R10 the triggers run after the flags are published; a throwing trigger pass never breaks the monitor', (t) => {
+  const { InstallTriggers } = loadTs('src/main/installTriggers.ts');
+  const realRun = InstallTriggers.prototype.run;
+  t.after(() => { InstallTriggers.prototype.run = realRun; });
+  const r = rig(t, { jim: agent('jim') }, [ARMED()]);
+  const flagsFile = path.join(r.root, 'state', 'board-flags.json');
+  let publishedFirst = null;
+  InstallTriggers.prototype.run = function () {
+    publishedFirst = fs.existsSync(flagsFile);
+    throw new Error('trigger pass failed (test)');
+  };
+  assert.doesNotThrow(() => r.boot('1.1.108'), 'a throwing trigger pass never breaks the tick');
+  assert.equal(publishedFirst, true, 'the trigger pass runs after board-flags.json is published');
+  const flags = JSON.parse(fs.readFileSync(flagsFile, 'utf8')).flags;
+  assert.ok(flags.some((f) => f.kind === 'SHIPPED_INSTALLED' && f.cardId === 'POST-INSTALL-161'), 'the flag is published');
+  assert.ok(r.log().some((l) => l.kind === 'install-trigger-error' && /trigger pass failed/.test(String(l.error))), 'the failure is logged');
 });
 
 test('G1 guards: a done card, an unarmed card and a fix not reached are never sent', (t) => {

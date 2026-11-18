@@ -13,7 +13,14 @@
  * A failed record write is logged (install-trigger-record-failed) and remembered in memory, so
  * the same process does not repeat it. A new fixVersion arms the card again. An assignee who is
  * not registered (or archived), or has no inbox, is skipped and NOT recorded: the inform goes out
- * once they are back.
+ * once they are back. A send that throws is logged (install-trigger-send-failed) and not
+ * recorded either.
+ *
+ * The record file is read ONCE per hive root (at process start, or on a hive-home change), so a
+ * hand edit or delete of it (e.g. to re-fire a card) takes effect at the next start.
+ *
+ * A card assigned to god fires to god as well: god gets this inform beside the SHIPPED_INSTALLED
+ * digest item. That is intended (Jim NIT 2): the inform names the step, the digest the decision.
  */
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
