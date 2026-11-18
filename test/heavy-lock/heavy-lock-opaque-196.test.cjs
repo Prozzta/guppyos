@@ -373,6 +373,41 @@ function killTree({ child, bornMs }, { rootFirst = false } = {}) {
   else try { process.kill(-child.pid, 'SIGKILL'); } catch { try { process.kill(child.pid, 'SIGKILL'); } catch { /* gone */ } }
 }
 
+/**
+ * HEAVY-LOCK-OPAQUE-196-WINDOW-108: resolves once the run is parked in the queue, by its own doing:
+ * one of agent 'a's processes was answered and has come back to ask again (only a 'wait' answer makes
+ * the preload ask twice). No clock decides a pass: a fixed 2.5 s window read the queue before a
+ * starved process had asked at all (Andy: waiters [] at 2533 ms under load). A run that ends first
+ * never waited, and the failure says how often it asked. The 60 s is a hang limit, for a process that
+ * neither asks nor ends: it names that, where the runner's own timeout would name nothing.
+ */
+function parked(lock, run, what) {
+  const asks = new Map();
+  let total = 0;
+  let seen;
+  const twice = new Promise((r) => { seen = r; });
+  const lease = lock.lease.bind(lock);
+  lock.lease = (agentId, r, gone) => {
+    const p = lease(agentId, r, gone);
+    if (agentId === 'a' && r && r.op === 'acquire') {
+      total++;
+      const n = (asks.get(r.pid) ?? 0) + 1;
+      asks.set(r.pid, n);
+      if (n === 2) seen('parked');
+    }
+    return p;
+  };
+  let timer;
+  const hang = new Promise((r) => { timer = setTimeout(() => r('hang'), 60_000); });
+  return Promise.race([twice, run.done, hang]).then((won) => {
+    clearTimeout(timer);
+    lock.lease = lease;
+    if (won === 'parked') return;
+    if (won === 'hang') throw new Error(`AN OPAQUE ${what.toUpperCase()}'S TEST RUN WAITS FOR THE SLOT: after 60 s it has neither queued nor ended (${total} slot request(s) so far)`);
+    throw new Error(`AN OPAQUE ${what.toUpperCase()}'S TEST RUN WAITS FOR THE SLOT: it ended (code ${won.code}) while b held the slot, ${total === 0 ? 'and it never asked for the slot' : `after ${total} slot request(s): it did not wait`}`);
+  });
+}
+
 async function broker(t, M, deps = {}) {
   const sock = process.platform === 'win32' ? `\\\\.\\pipe\\hlo196-${process.pid}-${Math.random().toString(36).slice(2)}` : path.join(fs.mkdtempSync(path.join(JAIL, 's-')), 's.sock');
   const hive = {
@@ -401,8 +436,10 @@ K.e2eOpaque = async (t, M = HJ, preload = PRELOAD) => {
     const b = await broker(t, M);
     b.lock.acquire('b', H, 'npm test', 'hb', false);
     const run = start(args, { url: b.url('a'), preload });
-    assert.equal(await within(run.done, 2_500), 'timeout', `AN OPAQUE ${what.toUpperCase()}'S TEST RUN WAITS FOR THE SLOT`);
+    await parked(b.lock, run, what);
+    assert.equal(run.child.exitCode, null, `AN OPAQUE ${what.toUpperCase()}'S TEST RUN WAITS FOR THE SLOT`);
     assert.deepEqual(b.lock.queueSnapshot().waiters.map((w) => w.agentId), ['a']);
+    assert.ok(!b.logs.some((x) => x.action === 'lease' && x.agentId === 'a'), `${what}: NO LEASE WHILE b HOLDS THE SLOT`);
     b.lock.callDone('b', 'hb');
     const r = await within(run.done, 20_000);
     assert.equal(r.code, 0, `${what}: ${r.stderr}`);
@@ -597,6 +634,13 @@ const MUTANTS = [
   { name: 'preload: GUPPY_TEST_RUN not passed on (a nested run waits behind another agent)', file: PRE, preload: true,
     edits: [['if (grant) process.env.GUPPY_TEST_RUN = grant.run;\n', '']],
     killer: 'e2eNested', dies: /A NESTED RUN OF A VISIBLE FILE RUNS AT ONCE/ },
+  // HEAVY-LOCK-OPAQUE-196-WINDOW-108: the two ways a run can fail to wait, each named by its cause.
+  { name: 'preload: the slot is never asked for', file: PRE, preload: true,
+    edits: [['if (!leasing) return;\n', 'return;\n']],
+    killer: 'e2eOpaque', dies: /WAITS FOR THE SLOT: it ended \(code 0\) while b held the slot, and it never asked for the slot/ },
+  { name: "preload: a 'wait' answer is not waited on", file: PRE, preload: true,
+    edits: [['      told = true;\n      continue;\n', '      told = true;\n      return null;\n']],
+    killer: 'e2eOpaque', dies: /WAITS FOR THE SLOT: it ended \(code 0\) while b held the slot, after \d+ slot request\(s\): it did not wait/ },
   { name: 'preload: the lease is not released at exit', file: PRE, preload: true,
     edits: [["      process.on('exit', () => { ask({ op: 'release', leaseId }, 5_000); });\n", '']],
     killer: 'e2eOpaque', dies: /THE LEASE IS RELEASED AT EXIT/ },
