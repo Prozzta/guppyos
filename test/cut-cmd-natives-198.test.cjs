@@ -9,6 +9,7 @@ const { spawnSync } = require('node:child_process');
 const ROOT = path.join(__dirname, '..');
 const cut = fs.readFileSync(path.join(ROOT, 'scripts', 'cut-cmd-natives.cjs'), 'utf8');
 const check = fs.readFileSync(path.join(ROOT, 'scripts', 'check-cut-natives.cjs'), 'utf8');
+const fsHandleContract = require('../scripts/check-cut-natives.cjs');
 const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
 
 function write(file, text) {
@@ -69,12 +70,21 @@ test('post-cut probe runs Electron as Node and loads both native modules', () =>
   assert.match(check, /ELECTRON_RUN_AS_NODE: '1'/);
   assert.match(check, /node-pty/);
   assert.match(check, /better-sqlite3/);
+  assert.match(check, /CUT FS-HANDLE MISSING EXPORTS/);
+  assert.match(check, /posixRenameAsync/);
   assert.match(check, /select 42 as n/);
   assert.match(check, /const modulesPath = path\.resolve\(modules\)/);
   assert.match(check, /path\.dirname\(path\.dirname\(modulesPath\)\)/);
   assert.match(check, /deleteEnvCaseInsensitive\(env, 'NODE_PATH'\)/);
   assert.match(check, /deleteEnvCaseInsensitive\(env, 'NODE_OPTIONS'\)/);
   assert.match(cut, /check-cut-natives\.cjs/);
+});
+
+test('fs-handle package contract rejects the 1.1.107-shaped addon before a cut', () => {
+  const v107 = { finalPath() {}, procOpen() {}, procAlive() {}, procClose() {}, procAdopt() {} };
+  assert.deepEqual(fsHandleContract.missingFsHandleExports(v107), ['posixRename', 'posixRenameAsync']);
+  const current = Object.fromEntries(fsHandleContract.FS_HANDLE_REQUIRED_EXPORTS.map((name) => [name, () => {}]));
+  assert.deepEqual(fsHandleContract.missingFsHandleExports(current), []);
 });
 
 test('packaged probe rejects a missing archive dependency despite inherited NODE_PATH', () => {
