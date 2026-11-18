@@ -562,3 +562,37 @@ test('MODEL FILL: a resources/models that is a junction into another tree is ref
   assert.deepEqual(fs.readdirSync(path.join(other, 'models')), ['native-memory-manifest.json'], 'the other tree is untouched');
   assert.ok(lines.some((l) => /refusing to write .*resolves outside/.test(l)), lines.join(' | '));
 });
+
+test('MODEL FILL: a deep link (mini/onnx as a junction into another tree) is refused, never written through (Jim NIT on 3c5ca488)', (t) => {
+  const root = modelTree(t);
+  const own = path.join(root, 'resources/models/mini');
+  modelDir(own, { 'onnx/model.onnx': null });
+  const other = jail(t);
+  put(other, 'onnx/model.onnx', 'OTHER-TREE');
+  fs.symlinkSync(path.join(other, 'onnx'), path.join(own, 'onnx'), 'junction');
+  assert.deepEqual(modelIds(root), ['model'], 'the linked file differs from the manifest: a gap');
+  const cache = modelDir(jail(t));
+  const calls = [];
+  const lines = [];
+  assert.deepEqual(modelSetup(root, noNetSpawn(t, root, calls), { env: { MUNDER_MODEL_CACHE: cache }, log: (l) => lines.push(l) }).map((g) => g.id), ['model'], 'THE DEEP LINK IS NOT WRITTEN THROUGH');
+  assert.deepEqual(calls, [], 'the fetch script never runs');
+  assert.equal(fs.readFileSync(path.join(other, 'onnx/model.onnx'), 'utf8'), 'OTHER-TREE', 'the other tree is untouched');
+  assert.ok(lines.some((l) => /refusing to write .*onnx resolves outside/.test(l)), lines.join(' | '));
+  assert.equal(W.modelLevelOutside(root, own, { model: { files: { 'tokenizer.json': 'x' } } }), null, 'a tree with no link at any level passes');
+});
+
+test('MODEL GAP: a model file that cannot be read (a directory: EISDIR) is a gap, not a throw; a throwing check makes the preflight exit 2', (t) => {
+  const root = modelTree(t);
+  const own = path.join(root, 'resources/models/mini');
+  modelDir(own, { 'onnx/model.onnx': null });
+  fs.mkdirSync(path.join(own, 'onnx/model.onnx'), { recursive: true });
+  const s = W.modelState(root);
+  assert.equal(s.ok, false, 'AN UNREADABLE FILE IS NOT COMPLETE');
+  assert.match(s.problem, /cannot read it \(EISDIR\)/);
+  assert.deepEqual(modelIds(root), ['model']);
+
+  const lines = [];
+  const boom = () => { const e = new Error('EBUSY: resource busy or locked, open model.onnx'); e.code = 'EBUSY'; throw e; };
+  assert.equal(W.preflight({ root, env: {}, log: (l) => lines.push(l), inspectFn: boom }), 2, 'A CHECK THAT THROWS REFUSES CLEANLY (2), NOT A CRASH');
+  assert.ok(lines.some((l) => /TREE CHECK FAILED: EBUSY/.test(l)), lines.join(' | '));
+});
