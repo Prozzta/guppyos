@@ -26,7 +26,7 @@ const tick = (ms) => { clock += ms; };
 function floor(t, agents = { a1: agent('a1') }) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'md-registry-read-cache-'));
   const hive = new HiveManager(() => home);
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   hive.ensureHive();
   const file = path.join(hive.root(), 'registry.json');
   const handEdit = (reg) => fs.writeFileSync(file, JSON.stringify(reg), 'utf8');

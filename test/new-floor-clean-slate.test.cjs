@@ -280,7 +280,7 @@ test('main seeds a new floor with no agents and the floor docs, and leaves the e
   const oldHome = fs.mkdtempSync(path.join(os.tmpdir(), 'md-nfcs-old-'));
   const newHome = fs.mkdtempSync(path.join(os.tmpdir(), 'md-nfcs-new-'));
   const oldHive = new HiveManager(() => oldHome);
-  t.after(() => { oldHive.dispose(); fs.rmSync(oldHome, { recursive: true, force: true }); fs.rmSync(newHome, { recursive: true, force: true }); });
+  t.after(async () => { oldHive.dispose(); await oldHive.drainReads(); fs.rmSync(oldHome, { recursive: true, force: true }); fs.rmSync(newHome, { recursive: true, force: true }); });
   oldHive.ensureHive();
   const oldReg = path.join(oldHive.root(), 'registry.json');
   fs.writeFileSync(oldReg, JSON.stringify({ godId: 'god-d', agents: { 'god-d': { id: 'god-d', cwd: oldHome }, jim: { id: 'jim', cwd: 'C:/PrzEdit' } } }, null, 2));

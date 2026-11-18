@@ -52,7 +52,7 @@ function sandbox(t, { source } = {}) {
   });
   assert.equal(os.homedir(), home, 'HOME redirect failed - aborting before constructing any hive');
   const hive = new HiveManager(() => path.join(home, 'harness'));
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   const keys = { at: undefined };
   hive.setHumanInputSource(source ?? (() => keys.at));
   const rows = [];

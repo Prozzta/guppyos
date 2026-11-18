@@ -47,7 +47,7 @@ function sandbox(t, seed) {
   fs.mkdirSync(path.join(home, '.codex'), { recursive: true });
   if (seed !== undefined) fs.writeFileSync(path.join(home, '.codex', 'config.toml'), seed);
   const hive = new HiveManager(() => path.join(home, 'harness'));
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   // The human-input source main wires from PtyManager.lastHumanInputAt: `type()` is a human
   // keystroke on the agent's pty right now. Until then there has been none.
   const keys = { at: undefined };

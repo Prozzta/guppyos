@@ -49,7 +49,7 @@ function sandbox(t, seed = SEED) {
   fs.mkdirSync(path.join(home, '.codex'), { recursive: true });
   if (seed !== undefined) fs.writeFileSync(path.join(home, '.codex', 'config.toml'), seed);
   const hive = new HiveManager(() => path.join(home, 'harness'));
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   const keys = { at: undefined };
   hive.setHumanInputSource(() => keys.at);
   const rows = [];
