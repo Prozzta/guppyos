@@ -629,9 +629,9 @@ test('END TO END: a file that finishes its tests but never exits is killed at th
     assert.match(e.lines.join('\n'), /FILE TIMED OUT after 4000 ms .*a-hung\.test\.cjs/);
     assert.doesNotMatch(e.lines.join('\n'), /b-ok/, 'only the hung file is named');
     assert.match(out, /^ok \d+ - ok$/m, 'the healthy file still ran and passed');
-    assert.strictEqual(childStillRunning(readRec(pidFile, 'node.exe')), false, 'the hung file\'s child process was killed with it');
+    assert.strictEqual(childStillRunning(readRec(pidFile, path.basename(process.execPath))), false, 'the hung file\'s child process was killed with it');
     // The file's own children (the ConPTY conhost among them) are gone too, not orphaned.
-    const left = leftBehind(readRec(filePidFile, 'node.exe'));
+    const left = leftBehind(readRec(filePidFile, path.basename(process.execPath)));
     assert.deepStrictEqual(left, [], `the hung file's process tree outlived the run: ${left.join(', ')}`);
     if (HAS_PTY) assert.match(e.lines.join('\n'), /FILE TIMED OUT/, 'the ConPTY case is the real one');
   } catch (err) {
@@ -875,6 +875,22 @@ test('watchdog: picks ONLY a test-file process under the runner\'s node --test t
   assert.strictEqual(fileOf('node.exe -e 1'), null);
 });
 
+test('GATE178 Electron leg: the watchdog finds the due file when the runner and its node --test run on electron.exe (ELECTRON_RUN_AS_NODE)', () => {
+  const { dueFiles } = require('./tools/file-watchdog.cjs');
+  const now = 1_000_000;
+  const P = (pid, ppid, name, cmd, age) => ({ pid, ppid, name, cmd, startedAt: now - age });
+  const E = 'C:/r/node_modules/electron/dist/electron.exe';
+  const procs = [
+    P(10, 1, 'electron.exe', `${E} test/tools/run-tests.cjs`, 999_999),
+    P(20, 10, 'electron.exe', `${E} --test --test-reporter=tap a.test.cjs`, 900_000),
+    P(30, 20, 'electron.exe', `${E} C:/r/test/hung.test.cjs`, 6_000),
+    P(21, 10, 'Guppy.exe', 'Guppy.exe --test x.test.cjs', 900_000),          // another image: not the runner's node --test
+    P(31, 21, 'Guppy.exe', 'Guppy.exe C:/r/test/other.test.cjs', 900_000)
+  ];
+  assert.deepStrictEqual(dueFiles(procs, 10, 5_000, now), [{ pid: 30, file: 'C:/r/test/hung.test.cjs', ageMs: 6_000 }],
+    'GATE178: UNDER THE ELECTRON LEG THE WATCHDOG FINDS THE HUNG FILE (its node --test runs on the runner\'s own image)');
+});
+
 test('watchdog: a due file is RECORDED before its tree is killed, once, and named even if the kill fails', () => {
   // The kill ends the file, node --test returns and the runner stops the watchdog at once: a record
   // written after a slow taskkill was lost (1.1.76 final gate #4, round 3/a, a run that named no file).
@@ -993,6 +1009,7 @@ test('GATE-178: a watchdog whose snapshot is 12 s late still TREE-kills a hung C
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runner-late-'));
   let failed = null;
   let wrapper = null;
+  let stopErr = null;
   try {
     const filePidFile = path.join(dir, 'file.pid');
     fs.writeFileSync(path.join(dir, 'a-hung.test.cjs'), [
@@ -1016,13 +1033,24 @@ test('GATE-178: a watchdog whose snapshot is 12 s late still TREE-kills a hung C
     const lateWatchdog = (limitMs, outFile) => {
       const args = [runner.WATCHDOG, String(process.pid), String(limitMs), outFile, String(runner.watchdogPollMs(limitMs))];
       wrapper = spawn(process.execPath, ['-e', `setTimeout(() => { const c = require('child_process').spawn(process.execPath, ${JSON.stringify(args)}, { stdio: 'ignore', windowsHide: true }); c.on('exit', () => process.exit(0)); }, 12000);`], { stdio: 'ignore', windowsHide: true });
-      const rec = { pid: wrapper.pid, bornMs: Date.now(), name: 'node.exe' };
+      const rec = { pid: wrapper.pid, bornMs: Date.now(), name: path.basename(process.execPath) };   // electron.exe under the Electron leg
       // the wrapper and the watchdog it started: its own tree, verified (not taskkill /T: TEST-GLOB-PID-RECYCLE)
-      return { stop: () => { try { own.killOwnTree(rec); } catch { /* gone */ } } };
+      // GATE178 (Electron leg): a wrong record (named node.exe on electron.exe) threw here and was swallowed,
+      // so the late watchdog was never killed and the run hung 23 min. A failed stop is kept and fails the test.
+      return { stop: () => { try { own.killOwnTree(rec); } catch (err) { stopErr = err; } } };
     };
     // Bounded (spawnSync blocks this file's own timeout): a run nothing ends FAILS here, it does not hang.
     let out = '';
-    const spawnTap = (args, opts) => { const r = spawnSync(process.execPath, args, { ...opts, env: nodeEnv(opts.env), stdio: 'pipe', encoding: 'utf8', timeout: 90_000, killSignal: 'SIGKILL' }); out = `${r.stdout || ''}${r.stderr || ''}${r.error ? `\n(spawn: ${r.error.code || r.error.message})` : ''}`; return r; };
+    // GATE178 (Electron leg): output to a FILE, not pipes. The timeout's SIGKILL ends only the `--test`
+    // child; a surviving file tree (conhost, ping) held the pipes and spawnSync never returned.
+    const outPath = `${dir}.out`;
+    const spawnTap = (args, opts) => {
+      const fd = fs.openSync(outPath, 'w');
+      let r;
+      try { r = spawnSync(process.execPath, args, { ...opts, env: nodeEnv(opts.env), stdio: ['ignore', fd, fd], timeout: 90_000, killSignal: 'SIGKILL' }); } finally { fs.closeSync(fd); }
+      out = `${fs.readFileSync(outPath, 'utf8')}${r.error ? `\n(spawn: ${r.error.code || r.error.message})` : ''}`;
+      return r;
+    };
     const t0 = Date.now();
     // GATE178-WATCHDOG-LATE-SNAPSHOT-RED-108: the REAL backstop, at its real floor. Injecting spawn and
     // watchdog turns the backstop off by default, so "before the backstop" was never raced: a floor cut
@@ -1030,13 +1058,15 @@ test('GATE-178: a watchdog whose snapshot is 12 s late still TREE-kills a hung C
     const code = run({ testDir: dir, cwd: dir, spawn: spawnTap, timeoutMs: 4_000, isTTY: false, log: () => {}, err: e.write, failureFile: () => path.join(dir, 'failures.json'), watchdog: lateWatchdog, backstop: runner.startBackstop });
     const ms = Date.now() - t0;
     // The tree is judged (and what is left killed) whatever the verdict; no record = no tree to judge.
-    const left = fs.existsSync(filePidFile) ? leftBehind(readRec(filePidFile, 'node.exe')) : null;
+    const left = fs.existsSync(filePidFile) ? leftBehind(readRec(filePidFile, path.basename(process.execPath))) : null;
     const verdict = lateWatchdogVerdict({ code, errText: e.lines.join('\n'), out, ms, left });
     if (verdict) assert.fail(verdict);
+    if (stopErr) assert.fail(`the late watchdog's wrapper could not be stopped: ${stopErr.message}`);
   } catch (err) {
     failed = err;
     throw err;
   } finally {
+    try { fs.rmSync(`${dir}.out`, { force: true }); } catch { /* a survivor still holds it: the tree verdict already failed */ }
     const r = removeWhenFree(dir);
     if (!r.removed && !failed) assert.fail(`the temp folder was still in use ${r.waitedMs} ms after the run (${r.code}); recent processes: ${recentProcesses()}`);
   }
