@@ -25,6 +25,8 @@ require('./tools/own-job.cjs');
  *       fails) sends it again on the next start - a duplicate, never a silent loss.
  *   R6  a new fixVersion arms it again.
  *   R7  an assignee who is not registered is not sent to and not recorded; once registered, sent.
+ *   R8  a registered assignee with no inbox (undeliverable) is not recorded; once the inbox
+ *       exists, it fires.
  *   G1  guards: a done card, an unarmed card, a fixVersion not reached yet: never sent.
  */
 
@@ -61,7 +63,11 @@ function rig(t, agents, tasks) {
   const first = new HiveManager(() => home);
   first.ensureHive();
   const root = first.root();
+  // A registered agent has its folder (agents/<id>/inbox), as on a live floor: the router
+  // delivers only into an existing inbox.
+  const mkInboxes = (a) => { for (const id of Object.keys(a)) fs.mkdirSync(path.join(root, 'agents', id, 'inbox'), { recursive: true }); };
   fs.writeFileSync(path.join(root, 'registry.json'), JSON.stringify({ godId: null, agents }, null, 2));
+  mkInboxes(agents);
   fs.writeFileSync(path.join(root, 'tasks.json'), JSON.stringify({ tasks }, null, 2));
   first.dispose();
   const inbox = (id) => {
@@ -71,7 +77,7 @@ function rig(t, agents, tasks) {
     return files.map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')));
   };
   const setTasks = (list) => { fs.writeFileSync(path.join(root, 'tasks.json'), JSON.stringify({ tasks: list }, null, 2)); };
-  const setAgents = (a) => { fs.writeFileSync(path.join(root, 'registry.json'), JSON.stringify({ godId: null, agents: a }, null, 2)); };
+  const setAgents = (a) => { fs.writeFileSync(path.join(root, 'registry.json'), JSON.stringify({ godId: null, agents: a }, null, 2)); mkInboxes(a); };
   const log = () => fs.readFileSync(path.join(root, 'log.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
   return { root, boot, inbox, setTasks, setAgents, log, flags: () => monitor.flags() };
 }
@@ -152,6 +158,16 @@ test('R7 an assignee who is not registered is skipped and not recorded; once reg
   r.setAgents({ ann: agent('ann'), jim: agent('jim') });
   r.boot('1.1.108');
   assert.equal(triggers(r.inbox('jim')).length, 1, 'skipped, not recorded: it fires once jim is back');
+});
+
+test('R8 an undeliverable send (no inbox) is not recorded as fired; once the inbox exists, it fires', (t) => {
+  const r = rig(t, { jim: agent('jim') }, [ARMED()]);
+  fs.rmSync(path.join(r.root, 'agents', 'jim'), { recursive: true, force: true });
+  r.boot('1.1.108');
+  assert.equal(triggers(r.inbox('jim')).length, 0);
+  fs.mkdirSync(path.join(r.root, 'agents', 'jim', 'inbox'), { recursive: true });
+  r.boot('1.1.108');
+  assert.equal(triggers(r.inbox('jim')).length, 1, 'never recorded while undeliverable, so it fires once the inbox exists');
 });
 
 test('G1 guards: a done card, an unarmed card and a fix not reached are never sent', (t) => {

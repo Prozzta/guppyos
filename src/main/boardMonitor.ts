@@ -16,6 +16,7 @@ import { atomicWriteJson } from './atomicJson';
 import { detectStale, flagKey, type BoardFlag, type BoardStaleConfig, type FleetFacts, type RegistryFacts, type CardMetaFacts } from '../shared/boardStale';
 import type { LivenessV1 } from '../shared/livenessV1';
 import { firstOccurrenceById } from '../shared/taskLedger';
+import { InstallTriggers } from './installTriggers';
 
 export const BOARD_FLAGS_FILE = 'board-flags.json';
 export const BOARD_MONITOR_TICK_MS = 60_000;
@@ -30,6 +31,8 @@ export interface BoardMonitorHive {
   registry(): { agents: Record<string, RegistryFacts> };
   patchTask(id: string, patch: Record<string, unknown>, source: 'board-auto'): boolean;
   appendLog(row: Record<string, unknown>): void;
+  /** A9: the install-trigger inform to a card's assignee (HiveManager.send). Absent: no informs. */
+  send?(msg: { to: string; act: 'inform'; card: string; subject: string; body: string; requires_reply: false }, from: string): unknown;
   ledgerGuard: { taskMeta(): { cards: Record<string, CardMetaFacts | undefined> } };
 }
 
@@ -66,8 +69,15 @@ export class BoardMonitor {
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
   private again = false;
+  /** A9: armed cards (waitingFor install + fixVersion) fire once to their assignee. */
+  private readonly installTriggers: InstallTriggers | null;
 
-  constructor(private readonly opts: BoardMonitorOptions) {}
+  constructor(private readonly opts: BoardMonitorOptions) {
+    const h = opts.hive;
+    this.installTriggers = typeof h.send === 'function'
+      ? new InstallTriggers({ registry: () => h.registry(), send: (msg, from) => h.send!(msg, from), appendLog: (row) => h.appendLog(row) })
+      : null;
+  }
 
   private now(): number { return (this.opts.now ?? Date.now)(); }
 
@@ -172,6 +182,12 @@ export class BoardMonitor {
       ({ flags } = this.compute(root, now));
     }
     this.publish(root, flags, now);
+    // A9: after the flags, so an inform never precedes the state it reports. It reads the same
+    // ledger snapshot; a failure here never breaks the monitor.
+    if (this.installTriggers) {
+      try { this.installTriggers.run(root, tasks, this.opts.runningVersion?.() ?? null, now); }
+      catch (e) { try { hive.appendLog({ kind: 'install-trigger-error', error: String(e).slice(0, 300) }); } catch { /* noop */ } }
+    }
     return flags;
   }
 

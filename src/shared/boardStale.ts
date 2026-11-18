@@ -214,7 +214,8 @@ export function detectStale(input: DetectStaleInput): BoardFlag[] {
   const flags: BoardFlag[] = [];
   const doingBy = new Map<string, Card[]>();
   for (const card of cards(input.tasks)) {
-    const wait = card.status === 'doing' || card.status === 'blocked' ? installWait(card, input.runningVersion) : null;
+    // ARMED-TRIGGERS-LOST-ON-RESTART (A9): a TODO card can be armed too (the usual post-install card).
+    const wait = card.status === 'todo' || card.status === 'doing' || card.status === 'blocked' ? installWait(card, input.runningVersion) : null;
     if (wait === 'installed') flags.push(installedFlag(card, input));
     if (card.status === 'blocked') {
       const f = answeredIdle(card, input.now, cfg);
