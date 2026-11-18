@@ -166,6 +166,28 @@ test('REMOVEDIR: waits while something holds the folder, and gives up after its 
 const SHARED_LAD = 'GUPPY_SHARED_LOCALAPPDATA';
 const SHARED_LAD_SETTER = 'test/tools/temp-jail-preload.cjs';
 const SHARED_LAD_READERS = ['test/rebrand-a-182.test.cjs', 'test/rebrand-updater-base-183.test.cjs', 'test/scheme-drop-187.test.cjs'];
+// DRILL-TREE-SELF-BUILD-108: one OWNER beside the readers. The 1.1.83 drill tree is built once and kept
+// under <shared LOCALAPPDATA>/guppy-test-fixtures, outside the per-file jail, so its library has to
+// name the shared folder. It is the only file that may write below it, and only in its own folder.
+// Its test file names the variable once, as a key handed to treeLocation.
+const SHARED_LAD_OWNER = 'test/tools/drill-tree-183.cjs';
+const SHARED_LAD_OWNER_TEST = 'test/drill-tree-183.test.cjs';
+const SHARED_LAD_OWNER_LINES = [
+  'const local = env.GUPPY_SHARED_LOCALAPPDATA || env.LOCALAPPDATA;',                            // treeLocation
+  'if (env.GUPPY_SHARED_LOCALAPPDATA) out.LOCALAPPDATA = env.GUPPY_SHARED_LOCALAPPDATA;',        // baseEnv: the old build's child
+  'const local = env.GUPPY_SHARED_LOCALAPPDATA || env.LOCALAPPDATA;',                            // localModel
+];
+const SHARED_LAD_OWNER_TEST_LINES = ["assert.equal(D.treeLocation({ ...all, GUPPY_SHARED_LOCALAPPDATA: path.join(jail, 'real') }).tree, path.join(jail, 'real', 'guppy-test-fixtures', 'guppy-v1.1.83'));"];
+/** The problems with the owner's text (or its test's): the variable set, read from process.env rather
+ *  than from the env object handed in, or named on a line that is not one of the known ones. */
+function sharedLadOwnerProblems(text, lines) {
+  const out = [];
+  if (new RegExp(`${SHARED_LAD}['"\\]]?\\s*=(?!=)`).test(text)) out.push('the variable is set');
+  if (text.includes(`process.env.${SHARED_LAD}`) || text.includes(`process.env['${SHARED_LAD}']`)) out.push('read from process.env, not from the env handed in');
+  const named = text.split(/\r?\n/).filter((l) => l.includes(SHARED_LAD)).map((l) => l.trim());
+  if (JSON.stringify(named) !== JSON.stringify(lines)) out.push(`named on other lines: ${JSON.stringify(named)}`);
+  return out;
+}
 const FS_WRITES = /\b(?:writeFile|appendFile|copyFile|cp|rm|rmdir|unlink|mkdir|mkdtemp|rename|symlink|link|truncate|chmod|utimes|open)(?:Sync)?\s*\(/;
 /** The problems with one reader's text: the shared folder used other than by listing, or a derived
  *  path (cache, makensis, plugins) handed to an fs write. */
@@ -194,7 +216,7 @@ test('SHARED LOCALAPPDATA: one setter, the known readers only, and they only rea
   for (const d of ['src', 'scripts', 'test', 'build']) if (fs.existsSync(path.join(root, d))) walk(path.join(root, d));
   const rel = (p) => path.relative(root, p).split(path.sep).join('/');
   const users = files.map(rel).filter((f) => f !== 'test/test-temp-hygiene.test.cjs' && fs.readFileSync(path.join(root, f), 'utf8').includes(SHARED_LAD)).sort();
-  assert.deepEqual(users, [...SHARED_LAD_READERS, SHARED_LAD_SETTER].sort(), 'ONLY THE PRELOAD AND THE KNOWN READERS NAME THE SHARED LOCALAPPDATA (src and scripts never do)');
+  assert.deepEqual(users, [...SHARED_LAD_READERS, SHARED_LAD_SETTER, SHARED_LAD_OWNER, SHARED_LAD_OWNER_TEST].sort(), 'ONLY THE PRELOAD, THE KNOWN READERS AND THE DRILL TREE (ITS ONE OWNER) NAME THE SHARED LOCALAPPDATA (src and scripts never do)');
   const setter = fs.readFileSync(path.join(root, SHARED_LAD_SETTER), 'utf8');
   assert.equal(setter.split(`process.env.${SHARED_LAD} =`).length - 1, 1, 'THE PRELOAD SETS IT ONCE');
   for (const f of SHARED_LAD_READERS) {
@@ -202,6 +224,20 @@ test('SHARED LOCALAPPDATA: one setter, the known readers only, and they only rea
     assert.ok(!text.includes(`process.env.${SHARED_LAD} =`), `${f}: A READER NEVER SETS IT`);
     assert.deepEqual(sharedLadProblems(text), [], `${f}: THE SHARED LOCALAPPDATA IS ONLY READ`);
   }
+  // The owner (DRILL-TREE-SELF-BUILD-108): the drill-tree library and its test name the variable only
+  // on the known lines, never set it, and take it from the env object handed in. The folder it
+  // builds in is its own: <shared>/guppy-test-fixtures/<NAME>.
+  const owner = fs.readFileSync(path.join(root, SHARED_LAD_OWNER), 'utf8');
+  const ownerTest = fs.readFileSync(path.join(root, SHARED_LAD_OWNER_TEST), 'utf8');
+  assert.deepEqual(sharedLadOwnerProblems(owner, SHARED_LAD_OWNER_LINES), [], `${SHARED_LAD_OWNER}: THE OWNER NAMES THE SHARED LOCALAPPDATA ONLY ON ITS KNOWN LINES`);
+  assert.deepEqual(sharedLadOwnerProblems(ownerTest, SHARED_LAD_OWNER_TEST_LINES), [], `${SHARED_LAD_OWNER_TEST}: THE OWNER'S TEST ONLY HANDS THE NAME TO treeLocation`);
+  assert.ok(owner.includes("if (local) return managedAt(path.resolve(local, 'guppy-test-fixtures', NAME), 'LOCALAPPDATA');"), 'the owner builds only in its own folder under the shared one');
+  assert.ok(!SHARED_LAD_READERS.includes(SHARED_LAD_OWNER) && !SHARED_LAD_READERS.includes(SHARED_LAD_OWNER_TEST), 'the owner is not a reader: the readers keep the read-only rule');
+  // The owner scanner itself: a set, a process.env read and a new line are each caught.
+  assert.equal(sharedLadOwnerProblems(`${owner}\nprocess.env.${SHARED_LAD} = 'x';\n`, SHARED_LAD_OWNER_LINES).length, 3, 'a set through process.env is caught three ways');
+  assert.deepEqual(sharedLadOwnerProblems(`${owner}\nenv.${SHARED_LAD} = 'x';\n`, SHARED_LAD_OWNER_LINES).slice(0, 1), ['the variable is set'], 'a set on the env object is caught');
+  assert.equal(sharedLadOwnerProblems(`${owner}\nconst other = env.${SHARED_LAD};\n`, SHARED_LAD_OWNER_LINES).length, 1, 'a new line naming it is caught');
+  assert.equal(sharedLadOwnerProblems(owner.replace(`env.${SHARED_LAD} || env.LOCALAPPDATA`, `process.env.${SHARED_LAD} || env.LOCALAPPDATA`), SHARED_LAD_OWNER_LINES).length, 2, 'a read from process.env is caught');
   // The scanner itself: each way a reader could start writing is caught.
   const ok = fs.readFileSync(path.join(root, SHARED_LAD_READERS[0]), 'utf8');
   const rmIn = ok.replace('fs.readdirSync(cache).find((d) => /^nsis-\\d/', 'fs.rmSync(cache, { recursive: true }) || fs.readdirSync(cache).find((d) => /^nsis-\\d/');
