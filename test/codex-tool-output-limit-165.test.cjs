@@ -103,7 +103,7 @@ function sandbox(t) {
   const seed = 'model = "m"\ntool_output_token_limit = 99\n\n[plugins."pdf@x"]\nenabled = true\n';
   fs.writeFileSync(path.join(home, '.codex', 'config.toml'), seed);
   const hive = new HiveManager(() => path.join(home, 'harness'));
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   return { home, hive, seed };
 }
 async function cfgFor(t, value) {

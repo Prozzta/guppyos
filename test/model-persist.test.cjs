@@ -15,7 +15,7 @@ const cfg = { defaultModel: 'claude-fable-5', godProvider: 'claude', godModel: '
 
 test('a status-line model is retained in the registry through an agent respawn', async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'md-model-persist-'));
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   const hive = new HiveManager(() => home);
   await hive.ensureAgent({ id: 'worker-1', name: 'Worker', provider: 'claude', cwd: home });
   hive.recordModel('worker-1', 'claude-opus-5-5[1m]', 'claude-fable-5');
@@ -34,7 +34,7 @@ test('per-agent model wins over worker and god defaults, while an empty saved va
 
 test('the 1M suffix is a deliberate god-model pin and a later plain report clears it', async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'md-model-1m-'));
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   const hive = new HiveManager(() => home);
   const god = { id: 'god-1', name: 'God', provider: 'claude', cwd: home, isGod: true };
   await hive.ensureAgent(god);

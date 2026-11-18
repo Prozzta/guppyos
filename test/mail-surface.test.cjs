@@ -317,7 +317,7 @@ async function floor(t, { providers = {}, steer = null, emit, claimWorkingSet } 
   const events = [];
   const hive = new HiveManager(() => home, emit ?? ((ch, p) => { events.push({ ch, p }); return true; }));
   const server = { current: null };
-  t.after(() => { try { server.current?.stop(); } catch { /* noop */ } hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { try { server.current?.stop(); } catch { /* noop */ } hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   await hive.ensureAgent({ id: 'god-1', name: 'Michael', provider: 'claude', cwd: home, isGod: true });
   for (const id of Object.keys(providers)) await hive.ensureAgent({ id, name: id, provider: 'claude', cwd: home });
   const reg = hive.registry.bind(hive);

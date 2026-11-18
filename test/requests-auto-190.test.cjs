@@ -138,7 +138,7 @@ test('digest: the backstop closes of the last 24 h are listed; none, no section'
 async function floor(t) {
   const home = fs.mkdtempSync(path.join(JAIL, 'floor-'));
   const hive = new HiveManager(() => home, () => true);
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   await hive.ensureAgent({ id: 'god-1', name: 'Michael', provider: 'claude', cwd: home, isGod: true });
   await hive.ensureAgent({ id: 'andy-1', name: 'Andy', provider: 'claude', cwd: home });
   return hive;

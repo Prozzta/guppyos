@@ -126,7 +126,7 @@ test('patching one card leaves its neighbours byte-identical', () => {
 
 test('answering a question through hive.writeTasks preserves the whole board', (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'md-task-ledger-'));
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   const hive = new HiveManager(() => home);
   const ledger = () => JSON.parse(fs.readFileSync(path.join(home, 'hive', 'tasks.json'), 'utf8')).tasks;
 
@@ -160,7 +160,7 @@ test('answering a question through hive.writeTasks preserves the whole board', (
 
 test('hive.writeTasks can still empty the ledger', (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'md-task-ledger-del-'));
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   const hive = new HiveManager(() => home);
   const ledger = () => JSON.parse(fs.readFileSync(path.join(home, 'hive', 'tasks.json'), 'utf8')).tasks;
 

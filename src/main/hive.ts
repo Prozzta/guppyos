@@ -766,6 +766,16 @@ class ArchivedMailDir {
 }
 const EMPTY_MAIL_DIR = new ArchivedMailDir(Number.NaN, new Map());
 
+/**
+ * MAIL-EPOCHS-TEARDOWN-RACE-108: an async read asked of a manager after dispose(). The folder is
+ * about to be deleted or copied, so the read is not started. Never swallowed as "missing" or
+ * "unreadable" by the readers below: a pass that gets it stops.
+ */
+export class HiveDisposedError extends Error {
+  readonly code = 'EHIVEDISPOSED';
+  constructor(p: string) { super(`hive disposed: ${basename(p)} not read`); this.name = 'HiveDisposedError'; }
+}
+
 export class HiveManager {
   /**
    * @param getHome  Lazily resolve harnessHome so the hive follows config changes.
@@ -873,6 +883,8 @@ export class HiveManager {
    * and a copy must see the rows. Safe to call more than once; a later row simply reopens.
    */
   dispose(): void {
+    // MAIL-EPOCHS-TEARDOWN-RACE-108: no new async read from here on; drainReads() waits for the open ones.
+    this.readsRefused = true;
     // ZT-I1-MAIL: the coalesced ledger writes land before the log closes (quit, home change).
     try { this.mail.dispose(); } catch (e) { try { this.appendLog({ kind: 'mail-ledger-write-failed', error: String(e) }); } catch { /* noop */ } }
     // LAG-SYNC-WRITES-107: mail-card rows still queued for a write-behind append land now.
@@ -880,6 +892,30 @@ export class HiveManager {
     this.closeAppendFiles();
     this.closeAuthorityWatchers();
   }
+  /**
+   * MAIL-EPOCHS-TEARDOWN-RACE-108: this manager's own async file reads. Node's async readFile holds
+   * the file open across several turns, and under Electron 45 a recursive delete of the folder
+   * fails with ENOTEMPTY while one is open (plain Node deletes it). dispose() is synchronous and
+   * cannot wait for them, so it refuses new ones and the caller that goes on to DELETE or COPY the
+   * folder awaits drainReads() in between. reopen() is for a caller that keeps the manager after
+   * all (a home change whose copy failed).
+   */
+  private asyncReads = 0;
+  private readsRefused = false;
+  private readDrained: Array<() => void> = [];
+  private async readTextAsync(p: string, tracked = false): Promise<string> {
+    if (this.readsRefused) throw new HiveDisposedError(p);
+    this.asyncReads++;
+    try { return await (tracked ? readFileTracked(p, 'utf8') : fsPromises.readFile(p, 'utf8')); } finally {
+      if (--this.asyncReads === 0) for (const done of this.readDrained.splice(0)) done();
+    }
+  }
+  /** Resolves once none of this manager's async reads is open. Call after dispose(), before the delete. */
+  drainReads(): Promise<void> {
+    return this.asyncReads === 0 ? Promise.resolve() : new Promise((done) => { this.readDrained.push(done); });
+  }
+  /** Async reads are allowed again (the folder was kept after a dispose()). */
+  reopen(): void { this.readsRefused = false; }
   setHookBroker(broker: HookBroker | null): void {
     this.hookBroker = broker;
   }
@@ -1125,7 +1161,7 @@ export class HiveManager {
       let raw: string;
       try {
         if ((await fsPromises.stat(path)).size > HiveManager.INBOX_MESSAGE_MAX_BYTES) return { ok: false, reason: 'unreadable', sig: await sig() };
-        raw = await fsPromises.readFile(path, 'utf8');
+        raw = await this.readTextAsync(path);
       } catch (e) {
         const code = (e as NodeJS.ErrnoException)?.code;
         if (code === 'ENOENT' || code === 'ENOTDIR') continue;
@@ -4029,17 +4065,18 @@ export class HiveManager {
       };
       let legacy = false;
       try {
-        const raw = JSON.parse(await fsPromises.readFile(join(root, OUTBOX_DEDUP_LEGACY_FILE), 'utf8')) as { entries?: unknown };
+        const raw = JSON.parse(await this.readTextAsync(join(root, OUTBOX_DEDUP_LEGACY_FILE))) as { entries?: unknown };
         legacy = true;
         for (const e of Array.isArray(raw.entries) ? raw.entries : []) take(e);
       } catch (e) {
+        if (e instanceof HiveDisposedError) throw e;
         // present but unreadable: still the legacy file, removed by the first compaction
         if ((e as NodeJS.ErrnoException)?.code !== 'ENOENT') legacy = true;
       }
       let lines = 0;
       let torn = false;
       try {
-        const text = await fsPromises.readFile(join(root, OUTBOX_DEDUP_FILE), 'utf8');
+        const text = await this.readTextAsync(join(root, OUTBOX_DEDUP_FILE));
         torn = text.length > 0 && !text.endsWith('\n');
         for (const line of text.split('\n')) {
           if (!line.trim()) continue;
@@ -4047,7 +4084,7 @@ export class HiveManager {
           // a torn or corrupt line is a dead line: skipped, and gone at the next compaction
           try { take(JSON.parse(line)); } catch { /* skip */ }
         }
-      } catch { /* none yet, or unreadable: start empty (a missed suppression only delivers, as before) */ }
+      } catch (e) { if (e instanceof HiveDisposedError) throw e; /* none yet, or unreadable: start empty (a missed suppression only delivers, as before) */ }
       // another pass for this root may have loaded it while this one awaited its reads
       if (this.outboxDedup?.root !== root) this.outboxDedup = { root, entries, lines, torn, legacy };
     }
@@ -4209,8 +4246,9 @@ export class HiveManager {
         }
         let partial: Partial<HiveMessage>;
         try {
-          partial = JSON.parse(await fsPromises.readFile(full, 'utf8')) as Partial<HiveMessage>;
+          partial = JSON.parse(await this.readTextAsync(full)) as Partial<HiveMessage>;
         } catch (error) {
+          if (error instanceof HiveDisposedError) throw error;
           // A non-atomic writer may still be streaming this file. Leave it in
           // place for subsequent polling passes; only a bounded failure becomes
           // a visible rejection.
@@ -6846,8 +6884,9 @@ export class HiveManager {
   private async readAuthoritativeJsonAsync<T>(p: string, onMissing: () => T): Promise<T> {
     let raw: string;
     try {
-      raw = await readFileTracked(p, 'utf8');
+      raw = await this.readTextAsync(p, true);
     } catch (error) {
+      if (error instanceof HiveDisposedError) throw error;
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         this.quarantinedJsonFingerprints.delete(p);
         this.authorityIssues.delete(p);
@@ -6989,7 +7028,7 @@ export class HiveManager {
       }
       let raw: string;
       try {
-        raw = await readFileTracked(p, 'utf8');
+        raw = await this.readTextAsync(p, true);
       } catch {
         if (overtaken()) continue;
         this.invalidateAuthorityCache(p);

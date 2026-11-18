@@ -49,7 +49,7 @@ function fakeRuntime() {
 
 async function floor(t, { emit } = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'md-event-router-'));
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   const rt = fakeRuntime();
   const hive = new HiveManager(() => home, emit, rt.runtime);
   rt.idle = () => hive.routerIdle();

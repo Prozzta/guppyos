@@ -26,7 +26,7 @@ function registryOf(home) {
 
 test('a "~/…" cwd is expanded before it reaches the registry', async (t) => {
   const home = tmpHome();
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   const hive = new HiveManager(() => home);
 
   await hive.ensureAgent({ id: 'a1', name: 'A', provider: 'claude', cwd: '~' });
@@ -39,7 +39,7 @@ test('a "~/…" cwd is expanded before it reaches the registry', async (t) => {
 
 test('an absolute cwd is unchanged', async (t) => {
   const home = tmpHome();
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   const hive = new HiveManager(() => home);
 
   await hive.ensureAgent({ id: 'a1', name: 'A', provider: 'claude', cwd: home });
@@ -51,7 +51,7 @@ test('an absolute cwd is unchanged', async (t) => {
 
 test('cwdValidity repairs a "~" left in an older registry', async (t) => {
   const home = tmpHome();
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   const hive = new HiveManager(() => home);
 
   // Entries written before the fix are still on disk; reading one must not

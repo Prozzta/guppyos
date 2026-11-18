@@ -111,8 +111,8 @@ test('Dwight F2 (behaviour): an archive, a restore and a respawn-restore each em
   const realHome = process.env.HOME; const realProfile = process.env.USERPROFILE;
   process.env.HOME = home; process.env.USERPROFILE = home;
   let hive = null;
-  t.after(() => {
-    try { hive?.dispose(); } finally {
+  t.after(async () => {
+    try { hive?.dispose(); await hive?.drainReads(); } finally {
       if (realHome === undefined) delete process.env.HOME; else process.env.HOME = realHome;
       if (realProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = realProfile;
       fs.rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });

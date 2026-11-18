@@ -54,7 +54,7 @@ function rig(t, agents, tasks) {
   let hive = null;
   let monitor = null;
   const stop = () => { try { monitor?.stop(); } catch { /* noop */ } try { hive?.dispose(); } catch { /* noop */ } monitor = null; hive = null; };
-  t.after(() => { stop(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { const last = hive; stop(); await last?.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   /** A fresh process: new HiveManager + new BoardMonitor, running `version`. `prep(hive)` runs before the first tick. */
   const boot = (version, prep) => {
     stop();

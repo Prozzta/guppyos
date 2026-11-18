@@ -22,7 +22,7 @@ const AJ = loadTs('src/main/atomicJson.ts');
 function floor(t) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'md-task-mutate-'));
   const hive = new HiveManager(() => home);
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   return hive;
 }
 
