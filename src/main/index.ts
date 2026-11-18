@@ -4,6 +4,7 @@ import { runQuitSteps, type QuitReport } from './quitTeardown';
 import { copyClipboardText, readClipboardPng, readClipboardText } from './clipboard';
 import { NativeMemoryWiring, toUnpacked } from './nativeMemory/mainWiring';
 import { ClaimStore, CLAIMS_CHECKPOINT_FILE } from './claims/store';
+import { RekeyCommand, rekeyCommandFor } from './claims/rekeyCommand';
 import { SearchResultLog } from './claims/searchLog';
 import { collectNoteCandidates, embedViaWorker, HiveCorpus, ledgerCandidateDeps, makeLocalScorer, type CandidateResult } from './claims/candidates';
 import { FileHeadAnchorStore, FileLedgerKeyRecord, HEAD_ANCHOR_FILE, KEY_RECORD_FILE, MAC_KEY_FILE, SafeStorageKeyProvider } from './claims/keyProvider';
@@ -1837,8 +1838,8 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
           const what = row.kind === CLAIMS_ALERT_KEY_MISSING && typeof row.recovery === 'string'
             ? row.recovery
             : row.kind === CLAIMS_ALERT_KEY_MISSING
-            // CLAIMS-KEYMISSING-TEXT-108: no Settings button runs the rekey yet (claimsUi.ts), so name who does.
-            ? 'The claim ledger key is missing or cannot be decrypted: every claim ledger is read-only. Nothing is fixed automatically. Recovery is the Human rekey for each floor; there is no Settings button for it yet, so ask god to run it for this floor. The rekey writes one rekey line on each ledger; records before that line are accepted on their prev chain only.'
+            // CLAIMS-REKEY-ENTRYPOINT-108: name the exact command that runs the rekey, with this floor's folder in it.
+            ? `The claim ledger key is missing or cannot be decrypted: every claim ledger is read-only. Nothing is fixed automatically. Recovery is a rekey of this floor, which only the Human can approve: god runs \`${rekeyCommandFor(root)}\` and the Human confirms it in the Guppy window. The rekey writes one rekey line on each ledger; records before that line are accepted on their prev chain only.`
             : `${String(row.agentId)}'s claim ledger failed verification (${String(row.reason)} at ${String(row.brokenAt)}) and is read-only. Nothing was repaired; the Human decides.`;
           hive.send({ to: 'god', act: 'inform', wake: 'now', subject: `Claim ledger alert: ${String(row.kind)}`, body: `${what}\nFor god and the Human.` }, 'claims');
         },
@@ -2302,11 +2303,28 @@ function claimsBootstrapStatus(): { ok: boolean; line: string; state: ReturnType
   const job = claimsBootstrapFor(root, ep.store);
   return { ok: true, line: job.isRunning() ? 'claims bootstrap is running' : 'claims bootstrap is idle', state: job.status() };
 }
+// CLAIMS-REKEY-ENTRYPOINT-108: `claims rekey --floor <hive folder>`, god's command. The only caller of
+// ClaimStore.rekey(); it runs on the Human's yes in this dialog and on nothing else.
+const rekeyCommand = new RekeyCommand({
+  isGod: (agentId) => hive.isGod(agentId),
+  floorRoot: () => hive.root(),
+  store: () => claimsEndpoint()?.store ?? null,
+  confirm: async (q, signal) => {
+    if (DEV_HIDDEN) return false;   // a hidden (harness) run never confirms a rekey
+    const win = BrowserWindow.getFocusedWindow() ?? mainWindow ?? [...allWindows][0];
+    // Cancel is the default button and the answer when the dialog is closed or its time runs out (signal).
+    const opts = { type: 'warning' as const, buttons: [q.ok, 'Cancel'], defaultId: 1, cancelId: 1, title: q.title, message: q.message, detail: q.detail, noLink: true, signal };
+    const r = win && !win.isDestroyed() ? await dialog.showMessageBox(win, opts) : await dialog.showMessageBox(opts);
+    return r.response === 0;
+  },
+  log: (row) => hive.appendLog(row),
+});
 hookServer.setClaimsHandler(async (agentId, body) => {
-  if (!hive.isGod(agentId)) return { status: 403, body: { ok: false, line: 'refused: claims bootstrap is god-only' } };
+  if (!hive.isGod(agentId)) return { status: 403, body: { ok: false, line: 'refused: the claims command is god-only' } };
   const action = body && typeof body === 'object' && !Array.isArray(body) ? (body as Record<string, unknown>).action : null;
   if (action === 'status') return { status: 200, body: claimsBootstrapStatus() };
-  if (action !== 'run') return { status: 400, body: { ok: false, line: 'refused: action must be run or status' } };
+  if (action === 'rekey') return rekeyCommand.handle(agentId, body);
+  if (action !== 'run') return { status: 400, body: { ok: false, line: 'refused: action must be run, status or rekey' } };
   const r = await runClaimsBootstrap(agentId);
   return { status: r.ok ? 200 : 409, body: r };
 });

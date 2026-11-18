@@ -7129,6 +7129,7 @@ const FLOOR_COMMANDS_MD = [
   '- `heavy status` — who holds the heavy slot, who waits, who has it reserved, and your own standing. `heavy release [--to <agent>]` — give up your reservation and queue place (to that agent first), or the slot you hold once no process of its job runs. `heavy next <agent>` — the next freed slot goes to that agent (a holder, a reserved agent or god may say so). A held slot frees when its job ends.',
   '- `tasks-all` — every card, hot tasks.json plus tasks-archive/ (old done cards move there). `tasks-revive <CARD-ID>` brings one back; `tasks-unsplit --yes` only with Guppy closed.',
   '- god only: `term read <agent> [--rows N]` (its live screen), `term type <agent>` / `term send <agent>` (text on stdin or `--file`, never in arguments; send presses Enter once the echo settles; `--raw` lets a lone `?` or a leading `!` or `/` through), `term keys <agent> <key>...` (`enter esc tab shift-tab backspace space ctrl-c ctrl-u up down y n 0-9` and more), `term hold on [reason]` / `term hold off` (the floor hold), `term rule <agent> send-again|already-handled --id <requestId>` (rules on a held-interfered latch, which `term read` shows, as the Human\'s message box does; it types nothing). After a timeout, `term read` before you repeat a type or send.',
+  '- god only: `claims rekey --floor <hive folder>` — rekey this floor\'s claim ledgers after the claim ledger key was lost or moved away (the key-missing alert names the command with the folder filled in). It only ASKS: Guppy shows the Human a dialog in its window, and the rekey runs on the Human\'s yes alone (5 minutes to answer; no answer, Cancel or a closed dialog writes nothing). It prints one line per ledger: `rekeyed: <agent>` or `refused: <agent> (why)`; a refused ledger stays read-only. A floor is rekeyed from its own Guppy window, never from another floor\'s. Never run it unasked or to clear an alert you have not read. `claims bootstrap [--status]` — the one-time legacy memory import.',
   '',
   '## FLEET SETTINGS (god)',
   '',
@@ -7380,6 +7381,12 @@ Your \`memory.md\` is indexed automatically, so the durable facts you write ther
 become searchable by every agent. There is no \`mine\` step. When your start-up instructions
 say the claim ledger is on for you, record facts with \`memory note\` instead (full syntax in
 \`COMMANDS.md\`, under Floor commands).
+
+If the claim ledger key is lost, every claim ledger of the floor goes read-only and \`memory note\`
+is refused. Nothing repairs that automatically, and no agent can: the fix is a rekey that only the
+Human can approve. Tell god. God runs \`claims rekey --floor <hive folder>\` (\`COMMANDS.md\`, under
+Floor commands) and the Human confirms it in the Guppy window. Do not work around a read-only
+ledger by writing facts into \`memory.md\`.
 
 ## The heavy slot
 The machine runs one heavy job at a time (installs, builds, full suites, benches). A command
