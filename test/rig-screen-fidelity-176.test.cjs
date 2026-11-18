@@ -51,6 +51,21 @@ test('RIG FIDELITY n1: a received echo that fell out of the stub\'s window gives
   assert.equal(screenDraftOf(undefined, 'live', 5), 'live');
 });
 
+// MAIL-RIG-G1-STALE-MIRROR-108 (Jim 6a7b99): the stub's composer write was refused (EPERM) until it
+// gave up, yet its echo went out. composer.json then ends at an OLDER seq (here the empty composer
+// after an Enter) while the host has seen a NEWER echo (god's typed text). Reading the newest entry
+// on disk showed '' for text the terminal shows, and G1's held look RELEASED god's draft.
+test('RIG FIDELITY n2: a received echo NEWER than composer.json\'s newest seq (the file is behind) gives NO reading, never the stale composer', () => {
+  const { screenDraftOf } = require('./mail-rig/screen-draft.cjs');
+  const behind = [{ seq: 4, draft: 'wake' }, { seq: 5, draft: '' }];
+  assert.equal(screenDraftOf(behind, '', 6), null, 'echo 6 seen, file ends at 5: no reading, not the empty composer');
+  assert.equal(screenDraftOf(behind, '', 9), null, 'several echoes ahead: still no reading');
+  assert.equal(screenDraftOf([{ seq: 0, draft: '' }], '', 1), null, 'the first echo seen before the first write landed');
+  // the boundary: the newest seq on disk IS the seen echo, so its draft is the screen
+  assert.equal(screenDraftOf(behind, '', 5), '');
+  assert.equal(screenDraftOf([...behind, { seq: 6, draft: ' and god' }], ' and god', 6), ' and god');
+});
+
 // SUITE-LOAD-FLAKES-1027: the stub's composer.json is the screen the host reads. On Windows the
 // stub's rename onto it is refused (EPERM) while any process has the file open, and the stub used
 // to swallow that: the file kept the EMPTY composer, the host read an empty prompt row for text

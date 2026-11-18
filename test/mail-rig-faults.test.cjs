@@ -289,7 +289,15 @@ test('G1 god unsticks a held wake through term: INTERFERED by god, god clears an
   assert.equal(rig.prompts('cl-a').length, 0, 'no Enter on god\'s text');
   await sleep(1_700);   // HUMAN_QUIET_MS after god's key
   const look0 = await rig.call('recheckHeld', { id: 'cl-a' });
-  assert.deepEqual([look0.kind, look0.why], ['HELD', 'god-draft-on-prompt'], "god's draft on the prompt is never erased by the look");
+  // MAIL-RIG-G1-STALE-MIRROR-108 (b): the reading this look trusted. echoSeen is the newest echo the
+  // host received; the stub's composer-write-* rows show whether composer.json was behind it (a write
+  // refused or given up), the stale-mirror shape behind the RELEASED red.
+  const screenWhy = async () => {
+    const pt = await rig.call('ptyTrace', { id: 'cl-a' }).catch((e) => ({ error: String(e) }));
+    const writes = rig.transcript('cl-a').filter((r) => /^composer-write-/.test(String(r.kind)));
+    return `echoSeen=${pt.echoSeen ?? pt.error}; composer-write rows (${writes.length}): ${JSON.stringify(writes)}`;
+  };
+  assert.deepEqual([look0.kind, look0.why], ['HELD', 'god-draft-on-prompt'], `god's draft on the prompt is never erased by the look (got ${JSON.stringify(look0)}; ${await screenWhy()})`);
 
   const read = await rig.call('term', { body: { action: 'read', agent: 'cl-a' } });
   assert.equal(read.body.ok, true, read.body.line);
@@ -301,7 +309,7 @@ test('G1 god unsticks a held wake through term: INTERFERED by god, god clears an
 
   await sleep(1_700);   // HUMAN_QUIET_MS after god's last key
   const look = await rig.call('recheckHeld', { id: 'cl-a' });
-  assert.ok(['RELEASED', 'SUBMITTED'].includes(look.kind), `only god's keys since the hold: the look releases it (got ${JSON.stringify(look)})`);
+  assert.ok(['RELEASED', 'SUBMITTED'].includes(look.kind), `only god's keys since the hold: the look releases it (got ${JSON.stringify(look)}; ${await screenWhy()})`);
   assert.equal(await rig.call('inhibition', { id: 'cl-a' }), null, 'the hold is gone');
   for (let i = 0; i < 3; i++) { await rig.call('advance', { ms: 70_000 }); await rig.beat(); await sleep(300); }
   assert.equal(rig.prompts('cl-a').length, 1, "exactly god's one turn: no second wake");
