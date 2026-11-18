@@ -79,20 +79,35 @@ function busyPool(ms) {
   return Promise.all(Array.from({ length: n }, () => new Promise((r) => crypto.pbkdf2('k', 's', iterations, 32, 'sha512', r))));
 }
 
-test('R0 a probe that lands before the reader opens leaves the reader the same big file', { skip: !win && 'Windows rename semantics' }, async (t) => {
-  t.after(() => AJ.__setRenameAddonForTest(undefined));
-  AJ.__setRenameAddonForTest(null);
-  const { dir, target, old, orig } = bigTarget(t, 'r0');
-  const pool = busyPool(150);
-  const reading = AJ.readFileTracked(target, 'utf8');
-  const stats = {};
-  const held = await untilHeldOpen(dir, target, reading, orig, stats);
-  assert.ok(stats.landed >= 1, 'the open was delayed past the first probe (the race was hit)');
-  assert.equal(held, true, 'the reader must be holding the file open (plain rename EPERM)');
-  const seen = await reading;
-  assert.equal(seen.length, old.length, 'the reader read the big file, not a probe body');
-  await pool;
-});
+/**
+ * REGISTRY-EPERM-R0-PRECOND-108: block the main thread for `ms` (it stays off the event loop; the
+ * libuv pool keeps running). Under load the main thread is descheduled like this between starting
+ * the read and the first probe; the 24 MB probe copy alone can take that long.
+ */
+function stallMainThread(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+for (const stallMs of [0, 400]) {
+  const name = stallMs
+    ? `R0 the race is hit even when the main thread stalls ${stallMs} ms after starting the read (as under load)`
+    : 'R0 a probe that lands before the reader opens leaves the reader the same big file';
+  test(name, { skip: !win && 'Windows rename semantics' }, async (t) => {
+    t.after(() => AJ.__setRenameAddonForTest(undefined));
+    AJ.__setRenameAddonForTest(null);
+    const { dir, target, old, orig } = bigTarget(t, stallMs ? 'r0s' : 'r0');
+    const pool = busyPool(150);
+    const reading = AJ.readFileTracked(target, 'utf8');
+    if (stallMs) stallMainThread(stallMs);
+    const stats = {};
+    const held = await untilHeldOpen(dir, target, reading, orig, stats);
+    assert.ok(stats.landed >= 1, 'the open was delayed past the first probe (the race was hit)');
+    assert.equal(held, true, 'the reader must be holding the file open (plain rename EPERM)');
+    const seen = await reading;
+    assert.equal(seen.length, old.length, 'the reader read the big file, not a probe body');
+    await pool;
+  });
+}
 
 test('R1 a sync atomic write publishes over a real in-flight readFile', { skip: !win && 'Windows rename semantics' }, async (t) => {
   t.after(() => AJ.__setRenameAddonForTest(undefined));
