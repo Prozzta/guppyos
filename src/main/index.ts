@@ -2314,8 +2314,15 @@ const rekeyCommand = new RekeyCommand({
     const win = BrowserWindow.getFocusedWindow() ?? mainWindow ?? [...allWindows][0];
     // Cancel is the default button and the answer when the dialog is closed or its time runs out (signal).
     const opts = { type: 'warning' as const, buttons: [q.ok, 'Cancel'], defaultId: 1, cancelId: 1, title: q.title, message: q.message, detail: q.detail, noLink: true, signal };
-    const r = win && !win.isDestroyed() ? await dialog.showMessageBox(win, opts) : await dialog.showMessageBox(opts);
-    return r.response === 0;
+    const shown = win && !win.isDestroyed() ? win : null;
+    // The Human must see it: a minimized window, or one behind the god terminal, would let the time run out.
+    if (shown) { try { if (shown.isMinimized()) shown.restore(); shown.show(); shown.focus(); shown.flashFrame(true); } catch { /* the dialog is still shown */ } }
+    try {
+      const r = shown ? await dialog.showMessageBox(shown, opts) : await dialog.showMessageBox(opts);
+      return r.response === 0;
+    } finally {
+      if (shown && !shown.isDestroyed()) { try { shown.flashFrame(false); } catch { /* closed meanwhile */ } }
+    }
   },
   log: (row) => hive.appendLog(row),
 });

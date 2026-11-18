@@ -5,6 +5,7 @@
  * automatic: no retry, no default yes, no rekey for a floor other than the one this Guppy runs.
  * The caller is checked against the registry's god at request time, as `term` is.
  */
+import { realpathSync } from 'fs';
 import { resolve } from 'path';
 
 /** What the alerts and the docs name. One place, so the texts cannot drift from the command. */
@@ -16,7 +17,8 @@ export function rekeyCommandFor(hiveRoot: string): string {
 /** How long the Human has to answer the dialog. After it the dialog closes as a no. */
 export const REKEY_CONFIRM_MS = 5 * 60_000;
 
-export interface RekeyResult { ok: boolean; keyId?: string; rekeyed: string[]; refused: Array<{ agentId: string; why: string }> }
+/** `recorded: false`: rekey lines were written but the new key id was not recorded, so no ledger is rekeyed in effect. */
+export interface RekeyResult { ok: boolean; keyId?: string; recorded?: boolean; rekeyed: string[]; refused: Array<{ agentId: string; why: string }> }
 export interface RekeyQuestion { title: string; message: string; detail: string; ok: string }
 export interface RekeyCommandDeps {
   isGod: (agentId: string) => boolean;
@@ -30,12 +32,21 @@ export interface RekeyCommandDeps {
   setTimer?: (fn: () => void, ms: number) => { unref?: () => void } | unknown;
   clearTimer?: (t: unknown) => void;
   platform?: NodeJS.Platform;
+  /** The folder a path really is (links, drive aliases and short names resolved). Throws when it is absent. */
+  realpath?: (p: string) => string;
 }
 export interface RekeyReply { status: number; body: { ok: boolean; line: string; lines?: string[]; result?: RekeyResult } }
 
 const refuse = (status: number, line: string): RekeyReply => ({ status, body: { ok: false, line: `refused: ${line}` } });
-function sameFolder(a: string, b: string, platform: NodeJS.Platform): boolean {
-  const norm = (p: string): string => { const r = resolve(p).replace(/[\\/]+$/, ''); return platform === 'win32' ? r.toLowerCase() : r; };
+/** The same folder, however it is spelled: through a junction, a drive alias or a short name too. A
+ *  path that cannot be resolved (absent) is compared as written, so it only matches itself. */
+function sameFolder(a: string, b: string, platform: NodeJS.Platform, realpath: (p: string) => string): boolean {
+  const norm = (p: string): string => {
+    let r = resolve(p);
+    try { r = realpath(r); } catch { /* absent or unreadable: as written */ }
+    r = r.replace(/[\\/]+$/, '');
+    return platform === 'win32' ? r.toLowerCase() : r;
+  };
   return norm(a) === norm(b);
 }
 
@@ -50,7 +61,7 @@ export class RekeyCommand {
     const root = this.d.floorRoot();
     const store = root ? this.d.store() : null;
     if (!root || !store) return refuse(409, 'no active hive with a claim ledger');
-    if (!sameFolder(floor, root, this.d.platform ?? process.platform)) {
+    if (!sameFolder(floor, root, this.d.platform ?? process.platform, this.d.realpath ?? realpathSync.native)) {
       return refuse(409, `${floor} is not the floor this Guppy runs (${root}). Each floor is rekeyed by its own god, in the Guppy window that runs it.`);
     }
     if (this.busy) return refuse(409, 'a rekey for this floor is already waiting for the Human or running');
@@ -96,6 +107,8 @@ export class RekeyCommand {
         ? `rekey complete: ${n} ledger${n === 1 ? '' : 's'} rekeyed under key ${r.keyId}`
         : n === 0 && r.refused.length === 0
           ? 'refused: this floor has no claim ledger to rekey'
+          : r.recorded === false
+            ? `rekey not in effect: the new key id was not recorded, so every ledger stays read-only (${r.refused.length} refused). Retry the rekey.`
           : `rekey not complete: ${n} rekeyed, ${r.refused.length} refused${r.keyId ? ` (key ${r.keyId})` : ''}. Refused ledgers stay read-only.`;
       return { status: r.ok ? 200 : 409, body: { ok: r.ok, line, lines, result: r } };
     } finally {
