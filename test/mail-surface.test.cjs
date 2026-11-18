@@ -763,6 +763,41 @@ test('N1 over real HTTP: after 2 consecutive unconfirmed surfacings an id is sti
   assert.ok(fs.existsSync(path.join(f.hive.root(), 'agents', 'cl-1', 'inbox', `${m.id}.json`)), 'still in the inbox');
 });
 
+// MAIL-POSITIVE-RECEIPT (Jim MUST 1): the pipe KEEPS the N1 fallback. Its shim sends its own
+// elapsed time with the request, so the measure includes any wait before the read.
+test('N1 over the real pipe: after 2 consecutive unconfirmed surfacings an id IS confirmed by latency alone (`latency-fallback`), logged mail-evidence-missing (confirmed:true), with a UI notice; a shim that had already given up is not', async (t) => {
+  const f = await floor(t, { providers: { 'cx-1': 'codex', 'cx-2': 'codex' } });
+  const armed = (agentId) => {
+    const m = f.hive.send({ to: agentId, act: 'inform', subject: 's', body: 'b' }, 'god-1');
+    for (const e of ['x1', 'x2']) { f.hive.mail.claimSurfacing(agentId, [m.id], e, 'UserPromptSubmit'); f.hive.mail.closeEpoch(agentId, e, 'normal'); }
+    assert.equal(f.entryOf(agentId, m.id).unconfirmedSurfacings, 2);
+    return m;
+  };
+  const ctxOf = (out) => out?.hookSpecificOutput?.additionalContext ?? '';
+  const settledRow = async (kind, id) => { for (let i = 0; i < 400; i++) { const r = f.logRows().find((x) => x.kind === kind && x.ids.includes(id)); if (r) return r; await new Promise((res) => setTimeout(res, 5)); } return undefined; };
+
+  // In time: the shim reports 100 ms of its own; the reply flushes well inside the pipe limit.
+  const m = armed('cx-1');
+  const out = await pipeHook(f, { agent_id: 'cx-1', hook_event_name: 'UserPromptSubmit', prompt: 'go', turn_id: 'T1', shim_elapsed_ms: 100 });
+  assert.ok(ctxOf(out).includes(`[hive-mail:${m.id}]`), 'the mail was in the pipe reply');
+  const row = await settledRow('mail-evidence-missing', m.id);
+  assert.deepEqual({ evidence: row?.evidence, confirmed: row?.confirmed }, { evidence: 'codex-rollout', confirmed: true });
+  const e = f.entryOf('cx-1', m.id);
+  assert.deepEqual({ state: e.state, method: e.confirmMethod }, { state: 'surfaced', method: 'latency-fallback' });
+  const notice = f.hive.integrityIssues().find((i) => i.error === 'mail-evidence-missing');
+  assert.match(notice?.notice ?? '', /confirmed by hook timing instead/);
+
+  // The shim's own clock is what makes this safe: one that had already used its 5 s is LATE, and
+  // its mail is not confirmed, however fast the server answered.
+  const m2 = armed('cx-2');
+  const out2 = await pipeHook(f, { agent_id: 'cx-2', hook_event_name: 'UserPromptSubmit', prompt: 'go', turn_id: 'T1', shim_elapsed_ms: 6_000 });
+  assert.ok(ctxOf(out2).includes(`[hive-mail:${m2.id}]`));
+  const late = await settledRow('mail-hook-late', m2.id);
+  assert.equal(late?.transport, 'pipe');
+  assert.ok(late.latencyMs >= late.limitMs, JSON.stringify(late));
+  assert.notEqual(f.entryOf('cx-2', m2.id).state, 'surfaced', 'a late pipe reply never confirms');
+});
+
 /** The REAL AGY_HOOK_SHIM, run the way AGY runs it, against the REAL HookServer pipe. */
 // PIPE-HOOK-NO-TOKEN-192: the shim carries its spawn's capability (minted as a spawn mints it).
 const spawnToken = (f, agentId) => { f.server.hookUrl(agentId); return f.server.hookToken(agentId); };
