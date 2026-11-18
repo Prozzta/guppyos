@@ -13,6 +13,11 @@
  * Read:  the live file. If it is there but is not a secrets blob, the `.good` copy is used and one
  *        line says so (no secret text is ever logged). A missing live file is an empty store, with
  *        or without a `.good` copy: removing the file is how the store is emptied.
+ * A file that could not be READ (EBUSY, EPERM, EACCES: a lock, not damage) is not a damaged file.
+ *        A read still answers from `.good`, but a save refuses and leaves the file as it was: what
+ *        is in it is not known, so it must not be replaced. A save also refuses when a damaged file
+ *        cannot first be copied to `<file>.corrupt`. That copy is one file: a later one replaces it.
+ * Not pinned: the folder flush after the rename (non-Windows only; this suite's box is Windows).
  *
  * Electron-free, so it is tested in plain Node (test/secrets-atomic-save.test.cjs).
  */
@@ -38,13 +43,13 @@ function parseBlob(text: string): SecretBlob | null {
   return parsed as SecretBlob;
 }
 
-type Read = { state: 'missing' } | { state: 'corrupt'; why: string } | { state: 'ok'; blob: SecretBlob };
+type Read = { state: 'missing' } | { state: 'unreadable'; why: string } | { state: 'corrupt'; why: string } | { state: 'ok'; blob: SecretBlob };
 
 function readOne(p: string): Read {
   let text: string;
   try { text = readFileSync(p, 'utf8'); } catch (e) {
     if ((e as NodeJS.ErrnoException).code === 'ENOENT') return { state: 'missing' };
-    return { state: 'corrupt', why: (e as NodeJS.ErrnoException).code ?? 'read failed' };
+    return { state: 'unreadable', why: (e as NodeJS.ErrnoException).code ?? 'read failed' };
   }
   const blob = parseBlob(text);
   return blob ? { state: 'ok', blob } : { state: 'corrupt', why: 'not a secrets blob' };
@@ -87,16 +92,21 @@ function publish(p: string, text: string): void {
 
 /**
  * Save `blob`. Throws, with the live file exactly as it was, if the text cannot be written, flushed,
- * read back or renamed. A live file that is unreadable is copied to `<file>.corrupt` first, so its
- * bytes are not lost to the save. If only the `.good` copy cannot be written, the save stands (the
+ * read back or renamed, if the live file is there but could not be read, or if it is not a secrets
+ * blob and could not be copied to `<file>.corrupt` (so its bytes are never lost to the save). If
+ * only the `.good` copy cannot be written, the save stands (the
  * live file is the new one), the stale copy is removed so it can never answer a later read, and
  * `warn` gets one line.
  */
 export function writeSecretFile(p: string, blob: SecretBlob, warn: Warn = console.error): void {
   mkdirSync(dirname(p), { recursive: true });
   const text = JSON.stringify(blob, null, 2);
-  if (readOne(p).state === 'corrupt') {
-    try { copyFileSync(p, corruptPathFor(p)); } catch { /* the file may not be readable at all */ }
+  const live = readOne(p);
+  if (live.state === 'unreadable') throw new Error(`${basename(p)} could not be read (${live.why}); not saved, so the secrets in it are not replaced`);
+  if (live.state === 'corrupt') {
+    try { copyFileSync(p, corruptPathFor(p)); } catch (e) {
+      throw new Error(`${basename(p)} is not a secrets blob and could not be copied to ${basename(corruptPathFor(p))} (${(e as NodeJS.ErrnoException).code ?? 'copy failed'}); not saved`);
+    }
   }
   publish(p, text);
   try { publish(goodPathFor(p), text); } catch (e) {

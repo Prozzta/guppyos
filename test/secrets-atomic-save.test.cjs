@@ -27,6 +27,8 @@ require('./tools/own-job.cjs');
  *   S9 readSecretFile: a missing live file is answered from .good        -> emptying the store
  *   S10 writeSecretFile: no .corrupt copy of an unreadable live file     -> not a secrets blob
  *   S11 publish: the temp file opened 'w' with no mode                   -> never opened for writing
+ *   S12 writeSecretFile: a live file that could not be read is saved over -> could not be READ
+ *   S13 writeSecretFile: a failed .corrupt copy is ignored                -> cannot be copied
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -96,6 +98,46 @@ test('not a secrets blob (an array, a non-string value, no copy): it reads as em
     assert.deepEqual(Object.keys(JSON.parse(fs.readFileSync(file, 'utf8'))), ['groq']);
     t.mock.restoreAll();
   }
+});
+
+// What an install from before this fix has: a live file and no good copy beside it.
+const oldInstall = () => { reset(); fs.writeFileSync(file, JSON.stringify({ slack: Buffer.from('enc:xoxb-one').toString('base64'), groq: Buffer.from('enc:gsk-two').toString('base64') }, null, 2)); };
+const busy = (what) => Object.assign(new Error(`EBUSY: resource busy or locked, ${what}`), { code: 'EBUSY' });
+
+test('a live file that could not be READ (a lock, not damage) is never saved over: the save reports it and every secret is kept', (t) => {
+  for (const withGood of [false, true]) {
+    oldInstall();
+    if (withGood) fs.copyFileSync(file, good);
+    const before = fs.readFileSync(file);
+    const lines = quiet(t);
+    const realRead = fs.readFileSync;
+    t.mock.method(fs, 'readFileSync', (p, ...rest) => { if (String(p) === file) throw busy('read'); return realRead(p, ...rest); });
+    const has = I.hasSecret('slack');
+    const r = I.setSecret('third', 'tok-three');
+    t.mock.restoreAll();
+    assert.equal(has, withGood, 'a read answers from the good copy when there is one');
+    assert.match(lines[0], withGood ? /is unreadable \(EBUSY\); using the last good copy/ : /is unreadable \(EBUSY\) and there is no usable/);
+    assert.deepEqual(r, { ok: false, error: 'integration-secrets.json could not be read (EBUSY); not saved, so the secrets in it are not replaced' }, `good copy ${withGood}: THE SAVE REPORTS THE FAILURE`);
+    assert.deepEqual(fs.readFileSync(file), before, `good copy ${withGood}: THE LIVE FILE IS BYTE FOR BYTE AS IT WAS`);
+    assert.equal(fs.existsSync(`${file}.corrupt`), false);
+    assert.deepEqual(leftovers(), []);
+    // The lock clears: the same save goes through and loses nothing.
+    assert.deepEqual(I.setSecret('third', 'tok-three'), { ok: true });
+    assert.deepEqual(Object.keys(JSON.parse(fs.readFileSync(file, 'utf8'))).sort(), ['groq', 'slack', 'third']);
+  }
+});
+
+test('a file that is not a secrets blob and cannot be copied to .corrupt is not saved over', (t) => {
+  reset();
+  quiet(t);
+  const bad = '{"slack":';
+  fs.writeFileSync(file, bad);
+  t.mock.method(fs, 'copyFileSync', () => { throw busy('copyfile'); });
+  const r = I.setSecret('groq', 'gsk-two');
+  t.mock.restoreAll();
+  assert.deepEqual(r, { ok: false, error: 'integration-secrets.json is not a secrets blob and could not be copied to integration-secrets.json.corrupt (EBUSY); not saved' });
+  assert.equal(fs.readFileSync(file, 'utf8'), bad, 'THE BYTES ARE STILL THERE');
+  assert.deepEqual(leftovers(), []);
 });
 
 test('a save never opens the live file for writing: temp file (0600), flushed, then renamed over it', (t) => {
