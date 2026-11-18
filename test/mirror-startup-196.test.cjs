@@ -79,6 +79,50 @@ test('the parse is MEASURED on the installed xterm: the WriteBuffer slice method
   assert.ok(spent > 0, `parse time was measured (${spent.toFixed(1)} ms)`);
 });
 
+// MIRROR-PARSE-ZERO-108. On Windows process.threadCpuUsage is GetThreadTimes: a whole 15.6 ms step is
+// charged to whichever thread is running at the clock interrupt, and nothing in between. A parse slice
+// is a few ms, so it is charged 0 when no interrupt lands in it and a whole step (or several, if the
+// thread was preempted mid-slice) when one does: never its own work. The guard's sum is then luck, and
+// the test above can read 0 for one parse.
+// Judged slice by slice so the verdict does not depend on machine load: a slice whose wall time stayed
+// within 1.5x of the work's cost ran at least two thirds of that time on this thread, so a true
+// per-thread clock charges it between 0.67x and 1x of its wall time. A step clock can only say 0 or
+// >= 15 ms for a slice of at most 7.5 ms. Slices that were preempted for longer are not judged.
+test('MIRROR-PARSE-ZERO-108: the parse clock charges each short slice its own work', () => {
+  assert.equal(typeof M.threadCpuMs, 'function', 'this runtime has a thread clock');
+  let sink = 0; // keeps the loop from being optimised away
+  const work = (n) => { let x = 0; for (let i = 0; i < n; i++) x = (x + Math.imul(i, 2654435761)) | 0; sink ^= x; };
+  // The cheapest of several wall-timed runs is the closest to the work's CPU cost.
+  const wallOf = (n) => { let best = Infinity; for (let r = 0; r < 12; r++) { const t0 = performance.now(); work(n); best = Math.min(best, performance.now() - t0); } return best; };
+  work(5e6); // warm up, so the JIT is done before anything is sized
+  const n = Math.round(5 / (wallOf(2e6) / 2e6));
+  const sliceMs = wallOf(n);
+  assert.ok(sliceMs > 2 && sliceMs < 10, `the slice is sized inside one 15.6 ms step (${sliceMs.toFixed(2)} ms)`);
+
+  // The product's wrapper on the product's default clock, around a slice method that does the work.
+  let charged = 0;
+  const wb = { _innerWrite() { work(n); } };
+  assert.equal(M.timeParse({ _core: { _writeBuffer: wb } }, (ms) => { charged += ms; }), true);
+  const WANT = 40;
+  const wrong = [];
+  let judged = 0, tried = 0;
+  while (judged < WANT && tried < 2000) {
+    tried += 1;
+    const before = charged;
+    const t0 = performance.now();
+    wb._innerWrite();
+    const wall = performance.now() - t0;
+    const got = charged - before;
+    if (wall > 1.5 * sliceMs) continue; // preempted for a good part of it: its fair charge is unknown
+    judged += 1;
+    if (!(got >= 0.5 * wall && got <= 1.5 * wall)) wrong.push(`${got.toFixed(1)} for ${wall.toFixed(1)}`);
+  }
+  assert.ok(Number.isFinite(sink));
+  assert.equal(judged, WANT, `${WANT} slices ran without a long preemption (${judged} of ${tried} tried)`);
+  assert.equal(wrong.length, 0,
+    `${wrong.length} of ${judged} slices of about ${sliceMs.toFixed(1)} ms were charged something other than their work (ms charged for ms run): ${wrong.slice(0, 8).join(', ')}`);
+});
+
 test('CENSUS MUTANT: injected slice clock measures one parse, never capped-job descheduling; only the outermost slice is timed', () => {
   const calls = [];
   let now = 100;
