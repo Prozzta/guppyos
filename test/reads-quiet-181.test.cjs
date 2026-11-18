@@ -68,7 +68,7 @@ K.replyWakes = (cls = real.cls) => {
 test('wakes: anything with requires_reply, whatever its act', () => K.replyWakes());
 
 K.sendersThatWake = (cls = real.cls) => {
-  for (const from of ['human', 'digest', 'breaker', 'webhook', 'system', 'heartbeat', 'scheduler']) {
+  for (const from of ['human', 'digest', 'breaker', 'webhook', 'system', 'heartbeat', 'scheduler', 'scratch-reaper']) {
     assert.equal(cls.mailWakeClass(entry('w', { from }), 'inject'), 'wake', `MAIL FROM ${from.toUpperCase()} ALWAYS WAKES`);
   }
 };
@@ -206,11 +206,11 @@ test('Jim B2: SENDER CENSUS: every hive.send sender always wakes, is an ordinary
 });
 
 K.b2Senders = (cls = real.cls) => {
-  for (const from of ['michael-voice', 'ephemeral-worker']) {
+  for (const from of ['michael-voice', 'ephemeral-worker', 'scratch-reaper']) {
     assert.equal(cls.mailWakeClass(entry('w', { from }), 'inject'), 'wake', `MAIL FROM ${from.toUpperCase()} ALWAYS WAKES`);
   }
 };
-test('Jim B2: the Human\'s voice ping (michael-voice) and a worker\'s terminal failure (ephemeral-worker) wake', () => K.b2Senders());
+test('Jim B2: voice, worker-failure and scratch-reaper harness senders wake', () => K.b2Senders());
 
 test('Jim\'s HEAVY SLOT FREE notice (from system, inform, no reply, wake:now) wakes', () => {
   assert.equal(real.cls.mailWakeClass(entry('slot', { from: 'system', wakeNow: true }), 'inject'), 'wake');
