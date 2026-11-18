@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { promises as fsp } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { openForRead, safeResolve } from './fs';
 import { GIT_MAX_OUTPUT_BYTES, gitSafeCall } from './gitSafe';
 
@@ -289,6 +289,11 @@ export interface LinkOps {
 const fsLinkOps: LinkOps = { unlink: (p) => fsp.unlink(p), rmdir: (p) => fsp.rmdir(p) };
 const errText = (e: unknown): string => e instanceof Error ? e.message : String(e);
 const gone = (e: unknown): boolean => (e as NodeJS.ErrnoException)?.code === 'ENOENT';
+const sameWorktreePath = (a: string, b: string): boolean => {
+  const left = resolve(a);
+  const right = resolve(b);
+  return process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right;
+};
 
 /** WORKTREE-REMOVE-JUNCTION-191: remove every junction/symlink under `root` as a LINK, never
  *  through it (scripts/worktree-reaper.cjs removeLinks). A junction is a directory link on
@@ -328,6 +333,22 @@ export async function unlinkLinksUnder(
 export async function removeWorktree(
   cwd: string, wtPath: string, ops?: LinkOps
 ): Promise<{ ok: boolean; error?: string; refused?: boolean }> {
+  // Check ownership before walking this path: --force must never traverse a foreign tree, a link
+  // root, or the primary clone. A gone path keeps Git's ordinary error behavior below.
+  let rootExists = true;
+  try {
+    if ((await fsp.lstat(wtPath)).isSymbolicLink()) return { ok: false, refused: true, error: `refused: worktree root is a link (${wtPath})` };
+  } catch (e) {
+    if (!gone(e)) return { ok: false, refused: true, error: `refused: cannot inspect worktree root ${wtPath}: ${errText(e)}` };
+    rootExists = false;
+  }
+  if (rootExists) {
+    const worktrees = await listWorktrees(cwd);
+    if ('error' in worktrees) return { ok: false, refused: true, error: `refused: cannot list worktrees for ${cwd}: ${worktrees.error}` };
+    const found = worktrees.find((w) => sameWorktreePath(w.path, wtPath));
+    if (!found) return { ok: false, refused: true, error: `refused: path is not a worktree registered to ${cwd} (${wtPath})` };
+    if (worktrees[0] && sameWorktreePath(worktrees[0].path, wtPath)) return { ok: false, refused: true, error: `refused: primary worktree cannot be removed (${wtPath})` };
+  }
   const links = await unlinkLinksUnder(wtPath, ops);
   if (links.failed.length) {
     const first = links.failed[0];
