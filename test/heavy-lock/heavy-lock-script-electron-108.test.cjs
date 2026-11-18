@@ -24,6 +24,7 @@ const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
 const { spawn } = require('node:child_process');
+const { nodeEnv } = require('../tools/node-env.cjs');
 const loadTs = require('../load-ts.cjs');
 const { readSource } = require('../read-source.cjs');
 const own = require('../tools/own-procs.cjs');
@@ -158,7 +159,9 @@ const AS_ELECTRON = path.join(FIX, 'as-electron.cjs');
 fs.writeFileSync(AS_ELECTRON, "Object.defineProperty(process, 'versions', { value: { ...process.versions, electron: '45.0.0' }, configurable: true });\n");
 function start(args, { url, agent = 'a', preload = PRELOAD, asElectron = false } = {}) {
   const req = (p) => `--require "${p.replace(/\\/g, '/')}"`;
-  const env = cleanEnv({ NODE_OPTIONS: `${asElectron ? `${req(AS_ELECTRON)} ` : ''}${req(preload)}`, HIVE_LEDGER_URL: url, HIVE_ROOT: JAIL, AGENT_ID: agent });
+  // TEST-EXECPATH-ENV-108: cleanEnv drops ELECTRON_RUN_AS_NODE, and args[0] is process.execPath here: under the
+  // Electron leg the child would be a real Electron app. nodeEnv puts the key back only under Electron.
+  const env = nodeEnv(cleanEnv({ NODE_OPTIONS: `${asElectron ? `${req(AS_ELECTRON)} ` : ''}${req(preload)}`, HIVE_LEDGER_URL: url, HIVE_ROOT: JAIL, AGENT_ID: agent }));
   const child = spawn(args[0], args.slice(1), { cwd: FIX, env, windowsHide: true });
   const bornMs = Date.now();
   let stderr = ''; let stdout = '';

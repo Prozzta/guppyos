@@ -8,6 +8,7 @@
 // test/mutant-runners-tap.test.cjs).
 const fs = require('node:fs');
 const { spawnSync } = require('node:child_process');
+const { nodeEnv } = require('./node-env.cjs');
 
 // MUTANT-RUNNERS-TAP-PARSE: every census runs its tests through runTests and reads them with verdict.
 // On Node >=23 `node --test` defaults to the spec reporter, which prints no 'not ok N - title' and no
@@ -62,7 +63,7 @@ function runTests(root, files, { args = [], env, timeout = 600_000 } = {}) {
   if (args.some((a) => /^--test-reporter/.test(a))) throw new Error('runTests picks the reporter (TAP); do not pass one');
   // A census started from inside a test inherits NODE_TEST_CONTEXT, which makes the child node --test speak
   // the parent runner's serialized protocol instead of TAP: drop it, so the run is always read as TAP.
-  const childEnv = { ...(env ?? process.env) };
+  const childEnv = nodeEnv(env ?? process.env);
   delete childEnv.NODE_TEST_CONTEXT;
   const r = spawnSync(process.execPath, ['--test', '--test-reporter=tap', ...args, ...files], {
     cwd: root, encoding: 'utf8', windowsHide: true, timeout, maxBuffer: 64 * 1024 * 1024, env: childEnv,

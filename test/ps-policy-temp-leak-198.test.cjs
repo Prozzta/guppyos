@@ -28,6 +28,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
+const { nodeEnv } = require('./tools/node-env.cjs');
 const { psEnv, psTempDir, sweepPsTempDirs, KEY, TEMP_KEYS } = require('./tools/ps-env.cjs');
 const { sharedTemp } = require('./tools/shared-temp.cjs');
 
@@ -269,7 +270,7 @@ const PK = {
     const script = `const m = require(${JSON.stringify(envPath)}); const e = m.psEnv(); process.stdout.write(JSON.stringify({ dir: m.psCacheDir(), key: e[m.KEY], made: require('fs').existsSync(m.psCacheDir()) }));`;
     const r = spawnSync(process.execPath, ['-e', script], {
       encoding: 'utf8', windowsHide: true, timeout: 60_000,
-      env: { ...withoutCacheKey(process.env), TEMP: jail, TMP: jail, TMPDIR: jail, GUPPY_SHARED_TEMP: shared }
+      env: nodeEnv({ ...withoutCacheKey(process.env), TEMP: jail, TMP: jail, TMPDIR: jail, GUPPY_SHARED_TEMP: shared })
     });
     assert.equal(r.status, 0, r.stderr);
     const o = JSON.parse(r.stdout);

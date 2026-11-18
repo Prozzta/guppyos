@@ -16,6 +16,7 @@ const os = require('node:os');
 const net = require('node:net');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+const { nodeEnv } = require('./tools/node-env.cjs');
 const loadTs = require('./load-ts.cjs');
 
 const electron = require.resolve('electron');
@@ -129,7 +130,7 @@ function runShim(file, { stdin, env = {}, args = [], preload = null, stretchWatc
     const elapsedFile = path.join(path.dirname(file), `elapsed-${++elapsedSeq}.txt`);
     const extra = preload ? ['--require', preload] : [];
     const child = spawn(process.execPath, ['--require', path.join(path.dirname(file), 'timing-preload.cjs'), ...extra, file, ...args], {
-      env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, SHIM_ELAPSED_FILE: elapsedFile, ...(stretchWatchdog ? { SHIM_STRETCH_WATCHDOG: '1' } : {}), ...env },
+      env: nodeEnv({ PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, SHIM_ELAPSED_FILE: elapsedFile, ...(stretchWatchdog ? { SHIM_STRETCH_WATCHDOG: '1' } : {}), ...env }),
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true
     });
