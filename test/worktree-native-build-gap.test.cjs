@@ -451,6 +451,7 @@ function modelDir(dir, over = {}) {
 function modelTree(t) {
   const root = jail(t);
   addon(root, 'PATCHED');
+  builtNatives(root);
   const files = Object.fromEntries(Object.entries(MODEL).map(([rel, text]) => [rel, sha256(text)]));
   put(root, MANIFEST_REL, JSON.stringify({ model: { dir: 'mini', source: 'https://invalid.example/never', files } }));
   put(root, FETCH_REL, fs.readFileSync(path.join(REPO, FETCH_REL)));

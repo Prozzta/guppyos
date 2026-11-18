@@ -380,15 +380,20 @@ export class ScratchDiskManager {
     if (typeof candidate !== 'string' || typeof card !== 'string' || !/^[A-Z][A-Z0-9-]{2,120}$/.test(card)) return { ok: false, line: 'refused: register needs a _work path and CARD-ID' };
     const path = resolve(candidate);
     if (!managedScratchPath(work, path)) return { ok: false, line: 'refused: scratch must be a direct _work child' };
-    if (!scratchPathOwnedBy(owner, path)) return { ok: false, line: 'refused: scratch path does not have your owner prefix' };
-    const kind = scratchKind(path);
-    if (!kind) return { ok: false, line: 'refused: path is missing or is a common repository (.git directory)' };
-    // Common-gitdir references are discovered by the asynchronous whole-floor
-    // inbound index immediately before every reap. Registration is not
-    // destructive, so it must not synchronously walk all of `_work` on main.
+    // A recorded foreign owner is more specific than the naming guard and does
+    // not inspect the candidate path. Otherwise authenticate the owner before
+    // filesystem classification so an arbitrary _work child is never probed.
     const state = readScratchState(root);
     const existing = state.records.find((r) => resolve(r.path) === path);
     if (existing && existing.owner !== owner) return { ok: false, line: 'refused: scratch is owned by another agent' };
+    if (!scratchPathOwnedBy(owner, path)) return { ok: false, line: 'refused: scratch path does not have your owner prefix' };
+    const kind = scratchKind(path);
+    if (!kind) return { ok: false, line: 'refused: path is missing or is a common repository (.git directory)' };
+    // Classification remains a safety boundary: an owner-looking name cannot
+    // make a common repository or a bare Git directory eligible for registration.
+    // Common-gitdir references are discovered by the asynchronous whole-floor
+    // inbound index immediately before every reap. Registration is not
+    // destructive, so it must not synchronously walk all of `_work` on main.
     const at = this.now();
     const record: ScratchRecord = existing ? { ...existing, card, kind, touchedAt: at } : { path, owner, card, kind, createdAt: at, touchedAt: at };
     writeScratchState(root, { v: 1, records: [...state.records.filter((r) => resolve(r.path) !== path), record] });

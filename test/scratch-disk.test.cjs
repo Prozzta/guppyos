@@ -78,7 +78,7 @@ test('registry round trip rejects malformed rows and preserves owner/card/timest
 
 test('manager authenticates owner, refuses a common repo, and only reaps a registered idle jail', async () => {
   const base = path.join(jail, 'managed'); const hive = path.join(base, 'hive'); const work = path.join(base, '_work');
-  const jailRoot = path.join(work, 'dwight-jail-a'); const common = path.join(work, 'common-repo');
+  const jailRoot = path.join(work, 'dwight-jail-a'); const common = path.join(work, 'dwight-common-repo');
   fs.mkdirSync(jailRoot, { recursive: true }); fs.mkdirSync(path.join(common, '.git'), { recursive: true });
   let clock = 100;
   const manager = new scratch.ScratchDiskManager(() => hive, (card) => card === 'CARD-1', async () => [], undefined, () => clock);
@@ -95,6 +95,14 @@ test('manager authenticates owner, refuses a common repo, and only reaps a regis
   }
   assert.deepEqual(r.reaped, [path.resolve(jailRoot)]);
   assert.equal(fs.existsSync(jailRoot), false);
+});
+
+test('manager refuses a recorded foreign owner even when both owners share a path prefix', () => {
+  const base = path.join(jail, 'shared-prefix-owner'); const hive = path.join(base, 'hive'); const work = path.join(base, '_work');
+  const sharedPrefix = path.join(work, 'dwight-shared-prefix'); fs.mkdirSync(sharedPrefix, { recursive: true });
+  const manager = new scratch.ScratchDiskManager(() => hive, () => false, async () => []);
+  assert.equal(manager.register('dwight-a', sharedPrefix, 'CARD-1').ok, true);
+  assert.match(manager.register('dwight-b', sharedPrefix, 'CARD-1').line, /owned by another agent/);
 });
 
 test('a register while the asynchronous sweep probe is pending is retained', async () => {
