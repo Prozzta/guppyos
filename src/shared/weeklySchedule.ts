@@ -156,3 +156,15 @@ export function weeklyDelayMs(w: unknown, nowMs: number, lastFiredAt = 0): numbe
   if (next !== null && covered(next) && lastFiredAt < next) next = nextWeeklyFireMs(n, next);
   return next === null ? null : Math.max(0, next - nowMs);
 }
+
+/**
+ * Whether a weekly timer armed for wall-clock `targetMs` may fire at `nowMs`.
+ * setTimeout counts on the monotonic clock, but slots are wall-clock, and a weekly
+ * delay can be days long: a clock that drifted or was stepped meanwhile wakes the
+ * timer early by however far it moved. A wake more than SLOT_EARLY_FIRE_MS early
+ * must re-arm from the current time, not fire; within it, the fire covers the slot
+ * (weeklyDelayMs). MISSION-WEEKLY-DOUBLEFIRE-108.
+ */
+export function weeklyTimerDue(targetMs: number, nowMs: number): boolean {
+  return nowMs >= targetMs - SLOT_EARLY_FIRE_MS;
+}

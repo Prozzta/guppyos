@@ -102,7 +102,7 @@ import { listDir, readFileText, readFileBinary, writeFileText, statAbs, expandTi
 import { SpawnedCwds } from './spawnedCwds';
 import { applyProjectHomeChange, isProjectThemeId, projectThemeHomeKey } from '../shared/projectTheme';
 import { resolveGodNameFromRegistry } from '../shared/godIdentity';
-import { normalizeWeekly, weeklyDelayMs } from '../shared/weeklySchedule';
+import { normalizeWeekly, weeklyDelayMs, weeklyTimerDue } from '../shared/weeklySchedule';
 import { isInputOrigin } from '../shared/inputOrigin';
 import { automaticDeliveryEligibility, isTerminalInputState } from '../shared/inputProvenance';
 import { isTerminalPromptState } from '../shared/promptState';
@@ -3405,7 +3405,13 @@ function syncMissions(): void {
         const persisted = (readConfig().missions ?? []).find((x) => x.id === m.id)?.lastFiredAt ?? 0;
         const delay = weeklyDelayMs(weekly, now, justFired ? Math.max(persisted, now) : persisted);
         if (delay === null) return;
-        entry.timeout = setTimeout(() => { fire(); rearm(true); }, delay);
+        // A wake well before the wall-clock target (clock drift or a step over a
+        // days-long delay) re-arms instead of firing (weeklyTimerDue).
+        const target = now + delay;
+        entry.timeout = setTimeout(() => {
+          if (!weeklyTimerDue(target, Date.now())) { rearm(false); return; }
+          fire(); rearm(true);
+        }, delay);
       };
       rearm(false);
       missionTimers.set(m.id, entry);

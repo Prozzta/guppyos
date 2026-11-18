@@ -14,7 +14,8 @@ const loadTs = require('./load-ts.cjs');
 
 const {
   normalizeWeekly, formatWeekly, formatMinute,
-  nextWeeklyFireMs, previousWeeklyFireMs, weeklyDelayMs, WEEKLY_CATCHUP_MS
+  nextWeeklyFireMs, previousWeeklyFireMs, weeklyDelayMs, WEEKLY_CATCHUP_MS,
+  weeklyTimerDue, SLOT_EARLY_FIRE_MS
 } = loadTs('src/shared/weeklySchedule.ts');
 
 /** Local-time helper: these tests run under TZ=UTC (set below), so a local
@@ -123,15 +124,19 @@ test('the clocks moving does not move the appointment', () => {
 // MISSION-WEEKLY-DOUBLEFIRE-108: a slot fires exactly once. The scheduler in index.ts fires,
 // stamps lastFiredAt = now, and re-arms with weeklyDelayMs(w, now, now). This drives that
 // loop on a fake clock: the first timer wakes earlyMs before its deadline, later ones on time.
-function drive(w, startMs, lastFiredAt, earlyMs, untilMs) {
+// With `due` (index.ts's weeklyTimerDue check in the timer callback), a wake that is not due
+// re-arms from the current time without firing.
+function drive(w, startMs, lastFiredAt, earlyMs, untilMs, due = weeklyTimerDue) {
   const fires = [];
   let now = startMs;
   let last = lastFiredAt;
   for (let i = 0; i < 20; i++) {
     const d = weeklyDelayMs(w, now, last);
     if (d === null) break;
+    const target = now + d;
     now = now + Math.max(0, d - (i === 0 ? earlyMs : 0));
     if (now > untilMs) break;
+    if (!due(target, now)) continue;
     fires.push(now);
     last = now;
   }
@@ -167,4 +172,40 @@ test('a run well before the slot does not cover it', () => {
   const slot = at(2026, 8, 24, 9, 0);
   assert.equal(weeklyDelayMs(mon9, slot - 3600000, slot - 3600000), 3600000);
   assert.equal(weeklyDelayMs(mon9, slot + 60000, slot - 3600000), 0, 'missed slot still catches up');
+});
+
+test('a wake far before the slot (wall clock drifted or stepped over the delay) re-arms, it does not fire twice', () => {
+  // Jim's SHOULD on 0ff143a4: setTimeout counts monotonic time, slots are wall-clock, and a
+  // weekly delay is days long, so the timer can wake early by any amount the clock moved.
+  const mon9 = { days: [1], minute: 540 };
+  const slot = at(2026, 8, 24, 9, 0);
+  for (const earlyMs of [5001, 14000, 120000, 3600000]) {
+    const fires = drive(mon9, slot - 3 * 86400000, slot - 7 * 86400000, earlyMs, slot + 86400000);
+    assert.deepEqual(fires.map((t) => t - slot), [0], `woke ${earlyMs} ms early`);
+    // Without the timer-callback check (the base index.ts loop) the same wake fires twice.
+    const unguarded = drive(mon9, slot - 3 * 86400000, slot - 7 * 86400000, earlyMs, slot + 86400000, () => true);
+    assert.equal(unguarded.length, 2, `unguarded loop, woke ${earlyMs} ms early`);
+  }
+});
+
+test('the early-fire window edge: exactly 5 s before covers the slot, 5 s + 1 ms does not', () => {
+  const mon9 = { days: [1], minute: 540 };
+  const slot = at(2026, 8, 24, 9, 0);
+  assert.equal(SLOT_EARLY_FIRE_MS, 5000);
+  assert.equal(weeklyDelayMs(mon9, slot - 1, slot - 5000), 7 * 86400000 + 1, 'a fire at slot - 5000 covers it');
+  assert.equal(weeklyDelayMs(mon9, slot - 1, slot - 5001), 1, 'a fire at slot - 5001 does not');
+  assert.equal(weeklyTimerDue(slot, slot - 5000), true);
+  assert.equal(weeklyTimerDue(slot, slot - 5001), false);
+});
+
+test('a clock set back after the slot fired lets the slot fire again (lastFiredAt past it)', () => {
+  // Jim NIT 1: pins the "lastFiredAt < next" half directly.
+  const mon9 = { days: [1], minute: 540 };
+  const slot = at(2026, 8, 24, 9, 0);
+  assert.equal(weeklyDelayMs(mon9, slot - 3600000, slot), 3600000);
+});
+
+test('index.ts checks weeklyTimerDue in the weekly timer callback before it fires', () => {
+  const src = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'src', 'main', 'index.ts'), 'utf8');
+  assert.match(src, /const target = now \+ delay;\s*entry\.timeout = setTimeout\(\(\) => \{\s*if \(!weeklyTimerDue\(target, Date\.now\(\)\)\) \{ rearm\(false\); return; \}\s*fire\(\); rearm\(true\);/);
 });
