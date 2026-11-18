@@ -13,7 +13,9 @@ require('./tools/own-job.cjs');
  *   A3  writeFileBehind publishes under the same held reader.
  *   A4  the rename runs on the pool, not on the main thread: with every pool thread blocked the
  *       call returns a pending promise, the target is unchanged and the loop keeps turning; the
- *       rename lands once the pool is released.
+ *       rename lands once the pool is released. "Keeps turning" is counted in loop turns, not in
+ *       milliseconds (ASYNC-RENAME-A4-TIMER-BOUND-108): a busy machine makes turns slower, never
+ *       fewer. A main thread that waits for the pool never turns; a watchdog thread names that.
  *   A5  fallback: a rejected or missing posixRenameAsync falls back to the plain rename, and the
  *       sync posixRename is never called on the async path.
  *   A6  `commit` is asked before the addon rename, and again before the fallback.
@@ -28,6 +30,7 @@ const fsp = require('node:fs/promises');
 const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
+const { Worker } = require('node:worker_threads');
 const loadTs = require('./load-ts.cjs');
 
 const AJ = loadTs('src/main/atomicJson.ts');
@@ -146,6 +149,43 @@ async function blockPool(t) {
   return { release, stat, statDone: () => statDone };
 }
 
+/** `n` fires of a timer on this thread, however long they take. */
+function loopTurns(n) {
+  return new Promise((resolve) => {
+    let turns = 0;
+    const tick = setInterval(() => { if (++turns >= n) { clearInterval(tick); resolve(turns); } }, 10);
+  });
+}
+
+/** How long the main thread may go without one loop turn before the watchdog ends the file. */
+const MAIN_THREAD_STUCK_MS = 30_000;
+
+/**
+ * A second thread that watches this one. The main thread beats on every loop turn; if no beat
+ * comes for `ms`, the watcher says so and ends the process, because a main thread that waits for
+ * a full pool can never get to an assert (or to the release that would free it).
+ */
+function watchMainThread(t, ms = MAIN_THREAD_STUCK_MS) {
+  const beat = new Int32Array(new SharedArrayBuffer(4));
+  const watcher = new Worker(`
+    const { workerData: { beat, ms } } = require('node:worker_threads');
+    for (;;) {
+      const seen = Atomics.load(beat, 0);
+      if (seen < 0) break;
+      if (Atomics.wait(beat, 0, seen, ms) !== 'timed-out') continue;
+      require('node:fs').writeSync(2, 'A4 THE MAIN THREAD IS STUCK: no loop turn in ' + ms + ' ms while the rename waits for a pool thread. posixRenameAsync did not return, or blocks the loop, with the pool full.\\n');
+      process.kill(process.pid);
+    }`, { eval: true, workerData: { beat, ms } });
+  const pulse = setInterval(() => { Atomics.add(beat, 0, 1); Atomics.notify(beat, 0); }, 10);
+  const stop = async () => {
+    clearInterval(pulse);
+    Atomics.store(beat, 0, -1);
+    Atomics.notify(beat, 0);
+    await watcher.terminate();
+  };
+  t.after(stop);
+}
+
 test('A4 the rename runs on a pool thread: the call returns at once, and nothing happens on the main thread', winOnly, async (t) => {
   const addon = realAddon();
   assert.equal(typeof addon.posixRenameAsync, 'function', 'the addon exports posixRenameAsync');
@@ -153,19 +193,18 @@ test('A4 the rename runs on a pool thread: the call returns at once, and nothing
   const src = path.join(dir, 'state.json.tmp-aaaaaa');
   fs.writeFileSync(src, 'new');
   const pool = await blockPool(t);
+  watchMainThread(t);
 
   let settled = false;
   const pending = addon.posixRenameAsync(src, target).then(() => { settled = true; });
   assert.ok(pending instanceof Promise, 'a promise comes back');
   assert.equal(fs.readFileSync(target, 'utf8'), 'old', 'NOT RENAMED IN THE CALL: the target is unchanged when the call returns');
-  let turns = 0;
-  const ticker = setInterval(() => { turns++; }, 10);
-  await sleep(300);
-  clearInterval(ticker);
+  // THE MAIN THREAD KEEPS TURNING while the rename waits: ten turns pass, and the rename is still parked.
+  assert.equal(await loopTurns(10), 10);
   assert.equal(settled, false, 'the rename waits for a pool thread');
+  assert.equal(pool.statDone(), false, 'the pool is still full, so nothing let the rename through');
   assert.equal(fs.readFileSync(target, 'utf8'), 'old', 'and still has not run on the main thread');
   assert.ok(fs.existsSync(src), 'the source is still in place');
-  assert.ok(turns >= 10, `THE MAIN THREAD KEEPS TURNING while the rename waits (${turns} timer turns in 300 ms)`);
 
   await pool.release();
   await pending;
