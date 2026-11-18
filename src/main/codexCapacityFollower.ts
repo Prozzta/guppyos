@@ -7,7 +7,11 @@
  * them instead, under two cost rules (god, A21/A7):
  *
  *  - it reads ONLY the bytes appended since its stored offset. The first poll of a file reads a
- *    bounded tail (TAIL_BYTES); after that an unchanged file costs one stat and no read.
+ *    bounded tail (FOLLOWER_FIRST_TAIL_BYTES); after that an unchanged file costs one stat and no
+ *    read, and a gap larger than FOLLOWER_MAX_READ_BYTES falls back to that bounded tail.
+ *  - a rollout that cannot be found is not looked for again (a sync directory walk) on every
+ *    beat: the miss is remembered per home and session for FOLLOWER_MISS_RETRY_MS.
+ *  - the account scope (existsSync + realpath) is resolved once per binding, not per poll.
  *  - it is async end to end (injected async stat/read), so the beat never blocks on disk.
  *
  * A partial last line is carried over and completed on a later poll, never parsed as half a line.
@@ -25,6 +29,10 @@ import {
 type Observation = NonNullable<ReturnType<typeof normalizeCodexRateLimits>>;
 
 export const FOLLOWER_FIRST_TAIL_BYTES = 256 * 1024;
+/** One poll never reads more than this: a longer gap (a long stall) restarts from the tail. */
+export const FOLLOWER_MAX_READ_BYTES = FOLLOWER_FIRST_TAIL_BYTES;
+/** After a rollout lookup misses, the same home and session are not looked up again for this long. */
+export const FOLLOWER_MISS_RETRY_MS = 60_000;
 
 export interface CodexCapacityFollowerDeps {
   scopeOf: (codexHome: string) => string;
@@ -38,6 +46,8 @@ export interface CodexCapacityFollowerDeps {
 interface HomeState {
   file: string;
   sessionId: string | undefined;
+  /** The account scope, resolved once when the file is bound. */
+  scope: string;
   offset: number;
   carry: Buffer;
   snapshotRaw: unknown;
@@ -50,6 +60,8 @@ interface HomeState {
 export class CodexCapacityFollower {
   private readonly homes = new Map<string, HomeState>();
   private readonly inflight = new Set<string>();
+  /** A lookup that found no rollout: not repeated before `until` unless the session changes. */
+  private readonly misses = new Map<string, { sessionId: string | undefined; until: number }>();
   private readonly now: () => number;
 
   constructor(private readonly deps: CodexCapacityFollowerDeps) {
@@ -73,7 +85,7 @@ export class CodexCapacityFollower {
     }
   }
 
-  forget(codexHome: string): void { this.homes.delete(codexHome); }
+  forget(codexHome: string): void { this.homes.delete(codexHome); this.misses.delete(codexHome); }
 
   private async pollOnce(codexHome: string, sessionId: string | undefined): Promise<Observation | null> {
     let st = this.homes.get(codexHome);
@@ -83,14 +95,22 @@ export class CodexCapacityFollower {
       try { size = (await this.deps.stat(st.file)).size; } catch { st = undefined; size = -1; }
     } else size = -1;
     if (!st) {
+      const miss = this.misses.get(codexHome);
+      if (miss && miss.sessionId === sessionId && this.now() < miss.until) return null;
       const file = await this.deps.findRollout(codexHome, sessionId);
-      if (!file) { this.homes.delete(codexHome); return null; }
+      if (!file) {
+        this.homes.delete(codexHome);
+        this.misses.set(codexHome, { sessionId, until: this.now() + FOLLOWER_MISS_RETRY_MS });
+        return null;
+      }
+      this.misses.delete(codexHome);
       size = (await this.deps.stat(file)).size;
-      st = { file, sessionId, offset: -1, carry: Buffer.alloc(0), snapshotRaw: null, snapshot: null, hit: null, skipHead: false };
+      st = { file, sessionId, scope: this.deps.scopeOf(codexHome), offset: -1, carry: Buffer.alloc(0), snapshotRaw: null, snapshot: null, hit: null, skipHead: false };
       this.homes.set(codexHome, st);
     }
-    if (st.offset < 0 || size < st.offset) {
-      // A new binding, or the file shrank (replaced): start again from a bounded tail.
+    if (st.offset < 0 || size < st.offset || size - st.offset > FOLLOWER_MAX_READ_BYTES) {
+      // A new binding, the file shrank (replaced), or a gap too long to read in one poll: start
+      // again from a bounded tail.
       st.offset = Math.max(0, size - FOLLOWER_FIRST_TAIL_BYTES);
       st.skipHead = st.offset > 0;
       st.carry = Buffer.alloc(0);
@@ -111,7 +131,7 @@ export class CodexCapacityFollower {
   }
 
   private ingest(codexHome: string, st: HomeState, lines: readonly string[]): Observation | null {
-    const scope = this.deps.scopeOf(codexHome);
+    const scope = st.scope;
     const streamId = `codex-rollout:${st.file}`;
     const receivedAt = this.now();
     let newSnapshot = false;
@@ -121,6 +141,8 @@ export class CodexCapacityFollower {
       if (!line) continue;
       const b = codexTurnBoundary(line);
       if (b) {
+        // A later turn boundary voids the hit here but reports nothing: the follower never lifts a
+        // LIMITED reading itself. Admission refuses while LIMITED; the next snapshot or the reset does.
         if (b.kind === 'hit') { st.hit = b.hit; newHit = true; } else { st.hit = null; newHit = false; }
         continue;
       }

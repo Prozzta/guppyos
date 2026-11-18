@@ -203,6 +203,65 @@ test('Q2b (b) a partial last line is not lost: the follower resumes at its start
   assert.ok(obs && (obs.ordinaryUsageAllowed === false || obs.providerReachedType !== null), 'the completed line is read whole');
 });
 
+const statOf = async (f) => { const s = await fs.promises.stat(f); return { size: s.size, mtimeMs: s.mtimeMs }; };
+const readOf = (reads) => async (f, position, length) => { reads?.push({ position, length }); const b = fs.readFileSync(f); return b.subarray(position, position + length); };
+
+test('Q2d (b) a rollout lookup that misses is not repeated every beat (Jim MUST 2: the walk is sync)', async () => {
+  const F = loadFollower();
+  assert.equal(F.missing, undefined, `src/main/codexCapacityFollower.ts: ${F.missing}`);
+  const clock = { t: HIT };
+  let finds = 0;
+  const follower = new F.CodexCapacityFollower({
+    scopeOf: () => 'scope-x', findRollout: () => { finds++; return null; },
+    stat: statOf, read: readOf(), now: () => clock.t
+  });
+  await follower.poll('home-a', { sessionId: 's1' });
+  await follower.poll('home-a', { sessionId: 's1' });
+  assert.equal(finds, 1, 'two polls on a miss make one lookup');
+  clock.t += F.FOLLOWER_MISS_RETRY_MS - 1;
+  await follower.poll('home-a', { sessionId: 's1' });
+  assert.equal(finds, 1, 'still inside the retry window');
+  await follower.poll('home-a', { sessionId: 's2' });
+  assert.equal(finds, 2, 'a new session is looked up at once');
+  clock.t += F.FOLLOWER_MISS_RETRY_MS;
+  await follower.poll('home-a', { sessionId: 's2' });
+  assert.equal(finds, 3, 'after the window the lookup is retried');
+});
+
+test('Q2e (b) the account scope is resolved once per binding, not per poll (Jim SHOULD 1)', async (t) => {
+  const F = loadFollower();
+  assert.equal(F.missing, undefined, `src/main/codexCapacityFollower.ts: ${F.missing}`);
+  const { home, file } = makeHome(t, [L_PREMIUM]);
+  let scopes = 0;
+  const follower = new F.CodexCapacityFollower({
+    scopeOf: () => { scopes++; return 'scope-x'; }, findRollout: () => file, stat: statOf, read: readOf()
+  });
+  await follower.poll(home);
+  fs.appendFileSync(file, L_CODEX + '\n');
+  assert.ok(await follower.poll(home), 'the new snapshot is reported');
+  fs.appendFileSync(file, L_HIT + '\n');
+  assert.ok(await follower.poll(home), 'the hit is reported');
+  assert.equal(scopes, 1);
+});
+
+test('Q2f (b) a gap longer than the read cap falls back to the bounded tail (Jim NIT 1)', async (t) => {
+  const F = loadFollower();
+  assert.equal(F.missing, undefined, `src/main/codexCapacityFollower.ts: ${F.missing}`);
+  const { home, file } = makeHome(t, [L_PREMIUM]);
+  const reads = [];
+  const follower = new F.CodexCapacityFollower({ scopeOf: () => 'scope-x', findRollout: () => file, stat: statOf, read: readOf(reads) });
+  await follower.poll(home);
+  const pad = JSON.stringify({ timestamp: '2026-10-24T07:00:00.000Z', type: 'event_msg', payload: { type: 'agent_message', message: 'x'.repeat(900) } });
+  const big = [];
+  while (big.length * (pad.length + 1) < 2 * F.FOLLOWER_MAX_READ_BYTES) big.push(pad);
+  fs.appendFileSync(file, big.join('\n') + '\n' + L_CODEX + '\n' + L_PREMIUM + '\n' + L_HIT + '\n');
+  reads.length = 0;
+  const obs = await follower.poll(home);
+  const n = reads.reduce((s, r) => s + r.length, 0);
+  assert.ok(n > 0 && n <= F.FOLLOWER_MAX_READ_BYTES, `one poll reads at most the cap (read ${n})`);
+  assert.ok(obs && obs.providerReachedType !== null && obs.windows.some((w) => w.resetsAt === RESET), 'the tail still carries the hit and its snapshot');
+});
+
 /** The real coordinator + bridge, as falseactive-rollout builds it. */
 function floor({ probe, refused = () => false }) {
   const coordinator = new WorkerWakeWatchdog();
