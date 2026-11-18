@@ -19,7 +19,9 @@ require('./tools/own-job.cjs');
  *       reader opened, the read settled in one chunk, and the probe never saw EPERM (R2 red once
  *       in a full suite: "the reader must be holding the file open"). The probe body is the old
  *       file's own bytes (copied from a kept original), so a probe that lands first leaves the reader
- *       the same big file.
+ *       the same big file. R0 forces that race with a gate (poolGate) that holds the reader's open
+ *       until the first probe has landed, so a main thread stalled under load cannot miss it
+ *       (REGISTRY-EPERM-R0-PRECOND-108).
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -30,7 +32,7 @@ const loadTs = require('./load-ts.cjs');
 
 const AJ = loadTs('src/main/atomicJson.ts');
 const win = process.platform === 'win32';
-const crypto = require('node:crypto');
+const net = require('node:net');
 const turn = () => new Promise((r) => setImmediate(r));
 
 function bigTarget(t, tag) {
@@ -64,19 +66,47 @@ async function untilHeldOpen(dir, target, reading, orig, stats = {}) {
       throw e;
     }
     stats.landed++;
+    if (stats.landed === 1 && stats.onFirstLanded) await stats.onFirstLanded();
     await turn();
   }
   return false;
 }
 
-/** Occupy every libuv pool thread for about `ms`, so the next fs.promises open queues behind them. */
-function busyPool(ms) {
+/**
+ * REGISTRY-EPERM-R0-PRECOND-108: hold every libuv pool thread until release(), so the next
+ * fs.promises open queues behind them for as long as the test needs, whatever the load. (A timed
+ * busy pool let the open run first when the main thread was off the CPU past the pool's time.)
+ * Each held thread is a blocking read on a named-pipe client; the server end, on this event loop,
+ * writes one byte to each on release(). The pool queue is FIFO, so any work queued after the
+ * held reads waits too.
+ */
+async function poolGate(t) {
   const n = Number(process.env.UV_THREADPOOL_SIZE) || 4;
-  const t0 = process.hrtime.bigint();
-  crypto.pbkdf2Sync('k', 's', 20_000, 32, 'sha512');
-  const per = Math.max(1, Number(process.hrtime.bigint() - t0) / 1e6);
-  const iterations = Math.ceil(20_000 * ms / per);
-  return Promise.all(Array.from({ length: n }, () => new Promise((r) => crypto.pbkdf2('k', 's', iterations, 32, 'sha512', r))));
+  const name = `\\\\.\\pipe\\guppy-r0gate-${process.pid}-${Date.now()}`;
+  const conns = [];
+  const server = net.createServer((c) => conns.push(c));
+  await new Promise((r) => server.listen(name, r));
+  const handles = [];
+  t.after(async () => {
+    for (const c of conns) c.destroy();
+    for (const h of handles) await h.close().catch(() => {});
+    await new Promise((r) => server.close(r));
+  });
+  for (let i = 0; i < n; i++) handles.push(await fs.promises.open(name, 'r+'));
+  while (conns.length < n) await turn();
+  const reads = handles.map((h) => new Promise((resolve, reject) => {
+    fs.read(h.fd, Buffer.alloc(1), 0, 1, null, (e, bytes) => (e ? reject(e) : resolve(bytes)));
+  }));
+  let released = false;
+  return {
+    /** Let the held pool threads go; the queued open runs after them. */
+    async release() {
+      if (released) return;
+      released = true;
+      for (const c of conns) c.write('g');
+      assert.deepEqual(await Promise.all(reads), handles.map(() => 1), 'every held pool read got its byte');
+    }
+  };
 }
 
 /**
@@ -96,16 +126,17 @@ for (const stallMs of [0, 400]) {
     t.after(() => AJ.__setRenameAddonForTest(undefined));
     AJ.__setRenameAddonForTest(null);
     const { dir, target, old, orig } = bigTarget(t, stallMs ? 'r0s' : 'r0');
-    const pool = busyPool(150);
+    const gate = await poolGate(t);
     const reading = AJ.readFileTracked(target, 'utf8');
     if (stallMs) stallMainThread(stallMs);
-    const stats = {};
-    const held = await untilHeldOpen(dir, target, reading, orig, stats);
+    // The open stays queued behind the gate until the first probe has replaced the target.
+    const stats = { onFirstLanded: () => gate.release() };
+    let held;
+    try { held = await untilHeldOpen(dir, target, reading, orig, stats); } finally { await gate.release(); }
     assert.ok(stats.landed >= 1, 'the open was delayed past the first probe (the race was hit)');
     assert.equal(held, true, 'the reader must be holding the file open (plain rename EPERM)');
     const seen = await reading;
     assert.equal(seen.length, old.length, 'the reader read the big file, not a probe body');
-    await pool;
   });
 }
 
