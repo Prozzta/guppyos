@@ -97,6 +97,8 @@ async function poolGate(t) {
   const reads = handles.map((h) => new Promise((resolve, reject) => {
     fs.read(h.fd, Buffer.alloc(1), 0, 1, null, (e, bytes) => (e ? reject(e) : resolve(bytes)));
   }));
+  // If the test fails before release(), t.after's destroy rejects these; keep the first error the one reported.
+  for (const r of reads) r.catch(() => {});
   let released = false;
   return {
     /** Let the held pool threads go; the queued open runs after them. */
