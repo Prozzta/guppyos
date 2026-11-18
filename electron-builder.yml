@@ -154,7 +154,8 @@ extraResources:
   # FS-CONTAINMENT-TOCTOU: the handle-check addon (N-API, Electron headers), built by
   # tools/build-fs-handle.cjs in postinstall. A .node cannot load from inside the asar, so it ships
   # beside it; src/main/fs.ts loads it from <resources>/fs-handle and refuses all confined file
-  # access if it is missing. Linux needs no addon (it reads /proc/self/fd), so its folder is empty.
+  # access if it is missing. It is also the link-safe tree delete (removeTree,
+  # FS-REMOVE-READDIR-GAP-108) on every platform, Linux included; without it no folder is deleted.
   - from: resources/fs-handle/bin
     to: fs-handle
     filter:

@@ -243,22 +243,6 @@ function archiveMd(src, dest, ops) {
   return n;
 }
 
-/** Remove every link under `dir` as a LINK (a junction is a directory link on Windows). */
-function removeLinks(dir, ops) {
-  let n = 0; const stack = [dir];
-  while (stack.length) {
-    const d = stack.pop();
-    let names = []; try { names = ops.readdirSync(d); } catch { continue; }
-    for (const nm of names) {
-      const c = path.join(d, nm);
-      let st; try { st = ops.lstatSync(c); } catch { continue; }
-      if (st.isSymbolicLink()) { try { ops.unlinkSync(c); } catch { ops.rmdirSync(c); } n++; }
-      else if (st.isDirectory()) stack.push(c);
-    }
-  }
-  return n;
-}
-
 const RETRY_CODES = new Set(['EBUSY', 'ENOTEMPTY', 'EPERM', 'EACCES', 'EMFILE', 'ENFILE']);
 function pause(ms) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }
 /** `fn`, tried again twice (100 ms, 200 ms) on the codes a busy Windows folder gives; then it throws. */
@@ -268,38 +252,105 @@ function retrying(fn) {
   }
 }
 
-/**
- * Delete the tree at `p` WITHOUT ever following a link (ELECTRON-RMSYNC-REAPER-108).
+/*
+ * Deleting a tree WITHOUT ever following a link (ELECTRON-RMSYNC-REAPER-108, FS-REMOVE-READDIR-GAP-108).
  * Agents run this script through $HIVE_NODE or the shim, which is Electron as Node, and Electron's
  * recursive fs.rmSync deletes THROUGH a Windows junction: it empties the folder the link points at
- * (measured on 45.3.0; RUNTIME PIN in test/electron-rmsync-link-safe.test.cjs). So there is no
- * recursive rm here: every entry is lstat'ed, a link is removed as a link, a folder is emptied and
- * then removed, a file is unlinked. removeLinks() still runs first (it counts the links); this
- * walk does not depend on it. Plain CommonJS on purpose: the script cannot import src/main.
+ * (measured on 45.3.0; RUNTIME PIN in test/electron-rmsync-link-safe.test.cjs). A walk of lstat,
+ * readdir, unlink and rmdir on paths is not safe either: a link put where a folder was between two
+ * of those calls is followed (1 loss in 26,571 jittered runs). So the delete is the fs-handle
+ * addon's removeTree (resources/fs-handle/guppy-fs-handle.c): each folder is opened once without
+ * following a link and is listed and emptied through that handle; a read-only file is handled
+ * there, and a folder that refills while it is removed is paused on and walked again, the same as
+ * in src/main/fsSafeRemove.ts. It returns how many links it removed.
+ * There is NO JS walk to fall back to. Without the addon a tree is kept: result 'refused', one
+ * line per tree, and a count in the summary. Plain CommonJS on purpose: the script cannot import
+ * src/main.
  */
-function removeTree(p, ops) {
-  const st = ops.lstatSync(p);
-  if (st.isSymbolicLink()) { try { ops.unlinkSync(p); } catch { ops.rmdirSync(p); } return; }
-  if (st.isDirectory()) {
-    for (const nm of ops.readdirSync(p)) removeTree(path.join(p, nm), ops);
-    retrying(() => ops.rmdirSync(p));
-    return;
-  }
-  retrying(() => {
-    try { ops.unlinkSync(p); } catch (err) {
-      if (!err || (err.code !== 'EPERM' && err.code !== 'EACCES')) throw err;
-      ops.chmodSync(p, 0o666); ops.unlinkSync(p);   // a read-only file (git objects are)
-    }
-  });
+/** The removeTree contract this file was written against. An addon that reports another is not used. */
+const REMOVE_TREE_API = 1;
+const ADDON_NAME = 'guppy_fs_handle.node';
+
+/**
+ * Where a build of the fs-handle addon can be, best first: this tree's own build, then the app
+ * this runs under (Electron as Node) and an installed Guppy, so a worktree with no native build
+ * still gets a real remover.
+ */
+function removerCandidates(env = process.env) {
+  const out = [path.join(__dirname, '..', 'resources', 'fs-handle', 'bin', ADDON_NAME)];
+  if (process.resourcesPath) out.push(path.join(process.resourcesPath, 'fs-handle', ADDON_NAME));
+  out.push(path.join(path.dirname(process.execPath), 'resources', 'fs-handle', ADDON_NAME));
+  if (env.GUPPY_PACKAGED_EXE) out.push(path.join(path.dirname(env.GUPPY_PACKAGED_EXE), 'resources', 'fs-handle', ADDON_NAME));
+  if (process.platform === 'win32' && env.LOCALAPPDATA) out.push(path.join(env.LOCALAPPDATA, 'Programs', 'Guppy', 'resources', 'fs-handle', ADDON_NAME));
+  if (process.platform === 'darwin') out.push(path.join('/Applications', 'Guppy.app', 'Contents', 'Resources', 'fs-handle', ADDON_NAME));
+  return [...new Set(out)];
 }
 
-function applyReap(plan, { root, repos = [], now = Date.now(), ops = fs, prune = (r) => gitOk(r, ['worktree', 'prune']), exes = runningExes } = {}) {
+function openAddon(file) {
+  const mod = { exports: {} };
+  process.dlopen(mod, file);
+  return mod.exports;
+}
+
+/**
+ * Load the first candidate that is there AND reports this file's removeTree contract. A build from
+ * before removeTree, or with another contract, is passed over and named in the reason: an old
+ * .node is refused, not trusted. Returns { removeTree, from } or { removeTree: null, reason }.
+ */
+function loadRemover(candidates = removerCandidates(), open = openAddon) {
+  const why = [];
+  for (const file of candidates) {
+    if (!fs.existsSync(file)) continue;
+    try {
+      const a = open(file);
+      if (a.removeTreeApi === REMOVE_TREE_API && typeof a.removeTree === 'function') return { removeTree: (p) => a.removeTree(path.toNamespacedPath(path.resolve(p))), from: file };
+      why.push(`${file}: removeTree contract ${String(a.removeTreeApi)}, need ${REMOVE_TREE_API}`);
+    } catch (err) {
+      why.push(`${file}: ${err.message}`);
+    }
+  }
+  return { removeTree: null, reason: why.length ? why.join('; ') : `no ${ADDON_NAME} build found` };
+}
+
+/**
+ * Remove the top-level entry `p` as what it is NOW: a link as a link, a file as a file, and a real
+ * folder with the addon (which itself refuses a root that is a link or a file, so a swap between
+ * this lstat and the delete is refused, not followed). Returns the number of links removed.
+ */
+function removeEntry(p, ops, remover) {
+  const st = ops.lstatSync(p);
+  if (st.isSymbolicLink()) { try { ops.unlinkSync(p); } catch { ops.rmdirSync(p); } return 1; }
+  if (!st.isDirectory()) {
+    retrying(() => {
+      try { ops.unlinkSync(p); } catch (err) {
+        if (!err || (err.code !== 'EPERM' && err.code !== 'EACCES')) throw err;
+        ops.chmodSync(p, 0o666); ops.unlinkSync(p);   // a read-only file
+      }
+    });
+    return 0;
+  }
+  const rm = remover();
+  if (!rm.removeTree) throw Object.assign(new Error(`addon unavailable: ${rm.reason}`), { code: 'EREMOVER_UNAVAILABLE' });
+  let links = 0;
+  // A busy folder (EBUSY and the like) is tried again: the delete picks up where it stopped.
+  retrying(() => { try { links += rm.removeTree(p); } catch (err) { links += (err && err.links) || 0; throw err; } });
+  return links;
+}
+
+function applyReap(plan, { root, repos = [], now = Date.now(), ops = fs, prune = (r) => gitOk(r, ['worktree', 'prune']), exes = runningExes, remover = null } = {}) {
   const results = [];
+  let rm = remover;   // loaded on the first tree that needs it
   const running = plan.some((e) => e.action === 'reap') ? exes() : [];   // re-listed: an app may have started since the plan
   for (const e of plan) {
     if (e.action !== 'reap') continue;
     const exe = running.find((x) => inside(x, e.path));
     if (exe) { results.push({ name: e.name, result: 'in-use', error: `running-exe ${exe}` }); continue; }
+    let isTree = false; try { const st = ops.lstatSync(e.path); isTree = st.isDirectory() && !st.isSymbolicLink(); } catch { /* the rename below reports it */ }
+    if (isTree) {   // a real folder needs the link-safe remover; a file or a link is one unlink
+      if (!rm) rm = loadRemover();
+      // Refused BEFORE the rename and the archive: the entry is left exactly as it was.
+      if (!rm.removeTree) { results.push({ name: e.name, result: 'refused', error: `addon unavailable: ${rm.reason}` }); continue; }
+    }
     const tomb = TOMBSTONE.test(e.path) ? e.path : `${e.path}.reaping-${now}`;
     try { if (tomb !== e.path) ops.renameSync(e.path, tomb); } catch (err) { results.push({ name: e.name, result: 'in-use', error: err.code || String(err) }); continue; }
     let md = 0; let links = 0;
@@ -312,8 +363,7 @@ function applyReap(plan, { root, repos = [], now = Date.now(), ops = fs, prune =
           ops.mkdirSync(path.dirname(to), { recursive: true }); ops.copyFileSync(path.join(tomb, rel), to); md++;
         }
       } else md = archiveMd(tomb, dest, ops);
-      links = removeLinks(tomb, ops);
-      removeTree(tomb, ops);
+      links = removeEntry(tomb, ops, () => (rm = rm || loadRemover()));
       results.push({ name: e.name, result: 'deleted', md, links });
     } catch (err) {
       results.push({ name: e.name, result: 'partial', md, links, error: err.code || String(err) });
@@ -352,18 +402,20 @@ function main(argv, out = (s) => process.stdout.write(s + '\n'), opts = {}) {
   const o = parseArgs(argv);
   const facts = collectFacts({ root: o.root, repos: o.repos, now: o.now, shipped: o.shipped, ...(opts.exes ? { exes: opts.exes() } : {}) });
   const plan = planReap(facts, { keep: o.keep, protect: o.protect });
-  const results = o.apply ? applyReap(plan, { root: o.root, repos: o.repos, now: o.now, ...(opts.exes ? { exes: opts.exes } : {}) }) : null;
-  if (o.json) out(JSON.stringify({ shipped: facts.shipped, plan: plan.map(({ name, kind, version, action, reason }) => ({ name, kind, version, action, reason })), results }, null, 2));
+  const results = o.apply ? applyReap(plan, { root: o.root, repos: o.repos, now: o.now, ...(opts.exes ? { exes: opts.exes } : {}), ...(opts.remover ? { remover: opts.remover } : {}) }) : null;
+  if (o.json) out(JSON.stringify({ shipped: facts.shipped, plan: plan.map(({ name, kind, version, action, reason }) => ({ name, kind, version, action, reason })), results, refused: results ? results.filter((r) => r.result === 'refused').length : 0 }, null, 2));
   else {
     out(`${o.apply ? 'APPLY' : 'DRY RUN (nothing deleted; --apply to reap)'}: shipped ${facts.shipped.slice(0, 3).map((v) => '1.1.' + v).join(', ')}`);
     for (const r of plan) out(`${r.action.toUpperCase()}\t${r.reason}\t${r.kind}\t${r.name}`);
     if (results) for (const r of results) out(`RESULT\t${r.result}\t${r.name}${r.error ? '\t' + r.error : ''}`);
+    const refused = results ? results.filter((r) => r.result === 'refused').length : 0;
+    if (refused) out(`${refused} refused (addon unavailable): these trees are KEPT and still use the disk; build the addon (node tools/build-fs-handle.cjs) and run again`);
     out(`${plan.filter((r) => r.action === 'reap').length} to reap, ${plan.filter((r) => r.action === 'keep').length} kept`);
   }
-  return { plan, results };
+  return { plan, results, refused: results ? results.filter((r) => r.result === 'refused').length : 0 };
 }
 
-module.exports = { parseVersion, shippedVersions, shippedTags, runningExes, isBare, planReap, collectFacts, applyReap, archiveMd, removeLinks, removeTree, main, DAY_MS, DEFAULT_KEEP, ARCHIVE_DIR };
+module.exports = { parseVersion, shippedVersions, shippedTags, runningExes, isBare, planReap, collectFacts, applyReap, archiveMd, removerCandidates, loadRemover, REMOVE_TREE_API, main, DAY_MS, DEFAULT_KEEP, ARCHIVE_DIR };
 
 if (require.main === module) {
   try { main(process.argv.slice(2)); } catch (e) { process.stderr.write(`${e.message}\n`); process.exit(2); }

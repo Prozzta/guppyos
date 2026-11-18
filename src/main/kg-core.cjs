@@ -333,19 +333,72 @@ function getDoc(kgRoot, docId) {
   return { meta, text };
 }
 
+/** The removeTree contract this file was written against. An addon that reports another is not used. */
+const REMOVE_TREE_API = 1;
+const ADDON_NAME = 'guppy_fs_handle.node';
+
+/**
+ * Where a build of the fs-handle addon can be, best first: next to this file (packaged: both sit
+ * in the app's resources), this source tree's own build, then the app this runs under and an
+ * installed Guppy.
+ */
+function removerCandidates(env = process.env) {
+  const out = [path.join(__dirname, 'fs-handle', ADDON_NAME), path.join(__dirname, '..', '..', 'resources', 'fs-handle', 'bin', ADDON_NAME)];
+  if (process.resourcesPath) out.push(path.join(process.resourcesPath, 'fs-handle', ADDON_NAME));
+  out.push(path.join(path.dirname(process.execPath), 'resources', 'fs-handle', ADDON_NAME));
+  if (env.GUPPY_PACKAGED_EXE) out.push(path.join(path.dirname(env.GUPPY_PACKAGED_EXE), 'resources', 'fs-handle', ADDON_NAME));
+  if (process.platform === 'win32' && env.LOCALAPPDATA) out.push(path.join(env.LOCALAPPDATA, 'Programs', 'Guppy', 'resources', 'fs-handle', ADDON_NAME));
+  if (process.platform === 'darwin') out.push(path.join('/Applications', 'Guppy.app', 'Contents', 'Resources', 'fs-handle', ADDON_NAME));
+  return [...new Set(out)];
+}
+
+function openAddon(file) {
+  const mod = { exports: {} };
+  process.dlopen(mod, file);
+  return mod.exports;
+}
+
+/**
+ * Load the first candidate that is there AND reports this file's removeTree contract. A build from
+ * before removeTree, or with another contract, is passed over and named in the reason: an old
+ * .node is refused, not trusted. Returns { removeTree, from } or { removeTree: null, reason }.
+ */
+function loadRemover(candidates = removerCandidates(), open = openAddon) {
+  const why = [];
+  for (const file of candidates) {
+    if (!fs.existsSync(file)) continue;
+    try {
+      const a = open(file);
+      if (a.removeTreeApi === REMOVE_TREE_API && typeof a.removeTree === 'function') return { removeTree: (p) => a.removeTree(path.toNamespacedPath(path.resolve(p))), from: file };
+      why.push(`${file}: removeTree contract ${String(a.removeTreeApi)}, need ${REMOVE_TREE_API}`);
+    } catch (err) {
+      why.push(`${file}: ${err.message}`);
+    }
+  }
+  return { removeTree: null, reason: why.length ? why.join('; ') : `no ${ADDON_NAME} build found` };
+}
+
 /**
  * Remove a doc folder with no recursive remove: under Electron that deletes through a junction
- * (ELECTRON-RMSYNC-AGENT-WRITABLE-108). This file ships as plain CommonJS for the kg CLI, so it
- * cannot use src/main/linkSafeRemove.ts. Every entry is removed as what it is: a link (in place of
- * the folder, or inside it) as a link, a file as a file, a folder only once it is empty.
+ * (ELECTRON-RMSYNC-AGENT-WRITABLE-108), and a JS walk of lstat, readdir and unlink on paths can be
+ * made to follow a link that appears between two of its calls (FS-REMOVE-READDIR-GAP-108). This
+ * file ships as plain CommonJS for the kg CLI, so it cannot use src/main/linkSafeRemove.ts.
+ * A link in place of the folder is removed as a link, a file as a file. A real folder goes to the
+ * fs-handle addon's removeTree, which opens each folder once without following a link and empties
+ * it through that handle. There is no JS walk to fall back to: without the addon the folder is
+ * kept, with one line saying so, and the error is thrown.
  */
 function removeDocDir(p) {
   const st = fs.lstatSync(p);
   if (st.isSymbolicLink()) {
     try { fs.rmdirSync(p); } catch { fs.unlinkSync(p); }
   } else if (st.isDirectory()) {
-    for (const name of fs.readdirSync(p)) removeDocDir(path.join(p, name));
-    fs.rmdirSync(p);
+    const rm = loadRemover();
+    if (!rm.removeTree) {
+      process.stderr.write(`[kg] REFUSED to remove ${p}: the link-safe remover (fs-handle addon) is unavailable: ${rm.reason}\n`);
+      throw Object.assign(new Error(`refused: link-safe remover unavailable (${rm.reason})`), { code: 'EREMOVER_UNAVAILABLE', path: p });
+    }
+    rm.removeTree(p);   // a link there by now is refused by the addon, not followed
   } else {
     fs.unlinkSync(p);
   }
