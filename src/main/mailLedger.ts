@@ -1771,16 +1771,17 @@ export class MailLedger {
 
   /**
    * N1 (§11.17): the surfacing evidence reader failed twice in a row for these ids, so they were
-   * confirmed on the latency rule alone. Logs `mail-evidence-missing` and raises a UI notice
+   * confirmed on the latency rule alone; or, over http/mcp (MAIL-POSITIVE-RECEIPT,
+   * `confirmed` false), were NOT confirmed and will be re-surfaced. Logs `mail-evidence-missing` and raises a UI notice
    * through the `hive:integrity` banner (once per agent per session; the row is per call).
    */
-  noteEvidenceMissing(agentId: string, ids: string[], epoch: string, evidence: string): void {
+  noteEvidenceMissing(agentId: string, ids: string[], epoch: string, evidence: string, confirmed = true): void {
     if (!ids.length) return;
-    this.log({ kind: 'mail-evidence-missing', agentId, ids, epoch, evidence });
+    this.log({ kind: 'mail-evidence-missing', agentId, ids, epoch, evidence, confirmed });
     if (this.notices.has(agentId)) return;
     this.notices.set(agentId, {
       file: `state/mail/${agentId}.json`, quarantine: null, error: 'mail-evidence-missing',
-      notice: `Mail delivery evidence for ${agentId} could not be found in its ${evidence === 'codex-rollout' ? 'Codex rollout' : 'session transcript'}; messages were confirmed by hook timing instead. The transcript reader may need updating (see mail-evidence-missing in the log).`
+      notice: `Mail delivery evidence for ${agentId} could not be found in its ${evidence === 'codex-rollout' ? 'Codex rollout' : 'session transcript'}; ${confirmed ? 'messages were confirmed by hook timing instead' : 'those messages stay unconfirmed and are shown to it again, marked re-delivered, until it is found'}. The transcript reader may need updating (see mail-evidence-missing in the log).`
     });
   }
 

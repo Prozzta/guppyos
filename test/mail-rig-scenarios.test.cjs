@@ -237,18 +237,32 @@ test('SCENARIO hooks-shim stub (gemini, legacy-read at release): the <inbox-upda
 
 // ——————————————————————————————————————————————————————————————————————— N1-N4 (§11.17)
 
-test('N1 the unconfirmed re-surface loop is bounded: context DISCARDED (no transcript evidence) -> after 2 unconfirmed surfacings, latency-fallback + mail-evidence-missing + UI notice', T, async (t) => {
+// MAIL-POSITIVE-RECEIPT (1.1.108): the rig's Claude posts its hooks over http, where latency alone
+// no longer confirms (test/mail-positive-receipt-108.test.cjs). Before: the third surfacing was
+// confirmed by `latency-fallback` and the mail acted, unseen. Now it is never acted without
+// evidence; the loop is paced by the F4 backoff instead of ended by a guess.
+const stillPending = async (rig, agentId, id, n) => { const e = await rig.entry(agentId, id); return e?.state === 'delivered' && e.unconfirmedSurfacings >= n; };
+const exhaustedRow = async (rig, agentId, id) => (await rig.call('diags', {})).find((d) => d.agentId === agentId && d.stage === 'wake-ids-exhausted' && (d.idList || []).includes(id));
+
+test('N1 over http, the unconfirmed re-surface loop is paced, never ended by a guess: context DISCARDED (no transcript evidence) -> the third surfacing is NOT confirmed by latency; mail-evidence-missing (confirmed:false) + UI notice, the mail stays pending and its next offer waits out the F4 backoff', T, async (t) => {
   const rig = await startRig(t);
   await rig.setup([{ id: 'cl-1', flavour: 'claude', scenario: { hookMode: 'discard' } }]);
   const m = await rig.call('send', { to: 'cl-1', subject: 'n1', body: 'evidence never appears' });
-  await rig.beatUntil(() => acted(rig, 'cl-1', m.id), { what: 'acted by the fallback' });
+  await rig.beatUntil(() => stillPending(rig, 'cl-1', m.id, 3), { what: 'a third surfacing, closed unconfirmed' });
   const e = await rig.entry('cl-1', m.id);
-  assert.equal(e.confirmMethod, 'latency-fallback');
-  assert.equal(e.surfaceCount, 3, 'two unconfirmed surfacings, then the fallback one');
-  assert.equal((await rig.rows('mail-surface-unconfirmed')).filter((r) => r.ids.includes(m.id)).length, 2);
-  assert.equal((await rig.rows('mail-evidence-missing')).length, 1);
-  assert.ok((await rig.call('integrity')).some((i) => i.notice), 'the UI alert');
-  assert.equal(rig.contexts('cl-1').filter((c) => c.ids.includes(m.id)).length, 3, 'the loop stopped at 3');
+  assert.deepEqual({ state: e.state, method: e.confirmMethod }, { state: 'delivered', method: undefined }, 'never confirmed, never acted');
+  assert.ok(e.surfaceCount >= 3, 'two unconfirmed surfacings, then the one the fallback used to confirm');
+  assert.ok((await rig.rows('mail-surface-unconfirmed')).filter((r) => r.ids.includes(m.id)).length >= 3);
+  const missing = (await rig.rows('mail-evidence-missing')).filter((r) => r.ids.includes(m.id));
+  assert.ok(missing.length >= 1, 'the missing evidence is logged');
+  assert.ok(missing.every((r) => r.confirmed === false), 'and no row says the mail was confirmed');
+  assert.ok((await rig.call('integrity')).some((i) => /stay unconfirmed and are shown to it again/.test(i.notice || '')), 'the UI alert');
+  const shown = rig.contexts('cl-1').filter((c) => c.ids.includes(m.id));
+  assert.ok(shown.length >= 3 && shown.slice(1).every((c) => String(c.context).includes(REDELIVERED)), 'every showing after the first carries the re-delivered marker');
+  // PACED: with the one N1 re-offer spent, the next offer is the F4 backoff's.
+  const ex = await waitFor(() => exhaustedRow(rig, 'cl-1', m.id), { what: 'the id handed to the F4 backoff' });
+  assert.ok(ex.retryInMs >= 300_000, `the next offer waits (${ex.retryInMs} ms)`);
+  assert.equal(await acted(rig, 'cl-1', m.id), false);
 });
 
 test('N1 + WAKE GENERATIONS (layer-b dry run #2): a beat DURING each unconfirmed surfacing (reconcile drops the id from the delivered set) and EVERY re-announcement is still TYPED under a new request id, never replayed', T, async (t) => {
@@ -257,7 +271,7 @@ test('N1 + WAKE GENERATIONS (layer-b dry run #2): a beat DURING each unconfirmed
   // (and its reconcile against the LEDGER's delivered set, which no longer holds the surfacing id)
   // runs INSIDE the surfacing, exactly as in the packaged dry run.
   await rig.setup([{ id: 'cl-1', flavour: 'claude', scenario: { hookMode: 'discard', manualTurns: true } }]);
-  const m = await rig.call('send', { to: 'cl-1', subject: 'n1-gen', body: 'context is discarded: surfaced twice unconfirmed, then the fallback' });
+  const m = await rig.call('send', { to: 'cl-1', subject: 'n1-gen', body: 'context is discarded: surfaced three times, never confirmed' });
   const typed = () => rig.prompts('cl-1').filter((p) => String(p.text || '').includes(m.id)).length;
   const surfacing = async () => ['surfacing', 'surfaced'].includes((await rig.entry('cl-1', m.id)).state);
   for (let n = 1; n <= 3; n++) {
@@ -265,11 +279,11 @@ test('N1 + WAKE GENERATIONS (layer-b dry run #2): a beat DURING each unconfirmed
     await rig.beat();                 // a reconcile while the id is surfacing (not delivered)
     await sleep(300);
     rig.cue('cl-1', { cue: 'stop' });
-    if (n < 3) await waitFor(async () => (await rig.entry('cl-1', m.id)).state === 'delivered', { what: `surfacing ${n} unconfirmed -> back to delivered` });
+    await waitFor(() => stillPending(rig, 'cl-1', m.id, n), { what: `surfacing ${n} unconfirmed -> back to delivered` });
   }
-  await waitFor(() => acted(rig, 'cl-1', m.id), { what: 'acted after the fallback surfacing' });
+  // MAIL-POSITIVE-RECEIPT: the third surfacing (http) is not confirmed by latency either.
   const e = await rig.entry('cl-1', m.id);
-  assert.equal(e.confirmMethod, 'latency-fallback');
+  assert.deepEqual({ state: e.state, method: e.confirmMethod, n: e.unconfirmedSurfacings }, { state: 'delivered', method: undefined, n: 3 });
   assert.equal(e.surfaceCount, 3);
   assert.equal(typed(), 3, 'three announcements TYPED into the agent');
   const outs = (await rig.call('outcomes')).filter((o) => o.agentId === 'cl-1' && o.requestId.startsWith('inbox-wake:') && o.outcome.kind === 'COMMITTED');
@@ -278,25 +292,28 @@ test('N1 + WAKE GENERATIONS (layer-b dry run #2): a beat DURING each unconfirmed
   assert.equal(new Set(outs.map((o) => o.requestId)).size, 3);
 });
 
-test('N1 BUDGET (layer-b dry run #4): an idle agent whose surfacing evidence never appears reaches acted via latency-fallback in SECONDS, event-driven after one kick beat: no simulated time, no 5-minute F4 wait', T, async (t) => {
+test('N1 BUDGET (layer-b dry run #4): an idle agent whose surfacing evidence never appears reaches its N1 re-offer (third surfacing) in SECONDS, event-driven after one kick beat: no simulated time, no 5-minute F4 wait before it; over http that surfacing is not confirmed and only THEN does the id go to the F4 backoff', T, async (t) => {
   const rig = await startRig(t);
   await rig.setup([{ id: 'cl-1', flavour: 'claude', scenario: { hookMode: 'discard' } }]);
   const clock0 = await rig.call('advance', { ms: 0 });
-  const m = await rig.call('send', { to: 'cl-1', subject: 'n1-budget', body: 'no transcript evidence: two unconfirmed surfacings, then the latency fallback' });
+  const m = await rig.call('send', { to: 'cl-1', subject: 'n1-budget', body: 'no transcript evidence: two unconfirmed surfacings, then the N1 re-offer' });
   // ONE beat at the same simulated instant starts the first wake (an idle agent's delivery wake
   // needs the beat's idle reading); after that no beat and no advance: only the Stop-driven
   // re-offers may move it.
   await rig.beat();
   // Before the fix the second unconfirmed surfacing spent the once-budget and the confirming
   // third surfacing waited out the F4 backoff (300 s): this never held.
-  await waitFor(() => acted(rig, 'cl-1', m.id), { what: 'acted by the N1 fallback, event-driven', timeoutMs: 30_000 });
+  await waitFor(() => stillPending(rig, 'cl-1', m.id, 3), { what: 'the third surfacing (the N1 re-offer), event-driven, closed unconfirmed', timeoutMs: 30_000 });
+  await waitFor(() => exhaustedRow(rig, 'cl-1', m.id), { what: 'the id handed to the F4 backoff after its third surfacing', timeoutMs: 30_000 });
   const e = await rig.entry('cl-1', m.id);
-  assert.equal(e.confirmMethod, 'latency-fallback');
-  assert.equal(e.surfaceCount, 3, 'two unconfirmed surfacings, then the confirming one');
+  assert.deepEqual({ state: e.state, method: e.confirmMethod }, { state: 'delivered', method: undefined }, 'MAIL-POSITIVE-RECEIPT: not confirmed by latency over http');
+  assert.equal(e.surfaceCount, 3, 'two unconfirmed surfacings, then the N1 re-offer; no fourth without the clock');
   assert.equal(await rig.call('advance', { ms: 0 }), clock0, 'the simulated clock never moved');
   const wake = (await rig.call('diags', {})).filter((d) => d.agentId === 'cl-1');
-  assert.ok(wake.some((r) => r.stage === 'wake-repend' && Array.isArray(r.n1) && r.n1.includes(m.id)), 'the N1 re-offer is logged');
-  assert.ok(!wake.some((r) => r.stage === 'wake-ids-exhausted' && (r.idList || []).includes(m.id)), 'never sent to the F4 backoff');
+  const n1At = wake.findIndex((r) => r.stage === 'wake-repend' && Array.isArray(r.n1) && r.n1.includes(m.id));
+  const exAt = wake.findIndex((r) => r.stage === 'wake-ids-exhausted' && (r.idList || []).includes(m.id));
+  assert.ok(n1At >= 0, 'the N1 re-offer is logged');
+  assert.ok(exAt > n1At, 'the F4 backoff comes only after the N1 re-offer was spent, never before the third surfacing');
 });
 
 test('P1 rig (dry #6 order, ON HOLD): the owner\'s COMMITTED lands AFTER the fast turn\'s Stop; the agent is not wedged, the next mail is acted without simulated time', T, async (t) => {

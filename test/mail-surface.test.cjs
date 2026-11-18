@@ -729,7 +729,9 @@ test('§11.1 evidence (Codex): the rollout\'s developer-role input with the mark
   assert.equal(f.entryOf('cx-1', m.id).state, 'surfaced');
 });
 
-test('N1: after 2 consecutive unconfirmed surfacings an id is confirmed by latency alone (`latency-fallback`), logged mail-evidence-missing, with a UI notice; over real HTTP', async (t) => {
+// MAIL-POSITIVE-RECEIPT (1.1.108): over http the server's latency cannot see a stall before the read
+// (test/mail-positive-receipt-108.test.cjs), so it never confirms alone. Before: `latency-fallback`.
+test('N1 over real HTTP: after 2 consecutive unconfirmed surfacings an id is still NOT confirmed by latency alone; it stays surfacing, logged mail-evidence-missing (confirmed:false), with a UI notice, and the close re-surfaces it', async (t) => {
   const f = await floor(t, { providers: { 'cl-1': 'claude' } });
   const m = f.hive.send({ to: 'cl-1', act: 'inform', subject: 's', body: 'b' }, 'god-1');
   for (const e of ['x1', 'x2']) { f.hive.mail.claimSurfacing('cl-1', [m.id], e, 'UserPromptSubmit'); f.hive.mail.closeEpoch('cl-1', e, 'normal'); }
@@ -746,12 +748,19 @@ test('N1: after 2 consecutive unconfirmed surfacings an id is confirmed by laten
   });
   assert.ok(out.hookSpecificOutput.additionalContext.includes(`[hive-mail:${m.id}]`));
   assert.ok(out.hookSpecificOutput.additionalContext.includes('(re-delivered: this may already have been handled'));
-  for (let i = 0; i < 200 && f.entryOf('cl-1', m.id).state !== 'surfaced'; i++) await new Promise((r) => setTimeout(r, 5));
+  const missing = () => f.logRows().find((r) => r.kind === 'mail-evidence-missing' && r.ids.includes(m.id));
+  for (let i = 0; i < 400 && !missing(); i++) await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual({ evidence: missing()?.evidence, confirmed: missing()?.confirmed }, { evidence: 'claude-transcript', confirmed: false }, 'the reply flushed in time and the claim was settled: logged, not confirmed');
   const e = f.entryOf('cl-1', m.id);
-  assert.deepEqual({ state: e.state, method: e.confirmMethod }, { state: 'surfaced', method: 'latency-fallback' });
-  assert.ok(f.logRows().some((r) => r.kind === 'mail-evidence-missing' && r.ids.includes(m.id) && r.evidence === 'claude-transcript'));
+  assert.deepEqual({ state: e.state, method: e.confirmMethod }, { state: 'surfacing', method: undefined });
   const notice = f.hive.integrityIssues().find((i) => i.error === 'mail-evidence-missing');
   assert.ok(notice && notice.notice && !notice.quarantine, 'a UI notice through the hive:integrity banner');
+  assert.match(notice.notice, /stay unconfirmed and are shown to it again/);
+  // The turn ends with no evidence: back to the inbox, one more unconfirmed surfacing, not archived.
+  f.fire('cl-1', 'Stop', { session_id: 's' });
+  const back = f.entryOf('cl-1', m.id);
+  assert.deepEqual({ state: back.state, n: back.unconfirmedSurfacings }, { state: 'delivered', n: 3 });
+  assert.ok(fs.existsSync(path.join(f.hive.root(), 'agents', 'cl-1', 'inbox', `${m.id}.json`)), 'still in the inbox');
 });
 
 /** The REAL AGY_HOOK_SHIM, run the way AGY runs it, against the REAL HookServer pipe. */
