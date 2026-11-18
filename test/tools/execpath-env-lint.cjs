@@ -6,7 +6,7 @@
  * The env of each such spawn must be VISIBLY one of:
  *  - absent (the child inherits process.env, key included), in a file that never strips the key
  *    from process.env itself;
- *  - process.env, or a nodeEnv(...) call (test/tools/node-env.cjs);
+ *  - process.env, or a nodeEnv(...) call (tools/node-env.cjs);
  *  - an object literal (or Object.assign) whose LAST word on the key is a non-empty string or a safe
  *    spread: a later spread of something that may carry the key (a parameter, an unknown object)
  *    voids an earlier safe one, and so does a computed key that may be ELECTRON_RUN_AS_NODE;
@@ -131,6 +131,23 @@ function analyzeSource(text, file = 'x.cjs') {
   }
 
   const isObjectAssign = (c) => ts.isCallExpression(c) && ts.isPropertyAccessExpression(c.expression) && c.expression.name.text === 'assign' && c.expression.expression.getText(sf) === 'Object';
+  const isReflectDelete = (c) => ts.isCallExpression(c) && ts.isPropertyAccessExpression(c.expression) && c.expression.name.text === 'deleteProperty' && c.expression.expression.getText(sf) === 'Reflect';
+  // The command of the spawn being checked (normalised text), or null (fork, exec strings).
+  let curCmd = null;
+  // 'eq' when cond is `<command> === process.execPath` (or ==), 'ne' for !== / !=, else null. Only the
+  // arm taken when the command IS process.execPath matters; the other runs some other binary.
+  const cmdGuard = (cond) => {
+    const c = strip(cond);
+    if (!curCmd || !c || !ts.isBinaryExpression(c)) return null;
+    const k = c.operatorToken.kind;
+    const eq = k === ts.SyntaxKind.EqualsEqualsEqualsToken || k === ts.SyntaxKind.EqualsEqualsToken;
+    const ne = k === ts.SyntaxKind.ExclamationEqualsEqualsToken || k === ts.SyntaxKind.ExclamationEqualsToken;
+    if (!eq && !ne) return null;
+    const [l, r] = [strip(c.left), strip(c.right)];
+    const other = isExec(l) && !isExec(r) ? r : isExec(r) && !isExec(l) ? l : null;
+    if (!other || norm(other) !== curCmd) return null;
+    return eq ? 'eq' : 'ne';
+  };
   // The key of an object-literal member: its name, KEY for a computed key ref, '[computed]' otherwise.
   const propKey = (p) => {
     if (ts.isSpreadAssignment(p) || !p.name) return null;
@@ -166,6 +183,11 @@ function analyzeSource(text, file = 'x.cjs') {
       }
       if (ts.isCallExpression(n) && isObjectAssign(n) && n.arguments.length && norm(n.arguments[0]) === target) {
         for (const s of n.arguments.slice(1)) if (overrideBad(s, depth + 1)) { hit = n; break; }
+      }
+      // Reflect.deleteProperty(target, KEY) is a delete; a non-literal key counts inside a loop naming KEY.
+      if (ts.isCallExpression(n) && isReflectDelete(n) && n.arguments.length >= 2 && norm(n.arguments[0]) === target) {
+        const a = strip(n.arguments[1]);
+        if (isKeyRef(a) || (!isStr(a) && loopNamesKey(n))) hit = n;
       }
     });
     return hit;
@@ -244,7 +266,12 @@ function analyzeSource(text, file = 'x.cjs') {
     const e = strip(expr);
     if (!e) return null;
     if (isProcessEnv(e)) return procStrip();
-    if (ts.isConditionalExpression(e)) return envBad(e.whenTrue, depth + 1) || envBad(e.whenFalse, depth + 1);
+    if (ts.isConditionalExpression(e)) {
+      const g = cmdGuard(e.condition);
+      if (g === 'eq') return envBad(e.whenTrue, depth + 1);
+      if (g === 'ne') return envBad(e.whenFalse, depth + 1);
+      return envBad(e.whenTrue, depth + 1) || envBad(e.whenFalse, depth + 1);
+    }
     if (ts.isBinaryExpression(e) && (e.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken || e.operatorToken.kind === ts.SyntaxKind.BarBarToken)) return envBad(e.left, depth + 1) || envBad(e.right, depth + 1);
     if (ts.isCallExpression(e)) {
       const n = calleeName(e.expression);
@@ -356,11 +383,17 @@ function analyzeSource(text, file = 'x.cjs') {
   const seen = new Set();
   const report = (call, why, via) => { const k = `${call.pos}`; if (seen.has(k)) return; seen.add(k); findings.push({ file, line: line(call), why: via ? `${why} (via ${via})` : why }); };
   const isSpawnName = (name) => CALLS.has(name) || EXEC.has(name) || name === 'fork';
+  // optsBad with curCmd set to this call's command, so a `command === process.execPath ? ...` guard applies.
+  const checkOpts = (call, name) => {
+    const cmd = name === 'fork' || EXEC.has(name) ? null : strip(call.arguments[0]);
+    curCmd = cmd ? norm(cmd) : null;
+    try { return optsBad(optionsOf(call, name), name === 'fork'); } finally { curCmd = null; }
+  };
   const launches = (call, name) => (name === 'fork' ? true : EXEC.has(name) ? containsExec(call.arguments[0]) : cmdIsExec(call.arguments[0]));
   all(sf, (n) => {
     if (!ts.isCallExpression(n)) return;
     const name = calleeName(n.expression);
-    if (isSpawnName(name)) { if (launches(n, name)) { const r = optsBad(optionsOf(n, name), name === 'fork'); if (r) report(n, r); } return; }
+    if (isSpawnName(name)) { if (launches(n, name)) { const r = checkOpts(n, name); if (r) report(n, r); } return; }
     if (!ts.isIdentifier(n.expression) || !fns.has(name)) return;
     n.arguments.forEach((arg, i) => {
       const a = strip(arg);
@@ -368,22 +401,27 @@ function analyzeSource(text, file = 'x.cjs') {
       const direct = !viaArray && cmdIsExec(a);
       if (!viaArray && !direct) return;
       for (const f of fns.get(name)) {
-        const p = f.parameters[i];
+        // A rest parameter (...a) at or before argument i: the command is a[i - restAt].
+        const restAt = f.parameters.findIndex((q) => q.dotDotDotToken);
+        const off = restAt >= 0 && i >= restAt ? i - restAt : -1;
+        const p = off >= 0 ? f.parameters[restAt] : f.parameters[i];
         if (!p || !ts.isIdentifier(p.name)) continue;
         const P = p.name.text;
         const isP = (x) => { x = strip(x); return !!x && ts.isIdentifier(x) && x.text === P; };
+        const idx = (x, k) => { x = strip(x); return !!x && ts.isElementAccessExpression(x) && strip(x.argumentExpression).getText(sf) === String(k) ? strip(x.expression) : null; };
+        const isCmd = (x) => (off < 0 ? isP(x) : isP(idx(x, off)));
         const usesP = (c) => {
           c = strip(c);
           if (!c) return false;
-          if (viaArray) return ts.isElementAccessExpression(c) && isP(c.expression) && strip(c.argumentExpression).getText(sf) === '0';
-          if (isP(c)) return true;
-          let hit = false; if (isConcat(c)) all(c, (y) => { if (!hit && isP(y)) hit = true; }); return hit;
+          if (viaArray) return isCmd(idx(c, 0));
+          if (isCmd(c)) return true;
+          let hit = false; if (isConcat(c)) all(c, (y) => { if (!hit && isCmd(y)) hit = true; }); return hit;
         };
         all(f.body, (x) => {
           if (!ts.isCallExpression(x)) return;
           const xn = calleeName(x.expression);
           if (!isSpawnName(xn) || xn === 'fork' || !usesP(x.arguments[0])) return;
-          const r = optsBad(optionsOf(x, xn), false); if (r) report(x, r, `${name}() called at line ${line(n)}`);
+          const r = checkOpts(x, xn); if (r) report(x, r, `${name}() called at line ${line(n)}`);
         });
       }
     });

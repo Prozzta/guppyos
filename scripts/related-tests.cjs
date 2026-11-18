@@ -54,7 +54,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { nodeEnv } = require('../test/tools/node-env.cjs');
+const { nodeEnv } = require('../tools/node-env.cjs');
 const { spawnSync } = require('child_process');
 
 const TEST_SUFFIX = '.test.cjs';
