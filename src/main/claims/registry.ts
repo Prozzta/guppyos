@@ -170,6 +170,8 @@ export function registryTextChunks(reg: KeyRegistry, size = 64 * 1024): Iterable
 
 /** STARTUP-FREEZE-104 A9 (Jim's 10x gate of 5b4db994): how long added keys wait to be saved together. */
 export const REGISTRY_SAVE_MS = 1_000;
+/** A failed registry publish is retried, but never at a sustained one-second rate. */
+export const REGISTRY_SAVE_RETRY_MAX_MS = 60_000;
 
 /** Unsaved keys per registry path: a reader of the registry (loadRegistry, loadRegistryShared, the raw text read)
  *  saves them first. */
@@ -229,12 +231,17 @@ export class KeyRegistryWriter {
   /** LAG-SYNC-WRITES-107: what readers add while the keys are unsaved (write-behind), and the write in flight. */
   private readonly held: HeldKeys = { keys: this.unsaved, gen: 0 };
   private writing = false;
+  /** The next delay after a failed publish, reset by the next successful publish. */
+  private retryDelayMs: number;
+  /** A publish failure is reported once, until a publish succeeds. */
+  private failureReported = false;
   /** The file's stamp at the last working() call. */
   private seen: FileStamp | null = null;
 
   constructor(private readonly hiveRoot: string, private readonly onSaveFailed: (keys: string[], error: unknown) => void,
     private readonly saveMs = REGISTRY_SAVE_MS) {
     this.path = registryPath(hiveRoot);
+    this.retryDelayMs = saveMs;
   }
 
   private statFile(): FileStamp | null {
@@ -282,9 +289,9 @@ export class KeyRegistryWriter {
     this.arm();
   }
 
-  private arm(): void {
+  private arm(delay = this.saveMs): void {
     if (this.timer || this.unsaved.size === 0) return;
-    this.timer = setTimeout(() => { this.timer = null; if (fileWriteBehindOn()) this.flushBehind(); else this.flush(); }, this.saveMs);
+    this.timer = setTimeout(() => { this.timer = null; if (fileWriteBehindOn()) this.flushBehind(); else this.flush(); }, delay);
     this.timer.unref?.();
   }
 
@@ -296,7 +303,13 @@ export class KeyRegistryWriter {
   /** Drop the keys of `snap` that are still the entries it saw (a key committed again meanwhile stays). */
   private saved(snap: Map<string, KeyEntry>): void {
     for (const [k, e] of snap) if (this.unsaved.get(k) === e) this.unsaved.delete(k);
+    this.publishSucceeded();
     this.heldChanged();
+  }
+
+  private publishSucceeded(): void {
+    this.retryDelayMs = this.saveMs;
+    this.failureReported = false;
   }
 
   /**
@@ -331,8 +344,13 @@ export class KeyRegistryWriter {
   private saveFailed(snap: Map<string, KeyEntry>, e: unknown): void {
     this.reg = null;
     this.stamp = null;
-    this.onSaveFailed([...snap.keys()], e);
-    this.arm();
+    if (!this.failureReported) {
+      this.failureReported = true;
+      this.onSaveFailed([...snap.keys()], e);
+    }
+    const max = Math.max(this.saveMs, REGISTRY_SAVE_RETRY_MAX_MS);
+    this.retryDelayMs = Math.min(this.retryDelayMs * 2, max);
+    this.arm(this.retryDelayMs);
   }
 
   /** Save the acked unsaved keys now (atomic tmp + rename). */
@@ -346,6 +364,7 @@ export class KeyRegistryWriter {
       this.saveFailed(new Map(this.unsaved), e);
       return;
     }
+    this.publishSucceeded();
     this.unsaved.clear();
     this.heldChanged();
     pendingWrites.delete(this.path);

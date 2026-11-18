@@ -82,6 +82,26 @@ async function withAsync(name, hook, fn) {
   fsp[name] = (...args) => { seen.push(path.basename(String(args[0]))); return hook(args, (...a) => real(...(a.length ? a : args))); };
   try { return await fn(seen); } finally { fsp[name] = real; }
 }
+/** Replace one fs sync function while fn runs. */
+async function withSync(name, hook, fn) {
+  const real = fs[name];
+  fs[name] = (...args) => hook(args, (...a) => real(...(a.length ? a : args)));
+  try { return await fn(); } finally { fs[name] = real; }
+}
+/** Capture timers so a retry sequence can be advanced without waiting for wall-clock time. */
+async function withTimers(fn) {
+  const realSet = global.setTimeout;
+  const realClear = global.clearTimeout;
+  const timers = [];
+  global.setTimeout = (run, ms, ...args) => {
+    const timer = { cleared: false, unref() {} };
+    timers.push({ run: () => run(...args), ms, timer });
+    return timer;
+  };
+  timers.wait = () => new Promise((resolve) => realSet(resolve, 1));
+  global.clearTimeout = (timer) => { timer.cleared = true; };
+  try { return await fn(timers); } finally { global.setTimeout = realSet; global.clearTimeout = realClear; }
+}
 /** A gate: `wait()` resolves once `open()` was called. `reached` is true once something waits. */
 function gate() {
   let open; let reached = false;
@@ -412,25 +432,78 @@ test('registry: another writer\'s change during a save is kept (the save withdra
   assert.deepEqual(regKeys(root), ['agent.andy.mine', 'agent.pam.theirs']);
 });
 
-test('registry: a Windows EPERM during publish keeps the acked key for a later save', async () => {
+test('registry: a write-behind publish retry backs off to a cap and reports one failure streak', async () => {
   const root = regRoot();
   const failed = [];
-  let reportFailure;
-  const reported = new Promise((resolve) => { reportFailure = resolve; });
-  // Invoke the write-behind path explicitly: this reaches its actual async rename without using a timer.
-  const w = new REG.KeyRegistryWriter(root, (keys) => { failed.push(...keys); reportFailure(); }, 60_000);
-  await withAsync('rename', async () => { throw Object.assign(new Error('EPERM'), { code: 'EPERM' }); }, async () => {
+  let attempts = 0;
+  let wakeAttempt = null;
+  const waitForAttempt = async (n) => {
+    while (attempts < n) await new Promise((resolve) => { wakeAttempt = resolve; });
+  };
+  await withTimers((timers) => withAsync('rename', async () => {
+    attempts++;
+    wakeAttempt?.();
+    throw Object.assign(new Error('injected publish failure'), { code: 'EIO' });
+  }, async () => {
+    const w = new REG.KeyRegistryWriter(root, (keys) => failed.push(keys), 5);
     addKey(w, 'agent.andy.lost');
-    w.flushBehind();
-    await reported;
-  });
-  assert.deepEqual(failed, ['agent.andy.lost']);
+    const delays = [];
+    const waitForRearm = async () => {
+      for (let i = 0; i < 500 && timers.length === 0; i++) await timers.wait();
+      assert.ok(timers.length, 'the failed save re-arms itself');
+    };
+    const fireNext = () => {
+      const timer = timers.shift();
+      assert.ok(timer, 'the failed save re-arms itself');
+      delays.push(timer.ms);
+      timer.run();
+    };
+    const expected = [5];
+    while (expected.at(-1) < REG.REGISTRY_SAVE_RETRY_MAX_MS) expected.push(Math.min(expected.at(-1) * 2, REG.REGISTRY_SAVE_RETRY_MAX_MS));
+    expected.push(REG.REGISTRY_SAVE_RETRY_MAX_MS);
+    for (let i = 0; i < expected.length; i++) {
+      fireNext();
+      await waitForAttempt(i + 1);
+      await waitForRearm();
+    }
+    assert.deepEqual(delays, expected, 'each failed async publish doubles its retry delay only to the cap');
+  }));
+  assert.deepEqual(failed, [['agent.andy.lost']], 'one callback covers the whole failed publish streak');
   assert.ok(REG.loadRegistry(root).keys['agent.andy.lost'], 'readers retain the failed key');
-  const again = w.check('agent.andy.lost', 'andy', '2026-11-17T10:00:01Z');
-  assert.equal(again.ok && again.added, false, 'the retry does not re-add a lost key');
-  w.flush();
-  assert.ok(REG.loadRegistry(root).keys['agent.andy.lost'], 'a later flush publishes the retained key');
-  assert.deepEqual(tmpsIn(path.dirname(REG.registryPath(root))), []);
+});
+
+test('registry: a synchronous publish failure re-arms, reports once, and resets after success', async () => {
+  WB.enableWriteBehind(false);
+  try {
+    const root = regRoot();
+    const failed = [];
+    let fail = true;
+    await withTimers((timers) => withSync('renameSync', (args, real) => {
+      if (fail && path.basename(String(args[1])) === 'memory-keys.json') throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
+      return real();
+    }, async () => {
+      const w = new REG.KeyRegistryWriter(root, (keys) => failed.push(keys), 5);
+      const delays = [];
+      const fireNext = () => {
+        const timer = timers.shift();
+        assert.ok(timer, 'the failed synchronous save re-arms itself');
+        delays.push(timer.ms);
+        timer.run();
+      };
+      addKey(w, 'agent.andy.sync');
+      fireNext();
+      fireNext();
+      assert.deepEqual(failed, [['agent.andy.sync']], 'repeated synchronous failures do not duplicate the report');
+      fail = false;
+      fireNext();
+      addKey(w, 'agent.andy.next');
+      fail = true;
+      fireNext();
+      assert.deepEqual(delays, [5, 10, 20, 5], 'the sync path re-arms with backoff, then resets after a publish');
+      assert.deepEqual(failed, [['agent.andy.sync'], ['agent.andy.next']], 'the next failure after a success starts a new report streak');
+    }));
+    assert.ok(REG.loadRegistry(root).keys['agent.andy.sync']);
+  } finally { WB.enableWriteBehind(); }
 });
 
 test('registry: with write-behind off (a bare class) the timer save is the synchronous one', async () => {
