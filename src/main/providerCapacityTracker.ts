@@ -738,6 +738,16 @@ export class ProviderCapacityTracker {
    * Asked of the tracker's OWN record with the tracker's OWN boundary rule
    * (`nextResetBoundary`), not re-derived from a snapshot by a caller.
    */
+  /**
+   * QUOTA-BACKOFF (A11): the reset a LIMITED pool is waiting for (epoch ms), by the same boundary
+   * rule recovery uses, or null (not LIMITED, or no known reset). The floor says "waiting until" it.
+   */
+  limitedUntil(poolKey: string): number | null {
+    const rec = this.pools.get(poolKey);
+    if (!rec || rec.restoredUnconfirmed || !rec.epoch || rec.projection.state !== 'LIMITED') return null;
+    return nextResetBoundary(rec.observation, rec.epoch);
+  }
+
   resetOutlook(poolKey: string): 'NO_KNOWN_RESET' | 'SPENT_RESET_PASSED' | 'RESET_KNOWN' | null {
     const rec = this.pools.get(poolKey);
     if (!rec || rec.restoredUnconfirmed) return null;

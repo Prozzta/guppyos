@@ -207,7 +207,9 @@ import { QuietRefusalWatch } from './quietRefusalWatch';
 import { RefusedSettleWatch } from './refusedSettleWatch';
 import type { SilentTurnView } from '../shared/agentBadges';
 import { CodexRolloutLifecycleSource, threadSettingsAppliedSince } from './codexRolloutLifecycle';
-import { CodexRolloutCapacitySource, codexUserMessageMatches } from './codexRolloutCapacity';
+import { CodexRolloutCapacitySource, codexUserMessageMatches, findNewestRollout } from './codexRolloutCapacity';
+import { CodexCapacityFollower } from './codexCapacityFollower';
+import { codexAccountScope } from './capacityScope';
 import { BootHookClock, startupSettled } from './bootSubmitEvidence';
 import { AgentLivenessMonitor, type LivenessFacts } from './agentLiveness';
 import { CODEX_ROTATE_MAX_ROLLOUT_BYTES, decideAgyRotation, decideThreadRotation, findAgyConversation, findCachedCodexRollout, findCodexRollout, pruneCachedCodexRollouts, threadRotatedLogRow, type CodexRolloutCacheEntry } from './codexThreadRotation';
@@ -752,6 +754,20 @@ function standingGoalFromRoster(agentId: string): string | null {
 const workerWake = new WorkerWakeWatchdog();
 // FALSEACTIVE-STALL-2 (B1): Codex's own turn boundaries, read from a bounded rollout tail.
 const codexLifecycle = new CodexRolloutLifecycleSource();
+// QUOTA-BACKOFF (A11): the beat's Codex capacity follower (async fs; reads only appended bytes).
+const codexCapacityFollower = new CodexCapacityFollower({
+  scopeOf: (home) => codexAccountScope(home),
+  findRollout: (home, sessionId) => findNewestRollout(home, sessionId),
+  stat: async (file) => { const st = await fsModule.promises.stat(file); return { size: st.size, mtimeMs: st.mtimeMs }; },
+  read: async (file, position, length) => {
+    const h = await fsModule.promises.open(file, 'r');
+    try {
+      const buf = Buffer.alloc(length);
+      const { bytesRead } = await h.read(buf, 0, length, position);
+      return buf.subarray(0, bytesRead);
+    } finally { await h.close(); }
+  }
+});
 // A separate bounded-reader cache: hooks and telemetry may have consumed their own changed
 // read, while the submit owner needs to see this PTY's next user_message independently.
 const codexWakeEvidence = new CodexRolloutCapacitySource();
@@ -1192,6 +1208,22 @@ inboxWake = new InboxWakeBridge({
   codexTurnProbe: (agentId) => {
     const home = hive.codexHomeFor(agentId);
     return home ? codexLifecycle.probe(home, hive.lastSession(agentId)) : undefined;
+  },
+  // QUOTA-BACKOFF (A11): a Codex turn refused for usage sends no Stop, so its capacity reading
+  // (and the usage_limit_exceeded completion) is followed on the beat: async, appended bytes only.
+  codexCapacityPoll: (agentId) => {
+    const home = hive.codexHomeFor(agentId);
+    if (!home) return;
+    void codexCapacityFollower.poll(home, { sessionId: hive.lastSession(agentId) ?? undefined }).then((obs) => {
+      if (!obs) return;
+      providerCapacity.ingest(agentId, obs);
+      capacityStore.scheduleSave();
+    }, () => { /* best effort: the hook path still reads it */ });
+  },
+  // QUOTA-BACKOFF (A11): a provider-refused (LIMITED) pool lets the rollout close the turn.
+  capacityRefused: (agentId) => {
+    const key = providerCapacity.poolKeyOf(agentId);
+    return !!key && providerCapacity.tracker.pool(key)?.state === 'LIMITED';
   },
   // CODEX-FALSEACTIVE-153: the providers whose own turn start reaches main (Claude and Codex
   // UserPromptSubmit, Codex task_started, AGY PreInvocation). Only for these is a COMMITTED
@@ -7554,7 +7586,9 @@ function controlFactsOf(agentId: string) {
 /**
  * v1.1.45 unit #5 - the agent-card impact, from the SAME settled facts the snapshot above
  * reports. The pool is named with the strip's own label and nothing else is taken from
- * the pool: a label and the tracker state word, never a figure, a window or a reset.
+ * the pool: a label and the tracker state word, never a figure or a window. One exception
+ * (QUOTA-BACKOFF A11, god): a LIMITED pool names WHEN it resets, from the tracker's own
+ * limitedUntil, so the floor says "waiting until <reset>".
  */
 function agentImpactFor(
   autoDeliveryPaused: boolean,
@@ -7569,7 +7603,9 @@ function agentImpactFor(
     capacityHold: gate.holds,
     capacityEvidence: gate.evidence,
     poolState: pool?.state ?? null,
-    poolLabel: pool ? capacityStrip.labelOf(pool) : null
+    poolLabel: pool ? capacityStrip.labelOf(pool) : null,
+    resetAt: poolKey ? providerCapacity.tracker.limitedUntil(poolKey) : null,
+    now: Date.now()
   });
 }
 

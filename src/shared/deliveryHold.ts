@@ -303,6 +303,11 @@ export interface AgentImpactInput {
   poolState: ImpactPoolState | null;
   /** The strip's label for that pool, or null when there is none to name. */
   poolLabel: string | null;
+  /** QUOTA-BACKOFF (A11): when a LIMITED pool next resets (epoch ms), if known; named as local
+   *  wall time so the floor says how long the agent waits. Absent/null = not named. */
+  resetAt?: number | null;
+  /** Wall now, to prefix the weekday when the reset is not today. Absent = time only. */
+  now?: number;
 }
 
 /** v1.1.45 CRIT-15-PRE: main PUSHES each watched agent's impact on this channel (not control:snapshot). */
@@ -327,6 +332,19 @@ const impact = (kind: AgentImpactKind, verb: AgentImpactVerb, rest: string): Age
  */
 const poolName = (label: string | null): string => label ?? 'capacity';
 
+const WEEKDAY = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+/** Absolute local wall time, `09:51`, or `Mon 09:51` when `now` is given and on another day.
+ *  Absolute (as capacityStrip's formatLocalTime): the impact is pushed on transitions, not on a
+ *  clock, so a relative "in 27m" would freeze and become false between pushes. */
+export function localWallTime(t: number, now?: number): string {
+  const d = new Date(t);
+  const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  if (typeof now !== 'number') return hm;
+  const n = new Date(now);
+  const same = d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth() && d.getDate() === n.getDate();
+  return same ? hm : `${WEEKDAY[d.getDay()]} ${hm}`;
+}
+
 /** The impact string for one agent, or null when nothing is held. */
 export function agentImpactOf(i: AgentImpactInput): AgentImpact | null {
   if (i.interfered) return impact('INTERFERED', 'held', 'a typed-over message needs you');
@@ -347,7 +365,8 @@ export function agentImpactOf(i: AgentImpactInput): AgentImpact | null {
   if (i.poolState === 'RESERVE_ONLY') return impact('CAPACITY_RESERVE_ONLY', 'paused', `${pool} reserve only`);
   if (i.poolState === 'LIMITED' || i.capacityEvidence === 'FRESH_NOT_HEALTHY'
     || i.capacityEvidence === 'STALE_AFTER_LIMITED' || i.capacityEvidence === 'LIMITED_NO_KNOWN_RESET') {
-    return impact('CAPACITY_LIMITED', 'paused', `${pool} limited`);
+    const until = typeof i.resetAt === 'number' && Number.isFinite(i.resetAt) ? `, waiting until ${localWallTime(i.resetAt, i.now)}` : '';
+    return impact('CAPACITY_LIMITED', 'paused', `${pool} limited${until}`);
   }
   // Held for want of evidence (the L0-UNKNOWN ruling holds NO_STATE, STALE_AFTER_UNHEALTHY,
   // INDETERMINATE and anything unclassified): the one string that claims nothing, so a held

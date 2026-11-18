@@ -117,6 +117,14 @@ export interface InboxWakeBridgeDeps {
   /** CODEX-FALSEACTIVE-153: does this agent's provider report its own turn starts? Then
    *  our COMMITTED epoch is provisional until it does. Absent = no (the plain reading). */
   confirmsTurnStart?: (agentId: string) => boolean;
+  /** QUOTA-BACKOFF (A11): follow this agent's provider capacity on the beat (fire and forget;
+   *  async, reads only appended bytes). Called for an ACTIVE agent: a Codex turn refused for usage
+   *  sends no Stop, so no hook would ever carry the reading. Absent = hooks only (unchanged). */
+  codexCapacityPoll?: (agentId: string) => void;
+  /** QUOTA-BACKOFF (A11): does admission refuse this agent's pool as LIMITED (provider-refused)?
+   *  Then its Codex turn is probed for a task_complete with no mail waiting, so a turn the provider
+   *  ended is not left WORKING (and SILENT). Absent = no. */
+  capacityRefused?: (agentId: string) => boolean;
   /** ZT-I1-MAIL slice 3: the mail ledger's epochs and channel (see InboxWakeMail). */
   mail?: InboxWakeMail;
   /** ZERO-TOKEN-LIVENESS: told (synchronously) BEFORE the WWR recovers an agent or reports that it
@@ -523,7 +531,12 @@ export class InboxWakeBridge {
     // is a turn with a mail epoch open (ZT-I1-MAIL: its task_complete makes that mail acted).
     let mailOpen = false;
     try { mailOpen = this.deps.mail?.hasOpenEpoch(agentId) ?? false; } catch { mailOpen = false; }
-    if (inboxIds.length === 0 && !st.provisional && !mailOpen) return;   // nothing waiting: nothing is stuck
+    // QUOTA-BACKOFF (A11): a provider-refused pool also probes - its turn ended without a Stop.
+    let refused = false;
+    if (inboxIds.length === 0 && !st.provisional && !mailOpen) {
+      try { refused = this.deps.capacityRefused?.(agentId) ?? false; } catch { refused = false; }
+    }
+    if (inboxIds.length === 0 && !st.provisional && !mailOpen && !refused) return;   // nothing waiting: nothing is stuck
     const probe = probeFn(agentId);
     if (!probe) return;                                      // not a Codex agent
     if (!probe.ok) {
@@ -657,6 +670,11 @@ export class InboxWakeBridge {
         this.deps.coordinator.reconcile(agentId, ids, this.openIds(agentId));
         try { this.closeLostCodexTurn(agentId, ids); }
         catch (e) { this.deps.diag?.('codex-rollout', { agentId, closed: false, why: 'probe-threw', error: String(e) }); }
+        // QUOTA-BACKOFF (A11): an active turn may have been refused for usage with no hook; its
+        // capacity lands asynchronously and is judged on a later beat.
+        if (this.deps.codexCapacityPoll && this.deps.coordinator.state(agentId).lifecycle === 'active') {
+          try { this.deps.codexCapacityPoll(agentId); } catch { /* best effort */ }
+        }
         // WAKE-WATCHDOG-RECOVERY: after B1 (which needs the exact turn), before the beat's edges.
         try { this.recoverStuckActive(agentId, ids); }
         catch (e) { this.deps.diag?.('stuck-active', { agentId, recovered: false, why: 'threw', error: String(e) }); }

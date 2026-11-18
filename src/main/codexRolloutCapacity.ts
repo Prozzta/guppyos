@@ -258,6 +258,119 @@ export function latestUsableRateLimits<T>(
 }
 
 /**
+ * QUOTA-BACKOFF (A11): Codex's own record that it REFUSED a turn for usage. A turn that hits the
+ * limit ends with a `task_complete` carrying `error.codex_error_info: "usage_limit_exceeded"` and
+ * no assistant message (so no Stop hook). Its `rate_limits` snapshot can read 100% with
+ * `rate_limit_reached_type: null`, which alone is only "numerically exhausted"; the error is the
+ * provider saying the allowance is spent. Measured on Dwight's rollout, 2026-10-24 07:23:42Z.
+ */
+export const CODEX_USAGE_LIMIT_ERROR = 'usage_limit_exceeded';
+
+export interface CodexUsageLimitHit {
+  observedAt: number;
+  /** The line's `ordinal` (orders events inside one rollout file). */
+  sequence: number | null;
+  /** "try again at 9:51 AM" in the error message, as epoch ms (local time), or null. */
+  retryAt: number | null;
+}
+
+/** "... try again at 9:51 AM." -> the next such local time after `at`, or null. */
+export function parseCodexRetryAt(message: string, at: number): number | null {
+  const m = /try again at (\d{1,2}):(\d{2})\s*([AaPp])\.?\s*[Mm]/.exec(message);
+  if (!m) return null;
+  const h12 = Number(m[1]);
+  const min = Number(m[2]);
+  if (h12 < 1 || h12 > 12 || min > 59) return null;
+  const hour = (h12 % 12) + (m[3].toLowerCase() === 'p' ? 12 : 0);
+  const d = new Date(at);
+  d.setHours(hour, min, 0, 0);
+  let t = d.getTime();
+  if (t <= at) { d.setDate(d.getDate() + 1); t = d.getTime(); }
+  return t;
+}
+
+/**
+ * One rollout line as a turn boundary: `started`, a plain `complete`, a usage-limit `hit`, or null
+ * (anything else, or unparsable).
+ */
+export function codexTurnBoundary(line: string): { kind: 'started' } | { kind: 'complete' } | { kind: 'hit'; hit: CodexUsageLimitHit } | null {
+  if (!line.includes('task_started') && !line.includes('task_complete')) return null;
+  let rec: Record<string, unknown>;
+  try {
+    const o = JSON.parse(line) as unknown;
+    if (typeof o !== 'object' || o === null) return null;
+    rec = o as Record<string, unknown>;
+  } catch { return null; }
+  const payload = (typeof rec.payload === 'object' && rec.payload !== null) ? rec.payload as Record<string, unknown> : null;
+  if (!payload) return null;
+  if (payload.type === 'task_started') return { kind: 'started' };
+  if (payload.type !== 'task_complete') return null;
+  const err = (typeof payload.error === 'object' && payload.error !== null) ? payload.error as Record<string, unknown> : null;
+  if (!err || err.codex_error_info !== CODEX_USAGE_LIMIT_ERROR) return { kind: 'complete' };
+  const observedAt = typeof rec.timestamp === 'string' ? Date.parse(rec.timestamp) : NaN;
+  if (!Number.isFinite(observedAt)) return { kind: 'complete' };
+  const sequence = typeof rec.ordinal === 'number' && Number.isFinite(rec.ordinal) ? rec.ordinal : null;
+  const retryAt = typeof err.message === 'string' ? parseCodexRetryAt(err.message, observedAt) : null;
+  return { kind: 'hit', hit: { observedAt, sequence, retryAt } };
+}
+
+/** The newest turn boundary in a tail, if it is a usage-limit hit (a later start voids it). */
+export function latestCodexUsageLimitHit(tail: string): CodexUsageLimitHit | null {
+  const lines = tail.split('\n');
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const b = codexTurnBoundary(lines[i].trim());
+    if (!b) continue;
+    return b.kind === 'hit' ? b.hit : null;
+  }
+  return null;
+}
+
+/** The fallback reset when Codex names none: the hit plus an hour. */
+export const CODEX_USAGE_LIMIT_FALLBACK_MS = 60 * 60_000;
+
+/**
+ * The capacity reading a usage-limit hit stands for: the newest `codex` snapshot's windows (raw, as
+ * the rollout wrote them; null when there was none) with the refusal as its reached type, at the
+ * hit's own time and ordinal. The reset is the spent window's `resets_at`. With no spent window,
+ * the window whose `resets_at` is within 90 s of the message's "try again at" is the spent one; with
+ * no window at all, one is synthesised at that time (else the hit + 1 h). Only a hit NEWER than
+ * the snapshot is attached; the caller checks.
+ */
+export function codexUsageLimitObservation(input: {
+  snapshotRaw: unknown;
+  hit: CodexUsageLimitHit;
+  accountScope: string;
+  streamId: string;
+  receivedAt: number;
+}): CapacityObservation | null {
+  const raw = input.snapshotRaw;
+  const base: Record<string, unknown> = typeof raw === 'object' && raw !== null ? { ...(raw as Record<string, unknown>) } : { limit_id: 'codex' };
+  if (typeof base.rate_limit_reached_type !== 'string' || !base.rate_limit_reached_type) base.rate_limit_reached_type = CODEX_USAGE_LIMIT_ERROR;
+  const slots = ['primary', 'secondary'].filter((s) => typeof base[s] === 'object' && base[s] !== null);
+  const slot = (s: string) => base[s] as Record<string, unknown>;
+  const spent = slots.some((s) => typeof slot(s).used_percent === 'number' && (slot(s).used_percent as number) >= 100);
+  if (!spent) {
+    const retryAt = input.hit.retryAt;
+    const match = retryAt === null ? undefined : slots.find((s) => typeof slot(s).resets_at === 'number'
+      && Math.abs((slot(s).resets_at as number) * 1000 - retryAt) <= 90_000);
+    if (match) base[match] = { ...slot(match), used_percent: 100 };
+    else if (!slots.length) {
+      const at = retryAt ?? input.hit.observedAt + CODEX_USAGE_LIMIT_FALLBACK_MS;
+      base.primary = { used_percent: 100, window_minutes: null, resets_at: Math.ceil(at / 1000) };
+    }
+  }
+  return normalizeCodexRateLimits({
+    rateLimits: base,
+    accountScope: input.accountScope,
+    streamId: input.streamId,
+    sourceSequence: input.hit.sequence,
+    observedAt: input.hit.observedAt,
+    receivedAt: input.receivedAt,
+    source: 'codex-rollout'
+  });
+}
+
+/**
  * MODEL-PINBACK G2: the model of the newest `turn_context` in a rollout tail, with its own
  * timestamp. Codex writes one `turn_context` per turn carrying the model that turn runs, so after
  * an in-TUI `/model` the next turn's line names the new model. Null when the tail holds none.
@@ -428,7 +541,9 @@ export class CodexRolloutCapacitySource {
     const scope = this.scopeOf(codexHome);
     const tail = readTail(entry.file);
     const file = entry.file;
-    const capacity = latestUsableRateLimits(tail, (rateLimits, observedAt, sequence) => normalizeCodexRateLimits({
+    let snapshotRaw: unknown = null;
+    const snapshot = latestUsableRateLimits(tail, (rateLimits, observedAt, sequence) => {
+      const o = normalizeCodexRateLimits({
       rateLimits,
       accountScope: scope,
       // The FILE is the stream: `ordinal` restarts at zero in each new session
@@ -442,7 +557,15 @@ export class CodexRolloutCapacitySource {
       observedAt,
       receivedAt: now,
       source: 'codex-rollout'
-    }));
+      });
+      if (o) snapshotRaw = rateLimits;
+      return o;
+    });
+    // QUOTA-BACKOFF (A11): a usage-limit refusal newer than that snapshot is the reading.
+    const hit = latestCodexUsageLimitHit(tail);
+    const capacity = hit && (!snapshot || hit.observedAt >= snapshot.observedAt)
+      ? codexUsageLimitObservation({ snapshotRaw, hit, accountScope: scope, streamId: `codex-rollout:${file}`, receivedAt: now }) ?? snapshot
+      : snapshot;
     const userMessage = latestUserMessage(tail);
     if (userMessage && (!entry.userMessage || userMessage.observedAt >= entry.userMessage.observedAt)) entry.userMessage = userMessage;
     return { capacity, turnModel: latestTurnContextModel(tail), usage: latestCodexRolloutUsage(tail), userMessage: entry.userMessage };
