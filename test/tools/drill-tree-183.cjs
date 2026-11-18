@@ -180,7 +180,47 @@ function localModel(manifest, env) {
   return null;
 }
 
-function rmTree(p) { fs.rmSync(p, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 }); }
+/**
+ * Remove a folder WITHOUT following links. Not fs.rmSync: under Electron its recursive delete goes
+ * through a junction and empties the folder it points at, and the fixture folder is one agents can write
+ * to. Every entry is lstat'ed just before it is touched; a link (junction, symlink) is unlinked, never
+ * entered. A folder that turns into a link between its lstat and its listing stops the removal. What
+ * stays open is a swap after that second look and before an entry under it is removed.
+ */
+const RM_RETRY = new Set(['EBUSY', 'EPERM', 'EACCES', 'ENOTEMPTY', 'EMFILE', 'ENFILE']);
+function dropEntry(p, isLink) {
+  try { fs.unlinkSync(p); return; } catch (e) {
+    if (e.code === 'ENOENT') return;
+    if (!['EPERM', 'EACCES', 'EISDIR'].includes(e.code)) throw e;
+  }
+  if (isLink) { try { fs.rmdirSync(p); } catch (e) { if (e.code !== 'ENOENT') throw e; } return; } // rmdir of a junction removes the link only
+  fs.chmodSync(p, 0o666); // a read-only file
+  try { fs.unlinkSync(p); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+}
+function rmNoFollow(p) {
+  let st;
+  try { st = fs.lstatSync(p); } catch (e) { if (e.code === 'ENOENT') return; throw e; }
+  if (st.isSymbolicLink() || !st.isDirectory()) { dropEntry(p, st.isSymbolicLink()); return; }
+  let names;
+  try { names = fs.readdirSync(p); } catch (e) { if (e.code === 'ENOENT') return; throw e; }
+  const again = fs.lstatSync(p);
+  if (again.isSymbolicLink() || !again.isDirectory() || again.ino !== st.ino) {
+    throw Object.assign(new Error(`${p} was swapped for another entry while it was being removed; nothing under it was touched`), { code: 'ESWAPPED' });
+  }
+  for (const n of names) rmNoFollow(path.join(p, n));
+  try { fs.rmdirSync(p); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+}
+function rmTree(p) {
+  const hadNoAsar = process.noAsar;
+  process.noAsar = true; // on Electron an .asar file would otherwise be listed as a folder
+  try {
+    let err = null;
+    for (let i = 0; i < 10; i++) {
+      try { rmNoFollow(p); return; } catch (e) { err = e; if (!RM_RETRY.has(e.code)) throw e; sleep(300); }
+    }
+    throw err;
+  } finally { process.noAsar = hadNoAsar; }
+}
 
 /**
  * Put the finished, stamped build at the fixture path. The old tree is moved aside in one rename, so
@@ -243,7 +283,9 @@ function adoptOrClear(tree, { adopt, nativeProbe = nativeFault, log = () => {}, 
  * The build's npm and download steps run on this process's own executable with ELECTRON_RUN_AS_NODE
  * taken out of their environment (baseEnv). Under Electron as Node that executable is Electron, so each
  * step would open an Electron app instead of running a script (seen: a hung window process, no output).
- * The build is refused there, before anything is written; using a tree that is ready needs no build.
+ * The build is refused there. ensureTree asks this BEFORE it takes the lock, so on Electron as Node
+ * nothing is written and nothing is deleted (no leftover cleared, no kept build moved in); build() asks
+ * again for a caller that reaches it another way. Using a tree that is ready needs no build.
  */
 function hostFault(versions = process.versions) {
   return versions.electron ? 'the 1.1.83 tree is built on node, not on Electron as Node. Build it first: node test/tools/drill-tree-183-build.cjs' : null;
@@ -331,19 +373,41 @@ function withLock(tree, log, fn, { waitMs = LOCK_WAIT_MS, staleMs = LOCK_STALE_M
   fs.mkdirSync(path.dirname(tree), { recursive: true });
   const t0 = now();
   let said = false;
+  // Which lock a folder is: its owner record and the folder's own time. A rename keeps both.
+  const lockId = (dir) => {
+    let text = null, at = null;
+    try { text = fs.readFileSync(path.join(dir, 'owner.json'), 'utf8'); } catch { /* just made, or left half-made */ }
+    try { at = fs.statSync(dir).mtimeMs; } catch { /* gone */ }
+    return `${at}|${text}`;
+  };
+  // Remove the lock that was judged dead, and only that one. Two waiters can judge the same dead lock:
+  // the first removes it and makes its own, and the second must not then remove the first one's. So the
+  // lock is looked at again, moved aside in one rename (one waiter wins it), and checked once more where
+  // it now is; a live lock that got moved is put back.
+  const takeOver = (judged) => {
+    if (lockId(lock) !== judged) return;
+    const tomb = `${lock}.dead-${token}`;
+    try { fs.renameSync(lock, tomb); } catch { return; }
+    if (lockId(tomb) !== judged) {
+      try { fs.renameSync(tomb, lock); return; } catch { /* a newer lock is there already: this one is nobody's now */ }
+    }
+    try { rmTree(tomb); } catch { /* an empty leftover name; it is not the lock */ }
+  };
   for (;;) {
     try { fs.mkdirSync(lock); break; } catch (e) { if (e.code !== 'EEXIST') throw e; }
+    const judged = lockId(lock);
     let o = null;
     try { o = JSON.parse(fs.readFileSync(owner, 'utf8')); } catch { /* just made, or left half-made */ }
     const pid = o && Number.isInteger(o.pid) ? o.pid : null;
     let age = 0;
     try { age = now() - fs.statSync(lock).mtimeMs; } catch { continue; }
+    if (lockId(lock) !== judged) continue; // it changed while it was being read
     const held = o && Number.isFinite(o.startedMs) ? now() - o.startedMs : age;
     if (held > staleMs) {
       log(`the build lock of pid ${pid} is ${Math.round(held / 60_000)} minutes old, over the ${Math.round(staleMs / 60_000)} minute limit: taking it over`);
-      rmTree(lock); continue;
+      takeOver(judged); continue;
     }
-    if ((pid && !alive(pid)) || (!pid && age > 30_000)) { rmTree(lock); continue; }
+    if ((pid && !alive(pid)) || (!pid && age > 30_000)) { takeOver(judged); continue; }
     if (now() - t0 > waitMs) throw new Error(`another process (pid ${pid}) has been building the ${VERSION} tree for over ${Math.round(waitMs / 60_000)} minutes (${lock})`);
     if (!said) { log(`waiting for pid ${pid}, which is building the tree`); said = true; }
     pause(1000);
@@ -378,7 +442,7 @@ function drillTree(opts = {}) {
  * `rebuild`: build a new tree and replace the one there, whatever its state (the by-hand command only).
  * `nativeProbe`, `builder`, `lock`, `pause`: seams for the tests; the defaults are the real ones.
  */
-function ensureTree({ env = process.env, log = (m) => process.stderr.write(`[drill-tree-183] ${m}\n`), build: mayBuild = true, rebuild = false, nativeProbe = nativeFault, builder = build, lock = {}, pause = sleep } = {}) {
+function ensureTree({ env = process.env, log = (m) => process.stderr.write(`[drill-tree-183] ${m}\n`), build: mayBuild = true, rebuild = false, nativeProbe = nativeFault, builder = build, lock = {}, pause = sleep, versions = process.versions } = {}) {
   const { tree, managed, from } = treeLocation(env);
   if (!managed) {
     if (rebuild) throw new Error(`${from}=${tree} is the caller's own tree and is not built here; unset ${from} to rebuild the self-building fixture.`);
@@ -399,10 +463,28 @@ function ensureTree({ env = process.env, log = (m) => process.stderr.write(`[dri
     return native ? { native } : null;
   };
   const nativeError = (native) => new Error(`the ${VERSION} drill tree at ${tree} is stamped but its native modules do not load: ${native}. Nothing was deleted: another test may be running from this tree. If it keeps failing, rebuild it by hand: node test/tools/drill-tree-183-build.cjs --rebuild`);
+  const host = hostFault(versions);
+  // A tree that is ready, and beside it a finished build an earlier run had to keep (replaceTree) or a
+  // dead run's leftovers: nobody will adopt them, so they are cleared. Only on a host that may build,
+  // only when no build is running, and never a reason to fail a run whose tree is ready.
+  const reap = () => {
+    if (host || !mayBuild) return;
+    const parent = path.dirname(tree);
+    try {
+      const mine = (n) => [`.building-${NAME}-`, `.tmp-${NAME}-`, `.old-${NAME}-`].some((p) => n.startsWith(p));
+      if (fs.existsSync(path.join(parent, `.lock-${NAME}`)) || !fs.readdirSync(parent).some(mine)) return;
+      withLock(tree, log, () => {
+        log(`clearing what earlier runs left beside the ready tree at ${tree}`);
+        adoptOrClear(tree, { adopt: false, nativeProbe, log });
+      }, { ...lock, waitMs: 0 });
+    } catch (e) { log(`leftovers beside ${tree} were not cleared (${e.code || e.message})`); }
+  };
   let bad = rebuild ? { structural: 'a rebuild was asked for' } : look();
-  if (!bad) return tree;
+  if (!bad) { reap(); return tree; }
   if (bad.native) throw nativeError(bad.native);
   if (!mayBuild) throw new Error(`the ${VERSION} drill tree at ${tree} is not ready: ${bad.structural}. Build it: node test/tools/drill-tree-183-build.cjs`);
+  // Before the lock and before any delete: see hostFault.
+  if (host) throw new Error(`${host} (${tree} is not ready: ${bad.structural}; nothing was written or deleted)`);
   return withLock(tree, log, () => {
     if (!rebuild) {
       bad = look(); // another process may have just built it
@@ -411,7 +493,9 @@ function ensureTree({ env = process.env, log = (m) => process.stderr.write(`[dri
     }
     log(`building the ${VERSION} tree at ${tree} (location from ${from}): ${bad.structural}`);
     try {
-      if (!adoptOrClear(tree, { adopt: !rebuild, nativeProbe, log })) builder(tree, env, log);
+      // A rebuild adopts a kept build that verifies too: it IS the rebuild, finished by a run whose
+      // replace was blocked by a tree in use.
+      if (!adoptOrClear(tree, { adopt: true, nativeProbe, log })) builder(tree, env, log);
     } catch (e) { throw new Error(`the ${VERSION} drill tree could not be built at ${tree}: ${e.message}`); }
     const fault = treeFault(tree, { nativeProbe });
     if (fault) throw new Error(`the ${VERSION} drill tree was built at ${tree} and does not verify: ${fault}`);
@@ -421,4 +505,4 @@ function ensureTree({ env = process.env, log = (m) => process.stderr.write(`[dri
   }, lock);
 }
 
-module.exports = { drillTree, ensureTree, treeLocation, treeFault, structuralFault, replaceTree, adoptOrClear, withLock, baseEnv, hostFault, TAG, COMMIT, VERSION, NAME, STAMP, RECIPE, LOCK_STALE_MS, LOCK_WAIT_MS };
+module.exports = { drillTree, ensureTree, treeLocation, treeFault, structuralFault, replaceTree, adoptOrClear, withLock, rmTree, baseEnv, hostFault, TAG, COMMIT, VERSION, NAME, STAMP, RECIPE, LOCK_STALE_MS, LOCK_WAIT_MS };

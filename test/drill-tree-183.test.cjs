@@ -90,7 +90,8 @@ test('the command line: --check on an absent tree exits 1 with the reason; an un
   // that same Electron and must get the flag back, or it opens an Electron app instead of the script.
   const env = { ...D.baseEnv(process.env), ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}), GUPPY_FIXTURE_ROOT: path.join(jail, 'cli-root') };
   delete env.CLAIMS_DRILL_TREE_183;
-  const run = (...a) => spawnSync(process.execPath, [TOOL, ...a], { env, encoding: 'utf8', windowsHide: true });
+  // A regression that opens an Electron app here must fail this file, not hang it (Jim NIT c).
+  const run = (...a) => spawnSync(process.execPath, [TOOL, ...a], { env, encoding: 'utf8', windowsHide: true, timeout: 60_000 });
   const check = run('--check');
   assert.equal(check.status, 1);
   assert.match(check.stderr, /drill-tree-183: .*is not ready: the tree is absent/);
@@ -106,7 +107,7 @@ test('the command line: --check on an absent tree exits 1 with the reason; an un
   // --rebuild is the by-hand command the native-fault error names; a caller's own tree is never rebuilt
   const own = path.join(jail, 'cli-own');
   fs.mkdirSync(own);
-  const r = spawnSync(process.execPath, [TOOL, '--rebuild'], { env: { ...env, CLAIMS_DRILL_TREE_183: own }, encoding: 'utf8', windowsHide: true });
+  const r = spawnSync(process.execPath, [TOOL, '--rebuild'], { env: { ...env, CLAIMS_DRILL_TREE_183: own }, encoding: 'utf8', windowsHide: true, timeout: 60_000 });
   assert.equal(r.status, 1);
   assert.match(r.stderr, /is the caller's own tree and is not built here/);
   assert.deepEqual(fs.readdirSync(own), []);
@@ -140,6 +141,9 @@ function fakeTree(dir, { stamp = true, mark = 'first' } = {}) {
 const noBuild = () => { throw new Error('the builder was called'); };
 const noPause = () => {};
 const loads = () => null;
+// The host the build is allowed on. This file also runs on Electron as Node, where the real answer is no.
+const NODE = { node: '26.0.0' };
+const ELECTRON = { node: '24.0.0', electron: '45.0.0' };
 
 test('SHOULD 1: a stamped tree whose native probe fails is probed once more, then a clear error; it is never rebuilt and is still there', () => {
   const root = path.join(jail, 's1-root');
@@ -175,14 +179,14 @@ test('SHOULD 1 + NIT 3: a structural fault is what builds, and the build says wh
   const logs = [];
   let built = 0;
   const builder = (t) => { built++; assert.equal(t, tree); fs.writeFileSync(path.join(t, D.STAMP), JSON.stringify({ commit: D.COMMIT, recipe: D.RECIPE })); };
-  assert.equal(D.ensureTree({ env: { GUPPY_FIXTURE_ROOT: root }, log: (m) => logs.push(m), nativeProbe: loads, builder, pause: noPause }), tree);
+  assert.equal(D.ensureTree({ env: { GUPPY_FIXTURE_ROOT: root }, log: (m) => logs.push(m), nativeProbe: loads, builder, pause: noPause, versions: NODE }), tree);
   assert.equal(built, 1);
   assert.ok(logs.includes(`building the ${D.VERSION} tree at ${tree} (location from GUPPY_FIXTURE_ROOT): no ${D.STAMP} (the build did not finish, or this file did not build the tree)`), logs.join('\n'));
   assert.deepEqual(fs.readdirSync(root), [D.NAME], 'the lock is released');
   // a model file that no longer matches its digest is structural too
   fs.writeFileSync(path.join(tree, 'resources', 'models', 'm', 'tokenizer.json'), '{"changed":1}');
   assert.match(D.structuralFault(tree), /^model file tokenizer\.json is /);
-  assert.throws(() => D.ensureTree({ env: { GUPPY_FIXTURE_ROOT: root }, log: quiet, nativeProbe: loads, builder: () => { built++; }, pause: noPause }), /was built at .* and does not verify: model file tokenizer\.json/);
+  assert.throws(() => D.ensureTree({ env: { GUPPY_FIXTURE_ROOT: root }, log: quiet, nativeProbe: loads, builder: () => { built++; }, pause: noPause, versions: NODE }), /was built at .* and does not verify: model file tokenizer\.json/);
   assert.equal(built, 2);
 });
 
@@ -267,7 +271,7 @@ test('NIT 4: an old tree that is in use keeps the finished build, the error name
   // the next run, the tree now free: the kept build is adopted; nothing is built again
   fs.mkdirSync(path.join(root, `.tmp-${D.NAME}-4194300`));
   const logs = [];
-  assert.equal(D.ensureTree({ env: { GUPPY_FIXTURE_ROOT: root }, log: (m) => logs.push(m), nativeProbe: loads, builder: noBuild, pause: noPause }), tree);
+  assert.equal(D.ensureTree({ env: { GUPPY_FIXTURE_ROOT: root }, log: (m) => logs.push(m), nativeProbe: loads, builder: noBuild, pause: noPause, versions: NODE }), tree);
   assert.equal(fs.readFileSync(path.join(tree, 'MARK'), 'utf8'), 'new');
   assert.ok(logs.includes(`adopting the finished build an earlier run kept: ${work}`), logs.join('\n'));
   assert.deepEqual(fs.readdirSync(root), [D.NAME], 'the kept build, the replaced tree, the dead run\'s temp folder and the lock are gone');
@@ -276,10 +280,151 @@ test('NIT 4: an old tree that is in use keeps the finished build, the error name
   fs.rmSync(path.join(tree, D.STAMP));
   fakeTree(path.join(root, `.building-${D.NAME}-4194301`), { stamp: false, mark: 'half' });
   let built = 0;
-  D.ensureTree({ env: { GUPPY_FIXTURE_ROOT: root }, log: quiet, nativeProbe: loads, pause: noPause, builder: (t) => { built++; fs.writeFileSync(path.join(t, D.STAMP), JSON.stringify({ commit: D.COMMIT, recipe: D.RECIPE })); } });
+  D.ensureTree({ env: { GUPPY_FIXTURE_ROOT: root }, log: quiet, nativeProbe: loads, pause: noPause, versions: NODE, builder: (t) => { built++; fs.writeFileSync(path.join(t, D.STAMP), JSON.stringify({ commit: D.COMMIT, recipe: D.RECIPE })); } });
   assert.equal(built, 1);
   assert.equal(fs.readFileSync(path.join(tree, 'MARK'), 'utf8'), 'new');
   assert.deepEqual(fs.readdirSync(root), [D.NAME]);
+});
+
+// A folder outside the fixture root with one file in it, and a junction to it at `link`.
+function plant(link, name) {
+  const victim = path.join(jail, name);
+  fs.mkdirSync(victim, { recursive: true });
+  fs.writeFileSync(path.join(victim, 'keep.txt'), 'not ours');
+  fs.mkdirSync(path.dirname(link), { recursive: true });
+  fs.symlinkSync(victim, link, 'junction');
+  return victim;
+}
+const kept = (victim) => fs.readdirSync(victim).join() === 'keep.txt' && fs.readFileSync(path.join(victim, 'keep.txt'), 'utf8') === 'not ours';
+
+test('Jim SHOULD: on Electron as Node a tree that needs a build is refused before the lock and before any delete', () => {
+  const root = path.join(jail, 'host-root');
+  const tree = fakeTree(path.join(root, D.NAME), { stamp: false });
+  const old = path.join(root, `.old-${D.NAME}-4194300`);
+  const victim = plant(path.join(old, 'inner', 'link'), 'host-victim');
+  const work = fakeTree(path.join(root, `.building-${D.NAME}-4194301`), { mark: 'new' }); // would be adopted
+  const before = fs.readdirSync(root).sort();
+  const env = { GUPPY_FIXTURE_ROOT: root };
+  for (const rebuild of [false, true]) {
+    assert.throws(() => D.ensureTree({ env, log: quiet, rebuild, nativeProbe: loads, builder: noBuild, pause: noPause, versions: ELECTRON }), (e) => {
+      assert.match(e.message, /^the 1\.1\.83 tree is built on node, not on Electron as Node\. Build it first: node test\/tools\/drill-tree-183-build\.cjs \(/);
+      assert.match(e.message, /nothing was written or deleted\)$/);
+      assert.ok(e.message.includes(tree));
+      return true;
+    });
+    assert.deepEqual(fs.readdirSync(root).sort(), before, 'no lock was taken, no leftover cleared, no kept build moved in');
+    assert.equal(fs.readFileSync(path.join(tree, 'MARK'), 'utf8'), 'first');
+    assert.equal(fs.readFileSync(path.join(work, 'MARK'), 'utf8'), 'new');
+    assert.ok(fs.lstatSync(path.join(old, 'inner', 'link')).isSymbolicLink(), 'the planted link is still there');
+    assert.ok(kept(victim), 'the folder the link points at is whole');
+  }
+  // the order in the source: the host is asked before the lock is taken
+  const src = fs.readFileSync(path.join(__dirname, 'tools', 'drill-tree-183.cjs'), 'utf8');
+  const body = src.slice(src.indexOf('\nfunction ensureTree('));
+  const refusal = body.indexOf('if (host) throw new Error(');
+  assert.ok(refusal > 0 && refusal < body.indexOf('return withLock('), 'the refusal precedes the lock');
+  assert.ok(!/\bfs\.rmSync\(/.test(src), 'no recursive fs.rmSync in the library: it follows junctions on Electron');
+
+  // on node the same root builds: the kept build is adopted, and clearing the leftover does not go through its link
+  assert.equal(D.ensureTree({ env, log: quiet, nativeProbe: loads, builder: noBuild, pause: noPause, versions: NODE }), tree);
+  assert.equal(fs.readFileSync(path.join(tree, 'MARK'), 'utf8'), 'new');
+  assert.deepEqual(fs.readdirSync(root), [D.NAME]);
+  assert.ok(kept(victim), 'the leftover is removed, the folder its link pointed at is not emptied');
+});
+
+test('Jim SHOULD: rmTree unlinks a link and never enters it; an .asar file is a file', () => {
+  const dir = path.join(jail, 'rm-dir');
+  const victim = plant(path.join(dir, 'a', 'b', 'link'), 'rm-victim');
+  const noAsar = process.noAsar;
+  process.noAsar = true; // Electron's fs would open the name as an archive; this only writes the file
+  try { fs.writeFileSync(path.join(dir, 'a', 'app.asar'), 'not an archive'); } finally { process.noAsar = noAsar; }
+  fs.writeFileSync(path.join(dir, 'a', 'b', 'ro.txt'), 'x');
+  fs.chmodSync(path.join(dir, 'a', 'b', 'ro.txt'), 0o444);
+  D.rmTree(dir);
+  assert.equal(fs.existsSync(dir), false);
+  assert.ok(kept(victim));
+  assert.equal(process.noAsar, noAsar, 'the asar switch is put back');
+  // the path itself a link: the link goes, its target stays
+  const link = path.join(jail, 'rm-link');
+  fs.symlinkSync(victim, link, 'junction');
+  D.rmTree(link);
+  assert.equal(fs.existsSync(link), false);
+  assert.ok(kept(victim));
+  D.rmTree(path.join(jail, 'rm-absent')); // absent: nothing to do, no error
+});
+
+test('Jim NIT a: a waiter that judged a lock stale does not remove the fresh lock another waiter made meanwhile', () => {
+  const root = path.join(jail, 'race-root');
+  const tree = path.join(root, D.NAME);
+  const lock = path.join(root, `.lock-${D.NAME}`);
+  const owner = path.join(lock, 'owner.json');
+  const hold = (token, startedMs) => { fs.mkdirSync(lock, { recursive: true }); fs.writeFileSync(owner, JSON.stringify({ pid: process.pid, token, startedMs })); };
+  hold('dead-one', Date.now() - D.LOCK_STALE_MS - 60_000);
+  let ran = 0, swapped = 0;
+  // The log line comes after this waiter judged the lock and before it removes it: the other waiter wins there.
+  const log = (m) => {
+    if (!/taking it over/.test(m) || swapped) return;
+    swapped++;
+    fs.rmSync(owner); fs.rmdirSync(lock);
+    hold('fresh', Date.now());
+  };
+  assert.throws(() => D.withLock(tree, log, () => { ran++; }, { waitMs: 30, pause: () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20) }), /another process \(pid \d+\) has been building/);
+  assert.equal(swapped, 1, 'the takeover was reached');
+  assert.equal(ran, 0, 'two builders never run');
+  assert.equal(JSON.parse(fs.readFileSync(owner, 'utf8')).token, 'fresh', 'the fresh lock is untouched');
+  assert.deepEqual(fs.readdirSync(root), [`.lock-${D.NAME}`], 'no tombstone is left');
+  fs.rmSync(owner); fs.rmdirSync(lock);
+});
+
+test('Jim NIT b: --rebuild adopts a kept build that verifies instead of clearing it and building again', () => {
+  const root = path.join(jail, 'rb-root');
+  const tree = fakeTree(path.join(root, D.NAME), { mark: 'old' });
+  const work = fakeTree(path.join(root, `.building-${D.NAME}-4194300`), { mark: 'new' });
+  const logs = [];
+  assert.equal(D.ensureTree({ env: { GUPPY_FIXTURE_ROOT: root }, log: (m) => logs.push(m), rebuild: true, nativeProbe: loads, builder: noBuild, pause: noPause, versions: NODE }), tree);
+  assert.equal(fs.readFileSync(path.join(tree, 'MARK'), 'utf8'), 'new');
+  assert.ok(logs.includes(`adopting the finished build an earlier run kept: ${work}`), logs.join('\n'));
+  assert.deepEqual(fs.readdirSync(root), [D.NAME]);
+  // with nothing kept, a rebuild builds
+  let built = 0;
+  D.ensureTree({ env: { GUPPY_FIXTURE_ROOT: root }, log: quiet, rebuild: true, nativeProbe: loads, pause: noPause, versions: NODE, builder: () => { built++; } });
+  assert.equal(built, 1);
+});
+
+test('Jim NIT d: a run that finds the tree ready clears what earlier runs left beside it', () => {
+  const root = path.join(jail, 'reap-root');
+  const tree = fakeTree(path.join(root, D.NAME));
+  const env = { GUPPY_FIXTURE_ROOT: root };
+  const lock = path.join(root, `.lock-${D.NAME}`);
+  const leave = () => {
+    fakeTree(path.join(root, `.building-${D.NAME}-4194300`), { mark: 'kept' });
+    fs.mkdirSync(path.join(root, `.tmp-${D.NAME}-4194300`), { recursive: true });
+    fs.mkdirSync(path.join(root, `.old-${D.NAME}-4194300-1700000000000`), { recursive: true });
+    fakeTree(path.join(root, `.building-${D.NAME}-${process.ppid}`), { mark: 'live' }); // a run that is alive
+    return fs.readdirSync(root).sort();
+  };
+  const all = leave();
+  const run = (extra) => D.ensureTree({ env, nativeProbe: loads, builder: noBuild, pause: noPause, versions: NODE, log: quiet, ...extra });
+
+  // not on Electron as Node, not on a check, not while a build holds the lock: nothing is touched
+  assert.equal(run({ versions: ELECTRON }), tree);
+  assert.equal(run({ build: false }), tree);
+  fs.mkdirSync(lock);
+  fs.writeFileSync(path.join(lock, 'owner.json'), JSON.stringify({ pid: process.pid, token: 'a-build', startedMs: Date.now() }));
+  assert.equal(run(), tree);
+  fs.rmSync(path.join(lock, 'owner.json')); fs.rmdirSync(lock);
+  assert.deepEqual(fs.readdirSync(root).sort(), all);
+
+  const logs = [];
+  assert.equal(run({ log: (m) => logs.push(m) }), tree);
+  assert.deepEqual(fs.readdirSync(root).sort(), [`.building-${D.NAME}-${process.ppid}`, D.NAME].sort(), 'the dead runs\' folders are gone; a live run\'s folder and the tree stay');
+  assert.equal(fs.readFileSync(path.join(tree, 'MARK'), 'utf8'), 'first', 'a ready tree is never replaced by a kept build');
+  assert.ok(logs.includes(`clearing what earlier runs left beside the ready tree at ${tree}`), logs.join('\n'));
+  // nothing left to clear: no lock is taken, nothing is said
+  logs.length = 0;
+  fs.rmSync(path.join(root, `.building-${D.NAME}-${process.ppid}`), { recursive: true, force: true });
+  assert.equal(run({ log: (m) => logs.push(m) }), tree);
+  assert.deepEqual(logs, []);
 });
 
 test('the files that run the tree take it from the builder: no fixed path, no skip', () => {
