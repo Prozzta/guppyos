@@ -115,7 +115,10 @@ test('MIRROR-PARSE-ZERO-108: the parse clock charges each short slice its own wo
   let minW = sliceMs;
   const MAX_WALL = 9.9; // 1.5x of it is under one 15 ms step, so a one-step charge is never in band
   const judged = () => seen.filter(([wall]) => wall <= Math.min(1.5 * minW, MAX_WALL));
-  while (judged().length < WANT && seen.length < 2000) {
+  // Bounded in time as well as in tries: if nothing can be judged (the work running at half the speed
+  // it was sized at), this fails in seconds with the count, not after minutes of slices.
+  const stopAt = performance.now() + 20_000;
+  while (judged().length < WANT && seen.length < 2000 && performance.now() < stopAt) {
     const before = charged;
     const t0 = performance.now();
     wb._innerWrite();
