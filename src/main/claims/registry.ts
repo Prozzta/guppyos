@@ -53,7 +53,8 @@ export function registryPath(hiveRoot: string): string {
 
 /** The registry on disk, or the default when the file is missing. A corrupt file is an error
  *  (never silently replaced: it would fork every slot). Keys a KeyRegistryWriter holds unsaved are saved first,
- *  so a reader sees every acked key (STARTUP-FREEZE-104 A9). */
+ *  so a reader sees every acked key (STARTUP-FREEZE-104 A9). Without write-behind (bare classes and
+ *  tests), this flush is synchronous, so each read during a publish-failure streak advances its retry delay. */
 export function loadRegistry(hiveRoot: string): KeyRegistry {
   const held = heldKeys(hiveRoot);
   if (!held) { flushRegistryWrites(hiveRoot); return readRegistryFile(hiveRoot); }

@@ -499,7 +499,8 @@ test('registry: a synchronous publish failure re-arms, reports once, and resets 
       addKey(w, 'agent.andy.next');
       fail = true;
       fireNext();
-      assert.deepEqual(delays, [5, 10, 20, 5], 'the sync path re-arms with backoff, then resets after a publish');
+      fireNext();
+      assert.deepEqual(delays, [5, 10, 20, 5, 10], 'the next failure after a successful publish starts at saveMs and then backs off');
       assert.deepEqual(failed, [['agent.andy.sync'], ['agent.andy.next']], 'the next failure after a success starts a new report streak');
     }));
     assert.ok(REG.loadRegistry(root).keys['agent.andy.sync']);
