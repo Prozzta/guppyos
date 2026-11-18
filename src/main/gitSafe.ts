@@ -1,3 +1,4 @@
+import { execFile } from 'node:child_process';
 import { devNull } from 'node:os';
 
 /**
@@ -7,8 +8,8 @@ import { devNull } from 'node:os';
  * checks and for diff output; each is switched off here. Nothing a person runs in a terminal is
  * touched: this is only for the app's own calls.
  *
- * Not covered: clean/smudge filters named in a repo's config (git has no switch that turns them all
- * off, and turning one off shows its files as changed).
+ * Clean, smudge and process filters have no such switch, so gitSafeCall reads which filter drivers
+ * the repo's own config defines and sets those back to what the person's config says (see below).
  */
 const SAFE_CONFIG: ReadonlyArray<readonly [string, string]> = [
   // Run by `status` and `diff` to ask what changed.
@@ -57,6 +58,96 @@ export function gitSafeEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.Proces
   }
   env.GIT_TERMINAL_PROMPT = '0';
   return env;
+}
+
+/**
+ * Subcommands that only read the object store and refs. They never turn a file in the work tree
+ * into a blob or back, so they never run a filter driver. Anything not listed is taken to run one.
+ */
+const OBJECT_ONLY = new Set(['rev-parse', 'rev-list', 'merge-base', 'for-each-ref', 'diff-tree', 'log', 'show', 'branch', 'cat-file']);
+const ASKS_FOR_FILTERS = new Set(['--filters', '--textconv']);
+
+/** Whether this call can run a clean, smudge or process filter. */
+export function gitRunsFilters(args: readonly string[]): boolean {
+  const sub = args[0];
+  if (sub === undefined || !OBJECT_ONLY.has(sub)) return true;
+  return sub === 'cat-file' && args.some((a) => ASKS_FOR_FILTERS.has(a));
+}
+
+const FILTER_KEYS = '^filter\\..*\\.(clean|smudge|process|required)$';
+const FILTER_VARS = ['clean', 'smudge', 'process', 'required'] as const;
+/** Config the person or the machine set. Every other scope (local, worktree, a file either includes) is the repo's. */
+const OUTER_SCOPES = new Set(['system', 'global']);
+
+/**
+ * From `git config --show-scope --show-origin -z --get-regexp` output (records of scope, origin,
+ * "key\nvalue"), the settings that take every filter driver the repo defines back to what the outer
+ * config says: its value there, or no program when it has none. A driver only the outer config
+ * defines (Git LFS as it is normally installed) is not in the result and stays as it is.
+ *
+ * `process` is the one setting with no neutral value: set but empty, it also stops the driver's
+ * clean and smudge programs. So it is only written when the outer config has one (its value) or
+ * when the repo set one the outer config has not; that last driver is then off as a whole, and
+ * not required, which is the safe side of a repo adding a program to the person's own driver.
+ */
+export function repoFilterOverrides(listing: string): Array<[string, string]> {
+  const parts = listing.split('\0');
+  const outer = new Map<string, Map<string, string>>();
+  const fromRepo = new Map<string, Set<string>>();
+  for (let i = 0; i + 2 < parts.length; i += 3) {
+    const scope = parts[i];
+    const nl = parts[i + 2].indexOf('\n');
+    const key = nl < 0 ? parts[i + 2] : parts[i + 2].slice(0, nl);
+    const value = nl < 0 ? 'true' : parts[i + 2].slice(nl + 1);
+    const dot = key.lastIndexOf('.');
+    const driver = key.slice('filter.'.length, dot);
+    if (!OUTER_SCOPES.has(scope)) {
+      if (!fromRepo.has(driver)) fromRepo.set(driver, new Set());
+      fromRepo.get(driver)!.add(key.slice(dot + 1));
+      continue;
+    }
+    if (!outer.has(driver)) outer.set(driver, new Map());
+    outer.get(driver)!.set(key.slice(dot + 1), value);
+  }
+  const out: Array<[string, string]> = [];
+  for (const [driver, set] of fromRepo) {
+    const mine = outer.get(driver);
+    const off = set.has('process') && !mine?.has('process');
+    for (const v of FILTER_VARS) {
+      if (v === 'process' && !off && !mine?.has('process')) continue;
+      if (v === 'required') out.push([`filter.${driver}.required`, off ? 'false' : mine?.get(v) ?? 'false']);
+      else out.push([`filter.${driver}.${v}`, mine?.get(v) ?? '']);
+    }
+  }
+  return out;
+}
+
+function readFilterConfig(cwd: string, env: NodeJS.ProcessEnv, timeoutMs: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile('git', [...gitSafeConfigArgs(), 'config', '--show-scope', '--show-origin', '-z', '--includes', '--get-regexp', FILTER_KEYS],
+      { cwd, env, windowsHide: true, encoding: 'utf8', timeout: timeoutMs, killSignal: 'SIGKILL', maxBuffer: 4 * 1024 * 1024 }, (err, out) => {
+        // Exit 1 is git's answer for "no such key".
+        if (!err) { resolve(out); return; }
+        if ((err as { code?: unknown }).code === 1) { resolve(''); return; }
+        reject(new Error(`git could not list the repo's filter drivers, so the call was not made (${err.message.split('\n')[0]})`));
+      });
+  });
+}
+
+/**
+ * The arguments and environment for one git call in `cwd`. For a call that can run a filter, the
+ * repo's config is read first (a read that runs nothing) and each filter driver the repo defines is
+ * overridden through GIT_CONFIG_COUNT, which takes any driver name. Rejects when that read fails:
+ * the call is then not made.
+ */
+export async function gitSafeCall(cwd: string, args: readonly string[], timeoutMs = 5000): Promise<{ args: string[]; env: NodeJS.ProcessEnv }> {
+  const env = gitSafeEnv();
+  if (gitRunsFilters(args)) {
+    const pairs = repoFilterOverrides(await readFilterConfig(cwd, env, timeoutMs));
+    if (pairs.length > 0) env.GIT_CONFIG_COUNT = String(pairs.length);
+    pairs.forEach(([k, v], i) => { env[`GIT_CONFIG_KEY_${i}`] = k; env[`GIT_CONFIG_VALUE_${i}`] = v; });
+  }
+  return { args: gitSafeArgs(args), env };
 }
 
 /** The most one git call may write before it is stopped (the size derivedGit already allowed). */

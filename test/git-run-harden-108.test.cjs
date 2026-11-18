@@ -279,3 +279,53 @@ test('GIT-RUN-HARDEN-108: a filter driver only the person\'s own config defines 
   assert.deepEqual(made, { ok: true });
   assert.ok(c.ran(), 'addWorktree still runs the person\'s smudge program');
 });
+
+test('GIT-RUN-HARDEN-108: which calls read the repo\'s filter drivers first, and what the read turns into', () => {
+  const safe = loadTs('src/main/gitSafe.ts');
+  for (const a of [['status', '--porcelain'], ['diff', '--quiet'], ['switch', 'x'], ['worktree', 'add', 'p'], ['checkout', 'x'], ['cat-file', '--filters', 'HEAD:f'], ['cat-file', '--textconv', 'HEAD:f'], ['made-up'], []]) {
+    assert.equal(safe.gitRunsFilters(a), true, `${a.join(' ')} can run a filter`);
+  }
+  for (const a of [['rev-parse', 'HEAD'], ['rev-list', 'HEAD'], ['merge-base', 'a', 'b'], ['for-each-ref'], ['diff-tree', '-p', 'x'], ['log', '-p'], ['show', 'HEAD:f'], ['branch', '-a'], ['cat-file', '-s', 'x'], ['cat-file', '--batch-check']]) {
+    assert.equal(safe.gitRunsFilters(a), false, `${a.join(' ')} reads objects only`);
+  }
+
+  const rec = (scope, key, value) => `${scope}\0file:x\0${key}\n${value}\0`;
+  const listing = rec('system', 'filter.sys.clean', 'sys-clean')
+    + rec('global', 'filter.lfs.clean', 'lfs clean -- %f') + rec('global', 'filter.lfs.required', 'true')
+    + rec('global', 'filter.both.clean', 'mine') + rec('local', 'filter.both.clean', 'theirs') + rec('local', 'filter.both.process', 'theirs-p')
+    + rec('worktree', 'filter.a.b=c.smudge', 'w') + rec('command', 'filter.cmd.required', 'true');
+  assert.deepEqual(safe.repoFilterOverrides(listing), [
+    ['filter.both.clean', 'mine'], ['filter.both.smudge', ''], ['filter.both.process', ''], ['filter.both.required', 'false'],
+    ['filter.a.b=c.clean', ''], ['filter.a.b=c.smudge', ''], ['filter.a.b=c.required', 'false'],
+    ['filter.cmd.clean', ''], ['filter.cmd.smudge', ''], ['filter.cmd.required', 'false'],
+  ], 'only drivers with a setting from outside system/global are overridden; sys and lfs are left alone');
+  // An empty process setting also stops clean and smudge, so it is written only where it has to be.
+  assert.deepEqual(safe.repoFilterOverrides(rec('global', 'filter.p.process', 'mine-p') + rec('global', 'filter.p.required', 'true') + rec('local', 'filter.p.process', 'theirs-p')),
+    [['filter.p.clean', ''], ['filter.p.smudge', ''], ['filter.p.process', 'mine-p'], ['filter.p.required', 'true']]);
+  assert.deepEqual(safe.repoFilterOverrides(''), []);
+});
+
+test('GIT-RUN-HARDEN-108: derivedGit.ts, which does not read the filter drivers, makes object-only calls', () => {
+  const safe = loadTs('src/main/gitSafe.ts');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'claims', 'derivedGit.ts'), 'utf8');
+  const subs = [...src.matchAll(/await git(?:Stdin)?\(this\.repo, \['([a-z-]+)'((?:, '[^']*')*)/g)];
+  assert.equal(subs.length, [...src.matchAll(/await git(?:Stdin)?\(/g)].length, 'every call in the file is read by this scan');
+  assert.ok(subs.length >= 15);
+  for (const m of subs) {
+    const args = [m[1], ...[...m[2].matchAll(/'([^']*)'/g)].map((x) => x[1])];
+    assert.equal(safe.gitRunsFilters(args), false, `derivedGit runs "git ${args.join(' ')}", which can run a filter`);
+  }
+});
+
+test('GIT-RUN-HARDEN-108: when the repo\'s filter drivers cannot be read, the call is not made', async () => {
+  const c = setup();
+  useFilter(c, 'planted');
+  raw(c.repo, 'config', 'filter.planted.clean', passThrough(c.marker));
+  // A config file git cannot parse: the read exits with an error, and so does not say what the repo defines.
+  fs.appendFileSync(path.join(c.repo, '.git', 'config'), '[broken\n');
+  const r = await git.runGit(c.repo, ['status', '--porcelain']);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /could not list the repo's filter drivers/);
+  assert.equal(await world.runGit(c.repo, ['status', '--porcelain'], undefined, 5000), null);
+  assert.equal(c.ran(), false);
+});

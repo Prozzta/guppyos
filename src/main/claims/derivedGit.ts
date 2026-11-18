@@ -61,6 +61,8 @@ export interface DerivedGitOptions {
 
 const timedOut = (args: readonly string[], ms: number) => new Error(`git ${args[0] ?? ''} timed out after ${ms} ms`);
 
+// Both runners below make object-only calls (gitRunsFilters is false for each), so the repo's filter
+// drivers need no read here; test/git-run-harden-108 pins the subcommands this file uses.
 function git(repo: string, args: string[], o: Required<DerivedGitOptions>): Promise<{ code: number; out: string }> {
   const [bin, ...pre] = o.command;
   return new Promise((resolve, reject) => {
