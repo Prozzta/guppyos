@@ -412,18 +412,24 @@ test('registry: another writer\'s change during a save is kept (the save withdra
   assert.deepEqual(regKeys(root), ['agent.andy.mine', 'agent.pam.theirs']);
 });
 
-test('registry: a failed save drops the keys, reports them, and the key is new again', async () => {
+test('registry: a Windows EPERM during publish keeps the acked key for a later save', async () => {
   const root = regRoot();
   const failed = [];
-  const w = new REG.KeyRegistryWriter(root, (keys) => failed.push(...keys), 5);
-  await withAsync('rename', async () => { throw Object.assign(new Error('EACCES'), { code: 'EACCES' }); }, async () => {
+  let reportFailure;
+  const reported = new Promise((resolve) => { reportFailure = resolve; });
+  // Invoke the write-behind path explicitly: this reaches its actual async rename without using a timer.
+  const w = new REG.KeyRegistryWriter(root, (keys) => { failed.push(...keys); reportFailure(); }, 60_000);
+  await withAsync('rename', async () => { throw Object.assign(new Error('EPERM'), { code: 'EPERM' }); }, async () => {
     addKey(w, 'agent.andy.lost');
-    await until(() => failed.length > 0, 'the failure');
+    w.flushBehind();
+    await reported;
   });
   assert.deepEqual(failed, ['agent.andy.lost']);
-  assert.equal(REG.loadRegistry(root).keys['agent.andy.lost'], undefined, 'readers no longer see it');
+  assert.ok(REG.loadRegistry(root).keys['agent.andy.lost'], 'readers retain the failed key');
   const again = w.check('agent.andy.lost', 'andy', '2026-11-17T10:00:01Z');
-  assert.equal(again.ok && again.added, true);
+  assert.equal(again.ok && again.added, false, 'the retry does not re-add a lost key');
+  w.flush();
+  assert.ok(REG.loadRegistry(root).keys['agent.andy.lost'], 'a later flush publishes the retained key');
   assert.deepEqual(tmpsIn(path.dirname(REG.registryPath(root))), []);
 });
 
