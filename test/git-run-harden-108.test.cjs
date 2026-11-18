@@ -174,3 +174,108 @@ test('GIT-RUN-HARDEN-108: the shared helper names every switch, and keeps only t
   const env = safe.gitSafeEnv({ PATH: 'p', GIT_DIR: 'd', git_work_tree: 'w', GIT_EXTERNAL_DIFF: 'e', GIT_CONFIG_COUNT: '1', GIT_CONFIG_GLOBAL: 'g', GIT_CONFIG_SYSTEM: 's', GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '1' });
   assert.deepEqual(env, { PATH: 'p', GIT_CONFIG_GLOBAL: 'g', GIT_CONFIG_SYSTEM: 's', GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0' });
 });
+
+// ---- Filter drivers (clean / smudge) the repo's own config defines ----
+
+/** A shell program that writes `marker` and passes the content through. */
+const passThrough = (marker) => `echo hit > '${fwd(marker)}'; cat`;
+/** Commit an attribute that sends package.json through filter `driver`, then leave package.json changed
+ *  so a status read has to clean it. Call before the driver is defined. */
+function useFilter(c, driver) {
+  fs.writeFileSync(path.join(c.repo, '.gitattributes'), `package.json filter=${driver}\n`);
+  raw(c.repo, 'add', '.gitattributes');
+  raw(c.repo, 'commit', '-q', '-m', 'attributes');
+  fs.writeFileSync(path.join(c.repo, 'package.json'), '{\n  "version": "1.0.2"\n}\n');
+}
+/** Point git at `file` as the person's own (global) config for this test. */
+function useGlobalConfig(t, file) {
+  const before = process.env.GIT_CONFIG_GLOBAL;
+  t.after(() => { if (before === undefined) delete process.env.GIT_CONFIG_GLOBAL; else process.env.GIT_CONFIG_GLOBAL = before; });
+  process.env.GIT_CONFIG_GLOBAL = file;
+}
+
+test('GIT-RUN-HARDEN-108: a status read and a new worktree do not run a filter driver from the repo\'s config', async () => {
+  const c = setup();
+  useFilter(c, 'planted');
+  raw(c.repo, 'config', 'filter.planted.clean', passThrough(c.marker));
+  raw(c.repo, 'config', 'filter.planted.smudge', passThrough(c.marker));
+  raw(c.repo, 'status', '--porcelain');
+  assert.ok(c.ran(), 'the plant is live: a plain git status runs the clean program');
+  raw(c.repo, 'worktree', 'add', '-q', path.join(c.base, 'plain'), '-b', 'plain', 'main');
+  assert.ok(c.ran(), 'the plant is live: a plain git worktree add runs the smudge program');
+
+  const st = await git.getStatus(c.repo);
+  assert.ok(!('error' in st), `getStatus answers (${st.error})`);
+  assert.equal(c.ran(), false, 'git.ts getStatus ran the repo\'s filter clean program');
+
+  const out = await world.runGit(c.repo, ['status', '--porcelain'], undefined, 5000);
+  assert.equal(typeof out, 'string', 'the claims runner answers');
+  assert.equal(c.ran(), false, 'the claims snapshot runner ran the repo\'s filter clean program');
+
+  const made = await git.addWorktree(c.repo, path.join(c.base, 'wt'), 'main');
+  assert.deepEqual(made, { ok: true });
+  assert.equal(c.ran(), false, 'addWorktree ran the repo\'s filter smudge program');
+});
+
+test('GIT-RUN-HARDEN-108: a filter driver in a file the repo\'s config includes is not run', async () => {
+  const c = setup();
+  useFilter(c, 'planted');
+  const inc = path.join(c.base, 'inc.cfg');
+  raw(c.repo, 'config', '--file', inc, 'filter.planted.clean', passThrough(c.marker));
+  raw(c.repo, 'config', 'include.path', fwd(inc));
+  raw(c.repo, 'status', '--porcelain');
+  assert.ok(c.ran(), 'the plant is live: a plain git status runs the included program');
+
+  const st = await git.getStatus(c.repo);
+  assert.ok(!('error' in st), `getStatus answers (${st.error})`);
+  assert.equal(c.ran(), false, 'getStatus ran a filter from a file included by the repo\'s config');
+});
+
+test('GIT-RUN-HARDEN-108: a filter driver in the per-worktree config is not run', async () => {
+  const c = setup();
+  useFilter(c, 'planted');
+  raw(c.repo, 'config', 'extensions.worktreeConfig', 'true');
+  raw(c.repo, 'config', '--worktree', 'filter.planted.clean', passThrough(c.marker));
+  raw(c.repo, 'status', '--porcelain');
+  assert.ok(c.ran(), 'the plant is live: a plain git status runs the config.worktree program');
+
+  const st = await git.getStatus(c.repo);
+  assert.ok(!('error' in st), `getStatus answers (${st.error})`);
+  assert.equal(c.ran(), false, 'getStatus ran a filter from the repo\'s config.worktree');
+});
+
+test('GIT-RUN-HARDEN-108: a repo that redefines the person\'s own filter driver gets the person\'s one back', async (t) => {
+  const c = setup();
+  useFilter(c, 'lfslike');
+  const globalFile = path.join(c.base, 'global.cfg');
+  const globalMarker = path.join(c.base, 'global-marker');
+  const globalRan = () => { const hit = fs.existsSync(globalMarker); fs.rmSync(globalMarker, { force: true }); return hit; };
+  raw(c.repo, 'config', '--file', globalFile, 'filter.lfslike.clean', passThrough(globalMarker));
+  useGlobalConfig(t, globalFile);
+  raw(c.repo, 'config', 'filter.lfslike.clean', passThrough(c.marker));
+  raw(c.repo, 'status', '--porcelain');
+  assert.ok(c.ran(), 'the plant is live: the repo\'s definition wins in a plain git status');
+  assert.equal(globalRan(), false, 'and the person\'s one is shadowed by it');
+
+  const st = await git.getStatus(c.repo);
+  assert.ok(!('error' in st), `getStatus answers (${st.error})`);
+  assert.equal(c.ran(), false, 'getStatus ran the repo\'s redefinition of a global filter driver');
+  assert.ok(globalRan(), 'the person\'s own driver ran in its place');
+});
+
+test('GIT-RUN-HARDEN-108: a filter driver only the person\'s own config defines (Git LFS style) stays on', async (t) => {
+  const c = setup();
+  useFilter(c, 'lfslike');
+  const globalFile = path.join(c.base, 'global.cfg');
+  raw(c.repo, 'config', '--file', globalFile, 'filter.lfslike.clean', passThrough(c.marker));
+  raw(c.repo, 'config', '--file', globalFile, 'filter.lfslike.smudge', passThrough(c.marker));
+  raw(c.repo, 'config', '--file', globalFile, 'filter.lfslike.required', 'true');
+  useGlobalConfig(t, globalFile);
+
+  const st = await git.getStatus(c.repo);
+  assert.ok(!('error' in st), `getStatus answers (${st.error})`);
+  assert.ok(c.ran(), 'getStatus still runs the person\'s clean program');
+  const made = await git.addWorktree(c.repo, path.join(c.base, 'wt'), 'main');
+  assert.deepEqual(made, { ok: true });
+  assert.ok(c.ran(), 'addWorktree still runs the person\'s smudge program');
+});
