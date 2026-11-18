@@ -9,6 +9,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { nodeEnv } = require('./tools/node-env.cjs');
 const { spawn } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..');
@@ -82,7 +83,7 @@ function sandboxed(helperText) {
 
 function recoverOnly(runner, env = {}) {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [runner, '--recover-only'], { cwd: ROOT, env: { ...process.env, ...env }, stdio: ['ignore', 'ignore', 'pipe'] });
+    const child = spawn(process.execPath, [runner, '--recover-only'], { cwd: ROOT, env: nodeEnv({ ...process.env, ...env }), stdio: ['ignore', 'ignore', 'pipe'] });
     let stderr = '';
     child.stderr.on('data', (d) => { stderr += d; });
     child.once('close', (code) => resolve({ code, stderr }));

@@ -37,7 +37,7 @@ test('MUTANT-JOURNAL-GATE bare node --test (god 5b1c57, Jim NIT): load-ts refuse
   fs.writeFileSync(file, 'export const x = 1;', 'utf8');
   const journal = (owner) => fs.writeFileSync(helper.journalPath(root), JSON.stringify({ owner, records: [{ file, original: Buffer.from('export const x = 1;').toString('base64') }] }), 'utf8');
   const bare = (env = {}) => spawnSync(process.execPath, ['-e', "process.stdout.write(String(require('./test/load-ts.cjs')('src/x.ts').x))"],
-    { cwd: root, encoding: 'utf8', timeout: 30_000, env: { ...process.env, NODE_PATH: path.join(REPO, 'node_modules'), MUTANT_RUNNER_PID: '', ...env } });
+    { cwd: root, encoding: 'utf8', timeout: 30_000, env: nodeEnv({ ...process.env, NODE_PATH: path.join(REPO, 'node_modules'), MUTANT_RUNNER_PID: '', ...env }) });
   // No journal: loads.
   let r = bare(); assert.equal(r.status, 0, r.stderr); assert.equal(r.stdout, '1');
   // Dead owner, mutant on disk: a bare load is refused with the recover command; the bytes stay (recover() is the fix).

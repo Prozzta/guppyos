@@ -14,6 +14,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { nodeEnv } = require('./tools/node-env.cjs');
 const http = require('node:http');
 const { spawn } = require('node:child_process');
 const loadTs = require('./load-ts.cjs');
@@ -466,7 +467,7 @@ test('MUTANT B-M2 (no #full exemption): a #full command is condensed', () => {
 // ── A: the CLI end to end (a child process against a real broker) ────────────────────────────
 function run(cmd, args, { input, env } = {}) {
   return new Promise((resolve) => {
-    const c = spawn(cmd, args, { env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
+    const c = spawn(cmd, args, { env: nodeEnv({ ...process.env, ...env }), stdio: ['pipe', 'pipe', 'pipe'] });
     let out = ''; let err = '';
     c.stdout.on('data', (d) => { out += d; }); c.stderr.on('data', (d) => { err += d; });
     c.on('close', (code) => resolve({ code, out, err }));

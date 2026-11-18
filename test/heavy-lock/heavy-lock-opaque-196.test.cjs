@@ -25,6 +25,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { nodeEnv } = require('../tools/node-env.cjs');
 const http = require('node:http');
 const { spawn, spawnSync } = require('node:child_process');
 const loadTs = require('../load-ts.cjs');
@@ -346,7 +347,7 @@ fs.writeFileSync(path.join(FIX, 'sleeper.test.cjs'), "require('node:test')('slee
 function cleanEnv(extra) {
   const env = { ...process.env };
   for (const k of ['NODE_TEST_CONTEXT', 'NODE_OPTIONS', 'GUPPY_TEST_RUN', 'HIVE_LEDGER_URL']) delete env[k];
-  return { ...env, ...extra };
+  return nodeEnv({ ...env, ...extra });
 }
 function start(args, { url, agent = 'a', preload = PRELOAD, root = JAIL } = {}) {
   const env = cleanEnv({ NODE_OPTIONS: `--require "${preload.replace(/\\/g, '/')}"`, HIVE_LEDGER_URL: url, HIVE_ROOT: root, AGENT_ID: agent });
