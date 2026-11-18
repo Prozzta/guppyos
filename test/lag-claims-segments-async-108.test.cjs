@@ -84,3 +84,126 @@ test('a census whose window has passed, with nothing changed, lists no folder sy
   assert.equal(sp.n('agents'), 0, 'agents/ is not listed synchronously when the window passes');
   assert.equal(sp.n('claims'), 0, 'no claims folder is listed synchronously when the window passes');
 });
+
+/** Hold the off-thread listing of agents/: the real listing is taken first, then kept back until
+ *  release(), so what the relist carries is older than anything done meanwhile. */
+function holdAgentsListing(t, x) {
+  const fsp = require('node:fs/promises');
+  const real = fsp.readdir;
+  const dir = path.join(x.root, 'agents');
+  let release; let started; let calls = 0; let fail = false;
+  const gate = new Promise((r) => { release = r; });
+  const reached = new Promise((r) => { started = r; });
+  fsp.readdir = async (p, ...rest) => {
+    if (path.resolve(String(p)) !== dir) return real(p, ...rest);
+    calls++;
+    const names = await real(p, ...rest);
+    started();
+    await gate;
+    if (fail) throw Object.assign(new Error('EPERM: listing refused'), { code: 'EPERM' });
+    return names;
+  };
+  t.after(() => { fsp.readdir = real; release(); });
+  return { started: () => reached, release, calls: () => calls, failIt: () => { fail = true; } };
+}
+/** Wait for the held listing. A census that started none fails here by name instead of hanging:
+ *  with nothing in flight rosterSettled() resolves at once. */
+function listingStarted(h, s) {
+  const none = s.rosterSettled().then(() => new Promise((r) => setImmediate(r))).then(() => { throw new Error('the census started no off-thread listing of agents/'); });
+  return Promise.race([h.started(), none]);
+}
+function syncListings(fn) {
+  const sp = spyReaddirSync();
+  let r;
+  try { r = fn(); } finally { sp.stop(); }
+  return { r, agents: sp.n('agents'), claims: sp.n('claims') };
+}
+async function append(s, a) {
+  const r = await s.appendRecord(a, { t: 'claim', kind: 'fact', text: `${a} first` }, 'endpoint');
+  assert.equal(r.ok, true, JSON.stringify(r));
+}
+
+test('a census whose window has passed starts one off-thread listing, however many consumers ask', async (t) => {
+  const x = setup();
+  await ledgers(x, ['andy', 'dwight']);
+  const s = x.mk();
+  s.ledgerAgents();
+  const h = holdAgentsListing(t, x);
+  x.tick(storeMod.ROSTER_REVALIDATE_MS);
+  for (let i = 0; i < 5; i++) assert.deepEqual([...s.ledgerAgents()].sort(), ['andy', 'dwight']);
+  await listingStarted(h, s);
+  for (let i = 0; i < 5; i++) s.ledgerAgents();
+  assert.equal(h.calls(), 1, 'ten census reads past the window start one listing');
+  h.release();
+  await s.rosterSettled();
+  s.ledgerAgents();
+  await s.rosterSettled(); // a second listing, if one was started, has reached agents/ by now
+  assert.equal(h.calls(), 1, 'the finished listing opened a new window: no second listing yet');
+});
+
+test('a listing that finishes after an own write does not replace the roster that write made', async (t) => {
+  const x = setup();
+  await ledgers(x, ['andy', 'dwight']);
+  const s = x.mk();
+  s.ledgerAgents();
+  const h = holdAgentsListing(t, x);
+  x.tick(storeMod.ROSTER_REVALIDATE_MS);
+  s.ledgerAgents();
+  await listingStarted(h, s); // the listing it carries has no pam
+  await append(s, 'pam');
+  assert.deepEqual([...s.ledgerAgents()].sort(), ['andy', 'dwight', 'pam'], 'the own write is in the very next census');
+  h.release();
+  await s.rosterSettled();
+  const after = syncListings(() => s.ledgerAgents());
+  assert.deepEqual([...after.r].sort(), ['andy', 'dwight', 'pam'], 'pam is still in the roster');
+  assert.equal(after.agents + after.claims, 0, 'and the roster the write made still stands: nothing is listed again');
+});
+
+test('a listing that finishes after close() is dropped: it does not throw and the next census lists afresh', async (t) => {
+  const x = setup();
+  await ledgers(x, ['andy', 'dwight']);
+  const s = x.mk();
+  s.ledgerAgents();
+  const h = holdAgentsListing(t, x);
+  x.tick(storeMod.ROSTER_REVALIDATE_MS);
+  s.ledgerAgents();
+  await listingStarted(h, s);
+  s.close();
+  h.release();
+  await s.rosterSettled();
+  const after = syncListings(() => s.ledgerAgents());
+  assert.deepEqual([...after.r].sort(), ['andy', 'dwight']);
+  assert.equal(after.agents, 1, 'the census after close() lists agents/ itself: the late listing did not become the roster');
+});
+
+test('a listing that cannot read agents/ leaves the roster as it was and does not throw', async (t) => {
+  const x = setup();
+  await ledgers(x, ['andy', 'dwight']);
+  const s = x.mk();
+  s.ledgerAgents();
+  const h = holdAgentsListing(t, x);
+  h.failIt();
+  x.tick(storeMod.ROSTER_REVALIDATE_MS);
+  s.ledgerAgents();
+  await listingStarted(h, s);
+  h.release();
+  await s.rosterSettled();
+  const after = syncListings(() => s.ledgerAgents());
+  assert.deepEqual([...after.r].sort(), ['andy', 'dwight'], 'the roster is not emptied by a failed listing');
+  assert.equal(after.agents + after.claims, 0, 'and the census still answers without a synchronous listing');
+  await s.rosterSettled();
+  assert.equal(h.calls(), 2, 'that census asked for the listing again');
+});
+
+test('segmentsAsync answers what segments answers', async () => {
+  const x = setup();
+  await ledgers(x, ['andy']);
+  const s = x.mk();
+  const dir = path.join(x.root, 'agents', 'andy', 'memory', 'claims');
+  const seg = fs.readdirSync(dir).find((n) => /\.jsonl$/.test(n));
+  fs.copyFileSync(path.join(dir, seg), path.join(dir, seg.replace(/\d{4}-\d{2}/, '2031-01')));
+  fs.writeFileSync(path.join(dir, 'notes.txt'), 'not a segment');
+  assert.equal(s.segments('andy').length, 2, 'the rig made a second segment');
+  assert.deepEqual(await s.segmentsAsync('andy'), s.segments('andy'));
+  assert.deepEqual(await s.segmentsAsync('nobody'), []);
+});

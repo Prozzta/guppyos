@@ -455,6 +455,15 @@ export class ClaimStore {
     return names.map((n) => join(dir, n));
   }
 
+  /** segments(), listed off the caller's thread: the same names in the same order. Only the timed
+   *  census relist uses it; every verifying read keeps the sync listing. */
+  async segmentsAsync(agentId: string): Promise<string[]> {
+    const dir = this.claimsDir(agentId);
+    let names: string[] = [];
+    try { names = (await fsp.readdir(dir)).filter((n) => SEGMENT_RE.test(n)).sort(); } catch { names = []; }
+    return names.map((n) => join(dir, n));
+  }
+
   /**
    * LAG-MAIN-SYNC-FIXES item 3: every agent with a ledger (a segment, or an anchor: Jim A-2), as
    * main's claimLedgerAgents served it to each consumer (reader watchers, export, reconcile, the
@@ -463,7 +472,10 @@ export class ClaimStore {
    *   - the anchored half is read fresh every call (one revalidated anchor snapshot, keyProvider);
    *   - the segment half is cached and listed again when: this store created, swapped or restored a
    *     claims folder or a segment (rosterDirty), the agents/ folder's stat key moved (an agent
-   *     added or archived), or ROSTER_REVALIDATE_MS passed (a folder another process made).
+   *     added or archived). Those three list synchronously: the answer is exact on that call.
+   *   - once ROSTER_REVALIDATE_MS passed (a folder another process made under an existing agent)
+   *     the census answers the roster it has and lists again off the caller's thread
+   *     (relistRoster): that folder is in the roster one off-thread listing later.
    * Verification never reads this: readLedger lists the agent's own segments every time.
    */
   ledgerAgents(): string[] {
@@ -485,7 +497,10 @@ export class ClaimStore {
     let st: nodeFs.Stats | null = null;
     try { st = nodeFs.statSync(agentsDir); key = statKey(st); } catch { /* no agents folder: no ledgers */ }
     const r = this.roster;
-    if (r && r.gen === this.rosterGen && r.key !== null && r.key === key && mono() - r.at < ROSTER_REVALIDATE_MS) return [...r.agents];
+    if (r && r.gen === this.rosterGen && r.key !== null && r.key === key) {
+      if (mono() - r.at >= ROSTER_REVALIDATE_MS) this.relistRoster(r);
+      return [...r.agents];
+    }
     const gen = this.rosterGen;
     const at = mono();
     let names: string[] = [];
@@ -494,6 +509,36 @@ export class ClaimStore {
     this.roster = { gen, at, key: st ? provenStatKey(st, (this.d.wallNow ?? Date.now)()) : null, agents };
     return [...agents];
   }
+
+  private rosterRelist: Promise<void> | null = null;
+
+  /**
+   * LAG-CLAIMS-SEGMENTS-ASYNC-108: the timed relist, off the caller's thread. The census answers
+   * from `from` meanwhile. One relist runs at a time. Its result replaces the roster only when
+   * the roster is still `from`: a late listing never overwrites a newer one. It carries `from`'s
+   * gen, so after an own write or close() (rosterDirty) the next census lists afresh. Never throws.
+   */
+  private relistRoster(from: { gen: number }): void {
+    if (this.rosterRelist) return;
+    const mono = this.d.monoNow ?? (() => performance.now());
+    const agentsDir = join(this.d.hiveRoot, 'agents');
+    const at = mono();
+    const run = async (): Promise<void> => {
+      let st: nodeFs.Stats | null = null;
+      try { st = await fsp.stat(agentsDir); } catch { /* no agents folder: no ledgers */ }
+      let names: string[];
+      try { names = await fsp.readdir(agentsDir); } catch { return; } // not listed: the roster stands, the next census asks again
+      const agents: string[] = [];
+      for (const a of names) { if ((await this.segmentsAsync(a)).length > 0) agents.push(a); }
+      if (this.roster !== from) return; // a newer roster stands
+      this.roster = { gen: from.gen, at, key: st ? provenStatKey(st, (this.d.wallNow ?? Date.now)()) : null, agents };
+    };
+    const p = run().catch(() => undefined).finally(() => { if (this.rosterRelist === p) this.rosterRelist = null; });
+    this.rosterRelist = p;
+  }
+
+  /** Resolves when no timed relist is in flight (tests, and a caller that wants the fresh roster). */
+  rosterSettled(): Promise<void> { return this.rosterRelist ?? Promise.resolve(); }
 
   /** Does any agent have a claims segment? (C2: "first use" means none anywhere.) */
   anySegmentAnywhere(): boolean {
@@ -1586,6 +1631,7 @@ export class ClaimStore {
 
   /** Close every append handle (quit, hive change). Appends after it reopen. */
   close(): void {
+    this.rosterDirty(); // the next census lists afresh, whatever a relist still in flight brings
     this.flushKeyRegistry();
     for (const a of [...this.fds.keys()]) this.closeFd(a);
     for (const a of [...this.anchorTimers.keys()]) this.flushAnchor(a);
