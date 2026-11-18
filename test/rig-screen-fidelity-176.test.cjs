@@ -66,6 +66,20 @@ test('RIG FIDELITY n2: a received echo NEWER than composer.json\'s newest seq (t
   assert.equal(screenDraftOf([...behind, { seq: 6, draft: ' and god' }], ' and god', 6), ' and god');
 });
 
+// MAIL-RIG-G1-STALE-MIRROR-108 (c), Jim NIT 1: the rig's screen readers flush the PTY batcher FIRST
+// (as pty.ts sendToOwner does before a product screen read), so buffered echoes reach the echoSeen
+// scan before the reading. A source pin, not a timing test: it catches a deletion or a reorder.
+test('RIG FIDELITY pin: readScreen and readCodexScreen flush the PTY batcher as their first statement', () => {
+  const src = require('node:fs').readFileSync(require('node:path').join(__dirname, 'mail-rig', 'rig-host.cjs'), 'utf8');
+  for (const reader of ['readScreen', 'readCodexScreen']) {
+    const at = src.indexOf(`const ${reader} = async (ptyId`);
+    assert.ok(at >= 0, `${reader} is defined in rig-host.cjs`);
+    const body = src.slice(src.indexOf('=> {', at) + 4).trimStart();
+    assert.equal(body.split('\n')[0].trim(), 'flushPtyOut(ptyId);', `${reader}'s first statement is the flush`);
+  }
+  assert.match(src, /const sessions = ptyManager\.sessions;[\s\S]{0,200}sessions\.get\(ptyId\)\?\.out\?\.flush\(\);/, 'flushPtyOut flushes the session\'s batcher');
+});
+
 // SUITE-LOAD-FLAKES-1027: the stub's composer.json is the screen the host reads. On Windows the
 // stub's rename onto it is refused (EPERM) while any process has the file open, and the stub used
 // to swallow that: the file kept the EMPTY composer, the host read an empty prompt row for text
