@@ -841,7 +841,8 @@ test('PIN: against the REAL test directory discovery is root tests plus only fol
   // electron-rmsync-agent-writable, electron-rmsync-jitter, worktree-reaper-link-safe). 633 + 6 = 639.
   // SCRATCH-DISK-REAP-108 Jim MUST: + 1 (tools-load-ts-journal). 639 + 1 = 640.
   // ARMED-TRIGGERS-LOST-ON-RESTART-108 (A9): + 1 (armed-triggers-108). 640 + 1 = 641 (root test/*.test.cjs 599).
-  assert.equal(files.length, 641,`the focused suite must retain its pre-fold file count, got ${files.length}`);
+  // MAIL-POSITIVE-RECEIPT (A14): + 1 (mail-positive-receipt-108). 641 + 1 = 642 (root test/*.test.cjs 600).
+  assert.equal(files.length, 642,`the focused suite must retain its pre-fold file count, got ${files.length}`);
   assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
   assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');
   assert.ok(files.includes(path.join('start-fixes-163', 'start-fixes-163-boot-submit.test.cjs')), 'the start-fixes feature folder is included');
