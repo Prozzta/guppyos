@@ -400,7 +400,7 @@ const MUTANTS = [
     'is paused until capacity returns. Queued messages wait; nothing is lost.`',
     'is paused until capacity returns (0% left). Queued messages wait; nothing is lost.`'],
   ['u12 a figure in the agent impact', HOLD,
-    "impact('CAPACITY_LIMITED', 'paused', `${pool} limited`)", "impact('CAPACITY_LIMITED', 'paused', `${pool} limited (0%)`)"],
+    "impact('CAPACITY_LIMITED', 'paused', `${pool} limited${until}`)", "impact('CAPACITY_LIMITED', 'paused', `${pool} limited (0%)${until}`)"],
   ['u12 the shape shows its state word as text', VIEW, "      {look.kind === 'STOP' ? <StopSvg />", "      {name}{look.kind === 'STOP' ? <StopSvg />"],
   ['u12 a segmented usage gauge', USAGE_LINE,
     '      <CapacityMeter percent={view.usedPercent}',
