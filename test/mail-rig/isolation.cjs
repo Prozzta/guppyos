@@ -37,9 +37,15 @@ function systemDirs(env = process.env) {
  * A dir holding ONLY this node's executable (a hard link; a copy if linking fails), shared by every
  * rig of this node version and kept between runs. Not inside a sandbox: a freshly created .exe is
  * held open by the antivirus scan for seconds, which made the sandbox removal fail (EPERM).
+ *
+ * Keyed by the executable's name as well as the version (RIG-NODE-DIR-SHARED-108): Electron 45 runs
+ * as node v24.22.2, the same version as the node leg, so a dir keyed by version alone got
+ * electron.exe linked in by an Electron-leg rig, and from then on every node-leg rig refused it
+ * ("the node dir holds more than node"). Now each executable has a dir of its own.
  */
 function jailedNodeDir() {
-  const dir = path.join(require('../tools/shared-temp.cjs').sharedTemp(), `md-rig-node-${process.version}`);
+  const exeKey = path.basename(process.execPath, path.extname(process.execPath)).toLowerCase();
+  const dir = path.join(require('../tools/shared-temp.cjs').sharedTemp(), `md-rig-node-${process.version}-${exeKey}`);
   const exe = path.join(dir, path.basename(process.execPath));
   if (fs.existsSync(exe)) return dir;
   fs.mkdirSync(dir, { recursive: true });

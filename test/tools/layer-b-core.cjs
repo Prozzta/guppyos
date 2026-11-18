@@ -71,7 +71,7 @@
  *      - git: the shared .git (worktree metadata + the seam cherry-picks as dangling commits);
  *      - the 1.1.74 worktree %TEMP%\md-layerb-v1174 (source + a node_modules COPY): removed at the
  *        end, node_modules first, then git worktree remove WITHOUT --force (--keep-v1174 keeps it);
- *      - isolation.rigEnv: the jail dirs and the shared node-only dir %TEMP%\md-rig-node-<ver>;
+ *      - isolation.rigEnv: the jail dirs and the shared node-only dir %TEMP%\md-rig-node-<ver>-<exe>;
  *      - the app and the CLIs themselves: the sandbox (jail, devroot) only. The sandbox base is
  *        C:Dunder_workandy-scratchlb-jailmd-layerb-<stamp> (real step 1: codex refuses its
  *        helper binaries under %TEMP%), removed at the end and verified gone.
@@ -1716,7 +1716,7 @@ function codexProbeVerdict(res, liveKeys) {
  *
  * Explicit exceptions (JAIL_LINK_EXCEPTIONS): none for reparse points. Hard links to FILES (nlink > 1)
  * are allowed and listed in the evidence. The one this run makes is isolation.jailedNodeDir's
- * %TEMP%\md-rig-node-<ver>\node.exe, a hard link to this node.exe, which lives OUTSIDE the jail (the
+ * %TEMP%\md-rig-node-<ver>-node\node.exe, a hard link to this node.exe, which lives OUTSIDE the jail (the
  * rig keeps it out of the sandbox on purpose), so the sweep never meets it.
  */
 const JAIL_LINK_EXCEPTIONS = Object.freeze({ reparsePointsOutside: [], hardLinkedFiles: 'allowed, listed in the evidence (md-rig-node node.exe is outside the jail)' });
