@@ -1719,7 +1719,13 @@ export class HookServer {
       }
       if (!mail) continue;
       try {
-        if (c.evidence === 'latency') {
+        if (c.evidence === 'latency' && !mailLatencyAloneConfirms(c.transport)) {
+          // No provider without a readable record posts over http/mcp today (the http hook URL
+          // goes into Claude's settings only, the mcp endpoint into Codex's), but both endpoints
+          // are keyed by agent id, not provider. One that did would have nothing but latency to
+          // confirm with, and latency proves nothing there: never confirm, say so, re-surface.
+          mail.noteEvidenceMissing(c.agentId, c.ids, c.epoch, c.evidence, false);
+        } else if (c.evidence === 'latency') {
           mail.confirmSurfaced(c.agentId, c.ids, c.epoch, 'latency');
         } else if (c.fallbackIds.length && !mailLatencyAloneConfirms(c.transport)) {
           // MAIL-POSITIVE-RECEIPT: over http/mcp only the agent's own record confirms. These ids
