@@ -371,10 +371,15 @@ test('Jim SHOULD 2: a folder swapped for a junction between two children stops t
       fs.symlinkSync(victim, top, 'junction');
       swappedAt = `${path.relative(top, folder) || '.'} before ${name}`;
     };
-    assert.throws(() => D.rmTree(p, { beforeChild }), (e) => e.code === 'ESWAPPED', label);
+    let err = null;
+    assert.throws(() => D.rmTree(p, { beforeChild }), (e) => { err = e; return e.code === 'ESWAPPED'; }, label);
     assert.ok(swappedAt, `${label}: the swap happened`);
     assert.notEqual(path.basename(top), 'p', 'the folder is walked under a name only this removal knows');
     assert.ok(whole(victim), `${label}: every file in the junction's target is still there (swapped at ${swappedAt})`);
+    // Jim NIT (01:34Z): what is at the tomb now is not the folder that was moved, so it is not put at p.
+    assert.deepEqual(fs.readdirSync(base).sort(), [path.basename(top), 'moved-away', 'victim'].sort(), `${label}: the foreign entry stays under the tomb name; nothing is put at p`);
+    assert.ok(fs.lstatSync(top).isSymbolicLink(), `${label}: the junction is left as it was`);
+    assert.ok(err.message.includes(`(what is left of it is at ${top})`), `${label}: the error says where: ${err.message}`);
   };
   swapRun('top', (isTop, folder, name) => isTop && name === 'd1'); // between the first and the second child of the folder itself
   swapRun('nested', (isTop, folder, name) => !isTop && path.basename(folder) === 'd1' && name !== 'deep'); // while a child folder is walked
@@ -415,6 +420,36 @@ test('Jim NIT a: a waiter that judged a lock stale does not remove the fresh loc
   assert.equal(JSON.parse(fs.readFileSync(owner, 'utf8')).token, 'fresh', 'the fresh lock is untouched');
   assert.deepEqual(fs.readdirSync(root), [`.lock-${D.NAME}`], 'no tombstone is left');
   fs.rmSync(owner); fs.rmdirSync(lock);
+});
+
+// Jim NIT (01:34Z): the branch where a lock that was not the stale one got moved aside and cannot go back.
+test('Jim NIT a2: a moved-aside lock that cannot be put back is left under its tomb name and said; the lock made meanwhile is untouched', () => {
+  const root = path.join(jail, 'putback-root');
+  const tree = path.join(root, D.NAME);
+  const lock = path.join(root, `.lock-${D.NAME}`);
+  const owner = path.join(lock, 'owner.json');
+  const hold = (token, startedMs) => { fs.mkdirSync(lock, { recursive: true }); fs.writeFileSync(owner, JSON.stringify({ pid: process.pid, token, startedMs })); };
+  hold('dead-one', Date.now() - D.LOCK_STALE_MS - 60_000);
+  const logs = [];
+  let moves = 0, ran = 0, tomb = null;
+  // Between this waiter's last look and its rename another waiter replaces the dead lock with its own
+  // ('second'), so the rename moves a live lock aside; before it can go back a third lock is made.
+  const rename = (from, to) => {
+    moves++;
+    if (moves === 1) { fs.rmSync(owner); fs.rmdirSync(lock); hold('second', Date.now()); tomb = to; fs.renameSync(from, to); hold('third', Date.now()); return; }
+    fs.renameSync(from, to);
+  };
+  assert.throws(() => D.withLock(tree, (m) => logs.push(m), () => { ran++; }, { waitMs: 30, rename, pause: () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20) }), /another process \(pid \d+\) has been building/);
+  assert.equal(moves, 2, 'one move aside and one try to put it back');
+  assert.equal(ran, 0, 'no builder ran');
+  assert.equal(JSON.parse(fs.readFileSync(owner, 'utf8')).token, 'third', 'the lock made meanwhile is untouched');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(tomb, 'owner.json'), 'utf8')).token, 'second', 'the moved lock is whole under its tomb name');
+  assert.deepEqual(fs.readdirSync(root).sort(), [path.basename(lock), path.basename(tomb)].sort());
+  assert.ok(path.basename(tomb).startsWith(`.lock-${D.NAME}.dead-`), 'a name the next ready run clears');
+  const said = logs.filter((m) => m.startsWith('a lock that was not the stale one got moved aside and could not be put back ('));
+  assert.equal(said.length, 1, logs.join('\n'));
+  assert.ok(said[0].endsWith(`; it is left at ${tomb}`), said[0]);
+  fs.rmSync(root, { recursive: true, force: true });
 });
 
 test('Jim NIT b: --rebuild adopts a kept build that verifies instead of clearing it and building again', () => {
@@ -463,9 +498,24 @@ test('Jim NIT d: a run that finds the tree ready clears what earlier runs left b
   assert.deepEqual(fs.readdirSync(root).sort(), [`.building-${D.NAME}-${process.ppid}`, D.NAME].sort(), 'the dead runs\' folders are gone; a live run\'s folder and the tree stay');
   assert.equal(fs.readFileSync(path.join(tree, 'MARK'), 'utf8'), 'first', 'a ready tree is never replaced by a kept build');
   assert.ok(logs.includes(`clearing what earlier runs left beside the ready tree at ${tree}`), logs.join('\n'));
+  fs.rmSync(path.join(root, `.building-${D.NAME}-${process.ppid}`), { recursive: true, force: true });
+  // Jim NIT (01:34Z): one try each. A leftover something still has open is said and left, never waited for.
+  const busy = path.join(root, `.tmp-${D.NAME}-4194300`);
+  fs.mkdirSync(busy);
+  fs.writeFileSync(path.join(busy, 'open'), 'x');
+  const fd = fs.openSync(path.join(busy, 'open'), 'r');
+  let pauses = 0;
+  logs.length = 0;
+  try { assert.equal(run({ log: (m) => logs.push(m), pause: () => { pauses++; } }), tree); } finally { fs.closeSync(fd); }
+  assert.equal(pauses, 0, 'the clear-up never waits to try a leftover again');
+  if (process.platform === 'win32') { // only there does an open file hold its folder
+    assert.ok(fs.existsSync(path.join(busy, 'open')), 'the held leftover is left whole');
+    assert.ok(logs.some((m) => m.startsWith(`could not clear ${busy} (`)), logs.join('\n'));
+  }
+  assert.equal(run(), tree); // nothing holds it now: the next ready run clears it
+  assert.deepEqual(fs.readdirSync(root), [D.NAME]);
   // nothing left to clear: no lock is taken, nothing is said
   logs.length = 0;
-  fs.rmSync(path.join(root, `.building-${D.NAME}-${process.ppid}`), { recursive: true, force: true });
   assert.equal(run({ log: (m) => logs.push(m) }), tree);
   assert.deepEqual(logs, []);
 });

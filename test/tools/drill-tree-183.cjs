@@ -231,13 +231,13 @@ function rmNoFollow(p, was, beforeChild) {
   try { fs.rmdirSync(p); } catch (e) { throw e.code === 'ENOENT' ? swapped(p) : e; }
 }
 let rmSeq = 0;
-function rmTree(p, { tries = 10, beforeChild = null } = {}) {
+function rmTree(p, { tries = 10, beforeChild = null, pause = sleep } = {}) {
   const hadNoAsar = process.noAsar;
   process.noAsar = true; // on Electron an .asar file would otherwise be listed as a folder
   try {
     const retry = (fn) => {
       for (let i = 1; ; i++) {
-        try { return fn(); } catch (e) { if (!RM_RETRY.has(e.code) || i >= tries) throw e; sleep(300); }
+        try { return fn(); } catch (e) { if (!RM_RETRY.has(e.code) || i >= tries) throw e; pause(300); }
       }
     };
     const st = entryAt(p);
@@ -249,7 +249,13 @@ function rmTree(p, { tries = 10, beforeChild = null } = {}) {
       // Whatever was moved is checked again inside: a link is unlinked, and only the folder seen above is walked.
       retry(() => { if (entryAt(tomb)) rmNoFollow(tomb, st, beforeChild); });
     } catch (e) {
-      try { if (!entryAt(p)) fs.renameSync(tomb, p); else e.message += ` (what is left of it is at ${tomb})`; } catch { e.message += ` (what is left of it is at ${tomb})`; }
+      // Only the folder that was moved goes back under the caller's name. Anything else now at the tomb
+      // (it was swapped) is not this removal's to place there: it stays where it is, and the error says where.
+      const left = ` (what is left of it is at ${tomb})`;
+      try {
+        const now = entryAt(tomb);
+        if (now && sameEntry(now, st) && !entryAt(p)) fs.renameSync(tomb, p); else if (now) e.message += left;
+      } catch { e.message += left; }
       throw e;
     }
   } finally { process.noAsar = hadNoAsar; }
@@ -292,7 +298,7 @@ const leftoverPid = (name) => Number((/-(\d+)(?:-\d+)?$/.exec(name) || [])[1]) |
  * runs left beside the tree. Returns true when a kept build is now the tree. A leftover whose process
  * is alive is left alone unless it is a finished build: under the lock nobody else is building.
  */
-function adoptOrClear(tree, { adopt, nativeProbe = nativeFault, log = () => {}, rename, tries } = {}) {
+function adoptOrClear(tree, { adopt, nativeProbe = nativeFault, log = () => {}, rename, tries, pause } = {}) {
   const parent = path.dirname(tree);
   let names = [];
   try { names = fs.readdirSync(parent); } catch { return false; }
@@ -309,7 +315,7 @@ function adoptOrClear(tree, { adopt, nativeProbe = nativeFault, log = () => {}, 
     } else if (!LEFTOVERS.slice(1).some((pre) => name.startsWith(pre))) continue;
     const pid = leftoverPid(name);
     if (pid && pid !== process.pid && alive(pid)) continue;
-    try { rmTree(p, { tries }); } catch (e) { log(`could not clear ${p} (${e.code || e.message})`); }
+    try { rmTree(p, { tries, pause }); } catch (e) { log(`could not clear ${p} (${e.code || e.message})`); }
   }
   return adopted;
 }
@@ -401,7 +407,7 @@ function alive(pid) { try { process.kill(pid, 0); return true; } catch (e) { ret
  * over when its owner's process has gone, and also once it is older than `staleMs` whatever the pid
  * says: a dead owner's pid can have been given to another live process, and no build takes that long.
  */
-function withLock(tree, log, fn, { waitMs = LOCK_WAIT_MS, staleMs = LOCK_STALE_MS, now = Date.now, pause = sleep } = {}) {
+function withLock(tree, log, fn, { waitMs = LOCK_WAIT_MS, staleMs = LOCK_STALE_MS, now = Date.now, pause = sleep, rename = fs.renameSync } = {}) {
   const lock = path.join(path.dirname(tree), `.lock-${NAME}`);
   const owner = path.join(lock, 'owner.json');
   const token = `${process.pid}-${crypto.randomBytes(8).toString('hex')}`;
@@ -422,10 +428,10 @@ function withLock(tree, log, fn, { waitMs = LOCK_WAIT_MS, staleMs = LOCK_STALE_M
   const takeOver = (judged) => {
     if (lockId(lock) !== judged) return;
     const tomb = `${lock}.dead-${token}`;
-    try { fs.renameSync(lock, tomb); } catch { return; }
+    try { rename(lock, tomb); } catch { return; }
     if (lockId(tomb) !== judged) {
       // Not removed: it may be a live run's lock. A later run that finds the tree ready clears it.
-      try { fs.renameSync(tomb, lock); } catch (e) { log(`a lock that was not the stale one got moved aside and could not be put back (${e.code || e.message}); it is left at ${tomb}`); }
+      try { rename(tomb, lock); } catch (e) { log(`a lock that was not the stale one got moved aside and could not be put back (${e.code || e.message}); it is left at ${tomb}`); }
       return;
     }
     try { rmTree(tomb); } catch { /* an empty leftover name; it is not the lock */ }
@@ -513,7 +519,7 @@ function ensureTree({ env = process.env, log = (m) => process.stderr.write(`[dri
       withLock(tree, log, () => {
         log(`clearing what earlier runs left beside the ready tree at ${tree}`);
         // One try each: a leftover something still has open is logged and left for a later run, not waited for.
-        adoptOrClear(tree, { adopt: false, nativeProbe, log, tries: 1 });
+        adoptOrClear(tree, { adopt: false, nativeProbe, log, tries: 1, pause });
       }, { ...lock, waitMs: 0 });
     } catch (e) { log(`leftovers beside ${tree} were not cleared (${e.code || e.message})`); }
   };
