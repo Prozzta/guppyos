@@ -46,7 +46,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # macos-15-intel beside macos-latest (arm64): the arm64 pool has repeatedly failed to hand out a
+        # runner. Both stay required; neither replaces the other.
+        os: [ubuntu-latest, macos-latest, macos-15-intel, windows-latest]
         caller: [sync, async, reaper]
     steps:
       - uses: actions/checkout@v4
