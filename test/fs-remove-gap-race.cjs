@@ -3,7 +3,7 @@
  * FS-REMOVE-READDIR-GAP-108: the race behind fs-remove-gap.test.cjs and the CI pin. Not a test
  * file by itself. It runs under plain Node and under Electron as Node, on Windows, Linux and macOS:
  *   <this file> race <impl> <base> <runs> <seconds>   remove a folder again and again while an agent attacks it
- *   <this file> plant <dir> <victim> <park> <stop>    the agent
+ *   <this file> plant <dir> <victim> <park> <stop> [follow]   the agent
  *   <this file> pin <racers> <runs> <seconds>         <racers> races at once for each of sync, async and reaper,
  *                                                     <runs> each: exit 0 only with every run done and 0 losses
  *                                                     (a fourth argument names the callers, e.g. `sync` or
@@ -24,6 +24,10 @@
  *   plant  a link to the victim at <dir>/a/j and <dir>/a/b/j (Jim's planter of 7604b62f)
  *   swap   rename <dir>, <dir>/a or <dir>/a/b away and put a link to the victim under that name.
  *          This is the gap itself: a real folder when it was checked, a link when it is listed.
+ * The reaper renames the folder to <dir>.reaping-<n> before it deletes it, which would take the tree out
+ * of this agent's reach. So against the reaper the agent follows: it works on the newest such name next
+ * to <dir> when there is one. The pin counts the agent's links per caller, and a caller the agent did
+ * not reach in more than a tenth of its runs fails the pin.
  */
 const child = require('node:child_process');
 const fs = require('node:fs');
@@ -33,13 +37,21 @@ const path = require('node:path');
 const LINK = process.platform === 'win32' ? 'junction' : 'dir';
 const VICTIM = ['v0.txt', 'v1.txt', 'v2.txt', 'v3.txt', 'v4.txt', path.join('sub', 's0.txt')];
 
-function plant(dir, victim, park, stop) {
+function plant(home, victim, park, stop, follow) {
   const out = { planted: 0, swapped: 0 };
-  const spots = [dir, path.join(dir, 'a'), path.join(dir, 'a', 'b')];
+  const parent = path.dirname(home), tomb = `${path.basename(home)}.reaping-`;
+  // The newest tombstone of `home`, when the caller renames before it deletes; else `home`.
+  const where = () => {
+    if (!follow) return home;
+    let names = []; try { names = fs.readdirSync(parent).filter((nm) => nm.startsWith(tomb)); } catch { /* not there now */ }
+    return names.length ? path.join(parent, names.sort().pop()) : home;
+  };
   let n = 0;
   while (!fs.existsSync(stop)) {
     const until = Date.now() + Math.random() * 3;
     while (Date.now() < until) { /* spin: a timer is too coarse for this window */ }
+    const dir = where();
+    const spots = [dir, path.join(dir, 'a'), path.join(dir, 'a', 'b')];
     if (Math.random() < 0.5) {
       for (const sub of ['a', path.join('a', 'b')]) {
         try { fs.symlinkSync(victim, path.join(dir, sub, 'j'), LINK); out.planted++; } catch { /* no folder now, or j is there */ }
@@ -122,7 +134,7 @@ async function race(impl, base, runs, seconds) {
   const trash = path.join(base, 'trash');
   for (const d of [work, path.join(victim, 'sub'), park, trash]) fs.mkdirSync(d, { recursive: true });
   const remove = remover(impl, work);
-  const kid = child.spawn(process.execPath, [__filename, 'plant', dir, victim, park, stop], { env: process.env, stdio: ['ignore', 'pipe', 'inherit'], windowsHide: true });
+  const kid = child.spawn(process.execPath, [__filename, 'plant', dir, victim, park, stop, ...(impl === 'reaper' ? ['follow'] : [])], { env: process.env, stdio: ['ignore', 'pipe', 'inherit'], windowsHide: true });
   let kidOut = '';
   kid.stdout.on('data', (d) => { kidOut += d; });
   const exited = new Promise((resolve) => kid.on('exit', resolve));
@@ -148,6 +160,7 @@ async function race(impl, base, runs, seconds) {
       for (const f of VICTIM) fs.writeFileSync(path.join(victim, f), 'x');
       // Built where the agent is not, then moved into place in one step.
       clear(stage); clear(dir);
+      if (impl === 'reaper') for (const nm of fs.readdirSync(work)) { if (nm.startsWith(`${path.basename(dir)}.reaping-`)) clear(path.join(work, nm)); }
       try {
         fs.mkdirSync(path.join(stage, 'a', 'b'), { recursive: true });
         for (let i = 0; i < 40; i++) fs.writeFileSync(path.join(stage, 'a', 'b', `f${i}`), 'y');
@@ -212,8 +225,8 @@ async function many(impls, racers, runs, seconds) {
 module.exports = { race, many, sweep, VICTIM };
 
 if (require.main === module) {
-  const [role, a, b, c, d] = process.argv.slice(2);
-  if (role === 'plant') plant(a, b, c, d);
+  const [role, a, b, c, d, e] = process.argv.slice(2);
+  if (role === 'plant') plant(a, b, c, d, e === 'follow');
   else if (role === 'race') {
     race(a, b, Number(c), Number(d))
       .then((out) => ({ ok: true, electron: process.versions.electron || null, node: process.versions.node, out }), (e) => ({ ok: false, error: String(e && e.stack || e) }))
@@ -229,8 +242,10 @@ if (require.main === module) {
       const failed = all.reduce((n, t) => n + t.failed, 0), attacks = all.reduce((n, t) => n + t.planted + t.swapped, 0);
       if (role === 'pin') {
         const want = impls.length * Number(a) * Number(b);
-        const ok = !failed && losses === 0 && runs === want && attacks > runs / 10;
-        say(`${ok ? 'PIN PASS' : 'PIN FAIL'}: ${res.runtime} on ${res.platform}: ${impls.join(', ')}: ${runs} of ${want} runs, ${losses} losses, ${attacks} links put in by the agent`);
+        // per caller: a caller the agent hardly reached proves nothing, whatever the others add up to
+        const reached = all.every((t) => t.planted + t.swapped > t.runs / 10);
+        const ok = !failed && losses === 0 && runs === want && reached;
+        say(`${ok ? 'PIN PASS' : 'PIN FAIL'}: ${res.runtime} on ${res.platform}: ${impls.join(', ')}: ${runs} of ${want} runs, ${losses} losses, ${attacks} links put in by the agent${reached ? '' : ' (TOO FEW for ' + impls.filter((i) => { const t = res.totals[i]; return !(t.planted + t.swapped > t.runs / 10); }).join(', ') + ')'}`);
         process.exitCode = ok ? 0 : 1;
       } else {
         const ok = !failed && losses > 0;
@@ -238,5 +253,5 @@ if (require.main === module) {
         process.exitCode = ok ? 0 : 1;
       }
     });
-  } else { console.error('usage: pin <racers> <runs> <seconds> [sync,async,reaper] | control <racers> <runs> <seconds> | race <sync|async|reaper|jswalk> <base> <runs> <seconds> | plant <dir> <victim> <park> <stop>'); process.exit(64); }
+  } else { console.error('usage: pin <racers> <runs> <seconds> [sync,async,reaper] | control <racers> <runs> <seconds> | race <sync|async|reaper|jswalk> <base> <runs> <seconds> | plant <dir> <victim> <park> <stop> [follow]'); process.exit(64); }
 }
