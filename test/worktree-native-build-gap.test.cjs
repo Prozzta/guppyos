@@ -68,7 +68,7 @@ test('inspect names every gap of a fresh tree; natives only on the platforms tha
   put(root, 'tools/patch-xterm-webgl-font.cjs', '//\n');
   const win = W.inspect(root, { platform: 'win32', spawnSyncFn: fakeSpawn(root) }).map((g) => g.id);
   assert.deepEqual(win, ['fs-handle', 'heavyjob', 'xterm'], 'a fresh Windows tree misses both natives and the addon');
-  assert.deepEqual(W.inspect(root, { platform: 'linux', spawnSyncFn: fakeSpawn(root) }).map((g) => g.id), ['xterm'], 'Linux builds neither native');
+  assert.deepEqual(W.inspect(root, { platform: 'linux', spawnSyncFn: fakeSpawn(root) }).map((g) => g.id), ['fs-handle', 'xterm'], 'Linux builds the fs-handle addon (the link-safe tree delete), not heavyjob');
   addon(root, 'PATCHED');
   builtNatives(root);
   assert.deepEqual(W.inspect(root, { platform: 'win32', spawnSyncFn: fakeSpawn(root) }), [], 'a complete tree has no gap');
@@ -195,7 +195,7 @@ function toolTree(t, tool) {
 const runTool = (root, tool) => require('node:child_process').spawnSync(process.execPath, [path.join(root, tool)], { cwd: root, encoding: 'utf8', windowsHide: true });
 const gapOf = (root, id) => W.inspect(root, { platform: 'win32', spawnSyncFn: fakeSpawn(root) }).find((g) => g.id === id);
 
-test('postinstall-style build: the real tools/build-fs-handle.cjs stamps its binary fresh; a source change after it reads stale', { skip: process.platform === 'linux' && 'no addon on Linux' }, (t) => {
+test('postinstall-style build: the real tools/build-fs-handle.cjs stamps its binary fresh; a source change after it reads stale', (t) => {
   const root = toolTree(t, 'tools/build-fs-handle.cjs');
   put(root, 'resources/fs-handle/guppy-fs-handle.c', 'int a;');
   // node-gyp and electron resolve from the jail's own node_modules: a fake gyp that "builds" the addon
@@ -230,7 +230,6 @@ test('the stamp records the sources the build STARTED from: a source edited duri
   // digest must already have been taken, so the recorded stamp no longer matches the sources.
   const cases = [['fs-handle', 'tools/build-fs-handle.cjs', 'resources/fs-handle/guppy-fs-handle.c', 'int a;']];
   if (process.platform === 'win32') cases.push(['heavyjob', 'tools/build-heavyjob.cjs', 'resources/heavyjob/guppy-heavyjob.cs', 'class P { static void Main() {} }']);
-  if (process.platform === 'linux') cases.shift(); // no addon on Linux
   for (const [id, tool, src, text] of cases) {
     const root = toolTree(t, tool);
     put(root, src, text);

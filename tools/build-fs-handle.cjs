@@ -7,10 +7,12 @@
  * prebuilt binary is committed. It is plain N-API, so the same file also loads in the Node that runs
  * the tests.
  *
- * Linux needs no addon (src/main/fs.ts reads /proc/self/fd), so there it only makes the empty folder.
- * Anywhere else a failed build fails the install: the app refuses every confined file access when the
- * addon is missing, so a build that "succeeds" without it would ship a file browser that cannot open
- * anything.
+ * Built on Linux too (FS-REMOVE-READDIR-GAP-108): src/main/fs.ts still reads /proc/self/fd there for
+ * the handle path, but the link-safe tree delete (removeTree) is this addon on every platform, and
+ * there is no JS walk to fall back to.
+ * A failed build fails the install: the app refuses every confined file access (Windows, macOS) and
+ * every tree delete (everywhere) when the addon is missing, so a build that "succeeds" without it
+ * would ship a file browser that cannot open anything and a cleanup that keeps every folder.
  */
 const { mkdirSync, copyFileSync, rmSync, statSync } = require('node:fs');
 const { join } = require('node:path');
@@ -27,10 +29,6 @@ const OUT_DIR = join(SRC_DIR, 'bin');
 const NAME = 'guppy_fs_handle.node';
 
 mkdirSync(OUT_DIR, { recursive: true });
-if (process.platform === 'linux') {
-  console.log('[build-fs-handle] Linux uses /proc/self/fd: skipped');
-  process.exit(0);
-}
 
 const electronVersion = require('electron/package.json').version;
 // electron-rebuild 4 uses the upstream node-gyp package. Resolving its executable from the

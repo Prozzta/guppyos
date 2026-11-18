@@ -4,24 +4,26 @@ require('./tools/own-job.cjs');
 require('./tools/mutant-runner-helper.cjs').gate(__filename);
 
 /**
- * ELECTRON-RMSYNC-REAPER-108: scripts/worktree-reaper.cjs deletes a tree without following a link.
+ * ELECTRON-RMSYNC-REAPER-108, FS-REMOVE-READDIR-GAP-108: scripts/worktree-reaper.cjs deletes a
+ * tree without following a link.
  *
  * Agents run the reaper through $HIVE_NODE or the shim, which is Electron as Node. There a
  * recursive fs.rmSync deletes THROUGH a Windows junction and empties the folder it points at
- * (RUNTIME PIN in electron-rmsync-link-safe.test.cjs). The script used to rely on its removeLinks
- * pre-pass alone and then call a recursive rmSync; now the delete is a walk of its own
- * (removeTree) that removes a link as a link.
+ * (RUNTIME PIN in electron-rmsync-link-safe.test.cjs), and a JS walk on paths can be made to
+ * follow a link that appears between two of its calls. So the delete is the fs-handle addon's
+ * removeTree, and without the addon the tree is kept: there is no JS walk.
  *
  * The fixture is a folder to reap with a junction at its top and one nested, each pointing at a
  * victim outside it, a read-only file and a link whose target is gone. It is reaped four times:
- * the script as it is, and with the removeLinks pre-pass taken out, each in this process and in
- * the installed Guppy.exe as Node (worktree-reaper-link-safe-child.cjs). Everything is under one
+ * the script as it is, and with a remover that found no build, each in this process and in the
+ * installed Guppy.exe as Node (worktree-reaper-link-safe-child.cjs). Everything is under one
  * temp folder; no git is run and nothing outside the temp folder is named.
  *
- * RED ON BASE: "no-prepass ... Electron" (the recursive rmSync empties both victims).
  * MUTANTS:
- *   R1 removeTree(tomb, ops) -> the recursive ops.rmSync    -> no-prepass, Electron; SOURCE
- *   R2 removeTree lstatSync -> statSync (follows the link)  -> no-prepass, both runtimes; SOURCE
+ *   R1 rm.removeTree(p) in removeEntry -> ops.rmSync(p, { recursive: true, force: true })
+ *        -> real, Electron (both victims emptied); links count; SOURCE
+ *   R2 the refusal in applyReap -> if (false)           -> no-addon, both runtimes
+ *   R3 removeEntry's lstatSync -> statSync              -> SOURCE
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -29,7 +31,7 @@ const child = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { run, SRC } = require('./worktree-reaper-link-safe-child.cjs');
+const { run, SRC, NO_ADDON } = require('./worktree-reaper-link-safe-child.cjs');
 
 const jail = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'reaper-link-safe-'));
 
@@ -64,13 +66,7 @@ function build(base) {
   link(goneTarget, path.join(tree, 'src', 'dangling')); fs.rmdirSync(goneTarget);
 }
 
-function check(base, variant, out) {
-  const work = path.join(base, 'work');
-  assert.equal(out.length, 1);
-  assert.deepEqual({ name: out[0].name, result: out[0].result, error: out[0].error }, { name: 'old-tree', result: 'deleted', error: undefined }, JSON.stringify(out));
-  assert.equal(out[0].links, variant === 'real' ? 3 : 0, 'the pre-pass counted the links (or was taken out)');
-  assert.deepEqual(fs.readdirSync(work).sort(), ['_reaped-md'], 'the tree is gone and no tombstone is left');
-  assert.equal(fs.readFileSync(path.join(work, '_reaped-md', 'old-tree', 'notes.md'), 'utf8'), 'a note', 'its .md was archived first');
+function victimsIntact(base) {
   for (const name of VICTIMS) {
     const d = path.join(base, 'live', name);
     assert.deepEqual(fs.existsSync(d) ? fs.readdirSync(d, { recursive: true }).map((f) => f.split(path.sep).join('/')).sort() : 'gone',
@@ -79,18 +75,40 @@ function check(base, variant, out) {
   }
 }
 
+function check(base, variant, out) {
+  const work = path.join(base, 'work');
+  assert.equal(out.length, 1);
+  if (variant === 'no-addon') {
+    // Kept exactly as it was: not renamed, not archived, nothing in it touched.
+    assert.deepEqual(out[0], { name: 'old-tree', result: 'refused', error: `addon unavailable: ${NO_ADDON.reason}` });
+    assert.deepEqual(fs.readdirSync(work), ['old-tree'], 'no tombstone and no archive');
+    const tree = path.join(work, 'old-tree');
+    assert.deepEqual(fs.readdirSync(tree).sort(), ['a.txt', 'node_modules', 'notes.md', 'src']);
+    assert.deepEqual(fs.readdirSync(path.join(tree, 'src')).sort(), ['dangling', 'deep', 'locked.bin']);
+    for (const l of ['node_modules', 'src/deep/assets', 'src/dangling']) assert.equal(fs.lstatSync(path.join(tree, l)).isSymbolicLink(), true, `${l} is still a link`);
+    victimsIntact(base);
+    return;
+  }
+  assert.deepEqual({ name: out[0].name, result: out[0].result, error: out[0].error }, { name: 'old-tree', result: 'deleted', error: undefined }, JSON.stringify(out));
+  assert.equal(out[0].links, 3, 'the remover counted the links it removed as links');
+  assert.deepEqual(fs.readdirSync(work).sort(), ['_reaped-md'], 'the tree is gone and no tombstone is left');
+  assert.equal(fs.readFileSync(path.join(work, '_reaped-md', 'old-tree', 'notes.md'), 'utf8'), 'a note', 'its .md was archived first');
+  victimsIntact(base);
+}
+
 // The runner jails LOCALAPPDATA; the shared helper finds the installed app read-only or gives a skip reason.
 const guppy = require('./tools/installed-guppy.cjs').installedGuppy();
 const exe = guppy.exe;
 
-for (const variant of ['real', 'no-prepass']) {
-  test(`${variant}: the reaped tree's links are removed as links, their targets survive (this process)`, { skip: process.platform !== 'win32' }, () => {
+const TITLE = { real: "real: the reaped tree's links are removed as links, their targets survive", 'no-addon': 'no-addon: the tree is refused and kept as it was, links and targets untouched' };
+for (const variant of ['real', 'no-addon']) {
+  test(`${TITLE[variant]} (this process)`, { skip: process.platform !== 'win32' }, () => {
     const base = path.join(jail, `${variant}-node`);
     build(base);
     check(base, variant, run(variant, base));
   });
 
-  test(`${variant}: the reaped tree's links are removed as links, their targets survive, in the installed Electron as Node`, { skip: guppy.skip }, () => {
+  test(`${TITLE[variant]}, in the installed Electron as Node`, { skip: guppy.skip }, () => {
     const base = path.join(jail, `${variant}-electron`);
     build(base);
     assert.equal(fs.existsSync(exe), true, `installed Guppy executable missing: ${exe}`);
@@ -104,14 +122,17 @@ for (const variant of ['real', 'no-prepass']) {
   });
 }
 
-test('SOURCE: the reaper has no recursive rm, rmSync, rmdir or rmdirSync; applyReap deletes with removeTree', () => {
+test('SOURCE: the reaper has no recursive rm, no rmSync and no tree walk of its own; a folder goes to the addon', () => {
   const source = fs.readFileSync(SRC, 'utf8').replace(/\r\n/g, '\n');
   const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
   assert.deepEqual(code.match(/\b(?:rm|rmSync|rmdir|rmdirSync)\s*\([^;]*\brecursive\b[^;]*/g) || [], [], 'no recursive remove call');
   assert.doesNotMatch(code, /\brmSync\b/, 'no rmSync at all');
-  assert.equal(code.split('removeTree(tomb, ops);').length - 1, 1, 'applyReap deletes the tombstone with removeTree');
-  const body = /function removeTree\(p, ops\) \{\n([\s\S]*?)\n\}\n/.exec(code);
-  assert.ok(body, 'removeTree is there');
-  assert.match(body[1], /ops\.lstatSync\(p\)/, 'it judges each entry with lstat');
-  assert.doesNotMatch(body[1], /\bstatSync\(|realpath/, 'never a call that follows the link');
+  assert.doesNotMatch(code, /function removeTree\(|function removeLinks\(/, 'the JS walk and the link pre-pass are gone');
+  assert.equal(code.split('links = removeEntry(tomb, ops, ').length - 1, 1, 'applyReap deletes the tombstone with removeEntry');
+  const body = /function removeEntry\(p, ops, remover\) \{\n([\s\S]*?)\n\}\n/.exec(code);
+  assert.ok(body, 'removeEntry is there');
+  assert.match(body[1], /const st = ops\.lstatSync\(p\);/, 'it judges the entry with lstat');
+  assert.doesNotMatch(body[1], /\bstatSync\(|realpath|readdir/, 'never a call that follows the link, and no listing: the addon lists');
+  assert.equal(body[1].split('rm.removeTree(p)').length - 1, 1, 'a real folder is deleted by the addon, in one place');
+  assert.match(body[1], /if \(!rm\.removeTree\) throw /, 'and never without it');
 });
