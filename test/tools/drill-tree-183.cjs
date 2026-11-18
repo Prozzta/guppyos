@@ -42,6 +42,7 @@ const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
+const { nodeEnv } = require('./node-env.cjs');
 
 const ROOT = path.join(__dirname, '..', '..');
 const TAG = 'v1.1.83';
@@ -148,8 +149,11 @@ function baseEnv(env, extra = {}) {
   return { ...out, ...extra };
 }
 
-function step(what, cmd, args, opts) {
-  const r = spawnSync(cmd, args, { encoding: 'utf8', windowsHide: true, timeout: STEP_MS, maxBuffer: 256 * 1024 * 1024, ...opts });
+function step(what, cmd, args, opts = {}) {
+  // A node step's env goes through nodeEnv (TEST-EXECPATH-ENV-108). That is a no-op today: build() is
+  // refused on Electron as Node (hostFault), so process.execPath here is always node.
+  const env = cmd === process.execPath ? nodeEnv(opts.env) : opts.env;
+  const r = spawnSync(cmd, args, { encoding: 'utf8', windowsHide: true, timeout: STEP_MS, maxBuffer: 256 * 1024 * 1024, ...opts, env });
   if (r.status === 0) return r;
   const tail = String(`${r.stdout || ''}\n${r.stderr || ''}`).trim().split(/\r?\n/).slice(-25).join('\n');
   throw new Error(`${what} failed (exit ${r.status}${r.signal ? `, ${r.signal}` : ''}${r.error ? `, ${r.error.message}` : ''}):\n${tail}`);
