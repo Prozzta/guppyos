@@ -42,8 +42,8 @@ async function floor(t) {
   process.env.HOME = home;
   process.env.USERPROFILE = home;
   const hive = new HiveManager(() => home);
-  t.after(() => {
-    hive.dispose();
+  t.after(async () => {
+    hive.dispose(); await hive.drainReads();
     for (const [k, v] of Object.entries(prior)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
     fs.rmSync(home, { recursive: true, force: true, maxRetries: 5 });
   });

@@ -42,7 +42,7 @@ function proxyBridgeBound(injection, agentDir) {
 
 test('crush: light theme writes options.tui.transparent and COLORFGBG', async (t) => {
   const home = tmpHome();
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   const hive = new HiveManager(() => home);
   t.after(() => { try { hive.stopAllProxyBridges(); } catch { /* already gone */ } });
 
@@ -59,7 +59,7 @@ test('crush: light theme writes options.tui.transparent and COLORFGBG', async (t
 
 test('crush: dark theme sends the dark hint and still goes transparent', async (t) => {
   const home = tmpHome();
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   const hive = new HiveManager(() => home);
   t.after(() => { try { hive.stopAllProxyBridges(); } catch { /* already gone */ } });
 
@@ -75,7 +75,7 @@ test('crush: dark theme sends the dark hint and still goes transparent', async (
 
 test('no theme passed: no hint, no options block (old behaviour)', async (t) => {
   const home = tmpHome();
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   const hive = new HiveManager(() => home);
   t.after(() => { try { hive.stopAllProxyBridges(); } catch { /* already gone */ } });
 
@@ -88,7 +88,7 @@ test('no theme passed: no hint, no options block (old behaviour)', async (t) => 
 
 test('opencode: theme lands in the per agent config dir as the system theme', async (t) => {
   const home = tmpHome();
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   const hive = new HiveManager(() => home);
 
   const injection = await hive.ensureAgent(

@@ -44,7 +44,7 @@ function rig(t, tasks) {
   const hotPath = path.join(root, 'tasks.json');
   if (tasks) fs.writeFileSync(hotPath, JSON.stringify({ tasks }, null, 2));
   const hive = new HiveManager(() => home);
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true, maxRetries: 5 }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true, maxRetries: 5 }); });
   const hot = () => JSON.parse(fs.readFileSync(hotPath, 'utf8')).tasks;
   const archiveLines = () => {
     const dir = path.join(root, 'tasks-archive');

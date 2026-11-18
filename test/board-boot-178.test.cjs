@@ -83,7 +83,7 @@ test('S1: a pty exit from one source wins over a fresh boot orphan from the othe
 function monitorRig(t, M = MONITOR) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'md-board-boot-'));
   const hive = new HiveManager(() => home);
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   hive.ensureHive();
   const root = hive.root();
   fs.writeFileSync(path.join(root, 'registry.json'), JSON.stringify({ godId: null, agents: {} }, null, 2));

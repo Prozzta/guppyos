@@ -116,7 +116,7 @@ test('the guard never writes tasks.json, even with errors in it (M6)', (t) => {
 function hiveRig(t) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'md-ledger-guard-hive-'));
   const hive = new HiveManager(() => home);
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   hive.ensureHive();
   const file = path.join(hive.root(), 'tasks.json');
   fs.writeFileSync(file, JSON.stringify({ tasks: [card('A'), card('B')] }, null, 2));

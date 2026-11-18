@@ -72,7 +72,7 @@ async function floor(t, providers) {
   hive.registry = () => { const r0 = reg(); const r = { ...r0, agents: { ...r0.agents } }; for (const [id, p] of Object.entries(providers)) r.agents[id] = { ...r.agents[id], provider: p }; return r; };
   const control = { takeSteer: () => null, shouldHalt: () => false, toolDecision: () => ({ deny: false }) };
   const server = new HookServer(hive, () => null, () => ({ notifications: false }), control, undefined, undefined, () => {});
-  t.after(() => { try { server.stop(); } catch { /* noop */ } hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { try { server.stop(); } catch { /* noop */ } hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   server.start();
   for (let i = 0; i < 200 && server.hookBrokerPort() === null; i++) await new Promise((r) => setTimeout(r, 5));
   assert.notEqual(server.hookBrokerPort(), null, 'the hook broker is listening');

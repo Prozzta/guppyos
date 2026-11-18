@@ -154,7 +154,7 @@ async function floor(t, cfg = {}) {
   const home = fs.mkdtempSync(path.join(JAIL, 'floor-'));
   const hive = new HiveManager(() => home, () => true);
   const server = { current: null };
-  t.after(() => { try { server.current?.stop(); } catch { /* noop */ } hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { try { server.current?.stop(); } catch { /* noop */ } hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   await hive.ensureAgent({ id: 'god-1', name: 'Michael', provider: 'claude', cwd: home, isGod: true });
   await hive.ensureAgent({ id: 'jim-1', name: 'Jim', provider: 'claude', cwd: home });
   await hive.ensureAgent({ id: 'cl-1', name: 'cl-1', provider: 'claude', cwd: home });

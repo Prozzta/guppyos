@@ -38,7 +38,7 @@ function proxyBridgeBound(injection, agentDir) {
 
 test('crush provider points CRUSH_GLOBAL_CONFIG at the agent directory', async (t) => {
   const home = tmpHome();
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
 
   const hive = new HiveManager(() => home);
   // ensureAgent on a proxy-tier provider spawns a real hive-proxy sidecar

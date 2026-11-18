@@ -260,7 +260,7 @@ async function server(t, limit) {
   process.env.HOME = home; process.env.USERPROFILE = home;
   assert.equal(os.homedir(), home, 'HOME jailed before any hive');
   const hive = new HiveManager(() => home);
-  t.after(() => { if (ph === undefined) delete process.env.HOME; else process.env.HOME = ph; if (pu === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = pu; hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { if (ph === undefined) delete process.env.HOME; else process.env.HOME = ph; if (pu === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = pu; hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   for (const id of ['a1', 'a2']) await hive.ensureAgent({ id, name: id, provider: 'claude', cwd: home });
   const control = { takeSteer: () => null, shouldHalt: () => false, toolDecision: () => ({ deny: false }) };
   const s = new HookServer(hive, () => null, () => ({ notifications: false }), control, undefined);

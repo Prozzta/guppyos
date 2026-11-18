@@ -44,7 +44,7 @@ function fakeOwner(decide = () => 'COMMITTED') {
 
 async function floor(t, { decide } = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'md-inbox-wake-'));
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   const immediates = [];
   const intervals = [];
   const watchers = new Map();

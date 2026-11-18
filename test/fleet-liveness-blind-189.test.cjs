@@ -168,7 +168,7 @@ K.rosterSaysSilent = async ({ HIVE: H = HIVE }) => {
     const line = hive.rosterContext();
     assert.match(line, /dwight "Dwight" \(agent, WORKING [^,]+, SILENT 3\.8 h \(no hook, no tool call\), active /, 'ROSTER: A SILENT WORKING TURN IS NAMED ON THE LIVE ROSTER');
     assert.doesNotMatch(line.slice(line.indexOf('andy "Andy"')), /^[^\n]*SILENT/, 'a long tool call is not named silent');
-  } finally { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); }
+  } finally { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); }
 };
 
 for (const [name, fn] of Object.entries(K)) test(`FLEET-LIVENESS-BLIND: ${name}`, () => fn({ ST, D, B, HIVE }));

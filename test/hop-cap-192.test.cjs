@@ -32,10 +32,10 @@ async function floor(t) {
   process.env.USERPROFILE = home;
   assert.equal(require('node:os').homedir(), home, 'HOME redirected before any hive object exists');
   const hive = new HiveManager(() => home, () => {});
-  t.after(() => {
+  t.after(async () => {
     if (priorHome === undefined) delete process.env.HOME; else process.env.HOME = priorHome;
     if (priorUserProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = priorUserProfile;
-    try { hive.dispose(); } catch { /* disposed by the test */ }
+    try { hive.dispose(); } catch { /* disposed by the test */ } await hive.drainReads();
     fs.rmSync(home, { recursive: true, force: true });
   });
   await hive.ensureAgent({ id: 'god-1', name: 'Michael', provider: 'claude', cwd: home, isGod: true });
