@@ -609,12 +609,6 @@ export interface ProvenMailOptions {
   known?: (id: string) => boolean;
 }
 
-/**
- * The messages a hive's primary records prove were delivered (see the header): main's MailLedger
- * entries (the body only when an inbox copy hashes to the entry's bodyHash), and inbox / inbox/.done
- * copies the sender's outbox/.sent copy matches (same recipient or broadcast, subject and body;
- * sender and recipient different agents). Every other copy is counted in `excluded` by reason.
- */
 /** Addresses that are not agent ids and reach god: 'god' itself, 'human' (god is the Human's
  *  proxy here) and 'breaker'. BREAKER-REPLY-UNDELIVERABLE-108: the circuit breaker's mails are
  *  requests from the sender id 'breaker' and tell the agent to take its answer to god, so an
@@ -624,6 +618,12 @@ export const GOD_ADDRESSES: ReadonlySet<string> = new Set(['god', 'human', 'brea
 /** The agent id a direct `to` is delivered to. */
 export const resolveMailTo = (to: string, godId: string): string => (GOD_ADDRESSES.has(to) ? godId : to);
 
+/**
+ * The messages a hive's primary records prove were delivered (see the header): main's MailLedger
+ * entries (the body only when an inbox copy hashes to the entry's bodyHash), and inbox / inbox/.done
+ * copies the sender's outbox/.sent copy matches (same recipient or broadcast, subject and body;
+ * sender and recipient different agents). Every other copy is counted in `excluded` by reason.
+ */
 export function readProvenMail(hiveRoot: string): { mails: BackfillMail[]; excluded: Record<string, number> } {
   const { mails, excluded } = drain(provenMailSteps(hiveRoot));
   return { mails, excluded };
