@@ -5,6 +5,7 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const Module = require('node:module');
 const vm = require('node:vm');
 
 const ROOT = path.join(__dirname, '..');
@@ -81,7 +82,7 @@ test('post-cut probe runs Electron as Node and loads both native modules', () =>
   assert.match(cut, /check-cut-natives\.cjs/);
 });
 
-function runPackagedProbe(addonExports, { inheritedEnv = {}, missingArchiveDependency = false } = {}) {
+function runPackagedProbe(contract, addonExports, { inheritedEnv = {}, missingArchiveDependency = false } = {}) {
   const tmp = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'cut-native-'));
   try {
     const resources = path.join(tmp, 'resources');
@@ -123,34 +124,31 @@ function runPackagedProbe(addonExports, { inheritedEnv = {}, missingArchiveDepen
       }
       return result;
     };
-    const status = fsHandleContract.main(process.execPath, modules, { spawn, env: inheritedEnv });
+    const status = contract.main(process.execPath, modules, { spawn, env: inheritedEnv });
     return { status, invoked, addonPaths, result };
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 }
 
-test('packaged probe rejects the 1.1.107 fs-handle exports and accepts the current addon', () => {
+function assertPackagedProbeContract(contract) {
   const v107 = { finalPath() {}, procOpen() {}, procAlive() {}, procClose() {}, procAdopt() {} };
-  const current = Object.fromEntries(fsHandleContract.FS_HANDLE_REQUIRED_EXPORTS.map((name) => [name, () => {}]));
-  assert.deepEqual(fsHandleContract.missingFsHandleExports(v107), ['posixRename', 'posixRenameAsync']);
-  assert.deepEqual(fsHandleContract.missingFsHandleExports(current), []);
+  const current = Object.fromEntries(contract.FS_HANDLE_REQUIRED_EXPORTS.map((name) => [name, () => {}]));
+  assert.deepEqual(contract.missingFsHandleExports(v107), ['posixRename', 'posixRenameAsync']);
+  assert.deepEqual(contract.missingFsHandleExports(current), []);
 
-  const oldProbe = runPackagedProbe(v107);
+  const oldProbe = runPackagedProbe(contract, v107);
   assert.equal(oldProbe.status, 1);
   assert.match(oldProbe.invoked.options.env.ELECTRON_RUN_AS_NODE, /1/);
   assert.match(oldProbe.invoked.args[1], /process\.dlopen/);
   assert.equal(oldProbe.addonPaths.length, 1);
   assert.match(oldProbe.result.stderr, /CUT FS-HANDLE MISSING EXPORTS: posixRename, posixRenameAsync/);
 
-  const currentProbe = runPackagedProbe(current);
+  const currentProbe = runPackagedProbe(contract, current);
   assert.equal(currentProbe.status, 0);
   assert.equal(currentProbe.addonPaths.length, 1);
-});
 
-test('packaged probe reaches the archive dependency and rejects inherited NODE_PATH', () => {
-  const current = Object.fromEntries(fsHandleContract.FS_HANDLE_REQUIRED_EXPORTS.map((name) => [name, () => {}]));
-  const probe = runPackagedProbe(current, {
+  const probe = runPackagedProbe(contract, current, {
     inheritedEnv: { nOdE_pAtH: 'would-mask-missing-cut-dependency' },
     missingArchiveDependency: true
   });
@@ -158,4 +156,29 @@ test('packaged probe reaches the archive dependency and rejects inherited NODE_P
   assert.doesNotMatch(Object.keys(probe.invoked.options.env).join(','), /node_path/i);
   assert.match(probe.result.stderr, /missing-cut-dependency/);
   assert.equal(probe.addonPaths.length, 1);
+}
+
+test('packaged probe rejects the 1.1.107 fs-handle exports and accepts the current addon', () => {
+  assertPackagedProbeContract(fsHandleContract);
+});
+
+function mutatedProbeContract(needle, replacement) {
+  assert.ok(check.includes(needle), `mutation target not found: ${needle}`);
+  const mutant = new Module(path.join(ROOT, 'scripts', 'check-cut-natives-mutant.cjs'), module);
+  mutant.filename = path.join(ROOT, 'scripts', 'check-cut-natives-mutant.cjs');
+  mutant.paths = Module._nodeModulePaths(ROOT);
+  mutant._compile(check.replace(needle, replacement), mutant.filename);
+  return mutant.exports;
+}
+
+test('N, T, F, and D mutations each fail the packaged probe contract', () => {
+  const mutants = [
+    ['N', "deleteEnvCaseInsensitive(env, 'NODE_PATH');", "deleteEnvCaseInsensitive(env, 'NODE_PATH_MUTANT');"],
+    ['T', 'if (fsHandleMissing.length)', 'if (false && fsHandleMissing.length)'],
+    ['F', 'JSON.stringify(FS_HANDLE_REQUIRED_EXPORTS)', 'JSON.stringify([])'],
+    ['D', 'process.dlopen(fsHandle, ${JSON.stringify(fsHandleAddon)});', 'void fsHandle;']
+  ];
+  for (const [name, needle, replacement] of mutants) {
+    assert.throws(() => assertPackagedProbeContract(mutatedProbeContract(needle, replacement)), assert.AssertionError, `${name} mutant must fail`);
+  }
 });
