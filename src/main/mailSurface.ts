@@ -194,6 +194,20 @@ export function mailSurfaceEvents(provider: AgentProvider | undefined): Readonly
 const AGY_EVENTS: ReadonlySet<string> = new Set(['PreInvocation']);
 const CLAUDE_CODEX_EVENTS: ReadonlySet<string> = new Set(['UserPromptSubmit', 'PostToolUse']);
 
+/**
+ * MAIL-POSITIVE-RECEIPT (1.1.108): may a reply flushed inside the limit confirm an
+ * evidence-provider's mail with no evidence (the N1 fallback)? Never over http or mcp. Those
+ * clients (Claude Code, Codex) give up after MAIL_HTTP_HOOK_TIMEOUT_MS on their own clock, which
+ * they cannot send us. Our latency runs from the moment the main thread READ the request to
+ * 'finish', and 'finish' only means the reply was handed to the kernel. A main thread stalled
+ * before the read measures a few milliseconds for a reply whose client left long ago; if that
+ * client kept its socket open the reply still "flushes". The pipe shim reports its own elapsed
+ * time with the request, so the pipe measure includes the wait and keeps the fallback.
+ */
+export function mailLatencyAloneConfirms(transport: string | undefined): boolean {
+  return transport !== 'http' && transport !== 'mcp';
+}
+
 /** §11.1: the latest a response may leave the harness and still count as delivered. */
 export function mailLatencyLimitMs(transport: string | undefined): number {
   return transport === 'http' || transport === 'mcp' ? MAIL_HTTP_LATENCY_LIMIT_MS : MAIL_PIPE_LATENCY_LIMIT_MS;

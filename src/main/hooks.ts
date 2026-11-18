@@ -38,7 +38,7 @@ import { MAIL_STALE_EPOCH_MS, MAIL_UNCONFIRMED_FALLBACK_AFTER, type MailEntry, t
 import {
   MAIL_EVIDENCE_SCAN_BACK_BYTES, MAIL_EVIDENCE_SCAN_MAX_BYTES, MAIL_JOINED_BUDGET, MAIL_PIPE_HOOK_TIMEOUT_MS,
   buildMailBlock, buildMailHeaders, effectiveMailCap, escapeMailText, isSlashPrompt, mailBudgetFor, mailCapCut, mailCapExempt, mailChannelMode,
-  mailEvidenceIn, mailEvidenceKind, mailLatencyLimitMs, mailSurfaceEvents, readFileWindow, shimElapsedMs,
+  mailEvidenceIn, mailEvidenceKind, mailLatencyAloneConfirms, mailLatencyLimitMs, mailSurfaceEvents, readFileWindow, shimElapsedMs,
   type MailBlock, type MailBlockItem, type MailChannelMode, type MailEvidenceKind
 } from './mailSurface';
 import { ALWAYS_WAKE_SENDERS } from '../shared/mailWakeClass';
@@ -1680,7 +1680,8 @@ export class HookServer {
    * (`mail-surface-late`). Otherwise:
    *  - latency-evidence providers (AGY and any channel without a readable record): confirmed;
    *  - evidence providers: only the N1 fallback ids are confirmed here (`latency-fallback`, with
-   *    `mail-evidence-missing` and the UI notice); the rest wait for the transcript / rollout.
+   *    `mail-evidence-missing` and the UI notice), and only over the pipe; the rest, and every
+   *    id over http/mcp (MAIL-POSITIVE-RECEIPT), wait for the transcript / rollout.
    */
   settleMailClaims(claims: MailClaim[], receivedAt: number, flushedAt: number | null): void {
     const mail = this.hive.mail;
@@ -1702,6 +1703,11 @@ export class HookServer {
       try {
         if (c.evidence === 'latency') {
           mail.confirmSurfaced(c.agentId, c.ids, c.epoch, 'latency');
+        } else if (c.fallbackIds.length && !mailLatencyAloneConfirms(c.transport)) {
+          // MAIL-POSITIVE-RECEIPT: over http/mcp only the agent's own record confirms. These ids
+          // stay `surfacing`: evidence found before the turn ends confirms them, otherwise the
+          // close re-surfaces them with the marker (a marked duplicate at worst, never a loss).
+          mail.noteEvidenceMissing(c.agentId, c.fallbackIds, c.epoch, c.evidence, false);
         } else if (c.fallbackIds.length) {
           const done = mail.confirmSurfaced(c.agentId, c.fallbackIds, c.epoch, 'latency-fallback');
           if (done.length) mail.noteEvidenceMissing(c.agentId, done, c.epoch, c.evidence);
