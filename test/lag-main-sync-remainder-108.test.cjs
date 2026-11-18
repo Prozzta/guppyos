@@ -222,6 +222,64 @@ test('digest runs that overlap wake god once, and a run under way when the diges
   assert.ok(fs.existsSync(path.join(stopped, 'floor-digest.md')));
 });
 
+/** Hold one node:fs/promises call (the first whose path matches) until release(): the call has
+ *  started and has not answered. `seen()` resolves once it is held. */
+function holdFsp(t, name, matches) {
+  const fsp = require('node:fs/promises');
+  const real = fsp[name];
+  let release; let held; let count = 0;
+  const gate = new Promise((r) => { release = r; });
+  const reached = new Promise((r) => { held = r; });
+  fsp[name] = async (p, ...rest) => {
+    if (!matches(String(p)) || count++ > 0) return real(p, ...rest);
+    held();
+    await gate;
+    return real(p, ...rest);
+  };
+  t.after(() => { fsp[name] = real; release(); });
+  return { seen: () => reached, release, count: () => count };
+}
+
+test('a digest stopped while its woken state is being read does not wake god or save state', async (t) => {
+  const root = fs.mkdtempSync(path.join(JAIL, 'stop-read-'));
+  const r = digestRig(root, [flag('A', 'STALE', true)]);
+  await r.digest.run();
+  const stateFile = path.join(root, 'state', 'digest-woken.json');
+  const stateBefore = fs.readFileSync(stateFile, 'utf8');
+  r.clock.now += 10 * MIN;
+  // The batch window is over: this run wakes god unless it is stopped. Hold its read of the
+  // woken state, which comes after the digest file is written.
+  const read = holdFsp(t, 'readFile', (p) => path.resolve(p) === path.resolve(stateFile));
+  const under_way = r.digest.run();
+  await read.seen();
+  r.digest.stop();
+  read.release();
+  assert.deepEqual(await under_way, [], 'the stopped run answers with no wake');
+  assert.deepEqual([r.sent.length, fs.readFileSync(stateFile, 'utf8') === stateBefore], [0, true], 'god not woken, the saved state untouched');
+  assert.equal(read.count(), 1, 'the held read is the run\'s (the test is not vacuous)');
+  assert.equal((await r.digest.run()).length, 1, 'the same run, not stopped, wakes god');
+});
+
+test('a digest write withdrawn by a stop is not remembered as written: the next start writes the file', async (t) => {
+  const root = fs.mkdtempSync(path.join(JAIL, 'stop-write-'));
+  const r = digestRig(root, [flag('A', 'STALE', true)]);
+  t.after(() => r.digest.stop());
+  const md = path.join(root, 'floor-digest.md');
+  const write = holdFsp(t, 'writeFile', (p) => path.resolve(p).startsWith(path.resolve(md) + '.tmp-'));
+  const under_way = r.digest.run();
+  await write.seen();
+  // A stop and a start while the temp file is being written: the old run's write is withdrawn.
+  r.digest.stop();
+  r.digest.start();
+  write.release();
+  await under_way;
+  // The run start() asked for goes after the withdrawn one; one more behind it has seen it end.
+  await r.digest.run();
+  assert.ok(fs.existsSync(md), 'the digest, unchanged since the withdrawn write, is written after the start');
+  assert.deepEqual(fs.readdirSync(root).filter((n) => n.includes('.tmp-')), [], 'the withdrawn temp file is removed');
+  assert.deepEqual(r.logged.filter((row) => row.kind !== 'floor-digest-wake'), [], 'no write failed');
+});
+
 // ── path 4: hive:log ────────────────────────────────────────────────────────────────────────
 test('the async log tail answers as the synchronous one, rotated files included, with no synchronous fs', async (t) => {
   const { hive, root } = await floor(t);
@@ -252,6 +310,26 @@ test('the async log tail answers as the synchronous one, rotated files included,
   const bare = new HiveManager(() => fs.mkdtempSync(path.join(JAIL, 'bare-')), () => false);
   t.after(() => bare.dispose());
   assert.deepEqual(await bare.logTailAsync(10), [], 'no hive: no rows');
+});
+
+test('a tail window that starts mid-line drops the cut row: every row answered is whole, sync and async', async (t) => {
+  const { hive, root } = await floor(t);
+  await hive.flushLog?.();
+  const WINDOW = 256 * 1024;
+  const text = Array.from({ length: 600 }, (_, i) => JSON.stringify({ kind: 'big', seq: i, pad: 'x'.repeat(700 + (i % 7)) })).join('\n') + '\n';
+  const live = path.join(root, 'log.jsonl');
+  fs.writeFileSync(live, text, 'utf8');
+  const size = fs.statSync(live).size;
+  assert.ok(size > WINDOW && size < 4 * WINDOW, `the log is over one window and under four: ${size}`);
+  const windowText = text.slice(size - WINDOW);
+  assert.notEqual(text[size - WINDOW - 1], '\n', 'the first window starts in the middle of a row');
+  // Whole rows in the first window. Asking for one more is the case that would hand back the cut row.
+  const whole = windowText.slice(windowText.indexOf('\n') + 1).split('\n').filter(Boolean).length;
+  for (const n of [whole - 1, whole, whole + 1, whole + 2]) {
+    for (const [how, rows] of [['sync', hive.logTail(n)], ['async', await hive.logTailAsync(n)]]) {
+      assert.deepEqual(rows.map((r) => [r.kind, r.seq, r.raw]), Array.from({ length: n }, (_, i) => ['big', 600 - n + i, undefined]), `${how} n=${n}: the last ${n} rows, each whole JSON`);
+    }
+  }
 });
 
 // ── path 5: memory-sources.json ─────────────────────────────────────────────────────────────
