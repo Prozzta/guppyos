@@ -2305,8 +2305,10 @@ function claimsBootstrapStatus(): { ok: boolean; line: string; state: ReturnType
 }
 // CLAIMS-REKEY-ENTRYPOINT-108: `claims rekey --floor <hive folder>`, god's command. The only caller of
 // ClaimStore.rekey(); it runs on the Human's yes in this dialog and on nothing else.
+// One god check for the claims command: the handler's gate and the rekey command share it.
+const claimsCallerIsGod = (agentId: string): boolean => hive.isGod(agentId);
 const rekeyCommand = new RekeyCommand({
-  isGod: (agentId) => hive.isGod(agentId),
+  isGod: claimsCallerIsGod,
   floorRoot: () => hive.root(),
   store: () => claimsEndpoint()?.store ?? null,
   confirm: async (q, signal) => {
@@ -2316,7 +2318,8 @@ const rekeyCommand = new RekeyCommand({
     const opts = { type: 'warning' as const, buttons: [q.ok, 'Cancel'], defaultId: 1, cancelId: 1, title: q.title, message: q.message, detail: q.detail, noLink: true, signal };
     const shown = win && !win.isDestroyed() ? win : null;
     // The Human must see it: a minimized window, or one behind the god terminal, would let the time run out.
-    if (shown) { try { if (shown.isMinimized()) shown.restore(); shown.show(); shown.focus(); shown.flashFrame(true); } catch { /* the dialog is still shown */ } }
+    // surfaceWindow is the one seam for the DEV_HIDDEN rule; nothing here shows a window directly.
+    try { surfaceWindow(shown, { show: true, restore: true, focus: true }); shown?.flashFrame(true); } catch { /* the dialog is still shown */ }
     try {
       const r = shown ? await dialog.showMessageBox(shown, opts) : await dialog.showMessageBox(opts);
       return r.response === 0;
@@ -2327,7 +2330,7 @@ const rekeyCommand = new RekeyCommand({
   log: (row) => hive.appendLog(row),
 });
 hookServer.setClaimsHandler(async (agentId, body) => {
-  if (!hive.isGod(agentId)) return { status: 403, body: { ok: false, line: 'refused: the claims command is god-only' } };
+  if (!claimsCallerIsGod(agentId)) return { status: 403, body: { ok: false, line: 'refused: the claims command is god-only' } };
   const action = body && typeof body === 'object' && !Array.isArray(body) ? (body as Record<string, unknown>).action : null;
   if (action === 'status') return { status: 200, body: claimsBootstrapStatus() };
   if (action === 'rekey') return rekeyCommand.handle(agentId, body);

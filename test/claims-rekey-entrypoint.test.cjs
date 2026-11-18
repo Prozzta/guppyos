@@ -327,7 +327,7 @@ test('E1 (red before): the entry point exists and is the only caller of rekey()'
   }
   const index = lf('src/main/index.ts');
   assert.ok(index.includes("  if (action === 'rekey') return rekeyCommand.handle(agentId, body);\n"), 'main routes the rekey action to the command');
-  assert.ok(index.includes("const rekeyCommand = new RekeyCommand({\n  isGod: (agentId) => hive.isGod(agentId),\n  floorRoot: () => hive.root(),\n  store: () => claimsEndpoint()?.store ?? null,\n"), 'the command is wired to god, this floor and its store');
+  assert.ok(index.includes("const claimsCallerIsGod = (agentId: string): boolean => hive.isGod(agentId);\nconst rekeyCommand = new RekeyCommand({\n  isGod: claimsCallerIsGod,\n  floorRoot: () => hive.root(),\n  store: () => claimsEndpoint()?.store ?? null,\n"), 'the command is wired to god, this floor and its store');
   // One caller: nothing else under src/ runs a rekey, so nothing can run it without the Human.
   const callers = [];
   // Code lines only: a comment that names rekey() is not a call.
@@ -464,7 +464,9 @@ test('E7: both alerts and COMMANDS.md name the exact command; a hidden run never
   assert.ok(wiring.includes('return r.response === 0;'), 'only the first button is a yes');
   assert.ok(wiring.includes('signal };'), 'the dialog closes when the time runs out');
   // Jim NIT d: the window is restored and brought to the front BEFORE the dialog is shown.
-  const front = wiring.indexOf('if (shown.isMinimized()) shown.restore(); shown.show(); shown.focus(); shown.flashFrame(true);');
+  const front = wiring.indexOf('try { surfaceWindow(shown, { show: true, restore: true, focus: true }); shown?.flashFrame(true); }');
+  assert.ok(!/\.(show|restore|focus)\(\)/.test(wiring), 'only through surfaceWindow, the one seam for the hidden rule');
+  assert.ok(index.includes("  if (!claimsCallerIsGod(agentId)) return { status: 403, body: { ok: false, line: 'refused: the claims command is god-only' } };"), 'the handler gate uses the same god check');
   assert.ok(front > 0 && front < wiring.indexOf('dialog.showMessageBox('), 'the parent window is brought to the front first');
   assert.ok(wiring.indexOf('    if (DEV_HIDDEN) return false;') < front, 'and never in a hidden run');
   // The CLI cannot confirm for the Human: it sends the floor and nothing else.
