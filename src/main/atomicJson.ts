@@ -37,6 +37,7 @@ export function hasInflightRead(p: string): boolean { return inflightReads.has(r
 
 type RenameAddon = { posixRename(src: string, dst: string): void; posixRenameAsync?(src: string, dst: string): Promise<void> };
 let renameAddon: RenameAddon | null | undefined;
+let renameAddonReason: string | null = null;
 /** The fs-handle addon's posixRename and posixRenameAsync (Windows), or null when it cannot load. Never throws. */
 function loadRenameAddon(): RenameAddon | null {
   if (renameAddon !== undefined) return renameAddon;
@@ -50,19 +51,33 @@ function loadRenameAddon(): RenameAddon | null {
     join(__dirname, '..', '..', 'resources', 'fs-handle', 'bin', 'guppy_fs_handle.node')
   ];
   const found = candidates.find((c) => existsSync(c));
-  if (!found) return null;
+  if (!found) { renameAddonReason = `not found at ${candidates.join(' or ')}`; return null; }
   try {
     const mod = { exports: {} as { posixRename?: unknown } };
     process.dlopen(mod, found);
     if (typeof mod.exports.posixRename === 'function') renameAddon = mod.exports as RenameAddon;
+    else {
+      renameAddonReason = `${found} lacks required posixRename export`;
+      console.error(`[atomicJson] POSIX rename unavailable, using plain rename: ${renameAddonReason}`);
+    }
   } catch (e) {
-    console.error(`[atomicJson] POSIX rename unavailable, using plain rename: ${e instanceof Error ? e.message : String(e)}`);
+    renameAddonReason = e instanceof Error ? e.message : String(e);
+    console.error(`[atomicJson] POSIX rename unavailable, using plain rename: ${renameAddonReason}`);
   }
   return renameAddon;
 }
 
+/** The packaged-addon capability R1 needs; the reason identifies a stale loaded addon. */
+export function renameAddonCapability(): { available: boolean; reason?: string } {
+  const addon = loadRenameAddon();
+  return addon ? { available: true } : { available: false, reason: renameAddonReason ?? 'POSIX rename addon unavailable' };
+}
+
 /** Test hook: replace (or with null, disable) the POSIX rename; undefined restores the addon. */
-export function __setRenameAddonForTest(addon: RenameAddon | null | undefined): void { renameAddon = addon; }
+export function __setRenameAddonForTest(addon: RenameAddon | null | undefined): void {
+  renameAddon = addon;
+  renameAddonReason = addon === null ? 'disabled by test' : null;
+}
 
 /**
  * Rename `tmp` onto `target`. On Windows the primary path is the fs-handle addon's POSIX rename
