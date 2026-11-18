@@ -1166,7 +1166,7 @@ const api = {
     ipcRenderer.invoke('kg:search', query, limit),
   kgGet: (id: string): Promise<{ meta: KnowledgeDoc; text: string } | null> =>
     ipcRenderer.invoke('kg:get', id),
-  kgRemove: (id: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('kg:remove', id),
+  kgRemove: (id: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('kg:remove', id),
   /** Open an OS file picker and ingest the chosen artifacts in one round-trip. */
   kgAddFiles: (): Promise<KnowledgeIngestResult> => ipcRenderer.invoke('kg:addFiles'),
   /** Ingest explicit file paths (e.g. drag-and-drop). */

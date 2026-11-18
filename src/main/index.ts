@@ -7042,8 +7042,11 @@ ipcMain.handle('kg:search', (_evt, query: unknown, limit: unknown) => {
 });
 ipcMain.handle('kg:get', (_evt, id: unknown) =>
   (typeof id === 'string' && id ? knowledge.get(id) : null));
-ipcMain.handle('kg:remove', (_evt, id: unknown) =>
-  ({ ok: typeof id === 'string' && id ? knowledge.remove(id) : false }));
+ipcMain.handle('kg:remove', (_evt, id: unknown) => {
+  // The remove refuses (throws) when the link-safe remover is unavailable: answer with the reason.
+  try { return { ok: typeof id === 'string' && id ? knowledge.remove(id) : false }; }
+  catch (e) { return { ok: false, error: (e as Error).message }; }
+});
 // Ingest one or more files from disk. Best-effort per file; returns per-file
 // results so the UI can report partial success.
 ipcMain.handle('kg:ingestFiles', async (_evt, payload: unknown) => {

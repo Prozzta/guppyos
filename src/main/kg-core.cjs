@@ -386,7 +386,9 @@ function loadRemover(candidates = removerCandidates(), open = openAddon) {
  * A link in place of the folder is removed as a link, a file as a file. A real folder goes to the
  * fs-handle addon's removeTree, which opens each folder once without following a link and empties
  * it through that handle. There is no JS walk to fall back to: without the addon the folder is
- * kept, with one line saying so, and the error is thrown.
+ * kept, with one line saying so, and the error is thrown. That refusal is NOT added to the app's
+ * count of refused removes (fsSafeRemove.ts): this file cannot load it. The line and the thrown
+ * error are all there is.
  */
 function removeDocDir(p, load = loadRemover) {
   const st = fs.lstatSync(p);
