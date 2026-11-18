@@ -251,6 +251,8 @@ function rmTree(p, { tries = 10, beforeChild = null, pause = sleep } = {}) {
     } catch (e) {
       // Only the folder that was moved goes back under the caller's name. Anything else now at the tomb
       // (it was swapped) is not this removal's to place there: it stays where it is, and the error says where.
+      // A narrow window is left: the look, the compare and the rename are three calls on a name, so a swap
+      // between the compare and the rename still moves a foreign entry to p. Closing it needs a rename by handle.
       const left = ` (what is left of it is at ${tomb})`;
       try {
         const now = entryAt(tomb);
@@ -431,7 +433,11 @@ function withLock(tree, log, fn, { waitMs = LOCK_WAIT_MS, staleMs = LOCK_STALE_M
     try { rename(lock, tomb); } catch { return; }
     if (lockId(tomb) !== judged) {
       // Not removed: it may be a live run's lock. A later run that finds the tree ready clears it.
-      try { rename(tomb, lock); } catch (e) { log(`a lock that was not the stale one got moved aside and could not be put back (${e.code || e.message}); it is left at ${tomb}`); }
+      // It goes back only to a free name. rename(2) replaces an EMPTY folder, and a waiter that has made
+      // the lock folder but not yet written its owner record is exactly that: putting this lock over it
+      // would leave two holders (Windows refuses the rename; Mac and Linux do it). A waiter can still make
+      // the lock between this look and the rename; that window is left, and it needs a no-replace rename.
+      try { if (entryAt(lock)) throw new Error('a newer lock is there'); rename(tomb, lock); } catch (e) { log(`a lock that was not the stale one got moved aside and could not be put back (${e.code || e.message}); it is left at ${tomb}`); }
       return;
     }
     try { rmTree(tomb); } catch { /* an empty leftover name; it is not the lock */ }

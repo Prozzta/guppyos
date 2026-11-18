@@ -423,32 +423,78 @@ test('Jim NIT a: a waiter that judged a lock stale does not remove the fresh loc
 });
 
 // Jim NIT (01:34Z): the branch where a lock that was not the stale one got moved aside and cannot go back.
-test('Jim NIT a2: a moved-aside lock that cannot be put back is left under its tomb name and said; the lock made meanwhile is untouched', () => {
-  const root = path.join(jail, 'putback-root');
+// A waiter judged a dead lock, and between its last look and its rename another waiter replaced that
+// lock with its own ('second'): the rename moves a live lock aside. `after` runs once that move is done.
+const movedLiveLock = (name, after, check) => {
+  const root = path.join(jail, name);
   const tree = path.join(root, D.NAME);
   const lock = path.join(root, `.lock-${D.NAME}`);
   const owner = path.join(lock, 'owner.json');
   const hold = (token, startedMs) => { fs.mkdirSync(lock, { recursive: true }); fs.writeFileSync(owner, JSON.stringify({ pid: process.pid, token, startedMs })); };
   hold('dead-one', Date.now() - D.LOCK_STALE_MS - 60_000);
   const logs = [];
-  let moves = 0, ran = 0, tomb = null;
-  // Between this waiter's last look and its rename another waiter replaces the dead lock with its own
-  // ('second'), so the rename moves a live lock aside; before it can go back a third lock is made.
+  const seen = { moves: 0, ran: 0, tomb: null };
   const rename = (from, to) => {
-    moves++;
-    if (moves === 1) { fs.rmSync(owner); fs.rmdirSync(lock); hold('second', Date.now()); tomb = to; fs.renameSync(from, to); hold('third', Date.now()); return; }
+    seen.moves++;
+    if (seen.moves === 1) { fs.rmSync(owner); fs.rmdirSync(lock); hold('second', Date.now()); seen.tomb = to; fs.renameSync(from, to); after({ lock, hold }); return; }
     fs.renameSync(from, to);
   };
-  assert.throws(() => D.withLock(tree, (m) => logs.push(m), () => { ran++; }, { waitMs: 30, rename, pause: () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20) }), /another process \(pid \d+\) has been building/);
-  assert.equal(moves, 2, 'one move aside and one try to put it back');
-  assert.equal(ran, 0, 'no builder ran');
-  assert.equal(JSON.parse(fs.readFileSync(owner, 'utf8')).token, 'third', 'the lock made meanwhile is untouched');
-  assert.equal(JSON.parse(fs.readFileSync(path.join(tomb, 'owner.json'), 'utf8')).token, 'second', 'the moved lock is whole under its tomb name');
+  assert.throws(() => D.withLock(tree, (m) => logs.push(m), () => { seen.ran++; }, { waitMs: 30, rename, pause: () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20) }), /has been building/);
+  assert.equal(seen.ran, 0, 'no builder ran');
+  const tokenAt = (dir) => JSON.parse(fs.readFileSync(path.join(dir, 'owner.json'), 'utf8')).token;
+  const said = logs.filter((m) => m.startsWith('a lock that was not the stale one got moved aside and could not be put back ('));
+  check({ root, lock, owner, tokenAt, said, logs, ...seen });
+  fs.rmSync(root, { recursive: true, force: true });
+};
+const leftAtTomb = ({ root, lock, tomb, tokenAt, said, logs }, why) => {
+  assert.equal(tokenAt(tomb), 'second', 'the moved lock is whole under its tomb name');
   assert.deepEqual(fs.readdirSync(root).sort(), [path.basename(lock), path.basename(tomb)].sort());
   assert.ok(path.basename(tomb).startsWith(`.lock-${D.NAME}.dead-`), 'a name the next ready run clears');
-  const said = logs.filter((m) => m.startsWith('a lock that was not the stale one got moved aside and could not be put back ('));
   assert.equal(said.length, 1, logs.join('\n'));
-  assert.ok(said[0].endsWith(`; it is left at ${tomb}`), said[0]);
+  assert.equal(said[0], `a lock that was not the stale one got moved aside and could not be put back (${why}); it is left at ${tomb}`);
+};
+
+test('Jim NIT a2: a moved-aside lock is not put back over a lock made meanwhile; it is left under its tomb name and said', () => {
+  movedLiveLock('putback-third', ({ hold }) => hold('third', Date.now()), (r) => {
+    assert.equal(r.moves, 1, 'one move aside, and no try to put it back over a lock');
+    assert.equal(r.tokenAt(r.lock), 'third', 'the lock made meanwhile is untouched');
+    leftAtTomb(r, 'a newer lock is there');
+  });
+});
+
+test('Jim 03:49Z NIT 2: a moved-aside lock is not put back over a lock folder whose owner is not written yet (rename replaces an empty folder on Mac and Linux)', () => {
+  movedLiveLock('putback-empty', ({ lock }) => fs.mkdirSync(lock), (r) => {
+    assert.equal(r.moves, 1, 'one move aside, and no try to put it back over a lock');
+    assert.deepEqual(fs.readdirSync(r.lock), [], 'the half-made lock is still its maker\'s: nothing was put over it');
+    leftAtTomb(r, 'a newer lock is there');
+  });
+});
+
+test('Jim NIT a2: a moved-aside lock goes back to a free name; one that cannot is left under its tomb name and said', () => {
+  movedLiveLock('putback-free', () => {}, (r) => {
+    assert.equal(r.moves, 2, 'one move aside and one move back');
+    assert.equal(r.tokenAt(r.lock), 'second', 'the live lock is back');
+    assert.deepEqual(fs.readdirSync(r.root), [path.basename(r.lock)]);
+    assert.equal(r.said.length, 0, r.logs.join('\n'));
+  });
+  // The name is free but the move back is refused: the lock stays at its tomb and that is said. The name
+  // being free, this run then takes the lock itself and its builder runs.
+  const root = path.join(jail, 'putback-refused');
+  const lock = path.join(root, `.lock-${D.NAME}`);
+  const logs = [];
+  let moves = 0, tomb = null, ran = 0;
+  fs.mkdirSync(lock, { recursive: true });
+  fs.writeFileSync(path.join(lock, 'owner.json'), JSON.stringify({ pid: process.pid, token: 'dead-one', startedMs: Date.now() - D.LOCK_STALE_MS - 60_000 }));
+  const rename = (from, to) => {
+    moves++;
+    if (moves === 1) { fs.rmSync(path.join(lock, 'owner.json')); fs.rmdirSync(lock); fs.mkdirSync(lock); fs.writeFileSync(path.join(lock, 'owner.json'), JSON.stringify({ pid: process.pid, token: 'second', startedMs: Date.now() })); tomb = to; fs.renameSync(from, to); return; }
+    throw Object.assign(new Error('refused'), { code: 'EPERM' });
+  };
+  D.withLock(path.join(root, D.NAME), (m) => logs.push(m), () => { ran++; }, { waitMs: 30, rename, pause: () => {} });
+  assert.equal(moves, 2, 'one move aside and one try to put it back');
+  assert.equal(ran, 1, 'the name was free, so this run took the lock');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(tomb, 'owner.json'), 'utf8')).token, 'second', 'the moved lock is whole under its tomb name');
+  assert.deepEqual(logs.filter((m) => m.includes('could not be put back')), [`a lock that was not the stale one got moved aside and could not be put back (EPERM); it is left at ${tomb}`]);
   fs.rmSync(root, { recursive: true, force: true });
 });
 
