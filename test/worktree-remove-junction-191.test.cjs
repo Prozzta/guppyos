@@ -155,6 +155,33 @@ test('a worktree with no links, or already gone: removeWorktree behaves as befor
   assert.notEqual(again.refused, true, 'a missing worktree is not a link refusal');
 });
 
+test('removeWorktree refuses a foreign worktree, a link root, and the primary clone before unlinking anything (A23)', async (t) => {
+  const ours = setup(t);
+  const foreign = setup(t);
+  const foreignLinkTarget = foreign.target('foreign-shared');
+  const foreignLink = path.join(foreign.wt, 'node_modules');
+  fs.symlinkSync(foreignLinkTarget, foreignLink, 'junction');
+  const wrongRepo = await git.removeWorktree(ours.repo, foreign.wt);
+  assert.equal(wrongRepo.refused, true, 'a worktree registered to another repository is refused');
+  assert.equal(fs.existsSync(foreignLink), true, 'the foreign worktree was not touched');
+  assert.equal(fs.existsSync(sentinel(foreignLinkTarget)), true, 'its junction target survives');
+
+  const rootLink = path.join(ours.base, 'wt-link');
+  fs.symlinkSync(ours.wt, rootLink, 'junction');
+  const linkedRoot = await git.removeWorktree(ours.repo, rootLink);
+  assert.equal(linkedRoot.refused, true, 'a path that is itself a junction is refused');
+  assert.equal(fs.existsSync(rootLink), true, 'the root junction remains');
+  assert.equal(fs.existsSync(path.join(ours.wt, 'a.txt')), true, 'its target worktree remains');
+
+  const mainTarget = ours.target('main-shared');
+  const mainLink = path.join(ours.repo, 'node_modules');
+  fs.symlinkSync(mainTarget, mainLink, 'junction');
+  const primary = await git.removeWorktree(ours.repo, ours.repo);
+  assert.equal(primary.refused, true, 'the primary clone is never a removable linked worktree');
+  assert.equal(fs.existsSync(mainLink), true, 'the primary clone was not pre-unlinked');
+  assert.equal(fs.existsSync(sentinel(mainTarget)), true, 'the primary clone junction target survives');
+});
+
 test('the worker scratch dir (removeWorkerScratch): the removal it makes takes a junction inside as a link, THE TARGET SURVIVES on Node and on Electron', async (t) => {
   // The safety claim (data loss if it fails), on whichever runtime runs this file: the suite runs it
   // under Node and under Electron as Node. index.ts cannot be loaded in a test, so this makes the one
