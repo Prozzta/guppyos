@@ -10,7 +10,7 @@ require('./tools/own-job.cjs');
  *
  *  1. THE TREE: test/tools/execpath-env-lint.cjs finds every spawn of process.execPath in test/,
  *     tools/ and scripts/ whose env is not visibly process.env-derived or wrapped in nodeEnv()
- *     (test/tools/node-env.cjs). Any finding fails here, naming file:line and why.
+ *     (tools/node-env.cjs). Any finding fails here, naming file:line and why.
  *  2. TEETH: the lint flags each unsafe shape (allowlist, parameter, this.env, a deleted key, a rest
  *     destructure, an alias, a helper fed [process.execPath, ...]) and passes each safe one. Jim's
  *     audit shapes each have their own subtest: a parameter used as the command, destructured /
@@ -39,7 +39,7 @@ test('THE TREE: every spawn of process.execPath keeps ELECTRON_RUN_AS_NODE under
   const r = scan(REPO);
   assert.ok(r.checked > 50, `the scan reached the tree (${r.checked} files mention process.execPath)`);
   assert.deepEqual(r.findings.map((f) => `${f.file}:${f.line}  ${f.why}`), [],
-    'A SPAWN OF process.execPath WHOSE ENV MAY LACK ELECTRON_RUN_AS_NODE: under the Electron leg it starts a real Electron app. Wrap the env in nodeEnv() from test/tools/node-env.cjs');
+    'A SPAWN OF process.execPath WHOSE ENV MAY LACK ELECTRON_RUN_AS_NODE: under the Electron leg it starts a real Electron app. Wrap the env in nodeEnv() from tools/node-env.cjs');
 });
 
 test('TEETH: each unsafe env shape is a finding', () => {
@@ -106,6 +106,58 @@ test('TEETH (Jim SHOULD): each shape the first lint missed is a finding', async 
     const r = scan(root);
     assert.deepEqual(r.findings.map((f) => `${f.file}:${f.line}`).sort(), ['test/alias.cjs:3', 'test/fork.cjs:2']);
   });
+});
+
+test('TEETH (Jim 01-35-58 NIT 1): Reflect.deleteProperty and rest-parameter helpers; the command guard is narrow', async (t) => {
+  const unsafe = {
+    'Reflect.deleteProperty of the key on a copy': "const env = { ...process.env }; Reflect.deleteProperty(env, 'ELECTRON_RUN_AS_NODE'); spawn(process.execPath, [], { env });",
+    'Reflect.deleteProperty of the key on process.env': "Reflect.deleteProperty(process.env, 'ELECTRON_RUN_AS_NODE'); spawnSync(process.execPath, ['-v']);",
+    'Reflect.deleteProperty of a computed key in a loop': "const env = { ...process.env }; for (const k of ['A', 'ELECTRON_RUN_AS_NODE']) Reflect.deleteProperty(env, k); spawn(process.execPath, [], { env });",
+    'a rest-parameter helper': "function run(...a) { return spawnSync(a[0], a[1], { env: { PATH: 'x' } }); } run(process.execPath, ['-v']);",
+    'a rest-parameter helper after a fixed parameter': "const run = (label, ...a) => spawnSync(a[0], a.slice(1), { env: { PATH: 'x' } }); run('v', process.execPath, '-v');",
+    'a guard on another variable than the command': "function run(cmd, other, env) { return spawnSync(cmd, [], { env: other === process.execPath ? nodeEnv(env) : env }); } run(process.execPath, 'x', { PATH: 'x' });",
+    'a guard whose raw arm is the execPath arm': "function run(cmd, env) { return spawnSync(cmd, [], { env: cmd !== process.execPath ? nodeEnv(env) : env }); } run(process.execPath, { PATH: 'x' });"
+  };
+  for (const [name, body] of Object.entries(unsafe)) {
+    await t.test(name, () => {
+      const f = lint(body);
+      assert.equal(f.length, 1, `${name}: ${JSON.stringify(f)}`);
+    });
+  }
+  const safe = {
+    'Reflect.deleteProperty of another key': "const env = { ...process.env }; Reflect.deleteProperty(env, 'NODE_OPTIONS'); spawn(process.execPath, [], { env });",
+    'a rest-parameter helper with nodeEnv': "function run(...a) { return spawnSync(a[0], a[1], { env: nodeEnv({ PATH: 'x' }) }); } run(process.execPath, ['-v']);",
+    'a rest-parameter helper called with another command': "function run(...a) { return spawnSync(a[0], a[1], { env: { PATH: 'x' } }); } run('git', ['status']);",
+    'a guard that wraps only when the command is process.execPath (build-trial)': "function run(command, args, env) { return spawnSync(command, args, { env: command === process.execPath ? nodeEnv(env) : env }); } run(process.execPath, ['x'], { PATH: 'x' });",
+    'a negated guard': "function run(cmd, env) { return spawnSync(cmd, [], { env: cmd !== process.execPath ? env : nodeEnv(env) }); } run(process.execPath, { PATH: 'x' });"
+  };
+  for (const [name, body] of Object.entries(safe)) {
+    await t.test(`safe: ${name}`, () => assert.deepEqual(lint(body), [], name));
+  }
+});
+
+test('LAYOUT (Jim 01-35-58 NIT 2): nodeEnv lives in tools/; no tools/ or scripts/ file requires from test/', () => {
+  assert.equal(require('../tools/node-env.cjs').nodeEnv, nodeEnv, 'test/tools/node-env.cjs re-exports tools/node-env.cjs');
+  const bad = [];
+  for (const d of ['tools', 'scripts']) {
+    const walk = (dir) => {
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (e.name === 'node_modules' || e.name.startsWith('.')) continue;
+        const p = path.join(dir, e.name);
+        if (e.isDirectory()) { walk(p); continue; }
+        if (!/\.(c?js|mjs|ts)$/.test(e.name)) continue;
+        const text = fs.readFileSync(p, 'utf8');
+        if (/require\(\s*['"`](\.\.\/)+test\/|from\s+['"`](\.\.\/)+test\//.test(text)) bad.push(path.relative(REPO, p).replace(/\\/g, '/'));
+      }
+    };
+    walk(path.join(REPO, d));
+  }
+  assert.deepEqual(bad, [], 'a tool or script depends on a test helper');
+});
+
+test('build-trial: only a process.execPath spawn gets nodeEnv (Jim 01-35-58 NIT 2)', () => {
+  const src = fs.readFileSync(path.join(REPO, 'tools', 'build-trial.cjs'), 'utf8');
+  assert.match(src, /env: command === process\.execPath \? nodeEnv\(env\) : env/);
 });
 
 test('TEETH: each safe env shape passes, and an electron.exe launch is not matched', () => {
