@@ -1783,7 +1783,7 @@ export class ClaimStore {
    * that key id. Refused for an agent whose prev chain is broken or that has a MAC failure under a
    * key that still loads (a forgery: G1.8). Never automatic.
    */
-  async rekey(confirmedByHuman: true): Promise<{ ok: boolean; keyId?: string; rekeyed: string[]; refused: Array<{ agentId: string; why: string }> }> {
+  async rekey(confirmedByHuman: true): Promise<{ ok: boolean; keyId?: string; recorded?: boolean; rekeyed: string[]; refused: Array<{ agentId: string; why: string }> }> {
     if (confirmedByHuman !== true) return { ok: false, rekeyed: [], refused: [] };
     let agents: string[] = [];
     try { agents = nodeFs.readdirSync(join(this.d.hiveRoot, 'agents')).filter((a) => AGENT_RE.test(a) && this.segments(a).length > 0); } catch { agents = []; }
@@ -1844,12 +1844,16 @@ export class ClaimStore {
       this.keyMissing = false;
       this.alerted.delete('key-missing');
     } else {
-      if (failed.length === 0) for (const a of rekeyed) refused.push({ agentId: a, why: `the new key id could not be recorded (${recErr}); retry the rekey` });
+      // Jim SHOULD (98544096): whatever kept the key id from being recorded, NO ledger is rekeyed in
+      // effect: each still reads key-missing. A ledger whose line was written is reported as refused,
+      // never as rekeyed, so god and the Human are not told that a read-only ledger works.
+      const why = recErr === 'skipped' ? 'the rekey append of another ledger failed' : recErr;
+      for (const a of rekeyed) refused.push({ agentId: a, why: `not in effect: the key id was not recorded (${why}), retry the rekey` });
       this.keyMissing = true;
       for (const a of eligible) this.state.delete(a);
     }
-    this.log({ kind: 'claims-rekey', keyId: made.keyId, recorded: recErr === null, rekeyed, refused });
-    return { ok: refused.length === 0, keyId: made.keyId, rekeyed, refused };
+    this.log({ kind: 'claims-rekey', keyId: made.keyId, recorded: recErr === null, rekeyed: recErr === null ? rekeyed : [], written: rekeyed, refused });
+    return { ok: refused.length === 0, keyId: made.keyId, recorded: recErr === null, rekeyed: recErr === null ? rekeyed : [], refused };
   }
 
   /** The tail (head hash, last id, every id) when every line parses and every prev matches; else why not. */

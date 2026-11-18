@@ -4,7 +4,9 @@
  * this client cannot confirm anything itself. */
 'use strict';
 const http = require('http');
-const EXIT = { ok: 0, refused: 1, usage: 2, unavailable: 3, timeout: 4 };
+// partial: the rekey RAN and is not complete or not in effect (the lines name each refused ledger).
+// refused: nothing ran (not god, wrong floor, the Human said no or did not answer, nothing to rekey).
+const EXIT = { ok: 0, refused: 1, usage: 2, unavailable: 3, timeout: 4, partial: 5 };
 const USAGE = 'usage: claims bootstrap [--status] | claims rekey --floor <hive folder>\n';
 // The Human has 5 minutes to answer main's dialog (rekeyCommand.ts REKEY_CONFIRM_MS); the rekey follows.
 const REKEY_TIMEOUT_MS = 10 * 60000;
@@ -30,17 +32,21 @@ function post(urlText, body, timeout = 120000) {
     req.on('error', (e) => resolve({ status: 0, error: String(e && e.code || e) })); req.end(data);
   });
 }
-async function main(argv, env, io = { out: (s) => process.stdout.write(s), err: (s) => process.stderr.write(s) }) {
+async function main(argv, env, io = { out: (s) => process.stdout.write(s), err: (s) => process.stderr.write(s) }, { rekeyTimeoutMs = REKEY_TIMEOUT_MS } = {}) {
   let a; try { a = parseArgs(argv); } catch (e) { io.err(`claims: ${e.message}\n${USAGE}`); return EXIT.usage; }
   if (a.help) { io.out(USAGE); return EXIT.ok; }
   if (!env.HIVE_CLAIMS_URL) { io.err('claims: unavailable (HIVE_CLAIMS_URL is not set: the claims command is god-only)\n'); return EXIT.unavailable; }
   if (a.action === 'rekey') io.err('claims: waiting for the Human to confirm the rekey in the Guppy window (up to 5 minutes)...\n');
-  const r = a.action === 'rekey' ? await post(env.HIVE_CLAIMS_URL, { action: 'rekey', floor: a.floor }, REKEY_TIMEOUT_MS) : await post(env.HIVE_CLAIMS_URL, { action: a.action });
+  const r = a.action === 'rekey' ? await post(env.HIVE_CLAIMS_URL, { action: 'rekey', floor: a.floor }, rekeyTimeoutMs) : await post(env.HIVE_CLAIMS_URL, { action: a.action });
+  // Main does not stop when this client gives up: a rekey the Human approved may still be writing.
+  if (r.status === 0 && r.error === 'timeout' && a.action === 'rekey') { io.err(`claims: no reply within ${Math.round(rekeyTimeoutMs / 60000)} minutes; the rekey may still be running. Check log.jsonl for claims-rekey-command and claims-rekey before running it again.\n`); return EXIT.timeout; }
   if (r.status === 0) { io.err(`claims: unavailable (${r.error})\n`); return r.error === 'timeout' ? EXIT.timeout : EXIT.unavailable; }
   const b = r.body || {}; const line = typeof b.line === 'string' ? b.line : `HTTP ${r.status}`;
   const more = Array.isArray(b.lines) ? b.lines.filter((l) => typeof l === 'string').map((l) => `${l}\n`).join('') : '';
   if (r.status === 200 && b.ok) { io.out(`${line}\n${more}`); if (b.state) io.out(`${JSON.stringify(b.state)}\n`); return EXIT.ok; }
-  io.err(`claims: ${line}\n${more}`); return EXIT.refused;
+  io.err(`claims: ${line}\n${more}`);
+  const ran = a.action === 'rekey' && b.result && Array.isArray(b.result.refused) && b.result.refused.length > 0;
+  return ran ? EXIT.partial : EXIT.refused;
 }
 if (require.main === module) main(process.argv.slice(2), process.env).then((code) => { process.exitCode = code; }, (e) => { process.stderr.write(`claims: ${e}\n`); process.exitCode = EXIT.unavailable; });
 module.exports = { main, parseArgs, EXIT, REKEY_TIMEOUT_MS };

@@ -13,7 +13,8 @@ require('./tools/own-job.cjs');
  *   E5 through the real CLI over HTTP: the output lists each ledger; a refusal exits 1.
  *   E6 a ledger the rekey refuses is reported by name and the command says it is not complete.
  *   E7 both alert texts and COMMANDS.md name the exact command; a hidden run never confirms.
- * Then a mutant census over rekeyCommand.ts (M1-M7), each killed by the case it names.
+ *   E8 one append fails: no ledger is reported as rekeyed. E9 the CLI: exit 5 and the timeout line.
+ * Then a mutant census over rekeyCommand.ts (M1-M9), each killed by the case it names.
  * Synthetic floors in temp dirs only. HOME, USERPROFILE and APPDATA are jailed and asserted before any
  * product code loads; the live key and %APPDATA% are never read.
  */
@@ -243,6 +244,44 @@ kase('E4-floor', 'another floor, or no floor, is refused before the Human is ask
   assert.equal((await spelled.cmd.handle('god', { floor: f.root + path.sep })).body.line, 'refused: the Human did not confirm. Nothing was written.');
   const win = command(mod, { root: 'C:\\Floor\\hive', store: f.store }, { platform: 'win32', confirm: async () => false });
   if (process.platform === 'win32') assert.equal((await win.cmd.handle('god', { floor: 'c:/floor/HIVE/' })).body.line, 'refused: the Human did not confirm. Nothing was written.');
+  // Jim NIT a: the same folder reached through a link is this floor; a link to another folder is not.
+  const link = path.join(JAIL, `link-${++n}`);
+  fs.symlinkSync(f.root, link, 'junction');
+  const elsewhere = path.join(JAIL, `link-${++n}`);
+  fs.mkdirSync(other, { recursive: true });
+  fs.symlinkSync(other, elsewhere, 'junction');
+  try {
+    assert.equal((await spelled.cmd.handle('god', { floor: link })).body.line, 'refused: the Human did not confirm. Nothing was written.', 'E4-floor: a link to this floor is this floor');
+    const wrong = command(mod, f);
+    assert.ok((await wrong.cmd.handle('god', { floor: elsewhere })).body.line.startsWith(`refused: ${elsewhere} is not the floor this Guppy runs (${f.root}).`));
+    assert.equal(wrong.asked.length, 0);
+  } finally { fs.unlinkSync(link); fs.unlinkSync(elsewhere); }
+  assert.equal(snapshot(f.root), before, 'E4-floor: not a byte changed');
+});
+
+kase('E8', 'one ledger\'s rekey append fails: no ledger is reported as rekeyed, and a retry completes', async (mod) => {
+  const f = await lostFloor();
+  const real = f.store.writeLine;
+  f.store.writeLine = async function (agent, ...rest) { return agent === 'dwight' ? { ok: false, error: 'the disk said no' } : real.call(this, agent, ...rest); };
+  const c = command(mod, f);
+  const r = await c.cmd.handle('god', { floor: f.root });
+  f.store.writeLine = real;
+  assert.equal(r.status, 409, `E8: ${JSON.stringify(r.body)}`);
+  assert.equal(r.body.ok, false);
+  assert.equal(rekeyLines(f.root, 'andy').length, 1, 'E8: the fixture of this case: andy\'s line WAS written');
+  assert.deepEqual(r.body.lines.filter((l) => l.startsWith('rekeyed:')), [], `E8: nothing is reported as rekeyed: ${r.body.lines}`);
+  assert.deepEqual([...r.body.lines].sort(), [
+    'refused: andy (not in effect: the key id was not recorded (the rekey append of another ledger failed), retry the rekey)',
+    'refused: dwight (the rekey append failed)',
+  ]);
+  assert.equal(r.body.line, 'rekey not in effect: the new key id was not recorded, so every ledger stays read-only (2 refused). Retry the rekey.');
+  assert.deepEqual(r.body.result.rekeyed, []);
+  assert.equal(r.body.result.recorded, false);
+  for (const a of AGENTS) assert.equal(f.store.readLedger(a).chain.reason, 'key-missing', `E8: ${a} is still read-only, as the lines say`);
+  const again = await command(mod, f).cmd.handle('god', { floor: f.root });
+  assert.equal(again.status, 200, `E8 retry: ${JSON.stringify(again.body)}`);
+  assert.deepEqual([...again.body.lines].sort(), AGENTS.map((a) => `rekeyed: ${a}`));
+  for (const a of AGENTS) assert.equal(f.store.readLedger(a).chain, 'ok', `E8: ${a} verifies after the retry`);
 });
 
 kase('E4-busy', 'a second request while the Human is being asked is refused, and asks nobody', async (mod) => {
@@ -351,6 +390,38 @@ test('E5: the real CLI over HTTP prints one line per ledger; a refusal exits 1 a
   }
 });
 
+test('E9 (Jim NIT b, c): the CLI tells a rekey that ran and is not complete (exit 5) from a refusal (exit 1), and a timeout says the rekey may still be running', async () => {
+  let reply = null;   // null: never answer
+  const open = [];
+  const server = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => { if (!reply) { open.push(res); return; } res.writeHead(reply.status, { 'content-type': 'application/json' }); res.end(JSON.stringify(reply.body)); });
+  });
+  await new Promise((res) => server.listen(0, '127.0.0.1', res));
+  try {
+    const env = { HIVE_CLAIMS_URL: `http://127.0.0.1:${server.address().port}/claims/god` };
+    const run = async (opts) => { const io = { o: '', e: '' }; const code = await cli.main(['rekey', '--floor', 'C:\\Floor\\hive'], env, { out: (s) => { io.o += s; }, err: (s) => { io.e += s; } }, opts); return { code, ...io }; };
+    assert.deepEqual(cli.EXIT, { ok: 0, refused: 1, usage: 2, unavailable: 3, timeout: 4, partial: 5 });
+    reply = { status: 409, body: { ok: false, line: 'rekey not complete: 1 rekeyed, 1 refused (key k). Refused ledgers stay read-only.', lines: ['rekeyed: andy', 'refused: dwight (mac at c-1)'], result: { ok: false, keyId: 'k', rekeyed: ['andy'], refused: [{ agentId: 'dwight', why: 'mac at c-1' }] } } };
+    const partial = await run();
+    assert.equal(partial.code, 5, JSON.stringify(partial));
+    assert.ok(partial.e.endsWith('claims: rekey not complete: 1 rekeyed, 1 refused (key k). Refused ledgers stay read-only.\nrekeyed: andy\nrefused: dwight (mac at c-1)\n'), partial.e);
+    reply = { status: 409, body: { ok: false, line: 'refused: the Human did not confirm. Nothing was written.' } };
+    assert.equal((await run()).code, 1);
+    reply = { status: 409, body: { ok: false, line: 'refused: this floor has no claim ledger to rekey', lines: [], result: { ok: false, rekeyed: [], refused: [] } } };
+    assert.equal((await run()).code, 1, 'nothing ran: a refusal');
+    reply = null;
+    const late = await run({ rekeyTimeoutMs: 300 });
+    assert.equal(late.code, 4, JSON.stringify(late));
+    assert.ok(late.e.endsWith('claims: no reply within 0 minutes; the rekey may still be running. Check log.jsonl for claims-rekey-command and claims-rekey before running it again.\n'), late.e);
+    assert.ok(lf('resources/claims-cli.cjs').includes('`claims: no reply within ${Math.round(rekeyTimeoutMs / 60000)} minutes; the rekey may still be running.'), 'the minutes are the real limit');
+    assert.equal(cli.REKEY_TIMEOUT_MS, 10 * 60000);
+  } finally {
+    for (const res of open) res.destroy();
+    await new Promise((res) => server.close(res));
+  }
+});
+
 test('E7: both alerts and COMMANDS.md name the exact command; a hidden run never confirms', () => {
   assert.ok(REAL, `${RC} exists`);
   assert.equal(REAL.REKEY_COMMAND, 'claims rekey --floor <hive folder>');
@@ -375,6 +446,10 @@ test('E7: both alerts and COMMANDS.md name the exact command; a hidden run never
   assert.ok(wiring.includes("buttons: [q.ok, 'Cancel'], defaultId: 1, cancelId: 1,"), 'Cancel is the default button');
   assert.ok(wiring.includes('return r.response === 0;'), 'only the first button is a yes');
   assert.ok(wiring.includes('signal };'), 'the dialog closes when the time runs out');
+  // Jim NIT d: the window is restored and brought to the front BEFORE the dialog is shown.
+  const front = wiring.indexOf('if (shown.isMinimized()) shown.restore(); shown.show(); shown.focus(); shown.flashFrame(true);');
+  assert.ok(front > 0 && front < wiring.indexOf('dialog.showMessageBox('), 'the parent window is brought to the front first');
+  assert.ok(wiring.indexOf('    if (DEV_HIDDEN) return false;') < front, 'and never in a hidden run');
   // The CLI cannot confirm for the Human: it sends the floor and nothing else.
   assert.ok(lf('resources/claims-cli.cjs').includes("{ action: 'rekey', floor: a.floor }"), 'the CLI sends no confirmation field');
   assert.ok(!/confirm/i.test(lf(RC).split('handle(agentId: string, body: unknown)')[1].split('const root = this.d.floorRoot();')[0]), 'and the command reads none from the request');
@@ -383,10 +458,12 @@ test('E7: both alerts and COMMANDS.md name the exact command; a hidden run never
 const MUTANTS = [
   { id: 'M1', what: 'a no still runs the rekey', from: '      if (!yes) {', to: '      if (false) {', dies: ['E3-no'] },
   { id: 'M2', what: 'any agent may ask', from: "    if (!this.d.isGod(agentId)) return refuse(403, 'claims rekey is god-only');", to: '', dies: ['E4-god'] },
-  { id: 'M3', what: 'any floor name is accepted', from: '    if (!sameFolder(floor, root, this.d.platform ?? process.platform)) {', to: '    if (false) {', dies: ['E4-floor'] },
+  { id: 'M3', what: 'any floor name is accepted', from: '    if (!sameFolder(floor, root, this.d.platform ?? process.platform, this.d.realpath ?? realpathSync.native)) {', to: '    if (false) {', dies: ['E4-floor'] },
   { id: 'M4', what: 'anything but false is a yes', from: '=== true && !ac.signal.aborted', to: '!== false && !ac.signal.aborted', dies: ['E3-true', 'E3-no'] },
   { id: 'M5', what: 'a late yes counts', from: '=== true && !ac.signal.aborted', to: '=== true', dies: ['E3-late'] },
   { id: 'M6', what: 'two dialogs at once', from: '    if (this.busy) return refuse(', to: '    if (false) return refuse(', dies: ['E4-busy'] },
+  { id: 'M8', what: 'a link to this floor is another floor', from: '    try { r = realpath(r); } catch { /* absent or unreadable: as written */ }', to: '', dies: ['E4-floor'] },
+  { id: 'M9', what: 'an unrecorded rekey is summed up as a partial one', from: '          : r.recorded === false', to: '          : false', dies: ['E8'] },
   { id: 'M7', what: 'the rekey never runs', from: '      const r = await store.rekey(true);', to: '      const r = { ok: true, keyId: \'k\', rekeyed: [\'andy\', \'dwight\'], refused: [] as Array<{ agentId: string; why: string }> };', dies: ['E2'] },
 ];
 for (const m of MUTANTS) {

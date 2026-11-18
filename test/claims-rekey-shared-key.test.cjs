@@ -392,9 +392,10 @@ async function storeSitesNeverThrow(mods) {
   const { store: rs, logs: rl } = open(mods, B, u, u.keys, { keyRecord: rec });
   const rk = await rs.rekey(true).catch((e) => ({ threw: String(e) }));
   assert.equal(rk.ok, false, JSON.stringify(rk));
-  assert.deepEqual(rk.rekeyed.sort(), ['andy', 'dwight']);
+  assert.deepEqual(rk.rekeyed, [], 'a ledger whose key id was not recorded is not reported as rekeyed');
+  assert.equal(rk.recorded, false);
   assert.deepEqual(rk.refused.map((x) => x.agentId).sort(), ['andy', 'dwight']);
-  assert.ok(rk.refused.every((x) => /the new key id could not be recorded .*retry the rekey/.test(x.why)), JSON.stringify(rk.refused));
+  assert.ok(rk.refused.every((x) => /^not in effect: the key id was not recorded \(Error: EPERM.*\), retry the rekey$/.test(x.why)), JSON.stringify(rk.refused));
   assert.deepEqual(failedRows(rl, 'claims-key-record-failed'), ['rekey']);
   assert.equal(rl.find((r) => r.kind === 'claims-rekey')?.recorded, false);
   assert.equal(rs.readLedger('andy').chain.reason, 'key-missing', 'unrecorded: still read-only');
