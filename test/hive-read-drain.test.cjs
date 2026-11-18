@@ -100,6 +100,51 @@ test('after dispose() no new async read reaches the file system, and reopen() al
   assert.equal(w.calls, 2);
 });
 
+/** A gate on fs.promises.open for the live log, for the Log panel's async tail (logTailAsync). */
+function gateLogOpen(t, hive) {
+  const log = path.join(hive.root(), 'log.jsonl');
+  const real = fs.promises.open;
+  const g = { calls: 0, open: 0, gated: false, release: () => {} };
+  fs.promises.open = async function gatedOpen(p, ...rest) {
+    if (path.resolve(String(p)) !== path.resolve(log)) return real.call(fs.promises, p, ...rest);
+    g.calls++; g.open++;
+    if (g.gated) await new Promise((go) => { g.release = go; });
+    const fh = await real.call(fs.promises, p, ...rest);
+    const close = fh.close.bind(fh);
+    fh.close = async () => { try { return await close(); } finally { g.open--; } };
+    return fh;
+  };
+  t.after(() => { g.release(); fs.promises.open = real; });
+  return g;
+}
+
+test('the async log tail is one of the reads: the wait covers its open handle, and dispose() refuses a new one', async (t) => {
+  const w = await world(t);
+  const g = gateLogOpen(t, w.hive);
+  const rows = await w.hive.logTailAsync(5);
+  assert.ok(rows.length > 0, 'control: the floor has log rows');
+  assert.equal(g.calls, 1, 'control: the tail goes through the gated open');
+  assert.equal(g.open, 0, 'control: the tail closed its handle');
+
+  g.gated = true;
+  const tailing = w.hive.logTailAsync(5);
+  await until(() => g.open === 1);
+  w.hive.dispose();
+  let waited = false;
+  const wait = Promise.resolve(w.hive.drainReads?.()).then(() => { waited = true; });
+  for (let i = 0; i < 20; i++) await turn();
+  const openWhenWaitEnded = waited ? g.open : null;
+  g.release();
+  await wait;
+  assert.equal(openWhenWaitEnded, null, 'the wait ended with the log tail still open: the delete would run under it');
+  assert.equal(g.open, 0, 'the log handle is closed once the wait has ended');
+  assert.ok((await tailing).length > 0, 'the tail that was already open still returns rows');
+
+  g.gated = false;
+  assert.deepEqual(await w.hive.logTailAsync(5), [], 'a disposed manager has no log to show');
+  assert.equal(g.calls, 2, 'a log tail asked for after dispose() opened the log');
+});
+
 test('reset and home change wait for the open reads between dispose() and touching the folder', () => {
   const src = codeOnly(readSource('src/main/index.ts'), 'index.ts');
   const order = (label, from, marks) => {
