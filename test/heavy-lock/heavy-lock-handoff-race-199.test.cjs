@@ -422,6 +422,38 @@ K.reservedLapseHeld = async (M = HJ) => {
 };
 test('(d) a kept reservation that lapses while its owner holds does not queue the owner again', () => K.reservedLapseHeld());
 
+const BENCH = { heavy: true, kind: 'bench' };
+K.reservationBindsLive108 = async (M = HJ) => {
+  // HEAVY-RESERVATION-STOLEN-108 (live on 1.1.107, 2026-11-18 18:43:20Z and 19:18:13Z, heavyJobsAtOnce=2):
+  // Creed was denied a suite at the hook and also had a bench test process waiting. Dwight's job
+  // exited; the slot was reserved for Creed's suite; 2 ms later Creed's OWN bench lease took it
+  // ("reserved:true", not kept), ran 3 s, and its posttool release reserved the slot for UHera (Jim
+  // the second time). Creed's suite call 10 s later was denied.
+  const x = rig(M, { limit: () => 2 });
+  assert.equal(x.l.acquire('dwight', BENCH, 'node bench.cjs', 'd1', false).allow, true);
+  assert.equal(x.l.acquire('creed', H, 'node --test test/', 'c1', false).allow, false, 'the suite is denied at the hook');
+  assert.equal(x.l.acquire('creed', BENCH, 'node --test (pid 141476)', 'lease:141476:1', false).allow, false, 'its test process waits');
+  assert.equal(x.l.acquire('uhera', BENCH, 'sh bench.sh', 'u1', false).allow, false);
+  x.l.callDone('dwight', 'd1');
+  assert.deepEqual([reservedFor(x), waiters(x), x.notes.map((n) => [n.a, n.k])], [['creed'], ['uhera'], [['creed', 'suite']]], "the slot is reserved for Creed's suite");
+  assert.equal(x.l.acquire('creed', BENCH, 'node --test (pid 141476)', 'lease:141476:1', false).allow, true, 'its waiting bench process runs');
+  assert.deepEqual(reservedFor(x), ['creed'], "CREED'S OWN BENCH LEASE DOES NOT SPEND ITS SUITE RESERVATION");
+  assert.equal(x.rows('acquire').at(-1).reservedKept, true, 'the acquire row says the reservation was kept');
+  x.tick(3_000);
+  x.l.callDone('creed', 'lease:141476:1');
+  assert.deepEqual(x.l.snapshot().map((s) => s.agentId), [], 'the bench process ended and freed its hold');
+  assert.deepEqual([reservedFor(x), waiters(x)], [['creed'], ['uhera']], 'THE RELEASE AFTER THE LEASE DOES NOT PASS A RESERVED SLOT ON');
+  assert.deepEqual(x.notes.map((n) => n.a), ['creed'], 'UHera is not told HEAVY SLOT FREE');
+  assert.equal(x.l.acquire('uhera', BENCH, 'sh bench.sh', 'u2', false).allow, false, "A RESERVED SLOT IS NOT GRANTED TO ANOTHER AGENT'S BENCH");
+  assert.equal(x.l.acquire('jim', INSTALL, 'npm ci', 'j1', false).allow, false, 'nor beside it, in the second slot');
+  x.tick(10_000);
+  assert.equal(x.l.acquire('creed', H, 'node --test test/', 'c2', false).allow, true, "CREED'S SUITE TAKES ITS RESERVED SLOT");
+  assert.deepEqual([x.l.snapshot().map((s) => s.agentId), reservedFor(x), waiters(x)], [['creed'], [], ['uhera', 'jim']]);
+  x.l.callDone('creed', 'c2');
+  assert.deepEqual(reservedFor(x), ['uhera'], 'then the slot passes on, in order');
+};
+test('(d) HEAVY-RESERVATION-STOLEN-108: two slots, a suite reservation survives the owner\'s own bench lease and its release', () => K.reservationBindsLive108());
+
 // ── the CLI ─────────────────────────────────────────────────────────────────────────────────
 
 test('the heavy CLI: `heavy next <agent>`, and the `you:` line of `heavy status`', () => {
@@ -500,6 +532,8 @@ const MUTANTS = [
   // (d)
   { name: "the owner's test process spends the reservation (before HEAVY-RESERVATION-BIND-108)", edits: [['    const keep = lease && !!this.reservations.get(agentId)?.hooked;', '    const keep = false;']],
     killer: 'reservationBinds', dies: /THE OWNER'S OWN TEST PROCESS DOES NOT SPEND A RESERVATION IT WAS TOLD OF/ },
+  { name: 'the 1.1.107 acquire: a bench lease spends a suite reservation on two slots (HEAVY-RESERVATION-STOLEN-108)', edits: [['    const keep = lease && !!this.reservations.get(agentId)?.hooked;', '    const keep = false;']],
+    killer: 'reservationBindsLive108', dies: /CREED'S OWN BENCH LEASE DOES NOT SPEND ITS SUITE RESERVATION/ },
   { name: 'a second test process of the owner spends it', edits: [['      if (reserved && !keep && (excl || !lease)) {', '      if (reserved && (excl || !lease)) {']],
     killer: 'reservationBinds', dies: /A SECOND TEST PROCESS OF THE OWNER DOES NOT SPEND IT EITHER/ },
   { name: 'a lease-only reservation is kept too', edits: [['    const keep = lease && !!this.reservations.get(agentId)?.hooked;', '    const keep = lease;']],
