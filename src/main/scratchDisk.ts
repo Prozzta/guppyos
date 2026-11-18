@@ -9,7 +9,7 @@ import { execFile } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { cp, lstat, mkdir, readdir, readFile, realpath, symlink } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import { atomicWriteJson, atomicWriteJsonAsync } from './atomicJson';
+import { atomicWriteJson, atomicWriteTextAsync } from './atomicJson';
 import { findReparsePointsSync, removeReparsePoint, removeReparsePointSync, safeRemoveTree, unlinkReparsePointsUnderSync } from './fsSafeRemove';
 
 export { findReparsePointsSync, removeReparsePointSync, unlinkReparsePointsUnderSync } from './fsSafeRemove';
@@ -227,7 +227,7 @@ async function readInboundIndex(file: string, floor: string): Promise<InboundLin
 
 async function writeInboundIndex(file: string, index: InboundLinkIndex): Promise<void> {
   await mkdir(dirname(file), { recursive: true });
-  await atomicWriteJsonAsync(file, index);
+  await atomicWriteTextAsync(file, JSON.stringify(index));
 }
 
 /** Build/refresh the persisted whole-floor index. `error` is deliberately a deletion veto. */
@@ -315,27 +315,6 @@ export function scratchKind(path: string): 'worktree' | 'jail' | null {
   }
 }
 
-/** Refuse a candidate that is the common gitdir referenced anywhere below `_work`, without following links. */
-export function worktreeGitdirPointsInto(workRoot: string, candidate: string): boolean {
-  const wanted = resolve(candidate);
-  const scan = (dir: string): boolean => {
-    let names: string[]; try { names = readdirSync(dir); } catch { return true; }
-    for (const name of names) {
-      const child = join(dir, name);
-      try {
-        const st = lstatSync(child);
-        if (st.isSymbolicLink()) continue;
-        if (st.isFile() && name === '.git') {
-          const m = /^gitdir:\s*(.+)\s*$/im.exec(readFileSync(child, 'utf8'));
-          if (m && under(resolve(dirname(child), m[1]), wanted)) return true;
-        } else if (st.isDirectory() && scan(child)) return true;
-      } catch { return true; }
-    }
-    return false;
-  };
-  return scan(workRoot);
-}
-
 /** A scratch root must visibly belong to the authenticated agent that registers it. */
 export function scratchPathOwnedBy(owner: string, path: string): boolean {
   const prefix = owner.split('-', 1)[0].toLowerCase();
@@ -401,13 +380,15 @@ export class ScratchDiskManager {
     if (typeof candidate !== 'string' || typeof card !== 'string' || !/^[A-Z][A-Z0-9-]{2,120}$/.test(card)) return { ok: false, line: 'refused: register needs a _work path and CARD-ID' };
     const path = resolve(candidate);
     if (!managedScratchPath(work, path)) return { ok: false, line: 'refused: scratch must be a direct _work child' };
+    if (!scratchPathOwnedBy(owner, path)) return { ok: false, line: 'refused: scratch path does not have your owner prefix' };
     const kind = scratchKind(path);
     if (!kind) return { ok: false, line: 'refused: path is missing or is a common repository (.git directory)' };
-    if (kind === 'jail' && worktreeGitdirPointsInto(work, path)) return { ok: false, line: 'refused: jail is referenced by a worktree gitdir file' };
+    // Common-gitdir references are discovered by the asynchronous whole-floor
+    // inbound index immediately before every reap. Registration is not
+    // destructive, so it must not synchronously walk all of `_work` on main.
     const state = readScratchState(root);
     const existing = state.records.find((r) => resolve(r.path) === path);
     if (existing && existing.owner !== owner) return { ok: false, line: 'refused: scratch is owned by another agent' };
-    if (!scratchPathOwnedBy(owner, path)) return { ok: false, line: 'refused: scratch path does not have your owner prefix' };
     const at = this.now();
     const record: ScratchRecord = existing ? { ...existing, card, kind, touchedAt: at } : { path, owner, card, kind, createdAt: at, touchedAt: at };
     writeScratchState(root, { v: 1, records: [...state.records.filter((r) => resolve(r.path) !== path), record] });
@@ -547,8 +528,14 @@ export class ScratchDiskManager {
     // Command handlers remain synchronous, so they can write while the async
     // probes/index/git work above is pending. Merge that latest state and only
     // remove records whose roots this sweep actually removed.
-    const reaped = new Set(result.reaped.map((path) => resolve(path)));
-    writeScratchState(root, { v: 1, records: readScratchState(root).records.filter((record) => !reaped.has(resolve(record.path))) });
+    const reaped = new Map(state.records.filter((record) => result.reaped.some((path) => resolve(path) === resolve(record.path))).map((record) => [resolve(record.path), record]));
+    // A second registration of a path while removal is in flight is a newer
+    // intent. Preserve it rather than overwriting it with this sweep's snapshot.
+    const unchanged = (current: ScratchRecord, original: ScratchRecord): boolean => current.owner === original.owner && current.card === original.card
+      && current.kind === original.kind && current.createdAt === original.createdAt && current.touchedAt === original.touchedAt && current.cacheKey === original.cacheKey;
+    writeScratchState(root, { v: 1, records: readScratchState(root).records.filter((record) => {
+      const original = reaped.get(resolve(record.path)); return !original || !unchanged(record, original);
+    }) });
     return result;
   }
 

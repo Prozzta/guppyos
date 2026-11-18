@@ -8,6 +8,7 @@ const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const child = require('node:child_process');
+const { performance } = require('node:perf_hooks');
 const loadTs = require('./load-ts.cjs');
 const scratch = loadTs('src/main/scratchDisk.ts');
 const safeRemove = loadTs('src/main/fsSafeRemove.ts');
@@ -209,19 +210,28 @@ test('link-safe scratch removal preserves junction targets under installed Elect
   assertLiveFixture(fixture.live);
 });
 
-test('jails that are bare/common git dirs or worktree gitdir targets are refused', () => {
+test('bare git dirs are refused while common gitdir targets are asynchronously protected by the inbound index', async () => {
   const base = path.join(jail, 'git-dir-refusal'); const hive = path.join(base, 'hive'); const work = path.join(base, '_work');
   const bare = path.join(work, 'bare'); fs.mkdirSync(path.join(bare, 'objects'), { recursive: true }); fs.mkdirSync(path.join(bare, 'refs'), { recursive: true }); fs.writeFileSync(path.join(bare, 'HEAD'), 'ref: refs/heads/main\n');
   assert.equal(scratch.scratchKind(bare), null);
   const target = path.join(work, 'dwight-common'); fs.mkdirSync(target, { recursive: true });
-  const linked = path.join(work, 'linked'); fs.mkdirSync(linked, { recursive: true }); fs.writeFileSync(path.join(linked, '.git'), 'gitdir: ../dwight-common/worktrees/linked\n');
+  const noise = path.join(work, 'noise');
+  for (let i = 0; i < 256; i += 1) fs.mkdirSync(path.join(noise, `entry-${i}`, 'nested'), { recursive: true });
+  const nested = path.join(work, 'nested', 'deep', 'worktree'); const dotGit = path.join(nested, '.git'); fs.mkdirSync(nested, { recursive: true });
+  fs.writeFileSync(dotGit, `gitdir: ${path.relative(path.dirname(dotGit), target)}\\worktrees\\nested\n`);
   const manager = new scratch.ScratchDiskManager(() => hive, () => false, async () => []);
   assert.match(manager.register('dwight', bare, 'CARD-1').line, /common repository/);
-  assert.match(manager.register('dwight', target, 'CARD-1').line, /referenced by a worktree gitdir/);
+  const started = performance.now();
+  assert.equal(manager.register('dwight', target, 'CARD-1').ok, true);
+  assert.ok(performance.now() - started < 500, 'register must not walk deep _work synchronously');
   const foreign = path.join(work, 'jim-foreign'); fs.mkdirSync(foreign, { recursive: true });
   assert.match(manager.register('dwight', foreign, 'CARD-1').line, /owner prefix/);
-  const nested = path.join(work, 'nested', 'worktree'); fs.mkdirSync(nested, { recursive: true }); fs.writeFileSync(path.join(nested, '.git'), 'gitdir: ../../dwight-common/worktrees/nested\n');
-  assert.equal(scratch.worktreeGitdirPointsInto(work, target), true);
+  let result;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    result = await manager.sweep();
+    if (result.kept.some((row) => row.path === path.resolve(target) && row.reason === 'inbound-node-modules-link')) break;
+  }
+  assert.match(result.kept.find((row) => row.path === path.resolve(target)).reason, /inbound-node-modules-link/);
 });
 
 test('install key changes for patch inputs and is stable for unchanged project inputs', () => {
@@ -264,7 +274,10 @@ test('persisted whole-floor inbound index finds nested, outside and gitdir refer
 test('mutant pins: each never-reap guard and source-input key is present', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'scratchDisk.ts'), 'utf8');
   const safe = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'fsSafeRemove.ts'), 'utf8');
-  for (const token of ['if (f.dirty)', 'if (!f.onOrigin)', 'if (f.live)', 'if (f.inboundLinks.length)', 'package-lock.json', 'package.json', 'const tools = join(project, \'tools\')', 'path-changed-or-missing', 'fixture-protected', 'worktreeGitdirPointsInto', 'inbound-index-rebuilt-candidate-changed', 'atomicWriteJsonAsync', 'scan-timeout']) assert.ok(src.includes(token), token);
+  for (const token of ['if (f.dirty)', 'if (!f.onOrigin)', 'if (f.live)', 'if (f.inboundLinks.length)', 'package-lock.json', 'package.json', 'const tools = join(project, \'tools\')', 'path-changed-or-missing', 'fixture-protected', 'inbound-index-rebuilt-candidate-changed', 'atomicWriteTextAsync', 'scan-timeout']) assert.ok(src.includes(token), token);
+  const register = src.slice(src.indexOf('register(owner:'), src.indexOf('registerFixture'));
+  assert.equal(register.includes('worktreeGitdirPointsInto'), false, 'register must use the asynchronous inbound index at reap time');
+  assert.ok(register.indexOf('scratchPathOwnedBy(owner, path)') < register.indexOf('const kind = scratchKind(path)'), 'owner-prefix refusal precedes filesystem inspection');
   assert.equal(src.includes('p.cwd'), false, 'the Win32_Process-backed live check must not claim an unavailable cwd');
   for (const token of ['removeReparsePointSync', 'unlinkReparsePointsUnderSync', 'findReparsePointsSync', 'beforeRootRmdir', 'directory changed during removal']) assert.ok(safe.includes(token), token);
   assert.equal(safe.includes('rm(path, { recursive'), false, 'safe removal must not delegate to recursive rm');
