@@ -955,7 +955,44 @@ test('watchdog timing: polls at a tenth of the limit (1-30 s); node --test\'s ba
   }
 });
 
-test('GATE-178: a watchdog whose snapshot is 8 s late still TREE-kills a hung ConPTY file before the backstop (no orphaned conhost)', { timeout: 120_000, skip: !HAS_PTY && 'needs node-pty on win32' }, () => {
+/**
+ * GATE178-WATCHDOG-LATE-SNAPSHOT-RED-108: what the GATE-178 run proves, judged in order, so a red names
+ * its real cause. The 3a42324b red took about 3 s, before the 8 s late watchdog even existed, yet it
+ * could only say "A LATE WATCHDOG STILL TREE-KILLS FIRST": an orphaned tree was blamed on a watchdog
+ * that never ran. The tree check means something only once the late watchdog is known to have killed
+ * the file. null = the run proves it.
+ */
+function lateWatchdogVerdict({ code, errText, out, ms, left }) {
+  const said = `runner said: ${errText.trim() || '(nothing)'}; the file's node --test output (tail): ${String(out).trim().slice(-1500) || '(none)'}`;
+  if (code === 0) return `a hung file fails the run, yet it exited 0 after ${ms} ms; ${said}`;
+  if (left === null) return `THE HUNG FILE NEVER WROTE ITS PID: it never got to its ConPTY (run ${ms} ms, code ${code}); ${said}`;
+  if (!/FILE TIMED OUT after 4000 ms \(it never finished; the watchdog killed it\): .*a-hung\.test\.cjs/.test(errText)) {
+    if (/FILE TIMED OUT after 4000 ms \(the runner's backstop killed it/.test(errText)) {
+      return `THE BACKSTOP CAME BEFORE THE LATE WATCHDOG: the floor leaves no room for a 12 s late snapshot (run ${ms} ms; tree left: ${left.join(', ') || 'none'}); ${said}`;
+    }
+    return `THE HUNG FILE ENDED BY ITSELF after ${ms} ms, before the late watchdog killed it, so there is no watchdog kill to judge (tree left: ${left.join(', ') || 'none'}, code ${code}); ${said}`;
+  }
+  if (left.length) return `A LATE WATCHDOG STILL TREE-KILLS FIRST: the hung file's tree outlived the run: ${left.join(', ')}`;
+  return null;
+}
+
+test('GATE-178 verdict: an early end, a backstop first, a missing pid and an orphaned tree each get their OWN cause', () => {
+  const watchdogKill = '[test-runner] FILE TIMED OUT after 4000 ms (it never finished; the watchdog killed it): C:/t/a-hung.test.cjs';
+  const backstopKill = "[test-runner] FILE TIMED OUT after 4000 ms (the runner's backstop killed it at 7000 ms): C:/t/a-hung.test.cjs";
+  assert.strictEqual(lateWatchdogVerdict({ code: 1, errText: watchdogKill, out: '', ms: 11_000, left: [] }), null, 'the late watchdog killed the whole tree: proven');
+  // The 3a42324b shape: about 3 s, no watchdog kill, the ConPTY tree orphaned by the file's own end.
+  const early = lateWatchdogVerdict({ code: 1, errText: '', out: 'not ok 1 - a ConPTY killed before its first output\n# fail 1', ms: 3_000, left: ['11 conhost.exe', '12 cmd.exe', '13 PING.EXE'] });
+  assert.match(early, /THE HUNG FILE ENDED BY ITSELF after 3000 ms/);
+  assert.match(early, /11 conhost\.exe/, 'what it left is named');
+  assert.match(early, /not ok 1 - a ConPTY killed/, 'the file\'s own output is carried');
+  assert.doesNotMatch(early, /LATE WATCHDOG STILL TREE-KILLS/, 'a watchdog that never ran is not blamed');
+  assert.match(lateWatchdogVerdict({ code: 1, errText: backstopKill, out: '', ms: 8_000, left: ['11 conhost.exe'] }), /THE BACKSTOP CAME BEFORE THE LATE WATCHDOG/);
+  assert.match(lateWatchdogVerdict({ code: 1, errText: '', out: 'Error: boom', ms: 900, left: null }), /NEVER WROTE ITS PID.*Error: boom/);
+  assert.match(lateWatchdogVerdict({ code: 0, errText: '', out: '', ms: 900, left: [] }), /yet it exited 0/);
+  assert.match(lateWatchdogVerdict({ code: 1, errText: watchdogKill, out: '', ms: 11_000, left: ['11 conhost.exe'] }), /A LATE WATCHDOG STILL TREE-KILLS FIRST: .*11 conhost\.exe/);
+});
+
+test('GATE-178: a watchdog whose snapshot is 12 s late still TREE-kills a hung ConPTY file before the backstop (no orphaned conhost)', { timeout: 120_000, skip: !HAS_PTY && 'needs node-pty on win32' }, () => {
   const os = require('node:os');
   const { spawn, spawnSync } = require('node:child_process');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runner-late-'));
@@ -977,20 +1014,30 @@ test('GATE-178: a watchdog whose snapshot is 8 s late still TREE-kills a hung Co
       '});'
     ].join('\n'));
     const e = sink();
-    // The real watchdog, started 8 s late: a slow PowerShell snapshot under load (9.6 s seen), and
-    // past the old backstop (limit + 3 polls = 7 s), so only the 20 s floor lets the tree kill win.
+    // The real watchdog, started 12 s late: worse than the slowest PowerShell snapshot seen under load
+    // (9.6 s), and far enough past the floorless backstop (limit + 3 polls = 7 s, plus its own ~1-2 s
+    // PowerShell verify) that without the 20 s floor the backstop ALWAYS kills first. At 8 s the two
+    // raced: with the floor cut to 0 the watchdog still won (17 s, green), so the floor had no teeth.
     const lateWatchdog = (limitMs, outFile) => {
       const args = [runner.WATCHDOG, String(process.pid), String(limitMs), outFile, String(runner.watchdogPollMs(limitMs))];
-      wrapper = spawn(process.execPath, ['-e', `setTimeout(() => { const c = require('child_process').spawn(process.execPath, ${JSON.stringify(args)}, { stdio: 'ignore', windowsHide: true }); c.on('exit', () => process.exit(0)); }, 8000);`], { stdio: 'ignore', windowsHide: true });
+      wrapper = spawn(process.execPath, ['-e', `setTimeout(() => { const c = require('child_process').spawn(process.execPath, ${JSON.stringify(args)}, { stdio: 'ignore', windowsHide: true }); c.on('exit', () => process.exit(0)); }, 12000);`], { stdio: 'ignore', windowsHide: true });
       const rec = { pid: wrapper.pid, bornMs: Date.now(), name: 'node.exe' };
       // the wrapper and the watchdog it started: its own tree, verified (not taskkill /T: TEST-GLOB-PID-RECYCLE)
       return { stop: () => { try { own.killOwnTree(rec); } catch { /* gone */ } } };
     };
-    const spawnTap = (args, opts) => spawnSync(process.execPath, args, { ...opts, env: nodeEnv(opts.env), stdio: 'pipe', encoding: 'utf8' });
-    const code = run({ testDir: dir, cwd: dir, spawn: spawnTap, timeoutMs: 4_000, isTTY: false, log: () => {}, err: e.write, failureFile: () => path.join(dir, 'failures.json'), watchdog: lateWatchdog });
-    assert.notStrictEqual(code, 0, 'a hung file fails the run');
-    const left = leftBehind(readRec(filePidFile, 'node.exe'));
-    assert.deepStrictEqual(left, [], `A LATE WATCHDOG STILL TREE-KILLS FIRST: the hung file's tree outlived the run: ${left.join(', ')}`);
+    // Bounded (spawnSync blocks this file's own timeout): a run nothing ends FAILS here, it does not hang.
+    let out = '';
+    const spawnTap = (args, opts) => { const r = spawnSync(process.execPath, args, { ...opts, env: nodeEnv(opts.env), stdio: 'pipe', encoding: 'utf8', timeout: 90_000, killSignal: 'SIGKILL' }); out = `${r.stdout || ''}${r.stderr || ''}${r.error ? `\n(spawn: ${r.error.code || r.error.message})` : ''}`; return r; };
+    const t0 = Date.now();
+    // GATE178-WATCHDOG-LATE-SNAPSHOT-RED-108: the REAL backstop, at its real floor. Injecting spawn and
+    // watchdog turns the backstop off by default, so "before the backstop" was never raced: a floor cut
+    // to 3 s kept this test green. Now a backstop that comes first is a red that says so.
+    const code = run({ testDir: dir, cwd: dir, spawn: spawnTap, timeoutMs: 4_000, isTTY: false, log: () => {}, err: e.write, failureFile: () => path.join(dir, 'failures.json'), watchdog: lateWatchdog, backstop: runner.startBackstop });
+    const ms = Date.now() - t0;
+    // The tree is judged (and what is left killed) whatever the verdict; no record = no tree to judge.
+    const left = fs.existsSync(filePidFile) ? leftBehind(readRec(filePidFile, 'node.exe')) : null;
+    const verdict = lateWatchdogVerdict({ code, errText: e.lines.join('\n'), out, ms, left });
+    if (verdict) assert.fail(verdict);
   } catch (err) {
     failed = err;
     throw err;
