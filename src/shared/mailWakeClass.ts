@@ -40,6 +40,9 @@ export const ALWAYS_WAKE_SENDERS: ReadonlySet<string> = new Set([
   // VOICE_ACTOR) and a worker's terminal failure to god with its Slack reply command (index
   // informGod). test/reads-quiet-181 keeps a census of every harness sender against this set.
   'michael-voice', 'ephemeral-worker',
+  // SCRATCH-DISK-REAP-108: a reap veto needs prompt owner attention; waiting up
+  // to the quiet-mail deadline can leave a large retained tree unexplained.
+  'scratch-reaper',
   // CLAIM-LEDGER W1: a claims-chain-broken or claims-key-missing alert to god (a ledger went read-only).
   'claims'
 ]);

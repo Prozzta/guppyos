@@ -9,6 +9,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const child = require('node:child_process');
 const { performance } = require('node:perf_hooks');
+const { installedGuppy } = require('./tools/installed-guppy.cjs');
 const loadTs = require('./load-ts.cjs');
 const scratch = loadTs('src/main/scratchDisk.ts');
 const safeRemove = loadTs('src/main/fsSafeRemove.ts');
@@ -199,11 +200,11 @@ test('a junction injected after the initial walk is never recursively followed',
   assert.equal(fs.existsSync(syncRoot), false);
 });
 
-test('link-safe scratch removal preserves junction targets under installed Electron as Node', { skip: process.platform !== 'win32' }, () => {
+test('link-safe scratch removal preserves junction targets under installed Electron as Node', { skip: process.platform !== 'win32' }, (t) => {
   const fixtureBase = path.join(jail, 'link-safe-electron'); const fixture = linkRemovalFixture(fixtureBase);
-  const exe = process.env.GUPPY_PACKAGED_EXE || path.join(process.env.LOCALAPPDATA || 'C:\\Users\\FiercePC\\AppData\\Local', 'Programs', 'Guppy', 'Guppy.exe');
-  assert.equal(fs.existsSync(exe), true, `installed Guppy executable missing: ${exe}`);
-  const result = child.spawnSync(exe, [path.join(__dirname, 'scratch-disk-electron-child.cjs'), fixtureBase], { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, encoding: 'utf8', timeout: 30_000 });
+  const installed = installedGuppy();
+  if (installed.skip) return t.skip(installed.skip);
+  const result = child.spawnSync(installed.exe, [path.join(__dirname, 'scratch-disk-electron-child.cjs'), fixtureBase], { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, encoding: 'utf8', timeout: 30_000 });
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.match(result.stdout, /"ok":true/);
   assert.equal(fs.existsSync(fixture.tree), false);
