@@ -49,7 +49,7 @@ export function listIssues(cwd: string): Promise<{ ok: boolean; issues?: GHIssue
     const proc = spawn(
       gh.program,
       ['issue', 'list', '--json', 'number,title,body,assignees,labels,url,state', '--limit', '30'],
-      { cwd }
+      { cwd, windowsHide: true }
     );
     let stdout = '';
     let stderr = '';
@@ -111,7 +111,7 @@ export function listCIRuns(cwd: string): Promise<{ ok: boolean; runs?: CIRun[]; 
     const proc = spawn(
       gh.program,
       ['run', 'list', '--limit', '5', '--json', 'name,status,conclusion,url,databaseId'],
-      { cwd }
+      { cwd, windowsHide: true }
     );
     let stdout = '';
     let stderr = '';
