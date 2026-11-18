@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 // RIG-NODE-DIR-SHARED-108: the rig's shared node-only dir must never be shared by the node leg and the
 // Electron leg. Electron 45 runs as node v24.22.2, the same process.version as the node leg, so a dir
 // keyed by version alone got electron.exe linked in by an Electron-leg rig; every node-leg rig after
