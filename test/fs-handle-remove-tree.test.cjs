@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * FS-REMOVE-READDIR-GAP-108: the fs-handle addon's removeTree / removeTreeAsync, and how
  * src/main/fsSafeRemove.ts uses it. The fixed cases; the race is fs-remove-gap.test.cjs.
