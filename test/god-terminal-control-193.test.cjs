@@ -12,6 +12,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { nodeEnv } = require('./tools/node-env.cjs');
 const http = require('node:http');
 const { spawn } = require('node:child_process');
 const loadTs = require('./load-ts.cjs');
@@ -560,7 +561,7 @@ test('broker: /claims is token-bound and its handler refuses a non-god', async (
 const CLI = path.join(ROOT, 'resources', 'term-cli.cjs');
 function run(args, { input, env, cli = CLI } = {}) {
   return new Promise((resolve) => {
-    const c = spawn(process.execPath, [cli, ...args], { env: { ...process.env, HIVE_TERM_URL: '', ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
+    const c = spawn(process.execPath, [cli, ...args], { env: nodeEnv({ ...process.env, HIVE_TERM_URL: '', ...env }), stdio: ['pipe', 'pipe', 'pipe'] });
     let out = ''; let err = '';
     c.stdout.on('data', (d) => { out += d; }); c.stderr.on('data', (d) => { err += d; });
     c.on('close', (code) => resolve({ code, out, err }));

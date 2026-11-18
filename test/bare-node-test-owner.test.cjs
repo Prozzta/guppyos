@@ -27,6 +27,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { nodeEnv } = require('./tools/node-env.cjs');
 const { spawn, spawnSync } = require('node:child_process');
 const R = require('./tools/run-tests.cjs');
 const own = require('./tools/own-procs.cjs');
@@ -130,7 +131,7 @@ const req = (file) => `require(${JSON.stringify(file.split(path.sep).join('/'))}
 function bareEnv(extra) {
   const env = { ...process.env };
   for (const k of ['NODE_OPTIONS', 'GUPPY_FILE_JOB_EXE', 'GUPPY_FILE_JOB_OPT', 'GUPPY_FILE_JOB_PID', 'NODE_TEST_CONTEXT']) delete env[k];
-  return Object.assign(env, extra);
+  return nodeEnv(Object.assign(env, extra));
 }
 const rowOf = (pid, bornMs) => { const r = own.lookupPids([pid])[0]; return r && Math.abs(r.created - bornMs) <= own.BIRTH_SLACK_MS ? r : undefined; };
 const until = async (what, ok, ms = 30_000) => {
