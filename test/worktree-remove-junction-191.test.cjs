@@ -182,6 +182,54 @@ test('removeWorktree refuses a foreign worktree, a link root, and the primary cl
   assert.equal(fs.existsSync(sentinel(mainTarget)), true, 'the primary clone junction target survives');
 });
 
+test('removeWorktree refuses a registered worktree path replaced by a junction before it can traverse the victim (A23 L)', async (t) => {
+  const s = setup(t);
+  const parked = path.join(s.base, 'parked-worktree');
+  const victim = s.target('victim');
+  const victimLinkTarget = s.target('victim-link-target');
+  const victimLink = path.join(victim, 'node_modules');
+  fs.symlinkSync(victimLinkTarget, victimLink, 'junction');
+  fs.renameSync(s.wt, parked);
+  fs.symlinkSync(victim, s.wt, 'junction');
+  const r = await git.removeWorktree(s.repo, s.wt);
+  assert.equal(r.refused, true, 'the registered root junction is refused before traversal');
+  assert.equal(fs.lstatSync(s.wt).isSymbolicLink(), true, 'the registered root junction remains');
+  assert.equal(fs.existsSync(victimLink), true, 'the victim junction was not unlinked');
+  assert.equal(fs.existsSync(sentinel(victimLinkTarget)), true, 'the victim junction target survives');
+  assert.equal(fs.existsSync(sentinel(victim)), true, 'the victim tree survives');
+});
+
+test('removeWorktree refuses when root inspection or worktree listing cannot prove ownership (A23 I/E)', async (t) => {
+  const s = setup(t);
+  const shared = s.target('shared');
+  const link = path.join(s.wt, 'node_modules');
+  fs.symlinkSync(shared, link, 'junction');
+  const plain = path.join(s.base, 'not-a-repo');
+  fs.mkdirSync(plain);
+  const listError = await git.removeWorktree(plain, s.wt);
+  assert.equal(listError.refused, true, 'a worktree-list error is fail-closed');
+  assert.equal(fs.existsSync(link), true, 'the list-error path did not unlink anything');
+  assert.equal(fs.existsSync(sentinel(shared)), true, 'the list-error target survives');
+
+  const realLstat = fs.promises.lstat;
+  fs.promises.lstat = async (p) => {
+    if (p === s.wt) throw Object.assign(new Error('EACCES: denied'), { code: 'EACCES' });
+    return realLstat(p);
+  };
+  t.after(() => { fs.promises.lstat = realLstat; });
+  const inspectError = await git.removeWorktree(s.repo, s.wt);
+  assert.equal(inspectError.refused, true, 'a root-inspection error is fail-closed');
+  assert.equal(fs.existsSync(link), true, 'the inspection-error path did not unlink anything');
+  assert.equal(fs.existsSync(sentinel(shared)), true, 'the inspection-error target survives');
+});
+
+test('removeWorktree matches a registered Windows worktree path without case sensitivity (A23 C)', { skip: !WIN }, async (t) => {
+  const s = setup(t);
+  const r = await git.removeWorktree(s.repo, s.wt.toUpperCase());
+  assert.equal(r.ok, true, r.error);
+  assert.equal(fs.existsSync(s.wt), false, 'the differently-cased registered worktree was removed');
+});
+
 test('the worker scratch dir (removeWorkerScratch): the removal it makes takes a junction inside as a link, THE TARGET SURVIVES on Node and on Electron', async (t) => {
   // The safety claim (data loss if it fails), on whichever runtime runs this file: the suite runs it
   // under Node and under Electron as Node. index.ts cannot be loaded in a test, so this makes the one
