@@ -146,16 +146,35 @@ function loadsFromTest(text) {
   for (const m of text.matchAll(/require(?:\.resolve)?\(\s*path\.(?:join|resolve)\(([^()]*)\)/g)) if (TEST_SEG.test(m[1])) return true;
   return false;
 }
+// In a named exception file, every load the regex can see, each as its call text: a literal
+// relative ../test/ require/import, and EVERY require(path.join|resolve(...)) whatever its
+// arguments, so a path built in a variable first (related-tests :183, testDir) is counted too.
+function loadCallsOf(text) {
+  const out = [];
+  for (const m of text.matchAll(/require\(\s*['"`](?:\.\.\/)+test\/[^'"`]*['"`]\s*\)|from\s+['"`](?:\.\.\/)+test\/[^'"`]*['"`]/g)) out.push(m[0]);
+  for (const m of text.matchAll(/require(?:\.resolve)?\(\s*path\.(?:join|resolve)\([^()]*\)\s*\)/g)) out.push(m[0]);
+  return out.map((s) => s.replace(/\s+/g, ' ')).sort();
+}
 // Older tools/ and scripts/ files that load test/ code today (Jim eca9fada NIT 2). Not part of
-// TEST-EXECPATH-ENV-108; named so that any NEW one goes red. Remove an entry when its file stops.
+// TEST-EXECPATH-ENV-108; named so that any NEW file goes red, and each lists its loads exactly
+// (Jim 1e1cb898 NIT 1), so a NEW load added to a listed file goes red too. Remove an entry when
+// its file stops loading from test/.
 const TEST_LOAD_EXCEPTIONS = {
-  'scripts/claims-derived-backfill.cjs': 'test/load-ts.cjs',
-  'scripts/claims-mailcard-backfill.cjs': 'test/load-ts.cjs',
-  'scripts/native-memory-migrate.cjs': 'test/load-ts.cjs',
-  'scripts/related-tests.cjs': 'test/tools/run-tests.cjs (FEATURE_TEST_DIRS)',
-  'tools/gen-legacy-prompt-fp.cjs': 'test/load-ts.cjs (this tree and the legacy tree)',
-  'tools/make-logo.cjs': 'test/load-ts.cjs',
-  'tools/make-ph-thumbnail.cjs': 'test/load-ts.cjs'
+  'scripts/claims-derived-backfill.cjs': ["require(path.join(REPO, 'test', 'load-ts.cjs'))"],
+  'scripts/claims-mailcard-backfill.cjs': ["require(path.join(REPO, 'test', 'load-ts.cjs'))"],
+  'scripts/native-memory-migrate.cjs': ["require(path.join(REPO, 'test', 'load-ts.cjs'))"],
+  // :171 FEATURE_TEST_DIRS; :183 discoverTestFiles, through testDir = path.join(repo, 'test').
+  'scripts/related-tests.cjs': [
+    "require(path.join(repo, 'test', 'tools', 'run-tests.cjs'))",
+    "require(path.join(testDir, 'tools', 'run-tests.cjs'))"
+  ],
+  // this tree and the legacy tree
+  'tools/gen-legacy-prompt-fp.cjs': [
+    "require(path.join(__dirname, '../test/load-ts.cjs'))",
+    "require(path.join(legacyRoot, 'test/load-ts.cjs'))"
+  ],
+  'tools/make-logo.cjs': ["require(path.join(ROOT, 'test/load-ts.cjs'))"],
+  'tools/make-ph-thumbnail.cjs': ["require(path.join(ROOT, 'test/load-ts.cjs'))"]
 };
 
 test('LAYOUT detector (Jim eca9fada NIT 2): path.join/path.resolve loads of test/ count, directory reads do not', () => {
@@ -197,6 +216,25 @@ test('LAYOUT (Jim 01-35-58 + eca9fada NIT 2): nodeEnv lives in tools/; no tools/
   const known = Object.keys(TEST_LOAD_EXCEPTIONS);
   assert.deepEqual(found.filter((f) => !known.includes(f)).sort(), [], 'a NEW tool or script loads code from test/: move the helper to tools/ (as node-env.cjs was)');
   assert.deepEqual(known.filter((f) => !found.includes(f)).sort(), [], 'a named exception no longer loads from test/: remove it from TEST_LOAD_EXCEPTIONS');
+  for (const f of known) {
+    assert.deepEqual(loadCallsOf(fs.readFileSync(path.join(REPO, f), 'utf8')), [...TEST_LOAD_EXCEPTIONS[f]].sort(),
+      `${f}: its loads changed. A new load from test/ in a listed file is not covered by the exception; move the helper to tools/`);
+  }
+});
+
+test('LAYOUT exception loads (Jim 1e1cb898 NIT 1): a listed file counts every path-built require, not just one naming test', () => {
+  const text = [
+    "const a = require(path.join(repo, 'test', 'tools', 'run-tests.cjs'));",
+    "const testDir = path.join(repo, 'test');",
+    "const b = require( path.join(testDir, 'tools', 'run-tests.cjs') );",
+    "const c = require('../test/load-ts.cjs');",
+    "const d = require('./node-env.cjs');"
+  ].join('\n');
+  assert.deepEqual(loadCallsOf(text), [
+    "require( path.join(testDir, 'tools', 'run-tests.cjs') )",
+    "require('../test/load-ts.cjs')",
+    "require(path.join(repo, 'test', 'tools', 'run-tests.cjs'))"
+  ]);
 });
 
 test('build-trial: only a process.execPath spawn gets nodeEnv (Jim 01-35-58 NIT 2)', () => {
