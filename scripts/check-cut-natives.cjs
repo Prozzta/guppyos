@@ -20,7 +20,7 @@ function deleteEnvCaseInsensitive(target, name) {
     if (key.toLowerCase() === wanted) delete target[key];
   }
 }
-function main(electron, modules) {
+function main(electron, modules, options = {}) {
   if (!electron || !modules) {
     console.error('usage: check-cut-natives.cjs <electron.exe> <unpacked node_modules>');
     return 2;
@@ -41,11 +41,11 @@ function main(electron, modules) {
     "if (db.prepare('select 42 as n').get().n !== 42) throw new Error('better-sqlite3 query failed');",
     "db.close(); console.log('CUT NATIVES OK: fs-handle + node-pty + better-sqlite3');"
   ].join('\n');
-  const env = { ...process.env, ELECTRON_RUN_AS_NODE: '1' };
+  const env = { ...(options.env || process.env), ELECTRON_RUN_AS_NODE: '1' };
   deleteEnvCaseInsensitive(env, 'NoDefaultCurrentDirectoryInExePath');
   deleteEnvCaseInsensitive(env, 'NODE_PATH');
   deleteEnvCaseInsensitive(env, 'NODE_OPTIONS');
-  const r = spawnSync(electronPath, ['-e', probe], { encoding: 'utf8', env, windowsHide: true });
+  const r = (options.spawn || spawnSync)(electronPath, ['-e', probe], { encoding: 'utf8', env, windowsHide: true });
   if (r.error || r.status !== 0 || !r.stdout.includes('CUT NATIVES OK')) {
     console.error('CUT NATIVES FAILED');
     if (r.error) console.error(r.error.message);

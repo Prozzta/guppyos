@@ -5,6 +5,7 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const vm = require('node:vm');
 
 const ROOT = path.join(__dirname, '..');
 const cut = fs.readFileSync(path.join(ROOT, 'scripts', 'cut-cmd-natives.cjs'), 'utf8');
@@ -80,14 +81,7 @@ test('post-cut probe runs Electron as Node and loads both native modules', () =>
   assert.match(cut, /check-cut-natives\.cjs/);
 });
 
-test('fs-handle package contract rejects the 1.1.107-shaped addon before a cut', () => {
-  const v107 = { finalPath() {}, procOpen() {}, procAlive() {}, procClose() {}, procAdopt() {} };
-  assert.deepEqual(fsHandleContract.missingFsHandleExports(v107), ['posixRename', 'posixRenameAsync']);
-  const current = Object.fromEntries(fsHandleContract.FS_HANDLE_REQUIRED_EXPORTS.map((name) => [name, () => {}]));
-  assert.deepEqual(fsHandleContract.missingFsHandleExports(current), []);
-});
-
-test('packaged probe rejects a missing archive dependency despite inherited NODE_PATH', () => {
+function runPackagedProbe(addonExports, { inheritedEnv = {}, missingArchiveDependency = false } = {}) {
   const tmp = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'cut-native-'));
   try {
     const resources = path.join(tmp, 'resources');
@@ -95,15 +89,73 @@ test('packaged probe rejects a missing archive dependency despite inherited NODE
     const archive = path.join(resources, 'app.asar', 'node_modules');
     const dev = path.join(tmp, 'dev-node-path');
     write(path.join(archive, 'node-pty', 'index.js'), 'module.exports = { spawn() {} };');
-    write(path.join(archive, 'better-sqlite3', 'index.js'), "require('missing-cut-dependency'); module.exports = class { prepare() { return { get() { return { n: 42 }; } }; } close() {} };");
+    write(path.join(archive, 'better-sqlite3', 'index.js'), `${missingArchiveDependency ? "require('missing-cut-dependency'); " : ''}module.exports = class { prepare() { return { get() { return { n: 42 }; } }; } close() {} };`);
     write(path.join(dev, 'missing-cut-dependency', 'index.js'), 'module.exports = {};');
     fs.mkdirSync(modules, { recursive: true });
-    const r = spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'check-cut-natives.cjs'), process.execPath, modules], {
-      encoding: 'utf8', env: { ...process.env, nOdE_pAtH: dev }
-    });
-    assert.notEqual(r.status, 0);
-    assert.match(r.stderr, /CUT NATIVES FAILED/);
+    const addonPaths = [];
+    let invoked;
+    let result;
+    const spawn = (_electron, args, options) => {
+      invoked = { args, options };
+      const requireFromArchive = (id) => {
+        if (id === path.join(archive, 'node-pty')) return { spawn() {} };
+        if (id === path.join(archive, 'better-sqlite3')) {
+          const module = { exports: {} };
+          vm.runInNewContext(fs.readFileSync(path.join(id, 'index.js'), 'utf8'), { module, exports: module.exports, require: requireFromArchive });
+          return module.exports;
+        }
+        if (id === 'missing-cut-dependency') {
+          if (Object.keys(options.env).some((key) => key.toLowerCase() === 'node_path')) return {};
+          throw new Error("Cannot find module 'missing-cut-dependency'");
+        }
+        throw new Error(`unexpected packaged require: ${id}`);
+      };
+      let stdout = '';
+      try {
+        vm.runInNewContext(args[1], {
+          process: { dlopen(holder, addonPath) { addonPaths.push(addonPath); holder.exports = addonExports; } },
+          require: requireFromArchive,
+          console: { log(line) { stdout += `${line}\n`; } }
+        });
+        result = { status: 0, stdout, stderr: '' };
+      } catch (error) {
+        result = { status: 1, stdout, stderr: `${error.message}\n` };
+      }
+      return result;
+    };
+    const status = fsHandleContract.main(process.execPath, modules, { spawn, env: inheritedEnv });
+    return { status, invoked, addonPaths, result };
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
+}
+
+test('packaged probe rejects the 1.1.107 fs-handle exports and accepts the current addon', () => {
+  const v107 = { finalPath() {}, procOpen() {}, procAlive() {}, procClose() {}, procAdopt() {} };
+  const current = Object.fromEntries(fsHandleContract.FS_HANDLE_REQUIRED_EXPORTS.map((name) => [name, () => {}]));
+  assert.deepEqual(fsHandleContract.missingFsHandleExports(v107), ['posixRename', 'posixRenameAsync']);
+  assert.deepEqual(fsHandleContract.missingFsHandleExports(current), []);
+
+  const oldProbe = runPackagedProbe(v107);
+  assert.equal(oldProbe.status, 1);
+  assert.match(oldProbe.invoked.options.env.ELECTRON_RUN_AS_NODE, /1/);
+  assert.match(oldProbe.invoked.args[1], /process\.dlopen/);
+  assert.equal(oldProbe.addonPaths.length, 1);
+  assert.match(oldProbe.result.stderr, /CUT FS-HANDLE MISSING EXPORTS: posixRename, posixRenameAsync/);
+
+  const currentProbe = runPackagedProbe(current);
+  assert.equal(currentProbe.status, 0);
+  assert.equal(currentProbe.addonPaths.length, 1);
+});
+
+test('packaged probe reaches the archive dependency and rejects inherited NODE_PATH', () => {
+  const current = Object.fromEntries(fsHandleContract.FS_HANDLE_REQUIRED_EXPORTS.map((name) => [name, () => {}]));
+  const probe = runPackagedProbe(current, {
+    inheritedEnv: { nOdE_pAtH: 'would-mask-missing-cut-dependency' },
+    missingArchiveDependency: true
+  });
+  assert.equal(probe.status, 1);
+  assert.doesNotMatch(Object.keys(probe.invoked.options.env).join(','), /node_path/i);
+  assert.match(probe.result.stderr, /missing-cut-dependency/);
+  assert.equal(probe.addonPaths.length, 1);
 });
