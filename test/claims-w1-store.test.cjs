@@ -749,7 +749,7 @@ test('F3: one TTL grammar; stored forms are task:<id> and until:<iso> only', asy
   assert.deepEqual(parseStoredTtl('task:CL-W1'), { kind: 'task', task: 'CL-W1' });
 });
 
-test('F5: a rekey whose line fails for one agent records no new key id; every ledger stays key-missing; the retry heals all', async () => {
+test('F5 (updated to the not-in-effect contract, Jim SHOULD on CLAIMS-REKEY-ENTRYPOINT-108): a rekey whose line fails for one agent records no new key id and names every other ledger as not in effect; every ledger stays key-missing; the retry heals all', async () => {
   const root = hive();
   const now = clock('2026-10-03T10:00:00Z');
   const keys = new SandboxKeyProvider();
@@ -775,7 +775,12 @@ test('F5: a rekey whose line fails for one agent records no new key id; every le
   const first = await r1.store.rekey(true);
   r1.store.close();
   assert.equal(first.ok, false);
-  assert.deepEqual(first.refused.map((x) => [x.agentId, x.why]), [['dwight', 'the rekey append failed']]);
+  // The contract Jim asked for: the failed ledger keeps its own reason, and each ledger whose line was
+  // written is named too, because without the recorded key id its rekey is not in effect.
+  const notInEffect = 'not in effect: the key id was not recorded (the rekey append of another ledger failed), retry the rekey';
+  assert.deepEqual(first.refused.map((x) => [x.agentId, x.why]).sort(), [['andy', notInEffect], ['creed', notInEffect], ['dwight', 'the rekey append failed']]);
+  assert.deepEqual(first.rekeyed, [], 'nothing is reported as rekeyed');
+  assert.equal(first.recorded, false, 'and the key id is reported as not recorded');
   // S2 (Jim): the SAME store must not keep the new key cached after the failed rekey.
   for (const a of Object.keys(acked)) assert.equal(r1.store.readLedger(a).chain.reason, 'key-missing', `${a} on the rekeying store`);
   await refused(r1.store.appendRecord('creed', note('x'), 'endpoint'), /read-only|key is missing/);
