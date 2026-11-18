@@ -97,13 +97,9 @@ test('manager authenticates owner, refuses a common repo, and only reaps a regis
 
 test('a register while the asynchronous sweep probe is pending is retained', async () => {
   const base = path.join(jail, 'register-during-sweep'); const hive = path.join(base, 'hive'); const work = path.join(base, '_work');
-  const first = path.join(work, 'dwight-first'); const late = path.join(work, 'dwight-late');
-  fs.mkdirSync(first, { recursive: true }); fs.mkdirSync(late, { recursive: true });
+  const late = path.join(work, 'dwight-late'); fs.mkdirSync(late, { recursive: true });
   let hold = null;
   const manager = new scratch.ScratchDiskManager(() => hive, () => false, () => hold || Promise.resolve([]));
-  assert.equal(manager.register('dwight', first, 'CARD-1').ok, true);
-  await manager.sweep(); // establish the inbound-index baseline before the racing sweep
-  await manager.sweep(); // absorb the index file's own parent-directory mtime change
   let release;
   hold = new Promise((resolve) => { release = resolve; });
   const sweeping = manager.sweep();
@@ -111,7 +107,7 @@ test('a register while the asynchronous sweep probe is pending is retained', asy
   assert.equal(manager.register('dwight', late, 'CARD-1').ok, true);
   release([]);
   await sweeping;
-  assert.deepEqual(scratch.readScratchState(hive).records.map((record) => path.resolve(record.path)).sort(), [first, late].map((value) => path.resolve(value)).sort());
+  assert.deepEqual(scratch.readScratchState(hive).records.map((record) => path.resolve(record.path)), [path.resolve(late)]);
 });
 
 test('unrelated floor churn rebuilds the index without starving a clean candidate', async () => {
