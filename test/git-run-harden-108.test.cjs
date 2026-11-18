@@ -329,3 +329,61 @@ test('GIT-RUN-HARDEN-108: when the repo\'s filter drivers cannot be read, the ca
   assert.equal(await world.runGit(c.repo, ['status', '--porcelain'], undefined, 5000), null);
   assert.equal(c.ran(), false);
 });
+
+// ---- A program named git in the folder itself ----
+
+const winOnly = { skip: process.platform !== 'win32' && 'only Windows looks a bare program name up in the working directory' };
+
+/**
+ * Windows skips the working directory when the STARTING process has NoDefaultCurrentDirectoryInExePath set. Agent
+ * shells here set it; the packaged app does not. These tests run as the app does, with the variable absent.
+ */
+function asTheAppRuns(t) {
+  const NAME = 'NoDefaultCurrentDirectoryInExePath';
+  const had = Object.prototype.hasOwnProperty.call(process.env, NAME) ? process.env[NAME] : undefined;
+  delete process.env[NAME];
+  t.after(() => { if (had !== undefined) process.env[NAME] = had; });
+}
+
+/** Put a console program that is not git into `dir` under `name`, and prove a bare `git` there runs it. */
+function plantProgram(dir, name) {
+  fs.copyFileSync(path.join(process.env.SystemRoot, 'System32', 'whoami.exe'), path.join(dir, name));
+  let out = '';
+  try { out = execFileSync('git', ['/user', '/fo', 'csv', '/nh'], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }); } catch { /* git itself refuses these arguments */ }
+  // whoami answers with the account's SID. The text is never printed: only whether it has that shape.
+  assert.ok(/S-1-5-\d+/.test(out), `the plant is live: a bare "git" started in the folder runs ${name}`);
+}
+
+for (const name of ['git.exe', 'git.com']) {
+  test(`GIT-RUN-HARDEN-108: a ${name} in the repo folder is not run in place of git`, winOnly, async (t) => {
+    asTheAppRuns(t);
+    const c = setup();
+    plantProgram(c.repo, name);
+
+    const inside = await git.runGit(c.repo, ['rev-parse', '--is-inside-work-tree']);
+    assert.ok(inside.ok, `git.ts runGit ran the repo's ${name}, not git (${inside.error})`);
+    assert.equal(inside.stdout.trim(), 'true');
+
+    // A call that reads the repo's filter drivers first: that read must reach git too.
+    const st = await git.runGit(c.repo, ['status', '--porcelain']);
+    assert.ok(st.ok, `a status read ran the repo's ${name}, not git (${st.error})`);
+    assert.ok(st.stdout.includes(`?? ${name}`), 'git itself lists the planted file as untracked');
+
+    const head = await world.runGit(c.repo, ['rev-parse', 'HEAD'], undefined, 5000);
+    assert.equal(head === null ? null : head.trim(), c.head, `the claims snapshot runner ran the repo's ${name}, not git`);
+    const worldStatus = await world.runGit(c.repo, ['status', '--porcelain'], undefined, 5000);
+    assert.equal(typeof worldStatus, 'string', `the claims snapshot runner's status read ran the repo's ${name}, not git`);
+  });
+}
+
+test('GIT-RUN-HARDEN-108: a git.exe in the app\'s own working directory is not run by the derived-facts reader', winOnly, async (t) => {
+  asTheAppRuns(t);
+  const c = setup();
+  const launchedIn = fs.mkdtempSync(path.join(ROOT, 'cwd-'));
+  plantProgram(launchedIn, 'git.exe');
+  const before = process.cwd();
+  process.chdir(launchedIn);
+  try {
+    assert.equal(await new DerivedGit(c.repo).ok(), true, 'derivedGit ran the git.exe in the working directory, not git');
+  } finally { process.chdir(before); }
+});
