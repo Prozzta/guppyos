@@ -25,6 +25,7 @@ const loadTs = require('./load-ts.cjs');
 const AJ = loadTs('src/main/atomicJson.ts');
 const win = process.platform === 'win32';
 const turn = () => new Promise((r) => setImmediate(r));
+const renameCapability = win ? AJ.renameAddonCapability() : { available: false, reason: 'Windows rename semantics' };
 
 function bigTarget(t, tag) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), `guppy-regeperm-${tag}-`));
@@ -52,7 +53,9 @@ async function untilHeldOpen(dir, target, reading) {
   return false;
 }
 
-test('R1 a sync atomic write publishes over a real in-flight readFile', { skip: !win && 'Windows rename semantics' }, async (t) => {
+test('R1 a sync atomic write publishes over a real in-flight readFile', {
+  skip: !win ? 'Windows rename semantics' : !renameCapability.available && `POSIX rename addon unavailable: ${renameCapability.reason}`
+}, async (t) => {
   t.after(() => AJ.__setRenameAddonForTest(undefined));
   AJ.__setRenameAddonForTest(undefined);
   const { dir, target } = bigTarget(t, 'r1');
