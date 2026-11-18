@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 // SCRATCH-DISK-REAP-108: release-worktrees loads linkSafeRemove through tools/load-ts.cjs.
 // It must fail closed if a census left that source journaled; no real repository journal is touched.
 const test = require('node:test');
