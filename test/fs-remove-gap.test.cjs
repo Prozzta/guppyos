@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 // @heavy-lock live: sustained work: 12 races at once, half of them in the installed Electron as Node. One run of this file takes the heavy slot.
 /**
  * FS-REMOVE-READDIR-GAP-108: a tree delete never follows a link that an agent puts in while the
@@ -28,14 +29,15 @@
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
 const { many } = require('./fs-remove-gap-race.cjs');
 
 const RACERS = 2;
 const RUNS = 150;
 const IMPLS = ['sync', 'async', 'reaper'];
-const exe = process.env.GUPPY_PACKAGED_EXE || path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Guppy', 'Guppy.exe');
+// The installed app comes from installed-guppy.cjs (run-tests jails LOCALAPPDATA); with no usable app the
+// Electron tests skip and say why.
+const guppy = require('./tools/installed-guppy.cjs').installedGuppy();
+const exe = guppy.exe;
 
 function clean(res, runtime) {
   assert.match(String(res.runtime), runtime);
@@ -60,8 +62,7 @@ test(`${RACERS * RUNS} raced deletes by each caller lose nothing (this Node)`, a
   clean(await under(null, () => many(IMPLS, RACERS, RUNS, 300)), /^Node /);
 });
 
-test(`${RACERS * RUNS} raced deletes by each caller lose nothing (the installed Electron as Node)`, { skip: process.platform !== 'win32' && 'the installed app is the Windows one' }, async () => {
-  assert.ok(fs.existsSync(exe), `no installed Guppy at ${exe}`);
+test(`${RACERS * RUNS} raced deletes by each caller lose nothing (the installed Electron as Node)`, { skip: guppy.skip }, async () => {
   clean(await under(exe, () => many(IMPLS, RACERS, RUNS, 300)), /^Electron .* as Node$/);
 });
 

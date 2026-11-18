@@ -1,12 +1,14 @@
 name: fs-remove-gap
 
 # FS-REMOVE-READDIR-GAP-108: the link-safe tree delete (the fs-handle addon's removeTree) built and
-# raced on Linux and macOS, where the development machine cannot run it. Per runner:
+# raced on Linux and macOS, where the development machine cannot run it, and on Windows. One job per
+# system and caller (sync, async, reaper), so a system's pin is 3 x RACERS x RUNS runs. Per job:
 #   1. build the addon
 #   2. the fixed cases (test/fs-handle-remove-tree.test.cjs)
-#   3. the pin: RACERS x RUNS raced deletes by each of the three callers at 0 losses, while a second
-#      process swaps the tree's folders for links to a victim folder
+#   3. the pin: RACERS x RUNS raced deletes by the job's caller at 0 losses, while a second process
+#      swaps the tree's folders for links to a victim folder
 #   4. the control: the old JS walk in the same race must LOSE the victim's files
+# The pin and the control each put their result line on the job as a notice.
 # It ships nothing and publishes nothing.
 
 on:
@@ -38,13 +40,14 @@ env:
 
 jobs:
   race:
-    name: removeTree on ${{ matrix.os }}
+    name: removeTree (${{ matrix.caller }}) on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        caller: [sync, async, reaper]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -58,9 +61,9 @@ jobs:
         run: node tools/build-fs-handle.cjs
       - name: Fixed cases
         run: node --test test/fs-handle-remove-tree.test.cjs
-      - name: Pin (0 losses in 3 x RACERS x RUNS raced deletes)
+      - name: Pin (0 losses in RACERS x RUNS raced deletes by this caller)
         shell: bash
-        run: node test/fs-remove-gap-race.cjs pin "$RACERS" "$RUNS" 3600
+        run: node test/fs-remove-gap-race.cjs pin "$RACERS" "$RUNS" 3600 "${{ matrix.caller }}"
       - name: Control (the old JS walk must lose)
         shell: bash
         run: node test/fs-remove-gap-race.cjs control 4 100000 900

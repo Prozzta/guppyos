@@ -844,7 +844,8 @@ test('PIN: against the REAL test directory discovery is root tests plus only fol
   // MAIL-POSITIVE-RECEIPT (A14): + 1 (mail-positive-receipt-108). 641 + 1 = 642 (root test/*.test.cjs 600).
   // SECRETS-ATOMIC-SAVE-108: + 1 (secrets-atomic-save). 642 + 1 = 643.
   // LAG-MAIN-SYNC-REMAINDER-108: + 1 (lag-main-sync-remainder-108). 643 + 1 = 644.
-  assert.equal(files.length, 644,`the focused suite must retain its pre-fold file count, got ${files.length}`);
+  // FS-REMOVE-READDIR-GAP-108: + 2 (fs-handle-remove-tree, fs-remove-gap). 644 + 2 = 646.
+  assert.equal(files.length, 646,`the focused suite must retain its pre-fold file count, got ${files.length}`);
   assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
   assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');
   assert.ok(files.includes(path.join('start-fixes-163', 'start-fixes-163-boot-submit.test.cjs')), 'the start-fixes feature folder is included');
