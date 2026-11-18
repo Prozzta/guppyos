@@ -887,10 +887,14 @@ export class HiveManager {
   private asyncReads = 0;
   private readsRefused = false;
   private readDrained: Array<() => void> = [];
-  private async readTextAsync(p: string, tracked = false): Promise<string> {
+  private readTextAsync(p: string): Promise<string> {
+    return this.countedRead(p, () => fsPromises.readFile(p, 'utf8'));
+  }
+  /** Runs one async read of p as this manager's own: refused after dispose(), waited for by drainReads(). */
+  private async countedRead<T>(p: string, read: () => Promise<T>): Promise<T> {
     if (this.readsRefused) throw new HiveDisposedError(p);
     this.asyncReads++;
-    try { return await (tracked ? readFileTracked(p, 'utf8') : fsPromises.readFile(p, 'utf8')); } finally {
+    try { return await read(); } finally {
       if (--this.asyncReads === 0) for (const done of this.readDrained.splice(0)) done();
     }
   }
@@ -6839,7 +6843,7 @@ export class HiveManager {
   private async readAuthoritativeJsonAsync<T>(p: string, onMissing: () => T): Promise<T> {
     let raw: string;
     try {
-      raw = await this.readTextAsync(p, true);
+      raw = await this.countedRead(p, async () => await readFileTracked(p, 'utf8'));
     } catch (error) {
       if (error instanceof HiveDisposedError) throw error;
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -6983,7 +6987,7 @@ export class HiveManager {
       }
       let raw: string;
       try {
-        raw = await this.readTextAsync(p, true);
+        raw = await this.countedRead(p, async () => await readFileTracked(p, 'utf8'));
       } catch {
         if (overtaken()) continue;
         this.invalidateAuthorityCache(p);
