@@ -213,7 +213,7 @@ test('link-safe scratch removal preserves junction targets under installed Elect
 
 test('bare git dirs are refused while common gitdir targets are asynchronously protected by the inbound index', async () => {
   const base = path.join(jail, 'git-dir-refusal'); const hive = path.join(base, 'hive'); const work = path.join(base, '_work');
-  const bare = path.join(work, 'bare'); fs.mkdirSync(path.join(bare, 'objects'), { recursive: true }); fs.mkdirSync(path.join(bare, 'refs'), { recursive: true }); fs.writeFileSync(path.join(bare, 'HEAD'), 'ref: refs/heads/main\n');
+  const bare = path.join(work, 'dwight-bare'); fs.mkdirSync(path.join(bare, 'objects'), { recursive: true }); fs.mkdirSync(path.join(bare, 'refs'), { recursive: true }); fs.writeFileSync(path.join(bare, 'HEAD'), 'ref: refs/heads/main\n');
   assert.equal(scratch.scratchKind(bare), null);
   const target = path.join(work, 'dwight-common'); fs.mkdirSync(target, { recursive: true });
   const noise = path.join(work, 'noise');
