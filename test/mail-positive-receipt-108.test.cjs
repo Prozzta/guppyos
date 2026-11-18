@@ -11,6 +11,11 @@ require('./tools/own-job.cjs');
  * latency alone, `latency-fallback`) marked that mail surfaced. Stop then archived it to
  * inbox/.done: mail the agent never saw, gone. Seen live on 1.1.78 (2026-10-02, two mails).
  *
+ * The same holds for a latency-evidence provider (every provider but claude and codex: no record
+ * of its context that we can read). Today those post over the pipe only: an http hook URL is
+ * written into Claude's settings alone, the mcp endpoint into Codex's. The server does not rely on
+ * that: a latency-evidence agent that posts over http is not confirmed by latency either.
+ *
  * The stall here is the real one: the main thread is blocked until each client has given up at
  * the product's own 30 s and has read nothing. It is an event, not a bet on milliseconds.
  */
@@ -93,13 +98,17 @@ const archived = (f, agentId, id) => fs.existsSync(path.join(f.hive.root(), 'age
  * blocked until all four clients have given up at the product's own timeout with 0 bytes read.
  */
 test('a 30 s main-thread stall before the hook is read: the client gave up unread, so the mail is never confirmed and archived', { timeout: 120_000 }, async (t) => {
-  const f = await floor(t, { 'cl-1': 'claude', 'cx-1': 'codex', 'cl-2': 'claude', 'cx-2': 'codex' });
+  const f = await floor(t, { 'cl-1': 'claude', 'cx-1': 'codex', 'cl-2': 'claude', 'cx-2': 'codex', 'ag-1': 'antigravity' });
   const http = (agentId, onGiveUp) => ({ agentId, transport: 'http', onGiveUp, session: `s-${agentId}`, mail: twiceUnconfirmed(f, agentId, 'UserPromptSubmit'), url: f.server.hookUrl(agentId), body: JSON.stringify({ hook_event_name: 'UserPromptSubmit', prompt: 'go', session_id: `s-${agentId}` }) });
+  // A latency-evidence provider (AGY surfaces at PreInvocation) on the http broker: a FIRST
+  // surfacing, which the latency rule confirms with no fallback involved.
+  const latencyHttp = (agentId, onGiveUp) => ({ agentId, transport: 'http', onGiveUp, session: `s-${agentId}`, evidence: 'latency', surfacedBefore: 0, mail: f.hive.send({ to: agentId, act: 'request', subject: `for ${agentId}`, body: `body for ${agentId}` }, 'god-1'), url: f.server.hookUrl(agentId), body: JSON.stringify({ hook_event_name: 'PreInvocation', session_id: `s-${agentId}` }) });
   const mcp = (agentId, onGiveUp) => {
     const ep = f.server.mcpEndpoint(agentId);
     return { agentId, transport: 'mcp', onGiveUp, session: `thread-${agentId}`, mail: twiceUnconfirmed(f, agentId, 'PostToolUse'), url: ep.url, body: JSON.stringify({ jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'hive_hook', arguments: { event: 'PostToolUse', k: ep.token }, _meta: { threadId: `thread-${agentId}` } } }) };
   };
-  const requests = [http('cl-1', 'close'), mcp('cx-1', 'close'), http('cl-2', 'keep-open'), mcp('cx-2', 'keep-open')];
+  assert.equal(S.mailEvidenceKind('antigravity'), 'latency');
+  const requests = [http('cl-1', 'close'), mcp('cx-1', 'close'), http('cl-2', 'keep-open'), mcp('cx-2', 'keep-open'), latencyHttp('ag-1', 'keep-open')];
 
   // Every settle of a mail claim, by agent: the product's own verdict on each reply.
   const settled = new Map();
@@ -147,11 +156,12 @@ test('a 30 s main-thread stall before the hook is read: the client gave up unrea
     assert.equal(archived(f, r.agentId, id), false, `MAIL LOST (${r.transport}, socket ${r.onGiveUp}): archived to inbox/.done, never seen by the agent`);
     assert.equal(inboxHas(f, r.agentId, id), true, `the ${r.transport} mail is still in the inbox`);
     const again = f.entryOf(r.agentId, id);
-    assert.ok(again.unconfirmedSurfacings >= 3, `the ${r.transport} mail counts one more unconfirmed surfacing (${again.unconfirmedSurfacings})`);
+    const want = (r.surfacedBefore ?? 2) + 1;
+    assert.ok(again.unconfirmedSurfacings >= want, `the ${r.transport} mail counts one more unconfirmed surfacing (${again.unconfirmedSurfacings}, want ${want})`);
   };
 
   for (const r of requests) {
     const what = r.onGiveUp === 'close' ? 'closed its socket at give-up (the reply never flushes)' : 'gave up but left its socket open (the reply flushes into a socket nobody reads)';
-    await t.test(`${r.transport}: the client ${what}`, () => neverConfirmed(r));
+    await t.test(`${r.transport}${r.evidence === 'latency' ? ' (a latency-evidence provider)' : ''}: the client ${what}`, () => neverConfirmed(r));
   }
 });
