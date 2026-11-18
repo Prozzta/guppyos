@@ -161,12 +161,15 @@ test('no recursive remove in src/main, and no remove reached under another name'
   });
 });
 
-test('the removers hold no recursive remove: fsSafeRemove walks bottom-up, linkSafeRemove only chooses', () => {
+test('the removers hold no recursive remove: fsSafeRemove hands a tree to the fs-handle addon, linkSafeRemove only chooses', () => {
   const body = (f) => fs.readFileSync(path.join(SRC, f), 'utf8');
   for (const r of REMOVERS) {
     assert.deepEqual(recursiveRemoves(body(r)), [], `${r} has no recursive remove`);
     assert.deepEqual(aliasedRemoves(body(r)), [], `${r} reaches no remove under another name`);
   }
-  assert.match(body('fsSafeRemove.ts'), /\brmdirSync\(p\);/, 'fsSafeRemove.ts removes a folder by itself, after its entries');
+  // FS-REMOVE-READDIR-GAP-108: the tree delete is the addon's; the file has no walk that deletes files
+  assert.match(body('fsSafeRemove.ts'), /\baddon\.removeTree\(p\);/, 'fsSafeRemove.ts deletes a tree with the addon');
+  assert.match(body('fsSafeRemove.ts'), /\bawait addon\.removeTreeAsync\(p\);/, 'and its async form too');
+  assert.doesNotMatch(body('fsSafeRemove.ts'), /function removeTree|function walk/, 'no JS walk left to fall back to');
   for (const r of REMOVERS) assert.doesNotMatch(body(r), /^import .*\brm(?:Sync)?\b/m, `${r} does not import rm or rmSync at all`);
 });

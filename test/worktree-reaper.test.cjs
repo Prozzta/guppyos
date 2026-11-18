@@ -15,12 +15,13 @@ require('./tools/mutant-runner-helper.cjs').gate(__filename);
  *   W1 recent-24h dropped          W2 current-release dropped     W3 newest-two-shipped dropped
  *   W4 junction-target dropped     W5 junction-target one pass    W6 uncommitted-changes dropped
  *   W7 unreachable-head dropped    W8 contains-git dropped        W9 git-repo dropped
- *   W10 no tombstone rename (an in-use folder is deleted)         W11 links not removed as links
+ *   W10 no tombstone rename (an in-use folder is deleted)         W11 removed links not counted
  *   W12 a hash such as a170e parses as a version                  W13 a dry run applies
  *   (Creed's audit) W14 untracked-work dropped   W15 running-exe dropped from the plan
  *   W16 no running-exe re-list before the rename  W17 a bare repo is a plain folder
  *   W18 shipped from local tags (an unpushed tag counts)   W19 prune despite a partial worktree
  *   W20 --protect ignored
+ *   (FS-REMOVE-READDIR-GAP-108) W21 no refusal without the addon   W22 a contract mismatch is trusted
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -254,14 +255,53 @@ test('REAL fixture: an exe that started after the plan keeps its folder (re-list
 function partialChecks(R) {
   const fx = fixture();
   const plan = R.planReap(R.collectFacts({ root: fx.work, repos: [fx.repo], now: fx.now, exes: [] }));
-  const ops = { ...fs, rmdirSync: (p, o) => { if (path.basename(p).startsWith('andy-cut175.reaping-')) throw Object.assign(new Error('locked'), { code: 'EBUSY' }); return fs.rmdirSync(p, o); } };
-  const results = R.applyReap(plan, { root: fx.work, repos: [fx.repo], now: fx.now, ops, exes: () => [] });
+  const real = R.loadRemover();
+  assert.ok(real.removeTree, `the fs-handle addon is built: ${real.reason}`);
+  // the tree delete is the addon's now: a locked tree is one that the remover cannot finish
+  const remover = { removeTree: (p) => { if (path.basename(p).startsWith('andy-cut175.reaping-')) throw Object.assign(new Error('locked'), { code: 'EBUSY' }); return real.removeTree(p); } };
+  const results = R.applyReap(plan, { root: fx.work, repos: [fx.repo], now: fx.now, remover, exes: () => [] });
   const res = Object.fromEntries(results.map((r) => [r.name, r]));
   assert.equal(res['andy-cut175'].result, 'partial');
   assert.equal(res['(git worktree prune)'] && res['(git worktree prune)'].result, 'skipped', 'W19: no prune while a worktree is partial');
   assert.match(git(fx.repo, 'worktree', 'list'), /andy-cut175/, 'W19: the partial worktree\'s admin entry survives');
 }
 test('REAL fixture: a partial worktree is not orphaned by git worktree prune', () => partialChecks(REAL));
+
+// FS-REMOVE-READDIR-GAP-108: without the addon there is no other way to delete a tree. It is kept, loudly.
+function refusedChecks(R) {
+  const fx = fixture();
+  const lines = [];
+  const { results, refused } = R.main(['--root', fx.work, '--repo', fx.repo, '--now', String(fx.now), '--apply'], (l) => lines.push(l),
+    { exes: () => [], remover: { removeTree: null, reason: 'test: no build' } });
+  const res = Object.fromEntries(results.map((r) => [r.name, r]));
+  for (const n of ['andy-cut175', 'topic-merged', 'gate-175-run']) {
+    assert.equal(res[n].result, 'refused', `${n}: ${JSON.stringify(res[n])}`);
+    assert.match(res[n].error, /^addon unavailable: test: no build$/);
+    assert.ok(fs.existsSync(path.join(fx.work, n)), `${n} is kept under its own name`);
+  }
+  assert.deepEqual(fs.readdirSync(fx.work).filter((n) => /\.reaping-/.test(n)), [], 'nothing was renamed to a tombstone');
+  assert.equal(fs.existsSync(path.join(fx.work, '_reaped-md')), false, 'nothing was archived');
+  assert.equal(res['old-170.log'].result, 'deleted', 'a log is one unlink and still goes');
+  assert.equal(refused, 3);
+  assert.equal(lines.filter((l) => /^RESULT\trefused\t/.test(l)).length, 3, 'one line per refused tree');
+  assert.ok(lines.some((l) => /^3 refused \(addon unavailable\)/.test(l)), `the summary counts them: ${lines.slice(-3).join(' | ')}`);
+  assert.match(git(fx.repo, 'worktree', 'list'), /andy-cut175/, 'a refused worktree is still a worktree');
+}
+test('REAL fixture: with no addon every tree is refused, kept as it was, and counted in the summary', () => refusedChecks(REAL));
+
+test('loadRemover passes over a build with another removeTree contract and one that does not load, and says why', () => {
+  const real = REAL.loadRemover();
+  assert.ok(real.removeTree, real.reason);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'reaper-remover-'));
+  try {
+    const junk = path.join(dir, 'junk.node'); fs.writeFileSync(junk, 'not a module');
+    const none = REAL.loadRemover([path.join(dir, 'missing.node')]);
+    assert.equal(none.removeTree, null); assert.match(none.reason, /no guppy_fs_handle\.node build found/);
+    const bad = REAL.loadRemover([junk]);
+    assert.equal(bad.removeTree, null); assert.ok(bad.reason.startsWith(junk + ': '), bad.reason);
+    assert.equal(REAL.loadRemover([path.join(dir, 'missing.node'), junk, real.from]).from, real.from, 'the next candidate is tried');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
 
 test('REAL process (Windows): a folder a running exe was started from is kept, at plan and at apply', { skip: process.platform !== 'win32' }, async () => {
   const fx = fixture();
@@ -289,6 +329,17 @@ test('the CLI refuses a missing --root/--repo and an unknown flag', () => {
   assert.throws(() => REAL.main(['--root', 'x', '--repo', 'y', '--force'], () => {}), /unknown argument: --force/);
 });
 
+function staleChecks(R) {
+  // a build from before removeTree, and one with another contract: passed over, with the reason
+  for (const [exports, said] of [[{ removeTree() { return 0; } }, 'undefined'], [{ removeTreeApi: 2, removeTree() { return 0; } }, '2']]) {
+    const got = R.loadRemover([__filename], () => exports);
+    assert.equal(got.removeTree, null, 'a build with another contract is not used');
+    assert.ok(got.reason.endsWith(`removeTree contract ${said}, need 1`), got.reason);
+  }
+  assert.equal(R.loadRemover([__filename], () => ({ removeTreeApi: 1, removeTree: () => 7 })).removeTree('x'), 7, 'the matching contract is used');
+}
+test('REAL: an addon that reports another removeTree contract is refused, not trusted', () => staleChecks(REAL));
+
 // ─── Mutant census ───────────────────────────────────────────────────────────
 
 const MUTANTS = [
@@ -302,7 +353,9 @@ const MUTANTS = [
   ['W8 contains-git dropped', "    if (e.nestedGit) return ['keep', 'contains-git'];\n", '', planChecks],
   ['W9 git-repo dropped', "    if (e.kind === 'repo') return ['keep', 'git-repo'];\n", '', planChecks],
   ['W10 no tombstone rename', 'if (tomb !== e.path) ops.renameSync(e.path, tomb);', '', inUseChecks],
-  ['W11 links not removed as links', 'links = removeLinks(tomb, ops);', 'links = 0;', applyChecks],
+  ['W11 removed links not counted', 'links = removeEntry(tomb, ops, () => (rm = rm || loadRemover()));', 'removeEntry(tomb, ops, () => (rm = rm || loadRemover())); links = 0;', applyChecks],
+  ['W21 no refusal without the addon', "if (!rm.removeTree) { results.push({ name: e.name, result: 'refused'", "if (false) { results.push({ name: e.name, result: 'refused'", refusedChecks],
+  ['W22 a contract mismatch is trusted', 'if (a.removeTreeApi === REMOVE_TREE_API && typeof', 'if (typeof', staleChecks],
   ['W12 a hash parses as a version', "m = /(?:^|[^0-9.])1(\\d{2})(?=$|[-_./])/.exec(s);", "m = /(?:^|[^0-9.])1(\\d{2})/.exec(s);", parseChecks],
   ['W13 a dry run applies', 'const results = o.apply ? applyReap(', 'const results = true ? applyReap(', dryRunChecks],
   ['W14 untracked-work dropped', "      if (w.untracked) return ['keep', 'untracked-work'];\n", '', planChecks],
@@ -321,7 +374,7 @@ function compile(text) {
   return m.exports;
 }
 
-test('MUTANT CENSUS WORKTREE-REAPER: W1-W13 each apply once and die at their named check', async (t) => {
+test('MUTANT CENSUS WORKTREE-REAPER: W1-W22 each apply once and die at their named check', async (t) => {
   const source = fs.readFileSync(SRC, 'utf8').replace(/\r\n/g, '\n');
   for (const [name, from, to, killer] of MUTANTS) {
     await t.test(name, () => {

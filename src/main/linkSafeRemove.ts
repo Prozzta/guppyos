@@ -5,7 +5,8 @@
  * at go too. This is the one call for a caller that has a path and does not know what it is:
  *   missing                nothing to do
  *   a junction or symlink  the link entry is removed, its target is left alone
- *   a real directory       walked bottom-up; a link in it is removed as a link, never followed
+ *   a real directory       deleted by the fs-handle addon's removeTree; a link in it is removed
+ *                          as a link, never followed
  *   a file                 unlinked (never rm: unlink cannot recurse, whatever is there by then)
  * The link handling is fsSafeRemove's; nothing here walks a tree itself.
  *
@@ -15,19 +16,19 @@
  * Do not shorten either one to a bare recursive rm. Measured on Electron 45.3.0 and pinned in
  * test/electron-rmsync-link-safe.test.cjs (RUNTIME PIN): rmSync on a junction empties its target;
  * fs.promises.rm on a junction removed the link only. That second result is one runtime version
- * and one shape, not a contract, so the async path takes the same walk.
+ * and one shape, not a contract, so the async path uses the same remover.
  *
- * A link planted WHILE a folder is being removed is not followed either: fsSafeRemove removes
- * each entry by itself, bottom-up, and never hands a folder to a recursive rm (which under
- * Electron follows a junction that appears while it runs; test/electron-rmsync-jitter.test.cjs).
+ * A link planted WHILE a folder is being removed is not followed either, and neither is a folder
+ * swapped for a link between two steps (FS-REMOVE-READDIR-GAP-108): removeTree opens each folder
+ * once, without following a link, and lists and deletes through that handle only, so no step
+ * resolves a name a second time. A walk on paths (lstat, readdir, unlink) cannot give that, so
+ * there is none: without the addon a tree is refused and kept, loudly (fsSafeRemove.ts).
+ * Pinned by test/fs-remove-gap.test.cjs and test/electron-rmsync-jitter.test.cjs.
  *
- * What remains open: between the lstat and the readdir of one folder, a process that can write
- * the parent can rename that real folder away and put a junction of the same name in its place;
- * the entries then listed are the target's. Only handle-based opens (FILE_FLAG_OPEN_REPARSE_POINT
- * on the folder, then listing by that handle) close it, and Node's fs has no such call.
- *
- * Not covered: a Windows volume mount point (a junction to \??\Volume{...}) is reported by
- * lstat as a directory, not a link, so it is walked like a real folder.
+ * A Windows volume mount point (a junction to \??\Volume{...}) is a link to the addon and is
+ * removed as one. The check of WHAT the path is, made here with lstat before choosing, is still a
+ * path check: if the path changes after it, the remover it is handed to refuses a root that is
+ * not a real folder, and unlink removes whatever single entry is there.
  */
 import { lstatSync, unlinkSync, type Stats } from 'node:fs';
 import { lstat, unlink } from 'node:fs/promises';

@@ -1,0 +1,232 @@
+'use strict';
+/**
+ * FS-REMOVE-READDIR-GAP-108: the race behind fs-remove-gap.test.cjs and the CI pin. Not a test
+ * file by itself. It runs under plain Node and under Electron as Node, on Windows, Linux and macOS:
+ *   <this file> race <impl> <base> <runs> <seconds>   remove a folder again and again while an agent attacks it
+ *   <this file> plant <dir> <victim> <park> <stop>    the agent
+ *   <this file> pin <racers> <runs> <seconds>         <racers> races at once for each of sync, async and reaper,
+ *                                                     <runs> each: exit 0 only with every run done and 0 losses
+ *   <this file> control <racers> <runs> <seconds>     the same with jswalk: exit 0 only if it LOST
+ * pin and control start their races with FS_GAP_EXE (run as Node: ELECTRON_RUN_AS_NODE=1) when it is
+ * set, and with this Node otherwise.
+ * `impl` is what removes the folder:
+ *   sync | async   src/main/fsSafeRemove.ts safeRemoveTreeSync / safeRemoveTree (the fs-handle addon)
+ *   reaper         scripts/worktree-reaper.cjs applyReap on the folder
+ *   jswalk         THE CONTROL: the walk of lstat, readdir, unlink and rmdir on paths that
+ *                  fsSafeRemove.ts had at e074a677. It must lose, or the agent has no teeth.
+ * The race prints one JSON line: { ok, electron, node, out } or { ok: false, error }.
+ * <base> must be under the temp folder; the victim is <base>/victim and nothing else is named.
+ *
+ * The agent does two things in a loop, with a random 0 to 3 ms spin between tries:
+ *   plant  a link to the victim at <dir>/a/j and <dir>/a/b/j (Jim's planter of 7604b62f)
+ *   swap   rename <dir>, <dir>/a or <dir>/a/b away and put a link to the victim under that name.
+ *          This is the gap itself: a real folder when it was checked, a link when it is listed.
+ */
+const child = require('node:child_process');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+
+const LINK = process.platform === 'win32' ? 'junction' : 'dir';
+const VICTIM = ['v0.txt', 'v1.txt', 'v2.txt', 'v3.txt', 'v4.txt', path.join('sub', 's0.txt')];
+
+function plant(dir, victim, park, stop) {
+  const out = { planted: 0, swapped: 0 };
+  const spots = [dir, path.join(dir, 'a'), path.join(dir, 'a', 'b')];
+  let n = 0;
+  while (!fs.existsSync(stop)) {
+    const until = Date.now() + Math.random() * 3;
+    while (Date.now() < until) { /* spin: a timer is too coarse for this window */ }
+    if (Math.random() < 0.5) {
+      for (const sub of ['a', path.join('a', 'b')]) {
+        try { fs.symlinkSync(victim, path.join(dir, sub, 'j'), LINK); out.planted++; } catch { /* no folder now, or j is there */ }
+      }
+    } else {
+      const spot = spots[Math.floor(Math.random() * spots.length)];
+      try {
+        fs.renameSync(spot, path.join(park, `p${process.pid}-${n++}`));
+        fs.symlinkSync(victim, spot, LINK);
+        out.swapped++;
+      } catch { /* not there now, busy, or its parent is gone */ }
+    }
+  }
+  console.log(JSON.stringify(out));
+}
+
+/** Remove whatever is at `p` without following a link (the fixture's own clean-up, not the code under test). */
+function sweep(p) {
+  const st = fs.lstatSync(p, { throwIfNoEntry: false });
+  if (!st) return;
+  if (st.isSymbolicLink()) { try { fs.unlinkSync(p); } catch { fs.rmdirSync(p); } return; }
+  if (!st.isDirectory()) { fs.unlinkSync(p); return; }
+  for (const nm of fs.readdirSync(p)) sweep(path.join(p, nm));
+  fs.rmdirSync(p);
+}
+
+/** The control: fsSafeRemove.ts safeRemoveTreeSync as it was at e074a677, word for word but in JS. */
+function jsWalk(root) {
+  const unlinkLink = (p) => {
+    if (!fs.lstatSync(p).isSymbolicLink()) throw new Error('refused: expected a reparse point');
+    if (process.platform === 'win32') { try { fs.rmdirSync(p); return; } catch { fs.unlinkSync(p); return; } }
+    fs.unlinkSync(p);
+  };
+  const walk = (p, isRoot) => {
+    const st = fs.lstatSync(p);
+    if (st.isSymbolicLink()) { if (isRoot) throw new Error('refused: root is a reparse point'); unlinkLink(p); return; }
+    if (!st.isDirectory()) { if (isRoot) throw new Error('refused: root is not a directory'); fs.unlinkSync(p); return; }
+    for (const name of fs.readdirSync(p)) walk(path.join(p, name), false);
+    const current = fs.lstatSync(p);
+    if (current.isSymbolicLink()) { if (isRoot) throw new Error('refused: root became a reparse point'); unlinkLink(p); return; }
+    if (!current.isDirectory()) throw new Error('refused: directory changed during removal');
+    try { fs.rmdirSync(p); }
+    catch (error) {
+      if (error.code !== 'ENOTEMPTY') throw error;
+      for (const name of fs.readdirSync(p)) walk(path.join(p, name), false);
+      fs.rmdirSync(p);
+    }
+  };
+  walk(root, true);
+}
+
+function remover(impl, work) {
+  if (impl === 'jswalk') return (dir) => jsWalk(dir);
+  if (impl === 'reaper') {
+    const R = require(path.join(__dirname, '..', 'scripts', 'worktree-reaper.cjs'));
+    const rm = R.loadRemover();
+    if (!rm.removeTree) throw new Error(`no fs-handle addon: ${rm.reason}`);
+    let now = 1700000000000;
+    return (dir) => {
+      const [r] = R.applyReap([{ name: path.basename(dir), path: dir, kind: 'folder', action: 'reap', reason: 'race' }], { root: work, now: now++, exes: () => [], remover: rm });
+      if (r.result !== 'deleted') throw Object.assign(new Error(`reaper: ${r.error || r.result}`), /refused|reparse/.test(String(r.error)) ? { code: 'EREFUSED' } : {});
+    };
+  }
+  const S = require('./load-ts.cjs')(path.join(__dirname, '..', 'src/main/fsSafeRemove.ts'));
+  if (impl === 'sync') return (dir) => S.safeRemoveTreeSync(dir);
+  if (impl === 'async') return (dir) => S.safeRemoveTree(dir);
+  throw new Error(`unknown impl ${impl}`);
+}
+
+async function race(impl, base, runs, seconds) {
+  const tmp = fs.realpathSync(os.tmpdir());
+  base = path.resolve(base);
+  if (!base.startsWith(tmp + path.sep) && !base.startsWith(path.resolve(os.tmpdir()) + path.sep)) throw new Error(`the base is not under the temp folder (${base}); refusing to run`);
+  const work = path.join(base, 'work');
+  const dir = path.join(work, 'claims.purge-old');
+  const victim = path.join(base, 'victim');
+  const park = path.join(base, 'park');
+  const stage = path.join(base, 'stage');
+  const stop = path.join(base, 'stop');
+  const trash = path.join(base, 'trash');
+  for (const d of [work, path.join(victim, 'sub'), park, trash]) fs.mkdirSync(d, { recursive: true });
+  const remove = remover(impl, work);
+  const kid = child.spawn(process.execPath, [__filename, 'plant', dir, victim, park, stop], { env: process.env, stdio: ['ignore', 'pipe', 'inherit'], windowsHide: true });
+  let kidOut = '';
+  kid.stdout.on('data', (d) => { kidOut += d; });
+  const exited = new Promise((resolve) => kid.on('exit', resolve));
+
+  const out = { impl, runs: 0, losses: 0, firstLossAt: 0, removed: 0, refused: 0, errors: {}, planted: 0, swapped: 0, ms: 0 };
+  const t0 = Date.now();
+  const end = t0 + seconds * 1000;
+  // The fixture's own clean-up must not be the walk under test: what is left at a path the agent
+  // can reach is first moved, in one step, to where the agent is not, and only swept there.
+  let trashed = 0;
+  const clear = (p) => {
+    for (let i = 0; i < 50 && fs.lstatSync(p, { throwIfNoEntry: false }); i++) {
+      const to = path.join(trash, `t${trashed++}`);
+      try { fs.renameSync(p, to); sweep(to); } catch { /* the agent is in it; again */ }
+    }
+  };
+  try {
+    while (out.runs < runs && Date.now() < end) {
+      fs.mkdirSync(path.join(victim, 'sub'), { recursive: true });
+      for (const f of VICTIM) fs.writeFileSync(path.join(victim, f), 'x');
+      // Built where the agent is not, then moved into place in one step.
+      clear(stage); clear(dir);
+      try {
+        fs.mkdirSync(path.join(stage, 'a', 'b'), { recursive: true });
+        for (let i = 0; i < 40; i++) fs.writeFileSync(path.join(stage, 'a', 'b', `f${i}`), 'y');
+        for (let i = 0; i < 4; i++) fs.writeFileSync(path.join(stage, 'a', `g${i}`), 'y');
+        fs.renameSync(stage, dir);
+      } catch { continue; }
+      out.runs++;
+      try { await remove(dir); out.removed++; }
+      catch (e) {
+        if (/refused/.test(String(e && e.message)) || (e && e.code === 'EREFUSED')) out.refused++;
+        else { const k = (e && e.code) || String(e && e.message).replace(/'[^']*'|[A-Za-z]:\\\S+|\/\S+/g, '<path>').slice(0, 60); out.errors[k] = (out.errors[k] || 0) + 1; }
+      }
+      if (!VICTIM.every((f) => fs.existsSync(path.join(victim, f)))) { out.losses++; if (!out.firstLossAt) out.firstLossAt = out.runs; if (impl === 'jswalk') break; }
+      if (out.runs % 50 === 0) for (const nm of fs.readdirSync(park)) { try { sweep(path.join(park, nm)); } catch { /* next time */ } }
+    }
+  } finally {
+    fs.writeFileSync(stop, '');
+    await exited;
+  }
+  out.ms = Date.now() - t0;
+  try { Object.assign(out, JSON.parse(kidOut)); } catch { out.planted = -1; }
+  // the agent has stopped: what is left is swept where it lies
+  for (const p of [work, stage, park, trash]) { try { sweep(p); } catch { /* reported by the caller's own clean-up */ } }
+  return out;
+}
+
+/** Run `racers` races of each impl at once, each in its own temp folder; returns the totals per impl. */
+async function many(impls, racers, runs, seconds) {
+  const exe = process.env.FS_GAP_EXE || process.execPath;
+  const env = { ...process.env, ...(process.env.FS_GAP_EXE ? { ELECTRON_RUN_AS_NODE: '1' } : {}) };
+  const jobs = [];
+  for (const impl of impls) {
+    for (let i = 0; i < racers; i++) {
+      const base = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), `fs-gap-${impl}-`));
+      jobs.push(new Promise((resolve) => {
+        child.execFile(exe, [__filename, 'race', impl, base, String(runs), String(seconds)], { env, windowsHide: true, maxBuffer: 1 << 24 }, (err, stdout, stderr) => {
+          let res;
+          try { res = JSON.parse(stdout.trim().split('\n').pop()); } catch { res = { ok: false, error: `no result: ${err && err.message} ${stderr}` }; }
+          try { sweep(base); } catch { /* left in the temp folder */ }
+          resolve({ impl, res });
+        });
+      }));
+    }
+  }
+  const done = await Promise.all(jobs);
+  const totals = {};
+  let runtime = null;
+  for (const { impl, res } of done) {
+    const t = totals[impl] || (totals[impl] = { races: 0, failed: 0, runs: 0, losses: 0, removed: 0, refused: 0, errors: {}, planted: 0, swapped: 0, firstLossAt: [] });
+    t.races++;
+    if (!res.ok) { t.failed++; t.errors[`RACE FAILED: ${String(res.error).slice(0, 200)}`] = 1; continue; }
+    runtime = res.electron ? `Electron ${res.electron} as Node` : `Node ${res.node}`;
+    for (const k of ['runs', 'losses', 'removed', 'refused', 'planted', 'swapped']) t[k] += res.out[k];
+    for (const [k, v] of Object.entries(res.out.errors)) t.errors[k] = (t.errors[k] || 0) + v;
+    if (res.out.firstLossAt) t.firstLossAt.push(res.out.firstLossAt);
+  }
+  return { runtime, platform: process.platform, totals };
+}
+
+module.exports = { race, many, sweep, VICTIM };
+
+if (require.main === module) {
+  const [role, a, b, c, d] = process.argv.slice(2);
+  if (role === 'plant') plant(a, b, c, d);
+  else if (role === 'race') {
+    race(a, b, Number(c), Number(d))
+      .then((out) => ({ ok: true, electron: process.versions.electron || null, node: process.versions.node, out }), (e) => ({ ok: false, error: String(e && e.stack || e) }))
+      .then((res) => { console.log(JSON.stringify(res)); process.exitCode = res.ok ? 0 : 1; });
+  } else if (role === 'pin' || role === 'control') {
+    const impls = role === 'pin' ? ['sync', 'async', 'reaper'] : ['jswalk'];
+    many(impls, Number(a), Number(b), Number(c)).then((res) => {
+      console.log(JSON.stringify(res, null, 1));
+      const all = Object.values(res.totals);
+      const runs = all.reduce((n, t) => n + t.runs, 0), losses = all.reduce((n, t) => n + t.losses, 0);
+      const failed = all.reduce((n, t) => n + t.failed, 0), attacks = all.reduce((n, t) => n + t.planted + t.swapped, 0);
+      if (role === 'pin') {
+        const want = impls.length * Number(a) * Number(b);
+        const ok = !failed && losses === 0 && runs === want && attacks > runs / 10;
+        console.log(`${ok ? 'PIN PASS' : 'PIN FAIL'}: ${res.runtime} on ${res.platform}: ${runs} of ${want} runs, ${losses} losses, ${attacks} links put in by the agent`);
+        process.exitCode = ok ? 0 : 1;
+      } else {
+        const ok = !failed && losses > 0;
+        console.log(`${ok ? 'CONTROL LOST (as it must)' : 'CONTROL DID NOT LOSE: the agent has no teeth here'}: ${res.runtime} on ${res.platform}: the JS walk lost the victim's files in ${losses} of ${runs} runs`);
+        process.exitCode = ok ? 0 : 1;
+      }
+    });
+  } else { console.error('usage: race <sync|async|reaper|jswalk> <base> <runs> <seconds> | plant <dir> <victim> <park> <stop>'); process.exit(64); }
+}

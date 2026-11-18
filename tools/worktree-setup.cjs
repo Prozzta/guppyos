@@ -51,7 +51,7 @@ const { spawnSync } = require('node:child_process');
 
 const REPO = path.join(__dirname, '..');
 const NATIVES = [
-  { id: 'fs-handle', dir: 'resources/fs-handle', out: 'resources/fs-handle/bin/guppy_fs_handle.node', build: 'tools/build-fs-handle.cjs', platforms: ['win32', 'darwin'] },
+  { id: 'fs-handle', dir: 'resources/fs-handle', out: 'resources/fs-handle/bin/guppy_fs_handle.node', build: 'tools/build-fs-handle.cjs', platforms: ['win32', 'darwin', 'linux'] },
   { id: 'heavyjob', dir: 'resources/heavyjob', out: 'resources/heavyjob/bin/guppy-heavyjob.exe', build: 'tools/build-heavyjob.cjs', platforms: ['win32'] }
 ];
 const ADDON = path.join('node_modules', '@xterm', 'addon-webgl');
