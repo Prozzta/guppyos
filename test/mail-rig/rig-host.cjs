@@ -168,6 +168,17 @@ async function buildFloor() {
   // of our own text then read as "the Enter was lost" (a second Enter).
   // null: the newest received echo fell out of the stub's window, so NO reading (fail closed).
   const screenDraft = (ptyId, c) => screenDraftOf(c.shown, c.draft, rig.echoSeen.get(ptyId) || 0);
+  // MAIL-RIG-G1-STALE-MIRROR-108 (c): a product screen reading first delivers every byte main has
+  // received (pty.ts sendToOwner: s.out?.flush()), so the screen covers the newest echo. The rig
+  // reads composer.json itself, not through sendToOwner, so it flushes the same batcher here: the
+  // echoes still buffered (up to the batch window) reach the echoSeen scan before the reading.
+  // Loud, not silent, if PtyManager's session map moves: a flush that quietly stopped would bring
+  // the stale screen back.
+  const flushPtyOut = (ptyId) => {
+    const sessions = ptyManager.sessions;
+    if (!(sessions instanceof Map)) throw new Error('mail-rig: PtyManager.sessions is not a Map; the screen-read flush (MAIL-RIG-G1-STALE-MIRROR-108) needs it');
+    sessions.get(ptyId)?.out?.flush();
+  };
   const count = (hay, needle) => { let n = 0; let i = hay.indexOf(needle); while (needle && i >= 0) { n++; i = hay.indexOf(needle, i + needle.length); } return n; };
   // The mirrors the renderer pushes into main (terminalPool / inputOrigin / the prompt mirror).
   const ownerPty = {
@@ -206,6 +217,7 @@ async function buildFloor() {
   // WAKE-SCREEN-GUARD: the renderer's Codex screen reading (terminalPool readCodexScreen). The rig's
   // fake Codex is always past startup (its header would show its model); its composer is the stub's.
   const readCodexScreen = async (ptyId, expectedTail) => {
+    flushPtyOut(ptyId);
     const c = composerOf(ptyId);
     if (!c) return null;
     const draft = screenDraft(ptyId, c);
@@ -225,6 +237,7 @@ async function buildFloor() {
     };
   };
   const readScreen = async (ptyId, needle, expectedTail) => {
+    flushPtyOut(ptyId);
     const c = composerOf(ptyId);
     if (!c) return null;
     const draft = screenDraft(ptyId, c);
