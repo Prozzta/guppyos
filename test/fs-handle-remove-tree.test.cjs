@@ -190,6 +190,44 @@ test('with no addon a tree delete is refused: nothing is removed, one line per t
   assert.deepEqual(S.removerRefusals(), { count: 0, reason: '' }, 'the real module refused nothing in this file');
 });
 
+// kg-core.cjs is plain CommonJS with its own copy of the loader and the refusal (it cannot load the
+// .ts module), so both are pinned here as well: nothing above reaches them.
+const KG = require('../src/main/kg-core.cjs');
+
+test('kg-core: its loader passes over a build with another contract and says why; the matching one is used', () => {
+  const junk = path.join(jail, 'kg-junk.node'); fs.writeFileSync(junk, 'not a module');
+  const none = KG.loadRemover([path.join(jail, 'missing.node')]);
+  assert.equal(none.removeTree, null); assert.equal(none.reason, 'no guppy_fs_handle.node build found');
+  for (const [exports, said] of [[{ removeTree() { return 0; } }, 'undefined'], [{ removeTree() { return 0; }, removeTreeApi: 2 }, '2']]) {
+    const got = KG.loadRemover([junk], () => exports);
+    assert.equal(got.removeTree, null, 'a build with another contract is not used');
+    assert.equal(got.reason, `${junk}: removeTree contract ${said}, need 1`);
+  }
+  const ok = KG.loadRemover([junk], () => ({ removeTree() { return 0; }, removeTreeApi: 1 }));
+  assert.equal(ok.from, junk); assert.equal(typeof ok.removeTree, 'function');
+});
+
+test('kg-core: a doc folder is deleted only by the addon; with no addon it is kept, one line, EREMOVER_UNAVAILABLE', (t) => {
+  const lines = [];
+  t.mock.method(process.stderr, 'write', (l) => { lines.push(String(l)); return true; });
+  const fx = build('kg-no-addon');
+  const before = listing(fx.tree);
+  assert.throws(() => KG.removeDocDir(fx.tree, () => ({ removeTree: null, reason: 'none here' })),
+    (e) => e.code === 'EREMOVER_UNAVAILABLE' && e.path === fx.tree && e.message === 'refused: link-safe remover unavailable (none here)');
+  assert.deepEqual(listing(fx.tree), before, 'the tree is exactly as it was');
+  assert.deepEqual(lines, [`[kg] REFUSED to remove ${fx.tree}: the link-safe remover (fs-handle addon) is unavailable: none here\n`]);
+  // The folder goes to the loaded remover and to nothing else: one that does nothing leaves the tree whole.
+  const asked = [];
+  KG.removeDocDir(fx.tree, () => ({ removeTree: (p) => { asked.push(p); return 0; }, from: 'stub' }));
+  assert.deepEqual(asked, [fx.tree]);
+  assert.deepEqual(listing(fx.tree), before, 'no other delete ran');
+  victimIntact(fx);
+  // And the real one removes it, the targets stay.
+  KG.removeDocDir(fx.tree);
+  assert.equal(fs.existsSync(fx.tree), false);
+  victimIntact(fx);
+});
+
 test('SOURCE: fsSafeRemove deletes a tree only through the addon', () => {
   const code = fs.readFileSync(TS, 'utf8').replace(/\r\n/g, '\n').replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
   const body = (name) => { const m = new RegExp(`export (?:async )?function ${name}\\([^\\n]*\\n([\\s\\S]*?)\\n}\\n`).exec(code); assert.ok(m, name); return m[1]; };

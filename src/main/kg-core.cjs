@@ -388,12 +388,12 @@ function loadRemover(candidates = removerCandidates(), open = openAddon) {
  * it through that handle. There is no JS walk to fall back to: without the addon the folder is
  * kept, with one line saying so, and the error is thrown.
  */
-function removeDocDir(p) {
+function removeDocDir(p, load = loadRemover) {
   const st = fs.lstatSync(p);
   if (st.isSymbolicLink()) {
     try { fs.rmdirSync(p); } catch { fs.unlinkSync(p); }
   } else if (st.isDirectory()) {
-    const rm = loadRemover();
+    const rm = load();
     if (!rm.removeTree) {
       process.stderr.write(`[kg] REFUSED to remove ${p}: the link-safe remover (fs-handle addon) is unavailable: ${rm.reason}\n`);
       throw Object.assign(new Error(`refused: link-safe remover unavailable (${rm.reason})`), { code: 'EREMOVER_UNAVAILABLE', path: p });
@@ -436,5 +436,7 @@ function stats(kgRoot) {
 module.exports = {
   ingest, search, list, getDoc, removeDoc, stats,
   detectModality, extractText, tryPdfToText, chunkText, tokenize, scoreChunk, makeSnippet, deriveTitle,
-  DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP, PDFTOTEXT_TIMEOUT_MS
+  DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP, PDFTOTEXT_TIMEOUT_MS,
+  // for test/fs-handle-remove-tree.test.cjs: the remover's loader and the one folder delete
+  loadRemover, removeDocDir
 };
