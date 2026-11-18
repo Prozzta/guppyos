@@ -4,8 +4,11 @@
  * this client cannot confirm anything itself. */
 'use strict';
 const http = require('http');
-// partial: the rekey RAN and is not complete or not in effect (the lines name each refused ledger).
-// refused: nothing ran (not god, wrong floor, the Human said no or did not answer, nothing to rekey).
+const path = require('path');
+// partial: rekey lines were WRITTEN and the rekey is not complete or not in effect (the lines name each
+// refused ledger).
+// refused: nothing was written (not god, wrong floor, the Human said no or did not answer, nothing to
+// rekey, every ledger refused before a line was written).
 const EXIT = { ok: 0, refused: 1, usage: 2, unavailable: 3, timeout: 4, partial: 5 };
 const USAGE = 'usage: claims bootstrap [--status] | claims rekey --floor <hive folder>\n';
 // The Human has 5 minutes to answer main's dialog (rekeyCommand.ts REKEY_CONFIRM_MS); the rekey follows.
@@ -32,10 +35,13 @@ function post(urlText, body, timeout = 120000) {
     req.on('error', (e) => resolve({ status: 0, error: String(e && e.code || e) })); req.end(data);
   });
 }
-async function main(argv, env, io = { out: (s) => process.stdout.write(s), err: (s) => process.stderr.write(s) }, { rekeyTimeoutMs = REKEY_TIMEOUT_MS } = {}) {
+async function main(argv, env, io = { out: (s) => process.stdout.write(s), err: (s) => process.stderr.write(s) }, { rekeyTimeoutMs = REKEY_TIMEOUT_MS, cwd = process.cwd() } = {}) {
   let a; try { a = parseArgs(argv); } catch (e) { io.err(`claims: ${e.message}\n${USAGE}`); return EXIT.usage; }
   if (a.help) { io.out(USAGE); return EXIT.ok; }
   if (!env.HIVE_CLAIMS_URL) { io.err('claims: unavailable (HIVE_CLAIMS_URL is not set: the claims command is god-only)\n'); return EXIT.unavailable; }
+  // Main compares the floor with its own folder and would resolve a relative one against ITS working
+  // folder, not god's: `--floor .` from the hive must name the hive.
+  if (a.action === 'rekey') a.floor = path.resolve(cwd, a.floor);
   if (a.action === 'rekey') io.err('claims: waiting for the Human to confirm the rekey in the Guppy window (up to 5 minutes)...\n');
   const r = a.action === 'rekey' ? await post(env.HIVE_CLAIMS_URL, { action: 'rekey', floor: a.floor }, rekeyTimeoutMs) : await post(env.HIVE_CLAIMS_URL, { action: a.action });
   // Main does not stop when this client gives up: a rekey the Human approved may still be writing.
@@ -45,8 +51,10 @@ async function main(argv, env, io = { out: (s) => process.stdout.write(s), err: 
   const more = Array.isArray(b.lines) ? b.lines.filter((l) => typeof l === 'string').map((l) => `${l}\n`).join('') : '';
   if (r.status === 200 && b.ok) { io.out(`${line}\n${more}`); if (b.state) io.out(`${JSON.stringify(b.state)}\n`); return EXIT.ok; }
   io.err(`claims: ${line}\n${more}`);
-  const ran = a.action === 'rekey' && b.result && Array.isArray(b.result.refused) && b.result.refused.length > 0;
-  return ran ? EXIT.partial : EXIT.refused;
+  // The store reports `recorded` only once rekey lines were written; before that nothing is on disk.
+  const res = a.action === 'rekey' && b.result && typeof b.result === 'object' ? b.result : null;
+  const wrote = res !== null && (typeof res.recorded === 'boolean' || (Array.isArray(res.rekeyed) && res.rekeyed.length > 0));
+  return wrote ? EXIT.partial : EXIT.refused;
 }
 if (require.main === module) main(process.argv.slice(2), process.env).then((code) => { process.exitCode = code; }, (e) => { process.stderr.write(`claims: ${e}\n`); process.exitCode = EXIT.unavailable; });
 module.exports = { main, parseArgs, EXIT, REKEY_TIMEOUT_MS };
