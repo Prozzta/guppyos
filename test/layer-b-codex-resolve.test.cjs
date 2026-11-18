@@ -125,13 +125,13 @@ test('DRY RUN: N/A (the stub PATH has no codex), recorded as such; no child is s
   assert.equal(fs.existsSync(path.join(x.report, 'codex-resolve.json')), false);
 });
 
-test('wiring: in main, right after appEnv and the first helper preflight, before the seed and every launch; the child gets this.env and the app cwd, hidden', () => {
+test('wiring: in main, right after appEnv and the first helper preflight, before the seed and every launch; the child gets nodeEnv(this.env) and the app cwd, hidden', () => {
   const main = src.slice(src.indexOf('async main() {'));
   const at = main.indexOf('this.proveCodexResolution();');
   assert.ok(at > main.indexOf('this.appEnv(liveUserData);') && at > main.indexOf('this.proveNoGitCredentialHelper();'), 'after appEnv and the helper preflight');
   assert.ok(at < main.indexOf('this.seed();') && at < main.indexOf('await this.launch('), 'before the first launch');
   const m = src.slice(src.indexOf('  proveCodexResolution() {'), src.indexOf('  jailLinkGate(label) {'));
-  assert.match(m, /spawnSync\(process\.execPath, \[CODEX_RESOLVE_PROBE\], \{ cwd: this\.s\.base, env: this\.env, encoding: 'utf8', windowsHide: true,/);
+  assert.match(m, /spawnSync\(process\.execPath, \[CODEX_RESOLVE_PROBE\], \{ cwd: this\.s\.base, env: nodeEnv\(this\.env\), encoding: 'utf8', windowsHide: true,/);
   assert.match(m, /codexResolveProblems\(res, CODEX_EXPECTED_VERSION, expectedDir\)/);
   assert.match(m, /this\.stop\([\s\S]*throw new Error\(`codex resolution preflight/);
 });
