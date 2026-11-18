@@ -38,7 +38,7 @@ const { samePath } = loadTs('src/main/fs.ts');
  */
 function sandbox(t, { live } = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hive-guard-'));
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
 
   const realHome = process.env.HOME;
   const realProfile = process.env.USERPROFILE;

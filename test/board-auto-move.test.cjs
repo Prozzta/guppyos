@@ -33,7 +33,7 @@ const agent = (id, extra = {}) => ({ id, name: id, cwd: '.', status: 'idle', las
 function rig(t, agents, tasks) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'md-board-auto-'));
   const hive = new HiveManager(() => home);
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   hive.ensureHive();
   const root = hive.root();
   fs.writeFileSync(path.join(root, 'registry.json'), JSON.stringify({ godId: null, agents }, null, 2));

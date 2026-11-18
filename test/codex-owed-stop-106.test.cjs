@@ -202,7 +202,7 @@ async function rig(t, provider) {
   const home = fs.mkdtempSync(path.join(JAIL, 'rig-'));
   const hive = new HiveManager(() => home, () => true);
   let server = null;
-  t.after(() => { try { server?.stop(); } catch { /* noop */ } hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { try { server?.stop(); } catch { /* noop */ } hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   await hive.ensureAgent({ id: 'god-1', name: 'Michael', provider: 'claude', cwd: home, isGod: true });
   await hive.ensureAgent({ id: A, name: 'Dwight', provider, cwd: home });
   const reg = hive.registry.bind(hive);

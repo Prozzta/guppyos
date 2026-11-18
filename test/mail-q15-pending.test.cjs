@@ -123,7 +123,7 @@ test('Q15 pure: reappearing is a NEW delivered transition (row reason "reappeare
 test('Q15: the terminal close is PERSISTED: after a restart it is still acted/missing, not pending, so nothing wakes', async (t) => {
   const home = fs.mkdtempSync(path.join(JAIL, 'floor-'));
   let hive = new HiveManager(() => home, () => true);
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   await hive.ensureAgent({ id: 'god-1', name: 'Michael', provider: 'claude', cwd: home, isGod: true });
   await hive.ensureAgent({ id: 'andy-1', name: 'Andy', provider: 'claude', cwd: home });
   const lost = hive.send({ to: 'andy-1', act: 'request', subject: 'lost', body: 'x' }, 'god-1');
@@ -192,7 +192,7 @@ test('Q28 pure: 3 failed parses spanning >= 60 s close it (acted, body-unparseab
 test('Q28: persisted through a restart (no wake), with the banner; redelivered only when the file CHANGES and then parses', async (t) => {
   const home = fs.mkdtempSync(path.join(JAIL, 'floor-'));
   let hive = new HiveManager(() => home, () => true);
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   await hive.ensureAgent({ id: 'god-1', name: 'Michael', provider: 'claude', cwd: home, isGod: true });
   await hive.ensureAgent({ id: 'andy-1', name: 'Andy', provider: 'claude', cwd: home });
   const m = hive.send({ to: 'andy-1', act: 'inform', subject: 'garbled', body: 'x' }, 'god-1');

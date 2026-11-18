@@ -51,7 +51,7 @@ const clock = 1_000_000;
 function floor(t, tasks) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'md-voice-task-cache-'));
   const hive = new HiveManager(() => home);
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); current = null; });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); current = null; });
   hive.ensureHive();
   const file = path.join(hive.root(), 'tasks.json');
   const handEdit = (list) => fs.writeFileSync(file, JSON.stringify({ tasks: list }), 'utf8');

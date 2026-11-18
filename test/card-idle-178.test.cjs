@@ -98,7 +98,7 @@ test('the LIVE ROSTER word comes from the liveness record', () => K.rosterSaysWo
 test('the injected LIVE ROSTER line says WORKING for an agent 9 minutes into a tool call ("active 9m ago")', async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'md-card-idle-'));
   const hive = new HiveManager(() => home);
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   await hive.ensureAgent({ id: 'andy', name: 'Andy', provider: 'claude', cwd: home });
   const since = Date.now() - 9 * MIN;
   hive.writeFleetSnapshot({

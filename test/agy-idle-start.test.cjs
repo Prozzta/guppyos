@@ -33,7 +33,7 @@ function sandbox(t, { live = true } = {}) {
   assert.equal(os.homedir(), home, 'HOME redirect failed - aborting before constructing any hive');
   const hiveHome = path.join(home, 'harness');
   const hive = live ? new HiveManager(() => hiveHome, undefined, {}, () => true) : new HiveManager(() => hiveHome);
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   return { home, hiveHome, hive };
 }
 const agentFile = (home, id) => path.join(home, '.gemini', 'config', 'agents', `munder-${id}`, 'agent.md');

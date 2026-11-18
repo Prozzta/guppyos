@@ -228,6 +228,7 @@ const stats = (list) => {
   console.log(out);
   if (arg('json')) fs.writeFileSync(arg('json'), out);
   try { hive.dispose(); } catch { /* best effort */ }
+  await hive.drainReads?.();   // MAIL-EPOCHS-TEARDOWN-RACE-108 (?. : this tool also runs older trees)
   try { loadTs.closeConfigWatchers(); } catch { /* an older tree */ }
   await sleep(500);
   try { fs.rmSync(JAIL, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch { /* a burner still held a file: the temp folder is the OS's to clear */ }
