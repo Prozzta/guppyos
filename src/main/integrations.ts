@@ -17,8 +17,7 @@
  * Contract: hive/docs/integrations-spec.md.
  */
 import { app, safeStorage } from 'electron';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import {
   type IntegrationRecord,
   validateIntegrationRecord,
@@ -26,6 +25,7 @@ import {
   secretRefFor
 } from '../shared/integrations';
 import { readConfig, readConfigForWrite, writeConfig } from './config';
+import { readSecretFile, removeSecretFile, writeSecretFile } from './secretFile';
 
 // ─── Registry (config-backed) ────────────────────────────────────────────────
 
@@ -88,21 +88,14 @@ function secretsPath(): string {
   return join(app.getPath('userData'), 'integration-secrets.json');
 }
 
+// SECRETS-ATOMIC-SAVE-108: the file is read and saved by secretFile.ts (temp file, fsync, read-back,
+// rename, and a last good copy that answers when the live file is unreadable).
 function readSecretBlob(): Record<string, string> {
-  const p = secretsPath();
-  if (!existsSync(p)) return {};
-  try {
-    const parsed = JSON.parse(readFileSync(p, 'utf8'));
-    return parsed && typeof parsed === 'object' ? (parsed as Record<string, string>) : {};
-  } catch {
-    return {};
-  }
+  return readSecretFile(secretsPath());
 }
 
 function writeSecretBlob(blob: Record<string, string>): void {
-  const p = secretsPath();
-  mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, JSON.stringify(blob, null, 2), { encoding: 'utf8', mode: 0o600 });
+  writeSecretFile(secretsPath(), blob);
 }
 
 /** Store a secret ENCRYPTED. Fail closed if OS encryption is unavailable (never
@@ -151,7 +144,7 @@ export function deleteSecret(secretRef: string | undefined): void {
   if (secretRef in blob) {
     delete blob[secretRef];
     if (Object.keys(blob).length === 0) {
-      try { rmSync(secretsPath(), { force: true }); } catch { /* best-effort */ }
+      try { removeSecretFile(secretsPath()); } catch { /* best-effort */ }
     } else {
       writeSecretBlob(blob);
     }
