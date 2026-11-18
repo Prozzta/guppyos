@@ -58,8 +58,11 @@ async function under(file, fn) {
   try { return await fn(); } finally { if (before === undefined) delete process.env.FS_GAP_EXE; else process.env.FS_GAP_EXE = before; }
 }
 
-test(`${RACERS * RUNS} raced deletes by each caller lose nothing (this Node)`, async () => {
-  clean(await under(null, () => many(IMPLS, RACERS, RUNS, 300)), /^Node /);
+// The suite also runs with Electron as Node as the test process: "this runtime" is then that Electron.
+const HERE = process.versions.electron ? /^Electron .* as Node$/ : /^Node /;
+
+test(`${RACERS * RUNS} raced deletes by each caller lose nothing (this runtime)`, async () => {
+  clean(await under(null, () => many(IMPLS, RACERS, RUNS, 300)), HERE);
 });
 
 test(`${RACERS * RUNS} raced deletes by each caller lose nothing (the installed Electron as Node)`, { skip: guppy.skip }, async () => {

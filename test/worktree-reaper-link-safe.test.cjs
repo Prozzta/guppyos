@@ -35,12 +35,15 @@ const { run, SRC, NO_ADDON } = require('./worktree-reaper-link-safe-child.cjs');
 
 const jail = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'reaper-link-safe-'));
 
-// The jail holds junctions when a test fails half way: remove them as links before the folder.
+// The jail holds junctions (after a failure, and always in the no-addon variant, which keeps its tree):
+// remove them as links before the folder. The kept tree also holds a read-only file, which Electron's
+// recursive rmSync refuses (EPERM), so each real file is made writable first; a link is never chmod-ed.
 test.after(() => {
   const walk = (p) => {
     const st = fs.lstatSync(p);
     if (st.isSymbolicLink()) { try { fs.rmdirSync(p); } catch { fs.unlinkSync(p); } return; }
-    if (st.isDirectory()) for (const n of fs.readdirSync(p)) walk(path.join(p, n));
+    if (st.isDirectory()) { for (const n of fs.readdirSync(p)) walk(path.join(p, n)); return; }
+    if ((st.mode & 0o200) === 0) fs.chmodSync(p, 0o666);
   };
   walk(jail);
   fs.rmSync(jail, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
