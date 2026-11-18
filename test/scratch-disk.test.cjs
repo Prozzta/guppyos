@@ -95,6 +95,40 @@ test('manager authenticates owner, refuses a common repo, and only reaps a regis
   assert.equal(fs.existsSync(jailRoot), false);
 });
 
+test('a register while the asynchronous sweep probe is pending is retained', async () => {
+  const base = path.join(jail, 'register-during-sweep'); const hive = path.join(base, 'hive'); const work = path.join(base, '_work');
+  const first = path.join(work, 'dwight-first'); const late = path.join(work, 'dwight-late');
+  fs.mkdirSync(first, { recursive: true }); fs.mkdirSync(late, { recursive: true });
+  let hold = null;
+  const manager = new scratch.ScratchDiskManager(() => hive, () => false, () => hold || Promise.resolve([]));
+  assert.equal(manager.register('dwight', first, 'CARD-1').ok, true);
+  await manager.sweep(); // establish the inbound-index baseline before the racing sweep
+  await manager.sweep(); // absorb the index file's own parent-directory mtime change
+  let release;
+  hold = new Promise((resolve) => { release = resolve; });
+  const sweeping = manager.sweep();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(manager.register('dwight', late, 'CARD-1').ok, true);
+  release([]);
+  await sweeping;
+  assert.deepEqual(scratch.readScratchState(hive).records.map((record) => path.resolve(record.path)).sort(), [first, late].map((value) => path.resolve(value)).sort());
+});
+
+test('unrelated floor churn rebuilds the index without starving a clean candidate', async () => {
+  const base = path.join(jail, 'unrelated-rebuild'); const hive = path.join(base, 'hive'); const work = path.join(base, '_work');
+  const candidate = path.join(work, 'dwight-clean'); const unrelated = path.join(base, 'unrelated');
+  fs.mkdirSync(candidate, { recursive: true }); fs.mkdirSync(unrelated, { recursive: true });
+  let done = false;
+  const manager = new scratch.ScratchDiskManager(() => hive, () => done, async () => []);
+  assert.equal(manager.register('dwight', candidate, 'CARD-1').ok, true);
+  await manager.sweep(); // cold index is deliberately a one-sweep veto
+  fs.writeFileSync(path.join(unrelated, 'churn'), 'changed');
+  done = true;
+  const result = await manager.sweep();
+  assert.deepEqual(result.reaped, [path.resolve(candidate)]);
+  assert.equal(fs.existsSync(candidate), false);
+});
+
 test('a broken link protects its candidate but not an unrelated done tree, and is reported', { skip: process.platform !== 'win32' }, async () => {
   const base = path.join(jail, 'broken-link-scope'); const hive = path.join(base, 'hive'); const work = path.join(base, '_work');
   const candidate = path.join(work, 'dwight-broken'); const unrelated = path.join(work, 'dwight-clean'); const broken = path.join(candidate, 'nested', 'gone');
@@ -169,6 +203,8 @@ test('jails that are bare/common git dirs or worktree gitdir targets are refused
   assert.match(manager.register('dwight', target, 'CARD-1').line, /referenced by a worktree gitdir/);
   const foreign = path.join(work, 'jim-foreign'); fs.mkdirSync(foreign, { recursive: true });
   assert.match(manager.register('dwight', foreign, 'CARD-1').line, /owner prefix/);
+  const nested = path.join(work, 'nested', 'worktree'); fs.mkdirSync(nested, { recursive: true }); fs.writeFileSync(path.join(nested, '.git'), 'gitdir: ../../dwight-common/worktrees/nested\n');
+  assert.equal(scratch.worktreeGitdirPointsInto(work, target), true);
 });
 
 test('install key changes for patch inputs and is stable for unchanged project inputs', () => {
@@ -211,7 +247,8 @@ test('persisted whole-floor inbound index finds nested, outside and gitdir refer
 test('mutant pins: each never-reap guard and source-input key is present', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'scratchDisk.ts'), 'utf8');
   const safe = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'fsSafeRemove.ts'), 'utf8');
-  for (const token of ['if (f.dirty)', 'if (!f.onOrigin)', 'if (f.live)', 'if (f.inboundLinks.length)', 'package-lock.json', 'package.json', 'const tools = join(project, \'tools\')', 'path-changed-or-missing', 'fixture-protected', 'worktreeGitdirPointsInto', 'inbound-index-rebuilt-no-delete-this-sweep', 'scan-timeout']) assert.ok(src.includes(token), token);
+  for (const token of ['if (f.dirty)', 'if (!f.onOrigin)', 'if (f.live)', 'if (f.inboundLinks.length)', 'package-lock.json', 'package.json', 'const tools = join(project, \'tools\')', 'path-changed-or-missing', 'fixture-protected', 'worktreeGitdirPointsInto', 'inbound-index-rebuilt-candidate-changed', 'atomicWriteJsonAsync', 'scan-timeout']) assert.ok(src.includes(token), token);
+  assert.equal(src.includes('p.cwd'), false, 'the Win32_Process-backed live check must not claim an unavailable cwd');
   for (const token of ['removeReparsePointSync', 'unlinkReparsePointsUnderSync', 'findReparsePointsSync', 'beforeRootRmdir', 'directory changed during removal']) assert.ok(safe.includes(token), token);
   assert.equal(safe.includes('rm(path, { recursive'), false, 'safe removal must not delegate to recursive rm');
 });
