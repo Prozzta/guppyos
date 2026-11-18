@@ -470,8 +470,10 @@ static napi_value posix_rename_async(napi_env env, napi_callback_info info) {
  *
  * Not covered, on purpose: the folders ABOVE the root. The root's own path is resolved by the
  * system as usual, so a caller must hand in a root whose parents it trusts. On POSIX the emptied
- * root is removed by rmdir(path): that removes a link's target never (rmdir does not follow) and a
- * folder only when it is empty.
+ * root is removed by rmdir(path), BY PATH and not through the handle we emptied it with (POSIX has
+ * no call that removes a folder by its handle). rmdir removes a link's target never (it does not
+ * follow) and a folder only when it is empty, so if the root's name was pointed somewhere else in
+ * between, what goes is at most an empty folder or nothing.
  *
  * removeTree(path, keepRoot?) -> links             synchronous; links = how many links it removed
  * removeTreeAsync(path, keepRoot?) -> Promise      same walk on a worker thread
@@ -946,13 +948,20 @@ static void rt_job_run(napi_env env, void *data) {
   j->ok = rt_remove(&j->c, j->path, j->keep_root);
 }
 
+/* The worker never ran or its result could not be made: reported as EIO on both platforms. */
+#ifdef _WIN32
+#define RT_WORKER_FAILED ERROR_GEN_FAILURE
+#else
+#define RT_WORKER_FAILED EIO
+#endif
+
 static void rt_job_done(napi_env env, napi_status status, void *data) {
   rt_job *j = (rt_job *)data;
   napi_value v = NULL;
   if (status == napi_ok && j->ok && napi_create_uint32(env, j->c.links, &v) == napi_ok) {
     napi_resolve_deferred(env, j->deferred, v);
   } else {
-    if (!j->c.code) { j->c.code = 1; j->c.step = "worker"; j->c.name[0] = 0; }
+    if (!j->c.code) { j->c.code = (uint32_t)RT_WORKER_FAILED; j->c.step = "worker"; j->c.name[0] = 0; }
     v = rt_error(env, &j->c);
     if (!v) napi_get_undefined(env, &v);
     napi_reject_deferred(env, j->deferred, v);
