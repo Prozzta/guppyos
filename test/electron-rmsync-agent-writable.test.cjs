@@ -142,7 +142,9 @@ test('refusal log: a clean-up that fails on every pass is logged once per path p
     'three failed backups a day, one claims-backup-failed row per day folder');
 });
 
-const exe = process.env.GUPPY_PACKAGED_EXE || path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Guppy', 'Guppy.exe');
+// The runner jails LOCALAPPDATA; the shared helper finds the installed app read-only or gives a skip reason.
+const guppy = require('./tools/installed-guppy.cjs').installedGuppy();
+const exe = guppy.exe;
 
 for (const [site, { build, check }] of Object.entries(SITES)) {
   test(`${site}: links are removed as links, their targets survive (this process)`, () => {
@@ -151,12 +153,12 @@ for (const [site, { build, check }] of Object.entries(SITES)) {
     check(base, run(site, base));
   });
 
-  test(`${site}: links are removed as links, their targets survive, in the installed Electron as Node`, { skip: process.platform !== 'win32' }, () => {
+  test(`${site}: links are removed as links, their targets survive, in the installed Electron as Node`, { skip: guppy.skip }, () => {
     const base = path.join(jail, `${site}-electron`);
     build(base);
     assert.equal(fs.existsSync(exe), true, `installed Guppy executable missing: ${exe}`);
     const r = child.spawnSync(exe, [path.join(__dirname, 'electron-rmsync-agent-writable-child.cjs'), site, base],
-      { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, encoding: 'utf8', timeout: 60_000 });
+      { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, encoding: 'utf8', timeout: 60_000, windowsHide: true });
     assert.equal(r.status, 0, `child exit ${r.status}: ${r.stderr || r.stdout}`);
     const res = JSON.parse(r.stdout);
     assert.equal(res.ok, true, res.error);

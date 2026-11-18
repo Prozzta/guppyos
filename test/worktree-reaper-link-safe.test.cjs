@@ -1,5 +1,7 @@
 'use strict';
 require('./tools/own-job.cjs');
+// This suite loads worktree-reaper.cjs, which the mutant census may edit in place.
+require('./tools/mutant-runner-helper.cjs').gate(__filename);
 
 /**
  * ELECTRON-RMSYNC-REAPER-108: scripts/worktree-reaper.cjs deletes a tree without following a link.
@@ -77,7 +79,9 @@ function check(base, variant, out) {
   }
 }
 
-const exe = process.env.GUPPY_PACKAGED_EXE || path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Guppy', 'Guppy.exe');
+// The runner jails LOCALAPPDATA; the shared helper finds the installed app read-only or gives a skip reason.
+const guppy = require('./tools/installed-guppy.cjs').installedGuppy();
+const exe = guppy.exe;
 
 for (const variant of ['real', 'no-prepass']) {
   test(`${variant}: the reaped tree's links are removed as links, their targets survive (this process)`, { skip: process.platform !== 'win32' }, () => {
@@ -86,12 +90,12 @@ for (const variant of ['real', 'no-prepass']) {
     check(base, variant, run(variant, base));
   });
 
-  test(`${variant}: the reaped tree's links are removed as links, their targets survive, in the installed Electron as Node`, { skip: process.platform !== 'win32' }, () => {
+  test(`${variant}: the reaped tree's links are removed as links, their targets survive, in the installed Electron as Node`, { skip: guppy.skip }, () => {
     const base = path.join(jail, `${variant}-electron`);
     build(base);
     assert.equal(fs.existsSync(exe), true, `installed Guppy executable missing: ${exe}`);
     const r = child.spawnSync(exe, [path.join(__dirname, 'worktree-reaper-link-safe-child.cjs'), variant, base],
-      { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, encoding: 'utf8', timeout: 60_000 });
+      { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, encoding: 'utf8', timeout: 60_000, windowsHide: true });
     assert.equal(r.status, 0, `child exit ${r.status}: ${r.stderr || r.stdout}`);
     const res = JSON.parse(r.stdout);
     assert.equal(res.ok, true, res.error);

@@ -193,7 +193,7 @@ function verifyModel(dir, manifest, sha = sha256File) {
  *  first use: only a seed needs it. The loader needs typescript and refuses while a mutant runner
  *  holds this tree, so a seed refuses then too: a mutated remover must not delete a model cache. */
 function removeLinkSafe(p) {
-  require(path.join(__dirname, '..', 'test', 'load-ts.cjs'))('src/main/linkSafeRemove.ts').removePathLinkSafeSync(p);
+  require('../tools/load-ts.cjs')('src/main/linkSafeRemove.ts').removePathLinkSafeSync(p);
 }
 
 /** Fill `cacheDir` from the first source whose model verifies; the copy is verified again. */

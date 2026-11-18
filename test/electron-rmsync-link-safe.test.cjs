@@ -148,12 +148,14 @@ const SITES = {
   }
 };
 
-const exe = process.env.GUPPY_PACKAGED_EXE || path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Guppy', 'Guppy.exe');
+// The runner jails LOCALAPPDATA; the shared helper finds the installed app read-only or gives a skip reason.
+const guppy = require('./tools/installed-guppy.cjs').installedGuppy();
+const exe = guppy.exe;
 /** Run one child site in the installed Guppy.exe as Node; what it returned. */
 const inElectron = (site, base) => {
   assert.equal(fs.existsSync(exe), true, `installed Guppy executable missing: ${exe}`);
   const r = child.spawnSync(exe, [path.join(__dirname, 'electron-rmsync-link-safe-child.cjs'), site, base],
-    { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, encoding: 'utf8', timeout: 60_000 });
+    { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, encoding: 'utf8', timeout: 60_000, windowsHide: true });
   assert.equal(r.status, 0, `child exit ${r.status}: ${r.stderr || r.stdout}`);
   const res = JSON.parse(r.stdout);
   assert.equal(res.ok, true, res.error);
@@ -168,7 +170,7 @@ for (const [site, { build, check }] of Object.entries(SITES)) {
     check(base, await run(site, base));
   });
 
-  test(`${site}: links are removed as links, their targets survive, in the installed Electron as Node`, { skip: process.platform !== 'win32' }, () => {
+  test(`${site}: links are removed as links, their targets survive, in the installed Electron as Node`, { skip: guppy.skip }, () => {
     const base = path.join(jail, `${site}-electron`);
     build(base);
     check(base, inElectron(site, base));
@@ -194,7 +196,7 @@ test('RUNTIME PIN, plain Node: a recursive rm of a junction removes the link onl
   });
 });
 
-test('RUNTIME PIN, installed Electron as Node: rmSync EMPTIES the junction\'s target; fs.promises.rm removes the link only', { skip: process.platform !== 'win32' }, () => {
+test('RUNTIME PIN, installed Electron as Node: rmSync EMPTIES the junction\'s target; fs.promises.rm removes the link only', { skip: guppy.skip }, () => {
   const base = path.join(jail, 'runtime-rm-electron');
   buildRuntimeRm(base);
   const out = inElectron('runtime-rm', base);
