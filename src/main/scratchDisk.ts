@@ -7,9 +7,9 @@
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
-import { cp, lstat, mkdir, readdir, readFile, realpath, symlink, writeFile } from 'node:fs/promises';
+import { cp, lstat, mkdir, readdir, readFile, realpath, symlink } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import { atomicWriteJson } from './atomicJson';
+import { atomicWriteJson, atomicWriteJsonAsync } from './atomicJson';
 import { findReparsePointsSync, removeReparsePoint, removeReparsePointSync, safeRemoveTree, unlinkReparsePointsUnderSync } from './fsSafeRemove';
 
 export { findReparsePointsSync, removeReparsePointSync, unlinkReparsePointsUnderSync } from './fsSafeRemove';
@@ -47,7 +47,8 @@ export interface ScratchFacts {
 }
 export interface ScratchPlan extends ScratchFacts { action: 'keep' | 'reap'; reason: string }
 
-export interface ScratchProcess { commandLine?: string | null; cwd?: string | null }
+/** The real Win32_Process provider exposes command lines, not a trustworthy cwd. */
+export interface ScratchProcess { commandLine?: string | null }
 export interface BrokenInboundLink { path: string; target: null; }
 export interface ScratchSweepResult { reaped: string[]; kept: Array<{ path: string; owner: string; reason: string }>; brokenLinks: BrokenInboundLink[] }
 
@@ -226,11 +227,11 @@ async function readInboundIndex(file: string, floor: string): Promise<InboundLin
 
 async function writeInboundIndex(file: string, index: InboundLinkIndex): Promise<void> {
   await mkdir(dirname(file), { recursive: true });
-  await writeFile(file, JSON.stringify(index), 'utf8');
+  await atomicWriteJsonAsync(file, index);
 }
 
 /** Build/refresh the persisted whole-floor index. `error` is deliberately a deletion veto. */
-export async function refreshInboundLinkIndex(hiveRoot: string, workRoot: string): Promise<{ index: InboundLinkIndex | null; error: string | null; rebuilt: boolean }> {
+export async function refreshInboundLinkIndex(hiveRoot: string, workRoot: string): Promise<{ index: InboundLinkIndex | null; previous: InboundLinkIndex | null; error: string | null; rebuilt: boolean }> {
   const floor = dirname(resolve(workRoot)); const file = inboundIndexFile(hiveRoot);
   try {
     const deadline = Date.now() + SCRATCH_INBOUND_INDEX_TIMEOUT_MS;
@@ -261,8 +262,8 @@ export async function refreshInboundLinkIndex(hiveRoot: string, workRoot: string
     }
     const index: InboundLinkIndex = { v: 1, floor, dirs, targets: indexTargets(dirs), brokenLinks };
     await writeInboundIndex(file, index);
-    return { index, error: null, rebuilt };
-  } catch (e) { return { index: null, error: String(e instanceof Error ? e.message : e), rebuilt: false }; }
+    return { index, previous: prior, error: null, rebuilt };
+  } catch (e) { return { index: null, previous: null, error: String(e instanceof Error ? e.message : e), rebuilt: false }; }
 }
 
 /** Resolve all recorded incoming links (including gitdir files) to a target subtree. */
@@ -271,6 +272,13 @@ export function inboundLinksFromIndex(index: InboundLinkIndex, target: string): 
   for (const [linkTarget, sources] of Object.entries(index.targets)) if (under(linkTarget, wanted)) out.push(...sources);
   for (const link of index.brokenLinks) if (under(link.path, wanted)) out.push(`broken-link:${link.path}:target-unreadable`);
   return out.sort();
+}
+
+/** Links added by this refresh are the only rebuild condition that can veto a clean candidate. */
+function inboundLinksAddedByRefresh(previous: InboundLinkIndex | null, current: InboundLinkIndex, target: string): boolean {
+  if (!previous) return true;
+  const before = new Set(inboundLinksFromIndex(previous, target));
+  return inboundLinksFromIndex(current, target).some((link) => !before.has(link));
 }
 
 function gitAsync(path: string, args: string[]): Promise<string | null> {
@@ -307,17 +315,25 @@ export function scratchKind(path: string): 'worktree' | 'jail' | null {
   }
 }
 
-/** Refuse a candidate that is the common gitdir referenced by any `_work` worktree. */
+/** Refuse a candidate that is the common gitdir referenced anywhere below `_work`, without following links. */
 export function worktreeGitdirPointsInto(workRoot: string, candidate: string): boolean {
-  let names: string[]; try { names = readdirSync(workRoot); } catch { return false; }
-  return names.some((name) => {
-    const dotGit = join(workRoot, name, '.git');
-    try {
-      if (!lstatSync(dotGit).isFile()) return false;
-      const m = /^gitdir:\s*(.+)\s*$/im.exec(readFileSync(dotGit, 'utf8'));
-      return !!m && under(resolve(dirname(dotGit), m[1]), candidate);
-    } catch { return false; }
-  });
+  const wanted = resolve(candidate);
+  const scan = (dir: string): boolean => {
+    let names: string[]; try { names = readdirSync(dir); } catch { return true; }
+    for (const name of names) {
+      const child = join(dir, name);
+      try {
+        const st = lstatSync(child);
+        if (st.isSymbolicLink()) continue;
+        if (st.isFile() && name === '.git') {
+          const m = /^gitdir:\s*(.+)\s*$/im.exec(readFileSync(child, 'utf8'));
+          if (m && under(resolve(dirname(child), m[1]), wanted)) return true;
+        } else if (st.isDirectory() && scan(child)) return true;
+      } catch { return true; }
+    }
+    return false;
+  };
+  return scan(workRoot);
 }
 
 /** A scratch root must visibly belong to the authenticated agent that registers it. */
@@ -332,7 +348,7 @@ function processUses(path: string, rows: readonly ScratchProcess[] | null): bool
   // into a destructive operation.
   if (!rows) return true;
   const needle = resolve(path).replace(/\\/g, '/').toLowerCase();
-  return rows.some((p) => [p.commandLine, p.cwd].some((v) => String(v ?? '').replace(/\\/g, '/').toLowerCase().includes(needle)));
+  return rows.some((p) => String(p.commandLine ?? '').replace(/\\/g, '/').toLowerCase().includes(needle));
 }
 
 /** Remove links as links, re-scan, then the verified link-free root.  Caller planned/rechecked first. */
@@ -476,13 +492,13 @@ export class ScratchDiskManager {
     const needsInboundCheck = state.records.some((record) => (!owner || record.owner === owner) && record.kind !== 'fixture');
     const initialIndex = needsInboundCheck ? await refreshInboundLinkIndex(root, work) : null;
     if (initialIndex?.index) result.brokenLinks = initialIndex.index.brokenLinks;
-    if (initialIndex && (!initialIndex.index || initialIndex.rebuilt || initialIndex.error)) {
+    if (initialIndex && (!initialIndex.index || !initialIndex.previous || initialIndex.error)) {
       // Scanning is an all-or-nothing safety proof. A stale, partial, timed-out
       // or unreadable floor must never be treated as an empty inbound-link set.
       for (const record of state.records) {
         const reason = record.kind === 'fixture'
           ? (managedFixturePath(root, record.path) ? 'fixture-protected' : 'fixture-path-changed-or-missing')
-          : (initialIndex.error ? `inbound-index-unavailable:${initialIndex.error}` : initialIndex.index ? 'inbound-index-rebuilt-no-delete-this-sweep' : 'inbound-index-unavailable:unknown');
+          : (initialIndex.error ? `inbound-index-unavailable:${initialIndex.error}` : initialIndex.index ? 'inbound-index-unrebuilt-no-baseline' : 'inbound-index-unavailable:unknown');
         result.kept.push({ path: record.path, owner: record.owner, reason });
         this.notify(record.owner, record.card, record.path, reason);
       }
@@ -504,6 +520,9 @@ export class ScratchDiskManager {
         path: record.path, ...gitFacts, live: processUses(record.path, rows),
         inboundLinks: inboundLinksFromIndex(initialIndex.index, record.path), cardDone: this.cardDone(record.card), idle: this.now() - record.touchedAt >= SCRATCH_IDLE_MS
       };
+      if (initialIndex.rebuilt && inboundLinksAddedByRefresh(initialIndex.previous, initialIndex.index, record.path)) {
+        result.kept.push({ path: record.path, owner: record.owner, reason: 'inbound-index-rebuilt-candidate-changed' }); keptRecords.push(record); continue;
+      }
       const plan = planScratchReap(facts);
       if (plan.action !== 'reap') {
         result.kept.push({ path: record.path, owner: record.owner, reason: plan.reason }); keptRecords.push(record);
@@ -513,10 +532,11 @@ export class ScratchDiskManager {
         }
         continue;
       }
-      // Last-moment recheck: a changed directory or failed scan vetoes this
-      // deletion, even though the initial full-floor index was clean.
+      // Last-moment recheck: a failed scan or a newly discovered inbound link
+      // vetoes deletion. Unrelated floor churn must not starve reaping forever.
       const finalIndex = await refreshInboundLinkIndex(root, work);
-      if (!finalIndex.index || finalIndex.rebuilt || finalIndex.error) { result.kept.push({ path: record.path, owner: record.owner, reason: finalIndex.error ? `inbound-index-unavailable:${finalIndex.error}` : finalIndex.index ? 'inbound-index-rebuilt-no-delete-this-sweep' : 'inbound-index-unavailable:unknown' }); keptRecords.push(record); continue; }
+      if (!finalIndex.index || !finalIndex.previous || finalIndex.error) { result.kept.push({ path: record.path, owner: record.owner, reason: finalIndex.error ? `inbound-index-unavailable:${finalIndex.error}` : finalIndex.index ? 'inbound-index-unrebuilt-no-baseline' : 'inbound-index-unavailable:unknown' }); keptRecords.push(record); continue; }
+      if (finalIndex.rebuilt && inboundLinksAddedByRefresh(finalIndex.previous, finalIndex.index, record.path)) { result.kept.push({ path: record.path, owner: record.owner, reason: 'inbound-index-rebuilt-candidate-changed' }); keptRecords.push(record); continue; }
       const finalFacts = { ...facts, inboundLinks: inboundLinksFromIndex(finalIndex.index, record.path), live: processUses(record.path, await this.processes()) };
       const finalPlan = planScratchReap(finalFacts);
       if (finalPlan.action !== 'reap') { result.kept.push({ path: record.path, owner: record.owner, reason: finalPlan.reason }); keptRecords.push(record); continue; }
@@ -524,7 +544,11 @@ export class ScratchDiskManager {
       try { await removeScratchRoot(work, record.path); result.reaped.push(record.path); }
       catch { result.kept.push({ path: record.path, owner: record.owner, reason: 'remove-failed' }); keptRecords.push(record); }
     }
-    writeScratchState(root, { v: 1, records: keptRecords });
+    // Command handlers remain synchronous, so they can write while the async
+    // probes/index/git work above is pending. Merge that latest state and only
+    // remove records whose roots this sweep actually removed.
+    const reaped = new Set(result.reaped.map((path) => resolve(path)));
+    writeScratchState(root, { v: 1, records: readScratchState(root).records.filter((record) => !reaped.has(resolve(record.path))) });
     return result;
   }
 
