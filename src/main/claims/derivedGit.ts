@@ -7,8 +7,9 @@
  * network remote) never stalls the later passes.
  */
 import { execFile, spawn } from 'node:child_process';
+import { resolve as resolvePath } from 'node:path';
 import { isDocFile } from './derivedFacts';
-import { gitSafeCommand, gitSafeConfigArgs, gitSafeEnv } from '../gitSafe';
+import { gitProgram, gitSafeCommand, gitSafeConfigArgs, gitSafeEnv } from '../gitSafe';
 import type { GitLogPort, ReleaseHead, TagLike } from './derivedFacts';
 
 /** The mainline refs (local and origin's) that branchesContaining reports beside the guppy branches. */
@@ -58,15 +59,23 @@ export interface DerivedGitOptions {
   /** The program and its leading args (default git); tests swap in a process that hangs. */
   command?: readonly string[];
 }
+type Opts = { timeoutMs: number; command: readonly string[] | null };
+
+/** What to spawn: git by its full path from git's own folder (gitProgram), or the command a test gave. */
+function program(o: Opts): { bin: string; pre: readonly string[]; cwd: string | undefined } {
+  if (o.command) return { bin: o.command[0], pre: o.command.slice(1), cwd: undefined };
+  const g = gitProgram();
+  return { bin: g.program, pre: [], cwd: g.cwd };
+}
 
 const timedOut = (args: readonly string[], ms: number) => new Error(`git ${args[0] ?? ''} timed out after ${ms} ms`);
 
 // Both runners below make object-only calls (gitRunsFilters is false for each), so the repo's filter
 // drivers need no read here; test/git-run-harden-108 pins the subcommands this file uses.
-function git(repo: string, args: string[], o: Required<DerivedGitOptions>): Promise<{ code: number; out: string }> {
-  const [bin, ...pre] = o.command;
+function git(repo: string, args: string[], o: Opts): Promise<{ code: number; out: string }> {
   return new Promise((resolve, reject) => {
-    execFile(bin, [...pre, ...gitSafeConfigArgs(), '-C', repo, ...gitSafeCommand(args)], { env: gitSafeEnv(), windowsHide: true, maxBuffer: 64 * 1024 * 1024, encoding: 'utf8', timeout: o.timeoutMs, killSignal: 'SIGKILL' }, (err, out) => {
+    const { bin, pre, cwd } = program(o);
+    execFile(bin, [...pre, ...gitSafeConfigArgs(), '-C', resolvePath(repo), ...gitSafeCommand(args)], { cwd, env: gitSafeEnv(), windowsHide: true, maxBuffer: 64 * 1024 * 1024, encoding: 'utf8', timeout: o.timeoutMs, killSignal: 'SIGKILL' }, (err, out) => {
       if (err && (err as { killed?: boolean }).killed) { reject(timedOut(args, o.timeoutMs)); return; }
       const code = err ? (typeof (err as { code?: unknown }).code === 'number' ? (err as { code: number }).code : -1) : 0;
       resolve({ code, out: out ?? '' });
@@ -74,10 +83,10 @@ function git(repo: string, args: string[], o: Required<DerivedGitOptions>): Prom
   });
 }
 
-function gitStdin(repo: string, args: string[], input: string, o: Required<DerivedGitOptions>): Promise<string> {
-  const [bin, ...pre] = o.command;
+function gitStdin(repo: string, args: string[], input: string, o: Opts): Promise<string> {
   return new Promise((resolve, reject) => {
-    const p = spawn(bin, [...pre, ...gitSafeConfigArgs(), '-C', repo, ...gitSafeCommand(args)], { env: gitSafeEnv(), windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] });
+    const { bin, pre, cwd } = program(o);
+    const p = spawn(bin, [...pre, ...gitSafeConfigArgs(), '-C', resolvePath(repo), ...gitSafeCommand(args)], { cwd, env: gitSafeEnv(), windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] });
     let out = '';
     let late = false;
     const timer = setTimeout(() => { late = true; p.kill('SIGKILL'); reject(timedOut(args, o.timeoutMs)); }, o.timeoutMs);
@@ -101,9 +110,9 @@ export class DerivedGit implements GitLogPort {
   private readonly rangesOf = new Map<string, string[] | null>();
   private refs: Map<string, string> | null = null;
   private readonly containing = new Map<string, Set<string> | null>();
-  private readonly o: Required<DerivedGitOptions>;
+  private readonly o: Opts;
   constructor(readonly repo: string, opts: DerivedGitOptions = {}) {
-    this.o = { timeoutMs: opts.timeoutMs ?? GIT_TIMEOUT_MS, command: opts.command ?? ['git'] };
+    this.o = { timeoutMs: opts.timeoutMs ?? GIT_TIMEOUT_MS, command: opts.command ?? null };
   }
 
   /** Whether the folder answers as a git repository. */

@@ -1,5 +1,7 @@
 import { execFile } from 'node:child_process';
 import { devNull } from 'node:os';
+import { dirname, resolve as resolvePath } from 'node:path';
+import { resolveExe } from './resolveExe';
 
 /**
  * GIT-RUN-HARDEN-108: what every git call the app makes on its own is run with, so that reading a
@@ -24,6 +26,18 @@ const SAFE_CONFIG: ReadonlyArray<readonly [string, string]> = [
 /** Subcommands that write diffs or file content: no external diff program, no text conversion program. */
 const NO_PROGRAM_FLAGS = ['--no-ext-diff', '--no-textconv'];
 const DIFF_WRITERS = new Set(['diff', 'log', 'show', 'diff-tree']);
+
+/**
+ * The git program by its full path, and the folder to start it in. A bare "git" started with the
+ * repo as its working directory runs a git.exe or git.com the repo carries (Windows looks there
+ * first), so no call names git bare and none is started in the repo: the repo goes in with -C.
+ * git's own folder is the working directory, since nothing a repo holds can be in it. Windows starts
+ * .com and .exe files only, so those are the extensions looked for. Throws when PATH has no git.
+ */
+export function gitProgram(): { program: string; cwd: string } {
+  const program = resolveExe('git', { exts: ['.com', '.exe'] });
+  return { program, cwd: dirname(program) };
+}
 
 /** The `-c key=value` options that go before the subcommand. */
 export function gitSafeConfigArgs(): string[] {
@@ -122,10 +136,10 @@ export function repoFilterOverrides(listing: string): Array<[string, string]> {
   return out;
 }
 
-function readFilterConfig(cwd: string, env: NodeJS.ProcessEnv, timeoutMs: number): Promise<string> {
+function readFilterConfig(git: { program: string; cwd: string }, repo: string, env: NodeJS.ProcessEnv, timeoutMs: number): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile('git', [...gitSafeConfigArgs(), 'config', '--show-scope', '--show-origin', '-z', '--includes', '--get-regexp', FILTER_KEYS],
-      { cwd, env, windowsHide: true, encoding: 'utf8', timeout: timeoutMs, killSignal: 'SIGKILL', maxBuffer: 4 * 1024 * 1024 }, (err, out) => {
+    execFile(git.program, ['-C', repo, ...gitSafeConfigArgs(), 'config', '--show-scope', '--show-origin', '-z', '--includes', '--get-regexp', FILTER_KEYS],
+      { cwd: git.cwd, env, windowsHide: true, encoding: 'utf8', timeout: timeoutMs, killSignal: 'SIGKILL', maxBuffer: 4 * 1024 * 1024 }, (err, out) => {
         // Exit 1 is git's answer for "no such key".
         if (!err) { resolve(out); return; }
         if ((err as { code?: unknown }).code === 1) { resolve(''); return; }
@@ -135,19 +149,23 @@ function readFilterConfig(cwd: string, env: NodeJS.ProcessEnv, timeoutMs: number
 }
 
 /**
- * The arguments and environment for one git call in `cwd`. For a call that can run a filter, the
+ * The program, working directory, arguments and environment for one git call on the repo at `cwd`
+ * (see gitProgram: the caller spawns `program` in the returned `cwd`, never "git" in the repo; the
+ * repo is in the arguments as -C). For a call that can run a filter, the
  * repo's config is read first (a read that runs nothing) and each filter driver the repo defines is
  * overridden through GIT_CONFIG_COUNT, which takes any driver name. Rejects when that read fails:
- * the call is then not made.
+ * or when PATH has no git: the call is then not made.
  */
-export async function gitSafeCall(cwd: string, args: readonly string[], timeoutMs = 5000): Promise<{ args: string[]; env: NodeJS.ProcessEnv }> {
+export async function gitSafeCall(cwd: string, args: readonly string[], timeoutMs = 5000): Promise<{ program: string; cwd: string; args: string[]; env: NodeJS.ProcessEnv }> {
+  const git = gitProgram();
+  const repo = resolvePath(cwd);
   const env = gitSafeEnv();
   if (gitRunsFilters(args)) {
-    const pairs = repoFilterOverrides(await readFilterConfig(cwd, env, timeoutMs));
+    const pairs = repoFilterOverrides(await readFilterConfig(git, repo, env, timeoutMs));
     if (pairs.length > 0) env.GIT_CONFIG_COUNT = String(pairs.length);
     pairs.forEach(([k, v], i) => { env[`GIT_CONFIG_KEY_${i}`] = k; env[`GIT_CONFIG_VALUE_${i}`] = v; });
   }
-  return { args: gitSafeArgs(args), env };
+  return { program: git.program, cwd: git.cwd, args: ['-C', repo, ...gitSafeArgs(args)], env };
 }
 
 /** The most one git call may write before it is stopped (the size derivedGit already allowed). */
