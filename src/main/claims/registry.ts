@@ -214,9 +214,9 @@ type FileStamp = { size: number; mtimeMs: number } | 'missing';
  * with the same atomic tmp + rename. Any registry reader, and the store's close(), saves them first.
  *
  * Unchanged: the check (checkKey on the file's keys plus the acked unsaved ones), a key enters only when its
- * claim is acked, one claims-key-added row per add, and a failed save drops the unsaved keys (the next claim
- * that uses one adds it again), as a failed save did before. A file changed by another writer is re-read and
- * the unsaved keys are put back on top before the save.
+ * claim is acked, one claims-key-added row per add, and a failed save keeps its unsaved keys held until a
+ * later save lands. A file changed by another writer is re-read and the unsaved keys are put back on top
+ * before the save.
  * New: a key acked less than REGISTRY_SAVE_MS before a crash is not on disk; the next claim with it adds it again.
  */
 export class KeyRegistryWriter {
@@ -313,11 +313,11 @@ export class KeyRegistryWriter {
     const snap = new Map(this.unsaved);
     let text: Iterable<string>;
     try { text = registryTextChunks(this.working()); }
-    catch (e) { this.dropFailed(snap, e); return; }
+    catch (e) { this.saveFailed(snap, e); return; }
     const before = this.seen;
     const done = (failure: { error: unknown } | null, published: boolean): void => {
       this.writing = false;
-      if (failure) this.dropFailed(snap, failure.error);
+      if (failure) this.saveFailed(snap, failure.error);
       else if (published) { this.saved(snap); this.stamp = this.statFile(); }
       if (this.unsaved.size === 0) pendingWrites.delete(this.path);
       this.arm();
@@ -327,32 +327,28 @@ export class KeyRegistryWriter {
       .then((r) => done(null, r === 'published'), (error) => done({ error }, false));
   }
 
-  private dropFailed(snap: Map<string, KeyEntry>, e: unknown): void {
+  /** A publish failure is transient: keep every acked key held and retry it, never make it new again. */
+  private saveFailed(snap: Map<string, KeyEntry>, e: unknown): void {
     this.reg = null;
     this.stamp = null;
-    this.saved(snap);
     this.onSaveFailed([...snap.keys()], e);
+    this.arm();
   }
 
   /** Save the acked unsaved keys now (atomic tmp + rename). */
   flush(): void {
     if (this.timer) { clearTimeout(this.timer); this.timer = null; }
-    pendingWrites.delete(this.path);
-    if (this.unsaved.size === 0) return;
-    const keys = [...this.unsaved.keys()];
+    if (this.unsaved.size === 0) { pendingWrites.delete(this.path); return; }
     try {
       saveRegistry(this.hiveRoot, this.working());
       this.stamp = this.statFile();
     } catch (e) {
-      this.reg = null;
-      this.stamp = null;
-      this.unsaved.clear();
-      this.heldChanged();
-      this.onSaveFailed(keys, e);
+      this.saveFailed(new Map(this.unsaved), e);
       return;
     }
     this.unsaved.clear();
     this.heldChanged();
+    pendingWrites.delete(this.path);
   }
 }
 
