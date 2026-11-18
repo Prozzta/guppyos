@@ -168,7 +168,11 @@ const SHARED_LAD_SETTER = 'test/tools/temp-jail-preload.cjs';
 const SHARED_LAD_READERS = ['test/rebrand-a-182.test.cjs', 'test/rebrand-updater-base-183.test.cjs', 'test/scheme-drop-187.test.cjs'];
 // DRILL-TREE-SELF-BUILD-108: one OWNER beside the readers. The 1.1.83 drill tree is built once and kept
 // under <shared LOCALAPPDATA>/guppy-test-fixtures, outside the per-file jail, so its library has to
-// name the shared folder. It is the only file that may write below it, and only in its own folder.
+// name the shared folder. It is the only file that may write below it, and it writes below
+// <shared>/guppy-test-fixtures (the tree, and its .building- and .tmp- folders beside the tree).
+// This rule pins who names the variable; it is NOT a write fence. The build's children get the real
+// LOCALAPPDATA through baseEnv on purpose, so they share the machine's npm, Electron and node-gyp
+// caches there (no download per jail), as a developer's own npm run does.
 // Its test file names the variable once, as a key handed to treeLocation.
 const SHARED_LAD_OWNER = 'test/tools/drill-tree-183.cjs';
 const SHARED_LAD_OWNER_TEST = 'test/drill-tree-183.test.cjs';
@@ -226,7 +230,7 @@ test('SHARED LOCALAPPDATA: one setter, the known readers only, and they only rea
   }
   // The owner (DRILL-TREE-SELF-BUILD-108): the drill-tree library and its test name the variable only
   // on the known lines, never set it, and take it from the env object handed in. The folder it
-  // builds in is its own: <shared>/guppy-test-fixtures/<NAME>.
+  // builds in is below <shared>/guppy-test-fixtures (Jim NIT on 507fbee6: beside NAME too).
   const owner = fs.readFileSync(path.join(root, SHARED_LAD_OWNER), 'utf8');
   const ownerTest = fs.readFileSync(path.join(root, SHARED_LAD_OWNER_TEST), 'utf8');
   assert.deepEqual(sharedLadOwnerProblems(owner, SHARED_LAD_OWNER_LINES), [], `${SHARED_LAD_OWNER}: THE OWNER NAMES THE SHARED LOCALAPPDATA ONLY ON ITS KNOWN LINES`);
