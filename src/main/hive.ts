@@ -29,7 +29,7 @@ import { basename, join, dirname, isAbsolute, win32, posix } from 'node:path';
 import { homedir } from 'node:os';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { AppendFile, LOG_KEEP_ROTATED, rotatedFiles } from './appendLog';
-import { MailCardIndex, NO_CARD, indexEntries, indexLinkContext, isNoCard, linkMail, replyChainGap, TRUSTED_METHODS, type LinkContext, type MailLink } from './mailCards';
+import { GOD_ADDRESSES, MailCardIndex, NO_CARD, indexEntries, indexLinkContext, isNoCard, linkMail, replyChainGap, resolveMailTo, TRUSTED_METHODS, type LinkContext, type MailLink } from './mailCards';
 import { atomicWriteJson as atomicWriteJsonFile, atomicWriteJsonAsync, atomicWriteTextAsync, readFileTracked } from './atomicJson';
 import { flushAppendsSync } from './writeBehind';
 import { ASK_BACKSTOP_MS, ASK_CLOSE_REASON_MAX, MailLedger, answeredByMessage, cardIdValue, freshMailId, isValidMailId, owesWork, replyTracked, staleObligations, supersededByMessage, type CardEvidence, type MailLedgerDoc, type ReleaseRun, type StaleObligation } from './mailLedger';
@@ -418,14 +418,6 @@ export interface SpawnInjection {
 }
 
 const HOP_CAP = 12;
-
-/** Addresses that are not agent ids and reach god: 'god' itself, 'human' (god is the Human's
- *  proxy here) and 'breaker'. BREAKER-REPLY-UNDELIVERABLE-108: the circuit breaker's mails are
- *  requests from the sender id 'breaker' and tell the agent to take its answer to god, so an
- *  answer addressed to that sender goes to god (it used to bounce as "no agent breaker"). */
-const GOD_ADDRESSES: ReadonlySet<string> = new Set(['god', 'human', 'breaker']);
-/** The agent id a direct `to` is delivered to. */
-const resolveMailTo = (to: string, godId: string): string => (GOD_ADDRESSES.has(to) ? godId : to);
 /**
  * Agents normally write mail atomically, but the protocol also permits ordinary
  * file writers. A poll can see one of those files between its create and close;

@@ -615,6 +615,15 @@ export interface ProvenMailOptions {
  * copies the sender's outbox/.sent copy matches (same recipient or broadcast, subject and body;
  * sender and recipient different agents). Every other copy is counted in `excluded` by reason.
  */
+/** Addresses that are not agent ids and reach god: 'god' itself, 'human' (god is the Human's
+ *  proxy here) and 'breaker'. BREAKER-REPLY-UNDELIVERABLE-108: the circuit breaker's mails are
+ *  requests from the sender id 'breaker' and tell the agent to take its answer to god, so an
+ *  answer addressed to that sender goes to god (it used to bounce as "no agent breaker").
+ *  One set for the router, the ledger command's send-time check and the proven-mail pairing. */
+export const GOD_ADDRESSES: ReadonlySet<string> = new Set(['god', 'human', 'breaker']);
+/** The agent id a direct `to` is delivered to. */
+export const resolveMailTo = (to: string, godId: string): string => (GOD_ADDRESSES.has(to) ? godId : to);
+
 export function readProvenMail(hiveRoot: string): { mails: BackfillMail[]; excluded: Record<string, number> } {
   const { mails, excluded } = drain(provenMailSteps(hiveRoot));
   return { mails, excluded };
@@ -632,7 +641,7 @@ function* provenMailSteps(hiveRoot: string, o: ProvenMailOptions = {}): Steps<Pr
   const agentsDir = join(hiveRoot, 'agents');
   const agents = ((yield { readdir: agentsDir }) as string[] | undefined ?? []).filter((a) => isValidMailId(a));
   const godId = ((r) => (typeof (r as { godId?: unknown } | undefined)?.godId === 'string' ? (r as { godId: string }).godId : 'god'))(yield* readJsonStep(join(hiveRoot, 'registry.json')));
-  const recipientOf = (to: unknown): string => (to === 'god' || to === 'human' ? godId : str(to));
+  const recipientOf = (to: unknown): string => resolveMailTo(str(to), godId);
   const incremental = typeof o.known === 'function';
   // the scan manifests of the last start (the startup catch-up only)
   const prior = new Map<string, AgentScan>();

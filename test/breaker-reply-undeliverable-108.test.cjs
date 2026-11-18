@@ -22,6 +22,7 @@ const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
 
 const { HiveManager } = loadTs('src/main/hive.ts');
+const { readProvenMail } = loadTs('src/main/mailCards.ts');
 
 async function floor(t) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'md-breaker-reply-'));
@@ -78,6 +79,10 @@ for (const level of ['steer', 'constrain']) {
     assert.equal(got[0].in_reply_to, mail.id);
     const sent = entries(hive, 'message').find((e) => e.from === 'jim-1');
     assert.deepEqual(sent.delivered, ['god-1'], 'the message log names god as the one who received it');
+    // The card backfill pairs the sender's copy with the delivered copy by recipient: it must
+    // resolve 'breaker' as the router does, or the reply is never linked to its card.
+    const proven = readProvenMail(hive.root());
+    assert.ok(proven.mails.some((m) => m.subject === reply.subject), `A REPLY TO A BREAKER MAIL IS PROVEN MAIL: the backfill left it out (${JSON.stringify(proven.excluded)})`);
   });
 }
 
