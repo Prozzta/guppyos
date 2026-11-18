@@ -32,7 +32,10 @@ const path = require('node:path');
 
 const RUNS = 60;
 const jail = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'rmsync-jitter-'));
-const exe = process.env.GUPPY_PACKAGED_EXE || path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Guppy', 'Guppy.exe');
+// The installed app comes from installed-guppy.cjs (run-tests jails LOCALAPPDATA); with no usable app the
+// Electron tests skip and say why.
+const guppy = require('./tools/installed-guppy.cjs').installedGuppy();
+const exe = guppy.exe;
 
 // The jail can hold junctions when a run stops half way: remove them as links before the folder.
 test.after(() => {
@@ -48,7 +51,7 @@ test.after(() => {
 
 for (const mode of ['sync', 'async']) {
   const name = mode === 'sync' ? 'safeRemoveTreeSync' : 'safeRemoveTree';
-  test(`${name}: an agent planting junctions during the remove never costs the victim a file (Electron as Node, ${RUNS} runs)`, { skip: process.platform !== 'win32' }, (t) => {
+  test(`${name}: an agent planting junctions during the remove never costs the victim a file (Electron as Node, ${RUNS} runs)`, { skip: guppy.skip }, (t) => {
     const base = path.join(jail, mode);
     fs.mkdirSync(base, { recursive: true });
     assert.equal(fs.existsSync(exe), true, `installed Guppy executable missing: ${exe}`);

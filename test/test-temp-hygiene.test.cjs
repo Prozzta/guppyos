@@ -165,7 +165,8 @@ test('REMOVEDIR: waits while something holds the folder, and gives up after its 
 // setter (the preload), only the known readers, and those readers only list and test paths in it.
 const SHARED_LAD = 'GUPPY_SHARED_LOCALAPPDATA';
 const SHARED_LAD_SETTER = 'test/tools/temp-jail-preload.cjs';
-const SHARED_LAD_READERS = ['test/rebrand-a-182.test.cjs', 'test/rebrand-updater-base-183.test.cjs', 'test/scheme-drop-187.test.cjs'];
+// FS-REMOVE-READDIR-GAP-108: + installed-guppy.cjs, which finds the installed app for the Electron-as-Node tests.
+const SHARED_LAD_READERS = ['test/rebrand-a-182.test.cjs', 'test/rebrand-updater-base-183.test.cjs', 'test/scheme-drop-187.test.cjs', 'test/tools/installed-guppy.cjs'];
 // DRILL-TREE-SELF-BUILD-108: one OWNER beside the readers. The 1.1.83 drill tree is built once and kept
 // under <shared LOCALAPPDATA>/guppy-test-fixtures, outside the per-file jail, so its library has to
 // name the shared folder. It is the only file that may write below it, and it writes below

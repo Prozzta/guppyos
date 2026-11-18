@@ -142,7 +142,10 @@ test('refusal log: a clean-up that fails on every pass is logged once per path p
     'three failed backups a day, one claims-backup-failed row per day folder');
 });
 
-const exe = process.env.GUPPY_PACKAGED_EXE || path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Guppy', 'Guppy.exe');
+// The installed app comes from installed-guppy.cjs (run-tests jails LOCALAPPDATA); with no usable app the
+// Electron tests skip and say why.
+const guppy = require('./tools/installed-guppy.cjs').installedGuppy();
+const exe = guppy.exe;
 
 for (const [site, { build, check }] of Object.entries(SITES)) {
   test(`${site}: links are removed as links, their targets survive (this process)`, () => {
@@ -151,7 +154,7 @@ for (const [site, { build, check }] of Object.entries(SITES)) {
     check(base, run(site, base));
   });
 
-  test(`${site}: links are removed as links, their targets survive, in the installed Electron as Node`, { skip: process.platform !== 'win32' }, () => {
+  test(`${site}: links are removed as links, their targets survive, in the installed Electron as Node`, { skip: guppy.skip }, () => {
     const base = path.join(jail, `${site}-electron`);
     build(base);
     assert.equal(fs.existsSync(exe), true, `installed Guppy executable missing: ${exe}`);
