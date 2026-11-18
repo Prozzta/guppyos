@@ -77,7 +77,7 @@ const AGENTS = [['god-1', 'Michael'], ['andy-1', 'Andy'], ['jim-1', 'Jim'], ['pa
 async function floor(t) {
   const home = fs.mkdtempSync(path.join(JAIL, 'floor-'));
   const hive = new HiveManager(() => home, () => true);
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   for (const [id, name] of AGENTS) await hive.ensureAgent({ id, name, provider: 'claude', cwd: home, isGod: id === 'god-1' });
   hive.send({ to: 'andy-1', act: 'request', subject: 'Review PR 12', body: 'please' }, 'god-1');
   hive.send({ to: 'andy-1', act: 'inform', subject: 'fyi', body: 'no reply owed' }, 'god-1');
