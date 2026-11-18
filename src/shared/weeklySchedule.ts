@@ -46,6 +46,11 @@ export const WEEKDAY_INITIALS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
  */
 export const WEEKLY_CATCHUP_MS = 6 * 60 * 60 * 1000;
 
+/** How far before a slot a fire still counts as that slot's fire (see weeklyDelayMs).
+ *  A timer wakes early by milliseconds; 5 s covers that with room, and stays far
+ *  short of any real gap between two slots (at least a day apart). */
+export const SLOT_EARLY_FIRE_MS = 5000;
+
 /** Validate and canonicalise. Returns null for anything that is not a usable
  *  weekly schedule — no days, a bad day number, a minute outside the day — so
  *  every caller has exactly one check to make. Days come back sorted and
@@ -132,12 +137,22 @@ export function previousWeeklyFireMs(w: unknown, nowMs: number): number | null {
  * clause is what `lastFiredAt` is for — without it, re-arming the scheduler
  * (which happens on every save of ANY mission) would re-fire a mission that
  * already ran minutes ago.
+ *
+ * A fire up to SLOT_EARLY_FIRE_MS before a slot IS that slot's fire
+ * (MISSION-WEEKLY-DOUBLEFIRE-108). A timer can wake a little early; it fires,
+ * stamps lastFiredAt a few ms before the slot, and re-arms. Without this, the
+ * re-arm finds that same slot still ahead (or, after a restart just past it,
+ * finds it missed and not run) and fires it a second time.
  */
 export function weeklyDelayMs(w: unknown, nowMs: number, lastFiredAt = 0): number | null {
   const n = normalizeWeekly(w);
   if (!n) return null;
+  const covered = (slot: number): boolean => lastFiredAt >= slot - SLOT_EARLY_FIRE_MS;
   const prev = previousWeeklyFireMs(n, nowMs);
-  if (prev !== null && prev > lastFiredAt && nowMs - prev <= WEEKLY_CATCHUP_MS) return 0;
-  const next = nextWeeklyFireMs(n, nowMs);
+  if (prev !== null && !covered(prev) && nowMs - prev <= WEEKLY_CATCHUP_MS) return 0;
+  let next = nextWeeklyFireMs(n, nowMs);
+  // Only an EARLY fire covers a slot still ahead: a lastFiredAt past it (a clock set back)
+  // keeps the old behaviour and fires the slot.
+  if (next !== null && covered(next) && lastFiredAt < next) next = nextWeeklyFireMs(n, next);
   return next === null ? null : Math.max(0, next - nowMs);
 }
