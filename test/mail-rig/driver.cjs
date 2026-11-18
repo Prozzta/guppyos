@@ -15,6 +15,7 @@ const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
 const { spawn } = require('node:child_process');
+const { nodeEnv } = require('../tools/node-env.cjs');
 const { createSandbox, removeSandbox } = require('../electron-harness/run.cjs');
 const { rigEnv } = require('./isolation.cjs');
 const own = require('../tools/own-procs.cjs');
@@ -84,7 +85,7 @@ class Rig {
 
   async boot(timeoutMs = 45_000) {
     const env = scrubbedEnv(this.sandbox);
-    this.child = spawn(process.execPath, [HOST, '--sandbox', this.sandbox, '--parent', String(process.pid)], { env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    this.child = spawn(process.execPath, [HOST, '--sandbox', this.sandbox, '--parent', String(process.pid)], { env: nodeEnv(env), stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     const child = this.child;
     child.rec = { pid: child.pid, bornMs: Date.now() };
     this.hostRecs.push(child.rec);

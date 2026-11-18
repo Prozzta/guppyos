@@ -24,6 +24,7 @@ const { selectTestFiles } = runner;
 const run = (options) => runner.run({ jobRate: () => 0, mutantJournal: () => ({ owner: null, live: false, files: [] }), ...options });
 const helper = require('./tools/mutant-runner-helper.cjs');
 const os = require('node:os');
+const { nodeEnv } = require('./tools/node-env.cjs');
 
 test('MUTANT-JOURNAL-GATE bare node --test (god 5b1c57, Jim NIT): load-ts refuses mutated source under a dead-owner or foreign live journal, lets the census\'s own spawned suites (MUTANT_RUNNER_PID) and the runner itself load, and loads normally with no journal (MUTANT: a bare node --test runs on mutated bytes)', { timeout: 60_000 }, () => {
   const { spawnSync, spawn: spawnChild } = require('node:child_process');
@@ -127,7 +128,7 @@ test('MUTANT-JOURNAL-GATE NIT 2 (god 9cb49c, Jim 967fa3): release-worktrees-muta
   // A killed run: the journal names a dead owner and scripts/release-worktrees.cjs carries the mutant.
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'c90-nit2-'));
   fs.mkdirSync(path.join(root, 'scripts')); fs.mkdirSync(path.join(root, 'test', 'tools'), { recursive: true });
-  for (const rel of [runner, 'test/tools/mutant-runner-helper.cjs', 'test/tools/mutant-tap.cjs', 'test/tools/ps-env.cjs']) fs.copyFileSync(path.join(REPO, rel), path.join(root, rel));
+  for (const rel of [runner, 'test/tools/mutant-runner-helper.cjs', 'test/tools/mutant-tap.cjs', 'test/tools/node-env.cjs', 'test/tools/ps-env.cjs']) fs.copyFileSync(path.join(REPO, rel), path.join(root, rel));
   const file = path.join(root, 'scripts', 'release-worktrees.cjs');
   fs.writeFileSync(file, 'if (false) rotated = 1;\r\n', 'utf8');
   fs.writeFileSync(helper.journalPath(root), JSON.stringify({ owner: { pid: 2147483000, start: '2026-10-25T15:23:08Z' }, records: [{ file, original: Buffer.from('if (newest) rotated = 1;\r\n').toString('base64') }] }), 'utf8');
@@ -620,7 +621,7 @@ test('END TO END: a file that finishes its tests but never exits is killed at th
     const e = sink();
     let out = '';
     // Captured, so the inner TAP never mixes into this file's own report.
-    const spawn = (args, opts) => { const r = spawnSync(process.execPath, args, { ...opts, stdio: 'pipe', encoding: 'utf8' }); out = r.stdout; return r; };
+    const spawn = (args, opts) => { const r = spawnSync(process.execPath, args, { ...opts, env: nodeEnv(opts.env), stdio: 'pipe', encoding: 'utf8' }); out = r.stdout; return r; };
     const t0 = Date.now();
     const code = run({ testDir: dir, cwd: dir, spawn, timeoutMs: 4_000, isTTY: false, log: () => {}, err: e.write, failureFile: () => path.join(dir, 'failures.json') });
     assert.notStrictEqual(code, 0, 'a hung file fails the run');
@@ -829,7 +830,8 @@ test('PIN: against the REAL test directory discovery is root tests plus only fol
   // CLAIMS-REKEY-SHARED-KEY: + 1 (claims-rekey-shared-key). INT-1.1.108 batch A: 623 + 1 = 624.
   // CLAIMS-REKEY-ENTRYPOINT-108: + 1 (claims-rekey-entrypoint). INT-1.1.108 batch B: 624 + 1 = 625.
   // DRILL-TREE-SELF-BUILD-108: + 1 (drill-tree-183). INT-1.1.108 batch C: 625 + 1 = 626.
-  assert.equal(files.length, 626,`the focused suite must retain its pre-fold file count, got ${files.length}`);
+  // TEST-EXECPATH-ENV-108: + 1 (execpath-env-guard). INT-1.1.108 batch D: 626 + 1 = 627.
+  assert.equal(files.length, 627,`the focused suite must retain its pre-fold file count, got ${files.length}`);
   assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
   assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');
   assert.ok(files.includes(path.join('start-fixes-163', 'start-fixes-163-boot-submit.test.cjs')), 'the start-fixes feature folder is included');
@@ -892,7 +894,7 @@ test('END TO END, the backstop alone (no watchdog): node --test\'s own file time
     // Bounded: spawnSync blocks the event loop, so the test's own timeout cannot fire; a backstop
     // that never kills must FAIL this test, not hang the suite (Jim, gate of 62c39414, mutant A).
     let timedOut = false;
-    const spawn = (args, opts) => { const r = spawnSync(process.execPath, args, { ...opts, stdio: 'pipe', encoding: 'utf8', timeout: 90_000, killSignal: 'SIGKILL' }); timedOut = timedOut || (r.error && r.error.code) === 'ETIMEDOUT'; return r; };
+    const spawn = (args, opts) => { const r = spawnSync(process.execPath, args, { ...opts, env: nodeEnv(opts.env), stdio: 'pipe', encoding: 'utf8', timeout: 90_000, killSignal: 'SIGKILL' }); timedOut = timedOut || (r.error && r.error.code) === 'ETIMEDOUT'; return r; };
     // GUPPY-NODE-LTS: the REAL backstop (the runner's own), on every Node: an injected watchdog would
     // otherwise turn it off, and Node 24's --test-timeout never kills this file.
     const code = run({ testDir: dir, cwd: dir, spawn, timeoutMs: 3_000, isTTY: false, log: () => {}, err: e.write, failureFile: () => path.join(dir, 'failures.json'), watchdog: () => ({ stop: () => {} }), backstop: runner.startBackstop });
@@ -969,7 +971,7 @@ test('GATE-178: a watchdog whose snapshot is 8 s late still TREE-kills a hung Co
       // the wrapper and the watchdog it started: its own tree, verified (not taskkill /T: TEST-GLOB-PID-RECYCLE)
       return { stop: () => { try { own.killOwnTree(rec); } catch { /* gone */ } } };
     };
-    const spawnTap = (args, opts) => spawnSync(process.execPath, args, { ...opts, stdio: 'pipe', encoding: 'utf8' });
+    const spawnTap = (args, opts) => spawnSync(process.execPath, args, { ...opts, env: nodeEnv(opts.env), stdio: 'pipe', encoding: 'utf8' });
     const code = run({ testDir: dir, cwd: dir, spawn: spawnTap, timeoutMs: 4_000, isTTY: false, log: () => {}, err: e.write, failureFile: () => path.join(dir, 'failures.json'), watchdog: lateWatchdog });
     assert.notStrictEqual(code, 0, 'a hung file fails the run');
     const left = leftBehind(readRec(filePidFile, 'node.exe'));

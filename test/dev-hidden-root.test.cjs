@@ -26,6 +26,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const { nodeEnv } = require('./tools/node-env.cjs');
 const loadTs = require('./load-ts.cjs');
 const { readSource, codeOnly } = require('./read-source.cjs');
 
@@ -137,7 +138,7 @@ function freshLoad(extra) {
     Object.assign(env, { HOME: home, USERPROFILE: home, TEMP: home, TMP: home, CODEX_HOME: path.join(home, '.codex'), GEMINI_CLI_HOME: home }, extra);
     const script = `const iso = require(${JSON.stringify(path.join(__dirname, 'load-ts.cjs'))})(${JSON.stringify(path.join(REPO, 'src/main/devIsolation.ts'))});
       process.stdout.write(JSON.stringify({ dev: iso.DEV_ISOLATION, hidden: iso.DEV_HIDDEN, root: iso.devDataRoot() }));`;
-    const r = spawnSync(process.execPath, ['-e', script], { cwd: REPO, env, encoding: 'utf8', windowsHide: true, timeout: 60_000 });
+    const r = spawnSync(process.execPath, ['-e', script], { cwd: REPO, env: nodeEnv(env), encoding: 'utf8', windowsHide: true, timeout: 60_000 });
     assert.equal(r.status, 0, r.stderr);
     return JSON.parse(r.stdout);
   } finally { fs.rmSync(home, { recursive: true, force: true }); }

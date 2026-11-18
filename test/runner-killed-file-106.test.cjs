@@ -23,6 +23,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const { nodeEnv } = require('./tools/node-env.cjs');
 const runner = require('./tools/run-tests.cjs');
 
 const row = (o) => JSON.stringify(o);
@@ -108,7 +109,7 @@ test('END TO END: two test files force-kill two others by pid (taskkill, process
     ].join('\n'));
     fs.writeFileSync(path.join(dir, 'c-ok.test.cjs'), "require('node:test')('ok', () => {});\n");
     const e = []; let out = '';
-    const spawn = (args, opts) => { const r = spawnSync(process.execPath, args, { ...opts, stdio: 'pipe', encoding: 'utf8', timeout: 100_000, killSignal: 'SIGKILL' }); out = r.stdout; return r; };
+    const spawn = (args, opts) => { const r = spawnSync(process.execPath, args, { ...opts, env: nodeEnv(opts.env), stdio: 'pipe', encoding: 'utf8', timeout: 100_000, killSignal: 'SIGKILL' }); out = r.stdout; return r; };
     const code = runner.run({ testDir: dir, cwd: dir, spawn, timeoutMs: 90_000, isTTY: false, log: () => {}, err: (l) => e.push(l),
       failureFile: () => path.join(dir, 'failures.json'), eventsFile: path.join(dir, 'ev.jsonl'), watchdog: () => ({ stop: () => {} }), backstop: runner.startBackstop });
     const errs = e.join('\n');
