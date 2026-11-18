@@ -111,6 +111,9 @@ export interface ClaimStoreDeps {
   monoNow?: () => number;
   /** The wall clock the roster's racy-stat rule compares with (statCacheKey.ts); tests drive it. */
   wallNow?: () => number;
+  /** LAG-CLAIMS-SEGMENTS-ASYNC-108: the repeating timer that keeps the roster fresh off-thread
+   *  (default: an unref'd setInterval); tests drive it. */
+  rosterInterval?: (fn: () => void, ms: number) => { clear(): void };
 }
 
 /** A10: the ids a supersede, retract or (non-sighting) event names: their statuses depend on more than their own key. */
@@ -155,6 +158,12 @@ const ANCHOR_DELAY_MS = 1_000;
  *  claims folders, for a segment folder made by something other than this store (every change main
  *  makes drops it at once). The same bound config.json's cache uses (CONFIG_REVALIDATE_MS). */
 export const ROSTER_REVALIDATE_MS = 1_000;
+/** LAG-CLAIMS-SEGMENTS-ASYNC-108: a roster older than this is never answered: the census lists
+ *  synchronously and exactly instead (the hard bound on a stale answer, e.g. after a sleep). */
+export const ROSTER_MAX_AGE_MS = 30_000;
+/** How often the store itself starts the off-thread listing, census or no census, so that a
+ *  running app's roster stays well under ROSTER_MAX_AGE_MS. */
+export const ROSTER_KEEP_FRESH_MS = 10_000;
 const REF_VALUE_MAX = 500;
 
 const CLAIM_DRAFT_FIELDS = new Set(['t', 'kind', 'text', 'key', 'refs', 'ttl', 'pin', 'supersedes', 'supersedesReason', 'retracts', 'at', 'source', 'legacy', 'section', 'value', 'valueAgent']);
@@ -476,6 +485,9 @@ export class ClaimStore {
    *   - once ROSTER_REVALIDATE_MS passed (a folder another process made under an existing agent)
    *     the census answers the roster it has and lists again off the caller's thread
    *     (relistRoster): that folder is in the roster one off-thread listing later.
+   *   - a roster older than ROSTER_MAX_AGE_MS is not answered: that census lists synchronously
+   *     and exactly. A timer (ROSTER_KEEP_FRESH_MS) starts the off-thread listing with no census
+   *     asking, so a running app does not reach that age; a sleep or a starved loop can.
    * Verification never reads this: readLedger lists the agent's own segments every time.
    */
   ledgerAgents(): string[] {
@@ -498,8 +510,11 @@ export class ClaimStore {
     try { st = nodeFs.statSync(agentsDir); key = statKey(st); } catch { /* no agents folder: no ledgers */ }
     const r = this.roster;
     if (r && r.gen === this.rosterGen && r.key !== null && r.key === key) {
-      if (mono() - r.at >= ROSTER_REVALIDATE_MS) this.relistRoster(r);
-      return [...r.agents];
+      const age = mono() - r.at;
+      if (age < ROSTER_MAX_AGE_MS) {
+        if (age >= ROSTER_REVALIDATE_MS) this.relistRoster(r);
+        return [...r.agents];
+      }
     }
     const gen = this.rosterGen;
     const at = mono();
@@ -507,7 +522,29 @@ export class ClaimStore {
     try { names = nodeFs.readdirSync(agentsDir); } catch { names = []; }
     const agents = names.filter((a) => this.segments(a).length > 0);
     this.roster = { gen, at, key: st ? provenStatKey(st, (this.d.wallNow ?? Date.now)()) : null, agents };
+    this.keepRosterFresh();
     return [...agents];
+  }
+
+  private rosterTimer: { clear(): void } | null = null;
+
+  /** Start the keep-fresh timer once there is a roster to keep (close() clears it; the next
+   *  census starts it again). A tick lists off-thread only a roster that still stands and whose
+   *  window has passed; a dirty one is left to the next census, which lists it exactly. */
+  private keepRosterFresh(): void {
+    if (this.rosterTimer) return;
+    const tick = (): void => {
+      const r = this.roster;
+      if (!r || r.gen !== this.rosterGen) return;
+      const mono = this.d.monoNow ?? (() => performance.now());
+      if (mono() - r.at >= ROSTER_REVALIDATE_MS) this.relistRoster(r);
+    };
+    const every = this.d.rosterInterval ?? ((fn: () => void, ms: number) => {
+      const t = setInterval(fn, ms);
+      t.unref();
+      return { clear: () => clearInterval(t) };
+    });
+    this.rosterTimer = every(tick, ROSTER_KEEP_FRESH_MS);
   }
 
   private rosterRelist: Promise<void> | null = null;
@@ -1632,6 +1669,7 @@ export class ClaimStore {
   /** Close every append handle (quit, hive change). Appends after it reopen. */
   close(): void {
     this.rosterDirty(); // the next census lists afresh, whatever a relist still in flight brings
+    if (this.rosterTimer) { this.rosterTimer.clear(); this.rosterTimer = null; }
     this.flushKeyRegistry();
     for (const a of [...this.fds.keys()]) this.closeFd(a);
     for (const a of [...this.anchorTimers.keys()]) this.flushAnchor(a);

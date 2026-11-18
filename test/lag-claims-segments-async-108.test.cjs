@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * LAG-CLAIMS-SEGMENTS-ASYNC-108: the claims census must not list folders on the main thread
  * every time its window passes.
@@ -9,7 +10,8 @@
  * has about ten synchronous consumers, so each window costs 1 + N directory listings there
  * (main-stall rows on 1.1.107 show one such slice at 679 ms).
  *
- * These tests count the synchronous listings, not time.
+ * These tests count the synchronous listings, not time. The clock and the keep-fresh timer are
+ * the test's own (monoNow, rosterInterval): nothing here sleeps.
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -54,13 +56,15 @@ function setup() {
   const anchors = new FileHeadAnchorStore(path.join(ud, HEAD_ANCHOR_FILE), later);
   const keys = new SandboxKeyProvider();
   let mono = 0;
+  const timers = [];
+  const rosterInterval = (fn, ms) => { const h = { fn, ms, cleared: false, clear() { h.cleared = true; } }; timers.push(h); return h; };
   const mk = () => {
     let t = Date.parse('2026-11-18T10:00:00Z');
-    const store = new storeMod.ClaimStore({ hiveRoot: root, keys, keyRecord: new FileLedgerKeyRecord(path.join(ud, KEY_RECORD_FILE)), headAnchor: anchors, now: () => new Date(t += 1000), monoNow: () => mono, wallNow: later });
+    const store = new storeMod.ClaimStore({ hiveRoot: root, keys, keyRecord: new FileLedgerKeyRecord(path.join(ud, KEY_RECORD_FILE)), headAnchor: anchors, now: () => new Date(t += 1000), monoNow: () => mono, wallNow: later, rosterInterval });
     STORES.push(store);
     return store;
   };
-  return { root, mk, tick: (ms) => { mono += ms; } };
+  return { root, mk, timers, tick: (ms) => { mono += ms; } };
 }
 async function ledgers(x, agents) {
   const s = x.mk();
@@ -76,7 +80,7 @@ test('a census whose window has passed, with nothing changed, lists no folder sy
   await ledgers(x, ['andy', 'dwight', 'jim']);
   const s = x.mk();
   assert.deepEqual([...s.ledgerAgents()].sort(), ['andy', 'dwight', 'jim'], 'the first census lists the three ledgers');
-  x.tick(storeMod.ROSTER_REVALIDATE_MS);
+  x.tick(storeMod.ROSTER_MAX_AGE_MS - 1); // as old as a roster may be and still be answered
   const sp = spyReaddirSync();
   let r;
   try { r = s.ledgerAgents(); } finally { sp.stop(); }
@@ -206,4 +210,74 @@ test('segmentsAsync answers what segments answers', async () => {
   assert.equal(s.segments('andy').length, 2, 'the rig made a second segment');
   assert.deepEqual(await s.segmentsAsync('andy'), s.segments('andy'));
   assert.deepEqual(await s.segmentsAsync('nobody'), []);
+});
+
+/** A claims folder made by something other than this store, under an agents/ entry that exists
+ *  already (so the agents/ stat key does not move). */
+function outsideLedger(x, from, to) {
+  fs.cpSync(path.join(x.root, 'agents', from, 'memory', 'claims'), path.join(x.root, 'agents', to, 'memory', 'claims'), { recursive: true });
+}
+async function withEmptyToby(x) {
+  await ledgers(x, ['andy', 'dwight']);
+  fs.mkdirSync(path.join(x.root, 'agents', 'toby'), { recursive: true });
+  const s = x.mk();
+  assert.deepEqual([...s.ledgerAgents()].sort(), ['andy', 'dwight']);
+  return s;
+}
+
+test('a roster older than ROSTER_MAX_AGE_MS is not answered: that census lists synchronously and exactly, with no timer tick', async () => {
+  const x = setup();
+  const s = await withEmptyToby(x);
+  outsideLedger(x, 'dwight', 'toby');
+  x.tick(storeMod.ROSTER_MAX_AGE_MS); // the keep-fresh timer never ran (a sleep, a starved loop)
+  const got = syncListings(() => s.ledgerAgents());
+  assert.deepEqual([...got.r].sort(), ['andy', 'dwight', 'toby'], 'the folder made elsewhere is in this very census');
+  assert.equal(got.agents, 1, 'agents/ was listed synchronously, once');
+  assert.equal(x.timers.length, 1, 'a second synchronous listing starts no second timer');
+  await s.rosterSettled();
+  const next = syncListings(() => s.ledgerAgents());
+  assert.equal(next.agents + next.claims, 0, 'and that listing is the roster now');
+});
+
+test('the keep-fresh timer starts the off-thread listing with no census asking', async (t) => {
+  const x = setup();
+  const s = await withEmptyToby(x);
+  assert.equal(x.timers.length, 1, 'the first census started one timer');
+  assert.equal(x.timers[0].ms, storeMod.ROSTER_KEEP_FRESH_MS);
+  assert.ok(storeMod.ROSTER_KEEP_FRESH_MS + storeMod.ROSTER_REVALIDATE_MS < storeMod.ROSTER_MAX_AGE_MS, 'a tick comes well before the roster may no longer be answered');
+  s.ledgerAgents();
+  assert.equal(x.timers.length, 1, 'a later census starts no second timer');
+  const h = holdAgentsListing(t, x);
+  x.timers[0].fn(); // inside the window: nothing to do
+  const idle = await Promise.race([s.rosterSettled().then(() => true), new Promise((r) => setImmediate(() => r(false)))]);
+  assert.equal(idle, true, 'a tick inside the window starts no listing');
+  assert.equal(h.calls(), 0, 'a tick inside the window lists nothing');
+  outsideLedger(x, 'dwight', 'toby');
+  x.tick(storeMod.ROSTER_KEEP_FRESH_MS);
+  const sp = spyReaddirSync();
+  try { x.timers[0].fn(); x.timers[0].fn(); } finally { sp.stop(); }
+  assert.equal(sp.n('agents') + sp.n('claims'), 0, 'the tick lists nothing synchronously');
+  await listingStarted(h, s);
+  h.release();
+  await s.rosterSettled();
+  assert.equal(h.calls(), 1, 'two ticks start one listing');
+  const got = syncListings(() => s.ledgerAgents());
+  assert.deepEqual([...got.r].sort(), ['andy', 'dwight', 'toby'], 'the folder made elsewhere is in the roster before any census asked');
+  assert.equal(got.agents + got.claims, 0, 'and that census listed nothing synchronously');
+});
+
+test('close() clears the keep-fresh timer; a tick after close does nothing; the next census starts a new timer', async (t) => {
+  const x = setup();
+  const s = await withEmptyToby(x);
+  const h = holdAgentsListing(t, x);
+  s.close();
+  assert.equal(x.timers[0].cleared, true, 'close() cleared the timer');
+  x.tick(storeMod.ROSTER_KEEP_FRESH_MS);
+  h.release(); // nothing is held: a listing, if one starts, runs to its end and is counted
+  x.timers[0].fn(); // a tick that was already due
+  await s.rosterSettled();
+  assert.equal(h.calls(), 0, 'a tick after close() starts no listing');
+  s.ledgerAgents();
+  assert.equal(x.timers.length, 2, 'the store is used again: a new timer');
+  assert.equal(x.timers[1].cleared, false);
 });
