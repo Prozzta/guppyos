@@ -5,7 +5,7 @@ import { openForRead, safeResolve } from './fs';
 import { GIT_MAX_OUTPUT_BYTES, gitSafeCall } from './gitSafe';
 
 /** Run git in `cwd` with `args`. Returns stdout text or an error. Every call goes through gitSafe
- *  (GIT-RUN-HARDEN-108): no program the repo names is run, the app's GIT_* variables are dropped,
+ *  (GIT-RUN-HARDEN-108): no program the repo names or carries is run, the app's GIT_* variables are dropped,
  *  and a call that writes more than `maxBytes` is stopped. Exported for the test of the cap. */
 export async function runGit(cwd: string, args: string[], timeoutMs = 8000, maxBytes = GIT_MAX_OUTPUT_BYTES): Promise<{
   ok: true; stdout: string;
@@ -14,7 +14,7 @@ export async function runGit(cwd: string, args: string[], timeoutMs = 8000, maxB
   try { call = await gitSafeCall(cwd, args, timeoutMs); }
   catch (e) { return { ok: false, error: (e as Error).message }; }
   return new Promise((resolve) => {
-    const proc = spawn('git', call.args, { cwd, env: call.env });
+    const proc = spawn(call.program, call.args, { cwd: call.cwd, env: call.env, windowsHide: true });
     let stdout = '';
     let stderr = '';
     let bytes = 0;

@@ -21,6 +21,8 @@ const loadTs = require('./load-ts.cjs');
 const git = loadTs('src/main/git.ts');
 const world = loadTs('src/main/claims/worldSnapshot.ts');
 const { DerivedGit } = loadTs('src/main/claims/derivedGit.ts');
+const gitSafe = loadTs('src/main/gitSafe.ts');
+const { findExe, resolveExe } = loadTs('src/main/resolveExe.ts');
 
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'grh108-'));
 test.after(() => fs.rmSync(ROOT, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
@@ -358,6 +360,13 @@ for (const name of ['git.exe', 'git.com']) {
   test(`GIT-RUN-HARDEN-108: a ${name} in the repo folder is not run in place of git`, winOnly, async (t) => {
     asTheAppRuns(t);
     const c = setup();
+    // A filter driver from the repo's config. If the read of the filter drivers runs the planted
+    // program, it learns of none (the plant exits 1, git's "no such key") and the driver is left on.
+    useFilter(c, 'planted');
+    raw(c.repo, 'config', 'filter.planted.clean', passThrough(c.marker));
+    raw(c.repo, 'status', '--porcelain');
+    assert.ok(c.ran(), 'the plant is live: a plain git status runs the clean program');
+    const headNow = raw(c.repo, 'rev-parse', 'HEAD').trim();
     plantProgram(c.repo, name);
 
     const inside = await git.runGit(c.repo, ['rev-parse', '--is-inside-work-tree']);
@@ -368,11 +377,13 @@ for (const name of ['git.exe', 'git.com']) {
     const st = await git.runGit(c.repo, ['status', '--porcelain']);
     assert.ok(st.ok, `a status read ran the repo's ${name}, not git (${st.error})`);
     assert.ok(st.stdout.includes(`?? ${name}`), 'git itself lists the planted file as untracked');
+    assert.equal(c.ran(), false, `git.ts read the repo's filter drivers with the repo's ${name}, not git: the driver ran`);
 
     const head = await world.runGit(c.repo, ['rev-parse', 'HEAD'], undefined, 5000);
-    assert.equal(head === null ? null : head.trim(), c.head, `the claims snapshot runner ran the repo's ${name}, not git`);
+    assert.equal(head === null ? null : head.trim(), headNow, `the claims snapshot runner ran the repo's ${name}, not git`);
     const worldStatus = await world.runGit(c.repo, ['status', '--porcelain'], undefined, 5000);
     assert.equal(typeof worldStatus, 'string', `the claims snapshot runner's status read ran the repo's ${name}, not git`);
+    assert.equal(c.ran(), false, `the claims snapshot runner read the repo's filter drivers with the repo's ${name}, not git: the driver ran`);
   });
 }
 
@@ -384,6 +395,113 @@ test('GIT-RUN-HARDEN-108: a git.exe in the app\'s own working directory is not r
   const before = process.cwd();
   process.chdir(launchedIn);
   try {
-    assert.equal(await new DerivedGit(c.repo).ok(), true, 'derivedGit ran the git.exe in the working directory, not git');
+    const d = new DerivedGit(c.repo);
+    assert.equal(await d.ok(), true, 'derivedGit ran the git.exe in the working directory, not git');
+    // The second way derivedGit starts git: the batch read that is fed on stdin.
+    await d.prefetch([c.head]);
+    assert.equal(await d.commitOf(c.head), c.head, 'the batch read ran the git.exe in the working directory, not git');
   } finally { process.chdir(before); }
+});
+
+// ---- The program's full path ----
+
+test('GIT-RUN-HARDEN-108: a program is looked up in the absolute folders of PATH only, in PATHEXT order', () => {
+  const have = (...files) => { const set = new Set(files.map((f) => f.toLowerCase())); return (f) => set.has(f.toLowerCase()); };
+  const win = (pathValue, files, exts = ['.COM', '.EXE', '.BAT', '.CMD'], name = 'git') => findExe(name, { platform: 'win32', path: pathValue, exts, isProgram: have(...files) });
+
+  assert.equal(win('C:\\a;C:\\b', ['C:\\b\\git.EXE']), 'C:\\b\\git.EXE');
+  // Folders that depend on where the process is: none is searched, whatever they hold.
+  for (const dir of ['.', '', 'bin', '.\\bin', '..', '\\tools', 'C:', 'C:tools', '/tools']) {
+    const planted = dir === '' ? 'git.EXE' : dir + '\\git.EXE';
+    assert.equal(win(dir + ';C:\\real', [planted, 'git.EXE', 'C:\\real\\git.EXE']), 'C:\\real\\git.EXE', 'PATH entry "' + dir + '" was searched');
+    assert.equal(win(dir, [planted, 'git.EXE']), null, 'PATH entry "' + dir + '" was searched');
+  }
+  assert.equal(win('C:/fwd', ['C:\\fwd\\git.EXE']), 'C:\\fwd\\git.EXE', 'a drive path with forward slashes is absolute');
+  assert.equal(win('\\\\host\\share\\bin', ['\\\\host\\share\\bin\\git.EXE']), '\\\\host\\share\\bin\\git.EXE', 'a network share is absolute');
+  assert.equal(win('"C:\\Program Files\\Git\\cmd"', ['C:\\Program Files\\Git\\cmd\\git.EXE']), 'C:\\Program Files\\Git\\cmd\\git.EXE', 'a quoted entry');
+  // The first folder that has any of the names wins; inside one folder the extensions go in order.
+  assert.equal(win('C:\\a;C:\\b', ['C:\\a\\git.CMD', 'C:\\b\\git.COM']), 'C:\\a\\git.CMD');
+  assert.equal(win('C:\\a', ['C:\\a\\git.CMD', 'C:\\a\\git.EXE', 'C:\\a\\git.BAT']), 'C:\\a\\git.EXE');
+  assert.equal(win('C:\\a', ['C:\\a\\git.CMD', 'C:\\a\\git.EXE'], ['.CMD', '.EXE']), 'C:\\a\\git.CMD');
+  assert.equal(win('C:\\a', ['C:\\a\\git.CMD'], ['.com', '.exe']), null, 'only the extensions asked for');
+  assert.equal(win('C:\\a', ['C:\\a\\git']), null, 'on Windows a file with no extension is not a program');
+  assert.equal(win('C:\\a', ['C:\\a\\npm.cmd', 'C:\\a\\npm.cmd.EXE'], undefined, 'npm.cmd'), 'C:\\a\\npm.cmd', 'a name that has its extension is tried as it is');
+
+  const nix = (pathValue, files) => findExe('git', { platform: 'linux', path: pathValue, isProgram: have(...files) });
+  assert.equal(nix('bin:.::/usr/bin', ['bin/git', './git', 'git', '/usr/bin/git']), '/usr/bin/git');
+  assert.equal(nix('bin:.:', ['bin/git', './git', 'git']), null);
+
+  for (const bad of ['', 'C:\\x\\git', 'bin/git', '.\\git', 'C:git']) assert.throws(() => findExe(bad, { platform: 'win32', path: 'C:\\a', isProgram: () => true }), /bare program name/);
+});
+
+test('GIT-RUN-HARDEN-108: every call is the full path of git, started in git\'s own folder, with the repo as -C', async () => {
+  const c = setup();
+  const { program, cwd } = gitSafe.gitProgram();
+  assert.ok(path.isAbsolute(program), program);
+  assert.equal(resolveExe('git', { exts: ['.com', '.exe'] }), program, 'the same lookup');
+  assert.equal(cwd, path.dirname(program));
+  assert.ok(fs.statSync(program).isFile());
+  for (const args of [['rev-parse', 'HEAD'], ['status', '--porcelain']]) {
+    const call = await gitSafe.gitSafeCall(c.repo, args);
+    assert.equal(call.program, program);
+    assert.equal(call.cwd, cwd, 'not the repo');
+    assert.deepEqual(call.args.slice(0, 2), ['-C', path.resolve(c.repo)]);
+  }
+  // A relative repo path means what it meant as a working directory: relative to the app's own.
+  const before = process.cwd();
+  process.chdir(c.base);
+  try {
+    assert.deepEqual((await gitSafe.gitSafeCall('repo', ['rev-parse', 'HEAD'])).args.slice(0, 2), ['-C', c.repo]);
+    assert.equal((await git.runGit('repo', ['rev-parse', 'HEAD'])).stdout.trim(), c.head);
+    assert.equal(await new DerivedGit('repo').ok(), true);
+  } finally { process.chdir(before); }
+});
+
+test('GIT-RUN-HARDEN-108: with no git in an absolute folder of PATH, no call is made and the error says so', async (t) => {
+  asTheAppRuns(t);
+  const c = setup();
+  const empty = fs.mkdtempSync(path.join(ROOT, 'nogit-'));
+  // The only git in reach is a plant in the repo and one in a relative PATH entry.
+  if (process.platform === 'win32') plantProgram(c.repo, 'git.exe');
+  const saved = process.env.PATH;
+  t.after(() => { process.env.PATH = saved; });
+  process.env.PATH = ['.', empty].join(path.delimiter);
+  const before = process.cwd();
+  process.chdir(c.repo);
+  try {
+    const said = /git was not found in any absolute folder on PATH, so it was not run/;
+    assert.throws(() => gitSafe.gitProgram(), said);
+    const r = await git.runGit(c.repo, ['rev-parse', 'HEAD']);
+    assert.equal(r.ok, false);
+    assert.match(r.error, said);
+    assert.equal(await world.runGit(c.repo, ['rev-parse', 'HEAD'], undefined, 5000), null);
+    await assert.rejects(new DerivedGit(c.repo).ok(), said);
+  } finally { process.chdir(before); process.env.PATH = saved; }
+  // A miss is not remembered: git is found again once PATH has it.
+  assert.equal((await git.runGit(c.repo, ['rev-parse', 'HEAD'])).ok, true);
+});
+
+test('GIT-RUN-HARDEN-108: every start of git names its full path, git\'s own folder, and no console window', async (t) => {
+  const c = setup();
+  const cp = require('node:child_process');
+  const real = { spawn: cp.spawn, execFile: cp.execFile };
+  const seen = [];
+  t.after(() => Object.assign(cp, real));
+  for (const how of ['spawn', 'execFile']) {
+    cp[how] = (file, args, opts, ...rest) => { seen.push({ how, file, opts }); return real[how](file, args, opts, ...rest); };
+  }
+  try {
+    assert.equal((await git.runGit(c.repo, ['status', '--porcelain'])).ok, true); // the filter read (execFile) + the call (spawn)
+    assert.equal((await world.runGit(c.repo, ['rev-parse', 'HEAD'], undefined, 5000)).trim(), c.head);
+    const d = new DerivedGit(c.repo);
+    assert.equal(await d.ok(), true); // execFile
+    await d.prefetch([c.head]); // spawn, fed on stdin
+  } finally { Object.assign(cp, real); }
+  const { program, cwd } = gitSafe.gitProgram();
+  assert.ok(seen.filter((x) => x.how === 'spawn').length >= 3 && seen.filter((x) => x.how === 'execFile').length >= 2, JSON.stringify(seen.map((x) => x.how)));
+  for (const x of seen) {
+    assert.equal(x.file, program, x.how + ' did not start git by its full path');
+    assert.equal(x.opts.cwd, cwd, x.how + ' was not started in git\'s own folder');
+    assert.equal(x.opts.windowsHide, true, x.how + ' can show a console window');
+  }
 });

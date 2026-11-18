@@ -24,7 +24,7 @@ export const runGit: GitRunner = async (cwd, args, input, timeoutMs) => {
   catch { return null; }
   return new Promise<string | null>((resolve) => {
   let child;
-  try { child = spawn('git', call.args, { cwd, env: call.env, windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] }); }
+  try { child = spawn(call.program, call.args, { cwd: call.cwd, env: call.env, windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] }); }
   catch { resolve(null); return; }
   let stdout = '';
   let settled = false;
