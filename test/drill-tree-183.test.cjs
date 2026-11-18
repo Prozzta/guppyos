@@ -16,6 +16,7 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { tempDir } = require('./tools/test-temp.cjs');
 const D = require('./tools/drill-tree-183.cjs');
+const { nodeEnv } = require('../tools/node-env.cjs');
 
 const TOOL = path.join(__dirname, 'tools', 'drill-tree-183-build.cjs');
 const jail = tempDir('drill-tree-183-');
@@ -87,8 +88,8 @@ test('drillTree gives the same failure every time in one process: one build atte
 
 test('the command line: --check on an absent tree exits 1 with the reason; an unknown flag exits 2 and does nothing', () => {
   // baseEnv takes ELECTRON_RUN_AS_NODE out. When this file itself runs on Electron as Node, the child is
-  // that same Electron and must get the flag back, or it opens an Electron app instead of the script.
-  const env = { ...D.baseEnv(process.env), ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}), GUPPY_FIXTURE_ROOT: path.join(jail, 'cli-root') };
+  // that same Electron and must get the flag back (nodeEnv), or it opens an Electron app instead of the script.
+  const env = nodeEnv({ ...D.baseEnv(process.env), GUPPY_FIXTURE_ROOT: path.join(jail, 'cli-root') });
   delete env.CLAIMS_DRILL_TREE_183;
   // A regression that opens an Electron app here must fail this file, not hang it (Jim NIT c).
   const run = (...a) => spawnSync(process.execPath, [TOOL, ...a], { env, encoding: 'utf8', windowsHide: true, timeout: 60_000 });
@@ -107,7 +108,7 @@ test('the command line: --check on an absent tree exits 1 with the reason; an un
   // --rebuild is the by-hand command the native-fault error names; a caller's own tree is never rebuilt
   const own = path.join(jail, 'cli-own');
   fs.mkdirSync(own);
-  const r = spawnSync(process.execPath, [TOOL, '--rebuild'], { env: { ...env, CLAIMS_DRILL_TREE_183: own }, encoding: 'utf8', windowsHide: true, timeout: 60_000 });
+  const r = spawnSync(process.execPath, [TOOL, '--rebuild'], { env: nodeEnv({ ...env, CLAIMS_DRILL_TREE_183: own }), encoding: 'utf8', windowsHide: true, timeout: 60_000 });
   assert.equal(r.status, 1);
   assert.match(r.stderr, /is the caller's own tree and is not built here/);
   assert.deepEqual(fs.readdirSync(own), []);
