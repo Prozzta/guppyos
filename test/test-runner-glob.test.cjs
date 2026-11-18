@@ -835,7 +835,8 @@ test('PIN: against the REAL test directory discovery is root tests plus only fol
   // GIT-RUN-HARDEN-108: + 1 (git-run-harden-108). 628 + 1 = 629.
   // BARE-SPAWN-CWD-HIJACK-108: + 1 (bare-spawn-cwd-hijack-108). 629 + 1 = 630.
   // BARE-SPAWN-CWD-HIJACK-108: + 1 (bare-spawn-gh-108). 630 + 1 = 631.
-  assert.equal(files.length, 631,`the focused suite must retain its pre-fold file count, got ${files.length}`);
+  // BREAKER-REPLY-UNDELIVERABLE-108: + 1 (breaker-reply-undeliverable-108). 631 + 1 = 632.
+  assert.equal(files.length, 632,`the focused suite must retain its pre-fold file count, got ${files.length}`);
   assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
   assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');
   assert.ok(files.includes(path.join('start-fixes-163', 'start-fixes-163-boot-submit.test.cjs')), 'the start-fixes feature folder is included');
