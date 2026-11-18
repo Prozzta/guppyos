@@ -41,6 +41,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { spawnSync, spawn: spawnAsync } = require('child_process');
+const { nodeEnv } = require('./node-env.cjs');
 
 const TEST_SUFFIX = '.test.cjs';
 const PERF_SUFFIX = '.perf.cjs';
@@ -235,7 +236,8 @@ function prepareStartGate({ dir = os.tmpdir(), slots = startSlots() } = {}) {
   return { slots, dir: fs.mkdtempSync(path.join(dir, 'run-tests-start-')) };
 }
 
-const nodeSpawn = (args, opts) => spawnSync(process.execPath, args, opts);
+// TEST-EXECPATH-ENV-108: under the Electron leg process.execPath is electron.exe; nodeEnv keeps it node.
+const nodeSpawn = (args, opts) => spawnSync(process.execPath, args, { ...opts, env: nodeEnv(opts && opts.env) });
 
 /** The limit to use: TEST_FILE_TIMEOUT_MS when it is a positive integer, else FILE_TIMEOUT_MS. */
 function fileTimeoutMs(env = process.env) {

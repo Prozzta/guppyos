@@ -81,6 +81,7 @@ test('the CLI and npm test run the lane: the CLI passes test/perf, and package.j
 // ── Andy's PERF-LANE-AUDIT shoulds: one totals line at the end, and the lane's per-file timeout ──
 
 const { spawnSync } = require('node:child_process');
+const { nodeEnv } = require('./tools/node-env.cjs');
 const os = require('node:os');
 const counts = (c) => Object.entries(c).map(([count, n]) => JSON.stringify({ count, n })).join('\n');
 
@@ -179,7 +180,7 @@ test('end to end (a real nested node --test): the totals match node\'s own count
     const go = () => {
       const logs = []; const errs = [];
       const code = R.run({ testDir: path.join(dir, 'test'), perfDir: path.join(dir, 'test', 'perf'), cwd: dir, timeoutMs: 3000, isTTY: false,
-        spawn: (a, o) => spawnSync(process.execPath, a, { ...o, stdio: 'pipe' }), log: (l) => logs.push(l), err: (l) => errs.push(l),
+        spawn: (a, o) => spawnSync(process.execPath, a, { ...o, env: nodeEnv(o.env), stdio: 'pipe' }), log: (l) => logs.push(l), err: (l) => errs.push(l),
         failureFile: () => path.join(dir, 'failures.json') });
       return { code, last: logs[logs.length - 1], logs, errs: errs.join('\n') };
     };

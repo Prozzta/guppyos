@@ -16,6 +16,7 @@ const net = require('node:net');
 const http = require('node:http');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+const { nodeEnv } = require('./tools/node-env.cjs');
 const { pathToFileURL } = require('node:url');
 const loadTs = require('./load-ts.cjs');
 
@@ -69,7 +70,7 @@ async function fakeSock(t) {
 /** Run `file` with node; resolves with its stderr once it exits (a hang guard kills it). */
 function run(file, env, stdin = '') {
   return new Promise((resolve) => {
-    const ch = spawn(process.execPath, [file], { env, stdio: ['pipe', 'ignore', 'pipe'], windowsHide: true });
+    const ch = spawn(process.execPath, [file], { env: nodeEnv(env), stdio: ['pipe', 'ignore', 'pipe'], windowsHide: true });
     let err = ''; ch.stderr.on('data', (d) => { err += d; });
     const guard = setTimeout(() => { try { ch.kill(); } catch { /* gone */ } }, 30_000);
     ch.on('close', (code) => { clearTimeout(guard); resolve({ code, err }); });
@@ -107,7 +108,7 @@ async function runProxy(t, env, arrived, expect) {
   await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
   t.after(() => upstream.close());
   const shim = write('hive-proxy.cjs', PROXY_BRIDGE_SHIM);
-  const ch = spawn(process.execPath, [shim], { env: { ...env, UPSTREAM_BASE_URL: `http://127.0.0.1:${upstream.address().port}` }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+  const ch = spawn(process.execPath, [shim], { env: nodeEnv({ ...env, UPSTREAM_BASE_URL: `http://127.0.0.1:${upstream.address().port}` }), stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
   let out = '', err = '';
   ch.stderr.on('data', (d) => { err += d; });
   const exited = new Promise((r) => ch.on('close', r));

@@ -22,6 +22,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const { nodeEnv } = require('./tools/node-env.cjs');
 const runner = require('./tools/run-tests.cjs');
 const bs = require('./tools/file-backstop.cjs');
 const own = require('./tools/own-procs.cjs');
@@ -136,7 +137,7 @@ test('END TO END (the Node 24 repro): a file whose test PASSED but which never e
     // Bounded (Jim, mutant A): spawnSync blocks the event loop, so the test's own timeout cannot fire;
     // a backstop that never kills must FAIL this test, not hang the suite.
     let timedOut = false;
-    const spawn = (args, opts) => { const r = spawnSync(process.execPath, args, { ...opts, stdio: 'pipe', encoding: 'utf8', timeout: 90_000, killSignal: 'SIGKILL' }); out = r.stdout; timedOut = timedOut || (r.error && r.error.code) === 'ETIMEDOUT'; return r; };
+    const spawn = (args, opts) => { const r = spawnSync(process.execPath, args, { ...opts, env: nodeEnv(opts.env), stdio: 'pipe', encoding: 'utf8', timeout: 90_000, killSignal: 'SIGKILL' }); out = r.stdout; timedOut = timedOut || (r.error && r.error.code) === 'ETIMEDOUT'; return r; };
     const t0 = Date.now();
     // The watchdog stubbed out: the backstop alone must end it (on Node 24 nothing else would).
     const code = runner.run({ testDir: dir, cwd: dir, spawn, timeoutMs: 2_000, isTTY: false, log: () => {}, err: (l) => e.push(l),

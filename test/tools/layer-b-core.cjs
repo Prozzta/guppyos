@@ -112,6 +112,7 @@
  * Release check (not part of this run): node scripts/verify-packaged-no-seams.cjs <shipped app.asar>
  */
 const { spawn, spawnSync } = require('node:child_process');
+const { nodeEnv } = require('./node-env.cjs');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const net = require('node:net');
@@ -3588,7 +3589,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
       this.check(true, 'real-mode Codex resolution preflight (product resolver + readCodexVersion + codexSupportsNoDaemon): N/A in the dry run (no codex on its PATH)', '');
       return null;
     }
-    const r = spawnSync(process.execPath, [CODEX_RESOLVE_PROBE], { cwd: this.s.base, env: this.env, encoding: 'utf8', windowsHide: true, timeout: 60_000, stdio: ['ignore', 'pipe', 'pipe'] });
+    const r = spawnSync(process.execPath, [CODEX_RESOLVE_PROBE], { cwd: this.s.base, env: nodeEnv(this.env), encoding: 'utf8', windowsHide: true, timeout: 60_000, stdio: ['ignore', 'pipe', 'pipe'] });
     let res = null;
     try { res = JSON.parse(String(r.stdout || '').trim().split(/\r?\n/).pop()); } catch { res = { error: `exit ${r.status}: ${String(r.stderr || r.stdout || '').slice(0, 300)}` }; }
     const expectedDir = this.cliPaths && this.cliPaths.codex ? path.dirname(this.cliPaths.codex) : null;
