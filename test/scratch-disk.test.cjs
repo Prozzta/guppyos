@@ -94,6 +94,15 @@ test('manager authenticates owner, refuses a common repo, and only reaps a regis
   assert.equal(fs.existsSync(jailRoot), false);
 });
 
+test('reap command reports link-safe remover refusal count', async () => {
+  const hive = path.join(jail, 'remover-summary', 'hive');
+  const manager = new scratch.ScratchDiskManager(() => hive, () => false, async () => []);
+  const result = await manager.command('dwight', { op: 'reap' });
+  assert.equal(result.status, 200);
+  assert.match(result.body.line, /remover refusals \d+/);
+  assert.equal(result.body.removerRefusals.count, safeRemove.removerRefusals().count);
+});
+
 test('a broken link protects its candidate but not an unrelated done tree, and is reported', { skip: process.platform !== 'win32' }, async () => {
   const base = path.join(jail, 'broken-link-scope'); const hive = path.join(base, 'hive'); const work = path.join(base, '_work');
   const candidate = path.join(work, 'dwight-broken'); const unrelated = path.join(work, 'dwight-clean'); const broken = path.join(candidate, 'nested', 'gone');

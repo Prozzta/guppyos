@@ -10,7 +10,7 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSy
 import { cp, lstat, mkdir, readdir, readFile, realpath, symlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { atomicWriteJson } from './atomicJson';
-import { findReparsePointsSync, removeReparsePoint, removeReparsePointSync, safeRemoveTree, unlinkReparsePointsUnderSync } from './fsSafeRemove';
+import { findReparsePointsSync, removeReparsePoint, removeReparsePointSync, removerRefusals, safeRemoveTree, unlinkReparsePointsUnderSync } from './fsSafeRemove';
 
 export { findReparsePointsSync, removeReparsePointSync, unlinkReparsePointsUnderSync } from './fsSafeRemove';
 
@@ -537,7 +537,11 @@ export class ScratchDiskManager {
     if (b.op === 'detach-private') { const r = await this.detachPrivate(owner, b.path); return { status: r.ok ? 200 : 400, body: r }; }
     if (b.op === 'prepare-cache') { const r = this.prepareCache(owner, b.path); return { status: r.ok ? 200 : 400, body: r }; }
     if (b.op === 'attach-cache') { const r = await this.attachCache(owner, b.path, b.key); return { status: r.ok ? 200 : 400, body: r }; }
-    if (b.op === 'reap') { const r = await this.sweep(owner); return { status: 200, body: { ok: true, line: `reaped ${r.reaped.length}; kept ${r.kept.length}`, ...r } }; }
+    if (b.op === 'reap') {
+      const r = await this.sweep(owner);
+      const refusals = removerRefusals();
+      return { status: 200, body: { ok: true, line: `reaped ${r.reaped.length}; kept ${r.kept.length}; remover refusals ${refusals.count}`, removerRefusals: refusals, ...r } };
+    }
     if (b.op === 'status') {
       const root = this.hiveRoot(); const records = root ? readScratchState(root).records.filter((r) => r.owner === owner) : [];
       return { status: 200, body: { ok: true, line: `${records.length} registered scratch root(s)`, records } };
