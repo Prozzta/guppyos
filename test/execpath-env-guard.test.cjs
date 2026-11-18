@@ -136,7 +136,7 @@ test('TEETH (Jim 01-35-58 NIT 1): Reflect.deleteProperty and rest-parameter help
   }
 });
 
-test('LAYOUT (Jim 01-35-58 NIT 2): nodeEnv lives in tools/; no tools/ or scripts/ file requires from test/', () => {
+test('LAYOUT (Jim 01-35-58 NIT 2): nodeEnv lives in tools/; no tools/ or scripts/ file has a literal relative require of test/ (path.join loads of test/load-ts.cjs and test/tools/run-tests.cjs predate this and are not checked)', () => {
   assert.equal(require('../tools/node-env.cjs').nodeEnv, nodeEnv, 'test/tools/node-env.cjs re-exports tools/node-env.cjs');
   const bad = [];
   for (const d of ['tools', 'scripts']) {
