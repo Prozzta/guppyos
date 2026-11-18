@@ -130,6 +130,10 @@ fs.mkdirSync(BIN, { recursive: true });
 const FAKE = path.join(BIN, process.platform === 'win32' ? 'electron.exe' : 'electron');
 try { fs.linkSync(process.execPath, FAKE); } catch { fs.copyFileSync(process.execPath, FAKE); fs.chmodSync(FAKE, 0o755); }
 const E = JSON.stringify(FAKE);
+// TEST-EXECPATH-ENV-108 (god e5645c): node-only. Under the Electron leg process.execPath is electron.exe,
+// so FAKE is the REAL Electron and these scripts' children inherit ELECTRON_RUN_AS_NODE (node, never asked
+// about): the E2E premise cannot hold there, and without the key they would start real Electron apps.
+const NODE_ONLY = process.versions.electron ? 'node-only: under the Electron leg the stand-in electron.exe is the real Electron (a hard link to process.execPath); run this file under node' : false;
 const N = JSON.stringify(process.execPath);
 // Jim's shape: a node script that starts (hidden) Electron twice, one after the other.
 fs.writeFileSync(path.join(FIX, 'launch.cjs'), `const { spawn } = require('node:child_process');
@@ -236,7 +240,7 @@ K.e2eScript = async (t, M = HJ, preload = PRELOAD) => {
     assert.equal(b.lock.snapshot().length, 0);
   }
 };
-test('E2E: a node script that starts Electron (spawn, spawnSync, execFile) waits for another agent\'s slot, starts it after, and releases at exit', { timeout: 120_000 }, (t) => K.e2eScript(t));
+test('E2E: a node script that starts Electron (spawn, spawnSync, execFile) waits for another agent\'s slot, starts it after, and releases at exit', { timeout: 120_000, skip: NODE_ONLY }, (t) => K.e2eScript(t));
 
 K.e2eNotElectron = async (t, M = HJ, preload = PRELOAD) => {
   const c = await counter(t);
@@ -248,7 +252,7 @@ K.e2eNotElectron = async (t, M = HJ, preload = PRELOAD) => {
   }
   assert.deepEqual(c.hits, [], 'A SCRIPT THAT STARTS NODE, OR ELECTRON AS NODE (ELECTRON_RUN_AS_NODE), NEVER ASKS');
 };
-test('E2E: a script that starts node, or Electron with ELECTRON_RUN_AS_NODE, never asks', { timeout: 60_000 }, (t) => K.e2eNotElectron(t));
+test('E2E: a script that starts node, or Electron with ELECTRON_RUN_AS_NODE, never asks', { timeout: 60_000, skip: NODE_ONLY }, (t) => K.e2eNotElectron(t));
 
 K.e2eInElectron = async (t, M = HJ, preload = PRELOAD) => {
   const c = await counter(t);
@@ -258,7 +262,7 @@ K.e2eInElectron = async (t, M = HJ, preload = PRELOAD) => {
   assert.match(r.stdout, /launched 0/, 'the stand-in Electron ran');
   assert.deepEqual(c.hits, [], 'AN ELECTRON PROCESS IS NOT GUARDED (its main thread never blocks in a slot wait)');
 };
-test('E2E: inside an Electron process (versions.electron set) an Electron child never asks', { timeout: 60_000 }, (t) => K.e2eInElectron(t));
+test('E2E: inside an Electron process (versions.electron set) an Electron child never asks', { timeout: 60_000, skip: NODE_ONLY }, (t) => K.e2eInElectron(t));
 
 K.e2eSingleFile = async (t, M = HJ, preload = PRELOAD) => {
   const b = await broker(t, M);
@@ -319,7 +323,7 @@ const MUTANTS = [
 
 test('MUTANT CENSUS: every mutant applies once and dies at the assertion that names its guarantee', { timeout: 600_000 }, async (t) => {
   for (const m of MUTANTS) {
-    await t.test(`mutant: ${m.name}`, async (st) => {
+    await t.test(`mutant: ${m.name}`, { skip: m.preload && NODE_ONLY }, async (st) => {
       const text = mutateText(m.file, m.edits, m.name);
       let run;
       if (m.module) run = () => K[m.killer](loadTs.fromText(m.file, text));
