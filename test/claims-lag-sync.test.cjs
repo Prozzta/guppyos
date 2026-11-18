@@ -259,7 +259,11 @@ async function agentsDirChangeSeen(mods) {
  *  first census after the window listed synchronously and answered with the folder. Now: that
  *  census answers the roster it has and starts the listing off the caller's thread; the folder
  *  is in the roster when that listing has finished. Why: the synchronous listing (agents/ plus
- *  every claims folder) ran on the main thread every window. */
+ *  every claims folder) ran on the main thread every window.
+ *  The bound (god 916c8b, 679460): the folder appears after at most ROSTER_REVALIDATE_MS plus one
+ *  off-thread listing while the census is asked, and on the very first census once the roster is
+ *  older than ROSTER_MAX_AGE_MS (that one lists synchronously). The store's own timer keeps a
+ *  running app's roster under that age. Pinned in test/lag-claims-segments-async-108.test.cjs. */
 async function revalidateBound(mods) {
   const x = setup(mods);
   await ledgers(x, ['andy', 'dwight']);
@@ -345,7 +349,7 @@ const MUTANTS = [
   { id: 'M8', what: 'the roster is listed per call', file: ST, from: "if (r && r.gen === this.rosterGen && r.key !== null && r.key === key) {", to: "if (false) {", dies: ['LAG-3a'] },
   { id: 'M9', what: 'an own append does not dirty the roster', file: ST, from: '        this.rosterDirty();\n        h = {', to: '        h = {', dies: ['LAG-3b'] },
   { id: 'M10', what: 'the agents/ stat key is ignored', file: ST, from: 'if (r && r.gen === this.rosterGen && r.key !== null && r.key === key) {', to: 'if (r && r.gen === this.rosterGen) {', dies: ['LAG-3c'] },
-  { id: 'M11', what: 'the roster never expires', file: ST, from: "if (mono() - r.at >= ROSTER_REVALIDATE_MS) this.relistRoster(r);", to: "", dies: ['LAG-3d'] },
+  { id: 'M11', what: 'the roster never expires', file: ST, from: "if (age >= ROSTER_REVALIDATE_MS) this.relistRoster(r);", to: "", dies: ['LAG-3d'] },
   { id: 'M13', what: 'the cache compares the mtime only (Jim)', file: KP, from: 'if (c && c.key !== null && c.key === statKey(st))', to: "if (c && c.key !== null && c.key.split(':')[0] === String(st.mtimeMs))", dies: ['LAG-2h'] },
   { id: 'M14', what: 'the cache compares the size only', file: KP, from: 'if (c && c.key !== null && c.key === statKey(st))', to: "if (c && c.key !== null && c.key.split(':')[2] === String(st.size))", dies: ['LAG-2h'] },
   { id: 'M15', what: 'a restore does not dirty the roster (Jim)', file: ST, from: 'return this.serial(agentId, () => { try { return this.restoreBackupNow(agentId, day); } finally { this.rosterDirty(); } });', to: 'return this.serial(agentId, () => this.restoreBackupNow(agentId, day));', dies: ['LAG-3f'] },
