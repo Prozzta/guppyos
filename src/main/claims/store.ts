@@ -56,6 +56,7 @@ import { canonicalJson, keyIdOf, recordMac, sha256Hex } from './canonical';
 import { hiveIdOf, type HeadAnchorStore, type LedgerKeyRecord } from './keyProvider';
 import { provenStatKey, statKey } from '../statCacheKey';
 import { redactSecrets } from './redact';
+import { REKEY_COMMAND } from './rekeyCommand';
 import { normalizeTtl, parseStoredTtl, zonelessHint } from './ttl';
 import { DEFAULT_KEY_REGISTRY, KeyRegistryWriter, loadRegistryShared } from './registry';
 import { derive, keysTurnedSingle, singleKeyOf } from './derive';
@@ -135,7 +136,7 @@ export function unreadableKeyRecovery(file: string): string {
     `The shared claim ledger key file does not decrypt: ${file}`,
     'Nothing replaces it automatically: every floor that uses this Guppy user-data folder shares it.',
     `Recovery (the Human): quit every Guppy instance, then move ${file} out of that folder. Keep the file: if it decrypts again later (for example under the Windows account that wrote it), putting it back makes the old ledgers verify again.`,
-    'After that, Guppy reports the key as missing. Each floor then needs the Human rekey; there is no Settings button for it yet, so ask god to run it for that floor.',
+    `After that, Guppy reports the key as missing. Each floor then needs a rekey, which only the Human can approve: that floor's god runs \`${REKEY_COMMAND}\` and the Human confirms it in that floor's Guppy window. Nothing runs it automatically.`,
     'Until a floor is rekeyed, all of its claim ledgers stay read-only. The rekey makes a new key and writes one rekey line on each ledger under it. Records written before that line are accepted on their prev chain only: without the old key their MACs cannot be checked.',
   ].join('\n');
 }

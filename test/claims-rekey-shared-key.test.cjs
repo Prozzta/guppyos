@@ -280,7 +280,9 @@ async function unreadableAlertNamesFileAndRecovery(mods) {
     assert.ok(row.recovery.includes(`move ${u.keyFile} out of that folder`), `${where}: the exact step names the file`);
     assert.match(row.recovery, /quit every Guppy instance/);
     assert.match(row.recovery, /Keep the file/);
-    assert.match(row.recovery, /ask god to run it for that floor/);
+    // CLAIMS-REKEY-ENTRYPOINT-108: the recovery names the command that runs the rekey, and who approves it.
+    assert.ok(row.recovery.includes("that floor's god runs `claims rekey --floor <hive folder>` and the Human confirms it in that floor's Guppy window"), `${where}: the recovery names the rekey command`);
+    assert.ok(!/ask god to run it/.test(row.recovery), `${where}: no "ask god" without a command`);
     assert.match(row.recovery, /Until a floor is rekeyed, all of its claim ledgers stay read-only/);
     assert.match(row.recovery, /accepted on their prev chain only/);
   }
@@ -531,7 +533,8 @@ test('Jim SHOULD 1 (source pin): main sends the row\'s own recovery for an unrea
 test('CLAIMS-KEYMISSING-TEXT-108 (source pin): the missing-key alert names no Settings rekey that does not exist', () => {
   const src = readSource('src/main/index.ts');
   assert.ok(!/rekey in Settings/i.test(src), 'index.ts still points at a Settings rekey');
-  assert.ok(src.includes("Recovery is the Human rekey for each floor; there is no Settings button for it yet, so ask god to run it for this floor."), 'the missing-key text names who runs the rekey');
+  // CLAIMS-REKEY-ENTRYPOINT-108: it names the command with this floor's folder (claims-rekey-entrypoint.test.cjs has the rest).
+  assert.ok(src.includes('Recovery is a rekey of this floor, which only the Human can approve: god runs \\`${rekeyCommandFor(root)}\\` and the Human confirms it in the Guppy window.'),'the missing-key text names who runs the rekey');
   assert.ok(!/rekey in Settings/i.test(readSource('src/main/claims/store.ts')), 'store.ts recovery text has no Settings rekey either');
 });
 

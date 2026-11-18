@@ -765,12 +765,12 @@ export class HookServer {
 
   private onClaims(agentId: string, raw: Buffer, reply: (status: number, body: unknown) => void): void {
     const handler = this.claimsHandler;
-    if (!handler) { reply(404, { ok: false, line: 'refused: claims bootstrap is not available in this build' }); return; }
+    if (!handler) { reply(404, { ok: false, line: 'refused: the claims command is not available in this build' }); return; }
     let body: unknown;
     try { body = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(raw).replace(/^ï»¿/, '') || '{}'); } catch {
       reply(400, { ok: false, line: 'refused: the input is not valid UTF-8 JSON' }); return;
     }
-    const failed = (e: unknown): void => reply(500, { ok: false, line: `refused: claims bootstrap failed (${String(e).slice(0, 160)})` });
+    const failed = (e: unknown): void => reply(500, { ok: false, line: `refused: the claims command failed (${String(e).slice(0, 160)})` });
     try { Promise.resolve(handler(agentId, body)).then((r) => reply(r.status, r.body), failed); } catch (e) { failed(e); }
   }
 
