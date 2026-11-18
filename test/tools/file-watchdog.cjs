@@ -49,7 +49,10 @@ function dueFiles(procs, runnerPid, limitMs, now) {
   const kids = (parent) => procs.filter((p) => p.ppid === parent.pid && p.startedAt >= parent.startedAt);
   const runner = procs.find((p) => p.pid === runnerPid);
   if (!runner) return [];
-  const nodeTest = kids(runner).filter((p) => /node(\.exe)?$/i.test(p.name) && /--test\b/.test(p.cmd));
+  // GATE178 (Electron leg): the runner spawns node --test on its OWN executable, which is electron.exe
+  // (ELECTRON_RUN_AS_NODE) under the Electron leg. Matching only node.exe found no file to kill there.
+  const sameImage = (p) => /node(\.exe)?$/i.test(p.name) || p.name.toLowerCase() === runner.name.toLowerCase();
+  const nodeTest = kids(runner).filter((p) => sameImage(p) && /--test\b/.test(p.cmd));
   const due = [];
   for (const nt of nodeTest) {
     for (const f of kids(nt)) {
