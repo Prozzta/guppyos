@@ -498,9 +498,12 @@ function shortRand(): string {
  *     events that never need a directive come this way. The OUTER `2>nul` also swallows cmd's
  *     own "cannot find the file" when the pipe is gone (measured: an inner one does not), and
  *     `exit /b 0`: a closed app fails fast and silently.
+ *   - BARE-SPAWN-CWD-HIJACK-108: the batch runs in the AGY agent's workspace, and cmd looks for a
+ *     bare `findstr` in its current directory before PATH, so a findstr.bat there would run.
+ *     NoDefaultCurrentDirectoryInExePath=1, set before the lookup, makes cmd skip that directory.
  */
 export function agyOnewayCmd(pipe: string): string {
-  return ['@echo off', `((echo %1 %2 %HIVE_HOOK_TOKEN% %AGENT_ID%& findstr /v /c:@@m@@) > ${pipe}) 2>nul`, 'exit /b 0', ''].join('\r\n');
+  return ['@echo off', `set NoDefaultCurrentDirectoryInExePath=1& ((echo %1 %2 %HIVE_HOOK_TOKEN% %AGENT_ID%& findstr /v /c:@@m@@) > ${pipe}) 2>nul`, 'exit /b 0', ''].join('\r\n');
 }
 
 /** HOOK-BROKER: what the hive asks the in-process hook endpoint for at spawn. */

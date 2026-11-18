@@ -462,9 +462,13 @@ export interface NpmShimTarget {
  *  not seen) resolves to null and falls back to the cmd.exe path — never worse
  *  than today's behaviour. */
 const SHIM_INTERPRETERS = new Set(['node', 'bun', 'deno']);
-/** The cmd.exe command line for a Windows `shellScript` spawn (the missing-CLI installer). */
+/** The cmd.exe command line for a Windows `shellScript` spawn (the missing-CLI installer).
+ *  BARE-SPAWN-CWD-HIJACK-108: it runs in the agent's workspace, and cmd looks for a bare `npm`
+ *  in its current directory before PATH, so an npm.bat there would run. Setting
+ *  NoDefaultCurrentDirectoryInExePath=1 first makes cmd, and every child it starts (npm.cmd's
+ *  own cmd included), skip the current directory. The packaged app does not set it. */
 export function winShellScriptArgs(script: string): string {
-  return `/d /s /c "${script}"`;
+  return `/d /s /c "set NoDefaultCurrentDirectoryInExePath=1& ${script}"`;
 }
 /** PROBE-REISSUE (B): how much raw output each PTY keeps for a diagnostic tail line. */
 export const PTY_TAIL_CHARS = 4096;
