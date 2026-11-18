@@ -84,10 +84,17 @@ test('the parse is MEASURED on the installed xterm: the WriteBuffer slice method
 // is a few ms, so it is charged 0 when no interrupt lands in it and a whole step (or several, if the
 // thread was preempted mid-slice) when one does: never its own work. The guard's sum is then luck, and
 // the test above can read 0 for one parse.
-// Judged slice by slice so the verdict does not depend on machine load: a slice whose wall time stayed
-// within 1.5x of the work's cost ran at least two thirds of that time on this thread, so a true
-// per-thread clock charges it between 0.67x and 1x of its wall time. A step clock can only say 0 or
-// >= 15 ms for a slice of at most 7.5 ms. Slices that were preempted for longer are not judged.
+// Judged slice by slice so the verdict does not depend on machine load. minW is the cheapest wall time
+// any slice took, so it is the work's cost as near as this run can know it (it only gets better as more
+// slices run, so sizing under a load spike corrects itself). Only slices with a wall time within
+// 1.5 x minW are judged. A true per-thread clock charges such a slice at least the work (>= minW, the
+// assert asks for half of it) and never more than its wall time (the assert allows 1.5x, for a clock
+// that converts cycles to ms). A step clock reads 0 for about two slices in three, and 0 always fails;
+// its other reading, one step of 15 ms or more, also fails because a judged slice is under 10 ms
+// (minW < 6.6). Slices preempted for longer are not judged.
+// For the fix: if the true clock comes from a native addon, a runtime that loads an older addon without
+// it (a packaged exe run as Node loads its own resources) is still on the step clock and stays red
+// here; that leg must say which addon it loaded, not pass or skip silently.
 test('MIRROR-PARSE-ZERO-108: the parse clock charges each short slice its own work', () => {
   assert.equal(typeof M.threadCpuMs, 'function', 'this runtime has a thread clock');
   let sink = 0; // keeps the loop from being optimised away
@@ -97,30 +104,30 @@ test('MIRROR-PARSE-ZERO-108: the parse clock charges each short slice its own wo
   work(5e6); // warm up, so the JIT is done before anything is sized
   const n = Math.round(5 / (wallOf(2e6) / 2e6));
   const sliceMs = wallOf(n);
-  assert.ok(sliceMs > 2 && sliceMs < 10, `the slice is sized inside one 15.6 ms step (${sliceMs.toFixed(2)} ms)`);
+  assert.ok(sliceMs > 2 && sliceMs < 6.6, `the slice is sized so that 1.5x of it is under 10 ms, well inside one 15.6 ms step (${sliceMs.toFixed(2)} ms)`);
 
   // The product's wrapper on the product's default clock, around a slice method that does the work.
   let charged = 0;
   const wb = { _innerWrite() { work(n); } };
   assert.equal(M.timeParse({ _core: { _writeBuffer: wb } }, (ms) => { charged += ms; }), true);
   const WANT = 40;
-  const wrong = [];
-  let judged = 0, tried = 0;
-  while (judged < WANT && tried < 2000) {
-    tried += 1;
+  const seen = []; // [wall ms, charged ms] of every slice run
+  let minW = sliceMs;
+  const judged = () => seen.filter(([wall]) => wall <= 1.5 * minW);
+  while (judged().length < WANT && seen.length < 2000) {
     const before = charged;
     const t0 = performance.now();
     wb._innerWrite();
     const wall = performance.now() - t0;
-    const got = charged - before;
-    if (wall > 1.5 * sliceMs) continue; // preempted for a good part of it: its fair charge is unknown
-    judged += 1;
-    if (!(got >= 0.5 * wall && got <= 1.5 * wall)) wrong.push(`${got.toFixed(1)} for ${wall.toFixed(1)}`);
+    seen.push([wall, charged - before]);
+    minW = Math.min(minW, wall);
   }
   assert.ok(Number.isFinite(sink));
-  assert.equal(judged, WANT, `${WANT} slices ran without a long preemption (${judged} of ${tried} tried)`);
+  const fair = judged(); // against the final minW, so every slice is held to the same cost
+  assert.ok(fair.length >= WANT, `${WANT} slices ran without a long preemption (${fair.length} of ${seen.length} tried, cheapest ${minW.toFixed(2)} ms)`);
+  const wrong = fair.filter(([wall, got]) => !(got >= 0.5 * minW && got <= 1.5 * wall)).map(([wall, got]) => `${got.toFixed(1)} for ${wall.toFixed(1)}`);
   assert.equal(wrong.length, 0,
-    `${wrong.length} of ${judged} slices of about ${sliceMs.toFixed(1)} ms were charged something other than their work (ms charged for ms run): ${wrong.slice(0, 8).join(', ')}`);
+    `${wrong.length} of ${fair.length} slices of about ${minW.toFixed(1)} ms were charged something other than their work (ms charged for ms run): ${wrong.slice(0, 8).join(', ')}`);
 });
 
 test('CENSUS MUTANT: injected slice clock measures one parse, never capped-job descheduling; only the outermost slice is timed', () => {
