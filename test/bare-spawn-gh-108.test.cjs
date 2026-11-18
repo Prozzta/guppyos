@@ -71,10 +71,20 @@ function jail(t, { realGh }) {
 for (const [row, fn] of [['row 5', 'listIssues'], ['row 6', 'listCIRuns']]) {
   test(`${row}: ${fn} runs the gh on PATH, not a gh.exe planted in the repo`, { skip: !WIN }, async (t) => {
     const { repo } = jail(t, { realGh: true });
-    const r = await loadTs('src/main/github.ts')[fn](repo);
+    const cp = require('node:child_process');
+    const realSpawn = cp.spawn;
+    const seen = [];
+    t.after(() => { cp.spawn = realSpawn; });
+    cp.spawn = (file, args, opts, ...rest) => { seen.push({ file, opts }); return realSpawn(file, args, opts, ...rest); };
+    let r;
+    try { r = await loadTs('src/main/github.ts')[fn](repo); } finally { cp.spawn = realSpawn; }
     assert.equal(r.ok, false, JSON.stringify(r));
     assert.doesNotMatch(r.error, PLANTED, `the repo's gh.exe ran: ${r.error}`);
     assert.match(r.error, REAL, `the gh on PATH ran: ${r.error}`);
+    // gh.exe is a console program: started from the GUI app it must not flash a console window (Jim NIT 1).
+    assert.equal(seen.length, 1, JSON.stringify(seen));
+    assert.equal(seen[0].opts.cwd, repo, 'gh runs in the repo');
+    assert.equal(seen[0].opts.windowsHide, true, `${fn} can show a console window`);
   });
 
   test(`${row}: ${fn} with no gh on PATH runs nothing and says so`, { skip: !WIN }, async (t) => {
