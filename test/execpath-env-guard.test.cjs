@@ -136,9 +136,52 @@ test('TEETH (Jim 01-35-58 NIT 1): Reflect.deleteProperty and rest-parameter help
   }
 });
 
-test('LAYOUT (Jim 01-35-58 NIT 2): nodeEnv lives in tools/; no tools/ or scripts/ file has a literal relative require of test/ (path.join loads of test/load-ts.cjs and test/tools/run-tests.cjs predate this and are not checked)', () => {
+// Does this source load code from test/? A literal relative require/import of ../test/..., or a
+// require (or require.resolve) of path.join / path.resolve whose arguments name a 'test' segment
+// ('test', 'test/...', '../test/...'). A path.join(..., 'test') that is not required (a directory
+// read) is not a load.
+const TEST_SEG = /['"`](?:\.\.\/)*test(?:['"`]|\/)/;
+function loadsFromTest(text) {
+  if (/require\(\s*['"`](?:\.\.\/)+test\/|from\s+['"`](?:\.\.\/)+test\//.test(text)) return true;
+  for (const m of text.matchAll(/require(?:\.resolve)?\(\s*path\.(?:join|resolve)\(([^()]*)\)/g)) if (TEST_SEG.test(m[1])) return true;
+  return false;
+}
+// Older tools/ and scripts/ files that load test/ code today (Jim eca9fada NIT 2). Not part of
+// TEST-EXECPATH-ENV-108; named so that any NEW one goes red. Remove an entry when its file stops.
+const TEST_LOAD_EXCEPTIONS = {
+  'scripts/claims-derived-backfill.cjs': 'test/load-ts.cjs',
+  'scripts/claims-mailcard-backfill.cjs': 'test/load-ts.cjs',
+  'scripts/native-memory-migrate.cjs': 'test/load-ts.cjs',
+  'scripts/related-tests.cjs': 'test/tools/run-tests.cjs (FEATURE_TEST_DIRS)',
+  'tools/gen-legacy-prompt-fp.cjs': 'test/load-ts.cjs (this tree and the legacy tree)',
+  'tools/make-logo.cjs': 'test/load-ts.cjs',
+  'tools/make-ph-thumbnail.cjs': 'test/load-ts.cjs'
+};
+
+test('LAYOUT detector (Jim eca9fada NIT 2): path.join/path.resolve loads of test/ count, directory reads do not', () => {
+  const loads = [
+    "require('../test/tools/node-env.cjs');",
+    "import { x } from '../test/x.cjs';",
+    "require(path.join(__dirname, '..', 'test', 'load-ts.cjs'));",
+    "require(path.join(ROOT, 'test/load-ts.cjs'));",
+    "require(path.join(__dirname, '../test/load-ts.cjs'));",
+    "require(path.resolve(REPO, 'test', 'tools', 'run-tests.cjs')).FEATURE_TEST_DIRS;",
+    "require.resolve(path.join(ROOT, 'test', 'x.cjs'));"
+  ];
+  for (const s of loads) assert.equal(loadsFromTest(s), true, `a load: ${s}`);
+  const notLoads = [
+    "const testDir = path.join(repo, 'test');",
+    "require(path.join(ROOT, 'tools', 'x.cjs'));",
+    "require(path.join(ROOT, 'latest', 'x.cjs'));",
+    "require('./node-env.cjs');",
+    "if (p.startsWith('test/')) out.push(p);"
+  ];
+  for (const s of notLoads) assert.equal(loadsFromTest(s), false, `not a load: ${s}`);
+});
+
+test('LAYOUT (Jim 01-35-58 + eca9fada NIT 2): nodeEnv lives in tools/; no tools/ or scripts/ file loads code from test/ except the named older ones', () => {
   assert.equal(require('../tools/node-env.cjs').nodeEnv, nodeEnv, 'test/tools/node-env.cjs re-exports tools/node-env.cjs');
-  const bad = [];
+  const found = [];
   for (const d of ['tools', 'scripts']) {
     const walk = (dir) => {
       for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -146,13 +189,14 @@ test('LAYOUT (Jim 01-35-58 NIT 2): nodeEnv lives in tools/; no tools/ or scripts
         const p = path.join(dir, e.name);
         if (e.isDirectory()) { walk(p); continue; }
         if (!/\.(c?js|mjs|ts)$/.test(e.name)) continue;
-        const text = fs.readFileSync(p, 'utf8');
-        if (/require\(\s*['"`](\.\.\/)+test\/|from\s+['"`](\.\.\/)+test\//.test(text)) bad.push(path.relative(REPO, p).replace(/\\/g, '/'));
+        if (loadsFromTest(fs.readFileSync(p, 'utf8'))) found.push(path.relative(REPO, p).replace(/\\/g, '/'));
       }
     };
     walk(path.join(REPO, d));
   }
-  assert.deepEqual(bad, [], 'a tool or script depends on a test helper');
+  const known = Object.keys(TEST_LOAD_EXCEPTIONS);
+  assert.deepEqual(found.filter((f) => !known.includes(f)).sort(), [], 'a NEW tool or script loads code from test/: move the helper to tools/ (as node-env.cjs was)');
+  assert.deepEqual(known.filter((f) => !found.includes(f)).sort(), [], 'a named exception no longer loads from test/: remove it from TEST_LOAD_EXCEPTIONS');
 });
 
 test('build-trial: only a process.execPath spawn gets nodeEnv (Jim 01-35-58 NIT 2)', () => {
