@@ -822,7 +822,11 @@ test('PIN: against the REAL test directory discovery is root tests plus only fol
   // ROUTER-ASYNC-DELIVER-107: + 1 (router-inbox-write-fault-107). LAG-ROUTE-WRITES-108: 616 + 1 = 617 (root test/*.test.cjs 576).
   // LAG-LEDGER-SCANS-108: + 1 (mail-ledger-index). 617 + 1 = 618 (root test/*.test.cjs 577).
   // LAG-LEDGER-DRAFT-COPY-108: + 1 (mail-ledger-draft-copy). 618 + 1 = 619 (root test/*.test.cjs 578).
-  assert.equal(files.length, 619,`the focused suite must retain its pre-fold file count, got ${files.length}`);
+  // FS-REMOVE-READDIR-GAP-108: 619 was stale on this branch's base: + 6 that the scratch and rm cards added
+  // (scratch-disk, electron-rmsync-link-safe, electron-rmsync-agent-writable, electron-rmsync-jitter,
+  // recursive-rm-census, worktree-reaper-link-safe) = 625, + 2 here (fs-handle-remove-tree, fs-remove-gap) = 627
+  // (root test/*.test.cjs 586).
+  assert.equal(files.length, 627,`the focused suite must retain its pre-fold file count, got ${files.length}`);
   assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
   assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');
   assert.ok(files.includes(path.join('start-fixes-163', 'start-fixes-163-boot-submit.test.cjs')), 'the start-fixes feature folder is included');

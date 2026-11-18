@@ -1,5 +1,8 @@
 'use strict';
 require('./tools/own-job.cjs');
+// MUTANT-JOURNAL-GATE: this suite loads worktree-reaper.cjs, which a census mutates in place; refuse a tree a
+// killed census left mutated, before anything is read.
+require('./tools/mutant-runner-helper.cjs').gate(__filename);
 
 /**
  * ELECTRON-RMSYNC-REAPER-108, FS-REMOVE-READDIR-GAP-108: scripts/worktree-reaper.cjs deletes a
@@ -94,7 +97,10 @@ function check(base, variant, out) {
   victimsIntact(base);
 }
 
-const exe = process.env.GUPPY_PACKAGED_EXE || path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Guppy', 'Guppy.exe');
+// The installed app comes from installed-guppy.cjs (run-tests jails LOCALAPPDATA); with no usable app the
+// Electron tests skip and say why.
+const guppy = require('./tools/installed-guppy.cjs').installedGuppy();
+const exe = guppy.exe;
 
 const TITLE = { real: "real: the reaped tree's links are removed as links, their targets survive", 'no-addon': 'no-addon: the tree is refused and kept as it was, links and targets untouched' };
 for (const variant of ['real', 'no-addon']) {
@@ -104,7 +110,7 @@ for (const variant of ['real', 'no-addon']) {
     check(base, variant, run(variant, base));
   });
 
-  test(`${TITLE[variant]}, in the installed Electron as Node`, { skip: process.platform !== 'win32' }, () => {
+  test(`${TITLE[variant]}, in the installed Electron as Node`, { skip: guppy.skip }, () => {
     const base = path.join(jail, `${variant}-electron`);
     build(base);
     assert.equal(fs.existsSync(exe), true, `installed Guppy executable missing: ${exe}`);

@@ -165,7 +165,8 @@ test('REMOVEDIR: waits while something holds the folder, and gives up after its 
 // setter (the preload), only the known readers, and those readers only list and test paths in it.
 const SHARED_LAD = 'GUPPY_SHARED_LOCALAPPDATA';
 const SHARED_LAD_SETTER = 'test/tools/temp-jail-preload.cjs';
-const SHARED_LAD_READERS = ['test/rebrand-a-182.test.cjs', 'test/rebrand-updater-base-183.test.cjs', 'test/scheme-drop-187.test.cjs'];
+// FS-REMOVE-READDIR-GAP-108: + installed-guppy.cjs, which finds the installed app for the Electron-as-Node tests.
+const SHARED_LAD_READERS = ['test/rebrand-a-182.test.cjs', 'test/rebrand-updater-base-183.test.cjs', 'test/scheme-drop-187.test.cjs', 'test/tools/installed-guppy.cjs'];
 const FS_WRITES = /\b(?:writeFile|appendFile|copyFile|cp|rm|rmdir|unlink|mkdir|mkdtemp|rename|symlink|link|truncate|chmod|utimes|open)(?:Sync)?\s*\(/;
 /** The problems with one reader's text: the shared folder used other than by listing, or a derived
  *  path (cache, makensis, plugins) handed to an fs write. */

@@ -6,7 +6,10 @@
  *   <this file> plant <dir> <victim> <park> <stop>    the agent
  *   <this file> pin <racers> <runs> <seconds>         <racers> races at once for each of sync, async and reaper,
  *                                                     <runs> each: exit 0 only with every run done and 0 losses
- *   <this file> control <racers> <runs> <seconds>     the same with jswalk: exit 0 only if it LOST
+ *                                                     (a fourth argument names the callers, e.g. `sync` or
+ *                                                     `async,reaper`, so a long pin can run one caller at a time)
+ *   <this file> control <racers> <runs> <seconds>     the same with jswalk: exit 0 only if it LOST; every racer
+ *                                                     stops at the first loss by any of them
  * pin and control start their races with FS_GAP_EXE (run as Node: ELECTRON_RUN_AS_NODE=1) when it is
  * set, and with this Node otherwise.
  * `impl` is what removes the folder:
@@ -136,8 +139,11 @@ async function race(impl, base, runs, seconds) {
       try { fs.renameSync(p, to); sweep(to); } catch { /* the agent is in it; again */ }
     }
   };
+  // The control only: its racers share one flag file, and all stop once any of them has lost.
+  const lost = impl === 'jswalk' ? process.env.FS_GAP_LOST : '';
   try {
     while (out.runs < runs && Date.now() < end) {
+      if (lost && fs.existsSync(lost)) break;
       fs.mkdirSync(path.join(victim, 'sub'), { recursive: true });
       for (const f of VICTIM) fs.writeFileSync(path.join(victim, f), 'x');
       // Built where the agent is not, then moved into place in one step.
@@ -154,7 +160,7 @@ async function race(impl, base, runs, seconds) {
         if (/refused/.test(String(e && e.message)) || (e && e.code === 'EREFUSED')) out.refused++;
         else { const k = (e && e.code) || String(e && e.message).replace(/'[^']*'|[A-Za-z]:\\\S+|\/\S+/g, '<path>').slice(0, 60); out.errors[k] = (out.errors[k] || 0) + 1; }
       }
-      if (!VICTIM.every((f) => fs.existsSync(path.join(victim, f)))) { out.losses++; if (!out.firstLossAt) out.firstLossAt = out.runs; if (impl === 'jswalk') break; }
+      if (!VICTIM.every((f) => fs.existsSync(path.join(victim, f)))) { out.losses++; if (!out.firstLossAt) out.firstLossAt = out.runs; if (impl === 'jswalk') { if (lost) fs.writeFileSync(lost, ''); break; } }
       if (out.runs % 50 === 0) for (const nm of fs.readdirSync(park)) { try { sweep(path.join(park, nm)); } catch { /* next time */ } }
     }
   } finally {
@@ -171,7 +177,8 @@ async function race(impl, base, runs, seconds) {
 /** Run `racers` races of each impl at once, each in its own temp folder; returns the totals per impl. */
 async function many(impls, racers, runs, seconds) {
   const exe = process.env.FS_GAP_EXE || process.execPath;
-  const env = { ...process.env, ...(process.env.FS_GAP_EXE ? { ELECTRON_RUN_AS_NODE: '1' } : {}) };
+  const flags = impls.includes('jswalk') ? fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'fs-gap-lost-')) : '';
+  const env = { ...process.env, ...(process.env.FS_GAP_EXE ? { ELECTRON_RUN_AS_NODE: '1' } : {}), ...(flags ? { FS_GAP_LOST: path.join(flags, 'lost') } : {}) };
   const jobs = [];
   for (const impl of impls) {
     for (let i = 0; i < racers; i++) {
@@ -187,6 +194,7 @@ async function many(impls, racers, runs, seconds) {
     }
   }
   const done = await Promise.all(jobs);
+  if (flags) { try { sweep(flags); } catch { /* left in the temp folder */ } }
   const totals = {};
   let runtime = null;
   for (const { impl, res } of done) {
@@ -211,7 +219,9 @@ if (require.main === module) {
       .then((out) => ({ ok: true, electron: process.versions.electron || null, node: process.versions.node, out }), (e) => ({ ok: false, error: String(e && e.stack || e) }))
       .then((res) => { console.log(JSON.stringify(res)); process.exitCode = res.ok ? 0 : 1; });
   } else if (role === 'pin' || role === 'control') {
-    const impls = role === 'pin' ? ['sync', 'async', 'reaper'] : ['jswalk'];
+    const impls = role === 'pin' ? String(d || 'sync,async,reaper').split(',') : ['jswalk'];
+    // On GitHub Actions the result line is also a notice on the job, where it can be read without the log.
+    const say = (line) => { console.log(line); if (process.env.GITHUB_ACTIONS) console.log(`::notice title=fs-remove-gap ${role}::${line}`); };
     many(impls, Number(a), Number(b), Number(c)).then((res) => {
       console.log(JSON.stringify(res, null, 1));
       const all = Object.values(res.totals);
@@ -220,13 +230,13 @@ if (require.main === module) {
       if (role === 'pin') {
         const want = impls.length * Number(a) * Number(b);
         const ok = !failed && losses === 0 && runs === want && attacks > runs / 10;
-        console.log(`${ok ? 'PIN PASS' : 'PIN FAIL'}: ${res.runtime} on ${res.platform}: ${runs} of ${want} runs, ${losses} losses, ${attacks} links put in by the agent`);
+        say(`${ok ? 'PIN PASS' : 'PIN FAIL'}: ${res.runtime} on ${res.platform}: ${impls.join(', ')}: ${runs} of ${want} runs, ${losses} losses, ${attacks} links put in by the agent`);
         process.exitCode = ok ? 0 : 1;
       } else {
         const ok = !failed && losses > 0;
-        console.log(`${ok ? 'CONTROL LOST (as it must)' : 'CONTROL DID NOT LOSE: the agent has no teeth here'}: ${res.runtime} on ${res.platform}: the JS walk lost the victim's files in ${losses} of ${runs} runs`);
+        say(`${ok ? 'CONTROL LOST (as it must)' : 'CONTROL DID NOT LOSE: the agent has no teeth here'}: ${res.runtime} on ${res.platform}: the JS walk lost the victim's files in ${losses} of ${runs} runs`);
         process.exitCode = ok ? 0 : 1;
       }
     });
-  } else { console.error('usage: race <sync|async|reaper|jswalk> <base> <runs> <seconds> | plant <dir> <victim> <park> <stop>'); process.exit(64); }
+  } else { console.error('usage: pin <racers> <runs> <seconds> [sync,async,reaper] | control <racers> <runs> <seconds> | race <sync|async|reaper|jswalk> <base> <runs> <seconds> | plant <dir> <victim> <park> <stop>'); process.exit(64); }
 }
