@@ -87,11 +87,11 @@ test('the parse is MEASURED on the installed xterm: the WriteBuffer slice method
 // Judged slice by slice so the verdict does not depend on machine load. minW is the cheapest wall time
 // any slice took, so it is the work's cost as near as this run can know it (it only gets better as more
 // slices run, so sizing under a load spike corrects itself). Only slices with a wall time within
-// 1.5 x minW are judged. A true per-thread clock charges such a slice at least the work (>= minW, the
+// 1.5 x minW, and under 9.9 ms whatever the sizing came to, are judged. A true per-thread clock charges such a slice at least the work (>= minW, the
 // assert asks for half of it) and never more than its wall time (the assert allows 1.5x, for a clock
 // that converts cycles to ms). A step clock reads 0 for about two slices in three, and 0 always fails;
-// its other reading, one step of 15 ms or more, also fails because a judged slice is under 10 ms
-// (minW < 6.6). Slices preempted for longer are not judged.
+// its other reading, one step of 15 ms or more, also fails because a judged slice is under 9.9 ms
+// (15 > 1.5 x 9.9). Slices preempted for longer are not judged.
 // For the fix: if the true clock comes from a native addon, a runtime that loads an older addon without
 // it (a packaged exe run as Node loads its own resources) is still on the step clock and stays red
 // here; that leg must say which addon it loaded, not pass or skip silently.
@@ -104,7 +104,7 @@ test('MIRROR-PARSE-ZERO-108: the parse clock charges each short slice its own wo
   work(5e6); // warm up, so the JIT is done before anything is sized
   const n = Math.round(5 / (wallOf(2e6) / 2e6));
   const sliceMs = wallOf(n);
-  assert.ok(sliceMs > 2 && sliceMs < 6.6, `the slice is sized so that 1.5x of it is under 10 ms, well inside one 15.6 ms step (${sliceMs.toFixed(2)} ms)`);
+  assert.ok(sliceMs > 2, `the slice is long enough to be told from 0 (${sliceMs.toFixed(2)} ms)`);
 
   // The product's wrapper on the product's default clock, around a slice method that does the work.
   let charged = 0;
@@ -113,7 +113,8 @@ test('MIRROR-PARSE-ZERO-108: the parse clock charges each short slice its own wo
   const WANT = 40;
   const seen = []; // [wall ms, charged ms] of every slice run
   let minW = sliceMs;
-  const judged = () => seen.filter(([wall]) => wall <= 1.5 * minW);
+  const MAX_WALL = 9.9; // 1.5x of it is under one 15 ms step, so a one-step charge is never in band
+  const judged = () => seen.filter(([wall]) => wall <= Math.min(1.5 * minW, MAX_WALL));
   while (judged().length < WANT && seen.length < 2000) {
     const before = charged;
     const t0 = performance.now();
