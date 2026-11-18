@@ -8,6 +8,7 @@
  */
 import { execFile, spawn } from 'node:child_process';
 import { isDocFile } from './derivedFacts';
+import { gitSafeCommand, gitSafeConfigArgs, gitSafeEnv } from '../gitSafe';
 import type { GitLogPort, ReleaseHead, TagLike } from './derivedFacts';
 
 /** The mainline refs (local and origin's) that branchesContaining reports beside the guppy branches. */
@@ -63,7 +64,7 @@ const timedOut = (args: readonly string[], ms: number) => new Error(`git ${args[
 function git(repo: string, args: string[], o: Required<DerivedGitOptions>): Promise<{ code: number; out: string }> {
   const [bin, ...pre] = o.command;
   return new Promise((resolve, reject) => {
-    execFile(bin, [...pre, '-C', repo, ...args], { windowsHide: true, maxBuffer: 64 * 1024 * 1024, encoding: 'utf8', timeout: o.timeoutMs, killSignal: 'SIGKILL' }, (err, out) => {
+    execFile(bin, [...pre, ...gitSafeConfigArgs(), '-C', repo, ...gitSafeCommand(args)], { env: gitSafeEnv(), windowsHide: true, maxBuffer: 64 * 1024 * 1024, encoding: 'utf8', timeout: o.timeoutMs, killSignal: 'SIGKILL' }, (err, out) => {
       if (err && (err as { killed?: boolean }).killed) { reject(timedOut(args, o.timeoutMs)); return; }
       const code = err ? (typeof (err as { code?: unknown }).code === 'number' ? (err as { code: number }).code : -1) : 0;
       resolve({ code, out: out ?? '' });
@@ -74,7 +75,7 @@ function git(repo: string, args: string[], o: Required<DerivedGitOptions>): Prom
 function gitStdin(repo: string, args: string[], input: string, o: Required<DerivedGitOptions>): Promise<string> {
   const [bin, ...pre] = o.command;
   return new Promise((resolve, reject) => {
-    const p = spawn(bin, [...pre, '-C', repo, ...args], { windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] });
+    const p = spawn(bin, [...pre, ...gitSafeConfigArgs(), '-C', repo, ...gitSafeCommand(args)], { env: gitSafeEnv(), windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] });
     let out = '';
     let late = false;
     const timer = setTimeout(() => { late = true; p.kill('SIGKILL'); reject(timedOut(args, o.timeoutMs)); }, o.timeoutMs);

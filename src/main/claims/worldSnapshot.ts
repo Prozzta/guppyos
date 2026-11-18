@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import type { ClaimRec, ClaimsState, LedgerRec } from '../../shared/claims';
+import { gitSafeArgs, gitSafeEnv } from '../gitSafe';
 
 export interface ClaimsWorldSnapshot {
   commits: Map<string, boolean>;
@@ -17,7 +18,7 @@ const GIT_CHILD_TIMEOUT_MS = 5_000;
 
 export const runGit: GitRunner = (cwd, args, input, timeoutMs) => new Promise((resolve) => {
   let child;
-  try { child = spawn('git', args, { cwd, windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] }); }
+  try { child = spawn('git', gitSafeArgs(args), { cwd, env: gitSafeEnv(), windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] }); }
   catch { resolve(null); return; }
   let stdout = '';
   let settled = false;

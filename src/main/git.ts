@@ -2,27 +2,40 @@ import { spawn } from 'node:child_process';
 import { promises as fsp } from 'node:fs';
 import { join } from 'node:path';
 import { openForRead, safeResolve } from './fs';
+import { GIT_MAX_OUTPUT_BYTES, gitSafeArgs, gitSafeEnv } from './gitSafe';
 
-/** Run git in `cwd` with `args`. Returns stdout text or an error. */
-function runGit(cwd: string, args: string[], timeoutMs = 8000): Promise<{
+/** Run git in `cwd` with `args`. Returns stdout text or an error. Every call goes through gitSafe
+ *  (GIT-RUN-HARDEN-108): no program the repo names is run, the app's GIT_* variables are dropped,
+ *  and a call that writes more than `maxBytes` is stopped. Exported for the test of the cap. */
+export function runGit(cwd: string, args: string[], timeoutMs = 8000, maxBytes = GIT_MAX_OUTPUT_BYTES): Promise<{
   ok: true; stdout: string;
 } | { ok: false; error: string }> {
   return new Promise((resolve) => {
-    const proc = spawn('git', args, { cwd });
+    const proc = spawn('git', gitSafeArgs(args), { cwd, env: gitSafeEnv() });
     let stdout = '';
     let stderr = '';
+    let bytes = 0;
+    let over = false;
+    const count = (d: Buffer) => {
+      bytes += d.length;
+      if (bytes <= maxBytes || over) return !over;
+      over = true;
+      try { proc.kill('SIGKILL'); } catch { /* noop */ }
+      return false;
+    };
     const timer = setTimeout(() => {
       try { proc.kill('SIGKILL'); } catch { /* noop */ }
     }, timeoutMs);
-    proc.stdout.on('data', d => { stdout += d.toString(); });
-    proc.stderr.on('data', d => { stderr += d.toString(); });
+    proc.stdout.on('data', d => { if (count(d)) stdout += d.toString(); });
+    proc.stderr.on('data', d => { if (count(d)) stderr += d.toString(); });
     proc.on('error', e => {
       clearTimeout(timer);
       resolve({ ok: false, error: e.message });
     });
     proc.on('close', code => {
       clearTimeout(timer);
-      if (code === 0) resolve({ ok: true, stdout });
+      if (over) resolve({ ok: false, error: `git ${args[0] ?? ''} wrote more than ${maxBytes} bytes and was stopped` });
+      else if (code === 0) resolve({ ok: true, stdout });
       else resolve({ ok: false, error: stderr.trim() || `git exited ${code}` });
     });
   });
