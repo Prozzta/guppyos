@@ -6747,7 +6747,11 @@ export class HiveManager {
     const parse = (l: string): unknown => { try { return JSON.parse(l); } catch { return { raw: l }; } };
     let rows: unknown[] = [];
     for (let i = files.length - 1; i >= 0 && rows.length < n; i--) {
-      rows = [...await this.fileTailAsync(files[i], n - rows.length, parse), ...rows];
+      // MAIL-EPOCHS-TEARDOWN-RACE-108: the open, the reads and the close are one counted read, so
+      // drainReads() waits for the handle. A disposed manager has no log to show: no rows.
+      const file = files[i], want = n - rows.length;
+      try { rows = [...await this.countedRead(file, () => this.fileTailAsync(file, want, parse)), ...rows]; }
+      catch (e) { if (e instanceof HiveDisposedError) return []; throw e; }
     }
     return rows;
   }
