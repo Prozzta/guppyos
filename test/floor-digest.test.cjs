@@ -151,7 +151,7 @@ test('a digest wake is actionable for god but leaves NO reply obligation (Jim S5
   const R = loadTs('src/main/mailReaders.ts');
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'md-digest-oblig-'));
   const hive = new HiveManager(() => home);
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   hive.ensureHive();
   const root = hive.root();
   await hive.ensureAgent({ id: 'god-1', name: 'Michael', provider: 'claude', cwd: home, isGod: true });

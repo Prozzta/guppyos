@@ -42,7 +42,7 @@ function pairsMoveWithDone(text) {
 async function floor(t) {
   const home = fs.mkdtempSync(path.join(JAIL, 'floor-'));
   const hive = new HiveManager(() => home, () => true);
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   const root = path.join(home, 'hive');
   const promptFor = async (id, provider, extra = {}) => {
     const meta = { id, name: id, provider, cwd: home, ...extra };

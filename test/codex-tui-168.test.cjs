@@ -146,7 +146,7 @@ function sandbox(t, seed) {
   fs.writeFileSync(path.join(home, '.codex', 'auth.json'), '{"x":1}');
   fs.writeFileSync(path.join(home, '.codex', 'config.toml'), seed);
   const hive = new HiveManager(() => path.join(home, 'harness'));
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   return { home, hive };
 }
 

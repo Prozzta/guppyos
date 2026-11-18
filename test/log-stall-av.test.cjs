@@ -125,6 +125,7 @@ test('F1 (B1/B3): a HiveManager holds its log open by default; dispose() release
   }
   hive.dispose();
   hive.dispose();   // idempotent
+  await hive.drainReads();
   fs.rmSync(path.join(home, 'hive'), { recursive: true, force: true });
   assert.equal(fs.existsSync(path.join(home, 'hive')), false, 'after dispose the whole hive folder goes');
 });

@@ -47,7 +47,7 @@ async function world(t, { providers = {}, confirms = () => true, probe = null, g
   const hive = new HiveManager(() => home, () => true);
   const w = { now: Date.now(), queue: [], reqs: [], diags: [], lastOutput: new Map(), outcome: () => ({ kind: 'COMMITTED' }) };
   let server = null;
-  t.after(() => { try { server?.stop(); } catch { /* noop */ } hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { try { server?.stop(); } catch { /* noop */ } hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   await hive.ensureAgent({ id: 'god-1', name: 'Michael', provider: 'claude', cwd: home, isGod: true });
   for (const id of Object.keys(providers)) await hive.ensureAgent({ id, name: id, provider: 'claude', cwd: home });
   const reg = hive.registry.bind(hive);
@@ -769,7 +769,7 @@ test('god cce9ab: a mode SWITCH immediately followed by a Stop is closed in the 
 test('Jim LOW residual: a RESPAWN as a different provider invalidates the cached provider: the very next hook reads the new one', async (t) => {
   const home = fs.mkdtempSync(path.join(JAIL, 'respawn-'));
   const hive = new HiveManager(() => home, () => true);
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   await hive.ensureAgent({ id: 'god-1', name: 'Michael', provider: 'claude', cwd: home, isGod: true });
   await hive.ensureAgent({ id: 'sw-1', name: 'sw', provider: 'claude', cwd: home });
   const server = new HookServer(hive, () => null, () => ({ notifications: false }));
@@ -814,7 +814,7 @@ test('§11.19 #4 (Q28 cadence pin): an unparseable body is re-tried every 30 s a
 test('Jim LOW gap D2: stop() CLEARS the provider cache: nothing cached survives the unsubscribe (the next read goes to the registry)', async (t) => {
   const home = fs.mkdtempSync(path.join(JAIL, 'd2-'));
   const hive = new HiveManager(() => home, () => true);
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   await hive.ensureAgent({ id: 'god-1', name: 'Michael', provider: 'claude', cwd: home, isGod: true });
   await hive.ensureAgent({ id: 'sw-1', name: 'sw', provider: 'claude', cwd: home });
   const server = new HookServer(hive, () => null, () => ({ notifications: false }));
@@ -832,7 +832,7 @@ test('Jim LOW gap D2: stop() CLEARS the provider cache: nothing cached survives 
 test('Jim LOW nit: stop() unsubscribes from onAgentProvisioned: the listener count goes back down and a later provisioning no longer touches that server\'s cache', async (t) => {
   const home = fs.mkdtempSync(path.join(JAIL, 'unsub-'));
   const hive = new HiveManager(() => home, () => true);
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   await hive.ensureAgent({ id: 'god-1', name: 'Michael', provider: 'claude', cwd: home, isGod: true });
   await hive.ensureAgent({ id: 'sw-1', name: 'sw', provider: 'claude', cwd: home });
   const base = hive.provisionedListeners.size;

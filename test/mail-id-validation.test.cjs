@@ -29,8 +29,8 @@ async function floor(t) {
   assert.equal(os.homedir(), home, 'home must be jailed before HiveManager construction');
   const { HiveManager } = loadTs('src/main/hive.ts');
   const hive = new HiveManager(() => home);
-  t.after(() => {
-    hive.dispose();
+  t.after(async () => {
+    hive.dispose(); await hive.drainReads();
     for (const k of keys) { if (prior[k] === undefined) delete process.env[k]; else process.env[k] = prior[k]; }
     fs.rmSync(home, { recursive: true, force: true });
   });

@@ -32,12 +32,12 @@ async function floor(t) {
   process.env.USERPROFILE = home;
   assert.equal(process.env.HOME, home, 'HOME must be jailed before HiveManager construction');
   assert.equal(process.env.USERPROFILE, home, 'USERPROFILE must be jailed before HiveManager construction');
-  t.after(() => {
+  t.after(async () => {
     if (priorHome === undefined) delete process.env.HOME;
     else process.env.HOME = priorHome;
     if (priorUserProfile === undefined) delete process.env.USERPROFILE;
     else process.env.USERPROFILE = priorUserProfile;
-    hive.dispose();
+    hive.dispose(); await hive.drainReads();
     fs.rmSync(home, { recursive: true, force: true });
   });
   const hive = new HiveManager(() => home);

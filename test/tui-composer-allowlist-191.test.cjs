@@ -377,8 +377,8 @@ test('every Claude agent spawns with prompt suggestions off (env + settings), so
   const { HiveManager } = loadTs('src/main/hive.ts');
   const harness = fs.mkdtempSync(path.join(FAKE_HOME, 'harness-'));
   const hive = new HiveManager(() => harness);
-  t.after(() => {
-    hive.dispose();
+  t.after(async () => {
+    hive.dispose(); await hive.drainReads();
     for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
     fs.rmSync(FAKE_HOME, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });

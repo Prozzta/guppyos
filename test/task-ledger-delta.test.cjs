@@ -25,7 +25,7 @@ const { HiveManager, TaskLedgerInvalidError } = loadTs('src/main/hive.ts');
 function floor(t) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'md-ledger-delta-'));
   const hive = new HiveManager(() => home);
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   hive.ensureHive();
   return hive;
 }
