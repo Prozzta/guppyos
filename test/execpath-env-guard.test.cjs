@@ -255,7 +255,7 @@ test('TEETH: each safe env shape passes, and an electron.exe launch is not match
     'a rest destructure of another key': "const { NODE_TEST_CONTEXT: _c, ...base } = process.env; spawn(process.execPath, [], { env: { ...base, A: '1' } });",
     'a helper with a process.env copy': "function start(args) { const env = { ...process.env }; return spawn(args[0], args.slice(1), { env }); } start([process.execPath, 'a.cjs']);",
     'options spread with nodeEnv': "const sp = (args, opts) => spawnSync(process.execPath, args, { ...opts, env: nodeEnv(opts.env) });",
-    'an intentional electron.exe launch (category A)': "const exe = require('electron'); const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE; spawn(exe, ['.'], { env });",
+    'an intentional electron.exe launch (category A)': "const exe = require(" + "'electron'); const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE; spawn(exe, ['.'], { env });",
     'a fallback to process.env': "function f(env) { return spawn(process.execPath, [], { env: nodeEnv(env ?? process.env) }); }",
     'a computed key set to a non-empty literal': "const KEY = 'ELECTRON_RUN_AS_NODE'; spawn(process.execPath, [], { env: { PATH: 'x', [KEY]: '1' } });",
     'a conditional spread of literals': "function f(ctx) { return spawn(process.execPath, [], { env: { ...process.env, ...(ctx ? { A: '1' } : {}) } }); }",
