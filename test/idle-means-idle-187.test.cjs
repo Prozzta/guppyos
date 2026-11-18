@@ -282,7 +282,7 @@ async function rosterWith(heavyLock) {
       liveness: ['andy', 'jim', 'creed', 'dwight'].map((id) => ({ ...lv('IDLE'), agentId: id, classifiedSince: now - 9 * MIN, evidence: { sampledAt: now } }))
     });
     return hive.rosterContext();
-  } finally { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); }
+  } finally { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); }
 }
 
 test('T4 the LIVE ROSTER says BACKGROUND / QUEUED #n / RESERVED from fleet.json\'s heavyLock, and idle without it', async () => {

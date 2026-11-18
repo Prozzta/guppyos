@@ -344,7 +344,7 @@ function sandbox(t, { live = false } = {}) {
   const rows = [];
   const realAppend = hive.appendLog.bind(hive);
   hive.appendLog = (row) => { rows.push(row); return realAppend(row); };
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   return { home, hive, rows, agentDir: (id) => path.join(hiveHome, 'hive', 'agents', id) };
 }
 const promptOf = (inj) => inj.args[inj.args.indexOf('--append-system-prompt') + 1];

@@ -337,7 +337,7 @@ function sandbox(t) {
   const hive = new HiveManager(() => path.join(home, 'harness'));
   const notices = [];
   hive.codexLayerSink = (n) => notices.push(n);
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   return { home, hive, notices };
 }
 const logRows = (home) => {

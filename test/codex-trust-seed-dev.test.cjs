@@ -26,8 +26,8 @@ test('DEV: the user\'s trust list is dropped by the sanitise, and the agent\'s o
   const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
   process.env.HOME = home; process.env.USERPROFILE = home;
   let hive = null;
-  t.after(() => {
-    if (hive) hive.dispose();
+  t.after(async () => {
+    if (hive) hive.dispose(); await hive?.drainReads();
     for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
     fs.rmSync(home, { recursive: true, force: true, maxRetries: 5 });
   });

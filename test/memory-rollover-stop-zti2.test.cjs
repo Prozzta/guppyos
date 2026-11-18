@@ -320,7 +320,7 @@ test('Andy SHOULD-1 / NIT-2 rows: the hive logs a recovery and a no-link rollove
 async function longLived(t, id, bytes) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zti2-hive-'));
   const hive = new HiveManager(() => home);
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   await hive.ensureAgent({ id, name: id, provider: 'claude', cwd: home });
   const rows = [];
   const appendLog = hive.appendLog.bind(hive);

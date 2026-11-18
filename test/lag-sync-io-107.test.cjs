@@ -181,7 +181,7 @@ const ids = (ledger) => ledger.tasks.map((c) => c.id);
 function tasksFloor(t, tasks = [card('T1')]) {
   const home = fs.mkdtempSync(path.join(JAIL, 'tasks-'));
   const hive = new HiveManager(() => home);
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   hive.ensureHive();
   const file = path.join(hive.root(), 'tasks.json');
   const handEdit = (list) => fs.writeFileSync(file, JSON.stringify({ tasks: list }), 'utf8');
@@ -348,7 +348,7 @@ test('derived claims: readCardsAsync is readCards with the ledger read off the m
 async function mailFloor(t) {
   const home = fs.mkdtempSync(path.join(JAIL, 'mail-'));
   const hive = new HiveManager(() => home, () => true);
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   await hive.ensureAgent({ id: 'god-1', name: 'Michael', provider: 'claude', cwd: home, isGod: true });
   await hive.ensureAgent({ id: 'andy-1', name: 'Andy', provider: 'claude', cwd: home });
   await hive.ensureAgent({ id: 'jim-1', name: 'Jim', provider: 'codex', cwd: home });
