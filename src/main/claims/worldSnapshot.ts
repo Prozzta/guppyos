@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import type { ClaimRec, ClaimsState, LedgerRec } from '../../shared/claims';
-import { gitSafeArgs, gitSafeEnv } from '../gitSafe';
+import { gitSafeCall } from '../gitSafe';
 
 export interface ClaimsWorldSnapshot {
   commits: Map<string, boolean>;
@@ -16,14 +16,21 @@ export const WORLD_GIT_CONCURRENCY = 4;
 export const WORLD_SNAPSHOT_DEADLINE_MS = 1_500;
 const GIT_CHILD_TIMEOUT_MS = 5_000;
 
-export const runGit: GitRunner = (cwd, args, input, timeoutMs) => new Promise((resolve) => {
+export const runGit: GitRunner = async (cwd, args, input, timeoutMs) => {
+  const started = Date.now();
+  const limit = Math.max(1, Math.min(GIT_CHILD_TIMEOUT_MS, timeoutMs));
+  let call: Awaited<ReturnType<typeof gitSafeCall>>;
+  try { call = await gitSafeCall(cwd, args, limit); }
+  catch { return null; }
+  return new Promise<string | null>((resolve) => {
   let child;
-  try { child = spawn('git', gitSafeArgs(args), { cwd, env: gitSafeEnv(), windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] }); }
+  try { child = spawn('git', call.args, { cwd, env: call.env, windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] }); }
   catch { resolve(null); return; }
   let stdout = '';
   let settled = false;
   const finish = (value: string | null) => { if (settled) return; settled = true; clearTimeout(timer); resolve(value); };
-  const timer = setTimeout(() => { child.kill(); finish(null); }, Math.max(1, Math.min(GIT_CHILD_TIMEOUT_MS, timeoutMs)));
+  // The read of the repo's filter drivers came out of the same allowance.
+  const timer = setTimeout(() => { child.kill(); finish(null); }, Math.max(1, limit - (Date.now() - started)));
   child.stdout.setEncoding('utf8');
   child.stdout.on('data', (chunk: string) => { stdout += chunk; if (stdout.length > 1_000_000) { child.kill(); finish(null); } });
   child.on('error', () => finish(null));
@@ -31,7 +38,8 @@ export const runGit: GitRunner = (cwd, args, input, timeoutMs) => new Promise((r
   child.stdin.on('error', () => { /* the child exited first */ });
   if (input !== undefined) child.stdin.end(input);
   else child.stdin.end();
-});
+  });
+};
 
 export interface WorldSnapshotOptions {
   git?: GitRunner;
