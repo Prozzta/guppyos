@@ -29,7 +29,7 @@ async function floor(t) {
   const made = [];
   const mk = () => { const h = new HiveManager(() => home, () => true); made.push(h); return h; };
   const hive = mk();
-  t.after(() => { for (const h of made) h.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { for (const h of made) { h.dispose(); await h.drainReads(); } fs.rmSync(home, { recursive: true, force: true }); });
   await hive.ensureAgent({ id: 'god-1', name: 'Michael', provider: 'claude', cwd: home, isGod: true });
   await hive.ensureAgent({ id: 'andy-1', name: 'Andy', provider: 'claude', cwd: home });
   const dir = (id, ...p) => path.join(hive.root(), 'agents', id, ...p);

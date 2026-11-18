@@ -6500,6 +6500,7 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
   // Close the hive's kept-open log and ledger before the copy (and the relaunch).
   await settleWrites(WRITE_BEHIND_SETTLE_MS);   // LAG-SYNC-WRITES-107: no late write into the old home
   try { hive.dispose(); } catch (e) { console.error('[changeHome] hive.dispose:', e); }
+  await hive.drainReads();   // MAIL-EPOCHS-TEARDOWN-RACE-108: no read of ours is open during the copy
 
   await memoryStopped;
 
@@ -6520,6 +6521,7 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
     } catch (e) {
       // Copy failed: recover IN PLACE against the unchanged old home (config never
       // repointed) so the user loses nothing, and surface the error — no relaunch.
+      hive.reopen();
       bootstrapHiveServices();
       const cfg = readConfig();
       if (cfg.slackEnabled && cfg.slackSigningSecret) void startSlackServer();
@@ -7268,6 +7270,8 @@ ipcMain.handle('app:resetAll', async () => {
   // The hive's kept-open log and ledger: an open file makes the rm below fail (ENOTEMPTY).
   await settleWrites(WRITE_BEHIND_SETTLE_MS);   // LAG-SYNC-WRITES-107: no late write into the erased hive
   try { hive.dispose(); } catch (e) { console.error('[reset] hive.dispose:', e); }
+  // MAIL-EPOCHS-TEARDOWN-RACE-108: an async read still open makes the delete below fail (ENOTEMPTY, Electron).
+  await hive.drainReads();
   // Erase the hive (Michael's + every agent's memory, inboxes, tasks, board,
   // git history) and the memory engine's index of it. Only harness-created data
   // is removed — never the user's whole harnessHome folder.

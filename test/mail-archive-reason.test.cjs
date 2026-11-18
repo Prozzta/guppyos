@@ -49,7 +49,7 @@ async function floor(t) {
   const emitted = [];
   let emitOk = true;
   const hive = new HiveManager(() => home, (channel, payload) => { if (channel === 'hive:terminalHandoff') { if (!emitOk) return false; emitted.push(payload); } return true; });
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   await hive.ensureAgent({ id: 'god-1', name: 'Michael', provider: 'claude', cwd: home, isGod: true });
   await hive.ensureAgent({ id: 'jim-1', name: 'Jim', provider: 'claude', cwd: home });
   await hive.ensureAgent({ id: 'pam-1', name: 'Pam', provider: 'claude', cwd: home });

@@ -32,7 +32,7 @@ function sandbox(t, seed) {
   fs.mkdirSync(path.join(home, '.codex'), { recursive: true });
   fs.writeFileSync(path.join(home, '.codex', 'config.toml'), seed);
   const hive = new HiveManager(() => path.join(home, 'harness'));
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   return { home, hive };
 }
 /** How codex 0.157.1 looks a cwd up: each key lowercased (Windows), `\\?\` aside, string-equal. */

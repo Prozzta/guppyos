@@ -27,7 +27,7 @@ const tick = (ms) => { clock += ms; };
 function floor(t, tasks = [card('T1')]) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'md-tasks-read-cache-'));
   const hive = new HiveManager(() => home);
-  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   hive.ensureHive();
   const file = path.join(hive.root(), 'tasks.json');
   const handEdit = (list) => fs.writeFileSync(file, JSON.stringify({ tasks: list }), 'utf8');

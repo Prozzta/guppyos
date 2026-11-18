@@ -21,9 +21,9 @@ process.env.HOME = JAIL; process.env.USERPROFILE = JAIL;
 assert.equal(os.homedir(), JAIL, 'HOME must be jailed before any product code loads');
 const STORES = [];
 const HIVES = [];
-test.after(() => {
+test.after(async () => {
   for (const s of STORES) s.close();
-  for (const h of HIVES) h.dispose();
+  for (const h of HIVES) { h.dispose(); await h.drainReads(); }
   for (const [k, v] of Object.entries(prior)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
   fs.rmSync(JAIL, { recursive: true, force: true });
 });

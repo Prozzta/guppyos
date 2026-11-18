@@ -405,7 +405,7 @@ async function floor(t, { provider = 'claude', stop = { claude: true, codex: tru
   const hive = new HiveManager(() => home, () => true);
   const w = base({ provider, stop, reqs: [], queue: [], diags: [] });
   let server = null;
-  t.after(() => { try { server?.stop(); } catch { /* noop */ } hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => { try { server?.stop(); } catch { /* noop */ } hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   await hive.ensureAgent({ id: 'god-1', name: 'Michael', provider: 'claude', cwd: home, isGod: true });
   await hive.ensureAgent({ id: 'a1', name: 'a1', provider: 'claude', cwd: home });
   const reg = hive.registry.bind(hive);
