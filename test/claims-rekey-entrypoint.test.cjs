@@ -392,10 +392,12 @@ test('E5: the real CLI over HTTP prints one line per ledger; a refusal exits 1 a
 
 test('E9 (Jim NIT b, c): the CLI tells a rekey that ran and is not complete (exit 5) from a refusal (exit 1), and a timeout says the rekey may still be running', async () => {
   let reply = null;   // null: never answer
+  let posted = null;
   const open = [];
   const server = http.createServer((req, res) => {
-    req.resume();
-    req.on('end', () => { if (!reply) { open.push(res); return; } res.writeHead(reply.status, { 'content-type': 'application/json' }); res.end(JSON.stringify(reply.body)); });
+    const chunks = [];
+    req.on('data', (d) => chunks.push(d));
+    req.on('end', () => { posted = JSON.parse(Buffer.concat(chunks).toString('utf8')); if (!reply) { open.push(res); return; } res.writeHead(reply.status, { 'content-type': 'application/json' }); res.end(JSON.stringify(reply.body)); });
   });
   await new Promise((res) => server.listen(0, '127.0.0.1', res));
   try {
@@ -410,6 +412,21 @@ test('E9 (Jim NIT b, c): the CLI tells a rekey that ran and is not complete (exi
     assert.equal((await run()).code, 1);
     reply = { status: 409, body: { ok: false, line: 'refused: this floor has no claim ledger to rekey', lines: [], result: { ok: false, rekeyed: [], refused: [] } } };
     assert.equal((await run()).code, 1, 'nothing ran: a refusal');
+    // Jim NIT 2 (9aebc259): refused ledgers alone are not a rekey that ran. Exit 5 needs written lines.
+    reply = { status: 409, body: { ok: false, line: 'rekey not complete: 0 rekeyed, 2 refused.', lines: ['refused: andy (mac at c-1)', 'refused: dwight (mac at c-2)'], result: { ok: false, rekeyed: [], refused: [{ agentId: 'andy', why: 'mac at c-1' }, { agentId: 'dwight', why: 'mac at c-2' }] } } };
+    assert.equal((await run()).code, 1, 'every ledger refused for a broken chain: nothing was written');
+    reply = { status: 409, body: { ok: false, line: 'x', lines: [], result: { ok: false, rekeyed: [], refused: [{ agentId: 'andy', why: 'no key (unreadable)' }] } } };
+    assert.equal((await run()).code, 1, 'no key: nothing was written');
+    reply = { status: 409, body: { ok: false, line: 'rekey not in effect', lines: [], result: { ok: false, keyId: 'k', recorded: false, rekeyed: [], refused: [{ agentId: 'andy', why: 'not in effect: the key id was not recorded (skipped), retry the rekey' }] } } };
+    assert.equal((await run()).code, 5, 'lines were written and the key id was not recorded: partial');
+    // Jim NIT 1 (9aebc259): a relative --floor is god's, so the CLI makes it absolute before posting.
+    reply = { status: 409, body: { ok: false, line: 'refused' } };
+    const at = path.join(os.tmpdir(), 'gods-folder', 'hive');
+    for (const [typed, want] of [['.', at], ['..', path.dirname(at)], ['sub', path.join(at, 'sub')], ['C:\\Floor\\hive', 'C:\\Floor\\hive']]) {
+      const io = { e: '' };
+      await cli.main(['rekey', '--floor', typed], env, { out: () => {}, err: (s) => { io.e += s; } }, { cwd: at });
+      assert.deepEqual(posted, { action: 'rekey', floor: want }, typed);
+    }
     reply = null;
     const late = await run({ rekeyTimeoutMs: 300 });
     assert.equal(late.code, 4, JSON.stringify(late));
