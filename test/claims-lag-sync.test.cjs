@@ -253,8 +253,13 @@ async function agentsDirChangeSeen(mods) {
   assert.ok(s.ledgerAgents().includes('stanley'), 'LAG-3c: a new agent folder is listed on the next roster read');
 }
 
-/** LAG-3d: a claims folder another process makes under an existing agent is listed within
- *  ROSTER_REVALIDATE_MS. */
+/** LAG-3d: a claims folder another process makes under an existing agent is listed once
+ *  ROSTER_REVALIDATE_MS passed and one off-thread listing finished.
+ *  LAG-CLAIMS-SEGMENTS-ASYNC-108 changed this guarantee on purpose (god cc6f53). Before: the
+ *  first census after the window listed synchronously and answered with the folder. Now: that
+ *  census answers the roster it has and starts the listing off the caller's thread; the folder
+ *  is in the roster when that listing has finished. Why: the synchronous listing (agents/ plus
+ *  every claims folder) ran on the main thread every window. */
 async function revalidateBound(mods) {
   const x = setup(mods);
   await ledgers(x, ['andy', 'dwight']);
@@ -262,8 +267,11 @@ async function revalidateBound(mods) {
   const s = x.mk();
   assert.deepEqual([...s.ledgerAgents()].sort(), ['andy', 'dwight']);
   fs.cpSync(x.claimsDir('dwight'), x.claimsDir('toby'), { recursive: true });
+  assert.ok(!s.ledgerAgents().includes('toby'), 'inside the window the roster is not listed again');
   x.tick(mods.store.ROSTER_REVALIDATE_MS);
-  assert.ok(s.ledgerAgents().includes('toby'), 'LAG-3d: a folder made elsewhere is listed once ROSTER_REVALIDATE_MS passed');
+  s.ledgerAgents(); // the window passed: this census starts the off-thread listing
+  await s.rosterSettled();
+  assert.ok(s.ledgerAgents().includes('toby'), 'LAG-3d: a folder made elsewhere is listed once ROSTER_REVALIDATE_MS passed and the listing finished');
 }
 
 /** LAG-3f (Jim NIT): a restore that brings back a claims folder is in the next roster (the
@@ -279,6 +287,8 @@ async function restoreDirties(mods) {
   assert.deepEqual(s.ledgerAgents(), ['andy']);
   fs.rmSync(x.claimsDir('andy'), { recursive: true });
   x.tick(mods.store.ROSTER_REVALIDATE_MS);
+  s.ledgerAgents(); // setup only: a folder removed elsewhere leaves by the timed listing (LAG-3d), now off-thread
+  await s.rosterSettled();
   assert.deepEqual(s.ledgerAgents(), [], 'the deleted folder left the roster');
   await s.restoreBackup('andy', '2026-10-30');
   assert.ok(fs.readdirSync(x.claimsDir('andy')).length > 0, 'the restore brought the folder back');
@@ -332,10 +342,10 @@ const MUTANTS = [
   { id: 'M5', what: 'a snapshot outlives its batch', file: KP, from: 'if (c && this.depth > 0 && this.batchFresh) return c.j;', to: 'if (c && this.batchFresh) return c.j;', dies: ['LAG-2e'] },
   { id: 'M6', what: 'the map is not cached at all (the old parse per call)', file: KP, from: 'this.cache = { key: provenStatKey(st, this.wall()), j };', to: 'this.cache = null;', dies: ['LAG-2a'] },
   { id: 'M7', what: 'checkAnchored reads outside one batch', file: ST, from: 'if (this.d.headAnchor?.batch) this.d.headAnchor.batch(run); else run();\n    return broken;', to: 'run();\n    return broken;', dies: ['LAG-2g'] },
-  { id: 'M8', what: 'the roster is listed per call', file: ST, from: "&& mono() - r.at < ROSTER_REVALIDATE_MS) return [...r.agents];", to: "&& false) return [...r.agents];", dies: ['LAG-3a'] },
+  { id: 'M8', what: 'the roster is listed per call', file: ST, from: "if (r && r.gen === this.rosterGen && r.key !== null && r.key === key) {", to: "if (false) {", dies: ['LAG-3a'] },
   { id: 'M9', what: 'an own append does not dirty the roster', file: ST, from: '        this.rosterDirty();\n        h = {', to: '        h = {', dies: ['LAG-3b'] },
-  { id: 'M10', what: 'the agents/ stat key is ignored', file: ST, from: 'r.key !== null && r.key === key && mono()', to: 'mono()', dies: ['LAG-3c'] },
-  { id: 'M11', what: 'the roster never expires', file: ST, from: "&& mono() - r.at < ROSTER_REVALIDATE_MS) return [...r.agents];", to: ") return [...r.agents];", dies: ['LAG-3d'] },
+  { id: 'M10', what: 'the agents/ stat key is ignored', file: ST, from: 'if (r && r.gen === this.rosterGen && r.key !== null && r.key === key) {', to: 'if (r && r.gen === this.rosterGen) {', dies: ['LAG-3c'] },
+  { id: 'M11', what: 'the roster never expires', file: ST, from: "if (mono() - r.at >= ROSTER_REVALIDATE_MS) this.relistRoster(r);", to: "", dies: ['LAG-3d'] },
   { id: 'M13', what: 'the cache compares the mtime only (Jim)', file: KP, from: 'if (c && c.key !== null && c.key === statKey(st))', to: "if (c && c.key !== null && c.key.split(':')[0] === String(st.mtimeMs))", dies: ['LAG-2h'] },
   { id: 'M14', what: 'the cache compares the size only', file: KP, from: 'if (c && c.key !== null && c.key === statKey(st))', to: "if (c && c.key !== null && c.key.split(':')[2] === String(st.size))", dies: ['LAG-2h'] },
   { id: 'M15', what: 'a restore does not dirty the roster (Jim)', file: ST, from: 'return this.serial(agentId, () => { try { return this.restoreBackupNow(agentId, day); } finally { this.rosterDirty(); } });', to: 'return this.serial(agentId, () => this.restoreBackupNow(agentId, day));', dies: ['LAG-3f'] },
