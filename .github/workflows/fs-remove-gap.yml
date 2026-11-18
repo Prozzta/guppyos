@@ -21,7 +21,7 @@ on:
         description: Runs per race
         default: '7000'
   push:
-    branches: ['guppy/fs-remove-readdir-gap-108']
+    branches: ['guppy/fs-remove-readdir-gap-108*']
     paths:
       - resources/fs-handle/**
       - src/main/fsSafeRemove.ts
