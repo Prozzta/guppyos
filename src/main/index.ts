@@ -35,7 +35,9 @@ import { enqueueR5AfterIndex, reconcileQueueForHive, ReconcileApi, shouldRunR5 }
 import { createClaimDelivery, WORKING_SET_MAX_CHARS, type TaskRow } from './claims/delivery';
 import { reconcileApiForHive as createReconcileApiForHive, refreshReconcileQueueForHive, type ReconcileHiveDeps } from './claims/reconcileHive';
 import { WordPieceTokenizer, wordPieceConfigFromTokenizerJson } from './nativeMemory/wordpiece';
-import { readSourcesConfig } from './nativeMemory/sources';
+import { SourcesConfigCache } from './nativeMemory/sourcesCache';
+import { cardBadgesFromFleet } from './cardBadges';
+import { readFileTracked } from './atomicJson';
 import { DEFAULT_KEY_REGISTRY, loadRegistry, loadRegistryShared } from './claims/registry';
 import { CLAIM_LEDGER_CLAMP_ROW, CLAIMS_ALERT_KEY_MISSING, DERIVED_AGENT_ID, effectiveLevel, IMPLEMENTED_LEVEL, manifestEntry, type DeriveFn, type LedgerLevel, type ReadResult, type ReconcileItem, type UsageRec } from '../shared/claims';
 import { CodexVersionLog, codexNoDaemonGate, readCodexVersion } from './codexCli';
@@ -572,6 +574,9 @@ const hive = new HiveManager(
 );
 /** ZT-I3 §3.2-3.3: the board monitor (stale flags + the one explicit-archive auto-move). It
  *  re-runs on every applied ledger change, and on its own 60 s tick. */
+/** LAG-MAIN-SYNC-REMAINDER-108: memory-sources.json from memory (it was read from disk, on the main
+ *  thread, for every claim-level check). Main's own writers drop() it. */
+const sourcesConfig = new SourcesConfigCache();
 const boardMonitor = new BoardMonitor({
   hive,
   fleetSnapshot: () => hive.fleetSnapshotView(),
@@ -586,7 +591,7 @@ const boardMonitor = new BoardMonitor({
   // god only for a NEW decision item, batched).
   onFlags: () => {
     boardStatus.request();
-    try { floorDigest.run(); } catch (e) { console.error('[floor-digest]', e); }
+    void floorDigest.run().catch((e) => { console.error('[floor-digest]', e); });
   }
 });
 /** ZT-I3 §3.5: hive/board-status.md, rendered (never hand-kept). */
@@ -1746,7 +1751,7 @@ derivedClaims = new DerivedLive({
 /** C4: the derived writer's repo now: the floor's, else config, else a seeded floor's project folder once it is git. */
 function derivedRepoNow(): string | null {
   const root = hive.root(); const cfg = readConfig();
-  return floorRepo(root ? readSourcesConfig(root) : null, cfg.derivedClaimsRepo, cfg.registeredRepos?.[0] ?? null);
+  return floorRepo(root ? sourcesConfig.get(root) : null, cfg.derivedClaimsRepo, cfg.registeredRepos?.[0] ?? null);
 }
 /** CLAIMS-90 M5: the ledgers an agent writes. The derived ledger is indexed, anchored and rekeyed like
  *  any (claimLedgerAgents), but it has no memory.md to import or watch, no export and no R5 queue. */
@@ -1807,7 +1812,7 @@ function claimLevel(agentId: string): LedgerLevel {
   // W3: the per-agent manifest entry (memory-sources.json `ledger`) narrows the setting, as the
   // worker's discovery does: main and the worker compute the same effective level.
   const root = hive.root();
-  const floor = root ? readSourcesConfig(root) : null;
+  const floor = root ? sourcesConfig.get(root) : null;
   const agentEntry = floor ? manifestEntry(floor.ledger, agentId, floor.ledgerDefault) : undefined;
   const e = effectiveLevel(saved, agentEntry);
   const clampKey = `${String(saved)}|${String(agentEntry)}`;
@@ -1823,6 +1828,7 @@ hive.setClaimLedgerLevelProvider(claimLevel);
 hive.setNewHiveSeed((root) => {
   const project = readConfig().registeredRepos?.[0] ?? null;
   const wrote = seedFloorSources(root, project);
+  sourcesConfig.drop();
   hive.appendLog({ kind: 'claims-floor-seeded', wrote });
 });
 function claimsEndpoint(): ClaimsEndpointDeps | null {
@@ -1977,7 +1983,7 @@ const CLAIMS_IMPORT_WAIT_MS = 120_000;
 let claimsImport: { root: string; ready: Promise<void> } | null = null;
 /** The agents that may be above off: the registry plus the memory-sources.json `ledger` (S0 and mid-run). */
 function claimImportCandidates(root: string): string[] {
-  return [...Object.keys(hive.registry().agents), ...Object.keys(readSourcesConfig(root).ledger ?? {})];
+  return [...Object.keys(hive.registry().agents), ...Object.keys(sourcesConfig.get(root).ledger ?? {})];
 }
 function claimsImportReady(): Promise<void> {
   const root = hive.root(); const ep = claimsEndpoint();
@@ -2049,7 +2055,7 @@ const ledgerUi = createLedgerUi({
   level: (agentId) => claimLevel(agentId),
   savedLevel: () => readConfig().claimLedger,
   floor: () => {
-    const root = hive.root(); const f = root ? readSourcesConfig(root) : null;
+    const root = hive.root(); const f = root ? sourcesConfig.get(root) : null;
     return { ledgerDefault: f?.ledgerDefault, derivedRepo: derivedRepoNow() };
   },
   saveLevel: (level) => { writeConfig({ claimLedger: level }); },
@@ -2334,8 +2340,8 @@ function claimsBootstrapFor(root: string, store: ClaimStore): ClaimsBootstrap {
     now: () => Date.now(),
     activeAgents: () => Object.entries(hive.registry().agents).filter(([, a]) => a.archived !== true).map(([id]) => id),
     isIdle: (agentId, requester) => agentId === requester || workerWake.state(agentId).lifecycle === 'idle',
-    promote: (agentId) => { enableLedgerAgent(root, agentId); },
-    seedDefault: () => { enableLedgerDefault(root); },
+    promote: (agentId) => { enableLedgerAgent(root, agentId); sourcesConfig.drop(); },
+    seedDefault: () => { enableLedgerDefault(root); sourcesConfig.drop(); },
     importOne: async (agentId) => {
       const report = await shadowImport({ hiveRoot: root, append: makeW6Append(store), read: (a) => store.readLedger(a), log: (row) => hive.appendLog(row) }, agentId, { settle: true });
       return { refused: report.refused.map((r) => `${r.file}:${r.line}`) };
@@ -2551,7 +2557,7 @@ async function armMirrorCostGuard(): Promise<void> {
 }
 /** An auto-off or a re-arm: god's digest is re-run now, and the banner polls hive:integrity. */
 function mirrorSurfaced(): void {
-  try { floorDigest.run(); } catch (e) { console.error('[floor-digest]', e); }
+  void floorDigest.run().catch((e) => { console.error('[floor-digest]', e); });
 }
 /** SHOULD 5: DECSET 2004 / alt screen / app-cursor per provider, read from the mirror 5 s and 30 s after
  *  every spawn (a resume is a spawn), so framing decisions rest on measured rows. */
@@ -6770,27 +6776,15 @@ ipcMain.handle('hive:boardFlags', () => boardMonitor.flags());
 // messages waiting (fleet's inboxBacklog: mail not yet acted on, from the ledger).
 // ZT-I3/I4: the sidecar (status ages for the Kanban) and the floor digest text (Floor panel).
 ipcMain.handle('hive:taskMeta', () => hive.ledgerGuard.taskMeta().cards);
-ipcMain.handle('hive:floorDigest', () => {
+ipcMain.handle('hive:floorDigest', async () => {
   const root = hive.root();
   if (!root) return '';
-  try { return readFileSync(join(root, FLOOR_DIGEST_FILE), 'utf8'); } catch { return ''; }
+  try { return await readFileTracked(join(root, FLOOR_DIGEST_FILE), 'utf8'); } catch { return ''; }
 });
-ipcMain.handle('hive:cardBadges', () => {
-  const inboxBacklog: Record<string, number> = {};
-  const inboxHeld: Record<string, number> = {};
-  const heldUntil: Record<string, number> = {};
-  try {
-    for (const [id, a] of Object.entries(hive.registry().agents)) if (!a.archived) {
-      const mail = fleetMail(id);
-      inboxBacklog[id] = mail.inboxBacklog;
-      if (mail.inboxHeld && mail.heldUntil) { inboxHeld[id] = mail.inboxHeld; heldUntil[id] = mail.heldUntil; }
-    }
-  } catch { /* hive unavailable: no mail badges */ }
-  let silentTurns: Record<string, SilentTurnView> = {};
-  try { silentTurns = silentTurnsById(Date.now()); } catch { /* no silent badges */ }
-  return { flags: boardMonitor.flags(), inboxBacklog, inboxHeld, heldUntil, silentTurns };
-});
-ipcMain.handle('hive:log', (_evt, n: unknown) => hive.logTail(typeof n === 'number' ? n : 200));
+// LAG-MAIN-SYNC-REMAINDER-108: from the fleet snapshot main keeps (cardBadges.ts): the 8 s beat
+// already computed each agent's mail fields and silent turn, so this poll touches no file.
+ipcMain.handle('hive:cardBadges', () => cardBadgesFromFleet(hive.fleetSnapshotView(), boardMonitor.flags()));
+ipcMain.handle('hive:log', (_evt, n: unknown) => hive.logTailAsync(typeof n === 'number' ? n : 200));
 ipcMain.handle('hive:memory', (_evt, id: unknown) => (typeof id === 'string' ? hive.memory(id) : ''));
 // ZT-I1-MAIL §11.8 #15: the Threads panel reads inbox/ AND inbox/.done/ with the ledger state as a
 // column, so the view does not empty when the harness archives at Stop.

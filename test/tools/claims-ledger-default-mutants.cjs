@@ -54,7 +54,7 @@ const MUTANTS = [
   ['C4-j a seeded floor reads a relative project folder live', SEED, "  return typeof projectFolder === 'string' && isAbsolute(projectFolder) &&", "  return typeof projectFolder === 'string' &&"],
   ['C4-c config beats the floor repo', SEED, "  if (typeof floorRepo === 'string' && floorRepo.trim()) return floorRepo;\n", ''],
   ['C4-d the manifest reader drops derivedRepo', SOURCES, '...(derivedRepo ? { derivedRepo } : {})', ''],
-  ['C4-e the derived writer reads config only', MAIN, 'return floorRepo(root ? readSourcesConfig(root) : null, cfg.derivedClaimsRepo, cfg.registeredRepos?.[0] ?? null);', 'return floorRepo(null, cfg.derivedClaimsRepo, cfg.registeredRepos?.[0] ?? null);'],
+  ['C4-e the derived writer reads config only', MAIN, 'return floorRepo(root ? sourcesConfig.get(root) : null, cfg.derivedClaimsRepo, cfg.registeredRepos?.[0] ?? null);', 'return floorRepo(null, cfg.derivedClaimsRepo, cfg.registeredRepos?.[0] ?? null);'],
   ['C4-f the seed reads no project folder', MAIN, '  const project = readConfig().registeredRepos?.[0] ?? null;', '  const project = null;'],
   ['C5-a the summary has no floor', UI, ', ...(floor ? { floor } : {}) };', ' };'],
   ['C5-b a garbled default shows as set', UI, "typeof f.ledgerDefault === 'string' && (LEDGER_LEVELS as readonly string[]).includes(f.ledgerDefault)", "typeof f.ledgerDefault === 'string'"],

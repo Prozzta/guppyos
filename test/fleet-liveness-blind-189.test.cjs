@@ -37,7 +37,7 @@ const agent = (agentId, over = {}) => ({
 });
 
 /** The digest scheduler on a fake clock, run every 5 minutes (the shipped cadence) for `forMs`. */
-function runDigest(mods, fleet, forMs) {
+async function runDigest(mods, fleet, forMs) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'md-fleet-blind-'));
   try {
     const clock = { now: T0 };
@@ -48,7 +48,7 @@ function runDigest(mods, fleet, forMs) {
       send: (m, from) => sent.push({ ...m, from, at: clock.now }), appendLog: () => {}
     };
     const digest = new mods.D.FloorDigest(host, () => mods.D.FLOOR_DIGEST_DEFAULTS, () => clock.now);
-    for (; clock.now <= T0 + forMs; clock.now += mods.D.FLOOR_DIGEST_DEFAULTS.digestEveryMs) digest.run();
+    for (; clock.now <= T0 + forMs; clock.now += mods.D.FLOOR_DIGEST_DEFAULTS.digestEveryMs) await digest.run();
     return sent;
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 }
@@ -56,7 +56,7 @@ function runDigest(mods, fleet, forMs) {
 const K = {
   /** Dwight's morning: active, last hook 09:29Z, nothing open, 5 unread. */
   async silentTurnReachesGod({ ST, D }) {
-    const sent = runDigest({ ST, D }, () => [agent('dwight', { mailWaiting: 5 })], 4 * 60 * MIN);
+    const sent = await runDigest({ ST, D }, () => [agent('dwight', { mailWaiting: 5 })], 4 * 60 * MIN);
     assert.equal(sent.length, 1, 'FIRES: A SILENT WORKING TURN REACHES GOD, ONCE (one silence = one decision)');
     const w = sent[0];
     assert.deepEqual([w.to, w.act, w.from], ['god', 'inform', 'digest']);
@@ -66,7 +66,7 @@ const K = {
   },
   /** The same agent, but its hooks keep coming every few minutes: never listed. */
   async hooksKeepItQuiet({ ST, D }) {
-    const sent = runDigest({ ST, D }, (now) => [agent('andy', { lastHookAt: now - ((now - T0) % (7 * MIN)) })], 4 * 60 * MIN);
+    const sent = await runDigest({ ST, D }, (now) => [agent('andy', { lastHookAt: now - ((now - T0) % (7 * MIN)) })], 4 * 60 * MIN);
     assert.equal(sent.length, 0, 'a turn whose hooks keep coming is not silent');
   },
   /** A tool call in progress is not silence: a 10-min foreground Bash and a 59-min suite. */
@@ -112,7 +112,7 @@ const K = {
   /** A new silence after the hooks came back is a new decision. */
   async newSilenceRearms({ ST, D }) {
     const back = T0 + 60 * MIN;
-    const sent = runDigest({ ST, D }, (now) => [agent('dwight', { lastHookAt: now < back ? T0 : back })], 3 * 60 * MIN);
+    const sent = await runDigest({ ST, D }, (now) => [agent('dwight', { lastHookAt: now < back ? T0 : back })], 3 * 60 * MIN);
     assert.deepEqual(sent.map((s) => s.body.match(/\[(silent-turn:[^\]]+)\]/)[1]), [`silent-turn:dwight:${T0}`, `silent-turn:dwight:${back}`]);
   },
   /** The digest lists it in floor-digest.md's decisions. */
@@ -178,11 +178,12 @@ test('FLEET-LIVENESS-BLIND: fleet.json, the card-badge IPC, the strip and the ca
   const snap = idx.slice(idx.indexOf('function writeFleetSnapshot(): void {'));
   assert.match(snap.slice(0, snap.indexOf('\n}\n')), /const silent = silentTurnsById\(now\);[^]*silentTurn: silent\[id\] \?\? null,/);
   assert.match(idx, /for \(const s of findSilentTurns\(silentTurnFacts\(\), now\)\) out\[s\.agentId\] = \{ kind: s\.kind, since: s\.since,/);
-  assert.match(idx, /try \{ silentTurns = silentTurnsById\(Date\.now\(\)\); \} catch/);
-  assert.match(idx, /const inboxHeld: Record<string, number> = \{\};/);
-  assert.match(idx, /const heldUntil: Record<string, number> = \{\};/);
-  assert.match(idx, /if \(mail\.inboxHeld && mail\.heldUntil\) \{ inboxHeld\[id\] = mail\.inboxHeld; heldUntil\[id\] = mail\.heldUntil; \}/);
-  assert.match(idx, /return \{ flags: boardMonitor\.flags\(\), inboxBacklog, inboxHeld, heldUntil, silentTurns \};/);
+  // LAG-MAIN-SYNC-REMAINDER-108: the IPC answers from that kept snapshot (cardBadges.ts), no file read.
+  assert.match(idx, /ipcMain\.handle\('hive:cardBadges', \(\) => cardBadgesFromFleet\(hive\.fleetSnapshotView\(\), boardMonitor\.flags\(\)\)\);/);
+  const cb = readSource('src/main/cardBadges.ts');
+  assert.match(cb, /const out: CardBadges<S> = \{ flags, inboxBacklog: \{\}, inboxHeld: \{\}, heldUntil: \{\}, silentTurns: \{\} \};/);
+  assert.match(cb, /if \(held && until\) \{ out\.inboxHeld\[a\.id\] = held; out\.heldUntil\[a\.id\] = until; \}/);
+  assert.match(cb, /if \(a\.silentTurn && typeof a\.silentTurn === 'object'\) out\.silentTurns\[a\.id\] = a\.silentTurn as S;/);
   const strip = readSource('src/renderer/src/components/AgentStrip.tsx');
   assert.match(strip, /setSilentByAgent\(same\(silent \?\? \{\}\)\);/);
   assert.match(strip, /silentTurn=\{silentByAgent\[a\.id\]\}/);

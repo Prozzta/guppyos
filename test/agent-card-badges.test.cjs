@@ -89,10 +89,13 @@ test('the strip feeds both badges from main (flags + messages waiting)', () => {
   assert.match(strip, /heldUntil=\{heldUntilByAgent\[a\.id\]\}/);
   assert.match(strip, /taskFlags=\{badgeByAgent\[a\.id\]\?\.flagged\}/);
   const index = codeOnly(readSource('src/main/index.ts'), 'index.ts');
-  assert.match(index, /ipcMain\.handle\('hive:cardBadges'/);
-  assert.match(index, /const mail = fleetMail\(id\);\n\s+inboxBacklog\[id\] = mail\.inboxBacklog/);
-  assert.match(index, /inboxHeld\[id\] = mail\.inboxHeld/);
-  assert.match(index, /heldUntil\[id\] = mail\.heldUntil/);
+  // LAG-MAIN-SYNC-REMAINDER-108: the handler answers from the kept fleet snapshot, whose rows carry
+  // the mail fields (fleetMail), and cardBadges.ts turns the rows into the three maps.
+  assert.match(index, /ipcMain\.handle\('hive:cardBadges', \(\) => cardBadgesFromFleet\(hive\.fleetSnapshotView\(\), boardMonitor\.flags\(\)\)\);/);
+  assert.match(index, /\.\.\.fleetMail\(id\),/);
+  const badges = codeOnly(readSource('src/main/cardBadges.ts'), 'cardBadges.ts');
+  assert.match(badges, /if \(backlog !== null\) out\.inboxBacklog\[a\.id\] = backlog;/);
+  assert.match(badges, /if \(held && until\) \{ out\.inboxHeld\[a\.id\] = held; out\.heldUntil\[a\.id\] = until; \}/);
 });
 
 test('Kanban status age: exact, bounded (">="), missing', () => {

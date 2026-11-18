@@ -106,11 +106,18 @@ export function safeRelativeMd(p: unknown): string | null {
 }
 
 export function readSourcesConfig(hiveRoot: string): SourcesConfig {
-  const empty: SourcesConfig = { topLevel: [], include: {} };
   const file = join(hiveRoot, SOURCES_CONFIG_FILE);
-  if (!existsSync(file)) return empty;
+  if (!existsSync(file)) return parseSourcesConfig(null);
+  try { return parseSourcesConfig(readFileSync(file, 'utf8')); } catch { return parseSourcesConfig(null); }
+}
+
+/** The config in a memory-sources.json's text. No file (null) or text that is not JSON is the
+ *  empty config. Shared by readSourcesConfig and main's cache (sourcesCache.ts). */
+export function parseSourcesConfig(text: string | null): SourcesConfig {
+  const empty: SourcesConfig = { topLevel: [], include: {} };
+  if (text === null) return empty;
   try {
-    const j = JSON.parse(readFileSync(file, 'utf8')) as Partial<SourcesConfig>;
+    const j = JSON.parse(text) as Partial<SourcesConfig>;
     const ledger: Record<string, unknown> = {};
     if (j.ledger && typeof j.ledger === 'object' && !Array.isArray(j.ledger)) for (const [k, v] of Object.entries(j.ledger)) ledger[k] = v;
     const topLevel = Array.isArray(j.topLevel) ? j.topLevel.filter((x): x is string => typeof x === 'string') : [];

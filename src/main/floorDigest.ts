@@ -13,9 +13,10 @@
  * `buildFloorDigest` and `decideGodWake` are pure; `FloorDigest` is the scheduler.
  */
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
-import { atomicWriteJson, renameWithRetry } from './atomicJson';
+import { atomicWriteJson, atomicWriteJsonAsync, atomicWriteTextAsync, readFileTracked, renameWithRetry } from './atomicJson';
 import type { BoardFlag } from '../shared/boardStale';
 import { firstOccurrenceById, type LedgerIssue } from '../shared/taskLedger';
 import { ageText } from '../shared/agentBadges';
@@ -74,12 +75,19 @@ export const ASKS_BACKSTOP_FILE = 'asks-backstop.json';
 export const ASKS_BACKSTOP_KEEP = 200;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+function parseBackstopClosed(text: string): DigestBackstopClosed[] {
+  const s = JSON.parse(text) as { closed?: unknown };
+  return Array.isArray(s?.closed) ? s.closed.filter((c): c is DigestBackstopClosed => !!c && typeof c === 'object'
+    && typeof (c as DigestBackstopClosed).id === 'string' && typeof (c as DigestBackstopClosed).at === 'number') : [];
+}
+
 export function readBackstopClosed(root: string): DigestBackstopClosed[] {
-  try {
-    const s = JSON.parse(readFileSync(join(root, 'state', ASKS_BACKSTOP_FILE), 'utf8')) as { closed?: unknown };
-    return Array.isArray(s?.closed) ? s.closed.filter((c): c is DigestBackstopClosed => !!c && typeof c === 'object'
-      && typeof (c as DigestBackstopClosed).id === 'string' && typeof (c as DigestBackstopClosed).at === 'number') : [];
-  } catch { return []; }
+  try { return parseBackstopClosed(readFileSync(join(root, 'state', ASKS_BACKSTOP_FILE), 'utf8')); } catch { return []; }
+}
+
+/** LAG-MAIN-SYNC-REMAINDER-108: the digest run's read, off the main thread. */
+export async function readBackstopClosedAsync(root: string): Promise<DigestBackstopClosed[]> {
+  try { return parseBackstopClosed(await readFileTracked(join(root, 'state', ASKS_BACKSTOP_FILE), 'utf8')); } catch { return []; }
 }
 
 export function recordBackstopClosed(root: string, add: readonly DigestBackstopClosed[], now: number): void {
@@ -96,12 +104,19 @@ export interface DigestFlaggedForHuman { agentId: string; name?: string; card: s
 export const NEEDS_HUMAN_FLAGGED_FILE = 'needs-human-flagged.json';
 export const NEEDS_HUMAN_FLAGGED_KEEP = 200;
 
+function parseFlaggedForHuman(text: string): DigestFlaggedForHuman[] {
+  const s = JSON.parse(text) as { flagged?: unknown };
+  return Array.isArray(s?.flagged) ? s.flagged.filter((c): c is DigestFlaggedForHuman => !!c && typeof c === 'object'
+    && typeof (c as DigestFlaggedForHuman).id === 'string' && typeof (c as DigestFlaggedForHuman).at === 'number') : [];
+}
+
 export function readFlaggedForHuman(root: string): DigestFlaggedForHuman[] {
-  try {
-    const s = JSON.parse(readFileSync(join(root, 'state', NEEDS_HUMAN_FLAGGED_FILE), 'utf8')) as { flagged?: unknown };
-    return Array.isArray(s?.flagged) ? s.flagged.filter((c): c is DigestFlaggedForHuman => !!c && typeof c === 'object'
-      && typeof (c as DigestFlaggedForHuman).id === 'string' && typeof (c as DigestFlaggedForHuman).at === 'number') : [];
-  } catch { return []; }
+  try { return parseFlaggedForHuman(readFileSync(join(root, 'state', NEEDS_HUMAN_FLAGGED_FILE), 'utf8')); } catch { return []; }
+}
+
+/** LAG-MAIN-SYNC-REMAINDER-108: the digest run's read, off the main thread. */
+export async function readFlaggedForHumanAsync(root: string): Promise<DigestFlaggedForHuman[]> {
+  try { return parseFlaggedForHuman(await readFileTracked(join(root, 'state', NEEDS_HUMAN_FLAGGED_FILE), 'utf8')); } catch { return []; }
 }
 
 export function recordFlaggedForHuman(root: string, add: readonly DigestFlaggedForHuman[], now: number): void {
@@ -477,6 +492,12 @@ export function writeTextAtomic(p: string, text: string): void {
 export class FloorDigest {
   private timer: ReturnType<typeof setInterval> | null = null;
   private lastMarkdownBody = '';
+  /** LAG-MAIN-SYNC-REMAINDER-108: runs are async and go one at a time, each after the one before
+   *  it, so a run always reads the woken state the last one saved (a flag change, the timer and
+   *  the mirror guard can all ask in the same turn, and god must be woken once). */
+  private chain: Promise<unknown> = Promise.resolve();
+  /** Raised by stop(): a run asked for before it writes nothing and wakes nobody. */
+  private gen = 0;
 
   constructor(
     private readonly host: FloorDigestHost,
@@ -488,18 +509,31 @@ export class FloorDigest {
     return this.host.fleetSnapshot ? fleetAgentsFromSnapshot(this.host.fleetSnapshot()) : readFleetAgents(root);
   }
 
-  private loadState(root: string): WakeState {
+  private async loadState(root: string): Promise<WakeState> {
     try {
-      const s = JSON.parse(readFileSync(join(root, 'state', DIGEST_WOKEN_FILE), 'utf8')) as WakeState;
+      const s = JSON.parse(await readFileTracked(join(root, 'state', DIGEST_WOKEN_FILE), 'utf8')) as WakeState;
       if (s && typeof s.woken === 'object' && s.woken) return { woken: s.woken, pendingSince: typeof s.pendingSince === 'number' ? s.pendingSince : null };
     } catch { /* first run */ }
     return { woken: {}, pendingSince: null };
   }
 
-  /** Build and write the digest, then wake god if the policy says so. Returns what it sent. */
-  run(): DecisionItem[] {
+  /** Build and write the digest, then wake god if the policy says so. Resolves with what it sent.
+   *  Every read and write of a hive file is async: a run used to hold the main thread for three
+   *  reads and two temp-file writes (2966 ms on a busy disk, 1.1.107). */
+  run(): Promise<DecisionItem[]> {
+    const gen = this.gen;
+    const p = this.chain.then(() => this.runOnce(gen));
+    this.chain = p.catch(() => undefined);
+    return p;
+  }
+
+  private async runOnce(gen: number): Promise<DecisionItem[]> {
+    const live = (): boolean => gen === this.gen;
     const root = this.host.root();
-    if (!root || !this.cfg().enabled) return [];
+    if (!live() || !root || !this.cfg().enabled) return [];
+    const [backstopClosed, flaggedForHuman] = await Promise.all([readBackstopClosedAsync(root), readFlaggedForHumanAsync(root)]);
+    if (!live()) return [];
+    // The floor's own state is read after the files, in one turn with the build: nothing is stale.
     const now = this.now();
     const { markdown, decisionItems: items } = buildFloorDigest({
       tasks: this.host.tasks(), meta: this.host.taskMeta(), flags: this.host.flags(),
@@ -515,16 +549,18 @@ export class FloorDigest {
       floorHold: (() => { try { return this.host.floorHold?.() ?? null; } catch { return null; } })(),
       modelHooks: (() => { try { return this.host.modelHooks?.() ?? []; } catch { return []; } })(),
       scratchDisk: (() => { try { const d = this.host.scratchDisk?.() ?? null; return d ? { ...d, budgetBytes: this.cfg().scratchDiskBudgetBytes } : null; } catch { return null; } })(),
-      backstopClosed: readBackstopClosed(root),
-      flaggedForHuman: readFlaggedForHuman(root)
+      backstopClosed,
+      flaggedForHuman
     });
     // The timestamp line changes every run; rewrite the file only when the content did.
     const body = markdown.split('\n').filter((l) => !l.startsWith('_Written by the harness')).join('\n');
     if (body !== this.lastMarkdownBody) {
-      try { writeTextAtomic(join(root, FLOOR_DIGEST_FILE), markdown); this.lastMarkdownBody = body; }
+      try { if (await atomicWriteTextAsync(join(root, FLOOR_DIGEST_FILE), markdown, live)) this.lastMarkdownBody = body; }
       catch (e) { this.host.appendLog({ kind: 'floor-digest-write-failed', error: String(e).slice(0, 300) }); }
     }
-    const before = this.loadState(root);
+    if (!live()) return [];
+    const before = await this.loadState(root);
+    if (!live()) return [];
     const { wake, state } = decideGodWake(items, before, now, this.cfg().wakeBatchMs);
     if (wake.length > 0) {
       // Jim: act INFORM. A request from 'digest' left god a reply obligation nobody could
@@ -533,7 +569,8 @@ export class FloorDigest {
       this.host.appendLog({ kind: 'floor-digest-wake', items: wake.map((i) => i.id) });
     }
     if (JSON.stringify(state) !== JSON.stringify(before)) {
-      try { mkdirSync(join(root, 'state'), { recursive: true }); atomicWriteJson(join(root, 'state', DIGEST_WOKEN_FILE), state); }
+      // Not withdrawn by a stop: the wake above is sent, and the state is what says so.
+      try { await mkdir(join(root, 'state'), { recursive: true }); await atomicWriteJsonAsync(join(root, 'state', DIGEST_WOKEN_FILE), state); }
       catch (e) { this.host.appendLog({ kind: 'floor-digest-write-failed', error: String(e).slice(0, 300) }); }
     }
     return wake;
@@ -541,7 +578,7 @@ export class FloorDigest {
 
   start(): void {
     this.stop();
-    const tick = (): void => { try { this.run(); } catch (e) { try { this.host.appendLog({ kind: 'floor-digest-error', error: String(e).slice(0, 300) }); } catch { /* noop */ } } };
+    const tick = (): void => { void this.run().catch((e) => { try { this.host.appendLog({ kind: 'floor-digest-error', error: String(e).slice(0, 300) }); } catch { /* noop */ } }); };
     tick();
     this.timer = setInterval(tick, this.cfg().digestEveryMs);
     this.timer.unref?.();
@@ -549,6 +586,7 @@ export class FloorDigest {
 
   stop(): void {
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
+    this.gen++;
     this.lastMarkdownBody = '';
   }
 }

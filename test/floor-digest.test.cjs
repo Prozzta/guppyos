@@ -106,32 +106,32 @@ function rig(t, flags) {
   return { root, clock, sent, digest };
 }
 
-test('the scheduler writes floor-digest.md and sends ONE decision wake as "digest", once (M15)', (t) => {
+test('the scheduler writes floor-digest.md and sends ONE decision wake as "digest", once (M15)', async (t) => {
   const flags = { current: [flag('A', 'STALE', true), flag('A', 'DOING_MANY', false)] };
   const r = rig(t, flags);
-  r.digest.run();
+  await r.digest.run();
   assert.ok(fs.existsSync(path.join(r.root, 'floor-digest.md')));
   assert.equal(r.sent.length, 0, 'inside the batch window');
   r.clock.now += 10 * MIN;
-  r.digest.run();
+  await r.digest.run();
   assert.equal(r.sent.length, 1);
   assert.deepEqual([r.sent[0].to, r.sent[0].act, r.sent[0].subject, r.sent[0].from], ['god', 'inform', 'Floor: 1 decision(s)', 'digest']);
   assert.match(r.sent[0].body, /^- \[stale:A:2026-10-01\] A: STALE evidence - still doing\?/);
   assert.doesNotMatch(r.sent[0].body, /DOING_MANY/, 'informational flags never reach the wake');
   r.clock.now += 60 * MIN;
-  r.digest.run();
+  await r.digest.run();
   assert.equal(r.sent.length, 1, 'the same decision never wakes god twice');
   // The woken set survives a restart (state/digest-woken.json).
   const again = new FloorDigest({ ...r.digest.host }, () => ({ ...FLOOR_DIGEST_DEFAULTS, wakeBatchMs: 0 }), () => r.clock.now);
-  again.run();
+  await again.run();
   assert.equal(r.sent.length, 1);
 });
 
-test('no decisions: the digest is still written and god is not woken', (t) => {
+test('no decisions: the digest is still written and god is not woken', async (t) => {
   const r = rig(t, { current: [flag('A', 'ASSIGNEE_ARCHIVED', false)] });
   r.clock.now += 60 * MIN;
-  r.digest.run();
-  r.digest.run();
+  await r.digest.run();
+  await r.digest.run();
   assert.equal(r.sent.length, 0);
   assert.match(fs.readFileSync(path.join(r.root, 'floor-digest.md'), 'utf8'), /## Decisions needed\n\nNone\./);
 });
@@ -160,7 +160,7 @@ test('a digest wake is actionable for god but leaves NO reply obligation (Jim S5
     root: () => root, tasks: () => ({ tasks: [] }), taskMeta: () => ({}), ledgerIssues: () => [],
     flags: () => [flag('A', 'ASSIGNEE_STUCK', true)], send: (m, from) => { hive.send(m, from); }, appendLog: () => {}
   }, () => ({ ...FLOOR_DIGEST_DEFAULTS, wakeBatchMs: 0 }), () => clock.now);
-  assert.equal(digest.run().length, 1);
+  assert.equal((await digest.run()).length, 1);
   const f = R.fleetMailFields(hive.mail, 'god-1');
   assert.equal(R.actionableBacklog(hive.mail, 'god-1'), 1, 'god sees it as actionable mail');
   assert.deepEqual([f.openRequestCount, f.awaitingReplyCount], [0, 0], 'and owes nobody a reply');

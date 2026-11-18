@@ -28,7 +28,7 @@ import { promises as fsPromises } from 'node:fs';
 import { basename, join, dirname, isAbsolute, win32, posix } from 'node:path';
 import { homedir } from 'node:os';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { AppendFile, LOG_KEEP_ROTATED, rotatedFiles } from './appendLog';
+import { AppendFile, LOG_KEEP_ROTATED, filesInOrderAsync, rotatedFiles } from './appendLog';
 import { GOD_ADDRESSES, MailCardIndex, NO_CARD, indexEntries, indexLinkContext, isNoCard, linkMail, replyChainGap, resolveMailTo, TRUSTED_METHODS, type LinkContext, type MailLink } from './mailCards';
 import { atomicWriteJson as atomicWriteJsonFile, atomicWriteJsonAsync, atomicWriteTextAsync, readFileTracked } from './atomicJson';
 import { flushAppendsSync } from './writeBehind';
@@ -460,6 +460,22 @@ export function outboxDedupKey(from: string, msg: Pick<HiveMessage, 'to' | 'act'
  *  (~170 B each on this floor) land in one read with room to spare; it quadruples from
  *  here if a caller asks for more than fits, so a large `n` still works, just not for free. */
 const LOG_TAIL_WINDOW_BYTES = 256 * 1024;
+
+/** One window of a bounded tail read (the last `want` bytes of a `size`-byte log, as `text`):
+ *  the last `n` rows when the window holds them, or null when it must grow. Shared by the
+ *  synchronous tail and the async one, so the two cannot answer differently. */
+function tailWindowRows(text: string, want: number, size: number, n: number, parse: (l: string) => unknown): unknown[] | null {
+  // A window that starts mid-file almost certainly starts mid-LINE. Drop that
+  // fragment: keeping it would hand back a corrupt row, and JSON.parse failing on
+  // it would surface as a bogus {raw} event rather than an error anyone notices.
+  if (size - want > 0) {
+    const nl = text.indexOf('\n');
+    if (nl === -1) return want >= size ? [] : null;
+    text = text.slice(nl + 1);
+  }
+  const lines = text.split('\n').filter(Boolean);
+  return lines.length >= n || want >= size ? lines.slice(-n).map(parse) : null;
+}
 
 function sleepSync(ms: number): void {
   const sab = new SharedArrayBuffer(4);
@@ -6665,20 +6681,10 @@ export class HiveManager {
         // Grow the window until it holds n+1 line starts (so we know the first line in it
         // is whole) or we have read the entire file.
         for (let want = Math.min(size, LOG_TAIL_WINDOW_BYTES); ; want = Math.min(size, want * 4)) {
-          const from = size - want;
           const buf = Buffer.alloc(want);
-          readSync(fd, buf, 0, want, from);
-          let text = buf.toString('utf8');
-          // A window that starts mid-file almost certainly starts mid-LINE. Drop that
-          // fragment: keeping it would hand back a corrupt row, and JSON.parse failing on
-          // it would surface as a bogus {raw} event rather than an error anyone notices.
-          if (from > 0) {
-            const nl = text.indexOf('\n');
-            if (nl === -1) { if (want >= size) return []; continue; }
-            text = text.slice(nl + 1);
-          }
-          const lines = text.split('\n').filter(Boolean);
-          if (lines.length >= n || want >= size) return lines.slice(-n).map(parse);
+          readSync(fd, buf, 0, want, size - want);
+          const rows = tailWindowRows(buf.toString('utf8'), want, size, n, parse);
+          if (rows) return rows;
         }
       } finally { if (fd !== null) closeSync(fd); }
     } catch {
@@ -6687,6 +6693,45 @@ export class HiveManager {
       const lines = readFileSync(file, 'utf8').trim().split('\n').filter(Boolean);
       return lines.slice(-n).map(parse);
     }
+  }
+
+  /** LAG-MAIN-SYNC-REMAINDER-108: logTail for the Log panel's poll (`hive:log`). The same rows,
+   *  with the folder listing, the stat, the open and the reads all off the main thread: the
+   *  synchronous tail listed the whole hive folder and opened the log on every poll. */
+  async logTailAsync(n = 200): Promise<unknown[]> {
+    const root = this.root();
+    if (!root || n <= 0) return [];
+    const files = await filesInOrderAsync(join(root, 'log.jsonl'));
+    const parse = (l: string): unknown => { try { return JSON.parse(l); } catch { return { raw: l }; } };
+    let rows: unknown[] = [];
+    for (let i = files.length - 1; i >= 0 && rows.length < n; i--) {
+      rows = [...await this.fileTailAsync(files[i], n - rows.length, parse), ...rows];
+    }
+    return rows;
+  }
+
+  /** fileTail, async. A file that is not there (no live log yet) has no rows. */
+  private async fileTailAsync(file: string, n: number, parse: (l: string) => unknown): Promise<unknown[]> {
+    if (n <= 0) return [];
+    let fh: fsPromises.FileHandle;
+    try { fh = await fsPromises.open(file, 'r'); }
+    catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return []; return this.wholeFileTailAsync(file, n, parse); }
+    try {
+      const size = (await fh.stat()).size;
+      if (size === 0) return [];
+      for (let want = Math.min(size, LOG_TAIL_WINDOW_BYTES); ; want = Math.min(size, want * 4)) {
+        const buf = Buffer.alloc(want);
+        await fh.read(buf, 0, want, size - want);
+        const rows = tailWindowRows(buf.toString('utf8'), want, size, n, parse);
+        if (rows) return rows;
+      }
+    } catch { return this.wholeFileTailAsync(file, n, parse); }
+    finally { await fh.close().catch(() => undefined); }
+  }
+
+  private async wholeFileTailAsync(file: string, n: number, parse: (l: string) => unknown): Promise<unknown[]> {
+    const lines = (await fsPromises.readFile(file, 'utf8')).trim().split('\n').filter(Boolean);
+    return lines.slice(-n).map(parse);
   }
 
   private listMessages(dir: string): HiveMessage[] {

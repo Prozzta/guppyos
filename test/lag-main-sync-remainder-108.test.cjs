@@ -323,6 +323,39 @@ test('the sources cache checks the file on its own clock, with no caller asking 
   assert.equal(checks, at, 'dispose() stops the checks');
 });
 
+test('a check under way when main writes the file does not put the old config back', async (t) => {
+  const SourcesConfigCache = added('src/main/nativeMemory/sourcesCache.ts', 'SourcesConfigCache');
+  const root = fs.mkdtempSync(path.join(JAIL, 'sources-r-'));
+  const file = path.join(root, SOURCES_CONFIG_FILE);
+  fs.writeFileSync(file, JSON.stringify({ topLevel: [], include: {}, ledger: { 'andy-1': 'off' } }), 'utf8');
+  const cache = new SourcesConfigCache();
+  t.after(() => cache.dispose());
+  assert.equal(cache.get(root).ledger['andy-1'], 'off');
+  // Hold the check's read: it has the old text in hand and has not answered yet.
+  const fsp = require('node:fs/promises');
+  const realRead = fsp.readFile;
+  let release; let reads = 0;
+  const gate = new Promise((r) => { release = r; });
+  fsp.readFile = async (p, ...rest) => {
+    if (path.resolve(String(p)) !== path.resolve(file)) return realRead(p, ...rest);
+    reads++;
+    const old = await realRead(p, ...rest);
+    await gate;
+    return old;
+  };
+  t.after(() => { fsp.readFile = realRead; });
+  const under_way = cache.refresh(root);
+  while (reads < 1) await new Promise((r) => setImmediate(r));
+  // Main promotes the agent (its own write, then drop) and reads the level at once.
+  fs.writeFileSync(file, JSON.stringify({ topLevel: [], include: {}, ledger: { 'andy-1': 'writer' } }), 'utf8');
+  cache.drop();
+  assert.equal(cache.get(root).ledger['andy-1'], 'writer');
+  release();
+  await under_way;
+  assert.equal(reads, 1, 'the held read is the check (the test is not vacuous)');
+  assert.equal(cache.get(root).ledger['andy-1'], 'writer', 'the late answer of the old check is not kept');
+});
+
 // ── wiring ──────────────────────────────────────────────────────────────────────────────────
 test('main wiring: the five paths use the answers above', () => {
   const index = codeOnly(readSource('src/main/index.ts'), 'index.ts');

@@ -399,7 +399,7 @@ test('surfaces: a digest decision for god per off, the floor notice, and term re
   // The scheduler passes the host's status through (and a throwing host is no item).
   const root = fs.mkdtempSync(path.join(JAIL, 'digest-'));
   const host = { root: () => root, tasks: () => ({ tasks: [] }), taskMeta: () => ({}), flags: () => [], ledgerIssues: () => [], mirrorOff: () => off, send: () => {}, appendLog: () => {} };
-  new D.FloorDigest(host, undefined, () => now).run();
+  await new D.FloorDigest(host, undefined, () => now).run();
   assert.match(fs.readFileSync(path.join(root, D.FLOOR_DIGEST_FILE), 'utf8'), /mirror-off:/);
   const notice = COST.mirrorOffNotice(off, now);
   assert.equal(notice.error, 'mirror-auto-off');
@@ -425,7 +425,7 @@ test('WIRING: measured parse, ELU, spawn grace, re-arm, and the off surfaced to 
   assert.match(arm, /enabled: \(\) => readConfig\(\)\.terminalMirror !== false,/, 'the Human\'s config off is read at re-arm time');
   assert.doesNotMatch(arm, /clearInterval\(timer\)|eld\.disable\(\)/, 'an off never stops the sampler: it must be able to re-arm');
   assert.match(arm, /mirrorGuard = guard;/);
-  assert.match(idx, /function mirrorSurfaced\(\): void \{\n  try \{ floorDigest\.run\(\); \}/);
+  assert.match(idx, /function mirrorSurfaced\(\): void \{\n  void floorDigest\.run\(\)\.catch\(/);
   assert.ok(idx.indexOf('let mirrorGuard: MirrorCostGuard | null = null;') < idx.indexOf('const floorDigest = new FloorDigest({'), 'declared before the digest that reads it');
   assert.match(idx, /mirrorOff: \(\) => mirrorGuard\?\.status\(\) \?\? null,\n  send: \(msg, from\)/, 'the digest host');
   assert.match(idx, /ipcMain\.handle\('hive:integrity', async \(\) => \{\n  const off = mirrorGuard\?\.status\(\) \?\? null;\n  const issues = await hive\.integrityIssuesAsync\(\);\n  return off \? \[\.\.\.issues, mirrorOffNotice\(off, Date\.now\(\)\)\] : issues;/, 'the floor banner uses the off-main integrity scan');
