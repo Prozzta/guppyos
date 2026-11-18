@@ -24,6 +24,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { nodeEnv } = require('./tools/node-env.cjs');
 const { spawn } = require('node:child_process');
 const R = require('./tools/run-tests.cjs');
 const W = require('./tools/file-watchdog.cjs');
@@ -272,7 +273,7 @@ async function startFile(dir, exe, src = FILE, env = {}) {
   const opt = `--require "${R.FILE_JOB_PRELOAD.split(path.sep).join('/')}"`;
   fs.writeFileSync(path.join(dir, 'f.cjs'), src);
   const f = spawn(process.execPath, [path.join(dir, 'f.cjs')], { cwd: dir, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
-    env: { ...process.env, ...env, NODE_TEST_CONTEXT: 'child', NODE_OPTIONS: opt, GUPPY_FILE_JOB_EXE: exe, GUPPY_FILE_JOB_OPT: opt } });
+    env: nodeEnv({ ...process.env, ...env, NODE_TEST_CONTEXT: 'child', NODE_OPTIONS: opt, GUPPY_FILE_JOB_EXE: exe, GUPPY_FILE_JOB_OPT: opt }) });
   const bornMs = Date.now();
   let out = ''; let errText = '';
   f.stdout.setEncoding('utf8'); f.stdout.on('data', (d) => { out += d; });

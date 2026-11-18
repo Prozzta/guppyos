@@ -134,6 +134,9 @@ const E = JSON.stringify(FAKE);
 // so FAKE is the REAL Electron and these scripts' children inherit ELECTRON_RUN_AS_NODE (node, never asked
 // about): the E2E premise cannot hold there, and without the key they would start real Electron apps.
 const NODE_ONLY = process.versions.electron ? 'node-only: under the Electron leg the stand-in electron.exe is the real Electron (a hard link to process.execPath); run this file under node' : false;
+// e2eSingleFile proves nothing there either: heavy-preload.cjs turns its spawn guard off whenever
+// process.versions.electron is set, so "runs at once" holds with or without the fix (Jim NIT 2).
+const NODE_ONLY_GUARD_OFF = process.versions.electron ? 'node-only: under the Electron leg heavy-preload.cjs has its spawn guard off (versions.electron is set), so a single file always runs at once and the test is vacuous; run this file under node' : false;
 const N = JSON.stringify(process.execPath);
 // Jim's shape: a node script that starts (hidden) Electron twice, one after the other.
 fs.writeFileSync(path.join(FIX, 'launch.cjs'), `const { spawn } = require('node:child_process');
@@ -274,7 +277,7 @@ K.e2eSingleFile = async (t, M = HJ, preload = PRELOAD) => {
   assert.doesNotMatch(r.stderr, /waiting for the heavy-job slot/);
   assert.equal(b.lock.snapshot()[0].agentId, 'b');
 };
-test('E2E: a single test file started by a script runs at once while another agent holds (HEAVY-RESERVATION-BIND-108 fix 2)', { timeout: 60_000 }, (t) => K.e2eSingleFile(t));
+test('E2E: a single test file started by a script runs at once while another agent holds (HEAVY-RESERVATION-BIND-108 fix 2)', { timeout: 60_000, skip: NODE_ONLY_GUARD_OFF }, (t) => K.e2eSingleFile(t));
 
 // ─── MUTANT CENSUS ────────────────────────────────────────────────────────────────────────────────
 

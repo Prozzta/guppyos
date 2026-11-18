@@ -19,6 +19,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { nodeEnv } = require('./tools/node-env.cjs');
 const { spawnSync } = require('node:child_process');
 const loadTs = require('./load-ts.cjs');
 
@@ -289,7 +290,7 @@ test('backfill: MailLedger and two-party copies only; a forged inbox file and se
 test('backfill script: refuses the live hive and a hive under the app\'s user data; writes on a copy', (t) => {
   const { root } = fixtureHive(t);
   const script = path.join(__dirname, '..', 'scripts', 'claims-mailcard-backfill.cjs');
-  const run = (env) => spawnSync(process.execPath, [script, '--hive', root, '--now', '2026-10-24T17:53:49Z'], { encoding: 'utf8', env: { ...process.env, ...env } });
+  const run = (env) => spawnSync(process.execPath, [script, '--hive', root, '--now', '2026-10-24T17:53:49Z'], { encoding: 'utf8', env: nodeEnv({ ...process.env, ...env }) });
   const live = run({ MUNDER_HIVE_ROOT: path.dirname(root) });
   assert.equal(live.status, 2);
   assert.match(live.stderr, /never the live hive/);

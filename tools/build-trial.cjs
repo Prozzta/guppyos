@@ -3,13 +3,14 @@
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
+const { nodeEnv } = require('../test/tools/node-env.cjs');
 
 function trialEnv(base = process.env) {
   return { ...base, GUPPY_TRIAL_BUILD: '1' };
 }
 
 function run(command, args, env, spawn = spawnSync) {
-  const result = spawn(command, args, { cwd: path.resolve(__dirname, '..'), env, stdio: 'inherit' });
+  const result = spawn(command, args, { cwd: path.resolve(__dirname, '..'), env: nodeEnv(env), stdio: 'inherit' });
   if (result.error) throw result.error;
   if (result.status !== 0) process.exit(result.status ?? 1);
 }

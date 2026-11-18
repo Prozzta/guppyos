@@ -7,7 +7,7 @@
  * Electron app (drill-tree-183: an allowlisted env dropped the key and an app came up). Every
  * spawn of process.execPath whose env is not process.env itself goes through nodeEnv().
  *
- * nodeEnv(env) returns a COPY of env (default process.env). When this process is Electron
+ * nodeEnv(env) returns a COPY of env (process.env when env is null or undefined). When this process is Electron
  * (process.versions.electron is set) the copy carries ELECTRON_RUN_AS_NODE=1; under plain node
  * nothing is added, so a node run's child env is byte-for-byte what the caller built.
  *
@@ -19,8 +19,9 @@
  */
 const KEY = 'ELECTRON_RUN_AS_NODE';
 
-function nodeEnv(env = process.env, versions = process.versions) {
-  const out = { ...env };
+function nodeEnv(env, versions = process.versions) {
+  // null as well as undefined means process.env: { ...null } would be {} and drop PATH and the rest.
+  const out = { ...(env ?? process.env) };
   if (versions && versions.electron) out[KEY] = '1';
   return out;
 }

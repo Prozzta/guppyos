@@ -19,6 +19,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const net = require('node:net');
 const path = require('node:path');
+const { nodeEnv } = require('./tools/node-env.cjs');
 const { spawn } = require('node:child_process');
 const loadTs = require('./load-ts.cjs');
 
@@ -67,7 +68,7 @@ function runShim(source, args, env, stdin, { pre = 0, post = 0, sentinel = '' } 
     const file = path.join(JAIL, `shim-${Math.random().toString(36).slice(2)}.cjs`);
     fs.writeFileSync(file, source);
     const t0 = Date.now();
-    const ch = spawn(process.execPath, ['--require', PRELOAD, file, ...args], { env: { ...process.env, ...env, SHIM_TEST_PRE_MS: String(pre), SHIM_TEST_POST_MS: String(post), SHIM_TEST_SENTINEL: sentinel }, stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
+    const ch = spawn(process.execPath, ['--require', PRELOAD, file, ...args], { env: nodeEnv({ ...process.env, ...env, SHIM_TEST_PRE_MS: String(pre), SHIM_TEST_POST_MS: String(post), SHIM_TEST_SENTINEL: sentinel }), stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
     let out = ''; ch.stdout.on('data', (d) => { out += d; });
     const guard = setTimeout(() => { try { ch.kill(); } catch { /* gone */ } }, 30_000);
     ch.on('close', () => { clearTimeout(guard); resolve({ out, ms: Date.now() - t0 }); });

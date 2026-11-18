@@ -12,7 +12,12 @@ require('./tools/own-job.cjs');
  *     tools/ and scripts/ whose env is not visibly process.env-derived or wrapped in nodeEnv()
  *     (test/tools/node-env.cjs). Any finding fails here, naming file:line and why.
  *  2. TEETH: the lint flags each unsafe shape (allowlist, parameter, this.env, a deleted key, a rest
- *     destructure, an alias, a helper fed [process.execPath, ...]) and passes each safe one.
+ *     destructure, an alias, a helper fed [process.execPath, ...]) and passes each safe one. Jim's
+ *     audit shapes each have their own subtest: a parameter used as the command, destructured /
+ *     element-access / chained aliases, exec templates, spreads or assigns of unknown objects,
+ *     writes and deletes of the key (process.env included), options mutated after creation,
+ *     fork (it always runs process.execPath unless its execPath option says otherwise), and a
+ *     scan that does not skip files lacking the literal 'process.execPath'.
  *  3. nodeEnv adds the key only under Electron, and always returns a copy.
  *  4. PtyManager spawns (command: process.execPath, env {}) are safe because buildPtyEnv keeps the
  *     key from the parent: pinned here so a strip there cannot reopen the hole unseen.
@@ -20,12 +25,14 @@ require('./tools/own-job.cjs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
+const fs = require('node:fs');
+const os = require('node:os');
 const { analyzeSource, scan, KEY } = require('./tools/execpath-env-lint.cjs');
 const { nodeEnv } = require('./tools/node-env.cjs');
 const loadTs = require('./load-ts.cjs');
 
 const REPO = path.resolve(__dirname, '..');
-const HEAD = "const { spawn, spawnSync, execFileSync, fork } = require('node:child_process');\nconst { nodeEnv } = require('./tools/node-env.cjs');\n";
+const HEAD = "const { spawn, spawnSync, execFileSync, exec, execSync, fork } = require('node:child_process');\nconst { nodeEnv } = require('./tools/node-env.cjs');\n";
 const lint = (body) => analyzeSource(HEAD + body, 'fixture.cjs');
 
 test('THE TREE: every spawn of process.execPath keeps ELECTRON_RUN_AS_NODE under Electron', () => {
@@ -53,12 +60,52 @@ test('TEETH: each unsafe env shape is a finding', () => {
     'opaque options': "function sp(args, opts) { return spawnSync(process.execPath, args, opts); }",
     'an options spread with no env': "const sp = (args, opts) => spawnSync(process.execPath, args, { ...opts, stdio: 'pipe' });",
     'a reassigned env': "let env = { ...process.env }; env = { PATH: 'x' }; spawn(process.execPath, [], { env });",
-    'fork with an allowlist': "fork('child.cjs', [], { env: { PATH: 'x' } }); fork(process.execPath, [], { env: { PATH: 'x' } });"
+    'fork with an allowlist': "fork(process.execPath, [], { env: { PATH: 'x' } });"
   };
   for (const [name, body] of Object.entries(unsafe)) {
     const f = lint(body);
     assert.equal(f.length, 1, `${name}: ${JSON.stringify(f)}`);
   }
+});
+
+// Jim's audit SHOULD: shapes the first lint missed. Each one is its own subtest so a miss names its shape;
+// every one was red against the lint at f76df0fd.
+test('TEETH (Jim SHOULD): each shape the first lint missed is a finding', async (t) => {
+  const unsafe = {
+    'a helper whose parameter is the command': "function run(cmd, args) { return spawnSync(cmd, args, { env: { PATH: 'x' } }); } run(process.execPath, ['-v']);",
+    'a destructured execPath': "const { execPath } = process; spawn(execPath, [], { env: { PATH: 'x' } });",
+    'a renamed destructure': "const { execPath: NODE } = process; spawn(NODE, [], { env: {} });",
+    "element access process['execPath']": "spawn(process['execPath'], [], { env: { PATH: 'x' } });",
+    'a chained alias': "const A = process.execPath; const B = A; let C; C = B; spawn(C, [], { env: {} });",
+    'execSync with a template': "execSync(`\"${process.execPath}\" -v`, { env: { PATH: 'x' } });",
+    'exec with a concatenation': "exec('\"' + process.execPath + '\" a.cjs', { env: {} }, () => {});",
+    'Object.assign of a parameter onto a process.env copy': "function bare(extra) { const env = { ...process.env }; return Object.assign(env, extra); } spawn(process.execPath, [], { env: bare({}) });",
+    'a parameter spread after process.env': "function run(o) { return spawn(process.execPath, [], { env: { ...process.env, ...o } }); }",
+    'env[KEY] = undefined': "const KEY = 'ELECTRON_RUN_AS_NODE'; const env = { ...process.env }; env[KEY] = undefined; spawn(process.execPath, [], { env });",
+    "env['ELECTRON_RUN_AS_NODE'] = ''": "const env = { ...process.env }; env['ELECTRON_RUN_AS_NODE'] = ''; spawn(process.execPath, [], { env });",
+    'Object.assign blanking the key': "const env = { ...process.env }; Object.assign(env, { ELECTRON_RUN_AS_NODE: undefined }); spawn(process.execPath, [], { env });",
+    'delete o.env.KEY': "const o = { env: { ...process.env } }; delete o.env.ELECTRON_RUN_AS_NODE; spawn(process.execPath, [], o);",
+    'delete process.env.KEY, then an inherited env': "delete process.env.ELECTRON_RUN_AS_NODE; spawnSync(process.execPath, ['-v']);",
+    'a computed key set undefined': "const KEY = 'ELECTRON_RUN_AS_NODE'; spawn(process.execPath, [], { env: { ...process.env, [KEY]: undefined } });",
+    'options env replaced after creation': "const o = { env: { ...process.env } }; o.env = { PATH: 'x' }; spawn(process.execPath, [], o);",
+    "fork's execPath option": "fork('child.cjs', [], { execPath: process.execPath, env: { PATH: 'x' } });",
+    'fork of a script (it runs process.execPath)': "fork('child.cjs', [], { env: { PATH: 'x' } });"
+  };
+  for (const [name, body] of Object.entries(unsafe)) {
+    await t.test(name, () => {
+      const f = lint(body);
+      assert.equal(f.length, 1, `${name}: ${JSON.stringify(f)}`);
+    });
+  }
+  await t.test('the scan reads a file without the literal process.execPath', (st) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'execpath-prefilter-'));
+    st.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    fs.mkdirSync(path.join(root, 'test'));
+    fs.writeFileSync(path.join(root, 'test', 'alias.cjs'), "const { spawn } = require('child_process');\nconst { execPath: N } = process;\nspawn(N, [], { env: {} });\n");
+    fs.writeFileSync(path.join(root, 'test', 'fork.cjs'), "const { fork } = require('child_process');\nfork('c.cjs', [], { env: {} });\n");
+    const r = scan(root);
+    assert.deepEqual(r.findings.map((f) => `${f.file}:${f.line}`).sort(), ['test/alias.cjs:3', 'test/fork.cjs:2']);
+  });
 });
 
 test('TEETH: each safe env shape passes, and an electron.exe launch is not matched', () => {
@@ -70,12 +117,19 @@ test('TEETH: each safe env shape passes, and an electron.exe launch is not match
     'nodeEnv of an allowlist': "spawn(process.execPath, ['a'], { env: nodeEnv({ PATH: 'x' }) });",
     'nodeEnv of a parameter': "function run(env) { return spawn(process.execPath, [], { env: nodeEnv(env) }); }",
     'the key set': "spawn(process.execPath, [], { env: { PATH: 'x', ELECTRON_RUN_AS_NODE: '1' } });",
-    'a local copy with other keys deleted': "function bare(extra) { const env = { ...process.env }; for (const k of ['NODE_OPTIONS', 'NODE_TEST_CONTEXT']) delete env[k]; return Object.assign(env, extra); } spawn(process.execPath, [], { env: bare({}) });",
+    'a local copy with other keys deleted': "function bare(extra) { const env = { ...process.env }; for (const k of ['NODE_OPTIONS', 'NODE_TEST_CONTEXT']) delete env[k]; return Object.assign(env, { A: '1' }); } spawn(process.execPath, [], { env: bare() });",
     'a rest destructure of another key': "const { NODE_TEST_CONTEXT: _c, ...base } = process.env; spawn(process.execPath, [], { env: { ...base, A: '1' } });",
     'a helper with a process.env copy': "function start(args) { const env = { ...process.env }; return spawn(args[0], args.slice(1), { env }); } start([process.execPath, 'a.cjs']);",
     'options spread with nodeEnv': "const sp = (args, opts) => spawnSync(process.execPath, args, { ...opts, env: nodeEnv(opts.env) });",
     'an intentional electron.exe launch (category A)': "const exe = require('electron'); const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE; spawn(exe, ['.'], { env });",
-    'a fallback to process.env': "function f(env) { return spawn(process.execPath, [], { env: nodeEnv(env ?? process.env) }); }"
+    'a fallback to process.env': "function f(env) { return spawn(process.execPath, [], { env: nodeEnv(env ?? process.env) }); }",
+    'a computed key set to a non-empty literal': "const KEY = 'ELECTRON_RUN_AS_NODE'; spawn(process.execPath, [], { env: { PATH: 'x', [KEY]: '1' } });",
+    'a conditional spread of literals': "function f(ctx) { return spawn(process.execPath, [], { env: { ...process.env, ...(ctx ? { A: '1' } : {}) } }); }",
+    'a helper called with another command': "function run(cmd, args) { return spawnSync(cmd, args, { env: { PATH: 'x' } }); } run('git', ['status']);",
+    'execSync of another command': "execSync('git status', { env: { PATH: 'x' } });",
+    'fork with no options (inherits)': "fork('child.cjs');",
+    'fork with nodeEnv': "fork('child.cjs', [], { env: nodeEnv({ PATH: 'x' }) });",
+    'fork with another execPath': "fork('child.cjs', [], { execPath: 'C:/node/node.exe', env: { PATH: 'x' } });"
   };
   for (const [name, body] of Object.entries(safe)) assert.deepEqual(lint(body), [], name);
 });
@@ -89,6 +143,7 @@ test('nodeEnv: the key only under Electron, and always a copy', () => {
   assert.notEqual(asNode, base, 'a copy: the caller can change it freely');
   assert.deepEqual(base, { PATH: 'p', A: '1' }, 'the input is untouched');
   assert.deepEqual(nodeEnv(undefined, { node: '24' }), { ...process.env }, 'default: a copy of process.env');
+  assert.deepEqual(nodeEnv(null, { node: '24' }), { ...process.env }, 'null is the default too, not {} (Jim NIT 1)');
   assert.equal(nodeEnv({})[KEY], process.versions.electron ? '1' : undefined, 'this runtime');
 });
 
