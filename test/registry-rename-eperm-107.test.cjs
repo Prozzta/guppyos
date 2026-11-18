@@ -146,7 +146,7 @@ for (const stallMs of [0, 400]) {
 test('R1 a sync atomic write publishes over a real in-flight readFile', {
   skip: !win
     ? 'Windows rename semantics'
-    : !renameCapability.available && renameCapability.reason.startsWith('not found at ')
+    : !renameCapability.available && renameCapability.reason?.startsWith('not found at ')
       && `POSIX rename addon unavailable: ${renameCapability.reason}`
 }, async (t) => {
   t.after(() => AJ.__setRenameAddonForTest(undefined));
