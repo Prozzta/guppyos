@@ -126,12 +126,16 @@ K.chain = (M = HJ) => {
 };
 test('case 3 (npm ci chain): the chain classes as an install; suite only, so an install or a bench passes on as before', () => K.chain());
 
-/** A watcher rig: Dwight's PTY root (pid 10) and his suite (pid 11). `s.mode`: 'running' | 'idle'. */
+/** What the watcher lists: Dwight's PTY root (pid 10), his suite RUNNER (pid 11: it runs the preflight
+ *  and starts no test by itself), and a TEST process below the runner (pid 12). */
+const P_ROOT = { pid: 10, parentPid: 1, commandLine: 'bash', createdMs: 1 };
+const P_RUNNER = { pid: 11, parentPid: 10, commandLine: 'node test/tools/run-tests.cjs', createdMs: 1_000_100 };
+const P_TEST = { pid: 12, parentPid: 11, commandLine: '"C:\\Program Files\\nodejs\\node.exe" --test --test-reporter tap test/a.test.cjs', createdMs: 1_000_200 };
+const listing = (mode) => (mode === 'running' ? [P_ROOT, P_RUNNER, P_TEST] : mode === 'runner' ? [P_ROOT, P_RUNNER] : [P_ROOT]);
+/** A watcher rig. `s.mode`: 'idle' (root only) | 'runner' (the runner, no test yet) | 'running' (a test). */
 function watched(M = HJ) {
   const s = { mode: 'idle' };
-  const root = { pid: 10, parentPid: 1, commandLine: 'bash', createdMs: 1 };
-  const kid = { pid: 11, parentPid: 10, commandLine: 'node test/tools/run-tests.cjs', createdMs: 1_000_100 };
-  const x = reservedForDwight(M, { roots: () => [{ agentId: 'dwight', pid: 10 }], probe: async () => (s.mode === 'running' ? [root, kid] : [root]) });
+  const x = reservedForDwight(M, { roots: () => [{ agentId: 'dwight', pid: 10 }], probe: async () => listing(s.mode) });
   return { ...x, s };
 }
 const scanOnce = async (x, M) => { x.tick(M.HEAVY_SCAN_MS); await x.l.scan(); };
@@ -163,6 +167,111 @@ K.background = async (M = HJ) => {
   assert.equal(y.rows('reserve-kept').length, 0);
 };
 test('case 4 (background): PostToolUse keeps nothing; process-exit keeps an unsighted suite, and passes a sighted one on', () => K.background());
+
+K.slowPrelaunch = async (M = HJ) => {
+  // Jim SHOULD 1, god e833a9 (a): a prelaunch failure that outlasts a scan. The watcher sees the
+  // RUNNER (a preflight build or tsc that fails after 30 s, an npm step that hangs and then fails)
+  // and no test process below it. The runner is a live job (the slot stays held while it lives),
+  // and it is not a started test.
+  const x = watched(M);
+  await settle();
+  x.l.acquire('dwight', SUITE, 'npm test', 'd1', true);
+  x.l.callDone('dwight', 'd1');
+  await settle();
+  x.s.mode = 'runner';
+  await scanOnce(x, M); await scanOnce(x, M); await scanOnce(x, M);
+  assert.deepEqual(x.held(), ['dwight'], 'A LIVE RUNNER HOLDS THE SLOT (three scans, 60 s)');
+  assert.equal(x.l.snapshot()[0].seenRunning, true, 'and is seen running, as a job');
+  x.s.mode = 'idle';
+  await scanOnce(x, M); await scanOnce(x, M);
+  assert.deepEqual(x.held(), []);
+  assert.deepEqual(reservedFor(x), ['dwight'], 'A RUNNER SIGHTED WITH NO TEST PROCESS BELOW IT STARTED NO TEST: KEPT');
+  assert.deepEqual(x.rows('reserve-kept'), [KEPT(M, x, 'process-exit')]);
+  // The bound holds on this path too: the kept slot's next slow failure passes on.
+  x.l.acquire('dwight', SUITE, 'npm test', 'd2', true);
+  x.s.mode = 'runner';
+  await scanOnce(x, M);
+  x.s.mode = 'idle';
+  await scanOnce(x, M); await scanOnce(x, M);
+  assert.deepEqual(reservedFor(x), ['jim'], 'A SECOND SLOW FAILURE PASSES THE SLOT ON');
+  assert.equal(x.rows('reserve-kept').length, 1);
+};
+test('SHOULD 1 (a): a runner the watcher saw with no test process below it is not a started test (a slow prelaunch failure keeps its slot)', () => K.slowPrelaunch());
+
+K.slowPrelaunchForeground = async (M = HJ) => {
+  // The same failure with the call returning while the runner still lives (orphan-kept): the runner
+  // is a live job, so the hold stays; it is still not a started test.
+  const x = watched(M);
+  await settle();
+  x.l.acquire('dwight', SUITE, 'npm test', 'd1', false);
+  x.s.mode = 'runner';
+  x.l.callDone('dwight', 'd1');
+  await settle(); await settle();
+  assert.equal(x.rows('orphan-kept').length, 1, 'the live runner keeps the hold');
+  assert.deepEqual(x.held(), ['dwight']);
+  x.s.mode = 'idle';
+  await scanOnce(x, M); await scanOnce(x, M);
+  assert.deepEqual(reservedFor(x), ['dwight'], 'A RUNNER FOUND ALIVE AT PostToolUse WITH NO TEST PROCESS STARTED NO TEST: KEPT');
+  assert.deepEqual(x.rows('reserve-kept'), [KEPT(M, x, 'process-exit')]);
+};
+test('SHOULD 1 (a): the same at PostToolUse (orphan-kept on the runner alone is not a started test)', () => K.slowPrelaunchForeground());
+
+K.testProcess = (M = HJ) => {
+  // What a sighting must show to count: node or electron run as the test runner, or on a test file.
+  const yes = [
+    'node --test',
+    'node --test --test-reporter tap test/a.test.cjs',
+    'node --test-reporter tap --test test/',
+    '"C:\\Program Files\\nodejs\\node.exe" --test-reporter=tap test\\heavy-lock\\x.test.cjs',
+    'C:\\wt\\node_modules\\electron\\dist\\electron.exe --test test/a.test.cjs',
+    'node -r ./pre.cjs test/b.test.mjs',
+    'node test/c.test.ts'
+  ];
+  const no = [
+    'bash',
+    'node test/tools/run-tests.cjs',
+    'node test/tools/run-tests.cjs test/a.test.cjs',
+    '"C:\\Program Files\\nodejs\\node.exe" "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js" test -- test/a.test.cjs',
+    'node node_modules/typescript/bin/tsc --noEmit',
+    'node scripts/build.cjs --test',
+    'cmd /c npm test',
+    'pwsh -File test/a.test.cjs',
+    'node -e "require(\'./test/a.test.cjs\')"',
+    ''
+  ];
+  for (const c of yes) assert.equal(M.isTestProcess(c), true, `A TEST PROCESS: ${c}`);
+  for (const c of no) assert.equal(M.isTestProcess(c), false, `NOT A TEST PROCESS: ${c}`);
+};
+test('SHOULD 1 (a): what counts as a test process in the watcher\'s listing (not the runner, npm, a build or a shell)', () => K.testProcess());
+
+K.regrant = async (M = HJ) => {
+  // Jim SHOULD 2: a reserved EXCLUSIVE call that finds the machine not empty goes back to the head
+  // of the queue (HEAVY-SLOT-EXCLUSIVE-192) and is granted again after the drain. That second
+  // reservation is still the first one's: hooked, and lapsed once already.
+  const x = rig(M, { limit: () => 2 });
+  x.l.acquire('b', INSTALL, 'npm ci', 'b1', false);
+  x.l.acquire('c', INSTALL, 'npm ci', 'c1', false);
+  assert.equal(x.l.acquire('dwight', INSTALL, 'npm ci', 'd0', false).allow, false);
+  x.l.callDone('c', 'c1');
+  assert.deepEqual(reservedFor(x), ['dwight'], 'a shared slot, reserved beside b');
+  x.tick(M.HEAVY_RESERVE_MS);
+  assert.deepEqual(x.held(), ['b']);   // snapshot() runs expire(): lapsed once, queued again, granted again
+  assert.deepEqual(reservedFor(x), ['dwight']);
+  assert.equal(x.l.acquire('dwight', SUITE, 'npm test', 'd1', false).allow, false, 'a suite on a shared reservation waits at the head');
+  assert.deepEqual([waiters(x), reservedFor(x)], [['dwight'], []]);
+  x.l.callDone('b', 'b1');
+  assert.deepEqual(reservedFor(x), ['dwight'], 'granted again when the machine is empty');
+  assert.equal(x.l.acquire('dwight', SUITE, 'npm test', 'd2', false).allow, true);
+  x.l.callDone('dwight', 'd2');
+  assert.deepEqual(reservedFor(x), ['dwight'], 'AN EXCLUSIVE SUITE RE-GRANTED AFTER THE DRAIN KEEPS ITS SLOT WHEN ITS LAUNCH DIES');
+  assert.deepEqual(x.rows('reserve-kept').map((r) => r.reason), ['posttool']);
+  x.lapses.length = 0;
+  x.tick(M.HEAVY_RESERVE_MS);
+  assert.deepEqual(x.held(), []);
+  assert.deepEqual([reservedFor(x), waiters(x)], [[], []], 'A RESERVATION THAT LAPSED ONCE BEFORE THE RE-GRANT IS NOT QUEUED AGAIN AFTER THE KEEP');
+  assert.deepEqual(x.lapses, [['dwight', 'suite', 'expired']], 'and its owner is told plainly');
+};
+test('SHOULD 2: an exclusive suite re-granted after the drain is kept like any other, and carries that it lapsed once', () => K.regrant());
 
 K.jobExit = (M = HJ) => {
   const x = reservedForDwight(M);
@@ -250,12 +359,10 @@ test('MUST 2: only a test process of this grant\'s own run counts (not an earlie
 K.sightedBefore = async (M = HJ) => {
   // MUST 2: a sighting belongs to the hold it was made in.
   const s = { mode: 'running' };
-  const root = { pid: 10, parentPid: 1, commandLine: 'bash', createdMs: 1 };
-  const kid = { pid: 11, parentPid: 10, commandLine: 'node test/tools/run-tests.cjs', createdMs: 1_000_100 };
-  const x = rig(M, { roots: () => [{ agentId: 'dwight', pid: 10 }, { agentId: 'andy', pid: 30 }], probe: async () => (s.mode === 'running' ? [root, kid] : [root]) });
+  const x = rig(M, { roots: () => [{ agentId: 'dwight', pid: 10 }, { agentId: 'andy', pid: 30 }], probe: async () => listing(s.mode) });
   x.l.acquire('dwight', SUITE, 'npm test', 'e1', true);
   await scanOnce(x, M);
-  assert.equal(x.l.snapshot()[0].seenRunning, true, 'the first hold was seen running');
+  assert.equal(x.l.snapshot()[0].seenRunning, true, 'the first hold was seen running (a test process of it)');
   x.l.acquire('andy', SUITE, 'npm test', 'a0', false);
   s.mode = 'idle';
   await scanOnce(x, M); await scanOnce(x, M);
