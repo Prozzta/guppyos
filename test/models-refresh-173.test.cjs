@@ -308,19 +308,58 @@ test('POSIX keeps execFile\'s own timeout', async () => {
 });
 
 // FLAKE-MODELS-REFRESH-TREEKILL-PIDFILE: `startMs` is how long the grandchild takes to get as far as
-// writing its pid (node's own start under suite load; 0 = at once).
+// writing its pid (node's own start under suite load; 0 = at once). The 2500 ms box is runCli's and
+// starts at the spawn, so under load it could expire before the grandchild had run: the tree kill
+// then met a tree with no grandchild in it and the pid read threw ENOENT. What this test is about is
+// the kill of a tree whose grandchild IS LIVE, so the box's own taskkill is HELD until the
+// grandchild has said it is running (its pid file, written whole and renamed into place). Events,
+// not a longer box: the wait ends on the file, or on the shim ending without one (named).
 async function treeKillAtTimeBox(t, startMs) {
   const cp = require('node:child_process');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'treekill-'));
-  t.after(() => { try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* best effort */ } });
   const pidFile = path.join(dir, 'grandchild.pid');
   const shim = path.join(dir, 'hang.cmd');
-  fs.writeFileSync(shim, `@"${process.execPath}" -e "setTimeout(() => require('fs').writeFileSync(process.argv[1], process.pid + ' ' + Math.round(Date.now() - process.uptime() * 1000)), Number(process.argv[2])); setInterval(() => {}, 1000)" "${pidFile}" ${startMs}\r\n`);
-  const d = { platform: 'win32', env: process.env, exists: fs.existsSync, exec: (file, args, opts, cb) => cp.execFile(file, args, opts, (err, stdout) => cb(err, String(stdout ?? ''))) };
+  fs.writeFileSync(shim, `@"${process.execPath}" -e "const fs = require('fs'), f = process.argv[1]; setTimeout(() => { fs.writeFileSync(f + '.tmp', process.pid + ' ' + Math.round(Date.now() - process.uptime() * 1000)); fs.renameSync(f + '.tmp', f); }, Number(process.argv[2])); setInterval(() => {}, 1000)" "${pidFile}" ${startMs}\r\n`);
+  let shimPid = 0, shimBorn = 0, shimEnded = false, readyAt = 0;
+  let shimEnds = () => {};
+  const watcher = fs.watch(dir);
+  const ready = new Promise((res, rej) => {
+    const look = () => { if (!readyAt && fs.existsSync(pidFile)) { readyAt = Date.now(); res(); } };
+    watcher.on('change', look);
+    shimEnds = () => { look(); if (!readyAt) rej(new Error('the .cmd shim ended and its grandchild never wrote its pid (it did not run)')); };
+    look();
+  });
+  ready.catch(() => { /* reported where it is awaited */ });
+  t.after(() => {
+    watcher.close();
+    // A run that failed before its tree kill: end the shim's tree (ours, still running) here.
+    if (shimPid && !shimEnded) own.killOwnTree({ pid: shimPid, bornMs: shimBorn, name: 'cmd.exe' });
+    try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* best effort */ }
+  });
+  const kills = [];
+  let treeKilled = null;
+  const d = {
+    platform: 'win32', env: process.env, exists: fs.existsSync,
+    exec: (file, args, opts, cb) => {
+      if (file === 'taskkill') {
+        kills.push(args);
+        treeKilled = ready.then(() => new Promise((res) => cp.execFile(file, args, opts, (err, stdout) => { cb(err, String(stdout ?? '')); res(); })));
+        treeKilled.catch(() => { /* reported where it is awaited */ });
+        return {};
+      }
+      const child = cp.execFile(file, args, opts, (err, stdout) => { shimEnded = true; shimEnds(); cb(err, String(stdout ?? '')); });
+      shimPid = child.pid; shimBorn = Date.now();
+      return child;
+    }
+  };
   const t0 = Date.now();
   const r = await P.runCli(d, shim, ['models'], 1024, 2500);
   assert.deepEqual(r, { reason: 'timeout' });
-  assert.ok(Date.now() - t0 < 15_000, 'bounded');
+  assert.deepEqual(kills, [['/PID', String(shimPid), '/T', '/F']], 'the time box asked ONCE for the kill of the shim\'s tree');
+  await ready;
+  await treeKilled;
+  // Bounded from the later of the start and the grandchild running: the box and its tree kill.
+  assert.ok(Date.now() - Math.max(t0, readyAt) < 15_000, 'bounded');
   // TEST-GLOB-PID-RECYCLE: the grandchild's pid AND birth; a pid that is now another process's is not killed
   const rec = own.readRec(pidFile, 'node.exe'), pid = rec.pid;
   assert.ok(pid > 0, 'the grandchild ran');
