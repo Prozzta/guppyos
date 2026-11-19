@@ -279,6 +279,16 @@ function helper(t, src) {
   return exe;
 }
 
+/** A deterministic helper mutant: `create` succeeds, but its completion-port association returns no
+ * key, so no PortLoop exit event can reach HeavyJobs. The release assertion below therefore judges
+ * the event/fallback path, not scheduling or a synthetic clock. */
+function noPortNoticesHelperSource() {
+  const source = fs.readFileSync(path.join(root, 'resources', 'heavyjob', 'guppy-heavyjob.cs'), 'utf8').replace(/\r\n/g, '\n');
+  const needle = '    static long Watch(IntPtr port, IntPtr job, string id, ref long next)\n    {';
+  assert.ok(source.includes(needle), 'the helper still has the completion-port Watch seam');
+  return source.replace(needle, `${needle}\n        return 0; // test mutant: suppress every completion-port notice`);
+}
+
 /** One heavy call held by the real lock in a real job; `body` is the bash after the join line, or
  *  `kill` ends the shell's tree from outside. Resolves with the ms from the shell's exit to the release. */
 async function liveRelease(t, o) {
@@ -343,6 +353,13 @@ test('LIVE: a killed job (every process of it ended from outside) frees the slot
   t.diagnostic(`kill: ran ${r.runMs} ms, held ${r.heldMs} ms, freed ${r.lagMs} ms after the exit`);
   assert.ok(r.runMs < 10_000, 'the kill ended the job');
   assertFreed(r, 'kill');
+});
+
+test('LIVE: a killed job frees the slot when completion-port notices are absent', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
+  const r = await liveRelease(t, { body: 'sleep 30', kill: 1_500, exe: helper(t, noPortNoticesHelperSource()) });
+  t.diagnostic(`no-port kill: ran ${r.runMs} ms, held ${r.heldMs} ms, freed ${r.lagMs} ms after the exit`);
+  assert.ok(r.runMs < 10_000, 'the kill ended the job');
+  assertFreed(r, 'no-port kill');
 });
 
 test('LIVE: a crash (an abnormal exit inside the job) frees the slot within 2 s', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
