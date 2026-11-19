@@ -349,6 +349,7 @@ async function logFloor(t) {
 // Node 24.22.2 inside Electron 45.3.0 after fs.rmSync; Node 26 removes the name at once, so the
 // state is given here by its measured answers): it is still listed, existsSync is false, and
 // access, open and readFile fail with EPERM. The synchronous tail skips it (existsSync).
+// The real state is covered by 'the async log tail answers as the synchronous one…' ('no live file') under Electron as Node.
 test('a live log that cannot be opened and is not reachable has no rows, as in the synchronous tail', async (t) => {
   const { hive, live } = await logFloor(t);
   const isLive = (p) => path.resolve(p).toLowerCase() === live.toLowerCase();
