@@ -155,9 +155,11 @@ test('a worktree with no links, or already gone: removeWorktree behaves as befor
   assert.notEqual(again.refused, true, 'a missing worktree is not a link refusal');
 });
 
-test('the worker scratch dir (rmSync recursive): a junction inside is removed as a link, its target survives', (t) => {
-  // removeWorkerScratch deletes HIVE_ROOT/agents/<id> with rmSync({recursive}); Node removes a
-  // junction/symlink there as a link. Pinned so a runtime change cannot reopen the hole silently.
+test('RUNTIME PIN, the worker scratch dir: a raw recursive rmSync removes a junction inside as a link under Node, and deletes THROUGH it under Electron on Windows', (t) => {
+  // Why removeWorkerScratch does not use rmSync({recursive}) (ELECTRON-RMSYNC-LINK-SAFE-108: it calls
+  // removePathLinkSafe). Node removes a junction/symlink as a link; Electron's fs, the runtime the app
+  // runs on, empties the target. Each runtime is pinned so a change in either one shows here.
+  const throughLink = !!process.versions.electron && process.platform === 'win32';
   const s = setup(t);
   const shared = s.target('shared');
   const scratch = path.join(s.base, 'agents', 'worker-1');
@@ -165,7 +167,7 @@ test('the worker scratch dir (rmSync recursive): a junction inside is removed as
   fs.symlinkSync(shared, path.join(scratch, 'node_modules'), 'junction');
   fs.rmSync(scratch, { recursive: true, force: true });
   assert.equal(fs.existsSync(scratch), false);
-  assert.equal(fs.existsSync(sentinel(shared)), true, 'THE TARGET SURVIVES');
+  assert.equal(fs.existsSync(sentinel(shared)), !throughLink, throughLink ? 'ELECTRON DELETES THROUGH THE JUNCTION' : 'THE TARGET SURVIVES');
 });
 
 test('worker scratch closes watched children before recursive removal', () => {
