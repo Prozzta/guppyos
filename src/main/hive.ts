@@ -6710,12 +6710,17 @@ export class HiveManager {
     return rows;
   }
 
-  /** fileTail, async. A file that is not there (no live log yet) has no rows. */
+  /** fileTail, async. A file that is not there (no live log yet) has no rows. "Not there" means
+   *  what existsSync means in fileTail: the file cannot be reached, whatever the error code. A log
+   *  deleted while the writer still holds it stays listed on Windows and answers EPERM, not ENOENT. */
   private async fileTailAsync(file: string, n: number, parse: (l: string) => unknown): Promise<unknown[]> {
     if (n <= 0) return [];
     let fh: fsPromises.FileHandle;
     try { fh = await fsPromises.open(file, 'r'); }
-    catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return []; return this.wholeFileTailAsync(file, n, parse); }
+    catch {
+      try { await fsPromises.access(file); } catch { return []; }
+      return this.wholeFileTailAsync(file, n, parse);
+    }
     try {
       const size = (await fh.stat()).size;
       if (size === 0) return [];
