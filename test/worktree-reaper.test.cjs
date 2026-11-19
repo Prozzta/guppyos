@@ -306,10 +306,13 @@ test('loadRemover passes over a build with another removeTree contract and one t
 
 test('REAL process (Windows): a folder a running exe was started from is kept, at plan and at apply', { skip: process.platform !== 'win32' }, async () => {
   const fx = fixture();
-  const exe = path.join(fx.work, 'gate-174-run', 'bin', 'node.exe');
-  fs.mkdirSync(path.dirname(exe), { recursive: true }); fs.copyFileSync(process.execPath, exe);
+  // The exe must run from the folder alone. A copy of process.execPath does under Node; under Electron as
+  // Node it is electron.exe without its DLLs, which never starts, so nothing runs from the folder and the
+  // plan says reap. cmd.exe needs nothing beside it; /k with an open stdin keeps it alive until the kill.
+  const exe = path.join(fx.work, 'gate-174-run', 'bin', 'cmd.exe');
+  fs.mkdirSync(path.dirname(exe), { recursive: true }); fs.copyFileSync(process.env.ComSpec, exe);
   const { spawn } = require('node:child_process');
-  const child = spawn(exe, ['-e', 'setTimeout(() => {}, 60000)'], { cwd: fx.base, windowsHide: true, stdio: 'ignore' });
+  const child = spawn(exe, ['/d', '/k'], { cwd: fx.base, windowsHide: true, stdio: ['pipe', 'ignore', 'ignore'] });
   try {
     await new Promise((r, j) => { child.once('spawn', r); child.once('error', j); });
     const facts = REAL.collectFacts({ root: fx.work, repos: [fx.repo], now: fx.now });   // the real process list
