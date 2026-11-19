@@ -286,6 +286,10 @@ export class HeavyJobs {
   /** HEAVY-LOCK-RELEASE-LAG-197: a process of a job exited (or the job went empty). Every notice
    *  restarts the confirm, so the check runs HEAVY_JOB_EXIT_CONFIRM_MS after the last one of a burst. */
   private onEvent(e: Record<string, unknown>): void {
+    if (e.event === 'watch') {
+      this.log({ action: 'watch', ...e });
+      return;
+    }
     if (e.event !== 'exit' || typeof e.job !== 'string') return;
     const j = this.jobs.get(e.job);
     if (!j || j.exited) return;

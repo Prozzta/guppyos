@@ -66,6 +66,7 @@ static class HeavyJob
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool IsProcessInJob(IntPtr proc, IntPtr job, out bool result);
     [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
     [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+    [DllImport("kernel32.dll")] static extern bool GetProcessHandleCount(IntPtr h, out uint count);
     [DllImport("kernel32.dll")] static extern uint GetPriorityClass(IntPtr h);
     [DllImport("kernel32.dll")] static extern bool SetPriorityClass(IntPtr h, uint cls);
     [DllImport("kernel32.dll")] static extern bool GetProcessAffinityMask(IntPtr h, out UIntPtr proc, out UIntPtr sys);
@@ -481,7 +482,8 @@ static class HeavyJob
     //   close <id>            drop the job's handle (Guppy is done with it)
     // HEAVY-LOCK-RELEASE-LAG-197: the job messages that mean a process of the job is gone.
     const uint MSG_ACTIVE_PROCESS_ZERO = 4, MSG_EXIT_PROCESS = 7, MSG_ABNORMAL_EXIT_PROCESS = 8;
-    const uint WAIT_OBJECT_0 = 0, INFINITE = 0xFFFFFFFF;
+    const uint SYNCHRONIZE = 0x00100000, WAIT_OBJECT_0 = 0, WAIT_FAILED = 0xFFFFFFFF;
+    const int ERROR_ACCESS_DENIED = 5, ERROR_INVALID_PARAMETER = 87, ERROR_NOT_FOUND = 1168;
     const int JobObjectAssociateCompletionPortInformation = 7;
     static readonly object Out = new object();
     static readonly Dictionary<long, string> PortKeys = new Dictionary<long, string>();
@@ -512,29 +514,85 @@ static class HeavyJob
         }
     }
 
-    // Completion-port packets can be late or absent. A Job Object handle itself becomes signaled
-    // when its last process exits, but it starts signaled before its first join; wait only after a
-    // member has appeared. This is independent of Watch/PortLoop and reports the same exit event.
-    sealed class EmptyWatch { public volatile bool Closed; }
-    static void WatchEmpty(IntPtr job, string id, EmptyWatch state)
+    // Completion-port packets can be late or absent. A Job Object handle does NOT signal for an
+    // ordinary empty transition, so retain SYNCHRONIZE handles for one membership snapshot. Once
+    // every retained member has exited, take another snapshot: descendants can join after the
+    // first one. Only an empty re-check reports the same exit event as PortLoop.
+    sealed class MemberWatch { public volatile bool Closed; public int Handles; public System.Threading.Thread Thread; }
+    static void WatchMembers(IntPtr job, string id, MemberWatch state)
     {
-        new System.Threading.Thread(() =>
+        var thread = new System.Threading.Thread(() =>
         {
+            var handles = new Dictionary<int, IntPtr>();
+            bool started = false;
+            uint baseline = 0, remaining = 0;
+            GetProcessHandleCount(GetCurrentProcess(), out baseline);
             try
             {
-                while (!state.Closed && Members(job).Count == 0) System.Threading.Thread.Sleep(10);
-                if (!state.Closed && WaitForSingleObject(job, INFINITE) == WAIT_OBJECT_0 && !state.Closed)
-                    Write("{\"event\":\"exit\",\"job\":\"" + id + "\",\"msg\":4,\"pid\":0}");
+                while (!state.Closed)
+                {
+                    if (handles.Count == 0)
+                    {
+                        var members = Members(job);
+                        if (members.Count == 0)
+                        {
+                            if (started)
+                            {
+                                Write("{\"event\":\"exit\",\"job\":\"" + id + "\",\"msg\":4,\"pid\":0}");
+                                return;
+                            }
+                            System.Threading.Thread.Sleep(25);
+                            continue;
+                        }
+                        started = true;
+                        foreach (int pid in members)
+                        {
+                            IntPtr h = OpenProcess(SYNCHRONIZE, false, pid);
+                            if (h == IntPtr.Zero)
+                            {
+                                int err = Marshal.GetLastWin32Error();
+                                if (err == ERROR_INVALID_PARAMETER || err == ERROR_NOT_FOUND) continue; // it already exited
+                                Write("{\"event\":\"watch\",\"action\":\"open-failed\",\"job\":\"" + id + "\",\"pid\":" + pid + ",\"error\":" + err + "}");
+                                return; // leave this job to HeavyJobs' existing poll
+                            }
+                            handles[pid] = h;
+                            state.Handles++;
+                        }
+                        continue;
+                    }
+                    var exited = new List<int>();
+                    foreach (var pair in handles)
+                    {
+                        uint result = WaitForSingleObject(pair.Value, 0);
+                        if (result == WAIT_OBJECT_0) exited.Add(pair.Key);
+                        else if (result == WAIT_FAILED)
+                        {
+                            Write("{\"event\":\"watch\",\"action\":\"wait-failed\",\"job\":\"" + id + "\",\"pid\":" + pair.Key + "}");
+                            return; // unknown handle state: do not claim an exit
+                        }
+                    }
+                    foreach (int pid in exited) { CloseHandle(handles[pid]); handles.Remove(pid); state.Handles--; }
+                    if (handles.Count != 0) System.Threading.Thread.Sleep(25);
+                }
             }
-            catch { /* closing the helper/job ends this best-effort fallback */ }
-        }) { IsBackground = true }.Start();
+            catch { Write("{\"event\":\"watch\",\"action\":\"failed\",\"job\":\"" + id + "\"}"); }
+            finally
+            {
+                foreach (var pair in handles) CloseHandle(pair.Value);
+                state.Handles = 0;
+                GetProcessHandleCount(GetCurrentProcess(), out remaining);
+                Write("{\"event\":\"watch\",\"action\":\"closed\",\"job\":\"" + id + "\",\"handles\":0,\"baseline\":" + baseline + ",\"remaining\":" + remaining + "}");
+            }
+        }) { IsBackground = true };
+        state.Thread = thread;
+        thread.Start();
     }
 
     static int Serve()
     {
         var jobs = new Dictionary<string, IntPtr>();
         var keys = new Dictionary<string, long>();
-        var emptyWatches = new Dictionary<string, EmptyWatch>();
+        var memberWatches = new Dictionary<string, MemberWatch>();
         long next = 0;
         IntPtr port = CreateIoCompletionPort(new IntPtr(-1), IntPtr.Zero, UIntPtr.Zero, 1);
         if (port != IntPtr.Zero) new System.Threading.Thread(() => PortLoop(port)) { IsBackground = true }.Start();
@@ -560,9 +618,9 @@ static class HeavyJob
                         if (job == IntPtr.Zero) throw new Exception("CreateJobObject failed (" + Marshal.GetLastWin32Error() + ")");
                         jobs[w[1]] = job;
                         keys[w[1]] = Watch(port, job, w[1], ref next);
-                        var emptyWatch = new EmptyWatch();
-                        emptyWatches[w[1]] = emptyWatch;
-                        WatchEmpty(job, w[1], emptyWatch);
+                        var memberWatch = new MemberWatch();
+                        memberWatches[w[1]] = memberWatch;
+                        WatchMembers(job, w[1], memberWatch);
                     }
                     Apply(job, w[2] == "1", w[3] == "1", cpuRate);
                     reply = "{\"ok\":true}";
@@ -586,8 +644,8 @@ static class HeavyJob
                 }
                 else if (w.Length == 2 && w[0] == "close")
                 {
-                    EmptyWatch emptyWatch;
-                    if (emptyWatches.TryGetValue(w[1], out emptyWatch)) { emptyWatch.Closed = true; emptyWatches.Remove(w[1]); }
+                    MemberWatch memberWatch;
+                    if (memberWatches.TryGetValue(w[1], out memberWatch)) { memberWatch.Closed = true; memberWatch.Thread.Join(100); memberWatches.Remove(w[1]); }
                     if (jobs.TryGetValue(w[1], out job)) { CloseHandle(job); jobs.Remove(w[1]); long k; if (keys.TryGetValue(w[1], out k)) { lock (PortKeys) PortKeys.Remove(k); keys.Remove(w[1]); } }
                     reply = "{\"ok\":true}";
                 }
