@@ -2415,6 +2415,9 @@ export class HookServer {
       try { claimWorkingSet = await this.claimWorkingSet?.(p.agent_id, p.source) ?? null; } catch { claimWorkingSet = null; }
       this.preparedClaimWorkingSets.set(p.agent_id, claimWorkingSet);
     }
+    // LAG-NAMED-STALLS-RESIDUAL-108: the agent's mail ledger is loaded (a corrupt one rebuilt) off
+    // the main thread before the hook asks it anything.
+    if (p.agent_id && typeof this.hive.mail?.warm === 'function') { try { await this.hive.mail.warm([p.agent_id]); } catch { /* the hook loads it */ } }
     let bodies: HookServer['prefetchedBodies'] = null;
     if (!fromSubagent) { try { bodies = await this.prefetchMailBodies(p); } catch { bodies = null; } }
     // LAG-NAMED-STALLS-RESIDUAL-108: the files the heavy-lock classifier will ask about.
