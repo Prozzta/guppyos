@@ -42,10 +42,10 @@ async function world(t) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, JSON.stringify({ id: 'm1', from: 'x', to: 'god-1', body: 'hello' }));
   const real = fs.promises.readFile;
-  const w = { home, hive, file, open: 0, calls: 0, gated: false, release: () => {} };
+  const w = { home, hive, file, open: 0, calls: 0, gated: false, release: () => {}, entered: () => {} };
   fs.promises.readFile = async function gatedReadFile(p, ...rest) {
     if (path.resolve(String(p)) !== path.resolve(file)) return real.call(fs.promises, p, ...rest);
-    w.calls++; w.open++;
+    w.calls++; w.open++; w.entered();
     try {
       if (w.gated) await new Promise((go) => { w.release = go; });
       return await real.call(fs.promises, p, ...rest);
@@ -61,13 +61,26 @@ async function world(t) {
 
 /** Runs every pending promise job and one timer turn, so "still pending" is a real observation. */
 const turn = () => new Promise((r) => setImmediate(r));
-const until = async (cond) => { for (let i = 0; i < 200 && !cond(); i++) await turn(); assert.ok(cond(), 'the gated read never started'); };
+/**
+ * FLAKE-HIVE-READ-DRAIN-LOG-TAIL. Waits until the read `op` has reached its gate. The product does
+ * real file work before each gated call (a stat before the mail read, a folder listing before the
+ * log open), and that work takes as long as the disk and the thread pool take. So this waits for
+ * the gate's own signal, not for a number of turns: the gate calls `entered` each time a read
+ * reaches it. If `op` settles without ever reaching the gate, the read never started, and that is
+ * the failure. Nothing here is a timer or a count.
+ */
+const started = (gate, cond, op) => new Promise((resolve, reject) => {
+  if (cond()) { resolve(); return; }
+  gate.entered = () => { if (cond()) resolve(); };
+  const never = () => { try { assert.ok(cond(), 'the gated read never started'); resolve(); } catch (e) { reject(e); } };
+  op.then(never, never);
+});
 
 test('the wait between dispose() and the delete ends only when the open read has closed', async (t) => {
   const w = await world(t);
   w.gated = true;
   const reading = w.hive.mailBodyAsync('god-1', 'm1');
-  await until(() => w.open === 1);
+  await started(w, () => w.open === 1, reading);
 
   w.hive.dispose();
   // What reset, home change and the teardowns do next. The gate opens later, on its own turn.
@@ -109,11 +122,11 @@ test('an authority read is one of the reads: the wait covers it, and after dispo
   const w = await world(t);
   const tasks = path.join(w.hive.root(), 'tasks.json');
   const real = fs.promises.readFile;   // world()'s gate: every other path passes through it
-  const g = { calls: 0, open: 0, gated: false, releases: [] };
+  const g = { calls: 0, open: 0, gated: false, releases: [], entered: () => {} };
   const releaseAll = () => { for (const go of g.releases.splice(0)) go(); };
   fs.promises.readFile = async function gatedAuthorityRead(p, ...rest) {
     if (path.resolve(String(p)) !== path.resolve(tasks)) return real.call(fs.promises, p, ...rest);
-    g.calls++; g.open++;
+    g.calls++; g.open++; g.entered();
     try {
       if (g.gated) await new Promise((go) => { g.releases.push(go); });
       return await real.call(fs.promises, p, ...rest);
@@ -132,7 +145,7 @@ test('an authority read is one of the reads: the wait covers it, and after dispo
   g.gated = true;
   rewrite();
   const reading = w.hive.integrityIssuesAsync();
-  await until(() => g.open >= 1);
+  await started(g, () => g.open >= 1, reading);
 
   w.hive.dispose();
   let waited = false;
@@ -169,10 +182,10 @@ test('the outbox dedup load passes HiveDisposedError on from both of its reads',
 function gateLogOpen(t, hive) {
   const log = path.join(hive.root(), 'log.jsonl');
   const real = fs.promises.open;
-  const g = { calls: 0, open: 0, gated: false, release: () => {} };
+  const g = { calls: 0, open: 0, gated: false, release: () => {}, entered: () => {} };
   fs.promises.open = async function gatedOpen(p, ...rest) {
     if (path.resolve(String(p)) !== path.resolve(log)) return real.call(fs.promises, p, ...rest);
-    g.calls++; g.open++;
+    g.calls++; g.open++; g.entered();
     if (g.gated) await new Promise((go) => { g.release = go; });
     const fh = await real.call(fs.promises, p, ...rest);
     const close = fh.close.bind(fh);
@@ -193,7 +206,7 @@ test('the async log tail is one of the reads: the wait covers its open handle, a
 
   g.gated = true;
   const tailing = w.hive.logTailAsync(5);
-  await until(() => g.open === 1);
+  await started(g, () => g.open === 1, tailing);
   w.hive.dispose();
   let waited = false;
   const wait = Promise.resolve(w.hive.drainReads?.()).then(() => { waited = true; });
