@@ -149,8 +149,12 @@ const temp = process.argv[2] === 'on';
 const dir = psEnv(process.env, { temp }).TEMP;
 const c = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 20'], { env: psEnv(process.env, { temp }), windowsHide: true, stdio: 'ignore' });
 let killed = false;
-fs.watch(dir, (_e, f) => { if (!killed && /^__PSScriptPolicyTest_/.test(String(f))) { killed = true; c.kill(); process.stdout.write('killed ' + f + '\\n'); } });
-setTimeout(() => { c.kill(); process.stdout.write('timer\\n'); }, 30000);
+// The kill only starts the PowerShell's end: say 'killed' (and be killed) once it has exited. Its process
+// object is signalled only after its threads have ended and its handles are closed, so by then it holds
+// nothing in the folder the sweep removes (FLAKE-PS-POLICY-TEMP-LEAK-198-L164).
+const afterExit = (say) => { if (c.exitCode !== null || c.signalCode !== null) say(); else { c.kill(); c.once('exit', say); } };
+fs.watch(dir, (_e, f) => { if (!killed && /^__PSScriptPolicyTest_/.test(String(f))) { killed = true; afterExit(() => process.stdout.write('killed ' + f + '\\n')); } });
+setTimeout(() => afterExit(() => process.stdout.write('timer\\n')), 30000);
 `);
   return new Promise((resolve, reject) => {
     const env = { ...process.env, TEMP: jail, TMP: jail, TMPDIR: jail, GUPPY_SHARED_TEMP: shared, PSModuleAnalysisCachePath: path.join(tmpRoot, 'modcache', 'ModuleAnalysisCache') };
