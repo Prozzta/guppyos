@@ -161,7 +161,13 @@ function stopScript(rows) {
   return `$list = '${json}' | ConvertFrom-Json
 foreach ($t in $list) {
   $q = Get-CimInstance Win32_Process -Filter "ProcessId=$($t.pid)"
-  if ($q -and $q.Name -eq $t.name -and ([DateTimeOffset]$q.CreationDate).ToUnixTimeMilliseconds() -eq $t.created) { Stop-Process -Id $t.pid -Force -ErrorAction SilentlyContinue }
+  if ($q -and $q.Name -eq $t.name -and ([DateTimeOffset]$q.CreationDate).ToUnixTimeMilliseconds() -eq $t.created) {
+    try { Stop-Process -Id $t.pid -Force -ErrorAction Stop }
+    catch {
+      if ($_.FullyQualifiedErrorId -like 'NoProcessFoundForGivenId,*') { continue }
+      throw
+    }
+  }
 }`;
 }
 

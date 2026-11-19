@@ -125,7 +125,7 @@ test('stopIfSame: the PowerShell that stops checks the name AND the CreationDate
   const s = scripts[0];
   assert.match(s, /^\$list = '\[.*\]' \| ConvertFrom-Json\r?\nforeach \(\$t in \$list\) \{/, 'assigned first: PS 5.1 pipes the array as ONE object');
   assert.match(s, /\$q = Get-CimInstance Win32_Process -Filter "ProcessId=\$\(\$t\.pid\)"/);
-  assert.match(s, /if \(\$q -and \$q\.Name -eq \$t\.name -and \(\[DateTimeOffset\]\$q\.CreationDate\)\.ToUnixTimeMilliseconds\(\) -eq \$t\.created\) \{ Stop-Process -Id \$t\.pid /);
+  assert.match(s, /if \(\$q -and \$q\.Name -eq \$t\.name -and \(\[DateTimeOffset\]\$q\.CreationDate\)\.ToUnixTimeMilliseconds\(\) -eq \$t\.created\) \{\s*try \{ Stop-Process -Id \$t\.pid /);
   assert.match(s, /"created":1792000000300/);
   assert.match(s, /o''dd\.exe/, 'quotes escaped for the single-quoted PowerShell string');
   own.stopIfSame([], (x) => scripts.push(x));
