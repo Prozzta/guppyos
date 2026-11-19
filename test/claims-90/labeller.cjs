@@ -28,6 +28,7 @@
  * key-batch.jsonl, run.json and session/. Item text and keys stay local; mails carry counts and shas only.
  */
 const fs = require('node:fs');
+const { rmTree } = require('../tools/rm-tree.cjs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawn, execFileSync } = require('node:child_process');
@@ -168,7 +169,7 @@ function sessionOut(projects, jail, dest, out) {
       const unequal = files.filter((f) => !fs.existsSync(path.join(to, f)) || !fs.readFileSync(path.join(src, f)).equals(fs.readFileSync(path.join(to, f))));
       if (unequal.length) session = { folder, created: true, files: files.length, removed: false, problem: `${unequal.length} copied file(s) differ` };
       else {
-        fs.rmSync(src, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+        rmTree(src, { maxRetries: 10, retryDelay: 200 });
         session = { folder, created: true, files: files.length, removed: !fs.existsSync(src), problem: fs.existsSync(src) ? 'the session folder could not be deleted' : null };
       }
     }
@@ -271,7 +272,7 @@ async function main(argv) {
   const already = fs.existsSync(keyOut) ? new Set(readJsonl(keyOut).map((r) => r.itemId)) : new Set();
   const clash = own.filter((r) => already.has(r.itemId)).map((r) => r.itemId);
   if (clash.length) throw new Error(`${clash.length} of this batch's rows are already in ${keyOut}`);
-  fs.rmSync(runDir, { recursive: true, force: true });
+  rmTree(runDir);
   fs.mkdirSync(runDir, { recursive: true });
   const run = {
     card: 'CLAIMS-90', mode: 'labeller', labeller: o.labeller, group: o.group, batch: batchName, startedAt,
@@ -356,7 +357,7 @@ async function main(argv) {
     if (!o.keep) {
       for (const d of [jail, scratch]) {
         if (R.linksUnder(d).length) console.error(`[claims-90] kept ${d}: it holds a link`);
-        else fs.rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+        else rmTree(d, { maxRetries: 10, retryDelay: 200 });
       }
     }
   }

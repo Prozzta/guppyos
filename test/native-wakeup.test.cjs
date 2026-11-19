@@ -16,6 +16,7 @@ require('./tools/own-job.cjs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const { rmTree } = require('./tools/rm-tree.cjs');
 const os = require('node:os');
 const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
@@ -24,7 +25,7 @@ const JAIL = fs.mkdtempSync(path.join(os.tmpdir(), 'native-wakeup-'));
 const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
 process.env.HOME = JAIL; process.env.USERPROFILE = JAIL;
 assert.equal(os.homedir(), JAIL, 'HOME jailed');
-test.after(() => { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } fs.rmSync(JAIL, { recursive: true, force: true }); });
+test.after(() => { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } rmTree(JAIL); });
 
 const { MemoryEngine } = loadTs('src/main/nativeMemory/engine.ts');
 const { validateRequest } = loadTs('src/main/nativeMemory/service.ts');
