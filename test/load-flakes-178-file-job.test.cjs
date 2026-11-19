@@ -383,7 +383,7 @@ test('LIVE: when the kill returns, nothing the file started still holds its fold
   const { exe } = R.prepareFileJob();
   const busy = []; const extra = [];
   for (let round = 0; round < 8; round++) {
-    const ps0 = own.powershellStarts(); let polls = 0;
+    const ps0 = own.powershellStarts(); let polls = 0; let left = [];
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lf178-'));
     let file = null; let rows = [];
     try {
@@ -407,12 +407,12 @@ test('LIVE: when the kill returns, nothing the file started still holds its fold
       fs.rmSync(path.join(dir, 'f.cjs'));
       try { fs.rmdirSync(dir); } catch (e) { busy.push(`round ${round}: ${e.code}`); }
     } finally {
-      sweepLeft(rows, file ? file.f.pid : null);
+      left = sweepLeft(rows, file ? file.f.pid : null);
       if (file && file.f.exitCode === null && file.f.signalCode === null) { const g = new Promise((res) => file.f.once('exit', res)); file.f.kill(); await g; }
       for (let i = 0; i < 100 && fs.existsSync(dir); i++) { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { await new Promise((res) => setTimeout(res, 100)); } }
     }
     const more = own.powershellStarts() - ps0 - polls;
-    if (more !== 0) extra.push(`round ${round}: ${more} beyond its ${polls} ping poll(s)`);
+    if (more !== 0) extra.push(`round ${round}: ${more} beyond its ${polls} ping poll(s); not gone after the kill (swept): [${left.join(', ')}]`);
   }
   assert.deepEqual(busy, [], 'the folder was still in use right after the kill returned');
   // FLAKE-FILEJOB178-CANCEL-180S-108: a PowerShell start costs 1.3-2 s idle and 4-5 s inside a full
