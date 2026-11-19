@@ -139,7 +139,14 @@ test('an authority read is one of the reads: the wait covers it, and after dispo
   rewrite();
   await w.hive.integrityIssuesAsync();
   assert.ok(g.calls >= 1, 'control: the authority read goes through the gated readFile');
-  for (let i = 0; i < 200 && g.open > 0; i++) await turn();
+  // FLAKE-HIVE-READ-DRAIN-LOG-TAIL: settle on signals, not on a number of turns. The load above
+  // put a watcher on the hive folder, and a watcher event refreshes tasks.json with a read of its
+  // own, outside any call this test awaits. Left alone, such a read can be the one that reaches
+  // the gate below, and dispose() then refuses the read this test is about. So: drop the
+  // watchers (no new refresh), wait for a refresh already in flight, then for every counted read.
+  w.hive.__dropAuthorityWatchersForTests();
+  await Promise.all([...w.hive.authorityRefreshes.values()]);
+  await w.hive.drainReads();
   assert.equal(g.open, 0, 'control: no authority read is left open');
 
   g.gated = true;
