@@ -6,46 +6,11 @@ require('./tools/own-job.cjs');
 // and interprets input as UTF-8, while POSIX PTYs preserve the raw bytes.
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const pty = require('node-pty');
 const loadTs = require('./load-ts.cjs');
 const { readSource } = require('./read-source.cjs');
+const { childBytes, electronExe } = require('./tools/pty-child.cjs');
 
 const X10_HIGH_COLUMN = '\x1b[M \x85!';
-const child = [
-  "process.stdin.setRawMode?.(true); process.stdin.resume();",
-  "process.stdout.write('READY\\n');",
-  "process.stdin.once('data', (data) => { process.stdout.write('BYTES:' + JSON.stringify([...data]) + '\\n'); process.exit(0); });",
-  "setTimeout(() => { process.stdout.write('TIMEOUT\\n'); process.exit(2); }, 3000);"
-].join(' ');
-
-function childBytes(input) {
-  return new Promise((resolve, reject) => {
-    const proc = pty.spawn(process.execPath, ['-e', child], {
-      name: 'xterm-256color', cols: 120, rows: 24, cwd: process.cwd(), env: process.env
-    });
-    let output = '';
-    let ended = false;
-    let wrote = false;
-    const timer = setTimeout(() => finish(new Error('PTY child did not answer')), 5000);
-    function finish(error, value) {
-      if (ended) return;
-      ended = true;
-      clearTimeout(timer);
-      try { proc.kill(); } catch { /* child already exited */ }
-      error ? reject(error) : resolve(value);
-    }
-    proc.onData((data) => {
-      output += data;
-      const hit = /BYTES:(\[[^\n]*\])/.exec(output);
-      if (hit) finish(null, JSON.parse(hit[1]));
-      if (output.includes('TIMEOUT')) finish(new Error('PTY child timed out'));
-      if (!wrote && output.includes('READY')) { wrote = true; proc.write(input); }
-    });
-    proc.onExit(({ exitCode }) => {
-      if (!/BYTES:/.test(output)) finish(new Error(`PTY child exited ${exitCode}: ${output}`));
-    });
-  });
-}
 
 test('ONBINARY-DROP: binary xterm input is wired to the platform handoff', () => {
   const pool = readSource('src/renderer/src/components/terminalPool.ts');
@@ -78,4 +43,28 @@ test('ONBINARY-DROP: POSIX real PTY receives the raw X10 bytes', { skip: process
   const { ptyBinaryInput } = loadTs('src/main/ptyBinaryInput.ts');
   assert.deepEqual(await childBytes(ptyBinaryInput(X10_HIGH_COLUMN, process.platform)),
     [0x1b, 0x5b, 0x4d, 0x20, 0x85, 0x21]);
+});
+
+// ONBINARY-DROP-ELECTRON-FILE-NEVER-EXITS-108. electron.exe is a GUI-subsystem program: Windows does not
+// attach it to the pseudoconsole, so (also as Node) it prints nothing to the PTY and reads nothing from it.
+// node-pty holds kill() back until a terminal's first data chunk, and its exit path frees only the output
+// socket: after such a child the conout worker thread stayed for good and the test file never ended (every
+// Electron leg waited out the 30 min file limit). The same child, on both runtimes: the helper must name
+// the failure AND leave no worker behind.
+test('ONBINARY-DROP: a PTY child that is not on the console fails by name and leaves no conout worker', { skip: process.platform !== 'win32' }, async () => {
+  let worker;
+  let exited;
+  const run = childBytes(X10_HIGH_COLUMN, {
+    file: electronExe(), env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+    onSpawn: (proc) => { worker = proc._agent._conoutSocketWorker._worker; exited = new Promise((res) => worker.once('exit', res)); }
+  });
+  try {
+    await assert.rejects(run, { message: 'PTY child exited 2: ' }, 'no READY reached the PTY: the child ran its 3 s timer out');
+    let t;
+    await Promise.race([exited, new Promise((_, rej) => {
+      t = setTimeout(() => rej(new Error('the conout worker of the terminal never exited: the kill did not run (node-pty waits for a first data chunk, and this child sends none)')), 8000);
+    })]).finally(() => clearTimeout(t));
+  } finally {
+    await worker.terminate();   // a red run must still let this file end
+  }
 });
