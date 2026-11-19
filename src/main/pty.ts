@@ -159,7 +159,11 @@ interface WindowsTerminalInternals {
   _isReady?: boolean;
   _deferreds?: unknown[];
   _close?: () => void;
-  _agent?: { kill?: () => void; exitCode?: number; _conoutSocketWorker?: ConoutConnectionInternals };
+  _agent?: {
+    kill?: () => void; exitCode?: number; _conoutSocketWorker?: ConoutConnectionInternals;
+    /** The input pipe (net.Socket). node-pty never destroys it: not from its exit path, not from its kill. */
+    _inSocket?: { destroyed?: boolean; destroy?: () => void };
+  };
   /** The agent's outSocket (net.Socket); `_handle` stays null until its connect() runs. */
   _socket?: { readable: boolean; _handle?: unknown; destroy?: () => void; once?: (event: string, fn: () => void) => unknown };
   /** Terminal events ride on the socket; 'exit' is what onExit listens to. */
@@ -170,6 +174,42 @@ interface WindowsTerminalInternals {
 interface ConoutConnectionInternals {
   connectSocket?: (socket: unknown) => void;
   _worker?: { terminate?: () => Promise<number> };
+  /** Ends the worker thread 1 s later; a second call does nothing (node-pty's own _isDisposed guard). */
+  dispose?: () => void;
+}
+
+/** Said once: releaseExited met a node-pty it does not fit. */
+let releaseExitedMissingSaid = false;
+
+/**
+ * PTY-NATURAL-EXIT-NO-KILL-LEAK. Frees what node-pty 1.1.0 keeps for a Windows terminal whose
+ * process is gone: the conout worker thread (node-pty frees it only from its kill, so a terminal
+ * that ended by itself kept it) and the input socket (node-pty never destroys it, so a killed
+ * terminal kept it too). One thread and one open pipe per terminal, for the life of the app.
+ *
+ * Called from the terminal's exit, AFTER the exit was reported: by then the data pipe has closed
+ * (that close is what emits the exit), so every byte is out. It names no process: node-pty's own
+ * `_agent.kill()` would sweep the console process list of a pid that is gone and may be reused
+ * (PTY-KILL-PID-IDENTITY), so this calls only the worker's dispose and the socket's destroy.
+ * Safe to repeat. A terminal without these internals (another node-pty) is left alone, said once.
+ */
+export function releaseExited(proc: pty.IPty, platform: NodeJS.Platform = process.platform): boolean {
+  if (platform !== 'win32') return false;   // unix terminals have neither
+  const agent = (proc as unknown as WindowsTerminalInternals)._agent;
+  const conout = agent?._conoutSocketWorker;
+  const input = agent?._inSocket;
+  try {
+    if (typeof conout?.dispose !== 'function' || typeof input?.destroy !== 'function') throw new Error('node-pty internals changed');
+    conout.dispose();
+    if (!input.destroyed) input.destroy();
+    return true;
+  } catch (e) {
+    if (!releaseExitedMissingSaid) {
+      releaseExitedMissingSaid = true;
+      console.warn(`[pty] an exited terminal keeps its conout worker and input socket: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    return false;
+  }
 }
 
 /** Said once: guardLateReady met a node-pty it does not fit. */
@@ -1233,19 +1273,25 @@ export class PtyManager {
       proc.onData((data) => this.deliverData(opts.id, session, data));
       if (this.startupHooks) { try { this.startupHook()?.spawned(opts.id); } catch { /* best-effort */ } }
       proc.onExit(({ exitCode, signal }) => {
-        // PTY-KILL-PID-IDENTITY: the root is gone. Unless a kill may still name the pid (it
-        // releases the hold itself when it is done), stop reserving it.
-        if (!session.holdUsers) session.hold?.release();
-        // Stale exit from a process whose id was reclaimed (kill()+respawn) — do
-        // NOT touch the live session or tell the renderer the new pty died.
-        if (this.sessions.get(opts.id) !== session) return;
-        session.out?.flush(); // every byte before the exit notice, as before batching
-        this.safeSend(`pty:exit:${opts.id}`, { exitCode, signal }, session.owner);
-        this.reportEnd(opts.id, session, exitCode, signal);   // ZERO-TOKEN-LIVENESS: before the session goes
-        this.sessions.delete(opts.id);
-        // Natural exit must run the same lifecycle teardown as an explicit kill.
-        // Guarded so a teardown error can never crash node-pty's exit callback.
-        try { this.exitHandler?.(opts.id, exitCode); } catch { /* never throw out of onExit */ }
+        try {
+          // PTY-KILL-PID-IDENTITY: the root is gone. Unless a kill may still name the pid (it
+          // releases the hold itself when it is done), stop reserving it.
+          if (!session.holdUsers) session.hold?.release();
+          // Stale exit from a process whose id was reclaimed (kill()+respawn) — do
+          // NOT touch the live session or tell the renderer the new pty died.
+          if (this.sessions.get(opts.id) !== session) return;
+          session.out?.flush(); // every byte before the exit notice, as before batching
+          this.safeSend(`pty:exit:${opts.id}`, { exitCode, signal }, session.owner);
+          this.reportEnd(opts.id, session, exitCode, signal);   // ZERO-TOKEN-LIVENESS: before the session goes
+          this.sessions.delete(opts.id);
+          // Natural exit must run the same lifecycle teardown as an explicit kill.
+          // Guarded so a teardown error can never crash node-pty's exit callback.
+          try { this.exitHandler?.(opts.id, exitCode); } catch { /* never throw out of onExit */ }
+        } finally {
+          // PTY-NATURAL-EXIT-NO-KILL-LEAK: last, once the exit is reported, and on the stale branch
+          // too: that is the exit of a KILLED terminal, whose input socket node-pty also keeps.
+          releaseExited(proc);
+        }
       });
 
       return { ok: true };
