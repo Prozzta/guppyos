@@ -507,6 +507,7 @@ export class ClaimStore {
     const agentsDir = join(this.d.hiveRoot, 'agents');
     let key: string | null = null;
     let st: nodeFs.Stats | null = null;
+    // Stat before the listing: an agent added in between leaves a key older than the listing, so the next census lists again.
     try { st = nodeFs.statSync(agentsDir); key = statKey(st); } catch { /* no agents folder: no ledgers */ }
     const r = this.roster;
     if (r && r.gen === this.rosterGen && r.key !== null && r.key === key) {
@@ -562,6 +563,7 @@ export class ClaimStore {
     const at = mono();
     const run = async (): Promise<void> => {
       let st: nodeFs.Stats | null = null;
+      // Stat before the listing, as in segmentAgents: a key taken after it would match a roster that lacks a folder added in between.
       try { st = await fsp.stat(agentsDir); } catch { /* no agents folder: no ledgers */ }
       let names: string[];
       try { names = await fsp.readdir(agentsDir); } catch { return; } // not listed: the roster stands, the next census asks again
