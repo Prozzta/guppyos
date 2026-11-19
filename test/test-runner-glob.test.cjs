@@ -997,10 +997,11 @@ test('GATE-178 verdict: an early end, a backstop first, a missing pid and an orp
   const backstopKill = "[test-runner] FILE TIMED OUT after 4000 ms (the runner's backstop killed it at 7000 ms): C:/t/a-hung.test.cjs";
   assert.strictEqual(lateWatchdogVerdict({ code: 1, errText: watchdogKill, out: '', ms: 11_000, left: [] }), null, 'the late watchdog killed the whole tree: proven');
   // The 3a42324b shape: about 3 s, no watchdog kill, the ConPTY tree orphaned by the file's own end.
-  const early = lateWatchdogVerdict({ code: 1, errText: '', out: 'not ok 1 - a ConPTY killed before its first output\n# fail 1', ms: 3_000, left: ['11 conhost.exe', '12 cmd.exe', '13 PING.EXE'] });
+  // (no TAP words in this fixture: census-reporter-tap would then read this whole file as a TAP parser)
+  const early = lateWatchdogVerdict({ code: 1, errText: '', out: 'FILE-OUTPUT-1 a ConPTY killed before its first output\nFILE-OUTPUT-2', ms: 3_000, left: ['11 conhost.exe', '12 cmd.exe', '13 PING.EXE'] });
   assert.match(early, /THE HUNG FILE ENDED BY ITSELF after 3000 ms/);
   assert.match(early, /11 conhost\.exe/, 'what it left is named');
-  assert.match(early, /not ok 1 - a ConPTY killed/, 'the file\'s own output is carried');
+  assert.match(early, /FILE-OUTPUT-1 a ConPTY killed[\s\S]*FILE-OUTPUT-2/, 'the file\'s own output is carried');
   assert.doesNotMatch(early, /LATE WATCHDOG STILL TREE-KILLS/, 'a watchdog that never ran is not blamed');
   assert.match(lateWatchdogVerdict({ code: 1, errText: backstopKill, out: '', ms: 8_000, left: ['11 conhost.exe'] }), /THE BACKSTOP CAME BEFORE THE LATE WATCHDOG/);
   assert.match(lateWatchdogVerdict({ code: 1, errText: '', out: 'Error: boom', ms: 900, left: null }), /NEVER WROTE ITS PID.*Error: boom/);
