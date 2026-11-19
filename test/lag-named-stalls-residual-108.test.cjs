@@ -272,3 +272,99 @@ test('ONE-WAY: an AGY PostToolUse frame that settles a provisional hold is class
   assert.equal(lock.snapshot().length, 0);
   assert.deepEqual(calls, []);
 });
+
+// ─── 2. the mail rebuild ────────────────────────────────────────────────────────────────────────
+//
+// readdirSync:hive (3 stalls on 1.1.107): the synchronous log tail lists the hive folder for the
+// rotated logs and reads them. Its last caller on int but one is the rebuild of a corrupt mail
+// ledger (MailLedger.rebuildCorrupt: 50,000 log rows, the inbox and .done), which runs inside
+// whichever ledger call touches that agent first: a delivery in the router, a hook.
+
+const { HiveManager } = loadTs('src/main/hive.ts');
+const plain = (v) => JSON.parse(JSON.stringify(v));
+
+/** Two copies of one floor whose `andy-1` ledger is corrupt: mail in the inbox and in .done, and a
+ *  log that holds what only the log knows (a reply, a surfaced message). */
+async function corruptFloors(t) {
+  const home = fs.mkdtempSync(path.join(JAIL, 'mail-'));
+  const twin = `${home}-twin`;
+  const first = new HiveManager(() => home, () => true);
+  await first.ensureAgent({ id: 'god-1', name: 'Michael', provider: 'claude', cwd: home, isGod: true });
+  await first.ensureAgent({ id: 'andy-1', name: 'Andy', provider: 'claude', cwd: home });
+  const q = first.send({ to: 'andy-1', act: 'request', subject: 'Review PR 12', body: 'please' }, 'god-1');
+  const old = first.send({ to: 'andy-1', act: 'request', subject: 'Audit', body: 'x' }, 'god-1');
+  first.send({ to: 'andy-1', act: 'inform', subject: 'fyi', body: 'no reply owed' }, 'god-1');
+  const reply = first.send({ to: 'god-1', act: 'done', subject: 're: Audit', body: 'done', in_reply_to: old.id }, 'andy-1');
+  first.mail.flushAll();
+  first.dispose();
+  await first.drainReads();
+  const root = first.root();
+  const rel = path.relative(home, root);
+  const inbox = path.join(root, 'agents', 'andy-1', 'inbox');
+  fs.mkdirSync(path.join(inbox, '.done'), { recursive: true });
+  fs.renameSync(path.join(inbox, `${old.id}.json`), path.join(inbox, '.done', `${old.id}.json`));
+  assert.match(fs.readFileSync(path.join(root, 'log.jsonl'), 'utf8'), new RegExp(reply.id), 'the log holds the reply');
+  fs.writeFileSync(path.join(root, 'state', 'mail', 'andy-1.json'), '{"schema":', 'utf8');
+  fs.cpSync(home, twin, { recursive: true, preserveTimestamps: true });
+  const open = (h) => {
+    const hive = new HiveManager(() => h, () => true);
+    t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(h, { recursive: true, force: true }); });
+    return hive;
+  };
+  return { a: open(home), b: open(twin), rel, q, old, reply };
+}
+/** What a rebuild stamps with the clock of its own run. */
+const clockless = (doc) => JSON.parse(JSON.stringify(doc, (k, v) => (/At$/.test(k) && typeof v === 'number' ? 0 : v)));
+/** The synchronous calls that are the log tail or the rebuild's folder reads. */
+const rebuildReads = (calls) => calls.filter((c) => /^(readdirSync|statSync|openSync|readFileSync|existsSync):(hive|log[\w.-]*\.jsonl|inbox|\.done|m-[\w-]+\.json|[\w-]+T[\w-]+\.json)$/.test(c));
+
+test('MAIL REBUILD NON-VACUOUS: the synchronous rebuild lists the hive folder and reads the log, and the log decides the answer', async (t) => {
+  const { b, reply, old } = await corruptFloors(t);
+  const root = b.root();
+  const { calls, result } = await syncCalls(root, () => b.mail.ledger('andy-1'));
+  assert.ok(calls.includes(`readdirSync:${path.basename(root)}`), `THE STALL'S NAME: ${JSON.stringify(calls)}`);
+  assert.ok(calls.includes('readdirSync:.done'), JSON.stringify(calls));
+  assert.equal(result.entries[old.id]?.replyId, reply.id, 'only the log knows the reply');
+  assert.ok(rebuildReads(calls).length > 0, JSON.stringify(calls));
+});
+
+test('MAIL REBUILD: a corrupt ledger warmed ahead is rebuilt with no synchronous read of the log, the inbox or .done, to the synchronous answer', async (t) => {
+  const { a, b, reply, old, q } = await corruptFloors(t);
+  assert.equal(typeof a.mail.warm, 'function', 'MailLedger.warm');
+  const { calls } = await syncCalls(a.root(), () => a.mail.warm(['andy-1', 'god-1', 'nobody-1']));
+  assert.deepEqual(rebuildReads(calls), [], JSON.stringify(calls));
+  const after = await syncCalls(a.root(), () => a.mail.ledger('andy-1'));
+  assert.deepEqual(after.calls.filter((c) => !c.startsWith('existsSync:inbox')), [], 'loaded: the ledger call reads nothing');
+  const doc = after.result;
+  assert.equal(doc.entries[old.id]?.replyId, reply.id);
+  assert.equal(doc.entries[q.id]?.state, 'delivered');
+  assert.deepEqual(clockless(doc), clockless(b.mail.ledger('andy-1')), 'the rebuilt ledger is the synchronous one');
+  assert.deepEqual(plain(a.mail.integrityIssues()).map((i) => [i.file, i.repaired]), [['state/mail/andy-1.json', true]]);
+  const quarantined = fs.readdirSync(path.join(a.root(), 'state', 'mail')).filter((n) => n.startsWith('andy-1.json.corrupt-'));
+  assert.equal(quarantined.length, 1, 'quarantined once');
+});
+
+test('MAIL REBUILD: the router rebuilds a corrupt ledger off the main thread before it delivers', async (t) => {
+  const { a } = await corruptFloors(t);
+  const root = a.root();
+  const outbox = path.join(root, 'agents', 'god-1', 'outbox');
+  fs.mkdirSync(outbox, { recursive: true });
+  fs.writeFileSync(path.join(outbox, 'm1.json'), JSON.stringify({ to: 'andy-1', act: 'inform', subject: 'new', body: 'after the corruption' }), 'utf8');
+  const { calls, result } = await syncCalls(root, () => a.routeOnce());
+  assert.equal(result, 1, 'the message was routed');
+  assert.deepEqual(rebuildReads(calls).filter((c) => !/^existsSync:inbox$/.test(c)), [], JSON.stringify(calls));
+  const entries = Object.values(a.mail.ledger('andy-1').entries);
+  assert.ok(entries.some((e) => e.subject === 'new' || /new/.test(JSON.stringify(e))), 'delivered into the rebuilt ledger');
+  assert.equal(plain(a.mail.integrityIssues()).length, 1);
+});
+
+test('MAIL REBUILD: a hook warms its agent\'s ledger before it is handled', async () => {
+  const dir = agentDir();
+  const { s } = server(dir);
+  const order = [];
+  s.hive.mail = { warm: async (ids) => { await new Promise((r) => setImmediate(r)); order.push(`warm:${ids.join(',')}`); }, pending: () => { order.push('pending'); return []; } };
+  const handle = s.handle.bind(s);
+  s.handle = (p) => { order.push('handle'); return handle(p); };
+  await s.handleWithClaimContext({ agent_id: 'a1', hook_event_name: 'PreToolUse', session_id: 's', cwd: dir, tool_name: 'Bash', tool_input: { command: 'git status' }, tool_use_id: 't1', transport: 'http' });
+  assert.deepEqual(order.slice(0, 2), ['warm:a1', 'handle'], JSON.stringify(order));
+});
