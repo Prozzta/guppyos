@@ -13,9 +13,11 @@ require('./tools/mutant-runner-helper.cjs').gate(__filename);
  */
 const test = require('node:test');
 const assert = require('node:assert');
+const { execFileSync, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const own = require('./tools/own-procs.cjs');
+const { psEnv } = require('./tools/ps-env.cjs');
 const { dueFiles, killTree } = require('./tools/file-watchdog.cjs');
 const { readSource, codeOnly } = require('./read-source.cjs');
 
@@ -32,6 +34,30 @@ const TABLE = [
 ];
 /** Fake deps that record every kill; `now` is the table at kill time (default: unchanged). */
 const deps = (now = TABLE) => { const kills = []; return { kills, lookup: (pids) => now.filter((r) => pids.includes(r.pid)), kill: (rows) => kills.push(...rows.map((r) => r.pid)) }; };
+
+function racedStopScript(rows) {
+  const script = own.stopScript(rows);
+  const identity = /if \(\$q -and [^\n]*\) \{\n/;
+  assert.strictEqual((script.match(new RegExp(identity.source, 'g')) || []).length, 1, 'the identity branch is replaced exactly once to model exit-after-check');
+  return script.replace(identity, 'if ($true) {\n');
+}
+
+function runStopScript(script) {
+  const body = `$ProgressPreference = 'SilentlyContinue'\n${script}`;
+  try {
+    return execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(body, 'utf16le').toString('base64')],
+      { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024, timeout: 60_000, env: psEnv() });
+  } catch (error) {
+    error.message += `\n${String(error.stderr || '').trim()}`;
+    throw error;
+  }
+}
+
+function exitedCmdRow() {
+  const gone = spawnSync('cmd.exe', ['/c', 'exit'], { windowsHide: true });
+  assert.strictEqual(gone.status, 0, 'the race fixture command exited');
+  return R(gone.pid, 0, 1, 'cmd.exe');
+}
 
 test('a child is created at or after its parent: an OLDER process naming the parent is not a child', () => {
   const kids = own.childrenOf(TABLE, { pid: 5000, created: T });
@@ -139,6 +165,13 @@ test('stopIfSame: a process that exits after the identity check is success, whil
   assert.match(s, /Stop-Process -Id \$t\.pid -Force -ErrorAction Stop/, 'the race is a terminating error we can classify');
   assert.match(s, /FullyQualifiedErrorId -like 'NoProcessFoundForGivenId,\*'/, 'only an already-gone process is success');
   assert.match(s, /catch \{[\s\S]*?throw[\s\S]*?\}/, 'any other Stop-Process failure still escapes');
+});
+
+test('stopIfSame: an already-gone verified PID exits zero, but Idle still names its real stop failure', { skip: process.platform !== 'win32' && 'win32 only' }, () => {
+  const gone = exitedCmdRow();
+  assert.doesNotThrow(() => runStopScript(racedStopScript([gone])), 'the one-row lookup-to-stop race is success');
+  assert.doesNotThrow(() => runStopScript(racedStopScript([gone, exitedCmdRow()])), 'every already-gone row in one list is success');
+  assert.throws(() => runStopScript(racedStopScript([R(0, 0, 0, 'Idle')])), /Idle|CouldNotStopProcess/, 'a real Stop-Process failure still identifies itself');
 });
 
 test('watchdog: an OLDER node --test or test-file process under a recycled pid is not due', () => {
