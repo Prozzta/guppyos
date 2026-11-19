@@ -8977,6 +8977,9 @@ function bootstrapHiveServices(): void {
   const retiredKeys = pruneRetiredConfigKeys();
   if (retiredKeys.length) { try { hive.appendLog({ kind: 'config-retired-keys-removed', keys: retiredKeys }); } catch { /* best-effort */ } }
 
+  // LAG-NAMED-STALLS-RESIDUAL-108: what the stale-requests beat reads is read off the main thread
+  // first; the beat armed below waits for it. Packaged only, as the beat is.
+  if (app.isPackaged) void hive.readReleaseRunsAhead();
   armAlwaysOnBeats();
 }
 
