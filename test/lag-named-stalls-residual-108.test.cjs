@@ -238,3 +238,37 @@ test('READ-AHEAD: what was read ahead is gone once the run returns or throws', a
   fs.writeFileSync(path.join(dir, 'light.sh'), `${NT}\n`);
   assert.deepEqual(sync(dir, 'Bash', 'bash light.sh'), suiteIn('light.sh'));
 });
+
+test('READ-AHEAD: a file over the size limit is measured, never read', async () => {
+  assert.equal(typeof HK.HookServer.heavyRead, 'function', 'HookServer.heavyRead must exist');
+  const dir = agentDir();
+  const asked = [];
+  const orig = { stat: fs.promises.stat, readFile: fs.promises.readFile };
+  for (const k of Object.keys(orig)) fs.promises[k] = function (p, ...rest) { if (typeof p === 'string' && under(dir, p)) asked.push(`${k}:${path.basename(p)}`); return orig[k].call(this, p, ...rest); };
+  let got;
+  try { got = await HK.HookServer.heavyRead(() => sync(dir, 'Bash', 'bash big.sh && bash light.sh')); } finally { Object.assign(fs.promises, orig); }
+  assert.deepEqual(got, sync(dir, 'Bash', 'bash big.sh && bash light.sh'));
+  assert.ok(asked.includes('stat:big.sh') && asked.includes('readFile:light.sh'), `NON-VACUOUS: both scripts are asked for (${asked.join(', ')})`);
+  assert.ok(!asked.includes('readFile:big.sh'), 'the text of a file over HEAVY_SCRIPT_MAX_BYTES must not be read');
+});
+
+test('ONE-WAY: an AGY PostToolUse frame that settles a provisional hold is classified without synchronous fs', async () => {
+  const dir = agentDir();
+  const { s, lock, rows } = server(dir);
+  const token = 'ab'.repeat(16);
+  s.hookTokens.set('a1', Buffer.from(token, 'hex'));
+  const args = { command: 'bash later.sh', run_in_background: true };
+  // AGY sends no tool_use_id: the call is known by its command, at PreToolUse and in the frame alike.
+  await s.handleWithClaimContext({ agent_id: 'a1', hook_event_name: 'PreToolUse', session_id: 's', cwd: dir, tool_name: 'Bash', tool_input: args });
+  assert.equal(lock.snapshot().length, 1, 'held for a script that is not there yet');
+  fs.writeFileSync(path.join(dir, 'later.sh'), 'echo hi\n');
+  const frame = `agy PostToolUse ${token} a1\n${JSON.stringify({ workspacePaths: [dir], toolCall: { name: 'Bash', args } })}`;
+  const { calls } = await syncCalls(dir, async () => {
+    s.onOneway(frame);
+    // The frame has no reply: wait on the settle itself, one timer turn at a time.
+    for (let turn = 0; turn < 2000 && !rows.some((r) => r.action === 'settled-light'); turn++) await new Promise((r) => setTimeout(r, 5));
+  });
+  assert.ok(rows.some((r) => r.action === 'settled-light'), 'the frame reached the lock and settled the hold');
+  assert.equal(lock.snapshot().length, 0);
+  assert.deepEqual(calls, []);
+});
