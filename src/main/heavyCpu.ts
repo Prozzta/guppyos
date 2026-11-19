@@ -287,7 +287,8 @@ export class HeavyJobs {
    *  restarts the confirm, so the check runs HEAVY_JOB_EXIT_CONFIRM_MS after the last one of a burst. */
   private onEvent(e: Record<string, unknown>): void {
     if (e.event === 'watch') {
-      this.log({ action: 'watch', ...e });
+      // The helper's own `action` (closed, open-failed, wait-failed, failed) is logged as `what`.
+      this.log({ ...e, action: 'watch', what: e.action });
       return;
     }
     if (e.event !== 'exit' || typeof e.job !== 'string') return;

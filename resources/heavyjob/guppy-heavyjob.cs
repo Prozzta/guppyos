@@ -66,7 +66,6 @@ static class HeavyJob
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool IsProcessInJob(IntPtr proc, IntPtr job, out bool result);
     [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
     [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
-    [DllImport("kernel32.dll")] static extern bool GetProcessHandleCount(IntPtr h, out uint count);
     [DllImport("kernel32.dll")] static extern uint GetPriorityClass(IntPtr h);
     [DllImport("kernel32.dll")] static extern bool SetPriorityClass(IntPtr h, uint cls);
     [DllImport("kernel32.dll")] static extern bool GetProcessAffinityMask(IntPtr h, out UIntPtr proc, out UIntPtr sys);
@@ -483,7 +482,7 @@ static class HeavyJob
     // HEAVY-LOCK-RELEASE-LAG-197: the job messages that mean a process of the job is gone.
     const uint MSG_ACTIVE_PROCESS_ZERO = 4, MSG_EXIT_PROCESS = 7, MSG_ABNORMAL_EXIT_PROCESS = 8;
     const uint SYNCHRONIZE = 0x00100000, WAIT_OBJECT_0 = 0, WAIT_FAILED = 0xFFFFFFFF;
-    const int ERROR_ACCESS_DENIED = 5, ERROR_INVALID_PARAMETER = 87, ERROR_NOT_FOUND = 1168;
+    const int ERROR_INVALID_PARAMETER = 87, ERROR_NOT_FOUND = 1168;
     const int JobObjectAssociateCompletionPortInformation = 7;
     static readonly object Out = new object();
     static readonly Dictionary<long, string> PortKeys = new Dictionary<long, string>();
@@ -518,15 +517,16 @@ static class HeavyJob
     // ordinary empty transition, so retain SYNCHRONIZE handles for one membership snapshot. Once
     // every retained member has exited, take another snapshot: descendants can join after the
     // first one. Only an empty re-check reports the same exit event as PortLoop.
-    sealed class MemberWatch { public volatile bool Closed; public int Handles; public System.Threading.Thread Thread; }
+    // Its last line counts the member handles it opened and the ones it closed: the two are equal
+    // on every way out (an exit, a close request, a failed open or wait).
+    sealed class MemberWatch { public volatile bool Closed; public System.Threading.Thread Thread; }
     static void WatchMembers(IntPtr job, string id, MemberWatch state)
     {
         var thread = new System.Threading.Thread(() =>
         {
             var handles = new Dictionary<int, IntPtr>();
             bool started = false;
-            uint baseline = 0, remaining = 0;
-            GetProcessHandleCount(GetCurrentProcess(), out baseline);
+            int opened = 0, closed = 0;
             try
             {
                 while (!state.Closed)
@@ -556,7 +556,7 @@ static class HeavyJob
                                 return; // leave this job to HeavyJobs' existing poll
                             }
                             handles[pid] = h;
-                            state.Handles++;
+                            opened++;
                         }
                         continue;
                     }
@@ -571,17 +571,15 @@ static class HeavyJob
                             return; // unknown handle state: do not claim an exit
                         }
                     }
-                    foreach (int pid in exited) { CloseHandle(handles[pid]); handles.Remove(pid); state.Handles--; }
+                    foreach (int pid in exited) { if (CloseHandle(handles[pid])) closed++; handles.Remove(pid); }
                     if (handles.Count != 0) System.Threading.Thread.Sleep(25);
                 }
             }
             catch { Write("{\"event\":\"watch\",\"action\":\"failed\",\"job\":\"" + id + "\"}"); }
             finally
             {
-                foreach (var pair in handles) CloseHandle(pair.Value);
-                state.Handles = 0;
-                GetProcessHandleCount(GetCurrentProcess(), out remaining);
-                Write("{\"event\":\"watch\",\"action\":\"closed\",\"job\":\"" + id + "\",\"handles\":0,\"baseline\":" + baseline + ",\"remaining\":" + remaining + "}");
+                foreach (var pair in handles) if (CloseHandle(pair.Value)) closed++;
+                Write("{\"event\":\"watch\",\"action\":\"closed\",\"job\":\"" + id + "\",\"opened\":" + opened + ",\"closed\":" + closed + "}");
             }
         }) { IsBackground = true };
         state.Thread = thread;

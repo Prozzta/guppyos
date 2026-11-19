@@ -249,6 +249,7 @@ const K = {
   helper() {
     const cs = read('resources/heavyjob/guppy-heavyjob.cs');
     assert.ok(cs.includes('keys[w[1]] = Watch(port, job, w[1], ref next);'), 'EVERY JOB SERVE MAKES IS TIED TO THE PORT');
+    assert.ok(cs.includes('WatchMembers(job, w[1], memberWatch);'), 'EVERY JOB SERVE MAKES HAS A MEMBER WATCHER (the port may never report)');
     assert.ok(/msg != MSG_EXIT_PROCESS && msg != MSG_ABNORMAL_EXIT_PROCESS && msg != MSG_ACTIVE_PROCESS_ZERO/.test(cs), 'A CRASH (ABNORMAL EXIT) AND AN EMPTY JOB ARE NOTICES TOO');
     assert.ok(cs.includes('Write(reply);') && !/Console\.Out\.WriteLine\(reply\)/.test(cs), 'REPLIES AND NOTICES SHARE ONE WRITER (a notice never lands inside a reply)');
   }
@@ -352,8 +353,71 @@ function assertFreed(r, what) {
   assert.equal(r.reason, 'job-exit');
 }
 
-function assertWatcherClosed(r, what) {
-  assert.ok(r.rows.some((row) => row.kind === 'heavy-cpu' && row.action === 'closed' && row.handles === 0 && row.remaining <= row.baseline + 1), `${what}: every retained member handle is closed`);
+/** The member watcher's last line: it counts the handles it opened and the ones CloseHandle closed.
+ *  Exact counts of its own handles, not the process-wide handle count (other threads move that). */
+function assertHandlesClosed(row, what, atLeast = 1) {
+  assert.ok(row, `${what}: THE MEMBER WATCHER REPORTS ITS HANDLES WHEN IT ENDS (no closed row)`);
+  assert.ok(Number.isInteger(row.opened) && row.opened >= atLeast, `${what}: the member watcher retained a handle (opened ${row.opened})`);
+  assert.equal(row.closed, row.opened, `${what}: EVERY RETAINED MEMBER HANDLE IS CLOSED (opened ${row.opened}, closed ${row.closed})`);
+}
+function assertWatcherClosed(r, what, atLeast = 1) {
+  assertHandlesClosed(r.rows.find((x) => x.kind === 'heavy-cpu' && x.action === 'watch' && x.what === 'closed'), what, atLeast);
+}
+
+/** The helper's serve mode driven directly: a job is closed while its members still run (what the
+ *  scan does to a job it lifts with other processes left in it). Resolves with the watcher's last line. */
+async function closeWhileRunning(t, exe) {
+  const id = `hlr197c${process.pid}x${Date.now()}`;
+  const serve = spawn(exe, ['serve'], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
+  const lines = [];
+  let buf = '';
+  serve.stdout.on('data', (d) => {
+    buf += d;
+    for (let i = buf.indexOf('\n'); i >= 0; i = buf.indexOf('\n')) { try { lines.push(JSON.parse(buf.slice(0, i))); } catch { /* not a line of ours */ } buf = buf.slice(i + 1); }
+  });
+  const members = () => String(spawnSync(exe, ['list', id], { encoding: 'utf8', windowsHide: true }).stdout).split(/\r?\n/).filter(Boolean);
+  const until = async (find, ms, what) => {
+    for (const end = Date.now() + ms; ;) {
+      const hit = find();
+      if (hit) return hit;
+      assert.ok(Date.now() < end, what);
+      await new Promise((r) => setTimeout(r, 25));
+    }
+  };
+  let sh = null;
+  t.after(() => { try { serve.kill(); } catch { /* gone */ } try { sh?.kill(); } catch { /* gone */ } });
+  serve.stdin.write(`create ${id} 0 0\n`);
+  await until(() => lines.find((x) => x.ok === true), 10_000, 'the helper made the job');
+  const local = fs.mkdtempSync(path.join(os.tmpdir(), 'hlr197-local-'));
+  helperDirs.push(local);
+  sh = spawn(gitBash(), ['-c', `"${exe.replace(/\\/g, '/')}" join ${id} 0 0; sleep 30`], { stdio: 'ignore', windowsHide: true, env: { ...process.env, LOCALAPPDATA: local } });
+  const gone = new Promise((r) => sh.on('exit', r));
+  await until(() => members().length > 0, 10_000, 'the shell joined the job');
+  // The watcher snapshots every 25 ms while the job is empty: it holds the members' handles by now.
+  await new Promise((r) => setTimeout(r, 500));
+  serve.stdin.write(`close ${id}\n`);
+  const row = await until(() => lines.find((x) => x.event === 'watch' && x.action === 'closed'), 10_000, 'THE MEMBER WATCHER REPORTS ITS HANDLES WHEN IT ENDS (no closed line after the close)');
+  for (const line of members()) { try { spawnSync('taskkill', ['/F', '/PID', String(JSON.parse(line).pid)], { windowsHide: true }); } catch { /* gone already */ } }
+  await gone;
+  return row;
+}
+
+/** A member the watcher's first snapshot cannot hold: a detached node started 1 s in, with a console
+ *  of its own, that runs 3 s more. (A plain `sleep 3 &` shares the shell's console host, which is in
+ *  the first snapshot and lives as long as the sleep does: the re-query would never be needed.) */
+const LATE_MEMBER_BODY = `sleep 1; node -e "require('child_process').spawn(process.execPath,['-e','setTimeout(()=>{},3000)'],{detached:true,stdio:'ignore',windowsHide:true}).unref()"`;
+/** The shell exits at ~1 s, the late member ~3 s after that. */
+function assertLateMember(r) {
+  assert.ok(r.lagMs === null || r.lagMs >= 1_500, `A MEMBER THAT JOINED AFTER THE SNAPSHOT KEEPS THE SLOT (freed ${r.lagMs} ms after the shell, the member runs 3 s more)`);
+  assert.ok(r.lagMs !== null && r.lagMs < 5_000, `THE SLOT IS FREED WITHIN 2 S OF THE LATE MEMBER'S EXIT (${r.lagMs === null ? 'not freed 6 s after the shell' : `freed ${r.lagMs} ms after the shell`}, the member ends 3 s after it)`);
+  assert.equal(r.reason, 'job-exit');
+}
+
+/** The helper with no member watcher: only the completion port reports exits. */
+function noMemberWatchHelperSource(source = helperSource()) {
+  const needle = '                        WatchMembers(job, w[1], memberWatch);\n';
+  assert.equal(source.split(needle).length - 1, 1, 'the helper still starts one member watcher per job');
+  return source.replace(needle, '');
 }
 
 test('LIVE: a job that succeeds frees the slot within 2 s of its exit', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
@@ -384,11 +448,16 @@ test('LIVE: a killed job frees the slot when completion-port notices are absent'
 });
 
 test('LIVE: a member that joins after a snapshot keeps the slot until its own exit', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
-  const r = await liveRelease(t, { body: 'sleep 1; sleep 3 &', exe: helper(t, noPortNoticesHelperSource()) });
+  const r = await liveRelease(t, { body: LATE_MEMBER_BODY, exe: helper(t, noPortNoticesHelperSource()) });
   t.diagnostic(`late member: shell ran ${r.runMs} ms, slot freed ${r.lagMs} ms after the shell exit`);
-  assert.ok(r.lagMs !== null && r.lagMs >= 1_500, 'the empty-confirm re-query observes the grandchild before release');
-  assert.equal(r.reason, 'job-exit');
+  assertLateMember(r);
   assertWatcherClosed(r, 'late member');
+});
+
+test('LIVE: the completion port alone still frees the slot within 2 s (no member watcher)', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
+  const r = await liveRelease(t, { body: 'sleep 1; exit 0', exe: helper(t, noMemberWatchHelperSource()) });
+  t.diagnostic(`port only: ran ${r.runMs} ms, held ${r.heldMs} ms, freed ${r.lagMs} ms after the exit`);
+  assertFreed(r, 'port only');
 });
 
 test('LIVE: member watcher returns every handle to baseline across runs', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
@@ -404,7 +473,13 @@ test('LIVE: a member that exits before OpenProcess does not stall the watcher', 
   const source = noPortNoticesHelperSource(goneOnOpenHelperSource());
   const r = await liveRelease(t, { body: 'sleep 1; exit 0', exe: helper(t, source) });
   assertFreed(r, 'open PID-gone race');
-  assertWatcherClosed(r, 'open PID-gone race');
+  assertWatcherClosed(r, 'open PID-gone race', 0); // no open succeeds here: nothing retained, nothing to close
+});
+
+test('LIVE: a job closed while its members still run closes every retained handle', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
+  const row = await closeWhileRunning(t, helper(t));
+  t.diagnostic(`closed early: opened ${row.opened}, closed ${row.closed}`);
+  assertHandlesClosed(row, 'closed early');
 });
 
 test('LIVE: a crash (an abnormal exit inside the job) frees the slot within 2 s', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
@@ -522,15 +597,35 @@ const MUTANTS = [
 
 // (Dropping MSG_ABNORMAL_EXIT_PROCESS alone is equivalent here: the shell's own exit and the job going
 // empty still come after a crash. It stays in the filter for a job whose shell outlives the crash.)
+const NO_MEMBER_WATCH = ['                        WatchMembers(job, w[1], memberWatch);\n', ''];
+const FREED = /THE SLOT IS FREED WITHIN 2 S OF THE JOB'S EXIT/;
 const HELPER_MUTANTS = [
+  // The completion port, judged alone: the member watcher is taken out of these two, or it would
+  // report the exit the mutant drops.
+  { name: 'serve ties no job to the port', edits: [NO_MEMBER_WATCH, ['                        keys[w[1]] = Watch(port, job, w[1], ref next);\n', '']], body: 'sleep 1; exit 0', what: 'success', dies: FREED },
+  { name: 'notices are never written', edits: [NO_MEMBER_WATCH, ['out id)) continue;\n            Write("{\\"event\\":\\"exit\\"', 'out id)) continue;\n            if (msg == 0) Write("{\\"event\\":\\"exit\\"']], body: 'sleep 1; exit 0', what: 'success', dies: FREED },
   {
     name: 'the helper suppresses every exit event',
-    edits: [['static void Write(string line) { lock', 'static void Write(string line) { if (line.Contains("\\\"event\\\":\\\"exit\\\"")) return; lock']], body: 'sleep 1; exit 0', what: 'success'
+    edits: [['static void Write(string line) { lock', 'static void Write(string line) { if (line.Contains("\\\"event\\\":\\\"exit\\\"")) return; lock']], body: 'sleep 1; exit 0', what: 'success', dies: FREED
+  },
+  // The member watcher, judged alone (no port notices).
+  { name: 'the member watcher never reports an empty job', edits: [['                                Write("{\\"event\\":\\"exit\\",\\"job\\":\\"" + id + "\\",\\"msg\\":4,\\"pid\\":0}");\n', '']], body: 'sleep 30', kill: 1_500, noPort: true, what: 'no-port kill', dies: FREED },
+  {
+    // It reports the exit once its first snapshot has exited. The lock's confirm then finds the
+    // late member and keeps the slot, and no second report ever comes.
+    name: 'the member watcher skips its empty-confirm re-query',
+    edits: [['                    if (handles.Count != 0) System.Threading.Thread.Sleep(25);', '                    if (handles.Count != 0) System.Threading.Thread.Sleep(25); else { Write("{\\"event\\":\\"exit\\",\\"job\\":\\"" + id + "\\",\\"msg\\":4,\\"pid\\":0}"); return; }']],
+    body: LATE_MEMBER_BODY, noPort: true, verify: assertLateMember, dies: /THE SLOT IS FREED WITHIN 2 S OF THE LATE MEMBER'S EXIT/
   },
   {
-    name: 'the member watcher skips its empty-confirm re-query',
-    edits: [['if (members.Count == 0)', 'if (true)']], body: 'sleep 1; sleep 3 &', noPort: true, what: 'late member',
-    verify: (r) => assert.ok(r.lagMs !== null && r.lagMs >= 1_500, 'the empty-confirm re-query observes the grandchild before release')
+    name: 'an exited member handle is left open',
+    edits: [['{ if (CloseHandle(handles[pid])) closed++; handles.Remove(pid); }', '{ handles.Remove(pid); }']],
+    body: 'sleep 1; exit 0', noPort: true, verify: (r) => assertWatcherClosed(r, 'leak'), dies: /EVERY RETAINED MEMBER HANDLE IS CLOSED/
+  },
+  {
+    name: 'the handles still held at the end are left open',
+    edits: [['                foreach (var pair in handles) if (CloseHandle(pair.Value)) closed++;\n', '']],
+    closeEarly: true, dies: /EVERY RETAINED MEMBER HANDLE IS CLOSED/
   }
 ];
 
@@ -554,8 +649,13 @@ test('MUTANT CENSUS: every mutant applies once and dies at the assertion that na
       if (m.noPort) source = noPortNoticesHelperSource(source);
       const exe = helper(tt, source);
       await assert.rejects(async () => {
-        const r = await liveRelease(tt, { exe, body: m.body });
+        if (m.closeEarly) return assertHandlesClosed(await closeWhileRunning(tt, exe), 'closed early');
+        const r = await liveRelease(tt, { exe, body: m.body, kill: m.kill });
+        tt.diagnostic(`ran ${r.runMs} ms, ${r.lagMs === null ? 'not freed 6 s after the exit' : `freed ${r.lagMs} ms after the exit`}; ${JSON.stringify(r.rows.filter((x) => x.kind === 'heavy-cpu').map((x) => [x.action, x.what, x.by, x.opened, x.closed]))}`);
         if (m.verify) m.verify(r); else assertFreed(r, m.what);
+      }, (e) => {
+        assert.match(String(e && e.message), m.dies, `${m.name}: died for the wrong reason: ${e && e.message}`);
+        return true;
       });
     });
   }
