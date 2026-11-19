@@ -1038,11 +1038,23 @@ test('GATE-178: a watchdog whose snapshot is 12 s late still TREE-kills a hung C
     const lateWatchdog = (limitMs, outFile) => {
       const args = [runner.WATCHDOG, String(process.pid), String(limitMs), outFile, String(runner.watchdogPollMs(limitMs))];
       wrapper = spawn(process.execPath, ['-e', `setTimeout(() => { const c = require('child_process').spawn(process.execPath, ${JSON.stringify(args)}, { stdio: 'ignore', windowsHide: true }); c.on('exit', () => process.exit(0)); }, 12000);`], { stdio: 'ignore', windowsHide: true });
+      // GATE178 (Jim MUST 1): never wait on the wrapper. Its watchdog lives until this process is gone, so a
+      // ref'd wrapper that was not killed kept this file alive forever (a pass, then a hang).
+      wrapper.unref();
       const rec = { pid: wrapper.pid, bornMs: Date.now(), name: path.basename(process.execPath) };   // electron.exe under the Electron leg
       // the wrapper and the watchdog it started: its own tree, verified (not taskkill /T: TEST-GLOB-PID-RECYCLE)
-      // GATE178 (Electron leg): a wrong record (named node.exe on electron.exe) threw here and was swallowed,
-      // so the late watchdog was never killed and the run hung 23 min. A failed stop is kept and fails the test.
-      return { stop: () => { try { own.killOwnTree(rec); } catch (err) { stopErr = err; } } };
+      // GATE178 (Electron leg): a wrong record (named node.exe on electron.exe) left the late watchdog alive and
+      // the run hung 23 min. killOwnTree does not throw on that: it returns what it killed. So the stop FAILS
+      // unless the wrapper's own pid is among the killed, with no stranger; then the wrapper is ended through
+      // its own handle (never a recycled pid) so the run still ends, red.
+      return { stop: () => {
+        try {
+          const r = own.killOwnTree(rec);
+          if (r.stranger) stopErr = new Error(`pid ${rec.pid} is a stranger (${r.stranger.name}), not the recorded ${rec.name}`);
+          else if (!r.killed.some((k) => k.pid === rec.pid)) stopErr = new Error(`the wrapper pid ${rec.pid} (${rec.name}) was not killed (killed [${r.killed.map((k) => k.pid)}], skipped [${r.skipped.map((k) => k.pid)}])`);
+        } catch (err) { stopErr = err; }
+        if (stopErr) { try { wrapper.kill('SIGKILL'); } catch { /* already gone */ } }
+      } };
     };
     // Bounded (spawnSync blocks this file's own timeout): a run nothing ends FAILS here, it does not hang.
     let out = '';
