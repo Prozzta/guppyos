@@ -316,7 +316,10 @@ async function corruptFloors(t) {
 /** What a rebuild stamps with the clock of its own run. */
 const clockless = (doc) => JSON.parse(JSON.stringify(doc, (k, v) => (/At$/.test(k) && typeof v === 'number' ? 0 : v)));
 /** The synchronous calls that are the log tail or the rebuild's folder reads. */
-const rebuildReads = (calls) => calls.filter((c) => /^(readdirSync|statSync|openSync|readFileSync|existsSync):(hive|log[\w.-]*\.jsonl|inbox|\.done|m-[\w-]+\.json|[\w-]+T[\w-]+\.json)$/.test(c));
+// What only the rebuild reads: the hive folder's listing and each log's stat (the log tail), the
+// inbox and .done listings, and each message file's stat and text. Not the log append's open of
+// log.jsonl (a write) nor a delivery's existsSync of its own message file.
+const rebuildReads = (calls) => calls.filter((c) => /^(readdirSync:(hive|inbox|\.done)|(statSync|existsSync|readFileSync):log[\w.-]*\.jsonl|(statSync|readFileSync):(m-[\w-]+\.json|[\w-]+T[\w-]+\.json))$/.test(c));
 
 test('MAIL REBUILD NON-VACUOUS: the synchronous rebuild lists the hive folder and reads the log, and the log decides the answer', async (t) => {
   const { b, reply, old } = await corruptFloors(t);
@@ -367,4 +370,20 @@ test('MAIL REBUILD: a hook warms its agent\'s ledger before it is handled', asyn
   s.handle = (p) => { order.push('handle'); return handle(p); };
   await s.handleWithClaimContext({ agent_id: 'a1', hook_event_name: 'PreToolUse', session_id: 's', cwd: dir, tool_name: 'Bash', tool_input: { command: 'git status' }, tool_use_id: 't1', transport: 'http' });
   assert.deepEqual(order.slice(0, 2), ['warm:a1', 'handle'], JSON.stringify(order));
+});
+
+test('MAIL REBUILD: starting the router loads every active agent\'s ledger off the main thread, a corrupt one rebuilt', async (t) => {
+  const { a, b } = await corruptFloors(t);
+  const root = a.root();
+  const { calls } = await syncCalls(root, async () => {
+    a.startRouter(60_000);
+    t.after(() => a.stopRouter());
+    for (let turn = 0; a.mail.loadedDoc('andy-1') === null || a.mail.loadedDoc('god-1') === null; turn++) {
+      assert.ok(turn < 2000, 'the router never loaded the ledgers');
+      await new Promise((r) => setTimeout(r, 5));
+    }
+  });
+  assert.deepEqual(rebuildReads(calls).filter((c) => !/^existsSync:inbox$/.test(c)), [], JSON.stringify(calls));
+  assert.deepEqual(clockless(a.mail.loadedDoc('andy-1')), clockless(b.mail.ledger('andy-1')));
+  assert.equal(plain(a.mail.integrityIssues()).length, 1);
 });
