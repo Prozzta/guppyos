@@ -13,6 +13,7 @@ require('./tools/own-job.cjs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const { rmTree } = require('./tools/rm-tree.cjs');
 const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
@@ -25,7 +26,7 @@ const gitSafe = loadTs('src/main/gitSafe.ts');
 const { findExe, resolveExe } = loadTs('src/main/resolveExe.ts');
 
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'grh108-'));
-test.after(() => fs.rmSync(ROOT, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
+test.after(() => rmTree(ROOT, { maxRetries: 10, retryDelay: 50 }));
 const raw = (cwd, ...args) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'core.autocrlf=false', ...args], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 const fwd = (p) => p.replace(/\\/g, '/');
 

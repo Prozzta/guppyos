@@ -26,6 +26,7 @@
  * and run.json. Item text and answers stay local; mails carry counts and shas only.
  */
 const fs = require('node:fs');
+const { rmTree } = require('../tools/rm-tree.cjs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
@@ -606,7 +607,7 @@ function sessionFolderOut(projects, cwd, dest) {
   const files = filesUnder(src);
   const unequal = files.filter((f) => !fs.existsSync(path.join(to, f)) || !fs.readFileSync(path.join(src, f)).equals(fs.readFileSync(path.join(to, f))));
   if (unequal.length) return { folder, created: true, files: files.length, removed: false, problem: `${unequal.length} copied file(s) differ` };
-  fs.rmSync(src, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  rmTree(src, { maxRetries: 10, retryDelay: 200 });
   return { folder, created: true, files: files.length, removed: !fs.existsSync(src), problem: fs.existsSync(src) ? 'the session folder could not be deleted' : null };
 }
 
@@ -717,7 +718,7 @@ async function preflight(o, v, addDir, key, asker, outDir) {
     if (!o.keep) {
       const inner = R.linksUnder(home);
       if (inner.length) console.error(`[claims-90] kept the sandbox: it holds a link (${inner[0]})`);
-      else fs.rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+      else rmTree(home, { maxRetries: 10, retryDelay: 200 });
     }
   }
 }
@@ -757,7 +758,7 @@ async function buildServed(o, v, addDir, key, outDir, dir) {
     if (!o.keep) {
       const inner = R.linksUnder(home);
       if (inner.length) console.error(`[claims-90] kept the build sandbox: it holds a link (${inner[0]})`);
-      else fs.rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+      else rmTree(home, { maxRetries: 10, retryDelay: 200 });
     }
   }
 }
@@ -890,7 +891,7 @@ async function answerItem(o, v, addDir, item, key, shape, instruction, outDir, p
     if (!o.keep) {
       const inner = R.linksUnder(home);
       if (inner.length) console.error(`[claims-90] kept the sandbox: it holds a link (${inner[0]})`);
-      else fs.rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+      else rmTree(home, { maxRetries: 10, retryDelay: 200 });
     }
   }
 }
@@ -929,7 +930,7 @@ async function main(argv) {
     for (const d of ['tmp', path.join('AppData', 'Local')]) fs.mkdirSync(path.join(keyHome, d), { recursive: true });
     const { userData } = R.stageSandbox(snap, v.manifest, keyHome);
     key = await R.unwrapKey(o.tree, userData, keyHome);
-  } finally { fs.rmSync(keyHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }); }
+  } finally { rmTree(keyHome, { maxRetries: 10, retryDelay: 200 }); }
   // Jim 4370f6 MUST 2: every verb an agent is shown answers before any spend.
   const pre = await preflight(o, v, addDir, key, items[0].asker, outDir);
   fs.writeFileSync(path.join(outDir, 'preflight.json'), JSON.stringify(pre, null, 1));
