@@ -12,6 +12,7 @@ require('./tools/own-job.cjs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const { rmTree } = require('./tools/rm-tree.cjs');
 const os = require('node:os');
 const path = require('node:path');
 const { execFileSync, spawnSync } = require('node:child_process');
@@ -24,7 +25,7 @@ const STORES = [];
 test.after(() => {
   for (const s of STORES) s.close();
   for (const [k, v] of Object.entries(prior)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
-  fs.rmSync(JAIL, { recursive: true, force: true });
+  rmTree(JAIL);
 });
 
 const loadTs = require('./load-ts.cjs');

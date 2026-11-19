@@ -13,6 +13,7 @@ require('./tools/own-job.cjs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const { rmTree } = require('./tools/rm-tree.cjs');
 const os = require('node:os');
 const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
@@ -21,7 +22,7 @@ const M = loadTs('src/main/memoryRollover.ts');
 
 function tmp(t, prefix) {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-  t.after(() => fs.rmSync(d, { recursive: true, force: true }));
+  t.after(() => rmTree(d));
   return d;
 }
 const HEAD = '# Memory - Invented (inv-x)\n\n_Append durable facts, decisions, and context below._\n';

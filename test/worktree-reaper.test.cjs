@@ -26,6 +26,7 @@ require('./tools/mutant-runner-helper.cjs').gate(__filename);
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const { rmTree } = require('./tools/rm-tree.cjs');
 const os = require('node:os');
 const path = require('node:path');
 const Module = require('node:module');
@@ -36,7 +37,7 @@ const REAL = require(SRC);
 const DAY = 24 * 60 * 60 * 1000;
 for (const k of Object.keys(process.env)) if (k.startsWith('GIT_')) delete process.env[k];   // never the caller's repo
 const JAIL = fs.mkdtempSync(path.join(os.tmpdir(), 'reaper-'));
-test.after(() => fs.rmSync(JAIL, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+test.after(() => rmTree(JAIL, { maxRetries: 5, retryDelay: 100 }));
 
 // ─── The pure planner ────────────────────────────────────────────────────────
 
@@ -300,7 +301,7 @@ test('loadRemover passes over a build with another removeTree contract and one t
     const bad = REAL.loadRemover([junk]);
     assert.equal(bad.removeTree, null); assert.ok(bad.reason.startsWith(junk + ': '), bad.reason);
     assert.equal(REAL.loadRemover([path.join(dir, 'missing.node'), junk, real.from]).from, real.from, 'the next candidate is tried');
-  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  } finally { rmTree(dir); }
 });
 
 test('REAL process (Windows): a folder a running exe was started from is kept, at plan and at apply', { skip: process.platform !== 'win32' }, async () => {

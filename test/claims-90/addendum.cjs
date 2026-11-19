@@ -16,6 +16,7 @@
  *   addendum.json     the sha256 of each file above, T_s, the snapshot manifest's sha, the sources.
  */
 const fs = require('node:fs');
+const { rmTree } = require('../tools/rm-tree.cjs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
@@ -79,7 +80,7 @@ function bundleOf(gitDir, refs, file) {
     const verify = spawnSync('git', ['bundle', 'list-heads', file], { cwd: scratch, encoding: 'utf8', maxBuffer: 64 << 20 });
     return verify.stdout.split('\n').filter(Boolean).length;
   } finally {
-    fs.rmSync(scratch, { recursive: true, force: true });
+    rmTree(scratch);
   }
 }
 

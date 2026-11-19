@@ -10,6 +10,7 @@ require('./tools/mutant-runner-helper.cjs').gate(__filename);
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const { rmTree } = require('./tools/rm-tree.cjs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
@@ -89,7 +90,7 @@ test('guard: one tokenizer finds chains and substitutions; -O, -f, ~, HOME, ever
 
 test('guard hook: denies in the PreToolUse shape and writes the open log', (ctx) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'c90-guard-'));
-  ctx.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  ctx.after(() => rmTree(dir));
   const log = path.join(dir, 'open.jsonl');
   const run = (payload) => spawnSync(process.execPath, [path.join(__dirname, 'claims-90', 'labeller-guard.cjs'), jail, log, keyFile], { input: JSON.stringify(payload), encoding: 'utf8' });
   const deny = run({ tool_name: 'Read', tool_use_id: 't1', tool_input: { file_path: 'C:/Dunder/hive/tasks.json' } });
@@ -149,7 +150,7 @@ test('god 3ba8b6 R5: the jail session folder is copied byte-equal into the run d
     assert.equal(L.sessionOut(projects, k, dest, out).session.problem, 'the session folder holds a link');
     assert.ok(fs.existsSync(path.join(target, 'keep.txt')) && fs.existsSync(linked));
     fs.unlinkSync(path.join(linked, 'link'));
-  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+  } finally { rmTree(base); }
 });
 
 test('god 3ba8b6 R5 static: the session folder is moved out before the verdict and a problem is INVALID first', () => {
@@ -161,7 +162,7 @@ test('god 3ba8b6 R5 static: the session folder is moved out before the verdict a
 
 test('audit: a compaction or an out-of-jail call is caught; the key is judged', (ctx) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'c90-audit-'));
-  ctx.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  ctx.after(() => rmTree(dir));
   const t = path.join(dir, 't.jsonl');
   const use = (id, name, input) => ({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name, input }] } });
   fs.writeFileSync(t, [{ type: 'system', subtype: 'init', tools: L.TOOLS, plugins: [] }, use('a', 'Read', { file_path: 'hive/tasks.json' }), use('b', 'Read', { file_path: 'C:/Dunder/hive/agents/x/memory.md' }), { type: 'system', subtype: 'compact_boundary' }, { type: 'result', is_error: false, usage: { input_tokens: 1 } }].map((r) => JSON.stringify(r)).join('\n'));
@@ -206,7 +207,7 @@ test('LABELLER-GUARD-FALSEPOS (a): an unquoted operator ends a word, so a jail p
 
 test('LABELLER-GUARD-FALSEPOS (b): a call the CLI rejected at input validation is not unlogged; any other call missing from the open log still voids', (ctx) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'c90-audit-fp-'));
-  ctx.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  ctx.after(() => rmTree(dir));
   const t = path.join(dir, 't.jsonl');
   const use = (id, name, input) => ({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name, input }] } });
   const res = (id, content, is_error) => ({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, content, ...(is_error ? { is_error: true } : {}) }] } });

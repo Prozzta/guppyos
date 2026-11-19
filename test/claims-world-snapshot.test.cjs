@@ -4,6 +4,7 @@ require('./tools/own-job.cjs');
 const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
+const { rmTree } = require('./tools/rm-tree.cjs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
@@ -32,7 +33,7 @@ function git(cwd, args, env = {}) {
 
 test('async world snapshot confirms refs, flags missing refs and git changes, and ignores unknown/touch-only state', async (t) => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'claims-world-'));
-  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  t.after(() => rmTree(cwd));
   git(cwd, ['init', '-q']);
   fs.writeFileSync(path.join(cwd, 'changed.txt'), 'before');
   fs.writeFileSync(path.join(cwd, 'touched.txt'), 'same');
