@@ -328,7 +328,10 @@ test('LIVE: mutants of own-job.cjs are caught: without a real join the detached 
   try {
     for (const [i, [name, from, to, env = {}]] of MUTANTS.entries()) {
       assert.equal(src.split(from).length, 2, `mutant "${name}": anchor found once`);
-      const mutated = src.replace(from, to).replace("require('./run-tests.cjs')", `require(${JSON.stringify(RUNNER.split(path.sep).join('/'))})`);
+      // RUNNER-NOCOLOR-FORCECOLOR-STDERR: own-job also requires ./colour-env.cjs; the temp copy gets it by absolute path too.
+      const abs = (f) => `require(${JSON.stringify(path.join(__dirname, 'tools', f).split(path.sep).join('/'))})`;
+      assert.equal(src.split("require('./colour-env.cjs')").length, 2, 'own-job requires ./colour-env.cjs once');
+      const mutated = src.replace(from, to).replace("require('./run-tests.cjs')", abs('run-tests.cjs')).replace("require('./colour-env.cjs')", abs('colour-env.cjs'));
       const mfile = path.join(dir, `own-job-m${i}.cjs`);
       fs.writeFileSync(mfile, mutated);
       const r = await bareRun(dir, `mutant${i}`, req(mfile), { env });
