@@ -58,6 +58,11 @@ function joinOwnJob({ env = process.env, platform = process.platform, pid = proc
   return { joined: true, why: null, exe: job.exe };
 }
 
+// On require, before anything can be spawned (RUNNER-NOCOLOR-FORCECOLOR-STDERR): this test file's own env
+// loses the colour variables, so a child it starts with no env option cannot print node's
+// "'NO_COLOR' env is ignored" warning on a stderr a test expects to be empty (colour-env.cjs).
+require('./colour-env.cjs').scrubColourEnv(process.env);
+
 // On require: the join itself (a unit test of joinOwnJob passes fakes; under the runner the mark verifies).
 const result = joinOwnJob();
 
