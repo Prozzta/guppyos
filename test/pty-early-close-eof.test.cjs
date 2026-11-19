@@ -32,6 +32,9 @@ const path = require('node:path');
 
 const READY_DELAY_MS = 300;
 const CAP_MS = 8000;
+/** PTY-EARLY-CLOSE-EOF-READY-WAIT-108: a conout worker that is slow to start, as in a loaded suite leg.
+ *  Longer than node-pty's FLUSH_DATA_INTERVAL (1 s), the time from a kill to the worker's terminate. */
+const SLOW_WORKER_MS = 1200;
 
 /** Settle within CAP_MS or fail: a mutant must never hang this file. */
 function within(p, what) {
@@ -45,8 +48,10 @@ if (process.platform !== 'win32') {
 } else {
   const wt = require('node:worker_threads');
   const on0 = wt.Worker.prototype.on;
+  /** How much later than it really did the next worker posts its READY (0: as it comes). */
+  let slowWorkerMs = 0;
   wt.Worker.prototype.on = function (name, fn) {
-    if (name === 'message') return on0.call(this, name, (m) => setTimeout(() => fn(m), READY_DELAY_MS));
+    if (name === 'message') return on0.call(this, name, (m) => setTimeout(() => fn(m), READY_DELAY_MS + slowWorkerMs));
     return on0.call(this, name, fn);
   };
 
@@ -92,7 +97,7 @@ if (process.platform !== 'win32') {
     return proc;
   }
 
-  test('a kill before the data pipe connects: the pipe connects NOT ended, the first chunk is data, the terminal exits', async () => {
+  async function killBeforeConnect() {
     const proc = await spawnSilent();
     const sock = proc._socket;
     const connected = new Promise((res) => sock.once('ready_datapipe', res));
@@ -117,6 +122,14 @@ if (process.platform !== 'win32') {
     assert.ok(got.includes('\x1b[?25l'), 'the chunk is ordinary data');
     await within(exited, 'the terminal exit (the drained pipe closes)');
     assert.deepEqual(uncaught.map((e) => e.code || e.message), [], 'nothing thrown outside a caller');
+  }
+
+  test('a kill before the data pipe connects: the pipe connects NOT ended, the first chunk is data, the terminal exits', killBeforeConnect);
+
+  // PTY-EARLY-CLOSE-EOF-READY-WAIT-108: how long the worker takes to start must not pick the outcome.
+  test('the same, with a conout worker that is slow to start (its READY comes more than 1 s after the spawn)', async () => {
+    slowWorkerMs = SLOW_WORKER_MS;
+    try { await killBeforeConnect(); } finally { slowWorkerMs = 0; }
   });
 
   test('real start-up output after an early kill throws nothing (several terminals)', async () => {
