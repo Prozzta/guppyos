@@ -920,14 +920,40 @@ export class HiveManager {
    * awaits this instead of three statSync calls per agent on the main thread. The inbox and
    * inbox/.done are deliberately not here: they are the sender's and the harness's doing.
    * After dispose() nothing is read (countedRead refuses) and every agent is 0.
+   *
+   * The wait is bounded: a stat still open after `waitMs` (a stalled drive, a scanner) counts as 0
+   * for this call, so the beat goes on. The open stat is kept and reused, never asked twice, and
+   * one `coordination-stat-stuck` row is logged per stuck spell.
    */
-  async coordinationFileTimes(agentIds: string[]): Promise<Map<string, number>> {
+  private coordinationStats = new Map<string, Promise<number>>();
+  private coordinationStuck = false;
+  async coordinationFileTimes(agentIds: string[], waitMs = 10_000): Promise<Map<string, number>> {
     const root = this.root();
-    const mtime = (p: string): Promise<number> => (root ? this.countedRead(p, () => fsPromises.stat(p)).then((s) => s.mtimeMs, () => 0) : Promise.resolve(0));
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), waitMs); });
+    const stuck: string[] = [];
+    const mtime = async (p: string): Promise<number> => {
+      if (!root) return 0;
+      let open = this.coordinationStats.get(p);
+      if (!open) {
+        const stat: Promise<number> = this.countedRead(p, () => fsPromises.stat(p)).then((s) => s.mtimeMs, () => 0);
+        open = stat;
+        this.coordinationStats.set(p, stat);
+        void stat.then(() => { if (this.coordinationStats.get(p) === stat) this.coordinationStats.delete(p); });
+      }
+      const at = await Promise.race([open, late]);
+      if (at === null) { stuck.push(p); return 0; }
+      return at;
+    };
     const rows = await Promise.all(agentIds.map(async (id): Promise<[string, number]> => {
       const dir = join(root ?? '', 'agents', id);
       return [id, Math.max(0, ...await Promise.all([mtime(join(dir, 'outbox')), mtime(join(dir, 'outbox', '.sent')), mtime(join(dir, 'memory.md'))]))];
     }));
+    clearTimeout(timer);
+    if (stuck.length && !this.coordinationStuck && root) {
+      this.appendLog({ kind: 'coordination-stat-stuck', paths: stuck.length, first: stuck[0].slice(root.length + 1).split(win32.sep).join('/'), waitMs });
+    }
+    this.coordinationStuck = stuck.length > 0;
     return new Map(rows);
   }
   /** Resolves once none of this manager's async reads is open. Call after dispose(), before the delete. */
