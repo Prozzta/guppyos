@@ -530,3 +530,95 @@ test('RELEASE RUNS: a write that fails is tried again at the next sweep, still o
   const first = await releasesOnDisk(hive, '1.1.82');
   assert.deepEqual([first['1.1.79'], first['1.1.80'], first['1.1.81']], [500, 1000, undefined]);
 });
+
+// ─── 4. the breaker beat's coordination times ───────────────────────────────────────────────
+//
+// statSync:.sent (1.1.106): every 30 s the circuit-breaker beat asked, for each live agent, when
+// it last coordinated, and the answer came from three statSync calls on the main thread: the
+// agent's outbox, outbox/.sent and memory.md (index.ts lastCoordinationAt). The stats are now one
+// asynchronous batch on HiveManager that the beat awaits before it ticks the breaker.
+
+const coordReads = (calls) => calls.filter((c) => /^(statSync|lstatSync|existsSync|readdirSync|openSync):(outbox|\.sent|memory\.md|andy-1|pam-1)$/.test(c));
+/** A floor with two agents whose three coordination paths carry set times (seconds). */
+async function coordFloor(t, times) {
+  const home = fs.mkdtempSync(path.join(JAIL, 'coord-'));
+  const hive = new HiveManager(() => home, () => true);
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
+  await hive.ensureAgent({ id: 'god-1', name: 'Michael', provider: 'claude', cwd: home, isGod: true });
+  for (const id of ['andy-1', 'pam-1']) {
+    await hive.ensureAgent({ id, name: id, provider: 'claude', cwd: home });
+    const dir = path.join(hive.root(), 'agents', id);
+    fs.mkdirSync(path.join(dir, 'outbox', '.sent'), { recursive: true });
+    fs.mkdirSync(path.join(dir, 'inbox', '.done'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'memory.md'), 'notes', 'utf8');
+    const at = times[id] || {};
+    // The inbox and its .done are the harness's and the sender's doing: far newer, never counted.
+    for (const [rel, sec] of [['inbox', 9000], [path.join('inbox', '.done'), 9000], [path.join('outbox', '.sent'), at.sent], ['outbox', at.outbox], ['memory.md', at.memory]]) {
+      if (sec === undefined) continue;
+      if (sec === null) fs.rmSync(path.join(dir, rel), { recursive: true, force: true });
+      else fs.utimesSync(path.join(dir, rel), sec, sec);
+    }
+  }
+  return hive;
+}
+
+test('COORDINATION NON-VACUOUS: the synchronous stats the beat made are seen by the counter', async (t) => {
+  const hive = await coordFloor(t, { 'andy-1': { outbox: 1000, sent: 3000, memory: 2000 } });
+  const dir = path.join(hive.root(), 'agents', 'andy-1');
+  const { calls, result } = await syncCalls(hive.root(), () => Math.max(...[path.join(dir, 'outbox'), path.join(dir, 'outbox', '.sent'), path.join(dir, 'memory.md')].map((p) => fs.statSync(p).mtimeMs)));
+  assert.deepEqual(coordReads(calls), ['statSync:outbox', 'statSync:.sent', 'statSync:memory.md']);
+  assert.equal(result, 3_000_000);
+});
+
+test('COORDINATION: the newest of outbox, outbox/.sent and memory.md for every agent asked, with no synchronous disk work', async (t) => {
+  const hive = await coordFloor(t, { 'andy-1': { outbox: 1000, sent: 3000, memory: 2000 }, 'pam-1': { outbox: 6000, sent: 4000, memory: 5000 } });
+  assert.equal(typeof hive.coordinationFileTimes, 'function', 'HiveManager.coordinationFileTimes');
+  const { calls, result } = await syncCalls(hive.root(), () => hive.coordinationFileTimes(['andy-1', 'pam-1']));
+  assert.deepEqual(coordReads(calls), [], JSON.stringify(calls));
+  assert.deepEqual([...result], [['andy-1', 3_000_000], ['pam-1', 6_000_000]], 'the inbox and inbox/.done (9000) are not the agent\'s doing');
+});
+
+test('COORDINATION: each of the three paths counts when it is the newest', async (t) => {
+  const hive = await coordFloor(t, { 'andy-1': { outbox: 1000, sent: 2000, memory: 7000 }, 'pam-1': { outbox: 1000, sent: 8000, memory: 2000 } });
+  assert.equal(typeof hive.coordinationFileTimes, 'function', 'HiveManager.coordinationFileTimes');
+  assert.deepEqual([...await hive.coordinationFileTimes(['pam-1', 'andy-1'])], [['pam-1', 8_000_000], ['andy-1', 7_000_000]]);
+});
+
+test('COORDINATION: a missing path is skipped, an agent with none of them (or no folder) is 0, and only the agents asked are read', async (t) => {
+  const hive = await coordFloor(t, { 'andy-1': { outbox: 1000, sent: null, memory: null }, 'pam-1': { outbox: null, sent: null, memory: null } });
+  assert.equal(typeof hive.coordinationFileTimes, 'function', 'HiveManager.coordinationFileTimes');
+  const { calls, result } = await syncCalls(hive.root(), () => hive.coordinationFileTimes(['andy-1', 'pam-1', 'nobody-1']));
+  assert.deepEqual(coordReads(calls), [], JSON.stringify(calls));
+  assert.deepEqual([...result], [['andy-1', 1_000_000], ['pam-1', 0], ['nobody-1', 0]]);
+  assert.deepEqual([...await hive.coordinationFileTimes([])], []);
+});
+
+test('COORDINATION: after dispose nothing is read and every agent asked is 0', async (t) => {
+  const hive = await coordFloor(t, { 'andy-1': { outbox: 1000, sent: 3000, memory: 2000 } });
+  assert.equal(typeof hive.coordinationFileTimes, 'function', 'HiveManager.coordinationFileTimes');
+  hive.dispose();
+  const seen = [];
+  const stat = fs.promises.stat;
+  fs.promises.stat = function (p, ...rest) { seen.push(String(p)); return stat.call(this, p, ...rest); };
+  let result;
+  try { result = await hive.coordinationFileTimes(['andy-1']); } finally { fs.promises.stat = stat; }
+  assert.deepEqual([...result], [['andy-1', 0]]);
+  assert.deepEqual(seen.filter((p) => under(hive.root() || JAIL, p)), [], 'no read starts on a disposed manager');
+});
+
+test('WIRING: the breaker beat awaits the coordination times, one beat at a time, and stats nothing itself', () => {
+  const idx = codeOnly(readSource('src/main/index.ts'), 'index.ts');
+  const from = idx.indexOf('function lastCoordinationAt');
+  const coord = idx.slice(from, idx.indexOf('hive.setHumanInputSource', from));
+  assert.ok(from >= 0 && !/statSync|existsSync|readdirSync/.test(coord), coord);
+  assert.match(coord, /Math\.max\(0, mailCoordinationAt\(hive\.mail, agentId\), fileTime\)/);
+  const at = idx.indexOf('async function runBreakerBeat');
+  assert.ok(at >= 0, 'runBreakerBeat is async');
+  const beat = idx.slice(at, idx.indexOf('breaker.tick(inputs, now)', at));
+  assert.match(beat, /if \(breakerBeatBusy\) return;\s*breakerBeatBusy = true;/);
+  assert.match(beat, /try \{ fileTimes = await hive\.coordinationFileTimes\(\w+\); \} finally \{ breakerBeatBusy = false; \}/);
+  assert.match(beat, /const fileTime = fileTimes\.get\(id\);\s*if \(fileTime === undefined\) continue;/);
+  assert.match(beat, /now - lastCoordinationAt\(id, fileTime\) < progressWindowMs/);
+  assert.ok(!/statSync/.test(beat), 'no stat in the beat');
+  assert.match(idx, /void runBreakerBeat\(300_000\)\.catch\(\(e\) => \{ console\.error\('\[breaker beat\]', e\); \}\)/);
+});
