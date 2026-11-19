@@ -500,14 +500,29 @@ test('F11 pin: a held AGY idle tick leaves lifecycle active through the first be
   const rig = await startRig(t);
   await rig.setup([{ id: 'ag-1', flavour: 'agy', scenario: { manualTurns: true } }]);
   const m = await rig.call('send', { to: 'ag-1', subject: 'f11-order', body: 'hold the idle tick' });
+  // MAIL-RIG-F11-IDLE-TIMEOUT-108: AGY's PostInvocation is one-way, and the shim's exit is not
+  // main's receipt. Land it late on purpose, so this pin always takes the late path.
+  await rig.call('delayNextHook', { id: 'ag-1', event: 'PostInvocation', ms: 2000 });
   await rig.beat();
   await waitFor(() => rig.contexts('ag-1').some((c) => c.ids.includes(m.id)), { what: 'surfaced at PreInvocation' });
   await waitFor(async () => (await rig.entry('ag-1', m.id))?.state === 'surfaced', { what: 'confirmed by latency' });
+  // MAIL-RIG-F11-IDLE-TIMEOUT-108: the submit's settle (COMMITTED) re-opens the epoch from its own
+  // time and drops a deferred idle (workerWake settle). Landing after the idle tick, as a slow
+  // host lets it, that is a different case from the one pinned here. Wait for main's own receipt.
+  await waitFor(async () => (await rig.call('diags')).some((d) => d.stage === 'settle' && d.agentId === 'ag-1' && d.outcome === 'COMMITTED'), { what: 'host settle of the submit' });
   await rig.call('holdProviderStatus', { id: 'ag-1' });
   const idleStatuses = async () => (await rig.call('diags')).filter((d) => d.stage === 'provider-status' && d.agentId === 'ag-1' && d.status === 'idle').length;
   const idleBefore = await idleStatuses();
   rig.cue('ag-1', { cue: 'statusline', state: 'idle' });
   await waitFor(() => rig.transcript('ag-1').some((r) => r.kind === 'statusline' && r.installed), { what: 'statusline tick' });
+  // Main's own "hook" diag is written after the coordinator took the PostInvocation (the shim
+  // exiting proves nothing). Until then `invoking` alone keeps the epoch open on every beat, so
+  // the held tick below would not be what this pin tests.
+  await waitFor(async () => {
+    const hooks = (await rig.call('diags')).filter((d) => d.stage === 'hook' && d.agentId === 'ag-1');
+    const pre = hooks.map((d) => d.event).lastIndexOf('PreInvocation');
+    return pre >= 0 && hooks.slice(pre + 1).some((d) => d.event === 'PostInvocation');
+  }, { what: 'host receipt of the PostInvocation' });
   await rig.call('advance', { ms: 10_000 });
   await rig.beat();
   assert.equal((await rig.call('wakeState', { id: 'ag-1' })).lifecycle, 'active', 'a tick held past the first beat cannot close the epoch');
