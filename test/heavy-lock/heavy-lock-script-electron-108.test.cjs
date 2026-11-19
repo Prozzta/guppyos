@@ -176,12 +176,17 @@ function start(args, { url, agent = 'a', preload = PRELOAD, asElectron = false }
   const env = nodeEnv(cleanEnv({ NODE_OPTIONS: `${asElectron ? `${req(AS_ELECTRON)} ` : ''}${req(preload)}`, HIVE_LEDGER_URL: url, HIVE_ROOT: JAIL, AGENT_ID: agent }));
   const child = spawn(args[0], args.slice(1), { cwd: FIX, env, windowsHide: true });
   const bornMs = Date.now();
-  let stderr = ''; let stdout = '';
-  child.stderr.on('data', (d) => { stderr += d; });
-  child.stdout.on('data', (d) => { stdout += d; });
-  const done = new Promise((resolve) => child.on('close', (code) => resolve({ code, stderr, stdout })));
-  return { child, done, bornMs, out: () => stdout };
+  let stderr = ''; let stdout = ''; let closed = false;
+  // CENSUS-RACE: until(pred) resolves at the first output or close event at which pred holds (no clock).
+  const waits = [];
+  const check = () => { for (const w of waits.splice(0)) if (!w.pred({ stdout, stderr, closed })) waits.push(w); else w.resolve({ stdout, stderr, closed }); };
+  child.stderr.on('data', (d) => { stderr += d; check(); });
+  child.stdout.on('data', (d) => { stdout += d; check(); });
+  const done = new Promise((resolve) => child.on('close', (code) => { closed = true; check(); resolve({ code, stderr, stdout }); }));
+  const until = (pred) => new Promise((resolve) => { waits.push({ pred, resolve }); check(); });
+  return { child, done, bornMs, out: () => stdout, until };
 }
+const WAITING = /\[guppy\] waiting for the heavy-job slot to start Electron \(held by b/;
 const within = (p, ms) => Promise.race([p, new Promise((r) => setTimeout(() => r('timeout'), ms))]);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function killTree({ child, bornMs }) {
@@ -231,15 +236,19 @@ K.e2eScript = async (t, M = HJ, preload = PRELOAD, scripts = ['launch.cjs', 'lau
     b.lock.acquire('b', H, 'npm test', 'hb', false);
     const run = start([process.execPath, script], { url: b.url('a'), preload });
     t.after(() => killTree(run));
-    const early = await within(run.done, 2_500);
-    assert.equal(early, 'timeout', `${script}: A NODE SCRIPT THAT STARTS ELECTRON WAITS FOR THE SLOT (it is not light): ${early === 'timeout' ? '' : early.stderr}`);
-    assert.equal(run.out(), '', `${script}: NO ELECTRON STARTED WHILE ANOTHER AGENT HELD THE SLOT`);
+    // HEAVY-LOCK-SCRIPT-ELECTRON-108-CENSUS-RACE: "it waited" is an event, not a 2.5 s clock. The first event
+    // decides: the preload says it waits for the slot (stderr), or a launch finished (stdout), or the script
+    // ended. Only the first can come from a guarded script while b holds: its launches start after the slot.
+    // One assertion carries both facts (Jim 64eb93), so an unguarded run fails it however slow it is.
+    const first = await within(run.until((s) => s.closed || s.stdout !== '' || WAITING.test(s.stderr)), 20_000);
+    const waited = first !== 'timeout' && !first.closed && first.stdout === '' && WAITING.test(first.stderr);
+    assert.ok(waited, `${script}: A NODE SCRIPT THAT STARTS ELECTRON WAITS FOR THE SLOT (it is not light) AND NO ELECTRON STARTED WHILE ANOTHER AGENT HELD THE SLOT: ${first === 'timeout' ? 'no event in 20 s' : `ended ${first.closed}, stdout ${JSON.stringify(first.stdout)}, stderr ${JSON.stringify(first.stderr.slice(-400))}`}`);
     assert.deepEqual(b.lock.queueSnapshot().waiters.map((w) => w.agentId), ['a']);
     b.lock.callDone('b', 'hb');
     const r = await within(run.done, 20_000);
     assert.notEqual(r, 'timeout', `${script}: it runs once the slot is free`);
     assert.equal(r.code, 0, `${script}: ${r.stderr}`);
-    assert.match(r.stderr, /\[guppy\] waiting for the heavy-job slot to start Electron \(held by b/);
+    assert.match(r.stderr, WAITING);
     assert.match(r.stdout, /launched/);
     const leases = b.logs.filter((x) => x.action === 'lease' && x.agentId === 'a');
     assert.equal(leases.length, 1, `${script}: THE PROCESS ASKS ONCE AND KEEPS ITS LEASE (both launches covered)`);
