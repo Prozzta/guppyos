@@ -19,6 +19,17 @@ require('./tools/own-job.cjs');
  *     under the existing lazy-row rule.
  * Before (004e957b): both ticks drift `quota-keys`, no Antigravity pool exists, and the strip
  * has no Antigravity row.
+ *
+ * FLAKE-AGY-QUOTA-TICK-WAIT. The tick crosses the pipe through two real process starts (cmd.exe,
+ * then findstr). Under suite load that took about 12 s once, so the server's receipt clock was
+ * more than 5 s past the reset times stated at build time, and the product refused the tick as
+ * `reset-disagree`, as it must. A refused tick never reaches the tick callback, so the old wait
+ * could only time out. Two changes here, and no change to the rule:
+ *   - the HookServer takes the test's RECEIPT CLOCK, and every send sets it from the tick's own
+ *     build time, so the time spent in transit cannot age the tick;
+ *   - the wait ends on the OUTCOME (the tick callback, or the server's drift tally moving) under
+ *     one real deadline, so a refused tick fails at once and names its drift code.
+ * The 5 s rule itself is pinned at its exact edges in the last test.
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -40,6 +51,7 @@ test.after(() => {
 
 const { HookServer } = loadTs('src/main/hooks.ts');
 const { agyOnewayCmd } = loadTs('src/main/hive.ts');
+const { AGY_RESET_TOLERANCE_MS } = loadTs('src/main/capacityNormalize.ts');
 const { CapacityRuntime } = loadTs('src/main/capacityRuntime.ts');
 const { CapacityStripPresenter } = loadTs('src/main/capacityStrip.ts');
 const { capacityDetailView } = loadTs('src/main/capacityDetail.ts');
@@ -53,16 +65,19 @@ const TOKEN = 'cd'.repeat(16);
 const FIXTURE = path.join(__dirname, 'fixtures', 'agy-statusline-1.4.0.json');
 const SCOPED = 'gemini-argon-wtu-weekly';
 
-/** The fixture tick as it is sent now (see the header for the three changes). */
-function tickNow(scopedFraction) {
+/**
+ * The fixture tick as built at `builtAt` (see the header for the three changes). `builtAt` goes
+ * back with the body: it is the instant every reset_time was stated from, and so the instant
+ * `sendTick` sets the receipt clock from.
+ */
+function tickNow(scopedFraction, builtAt = Date.now()) {
   const p = JSON.parse(fs.readFileSync(FIXTURE, 'utf8'));
   p.agent_state = 'idle';
-  const now = Date.now();
   for (const b of Object.values(p.quota)) {
-    b.reset_time = new Date(Math.round((now + b.reset_in_seconds * 1000) / 1000) * 1000).toISOString().replace('.000Z', 'Z');
+    b.reset_time = new Date(Math.round((builtAt + b.reset_in_seconds * 1000) / 1000) * 1000).toISOString().replace('.000Z', 'Z');
   }
   if (scopedFraction !== undefined) p.quota[SCOPED].remaining_fraction = scopedFraction;
-  return JSON.stringify(p);
+  return { body: JSON.stringify(p), builtAt, quota: p.quota };
 }
 
 /** The product's wiring (index.ts), minus Electron: HookServer -> runtime; strip + detail on demand. */
@@ -79,11 +94,15 @@ async function floor(t) {
   let present = () => null;
   const runtime = new CapacityRuntime({ deliver: () => {}, onChange: () => { present(); } });
   const ticks = [];
+  // The receipt clock. It starts at 0 on purpose: a send that did not go through `sendTick` is
+  // refused as `reset-disagree` and says so, it does not fall back to the wall clock.
+  const receipt = { at: 0 };
   const s = new HookServer(hive, () => null, () => ({}), undefined, undefined, undefined, () => {}, () => {},
     (agentId, tick) => {
       ticks.push(tick);
       runtime.ingestAgyTick(agentId, { accountScope: tick.observations[0].accountScope, activeLimitId: tick.activeLimitId, observations: tick.observations });
-    });
+    },
+    () => receipt.at);
   s.start(); t.after(() => { s.stop(); runtime.stop(); });
   for (let i = 0; i < 200 && s.hookBrokerPort() === null; i++) await new Promise((r) => setTimeout(r, 5));
   const cmdFile = path.join(fs.mkdtempSync(path.join(JAIL, 'bin-')), 'agy-oneway.cmd');
@@ -93,7 +112,7 @@ async function floor(t) {
     snapshot: runtime.snapshot(), membersOf: (k) => runtime.membersOf(k), membershipKnown: () => true,
     freshUntil: (k) => runtime.tracker.freshUntil(k), now: Date.now()
   });
-  return { logs, ticks, runtime, strip, present, cmdFile };
+  return { logs, ticks, runtime, strip, present, cmdFile, receipt, server: s };
 }
 
 /** What AGY runs for the statusline: `<agy-oneway.cmd> agy-status <token>`, the tick on stdin. */
@@ -107,9 +126,36 @@ function send(cmdFile, stdin) {
     p.on('close', (code) => { clearTimeout(guard); resolve({ code, out }); });
   });
 }
-async function until(fn, what) {
-  for (let i = 0; i < 400; i++) { if (fn()) return; await new Promise((r) => setTimeout(r, 25)); }
-  assert.fail(`timed out waiting for ${what}`);
+const refusals = (f) => Object.values(f.server.agyDriftCounts()).reduce((a, n) => a + n, 0);
+/** The same 10 s the old wait meant (400 x 25 ms), as a real deadline: sleeps that stretch under load cannot extend it. */
+const OUTCOME_DEADLINE_MS = 10_000;
+
+/**
+ * Send one tick and wait for what the server did with it. `receivedAfterMs` is where the receipt
+ * clock stands relative to the tick's build time: 0 for a tick read the instant it was built.
+ * Resolves `{ code, out, accepted, drift }`: `accepted` when the tick callback fired, otherwise
+ * `drift` is the tally row that moved. One tick is in flight at a time, so the outcome is this tick's.
+ */
+async function sendTick(f, tick, what, receivedAfterMs = 0) {
+  const before = { ticks: f.ticks.length, refused: refusals(f), tally: f.server.agyDriftCounts() };
+  f.receipt.at = tick.builtAt + receivedAfterMs;
+  const r = await send(f.cmdFile, tick.body);
+  const deadline = Date.now() + OUTCOME_DEADLINE_MS;
+  for (;;) {
+    if (f.ticks.length > before.ticks) return { ...r, accepted: true, drift: null };
+    if (refusals(f) > before.refused) {
+      const now = f.server.agyDriftCounts();
+      return { ...r, accepted: false, drift: Object.keys(now).filter((k) => now[k] !== (before.tally[k] ?? 0)) };
+    }
+    if (Date.now() >= deadline) assert.fail(`${what}: the server neither accepted nor refused it within ${OUTCOME_DEADLINE_MS} ms of the send ending (exit ${r.code})`);
+    await new Promise((res) => setTimeout(res, 25));
+  }
+}
+/** A tick that must be accepted: a refusal fails here, with its drift code. */
+async function accepted(f, tick, what, receivedAfterMs = 0) {
+  const r = await sendTick(f, tick, what, receivedAfterMs);
+  assert.ok(r.accepted, `${what}: refused as ${JSON.stringify(r.drift)}`);
+  return r;
 }
 
 test('the real 1.4.0 tick, through agy-oneway.cmd and the real HookServer, reaches the tracker, the strip and the details', { skip: !WIN }, async (t) => {
@@ -119,13 +165,13 @@ test('the real 1.4.0 tick, through agy-oneway.cmd and the real HookServer, reach
   const P3 = poolKeyOf('antigravity', scope, '3p');
 
   // Seed: the scoped bucket as it was ten minutes before the capture.
-  let r = await send(f.cmdFile, tickNow(0.965));
+  let r = await accepted(f, tickNow(0.965), 'the seeding tick');
   assert.equal(r.code, 0); assert.equal(r.out, '');
-  await until(() => f.ticks.length === 1, 'the seeding tick');
+  assert.equal(f.ticks.length, 1);
   // The real tick.
-  r = await send(f.cmdFile, tickNow());
+  r = await accepted(f, tickNow(), 'the real tick');
   assert.equal(r.code, 0);
-  await until(() => f.ticks.length === 2, 'the real tick');
+  assert.equal(f.ticks.length, 2);
 
   assert.deepEqual(f.logs.filter((l) => l.kind === 'agy-statusline-drift'), [], 'no drift row (before: quota-keys)');
 
@@ -162,11 +208,57 @@ test('the real 1.4.0 tick, through agy-oneway.cmd and the real HookServer, reach
 test('the same path: the scoped bucket at zero makes the Gemini pool RESERVE_ONLY, by the existing numeric rule', { skip: !WIN }, async (t) => {
   const f = await floor(t);
   const PG = poolKeyOf('antigravity', agyAccountScope(), 'gemini');
-  await send(f.cmdFile, tickNow(0));
-  await until(() => f.ticks.length === 1, 'the tick');
+  await accepted(f, tickNow(0), 'the tick');
+  assert.equal(f.ticks.length, 1);
   const gem = f.runtime.tracker.pool(PG);
   assert.equal(gem.state, 'RESERVE_ONLY');
   assert.deepEqual(gem.numericallyExhaustedWindowIds, [SCOPED]);
   const coll = f.present();
   assert.deepEqual(validateCapacityStrip(coll), []);
+});
+
+test('the receipt rule, at its edges: a tick received 5 s from its build time is accepted, one millisecond further is refused as reset-disagree and changes nothing', { skip: !WIN }, async (t) => {
+  const f = await floor(t);
+  const PG = poolKeyOf('antigravity', agyAccountScope(), 'gemini');
+  const LIMIT = 5_000;
+  assert.equal(AGY_RESET_TOLERANCE_MS, LIMIT, 'the limit is 5 s');
+  const ROW = '1.4.0|reset-disagree';
+  // A whole-second build time and whole reset seconds: every reset_time is then exact, so the
+  // only distance the rule can see is the receipt offset itself.
+  const builtAt = Math.floor(Date.now() / 1000) * 1000;
+  const tick = (fraction) => {
+    const k = tickNow(fraction, builtAt);
+    for (const b of Object.values(k.quota)) {
+      assert.ok(Number.isInteger(b.reset_in_seconds), 'whole reset seconds');
+      assert.equal(Date.parse(b.reset_time), builtAt + b.reset_in_seconds * 1000, 'reset_time is exact');
+    }
+    return k;
+  };
+
+  // At the limit, early and late: accepted. Early first, so the receipt clock only moves forward
+  // (the tracker keeps the reading with the later receipt time).
+  await accepted(f, tick(0.5), 'received 5000 ms before the build', -LIMIT);
+  await accepted(f, tick(0.4), 'received 5000 ms after the build', LIMIT);
+  assert.equal(f.ticks.length, 2);
+  assert.deepEqual(f.server.agyDriftCounts(), {}, 'nothing refused at the limit');
+  const kept = f.runtime.tracker.pool(PG);
+  assert.equal(kept.state, 'AVAILABLE');
+  assert.equal(kept.windows[2].remainingPercent, 0.4 * 100);
+
+  // One millisecond past it, late and early: refused. The refused ticks say the scoped bucket
+  // is at zero, so an accepted one would turn the pool RESERVE_ONLY.
+  let r = await sendTick(f, tick(0), 'received 5001 ms after the build', LIMIT + 1);
+  assert.equal(r.code, 0, 'the command still exits 0 for a refused tick');
+  assert.deepEqual({ accepted: r.accepted, drift: r.drift }, { accepted: false, drift: [ROW] });
+  r = await sendTick(f, tick(0), 'received 5001 ms before the build', -(LIMIT + 1));
+  assert.deepEqual({ accepted: r.accepted, drift: r.drift }, { accepted: false, drift: [ROW] });
+
+  assert.deepEqual(f.server.agyDriftCounts(), { [ROW]: 2 });
+  assert.deepEqual(f.logs.filter((l) => l.kind === 'agy-statusline-drift'),
+    [{ kind: 'agy-statusline-drift', version: '1.4.0', driftCode: 'reset-disagree' }], 'logged once, on the first sighting');
+  assert.equal(f.ticks.length, 2, 'a refused tick never reaches the tick callback');
+  const after = f.runtime.tracker.pool(PG);
+  assert.equal(after.state, 'AVAILABLE', 'the last good pool is unchanged');
+  assert.equal(after.windows[2].remainingPercent, 0.4 * 100);
+  assert.deepEqual(after.numericallyExhaustedWindowIds, []);
 });
