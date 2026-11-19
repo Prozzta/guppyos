@@ -79,6 +79,7 @@ static class HeavyJob
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetInformationJobObject(IntPtr job, int cls, ref PORT_INFO info, int len);
     [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr CreateIoCompletionPort(IntPtr file, IntPtr port, UIntPtr key, uint threads);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetQueuedCompletionStatus(IntPtr port, out uint bytes, out UIntPtr key, out IntPtr overlapped, uint ms);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern uint WaitForSingleObject(IntPtr h, uint ms);
 
     const uint LIMIT_PRIORITY_CLASS = 0x20;
     const uint BELOW_NORMAL = 0x4000, NORMAL = 0x20;
@@ -480,6 +481,7 @@ static class HeavyJob
     //   close <id>            drop the job's handle (Guppy is done with it)
     // HEAVY-LOCK-RELEASE-LAG-197: the job messages that mean a process of the job is gone.
     const uint MSG_ACTIVE_PROCESS_ZERO = 4, MSG_EXIT_PROCESS = 7, MSG_ABNORMAL_EXIT_PROCESS = 8;
+    const uint WAIT_OBJECT_0 = 0, INFINITE = 0xFFFFFFFF;
     const int JobObjectAssociateCompletionPortInformation = 7;
     static readonly object Out = new object();
     static readonly Dictionary<long, string> PortKeys = new Dictionary<long, string>();
@@ -510,10 +512,29 @@ static class HeavyJob
         }
     }
 
+    // Completion-port packets can be late or absent. A Job Object handle itself becomes signaled
+    // when its last process exits, but it starts signaled before its first join; wait only after a
+    // member has appeared. This is independent of Watch/PortLoop and reports the same exit event.
+    sealed class EmptyWatch { public volatile bool Closed; }
+    static void WatchEmpty(IntPtr job, string id, EmptyWatch state)
+    {
+        new System.Threading.Thread(() =>
+        {
+            try
+            {
+                while (!state.Closed && Members(job).Count == 0) System.Threading.Thread.Sleep(10);
+                if (!state.Closed && WaitForSingleObject(job, INFINITE) == WAIT_OBJECT_0 && !state.Closed)
+                    Write("{\"event\":\"exit\",\"job\":\"" + id + "\",\"msg\":4,\"pid\":0}");
+            }
+            catch { /* closing the helper/job ends this best-effort fallback */ }
+        }) { IsBackground = true }.Start();
+    }
+
     static int Serve()
     {
         var jobs = new Dictionary<string, IntPtr>();
         var keys = new Dictionary<string, long>();
+        var emptyWatches = new Dictionary<string, EmptyWatch>();
         long next = 0;
         IntPtr port = CreateIoCompletionPort(new IntPtr(-1), IntPtr.Zero, UIntPtr.Zero, 1);
         if (port != IntPtr.Zero) new System.Threading.Thread(() => PortLoop(port)) { IsBackground = true }.Start();
@@ -539,6 +560,9 @@ static class HeavyJob
                         if (job == IntPtr.Zero) throw new Exception("CreateJobObject failed (" + Marshal.GetLastWin32Error() + ")");
                         jobs[w[1]] = job;
                         keys[w[1]] = Watch(port, job, w[1], ref next);
+                        var emptyWatch = new EmptyWatch();
+                        emptyWatches[w[1]] = emptyWatch;
+                        WatchEmpty(job, w[1], emptyWatch);
                     }
                     Apply(job, w[2] == "1", w[3] == "1", cpuRate);
                     reply = "{\"ok\":true}";
@@ -562,6 +586,8 @@ static class HeavyJob
                 }
                 else if (w.Length == 2 && w[0] == "close")
                 {
+                    EmptyWatch emptyWatch;
+                    if (emptyWatches.TryGetValue(w[1], out emptyWatch)) { emptyWatch.Closed = true; emptyWatches.Remove(w[1]); }
                     if (jobs.TryGetValue(w[1], out job)) { CloseHandle(job); jobs.Remove(w[1]); long k; if (keys.TryGetValue(w[1], out k)) { lock (PortKeys) PortKeys.Remove(k); keys.Remove(w[1]); } }
                     reply = "{\"ok\":true}";
                 }
