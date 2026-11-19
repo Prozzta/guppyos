@@ -152,13 +152,45 @@ let killed = false;
 fs.watch(dir, (_e, f) => { if (!killed && /^__PSScriptPolicyTest_/.test(String(f))) { killed = true; c.kill(); process.stdout.write('killed ' + f + '\\n'); } });
 setTimeout(() => { c.kill(); process.stdout.write('timer\\n'); }, 30000);
 `);
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const env = { ...process.env, TEMP: jail, TMP: jail, TMPDIR: jail, GUPPY_SHARED_TEMP: shared, PSModuleAnalysisCachePath: path.join(tmpRoot, 'modcache', 'ModuleAnalysisCache') };
     const p = spawn(process.execPath, [inner, temp ? 'on' : 'off'], { env, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    // FLAKE-PS-POLICY-TEMP-LEAK-198-L164: the test process is held by handle from its spawn, BEFORE the
+    // kill, until the caller has swept. While the hold is open Windows cannot give its pid to another
+    // process, so the sweep's kill(pid, 0) answers for this process (exited: ESRCH), not a stranger.
+    // procOpen takes only a running child of ours: opened later, it would throw "already exited".
+    const hold = procHold().procOpen(p.pid);
     let out = '';
     p.stdout.on('data', (d) => { out += d; if (/killed|timer/.test(out)) p.kill('SIGKILL'); });
-    p.on('close', () => setTimeout(() => resolve({ out, pid: p.pid }), 1000));
+    p.on('close', () => {
+      // The exit itself, read through the hold (no timer): 'close' comes after the process has ended.
+      try { assert.equal(procHold().procAlive(hold), false, 'PS POLICY: the killed test process has exited (read through its hold)'); } catch (e) { procHold().procClose(hold); reject(e); return; }
+      resolve({ out, pid: p.pid, hold });
+    });
   });
+}
+
+/** The fs-handle addon's process holds (PTY-KILL-PID-IDENTITY), loaded on first use (Windows only). */
+let holdAddon;
+function procHold() {
+  if (!holdAddon) {
+    const mod = { exports: {} };
+    process.dlopen(mod, path.join(__dirname, '..', 'resources', 'fs-handle', 'bin', 'guppy_fs_handle.node'));
+    holdAddon = mod.exports;
+  }
+  return holdAddon;
+}
+
+/** Why the sweep kept the killed process's folder: the two ways sweepPsTempDirs returns less. Its pid
+ *  answered alive (EPERM counts as alive), or rmSync threw and the sweep swallowed it ("in use: next
+ *  sweep"). Removes what it can, so call it only when the sweep already fell short. */
+function whyKept(shared, left, pid) {
+  let alive;
+  try { process.kill(pid, 0); alive = 'alive'; } catch (e) { alive = e.code; }
+  const rm = left.filter((n) => fs.existsSync(path.join(shared, n))).map((n) => {
+    try { fs.rmSync(path.join(shared, n), { recursive: true, force: true }); return `${n}: removed on a second try`; } catch (e) { return `${n}: rmSync ${e.code} ${e.path || ''}`; }
+  });
+  return `kill(${pid}, 0) said ${alive}; direct rmSync: ${rm.join('; ') || 'nothing left to remove'}`;
 }
 
 test('KILLED: PowerShell killed on its first policy file, then its test process killed: the jail stays clean, the left folder is swept', { skip: !WIN && 'Windows PowerShell only', timeout: 120_000 }, async () => {
@@ -168,16 +200,24 @@ test('KILLED: PowerShell killed on its first policy file, then its test process 
   fs.mkdirSync(shared);
   // The control (the mutant "psEnv leaves the temp alone"): the cut-short PowerShell leaves its policy file in the jail.
   const control = await killedOnFirstFile(jail, shared, false);
+  procHold().procClose(control.hold);
   assert.match(control.out, /^killed __PSScriptPolicyTest_/, 'PS POLICY control: the PowerShell was killed on its first policy file');
   assert.ok(fs.readdirSync(jail).some((f) => POLICY.test(f)), `PS POLICY control: without psEnv the killed PowerShell leaves its policy file in the jail (${fs.readdirSync(jail)})`);
   for (const f of fs.readdirSync(jail)) fs.rmSync(path.join(jail, f), { recursive: true, force: true });
   const fixed = await killedOnFirstFile(jail, shared, true);
-  assert.match(fixed.out, /^killed __PSScriptPolicyTest_/, 'PS POLICY: the PowerShell was killed on its first policy file');
-  assert.deepEqual(fs.readdirSync(jail), [], 'PS POLICY: with psEnv the killed PowerShell leaves nothing in the jail');
-  const left = fs.readdirSync(shared);
-  assert.deepEqual(left.map((n) => n.replace(/-[^-]+$/, '')), [`guppy-pstemp-${fixed.pid}`], `PS POLICY: the killed test process left its own folder in the real temp folder (${left})`);
-  assert.deepEqual(sweepPsTempDirs(shared), left, 'PS POLICY: the sweep removes the dead test process\'s folder');
-  assert.deepEqual(fs.readdirSync(shared), [], 'PS POLICY: the real temp folder is clean after the sweep');
+  try {
+    assert.match(fixed.out, /^killed __PSScriptPolicyTest_/, 'PS POLICY: the PowerShell was killed on its first policy file');
+    assert.deepEqual(fs.readdirSync(jail), [], 'PS POLICY: with psEnv the killed PowerShell leaves nothing in the jail');
+    const left = fs.readdirSync(shared);
+    assert.deepEqual(left.map((n) => n.replace(/-[^-]+$/, '')), [`guppy-pstemp-${fixed.pid}`], `PS POLICY: the killed test process left its own folder in the real temp folder (${left})`);
+    const removed = sweepPsTempDirs(shared);
+    // The pid was still reserved through the sweep: the hold was open (procAlive throws on a closed one).
+    assert.equal(procHold().procAlive(fixed.hold), false, 'PS POLICY: the killed test process stays held through the sweep, so its pid is not reused');
+    assert.deepEqual(removed, left, `PS POLICY: the sweep removes the dead test process's folder${removed.length === left.length ? '' : ` (kept: ${whyKept(shared, left, fixed.pid)})`}`);
+    assert.deepEqual(fs.readdirSync(shared), [], 'PS POLICY: the real temp folder is clean after the sweep');
+  } finally {
+    procHold().procClose(fixed.hold);
+  }
 });
 
 test('RUNNER: run-tests sweeps dead pids\' folders at the end of a run', () => {
