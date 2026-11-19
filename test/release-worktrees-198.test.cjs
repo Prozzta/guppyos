@@ -16,6 +16,7 @@ require('./tools/mutant-runner-helper.cjs').gate(__filename);
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const { rmTree } = require('./tools/rm-tree.cjs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
@@ -26,7 +27,7 @@ for (const k of Object.keys(process.env)) if (k.startsWith('GIT_')) delete proce
 delete process.env.HIVE_ROOT;   // never the live hive log
 const DAY = 24 * 60 * 60 * 1000;
 const JAIL = fs.mkdtempSync(path.join(os.tmpdir(), 'relprune-'));
-test.after(() => fs.rmSync(JAIL, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+test.after(() => rmTree(JAIL, { maxRetries: 5, retryDelay: 100 }));
 
 const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
 const write = (p, s = 'x') => { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, s); };
@@ -261,7 +262,7 @@ test('main: every link under --root outside the cut trees protects its target (a
 
 test('main --apply refuses when the model cache cannot be verified', () => {
   const fx = fixture('nocache');
-  fs.rmSync(path.join(fx.work, 'cut197', 'resources', 'models'), { recursive: true });
+  rmTree(path.join(fx.work, 'cut197', 'resources', 'models'));
   const r = P.main([...fx.args, '--apply'], () => {}, fx.deps);
   assert.match(r.refused, /^model cache .* not verified: no verified source/);
   assert.ok(fs.existsSync(path.join(fx.work, 'cut194')));
