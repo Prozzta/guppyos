@@ -98,12 +98,38 @@ test('ONBINARY-DROP: a PTY child that is not on the console fails by name and le
     onSpawn: (proc) => { worker = proc._agent._conoutSocketWorker._worker; exited = new Promise((res) => worker.once('exit', res)); }
   });
   try {
-    await assert.rejects(run, { message: 'PTY child exited 2: ' }, 'no READY reached the PTY: the child ran its 3 s timer out');
+    // Two names for the one failure, whichever clock is first: the child's own 3 s timer (counted from
+    // its start, which is slow on a loaded machine) or the helper's 5 s wait for an answer.
+    await assert.rejects(run, { message: /^PTY child (exited 2: $|did not answer$)/ }, 'no READY reached the PTY');
     let t;
     await Promise.race([exited, new Promise((_, rej) => {
       t = setTimeout(() => rej(new Error('the conout worker of the terminal never exited: the kill did not run (node-pty waits for a first data chunk, and this child sends none)')), 8000);
     })]).finally(() => clearTimeout(t));
   } finally {
     await worker.terminate();   // a red run must still let this file end
+  }
+});
+
+// The child reports isTTY itself and the helper asserts it. A console node on the PTY always says true,
+// so this child is made to say false: it answers with its bytes, and the helper must still refuse it by
+// name (Jim 393e0b MUST 1: without this case nothing reached that assertion).
+test('ONBINARY-DROP: a child that answers but says its stdout is no TTY is refused by name, and leaves no conout worker', { skip: process.platform !== 'win32' }, async (t) => {
+  const node = consoleNode();
+  t.diagnostic(`PTY child: ${node.file} ${node.version} (from ${node.from})`);
+  let worker;
+  let exited;
+  const run = childBytes(ptyBinaryInput(X10_HIGH_COLUMN, 'win32'), {
+    file: node.file,
+    prelude: "Object.defineProperty(process.stdout, 'isTTY', { value: false });",
+    onSpawn: (proc) => { worker = proc._agent._conoutSocketWorker._worker; exited = new Promise((res) => worker.once('exit', res)); }
+  });
+  try {
+    await assert.rejects(run, { message: /^PTY child is not on the console \(its stdout\/stdin isTTY is not true\): [\s\S]*READY:false[\s\S]*BYTES:/ });
+    let timer;
+    await Promise.race([exited, new Promise((_, rej) => {
+      timer = setTimeout(() => rej(new Error('the conout worker of the refused terminal never exited')), 8000);
+    })]).finally(() => clearTimeout(timer));
+  } finally {
+    await worker.terminate();
   }
 });
