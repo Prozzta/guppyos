@@ -139,7 +139,7 @@ function give(dir, slot) {
 /**
  * The run's one clock: ms on the system's monotonic counter, the same counter in every process
  * (FLAKE-LOAD-BURST-196-GATE-OVERADMIT). Date.now() is not: each process fixes its wall clock when it
- * starts, to the system tick, so two processes disagree by up to a tick (1 to 15.6 ms on Windows). A
+ * starts, to the system tick, so two processes disagree; the size is not measured here. A
  * slot handed over faster than that was recorded as taken before it was given back, and the sum of
  * the starts then showed one file more than SLOTS past the gate.
  */

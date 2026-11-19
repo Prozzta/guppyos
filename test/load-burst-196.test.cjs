@@ -325,36 +325,60 @@ test('live: 6 files through the preload with 2 slots never have more than 2 past
 
 /**
  * FLAKE-LOAD-BURST-196-GATE-OVERADMIT, the red-before. Every process fixes its own wall clock at its
- * start, so two processes disagree (measured: up to one system tick). Here the disagreement is made
- * large enough to be certain: two files hold both slots for HOLD_MS, and a third, whose wall clock is
- * SKEW_MS behind (a preload ahead of the gate), is started once both slots are held. It takes a slot
- * only after a holder gave one back: never 3 past the gate. Its wall clock says it took the slot
- * SKEW_MS earlier, while both holders still held theirs: summed on the wall clocks, that is 3 on 2.
+ * start, so two processes disagree. Here the disagreement is made large enough to be certain: two
+ * files hold both slots, and a third, whose wall clock is skewMs behind (a preload ahead of the gate),
+ * is started once both slots are held. It takes a slot only after a holder gave one back: never 3 past
+ * the gate. Its wall clock says it took the slot skewMs earlier, while both holders still held theirs:
+ * summed on the wall clocks, that is 3 on 2.
+ * Every step is released on a signal, never on a timer in the files (Jim e38f17: node startup under
+ * load would eat a fixed hold). The holders hold until the test writes 'release', and it writes that
+ * HOLD_MS after the late file is seen waiting at the gate: the gate's own claim-<pid> folder, made
+ * after the wait began. So the late file waited HOLD_MS or more by construction. The late file then
+ * holds until 'late-release', written skewMs after both slots were seen held, so that on its wall
+ * clock its hold still reaches into the holders'. starve: the holders are released before the late
+ * file is started (the fixture then has to say so itself).
  */
-const HOLD_MS = 2000;
-const SKEW_MS = 3000;
-const HOLD_TOP = `Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${HOLD_MS});\n`;
-const SKEW_PRE = `const real = Date.now; Date.now = () => real() - ${SKEW_MS};\n`;
-K.skew = async (gateFile, d) => {
+const HOLD_MS = 500;
+const SKEW_MS = 6000;
+const holdTop = (until) => `const a = new Int32Array(new SharedArrayBuffer(4)); const t0 = process.hrtime.bigint();\nwhile (!require('fs').existsSync(${JSON.stringify(until)}) && process.hrtime.bigint() - t0 < 60_000_000_000n) Atomics.wait(a, 0, 0, 20);\n`;
+K.skew = async (gateFile, d, { skewMs = SKEW_MS, starve = false } = {}) => {
   const gateDir = path.join(d, 'gate'); fs.mkdirSync(gateDir, { recursive: true });
   const fwd = (f) => f.split(path.sep).join('/');
   const holder = path.join(d, 'holder.cjs'); const late = path.join(d, 'late.cjs'); const pre = path.join(d, 'skew.cjs');
-  fs.writeFileSync(holder, HOLD_TOP); fs.writeFileSync(late, HOLD_TOP); fs.writeFileSync(pre, SKEW_PRE);
+  const release = path.join(d, 'release'); const lateRelease = path.join(d, 'late-release');
+  fs.writeFileSync(holder, holdTop(release)); fs.writeFileSync(late, holdTop(lateRelease));
+  fs.writeFileSync(pre, `const real = Date.now; Date.now = () => real() - ${skewMs};\n`);
   let errs = '';
-  const run = (file, opt) => new Promise((resolve, reject) => {
+  const run = (file, opt) => {
     const env = { ...process.env, NODE_OPTIONS: opt, GUPPY_START_GATE: `2|${gateDir}`, GUPPY_START_OPT: opt, NODE_TEST_CONTEXT: 'child-v8' };
     const p = spawn(process.execPath, [file], { env, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
     p.stderr.on('data', (b) => { errs += b; });
-    p.on('error', reject); p.on('exit', resolve);
-  });
+    return { pid: p.pid, done: new Promise((resolve, reject) => { p.on('error', reject); p.on('exit', resolve); }) };
+  };
+  const mono = () => Number(process.hrtime.bigint() / 1_000_000n);
+  const until = async (ok, what) => {
+    for (const t0 = mono(); !ok();) {
+      assert.ok(mono() - t0 < 60_000, `the fixture: ${what}`);
+      await new Promise((r) => setTimeout(r, 10));
+    }
+  };
   const plain = `--require "${fwd(gateFile)}"`;
   const holders = [run(holder, plain), run(holder, plain)];
-  const bothHeld = () => [0, 1].every((k) => fs.existsSync(path.join(gateDir, `slot-${k}`)));
-  for (const t0 = Date.now(); !bothHeld();) {
-    assert.ok(Date.now() - t0 < 60_000, 'the two holders never took their slots');
-    await new Promise((r) => setTimeout(r, 10));
+  await until(() => [0, 1].every((k) => fs.existsSync(path.join(gateDir, `slot-${k}`))), 'the two holders never took their slots');
+  const bothHeld = mono();
+  if (starve) { fs.writeFileSync(release, ''); await Promise.all(holders.map((h) => h.done)); }
+  const third = run(late, `--require "${fwd(pre)}" ${plain}`);
+  if (!starve) {
+    await until(() => fs.existsSync(path.join(gateDir, `claim-${third.pid}`)), 'the late file never reached the gate');
+    const seen = mono();
+    await until(() => mono() - seen >= HOLD_MS + 2, 'the hold never ended');
+    fs.writeFileSync(release, '');
   }
-  await Promise.all([...holders, run(late, `--require "${fwd(pre)}" ${plain}`)]);
+  await until(() => [0, 1].some((k) => fs.existsSync(path.join(gateDir, `slot-${k}`, String(third.pid)))), 'the late file never took a slot');
+  const took = mono();
+  await until(() => mono() - bothHeld >= skewMs + 250 && mono() - took >= 50, 'the late hold never ended');
+  fs.writeFileSync(lateRelease, '');
+  await Promise.all([...holders, third].map((h) => h.done));
   const text = fs.readFileSync(path.join(gateDir, 'starts.jsonl'), 'utf8');
   const recs = text.trim().split(/\r?\n/).map((l) => JSON.parse(l));
   const summary = G.burstSummary(text);
@@ -363,12 +387,17 @@ K.skew = async (gateFile, d) => {
   // The fixture did what it says: on the wall clocks, the late file took its slot while both holders held theirs.
   const lateRec = recs.find((r) => /late\.cjs$/.test(r.file)); const held = recs.filter((r) => /holder\.cjs$/.test(r.file));
   assert.equal(held.length, 2);
-  assert.ok(lateRec.waitMs > HOLD_MS / 2, `the late file waited for a holder (${lateRec.waitMs} ms)`);
+  assert.ok(lateRec.waitMs >= HOLD_MS, `the fixture: the late file waited for a holder, ${HOLD_MS} ms or more (${lateRec.waitMs} ms)`);
   const wallFrom = Math.max(...recs.map((r) => r.takenMs)); const wallTo = Math.min(...recs.map((r) => r.bornMs + r.loadMs));
   assert.ok(wallFrom < wallTo, `the fixture: on the files' wall clocks all three hold at once (latest take ${wallFrom}, first end ${wallTo})`);
   assert.ok(summary.peakHolding <= 2, `CLOCKS THAT DISAGREE BETWEEN PROCESSES DO NOT PUT A THIRD FILE PAST A 2-SLOT GATE, got ${summary.peakHolding}`);
 };
 test('live: a file whose wall clock is behind takes a slot after a holder gave it back, and is never summed as a third past the gate', { timeout: 120_000 }, (t) => K.skew(GATE_FILE, tmp(t)));
+// The skew test is only worth its green when the fixture really made the overlap: starved, it says so by name.
+test('live: the skew fixture, starved, fails as the fixture and not as the gate', { timeout: 120_000 }, async (t) => {
+  await assert.rejects(() => K.skew(GATE_FILE, tmp(t), { skewMs: 300, starve: true }), /the fixture: the late file waited for a holder/, 'HOLDERS GONE BEFORE THE LATE FILE: NAMED AS THE FIXTURE');
+  await assert.rejects(() => K.skew(GATE_FILE, tmp(t), { skewMs: 0 }), /the fixture: on the files' wall clocks all three hold at once/, 'NO SKEW: NAMED AS THE FIXTURE');
+});
 
 // The slot goes back once the top level has run, not at exit (Jim a5a246): 1 slot, 2 files whose
 // tests run 2 s AFTER a quick top level. Held to exit, the gate would cap the whole run, not its start.
