@@ -49,12 +49,14 @@ function electronExe() {
 /**
  * @param input what the test writes once the child said READY
  * @param opts.file the child program; opts.env its env; opts.onSpawn(proc) sees the terminal first
+ * @param opts.prelude JS run in the child before its script (a test uses it to make a child that is
+ *   on the PTY say it is not)
  */
-function childBytes(input, { file = process.execPath, env = process.env, onSpawn } = {}) {
+function childBytes(input, { file = process.execPath, env = process.env, onSpawn, prelude = '' } = {}) {
   // An electron.exe without this key is a real app with a window: never start one from here.
   if (isElectronExe(file)) assert.equal(env.ELECTRON_RUN_AS_NODE, '1', `${file} runs as Node only (ELECTRON_RUN_AS_NODE=1 in its env)`);
   return new Promise((resolve, reject) => {
-    const proc = pty.spawn(file, ['-e', CHILD], {
+    const proc = pty.spawn(file, ['-e', `${prelude}${CHILD}`], {
       name: 'xterm-256color', cols: 120, rows: 24, cwd: process.cwd(), env
     });
     // As the app does for every terminal (PtyManager.spawn): node-pty alone holds kill() back until
