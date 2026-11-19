@@ -100,6 +100,71 @@ test('after dispose() no new async read reaches the file system, and reopen() al
   assert.equal(w.calls, 2);
 });
 
+/**
+ * The authority reads (registry.json, tasks.json) go through readAuthoritativeJsonAsync, a
+ * different path from the mail reads above. Here tasks.json is gated, and rewritten with a new
+ * size before each ask so the cache cannot answer without a read of the file.
+ */
+test('an authority read is one of the reads: the wait covers it, and after dispose() it rejects without touching the file', async (t) => {
+  const w = await world(t);
+  const tasks = path.join(w.hive.root(), 'tasks.json');
+  const real = fs.promises.readFile;   // world()'s gate: every other path passes through it
+  const g = { calls: 0, open: 0, gated: false, releases: [] };
+  const releaseAll = () => { for (const go of g.releases.splice(0)) go(); };
+  fs.promises.readFile = async function gatedAuthorityRead(p, ...rest) {
+    if (path.resolve(String(p)) !== path.resolve(tasks)) return real.call(fs.promises, p, ...rest);
+    g.calls++; g.open++;
+    try {
+      if (g.gated) await new Promise((go) => { g.releases.push(go); });
+      return await real.call(fs.promises, p, ...rest);
+    } finally { g.open--; }
+  };
+  t.after(() => { g.gated = false; releaseAll(); fs.promises.readFile = real; });
+  let pad = 0;
+  const rewrite = () => fs.writeFileSync(tasks, JSON.stringify({ tasks: [] }) + ' '.repeat(++pad) + '\n');
+
+  rewrite();
+  await w.hive.integrityIssuesAsync();
+  assert.ok(g.calls >= 1, 'control: the authority read goes through the gated readFile');
+  for (let i = 0; i < 200 && g.open > 0; i++) await turn();
+  assert.equal(g.open, 0, 'control: no authority read is left open');
+
+  g.gated = true;
+  rewrite();
+  const reading = w.hive.integrityIssuesAsync();
+  await until(() => g.open >= 1);
+
+  w.hive.dispose();
+  let waited = false;
+  const wait = Promise.resolve(w.hive.drainReads?.()).then(() => { waited = true; });
+  for (let i = 0; i < 20; i++) await turn();
+  const openWhenWaitEnded = waited ? g.open : null;
+  g.gated = false;
+  releaseAll();
+  await wait;
+  assert.equal(openWhenWaitEnded, null, 'the wait ended with an authority read still open: the delete would run under it');
+  assert.equal(g.open, 0, 'no authority read is open once the wait has ended');
+  assert.ok(Array.isArray(await reading), 'the read that was already open still completes');
+
+  const before = g.calls;
+  rewrite();
+  await assert.rejects(w.hive.integrityIssuesAsync(), (e) => e?.name === 'HiveDisposedError' && e.code === 'EHIVEDISPOSED',
+    'an authority read asked for after dispose() must reject with HiveDisposedError');
+  for (let i = 0; i < 20; i++) await turn();
+  assert.equal(g.calls, before, 'an authority read asked for after dispose() opened the file');
+});
+
+test('the outbox dedup load passes HiveDisposedError on from both of its reads', () => {
+  const src = codeOnly(readSource('src/main/hive.ts'), 'hive.ts');
+  const from = src.indexOf('private async outboxDedupEntries(');
+  assert.ok(from >= 0, 'outboxDedupEntries not found');
+  const body = src.slice(from, src.indexOf('const now = outboxDedupClock.now();', from));
+  assert.equal(body.split('this.readTextAsync(').length - 1, 2, 'control: the load makes two reads');
+  // A swallowed HiveDisposedError here reads as "no dedup log": the pass would go on and deliver.
+  assert.equal(body.split(/catch \(e\) \{\s+if \(e instanceof HiveDisposedError\) throw e;/).length - 1, 2,
+    'each catch around a dedup read must rethrow HiveDisposedError first');
+});
+
 /** A gate on fs.promises.open for the live log, for the Log panel's async tail (logTailAsync). */
 function gateLogOpen(t, hive) {
   const log = path.join(hive.root(), 'log.jsonl');
