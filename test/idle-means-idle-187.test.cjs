@@ -496,7 +496,7 @@ test('T7 replaying 05:52-06:35Z: no plain-idle stretch between a background acqu
   const rootsOf = AGENTS.map((agentId, i) => ({ agentId, pid: 100 + i }));
   const probe = async () => [
     ...rootsOf.map((r) => ({ pid: r.pid, parentPid: 1, commandLine: 'bash', createdMs: 1 })),
-    ...rootsOf.filter((r) => r.agentId === ran.id).map((r) => ({ pid: r.pid + 1000, parentPid: r.pid, commandLine: 'node test/tools/run-tests.cjs', createdMs: ran.at }))
+    ...rootsOf.filter((r) => r.agentId === ran.id).map((r) => ({ pid: r.pid + 1000, parentPid: r.pid, commandLine: 'node --test --test-reporter tap test/a.test.cjs', createdMs: ran.at }))
   ];
   const { lock, clock, rows } = fakeLock({ t: at('05:52:00.000'), extra: { roots: () => rootsOf, probe } });
   const pushes = [];

@@ -540,10 +540,13 @@ test('control: a call that returned with its heavy child still running (orphan-k
 
 // ─── MUTANT CENSUS ───────────────────────────────────────────────────────────────────────────
 // Each mutant is ONE edit of the source, loaded as text, and must fail its named killer with the
-// named message. NOT PINNED, said plainly: the `kept: r.kept` carried by the exclusive re-entry in
-// acquireAs (a reservation put back at the head of the queue). A kept reservation is exclusive and
-// is made as its exclusive holder leaves, so no other holder exists for that branch to meet; the
-// carry is there so the bound holds if that ever changes.
+// named message. The exclusive re-grant after the drain (a reservation put back at the head of the
+// queue in acquireAs) is pinned by K.regrant for what it can carry: `lapsed`. NOT PINNED, said
+// plainly: (1) its `kept: r.kept`. A kept reservation is exclusive (only a suite hold is kept; the
+// classifier makes no provisional suite), so its owner's exclusive call always fits and that branch
+// never meets a kept reservation; the carry is there so the bound holds if that ever changes.
+// (2) its `hooked: r.hooked` alone: deny() marks a hook call's waiter hooked again, so dropping it
+// changes nothing for a hook call (the two-edit mutant below drops both).
 
 function mutateText(rel, edits, tag) {
   let text = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', '..', rel), 'utf8');
@@ -574,8 +577,24 @@ const MUTANTS = [
   { name: "a runner's child is not a start", edits: [['if (held && hold && parent.grant === hold.grant) hold.started = true;', '']], killer: 'started', dies: /STARTED A TEST AND THEN DIED PASSES THE SLOT ON/ },
   { name: 'a test process of its own is not a start', edits: [["if (own && !Array.isArray(r.runner) && (electron || !r.preloadKind)) hold.started = true;", '']], killer: 'started', dies: /node --test ITSELF IS A STARTED TEST/ },
   { name: 'an Electron launch is not a start', edits: [['(electron || !r.preloadKind)) hold.started = true;', '(!r.preloadKind)) hold.started = true;']], killer: 'started', dies: /AN ELECTRON LAUNCH IS A START/ },
-  { name: 'a sighting is not a start', edits: [['if (busy.has(h.agentId)) h.started = true;', '']], killer: 'background', dies: /SAW RUNNING IS NOT KEPT/ },
-  { name: 'an orphan-kept job is not a start', edits: [['{ cur.started = true; cur.background = true;', '{ cur.background = true;']], killer: 'orphan', dies: /FOUND RUNNING AT PostToolUse IS NOT KEPT/ },
+  { name: 'a sighting is not a start', edits: [['if (probed.tested.has(h.agentId)) h.started = true;', '']], killer: 'background', dies: /SAW RUNNING IS NOT KEPT/ },
+  { name: 'an orphan-kept job is not a start', edits: [['if (busy?.tested.has(agentId)) cur.started = true;', '']], killer: 'orphan', dies: /FOUND RUNNING AT PostToolUse IS NOT KEPT/ },
+  // Jim SHOULD 1, god e833a9 (a): the runner is the job, not a test.
+  { name: 'a runner sighted by a scan is a start', edits: [['if (probed.tested.has(h.agentId)) h.started = true;', 'if (busy.has(h.agentId)) h.started = true;']], killer: 'slowPrelaunch', dies: /RUNNER SIGHTED WITH NO TEST PROCESS BELOW IT/ },
+  { name: 'a runner alive at PostToolUse is a start', edits: [['if (busy?.tested.has(agentId)) cur.started = true;', 'if (busy?.busy.has(agentId)) cur.started = true;']], killer: 'slowPrelaunchForeground', dies: /RUNNER FOUND ALIVE AT PostToolUse/ },
+  { name: 'any process of the job counts as a test', edits: [['p.createdMs === created && isTestProcess(p.commandLine)) tested.add', 'p.createdMs === created) tested.add']], killer: 'slowPrelaunch', dies: /RUNNER SIGHTED WITH NO TEST PROCESS BELOW IT/ },
+  { name: 'any node script is a test process (the runner too)', edits: [['return at >= 0 && /\\.test\\.[cm]?[jt]sx?$/i.test(args[at]);', 'return at >= 0;']], killer: 'testProcess', dies: /^NOT A TEST PROCESS: node test\/tools\/run-tests\.cjs\n/ },
+  { name: 'a test file among the arguments counts (npm, a filtered runner)', edits: [['return at >= 0 && /\\.test\\.[cm]?[jt]sx?$/i.test(args[at]);', 'return args.some((a) => /\\.test\\.[cm]?[jt]sx?$/i.test(a));']], killer: 'testProcess', dies: /^NOT A TEST PROCESS: node test\/tools\/run-tests\.cjs test\/a\.test\.cjs\n/ },
+  { name: '--test after the script counts', edits: [["if ((at < 0 ? args : args.slice(0, at)).includes('--test')) return true;", "if (args.includes('--test')) return true;"]], killer: 'testProcess', dies: /^NOT A TEST PROCESS: node scripts\/build\.cjs --test\n/ },
+  { name: 'any program on a test file counts', edits: [["if (prog !== 'node' && prog !== 'electron') return false;", '']], killer: 'testProcess', dies: /^NOT A TEST PROCESS: pwsh / },
+  { name: 'node --test is not a test process', edits: [["if ((at < 0 ? args : args.slice(0, at)).includes('--test')) return true;", '']], killer: 'testProcess', dies: /^A TEST PROCESS: node --test\n/ },
+  { name: 'electron is not a test program', edits: [["if (prog !== 'node' && prog !== 'electron') return false;", "if (prog !== 'node') return false;"]], killer: 'testProcess', dies: /^A TEST PROCESS: C:.*electron\.exe/ },
+  { name: 'a test file run by node is not a test process', edits: [['return at >= 0 && /\\.test\\.[cm]?[jt]sx?$/i.test(args[at]);', 'return false;']], killer: 'testProcess', dies: /^A TEST PROCESS: .*x\.test\.cjs\n/ },
+  // Jim SHOULD 2: the exclusive re-grant after the drain carries the reservation it came from.
+  { name: 'the re-grant after the drain forgets the lapse', edits: [['exclusive: true, lapsed: r.lapsed, kept: r.kept });', 'exclusive: true, lapsed: false, kept: r.kept });']], killer: 'regrant', dies: /LAPSED ONCE BEFORE THE RE-GRANT IS NOT QUEUED AGAIN/ },
+  { name: 'the hold forgets that its reservation lapsed', edits: [["cls.kind === 'suite' ? { lapsed: was.lapsed } : null;", "cls.kind === 'suite' ? { lapsed: false } : null;"]], killer: 'regrant', dies: /LAPSED ONCE BEFORE THE RE-GRANT IS NOT QUEUED AGAIN/ },
+  { name: 'the kept reservation forgets the lapse', edits: [['lapsed: h.spent.lapsed, kept: true });', 'lapsed: false, kept: true });']], killer: 'regrant', dies: /LAPSED ONCE BEFORE THE RE-GRANT IS NOT QUEUED AGAIN/ },
+  { name: 'the re-grant after the drain is not hooked (no keep for it)', edits: [['if (i >= 0 && hooked) this.waiters[i].hooked = true;', ''], ['hooked: r.hooked, exclusive: true, lapsed: r.lapsed', 'hooked: false, exclusive: true, lapsed: r.lapsed']], killer: 'regrant', dies: /RE-GRANTED AFTER THE DRAIN KEEPS ITS SLOT|granted again when the machine is empty/ },
   { name: 'the started mark outlives its hold', edits: [['grant: ++this.grants, spent, started: false });', 'grant: ++this.grants, spent, started: this.grants > 1 });']], killer: 'sightedBefore', dies: /SIGHTING BEFORE THE GRANT DOES NOT COUNT/ },
   { name: 'a lapsed kept reservation queues as fresh', edits: [['exclusive: r.exclusive, lapsed: true, kept: r.kept });', 'exclusive: r.exclusive, lapsed: true });']], killer: 'lapse', dies: /QUEUED AGAIN AFTER A KEEP IS NOT KEPT/ },
   { name: 'a grant drops the kept mark', edits: [['exclusive: w.exclusive, lapsed: w.lapsed, kept: w.kept });', 'exclusive: w.exclusive, lapsed: w.lapsed });']], killer: 'lapse', dies: /QUEUED AGAIN AFTER A KEEP IS NOT KEPT/ },

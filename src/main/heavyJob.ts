@@ -2369,8 +2369,11 @@ export interface HeavyHolder {
    *  otherwise: nothing to give back. */
   spent: { lapsed: boolean } | null;
   /** HEAVY-SLOT-PRELAUNCH-FAIL-108: a test process (or an Electron launch) of this hold leased, or
-   *  the watcher saw a heavy process of it. Never set by the suite runner's own lease: the runner
-   *  asks before its preflight. */
+   *  the watcher saw a TEST process of it (isTestProcess). Never set by the suite runner: not by its
+   *  own lease (it asks before its preflight), and not by a sighting of it (a preflight can run for
+   *  longer than a scan and then fail). Known limit: a test started by a tool whose command line
+   *  shows neither `--test` nor a test file, and that takes no lease, is not seen as a start; such a
+   *  hold is kept once (one extra HEAVY_RESERVE_MS, the bound of this rule). */
   started: boolean;
 }
 
@@ -2390,6 +2393,19 @@ export const HEAVY_LOOP_CALL_MS = 15 * 60_000;
 
 /** One process of the listing. `createdMs` (epoch ms) is what the watcher judges by (Jim MF3). */
 export interface ProcRow { pid: number; parentPid: number; commandLine: string; createdMs?: number }
+/** HEAVY-SLOT-PRELAUNCH-FAIL-108 (Jim SHOULD 1, god e833a9 (a)): a listed process that IS a test:
+ *  node or electron run as the test runner (`--test` among its own options) or on a test file
+ *  (its script is `*.test.*`). Not the suite runner (run-tests.cjs, whatever its arguments), npm,
+ *  a build, tsc or a shell: those are the job, and prove no test started. */
+export function isTestProcess(commandLine: string): boolean {
+  const ws = words(commandLine, 'cmd');
+  const prog = (ws[0] ?? '').replace(/^.*[\\/]/, '').toLowerCase().replace(/\.exe$/, '');
+  if (prog !== 'node' && prog !== 'electron') return false;
+  const args = ws.slice(1);
+  const at = nodeScriptIndex(args);
+  if ((at < 0 ? args : args.slice(0, at)).includes('--test')) return true;
+  return at >= 0 && /\.test\.[cm]?[jt]sx?$/i.test(args[at]);
+}
 /** Clock skew allowed between the app's clock and a process CreationDate. */
 export const HEAVY_CREATED_SKEW_MS = 2_000;
 export interface HeavyLockDeps {
@@ -2740,6 +2756,10 @@ export class HeavyJobLock {
       const r = this.reservations.get(agentId)!;
       this.reservations.delete(agentId);
       this.dequeue(agentId);
+      // HEAVY-SLOT-PRELAUNCH-FAIL-108 (Jim SHOULD 2): the re-grant is still this reservation: `lapsed`
+      // goes with it (pinned). `kept` goes with it too, and cannot be met today: a kept reservation is
+      // exclusive (only a suite hold is kept), so its owner's exclusive call always fits. `hooked` is
+      // set again by deny() for a hook call.
       this.waiters.unshift({ agentId, kind: cls.kind as HeavyKind, since: this.now(), procs: r.procs, hooked: r.hooked, exclusive: true, lapsed: r.lapsed, kept: r.kept });
       return this.deny(agentId, cls, limit, callId);
     }
@@ -2912,7 +2932,8 @@ export class HeavyJobLock {
       void this.heavyAgents().then((busy) => {
         const cur = this.holders.get(agentId);
         if (!cur || cur.calls.size || cur.background) return;
-        if (busy?.busy.has(agentId)) { cur.started = true; cur.background = true; cur.seenRunning = true; cur.seenAt = this.now(); this.log({ kind: 'heavy-lock', action: 'orphan-kept', agentId, heavyKind: cur.kind }); this.changed(); this.arm(); return; }
+        if (busy?.tested.has(agentId)) cur.started = true; // HEAVY-SLOT-PRELAUNCH-FAIL-108: a test process lives on; a runner alone keeps the hold below and proves no start
+        if (busy?.busy.has(agentId)) { cur.background = true; cur.seenRunning = true; cur.seenAt = this.now(); this.log({ kind: 'heavy-lock', action: 'orphan-kept', agentId, heavyKind: cur.kind }); this.changed(); this.arm(); return; }
         // (a) FAIL CLOSED: a failed listing says nothing about the job (most likely a TIMEOUT on a
         // loaded machine, i.e. exactly when a second heavy job hurts most). Keep the slot as a
         // background holder; the watcher frees it on two clean scans without it, or the TTL.
@@ -2931,7 +2952,7 @@ export class HeavyJobLock {
    *  while its agent's PTY tree has ANY descendant CREATED at or after its acquire: exact for every
    *  wrapper, shim and tool, and conservative (the agent's other calls only extend the hold). The
    *  PTY root itself and its long-lived children (created earlier) never count. */
-  private async heavyAgents(given?: { procs: ProcRow[] | null }): Promise<{ busy: Set<string>; seen: Set<string> } | null> {
+  private async heavyAgents(given?: { procs: ProcRow[] | null }): Promise<{ busy: Set<string>; seen: Set<string>; tested: Set<string> } | null> {
     if (!this.d.probe || !this.d.roots) return null;
     let procs: ProcRow[] | null;
     if (given) procs = given.procs;
@@ -3000,7 +3021,21 @@ export class HeavyJobLock {
     // HEAVY-LOCK-OPAQUE-SCRIPT-196: a held lease's test process keeps its agent busy while it runs
     // (it may have been created long before its lease: it waited in the queue).
     for (const l of this.leases.values()) if (procLive(byPid, l.pid, l.createdMs)) busy.add(l.agentId);
-    return { busy, seen: rootsSeen };
+    // HEAVY-SLOT-PRELAUNCH-FAIL-108 (Jim SHOULD 1, god e833a9 (a)): BUSY is any process of the job, the
+    // suite runner included: it keeps the slot held while it lives. TESTED is narrower: a process of
+    // this hold's job that is a TEST process (isTestProcess), i.e. one below the runner. Only that
+    // proves a start: a runner seen for 30 s in a preflight that then fails started no test.
+    // Jim NIT 1: a live lease (the line above) is busy only, never tested. A lease still held from an
+    // EARLIER grant of the same agent would otherwise mark the new hold started; the lease path sets
+    // `started` itself, with its grant check.
+    const tested = new Set<string>();
+    for (const h of this.holders.values()) {
+      for (const [pid, created] of h.attributed) {
+        const p = byPid.get(pid);
+        if (p && p.createdMs === created && isTestProcess(p.commandLine)) tested.add(h.agentId);
+      }
+    }
+    return { busy, seen: rootsSeen, tested };
   }
 
   /** The holder's PTY exited: its jobs are gone with it. */
@@ -3314,7 +3349,7 @@ export class HeavyJobLock {
     const t = this.now();
     for (const h of held) {
       if (!this.holders.has(h.agentId)) continue;
-      if (busy.has(h.agentId)) h.started = true; // HEAVY-SLOT-PRELAUNCH-FAIL-108: seen running is a started job
+      if (probed.tested.has(h.agentId)) h.started = true; // HEAVY-SLOT-PRELAUNCH-FAIL-108: a TEST process seen running is a started job (the runner alone is not)
       if (busy.has(h.agentId)) { h.misses = 0; h.seenRunning = true; h.seenAt = t; continue; }
       if (!seen.has(h.agentId)) continue;   // its PTY root is not in the listing: unknown, not a miss
       h.seenRunning = false;
