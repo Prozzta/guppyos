@@ -5193,6 +5193,19 @@ export class HiveManager {
    * reason. Data only: nothing wakes, no mail.
    */
   autoCloseStaleObligations(runningVersion: string | null, now: number = Date.now()): StaleObligation[] {
+    // LAG-NAMED-STALLS-RESIDUAL-108: while the release runs and the ledgers are being read off the
+    // main thread (readReleaseRunsAhead), this sweep closes nothing and runs once they are loaded.
+    if (this.releaseRunsLoading) {
+      if (!this.releaseSweepWaiting) {
+        this.releaseSweepWaiting = true;
+        void this.releaseRunsLoading.then(() => {
+          this.releaseSweepWaiting = false;
+          if (this.readsRefused) return;
+          try { this.autoCloseStaleObligations(runningVersion); } catch (e) { console.error('[stale requests]', e); }
+        });
+      }
+      return [];
+    }
     const reg = this.registry();
     const docs: Record<string, MailLedgerDoc> = {};
     for (const id of Object.keys(reg.agents ?? {})) {
@@ -5329,16 +5342,24 @@ export class HiveManager {
    * REQUESTS-TAB-STALE: the first start of each packaged release on this hive, kept in
    * `state/app-releases.json`. Seeded once from the `app-start` rows of the logs (rotated files
    * included); the running version is added at its first sweep if no row has it.
+   *
+   * LAG-NAMED-STALLS-RESIDUAL-108: the packaged app reads them ahead (readReleaseRunsAhead), and
+   * from then on this answers from memory and writes the file off the main thread. Without the
+   * read-ahead (a direct caller) it reads, seeds and writes here, synchronously, as before.
    */
   private releaseRuns(runningVersion: string | null): ReleaseRun[] {
     const root = this.root();
     if (!root) return [];
+    const runs = (of: Record<string, number>): ReleaseRun[] => Object.entries(of).filter(([, at]) => typeof at === 'number').map(([version, firstRunAt]) => ({ version, firstRunAt }));
+    const mem = this.releaseRunsMem?.root === root ? this.releaseRunsMem : null;
+    if (mem) {
+      if (runningVersion && typeof mem.first[runningVersion] !== 'number') { mem.first[runningVersion] = Date.now(); mem.unsaved = true; }
+      this.saveReleaseRuns(mem);
+      return runs(mem.first);
+    }
     const file = join(root, 'state', 'app-releases.json');
     let first: Record<string, number> | null = null;
-    try {
-      const doc = JSON.parse(readFileSync(file, 'utf8')) as { firstRunAt?: unknown };
-      if (doc && typeof doc.firstRunAt === 'object' && doc.firstRunAt) first = { ...(doc.firstRunAt as Record<string, number>) };
-    } catch { /* absent or unreadable: seed from the logs */ }
+    try { first = HiveManager.releaseRunsIn(readFileSync(file, 'utf8')); } catch { /* absent or unreadable: seed from the logs */ }
     let changed = false;
     if (!first) {
       first = {};
@@ -5347,21 +5368,81 @@ export class HiveManager {
       for (const p of [...rotatedFiles(live).map((r) => r.path), live]) {
         let text = '';
         try { text = readFileSync(p, 'utf8'); } catch { continue; }
-        for (const line of text.split('\n')) {
-          if (!line.includes('"app-start"')) continue;
-          try {
-            const r = JSON.parse(line) as { kind?: unknown; packaged?: unknown; version?: unknown; ts?: unknown };
-            if (r.kind !== 'app-start' || r.packaged !== true || typeof r.version !== 'string' || typeof r.ts !== 'number') continue;
-            if (!(first[r.version] <= r.ts)) first[r.version] = r.ts;
-          } catch { /* a torn line */ }
-        }
+        HiveManager.foldAppStarts(first, text);
       }
     }
     if (runningVersion && typeof first[runningVersion] !== 'number') { first[runningVersion] = Date.now(); changed = true; }
     if (changed) {
       try { mkdirSync(join(root, 'state'), { recursive: true }); atomicWriteJsonFile(file, { v: 1, firstRunAt: first }); } catch { /* next sweep retries */ }
     }
-    return Object.entries(first).filter(([, at]) => typeof at === 'number').map(([version, firstRunAt]) => ({ version, firstRunAt }));
+    return runs(first);
+  }
+  /** The first runs in an `app-releases.json` text; null when it holds none (seed from the logs). */
+  private static releaseRunsIn(raw: string): Record<string, number> | null {
+    const doc = JSON.parse(raw) as { firstRunAt?: unknown };
+    return doc && typeof doc.firstRunAt === 'object' && doc.firstRunAt ? { ...(doc.firstRunAt as Record<string, number>) } : null;
+  }
+  /** One log file's packaged `app-start` rows, folded into the earliest start of each version. */
+  private static foldAppStarts(first: Record<string, number>, text: string): void {
+    for (const line of text.split('\n')) {
+      if (!line.includes('"app-start"')) continue;
+      try {
+        const r = JSON.parse(line) as { kind?: unknown; packaged?: unknown; version?: unknown; ts?: unknown };
+        if (r.kind !== 'app-start' || r.packaged !== true || typeof r.version !== 'string' || typeof r.ts !== 'number') continue;
+        if (!(first[r.version] <= r.ts)) first[r.version] = r.ts;
+      } catch { /* a torn line */ }
+    }
+  }
+  /** The release runs of `root` once read ahead; `unsaved`: the file does not hold them all yet. */
+  private releaseRunsMem: { root: string; first: Record<string, number>; unsaved: boolean; saving: boolean } | null = null;
+  private releaseRunsLoading: Promise<void> | null = null;
+  private releaseSweepWaiting = false;
+  /**
+   * LAG-NAMED-STALLS-RESIDUAL-108: read what the stale-requests sweep reads, off the main thread:
+   * `state/app-releases.json`, or when it is absent the `app-start` rows of every log (the hive
+   * folder listed and each file read asynchronously), and every registry agent's mail ledger. The
+   * packaged app calls this before it arms the beat; a sweep that finds the load in flight waits
+   * for it (autoCloseStaleObligations). Safe to call again: one load per hive folder.
+   */
+  readReleaseRunsAhead(): Promise<void> {
+    const root = this.root();
+    if (!root || this.releaseRunsMem?.root === root) return Promise.resolve();
+    if (this.releaseRunsLoading) return this.releaseRunsLoading;
+    const load: Promise<void> = this.loadReleaseRuns(root).catch(() => { /* the sweep reads them itself */ })
+      .then(() => { if (this.releaseRunsLoading === load) this.releaseRunsLoading = null; });
+    this.releaseRunsLoading = load;
+    return load;
+  }
+  private async loadReleaseRuns(root: string): Promise<void> {
+    const file = join(root, 'state', 'app-releases.json');
+    let first: Record<string, number> | null = null;
+    try { first = HiveManager.releaseRunsIn(await this.readTextAsync(file)); } catch { /* absent or unreadable: seed from the logs */ }
+    if (this.readsRefused) return;
+    const seeded = !first;
+    if (!first) {
+      first = {};
+      const live = join(root, 'log.jsonl');
+      for (const p of await this.countedRead(live, () => filesInOrderAsync(live))) {
+        let text = '';
+        try { text = await this.readTextAsync(p); } catch { if (this.readsRefused) return; continue; }
+        HiveManager.foldAppStarts(first, text);
+      }
+    }
+    try { await this.mail.warm(Object.keys(this.registry().agents ?? {})); } catch { /* the sweep loads what is not loaded */ }
+    if (this.readsRefused || this.root() !== root) return;
+    const mem = { root, first, unsaved: seeded, saving: false };
+    this.releaseRunsMem = mem;
+    this.saveReleaseRuns(mem);
+  }
+  /** Write the release runs off the main thread; a write that fails is tried again at the next sweep. */
+  private saveReleaseRuns(mem: NonNullable<HiveManager['releaseRunsMem']>): void {
+    if (mem.saving || !mem.unsaved) return;
+    mem.saving = true;
+    mem.unsaved = false;
+    const file = join(mem.root, 'state', 'app-releases.json');
+    const text = JSON.stringify({ v: 1, firstRunAt: mem.first }, null, 2);
+    void this.countedRead(file, async () => { await fsPromises.mkdir(join(mem.root, 'state'), { recursive: true }); await atomicWriteTextAsync(file, text); })
+      .then(() => { mem.saving = false; this.saveReleaseRuns(mem); }, () => { mem.saving = false; mem.unsaved = true; });
   }
 
   /**
