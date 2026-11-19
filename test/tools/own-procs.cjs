@@ -168,7 +168,8 @@ foreach ($t in $list) {
       throw
     }
   }
-}`;
+}
+exit 0`;
 }
 
 /** Stop each row's pid, but only if it still has that name and CreationDate (checked here, again). `run` is for tests. */
