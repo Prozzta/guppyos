@@ -114,6 +114,7 @@ test('ONBINARY-DROP: a PTY child that is not on the console fails by name and le
 // so this child is made to say false: it answers with its bytes, and the helper must still refuse it by
 // name (Jim 393e0b MUST 1: without this case nothing reached that assertion).
 test('ONBINARY-DROP: a child that answers but says its stdout is no TTY is refused by name, and leaves no conout worker', { skip: process.platform !== 'win32' }, async (t) => {
+  const { ptyBinaryInput } = loadTs('src/main/ptyBinaryInput.ts');
   const node = consoleNode();
   t.diagnostic(`PTY child: ${node.file} ${node.version} (from ${node.from})`);
   let worker;
