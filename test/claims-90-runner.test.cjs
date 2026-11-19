@@ -358,8 +358,11 @@ test('--build: the branch build is the tree, its out/ the hook shape, its Electr
   fs.writeFileSync(path.join(build, 'out', 'main', 'extra.js'), 'x');
   assert.notEqual(A.buildInfo(build).outSha256, out1, 'out/ is hashed as a whole');
   fs.mkdirSync(path.join(build, 'dist', 'win-unpacked', 'resources'), { recursive: true });
-  fs.writeFileSync(path.join(build, 'dist', 'win-unpacked', 'resources', 'app.asar'), 'asar');
+  const noAsar = process.noAsar;
+  process.noAsar = true; // Electron's fs would open the name as an archive; this only writes the file
+  try { fs.writeFileSync(path.join(build, 'dist', 'win-unpacked', 'resources', 'app.asar'), 'asar'); } finally { process.noAsar = noAsar; }
   assert.equal(A.buildInfo(build).asarSha256, sha('asar'));
+  assert.equal(process.noAsar, noAsar, 'buildInfo puts the asar switch back');
   rmTree(build);
 
   const src = codeOnly(readSource(path.join(__dirname, 'claims-90', 'answerer.cjs')));

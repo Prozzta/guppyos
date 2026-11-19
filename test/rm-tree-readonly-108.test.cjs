@@ -157,7 +157,7 @@ test('rmTree tries again only on an open-handle code, and only as often as asked
 const TEST_DIR = __dirname;
 /** What makes read-only files in a test tree. A file matching any of these is a producer. */
 const PRODUCERS = [
-  { name: 'git init', re: /['"]init['"]\s*[,\]]|\bgit init\b/ },
+  { name: 'git init', re: /(?<!:\s*)['"]init['"]\s*[,\]]|\bgit init\b/ }, // not an object value (`subtype: 'init'`)
   { name: 'git clone', re: /['"]clone['"]\s*,|\bgit clone\b/ },
   { name: 'chmod to a read-only mode', re: /chmodSync\([^)]*0o[45][0-7]{2}\b|mode:\s*0o[45][0-7]{2}\b/ },
   { name: 'attrib +R / IsReadOnly', re: /attrib(\.exe)?['"]?,?\s*\[?\s*['"]\+[rR]|IsReadOnly\s*=\s*\$true/ },
