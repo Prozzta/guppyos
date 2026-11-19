@@ -53,6 +53,12 @@ npm run dev        # live-reloading Electron build
    Don't invoke `node --test test/*.test.cjs` yourself: that relies on the shell
    expanding the glob, which cmd.exe does not do (and Node only expands it itself
    from Node 21), so on Windows it runs **zero** tests while looking like a run.
+   The suite drops `FORCE_COLOR`, `NO_COLOR` and `NODE_DISABLE_COLORS` from its
+   own environment, so a result does not depend on your shell. One limit: if you
+   start a single test file directly under Electron's Node 24 with both
+   `FORCE_COLOR` and `NO_COLOR` set, that file's own stderr can carry node's
+   "'NO_COLOR' env is ignored" warning once, printed before the file's first
+   line runs. Its children are clean.
 3. **Confirm a production build works:** `npm run build`.
 4. **Match the aesthetic.** Any new UI **must** derive from the design tokens in
    [`DESIGN.md`](./DESIGN.md) / `src/renderer/src/design/tokens.ts` — no ad-hoc
