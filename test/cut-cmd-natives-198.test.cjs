@@ -88,10 +88,14 @@ function runPackagedProbe(contract, addonExports, { inheritedEnv = {}, missingAr
     const resources = path.join(tmp, 'resources');
     const modules = path.join(resources, 'app.asar.unpacked', 'node_modules');
     const archive = path.join(resources, 'app.asar', 'node_modules');
-    const dev = path.join(tmp, 'dev-node-path');
-    write(path.join(archive, 'node-pty', 'index.js'), 'module.exports = { spawn() {} };');
-    write(path.join(archive, 'better-sqlite3', 'index.js'), `${missingArchiveDependency ? "require('missing-cut-dependency'); " : ''}module.exports = class { prepare() { return { get() { return { n: 42 }; } }; } close() {} };`);
-    write(path.join(dev, 'missing-cut-dependency', 'index.js'), 'module.exports = {};');
+    // Electron intercepts any path segment named *.asar as an archive, so a
+    // fixture directory below app.asar cannot be created under Electron as Node.
+    // The checker already receives these modules through requireFromArchive;
+    // supply the synthetic archive's source in-memory instead.
+    const archiveSources = new Map([
+      [path.join(archive, 'node-pty', 'index.js'), 'module.exports = { spawn() {} };'],
+      [path.join(archive, 'better-sqlite3', 'index.js'), `${missingArchiveDependency ? "require('missing-cut-dependency'); " : ''}module.exports = class { prepare() { return { get() { return { n: 42 }; } }; } close() {} };`]
+    ]);
     fs.mkdirSync(modules, { recursive: true });
     const addonPaths = [];
     let invoked;
@@ -99,10 +103,11 @@ function runPackagedProbe(contract, addonExports, { inheritedEnv = {}, missingAr
     const spawn = (_electron, args, options) => {
       invoked = { args, options };
       const requireFromArchive = (id) => {
-        if (id === path.join(archive, 'node-pty')) return { spawn() {} };
-        if (id === path.join(archive, 'better-sqlite3')) {
+        const source = archiveSources.get(path.join(id, 'index.js'));
+        if (source !== undefined && id === path.join(archive, 'node-pty')) return { spawn() {} };
+        if (source !== undefined && id === path.join(archive, 'better-sqlite3')) {
           const module = { exports: {} };
-          vm.runInNewContext(fs.readFileSync(path.join(id, 'index.js'), 'utf8'), { module, exports: module.exports, require: requireFromArchive });
+          vm.runInNewContext(source, { module, exports: module.exports, require: requireFromArchive });
           return module.exports;
         }
         if (id === 'missing-cut-dependency') {
