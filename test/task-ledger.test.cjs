@@ -124,7 +124,7 @@ test('patching one card leaves its neighbours byte-identical', () => {
 
 // ── end to end through the real persistence path ─────────────────────────────
 
-test('answering a question through hive.writeTasks preserves the whole board', (t) => {
+test('answering a question through hive.writeTasks preserves the whole board', async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'md-task-ledger-'));
   t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   const hive = new HiveManager(() => home);
@@ -133,11 +133,11 @@ test('answering a question through hive.writeTasks preserves the whole board', (
   const second = richCard();
   second.id = 'hive-delivery-pump-down';
   second.result = 'Root-caused and fixed; replied in thread.';
-  hive.writeTasks([richCard(), second]);
+  await hive.writeTasks([richCard(), second]);
 
   // The ASK ME view answers the question on the first card, sending the partial
   // model it holds. The second card is sent as the view last read it.
-  hive.writeTasks([
+  await hive.writeTasks([
     {
       id: 'vxr-onboarding-review',
       title: 'Review the onboarding doc',
@@ -158,16 +158,16 @@ test('answering a question through hive.writeTasks preserves the whole board', (
   assert.deepEqual(untouched.deps, ['vxr-intake']);
 });
 
-test('hive.writeTasks can still empty the ledger', (t) => {
+test('hive.writeTasks can still empty the ledger', async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'md-task-ledger-del-'));
   t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   const hive = new HiveManager(() => home);
   const ledger = () => JSON.parse(fs.readFileSync(path.join(home, 'hive', 'tasks.json'), 'utf8')).tasks;
 
-  hive.writeTasks([richCard(), { id: 'other', title: 'Other', status: 'todo' }]);
-  hive.writeTasks([{ id: 'other', title: 'Other', status: 'todo' }]);
+  await hive.writeTasks([richCard(), { id: 'other', title: 'Other', status: 'todo' }]);
+  await hive.writeTasks([{ id: 'other', title: 'Other', status: 'todo' }]);
   assert.deepEqual(ledger().map((t) => t.id), ['other']);
 
-  hive.writeTasks([]);
+  await hive.writeTasks([]);
   assert.deepEqual(ledger(), []);
 });

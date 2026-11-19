@@ -269,7 +269,7 @@ function ledgerFixture(tasks = [{ id: 'READS-181', title: 'reads', status: 'todo
     isRecipient: (to) => ['god', 'broadcast', 'jim'].includes(to),
     readTasks: () => state.tasks.map((t) => ({ ...t })),
     addTask: (t) => { if (state.tasks.some((x) => x.id === t.id)) return false; state.tasks.push(t); state.adds += 1; return true; },
-    patchTask: (id, patch) => { if (state.failPatch) throw new Error('disk full'); const i = state.tasks.findIndex((x) => x.id === id); if (i < 0) return false; state.tasks[i] = { ...state.tasks[i], ...patch, id }; state.patches += 1; return true; },
+    patchTask: (id, patch) => { if (state.failPatch) throw new Error('disk full'); const i = state.tasks.findIndex((x) => x.id === id); if (i < 0) return false; if (typeof patch === 'function') patch = patch(state.tasks[i]); /* LAG-TASKS-WRITE-SYNC-READ-108: a function patch, as hive.patchTask */ state.tasks[i] = { ...state.tasks[i], ...patch, id }; state.patches += 1; return true; },
     now: () => new Date('2026-10-03T08:00:00.000Z')
   };
   const outbox = () => { try { return fs.readdirSync(path.join(agentDir, 'outbox')).filter((f) => f.endsWith('.json')); } catch { return []; } };
@@ -278,9 +278,9 @@ function ledgerFixture(tasks = [{ id: 'READS-181', title: 'reads', status: 'todo
 }
 const BODY = 'Ran `rm -rf /` and $(touch CANARY) and %USERPROFILE% and "quotes" and \'single\' and \\ backslash, ünïcödé ✓';
 
-test('A: one op patches the card (assignee kept), writes one outbox message and appends memory; the reply is one line', () => {
+test('A: one op patches the card (assignee kept), writes one outbox message and appends memory; the reply is one line', async () => {
   const f = ledgerFixture();
-  const r = L.applyLedgerOp({
+  const r = await L.applyLedgerOp({
     op: 'creed-181-1',
     card: { id: 'READS-181', patch: { status: 'doing' }, appendResult: 'design approved' },
     message: { to: 'god', act: 'inform', subject: 'started', body: BODY, conversation: 'reads-181', in_reply_to: 'm1' },
@@ -298,7 +298,7 @@ test('A: one op patches the card (assignee kept), writes one outbox message and 
   assert.ok(f.memory().endsWith('- old note\n- 2026-10-03 started READS-181\n'));
 });
 
-test('A: everything is checked BEFORE any write: a duplicate create, a missing card or a bad recipient writes nothing', () => {
+test('A: everything is checked BEFORE any write: a duplicate create, a missing card or a bad recipient writes nothing', async () => {
   for (const [op, status] of [
     [{ op: 'o1', card: { id: 'READS-181', create: { title: 'dup' } }, message: { to: 'god', act: 'inform', subject: 's', body: 'b' }, memory: { append: 'x' } }, 409],
     [{ op: 'o2', card: { id: 'NOPE-1', patch: { status: 'done' } }, memory: { append: 'x' } }, 404],
@@ -306,7 +306,7 @@ test('A: everything is checked BEFORE any write: a duplicate create, a missing c
   ]) {
     const f = ledgerFixture();
     const mem0 = f.memory();
-    const r = L.applyLedgerOp(op, f.deps);
+    const r = await L.applyLedgerOp(op, f.deps);
     assert.equal(r.status, status, r.body.line);
     assert.match(r.body.line, /^refused: /);
     assert.equal(f.state.patches + f.state.adds, 0, `${op.op}: no card write`);
@@ -336,7 +336,7 @@ test('A: shape errors are refused with the field named (unknown keys, no op, cre
   }
 });
 
-test('LEDGER-PARKED-FIELD: patch accepts only typed parked/install/fixVersion fields', () => {
+test('LEDGER-PARKED-FIELD: patch accepts only typed parked/install/fixVersion fields', async () => {
   const good = L.parseLedgerOp({ op: 'park-1', card: { id: 'A', patch: { parked: true, waitingFor: 'install', fixVersion: '1.1.96' } } });
   assert.equal(good.ok, true);
   assert.match(L.parseLedgerOp({ op: 'park-2', card: { id: 'A', patch: { parked: 'yes' } } }).error, /parked: true or false/);
@@ -344,29 +344,29 @@ test('LEDGER-PARKED-FIELD: patch accepts only typed parked/install/fixVersion fi
   assert.match(L.parseLedgerOp({ op: 'park-4', card: { id: 'A', patch: { fixVersion: '1.1' } } }).error, /fixVersion/);
   assert.match(L.parseLedgerOp({ op: 'park-5', card: { id: 'A', patch: { nope: true } } }).error, /unknown field/);
   const f = ledgerFixture();
-  assert.equal(L.applyLedgerOp({ op: 'park-6', card: { id: 'READS-181', patch: { parked: true, waitingFor: 'install', fixVersion: '1.1.96' } } }, f.deps).status, 200);
+  assert.equal((await L.applyLedgerOp({ op: 'park-6', card: { id: 'READS-181', patch: { parked: true, waitingFor: 'install', fixVersion: '1.1.96' } } }, f.deps)).status, 200);
   assert.deepEqual(Object.fromEntries(['parked', 'waitingFor', 'fixVersion'].map((k) => [k, f.state.tasks[0][k]])), { parked: true, waitingFor: 'install', fixVersion: '1.1.96' });
-  assert.equal(L.applyLedgerOp({ op: 'park-7', card: { id: 'READS-181', patch: { waitingFor: null, fixVersion: null } } }, f.deps).status, 200);
+  assert.equal((await L.applyLedgerOp({ op: 'park-7', card: { id: 'READS-181', patch: { waitingFor: null, fixVersion: null } } }, f.deps)).status, 200);
   assert.deepEqual([f.state.tasks[0].waitingFor, f.state.tasks[0].fixVersion], [null, null]);
 });
 
-test('A: create makes a new card (status todo by default); a lesson lands at the END of the standing lessons', () => {
+test('A: create makes a new card (status todo by default); a lesson lands at the END of the standing lessons', async () => {
   const f = ledgerFixture();
-  const r = L.applyLedgerOp({ op: 'c1', card: { id: 'NEW-1', create: { title: 'New card', assignee: 'jim' } }, memory: { append: '- lesson two', lesson: true } }, f.deps);
+  const r = await L.applyLedgerOp({ op: 'c1', card: { id: 'NEW-1', create: { title: 'New card', assignee: 'jim' } }, memory: { append: '- lesson two', lesson: true } }, f.deps);
   assert.equal(r.status, 200, r.body.line);
   const t = f.state.tasks.find((x) => x.id === 'NEW-1');
   assert.deepEqual({ status: t.status, assignee: t.assignee, title: t.title }, { status: 'todo', assignee: 'jim', title: 'New card' });
   assert.equal(f.memory(), '# Creed memory\n\n## How I work (standing lessons)\n- lesson one\n- lesson two\n\n## 2026-10-01 notes\n- old note\n');
   const noSection = ledgerFixture();
   fs.writeFileSync(path.join(noSection.agentDir, 'memory.md'), '# memory\n- a\n');
-  assert.equal(L.applyLedgerOp({ op: 'c2', memory: { append: '- x', lesson: true } }, noSection.deps).status, 400);
+  assert.equal((await L.applyLedgerOp({ op: 'c2', memory: { append: '- x', lesson: true } }, noSection.deps)).status, 400);
 });
 
-test('A: idempotent by op: a repeat is a no-op, and a retry after a failed part finishes ONLY what is left', () => {
+test('A: idempotent by op: a repeat is a no-op, and a retry after a failed part finishes ONLY what is left', async () => {
   const f = ledgerFixture();
   const op = { op: 'r1', card: { id: 'READS-181', patch: { status: 'done' }, appendResult: 'built' }, message: { to: 'jim', act: 'request', subject: 'audit', body: 'please' }, memory: { append: '- built' } };
-  assert.equal(L.applyLedgerOp(op, f.deps).status, 200);
-  const again = L.applyLedgerOp(op, f.deps);
+  assert.equal((await L.applyLedgerOp(op, f.deps)).status, 200);
+  const again = await L.applyLedgerOp(op, f.deps);
   assert.match(again.body.line, /\(already applied\)$/);
   assert.equal(f.state.patches, 1);
   assert.equal((f.memory().match(/- built/g) || []).length, 1);
@@ -374,12 +374,12 @@ test('A: idempotent by op: a repeat is a no-op, and a retry after a failed part 
   // A failure in the message part: the card is done once; the retry writes the message and memory only.
   const g = ledgerFixture();
   fs.writeFileSync(path.join(g.agentDir, 'outbox'), 'a file where the outbox dir should be');
-  const r1 = L.applyLedgerOp(op, g.deps);
+  const r1 = await L.applyLedgerOp(op, g.deps);
   assert.equal(r1.status, 500);
   // CARD-AUTODONE-ON-BUILD: creed is not god, so the done is kept off the card and the line says so.
   assert.match(r1.body.line, /^partial: card=READS-181:todo \(status kept: done is god's\); message failed .*Run the same op again/);
   fs.rmSync(path.join(g.agentDir, 'outbox'));
-  const r2 = L.applyLedgerOp(op, g.deps);
+  const r2 = await L.applyLedgerOp(op, g.deps);
   assert.equal(r2.status, 200, r2.body.line);
   assert.equal(g.state.patches, 1, 'the card is not patched twice');
   assert.equal((g.state.tasks[0].result.match(/built/g) || []).length, 1, 'the result line is not appended twice');
@@ -387,43 +387,43 @@ test('A: idempotent by op: a repeat is a no-op, and a retry after a failed part 
   assert.equal((g.memory().match(/- built/g) || []).length, 1);
 });
 
-test('B1 (Jim): a REUSED op name with DIFFERENT content is refused (409) and writes nothing; the same content stays "(already applied)"', () => {
+test('B1 (Jim): a REUSED op name with DIFFERENT content is refused (409) and writes nothing; the same content stays "(already applied)"', async () => {
   const f = ledgerFixture();
   const op = { op: 'done-1', message: { to: 'god', act: 'done', subject: 'first', body: 'one' }, memory: { append: '- first' } };
-  assert.equal(L.applyLedgerOp(op, f.deps).status, 200);
+  assert.equal((await L.applyLedgerOp(op, f.deps)).status, 200);
   const mem1 = f.memory();
   const other = { op: 'done-1', message: { to: 'god', act: 'done', subject: 'SECOND', body: 'two' }, memory: { append: '- second' } };
-  const r = L.applyLedgerOp(other, f.deps);
+  const r = await L.applyLedgerOp(other, f.deps);
   assert.equal(r.status, 409);
   assert.equal(r.body.line, 'refused: op done-1 was already used for a different operation; choose a new op name');
   assert.equal(f.memory(), mem1);
   assert.equal(JSON.parse(fs.readFileSync(path.join(f.agentDir, 'outbox', 'ledger-done-1.json'), 'utf8')).subject, 'first');
   // key order does not matter: the same content is the same op
   const same = { memory: { append: '- first' }, message: { body: 'one', subject: 'first', act: 'done', to: 'god' }, op: 'done-1' };
-  assert.match(L.applyLedgerOp(same, f.deps).body.line, /\(already applied\)$/);
+  assert.match((await L.applyLedgerOp(same, f.deps)).body.line, /\(already applied\)$/);
 });
 
-test('B1: a partial retry with CHANGED content is refused, so an op is never half old and half new', () => {
+test('B1: a partial retry with CHANGED content is refused, so an op is never half old and half new', async () => {
   const g = ledgerFixture();
   const op = { op: 'p1', card: { id: 'READS-181', patch: { status: 'done' } }, message: { to: 'jim', act: 'request', subject: 'audit', body: 'v1' } };
   fs.writeFileSync(path.join(g.agentDir, 'outbox'), 'blocks the outbox dir');
-  assert.equal(L.applyLedgerOp(op, g.deps).status, 500);
+  assert.equal((await L.applyLedgerOp(op, g.deps)).status, 500);
   fs.rmSync(path.join(g.agentDir, 'outbox'));
   const changed = { ...op, message: { ...op.message, body: 'v2' } };
-  assert.equal(L.applyLedgerOp(changed, g.deps).status, 409);
+  assert.equal((await L.applyLedgerOp(changed, g.deps)).status, 409);
   assert.deepEqual(g.outbox(), [], 'nothing written by the refused retry');
-  assert.equal(L.applyLedgerOp(op, g.deps).status, 200, 'the original content still finishes');
+  assert.equal((await L.applyLedgerOp(op, g.deps)).status, 200, 'the original content still finishes');
 });
 
-test('MUTANT B1-M1 (no content-hash check): a reused name with different content is answered "already applied" and lost', () => {
+test('MUTANT B1-M1 (no content-hash check): a reused name with different content is answered "already applied" and lost', async () => {
   const file = 'src/main/ledger.ts';
   const src = normaliseEol(fs.readFileSync(path.join(ROOT, file), 'utf8'));
   const from = 'if (rec && rec.hash !== hash) {';
   assert.ok(src.includes(from));
   const M = loadTs.fromText(file, src.replace(from, 'if (false) {'));
   const f = ledgerFixture();
-  M.applyLedgerOp({ op: 'x1', memory: { append: '- first' } }, f.deps);
-  const r = M.applyLedgerOp({ op: 'x1', memory: { append: '- second' } }, f.deps);
+  await M.applyLedgerOp({ op: 'x1', memory: { append: '- first' } }, f.deps);
+  const r = await M.applyLedgerOp({ op: 'x1', memory: { append: '- second' } }, f.deps);
   assert.match(r.body.line, /already applied/);
   assert.equal(f.memory().includes('- second'), false);
 });
@@ -444,14 +444,14 @@ test('A: the broker route: the URL token names the caller (a wrong token is 403)
   assert.equal(seen.length, 1, 'refused bodies never reach the handler');
 });
 
-test('MUTANT A-M2 (no recipient check before writing): a bad "to" leaves a patched card and a stray message behind', () => {
+test('MUTANT A-M2 (no recipient check before writing): a bad "to" leaves a patched card and a stray message behind', async () => {
   const file = 'src/main/ledger.ts';
   const src = normaliseEol(fs.readFileSync(path.join(ROOT, file), 'utf8'));
   const from = 'if (op.message && !rec?.message && !deps.isRecipient(op.message.to)) {';
   assert.ok(src.includes(from));
   const M = loadTs.fromText(file, src.replace(from, 'if (false) {'));
   const f = ledgerFixture();
-  M.applyLedgerOp({ op: 'm2', card: { id: 'READS-181', patch: { status: 'done' } }, message: { to: 'nobody-123', act: 'inform', subject: 's', body: 'b' } }, f.deps);
+  await M.applyLedgerOp({ op: 'm2', card: { id: 'READS-181', patch: { status: 'done' } }, message: { to: 'nobody-123', act: 'inform', subject: 's', body: 'b' } }, f.deps);
   assert.ok(f.state.patches === 1 || f.outbox().length === 1, 'the mutant writes before refusing');
 });
 

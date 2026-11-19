@@ -50,7 +50,7 @@ async function floor(t) {
   await hive.ensureAgent({ id: 'god-1', name: 'Michael', provider: 'claude', cwd: home, isGod: true });
   await hive.ensureAgent({ id: 'jim-1', name: 'Jim', provider: 'claude', cwd: home });
   await hive.ensureAgent({ id: 'pam-1', name: 'Pam', provider: 'claude', cwd: home });
-  for (const id of ['CARD-ONE', 'CARD-TWO']) assert.equal(hive.addTask({ id, title: id, status: 'todo', priority: 'normal', deps: [], humanQA: [] }), true);
+  for (const id of ['CARD-ONE', 'CARD-TWO']) assert.equal(await hive.addTask({ id, title: id, status: 'todo', priority: 'normal', deps: [], humanQA: [] }), true);
   const root = hive.root();
   const o1 = { id: '2026-10-01T00-00-00-000Z-0a0a01', from: 'pam-1', to: 'jim-1', act: 'request', subject: 'build CARD-ONE', body: 'please', card: 'CARD-ONE', conversation: 'c-old', created_at: '2026-10-01T00:00:00Z' };
   writeJson(path.join(root, 'agents', 'jim-1', 'inbox', '.done', `${o1.id}.json`), o1);

@@ -42,13 +42,17 @@ function rig(t, agents, tasks) {
   const monitor = new BoardMonitor({ hive, now: () => NOW });
   const log = () => fs.readFileSync(path.join(root, 'log.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
   const card = (id) => hive.tasks().tasks.find((c) => c.id === id);
-  return { hive, root, monitor, log, card };
+  // LAG-TASKS-WRITE-SYNC-READ-108: a move is a queued card write; its .finally re-ticks. Settle =
+  // the queue drained, that chain run out (setImmediate), and no move still in flight.
+  const settle = async () => { do { await hive.drainReads(); await new Promise((res) => setImmediate(res)); } while (monitor.moving.size > 0); };
+  return { hive, root, monitor, log, card, settle };
 }
 
-test('an explicit archive moves the doing card to todo, assignee kept, noted and logged (M11)', (t) => {
+test('an explicit archive moves the doing card to todo, assignee kept, noted and logged (M11)', async (t) => {
   const r = rig(t, { jim: agent('jim', { archived: true, archiveReason: 'explicit' }) },
     [{ id: 'A', title: 'A', status: 'doing', assignee: 'jim', notes: 'earlier note', note: 'kept', repo: 'x' }]);
   r.monitor.tick();
+  await r.settle();
   const a = r.card('A');
   assert.equal(a.status, 'todo');
   assert.equal(a.assignee, 'jim', 'NEVER clear the assignee on a status change');
@@ -63,13 +67,16 @@ test('an explicit archive moves the doing card to todo, assignee kept, noted and
   assert.deepEqual(r.monitor.flags(), [], 'after the move nothing is left to flag');
 });
 
-test('the move is idempotent: a second tick changes nothing (M12)', (t) => {
+test('the move is idempotent: a second tick changes nothing (M12)', async (t) => {
   const r = rig(t, { jim: agent('jim', { archived: true, archiveReason: 'explicit' }) },
     [{ id: 'A', title: 'A', status: 'doing', assignee: 'jim' }]);
   r.monitor.tick();
+  await r.settle();
+  assert.equal(r.card('A').status, 'todo', 'control: the first tick moved it');
   const bytes = fs.readFileSync(path.join(r.root, 'tasks.json'));
   r.monitor.tick();
   r.monitor.tick();
+  await r.settle();
   assert.deepEqual(fs.readFileSync(path.join(r.root, 'tasks.json')), bytes);
   assert.equal(r.log().filter((l) => l.kind === 'board-auto').length, 1);
 });
@@ -83,14 +90,14 @@ test('a boot-sweep orphan archive raises no down flag, and a non-doing card neve
   assert.deepEqual(r.monitor.flags(), []);
 });
 
-test('flags are published to state/board-flags.json and logged only when raised or cleared (MLOG)', (t) => {
+test('flags are published to state/board-flags.json and logged only when raised or cleared (MLOG)', async (t) => {
   const r = rig(t, { jim: agent('jim') }, [{ id: 'A', title: 'A', status: 'doing', assignee: 'ghost' }]);
   r.monitor.tick();
   r.monitor.tick();
   const pub = JSON.parse(fs.readFileSync(path.join(r.root, 'state', 'board-flags.json'), 'utf8'));
   assert.deepEqual(pub.flags.map((f) => `${f.cardId}:${f.kind}`), ['A:ASSIGNEE_UNKNOWN']);
   assert.equal(r.log().filter((l) => l.kind === 'board-flag').length, 1);
-  r.hive.patchTask('A', { assignee: 'jim' }, 'ipc');
+  await r.hive.patchTask('A', { assignee: 'jim' }, 'ipc');
   r.monitor.tick();
   const rows = r.log().filter((l) => l.kind === 'board-flag').map((l) => `${l.event}:${l.flag}`);
   assert.deepEqual(rows, ['raised:ASSIGNEE_UNKNOWN', 'cleared:ASSIGNEE_UNKNOWN']);
@@ -121,24 +128,26 @@ test('liveness records riding in fleet.json are used when no in-process source i
   assert.deepEqual(r.monitor.flags().map((f) => `${f.cardId}:${f.kind}`), ['A:ASSIGNEE_STUCK']);
 });
 
-test('wired as in the app (guard change -> tick), the move happens once (the nested tick finds the card already moved)', (t) => {
+test('wired as in the app (guard change -> tick), the move happens once (the nested tick finds the card already moved)', async (t) => {
   const r = rig(t, { jim: agent('jim', { archived: true, archiveReason: 'explicit' }) },
     [{ id: 'A', title: 'A', status: 'doing', assignee: 'jim' }]);
   let ticks = 0;
   r.hive.ledgerGuard.onChange(() => { ticks++; r.monitor.tick(); });
   r.monitor.tick();
+  await r.settle();
   assert.equal(ticks, 1, 'the auto-move write notified the guard listener once');
   assert.equal(r.card('A').notes.split('\n').length, 1);
   assert.equal(r.log().filter((l) => l.kind === 'board-auto').length, 1);
 });
 
-test('wired as in the app, N cards of one archived agent = exactly N writes and N board-auto rows (Jim R1)', (t) => {
+test('wired as in the app, N cards of one archived agent = exactly N writes and N board-auto rows (Jim R1)', async (t) => {
   const r = rig(t, { jim: agent('jim', { archived: true, archiveReason: 'explicit', lastSeen: NOW - 1000 }) },
     ['A', 'B', 'C'].map((id) => ({ id, title: id, status: 'doing', assignee: 'jim' })));
   r.hive.ledgerGuard.onChange(() => r.monitor.tick());
   const writes = () => r.log().filter((l) => l.kind === 'tasks').length;
   const before = writes();
   r.monitor.tick();
+  await r.settle();
   assert.equal(writes() - before, 3, 'one write per card');
   assert.deepEqual(r.log().filter((l) => l.kind === 'board-auto').map((l) => l.cardId), ['A', 'B', 'C']);
   for (const id of ['A', 'B', 'C']) {

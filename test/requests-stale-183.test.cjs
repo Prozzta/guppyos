@@ -181,10 +181,10 @@ test('hive: auto-closes by card and by conversation, logs each reason, writes no
   const { hive } = await floor(t);
   hive.startLedgerGuard();
   t.after(() => hive.stopLedgerGuard());
-  hive.addTask({ id: 'SHIP-IT-1', title: 'ship', status: 'doing', dependsOn: [] });
-  hive.addTask({ id: 'DONE-BEFORE-1', title: 'old', status: 'done', dependsOn: [], doneAt: new Date(Date.now() - H).toISOString() });
+  await hive.addTask({ id: 'SHIP-IT-1', title: 'ship', status: 'doing', dependsOn: [] });
+  await hive.addTask({ id: 'DONE-BEFORE-1', title: 'old', status: 'done', dependsOn: [], doneAt: new Date(Date.now() - H).toISOString() });
   // C90-MAILCARD: an agent's message names its card (MISC-1, a neutral card); god's direct mail says card "none".
-  hive.addTask({ id: 'MISC-1', title: 'misc', status: 'doing', dependsOn: [] });
+  await hive.addTask({ id: 'MISC-1', title: 'misc', status: 'doing', dependsOn: [] });
   const byCard = hive.send({ to: 'andy-1', act: 'request', subject: 'SHIP-IT-1: build it', body: 'go' }, 'god-1');
   const followUp = hive.send({ to: 'andy-1', act: 'request', subject: 'DONE-BEFORE-1: it broke again', body: 'go' }, 'god-1');
   const byConv = hive.send({ to: 'andy-1', act: 'request', subject: 'Look at the logs', body: 'go', conversation: 'conv-logs', card: 'none' }, 'god-1');
@@ -194,7 +194,7 @@ test('hive: auto-closes by card and by conversation, logs each reason, writes no
 
   await new Promise((r) => setTimeout(r, 5));   // the done time below must be later than the ask (ms clock)
   // No doneAt on the card: the harness's own task-meta history dates the done.
-  hive.patchTask('SHIP-IT-1', { status: 'done' });
+  await hive.patchTask('SHIP-IT-1', { status: 'done' });
   const hist = hive.ledgerGuard.taskMeta().cards['SHIP-IT-1'].history;
   assert.equal(hist[hist.length - 1].to, 'done', 'the guard recorded the transition');
   hive.send({ to: 'god-1', act: 'inform', subject: 'looking now', body: 'starting', conversation: 'conv-logs', card: 'MISC-1' }, 'andy-1');

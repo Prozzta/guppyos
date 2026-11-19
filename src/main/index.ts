@@ -4599,7 +4599,7 @@ function notifyTriggerHistoryUpdated(): void {
  * written. The god routing is best-effort: the card already exists and is
  * pollable even if the send hiccups.
  */
-function dispatchWebhookWork(arg: {
+async function dispatchWebhookWork(arg: {
   taskId: string;
   title: string;
   message: string;
@@ -4607,7 +4607,7 @@ function dispatchWebhookWork(arg: {
   tokenHash?: string;
   /** 'webhook' | 'org' — only for the subject line and the god-facing note. */
   origin: 'webhook' | 'org';
-}): boolean {
+}): Promise<boolean> {
   try {
     const card: HiveTask = {
       id: arg.taskId,
@@ -4623,7 +4623,8 @@ function dispatchWebhookWork(arg: {
     // id, so a concurrent card writer (Slack, god, voice, another webhook) can't
     // have its card lost to our stale whole-ledger overwrite. (writeTasks(...existing)
     // recreated exactly that race.) A fresh taskId never collides, so this always adds.
-    hive.addTask(card, 'webhook');
+    // LAG-TASKS-WRITE-SYNC-READ-108: awaited, so a refused or failed write is reported, not routed.
+    if (!(await hive.addTask(card, 'webhook'))) throw new Error(`card ${arg.taskId} already exists`);
   } catch (e) {
     console.error('[webhook] could not create task card:', e instanceof Error ? e.message : e);
     return false;
@@ -4659,7 +4660,7 @@ function dispatchWebhookWork(arg: {
  * (the server hands over `{id,name}` only) and no credential is ever written to
  * the ledger.
  */
-function handleWebhookMessage(msg: WebhookInbound, endpoint: WebhookEndpointRef): WebhookDispatch | null {
+async function handleWebhookMessage(msg: WebhookInbound, endpoint: WebhookEndpointRef): Promise<WebhookDispatch | null> {
   // 192-bit unguessable token, returned once; only its hash is stored.
   const token = randomBytes(24).toString('hex');
   const tokenHash = hashWebhookToken(token);
@@ -4699,7 +4700,7 @@ function handleWebhookMessage(msg: WebhookInbound, endpoint: WebhookEndpointRef)
   }
 
   const taskId = `webhook-${randomBytes(8).toString('hex')}`;
-  if (!dispatchWebhookWork({ taskId, title, message: msg.message, tokenHash, origin: 'webhook' })) return null;
+  if (!(await dispatchWebhookWork({ taskId, title, message: msg.message, tokenHash, origin: 'webhook' }))) return null;
   appendTriggerHistory({ ...base, decision: 'auto-allowed', taskId });
   notifyTriggerHistoryUpdated();
   return { token, taskId, pending: false };
@@ -6860,27 +6861,27 @@ ipcMain.handle('hive:send', (_evt, partial: Partial<HiveMessage>, from: unknown)
   const msg = hive.send(partial ?? {}, typeof from === 'string' ? from : 'system');
   return { ok: true, message: msg };
 });
-ipcMain.handle('hive:addTask', (_evt, task: unknown) => {
+ipcMain.handle('hive:addTask', async (_evt, task: unknown) => {
   if (!task || typeof task !== 'object' || Array.isArray(task)
     || typeof (task as { id?: unknown }).id !== 'string') {
     return { ok: false, error: 'invalid task' };
   }
   if (!hive.enabled()) return { ok: false, error: 'hive disabled (no harnessHome)' };
-  try { return { ok: hive.addTask(task as HiveTask) }; }
+  try { return { ok: await hive.addTask(task as HiveTask) }; }
   catch (e) { return { ok: false, error: e instanceof Error ? e.message : String(e) }; }
 });
-ipcMain.handle('hive:patchTask', (_evt, id: unknown, patch: unknown) => {
+ipcMain.handle('hive:patchTask', async (_evt, id: unknown, patch: unknown) => {
   if (typeof id !== 'string' || !id || !patch || typeof patch !== 'object' || Array.isArray(patch)) {
     return { ok: false, error: 'invalid task patch' };
   }
   if (!hive.enabled()) return { ok: false, error: 'hive disabled (no harnessHome)' };
-  try { return { ok: hive.patchTask(id, patch as Partial<Omit<HiveTask, 'id'>>) }; }
+  try { return { ok: await hive.patchTask(id, patch as Partial<Omit<HiveTask, 'id'>>) }; }
   catch (e) { return { ok: false, error: e instanceof Error ? e.message : String(e) }; }
 });
-ipcMain.handle('hive:deleteTask', (_evt, id: unknown) => {
+ipcMain.handle('hive:deleteTask', async (_evt, id: unknown) => {
   if (typeof id !== 'string' || !id) return { ok: false, error: 'invalid task id' };
   if (!hive.enabled()) return { ok: false, error: 'hive disabled (no harnessHome)' };
-  try { return { ok: hive.deleteTask(id) }; }
+  try { return { ok: await hive.deleteTask(id) }; }
   catch (e) { return { ok: false, error: e instanceof Error ? e.message : String(e) }; }
 });
 ipcMain.handle('hive:setArchived', (_evt, id: unknown, archived: unknown) => {
@@ -8093,7 +8094,10 @@ ipcMain.handle('triggerHistory:clear', (_evt, arg: unknown) => {
  * decided, so a double-click (or two windows deciding at once) cannot dispatch
  * the same message twice.
  */
-ipcMain.handle('triggerHistory:decide', (_evt, arg: unknown) => {
+// LAG-TASKS-WRITE-SYNC-READ-108: the card write is awaited, so an id being approved is held here
+// until it settles; a second decide meanwhile is a no-op (the double-click guard stays whole).
+const triggerDeciding = new Set<string>();
+ipcMain.handle('triggerHistory:decide', async (_evt, arg: unknown) => {
   const p = (arg ?? {}) as { id?: unknown; decision?: unknown };
   const id = typeof p.id === 'string' ? p.id : '';
   const decision = p.decision === 'approved' ? 'approved' : p.decision === 'rejected' ? 'rejected' : null;
@@ -8111,7 +8115,12 @@ ipcMain.handle('triggerHistory:decide', (_evt, arg: unknown) => {
   const taskId = `webhook-${randomBytes(8).toString('hex')}`;
   const tokenHash = heldTokenHashFor(id);
   const title = entry.title ?? (entry.body.length > 80 ? `${entry.body.slice(0, 79)}…` : entry.body);
-  if (!dispatchWebhookWork({ taskId, title, message: entry.body, tokenHash, origin: entry.source })) {
+  if (triggerDeciding.has(id)) return entry;
+  triggerDeciding.add(id);
+  let dispatched: boolean;
+  try { dispatched = await dispatchWebhookWork({ taskId, title, message: entry.body, tokenHash, origin: entry.source }); }
+  finally { triggerDeciding.delete(id); }
+  if (!dispatched) {
     // The card is what the caller polls and what god works from. Leave the entry
     // pending so the operator can approve again once the hive is writable.
     return entry;

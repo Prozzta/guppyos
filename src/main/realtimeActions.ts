@@ -62,9 +62,11 @@ export interface RealtimeActionDeps {
    *  old. Every voice write goes through the by-id mutators below, which read tasks.json
    *  fresh and merge, so a card added elsewhere inside that window survives. */
   hiveTasks(): unknown;
-  hiveAddTask(task: HiveTask): boolean;
-  hivePatchTask(id: string, patch: Partial<Omit<HiveTask, 'id'>>): boolean;
-  hiveDeleteTask(id: string): boolean;
+  /** LAG-TASKS-WRITE-SYNC-READ-108: each resolves once its queued write landed (false = refused).
+   *  Awaited: a promise is always truthy, so `!deps.hiveAddTask(c)` would speak a refusal as success. */
+  hiveAddTask(task: HiveTask): Promise<boolean>;
+  hivePatchTask(id: string, patch: Partial<Omit<HiveTask, 'id'>>): Promise<boolean>;
+  hiveDeleteTask(id: string): Promise<boolean>;
   hiveRegistry(): Registry;
   hiveLog(event: Record<string, unknown>): void;
   controlPause(agentId: string, on: boolean): void;
@@ -358,7 +360,7 @@ function execSteer(deps: RealtimeActionDeps, a: Record<string, unknown>): Action
   return { ok: true, spoken: `Steering ${r.name}: ${text.slice(0, 80)}.` };
 }
 
-function execCreateTask(deps: RealtimeActionDeps, a: Record<string, unknown>): ActionResult {
+async function execCreateTask(deps: RealtimeActionDeps, a: Record<string, unknown>): Promise<ActionResult> {
   const title = str(a.title) || str(a.task) || str(a.name);
   if (!title) return { ok: false, spoken: 'What should the task be titled?' };
   const id = `${slug(title)}-${shortId()}`;
@@ -372,7 +374,7 @@ function execCreateTask(deps: RealtimeActionDeps, a: Record<string, unknown>): A
     priority: typeof a.priority === 'number' ? a.priority : 5,
     createdAt: new Date().toISOString()
   };
-  if (!deps.hiveAddTask(card)) return { ok: false, spoken: `I couldn't add "${title}": that id is already taken. Try again.` };
+  if (!(await deps.hiveAddTask(card))) return { ok: false, spoken: `I couldn't add "${title}": that id is already taken. Try again.` };
   attribute(deps, 'create_task', id, { title: title.slice(0, 120), assignee: card.assignee });
   return { ok: true, spoken: `Created task "${title}"${card.assignee ? `, assigned to ${card.assignee}` : ''}.` };
 }
@@ -429,7 +431,7 @@ function findCard(
   return { card: top.c };
 }
 
-function execAssignTask(deps: RealtimeActionDeps, a: Record<string, unknown>): ActionResult {
+async function execAssignTask(deps: RealtimeActionDeps, a: Record<string, unknown>): Promise<ActionResult> {
   const ref = str(a.taskId) || str(a.task) || str(a.title);
   const assignee = str(a.assignee) || str(a.to) || str(a.agentId);
   if (!ref || !assignee) return { ok: false, spoken: 'I need both a task and who to assign it to.' };
@@ -438,12 +440,12 @@ function execAssignTask(deps: RealtimeActionDeps, a: Record<string, unknown>): A
     return { ok: false, spoken: `Which one — ${ambiguous.map((c) => `"${c.title}"`).join(', or ')}?` };
   }
   if (!card) return { ok: false, spoken: `I couldn't find a task matching "${ref}".` };
-  if (!deps.hivePatchTask(card.id, { assignee })) return { ok: false, spoken: `"${card.title}" is no longer on the board.` };
+  if (!(await deps.hivePatchTask(card.id, { assignee }))) return { ok: false, spoken: `"${card.title}" is no longer on the board.` };
   attribute(deps, 'assign_task', card.id, { assignee });
   return { ok: true, spoken: `Assigned "${card.title}" to ${assignee}.` };
 }
 
-function execUpdateTask(deps: RealtimeActionDeps, a: Record<string, unknown>): ActionResult {
+async function execUpdateTask(deps: RealtimeActionDeps, a: Record<string, unknown>): Promise<ActionResult> {
   const ref = str(a.taskId) || str(a.task) || str(a.title);
   if (!ref) return { ok: false, spoken: 'Which task should I update?' };
   const { card, ambiguous } = findCard(deps, ref);
@@ -458,7 +460,7 @@ function execUpdateTask(deps: RealtimeActionDeps, a: Record<string, unknown>): A
   if (status) patch.status = status as HiveTask['status'];
   if (str(a.result)) patch.result = str(a.result);
   if (str(a.assignee)) patch.assignee = str(a.assignee);
-  if (!deps.hivePatchTask(card.id, patch)) return { ok: false, spoken: `"${card.title}" is no longer on the board.` };
+  if (!(await deps.hivePatchTask(card.id, patch))) return { ok: false, spoken: `"${card.title}" is no longer on the board.` };
   attribute(deps, 'update_task', card.id, { status: patch.status ?? card.status });
   return { ok: true, spoken: `Updated "${card.title}"${status ? ` to ${status}` : ''}.` };
 }
@@ -503,13 +505,13 @@ function execGateTool(deps: RealtimeActionDeps, a: Record<string, unknown>): Act
   return { ok: true, spoken: `${on ? 'Gated' : 'Un-gated'} the ${toolName} tool for ${r.name}.` };
 }
 
-function execDeleteTask(deps: RealtimeActionDeps, a: Record<string, unknown>): ActionResult {
+async function execDeleteTask(deps: RealtimeActionDeps, a: Record<string, unknown>): Promise<ActionResult> {
   const ref = str(a.taskId) || str(a.task) || str(a.title);
   if (!ref) return { ok: false, spoken: 'Which task should I delete?' };
   const { card, ambiguous } = findCard(deps, ref);
   if (ambiguous) return { ok: false, spoken: `Which one — ${ambiguous.map((c) => `"${c.title}"`).join(', or ')}?` };
   if (!card) return { ok: false, spoken: `I couldn't find a task matching "${ref}".` };
-  if (!deps.hiveDeleteTask(card.id)) return { ok: false, spoken: `"${card.title}" is no longer on the board.` };
+  if (!(await deps.hiveDeleteTask(card.id))) return { ok: false, spoken: `"${card.title}" is no longer on the board.` };
   attribute(deps, 'delete_task', card.id, { title: card.title.slice(0, 120) });
   return { ok: true, spoken: `Deleted the task "${card.title}". Recreate it any time if that was wrong.` };
 }
@@ -807,7 +809,7 @@ function setThemeByVoice(deps: RealtimeActionDeps, raw: unknown): ActionResult {
 
 /** Top-level propose/execute for one verb. Soft writes run now; destructive ones
  *  stage a pending and ask for verbal confirm. */
-function runAction(deps: RealtimeActionDeps, verb: string, a: Record<string, unknown>): ActionResult {
+function runAction(deps: RealtimeActionDeps, verb: string, a: Record<string, unknown>): ActionResult | Promise<ActionResult> {
   if (!deps.hiveEnabled()) return { ok: false, spoken: 'The hive is not configured, so I can\'t take that action.' };
   const spec = VERBS[verb];
   if (!spec) return { ok: false, spoken: `I don't have an action called "${verb}".` };
@@ -868,7 +870,7 @@ export function registerRealtimeActionIpc(deps: RealtimeActionDeps): void {
     const p = (payload ?? {}) as Record<string, unknown>;
     const verb = norm(str(p.verb)).replace(/\s+/g, '_');
     try {
-      const res = runAction(deps, verb, p);
+      const res = await runAction(deps, verb, p);
       // A non-ok result is an EXPECTED friendly rejection (bad target, hive off, etc.) —
       // log it quietly so a live repro can still be correlated, but it is not an error.
       if (!res.ok) console.warn(`[realtime-action] verb=${verb} rejected: ${res.spoken}`);

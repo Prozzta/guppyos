@@ -52,7 +52,7 @@ function fixture(level = 'writer', { refuseNotes = 0 } = {}) {
     isRecipient: (to) => to === 'god',
     readTasks: () => state.tasks.map((t) => ({ ...t })),
     addTask: () => false,
-    patchTask: (id, patch) => { const i = state.tasks.findIndex((x) => x.id === id); if (i < 0) return false; state.tasks[i] = { ...state.tasks[i], ...patch, id }; state.patches += 1; return true; },
+    patchTask: (id, patch) => { const i = state.tasks.findIndex((x) => x.id === id); if (i < 0) return false; if (typeof patch === 'function') patch = patch(state.tasks[i]); /* LAG-TASKS-WRITE-SYNC-READ-108: a function patch, as hive.patchTask */ state.tasks[i] = { ...state.tasks[i], ...patch, id }; state.patches += 1; return true; },
     now: () => new Date('2026-10-03T10:00:00Z'),
     // as main wires it (index.ts ledgerMemoryClaim): the note verb, origin 'ledger-route'
     memoryClaim: {
@@ -160,10 +160,11 @@ for (const level of ['reader', 'shadow', 'off']) {
   });
 }
 
-test('no ledger wired (memoryClaim null): unchanged behaviour, and the reply is synchronous', () => {
+// LAG-TASKS-WRITE-SYNC-READ-108: the reply was synchronous here; card writes are queued async jobs now,
+// so applyLedgerOp always returns a promise (the hooks server awaits it: see the wiring test below).
+test('no ledger wired (memoryClaim null): unchanged behaviour', async () => {
   const f = fixture();
-  const r = L.applyLedgerOp(op('n-1', { append: '- an invented note' }), { ...f.deps, memoryClaim: null });
-  assert.ok(!(r instanceof Promise));
+  const r = await L.applyLedgerOp(op('n-1', { append: '- an invented note' }), { ...f.deps, memoryClaim: null });
   assert.equal(r.status, 200);
   assert.ok(f.memory().endsWith('- an invented note\n'));
 });

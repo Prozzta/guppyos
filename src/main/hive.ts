@@ -72,8 +72,8 @@ import { preferredAgentRole } from '../shared/agentRole';
 import { introducedErrors, mergeTaskLedger, validateLedger, type LedgerIssue } from '../shared/taskLedger';
 import { TaskLedgerGuard, type CardMeta, type TaskEditSource, type TaskLedgerRead } from './taskLedgerGuard';
 import {
-  ARCHIVE_DIR, ARCHIVE_PASS_MS, appendArchived, appendRevived, archiveStamp, archiveWriteGen, landedCards, mergeHotCold, parseArchive, planArchive,
-  readArchive, readArchiveTextsAsync
+  ARCHIVE_DIR, ARCHIVE_PASS_MS, appendArchivedAsync, appendRevivedAsync, archiveStamp, archiveWriteGen, landedCardsAsync, mergeHotCold, parseArchive, planArchive,
+  readArchive, readArchiveAsync, readArchiveTextsAsync
 } from './taskArchive';
 import { expandTilde } from './fs';
 import { CATCHUP_SLICE_MS, MAIL_BATCH, TICK_EVERY, batchOp, byCodeUnit, drainMail, filterSteps, listOp, mergeSteps, runMailSliced, sortSteps, statOp, tick, type MailSliceDeps, type MailStat, type MailSteps } from './mailSteps';
@@ -199,6 +199,9 @@ export interface HumanQA {
   from?: string;
   msgId?: string;
 }
+
+/** A card patch, or (LAG-TASKS-WRITE-SYNC-READ-108) a function of the current card computed inside the queued write. */
+export type TaskPatch = Partial<Omit<HiveTask, 'id'>> | ((current: HiveTask) => Partial<Omit<HiveTask, 'id'>>);
 
 export interface HiveTask {
   id: string;
@@ -367,6 +370,16 @@ export interface HiveIntegrityIssue {
 export class TaskLedgerInvalidError extends Error {
   constructor(readonly issues: LedgerIssue[]) {
     super(`Task ledger write refused: ${issues.map((i) => i.message).join('; ')}`);
+  }
+}
+
+/** LAG-TASKS-WRITE-SYNC-READ-108: an outside writer changed tasks.json during every one of a card
+ *  write's attempts (TASK_WRITE_REMERGES re-merges). The write is refused; the outside edit stays. */
+export class TaskLedgerBusyError extends Error {
+  readonly code = 'ETASKSBUSY';
+  constructor(readonly attempts: number) {
+    super(`Task ledger write refused: an outside writer changed tasks.json during each of ${attempts} attempts; the outside edit is kept`);
+    this.name = 'TaskLedgerBusyError';
   }
 }
 
@@ -3153,7 +3166,10 @@ export class HiveManager {
         this.appendLog({ kind: 'needs-human-flagged', from: msg.from, id: msg.id, card });
         return;
       }
-      const ledger = this.tasksForMutation();
+      // LAG-TASKS-WRITE-SYNC-READ-108: the decision reads the cached ledger; the entry is added by a
+      // queued write that re-checks the card it finds (a card done or the entry added meanwhile
+      // writes nothing). The routing steps never wait for it; its outcome is logged.
+      const ledger = this.tasks() as { tasks?: HiveTask[] };
       const tasks = Array.isArray(ledger?.tasks) ? ledger.tasks : [];
       const task = card ? tasks.find((x) => x?.id === card) : undefined;
       let why: string | null = null;
@@ -3161,18 +3177,23 @@ export class HiveManager {
       else if (!task) why = `${card} is not a card on the board`;
       else if (task.status === 'done') why = `${card} is done`;
       if (task && !why) {
-        const qa = Array.isArray(task.humanQA) ? task.humanQA : [];
-        if (qa.some((e) => e?.msgId === msg.id)) return; // re-delivered: already on the card
+        if ((Array.isArray(task.humanQA) ? task.humanQA : []).some((e) => e?.msgId === msg.id)) return; // re-delivered: already on the card
         const body = String(msg.body ?? '');
         const cap = HiveManager.NEEDS_HUMAN_EXCERPT;
         const excerpt = body.length > cap ? `${body.slice(0, cap)}\n\n(the rest is in the message ${msg.id})` : body;
         const entry: HumanQA = { q: `${name} asks: ${msg.subject}${excerpt ? `\n\n${excerpt}` : ''}`, askedAt: new Date().toISOString(), from: msg.from, msgId: msg.id };
-        if (this.patchTask(task.id, { humanQA: [...qa, entry] }, 'needs-human')) {
+        let added = false;
+        this.patchTask(task.id, (cur) => {
+          const qa = Array.isArray(cur.humanQA) ? cur.humanQA : [];
+          if (cur.status === 'done' || qa.some((e) => e?.msgId === msg.id)) return {};
+          added = true;
+          return { humanQA: [...qa, entry] };
+        }, 'needs-human').then((ok) => {
+          if (!ok || !added) { this.appendLog({ kind: 'needs-human-not-surfaced', from: msg.from, id: msg.id, card, reason: ok ? 'the card changed before the write (done, or already asked)' : `${card} could not be updated` }); return; }
           this.appendLog({ kind: 'needs-human-surfaced', from: msg.from, id: msg.id, card: task.id });
           try { this.needsHumanObserver?.({ agentId: msg.from, name, card: task.id, subject: msg.subject, id: msg.id }); } catch { /* a notice never blocks mail */ }
-          return;
-        }
-        why = `${card} could not be updated`;
+        }, (e) => { try { this.appendLog({ kind: 'needs-human-error', from: msg.from, id: msg.id, error: String(e) }); } catch { /* noop */ } });
+        return;
       }
       this.appendLog({ kind: 'needs-human-not-surfaced', from: msg.from, id: msg.id, card, reason: why });
       const notice = this.normalize({
@@ -3194,15 +3215,23 @@ export class HiveManager {
     try {
       if (!Object.prototype.hasOwnProperty.call(reg.agents, msg.from)) return;
       const named = new Set(msg.supersedes ?? []);
-      const ledger = this.tasksForMutation();
+      // LAG-TASKS-WRITE-SYNC-READ-108: the cached ledger picks the cards; each dismissal is a queued
+      // function patch computed from the card as it is when the write runs.
+      const ledger = this.tasks() as { tasks?: HiveTask[] };
       const tasks = Array.isArray(ledger?.tasks) ? ledger.tasks : [];
+      const hit = (e: HumanQA | null | undefined): boolean => !!e && !e.a && !e.dismissedAt && e.from === msg.from && typeof e.msgId === 'string' && named.has(e.msgId);
       for (const task of tasks) {
-        const qa = Array.isArray(task?.humanQA) ? task.humanQA : [];
-        const hit = (e: HumanQA | null | undefined): boolean => !!e && !e.a && !e.dismissedAt && e.from === msg.from && typeof e.msgId === 'string' && named.has(e.msgId);
-        if (!qa.some(hit)) continue;
+        if (!(Array.isArray(task?.humanQA) ? task.humanQA : []).some(hit)) continue;
         const at = new Date().toISOString();
-        const next = qa.map((e) => (hit(e) ? { ...e, dismissedAt: at, dismissedReason: `superseded by ${msg.id}` } : e));
-        if (this.patchTask(task.id, { humanQA: next }, 'needs-human')) this.appendLog({ kind: 'needs-human-dismissed', from: msg.from, id: msg.id, card: task.id });
+        let dismissed = false;
+        this.patchTask(task.id, (cur) => {
+          const qa = Array.isArray(cur.humanQA) ? cur.humanQA : [];
+          if (!qa.some(hit)) return {};
+          dismissed = true;
+          return { humanQA: qa.map((e) => (hit(e) ? { ...e, dismissedAt: at, dismissedReason: `superseded by ${msg.id}` } : e)) };
+        }, 'needs-human').then((ok) => {
+          if (ok && dismissed) this.appendLog({ kind: 'needs-human-dismissed', from: msg.from, id: msg.id, card: task.id });
+        }, (e) => { try { this.appendLog({ kind: 'needs-human-error', from: msg.from, id: msg.id, error: String(e) }); } catch { /* noop */ } });
       }
     } catch (e) {
       try { this.appendLog({ kind: 'needs-human-error', from: msg.from, id: msg.id, error: String(e) }); } catch { /* noop */ }
@@ -4462,7 +4491,7 @@ export class HiveManager {
     return root && existsSync(join(root, 'board.md')) ? readFileSync(join(root, 'board.md'), 'utf8') : '';
   }
   /** The task ledger for readers: a shared, deep-frozen object (read-only; mutate through
-   *  tasksForMutation / writeTasks). `fresh` skips the revalidate window (a stat still decides). */
+   *  addTask / patchTask / deleteTask / writeTasks). `fresh` skips the revalidate window (a stat still decides). */
   tasks(fresh = false): unknown {
     const root = this.root();
     if (!root) return { tasks: [] };
@@ -4527,10 +4556,6 @@ export class HiveManager {
     const root = this.root();
     return root ? this.readAuthoritativeJson(join(root, 'registry.json'), () => this.emptyRegistry()) : this.emptyRegistry();
   }
-  private tasksForMutation(): { tasks?: HiveTask[] } {
-    const root = this.root();
-    return root ? this.readAuthoritativeJson(join(root, 'tasks.json'), () => ({ tasks: [] })) : { tasks: [] };
-  }
 
   /** Persist the task ledger to hive/tasks.json. Mirrors the board/message persist
    *  pattern: write JSON, log the change.
@@ -4544,81 +4569,195 @@ export class HiveManager {
    *
    *  Deleting a card still works: the incoming list IS the membership, so a card
    *  dropped from it (TasksKanban dismiss, the voice delete_task action) is
-   *  gone. Merging protects fields, never card membership. */
-  writeTasks(tasks: HiveTask[], source: TaskEditSource = 'ipc'): void {
-    const root = this.root();
-    if (!root) return;
-    this.ensureHive();
-    const path = join(root, 'tasks.json');
-    const current = this.readAuthoritativeJson<{ tasks?: unknown }>(path, () => ({ tasks: [] }));
-    const merged = mergeTaskLedger(current?.tasks, tasks);
-    // ZT-I3 (Jim C1): validate the CHANGE, not the file. Refuse only an error this write
-    // would introduce; an error a hand edit already put in the file never blocks an
-    // unrelated UI, Slack, webhook, voice or auto-move write.
-    const introduced = introducedErrors(validateLedger(current?.tasks), validateLedger(merged));
-    if (introduced.length > 0) {
-      this.appendLog({ kind: 'task-ledger-refused', source, errors: introduced.map((i) => i.key) });
-      throw new TaskLedgerInvalidError(introduced);
+   *  gone. Merging protects fields, never card membership.
+   *
+   *  LAG-TASKS-WRITE-SYNC-READ-108: queued (see enqueueTaskJob); resolves once the write landed. */
+  writeTasks(tasks: HiveTask[], source: TaskEditSource = 'ipc'): Promise<void> {
+    return this.enqueueTaskJob(async () => { await this.ledgerWrite(source, () => ({ next: tasks, result: undefined })); });
+  }
+
+  /**
+   * LAG-TASKS-WRITE-SYNC-READ-108: every card write ran its read-modify-write with sync fs on
+   * Electron main (tasks.json read twice, the sync atomic write, the archive's stat, read and
+   * fsync'd append, the guard's sidecar, and ensureHive's bootstrap rewrite of PROTOCOL.md,
+   * COMMANDS.md, the registry check and the bin shims). Card writes now run as jobs in ONE serial
+   * queue with fs.promises only. A job reads the ledger itself, so a patch given as a function of
+   * the current card is computed from what the job before it wrote. A job that throws rejects its
+   * own caller only. After dispose() a queued or later job is refused (HiveDisposedError) and
+   * nothing is written; drainReads() waits for the queue. The write no longer runs ensureHive():
+   * the root folder is created if missing, nothing else (the bootstrap stays with startup, the
+   * home change, onboarding and every agent spawn).
+   */
+  private taskQueue: Promise<void> = Promise.resolve();
+  /** Test seam: called with 'merged' after each merge (before the write) and 'written' right after the rename. */
+  __taskWriteHookForTest: ((phase: 'merged' | 'written') => void) | null = null;
+  /** Re-merges allowed when an outside writer changed tasks.json during a write (then it is refused). */
+  static readonly TASK_WRITE_REMERGES = 3;
+  private enqueueTaskJob<T>(job: () => Promise<T>): Promise<T> {
+    if (this.readsRefused) return Promise.reject(new HiveDisposedError('tasks.json'));
+    this.asyncReads++;
+    const run = this.taskQueue.then(async () => {
+      if (this.readsRefused) throw new HiveDisposedError('tasks.json');
+      return await job();
+    });
+    this.taskQueue = run.then(() => undefined, () => undefined);
+    return run.finally(() => {
+      if (--this.asyncReads === 0) for (const done of this.readDrained.splice(0)) done();
+    });
+  }
+  /** The hive-owned async writer (a test seam: tests fault-inject it). `commit` runs before the rename. */
+  private async atomicWriteJsonAsync(p: string, text: string, commit?: () => Promise<boolean>): Promise<boolean> {
+    try { return await atomicWriteTextAsync(p, text, commit); } finally { this.invalidateAuthorityCache(p); }
+  }
+  /** tasks.json's text, or null when it is missing. Inside a job: the job is the counted read. */
+  private async readTasksText(p: string): Promise<string | null> {
+    try { return await readFileTracked(p, 'utf8'); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw new Error(`Hive authority ${basename(p)} could not be read: ${error instanceof Error ? error.message : String(error)}`);
     }
-    const data = { tasks: merged };
-    this.atomicWriteJson(path, data);
-    // Jim C4: recorded only after the rename succeeded (a throw above records nothing), with
-    // the exact bytes atomicWriteJson wrote, so the watcher does not re-attribute it to 'file'.
-    try { this.ledgerGuard.recordApiWrite(JSON.stringify(data, null, 2), merged, source); }
-    catch (e) { try { this.appendLog({ kind: 'task-meta-write-failed', error: String(e) }); } catch { /* noop */ } }
-    this.appendLog({ kind: 'tasks', count: merged.length, source });
+  }
+  private async parseTasksText(p: string, text: string | null): Promise<HiveTask[]> {
+    if (text === null) return [];
+    let parsed: { tasks?: unknown };
+    try { parsed = JSON.parse(text) as { tasks?: unknown }; } catch {
+      // The corrupt-file quarantine, notice and throw, exactly as the synchronous reader.
+      await this.readAuthoritativeJsonAsync<{ tasks?: unknown }>(p, () => ({ tasks: [] }));
+      throw new Error(`Hive authority ${basename(p)} changed while it was read`);
+    }
+    return Array.isArray(parsed?.tasks) ? parsed.tasks as HiveTask[] : [];
+  }
+  /**
+   * One card write, inside a queue job: read, `mutate` (null = nothing to write), merge, validate
+   * (ZT-I3), then the atomic write. Before the rename the file is read again: if an outside writer
+   * changed it since this job read it, the temp file is dropped and the job re-merges against the
+   * new file, up to TASK_WRITE_REMERGES times; then it is refused (TaskLedgerBusyError) and the
+   * outside edit stays. The guard expects the bytes before the rename (Jim C4 moved: a watch check
+   * that runs between the rename and this continuation attributes them to the API). The read cache
+   * is set to the written ledger only once the write landed.
+   */
+  private async ledgerWrite<T>(source: TaskEditSource, mutate: (tasks: HiveTask[]) => { next: HiveTask[] | null; result: T } | Promise<{ next: HiveTask[] | null; result: T }>): Promise<T> {
+    const root = this.root();
+    if (!root) return (await mutate([])).result;
+    const path = join(root, 'tasks.json');
+    for (let pass = 0; ; pass++) {
+      const text = await this.readTasksText(path);
+      const current = await this.parseTasksText(path, text);
+      const { next, result } = await mutate(current);
+      if (!next) return result;
+      const merged = mergeTaskLedger(current, next);
+      // ZT-I3 (Jim C1): validate the CHANGE, not the file. Refuse only an error this write
+      // would introduce; an error a hand edit already put in the file never blocks an
+      // unrelated UI, Slack, webhook, voice or auto-move write.
+      const introduced = introducedErrors(validateLedger(current), validateLedger(merged));
+      if (introduced.length > 0) {
+        this.appendLog({ kind: 'task-ledger-refused', source, errors: introduced.map((i) => i.key) });
+        throw new TaskLedgerInvalidError(introduced);
+      }
+      this.__taskWriteHookForTest?.('merged');
+      const content = JSON.stringify({ tasks: merged }, null, 2);
+      if (text === null) await fsPromises.mkdir(root, { recursive: true });
+      const hash = this.ledgerGuard.expectApiWrite(content, source);
+      let changed = false;
+      let landed: boolean;
+      try {
+        landed = await this.atomicWriteJsonAsync(path, content, async () => {
+          if (this.readsRefused) return false;
+          if ((await this.readTasksText(path)) === text) return true;
+          changed = true;
+          return false;
+        });
+      } catch (error) { this.ledgerGuard.forgetApiWrite(hash); throw error; }
+      if (!landed) {
+        this.ledgerGuard.forgetApiWrite(hash);
+        if (!changed) throw new HiveDisposedError(path);
+        if (pass >= HiveManager.TASK_WRITE_REMERGES) {
+          this.appendLog({ kind: 'task-ledger-busy', source, remerges: pass });
+          throw new TaskLedgerBusyError(pass + 1);
+        }
+        continue;
+      }
+      this.__taskWriteHookForTest?.('written');
+      await this.installTasksCache(path, content);
+      try {
+        const registry = await this.readAuthoritativeJsonCachedAsync<Registry>(join(root, 'registry.json'), () => this.emptyRegistry());
+        const archived = await this.archivedAsync(root).catch(() => new Map<string, Record<string, unknown>>());
+        await this.ledgerGuard.applyApiWrite(hash, merged, source, { agentIds: new Set(Object.keys(registry?.agents ?? {})), archivedIds: new Set(archived.keys()) });
+      } catch (e) { try { this.appendLog({ kind: 'task-meta-write-failed', error: String(e) }); } catch { /* noop */ } }
+      this.appendLog({ kind: 'tasks', count: merged.length, source });
+      return result;
+    }
+  }
+  /** The read cache holds what the job just wrote (parsed from the written bytes, never the
+   *  callers' objects), so a tasks() right after the write is served from memory. */
+  private async installTasksCache(path: string, content: string): Promise<void> {
+    const generation = this.invalidateAuthorityCache(path);
+    const st = await fsPromises.stat(path).catch(() => null);
+    if (!st || (this.authorityGeneration.get(path) ?? 0) !== generation) return;
+    this.authorityCache.set(path, { key: provenStatKey(st, this.authorityWall()), value: authorityDeepFreeze(JSON.parse(content)), checkedAt: this.authorityNow() });
+    this.ensureAuthorityFallback();
+    this.watchAuthority(path);
   }
 
   /** Append one card against the latest on-disk ledger. Renderer callers must
    *  use this instead of re-writing a collection they read before another
-   *  source (webhook, Slack, god, voice) added work. Idempotent by task id. */
-  addTask(task: HiveTask, source: TaskEditSource = 'ipc'): boolean {
-    const ledger = this.tasksForMutation();
-    const tasks = Array.isArray(ledger?.tasks) ? ledger.tasks : [];
-    if (tasks.some((current) => current?.id === task.id)) return false;
-    // TASKS-JSON-SPLIT: ids stay unique across hot and the archive.
-    const root = this.root();
-    if (root && this.archived(root).has(task.id)) return false;
-    this.writeTasks([...tasks, task], source);
-    return true;
+   *  source (webhook, Slack, god, voice) added work. Idempotent by task id.
+   *  Resolves false when the id is taken (hot or archived), true once the card landed. */
+  addTask(task: HiveTask, source: TaskEditSource = 'ipc'): Promise<boolean> {
+    return this.enqueueTaskJob(async () => {
+      const root = this.root();
+      // TASKS-JSON-SPLIT: ids stay unique across hot and the archive.
+      if (root && (await this.archivedAsync(root)).has(task.id)) return false;
+      return await this.ledgerWrite(source, (tasks) => tasks.some((current) => current?.id === task.id)
+        ? { next: null, result: false }
+        : { next: [...tasks, task], result: true });
+    });
   }
 
   /** Patch one card against the latest on-disk ledger, preserving unrelated
    *  cards and fields (notably webhook.tokenHash and Slack thread metadata).
-   *  With duplicate ids the FIRST card is the one patched (the shared rule). */
-  patchTask(id: string, patch: Partial<Omit<HiveTask, 'id'>>, source: TaskEditSource = 'ipc'): boolean {
-    const ledger = this.tasksForMutation();
-    const tasks = Array.isArray(ledger?.tasks) ? ledger.tasks : [];
-    const index = tasks.findIndex((task) => task?.id === id);
-    if (index < 0) {
-      // TASKS-JSON-SPLIT: an archived card is revived: hot is written first, then the
-      // tombstone, so a crash in between leaves it in both (hot wins), never in neither.
+   *  With duplicate ids the FIRST card is the one patched (the shared rule).
+   *  `patch` may be a function of the current card: it is computed inside the queued job, from
+   *  the card as the job before this one left it (the ledger op's appendNote/appendResult). */
+  patchTask(id: string, patch: TaskPatch, source: TaskEditSource = 'ipc'): Promise<boolean> {
+    return this.enqueueTaskJob(async () => {
       const root = this.root();
-      const old = root ? this.archived(root).get(id) : undefined;
-      if (!root || !old) return false;
-      // revivedAt restarts the keep window, so the next pass does not move it straight back.
-      const now = Date.now();
-      this.writeTasks([...tasks, { ...(old as unknown as HiveTask), revivedAt: new Date(now).toISOString(), ...patch, id }], source);
-      appendRevived(root, id, now);
-      this.noteArchiveWrite(root, null, (cards) => { cards.delete(id); });
-      return true;
-    }
-    const next = tasks.slice();
-    next[index] = { ...tasks[index], ...patch, id };
-    this.writeTasks(next, source);
-    return true;
+      let revived: number | null = null;
+      const ok = await this.ledgerWrite(source, async (tasks) => {
+        revived = null;
+        const index = tasks.findIndex((task) => task?.id === id);
+        if (index < 0) {
+          // TASKS-JSON-SPLIT: an archived card is revived: hot is written first, then the
+          // tombstone, so a crash in between leaves it in both (hot wins), never in neither.
+          const old = root ? (await this.archivedAsync(root)).get(id) as unknown as HiveTask | undefined : undefined;
+          if (!root || !old) return { next: null, result: false };
+          // revivedAt restarts the keep window, so the next pass does not move it straight back.
+          const now = Date.now();
+          revived = now;
+          const p = typeof patch === 'function' ? patch(old) : patch;
+          return { next: [...tasks, { ...old, revivedAt: new Date(now).toISOString(), ...p, id }], result: true };
+        }
+        const next = tasks.slice();
+        const p = typeof patch === 'function' ? patch(tasks[index]) : patch;
+        // A function patch that finds nothing to change writes nothing (the card is still there: true).
+        if (typeof patch === 'function' && Object.keys(p).length === 0) return { next: null, result: true };
+        next[index] = { ...tasks[index], ...p, id };
+        return { next, result: true };
+      });
+      if (ok && root && revived !== null) {
+        await appendRevivedAsync(root, id, revived);
+        this.noteArchiveWrite(root, null, (cards) => { cards.delete(id); });
+      }
+      return ok;
+    });
   }
 
   /** Delete only the named card from the latest on-disk ledger. With duplicate ids only the
    *  FIRST card (the one every reader shows) is deleted; a later twin stays for god (Jim S2). */
-  deleteTask(id: string, source: TaskEditSource = 'ipc'): boolean {
-    const ledger = this.tasksForMutation();
-    const tasks = Array.isArray(ledger?.tasks) ? ledger.tasks : [];
-    const at = tasks.findIndex((task) => task?.id === id);
-    const next = at < 0 ? tasks : [...tasks.slice(0, at), ...tasks.slice(at + 1)];
-    if (next.length === tasks.length) return false;
-    this.writeTasks(next, source);
-    return true;
+  deleteTask(id: string, source: TaskEditSource = 'ipc'): Promise<boolean> {
+    return this.enqueueTaskJob(async () => await this.ledgerWrite(source, (tasks) => {
+      const at = tasks.findIndex((task) => task?.id === id);
+      return at < 0 ? { next: null, result: false } : { next: [...tasks.slice(0, at), ...tasks.slice(at + 1)], result: true };
+    }));
   }
 
   /** ZT-I3: start watching tasks.json (the guard's first check runs at once). */
@@ -4627,12 +4766,12 @@ export class HiveManager {
     this.ledgerGuard.start();
     // TASKS-JSON-SPLIT: after the guard's first check (fresh statusSince), then hourly.
     this.stopArchivePass();
-    try { this.archivePass(); } catch (e) { try { this.appendLog({ kind: 'task-archive-failed', error: String(e) }); } catch { /* noop */ } }
+    this.archivePass().catch((e) => { try { this.appendLog({ kind: 'task-archive-failed', error: String(e) }); } catch { /* noop */ } });
     // LAG-SYNC-IO-107: read the archive off-thread now, so the first reader finds it cached.
     const root = this.root();
     if (root) { this.ensureArchiveFallback(); void this.revalidateArchiveAsync(root); }
     this.archiveTimer = setInterval(() => {
-      try { this.archivePass(); } catch (e) { try { this.appendLog({ kind: 'task-archive-failed', error: String(e) }); } catch { /* noop */ } }
+      this.archivePass().catch((e) => { try { this.appendLog({ kind: 'task-archive-failed', error: String(e) }); } catch { /* noop */ } });
     }, ARCHIVE_PASS_MS);
     this.archiveTimer.unref?.();
   }
@@ -4649,39 +4788,64 @@ export class HiveManager {
    * TASKS-JSON-SPLIT: move old done cards from hot tasks.json to the append-only archive.
    * Append first, then rewrite hot without them (a crash leaves a card in both; hot wins).
    * The first pass that moves anything on a hive without tasks-archive/ is the migration:
-   * it copies tasks.json to tasks.pre-split-<ts>.json first. Returns the ids moved.
+   * it copies tasks.json to tasks.pre-split-<ts>.json first. Resolves to the ids moved.
+   * LAG-TASKS-WRITE-SYNC-READ-108: a queued job with no synchronous fs.
    */
-  archivePass(now: number = Date.now()): string[] {
-    const root = this.root();
-    if (!root || !existsSync(join(root, 'tasks.json'))) return [];
-    const hot = this.tasksForMutation();
-    const tasks = Array.isArray(hot?.tasks) ? hot.tasks : [];
-    let meta: Record<string, CardMeta> = {};
-    try { meta = this.ledgerGuard.taskMeta().cards ?? {}; } catch { /* doneAt only */ }
-    const ids = new Set(planArchive(tasks, meta, now));
-    if (ids.size === 0) return [];
-    if (!existsSync(join(root, ARCHIVE_DIR))) {
-      const backup = `tasks.pre-split-${now}.json`;
-      copyFileSync(join(root, 'tasks.json'), join(root, backup));
-      this.appendLog({ kind: 'task-archive-migrate', backup, cards: tasks.length });
-    }
-    const moving = tasks.filter((t) => ids.has(t.id));
-    const mark = appendArchived(root, moving, now);
-    // Only a card that reads back from the archive exactly as it was leaves hot: an append
-    // that did not land whole (torn, partial, unreadable) keeps the card hot (Jim MUST).
-    // LAG-SYNC-IO-107: landedCards reads back the appended bytes, and the whole archive only when
-    // they do not settle it.
-    let landed: Set<string>;
-    try {
-      const read = landedCards(root, mark, moving);
-      landed = read.landed;
-      this.noteArchiveWrite(root, read.full as Map<string, Record<string, unknown>> | null, (cards) => {
-        for (const t of moving) if (landed.has(t.id)) cards.set(t.id, JSON.parse(JSON.stringify(t)) as Record<string, unknown>);
-      });
-    } catch (e) { this.archiveCache = null; throw e; }
-    if (landed.size > 0) this.writeTasks(tasks.filter((t) => !landed.has(t.id)), 'archive');
-    this.appendLog({ kind: 'task-archive', moved: landed.size, ...(landed.size < ids.size ? { kept: [...ids].filter((id) => !landed.has(id)) } : {}) });
-    return [...landed];
+  archivePass(now: number = Date.now()): Promise<string[]> {
+    return this.enqueueTaskJob(async () => {
+      const root = this.root();
+      if (!root) return [];
+      const hotPath = join(root, 'tasks.json');
+      const text = await this.readTasksText(hotPath);
+      if (text === null) return [];
+      const tasks = await this.parseTasksText(hotPath, text);
+      await this.ledgerGuard.primeMetaAsync(root);
+      let meta: Record<string, CardMeta> = {};
+      try { meta = this.ledgerGuard.taskMeta().cards ?? {}; } catch { /* doneAt only */ }
+      const ids = new Set(planArchive(tasks, meta, now));
+      if (ids.size === 0) return [];
+      if (!(await fsPromises.stat(join(root, ARCHIVE_DIR)).then(() => true, () => false))) {
+        const backup = `tasks.pre-split-${now}.json`;
+        await fsPromises.writeFile(join(root, backup), text);
+        this.appendLog({ kind: 'task-archive-migrate', backup, cards: tasks.length });
+      }
+      const moving = tasks.filter((t) => ids.has(t.id));
+      const mark = await appendArchivedAsync(root, moving, now);
+      // Only a card that reads back from the archive exactly as it was leaves hot: an append
+      // that did not land whole (torn, partial, unreadable) keeps the card hot (Jim MUST).
+      // LAG-SYNC-IO-107: landedCards reads back the appended bytes, and the whole archive only when
+      // they do not settle it.
+      let landed: Set<string>;
+      try {
+        const read = await landedCardsAsync(root, mark, moving);
+        landed = read.landed;
+        this.noteArchiveWrite(root, read.full as Map<string, Record<string, unknown>> | null, (cards) => {
+          for (const t of moving) if (landed.has(t.id)) cards.set(t.id, JSON.parse(JSON.stringify(t)) as Record<string, unknown>);
+        });
+      } catch (e) { this.archiveCache = null; throw e; }
+      // The hot rewrite removes the landed cards from the ledger as it is NOW (a card added or
+      // edited since the plan stays as it is).
+      if (landed.size > 0) await this.ledgerWrite('archive', (cur) => ({ next: cur.filter((t) => !landed.has(t?.id)), result: undefined }));
+      this.appendLog({ kind: 'task-archive', moved: landed.size, ...(landed.size < ids.size ? { kept: [...ids].filter((id) => !landed.has(id)) } : {}) });
+      return [...landed];
+    });
+  }
+
+  /** The archived cards with no synchronous fs (card writes): the cache while fresh, else the
+   *  archive read off-thread, installed unless an archive write or another reader overtook it. */
+  private async archivedAsync(root: string): Promise<Map<string, Record<string, unknown>>> {
+    const now = this.authorityNow();
+    const c = this.archiveCache;
+    if (c && c.root === root && now - c.checkedAt >= 0 && now - c.checkedAt < HiveManager.ARCHIVE_REVALIDATE_MS) return c.cards;
+    const gen = archiveWriteGen();
+    const got = await readArchiveAsync(root);
+    if (!got) throw new Error('tasks archive could not be read');
+    if (this.archiveCache !== c || gen !== archiveWriteGen()) return got.cards as Map<string, Record<string, unknown>>;
+    if (c && c.root === root && c.stamp === got.stamp) { c.checkedAt = now; return c.cards; }
+    const cards = got.cards as Map<string, Record<string, unknown>>;
+    this.archiveCache = { root, stamp: got.stamp, cards, checkedAt: now };
+    this.ensureArchiveFallback();
+    return cards;
   }
 
   /** The archived cards, cached by the archive's file stamp (it changes about once an hour), which
@@ -4791,7 +4955,7 @@ export class HiveManager {
   }
 
   /** tasks-revive: move one archived card back to hot unchanged. False when it is not archived. */
-  reviveTask(id: string, source: TaskEditSource = 'ipc'): boolean {
+  reviveTask(id: string, source: TaskEditSource = 'ipc'): Promise<boolean> {
     return this.patchTask(id, {}, source);
   }
   memory(id: string): string {

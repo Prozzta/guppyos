@@ -132,7 +132,7 @@ export class TaskLedgerGuard {
   private epoch = 0;
   /** The stat key of the last content the async check handled (see TaskLedgerRead.key). */
   private lastKey: string | null = null;
-  /** Bumped by every synchronous sidecar write: an async write it overtook withdraws or repeats. */
+  /** Bumped by every synchronous sidecar write and every deferred record change: an async write it overtook withdraws or repeats. */
   private persistSeq = 0;
   /** Set by a deferred apply (the async check): the sidecar write and the notices it still owes. */
   private owed: { root: string; change: TaskLedgerChange; primed: boolean } | null = null;
@@ -188,6 +188,53 @@ export class TaskLedgerGuard {
     this.apiRing.push({ hash, source });
     while (this.apiRing.length > API_HASH_RING) this.apiRing.shift();
     this.apply(hash, tasks, `api:${source}`);
+  }
+
+  /**
+   * LAG-TASKS-WRITE-SYNC-READ-108: the hive's queued card write tells the guard which bytes it is
+   * about to rename into place, BEFORE the rename (Jim 3d83ac point 1). A watch check that reads
+   * the file between the rename and the write's continuation then attributes it to the API, not
+   * to 'file'. Returns the hash to hand to applyApiWrite, or to forgetApiWrite when the write did
+   * not land.
+   */
+  expectApiWrite(content: string, source: string): string {
+    const hash = sha256(content);
+    this.apiRing.push({ hash, source });
+    while (this.apiRing.length > API_HASH_RING) this.apiRing.shift();
+    return hash;
+  }
+  /** The expected write did not land (a throw, a refused commit): its bytes are not ours. */
+  forgetApiWrite(hash: string): void {
+    for (let i = this.apiRing.length - 1; i >= 0; i--) if (this.apiRing[i].hash === hash) { this.apiRing.splice(i, 1); return; }
+  }
+  /** Load the sidecar with no synchronous fs (a later loadMeta then serves it from memory). */
+  async primeMetaAsync(root: string): Promise<void> {
+    if (this.meta) return;
+    let meta: TaskMeta = { v: 1, cards: {} };
+    try {
+      const parsed = JSON.parse(await readFile(this.metaPath(root), 'utf8')) as TaskMeta;
+      if (parsed && parsed.v === 1 && parsed.cards && typeof parsed.cards === 'object') meta = parsed;
+    } catch { /* missing or damaged: rebuilt from the ledger, as loadMeta */ }
+    if (!this.meta && this.opts.root() === root) this.meta = meta;
+  }
+  /**
+   * The expected write landed: apply it as recordApiWrite does, with no synchronous fs. The sidecar
+   * is written off-thread (persistAsync), then the notices go out, as the async check does. `ids`
+   * stands in for the registry and archive reads the validation would make on main. A watch check
+   * that already applied these bytes (attributed through the ring) leaves nothing to do.
+   */
+  async applyApiWrite(hash: string, tasks: unknown[], source: string, ids?: { agentIds: ReadonlySet<string>; archivedIds: ReadonlySet<string> }): Promise<void> {
+    const root = this.opts.root();
+    if (!root) return;
+    await this.primeMetaAsync(root);
+    if (this.opts.root() !== root || hash === this.lastHash) return;
+    this.apply(hash, tasks, `api:${source}`, true, true, ids);
+    const owed = this.owed;
+    this.owed = null;
+    if (owed) {
+      await this.persistAsync(owed.root);
+      this.notify(owed.change, owed.primed);
+    }
   }
 
   /** Read `tasks.json` and apply whatever changed since the last applied content. */
@@ -295,7 +342,7 @@ export class TaskLedgerGuard {
     }
   }
 
-  private apply(hash: string, tasks: unknown[], by: string, primed = false, defer = false): TaskLedgerChange | null {
+  private apply(hash: string, tasks: unknown[], by: string, primed = false, defer = false, ids?: { agentIds: ReadonlySet<string>; archivedIds: ReadonlySet<string> }): TaskLedgerChange | null {
     const root = this.opts.root();
     if (!root) return null;
     this.applySeq++;
@@ -349,9 +396,12 @@ export class TaskLedgerGuard {
     for (const id of Object.keys(meta.cards)) {
       if (!seen.has(id)) { delete meta.cards[id]; change.removed.push(id); }
     }
-    this.validate(tasks, by);
+    this.validate(tasks, by, ids);
     const touched = firstRun || change.added.length + change.removed.length + change.edited.length > 0;
     if (touched && defer) {
+      // LAG-TASKS-WRITE-SYNC-READ-108: the record changed, so an async sidecar write already in
+      // flight holds older text: it withdraws (or writes once more), as for a synchronous write.
+      this.persistSeq++;
       this.owed = { root, change, primed };
     } else if (touched) {
       this.persistSeq++;
@@ -366,8 +416,8 @@ export class TaskLedgerGuard {
     return change;
   }
 
-  private validate(tasks: unknown[], by: string): void {
-    this.currentIssues = validateLedger(tasks, this.opts.agentIds(), this.opts.archivedIds?.());
+  private validate(tasks: unknown[], by: string, ids?: { agentIds: ReadonlySet<string>; archivedIds: ReadonlySet<string> }): void {
+    this.currentIssues = validateLedger(tasks, ids ? ids.agentIds : this.opts.agentIds(), ids ? ids.archivedIds : this.opts.archivedIds?.());
     const errors = this.currentIssues.filter((i) => i.level === 'error');
     const keys = new Set(errors.map((e) => e.key));
     const fresh = errors.filter((e) => !this.errorKeys.has(e.key));

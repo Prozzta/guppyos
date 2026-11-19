@@ -84,8 +84,10 @@ export interface LedgerDeps {
   isRecipient(to: string): boolean;
   /** The current cards (fresh from disk). */
   readTasks(): HiveTask[];
-  addTask(task: HiveTask): boolean;
-  patchTask(id: string, patch: Partial<HiveTask>): boolean;
+  /** LAG-TASKS-WRITE-SYNC-READ-108: resolves once the write landed (false = refused). */
+  addTask(task: HiveTask): boolean | Promise<boolean>;
+  /** A function patch is computed from the card as it is inside the write job. */
+  patchTask(id: string, patch: Partial<HiveTask> | ((current: HiveTask) => Partial<HiveTask>)): boolean | Promise<boolean>;
   /**
    * CARD-AUTODONE-ON-BUILD: true when the caller is god. Only god marks a card done (a card is
    * done when its sha lands in an INT on origin); anyone else's `status: done` is dropped from the
@@ -308,7 +310,7 @@ export function insertLesson(memory: string, text: string): string | null {
  * Apply one op for `deps.agentId`. Validates everything first; then card, message, memory, each
  * recorded as done for the op once written, so a retry of the same op finishes only what is left.
  */
-export function applyLedgerOp(raw: unknown, deps: LedgerDeps): LedgerReply | Promise<LedgerReply> {
+export async function applyLedgerOp(raw: unknown, deps: LedgerDeps): Promise<LedgerReply> {
   const parsed = parseLedgerOp(raw);
   if (!parsed.ok) return { status: 400, body: { ok: false, line: `refused: ${parsed.error}` } };
   const op = parsed.op;
@@ -403,16 +405,20 @@ export function applyLedgerOp(raw: unknown, deps: LedgerDeps): LedgerReply | Pro
             ...(card.appendResult ? { result: appended(undefined, card.appendResult, now) } : {}),
             ...(card.appendNote ? { notes: appended(undefined, card.appendNote, now) } : {})
           };
-          if (!deps.addTask(t)) throw new Error(`card ${card.id} appeared meanwhile`);
+          if (!(await deps.addTask(t))) throw new Error(`card ${card.id} appeared meanwhile`);
         } else {
-          const cur = deps.readTasks().find((t) => t?.id === card.id) as (HiveTask & Record<string, unknown>) | undefined;
-          if (!cur) throw new Error(`card ${card.id} disappeared meanwhile`);
           // The assignee is kept unless the patch names one (a patch never touches other fields).
-          const patch: Partial<HiveTask> = { ...(card.patch ?? {}) };
-          if (doneKept) delete patch.status;
-          if (card.appendResult) patch.result = appended(cur.result, card.appendResult, now);
-          if (card.appendNote) patch.notes = appended(cur.notes, card.appendNote, now);
-          if (!deps.patchTask(card.id, patch)) throw new Error(`card ${card.id} could not be patched`);
+          // The appends are computed from the card as it is inside the write job, so a write that
+          // landed meanwhile is appended to, never overwritten.
+          const ok = await deps.patchTask(card.id, (cur) => {
+            const c = cur as HiveTask & Record<string, unknown>;
+            const patch: Partial<HiveTask> = { ...(card.patch ?? {}) };
+            if (doneKept) delete patch.status;
+            if (card.appendResult) patch.result = appended(c.result as string | undefined, card.appendResult, now);
+            if (card.appendNote) patch.notes = appended(c.notes as string | undefined, card.appendNote, now);
+            return patch;
+          });
+          if (!ok) throw new Error(`card ${card.id} disappeared meanwhile`);
         }
         rec.card = true;
         save();
