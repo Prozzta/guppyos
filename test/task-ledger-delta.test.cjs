@@ -35,57 +35,57 @@ const card = (id, extra = {}) => ({ id, title: id, status: 'todo', dependsOn: []
 const handWrite = (hive, tasks) => fs.writeFileSync(tasksFile(hive), JSON.stringify({ tasks }, null, 2));
 const log = (hive) => fs.readFileSync(path.join(hive.root(), 'log.jsonl'), 'utf8');
 
-test('a duplicate already in the file does not block unrelated writes (M20, M21)', (t) => {
+test('a duplicate already in the file does not block unrelated writes (M20, M21)', async (t) => {
   const hive = floor(t);
   handWrite(hive, [card('A', { status: 'done' }), card('B'), card('A')]);
-  assert.equal(hive.patchTask('B', { status: 'doing' }, 'ipc'), true);
-  assert.equal(hive.addTask(card('C'), 'slack'), true);
-  assert.equal(hive.deleteTask('C', 'ipc'), true);
+  assert.equal(await hive.patchTask('B', { status: 'doing' }, 'ipc'), true);
+  assert.equal(await hive.addTask(card('C'), 'slack'), true);
+  assert.equal(await hive.deleteTask('C', 'ipc'), true);
   const ids = hive.tasks().tasks.map((c) => `${c.id}:${c.status}`);
   assert.deepEqual(ids, ['A:done', 'B:doing', 'A:todo'], 'the hand-made duplicate is reported, never "fixed" by a write');
 });
 
-test('a write that INTRODUCES a duplicate is refused and the file is byte-identical (M4)', (t) => {
+test('a write that INTRODUCES a duplicate is refused and the file is byte-identical (M4)', async (t) => {
   const hive = floor(t);
   handWrite(hive, [card('A'), card('B')]);
   const before = fs.readFileSync(tasksFile(hive));
-  assert.throws(() => hive.writeTasks([card('A'), card('B'), card('A', { status: 'done' })], 'voice'), TaskLedgerInvalidError);
+  await assert.rejects(async () => hive.writeTasks([card('A'), card('B'), card('A', { status: 'done' })], 'voice'), TaskLedgerInvalidError);
   assert.deepEqual(fs.readFileSync(tasksFile(hive)), before);
   assert.match(log(hive), /"kind":"task-ledger-refused","source":"voice","errors":\["dup:A"\]/);
 });
 
-test('a patch that introduces an unknown status is refused; the file is unchanged', (t) => {
+test('a patch that introduces an unknown status is refused; the file is unchanged', async (t) => {
   const hive = floor(t);
   handWrite(hive, [card('A'), card('B')]);
   const before = fs.readFileSync(tasksFile(hive));
-  assert.throws(() => hive.patchTask('A', { status: 'finished' }, 'ipc'), (e) => e instanceof TaskLedgerInvalidError && /status/.test(e.message));
+  await assert.rejects(async () => hive.patchTask('A', { status: 'finished' }, 'ipc'), (e) => e instanceof TaskLedgerInvalidError && /status/.test(e.message));
   assert.deepEqual(fs.readFileSync(tasksFile(hive)), before);
 });
 
-test('an existing unknown status does not block a patch to that same card that fixes it', (t) => {
+test('an existing unknown status does not block a patch to that same card that fixes it', async (t) => {
   const hive = floor(t);
   handWrite(hive, [card('A', { status: 'finished' })]);
-  assert.equal(hive.patchTask('A', { status: 'done' }, 'ipc'), true);
+  assert.equal(await hive.patchTask('A', { status: 'done' }, 'ipc'), true);
   assert.equal(hive.tasks().tasks[0].status, 'done');
 });
 
-test('every accepted write logs its source', (t) => {
+test('every accepted write logs its source', async (t) => {
   const hive = floor(t);
   handWrite(hive, [card('A')]);
-  hive.patchTask('A', { status: 'doing' }, 'slack');
+  await hive.patchTask('A', { status: 'doing' }, 'slack');
   assert.match(log(hive), /"kind":"tasks","count":1,"source":"slack"/);
 });
 
-test('a hand-made twin is never rewritten by an unrelated write; patch and delete act on the FIRST copy (S2, J17)', (t) => {
+test('a hand-made twin is never rewritten by an unrelated write; patch and delete act on the FIRST copy (S2, J17)', async (t) => {
   const hive = floor(t);
   handWrite(hive, [card('X', { status: 'done', result: 'R1', notes: 'first' }), card('Y'), card('X', { status: 'todo' })]);
-  hive.patchTask('Y', { status: 'doing' }, 'ipc');
+  await hive.patchTask('Y', { status: 'doing' }, 'ipc');
   let list = hive.tasks().tasks;
   assert.deepEqual(list[2], card('X', { status: 'todo' }), 'the twin keeps exactly its own fields');
-  hive.patchTask('X', { notes: 'patched' }, 'ipc');
+  await hive.patchTask('X', { notes: 'patched' }, 'ipc');
   list = hive.tasks().tasks;
   assert.deepEqual([list[0].notes, list[2].notes], ['patched', undefined]);
-  assert.equal(hive.deleteTask('X', 'ipc'), true);
+  assert.equal(await hive.deleteTask('X', 'ipc'), true);
   assert.deepEqual(hive.tasks().tasks.map((c) => `${c.id}:${c.status}`), ['Y:doing', 'X:todo'], 'only the first copy is deleted');
 });
 

@@ -29,7 +29,8 @@ export interface BoardMonitorHive {
   root(): string | null;
   tasks(): unknown;
   registry(): { agents: Record<string, RegistryFacts> };
-  patchTask(id: string, patch: Record<string, unknown>, source: 'board-auto'): boolean;
+  /** LAG-TASKS-WRITE-SYNC-READ-108: queued; a function patch is computed from the card when the write runs. */
+  patchTask(id: string, patch: (current: { status?: unknown; assignee?: unknown; notes?: unknown }) => { status?: 'todo'; notes?: string }, source: 'board-auto'): Promise<boolean>;
   appendLog(row: Record<string, unknown>): void;
   /** A9: the install-trigger inform to a card's assignee (HiveManager.send). Absent: no informs. */
   send?(msg: { to: string; act: 'inform'; card: string; subject: string; body: string; requires_reply: false }, from: string): unknown;
@@ -69,6 +70,9 @@ export class BoardMonitor {
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
   private again = false;
+  /** LAG-TASKS-WRITE-SYNC-READ-108: auto-moves queued and not yet settled (card ids). */
+  private readonly moving = new Set<string>();
+  private stopped = false;
   /** A9: armed cards (waitingFor install + fixVersion) fire once to their assignee. */
   private readonly installTriggers: InstallTriggers | null;
 
@@ -168,19 +172,29 @@ export class BoardMonitor {
         const card = byId.get(f.cardId);
         // Idempotent by construction: the detector flags only DOING cards, and this list was
         // computed from the same ledger read, so a moved (todo) card is never flagged again.
-        if (!card) continue;
+        if (!card || this.moving.has(f.cardId)) continue;
+        // LAG-TASKS-WRITE-SYNC-READ-108: the move is a queued write. It re-checks the card when it
+        // runs (still doing, same assignee) and builds the note from the card as it is then; the
+        // flag is held back until it settles, then the monitor runs again on the written ledger.
         const line = autoMoveNote(now, f.agentId, f.archivedAt);
-        const notes = typeof card.notes === 'string' && card.notes ? `${card.notes}\n${line}` : line;
-        try {
-          if (hive.patchTask(f.cardId, { status: 'todo', notes }, 'board-auto')) {
-            hive.appendLog({ kind: 'board-auto', cardId: f.cardId, from: 'doing', to: 'todo', assignee: f.agentId, reason: f.evidence });
-          }
-        } catch (e) {
-          hive.appendLog({ kind: 'board-auto-failed', cardId: f.cardId, error: String(e).slice(0, 300) });
-        }
+        const assignee = card.assignee;
+        let moved = false;
+        this.moving.add(f.cardId);
+        hive.patchTask(f.cardId, (cur) => {
+          if (cur.status !== 'doing' || cur.assignee !== assignee) return {};
+          moved = true;
+          return { status: 'todo', notes: typeof cur.notes === 'string' && cur.notes ? `${cur.notes}\n${line}` : line };
+        }, 'board-auto').then((ok) => {
+          if (ok && moved) hive.appendLog({ kind: 'board-auto', cardId: f.cardId, from: 'doing', to: 'todo', assignee: f.agentId, reason: f.evidence });
+        }, (e) => {
+          try { hive.appendLog({ kind: 'board-auto-failed', cardId: f.cardId, error: String(e).slice(0, 300) }); } catch { /* noop */ }
+        }).finally(() => {
+          this.moving.delete(f.cardId);
+          if (!this.stopped && this.moving.size === 0) { try { this.tick(); } catch (e) { try { hive.appendLog({ kind: 'board-monitor-error', error: String(e).slice(0, 300) }); } catch { /* noop */ } } }
+        });
       }
-      ({ flags } = this.compute(root, now));
     }
+    if (this.moving.size > 0) flags = flags.filter((f) => !(f.kind === 'ASSIGNEE_ARCHIVED' && this.moving.has(f.cardId)));
     this.publish(root, flags, now);
     // A9: after the flags, so an inform never precedes the state it reports. It reads the same
     // ledger snapshot; a failure here never breaks the monitor.
@@ -221,6 +235,7 @@ export class BoardMonitor {
     // `start` may follow a ledger-guard tick during bootstrap. Re-arm only the timer: clearing
     // `keys` here would make that already-raised flag appear new and log a duplicate raise.
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
+    this.stopped = false;
     try { this.tick(); } catch (e) { try { this.opts.hive.appendLog({ kind: 'board-monitor-error', error: String(e).slice(0, 300) }); } catch { /* noop */ } }
     this.timer = setInterval(() => {
       try { this.tick(); } catch (e) { try { this.opts.hive.appendLog({ kind: 'board-monitor-error', error: String(e).slice(0, 300) }); } catch { /* noop */ } }
@@ -230,6 +245,7 @@ export class BoardMonitor {
 
   stop(): void {
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
+    this.stopped = true;
     this.current = [];
     this.keys = new Set();
     this.lastPublished = '';

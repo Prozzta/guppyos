@@ -490,7 +490,7 @@ test('Jim M-3 gate: a SessionStart(compact) with a FULL working set, the carry a
   const full = `# Memory working set — cl-1\n${'- a synthetic claim line about the widget relay [c:c-000000000001]\n'.repeat(200)}`.slice(0, WORKING_SET_MAX_CHARS);
   assert.equal(full.length, WORKING_SET_MAX_CHARS);
   const f = await floor(t, { providers: { 'cl-1': 'claude' }, claimWorkingSet: () => full });
-  f.hive.writeTasks([{ id: 'CARD-W4', title: 'A card in progress', status: 'doing', assignee: 'cl-1' }]);
+  await f.hive.writeTasks([{ id: 'CARD-W4', title: 'A card in progress', status: 'doing', assignee: 'cl-1' }]);
   f.server.mailReminders = () => [{ entry: { id: 'old-1', from: 'jim-1', act: 'request', subject: 'please check', state: 'acted', epoch: 'e-old' }, ageMs: 3_600_000 }];
   const m = f.hive.send({ to: 'cl-1', act: 'inform', subject: 'live', body: 'a pending body '.repeat(40), card: 'CARD-W4' }, 'god-1');
   f.fire('cl-1', 'UserPromptSubmit', { prompt: 'go' });

@@ -104,22 +104,24 @@ test('production missed-watch fallback invalidates tasks asynchronously', async 
   assert.deepEqual(ids(hive.tasks()), ['T2', 'T3']);
 });
 
-test('a mutation reads the file fresh, never the frozen cache, and its write is seen by the next read', (t) => {
+test('a mutation reads the file fresh, never the frozen cache, and its write is seen by the next read', async (t) => {
   const { hive, file, handEdit } = floor(t);
   hive.tasks();
   // Another process adds a card inside the window: the mutation must build on it.
   handEdit([card('T1'), card('T2')]);
   assert.deepEqual(ids(hive.tasks()), ['T1'], 'readers may lag by up to the window');
-  assert.equal(hive.addTask(card('T3')), true);
+  assert.equal(await hive.addTask(card('T3')), true);
+  // LAG-TASKS-WRITE-SYNC-READ-108: a landed write installs its own bytes as the cache (Jim SHOULD 3),
+  // so the next read needs no sync read and still sees the merged ledger.
   const after = io(file, () => hive.tasks());
-  assert.equal(after.reads, 1, 'our write dropped the cache');
+  assert.equal(after.reads, 0, 'our write installed the cache');
   assert.deepEqual(ids(after.result), ['T1', 'T2', 'T3'], 'no lost update: T2 kept');
   assert.ok(Object.isFrozen(after.result.tasks[2]));
   assert.deepEqual(after.result, JSON.parse(fs.readFileSync(file, 'utf8')), 'equal to a cold read');
   // writeTasks merges against the file too, not the cache.
   hive.tasks();
   handEdit([card('T1'), card('T2'), card('T3'), card('T4')]);
-  hive.writeTasks([card('T1', { status: 'doing' }), card('T2'), card('T3'), card('T4')]);
+  await hive.writeTasks([card('T1', { status: 'doing' }), card('T2'), card('T3'), card('T4')]);
   const w = hive.tasks();
   assert.deepEqual(ids(w), ['T1', 'T2', 'T3', 'T4']);
   assert.equal(w.tasks[0].status, 'doing');
@@ -176,7 +178,7 @@ test('registry and tasks are cached separately: a registry write leaves the task
   assert.equal(io(reg, () => hive.registry()).reads, 1, 'the registry write dropped only its own entry');
 });
 
-test('corrupt tasks.json: not cached, quarantined once, mutations refused; integrityIssues sees it inside the window; a repair is seen at once', (t) => {
+test('corrupt tasks.json: not cached, quarantined once, mutations refused; integrityIssues sees it inside the window; a repair is seen at once', async (t) => {
   const { hive, file, handEdit } = floor(t);
   hive.tasks();
   const corrupt = '{"tasks":';
@@ -186,7 +188,7 @@ test('corrupt tasks.json: not cached, quarantined once, mutations refused; integ
   assert.equal(r.reads, 2, 'each read re-reads, as before');
   assert.deepEqual(r.result[0], { tasks: [] });
   assert.equal(Object.isFrozen(r.result[0]), false, 'the safe default is a fresh object');
-  assert.throws(() => hive.addTask(card('T7')), /tasks\.json is invalid JSON; refusing to overwrite it/);
+  await assert.rejects(async () => hive.addTask(card('T7')), /tasks\.json is invalid JSON; refusing to overwrite it/);
   assert.equal(fs.readFileSync(file, 'utf8'), corrupt);
   assert.equal(fs.readdirSync(hive.root()).filter((n) => n.startsWith('tasks.json.corrupt-')).length, 1);
   handEdit([card('T8')]);
@@ -215,16 +217,18 @@ test('an unreadable tasks.json still throws, and is not cached', (t) => {
   assert.deepEqual(ids(hive.tasks()), ['T1']);
 });
 
-test('a failed write drops the cache: the next read goes to disk and returns what is there', (t) => {
+test('a failed write drops the cache: the next read goes to disk and returns what is there', async (t) => {
   const { hive, file } = floor(t);
   hive.tasks();
   // REGISTRY-RENAME-EPERM-107: renameWithRetry tries the POSIX rename first, which never calls
   // fs.renameSync; the injected rename fault below is for the plain-rename path, so turn POSIX off.
   AJ.__setRenameAddonForTest(null);
   t.after(() => AJ.__setRenameAddonForTest(undefined));
-  const { renameSync } = fs;
-  fs.renameSync = () => { const e = new Error('denied'); e.code = 'EACCES'; throw e; };
-  try { assert.throws(() => hive.addTask(card('T9'))); } finally { fs.renameSync = renameSync; }
+  // LAG-TASKS-WRITE-SYNC-READ-108: card writes publish through the async writer (fs.promises.rename).
+  const fsp = require('node:fs/promises');
+  const { rename } = fsp;
+  fsp.rename = async () => { const e = new Error('denied'); e.code = 'EACCES'; throw e; };
+  try { await assert.rejects(async () => hive.addTask(card('T9')), /denied/); } finally { fsp.rename = rename; }
   const r = io(file, () => hive.tasks());
   assert.equal(r.reads, 1);
   assert.deepEqual(ids(r.result), ['T1']);
@@ -234,9 +238,16 @@ test('wiring: readers use the cache, mutations read the file, every tasks write 
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'hive.ts'), 'utf8').replace(/\r\n/g, '\n');
   const body = (sig) => { const i = src.indexOf(sig); assert.ok(i >= 0, sig); return src.slice(i, src.indexOf('\n  }\n', i)); };
   assert.match(body('  tasks(fresh = false): unknown {'), /this\.readAuthoritativeJsonCached\(join\(root, 'tasks\.json'\), \(\) => \(\{ tasks: \[\] \}\), fresh\)/);
-  assert.match(body('  private tasksForMutation(): { tasks?: HiveTask[] } {'), /this\.readAuthoritativeJson\(join\(root, 'tasks\.json'\)/);
-  assert.ok(!/readAuthoritativeJsonCached/.test(body('  private tasksForMutation(): { tasks?: HiveTask[] } {')));
-  assert.match(body('  writeTasks(tasks: HiveTask[], source: TaskEditSource = \'ipc\'): void {'), /this\.readAuthoritativeJson<\{ tasks\?: unknown \}>\(path,/);
+  // LAG-TASKS-WRITE-SYNC-READ-108: every card mutation is a queued ledgerWrite job; it reads the
+  // FILE (readTasksText), before the merge and again before the rename, never the cache.
+  const reader = body('  private async readTasksText(p: string): Promise<string | null> {');
+  assert.match(reader, /readFileTracked\(p, 'utf8'\)/);
+  assert.ok(!/Cached/.test(reader));
+  const write = body('  private async ledgerWrite<T>(');
+  assert.match(write, /const text = await this\.readTasksText\(path\);/);
+  assert.match(write, /\(await this\.readTasksText\(path\)\) === text/);
+  assert.ok(!/readAuthoritativeJsonCached(Async)?\(path|tasks\(\)/.test(write), 'the merge never reads the cache');
+  assert.match(body('  writeTasks(tasks: HiveTask[], source: TaskEditSource = \'ipc\'): Promise<void> {'), /this\.enqueueTaskJob\(async \(\) => \{ await this\.ledgerWrite\(source,/);
   assert.match(body('  integrityIssues(): HiveIntegrityIssue[] {'), /this\.tasks\(true\);/);
   // tasks.json is only ever written through writeJson / atomicWriteJson.
   const direct = src.split('\n').filter((l) => /tasks\.json/.test(l) && /writeFileSync|renameSync|atomicWriteJsonFile\(/.test(l));

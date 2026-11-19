@@ -81,10 +81,10 @@ test('planArchive: only status done, done >= 48 h, no open ask, no waitingFor/pa
   assert.deepEqual(A.planArchive(tasks, meta, NOW), ['OLD', 'EDGE', 'EMPTYWAIT', 'ANSWERED', 'META']);
 });
 
-test('the archive pass: append first, hot keeps live + young + asks, allTasks keeps every card, migration backup once', (t) => {
+test('the archive pass: append first, hot keeps live + young + asks, allTasks keeps every card, migration backup once', async (t) => {
   const tasks = [old('A1'), card('LIVE'), old('A2'), card('ASKED', { status: 'done', doneAt: iso(NOW - 99 * H), humanQA: [{ q: 'ok?' }] }), card('YOUNG', { status: 'done', doneAt: iso(NOW - H) })];
   const r = rig(t, tasks);
-  assert.deepEqual(r.hive.archivePass(NOW).sort(), ['A1', 'A2']);
+  assert.deepEqual((await r.hive.archivePass(NOW)).sort(), ['A1', 'A2']);
   assert.deepEqual(r.ids(r.hot()), ['ASKED', 'LIVE', 'YOUNG']);
   assert.deepEqual(r.archiveLines().map((l) => l.card.id), ['A1', 'A2']);
   assert.ok(fs.existsSync(path.join(r.root, 'tasks-archive', '2026-10.jsonl')), 'the month file');
@@ -97,28 +97,28 @@ test('the archive pass: append first, hot keeps live + young + asks, allTasks ke
   assert.deepEqual(r.ids(all), r.ids(tasks));
   assert.deepEqual(all.find((c) => c.id === 'A1'), tasks[0]);
   // a later pass with more to move appends, and takes no second backup
-  r.hive.patchTask('LIVE', { status: 'done', doneAt: iso(NOW - 60 * H) });
-  assert.deepEqual(r.hive.archivePass(NOW), ['LIVE']);
+  await r.hive.patchTask('LIVE', { status: 'done', doneAt: iso(NOW - 60 * H) });
+  assert.deepEqual(await r.hive.archivePass(NOW), ['LIVE']);
   assert.equal(r.backups().length, 1);
-  assert.deepEqual(r.hive.archivePass(NOW), [], 'nothing left to move');
+  assert.deepEqual(await r.hive.archivePass(NOW), [], 'nothing left to move');
 });
 
-test('crash between the append and the hot rewrite: the card is in both, nothing is lost, the hot copy wins', (t) => {
+test('crash between the append and the hot rewrite: the card is in both, nothing is lost, the hot copy wins', async (t) => {
   const r = rig(t, [old('X', { result: 'hot copy' }), card('LIVE')]);
   A.appendArchived(r.root, [old('X', { result: 'archived copy' })], NOW); // the pass died here
   const all = r.hive.allTasks().tasks;
   assert.equal(all.filter((c) => c.id === 'X').length, 1);
   assert.equal(all.find((c) => c.id === 'X').result, 'hot copy');
   // the next pass finishes the move; the latest archive line is the hot copy
-  assert.deepEqual(r.hive.archivePass(NOW), ['X']);
+  assert.deepEqual(await r.hive.archivePass(NOW), ['X']);
   assert.equal(r.hive.allTasks().tasks.find((c) => c.id === 'X').result, 'hot copy');
 });
 
-test('a patch of an archived card revives it (hot first, then the tombstone); addTask refuses an archived id', (t) => {
+test('a patch of an archived card revives it (hot first, then the tombstone); addTask refuses an archived id', async (t) => {
   const r = rig(t, [old('OLD1'), card('LIVE')]);
-  r.hive.archivePass(NOW);
-  assert.equal(r.hive.addTask(card('OLD1')), false, 'A8: ids stay unique across hot and the archive');
-  assert.ok(r.hive.patchTask('OLD1', { notes: 'a late note' }));
+  await r.hive.archivePass(NOW);
+  assert.equal(await r.hive.addTask(card('OLD1')), false, 'A8: ids stay unique across hot and the archive');
+  assert.ok(await r.hive.patchTask('OLD1', { notes: 'a late note' }));
   const revived = r.hot().find((c) => c.id === 'OLD1');
   assert.equal(revived.notes, 'a late note');
   assert.equal(revived.result, old('OLD1').result, 'the archived fields come back');
@@ -126,14 +126,14 @@ test('a patch of an archived card revives it (hot first, then the tombstone); ad
   assert.deepEqual(lines[lines.length - 1].revived, 'OLD1');
   assert.equal(A.readArchive(r.root).has('OLD1'), false);
   assert.equal(r.hive.allTasks().tasks.filter((c) => c.id === 'OLD1').length, 1);
-  assert.equal(r.hive.patchTask('NEVER', { notes: 'x' }), false, 'an unknown id is still refused');
+  assert.equal(await r.hive.patchTask('NEVER', { notes: 'x' }), false, 'an unknown id is still refused');
   // Jim SHOULD 1: revivedAt restarts the 48 h window; the next pass leaves it hot ...
   const revivedAt = Date.parse(revived.revivedAt);
   assert.ok(Math.abs(revivedAt - Date.now()) < 60_000, 'revivedAt is stamped at the revive');
-  assert.deepEqual(r.hive.archivePass(revivedAt + H), []);
-  assert.deepEqual(r.hive.archivePass(revivedAt + 47 * H), []);
+  assert.deepEqual(await r.hive.archivePass(revivedAt + H), []);
+  assert.deepEqual(await r.hive.archivePass(revivedAt + 47 * H), []);
   // ... and after the window it moves back, carrying the note
-  assert.deepEqual(r.hive.archivePass(revivedAt + 49 * H), ['OLD1']);
+  assert.deepEqual(await r.hive.archivePass(revivedAt + 49 * H), ['OLD1']);
   assert.equal(A.readArchive(r.root).get('OLD1').notes, 'a late note');
 });
 
@@ -145,29 +145,34 @@ test('Jim MUST: a torn archive tail does not swallow the next append (exact fixt
   assert.deepEqual([...A.readArchive(r.root).keys()], ['A-1', 'B-2', 'C-3']);
 });
 
-test('Jim MUST: the pass drops from hot only cards that read back from the archive whole', (t) => {
+test('Jim MUST: the pass drops from hot only cards that read back from the archive whole', async (t) => {
   const r = rig(t, [old('W1'), old('W2'), card('LIVE')]);
-  const realWrite = fs.writeSync;
+  // LAG-TASKS-WRITE-SYNC-READ-108: the pass appends through a FileHandle (off the main thread).
+  const probe = await require('node:fs/promises').open(r.hotPath, 'r');
+  const FH = Object.getPrototypeOf(probe);
+  await probe.close();
+  const realWrite = FH.write;
   let cut = true;
-  fs.writeSync = function (fd, data, ...rest) {
+  FH.write = function (data, ...rest) {
     // one short append: the archive gets W1's line and half of W2's (a crash or a full disk)
     if (cut && typeof data === 'string' && data.includes('"W2"')) { cut = false; data = data.slice(0, data.indexOf('"W2"') + 10); }
-    return realWrite.call(this, fd, data, ...rest);
+    return realWrite.call(this, data, ...rest);
   };
   let moved;
-  try { moved = r.hive.archivePass(NOW); } finally { fs.writeSync = realWrite; }
+  try { moved = await r.hive.archivePass(NOW); } finally { FH.write = realWrite; }
+  assert.equal(cut, false, 'control: the append was cut');
   assert.deepEqual(moved, ['W1']);
   assert.deepEqual(r.ids(r.hot()), ['LIVE', 'W2'], 'W2 stays hot: its line never landed whole');
   assert.deepEqual(r.ids(r.hive.allTasks().tasks), ['LIVE', 'W1', 'W2']);
   // the next pass ends the torn line first, then moves W2
-  assert.deepEqual(r.hive.archivePass(NOW), ['W2']);
+  assert.deepEqual(await r.hive.archivePass(NOW), ['W2']);
   assert.deepEqual(r.ids(r.hive.allTasks().tasks), ['LIVE', 'W1', 'W2']);
   assert.deepEqual(r.ids(r.hot()), ['LIVE']);
 });
 
-test('Jim NIT: a live card that depends on an archived card is no dep warning', (t) => {
+test('Jim NIT: a live card that depends on an archived card is no dep warning', async (t) => {
   const r = rig(t, [old('D1'), card('LIVE')]);
-  r.hive.archivePass(NOW);
+  await r.hive.archivePass(NOW);
   const hot = r.hot();
   hot.find((c) => c.id === 'LIVE').dependsOn = ['D1', 'GONE'];
   fs.writeFileSync(r.hotPath, JSON.stringify({ tasks: hot }, null, 2));
@@ -176,29 +181,29 @@ test('Jim NIT: a live card that depends on an archived card is no dep warning', 
   assert.deepEqual(deps, ['dep:LIVE:GONE']);
 });
 
-test('a failed archive append leaves hot untouched (A6: append first, then rewrite hot)', (t) => {
+test('a failed archive append leaves hot untouched (A6: append first, then rewrite hot)', async (t) => {
   const r = rig(t, [old('F1'), card('LIVE')]);
   fs.writeFileSync(path.join(r.root, 'tasks-archive'), 'not a directory'); // the append cannot open its file
-  assert.throws(() => r.hive.archivePass(NOW));
+  await assert.rejects(async () => r.hive.archivePass(NOW));
   assert.deepEqual(r.ids(r.hot()), ['F1', 'LIVE'], 'no card left hot before the archive held it');
 });
 
-test('a failed tombstone append still leaves the revived card hot (A10: hot first, then the tombstone)', (t) => {
+test('a failed tombstone append still leaves the revived card hot (A10: hot first, then the tombstone)', async (t) => {
   const r = rig(t, [card('LIVE')]);
   const dir = path.join(r.root, 'tasks-archive');
   fs.mkdirSync(dir);
   fs.writeFileSync(path.join(dir, '2026-09.jsonl'), JSON.stringify({ v: 1, at: 'x', card: old('T1') }) + '\n');
   fs.mkdirSync(path.join(dir, `${new Date().toISOString().slice(0, 7)}.jsonl`)); // this month's file cannot be opened
-  assert.throws(() => r.hive.patchTask('T1', { notes: 'n' }));
+  await assert.rejects(async () => r.hive.patchTask('T1', { notes: 'n' }));
   assert.equal(r.hot().find((c) => c.id === 'T1')?.notes, 'n');
   assert.equal(r.hive.allTasks().tasks.filter((c) => c.id === 'T1').length, 1);
 });
 
-test('a torn last archive line (crash mid-append) is skipped; a new month file invalidates the cache', (t) => {
+test('a torn last archive line (crash mid-append) is skipped; a new month file invalidates the cache', async (t) => {
   const r = rig(t, [old('M1'), card('LIVE')]);
   let clock = 1_000_000;
   r.hive.__resetAuthorityCacheForTests(() => clock);
-  r.hive.archivePass(NOW);
+  await r.hive.archivePass(NOW);
   assert.equal(r.hive.allTasks().tasks.length, 2);
   fs.appendFileSync(path.join(r.root, 'tasks-archive', '2026-10.jsonl'), '{"v":1,"at":"x","card":{"id":"TOR');
   clock += HiveManager.ARCHIVE_REVALIDATE_MS;   // SCALE-TASKS-MAP: an outside write is re-checked after the window
@@ -209,12 +214,12 @@ test('a torn last archive line (crash mid-append) is skipped; a new month file i
   assert.deepEqual(r.ids(r.hive.allTasks().tasks), ['LIVE', 'M1', 'M2']);
 });
 
-test('god 4eb6eb: a direct python edit of hot (indent=2, ensure_ascii=False) round-trips through the pass with no card lost', (t) => {
+test('god 4eb6eb: a direct python edit of hot (indent=2, ensure_ascii=False) round-trips through the pass with no card lost', async (t) => {
   const py = ['python', 'python3', 'py'].find((p) => spawnSync(p, ['--version']).status === 0);
   if (!py) { t.skip('no python on this machine'); return; }
   const tasks = [old('G1'), card('G2', { title: 'café ünïcode — dash' }), old('G3'), card('G4', { status: 'doing' })];
   const r = rig(t, tasks);
-  r.hive.archivePass(NOW);
+  await r.hive.archivePass(NOW);
   const script = [
     'import json, sys',
     'p = sys.argv[1]',
@@ -231,7 +236,7 @@ test('god 4eb6eb: a direct python edit of hot (indent=2, ensure_ascii=False) rou
   hot.find((c) => c.id === 'G4').status = 'done';
   hot.find((c) => c.id === 'G4').doneAt = iso(NOW - 99 * H);
   fs.writeFileSync(r.hotPath, JSON.stringify({ tasks: hot }, null, 2));
-  assert.deepEqual(r.hive.archivePass(NOW), ['G4']);
+  assert.deepEqual(await r.hive.archivePass(NOW), ['G4']);
   const all = r.hive.allTasks().tasks;
   assert.deepEqual(r.ids(all), ['G1', 'G2', 'G3', 'G4', 'G5']);
   assert.equal(all.find((c) => c.id === 'G2').notes, 'god édit');
@@ -242,8 +247,8 @@ test('god 4eb6eb: a direct python edit of hot (indent=2, ensure_ascii=False) rou
 test('tasks-all prints hot + archive; tasks-unsplit --yes restores one tasks.json with every card and field', async (t) => {
   const tasks = [old('U1'), card('U2'), old('U3', { humanQA: [{ q: 'a', a: 'b' }], deps: ['U1'] }), card('U4', { status: 'blocked' })];
   const r = rig(t, tasks);
-  r.hive.archivePass(NOW);
-  r.hive.patchTask('U2', { notes: 'hot edit' });
+  await r.hive.archivePass(NOW);
+  await r.hive.patchTask('U2', { notes: 'hot edit' });
   let out = '';
   const io = { out: (s) => { out += s; }, err: (s) => { out += s; } };
   assert.equal(await cli.main(['all', '--root', r.root], {}, io), 0);
@@ -273,7 +278,7 @@ test('tasks-all prints hot + archive; tasks-unsplit --yes restores one tasks.jso
 
 test('tasks-revive: refuses an id not archived, says so for a hot id, and goes through the ledger route', async (t) => {
   const r = rig(t, [old('R1'), card('R2')]);
-  r.hive.archivePass(NOW);
+  await r.hive.archivePass(NOW);
   let out = '';
   const io = { out: (s) => { out += s; }, err: (s) => { out += s; } };
   assert.equal(await cli.main(['revive', 'NOPE', '--root', r.root], {}, io), 1);
@@ -289,11 +294,11 @@ test('tasks-revive: refuses an id not archived, says so for a hot id, and goes t
 // SCALE-TASKS-MAP (Jim's STARTUP-SCALE-YEAR audit A13): a per-claim status lookup was a .find over a
 // fresh merge of every card ever made, on every call. The merged view is now rebuilt only when hot or
 // the archive changed, and taskById is a Map lookup over it.
-test('SCALE-TASKS-MAP: allTasks is one frozen view until hot or the archive changes; taskById = .find over it', (t) => {
+test('SCALE-TASKS-MAP: allTasks is one frozen view until hot or the archive changes; taskById = .find over it', async (t) => {
   const r = rig(t, [old('A1'), card('LIVE'), old('A2'), card('DUPE', { result: 'first' }), card('DUPE', { result: 'second' })]);
   let clock = 1_000_000;
   r.hive.__resetAuthorityCacheForTests(() => clock);
-  r.hive.archivePass(NOW);
+  await r.hive.archivePass(NOW);
   const v1 = r.hive.allTasks();
   assert.equal(r.hive.allTasks(), v1, 'unchanged hot and archive: the same view, not a new merge');
   assert.ok(Object.isFrozen(v1.tasks), 'the shared list is frozen: no caller can mutate it under the others');
@@ -302,7 +307,7 @@ test('SCALE-TASKS-MAP: allTasks is one frozen view until hot or the archive chan
   }
   assert.equal(r.hive.taskById('DUPE').result, 'first', 'a duplicate id resolves to its first occurrence');
   // a hot change through the API: a new view with the new status
-  assert.ok(r.hive.patchTask('LIVE', { status: 'doing' }));
+  assert.ok(await r.hive.patchTask('LIVE', { status: 'doing' }));
   const v2 = r.hive.allTasks();
   assert.notEqual(v2, v1);
   assert.equal(r.hive.taskById('LIVE').status, 'doing');
@@ -318,11 +323,11 @@ test('SCALE-TASKS-MAP: allTasks is one frozen view until hot or the archive chan
   assert.equal(r.hive.taskById('NEW')?.id, 'NEW', 'a direct edit of hot shows');
 });
 
-test('SCALE-TASKS-MAP: lookups inside the revalidate window read, list and stat nothing; an archive write by main shows at once (fs spy)', (t) => {
+test('SCALE-TASKS-MAP: lookups inside the revalidate window read, list and stat nothing; an archive write by main shows at once (fs spy)', async (t) => {
   const r = rig(t, [old('A1'), card('LIVE'), old('A2'), card('GOES')]);
   let clock = 1_000_000;
   r.hive.__resetAuthorityCacheForTests(() => clock);
-  r.hive.archivePass(NOW);
+  await r.hive.archivePass(NOW);
   r.hive.taskById('A1');   // first sight: reads hot and the archive
   const seen = { read: [], stat: [], dir: [] };
   const orig = { readFileSync: fs.readFileSync, statSync: fs.statSync, readdirSync: fs.readdirSync, openSync: fs.openSync };
@@ -348,8 +353,8 @@ test('SCALE-TASKS-MAP: lookups inside the revalidate window read, list and stat 
   assert.deepEqual(steady, { read: [], stat: [], dir: [] }, '50 x 3 lookups inside the window: no read, no stat, no listing');
   // Main's own archive write drops the cache: the moved card is visible with no clock advance
   // (else it would be in neither hot nor the cached archive until the window passed).
-  assert.ok(r.hive.patchTask('GOES', { status: 'done', doneAt: iso(NOW - 60 * H) }));
-  assert.deepEqual(r.hive.archivePass(NOW), ['GOES']);
+  assert.ok(await r.hive.patchTask('GOES', { status: 'done', doneAt: iso(NOW - 60 * H) }));
+  assert.deepEqual(await r.hive.archivePass(NOW), ['GOES']);
   assert.equal(r.ids(r.hot()).includes('GOES'), false, 'it left hot');
   assert.equal(r.hive.taskById('GOES')?.status, 'done', 'and is found in the archive at once');
 });
@@ -372,10 +377,11 @@ test('readers that need any card ever made read allTasks (source pins)', () => {
   assert.match(ix, /function pollWebhookDoneTasks\(\): void \{\s+let tasks: HiveTask\[\];\s+try \{\s+const ledger = hive\.tasks\(\)/);
 });
 
-test('the pass runs at guard start and hourly, and stops with the guard', (t) => {
+test('the pass runs at guard start and hourly, and stops with the guard', async (t) => {
   const r = rig(t, [old('S1'), card('S2')]);
   r.hive.startLedgerGuard();
   t.after(() => r.hive.stopLedgerGuard());
+  await r.hive.drainReads(); // LAG-TASKS-WRITE-SYNC-READ-108: the start pass is a queued job
   assert.deepEqual(r.ids(r.hot()), ['S2'], 'moved at start (doneAt three days ago, real clock)');
   r.hive.stopLedgerGuard();
   const src = fs.readFileSync(path.join(__dirname, '..', 'src/main/hive.ts'), 'utf8');

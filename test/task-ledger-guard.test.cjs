@@ -124,22 +124,22 @@ function hiveRig(t) {
   return { hive, file };
 }
 
-test('an API write is attributed to its source, and the watcher does not re-attribute it (M24)', (t) => {
+test('an API write is attributed to its source, and the watcher does not re-attribute it (M24)', async (t) => {
   const { hive } = hiveRig(t);
-  hive.patchTask('A', { status: 'doing' }, 'slack');
+  await hive.patchTask('A', { status: 'doing' }, 'slack');
   assert.equal(hive.ledgerGuard.taskMeta().cards.A.lastEditBy, 'api:slack');
   assert.equal(hive.ledgerGuard.check(), null, 'the file holds exactly the bytes the API wrote');
-  hive.patchTask('B', { status: 'doing' }, 'voice');
-  hive.patchTask('B', { status: 'blocked' }, 'ipc');
+  await hive.patchTask('B', { status: 'doing' }, 'voice');
+  await hive.patchTask('B', { status: 'blocked' }, 'ipc');
   assert.equal(hive.ledgerGuard.check(), null, 'back-to-back API writes');
   const meta = hive.ledgerGuard.taskMeta().cards;
   assert.deepEqual([meta.A.lastEditBy, meta.B.lastEditBy], ['api:slack', 'api:ipc']);
   assert.deepEqual(meta.B.history.map((h) => `${h.from}>${h.to}@${h.by}`), ['todo>doing@api:voice', 'doing>blocked@api:ipc']);
 });
 
-test('a god edit right after an API write is attributed to file', (t) => {
+test('a god edit right after an API write is attributed to file', async (t) => {
   const { hive, file } = hiveRig(t);
-  hive.patchTask('A', { status: 'doing' }, 'ipc');
+  await hive.patchTask('A', { status: 'doing' }, 'ipc');
   const ledger = JSON.parse(fs.readFileSync(file, 'utf8'));
   ledger.tasks[0].status = 'done';
   fs.writeFileSync(file, JSON.stringify(ledger, null, 2));
@@ -147,11 +147,12 @@ test('a god edit right after an API write is attributed to file', (t) => {
   assert.equal(hive.ledgerGuard.taskMeta().cards.A.lastEditBy, 'file');
 });
 
-test('a failed API write records nothing (Jim nit a)', (t) => {
+test('a failed API write records nothing (Jim nit a)', async (t) => {
   const { hive } = hiveRig(t);
   const before = hive.ledgerGuard.taskMeta();
-  hive.atomicWriteJson = () => { throw new Error('disk full'); };
-  assert.throws(() => hive.patchTask('A', { status: 'doing' }, 'ipc'), /disk full/);
+  // LAG-TASKS-WRITE-SYNC-READ-108: card writes publish through the async writer.
+  hive.atomicWriteJsonAsync = async () => { throw new Error('disk full'); };
+  await assert.rejects(async () => hive.patchTask('A', { status: 'doing' }, 'ipc'), /disk full/);
   assert.deepEqual(hive.ledgerGuard.taskMeta(), before);
 });
 

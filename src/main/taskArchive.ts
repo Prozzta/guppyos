@@ -17,7 +17,7 @@
  * always wins (`mergeHotCold`).
  */
 import { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, statSync, writeSync } from 'node:fs';
-import { readFile, readdir, stat } from 'node:fs/promises';
+import { mkdir, open, readFile, readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 
 export const ARCHIVE_DIR = 'tasks-archive';
@@ -164,6 +164,75 @@ export function landedCards(root: string, mark: ArchiveMark | null, cards: reado
 
 export function appendRevived(root: string, id: string, now: number): void {
   void appendLines(root, [{ v: 1, at: new Date(now).toISOString(), revived: id }], now);
+}
+
+/**
+ * LAG-TASKS-WRITE-SYNC-READ-108: the appends and the read-back above, with no synchronous fs.
+ * Card writes run in the hive's serial queue on Electron main; the sync versions stalled it for
+ * the open, fsync and close of the archive file at every archive pass and every revive. Same
+ * bytes, same torn-tail rule, same `writeGen` bumps (an async archive read the append overtook
+ * is thrown away).
+ */
+async function appendLinesAsync(root: string, lines: readonly unknown[], now: number): Promise<ArchiveMark | null> {
+  if (lines.length === 0) return null;
+  const dir = join(root, ARCHIVE_DIR);
+  await mkdir(dir, { recursive: true });
+  const file = join(dir, monthFile(now));
+  const fh = await open(file, 'a+');
+  writeGen++;
+  try {
+    const size = (await fh.stat()).size;
+    const last = Buffer.alloc(1);
+    const torn = size > 0 && (await fh.read(last, 0, 1, size - 1)).bytesRead === 1 && last[0] !== 0x0a;
+    await fh.write((torn ? '\n' : '') + lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+    await fh.sync();
+    return { file, from: size };
+  } finally { await fh.close(); writeGen++; }
+}
+
+export function appendArchivedAsync(root: string, cards: readonly unknown[], now: number): Promise<ArchiveMark | null> {
+  const at = new Date(now).toISOString();
+  return appendLinesAsync(root, cards.map((card) => ({ v: 1, at, card })), now);
+}
+
+export async function appendRevivedAsync(root: string, id: string, now: number): Promise<void> {
+  await appendLinesAsync(root, [{ v: 1, at: new Date(now).toISOString(), revived: id }], now);
+}
+
+/** `landedCards` off the main thread. The full read, when the tail does not settle it, is a fresh
+ *  `readArchiveTexts` (never a shared flight that may predate the append); when even that cannot
+ *  read the archive, nothing counts as landed, so every card stays hot. */
+export async function landedCardsAsync(root: string, mark: ArchiveMark | null, cards: readonly unknown[]): Promise<{ landed: Set<string>; full: Map<string, Card> | null }> {
+  const same = (back: Map<string, Card>, c: unknown): boolean => { const id = idOf(c); return !!id && JSON.stringify(back.get(id)) === JSON.stringify(c); };
+  if (mark && cards.length > 0) {
+    try {
+      const dir = join(root, ARCHIVE_DIR);
+      const names = (await readdir(dir)).filter(isArchiveFile).sort();
+      if (names.length > 0 && join(dir, names[names.length - 1]) === mark.file) {
+        const fh = await open(mark.file, 'r');
+        let text = '';
+        try {
+          const buf = Buffer.alloc(Math.max(0, (await fh.stat()).size - mark.from));
+          let got = 0;
+          while (got < buf.length) { const { bytesRead } = await fh.read(buf, got, buf.length - got, mark.from + got); if (bytesRead <= 0) break; got += bytesRead; }
+          if (got === buf.length) text = buf.toString('utf8');
+        } finally { await fh.close(); }
+        const tail = parseArchive([text]);
+        if (cards.every((c) => same(tail, c))) return { landed: new Set(cards.map((c) => idOf(c) as string)), full: null };
+      }
+    } catch { /* decided by the full read below */ }
+  }
+  const got = await readArchiveTexts(root);
+  if (!got) return { landed: new Set(), full: null };
+  const back = parseArchive(got.texts);
+  return { landed: new Set(cards.filter((c) => same(back, c)).map((c) => idOf(c) as string)), full: back };
+}
+
+/** The archive's cards and stamp, read off the main thread (null: unreadable, see readArchiveTexts).
+ *  A fresh read, not the shared flight: a flight that settled just before an append is stale. */
+export async function readArchiveAsync(root: string): Promise<{ stamp: string; cards: Map<string, Card> } | null> {
+  const got = await readArchiveTexts(root);
+  return got ? { stamp: got.stamp, cards: parseArchive(got.texts) } : null;
 }
 
 /**

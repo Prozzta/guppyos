@@ -249,7 +249,7 @@ async function floor(t) {
 
 test('hooks: SessionStart(compact) carries the cards in progress and owed mail back, re-injects the open mail, and the Stop row says it came back', async (t) => {
   const f = await floor(t);
-  f.hive.writeTasks([
+  await f.hive.writeTasks([
     { id: 'READS-COMPACT-HEALTH', title: 'After each compaction, check', status: 'doing', assignee: 'god-1' },
     { id: 'OTHER', title: 'not mine', status: 'doing', assignee: 'jim-1' },
     { id: 'DONE-ONE', title: 'done', status: 'done', assignee: 'god-1' }

@@ -112,7 +112,7 @@ export interface WebhookServerOptions {
    * operator). Return null to signal a server-side failure (→ 500). The token it
    * returns is the ONLY thing echoed to the caller; no secret ever reaches here.
    */
-  onMessage: (msg: WebhookInbound, endpoint: WebhookEndpointRef) => WebhookDispatch | null;
+  onMessage: (msg: WebhookInbound, endpoint: WebhookEndpointRef) => WebhookDispatch | null | Promise<WebhookDispatch | null>;
   /**
    * Resolve a capability token to its task's public status, or null when the
    * token maps to nothing (→ 404). MUST be scoped to the one token — it must
@@ -149,7 +149,7 @@ export class WebhookServer {
   private readonly port: number;
   private readonly host: '127.0.0.1' | '0.0.0.0';
   private endpoints = new Map<string, WebhookEndpoint>();
-  private readonly onMessage: (msg: WebhookInbound, endpoint: WebhookEndpointRef) => WebhookDispatch | null;
+  private readonly onMessage: (msg: WebhookInbound, endpoint: WebhookEndpointRef) => WebhookDispatch | null | Promise<WebhookDispatch | null>;
   private readonly lookupStatus: (token: string) => WebhookTaskStatus | null;
   /** Compared against when the requested id doesn't exist, purely so the failure
    *  path does the same work as a wrong-secret failure. Random per process and
@@ -336,7 +336,7 @@ export class WebhookServer {
       if (size > MAX_BODY_BYTES) { aborted = true; json(res, 413, { ok: false, error: 'too large' }); req.destroy(); return; }
       chunks.push(c);
     });
-    req.on('end', () => {
+    req.on('end', async () => {
       if (aborted) return;
       let parsed: unknown;
       try { parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
@@ -362,7 +362,8 @@ export class WebhookServer {
       if (from) inbound.from = from;
 
       let out: WebhookDispatch | null = null;
-      try { out = this.onMessage(inbound, { id: endpoint.id, name: endpoint.name }); }
+      // LAG-TASKS-WRITE-SYNC-READ-108: the reply goes out after the card write landed.
+      try { out = await this.onMessage(inbound, { id: endpoint.id, name: endpoint.name }); }
       catch { json(res, 500, { ok: false, error: 'could not create task' }); return; }
       if (!out) { json(res, 500, { ok: false, error: 'could not create task' }); return; }
       // 202, not 200: the message was accepted but no work has started. The caller
