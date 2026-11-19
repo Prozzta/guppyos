@@ -1353,7 +1353,8 @@ const NON_PTY_WRITERS = {
   'src/main/rendererRecovery.ts': ['opts'],                 // RENDERER-PROFILE: the .cpuprofile file writer (saveRendererProfile), never a terminal
   'src/main/boardStatus.ts': ['this'],                      // ZT-I3: BoardStatusWriter.write() renders hive/board-status.md (a file), never a terminal
   'src/main/providerModels.ts': ['child.stdin'],            // CLAUDE-MODEL-LIST: the one initialize request to a hidden, piped `claude -p` that Refresh models starts and kills; never an agent's pty
-  'src/main/heavyCpu.ts': ['child.stdin']                   // HEAVY-CPU-OPTIONS-191: create/set/list/close lines to Guppy's own `guppy-heavyjob serve` helper on a pipe; never an agent's pty
+  'src/main/heavyCpu.ts': ['child.stdin'],                  // HEAVY-CPU-OPTIONS-191: create/set/list/close lines to Guppy's own `guppy-heavyjob serve` helper on a pipe; never an agent's pty
+  'src/main/taskArchive.ts': ['fh']                         // LAG-TASKS-WRITE-SYNC-READ-108: appendArchivedAsync's FileHandle on hive/tasks-archive/<month>.jsonl (a file), never a terminal
 };
 
 /** Parsed, not pattern-matched. A first version stripped comments with a regex and then
