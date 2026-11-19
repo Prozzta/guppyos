@@ -477,6 +477,8 @@ K.notice = (M = HJ) => {
   assert.doesNotMatch(`${kept.message.subject} ${kept.message.body}`, /npm|polic|python|preflight/i, 'IT DOES NOT GUESS WHY THE LAUNCH DIED');
   assert.match(kept.message.body, /once/i, 'the body says the keep is once');
   assert.equal(kept.message.wake, 'now');
+  // reads-quiet-181's sender census passes `k.from` through on this pin: the same sender as the free notice.
+  assert.deepEqual([kept.from, free.from, free.message.wake], ['system', 'system', 'now'], 'THE KEPT NOTICE HAS THE FREE NOTICE\'S SENDER AND WAKE');
   assert.equal(kept.steer, `${kept.message.subject}.`);
 };
 test('MUST 4: the kept notice says "no test started", never a guessed cause', () => K.notice());

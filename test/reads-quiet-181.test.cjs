@@ -154,7 +154,11 @@ const PASS_THROUGH = [
   // rc/1.1.81 merge note (Andy, HEAVY-LOCK delta): the HEAVY SLOT FREE notice is sent as
   // hive.send(n.message, n.from), where n is heavySlotFreeNotice's (from 'system', wake 'now'),
   // which heavy-lock-queue-181 pins as WAKE against this classifier.
-  ['src/main/index.ts', 'n.from']
+  ['src/main/index.ts', 'n.from'],
+  // HEAVY-SLOT-PRELAUNCH-FAIL-108: the HEAVY SLOT KEPT notice is sent as hive.send(k.message, k.from),
+  // where k is heavySlotKeptNotice's. heavy-slot-prelaunch-fail-108 pins it to the same sender and
+  // wake as the HEAVY SLOT FREE notice (from 'system', wake 'now').
+  ['src/main/index.ts', 'k.from']
 ];
 function sendSites() {
   const files = [];
