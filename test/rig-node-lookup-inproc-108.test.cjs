@@ -174,6 +174,23 @@ test('B3 parity: a missing dir and a FILE as PATH entries are skipped; a DIRECTO
   await parity(t, root, 'rgfnone', [path.join(root, 'd1'), path.join(root, 'd2')], '.EXE');
 });
 
+test('B5 cwd-first is DROPPED (stated decision): a hit only in the cwd is not found; a PATH hit beats a cwd hit', { skip: !WIN && 'win32 only' }, async (t) => {
+  // where.exe searches the current dir before PATH. The app's resolver must not resolve a CLI from
+  // whatever dir main happens to run in, so this is the one case that deliberately is NOT parity.
+  const root = tmpRoot(t);
+  const cwd = path.join(root, 'cwd');
+  mk(root, 'cwd\\rgfc.exe');
+  const onPath = mk(root, 'p\\rgfc.exe');
+  const empty = path.join(root, 'p0');
+  fs.mkdirSync(empty, { recursive: true });
+  const onlyCwd = fixtureEnv(root, [empty], '.EXE');
+  const w = await run(path.join(SYS32, 'where.exe'), ['rgfc'], { env: onlyCwd, cwd });
+  assert.match(w.stdout, /rgfc\.exe/i, `fixture: where.exe must list the cwd hit (cwd-first), got ${JSON.stringify(w.stdout)}`);
+  assert.deepEqual(await resolverAnswer('rgfc', onlyCwd, cwd), { path: 'rgfc', found: false }, 'a hit only in the cwd must not resolve');
+  const both = fixtureEnv(root, [path.join(root, 'p')], '.EXE');
+  assert.deepEqual(await resolverAnswer('rgfc', both, cwd), { path: onPath, found: true }, 'the PATH hit must win over the cwd hit');
+});
+
 test('B4 parity: App Execution Aliases in WindowsApps (listed by where, existsSync false today)', { skip: !WIN && 'win32 only' }, async (t) => {
   const wa = path.join(process.env.LOCALAPPDATA || '', 'Microsoft', 'WindowsApps');
   let names = [];
