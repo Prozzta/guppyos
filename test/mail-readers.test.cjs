@@ -289,8 +289,16 @@ test('PIN #10/#12/#13 (ZT-I4): the heartbeat that read them is retired; no quiet
 test('PIN #11: lastCoordinationAt = acted transitions + own outbox/memory writes; no inbox or .done mtime', () => {
   const body = fn('function lastCoordinationAt', 'hive.setHumanInputSource');
   assert.match(body, /mailCoordinationAt\(hive\.mail, agentId\)/);
-  assert.ok(!/'inbox'|'\.done'/.test(body), body);
-  assert.match(body, /'outbox'/);
+  assert.ok(!/'inbox'|'\.done'|statSync/.test(body), body);
+  // LAG-NAMED-STALLS-RESIDUAL-108: the three mtimes are read off the main thread by the hive and
+  // handed in; the paths are pinned where they now live (their behaviour: lag-named-stalls-residual-108).
+  assert.match(body, /Math\.max\(0, mailCoordinationAt\(hive\.mail, agentId\), fileTime\)/);
+  const hiveSrc = codeOnly(readSource('src/main/hive.ts'), 'hive.ts');
+  const at = hiveSrc.indexOf('async coordinationFileTimes(');
+  assert.ok(at >= 0, 'HiveManager.coordinationFileTimes');
+  const files = hiveSrc.slice(at, hiveSrc.indexOf('drainReads(): Promise<void>', at));
+  assert.ok(!/'inbox'|'\.done'/.test(files), files);
+  assert.match(files, /mtime\(join\(dir, 'outbox'\)\), mtime\(join\(dir, 'outbox', '\.sent'\)\), mtime\(join\(dir, 'memory\.md'\)\)/);
 });
 
 
