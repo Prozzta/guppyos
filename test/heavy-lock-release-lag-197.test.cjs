@@ -282,11 +282,26 @@ function helper(t, src) {
 /** A deterministic helper mutant: `create` succeeds, but its completion-port association returns no
  * key, so no PortLoop exit event can reach HeavyJobs. The release assertion below therefore judges
  * the event/fallback path, not scheduling or a synthetic clock. */
-function noPortNoticesHelperSource() {
-  const source = fs.readFileSync(path.join(root, 'resources', 'heavyjob', 'guppy-heavyjob.cs'), 'utf8').replace(/\r\n/g, '\n');
+function helperSource() {
+  return fs.readFileSync(path.join(root, 'resources', 'heavyjob', 'guppy-heavyjob.cs'), 'utf8').replace(/\r\n/g, '\n');
+}
+
+function noPortNoticesHelperSource(source = helperSource()) {
   const needle = '    static long Watch(IntPtr port, IntPtr job, string id, ref long next)\n    {';
   assert.ok(source.includes(needle), 'the helper still has the completion-port Watch seam');
   return source.replace(needle, `${needle}\n        return 0; // test mutant: suppress every completion-port notice`);
+}
+
+function goneOnOpenHelperSource(source = helperSource()) {
+  const needle = `                            IntPtr h = OpenProcess(SYNCHRONIZE, false, pid);
+                            if (h == IntPtr.Zero)
+                            {
+                                int err = Marshal.GetLastWin32Error();`;
+  assert.ok(source.includes(needle), 'the helper still has the open-member race seam');
+  return source.replace(needle, `                            IntPtr h = IntPtr.Zero; // test mutant: the process vanished before OpenProcess
+                            if (h == IntPtr.Zero)
+                            {
+                                int err = ERROR_INVALID_PARAMETER;`);
 }
 
 /** One heavy call held by the real lock in a real job; `body` is the bash after the join line, or
@@ -327,7 +342,7 @@ async function liveRelease(t, o) {
   const deadline = exitAt + 6_000;
   while (lock.snapshot().length && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
   const rel = rows.find((r) => r.kind === 'heavy-lock' && r.action === 'release');
-  return { lagMs: rel ? rel.ts - exitAt : null, runMs: exitAt - t0, heldMs: rel ? rel.heldMs : null, reason: rel ? rel.reason : null };
+  return { lagMs: rel ? rel.ts - exitAt : null, runMs: exitAt - t0, heldMs: rel ? rel.heldMs : null, reason: rel ? rel.reason : null, rows };
 }
 
 function assertFreed(r, what) {
@@ -335,6 +350,10 @@ function assertFreed(r, what) {
   assert.ok(r.lagMs >= 0, `${what}: THE SLOT IS NOT RELEASED BEFORE THE JOB EXITS (released ${r.lagMs} ms before it)`);
   assert.ok(r.lagMs < 2_000, `${what}: THE SLOT IS FREED WITHIN 2 S OF THE JOB'S EXIT (freed ${r.lagMs} ms after)`);
   assert.equal(r.reason, 'job-exit');
+}
+
+function assertWatcherClosed(r, what) {
+  assert.ok(r.rows.some((row) => row.kind === 'heavy-cpu' && row.action === 'closed' && row.handles === 0 && row.remaining <= row.baseline + 1), `${what}: every retained member handle is closed`);
 }
 
 test('LIVE: a job that succeeds frees the slot within 2 s of its exit', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
@@ -361,6 +380,31 @@ test('LIVE: a killed job frees the slot when completion-port notices are absent'
   t.diagnostic(`no-port kill: ran ${r.runMs} ms, held ${r.heldMs} ms, freed ${r.lagMs} ms after the exit`);
   assert.ok(r.runMs < 10_000, 'the kill ended the job');
   assertFreed(r, 'no-port kill');
+  assertWatcherClosed(r, 'no-port kill');
+});
+
+test('LIVE: a member that joins after a snapshot keeps the slot until its own exit', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
+  const r = await liveRelease(t, { body: 'sleep 1; sleep 3 &', exe: helper(t, noPortNoticesHelperSource()) });
+  t.diagnostic(`late member: shell ran ${r.runMs} ms, slot freed ${r.lagMs} ms after the shell exit`);
+  assert.ok(r.lagMs !== null && r.lagMs >= 1_500, 'the empty-confirm re-query observes the grandchild before release');
+  assert.equal(r.reason, 'job-exit');
+  assertWatcherClosed(r, 'late member');
+});
+
+test('LIVE: member watcher returns every handle to baseline across runs', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
+  const exe = helper(t, noPortNoticesHelperSource());
+  for (let i = 0; i < 3; i++) {
+    const r = await liveRelease(t, { body: 'sleep 1; exit 0', exe });
+    assertFreed(r, `handle run ${i + 1}`);
+    assertWatcherClosed(r, `handle run ${i + 1}`);
+  }
+});
+
+test('LIVE: a member that exits before OpenProcess does not stall the watcher', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
+  const source = noPortNoticesHelperSource(goneOnOpenHelperSource());
+  const r = await liveRelease(t, { body: 'sleep 1; exit 0', exe: helper(t, source) });
+  assertFreed(r, 'open PID-gone race');
+  assertWatcherClosed(r, 'open PID-gone race');
 });
 
 test('LIVE: a crash (an abnormal exit inside the job) frees the slot within 2 s', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
@@ -479,8 +523,15 @@ const MUTANTS = [
 // (Dropping MSG_ABNORMAL_EXIT_PROCESS alone is equivalent here: the shell's own exit and the job going
 // empty still come after a crash. It stays in the filter for a job whose shell outlives the crash.)
 const HELPER_MUTANTS = [
-  { name: 'serve ties no job to the port', edits: [['                        keys[w[1]] = Watch(port, job, w[1], ref next);\n', '']], body: 'sleep 1; exit 0', what: 'success' },
-  { name: 'notices are never written', edits: [['            Write("{\\"event\\":\\"exit\\"', '            if (msg == 0) Write("{\\"event\\":\\"exit\\"']], body: 'sleep 1; exit 0', what: 'success' }
+  {
+    name: 'the helper suppresses every exit event',
+    edits: [['static void Write(string line) { lock', 'static void Write(string line) { if (line.Contains("\\\"event\\\":\\\"exit\\\"")) return; lock']], body: 'sleep 1; exit 0', what: 'success'
+  },
+  {
+    name: 'the member watcher skips its empty-confirm re-query',
+    edits: [['if (members.Count == 0)', 'if (true)']], body: 'sleep 1; sleep 3 &', noPort: true, what: 'late member',
+    verify: (r) => assert.ok(r.lagMs !== null && r.lagMs >= 1_500, 'the empty-confirm re-query observes the grandchild before release')
+  }
 ];
 
 test('MUTANT CENSUS: every mutant applies once and dies at the assertion that names its guarantee', { timeout: 300_000 }, async (t) => {
@@ -499,8 +550,13 @@ test('MUTANT CENSUS: every mutant applies once and dies at the assertion that na
   // The helper: a mutated copy compiled and run live; the source pins name the same guarantee.
   for (const m of HELPER_MUTANTS) {
     await t.test(`helper mutant: ${m.name}`, { skip: LIVE_SKIP }, async (tt) => {
-      const exe = helper(tt, mutatedText('resources/heavyjob/guppy-heavyjob.cs', m.edits, m.name));
-      await assert.rejects(async () => assertFreed(await liveRelease(tt, { exe, body: m.body }), m.what), /THE SLOT IS FREED WITHIN 2 S/);
+      let source = mutatedText('resources/heavyjob/guppy-heavyjob.cs', m.edits, m.name);
+      if (m.noPort) source = noPortNoticesHelperSource(source);
+      const exe = helper(tt, source);
+      await assert.rejects(async () => {
+        const r = await liveRelease(tt, { exe, body: m.body });
+        if (m.verify) m.verify(r); else assertFreed(r, m.what);
+      });
     });
   }
 });
