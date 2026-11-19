@@ -8,7 +8,11 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const loadTs = require('./load-ts.cjs');
 const { readSource } = require('./read-source.cjs');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const { childBytes, electronExe } = require('./tools/pty-child.cjs');
+const { consoleNode, peSubsystem, KEY } = require('./tools/console-node.cjs');
 
 const X10_HIGH_COLUMN = '\x1b[M \x85!';
 
@@ -32,17 +36,52 @@ test('ONBINARY-DROP: helper keeps a JS string for ConPTY and raw latin-1 bytes f
   assert.deepEqual([...posix], [0x1b, 0x5b, 0x4d, 0x20, 0x85, 0x21]);
 });
 
-test('ONBINARY-DROP: win32 ConPTY preserves the high coordinate only via string (Buffer mutant is red)', { skip: process.platform !== 'win32' }, async () => {
+// The child must be ON the pseudoconsole: a console-subsystem Node, never electron.exe (see console-node.cjs).
+test('ONBINARY-DROP: win32 ConPTY preserves the high coordinate only via string (Buffer mutant is red)', { skip: process.platform !== 'win32' }, async (t) => {
   const { ptyBinaryInput } = loadTs('src/main/ptyBinaryInput.ts');
-  assert.deepEqual(await childBytes(ptyBinaryInput(X10_HIGH_COLUMN, 'win32')), [0x20, 0xc2, 0x85, 0x21]);
-  assert.deepEqual(await childBytes(Buffer.from(X10_HIGH_COLUMN, 'latin1')), [0x20, 0x21],
+  const node = consoleNode();
+  t.diagnostic(`PTY child: ${node.file} ${node.version} (from ${node.from})`);
+  assert.deepEqual(await childBytes(ptyBinaryInput(X10_HIGH_COLUMN, 'win32'), { file: node.file }), [0x20, 0xc2, 0x85, 0x21]);
+  assert.deepEqual(await childBytes(Buffer.from(X10_HIGH_COLUMN, 'latin1'), { file: node.file }), [0x20, 0x21],
     'the Buffer mutant loses 0x85 at ConPTY UTF-8 decoding');
 });
 
-test('ONBINARY-DROP: POSIX real PTY receives the raw X10 bytes', { skip: process.platform === 'win32' }, async () => {
+test('ONBINARY-DROP: POSIX real PTY receives the raw X10 bytes', { skip: process.platform === 'win32' }, async (t) => {
   const { ptyBinaryInput } = loadTs('src/main/ptyBinaryInput.ts');
-  assert.deepEqual(await childBytes(ptyBinaryInput(X10_HIGH_COLUMN, process.platform)),
+  const node = consoleNode();
+  t.diagnostic(`PTY child: ${node.file} ${node.version} (from ${node.from})`);
+  assert.deepEqual(await childBytes(ptyBinaryInput(X10_HIGH_COLUMN, process.platform), { file: node.file }),
     [0x1b, 0x5b, 0x4d, 0x20, 0x85, 0x21]);
+});
+
+test('ONBINARY-DROP: consoleNode() rejects electron.exe and any GUI-subsystem exe by name, and never falls back', (t) => {
+  const electron = electronExe();
+  const asElectron = { versions: { ...process.versions, electron: '0.0.0' }, execPath: electron };
+  // The env key is used first, and a bad one is a named failure (not passed over for PATH).
+  assert.throws(() => consoleNode({ ...asElectron, env: { [KEY]: electron, PATH: process.env.PATH } }),
+    (e) => e.message.startsWith(`no console node.exe: ${KEY} is electron.exe (${electron})`));
+  // None found under Electron: fail by name; process.execPath is not a fallback.
+  assert.throws(() => consoleNode({ ...asElectron, env: { PATH: '' } }),
+    { message: `no console node.exe: set ${KEY} or put node on PATH` });
+  if (process.platform !== 'win32') return;
+  assert.equal(peSubsystem(electron), 2, 'electron.exe is a GUI-subsystem program');
+  // The subsystem is read from the file: a GUI exe is refused under any name, before it is run.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'guppy-console-node-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const fake = path.join(dir, 'node.exe');
+  const head = Buffer.alloc(0x40 + 24 + 70);
+  head.write('MZ', 0, 'latin1'); head.writeUInt32LE(0x40, 0x3c);
+  head.write('PE\0\0', 0x40, 'latin1'); head.writeUInt16LE(2, 0x40 + 24 + 68);
+  fs.writeFileSync(fake, head);
+  const ran = [];
+  assert.throws(() => consoleNode({ ...asElectron, env: { [KEY]: fake }, run: (...a) => { ran.push(a); return 'v1.2.3'; } }),
+    (e) => e.message.startsWith(`no console node.exe: ${KEY} (${fake}) has PE subsystem 2 (GUI), not 3 (console)`));
+  assert.deepEqual(ran, [], 'a refused exe is never started');
+  // What it does accept on this machine is a console exe that answers --version.
+  const real = consoleNode();
+  assert.equal(peSubsystem(real.file), 3);
+  assert.match(real.version, /^v\d+\.\d+\.\d+/);
+  assert.doesNotMatch(path.basename(real.file), /^electron/i);
 });
 
 // ONBINARY-DROP-ELECTRON-FILE-NEVER-EXITS-108. electron.exe is a GUI-subsystem program: Windows does not
