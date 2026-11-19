@@ -155,10 +155,43 @@ test('a worktree with no links, or already gone: removeWorktree behaves as befor
   assert.notEqual(again.refused, true, 'a missing worktree is not a link refusal');
 });
 
-test('RUNTIME PIN, the worker scratch dir: a raw recursive rmSync removes a junction inside as a link under Node, and deletes THROUGH it under Electron on Windows', (t) => {
-  // Why removeWorkerScratch does not use rmSync({recursive}) (ELECTRON-RMSYNC-LINK-SAFE-108: it calls
-  // removePathLinkSafe). Node removes a junction/symlink as a link; Electron's fs, the runtime the app
-  // runs on, empties the target. Each runtime is pinned so a change in either one shows here.
+test('the worker scratch dir (removeWorkerScratch): the removal it makes takes a junction inside as a link, THE TARGET SURVIVES on Node and on Electron', async (t) => {
+  // The safety claim (data loss if it fails), on whichever runtime runs this file: the suite runs it
+  // under Node and under Electron as Node. index.ts cannot be loaded in a test, so this makes the one
+  // call removeWorkerScratch makes on its folder, removePathLinkSafe(dir), and pins that the function
+  // makes that call and no other removal.
+  // RED-BEFORE: with removePathLinkSafe put back to a raw recursive rmSync the two sentinels are gone
+  // under Electron; with removeWorkerScratch put back to a raw recursive rmSync the pin fails.
+  const s = setup(t);
+  const shared = s.target('shared');
+  const nested = s.target('nested');
+  const scratch = path.join(s.base, 'agents', 'worker-1');
+  fs.mkdirSync(path.join(scratch, 'outbox'), { recursive: true });
+  fs.writeFileSync(path.join(scratch, 'memory.md'), 'notes');
+  fs.writeFileSync(path.join(scratch, 'outbox', 'm.json'), '{}');
+  fs.symlinkSync(shared, path.join(scratch, 'node_modules'), 'junction');
+  fs.mkdirSync(path.join(scratch, 'work', 'deep'), { recursive: true });
+  fs.symlinkSync(nested, path.join(scratch, 'work', 'deep', 'j'), 'junction');
+
+  await loadTs('src/main/linkSafeRemove.ts').removePathLinkSafe(scratch);
+  assert.equal(fs.existsSync(scratch), false, 'the scratch dir is gone');
+  assert.equal(fs.existsSync(sentinel(shared)), true, 'THE JUNCTION TARGET SURVIVES');
+  assert.equal(fs.existsSync(sentinel(nested)), true, 'A NESTED JUNCTION TARGET SURVIVES');
+
+  const src = codeOnly(readSource('src/main/index.ts')).replace(/\r\n/g, '\n');
+  const a = src.indexOf('async function removeWorkerScratch(workerId: string): Promise<void> {');
+  const b = src.indexOf('\n}\n', a);
+  assert.ok(a >= 0 && b > a, 'index.ts has removeWorkerScratch');
+  const body = src.slice(a, b);
+  assert.match(body, /try \{ await removePathLinkSafe\(dir\); \}/, 'removeWorkerScratch removes its folder with removePathLinkSafe, awaited');
+  assert.doesNotMatch(body, /\brm(Sync)?\(|\brmdir(Sync)?\(|\bunlink(Sync)?\(/, 'and with nothing else');
+});
+
+test('RUNTIME PIN (documentation only, no product code): a raw recursive rmSync removes a junction inside a folder as a link under Node, and deletes THROUGH it under Electron on Windows', (t) => {
+  // Why removeWorkerScratch does not use rmSync({recursive}) (ELECTRON-RMSYNC-LINK-SAFE-108). The test
+  // above is the safety claim; this one only records what each runtime's own rm does, so a change in
+  // either runtime shows here. Node removes a junction/symlink as a link; Electron's fs, the runtime
+  // the app runs on, empties the target.
   const throughLink = !!process.versions.electron && process.platform === 'win32';
   const s = setup(t);
   const shared = s.target('shared');
