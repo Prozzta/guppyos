@@ -3762,23 +3762,17 @@ function ensureDefaultMissions(): void {
 // ─── Coordination helpers. The heartbeat (Lane A #1) is retired: ZT-I4's floor digest
 // (floorDigest.ts) replaces its quiet/stuck heuristics and its re-engage message. ───
 
-/** Newest coordination time for one agent: its own outbox + outbox/.sent and memory.md mtimes,
+/** Newest coordination time for one agent: its own outbox + outbox/.sent and memory.md mtimes
+ *  (`fileTime`: read off the main thread by hive.coordinationFileTimes, LAG-NAMED-STALLS-RESIDUAL-108),
  *  plus its last ACTED mail transition from the ledger. Deliberately excludes PTY output, so
  *  "no-progress" means "not coordinating" even while the agent is busy printing tokens. Handling
  *  mail IS coordination (without it an inbox-ack turn reads as no-progress, issue #109's second
  *  trigger), but since 1.1.75 the HARNESS moves handled mail into inbox/.done, so neither the
  *  inbox nor the .done mtime is the agent's doing (ZT-I1-MAIL §11.8 #11): the ledger's `acted`
  *  transition is the signal. A delivery into the inbox is the sender's act, not this agent's. */
-function lastCoordinationAt(agentId: string): number {
-  const root = hive.root();
-  if (!root) return 0;
-  const times: number[] = [0, mailCoordinationAt(hive.mail, agentId)];
-  const pushMtime = (p: string): void => { try { times.push(statSync(p).mtimeMs); } catch { /* missing */ } };
-  const dir = join(root, 'agents', agentId);
-  pushMtime(join(dir, 'outbox'));
-  pushMtime(join(dir, 'outbox', '.sent'));
-  pushMtime(join(dir, 'memory.md'));
-  return Math.max(...times);
+function lastCoordinationAt(agentId: string, fileTime: number): number {
+  if (!hive.root()) return 0;
+  return Math.max(0, mailCoordinationAt(hive.mail, agentId), fileTime);
 }
 
 // MODEL-PINBACK user/auto: a live model switch counts as the user's only when HUMAN- or GOD-origin
@@ -3922,7 +3916,18 @@ function breakerToast(title: string, body: string): void {
  *  emit each BreakerState on control:breakerState (Seam 2), and enforce any
  *  escalation. God is in the LEDGER (cost visibility) but NOT the breaker inputs
  *  (the heartbeat manages god; we never auto-steer/kill the orchestrator). */
-function runBreakerBeat(progressWindowMs: number): void {
+let breakerBeatBusy = false;
+async function runBreakerBeat(progressWindowMs: number): Promise<void> {
+  if (!hive.enabled()) return;
+  // LAG-NAMED-STALLS-RESIDUAL-108: the agents' coordination files are stat'ed off the main thread
+  // first; everything after the await is the beat as it was. A beat still waiting when the next
+  // one fires is not doubled. An agent registered during the wait has no time yet: its breaker
+  // input starts at the next beat.
+  if (breakerBeatBusy) return;
+  breakerBeatBusy = true;
+  let fileTimes: Map<string, number>;
+  const asked = Object.entries(hive.registry().agents).filter(([, a]) => !a.archived && !a.isAssistant).map(([id]) => id);
+  try { fileTimes = await hive.coordinationFileTimes(asked); } finally { breakerBeatBusy = false; }
   if (!hive.enabled()) return;
   const reg = hive.registry();
   const now = Date.now();
@@ -3978,12 +3983,14 @@ function runBreakerBeat(progressWindowMs: number): void {
     // collector under this agent's id — an idle parent supervising a hard-
     // working background fleet is progressing, not wedged. Observed live: the
     // one residual no-progress false positive after the #109 fixes.
+    const fileTime = fileTimes.get(id);
+    if (fileTime === undefined) continue;
     const spans = telemetry.getSpans(id);
     const lastSpanAt = spans.length ? spans[spans.length - 1].ts : 0;
     inputs.push({
       agentId: id,
       sample,
-      progressing: now - lastCoordinationAt(id) < progressWindowMs || now - lastSpanAt < progressWindowMs
+      progressing: now - lastCoordinationAt(id, fileTime) < progressWindowMs || now - lastSpanAt < progressWindowMs
     });
   }
   for (const d of breaker.tick(inputs, now)) {
@@ -9127,7 +9134,7 @@ function armAlwaysOnBeats(): void {
     (blobFacesTimer as { unref?: () => void }).unref?.();
   }
   if (breakerBeatTimer) clearInterval(breakerBeatTimer);
-  breakerBeatTimer = setInterval(() => { try { runBreakerBeat(300_000); } catch (e) { console.error('[breaker beat]', e); } }, 30_000);
+  breakerBeatTimer = setInterval(() => { void runBreakerBeat(300_000).catch((e) => { console.error('[breaker beat]', e); }); }, 30_000);
   // REQUESTS-TAB-STALE (1.1.83): close the requests whose work is provably finished. Data only.
   if (staleRequestsTimer) clearInterval(staleRequestsTimer);
   runStaleRequestsBeat();

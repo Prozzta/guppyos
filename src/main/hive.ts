@@ -914,6 +914,22 @@ export class HiveManager {
       if (--this.asyncReads === 0) for (const done of this.readDrained.splice(0)) done();
     }
   }
+  /**
+   * LAG-NAMED-STALLS-RESIDUAL-108: for each agent asked, the newest mtime (ms) of its own
+   * coordination files: outbox, outbox/.sent and memory.md; 0 when it has none. The breaker beat
+   * awaits this instead of three statSync calls per agent on the main thread. The inbox and
+   * inbox/.done are deliberately not here: they are the sender's and the harness's doing.
+   * After dispose() nothing is read (countedRead refuses) and every agent is 0.
+   */
+  async coordinationFileTimes(agentIds: string[]): Promise<Map<string, number>> {
+    const root = this.root();
+    const mtime = (p: string): Promise<number> => (root ? this.countedRead(p, () => fsPromises.stat(p)).then((s) => s.mtimeMs, () => 0) : Promise.resolve(0));
+    const rows = await Promise.all(agentIds.map(async (id): Promise<[string, number]> => {
+      const dir = join(root ?? '', 'agents', id);
+      return [id, Math.max(0, ...await Promise.all([mtime(join(dir, 'outbox')), mtime(join(dir, 'outbox', '.sent')), mtime(join(dir, 'memory.md'))]))];
+    }));
+    return new Map(rows);
+  }
   /** Resolves once none of this manager's async reads is open. Call after dispose(), before the delete. */
   drainReads(): Promise<void> {
     return this.asyncReads === 0 ? Promise.resolve() : new Promise((done) => { this.readDrained.push(done); });
