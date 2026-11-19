@@ -249,6 +249,14 @@ test('tasks-all prints hot + archive; tasks-unsplit --yes restores one tasks.jso
   const r = rig(t, tasks);
   await r.hive.archivePass(NOW);
   await r.hive.patchTask('U2', { notes: 'hot edit' });
+  // LAG-TASKS-WRITE-SYNC-READ-108: the async write installs the tasks cache and arms the folder
+  // watcher, so the event of our own rename can arrive late and refresh (stat + read) tasks.json.
+  // A read held open across the CLI's renameSync is EPERM on Windows. This test is about the CLI,
+  // not the watcher: stop the watch, then wait for any refresh already in flight, so the hive is
+  // idle before an outside process rewrites the file (on 463adeb5 nothing was armed here yet).
+  r.hive.closeAuthorityWatchers();
+  await Promise.all([...r.hive.authorityRefreshes.values()]);
+  await r.hive.drainReads();
   let out = '';
   const io = { out: (s) => { out += s; }, err: (s) => { out += s; } };
   assert.equal(await cli.main(['all', '--root', r.root], {}, io), 0);
