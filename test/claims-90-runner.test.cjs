@@ -11,6 +11,7 @@ require('./tools/mutant-runner-helper.cjs').gate(__filename);
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const { rmTree } = require('./tools/rm-tree.cjs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
@@ -35,7 +36,7 @@ test('the snapshot check passes an intact copy and names a changed or missing fi
   assert.deepEqual(verifySnapshot(dir).diffs, ['changed hive/a.jsonl']);
   fs.rmSync(path.join(dir, 'hive', 'a.jsonl'));
   assert.deepEqual(verifySnapshot(dir).diffs, ['missing hive/a.jsonl']);
-  fs.rmSync(dir, { recursive: true, force: true });
+  rmTree(dir);
 });
 
 test('items: unique ids, an agent-id asker, at most 3 searches, each an argv list of strings', () => {
@@ -48,7 +49,7 @@ test('items: unique ids, an agent-id asker, at most 3 searches, each an argv lis
   bad([{ id: 'a', asker: 'C:/Dunder/hive', searches: [] }], /bad asker/);
   bad([{ id: 'a', asker: 'x', searches: [['search', 'a'], ['search', 'b'], ['search', 'c'], ['search', 'd']] }], /at most 3/);
   bad([{ id: 'a', asker: 'x', searches: ['search q'] }], /argv list/);
-  fs.rmSync(dir, { recursive: true, force: true });
+  rmTree(dir);
 });
 
 test('arguments: snapshot, addendum, items and out are required; nothing unknown is accepted', () => {
@@ -139,7 +140,7 @@ test('PIN: the contained answerer reads what the tree\'s own hook gives it (M4, 
 test('answerer: hook settings follow the installed shape; env and transcript checks', (tc) => {
   const { settingsFor, childEnv, readTranscript, styleDeviation, parseItems: answererItems } = require('./claims-90/answerer.cjs');
   const itemsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'c90-ai-'));
-  tc.after(() => fs.rmSync(itemsDir, { recursive: true, force: true }));
+  tc.after(() => rmTree(itemsDir));
   const itemsFile = path.join(itemsDir, 'items.jsonl');
   fs.writeFileSync(itemsFile, [{ itemId: 'DV001', asker: 'god', question: 'q?', group: 'F' }, { id: 'P1', asker: 'jim', question: 'r?' }].map((r) => JSON.stringify(r)).join('\n'));
   assert.deepEqual(answererItems(itemsFile).map((i) => i.id), ['DV001', 'P1'], 'the DEV files name the id itemId');
@@ -187,7 +188,7 @@ test('answerer: hook settings follow the installed shape; env and transcript che
   assert.deepEqual(t.leaks.map((l) => l.id), ['2', '3'], 'a live path and a Read outside the saved outputs');
   assert.equal(t.init.otherPlugins, 0);
   assert.equal(t.answer, 'current: x');
-  fs.rmSync(dir, { recursive: true, force: true });
+  rmTree(dir);
 });
 
 test('the addendum check names a changed file or another snapshot; refs at T_s come from the reflog', () => {
@@ -198,7 +199,7 @@ test('the addendum check names a changed file or another snapshot; refs at T_s c
   assert.deepEqual(verifyAddendum(dir, 'm2').diffs, ['it names another snapshot']);
   fs.writeFileSync(path.join(dir, 'world.json'), '{"x":1}');
   assert.deepEqual(verifyAddendum(dir, 'm1').diffs, ['changed world.json']);
-  fs.rmSync(dir, { recursive: true, force: true });
+  rmTree(dir);
   const a = 'a'.repeat(40); const b = 'b'.repeat(40); const z = '0'.repeat(40);
   const log = [`${z} ${a} X <x> 100 +0000\tfetch`, `${a} ${b} X <x> 200 +0000\tfetch`].join('\n');
   assert.equal(valueAt(log, 99), null, 'not created yet');
@@ -293,7 +294,7 @@ test('C0b: memory.md reads (Read, or a read-only grep/cat/head/tail/sed -n) go t
   assert.match(child, /permissionDecision: 'allow', updatedInput: \{ \.\.\.p\.tool_input, file_path: m\.target \} \}/);
   assert.match(child, /p\.tool_name === 'Bash' \? memoryMdCommand\(command, hive\)/);
   assert.match(child, /permissionDecision: 'allow', updatedInput: \{ \.\.\.p\.tool_input, command: b\.command \} \}/);
-  fs.rmSync(dir, { recursive: true, force: true });
+  rmTree(dir);
 });
 
 test('--build: the branch build is the tree, its out/ the hook shape, its Electron and memory-cli the shim; run.json identity (god 7fea2c)', () => {
@@ -359,7 +360,7 @@ test('--build: the branch build is the tree, its out/ the hook shape, its Electr
   fs.mkdirSync(path.join(build, 'dist', 'win-unpacked', 'resources'), { recursive: true });
   fs.writeFileSync(path.join(build, 'dist', 'win-unpacked', 'resources', 'app.asar'), 'asar');
   assert.equal(A.buildInfo(build).asarSha256, sha('asar'));
-  fs.rmSync(build, { recursive: true, force: true });
+  rmTree(build);
 
   const src = codeOnly(readSource(path.join(__dirname, 'claims-90', 'answerer.cjs')));
   assert.match(src, /const shape = o\.build \? buildHookShape\(o\.build\) : installedHookShape\(o\.resources\);/);

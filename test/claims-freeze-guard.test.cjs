@@ -9,6 +9,7 @@ require('./tools/mutant-runner-helper.cjs').gate(__filename);
 const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
+const { rmTree } = require('./tools/rm-tree.cjs');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
@@ -25,7 +26,7 @@ const AUTH = 'origin/guppy/int-1.1.90';
 /** A repo at the measured release 1.1.90 (base), then INT with the window opened on it. */
 function repo(t) {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'claims-freeze-'));
-  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  t.after(() => rmTree(cwd));
   git(cwd, ['init', '-q']);
   version(cwd, '1.1.90');
   write(cwd, 'src/main/claims/a.ts', 'export const a = 1;\n');
@@ -46,7 +47,7 @@ function repo(t) {
   // INT lives on a remote, as for real: the gate fetches origin/guppy/int-1.1.90 itself. `int` in a
   // gate call stands for that ref, pushed from the local int first.
   const origin = fs.mkdtempSync(path.join(os.tmpdir(), 'claims-freeze-origin-'));
-  t.after(() => fs.rmSync(origin, { recursive: true, force: true }));
+  t.after(() => rmTree(origin));
   git(origin, ['init', '-q', '--bare']);
   git(cwd, ['remote', 'add', 'origin', origin]);
   const run = (...argv) => {

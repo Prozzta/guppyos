@@ -33,6 +33,7 @@ require('./tools/own-job.cjs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const { rmTree } = require('./tools/rm-tree.cjs');
 const path = require('node:path');
 const Module = require('node:module');
 const { execFileSync, spawnSync } = require('node:child_process');
@@ -311,7 +312,7 @@ test('--run status file: done/total and the current file, then done with rc and 
 test('--run status file: a linked worktree has its own; the CLI refusal exits 2 and runs nothing', () => {
   const { dir, base, tip } = repo();
   const wt = tempDir('related-wt-');
-  fs.rmSync(wt, { recursive: true, force: true });
+  rmTree(wt);
   git(dir, 'worktree', 'add', '-q', '--detach', wt, tip);
   try {
     const own = REAL.runStatusPath(wt);
