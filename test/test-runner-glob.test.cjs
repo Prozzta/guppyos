@@ -849,7 +849,8 @@ test('PIN: against the REAL test directory discovery is root tests plus only fol
   // MAIL-EPOCHS-TEARDOWN-RACE-108: + 1 (hive-read-drain). 647 + 1 = 648 (root test/*.test.cjs 606).
   // ELECTRON-RM-READONLY-EPERM-108: + 1 (rm-tree-readonly-108). 648 + 1 = 649 (root test/*.test.cjs 607).
   // PTY-NATURAL-EXIT-NO-KILL-LEAK: + 1 (pty-natural-exit-leak). 649 + 1 = 650 (root test/*.test.cjs 608).
-  assert.equal(files.length, 650,`the focused suite must retain its pre-fold file count, got ${files.length}`);
+  // ELECTRON-RM-EPERM-UNKNOWN-CAUSE-108: + 1 (hive-dispose-closes-handles-108). 650 + 1 = 651 (root test/*.test.cjs 609).
+  assert.equal(files.length, 651,`the focused suite must retain its pre-fold file count, got ${files.length}`);
   assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
   assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');
   assert.ok(files.includes(path.join('start-fixes-163', 'start-fixes-163-boot-submit.test.cjs')), 'the start-fixes feature folder is included');

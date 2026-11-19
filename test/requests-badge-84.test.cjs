@@ -275,7 +275,10 @@ test('D/E (ledger): the owner closes (owner:), the requester withdraws (withdraw
 async function floor(t) {
   const home = fs.mkdtempSync(path.join(JAIL, 'floor-'));
   const hive = new HiveManager(() => home, () => true);
-  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
+  // Close before delete: the ledger guard's watcher sits on <home>/hive, and Electron's rmSync fails
+  // (ENOTEMPTY, then EPERM on the jail) on a tree with an open watcher. After-hooks run in the order
+  // registered, so a hook a test adds later runs AFTER this delete: the stop belongs here.
+  t.after(async () => { hive.stopLedgerGuard(); hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   await hive.ensureAgent({ id: 'god-1', name: 'Michael', provider: 'claude', cwd: home, isGod: true });
   await hive.ensureAgent({ id: 'andy-1', name: 'Andy', provider: 'claude', cwd: home });
   await hive.ensureAgent({ id: 'jim-1', name: 'Jim', provider: 'claude', cwd: home });
@@ -287,8 +290,7 @@ const closedRows = (hive) => hive.logTail(500).filter((r) => r && r.kind === 'ma
 
 test('hive: A tie by card, B answers at routing, C supersedes; each close is logged with its reason', async (t) => {
   const { hive } = await floor(t);
-  hive.startLedgerGuard();
-  t.after(() => hive.stopLedgerGuard());
+  hive.startLedgerGuard(); // stopped by floor()'s hook, before the folder is deleted
   hive.addTask({ id: 'SHIP-IT-1', title: 'ship', status: 'doing', dependsOn: [] });
   // C90-MAILCARD: an agent's message names its card (MISC-1, a neutral card); god's direct mail says card "none".
   hive.addTask({ id: 'MISC-1', title: 'misc', status: 'doing', dependsOn: [] });
