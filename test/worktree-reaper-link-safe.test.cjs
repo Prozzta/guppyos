@@ -19,9 +19,9 @@ require('./tools/mutant-runner-helper.cjs').gate(__filename);
  * installed Guppy.exe as Node (worktree-reaper-link-safe-child.cjs). Everything is under one
  * temp folder; no git is run and nothing outside the temp folder is named.
  *
- * MUTANTS:
+ * MUTANTS (machine-run: node test/tools/worktree-reaper-link-safe-mutants.cjs):
  *   R1 rm.removeTree(p) in removeEntry -> ops.rmSync(p, { recursive: true, force: true })
- *        -> real, Electron (both victims emptied); links count; SOURCE
+ *        -> real, Electron (both victims emptied, named in the failure); SOURCE
  *   R2 the refusal in applyReap -> if (false)           -> no-addon, both runtimes
  *   R3 removeEntry's lstatSync -> statSync              -> SOURCE
  */
@@ -69,17 +69,26 @@ function build(base) {
   link(goneTarget, path.join(tree, 'src', 'dangling')); fs.rmdirSync(goneTarget);
 }
 
+// Both targets are listed before anything is asserted, and the one failure names the files left in each:
+// a loss in live/top must not hide what happened to live/nested.
+const VICTIM_FILES = ['precious.txt', 'sub/b.txt'];
 function victimsIntact(base) {
+  const listing = {}, whole = {}, left = [];
   for (const name of VICTIMS) {
     const d = path.join(base, 'live', name);
-    assert.deepEqual(fs.existsSync(d) ? fs.readdirSync(d, { recursive: true }).map((f) => f.split(path.sep).join('/')).sort() : 'gone',
-      ['precious.txt', 'sub', 'sub/b.txt'], `THE LINK TARGET live/${name} SURVIVES WITH EVERYTHING IN IT`);
-    assert.equal(fs.readFileSync(path.join(d, 'precious.txt'), 'utf8'), `live ${name}`);
+    listing[name] = fs.existsSync(d) ? fs.readdirSync(d, { recursive: true }).map((f) => f.split(path.sep).join('/')).sort() : 'gone';
+    whole[name] = ['precious.txt', 'sub', 'sub/b.txt'];
+    left.push(`live/${name}: ${VICTIM_FILES.filter((rel) => fs.existsSync(path.join(d, rel))).length} of ${VICTIM_FILES.length} files left`);
   }
+  assert.deepEqual(listing, whole, `THE LINK TARGETS SURVIVE WITH EVERYTHING IN THEM (${left.join(', ')})`);
+  for (const name of VICTIMS) assert.equal(fs.readFileSync(path.join(base, 'live', name, 'precious.txt'), 'utf8'), `live ${name}`);
 }
 
 function check(base, variant, out) {
   const work = path.join(base, 'work');
+  // The harm first: a reap that went through a link is reported as the files lost, before any count or
+  // return value is judged (a mutant that also breaks the links count would otherwise fail there and hide it).
+  victimsIntact(base);
   assert.equal(out.length, 1);
   if (variant === 'no-addon') {
     // Kept exactly as it was: not renamed, not archived, nothing in it touched.
@@ -89,14 +98,12 @@ function check(base, variant, out) {
     assert.deepEqual(fs.readdirSync(tree).sort(), ['a.txt', 'node_modules', 'notes.md', 'src']);
     assert.deepEqual(fs.readdirSync(path.join(tree, 'src')).sort(), ['dangling', 'deep', 'locked.bin']);
     for (const l of ['node_modules', 'src/deep/assets', 'src/dangling']) assert.equal(fs.lstatSync(path.join(tree, l)).isSymbolicLink(), true, `${l} is still a link`);
-    victimsIntact(base);
     return;
   }
   assert.deepEqual({ name: out[0].name, result: out[0].result, error: out[0].error }, { name: 'old-tree', result: 'deleted', error: undefined }, JSON.stringify(out));
   assert.equal(out[0].links, 3, 'the remover counted the links it removed as links');
   assert.deepEqual(fs.readdirSync(work).sort(), ['_reaped-md'], 'the tree is gone and no tombstone is left');
   assert.equal(fs.readFileSync(path.join(work, '_reaped-md', 'old-tree', 'notes.md'), 'utf8'), 'a note', 'its .md was archived first');
-  victimsIntact(base);
 }
 
 // The runner jails LOCALAPPDATA; the shared helper finds the installed app read-only or gives a skip reason.
