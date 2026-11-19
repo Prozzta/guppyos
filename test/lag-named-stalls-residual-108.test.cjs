@@ -377,11 +377,14 @@ test('MAIL REBUILD: starting the router loads every active agent\'s ledger off t
   const root = a.root();
   const { calls } = await syncCalls(root, async () => {
     a.startRouter(60_000);
-    t.after(() => a.stopRouter());
-    for (let turn = 0; a.mail.loadedDoc('andy-1') === null || a.mail.loadedDoc('god-1') === null; turn++) {
-      assert.ok(turn < 2000, 'the router never loaded the ledgers');
-      await new Promise((r) => setTimeout(r, 5));
-    }
+    // The floor's own teardown (registered first, so it runs first) deletes the folder: the router
+    // is stopped and its pass in flight has ended before the test body returns, pass or fail.
+    try {
+      for (let turn = 0; a.mail.loadedDoc('andy-1') === null || a.mail.loadedDoc('god-1') === null; turn++) {
+        assert.ok(turn < 2000, 'the router never loaded the ledgers');
+        await new Promise((r) => setTimeout(r, 5));
+      }
+    } finally { a.stopRouter(); await a.routerIdle(); }
   });
   assert.deepEqual(rebuildReads(calls).filter((c) => !/^existsSync:inbox$/.test(c)), [], JSON.stringify(calls));
   assert.deepEqual(clockless(a.mail.loadedDoc('andy-1')), clockless(b.mail.ledger('andy-1')));
