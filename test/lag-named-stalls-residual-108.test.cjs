@@ -439,11 +439,21 @@ test('RELEASE RUNS NON-VACUOUS: the synchronous sweep reads the file, lists the 
   assert.deepEqual([first['1.1.79'], first['1.1.80'], first['1.1.81'], typeof first['1.1.82']], [500, 1000, undefined, 'number']);
 });
 
+test('RELEASE RUNS: a load that has landed clears its in-flight mark', async (t) => {
+  const { hive } = await releaseFloor(t);
+  assert.equal(typeof hive.readReleaseRunsAhead, 'function', 'HiveManager.readReleaseRunsAhead');
+  await hive.readReleaseRunsAhead();
+  assert.equal(hive.releaseRunsLoading, null, 'else a sweep that found the load in flight re-arms on it for ever');
+});
+
 test('RELEASE RUNS: read ahead, the sweep seeds from the logs, closes the shipped ask and writes the file with no synchronous disk work', async (t) => {
   const { hive, old, ran80 } = await releaseFloor(t);
   assert.equal(typeof hive.readReleaseRunsAhead, 'function', 'HiveManager.readReleaseRunsAhead');
   const { calls, result } = await syncCalls(hive.root(), async () => {
     const loaded = hive.readReleaseRunsAhead();
+    // A mark still set here makes the waiting sweep re-arm on a settled promise: an endless
+    // microtask loop that starves every timer, so no assert or watchdog could report it.
+    void loaded.then(() => { if (hive.releaseRunsLoading) { console.error('FAIL: the release-runs load landed with its in-flight mark still set; the sweep would re-arm for ever'); process.exit(1); } });
     const during = hive.autoCloseStaleObligations('1.1.82');   // main's first beat, at arm time
     await loaded;
     return during;
@@ -461,7 +471,6 @@ test('RELEASE RUNS: once read ahead, every later sweep answers from memory and a
   const { hive, old, ran80 } = await releaseFloor(t, { '1.1.70': 7, '1.1.80': 1000 });
   assert.equal(typeof hive.readReleaseRunsAhead, 'function', 'HiveManager.readReleaseRunsAhead');
   await hive.readReleaseRunsAhead();
-  assert.equal(hive.releaseRunsLoading, null, 'a load that has landed clears its in-flight mark (else every sweep re-arms on it for ever)');
   let first;
   const one = await syncCalls(hive.root(), async () => {
     const closed = hive.autoCloseStaleObligations('1.1.82');
@@ -636,9 +645,13 @@ test('COORDINATION: a stat that never settles is waited for once, counts as 0, i
     assert.equal(stuckRows().length, 1, 'one row for one stuck spell');
     free();
     await held;
-    await new Promise((resolve) => setImmediate(resolve));
+    for (let turn = 0; hive.coordinationStats.size; turn++) {
+      assert.ok(turn < 1000, 'the settled stat is dropped');
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    fs.utimesSync(stuckPath, 9000, 9000);
     const three = await bounded(hive.coordinationFileTimes(['andy-1', 'pam-1'], 20));
-    assert.deepEqual([...three], [['andy-1', 3_000_000], ['pam-1', 6_000_000]], 'once it settles the path counts again');
+    assert.deepEqual([...three], [['andy-1', 9_000_000], ['pam-1', 6_000_000]], 'once it settles the path is read afresh, not answered from the old stat');
     assert.equal(asked.filter((p) => p === stuckPath).length, 2);
     assert.equal(stuckRows().length, 1);
   } finally { free(); fs.promises.stat = stat; }
