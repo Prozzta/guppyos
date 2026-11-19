@@ -332,6 +332,7 @@ async function liveRelease(t, o) {
 
 function assertFreed(r, what) {
   assert.ok(r.lagMs !== null, `${what}: THE SLOT IS FREED WITHIN 2 S OF THE JOB'S EXIT (not freed 6 s after it)`);
+  assert.ok(r.lagMs >= 0, `${what}: THE SLOT IS NOT RELEASED BEFORE THE JOB EXITS (released ${r.lagMs} ms before it)`);
   assert.ok(r.lagMs < 2_000, `${what}: THE SLOT IS FREED WITHIN 2 S OF THE JOB'S EXIT (freed ${r.lagMs} ms after)`);
   assert.equal(r.reason, 'job-exit');
 }
