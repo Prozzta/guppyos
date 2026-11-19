@@ -19,9 +19,18 @@ require('./tools/mutant-runner-helper.cjs').gate(__filename);
  * installed Guppy.exe as Node (worktree-reaper-link-safe-child.cjs). Everything is under one
  * temp folder; no git is run and nothing outside the temp folder is named.
  *
- * MUTANTS:
+ * A second, 'nested' fixture holds only plain files and one junction in a subfolder, with no
+ * read-only file and no dangling link: nothing in it can stop a recursive rm before the junction.
+ * It is reaped as the script is, in this process and in the installed Guppy.exe as Node, each
+ * under a temp folder of its own.
+ *
+ * MUTANTS (machine-run: node test/tools/worktree-reaper-link-safe-mutants.cjs):
  *   R1 rm.removeTree(p) in removeEntry -> ops.rmSync(p, { recursive: true, force: true })
- *        -> real, Electron (both victims emptied); links count; SOURCE
+ *        -> real, Electron: a link target is emptied and named in the failure; which one depends
+ *           on where the recursive rm stops (measured 2026-11-19: live/top 0 of 2 left,
+ *           live/nested 2 of 2 left; the cause is unverified)
+ *        -> nested, Electron: the nested junction's target is emptied and named in the failure
+ *        -> SOURCE
  *   R2 the refusal in applyReap -> if (false)           -> no-addon, both runtimes
  *   R3 removeEntry's lstatSync -> statSync              -> SOURCE
  */
@@ -38,14 +47,14 @@ const jail = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'reaper-link
 // The jail holds junctions (after a failure, and always in the no-addon variant, which keeps its tree):
 // remove them as links before the folder. The kept tree also holds a read-only file, which Electron's
 // recursive rmSync refuses (EPERM), so each real file is made writable first; a link is never chmod-ed.
+function freeLinks(p) {
+  const st = fs.lstatSync(p);
+  if (st.isSymbolicLink()) { try { fs.rmdirSync(p); } catch { fs.unlinkSync(p); } return; }
+  if (st.isDirectory()) { for (const n of fs.readdirSync(p)) freeLinks(path.join(p, n)); return; }
+  if ((st.mode & 0o200) === 0) fs.chmodSync(p, 0o666);
+}
 test.after(() => {
-  const walk = (p) => {
-    const st = fs.lstatSync(p);
-    if (st.isSymbolicLink()) { try { fs.rmdirSync(p); } catch { fs.unlinkSync(p); } return; }
-    if (st.isDirectory()) { for (const n of fs.readdirSync(p)) walk(path.join(p, n)); return; }
-    if ((st.mode & 0o200) === 0) fs.chmodSync(p, 0o666);
-  };
-  walk(jail);
+  freeLinks(jail);
   fs.rmSync(jail, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
@@ -69,17 +78,52 @@ function build(base) {
   link(goneTarget, path.join(tree, 'src', 'dangling')); fs.rmdirSync(goneTarget);
 }
 
-function victimsIntact(base) {
-  for (const name of VICTIMS) {
+// Both targets are listed before anything is asserted, and the one failure names the files left in each:
+// a loss in live/top must not hide what happened to live/nested.
+const VICTIM_FILES = ['precious.txt', 'sub/b.txt'];
+function victimsIntact(base, names = VICTIMS) {
+  const listing = {}, whole = {}, left = [];
+  for (const name of names) {
     const d = path.join(base, 'live', name);
-    assert.deepEqual(fs.existsSync(d) ? fs.readdirSync(d, { recursive: true }).map((f) => f.split(path.sep).join('/')).sort() : 'gone',
-      ['precious.txt', 'sub', 'sub/b.txt'], `THE LINK TARGET live/${name} SURVIVES WITH EVERYTHING IN IT`);
-    assert.equal(fs.readFileSync(path.join(d, 'precious.txt'), 'utf8'), `live ${name}`);
+    listing[name] = fs.existsSync(d) ? fs.readdirSync(d, { recursive: true }).map((f) => f.split(path.sep).join('/')).sort() : 'gone';
+    whole[name] = ['precious.txt', 'sub', 'sub/b.txt'];
+    left.push(`live/${name}: ${VICTIM_FILES.filter((rel) => fs.existsSync(path.join(d, rel))).length} of ${VICTIM_FILES.length} files left`);
   }
+  assert.deepEqual(listing, whole, `THE LINK TARGETS SURVIVE WITH EVERYTHING IN THEM (${left.join(', ')})`);
+  for (const name of names) assert.equal(fs.readFileSync(path.join(base, 'live', name, 'precious.txt'), 'utf8'), `live ${name}`);
+}
+
+// The nested fixture: plain files and one junction two folders down, pointing at live/inner. Nothing
+// read-only and no dangling link, so a recursive rm that follows links reaches the junction.
+const INNER = ['inner'];
+function buildNested(base) {
+  const tree = path.join(base, 'work', 'old-tree');
+  write(path.join(base, 'live', 'inner', 'precious.txt'), 'live inner'); write(path.join(base, 'live', 'inner', 'sub', 'b.txt'), 'b');
+  write(path.join(tree, 'a.txt'), 'a');
+  write(path.join(tree, 'notes.md'), 'a note');
+  write(path.join(tree, 'pkg', 'lib', 'b.txt'), 'b');
+  link(path.join(base, 'live', 'inner'), path.join(tree, 'pkg', 'lib', 'assets'));
+}
+function checkNested(base, out) {
+  const work = path.join(base, 'work');
+  victimsIntact(base, INNER); // the harm first, named: 'live/inner: N of 2 files left'
+  assert.equal(out.length, 1);
+  assert.deepEqual({ name: out[0].name, result: out[0].result, error: out[0].error }, { name: 'old-tree', result: 'deleted', error: undefined }, JSON.stringify(out));
+  assert.equal(out[0].links, 1, 'the remover counted the one link it removed as a link');
+  assert.deepEqual(fs.readdirSync(work).sort(), ['_reaped-md'], 'the tree is gone and no tombstone is left');
+}
+/** Runs `fn(base)` on a temp folder of its own; whatever happened, its links go first, as links, then the folder. */
+function inOwnTemp(fn) {
+  const base = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'reaper-link-nested-'));
+  try { return fn(base); }
+  finally { freeLinks(base); fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
 }
 
 function check(base, variant, out) {
   const work = path.join(base, 'work');
+  // The harm first: a reap that went through a link is reported as the files lost, before any count or
+  // return value is judged (a mutant that also breaks the links count would otherwise fail there and hide it).
+  victimsIntact(base);
   assert.equal(out.length, 1);
   if (variant === 'no-addon') {
     // Kept exactly as it was: not renamed, not archived, nothing in it touched.
@@ -89,14 +133,12 @@ function check(base, variant, out) {
     assert.deepEqual(fs.readdirSync(tree).sort(), ['a.txt', 'node_modules', 'notes.md', 'src']);
     assert.deepEqual(fs.readdirSync(path.join(tree, 'src')).sort(), ['dangling', 'deep', 'locked.bin']);
     for (const l of ['node_modules', 'src/deep/assets', 'src/dangling']) assert.equal(fs.lstatSync(path.join(tree, l)).isSymbolicLink(), true, `${l} is still a link`);
-    victimsIntact(base);
     return;
   }
   assert.deepEqual({ name: out[0].name, result: out[0].result, error: out[0].error }, { name: 'old-tree', result: 'deleted', error: undefined }, JSON.stringify(out));
   assert.equal(out[0].links, 3, 'the remover counted the links it removed as links');
   assert.deepEqual(fs.readdirSync(work).sort(), ['_reaped-md'], 'the tree is gone and no tombstone is left');
   assert.equal(fs.readFileSync(path.join(work, '_reaped-md', 'old-tree', 'notes.md'), 'utf8'), 'a note', 'its .md was archived first');
-  victimsIntact(base);
 }
 
 // The runner jails LOCALAPPDATA; the shared helper finds the installed app read-only or gives a skip reason.
@@ -124,6 +166,24 @@ for (const variant of ['real', 'no-addon']) {
     check(base, variant, res.out);
   });
 }
+
+const NESTED = "nested: a junction in a subfolder of the reaped tree is removed as a link, its target survives";
+test(`${NESTED} (this process)`, { skip: process.platform !== 'win32' }, () => inOwnTemp((base) => {
+  buildNested(base);
+  checkNested(base, run('real', base));
+}));
+
+test(`${NESTED}, in the installed Electron as Node`, { skip: guppy.skip }, () => inOwnTemp((base) => {
+  buildNested(base);
+  assert.equal(fs.existsSync(exe), true, `installed Guppy executable missing: ${exe}`);
+  const r = child.spawnSync(exe, [path.join(__dirname, 'worktree-reaper-link-safe-child.cjs'), 'real', base],
+    { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, encoding: 'utf8', timeout: 60_000, windowsHide: true });
+  assert.equal(r.status, 0, `child exit ${r.status}: ${r.stderr || r.stdout}`);
+  const res = JSON.parse(r.stdout);
+  assert.equal(res.ok, true, res.error);
+  assert.match(res.electron, /^\d+\./, 'the child really ran in Electron');
+  checkNested(base, res.out);
+}));
 
 test('SOURCE: the reaper has no recursive rm, no rmSync and no tree walk of its own; a folder goes to the addon', () => {
   const source = fs.readFileSync(SRC, 'utf8').replace(/\r\n/g, '\n');
