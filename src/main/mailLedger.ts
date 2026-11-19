@@ -1558,6 +1558,13 @@ export function rebuildLedger(agentId: string, input: { inbox: DiskMessage[]; do
 }
 
 /** Structural check of a parsed ledger. A document that fails it is treated as corrupt. */
+/** A ledger file's text as a ledger, or why it is not one (`load` rebuilds it then). */
+function parseLedgerText(raw: string, agentId: string): { doc: MailLedgerDoc | null; failure: string | null } {
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch (error) { return { doc: null, failure: `invalid JSON: ${error instanceof Error ? error.message : String(error)}` }; }
+  return validLedgerDoc(parsed, agentId) ? { doc: parsed, failure: null } : { doc: null, failure: 'invalid ledger structure' };
+}
+
 export function validLedgerDoc(x: unknown, agentId: string): x is MailLedgerDoc {
   if (!x || typeof x !== 'object') return false;
   const d = x as Partial<MailLedgerDoc>;
@@ -1688,6 +1695,9 @@ export interface MailLedgerOptions {
   appendLog: (row: Record<string, unknown>) => void;
   /** Log rows (oldest first) for a corrupt-ledger rebuild; bounded by the caller. */
   readLogRows?: () => unknown[];
+  /** LAG-NAMED-STALLS-RESIDUAL-108: the same rows read off the main thread, for a rebuild whose
+   *  ledger was read ahead (stateAsync). */
+  readLogRowsAsync?: () => Promise<unknown[]>;
   clock?: () => number;
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
@@ -1949,8 +1959,9 @@ export class MailLedger {
    * this ledger while the files were being read (a delivery, any ledger call for the agent), what
    * was read is dropped and its ledger is the answer. Every write to a ledger or by the ledger to
    * an inbox goes through `state`, so nothing read here can be older than a loaded ledger.
-   * The rare repairs inside `load` (a corrupt ledger's rebuild, a missing body that came back)
-   * still read synchronously.
+   * LAG-NAMED-STALLS-RESIDUAL-108: a corrupt ledger's rebuild is read here too (.done and the log
+   * rows; the sync log tail listed the hive folder and read every log file on the main thread).
+   * Only its quarantine rename and a missing body that came back still touch the disk in `load`.
    */
   private stateAsync(agentId: string): Promise<AgentLedger> {
     if (!isValidMailId(agentId)) return Promise.reject(new Error(`mail ledger: invalid agent id ${JSON.stringify(agentId).slice(0, 80)}`));
@@ -1972,6 +1983,15 @@ export class MailLedger {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') failure = `unreadable: ${error instanceof Error ? error.message : String(error)}`;
       }
       const dir = await this.readDirAsync(inboxDir);
+      // The text is parsed once, here: a ledger that will be rebuilt has its files read first.
+      const read = failure !== null ? { doc: null, failure } : raw !== null ? parseLedgerText(raw, agentId) : null;
+      let rebuild: { done: DiskMessage[]; logRows: unknown[] } | undefined;
+      if (read && !read.doc && this.opts.readLogRowsAsync) {
+        const done = (await this.readDirAsync(join(inboxDir, '.done'))).msgs;
+        let logRows: unknown[] = [];
+        try { logRows = await this.opts.readLogRowsAsync(); } catch { logRows = []; }
+        rebuild = { done, logRows };
+      }
       // The hive moved, or the synchronous loader got there first: its answer stands.
       if (this.ledgerFile(agentId) !== file || this.ledgers.has(file)) return this.state(agentId);
       const st: AgentLedger = {
@@ -1979,13 +1999,28 @@ export class MailLedger {
         archive: new Set(), archiveTimer: null, archiveAttempt: 0, archiveFailLogged: new Set(), writeFailLogged: false, rev: 0, flying: false
       };
       this.ledgers.set(file, st);
-      this.load(st, { raw, failure, inbox: dir.msgs, names: dir.names });
+      this.load(st, { raw, failure, inbox: dir.msgs, names: dir.names, read, rebuild });
       return st;
     })().finally(() => { if (this.loading.get(file) === flight) this.loading.delete(file); });
     this.loading.set(file, flight);
     return flight;
   }
   private readonly loading = new Map<string, Promise<AgentLedger>>();
+
+  /**
+   * LAG-NAMED-STALLS-RESIDUAL-108: load these agents' ledgers off the main thread (stateAsync), so
+   * the synchronous calls that follow find them loaded: a first load, and above all a corrupt
+   * ledger's rebuild, is then not read on the main thread. A load that fails (a name that is no
+   * agent here) is left to the synchronous call, which reports it.
+   */
+  async warm(agentIds: Iterable<string>): Promise<void> {
+    for (const id of agentIds) {
+      if (!isValidMailId(id)) continue;
+      const file = this.ledgerFile(id);
+      if (!file || this.ledgers.has(file)) continue;
+      try { await this.stateAsync(id); } catch { /* the synchronous call reports it */ }
+    }
+  }
 
   /** `readDir` through node:fs/promises, plus every name in the folder (for `load`'s existence checks). */
   private async readDirAsync(dir: string): Promise<{ msgs: DiskMessage[]; names: Set<string> }> {
@@ -2011,8 +2046,13 @@ export class MailLedger {
   }
 
   /** `pre` (stateAsync): the ledger file's text or read failure, the inbox's messages and its
-   *  names, already read; without it they are read here. */
-  private load(st: AgentLedger, pre?: { raw: string | null; failure: string | null; inbox: DiskMessage[]; names: Set<string> }): void {
+   *  names, already read; without it they are read here. `read`: the text parsed (null: no ledger
+   *  file); `rebuild`: what a corrupt ledger's rebuild reads besides the inbox. */
+  private load(st: AgentLedger, pre?: {
+    raw: string | null; failure: string | null; inbox: DiskMessage[]; names: Set<string>;
+    read: { doc: MailLedgerDoc | null; failure: string | null } | null;
+    rebuild?: { done: DiskMessage[]; logRows: unknown[] };
+  }): void {
     const now = this.now();
     const inboxDir = this.inboxDir(st.agentId)!;
     let raw: string | null = null;
@@ -2033,13 +2073,9 @@ export class MailLedger {
       if (inbox.length) this.log({ kind: 'mail-ledger-migrated', agentId: st.agentId, imported: inbox.length });
       this.markDirty(st);
     } else {
-      let parsed: unknown = null;
-      if (failure === null) {
-        try { parsed = JSON.parse(raw!); } catch (error) { failure = `invalid JSON: ${error instanceof Error ? error.message : String(error)}`; }
-      }
-      if (failure === null && !validLedgerDoc(parsed, st.agentId)) failure = 'invalid ledger structure';
-      if (failure === null) st.doc = parsed as MailLedgerDoc;
-      else this.rebuildCorrupt(st, failure, now);
+      const read = pre?.read ?? (failure !== null ? { doc: null, failure } : parseLedgerText(raw!, st.agentId));
+      if (read.doc) st.doc = read.doc;
+      else this.rebuildCorrupt(st, read.failure!, now, pre);
     }
     // App restart with epochs open (§1.1, §2.4): they close abnormally.
     this.commit(st, applyRestartRecovery(st.doc, now));
@@ -2061,7 +2097,8 @@ export class MailLedger {
     if (st.archive.size) this.markDirty(st);
   }
 
-  private rebuildCorrupt(st: AgentLedger, error: string, now: number): void {
+  /** `pre`: the inbox, and with `rebuild` .done and the log rows, already read (stateAsync). */
+  private rebuildCorrupt(st: AgentLedger, error: string, now: number, pre?: { inbox: DiskMessage[]; rebuild?: { done: DiskMessage[]; logRows: unknown[] } }): void {
     // Never an empty ledger (G4): quarantine, rebuild from log + filesystem, tell the Human.
     let quarantine: string | null = `${st.file}.corrupt-${now}`;
     try {
@@ -2070,9 +2107,11 @@ export class MailLedger {
       try { copyFileSync(st.file, quarantine); } catch { quarantine = null; }
     }
     const inboxDir = this.inboxDir(st.agentId)!;
-    let logRows: unknown[] = [];
-    try { logRows = this.opts.readLogRows?.() ?? []; } catch { logRows = []; }
-    st.doc = rebuildLedger(st.agentId, { inbox: this.readDir(inboxDir), done: this.readDir(join(inboxDir, '.done')), logRows }, now);
+    let logRows: unknown[] = pre?.rebuild?.logRows ?? [];
+    if (!pre?.rebuild) { try { logRows = this.opts.readLogRows?.() ?? []; } catch { logRows = []; } }
+    const inbox = pre ? pre.inbox : this.readDir(inboxDir);
+    const done = pre?.rebuild ? pre.rebuild.done : this.readDir(join(inboxDir, '.done'));
+    st.doc = rebuildLedger(st.agentId, { inbox, done, logRows }, now);
     const entries = Object.keys(st.doc.entries).length;
     this.log({ kind: 'mail-ledger-corrupt', agentId: st.agentId, error, quarantine: quarantine ? basename(quarantine) : null, rebuiltEntries: entries });
     this.issues.set(st.file, { file: `state/mail/${st.agentId}.json`, quarantine: quarantine ? basename(quarantine) : null, error, repaired: true });

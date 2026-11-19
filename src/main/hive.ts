@@ -930,7 +930,8 @@ export class HiveManager {
     root: () => this.root(),
     appendLog: (row) => this.appendLog(row),
     // A corrupt-ledger rebuild reads the recent log (bounded; rotated files included).
-    readLogRows: () => this.logTail(HiveManager.MAIL_REBUILD_LOG_ROWS)
+    readLogRows: () => this.logTail(HiveManager.MAIL_REBUILD_LOG_ROWS),
+    readLogRowsAsync: () => this.logTailAsync(HiveManager.MAIL_REBUILD_LOG_ROWS)
   });
   static readonly MAIL_REBUILD_LOG_ROWS = 50_000;
 
@@ -4213,6 +4214,12 @@ export class HiveManager {
     const root = this.root();
     if (!root) return 0;
     const agentsDir = join(root, 'agents');
+    // LAG-NAMED-STALLS-RESIDUAL-108: every active agent's ledger is loaded off the main thread
+    // before this pass delivers into any of them (a corrupt one is rebuilt from files read there).
+    try {
+      const agents = this.registry().agents;
+      await this.mail.warm(Object.keys(agents).filter((a) => !agents[a]?.archived));
+    } catch { /* the delivery loads what is not loaded */ }
     const fullScan = dirtyOutboxes === undefined;
     let agentIds: string[] = [];
     if (fullScan) {
