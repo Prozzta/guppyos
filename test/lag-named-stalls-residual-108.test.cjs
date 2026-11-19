@@ -461,6 +461,7 @@ test('RELEASE RUNS: once read ahead, every later sweep answers from memory and a
   const { hive, old, ran80 } = await releaseFloor(t, { '1.1.70': 7, '1.1.80': 1000 });
   assert.equal(typeof hive.readReleaseRunsAhead, 'function', 'HiveManager.readReleaseRunsAhead');
   await hive.readReleaseRunsAhead();
+  assert.equal(hive.releaseRunsLoading, null, 'a load that has landed clears its in-flight mark (else every sweep re-arms on it for ever)');
   let first;
   const one = await syncCalls(hive.root(), async () => {
     const closed = hive.autoCloseStaleObligations('1.1.82');
@@ -604,6 +605,67 @@ test('COORDINATION: after dispose nothing is read and every agent asked is 0', a
   try { result = await hive.coordinationFileTimes(['andy-1']); } finally { fs.promises.stat = stat; }
   assert.deepEqual([...result], [['andy-1', 0]]);
   assert.deepEqual(seen.filter((p) => under(hive.root() || JAIL, p)), [], 'no read starts on a disposed manager');
+});
+
+/** The call, or a named failure if it is still waiting after 5 s: an unbounded wait is the defect, not a slow run. */
+function bounded(call) {
+  let timer;
+  const late = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('coordinationFileTimes is still waiting for a stat that never settles')), 5000); });
+  return Promise.race([call, late]).finally(() => clearTimeout(timer));
+}
+
+test('COORDINATION: a stat that never settles is waited for once, counts as 0, is not asked again while open, and is logged once', async (t) => {
+  const hive = await coordFloor(t, { 'andy-1': { outbox: 1000, sent: 3000, memory: 2000 }, 'pam-1': { outbox: 6000, sent: 4000, memory: 5000 } });
+  const stuckPath = path.join(hive.root(), 'agents', 'andy-1', 'outbox', '.sent');
+  const stat = fs.promises.stat;
+  const asked = [];
+  let free;
+  const held = new Promise((resolve) => { free = resolve; });
+  fs.promises.stat = function (p, ...rest) {
+    asked.push(String(p));
+    return String(p) === stuckPath ? held.then(() => stat.call(this, p, ...rest)) : stat.call(this, p, ...rest);
+  };
+  const stuckRows = () => hive.logTail(500).filter((r) => r && r.kind === 'coordination-stat-stuck');
+  try {
+    const one = await bounded(hive.coordinationFileTimes(['andy-1', 'pam-1'], 20));
+    assert.deepEqual([...one], [['andy-1', 2_000_000], ['pam-1', 6_000_000]], 'the beat goes on: the open stat is 0, every other path counts');
+    assert.deepEqual(stuckRows().map((r) => [r.paths, r.first, r.waitMs]), [[1, 'agents/andy-1/outbox/.sent', 20]]);
+    const two = await bounded(hive.coordinationFileTimes(['andy-1', 'pam-1'], 20));
+    assert.deepEqual([...two], [['andy-1', 2_000_000], ['pam-1', 6_000_000]]);
+    assert.equal(asked.filter((p) => p === stuckPath).length, 1, 'the open stat is reused, not piled up');
+    assert.equal(stuckRows().length, 1, 'one row for one stuck spell');
+    free();
+    await held;
+    await new Promise((resolve) => setImmediate(resolve));
+    const three = await bounded(hive.coordinationFileTimes(['andy-1', 'pam-1'], 20));
+    assert.deepEqual([...three], [['andy-1', 3_000_000], ['pam-1', 6_000_000]], 'once it settles the path counts again');
+    assert.equal(asked.filter((p) => p === stuckPath).length, 2);
+    assert.equal(stuckRows().length, 1);
+  } finally { free(); fs.promises.stat = stat; }
+});
+
+test('COORDINATION: a second stuck spell after a clean beat is logged again', async (t) => {
+  const hive = await coordFloor(t, { 'andy-1': { outbox: 1000, sent: 3000, memory: 2000 } });
+  const stat = fs.promises.stat;
+  let hold = true;
+  const frees = [];
+  fs.promises.stat = function (p, ...rest) {
+    if (!hold || !String(p).endsWith('memory.md')) return stat.call(this, p, ...rest);
+    return new Promise((resolve) => { frees.push(resolve); }).then(() => stat.call(this, p, ...rest));
+  };
+  const stuckRows = () => hive.logTail(500).filter((r) => r && r.kind === 'coordination-stat-stuck');
+  try {
+    assert.deepEqual([...await bounded(hive.coordinationFileTimes(['andy-1'], 20))], [['andy-1', 3_000_000]]);
+    assert.equal(stuckRows().length, 1);
+    hold = false;
+    frees.splice(0).forEach((f) => f());
+    await new Promise((resolve) => setImmediate(resolve));
+    await bounded(hive.coordinationFileTimes(['andy-1'], 20));
+    assert.equal(stuckRows().length, 1, 'a clean beat writes no row');
+    hold = true;
+    await bounded(hive.coordinationFileTimes(['andy-1'], 20));
+    assert.equal(stuckRows().length, 2, 'a new spell is a new row');
+  } finally { hold = false; frees.splice(0).forEach((f) => f()); fs.promises.stat = stat; }
 });
 
 test('WIRING: the breaker beat awaits the coordination times, one beat at a time, and stats nothing itself', () => {
