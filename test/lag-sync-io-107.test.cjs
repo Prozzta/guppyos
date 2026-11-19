@@ -457,6 +457,16 @@ async function during(name, accepts, after, fn) {
   };
   try { return { result: await fn(), fired }; } finally { fsp[name] = real; }
 }
+/** LAG-TASKS-WRITE-SYNC-READ-108: a card write installs the tasks.json cache and arms its folder
+ *  watcher, so the fs.watch event of an earlier write (the archive pass) refreshes the cache with
+ *  a readFile of tasks.json. Under load that event arrives after during()'s race and is counted as
+ *  the reader's read (3, not 2). Close the watchers and let every refresh and read land before the
+ *  race; the revive's own write arms the watcher only after its rename. */
+async function settleTasks(hive) {
+  hive.closeAuthorityWatchers();
+  await Promise.all([...hive.authorityRefreshes.values()]);
+  await hive.drainReads();
+}
 const jsonl = (calls) => calls.filter((c) => /\.jsonl$/.test(c));
 
 test('archive: readCardsAsync reads tasks.json, the archive and task-meta.json with no synchronous fs, and answers as readCards', async (t) => {
@@ -483,6 +493,7 @@ test('archive: a revive that lands while readCardsAsync is reading is the last w
   assert.deepEqual(await hive.archivePass(), ['O1']);
   // tasks.json is read (O1 not in it); then the revive moves O1 back to hot and tombstones it in
   // the archive. Hot-before plus archive-after would have O1 nowhere.
+  await settleTasks(hive);
   const { result, fired } = await during('readFile', (p) => p.endsWith('tasks.json'), async () => { assert.ok(await hive.patchTask('O1', { notes: 'late' })); },
     () => derived.readCardsAsync(root));
   assert.equal(fired, 2, 'overtaken once, then read again');
@@ -583,6 +594,7 @@ test('archive: the mail-card catch-up lists the registry\'s card ids through its
   assert.deepEqual(calls, []);
   assert.deepEqual(result, sync);
   // A revive between the hot read and the archive read: read again, not O1 lost.
+  await settleTasks(hive);
   const raced = await during('readFile', (p) => p.endsWith('tasks.json'), async () => { assert.ok(await hive.patchTask('O1', { notes: 'late' })); },
     () => drive(mailCards.registryCardIdsSteps(root)));
   assert.equal(raced.fired, 2, 'overtaken once, then read again');
