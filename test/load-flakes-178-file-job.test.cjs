@@ -303,10 +303,28 @@ const until = async (what, ok, ms = 30_000) => {
 };
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 /** cmd's ping: a child by parent pid and birth (own-procs' check), never by parent pid alone. */
-const pingOf = (cmdPid) => { const t = own.processTable(); const cmd = t.find((r) => r.pid === cmdPid); return cmd ? own.childrenOf(t, cmd).find((r) => /^ping/i.test(r.name)) : undefined; };
+const pingOf = (cmdPid) => { const s = pingIn(cmdPid); return s ? s.ping : undefined; };
+/** The same, with the table that showed it (ONE PowerShell start): the rows beside the ping are of the same instant. */
+function pingIn(cmdPid) {
+  const t = own.processTable(); const cmd = t.find((r) => r.pid === cmdPid);
+  const ping = cmd ? own.childrenOf(t, cmd).find((r) => /^ping/i.test(r.name)) : undefined;
+  return ping ? { t, ping } : null;
+}
 
 /** Leftovers of a failed run: only what is still the process we saw (pid and birth). */
 function sweep(rows) { own.killVerified(rows.filter(Boolean), {}); }
+/** Gone for sure. Only ESRCH says so: EPERM is a live process we may not signal, and anything else is unknown. */
+const gone = (pid) => { try { process.kill(pid, 0); return false; } catch (e) { return e.code === 'ESRCH'; } };
+/**
+ * The sweep, unless every process the round recorded (the file and each row) is gone for sure:
+ * then there is nothing to verify and no PowerShell is started. A pid that is alive, unknown or
+ * reused by another process gets the full verified kill (pid and birth), as before.
+ */
+function sweepLeft(rows, filePid, { isGone = gone, run = sweep } = {}) {
+  const left = [filePid, ...rows.filter(Boolean).map((r) => r.pid)].filter((pid) => pid != null && !isGone(pid));
+  if (left.length) run(rows);
+  return left;
+}
 
 test('LIVE: a child born between the watchdog\'s snapshot and its kill dies with the file (node -> cmd -> ping, and a detached node)', LIVE, async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lf178-'));
@@ -372,9 +390,15 @@ test('LIVE: when the kill returns, nothing the file started still holds its fold
       file = await startFile(dir, exe);
       const kids = await file.started();
       let ping = null;
-      await until('ping', () => { polls += 1; return (ping = pingOf(kids.cmd)) != null; });
-      rows = own.processTable().filter((r) => [kids.cmd, kids.detached, ping.pid].includes(r.pid));
-      const f = own.lookupPids([file.f.pid])[0];
+      let seen = null;
+      await until('ping', () => { polls += 1; return (seen = pingIn(kids.cmd)) != null; });
+      ping = seen.ping;
+      // One table for the round: taken after the file answered with its children's pids, so the file,
+      // cmd, the detached node and the ping were all running when it was read. A row it lacks is a failure.
+      rows = seen.t.filter((r) => [kids.cmd, kids.detached, ping.pid].includes(r.pid));
+      assert.deepEqual(rows.map((r) => r.pid).sort((a, b) => a - b), [kids.cmd, kids.detached, ping.pid].sort((a, b) => a - b), `round ${round}: the table that showed the ping has cmd and the detached node too`);
+      const f = seen.t.find((r) => r.pid === file.f.pid);
+      assert.ok(f, `round ${round}: the table that showed the ping has the file (pid ${file.f.pid})`);
       const k = W.killFile([{ pid: f.pid, startedAt: f.created }], f.pid, { jobExe: exe });
       assert.equal(k.by, 'job');
       // Jim MUST 1: every process the job held reached the wait (node, cmd, ping, the detached node at least)
@@ -383,7 +407,7 @@ test('LIVE: when the kill returns, nothing the file started still holds its fold
       fs.rmSync(path.join(dir, 'f.cjs'));
       try { fs.rmdirSync(dir); } catch (e) { busy.push(`round ${round}: ${e.code}`); }
     } finally {
-      sweep(rows);
+      sweepLeft(rows, file ? file.f.pid : null);
       if (file && file.f.exitCode === null && file.f.signalCode === null) { const g = new Promise((res) => file.f.once('exit', res)); file.f.kill(); await g; }
       for (let i = 0; i < 100 && fs.existsSync(dir); i++) { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { await new Promise((res) => setTimeout(res, 100)); } }
     }
@@ -395,6 +419,24 @@ test('LIVE: when the kill returns, nothing the file started still holds its fold
   // suite; at 4 a round this test ran 120-159 s of its 180 s there. A round that goes well starts
   // one per ping poll and no other (counted in own-procs, the one place the tools start it).
   assert.deepEqual(extra, [], 'a round that went well started PowerShell for its ping poll only');
+});
+
+test('the sweep is skipped only when every recorded process is gone for sure (ESRCH); alive, EPERM or unknown runs it', () => {
+  const rows = [{ pid: 11, created: 1, name: 'cmd.exe' }, { pid: 12, created: 2, name: 'node.exe' }, { pid: 13, created: 3, name: 'PING.EXE' }];
+  const go = (alivePids) => { const ran = []; const left = sweepLeft(rows, 10, { isGone: (pid) => !alivePids.includes(pid), run: (r) => ran.push(r) }); return { ran, left }; };
+  assert.deepEqual(go([]), { ran: [], left: [] }, 'all four gone: no query');
+  for (const pid of [10, 11, 12, 13]) assert.deepEqual(go([pid]), { ran: [rows], left: [pid] }, `pid ${pid} alone still there: the full sweep, with every row`);
+  assert.deepEqual(sweepLeft([], null, { isGone: () => { throw new Error('nothing to ask about'); }, run: () => { throw new Error('nothing to sweep'); } }), [], 'a round that recorded nothing');
+  // gone(): the real check against this process, then each answer process.kill can give
+  assert.equal(gone(process.pid), false, 'a live process');
+  const real = process.kill;
+  try {
+    const answer = (code) => { process.kill = (pid, sig) => { assert.equal(sig, 0, 'asked, never signalled'); if (code) throw Object.assign(new Error(code), { code }); return true; }; return gone(4242); };
+    assert.equal(answer('ESRCH'), true, 'ESRCH: gone');
+    assert.equal(answer('EPERM'), false, 'EPERM IS A LIVE PROCESS');
+    assert.equal(answer('EINVAL'), false, 'anything else is unknown: not gone');
+    assert.equal(answer(null), false, 'alive');
+  } finally { process.kill = real; }
 });
 
 test('LIVE (Jim SHOULD 1): a process list that fails is said, and the job is still terminated and waited on by its count', LIVE, async () => {
