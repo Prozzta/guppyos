@@ -132,6 +132,15 @@ test('stopIfSame: the PowerShell that stops checks the name AND the CreationDate
   assert.strictEqual(scripts.length, 1, 'no rows: no PowerShell');
 });
 
+test('stopIfSame: a process that exits after the identity check is success, while another stop failure still escapes', { skip: process.platform !== 'win32' && 'win32 only' }, () => {
+  const scripts = [];
+  own.stopIfSame([R(6000, 5000, T + 300, 'conhost.exe')], (s) => scripts.push(s));
+  const s = scripts[0];
+  assert.match(s, /Stop-Process -Id \$t\.pid -Force -ErrorAction Stop/, 'the race is a terminating error we can classify');
+  assert.match(s, /FullyQualifiedErrorId -like 'NoProcessFoundForGivenId,\*'/, 'only an already-gone process is success');
+  assert.match(s, /catch \{[\s\S]*?throw[\s\S]*?\}/, 'any other Stop-Process failure still escapes');
+});
+
 test('watchdog: an OLDER node --test or test-file process under a recycled pid is not due', () => {
   const now = 1_000_000;
   const P = (pid, ppid, name, cmd, age) => ({ pid, ppid, name, cmd, startedAt: now - age });
