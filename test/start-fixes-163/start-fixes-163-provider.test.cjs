@@ -39,6 +39,9 @@ function sandboxHome(t) {
   t.after(() => {
     if (realHome === undefined) delete process.env.HOME; else process.env.HOME = realHome;
     if (realProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = realProfile;
+    // Close before delete: readAgentUsage arms a watcher on the transcript folder under `home`, and
+    // Electron's rmSync fails on a tree with an open watcher (the retries then surface EPERM).
+    T.closeTranscriptWatches();
     fs.rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
   assert.equal(os.homedir(), home, 'HOME redirect failed - aborting before touching ~/.claude');

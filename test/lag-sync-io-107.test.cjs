@@ -176,18 +176,28 @@ test('config integrity (async): concurrent polls share one flight, and a write d
 });
 
 // ── path 2: tasks.json ──────────────────────────────────────────────────────────────────────
+/** Close before delete. Electron's recursive rmSync fails (ENOTEMPTY, then EPERM on the jail) on a
+ *  tree with a watcher or a file still open inside it, and every manager over `home` holds some:
+ *  the ledger guard's watcher, the authority watchers, the kept-open log. After-hooks run in the
+ *  order registered, so a manager a test builds later goes in `alsoOpen`, not in a hook of its own
+ *  (that hook would run after this delete). */
+async function closeThenDelete(home, hive, alsoOpen) {
+  for (const m of [...alsoOpen, hive]) { m.stopLedgerGuard(); m.dispose(); await m.drainReads(); }
+  fs.rmSync(home, { recursive: true, force: true });
+}
 const card = (id, extra = {}) => ({ id, title: `card ${id}`, status: 'todo', tags: ['x'], ...extra });
 const ids = (ledger) => ledger.tasks.map((c) => c.id);
 function tasksFloor(t, tasks = [card('T1')]) {
   const home = fs.mkdtempSync(path.join(JAIL, 'tasks-'));
   const hive = new HiveManager(() => home);
-  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
+  const alsoOpen = [];
+  t.after(() => closeThenDelete(home, hive, alsoOpen));
   hive.ensureHive();
   const file = path.join(hive.root(), 'tasks.json');
   const handEdit = (list) => fs.writeFileSync(file, JSON.stringify({ tasks: list }), 'utf8');
   handEdit(tasks);
   watched(hive.root());
-  return { hive, file, handEdit, home };
+  return { hive, file, handEdit, home, alsoOpen };
 }
 
 test('tasks.json: an outside edit reaches the guard and its listeners with no synchronous read or stat of the ledger', async (t) => {
@@ -308,7 +318,7 @@ test('tasks.json: a check in flight when the guard stops announces nothing', asy
 });
 
 test('tasks.json: a corrupt or missing ledger is left to the synchronous reader (quarantine and defaults as before)', async (t) => {
-  const { hive, file } = tasksFloor(t);
+  const { hive, file, alsoOpen } = tasksFloor(t);
   hive.startLedgerGuard();
   hive.tasks();
   fs.writeFileSync(file, '{"tasks":[', 'utf8');
@@ -321,7 +331,7 @@ test('tasks.json: a corrupt or missing ledger is left to the synchronous reader 
   // Whatever the synchronous reader does with a corrupt ledger, a fresh manager over the same
   // folder (no async path has run in it) must do the same.
   const other = new HiveManager(() => path.dirname(hive.root()));
-  t.after(() => other.dispose());
+  alsoOpen.push(other);
   let threw2 = null; let got2 = null;
   try { got2 = other.tasks(); } catch (e) { threw2 = e; }
   assert.equal(!!threw, !!threw2, 'same outcome kind');
@@ -348,7 +358,8 @@ test('derived claims: readCardsAsync is readCards with the ledger read off the m
 async function mailFloor(t) {
   const home = fs.mkdtempSync(path.join(JAIL, 'mail-'));
   const hive = new HiveManager(() => home, () => true);
-  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
+  const alsoOpen = [];
+  t.after(() => closeThenDelete(home, hive, alsoOpen));
   await hive.ensureAgent({ id: 'god-1', name: 'Michael', provider: 'claude', cwd: home, isGod: true });
   await hive.ensureAgent({ id: 'andy-1', name: 'Andy', provider: 'claude', cwd: home });
   await hive.ensureAgent({ id: 'jim-1', name: 'Jim', provider: 'codex', cwd: home });
@@ -362,7 +373,7 @@ async function mailFloor(t) {
   hive.mail.flushAll();
   watched(hive.root());
   await new Promise((r) => setTimeout(r, 150));
-  return { hive, home, q, lost };
+  return { hive, home, q, lost, alsoOpen };
 }
 const plain = (v) => JSON.parse(JSON.stringify(v));
 /** Ages move with the clock between two calls: compare everything else exactly. */
@@ -385,12 +396,12 @@ test('mail obligations (async): the synchronous view, with no synchronous fs onc
 });
 
 test('mail obligations (async): ledgers not loaded yet, an agent with no inbox and an unreadable ledger give the synchronous answers', async (t) => {
-  const { hive, home } = await mailFloor(t);
+  const { hive, home, alsoOpen } = await mailFloor(t);
   // A second manager over the same hive has loaded no ledger: the async view loads them itself
   // (the load runs restart recovery, so the yardstick is another cold manager, read synchronously).
   const cold = new HiveManager(() => home, () => true);
   const coldSync = new HiveManager(() => home, () => true);
-  t.after(() => { cold.dispose(); coldSync.dispose(); });
+  alsoOpen.push(cold, coldSync);
   const coldView = ageless(await cold.mailObligationsAsync());
   assert.deepEqual(coldView, ageless(coldSync.mailObligations()));
   assert.deepEqual(coldView.map((a) => [a.agentId, a.openRequestCount]), [['andy-1', 1], ['jim-1', 1]]);
@@ -399,7 +410,7 @@ test('mail obligations (async): ledgers not loaded yet, an agent with no inbox a
   assert.deepEqual(ageless(await hive.mailObligationsAsync()), ageless(hive.mailObligations()));
   const gone = new HiveManager(() => home, () => true);
   const goneSync = new HiveManager(() => home, () => true);
-  t.after(() => { gone.dispose(); goneSync.dispose(); });
+  alsoOpen.push(gone, goneSync);
   assert.deepEqual(ageless(await gone.mailObligationsAsync()), ageless(goneSync.mailObligations()));
 });
 
@@ -575,11 +586,11 @@ test('archive: the mail-card catch-up lists the registry\'s card ids through its
 });
 
 test('first ledger load (async): a cold manager loads each ledger with no synchronous read of the ledger or the inbox', async (t) => {
-  const { hive, home } = await mailFloor(t);
+  const { hive, home, alsoOpen } = await mailFloor(t);
   const reads = (calls) => calls.filter((c) => /^(readFileSync|readdirSync|statSync|lstatSync|existsSync|openSync):/.test(c));
   const coldSync = new HiveManager(() => home, () => true);
   const cold = new HiveManager(() => home, () => true);
-  t.after(() => { cold.dispose(); coldSync.dispose(); });
+  alsoOpen.push(cold, coldSync);
   const counted = await syncCalls(path.join(hive.root(), 'agents'), () => coldSync.mailObligations());
   assert.ok(reads(counted.calls).some((c) => c === 'readFileSync:mail-ledger.json' || /^readFileSync:.*\.json$/.test(c)), `the synchronous load reads: ${counted.calls}`);
   const { calls, result } = await syncCalls(path.join(hive.root(), 'agents'), () => cold.mailObligationsAsync());
@@ -588,9 +599,9 @@ test('first ledger load (async): a cold manager loads each ledger with no synchr
 });
 
 test('first ledger load (async): a delivery that loads the ledger while its files are being read is the last word', async (t) => {
-  const { hive, home } = await mailFloor(t);
+  const { hive, home, alsoOpen } = await mailFloor(t);
   const cold = new HiveManager(() => home, () => true);
-  t.after(() => { cold.dispose(); });
+  alsoOpen.push(cold);
   let sent = null;
   const { result, fired } = await during('readdir', (p) => /andy-1[\\/]inbox$/.test(p), () => { sent = cold.send({ to: 'andy-1', act: 'request', subject: 'mid-load', body: 'x' }, 'god-1'); },
     () => cold.mailObligationsAsync());

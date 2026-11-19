@@ -106,8 +106,10 @@ test('watcher: deleting the config folder closes its watcher, so the process sti
   // self-close that leaves configWatcher set would leave the folder unwatched for good (Jim J1/J3).
   const { r, ms } = configChild([
     "setTimeout(() => fs.rmSync(require('node:path').join(ud, 'config.json')), 100);",
-    'setTimeout(() => { if (watchers[0].closed) { console.error("MUTANT: deleting config.json alone closed the watcher"); process.exit(6); } fs.rmSync(ud, { recursive: true, force: true }); }, 200);',
-    'setTimeout(() => { watchers[0].onClose = () => setImmediate(() => { fs.mkdirSync(ud, { recursive: true }); cfg.writeConfig({ onboardingComplete: true }); cfg.__resetConfigCacheForTests(); cfg.readConfig();',
+    // ONE delete of the folder, after onClose is set: a second rm of a folder whose watcher is still
+    // open finds it delete-pending on Windows, and under Electron that rm throws EPERM.
+    'setTimeout(() => { if (watchers[0].closed) { console.error("MUTANT: deleting config.json alone closed the watcher"); process.exit(6); }',
+    '  watchers[0].onClose = () => setImmediate(() => { fs.mkdirSync(ud, { recursive: true }); cfg.writeConfig({ onboardingComplete: true }); cfg.__resetConfigCacheForTests(); cfg.readConfig();',
     '  if (watchers.length !== 2 || watchers[1].closed) { console.error("MUTANT: no new watcher after the folder came back", watchers.length); process.exit(5); } }); fs.rmSync(ud, { recursive: true, force: true }); }, 200);',
   ].join('\n'));
   assert.notEqual((r.error && r.error.code), 'ETIMEDOUT', `MUTANT: THE PROCESS NEVER EXITED after its config folder was deleted (${ms} ms): the watcher spins`);
