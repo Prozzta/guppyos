@@ -122,6 +122,22 @@ test('(a) no sync fs on the hive folder during an archive pass or an archived re
   assert.deepEqual(r.hot().map((c) => c.id).sort(), ['LIVE', 'OLD1']);
 });
 
+test('Jim SHOULD 3: with no watcher and no fallback timer, our write installed the cache: the next tasks() reads no disk', async (t) => {
+  const r = rig(t);
+  r.hive.tasks();
+  // The fs.watch refresh of our own rename would refill the cache during the job's later awaits and
+  // hide a job that installs nothing; closed here, only the job can fill it.
+  r.hive.closeAuthorityWatchers();
+  assert.equal(await r.hive.addTask(card('C')), true);
+  const { readFileSync } = fs;
+  let reads = 0;
+  fs.readFileSync = function (p, ...rest) { if (String(p) === r.hotPath) reads++; return readFileSync.call(this, p, ...rest); };
+  let got;
+  try { got = r.hive.tasks(); } finally { fs.readFileSync = readFileSync; }
+  assert.equal(reads, 0, 'served from the cache the job installed');
+  assert.deepEqual(got.tasks.map((c) => c.id), ['A', 'B', 'C']);
+});
+
 test('(b) a patch given as a function of the current card is computed inside the queue: two interleaved appends both land', async (t) => {
   const r = rig(t);
   const append = (tag) => (cur) => ({ notes: `${cur.notes ?? ''}[${tag}]` });
@@ -170,7 +186,8 @@ test('(g) bound (Jim MUST 2): an outside writer at every merge gets a rejection 
   const r = rig(t);
   let edits = 0;
   r.hive.__taskWriteHookForTest = (phase) => {
-    if (phase !== 'merged') return;
+    // Stops after 10: a job with no bound then lands on pass 11 and the asserts go red, not a hang.
+    if (phase !== 'merged' || edits >= 10) return;
     edits++;
     const ledger = JSON.parse(fs.readFileSync(r.hotPath, 'utf8'));
     ledger.tasks.push(card(`HAND${edits}`));
@@ -241,6 +258,23 @@ test('(e) dispose(): queued and later jobs are refused, nothing is written after
   assert.deepEqual(fs.readdirSync(r.root).filter((f) => f.includes('.tmp')), [], 'no temp file left');
   fs.rmSync(r.home, { recursive: true }); // no handle open: the folder goes (ENOTEMPTY/EBUSY otherwise)
   assert.equal(fs.existsSync(r.home), false);
+});
+
+test('(e) dispose() while a job is past its merge: the rename is refused, the caller rejects, no temp file, the file is unchanged', async (t) => {
+  const r = rig(t);
+  const before = fs.readFileSync(r.hotPath, 'utf8');
+  let hits = 0;
+  r.hive.__taskWriteHookForTest = (phase) => {
+    if (phase !== 'merged' || hits++) return;
+    r.hive.dispose(); // between the merge and the commit check: the job reads the file unchanged
+  };
+  const p = r.hive.patchTask('A', { status: 'doing' });
+  r.markDisposed();
+  await assert.rejects(p, /disposed/);
+  await r.hive.drainReads();
+  assert.equal(hits, 1);
+  assert.equal(fs.readFileSync(r.hotPath, 'utf8'), before, 'nothing written after dispose()');
+  assert.deepEqual(fs.readdirSync(r.root).filter((f) => f.includes('.tmp')), [], 'no temp file left');
 });
 
 test('(f) the guard expects our write before the rename: a watcher check right after the rename attributes it to the API', async (t) => {
