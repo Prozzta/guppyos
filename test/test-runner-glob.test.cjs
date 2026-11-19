@@ -878,7 +878,8 @@ test('PIN: against the REAL test directory discovery is root tests plus only fol
   // FLAKE-OWN-PROCS-POWERSHELL-EXIT-NEG1-EMPTY-108: + 1 (own-procs-neg1-diag-108). 672 + 1 = 673 (root test/*.test.cjs 626).
   // MAILRIG-EVENTLOG-EMPTY-READS-COMMAND-FAILED-108: + 1 (mail-rig-eventlog-read). 673 + 1 = 674 (root test/*.test.cjs 627).
   // WAKE-CODEX-MODAL-PROMPT-BLOCKS-108: + 1 (wake-codex-modal-108). 674 + 1 = 675 (root test/*.test.cjs 628).
-  assert.equal(files.length, 675,`the focused suite must retain its pre-fold file count, got ${files.length}`);
+  // RUNNER-NOCOLOR-FORCECOLOR-STDERR: + 1 (colour-env). 675 + 1 = 676 (root test/*.test.cjs 629). Landed after WAKE-CODEX-MODAL-PROMPT-BLOCKS-108.
+  assert.equal(files.length, 676,`the focused suite must retain its pre-fold file count, got ${files.length}`);
   assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
   assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');
   assert.ok(files.includes(path.join('start-fixes-163', 'start-fixes-163-boot-submit.test.cjs')), 'the start-fixes feature folder is included');
