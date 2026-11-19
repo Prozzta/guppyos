@@ -122,9 +122,10 @@ async function whereAnswer(name, env, cwd) {
   const exts = env.PATHEXT.split(';').map((e) => e.trim().toUpperCase()).filter(Boolean);
   const lines = w.stdout.trim().split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   const pick = lines.find((p) => {
-    const base = path.win32.basename(p);
-    const dot = base.lastIndexOf('.');
-    return dot > 0 && exts.includes(base.slice(dot).toUpperCase()) && fs.existsSync(p);
+    // commandResolver.ts isExecutable, verbatim: an extension on the basename, listed in PATHEXT.
+    const dot = p.lastIndexOf('.');
+    const sep = Math.max(p.lastIndexOf('\\'), p.lastIndexOf('/'));
+    return dot > sep && exts.includes(p.slice(dot).toUpperCase()) && fs.existsSync(p);
   });
   return { lines, pick: pick ?? null };
 }
@@ -135,11 +136,14 @@ async function resolverAnswer(name, env, cwd) {
   return JSON.parse(c.stdout);
 }
 
-async function parity(t, root, name, pathEntries, pathext) {
+/** expectRel: the pick where.exe gives, hard-coded (relative to root; null = a plain miss), so a
+ *  fixture slip that makes both sides miss cannot pass. undefined = the oracle only (B4). */
+async function parity(t, root, name, pathEntries, pathext, expectRel) {
   const env = fixtureEnv(root, pathEntries, pathext);
   const cwd = path.join(root, 'empty');
   const w = await whereAnswer(name, env, cwd);
   const r = await resolverAnswer(name, env, cwd);
+  if (expectRel !== undefined) assert.equal(w.pick, expectRel === null ? null : path.join(root, expectRel), `fixture: where.exe's pick for ${name} (PATHEXT ${pathext}), it listed ${JSON.stringify(w.lines)}`);
   const want = w.pick ? { path: w.pick, found: true } : { path: name, found: false };
   assert.deepEqual(r, want, `${name} with PATH ${JSON.stringify(pathEntries)} PATHEXT ${pathext}: where.exe listed ${JSON.stringify(w.lines)}`);
   return w;
@@ -149,10 +153,10 @@ test('B1 parity: PATHEXT order and case, an extensionless shim first, an upper-c
   const root = tmpRoot(t);
   for (const f of ['e1\\rgfy', 'e1\\rgfy.cmd', 'e1\\rgfy.exe', 'e2\\RGFW.EXE']) mk(root, f);
   const e1 = path.join(root, 'e1');
-  await parity(t, root, 'rgfy', [e1], '.CMD;.EXE');
-  await parity(t, root, 'rgfy', [e1], '.exe;.cmd');
-  await parity(t, root, 'rgfy', [e1], '.EXE');
-  await parity(t, root, 'rgfw', [path.join(root, 'e2')], '.COM;.EXE;.BAT;.CMD');
+  await parity(t, root, 'rgfy', [e1], '.CMD;.EXE', 'e1\\rgfy.cmd');
+  await parity(t, root, 'rgfy', [e1], '.exe;.cmd', 'e1\\rgfy.cmd'); // name order, not PATHEXT order
+  await parity(t, root, 'rgfy', [e1], '.EXE', 'e1\\rgfy.exe');
+  await parity(t, root, 'rgfw', [path.join(root, 'e2')], '.COM;.EXE;.BAT;.CMD', 'e2\\RGFW.EXE');
 });
 
 test('B2 parity: quoted, empty and trailing-backslash PATH entries; a name with an extension', { skip: !WIN && 'win32 only' }, async (t) => {
@@ -160,9 +164,9 @@ test('B2 parity: quoted, empty and trailing-backslash PATH entries; a name with 
   mk(root, 'sp ace\\rgfz.CMD');
   mk(root, 'e1\\rgfy.cmd'); mk(root, 'e1\\rgfy.exe');
   const sp = path.join(root, 'sp ace');
-  await parity(t, root, 'rgfz', [`"${sp}"`], '.EXE;.CMD');
-  await parity(t, root, 'rgfz', ['', '', sp + '\\', ''], '.EXE;.CMD');
-  await parity(t, root, 'rgfy.cmd', [path.join(root, 'e1')], '.EXE;.CMD');
+  await parity(t, root, 'rgfz', [`"${sp}"`], '.EXE;.CMD', null); // where does not search a quoted entry
+  await parity(t, root, 'rgfz', ['', '', sp + '\\', ''], '.EXE;.CMD', 'sp ace\\rgfz.CMD');
+  await parity(t, root, 'rgfy.cmd', [path.join(root, 'e1')], '.EXE;.CMD', 'e1\\rgfy.cmd');
 });
 
 test('B3 parity: a missing dir and a FILE as PATH entries are skipped; a DIRECTORY named rgfx.exe is not a hit; no hit is a plain miss', { skip: !WIN && 'win32 only' }, async (t) => {
@@ -170,8 +174,8 @@ test('B3 parity: a missing dir and a FILE as PATH entries are skipped; a DIRECTO
   mk(root, 'd1\\rgfx.exe', { dir: true });
   mk(root, 'd2\\rgfx.exe');
   const asFile = mk(root, 'f\\notadir');
-  await parity(t, root, 'rgfx', [path.join(root, 'nope'), asFile, path.join(root, 'd1'), path.join(root, 'd2')], '.EXE');
-  await parity(t, root, 'rgfnone', [path.join(root, 'd1'), path.join(root, 'd2')], '.EXE');
+  await parity(t, root, 'rgfx', [path.join(root, 'nope'), asFile, path.join(root, 'd1'), path.join(root, 'd2')], '.EXE', 'd2\\rgfx.exe');
+  await parity(t, root, 'rgfnone', [path.join(root, 'd1'), path.join(root, 'd2')], '.EXE', null);
 });
 
 test('B5 cwd-first is DROPPED (stated decision): a hit only in the cwd is not found; a PATH hit beats a cwd hit', { skip: !WIN && 'win32 only' }, async (t) => {
