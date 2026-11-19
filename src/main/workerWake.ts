@@ -1158,9 +1158,18 @@ export class WorkerWakeWatchdog {
       }
       r.lifecycle = 'active';          // a turn just started; new mail waits for its Stop
       r.activeSince = at;              // and THIS is the edge terminal proof must be newer than
-      r.pendingIdleAt = 0;
       // Already confirmed if the provider's turn start beat our settle here.
-      r.provisional = confirms && !(r.claimedAt > 0 && r.turnStartAt >= r.claimedAt);
+      const turnStarted = r.claimedAt > 0 && r.turnStartAt >= r.claimedAt;
+      // DEFER, NEVER DROP across the settle (WORKERWAKE-SETTLE-AFTER-IDLE-DROP). The settle can land
+      // AFTER the turn started and after an idle reading the grace deferred. Forgetting that reading
+      // here left nothing to close the epoch: AGY is silent while idle, and a confirmed epoch has no
+      // submit-unconfirmed bound. A deferred idle read at or after a turn start of THIS claim is about
+      // this turn, so it is kept, and the next beat after the grace (counted from this edge) applies
+      // it under the deferral's own rules (not mid-invocation; anything newer saying active clears
+      // it). Any other one is about the turn before our prompt (the grace's case) or was overtaken
+      // by a later start, and is forgotten as before.
+      if (!(turnStarted && r.pendingIdleAt >= r.turnStartAt)) r.pendingIdleAt = 0;
+      r.provisional = confirms && !turnStarted;
       r.viaStop = viaStop;
       r.commitIds = claim.ids;
       if (claim.recheck) r.recheck = null;   // the prompt was seen clear, and this went out
