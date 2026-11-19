@@ -12,6 +12,7 @@ require('./tools/own-job.cjs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const { rmTree } = require('./tools/rm-tree.cjs');
 const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
@@ -22,7 +23,7 @@ const git = loadTs('src/main/git.ts');
 const WIN = process.platform === 'win32';
 
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'wtj191-'));
-test.after(() => fs.rmSync(ROOT, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
+test.after(() => rmTree(ROOT, { maxRetries: 10, retryDelay: 50 }));
 const run = (cwd, ...args) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'core.autocrlf=false', ...args], { cwd, encoding: 'utf8' });
 
 /** A repo with one commit (node_modules ignored, as in Guppy's), a worktree of it, and two link
@@ -45,7 +46,7 @@ function setup(t) {
     fs.writeFileSync(path.join(dir, 'pkg', 'SENTINEL'), name);
     return dir;
   };
-  t.after(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
+  t.after(() => rmTree(base, { maxRetries: 10, retryDelay: 50 }));
   return { base, repo, wt, target };
 }
 const sentinel = (dir) => path.join(dir, 'pkg', 'SENTINEL');
