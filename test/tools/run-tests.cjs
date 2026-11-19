@@ -375,7 +375,9 @@ function run({
   // TEST-PS-MODCACHE-LEAK: one PowerShell module-cache path in a temp folder for every file, so a
   // PowerShell that a test or the product under test starts never writes it under the repo root.
   // PS-POLICY-TEMP-LEAK: not the PowerShell temp folder; the files' temp jail sets theirs.
-  const env = require('./ps-env.cjs').psEnv(processEnv, { temp: false });
+  // RUNNER-NOCOLOR-FORCECOLOR-STDERR: and no colour variable from the caller's shell (colour-env.cjs), so
+  // `node --test` and every file start the same for every caller. psEnv returned a copy: processEnv is untouched.
+  const env = require('./colour-env.cjs').scrubColourEnv(require('./ps-env.cjs').psEnv(processEnv, { temp: false }));
   delete env.NODE_TEST_CONTEXT;
   // Re-query after psEnv cloning: it preserves the process's job membership and explicit overrides.
   let rateNow;
