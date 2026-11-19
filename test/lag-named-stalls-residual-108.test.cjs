@@ -622,3 +622,48 @@ test('WIRING: the breaker beat awaits the coordination times, one beat at a time
   assert.ok(!/statSync/.test(beat), 'no stat in the beat');
   assert.match(idx, /void runBreakerBeat\(300_000\)\.catch\(\(e\) => \{ console\.error\('\[breaker beat\]', e\); \}\)/);
 });
+
+// ─── 5. source discovery ────────────────────────────────────────────────────────────────────
+//
+// readdirSync:hive, the third caller: discoverSources (nativeMemory/sources.ts) lists the hive
+// folder synchronously. That is right where it runs, in the memory worker (a utility process);
+// this pins that the main process cannot reach it. No product change.
+
+/** Every module under src/ that `entry` loads at run time (type-only imports are erased). */
+function runtimeImports(entry) {
+  const seen = new Set();
+  const todo = [path.resolve(__dirname, '..', entry)];
+  while (todo.length) {
+    const file = todo.pop();
+    if (seen.has(file)) continue;
+    seen.add(file);
+    const src = codeOnly(fs.readFileSync(file, 'utf8'), path.basename(file));
+    const specs = [];
+    for (const m of src.matchAll(/^\s*(?:import|export)\s+(?!type\s)(?:[^'";]*?\sfrom\s+)?'(\.[^']+)'/gm)) specs.push(m[1]);
+    for (const m of src.matchAll(/\b(?:require|import)\(\s*'(\.[^']+)'\s*\)/g)) specs.push(m[1]);
+    for (const spec of specs) {
+      const base = path.resolve(path.dirname(file), spec);
+      const hit = [base, `${base}.ts`, `${base}.tsx`, path.join(base, 'index.ts')].find((p) => fs.existsSync(p) && fs.statSync(p).isFile());
+      if (hit && /\.tsx?$/.test(hit)) todo.push(hit);
+    }
+  }
+  return [...seen].map((p) => path.relative(path.resolve(__dirname, '..'), p).split(path.sep).join('/'));
+}
+
+test('SOURCES: discoverSources is called by the memory worker and its engine only, and the main process loads neither', () => {
+  const callers = [];
+  const walk = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (/\.tsx?$/.test(e.name) && /\bdiscoverSources\(/.test(codeOnly(fs.readFileSync(p, 'utf8'), e.name))) callers.push(path.relative(path.resolve(__dirname, '..'), p).split(path.sep).join('/'));
+    }
+  };
+  walk(path.resolve(__dirname, '..', 'src'));
+  assert.deepEqual(callers.sort(), ['src/main/nativeMemory/engine.ts', 'src/main/nativeMemory/sources.ts', 'src/main/nativeMemory/worker.ts']);
+  const main = runtimeImports('src/main/index.ts');
+  assert.ok(main.length > 50 && main.includes('src/main/hive.ts') && main.includes('src/main/nativeMemory/sourcesCache.ts'), `the walk follows main's imports (${main.length})`);
+  assert.deepEqual(main.filter((p) => /nativeMemory\/(engine|worker)\.ts$/.test(p)), [], 'the main process loads the engine or the worker');
+  const worker = runtimeImports('src/main/nativeMemory/worker.ts');
+  assert.ok(worker.includes('src/main/nativeMemory/engine.ts') && worker.includes('src/main/nativeMemory/sources.ts'), 'NON-VACUOUS: the same walk reaches them from the worker');
+});
