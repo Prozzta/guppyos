@@ -38,6 +38,13 @@ const { UNAVAILABLE_RE } = require('./claims-deps.cjs');
 
 const REPO = path.resolve(__dirname, '..', '..');
 const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
+/** Run `fn` with app.asar read as a plain FILE. Under Electron (as Node too) fs opens a path that ends in
+ *  .asar as an archive, so hashing the file, or asking whether it exists, would throw 'Invalid package'. */
+function asPlainFile(fn) {
+  const had = process.noAsar;
+  process.noAsar = true;
+  try { return fn(); } finally { process.noAsar = had; }
+}
 const DERIVED_DIR = 'derived'; // DERIVED_AGENT_ID (src/shared/claims.ts): the derived ledger's agent folder and anchor key
 const MAX_CALLS = 5;
 const ITEM_TIMEOUT_MS = 10 * 60_000;
@@ -109,7 +116,7 @@ function installedHookShape(resources) {
   const asarFile = path.join(resources, 'app.asar');
   const asar = require(path.join(REPO, 'node_modules', '@electron', 'asar'));
   const js = asar.extractFile(asarFile, path.join('out', 'main', 'index.js')).toString('utf8');
-  return { asarSha256: sha256(fs.readFileSync(asarFile)), ...hookShapeOf(js, 'the installed app.asar') };
+  return { asarSha256: asPlainFile(() => sha256(fs.readFileSync(asarFile))), ...hookShapeOf(js, 'the installed app.asar') };
 }
 
 /** The tool-output hook entry in a built out/main/index.js (hive.ts hookSettings, as bundled). */
@@ -144,7 +151,7 @@ function buildInfo(build) {
     outMainSha256: sha256(fs.readFileSync(path.join(build, 'out', 'main', 'index.js'))),
     outSha256: treeSha256(path.join(build, 'out')),
     memoryCliSha256: sha256(fs.readFileSync(path.join(build, 'resources', 'memory-cli.cjs'))),
-    asarSha256: fs.existsSync(asar) ? sha256(fs.readFileSync(asar)) : null,
+    asarSha256: asPlainFile(() => (fs.existsSync(asar) ? sha256(fs.readFileSync(asar)) : null)),
   };
 }
 
