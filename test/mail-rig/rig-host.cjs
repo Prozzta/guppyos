@@ -138,7 +138,7 @@ async function buildFloor() {
   };
   const diags = [];
   const outcomes = [];
-  const rig = { clock, diags, outcomes, llm, bootSeen: new Set(), afterBoot: new Map(), echoSeen: new Map(), stall: new Map(), interfere: new Map(), humanDirty: new Set(), humanAtStop: new Map(), capacityHold: false, owedWait: {}, owedStopSetting: undefined, quietHoldMin: 0, holdArchives: false, settleDelay: new Map(), heldProviderStatus: new Map() };
+  const rig = { clock, diags, outcomes, llm, bootSeen: new Set(), afterBoot: new Map(), echoSeen: new Map(), stall: new Map(), interfere: new Map(), humanDirty: new Set(), humanAtStop: new Map(), capacityHold: false, owedWait: {}, owedStopSetting: undefined, quietHoldMin: 0, holdArchives: false, settleDelay: new Map(), heldProviderStatus: new Map(), hookDelay: new Map() };
 
   // index.ts:361 - the ONE hive; this sandbox's harness home is the "live" home of THIS instance,
   // so the per-provider global writers (AGY hooks.json, statusline) write into the jailed HOME.
@@ -405,6 +405,10 @@ async function buildFloor() {
       // thread), which is what makes a hook response late.
       const st = agentId ? rig.stall.get(agentId) : undefined;
       if (st && (!st.event || st.event === event)) { rig.stall.delete(agentId); const until = Date.now() + st.ms; while (Date.now() < until) { /* stalled main thread */ } }
+      // MAIL-RIG-F11-IDLE-TIMEOUT-108: the driver can make ONE hook of an agent reach the coordinator
+      // late (a one-way frame that lands after a beat), without blocking this process.
+      const dl = agentId ? rig.hookDelay.get(agentId) : undefined;
+      if (dl && dl.event === event) { rig.hookDelay.delete(agentId); setTimeout(() => inboxWake?.onHook(agentId, event, message, fullyIdle, turnId, source), dl.ms); return; }
       inboxWake?.onHook(agentId, event, message, fullyIdle, turnId, source);
     },
     undefined,
@@ -726,6 +730,7 @@ async function main() {
     ptyTrace: ({ id }) => { const p = f.ptyForAgent(id); const out = p ? (f.ptyManager.lastOutputAt(p) ?? 0) : 0; return { real: Date.now(), sim: rig.clock.now(), lastOutputReal: out, lastOutputSim: out > 0 ? rig.clock.at(out) : 0, clockMovedReal: rig.clock.changes[rig.clock.changes.length - 1].realAt, echoSeen: rig.echoSeen.get(p) || 0, chunks: rig.afterBoot.get(p) || [] }; },
     bootSeen: ({ id }) => { const p = f.ptyForAgent(id); return !!p && rig.bootSeen.has(p); },
     stallNextHook: ({ id, ms, event }) => { rig.stall.set(id, { ms, event }); return true; },
+    delayNextHook: ({ id, ms, event }) => { rig.hookDelay.set(id, { ms, event }); return true; },
     holdProviderStatus: ({ id }) => { rig.heldProviderStatus.set(id, []); return true; },
     releaseProviderStatus: ({ id }) => {
       const held = rig.heldProviderStatus.get(id) || [];
