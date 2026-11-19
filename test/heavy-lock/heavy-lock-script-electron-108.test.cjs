@@ -142,6 +142,11 @@ const N = JSON.stringify(process.execPath);
 fs.writeFileSync(path.join(FIX, 'launch.cjs'), `const { spawn } = require('node:child_process');
 const once = () => new Promise((r) => spawn(${E}, ['-e', 'process.exit(0)'], { stdio: 'ignore', windowsHide: true }).on('close', r));
 (async () => { await once(); process.stdout.write('launched 1\\n'); await once(); process.stdout.write('launched 2\\n'); })();\n`);
+// HEAVY-LOCK-SCRIPT-ELECTRON-108-CENSUS-RACE: the state two suites hit, made certain. The first launch is quick,
+// the second runs 4 s, so an UNGUARDED run has written 'launched 1' and is still running at any fixed early clock.
+fs.writeFileSync(path.join(FIX, 'launch-slow.cjs'), `const { spawn } = require('node:child_process');
+const once = (code) => new Promise((r) => spawn(${E}, ['-e', code], { stdio: 'ignore', windowsHide: true }).on('close', r));
+(async () => { await once('process.exit(0)'); process.stdout.write('launched 1\\n'); await once('setTimeout(() => {}, 4000)'); process.stdout.write('launched 2\\n'); })();\n`);
 fs.writeFileSync(path.join(FIX, 'launch-sync.cjs'), `const r = require('node:child_process').spawnSync(${E}, ['-e', 'process.exit(0)'], { windowsHide: true });
 process.stdout.write('launched ' + r.status + '\\n');\n`);
 fs.writeFileSync(path.join(FIX, 'launch-execfile.cjs'), `require('node:child_process').execFile(${E}, ['-e', 'process.exit(0)'], { windowsHide: true }, (e) => process.stdout.write('launched ' + !e + '\\n'));\n`);
@@ -220,8 +225,8 @@ async function counter(t) {
   return { hits, url: `http://127.0.0.1:${srv.address().port}/ledger/a/${'0'.repeat(32)}` };
 }
 
-K.e2eScript = async (t, M = HJ, preload = PRELOAD) => {
-  for (const script of ['launch.cjs', 'launch-sync.cjs', 'launch-execfile.cjs']) {
+K.e2eScript = async (t, M = HJ, preload = PRELOAD, scripts = ['launch.cjs', 'launch-sync.cjs', 'launch-execfile.cjs']) => {
+  for (const script of scripts) {
     const b = await broker(t, M);
     b.lock.acquire('b', H, 'npm test', 'hb', false);
     const run = start([process.execPath, script], { url: b.url('a'), preload });
@@ -244,6 +249,8 @@ K.e2eScript = async (t, M = HJ, preload = PRELOAD) => {
   }
 };
 test('E2E: a node script that starts Electron (spawn, spawnSync, execFile) waits for another agent\'s slot, starts it after, and releases at exit', { timeout: 120_000, skip: NODE_ONLY }, (t) => K.e2eScript(t));
+K.e2eScriptSlow = (t, M = HJ, preload = PRELOAD) => K.e2eScript(t, M, preload, ['launch-slow.cjs']);
+test('E2E (CENSUS-RACE): a script whose second Electron launch is slow waits for the slot too', { timeout: 60_000, skip: NODE_ONLY }, (t) => K.e2eScriptSlow(t));
 
 K.e2eNotElectron = async (t, M = HJ, preload = PRELOAD) => {
   const c = await counter(t);
@@ -304,6 +311,10 @@ const MUTANTS = [
   { name: 'preload: no spawn guard', file: PRE, preload: true,
     edits: [['if (guard) {', 'if (false) {']],
     killer: 'e2eScript', dies: /A NODE SCRIPT THAT STARTS ELECTRON WAITS FOR THE SLOT/ },
+  // CENSUS-RACE: the same mutant, met by a script that is still running with 'launched 1' written (two suite reds).
+  { name: 'preload: no spawn guard (a slow second launch)', file: PRE, preload: true,
+    edits: [['if (guard) {', 'if (false) {']],
+    killer: 'e2eScriptSlow', dies: /launch-slow\.cjs: A NODE SCRIPT THAT STARTS ELECTRON WAITS FOR THE SLOT/ },
   { name: 'preload: the synchronous functions are not guarded', file: PRE, preload: true,
     edits: [["for (const name of ['spawnSync', 'execFileSync'])", 'for (const name of [])']],
     killer: 'e2eScript', dies: /launch-sync\.cjs: A NODE SCRIPT THAT STARTS ELECTRON WAITS FOR THE SLOT/ },
