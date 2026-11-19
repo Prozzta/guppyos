@@ -22,9 +22,11 @@
  * its path: the newer holder's. One file more than SLOTS got past the gate.)
  *
  * Every file appends its start record to <gate>/starts.jsonl (the runner sums the burst from it):
- *   { file, bornMs, takenMs, waitMs, loadMs, slot }  bornMs = process start, takenMs = slot taken,
- *   waitMs = gate wait, loadMs = top level done minus process start (the wait included);
- *   slot = -1 when it went on without one.
+ *   { file, bornMs, takenMs, waitMs, loadMs, slot, heldFrom, heldTo, why }  bornMs = process start,
+ *   takenMs = slot taken, waitMs = gate wait, loadMs = top level done minus process start (the wait
+ *   included); slot = -1 when it went on without one, and `why` then says why. bornMs and takenMs are
+ *   the file's own wall clock; heldFrom and heldTo are the run's one clock (see mono) and are what
+ *   "past the gate at once" is summed from.
  * SLOTS 0 records only (the before measurement). The file takes this back out of NODE_OPTIONS, so
  * nothing it starts loads it again.
  */
@@ -134,6 +136,45 @@ function give(dir, slot) {
   try { fs.rmSync(path.join(p, String(process.pid)), { force: true }); fs.rmdirSync(p); } catch { /* taken over */ }
 }
 
+/**
+ * The run's one clock: ms on the system's monotonic counter, the same counter in every process
+ * (FLAKE-LOAD-BURST-196-GATE-OVERADMIT). Date.now() is not: each process fixes its wall clock when it
+ * starts, to the system tick, so two processes disagree by up to a tick (1 to 15.6 ms on Windows). A
+ * slot handed over faster than that was recorded as taken before it was given back, and the sum of
+ * the starts then showed one file more than SLOTS past the gate.
+ */
+const mono = () => Number(process.hrtime.bigint() / 1000n) / 1000;
+
+/** Why a file went on without a slot, for its start record. */
+function whyNoSlot(got, slots) {
+  if (got.slot >= 0 || slots <= 0) return undefined;
+  if (got.timedOut) return `timeout: waited ${got.waitMs} ms`;
+  if (got.faulted) return `create faults: ${FAULT_POLLS} passes in a row, no slot could be created`;
+  return 'gate folder gone';
+}
+
+/**
+ * Takes this file's slot and returns { got, end }. end() gives the slot back and returns the start
+ * record. The time past the gate is read on the run's one clock, INSIDE the real hold: heldFrom after
+ * the take, heldTo before the give. So the recorded hold of a slot never reaches into the next one.
+ * takenMs is one reading of the wall clock, after the take.
+ */
+function start(dir, slots, file, { bornMs, wall = Date.now, tick = mono, ...opts } = {}) {
+  const got = take(dir, slots, opts);
+  const heldFrom = tick();
+  const takenMs = wall();
+  const end = () => {
+    const heldTo = tick();
+    const doneMs = wall();
+    give(dir, got.slot);
+    const rec = { file, bornMs, takenMs, waitMs: got.waitMs, loadMs: doneMs - bornMs, slot: got.slot, heldFrom, heldTo };
+    const why = whyNoSlot(got, slots);
+    if (why) rec.why = why;
+    return rec;
+  };
+  return { got, end };
+}
+
 /** The preload proper. */
 function gate(env = process.env) {
   const spec = env.GUPPY_START_GATE; // `<slots>|<dir>`
@@ -147,18 +188,16 @@ function gate(env = process.env) {
   const slots = Number(spec.slice(0, bar));
   const dir = spec.slice(bar + 1);
   const bornMs = Math.round(Date.now() - process.uptime() * 1000);
-  const gateMs = Date.now();
-  const got = take(dir, slots);
   const file = path.relative(process.cwd(), process.argv[1] || '') || '?';
+  const s = start(dir, slots, file, { bornMs });
+  const got = s.got;
   if (got.timedOut) process.stderr.write(`[test-runner] ${file} waited ${got.waitMs} ms for a start slot (LOAD-BURST-196) and starts without one\n`);
   if (got.faulted) process.stderr.write(`[test-runner] ${file}: no start slot can be created in ${dir} (LOAD-BURST-196); it starts without one\n`);
   let done = false;
   const finish = () => {
     if (done) return;
     done = true;
-    const doneMs = Date.now();
-    give(dir, got.slot);
-    const rec = { file, bornMs, takenMs: gateMs + got.waitMs, waitMs: got.waitMs, loadMs: doneMs - bornMs, slot: got.slot };
+    const rec = s.end();
     try { fs.appendFileSync(path.join(dir, 'starts.jsonl'), `${JSON.stringify(rec)}\n`); } catch { /* the gate folder is gone: the run is over */ }
   };
   setImmediate(finish);
@@ -186,22 +225,27 @@ function burstSummary(text, { windowMs = 60_000 } = {}) {
   const pct = (q) => pctOf(loads, q);
   // The most files at one moment between two points of their start: born to top level done
   // (loading, the wait included), and slot taken to top level done (holding: what the cap bounds).
-  const peakOf = (from) => {
-    const edges = recs.flatMap((r) => [[from(r), 1], [r.bornMs + r.loadMs, -1]]).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const peakOf = (from, to = (r) => r.bornMs + r.loadMs, of = recs) => {
+    const edges = of.flatMap((r) => [[from(r), 1], [to(r), -1]]).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
     let open = 0; let peak = 0;
     for (const [, d] of edges) { open += d; peak = Math.max(peak, open); }
     return peak;
   };
+  // Past the gate: on the run's one clock (heldFrom to heldTo), never on the files' own wall clocks.
+  // A file that went on without a slot IS past the gate and is counted; `without` names each and why.
+  const held = recs.filter((r) => Number.isFinite(r.heldFrom) && Number.isFinite(r.heldTo));
   return {
     files: recs.length, early: early.length, windowMs,
     loadP50: pct(0.5), loadP95: pct(0.95), loadMax: loads[loads.length - 1],
     netP50: pctOf(nets, 0.5), netP95: pctOf(nets, 0.95), netMax: nets[nets.length - 1],
     waitMax: Math.max(...early.map((r) => r.waitMs || 0)),
-    peakLoading: peakOf((r) => r.bornMs), peakHolding: peakOf((r) => r.takenMs ?? r.bornMs + (r.waitMs || 0)),
-    noSlot: recs.filter((r) => r.slot === -1 && r.waitMs > 0).length
+    peakLoading: peakOf((r) => r.bornMs), peakHolding: peakOf((r) => r.heldFrom, (r) => r.heldTo, held),
+    unclocked: recs.length - held.length,
+    noSlot: recs.filter((r) => r.slot === -1 && r.waitMs > 0).length,
+    without: recs.filter((r) => r.why).map((r) => `${r.file}: ${r.why}`)
   };
 }
 
-module.exports = { claim, tryTake, take, give, gate, burstSummary, STALE_MS, WAIT_MS, FAULT_POLLS };
+module.exports = { claim, tryTake, take, give, start, gate, burstSummary, STALE_MS, WAIT_MS, FAULT_POLLS };
 
 if (require.main !== module && process.env.GUPPY_START_GATE) gate();

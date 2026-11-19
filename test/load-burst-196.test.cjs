@@ -181,7 +181,8 @@ K.waits = (g = G, d) => {
 test('a full gate waits a bounded time; a missing gate folder or 0 slots is no wait', (t) => K.waits(G, tmp(t)));
 
 K.summary = (g = G) => {
-  const line = (file, bornMs, waitMs, loadMs, slot = 0) => JSON.stringify({ file, bornMs, waitMs, loadMs, slot });
+  // heldFrom/heldTo: the same moments as before (slot taken, top level done), on the run's one clock.
+  const line = (file, bornMs, waitMs, loadMs, slot = 0) => JSON.stringify({ file, bornMs, waitMs, loadMs, slot, heldFrom: bornMs + waitMs, heldTo: bornMs + loadMs });
   const text = [
     line('a', 1000, 0, 500), line('b', 1000, 0, 700), line('c', 1000, 400, 900), line('d', 1100, 600, 1000, -1),
     'torn {', line('late', 1000 + 61_000, 0, 50)
@@ -196,7 +197,54 @@ K.summary = (g = G) => {
   assert.equal(s.peakHolding, 3, 'THE MOST PAST THE GATE AT ONCE COUNTS FROM THE SLOT');
   assert.equal(s.noSlot, 1);
   assert.equal(g.burstSummary(''), null);
+  // FLAKE-LOAD-BURST-196-GATE-OVERADMIT. A file that went on without a slot is past the gate: counted, and named.
+  const why = 'create faults: 40 passes in a row, no slot could be created';
+  const over = g.burstSummary([
+    line('a', 1000, 0, 500), line('b', 1000, 0, 500),
+    JSON.stringify({ file: 'c', bornMs: 1000, waitMs: 100, loadMs: 400, slot: -1, heldFrom: 1100, heldTo: 1400, why })
+  ].join('\n'));
+  assert.equal(over.peakHolding, 3, 'A FILE THAT WENT ON WITHOUT A SLOT IS COUNTED AS PAST THE GATE');
+  assert.deepEqual(over.without, [`c: ${why}`], 'A FILE THAT WENT ON WITHOUT A SLOT IS NAMED, WITH ITS REASON');
+  // The files' own wall clocks (bornMs, takenMs, loadMs) are never what the count is summed from:
+  // b's wall clock is 50 ms behind a's, and it took the slot 1 ms after a gave it back.
+  const skewed = g.burstSummary([
+    JSON.stringify({ file: 'a', bornMs: 1000, takenMs: 1000, waitMs: 0, loadMs: 300, slot: 0, heldFrom: 5000, heldTo: 5300 }),
+    JSON.stringify({ file: 'b', bornMs: 950, takenMs: 1251, waitMs: 301, loadMs: 601, slot: 0, heldFrom: 5301, heldTo: 5601 })
+  ].join('\n'));
+  assert.equal(skewed.peakHolding, 1, 'PAST THE GATE IS SUMMED ON THE ONE CLOCK, NOT THE WALL CLOCKS OF THE FILES');
+  assert.equal(skewed.unclocked, 0);
+  assert.equal(g.burstSummary(JSON.stringify({ file: 'old', bornMs: 1, waitMs: 0, loadMs: 9, slot: 0 })).unclocked, 1, 'A RECORD WITHOUT THE ONE CLOCK IS COUNTED AS SUCH, NOT DROPPED IN SILENCE');
 };
+
+// A start without a slot records why (the live test below fails on any such start, by name).
+K.why = (g = G, d) => {
+  let clock = 0;
+  const now = () => clock;
+  const sleep = (ms) => { clock += ms; };
+  let ticks = 100;
+  const tick = () => ++ticks;
+  const sub = (n) => { const p = path.join(d, n); fs.mkdirSync(p); return p; };
+  const eperm = () => { throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' }); };
+  const stuck = g.start(sub('stuck'), 1, 'f', { bornMs: 0, wall: now, tick, now, sleep, make: eperm }).end();
+  assert.equal(stuck.slot, -1);
+  assert.match(String(stuck.why), /^create faults: 40 passes in a row/, 'A START WITHOUT A SLOT RECORDS WHY: create faults');
+  const full = sub('full'); g.tryTake(full, 1);
+  clock = 0;
+  assert.match(String(g.start(full, 1, 'f', { bornMs: 0, wall: now, tick, waitMs: 1000, now, sleep }).end().why), /^timeout: waited 1\d\d\d ms$/, 'A START WITHOUT A SLOT RECORDS WHY: timeout');
+  assert.equal(g.start(path.join(d, 'nope'), 1, 'f', { bornMs: 0, wall: now, tick, now, sleep }).end().why, 'gate folder gone', 'A START WITHOUT A SLOT RECORDS WHY: gate folder gone');
+  // With a slot, or with 0 slots (record only), there is no reason to give.
+  clock = 500;
+  const ok = g.start(sub('ok'), 1, 'f', { bornMs: 0, wall: now, tick, now, sleep });
+  const t1 = ticks;
+  clock = 800;
+  const rec = ok.end();
+  assert.equal('why' in rec, false, 'A START WITH A SLOT GIVES NO REASON');
+  assert.equal('why' in g.start(sub('zero'), 0, 'f', { bornMs: 0, wall: now, tick, now, sleep }).end(), false, '0 SLOTS IS RECORD ONLY, NOT A START WITHOUT A SLOT');
+  assert.deepEqual([rec.heldFrom, rec.heldTo], [t1, t1 + 1], 'THE HOLD IS READ ON THE ONE CLOCK: once after the take, once before the give');
+  assert.deepEqual([rec.takenMs, rec.loadMs, rec.slot], [500, 800, 0], 'THE TAKE TIME IS ONE READING OF THE WALL CLOCK, AFTER THE TAKE');
+  assert.deepEqual(fs.readdirSync(path.join(d, 'ok')), [], 'end() gives the slot back');
+};
+test('a start without a slot records why; the hold is read on the one clock', (t) => K.why(G, tmp(t)));
 test('the burst summary: first minute only, load percentiles, gate wait, the most loading and past the gate at once', () => K.summary());
 
 K.slotsDefault = (r = R) => {
@@ -243,23 +291,84 @@ async function liveRun(d, slots, n = 6, { gateFile = GATE_FILE, body = SLOW_TOP,
   fs.writeFileSync(file, body);
   const opt = [pre, gateFile].filter(Boolean).map((f) => `--require "${f.split(path.sep).join('/')}"`).join(' ');
   const env = { ...process.env, NODE_OPTIONS: opt, GUPPY_START_GATE: `${slots}|${gateDir}`, GUPPY_START_OPT: opt, NODE_TEST_CONTEXT: 'child-v8' };
-  const outs = await Promise.all(Array.from({ length: n }, () => new Promise((resolve, reject) => {
+  let errs = '';
+  const outs =await Promise.all(Array.from({ length: n }, () => new Promise((resolve, reject) => {
     const p = spawn(process.execPath, [file], { env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     let out = ''; p.stdout.on('data', (b) => { out += b; });
+    p.stderr.on('data', (b) => { errs += b; });
     p.on('error', reject); p.on('exit', () => resolve(out));
   })));
   const text = fs.readFileSync(path.join(gateDir, 'starts.jsonl'), 'utf8');
-  return { outs, text, summary: G.burstSummary(text), left: fs.readdirSync(gateDir).filter((f) => f.startsWith('slot-')) };
+  return { outs, errs, text, summary: G.burstSummary(text), left: fs.readdirSync(gateDir).filter((f) => f.startsWith('slot-')) };
 }
 
-test('live: 6 files through the preload with 2 slots never have more than 2 past the gate; each records once and gives its slot back', { timeout: 120_000 }, async (t) => {
-  const { outs, summary, left } = await liveRun(tmp(t), 2);
+/**
+ * FLAKE-LOAD-BURST-196-GATE-OVERADMIT: a file that went on without a slot is past the gate on purpose
+ * (timeout, create faults, gate gone). It used to say so only on its own stderr, which nothing read,
+ * and the run then failed as "more than SLOTS past the gate". It fails here first, by name and reason.
+ */
+const assertAllHadASlot = (summary, errs) => {
+  assert.deepEqual(summary.without, [], `NO FILE GOES ON WITHOUT A SLOT: ${summary.without.join('; ')} | stderr: ${String(errs).trim()}`);
+  assert.equal(summary.unclocked, 0, 'EVERY START IS ON THE ONE CLOCK');
+};
+
+K.live = async (gateFile, d) => {
+  const { outs, errs, summary, left } = await liveRun(d, 2, 6, { gateFile });
   assert.equal(summary.files, 6, 'EVERY FILE RECORDS ITS START ONCE');
+  assertAllHadASlot(summary, errs);
   assert.ok(summary.peakHolding <= 2, `AT MOST 2 FILES PAST THE GATE AT ONCE, got ${summary.peakHolding}`);
   assert.ok(summary.waitMax >= 250, `later files waited for a slot (${summary.waitMax} ms)`);
   assert.deepEqual(left, [], 'EVERY SLOT IS GIVEN BACK');
   for (const o of outs) assert.equal(o, '|', `THE PRELOAD TAKES ITSELF BACK OUT OF THE FILE'S ENV: ${o}`);
-});
+};
+test('live: 6 files through the preload with 2 slots never have more than 2 past the gate; each records once and gives its slot back', { timeout: 120_000 }, (t) => K.live(GATE_FILE, tmp(t)));
+
+/**
+ * FLAKE-LOAD-BURST-196-GATE-OVERADMIT, the red-before. Every process fixes its own wall clock at its
+ * start, so two processes disagree (measured: up to one system tick). Here the disagreement is made
+ * large enough to be certain: two files hold both slots for HOLD_MS, and a third, whose wall clock is
+ * SKEW_MS behind (a preload ahead of the gate), is started once both slots are held. It takes a slot
+ * only after a holder gave one back: never 3 past the gate. Its wall clock says it took the slot
+ * SKEW_MS earlier, while both holders still held theirs: summed on the wall clocks, that is 3 on 2.
+ */
+const HOLD_MS = 2000;
+const SKEW_MS = 3000;
+const HOLD_TOP = `Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${HOLD_MS});\n`;
+const SKEW_PRE = `const real = Date.now; Date.now = () => real() - ${SKEW_MS};\n`;
+K.skew = async (gateFile, d) => {
+  const gateDir = path.join(d, 'gate'); fs.mkdirSync(gateDir, { recursive: true });
+  const fwd = (f) => f.split(path.sep).join('/');
+  const holder = path.join(d, 'holder.cjs'); const late = path.join(d, 'late.cjs'); const pre = path.join(d, 'skew.cjs');
+  fs.writeFileSync(holder, HOLD_TOP); fs.writeFileSync(late, HOLD_TOP); fs.writeFileSync(pre, SKEW_PRE);
+  let errs = '';
+  const run = (file, opt) => new Promise((resolve, reject) => {
+    const env = { ...process.env, NODE_OPTIONS: opt, GUPPY_START_GATE: `2|${gateDir}`, GUPPY_START_OPT: opt, NODE_TEST_CONTEXT: 'child-v8' };
+    const p = spawn(process.execPath, [file], { env, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+    p.stderr.on('data', (b) => { errs += b; });
+    p.on('error', reject); p.on('exit', resolve);
+  });
+  const plain = `--require "${fwd(gateFile)}"`;
+  const holders = [run(holder, plain), run(holder, plain)];
+  const bothHeld = () => [0, 1].every((k) => fs.existsSync(path.join(gateDir, `slot-${k}`)));
+  for (const t0 = Date.now(); !bothHeld();) {
+    assert.ok(Date.now() - t0 < 60_000, 'the two holders never took their slots');
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  await Promise.all([...holders, run(late, `--require "${fwd(pre)}" ${plain}`)]);
+  const text = fs.readFileSync(path.join(gateDir, 'starts.jsonl'), 'utf8');
+  const recs = text.trim().split(/\r?\n/).map((l) => JSON.parse(l));
+  const summary = G.burstSummary(text);
+  assert.equal(summary.files, 3);
+  assertAllHadASlot(summary, errs);
+  // The fixture did what it says: on the wall clocks, the late file took its slot while both holders held theirs.
+  const lateRec = recs.find((r) => /late\.cjs$/.test(r.file)); const held = recs.filter((r) => /holder\.cjs$/.test(r.file));
+  assert.equal(held.length, 2);
+  assert.ok(lateRec.waitMs > HOLD_MS / 2, `the late file waited for a holder (${lateRec.waitMs} ms)`);
+  const wallFrom = Math.max(...recs.map((r) => r.takenMs)); const wallTo = Math.min(...recs.map((r) => r.bornMs + r.loadMs));
+  assert.ok(wallFrom < wallTo, `the fixture: on the files' wall clocks all three hold at once (latest take ${wallFrom}, first end ${wallTo})`);
+  assert.ok(summary.peakHolding <= 2, `CLOCKS THAT DISAGREE BETWEEN PROCESSES DO NOT PUT A THIRD FILE PAST A 2-SLOT GATE, got ${summary.peakHolding}`);
+};
+test('live: a file whose wall clock is behind takes a slot after a holder gave it back, and is never summed as a third past the gate', { timeout: 120_000 }, (t) => K.skew(GATE_FILE, tmp(t)));
 
 // The slot goes back once the top level has run, not at exit (Jim a5a246): 1 slot, 2 files whose
 // tests run 2 s AFTER a quick top level. Held to exit, the gate would cap the whole run, not its start.
@@ -319,7 +428,18 @@ const MUTANTS = [
   // Live: the preload runs from a mutated copy of the gate file (it requires only fs and path).
   { name: 'the slot is given back at exit (Jim a5a246)', file: GATE_FILE, live: true, edits: [['  setImmediate(finish);', "  process.once('beforeExit', finish);"]], killer: 'release', dies: /THE SLOT IS GIVEN BACK ONCE THE TOP LEVEL HAS RUN, NOT AT EXIT/ },
   { name: 'the burst is the whole run', file: GATE_FILE, edits: [['  const early = recs.filter((r) => r.bornMs - t0 < windowMs);', '  const early = recs;']], killer: 'summary', dies: /ONLY THE FIRST MINUTE IS THE BURST/ },
-  { name: 'past the gate counts from birth', file: GATE_FILE, edits: [['peakHolding: peakOf((r) => r.takenMs ?? r.bornMs + (r.waitMs || 0)),', 'peakHolding: peakOf((r) => r.bornMs),']], killer: 'summary', dies: /THE MOST PAST THE GATE AT ONCE COUNTS FROM THE SLOT/ },
+  { name: 'past the gate counts from birth', file: GATE_FILE, edits: [['peakHolding: peakOf((r) => r.heldFrom, (r) => r.heldTo, held),', 'peakHolding: peakOf((r) => r.bornMs, (r) => r.heldTo, held),']], killer: 'summary', dies: /THE MOST PAST THE GATE AT ONCE COUNTS FROM THE SLOT/ },
+  // FLAKE-LOAD-BURST-196-GATE-OVERADMIT
+  { name: 'past the gate is summed on the wall clocks of the files (the defect)', file: GATE_FILE, edits: [['peakHolding: peakOf((r) => r.heldFrom, (r) => r.heldTo, held),', 'peakHolding: peakOf((r) => r.takenMs ?? r.bornMs + (r.waitMs || 0), undefined, held),']], killer: 'summary', dies: /PAST THE GATE IS SUMMED ON THE ONE CLOCK/ },
+  { name: 'a file without a slot is not counted as past the gate', file: GATE_FILE, edits: [['Number.isFinite(r.heldFrom) && Number.isFinite(r.heldTo));', 'Number.isFinite(r.heldFrom) && Number.isFinite(r.heldTo) && r.slot >= 0);']], killer: 'summary', dies: /A FILE THAT WENT ON WITHOUT A SLOT IS COUNTED AS PAST THE GATE/ },
+  { name: 'a file without a slot is not named', file: GATE_FILE, edits: [['    without: recs.filter((r) => r.why)', '    without: recs.filter((r) => r.why && 0)']], killer: 'summary', dies: /A FILE THAT WENT ON WITHOUT A SLOT IS NAMED/ },
+  { name: 'a record without the one clock is dropped in silence', file: GATE_FILE, edits: [['unclocked: recs.length - held.length', 'unclocked: 0']], killer: 'summary', dies: /A RECORD WITHOUT THE ONE CLOCK IS COUNTED AS SUCH/ },
+  { name: 'a start without a slot records no reason', file: GATE_FILE, edits: [['    if (why) rec.why = why;\n', '']], killer: 'why', dies: /A START WITHOUT A SLOT RECORDS WHY: create faults/ },
+  { name: 'a timeout is recorded as a create fault', file: GATE_FILE, edits: [['  if (got.timedOut) return `timeout: waited ${got.waitMs} ms`;\n', '']], killer: 'why', dies: /A START WITHOUT A SLOT RECORDS WHY: timeout/ },
+  { name: '0 slots is recorded as a start without a slot', file: GATE_FILE, edits: [['  if (got.slot >= 0 || slots <= 0) return undefined;', '  if (got.slot >= 0) return undefined;']], killer: 'why', dies: /0 SLOTS IS RECORD ONLY, NOT A START WITHOUT A SLOT/ },
+  { name: 'the hold is read on the wall clock (unit)', file: GATE_FILE, edits: [['  const heldFrom = tick();', '  const heldFrom = wall();'], ['    const heldTo = tick();', '    const heldTo = wall();']], killer: 'why', dies: /THE HOLD IS READ ON THE ONE CLOCK/ },
+  { name: 'the hold is read on the wall clock (live: 3 on 2 from skew alone)', file: GATE_FILE, live: true, edits: [['  const heldFrom = tick();', '  const heldFrom = wall();'], ['    const heldTo = tick();', '    const heldTo = wall();']], killer: 'skew', dies: /CLOCKS THAT DISAGREE BETWEEN PROCESSES DO NOT PUT A THIRD FILE PAST A 2-SLOT GATE, got 3/ },
+  { name: 'every create faults: the files go on without a slot (live)', file: GATE_FILE, live: true, edits: [['      make(p);\n      return k;', "      throw Object.assign(new Error('EPERM: mutant'), { code: 'EPERM' });"]], killer: 'live', dies: /NO FILE GOES ON WITHOUT A SLOT: .*create faults: 40 passes in a row/ },
   { name: 'the net load keeps the gate wait', file: GATE_FILE, edits: [['  const nets = sorted((r) => r.loadMs - (r.waitMs || 0));', '  const nets = sorted((r) => r.loadMs);']], killer: 'summary', dies: /THE NET LOAD LEAVES THE GATE WAIT OUT/ },
   { name: 'the default is every core', file: RUNNER_FILE, edits: [[': Math.max(2, Math.ceil(cores / 4));', ': cores;']], killer: 'slotsDefault', dies: /THE DEFAULT IS A QUARTER OF THE CORES/ },
   { name: '0 slots is the default, not record only', file: RUNNER_FILE, edits: [['Number.isInteger(n) && n >= 0 ?', 'Number.isInteger(n) && n > 0 ?']], killer: 'slotsDefault', dies: /GUPPY_START_SLOTS=0 IS RECORD ONLY/ },
