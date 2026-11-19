@@ -520,7 +520,13 @@ export class HookServer {
      *  that parsed is exactly as suspect as the half that did not" is the rule this
      *  normaliser is already built on. HookServer still knows nothing about pools, wake
      *  or admission; it hands over the canonical record and the caller routes it. */
-    private onAgyTick?: (agentId: string | null, tick: AgyStatusTick) => void
+    private onAgyTick?: (agentId: string | null, tick: AgyStatusTick) => void,
+    /** FLAKE-AGY-QUOTA-TICK-WAIT - the RECEIPT clock of an Antigravity statusline tick, and of
+     *  nothing else. The product never passes it, so receipt is `Date.now()` as before (called
+     *  late, not captured, so a test that mocks `Date` still sees its own clock). A test passes
+     *  one so the time a tick spends crossing the pipe cannot age it past
+     *  AGY_RESET_TOLERANCE_MS, and so the limit itself can be pinned at an exact instant. */
+    private agyReceiptNow: () => number = () => Date.now()
   ) {
     // Jim LOW residual: a (re)spawn rewrites the agent's registry entry, possibly with a DIFFERENT
     // provider; the cached provider must not outlive it (the very next hook reads the new one).
@@ -1346,7 +1352,7 @@ export class HookServer {
       const c = classifyAgyStatusLine({
         payload: p.agy_status,
         accountScope: agyAccountScope(),
-        receivedAt: Date.now(),
+        receivedAt: this.agyReceiptNow(),
         readAt: p.read_at
       });
       if (!c.ok) {
