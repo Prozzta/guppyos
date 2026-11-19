@@ -387,3 +387,107 @@ test('MAIL REBUILD: starting the router loads every active agent\'s ledger off t
   assert.deepEqual(clockless(a.mail.loadedDoc('andy-1')), clockless(b.mail.ledger('andy-1')));
   assert.equal(plain(a.mail.integrityIssues()).length, 1);
 });
+
+// ─── 3. the release runs ────────────────────────────────────────────────────────────────────
+//
+// readdirSync:hive, the last caller: the packaged app's stale-requests beat (at arm time, then
+// every 60 s) asks HiveManager.releaseRuns, which read state/app-releases.json on the main thread
+// at every sweep and, when it was absent, listed the hive folder and read every log file to seed
+// it. The same sweep asks every registry agent's mail ledger, a first load when nothing loaded it.
+
+/** The sweep's own synchronous disk work for the release runs (the seed, the file, its write). */
+const releaseReads = (calls) => calls.filter((c) => /^(readdirSync:hive|(readFileSync|statSync|existsSync):(log[\w.-]*\.jsonl|app-releases\.json)|(writeFileSync|openSync|renameSync):app-releases\.json[\w.-]*)$/.test(c));
+const releasesFile = (hive) => path.join(hive.root(), 'state', 'app-releases.json');
+
+/** A floor whose logs (one rotated) hold packaged and dev starts, with two asks that name releases. */
+async function releaseFloor(t, seed) {
+  const home = fs.mkdtempSync(path.join(JAIL, 'rel-'));
+  const hive = new HiveManager(() => home, () => true);
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
+  await hive.ensureAgent({ id: 'god-1', name: 'Michael', provider: 'claude', cwd: home, isGod: true });
+  await hive.ensureAgent({ id: 'andy-1', name: 'Andy', provider: 'claude', cwd: home });
+  fs.writeFileSync(path.join(hive.root(), 'log.1.jsonl'), `${JSON.stringify({ kind: 'app-start', version: '1.1.79', packaged: true, ts: 500 })}\n`, 'utf8');
+  hive.appendLog({ kind: 'app-start', version: '1.1.80', packaged: true, ts: 1000 });
+  hive.appendLog({ kind: 'app-start', version: '1.1.80', packaged: true, ts: 2000 });
+  hive.appendLog({ kind: 'app-start', version: '1.1.81', packaged: false, ts: 1500 });
+  if (seed) { fs.mkdirSync(path.join(hive.root(), 'state'), { recursive: true }); fs.writeFileSync(releasesFile(hive), JSON.stringify({ v: 1, firstRunAt: seed }), 'utf8'); }
+  const old = hive.send({ to: 'andy-1', act: 'request', subject: '1.1.82: cut it', body: 'go' }, 'god-1');
+  const ran80 = hive.send({ to: 'andy-1', act: 'request', subject: '1.1.80: bug in it', body: 'go' }, 'god-1');
+  await new Promise((r) => setTimeout(r, 5));   // the first run below must be later than the asks (ms clock)
+  return { hive, old, ran80 };
+}
+const openAsks = (hive) => hive.mailObligations().flatMap((a) => a.openRequests.map((o) => o.id)).sort();
+/** The file as the async write left it: waited for by loop turns, read off the patched functions. */
+async function releasesOnDisk(hive, has) {
+  for (let turn = 0; ; turn++) {
+    let doc = null;
+    try { doc = JSON.parse(await fs.promises.readFile(releasesFile(hive), 'utf8')); } catch { /* not written yet */ }
+    if (doc && typeof doc.firstRunAt?.[has] === 'number') return doc.firstRunAt;
+    assert.ok(turn < 2000, `app-releases.json never got ${has}`);
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
+test('RELEASE RUNS NON-VACUOUS: the synchronous sweep reads the file, lists the hive folder and reads every log', async (t) => {
+  const { hive, old } = await releaseFloor(t);
+  const { calls, result } = await syncCalls(hive.root(), () => hive.autoCloseStaleObligations('1.1.82'));
+  assert.deepEqual(result.map((s) => [s.id, s.reason]), [[old.id, 'auto:release-shipped:1.1.82']]);
+  const reads = releaseReads(calls);
+  for (const want of ['readFileSync:app-releases.json', 'readdirSync:hive', 'readFileSync:log.1.jsonl', 'readFileSync:log.jsonl']) assert.ok(reads.includes(want), `${want} in ${JSON.stringify(reads)}`);
+  assert.ok(reads.some((c) => /^writeFileSync:app-releases\.json/.test(c)), JSON.stringify(reads));
+  const first = JSON.parse(fs.readFileSync(releasesFile(hive), 'utf8')).firstRunAt;
+  assert.deepEqual([first['1.1.79'], first['1.1.80'], first['1.1.81'], typeof first['1.1.82']], [500, 1000, undefined, 'number']);
+});
+
+test('RELEASE RUNS: read ahead, the sweep seeds from the logs, closes the shipped ask and writes the file with no synchronous disk work', async (t) => {
+  const { hive, old, ran80 } = await releaseFloor(t);
+  assert.equal(typeof hive.readReleaseRunsAhead, 'function', 'HiveManager.readReleaseRunsAhead');
+  const { calls, result } = await syncCalls(hive.root(), async () => {
+    const loaded = hive.readReleaseRunsAhead();
+    const during = hive.autoCloseStaleObligations('1.1.82');   // main's first beat, at arm time
+    await loaded;
+    return during;
+  });
+  assert.deepEqual(result, [], 'a sweep that finds the load in flight closes nothing itself');
+  assert.deepEqual(releaseReads(calls), [], JSON.stringify(calls));
+  assert.deepEqual(openAsks(hive), [ran80.id], 'the sweep ran once the load landed: the 1.1.82 ask is closed, the 1.1.80 ask is not');
+  const rows = hive.logTail(500).filter((r) => r && r.kind === 'mail-obligation-closed');
+  assert.deepEqual(rows.map((r) => [r.id, r.reason]), [[old.id, 'auto:release-shipped:1.1.82']]);
+  const first = await releasesOnDisk(hive, '1.1.82');
+  assert.deepEqual([first['1.1.79'], first['1.1.80'], first['1.1.81']], [500, 1000, undefined], 'the seed the synchronous sweep writes');
+});
+
+test('RELEASE RUNS: once read ahead, every later sweep answers from memory and a new running version is written off the main thread', async (t) => {
+  const { hive, old, ran80 } = await releaseFloor(t, { '1.1.70': 7 });
+  assert.equal(typeof hive.readReleaseRunsAhead, 'function', 'HiveManager.readReleaseRunsAhead');
+  await hive.readReleaseRunsAhead();
+  const one = await syncCalls(hive.root(), () => hive.autoCloseStaleObligations('1.1.82'));
+  assert.deepEqual(one.result.map((s) => [s.id, s.reason]), [[old.id, 'auto:release-shipped:1.1.82']]);
+  assert.deepEqual(releaseReads(one.calls), [], JSON.stringify(one.calls));
+  const first = await releasesOnDisk(hive, '1.1.82');
+  assert.deepEqual([first['1.1.70'], first['1.1.80']], [7, undefined], 'a file that is there is never re-seeded from the logs');
+  const bug = hive.send({ to: 'andy-1', act: 'request', subject: '1.1.82: bug found while it runs', body: 'go' }, 'god-1');
+  const two = await syncCalls(hive.root(), () => hive.autoCloseStaleObligations('1.1.82'));
+  assert.deepEqual(two.result, [], 'an ask about the running release stays');
+  assert.deepEqual(releaseReads(two.calls), [], JSON.stringify(two.calls));
+  assert.deepEqual(openAsks(hive), [bug.id, ran80.id].sort());
+  assert.equal((await releasesOnDisk(hive, '1.1.82'))['1.1.82'], first['1.1.82'], 'the first run keeps its time');
+});
+
+test('RELEASE RUNS: the read-ahead loads every agent\'s mail ledger too, a corrupt one rebuilt off the main thread', async (t) => {
+  const { a, b } = await corruptFloors(t);
+  assert.equal(typeof a.readReleaseRunsAhead, 'function', 'HiveManager.readReleaseRunsAhead');
+  const { calls } = await syncCalls(a.root(), async () => {
+    const loaded = a.readReleaseRunsAhead();
+    a.autoCloseStaleObligations(null);
+    await loaded;
+  });
+  assert.deepEqual(rebuildReads(calls).filter((c) => !/^existsSync:inbox$/.test(c)), [], JSON.stringify(calls));
+  assert.deepEqual(releaseReads(calls), [], JSON.stringify(calls));
+  assert.deepEqual(clockless(a.mail.loadedDoc('andy-1')), clockless(b.mail.ledger('andy-1')));
+});
+
+test('WIRING: the packaged app reads the release runs ahead before it arms the stale-requests beat', () => {
+  const idx = codeOnly(readSource('src/main/index.ts'), 'index.ts');
+  assert.match(idx, /if \(app\.isPackaged\) void hive\.readReleaseRunsAhead\(\);\s*armAlwaysOnBeats\(\);/);
+});
