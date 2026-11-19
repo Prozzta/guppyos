@@ -394,9 +394,11 @@ K.skew = async (gateFile, d, { skewMs = SKEW_MS, starve = false } = {}) => {
 };
 test('live: a file whose wall clock is behind takes a slot after a holder gave it back, and is never summed as a third past the gate', { timeout: 120_000 }, (t) => K.skew(GATE_FILE, tmp(t)));
 // The skew test is only worth its green when the fixture really made the overlap: starved, it says so by name.
+// The second case skews the late clock 2 s AHEAD (Jim ac9183): with no skew, "no overlap" would itself
+// rest on the files' wall clocks agreeing to a few ms, which is what this card says they do not.
 test('live: the skew fixture, starved, fails as the fixture and not as the gate', { timeout: 120_000 }, async (t) => {
   await assert.rejects(() => K.skew(GATE_FILE, tmp(t), { skewMs: 300, starve: true }), /the fixture: the late file waited for a holder/, 'HOLDERS GONE BEFORE THE LATE FILE: NAMED AS THE FIXTURE');
-  await assert.rejects(() => K.skew(GATE_FILE, tmp(t), { skewMs: 0 }), /the fixture: on the files' wall clocks all three hold at once/, 'NO SKEW: NAMED AS THE FIXTURE');
+  await assert.rejects(() => K.skew(GATE_FILE, tmp(t), { skewMs: -2000 }), /the fixture: on the files' wall clocks all three hold at once/, 'THE LATE CLOCK AHEAD, NOT BEHIND: NAMED AS THE FIXTURE');
 });
 
 // The slot goes back once the top level has run, not at exit (Jim a5a246): 1 slot, 2 files whose
