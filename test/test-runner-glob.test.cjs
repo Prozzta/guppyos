@@ -80,7 +80,8 @@ test('MUTANT-JOURNAL-GATE NIT 1 (god 9cb49c, Jim 967fa3): new-floor-knowhow and 
   const SUITES = ['test/new-floor-knowhow.test.cjs', 'test/rebrand-internal-names-182.test.cjs'];
   // INT 1.1.103: both suites now require tools/own-job.cjs first (BARE-NODE-TEST-NO-OWNER); without run-tests.cjs
   // in this bare tree it says so on stderr and the suite runs on.
-  for (const rel of [...SUITES, 'test/tools/mutant-runner-helper.cjs', 'test/tools/ps-env.cjs', 'test/tools/own-job.cjs']) fs.copyFileSync(path.join(REPO, rel), path.join(root, rel));
+  // RUNNER-NOCOLOR-FORCECOLOR-STDERR: own-job.cjs requires tools/colour-env.cjs on load, so the bare tree carries it too.
+  for (const rel of [...SUITES, 'test/tools/mutant-runner-helper.cjs', 'test/tools/ps-env.cjs', 'test/tools/own-job.cjs', 'test/tools/colour-env.cjs']) fs.copyFileSync(path.join(REPO, rel), path.join(root, rel));
   const cli = path.join(root, 'resources', 'memory-cli.cjs');
   const dead = { pid: 2147483000, start: '2026-10-25T15:23:08Z' };
   const journal = (file, owner = dead) => fs.writeFileSync(helper.journalPath(root), JSON.stringify({ owner, records: [{ file, original: Buffer.from('const CLAIM_VERBS = new Set([]);').toString('base64') }] }), 'utf8');
