@@ -61,6 +61,13 @@ test('the same when the turn start was a `running` reading (no hook)', () => {
   assert.equal(c.state('p').lifecycle, 'active');
   assert.deepEqual(c.beat('p', SETTLE + PROVIDER_IDLE_CONFIRM_MS), { kind: 'deferred-idle' });
   assert.equal(c.state('p').lifecycle, 'idle');
+  // Boundary: an idle read in the SAME millisecond as the turn start is not older than it
+  // (turnStarted() itself only clears a deferred idle that is strictly older).
+  const same = claimed();
+  same.c.noteProviderStatus('p', 'running', T0 + 300);
+  same.c.noteProviderStatus('p', 'idle', T0 + 300);
+  same.c.settle(same.claim, 'COMMITTED', SETTLE, true);
+  assert.deepEqual(same.c.beat('p', SETTLE + PROVIDER_IDLE_CONFIRM_MS), { kind: 'deferred-idle' });
 });
 
 test('the kept idle still obeys the deferral\'s own rules: held mid-invocation, and overtaken by anything newer', () => {
