@@ -516,7 +516,9 @@ const { readRec } = own;
 function leftBehind(rec) {
   const { tree } = own.ownTreeOrThrow(own.processTable(), rec);
   own.killVerified(tree);
-  return tree.map((r) => `${r.pid} ${r.name}`);
+  // GATE178-WATCHDOG-LATE-SNAPSHOT-RED-108: each leftover names its parent, so an orphan (a conhost whose
+  // file process is gone) reads as one in the red without a rerun.
+  return tree.map((r) => `${r.pid} ${r.name} ppid=${r.ppid}`);
 }
 /** The hung file's node child: gone, or (polled 5 s) still ours. A pid that now belongs to another process is gone. */
 function childStillRunning(rec) {
@@ -1084,6 +1086,10 @@ test('GATE-178: a watchdog whose snapshot is 12 s late still TREE-kills a hung C
     // The tree is judged (and what is left killed) whatever the verdict; no record = no tree to judge.
     const left = fs.existsSync(filePidFile) ? leftBehind(readRec(filePidFile, path.basename(process.execPath))) : null;
     const verdict = lateWatchdogVerdict({ code, errText: e.lines.join('\n'), out, ms, left });
+    // GATE178-WATCHDOG-LATE-SNAPSHOT-RED-108: the 3a42324b red kept only its failing row; its text was lost.
+    // The verdict also goes out as ONE stderr line (node --test prints it as a "#" line beside that row), so
+    // a log cut down to the failing rows still says why. The assertion below is unchanged.
+    if (verdict) process.stderr.write(`GATE-178 RED (run ${ms} ms, code ${code}): ${verdict.replace(/\s*[\r\n]+\s*/g, ' | ')}\n`);
     if (verdict) assert.fail(verdict);
     if (stopErr) assert.fail(`the late watchdog's wrapper could not be stopped: ${stopErr.message}`);
   } catch (err) {
