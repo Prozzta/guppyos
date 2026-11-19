@@ -25,6 +25,9 @@ const { readSource } = require('../read-source.cjs');
 
 const HJ = loadTs('src/main/heavyJob.ts');
 const H = { heavy: true, kind: 'suite' };
+// HEAVY-SLOT-PRELAUNCH-FAIL-108: `npm ci` is an install. (A reserved SUITE call that ends with no test
+// started keeps its slot once: test/heavy-lock/heavy-slot-prelaunch-fail-108.test.cjs.)
+const CI = { heavy: true, kind: 'install' };
 // HEAVY-SLOT-EXCLUSIVE-192: a suite runs alone at 2+ slots; the slot-counting tests use a class that shares.
 const S = { heavy: true, kind: 'install' };
 
@@ -44,11 +47,11 @@ const K = {};
 K.fifoReserveNotify = (M = HJ) => {
   const x = rig(M);
   assert.equal(x.l.acquire('a', H, 'node test/tools/run-tests.cjs', 'a1', false).allow, true);
-  const db = x.l.acquire('b', H, 'npm ci', 'b1', false);
+  const db = x.l.acquire('b', CI, 'npm ci', 'b1', false);
   const dc = x.l.acquire('c', H, 'npm run build', 'c1', false);
   assert.match(db.reason, /You are QUEUED \(position 1\)/);
   assert.match(dc.reason, /You are QUEUED \(position 2\)/);
-  assert.match(x.l.acquire('b', H, 'npm ci', 'b2', false).reason, /position 1\)/, 'QUEUED ONCE: A RETRY KEEPS ITS PLACE');
+  assert.match(x.l.acquire('b', CI, 'npm ci', 'b2', false).reason, /position 1\)/, 'QUEUED ONCE: A RETRY KEEPS ITS PLACE');
   assert.deepEqual(x.l.queueSnapshot().waiters.map((w) => [w.agentId, w.position]), [['b', 1], ['c', 2]], 'QUEUED ONCE: A RETRY KEEPS ITS PLACE');
   x.l.callDone('a', 'a1');
   assert.deepEqual(x.notes.map((n) => n.a), ['b'], 'THE OLDEST WAITER IS RESERVED AND NOTIFIED');
@@ -56,7 +59,7 @@ K.fifoReserveNotify = (M = HJ) => {
   const d = x.l.acquire('c', H, 'npm run build', 'c2', false);
   assert.equal(d.allow, false, 'NOBODY ELSE TAKES A RESERVED SLOT');
   assert.match(d.reason, /no job is running \(reserved for b until \d\d:\d\d:\d\dZ\)/);
-  assert.deepEqual(x.l.acquire('b', H, 'npm ci', 'b3', false), { allow: true, acquired: true }, 'THE RESERVED AGENT TAKES ITS SLOT');
+  assert.deepEqual(x.l.acquire('b', CI, 'npm ci', 'b3', false), { allow: true, acquired: true }, 'THE RESERVED AGENT TAKES ITS SLOT');
   assert.equal(x.logs.find((r) => r.action === 'acquire' && r.agentId === 'b').reserved, true);
   x.l.callDone('b', 'b3');
   assert.deepEqual(x.notes.map((n) => n.a), ['b', 'c'], 'THEN THE NEXT WAITER');

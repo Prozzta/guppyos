@@ -431,5 +431,62 @@ K.orphan = async (M = HJ) => {
 };
 test('control: a call that returned with its heavy child still running (orphan-kept) is a started job', () => K.orphan());
 
-// MUTANT CENSUS (each must fail at least one test above): filled in with the fix.
-module.exports = { K };
+// ─── MUTANT CENSUS ───────────────────────────────────────────────────────────────────────────
+// Each mutant is ONE edit of the source, loaded as text, and must fail its named killer with the
+// named message. NOT PINNED, said plainly: the `kept: r.kept` carried by the exclusive re-entry in
+// acquireAs (a reservation put back at the head of the queue). A kept reservation is exclusive and
+// is made as its exclusive holder leaves, so no other holder exists for that branch to meet; the
+// carry is there so the bound holds if that ever changes.
+
+function mutateText(rel, edits, tag) {
+  let text = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', '..', rel), 'utf8');
+  for (const [from, to] of edits) {
+    const hits = text.split(from).length - 1;
+    assert.equal(hits, 1, `mutant ${tag}: edit target must match EXACTLY ONCE, matched ${hits}: ${JSON.stringify(from.slice(0, 80))}`);
+    text = text.replace(from, () => to);
+  }
+  return text;
+}
+const IDX = 'src/main/index.ts';
+const KEEP_IF = "if (h.spent && !h.started && (reason === 'posttool' || reason === 'job-exit' || reason === 'process-exit') && this.d.limit() !== 'off' && this.alive(agentId)) {";
+const MUTANTS = [
+  { name: 'nothing is kept (base behaviour)', edits: [[KEEP_IF, 'if (false) {']], killer: 'shimRefused', dies: /KEEPS ITS SLOT/ },
+  { name: 'a started job is kept too', edits: [['if (h.spent && !h.started && (reason', 'if (h.spent && (reason']], killer: 'started', dies: /STARTED A TEST AND THEN DIED PASSES THE SLOT ON/ },
+  { name: 'any release reason keeps', edits: [["(reason === 'posttool' || reason === 'job-exit' || reason === 'process-exit') && this.d.limit()", 'true && this.d.limit()']], killer: 'untouched', dies: /pty-exit KEEPS NOTHING/ },
+  { name: 'job-exit does not keep', edits: [["(reason === 'posttool' || reason === 'job-exit' || reason === 'process-exit') && this.d.limit()", "(reason === 'posttool' || reason === 'process-exit') && this.d.limit()"]], killer: 'jobExit', dies: /HELD JOB THAT ENDED WITH NO TEST/ },
+  { name: 'process-exit does not keep', edits: [["(reason === 'posttool' || reason === 'job-exit' || reason === 'process-exit') && this.d.limit()", "(reason === 'posttool' || reason === 'job-exit') && this.d.limit()"]], killer: 'background', dies: /KEPT AT process-exit/ },
+  { name: 'posttool does not keep', edits: [["(reason === 'posttool' || reason === 'job-exit' || reason === 'process-exit') && this.d.limit()", "(reason === 'job-exit' || reason === 'process-exit') && this.d.limit()"]], killer: 'shimRefused', dies: /KEEPS ITS SLOT/ },
+  { name: 'kept with the limit Off', edits: [[" && this.d.limit() !== 'off' && this.alive(agentId)) {", ' && this.alive(agentId)) {']], killer: 'untouched', dies: /limit Off KEEPS NOTHING/ },
+  { name: 'a kept reservation is kept again', edits: [['was.hooked && !was.kept && cls.kind', 'was.hooked && cls.kind']], killer: 'once', dies: /SECOND FAILED LAUNCH PASSES THE SLOT ON/ },
+  { name: 'the kept reservation is not marked', edits: [['lapsed: h.spent.lapsed, kept: true });', 'lapsed: h.spent.lapsed });']], killer: 'once', dies: /SECOND FAILED LAUNCH PASSES THE SLOT ON/ },
+  { name: 'any heavy kind is kept', edits: [["!was.kept && cls.kind === 'suite' ? { lapsed", '!was.kept ? { lapsed']], killer: 'chain', dies: /AN INSTALL IS NOT KEPT/ },
+  { name: 'a reservation not made at the hook is kept', edits: [['const spent = was && was.hooked && !was.kept', 'const spent = was && !was.kept']], killer: 'unhooked', dies: /NOT MADE AT THE HOOK IS NOT KEPT/ },
+  { name: "the runner's own lease is a start", edits: [['if (own && !Array.isArray(r.runner) && (electron', 'if (own && (electron']], killer: 'preflight', dies: /RUNNER THAT EXITED IN ITS PREFLIGHT/ },
+  { name: "an earlier run's straggler is a start", edits: [["const own = typeof r.parentRun !== 'string' || parent?.grant === hold.grant;", 'const own = true;']], killer: 'thisGrant', dies: /EARLIER RUN IS NO PROOF/ },
+  { name: 'a child of a light run is a start', edits: [['if (held && hold && parent.grant === hold.grant) hold.started = true;', 'if (hold) hold.started = true;']], killer: 'thisGrant', dies: /LIGHT LEASE THAT ACQUIRES NOTHING/ },
+  { name: "a runner's child is not a start", edits: [['if (held && hold && parent.grant === hold.grant) hold.started = true;', '']], killer: 'started', dies: /STARTED A TEST AND THEN DIED PASSES THE SLOT ON/ },
+  { name: 'a test process of its own is not a start', edits: [["if (own && !Array.isArray(r.runner) && (electron || !r.preloadKind)) hold.started = true;", '']], killer: 'started', dies: /node --test ITSELF IS A STARTED TEST/ },
+  { name: 'an Electron launch is not a start', edits: [['(electron || !r.preloadKind)) hold.started = true;', '(!r.preloadKind)) hold.started = true;']], killer: 'started', dies: /AN ELECTRON LAUNCH IS A START/ },
+  { name: 'a sighting is not a start', edits: [['if (busy.has(h.agentId)) h.started = true;', '']], killer: 'background', dies: /SAW RUNNING IS NOT KEPT/ },
+  { name: 'an orphan-kept job is not a start', edits: [['{ cur.started = true; cur.background = true;', '{ cur.background = true;']], killer: 'orphan', dies: /FOUND RUNNING AT PostToolUse IS NOT KEPT/ },
+  { name: 'the started mark outlives its hold', edits: [['grant: ++this.grants, spent, started: false });', 'grant: ++this.grants, spent, started: this.grants > 1 });']], killer: 'sightedBefore', dies: /SIGHTING BEFORE THE GRANT DOES NOT COUNT/ },
+  { name: 'a lapsed kept reservation queues as fresh', edits: [['exclusive: r.exclusive, lapsed: true, kept: r.kept });', 'exclusive: r.exclusive, lapsed: true });']], killer: 'lapse', dies: /QUEUED AGAIN AFTER A KEEP IS NOT KEPT/ },
+  { name: 'a grant drops the kept mark', edits: [['exclusive: w.exclusive, lapsed: w.lapsed, kept: w.kept });', 'exclusive: w.exclusive, lapsed: w.lapsed });']], killer: 'lapse', dies: /QUEUED AGAIN AFTER A KEEP IS NOT KEPT/ },
+  { name: 'the agent is not told', edits: [['try { this.d.notifyKept?.(agentId, h.kind, keptUntil); } catch', 'try { } catch']], killer: 'shimRefused', dies: /THE AGENT IS TOLD, ONCE/ },
+  { name: 'the log row has no reason', edits: [["action: 'reserve-kept', agentId, heavyKind: h.kind, reason, until:", "action: 'reserve-kept', agentId, heavyKind: h.kind, until:"]], killer: 'shimRefused', dies: /ONE reserve-kept ROW/ },
+  { name: 'the kept window is what was left, not a fresh one', edits: [['const keptUntil = this.now() + HEAVY_RESERVE_MS;', 'const keptUntil = h.since + HEAVY_RESERVE_MS;']], killer: 'fresh', dies: /A FRESH WINDOW FROM THE MOMENT THE LAUNCH DIED/ },
+  { name: 'the notice guesses a cause', edits: [['ended before any test started; the slot is still reserved', 'ended (npm was refused by the policy?); the slot is still reserved']], killer: 'notice', dies: /THE CAUSE AS THE LOCK KNOWS IT/ },
+  { name: 'main does not give the lock notifyKept', file: IDX, edits: [['  notifyKept: (agentId, kind, until) => notifyHeavySlotKept(agentId, kind, until),', '']], killer: 'wired', dies: /MAIN GIVES THE LOCK notifyKept/ },
+  { name: 'main sends no mail for it', file: IDX, edits: [['try { hive.send(k.message as Partial<HiveMessage>, k.from); } catch', 'try { } catch']], killer: 'wired', dies: /ON THE MAIL RAIL/ },
+  { name: 'main does not steer for it', file: IDX, edits: [['try { control.steer(agentId, k.steer); } catch', 'try { } catch']], killer: 'wired', dies: /AND THE STEER RAIL/ },
+];
+test('MUTANT CENSUS: every mutant dies in its named test, for its named reason', async () => {
+  for (const m of MUTANTS) {
+    const file = m.file ?? HJF;
+    const text = mutateText(file, m.edits, m.name);
+    const arg = file === IDX ? text : loadTs.fromText(file, text);
+    await assert.rejects(async () => K[m.killer](arg), (e) => { assert.match(String(e.message), m.dies, `mutant "${m.name}" died for another reason`); return true; }, `MUTANT SURVIVED: ${m.name}`);
+  }
+});
+
+module.exports = { K, MUTANTS };

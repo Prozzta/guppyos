@@ -290,7 +290,7 @@ const MUTANTS = [
     killer: 'head', dies: /M6: THE NAMED AGENT IS AT THE HEAD AT ONCE/ },
   { name: 'M9: no 80-char cap on the name', edits: [['    to = to.slice(0, 80);\n', '']],
     killer: 'pins', dies: /M9: THE NAME IS CAPPED AT 80 CHARACTERS/ },
-  { name: 'M13: the lapsed flag is lost on the exclusive re-deny path', edits: [['exclusive: true, lapsed: r.lapsed });', 'exclusive: true, lapsed: false });']],
+  { name: 'M13: the lapsed flag is lost on the exclusive re-deny path', edits: [['exclusive: true, lapsed: r.lapsed, kept: r.kept });', 'exclusive: true, lapsed: false, kept: r.kept });']],
     killer: 'lapsedExclusive', dies: /M13: THE RE-DENY ON THE EXCLUSIVE PATH KEEPS THE LAPSED FLAG/ },
 ];
 

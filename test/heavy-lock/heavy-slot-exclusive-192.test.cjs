@@ -86,8 +86,8 @@ const K = {
   },
 
   // FIFO: a FULL waiting at the head for the drain is not overtaken by builds that come and go.
-  fifo(M = HJ, N = 2) {
-    const r = rig(M, N);
+  async fifo(M = HJ, N = 2) {
+    const r = rig(M, N, { pidAlive: () => true, leasePollMs: 0 });
     let b = r.take('b0', BUILD);
     assert.equal(r.take('x', FULL).allow, false);
     for (let i = 1; i <= 5; i++) {
@@ -98,6 +98,12 @@ const K = {
     r.l.callDone('b0', b.id);
     assert.deepEqual(reserved(r), ['x'], 'THE EXCLUSIVE IS SERVED FIRST, NOT STARVED');
     const x = r.take('x', FULL);
+    // HEAVY-SLOT-PRELAUNCH-FAIL-108: the FULL really runs: one test process of its hold takes a lease and
+    // ends. (A reserved suite call that ends with no test started keeps its slot once:
+    // test/heavy-lock/heavy-slot-prelaunch-fail-108.test.cjs.)
+    const t = await r.l.lease('x', { op: 'acquire', pid: 301, createdMs: 1_000_050, ppid: 50, files: [], suite: true });
+    assert.equal(t.state, 'held', 'the test process of the reserved FULL leases under its hold');
+    await r.l.lease('x', { op: 'release', leaseId: t.leaseId });
     r.l.callDone('x', x.id);
     // Then the builds behind it, as many as fit.
     assert.deepEqual(reserved(r), ['y1', 'y2', 'y3', 'y4', 'y5'].slice(0, N), 'AFTER THE EXCLUSIVE, THE WAITERS BEHIND IT SHARE THE SLOTS');

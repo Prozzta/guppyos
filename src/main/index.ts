@@ -140,7 +140,7 @@ import { createTerminalMirror, mirrorParseMs } from './terminalMirror';
 import { MirrorCostGuard, calibrationSample, mirrorOffNotice, mirrorOffWords } from './mirrorCost';
 import { ShadowDiff } from './termShadow';
 import { createScreenGate, screenGateSourceOf } from './screenGate';
-import { HeavyJobLock, heavyLimit, heavySlotFreeNotice, heavyWaitLapsedNotice, heavyUnlimitedNotice, probeProcesses, processImage } from './heavyJob';
+import { HeavyJobLock, heavyLimit, heavySlotFreeNotice, heavySlotKeptNotice, heavyWaitLapsedNotice, heavyUnlimitedNotice, probeProcesses, processImage } from './heavyJob';
 import { ScratchDiskManager } from './scratchDisk';
 import { removePathLinkSafe } from './linkSafeRemove';
 import { HeavyJobs, approvesWithoutAsking, heavyCpuOptions } from './heavyCpu';
@@ -1443,6 +1443,8 @@ const heavyLock = new HeavyJobLock({
   parentImage: processImage,
   // HEAVY-HANDOFF-RACE (a): god may name the next holder (`heavy next`) without holding a slot.
   isGod: (agentId) => hive.isGod(agentId),
+  // HEAVY-SLOT-PRELAUNCH-FAIL-108: its suite ended before any test started; the slot is kept for it, once.
+  notifyKept: (agentId, kind, until) => notifyHeavySlotKept(agentId, kind, until),
   // HEAVY-LOCK-SELF-WAIT: a queued agent is told when a slot is RESERVED for it, so it never polls.
   alive: (agentId) => [...ptyToAgent.values()].includes(agentId),
   notify: (agentId, kind, until) => notifyHeavySlotFree(agentId, kind, until),
@@ -1594,6 +1596,12 @@ function notifyHeavySlotFree(agentId: string, kind: string, until: number): void
   const n = heavySlotFreeNotice(agentId, kind, until);
   try { hive.send(n.message as Partial<HiveMessage>, n.from); } catch { /* best effort */ }
   try { control.steer(agentId, n.steer); } catch { /* best effort */ }
+}
+/** HEAVY-SLOT-PRELAUNCH-FAIL-108: send the "slot kept" notice (heavyJob.heavySlotKeptNotice) on both rails. */
+function notifyHeavySlotKept(agentId: string, kind: string, until: number): void {
+  const k = heavySlotKeptNotice(agentId, kind, until);
+  try { hive.send(k.message as Partial<HiveMessage>, k.from); } catch { /* best effort */ }
+  try { control.steer(agentId, k.steer); } catch { /* best effort */ }
 }
 function notifyHeavyUnlimited(agentId: string, kind: string): void {
   const n = heavyUnlimitedNotice(agentId, kind);

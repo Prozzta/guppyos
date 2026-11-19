@@ -51,7 +51,7 @@ function fakeLock(opts = {}) {
     limit: () => opts.limit ?? 1, now: () => clock.t,
     setTimer: () => ({}), clearTimer: () => {},
     log: (r) => rows.push(r), notify: (a, k, u) => notified.push([a, k, u]),
-    ...(opts.alive ? { alive: opts.alive } : {})
+    ...(opts.alive ? { alive: opts.alive } : {}), ...(opts.extra ?? {})
   });
   return { lock, clock, rows, notified };
 }
@@ -190,7 +190,13 @@ test('T2 onChange fires exactly once per acquire, background re-entry, deny, res
   assert.deepEqual(rows.slice(-2).map((r) => [r.action, r.reason]), [['release', 'posttool'], ['reserve', undefined]]);
   assert.ok(!rows.some((r) => r.action === 'queue-dropped'), 'no waiter dropped by age');
   step(() => lock.acquire('c', SUITE, 'npm test', 'c8b', false), 1, 'c takes its reservation');
-  step(() => lock.callDone('c', 'c8b'), 1, 'release');
+  // HEAVY-SLOT-PRELAUNCH-FAIL-108: c's reserved suite call ended with no test started, so its slot is
+  // kept for it, once: release + reserve-kept. Its next call's end passes on (nobody waits: one change).
+  step(() => lock.callDone('c', 'c8b'), 2, 'release, then the slot kept for c: one each');
+  assert.deepEqual(rows.slice(-2).map((r) => [r.action, r.reason]), [['release', 'posttool'], ['reserve-kept', 'posttool']]);
+  step(() => lock.acquire('c', SUITE, 'npm test', 'c8c', false), 1, 'c takes its kept slot');
+  step(() => lock.callDone('c', 'c8c'), 1, 'release: a kept slot is not kept again');
+  assert.equal(rows.at(-1).action, 'release');
   // A gone agent: its queue place, its reservation.
   step(() => lock.acquire('a', SUITE, 'npm test', 'c10', false), 1, 'acquire');
   step(() => lock.acquire('d', SUITE, 'npm test', 'c11', false), 1, 'deny');
@@ -480,12 +486,21 @@ const LOGGED = [
   'reenter andy'
 ];
 
-test('T7 replaying 05:52-06:35Z: no plain-idle stretch between a background acquire and its release, or between a deny and its slot', () => {
+test('T7 replaying 05:52-06:35Z: no plain-idle stretch between a background acquire and its release, or between a deny and its slot', async () => {
   const at = (hms) => Date.parse(`2026-10-15T${hms}Z`);
-  const { lock, clock, rows } = fakeLock({ t: at('05:52:00.000') });
+  const AGENTS = ['andy', 'jim', 'creed', 'dwight'];
+  // HEAVY-SLOT-PRELAUNCH-FAIL-108: these jobs RAN (minutes each, in the log). The watcher sees each
+  // holder's job once, as it did live; a reserved suite call that the lock never saw start a test
+  // would keep its slot, which is not what the log shows.
+  const ran = { id: null, at: 0 };
+  const rootsOf = AGENTS.map((agentId, i) => ({ agentId, pid: 100 + i }));
+  const probe = async () => [
+    ...rootsOf.map((r) => ({ pid: r.pid, parentPid: 1, commandLine: 'bash', createdMs: 1 })),
+    ...rootsOf.filter((r) => r.agentId === ran.id).map((r) => ({ pid: r.pid + 1000, parentPid: r.pid, commandLine: 'node test/tools/run-tests.cjs', createdMs: ran.at }))
+  ];
+  const { lock, clock, rows } = fakeLock({ t: at('05:52:00.000'), extra: { roots: () => rootsOf, probe } });
   const pushes = [];
   lock.onChange(() => pushes.push(clock.t));
-  const AGENTS = ['andy', 'jim', 'creed', 'dwight'];
   const idleRec = (id) => ({ ...lv('IDLE'), agentId: id, classifiedSince: at('05:52:00.000') });
   // Every agent's turn is closed between its own heavy calls (liveness IDLE): the case that read
   // as plain idle. Sample each agent after every event; a sample stands for the stretch up to the next.
@@ -501,6 +516,9 @@ test('T7 replaying 05:52-06:35Z: no plain-idle stretch between a background acqu
       const c = `c${call++}`;
       const d = lock.acquire(id, SUITE, 'npm test', c, mode === 'bg' || (op === 'reenter'));
       assert.equal(d.allow, true, `${hms} ${op} ${id}`);
+      if (ran.id !== id) ran.at = clock.t + 1;
+      ran.id = id;
+      await lock.scan();
       if (!calls.has(id)) calls.set(id, []);
       calls.get(id).push(c);
       // An acquire ends the agent's wait (deny .. reserve .. acquire); a re-entry continues its job.
@@ -512,8 +530,10 @@ test('T7 replaying 05:52-06:35Z: no plain-idle stretch between a background acqu
     } else {
       const h = lock.snapshot().find((x) => x.agentId === id);
       assert.ok(h, `${hms} release ${id}: it holds`);
+      ran.id = null;
       if (h.background) lock.release(id, 'process-exit');
       else for (const c of calls.get(id)) lock.callDone(id, c);
+      await new Promise((r) => setImmediate(r)); // with a watcher, PostToolUse looks for a live job first
       calls.delete(id);
       if (open.has(id)) { const o = open.get(id); spans.push([id, o.from, clock.t, o.want]); open.delete(id); }
     }

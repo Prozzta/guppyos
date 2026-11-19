@@ -50,6 +50,16 @@ function rig(M = HJ, extra = {}) {
 }
 const waiters = (x) => x.l.queueSnapshot().waiters.map((w) => w.agentId);
 const reservedFor = (x) => x.l.queueSnapshot().reserved.map((r) => r.agentId);
+/** HEAVY-SLOT-PRELAUNCH-FAIL-108: a reserved suite REALLY RUNS: one test process of its hold takes a
+ *  lease and ends. Without it the call is a launch that started no test, and the lock keeps that
+ *  agent's slot once (test/heavy-lock/heavy-slot-prelaunch-fail-108.test.cjs), which is not what
+ *  the tests here model. Its rig needs RAN's deps. */
+const RAN = { pidAlive: () => true, leasePollMs: 0 };
+async function suiteRan(x, agentId, pid) {
+  const t = await x.l.lease(agentId, { op: 'acquire', pid, createdMs: 1_000_050, ppid: 50, files: [], suite: true });
+  assert.equal(t.state, 'held', 'the test process of the reserved suite leases under its hold');
+  await x.l.lease(agentId, { op: 'release', leaseId: t.leaseId });
+}
 
 const K = {};
 
@@ -215,7 +225,7 @@ test('(b) a hold never seen running (no watcher, or last seen idle) still expire
 // ── (c) a lapsed reservation queues its owner again, once ────────────────────────────────────
 
 K.requeueOnce = async (M = HJ) => {
-  const x = rig(M);
+  const x = rig(M, RAN);
   x.l.acquire('h', H, 'npm ci', 'h1', false);
   x.l.acquire('creed', H, 'npm test', 'c1', false);
   x.l.acquire('dwight', H, 'npm test', 'd1', false);
@@ -234,9 +244,11 @@ K.requeueOnce = async (M = HJ) => {
   assert.deepEqual(waiters(x), ['andy', 'creed']);
   // dwight then andy run; the slot comes back to creed, reserved again and told HEAVY SLOT FREE again.
   x.l.acquire('dwight', H, 'npm test', 'd2', false);
+  await suiteRan(x, 'dwight', 201);
   x.l.callDone('dwight', 'd2');
   assert.deepEqual(reservedFor(x), ['andy']);
   x.l.acquire('andy', H, 'npm test', 'a2', false);
+  await suiteRan(x, 'andy', 202);
   x.l.callDone('andy', 'a2');
   assert.deepEqual(reservedFor(x), ['creed']);
   assert.deepEqual(x.notes.map((n) => n.a), ['creed', 'dwight', 'andy', 'creed']);
@@ -429,7 +441,7 @@ K.reservationBindsLive108 = async (M = HJ) => {
   // exited; the slot was reserved for Creed's suite; 2 ms later Creed's OWN bench lease took it
   // ("reserved:true", not kept), ran 3 s, and its posttool release reserved the slot for UHera (Jim
   // the second time). Creed's suite call 10 s later was denied.
-  const x = rig(M, { limit: () => 2 });
+  const x = rig(M, { limit: () => 2, ...RAN });
   assert.equal(x.l.acquire('dwight', BENCH, 'node bench.cjs', 'd1', false).allow, true);
   assert.equal(x.l.acquire('creed', H, 'node --test test/', 'c1', false).allow, false, 'the suite is denied at the hook');
   assert.equal(x.l.acquire('creed', BENCH, 'node --test (pid 141476)', 'lease:141476:1', false).allow, false, 'its test process waits');
@@ -449,6 +461,7 @@ K.reservationBindsLive108 = async (M = HJ) => {
   x.tick(10_000);
   assert.equal(x.l.acquire('creed', H, 'node --test test/', 'c2', false).allow, true, "CREED'S SUITE TAKES ITS RESERVED SLOT");
   assert.deepEqual([x.l.snapshot().map((s) => s.agentId), reservedFor(x), waiters(x)], [['creed'], [], ['uhera', 'jim']]);
+  await suiteRan(x, 'creed', 141500);
   x.l.callDone('creed', 'c2');
   assert.deepEqual(reservedFor(x), ['uhera'], 'then the slot passes on, in order');
 };
@@ -579,9 +592,9 @@ const MUTANTS = [
     killer: 'requeueNot', dies: /A GONE OWNER IS NOT QUEUED AGAIN/ },
   { name: 'the caller is queued again', edits: [['      if (!r.lapsed && r.hooked && agentId !== this.calling && this.alive(agentId)) {', '      if (!r.lapsed && r.hooked && this.alive(agentId)) {']],
     killer: 'requeueNot', dies: /THE CALLER TAKES THE SLOT ITSELF|THE CALLER IS NOT QUEUED AGAIN/ },
-  { name: 'queued again at the head', edits: [['        this.waiters.push({ agentId, kind: r.kind, since: t, procs: r.procs, hooked: true, exclusive: r.exclusive, lapsed: true });', '        this.waiters.unshift({ agentId, kind: r.kind, since: t, procs: r.procs, hooked: true, exclusive: r.exclusive, lapsed: true });']],
+  { name: 'queued again at the head', edits: [['        this.waiters.push({ agentId, kind: r.kind, since: t, procs: r.procs, hooked: true, exclusive: r.exclusive, lapsed: true, kept: r.kept });', '        this.waiters.unshift({ agentId, kind: r.kind, since: t, procs: r.procs, hooked: true, exclusive: r.exclusive, lapsed: true, kept: r.kept });']],
     killer: 'requeueOnce', dies: /THE OWNER IS QUEUED AGAIN AT THE BACK/ },
-  { name: 'the second reservation is a first one', edits: [['lapsed: w.lapsed });', 'lapsed: false });']],
+  { name: 'the second reservation is a first one', edits: [['lapsed: w.lapsed, kept: w.kept });', 'lapsed: false, kept: w.kept });']],
     killer: 'requeueOnce', dies: /THE SECOND LAPSE DROPS IT/ },
   { name: 'told requeued even when reserved again at once', edits: [['    for (const a of again) if (!this.reservations.has(a.agentId)) this.lapse(a.agentId, a.kind, \'requeued\');', '    for (const a of again) this.lapse(a.agentId, a.kind, \'requeued\');']],
     killer: 'requeueAlone', dies: /TOLD HEAVY SLOT FREE AGAIN, NOT REQUEUED/ },

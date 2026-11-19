@@ -2361,6 +2361,17 @@ export interface HeavyHolder {
   jobs: Map<string, Map<string, boolean>>;
   /** HEAVY-SLOT-EXCLUSIVE-192: it runs alone (an exclusive re-entry makes it so). */
   exclusive: boolean;
+  /** HEAVY-SLOT-PRELAUNCH-FAIL-108: this hold's number (one per acquire). A run of test processes
+   *  carries the number of the hold it leased under, so a straggler of an earlier hold proves nothing. */
+  grant: number;
+  /** HEAVY-SLOT-PRELAUNCH-FAIL-108: a SUITE call at the hook spent a reservation to make this hold
+   *  (`lapsed`: that reservation's own flag), and that reservation had not been kept before. null
+   *  otherwise: nothing to give back. */
+  spent: { lapsed: boolean } | null;
+  /** HEAVY-SLOT-PRELAUNCH-FAIL-108: a test process (or an Electron launch) of this hold leased, or
+   *  the watcher saw a heavy process of it. Never set by the suite runner's own lease: the runner
+   *  asks before its preflight. */
+  started: boolean;
 }
 
 /** A process created this long after its call's PostToolUse still belongs to the call (a
@@ -2393,6 +2404,9 @@ export interface HeavyLockDeps {
   log?: (row: Record<string, unknown>) => void;
   /** HEAVY-LOCK-SELF-WAIT: tell a queued agent that a slot is RESERVED for it until `until` (ms). */
   notify?: (agentId: string, kind: HeavyKind, until: number) => void;
+  /** HEAVY-SLOT-PRELAUNCH-FAIL-108: tell an agent its suite ended before any test started and its
+   *  slot is KEPT for it until `until` (ms), once. */
+  notifyKept?: (agentId: string, kind: HeavyKind, until: number) => void;
   /** A limit switched to Off releases every queued/reserved agent without a reservation. */
   notifyUnlimited?: (agentId: string, kind: HeavyKind) => void;
   /** LOCK-WAIT-NOTICES: tell an agent its reservation lapsed unused ('expired'), so it has left the
@@ -2537,6 +2551,22 @@ export function heavySlotFreeNotice(agentId: string, kind: string, until: number
 }
 
 /**
+ * HEAVY-SLOT-PRELAUNCH-FAIL-108: the "slot kept" notice, on the same rails as heavySlotFreeNotice.
+ * It gives the cause as the lock knows it (no test started) and never guesses why the launch died.
+ * Pure: main sends it.
+ */
+export function heavySlotKeptNotice(agentId: string, kind: string, until: number): {
+  message: { to: string; act: 'inform'; requires_reply: false; subject: string; body: string; wake: 'now' };
+  from: 'system';
+  steer: string;
+} {
+  const at = `${new Date(until).toISOString().slice(11, 16)}Z`;
+  const subject = `HEAVY SLOT KEPT: your ${kind} ended before any test started; the slot is still reserved for you until ${at}`;
+  const body = `Your ${kind} call took the heavy-job slot reserved for you and ended with no test process started, so the slot was not passed on: it is reserved for you again until ${at}. Read the output of that call, correct the launch and run it again. This happens once: if the next run also ends before a test starts, or you do not run it by then, the slot passes to the next agent in the queue. If you no longer need it, run \`heavy release\` so it passes on at once. No reply is needed.`;
+  return { message: { to: agentId, act: 'inform', requires_reply: false, subject, body, wake: 'now' }, from: 'system', steer: `${subject}.` };
+}
+
+/**
  * LOCK-WAIT-NOTICES (1.1.87): the notice for an agent that has left the queue without a slot: a
  * reservation not used within HEAVY_RESERVE_MS passes on, so the agent is no longer queued, and it
  * was told to wait for a notice, so it gets one. Same rails and wake as heavySlotFreeNotice. Pure:
@@ -2586,9 +2616,13 @@ export class HeavyJobLock {
   /** `procs`: HEAVY-LOCK-OPAQUE-SCRIPT-196 (Jim MUST C), the test processes waiting in a lease
    *  request; `hooked`: the agent was also denied at PreToolUse (it waits for the notice, not a
    *  process). A waiter with no live process and no hooked deny has left: the scan drops it. */
-  private readonly waiters: Array<{ agentId: string; kind: HeavyKind; since: number; procs: Array<{ pid: number; createdMs: number }>; hooked: boolean; exclusive: boolean; lapsed: boolean }> = [];
-  /** `lapsed` (HEAVY-HANDOFF-RACE (c)): the owner is queued again after an unused reservation; a second one drops it. */
-  private readonly reservations = new Map<string, { kind: HeavyKind; until: number; procs: Array<{ pid: number; createdMs: number }>; hooked: boolean; exclusive: boolean; lapsed: boolean }>();
+  private readonly waiters: Array<{ agentId: string; kind: HeavyKind; since: number; procs: Array<{ pid: number; createdMs: number }>; hooked: boolean; exclusive: boolean; lapsed: boolean; kept?: boolean }> = [];
+  /** `lapsed` (HEAVY-HANDOFF-RACE (c)): the owner is queued again after an unused reservation; a second one drops it.
+   *  `kept` (HEAVY-SLOT-PRELAUNCH-FAIL-108): it was given back once after a launch that started no
+   *  test; it (and its queue-again) is never given back again. */
+  private readonly reservations = new Map<string, { kind: HeavyKind; until: number; procs: Array<{ pid: number; createdMs: number }>; hooked: boolean; exclusive: boolean; lapsed: boolean; kept?: boolean }>();
+  /** HEAVY-SLOT-PRELAUNCH-FAIL-108: the number of the last hold made (HeavyHolder.grant). */
+  private grants = 0;
   /** HEAVY-LOCK-OPAQUE-SCRIPT-196: each agent's recent calls that ARE one `node --test` of named files
    *  (testInvocation), each consumed by the one test process it starts (Jim MUST A). */
   private readonly testCalls = new Map<string, Array<{ callId: string; files: string[]; start: number; end: number | null; used: boolean }>>();
@@ -2597,7 +2631,7 @@ export class HeavyJobLock {
   /** Held leases by id ('lease:<pid>:<createdMs>'): released by the preload at exit, or by the scan. */
   private readonly leases = new Map<string, { agentId: string; pid: number; createdMs: number; run: string }>();
   /** Classified runs ('<pid>:<createdMs>') a nested test process may name in GUPPY_TEST_RUN (MUST B). */
-  private readonly runs = new Map<string, { agentId: string; held: boolean; single?: boolean }>();
+  private readonly runs = new Map<string, { agentId: string; held: boolean; single?: boolean; grant?: number }>();
   /** Agents queued only by a waiting test process (no PreToolUse deny told them to wait). */
   private readonly leaseOnly = new Set<string>();
   private timer: unknown = null;
@@ -2706,14 +2740,18 @@ export class HeavyJobLock {
       const r = this.reservations.get(agentId)!;
       this.reservations.delete(agentId);
       this.dequeue(agentId);
-      this.waiters.unshift({ agentId, kind: cls.kind as HeavyKind, since: this.now(), procs: r.procs, hooked: r.hooked, exclusive: true, lapsed: r.lapsed });
+      this.waiters.unshift({ agentId, kind: cls.kind as HeavyKind, since: this.now(), procs: r.procs, hooked: r.hooked, exclusive: true, lapsed: r.lapsed, kept: r.kept });
       return this.deny(agentId, cls, limit, callId);
     }
+    // HEAVY-SLOT-PRELAUNCH-FAIL-108: a suite call at the hook spends its reservation HERE, before
+    // anything has run. The hold remembers it, so release() can give it back if no test starts.
+    const was = reserved && !keep ? this.reservations.get(agentId)! : null;
+    const spent = was && was.hooked && !was.kept && cls.kind === 'suite' ? { lapsed: was.lapsed } : null;
     if (reserved && !keep) this.reservations.delete(agentId);
     this.dequeue(agentId);
     this.leaseOnly.delete(agentId);
     if (this.nextUp === agentId) this.nextUp = null;
-    this.holders.set(agentId, { agentId, kind: cls.kind, command: command.slice(0, 200), since: this.now(), touched: this.now(), calls: new Set([callId]), background, provisional: new Set(cls.provisional ? [callId] : []), definite: !cls.provisional, misses: 0, seenRunning: false, seenAt: null, attributed: new Map(), windows: [{ callId, start: this.now(), end: null }], lastProbe: null, jobs: new Map(), exclusive: excl });
+    this.holders.set(agentId, { agentId, kind: cls.kind, command: command.slice(0, 200), since: this.now(), touched: this.now(), calls: new Set([callId]), background, provisional: new Set(cls.provisional ? [callId] : []), definite: !cls.provisional, misses: 0, seenRunning: false, seenAt: null, attributed: new Map(), windows: [{ callId, start: this.now(), end: null }], lastProbe: null, jobs: new Map(), exclusive: excl, grant: ++this.grants, spent, started: false });
     this.log({ kind: 'heavy-lock', action: 'acquire', agentId, heavyKind: cls.kind, command: command.slice(0, 200), background, limit, ...(reserved ? (keep ? { reservedKept: true } : { reserved: true }) : {}), ...(excl ? { exclusive: true } : {}) });
     this.changed();
     this.arm();
@@ -2821,7 +2859,7 @@ export class HeavyJobLock {
       // HEAVY-QUEUE-WAIT-DROPS: no drop by age here (the old Andy N2 "stale" drop). A waiter that
       // moved on takes this reservation, which lapses in HEAVY_RESERVE_MS and passes on.
       const until = this.now() + HEAVY_RESERVE_MS;
-      this.reservations.set(w.agentId, { kind: w.kind, until, procs: w.procs, hooked: w.hooked, exclusive: w.exclusive, lapsed: w.lapsed });
+      this.reservations.set(w.agentId, { kind: w.kind, until, procs: w.procs, hooked: w.hooked, exclusive: w.exclusive, lapsed: w.lapsed, kept: w.kept });
       if (w.agentId === this.nextUp) this.nextUp = null;
       this.log({ kind: 'heavy-lock', action: 'reserve', agentId: w.agentId, heavyKind: w.kind, until: new Date(until).toISOString(), waitedMs: this.now() - w.since, ...(w.exclusive ? { exclusive: true } : {}) });
       this.changed();
@@ -2874,7 +2912,7 @@ export class HeavyJobLock {
       void this.heavyAgents().then((busy) => {
         const cur = this.holders.get(agentId);
         if (!cur || cur.calls.size || cur.background) return;
-        if (busy?.busy.has(agentId)) { cur.background = true; cur.seenRunning = true; cur.seenAt = this.now(); this.log({ kind: 'heavy-lock', action: 'orphan-kept', agentId, heavyKind: cur.kind }); this.changed(); this.arm(); return; }
+        if (busy?.busy.has(agentId)) { cur.started = true; cur.background = true; cur.seenRunning = true; cur.seenAt = this.now(); this.log({ kind: 'heavy-lock', action: 'orphan-kept', agentId, heavyKind: cur.kind }); this.changed(); this.arm(); return; }
         // (a) FAIL CLOSED: a failed listing says nothing about the job (most likely a TIMEOUT on a
         // loaded machine, i.e. exactly when a second heavy job hurts most). Keep the slot as a
         // background holder; the watcher frees it on two clean scans without it, or the TTL.
@@ -3128,6 +3166,20 @@ export class HeavyJobLock {
     this.holders.delete(agentId);
     this.log({ kind: 'heavy-lock', action: 'release', agentId, heavyKind: h.kind, reason, heldMs: this.now() - h.since });
     this.changed();
+    // HEAVY-SLOT-PRELAUNCH-FAIL-108 (2026-11-18 10:00Z, 10:54Z; 11-19 10:17Z): the hold spent a
+    // reservation and its job is over with NO test started (npm.ps1 refused; the runner's preflight
+    // said TREE GAP). "The call returned" is not "the job ran": the slot is reserved for the same
+    // agent again, for a fresh window, and it is told. ONCE (`kept`): the next hold from this
+    // reservation, or from its queue-again, passes on whatever happens, so a launch that keeps
+    // failing costs the queue one extra HEAVY_RESERVE_MS at most. Only when the job itself ended
+    // (posttool, job-exit, process-exit): not ttl, pty-exit, `heavy release` or settled-light.
+    if (h.spent && !h.started && (reason === 'posttool' || reason === 'job-exit' || reason === 'process-exit') && this.d.limit() !== 'off' && this.alive(agentId)) {
+      const keptUntil = this.now() + HEAVY_RESERVE_MS;
+      this.reservations.set(agentId, { kind: h.kind, until: keptUntil, procs: [], hooked: true, exclusive: h.exclusive, lapsed: h.spent.lapsed, kept: true });
+      this.log({ kind: 'heavy-lock', action: 'reserve-kept', agentId, heavyKind: h.kind, reason, until: new Date(keptUntil).toISOString() });
+      this.changed();
+      try { this.d.notifyKept?.(agentId, h.kind, keptUntil); } catch { /* best effort: the reservation stands */ }
+    }
     // HEAVY-LOCK-SELF-WAIT: the freed slot goes to the oldest waiter (reserved), not to whoever asks first.
     this.grant();
     if (!this.watching() && this.timer) { this.clearTimer(this.timer); this.timer = null; }
@@ -3224,7 +3276,7 @@ export class HeavyJobLock {
       // only by its test process (hooked false: the process asks again by itself), not the caller (its
       // own answer says it all), not a gone one (no PTY to serve or tell).
       if (!r.lapsed && r.hooked && agentId !== this.calling && this.alive(agentId)) {
-        this.waiters.push({ agentId, kind: r.kind, since: t, procs: r.procs, hooked: true, exclusive: r.exclusive, lapsed: true });
+        this.waiters.push({ agentId, kind: r.kind, since: t, procs: r.procs, hooked: true, exclusive: r.exclusive, lapsed: true, kept: r.kept });
         this.log({ kind: 'heavy-lock', action: 'queue-again', agentId, heavyKind: r.kind, position: this.waiters.length });
         this.changed();
         again.push({ agentId, kind: r.kind });
@@ -3262,6 +3314,7 @@ export class HeavyJobLock {
     const t = this.now();
     for (const h of held) {
       if (!this.holders.has(h.agentId)) continue;
+      if (busy.has(h.agentId)) h.started = true; // HEAVY-SLOT-PRELAUNCH-FAIL-108: seen running is a started job
       if (busy.has(h.agentId)) { h.misses = 0; h.seenRunning = true; h.seenAt = t; continue; }
       if (!seen.has(h.agentId)) continue;   // its PTY root is not in the listing: unknown, not a miss
       h.seenRunning = false;
@@ -3353,7 +3406,11 @@ export class HeavyJobLock {
     // does not inherit: a light test file or script whose tree starts Electron needs the slot.
     if (parent && parent.agentId === agentId && this.runAlive(r.parentRun!) && (!electron || (parent.held && this.holders.has(agentId)))) {
       const held = parent.held && this.holders.has(agentId);
-      this.runs.set(run, { agentId, held });
+      this.runs.set(run, { agentId, held, grant: parent.grant });
+      // HEAVY-SLOT-PRELAUNCH-FAIL-108: a test process of a run that leased under THIS hold is the
+      // proof that a test started (not a straggler of an earlier hold's run: its number differs).
+      const hold = this.holders.get(agentId);
+      if (held && hold && parent.grant === hold.grant) hold.started = true;
       this.log({ kind: 'heavy-lock', action: 'lease-inherit', agentId, pid, held });
       return held ? { state: 'held', run, leaseId: null, why: 'part of a held run' } : { state: 'light', run, why: 'part of a light run' };
     }
@@ -3368,7 +3425,7 @@ export class HeavyJobLock {
       // LAG-NAMED-STALLS-RESIDUAL-108: the runner's file and its repo's test files are read first.
       const judged = this.d.classifyRead ? await this.d.classifyRead(judge) : judge();
       if (!judged.heavy) {
-        this.runs.set(run, { agentId, held: this.holders.has(agentId) });
+        this.runs.set(run, { agentId, held: this.holders.has(agentId), grant: this.holders.get(agentId)?.grant });
         return { state: 'light', run, why: 'a filtered suite runner' };
       }
       suite = true;
@@ -3404,7 +3461,14 @@ export class HeavyJobLock {
           // 'off' (or nothing held after all): nothing to release.
           if (!this.holders.get(agentId)?.calls.has(id)) { this.runs.set(run, { agentId, held: false }); return { state: 'light', run, why: 'heavy jobs are unlimited' }; }
           this.leases.set(id, { agentId, pid, createdMs, run });
-          this.runs.set(run, { agentId, held: true });
+          const hold = this.holders.get(agentId)!;
+          this.runs.set(run, { agentId, held: true, grant: hold.grant });
+          // HEAVY-SLOT-PRELAUNCH-FAIL-108: a test process or an Electron launch has started. The
+          // suite RUNNER's own lease is no proof (it asks before its preflight), nor is an install
+          // or build program's, nor a process that names a parent run this hold did not make (a
+          // straggler of an earlier run whose runner is gone).
+          const own = typeof r.parentRun !== 'string' || parent?.grant === hold.grant;
+          if (own && !Array.isArray(r.runner) && (electron || !r.preloadKind)) hold.started = true;
           const mine = [...this.leases.values()].filter((l) => l.agentId === agentId).length;
           this.log({ kind: 'heavy-lock', action: 'lease', agentId, heavyKind: kind, pid, shared });
           // Jim SHOULD 3: two heavy jobs of one agent on its one slot (today's share semantics).
