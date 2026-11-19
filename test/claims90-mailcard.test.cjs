@@ -134,7 +134,7 @@ async function floor(t, cards = ['CARD-ONE', 'CARD-TWO']) {
   await hive.ensureAgent({ id: 'god-1', name: 'Michael', provider: 'claude', cwd: home, isGod: true });
   await hive.ensureAgent({ id: 'jim-1', name: 'Jim', provider: 'claude', cwd: home });
   await hive.ensureAgent({ id: 'pam-1', name: 'Pam', provider: 'claude', cwd: home });
-  for (const id of cards) assert.equal(hive.addTask({ id, title: id, status: 'todo', priority: 'normal', deps: [], humanQA: [] }), true);
+  for (const id of cards) assert.equal(await hive.addTask({ id, title: id, status: 'todo', priority: 'normal', deps: [], humanQA: [] }), true);
   const dir = path.join(hive.root(), 'state', 'mail-cards');
   return { hive, dir, links: () => readLines(path.join(dir, '_links.jsonl')) };
 }

@@ -249,16 +249,16 @@ test('tasks.json: an API write that lands during the async sidecar write is the 
   const atomic = loadTs('src/main/atomicJson.ts');
   atomic.__setRenameAddonForTest(null);
   t.after(() => atomic.__setRenameAddonForTest(undefined));
-  // Land our own (synchronous) write inside the async sidecar write: once while the temp file
+  // Land our own write (LAG-TASKS-WRITE-SYNC-READ-108: awaited, it is async now) inside the async sidecar write: once while the temp file
   // is being written (the async write must withdraw), once just as it renames (it must repeat).
   for (const [round, hook] of [[0, 'writeFile'], [1, 'rename']]) {
     const outside = `F${round}`; const ours = `A${round}`;
     const orig = fsp[hook];
     let fired = 0;
-    fsp[hook] = function (...args) {
+    fsp[hook] = async function (...args) {
       if (fired === 0 && args.some((a) => typeof a === 'string' && /task-meta\.json/.test(a))) {
         fired++;
-        hive.addTask({ id: ours, title: 'ours', status: 'todo' });
+        await hive.addTask({ id: ours, title: 'ours', status: 'todo' });
       }
       return orig.apply(this, args);
     };
@@ -292,7 +292,7 @@ test('tasks.json: our own API write is announced as ours and read back at once (
   hive.startLedgerGuard();
   const seen = [];
   hive.ledgerGuard.onChange((change) => { seen.push({ by: change.by, ids: ids(hive.tasks()) }); });
-  hive.addTask({ id: 'T9', title: 'ours', status: 'todo' });
+  await hive.addTask({ id: 'T9', title: 'ours', status: 'todo' });
   assert.deepEqual(ids(hive.tasks()), ['T1', 'T9']);
   await hive.ledgerGuard.checkSoon();
   await new Promise((r) => setTimeout(r, 600));
@@ -445,9 +445,14 @@ const oldDone = (id, extra = {}) => card(id, { status: 'done', doneAt: new Date(
 async function during(name, accepts, after, fn) {
   const real = fsp[name];
   let fired = 0;
+  let racing = false;
   fsp[name] = async function (p, ...rest) {
     const out = await real.call(this, p, ...rest);
-    if (accepts(String(p)) && fired++ === 0) after(String(p));
+    // LAG-TASKS-WRITE-SYNC-READ-108: card writes are async, so the reader's read resolves only
+    // once the write it races has landed; the write's own reads are not the reader's, so they
+    // are not counted.
+    if (racing) return out;
+    if (accepts(String(p)) && fired++ === 0) { racing = true; try { await after(String(p)); } finally { racing = false; } }
     return out;
   };
   try { return { result: await fn(), fired }; } finally { fsp[name] = real; }
@@ -457,7 +462,7 @@ const jsonl = (calls) => calls.filter((c) => /\.jsonl$/.test(c));
 test('archive: readCardsAsync reads tasks.json, the archive and task-meta.json with no synchronous fs, and answers as readCards', async (t) => {
   const { hive } = tasksFloor(t, [card('L1', { status: 'doing' }), oldDone('O1'), oldDone('O2')]);
   const root = hive.root();
-  assert.deepEqual(hive.archivePass().sort(), ['O1', 'O2']);
+  assert.deepEqual((await hive.archivePass()).sort(), ['O1', 'O2']);
   const sync = derived.readCards(root);
   assert.deepEqual(sync.map((c) => c.id).sort(), ['L1', 'O1', 'O2']);
   const counted = await syncCalls(root, () => derived.readCards(root));
@@ -475,10 +480,10 @@ test('archive: readCardsAsync reads tasks.json, the archive and task-meta.json w
 test('archive: a revive that lands while readCardsAsync is reading is the last word (never a mix of before and after)', async (t) => {
   const { hive } = tasksFloor(t, [card('L1'), oldDone('O1')]);
   const root = hive.root();
-  assert.deepEqual(hive.archivePass(), ['O1']);
+  assert.deepEqual(await hive.archivePass(), ['O1']);
   // tasks.json is read (O1 not in it); then the revive moves O1 back to hot and tombstones it in
   // the archive. Hot-before plus archive-after would have O1 nowhere.
-  const { result, fired } = await during('readFile', (p) => p.endsWith('tasks.json'), () => { assert.ok(hive.patchTask('O1', { notes: 'late' })); },
+  const { result, fired } = await during('readFile', (p) => p.endsWith('tasks.json'), async () => { assert.ok(await hive.patchTask('O1', { notes: 'late' })); },
     () => derived.readCardsAsync(root));
   assert.equal(fired, 2, 'overtaken once, then read again');
   assert.deepEqual(result, derived.readCards(root));
@@ -488,7 +493,7 @@ test('archive: a revive that lands while readCardsAsync is reading is the last w
 test('archive: readArchiveTextsAsync gives readArchive\'s cards and archiveStamp\'s stamp, shares one flight, and sees an outside append', async (t) => {
   const { hive } = tasksFloor(t, [oldDone('O1'), oldDone('O2')]);
   const root = hive.root();
-  hive.archivePass();
+  await hive.archivePass();
   const [a, b] = await Promise.all([archive.readArchiveTextsAsync(root), archive.readArchiveTextsAsync(root)]);
   assert.equal(a, b, 'one flight');
   assert.equal(a.stamp, archive.archiveStamp(root));
@@ -506,21 +511,21 @@ test('archive: readArchiveTextsAsync gives readArchive\'s cards and archiveStamp
 test('archive: an archive pass and a revive no longer make the next reader read the archive synchronously', async (t) => {
   const { hive } = tasksFloor(t, [card('L1'), oldDone('O1')]);
   const root = hive.root();
-  assert.deepEqual(hive.archivePass(), ['O1']);
+  assert.deepEqual(await hive.archivePass(), ['O1']);
   await hive.__revalidateArchiveForTests();
   const first = await syncCalls(root, () => hive.allTasks());
   assert.deepEqual(jsonl(first.calls).filter((c) => c.startsWith('readFileSync:')), [], `cached after the off-thread read: ${first.calls}`);
   assert.deepEqual(first.result.tasks.map((c) => c.id).sort(), ['L1', 'O1']);
   // A second pass: the appended bytes are read back (not the archive), and the cards in memory follow.
-  assert.ok(hive.addTask(oldDone('O2', { notes: 'second' })));
-  const pass = await syncCalls(root, () => { const moved = hive.archivePass(); return { moved, all: hive.allTasks().tasks }; });
+  assert.ok(await hive.addTask(oldDone('O2', { notes: 'second' })));
+  const pass = await syncCalls(root, async () => { const moved = await hive.archivePass(); return { moved, all: hive.allTasks().tasks }; });
   assert.deepEqual(pass.result.moved, ['O2']);
   assert.deepEqual(jsonl(pass.calls).filter((c) => c.startsWith('readFileSync:')), [], `no whole-archive read: ${pass.calls}`);
   assert.deepEqual(pass.result.all.map((c) => c.id).sort(), ['L1', 'O1', 'O2']);
   assert.deepEqual(plain(pass.result.all.find((c) => c.id === 'O2')), plain(archive.readArchive(root).get('O2')));
   // A revive: the card leaves the cached archive with its tombstone.
   const before = hive.archived(root);
-  const rev = await syncCalls(root, () => { const ok = hive.patchTask('O1', { notes: 'back' }); return { ok, all: hive.allTasks().tasks }; });
+  const rev = await syncCalls(root, async () => { const ok = await hive.patchTask('O1', { notes: 'back' }); return { ok, all: hive.allTasks().tasks }; });
   assert.ok(rev.result.ok);
   assert.deepEqual(jsonl(rev.calls).filter((c) => c.startsWith('readFileSync:')), [], `no whole-archive read: ${rev.calls}`);
   assert.equal(rev.result.all.filter((c) => c.id === 'O1').length, 1);
@@ -560,7 +565,7 @@ test('archive: landedCards answers as the whole-archive read back does (whole, t
 test('archive: the mail-card catch-up lists the registry\'s card ids through its own driver, as registryCardIds does', async (t) => {
   const { hive } = tasksFloor(t, [card('L1'), oldDone('O1'), oldDone('O2')]);
   const root = hive.root();
-  hive.archivePass();
+  await hive.archivePass();
   const drive = async (g) => {
     let input;
     for (;;) {
@@ -578,7 +583,7 @@ test('archive: the mail-card catch-up lists the registry\'s card ids through its
   assert.deepEqual(calls, []);
   assert.deepEqual(result, sync);
   // A revive between the hot read and the archive read: read again, not O1 lost.
-  const raced = await during('readFile', (p) => p.endsWith('tasks.json'), () => { assert.ok(hive.patchTask('O1', { notes: 'late' })); },
+  const raced = await during('readFile', (p) => p.endsWith('tasks.json'), async () => { assert.ok(await hive.patchTask('O1', { notes: 'late' })); },
     () => drive(mailCards.registryCardIdsSteps(root)));
   assert.equal(raced.fired, 2, 'overtaken once, then read again');
   assert.deepEqual([...raced.result].sort(), ['L1', 'O1', 'O2']);
@@ -682,5 +687,5 @@ test('wiring (round 2): the archive, the ledger load and the mail bodies use the
   const hv = codeOnly(readSource('src/main/hive.ts'));
   const pass = hv.slice(hv.indexOf('  archivePass(now'), hv.indexOf('  private archived(root'));
   assert.doesNotMatch(pass, /= readArchive\(root\)/, 'the pass reads back through landedCards');
-  assert.match(pass, /landedCards\(root, mark, moving\)/);
+  assert.match(pass, /landedCardsAsync\(root, mark, moving\)/);
 });

@@ -12,6 +12,7 @@ require('./tools/own-job.cjs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const fsp = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
@@ -42,59 +43,59 @@ function tasks(hive) {
   return hive.tasks().tasks;
 }
 
-test('patching a stale UI card preserves a concurrently appended webhook card', (t) => {
+test('patching a stale UI card preserves a concurrently appended webhook card', async (t) => {
   const hive = floor(t);
   const question = card('needs-human', {
     status: 'blocked',
     humanQA: [{ q: 'Which option?', askedAt: '2026-08-15T08:00:00.000Z' }]
   });
-  hive.writeTasks([question]);
+  await hive.writeTasks([question]);
 
   // The renderer still holds this one-card snapshot when the webhook arrives.
   const staleQuestion = structuredClone(tasks(hive)[0]);
   const webhook = card('webhook-1', {
     webhook: { tokenHash: 'a'.repeat(64) }
   });
-  assert.equal(hive.addTask(webhook), true);
+  assert.equal(await hive.addTask(webhook), true);
 
   staleQuestion.humanQA[0].a = 'Option B';
   staleQuestion.humanQA[0].answeredAt = '2026-08-15T08:00:01.000Z';
-  assert.equal(hive.patchTask(staleQuestion.id, { humanQA: staleQuestion.humanQA }), true);
+  assert.equal(await hive.patchTask(staleQuestion.id, { humanQA: staleQuestion.humanQA }), true);
 
   assert.deepEqual(tasks(hive).map((task) => task.id), ['needs-human', 'webhook-1']);
   assert.equal(tasks(hive)[0].humanQA[0].a, 'Option B');
   assert.equal(tasks(hive)[1].webhook.tokenHash, 'a'.repeat(64));
 });
 
-test('atomic add is idempotent and delete removes only the named card', (t) => {
+test('atomic add is idempotent and delete removes only the named card', async (t) => {
   const hive = floor(t);
-  hive.writeTasks([card('existing')]);
+  await hive.writeTasks([card('existing')]);
 
-  assert.equal(hive.addTask(card('new')), true);
-  assert.equal(hive.addTask(card('new', { title: 'duplicate' })), false);
-  assert.equal(hive.deleteTask('existing'), true);
-  assert.equal(hive.deleteTask('missing'), false);
+  assert.equal(await hive.addTask(card('new')), true);
+  assert.equal(await hive.addTask(card('new', { title: 'duplicate' })), false);
+  assert.equal(await hive.deleteTask('existing'), true);
+  assert.equal(await hive.deleteTask('missing'), false);
 
   assert.deepEqual(tasks(hive).map((task) => task.id), ['new']);
   assert.equal(tasks(hive)[0].title, 'new');
 });
 
-test('patch refuses an unknown card without rewriting the ledger', (t) => {
+test('patch refuses an unknown card without rewriting the ledger', async (t) => {
   const hive = floor(t);
-  hive.writeTasks([card('existing')]);
+  await hive.writeTasks([card('existing')]);
 
-  assert.equal(hive.patchTask('missing', { status: 'done' }), false);
+  assert.equal(await hive.patchTask('missing', { status: 'done' }), false);
   assert.deepEqual(tasks(hive), [card('existing')]);
 });
 
-test('malformed tasks.json is quarantined and addTask refuses to overwrite it', (t) => {
+test('malformed tasks.json is quarantined and addTask refuses to overwrite it', async (t) => {
   const hive = floor(t);
-  hive.writeTasks([card('existing')]);
+  await hive.writeTasks([card('existing')]);
   const file = path.join(hive.root(), 'tasks.json');
   const corrupt = '{"tasks":["half-written"';
   fs.writeFileSync(file, corrupt, 'utf8');
 
-  assert.throws(() => hive.addTask(card('new')), /tasks\.json is invalid JSON; refusing to overwrite it/);
+  await assert.rejects(hive.addTask(card('new')), /tasks\.json is invalid JSON; refusing to overwrite it/);
   assert.equal(fs.readFileSync(file, 'utf8'), corrupt, 'the bad authority file remains untouched for repair');
   const copies = fs.readdirSync(hive.root()).filter((name) => name.startsWith('tasks.json.corrupt-'));
   assert.equal(copies.length, 1, 'one byte-identical copy is quarantined');
@@ -103,9 +104,12 @@ test('malformed tasks.json is quarantined and addTask refuses to overwrite it', 
     'the operator gets a durable, loud integrity event');
 });
 
-test('malformed registry.json keeps read-only views alive but refuses every mutation', (t) => {
+test('malformed registry.json keeps read-only views alive but refuses every mutation', async (t) => {
   const hive = floor(t);
-  hive.writeTasks([card('existing')]); // bootstraps the authoritative hive files
+  // LAG-TASKS-WRITE-SYNC-READ-108 (Jim MUST 1): a card write no longer runs ensureHive(), so the
+  // authoritative hive files are bootstrapped here, as startup does.
+  hive.ensureHive();
+  await hive.writeTasks([card('existing')]);
   const file = path.join(hive.root(), 'registry.json');
   const corrupt = '{"agents":';
   fs.writeFileSync(file, corrupt, 'utf8');
@@ -119,7 +123,7 @@ test('malformed registry.json keeps read-only views alive but refuses every muta
   assert.equal(fs.readFileSync(path.join(hive.root(), copies[0]), 'utf8'), corrupt);
 });
 
-test('missing authorities bootstrap with defaults, while a corrupt legacy cursor.json is never overwritten', (t) => {
+test('missing authorities bootstrap with defaults, while a corrupt legacy cursor.json is never overwritten', async (t) => {
   const hive = floor(t);
   hive.ensureHive();
   const root = hive.root();
@@ -127,7 +131,7 @@ test('missing authorities bootstrap with defaults, while a corrupt legacy cursor
   fs.rmSync(path.join(root, 'tasks.json'));
   assert.deepEqual(hive.registry(), { godId: null, agents: {} });
   assert.deepEqual(hive.tasks(), { tasks: [] });
-  assert.equal(hive.addTask(card('first')), true, 'missing tasks.json may be freshly created');
+  assert.equal(await hive.addTask(card('first')), true, 'missing tasks.json may be freshly created');
 
   // ZT-I1-MAIL P11: drainForStop, cursor.json's only reader and writer, is deleted; an agent
   // folder from an older build keeps its cursor.json byte for byte (nothing rewrites it).
@@ -139,32 +143,33 @@ test('missing authorities bootstrap with defaults, while a corrupt legacy cursor
   assert.equal(typeof hive.drainForStop, 'undefined');
 });
 
-test('Windows rename retries publish after transient locks and leave no temp file', (t) => {
+test('Windows rename retries publish after transient locks and leave no temp file', async (t) => {
   const hive = floor(t);
-  hive.writeTasks([card('old')]);
+  await hive.writeTasks([card('old')]);
   const file = path.join(hive.root(), 'tasks.json');
   // REGISTRY-RENAME-EPERM-107: renameWithRetry tries the POSIX rename first, which never calls
   // fs.renameSync; the injected rename fault below is for the plain-rename path, so turn POSIX off.
+  // LAG-TASKS-WRITE-SYNC-READ-108: card writes publish off main thread through fs/promises rename.
   AJ.__setRenameAddonForTest(null);
   t.after(() => AJ.__setRenameAddonForTest(undefined));
-  const renameSync = fs.renameSync;
+  const realRename = fsp.rename;
   let attempts = 0;
-  fs.renameSync = (...args) => {
+  fsp.rename = async (...args) => {
     // ZT-I3: count the ledger's own publish; the guard's sidecar (state/task-meta.json) is
     // a second, separate atomic write after it.
-    if (path.basename(String(args[1])) !== 'tasks.json') return renameSync(...args);
+    if (path.basename(String(args[1])) !== 'tasks.json') return realRename(...args);
     attempts++;
     if (attempts < 3) {
       const error = new Error('simulated Windows sharing violation');
       error.code = 'EPERM';
       throw error;
     }
-    return renameSync(...args);
+    return realRename(...args);
   };
   try {
-    hive.writeTasks([card('new')]);
+    await hive.writeTasks([card('new')]);
   } finally {
-    fs.renameSync = renameSync;
+    fsp.rename = realRename;
   }
   assert.equal(attempts, 3);
   assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).tasks.map((task) => task.id), ['new']);

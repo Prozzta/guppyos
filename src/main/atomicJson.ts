@@ -130,8 +130,10 @@ export function atomicWriteJson(p: string, data: unknown): void {
  *  ASYNC-RENAME-POSIX-107: on Windows the rename is first the addon's posixRenameAsync, the POSIX rename
  *  of renameWithRetry run on a libuv pool thread, so it publishes while a reader holds the target open
  *  and the main thread never waits for it (the sync posixRename is never called here). If it fails or
- *  is not there, the plain rename and its retries run as before, after `commit` is asked again. */
-export async function atomicWriteTextAsync(p: string, text: string | Iterable<string>, commit?: () => boolean, onTmp?: (tmp: string) => void): Promise<boolean> {
+ *  is not there, the plain rename and its retries run as before, after `commit` is asked again.
+ *  LAG-TASKS-WRITE-SYNC-READ-108: `commit` may be async (the card write re-reads tasks.json in it,
+ *  so an outside edit that landed while the temp file was written is merged, not overwritten). */
+export async function atomicWriteTextAsync(p: string, text: string | Iterable<string>, commit?: () => boolean | Promise<boolean>, onTmp?: (tmp: string) => void): Promise<boolean> {
   const tmp = `${p}.tmp-${randomBytes(3).toString('hex')}`;
   onTmp?.(tmp);
   let last: unknown;
@@ -140,7 +142,7 @@ export async function atomicWriteTextAsync(p: string, text: string | Iterable<st
     const addon = loadRenameAddon();
     let viaPool = typeof addon?.posixRenameAsync === 'function';
     for (let attempt = 0; attempt < 5; attempt++) {
-      if (commit && !commit()) { await rm(tmp, { force: true }); return false; }
+      if (commit && !(await commit())) { await rm(tmp, { force: true }); return false; }
       if (viaPool && addon?.posixRenameAsync) {
         // One try, which is not one of the plain rename's five: a failure goes back to the commit check.
         viaPool = false;

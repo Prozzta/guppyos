@@ -46,7 +46,7 @@ async function floor(t) {
   await hive.ensureAgent({ id: 'god-1', name: 'Michael', provider: 'claude', cwd: home, isGod: true });
   await hive.ensureAgent({ id: 'jim-1', name: 'Jim', provider: 'claude', cwd: home });
   const card = (id, status) => ({ id, title: `invented card ${id}`, status, dependsOn: [], priority: 1, createdAt: '2026-10-17T00:00:00.000Z' });
-  hive.writeTasks([card('ASK-1', 'doing'), card('DONE-1', 'done'), card('TODO-1', 'todo')]);
+  await hive.writeTasks([card('ASK-1', 'doing'), card('DONE-1', 'done'), card('TODO-1', 'todo')]);
   const surfaced = [];
   hive.setNeedsHumanObserver((e) => surfaced.push(e));
   let n = 0;
@@ -54,6 +54,8 @@ async function floor(t) {
     const subject = msg.subject ?? `invented ${++n}`;
     fs.writeFileSync(path.join(hive.root(), 'agents', from, 'outbox', `m${++n}.json`), JSON.stringify({ to, subject, body: `invented body ${n}`, ...msg }));
     await hive.routeOnce();
+    await hive.drainReads(); // LAG-TASKS-WRITE-SYNC-READ-108: the ASK ME patch is a queued write
+    await new Promise((res) => setImmediate(res)); // and its outcome is logged in the patch's .then
     return hive.inbox(to === 'god' ? 'god-1' : to).find((m) => m.subject === subject) ?? null;
   };
   const qa = (id) => hive.tasks().tasks.find((c) => c.id === id)?.humanQA ?? [];
@@ -84,6 +86,7 @@ test('an ask with needs_human and a card: one ASK ME entry on the card, its stat
   // The same message routed again (a re-delivery, past the outbox's repeat filter): no second
   // entry, no second notice.
   f.hive.send({ id: m.id, to: 'god', act: 'request', card: 'ASK-1', needs_human: true, subject: 'invented: which colour?', body: 'invented detail' }, 'jim-1');
+  await f.hive.drainReads(); // LAG-TASKS-WRITE-SYNC-READ-108: the ASK ME patch is a queued write
   assert.equal(f.qa('ASK-1').length, 1);
   assert.equal(f.surfaced.length, 1);
   assert.equal(f.notices().length, 0);
@@ -165,6 +168,7 @@ test('no card found, a done card or an unknown card: delivered to god as before,
 test('only an agent surfaces (system and the Human do not), and the body excerpt is capped', async (t) => {
   const f = await floor(t);
   f.hive.send({ to: 'god', act: 'request', card: 'ASK-1', needs_human: true, subject: 'invented system ask' }, 'system');
+  await f.hive.drainReads(); // LAG-TASKS-WRITE-SYNC-READ-108: the ASK ME patch is a queued write
   assert.equal(f.qa('ASK-1').length, 0);
   const long = 'x'.repeat(5000);
   const m = await f.post('jim-1', 'god', { act: 'request', card: 'ASK-1', needs_human: true, subject: 'invented: long', body: long });

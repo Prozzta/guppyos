@@ -291,9 +291,9 @@ const closedRows = (hive) => hive.logTail(500).filter((r) => r && r.kind === 'ma
 test('hive: A tie by card, B answers at routing, C supersedes; each close is logged with its reason', async (t) => {
   const { hive } = await floor(t);
   hive.startLedgerGuard(); // stopped by floor()'s hook, before the folder is deleted
-  hive.addTask({ id: 'SHIP-IT-1', title: 'ship', status: 'doing', dependsOn: [] });
+  await hive.addTask({ id: 'SHIP-IT-1', title: 'ship', status: 'doing', dependsOn: [] });
   // C90-MAILCARD: an agent's message names its card (MISC-1, a neutral card); god's direct mail says card "none".
-  hive.addTask({ id: 'MISC-1', title: 'misc', status: 'doing', dependsOn: [] });
+  await hive.addTask({ id: 'MISC-1', title: 'misc', status: 'doing', dependsOn: [] });
   const tied = hive.send({ to: 'andy-1', act: 'request', subject: 'build it (no card in subject)', body: 'go', card: 'SHIP-IT-1' }, 'god-1');
   const cited = hive.send({ to: 'andy-1', act: 'request', subject: 'review', body: 'go', conversation: 'conv-a', card: 'none' }, 'god-1');
   const retract = hive.send({ to: 'andy-1', act: 'request', subject: 'old plan', body: 'go', conversation: 'conv-b', card: 'none' }, 'god-1');
@@ -307,7 +307,7 @@ test('hive: A tie by card, B answers at routing, C supersedes; each close is log
   assert.deepEqual(openIds(hive), [tied.id, live.id, jims.id].sort(), 'B and C closed at routing');
 
   await tick();
-  hive.patchTask('SHIP-IT-1', { status: 'done' });
+  await hive.patchTask('SHIP-IT-1', { status: 'done' });
   const swept = hive.autoCloseStaleObligations(null);
   assert.deepEqual(swept.map((s) => [s.id, s.reason]), [[tied.id, 'auto:card-done:SHIP-IT-1']]);
   assert.deepEqual(openIds(hive), [live.id, jims.id].sort());

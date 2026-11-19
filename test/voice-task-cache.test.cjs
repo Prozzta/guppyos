@@ -136,15 +136,39 @@ test('an edit made inside the window to the SAME card is kept by a voice update 
 });
 
 test('a card deleted elsewhere inside the window is not brought back by a voice assign, update or delete', async (t) => {
-  const { hive, handEdit, disk } = floor(t, [card('alpha-route'), card('beta-sync')]);
-  hive.tasks();
-  handEdit([card('beta-sync')]);
+  // One floor per verb: the writes yield now, so the tasks.json watcher can refresh the cache
+  // between verbs. Each say() is called synchronously after the hand delete, so findCard reads the
+  // cached card and only the write job's own read sees it gone (one pin per site, god b56f8a).
   for (const [verb, args] of [['assign_task', { task: 'alpha route', assignee: 'jim-1' }], ['update_task', { task: 'alpha route', status: 'done' }], ['delete_task', { task: 'alpha route' }]]) {
+    const { hive, handEdit, disk } = floor(t, [card('alpha-route'), card('beta-sync')]);
+    hive.tasks();
+    handEdit([card('beta-sync')]);
+    assert.equal(hive.tasks().tasks.length, 2, `control (${verb}): the cache still serves alpha-route`);
     const r = await say(verb, args);
     assert.equal(r.ok, false, verb);
     assert.match(r.spoken, /no longer on the board/, verb);
     assert.deepEqual(disk().map((c) => c.id), ['beta-sync'], verb);
   }
+});
+
+// LAG-TASKS-WRITE-SYNC-READ-108 (god b56f8a): the by-id mutators resolve a promise now, and a
+// promise is always truthy, so a `!deps.hiveX()` without await would speak every refusal above as
+// success. The test above pins assign, update and delete; this one pins create.
+test('a voice create whose id already sits on disk is reported as refused, and nothing is written', async (t) => {
+  const { hive, handEdit, disk } = floor(t, [card('alpha-route')]);
+  hive.tasks();
+  const rnd = 0.123456789;
+  const id = `voice-dup-${rnd.toString(36).slice(2, 8)}`;
+  // Another writer lands the same id inside the window: the cache still serves the old list, so
+  // only the write job's own merge can see it.
+  handEdit([card('alpha-route'), card(id, { title: 'by hand' })]);
+  const real = Math.random;
+  Math.random = () => rnd;
+  let r;
+  try { r = await say('create_task', { title: 'Voice dup' }); } finally { Math.random = real; }
+  assert.equal(r.ok, false);
+  assert.match(r.spoken, /already taken/);
+  assert.deepEqual(disk(), [card('alpha-route'), card(id, { title: 'by hand' })]);
 });
 
 test('the ledger guard drops the cached tasks entry before its listeners run', (t) => {
