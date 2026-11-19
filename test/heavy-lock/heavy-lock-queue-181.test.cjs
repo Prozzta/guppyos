@@ -279,7 +279,14 @@ K.wiring = (idx = readSource('src/main/index.ts'), hooks = readSource('src/main/
   // (settle), every other one is freed by its call id alone.
   assert.match(hooks, /if \(\(event === 'PostToolUse' \|\| event === 'PostToolUseFailure'\) && agentId && this\.heavyLock\) \{\n(?:      \/\/.*\n)*      this\.heavyLock\.settle\(agentId, HookServer\.heavyCallId\(p\), \(\) => classifyHeavy\(p\.tool_name, p\.tool_input, HookServer\.heavyCtxOf\(p\)\)\);\n      this\.heavyLock\.callDone\(agentId, HookServer\.heavyCallId\(p\)\);/, 'POST SETTLES A PROVISIONAL CALL, THEN FREES BY THE HELD CALL');
   // HEAVY-LOCK-FALSE-NEGATIVES (P1, 6b592d62): the call's context (its folder and its named shell) is heavyCtxOf(p).
-  assert.equal(hooks.split('heavyCtxOf(p)').length - 1, 2, 'the script is read at PreToolUse, and at Post only by settle');
+  // LAG-NAMED-STALLS-RESIDUAL-108: each of the two reads has one read-ahead twin in heavyProbeOf (the same
+  // classification, run first so its files are read off the main thread): 2 + 2 = 4. The Post twin runs only
+  // for a call that settle would classify.
+  assert.equal(hooks.split('heavyCtxOf(p)').length - 1, 4, 'the script is read at PreToolUse, and at Post only by settle; each has one read-ahead twin');
+  const probe = hooks.slice(hooks.indexOf('private heavyProbeOf(p: HookPayload)'), hooks.indexOf('static heavyScriptCtx(cwd: unknown)'));
+  assert.equal(probe.split('heavyCtxOf(p)').length - 1, 2, 'THE TWO NEW USES ARE THE READ-AHEAD PROBE, AND NOWHERE ELSE');
+  assert.match(probe, /if \(p\.hook_event_name === 'PreToolUse'\) \{\n      return \(\) => \{\n        const ctx = HookServer\.heavyCtxOf\(p\);/, 'THE PRE TWIN');
+  assert.match(probe, /if \(\(p\.hook_event_name === 'PostToolUse' \|\| p\.hook_event_name === 'PostToolUseFailure'\) && lock\.settles\(agentId, HookServer\.heavyCallId\(p\)\)\) \{\n      return \(\) => \{ classifyHeavy\(p\.tool_name, p\.tool_input, HookServer\.heavyCtxOf\(p\)\); \};/, 'THE POST TWIN READS ONLY FOR A CALL THAT SETTLE CLASSIFIES');
   assert.equal(hooks.split('heavyScriptCtx(p.cwd)').length - 1, 1, 'and heavyCtxOf is the one reader of the folder');
 };
 test('wiring: the notice on both rails (wake-proof mail + steer); scripts read at Pre; Post frees by the held call id', () => K.wiring());
