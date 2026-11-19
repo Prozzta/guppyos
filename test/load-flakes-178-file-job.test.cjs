@@ -363,15 +363,16 @@ test('the kill waits for every process of the job to be signaled, listed after t
 
 test('LIVE: when the kill returns, nothing the file started still holds its folder (rmdir at once, no retry, 8 rounds)', LIVE, async () => {
   const { exe } = R.prepareFileJob();
-  const busy = [];
+  const busy = []; const extra = [];
   for (let round = 0; round < 8; round++) {
+    const ps0 = own.powershellStarts(); let polls = 0;
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lf178-'));
     let file = null; let rows = [];
     try {
       file = await startFile(dir, exe);
       const kids = await file.started();
       let ping = null;
-      await until('ping', () => (ping = pingOf(kids.cmd)) != null);
+      await until('ping', () => { polls += 1; return (ping = pingOf(kids.cmd)) != null; });
       rows = own.processTable().filter((r) => [kids.cmd, kids.detached, ping.pid].includes(r.pid));
       const f = own.lookupPids([file.f.pid])[0];
       const k = W.killFile([{ pid: f.pid, startedAt: f.created }], f.pid, { jobExe: exe });
@@ -386,8 +387,14 @@ test('LIVE: when the kill returns, nothing the file started still holds its fold
       if (file && file.f.exitCode === null && file.f.signalCode === null) { const g = new Promise((res) => file.f.once('exit', res)); file.f.kill(); await g; }
       for (let i = 0; i < 100 && fs.existsSync(dir); i++) { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { await new Promise((res) => setTimeout(res, 100)); } }
     }
+    const more = own.powershellStarts() - ps0 - polls;
+    if (more !== 0) extra.push(`round ${round}: ${more} beyond its ${polls} ping poll(s)`);
   }
   assert.deepEqual(busy, [], 'the folder was still in use right after the kill returned');
+  // FLAKE-FILEJOB178-CANCEL-180S-108: a PowerShell start costs 1.3-2 s idle and 4-5 s inside a full
+  // suite; at 4 a round this test ran 120-159 s of its 180 s there. A round that goes well starts
+  // one per ping poll and no other (counted in own-procs, the one place the tools start it).
+  assert.deepEqual(extra, [], 'a round that went well started PowerShell for its ping poll only');
 });
 
 test('LIVE (Jim SHOULD 1): a process list that fails is said, and the job is still terminated and waited on by its count', LIVE, async () => {

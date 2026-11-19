@@ -136,7 +136,11 @@ function killOwnTree(rec, { table = processTable, lookup = lookupPids, kill = st
 }
 
 const ROW = '"$($_.ProcessId)|$($_.ParentProcessId)|$(([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds())|$($_.Name)"';
+/** How many PowerShell processes this module has started (each costs seconds on a loaded box). */
+let starts = 0;
+const powershellStarts = () => starts;
 function powershell(script) {
+  starts += 1;
   const body = `$ProgressPreference = 'SilentlyContinue'\n${script}`;
   return execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(body, 'utf16le').toString('base64')],
     { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024, timeout: 60_000, env: psEnv() });
@@ -178,4 +182,4 @@ function stopIfSame(rows, run = powershell) {
   run(stopScript(rows));
 }
 
-module.exports = { ORPHAN_LEAD_MS, BIRTH_SLACK_MS, bornNow, parseRows, sameProcess, childrenOf, treeOf, ownTree, ownTreeOrThrow, cutAfter, stillOurs, readRec, killVerified, killOwnTree, processTable, lookupPids, stopScript, stopIfSame };
+module.exports = { ORPHAN_LEAD_MS, BIRTH_SLACK_MS, bornNow, parseRows, sameProcess, childrenOf, treeOf, ownTree, ownTreeOrThrow, cutAfter, stillOurs, readRec, killVerified, killOwnTree, processTable, lookupPids, stopScript, stopIfSame, powershellStarts };
