@@ -2417,6 +2417,9 @@ export interface HeavyLockDeps {
    *  script reader and test-file lister), so a runner's argv is judged as PreToolUse judges a
    *  command. Absent = the argv alone (a filtered runner is light). */
   classifyCtx?: (cwd?: string) => ClassifyCtx;
+  /** LAG-NAMED-STALLS-RESIDUAL-108: runs a classification made through classifyCtx with the files it
+   *  reads read off the main thread first (HookServer.heavyRead). Without it the context reads itself. */
+  classifyRead?: <T>(run: () => T) => Promise<T>;
 }
 
 /**
@@ -2831,6 +2834,13 @@ export class HeavyJobLock {
     this.arm();
   }
 
+  /** LAG-NAMED-STALLS-RESIDUAL-108: would `settle` classify this call again? The hook asks first, so
+   *  the files that classification reads are read off the main thread before it. */
+  settles(agentId: string, callId: string): boolean {
+    const h = this.holders.get(agentId);
+    return !!h && h.background && !h.definite && h.provisional.has(callId) && h.provisional.size === 1;
+  }
+
   /** HEAVY-LOCK-BG-LAPSE-189 (early release): PostToolUse of a call held only because its script was
    *  unreadable at PreToolUse. `reclassify` runs the classifier again now that the call has run (the
    *  script exists): light, and nothing else of the holder heavy, frees the slot at once instead of
@@ -2839,7 +2849,7 @@ export class HeavyJobLock {
    *  background holder: a foreground one is freed by callDone, after its orphan check (Jim N2). */
   settle(agentId: string, callId: string, reclassify: () => HeavyClass): void {
     const h = this.holders.get(agentId);
-    if (!h || !h.background || h.definite || !h.provisional.has(callId) || h.provisional.size !== 1) return;
+    if (!h || !this.settles(agentId, callId)) return;
     let c: HeavyClass;
     try { c = reclassify(); } catch { return; }
     if (c.heavy) return;
@@ -3354,7 +3364,10 @@ export class HeavyJobLock {
       const argv = ['node', ...r.runner.map(String)].map((a) => `"${a.replace(/["\\$`]/g, '\\$&')}"`).join(' ');
       // HEAVY-LOCK-FALSE-NEGATIVES: with the process's folder, so a broad filter counts as the suite.
       const ctx = this.d.classifyCtx?.(typeof r.cwd === 'string' ? r.cwd : undefined) ?? {};
-      if (!classifyCommand(argv, 0, ctx).heavy) {
+      const judge = (): HeavyClass => classifyCommand(argv, 0, ctx);
+      // LAG-NAMED-STALLS-RESIDUAL-108: the runner's file and its repo's test files are read first.
+      const judged = this.d.classifyRead ? await this.d.classifyRead(judge) : judge();
+      if (!judged.heavy) {
         this.runs.set(run, { agentId, held: this.holders.has(agentId) });
         return { state: 'light', run, why: 'a filtered suite runner' };
       }

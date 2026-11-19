@@ -363,7 +363,7 @@ const MUTANTS = [
     killer: 'needle', dies: /NPM RUN TEST WITH A BROAD NEEDLE IS THE SUITE/ },
   { file: HJF, name: 'node run-tests.cjs <needle> is always light (today)', edits: [['      if (many.heavy) return many;\n', '']],
     killer: 'needle', dies: /A BROAD NEEDLE IS THE SUITE \(Bash\)/ },
-  { file: HJF, name: 'the lease classifies the argv without its folder (today)', edits: [['      if (!classifyCommand(argv, 0, ctx).heavy) {', '      if (!classifyCommand(argv).heavy) {']],
+  { file: HJF, name: 'the lease classifies the argv without its folder (today)', edits: [['      const judge = (): HeavyClass => classifyCommand(argv, 0, ctx);', '      const judge = (): HeavyClass => classifyCommand(argv);']],
     killer: 'lease', dies: /THE LEASE COUNTS THE NEEDLE/ },
   { file: HJF, name: 'spawned lines are not collected', edits: [['      const sp = spawnedLine(x.v, args);\n      if (sp) spawns.push(sp);\n', '']],
     killer: 'spawn', dies: /A SCRIPT SPAWNS NPM TEST/ },
