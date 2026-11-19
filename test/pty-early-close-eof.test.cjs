@@ -13,9 +13,18 @@ require('./tools/own-job.cjs');
  * handler on 'ready_datapipe', and the first start-up chunk (Pipe.onStreamRead -> push) is
  * ERR_STREAM_PUSH_AFTER_EOF, which that handler rethrows outside any caller.
  *
- * The lever: the conout worker's messages reach the main thread READY_DELAY_MS late (worker_threads
- * patched BEFORE node-pty loads), as when the worker starts slowly under load, so the kill always
- * lands before the connect. Real ConPTYs, through PtyManager.spawn (which arms every terminal).
+ * The lever: each conout worker's READY is HELD when it reaches the main thread (worker_threads
+ * patched BEFORE node-pty loads) and handed to node-pty only when the test releases it, after the
+ * kill, so the kill always lands before the connect. Real ConPTYs, through PtyManager.spawn (which
+ * arms every terminal).
+ *
+ * PTY-EARLY-CLOSE-EOF-READY-WAIT-108: the lever orders events, it does not time them. It used to
+ * delay the READY by a fixed 300 ms and kill right after the spawn. node-pty terminates the worker
+ * 1 s after a kill, and a READY handled after that connects nothing (guardLateReady reports the exit
+ * itself): 'ready_datapipe' then never comes. So a worker that took more than about 700 ms to start
+ * (a loaded suite leg) left the first test waiting CAP_MS for an event that could not come. Now the
+ * test sees the READY arrive, kills, and releases it in the same turn: the connect starts inside the
+ * kill's turn, however long the worker took.
  *
  * Named mutants, each must fail this file:
  *   E1 no restore: the unconnected socket keeps readable = false (the pre-fix code)
@@ -30,7 +39,6 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const READY_DELAY_MS = 300;
 const CAP_MS = 8000;
 /** PTY-EARLY-CLOSE-EOF-READY-WAIT-108: a conout worker that is slow to start, as in a loaded suite leg.
  *  Longer than node-pty's FLUSH_DATA_INTERVAL (1 s), the time from a kill to the worker's terminate. */
@@ -50,9 +58,20 @@ if (process.platform !== 'win32') {
   const on0 = wt.Worker.prototype.on;
   /** How much later than it really did the next worker posts its READY (0: as it comes). */
   let slowWorkerMs = 0;
+  /** Worker -> its held READY: `arrived` settles when the message is here, `deliver` hands it on. */
+  const gates = new WeakMap();
   wt.Worker.prototype.on = function (name, fn) {
-    if (name === 'message') return on0.call(this, name, (m) => setTimeout(() => fn(m), READY_DELAY_MS + slowWorkerMs));
-    return on0.call(this, name, fn);
+    if (name !== 'message') return on0.call(this, name, fn);
+    const gate = { released: false, deliver: null, arrived: null, here: null };
+    gate.arrived = new Promise((res) => { gate.here = res; });
+    gates.set(this, gate);
+    return on0.call(this, name, (m) => {
+      const arrive = () => {
+        if (gate.released) fn(m); else gate.deliver = () => fn(m);
+        gate.here();
+      };
+      if (slowWorkerMs > 0) setTimeout(arrive, slowWorkerMs); else arrive();
+    });
   };
 
   const JAIL = fs.mkdtempSync(path.join(os.tmpdir(), 'pty-eof-'));
@@ -97,9 +116,26 @@ if (process.platform !== 'win32') {
     return proc;
   }
 
+  /** The held READY of this terminal's conout worker. */
+  function gateOf(proc) {
+    const gate = gates.get(proc._agent._conoutSocketWorker._worker);
+    assert.ok(gate, 'the lever holds the conout worker of this terminal (node-pty 1.1.0 internals)');
+    return gate;
+  }
+  /** Hand the READY to node-pty: now if it is here, else the moment it arrives. */
+  function releaseReady(proc) {
+    const gate = gateOf(proc);
+    gate.released = true;
+    const deliver = gate.deliver;
+    gate.deliver = null;
+    if (deliver) deliver();
+  }
+
   async function killBeforeConnect() {
     const proc = await spawnSilent();
     const sock = proc._socket;
+    // The worker is up and its READY is held: from here the order is the test's, not the clock's.
+    await within(gateOf(proc).arrived, 'the READY of the conout worker never arrived (the worker did not start)');
     const connected = new Promise((res) => sock.once('ready_datapipe', res));
     const exited = new Promise((res) => proc.onExit(res));
     // PTY-EARLY-KILL-LEAK: the pseudoconsole closes AT the kill, not when the pipe connects.
@@ -111,6 +147,7 @@ if (process.platform !== 'win32') {
     assert.equal(proc._writable, false, '_close() ran synchronously inside kill()');
     assert.equal(sock._handle, null, 'the lever holds: the kill ran before the connect');
     assert.equal(proc._isReady, true, 'the early close ran (node-pty would have queued it)');
+    releaseReady(proc);   // in the kill's turn: node-pty's connect starts before its 1 s terminate can
     await within(connected, 'ready_datapipe');
     assert.equal(sock._readableState.ended, false, 'the socket connected already ENDED (push after EOF next)');
     // The first start-up chunk, exactly as Pipe.onStreamRead delivers it.
@@ -138,6 +175,7 @@ if (process.platform !== 'win32') {
       const proc = await spawnSilent();
       exits.push(new Promise((res) => proc.onExit(res)));
       proc.kill();
+      releaseReady(proc);   // after the kill, whenever the worker posts it
     }
     await within(Promise.all(exits), 'every terminal exits');
     await new Promise((res) => setTimeout(res, 200));
