@@ -1,5 +1,8 @@
 'use strict';
 require('./tools/own-job.cjs');
+// MUTANT-JOURNAL-GATE (god 5cc045/ed8032): this suite loads run-tests.cjs, a file a census mutates in place;
+// refuse a tree a killed census left mutated, before anything is read.
+require('./tools/mutant-runner-helper.cjs').gate(__filename);
 /**
  * RUNNER-NOCOLOR-FORCECOLOR-STDERR: a test result does not depend on the colour variables of the
  * caller's shell.
