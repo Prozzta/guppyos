@@ -312,6 +312,71 @@ test('the async log tail answers as the synchronous one, rotated files included,
   assert.deepEqual(await bare.logTailAsync(10), [], 'no hive: no rows');
 });
 
+/** Make the named node:fs/promises calls fail with `code` for the paths that match, until the
+ *  returned restore() (also run at the end of the test). `hits[name]` counts the failed calls. */
+function failFsp(t, names, matches, code) {
+  const fsp = require('node:fs/promises');
+  const real = {}; const hits = {};
+  for (const name of names) {
+    real[name] = fsp[name]; hits[name] = 0;
+    fsp[name] = async (p, ...rest) => {
+      if (!matches(String(p))) return real[name](p, ...rest);
+      hits[name]++;
+      throw Object.assign(new Error(`${code}: operation not permitted, ${name} '${p}'`), { code, syscall: name, path: String(p) });
+    };
+  }
+  const restore = () => { for (const name of names) fsp[name] = real[name]; };
+  t.after(restore);
+  return { hits, restore };
+}
+
+/** A floor whose live log holds 40 rows and has one rotated file of 30 beside it. */
+async function logFloor(t) {
+  const { hive, root } = await floor(t);
+  for (let i = 0; i < 40; i++) hive.appendLog({ kind: 'lag-108-row', seq: i });
+  await hive.flushLog?.();
+  const live = path.join(root, 'log.jsonl');
+  const until = Date.now() + 10_000;
+  while (!(fs.existsSync(live) && fs.readFileSync(live, 'utf8').includes('"seq":39'))) {
+    if (Date.now() > until) assert.fail('the 40 rows never reached log.jsonl');
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  fs.writeFileSync(path.join(root, 'log.1700000000000.jsonl'), Array.from({ length: 30 }, (_, i) => JSON.stringify({ kind: 'old', seq: i })).join('\n') + '\n', 'utf8');
+  return { hive, live };
+}
+
+// A live log deleted while the writer still holds it is delete-pending on Windows (measured on
+// Node 24.22.2 inside Electron 45.3.0 after fs.rmSync; Node 26 removes the name at once, so the
+// state is given here by its measured answers): it is still listed, existsSync is false, and
+// access, open and readFile fail with EPERM. The synchronous tail skips it (existsSync).
+test('a live log that cannot be opened and is not reachable has no rows, as in the synchronous tail', async (t) => {
+  const { hive, live } = await logFloor(t);
+  const isLive = (p) => path.resolve(p).toLowerCase() === live.toLowerCase();
+  const realExists = fs.existsSync;
+  fs.existsSync = (p) => (isLive(String(p)) ? false : realExists(p));
+  t.after(() => { fs.existsSync = realExists; });
+  const gone = failFsp(t, ['open', 'access', 'readFile'], isLive, 'EPERM');
+  const want = hive.logTail(10);
+  assert.deepEqual(want, Array.from({ length: 10 }, (_, i) => ({ kind: 'old', seq: 20 + i })), 'the synchronous tail skips the live log');
+  let got;
+  try { got = await hive.logTailAsync(10); } catch (e) { assert.fail(`logTailAsync must not reject for a live log that is not reachable: ${e.code ?? e}`); }
+  assert.ok(gone.hits.open > 0, 'the open of the live log was refused');
+  assert.deepEqual(got, want, 'the same rows as the synchronous tail');
+});
+
+// The other side of that check: a live log whose open fails but which is reachable keeps the
+// whole-file read, as the synchronous tail does when its bounded read fails.
+test('a live log whose open fails but which is reachable is still read whole', async (t) => {
+  const { hive, live } = await logFloor(t);
+  const isLive = (p) => path.resolve(p).toLowerCase() === live.toLowerCase();
+  const want = hive.logTail(10);
+  assert.deepEqual(want.map((r) => r.seq), [30, 31, 32, 33, 34, 35, 36, 37, 38, 39], 'the synchronous tail reads the live log');
+  const shut = failFsp(t, ['open'], isLive, 'EPERM');
+  const got = await hive.logTailAsync(10);
+  assert.ok(shut.hits.open > 0, 'the open of the live log was refused');
+  assert.deepEqual(got, want, 'the same rows as the synchronous tail');
+});
+
 test('a tail window that starts mid-line drops the cut row: every row answered is whole, sync and async', async (t) => {
   const { hive, root } = await floor(t);
   await hive.flushLog?.();
