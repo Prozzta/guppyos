@@ -12,7 +12,7 @@ const { runTests, verdict, requireBaseline } = require('./mutant-tap.cjs');
 const ROOT = path.join(__dirname, '..', '..');
 const LAB = 'test/claims-90/labeller.cjs';
 const M = [
-  ['L1 the session folder is copied but not deleted', "        fs.rmSync(src, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });\n        session = { folder, created: true,", '        session = { folder, created: true,'],
+  ['L1 the session folder is copied but not deleted', "        rmTree(src, { maxRetries: 10, retryDelay: 200 });\n        session = { folder, created: true,", '        session = { folder, created: true,'],
   ['L2 the leftover check sees nothing', '  const leftovers = names.filter((n) => n.startsWith(leftoverPrefix(out))).sort();', '  const leftovers = [];'],
   ['L3 a session folder problem is not INVALID', '    if (s.problem) reason = ', '    if (false) reason = '],
   ['L4 the session folder is never moved out', "    const s = sessionOut(path.dirname(G.ownOutputsDir(jail)), jail, path.join(runDir, 'session'), o.out);", '    const s = { session: null, leftovers: [], problem: null };'],
