@@ -307,13 +307,15 @@ test('POSIX keeps execFile\'s own timeout', async () => {
   assert.equal(seen.timeout, 1234);
 });
 
-test('REAL (Windows): a .cmd shim whose node grandchild hangs is killed WITH its tree at the time box', { skip: process.platform !== 'win32' }, async (t) => {
+// FLAKE-MODELS-REFRESH-TREEKILL-PIDFILE: `startMs` is how long the grandchild takes to get as far as
+// writing its pid (node's own start under suite load; 0 = at once).
+async function treeKillAtTimeBox(t, startMs) {
   const cp = require('node:child_process');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'treekill-'));
   t.after(() => { try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* best effort */ } });
   const pidFile = path.join(dir, 'grandchild.pid');
   const shim = path.join(dir, 'hang.cmd');
-  fs.writeFileSync(shim, `@"${process.execPath}" -e "require('fs').writeFileSync(process.argv[1], process.pid + ' ' + Math.round(Date.now() - process.uptime() * 1000)); setInterval(() => {}, 1000)" "${pidFile}"\r\n`);
+  fs.writeFileSync(shim, `@"${process.execPath}" -e "setTimeout(() => require('fs').writeFileSync(process.argv[1], process.pid + ' ' + Math.round(Date.now() - process.uptime() * 1000)), Number(process.argv[2])); setInterval(() => {}, 1000)" "${pidFile}" ${startMs}\r\n`);
   const d = { platform: 'win32', env: process.env, exists: fs.existsSync, exec: (file, args, opts, cb) => cp.execFile(file, args, opts, (err, stdout) => cb(err, String(stdout ?? ''))) };
   const t0 = Date.now();
   const r = await P.runCli(d, shim, ['models'], 1024, 2500);
@@ -328,6 +330,14 @@ test('REAL (Windows): a .cmd shim whose node grandchild hangs is killed WITH its
   }
   if (alive) { const root = own.stillOurs(rec); alive = !!root; if (root) own.killVerified([root]); }
   assert.equal(alive, false, 'the node GRANDCHILD of the .cmd shim is gone (no orphaned tree)');
+}
+
+test('REAL (Windows): a .cmd shim whose node grandchild hangs is killed WITH its tree at the time box', { skip: process.platform !== 'win32' }, async (t) => {
+  await treeKillAtTimeBox(t, 0);
+});
+
+test('REAL (Windows): the same when the grandchild is slower to start than the time box (suite load)', { skip: process.platform !== 'win32' }, async (t) => {
+  await treeKillAtTimeBox(t, 4000);
 });
 
 // ── The Human's rule (god 34c5a5): NO model lookup at launch or on picker open - button only ────
