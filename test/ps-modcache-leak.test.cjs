@@ -119,6 +119,7 @@ const KNOWN = {
   'heavy-cpu-options-191.test.cjs': 2, // INT 1.1.102: + cap-199's known-folder query (B1)
   'heavy-job-lock.test.cjs': 1,
   'mutant-runners-tap.test.cjs': 1,
+  'own-procs-pid-recycle.test.cjs': 1, // OWNPROCS-STOPPROCESS-THROW-108: terminal Stop-Process race behavior pin
   'ps-policy-temp-leak-198.test.cjs': 2,
   'rebrand-a-182.test.cjs': 1,
   'rebrand-updater-base-183.test.cjs': 1,
