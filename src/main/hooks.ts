@@ -18,7 +18,8 @@ import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, 
 import { isAbsolute, join } from 'node:path';
 import { Notification, type WebContents } from 'electron';
 import type { HiveManager } from './hive';
-import { classifyCommand, classifyHeavy, codexDefaultShell, codexShellKind, commandFromToolInput, heavyCommandOf, isBackground, scriptReaderFor, type ClassifyCtx, type HeavyJobLock, type HeavyLeaseRequest, type ShellKind } from './heavyJob';
+import { HeavyFileCache, type HeavyFile } from './heavyFiles';
+import { classifyCommand, classifyHeavy, codexDefaultShell, codexShellKind, commandFromToolInput, heavyCommandOf, HEAVY_SCRIPT_MAX_BYTES, isBackground, scriptReaderFor, type ClassifyCtx, type HeavyJobLock, type HeavyLeaseRequest, type ShellKind } from './heavyJob';
 import { compactCarryText, readPathOf, type CarryCard, type CarryObligation, type CompactHealthWatch } from './compactHealth';
 import { modelForHiveSpawn, type HarnessConfig } from './config';
 import { TOOL_OUTPUT_CAP_READ, capForCommand, commandOf, condenseOutput, effectiveCap, isReadCommand, outputText, shouldCondense, type BashLikeResponse } from './toolOutputCondense';
@@ -1223,7 +1224,12 @@ export class HookServer {
       if (f.kind === 'hook') {
         if (!f.agentId) return;   // a user's own AGY session: not ours (the shim no-ops too)
         if (!this.hookTokenMatches(f.agentId, f.token)) return;
-        void this.handle(this.stampArrival(agyHookPayload(f.event, f.agentId, f.body as Record<string, unknown> | null), 'pipe-oneway'));
+        const p = this.stampArrival(agyHookPayload(f.event, f.agentId, f.body as Record<string, unknown> | null), 'pipe-oneway');
+        // LAG-NAMED-STALLS-RESIDUAL-108: a hook that will classify (the PostToolUse of a provisional
+        // hold) has its files read first; every other frame is handled at once, as before.
+        const probe = this.heavyProbeOf(p);
+        if (!probe) { void this.handle(p); return; }
+        void HookServer.heavyReadAhead(probe).then((files) => { HookServer.withHeavyFiles(files, () => this.handle(p)); }).catch(() => { /* a dropped frame, as a throw in handle was */ });
         return;
       }
       const owner = this.hive.agyStatuslineOwnerToken() ?? null;
@@ -2160,6 +2166,9 @@ export class HookServer {
     const folder = cd ? (abs(cd) ? drive(cd) : join(cwd!, cd)) : cwd;
     const base = repo ? (abs(repo) ? drive(repo) : join(folder!, repo)) : folder!;
     const root = join(drive(base), 'test');
+    // LAG-NAMED-STALLS-RESIDUAL-108: listed ahead for the classification being made (heavyRead).
+    const ahead = HookServer.heavyFiles?.list(root);
+    if (ahead !== undefined) return ahead && [...ahead];
     const out: string[] = [];
     const walk = (dir: string, rel: string, depth: number): void => {
       let entries: Dirent[];
@@ -2174,6 +2183,76 @@ export class HookServer {
     return out;
   }
 
+  /** LAG-NAMED-STALLS-RESIDUAL-108: the files read ahead for the classification being made. Set
+   *  only around one synchronous run of the classifier (nothing else can run between the set and
+   *  the clear), so heavyScriptCtx and listTestFiles answer from it whatever folder they are for.
+   *  Null everywhere else: a direct caller of the context reads the disk itself, as before. */
+  private static heavyFiles: HeavyFileCache | null = null;
+
+  /** The most runs made to learn what a classification reads. Each run that is not the last
+   *  finds a file the one before could not (a script named in a script), and the classifier
+   *  follows scripts only a few deep; past this, what is still not held is read as before. */
+  private static readonly HEAVY_READ_RUNS = 16;
+
+  /** What the reader answers for a file read ahead, in scriptReaderFor's form. */
+  private static heavyFileAnswer(f: HeavyFile): { size: number; text: () => string; dir?: boolean } {
+    if (f.dir) return { size: 0, text: () => '', dir: true };
+    // A file with no text (over the size limit, or the read failed): readScript takes the throw as unreadable.
+    return { size: f.size, text: () => { if (f.text === null) throw new Error('not read'); return f.text; } };
+  }
+
+  /** Run `probe` (a classification, nothing else: it is run more than once) until it asks for no
+   *  file that is not read yet, reading what it asks for off the main thread. */
+  private static async heavyReadAhead(probe: () => unknown): Promise<HeavyFileCache> {
+    const files = new HeavyFileCache(HEAVY_SCRIPT_MAX_BYTES);
+    for (let run = 0; run < HookServer.HEAVY_READ_RUNS; run++) {
+      files.noting = true;
+      HookServer.heavyFiles = files;
+      try { probe(); } catch { /* the run that counts reports it */ } finally { HookServer.heavyFiles = null; files.noting = false; }
+      if (!(await files.fill())) break;
+    }
+    return files;
+  }
+
+  /** Run `run` with what was read ahead in place. */
+  private static withHeavyFiles<T>(files: HeavyFileCache | null, run: () => T): T {
+    HookServer.heavyFiles = files;
+    try { return run(); } finally { HookServer.heavyFiles = null; }
+  }
+
+  /**
+   * LAG-NAMED-STALLS-RESIDUAL-108: `run` (a classification through heavyScriptCtx, with no other
+   * effect: it is run more than once) with the files it reads read off the main thread first. The
+   * answer is the one the synchronous context gives for the same files.
+   */
+  static async heavyRead<T>(run: () => T): Promise<T> {
+    return HookServer.withHeavyFiles(await HookServer.heavyReadAhead(run), run);
+  }
+
+  /** The classification handle() will make for this hook (the PreToolUse of a call, its rollout
+   *  hints when a degraded Codex hook carries no input, the PostToolUse of a provisional hold), or
+   *  null when it will make none. */
+  private heavyProbeOf(p: HookPayload): (() => void) | null {
+    const lock = this.heavyLock;
+    const agentId = p.agent_id;
+    if (!lock || !agentId) return null;
+    if (p.hook_event_name === 'PreToolUse') {
+      return () => {
+        const ctx = HookServer.heavyCtxOf(p);
+        const own = p.hook_tool_input;
+        try { classifyHeavy(own ? 'Bash' : p.tool_name, own ?? p.tool_input, ctx); } catch { /* the hints are still read */ }
+        if (own || p.payload_degraded !== true || commandFromToolInput(p.tool_input) !== null) return;
+        for (const c of Array.isArray(p.codex_commands) ? p.codex_commands : []) {
+          if (typeof c === 'string') { try { classifyCommand(c, 0, ctx); } catch { /* the next hint */ } }
+        }
+      };
+    }
+    if ((p.hook_event_name === 'PostToolUse' || p.hook_event_name === 'PostToolUseFailure') && lock.settles(agentId, HookServer.heavyCallId(p))) {
+      return () => { classifyHeavy(p.tool_name, p.tool_input, HookServer.heavyCtxOf(p)); };
+    }
+    return null;
+  }
+
   static heavyScriptCtx(cwd: unknown): ClassifyCtx {
     // HEAVY-LOCK-FALSE-POSITIVE: the env places Git Bash's /tmp (TEMP) for the reader too.
     const env = HookServer.heavyEnv();
@@ -2182,6 +2261,9 @@ export class HookServer {
       testFiles: (cd, repo) => HookServer.listTestFiles(folder, cd, repo),
       ...scriptReaderFor(typeof cwd === 'string' ? cwd : null, (abs) => {
         const path = abs.replace(/^\/([A-Za-z])\//, (_m, d: string) => `${d.toUpperCase()}:/`);
+        // LAG-NAMED-STALLS-RESIDUAL-108: read ahead for the classification being made (heavyRead).
+        const ahead = HookServer.heavyFiles?.file(path);
+        if (ahead !== undefined) return ahead && HookServer.heavyFileAnswer(ahead);
         try {
           const st = statSync(path);
           if (st.isFile()) return { size: st.size, text: () => readFileSync(path, 'utf8') };
@@ -2335,10 +2417,13 @@ export class HookServer {
     }
     let bodies: HookServer['prefetchedBodies'] = null;
     if (!fromSubagent) { try { bodies = await this.prefetchMailBodies(p); } catch { bodies = null; } }
+    // LAG-NAMED-STALLS-RESIDUAL-108: the files the heavy-lock classifier will ask about.
+    const probe = this.heavyProbeOf(p);
+    const files = probe ? await HookServer.heavyReadAhead(probe) : null;
     let out: unknown;
     // Only for this one synchronous handle: nothing else can run between the set and the clear.
     this.prefetchedBodies = bodies;
-    try { out = this.handle(p); } finally { this.prefetchedBodies = null; }
+    try { out = HookServer.withHeavyFiles(files, () => this.handle(p)); } finally { this.prefetchedBodies = null; }
     const wrap = this.heavyWrap;
     this.heavyWrap = null;
     if (!wrap || !this.heavyJobs) return out;

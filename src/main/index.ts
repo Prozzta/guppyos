@@ -1437,6 +1437,7 @@ const heavyLock = new HeavyJobLock({
   probe: probeProcesses,
   // HEAVY-LOCK-FALSE-NEGATIVES: a leasing suite runner's argv is judged in its own folder.
   classifyCtx: (cwd) => HookServer.heavyScriptCtx(cwd),
+  classifyRead: (run) => HookServer.heavyRead(run),
   log: (row) => { try { hive.appendLog(row); } catch { /* best effort */ } },
   // HEAVY-LOCK-OPAQUE-SCRIPT-196: is a test process the call's own node (its parent the call's shell)?
   parentImage: processImage,
