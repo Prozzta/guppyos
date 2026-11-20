@@ -53,6 +53,25 @@ test('endedWithoutExit: a start with no exit row is named; an exited file and a 
   assert.deepEqual(runner.endedWithoutExit(row({ pid: 5, bornMs: 1, file: 'self.test.cjs' }), row({ pid: 5, file: 'self.test.cjs', via: 'process.kill', targets: [5], t: 9 }))[0].kills[0].self, true);
 });
 
+test('fileTimeLines: one line per file with its start and end, ordered by start; a file with no exit row ends "never"', () => {
+  const row = (o) => JSON.stringify(o);
+  const starts = [
+    row({ pid: 2, bornMs: Date.parse('2026-01-01T00:00:05.000Z'), file: 'b.test.cjs' }),
+    row({ pid: 1, bornMs: Date.parse('2026-01-01T00:00:01.000Z'), file: 'a.test.cjs' }),
+    row({ pid: 1, exited: true, endMs: Date.parse('2026-01-01T00:00:03.500Z') }),
+    row({ pid: 3, bornMs: Date.parse('2026-01-01T00:00:06.000Z'), file: 'killed.test.cjs' }),
+    row({ pid: 2, exited: true, endMs: Date.parse('2026-01-01T00:00:09.000Z') }),
+    'torn',
+  ].join('\n');
+  assert.deepEqual(runner.fileTimeLines(starts), [
+    'file-times 2026-01-01T00:00:01.000Z 2026-01-01T00:00:03.500Z 2500 pid 1 a.test.cjs',
+    'file-times 2026-01-01T00:00:05.000Z 2026-01-01T00:00:09.000Z 4000 pid 2 b.test.cjs',
+    'file-times 2026-01-01T00:00:06.000Z never - pid 3 killed.test.cjs',
+  ]);
+  assert.deepEqual(runner.fileTimeLines(''), []);
+  assert.deepEqual(runner.fileTimeLines(undefined), []);
+});
+
 test('runNodeTest says the cause on stderr, and never for a file one of the runner\'s own timeouts ended', () => {
   const files = {
     'ev.jsonl.starts': [row({ pid: 11, bornMs: 1000, file: 'victim.test.cjs' }), row({ pid: 12, bornMs: 1000, file: 'unknown.test.cjs' }), row({ pid: 13, bornMs: 1000, file: 'hung.test.cjs' })].join('\n'),
