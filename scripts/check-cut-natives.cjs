@@ -8,7 +8,7 @@ const { spawnSync } = require('node:child_process');
 const path = require('node:path');
 
 const FS_HANDLE_REQUIRED_EXPORTS = Object.freeze([
-  'finalPath', 'procOpen', 'procAlive', 'procClose', 'procAdopt', 'posixRename', 'posixRenameAsync'
+  'finalPath', 'procOpen', 'procAlive', 'procClose', 'procAdopt', 'posixRename', 'posixRenameAsync', 'threadCpuMs'
 ]);
 
 function missingFsHandleExports(exports) {

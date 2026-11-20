@@ -994,6 +994,82 @@ static napi_value remove_tree_async(napi_env env, napi_callback_info info) {
   return promise;
 }
 
+#ifdef _WIN32
+/*
+ * MIRROR-PARSE-ZERO-108: threadCpuMs() -> number, the CPU time of the CALLING thread in ms.
+ *
+ * process.threadCpuUsage is GetThreadTimes on Windows: it moves a whole scheduler step (15.6 ms) at a
+ * time, charged to whichever thread runs at the clock interrupt. A parse slice of a few ms reads 0 or
+ * a step, never its own work. QueryThreadCycleTime counts the cycles the thread itself ran, updated at
+ * every switch, so it has no step.
+ *
+ * Cycles are turned into ms with one rate, measured once and then never changed (a rate that moved
+ * between two readings would move every earlier cycle with it). The rate is the processor's cycle
+ * counter against QueryPerformanceCounter between two points: the first load of this addon and the
+ * first call. Both counters run on wall time, so a preemption between the points does not bend it.
+ * Each point is read as counter, cycles, counter and kept only if the two counter readings are close,
+ * so a preemption inside a point is not taken either. If the first call comes within 2 ms of the
+ * load, it waits out the rest of those 2 ms, once.
+ * Throws when a reading fails or the rate cannot be measured; the caller then stays on its own clock.
+ */
+#include <intrin.h>
+
+typedef struct { LONGLONG qpc; unsigned __int64 tsc; } cpu_point;
+static cpu_point cpu_p0;
+static int cpu_p0_set = 0;
+static double cpu_cycles_per_ms = 0;
+
+/* One point in time on both counters. 0 if no clean reading could be taken. */
+static int cpu_point_read(cpu_point *out, LONGLONG qpf) {
+  LONGLONG close_ticks = qpf / 200000; /* 5 us */
+  if (close_ticks < 1) close_ticks = 1;
+  for (int i = 0; i < 64; i++) {
+    LARGE_INTEGER a, b;
+    if (!QueryPerformanceCounter(&a)) return 0;
+    unsigned __int64 t = __rdtsc();
+    if (!QueryPerformanceCounter(&b)) return 0;
+    if (b.QuadPart - a.QuadPart <= close_ticks) {
+      out->qpc = a.QuadPart + (b.QuadPart - a.QuadPart) / 2;
+      out->tsc = t;
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static void cpu_clock_load(void) {
+  LARGE_INTEGER f;
+  if (cpu_p0_set || !QueryPerformanceFrequency(&f) || f.QuadPart <= 0) return;
+  cpu_p0_set = cpu_point_read(&cpu_p0, f.QuadPart);
+}
+
+static napi_value thread_cpu_ms(napi_env env, napi_callback_info info) {
+  (void)info;
+  if (cpu_cycles_per_ms <= 0) {
+    LARGE_INTEGER f;
+    if (!QueryPerformanceFrequency(&f) || f.QuadPart <= 0) return fail(env, "threadCpuMs: no performance counter");
+    if (!cpu_p0_set) cpu_clock_load();
+    if (!cpu_p0_set) return fail(env, "threadCpuMs: the first point of the rate could not be read");
+    LONGLONG need = f.QuadPart / 500; /* 2 ms */
+    cpu_point p1;
+    for (;;) {
+      if (!cpu_point_read(&p1, f.QuadPart)) return fail(env, "threadCpuMs: the second point of the rate could not be read");
+      if (p1.qpc - cpu_p0.qpc >= need) break;
+    }
+    double ms = (double)(p1.qpc - cpu_p0.qpc) * 1000.0 / (double)f.QuadPart;
+    double rate = (double)(p1.tsc - cpu_p0.tsc) / ms;
+    /* 100 MHz to 100 GHz: outside it the cycle counter is not a clock (or went backwards). */
+    if (p1.tsc <= cpu_p0.tsc || !(rate >= 1e5 && rate <= 1e8)) return fail(env, "threadCpuMs: the cycle rate could not be measured");
+    cpu_cycles_per_ms = rate;
+  }
+  ULONG64 cycles;
+  if (!QueryThreadCycleTime(GetCurrentThread(), &cycles)) return fail(env, "threadCpuMs: QueryThreadCycleTime failed");
+  napi_value out;
+  if (napi_create_double(env, (double)cycles / cpu_cycles_per_ms, &out) != napi_ok) return NULL;
+  return out;
+}
+#endif
+
 static int export_fn(napi_env env, napi_value exports, const char *name, napi_callback cb) {
   napi_value fn;
   return napi_create_function(env, name, NAPI_AUTO_LENGTH, cb, NULL, &fn) == napi_ok &&
@@ -1018,6 +1094,8 @@ NAPI_MODULE_INIT() {
       !export_fn(env, exports, "posixRenameAsync", posix_rename_async)) {
     return NULL;
   }
+  cpu_clock_load();
+  if (!export_fn(env, exports, "threadCpuMs", thread_cpu_ms)) return NULL;
 #endif
   return exports;
 }

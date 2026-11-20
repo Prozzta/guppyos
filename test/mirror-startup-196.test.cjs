@@ -95,8 +95,10 @@ test('the parse is MEASURED on the installed xterm: the WriteBuffer slice method
 // For the fix: if the true clock comes from a native addon, a runtime that loads an older addon without
 // it (a packaged exe run as Node loads its own resources) is still on the step clock and stays red
 // here; that leg must say which addon it loaded, not pass or skip silently.
-test('MIRROR-PARSE-ZERO-108: the parse clock charges each short slice its own work', () => {
+test('MIRROR-PARSE-ZERO-108: the parse clock charges each short slice its own work', (t) => {
   assert.equal(typeof M.threadCpuMs, 'function', 'this runtime has a thread clock');
+  // Which clock this leg is on, and which addon gave it (or why none did), in the run's own output.
+  t.diagnostic(`parse clock: ${M.threadCpuClock.kind} (${M.threadCpuClock.why})`);
   let sink = 0; // keeps the loop from being optimised away
   const work = (n) => { let x = 0; for (let i = 0; i < n; i++) x = (x + Math.imul(i, 2654435761)) | 0; sink ^= x; };
   // The cheapest of several wall-timed runs is the closest to the work's CPU cost.
@@ -165,9 +167,13 @@ test('MIRROR-GUARD-CPU-TIME: the default clock is the thread\'s CPU: a waited sl
   let mode = 'wait';
   const wb = { _innerWrite() {
     if (mode === 'wait') { Atomics.wait(word, 0, 0, 200); return; }
-    // A fixed amount of CPU, not of wall time, so a loaded machine cannot shorten it.
+    // A fixed amount of CPU, not of wall time, so a loaded machine cannot shorten it. It is sized on
+    // process.threadCpuUsage, deliberately not on the product's clock (a product clock stuck at 0 must
+    // fail here, not spin for ever). On Windows that sizing clock moves in 15.6 ms steps, so "120" of it
+    // is 120 give or take a step of real CPU (MIRROR-PARSE-ZERO-108: the cycle clock read 115.6). The
+    // slice therefore runs two steps past 120, and the assert below still asks for the full 120.
     const cpu = () => { const u = process.threadCpuUsage(); return (u.user + u.system) / 1000; };
-    const end = cpu() + 120; while (cpu() < end) { /* compute */ }
+    const end = cpu() + 120 + 2 * 15.625; while (cpu() < end) { /* compute */ }
   } };
   assert.equal(M.timeParse({ _core: { _writeBuffer: wb } }, (ms) => calls.push(ms)), true);
   wb._innerWrite();
