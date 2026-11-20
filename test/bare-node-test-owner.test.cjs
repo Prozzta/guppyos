@@ -25,6 +25,7 @@ require('./tools/mutant-runner-helper.cjs').gate(__filename);
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const { nodeEnv } = require('./tools/node-env.cjs');
@@ -109,20 +110,25 @@ test('this process is owned either way: under the runner the preload joined and 
 // ── LIVE: a bare node --test of a file that spawns and fails ───────────────────────────────────
 
 // The fixture: one test that spawns a detached node (libuv puts a non-detached child in node's own
-// job; a detached one escapes it, the orphan shape) and a cmd -> ping, writes {detached, cmd, bornMs},
-// then fails (FAIL) or hangs (HANG, for the hard kill of its node parent).
+// job; a detached one escapes it, the orphan shape) and a cmd -> ping. The detached child reports
+// its own pid + birth time over IPC before the fixture can fail. This observer changes only stdio;
+// detached and the fixture's process-tree/job placement are otherwise unchanged.
 const fixture = (helperLine, mode) => `'use strict';
 ${helperLine}
 const test = require('node:test');
-const fs = require('node:fs');
+const net = require('node:net');
 const { spawn } = require('node:child_process');
 test('spawns, then ${mode}', async () => {
-  const d = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore', windowsHide: true });
+  const d = spawn(process.execPath, ['-e', "process.send({ type: 'ready', pid: process.pid, bornMs: Date.now() }); setInterval(() => {}, 1000)"], { detached: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'], windowsHide: true });
   d.unref();
   const c = spawn('cmd.exe', ['/d', '/c', 'ping -n 90 127.0.0.1 > nul'], { stdio: 'ignore', windowsHide: true });
   c.unref();
-  fs.writeFileSync(process.env.BNTO_PIDS, JSON.stringify({ detached: d.pid, cmd: c.pid, bornMs: Date.now() }));
-  ${mode === 'HANG' ? 'setInterval(() => {}, 1000); await new Promise(() => {});' : "throw new Error('the test fails, its children still running');"}
+  const ready = await new Promise((resolve, reject) => { d.once('message', resolve); d.once('error', reject); });
+  const observer = JSON.parse(process.env.BNTO_OBSERVER);
+  const socket = net.createConnection({ host: '127.0.0.1', port: observer.port });
+  await new Promise((resolve, reject) => { socket.once('connect', resolve); socket.once('error', reject); });
+  socket.write(JSON.stringify({ token: observer.token, detached: ready.pid, detachedBornMs: ready.bornMs, cmd: c.pid, cmdBornMs: Date.now() }) + '\\n');
+  ${mode === 'HANG' ? 'setInterval(() => {}, 1000); await new Promise(() => {});' : "await new Promise((resolve) => socket.once('data', resolve)); socket.end(); throw new Error('the test fails, its children still running');"}
 });
 `;
 const req = (file) => `require(${JSON.stringify(file.split(path.sep).join('/'))});`;
@@ -145,8 +151,8 @@ const until = async (what, ok, ms = 30_000) => {
 const readPids = (file) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; } };
 /** The children the fixture reported, as rows now (pid + birth), and the ping under cmd. */
 function childRows(pids) {
-  const d = rowOf(pids.detached, pids.bornMs);
-  const c = rowOf(pids.cmd, pids.bornMs);
+  const d = rowOf(pids.detached, pids.detachedBornMs || pids.bornMs);
+  const c = rowOf(pids.cmd, pids.cmdBornMs || pids.bornMs);
   const ping = c ? own.childrenOf(own.processTable(`ParentProcessId = ${c.pid}`), c).find((r) => /^ping/i.test(r.name)) : undefined;
   return { detached: d, cmd: c, ping };
 }
@@ -159,11 +165,68 @@ const rmDir = (dir) => fs.rmSync(dir, { recursive: true, force: true, maxRetries
 /** Kill what is left of the fixture's children (and the node parent), each verified by pid + CreationDate. */
 function sweep(rows) { return own.killVerified(rows.filter(Boolean), {}); }
 
+async function openObserver() {
+  const token = `${process.pid}-${Date.now()}-${Math.random()}`;
+  let resolveReady, rejectReady, observed = false;
+  const ready = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
+  const server = net.createServer((socket) => {
+    let text = '';
+    socket.setEncoding('utf8');
+    socket.on('data', (chunk) => {
+      text += chunk;
+      const end = text.indexOf('\\n');
+      if (end < 0 || observed) return;
+      try {
+        const pids = JSON.parse(text.slice(0, end));
+        if (pids.token !== token) throw new Error('wrong observer token');
+        observed = true;
+        resolveReady({ socket, pids });
+      } catch (e) { rejectReady(e); socket.destroy(); }
+    });
+    socket.once('error', rejectReady);
+  });
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+  return {
+    env: { BNTO_OBSERVER: JSON.stringify({ port: server.address().port, token }) },
+    ready,
+    close: () => server.close(),
+    fail: rejectReady,
+  };
+}
+
+async function observeProcess(p, observer, name, { hold = false } = {}) {
+  let errText = ''; let outText = ''; let exit = null;
+  p.stderr.setEncoding('utf8'); p.stderr.on('data', (d) => { errText += d; });
+  p.stdout.setEncoding('utf8'); p.stdout.on('data', (d) => { outText += d; });
+  const done = new Promise((resolve) => p.once('exit', (code, signal) => { exit = { code, signal }; resolve(exit); }));
+  p.once('error', observer.fail);
+  done.then(() => { observer.close(); observer.fail(new Error(`${name}: test process exited before fixture observation: ${JSON.stringify(exit)} ${errText.slice(-300)}`)); });
+  const seen = await observer.ready;
+  let released = false;
+  const release = async () => {
+    if (!released) { released = true; seen.socket.write('release\\n'); seen.socket.end(); }
+    return done;
+  };
+  return { pids: seen.pids, stderr: () => errText, stdout: () => outText, exited: () => exit, release, done, hold };
+}
+
 async function bareRun(dir, name, helperLine, { mode = 'FAIL', env: extra = {} } = {}) {
   const file = path.join(dir, `${name}.test.cjs`);
   fs.writeFileSync(file, fixture(helperLine, mode));
   const pidsFile = path.join(dir, `${name}.pids.json`);
-  const env = bareEnv({ BNTO_PIDS: pidsFile, ...extra });
+  const observer = await openObserver();
+  const env = bareEnv({ ...observer.env, ...extra });
+  const testArgs = ['--' + 'test', file];
+  const launch = spawn;
+  const executable = process.execPath;
+  const p = launch(executable, testArgs, { cwd: os.tmpdir(), env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+  const parentBornMs = Date.now();
+  const watched = await observeProcess(p, observer, name);
+  const result = { ...watched, parent: { pid: p.pid, bornMs: parentBornMs } };
+  if (mode === 'HANG') return result;
+  const ended = await result.release();
+  assert.equal(ended.code, 1, `${name}: the bare test fails, as the fixture's test does`);
+  return { ...result, stderr: result.stderr(), stdout: result.stdout() };
   if (mode === 'FAIL') {
     const r = spawnSync(process.execPath, ['--test', file], { cwd: os.tmpdir(), env, encoding: 'utf8', windowsHide: true, timeout: 180_000 });
     const pids = readPids(pidsFile);
@@ -310,6 +373,7 @@ test('LIVE file-job-preload.cjs: a successful join is marked with the file\'s ow
 });
 
 // ── mutants of the helper: each one lets the orphan live, and the dead-child check catches it ──
+// node --test observer handshake coverage remains test-only.
 
 const MUTANTS = [
   ['never joins (platform check always true)', "if (platform !== 'win32') return", 'if (true) return'],
