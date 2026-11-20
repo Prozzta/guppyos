@@ -36,6 +36,8 @@ process.kill = function kill(pid, signal) {
   named.push(pid);
   return true;
 };
+/** The root of the case that is running, so a driver that fails leaves nothing behind. */
+let live = null;
 const forks = [];
 const realFork = cp.fork;
 cp.fork = function fork(...a) { const c = realFork.apply(this, a); forks.push(c.pid); return c; };
@@ -93,8 +95,12 @@ function consoleOf(pid) {
     // Outside the terminal's own tree. The helper is node-pty's own and ends by itself: not counted.
     c.strangers = c.named.filter((r) => r !== 'root' && r !== 'helper');
     c.treeSweeps = sweeps;
+    // Control that does not depend on the clock: the kills were only recorded, so a root that was
+    // alive at the kill still is. Whose console is it on now?
+    c.consoleAfter = roles(await consoleOf(root), root);
     save();
     try { realKill(root); } catch { /* gone */ }
+    live = null;
   };
   /** `atKill` runs as node-pty's kill is entered, before anything is closed or listed. */
   const watch = (proc, st, atKill) => {
@@ -120,7 +126,7 @@ function consoleOf(pid) {
       await childBytes(Buffer.from('x'), {
         file: electronExe(), env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, prelude: up(marker) + prelude,
         onSpawn: (proc) => {
-          root = proc.pid;
+          root = live = proc.pid;
           watch(proc, st, () => { c.upAtKill = fs.existsSync(marker); c.aliveAtKill = alive(root); });
         }
       });
@@ -129,7 +135,8 @@ function consoleOf(pid) {
     await record(c, root, st);
   };
   await harness('harnessAlive', late);
-  await harness('harnessGone', '');
+  // Gone at once, as soon as it has run a line: the pin does not race the child's start against the 5 s.
+  await harness('harnessGone', 'process.exit(2);');
 
   // ---- (b) the product: PtyManager ----
   const product = async (key, { file, env, endsNothing, quit, recycled }) => {
@@ -142,7 +149,7 @@ function consoleOf(pid) {
     c.spawn = r.ok ? 'ok' : String(r.error);
     if (!r.ok) { save(); return; }
     const s = m.sessions.get(key);
-    const root = s.proc.pid;
+    const root = live = s.proc.pid;
     c.hold = Boolean(s.hold);
     for (let i = 0; i < 2400 && !fs.existsSync(marker); i++) await sleep(25);
     c.up = fs.existsSync(marker);
@@ -179,4 +186,9 @@ function consoleOf(pid) {
   out.done = true;
   save();
   process.exit(0);
-})().catch((e) => { out.failed = String((e && e.stack) || e); save(); process.exit(1); });
+})().catch((e) => {
+  out.failed = String((e && e.stack) || e);
+  save();
+  for (const pid of [out.bystander, live]) { try { if (pid) realKill(pid); } catch { /* gone */ } }
+  process.exit(1);
+});
