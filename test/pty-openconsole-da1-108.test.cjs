@@ -16,6 +16,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { tempDir, removeDir } = require('./tools/test-temp.cjs');
+// The PTY child must be ON the pseudoconsole: a console-subsystem node.exe, never electron.exe (a GUI-subsystem
+// program that ConPTY does not attach, so it neither prints to nor reads from the console).
+const { consoleNode } = require('./tools/console-node.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
 const loadTs = require('./load-ts.cjs');
@@ -101,7 +104,7 @@ test('an unattached PTY starts with no DA1 wait, the query never reaches the sin
   const exited = new Promise((r) => { const orig = sink.send; sink.send = (ch, d) => { orig(ch, d); if (ch === 'pty:exit:da1') r(); }; });
   try {
     spawnAt = Date.now();
-    const r = await m.spawn({ id: 'da1', cwd: dir, command: process.execPath, args: [path.join(dir, 'child.cjs')], cols: 80, rows: 24, env: {} }, sink);
+    const r = await m.spawn({ id: 'da1', cwd: dir, command: consoleNode().file, args: [path.join(dir, 'child.cjs')], cols: 80, rows: 24, env: {} }, sink);
     assert.ok(r.ok, `spawn: ${r.error}`);
     await Promise.race([exited, new Promise((r2) => setTimeout(r2, 15_000))]);
     assert.ok(upAt, `the child's output arrived: ${JSON.stringify(stream.slice(0, 200))}`);
@@ -133,7 +136,7 @@ test('a write the console can no longer take is said, not thrown outside any cal
   let exited = false;
   const sink = { isDestroyed: () => false, send: (ch) => { if (ch === 'pty:exit:ocin') exited = true; } };
   try {
-    const r = await m.spawn({ id: 'ocin', cwd: dir, command: process.execPath, args: [path.join(dir, 'gone.cjs')], cols: 80, rows: 24, env: {} }, sink);
+    const r = await m.spawn({ id: 'ocin', cwd: dir, command: consoleNode().file, args: [path.join(dir, 'gone.cjs')], cols: 80, rows: 24, env: {} }, sink);
     assert.ok(r.ok, `spawn: ${r.error}`);
     // The answer goes out from the output handler, in the first turn after this block.
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, BUSY_PAST_DA1_MS);
