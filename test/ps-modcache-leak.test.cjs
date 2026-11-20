@@ -121,6 +121,7 @@ const KNOWN = {
   'mutant-runners-tap.test.cjs': 1,
   'own-procs-pid-recycle.test.cjs': 1, // OWNPROCS-STOPPROCESS-THROW-108: terminal Stop-Process race behavior pin
   'ps-policy-temp-leak-198.test.cjs': 2,
+  'pty-conhost-leak-native.test.cjs': 2, // PTY-CONHOST-LEAK-NATIVE: the console-host listing, and the end of a host a manager left
   'rebrand-a-182.test.cjs': 1,
   'rebrand-updater-base-183.test.cjs': 1,
   'test-runner-glob.test.cjs': 1,
