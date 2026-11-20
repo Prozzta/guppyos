@@ -49,9 +49,10 @@ window.cancelAnimationFrame = (id: number) => clearTimeout(id);
 });
 
 let app: any = null;
+let frames = 0; // the frames the floor has drawn
 const appRender = Application.prototype.render;
 Application.prototype.render = function (this: any) {
-  if (this.__tesScene) app = this;
+  if (this.__tesScene) { app = this; frames++; }
   return appRender.call(this);
 };
 
@@ -112,7 +113,16 @@ window.__harnessRun = async () => {
       // Parallel full-suite Electron runs can take longer than the interactive mount; do not turn
       // scheduler pressure into a spurious "scene was not mounted" result.
       for (let i = 0; i < 40 && !app; i++) await wait(100);
-      await wait(250);
+      // The floor takes a pane's size from a ResizeObserver and places its fit on its next tick, so
+      // neither is there at a fixed time after the box changed: a hidden window can deliver the
+      // observer late, and the pane before this one was then measured in this one's place. Wait for
+      // the floor itself: its canvas has the pane's size, and it has drawn a frame since.
+      const sized = () => !!app && app.canvas.width === Math.round(aspect.w * app.renderer.resolution) && app.canvas.height === Math.round(aspect.h * app.renderer.resolution);
+      for (let i = 0; i < 400 && !sized(); i++) await wait(50);
+      if (!sized()) throw new Error(`${aspect.name}: the floor did not take the pane's size (canvas ${app?.canvas.width}x${app?.canvas.height}, pane ${aspect.w}x${aspect.h})`);
+      const drawn = frames;
+      for (let i = 0; i < 400 && frames === drawn; i++) await wait(50);
+      if (frames === drawn) throw new Error(`${aspect.name}: the floor drew no frame after it took the pane's size`);
       const metric = placement();
       const shot = await window.harness.capture(aspect.w, aspect.h);
       out.push({ ...aspect, ...metric, size: shot.size, png: shot.png });
