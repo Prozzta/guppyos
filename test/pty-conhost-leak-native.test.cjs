@@ -291,7 +291,15 @@ async function unreadManager() {
         };
         fs.writeFileSync(flag, '');
         await firstOutput;
-        fs.writeFileSync(stop, '');    // the program ends itself once it has printed
+        // From here this thread takes nothing more until the program is gone: the output stays
+        // flowing (nobody pauses it), the pipes fill, the program's writes stand still and it ends
+        // itself. So when the exit is reported, more is unread than the stream and the worker can
+        // buffer between them, and only a reader could make the host close the output. With a
+        // short tail the worker drains the host by itself and the pause costs nothing: that run
+        // would pass with or without the exit path this cell is about.
+        const nap = new Int32Array(new SharedArrayBuffer(4));
+        const running = () => { try { process.kill(proc.pid, 0); return true; } catch { return false; } };
+        while (!fs.existsSync(written) && running()) Atomics.wait(nap, 0, 0, 50);
       } else {
         proc.pause();                    // nothing reads this terminal's output from here on
         out.readAtPause = out.read;      // (the bundled host's own first bytes may have come by now)
@@ -512,6 +520,7 @@ test('PTY-CONHOST-LEAK: node-pty alone on the bundled console host, the output r
     assert.ok(r.written > 0, 'the program printed before it ended itself');
     assert.equal(r.flowingAtExit, true, `the output was flowing when the native side reported the exit (the premise of this cell): ${r.flowingAtExit}`);
     assert.equal(r.read, r.readAtPause, `nothing was read after the pause: ${r.readAtPause} bytes before, ${r.read} in all`);
+    assert.ok(r.readAtPause < r.written * 4097, `part of the program's output was still unread at the pause (the premise of this cell): ${r.readAtPause} bytes read of at least ${r.written * 4097} written`);
     assert.ok(r.exit, `THE EXIT IS NOT REPORTED: the program is gone (the native side has its exit code: ${r.nativeExit}), the output was paused after that, and ${LISTINGS} listings later the terminal has told nobody. `
       + 'The terminal waits for the console host to close the output, and the host waits for somebody to read it');
     assert.deepEqual(r.exit && r.exit.exitCode, 1, `THE EXIT IS REPORTED, with the program's own end: ${JSON.stringify(r.exit)}`);
