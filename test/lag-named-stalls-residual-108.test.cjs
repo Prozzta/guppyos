@@ -673,10 +673,13 @@ async function secondSpell(t, lateMs) {
   const stat = fs.promises.stat;
   let hold = true;
   const frees = [];
+  const handed = [];   // every held stat this wrapper handed out: it settles when the real stat has answered
   const late = () => (lateMs ? new Promise((resolve) => { setTimeout(resolve, lateMs); }) : undefined);
   fs.promises.stat = function (p, ...rest) {
     if (!hold || !String(p).endsWith('memory.md')) return stat.call(this, p, ...rest);
-    return new Promise((resolve) => { frees.push(resolve); }).then(late).then(() => stat.call(this, p, ...rest));
+    const answer = new Promise((resolve) => { frees.push(resolve); }).then(late).then(() => stat.call(this, p, ...rest));
+    handed.push(answer.catch(() => {}));
+    return answer;
   };
   const stuckRows = () => hive.logTail(500).filter((r) => r && r.kind === 'coordination-stat-stuck');
   try {
@@ -684,8 +687,14 @@ async function secondSpell(t, lateMs) {
     assert.equal(stuckRows().length, 1);
     hold = false;
     frees.splice(0).forEach((f) => f());
+    // Freed is not answered: the real stat runs on the thread pool and, under load, was still open
+    // one turn later. The next beat was then a stuck one, the spell never ended, and the third beat
+    // wrote no row (the 1 !== 2 red). So wait for the answer, then one turn for the manager to drop it.
+    await Promise.all(handed.splice(0));   // the event itself: every freed stat has answered
     await new Promise((resolve) => setImmediate(resolve));
-    await bounded(hive.coordinationFileTimes(['andy-1'], 20));
+    assert.equal(hive.coordinationStats.size, 0, 'the answered stat is dropped: the next beat reads afresh');
+    fs.utimesSync(path.join(hive.root(), 'agents', 'andy-1', 'memory.md'), 9000, 9000);
+    assert.deepEqual([...await bounded(hive.coordinationFileTimes(['andy-1'], 20))], [['andy-1', 9_000_000]], 'the clean beat is a real one: it read the freed path');
     assert.equal(stuckRows().length, 1, 'a clean beat writes no row');
     hold = true;
     await bounded(hive.coordinationFileTimes(['andy-1'], 20));
