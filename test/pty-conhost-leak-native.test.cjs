@@ -64,7 +64,11 @@ const RAW_UNREAD = process.argv.includes(RAW_UNREAD_FLAG);
 // path looks at it. The other half of that path (paused later, not paused now).
 const LATE_PAUSE_FLAG = '--conhost-leak-raw-late-pause-manager';
 const LATE_PAUSE = process.argv.includes(LATE_PAUSE_FLAG);
-const UNREAD = DESTROYED || RAW_UNREAD || LATE_PAUSE || process.argv.includes(UNREAD_FLAG);
+// The same terminal with a reader that NEVER pauses: the program prints a stream that ends with a
+// marker and ends itself while part of it is still unread. That reader must get all of it.
+const FLOWING_FLAG = '--conhost-leak-raw-flowing-manager';
+const FLOWING = process.argv.includes(FLOWING_FLAG);
+const UNREAD = DESTROYED || RAW_UNREAD || LATE_PAUSE || FLOWING || process.argv.includes(UNREAD_FLAG);
 // A manager in which the thread that closes the pseudoconsole cannot be started (the native test
 // hook GUPPY_PTY_TEST_CLOSE_THREAD_FAILS throws what std::thread throws when it cannot start).
 const THREAD_FAILS_FLAG = '--conhost-leak-close-thread-fails-manager';
@@ -171,10 +175,15 @@ test('PTY-CONHOST-LEAK: a terminal killed while its program floods output releas
 // then ends the process when the manager's stop file appears, and the program has printed all the
 // while (the host takes about 35 such writes before it blocks).
 const STILL = 10;
+// The flowing reader's program stops by itself after this many writes (far fewer than the pipes
+// hold with nobody taking them: the unread program above gets past 50), says so with END as the
+// last thing it prints, and ends with code 0.
+const STREAM = 40;
+const END = 'GUPPY-CONHOST-LEAK-END-OF-OUTPUT';
 const UNREAD_PROGRAM = `'use strict';
 const fs = require('fs');
 const { Worker } = require('worker_threads');
-const [flag, written, stop] = process.argv.slice(2);
+const [flag, written, stop, stream] = process.argv.slice(2);
 const sab = new SharedArrayBuffer(4);
 const n = new Int32Array(sab);
 new Worker(\`
@@ -194,7 +203,10 @@ const block = 'x'.repeat(4096) + '\\n';
 const t = setInterval(() => {
   if (!fs.existsSync(flag)) return;
   clearInterval(t);
-  for (;;) { fs.writeSync(1, block); Atomics.add(n, 0, 1); }
+  for (let k = 0; !stream || k < Number(stream); k += 1) { fs.writeSync(1, block); Atomics.add(n, 0, 1); }
+  fs.writeSync(1, '${END}\\n');
+  fs.writeFileSync(written, String(Atomics.load(n, 0)));
+  process.exit(0);
 }, 50);
 `;
 
@@ -235,9 +247,9 @@ async function unreadManager() {
       before.threads = lowest;
     }
     let proc;
-    if (RAW || RAW_UNREAD || LATE_PAUSE) {
+    if (RAW || RAW_UNREAD || LATE_PAUSE || FLOWING) {
       // node-pty alone: no PtyManager, so nothing but node-pty itself ever ends the output worker.
-      proc = require('node-pty').spawn(node.file, [program, flag, written, stop], rawOptions);
+      proc = require('node-pty').spawn(node.file, [program, flag, written, stop].concat(FLOWING ? [String(STREAM)] : []), rawOptions);
     } else {
       out.spawn = await m.spawn({ id, cwd: process.cwd(), command: node.file, args: DESTROYED ? [program, flag, written, stop] : [program, flag, written], cols: 80, rows: 24 });
       proc = m.sessions.get(id).proc;
@@ -276,7 +288,28 @@ async function unreadManager() {
       out.exit = { exitCode: proc._agent._exitCode };
       out.programAlive = alive();
     } else {
-      if (LATE_PAUSE) {
+      if (FLOWING) {
+        // Nobody pauses this output, ever. This thread takes nothing from the first output until
+        // the program is gone, so part of what it printed is still on its way when the native side
+        // reports the exit. What was read by then, and whether END had come when the terminal's
+        // exit event was sent, is the result.
+        const agent = proc._agent;
+        const onProcessExit = agent._$onProcessExit;
+        agent._$onProcessExit = function (...args) {
+          out.flowingAtExit = agent._outSocket.readableFlowing;
+          out.readAtExit = out.read;
+          return onProcessExit.apply(this, args);
+        };
+        let tail = '';
+        out.end = false;
+        proc.onData((d) => { tail = (tail + d).slice(-(END.length + d.length)); if (tail.includes(END)) out.end = true; });
+        proc.onExit(() => { out.endAtExitEvent = out.end; out.readAtExitEvent = out.read; });
+        fs.writeFileSync(flag, '');
+        await firstOutput;
+        const nap = new Int32Array(new SharedArrayBuffer(4));
+        const running = () => { try { process.kill(proc.pid, 0); return true; } catch { return false; } };
+        while (running()) Atomics.wait(nap, 0, 0, 50);
+      } else if (LATE_PAUSE) {
         // The output is read while the program prints. The pause is made in the same turn as the
         // native exit report, right after node-pty's own exit path has run: by then that path has
         // seen a flowing output, and nothing was read in between.
@@ -524,6 +557,30 @@ test('PTY-CONHOST-LEAK: node-pty alone on the bundled console host, the output r
     assert.ok(r.exit, `THE EXIT IS NOT REPORTED: the program is gone (the native side has its exit code: ${r.nativeExit}), the output was paused after that, and ${LISTINGS} listings later the terminal has told nobody. `
       + 'The terminal waits for the console host to close the output, and the host waits for somebody to read it');
     assert.deepEqual(r.exit && r.exit.exitCode, 1, `THE EXIT IS REPORTED, with the program's own end: ${JSON.stringify(r.exit)}`);
+    assert.deepEqual(r.left, [], `THE CONSOLE HOST OUTLIVES ITS TERMINAL: ${LISTINGS} listings after the exit was reported ${r.left.map(([p, name]) => `${name} pid ${p}`).join(', ')} is still a child of the manager process`);
+    const end = await ended();
+    assert.ok(end, `THE MANAGER PROCESS DOES NOT END: ${LISTINGS} listings after it reported its result pid ${pid} is still running`);
+    assert.deepEqual(end, { code: 0, signal: null }, `the manager process ended by itself and cleanly:
+${stderr()}`);
+  });
+
+// What the exit path above costs, and whom: a reader that has paused loses what it had not taken
+// when the program went (that is the design: the host closes the output only once it is read).
+// A reader that never pauses must lose nothing, and that is every terminal of the app (see the
+// no-pause pin in pty-no-pause-pin.test.cjs).
+test('PTY-CONHOST-LEAK: node-pty alone on the bundled console host, a reader that never pauses and a program that ends itself with part of its output still unread: all of it arrives before the exit event, the host goes, and the manager process ends by itself',
+  { skip: NO_BUNDLED_HOST, timeout: 120_000 }, async (t) => {
+    const { r, pid, ended, stderr } = await managerRun(t, [FLOWING_FLAG, DLL_FLAG]);
+    t.diagnostic(`PTY child: ${r.node}; the program made ${r.written} writes of 4097 bytes and ended itself; the manager had read ${r.readAtExit} bytes when the native side reported the exit and ${r.readAtExitEvent} when the exit event came`);
+    assert.equal(r.bundledHost, true, 'this cell ran on the bundled host');
+    assert.equal(r.written, STREAM, `the program printed its whole stream and ended itself (it is ended from inside when its writes stand still, and then the stream did not fit the pipes): ${r.written} of ${STREAM} writes`);
+    assert.equal(r.flowingAtExit, true, `the output was flowing when the native side reported the exit: ${r.flowingAtExit}`);
+    assert.ok(r.exit, `THE EXIT IS NOT REPORTED: the program is gone (the native side has its exit code: ${r.nativeExit}) and ${LISTINGS} listings later the terminal has told nobody`);
+    assert.ok(r.readAtExit < r.readAtExitEvent, `part of the output was still unread when the native side reported the exit (the premise of this cell): ${r.readAtExit} bytes read then, ${r.readAtExitEvent} at the exit event`);
+    assert.equal(r.endAtExitEvent, true, `THE END OF THE OUTPUT IS LOST: the reader never paused, the program printed ${END} last and ended itself, and the exit event came without it (${r.readAtExitEvent} bytes read of at least ${STREAM * 4097} written)`);
+    assert.ok(r.readAtExitEvent >= STREAM * 4097, `all of the stream was read before the exit event: ${r.readAtExitEvent} bytes of at least ${STREAM * 4097}`);
+    assert.equal(r.read, r.readAtExitEvent, `nothing comes after the exit event: ${r.readAtExitEvent} bytes then, ${r.read} in all`);
+    assert.deepEqual(r.exit && r.exit.exitCode, 0, `THE EXIT IS REPORTED, with the program's own end: ${JSON.stringify(r.exit)}`);
     assert.deepEqual(r.left, [], `THE CONSOLE HOST OUTLIVES ITS TERMINAL: ${LISTINGS} listings after the exit was reported ${r.left.map(([p, name]) => `${name} pid ${p}`).join(', ')} is still a child of the manager process`);
     const end = await ended();
     assert.ok(end, `THE MANAGER PROCESS DOES NOT END: ${LISTINGS} listings after it reported its result pid ${pid} is still running`);
