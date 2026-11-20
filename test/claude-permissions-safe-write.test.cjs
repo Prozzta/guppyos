@@ -288,7 +288,10 @@ test('on Windows the trust key is the forward-slash path (claude 2.1.302 j2(): r
 
 test('the per-agent settings file carries both bypass flags, with and without the broker', (t) => {
   const env = home(t);
-  const harness = fs.mkdtempSync(path.join(env.h, 'harness-'));
+  // Under ROOT, not env.h: home(t) registered the removal of env.h before the hook below, and
+  // after-hooks run in the order registered, so a harness inside env.h was removed before the drain.
+  // ROOT goes in the file-level hook, after every test's own hooks.
+  const harness = fs.mkdtempSync(path.join(ROOT, 'harness-'));
   const hive = new HiveManager(() => harness);
   t.after(async () => { hive.dispose(); await hive.drainReads(); });
   for (const url of [null, `http://127.0.0.1:60971/hook/andy-mtuk4y4x/${'a'.repeat(32)}`]) {
