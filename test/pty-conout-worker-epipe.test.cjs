@@ -19,8 +19,13 @@ require('./tools/own-job.cjs');
  * Anything else is thrown again, as before.
  *
  * Lever (no load needed). The REAL worker file, served by a fake console output pipe that already
- * wrote its output; a client socket that connects and is destroyed in the same turn. That is the
- * socket destroyed before the worker's write, every time.
+ * wrote its output; a client socket that connects and is destroyed in the same turn, and whose
+ * handle is CLOSED before the worker thread may run again (the gate, GATED below). That is the
+ * socket closed before the worker's write, every time.
+ * Without the gate it was a race of two threads (FLAKE-PTY-CONOUT-EPIPE-CONTROL-TIMEOUT-108):
+ * destroy() closes the handle later on this thread's loop, and a worker that accepted first wrote
+ * to an open socket. No EPIPE then: the unpatched worker never ended (the control's 10 s red under
+ * load) and the patched cells passed on a write that had worked.
  * The controls run in a child process (this file, with CONTROL_FLAG): node:test fails the running
  * test on any uncaught exception, so a run that is meant to have one cannot be a test of this process.
  *
@@ -82,7 +87,8 @@ const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 /**
  * FLAKE-PTY-CONOUT-EPIPE-CONTROL-TIMEOUT-108. How long the stalled cells keep this thread off its loop
  * right after connect() + destroy(): what a loaded machine does to it at a moment of its choosing.
- * destroy() does not close the handle in that turn, so the worker can accept and write meanwhile.
+ * destroy() does not close the handle in that turn; without the gate the worker accepts and writes
+ * meanwhile (both stalled cells are red then).
  */
 const STALL_MS = 300;
 function stall(ms) { const end = Date.now() + ms; while (Date.now() < end) { /* this thread, kept off its loop */ } }
@@ -238,10 +244,32 @@ if (process.platform !== 'win32') {
     return [file, () => fs.rmSync(dir, { recursive: true, force: true })];
   }
 
+  /**
+   * The worker file behind a gate. The worker's text is not touched: this only decides WHEN its
+   * thread runs. Told to, the thread says it has stopped (gate[1]) and waits (gate[0]) inside one
+   * callback, so it cannot take the data socket's connection until this thread opens the gate.
+   */
+  const GATED = [
+    "'use strict';",
+    "const { parentPort, workerData } = require('node:worker_threads');",
+    'const gate = new Int32Array(workerData.gate);',
+    "parentPort.once('message', () => { Atomics.store(gate, 1, 1); Atomics.notify(gate, 1); Atomics.wait(gate, 0, 0); });",
+    'require(workerData.run);'
+  ].join('\n');
+  const STOPPED = 1;
+  const OPEN = 0;
+  function stoppedAtTheGate(gate) {
+    const w = Atomics.waitAsync(gate, STOPPED, 0);
+    return w.async ? w.value : Promise.resolve();
+  }
+  function openTheGate(gate) { Atomics.store(gate, OPEN, 1); Atomics.notify(gate, OPEN); }
+
   let seq = 0;
   /**
    * A real worker (`file`), with output already buffered, and a data socket destroyed in the turn
-   * of its connect(). `mustEnd`: wait for the worker's end; otherwise watch it for STAYS_MS and, if
+   * of its connect() and closed while the worker thread is stopped at the gate. `stallMs` keeps this
+   * thread off its loop after the destroy (the gate makes that harmless).
+   * `mustEnd`: wait for the worker's end; otherwise watch it for STAYS_MS and, if
    * it lives, connect a second data socket and read later console output through it.
    * Nothing here listens for the worker's 'error': an error from it is thrown on this thread.
    */
@@ -253,7 +281,8 @@ if (process.platform !== 'win32') {
     let peer;
     const conout = net.createServer((s) => { peer = s; s.on('error', () => {}); });
     await new Promise((res) => conout.listen(conoutPipeName, res));
-    const worker = new Worker(file, { workerData: { conoutPipeName } });
+    const gate = new Int32Array(new SharedArrayBuffer(8));
+    const worker = new Worker(GATED, { eval: true, workerData: { conoutPipeName, gate: gate.buffer, run: file } });
     const client = new net.Socket();
     const second = new net.Socket();
     const seen = { connectEvents: 0, clientErrors: [], reports: [], exitCode: null, later: '' };
@@ -266,9 +295,14 @@ if (process.platform !== 'win32') {
       worker.on('message', (m) => { seen.reports.push(m); });
       await within(new Promise((res) => peer.write('output the console wrote before the data socket connected', res)), 'the fake console\'s write');
       await sleep(BUFFERED_MS);
+      worker.postMessage('stop at the gate');
+      await within(stoppedAtTheGate(gate), 'the worker thread stopping at the gate');
+      const closed = new Promise((res) => client.once('close', res));
       client.connect(getWorkerPipeName(conoutPipeName));
-      client.destroy();   // same turn: before the worker accepts, and so before it writes
+      client.destroy();   // same turn: before its connect event
       if (stallMs) stall(stallMs);
+      await within(closed, 'the data socket\'s close');   // its handle is closed: a write to it now fails
+      openTheGate(gate);   // only now does the worker accept it, and write
       if (mustEnd) {
         seen.exitCode = await within(ended, 'the worker\'s end (its write to the destroyed socket fails)');
         await sleep(50);  // an error event that follows the exit would land here
@@ -285,6 +319,7 @@ if (process.platform !== 'win32') {
       return { ...seen, uncaught };
     } finally {
       process.removeListener('uncaughtException', onUncaught);
+      openTheGate(gate);   // a failure above must not leave the thread waiting
       await worker.terminate();
       client.destroy();
       second.destroy();
