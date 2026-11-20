@@ -610,7 +610,7 @@ ${stderr()}`);
 // catches: a start that throws there is std::terminate, the whole app gone with every terminal in
 // it. Caught, it costs what an ended terminal cost before the close existed: its console host
 // stays until the app quits.
-test('PTY-CONHOST-LEAK: a close thread that cannot be started costs one console host until the app quits, never the app: the exit is reported and the manager process ends by itself',
+test('PTY-CONHOST-LEAK: a close thread that cannot be started costs at most one console host until the app quits (none on the bundled OpenConsole), never the app: the exit is reported and the manager process ends by itself',
   { skip: !WIN, timeout: 120_000 }, async (t) => {
     const { r, ended, stderr } = await managerRun(t, THREAD_FAILS_FLAG);
     assert.deepEqual(r.spawn, { ok: true });
