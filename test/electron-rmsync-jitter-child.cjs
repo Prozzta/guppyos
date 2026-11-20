@@ -13,6 +13,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const VICTIM_FILES = 5;
+const BOX_MS = 60_000;
 
 /** The agent: plant <dir>/a/j and <dir>/a/b/j -> victim, with a random 0 to 3 ms wait between tries. */
 function plant(dir, victim, stop) {
@@ -53,15 +54,24 @@ async function race(mode, base, runs) {
   kid.stdout.on('data', (d) => { kidOut += d; });
   const exited = new Promise((resolve) => kid.on('exit', resolve));
 
-  const out = { runs: 0, losses: 0, refused: 0, errors: {}, linkLeft: 0, planted: 0 };
-  const end = Date.now() + 60_000;
+  // The 60 s box bounds the remove under test and the clean-up after it: boxMs. The fixture's own
+  // building (the victim's files and the 40-file tree) is not counted, it is reported as buildMs.
+  // Under a full suite's file load the building alone took most of a 60 s wall-clock box, and the
+  // loop then ended short of its runs though no remove was slow. The parent's limit on the whole
+  // child is the stop for everything else.
+  const out = { runs: 0, losses: 0, refused: 0, errors: {}, linkLeft: 0, planted: 0, boxMs: 0, buildMs: 0 };
   try {
-    while (out.runs < runs && Date.now() < end) {
+    while (out.runs < runs && out.boxMs < BOX_MS) {
+      const b0 = Date.now();
       for (let i = 0; i < VICTIM_FILES; i++) fs.writeFileSync(path.join(victim, `v${i}.txt`), 'x');
+      let built = true;
       try {
         fs.mkdirSync(path.join(dir, 'a', 'b'), { recursive: true });
         for (let i = 0; i < 40; i++) fs.writeFileSync(path.join(dir, 'a', 'b', `f${i}`), 'y');
-      } catch { try { sweep(dir); } catch { /* the planter is in it; next pass */ } continue; }
+      } catch { built = false; }
+      const t0 = Date.now();
+      out.buildMs += t0 - b0;
+      if (!built) { try { sweep(dir); } catch { /* the planter is in it; next pass */ } out.boxMs += Date.now() - t0; continue; }
       out.runs++;
       try { if (mode === 'sync') safeRemoveTreeSync(dir); else await safeRemoveTree(dir); }
       catch (e) {
@@ -71,6 +81,7 @@ async function race(mode, base, runs) {
       if (fs.readdirSync(victim).length < VICTIM_FILES) out.losses++;
       if (fs.existsSync(dir)) out.linkLeft++;
       for (let i = 0; i < 20 && fs.existsSync(dir); i++) { try { sweep(dir); } catch { /* the planter got in again */ } }
+      out.boxMs += Date.now() - t0;
     }
   } finally {
     fs.writeFileSync(stop, '');
