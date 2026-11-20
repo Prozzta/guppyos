@@ -142,7 +142,29 @@ const AGENT_EDITS = [
     '            this._innerPid = connect.pid;\n',
     '            this._innerPid = connect.pid;\n' +
     '            // GUPPY PTY-HOLD-NODEPTY-HANDOFF (tools/patch-node-pty-root-handle.cjs): the root\'s own handle.\n' +
-    '            this._rootHandle = connect.rootHandle;\n']
+    '            this._rootHandle = connect.rootHandle;\n'],
+  // PTY-CONHOST-LEAK-NATIVE: on the bundled console host (useConptyDll) node-pty reports the exit
+  // only when the host closes the output pipe. A paused reader would wait for ever.
+  ['the bundled host: a process gone with its output paused ends the output socket',
+    '            this._outSocket.on(\'data\', function () { return _this._flushDataAndCleanUp(); });\n' +
+    '        }\n',
+    '            this._outSocket.on(\'data\', function () { return _this._flushDataAndCleanUp(); });\n' +
+    '        }\n' +
+    '        else {\n' +
+    '            // GUPPY PTY-CONHOST-LEAK-NATIVE (tools/patch-node-pty-root-handle.cjs): on the bundled\n' +
+    '            // console host the exit is reported when the host closes the output pipe, and the\n' +
+    '            // host closes it only once its output has been read. A terminal whose reader has\n' +
+    '            // paused would never report its exit, and its host would stay. So with the process\n' +
+    '            // gone and the output paused (now, or later), the output socket ends here: the exit\n' +
+    '            // is reported, and the output worker reads the rest and throws it away.\n' +
+    '            var guppyUnread = function () { _this._outSocket.destroy(); };\n' +
+    '            if (this._outSocket.readableFlowing === false) {\n' +
+    '                guppyUnread();\n' +
+    '            }\n' +
+    '            else {\n' +
+    '                this._outSocket.once(\'pause\', guppyUnread);\n' +
+    '            }\n' +
+    '        }\n']
 ];
 // NODEPTY-PACKAGED-PROOF: on Windows the loader takes the binaries built in this tree, or throws.
 const UTILS_EDITS = [
