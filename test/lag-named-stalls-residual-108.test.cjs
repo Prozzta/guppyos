@@ -619,6 +619,14 @@ test('COORDINATION: after dispose nothing is read and every agent asked is 0', a
   assert.deepEqual(seen.filter((p) => under(hive.root() || JAIL, p)), [], 'no read starts on a disposed manager');
 });
 
+/**
+ * A stat answered at once, in microtasks, with no libuv pool thread. The two stuck-stat tests below
+ * use it for every stat they do NOT hold (and for a held one once freed): a real fs.promises.stat
+ * waits for a pool thread, and under load that wait lost the race with the 20 ms beat wait and with
+ * the 1000-turn drop loop. Only the stat a test holds on purpose may be late.
+ */
+const statNow = (p) => new Promise((resolve) => { resolve(fs.statSync(p)); });
+
 /** The call, or a named failure if it is still waiting after 5 s: an unbounded wait is the defect, not a slow run. */
 function bounded(call) {
   let timer;
@@ -635,7 +643,7 @@ test('COORDINATION: a stat that never settles is waited for once, counts as 0, i
   const held = new Promise((resolve) => { free = resolve; });
   fs.promises.stat = function (p, ...rest) {
     asked.push(String(p));
-    return String(p) === stuckPath ? held.then(() => stat.call(this, p, ...rest)) : stat.call(this, p, ...rest);
+    return String(p) === stuckPath ? held.then(() => statNow(p)) : statNow(p);
   };
   const stuckRows = () => hive.logTail(500).filter((r) => r && r.kind === 'coordination-stat-stuck');
   try {
@@ -678,8 +686,7 @@ async function secondSpell(t, lateMs) {
   // Every path the cell does not hold is answered AT ONCE, from a promise that is already settled:
   // the beats race each stat against a 20 ms timer, and a real stat is a thread-pool job that can
   // lose that race under load. Then outbox or outbox/.sent makes a beat stuck that the cell calls
-  // clean (the same 1 !== 2), or drops out of the first beat's answer.
-  const statNow = (p) => new Promise((resolve) => { resolve(fs.statSync(p)); });
+  // clean (the same 1 !== 2), or drops out of the first beat's answer. statNow is the file's one helper.
   fs.promises.stat = function (p) {
     if (!hold || !String(p).endsWith('memory.md')) return statNow(p);
     const answer = new Promise((resolve) => { frees.push(resolve); }).then(late).then(() => statNow(p));
