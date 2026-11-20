@@ -130,7 +130,7 @@ test('spawns, then ${mode}', async () => {
   const observer = JSON.parse(process.env.BNTO_OBSERVER);
   const socket = net.createConnection({ host: '127.0.0.1', port: observer.port });
   await new Promise((resolve, reject) => { socket.once('connect', resolve); socket.once('error', reject); });
-  socket.write(JSON.stringify({ token: observer.token, detached: ready.pid, detachedBornMs: ready.bornMs, cmd: c.pid, cmdBornMs: Date.now() }) + '\\n');
+  socket.write(JSON.stringify({ token: observer.token, detached: ready.pid, detachedBornMs: ready.bornMs, cmd: c.pid, cmdBornMs: Date.now(), connected: d.connected }) + '\\n');
   ${mode === 'HANG' ? 'setInterval(() => {}, 1000); await new Promise(() => {});' : "await new Promise((resolve) => socket.once('data', resolve)); socket.end(); throw new Error('the test fails, its children still running');"}
 });
 `;
@@ -154,8 +154,8 @@ const until = async (what, ok, ms = 30_000) => {
 const readPids = (file) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; } };
 /** The children the fixture reported, as rows now (pid + birth), and the ping under cmd. */
 function childRows(pids) {
-  const d = rowOf(pids.detached, pids.detachedBornMs || pids.bornMs);
-  const c = rowOf(pids.cmd, pids.cmdBornMs || pids.bornMs);
+  const d = rowOf(pids.detached, pids.detachedBornMs);
+  const c = rowOf(pids.cmd, pids.cmdBornMs);
   const ping = c ? own.childrenOf(own.processTable(`ParentProcessId = ${c.pid}`), c).find((r) => /^ping/i.test(r.name)) : undefined;
   return { detached: d, cmd: c, ping };
 }
@@ -177,7 +177,7 @@ async function openObserver() {
     socket.setEncoding('utf8');
     socket.on('data', (chunk) => {
       text += chunk;
-      const end = text.indexOf('\\n');
+      const end = text.indexOf('\n');
       if (end < 0 || observed) return;
       try {
         const pids = JSON.parse(text.slice(0, end));
@@ -208,6 +208,7 @@ async function observeProcess(p, observer, name, { hold = false, parent, doneMs 
   let readyTimer;
   const readyTimeout = new Promise((_, reject) => {
     readyTimer = setTimeout(() => {
+      observer.close();
       if (parent) own.killVerified([parent], {});
       reject(new Error(name + ': fixture observation did not arrive within ' + readyMs + ' ms'));
     }, readyMs);
@@ -222,12 +223,21 @@ async function observeProcess(p, observer, name, { hold = false, parent, doneMs 
   seen.pids.cmdBornMs = cmd.created;
   let released = false;
   const release = async () => {
-    if (!released) { released = true; seen.socket.write('release\\n'); seen.socket.end(); }
+    if (!released) { released = true; seen.socket.write('release\n'); seen.socket.end(); }
     let doneTimer;
     const doneTimeout = new Promise((_, reject) => {
       doneTimer = setTimeout(() => {
+        // evidence BEFORE the kill: the fixture subprocess (node --test's child running the file) is still alive and
+        // the detached child's channel was still connected when the fixture reported it
+        const fixtureRows = parent ? own.childrenOf(own.processTable(`ParentProcessId = ${parent.pid}`), parent) : [];
+        const err = new Error(name + ': fixture did not exit within ' + doneMs + ' ms after release');
+        err.pids = seen.pids;
+        err.parent = parent;
+        err.fixtureRows = fixtureRows;
+        err.fixtureAlive = fixtureRows.some((r) => /^node/i.test(r.name));
+        err.channelConnected = seen.pids.connected === true;
         if (parent) own.killVerified([parent], {});
-        reject(new Error(name + ': fixture did not exit within ' + doneMs + ' ms after release'));
+        reject(err);
       }, doneMs);
     });
     try { return await Promise.race([done, doneTimeout]); } finally { clearTimeout(doneTimer); }
@@ -247,35 +257,38 @@ async function bareRun(dir, name, helperLine, { mode = 'FAIL', env: extra = {}, 
     return row && /^node/i.test(row.name) ? row : null;
   }, 30_000);
   const watched = await observeProcess(p, observer, name, { hold: mode === 'HANG', parent, doneMs });
+  assert.equal(watched.pids.connected, !disconnect, `${name}: the fixture reports its detached child's channel ${disconnect ? 'closed' : 'still open'}`);
   const result = { ...watched, parent: { pid: parent.pid, bornMs: parent.created } };
   if (mode === 'HANG') return result;
   const ended = await result.release();
   assert.equal(ended.code, 1, `${name}: the bare test fails, as the fixture's test does`);
   return { ...result, stderr: result.stderr(), stdout: result.stdout() };
-  if (mode === 'FAIL') {
-    const r = spawnSync(process.execPath, ['--test', file], { cwd: os.tmpdir(), env, encoding: 'utf8', windowsHide: true, timeout: 180_000 });
-    const pids = readPids(pidsFile);
-    assert.ok(pids, `${name}: the fixture spawned and wrote its pids (exit ${r.status}, stderr ${JSON.stringify((r.stderr || '').slice(-400))})`);
-    assert.equal(r.status, 1, `${name}: the bare node --test failed, as the fixture's test does`);
-    return { pids, stderr: r.stderr || '', stdout: r.stdout || '' };
-  }
-  // HANG: node --test runs on; hand back the parent to kill
-  const p = spawn(process.execPath, ['--test', file], { cwd: os.tmpdir(), env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
-  const parentBornMs = Date.now();
-  let errText = ''; p.stderr.setEncoding('utf8'); p.stderr.on('data', (d) => { errText += d; }); p.stdout.setEncoding('utf8'); p.stdout.on('data', (d) => { errText += d; });
-  let exit = null; p.once('exit', (code, signal) => { exit = { code, signal }; });
-  const pids = await until('fixture pids', () => readPids(pidsFile) || (exit && assert.fail(`node --test exited early: ${JSON.stringify(exit)} ${errText.slice(-300)}`)), 120_000);
-  return { pids, parent: { pid: p.pid, bornMs: parentBornMs }, stderr: () => errText, exited: () => exit };
 }
 
 test('LIVE: the observer disconnect is required for a released failing fixture to exit', LIVE, async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bnto-'));
+  let err = null;
   try {
-    await assert.rejects(
-      bareRun(dir, 'disconnect-mutant', req(HELPER), { disconnect: false, doneMs: 5_000 }),
-      /did not exit within 5000 ms after release/,
+    await bareRun(dir, 'disconnect-mutant', req(HELPER), { disconnect: false, doneMs: 5_000 }).then(
+      () => assert.fail('the mutant fixture exited although its detached child still held the channel'),
+      (e) => { err = e; },
     );
+    assert.match(String(err && err.message), /did not exit within 5000 ms after release/);
+    // not just a clock: the fixture subprocess was still alive and the detached child's channel still open
+    assert.equal(err.channelConnected, true, 'the detached child still held its IPC channel');
+    assert.equal(err.fixtureAlive, true, 'the fixture subprocess was still alive 5 s after release');
   } finally {
+    if (err && err.pids) {
+      const rows = childRows(err.pids);
+      const mine = [rows.detached, rows.cmd, rows.ping, ...(err.fixtureRows || []).map((r) => own.lookupPids([r.pid])[0]).filter(Boolean)];
+      sweep(mine);
+      if (err.parent) sweep([own.lookupPids([err.parent.pid])[0] && rowOf(err.parent.pid, err.parent.created)]);
+      const after = childRows(err.pids);
+      assert.equal(after.detached, undefined, 'mutant detached node is swept');
+      assert.equal(after.cmd, undefined, 'mutant cmd is swept');
+      assert.equal(after.ping, undefined, 'mutant ping is swept');
+      for (const r of err.fixtureRows || []) assert.equal(rowOf(r.pid, r.created), undefined, `fixture subprocess ${r.pid} is swept`);
+    }
     rmDir(dir);
   }
 });
@@ -301,7 +314,7 @@ test('LIVE: with the helper, a bare node --test of a failing, spawning file leav
     const swept = sweep([left.detached, left.cmd, left.ping]);
     assert.ok(swept.killed.length >= 1, 'the control\'s orphan is killed, verified by pid + CreationDate');
     assert.equal(swept.skipped.length, 0, 'nothing of ours changed identity');
-    await until('control swept', () => !rowOf(bare.pids.detached, bare.pids.bornMs), 20_000);
+    assert.ok(rowOf(bare.pids.detached, bare.pids.detachedBornMs) === undefined, 'control detached node is gone after the sweep');
   } finally {
     sweep(leftovers);
     rmDir(dir);
