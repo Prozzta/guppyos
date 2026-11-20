@@ -177,6 +177,8 @@ interface TrackedJob {
   /** The pending confirm after an exit notice, and when the first notice of this burst came. */
   confirm: unknown;
   noticeAt: number | null;
+  /** The helper said the job is EMPTY (msg 4): the list runs at once, and a later notice changes nothing. A list that keeps the job clears it. */
+  empty: boolean;
 }
 
 /** The jobs Guppy made for heavy calls: created before the call, changed live, let go when done. */
@@ -235,7 +237,7 @@ export class HeavyJobs {
     // Not created: the join line still makes the job with these limits itself (the options hold);
     // only a later live change cannot reach it.
     if (r?.ok === true) {
-      this.jobs.set(id, { id, agentId, startMs: start, idleScans: 0, started: false, callId, exited: false, confirm: null, noticeAt: null });
+      this.jobs.set(id, { id, agentId, startMs: start, idleScans: 0, started: false, callId, exited: false, confirm: null, noticeAt: null, empty: false });
       this.arm();
       if (callId) this.tell(agentId, callId, id, 'held');
     }
@@ -296,6 +298,8 @@ export class HeavyJobs {
     if (!j || j.exited) return;
     j.started = true;
     if (j.noticeAt === null) j.noticeAt = this.now();
+    if (j.empty) return;
+    if (e.msg === 4) { this.cancelConfirm(j); j.empty = true; void this.confirmExit(j); return; }
     this.cancelConfirm(j);
     const st = this.d.setTimeout ?? ((fn: () => void, ms: number) => { const t = setTimeout(fn, ms); t.unref?.(); return t; });
     j.confirm = st(() => { j.confirm = null; void this.confirmExit(j); }, HEAVY_JOB_EXIT_CONFIRM_MS);
@@ -314,6 +318,7 @@ export class HeavyJobs {
     const r = await this.req(`list ${j.id}`);
     if (!r || r.ok !== true || !Array.isArray(r.rows)) return;
     if (j.confirm !== null || this.jobs.get(j.id) !== j) return;   // a newer notice re-armed it, or it was let go
+    if (this.own(j, r.rows as HeavyJobRow[]).length) j.empty = false;
     if (this.own(j, r.rows as HeavyJobRow[]).length) { j.noticeAt = null; return; }
     this.exited(j, 'notice');
   }
