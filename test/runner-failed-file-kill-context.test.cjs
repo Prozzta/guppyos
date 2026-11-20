@@ -1,4 +1,8 @@
 'use strict';
+require('./tools/own-job.cjs');
+// MUTANT-JOURNAL-GATE (god 5cc045/ed8032): this suite loads run-tests.cjs, a file a census mutates in
+// place; refuse a tree a killed census left mutated, before anything is read.
+require('./tools/mutant-runner-helper.cjs').gate(__filename);
 /**
  * RUNNER-FAILED-FILE-KILL-CONTEXT-POST108: a failed test file is shown with the kills other files made
  * while it ran, and the start and kill records of a failed run are kept.
