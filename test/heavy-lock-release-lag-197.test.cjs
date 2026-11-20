@@ -526,6 +526,19 @@ test('LIVE: a job whose other members are killed long after the shell is freed w
   assertFreed(r, 'late kills');
 });
 
+// FLAKE-LAG197-NOPORT-KILL-FREE-108 MUST 1: "not released before the job exits" is judged against the job's
+// real end. A kill that has not been SENT yet cannot have ended its process, so a release before the last
+// kill was sent frees a slot while a member still runs. (A synthetic record: the shape of a product that
+// frees the slot at the shell's death while the 7 s-late members run: 100 ms after the shell, 6800 ms early.)
+test('the freed check fails a release while the kill of a member has not even been sent', () => {
+  const T = 1_000_000;
+  const rec = (relAt, extra = {}) => ({ exitAt: T, jobEndAt: T + 6_900, relAt, lagMs: relAt - T, afterEndMs: relAt - (T + 6_900), reason: 'job-exit', shellPid: 1,
+    kills: [{ pid: 1, startedAt: T - 600, sentAt: T - 600, endedAt: T }, { pid: 2, startedAt: T - 600, sentAt: T + 6_400, endedAt: T + 6_900 }], ...extra });
+  assert.doesNotThrow(() => assertFreed(rec(T + 7_400), 'x'), 'a release 500 ms after the last member ended is fine');
+  assert.throws(() => assertFreed(rec(T + 100), 'x'), /NOT RELEASED BEFORE THE JOB EXITS.*pid 2/s, 'a release at the shell death, 6 s before the last kill was sent');
+  assert.throws(() => assertFreed(rec(T + 6_000), 'x'), /NOT RELEASED BEFORE THE JOB EXITS/, 'a release while the last kill is still unsent');
+});
+
 test('the killed check fails a shell that ran out on its own, and one nothing was killed in', () => {
   const kills = [{ pid: 1, startedAt: 1, endedAt: 2 }];
   assert.doesNotThrow(() => assertKilled({ code: KILLED_EXIT, signal: null, kills }, 'x'));
