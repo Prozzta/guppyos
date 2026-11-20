@@ -247,82 +247,6 @@ export function guardInputErrors(proc: pty.IPty, platform: NodeJS.Platform = pro
   return true;
 }
 
-/** Said once: guardLateReady met a node-pty it does not fit. */
-let lateReadyGuardMissingSaid = false;
-
-/**
- * PTY-LATE-READY-ENOENT. After an early close the data socket is still unconnected, and node-pty's
- * `_agent.kill()` has started the conout worker's 1 s flush timer, which TERMINATES the worker: the
- * only server of the pipe the socket would connect to. node-pty connects whenever the worker's READY
- * is handled, with no look at that. A READY handled after the terminate (the main thread was busy
- * for that second: both are then due in the same turn) connects to a pipe that no longer exists, and
- * the socket has no error listener yet (node-pty adds its own on 'ready_datapipe'), so the
- * 'connect ENOENT' is thrown outside any caller. And a worker terminated before the pipe came up,
- * READY or not, leaves a terminal that never reports its exit: node-pty reports it from the pipe's
- * close.
- *
- * So, for a terminal closed early with its connect still to come, the terminate is where the pipe's
- * fate is known. If the socket has not started its connect by then, it never will: a later READY
- * connects nothing, the socket is destroyed, and the exit node-pty would have reported from the
- * pipe's close is reported here, once. A socket that did start its connect is left to node-pty
- * (Windows completes a pipe connect inside the call, so that one reaches the still-listening worker).
- * No error is caught or handled anywhere: the connect that would fail is not made.
- *
- * PTY-LATE-READY-EXIT-107. "Left to node-pty" holds only once the socket's 'connect' event has come:
- * that event is where node-pty adds the 'close' listener that reports the exit. node-pty has a SECOND
- * 1 s timer, the agent's `_closeTimeout`, armed when the root process exits; its `_cleanUpProcess`
- * destroys the data socket. Under load the READY is handled about a second after the kill, in the
- * same turn as that timer: the socket is destroyed between its connect() and its 'connect' event, with
- * no error, 'connect' never comes, and the terminal never reports its exit (seen 1 to 2 runs in 144
- * under load). So a started connect is watched: a socket that closes before its 'connect' gets its
- * exit reported here. The two reports cannot both happen: the terminate reports only when no connect
- * was started, this one only after a connect was started, and each of them reports once.
- */
-function guardLateReady(t: WindowsTerminalInternals): void {
-  const sock = t._socket;
-  const conn = t._agent?._conoutSocketWorker;
-  const worker = conn?._worker;
-  if (!sock || !conn || !worker || typeof conn.connectSocket !== 'function' || typeof worker.terminate !== 'function'
-    || typeof sock.destroy !== 'function' || typeof sock.once !== 'function' || typeof t.emit !== 'function') {
-    // Another node-pty: the pin test fails. Here the terminal is left as it was before this guard.
-    if (!lateReadyGuardMissingSaid) {
-      lateReadyGuardMissingSaid = true;
-      console.warn('[pty] late-READY guard not installed: this node-pty lacks the conout internals it gates; an early-killed terminal may throw connect ENOENT or report no exit');
-    }
-    return;
-  }
-  const connect = conn.connectSocket.bind(conn);
-  const terminate = worker.terminate.bind(worker);
-  // Whether the connect was started is remembered here, not read from the socket: a pipe that
-  // connected, drained and closed has no handle again by the time its worker is terminated.
-  let connectStarted = false;
-  let pipeGone = false;
-  // The guard reports at most one exit: at the terminate only if no connect was started (latched by
-  // pipeGone), at the socket's close only if one was (a once listener, added with the first connect).
-  const reportExit = (): void => { t.emit!('exit', t._agent?.exitCode); };
-  conn.connectSocket = (socket: unknown): void => {
-    if (pipeGone) return;
-    if (!connectStarted) {
-      connectStarted = true;
-      // PTY-LATE-READY-EXIT-107: node-pty reports the exit from a 'close' listener it adds on
-      // 'connect'. A socket closed before that event (the agent's own close timer destroyed it) has
-      // no such listener, so its close is the exit, reported here.
-      let connected = false;
-      sock.once!('connect', () => { connected = true; });
-      sock.once!('close', () => { if (!connected) reportExit(); });
-    }
-    connect(socket);
-  };
-  worker.terminate = (): Promise<number> => {
-    if (!pipeGone && !connectStarted) {
-      pipeGone = true;
-      sock.destroy!();
-      reportExit();
-    }
-    return terminate();
-  };
-}
-
 /**
  * PTY-EARLY-KILL-LEAK (Creed, rc/1.1.76 gate, inspector on the hung process). node-pty's
  * WindowsTerminal DEFERS kill() until the terminal's first output (`_deferNoArgs`: queued until the
@@ -332,7 +256,7 @@ function guardLateReady(t: WindowsTerminalInternals): void {
  *
  * This arms ONE terminal: its kill(), while the terminal is not ready yet, runs exactly what the
  * deferred kill would have run (`_close()`, then `_agent.kill()`: ClosePseudoConsole, the console
- * process sweep, the conout worker dispose) at once, and drops the queued deferreds (writes and
+ * process close, the conout worker dispose) at once, and drops the queued deferreds (writes and
  * resizes for a terminal that is going away). Once ready, kill() is node-pty's own, unchanged. A
  * signal argument keeps node-pty's behaviour (it throws on Windows). Windows only; a terminal that
  * lacks these internals (another node-pty version) is left untouched, and the pin test fails.
@@ -345,6 +269,12 @@ function guardLateReady(t: WindowsTerminalInternals): void {
  * caller). So for a socket whose connect is still to come, the flag goes back to readable: the pipe
  * then connects, drains and closes like that of any terminal killed after its pipe came up, and
  * that close is what emits the terminal's exit.
+ *
+ * PTY-LATE-READY-ENOENT's guard (guardLateReady) is retired with PTY-CONHOST-ORPHAN option A: on the
+ * bundled OpenConsole (useConptyDll) the early close neither terminates the conout worker under a
+ * READY still to come nor loses the exit report (measured through PtyManager: READY 1.5 s late, a
+ * 1.3 s busy thread, `_cleanUpProcess` at READY: one exit, the worker ends, nothing thrown, 3 of 3
+ * runs); test/pty-late-ready-enoent.test.cjs pins that behaviour.
  */
 export function armEarlyKill(proc: pty.IPty, platform: NodeJS.Platform = process.platform): boolean {
   const t = proc as unknown as WindowsTerminalInternals & { kill: (signal?: string) => void };
@@ -363,11 +293,7 @@ export function armEarlyKill(proc: pty.IPty, platform: NodeJS.Platform = process
     t._close!();
     t._agent!.kill!();
     // PTY-EARLY-CLOSE-EOF: an unconnected socket must not reach connect() marked unreadable.
-    if (connectPending) {
-      sock.readable = true;
-      // PTY-LATE-READY-ENOENT: and it must not connect once its pipe's server has been terminated.
-      guardLateReady(t);
-    }
+    if (connectPending) sock.readable = true;
   };
   return true;
 }
@@ -395,34 +321,6 @@ export function rootState(proc: pty.IPty): 'running' | 'exited' | 'unknown' {
   const agent = (proc as unknown as { _agent?: { _useConpty?: unknown; _exitCode?: unknown; _$onProcessExit?: unknown } })._agent;
   if (!agent || agent._useConpty !== true || typeof agent._$onProcessExit !== 'function') return 'unknown';
   return agent._exitCode === undefined ? 'running' : 'exited';
-}
-
-/**
- * PTY-HOLD-NODEPTY-HANDOFF. node-pty's kill() of a ConPTY terminal does not end with the call: it
- * forks a helper that lists the console processes OF THE ROOT'S PID, and when the list arrives it
- * calls process.kill on each entry. That runs after kill() returned (a process start later, 5 s at
- * node-pty's own bound), and on a root that is already dead it names a pid that is the root's only
- * while something reserves it. This watches the one kill() about to be made: started() gives the
- * promise of that list when the kill asked for it, null when it did not (no ConPTY sweep, another
- * node-pty, or a kill node-pty deferred because the terminal was not ready and not armed).
- *
- * The caller chains on it AFTER kill() returned. node-pty chained its kills on the same promise
- * inside kill(), and reactions of one promise run in the order they were added, so the caller's
- * runs when the kills are done: tied to the sweep itself, no delay involved.
- */
-export function watchKillSweep(proc: pty.IPty): { started: () => Promise<unknown> | null } {
-  const agent = (proc as unknown as { _agent?: { _getConsoleProcessList?: unknown } })._agent;
-  const list = agent?._getConsoleProcessList;
-  let sweep: Promise<unknown> | null = null;
-  let watching = true;
-  if (agent && typeof list === 'function') {
-    agent._getConsoleProcessList = function consoleProcessList(this: unknown, ...a: unknown[]): unknown {
-      const p: unknown = (list as (...x: unknown[]) => unknown).apply(this, a);
-      if (watching && p instanceof Promise) sweep = p;
-      return p;
-    };
-  }
-  return { started: () => { watching = false; return sweep; } };
 }
 
 /**
@@ -815,17 +713,11 @@ export class PtyManager {
   private closePty(s: PtySession): void {
     if (s.ptyClosed) return;
     s.ptyClosed = true;
-    const sweep = watchKillSweep(s.proc);
     try { s.proc.kill(); } catch { /* already gone */ }
-    // node-pty's own kill names the root by pid once more, later (watchKillSweep). That sweep is
-    // one more user of the hold, until it has ended: the pid stays the root's for as long.
-    // What is left: a terminal with no hold at all (no handoff, and its root died before the open
-    // by pid, or no addon) has nothing to keep, and its sweep names a pid nobody reserves.
-    const pending = sweep.started();
-    if (!pending) return;
-    s.holdUsers = (s.holdUsers ?? 0) + 1;
-    const done = (): void => this.dropHold(s);
-    pending.then(done, done);
+    // PTY-HOLD-NODEPTY-HANDOFF's sweep watch is retired with PTY-CONHOST-ORPHAN option A: on the
+    // bundled OpenConsole node-pty's kill ends the root by handle and lists no console processes,
+    // so nothing names the root's pid after this close (measured: 0 lists, 0 by-pid kills in 7
+    // scenarios; test/pty-kill-pid-identity.test.cjs pins it).
   }
 
   /** Register the natural-exit teardown callback. Invoked from inside node-pty's

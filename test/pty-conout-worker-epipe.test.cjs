@@ -8,7 +8,7 @@ require('./tools/own-job.cjs');
  * it reads the console's output pipe and, when the data socket connects to the worker's own pipe,
  * pipes what it has to it (`conoutSocket.pipe(workerSocket)`). In node-pty 1.1.0 neither socket has
  * an 'error' listener. A data socket destroyed between its connect() and its 'connect' event
- * (node-pty's `_cleanUpProcess` 1 s after the root's exit; guardLateReady) is accepted by the worker
+ * (node-pty's `_cleanUpProcess` 1 s after the root's exit) is accepted by the worker
  * and written to, with the reader gone: EPIPE, uncaught in the worker. Node ends the worker and
  * emits the error on the Worker object of the main thread; node-pty has no listener there, so Node
  * throws it there.

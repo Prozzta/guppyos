@@ -21,19 +21,11 @@ require('./tools/own-job.cjs');
  * loads), which puts it after the terminate every time; one test uses no delay and blocks the main
  * thread instead. Real ConPTYs through PtyManager.spawn (which arms every terminal).
  *
- * Named mutants, each must fail this file:
- *   L1 no guard at all (the code before this card)
- *   L2 the late READY still connects (connectSocket is not gated on the terminate)
- *   L3 the exit is not reported at the terminate
- *   L4 the terminate ends the terminal even when its socket did start a connect (two exits)
- *   L5 the worker's real terminate() is not called
- *   L6 the guard is installed for a socket that was already connected at the kill
- *   L7 the terminate is not latched (a second terminate reports a second exit)
- *   L8 the socket that will never connect is not destroyed
- *   L9 the exit reported at the terminate does not carry the agent's exit code
- *   L10 a started connect is not remembered (the terminate ends a terminal whose pipe came up)
- *   A7 (Jim) the exit code is read when the guard is installed, not at the terminate
- *   W1 the missing-guard line is said for every terminal; W2 it is never said
+ * PTY-CONHOST-ORPHAN-OWNER-DEATH (option A) retires the guard (guardLateReady) and its mutants
+ * L1-L10, A7, W1-W2 and X1-X5: every PTY runs on the bundled OpenConsole (useConptyDll), where the
+ * early close neither terminates the conout worker under a READY still to come nor loses the exit
+ * report. The scenarios below now pin that behaviour with no guard; with useConptyDll off (the inbox
+ * conhost) the late READY throws connect ENOENT and reports no exit, and they fail.
  *
  * PTY-LATE-READY-EXIT-107 (found by TEST-TEMP-LEAK-UNDER-LOAD: 1 to 2 runs in 144 under load timed
  * out in "READY handled inside the flush second" with no terminal exit). node-pty's agent has a
@@ -42,12 +34,7 @@ require('./tools/own-job.cjs');
  * socket's 'connect' event. Under load the READY is handled about a second after the kill, in the
  * turn that timer is due: the socket is destroyed between connect() and 'connect', no error, no
  * 'connect', no listener, no exit. Lever: `_cleanUpProcess()` is called in the turn the READY is
- * handled, which is that order every time. Mutants, each must fail this file:
- *   X1 a started connect is not watched (the code before this card)
- *   X2 the close reports an exit even after 'connect' came (two exits, with node-pty's own)
- *   X3 the close is watched with on, not once (a second close reports a second exit)
- *   X4 the early close's exit does not carry the agent's exit code
- *   X5 the socket is watched from the kill, not from its connect (the terminate's destroy reports twice)
+ * handled, which is that order every time.
  *
  * A worker this file leaks would keep the process alive with every test passed; FILE_CAP_MS ends
  * it as a failure instead (Jim's A6/A8 hung the file).
@@ -57,7 +44,6 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { EventEmitter } = require('node:events');
 
 /** node-pty's FLUSH_DATA_INTERVAL: kill -> worker.terminate(). Pinned against its source below. */
 const FLUSH_MS = 1000;
@@ -117,11 +103,10 @@ if (process.platform !== 'win32') {
   process.env.HOME = JAIL; process.env.USERPROFILE = JAIL;
   assert.equal(os.homedir(), JAIL, 'home is redirected before any hive object is built');
   const loadTs = require('./load-ts.cjs');
-  const { armEarlyKill, PtyManager } = loadTs('src/main/pty.ts');
+  const { PtyManager } = loadTs('src/main/pty.ts');
   const { holdRoot, rootHandoff } = loadTs('src/main/procIdentity.ts');
   const { awaitHeldExit } = require('./tools/await-exit.cjs');
   const NODE_PTY = path.dirname(require.resolve('node-pty/package.json'));
-  const { WindowsTerminal } = require(path.join(NODE_PTY, 'lib', 'windowsTerminal.js'));
   const ROOT = path.join(JAIL, 'root.js');
   fs.writeFileSync(ROOT, 'setInterval(() => {}, 1000);\n');
 
@@ -192,21 +177,15 @@ if (process.platform !== 'win32') {
     assert.match(term, /_this\._socket\.on\('ready_datapipe', function \(\) \{[\s\S]*?_this\._socket\.on\('close', function \(\) \{\s*_this\.emit\('exit', _this\._agent\.exitCode\);/, 'the exit is reported by a close listener added on ready_datapipe');
   });
 
-  test('READY handled after the worker was terminated: nothing connects, nothing is thrown, the terminal exits once', async () => {
+  test('READY handled after the flush second: nothing is thrown, the worker ends, the terminal exits once', async () => {
     const s = await spawnSilent(LATE_READY_MS);
-    assert.equal(typeof s.proc._agent._conoutSocketWorker.connectSocket, 'function', 'node-pty still has connectSocket');
-    assert.equal(typeof s.worker.terminate, 'function', 'node-pty still has the conout worker');
     s.proc.kill();   // the armed early kill
     assert.equal(s.sock._handle, null, 'the lever holds: the kill ran before the connect');
-    await within(s.exited, 'the terminal exit (reported when its pipe\'s server is terminated)');
-    assert.deepEqual(s.seen.events, ['exit'], 'the exit comes at the terminate, before the late READY');
-    assert.equal(s.sock.destroyed, true, 'the socket that will never connect is destroyed');
-    await withinAll({ 'the late READY': s.readyHandled, 'the worker\'s end': s.workerEnded }, s, 'READY after the terminate');
+    await withinAll({ 'the late READY': s.readyHandled, 'the terminal exit': s.exited, 'the worker\'s end': s.workerEnded }, s, 'READY after the flush second');
     await sleep(200);   // a connect made here fails in a later turn
-    assert.equal(s.seen.connects, 0, 'the late READY connected to a pipe whose server was terminated');
+    assert.ok(s.seen.connects <= 1, `the late READY connects once at most (${s.state()})`);
     assert.deepEqual(thrown(), [], 'nothing thrown outside a caller (connect ENOENT)');
-    assert.equal(s.seen.exits, 1, 'exactly one exit');
-    assert.equal(s.sock._handle, null, 'the socket never got a handle');
+    assert.equal(s.seen.exits, 1, `exactly one exit (${s.state()})`);
   });
 
   test('READY handled inside the flush second: the pipe connects and node-pty reports the one exit', async () => {
@@ -221,20 +200,17 @@ if (process.platform !== 'win32') {
     assert.deepEqual(thrown(), [], 'nothing thrown outside a caller');
   });
 
-  test('PTY-LATE-READY-EXIT-107: the agent\'s close timer destroys the socket between connect() and \'connect\': the exit is still reported, once', async () => {
+  test('PTY-LATE-READY-EXIT-107: the agent\'s close timer runs in the turn the READY is handled: the exit is still reported, once', async () => {
     const s = await spawnSilent(EARLY_READY_MS);
     const codes = [];
     s.proc.onExit((e) => { codes.push(e.exitCode); });
     s.proc.kill();
     assert.equal(s.sock._handle, null, 'the lever holds: the kill ran before the connect');
-    let connectEvents = 0;
-    s.sock.on('connect', () => { connectEvents++; });
     // node-pty's _closeTimeout body, in the turn the READY is handled: after connect(), before 'connect'.
     s.readyHandled.then(() => { s.proc._agent._exitCode = 41; s.proc._agent._cleanUpProcess(); });
     await withinAll({ 'the terminal exit': s.exited, 'the worker\'s end': s.workerEnded }, s, 'socket destroyed before its connect event');
     await sleep(FLUSH_MS + 300);   // node-pty's own close timer, and anything a second report would ride on
     assert.equal(s.seen.connects, 1, 'the READY did start its connect');
-    assert.equal(connectEvents, 0, 'the lever holds: the socket was destroyed before its connect event');
     assert.equal(s.seen.exits, 1, `exactly one exit (${s.state()})`);
     assert.deepEqual(codes, [41], 'the exit carries the agent\'s exit code, read at the close');
     assert.deepEqual(thrown(), [], 'nothing thrown outside a caller');
@@ -254,116 +230,5 @@ if (process.platform !== 'win32') {
       assert.equal(s.seen.exits, 1, `terminal ${i}: exactly one exit (${s.seen.events})`);
       assert.deepEqual(thrown(), [], `terminal ${i}: nothing thrown outside a caller`);
     }
-  });
-
-  /** A WindowsTerminal from the REAL prototype with a recording agent, socket and conout connection. */
-  function terminal({ handle }) {
-    const rec = { connects: 0, terminates: 0, destroys: 0, exits: [] };
-    const t = Object.create(WindowsTerminal.prototype);
-    t._isReady = false;
-    t._deferreds = [];
-    // A real emitter: the guard watches the socket's 'connect' and 'close'. destroy() closes it, as net does.
-    const sock = new EventEmitter();
-    let closed = false;
-    sock.close = () => { if (!closed) { closed = true; sock.emit('close'); } };
-    Object.assign(sock, { readable: true, _handle: handle, destroy: () => { rec.destroys++; sock.close(); } });
-    t._socket = sock;
-    const worker = { terminate: () => { rec.terminates++; return Promise.resolve(0); } };
-    const conn = { connectSocket: () => { rec.connects++; }, _worker: worker };
-    // No exit code yet: node-pty's agent learns it from the exit callback, which can come after the kill.
-    t._agent = { kill: () => { t._socket.readable = false; }, exitCode: undefined, _conoutSocketWorker: conn };
-    t.emit = (name, ...a) => { if (name === 'exit') rec.exits.push(a[0]); };
-    return { t, rec, conn, worker, own: { connectSocket: conn.connectSocket, terminate: worker.terminate } };
-  }
-
-  test('the guard, step by step, on the real WindowsTerminal prototype', async () => {
-    // Terminate first, READY late.
-    const late = terminal({ handle: null });
-    assert.equal(armEarlyKill(late.t, 'win32'), true);
-    late.t.kill();
-    assert.deepEqual(late.rec, { connects: 0, terminates: 0, destroys: 0, exits: [] }, 'the kill alone ends nothing');
-    late.t._agent.exitCode = 7;   // between the kill and the terminate: the code is read AT the terminate (A7)
-    assert.equal(await late.worker.terminate(), 0, 'the terminate\'s own result is passed on');
-    assert.deepEqual(late.rec, { connects: 0, terminates: 1, destroys: 1, exits: [7] }, 'terminate: worker terminated, socket destroyed, exit reported with the agent\'s code');
-    late.conn.connectSocket(late.t._socket);
-    assert.equal(late.rec.connects, 0, 'a READY after the terminate connects nothing');
-    await late.worker.terminate();
-    assert.deepEqual(late.rec, { connects: 0, terminates: 2, destroys: 1, exits: [7] }, 'a second terminate reports no second exit');
-
-    // READY first: the connect goes through, and the terminate then ends nothing.
-    const early = terminal({ handle: null });
-    armEarlyKill(early.t, 'win32');
-    early.t.kill();
-    early.conn.connectSocket(early.t._socket);
-    assert.equal(early.rec.connects, 1, 'a READY before the terminate connects');
-    // The socket's handle is null again once a connected pipe has drained and closed: that is not 'never connected'.
-    await early.worker.terminate();
-    assert.deepEqual(early.rec, { connects: 1, terminates: 1, destroys: 0, exits: [] }, 'a socket that started its connect is left to node-pty');
-
-    // ...and when that socket connects and later closes, the exit is node-pty's to report, not the guard's.
-    early.t._socket.emit('connect');
-    early.t._socket.close();
-    assert.deepEqual(early.rec.exits, [], 'a close after the connect event reports nothing here');
-
-    // PTY-LATE-READY-EXIT-107. READY first, then the socket is closed BEFORE its connect event (the
-    // agent's close timer): the guard reports the exit, with the code as it is at the close.
-    const cut = terminal({ handle: null });
-    armEarlyKill(cut.t, 'win32');
-    cut.t.kill();
-    cut.t._socket.close();   // closed with no connect started: not this path's to report
-    assert.deepEqual(cut.rec.exits, [], 'a socket watched only from its connect');
-    const cut2 = terminal({ handle: null });
-    armEarlyKill(cut2.t, 'win32');
-    cut2.t.kill();
-    cut2.conn.connectSocket(cut2.t._socket);
-    cut2.t._agent.exitCode = 9;
-    cut2.t._socket.close();
-    assert.deepEqual(cut2.rec, { connects: 1, terminates: 0, destroys: 0, exits: [9] }, 'closed before its connect event: the exit is reported here');
-    // The kill's terminate racing that close, either order: still one exit.
-    await cut2.worker.terminate();
-    cut2.t._socket.emit('close');
-    assert.deepEqual(cut2.rec, { connects: 1, terminates: 1, destroys: 0, exits: [9] }, 'close, then terminate: no second exit');
-    const race = terminal({ handle: null });
-    armEarlyKill(race.t, 'win32');
-    race.t.kill();
-    race.conn.connectSocket(race.t._socket);
-    await race.worker.terminate();
-    assert.deepEqual(race.rec.exits, [], 'the terminate leaves a started connect alone');
-    race.t._socket.close();
-    await race.worker.terminate();
-    assert.deepEqual(race.rec, { connects: 1, terminates: 2, destroys: 0, exits: [undefined] }, 'terminate, then close: one exit');
-    // Terminate with no connect started: its own destroy closes the socket, and that close reports nothing more.
-    const gone = terminal({ handle: null });
-    armEarlyKill(gone.t, 'win32');
-    gone.t.kill();
-    gone.t._agent.exitCode = 3;
-    await gone.worker.terminate();
-    gone.conn.connectSocket(gone.t._socket);
-    gone.t._socket.emit('close');
-    assert.deepEqual(gone.rec, { connects: 0, terminates: 1, destroys: 1, exits: [3] }, 'the terminate\'s exit is the only one');
-
-    // Connected at the kill: nothing of the connection is touched.
-    const up = terminal({ handle: {} });
-    armEarlyKill(up.t, 'win32');
-    up.t.kill();
-    assert.equal(up.conn.connectSocket, up.own.connectSocket, 'connectSocket is node-pty\'s own');
-    assert.equal(up.worker.terminate, up.own.terminate, 'terminate is the worker\'s own');
-
-    // Another node-pty (no conout connection): the early kill still runs, nothing throws, and the
-    // missing guard is said once, however many terminals meet it.
-    const warns = [];
-    const ownWarn = console.warn;
-    console.warn = (...a) => { warns.push(a.join(' ')); };
-    try {
-      for (let i = 0; i < 2; i++) {
-        const bare = terminal({ handle: null });
-        delete bare.t._agent._conoutSocketWorker;
-        armEarlyKill(bare.t, 'win32');
-        bare.t.kill();
-        assert.equal(bare.t._socket.readable, true, 'PTY-EARLY-CLOSE-EOF still holds without it');
-      }
-    } finally { console.warn = ownWarn; }
-    assert.equal(warns.length, 1, `one line for a node-pty the guard does not fit (${JSON.stringify(warns)})`);
-    assert.match(warns[0], /^\[pty\] late-READY guard not installed/, 'and it names the guard');
   });
 }
