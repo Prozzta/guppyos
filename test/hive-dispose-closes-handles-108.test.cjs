@@ -432,7 +432,8 @@ async function passRig(t, payload) {
   const timers = [];
   const cold = new HiveManager(() => home, () => true, { setTimeout: (fn, ms) => { timers.push(ms); return null; } });
   const undo = [];
-  t.after(async () => { for (const u of undo) u(); cold.dispose(); await cold.drainReads(); });
+  // newest first: two holds on one fs call unwind to the real one
+  t.after(async () => { for (const u of undo.reverse()) u(); cold.dispose(); await cold.drainReads(); });
   const outbox = path.resolve(path.join(cold.agentDir('god-1'), 'outbox'));
   fs.mkdirSync(path.join(outbox, '.sent'), { recursive: true });
   const file = path.join(outbox, 'note.json');
@@ -480,7 +481,34 @@ async function passRig(t, payload) {
     assert.deepEqual(openUnder(home), [], 'the pass that resumed after dispose() left a file open in the folder');
     assert.deepEqual(timers, [], 'and it armed no timer');
   };
-  return { home, cold, outbox, file, inboxOf, hold, disposeWhileHeld, quiet };
+  /** The subjects of every mail an agent holds (inbox/ and inbox/.done/). */
+  const subjects = (id) => [inboxOf(id), path.join(inboxOf(id), '.done')].flatMap((dir) => {
+    try { return fs.readdirSync(dir).filter((f) => f.endsWith('.json')).map((f) => String(JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')).subject)); } catch { return []; }
+  });
+  /**
+   * The end state when a call that COMMITS (the inbox write, the delivery record, the archive
+   * rename) lands after dispose(): the next start, a new manager over the same folder, leaves the
+   * mail delivered exactly once, tells the sender nothing, and has the file in outbox/.sent/.
+   */
+  const deliveredOnceAfterRestart = async () => {
+    const next = new HiveManager(() => home, () => true, { setTimeout: () => null });
+    try { await next.routeOnce([outbox]); } finally { await shutDown(next); }
+    assert.equal(subjects('andy-1').filter((s) => s.includes(MAIL.subject)).length, 1, 'after the next start the mail is in the inbox exactly once');
+    assert.deepEqual(subjects('god-1').filter((s) => s.startsWith('[')), [], 'and the sender was sent no notice about a mail that was delivered once');
+    assert.equal(fs.existsSync(file), false, 'and the file has left outbox/');
+    assert.equal(fs.existsSync(path.join(outbox, '.sent', path.basename(file))), true, 'for outbox/.sent/, under its own name');
+  };
+  /**
+   * For a held rename of `target`: `match` picks it, and `started()` counts the checks of the
+   * sender's inbox made after the rename was asked for. The rename is held until dispose(), so
+   * each one is a notice to the sender that was started on a disposed manager.
+   */
+  const noticeAfter = (target) => {
+    let asked = false; let n = 0;
+    hold('stat', (p) => { if (asked && p === inboxOf('god-1')) n++; return false; }).arm();
+    return { match: (p) => { if (p === target) asked = true; return p === target; }, started: () => n };
+  };
+  return { home, cold, outbox, file, inboxOf, hold, disposeWhileHeld, quiet, deliveredOnceAfterRestart, noticeAfter };
 }
 const MAIL = { to: 'andy-1', act: 'inform', subject: 'Build is green', body: 'all 12 checks passed' };
 
@@ -514,6 +542,9 @@ test('a route pass held at an inbox write across dispose() does no delivery book
   const inbox = rig.inboxOf('andy-1') + path.sep;
   const r = await rig.disposeWhileHeld(rig.hold('writeFile', (p) => p.startsWith(inbox)), 'the route pass writing the mail into the inbox');
   rig.quiet(r);
+  // The write was under way at dispose(), so the mail is in the inbox. Nothing after it was started.
+  assert.equal(fs.existsSync(rig.file), true, 'a disposed manager archived the file after its inbox write landed');
+  await rig.deliveredOnceAfterRestart();
   deletes(rig.home);
 });
 
@@ -533,8 +564,167 @@ test('a route pass held at the archive rename of a delivered file across dispose
 
 test('a route pass held at the bad- rename of a rejected file across dispose() sends no reject notice and logs nothing', async (t) => {
   const rig = await passRig(t, { ...MAIL, act: 'shout' });   // parses, but no such act: rejected as unroutable
-  const r = await rig.disposeWhileHeld(rig.hold('rename', (p) => p === rig.file), 'the route pass moving the rejected file aside');
+  const notice = rig.noticeAfter(rig.file);
+  const r = await rig.disposeWhileHeld(rig.hold('rename', notice.match), 'the route pass moving the rejected file aside');
+  assert.equal(notice.started(), 0, 'a disposed manager started the reject notice (it checked the sender inbox) after dispose()');
   assert.deepEqual(r.after.inboxes, r.before.inboxes, 'a disposed manager delivered a reject notice into an inbox');
+  rig.quiet(r);
+  deletes(rig.home);
+});
+
+/**
+ * Jim's re-audit (a5bd243a): the awaits the cells above do not reach, and the same awaits when the
+ * held call SUCCEEDS. Each cell below is the only one that fails when its own stop is missing.
+ */
+test('a route pass held at its read of the delivery record across dispose() starts no delivery when the read returns', async (t) => {
+  const rig = await passRig(t, MAIL);
+  const r = await rig.disposeWhileHeld(rig.hold('readFile', (p) => path.basename(p) === 'outbox-dedup.jsonl'), 'the route pass reading its delivery record');
+  assert.deepEqual(r.after.inboxes, r.before.inboxes, 'a disposed manager started an inbox write after dispose()');
+  assert.equal(fs.existsSync(rig.file), true, 'the mail is still in outbox/, to be delivered on the next start');
+  rig.quiet(r);
+  deletes(rig.home);
+});
+
+test('a route pass held at its read of the OLD delivery record across dispose() does not reject the mail when the next read is refused', async (t) => {
+  const rig = await passRig(t, MAIL);
+  // The old-format record is read first. The read after it is refused by the disposed manager, and
+  // that refusal reaches the place that turns any routing error into a rejected file.
+  const r = await rig.disposeWhileHeld(rig.hold('readFile', (p) => path.basename(p) === 'outbox-dedup.json'), 'the route pass reading the old delivery record');
+  assert.equal(fs.existsSync(path.join(rig.outbox, '.sent', 'bad-note.json')), false, 'a valid mail was rejected (archived as bad-) because a disposed manager refused a read');
+  assert.equal(fs.existsSync(rig.file), true, 'the mail is still in outbox/');
+  assert.deepEqual(r.after.inboxes, r.before.inboxes, 'a disposed manager delivered a notice into an inbox');
+  rig.quiet(r);
+  deletes(rig.home);
+});
+
+test('a route pass whose read of an UNROUTABLE outbox file was open at dispose() does not move the file aside', async (t) => {
+  const rig = await passRig(t, { ...MAIL, act: 'shout' });
+  const r = await rig.disposeWhileHeld(rig.hold('readFile', (p) => p === rig.file), 'the route pass reading the unroutable outbox file');
+  assert.equal(fs.existsSync(path.join(rig.outbox, '.sent', 'bad-note.json')), false, 'a disposed manager moved the file to bad- (its sender is never told)');
+  assert.equal(fs.existsSync(rig.file), true, 'the file is still in outbox/, to be rejected with its notice on the next start');
+  assert.deepEqual(r.after.inboxes, r.before.inboxes, 'a disposed manager delivered a reject notice into an inbox');
+  rig.quiet(r);
+  deletes(rig.home);
+});
+
+test('a route pass whose read of an AGED outbox file was open at dispose() logs nothing when the read FAILS', async (t) => {
+  const rig = await passRig(t, MAIL);
+  const aged = new Date(Date.now() - 5000);
+  fs.utimesSync(rig.file, aged, aged);
+  assert.ok(Date.now() - fs.statSync(rig.file).mtimeMs >= 4000, 'the file is well past the 1 s fresh-write grace');
+  const r = await rig.disposeWhileHeld(rig.hold('readFile', (p) => p === rig.file, 'EBUSY'), 'the route pass reading the locked outbox file');
+  assert.equal(fs.existsSync(rig.file), true, 'the mail is still in outbox/');
+  rig.quiet(r);
+  deletes(rig.home);
+});
+
+test('a route pass held at its check that the inbox exists across dispose() starts no delivery when the check returns', async (t) => {
+  const rig = await passRig(t, MAIL);
+  const inbox = rig.inboxOf('andy-1');
+  // The pass also stats this inbox at its start, to load the ledger. The check held here is the
+  // delivery's own, which comes after the delivery record was read. This watcher holds nothing.
+  let recordRead = false;
+  rig.hold('readFile', (p) => { if (path.basename(p) === 'outbox-dedup.jsonl') recordRead = true; return false; }).arm();
+  const r = await rig.disposeWhileHeld(rig.hold('stat', (p) => recordRead && p === inbox), 'the route pass checking that the inbox exists');
+  assert.deepEqual(r.after.inboxes, r.before.inboxes, 'a disposed manager started an inbox write after dispose()');
+  assert.equal(fs.existsSync(rig.file), true, 'the mail is still in outbox/, to be delivered on the next start');
+  rig.quiet(r);
+  deletes(rig.home);
+});
+
+test('a route pass held at its delivery-record append across dispose() stops when the append LANDS, and the next start delivers nothing twice', async (t) => {
+  const rig = await passRig(t, MAIL);
+  const r = await rig.disposeWhileHeld(rig.hold('appendFile', (p) => path.basename(p) === 'outbox-dedup.jsonl'), 'the route pass appending its delivery record');
+  assert.equal(fs.existsSync(rig.file), true, 'a disposed manager archived the file after its delivery record landed');
+  rig.quiet(r);
+  // The record names this very mail. The next start must not take the file for a repeat of it.
+  await rig.deliveredOnceAfterRestart();
+  deletes(rig.home);
+});
+
+test('a route pass held at an owed archive rename across dispose() logs nothing when the rename LANDS, and the next start delivers nothing twice', async (t) => {
+  const rig = await passRig(t, MAIL);
+  const lock = rig.hold('rename', (p) => p === rig.file, 'EBUSY');
+  lock.g.release(); lock.arm();
+  await rig.cold.routeOnce([rig.outbox]);
+  assert.equal(fs.existsSync(rig.file), true, 'control: the delivered file is still in outbox/, its archive owed');
+  const r = await rig.disposeWhileHeld(rig.hold('rename', (p) => p === rig.file), 'the route pass archiving the delivered file');
+  assert.equal(fs.existsSync(path.join(rig.outbox, '.sent', 'note.json')), true, 'control: the rename that was under way landed');
+  rig.quiet(r);
+  await rig.deliveredOnceAfterRestart();
+  deletes(rig.home);
+});
+
+/** A live pass delivers the mail, then the same text arrives again under another file name. */
+async function repeatRig(t) {
+  const rig = await passRig(t, MAIL);
+  await rig.cold.routeOnce([rig.outbox]);
+  assert.equal(fs.existsSync(path.join(rig.outbox, '.sent', 'note.json')), true, 'control: the first copy was delivered and archived');
+  const again = path.join(rig.outbox, 'again.json');
+  fs.writeFileSync(again, JSON.stringify(MAIL));
+  return { rig, again };
+}
+
+test('a route pass held at the rename of an exact repeat across dispose() sends no notice and logs nothing when the rename lands', async (t) => {
+  const { rig, again } = await repeatRig(t);
+  const notice = rig.noticeAfter(again);
+  const r = await rig.disposeWhileHeld(rig.hold('rename', notice.match), 'the route pass moving the repeat aside');
+  assert.equal(notice.started(), 0, 'a disposed manager started the duplicate notice (it checked the sender inbox) after dispose()');
+  assert.deepEqual(r.after.inboxes, r.before.inboxes, 'a disposed manager delivered a duplicate notice into an inbox');
+  rig.quiet(r);
+  deletes(rig.home);
+});
+
+test('a route pass held at the rename of an exact repeat across dispose() sends no notice and logs nothing when the rename FAILS', async (t) => {
+  const { rig, again } = await repeatRig(t);
+  const r = await rig.disposeWhileHeld(rig.hold('rename', (p) => p === again, 'EBUSY'), 'the route pass moving the repeat aside');
+  assert.deepEqual(r.after.inboxes, r.before.inboxes, 'a disposed manager delivered a duplicate notice into an inbox');
+  rig.quiet(r);
+  deletes(rig.home);
+});
+
+test('a route pass held at its read of the delivery record across dispose() does not move an exact repeat aside when the read returns', async (t) => {
+  const rig = await passRig(t, MAIL);
+  // Another manager over the same folder delivers the first copy and writes the record.
+  const first = new HiveManager(() => rig.home, () => true, { setTimeout: () => null });
+  try { await first.routeOnce([rig.outbox]); } finally { await shutDown(first); }
+  assert.equal(fs.existsSync(path.join(rig.outbox, '.sent', 'note.json')), true, 'control: the first copy was delivered and archived');
+  const again = path.join(rig.outbox, 'again.json');
+  fs.writeFileSync(again, JSON.stringify(MAIL));
+  const r = await rig.disposeWhileHeld(rig.hold('readFile', (p) => path.basename(p) === 'outbox-dedup.jsonl'), 'the route pass reading its delivery record');
+  assert.equal(fs.existsSync(again), true, 'a disposed manager started a rename after dispose(): the repeat left outbox/ and its sender is never told');
+  assert.deepEqual(r.after.inboxes, r.before.inboxes, 'a disposed manager delivered into an inbox');
+  rig.quiet(r);
+  deletes(rig.home);
+});
+
+/** The end-of-pass rewrite of the delivery record runs when the old-format record is still there. */
+async function compactRig(t) {
+  const rig = await passRig(t, MAIL);
+  const legacy = path.join(rig.home, 'hive', 'outbox-dedup.json');
+  fs.writeFileSync(legacy, JSON.stringify({ entries: [] }));
+  const isRewrite = (p) => path.dirname(p) === path.join(rig.home, 'hive') && path.basename(p).startsWith('outbox-dedup.jsonl');
+  return { rig, legacy, isRewrite };
+}
+
+test('a route pass held at the rewrite of its delivery record across dispose() does not go on to remove the old record', async (t) => {
+  const { rig, legacy, isRewrite } = await compactRig(t);
+  const r = await rig.disposeWhileHeld(rig.hold('writeFile', isRewrite), 'the route pass rewriting its delivery record');
+  assert.equal(fs.existsSync(legacy), true, 'a disposed manager removed the old record after dispose()');
+  rig.quiet(r);
+  deletes(rig.home);
+});
+
+test('a route pass held at the rewrite of its delivery record across dispose() logs nothing when the rewrite FAILS', async (t) => {
+  const { rig, isRewrite } = await compactRig(t);
+  const r = await rig.disposeWhileHeld(rig.hold('writeFile', isRewrite, 'EBUSY'), 'the route pass rewriting its delivery record');
+  rig.quiet(r);
+  deletes(rig.home);
+});
+
+test('a route pass held at the removal of the old delivery record across dispose() logs nothing when the removal lands', async (t) => {
+  const { rig, legacy } = await compactRig(t);
+  const r = await rig.disposeWhileHeld(rig.hold('rm', (p) => p === legacy), 'the route pass removing the old delivery record');
   rig.quiet(r);
   deletes(rig.home);
 });
