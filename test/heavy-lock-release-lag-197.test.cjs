@@ -388,6 +388,22 @@ K.droppedNotice = async (C) => {
 };
 test('recur: an exit notice that landed while the list was out is judged when that list keeps the job', async () => { await K.droppedNotice(C); });
 
+// A notice dropped under the mark while the list was out, then that list FAILS: the list said
+// nothing, so the dropped notice must still be judged (a confirm), not left to the idle scans.
+K.failedDropped = async (C) => {
+  const r = await heldListRig(C);
+  r.emit({ event: 'exit', job: r.id, msg: 4, pid: 0 });
+  r.emit({ event: 'exit', job: r.id, msg: 7, pid: 9 });   // lands while the list is out
+  const [answer] = r.pending.splice(0);
+  answer(null);   // the list failed
+  await r.clock.tick(0);
+  assert.equal(exits(r.told).length, 0, 'control: a failed list says nothing, the job is not ended');
+  await r.clock.tick(C.HEAVY_JOB_EXIT_CONFIRM_MS);
+  await r.answerEmpty();
+  assert.equal(exits(r.told).length, 1, 'A NOTICE DROPPED WHILE THE LIST WAS OUT IS CHECKED AFTER THAT LIST FAILED (not left to the idle scans)');
+};
+test('recur: an exit notice that landed while the list was out is judged when that list fails', async () => { await K.failedDropped(C); });
+
 // ─── LIVE: the real helper, real jobs, the real lock ────────────────────────────────────────
 
 const CSC = path.join(process.env.WINDIR || 'C:\\Windows', 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe');
