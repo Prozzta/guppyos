@@ -116,7 +116,8 @@ window.__harnessRun = async () => {
       // The floor takes a pane's size from a ResizeObserver and places its fit on its next tick, so
       // neither is there at a fixed time after the box changed: a hidden window can deliver the
       // observer late, and the pane before this one was then measured in this one's place. Wait for
-      // the floor itself: its canvas has the pane's size, and it has drawn a frame since.
+      // the floor itself: its canvas has the pane's size, and it has drawn a frame since. The canvas
+      // size tells this pane from the one before only because each pane differs from the last in size.
       const sized = () => !!app && app.canvas.width === Math.round(aspect.w * app.renderer.resolution) && app.canvas.height === Math.round(aspect.h * app.renderer.resolution);
       for (let i = 0; i < 400 && !sized(); i++) await wait(50);
       if (!sized()) throw new Error(`${aspect.name}: the floor did not take the pane's size (canvas ${app?.canvas.width}x${app?.canvas.height}, pane ${aspect.w}x${aspect.h})`);
