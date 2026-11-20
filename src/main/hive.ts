@@ -4076,6 +4076,9 @@ export class HiveManager {
 
   /** Re-read a partial outbox file even when its writer emits no second watch hint. */
   private scheduleRouteOnceAfter(outbox: string, delayMs: number): void {
+    // HIVE-DISPOSE-INFLIGHT-REARM: a pass whose read was open at dispose() ends here when the file
+    // is half-written; it arms no retry timer on a disposed manager.
+    if (this.readsRefused) return;
     const generation = this.routerGeneration;
     this.routerRuntime.setTimeout(() => {
       if (generation !== this.routerGeneration || !this.routerTimer) return;

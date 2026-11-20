@@ -328,3 +328,41 @@ test('routeOnce() on a disposed manager runs no pass: neither one asked after di
   await assert.rejects(cold.__revalidateAuthoritiesForTests(), /fallback is not armed/, 'and the fallback timer is off');
   deletes(home);
 });
+
+test('a route pass whose read of a half-written outbox file was open at dispose() arms no retry timer when it finishes', async (t) => {
+  const { home, hive } = await floor();
+  await shutDown(hive);
+  const timers = [];
+  const runtime = { setTimeout: (fn, ms) => { timers.push(ms); return null; } };
+  const real = fs.promises.readFile;
+  let g = gate(); g.release();
+  let held = null;
+  fs.promises.readFile = function gatedOutboxRead(p, ...rest) {
+    if (held === null || path.resolve(String(p)) !== held) return real.call(fs.promises, p, ...rest);
+    return g.through(() => real.call(fs.promises, p, ...rest));
+  };
+  const live = new HiveManager(() => home, () => true, runtime);
+  const cold = new HiveManager(() => home, () => true, runtime);
+  t.after(async () => { g.release(); fs.promises.readFile = real; for (const m of [live, cold]) { m.dispose(); await m.drainReads(); } });
+  const outbox = path.resolve(path.join(live.agentDir('god-1'), 'outbox'));
+  fs.mkdirSync(outbox, { recursive: true });
+  held = path.join(outbox, 'half-written.json');
+  fs.writeFileSync(held, '{"to": "andy-1", "subj');   // a writer still streaming: not JSON yet
+
+  // Control: a live pass that reads the half-written file arms one retry timer.
+  await live.routeOnce([outbox]);
+  assert.equal(timers.length, 1, `control: a live pass arms a retry for the half-written file: ${JSON.stringify(timers)}`);
+  await shutDown(live);
+
+  timers.length = 0; g = gate();
+  const pass = cold.routeOnce([outbox]).then(() => null, (e) => e);
+  await reached(g, 'the route pass reading the half-written outbox file');
+  cold.stopLedgerGuard(); cold.dispose();
+  g.release();
+  await cold.drainReads();
+  await pass;
+  assert.deepEqual(timers, [], 'the pass that finished after dispose() armed a retry timer');
+  assert.deepEqual(openUnder(home), [], 'nothing is open in the folder');
+  await assert.rejects(cold.__revalidateAuthoritiesForTests(), /fallback is not armed/, 'and the fallback timer is off');
+  deletes(home);
+});
