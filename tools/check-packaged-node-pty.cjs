@@ -151,6 +151,10 @@ function inspect(dir) {
   const workerSha = sha(at('lib/worker/conoutSocketWorker.js'));
   add('lib/worker/conoutSocketWorker.js handles socket errors', workerSha === pins.WORKER_JS_QUIET_SHA256,
     workerSha === pins.WORKER_JS_PRISTINE_SHA256 ? 'it is the UNPATCHED 1.1.0 worker: a destroyed data socket throws EPIPE in the main process' : `sha256 ${short(workerSha)} is not the pinned worker`);
+
+  // PTY-CONHOST-LEAK-NATIVE: the close on exit adds no import; the patched module exports a name.
+  add('conpty.node closes the pseudoconsole of an ended terminal', binarySha !== null && pins.hasCloseMarker(binary),
+    binarySha === null ? `${BUILT} is missing` : `it does not carry ${pins.CLOSE_MARKER}: every ended terminal would keep its console host until the app quits`);
   return { resources, checks };
 }
 
