@@ -140,7 +140,7 @@ test('SWEEP: dead pids\' guppy-pstemp folders are removed, live ones and other n
 
 /** Andy's probe: a test process (TEMP = jail) runs PowerShell through psEnv(..., { temp }), kills it the
  *  moment a policy file shows in the temp it gave it, and is then itself killed (no exit handler). */
-function killedOnFirstFile(jail, shared, temp, open = (pid) => procHold().procOpen(pid)) {
+function killedOnFirstFile(jail, shared, temp, open = (pid) => procHold().procOpen(pid), signal) {
   const inner = path.join(tmpRoot, 'killed-inner.cjs');
   fs.writeFileSync(inner, `
 const fs = require('fs'), { spawn } = require('child_process');
@@ -167,9 +167,15 @@ setTimeout(() => afterExit(() => process.stdout.write('timer\\n')), 30000);
     // If the hold cannot be opened, end it and report once it has gone: left alone it never ends.
     let hold;
     try { hold = open(p.pid); } catch (e) { p.once('close', () => reject(e)); p.kill('SIGKILL'); return; }
+    // (b) The same when the cell is ended while the process runs (its timeout aborts its signal).
+    let ended = null;
+    const onEnd = () => { ended = { why: signal.reason }; p.kill('SIGKILL'); };
+    if (signal) { if (signal.aborted) onEnd(); else signal.addEventListener('abort', onEnd, { once: true }); }
     let out = '';
     p.stdout.on('data', (d) => { out += d; if (/killed|timer/.test(out)) p.kill('SIGKILL'); });
     p.on('close', () => {
+      if (signal) signal.removeEventListener('abort', onEnd);
+      if (ended) { procHold().procClose(hold); reject(ended.why); return; }
       // The exit itself, read through the hold (no timer): 'close' comes after the process has ended.
       try { assert.equal(procHold().procAlive(hold), false, 'PS POLICY: the killed test process has exited (read through its hold)'); } catch (e) { procHold().procClose(hold); reject(e); return; }
       resolve({ out, pid: p.pid, hold });
@@ -200,18 +206,18 @@ function whyKept(shared, left, pid) {
   return `kill(${pid}, 0) said ${alive}; direct rmSync: ${rm.join('; ') || 'nothing left to remove'}`;
 }
 
-test('KILLED: PowerShell killed on its first policy file, then its test process killed: the jail stays clean, the left folder is swept', { skip: !WIN && 'Windows PowerShell only', timeout: 120_000 }, async () => {
+test('KILLED: PowerShell killed on its first policy file, then its test process killed: the jail stays clean, the left folder is swept', { skip: !WIN && 'Windows PowerShell only', timeout: 120_000 }, async (t) => {
   const jail = path.join(tmpRoot, 'jail-killed');
   const shared = path.join(tmpRoot, 'shared-killed');
   fs.mkdirSync(jail);
   fs.mkdirSync(shared);
   // The control (the mutant "psEnv leaves the temp alone"): the cut-short PowerShell leaves its policy file in the jail.
-  const control = await killedOnFirstFile(jail, shared, false);
+  const control = await killedOnFirstFile(jail, shared, false, undefined, t.signal);
   procHold().procClose(control.hold);
   assert.match(control.out, /^killed __PSScriptPolicyTest_/, 'PS POLICY control: the PowerShell was killed on its first policy file');
   assert.ok(fs.readdirSync(jail).some((f) => POLICY.test(f)), `PS POLICY control: without psEnv the killed PowerShell leaves its policy file in the jail (${fs.readdirSync(jail)})`);
   for (const f of fs.readdirSync(jail)) fs.rmSync(path.join(jail, f), { recursive: true, force: true });
-  const fixed = await killedOnFirstFile(jail, shared, true);
+  const fixed = await killedOnFirstFile(jail, shared, true, undefined, t.signal);
   try {
     assert.match(fixed.out, /^killed __PSScriptPolicyTest_/, 'PS POLICY: the PowerShell was killed on its first policy file');
     assert.deepEqual(fs.readdirSync(jail), [], 'PS POLICY: with psEnv the killed PowerShell leaves nothing in the jail');
