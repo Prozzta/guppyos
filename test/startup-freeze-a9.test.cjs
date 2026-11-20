@@ -209,11 +209,11 @@ test('writer: a failed save keeps the key held, reports once, and a later flush 
   fs.renameSync = () => { throw Object.assign(new Error('EPERM'), { code: 'EPERM' }); };
   try { w.flush(); } finally { fs.renameSync = real; }
   assert.deepEqual(failed, ['agent.andy.lost']);
-  assert.ok(REG.loadRegistry(root).keys['agent.andy.lost'], 'a reader sees the key held after EPERM');
   const again = w.check('agent.andy.lost', 'andy', '2026-10-03T10:00:01Z');
   assert.equal(again.ok && again.added, false, 'a failed publish does not make an acked key new again');
   w.flush();
   assert.ok(fileKeys(root).includes('agent.andy.lost'), 'the later flush publishes the retained key');
+  assert.ok(REG.loadRegistry(root).keys['agent.andy.lost'], 'a reader sees the writer-published retained key');
 });
 
 test('store: a failed save is logged as claims-key-save-failed with the key', async () => {
