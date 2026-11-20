@@ -85,7 +85,24 @@ test('killsDuring: a later file under the same pid ends the window of the one be
   assert.deepEqual(runner.killsDuring(starts, kills, ['failed.test.cjs']).map((f) => f.kills.map((k) => k.file)), [['killer.test.cjs']]);
 });
 
-test('the preload writes the time into a file\'s exit row', { timeout: 60_000 }, () => {
+test('killsDuring: on Windows a failed file named in another case than its start row still has its window', () => {
+  // Jim (mutants on 80601784, NIT 2): node's report and the preload can spell one file's path in two
+  // cases on Windows (drive letter, folder). Elsewhere a path in another case is another file.
+  const started = path.resolve('Some-Dir', 'Failed.test.cjs');
+  const reported = started.toLowerCase();
+  assert.notEqual(reported, started, 'CONTROL: the two spellings differ');
+  const starts = [row({ pid: 11, bornMs: 1000, file: started }), row({ pid: 11, exited: true, t: 9000 })].join('\n');
+  const kills = row({ pid: 21, file: 'killer.test.cjs', via: 'taskkill', targets: [7], t: 1792 });
+  const got = runner.killsDuring(starts, kills, [reported]);
+  if (process.platform === 'win32') {
+    assert.deepEqual(got, [{ pid: 11, file: started, ranMs: 8000, kills: [{ via: 'taskkill', file: 'killer.test.cjs', pid: 21, targets: [7], afterMs: 792 }] }],
+      'THE WINDOW IS FOUND UNDER THE OTHER SPELLING, and the file is named as its start row has it');
+  } else {
+    assert.deepEqual(got, [], 'a path in another case is another file here');
+  }
+});
+
+test('the preload writes the time into a file\'s exit row',{ timeout: 60_000 }, () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runner-killctx-'));
   try {
     const out = path.join(dir, 'starts.jsonl');
@@ -178,6 +195,38 @@ test('a run with two failed lanes keeps both lanes\' records in the one file, ea
     assert.deepEqual(rows.map((x) => x.lane || x.via || (x.exited ? 'exit' : 'start')), ['main', 'start', 'exit', 'taskkill', 'render', 'start', 'exit', 'process.kill'], 'BOTH LANES ARE IN IT, each under its own lane row');
     assert.deepEqual(logs.filter((l) => l.includes('records')), ['[test-runner] start and kill records of the failed run written to failures.json.records.jsonl']);
     assert.match(logs[logs.length - 1], /^\[test-runner\] totals: /, 'CONTROL: the totals line is still the last line');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a failed perf lane keeps its records in the one file, under its own lane row', () => {
+  // Jim (mutants on 80601784, SHOULD 1): the perf lane runs runNodeTest too, after the parallel run.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runner-killctx-'));
+  try {
+    fs.writeFileSync(path.join(dir, 'plain.test.cjs'), '// an ordinary file\n');
+    fs.mkdirSync(path.join(dir, 'perf'));
+    fs.writeFileSync(path.join(dir, 'perf', 'slow.perf.cjs'), '// a wall-clock file\n');
+    const slow = path.join(dir, 'perf', 'slow.perf.cjs');
+    const files = {
+      'ev.jsonl.perf': row({ failure: { file: slow, name: 'a wall-clock gate' } }),
+      'ev.jsonl.perf.starts': [row({ pid: 51, bornMs: 5000, file: slow }), row({ pid: 51, exited: true, t: 6000 })].join('\n'),
+      'ev.jsonl.perf.starts.kills': row({ pid: 61, file: 'perf-killer.test.cjs', via: 'taskkill', targets: [9], t: 5250 }),
+    };
+    const e = []; const logs = []; const written = []; const lanes = [];
+    const code = runner.run({ testDir: dir, cwd: dir, perfDir: path.join(dir, 'perf'),
+      spawn: (args) => { const last = path.basename(args[args.length - 1]); lanes.push(last); return { status: last === 'slow.perf.cjs' ? 1 : 0 }; }, timeoutMs: 5, isTTY: false,
+      eventsFile: 'ev.jsonl', readFile: (f) => files[f] || '', removeFile: () => {}, failureFile: () => 'failures.json', writeFailureFile: (p, text) => written.push({ p, text }),
+      watchdog: () => ({ stop: () => {} }), backstop: () => ({ opt: '', env: {}, stop: () => {} }), log: (l) => logs.push(l), err: (l) => e.push(l),
+      cores: 4, processEnv: {}, jobRate: () => 5000, mutantJournal: () => ({ files: [], live: false, owner: null }) });
+    const errs = e.join('\n');
+    assert.equal(code, 1, `CONTROL: the run fails:\n${errs}\n${logs.join('\n')}`);
+    assert.deepEqual(lanes, ['plain.test.cjs', 'slow.perf.cjs'], 'CONTROL: the parallel run passed, then the perf lane ran its one file');
+    assert.match(errs, /^\[test-runner\] the perf lane FAILED /m, `CONTROL: only the perf lane failed:\n${errs}`);
+    assert.match(errs, /^\[test-runner\] perf lane KILLS WHILE A FAILED FILE RAN \(pid 51, 1000 ms\): 1 by other files: .*slow\.perf\.cjs$/m, `THE PERF LANE'S FAILED FILE HAS ITS CONTEXT, under the lane's label:\n${errs}`);
+    const kept = written.filter((w) => w.p === 'failures.json.records.jsonl');
+    assert.equal(kept.length, 1, `THE RECORDS ARE WRITTEN ONCE, to one file: ${written.map((w) => w.p).join(', ')}`);
+    const rows = kept[0].text.trim().split('\n').map((l) => JSON.parse(l));
+    assert.deepEqual(rows.map((x) => x.lane || x.via || (x.exited ? 'exit' : 'start')), ['perf', 'start', 'exit', 'taskkill'], 'THE PERF LANE\'S RECORDS ARE IN IT under a { lane: "perf" } row; the lanes that passed have none');
+    assert.deepEqual(rows[0], { lane: 'perf' });
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 

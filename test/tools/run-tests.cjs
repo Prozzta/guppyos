@@ -740,8 +740,10 @@ function totals(code, counts, laneState, log, failures = [], {
   // file beside the failing-test list (same name + '.records.jsonl'): a { lane } row, then that
   // lane's start/exit rows, then its kill rows. Like the list it is a kept artifact of a red run in
   // the temp folder and is never removed by the runner; the list's name is unique per run.
+  // No check of `code` here: runNodeTest hands records back only from a lane that failed, so a lane
+  // with records is itself the reason to keep them (as the failing-test list above is written).
   const keep = records.filter((r) => r && r.records && (String(r.records.starts || '').trim() || String(r.records.kills || '').trim()));
-  if (keep.length && code !== 0) {
+  if (keep.length) {
     const kept = `${output || failureFile()}.records.jsonl`;
     const text = keep.map((r) => [JSON.stringify({ lane: r.lane }), String(r.records.starts || '').trim(), String(r.records.kills || '').trim()].filter(Boolean).join('\n')).join('\n');
     try {
