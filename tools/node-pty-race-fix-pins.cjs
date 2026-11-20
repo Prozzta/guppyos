@@ -354,7 +354,7 @@ module.exports = {
   hasCloseMarker,
   // lib/windowsPtyAgent.js: from the same tarball, and after the handoff patch.
   AGENT_JS_PRISTINE_SHA256: '8636d16b38266112204061a22b135734177c242837982fd3a4055be726efa64a',
-  AGENT_JS_HANDOFF_SHA256: '3b77443093cc1e7bc5afb74f491c5b5a6477731e18fa1ebc21df8374cc9004b3',
+  AGENT_JS_HANDOFF_SHA256: '5e29f715839d25d7d20c540eebc497ca9b8b64d62b569a88bf0c3c27c503e045',
   // lib/utils.js (NODEPTY-PACKAGED-PROOF): from the same tarball, and after the loader patch that
   // stops Windows from falling back to node-pty's unpatched prebuilt binaries.
   UTILS_JS_PRISTINE_SHA256: 'f75ad341c13fbf1a9a6605d7ee42dff5bbc5d43b7b381e413fb97eb1b8300beb',
