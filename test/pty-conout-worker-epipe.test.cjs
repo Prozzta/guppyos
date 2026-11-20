@@ -268,7 +268,9 @@ if (process.platform !== 'win32') {
   /**
    * A real worker (`file`), with output already buffered, and a data socket destroyed in the turn
    * of its connect() and closed while the worker thread is stopped at the gate. `stallMs` keeps this
-   * thread off its loop after the destroy (the gate makes that harmless).
+   * thread off its loop after the destroy (the gate makes that harmless) and again after the gate
+   * opens. The second stall pins the wait for 'close': a gate opened before the close gives the
+   * worker that long against an open handle, and both stalled cells are red.
    * `mustEnd`: wait for the worker's end; otherwise watch it for STAYS_MS and, if
    * it lives, connect a second data socket and read later console output through it.
    * Nothing here listens for the worker's 'error': an error from it is thrown on this thread.
@@ -303,6 +305,7 @@ if (process.platform !== 'win32') {
       if (stallMs) stall(stallMs);
       await within(closed, 'the data socket\'s close');   // its handle is closed: a write to it now fails
       openTheGate(gate);   // only now does the worker accept it, and write
+      if (stallMs) stall(stallMs);   // the woken worker gets this long: harmless ONLY because the handle is closed
       if (mustEnd) {
         seen.exitCode = await within(ended, 'the worker\'s end (its write to the destroyed socket fails)');
         await sleep(50);  // an error event that follows the exit would land here
