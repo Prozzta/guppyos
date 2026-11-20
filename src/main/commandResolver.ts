@@ -10,13 +10,15 @@
  *   here from providerModels.ts VERBATIM: uncached, `where` / `$SHELL -lc command -v`, a string or
  *   null. providerModels re-exports it, so its adapters behave exactly as before.
  * - resolveCommandAsync(command): the app's resolver (agent spawn, the missing-CLI check, hidden
- *   claude, codex remote, the setup catalog). Spawn-grade: on Windows it takes the first
- *   PATHEXT-eligible `where` hit (never an extensionless npm sh-shim); on POSIX it asks the user's
+ *   claude, codex remote, the setup catalog). Spawn-grade: on Windows it searches PATH in process
+ *   (searchPathWin; no where.exe since FLAKE-RIG-NODE-LOOKUP-UNDER-LOAD-108) and takes the first
+ *   PATHEXT-eligible hit (never an extensionless npm sh-shim); on POSIX it asks the user's
  *   INTERACTIVE login shell (fenced, so rc-file chatter cannot poison it), because nvm/asdf/brew
  *   PATH edits live in .zshrc. CACHED, misses included:
  *     * a hit is re-validated with exists() on every use (uninstall/update -> re-probe);
  *     * a miss is trusted for MISS_TTL_MS (60 s), then re-checked;
- *     * a lookup killed by its time box is UNKNOWN (RESOLVER-TIMEOUT-MISS): retried once, never
+ *     * a lookup that got no answer (POSIX: killed by its time box; Windows: a PATH dir that
+ *       could not be listed) is UNKNOWN (RESOLVER-TIMEOUT-MISS): retried once, never
  *       cached, and never treated as "not installed" by a caller;
  *     * invalidateCommandCache(command?) drops one entry or all of them. The missing-CLI
  *       auto-install calls it when its installer exits, so the relaunch sees the new binary;
@@ -25,6 +27,8 @@
  */
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { readdir } from 'node:fs/promises';
+import { win32 } from 'node:path';
 
 // ── Deps (injectable for tests) ─────────────────────────────────────────────────────────
 
@@ -37,6 +41,10 @@ export interface ResolverDeps {
   env: NodeJS.ProcessEnv;
   exec: ResolverExec;
   exists: (p: string) => boolean;
+  /** FLAKE-RIG-NODE-LOOKUP-UNDER-LOAD-108: the names in one PATH directory, in directory order
+   *  (win32 lookup). It rejects with the fs error when the directory cannot be listed. Unset, the
+   *  real directory is read (nodeListDir). */
+  listDir?: (dir: string) => Promise<PathDirEntry[]>;
   /** RESOLVER-TIMEOUT-MISS: the time box of one `where` / login-shell lookup (default
    *  LOOKUP_TIMEOUT_MS). A seam for tests and fixtures; the app never sets it. */
   whereTimeoutMs?: number;
@@ -51,8 +59,75 @@ export function nodeResolverDeps(): ResolverDeps {
     platform: process.platform,
     env: process.env,
     exists: existsSync,
+    listDir: nodeListDir,
     exec: (file, args, opts, cb) => execFile(file, args, opts, (err, stdout) => cb(err, String(stdout ?? '')))
   };
+}
+
+/** One name in a PATH directory; `dir` is true for a sub-directory (never a command). */
+export interface PathDirEntry { name: string; dir: boolean }
+
+/** The real directory, async, in the order the file system lists it. */
+export async function nodeListDir(dir: string): Promise<PathDirEntry[]> {
+  return (await readdir(dir, { withFileTypes: true })).map((e) => ({ name: e.name, dir: e.isDirectory() }));
+}
+
+/** An environment variable by name. Windows names are case-insensitive (`Path`), and a copied
+ *  env object does not keep process.env's case-insensitive lookup. */
+function envVar(env: NodeJS.ProcessEnv, name: string): string | undefined {
+  if (env[name] !== undefined) return env[name];
+  const key = Object.keys(env).find((k) => k.toUpperCase() === name);
+  return key === undefined ? undefined : env[key];
+}
+
+/**
+ * FLAKE-RIG-NODE-LOOKUP-UNDER-LOAD-108 (win32): search PATH for `command` IN PROCESS, in the order
+ * where.exe lists its matches, and return the first one `accept` takes.
+ *
+ * This used to start where.exe inside a 3 s box. On a loaded machine the START of a new process
+ * can be starved for that long, so an installed CLI came back UNKNOWN. Reading the PATH
+ * directories needs no process and no box.
+ *
+ * where.exe's rules (measured, pinned in test/rig-node-lookup-inproc-108.test.cjs):
+ *  - PATH entries in order. An empty entry is nothing. A quoted entry is NOT searched (the quotes
+ *    are not stripped). Trailing spaces and a trailing backslash are dropped; `/`, `..` and a
+ *    relative entry are resolved (a relative one against the current dir).
+ *  - a missing dir and a FILE given as an entry are skipped;
+ *  - inside one dir the matches come in DIRECTORY order, not PATHEXT order: every name equal to
+ *    `command`, or to `command` + one PATHEXT extension, whatever its case. A sub-directory with
+ *    such a name is not a match.
+ * The one stated difference: where.exe searches the CURRENT DIR before PATH. This does not, so a
+ * CLI is never resolved from whatever dir the app happens to run in.
+ *
+ * `failed` is true when a PATH dir could not be listed for a reason other than "not there" /
+ * "not a directory": that dir might hold the command, so a search with no hit is then no answer.
+ */
+async function searchPathWin(d: ResolverDeps, command: string, pathExts: string[], accept: (p: string) => boolean): Promise<{ hit: string | null; failed: boolean }> {
+  const listDir = d.listDir ?? nodeListDir;
+  const wanted = new Set([command.toUpperCase(), ...pathExts.map((e) => command.toUpperCase() + e)]);
+  const seen = new Set<string>();
+  let failed = false;
+  for (const raw of (envVar(d.env, 'PATH') ?? '').split(';')) {
+    const entry = raw.replace(/ +$/, '');
+    if (!entry || /["<>|?*]/.test(entry)) continue;
+    const dir = win32.resolve(entry);
+    if (seen.has(dir.toUpperCase())) continue;
+    seen.add(dir.toUpperCase());
+    let names: PathDirEntry[];
+    try {
+      names = await listDir(dir);
+    } catch (e) {
+      const code = (e as { code?: unknown } | null)?.code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') failed = true;
+      continue;
+    }
+    for (const n of names) {
+      if (n.dir || !wanted.has(n.name.toUpperCase())) continue;
+      const p = dir.endsWith('\\') ? dir + n.name : `${dir}\\${n.name}`;
+      if (accept(p)) return { hit: p, failed };
+    }
+  }
+  return { hit: null, failed };
 }
 
 /** How long a tree kill may take before the time box gives up waiting for it. */
@@ -181,8 +256,8 @@ export interface ResolvedCommand {
   path: string;
   /** Whether an existing executable was actually located — what the missing-CLI path keys on. */
   found: boolean;
-  /** RESOLVER-TIMEOUT-MISS: the lookup gave NO ANSWER (killed by its time box, or any failure
-   *  other than `where` exit 1 / a shell that ran `which`: Andy C1) and no install-dir candidate
+  /** RESOLVER-TIMEOUT-MISS: the lookup gave NO ANSWER (POSIX: the shell was killed by its time box
+   *  or failed before it ran `which`; Windows: a PATH dir could not be listed: Andy C1) and no install-dir candidate
    *  matched, so nobody knows whether the CLI is installed. `found` is false, but this is NOT a
    *  miss: it is never cached, and no caller may act on it as "not installed". */
   unknown?: true;
@@ -197,24 +272,20 @@ export async function lookupCommandAsync(command: string, d: ResolverDeps = node
   // never reaches `which`/`where`; `found:false` makes the caller treat it as missing.
   if (!isSafeCommandName(command)) return { path: command, found: false };
   if (d.platform === 'win32') {
-    // `where` can return MULTIPLE matches in PATH order; the first is often an EXTENSIONLESS
-    // npm shim (bare `claude`, a POSIX sh script). Skip extensionless hits and take the first
-    // PATHEXT-eligible one (.CMD/.BAT/.EXE/…). No `shell:true`: `command` is proven
-    // metacharacter-free above, and running where.exe directly keeps cmd.exe out of the loop.
-    const r = await execP(d, 'where', [command], lookupTimeout(d), 64 * 1024);
-    if ('stdout' in r) {
-      const lines = r.stdout.trim().split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-      const pathExts = (d.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD')
-        .split(';').map((e) => e.trim().toUpperCase()).filter(Boolean);
-      const isExecutable = (p: string): boolean => {
-        const dot = p.lastIndexOf('.');
-        const sep = Math.max(p.lastIndexOf('\\'), p.lastIndexOf('/'));
-        if (dot <= sep) return false; // no extension on the basename
-        return pathExts.includes(p.slice(dot).toUpperCase());
-      };
-      const exe = lines.find((p) => isExecutable(p) && d.exists(p));
-      if (exe) return { path: exe, found: true };
-    }
+    // PATH can hold MULTIPLE matches; the first is often an EXTENSIONLESS npm shim (bare `claude`,
+    // a POSIX sh script). Skip extensionless hits and take the first PATHEXT-eligible one
+    // (.CMD/.BAT/.EXE/…) that exists. The search runs in process (searchPathWin): no where.exe,
+    // no shell, no time box.
+    const pathExts = (envVar(d.env, 'PATHEXT') ?? '.COM;.EXE;.BAT;.CMD')
+      .split(';').map((e) => e.trim().toUpperCase()).filter(Boolean);
+    const isExecutable = (p: string): boolean => {
+      const dot = p.lastIndexOf('.');
+      const sep = Math.max(p.lastIndexOf('\\'), p.lastIndexOf('/'));
+      if (dot <= sep) return false; // no extension on the basename
+      return pathExts.includes(p.slice(dot).toUpperCase());
+    };
+    const r = await searchPathWin(d, command, pathExts, (p) => isExecutable(p) && d.exists(p));
+    if (r.hit) return { path: r.hit, found: true };
     // Common Windows install locations (npm global = %APPDATA%\npm\<cmd>.cmd).
     const appData = d.env.APPDATA ?? '';
     const localAppData = d.env.LOCALAPPDATA ?? '';
@@ -227,11 +298,10 @@ export async function lookupCommandAsync(command: string, d: ResolverDeps = node
       `${home}\\.claude\\local\\${command}`
     ];
     for (const c of winCandidates) if (d.exists(c)) return { path: c, found: true };
-    // Andy C1: a MISS is only an ANSWER from `where` - it ran and listed nothing usable, or it
-    // exited 1 ("could not find"). Anything else (our box, where's own error exit 2, a spawn that
-    // failed with EAGAIN/ENOMEM, a synchronous EMFILE throw, a foreign signal) says nothing about
-    // whether the CLI is installed: UNKNOWN. Those are exactly a loaded machine's failures.
-    return whereAnswered(r) ? { path: command, found: false } : { path: command, found: false, unknown: true };
+    // Andy C1: a MISS is only an ANSWER - every PATH dir was listed (or is not there) and none
+    // holds a usable match. A dir that could not be listed (EACCES, EMFILE, EIO, …) might hold
+    // the CLI, so that says nothing about whether it is installed: UNKNOWN.
+    return r.failed ? { path: command, found: false, unknown: true } : { path: command, found: false };
   }
   // macOS / Linux — `which` against an interactive shell so we pick up nvm/asdf/brew paths.
   const { out: which } = await captureFenced(`which ${command}`, d);
@@ -251,12 +321,6 @@ export async function lookupCommandAsync(command: string, d: ResolverDeps = node
   // Andy C1: only a shell that RAN the lookup (both fences printed) answered; `which` then found
   // nothing. No fence (our box, a shell that could not start, one that died) is UNKNOWN.
   return which !== null ? { path: command, found: false } : { path: command, found: false, unknown: true };
-}
-
-/** Andy C1 (win32): did `where` ANSWER? It ran (stdout), or it exited 1 ("could not find") on
- *  its own. Our box, any other exit code, a spawn error and a thrown exec are not answers. */
-function whereAnswered(r: { stdout: string } | { err: ExecErr; out: string }): boolean {
-  return 'stdout' in r || (r.err.killed !== true && r.err.code === 1);
 }
 
 // ── The cache ────────────────────────────────────────────────────────────────────────────

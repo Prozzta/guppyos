@@ -31,10 +31,19 @@ const R = loadTs('src/main/commandResolver.ts');
 
 /** A fake exec. `where` / the shell: 'hang' (never answers: only the time box ends it), an Error
  *  (a real non-zero exit), or stdout text. taskkill always succeeds. */
-function deps(platform, behaviour, { onDisk = [], env = {}, whereTimeoutMs } = {}) {
+function deps(platform, behaviour, { onDisk = [], env = {}, whereTimeoutMs, dirs = {} } = {}) {
   const calls = [];
+  const listed = [];
   const d = {
     platform, env, exists: (p) => onDisk.includes(p),
+    // FLAKE-RIG-NODE-LOOKUP-UNDER-LOAD-108: the win32 lookup lists the PATH dirs itself. `dirs` maps a
+    // dir to its names, or to the Error its listing fails with; a dir not in the map is not there.
+    listDir: async (dir) => {
+      listed.push(dir);
+      const v = Object.prototype.hasOwnProperty.call(dirs, dir) ? dirs[dir] : fsErr('ENOENT');
+      if (!Array.isArray(v)) throw v;
+      return v.map((name) => ({ name, dir: false }));
+    },
     exec: (file, args, opts, cb) => {
       calls.push({ file, args, timeout: opts.timeout });
       if (file === 'taskkill') { setImmediate(() => cb(null, 'SUCCESS')); return { pid: 2 }; }
@@ -49,25 +58,37 @@ function deps(platform, behaviour, { onDisk = [], env = {}, whereTimeoutMs } = {
     }
   };
   if (whereTimeoutMs !== undefined) d.whereTimeoutMs = whereTimeoutMs;
-  return { d, calls };
+  return { d, calls, listed };
 }
+function fsErr(code) { return Object.assign(new Error(code), { code }); }
 
 // ─── lookupCommandAsync ───────────────────────────────────────────────────────────────
 
-test('win32: a `where` killed by its box, no candidate -> UNKNOWN (found:false, unknown:true)', async () => {
-  const { d, calls } = deps('win32', 'hang', { whereTimeoutMs: 5 });
+// FLAKE-RIG-NODE-LOOKUP-UNDER-LOAD-108: the win32 lookup no longer starts where.exe, so "killed by its
+// box" cannot happen there. The win32 cases below are the same outcomes (no answer -> UNKNOWN, an
+// answer with no hit -> a plain miss, no answer but a candidate -> found), restated on the one thing
+// that can now give no answer: a PATH dir that cannot be listed.
+test('win32: a PATH dir that cannot be listed, no candidate -> UNKNOWN (found:false, unknown:true)', async () => {
+  const { d, calls, listed } = deps('win32', 'hang', { whereTimeoutMs: 5, env: { PATH: 'C:\\locked' }, dirs: { 'C:\\locked': fsErr('EACCES') } });
   assert.deepEqual(await R.lookupCommandAsync('codex', d), { path: 'codex', found: false, unknown: true });
-  assert.deepEqual(calls.map((c) => c.file), ['where', 'taskkill'], 'the box fired and killed the tree');
+  assert.deepEqual(listed, ['C:\\locked']);
+  assert.deepEqual(calls.map((c) => c.file), [], 'no process is started, so there is no box and no tree to kill');
 });
 
-test('win32: a real `where` miss (exit 1) is still a plain miss, never unknown', async () => {
-  const { d } = deps('win32', Object.assign(new Error('exit 1'), { code: 1 }));
+test('win32: a real miss (every PATH dir listed, or not there) is still a plain miss, never unknown', async () => {
+  const { d, listed } = deps('win32', Object.assign(new Error('exit 1'), { code: 1 }), { env: { PATH: 'C:\\bin;C:\\gone;C:\\afile' }, dirs: { 'C:\\bin': ['other.exe'], 'C:\\afile': fsErr('ENOTDIR') } });
   assert.deepEqual(await R.lookupCommandAsync('codex', d), { path: 'codex', found: false });
+  assert.deepEqual(listed, ['C:\\bin', 'C:\\gone', 'C:\\afile'], 'all three were asked: a missing dir (ENOENT) and a file as an entry (ENOTDIR) are skipped');
 });
 
-test('win32: a timed-out `where` is rescued by an install-dir candidate (found, not unknown)', async () => {
-  const { d } = deps('win32', 'hang', { whereTimeoutMs: 5, onDisk: ['C:\\AppData\\npm\\codex.cmd'], env: { APPDATA: 'C:\\AppData' } });
+test('win32: a PATH dir that cannot be listed is rescued by an install-dir candidate (found, not unknown)', async () => {
+  const { d } = deps('win32', 'hang', { whereTimeoutMs: 5, onDisk: ['C:\\AppData\\npm\\codex.cmd'], env: { APPDATA: 'C:\\AppData', PATH: 'C:\\locked' }, dirs: { 'C:\\locked': fsErr('EACCES') } });
   assert.deepEqual(await R.lookupCommandAsync('codex', d), { path: 'C:\\AppData\\npm\\codex.cmd', found: true });
+});
+
+test('win32: a PATH dir that cannot be listed does not hide a hit in a later dir (found, not unknown)', async () => {
+  const { d } = deps('win32', 'hang', { onDisk: ['C:\\bin\\codex.cmd'], env: { PATH: 'C:\\locked;C:\\bin' }, dirs: { 'C:\\locked': fsErr('EACCES'), 'C:\\bin': ['codex.cmd'] } });
+  assert.deepEqual(await R.lookupCommandAsync('codex', d), { path: 'C:\\bin\\codex.cmd', found: true });
 });
 
 test('POSIX: a login shell killed by its box -> UNKNOWN; so is a shell that fails without printing its fence (Andy C1)', async () => {
@@ -81,9 +102,12 @@ test('POSIX: a login shell killed by its box -> UNKNOWN; so is a shell that fail
 test('whereTimeoutMs: the seam sets the box; unset, the box is LOOKUP_TIMEOUT_MS (3000)', async () => {
   assert.equal(R.LOOKUP_TIMEOUT_MS, 3000);
   const t0 = Date.now();
-  const { d } = deps('win32', 'hang', { whereTimeoutMs: 20 });
-  assert.equal((await R.lookupCommandAsync('codex', d)).unknown, true);
-  assert.ok(Date.now() - t0 < 2000, 'a 20 ms box fires long before the default 3 s');
+  // win32 (FLAKE-RIG-NODE-LOOKUP-UNDER-LOAD-108): the app lookup starts no process, so the box has
+  // nothing to time there. An exec that would hang is never called and the answer is a plain miss.
+  const { d, calls } = deps('win32', 'hang', { whereTimeoutMs: 20 });
+  assert.deepEqual(await R.lookupCommandAsync('codex', d), { path: 'codex', found: false });
+  assert.deepEqual(calls, [], 'no exec on win32');
+  assert.ok(Date.now() - t0 < 2000, 'and no wait for any box');
   const posix = deps('linux', 'hang', { env: { SHELL: '/bin/sh', HOME: '/h' } });
   const realSetTimeout = global.setTimeout;
   const seen = [];
@@ -140,13 +164,14 @@ test('resolver: concurrent callers of an unknown share the ONE lookup and its on
   assert.equal(seen.length, 2);
 });
 
-test('the app resolver end to end (win32): a hung `where` twice -> unknown, two where runs, nothing cached', async () => {
-  const { d, calls } = deps('win32', 'hang', { whereTimeoutMs: 5 });
+test('the app resolver end to end (win32): an unlistable PATH dir twice -> unknown, two searches, nothing cached', async () => {
+  const { d, calls, listed } = deps('win32', 'hang', { whereTimeoutMs: 5, env: { PATH: 'C:\\locked' }, dirs: { 'C:\\locked': fsErr('EACCES') } });
   const r = new R.CommandResolver({ deps: () => d });
   assert.deepEqual(await r.resolve('codex'), UNKNOWN('codex'));
-  assert.equal(calls.filter((c) => c.file === 'where').length, 2, 'the lookup and its one retry');
+  assert.equal(listed.length, 2, 'the lookup and its one retry');
   await r.resolve('codex');
-  assert.equal(calls.filter((c) => c.file === 'where').length, 4, 'nothing was cached');
+  assert.equal(listed.length, 4, 'nothing was cached');
+  assert.deepEqual(calls, [], 'and no process was started');
 });
 
 // ─── PtyManager.commandStatus ─────────────────────────────────────────────────────────
@@ -164,18 +189,23 @@ test('PtyManager.commandStatus: found / missing / unknown; commandPath stays nul
 
 // ─── Andy C1: only an ANSWER from where/the shell is a miss; every other failure is UNKNOWN ──
 
-test('C1 win32: where exit 2, a spawn error (EAGAIN/ENOMEM), a thrown exec (EMFILE) and a foreign signal are UNKNOWN; only exit 1 and a listing are misses', async () => {
+// FLAKE-RIG-NODE-LOOKUP-UNDER-LOAD-108: the same rule on the in-process search. where.exe's failures
+// (exit 2, a spawn EAGAIN/ENOMEM, a thrown exec, a foreign signal) went with where.exe; what can fail
+// now is the listing of a PATH dir, and only "not there" / "not a directory" is an answer.
+test('C1 win32: a PATH dir whose listing fails (EACCES, EPERM, EMFILE, EIO, EBUSY, no code, a sync throw) is UNKNOWN; only ENOENT, ENOTDIR and a listing are misses', async () => {
   const U = { path: 'codex', found: false, unknown: true };
   const M = { path: 'codex', found: false };
-  const exit = (code) => Object.assign(new Error(`exit ${code}`), { code });
-  assert.deepEqual(await R.lookupCommandAsync('codex', deps('win32', exit(2)).d), U, 'where exit 2 (its own error)');
-  assert.deepEqual(await R.lookupCommandAsync('codex', deps('win32', Object.assign(new Error('spawn EAGAIN'), { code: 'EAGAIN' })).d), U, 'spawn EAGAIN');
-  assert.deepEqual(await R.lookupCommandAsync('codex', deps('win32', Object.assign(new Error('spawn ENOMEM'), { code: 'ENOMEM' })).d), U, 'spawn ENOMEM');
-  assert.deepEqual(await R.lookupCommandAsync('codex', deps('win32', Object.assign(new Error('killed'), { code: null, signal: 'SIGKILL' })).d), U, 'a signal that was not our box');
-  const throwing = { platform: 'win32', env: {}, exists: () => false, exec: () => { throw Object.assign(new Error('EMFILE'), { code: 'EMFILE' }); } };
-  assert.deepEqual(await R.lookupCommandAsync('codex', throwing), U, 'a synchronous EMFILE throw from exec');
-  assert.deepEqual(await R.lookupCommandAsync('codex', deps('win32', exit(1)).d), M, 'where exit 1 IS the miss');
-  assert.deepEqual(await R.lookupCommandAsync('codex', deps('win32', 'C:\\x\\codex\r\n', { onDisk: ['C:\\x\\codex'] }).d), M, 'where listed only a non-executable hit: an answer, a miss');
+  const env = { PATH: 'C:\\x' };
+  const withDir = (v, extra = {}) => deps('win32', 'hang', { env, dirs: { 'C:\\x': v }, ...extra }).d;
+  for (const code of ['EACCES', 'EPERM', 'EMFILE', 'EIO', 'EBUSY']) assert.deepEqual(await R.lookupCommandAsync('codex', withDir(fsErr(code))), U, `a listing that fails with ${code}`);
+  assert.deepEqual(await R.lookupCommandAsync('codex', withDir(new Error('no code'))), U, 'a listing that fails with no code');
+  const throwing = { platform: 'win32', env, exists: () => false, listDir: () => { throw fsErr('EMFILE'); }, exec: () => { throw fsErr('EMFILE'); } };
+  assert.deepEqual(await R.lookupCommandAsync('codex', throwing), U, 'a synchronous EMFILE throw from the listing');
+  assert.deepEqual(await R.lookupCommandAsync('codex', withDir(fsErr('ENOENT'))), M, 'a PATH dir that is not there is skipped: a miss');
+  assert.deepEqual(await R.lookupCommandAsync('codex', withDir(fsErr('ENOTDIR'))), M, 'a file given as a PATH entry is skipped: a miss');
+  assert.deepEqual(await R.lookupCommandAsync('codex', withDir(['codex'], { onDisk: ['C:\\x\\codex'] })), M, 'the dir holds only a non-executable hit: an answer, a miss');
+  const noPath = { platform: 'win32', env: {}, exists: () => false, listDir: async () => [], exec: () => { throw fsErr('EMFILE'); } };
+  assert.deepEqual(await R.lookupCommandAsync('codex', noPath), M, 'an exec that would throw is never called: no PATH is a plain miss');
 });
 
 test('C1 POSIX: a shell that could not start or died (no fence) is UNKNOWN; a shell that ran `which` and found nothing is a miss', async () => {
@@ -184,12 +214,12 @@ test('C1 POSIX: a shell that could not start or died (no fence) is UNKNOWN; a sh
   assert.deepEqual(await R.lookupCommandAsync('claude', deps('darwin', '__MD_SHELL_FENCE____MD_SHELL_FENCE__', { env }).d), { path: 'claude', found: false });
 });
 
-test('C1 resolver: an EAGAIN lookup is unknown, retried once, and NOT cached (the next resolve looks again)', async () => {
-  const { d, calls } = deps('win32', Object.assign(new Error('spawn EAGAIN'), { code: 'EAGAIN' }));
+test('C1 resolver: an EMFILE listing is unknown, retried once, and NOT cached (the next resolve looks again)', async () => {
+  const { d, listed } = deps('win32', 'hang', { env: { PATH: 'C:\\x' }, dirs: { 'C:\\x': fsErr('EMFILE') } });
   const r = new R.CommandResolver({ deps: () => d });
   assert.deepEqual(await r.resolve('codex'), UNKNOWN('codex'));
   await r.resolve('codex');
-  assert.equal(calls.filter((c) => c.file === 'where').length, 4, 'two lookups per resolve, nothing cached');
+  assert.equal(listed.length, 4, 'two lookups per resolve, nothing cached');
 });
 
 // ─── The decisions (cliLookupPolicy.ts), as behaviour (Andy R2) ─────────────────────────

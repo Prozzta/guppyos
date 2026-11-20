@@ -419,15 +419,23 @@ function fakeDeps(platform, out, onDisk, env = {}) {
   };
 }
 
-test('lookupCommandAsync (win32): async `where`, no shell, first PATHEXT hit (never the extensionless sh-shim)', async () => {
-  const { calls, d } = fakeDeps('win32', () => 'C:\\npm\\claude\r\nC:\\npm\\claude.cmd\r\n', ['C:\\npm\\claude', 'C:\\npm\\claude.cmd'], { PATHEXT: '.COM;.EXE;.BAT;.CMD' });
+// FLAKE-RIG-NODE-LOOKUP-UNDER-LOAD-108: the win32 lookup searches PATH in process. The old assert on
+// the one `where` call ([['where', ['claude'], 0, true, undefined]]) is now "no call at all"; the
+// tree-safe time box that call proved is still pinned on execP itself, further down.
+test('lookupCommandAsync (win32): PATH searched in process, no child, first PATHEXT hit (never the extensionless sh-shim)', async () => {
+  const names = (...n) => n.map((name) => ({ name, dir: false }));
+  // The fake `where` would answer with a DIFFERENT file that exists: a lookup that still asked it would return that.
+  const { calls, d } = fakeDeps('win32', () => 'C:\\wrong\\claude.exe\r\n', ['C:\\npm\\claude', 'C:\\npm\\claude.cmd', 'C:\\wrong\\claude.exe'], { PATH: 'C:\\npm', PATHEXT: '.COM;.EXE;.BAT;.CMD' });
+  d.listDir = async (dir) => (dir === 'C:\\npm' ? names('claude', 'claude.cmd') : []);
   assert.deepEqual(await R.lookupCommandAsync('claude', d), { path: 'C:\\npm\\claude.cmd', found: true });
-  assert.deepEqual(calls.map((c) => [c.file, c.args, c.opts.timeout, c.opts.windowsHide, c.opts.shell]), [['where', ['claude'], 0, true, undefined]],
-    'win32: execFile timeout 0 - execP runs the 3 s time box itself and kills the TREE on expiry');
-  const miss = fakeDeps('win32', () => Object.assign(new Error('exit 1'), { code: 1 }), ['C:\\AppData\\npm\\codex.cmd'], { APPDATA: 'C:\\AppData' });
+  assert.deepEqual(calls, [], 'win32: no where.exe and no other child');
+  const miss = fakeDeps('win32', () => Object.assign(new Error('exit 1'), { code: 1 }), ['C:\\AppData\\npm\\codex.cmd'], { APPDATA: 'C:\\AppData', PATH: 'C:\\npm' });
+  miss.d.listDir = async () => names('claude.cmd');
   assert.deepEqual(await R.lookupCommandAsync('codex', miss.d), { path: 'C:\\AppData\\npm\\codex.cmd', found: true }, 'the install-dir candidates still apply');
-  const none = fakeDeps('win32', () => '', [], {});
+  const none = fakeDeps('win32', () => '', [], { PATH: 'C:\\npm' });
+  none.d.listDir = async () => names('claude.cmd');
   assert.deepEqual(await R.lookupCommandAsync('nope', none.d), { path: 'nope', found: false });
+  assert.deepEqual([...miss.calls, ...none.calls], []);
 });
 
 test('lookupCommandAsync (POSIX): the fenced interactive login shell, rc-file chatter ignored', async () => {
@@ -471,7 +479,10 @@ test('PtyManager.isCommandAvailable / commandPath go through the injectable asyn
   assert.deepEqual(asked, ['codex', 'agy', 'codex', 'agy']);
 });
 
-test('ONE exec primitive: a hung `where` in the app resolver gets the MODELS-173 tree-safe time box (async taskkill /T /F)', async () => {
+// FLAKE-RIG-NODE-LOOKUP-UNDER-LOAD-108: the app lookup on win32 starts no child any more, so the box
+// is pinned on the primitive itself (execP, still used by every caller that does start one), with
+// the same two call asserts. The app lookup given the same hung exec never calls it.
+test('ONE exec primitive: a hung child under execP gets the MODELS-173 tree-safe time box (async taskkill /T /F); the win32 app lookup starts none', async () => {
   const P = loadTs('src/main/providerModels.ts');
   assert.equal(P.TREE_KILL_TIMEOUT_MS, R.TREE_KILL_TIMEOUT_MS, 'providerModels re-exports the shared constant');
   const calls = [];
@@ -480,16 +491,16 @@ test('ONE exec primitive: a hung `where` in the app resolver gets the MODELS-173
     exec: (file, args, opts, cb) => {
       calls.push({ file, args, timeout: opts.timeout });
       if (file === 'taskkill') { setImmediate(() => cb(null, 'SUCCESS')); return { pid: 2 }; }
-      return { pid: 4242 }; // `where` hangs: never calls back
+      return { pid: 4242 }; // hangs: never calls back
     }
   };
-  const realSetTimeout = global.setTimeout;
-  global.setTimeout = (fn, ms, ...a) => realSetTimeout(fn, ms === 3000 ? 5 : ms, ...a); // shrink the 3 s box
-  let r;
-  try { r = await R.lookupCommandAsync('claude', d); } finally { global.setTimeout = realSetTimeout; }
-  assert.deepEqual(r, { path: 'claude', found: false, unknown: true }, 'a timed-out lookup is UNKNOWN, not a miss (RESOLVER-TIMEOUT-MISS)');
+  const r = await R.execP(d, 'where', ['claude'], 5, 64 * 1024);
+  assert.equal(r.err && r.err.killed, true, 'the box fired: a timeout');
   assert.deepEqual(calls[0], { file: 'where', args: ['claude'], timeout: 0 }, 'win32: execFile timeout 0, execP times the run');
   assert.deepEqual(calls[1], { file: 'taskkill', args: ['/PID', '4242', '/T', '/F'], timeout: R.TREE_KILL_TIMEOUT_MS });
+  calls.length = 0;
+  assert.deepEqual(await R.lookupCommandAsync('claude', d), { path: 'claude', found: false }, 'no PATH: a plain miss');
+  assert.deepEqual(calls, [], 'the app lookup never reached the hung exec');
 });
 
 // ─── Jim's audit CHANGE 2: a USER-initiated check never trusts a cached miss ──────────

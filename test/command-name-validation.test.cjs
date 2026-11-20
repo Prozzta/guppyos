@@ -119,7 +119,9 @@ test('the shared resolver validates before which/where', () => {
   assert.ok(src.includes(guard));
   assert.doesNotMatch(src, /shell: true/);
   const guardAt = src.indexOf(guard);
-  const whereAt = src.indexOf("execP(d, 'where', [command]");
+  // FLAKE-RIG-NODE-LOOKUP-UNDER-LOAD-108: win32 searches PATH in process; the guard must still come first.
+  const whereAt = src.indexOf('await searchPathWin(d, command, pathExts');
+  assert.doesNotMatch(src, /execP\(d, 'where', \[command\]/, 'the app lookup starts no where.exe');
   const whichAt = src.indexOf('captureFenced(`which ${command}`, d)'); // RESOLVER-TIMEOUT-MISS: the timeout-aware capture
   assert.ok(guardAt > 0 && whereAt > guardAt, 'the guard must precede `where`');
   assert.ok(whichAt > guardAt, 'the guard must precede the `which` interpolation');
