@@ -361,7 +361,10 @@ async function liveRelease(t, o) {
           };
           // One kill, from its start to the tool's exit. o.slowKill: the kill tool takes this long
           // per process, as taskkill does on a loaded machine.
-          const kill = () => { k.startedAt = Date.now(); if (o.slowKill) setTimeout(go, o.slowKill); else go(); };
+          // o.slowOthers: every process but the shell's takes this long, so the shell dies first and the rest of
+          // the job after it (taskkill on a loaded machine, one process slower than another).
+          const delay = o.slowOthers && pid !== sh.pid ? o.slowOthers : (o.slowKill || 0);
+          const kill = () => { k.startedAt = Date.now(); if (delay) setTimeout(go, delay); else go(); };
           kill();
         }
       });
@@ -373,7 +376,7 @@ async function liveRelease(t, o) {
   while (lock.snapshot().length && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
   const rel = rows.find((r) => r.kind === 'heavy-lock' && r.action === 'release');
   await killsDone;
-  return { lagMs: rel ? rel.ts - exitAt : null, runMs: exitAt - t0, heldMs: rel ? rel.heldMs : null, reason: rel ? rel.reason : null, rows, code: exit.code, signal: exit.signal, kills };
+  return { lagMs: rel ? rel.ts - exitAt : null, runMs: exitAt - t0, heldMs: rel ? rel.heldMs : null, reason: rel ? rel.reason : null, rows, code: exit.code, signal: exit.signal, kills, shellPid: sh.pid };
 }
 
 // What this process reads from a Git Bash shell that taskkill /F ended: exit code 1, no signal.
@@ -502,6 +505,16 @@ test('LIVE: a kill tool that is slow under load is not read as a job the kill di
   const firstEnd = Math.min(...r.kills.map((k) => k.endedAt));
   assert.ok(r.kills.every((k) => k.startedAt <= firstEnd), `THE KILLS RUN TOGETHER, not one after another: ${JSON.stringify(r.kills)}`);
   assertFreed(r, 'slow kill');
+});
+
+// FLAKE-LAG197-NOPORT-KILL-FREE-108: the kills start together, so the shell can die first and the rest of
+// the job after it. The 6 s window opened at the SHELL's exit, so a member killed later than that read as
+// "not freed" although the slot was freed right after the job's last process ended.
+test('LIVE: a job whose other members are killed long after the shell is freed within 2 s of the last one', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
+  const r = await liveRelease(t, { body: 'sleep 30', kill: 1_500, slowOthers: 7_000, exe: helper(t, noPortNoticesHelperSource()) });
+  t.diagnostic(`late kills: ran ${r.runMs} ms, held ${r.heldMs} ms, freed ${r.lagMs} ms after the shell exit; shell exit code ${r.code}, signal ${r.signal}, ${r.kills.length} killed`);
+  assertKilled(r, 'late kills');
+  assertFreed(r, 'late kills');
 });
 
 test('the killed check fails a shell that ran out on its own, and one nothing was killed in', () => {
