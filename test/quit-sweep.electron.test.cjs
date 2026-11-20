@@ -62,6 +62,7 @@ const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'quit-sweep-'));
 const pidFile = path.join(sandbox, 'pids.json');
 
 const own = require('./tools/own-procs.cjs');
+const { seenExit, exitNote, crashDumpNote, removeSandbox } = require('./tools/fixture-exit.cjs');
 /** TEST-GLOB-PID-RECYCLE: the recorded processes still running AS THEMSELVES (same pid, name and CreationDate,
  *  own-procs); a pid reused by another program is neither counted nor killed. */
 function stillRunning(rows) {
@@ -89,22 +90,29 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   child.stdout.on('data', (d) => { output += d; });
   child.stderr.on('data', (d) => { output += d; });
 
-  const exitCode = await new Promise((resolve) => {
-    const timeout = setTimeout(() => {
-      // Hung fixture: reap it (and anything it spawned) so the TEST never leaks.
-      try { own.killOwnTree(childRec); } catch { /* gone */ }
-      resolve('timeout');
-    }, 300_000); // a HANG guard (FLAKY-170: generous; a saturated machine stretches the fixture past a minute)
-    child.on('exit', (code) => { clearTimeout(timeout); resolve(code); });
-  });
+  // QUIT-SWEEP-ELECTRON-SILENT-EXIT: how the fixture ended (code, signal, ms) goes into every failure
+  // message below. A fail with no pid file and no output could not be told from a kill or a crash.
+  let timeout;
+  const seen = await Promise.race([
+    seenExit(child, childRec.bornMs),
+    new Promise((resolve) => {
+      timeout = setTimeout(() => {
+        // Hung fixture: reap it (and anything it spawned) so the TEST never leaks.
+        try { own.killOwnTree(childRec); } catch { /* gone */ }
+        resolve('timeout');
+      }, 300_000); // a HANG guard (FLAKY-170: generous; a saturated machine stretches the fixture past a minute)
+    })
+  ]);
+  clearTimeout(timeout);
+  const exitCode = seen === 'timeout' ? 'timeout' : seen.code;
 
   try {
-    assert.notStrictEqual(exitCode, 'timeout', `electron fixture hung; output:\n${output}`);
-    assert.ok(fs.existsSync(pidFile), `fixture never wrote the pid file; output:\n${output}`);
+    assert.notStrictEqual(exitCode, 'timeout', `electron fixture hung; ${exitNote(seen)}; output:\n${output}`);
+    assert.ok(fs.existsSync(pidFile), `fixture never wrote the pid file; ${exitNote(seen)}; output:\n${output}`);
     const recorded = JSON.parse(fs.readFileSync(pidFile, 'utf8'));
-    assert.ok(!recorded.error, `fixture bailed: ${recorded.error}; output:\n${output}`);
-    assert.strictEqual(exitCode, 0, `electron exited ${exitCode}; output:\n${output}`);
-    assert.ok(recorded.pids.length >= 2, `expected root+descendant, saw: ${recorded.pids.join(',')}`);
+    assert.ok(!recorded.error, `fixture bailed: ${recorded.error}; ${exitNote(seen)}; output:\n${output}`);
+    assert.strictEqual(exitCode, 0, `electron exited ${exitCode}; ${exitNote(seen)}; output:\n${output}`);
+    assert.ok(recorded.pids.length >= 2, `expected root+descendant, saw: ${recorded.pids.join(',')}; ${exitNote(seen)}`);
 
     // FLAKY-TIMING (Andy, flaky-170): a fixed sleep(500) raced the OS reaping what taskkill
     // force-killed on a busy machine. Poll for the EVENT (every recorded process gone) with a
@@ -121,13 +129,17 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     if (survivors.length) {
       // Clean up the leak before failing, so a red run doesn't strand processes (verified, deepest first).
       own.killVerified(survivors);
-      assert.fail(`process tree survived Electron quit — leaked PIDs: ${survivors.map((r) => r.pid).join(',')} of ${recorded.pids.join(',')}`);
+      assert.fail(`process tree survived Electron quit — leaked PIDs: ${survivors.map((r) => r.pid).join(',')} of ${recorded.pids.join(',')}; ${exitNote(seen)}`);
     }
     console.log(`  ok  quit sweep reaped the whole tree inside Electron (pids: ${recorded.pids.join(',')})`);
   } catch (e) {
-    console.error(`FAIL  ${e.message}`);
+    // The crash dumps are read before the sandbox goes: a native crash leaves one there.
+    console.error(`FAIL  ${e.message}; ${crashDumpNote(sandbox)}`);
     process.exitCode = 1;
   } finally {
-    try { fs.rmSync(sandbox, { recursive: true, force: true }); } catch { /* best effort */ }
+    // Still best effort (the verdict is above), but a removal that failed says why: the runner's
+    // TEMP LEAK row names only the folder.
+    const left = removeSandbox(sandbox);
+    if (left) console.error(`NOTE  ${left}`);
   }
 })();
