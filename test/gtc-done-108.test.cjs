@@ -134,7 +134,8 @@ for (const provider of ['claude', 'codex', 'agy']) {
   test(`${provider}: god reads, types and sends keys on a real PTY, idle and mid-turn`, { skip: process.platform !== 'win32' }, async () => {
     const x = await rig(provider);
     try {
-      await until('the TUI is up', async () => (await x.screen()).includes(`TUI ${provider} up`));
+      // The banner and the prompt are two writes; ConPTY can deliver them apart, so wait for the prompt row too.
+      await until('the TUI is up at its prompt', async () => { const s = await x.screen(); return s.includes(`TUI ${provider} up`) && s.split('\n').some((l) => l.startsWith(PROMPTS[provider].trimEnd())); });
       let want = '';
       const arrived = async (what) => {
         await until(`${JSON.stringify(what)} arrives`, () => x.bytes().length >= want.length);
