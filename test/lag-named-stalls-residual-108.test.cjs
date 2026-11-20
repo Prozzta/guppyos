@@ -675,9 +675,14 @@ async function secondSpell(t, lateMs) {
   const frees = [];
   const handed = [];   // every held stat this wrapper handed out: it settles when the real stat has answered
   const late = () => (lateMs ? new Promise((resolve) => { setTimeout(resolve, lateMs); }) : undefined);
-  fs.promises.stat = function (p, ...rest) {
-    if (!hold || !String(p).endsWith('memory.md')) return stat.call(this, p, ...rest);
-    const answer = new Promise((resolve) => { frees.push(resolve); }).then(late).then(() => stat.call(this, p, ...rest));
+  // Every path the cell does not hold is answered AT ONCE, from a promise that is already settled:
+  // the beats race each stat against a 20 ms timer, and a real stat is a thread-pool job that can
+  // lose that race under load. Then outbox or outbox/.sent makes a beat stuck that the cell calls
+  // clean (the same 1 !== 2), or drops out of the first beat's answer.
+  const statNow = (p) => new Promise((resolve) => { resolve(fs.statSync(p)); });
+  fs.promises.stat = function (p) {
+    if (!hold || !String(p).endsWith('memory.md')) return statNow(p);
+    const answer = new Promise((resolve) => { frees.push(resolve); }).then(late).then(() => statNow(p));
     handed.push(answer.catch(() => {}));
     return answer;
   };
@@ -696,6 +701,7 @@ async function secondSpell(t, lateMs) {
     fs.utimesSync(path.join(hive.root(), 'agents', 'andy-1', 'memory.md'), 9000, 9000);
     assert.deepEqual([...await bounded(hive.coordinationFileTimes(['andy-1'], 20))], [['andy-1', 9_000_000]], 'the clean beat is a real one: it read the freed path');
     assert.equal(stuckRows().length, 1, 'a clean beat writes no row');
+    assert.equal(hive.coordinationStuck, false, 'the clean beat ended the spell: no path was still open at its 20 ms');
     hold = true;
     await bounded(hive.coordinationFileTimes(['andy-1'], 20));
     assert.equal(stuckRows().length, 2, 'a new spell is a new row');
