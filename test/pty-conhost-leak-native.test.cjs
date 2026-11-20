@@ -22,8 +22,17 @@ require('./tools/own-job.cjs');
 // UNREAD_FLAG) with the terminal's output paused, lets the program print until the host takes no
 // more and then end itself from a second thread, and requires all three: the exit is reported, the
 // host goes, and the manager process ends BY ITSELF (nothing calls process.exit there).
+//
+// MEASURED on Windows 10 19045: with the output PAUSED the close returns. With the terminal's
+// output socket DESTROYED before the program prints (what an EPIPE leaves behind) it never does.
+// Made on the exit thread before the callback was released, that close held the manager's event
+// loop for ever. So the close runs on a detached thread after the release, and the second
+// manager test (DESTROYED_FLAG) requires: the exit is reported and the manager process ends by
+// itself. In that state the host itself still stays; the test prints it and does not judge it yet.
 const UNREAD_FLAG = '--conhost-leak-unread-manager';
-const UNREAD = process.argv.includes(UNREAD_FLAG);
+const DESTROYED_FLAG = '--conhost-leak-destroyed-manager';
+const DESTROYED = process.argv.includes(DESTROYED_FLAG);
+const UNREAD = DESTROYED || process.argv.includes(UNREAD_FLAG);
 const RESULT = 'UNREAD-RESULT ';
 const test = UNREAD ? () => {} : require('node:test');
 const assert = require('node:assert/strict');
@@ -146,7 +155,7 @@ async function unreadManager() {
   const { PtyManager } = loadTs('src/main/pty.ts');
   const node = consoleNode();
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'conhost-leak-unread-'));
-  const out = { node: `${node.file} ${node.version} (from ${node.from})`, hosts: [], exit: null, read: 0, written: null, left: null };
+  const out = { node: `${node.file} ${node.version} (from ${node.from})`, hosts: [], exit: null, events: [], read: 0, written: null, left: null };
   const m = new PtyManager();
   const id = `conhost-leak-unread-${process.pid}`;
   try {
@@ -158,11 +167,22 @@ async function unreadManager() {
     out.spawn = await m.spawn({ id, cwd: process.cwd(), command: node.file, args: [program, flag, written], cols: 80, rows: 24 });
     const proc = m.sessions.get(id).proc;
     proc.onData((d) => { out.read += d.length; });
-    const exited = new Promise((res) => proc.onExit(res));
+    const exited = new Promise((res) => proc.onExit((e) => { out.events.push(e); res(e); }));
     out.hosts = [...(await hostChildren())].filter(([pid]) => !before.has(pid));
-    proc.pause();                      // nothing reads this terminal's output from here on
-    fs.writeFileSync(flag, '');        // and only now does the program print
-    out.exit = await exited;
+    if (DESTROYED) {
+      // The terminal's exit event comes from the socket closing, at once and without a code. The
+      // program's own end is the file it writes; the native exit report is the agent's exit code.
+      proc._agent.outSocket.destroy();
+      fs.writeFileSync(flag, '');
+      await exited;
+      while (!fs.existsSync(written)) await hostChildren();
+      for (let k = 0; k < LISTINGS && proc._agent._exitCode === undefined; k += 1) await hostChildren();
+      out.exit = { exitCode: proc._agent._exitCode };
+    } else {
+      proc.pause();                    // nothing reads this terminal's output from here on
+      fs.writeFileSync(flag, '');      // and only now does the program print
+      out.exit = await exited;
+    }
     out.written = Number(fs.readFileSync(written, 'utf8'));
     out.left = out.hosts;
     for (let k = 0; k < LISTINGS && out.left.length; k += 1) {
@@ -179,32 +199,59 @@ async function unreadManager() {
 }
 if (UNREAD) unreadManager();
 
+/** Runs this file as a manager process; resolves with its result line, and `ended()` says how it ended, waiting LISTINGS listings at most. */
+async function managerRun(t, flag) {
+  const child = spawn(process.execPath, [__filename, flag], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+  t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill(); });
+  let stdout = ''; let stderr = '';
+  child.stderr.setEncoding('utf8').on('data', (d) => { stderr += d; });
+  const line = () => stdout.split(/\r?\n/).find((l) => l.startsWith(RESULT) && stdout.includes(`${l}\n`));
+  const reported = new Promise((res) => { child.stdout.setEncoding('utf8').on('data', (d) => { stdout += d; if (line()) res(); }); });
+  let end = null;
+  const closed = new Promise((res) => { child.on('close', (code, signal) => { end = { code, signal }; res(); }); });
+  await Promise.race([reported, closed]);
+  assert.ok(line(), `the manager process reports its result before it ends (ended ${JSON.stringify(end)}):\n${stdout}\n${stderr}`);
+  const r = JSON.parse(line().slice(RESULT.length));
+  assert.equal(r.error, undefined, `the manager ran the scenario:\n${r.error}\n${stderr}`);
+  assert.equal(r.hosts.length, 1, `the listing sees this terminal's console host: exactly one new host child, got ${JSON.stringify(r.hosts)}`);
+  // The bound is again a count of completed listings, taken after the result was printed.
+  const ended = async () => { for (let k = 0; k < LISTINGS && !end; k += 1) await Promise.race([closed, hostChildren()]); return end; };
+  return { r, pid: child.pid, ended, stderr: () => stderr };
+}
+
 test('PTY-CONHOST-LEAK: a program that ends itself with its output unread: the exit is reported, the host goes, and the manager process ends by itself',
   { skip: !WIN, timeout: 120_000 }, async (t) => {
-    const child = spawn(process.execPath, [__filename, UNREAD_FLAG], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
-    t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill(); });
-    let stdout = ''; let stderr = '';
-    child.stderr.setEncoding('utf8').on('data', (d) => { stderr += d; });
-    const line = () => stdout.split(/\r?\n/).find((l) => l.startsWith(RESULT) && stdout.includes(`${l}\n`));
-    const reported = new Promise((res) => { child.stdout.setEncoding('utf8').on('data', (d) => { stdout += d; if (line()) res(); }); });
-    let end = null;
-    const ended = new Promise((res) => { child.on('close', (code, signal) => { end = { code, signal }; res(); }); });
-    await Promise.race([reported, ended]);
-    assert.ok(line(), `the manager process reports its result before it ends (ended ${JSON.stringify(end)}):\n${stdout}\n${stderr}`);
-    const r = JSON.parse(line().slice(RESULT.length));
+    const { r, pid, ended, stderr } = await managerRun(t, UNREAD_FLAG);
     t.diagnostic(`PTY child: ${r.node}; the program had ${r.written} writes of 4097 bytes returned when it ended itself; the manager read ${r.read} bytes`);
-    assert.equal(r.error, undefined, `the manager ran the scenario:\n${r.error}\n${stderr}`);
-    assert.equal(r.hosts.length, 1, `the listing sees this terminal's console host: exactly one new host child, got ${JSON.stringify(r.hosts)}`);
     // The state: the program printed, nothing of it was read, and it ended ITSELF (process.kill of
     // its own pid ends a Windows process with code 1; the manager sent no kill).
     assert.ok(r.written > 0, 'the program printed before it ended');
     assert.equal(r.read, 0, 'nothing of the output was read: the terminal was paused before the first write');
     assert.deepEqual(r.exit && r.exit.exitCode, 1, `THE EXIT IS REPORTED, with the program's own end: ${JSON.stringify(r.exit)}`);
     assert.deepEqual(r.left, [], `THE CONSOLE HOST OUTLIVES ITS TERMINAL: the program ended itself with its output unread, and ${LISTINGS} listings after the exit was reported `
-      + `${r.left.map(([pid, name]) => `${name} pid ${pid}`).join(', ')} is still a child of the manager process`);
-    // The bound is again a count of completed listings, taken after the result was printed.
-    for (let k = 0; k < LISTINGS && !end; k += 1) await Promise.race([ended, hostChildren()]);
-    assert.ok(end, `THE MANAGER PROCESS DOES NOT END: ${LISTINGS} listings after it reported its result (exit reported, host gone) pid ${child.pid} is still running. `
+      + `${r.left.map(([p, name]) => `${name} pid ${p}`).join(', ')} is still a child of the manager process`);
+    const end = await ended();
+    assert.ok(end, `THE MANAGER PROCESS DOES NOT END: ${LISTINGS} listings after it reported its result (exit reported, host gone) pid ${pid} is still running. `
       + 'Nothing is left for it to do, so its exit thread is still inside the close and holds the exit callback (quit would wait on that thread)');
-    assert.deepEqual(end, { code: 0, signal: null }, `the manager process ended by itself and cleanly:\n${stderr}`);
+    assert.deepEqual(end, { code: 0, signal: null }, `the manager process ended by itself and cleanly:\n${stderr()}`);
+  });
+
+/** Ends a console host the manager process `parent` left behind: only a host, and only one whose recorded parent is that process. */
+function endLeftHost(pid, parent) {
+  const body = `$ProgressPreference = 'SilentlyContinue'\nGet-CimInstance Win32_Process -Filter "ProcessId=${pid} AND ParentProcessId=${parent}" | Where-Object { $_.Name -eq 'conhost.exe' -or $_.Name -eq 'OpenConsole.exe' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`;
+  return new Promise((res) => execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(body, 'utf16le').toString('base64')], { windowsHide: true }, () => res()));
+}
+
+test('PTY-CONHOST-LEAK: the same program with the terminal\'s output socket destroyed: the exit is reported and the manager process ends by itself (the close never returns there)',
+  { skip: !WIN, timeout: 120_000 }, async (t) => {
+    const { r, pid, ended, stderr } = await managerRun(t, DESTROYED_FLAG);
+    t.after(async () => { for (const [host] of r.left || []) await endLeftHost(host, pid); });
+    t.diagnostic(`PTY child: ${r.node}; the program had ${r.written} writes returned when it ended itself; host still a child ${LISTINGS} listings later: ${JSON.stringify(r.left)} (not judged here yet)`);
+    assert.ok(r.written > 0, 'the program printed before it ended');
+    assert.ok(r.events.length >= 1, 'the terminal told the manager that it ended');
+    assert.deepEqual(r.exit, { exitCode: 1 }, `THE EXIT IS REPORTED by the native side, with the program's own end: ${JSON.stringify(r.exit)}`);
+    const end = await ended();
+    assert.ok(end, `THE MANAGER PROCESS DOES NOT END: ${LISTINGS} listings after it reported its result (exit reported) pid ${pid} is still running. `
+      + 'Nothing is left for it to do: the close of the pseudoconsole has not returned and holds the exit callback, on the thread a quit joins');
+    assert.deepEqual(end, { code: 0, signal: null }, `the manager process ended by itself and cleanly:\n${stderr()}`);
   });
