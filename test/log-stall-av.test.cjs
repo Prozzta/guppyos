@@ -110,6 +110,7 @@ test('F1 (B1/B3): a HiveManager holds its log open by default; dispose() release
   } finally {
     fs.openSync = openSync; fs.closeSync = closeSync;
   }
+  await hive?.drainReads();   // the replaced manager's reads end before its folder is removed below
   // A fresh manager for the delete check, which the spy has already proven releases on dispose.
   hive = new HiveManager(() => home);
   await hive.ensureAgent({ id: 'a1', name: 'A', provider: 'claude', cwd: home });
@@ -165,6 +166,7 @@ test('F1 GATE (Jim\'s probe): with a large pre-existing log, an app append never
     for (let i = 0; i < 40; i++) hive.appendLog({ kind: 'probe', i });
   } finally { Object.assign(fs, real); }
   hive.dispose();
+  await hive.drainReads();
   assert.ok(readBytes < 64 * 1024, `the append path read ${readBytes} bytes (a whole-log read is ${big.length})`);
   assert.equal(copies, 0, 'nothing copied or streamed on the append path');
   const legacy = rotatedFiles(log).filter((r) => r.legacy);
@@ -274,6 +276,7 @@ test('F2: logTail across rotation returns exactly the naive tail of the concaten
   assert.deepEqual(hive.logTail(100).map((r) => r.i), [1, 2, 3, 4, 5, 6, 7]);
   assert.deepEqual(hive.logTail(2).map((r) => r.i), [6, 7]);
   hive.dispose();
+  await hive.drainReads();
 });
 
 test('F2: the lifetime cost folded across rotations, INCLUDING a rotation mid-fold, equals the fold of one file', async () => {

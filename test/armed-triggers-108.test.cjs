@@ -53,8 +53,11 @@ function rig(t, agents, tasks) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'md-armed-'));
   let hive = null;
   let monitor = null;
-  const stop = () => { try { monitor?.stop(); } catch { /* noop */ } try { hive?.dispose(); } catch { /* noop */ } monitor = null; hive = null; };
-  t.after(async () => { const last = hive; stop(); await last?.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
+  // Every manager this rig disposed. boot() is synchronous (it is called inside assert.doesNotThrow),
+  // so a replaced manager cannot be drained where it is replaced: all of them drain before the delete.
+  const retired = [];
+  const stop = () => { try { monitor?.stop(); } catch { /* noop */ } try { hive?.dispose(); } catch { /* noop */ } if (hive) retired.push(hive); monitor = null; hive = null; };
+  t.after(async () => { stop(); for (const m of retired) await m.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   /** A fresh process: new HiveManager + new BoardMonitor, running `version`. `prep(hive)` runs before the first tick. */
   const boot = (version, prep) => {
     stop();
@@ -76,6 +79,7 @@ function rig(t, agents, tasks) {
   mkInboxes(agents);
   fs.writeFileSync(path.join(root, 'tasks.json'), JSON.stringify({ tasks }, null, 2));
   first.dispose();
+  retired.push(first);
   const inbox = (id) => {
     const dir = path.join(root, 'agents', id, 'inbox');
     let files = [];

@@ -134,6 +134,7 @@ test('Q15: the terminal close is PERSISTED: after a restart it is still acted/mi
   assert.equal(hive.mailBody('andy-1', lost.id).reason, 'missing');
   assert.equal(hive.mail.bodyMissing('andy-1', lost.id, 'missing'), true);
   hive.dispose();
+  await hive.drainReads();
   // Restart.
   hive = new HiveManager(() => home, () => true);
   const e = hive.mail.ledger('andy-1').entries[lost.id];
@@ -143,6 +144,7 @@ test('Q15: the terminal close is PERSISTED: after a restart it is still acted/mi
   assert.deepEqual(hive.mail.openRequests('andy-1').map((o) => o.entry.id), [lost.id], 'still owed');
   // The file comes back while the app is down: the load redelivers it (never archives it).
   hive.dispose();
+  await hive.drainReads();
   fs.writeFileSync(path.join(inbox, `${lost.id}.json`), saved);
   hive = new HiveManager(() => home, () => true);
   assert.equal(hive.mail.ledger('andy-1').entries[lost.id].state, 'delivered');
@@ -210,6 +212,7 @@ test('Q28: persisted through a restart (no wake), with the banner; redelivered o
   assert.equal(hive.logTail(200).filter((r) => r.kind === 'mail-body-unparseable').length, 1);
   assert.deepEqual(hive.mail.pending('andy-1'), []);
   hive.dispose();
+  await hive.drainReads();
   // Restart: still closed, nothing pending, the file is NOT archived.
   hive = new HiveManager(() => home, () => true);
   assert.deepEqual([hive.mail.ledger('andy-1').entries[m.id].state, hive.mail.ledger('andy-1').entries[m.id].missingReason], ['acted', 'unparseable']);

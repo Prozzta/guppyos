@@ -170,7 +170,9 @@ test('replay: the live floor of 2026-10-03 (anonymised) closes only on evidence 
 async function floor(t) {
   const home = fs.mkdtempSync(path.join(JAIL, 'floor-'));
   const hive = new HiveManager(() => home, () => true);
-  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
+  // dispose() does not stop the ledger guard, and its watcher sits on <home>/hive. A test's own
+  // stopLedgerGuard hook is registered later and so runs AFTER this delete: the stop belongs here.
+  t.after(async () => { hive.stopLedgerGuard(); hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   await hive.ensureAgent({ id: 'god-1', name: 'Michael', provider: 'claude', cwd: home, isGod: true });
   await hive.ensureAgent({ id: 'andy-1', name: 'Andy', provider: 'claude', cwd: home });
   return { hive };
