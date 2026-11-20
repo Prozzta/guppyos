@@ -230,7 +230,7 @@ async function observeProcess(p, observer, name, { hold = false, parent, doneMs 
       doneTimer = setTimeout(() => {
         // evidence BEFORE the kill: the fixture subprocess (node --test's child running the file) is still alive and
         // the detached child's channel was still connected when the fixture REPORTED it (not re-read at the bound)
-        const fixtureRows = parent ? own.childrenOf(own.processTable(`ParentProcessId = ${parent.pid}`), parent) : [];
+        const fixtureRows = parent ? own.treeOf(own.processTable(), parent) : [];
         const err = new Error(name + ': fixture did not exit within ' + doneMs + ' ms after release');
         err.pids = seen.pids;
         err.parent = parent;
