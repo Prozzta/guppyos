@@ -75,6 +75,13 @@ const kase = async (key) => {
 const NOBODY = (c, what) => assert.deepEqual(c.strangers, [],
   `CLOSING A TERMINAL NAMES ONLY ITS OWN TREE: ${what}, and node-pty's kill named ${JSON.stringify(c.named)}`
   + " (driver = the process that owns the terminal, bystander = another process on the owner's console)");
+/**
+ * The other half of the rule. A GUI-subsystem root is not on the pseudoconsole, so closing the
+ * ConPTY does not end it: after tree sweeps that ended nothing, node-pty's kill naming the root is
+ * the only thing left that ends the terminal's own tree. A fix that names nobody leaves it running.
+ */
+const OWN_ROOT = (c) => assert.equal(c.named.includes('root'), true,
+  `CLOSING A TERMINAL STILL ENDS ITS OWN ROOT: the root was alive, the tree sweeps ended nothing, and node-pty's kill named ${JSON.stringify(c.named)}`);
 /** The product control: the terminal started, its root ran, and it was on the console the cell is about. */
 function built(c, { ownerConsole, sweeps }) {
   assert.equal(c.spawn, 'ok', 'PtyManager.spawn');
@@ -97,14 +104,15 @@ test('the driver is on a console of its own: no case ever lists or names this te
 });
 
 // ---- (a) the test harness ----
-test('harness: a GUI-subsystem child still alive when childBytes gives up is closed without naming the test file or its siblings', async (t) => {
+test('harness: a GUI-subsystem child still alive when childBytes gives up is closed without naming the test file or its siblings', async () => {
   const c = await kase('harnessAlive');
   assert.match(c.result, /PTY child did not answer/, 'childBytes gave up at its 5 s (the child is not on the terminal, so it never answers there)');
   assert.equal(c.closed, true, "node-pty's kill ran");
   assert.equal(c.aliveAtKill, true, 'the child was alive when the kill ran');
-  // The child attaches to the owner's console as it starts. On a machine so loaded that it had not
-  // run a line of its script by the give-up this is said, not failed: the rule below holds either way.
-  if (!c.upAtKill) t.diagnostic('the child had not run its script when the kill came: the scenario may not be built in this run');
+  // The scenario, whatever the load: the kills were only recorded, so the child is still alive after
+  // them, and it is on the owner's console. A child too slow to get there fails here by name.
+  assert.equal(c.consoleAfter.includes('driver') && c.consoleAfter.includes('root'), true,
+    `the child is on the owner's console (after the recorded kill its console holds ${JSON.stringify(c.consoleAfter)}; it had ${c.upAtKill ? '' : 'NOT '}run its script at the kill)`);
   NOBODY(c, 'the child of childBytes was alive at the give-up');
 });
 test('harness: a GUI-subsystem child that is gone when childBytes closes its terminal names nobody (pin)', async () => {
@@ -145,12 +153,14 @@ test('product: kill(id) of a GUI-subsystem root whose tree sweep ended nothing d
   built(c, { ownerConsole: true, sweeps: 2 });
   assert.equal(c.aliveAtKill, true, 'the root was alive when node-pty\'s kill ran');
   NOBODY(c, 'kill(id) ran after two tree sweeps that ended nothing');
+  OWN_ROOT(c);
 });
 test('product: the quit (killAllAsync) of a GUI-subsystem root whose tree sweep ended nothing does not name the app or its console', async () => {
   const c = await kase('guiQuitSweepFailed');
   built(c, { ownerConsole: true, sweeps: 1 });
   assert.equal(c.aliveAtKill, true, 'the root was alive when node-pty\'s kill ran');
   NOBODY(c, 'the quit ran after a tree sweep that ended nothing');
+  OWN_ROOT(c);
 });
 test('product: kill(id) of a console root names nobody outside its tree, with the tree sweep failed or not (pin)', async () => {
   const failed = await kase('consoleKillSweepFailed');
