@@ -16,6 +16,8 @@ require('./tools/own-job.cjs');
  * this box 2026-11-20. where.exe resolves a relative entry against the current dir, takes `/` and
  * `..`, and ignores trailing spaces; an entry with a LEADING space finds nothing. The resolver gives
  * the same answer for each, and "finds nothing" is a plain miss, never UNKNOWN.
+ * PART 3: resolveCliAsync (the models-refresh lookup) uses the same search: no process, every PATH
+ * match collected, the old pick rule (.exe/.cmd/.bat first) and the old two fallbacks; POSIX unchanged.
  */
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -166,4 +168,87 @@ test('real fs: an entry with a LEADING space or in quotes finds nothing, and tha
   await both('lkrd', env([' ' + p]), cwd, null, 'a leading space');
   await both('lkrd', env([`"${p}"`]), cwd, null, 'a quoted entry');
   await both('lkrd', env([p + '\\nope', path.join(root, 'p', 'lkrd.exe')]), cwd, null, 'a missing dir and a file as an entry');
+});
+
+// ─── PART 3: resolveCliAsync (the models-refresh lookup) on the same PATH search ─────
+// It took where.exe's whole list and picked .exe/.cmd/.bat first, then the rest, the first one on
+// disk. The list now comes from the PATH dirs in process; the pick rule and the two install-dir
+// fallbacks are the old ones.
+
+const CLI_ENV = { LOCALAPPDATA: 'C:\\LAD', APPDATA: 'C:\\AD', PATH: 'C:\\a;C:\\b', PATHEXT: '.COM;.EXE;.BAT;.CMD;.PS1' };
+
+test('resolveCliAsync (win32): no process is started; every PATH dir is listed', async () => {
+  const { d, listed } = fake({ env: CLI_ENV, dirs: { 'C:\\a': ['agy.exe'], 'C:\\b': ['agy.cmd'] }, onDisk: ['C:\\a\\agy.exe', 'C:\\b\\agy.cmd'] });
+  assert.equal(await R.resolveCliAsync(d, 'agy'), 'C:\\a\\agy.exe', 'exec throws in this fake: a where.exe start would have thrown or returned null');
+  assert.deepEqual(listed, ['C:\\a', 'C:\\b'], 'like where.exe it collects every match before it picks');
+});
+
+test('resolveCliAsync (win32): the pick rule is the old one - .exe/.cmd/.bat first across ALL dirs, then the rest, first on disk', async () => {
+  const dirs = { 'C:\\a': ['agy', 'agy.ps1'], 'C:\\b': ['agy.bat', 'agy.cmd'] };
+  const all = ['C:\\a\\agy', 'C:\\a\\agy.ps1', 'C:\\b\\agy.bat', 'C:\\b\\agy.cmd'];
+  const at = (onDisk) => R.resolveCliAsync(fake({ env: CLI_ENV, dirs, onDisk }).d, 'agy');
+  assert.equal(await at(all), 'C:\\b\\agy.bat', 'a .bat in a LATER dir beats the extensionless shim and the .ps1 in an earlier one');
+  assert.equal(await at(all.filter((p) => p !== 'C:\\b\\agy.bat')), 'C:\\b\\agy.cmd', 'a preferred match that is not on disk is passed over');
+  assert.equal(await at(['C:\\a\\agy', 'C:\\a\\agy.ps1']), 'C:\\a\\agy', 'no .exe/.cmd/.bat on disk: the rest, in where.exe order');
+  assert.equal(await at(['C:\\a\\agy.ps1']), 'C:\\a\\agy.ps1');
+  assert.equal(await at([]), null, 'nothing on disk: not found');
+  const sub = fake({ env: CLI_ENV, dirs: { 'C:\\a': ['agy.exe\\','AGY.CMD'] }, onDisk: ['C:\\a\\agy.exe', 'C:\\a\\AGY.CMD'] });
+  assert.equal(await R.resolveCliAsync(sub.d, 'agy'), 'C:\\a\\AGY.CMD', 'a sub-directory is never a match; the name keeps its case on disk');
+});
+
+test('resolveCliAsync (win32): after a PATH miss the two install-dir fallbacks, in the old order; a PATH hit beats both', async () => {
+  const fallbacks = ['C:\\LAD\\agy\\bin\\agy.exe', 'C:\\AD\\npm\\agy.cmd'];
+  const miss = { 'C:\\a': ['other.exe'], 'C:\\b': [] };
+  assert.equal(await R.resolveCliAsync(fake({ env: CLI_ENV, dirs: miss, onDisk: fallbacks }).d, 'agy'), fallbacks[0]);
+  assert.equal(await R.resolveCliAsync(fake({ env: CLI_ENV, dirs: miss, onDisk: [fallbacks[1]] }).d, 'agy'), fallbacks[1]);
+  assert.equal(await R.resolveCliAsync(fake({ env: CLI_ENV, dirs: miss }).d, 'agy'), null);
+  assert.equal(await R.resolveCliAsync(fake({ env: CLI_ENV, dirs: { 'C:\\a': [], 'C:\\b': ['agy.cmd'] }, onDisk: ['C:\\b\\agy.cmd', ...fallbacks] }).d, 'agy'), 'C:\\b\\agy.cmd');
+});
+
+test('resolveCliAsync (win32): a PATH dir that cannot be listed adds nothing and never throws; a bad name lists nothing', async () => {
+  const f = fake({ env: CLI_ENV, dirs: { 'C:\\b': ['agy.cmd'] }, onDisk: ['C:\\b\\agy.cmd'] });
+  const inner = f.d.listDir;
+  f.d.listDir = async (dir) => { if (dir === 'C:\\a') { f.listed.push(dir); throw Object.assign(new Error('EACCES'), { code: 'EACCES' }); } return inner(dir); };
+  assert.equal(await R.resolveCliAsync(f.d, 'agy'), 'C:\\b\\agy.cmd', 'the dirs that can be listed are still searched');
+  const none = fake({ env: { ...CLI_ENV, PATH: 'C:\\a' } });
+  none.d.listDir = async () => { throw Object.assign(new Error('EIO'), { code: 'EIO' }); };
+  assert.equal(await R.resolveCliAsync(none.d, 'agy'), null);
+  const bad = fake({ env: CLI_ENV, dirs: { 'C:\\a': ['Bad;Name.exe'] }, onDisk: ['C:\\a\\Bad;Name.exe'] });
+  assert.equal(await R.resolveCliAsync(bad.d, 'Bad;Name'), null);
+  assert.deepEqual(bad.listed, [], 'refused before any dir is read');
+});
+
+test('resolveCliAsync (POSIX): unchanged - still `$SHELL -lc command -v`, the last line on disk', async () => {
+  const calls = [];
+  const d = {
+    platform: 'linux', env: { SHELL: '/bin/zsh', HOME: '/h' }, exists: (p) => p === '/usr/bin/agy',
+    listDir: async () => { throw new Error('POSIX must not list PATH dirs'); },
+    exec: (file, args, opts, cb) => { calls.push([file, args]); setImmediate(() => cb(null, 'motd\n/usr/bin/agy\n')); }
+  };
+  assert.equal(await R.resolveCliAsync(d, 'agy'), '/usr/bin/agy');
+  assert.deepEqual(calls, [['/bin/zsh', ['-lc', 'command -v agy']]]);
+});
+
+const CLI_CHILD = [
+  "const [repo, name] = process.argv.slice(1);",
+  "const R = require(repo + '/test/load-ts.cjs')('src/main/commandResolver.ts');",
+  "const d = { ...R.nodeResolverDeps(), exec: () => { throw new Error('no process'); } };",
+  "R.resolveCliAsync(d, name).then((r) => process.stdout.write(JSON.stringify(r)));"
+].join('\n');
+
+test('real fs: resolveCliAsync gives what the old rule gave on where.exe\'s own list, with no process', { skip: !WIN && 'win32 only' }, async (t) => {
+  const { root, mk, env } = fixture(t);
+  mk('a\\lkcli');
+  mk('a\\lkcli.cmd.txt');
+  const cmd = mk('b\\lkcli.cmd');
+  const cwd = path.join(root, 'empty');
+  const e = env([path.join(root, 'a'), path.join(root, 'b')]);
+  const w = await run(path.join(SYS32, 'where.exe'), ['lkcli'], { env: e, cwd });
+  const lines = w.stdout.trim().split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  assert.deepEqual(lines, [path.join(root, 'a', 'lkcli'), cmd], 'fixture: where.exe lists the extensionless shim first, then the .cmd');
+  const old = [...lines.filter((l) => /\.(exe|cmd|bat)$/i.test(l)), ...lines.filter((l) => !/\.(exe|cmd|bat)$/i.test(l))].find((p) => fs.existsSync(p));
+  const c = await run(process.execPath, ['-e', CLI_CHILD, REPO, 'lkcli'], { env: e, cwd });
+  assert.equal(c.code, 0, `resolver child failed: ${c.stderr}`);
+  assert.equal(JSON.parse(c.stdout), old);
+  assert.equal(old, cmd);
 });

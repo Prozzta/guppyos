@@ -7,8 +7,9 @@
  *
  * Two entry points share the same primitives (execP, the platform lookup):
  * - resolveCliAsync(d, bin): the models-refresh adapters' resolver (Jim, REFRESH-MODELS). Moved
- *   here from providerModels.ts VERBATIM: uncached, `where` / `$SHELL -lc command -v`, a string or
- *   null. providerModels re-exports it, so its adapters behave exactly as before.
+ *   here from providerModels.ts: uncached, PATH searched in process on Windows (searchPathWin,
+ *   every match, .exe/.cmd/.bat first) / `$SHELL -lc command -v` on POSIX, a string or null.
+ *   providerModels re-exports it, so its adapters behave exactly as before.
  * - resolveCommandAsync(command): the app's resolver (agent spawn, the missing-CLI check, hidden
  *   claude, codex remote, the setup catalog). Spawn-grade: on Windows it searches PATH in process
  *   (searchPathWin; no where.exe since FLAKE-RIG-NODE-LOOKUP-UNDER-LOAD-108) and takes the first
@@ -78,6 +79,11 @@ function envVar(env: NodeJS.ProcessEnv, name: string): string | undefined {
   if (env[name] !== undefined) return env[name];
   const key = Object.keys(env).find((k) => k.toUpperCase() === name);
   return key === undefined ? undefined : env[key];
+}
+
+/** PATHEXT as upper-case extensions (`.EXE`), with cmd.exe's short default when it is unset. */
+function winPathExts(env: NodeJS.ProcessEnv): string[] {
+  return (envVar(env, 'PATHEXT') ?? '.COM;.EXE;.BAT;.CMD').split(';').map((e) => e.trim().toUpperCase()).filter(Boolean);
 }
 
 /**
@@ -192,15 +198,22 @@ export function isSafeCommandName(command: string): boolean {
 /** Where is `bin`? `where` (Windows) / `command -v` in a login shell, then the usual install dirs. */
 export async function resolveCliAsync(d: ResolverDeps, bin: string): Promise<string | null> {
   if (!/^[a-z][a-z0-9-]{0,30}$/.test(bin)) return null;
-  const pick = (out: string, last: boolean): string | null => {
-    let lines = out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const pickOf = (found: string[], last: boolean): string | null => {
+    let lines = found;
     if (d.platform === 'win32') lines = [...lines.filter((l) => /\.(exe|cmd|bat)$/i.test(l)), ...lines.filter((l) => !/\.(exe|cmd|bat)$/i.test(l))];
     for (const p of last ? lines.reverse() : lines) if (d.exists(p)) return p;
     return null;
   };
+  const pick = (out: string, last: boolean): string | null => pickOf(out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean), last);
   if (d.platform === 'win32') {
-    const r = await execP(d, 'where', [bin], lookupTimeout(d), 64 * 1024);
-    if ('stdout' in r) { const p = pick(r.stdout, false); if (p) return p; }
+    // FLAKE-RIG-NODE-LOOKUP-UNDER-LOAD-108: every PATH match, in the order where.exe printed them,
+    // found in process (no where.exe, no time box). The pick rule is unchanged: .exe/.cmd/.bat
+    // first, then the rest, the first one on disk. A PATH dir that cannot be listed adds nothing,
+    // as a where.exe that failed added nothing.
+    const hits: string[] = [];
+    await searchPathWin(d, bin, winPathExts(d.env), (p) => { hits.push(p); return false; });
+    const p = pickOf(hits, false);
+    if (p) return p;
     const la = d.env.LOCALAPPDATA ?? ''; const ad = d.env.APPDATA ?? '';
     for (const c of [`${la}\\${bin}\\bin\\${bin}.exe`, `${ad}\\npm\\${bin}.cmd`]) if (d.exists(c)) return c;
     return null;
@@ -276,8 +289,7 @@ export async function lookupCommandAsync(command: string, d: ResolverDeps = node
     // a POSIX sh script). Skip extensionless hits and take the first PATHEXT-eligible one
     // (.CMD/.BAT/.EXE/…) that exists. The search runs in process (searchPathWin): no where.exe,
     // no shell, no time box.
-    const pathExts = (envVar(d.env, 'PATHEXT') ?? '.COM;.EXE;.BAT;.CMD')
-      .split(';').map((e) => e.trim().toUpperCase()).filter(Boolean);
+    const pathExts = winPathExts(d.env);
     const isExecutable = (p: string): boolean => {
       const dot = p.lastIndexOf('.');
       const sep = Math.max(p.lastIndexOf('\\'), p.lastIndexOf('/'));
