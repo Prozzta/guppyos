@@ -728,6 +728,20 @@ test('a route pass held at the rename of an exact repeat across dispose() sends 
   const r = await rig.disposeWhileHeld(rig.hold('rename', (p) => p === again, 'EBUSY'), 'the route pass moving the repeat aside');
   assert.deepEqual(r.after.inboxes, r.before.inboxes, 'a disposed manager delivered a duplicate notice into an inbox');
   rig.quiet(r);
+  // The move did not land: the next start handles the file afresh, and the sender is told once.
+  await rig.noticeOnceAcrossStarts('[duplicate not delivered]');
+  await keptOnce(rig);
+  deletes(rig.home);
+});
+
+test('a route pass held at the bad- rename of a rejected file across dispose() sends no reject notice when the rename FAILS, and the next start sends it once', async (t) => {
+  const rig = await passRig(t, { ...MAIL, act: 'shout' });
+  const r = await rig.disposeWhileHeld(rig.hold('rename', (p) => p === rig.file, 'EBUSY'), 'the route pass moving the rejected file aside');
+  assert.deepEqual(r.after.inboxes, r.before.inboxes, 'a disposed manager delivered a reject notice into an inbox');
+  rig.quiet(r);
+  // The move did not land: the next start handles the file afresh, and the sender is told once.
+  await rig.noticeOnceAcrossStarts('[outbox rejected');
+  assert.equal(fs.existsSync(path.join(rig.outbox, '.sent', 'bad-note.json')), true, 'the rejected file is kept as outbox/.sent/bad-note.json');
   deletes(rig.home);
 });
 
