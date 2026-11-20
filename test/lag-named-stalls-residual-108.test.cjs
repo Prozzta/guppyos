@@ -660,14 +660,23 @@ test('COORDINATION: a stat that never settles is waited for once, counts as 0, i
   } finally { free(); fs.promises.stat = stat; }
 });
 
-test('COORDINATION: a second stuck spell after a clean beat is logged again', async (t) => {
+/**
+ * FLAKE-LAG-NAMED-CLEAN-BEAT-DRAIN-108. How long after it is freed the held stat takes to answer in
+ * the LATE cell: what a loaded thread pool does to the real stat. It is a lever, not a bound; it only
+ * has to be longer than the beats' 20 ms wait, so that a beat started before the answer is a stuck
+ * beat, not the clean one.
+ */
+const LATE_MS = 100;
+
+async function secondSpell(t, lateMs) {
   const hive = await coordFloor(t, { 'andy-1': { outbox: 1000, sent: 3000, memory: 2000 } });
   const stat = fs.promises.stat;
   let hold = true;
   const frees = [];
+  const late = () => (lateMs ? new Promise((resolve) => { setTimeout(resolve, lateMs); }) : undefined);
   fs.promises.stat = function (p, ...rest) {
     if (!hold || !String(p).endsWith('memory.md')) return stat.call(this, p, ...rest);
-    return new Promise((resolve) => { frees.push(resolve); }).then(() => stat.call(this, p, ...rest));
+    return new Promise((resolve) => { frees.push(resolve); }).then(late).then(() => stat.call(this, p, ...rest));
   };
   const stuckRows = () => hive.logTail(500).filter((r) => r && r.kind === 'coordination-stat-stuck');
   try {
@@ -682,7 +691,11 @@ test('COORDINATION: a second stuck spell after a clean beat is logged again', as
     await bounded(hive.coordinationFileTimes(['andy-1'], 20));
     assert.equal(stuckRows().length, 2, 'a new spell is a new row');
   } finally { hold = false; frees.splice(0).forEach((f) => f()); fs.promises.stat = stat; }
-});
+}
+
+test('COORDINATION: a second stuck spell after a clean beat is logged again', (t) => secondSpell(t, 0));
+
+test('COORDINATION: a second stuck spell is logged again when the freed stat answers LATE (the clean beat is a real one)', (t) => secondSpell(t, LATE_MS));
 
 test('WIRING: the breaker beat awaits the coordination times, one beat at a time, and stats nothing itself', () => {
   const idx = codeOnly(readSource('src/main/index.ts'), 'index.ts');
