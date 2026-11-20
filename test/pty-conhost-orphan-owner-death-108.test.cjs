@@ -48,7 +48,7 @@ fs.writeFileSync(path.join(DIR, 'owner.js'), [
   `const { PtyManager } = require(${JSON.stringify(LOAD_TS)})('src/main/pty.ts');`,
   '(async () => {',
   '  const m = new PtyManager();',
-  "  const r = await m.spawn({ id: 'conorph', cwd: dir, command: 'cmd.exe', args: ['/d', '/c', path.join(dir, 'client.bat')], cols: 80, rows: 24, env: {} }, { isDestroyed: () => false, send: () => {} });",
+  "  const r = await m.spawn({ id: 'conorph', cwd: dir, command: 'cmd.exe', args: ['/d', '/c', path.join(dir, '..', 'client.bat')], cols: 80, rows: 24, env: {} }, { isDestroyed: () => false, send: () => {} });",
   '  const row = m.list()[0];',
   "  fs.writeFileSync(path.join(dir, 'owner.json.tmp'), JSON.stringify({ ok: r.ok, error: r.error || null, root: row ? row.pid : 0 }));",
   "  fs.renameSync(path.join(dir, 'owner.json.tmp'), path.join(dir, 'owner.json'));",
@@ -64,7 +64,10 @@ const isLive = (rec) => lookupPids([rec.pid]).some((r) => sameProcess(r, rec));
 
 test('PTY-CONHOST-ORPHAN: the console host of a PTY ends when its owner dies abruptly with a live client', async () => {
   const dir = fs.mkdtempSync(path.join(DIR, 'run-'));
-  const owner = spawn(process.execPath, [path.join(DIR, 'owner.js'), dir], { cwd: path.resolve(__dirname, '..'), windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+  const owner = spawn(process.execPath, [path.join(DIR, 'owner.js'), dir], { cwd: path.resolve(__dirname, '..'), windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'],
+    // DETACHED_PROCESS: no console of its own, as Electron's main has none; else its own conhost
+    // is a second console host child and the count below cannot tell which one is the PTY's.
+    detached: true });
   let ownerErr = '';
   owner.stderr.on('data', (d) => { ownerErr += d; });
   const ownerExit = new Promise((r) => owner.once('exit', (code) => r(code)));
