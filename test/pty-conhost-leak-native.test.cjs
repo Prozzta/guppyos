@@ -59,7 +59,12 @@ const DLL = process.argv.includes(DLL_FLAG);
 // The unread (paused) terminal with node-pty alone: nothing but node-pty reports the exit.
 const RAW_UNREAD_FLAG = '--conhost-leak-raw-unread-manager';
 const RAW_UNREAD = process.argv.includes(RAW_UNREAD_FLAG);
-const UNREAD = DESTROYED || RAW_UNREAD || process.argv.includes(UNREAD_FLAG);
+// The same terminal READ until the program is gone and paused only then: the pause comes in the
+// turn in which the native side reports the exit, so the output is still flowing when the exit
+// path looks at it. The other half of that path (paused later, not paused now).
+const LATE_PAUSE_FLAG = '--conhost-leak-raw-late-pause-manager';
+const LATE_PAUSE = process.argv.includes(LATE_PAUSE_FLAG);
+const UNREAD = DESTROYED || RAW_UNREAD || LATE_PAUSE || process.argv.includes(UNREAD_FLAG);
 // A manager in which the thread that closes the pseudoconsole cannot be started (the native test
 // hook GUPPY_PTY_TEST_CLOSE_THREAD_FAILS throws what std::thread throws when it cannot start).
 const THREAD_FAILS_FLAG = '--conhost-leak-close-thread-fails-manager';
@@ -230,7 +235,7 @@ async function unreadManager() {
       before.threads = lowest;
     }
     let proc;
-    if (RAW || RAW_UNREAD) {
+    if (RAW || RAW_UNREAD || LATE_PAUSE) {
       // node-pty alone: no PtyManager, so nothing but node-pty itself ever ends the output worker.
       proc = require('node-pty').spawn(node.file, [program, flag, written, stop], rawOptions);
     } else {
@@ -271,9 +276,27 @@ async function unreadManager() {
       out.exit = { exitCode: proc._agent._exitCode };
       out.programAlive = alive();
     } else {
-      proc.pause();                    // nothing reads this terminal's output from here on
-      out.readAtPause = out.read;      // (the bundled host's own first bytes may have come by now)
-      fs.writeFileSync(flag, '');      // and only now does the program print
+      if (LATE_PAUSE) {
+        // The output is read while the program prints. The pause is made in the same turn as the
+        // native exit report, right after node-pty's own exit path has run: by then that path has
+        // seen a flowing output, and nothing was read in between.
+        const agent = proc._agent;
+        const onProcessExit = agent._$onProcessExit;
+        agent._$onProcessExit = function (...args) {
+          out.flowingAtExit = agent._outSocket.readableFlowing;
+          const r = onProcessExit.apply(this, args);
+          proc.pause();
+          out.readAtPause = out.read;
+          return r;
+        };
+        fs.writeFileSync(flag, '');
+        await firstOutput;
+        fs.writeFileSync(stop, '');    // the program ends itself once it has printed
+      } else {
+        proc.pause();                    // nothing reads this terminal's output from here on
+        out.readAtPause = out.read;      // (the bundled host's own first bytes may have come by now)
+        fs.writeFileSync(flag, '');      // and only now does the program print
+      }
       // The program ends itself once its writes stand still. From then the terminal has LISTINGS
       // completed listings to report the exit: a terminal that never does is a result (null),
       // not a manager that waits for ever.
@@ -477,6 +500,26 @@ test('PTY-CONHOST-LEAK: node-pty alone on the bundled console host, the output s
   { skip: NO_BUNDLED_HOST, timeout: 120_000 }, async (t) => {
     const r = await destroyedSocket(t, [RAW_EARLY_FLAG, DLL_FLAG], 'node-pty');
     assert.equal(r.bundledHost, true, 'this cell ran on the bundled host');
+  });
+
+// The other half of the same exit path: the output is flowing when the process goes, and is
+// paused after that. Nothing reads it from then on, so the host would never close it.
+test('PTY-CONHOST-LEAK: node-pty alone on the bundled console host, the output read until the program is gone and paused only then: the exit is reported, the host goes, and the manager process ends by itself',
+  { skip: NO_BUNDLED_HOST, timeout: 120_000 }, async (t) => {
+    const { r, pid, ended, stderr } = await managerRun(t, [LATE_PAUSE_FLAG, DLL_FLAG]);
+    t.diagnostic(`PTY child: ${r.node}; the program had ${r.written} writes of 4097 bytes returned when it ended itself; the manager read ${r.readAtPause} bytes before the pause and ${r.read} in all`);
+    assert.equal(r.bundledHost, true, 'this cell ran on the bundled host');
+    assert.ok(r.written > 0, 'the program printed before it ended itself');
+    assert.equal(r.flowingAtExit, true, `the output was flowing when the native side reported the exit (the premise of this cell): ${r.flowingAtExit}`);
+    assert.equal(r.read, r.readAtPause, `nothing was read after the pause: ${r.readAtPause} bytes before, ${r.read} in all`);
+    assert.ok(r.exit, `THE EXIT IS NOT REPORTED: the program is gone (the native side has its exit code: ${r.nativeExit}), the output was paused after that, and ${LISTINGS} listings later the terminal has told nobody. `
+      + 'The terminal waits for the console host to close the output, and the host waits for somebody to read it');
+    assert.deepEqual(r.exit && r.exit.exitCode, 1, `THE EXIT IS REPORTED, with the program's own end: ${JSON.stringify(r.exit)}`);
+    assert.deepEqual(r.left, [], `THE CONSOLE HOST OUTLIVES ITS TERMINAL: ${LISTINGS} listings after the exit was reported ${r.left.map(([p, name]) => `${name} pid ${p}`).join(', ')} is still a child of the manager process`);
+    const end = await ended();
+    assert.ok(end, `THE MANAGER PROCESS DOES NOT END: ${LISTINGS} listings after it reported its result pid ${pid} is still running`);
+    assert.deepEqual(end, { code: 0, signal: null }, `the manager process ended by itself and cleanly:
+${stderr()}`);
   });
 
 // The thread that closes the pseudoconsole is started on node-pty's exit thread, where nothing

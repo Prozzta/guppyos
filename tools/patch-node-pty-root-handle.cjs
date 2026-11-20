@@ -177,6 +177,10 @@ const AGENT_EDITS = [
     '            // paused would never report its exit, and its host would stay. So with the process\n' +
     '            // gone and the output paused (now, or later), the output socket ends here: the exit\n' +
     '            // is reported, and the output worker reads the rest and throws it away.\n' +
+    '            // THIS ASSUMES NOBODY PAUSES THE OUTPUT FOR FLOW CONTROL: once the process is gone,\n' +
+    '            // any pause, a short one included, ends the socket, and output not yet taken is\n' +
+    '            // lost. Guppy never pauses a terminal\'s output (no .pause() in src/main), and it\n' +
+    '            // does not use the bundled host today (pty.ts never sets useConptyDll).\n' +
     '            var guppyUnread = function () { _this._outSocket.destroy(); };\n' +
     '            if (this._outSocket.readableFlowing === false) {\n' +
     '                guppyUnread();\n' +
