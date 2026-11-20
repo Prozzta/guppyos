@@ -36,6 +36,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFile } = require('node:child_process');
 const loadTs = require('./load-ts.cjs');
+const { nodeEnv } = require('./tools/node-env.cjs');
 
 const REPO = path.resolve(__dirname, '..');
 const R = loadTs('src/main/commandResolver.ts');
@@ -101,7 +102,8 @@ const CHILD = [
   "R.lookupCommandAsync(name).then((r) => process.stdout.write(JSON.stringify(r)));"
 ].join('\n');
 
-const run = (file, args, opts) => new Promise((res) => execFile(file, args, { windowsHide: true, maxBuffer: 1 << 20, ...opts }, (err, stdout, stderr) => res({ code: err ? err.code : 0, stdout: String(stdout), stderr: String(stderr) })));
+// nodeEnv: under the Electron leg process.execPath is electron.exe, and a child env without ELECTRON_RUN_AS_NODE starts a real app.
+const run = (file, args, env, cwd) => new Promise((res) => execFile(file, args, { windowsHide: true, maxBuffer: 1 << 20, env: nodeEnv(env), cwd }, (err, stdout, stderr) => res({ code: err ? err.code : 0, stdout: String(stdout), stderr: String(stderr) })));
 
 /** The env both sides see: the fixture PATH, System32 LAST (the old path starts `where` by name), and
  *  the install-dir candidates (APPDATA, LOCALAPPDATA, USERPROFILE) pointed at an empty dir. */
@@ -117,7 +119,7 @@ function fixtureEnv(root, pathEntries, pathext) {
 
 /** Today's answer: where.exe's lines, the first one with a PATHEXT extension that existsSync accepts. */
 async function whereAnswer(name, env, cwd) {
-  const w = await run(path.join(SYS32, 'where.exe'), [name], { env, cwd });
+  const w = await run(path.join(SYS32, 'where.exe'), [name], env, cwd);
   if (w.code !== 0 && w.code !== 1) throw new Error(`where.exe failed (${w.code}): ${w.stderr}`);
   const exts = env.PATHEXT.split(';').map((e) => e.trim().toUpperCase()).filter(Boolean);
   const lines = w.stdout.trim().split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
@@ -131,7 +133,7 @@ async function whereAnswer(name, env, cwd) {
 }
 
 async function resolverAnswer(name, env, cwd) {
-  const c = await run(process.execPath, ['-e', CHILD, REPO, name], { env, cwd });
+  const c = await run(process.execPath, ['-e', CHILD, REPO, name], env, cwd);
   assert.equal(c.code, 0, `resolver child failed: ${c.stderr}`);
   return JSON.parse(c.stdout);
 }
@@ -188,7 +190,7 @@ test('B5 cwd-first is DROPPED (stated decision): a hit only in the cwd is not fo
   const empty = path.join(root, 'p0');
   fs.mkdirSync(empty, { recursive: true });
   const onlyCwd = fixtureEnv(root, [empty], '.EXE');
-  const w = await run(path.join(SYS32, 'where.exe'), ['rgfc'], { env: onlyCwd, cwd });
+  const w = await run(path.join(SYS32, 'where.exe'), ['rgfc'], onlyCwd, cwd);
   assert.match(w.stdout, /rgfc\.exe/i, `fixture: where.exe must list the cwd hit (cwd-first), got ${JSON.stringify(w.stdout)}`);
   assert.deepEqual(await resolverAnswer('rgfc', onlyCwd, cwd), { path: 'rgfc', found: false }, 'a hit only in the cwd must not resolve');
   const both = fixtureEnv(root, [path.join(root, 'p')], '.EXE');

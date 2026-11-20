@@ -26,6 +26,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFile } = require('node:child_process');
 const loadTs = require('./load-ts.cjs');
+const { nodeEnv } = require('./tools/node-env.cjs');
 
 const REPO = path.resolve(__dirname, '..');
 const R = loadTs('src/main/commandResolver.ts');
@@ -110,7 +111,8 @@ const CHILD = [
   "const R = require(repo + '/test/load-ts.cjs')('src/main/commandResolver.ts');",
   "R.lookupCommandAsync(name).then((r) => process.stdout.write(JSON.stringify(r)));"
 ].join('\n');
-const run = (file, args, opts) => new Promise((res) => execFile(file, args, { windowsHide: true, maxBuffer: 1 << 20, ...opts }, (err, stdout, stderr) => res({ code: err ? err.code : 0, stdout: String(stdout), stderr: String(stderr) })));
+// nodeEnv: under the Electron leg process.execPath is electron.exe, and a child env without ELECTRON_RUN_AS_NODE starts a real app.
+const run = (file, args, env, cwd) => new Promise((res) => execFile(file, args, { windowsHide: true, maxBuffer: 1 << 20, env: nodeEnv(env), cwd }, (err, stdout, stderr) => res({ code: err ? err.code : 0, stdout: String(stdout), stderr: String(stderr) })));
 
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lkps-'));
@@ -129,12 +131,12 @@ function fixture(t) {
 /** where.exe's own first PATHEXT line (the old rule), then the resolver's answer in a child with the
  *  same env and cwd. `expect`: the full path both must give, or null for "found nothing". */
 async function both(name, env, cwd, expect, why) {
-  const w = await run(path.join(SYS32, 'where.exe'), [name], { env, cwd });
+  const w = await run(path.join(SYS32, 'where.exe'), [name], env, cwd);
   assert.ok(w.code === 0 || w.code === 1, `where.exe failed (${w.code}): ${w.stderr}`);
   const lines = w.stdout.trim().split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   const pick = lines.find((p) => /\.(exe|cmd)$/i.test(p) && fs.existsSync(p)) ?? null;
   assert.equal(pick, expect, `fixture, where.exe's pick (${why}); it listed ${JSON.stringify(lines)}`);
-  const c = await run(process.execPath, ['-e', CHILD, REPO, name], { env, cwd });
+  const c = await run(process.execPath, ['-e', CHILD, REPO, name], env, cwd);
   assert.equal(c.code, 0, `resolver child failed: ${c.stderr}`);
   assert.deepEqual(JSON.parse(c.stdout), expect ? { path: expect, found: true } : { path: name, found: false }, why);
 }
@@ -243,11 +245,11 @@ test('real fs: resolveCliAsync gives what the old rule gave on where.exe\'s own 
   const cmd = mk('b\\lkcli.cmd');
   const cwd = path.join(root, 'empty');
   const e = env([path.join(root, 'a'), path.join(root, 'b')]);
-  const w = await run(path.join(SYS32, 'where.exe'), ['lkcli'], { env: e, cwd });
+  const w = await run(path.join(SYS32, 'where.exe'), ['lkcli'], e, cwd);
   const lines = w.stdout.trim().split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   assert.deepEqual(lines, [path.join(root, 'a', 'lkcli'), cmd], 'fixture: where.exe lists the extensionless shim first, then the .cmd');
   const old = [...lines.filter((l) => /\.(exe|cmd|bat)$/i.test(l)), ...lines.filter((l) => !/\.(exe|cmd|bat)$/i.test(l))].find((p) => fs.existsSync(p));
-  const c = await run(process.execPath, ['-e', CLI_CHILD, REPO, 'lkcli'], { env: e, cwd });
+  const c = await run(process.execPath, ['-e', CLI_CHILD, REPO, 'lkcli'], e, cwd);
   assert.equal(c.code, 0, `resolver child failed: ${c.stderr}`);
   assert.equal(JSON.parse(c.stdout), old);
   assert.equal(old, cmd);
