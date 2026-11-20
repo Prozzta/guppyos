@@ -20,8 +20,8 @@ require('./tools/own-job.cjs');
  *
  * PTY-EARLY-CLOSE-EOF-READY-WAIT-108: the lever orders events, it does not time them. It used to
  * delay the READY by a fixed 300 ms and kill right after the spawn. node-pty terminates the worker
- * 1 s after a kill, and a READY handled after that connects nothing (guardLateReady reports the exit
- * itself): 'ready_datapipe' then never comes. So a worker that took more than about 700 ms to start
+ * 1 s after a kill, and a READY handled after that connected nothing (guardLateReady, since retired
+ * with PTY-CONHOST-ORPHAN option A, reported the exit itself): 'ready_datapipe' then never came. So a worker that took more than about 700 ms to start
  * (a loaded suite leg) left the first test waiting CAP_MS for an event that could not come. Now the
  * test sees the READY arrive, kills, and releases it in the same turn: the connect starts inside the
  * kill's turn, however long the worker took.
