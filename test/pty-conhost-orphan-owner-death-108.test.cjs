@@ -22,6 +22,10 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+// MUTANT-JOURNAL NO-BYPASS: tools/test-temp.cjs is mutated in place by the temp-hygiene census; refuse a
+// tree a mutant runner left (or is holding) mutated, like load-ts does.
+const REPO = path.join(__dirname, '..');
+require('./tools/mutant-runner-helper.cjs').assertUnmutated(REPO, path.basename(__filename));
 const { tempDir } = require('./tools/test-temp.cjs');
 const { processTable, lookupPids, childrenOf, treeOf, sameProcess, killVerified } = require('./tools/own-procs.cjs');
 
