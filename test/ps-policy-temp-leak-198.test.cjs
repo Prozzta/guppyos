@@ -163,7 +163,10 @@ setTimeout(() => afterExit(() => process.stdout.write('timer\\n')), 30000);
     // kill, until the caller has swept. While the hold is open Windows cannot give its pid to another
     // process, so the sweep's kill(pid, 0) answers for this process (exited: ESRCH), not a stranger.
     // procOpen takes only a running child of ours: opened later, it would throw "already exited".
-    const hold = open(p.pid);
+    // FLAKE-PS-POLICY-KILLED-CELL-HANG-108: from here the process runs, and only this helper ends it.
+    // If the hold cannot be opened, end it and report once it has gone: left alone it never ends.
+    let hold;
+    try { hold = open(p.pid); } catch (e) { p.once('close', () => reject(e)); p.kill('SIGKILL'); return; }
     let out = '';
     p.stdout.on('data', (d) => { out += d; if (/killed|timer/.test(out)) p.kill('SIGKILL'); });
     p.on('close', () => {
