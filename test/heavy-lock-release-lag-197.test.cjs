@@ -351,10 +351,11 @@ async function liveRelease(t, o) {
         }
         if (!pids.length) killsOver();
         for (const pid of pids) {
-          const k = { pid, startedAt: null, endedAt: null };
+          const k = { pid, startedAt: null, sentAt: null, endedAt: null };
           kills.push(k);
           const end = () => { if (k.endedAt === null) k.endedAt = Date.now(); if (kills.every((x) => x.endedAt !== null)) killsOver(); };
           const go = () => {
+            k.sentAt = Date.now();
             const tk = spawn('taskkill', ['/F', '/PID', String(pid)], { stdio: 'ignore', windowsHide: true });
             tk.on('error', end);
             tk.on('exit', end);
@@ -364,6 +365,7 @@ async function liveRelease(t, o) {
           // o.slowOthers: every process but the shell's takes this long, so the shell dies first and the rest of
           // the job after it (taskkill on a loaded machine, one process slower than another).
           const delay = o.slowOthers && pid !== sh.pid ? o.slowOthers : (o.slowKill || 0);
+          // startedAt: scheduled; sentAt: the taskkill process was actually spawned (after the delay).
           const kill = () => { k.startedAt = Date.now(); if (delay) setTimeout(go, delay); else go(); };
           kill();
         }
@@ -376,10 +378,12 @@ async function liveRelease(t, o) {
   // that can be well after the shell's exit. The 6 s window opens at the job's end, not the shell's.
   await killsDone;
   const jobEndAt = Math.max(exitAt, ...kills.map((k) => k.endedAt ?? 0));
+  // No process can die from a kill that has not been sent: the slot is not free before the last one was.
+  const lastSent = kills.reduce((m, k) => (k.sentAt !== null && k.sentAt > m.at ? { at: k.sentAt, pid: k.pid } : m), { at: exitAt, pid: null });
   const deadline = jobEndAt + 6_000;
   while (lock.snapshot().length && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
   const rel = rows.find((r) => r.kind === 'heavy-lock' && r.action === 'release');
-  return { lagMs: rel ? rel.ts - exitAt : null, afterEndMs: rel ? rel.ts - jobEndAt : null, exitAt, jobEndAt, runMs: exitAt - t0, heldMs: rel ? rel.heldMs : null, reason: rel ? rel.reason : null, rows, code: exit.code, signal: exit.signal, kills, shellPid: sh.pid };
+  return { lagMs: rel ? rel.ts - exitAt : null, relAt: rel ? rel.ts : null, lastSentAt: lastSent.at, lastSentPid: lastSent.pid, afterEndMs: rel ? rel.ts - jobEndAt : null, exitAt, jobEndAt, runMs: exitAt - t0, heldMs: rel ? rel.heldMs : null, reason: rel ? rel.reason : null, rows, code: exit.code, signal: exit.signal, kills, shellPid: sh.pid };
 }
 
 // What this process reads from a Git Bash shell that taskkill /F ended: exit code 1, no signal.
@@ -396,13 +400,14 @@ function assertKilled(r, what) {
 
 /** Every kill, from the shell's exit: pid, start, end (ms), so a red says which process was late. */
 function killsText(r) {
-  return r.kills.map((k) => `${k.pid}${k.pid === r.shellPid ? '(shell)' : ''}: ${k.startedAt === null ? '?' : k.startedAt - r.exitAt}..${k.endedAt === null ? '?' : k.endedAt - r.exitAt}`).join(', ');
+  return r.kills.map((k) => `${k.pid}${k.pid === r.shellPid ? '(shell)' : ''}: ${k.startedAt === null ? '?' : k.startedAt - r.exitAt}${k.sentAt === null ? '' : `/sent ${k.sentAt - r.exitAt}`}..${k.endedAt === null ? '?' : k.endedAt - r.exitAt}`).join(', ');
 }
 
 function assertFreed(r, what) {
   const kills = r.kills.length ? `; kills (ms from the shell's exit) ${killsText(r)}; the job ended ${r.jobEndAt - r.exitAt} ms after the shell` : '';
   assert.ok(r.afterEndMs !== null, `${what}: THE SLOT IS FREED WITHIN 2 S OF THE JOB'S EXIT (not freed 6 s after the job's last process ended${kills})`);
-  assert.ok(r.lagMs >= 0, `${what}: THE SLOT IS NOT RELEASED BEFORE THE JOB EXITS (released ${r.lagMs} ms before it)`);
+  assert.ok(r.lagMs >= 0, `${what}: THE SLOT IS NOT RELEASED BEFORE THE JOB EXITS (released ${-r.lagMs} ms before the shell's exit)`);
+  assert.ok(r.relAt >= r.lastSentAt, `${what}: THE SLOT IS NOT RELEASED BEFORE THE JOB EXITS (released ${r.lastSentAt - r.relAt} ms before the kill of pid ${r.lastSentPid} was even sent${kills})`);
   assert.ok(r.afterEndMs < 2_000, `${what}: THE SLOT IS FREED WITHIN 2 S OF THE JOB'S EXIT (freed ${r.afterEndMs} ms after the job's end${kills})`);
   assert.equal(r.reason, 'job-exit');
 }
@@ -532,7 +537,7 @@ test('LIVE: a job whose other members are killed long after the shell is freed w
 // frees the slot at the shell's death while the 7 s-late members run: 100 ms after the shell, 6800 ms early.)
 test('the freed check fails a release while the kill of a member has not even been sent', () => {
   const T = 1_000_000;
-  const rec = (relAt, extra = {}) => ({ exitAt: T, jobEndAt: T + 6_900, relAt, lagMs: relAt - T, afterEndMs: relAt - (T + 6_900), reason: 'job-exit', shellPid: 1,
+  const rec = (relAt, extra = {}) => ({ exitAt: T, jobEndAt: T + 6_900, relAt, lastSentAt: T + 6_400, lastSentPid: 2, lagMs: relAt - T, afterEndMs: relAt - (T + 6_900), reason: 'job-exit', shellPid: 1,
     kills: [{ pid: 1, startedAt: T - 600, sentAt: T - 600, endedAt: T }, { pid: 2, startedAt: T - 600, sentAt: T + 6_400, endedAt: T + 6_900 }], ...extra });
   assert.doesNotThrow(() => assertFreed(rec(T + 7_400), 'x'), 'a release 500 ms after the last member ended is fine');
   assert.throws(() => assertFreed(rec(T + 100), 'x'), /NOT RELEASED BEFORE THE JOB EXITS.*pid 2/s, 'a release at the shell death, 6 s before the last kill was sent');
