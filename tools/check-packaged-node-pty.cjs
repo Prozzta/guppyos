@@ -20,7 +20,11 @@
 //     app loads), and no other conpty.node is packed anywhere in the archive.
 // and, again in the unpacked node-pty (PTY-EARLY-KILL-EPIPE-108):
 //   9 lib/worker/conoutSocketWorker.js is the pinned form with the socket error listeners
-const fs = require('node:fs');
+// PTY-HOLD-FIXTURE-ASAR-INVALID-PACKAGE-108: under Electron (ELECTRON_RUN_AS_NODE included) `fs`
+// shows a *.asar as a FOLDER: opening app.asar is EISDIR, and a walk goes into it. This tool must
+// read the archive as the file it is, and name it in a walk, so there it takes Electron's own
+// unpatched fs. Under Node the two are one module.
+const fs = process.versions.electron ? require('original-fs') : require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const pins = require('./node-pty-race-fix-pins.cjs');

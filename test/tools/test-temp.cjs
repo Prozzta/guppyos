@@ -4,7 +4,9 @@
 // and after-hooks), so a file that makes folders in helpers and module scope cannot forget one.
 // A folder still in use then (a child left running, a file left open) stays, and run-tests names
 // it (TEMP LEAK).
-const fs = require('node:fs');
+// Under Electron `fs` shows a *.asar as a folder and cannot remove one (EPERM), so a temp folder
+// that holds an archive would stay. The unpatched fs removes it as the file it is.
+const fs = process.versions.electron ? require('original-fs') : require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
