@@ -331,21 +331,51 @@ async function liveRelease(t, o) {
   const t0 = Date.now();
   // A kill ends every process of the job (what stopping a background task does to its tree; a tree
   // kill from the Git Bash launcher alone misses the MSYS children, which then keep the job running).
+  // FLAKE-LAG197-NOPORT-KILL-NOT-ENDED-108: the kill never blocks this process, and every taskkill
+  // starts at once. It was one spawnSync after another, so this process could not see the shell's
+  // exit until the last taskkill returned, and runMs measured the kill tool under load, not the job.
+  const kills = [];
   if (o.kill) {
     setTimeout(() => {
-      const l = spawnSync(exe, ['list', id], { encoding: 'utf8', windowsHide: true });
-      for (const line of String(l.stdout).split(/\r?\n/).filter(Boolean)) {
-        // o.slowKill: the kill tool takes this long per process, as taskkill does on a loaded machine
-        if (o.slowKill) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, o.slowKill);
-        try { spawnSync('taskkill', ['/F', '/PID', String(JSON.parse(line).pid)], { windowsHide: true }); } catch { /* gone already */ }
-      }
+      let out = '';
+      const l = spawn(exe, ['list', id], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
+      l.stdout.on('data', (d) => { out += d; });
+      l.on('error', () => { /* no list: no kill, and the cell's exit-code check says so */ });
+      l.on('close', () => {
+        for (const line of out.split(/\r?\n/).filter(Boolean)) {
+          let pid;
+          try { pid = JSON.parse(line).pid; } catch { continue; }
+          const k = { pid, startedAt: Date.now(), endedAt: null };
+          kills.push(k);
+          const go = () => {
+            const tk = spawn('taskkill', ['/F', '/PID', String(pid)], { stdio: 'ignore', windowsHide: true });
+            tk.on('error', () => { k.endedAt = Date.now(); });
+            tk.on('exit', () => { k.endedAt = Date.now(); });
+          };
+          // o.slowKill: the kill tool takes this long per process, as taskkill does on a loaded machine
+          if (o.slowKill) setTimeout(go, o.slowKill); else go();
+        }
+      });
     }, o.kill);
   }
-  const exitAt = await new Promise((r) => sh.on('exit', () => r(Date.now())));
+  const exit = await new Promise((r) => sh.on('exit', (code, signal) => r({ at: Date.now(), code, signal })));
+  const exitAt = exit.at;
   const deadline = exitAt + 6_000;
   while (lock.snapshot().length && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
   const rel = rows.find((r) => r.kind === 'heavy-lock' && r.action === 'release');
-  return { lagMs: rel ? rel.ts - exitAt : null, runMs: exitAt - t0, heldMs: rel ? rel.heldMs : null, reason: rel ? rel.reason : null, rows };
+  return { lagMs: rel ? rel.ts - exitAt : null, runMs: exitAt - t0, heldMs: rel ? rel.heldMs : null, reason: rel ? rel.reason : null, rows, code: exit.code, signal: exit.signal, kills };
+}
+
+// What this process reads from a Git Bash shell that taskkill /F ended: exit code 1, no signal.
+// MEASURED on this file's own kill cells (see the card), not assumed. `sleep 30` that runs out on
+// its own ends the shell with 0.
+const KILLED_EXIT = 1;
+
+/** The shell ended BECAUSE it was killed: the fact `runMs < 10 s` stood in for. */
+function assertKilled(r, what) {
+  assert.ok(r.kills.length > 0, `${what}: THE JOB LISTED ITS PROCESSES AND EACH WAS KILLED (none listed)`);
+  assert.equal(r.signal, null, `${what}: the shell's exit carries no signal`);
+  assert.equal(r.code, KILLED_EXIT, `${what}: THE KILL ENDED THE JOB (exit code ${r.code}; a killed shell reports ${KILLED_EXIT}, one that ran out on its own reports 0)`);
 }
 
 function assertFreed(r, what) {
@@ -436,15 +466,15 @@ test('LIVE: a failed gate (exit 1) frees the slot within 2 s', { skip: LIVE_SKIP
 
 test('LIVE: a killed job (every process of it ended from outside) frees the slot within 2 s', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
   const r = await liveRelease(t, { body: 'sleep 30', kill: 1_500 });
-  t.diagnostic(`kill: ran ${r.runMs} ms, held ${r.heldMs} ms, freed ${r.lagMs} ms after the exit`);
-  assert.ok(r.runMs < 10_000, 'the kill ended the job');
+  t.diagnostic(`kill: ran ${r.runMs} ms, held ${r.heldMs} ms, freed ${r.lagMs} ms after the exit; shell exit code ${r.code}, signal ${r.signal}, ${r.kills.length} killed`);
+  assertKilled(r, 'kill');
   assertFreed(r, 'kill');
 });
 
 test('LIVE: a killed job frees the slot when completion-port notices are absent', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
   const r = await liveRelease(t, { body: 'sleep 30', kill: 1_500, exe: helper(t, noPortNoticesHelperSource()) });
-  t.diagnostic(`no-port kill: ran ${r.runMs} ms, held ${r.heldMs} ms, freed ${r.lagMs} ms after the exit`);
-  assert.ok(r.runMs < 10_000, 'the kill ended the job');
+  t.diagnostic(`no-port kill: ran ${r.runMs} ms, held ${r.heldMs} ms, freed ${r.lagMs} ms after the exit; shell exit code ${r.code}, signal ${r.signal}, ${r.kills.length} killed`);
+  assertKilled(r, 'no-port kill');
   assertFreed(r, 'no-port kill');
   assertWatcherClosed(r, 'no-port kill');
 });
@@ -455,9 +485,20 @@ test('LIVE: a killed job frees the slot when completion-port notices are absent'
 // job. Here the tool is slow on purpose: the job is still killed, and the slot is still freed.
 test('LIVE: a kill tool that is slow under load is not read as a job the kill did not end', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
   const r = await liveRelease(t, { body: 'sleep 30', kill: 1_500, slowKill: 6_000 });
-  t.diagnostic(`slow kill: ran ${r.runMs} ms, held ${r.heldMs} ms, freed ${r.lagMs} ms after the exit`);
-  assert.ok(r.runMs < 10_000, 'the kill ended the job');
+  t.diagnostic(`slow kill: ran ${r.runMs} ms, held ${r.heldMs} ms, freed ${r.lagMs} ms after the exit; shell exit code ${r.code}, signal ${r.signal}, ${r.kills.length} killed`);
+  assertKilled(r, 'slow kill');
+  // the kills run together: every one had started before the first one ended
+  const firstEnd = Math.min(...r.kills.map((k) => k.endedAt ?? Infinity));
+  assert.ok(r.kills.every((k) => k.startedAt <= firstEnd), `THE KILLS RUN TOGETHER, not one after another: ${JSON.stringify(r.kills)}`);
   assertFreed(r, 'slow kill');
+});
+
+test('the killed check fails a shell that ran out on its own, and one nothing was killed in', () => {
+  const kills = [{ pid: 1, startedAt: 1, endedAt: 2 }];
+  assert.doesNotThrow(() => assertKilled({ code: KILLED_EXIT, signal: null, kills }, 'x'));
+  assert.throws(() => assertKilled({ code: 0, signal: null, kills }, 'x'), /THE KILL ENDED THE JOB \(exit code 0/);
+  assert.throws(() => assertKilled({ code: KILLED_EXIT, signal: null, kills: [] }, 'x'), /none listed/);
+  assert.throws(() => assertKilled({ code: null, signal: 'SIGTERM', kills }, 'x'), /no signal/);
 });
 
 test('LIVE: a member that joins after a snapshot keeps the slot until its own exit', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
