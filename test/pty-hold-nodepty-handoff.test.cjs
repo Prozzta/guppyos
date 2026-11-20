@@ -29,13 +29,16 @@ require('./tools/own-job.cjs');
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
+// Under Electron `fs` shows a *.asar as a folder: writing the fixture's app.asar is 'Invalid
+// package', and a listing does not name it as a file. The fixtures are real files, so this file
+// takes the unpatched fs there (PTY-HOLD-FIXTURE-ASAR-INVALID-PACKAGE-108).
+const fs = process.versions.electron ? require('original-fs') : require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const loadTs = require('./load-ts.cjs');
 const { readSource } = require('./read-source.cjs');
-const { tempDir } = require('./tools/test-temp.cjs');
+const { tempDir, removeDir } = require('./tools/test-temp.cjs');
 
 const ROOT = path.join(__dirname, '..');
 const PTYF = 'src/main/pty.ts';
@@ -575,6 +578,47 @@ if (!WIN) {
       assert.doesNotMatch(r.stdout, /PACKAGED NODE-PTY/, 'a refused call checks nothing');
     }
     assert.deepEqual(everyFile(good), before);
+  });
+
+  // PTY-HOLD-FIXTURE-ASAR-INVALID-PACKAGE-108: the tool reads an archive as a FILE, under Electron
+  // too. The archive is a real one, written by @electron/asar (the packer electron-builder uses).
+  const RAW_FS = "const fs = process.versions.electron ? require('original-fs') : require('node:fs');";
+  test('ASAR: the tool reads a real archive as a file, under Electron too: packed and unpacked entries, and a temp folder that holds an archive is removed', async () => {
+    const asar = require(require.resolve('@electron/asar', { paths: [path.dirname(require.resolve('app-builder-lib/package.json'))] }));
+    const dir = tempDir('phnh-asar-');
+    const src = path.join(dir, 'app');
+    for (const [rel, bytes] of [['package.json', '{}'], ['out/main/index.js', '// main'], [`${NPP}/build/Release/conpty.node`, 'a binary'], [`${NPP}/lib/utils.js`, '// utils']]) {
+      fs.mkdirSync(path.dirname(path.join(src, rel)), { recursive: true });
+      fs.writeFileSync(path.join(src, rel), bytes);
+    }
+    const archive = path.join(dir, 'resources', 'app.asar');
+    fs.mkdirSync(path.dirname(archive), { recursive: true });
+    await asar.createPackageWithOptions(src, archive, { unpack: '*.node' });
+    assert.ok(fs.statSync(archive).isFile(), 'the archive is a file on disk');
+    const entries = new Map(checker.asarFiles(checker.readAsarHeader(archive)));
+    assert.deepEqual([...entries.keys()].sort(), ['package.json', 'out/main/index.js', `${NPP}/build/Release/conpty.node`, `${NPP}/lib/utils.js`].sort(), 'THE TOOL READS THE INDEX OF A REAL ARCHIVE');
+    assert.equal(entries.get(`${NPP}/build/Release/conpty.node`).unpacked, true, 'the unpacked flag is read');
+    assert.equal(entries.get(`${NPP}/lib/utils.js`).unpacked, undefined, 'a packed file has no unpacked flag');
+    assert.equal(typeof entries.get(`${NPP}/lib/utils.js`).offset, 'string', 'a packed file has its offset');
+    // The mutant: the tool on the plain fs. Under Electron that fs shows the archive as a folder.
+    // It runs in a process of its own: once Electron's fs has looked at an archive it keeps the
+    // file open for as long as the process lives, and then nothing can remove it (EPERM).
+    const mdir = tempDir('phnh-chk-');
+    fs.writeFileSync(path.join(mdir, 'node-pty-race-fix-pins.cjs'), `module.exports = require(${JSON.stringify(path.join(ROOT, 'tools', 'node-pty-race-fix-pins.cjs'))});
+`);
+    fs.writeFileSync(path.join(mdir, 'check-packaged-node-pty.cjs'), mutated(fs.readFileSync(CHECKER, 'utf8'), [[RAW_FS, "const fs = require('node:fs');"]], 'plain fs'));
+    const script = "const m = require(process.argv[1]); try { console.log(JSON.stringify({ entries: m.asarFiles(m.readAsarHeader(process.argv[2])) })); } catch (e) { console.log(JSON.stringify({ code: String(e && e.code), message: String(e && e.message) })); }";
+    const run = (tool) => { const r = spawnSync(process.execPath, ['-e', script, tool, archive], { encoding: 'utf8' }); assert.equal(r.status, 0, r.stderr); return JSON.parse(r.stdout); };
+    assert.deepEqual(run(CHECKER).entries, [...entries], 'control: the tool as it stands, in a process of its own, reads the same index');
+    const plain = run(path.join(mdir, 'check-packaged-node-pty.cjs'));
+    if (process.versions.electron) {
+      assert.equal(plain.code, 'EISDIR', `ON THE PLAIN fs UNDER ELECTRON THE TOOL CANNOT READ THE ARCHIVE (it is shown as a folder): ${JSON.stringify(plain)}`);
+    } else {
+      assert.deepEqual(plain.entries, [...entries], 'under Node the plain fs is the same module: the mutant reads the same index');
+    }
+    // The cleanup: the folder goes, archive and all.
+    assert.equal(await removeDir(dir, { budgetMs: 5_000 }), true, 'THE TEMP FOLDER WITH THE ARCHIVE IS REMOVED');
+    assert.equal(fs.existsSync(dir), false, 'nothing of it is left');
   });
 
   // The loader itself, in a process of its own: a node-pty with no built binary and a loadable
