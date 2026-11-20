@@ -16,7 +16,8 @@
  *   sync | async   src/main/fsSafeRemove.ts safeRemoveTreeSync / safeRemoveTree (the fs-handle addon)
  *   reaper         scripts/worktree-reaper.cjs applyReap on the folder
  *   jswalk         THE CONTROL: the walk of lstat, readdir, unlink and rmdir on paths that
- *                  fsSafeRemove.ts had at e074a677. It must lose, or the agent has no teeth.
+ *                  fsSafeRemove.ts had at e074a677. It must lose, or the agent has no teeth. It loses
+ *                  to a link that appears while it walks, planted or swapped in (see HOLD_US).
  * The race prints one JSON line: { ok, electron, node, out } or { ok: false, error }.
  * <base> must be under the temp folder; the victim is <base>/victim and nothing else is named.
  *
@@ -126,6 +127,13 @@ function jsWalk(root) {
 // walks ended that way, with no loss. Held for 1 ms, the walk meets the finished link instead: 16 of 16
 // control legs lost within 73 runs. The hold is put around the walk from outside; the walk's text is
 // not changed. The callers under test are one native call each and are not held.
+// The plant loses too, by the same lines of the walk. On Windows a junction is made in two steps (an
+// empty folder, then the link is set on it), so a planted j is a real folder for a moment. The walk's
+// check of j (its first lstat) can fall in that moment; its listing of j (the readdir after it) then
+// goes through the finished link, and the victim's files are deleted by path. Measured with 8 racers
+// at once: 25 of 32 plant-only legs lost held, 5 of 8 not held, and the check had seen j as a real
+// folder in every leg that lost and in none that did not. An agent that does nothing lost nothing in
+// 11,982 runs. So the control's claim is: the walk loses to a link that appears while it walks.
 const HOLD_US = 1000;
 
 function remover(impl, work) {
@@ -286,7 +294,7 @@ if (require.main === module) {
         process.exitCode = ok ? 0 : 1;
       } else {
         const ok = !failed && losses > 0;
-        say(`${ok ? 'CONTROL LOST (as it must)' : 'CONTROL DID NOT LOSE: the agent has no teeth here'}: ${res.runtime} on ${res.platform}: the JS walk lost the victim's files in ${losses} of ${runs} runs`);
+        say(`${ok ? 'CONTROL LOST (as it must)' : 'CONTROL DID NOT LOSE: the agent has no teeth here'}: ${res.runtime} on ${res.platform}: the JS walk lost the victim's files to a link that appeared during the walk in ${losses} of ${runs} runs (${attacks} links planted or swapped in by the agent)`);
         process.exitCode = ok ? 0 : 1;
       }
     });

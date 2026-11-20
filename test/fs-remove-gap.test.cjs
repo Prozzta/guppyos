@@ -19,7 +19,9 @@ require('./tools/own-job.cjs');
  * Electron as Node, at 0 losses, and the old walk as the control. The control is the copy of the
  * e074a677 walk kept in the race file, held for 1 ms after each check that found a real folder (why
  * is in the race file, at HOLD_US): it loses within 100 runs, so it is run until it loses and the
- * test fails if it does not.
+ * test fails if it does not. What it proves is that the old walk loses to a link that appears while
+ * it walks, whichever way the agent put it there: swapped in for a folder, or planted (on Windows a
+ * new junction is a real folder for a moment). An agent that plants and swaps nothing fails it.
  *
  * The statistical pin is the same race at a run count that would have caught 1 in 26,571
  * (`node test/fs-remove-gap-race.cjs pin <racers> <runs> <seconds>`); its numbers are on the card
@@ -71,9 +73,9 @@ test(`${RACERS * RUNS} raced deletes by each caller lose nothing (the installed 
   clean(await under(exe, () => many(IMPLS, RACERS, RUNS, 300)), /^Electron .* as Node$/);
 });
 
-test('CONTROL: the old JS walk loses the victim\'s files in the same race, so the race has teeth', async () => {
+test('CONTROL: the old JS walk loses the victim\'s files to links that appear during the walk (planted or swapped in), so the race has teeth', async () => {
   const res = await under(null, () => many(['jswalk'], 8, 20000, 240));
   const t = res.totals.jswalk;
   assert.equal(t.failed, 0, JSON.stringify(t.errors));
-  assert.ok(t.losses > 0, `the e074a677 walk lost nothing in ${t.runs} runs: the agent is not reaching the gap`);
+  assert.ok(t.losses > 0, `the e074a677 walk lost nothing in ${t.runs} runs: no link the agent planted (${t.planted}) or swapped in (${t.swapped}) appeared during a walk`);
 });
