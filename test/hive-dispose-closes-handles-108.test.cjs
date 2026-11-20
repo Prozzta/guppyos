@@ -207,6 +207,40 @@ test('dispose() stops the router itself: no outbox watcher is left in the folder
   deletes(home);
 });
 
+test('startRouter() on a disposed manager arms nothing (a power resume between dispose() and the delete); after reopen() it starts again', async (t) => {
+  const { home, hive } = await floor();
+  await shutDown(hive);
+  const intervals = [];
+  const runtime = { setInterval: (fn, ms) => { const h = setInterval(fn, ms); intervals.push(h); return h; } };
+  const cold = new HiveManager(() => home, () => true, runtime);
+  t.after(async () => { cold.stopRouter(); cold.dispose(); await cold.drainReads(); for (const h of intervals) clearInterval(h); });
+
+  // Control: a live startRouter() arms the reconcile timer and an outbox watcher.
+  cold.startRouter();
+  await cold.routerIdle();
+  assert.equal(intervals.length, 1, 'control: a live startRouter() arms the reconcile timer');
+  assert.ok(watches(home).some((l) => /outbox$/.test(l)), `control: a live startRouter() watches the outboxes: ${JSON.stringify(watches(home))}`);
+
+  cold.stopLedgerGuard(); cold.dispose(); await cold.drainReads();
+  assert.deepEqual(openUnder(home), [], 'control: shutdown leaves nothing open');
+  // What onSystemResume does (src/main/index.ts): stopRouter(), startRouter(), routeOnce().
+  cold.stopRouter();
+  cold.startRouter();
+  await cold.routerIdle();
+  assert.equal(intervals.length, 1, 'startRouter() on a disposed manager armed the reconcile timer');
+  assert.deepEqual(openUnder(home), [], 'startRouter() on a disposed manager opened a watcher in the folder');
+  assert.deepEqual(cold.watchedOutboxes(), [], 'and it watches no outbox');
+
+  cold.reopen();
+  cold.startRouter();
+  await cold.routerIdle();
+  assert.equal(intervals.length, 2, 'after reopen() the router starts again');
+  assert.ok(watches(home).some((l) => /outbox$/.test(l)), 'after reopen() it watches the outboxes again');
+  cold.stopLedgerGuard(); cold.dispose(); await cold.drainReads();
+  assert.deepEqual(openUnder(home), [], 'nothing is open after the last shutdown');
+  deletes(home);
+});
+
 test('drainReads() does not resolve while a route pass is in flight, even with none of its reads open', async (t) => {
   const { home, hive } = await floor();
   const outbox = path.resolve(path.join(hive.agentDir('god-1'), 'outbox'));

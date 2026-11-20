@@ -3935,6 +3935,9 @@ export class HiveManager {
    * the loss-recovery backstop for dropped/failed watchers. */
   static readonly ROUTER_RECONCILE_MS = 10_000;
   startRouter(intervalMs = HiveManager.ROUTER_RECONCILE_MS): void {
+    // HIVE-DISPOSE-INFLIGHT-REARM: a power resume or unlock between dispose() and the folder's
+    // delete restarts the router; on a disposed manager that arms nothing until reopen().
+    if (this.readsRefused) return;
     if (this.routerTimer || !this.enabled()) return;
     this.routerGeneration++;
     this.routerTimer = this.routerRuntime.setInterval(() => this.reconcileRouterAsync(), intervalMs);
