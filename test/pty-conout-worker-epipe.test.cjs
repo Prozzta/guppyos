@@ -107,30 +107,32 @@ test('the main thread still has no listener for the worker\'s error (so a worker
 function load(text) {
   const made = [];
   class Sock extends EventEmitter {
-    constructor() { super(); this.destroyed = false; this.piped = []; this.unpiped = []; this.ended = 0; made.push(this); }
+    constructor() { super(); this.destroyed = false; this.piped = []; this.unpiped = []; this.ended = 0; this.resumed = 0; made.push(this); }
     setEncoding() {}
     connect(_name, cb) { this.connected = cb; }
     pipe(dest) { this.piped.push(dest); return dest; }
-    unpipe(dest) { this.unpiped.push(dest); }
+    unpipe(dest) { this.unpiped.push(dest === undefined ? 'all' : dest); }
+    resume() { this.resumed++; }
     end() { this.ended++; }
   }
   let accept;
+  const server = Object.assign(new EventEmitter(), { closed: 0, listen() {}, close() { this.closed++; } });
   const mods = {
     worker_threads: { workerData: { conoutPipeName: 'p' }, parentPort: { postMessage() {} } },
-    net: { Socket: Sock, createServer: (fn) => { accept = fn; return { listen() {} }; } },
+    net: { Socket: Sock, createServer: (fn) => { accept = fn; return server; } },
     '../shared/conout': { getWorkerPipeName: (n) => `${n}-worker` }
   };
   // eslint-disable-next-line no-new-func
   new Function('require', 'exports', text)((n) => { if (!mods[n]) throw new Error(`unexpected require ${n}`); return mods[n]; }, {});
   const conout = made[0];
   conout.connected();
-  return { conout, data: () => { const s = new Sock(); accept(s); return s; } };
+  return { conout, server, data: () => { const s = new Sock(); accept(s); server.emit('connection', s); return s; } };
 }
 const err = (code) => Object.assign(new Error(`write ${code}`), code ? { code } : {});
 
 /** Throws unless `text` is quiet for a reader that has gone, and for nothing else. */
 function quietOnlyForAPeerThatHasGone(text) {
-  const { conout, data } = load(text);
+  const { conout, server, data } = load(text);
   const a = data();
   assert.deepEqual(conout.piped, [a], 'the data socket is piped to');
   assert.equal(a.listenerCount('error'), 1, 'THE DATA SOCKET HAS AN ERROR LISTENER');
@@ -142,7 +144,17 @@ function quietOnlyForAPeerThatHasGone(text) {
   assert.equal(a.emit('error', err('ECONNRESET')), true, 'ECONNRESET on a destroyed data socket is taken');
   assert.throws(() => a.emit('error', err('ENOENT')), /write ENOENT/, 'ANOTHER ERROR IS THROWN AGAIN, destroyed socket or not');
   assert.throws(() => a.emit('error', err('')), /write /, 'an error with no code is thrown again');
+  // PTY-CONHOST-LEAK-NATIVE: the console writes on when its reader has gone. A pipe with no
+  // destination stops reading, and the console host then blocks in its own write for ever.
+  const c = data();
+  conout.unpiped.length = 0;
   a.emit('close');
+  assert.equal(conout.resumed, 0, 'another reader is still there: the output still goes to it');
+  assert.deepEqual(conout.unpiped, [], 'and it stays piped to');
+  c.emit('close');
+  assert.deepEqual(conout.unpiped, ['all'], 'the last reader has gone: nothing is piped to any more');
+  assert.equal(conout.resumed, 1, 'AND THE CONSOLE\'S OUTPUT IS STILL READ (and thrown away)');
+  assert.equal(server.closed, 0, 'the worker stays while the console has its end open');
   const b = data();
   assert.equal(conout.listenerCount('error'), 1, 'THE CONSOLE PIPE HAS AN ERROR LISTENER');
   assert.throws(() => conout.emit('error', err('ECONNRESET')), /write ECONNRESET/, 'a console pipe that is not destroyed: thrown again');
@@ -152,6 +164,31 @@ function quietOnlyForAPeerThatHasGone(text) {
   assert.equal(conout.emit('error', err('ECONNRESET')), true, 'a console that has gone is taken');
   assert.equal(b.ended, 1, 'THE OPEN DATA SOCKET IS ENDED (the terminal sees its output end)');
   assert.equal(a.ended, 0, 'A DATA SOCKET THAT CLOSED IS NOT TOUCHED AGAIN');
+  // PTY-CONHOST-LEAK-NATIVE: the worker ends by itself (it listens no more), and nothing else
+  // ends it. Only when the console has closed its end, a reader was served, and none is open.
+  conout.emit('close');
+  assert.equal(server.closed, 0, 'THE WORKER STAYS WHILE A READER IS OPEN');
+  b.emit('close');
+  assert.equal(server.closed, 1, 'THE WORKER ENDS BY ITSELF: the console has closed its end and the last reader has gone');
+  {
+    const w = load(text);
+    const d = w.data();
+    d.emit('close');
+    assert.equal(w.server.closed, 0, 'THE WORKER STAYS WHILE THE CONSOLE HAS ITS END OPEN, reader or not: it reads on');
+    w.conout.destroyed = true;
+    w.conout.emit('close');
+    assert.equal(w.server.closed, 1, 'THE WORKER ENDS BY ITSELF WHEN THE CONSOLE CLOSES ITS END after the reader went');
+  }
+  {
+    const w = load(text);
+    w.conout.destroyed = true;
+    w.conout.emit('close');
+    assert.equal(w.server.closed, 0, 'A CONSOLE THAT CLOSED BEFORE ANY READER CAME: THE PIPE IS STILL THERE for the reader that connects late');
+    const d = w.data();
+    assert.equal(w.server.closed, 0, 'and it is served');
+    d.emit('close');
+    assert.equal(w.server.closed, 1, 'and the worker ends by itself after it');
+  }
 }
 
 test('the patched worker is quiet for a reader that has gone, and for nothing else', () => {
@@ -166,6 +203,12 @@ const MUTANTS = [
   ['M4 closed data sockets are kept', (t) => swap(t, '            guppyDataSockets.splice(guppyDataSockets.indexOf(workerSocket), 1);\n', '', 'M4')],
   ['M5 a console that has gone leaves the data sockets open', (t) => swap(t, '    guppyDataSockets.slice().forEach(function (dataSocket) { dataSocket.end(); });\n', '', 'M5')],
   ['M6 no listener on the data socket (W2)', () => noDataListener()],
+  ['M8 the worker stops reading when its last reader has gone', (t) => swap(t, '                conoutSocket.resume();\n', '', 'M8')],
+  ['M9 the reading resumes while the old pipe is still attached (its own close then pauses it)', (t) => swap(t, '                conoutSocket.unpipe();\n', '', 'M9')],
+  ['M10 the worker stays when the console closes its end after its reader went', (t) => swap(t, '    conoutSocket.on(\'close\', guppyEndWhenDone);\n', '', 'M10')],
+  ['M11 the worker ends before a late reader has come', (t) => swap(t, 'conoutSocket.destroyed && guppyHadReader && guppyReaders === 0', 'conoutSocket.destroyed && guppyReaders === 0', 'M11')],
+  ['M12 the worker ends under an open reader', (t) => swap(t, 'conoutSocket.destroyed && guppyHadReader && guppyReaders === 0', 'conoutSocket.destroyed && guppyHadReader', 'M12')],
+  ['M13 the worker ends while the console has its end open', (t) => swap(t, 'conoutSocket.destroyed && guppyHadReader && guppyReaders === 0', 'guppyHadReader && guppyReaders === 0', 'M13')],
   ['M7 the unpatched worker (W1)', () => PRISTINE]
 ];
 test('each named change to the patched worker is refused by that check', () => {

@@ -127,10 +127,10 @@ test('PTY-NATURAL-EXIT: releaseExited is safe to repeat and leaves a terminal it
   const proc = { _agent: { kill: () => calls.push('kill'), _conoutSocketWorker: { dispose: () => calls.push('dispose') }, _inSocket: { destroyed: false, destroy() { calls.push('destroy'); this.destroyed = true; } } } };
   assert.equal(releaseExited(proc, 'win32'), true);
   assert.equal(releaseExited(proc, 'win32'), true);
-  assert.deepEqual(calls, ['dispose', 'destroy', 'dispose'], 'no kill; the socket is destroyed once; node-pty\'s dispose guards itself');
+  assert.deepEqual(calls, ['destroy'], 'no kill; the socket is destroyed once; THE OUTPUT WORKER IS NOT ENDED HERE: it ends by itself when the console host has closed its end (PTY-CONHOST-LEAK-NATIVE)');
   assert.equal(releaseExited(proc, 'linux'), false, 'unix terminals have neither: nothing to do');
   assert.equal(releaseExited({}, 'win32'), false, 'another node-pty: left alone, and said so');
   assert.equal(releaseExited({ _agent: {} }, 'win32'), false);
   // A throwing internal never escapes into node-pty's exit callback.
-  assert.equal(releaseExited({ _agent: { _conoutSocketWorker: { dispose() { throw new Error('x'); } }, _inSocket: { destroy() {} } } }, 'win32'), false);
+  assert.equal(releaseExited({ _agent: { _conoutSocketWorker: { dispose() {} }, _inSocket: { destroy() { throw new Error('x'); } } } }, 'win32'), false);
 });
