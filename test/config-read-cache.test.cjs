@@ -36,6 +36,17 @@ function io(fn) {
   return n;
 }
 const handEdit = (obj) => fs.writeFileSync(file, JSON.stringify({ ...MIGRATED, ...obj }), 'utf8');
+/**
+ * An outside edit the stat MUST see: its byte length differs from the text on disk (JSON plus a
+ * newline when the lengths would match). Size is part of the stat key, so the key moves whatever
+ * the file clock does. A same-size in-place write within one NTFS clock step (1 ms here) keeps
+ * mtime and ctime, hence the whole key; product code covers that with the racy rule, which the
+ * `OLD` wall clock below switches off. Tests of the racy rule itself keep using handEdit.
+ */
+const seenEdit = (obj) => {
+  const text = JSON.stringify({ ...MIGRATED, ...obj });
+  fs.writeFileSync(file, Buffer.byteLength(text) === fs.statSync(file).size ? `${text}\n` : text, 'utf8');
+};
 // The racy rule's wall clock: a minute ahead, so the files these tests just wrote count as old
 // (proven) writes; the racy tests below drive it themselves.
 const OLD = () => Date.now() + 60_000;
@@ -65,7 +76,7 @@ test('production missed-watch fallback invalidates asynchronously', async () => 
   handEdit({ onboardingComplete: true, toolOutputCap: 701 }); __resetConfigCacheForTests(undefined, OLD);
   assert.equal(readConfig().toolOutputCap, 701);
   __dropConfigWatcherForTests();
-  handEdit({ onboardingComplete: true, toolOutputCap: 702 });
+  seenEdit({ onboardingComplete: true, toolOutputCap: 702 });
   await __revalidateConfigForTests();
   assert.equal(readConfig().toolOutputCap, 702);
 });
@@ -154,7 +165,7 @@ test('Jim P1: an outside write that lands between our rename and the next read i
 test('a read-modify-write inside the window builds on an outside edit, not on the cached value', () => {
   fresh({ toolOutputCap: 30, notifications: false });
   readConfig();
-  handEdit({ toolOutputCap: 31, notifications: false });
+  seenEdit({ toolOutputCap: 31, notifications: false });
   assert.equal(readConfig().toolOutputCap, 30, 'readers may lag by up to the window');
   writeConfig({ notifications: true });
   const disk = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -165,7 +176,7 @@ test('an external edit is invisible inside the window and picked up by the slow 
   assert.equal(CONFIG_REVALIDATE_MS, 5_000, 'the async missed-watch backstop is bounded to five seconds');
   fresh({ toolOutputCap: 100 });
   assert.equal(readConfig().toolOutputCap, 100);
-  handEdit({ toolOutputCap: 200 });
+  seenEdit({ toolOutputCap: 200 });
   tick(CONFIG_REVALIDATE_MS - 1);
   assert.equal(readConfig().toolOutputCap, 100, 'inside the window (no event loop turn, so no watcher yet)');
   tick(1);
