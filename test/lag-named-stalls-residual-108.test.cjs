@@ -619,6 +619,14 @@ test('COORDINATION: after dispose nothing is read and every agent asked is 0', a
   assert.deepEqual(seen.filter((p) => under(hive.root() || JAIL, p)), [], 'no read starts on a disposed manager');
 });
 
+/**
+ * A stat answered at once, in microtasks, with no libuv pool thread. The two stuck-stat tests below
+ * use it for every stat they do NOT hold (and for a held one once freed): a real fs.promises.stat
+ * waits for a pool thread, and under load that wait lost the race with the 20 ms beat wait and with
+ * the 1000-turn drop loop. Only the stat a test holds on purpose may be late.
+ */
+const statNow = (p) => new Promise((resolve) => { resolve(fs.statSync(p)); });
+
 /** The call, or a named failure if it is still waiting after 5 s: an unbounded wait is the defect, not a slow run. */
 function bounded(call) {
   let timer;
@@ -635,7 +643,7 @@ test('COORDINATION: a stat that never settles is waited for once, counts as 0, i
   const held = new Promise((resolve) => { free = resolve; });
   fs.promises.stat = function (p, ...rest) {
     asked.push(String(p));
-    return String(p) === stuckPath ? held.then(() => stat.call(this, p, ...rest)) : stat.call(this, p, ...rest);
+    return String(p) === stuckPath ? held.then(() => statNow(p)) : statNow(p);
   };
   const stuckRows = () => hive.logTail(500).filter((r) => r && r.kind === 'coordination-stat-stuck');
   try {
@@ -666,8 +674,8 @@ test('COORDINATION: a second stuck spell after a clean beat is logged again', as
   let hold = true;
   const frees = [];
   fs.promises.stat = function (p, ...rest) {
-    if (!hold || !String(p).endsWith('memory.md')) return stat.call(this, p, ...rest);
-    return new Promise((resolve) => { frees.push(resolve); }).then(() => stat.call(this, p, ...rest));
+    if (!hold || !String(p).endsWith('memory.md')) return statNow(p);
+    return new Promise((resolve) => { frees.push(resolve); }).then(() => statNow(p));
   };
   const stuckRows = () => hive.logTail(500).filter((r) => r && r.kind === 'coordination-stat-stuck');
   try {
