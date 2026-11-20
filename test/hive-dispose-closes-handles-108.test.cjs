@@ -508,7 +508,21 @@ async function passRig(t, payload) {
     hold('stat', (p) => { if (asked && p === inboxOf('god-1')) n++; return false; }).arm();
     return { match: (p) => { if (p === target) asked = true; return p === target; }, started: () => n };
   };
-  return { home, cold, outbox, file, inboxOf, hold, disposeWhileHeld, quiet, deliveredOnceAfterRestart, noticeAfter };
+  /**
+   * The end state when the pass was stopped around a notice it OWED the sender (a rejected file, an
+   * exact repeat): the file had already left outbox/, so only the manager knew a notice was due.
+   * The next start sends it, once; the start after that sends nothing and does nothing about the file.
+   */
+  const noticeOnceAcrossStarts = async (prefix) => {
+    for (const which of ['next', 'third']) {
+      const rows = logRows(home).length;
+      const again = new HiveManager(() => home, () => true, { setTimeout: () => null });
+      try { await again.routeOnce([outbox]); } finally { await shutDown(again); }
+      assert.equal(subjects('god-1').filter((s) => s.startsWith(prefix)).length, 1, `after the ${which} start the sender holds the '${prefix}' notice exactly once`);
+      if (which === 'third') assert.deepEqual(logRows(home).slice(rows).map(rowKind).filter((k) => k.startsWith('outbox')), [], 'the third start has nothing left to do about the file');
+    }
+  };
+  return { home, cold, outbox, file, inboxOf, hold, disposeWhileHeld, quiet, deliveredOnceAfterRestart, noticeAfter, noticeOnceAcrossStarts };
 }
 const MAIL = { to: 'andy-1', act: 'inform', subject: 'Build is green', body: 'all 12 checks passed' };
 
@@ -569,6 +583,19 @@ test('a route pass held at the bad- rename of a rejected file across dispose() s
   assert.equal(notice.started(), 0, 'a disposed manager started the reject notice (it checked the sender inbox) after dispose()');
   assert.deepEqual(r.after.inboxes, r.before.inboxes, 'a disposed manager delivered a reject notice into an inbox');
   rig.quiet(r);
+  // The move landed, so the file is out of outbox/ and the sender has not been told. That is owed.
+  await rig.noticeOnceAcrossStarts('[outbox rejected');
+  assert.equal(fs.existsSync(path.join(rig.outbox, '.sent', 'bad-note.json')), true, 'and the rejected file is kept as outbox/.sent/bad-note.json');
+  deletes(rig.home);
+});
+
+test('a route pass held at the inbox write of a reject notice across dispose() stops when the write lands, and no later start sends the notice again', async (t) => {
+  const rig = await passRig(t, { ...MAIL, act: 'shout' });
+  const inbox = rig.inboxOf('god-1') + path.sep;
+  const r = await rig.disposeWhileHeld(rig.hold('writeFile', (p) => p.startsWith(inbox)), 'the route pass writing the reject notice into the sender inbox');
+  rig.quiet(r);
+  await rig.noticeOnceAcrossStarts('[outbox rejected');
+  assert.equal(fs.existsSync(path.join(rig.outbox, '.sent', 'bad-note.json')), true, 'and the rejected file is kept as outbox/.sent/bad-note.json');
   deletes(rig.home);
 });
 
@@ -664,6 +691,15 @@ async function repeatRig(t) {
   fs.writeFileSync(again, JSON.stringify(MAIL));
   return { rig, again };
 }
+/** The repeat was never delivered, and it is kept aside in outbox/.sent/ exactly once. */
+async function keptOnce(rig) {
+  const done = path.join(rig.inboxOf('andy-1'), '.done');
+  const mails = [rig.inboxOf('andy-1'), done].flatMap((dir) => { try { return fs.readdirSync(dir).filter((f) => f.endsWith('.json')).map((f) => path.join(dir, f)); } catch { return []; } })
+    .filter((f) => JSON.parse(fs.readFileSync(f, 'utf8')).subject === MAIL.subject);
+  assert.equal(mails.length, 1, 'the repeat was not delivered: the recipient holds the mail once');
+  assert.equal(fs.existsSync(path.join(rig.outbox, 'again.json')), false, 'the repeat has left outbox/');
+  assert.equal(fs.readdirSync(path.join(rig.outbox, '.sent')).filter((f) => f.startsWith('again.json.duplicate-')).length, 1, 'and is kept aside in outbox/.sent/ once');
+}
 
 test('a route pass held at the rename of an exact repeat across dispose() sends no notice and logs nothing when the rename lands', async (t) => {
   const { rig, again } = await repeatRig(t);
@@ -672,6 +708,18 @@ test('a route pass held at the rename of an exact repeat across dispose() sends 
   assert.equal(notice.started(), 0, 'a disposed manager started the duplicate notice (it checked the sender inbox) after dispose()');
   assert.deepEqual(r.after.inboxes, r.before.inboxes, 'a disposed manager delivered a duplicate notice into an inbox');
   rig.quiet(r);
+  await rig.noticeOnceAcrossStarts('[duplicate not delivered]');
+  await keptOnce(rig);
+  deletes(rig.home);
+});
+
+test('a route pass held at the inbox write of a duplicate notice across dispose() stops when the write lands, and no later start sends the notice again', async (t) => {
+  const { rig } = await repeatRig(t);
+  const inbox = rig.inboxOf('god-1') + path.sep;
+  const r = await rig.disposeWhileHeld(rig.hold('writeFile', (p) => p.startsWith(inbox)), 'the route pass writing the duplicate notice into the sender inbox');
+  rig.quiet(r);
+  await rig.noticeOnceAcrossStarts('[duplicate not delivered]');
+  await keptOnce(rig);
   deletes(rig.home);
 });
 
