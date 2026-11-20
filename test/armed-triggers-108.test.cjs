@@ -89,7 +89,9 @@ function rig(t, agents, tasks) {
   const setTasks = (list) => { fs.writeFileSync(path.join(root, 'tasks.json'), JSON.stringify({ tasks: list }, null, 2)); };
   const setAgents = (a) => { fs.writeFileSync(path.join(root, 'registry.json'), JSON.stringify({ godId: null, agents: a }, null, 2)); mkInboxes(a); };
   const log = () => fs.readFileSync(path.join(root, 'log.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
-  return { root, boot, inbox, setTasks, setAgents, log, flags: () => monitor.flags() };
+  // For a test that removes a path inside the hive mid-test: every manager disposed so far drains first.
+  const drained = async () => { for (const m of retired) await m.drainReads(); };
+  return { root, boot, inbox, setTasks, setAgents, log, drained, flags: () => monitor.flags() };
 }
 
 const triggers = (msgs) => msgs.filter((m) => m.card === 'POST-INSTALL-161' && /app-start/.test(String(m.subject)));
@@ -134,7 +136,7 @@ test('R4 once per (card, fixVersion): another restart sends nothing more, and th
   assert.equal(rec.fired['POST-INSTALL-161@1.1.108'].to, 'jim');
 });
 
-test('R5 at-least-once: a failed record write sends again on the next start (a duplicate, never silent)', (t) => {
+test('R5 at-least-once: a failed record write sends again on the next start (a duplicate, never silent)', async (t) => {
   const r = rig(t, { jim: agent('jim') }, [ARMED()]);
   // The record cannot be written: its path is a directory (a crash between send and record).
   fs.mkdirSync(path.join(r.root, 'state', 'install-triggers.json'), { recursive: true });
@@ -142,6 +144,7 @@ test('R5 at-least-once: a failed record write sends again on the next start (a d
   assert.equal(triggers(r.inbox('jim')).length, 1, 'the send happens before the record');
   assert.ok(r.log().some((l) => l.kind === 'install-trigger-record-failed' && l.cardId === 'POST-INSTALL-161'),
     'the failed record is logged');
+  await r.drained();
   fs.rmSync(path.join(r.root, 'state', 'install-triggers.json'), { recursive: true, force: true });
   r.boot('1.1.108');
   assert.equal(triggers(r.inbox('jim')).length, 2, 'not recorded, so it fires again: at-least-once');
@@ -170,8 +173,9 @@ test('R7 an assignee who is not registered is skipped and not recorded; once reg
   assert.equal(triggers(r.inbox('jim')).length, 1, 'skipped, not recorded: it fires once jim is back');
 });
 
-test('R8 an undeliverable send (no inbox) is not recorded as fired; once the inbox exists, it fires', (t) => {
+test('R8 an undeliverable send (no inbox) is not recorded as fired; once the inbox exists, it fires', async (t) => {
   const r = rig(t, { jim: agent('jim') }, [ARMED()]);
+  await r.drained();
   fs.rmSync(path.join(r.root, 'agents', 'jim'), { recursive: true, force: true });
   r.boot('1.1.108');
   assert.equal(triggers(r.inbox('jim')).length, 0);
