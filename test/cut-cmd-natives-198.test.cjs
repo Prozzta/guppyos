@@ -134,7 +134,12 @@ function runPackagedProbe(contract, addonExports, { inheritedEnv = {}, missingAr
 function assertPackagedProbeContract(contract) {
   const v107 = { finalPath() {}, procOpen() {}, procAlive() {}, procClose() {}, procAdopt() {} };
   const current = Object.fromEntries(contract.FS_HANDLE_REQUIRED_EXPORTS.map((name) => [name, () => {}]));
-  assert.deepEqual(contract.missingFsHandleExports(v107), ['posixRename', 'posixRenameAsync']);
+  // MIRROR-PARSE-ZERO-108 added threadCpuMs to the required list, so the 1.1.107 addon now lacks three.
+  // v108pre is the addon as it was just before that (both renames, no thread clock): it pins the new
+  // export alone, the way v107 pins the two renames.
+  const v108pre = { ...v107, posixRename() {}, posixRenameAsync() {} };
+  assert.deepEqual(contract.missingFsHandleExports(v107), ['posixRename', 'posixRenameAsync', 'threadCpuMs']);
+  assert.deepEqual(contract.missingFsHandleExports(v108pre), ['threadCpuMs']);
   assert.deepEqual(contract.missingFsHandleExports(current), []);
 
   const oldProbe = runPackagedProbe(contract, v107);
@@ -142,7 +147,13 @@ function assertPackagedProbeContract(contract) {
   assert.match(oldProbe.invoked.options.env.ELECTRON_RUN_AS_NODE, /1/);
   assert.match(oldProbe.invoked.args[1], /process\.dlopen/);
   assert.equal(oldProbe.addonPaths.length, 1);
-  assert.match(oldProbe.result.stderr, /CUT FS-HANDLE MISSING EXPORTS: posixRename, posixRenameAsync/);
+  assert.match(oldProbe.result.stderr, /CUT FS-HANDLE MISSING EXPORTS: posixRename, posixRenameAsync, threadCpuMs
+/);
+
+  const preProbe = runPackagedProbe(contract, v108pre);
+  assert.equal(preProbe.status, 1, 'a cut carrying the addon from before the thread clock fails');
+  assert.match(preProbe.result.stderr, /CUT FS-HANDLE MISSING EXPORTS: threadCpuMs
+/);
 
   const currentProbe = runPackagedProbe(contract, current);
   assert.equal(currentProbe.status, 0);
