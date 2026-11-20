@@ -138,6 +138,26 @@ const CONPTY_EDITS = [
     '  return marshal;\n']
 ];
 const AGENT_EDITS = [
+  // PTY-CONHOST-LEAK-NATIVE: the native exit report has a second argument (close not started).
+  ['the exit report carries whether the close was started',
+    'function (c) { return _this._$onProcessExit(c); });\n',
+    'function (c, guppyCloseUnstarted) { return _this._$onProcessExit(c, guppyCloseUnstarted); });\n'],
+  ['the exit handler takes it',
+    '    WindowsPtyAgent.prototype._$onProcessExit = function (exitCode) {\n' +
+    '        var _this = this;\n' +
+    '        this._exitCode = exitCode;\n',
+    '    WindowsPtyAgent.prototype._$onProcessExit = function (exitCode, guppyCloseUnstarted) {\n' +
+    '        var _this = this;\n' +
+    '        this._exitCode = exitCode;\n' +
+    '        // GUPPY PTY-CONHOST-LEAK-NATIVE (tools/patch-node-pty-root-handle.cjs): the output worker\n' +
+    '        // ends by itself when the console host closes its end, and the host closes it when the\n' +
+    '        // pseudoconsole is closed. The native side says here when that close could not be\n' +
+    '        // started: the host then stays, and the worker would wait for it for ever (one thread\n' +
+    '        // and two pipes more, and a loop that never empties). So the worker is ended here,\n' +
+    '        // after its flush time, as node-pty ends it on a kill.\n' +
+    '        if (guppyCloseUnstarted === true) {\n' +
+    '            this._conoutSocketWorker.dispose();\n' +
+    '        }\n'],
   ['keep the handle next to the pid',
     '            this._innerPid = connect.pid;\n',
     '            this._innerPid = connect.pid;\n' +

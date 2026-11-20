@@ -162,6 +162,8 @@ const CONPTY_CC_CLOSE_EDITS = [
     '\n' +
     'struct ExitEvent {\n' +
     '  int exit_code = 0;\n' +
+    '  // GUPPY PTY-CONHOST-LEAK-NATIVE: the thread that closes the pseudoconsole could not be started.\n' +
+    '  bool guppy_close_unstarted = false;\n' +
     '};\n'],
   ['the exit thread has the pseudoconsole it drops closed, off the joined thread',
     '    WaitForSingleObject(baton->hShell, INFINITE);\n' +
@@ -215,6 +217,37 @@ const CONPTY_CC_CLOSE_EDITS = [
     '        return ptyHandle->id == id;\n' +
     '      });\n' +
     '    }\n' +
+    '    // GUPPY PTY-CONHOST-LEAK-NATIVE (tools/patch-node-pty-root-handle.cjs): the thread that will\n' +
+    '    // close the pseudoconsole is started here, parked on an event, before the exit is reported,\n' +
+    '    // so that the report can say whether there is one. A thread that cannot be started throws,\n' +
+    '    // and nothing on this thread would catch it: that is std::terminate, the whole app gone.\n' +
+    '    // Caught instead, the pseudoconsole stays open (a console host that stays until the app\n' +
+    '    // quits, never a crash) and the exit report says so: the agent then ends the output worker\n' +
+    '    // itself, which would otherwise wait for ever for a host that never closes its end.\n' +
+    '    // (GUPPY_PTY_TEST_CLOSE_THREAD_FAILS makes the start fail: the test of this handler.)\n' +
+    '    HANDLE guppyGo = nullptr;\n' +
+    '    if (guppyHpc != nullptr) {\n' +
+    '      try {\n' +
+    '        if (GetEnvironmentVariableW(L"GUPPY_PTY_TEST_CLOSE_THREAD_FAILS", nullptr, 0) != 0) {\n' +
+    '          throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));\n' +
+    '        }\n' +
+    '        guppyGo = CreateEventW(nullptr, TRUE, FALSE, nullptr);\n' +
+    '        if (guppyGo == nullptr) {\n' +
+    '          throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));\n' +
+    '        }\n' +
+    '        std::thread([guppyHpc, guppyUseConptyDll, guppyGo] {\n' +
+    '          WaitForSingleObject(guppyGo, INFINITE);\n' +
+    '          CloseHandle(guppyGo);\n' +
+    '          GuppyClosePseudoConsole(guppyHpc, guppyUseConptyDll);\n' +
+    '        }).detach();\n' +
+    '      } catch (...) {\n' +
+    '        if (guppyGo != nullptr) {\n' +
+    '          CloseHandle(guppyGo);\n' +
+    '          guppyGo = nullptr;\n' +
+    '        }\n' +
+    '        exit_event->guppy_close_unstarted = true;\n' +
+    '      }\n' +
+    '    }\n' +
     '\n' +
     '    auto status = tsfn.BlockingCall(exit_event, callback); // In main thread\n' +
     '    switch (status) {\n' +
@@ -234,16 +267,18 @@ const CONPTY_CC_CLOSE_EDITS = [
     '        Napi::Error::Fatal("SetupExitCallback", "ThreadSafeFunction.BlockingCall() failed");\n' +
     '    }\n' +
     '    // GUPPY PTY-CONHOST-LEAK-NATIVE (tools/patch-node-pty-root-handle.cjs): the close runs on a\n' +
-    '    // detached thread of its own, started after the callback function is released. On Windows 10\n' +
+    '    // detached thread of its own, let go here, after the callback function is released. On Windows 10\n' +
     '    // the close can wait for the console host for ever (measured: the output socket destroyed,\n' +
     '    // then a program that floods and ends by itself). This thread is joined by the finalizer on\n' +
     '    // the main thread, and until Release() the function keeps the event loop alive: a close\n' +
-    '    // here held both. The detached thread holds only the handle and the library flag.\n' +
-    '    if (guppyHpc != nullptr) {\n' +
-    '      std::thread([guppyHpc, guppyUseConptyDll] {\n' +
-    '        GuppyClosePseudoConsole(guppyHpc, guppyUseConptyDll);\n' +
-    '      }).detach();\n' +
+    '    // here held both. The detached thread holds only the handle, the library flag and its event.\n' +
+    '    if (guppyGo != nullptr) {\n' +
+    '      SetEvent(guppyGo);\n' +
     '    }\n'],
+  ['the exit report says when the close could not be started',
+    '      cb.Call({Napi::Number::New(env, exit_event->exit_code)});\n',
+    '      // GUPPY PTY-CONHOST-LEAK-NATIVE: the second argument is true when the close was not started.\n' +
+    '      cb.Call({Napi::Number::New(env, exit_event->exit_code), Napi::Boolean::New(env, exit_event->guppy_close_unstarted)});\n'],
   ['connect records which library made the pseudoconsole',
     '  // Update handle\n' +
     '  handle->hShell = piClient.hProcess;\n',
@@ -309,13 +344,13 @@ module.exports = {
   // conpty.cc after ALL its patches (#922, the root-handle handoff, then the close on exit of
   // PTY-CONHOST-LEAK-NATIVE): the only source conpty.node may be built from, and what the record
   // and the release markers require.
-  CONPTY_CC_BUILT_SHA256: '2b09757e872ec6089ebd487fe884130e8ccc634726e2b14f1129bc589cb47e53',
+  CONPTY_CC_BUILT_SHA256: '66801835bc8b51a98b59b29f969865c14f3744866a1c5049d0399497ecfd2888',
   CONPTY_CC_CLOSE_EDITS,
   CLOSE_MARKER,
   hasCloseMarker,
   // lib/windowsPtyAgent.js: from the same tarball, and after the handoff patch.
   AGENT_JS_PRISTINE_SHA256: '8636d16b38266112204061a22b135734177c242837982fd3a4055be726efa64a',
-  AGENT_JS_HANDOFF_SHA256: 'b960fc7252213495fbbdf89371072998b65605b1845e38e0ffeb4a8a3d163308',
+  AGENT_JS_HANDOFF_SHA256: '746c9c4b29a39c05c56acf40ee4484dfc701b077bb7f44f6e406b6afc6da2ff1',
   // lib/utils.js (NODEPTY-PACKAGED-PROOF): from the same tarball, and after the loader patch that
   // stops Windows from falling back to node-pty's unpatched prebuilt binaries.
   UTILS_JS_PRISTINE_SHA256: 'f75ad341c13fbf1a9a6605d7ee42dff5bbc5d43b7b381e413fb97eb1b8300beb',
