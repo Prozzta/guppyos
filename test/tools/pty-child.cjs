@@ -24,7 +24,8 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const pty = require('node-pty');
 const loadTs = require('../load-ts.cjs');
-const { armEarlyKill } = loadTs('src/main/pty.ts');
+const { armEarlyKill, cutKillSweep, watchKillSweep } = loadTs('src/main/pty.ts');
+const { holdRoot, rootHandoff } = loadTs('src/main/procIdentity.ts');
 
 /** From the kill to the conout worker's exit node-pty takes 1 s (its flush interval). */
 const TEARDOWN_CAP_MS = 8000;
@@ -62,6 +63,9 @@ function childBytes(input, { file = process.execPath, env = process.env, onSpawn
     // As the app does for every terminal (PtyManager.spawn): node-pty alone holds kill() back until
     // the terminal's first data chunk, and a child that never prints is then never killed.
     if (process.platform === 'win32') assert.equal(armEarlyKill(proc), true, 'armEarlyKill fits this node-pty');
+    // NODEPTY-CONSOLE-LIST-KILL-SIBLINGS: held in the same turn as the spawn, as the app holds every
+    // root: while it is held the pid is this child's and nobody else's. Null with no addon.
+    const hold = holdRoot(proc.pid, process.platform, rootHandoff(proc));
     if (onSpawn) onSpawn(proc);
     // node-pty frees the conout worker thread only from its kill (1 s after it), never from the exit.
     const worker = proc._agent?._conoutSocketWorker?._worker ?? null;
@@ -75,7 +79,17 @@ function childBytes(input, { file = process.execPath, env = process.env, onSpawn
       if (ended) return;
       ended = true;
       clearTimeout(timer);
+      // NODEPTY-CONSOLE-LIST-KILL-SIBLINGS: node-pty's kill ends every process on the console of
+      // the child's pid. An electron.exe child is on THIS test file's console, the one the runner
+      // shares between its files, so a child still alive here took the sibling files with it. As the
+      // app does (PtyManager.closePty): the kill names the held child only, or nobody with no hold.
+      cutKillSweep(proc, hold ? proc.pid : null);
+      const sweep = watchKillSweep(proc);
       try { proc.kill(); } catch { /* child already exited */ }
+      // The hold goes after the last kill that names the pid, never before it.
+      const pending = sweep.started();
+      const free = () => { if (hold) hold.release(); };
+      if (pending) pending.then(free, free); else free();
       if (!workerGone) { error ? reject(error) : resolve(value); return; }
       // Settle only once the terminal is torn down: a kill that did not run fails HERE, by name,
       // instead of leaving a thread that keeps the test file from ending.

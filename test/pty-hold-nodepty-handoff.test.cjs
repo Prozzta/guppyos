@@ -946,7 +946,8 @@ if (!WIN) {
         up = new Promise((resolve) => { const sub = proc.onData((d) => { seen += d; if (seen.includes('phnh-root-up')) { sub.dispose(); resolve(); } }); });
         proc._agent._getConsoleProcessList = () => new Promise((resolve) => {
           order.push('asked');
-          arrive = () => resolve({ forEach: () => { order.push('swept'); } });
+          // A list, as node-pty's is (the product cuts it as one: NODEPTY-CONSOLE-LIST-KILL-SIBLINGS).
+          arrive = () => resolve(Object.assign([], { forEach: () => { order.push('swept'); } }));
         });
         return proc;
       };

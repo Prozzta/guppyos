@@ -396,6 +396,40 @@ export function watchKillSweep(proc: pty.IPty): { started: () => Promise<unknown
 }
 
 /**
+ * NODEPTY-CONSOLE-LIST-KILL-SIBLINGS. The list node-pty's kill() ends is "every process on the
+ * console of the root's pid", not the terminal's tree. A GUI-subsystem root (electron.exe, also as
+ * Node) is not on the pseudoconsole: it sits on the console of the process that owns the terminal,
+ * so a kill that finds it alive names the owner and everything else on the owner's console. And a
+ * pid that nothing reserves may be another process's by the time the list is taken: then it is
+ * that stranger's console.
+ *
+ * This cuts the list of the one kill() about to be made, in place, to the terminal's own root:
+ *   - `ownRoot` null (the pid is not held: nothing says the number is still the root's): no list is
+ *     asked for at all, and the kill names nobody;
+ *   - `ownRoot` a pid (held, so the number is the root's until the hold is released): the list is
+ *     asked for as before and every entry but the root is dropped, so a root that is alive is still
+ *     ended and nothing else is named. The rest of the tree is the tree sweep's (taskkill /T) and
+ *     the closed pseudoconsole's to end, as it was for every process off the list.
+ * False when the terminal has no such helper (no ConPTY sweep, another node-pty): nothing to cut.
+ */
+export function cutKillSweep(proc: pty.IPty, ownRoot: number | null): boolean {
+  const agent = (proc as unknown as { _agent?: { _getConsoleProcessList?: unknown } })._agent;
+  const list = agent?._getConsoleProcessList;
+  if (!agent || typeof list !== 'function') return false;
+  agent._getConsoleProcessList = function ownRootList(this: unknown, ...a: unknown[]): unknown {
+    if (ownRoot === null) return Promise.resolve([]);
+    const asked: unknown = (list as (...x: unknown[]) => unknown).apply(this, a);
+    if (!(asked instanceof Promise)) return Promise.resolve([]);
+    return asked.then((pids: unknown) => {
+      if (!Array.isArray(pids)) return [];
+      for (let i = pids.length - 1; i >= 0; i--) if (pids[i] !== ownRoot) pids.splice(i, 1);
+      return pids;
+    });
+  };
+  return true;
+}
+
+/**
  * PTY-KILL-PID-IDENTITY: may a tree kill name this root's pid right now? The one question every
  * Windows kill path asks (closeTree's two sweeps, killAllAsync's batch), immediately before it
  * spawns taskkill.
@@ -785,6 +819,8 @@ export class PtyManager {
   private closePty(s: PtySession): void {
     if (s.ptyClosed) return;
     s.ptyClosed = true;
+    // NODEPTY-CONSOLE-LIST-KILL-SIBLINGS: node-pty's kill names the held root and nobody else.
+    cutKillSweep(s.proc, s.hold ? s.proc.pid : null);
     const sweep = watchKillSweep(s.proc);
     try { s.proc.kill(); } catch { /* already gone */ }
     // node-pty's own kill names the root by pid once more, later (watchKillSweep). That sweep is
