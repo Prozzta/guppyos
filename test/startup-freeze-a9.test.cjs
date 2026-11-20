@@ -9,8 +9,8 @@ require('./tools/own-job.cjs');
  *  - a key enters only when its claim is acked, and one claims-key-added row is logged per add;
  *  - every registry reader (loadRegistry, loadRegistryShared, the get path's raw text read) and close() save the
  *    acked keys first; without a reader the timer saves them within REGISTRY_SAVE_MS;
- *  - another writer's change is re-read and the unsaved keys are put on top; a failed save drops them and logs
- *    claims-key-save-failed per key, as before.
+ *  - another writer's change is re-read and the unsaved keys are put on top; a failed save keeps them held,
+ *    reports the failure once, and retries until a later publish lands.
  * Temp hives in a jailed HOME only.
  */
 const test = require('node:test');
@@ -199,7 +199,7 @@ test('writer: another writer\'s change is kept and the unsaved keys go on top', 
   assert.deepEqual(fileKeys(root).sort(), ['agent.andy.mine', 'agent.andy.second', 'agent.pam.theirs']);
 });
 
-test('writer: a failed save drops the unsaved keys, logs each, and the key is new again', () => {
+test('writer: a failed save keeps the key held, reports once, and a later flush retries it', () => {
   const root = hive();
   const failed = [];
   const w = new REG.KeyRegistryWriter(root, (keys) => failed.push(...keys));
@@ -209,8 +209,11 @@ test('writer: a failed save drops the unsaved keys, logs each, and the key is ne
   fs.renameSync = () => { throw Object.assign(new Error('EPERM'), { code: 'EPERM' }); };
   try { w.flush(); } finally { fs.renameSync = real; }
   assert.deepEqual(failed, ['agent.andy.lost']);
+  assert.ok(REG.loadRegistry(root).keys['agent.andy.lost'], 'a reader sees the key held after EPERM');
   const again = w.check('agent.andy.lost', 'andy', '2026-10-03T10:00:01Z');
-  assert.equal(again.ok && again.added, true);
+  assert.equal(again.ok && again.added, false, 'a failed publish does not make an acked key new again');
+  w.flush();
+  assert.ok(fileKeys(root).includes('agent.andy.lost'), 'the later flush publishes the retained key');
 });
 
 test('store: a failed save is logged as claims-key-save-failed with the key', async () => {
