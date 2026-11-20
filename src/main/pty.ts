@@ -12,6 +12,7 @@ import { ensureKilled, isAlive, killTreesAsync } from './procKill';
 import { holdRoot, pidIdentity, rootHandoff, type PidIdentity, type RootHold } from './procIdentity';
 import { expandTilde } from './fs';
 import { buildPtyEnv } from './ptyEnv';
+import { DA1_ANSWER, startupHandshake } from './openConsoleHandshake';
 import { createPtyDataBatcher, type PtyDataBatcher } from './ptyDataBatcher';
 import { userShellPathAsync } from './shellEnv';
 import { commandResolver, type CommandResolver, type ResolvedCommand } from './commandResolver';
@@ -115,6 +116,9 @@ interface PtySession {
   holdUsers?: number;
   /** PTY-KILL-PID-IDENTITY (POSIX): the root's start stamp, taken in the spawn's turn. */
   rootId?: PidIdentity;
+  /** PTY-CONHOST-ORPHAN (option A): chunks left in which OpenConsole's start-up DA1 query may
+   *  still come (openConsoleHandshake.ts). 0 = over: the stream passes untouched. */
+  handshakeChunks?: number;
   /** GOD-TERMINAL-CONTROL M1: this incarnation's headless screen (terminalMirror.ts), fed every
    *  accepted chunk. Absent when the mirror is off or could not be made. Dies with the session. */
   mirror?: TerminalMirror;
@@ -162,7 +166,7 @@ interface WindowsTerminalInternals {
   _agent?: {
     kill?: () => void; exitCode?: number; _conoutSocketWorker?: ConoutConnectionInternals;
     /** The input pipe (net.Socket). node-pty never destroys it: not from its exit path, not from its kill. */
-    _inSocket?: { destroyed?: boolean; destroy?: () => void };
+    _inSocket?: { destroyed?: boolean; destroy?: () => void; on?: (event: 'error', fn: (e: Error & { code?: string }) => void) => unknown };
   };
   /** The agent's outSocket (net.Socket); `_handle` stays null until its connect() runs. */
   _socket?: { readable: boolean; _handle?: unknown; destroy?: () => void; once?: (event: string, fn: () => void) => unknown };
@@ -210,6 +214,37 @@ export function releaseExited(proc: pty.IPty, platform: NodeJS.Platform = proces
     }
     return false;
   }
+}
+
+/** Said once: guardInputErrors met a node-pty it does not fit. */
+let inputGuardMissingSaid = false;
+
+/**
+ * PTY-CONHOST-ORPHAN (option A). node-pty's input pipe has no 'error' listener, so a write that
+ * fails is thrown outside any caller. On the bundled OpenConsole a write that lands while the
+ * console is going away after its client exited fails that way: EAGAIN (measured: 5 of 5 when the
+ * main thread was busy past OpenConsole's 3 s DA1 wait, the root exited meanwhile, and the DA1
+ * answer was written then; the inbox conhost does not fail it). A typed key, a god nudge or the
+ * DA1 answer can be that write. Its bytes have nowhere to go, so the error is only said, once per
+ * terminal. A node-pty without the socket is left as it was, said once.
+ */
+export function guardInputErrors(proc: pty.IPty, platform: NodeJS.Platform = process.platform): boolean {
+  if (platform !== 'win32') return false;   // unix terminals write to the pty fd, with node-pty's own handler
+  const input = (proc as unknown as WindowsTerminalInternals)._agent?._inSocket;
+  if (typeof input?.on !== 'function') {
+    if (!inputGuardMissingSaid) {
+      inputGuardMissingSaid = true;
+      console.warn('[pty] input-pipe error guard not installed: this node-pty lacks the agent\'s input socket; a failed write may be thrown outside any caller');
+    }
+    return false;
+  }
+  let said = false;
+  input.on('error', (e) => {
+    if (said) return;
+    said = true;
+    console.warn(`[pty] a write to terminal ${proc.pid} failed (${e.code ?? e.message}): its console is gone or going; the input is dropped`);
+  });
+  return true;
 }
 
 /** Said once: guardLateReady met a node-pty it does not fit. */
@@ -1224,7 +1259,10 @@ export class PtyManager {
         // Inherited env minus the parent Claude session's identity markers,
         // then the app's defaults and locale, then per-agent values — see
         // ptyEnv.ts for why the strip exists and why it is prefix-based.
-        env: buildPtyEnv(process.env, userPath, opts.env, process.platform, opts.pathPrepend, opts.nodeRequire)
+        env: buildPtyEnv(process.env, userPath, opts.env, process.platform, opts.pathPrepend, opts.nodeRequire),
+        // PTY-CONHOST-ORPHAN-OWNER-DEATH (option A): the bundled OpenConsole, staged by
+        // tools/stage-node-pty-openconsole.cjs. The inbox conhost parks forever when its owner dies.
+        useConptyDll: process.platform === 'win32'
       });
       // PTY-EARLY-KILL-LEAK: a kill before the first output must close the pseudoconsole now.
       armEarlyKill(proc);
@@ -1232,6 +1270,8 @@ export class PtyManager {
       // else can run: a handle of our own on Windows (node-pty's own, handed over:
       // PTY-HOLD-NODEPTY-HANDOFF), the start stamp elsewhere.
       const hold = holdRoot(proc.pid, process.platform, rootHandoff(proc));
+      // PTY-CONHOST-ORPHAN (option A): a write that fails is said, not thrown outside any caller.
+      guardInputErrors(proc);
       const rootId = process.platform === 'win32' ? undefined : pidIdentity(proc.pid);
 
       // Capture THIS session object so the proc's callbacks can tell whether the
@@ -1255,7 +1295,8 @@ export class PtyManager {
         incarnation: (incarnationSeq += 1),
         spawnedAt: Date.now(),
         hold,
-        rootId
+        rootId,
+        handshakeChunks: process.platform === 'win32' ? 8 : 0
       };
       // Route to the session's owner window (multi-window owner routing), read at SEND
       // time. Batched: one IPC message per burst, not per ~170-byte conpty chunk.
@@ -1270,7 +1311,18 @@ export class PtyManager {
       if (replaced && replaced !== session) { replaced.mirror?.dispose(); replaced.mirror = undefined; }
       this.sessions.set(opts.id, session);
 
-      proc.onData((data) => this.deliverData(opts.id, session, data));
+      proc.onData((data) => {
+        // PTY-CONHOST-ORPHAN (option A): main answers OpenConsole's start-up DA1 for every PTY, and
+        // takes it out of the stream so the renderer never answers it too (openConsoleHandshake.ts).
+        if (session.handshakeChunks) {
+          const step = startupHandshake(data);
+          session.handshakeChunks = step.pending ? session.handshakeChunks - 1 : 0;
+          if (step.answer) { try { proc.write(DA1_ANSWER); } catch { /* the PTY is going */ } }
+          if (!step.data) return;
+          data = step.data;
+        }
+        this.deliverData(opts.id, session, data);
+      });
       if (this.startupHooks) { try { this.startupHook()?.spawned(opts.id); } catch { /* best-effort */ } }
       proc.onExit(({ exitCode, signal }) => {
         try {

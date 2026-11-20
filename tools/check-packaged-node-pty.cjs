@@ -20,6 +20,9 @@
 //     app loads), and no other conpty.node is packed anywhere in the archive.
 // and, again in the unpacked node-pty (PTY-EARLY-KILL-EPIPE-108):
 //   9 lib/worker/conoutSocketWorker.js is the pinned form with the socket error listeners
+// and (PTY-CONHOST-ORPHAN-OWNER-DEATH, option A: every PTY runs on the bundled OpenConsole):
+//  10 build/Release/conpty/{conpty.dll,OpenConsole.exe} are the pinned pair of one arch, unpacked
+//     (conpty.node loads <its dir>/conpty/conpty.dll; without it node-pty cannot start a PTY).
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
@@ -77,6 +80,7 @@ function filesUnder(dir) {
 const NP = 'node_modules/node-pty';
 const BUILT = 'build/Release/conpty.node';
 const WIN_PREBUILT = /(^|\/)node-pty\/prebuilds\/win32-[^/]+\//;
+const OPENCONSOLE = ['build/Release/conpty/conpty.dll', 'build/Release/conpty/OpenConsole.exe'];
 
 /** The checks on a packaged tree: { resources, checks: [{ name, ok, why }] }. Never throws. */
 function inspect(dir) {
@@ -137,7 +141,7 @@ function inspect(dir) {
   if (entries) {
     const mine = entries.filter(([p]) => p.startsWith(`${NP}/`));
     const packed = mine.filter(([, e]) => e.unpacked !== true).map(([p]) => p);
-    const need = ['package.json', 'lib/windowsPtyAgent.js', 'lib/utils.js', 'lib/worker/conoutSocketWorker.js', BUILT].filter((rel) => !mine.some(([p]) => p === `${NP}/${rel}`));
+    const need = ['package.json', 'lib/windowsPtyAgent.js', 'lib/utils.js', 'lib/worker/conoutSocketWorker.js', BUILT, ...OPENCONSOLE].filter((rel) => !mine.some(([p]) => p === `${NP}/${rel}`));
     const others = entries.filter(([p]) => (p === 'conpty.node' || p.endsWith('/conpty.node')) && p !== `${NP}/${BUILT}`).map(([p]) => p);
     const prebuilt = entries.filter(([p]) => WIN_PREBUILT.test(`/${p}`)).map(([p]) => p);
     asarWhy = need.length ? `app.asar does not list ${NP}/${need[0]}: the app would not load the files checked above`
@@ -155,6 +159,13 @@ function inspect(dir) {
   // PTY-CONHOST-LEAK-NATIVE: the close on exit adds no import; the patched module exports a name.
   add('conpty.node closes the pseudoconsole of an ended terminal', binarySha !== null && pins.hasCloseMarker(binary),
     binarySha === null ? `${BUILT} is missing` : `it does not carry ${pins.CLOSE_MARKER}: every ended terminal would keep its console host until the app quits`);
+
+  const oc = OPENCONSOLE.map((rel) => [path.posix.basename(rel), sha(at(rel))]);
+  const ocArch = Object.keys(pins.OPENCONSOLE_SHA256).find((a) => oc.every(([n, s]) => s === pins.OPENCONSOLE_SHA256[a][n]));
+  const ocMissing = oc.filter(([, s]) => s === null).map(([n]) => n);
+  add(`OpenConsole ${pins.CONPTY_THIRD_PARTY_VERSION} ships in build/Release/conpty`, !!ocArch,
+    ocMissing.length ? `build/Release/conpty/${ocMissing[0]} is missing: every PTY fails to start (run tools/stage-node-pty-openconsole.cjs before packaging)`
+      : `the pair is ${oc.map(([n, s]) => `${n} ${short(s)}`).join(', ')}, not a pinned pair of one arch`);
   return { resources, checks };
 }
 
