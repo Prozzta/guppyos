@@ -207,7 +207,11 @@ if (!WIN) {
     .replace(/ {4}\/\/ GUPPY NODEPTY-PACKAGED-PROOF[\s\S]*?\n {4}if \(guppyBuiltOnly\) \{\n[^\n]*\n {4}\}\n/, '')
     .replace(/ {4}if \(guppyBuiltOnly\) \{\n {8}throw new Error\("Guppy: [^\n]*\n {4}\}\n/, '');
   // (PTY-CONHOST-LEAK-NATIVE added the bundled-host exit block; it is taken out whole, by its own words.)
-  const pristineJs = handoffJs.replace(/ {8}else \{\n {12}\/\/ GUPPY PTY-CONHOST-LEAK-NATIVE[\s\S]*?\n {8}\}\n/, '').split('\n').filter((l) => !/GUPPY PTY-HOLD-NODEPTY-HANDOFF|this\._rootHandle = connect\.rootHandle;/.test(l)).join('\n');
+  // (And the close-not-started report: its argument in two places and the block that reads it.)
+  const pristineJs = handoffJs.replace(/ {8}else \{\n {12}\/\/ GUPPY PTY-CONHOST-LEAK-NATIVE[\s\S]*?\n {8}\}\n/, '')
+    .replace('function (c, guppyCloseUnstarted) { return _this._$onProcessExit(c, guppyCloseUnstarted); }', 'function (c) { return _this._$onProcessExit(c); }')
+    .replace('function (exitCode, guppyCloseUnstarted) {', 'function (exitCode) {')
+    .replace(/ {8}\/\/ GUPPY PTY-CONHOST-LEAK-NATIVE \(tools\/patch-node-pty-root-handle\.cjs\): the output worker[\s\S]*?\n {8}if \(guppyCloseUnstarted === true\) \{\n[^\n]*\n {8}\}\n/, '').split('\n').filter((l) => !/GUPPY PTY-HOLD-NODEPTY-HANDOFF|this\._rootHandle = connect\.rootHandle;/.test(l)).join('\n');
 
   // PTY-EARLY-KILL-EPIPE-108: the output worker, and the same with the pinned edits taken back out.
   const builtWorker = fs.readFileSync(path.join(NP, 'lib', 'worker', 'conoutSocketWorker.js'), 'utf8');
@@ -248,14 +252,27 @@ if (!WIN) {
       assert.equal(builtCc.split(after).length, 2, `the close-on-exit edit is in the source once: ${label}`);
       assert.notEqual(before, after, label);
     }
-    // The exit thread: take the pseudoconsole under the lock, report the exit, release the callback
-    // function, and only then start the close, on a detached thread (the close can block for ever).
+    // The exit thread: take the pseudoconsole under the lock, start the close thread PARKED on its
+    // event, report the exit, release the callback function, and only then let the close go, on
+    // that detached thread (the close can block for ever).
     const thread = builtCc.slice(builtCc.indexOf('    WaitForSingleObject(baton->hShell, INFINITE);'), builtCc.indexOf('Napi::Error errorWithCode('));
     const order = ['std::lock_guard<std::mutex> lock(g_ptyHandlesMutex);', 'if (!baton->guppyHpcClosed) {', 'guppyHpc = baton->hpc;', 'baton->guppyHpcClosed = true;',
-      'std::erase_if(ptyHandles', '    }\n\n', 'tsfn.BlockingCall(exit_event, callback);', 'tsfn.Release()', 'ThreadSafeFunction.BlockingCall() failed");\n    }\n',
-      'std::thread([guppyHpc, guppyUseConptyDll] {\n', 'GuppyClosePseudoConsole(guppyHpc, guppyUseConptyDll);', '}).detach();'].map((s) => thread.indexOf(s));
+      'std::erase_if(ptyHandles', '    }\n    // GUPPY', '      try {\n', 'guppyGo = CreateEventW(nullptr, TRUE, FALSE, nullptr);', 'std::thread([guppyHpc, guppyUseConptyDll, guppyGo] {\n',
+      'WaitForSingleObject(guppyGo, INFINITE);', 'GuppyClosePseudoConsole(guppyHpc, guppyUseConptyDll);', '}).detach();\n      } catch (...) {\n', 'exit_event->guppy_close_unstarted = true;\n      }\n    }\n\n',
+      'tsfn.BlockingCall(exit_event, callback);', 'tsfn.Release()', 'ThreadSafeFunction.BlockingCall() failed");\n    }\n', 'if (guppyGo != nullptr) {\n      SetEvent(guppyGo);\n    }\n'].map((s) => thread.indexOf(s));
     assert.ok(order.every((at, i) => at >= 0 && (i === 0 || at > order[i - 1])), `THE EXIT THREAD TAKES THE PSEUDOCONSOLE UNDER THE LOCK AND HAS IT CLOSED AFTER THE LOCK, AFTER THE EXIT IS REPORTED AND AFTER THE CALLBACK IS RELEASED, ON A DETACHED THREAD: ${order}`);
     assert.equal(thread.split('GuppyClosePseudoConsole(').length, 2, 'the exit thread closes in one place: never on the thread the finalizer joins');
+    assert.equal(thread.split('SetEvent(guppyGo)').length, 2, 'the close is let go in one place, after the release');
+    // A thread that cannot start throws on the exit thread, where nothing else would catch it
+    // (std::terminate: the app gone). The start is inside the try. The handler leaves the
+    // pseudoconsole open (the leak this edit removed, never a crash) and says so in the exit
+    // report, and the agent then ends the output worker, which would wait for the close for ever.
+    assert.equal(thread.split('std::thread(').length, 2, 'the exit thread starts one thread');
+    assert.equal(thread.split('try {').length, 2, 'under one try');
+    assert.equal(thread.split('catch (...)').length, 2, 'A CLOSE THREAD THAT CANNOT START IS CAUGHT, WHATEVER IT THROWS');
+    assert.equal(builtCc.split('Napi::Boolean::New(env, exit_event->guppy_close_unstarted)').length, 2, 'THE EXIT REPORT SAYS WHEN THE CLOSE WAS NOT STARTED');
+    assert.match(handoffJs, /_\$onProcessExit = function \(exitCode, guppyCloseUnstarted\) \{\n {8}var _this = this;\n {8}this\._exitCode = exitCode;\n(?: {8}\/\/[^\n]*\n)+ {8}if \(guppyCloseUnstarted === true\) \{\n {12}this\._conoutSocketWorker\.dispose\(\);\n {8}\}\n/, 'THE AGENT ENDS THE OUTPUT WORKER WHEN THE CLOSE WAS NOT STARTED');
+    assert.match(handoffJs, /function \(c, guppyCloseUnstarted\) \{ return _this\._\$onProcessExit\(c, guppyCloseUnstarted\); \}/, 'and the report reaches the handler');
     assert.equal(builtCc.split('pfnClosePseudoConsole(handle->hpc);').length, 2, 'kill closes in one place');
     assert.match(builtCc, /if \(pfnClosePseudoConsole && !handle->guppyHpcClosed\)\n {6}\{\n {8}handle->guppyHpcClosed = true;\n {8}pfnClosePseudoConsole\(handle->hpc\);/, 'A PSEUDOCONSOLE IS CLOSED ONCE: kill closes only one the exit thread has not taken, and says so');
     // The duplicate is made before the thread that can close the original exists, with query rights only.
@@ -825,9 +842,9 @@ if (!WIN) {
         const report = agent._$onProcessExit;
         let pending = null;
         let holding = true;
-        agent._$onProcessExit = function onProcessExit(code) {
-          if (holding) { pending = () => report.call(this, code); return undefined; }
-          return report.call(this, code);
+        agent._$onProcessExit = function onProcessExit(code, unstarted) {
+          if (holding) { pending = () => report.call(this, code, unstarted); return undefined; }
+          return report.call(this, code, unstarted);
         };
         letReport = () => { holding = false; const p = pending; pending = null; if (p) p(); };
         blockUntilExited(proc.pid);
