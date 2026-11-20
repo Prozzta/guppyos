@@ -259,6 +259,61 @@ for (const [name, k] of Object.entries(K)) {
   test(`guarantee: ${name}`, async () => { await k(name.startsWith('lock') ? HJ : C); });
 }
 
+// ─── HEAVY-LOCK-RELEASE-LAG-197-RECUR-108: the confirm wait after a JOB-EMPTY notice ──────────────────
+// Measured (64 CPU burners on 32 cores): the release comes (last member's exit after the shell's
+// exit, 258-427 ms) + the fixed confirm wait (400 ms) + a late timer (up to 80 ms) + one list round
+// trip (160-200 ms). When the job-empty notice lands while a confirm's list is out, that answer is
+// thrown away and the whole wait and list run again (1068 ms seen). The confirm wait exists for a
+// PROCESS exit (msg 7): a shell from before the call starts its next process right after. A
+// job-empty notice (msg 4) says no process is left at all, the shell included, so nothing can follow
+// it. These two tests move no clock after the job-empty notice.
+
+/** A channel whose list answers wait until the test gives them. */
+async function heldListRig(Cm) {
+  const clock = fakeClock();
+  let listener = null;
+  const pending = [];
+  const told = [];
+  const ch = {
+    async request(line) {
+      const cmd = line.split(' ')[0];
+      if (cmd === 'create') return { ok: true };
+      if (cmd === 'list') return new Promise((answer) => { pending.push(answer); });
+      return { ok: true };
+    },
+    close() {},
+    onEvent(fn) { listener = fn; }
+  };
+  const jobs = new Cm.HeavyJobs({
+    platform: 'win32', options: () => ({ background: false, half: false }), exe: () => 'guppy-heavyjob.exe',
+    channel: () => ch, now: clock.now, setInterval: () => 1, clearInterval: () => {},
+    setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, log: () => {},
+    onJob: (e) => told.push(e)
+  });
+  await jobs.begin(AGENT, { command: 'npm ci' }, false, 'call-1');
+  /** Answers every list that is out with "no process left", then lets the product run. */
+  const answerEmpty = async () => { for (const answer of pending.splice(0)) answer({ ok: true, rows: [] }); await clock.tick(0); };
+  return { clock, told, pending, answerEmpty, id: jobs.ids()[0], emit: (e) => listener(e) };
+}
+
+test('recur: a job-empty notice ends the job without the confirm wait', async () => {
+  const r = await jobsRig(C, () => []);
+  r.f.emit({ event: 'exit', job: r.id, msg: 4, pid: 0 });
+  await r.clock.tick(0);
+  assert.equal(exits(r.told).length, 1, 'A JOB-EMPTY NOTICE ENDS THE JOB AT ONCE (no process is left to start another)');
+});
+
+test('recur: a job-empty notice that lands while a confirm list is out does not start the wait again', async () => {
+  const r = await heldListRig(C);
+  r.emit({ event: 'exit', job: r.id, msg: 7, pid: 1 });
+  await r.clock.tick(C.HEAVY_JOB_EXIT_CONFIRM_MS);
+  assert.equal(r.pending.length, 1, 'control: the confirm asked for the list, and its answer is still out');
+  r.emit({ event: 'exit', job: r.id, msg: 4, pid: 0 });   // the last member went while the list was out
+  await r.answerEmpty();
+  await r.answerEmpty();   // a second list, if the product asks for one at once, is answered too
+  assert.equal(exits(r.told).length, 1, 'THE JOB IS OVER ONCE THE LIST SAYS SO: no second confirm wait after a job-empty notice');
+});
+
 // ─── LIVE: the real helper, real jobs, the real lock ────────────────────────────────────────
 
 const CSC = path.join(process.env.WINDIR || 'C:\\Windows', 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe');
