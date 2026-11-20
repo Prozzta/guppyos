@@ -5,8 +5,8 @@ require('./tools/own-job.cjs');
  * god R1 (Jim's real-mode sweep): the zero-token real-run preflight runs the PRODUCT's resolution
  * (commandPath('codex') over the commandResolver, readCodexVersion, codexSupportsNoDaemon) in a
  * hidden child with the jailed app env, and refuses the run unless it yields the CLI dir's
- * codex.cmd, 0.157.1 and --no-daemon. Fixtures are fake npm prefixes in a temp dir; where.exe runs
- * hidden; no codex is ever started.
+ * codex.cmd, 0.157.1 and --no-daemon. Fixtures are fake npm prefixes in a temp dir; the lookup
+ * starts no process; no codex is ever started.
  */
 
 const test = require('node:test');
@@ -142,7 +142,7 @@ test('the child runs the PRODUCT modules from src/ (not copies), and never start
   assert.match(probeSrc, /const \{ readCodexVersion, codexSupportsNoDaemon \} = loadTs\('src\/main\/codexCli\.ts'\);/);
   assert.match(probeSrc, /await PtyManager\.prototype\.commandPath\.call\(self, 'codex'\)/);
   assert.match(probeSrc, /self\.resolver = new CommandResolver\(/, 'the product resolver class and lookup (the seam is pinned below)');
-  assert.doesNotMatch(probeSrc.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, ''), /child_process|spawn|exec/,'the probe itself starts nothing (the product resolver runs where.exe, hidden)');
+  assert.doesNotMatch(probeSrc.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, ''), /child_process|spawn|exec/,'the probe itself starts nothing (the product resolver searches PATH in process)');
   // readCodexVersion starts no process: codexCli.ts imports only node:fs and node:path.
   const cli = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'codexCli.ts'), 'utf8');
   assert.deepEqual([...cli.matchAll(/^import .* from '([^']+)';/gm)].map((m) => m[1]), ['node:fs', 'node:path']);

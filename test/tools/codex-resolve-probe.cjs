@@ -7,7 +7,7 @@
  * It runs the PRODUCT's own code, loaded from src/ (test/load-ts.cjs), exactly as index.ts:803-806
  * codexCliNow does for a Codex spawn:
  *   path    = PtyManager.prototype.commandPath('codex')   (src/main/pty.ts:500-503) over the
- *             app-wide commandResolver (src/main/commandResolver.ts: where.exe hidden, then the
+ *             app-wide commandResolver (src/main/commandResolver.ts: PATH searched in process, then the
  *             %APPDATA%\npm / %LOCALAPPDATA% candidates)
  *   version = readCodexVersion(path)      (src/main/codexCli.ts:46: reads @openai/codex/package.json;
  *             codexCli.ts imports only node:fs and node:path, so it starts no process)

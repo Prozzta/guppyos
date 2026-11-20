@@ -114,7 +114,10 @@ test('whereTimeoutMs: the seam sets the box; unset, the box is LOOKUP_TIMEOUT_MS
   global.setTimeout = (fn, ms, ...a) => { seen.push(ms); return realSetTimeout(fn, ms === 3000 ? 5 : ms, ...a); };
   try { await R.lookupCommandAsync('codex', posix.d); } finally { global.setTimeout = realSetTimeout; }
   assert.equal(posix.calls[0].timeout, 3000, 'the default box');
-  assert.equal(await R.resolveCliAsync(deps('win32', 'hang', { whereTimeoutMs: 5 }).d, 'agy'), null, 'resolveCliAsync honours the seam too (and stays uncached)');
+  // POSIX deps: the win32 lookup starts no process, so only the shell lookup can show the seam.
+  const cli = deps('linux', 'hang', { env: { SHELL: '/bin/sh', HOME: '/h' }, whereTimeoutMs: 5 });
+  assert.equal(await R.resolveCliAsync(cli.d, 'agy'), null, 'resolveCliAsync honours the seam too (and stays uncached)');
+  assert.equal(cli.calls[0].timeout, 5, 'the shell lookup ran under the seam\'s box');
 });
 
 // ─── CommandResolver: retry once, never cache unknown ─────────────────────────────────

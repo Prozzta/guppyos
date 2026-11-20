@@ -46,12 +46,14 @@ export interface ResolverDeps {
    *  (win32 lookup). It rejects with the fs error when the directory cannot be listed. Unset, the
    *  real directory is read (nodeListDir). */
   listDir?: (dir: string) => Promise<PathDirEntry[]>;
-  /** RESOLVER-TIMEOUT-MISS: the time box of one `where` / login-shell lookup (default
-   *  LOOKUP_TIMEOUT_MS). A seam for tests and fixtures; the app never sets it. */
+  /** RESOLVER-TIMEOUT-MISS: the time box of one login-shell lookup (default LOOKUP_TIMEOUT_MS).
+   *  POSIX only: the win32 lookup starts no process, so it times nothing there. A seam for tests
+   *  and fixtures; the app never sets it. */
   whereTimeoutMs?: number;
 }
 
-/** How long one `where` / login-shell lookup may take before it is killed and reported UNKNOWN. */
+/** How long one login-shell lookup (POSIX) may take before it is killed and reported UNKNOWN.
+ *  The win32 lookup searches PATH in process and has no time box. */
 export const LOOKUP_TIMEOUT_MS = 3000;
 
 /** The live process: execFile (async), existsSync, and the current platform/env. */

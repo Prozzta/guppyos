@@ -3580,7 +3580,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   /** god R1 (Jim's real-mode sweep): ZERO-TOKEN, before the first launch. The PRODUCT's own
    *  resolution for lb-codex's spawn (codex-resolve-probe.cjs: commandPath('codex') over the
    *  commandResolver, readCodexVersion, codexSupportsNoDaemon) in a hidden child whose env is
-   *  this.env, the app's env exactly, and whose cwd is the app's (where.exe searches the cwd first).
+   *  this.env, the app's env exactly, and whose cwd is the app's (a relative PATH entry is searched against it).
    *  Refuses the run unless it yields the CLI dir's codex.cmd, CODEX_EXPECTED_VERSION and true.
    *  The dry run's PATH has no codex: N/A there. */
   proveCodexResolution() {
