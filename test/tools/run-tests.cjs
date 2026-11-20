@@ -447,10 +447,12 @@ function runGated({ rel, renderRel = [], env, gate, jail = null, spawn, cwd, tim
   const main = rel.length ? runNodeTest({ ...fx, rel, eventsFile, label: '', extraArgs: concurrency < cores ? [`--test-concurrency=${concurrency}`] : [] }) : { res: { status: 0 }, counts: ZERO_COUNTS, failures: [], hung: [] };
   const render = renderRel.length ? runNodeTest({ ...fx, rel: renderRel, eventsFile: `${eventsFile}.render`, label: 'render lane: ', extraArgs: ['--test-concurrency=1'] }) : { res: { status: 0 }, counts: ZERO_COUNTS, failures: [], hung: [] };
   if (gate) log(burstLine(readFile(path.join(gate.dir, 'starts.jsonl')), gate.slots));
+  // RUNNER-FAILED-FILE-KILL-CONTEXT: each lane's records under its own name; totals writes them to one file.
+  const laneRecords = [{ lane: 'main', records: main.records }, { lane: 'render', records: render.records }];
   // A child that never started, or was killed by a signal (status null), is a failure, not a pass.
   if (spawnFailed(main.res, '', err) || spawnFailed(render.res, 'render lane: ', err)) {
     if (joinFile) removeFile(joinFile);
-    return totals(1, sumCounts(main.counts, render.counts), 'not run', log, [...main.failures, ...render.failures], { failureFile, writeFailureFile });
+    return totals(1, sumCounts(main.counts, render.counts), 'not run', log, [...main.failures, ...render.failures], { failureFile, writeFailureFile, records: laneRecords });
   }
   // A timed-out file fails the run whatever node's own exit code says.
   // TEST-TEMP-HYGIENE: a file that left anything in its temp folder fails the run, as a timed-out one does.
@@ -461,11 +463,11 @@ function runGated({ rel, renderRel = [], env, gate, jail = null, spawn, cwd, tim
   const joinFailed = () => fileJobVerdict({ job, joinFile, strict, readFile, removeFile, log, err });
   if (!perfDir) {
     const n = leaked() + joinFailed();
-    return totals(n && hungCode === 0 ? 1 : hungCode, mergedCounts, 'off', log, mergedFailures, { failureFile, writeFailureFile });
+    return totals(n && hungCode === 0 ? 1 : hungCode, mergedCounts, 'off', log, mergedFailures, { failureFile, writeFailureFile, records: laneRecords });
   }
   const lane = runPerfLane({ perfDir, filters, readdir, ...fx, eventsFile: `${eventsFile}.perf`, log });
   const mainCode = leaked() + joinFailed() && hungCode === 0 ? 1 : hungCode;
-  return totals(mainCode !== 0 ? mainCode : lane.code, sumCounts(mergedCounts, lane.counts), lane.state, log, [...mergedFailures, ...lane.failures], { failureFile, writeFailureFile });
+  return totals(mainCode !== 0 ? mainCode : lane.code, sumCounts(mergedCounts, lane.counts), lane.state, log, [...mergedFailures, ...lane.failures], { failureFile, writeFailureFile, records: [...laneRecords, { lane: 'perf', records: lane.records }] });
 }
 
 /** AV-FILEJOB-FLAG: a run that must keep every file in a job of its own: GUPPY_FILE_JOB_STRICT=1, or
@@ -546,8 +548,17 @@ function runNodeTest({ rel, extraArgs = [], label, spawn, cwd, timeoutMs, isTTY,
   // CLAIMS-LEDGER-W6-SILENT-EXIT: a file that started and never wrote its exit row, and that no
   // timeout of the runner's ended: it was killed from outside (or crashed too hard to run its exit
   // hook). node --test shows only "exitCode: 1" for it, so the cause is said here.
-  const lost = backstop ? endedWithoutExit(readFile(startsFile), readFile(`${startsFile}.kills`))
+  const startsText = backstop ? readFile(startsFile) : '';
+  const killsText = backstop ? readFile(`${startsFile}.kills`) : '';
+  const lost = backstop ? endedWithoutExit(startsText, killsText)
     .filter((l) => !hung.some((h) => path.resolve(h.file) === path.resolve(l.file))) : [];
+  // RUNNER-FAILED-FILE-KILL-CONTEXT: a file can fail because a process IT started was ended by
+  // another file's kill by number; the file itself then exits normally and the report above has
+  // nothing to say. Every failed file is shown with the kills other files recorded while it ran, and
+  // a failed run hands its record texts back (the caller keeps them beside the failing-test list).
+  const context = backstop ? killsDuring(startsText, killsText, failures.map((f) => f.file)) : [];
+  const failedRun = failures.length > 0 || hung.length > 0 || res.status !== 0;
+  const records = backstop && failedRun ? { starts: startsText, kills: killsText } : null;
   removeFile(eventsFile);
   removeFile(watchFile);
   if (backstop) { removeFile(backstopFile); removeFile(startsFile); removeFile(`${startsFile}.kills`); }
@@ -556,6 +567,13 @@ function runNodeTest({ rel, extraArgs = [], label, spawn, cwd, timeoutMs, isTTY,
     for (const k of l.kills) err(`[test-runner] ${label}  its pid ${l.pid} was named by a kill (${k.via}) from ${k.self ? 'the file itself' : `${k.file || 'an unnamed file'} (pid ${k.pid})`}, ${k.afterMs} ms after it started`);
     if (!l.kills.length) err(`[test-runner] ${label}  no recorded kill names its pid ${l.pid} (a kill made by a process a test file started is not recorded)`);
   }
+  for (const c of context) {
+    const ran = c.ranMs === null ? 'end time not recorded' : `${c.ranMs} ms`;
+    const n = c.kills.length;
+    err(`[test-runner] ${label}KILLS WHILE A FAILED FILE RAN (pid ${c.pid}, ${ran}): ${n ? `${n} by other files` : 'none recorded by other files (a kill made by a process a test file started is not recorded)'}: ${c.file}`);
+    for (const k of c.kills.slice(0, KILL_ROWS_SHOWN)) err(`[test-runner] ${label}  ${k.via} of pid ${k.targets.join(',')} by ${k.file || 'an unnamed file'} (pid ${k.pid}), ${k.afterMs} ms after it started`);
+    if (n > KILL_ROWS_SHOWN) err(`[test-runner] ${label}  ... and ${n - KILL_ROWS_SHOWN} more, in the kept records`);
+  }
   for (const h of hung) {
     const how = h.by === 'backstop' ? `the runner's backstop killed it at ${backstopMs(timeoutMs)} ms`
       : h.by === 'watchdog' ? 'it never finished; the watchdog killed it' : 'it never finished';
@@ -563,7 +581,43 @@ function runNodeTest({ rel, extraArgs = [], label, spawn, cwd, timeoutMs, isTTY,
   }
   for (const r of bsRows) if (r.kill) err(`[test-runner] ${label}${r.message}: ${r.file}`);
   if (hung.length) err(`[test-runner] ${label}${hung.length} test file(s) timed out - the run FAILS (node --test lists them as cancelled, not failed)`);
-  return { res, hung, counts: runCounts(events), failures };
+  return { res, hung, counts: runCounts(events), failures, records };
+}
+
+/** RUNNER-FAILED-FILE-KILL-CONTEXT: the most kill rows printed for one failed file; the rest are counted. */
+const KILL_ROWS_SHOWN = 20;
+
+/**
+ * RUNNER-FAILED-FILE-KILL-CONTEXT: for each failed file that has a start row, the kills OTHER files
+ * recorded while it ran: from its start to its exit row's time (file-backstop-preload's
+ * { pid, exited, t }), or to the next start under the same pid, or with no end when neither is
+ * recorded (ranMs null). The file's own kills are left out. A file with no start row is not listed.
+ */
+function killsDuring(startsText, killsText, failedFiles) {
+  const rows = (text) => String(text || '').split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+  const key = (f) => { const p = path.resolve(String(f || '')); return process.platform === 'win32' ? p.toLowerCase() : p; };
+  const failed = new Set((failedFiles || []).map(key));
+  const last = new Map();
+  const windows = [];
+  for (const r of rows(startsText)) {
+    if (!Number.isInteger(r.pid)) continue;
+    const before = last.get(r.pid);
+    if (r.exited) {
+      if (before && before.ranMs === null && before.untilMs === Infinity && Number.isFinite(r.t)) { before.untilMs = r.t; before.ranMs = Math.round(r.t - before.bornMs); }
+      continue;
+    }
+    if (!Number.isFinite(r.bornMs)) continue;
+    if (before && before.untilMs === Infinity) before.untilMs = r.bornMs;
+    const w = { pid: r.pid, bornMs: r.bornMs, file: String(r.file || ''), untilMs: Infinity, ranMs: null };
+    last.set(r.pid, w);
+    windows.push(w);
+  }
+  const kills = rows(killsText).filter((k) => Array.isArray(k.targets) && Number.isFinite(k.t));
+  return windows.filter((w) => failed.has(key(w.file))).map((w) => ({
+    pid: w.pid, file: w.file, ranMs: w.ranMs,
+    kills: kills.filter((k) => k.pid !== w.pid && k.t >= w.bornMs && k.t <= w.untilMs)
+      .map((k) => ({ via: String(k.via || 'kill'), file: String(k.file || ''), pid: k.pid, targets: k.targets, afterMs: Math.round(k.t - w.bornMs) })),
+  }));
 }
 
 /**
@@ -620,11 +674,11 @@ function runPerfLane({ perfDir, filters, readdir, spawn, cwd, timeoutMs, isTTY, 
   log(`[test-runner] perf lane: running ${files.length} wall-clock file(s) serially (--test-concurrency=1), after the parallel suite (per-file limit ${timeoutMs} ms)`);
   const rel = files.map((n) => path.join(path.relative(cwd, perfDir) || '.', n));
   const lane = runNodeTest({ rel, extraArgs: ['--test-concurrency=1'], label: 'perf lane ', spawn, cwd, timeoutMs, isTTY, env, eventsFile, readFile, removeFile, watchdog, backstop, jobExe, err });
-  if (spawnFailed(lane.res, 'perf lane ', err)) return { code: 1, counts: lane.counts, state: 'fail', failures: lane.failures };
+  if (spawnFailed(lane.res, 'perf lane ', err)) return { code: 1, counts: lane.counts, state: 'fail', failures: lane.failures, records: lane.records };
   const code = lane.hung.length && lane.res.status === 0 ? 1 : lane.res.status;
   if (code !== 0) err('[test-runner] the perf lane FAILED (a wall-clock gate, measured serially)');
   else log('[test-runner] perf lane passed');
-  return { code, counts: lane.counts, state: code === 0 ? 'pass' : 'fail', failures: lane.failures };
+  return { code, counts: lane.counts, state: code === 0 ? 'pass' : 'fail', failures: lane.failures, records: lane.records };
 }
 
 // CLAIMS-PERF-LANE totals: node --test's own summary counts ('tests N', 'pass N', ...), recorded by
@@ -666,13 +720,15 @@ function failingTests(text) {
 /** Prints the one totals line and returns `code`. Unknown counts print as '?'. */
 function totals(code, counts, laneState, log, failures = [], {
   failureFile = () => path.join(os.tmpdir(), `run-tests-failures-${process.pid}-${Date.now()}.json`),
-  writeFailureFile = (p, text) => fs.writeFileSync(p, text, 'utf8')
+  writeFailureFile = (p, text) => fs.writeFileSync(p, text, 'utf8'),
+  records = []
 } = {}) {
   const n = (k) => (counts[k] === null ? '?' : String(counts[k]));
+  let output = null;
   if (failures.length) {
     log(`[test-runner] failing tests (${failures.length}):`);
     for (const f of failures) log(`[test-runner] FAIL ${f.file} :: ${f.name}`);
-    const output = failureFile();
+    output = failureFile();
     try {
       writeFailureFile(output, `${JSON.stringify(failures, null, 2)}\n`);
       log(`[test-runner] failing-test list written to ${output}`);
@@ -680,11 +736,26 @@ function totals(code, counts, laneState, log, failures = [], {
       log(`[test-runner] could not write failing-test list: ${String(e)}`);
     }
   }
+  // RUNNER-FAILED-FILE-KILL-CONTEXT: the start and kill records of every lane that failed, in ONE
+  // file beside the failing-test list (same name + '.records.jsonl'): a { lane } row, then that
+  // lane's start/exit rows, then its kill rows. Like the list it is a kept artifact of a red run in
+  // the temp folder and is never removed by the runner; the list's name is unique per run.
+  const keep = records.filter((r) => r && r.records && (String(r.records.starts || '').trim() || String(r.records.kills || '').trim()));
+  if (keep.length && code !== 0) {
+    const kept = `${output || failureFile()}.records.jsonl`;
+    const text = keep.map((r) => [JSON.stringify({ lane: r.lane }), String(r.records.starts || '').trim(), String(r.records.kills || '').trim()].filter(Boolean).join('\n')).join('\n');
+    try {
+      writeFailureFile(kept, `${text}\n`);
+      log(`[test-runner] start and kill records of the failed run written to ${kept}`);
+    } catch (e) {
+      log(`[test-runner] could not write the start and kill records: ${String(e)}`);
+    }
+  }
   log(`[test-runner] totals: tests ${n('tests')} pass ${n('pass')} fail ${n('fail')} cancelled ${n('cancelled')} skipped ${n('skipped')} lane ${laneState} exit ${code}`);
   return code;
 }
 
-module.exports = { startBackstop, BACKSTOP_PRELOAD, runNodeTest, endedWithoutExit,prepareFileJob, pruneFileJobs, FILE_JOB_DIR, FILE_JOB_PRELOAD, fileJobStrict, jobJoinFailures, fileJobVerdict, prepareTempJail, TEMP_JAIL_PRELOAD, tempLeaks, reportTempLeaks,prepareStartGate, startSlots, cappedCores, selfJobRate, HEAVYJOB_HELPER, CPU_RATE_50_PERCENT, START_GATE_PRELOAD, burstLine, selectTestFiles, discoverTestFiles, renderLaneFiles, FEATURE_TEST_DIRS, run, runPerfLane, runCounts, failingTests, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
+module.exports = { startBackstop, BACKSTOP_PRELOAD, runNodeTest, endedWithoutExit, killsDuring, prepareFileJob, pruneFileJobs, FILE_JOB_DIR, FILE_JOB_PRELOAD, fileJobStrict, jobJoinFailures, fileJobVerdict, prepareTempJail, TEMP_JAIL_PRELOAD, tempLeaks, reportTempLeaks,prepareStartGate, startSlots, cappedCores, selfJobRate, HEAVYJOB_HELPER, CPU_RATE_50_PERCENT, START_GATE_PRELOAD, burstLine, selectTestFiles, discoverTestFiles, renderLaneFiles, FEATURE_TEST_DIRS, run, runPerfLane, runCounts, failingTests, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
 
 if (require.main === module) {
   const repoRoot = path.resolve(__dirname, '..', '..');

@@ -141,6 +141,42 @@ test('runNodeTest hands the start and kill records back on a failed run, and not
   assert.equal(green.r.records, null, 'a green run keeps none');
 });
 
+test('a run with two failed lanes keeps both lanes\' records in the one file, each under its lane', () => {
+  // Jim (audit of the red-before, SHOULD 1): the main lane and the render lane each run runNodeTest;
+  // a render-lane fail must not lose its records, and one lane must not overwrite the other's.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runner-killctx-'));
+  try {
+    fs.writeFileSync(path.join(dir, 'plain.test.cjs'), '// an ordinary file\n');
+    fs.writeFileSync(path.join(dir, 'drawn.test.cjs'), "// require('./electron-harness/run.cjs') puts a file in the render lane\n");
+    const plain = path.join(dir, 'plain.test.cjs'); const drawn = path.join(dir, 'drawn.test.cjs');
+    const files = {
+      'ev.jsonl': row({ failure: { file: plain, name: 'a test' } }),
+      'ev.jsonl.starts': [row({ pid: 11, bornMs: 1000, file: plain }), row({ pid: 11, exited: true, t: 2000 })].join('\n'),
+      'ev.jsonl.starts.kills': row({ pid: 21, file: 'main-killer.test.cjs', via: 'taskkill', targets: [7], t: 1500 }),
+      'ev.jsonl.render': row({ failure: { file: drawn, name: 'a drawn test' } }),
+      'ev.jsonl.render.starts': [row({ pid: 31, bornMs: 3000, file: drawn }), row({ pid: 31, exited: true, t: 4000 })].join('\n'),
+      'ev.jsonl.render.starts.kills': row({ pid: 41, file: 'render-killer.test.cjs', via: 'process.kill', targets: [8], t: 3500 }),
+    };
+    const e = []; const logs = []; const written = []; const lanes = [];
+    const code = runner.run({ testDir: dir, cwd: dir, spawn: (args) => { lanes.push(args[args.length - 1]); return { status: 1 }; }, timeoutMs: 5, isTTY: false,
+      eventsFile: 'ev.jsonl', readFile: (f) => files[f] || '', removeFile: () => {}, failureFile: () => 'failures.json', writeFailureFile: (p, text) => written.push({ p, text }),
+      watchdog: () => ({ stop: () => {} }), backstop: () => ({ opt: '', env: {}, stop: () => {} }), log: (l) => logs.push(l), err: (l) => e.push(l),
+      cores: 4, processEnv: {}, jobRate: () => 5000, mutantJournal: () => ({ files: [], live: false, owner: null }) });
+    const errs = e.join('\n');
+    assert.equal(code, 1, `CONTROL: the run fails:\n${errs}`);
+    assert.deepEqual(lanes.map((l) => path.basename(l)), ['plain.test.cjs', 'drawn.test.cjs'], 'CONTROL: two lanes ran, the ordinary file then the render-lane file');
+    assert.match(errs, /^\[test-runner\] KILLS WHILE A FAILED FILE RAN \(pid 11, 1000 ms\): 1 by other files: .*plain\.test\.cjs$/m, `the main lane's failed file has its context:\n${errs}`);
+    assert.match(errs, /^\[test-runner\] render lane: KILLS WHILE A FAILED FILE RAN \(pid 31, 1000 ms\): 1 by other files: .*drawn\.test\.cjs$/m, `THE RENDER LANE'S FAILED FILE HAS ITS CONTEXT, under the lane's label:\n${errs}`);
+    assert.match(errs, /^\[test-runner\] render lane: {3}process\.kill of pid 8 by render-killer\.test\.cjs \(pid 41\), 500 ms after it started$/m, errs);
+    const kept = written.filter((w) => w.p === 'failures.json.records.jsonl');
+    assert.equal(kept.length, 1, `THE RECORDS ARE WRITTEN ONCE, to one file: ${written.map((w) => w.p).join(', ')}`);
+    const rows = kept[0].text.trim().split('\n').map((l) => JSON.parse(l));
+    assert.deepEqual(rows.map((x) => x.lane || x.via || (x.exited ? 'exit' : 'start')), ['main', 'start', 'exit', 'taskkill', 'render', 'start', 'exit', 'process.kill'], 'BOTH LANES ARE IN IT, each under its own lane row');
+    assert.deepEqual(logs.filter((l) => l.includes('records')), ['[test-runner] start and kill records of the failed run written to failures.json.records.jsonl']);
+    assert.match(logs[logs.length - 1], /^\[test-runner\] totals: /, 'CONTROL: the totals line is still the last line');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('END TO END: a file fails while another kills a process by number; the run names that kill and keeps the records', { timeout: 120_000 }, () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runner-killctx-'));
   const up = path.join(dir, 'a.up');
@@ -184,6 +220,7 @@ test('END TO END: a file fails while another kills a process by number; the run 
     assert.deepEqual(fs.readdirSync(dir).filter((n) => n.startsWith('ev.jsonl')), [], 'CONTROL: the record files beside the events file are removed, as before');
     assert.match(errs, /KILLS WHILE A FAILED FILE RAN \(pid \d+, \d+ ms\): 1 by other files: .*a-fails\.test\.cjs$/m, `THE FAILED FILE HAS ITS KILL CONTEXT:\n${errs}`);
     assert.match(errs, /^\[test-runner\] {3}process\.kill of pid \d+ by .*b-killer\.test\.cjs \(pid \d+\), \d+ ms after it started$/m, `THE OTHER FILE'S KILL IS NAMED:\n${errs}`);
+    assert.doesNotMatch(errs, /KILLS WHILE A FAILED FILE RAN.*b-killer\.test\.cjs$/m, 'the file that passed gets no kill context line');
     const kept = `${failuresFile}.records.jsonl`;
     assert.ok(fs.existsSync(kept), `THE RECORDS OF THE FAILED RUN ARE KEPT beside the failing-test list: ${fs.readdirSync(dir).join(', ')}`);
     const rows = fs.readFileSync(kept, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
