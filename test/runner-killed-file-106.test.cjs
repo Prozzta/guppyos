@@ -64,9 +64,9 @@ test('fileTimeLines: one line per file with its start and end, ordered by start;
     'torn',
   ].join('\n');
   assert.deepEqual(runner.fileTimeLines(starts), [
-    'file-times 2026-01-01T00:00:01.000Z 2026-01-01T00:00:03.500Z 2500 pid 1 a.test.cjs',
-    'file-times 2026-01-01T00:00:05.000Z 2026-01-01T00:00:09.000Z 4000 pid 2 b.test.cjs',
-    'file-times 2026-01-01T00:00:06.000Z never - pid 3 killed.test.cjs',
+    'file-times pid 1 a.test.cjs start 2026-01-01T00:00:01.000Z end 2026-01-01T00:00:03.500Z ms 2500',
+    'file-times pid 2 b.test.cjs start 2026-01-01T00:00:05.000Z end 2026-01-01T00:00:09.000Z ms 4000',
+    'file-times pid 3 killed.test.cjs start 2026-01-01T00:00:06.000Z end never ms -',
   ]);
   assert.deepEqual(runner.fileTimeLines(''), []);
   assert.deepEqual(runner.fileTimeLines(undefined), []);
