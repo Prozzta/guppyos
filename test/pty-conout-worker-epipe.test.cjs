@@ -79,6 +79,13 @@ const BUFFERED_MS = 250;
 /** How long a worker that must NOT end is watched after the failed write (the unpatched one ends in a few ms). */
 const STAYS_MS = 500;
 const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+/**
+ * FLAKE-PTY-CONOUT-EPIPE-CONTROL-TIMEOUT-108. How long the stalled cells keep this thread off its loop
+ * right after connect() + destroy(): what a loaded machine does to it at a moment of its choosing.
+ * destroy() does not close the handle in that turn, so the worker can accept and write meanwhile.
+ */
+const STALL_MS = 300;
+function stall(ms) { const end = Date.now() + ms; while (Date.now() < end) { /* this thread, kept off its loop */ } }
 function within(p, what) {
   let t;
   return Promise.race([p, new Promise((_, rej) => { t = setTimeout(() => rej(new Error(`timed out: ${what}`)), CAP_MS); })])
@@ -238,7 +245,7 @@ if (process.platform !== 'win32') {
    * it lives, connect a second data socket and read later console output through it.
    * Nothing here listens for the worker's 'error': an error from it is thrown on this thread.
    */
-  async function destroyedBeforeTheWrite(file, mustEnd) {
+  async function destroyedBeforeTheWrite(file, mustEnd, stallMs = 0) {
     const conoutPipeName = `\\\\.\\pipe\\guppy-epipe-108-${process.pid}-${++seq}`;
     const uncaught = [];
     const onUncaught = (e) => { uncaught.push(`${(e && e.code) || ''} ${e && e.message}`); };
@@ -261,6 +268,7 @@ if (process.platform !== 'win32') {
       await sleep(BUFFERED_MS);
       client.connect(getWorkerPipeName(conoutPipeName));
       client.destroy();   // same turn: before the worker accepts, and so before it writes
+      if (stallMs) stall(stallMs);
       if (mustEnd) {
         seen.exitCode = await within(ended, 'the worker\'s end (its write to the destroyed socket fails)');
         await sleep(50);  // an error event that follows the exit would land here
@@ -284,14 +292,14 @@ if (process.platform !== 'win32') {
       await new Promise((res) => conout.close(res));
     }
   }
-  async function withText(text, mustEnd) {
+  async function withText(text, mustEnd, stallMs = 0) {
     const [file, remove] = asFile(text);
-    try { return await destroyedBeforeTheWrite(file, mustEnd); } finally { remove(); }
+    try { return await destroyedBeforeTheWrite(file, mustEnd, stallMs); } finally { remove(); }
   }
 
-  const CONTROLS = { pristine: () => PRISTINE, 'no-data-listener': noDataListener };
+  const CONTROLS = { pristine: [() => PRISTINE, 0], 'no-data-listener': [noDataListener, 0], 'pristine-stalled': [() => PRISTINE, STALL_MS] };
   if (CONTROL) {
-    Promise.resolve().then(() => withText(CONTROLS[CONTROL](), true)).then(
+    Promise.resolve().then(() => withText(CONTROLS[CONTROL][0](), true, CONTROLS[CONTROL][1])).then(
       (r) => { process.stdout.write(JSON.stringify(r)); },
       (e) => { process.stderr.write(String((e && e.stack) || e)); process.exitCode = 2; });
   }
@@ -301,7 +309,8 @@ if (process.platform !== 'win32') {
   }), `the ${which} control's child`);
   const UNQUIET = [
     ['control (W1): node-pty 1.1.0\'s own worker throws the EPIPE on the main thread, outside any caller', 'pristine'],
-    ['W2: the patched worker WITHOUT the data socket\'s error listener throws it just the same', 'no-data-listener']
+    ['W2: the patched worker WITHOUT the data socket\'s error listener throws it just the same', 'no-data-listener'],
+    ['control, THIS THREAD STALLED after the destroy: the lever holds just the same (the socket is closed before the worker may write)', 'pristine-stalled']
   ];
   for (const [name, which] of UNQUIET) {
     test(name, async () => {
@@ -324,6 +333,12 @@ if (process.platform !== 'win32') {
   test('the patched worker, reporting: the same lever gives its listener EPIPE on a destroyed socket, and it stays quiet', async () => {
     const r = await withText(reporting(), false);
     assert.deepEqual(r.reports, [{ saw: 'EPIPE', destroyed: true }], 'the EPIPE did happen, once, and the socket was destroyed by then');
+    quiet(r);
+  });
+
+  test('the patched worker, reporting, THIS THREAD STALLED after the destroy: its listener still sees the EPIPE (the cell is not passing on a write that worked)', async () => {
+    const r = await withText(reporting(), false, STALL_MS);
+    assert.deepEqual(r.reports, [{ saw: 'EPIPE', destroyed: true }], 'THE WRITE FAILED: the socket was closed before the worker wrote, stalled thread or not');
     quiet(r);
   });
 
