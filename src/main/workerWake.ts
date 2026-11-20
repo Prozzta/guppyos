@@ -623,7 +623,7 @@ export class WorkerWakeWatchdog {
       if (r.lifecycle === 'active' && r.provisional && r.claimedAt > 0 && at >= r.claimedAt) {
         if (!r.claimTurnSeen) { r.claimTurnSeen = true; r.claimTurnId = turnId ?? null; }
         this.turnStarted(r, at);
-        r.activeSince = at;
+        r.activeSince = at; r.settleEdgeAt = 0;   // not the settle's edge, whatever its stamp
         if (turnId) r.openTurnId = turnId;
         return false;
       }
@@ -643,7 +643,7 @@ export class WorkerWakeWatchdog {
             return false;
           }
         }
-        r.lifecycle = 'active'; r.activeSince = at;
+        r.lifecycle = 'active'; r.activeSince = at; r.settleEdgeAt = 0;   // not the settle's edge, whatever its stamp
         r.openTurnId = turnId ?? null;
         r.compactEpoch = true;
         return false;
@@ -676,7 +676,7 @@ export class WorkerWakeWatchdog {
       // P1: the first turn start after the claim names the turn the claim's settle is about.
       if (!r.claimTurnSeen && r.claimedAt > 0 && at >= r.claimedAt) { r.claimTurnSeen = true; r.claimTurnId = turnId ?? null; }
       this.turnStarted(r, at);   // the provider's own turn start: confirms our submit
-      r.lifecycle = 'active'; r.activeSince = at;
+      r.lifecycle = 'active'; r.activeSince = at; r.settleEdgeAt = 0;   // not the settle's edge, whatever its stamp
       r.openTurnId = turnId ?? null;   // no id (Claude, our own submit): the turn is unnamed
       return false;
     }
@@ -767,7 +767,9 @@ export class WorkerWakeWatchdog {
     //     same reading, so it gets the settle's own rule: read at or after a turn start that came
     //     after the claim, it is deferred, and the beat applies it after the grace counted from
     //     the settle. Only while the edge IS that settle's: a reading older than any other edge
-    //     (a turn start, a compaction) says nothing about what that edge opened.
+    //     (a turn start, a compaction) says nothing about what that edge opened. Every other
+    //     write of the edge clears settleEdgeAt, so an edge stamped in the settle's own
+    //     millisecond is not taken for it.
     if (status === 'idle') {
       if (r.activeSince > 0 && at < r.activeSince) {
         const settleEdge = r.settleEdgeAt === r.activeSince;
