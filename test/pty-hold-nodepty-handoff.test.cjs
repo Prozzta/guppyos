@@ -247,11 +247,14 @@ if (!WIN) {
       assert.equal(builtCc.split(after).length, 2, `the close-on-exit edit is in the source once: ${label}`);
       assert.notEqual(before, after, label);
     }
-    // The exit thread: take the pseudoconsole under the lock, report the exit, then close.
-    const thread = builtCc.slice(builtCc.indexOf('    WaitForSingleObject(baton->hShell, INFINITE);'), builtCc.indexOf('    switch (status) {'));
+    // The exit thread: take the pseudoconsole under the lock, report the exit, release the callback
+    // function, and only then start the close, on a detached thread (the close can block for ever).
+    const thread = builtCc.slice(builtCc.indexOf('    WaitForSingleObject(baton->hShell, INFINITE);'), builtCc.indexOf('Napi::Error errorWithCode('));
     const order = ['std::lock_guard<std::mutex> lock(g_ptyHandlesMutex);', 'if (!baton->guppyHpcClosed) {', 'guppyHpc = baton->hpc;', 'baton->guppyHpcClosed = true;',
-      'std::erase_if(ptyHandles', '    }\n\n', 'tsfn.BlockingCall(exit_event, callback);', 'GuppyClosePseudoConsole(guppyHpc, guppyUseConptyDll);'].map((s) => thread.indexOf(s));
-    assert.ok(order.every((at, i) => at >= 0 && (i === 0 || at > order[i - 1])), `THE EXIT THREAD TAKES THE PSEUDOCONSOLE UNDER THE LOCK AND CLOSES IT AFTER THE LOCK AND AFTER THE EXIT IS REPORTED: ${order}`);
+      'std::erase_if(ptyHandles', '    }\n\n', 'tsfn.BlockingCall(exit_event, callback);', 'tsfn.Release()', 'ThreadSafeFunction.BlockingCall() failed");\n    }\n',
+      'std::thread([guppyHpc, guppyUseConptyDll] {\n', 'GuppyClosePseudoConsole(guppyHpc, guppyUseConptyDll);', '}).detach();'].map((s) => thread.indexOf(s));
+    assert.ok(order.every((at, i) => at >= 0 && (i === 0 || at > order[i - 1])), `THE EXIT THREAD TAKES THE PSEUDOCONSOLE UNDER THE LOCK AND HAS IT CLOSED AFTER THE LOCK, AFTER THE EXIT IS REPORTED AND AFTER THE CALLBACK IS RELEASED, ON A DETACHED THREAD: ${order}`);
+    assert.equal(thread.split('GuppyClosePseudoConsole(').length, 2, 'the exit thread closes in one place: never on the thread the finalizer joins');
     assert.equal(builtCc.split('pfnClosePseudoConsole(handle->hpc);').length, 2, 'kill closes in one place');
     assert.match(builtCc, /if \(pfnClosePseudoConsole && !handle->guppyHpcClosed\)\n {6}\{\n {8}handle->guppyHpcClosed = true;\n {8}pfnClosePseudoConsole\(handle->hpc\);/, 'A PSEUDOCONSOLE IS CLOSED ONCE: kill closes only one the exit thread has not taken, and says so');
     // The duplicate is made before the thread that can close the original exists, with query rights only.
