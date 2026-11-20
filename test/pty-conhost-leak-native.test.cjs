@@ -380,12 +380,18 @@ async function threadFailsManager() {
     out.spawn = await m.spawn({ id, cwd: process.cwd(), command: node.file, cols: 80, rows: 24,
       args: ['-e', `const fs = require('fs'); setInterval(() => { if (fs.existsSync(${JSON.stringify(flag)})) process.exit(0); }, 50)`] });
     const proc = m.sessions.get(id).proc;
+    // The premise, read where it happens: the native exit says whether the close thread started
+    // (its second argument, true when it could not). PTY-CONHOST-ORPHAN: on the bundled
+    // OpenConsole the host also ends with its client, so the host cannot show the premise there.
+    out.bundledHost = proc._agent._useConptyDll === true;
+    const nativeExit = proc._agent._$onProcessExit.bind(proc._agent);
+    proc._agent._$onProcessExit = (...a) => { out.closeUnstarted = a[1]; return nativeExit(...a); };
     const exited = new Promise((res) => proc.onExit(res));
     out.hosts = [...(await hostChildren())].filter(([pid]) => !before.has(pid));
     fs.writeFileSync(flag, '');
     out.exit = await exited;
-    // The close was never started, so the host is what it was before the close existed: it
-    // stays for as long as this process lives. LISTINGS completed listings later it is still here.
+    // The close was never started. On the inbox conhost the host is what it was before the close
+    // existed: it stays for as long as this process lives, LISTINGS completed listings later.
     out.left = out.hosts;
     for (let k = 0; k < LISTINGS && out.left.length; k += 1) {
       const now = await hostChildren();
@@ -599,8 +605,14 @@ test('PTY-CONHOST-LEAK: a close thread that cannot be started costs one console 
     const { r, ended, stderr } = await managerRun(t, THREAD_FAILS_FLAG);
     assert.deepEqual(r.spawn, { ok: true });
     assert.equal(r.exit && r.exit.exitCode, 0, `the terminal's exit is reported with the program's own code: ${JSON.stringify(r.exit)}`);
-    // The premise: the start DID fail in that process. Had the hook not been read, the host would be closed and gone.
-    assert.deepEqual(r.left, r.hosts, `the close was never started, so the host stays while the manager lives (the leak this card removes, and the price of a failed start): ${JSON.stringify(r.left)}`);
+    // The premise: the start DID fail in that process (the native exit says so).
+    assert.equal(r.closeUnstarted, true, `THE HOOK WAS NOT READ: the native exit says the close thread started (${JSON.stringify(r.closeUnstarted)})`);
+    if (r.bundledHost) {
+      // PTY-CONHOST-ORPHAN: the bundled OpenConsole ends with its client, so a failed start costs no host.
+      assert.deepEqual(r.left, [], `on the bundled OpenConsole the host ends with its client even with no close: ${JSON.stringify(r.left)}`);
+    } else {
+      assert.deepEqual(r.left, r.hosts, `the close was never started, so the host stays while the manager lives (the leak this card removes, and the price of a failed start): ${JSON.stringify(r.left)}`);
+    }
     const end = await ended();
     assert.ok(end, `THE MANAGER PROCESS DOES NOT END: ${LISTINGS} listings after its result it is still alive
 ${stderr()}`);
