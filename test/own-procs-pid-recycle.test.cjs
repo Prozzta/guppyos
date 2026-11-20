@@ -273,7 +273,11 @@ const PPID_ALLOW = {
   'heavy-job-lock.test.cjs': [/ParentProcessId/],                                     // parse fixtures
   'layer-b-codex-argv.test.cjs': [/c\.ppid === x\.pid/],                              // a fake table
   // INT 1.1.103 (BARE-NODE-TEST-NO-OWNER): a listing narrowed by ParentProcessId, then own-procs' childrenOf (birth-checked)
-  'bare-node-test-owner.test.cjs': [/own\.childrenOf\(own\.processTable\(`ParentProcessId = \$\{c\.pid\}`\), c\)/]
+  'bare-node-test-owner.test.cjs': [/own\.childrenOf\(own\.processTable\(`ParentProcessId = \$\{c\.pid\}`\), c\)/],
+  // PTY-CONHOST-LEAK-NATIVE: the console hosts of one process, each with its CreationDate check on the same line
+  // (no older than the parent itself; for a manager that has ended, no older than the time taken before it started)
+  'pty-conhost-leak-native.test.cjs': [/ParentProcessId=\$\{process\.pid\}" \| Where-Object \{ \$_\.CreationDate -ge \$me\.CreationDate \}/,
+    /ParentProcessId=\$\{parent\}" \| Where-Object \{ \$_\.CreationDate -ge \[DateTimeOffset\]::FromUnixTimeMilliseconds\(\$\{born\}\)\.LocalDateTime \}/]
 };
 test('PIN (all of test/): no tree walk by ParentProcessId alone outside own-procs (an allow-list, each entry a listing or checked)', () => {
   const bad = hits(PPID).filter((h) => !(PPID_ALLOW[h.file] || []).some((re) => re.test(h.text)));

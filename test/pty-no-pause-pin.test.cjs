@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 // PTY-CONHOST-LEAK-NATIVE (branch guppy/pty-conhost-leak-native-108): no terminal of the app may
 // ever stop reading its output.
 //

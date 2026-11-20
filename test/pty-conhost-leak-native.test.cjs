@@ -83,6 +83,7 @@ const path = require('node:path');
 const { execFile, spawn } = require('node:child_process');
 const loadTs = require('./load-ts.cjs');
 const { consoleNode } = require('./tools/console-node.cjs');
+const { psEnv } = require('./tools/ps-env.cjs');
 
 const WIN = process.platform === 'win32';
 const HOSTS = new Set(['conhost.exe', 'openconsole.exe']);
@@ -94,12 +95,16 @@ const BUNDLED_HOST = path.join(__dirname, '..', 'node_modules', 'node-pty', 'bui
 const SESSION_ENDED = [-1073741510, -1073741502];
 let seq = 0;
 
-/** pid -> name of the console hosts that are children of this process; `.threads` is this process's thread count. */
+/**
+ * pid -> name of the console hosts that are children of this process; `.threads` is this process's thread count.
+ * A child is a row that names this pid as its parent AND was made no earlier than this process: a row left by an
+ * earlier holder of the pid is not a child (the recorded parent pid is never checked by Windows after the fact).
+ */
 function hostChildren() {
-  const body = `$ProgressPreference = 'SilentlyContinue'\nGet-CimInstance Win32_Process -Filter "ParentProcessId=${process.pid}" | ForEach-Object { "$($_.ProcessId) $($_.Name)" }\n"threads $((Get-Process -Id ${process.pid}).Threads.Count)"`;
+  const body = `$ProgressPreference = 'SilentlyContinue'\n$me = Get-CimInstance Win32_Process -Filter "ProcessId=${process.pid}"\nGet-CimInstance Win32_Process -Filter "ParentProcessId=${process.pid}" | Where-Object { $_.CreationDate -ge $me.CreationDate } | ForEach-Object { "$($_.ProcessId) $($_.Name)" }\n"threads $((Get-Process -Id ${process.pid}).Threads.Count)"`;
   return new Promise((res, rej) => {
     execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(body, 'utf16le').toString('base64')],
-      { encoding: 'utf8', windowsHide: true }, (err, stdout, stderr) => {
+      { encoding: 'utf8', windowsHide: true, env: psEnv() }, (err, stdout, stderr) => {
         if (err) { rej(new Error(`the process listing failed: ${err.message}\n${stderr}`)); return; }
         const hosts = new Map();
         hosts.threads = null;   // of this process, in the same listing
@@ -404,6 +409,7 @@ if (THREAD_FAILS) threadFailsManager();
 
 /** Runs this file as a manager process; resolves with its result line, and `ended()` says how it ended, waiting LISTINGS listings at most. */
 async function managerRun(t, flag) {
+  const born = Date.now();   // before the manager exists: nothing it makes is older
   const child = spawn(process.execPath, [__filename].concat(flag), { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
   t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill(); });
   let stdout = ''; let stderr = '';
@@ -419,7 +425,7 @@ async function managerRun(t, flag) {
   assert.equal(r.hosts.length, 1, `the listing sees this terminal's console host: exactly one new host child, got ${JSON.stringify(r.hosts)}`);
   // The bound is again a count of completed listings, taken after the result was printed.
   const ended = async () => { for (let k = 0; k < LISTINGS && !end; k += 1) await Promise.race([closed, hostChildren()]); return end; };
-  return { r, pid: child.pid, ended, stderr: () => stderr };
+  return { r, pid: child.pid, born, ended, stderr: () => stderr };
 }
 
 async function unreadTerminal(t, flag) {
@@ -449,16 +455,20 @@ async function unreadTerminal(t, flag) {
 test('PTY-CONHOST-LEAK: a program that ends itself with its output unread: the exit is reported, the host goes, and the manager process ends by itself',
   { skip: !WIN, timeout: 120_000 }, (t) => unreadTerminal(t, UNREAD_FLAG));
 
-/** Ends a console host the manager process `parent` left behind: only a host, and only one whose recorded parent is that process. */
-function endLeftHost(pid, parent) {
-  const body = `$ProgressPreference = 'SilentlyContinue'\nGet-CimInstance Win32_Process -Filter "ProcessId=${pid} AND ParentProcessId=${parent}" | Where-Object { $_.Name -eq 'conhost.exe' -or $_.Name -eq 'OpenConsole.exe' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`;
-  return new Promise((res) => execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(body, 'utf16le').toString('base64')], { windowsHide: true }, () => res()));
+/**
+ * Ends a console host the manager process `parent` left behind: only a host, only one whose recorded parent is that
+ * process, and only one made after `born` (taken before the manager was started), so a process that has the pid now
+ * and an older parent record is not it.
+ */
+function endLeftHost(pid, parent, born) {
+  const body = `$ProgressPreference = 'SilentlyContinue'\nGet-CimInstance Win32_Process -Filter "ProcessId=${pid} AND ParentProcessId=${parent}" | Where-Object { $_.CreationDate -ge [DateTimeOffset]::FromUnixTimeMilliseconds(${born}).LocalDateTime } | Where-Object { $_.Name -eq 'conhost.exe' -or $_.Name -eq 'OpenConsole.exe' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`;
+  return new Promise((res) => execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(body, 'utf16le').toString('base64')], { windowsHide: true, env: psEnv() }, () => res()));
 }
 
 /** The destroyed-socket state, through `flag`'s manager: exit reported, host gone, threads back, manager ends by itself. */
 async function destroyedSocket(t, flag, who) {
-  const { r, pid, ended, stderr } = await managerRun(t, flag);
-  t.after(async () => { for (const [host] of r.left || []) await endLeftHost(host, pid); });
+  const { r, pid, born, ended, stderr } = await managerRun(t, flag);
+  t.after(async () => { for (const [host] of r.left || []) await endLeftHost(host, pid, born); });
   t.diagnostic(`PTY child: ${r.node}; the program had ${r.written} writes of 4097 bytes returned when it ended itself (on the manager's word, or when they stood still); `
     + `manager threads ${JSON.stringify(r.threads)}; output worker ended while the program printed: ${r.workerEndedEarly}`);
   // HOW THE PROGRAM ENDS is a fact of the path, and each path's own premise is required here.
