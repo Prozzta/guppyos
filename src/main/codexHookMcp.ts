@@ -288,13 +288,16 @@ const APPLY_PATCH_CALL = /\btools\s*(?:\?\.|\.)\s*apply_patch\s*\(|\btools\s*\[\
  * text, so the heavy lock read an edit that held a test line as that test run. True only when the
  * rollout shows it: `text` is a patch body, a pending call is an apply_patch (code is read through
  * codeMask, so a string or a comment never counts), and no pending shell call could run the same
- * text: none with that literal text, and none the rollout cannot read.
+ * text: none with that literal text (white space at the end aside), and none the rollout cannot read.
  */
 export function pendingApplyPatch(tail: string, text: string): boolean {
   if (!PATCH_BODY.test(text)) return false;
   const shell = pendingExecCommands(tail);
   if (!shell.complete || shell.unnamed > 0) return false;
-  if (shell.commands.includes(text)) return false;
+  // Ends compared trimmed on both sides: a write_stdin's `chars` lose their line end in the list
+  // above, and the hook's text may keep it, so an exact match let a typed patch-shaped text through.
+  const typed = text.replace(/\s+$/, '');
+  if (shell.commands.some((c) => c.replace(/\s+$/, '') === typed)) return false;
   for (const p of pendingCallItems(tail)) {
     if (p.name === 'apply_patch') return true;
     if (p.name !== 'exec' || typeof p.input !== 'string') continue;
