@@ -133,7 +133,7 @@ const CONPTY_CC_CLOSE_EDITS = [
     'struct ExitEvent {\n' +
     '  int exit_code = 0;\n' +
     '};\n'],
-  ['the exit thread closes the pseudoconsole it drops',
+  ['the exit thread has the pseudoconsole it drops closed, off the joined thread',
     '    WaitForSingleObject(baton->hShell, INFINITE);\n' +
     '    {\n' +
     '      std::lock_guard<std::mutex> lock(g_ptyHandlesMutex);\n' +
@@ -145,12 +145,28 @@ const CONPTY_CC_CLOSE_EDITS = [
     '      });\n' +
     '    }\n' +
     '\n' +
-    '    auto status = tsfn.BlockingCall(exit_event, callback); // In main thread\n',
+    '    auto status = tsfn.BlockingCall(exit_event, callback); // In main thread\n' +
+    '    switch (status) {\n' +
+    '      case napi_closing:\n' +
+    '        break;\n' +
+    '\n' +
+    '      case napi_queue_full:\n' +
+    '        Napi::Error::Fatal("SetupExitCallback", "Queue was full");\n' +
+    '\n' +
+    '      case napi_ok:\n' +
+    '        if (tsfn.Release() != napi_ok) {\n' +
+    '          Napi::Error::Fatal("SetupExitCallback", "ThreadSafeFunction.Release() failed");\n' +
+    '        }\n' +
+    '        break;\n' +
+    '\n' +
+    '      default:\n' +
+    '        Napi::Error::Fatal("SetupExitCallback", "ThreadSafeFunction.BlockingCall() failed");\n' +
+    '    }\n',
     '    WaitForSingleObject(baton->hShell, INFINITE);\n' +
     '    // GUPPY PTY-CONHOST-LEAK-NATIVE (tools/patch-node-pty-root-handle.cjs): this thread erases the\n' +
     '    // record of the terminal, and after that no kill can find the pseudoconsole. Unclosed, its\n' +
     '    // console host stayed for the life of the app. So the thread takes the pseudoconsole out\n' +
-    '    // of the record under the lock (unless a kill has closed it already) and closes it itself:\n' +
+    '    // of the record under the lock (unless a kill has closed it already) and has it closed\n' +
     '    // after the lock is released and after the exit is reported, so that a slow close holds up\n' +
     '    // neither a kill or resize of another terminal nor the exit event.\n' +
     '    HPCON guppyHpc = nullptr;\n' +
@@ -171,8 +187,32 @@ const CONPTY_CC_CLOSE_EDITS = [
     '    }\n' +
     '\n' +
     '    auto status = tsfn.BlockingCall(exit_event, callback); // In main thread\n' +
+    '    switch (status) {\n' +
+    '      case napi_closing:\n' +
+    '        break;\n' +
+    '\n' +
+    '      case napi_queue_full:\n' +
+    '        Napi::Error::Fatal("SetupExitCallback", "Queue was full");\n' +
+    '\n' +
+    '      case napi_ok:\n' +
+    '        if (tsfn.Release() != napi_ok) {\n' +
+    '          Napi::Error::Fatal("SetupExitCallback", "ThreadSafeFunction.Release() failed");\n' +
+    '        }\n' +
+    '        break;\n' +
+    '\n' +
+    '      default:\n' +
+    '        Napi::Error::Fatal("SetupExitCallback", "ThreadSafeFunction.BlockingCall() failed");\n' +
+    '    }\n' +
+    '    // GUPPY PTY-CONHOST-LEAK-NATIVE (tools/patch-node-pty-root-handle.cjs): the close runs on a\n' +
+    '    // detached thread of its own, started after the callback function is released. On Windows 10\n' +
+    '    // the close can wait for the console host for ever (measured: the output socket destroyed,\n' +
+    '    // then a program that floods and ends by itself). This thread is joined by the finalizer on\n' +
+    '    // the main thread, and until Release() the function keeps the event loop alive: a close\n' +
+    '    // here held both. The detached thread holds only the handle and the library flag.\n' +
     '    if (guppyHpc != nullptr) {\n' +
-    '      GuppyClosePseudoConsole(guppyHpc, guppyUseConptyDll);\n' +
+    '      std::thread([guppyHpc, guppyUseConptyDll] {\n' +
+    '        GuppyClosePseudoConsole(guppyHpc, guppyUseConptyDll);\n' +
+    '      }).detach();\n' +
     '    }\n'],
   ['connect records which library made the pseudoconsole',
     '  // Update handle\n' +
@@ -239,7 +279,7 @@ module.exports = {
   // conpty.cc after ALL its patches (#922, the root-handle handoff, then the close on exit of
   // PTY-CONHOST-LEAK-NATIVE): the only source conpty.node may be built from, and what the record
   // and the release markers require.
-  CONPTY_CC_BUILT_SHA256: '222ee407913f622cb98106df1a3cad6afc94cea434a2401e53186e5bec25b1b6',
+  CONPTY_CC_BUILT_SHA256: '2b09757e872ec6089ebd487fe884130e8ccc634726e2b14f1129bc589cb47e53',
   CONPTY_CC_CLOSE_EDITS,
   CLOSE_MARKER,
   hasCloseMarker,
