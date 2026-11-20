@@ -335,6 +335,8 @@ async function liveRelease(t, o) {
     setTimeout(() => {
       const l = spawnSync(exe, ['list', id], { encoding: 'utf8', windowsHide: true });
       for (const line of String(l.stdout).split(/\r?\n/).filter(Boolean)) {
+        // o.slowKill: the kill tool takes this long per process, as taskkill does on a loaded machine
+        if (o.slowKill) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, o.slowKill);
         try { spawnSync('taskkill', ['/F', '/PID', String(JSON.parse(line).pid)], { windowsHide: true }); } catch { /* gone already */ }
       }
     }, o.kill);
@@ -445,6 +447,17 @@ test('LIVE: a killed job frees the slot when completion-port notices are absent'
   assert.ok(r.runMs < 10_000, 'the kill ended the job');
   assertFreed(r, 'no-port kill');
   assertWatcherClosed(r, 'no-port kill');
+});
+
+// FLAKE-LAG197-NOPORT-KILL-NOT-ENDED-108: under full-suite load the no-port kill "ran 10066 ms" and
+// was read as a job the kill did not end, although the slot was freed 640 ms after the exit. The
+// run time measured the kill TOOL (one taskkill after another, each blocking this process), not the
+// job. Here the tool is slow on purpose: the job is still killed, and the slot is still freed.
+test('LIVE: a kill tool that is slow under load is not read as a job the kill did not end', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
+  const r = await liveRelease(t, { body: 'sleep 30', kill: 1_500, slowKill: 6_000 });
+  t.diagnostic(`slow kill: ran ${r.runMs} ms, held ${r.heldMs} ms, freed ${r.lagMs} ms after the exit`);
+  assert.ok(r.runMs < 10_000, 'the kill ended the job');
+  assertFreed(r, 'slow kill');
 });
 
 test('LIVE: a member that joins after a snapshot keeps the slot until its own exit', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
