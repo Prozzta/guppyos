@@ -21,6 +21,8 @@ require('../tools/own-job.cjs');
  *   P5 a pending shell call the rollout cannot read does not stop it
  *   P6 the input need not be shaped as a patch
  *   P7 the mark is taken from any transport, not only from Codex's MCP hook
+ *   P8 a pending shell call stops it only when its text is the hook's text to the byte (Jim SHOULD 1:
+ *      a write_stdin's typed line end, trimmed on one side only, let a typed patch-shaped text through)
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -161,6 +163,26 @@ test('a shell call that could run the same text keeps it a command (P4, P5)', as
     `const run = tools.exec_command;\nawait tools.apply_patch(${q(PATCH)});\nawait run({cmd: x});`,
     `await tools.apply_patch(${q(PATCH)});\nawait tools[n]({cmd: x});`
   ]) assert.equal(denied((await pre([exec(program)], SHAPED)).out), true, `P5: ${program.split('\n').at(-1)}`);
+});
+
+test('a shell call whose text differs from the hook\'s only by its line end keeps it a command (P8)', async (t) => {
+  const { pre } = await server(t);
+  // Typed into an open shell with its Enter: the shell runs the middle line.
+  const typed = `${SHAPED}\n`;
+  const stdinCall = JSON.stringify({ timestamp: 't', type: 'response_item', payload: { type: 'function_call', call_id: 'c2', name: 'write_stdin', arguments: JSON.stringify({ session_id: 1, chars: typed }) } });
+  const inCode = `await tools.apply_patch(${q(PATCH)});\nawait tools.write_stdin({session_id: 1, chars:${q(typed)}});`;
+  assert.equal(denied((await pre([exec(inCode)], typed)).out), true, 'P8: a write_stdin in code mode, the hook text with its line end');
+  assert.equal(denied((await pre([exec(inCode)], SHAPED)).out), true, 'P8: the same, the hook text without it');
+  assert.equal(denied((await pre([direct(PATCH, 'c1'), stdinCall], typed)).out), true, 'P8: a write_stdin as a tool of its own');
+  // An exec_command whose cmd ends in white space the hook text does not have, and the other way.
+  const spaced = `await tools.apply_patch(${q(PATCH)});\nawait tools.exec_command({cmd:${q(`${SHAPED} \n`)}});`;
+  assert.equal(denied((await pre([exec(spaced)], SHAPED)).out), true, 'P8: the cmd has the line end, the hook text has not');
+  assert.equal(denied((await pre([exec(`await tools.apply_patch(${q(PATCH)});\nawait tools.exec_command({cmd:${q(SHAPED)}});`)], `${SHAPED}\r\n`)).out), true, 'P8: the hook text has the line end, the cmd has not');
+  const f = mcp.pendingApplyPatch;
+  const tail = (...items) => [turn, ...items].join('\n');
+  assert.equal(f(tail(exec(inCode)), typed), false, 'P8: pendingApplyPatch, write_stdin in code mode');
+  assert.equal(f(tail(direct(PATCH, 'c1'), stdinCall), typed), false, 'P8: pendingApplyPatch, write_stdin as a tool');
+  assert.equal(f(tail(exec(spaced)), SHAPED), false, 'P8: pendingApplyPatch, cmd with a line end');
 });
 
 test('an input that is not shaped as a patch is a command even beside a pending apply_patch (P6)', async (t) => {
