@@ -206,7 +206,8 @@ for (const provider of ['claude', 'codex', 'agy']) {
 test('only god drives a terminal: another caller is refused and nothing is written', { skip: process.platform !== 'win32' }, async () => {
   const x = await rig('claude');
   try {
-    await until('the TUI is up', async () => (await x.screen()).includes('TUI claude up'));
+    // Same start-up wait as the provider tests (banner AND prompt row), so the refusal hits a fully drawn TUI.
+    await until('the TUI is up at its prompt', async () => { const s = await x.screen(); return s.includes('TUI claude up') && s.split('\n').some((l) => l.startsWith(PROMPTS.claude.trimEnd())); });
     const reply = await x.tc.handle('jim-mtujpe28', { action: 'type', agent: x.agent, text: 'not god' });
     assert.equal(reply.status, 403);
     assert.equal(reply.body.ok, false);
