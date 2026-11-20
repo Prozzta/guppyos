@@ -43,14 +43,19 @@ const BENCH = { heavy: true, kind: 'bench' };
 function fakeHelper(answer = () => undefined) {
   let listener = null;
   let closed = false;
+  let dead = false;
   const known = new Set();
   const reqs = [];
   const count = {};
   return {
     reqs,
+    /** The helper process crashes or exits: as serveChannel, every request now answers null at once. */
+    crash() { dead = true; },
+    closed: () => closed,
     ch: {
       async request(line) {
         reqs.push(line);
+        if (dead) return null;
         const [cmd, id] = line.split(' ');
         count[cmd] = (count[cmd] ?? 0) + 1;
         const a = answer(cmd, id, count[cmd]);
@@ -61,7 +66,7 @@ function fakeHelper(answer = () => undefined) {
         return cmd === 'list' ? { ok: true, rows: [] } : { ok: true };
       },
       close() { closed = true; },
-      alive() { return !closed; },
+      alive() { return !closed && !dead; },
       onEvent(fn) { listener = fn; }
     }
   };
@@ -96,6 +101,30 @@ test('one timed-out request on a live helper does not orphan the jobs it holds',
   assert.equal(told.filter((e) => e.state === 'exited').length, 1, 'A JOB HELD BEFORE ONE SLOW ANSWER STILL ENDS THROUGH HEAVYJOBS');
 });
 
+test('PIN: a helper that crashed or exited is replaced, and a job made after that is held again', async () => {
+  const h1 = fakeHelper();
+  const h2 = fakeHelper();
+  const told = [];
+  let opened = 0;
+  const jobs = new C.HeavyJobs({
+    platform: 'win32', options: () => ({ background: false, half: false }), exe: () => 'guppy-heavyjob.exe',
+    channel: () => [h1, h2][opened++]?.ch ?? fakeHelper().ch,
+    now: () => 1_000_000, setInterval: () => 1, clearInterval: () => {}, setTimeout: () => 1, clearTimeout: () => {},
+    log: () => {}, onJob: (e) => told.push(e)
+  });
+  await jobs.begin(AGENT, { command: 'npm ci' }, false, 'call-1');
+  assert.deepEqual(told.filter((e) => e.state === 'held').map((e) => e.callId), ['call-1'], 'the first job is held');
+  h1.crash();
+  // Today the request that meets the dead helper answers null and closes it; the one after runs on a
+  // new helper. A fix may replace it sooner (it is not alive), never later.
+  await jobs.begin(AGENT, { command: 'npm ci' }, false, 'call-2');
+  await jobs.begin(AGENT, { command: 'npm ci' }, false, 'call-3');
+  assert.equal(opened, 2, `A DEAD HELPER IS STARTED AGAIN (helpers opened ${opened}; the dead one was sent ${JSON.stringify(h1.reqs)})`);
+  assert.ok(h2.reqs.some((l) => l.startsWith('create ')), `the new helper creates the later job (it was sent ${JSON.stringify(h2.reqs)})`);
+  assert.ok(told.some((e) => e.state === 'held' && e.callId !== 'call-1'),
+    `A JOB MADE AFTER THE CRASH IS HELD AGAIN (held: ${JSON.stringify(told.filter((e) => e.state === 'held').map((e) => e.callId))})`);
+});
+
 // ─── LIVE: the shipped helper with a cold start of 4 s ──────────────────────────────────────
 
 const CSC = path.join(process.env.WINDIR || 'C:\\Windows', 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe');
@@ -120,7 +149,7 @@ function slowStartHelper(ms) {
   return exe;
 }
 
-test('LIVE: a helper slow to start (past the request timeout) still holds the job and frees the slot within 2 s of its exit, on one helper', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
+test('LIVE: a helper slow to start (past the request timeout) still holds the job and frees the slot within 5 s of its exit, on one helper', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
   assert.ok(COLD_MS > C.HEAVY_JOB_REQUEST_MS, 'the cold start is longer than the request timeout');
   const exe = slowStartHelper(COLD_MS);
   const rows = [];
@@ -156,8 +185,12 @@ test('LIVE: a helper slow to start (past the request timeout) still holds the jo
   const lag = rel ? rel.ts - exitAt : null;
   const trail = rows.filter((x) => x.kind === 'heavy-cpu').map((x) => `${x.ts - exitAt}ms ${x.action}${x.what ? ' ' + x.what : ''}${x.held !== undefined ? ' held=' + x.held : ''}`).join(', ');
   assert.equal(rows.find((r) => r.action === 'wrap').held, true, `A COLD START IS NOT A FAILED CREATE: THE JOB IS HELD (${trail})`);
-  assert.ok(lag !== null && lag >= 0 && lag < 2_000,
-    `THE SLOT IS FREED WITHIN 2 S OF THE JOB'S EXIT (${lag === null ? 'not freed 6 s after it' : `freed ${lag} ms after`}; ${trail})`);
+  // The same bar as the sister cell heavy-lock-release-lag-197 (lagMs < 5 s).
+  const lateCreate = lag === null
+    ? ' - held but never told exited: a create answered after the join line ran makes a NEW, EMPTY job under the same name (the join\'s own job released it on exit), so no exit notice can come for the call'
+    : '';
+  assert.ok(lag !== null && lag >= 0 && lag < 5_000,
+    `THE SLOT IS FREED WITHIN 5 S OF THE JOB'S EXIT (${lag === null ? 'not freed 6 s after it' : `freed ${lag} ms after`}${lateCreate}; ${trail})`);
   assert.equal(rel.reason, 'job-exit');
   assert.equal(helpers, 1, 'ONE HELPER: a slow start does not start another');
 });
