@@ -277,6 +277,35 @@ export function pendingExecCommands(tail: string): { commands: string[]; complet
   return { commands, complete, unnamed };
 }
 
+/** Codex's patch envelope, as the whole text. */
+const PATCH_BODY = /^\*\*\* Begin Patch\r?\n[\s\S]*\*\*\* End Patch\s*$/;
+/** A nested apply_patch call in an exec program: `tools.apply_patch(`, `tools?.apply_patch(`, `tools["apply_patch"](`. */
+const APPLY_PATCH_CALL = /\btools\s*(?:\?\.|\.)\s*apply_patch\s*\(|\btools\s*\[\s*(['"`])apply_patch\1\s*\]\s*\(/;
+
+/**
+ * HEAVY-LOCK-CODEX-APPLYPATCH-AS-BASH: is the hook whose template input is `text` for an
+ * apply_patch? The template carries no tool name, and an apply_patch's `{ command }` is its patch
+ * text, so the heavy lock read an edit that held a test line as that test run. True only when the
+ * rollout shows it: `text` is a patch body, a pending call is an apply_patch (code is read through
+ * codeMask, so a string or a comment never counts), and no pending shell call could run the same
+ * text: none with that literal text, and none the rollout cannot read.
+ */
+export function pendingApplyPatch(tail: string, text: string): boolean {
+  if (!PATCH_BODY.test(text)) return false;
+  const shell = pendingExecCommands(tail);
+  if (!shell.complete || shell.unnamed > 0) return false;
+  if (shell.commands.includes(text)) return false;
+  for (const p of pendingCallItems(tail)) {
+    if (p.name === 'apply_patch') return true;
+    if (p.name !== 'exec' || typeof p.input !== 'string') continue;
+    const code = codeMask(p.input);
+    const re = new RegExp(APPLY_PATCH_CALL.source, 'g');
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(p.input))) if (code[m.index] === 't') return true;
+  }
+  return false;
+}
+
 /** The current turn's calls that have no output yet, newest first. */
 function pendingCallItems(tail: string): Array<Record<string, unknown>> {
   const lines = tail.split('\n');
