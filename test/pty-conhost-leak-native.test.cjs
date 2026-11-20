@@ -41,8 +41,17 @@ require('./tools/own-job.cjs');
 const UNREAD_FLAG = '--conhost-leak-unread-manager';
 const DESTROYED_FLAG = '--conhost-leak-destroyed-manager';
 const RAW_FLAG = '--conhost-leak-raw-destroyed-manager';
-const RAW = process.argv.includes(RAW_FLAG);
-const DESTROYED = RAW || process.argv.includes(DESTROYED_FLAG);
+// The named mutant of the fix, as a manager of its own: node-pty alone, and the manager ends the
+// output worker on the terminal's exit event, as PtyManager did before. It must leave the host.
+const DISPOSED_FLAG = '--conhost-leak-raw-disposed-manager';
+const DISPOSED = process.argv.includes(DISPOSED_FLAG);
+// The same two managers with the socket destroyed BEFORE the program's first write (what an
+// EPIPE at the start leaves behind), not while it prints.
+const EARLY_FLAG = '--conhost-leak-destroyed-early-manager';
+const RAW_EARLY_FLAG = '--conhost-leak-raw-destroyed-early-manager';
+const EARLY = process.argv.includes(EARLY_FLAG) || process.argv.includes(RAW_EARLY_FLAG);
+const RAW = DISPOSED || process.argv.includes(RAW_FLAG) || process.argv.includes(RAW_EARLY_FLAG);
+const DESTROYED = RAW || EARLY || process.argv.includes(DESTROYED_FLAG);
 const UNREAD = DESTROYED || process.argv.includes(UNREAD_FLAG);
 const RESULT = 'UNREAD-RESULT ';
 const test = UNREAD ? () => {} : require('node:test');
@@ -204,10 +213,16 @@ async function unreadManager() {
       // that still writes.
       let workerEnded = false;
       proc._agent._conoutSocketWorker._worker.on('exit', () => { workerEnded = true; });
-      fs.writeFileSync(flag, '');
-      await firstOutput;
-      proc._agent.outSocket.destroy();
+      if (EARLY) {
+        proc._agent.outSocket.destroy();
+        fs.writeFileSync(flag, '');
+      } else {
+        fs.writeFileSync(flag, '');
+        await firstOutput;
+        proc._agent.outSocket.destroy();
+      }
       await exited;
+      if (DISPOSED) proc._agent._conoutSocketWorker.dispose();   // the mutant: node-pty ends the worker one second later
       for (let k = 0; k < SETTLE; k += 1) await hostChildren();
       out.workerEndedEarly = workerEnded;
       fs.writeFileSync(stop, '');
@@ -308,3 +323,22 @@ test('PTY-CONHOST-LEAK: the same program with the terminal\'s output socket dest
 
 test('PTY-CONHOST-LEAK: the same with node-pty alone (nothing ends its output worker): the exit is reported, the host goes, no thread stays, and the manager process ends by itself',
   { skip: !WIN, timeout: 120_000 }, (t) => destroyedSocket(t, RAW_FLAG, 'node-pty'));
+
+test('PTY-CONHOST-LEAK: the output socket destroyed before the program\'s first write, through PtyManager: the exit is reported, the host goes, no thread stays, and the manager process ends by itself',
+  { skip: !WIN, timeout: 120_000 }, (t) => destroyedSocket(t, EARLY_FLAG, 'PtyManager'));
+
+test('PTY-CONHOST-LEAK: the same early end with node-pty alone: the exit is reported, the host goes, no thread stays, and the manager process ends by itself',
+  { skip: !WIN, timeout: 120_000 }, (t) => destroyedSocket(t, RAW_EARLY_FLAG, 'node-pty'));
+
+// What this mutant leaves is measured, not assumed: on the inbox console host a terminated worker
+// closes its end of the console pipe, the host's blocked write fails, and the host goes. So the
+// mutant is not refused for a leftover host here. It is refused for what it does: the reader of
+// the console's output is ended while the console still writes.
+test('PTY-CONHOST-LEAK mutant: a manager that ends the output worker on the terminal\'s exit, before the close has returned, is refused: the console is left writing with no reader',
+  { skip: !WIN, timeout: 120_000 }, async (t) => {
+    await assert.rejects(() => destroyedSocket(t, DISPOSED_FLAG, 'the manager'), (e) => {
+      assert.ok(e instanceof assert.AssertionError, String(e && e.stack || e));
+      assert.match(e.message, /THE OUTPUT WORKER IS ENDED WHILE THE CONSOLE STILL WRITES/, 'the mutant is refused for the reader it ends');
+      return true;
+    }, 'A WORKER ENDED BEFORE THE CLOSE RETURNED MUST BE REFUSED, and the check must say why');
+  });
