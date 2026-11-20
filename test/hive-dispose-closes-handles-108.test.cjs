@@ -366,3 +366,47 @@ test('a route pass whose read of a half-written outbox file was open at dispose(
   await assert.rejects(cold.__revalidateAuthoritiesForTests(), /fallback is not armed/, 'and the fallback timer is off');
   deletes(home);
 });
+
+// HIVE-DISPOSE-APPENDLOG-AFTER-DISPOSE-108 (Creed, Electron suite red at the test above): the same
+// pass, but the half-written file is OLDER than the fresh-write grace (1 s) when the pass resumes.
+// Under a slow suite the file ages by itself; here its write time is set 5 s back, so the age does
+// not depend on load. Past the grace the pass takes the parse-retry branch, which logs
+// 'outbox-parse-retry'. That log row, written after dispose(), reopens hive/log.jsonl.
+test('a route pass whose read of an AGED half-written outbox file was open at dispose() writes no log row and leaves no file open', async (t) => {
+  const { home, hive } = await floor();
+  await shutDown(hive);
+  const timers = [];
+  const runtime = { setTimeout: (fn, ms) => { timers.push(ms); return null; } };
+  const real = fs.promises.readFile;
+  const g = gate();
+  let held = null;
+  fs.promises.readFile = function gatedOutboxRead(p, ...rest) {
+    if (held === null || path.resolve(String(p)) !== held) return real.call(fs.promises, p, ...rest);
+    return g.through(() => real.call(fs.promises, p, ...rest));
+  };
+  const cold = new HiveManager(() => home, () => true, runtime);
+  t.after(async () => { g.release(); fs.promises.readFile = real; cold.dispose(); await cold.drainReads(); });
+  const outbox = path.resolve(path.join(cold.agentDir('god-1'), 'outbox'));
+  fs.mkdirSync(outbox, { recursive: true });
+  const file = path.join(outbox, 'half-written.json');
+  fs.writeFileSync(file, '{"to": "andy-1", "subj');   // a writer still streaming: not JSON yet
+  const aged = new Date(Date.now() - 5000);
+  fs.utimesSync(file, aged, aged);
+  assert.ok(Date.now() - fs.statSync(file).mtimeMs >= 4000, 'the file is well past the 1 s fresh-write grace');
+  const logFile = path.join(home, 'hive', 'log.jsonl');
+  const retryRows = () => (fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : '').split('\n').filter((l) => l.includes('"outbox-parse-retry"')).length;
+  const rowsBefore = retryRows();
+  held = file;
+
+  const pass = cold.routeOnce([outbox]).then(() => null, (e) => e);
+  await reached(g, 'the route pass reading the aged half-written outbox file');
+  cold.stopLedgerGuard(); cold.dispose();
+  assert.deepEqual(openUnder(home), [], 'dispose() closed everything while the read was still open');
+  g.release();
+  await cold.drainReads();
+  await pass;
+  assert.deepEqual(openUnder(home), [], 'the pass that finished after dispose() left a file open in the folder');
+  assert.equal(retryRows(), rowsBefore, 'and it wrote no outbox-parse-retry row to the log of a disposed manager');
+  assert.deepEqual(timers, [], 'and armed no retry timer');
+  deletes(home);
+});
