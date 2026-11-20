@@ -147,13 +147,11 @@ function assertPackagedProbeContract(contract) {
   assert.match(oldProbe.invoked.options.env.ELECTRON_RUN_AS_NODE, /1/);
   assert.match(oldProbe.invoked.args[1], /process\.dlopen/);
   assert.equal(oldProbe.addonPaths.length, 1);
-  assert.match(oldProbe.result.stderr, /CUT FS-HANDLE MISSING EXPORTS: posixRename, posixRenameAsync, threadCpuMs
-/);
+  assert.match(oldProbe.result.stderr, /CUT FS-HANDLE MISSING EXPORTS: posixRename, posixRenameAsync, threadCpuMs\n/);
 
   const preProbe = runPackagedProbe(contract, v108pre);
   assert.equal(preProbe.status, 1, 'a cut carrying the addon from before the thread clock fails');
-  assert.match(preProbe.result.stderr, /CUT FS-HANDLE MISSING EXPORTS: threadCpuMs
-/);
+  assert.match(preProbe.result.stderr, /CUT FS-HANDLE MISSING EXPORTS: threadCpuMs\n/);
 
   const currentProbe = runPackagedProbe(contract, current);
   assert.equal(currentProbe.status, 0);
