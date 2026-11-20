@@ -113,7 +113,7 @@ test('this process is owned either way: under the runner the preload joined and 
 // job; a detached one escapes it, the orphan shape) and a cmd -> ping. The detached child reports
 // its own pid + birth time over IPC before the fixture can fail. This observer changes only stdio;
 // detached and the fixture's process-tree/job placement are otherwise unchanged.
-const fixture = (helperLine, mode) => `'use strict';
+const fixture = (helperLine, mode, disconnect = true) => `'use strict';
 ${helperLine}
 const test = require('node:test');
 const net = require('node:net');
@@ -123,7 +123,10 @@ test('spawns, then ${mode}', async () => {
   d.unref();
   const c = spawn('cmd.exe', ['/d', '/c', 'ping -n 90 127.0.0.1 > nul'], { stdio: 'ignore', windowsHide: true });
   c.unref();
-  const ready = await new Promise((resolve, reject) => { d.once('message', resolve); d.once('error', reject); });
+  const ready = await new Promise((resolve, reject) => {
+    d.once('message', (message) => { ${disconnect ? 'd.disconnect(); ' : ''}resolve(message); });
+    d.once('error', reject);
+  });
   const observer = JSON.parse(process.env.BNTO_OBSERVER);
   const socket = net.createConnection({ host: '127.0.0.1', port: observer.port });
   await new Promise((resolve, reject) => { socket.once('connect', resolve); socket.once('error', reject); });
@@ -194,35 +197,57 @@ async function openObserver() {
   };
 }
 
-async function observeProcess(p, observer, name, { hold = false } = {}) {
+async function observeProcess(p, observer, name, { hold = false, parent, doneMs = 180_000 } = {}) {
   let errText = ''; let outText = ''; let exit = null;
   p.stderr.setEncoding('utf8'); p.stderr.on('data', (d) => { errText += d; });
   p.stdout.setEncoding('utf8'); p.stdout.on('data', (d) => { outText += d; });
   const done = new Promise((resolve) => p.once('exit', (code, signal) => { exit = { code, signal }; resolve(exit); }));
   p.once('error', observer.fail);
   done.then(() => { observer.close(); observer.fail(new Error(`${name}: test process exited before fixture observation: ${JSON.stringify(exit)} ${errText.slice(-300)}`)); });
-  const seen = await observer.ready;
+  const readyMs = hold ? 30_000 : 180_000;
+  let readyTimer;
+  const readyTimeout = new Promise((_, reject) => {
+    readyTimer = setTimeout(() => {
+      if (parent) own.killVerified([parent], {});
+      reject(new Error(name + ': fixture observation did not arrive within ' + readyMs + ' ms'));
+    }, readyMs);
+  });
+  let seen;
+  try { seen = await Promise.race([observer.ready, readyTimeout]); } finally { clearTimeout(readyTimer); }
+  const rows = own.lookupPids([seen.pids.detached, seen.pids.cmd]);
+  const detached = rows.find((row) => row.pid === seen.pids.detached);
+  const cmd = rows.find((row) => row.pid === seen.pids.cmd);
+  assert.ok(detached && cmd, name + ': observer must find both fixture children alive before judging their deaths: ' + JSON.stringify(rows));
+  seen.pids.detachedBornMs = detached.created;
+  seen.pids.cmdBornMs = cmd.created;
   let released = false;
   const release = async () => {
     if (!released) { released = true; seen.socket.write('release\\n'); seen.socket.end(); }
-    return done;
+    let doneTimer;
+    const doneTimeout = new Promise((_, reject) => {
+      doneTimer = setTimeout(() => {
+        if (parent) own.killVerified([parent], {});
+        reject(new Error(name + ': fixture did not exit within ' + doneMs + ' ms after release'));
+      }, doneMs);
+    });
+    try { return await Promise.race([done, doneTimeout]); } finally { clearTimeout(doneTimer); }
   };
   return { pids: seen.pids, stderr: () => errText, stdout: () => outText, exited: () => exit, release, done, hold };
 }
 
-async function bareRun(dir, name, helperLine, { mode = 'FAIL', env: extra = {} } = {}) {
+async function bareRun(dir, name, helperLine, { mode = 'FAIL', env: extra = {}, disconnect = true, doneMs } = {}) {
   const file = path.join(dir, `${name}.test.cjs`);
-  fs.writeFileSync(file, fixture(helperLine, mode));
+  fs.writeFileSync(file, fixture(helperLine, mode, disconnect));
   const pidsFile = path.join(dir, `${name}.pids.json`);
   const observer = await openObserver();
   const env = bareEnv({ ...observer.env, ...extra });
-  const testArgs = ['--' + 'test', file];
-  const launch = spawn;
-  const executable = process.execPath;
-  const p = launch(executable, testArgs, { cwd: os.tmpdir(), env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
-  const parentBornMs = Date.now();
-  const watched = await observeProcess(p, observer, name);
-  const result = { ...watched, parent: { pid: p.pid, bornMs: parentBornMs } };
+  const p = spawn(process.execPath, ['--test', file], { cwd: os.tmpdir(), env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+  const parent = await until('bare node parent', () => {
+    const row = own.lookupPids([p.pid])[0];
+    return row && /^node/i.test(row.name) ? row : null;
+  }, 30_000);
+  const watched = await observeProcess(p, observer, name, { hold: mode === 'HANG', parent, doneMs });
+  const result = { ...watched, parent: { pid: parent.pid, bornMs: parent.created } };
   if (mode === 'HANG') return result;
   const ended = await result.release();
   assert.equal(ended.code, 1, `${name}: the bare test fails, as the fixture's test does`);
@@ -242,6 +267,18 @@ async function bareRun(dir, name, helperLine, { mode = 'FAIL', env: extra = {} }
   const pids = await until('fixture pids', () => readPids(pidsFile) || (exit && assert.fail(`node --test exited early: ${JSON.stringify(exit)} ${errText.slice(-300)}`)), 120_000);
   return { pids, parent: { pid: p.pid, bornMs: parentBornMs }, stderr: () => errText, exited: () => exit };
 }
+
+test('LIVE: the observer disconnect is required for a released failing fixture to exit', LIVE, async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bnto-'));
+  try {
+    await assert.rejects(
+      bareRun(dir, 'disconnect-mutant', req(HELPER), { disconnect: false, doneMs: 5_000 }),
+      /did not exit within 5000 ms after release/,
+    );
+  } finally {
+    rmDir(dir);
+  }
+});
 
 test('LIVE: with the helper, a bare node --test of a failing, spawning file leaves no child behind (control without it: the detached node lives on)', LIVE, async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bnto-'));
