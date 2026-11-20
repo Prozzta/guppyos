@@ -23,11 +23,14 @@
  * The agent does two things in a loop, with a random 0 to 3 ms spin between tries:
  *   plant  a link to the victim at <dir>/a/j and <dir>/a/b/j (Jim's planter of 7604b62f)
  *   swap   rename <dir>, <dir>/a or <dir>/a/b away and put a link to the victim under that name.
- *          This is the gap itself: a real folder when it was checked, a link when it is listed.
+ *          This is the gap itself: a real folder when it was checked, a link when it is listed. And
+ *          because the victim holds files under the tree's own names (MIRROR), it is also every later
+ *          step by path: a file that was listed in the real folder is deleted in the victim.
  * The reaper renames the folder to <dir>.reaping-<n> before it deletes it, which would take the tree out
  * of this agent's reach. So against the reaper the agent follows: it works on the newest such name next
  * to <dir> when there is one. The pin counts the agent's links per caller, and a caller the agent did
- * not reach in more than a tenth of its runs fails the pin.
+ * not reach in more than a tenth of its runs fails the pin. It also counts the swaps that landed (the
+ * name that was moved away was a real folder of the tree), and a caller with none fails the pin.
  */
 const child = require('node:child_process');
 const fs = require('node:fs');
@@ -35,10 +38,18 @@ const os = require('node:os');
 const path = require('node:path');
 
 const LINK = process.platform === 'win32' ? 'junction' : 'dir';
-const VICTIM = ['v0.txt', 'v1.txt', 'v2.txt', 'v3.txt', 'v4.txt', path.join('sub', 's0.txt')];
+// The victim also holds a file under every file name the tree has (MIRROR): <dir>/a/b/f9 is the
+// victim's f9 once a/b is a link to it, and <dir>/a/g3 is its g3 once a is. So a delete that names a
+// file by its path loses it whenever the swap lands while it is still at work in that folder, not only
+// in the gap between a check and a listing. Every name, not some: the old walk throws on the first
+// name it does not find behind the link, and would stop before it came to one the victim holds.
+// The victim holds no folder named a or b: the agent works on those names by path too, and through
+// a link it would move the victim's own folders away itself.
+const MIRROR = [...Array.from({ length: 40 }, (_, i) => `f${i}`), ...Array.from({ length: 4 }, (_, i) => `g${i}`)];
+const VICTIM = ['v0.txt', 'v1.txt', 'v2.txt', 'v3.txt', 'v4.txt', path.join('sub', 's0.txt'), ...MIRROR];
 
 function plant(home, victim, park, stop, follow) {
-  const out = { planted: 0, swapped: 0 };
+  const out = { planted: 0, swapped: 0, landed: 0 };
   const parent = path.dirname(home), tomb = `${path.basename(home)}.reaping-`;
   // The newest tombstone of `home`, when the caller renames before it deletes; else `home`.
   const where = () => {
@@ -58,11 +69,16 @@ function plant(home, victim, park, stop, follow) {
       }
     } else {
       const spot = spots[Math.floor(Math.random() * spots.length)];
+      const to = path.join(park, `p${process.pid}-${n++}`);
+      let moved = false;
       try {
-        fs.renameSync(spot, path.join(park, `p${process.pid}-${n++}`));
+        fs.renameSync(spot, to);
+        moved = true;
         fs.symlinkSync(victim, spot, LINK);
         out.swapped++;
       } catch { /* not there now, busy, or its parent is gone */ }
+      // landed: what moved away was a real folder of the tree, not a link left by an earlier swap
+      if (moved) { try { if (fs.lstatSync(to).isDirectory()) out.landed++; } catch { /* swept already */ } }
     }
   }
   console.log(JSON.stringify(out));
@@ -103,8 +119,27 @@ function jsWalk(root) {
   walk(root, true);
 }
 
+// The control's walk is held for this long after each check that found a real folder. The agent's swap
+// is two steps (move the folder away, then put the link there), and between them the name is missing
+// for longer than one step of the walk takes. A walk that is never held looks into that hole, throws
+// "not found" and loses nothing: measured without load, 322 swaps landed in 300 runs and 208 of the
+// walks ended that way, with no loss. Held for 1 ms, the walk meets the finished link instead: 16 of 16
+// control legs lost within 73 runs. The hold is put around the walk from outside; the walk's text is
+// not changed. The callers under test are one native call each and are not held.
+const HOLD_US = 1000;
+
 function remover(impl, work) {
-  if (impl === 'jswalk') return (dir) => jsWalk(dir);
+  if (impl === 'jswalk') {
+    const lstat = fs.lstatSync;
+    return (dir) => {
+      fs.lstatSync = (...args) => {
+        const st = lstat(...args);
+        if (st && st.isDirectory()) { const until = process.hrtime.bigint() + BigInt(HOLD_US) * 1000n; while (process.hrtime.bigint() < until) { /* held: a timer is too coarse */ } }
+        return st;
+      };
+      try { jsWalk(dir); } finally { fs.lstatSync = lstat; }
+    };
+  }
   if (impl === 'reaper') {
     const R = require(path.join(__dirname, '..', 'scripts', 'worktree-reaper.cjs'));
     const rm = R.loadRemover();
@@ -139,7 +174,7 @@ async function race(impl, base, runs, seconds) {
   kid.stdout.on('data', (d) => { kidOut += d; });
   const exited = new Promise((resolve) => kid.on('exit', resolve));
 
-  const out = { impl, runs: 0, losses: 0, firstLossAt: 0, removed: 0, refused: 0, errors: {}, planted: 0, swapped: 0, ms: 0 };
+  const out = { impl, runs: 0, losses: 0, firstLossAt: 0, removed: 0, refused: 0, errors: {}, planted: 0, swapped: 0, landed: 0, ms: 0 };
   const t0 = Date.now();
   const end = t0 + seconds * 1000;
   // The fixture's own clean-up must not be the walk under test: what is left at a path the agent
@@ -211,11 +246,11 @@ async function many(impls, racers, runs, seconds) {
   const totals = {};
   let runtime = null;
   for (const { impl, res } of done) {
-    const t = totals[impl] || (totals[impl] = { races: 0, failed: 0, runs: 0, losses: 0, removed: 0, refused: 0, errors: {}, planted: 0, swapped: 0, firstLossAt: [] });
+    const t = totals[impl] || (totals[impl] = { races: 0, failed: 0, runs: 0, losses: 0, removed: 0, refused: 0, errors: {}, planted: 0, swapped: 0, landed: 0, firstLossAt: [] });
     t.races++;
     if (!res.ok) { t.failed++; t.errors[`RACE FAILED: ${String(res.error).slice(0, 200)}`] = 1; continue; }
     runtime = res.electron ? `Electron ${res.electron} as Node` : `Node ${res.node}`;
-    for (const k of ['runs', 'losses', 'removed', 'refused', 'planted', 'swapped']) t[k] += res.out[k];
+    for (const k of ['runs', 'losses', 'removed', 'refused', 'planted', 'swapped', 'landed']) t[k] += res.out[k];
     for (const [k, v] of Object.entries(res.out.errors)) t.errors[k] = (t.errors[k] || 0) + v;
     if (res.out.firstLossAt) t.firstLossAt.push(res.out.firstLossAt);
   }
@@ -244,8 +279,10 @@ if (require.main === module) {
         const want = impls.length * Number(a) * Number(b);
         // per caller: a caller the agent hardly reached proves nothing, whatever the others add up to
         const reached = all.every((t) => t.planted + t.swapped > t.runs / 10);
-        const ok = !failed && losses === 0 && runs === want && reached;
-        say(`${ok ? 'PIN PASS' : 'PIN FAIL'}: ${res.runtime} on ${res.platform}: ${impls.join(', ')}: ${runs} of ${want} runs, ${losses} losses, ${attacks} links put in by the agent${reached ? '' : ' (TOO FEW for ' + impls.filter((i) => { const t = res.totals[i]; return !(t.planted + t.swapped > t.runs / 10); }).join(', ') + ')'}`);
+        // per caller too: a caller whose tree the agent never swapped a real folder out of was not raced
+        const landed = all.every((t) => t.landed > 0);
+        const ok = !failed && losses === 0 && runs === want && reached && landed;
+        say(`${ok ? 'PIN PASS' : 'PIN FAIL'}: ${res.runtime} on ${res.platform}: ${impls.join(', ')}: ${runs} of ${want} runs, ${losses} losses, ${attacks} links put in by the agent${reached ? '' : ' (TOO FEW for ' + impls.filter((i) => { const t = res.totals[i]; return !(t.planted + t.swapped > t.runs / 10); }).join(', ') + ')'}, swaps that landed on a real folder: ${impls.map((i) => `${i} ${res.totals[i].landed}`).join(', ')}${landed ? '' : ' (NONE LANDED for ' + impls.filter((i) => !(res.totals[i].landed > 0)).join(', ') + ')'}`);
         process.exitCode = ok ? 0 : 1;
       } else {
         const ok = !failed && losses > 0;
