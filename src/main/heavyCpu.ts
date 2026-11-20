@@ -322,7 +322,7 @@ export class HeavyJobs {
   private async confirmExit(j: TrackedJob): Promise<void> {
     if (j.exited || this.jobs.get(j.id) !== j) return;
     const r = await this.req(`list ${j.id}`);
-    if (!r || r.ok !== true || !Array.isArray(r.rows)) { j.empty = false; return; }   // a failed list says nothing: later notices count again
+    if (!r || r.ok !== true || !Array.isArray(r.rows)) { j.empty = false; if (j.missed) { j.missed = false; this.armConfirm(j); } return; }   // a failed list says nothing: later notices count again, and a notice dropped under the mark is judged
     if (j.confirm !== null || this.jobs.get(j.id) !== j) return;   // a newer notice re-armed it, or it was let go
     const left = this.own(j, r.rows as HeavyJobRow[]).length;
     if (left) j.empty = false;
