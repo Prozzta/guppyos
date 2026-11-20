@@ -30,7 +30,11 @@ const MUTANTS = [
     "    case 'esc': return '\\x1b';\n", ''],
   ['M3 the write is skipped while the terminal is busy (and still reported ok)', TC,
     '    for (const w of writes) {\n      if (w.gapBeforeMs) await this.deps.sleep(w.gapBeforeMs);\n      const r = this.deps.write(ptyId, w.data);',
-    `    ${BUSY_NOW}\n    for (const w of writes) {\n      if (w.gapBeforeMs) await this.deps.sleep(w.gapBeforeMs);\n      const r = busyNow ? { ok: true } : this.deps.write(ptyId, w.data);`]
+    `    ${BUSY_NOW}\n    for (const w of writes) {\n      if (w.gapBeforeMs) await this.deps.sleep(w.gapBeforeMs);\n      const r = busyNow ? { ok: true } : this.deps.write(ptyId, w.data);`],
+  // Jim NIT 2: proves the 'read shows the <provider> prompt' assert still has teeth after the start-up prompt wait.
+  ['M4 term read returns no rows (the reading is emptied)', TC,
+    '      const r = await this.deps.readScreen(ptyId, rows);\n',
+    '      const r0 = await this.deps.readScreen(ptyId, rows); const r = r0 && { ...r0, lines: [] };\n']
 ];
 
 // THE BASELINE MUST BE GREEN.
