@@ -2,7 +2,8 @@
 'use strict';
 
 // Emit evidence only when electron-rebuild compiled the fully patched source
-// (#922, then the PTY-HOLD-NODEPTY-HANDOFF root-handle handoff):
+// (#922, then the PTY-HOLD-NODEPTY-HANDOFF root-handle handoff, then the
+// PTY-CONHOST-LEAK-NATIVE close on exit):
 // node-pty is the pinned 1.1.0, conpty.cc is byte-for-byte the pinned built
 // form (CONPTY_CC_BUILT_SHA256), lib/windowsPtyAgent.js is its pinned handoff form, and build/Release/conpty.node is newer than that patched source (a
 // binary built before the patch, or a stale copy, is refused rather than
@@ -37,6 +38,9 @@ if (binaries.some((p) => fs.statSync(p).mtimeMs <= sourceStat.mtimeMs)) fail('co
 if (!binaries.every(pins.hasMutexImports)) fail(`conpty.node lacks the #922 mutex imports (${pins.MUTEX_IMPORTS.join(', ')}): not built from the patched source`);
 // The same for the handoff: only its code calls DuplicateHandle.
 if (!binaries.every(pins.hasHandoffImports)) fail(`conpty.node lacks the root-handle import (${pins.HANDOFF_IMPORTS.join(', ')}): not built from the handoff source`);
+// PTY-CONHOST-LEAK-NATIVE: the close on exit needs no new import, so the patched module exports a
+// name that no other build carries.
+if (!binaries.every(pins.hasCloseMarker)) fail(`conpty.node lacks the close-on-exit marker (${pins.CLOSE_MARKER}): not built from the source that closes an ended terminal's pseudoconsole`);
 const files = Object.fromEntries(binaries.map((p) => [path.relative(root, p).replaceAll('\\', '/'), { sha256: hash(p), mtimeMs: fs.statSync(p).mtimeMs }]));
 fs.writeFileSync(markerPath, `${JSON.stringify({ version: pkg.version, sourceSha256, sourceMtimeMs: sourceStat.mtimeMs, files }, null, 2)}\n`);
 console.log(`[record-node-pty-race-fix] ${pkg.version}; recorded ${binaries.length} rebuilt conpty.node digest(s)`);

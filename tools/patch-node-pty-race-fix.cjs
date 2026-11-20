@@ -51,7 +51,7 @@ if (!fs.existsSync(file)) fail('node-pty src/win/conpty.cc missing');
 const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
 let source = fs.readFileSync(file, 'utf8');
 const inputSha = sha(source);
-if (inputSha === pins.CONPTY_CC_PATCHED_SHA256 || inputSha === pins.CONPTY_CC_BUILT_SHA256) {
+if (inputSha === pins.CONPTY_CC_PATCHED_SHA256 || inputSha === pins.CONPTY_CC_HANDOFF_SHA256 || inputSha === pins.CONPTY_CC_BUILT_SHA256) {
   console.log('[patch-node-pty-race-fix] node-pty #922 already applied');
   process.exit(0);
 }

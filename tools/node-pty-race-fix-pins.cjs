@@ -90,6 +90,141 @@ const WORKER_JS_EDITS = [
     '        conoutSocket.pipe(workerSocket);\n']
 ];
 
+// PTY-CONHOST-LEAK-NATIVE (tools/patch-node-pty-root-handle.cjs), applied on top of the handoff.
+// A terminal's console host (conhost.exe, or OpenConsole.exe with the bundled conpty.dll) lives
+// until its pseudoconsole is closed. node-pty 1.1.0 closes it only in its kill, and only while the
+// terminal's record is still in the native list; the exit thread erases the record without
+// closing. So every terminal whose root had ended kept its host until the app quit.
+// The edits live here, not in the tool, so that a test can take them back out and prove the
+// handoff form byte for byte.
+const CONPTY_CC_CLOSE_EDITS = [
+  ['the record: which library made the pseudoconsole, and whether it is closed',
+    '  HANDLE hShell;\n' +
+    '\n' +
+    '  pty_baton(',
+    '  HANDLE hShell;\n' +
+    '  // GUPPY PTY-CONHOST-LEAK-NATIVE (tools/patch-node-pty-root-handle.cjs): both are read and\n' +
+    '  // written under g_ptyHandlesMutex only.\n' +
+    '  bool guppyUseConptyDll = false;\n' +
+    '  bool guppyHpcClosed = false;\n' +
+    '\n' +
+    '  pty_baton('],
+  ['a close that needs no JavaScript environment',
+    'struct ExitEvent {\n' +
+    '  int exit_code = 0;\n' +
+    '};\n',
+    '// GUPPY PTY-CONHOST-LEAK-NATIVE (tools/patch-node-pty-root-handle.cjs): close a pseudoconsole\n' +
+    '// from any thread. The library that made it is already loaded (PtyStartProcess loaded it), so\n' +
+    '// it is looked up by name; no Napi value is needed, which the exit thread does not have.\n' +
+    'static void GuppyClosePseudoConsole(HPCON hpc, bool useConptyDll) {\n' +
+    '  HMODULE hLibrary = GetModuleHandleW(useConptyDll ? L"conpty.dll" : L"kernel32.dll");\n' +
+    '  if (hLibrary == nullptr) {\n' +
+    '    return;\n' +
+    '  }\n' +
+    '  PFNCLOSEPSEUDOCONSOLE const pfnClosePseudoConsole = (PFNCLOSEPSEUDOCONSOLE)GetProcAddress(\n' +
+    '    hLibrary,\n' +
+    '    useConptyDll ? "ConptyClosePseudoConsole" : "ClosePseudoConsole");\n' +
+    '  if (pfnClosePseudoConsole) {\n' +
+    '    pfnClosePseudoConsole(hpc);\n' +
+    '  }\n' +
+    '}\n' +
+    '\n' +
+    'struct ExitEvent {\n' +
+    '  int exit_code = 0;\n' +
+    '};\n'],
+  ['the exit thread closes the pseudoconsole it drops',
+    '    WaitForSingleObject(baton->hShell, INFINITE);\n' +
+    '    {\n' +
+    '      std::lock_guard<std::mutex> lock(g_ptyHandlesMutex);\n' +
+    '      GetExitCodeProcess(baton->hShell, (LPDWORD)(&exit_event->exit_code));\n' +
+    '      CloseHandle(baton->hShell);\n' +
+    '      const int id = baton->id;\n' +
+    '      std::erase_if(ptyHandles, [id](const auto& ptyHandle) {\n' +
+    '        return ptyHandle->id == id;\n' +
+    '      });\n' +
+    '    }\n' +
+    '\n' +
+    '    auto status = tsfn.BlockingCall(exit_event, callback); // In main thread\n',
+    '    WaitForSingleObject(baton->hShell, INFINITE);\n' +
+    '    // GUPPY PTY-CONHOST-LEAK-NATIVE (tools/patch-node-pty-root-handle.cjs): this thread erases the\n' +
+    '    // record of the terminal, and after that no kill can find the pseudoconsole. Unclosed, its\n' +
+    '    // console host stayed for the life of the app. So the thread takes the pseudoconsole out\n' +
+    '    // of the record under the lock (unless a kill has closed it already) and closes it itself:\n' +
+    '    // after the lock is released and after the exit is reported, so that a slow close holds up\n' +
+    '    // neither a kill or resize of another terminal nor the exit event.\n' +
+    '    HPCON guppyHpc = nullptr;\n' +
+    '    bool guppyUseConptyDll = false;\n' +
+    '    {\n' +
+    '      std::lock_guard<std::mutex> lock(g_ptyHandlesMutex);\n' +
+    '      GetExitCodeProcess(baton->hShell, (LPDWORD)(&exit_event->exit_code));\n' +
+    '      CloseHandle(baton->hShell);\n' +
+    '      if (!baton->guppyHpcClosed) {\n' +
+    '        guppyHpc = baton->hpc;\n' +
+    '        baton->guppyHpcClosed = true;\n' +
+    '      }\n' +
+    '      guppyUseConptyDll = baton->guppyUseConptyDll;\n' +
+    '      const int id = baton->id;\n' +
+    '      std::erase_if(ptyHandles, [id](const auto& ptyHandle) {\n' +
+    '        return ptyHandle->id == id;\n' +
+    '      });\n' +
+    '    }\n' +
+    '\n' +
+    '    auto status = tsfn.BlockingCall(exit_event, callback); // In main thread\n' +
+    '    if (guppyHpc != nullptr) {\n' +
+    '      GuppyClosePseudoConsole(guppyHpc, guppyUseConptyDll);\n' +
+    '    }\n'],
+  ['connect records which library made the pseudoconsole',
+    '  // Update handle\n' +
+    '  handle->hShell = piClient.hProcess;\n',
+    '  // Update handle\n' +
+    '  handle->hShell = piClient.hProcess;\n' +
+    '  // GUPPY PTY-CONHOST-LEAK-NATIVE: the exit thread closes with the same library.\n' +
+    '  handle->guppyUseConptyDll = useConptyDll;\n'],
+  ['kill closes once and says so',
+    '  const pty_baton* handle = get_pty_baton(lock, id);\n' +
+    '\n' +
+    '  if (handle != nullptr) {\n' +
+    '    HANDLE hLibrary = LoadConptyDll(info, useConptyDll);\n' +
+    '    bool fLoadedDll = hLibrary != nullptr;\n' +
+    '    if (fLoadedDll)\n' +
+    '    {\n' +
+    '      PFNCLOSEPSEUDOCONSOLE const pfnClosePseudoConsole = (PFNCLOSEPSEUDOCONSOLE)GetProcAddress(\n' +
+    '        (HMODULE)hLibrary,\n' +
+    '        useConptyDll ? "ConptyClosePseudoConsole" : "ClosePseudoConsole");\n' +
+    '      if (pfnClosePseudoConsole)\n' +
+    '      {\n' +
+    '        pfnClosePseudoConsole(handle->hpc);\n' +
+    '      }\n',
+    '  // GUPPY PTY-CONHOST-LEAK-NATIVE (tools/patch-node-pty-root-handle.cjs): a pseudoconsole is\n' +
+    '  // closed exactly once, by this kill or by the exit thread, whichever holds the lock first.\n' +
+    '  pty_baton* handle = get_pty_baton(lock, id);\n' +
+    '\n' +
+    '  if (handle != nullptr) {\n' +
+    '    HANDLE hLibrary = LoadConptyDll(info, useConptyDll);\n' +
+    '    bool fLoadedDll = hLibrary != nullptr;\n' +
+    '    if (fLoadedDll)\n' +
+    '    {\n' +
+    '      PFNCLOSEPSEUDOCONSOLE const pfnClosePseudoConsole = (PFNCLOSEPSEUDOCONSOLE)GetProcAddress(\n' +
+    '        (HMODULE)hLibrary,\n' +
+    '        useConptyDll ? "ConptyClosePseudoConsole" : "ClosePseudoConsole");\n' +
+    '      if (pfnClosePseudoConsole && !handle->guppyHpcClosed)\n' +
+    '      {\n' +
+    '        handle->guppyHpcClosed = true;\n' +
+    '        pfnClosePseudoConsole(handle->hpc);\n' +
+    '      }\n'],
+  ['the binary says that it closes on exit',
+    '  exports.Set("kill", Napi::Function::New(env, PtyKill));\n' +
+    '  return exports;\n',
+    '  exports.Set("kill", Napi::Function::New(env, PtyKill));\n' +
+    '  // GUPPY PTY-CONHOST-LEAK-NATIVE (tools/patch-node-pty-root-handle.cjs): the close needs no new\n' +
+    '  // import, so the build names itself. The name is in the binary and on the loaded module.\n' +
+    '  exports.Set("guppyClosesPseudoConsoleOnExit", Napi::Boolean::New(env, true));\n' +
+    '  return exports;\n']
+];
+// Binary fingerprint of the close: the export name above, as bytes in conpty.node.
+const CLOSE_MARKER = 'guppyClosesPseudoConsoleOnExit';
+const hasCloseMarker = (file) => { try { return fs.readFileSync(file).includes(Buffer.from(CLOSE_MARKER, 'latin1')); } catch { return false; } };
+
 module.exports = {
   NODE_PTY_VERSION: '1.1.0',
   // lib/worker/conoutSocketWorker.js: from the same tarball, and with the error listeners.
@@ -98,10 +233,15 @@ module.exports = {
   WORKER_JS_EDITS,
   CONPTY_CC_PRISTINE_SHA256: '52c893b689ab3210c0961e2a6aa805a82350003767b21069b164926b5becd4e2',
   CONPTY_CC_PATCHED_SHA256: 'a000a53daa90506662e4747c6585a403b93431d1fe46f99895aa6d58faaa9082',
-  // conpty.cc after BOTH patches (#922, then the root-handle handoff): the only source
-  // conpty.node may be built from, and what the record and the release markers require.
-  // CONPTY_CC_PATCHED_SHA256 above is the state in between.
-  CONPTY_CC_BUILT_SHA256: '7f9d90c35006328d4ac0dec08bafb4d7ac31cf35cc2363bde4dd9b0f375d160c',
+  // conpty.cc after #922 and the root-handle handoff: a state in between, like PATCHED above.
+  CONPTY_CC_HANDOFF_SHA256: '7f9d90c35006328d4ac0dec08bafb4d7ac31cf35cc2363bde4dd9b0f375d160c',
+  // conpty.cc after ALL its patches (#922, the root-handle handoff, then the close on exit of
+  // PTY-CONHOST-LEAK-NATIVE): the only source conpty.node may be built from, and what the record
+  // and the release markers require.
+  CONPTY_CC_BUILT_SHA256: '8ab37a5002b6d6297b49e8d62a13f58c2f6f10530309c08402550d9aa8ef6dcb',
+  CONPTY_CC_CLOSE_EDITS,
+  CLOSE_MARKER,
+  hasCloseMarker,
   // lib/windowsPtyAgent.js: from the same tarball, and after the handoff patch.
   AGENT_JS_PRISTINE_SHA256: '8636d16b38266112204061a22b135734177c242837982fd3a4055be726efa64a',
   AGENT_JS_HANDOFF_SHA256: '33390ba2cc9bc5bbf78d6123abb914f627445fadb89745de466a5eab8bbb197e',
