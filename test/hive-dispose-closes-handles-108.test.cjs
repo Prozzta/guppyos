@@ -114,6 +114,28 @@ test('a second manager over the same folder is closed by its own shutdown, not b
 const turn = () => new Promise((r) => setImmediate(r));
 const disposed = (e) => e?.name === 'HiveDisposedError' && e.code === 'EHIVEDISPOSED';
 const watches = (home) => openUnder(home).filter((l) => l.startsWith('watch '));
+/**
+ * Holds every call that goes through it until release(). `entered` resolves at the first held
+ * call, so a test waits for the product to arrive, however long its earlier file work takes.
+ */
+function gate() {
+  let enter;
+  const g = {
+    open: 0, gated: true, waiting: [],
+    entered: new Promise((r) => { enter = r; }),
+    async through(run) {
+      g.open++; enter();
+      try { if (g.gated) await new Promise((go) => { g.waiting.push(go); }); return await run(); } finally { g.open--; }
+    },
+    release() { g.gated = false; for (const go of g.waiting.splice(0)) go(); }
+  };
+  return g;
+}
+/** Waits for the gate's first call. The clock here only words the failure: it decides no pass. */
+const reached = (g, what) => new Promise((ok, no) => {
+  const late = setTimeout(() => no(new Error(`never reached the gate: ${what}`)), 60_000);
+  void g.entered.then(() => { clearTimeout(late); ok(); });
+});
 
 test('a roster read open at dispose() finishes without putting the watcher or the fallback timer back; reopen() allows both again', async (t) => {
   const { home, hive } = await floor();
@@ -131,16 +153,15 @@ test('a roster read open at dispose() finishes without putting the watcher or th
   const cold = new HiveManager(() => home, () => true);
   const registry = path.join(cold.root(), 'registry.json');
   const real = fs.promises.readFile;
-  const g = { open: 0, gated: true, waiting: [], release() { this.gated = false; for (const go of this.waiting.splice(0)) go(); } };
-  fs.promises.readFile = async function gatedRosterRead(p, ...rest) {
+  const g = gate();
+  fs.promises.readFile = function gatedRosterRead(p, ...rest) {
     if (path.resolve(String(p)) !== path.resolve(registry)) return real.call(fs.promises, p, ...rest);
-    g.open++;
-    try { if (g.gated) await new Promise((go) => { g.waiting.push(go); }); return await real.call(fs.promises, p, ...rest); } finally { g.open--; }
+    return g.through(() => real.call(fs.promises, p, ...rest));
   };
   t.after(async () => { g.release(); fs.promises.readFile = real; cold.dispose(); await cold.drainReads(); });
 
   const asked = cold.mailObligationsAsync().then(() => null, (e) => e);
-  for (let i = 0; i < 200 && g.open === 0; i++) await turn();
+  await reached(g, 'the roster read of registry.json');
   assert.equal(g.open, 1, 'the roster read is open and held');
 
   cold.dispose();
@@ -247,17 +268,16 @@ test('drainReads() does not resolve while a route pass is in flight, even with n
   fs.mkdirSync(outbox, { recursive: true });
   await hive.routerIdle();
   const real = fs.promises.readdir;
-  const g = { open: 0, gated: true, waiting: [], release() { this.gated = false; for (const go of this.waiting.splice(0)) go(); } };
-  fs.promises.readdir = async function gatedOutboxList(p, ...rest) {
+  const g = gate();
+  fs.promises.readdir = function gatedOutboxList(p, ...rest) {
     if (path.resolve(String(p)) !== outbox) return real.call(fs.promises, p, ...rest);
-    g.open++;
-    try { if (g.gated) await new Promise((go) => { g.waiting.push(go); }); return await real.call(fs.promises, p, ...rest); } finally { g.open--; }
+    return g.through(() => real.call(fs.promises, p, ...rest));
   };
   t.after(async () => { g.release(); fs.promises.readdir = real; hive.dispose(); await hive.drainReads(); });
 
   let passSettled = false;
   hive.routeOnce([outbox]).then(() => { passSettled = true; }, () => { passSettled = true; });
-  for (let i = 0; i < 200 && g.open === 0; i++) await turn();
+  await reached(g, 'the route pass listing the outbox');
   assert.equal(g.open, 1, 'the pass is in flight, held at its listing of the outbox');
 
   hive.stopLedgerGuard(); hive.dispose();
