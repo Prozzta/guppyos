@@ -248,6 +248,38 @@ test('KILLED helper: when the hold cannot be opened the test process it started 
   }
 });
 
+// FLAKE-PS-POLICY-KILLED-CELL-HANG-108 (b): a cell that is ended while its test process runs (by its own
+// timeout: node:test then aborts the cell's signal, t.signal) must not leave that process behind either.
+// The trigger is measured, not timed: the signal is aborted as soon as the hold is open, with the
+// process running and nothing reported yet.
+test('KILLED helper: when the cell is ended while its test process runs, the process is ended with it', { skip: !WIN && 'Windows PowerShell only', timeout: 120_000 }, async () => {
+  const jail = path.join(tmpRoot, 'jail-ended');
+  const shared = path.join(tmpRoot, 'shared-ended');
+  fs.mkdirSync(jail);
+  fs.mkdirSync(shared);
+  const ended = new AbortController();
+  const reason = new Error('the cell was ended');
+  // This cell's own hold as well as the helper's, and the end of the cell one loop turn after both are open.
+  let own, pid, aliveThen;
+  const open = (p) => {
+    pid = p;
+    own = procHold().procOpen(p);
+    setImmediate(() => { aliveThen = procHold().procAlive(own); ended.abort(reason); });
+    return procHold().procOpen(p);
+  };
+  try {
+    const got = await killedOnFirstFile(jail, shared, false, open, ended.signal).then((r) => ({ r }), (e) => ({ e }));
+    if (got.r) procHold().procClose(got.r.hold);
+    assert.equal(aliveThen, true, 'PS POLICY helper: the test process was running when the cell was ended (the premise of this cell)');
+    assert.ok(got.e, `PS POLICY helper: THE TEST PROCESS OUTLIVES ITS CELL: the cell was ended with pid ${pid} (killed-inner.cjs) running, and the helper let it run on (it went on to report ${JSON.stringify(got.r && got.r.out)})`);
+    assert.equal(got.e, reason, 'PS POLICY helper: the end of the cell is what the helper reports');
+    assert.equal(procHold().procAlive(own), false, `PS POLICY helper: THE TEST PROCESS IS LEFT RUNNING: the helper has given its result and pid ${pid} (killed-inner.cjs) is still alive`);
+  } finally {
+    // Whatever the helper did, this cell leaves no process: the pid is ours while the hold is open.
+    if (own !== undefined) { if (procHold().procAlive(own)) process.kill(pid, 'SIGKILL'); procHold().procClose(own); }
+  }
+});
+
 test('RUNNER: run-tests sweeps dead pids\' folders at the end of a run', () => {
   const src = fs.readFileSync(path.join(__dirname, 'tools', 'run-tests.cjs'), 'utf8');
   assert.match(src, /const code = run\(\{[\s\S]*?\}\);\s*(?:\/\/[^\n]*\n\s*)*require\('\.\/ps-env\.cjs'\)\.sweepPsTempDirs\(\);\s*process\.exit\(code\);/, 'PS POLICY runner: the sweep runs after run() and before the exit');
