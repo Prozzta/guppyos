@@ -60,8 +60,13 @@ const DLL = process.argv.includes(DLL_FLAG);
 const RAW_UNREAD_FLAG = '--conhost-leak-raw-unread-manager';
 const RAW_UNREAD = process.argv.includes(RAW_UNREAD_FLAG);
 const UNREAD = DESTROYED || RAW_UNREAD || process.argv.includes(UNREAD_FLAG);
+// A manager in which the thread that closes the pseudoconsole cannot be started (the native test
+// hook GUPPY_PTY_TEST_CLOSE_THREAD_FAILS throws what std::thread throws when it cannot start).
+const THREAD_FAILS_FLAG = '--conhost-leak-close-thread-fails-manager';
+const THREAD_FAILS = process.argv.includes(THREAD_FAILS_FLAG);
+const MANAGER = UNREAD || THREAD_FAILS;
 const RESULT = 'UNREAD-RESULT ';
-const test = UNREAD ? () => {} : require('node:test');
+const test = MANAGER ? () => {} : require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -296,6 +301,43 @@ async function unreadManager() {
 }
 if (UNREAD) unreadManager();
 
+/** This file as the manager of one terminal whose close thread cannot start: one result line, then its own empty loop ends it. */
+async function threadFailsManager() {
+  process.env.GUPPY_PTY_TEST_CLOSE_THREAD_FAILS = '1';   // read by the exit thread of every terminal of THIS process
+  const { PtyManager } = loadTs('src/main/pty.ts');
+  const node = consoleNode();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'conhost-leak-thread-'));
+  const out = { node: `${node.file} ${node.version} (from ${node.from})`, hosts: [], exit: null, left: null };
+  const m = new PtyManager();
+  const id = `conhost-leak-thread-${process.pid}`;
+  try {
+    const flag = path.join(dir, 'end');
+    const before = await hostChildren();
+    out.spawn = await m.spawn({ id, cwd: process.cwd(), command: node.file, cols: 80, rows: 24,
+      args: ['-e', `const fs = require('fs'); setInterval(() => { if (fs.existsSync(${JSON.stringify(flag)})) process.exit(0); }, 50)`] });
+    const proc = m.sessions.get(id).proc;
+    const exited = new Promise((res) => proc.onExit(res));
+    out.hosts = [...(await hostChildren())].filter(([pid]) => !before.has(pid));
+    fs.writeFileSync(flag, '');
+    out.exit = await exited;
+    // The close was never started, so the host is what it was before the close existed: it
+    // stays for as long as this process lives. LISTINGS completed listings later it is still here.
+    out.left = out.hosts;
+    for (let k = 0; k < LISTINGS && out.left.length; k += 1) {
+      const now = await hostChildren();
+      out.left = out.hosts.filter(([pid]) => now.has(pid));
+    }
+  } catch (e) {
+    out.error = String(e && e.stack || e);
+  } finally {
+    if (m.sessions.has(id)) m.kill(id);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  process.stdout.write(`${RESULT}${JSON.stringify(out)}
+`);
+}
+if (THREAD_FAILS) threadFailsManager();
+
 /** Runs this file as a manager process; resolves with its result line, and `ended()` says how it ended, waiting LISTINGS listings at most. */
 async function managerRun(t, flag) {
   const child = spawn(process.execPath, [__filename].concat(flag), { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
@@ -435,4 +477,26 @@ test('PTY-CONHOST-LEAK: node-pty alone on the bundled console host, the output s
   { skip: NO_BUNDLED_HOST, timeout: 120_000 }, async (t) => {
     const r = await destroyedSocket(t, [RAW_EARLY_FLAG, DLL_FLAG], 'node-pty');
     assert.equal(r.bundledHost, true, 'this cell ran on the bundled host');
+  });
+
+// The thread that closes the pseudoconsole is started on node-pty's exit thread, where nothing
+// catches: a start that throws there is std::terminate, the whole app gone with every terminal in
+// it. Caught, it costs what an ended terminal cost before the close existed: its console host
+// stays until the app quits.
+test('PTY-CONHOST-LEAK: a close thread that cannot be started costs one console host until the app quits, never the app: the exit is reported and the manager process ends by itself',
+  { skip: !WIN, timeout: 120_000 }, async (t) => {
+    const { r, ended, stderr } = await managerRun(t, THREAD_FAILS_FLAG);
+    assert.deepEqual(r.spawn, { ok: true });
+    assert.equal(r.exit && r.exit.exitCode, 0, `the terminal's exit is reported with the program's own code: ${JSON.stringify(r.exit)}`);
+    // The premise: the start DID fail in that process. Had the hook not been read, the host would be closed and gone.
+    assert.deepEqual(r.left, r.hosts, `the close was never started, so the host stays while the manager lives (the leak this card removes, and the price of a failed start): ${JSON.stringify(r.left)}`);
+    const end = await ended();
+    assert.ok(end, `THE MANAGER PROCESS DOES NOT END: ${LISTINGS} listings after its result it is still alive
+${stderr()}`);
+    assert.deepEqual(end, { code: 0, signal: null }, `THE APP DIES WHEN A CLOSE THREAD CANNOT START: the manager process ended ${JSON.stringify(end)}
+${stderr()}`);
+    // The host was the manager's; with the manager gone it goes too.
+    const alive = () => { try { process.kill(r.hosts[0][0], 0); return true; } catch { return false; } };
+    for (let k = 0; k < LISTINGS && alive(); k += 1) await hostChildren();
+    assert.equal(alive(), false, `the host left by the failed start goes with the manager process: pid ${r.hosts[0][0]} is still alive`);
   });
