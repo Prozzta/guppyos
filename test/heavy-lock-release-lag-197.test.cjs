@@ -328,19 +328,20 @@ test('recur: a job-empty notice does not end a job whose list still names a proc
 
 // Windows does not order the notices: the exit notice of the last process (msg 7) can be read
 // after the job-empty notice (msg 4). It must not bring the wait back.
-test('recur: a process-exit notice that lands after the job-empty notice does not start the wait again', async () => {
+K.lateNotice = async (C) => {
   const r = await heldListRig(C);
   r.emit({ event: 'exit', job: r.id, msg: 4, pid: 0 });
   r.emit({ event: 'exit', job: r.id, msg: 7, pid: 5 });   // the late notice of the last process
   await r.answerEmpty();
   await r.answerEmpty();   // a second list, if the product asks for one at once, is answered too
   assert.equal(exits(r.told).length, 1, 'A LATE PROCESS-EXIT NOTICE AFTER THE JOB-EMPTY NOTICE DOES NOT RESTART THE CONFIRM');
-});
+};
+test('recur: a process-exit notice that lands after the job-empty notice does not start the wait again', async () => { await K.lateNotice(C); });
 
 // The other side of that: once a list has KEPT the job after a job-empty notice, the notices
 // count again. The exit of the process the list named must end the job within the confirm, and
 // not leave it to the poll (HEAVY_JOB_POLL_MS).
-test('recur: after a job-empty notice whose list kept the job, the exit notice of the process left ends the job within the confirm', async () => {
+K.keptThenGone = async (C) => {
   let alive = true;
   const r = await jobsRig(C, (id, clock) => (alive ? [{ pid: 9, name: 'node.exe', createdMs: clock.now() - 10 }] : []));
   r.f.emit({ event: 'exit', job: r.id, msg: 4, pid: 0 });
@@ -352,11 +353,12 @@ test('recur: after a job-empty notice whose list kept the job, the exit notice o
   await r.clock.tick(C.HEAVY_JOB_EXIT_CONFIRM_MS);
   await r.clock.tick(0);
   assert.equal(exits(r.told).length, 1, 'A JOB THE LIST KEPT AFTER A JOB-EMPTY NOTICE STILL ENDS ON ITS NEXT EXIT NOTICE (not at the poll)');
-});
+};
+test('recur: after a job-empty notice whose list kept the job, the exit notice of the process left ends the job within the confirm', async () => { await K.keptThenGone(C); });
 
 // The mark must not outlive a list that said nothing: a FAILED list leaves the job as it was, so
 // the next notice has to be judged (it would otherwise be dropped and only the poll would end it).
-test('recur: a job-empty notice whose list failed does not make later exit notices be ignored', async () => {
+K.failedMark = async (C) => {
   let n = 0;
   const r = await jobsRig(C, () => (++n === 1 ? null : []));
   r.f.emit({ event: 'exit', job: r.id, msg: 4, pid: 0 });
@@ -367,11 +369,12 @@ test('recur: a job-empty notice whose list failed does not make later exit notic
   await r.clock.tick(C.HEAVY_JOB_EXIT_CONFIRM_MS);
   await r.clock.tick(0);
   assert.equal(exits(r.told).length, 1, 'A LATER NOTICE AFTER A FAILED LIST IS NOT IGNORED (the job ends within the confirm, not at the poll)');
-});
+};
+test('recur: a job-empty notice whose list failed does not make later exit notices be ignored', async () => { await K.failedMark(C); });
 
 // A notice that lands while the list is out is dropped under the mark. The list was taken before
 // that exit, so it may still name the process: the dropped notice must then be judged after all.
-test('recur: an exit notice that landed while the list was out is judged when that list keeps the job', async () => {
+K.droppedNotice = async (C) => {
   const r = await heldListRig(C);
   r.emit({ event: 'exit', job: r.id, msg: 4, pid: 0 });
   r.emit({ event: 'exit', job: r.id, msg: 7, pid: 9 });   // lands while the list is out
@@ -382,7 +385,8 @@ test('recur: an exit notice that landed while the list was out is judged when th
   await r.clock.tick(C.HEAVY_JOB_EXIT_CONFIRM_MS);
   await r.answerEmpty();
   assert.equal(exits(r.told).length, 1, 'A NOTICE DROPPED WHILE THE LIST WAS OUT IS CHECKED AFTER THE LIST KEPT THE JOB (not left to the poll)');
-});
+};
+test('recur: an exit notice that landed while the list was out is judged when that list keeps the job', async () => { await K.droppedNotice(C); });
 
 // ─── LIVE: the real helper, real jobs, the real lock ────────────────────────────────────────
 
@@ -857,9 +861,13 @@ function mutatedText(file, edits, tag) {
 const MUTANTS = [
   { name: 'no confirm: the first notice is checked at once', file: CPU_FILE, edits: [['}, HEAVY_JOB_EXIT_CONFIRM_MS);', '}, 0);']], killer: 'notice', dies: /NO JOB IS CALLED OVER BEFORE THE CONFIRM/ },
   { name: 'a notice does not restart the confirm', file: CPU_FILE, edits: [['    this.cancelConfirm(j);\n    const st =', '    if (j.confirm !== null) return;\n    const st =']], killer: 'burst', dies: /A BURST OF NOTICES IS CHECKED ONCE, AFTER THE LAST/ },
-  { name: 'the confirm ignores the processes left', file: CPU_FILE, edits: [['    if (this.own(j, r.rows as HeavyJobRow[]).length) { j.noticeAt = null; return; }\n', '']], killer: 'stillRunning', dies: /A JOB WITH A PROCESS OF ITS CALL LEFT IS NOT OVER/ },
+  { name: 'the confirm ignores the processes left', file: CPU_FILE, edits: [['    if (left) { j.noticeAt = null; if (j.missed) { j.missed = false; this.armConfirm(j); } return; }\n', '']], killer: 'stillRunning', dies: /A JOB WITH A PROCESS OF ITS CALL LEFT IS NOT OVER/ },
+  { name: 'a failed list leaves the empty mark set', file: CPU_FILE, edits: [['{ j.empty = false; return; }   // a failed list', 'return;   // a failed list']], killer: 'failedMark', dies: /A LATER NOTICE AFTER A FAILED LIST IS NOT IGNORED/ },
+  { name: 'a notice dropped under the mark is never judged', file: CPU_FILE, edits: [['if (j.missed) { j.missed = false; this.armConfirm(j); } ', '']], killer: 'droppedNotice', dies: /A NOTICE DROPPED WHILE THE LIST WAS OUT IS CHECKED/ },
+  { name: 'the empty mark is not sticky', file: CPU_FILE, edits: [['j.empty = true; j.missed = false;', 'j.missed = false;']], killer: 'lateNotice', dies: /A LATE PROCESS-EXIT NOTICE AFTER THE JOB-EMPTY NOTICE/ },
+  { name: 'a list that keeps the job leaves the empty mark set', file: CPU_FILE, edits: [['    if (left) j.empty = false;\n', '']], killer: 'keptThenGone', dies: /A JOB THE LIST KEPT AFTER A JOB-EMPTY NOTICE STILL ENDS/ },
   { name: 'every process in the job is the call', file: CPU_FILE, edits: [['x.createdMs >= j.startMs - HEAVY_JOB_START_SKEW_MS);', 'x.createdMs >= 0);']], killer: 'oldShell', dies: /A SHELL FROM BEFORE THE CALL IS NOT THE CALL/ },
-  { name: 'a failed list is an empty job', file: CPU_FILE, edits: [["    if (!r || r.ok !== true || !Array.isArray(r.rows)) return;\n    if (j.confirm !== null", "    if (!r || r.ok !== true || !Array.isArray(r.rows)) { this.exited(j, 'notice'); return; }\n    if (j.confirm !== null"]], killer: 'failedList', dies: /A FAILED LIST SAYS NOTHING/ },
+  { name: 'a failed list is an empty job', file: CPU_FILE, edits: [["    if (!r || r.ok !== true || !Array.isArray(r.rows)) { j.empty = false; return; }   // a failed list says nothing: later notices count again\n    if (j.confirm !== null", "    if (!r || r.ok !== true || !Array.isArray(r.rows)) { this.exited(j, 'notice'); return; }\n    if (j.confirm !== null"]], killer: 'failedList', dies: /A FAILED LIST SAYS NOTHING/ },
   { name: 'exited is told again', file: CPU_FILE, edits: [['    if (j.exited) return;\n    j.exited = true;', '    j.exited = true;']], killer: 'once', dies: /EXITED IS TOLD ONCE PER JOB/ },
   { name: 'any event line is an exit', file: CPU_FILE, edits: [["    if (e.event !== 'exit' || typeof e.job !== 'string') return;", "    if (typeof e.job !== 'string') return;"]], killer: 'otherJob', dies: /ONLY AN EXIT NOTICE OF A TRACKED JOB IS CHECKED/ },
   { name: 'the poll does not tell the lock', file: CPU_FILE, edits: [["      this.exited(j, 'poll');\n", '']], killer: 'poll', dies: /THE POLL STILL ENDS A JOB NO NOTICE REACHED/ },
