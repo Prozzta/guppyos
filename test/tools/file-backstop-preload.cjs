@@ -26,7 +26,7 @@ if (out && opt && String(process.env.NODE_TEST_CONTEXT || '').startsWith('child'
   const bornMs = Math.round(Date.now() - process.uptime() * 1000);
   const name = require('path').basename(process.execPath);
   try { fs.appendFileSync(out, `${JSON.stringify({ pid, bornMs, file: process.argv[1] || '', name })}\n`); } catch { /* the watchdog still covers it */ }
-  process.on('exit', () => { try { fs.appendFileSync(out, `${JSON.stringify({ pid, exited: true })}\n`); } catch { /* noop */ } });
+  process.on('exit', () => { try { fs.appendFileSync(out, `${JSON.stringify({ pid, exited: true, endMs: Date.now() })}\n`); } catch { /* noop */ } });
 
   // CLAIMS-LEDGER-W6-SILENT-EXIT: a kill by pid NUMBER can end a stranger that got the number after
   // its owner died; the stranger (another test file) then ends with exit code 1 and not one line of
