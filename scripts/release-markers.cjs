@@ -23,7 +23,7 @@
  *   node scripts/release-markers.cjs <node_modules root> <models dir>
  *     source:  node_modules                                        resources/models
  *     build:   dist/win-unpacked/resources/app.asar.unpacked/node_modules   dist/win-unpacked/resources/models
- * Prints ALL 17 MARKERS OK, or MARKERS FAILED (exit 1).
+ * Prints ALL 18 MARKERS OK, or MARKERS FAILED (exit 1).
  */
 'use strict';
 const fs = require('fs');
@@ -74,6 +74,13 @@ const handoffBinary = () => {
   const record = raceMarker && raceMarker.files && typeof raceMarker.files === 'object' ? raceMarker.files['build/Release/conpty.node'] : null;
   return !!record && record.sha256 === sha(p) && racePins.hasHandoffImports(p);
 };
+// PTY-CONHOST-LEAK-NATIVE: the binary that ships is the recorded one AND carries the name only the
+// build that closes an ended terminal's pseudoconsole exports.
+const closeBinary = () => {
+  const p = path.join(ptyRoot, 'build', 'Release', 'conpty.node');
+  const record = raceMarker && raceMarker.files && typeof raceMarker.files === 'object' ? raceMarker.files['build/Release/conpty.node'] : null;
+  return !!record && record.sha256 === sha(p) && racePins.hasCloseMarker(p);
+};
 const builtOnlyLoader = () => sha(path.join(ptyRoot, 'lib', 'utils.js')) === racePins.UTILS_JS_BUILT_ONLY_SHA256;
 const quietWorker = () => sha(path.join(ptyRoot, 'lib', 'worker', 'conoutSocketWorker.js')) === racePins.WORKER_JS_QUIET_SHA256;
 const handoffAgent = () => sha(path.join(ptyRoot, 'lib', 'windowsPtyAgent.js')) === racePins.AGENT_JS_HANDOFF_SHA256;
@@ -115,7 +122,8 @@ const checks = [
   ['conpty.node built with the root-handle handoff', handoffBinary()],
   ['windowsPtyAgent.js keeps the root handle', handoffAgent()],
   ['node-pty loader takes built binaries only', builtOnlyLoader()],
-  ['node-pty output worker handles socket errors', quietWorker()]
+  ['node-pty output worker handles socket errors', quietWorker()],
+  ['conpty.node closes the pseudoconsole of an ended terminal', closeBinary()]
 ];
 let ok = true;
 for (const [n, v] of checks) { console.log((v ? 'OK   ' : 'FAIL ') + n); ok = ok && v; }
