@@ -140,7 +140,7 @@ test('SWEEP: dead pids\' guppy-pstemp folders are removed, live ones and other n
 
 /** Andy's probe: a test process (TEMP = jail) runs PowerShell through psEnv(..., { temp }), kills it the
  *  moment a policy file shows in the temp it gave it, and is then itself killed (no exit handler). */
-function killedOnFirstFile(jail, shared, temp) {
+function killedOnFirstFile(jail, shared, temp, open = (pid) => procHold().procOpen(pid)) {
   const inner = path.join(tmpRoot, 'killed-inner.cjs');
   fs.writeFileSync(inner, `
 const fs = require('fs'), { spawn } = require('child_process');
@@ -163,7 +163,7 @@ setTimeout(() => afterExit(() => process.stdout.write('timer\\n')), 30000);
     // kill, until the caller has swept. While the hold is open Windows cannot give its pid to another
     // process, so the sweep's kill(pid, 0) answers for this process (exited: ESRCH), not a stranger.
     // procOpen takes only a running child of ours: opened later, it would throw "already exited".
-    const hold = procHold().procOpen(p.pid);
+    const hold = open(p.pid);
     let out = '';
     p.stdout.on('data', (d) => { out += d; if (/killed|timer/.test(out)) p.kill('SIGKILL'); });
     p.on('close', () => {
@@ -221,6 +221,27 @@ test('KILLED: PowerShell killed on its first policy file, then its test process 
     assert.deepEqual(fs.readdirSync(shared), [], 'PS POLICY: the real temp folder is clean after the sweep');
   } finally {
     procHold().procClose(fixed.hold);
+  }
+});
+
+// FLAKE-PS-POLICY-KILLED-CELL-HANG-108: the hold is opened after the test process is started. When it
+// cannot be opened (a tree where the fs-handle addon is not built: the load throws), the helper must not
+// leave that process behind: nothing would ever kill it, it never ends by itself (it watches a folder),
+// and the test file then never ends either.
+test('KILLED helper: when the hold cannot be opened the test process it started is ended, not left running', { skip: !WIN && 'Windows PowerShell only', timeout: 120_000 }, async () => {
+  const jail = path.join(tmpRoot, 'jail-nohold');
+  const shared = path.join(tmpRoot, 'shared-nohold');
+  fs.mkdirSync(jail);
+  fs.mkdirSync(shared);
+  // This cell's own hold on the started process (so its pid cannot be given to another), then the failure.
+  let own, pid;
+  const noHold = (p) => { pid = p; own = procHold().procOpen(p); throw new Error('no hold for this cell'); };
+  try {
+    await assert.rejects(killedOnFirstFile(jail, shared, false, noHold), /no hold for this cell/, 'PS POLICY helper: the failure to open the hold is what the helper reports');
+    assert.equal(procHold().procAlive(own), false, `PS POLICY helper: THE TEST PROCESS IS LEFT RUNNING: the helper has given its result and pid ${pid} (killed-inner.cjs) is still alive; nothing will end it and the test file cannot end`);
+  } finally {
+    // Whatever the helper did, this cell leaves no process: the pid is ours while the hold is open.
+    if (own !== undefined) { if (procHold().procAlive(own)) process.kill(pid, 'SIGKILL'); procHold().procClose(own); }
   }
 });
 
