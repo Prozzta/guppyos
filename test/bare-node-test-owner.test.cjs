@@ -142,6 +142,8 @@ function bareEnv(extra) {
   for (const k of ['NODE_OPTIONS', 'GUPPY_FILE_JOB_EXE', 'GUPPY_FILE_JOB_OPT', 'GUPPY_FILE_JOB_PID', 'NODE_TEST_CONTEXT']) delete env[k];
   return nodeEnv(Object.assign(env, extra));
 }
+// Under the Electron leg the node --test parent and the fixture subprocess are electron.exe, not node.exe.
+const isNodeExe = (row) => !!row && String(row.name).toLowerCase() === path.basename(process.execPath).toLowerCase();
 const rowOf = (pid, bornMs) => { const r = own.lookupPids([pid])[0]; return r && Math.abs(r.created - bornMs) <= own.BIRTH_SLACK_MS ? r : undefined; };
 const until = async (what, ok, ms = 30_000) => {
   const t0 = Date.now(); let last = null;
@@ -151,7 +153,6 @@ const until = async (what, ok, ms = 30_000) => {
     await new Promise((r) => setTimeout(r, 100));
   }
 };
-const readPids = (file) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; } };
 /** The children the fixture reported, as rows now (pid + birth), and the ping under cmd. */
 function childRows(pids) {
   const d = rowOf(pids.detached, pids.detachedBornMs);
@@ -228,13 +229,13 @@ async function observeProcess(p, observer, name, { hold = false, parent, doneMs 
     const doneTimeout = new Promise((_, reject) => {
       doneTimer = setTimeout(() => {
         // evidence BEFORE the kill: the fixture subprocess (node --test's child running the file) is still alive and
-        // the detached child's channel was still connected when the fixture reported it
+        // the detached child's channel was still connected when the fixture REPORTED it (not re-read at the bound)
         const fixtureRows = parent ? own.childrenOf(own.processTable(`ParentProcessId = ${parent.pid}`), parent) : [];
         const err = new Error(name + ': fixture did not exit within ' + doneMs + ' ms after release');
         err.pids = seen.pids;
         err.parent = parent;
         err.fixtureRows = fixtureRows;
-        err.fixtureAlive = fixtureRows.some((r) => /^node/i.test(r.name));
+        err.fixtureAlive = fixtureRows.some(isNodeExe);
         err.channelConnected = seen.pids.connected === true;
         if (parent) own.killVerified([parent], {});
         reject(err);
@@ -248,13 +249,12 @@ async function observeProcess(p, observer, name, { hold = false, parent, doneMs 
 async function bareRun(dir, name, helperLine, { mode = 'FAIL', env: extra = {}, disconnect = true, doneMs } = {}) {
   const file = path.join(dir, `${name}.test.cjs`);
   fs.writeFileSync(file, fixture(helperLine, mode, disconnect));
-  const pidsFile = path.join(dir, `${name}.pids.json`);
   const observer = await openObserver();
   const env = bareEnv({ ...observer.env, ...extra });
   const p = spawn(process.execPath, ['--test', file], { cwd: os.tmpdir(), env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
   const parent = await until('bare node parent', () => {
     const row = own.lookupPids([p.pid])[0];
-    return row && /^node/i.test(row.name) ? row : null;
+    return isNodeExe(row) ? row : null;
   }, 30_000);
   const watched = await observeProcess(p, observer, name, { hold: mode === 'HANG', parent, doneMs });
   assert.equal(watched.pids.connected, !disconnect, `${name}: the fixture reports its detached child's channel ${disconnect ? 'closed' : 'still open'}`);
@@ -275,19 +275,17 @@ test('LIVE: the observer disconnect is required for a released failing fixture t
     );
     assert.match(String(err && err.message), /did not exit within 5000 ms after release/);
     // not just a clock: the fixture subprocess was still alive and the detached child's channel still open
-    assert.equal(err.channelConnected, true, 'the detached child still held its IPC channel');
+    assert.equal(err.channelConnected, true, 'the detached child held its IPC channel when the fixture reported it');
     assert.equal(err.fixtureAlive, true, 'the fixture subprocess was still alive 5 s after release');
   } finally {
     if (err && err.pids) {
+      // identity-safe: every row carries the birth it was captured with (pid + CreationDate), never a pid looked up now
       const rows = childRows(err.pids);
-      const mine = [rows.detached, rows.cmd, rows.ping, ...(err.fixtureRows || []).map((r) => own.lookupPids([r.pid])[0]).filter(Boolean)];
+      const mine = [rows.detached, rows.cmd, rows.ping, ...(err.fixtureRows || [])].filter(Boolean);
       sweep(mine);
-      if (err.parent) sweep([own.lookupPids([err.parent.pid])[0] && rowOf(err.parent.pid, err.parent.created)]);
-      const after = childRows(err.pids);
-      assert.equal(after.detached, undefined, 'mutant detached node is swept');
-      assert.equal(after.cmd, undefined, 'mutant cmd is swept');
-      assert.equal(after.ping, undefined, 'mutant ping is swept');
-      for (const r of err.fixtureRows || []) assert.equal(rowOf(r.pid, r.created), undefined, `fixture subprocess ${r.pid} is swept`);
+      if (err.parent) sweep([rowOf(err.parent.pid, err.parent.created)]);
+      const everyone = [...mine, err.parent].filter(Boolean);
+      await until('mutant leftovers swept', () => everyone.every((r) => !rowOf(r.pid, r.created)), 20_000);
     }
     rmDir(dir);
   }
@@ -314,7 +312,7 @@ test('LIVE: with the helper, a bare node --test of a failing, spawning file leav
     const swept = sweep([left.detached, left.cmd, left.ping]);
     assert.ok(swept.killed.length >= 1, 'the control\'s orphan is killed, verified by pid + CreationDate');
     assert.equal(swept.skipped.length, 0, 'nothing of ours changed identity');
-    assert.ok(rowOf(bare.pids.detached, bare.pids.detachedBornMs) === undefined, 'control detached node is gone after the sweep');
+    await until('control swept', () => !rowOf(bare.pids.detached, bare.pids.detachedBornMs), 20_000);
   } finally {
     sweep(leftovers);
     rmDir(dir);
@@ -369,7 +367,7 @@ test('LIVE: a hard kill of the bare node --test parent takes the file\'s childre
     assert.ok(before.detached && before.cmd, `the fixture's children are up: ${JSON.stringify(run.pids)}; rows now ${JSON.stringify(own.lookupPids([run.pids.detached, run.pids.cmd]))}; parent ${JSON.stringify(own.lookupPids([run.parent.pid]))} born ${run.parent.bornMs}; ${diag()}`);
     // the node parent, verified by pid + CreationDate before Stop-Process -Force (own-procs checks again)
     const parent = rowOf(run.parent.pid, run.parent.bornMs);
-    assert.ok(parent && /^node/i.test(parent.name), `the node --test parent ${run.parent.pid} is ours (${parent && parent.name})`);
+    assert.ok(parent && isNodeExe(parent), `the node --test parent ${run.parent.pid} is ours (${parent && parent.name})`);
     const k = own.killVerified([parent], {});
     assert.deepEqual(k.skipped, [], 'the parent still had our name and birth');
     await until('parent gone', () => run.exited() || !rowOf(run.parent.pid, run.parent.bornMs), 30_000);
