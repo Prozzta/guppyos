@@ -217,6 +217,10 @@ const CONPTY_CC_CLOSE_EDITS = [
     '        return ptyHandle->id == id;\n' +
     '      });\n' +
     '    }\n' +
+    // The test hook GUPPY_PTY_TEST_CLOSE_THREAD_FAILS below IS SHIPPED in the native binary. It is
+    // safe there because it fails safe: a process that has it set keeps each ended terminal's console
+    // host until the app quits (the very state this handler exists for), and never crashes. Nothing
+    // in Guppy sets it; only test/pty-conhost-leak-native.test.cjs does, in its own child process.
     '    // GUPPY PTY-CONHOST-LEAK-NATIVE (tools/patch-node-pty-root-handle.cjs): the thread that will\n' +
     '    // close the pseudoconsole is started here, parked on an event, before the exit is reported,\n' +
     '    // so that the report can say whether there is one. A thread that cannot be started throws,\n' +
@@ -350,7 +354,7 @@ module.exports = {
   hasCloseMarker,
   // lib/windowsPtyAgent.js: from the same tarball, and after the handoff patch.
   AGENT_JS_PRISTINE_SHA256: '8636d16b38266112204061a22b135734177c242837982fd3a4055be726efa64a',
-  AGENT_JS_HANDOFF_SHA256: '746c9c4b29a39c05c56acf40ee4484dfc701b077bb7f44f6e406b6afc6da2ff1',
+  AGENT_JS_HANDOFF_SHA256: '3b77443093cc1e7bc5afb74f491c5b5a6477731e18fa1ebc21df8374cc9004b3',
   // lib/utils.js (NODEPTY-PACKAGED-PROOF): from the same tarball, and after the loader patch that
   // stops Windows from falling back to node-pty's unpatched prebuilt binaries.
   UTILS_JS_PRISTINE_SHA256: 'f75ad341c13fbf1a9a6605d7ee42dff5bbc5d43b7b381e413fb97eb1b8300beb',
