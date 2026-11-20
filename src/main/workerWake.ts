@@ -279,6 +279,9 @@ interface AgentWake {
   /** An idle reading refused only by the confirm grace, applied on a later beat unless
    *  something newer said active (0 = none). */
   pendingIdleAt: number;
+  /** The epoch edge (`activeSince`) a COMMITTED settle wrote, while that settle's epoch is open
+   *  (0 = none). An idle reading older than the edge is kept only when the edge is this one. */
+  settleEdgeAt: number;
   /** Ids already re-pended once (an unconfirmed submit, or still delivered at the close of their
    *  wake's epoch). A second time goes to the F4 backoff instead. */
   reannounced: Set<string>;
@@ -409,7 +412,7 @@ export class WorkerWakeWatchdog {
     if (!r) {
       r = {
         pending: new Set(), announced: new Set(), inFlight: null, held: null, lifecycle: 'unknown', lastHumanNeedsAt: 0, lastReconcileAttemptAt: 0, providerSession: null, activeSince: 0, closedTurns: [], orphanPostCompacts: [], openTurnId: null,
-        stoppedAt: 0, turnStartAt: 0, provisional: false, viaStop: false, claimedAt: 0, commitIds: [], pendingIdleAt: 0, reannounced: new Set(), n1Reoffered: new Set(), retries: new Map(), quiet: new Map(), recheck: null, invoking: false, claimTurnSeen: false, claimTurnId: null, claimEpochClosed: false,
+        stoppedAt: 0, turnStartAt: 0, provisional: false, viaStop: false, claimedAt: 0, commitIds: [], pendingIdleAt: 0, settleEdgeAt: 0, reannounced: new Set(), n1Reoffered: new Set(), retries: new Map(), quiet: new Map(), recheck: null, invoking: false, claimTurnSeen: false, claimTurnId: null, claimEpochClosed: false,
         lastTrafficAt: 0, lastMainTrafficAt: 0, stuckEpoch: 0, stuckRecoveries: 0, compactEpoch: false
       };
       this.agents.set(agentId, r);
@@ -432,6 +435,7 @@ export class WorkerWakeWatchdog {
     r.provisional = false;
     r.viaStop = false;
     r.pendingIdleAt = 0;
+    r.settleEdgeAt = 0;
   }
 
   /**
@@ -755,8 +759,22 @@ export class WorkerWakeWatchdog {
     //     idle was the last word and the epoch never closed. A grace-refused reading is
     //     remembered and applied by the next beat after the grace (`beat`), unless
     //     something newer said active first. The beat already runs: no new timer.
+    //
+    // (3b) THE SAME READING, ARRIVING AFTER THE SETTLE (WORKERWAKE-IDLE-READ-BEFORE-SETTLE-ARRIVES-
+    //     AFTER). The settle keeps a deferred idle that is about the claim's own turn. When that
+    //     reading arrives after the settle instead, the settle has already moved the edge past it
+    //     and (1) refused it outright: nothing was deferred, and AGY said nothing more. It is the
+    //     same reading, so it gets the settle's own rule: read at or after a turn start that came
+    //     after the claim, it is deferred, and the beat applies it after the grace counted from
+    //     the settle. Only while the edge IS that settle's: a reading older than any other edge
+    //     (a turn start, a compaction) says nothing about what that edge opened.
     if (status === 'idle') {
-      if (r.activeSince > 0 && at < r.activeSince) return false;
+      if (r.activeSince > 0 && at < r.activeSince) {
+        const settleEdge = r.settleEdgeAt === r.activeSince;
+        const startedSinceClaim = r.claimedAt > 0 && r.turnStartAt >= r.claimedAt;
+        if (settleEdge && startedSinceClaim && at >= r.turnStartAt) r.pendingIdleAt = Math.max(r.pendingIdleAt, at);
+        return false;
+      }
       if (r.lifecycle === 'active' && r.activeSince > 0 && at - r.activeSince < PROVIDER_IDLE_CONFIRM_MS) {
         r.pendingIdleAt = Math.max(r.pendingIdleAt, at);
         return false;
@@ -1158,6 +1176,7 @@ export class WorkerWakeWatchdog {
       }
       r.lifecycle = 'active';          // a turn just started; new mail waits for its Stop
       r.activeSince = at;              // and THIS is the edge terminal proof must be newer than
+      r.settleEdgeAt = at;
       // Already confirmed if the provider's turn start beat our settle here.
       const turnStarted = r.claimedAt > 0 && r.turnStartAt >= r.claimedAt;
       // DEFER, NEVER DROP across the settle (WORKERWAKE-SETTLE-AFTER-IDLE-DROP). The settle can land
