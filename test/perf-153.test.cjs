@@ -281,7 +281,10 @@ test('R1 REAL: with the broker down the script prints nothing, exits 0, and writ
   const file = path.join(fs.mkdtempSync(path.join(JAIL, 'sh-')), 'claude-status.sh');
   fs.writeFileSync(file, CLAUDE_STATUS_SH);
   const r = await runStatusLine(claudeStatusCommand(file.replace(/\\/g, '/'), { port, agentId: 'a1', token: TOK }), JSON.stringify(STATUS), { PATH: '' });
-  assert.equal(r.code, 0); assert.equal(r.out, ''); assert.equal(r.err, '');
+  // The same three assertions, each carrying the whole result: a bash ended from outside (exit 4294967295)
+  // used to show only the code, which named neither the stderr nor how long the process had lived.
+  const seen = `code=${JSON.stringify(r.code)} ms=${r.ms} err=${JSON.stringify(r.err.slice(0, 400))} out=${JSON.stringify(r.out.slice(0, 400))} at=${new Date().toISOString()}`;
+  assert.equal(r.code, 0, seen); assert.equal(r.out, '', seen); assert.equal(r.err, '', seen);
 });
 
 test('R1 STATIC: the script uses no external command (builtins, redirections and its own function only)', () => {
