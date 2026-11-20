@@ -103,8 +103,9 @@ const CONPTY_CC_CLOSE_EDITS = [
     '\n' +
     '  pty_baton(',
     '  HANDLE hShell;\n' +
-    '  // GUPPY PTY-CONHOST-LEAK-NATIVE (tools/patch-node-pty-root-handle.cjs): both are read and\n' +
-    '  // written under g_ptyHandlesMutex only.\n' +
+    '  // GUPPY PTY-CONHOST-LEAK-NATIVE (tools/patch-node-pty-root-handle.cjs): guppyHpcClosed is\n' +
+    '  // read and written under g_ptyHandlesMutex only. guppyUseConptyDll is written once, by\n' +
+    '  // PtyConnect before it starts the exit thread, and is only read after that.\n' +
     '  bool guppyUseConptyDll = false;\n' +
     '  bool guppyHpcClosed = false;\n' +
     '\n' +
@@ -238,7 +239,7 @@ module.exports = {
   // conpty.cc after ALL its patches (#922, the root-handle handoff, then the close on exit of
   // PTY-CONHOST-LEAK-NATIVE): the only source conpty.node may be built from, and what the record
   // and the release markers require.
-  CONPTY_CC_BUILT_SHA256: '8ab37a5002b6d6297b49e8d62a13f58c2f6f10530309c08402550d9aa8ef6dcb',
+  CONPTY_CC_BUILT_SHA256: '222ee407913f622cb98106df1a3cad6afc94cea434a2401e53186e5bec25b1b6',
   CONPTY_CC_CLOSE_EDITS,
   CLOSE_MARKER,
   hasCloseMarker,
