@@ -145,7 +145,12 @@ test('WIRING: every pty:data send goes through the batcher; exit and kill flush 
   const dataSends = src.match(/safeSend\(`pty:data:\$\{[^}]+\}`/g) || [];
   assert.equal(dataSends.length, 2, 'the batcher\'s send, and the test-only fallback in deliverData');
   assert.match(src, /session\.out = createPtyDataBatcher\(\(data\) => this\.safeSend\(`pty:data:\$\{opts\.id\}`, data, session\.owner\)\)/);
-  assert.match(src, /proc\.onData\(\(data\) => this\.deliverData\(opts\.id, session, data\)\)/);
+  // PTY-CONHOST-ORPHAN (option A): the handler first takes OpenConsole's start-up DA1 out of the
+  // stream; what remains still goes to deliverData, and nothing else in it sends (the count above).
+  const onData = /proc\.onData\(\(data\) => \{\n([\s\S]*?)\n {6}\}\);/.exec(src);
+  assert.ok(onData, 'the PTY output handler');
+  assert.match(onData[1], /\n\s*this\.deliverData\(opts\.id, session, data\);$/, 'every chunk that is delivered goes through deliverData, last');
+  assert.doesNotMatch(onData[1], /safeSend|\.send\(/, 'the handler sends nothing itself');
   assert.match(src, /session\.out\?\.flush\(\);\s*this\.safeSend\(`pty:exit:\$\{opts\.id\}`/, 'exit notice after the last bytes');
   // AGY-TEARDOWN: the kill is closeTree (sweep the tree, then close the ConPTY).
   assert.match(src, /s\.out\?\.flush\(\);[^\n]*\n\s*this\.closeTree\(s\);/, 'kill flushes before the id can be reclaimed');

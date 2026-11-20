@@ -290,12 +290,14 @@ if (!WIN) {
       letReport = () => { holding = false; const p = pending; pending = null; if (p) p(); };
       rawClose = proc.kill.bind(proc);
       proc.kill = (...a) => { closes += 1; onClose(); return rawClose(...a); };
-      // node-pty's kill() asks for the root's console process list and kills its entries when it
-      // arrives: a use of the pid that ends after the close (PTY-HOLD-NODEPTY-HANDOFF follow-up).
+      // node-pty's kill() on the inbox conhost asked for the root's console process list and killed
+      // its entries when it arrived: a use of the pid that ended after the close (PTY-HOLD-NODEPTY-
+      // HANDOFF follow-up). On the bundled OpenConsole (useConptyDll, PTY-CONHOST-ORPHAN option A)
+      // the close kills by handle and asks for no list: the last use of the pid is closeTree's own.
       let sweep = null;
       const list = agent._getConsoleProcessList;
       agent._getConsoleProcessList = function consoleProcessList(...a) { sweep = list.apply(this, a); return sweep; };
-      const swept = async () => { assert.ok(sweep, "node-pty's close asked for the console process list"); await within(sweep, "node-pty's own by-pid sweep"); await turns(3); };
+      const swept = async () => { assert.equal(sweep, null, "NO BY-PID SWEEP AFTER THE CLOSE: node-pty's close on the bundled OpenConsole asks for no console process list"); await turns(3); };
       let releases = 0;
       if (session.hold) { const release = session.hold.release; session.hold.release = () => { releases += 1; release(); }; }
       /** End the root for real. It is running, so the pid is its own. */
@@ -366,7 +368,7 @@ if (!WIN) {
       await within(m.killAllAsync(5_000), 'the quit');
       assert.equal(sweepsOf(root), 1, `QUIT STILL SWEEPS A LIVE ROOT ONCE: ${sweepsOf(root)} sweep(s) of a running root`);
       assert.equal(atExit, 0, "THE HOLD OUTLIVES THE QUIT'S SWEEP: the root exited while taskkill was still running, and the hold was released under it (the pid was free while taskkill named it)");
-      await swept();   // the last use of the pid: node-pty's own sweep, started by the close
+      await swept();   // the last use of the pid is the quit's own taskkill: the close sweeps nothing
       assert.ok(releases() >= 1, 'THE HOLD IS RELEASED WHEN THE QUIT IS DONE WITH THE PID');
     }),
     /** The hold reserves the pid until closeTree's last sweep is over, and not longer. */
@@ -378,7 +380,7 @@ if (!WIN) {
       await within(closed, 'the ConPTY close after the sweep');
       await turns(3);
       assert.equal(atExit, 0, 'THE HOLD OUTLIVES THE SWEEP: the root exited while taskkill was still running, and the hold was released under it (the pid was free while taskkill named it)');
-      await swept();   // the last kill is node-pty's own sweep, started by the close
+      await swept();   // the last kill is closeTree's own: the close sweeps nothing
       assert.ok(releases() >= 1, 'THE HOLD IS RELEASED AFTER THE LAST KILL: a hold kept for ever keeps a dead process object for ever');
     }),
     /** A root that exits on its own, with no kill in sight, is let go at its exit. */
@@ -487,6 +489,8 @@ if (!WIN) {
       run: (mod) => W.quitLive(mod.PtyManager), dies: /THE HOLD OUTLIVES THE QUIT'S SWEEP/ },
     { file: PTYF, name: 'H5 kill() does not count itself as a user of the hold', edits: [['    s.holdUsers = (s.holdUsers ?? 0) + 1;\n    const close', '    const close']],
       run: (mod) => W.holdLife(mod.PtyManager), dies: /THE HOLD OUTLIVES THE SWEEP/ },
+    { file: PTYF, name: 'D1 the inbox conhost (useConptyDll off): its close sweeps by pid after the kill', edits: [["useConptyDll: process.platform === 'win32'", 'useConptyDll: false']],
+      run: (mod) => W.holdLife(mod.PtyManager), dies: /NO BY-PID SWEEP AFTER THE CLOSE/ },
     { file: IDF, name: 'J1 (Jim) alive() after release() asks the addon', edits: [['      if (!open) return false;\n', '']],
       run: (mod) => W.released(mod), dies: /A RELEASED HOLD SAYS DEAD ON ITS OWN/ }
   );
