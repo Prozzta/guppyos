@@ -12,6 +12,8 @@
  *
  * Unicode 11 widths, as the renderer uses (measured: the addon loads and works in headless).
  */
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { Terminal } from '@xterm/headless';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
@@ -89,13 +91,50 @@ export function mirrorParseMs(): number | null {
  */
 /**
  * MIRROR-GUARD-CPU-TIME: this thread's CPU ms (user + system), process.threadCpuUsage (Node 23.9+,
- * Electron 45; no native addon). On Windows it is GetThreadTimes, which advances in scheduler ticks
- * (15.6 ms): one slice reads 0 or a tick, but the guard judges sums over a 10 s window, where the
- * ticks average out to the parse's CPU. null when this runtime has no thread clock.
+ * Electron 45). On Windows it is GetThreadTimes, which advances in scheduler ticks (15.6 ms): one
+ * slice reads 0 or a whole tick, never its own work, so there it is only the fallback (below).
+ * null when this runtime has no thread clock.
  */
-export const threadCpuMs: (() => number) | null = typeof (process as { threadCpuUsage?: unknown }).threadCpuUsage === 'function'
+const stepClock: (() => number) | null = typeof (process as { threadCpuUsage?: unknown }).threadCpuUsage === 'function'
   ? () => { const u = process.threadCpuUsage(); return (u.user + u.system) / 1000; }
   : null;
+
+/**
+ * MIRROR-PARSE-ZERO-108: on Windows the thread clock is the fs-handle addon's threadCpuMs
+ * (QueryThreadCycleTime: the cycles this thread ran, no step). Looked for where src/main/fs.ts looks:
+ * packaged <resources>/fs-handle, else the repo's resources/fs-handle/bin. An addon that is missing,
+ * older (no such export) or whose first reading fails leaves the step clock, and `why` says so:
+ * never silent, since sums on the step clock can read 0 for a real parse.
+ */
+function cycleClock(): { clock: (() => number) | null; why: string } {
+  if (process.platform !== 'win32') return { clock: null, why: 'not Windows' };
+  const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath;
+  const candidates = [
+    ...(resourcesPath ? [join(resourcesPath, 'fs-handle', 'guppy_fs_handle.node')] : []),
+    join(__dirname, '..', '..', 'resources', 'fs-handle', 'bin', 'guppy_fs_handle.node')
+  ];
+  const found = candidates.find((c) => existsSync(c));
+  if (!found) return { clock: null, why: `no addon at ${candidates.join(' or ')}` };
+  try {
+    const mod = { exports: {} as { threadCpuMs?: unknown } };
+    process.dlopen(mod, found);
+    const fn = mod.exports.threadCpuMs;
+    if (typeof fn !== 'function') return { clock: null, why: `${found} has no threadCpuMs export (an older build)` };
+    const clock = fn as () => number;
+    const first = clock(); // throws if the cycle rate cannot be measured on this machine
+    if (!Number.isFinite(first) || first < 0) return { clock: null, why: `${found}: threadCpuMs read ${String(first)}` };
+    return { clock, why: found };
+  } catch (e) {
+    return { clock: null, why: `${found}: ${e instanceof Error ? e.message : String(e)}` };
+  }
+}
+const cycle = cycleClock();
+/** Which thread clock this process is on, for the logs and for the test that judges it. */
+export const threadCpuClock: { kind: 'cycle' | 'step' | 'none'; why: string } = cycle.clock
+  ? { kind: 'cycle', why: cycle.why }
+  : { kind: stepClock ? 'step' : 'none', why: cycle.why };
+if (process.platform === 'win32' && !cycle.clock) console.error(`[terminalMirror] no cycle clock, the parse is timed in 15.6 ms steps: ${cycle.why}`);
+export const threadCpuMs: (() => number) | null = cycle.clock ?? stepClock;
 
 export function timeParse(t: unknown, add: (ms: number) => void, now: (() => number) | null = threadCpuMs): boolean {
   if (!now) return false;
