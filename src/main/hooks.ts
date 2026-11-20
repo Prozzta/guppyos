@@ -30,7 +30,7 @@ import { estimateCostUsd } from './pricing';
 import { classifyAgyStatusLine, normalizeClaudeStatusLine, type AgyStatusTick } from './capacityNormalize';
 import { agyAccountScope, claudeAccountScope } from './capacityScope';
 import { CodexRolloutCapacitySource } from './codexRolloutCapacity';
-import { CodexThreadRollouts, HIVE_HOOK_TOOL, MCP_SERVER_NAME, isCmdShell, pendingExecCommands, pendingExecShell, pendingExecWorkdir, rebuildToolHook, templatedToolInput, turnCwd } from './codexHookMcp';
+import { CodexThreadRollouts, HIVE_HOOK_TOOL, MCP_SERVER_NAME, isCmdShell, pendingApplyPatch, pendingExecCommands, pendingExecShell, pendingExecWorkdir, rebuildToolHook, templatedToolInput, turnCwd } from './codexHookMcp';
 import { withoutJoinLine, type HeavyJobs } from './heavyCpu';
 import type { CapacityObservation } from '../shared/providerCapacity';
 import { CODEX_INBOX_WAKE_SENTINEL } from '../shared/hiveNudge';
@@ -180,6 +180,10 @@ interface HookPayload {
   /** HEAVY-CPU-OPTIONS-191: that call asked for Windows cmd as its shell (its literal `shell` in the
    *  rollout), so its join line takes cmd's own separator. */
   hook_cmd_shell?: boolean;
+  /** HEAVY-LOCK-CODEX-APPLYPATCH-AS-BASH: that input is an apply_patch's patch text (the rollout
+   *  shows the pending apply_patch): an edit, so the heavy lock does not read it as a command.
+   *  Honoured from Codex's MCP hook only. */
+  hook_patch?: boolean;
   /** HEAVY-LOCK-FALSE-NEGATIVES (Andy, item 1): the shell a Codex call's text runs in, for the heavy
    *  classifier: its exec_command's literal `shell`, else Codex's default (PowerShell on Windows);
    *  a write_stdin writes to that default shell. Absent = unknown (cmd, computed, or not found). */
@@ -1176,6 +1180,8 @@ export class HookServer {
     const ti = event === 'PreToolUse' ? templatedToolInput(args.ti) : undefined;
     if (ti) p.hook_tool_input = ti;
     if (ti && tail && typeof ti.command === 'string' && isCmdShell(pendingExecShell(tail, ti.command))) p.hook_cmd_shell = true;
+    // HEAVY-LOCK-CODEX-APPLYPATCH-AS-BASH: the template names no tool; an apply_patch's `command` is its patch text.
+    if (ti && tail && typeof ti.command === 'string' && pendingApplyPatch(tail, ti.command)) p.hook_patch = true;
     // HEAVY-LOCK-SINGLE-FILE-DENIAL-198: a Codex hook carries no cwd. The heavy lock reads a
     // relative script against the folder the call runs in: its workdir, else the turn's cwd as
     // Codex records it, else the agent's folder.
@@ -2229,6 +2235,13 @@ export class HookServer {
     return HookServer.withHeavyFiles(await HookServer.heavyReadAhead(run), run);
   }
 
+  /** HEAVY-LOCK-CODEX-APPLYPATCH-AS-BASH: a Codex PreToolUse for an apply_patch: an edit, which the
+   *  heavy lock neither classifies nor holds. The mark is set from the rollout by the MCP hook;
+   *  one that arrives over any other transport is ignored. */
+  private static isPatchHook(p: HookPayload): boolean {
+    return p.hook_patch === true && p.transport === 'mcp' && p.hook_event_name === 'PreToolUse';
+  }
+
   /** The classification handle() will make for this hook (the PreToolUse of a call, its rollout
    *  hints when a degraded Codex hook carries no input, the PostToolUse of a provisional hold), or
    *  null when it will make none. */
@@ -2236,6 +2249,7 @@ export class HookServer {
     const lock = this.heavyLock;
     const agentId = p.agent_id;
     if (!lock || !agentId) return null;
+    if (HookServer.isPatchHook(p)) return null;
     if (p.hook_event_name === 'PreToolUse') {
       return () => {
         const ctx = HookServer.heavyCtxOf(p);
@@ -2808,7 +2822,7 @@ export class HookServer {
     // machine's heavy-job slots, or is DENIED naming the holders. Every provider reaches this deny
     // (Claude http, Codex mcp, the AGY shim's deny translation). A subagent's call counts as its
     // agent's. Settings "Heavy jobs at once" = Off makes this do nothing.
-    if (event === 'PreToolUse' && agentId && this.heavyLock) {
+    if (event === 'PreToolUse' && agentId && this.heavyLock && !HookServer.isPatchHook(p)) {
       // Jim N1: a DEGRADED Codex hook (rebuilt from the rollout tail) may carry no tool input:
       // it cannot be classified, so it is allowed and logged.
       const scripts = HookServer.heavyCtxOf(p);
