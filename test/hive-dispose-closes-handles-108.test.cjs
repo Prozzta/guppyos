@@ -410,3 +410,131 @@ test('a route pass whose read of an AGED half-written outbox file was open at di
   assert.deepEqual(timers, [], 'and armed no retry timer');
   deletes(home);
 });
+
+/**
+ * HIVE-DISPOSE-APPENDLOG-AFTER-DISPOSE-108, the whole defect (Jim's audit of the test above): a
+ * route pass awaits file work at several places, and dispose() can land during any of them. When
+ * the awaited call returns or fails, the pass carries on: it rejects a valid mail, delivers a
+ * notice, archives, and logs, which reopens hive/log.jsonl in a folder that is about to be deleted.
+ * One test per await below. Each holds that one call open across dispose(), then lets it finish.
+ * No clock decides anything: the order is forced by the gate.
+ */
+const logRows = (home) => {
+  const f = path.join(home, 'hive', 'log.jsonl');
+  return (fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : '').split('\n').filter(Boolean);
+};
+const rowKind = (line) => { try { const r = JSON.parse(line); return [r.kind, r.stage ?? r.action].filter(Boolean).join('/'); } catch { return line; } };
+
+/** A shut-down floor, a second manager over it, and one file in god-1's outbox. */
+async function passRig(t, payload) {
+  const { home, hive } = await floor();
+  await shutDown(hive);
+  const timers = [];
+  const cold = new HiveManager(() => home, () => true, { setTimeout: (fn, ms) => { timers.push(ms); return null; } });
+  const undo = [];
+  t.after(async () => { for (const u of undo) u(); cold.dispose(); await cold.drainReads(); });
+  const outbox = path.resolve(path.join(cold.agentDir('god-1'), 'outbox'));
+  fs.mkdirSync(path.join(outbox, '.sent'), { recursive: true });
+  const file = path.join(outbox, 'note.json');
+  fs.writeFileSync(file, JSON.stringify(payload));
+  const inboxOf = (id) => path.resolve(path.join(cold.agentDir(id), 'inbox'));
+  const inboxes = () => ['god-1', 'andy-1'].flatMap((id) => {
+    try { return fs.readdirSync(inboxOf(id)).filter((f) => f.endsWith('.json')).map((f) => `${id}/${f}`); } catch { return []; }
+  }).sort();
+  /**
+   * Replaces fs.promises[name] for the paths `match` picks, once arm() is called. The call waits at
+   * the gate. With `failWith` the first held call then fails with that code (a locked file)
+   * instead of running.
+   */
+  const hold = (name, match, failWith) => {
+    const real = fs.promises[name];
+    const g = gate();
+    let armed = false; let failed = false;
+    fs.promises[name] = function heldCall(p, ...rest) {
+      if (!armed || !match(path.resolve(String(p)))) return real.call(fs.promises, p, ...rest);
+      return g.through(() => {
+        if (failWith && !failed) { failed = true; throw Object.assign(new Error(`${failWith}: locked by the test`), { code: failWith }); }
+        return real.call(fs.promises, p, ...rest);
+      });
+    };
+    undo.push(() => { g.release(); fs.promises[name] = real; });
+    return { g, arm() { armed = true; } };
+  };
+  /** Starts a pass, waits for it at the gate, disposes, then lets the held call finish. */
+  const disposeWhileHeld = async (h, what) => {
+    h.arm();
+    const pass = cold.routeOnce([outbox]).then(() => null, (e) => e);
+    await reached(h.g, what);
+    cold.stopLedgerGuard(); cold.dispose();
+    assert.deepEqual(openUnder(home), [], 'dispose() closed everything while the pass was held');
+    const before = { rows: logRows(home), inboxes: inboxes() };
+    h.g.release();
+    await cold.drainReads();
+    const ended = await pass;
+    assert.ok(ended === null || disposed(ended), `the pass ends quietly or with HiveDisposedError: ${ended}`);
+    return { before, after: { rows: logRows(home), inboxes: inboxes() } };
+  };
+  /** What every cell asks: after dispose() the pass wrote no row, opened nothing, armed nothing. */
+  const quiet = (r) => {
+    assert.deepEqual(r.after.rows.slice(r.before.rows.length).map(rowKind), [], 'the pass that resumed after dispose() wrote log rows');
+    assert.deepEqual(openUnder(home), [], 'the pass that resumed after dispose() left a file open in the folder');
+    assert.deepEqual(timers, [], 'and it armed no timer');
+  };
+  return { home, cold, outbox, file, inboxOf, hold, disposeWhileHeld, quiet };
+}
+const MAIL = { to: 'andy-1', act: 'inform', subject: 'Build is green', body: 'all 12 checks passed' };
+
+test('a route pass whose read of a COMPLETE outbox file was open at dispose() does not reject the mail: it stays in outbox/, no notice, no log row, nothing open', async (t) => {
+  const rig = await passRig(t, MAIL);
+  const r = await rig.disposeWhileHeld(rig.hold('readFile', (p) => p === rig.file), 'the route pass reading the complete outbox file');
+  assert.equal(fs.existsSync(path.join(rig.outbox, '.sent', 'bad-note.json')), false, 'a valid mail was rejected (archived as bad-) by a disposed manager');
+  assert.equal(fs.existsSync(rig.file), true, 'the mail is still in outbox/, to be read again on the next start');
+  assert.deepEqual(r.after.inboxes, r.before.inboxes, 'a disposed manager delivered a notice into an inbox');
+  rig.quiet(r);
+  deletes(rig.home);
+});
+
+test('a route pass held at its listing of the outbox across dispose() does no archive work when the listing returns', async (t) => {
+  const rig = await passRig(t, MAIL);
+  // A first, live pass delivers the mail but finds the file locked, so it is left in outbox/ with
+  // its archive owed. The next pass owes only that rename, with no read in front of it.
+  const lock = rig.hold('rename', (p) => p === rig.file, 'EBUSY');
+  lock.g.release(); lock.arm();
+  await rig.cold.routeOnce([rig.outbox]);
+  assert.equal(fs.existsSync(rig.file), true, 'control: the delivered file is still in outbox/, its archive owed');
+  assert.ok(logRows(rig.home).some((l) => rowKind(l) === 'outbox-archive-failed'), 'control: the live pass reported the held archive');
+  const r = await rig.disposeWhileHeld(rig.hold('readdir', (p) => p === rig.outbox), 'the route pass listing the outbox');
+  assert.equal(fs.existsSync(rig.file), true, 'a disposed manager archived the file it found in the listing');
+  rig.quiet(r);
+  deletes(rig.home);
+});
+
+test('a route pass held at an inbox write across dispose() does no delivery bookkeeping when the write lands', async (t) => {
+  const rig = await passRig(t, MAIL);
+  const inbox = rig.inboxOf('andy-1') + path.sep;
+  const r = await rig.disposeWhileHeld(rig.hold('writeFile', (p) => p.startsWith(inbox)), 'the route pass writing the mail into the inbox');
+  rig.quiet(r);
+  deletes(rig.home);
+});
+
+test('a route pass held at its delivery-record append across dispose() logs nothing when the append fails', async (t) => {
+  const rig = await passRig(t, MAIL);
+  const r = await rig.disposeWhileHeld(rig.hold('appendFile', (p) => path.basename(p) === 'outbox-dedup.jsonl', 'EBUSY'), 'the route pass appending its delivery record');
+  rig.quiet(r);
+  deletes(rig.home);
+});
+
+test('a route pass held at the archive rename of a delivered file across dispose() logs nothing when the rename fails', async (t) => {
+  const rig = await passRig(t, MAIL);
+  const r = await rig.disposeWhileHeld(rig.hold('rename', (p) => p === rig.file, 'EBUSY'), 'the route pass archiving the delivered file');
+  rig.quiet(r);
+  deletes(rig.home);
+});
+
+test('a route pass held at the bad- rename of a rejected file across dispose() sends no reject notice and logs nothing', async (t) => {
+  const rig = await passRig(t, { ...MAIL, act: 'shout' });   // parses, but no such act: rejected as unroutable
+  const r = await rig.disposeWhileHeld(rig.hold('rename', (p) => p === rig.file), 'the route pass moving the rejected file aside');
+  assert.deepEqual(r.after.inboxes, r.before.inboxes, 'a disposed manager delivered a reject notice into an inbox');
+  rig.quiet(r);
+  deletes(rig.home);
+});
