@@ -860,7 +860,8 @@ test('PIN: against the REAL test directory discovery is root tests plus only fol
   // PTY-CONHOST-LEAK-NATIVE: + 1 (pty-no-pause-pin). 658 + 1 = 659 (root test/*.test.cjs 617).
   // FLAKE-FS-REMOVE-GAP-RACE-CHILD-FAILED-108: + 1 (fs-remove-gap-report). 659 + 1 = 660 (root test/*.test.cjs 618).
   // HEAVY-LOCK-CODEX-APPLYPATCH-AS-BASH: + 1 (heavy-lock/heavy-lock-codex-applypatch-108). 660 + 1 = 661 (root test/*.test.cjs 618).
-  assert.equal(files.length, 661,`the focused suite must retain its pre-fold file count, got ${files.length}`);
+  // NODEPTY-CONSOLE-LIST-KILL-SIBLINGS: + 1 (nodepty-console-list-kill). 661 + 1 = 662 (root test/*.test.cjs 619).
+  assert.equal(files.length, 662,`the focused suite must retain its pre-fold file count, got ${files.length}`);
   assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
   assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');
   assert.ok(files.includes(path.join('start-fixes-163', 'start-fixes-163-boot-submit.test.cjs')), 'the start-fixes feature folder is included');
