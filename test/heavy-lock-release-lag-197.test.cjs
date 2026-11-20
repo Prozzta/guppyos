@@ -335,25 +335,34 @@ async function liveRelease(t, o) {
   // starts at once. It was one spawnSync after another, so this process could not see the shell's
   // exit until the last taskkill returned, and runMs measured the kill tool under load, not the job.
   const kills = [];
+  // Resolves when every kill has ended (or there was nothing to kill), so the caller reads whole records.
+  let killsOver = () => {};
+  const killsDone = o.kill ? new Promise((r) => { killsOver = r; }) : Promise.resolve();
   if (o.kill) {
     setTimeout(() => {
       let out = '';
       const l = spawn(exe, ['list', id], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
       l.stdout.on('data', (d) => { out += d; });
-      l.on('error', () => { /* no list: no kill, and the cell's exit-code check says so */ });
+      l.on('error', () => { killsOver(); /* no list: no kill, and the cell's exit-code check says so */ });
       l.on('close', () => {
+        const pids = [];
         for (const line of out.split(/\r?\n/).filter(Boolean)) {
-          let pid;
-          try { pid = JSON.parse(line).pid; } catch { continue; }
-          const k = { pid, startedAt: Date.now(), endedAt: null };
+          try { pids.push(JSON.parse(line).pid); } catch { /* not a row */ }
+        }
+        if (!pids.length) killsOver();
+        for (const pid of pids) {
+          const k = { pid, startedAt: null, endedAt: null };
           kills.push(k);
+          const end = () => { if (k.endedAt === null) k.endedAt = Date.now(); if (kills.every((x) => x.endedAt !== null)) killsOver(); };
           const go = () => {
             const tk = spawn('taskkill', ['/F', '/PID', String(pid)], { stdio: 'ignore', windowsHide: true });
-            tk.on('error', () => { k.endedAt = Date.now(); });
-            tk.on('exit', () => { k.endedAt = Date.now(); });
+            tk.on('error', end);
+            tk.on('exit', end);
           };
-          // o.slowKill: the kill tool takes this long per process, as taskkill does on a loaded machine
-          if (o.slowKill) setTimeout(go, o.slowKill); else go();
+          // One kill, from its start to the tool's exit. o.slowKill: the kill tool takes this long
+          // per process, as taskkill does on a loaded machine.
+          const kill = () => { k.startedAt = Date.now(); if (o.slowKill) setTimeout(go, o.slowKill); else go(); };
+          kill();
         }
       });
     }, o.kill);
@@ -363,6 +372,7 @@ async function liveRelease(t, o) {
   const deadline = exitAt + 6_000;
   while (lock.snapshot().length && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
   const rel = rows.find((r) => r.kind === 'heavy-lock' && r.action === 'release');
+  await killsDone;
   return { lagMs: rel ? rel.ts - exitAt : null, runMs: exitAt - t0, heldMs: rel ? rel.heldMs : null, reason: rel ? rel.reason : null, rows, code: exit.code, signal: exit.signal, kills };
 }
 
@@ -373,7 +383,7 @@ const KILLED_EXIT = 1;
 
 /** The shell ended BECAUSE it was killed: the fact `runMs < 10 s` stood in for. */
 function assertKilled(r, what) {
-  assert.ok(r.kills.length > 0, `${what}: THE JOB LISTED ITS PROCESSES AND EACH WAS KILLED (none listed)`);
+  assert.ok(r.kills.length > 0, `${what}: THE JOB LISTED ITS PROCESSES AND A KILL WAS SENT TO EACH (none listed)`);
   assert.equal(r.signal, null, `${what}: the shell's exit carries no signal`);
   assert.equal(r.code, KILLED_EXIT, `${what}: THE KILL ENDED THE JOB (exit code ${r.code}; a killed shell reports ${KILLED_EXIT}, one that ran out on its own reports 0)`);
 }
@@ -488,7 +498,8 @@ test('LIVE: a kill tool that is slow under load is not read as a job the kill di
   t.diagnostic(`slow kill: ran ${r.runMs} ms, held ${r.heldMs} ms, freed ${r.lagMs} ms after the exit; shell exit code ${r.code}, signal ${r.signal}, ${r.kills.length} killed`);
   assertKilled(r, 'slow kill');
   // the kills run together: every one had started before the first one ended
-  const firstEnd = Math.min(...r.kills.map((k) => k.endedAt ?? Infinity));
+  assert.ok(r.kills.every((k) => k.startedAt !== null && k.endedAt !== null), `EVERY KILL STARTED AND ENDED: ${JSON.stringify(r.kills)}`);
+  const firstEnd = Math.min(...r.kills.map((k) => k.endedAt));
   assert.ok(r.kills.every((k) => k.startedAt <= firstEnd), `THE KILLS RUN TOGETHER, not one after another: ${JSON.stringify(r.kills)}`);
   assertFreed(r, 'slow kill');
 });
