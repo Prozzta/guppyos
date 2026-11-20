@@ -372,11 +372,14 @@ async function liveRelease(t, o) {
   }
   const exit = await new Promise((r) => sh.on('exit', (code, signal) => r({ at: Date.now(), code, signal })));
   const exitAt = exit.at;
-  const deadline = exitAt + 6_000;
+  // FLAKE-LAG197-NOPORT-KILL-FREE-108: the job ends with its LAST process, and the kills run together, so
+  // that can be well after the shell's exit. The 6 s window opens at the job's end, not the shell's.
+  await killsDone;
+  const jobEndAt = Math.max(exitAt, ...kills.map((k) => k.endedAt ?? 0));
+  const deadline = jobEndAt + 6_000;
   while (lock.snapshot().length && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
   const rel = rows.find((r) => r.kind === 'heavy-lock' && r.action === 'release');
-  await killsDone;
-  return { lagMs: rel ? rel.ts - exitAt : null, runMs: exitAt - t0, heldMs: rel ? rel.heldMs : null, reason: rel ? rel.reason : null, rows, code: exit.code, signal: exit.signal, kills, shellPid: sh.pid };
+  return { lagMs: rel ? rel.ts - exitAt : null, afterEndMs: rel ? rel.ts - jobEndAt : null, exitAt, jobEndAt, runMs: exitAt - t0, heldMs: rel ? rel.heldMs : null, reason: rel ? rel.reason : null, rows, code: exit.code, signal: exit.signal, kills, shellPid: sh.pid };
 }
 
 // What this process reads from a Git Bash shell that taskkill /F ended: exit code 1, no signal.
@@ -391,10 +394,16 @@ function assertKilled(r, what) {
   assert.equal(r.code, KILLED_EXIT, `${what}: THE KILL ENDED THE JOB (exit code ${r.code}; a killed shell reports ${KILLED_EXIT}, one that ran out on its own reports 0)`);
 }
 
+/** Every kill, from the shell's exit: pid, start, end (ms), so a red says which process was late. */
+function killsText(r) {
+  return r.kills.map((k) => `${k.pid}${k.pid === r.shellPid ? '(shell)' : ''}: ${k.startedAt === null ? '?' : k.startedAt - r.exitAt}..${k.endedAt === null ? '?' : k.endedAt - r.exitAt}`).join(', ');
+}
+
 function assertFreed(r, what) {
-  assert.ok(r.lagMs !== null, `${what}: THE SLOT IS FREED WITHIN 2 S OF THE JOB'S EXIT (not freed 6 s after it)`);
+  const kills = r.kills.length ? `; kills (ms from the shell's exit) ${killsText(r)}; the job ended ${r.jobEndAt - r.exitAt} ms after the shell` : '';
+  assert.ok(r.afterEndMs !== null, `${what}: THE SLOT IS FREED WITHIN 2 S OF THE JOB'S EXIT (not freed 6 s after the job's last process ended${kills})`);
   assert.ok(r.lagMs >= 0, `${what}: THE SLOT IS NOT RELEASED BEFORE THE JOB EXITS (released ${r.lagMs} ms before it)`);
-  assert.ok(r.lagMs < 2_000, `${what}: THE SLOT IS FREED WITHIN 2 S OF THE JOB'S EXIT (freed ${r.lagMs} ms after)`);
+  assert.ok(r.afterEndMs < 2_000, `${what}: THE SLOT IS FREED WITHIN 2 S OF THE JOB'S EXIT (freed ${r.afterEndMs} ms after the job's end${kills})`);
   assert.equal(r.reason, 'job-exit');
 }
 
@@ -479,14 +488,14 @@ test('LIVE: a failed gate (exit 1) frees the slot within 2 s', { skip: LIVE_SKIP
 
 test('LIVE: a killed job (every process of it ended from outside) frees the slot within 2 s', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
   const r = await liveRelease(t, { body: 'sleep 30', kill: 1_500 });
-  t.diagnostic(`kill: ran ${r.runMs} ms, held ${r.heldMs} ms, freed ${r.lagMs} ms after the exit; shell exit code ${r.code}, signal ${r.signal}, ${r.kills.length} killed`);
+  t.diagnostic(`kill: ran ${r.runMs} ms, held ${r.heldMs} ms, freed ${r.lagMs} ms after the exit; shell exit code ${r.code}, signal ${r.signal}, ${r.kills.length} killed (${killsText(r)}); the job ended ${r.jobEndAt - r.exitAt} ms after the shell`);
   assertKilled(r, 'kill');
   assertFreed(r, 'kill');
 });
 
 test('LIVE: a killed job frees the slot when completion-port notices are absent', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
   const r = await liveRelease(t, { body: 'sleep 30', kill: 1_500, exe: helper(t, noPortNoticesHelperSource()) });
-  t.diagnostic(`no-port kill: ran ${r.runMs} ms, held ${r.heldMs} ms, freed ${r.lagMs} ms after the exit; shell exit code ${r.code}, signal ${r.signal}, ${r.kills.length} killed`);
+  t.diagnostic(`no-port kill: ran ${r.runMs} ms, held ${r.heldMs} ms, freed ${r.lagMs} ms after the exit; shell exit code ${r.code}, signal ${r.signal}, ${r.kills.length} killed (${killsText(r)}); the job ended ${r.jobEndAt - r.exitAt} ms after the shell`);
   assertKilled(r, 'no-port kill');
   assertFreed(r, 'no-port kill');
   assertWatcherClosed(r, 'no-port kill');
@@ -498,7 +507,7 @@ test('LIVE: a killed job frees the slot when completion-port notices are absent'
 // job. Here the tool is slow on purpose: the job is still killed, and the slot is still freed.
 test('LIVE: a kill tool that is slow under load is not read as a job the kill did not end', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
   const r = await liveRelease(t, { body: 'sleep 30', kill: 1_500, slowKill: 6_000 });
-  t.diagnostic(`slow kill: ran ${r.runMs} ms, held ${r.heldMs} ms, freed ${r.lagMs} ms after the exit; shell exit code ${r.code}, signal ${r.signal}, ${r.kills.length} killed`);
+  t.diagnostic(`slow kill: ran ${r.runMs} ms, held ${r.heldMs} ms, freed ${r.lagMs} ms after the exit; shell exit code ${r.code}, signal ${r.signal}, ${r.kills.length} killed (${killsText(r)}); the job ended ${r.jobEndAt - r.exitAt} ms after the shell`);
   assertKilled(r, 'slow kill');
   // the kills run together: every one had started before the first one ended
   assert.ok(r.kills.every((k) => k.startedAt !== null && k.endedAt !== null), `EVERY KILL STARTED AND ENDED: ${JSON.stringify(r.kills)}`);
@@ -512,7 +521,7 @@ test('LIVE: a kill tool that is slow under load is not read as a job the kill di
 // "not freed" although the slot was freed right after the job's last process ended.
 test('LIVE: a job whose other members are killed long after the shell is freed within 2 s of the last one', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
   const r = await liveRelease(t, { body: 'sleep 30', kill: 1_500, slowOthers: 7_000, exe: helper(t, noPortNoticesHelperSource()) });
-  t.diagnostic(`late kills: ran ${r.runMs} ms, held ${r.heldMs} ms, freed ${r.lagMs} ms after the shell exit; shell exit code ${r.code}, signal ${r.signal}, ${r.kills.length} killed`);
+  t.diagnostic(`late kills: ran ${r.runMs} ms, held ${r.heldMs} ms, freed ${r.lagMs} ms after the shell exit; shell exit code ${r.code}, signal ${r.signal}, ${r.kills.length} killed (${killsText(r)}); the job ended ${r.jobEndAt - r.exitAt} ms after the shell`);
   assertKilled(r, 'late kills');
   assertFreed(r, 'late kills');
 });
