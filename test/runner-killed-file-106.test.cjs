@@ -72,6 +72,38 @@ test('fileTimeLines: one line per file with its start and end, ordered by start;
   assert.deepEqual(runner.fileTimeLines(undefined), []);
 });
 
+test('FLAKE-PERF153 file-times: stderr carries NO per-file line (a healthy file is never named there); runNodeTest hands the lines back', () => {
+  const files = { 'ev.jsonl.starts': [
+    JSON.stringify({ pid: 1, bornMs: Date.parse('2026-01-01T00:00:01.000Z'), file: 'healthy.test.cjs' }),
+    JSON.stringify({ pid: 1, exited: true, endMs: Date.parse('2026-01-01T00:00:02.000Z') }),
+  ].join('\n') };
+  const e = [];
+  const r = runner.runNodeTest({ rel: ['x'], label: '', spawn: () => ({ status: 0 }), cwd: '.', timeoutMs: 5, isTTY: false, env: {},
+    eventsFile: 'ev.jsonl', readFile: (f) => files[f] || '', removeFile: () => {}, watchdog: () => ({ stop: () => {} }),
+    backstop: () => ({ opt: '', env: {}, stop: () => {} }), err: (l) => e.push(l) });
+  assert.doesNotMatch(e.join('\n'), /healthy|file-times/, 'no per-file line on stderr');
+  assert.deepEqual(r.times, ['file-times pid 1 healthy.test.cjs start 2026-01-01T00:00:01.000Z end 2026-01-01T00:00:02.000Z ms 1000']);
+});
+
+test('FLAKE-PERF153 file-times: a FAILING run writes the times file beside the failure file (healthy file included) and logs one pointer naming no test file; a green run writes none', () => {
+  const times = ['file-times pid 1 healthy.test.cjs start A end B ms 1', 'file-times pid 2 killed.test.cjs start A end never ms -'];
+  const run = (failures, fileTimes) => {
+    const written = {}; const lines = [];
+    runner.totals(failures.length ? 1 : 0, { tests: 1, pass: 0, fail: 0, cancelled: 0, skipped: 0, todo: 0 }, 'off', (l) => lines.push(l), failures,
+      { failureFile: () => 'D:/t/run-tests-failures-9.json', writeFailureFile: (p, text) => { written[p] = text; }, fileTimes });
+    return { written, lines };
+  };
+  const bad = run([{ file: 'killed.test.cjs', name: 'x' }], times);
+  assert.deepEqual(Object.keys(bad.written).sort(), ['D:/t/run-tests-failures-9.file-times.txt', 'D:/t/run-tests-failures-9.json']);
+  assert.equal(bad.written['D:/t/run-tests-failures-9.file-times.txt'], `${times.join('\n')}\n`, 'one line per file, the healthy one included');
+  const pointers = bad.lines.filter((l) => /file-times/.test(l));
+  assert.deepEqual(pointers, ['[test-runner] file-times: D:/t/run-tests-failures-9.file-times.txt']);
+  assert.doesNotMatch(pointers[0], /\.test\.cjs/, 'the pointer names no test file');
+  const ok = run([], times);
+  assert.deepEqual(Object.keys(ok.written), [], 'a green run writes no file');
+  assert.doesNotMatch(ok.lines.join('\n'), /file-times/);
+});
+
 test('runNodeTest says the cause on stderr, and never for a file one of the runner\'s own timeouts ended', () => {
   const files = {
     'ev.jsonl.starts': [row({ pid: 11, bornMs: 1000, file: 'victim.test.cjs' }), row({ pid: 12, bornMs: 1000, file: 'unknown.test.cjs' }), row({ pid: 13, bornMs: 1000, file: 'hung.test.cjs' })].join('\n'),

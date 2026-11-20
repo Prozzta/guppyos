@@ -444,13 +444,13 @@ function runGated({ rel, renderRel = [], env, gate, jail = null, spawn, cwd, tim
     err(`[test-runner] per-file jobs are unavailable (${job.why}): a hung file is killed from a process snapshot, which can miss a process born just before the kill (LOAD-FLAKES-178)`);
   }
   const fx = { spawn, cwd, timeoutMs, isTTY, env, readFile, removeFile, watchdog, backstop, jobExe: job.exe, err };
-  const main = rel.length ? runNodeTest({ ...fx, rel, eventsFile, label: '', extraArgs: concurrency < cores ? [`--test-concurrency=${concurrency}`] : [] }) : { res: { status: 0 }, counts: ZERO_COUNTS, failures: [], hung: [] };
-  const render = renderRel.length ? runNodeTest({ ...fx, rel: renderRel, eventsFile: `${eventsFile}.render`, label: 'render lane: ', extraArgs: ['--test-concurrency=1'] }) : { res: { status: 0 }, counts: ZERO_COUNTS, failures: [], hung: [] };
+  const main = rel.length ? runNodeTest({ ...fx, rel, eventsFile, label: '', extraArgs: concurrency < cores ? [`--test-concurrency=${concurrency}`] : [] }) : { res: { status: 0 }, counts: ZERO_COUNTS, failures: [], hung: [], times: [] };
+  const render = renderRel.length ? runNodeTest({ ...fx, rel: renderRel, eventsFile: `${eventsFile}.render`, label: 'render lane: ', extraArgs: ['--test-concurrency=1'] }) : { res: { status: 0 }, counts: ZERO_COUNTS, failures: [], hung: [], times: [] };
   if (gate) log(burstLine(readFile(path.join(gate.dir, 'starts.jsonl')), gate.slots));
   // A child that never started, or was killed by a signal (status null), is a failure, not a pass.
   if (spawnFailed(main.res, '', err) || spawnFailed(render.res, 'render lane: ', err)) {
     if (joinFile) removeFile(joinFile);
-    return totals(1, sumCounts(main.counts, render.counts), 'not run', log, [...main.failures, ...render.failures], { failureFile, writeFailureFile });
+    return totals(1, sumCounts(main.counts, render.counts), 'not run', log, [...main.failures, ...render.failures], { failureFile, writeFailureFile, fileTimes: [...main.times, ...render.times] });
   }
   // A timed-out file fails the run whatever node's own exit code says.
   // TEST-TEMP-HYGIENE: a file that left anything in its temp folder fails the run, as a timed-out one does.
@@ -461,11 +461,11 @@ function runGated({ rel, renderRel = [], env, gate, jail = null, spawn, cwd, tim
   const joinFailed = () => fileJobVerdict({ job, joinFile, strict, readFile, removeFile, log, err });
   if (!perfDir) {
     const n = leaked() + joinFailed();
-    return totals(n && hungCode === 0 ? 1 : hungCode, mergedCounts, 'off', log, mergedFailures, { failureFile, writeFailureFile });
+    return totals(n && hungCode === 0 ? 1 : hungCode, mergedCounts, 'off', log, mergedFailures, { failureFile, writeFailureFile, fileTimes: [...main.times, ...render.times] });
   }
   const lane = runPerfLane({ perfDir, filters, readdir, ...fx, eventsFile: `${eventsFile}.perf`, log });
   const mainCode = leaked() + joinFailed() && hungCode === 0 ? 1 : hungCode;
-  return totals(mainCode !== 0 ? mainCode : lane.code, sumCounts(mergedCounts, lane.counts), lane.state, log, [...mergedFailures, ...lane.failures], { failureFile, writeFailureFile });
+  return totals(mainCode !== 0 ? mainCode : lane.code, sumCounts(mergedCounts, lane.counts), lane.state, log, [...mergedFailures, ...lane.failures], { failureFile, writeFailureFile, fileTimes: [...main.times, ...render.times, ...lane.times] });
 }
 
 /** AV-FILEJOB-FLAG: a run that must keep every file in a job of its own: GUPPY_FILE_JOB_STRICT=1, or
@@ -547,7 +547,7 @@ function runNodeTest({ rel, extraArgs = [], label, spawn, cwd, timeoutMs, isTTY,
   // timeout of the runner's ended: it was killed from outside (or crashed too hard to run its exit
   // hook). node --test shows only "exitCode: 1" for it, so the cause is said here.
   // FLAKE-PERF153: when each file started and ended, so a failure can be lined up with its neighbours.
-  if (backstop) for (const l of fileTimeLines(readFile(startsFile))) err(`[test-runner] ${label}${l}`);
+  const times = backstop ? fileTimeLines(readFile(startsFile)).map((l) => `${label}${l}`) : [];
   const lost = backstop ? endedWithoutExit(readFile(startsFile), readFile(`${startsFile}.kills`))
     .filter((l) => !hung.some((h) => path.resolve(h.file) === path.resolve(l.file))) : [];
   removeFile(eventsFile);
@@ -565,7 +565,7 @@ function runNodeTest({ rel, extraArgs = [], label, spawn, cwd, timeoutMs, isTTY,
   }
   for (const r of bsRows) if (r.kill) err(`[test-runner] ${label}${r.message}: ${r.file}`);
   if (hung.length) err(`[test-runner] ${label}${hung.length} test file(s) timed out - the run FAILS (node --test lists them as cancelled, not failed)`);
-  return { res, hung, counts: runCounts(events), failures };
+  return { res, hung, counts: runCounts(events), failures, times };
 }
 
 /**
@@ -623,7 +623,7 @@ function spawnFailed(res, label, err) {
 
 /** CLAIMS-PERF-LANE: every *.perf.cjs, serially (--test-concurrency=1), after the parallel run. */
 function runPerfLane({ perfDir, filters, readdir, spawn, cwd, timeoutMs, isTTY, env, eventsFile, readFile, removeFile, watchdog, backstop = null, jobExe = null, log, err }) {
-  const none = { code: 0, counts: ZERO_COUNTS, state: 'skipped', failures: [] };
+  const none = { code: 0, counts: ZERO_COUNTS, state: 'skipped', failures: [], times: [] };
   if (filters.length) {
     log(`[test-runner] perf lane SKIPPED: a filtered run (${filters.join(', ')}); run the full suite (npm test) for the wall-clock gates`);
     return none;
@@ -641,11 +641,11 @@ function runPerfLane({ perfDir, filters, readdir, spawn, cwd, timeoutMs, isTTY, 
   log(`[test-runner] perf lane: running ${files.length} wall-clock file(s) serially (--test-concurrency=1), after the parallel suite (per-file limit ${timeoutMs} ms)`);
   const rel = files.map((n) => path.join(path.relative(cwd, perfDir) || '.', n));
   const lane = runNodeTest({ rel, extraArgs: ['--test-concurrency=1'], label: 'perf lane ', spawn, cwd, timeoutMs, isTTY, env, eventsFile, readFile, removeFile, watchdog, backstop, jobExe, err });
-  if (spawnFailed(lane.res, 'perf lane ', err)) return { code: 1, counts: lane.counts, state: 'fail', failures: lane.failures };
+  if (spawnFailed(lane.res, 'perf lane ', err)) return { code: 1, counts: lane.counts, state: 'fail', failures: lane.failures, times: lane.times };
   const code = lane.hung.length && lane.res.status === 0 ? 1 : lane.res.status;
   if (code !== 0) err('[test-runner] the perf lane FAILED (a wall-clock gate, measured serially)');
   else log('[test-runner] perf lane passed');
-  return { code, counts: lane.counts, state: code === 0 ? 'pass' : 'fail', failures: lane.failures };
+  return { code, counts: lane.counts, state: code === 0 ? 'pass' : 'fail', failures: lane.failures, times: lane.times };
 }
 
 // CLAIMS-PERF-LANE totals: node --test's own summary counts ('tests N', 'pass N', ...), recorded by
@@ -687,7 +687,8 @@ function failingTests(text) {
 /** Prints the one totals line and returns `code`. Unknown counts print as '?'. */
 function totals(code, counts, laneState, log, failures = [], {
   failureFile = () => path.join(os.tmpdir(), `run-tests-failures-${process.pid}-${Date.now()}.json`),
-  writeFailureFile = (p, text) => fs.writeFileSync(p, text, 'utf8')
+  writeFailureFile = (p, text) => fs.writeFileSync(p, text, 'utf8'),
+  fileTimes = []
 } = {}) {
   const n = (k) => (counts[k] === null ? '?' : String(counts[k]));
   if (failures.length) {
@@ -697,6 +698,12 @@ function totals(code, counts, laneState, log, failures = [], {
     try {
       writeFailureFile(output, `${JSON.stringify(failures, null, 2)}\n`);
       log(`[test-runner] failing-test list written to ${output}`);
+      // FLAKE-PERF153: when each file started and ended, in a file beside the failure file (never on stderr: it names healthy files).
+      if (fileTimes.length) {
+        const timesPath = `${output.replace(/\.json$/, '')}.file-times.txt`;
+        writeFailureFile(timesPath, `${fileTimes.join('\n')}\n`);
+        log(`[test-runner] file-times: ${timesPath}`);
+      }
     } catch (e) {
       log(`[test-runner] could not write failing-test list: ${String(e)}`);
     }
@@ -705,7 +712,7 @@ function totals(code, counts, laneState, log, failures = [], {
   return code;
 }
 
-module.exports = { startBackstop, BACKSTOP_PRELOAD, runNodeTest, endedWithoutExit, fileTimeLines,prepareFileJob, pruneFileJobs, FILE_JOB_DIR, FILE_JOB_PRELOAD, fileJobStrict, jobJoinFailures, fileJobVerdict, prepareTempJail, TEMP_JAIL_PRELOAD, tempLeaks, reportTempLeaks,prepareStartGate, startSlots, cappedCores, selfJobRate, HEAVYJOB_HELPER, CPU_RATE_50_PERCENT, START_GATE_PRELOAD, burstLine, selectTestFiles, discoverTestFiles, renderLaneFiles, FEATURE_TEST_DIRS, run, runPerfLane, runCounts, failingTests, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
+module.exports = { startBackstop, BACKSTOP_PRELOAD, runNodeTest, endedWithoutExit, fileTimeLines, totals, prepareFileJob, pruneFileJobs, FILE_JOB_DIR, FILE_JOB_PRELOAD, fileJobStrict, jobJoinFailures, fileJobVerdict, prepareTempJail, TEMP_JAIL_PRELOAD, tempLeaks, reportTempLeaks,prepareStartGate, startSlots, cappedCores, selfJobRate, HEAVYJOB_HELPER, CPU_RATE_50_PERCENT, START_GATE_PRELOAD, burstLine, selectTestFiles, discoverTestFiles, renderLaneFiles, FEATURE_TEST_DIRS, run, runPerfLane, runCounts, failingTests, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
 
 if (require.main === module) {
   const repoRoot = path.resolve(__dirname, '..', '..');
