@@ -206,7 +206,8 @@ if (!WIN) {
   const pristineUtils = builtUtils
     .replace(/ {4}\/\/ GUPPY NODEPTY-PACKAGED-PROOF[\s\S]*?\n {4}if \(guppyBuiltOnly\) \{\n[^\n]*\n {4}\}\n/, '')
     .replace(/ {4}if \(guppyBuiltOnly\) \{\n {8}throw new Error\("Guppy: [^\n]*\n {4}\}\n/, '');
-  const pristineJs = handoffJs.split('\n').filter((l) => !/GUPPY PTY-HOLD-NODEPTY-HANDOFF|this\._rootHandle = connect\.rootHandle;/.test(l)).join('\n');
+  // (PTY-CONHOST-LEAK-NATIVE added the bundled-host exit block; it is taken out whole, by its own words.)
+  const pristineJs = handoffJs.replace(/ {8}else \{\n {12}\/\/ GUPPY PTY-CONHOST-LEAK-NATIVE[\s\S]*?\n {8}\}\n/, '').split('\n').filter((l) => !/GUPPY PTY-HOLD-NODEPTY-HANDOFF|this\._rootHandle = connect\.rootHandle;/.test(l)).join('\n');
 
   // PTY-EARLY-KILL-EPIPE-108: the output worker, and the same with the pinned edits taken back out.
   const builtWorker = fs.readFileSync(path.join(NP, 'lib', 'worker', 'conoutSocketWorker.js'), 'utf8');
