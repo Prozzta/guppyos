@@ -597,7 +597,7 @@ function endedWithoutExit(startsText, killsText = '') {
 
 /**
  * FLAKE-PERF153: one line per test file from the start rows (file-backstop-preload's { pid, bornMs, file })
- * and the exit rows ({ pid, exited, endMs }): "file-times <start ISO> <end ISO | never> <ms> pid <pid> <file>",
+ * and the exit rows ({ pid, exited, endMs }): "file-times pid <pid> <file> start <ISO> end <ISO | never> ms <n | ->" (the file is not last: a line ending in a test path reads as a report of that file),
  * ordered by start. A start with no exit row ends "never" (a killed file); a later start under the same pid
  * is a different file. Tooling only: nothing reads these lines back.
  */
@@ -611,7 +611,7 @@ function fileTimeLines(startsText) {
     const f = { pid: r.pid, file: String(r.file || ''), bornMs: r.bornMs, endMs: null };
     files.push(f); live.set(r.pid, f);
   }
-  return files.sort((a, b) => a.bornMs - b.bornMs).map((f) => `file-times ${new Date(f.bornMs).toISOString()} ${f.endMs === null ? 'never' : new Date(f.endMs).toISOString()} ${f.endMs === null ? '-' : f.endMs - f.bornMs} pid ${f.pid} ${f.file}`);
+  return files.sort((a, b) => a.bornMs - b.bornMs).map((f) => `file-times pid ${f.pid} ${f.file} start ${new Date(f.bornMs).toISOString()} end ${f.endMs === null ? 'never' : new Date(f.endMs).toISOString()} ms ${f.endMs === null ? '-' : f.endMs - f.bornMs}`);
 }
 
 /** A spawn error or a signal death: logged, and true (the run failed). */
