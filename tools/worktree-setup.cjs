@@ -59,6 +59,9 @@ const XTERM_PATCH = 'tools/patch-xterm-webgl-font.cjs';
 const NODE_PTY = path.join('node_modules', 'node-pty');
 const NODE_PTY_PATCH = 'tools/patch-node-pty-root-handle.cjs';
 const NODE_PTY_BINARY = path.join(NODE_PTY, 'build', 'Release', 'conpty.node');
+// What a conpty.node built from the patched source carries: the handoff's import, and the name the
+// close on exit exports (CLOSE_MARKER in tools/node-pty-race-fix-pins.cjs).
+const NODE_PTY_BINARY_MARKS = ['DuplicateHandle', 'guppyClosesPseudoConsoleOnExit'];
 const STAMP = '.worktree-setup.json';
 const MODEL_MANIFEST = 'resources/models/native-memory-manifest.json';
 const MODEL_FETCH = 'scripts/fetch-memory-model.cjs';
@@ -179,7 +182,9 @@ function nodePtyState(root, { platform = process.platform, spawnSyncFn = spawnSy
   const r = spawnSyncFn(process.execPath, [tool, '--check', '--root', np], { encoding: 'utf8', windowsHide: true });
   if (r.status !== 0) return { ok: false, shared, problem: `${NODE_PTY} is not PTY-HOLD-NODEPTY-HANDOFF patched${fix}` };
   const binary = path.join(root, NODE_PTY_BINARY);
-  const rebuilt = fs.existsSync(binary) && fs.readFileSync(binary).includes('DuplicateHandle');
+  // The handoff imports DuplicateHandle; the close on exit (PTY-CONHOST-LEAK-NATIVE) exports a name.
+  const bytes = fs.existsSync(binary) ? fs.readFileSync(binary) : null;
+  const rebuilt = !!bytes && NODE_PTY_BINARY_MARKS.every((mark) => bytes.includes(mark));
   if (!rebuilt) return { ok: false, shared, problem: `${NODE_PTY_BINARY} was not rebuilt from the patched source${fix}` };
   return { ok: true };
 }
@@ -402,7 +407,7 @@ function preflight({ root = REPO, env = process.env, log = (l) => process.stderr
 /** The line run-tests.cjs repeats after its summary on an opted-out run. */
 function optOutLine(ids) { return `[test-runner] INCOMPLETE TREE (opt-out): ${ids.join(', ')}`; }
 
-module.exports = { NATIVES, ADDON, NODE_PTY, NODE_PTY_PATCH, NODE_PTY_BINARY, nodePtyState, MODEL_MANIFEST, MODEL_FETCH, modelState, modelSources, fillModel, modelLevelOutside, STAMP, buildStamp, inspect, optOutLine, sourcesDigest, readStamp, linksUnder, setup, preflight, teardown, localizeXterm, sameSources, sourceDigests, resolvesInside };
+module.exports = { NATIVES, ADDON, NODE_PTY, NODE_PTY_PATCH, NODE_PTY_BINARY, NODE_PTY_BINARY_MARKS, nodePtyState, MODEL_MANIFEST, MODEL_FETCH, modelState, modelSources, fillModel, modelLevelOutside, STAMP, buildStamp, inspect, optOutLine, sourcesDigest, readStamp, linksUnder, setup, preflight, teardown, localizeXterm, sameSources, sourceDigests, resolvesInside };
 
 if (require.main === module) {
   const argv = process.argv.slice(2);

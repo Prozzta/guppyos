@@ -29,7 +29,7 @@ A release has one path: the verified local cut. The Release workflow
      `MUNDER_MODEL_CACHE=<root>/release-cache/models/all-MiniLM-L6-v2 node scripts/fetch-memory-model.cjs`.
      `npm run cut:prune` prints the cache path, and `-- --seed-cache` fills it.
    - `node scripts/release-markers.cjs` on the source tree and again on the build. It must print
-     `ALL 17 MARKERS OK`.
+     `ALL 18 MARKERS OK`.
    - `node tools/patch-node-pty-root-handle.cjs --packaged dist/win-unpacked` on the build
      (`npm run cut:win` runs it). It reads `app.asar` and `app.asar.unpacked` and must print
      `PACKAGED NODE-PTY OK`: the packaged node-pty is the patched build that hands over the root
