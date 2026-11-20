@@ -354,6 +354,36 @@ test('recur: after a job-empty notice whose list kept the job, the exit notice o
   assert.equal(exits(r.told).length, 1, 'A JOB THE LIST KEPT AFTER A JOB-EMPTY NOTICE STILL ENDS ON ITS NEXT EXIT NOTICE (not at the poll)');
 });
 
+// The mark must not outlive a list that said nothing: a FAILED list leaves the job as it was, so
+// the next notice has to be judged (it would otherwise be dropped and only the poll would end it).
+test('recur: a job-empty notice whose list failed does not make later exit notices be ignored', async () => {
+  let n = 0;
+  const r = await jobsRig(C, () => (++n === 1 ? null : []));
+  r.f.emit({ event: 'exit', job: r.id, msg: 4, pid: 0 });
+  await r.clock.tick(0);
+  assert.equal(exits(r.told).length, 0, 'control: a failed list says nothing, the job is not ended');
+  r.f.emit({ event: 'exit', job: r.id, msg: 7, pid: 9 });
+  await r.clock.tick(0);
+  await r.clock.tick(C.HEAVY_JOB_EXIT_CONFIRM_MS);
+  await r.clock.tick(0);
+  assert.equal(exits(r.told).length, 1, 'A LATER NOTICE AFTER A FAILED LIST IS NOT IGNORED (the job ends within the confirm, not at the poll)');
+});
+
+// A notice that lands while the list is out is dropped under the mark. The list was taken before
+// that exit, so it may still name the process: the dropped notice must then be judged after all.
+test('recur: an exit notice that landed while the list was out is judged when that list keeps the job', async () => {
+  const r = await heldListRig(C);
+  r.emit({ event: 'exit', job: r.id, msg: 4, pid: 0 });
+  r.emit({ event: 'exit', job: r.id, msg: 7, pid: 9 });   // lands while the list is out
+  const [answer] = r.pending.splice(0);
+  answer({ ok: true, rows: [{ pid: 9, name: 'node.exe', createdMs: r.clock.now() - 10 }] });   // taken before that exit
+  await r.clock.tick(0);
+  assert.equal(exits(r.told).length, 0, 'control: the list kept the job');
+  await r.clock.tick(C.HEAVY_JOB_EXIT_CONFIRM_MS);
+  await r.answerEmpty();
+  assert.equal(exits(r.told).length, 1, 'A NOTICE DROPPED WHILE THE LIST WAS OUT IS CHECKED AFTER THE LIST KEPT THE JOB (not left to the poll)');
+});
+
 // ─── LIVE: the real helper, real jobs, the real lock ────────────────────────────────────────
 
 const CSC = path.join(process.env.WINDIR || 'C:\\Windows', 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe');
