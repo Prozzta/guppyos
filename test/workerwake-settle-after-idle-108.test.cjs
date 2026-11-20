@@ -218,3 +218,22 @@ test('a late idle older than an edge that is NOT the settle\'s is still refused 
   assert.equal(late.c.beat('p', T0 + 9000 + PROVIDER_IDLE_CONFIRM_MS), null, 'the settle\'s epoch is over: nothing was deferred');
   assert.equal(late.c.state('p').lifecycle, 'active');
 });
+
+test('an edge that is not the settle\'s is not taken for it when it is stamped in the SAME millisecond', () => {
+  // A compaction was open when the prompt went in, and a second one opens in the very millisecond
+  // of the settle. The edge is now that compaction's, with the settle's own stamp: telling the two
+  // apart by their stamps alone takes the compaction's edge for the settle's.
+  const { c, claim } = claimed();
+  c.noteHook('p', 'PreCompact', undefined, T0 + 100);
+  c.noteProviderStatus('p', 'running', T0 + 300);
+  c.settle(claim, 'COMMITTED', SETTLE, true);
+  c.noteHook('p', 'PreCompact', undefined, SETTLE);
+  const s = c.agents.get('p');   // the record itself: state() does not show the edge
+  assert.equal(s.lifecycle, 'active');
+  assert.equal(s.activeSince, SETTLE, 'the premise: the compaction\'s edge carries the settle\'s stamp');
+  assert.equal(s.compactEpoch, true, 'the premise: the open epoch is the compaction\'s');
+  assert.equal(c.noteProviderStatus('p', 'idle', T0 + 1000), false, 'older than the edge: it closes nothing by itself');
+  assert.equal(c.beat('p', SETTLE + PROVIDER_IDLE_CONFIRM_MS), null, 'NOT DEFERRED: the reading says nothing about the compaction this edge opened');
+  assert.equal(c.beat('p', SETTLE + 20_000), null);
+  assert.equal(c.state('p').lifecycle, 'active', 'the compaction is still open');
+});
