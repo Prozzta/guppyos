@@ -337,6 +337,23 @@ test('recur: a process-exit notice that lands after the job-empty notice does no
   assert.equal(exits(r.told).length, 1, 'A LATE PROCESS-EXIT NOTICE AFTER THE JOB-EMPTY NOTICE DOES NOT RESTART THE CONFIRM');
 });
 
+// The other side of that: once a list has KEPT the job after a job-empty notice, the notices
+// count again. The exit of the process the list named must end the job within the confirm, and
+// not leave it to the poll (HEAVY_JOB_POLL_MS).
+test('recur: after a job-empty notice whose list kept the job, the exit notice of the process left ends the job within the confirm', async () => {
+  let alive = true;
+  const r = await jobsRig(C, (id, clock) => (alive ? [{ pid: 9, name: 'node.exe', createdMs: clock.now() - 10 }] : []));
+  r.f.emit({ event: 'exit', job: r.id, msg: 4, pid: 0 });
+  await r.clock.tick(0);
+  assert.equal(exits(r.told).length, 0, 'control: the job is kept while its list names a process of the call');
+  alive = false;
+  r.f.emit({ event: 'exit', job: r.id, msg: 7, pid: 9 });
+  await r.clock.tick(0);
+  await r.clock.tick(C.HEAVY_JOB_EXIT_CONFIRM_MS);
+  await r.clock.tick(0);
+  assert.equal(exits(r.told).length, 1, 'A JOB THE LIST KEPT AFTER A JOB-EMPTY NOTICE STILL ENDS ON ITS NEXT EXIT NOTICE (not at the poll)');
+});
+
 // ─── LIVE: the real helper, real jobs, the real lock ────────────────────────────────────────
 
 const CSC = path.join(process.env.WINDIR || 'C:\\Windows', 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe');
