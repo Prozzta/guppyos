@@ -42,6 +42,21 @@ const IMPLS = ['sync', 'async', 'reaper'];
 const guppy = require('./tools/installed-guppy.cjs').installedGuppy();
 const exe = guppy.exe;
 
+/**
+ * The asserts of a row stop at the first one that fails, so a dead child in one caller would hide
+ * a file loss counted by another child or another caller. Before a failed row throws, this prints
+ * what every caller counted: children with no result, runs, losses, links, landed swaps, removals.
+ * It only adds output; the error thrown is the assert's own.
+ */
+async function shown(t, res, checks) {
+  try { return await checks(); } catch (err) {
+    const line = `FULL TOTALS (${res && res.runtime}): ${JSON.stringify(res && res.totals)}`;
+    t.diagnostic(line);
+    console.log(line);
+    throw err;
+  }
+}
+
 function clean(res, runtime) {
   assert.match(String(res.runtime), runtime);
   for (const impl of IMPLS) {
@@ -65,17 +80,21 @@ async function under(file, fn) {
 // The suite also runs with Electron as Node as the test process: "this runtime" is then that Electron.
 const HERE = process.versions.electron ? /^Electron .* as Node$/ : /^Node /;
 
-test(`${RACERS * RUNS} raced deletes by each caller lose nothing (this runtime)`, async () => {
-  clean(await under(null, () => many(IMPLS, RACERS, RUNS, 300)), HERE);
+test(`${RACERS * RUNS} raced deletes by each caller lose nothing (this runtime)`, async (t) => {
+  const res = await under(null, () => many(IMPLS, RACERS, RUNS, 300));
+  await shown(t, res, () => clean(res, HERE));
 });
 
-test(`${RACERS * RUNS} raced deletes by each caller lose nothing (the installed Electron as Node)`, { skip: guppy.skip }, async () => {
-  clean(await under(exe, () => many(IMPLS, RACERS, RUNS, 300)), /^Electron .* as Node$/);
+test(`${RACERS * RUNS} raced deletes by each caller lose nothing (the installed Electron as Node)`, { skip: guppy.skip }, async (t) => {
+  const res = await under(exe, () => many(IMPLS, RACERS, RUNS, 300));
+  await shown(t, res, () => clean(res, /^Electron .* as Node$/));
 });
 
-test('CONTROL: the old JS walk loses the victim\'s files to links that appear during the walk (planted or swapped in), so the race has teeth', async () => {
+test('CONTROL: the old JS walk loses the victim\'s files to links that appear during the walk (planted or swapped in), so the race has teeth', async (ctx) => {
   const res = await under(null, () => many(['jswalk'], 8, 20000, 240));
-  const t = res.totals.jswalk;
-  assert.equal(t.failed, 0, JSON.stringify(t.errors));
-  assert.ok(t.losses > 0, `the e074a677 walk lost nothing in ${t.runs} runs: no link the agent planted (${t.planted}) or swapped in (${t.swapped}) appeared during a walk`);
+  await shown(ctx, res, () => {
+    const t = res.totals.jswalk;
+    assert.equal(t.failed, 0, JSON.stringify(t.errors));
+    assert.ok(t.losses > 0, `the e074a677 walk lost nothing in ${t.runs} runs: no link the agent planted (${t.planted}) or swapped in (${t.swapped}) appeared during a walk`);
+  });
 });
