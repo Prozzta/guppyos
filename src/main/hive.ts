@@ -4271,7 +4271,9 @@ export class HiveManager {
    *  entry, its wake and the outbox file's rename to .sent. */
   routeOnce(dirtyOutboxes?: Iterable<string>): Promise<number> {
     const dirty = dirtyOutboxes === undefined ? undefined : [...dirtyOutboxes];
-    return this.enqueueRoutePass(() => dirty);
+    // HIVE-DISPOSE-INFLIGHT-REARM: asked when the pass STARTS, so a pass asked for after dispose()
+    // and one queued before it behind an earlier pass both do nothing until reopen().
+    return this.enqueueRoutePass(() => (this.readsRefused ? null : dirty));
   }
 
   /** Chain one pass behind the earlier ones. `take` runs when the pass starts and names its

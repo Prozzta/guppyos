@@ -291,3 +291,40 @@ test('drainReads() does not resolve while a route pass is in flight, even with n
   assert.deepEqual(openUnder(home), [], 'nothing is open once the wait has ended');
   deletes(home);
 });
+
+test('routeOnce() on a disposed manager runs no pass: neither one asked after dispose() nor one queued before it', async (t) => {
+  const { home, hive } = await floor();
+  await shutDown(hive);
+  const cold = new HiveManager(() => home, () => true);
+  const outbox = path.resolve(path.join(cold.agentDir('god-1'), 'outbox'));
+  fs.mkdirSync(outbox, { recursive: true });
+  const real = fs.promises.readdir;
+  let g = gate(); g.release();
+  let lists = 0;
+  fs.promises.readdir = function countedOutboxList(p, ...rest) {
+    if (path.resolve(String(p)) !== outbox) return real.call(fs.promises, p, ...rest);
+    lists++;
+    return g.through(() => real.call(fs.promises, p, ...rest));
+  };
+  t.after(async () => { g.release(); fs.promises.readdir = real; cold.dispose(); await cold.drainReads(); });
+
+  // Control: a live pass lists the outbox, so "not listed" below is a real observation.
+  await cold.routeOnce([outbox]);
+  assert.equal(lists, 1, 'control: a live pass lists the outbox once');
+
+  g = gate(); lists = 0;
+  const first = cold.routeOnce([outbox]).then(() => null, (e) => e);
+  await reached(g, 'the first pass listing the outbox');
+  const queued = cold.routeOnce([outbox]);            // waits behind the held pass
+  cold.stopLedgerGuard(); cold.dispose();
+  const after = cold.routeOnce([outbox]);             // asked for on a disposed manager
+  g.release();
+  await cold.drainReads();
+  await first;
+  assert.equal(await queued, 0, 'the pass queued before dispose() delivers nothing');
+  assert.equal(await after, 0, 'the pass asked for after dispose() delivers nothing');
+  assert.equal(lists, 1, 'a route pass ran on a disposed manager: it listed the outbox');
+  assert.deepEqual(openUnder(home), [], 'nothing is open in the folder');
+  await assert.rejects(cold.__revalidateAuthoritiesForTests(), /fallback is not armed/, 'and the fallback timer is off');
+  deletes(home);
+});
