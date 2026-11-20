@@ -314,6 +314,29 @@ test('recur: a job-empty notice that lands while a confirm list is out does not 
   assert.equal(exits(r.told).length, 1, 'THE JOB IS OVER ONCE THE LIST SAYS SO: no second confirm wait after a job-empty notice');
 });
 
+// The list stays the judge. A job-empty notice only removes the wait: a list answer that still
+// names a process of the call (the notice was for an earlier moment, or it was wrong) keeps the job.
+test('recur: a job-empty notice does not end a job whose list still names a process of the call', async () => {
+  const r = await jobsRig(C, (id, clock) => [{ pid: 9, name: 'node.exe', createdMs: clock.now() - 10 }]);
+  r.f.emit({ event: 'exit', job: r.id, msg: 4, pid: 0 });
+  await r.clock.tick(0);
+  assert.equal(exits(r.told).length, 0, 'A JOB-EMPTY NOTICE IS STILL CHECKED BY A LIST: a process of the call left keeps the job');
+  await r.clock.tick(C.HEAVY_JOB_EXIT_CONFIRM_MS);
+  assert.equal(exits(r.told).length, 0, 'A JOB-EMPTY NOTICE IS STILL CHECKED BY A LIST: the job is not ended later either');
+  assert.ok(r.f.lists() >= 1, 'control: the job was listed');
+});
+
+// Windows does not order the notices: the exit notice of the last process (msg 7) can be read
+// after the job-empty notice (msg 4). It must not bring the wait back.
+test('recur: a process-exit notice that lands after the job-empty notice does not start the wait again', async () => {
+  const r = await heldListRig(C);
+  r.emit({ event: 'exit', job: r.id, msg: 4, pid: 0 });
+  r.emit({ event: 'exit', job: r.id, msg: 7, pid: 5 });   // the late notice of the last process
+  await r.answerEmpty();
+  await r.answerEmpty();   // a second list, if the product asks for one at once, is answered too
+  assert.equal(exits(r.told).length, 1, 'A LATE PROCESS-EXIT NOTICE AFTER THE JOB-EMPTY NOTICE DOES NOT RESTART THE CONFIRM');
+});
+
 // ─── LIVE: the real helper, real jobs, the real lock ────────────────────────────────────────
 
 const CSC = path.join(process.env.WINDIR || 'C:\\Windows', 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe');
