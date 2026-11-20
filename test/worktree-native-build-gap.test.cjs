@@ -343,8 +343,11 @@ test('resolvesInside sees through links; an @xterm junction out of the tree is r
 // SUITE-LOAD-FLAKES-106H: a tree whose node_modules is a junction into an older tree ran the suite
 // on a node-pty without the PTY-HOLD-NODEPTY-HANDOFF patch. The preflight did not look, and
 // pty-hold-nodepty-handoff went red in 10 tests that read as a defect in that file.
+// What a conpty.node built from the patched source carries: the handoff's import and the name the
+// close on exit exports (PTY-CONHOST-LEAK-NATIVE).
+const BUILT_BINARY = 'MZ..DuplicateHandle..guppyClosesPseudoConsoleOnExit..';
 /** A node-pty fixture: `source` is what the fake --check reads, `binary` the built conpty.node (or none). */
-function nodePty(base, { source = 'HANDOFF', binary = 'MZ..DuplicateHandle..' } = {}) {
+function nodePty(base, { source = 'HANDOFF', binary = BUILT_BINARY } = {}) {
   put(base, 'node_modules/node-pty/src/win/conpty.cc', source);
   if (binary !== null) put(base, 'node_modules/node-pty/build/Release/conpty.node', binary);
 }
@@ -369,7 +372,16 @@ function ptyTree(t, opts) {
 const ids = (root, platform = 'win32', calls = []) => W.inspect(root, { platform, spawnSyncFn: fakeSpawnPty(root, calls) }).map((g) => g.id);
 
 test('NODE-PTY GAP: an unpatched node-pty, or a patched one whose binary was not rebuilt, is a gap; the installed form is none', (t) => {
-  assert.deepEqual(ids(ptyTree(t, {})), [], 'patched source and a binary that imports DuplicateHandle: complete');
+  assert.deepEqual(ids(ptyTree(t, {})), [], 'patched source and a binary that imports DuplicateHandle and says it closes on exit: complete');
+  assert.deepEqual(W.NODE_PTY_BINARY_MARKS, ['DuplicateHandle', 'guppyClosesPseudoConsoleOnExit']);
+  assert.equal(W.NODE_PTY_BINARY_MARKS[1], require('../tools/node-pty-race-fix-pins.cjs').CLOSE_MARKER, 'the preflight looks for the name the pins module gives');
+  // PTY-CONHOST-LEAK-NATIVE: a binary of the handoff build, from before the close on exit.
+  for (const [name, binary] of [['the handoff only', 'MZ..DuplicateHandle..'], ['the close only', 'MZ..guppyClosesPseudoConsoleOnExit..']]) {
+    const half = ptyTree(t, { binary });
+    const g = W.inspect(half, { platform: 'win32', spawnSyncFn: fakeSpawnPty(half) });
+    assert.deepEqual(g.map((x) => x.id), ['node-pty'], `A BINARY BUILT FROM AN OLDER PATCH STAGE IS A GAP (${name}): the suite runs the binary`);
+    assert.match(g[0].problem, /conpty\.node was not rebuilt from the patched source/);
+  }
 
   const unpatched = ptyTree(t, { source: 'RACE-FIX ONLY' });
   const gap = W.inspect(unpatched, { platform: 'win32', spawnSyncFn: fakeSpawnPty(unpatched) });
@@ -423,7 +435,7 @@ test('NODE-PTY GAP: the real patch tool takes the check as inspect sends it, and
   put(root, 'node_modules/node-pty/package.json', JSON.stringify({ name: 'node-pty', version: pins.NODE_PTY_VERSION }));
   put(root, 'node_modules/node-pty/src/win/conpty.cc', '// not the pinned source\n');
   put(root, 'node_modules/node-pty/lib/windowsPtyAgent.js', '// not the pinned agent\n');
-  put(root, 'node_modules/node-pty/build/Release/conpty.node', 'MZ..DuplicateHandle..');
+  put(root, 'node_modules/node-pty/build/Release/conpty.node', BUILT_BINARY);
   const state = W.nodePtyState(root, { platform: 'win32' });
   assert.equal(state.ok, false, 'the real --check exits nonzero');
   assert.match(state.problem, /not PTY-HOLD-NODEPTY-HANDOFF patched/);
