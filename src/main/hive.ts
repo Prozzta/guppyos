@@ -898,6 +898,9 @@ export class HiveManager {
   dispose(): void {
     // MAIL-EPOCHS-TEARDOWN-RACE-108: no new async read from here on; drainReads() waits for the open ones.
     this.readsRefused = true;
+    // HIVE-DISPOSE-INFLIGHT-REARM: the router's timer and outbox watchers go with the rest, so a
+    // caller that forgets stopRouter() leaves no watcher in the folder and starts no new pass.
+    this.stopRouter();
     // ZT-I1-MAIL: the coalesced ledger writes land before the log closes (quit, home change).
     try { this.mail.dispose(); } catch (e) { try { this.appendLog({ kind: 'mail-ledger-write-failed', error: String(e) }); } catch { /* noop */ } }
     // LAG-SYNC-WRITES-107: mail-card rows still queued for a write-behind append land now.
@@ -971,7 +974,10 @@ export class HiveManager {
   }
   /** Resolves once none of this manager's async reads is open. Call after dispose(), before the delete. */
   drainReads(): Promise<void> {
-    return this.asyncReads === 0 ? Promise.resolve() : new Promise((done) => { this.readDrained.push(done); });
+    const reads: Promise<void> = this.asyncReads === 0 ? Promise.resolve() : new Promise((done) => { this.readDrained.push(done); });
+    // HIVE-DISPOSE-INFLIGHT-REARM: a route pass in flight at dispose() runs on between its reads
+    // (directory listings, a delivery it had already read), so the delete waits for it too.
+    return reads.then(() => this.routerIdle()).then(() => (this.asyncReads === 0 ? undefined : this.drainReads()));
   }
   /** Async reads are allowed again (the folder was kept after a dispose()). */
   reopen(): void { this.readsRefused = false; }

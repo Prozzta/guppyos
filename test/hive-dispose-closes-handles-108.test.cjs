@@ -188,3 +188,52 @@ test('a roster ask after dispose() rejects and does not read the roster synchron
   assert.deepEqual(openUnder(home), [], 'and nothing was opened in the folder');
   deletes(home);
 });
+
+/**
+ * HIVE-DISPOSE-INFLIGHT-REARM, router half: dispose() used to leave the router to its caller, and
+ * drainReads() waited only for the manager's counted reads. A route pass in flight goes on between
+ * those reads, so "dispose, drain, delete" could delete under a pass that was still running.
+ */
+test('dispose() stops the router itself: no outbox watcher is left in the folder', async (t) => {
+  const { home, hive } = await floor();
+  t.after(() => hive.stopRouter());
+  hive.startRouter();
+  await hive.routerIdle();
+  const used = watches(home);
+  assert.ok(used.some((l) => /outbox$/.test(l)), `control: a running router watches the outboxes: ${JSON.stringify(used)}`);
+  // No stopRouter() here: dispose() is the only call.
+  hive.stopLedgerGuard(); hive.dispose(); await hive.drainReads();
+  assert.deepEqual(openUnder(home), [], 'dispose() left a router watcher in the folder');
+  deletes(home);
+});
+
+test('drainReads() does not resolve while a route pass is in flight, even with none of its reads open', async (t) => {
+  const { home, hive } = await floor();
+  const outbox = path.resolve(path.join(hive.agentDir('god-1'), 'outbox'));
+  fs.mkdirSync(outbox, { recursive: true });
+  await hive.routerIdle();
+  const real = fs.promises.readdir;
+  const g = { open: 0, gated: true, waiting: [], release() { this.gated = false; for (const go of this.waiting.splice(0)) go(); } };
+  fs.promises.readdir = async function gatedOutboxList(p, ...rest) {
+    if (path.resolve(String(p)) !== outbox) return real.call(fs.promises, p, ...rest);
+    g.open++;
+    try { if (g.gated) await new Promise((go) => { g.waiting.push(go); }); return await real.call(fs.promises, p, ...rest); } finally { g.open--; }
+  };
+  t.after(async () => { g.release(); fs.promises.readdir = real; hive.dispose(); await hive.drainReads(); });
+
+  let passSettled = false;
+  hive.routeOnce([outbox]).then(() => { passSettled = true; }, () => { passSettled = true; });
+  for (let i = 0; i < 200 && g.open === 0; i++) await turn();
+  assert.equal(g.open, 1, 'the pass is in flight, held at its listing of the outbox');
+
+  hive.stopLedgerGuard(); hive.dispose();
+  let waited = false; let settledWhenWaitEnded = null;
+  const wait = hive.drainReads().then(() => { waited = true; settledWhenWaitEnded = passSettled; });
+  for (let i = 0; i < 20; i++) await turn();
+  assert.equal(waited, false, 'the wait ended with a route pass still in flight: the delete would run under it');
+  g.release();
+  await wait;
+  assert.equal(settledWhenWaitEnded, true, 'the wait ended before the route pass had finished');
+  assert.deepEqual(openUnder(home), [], 'nothing is open once the wait has ended');
+  deletes(home);
+});
