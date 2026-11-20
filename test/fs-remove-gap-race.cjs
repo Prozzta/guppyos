@@ -230,6 +230,20 @@ async function race(impl, base, runs, seconds) {
   return out;
 }
 
+/**
+ * What is known of a race process that ended without a result line, in the order that matters:
+ * how it ended and when, the END of its stderr (a stack ends with its reason), the end of its
+ * stdout, and the command last. FLAKE-FS-REMOVE-GAP-RACE-CHILD-FAILED-108: the old text began with
+ * the command line, which is 200 characters long, and was cut at 200, so one red run under load
+ * could not say whether the child threw (stderr has the stack) or was ended from outside (stderr
+ * is empty).
+ */
+function noResult(err, stdout, stderr) {
+  const tail = (s, n) => { const v = String(s || '').trim(); return v ? (v.length > n ? `[... ${v.length - n} more before] ${v.slice(-n)}` : v) : '(empty)'; };
+  const how = err ? `exit ${err.code === undefined ? '?' : err.code}, signal ${err.signal || 'none'}${err.killed ? ', killed by this process' : ''}` : 'exit 0';
+  return `no result: ${how}, at ${new Date().toISOString()}; stderr: ${tail(stderr, 1200)}; stdout: ${tail(stdout, 300)}; ${err ? String(err.message).split('\n')[0] : 'no error'}`;
+}
+
 /** Run `racers` races of each impl at once, each in its own temp folder; returns the totals per impl. */
 async function many(impls, racers, runs, seconds) {
   const exe = process.env.FS_GAP_EXE || process.execPath;
@@ -242,7 +256,7 @@ async function many(impls, racers, runs, seconds) {
       jobs.push(new Promise((resolve) => {
         child.execFile(exe, [__filename, 'race', impl, base, String(runs), String(seconds)], { env, windowsHide: true, maxBuffer: 1 << 24 }, (err, stdout, stderr) => {
           let res;
-          try { res = JSON.parse(stdout.trim().split('\n').pop()); } catch { res = { ok: false, error: `no result: ${err && err.message} ${stderr}` }; }
+          try { res = JSON.parse(stdout.trim().split('\n').pop()); } catch { res = { ok: false, whole: true, error: noResult(err, stdout, stderr) }; }
           try { sweep(base); } catch { /* left in the temp folder */ }
           resolve({ impl, res });
         });
@@ -256,7 +270,8 @@ async function many(impls, racers, runs, seconds) {
   for (const { impl, res } of done) {
     const t = totals[impl] || (totals[impl] = { races: 0, failed: 0, runs: 0, losses: 0, removed: 0, refused: 0, errors: {}, planted: 0, swapped: 0, landed: 0, firstLossAt: [] });
     t.races++;
-    if (!res.ok) { t.failed++; t.errors[`RACE FAILED: ${String(res.error).slice(0, 200)}`] = 1; continue; }
+    // a no-result text is already bounded by noResult(), and its facts must not be cut off
+    if (!res.ok) { t.failed++; t.errors[`RACE FAILED: ${res.whole ? res.error : String(res.error).slice(0, 200)}`] = 1; continue; }
     runtime = res.electron ? `Electron ${res.electron} as Node` : `Node ${res.node}`;
     for (const k of ['runs', 'losses', 'removed', 'refused', 'planted', 'swapped', 'landed']) t[k] += res.out[k];
     for (const [k, v] of Object.entries(res.out.errors)) t.errors[k] = (t.errors[k] || 0) + v;
