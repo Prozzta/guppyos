@@ -50,6 +50,21 @@
 //                            anything else is thrown as before. The edits are in the pins module.
 //                            pristine -> patch -> must equal WORKER_JS_QUIET_SHA256.
 //
+// PTY-CONHOST-LEAK-NATIVE adds a second stage to conpty.cc, on top of the handoff.
+//   src/win/conpty.cc        a terminal's console host (conhost.exe or OpenConsole.exe) lives until
+//                            its pseudoconsole is closed. node-pty closed it only in kill, and only
+//                            while the terminal's record was in the native list; the exit thread
+//                            erases the record without closing, so every terminal whose root had
+//                            ended kept its host until the app quit. Patched, the exit thread
+//                            closes the pseudoconsole it drops (outside the lock, after the exit
+//                            is reported), kill and the thread close it exactly once between
+//                            them, and the module exports guppyClosesPseudoConsoleOnExit so that
+//                            the built binary can be told from one without the close. The edits
+//                            are in the pins module (CONPTY_CC_CLOSE_EDITS).
+//                            #922-patched -> handoff + close -> must equal CONPTY_CC_BUILT_SHA256
+//                            handoff form (a tree patched before this stage existed) -> close ->
+//                            the same.
+//
 //   --check          change nothing; exit 1 unless all four files are in their patched form
 //   --root <dir>     another node-pty tree (the self-test only)
 // Any other argument is refused: this tool rewrites files, so it never guesses.
@@ -151,7 +166,9 @@ const UTILS_EDITS = [
 ];
 
 const targets = [
-  { rel: ['src', 'win', 'conpty.cc'], from: pins.CONPTY_CC_PATCHED_SHA256, fromName: 'the #922-patched form (run patch-node-pty-race-fix.cjs first)', to: pins.CONPTY_CC_BUILT_SHA256, edits: CONPTY_EDITS },
+  { rel: ['src', 'win', 'conpty.cc'], from: pins.CONPTY_CC_PATCHED_SHA256, fromName: 'the #922-patched form (run patch-node-pty-race-fix.cjs first)', to: pins.CONPTY_CC_BUILT_SHA256, edits: [...CONPTY_EDITS, ...pins.CONPTY_CC_CLOSE_EDITS],
+    // A tree patched before PTY-CONHOST-LEAK-NATIVE has the handoff already: only the close is added.
+    also: [{ from: pins.CONPTY_CC_HANDOFF_SHA256, edits: pins.CONPTY_CC_CLOSE_EDITS }] },
   { rel: ['lib', 'windowsPtyAgent.js'], from: pins.AGENT_JS_PRISTINE_SHA256, fromName: 'pristine 1.1.0', to: pins.AGENT_JS_HANDOFF_SHA256, edits: AGENT_EDITS },
   { rel: ['lib', 'utils.js'], from: pins.UTILS_JS_PRISTINE_SHA256, fromName: 'pristine 1.1.0', to: pins.UTILS_JS_BUILT_ONLY_SHA256, edits: UTILS_EDITS },
   { rel: ['lib', 'worker', 'conoutSocketWorker.js'], from: pins.WORKER_JS_PRISTINE_SHA256, fromName: 'pristine 1.1.0', to: pins.WORKER_JS_QUIET_SHA256, edits: pins.WORKER_JS_EDITS }
@@ -167,8 +184,9 @@ for (const t of targets) {
   const inputSha = sha(source);
   if (inputSha === t.to) continue;
   if (check) fail(`${name} is not the pinned root-handle form (sha256 ${inputSha})`);
-  if (inputSha !== t.from) fail(`${name} is neither ${t.fromName} nor the pinned root-handle form (sha256 ${inputSha})`);
-  for (const [label, before, after] of t.edits) {
+  const input = [{ from: t.from, edits: t.edits }, ...(t.also || [])].find((i) => i.from === inputSha);
+  if (!input) fail(`${name} is neither ${t.fromName} nor the pinned root-handle form (sha256 ${inputSha})`);
+  for (const [label, before, after] of input.edits) {
     const at = source.indexOf(before);
     if (at < 0 || source.indexOf(before, at + 1) >= 0) fail(`${name} patch point missing or not unique: ${label}`);
     source = source.slice(0, at) + after + source.slice(at + before.length);
@@ -178,6 +196,6 @@ for (const t of targets) {
   writes.push([file, source]);
 }
 for (const [file, source] of writes) fs.writeFileSync(file, source, 'utf8');
-if (check) console.log(`${TAG} node-pty hands over the root handle, loads built binaries only and its output worker handles socket errors (conpty.cc, windowsPtyAgent.js, utils.js, worker/conoutSocketWorker.js)`);
+if (check) console.log(`${TAG} node-pty hands over the root handle, closes the pseudoconsole of an ended terminal, loads built binaries only and its output worker handles socket errors (conpty.cc, windowsPtyAgent.js, utils.js, worker/conoutSocketWorker.js)`);
 else if (writes.length === 0) console.log(`${TAG} root-handle handoff already applied`);
 else console.log(`${TAG} applied the root-handle handoff to node-pty ${version} (${writes.length} file(s))`);
