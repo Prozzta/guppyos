@@ -152,16 +152,23 @@ const baseEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !
 let n = 0;
 /** Every real fake's log, for the hang guard's 'parent-gone' line (orphanedFakes). */
 const fakeLogs = [];
-/** Deps: real spawn and real taskkill; `where` / `command -v` answer with the fake (or nothing). */
+/** Deps: real spawn and real taskkill; the lookup answers with the fake (or nothing): `command -v` on
+ *  POSIX, and on Windows the PATH listing (FLAKE-RIG-NODE-LOOKUP-UNDER-LOAD-108: the lookup reads the
+ *  PATH dirs in process). The jail is the ONLY dir that listing fills; every other dir of the real PATH
+ *  is empty to it, so the real claude CLI can never be found. */
+const samePath = (a, b) => path.resolve(a).toUpperCase() === path.resolve(b).toUpperCase();
 function deps(mode, { found = true, extra = {} } = {}) {
   const log = path.join(JAIL, `log-${++n}.jsonl`);
   const tmpDir = fs.mkdtempSync(path.join(JAIL, 'cwd-'));
   const stop = path.join(JAIL, `stop-${n}`);
   const env = { ...baseEnv, FAKE_CLAUDE_MODE: mode, FAKE_CLAUDE_LOG: log, FAKE_CLAUDE_STOP: stop, SHELL: '/bin/sh', ...extra };
+  const pathKey = Object.keys(env).find((k) => k.toUpperCase() === 'PATH') ?? 'PATH';
+  if (WIN) env[pathKey] = env[pathKey] ? `${JAIL};${env[pathKey]}` : JAIL;
   const d = {
     platform: process.platform, env, tmpDir, exists: (p) => fs.existsSync(p),
+    listDir: async (dir) => (found && samePath(dir, JAIL) ? [{ name: path.basename(FAKE), dir: false }] : []),
     exec: (file, args, opts, cb) => {
-      if (file === 'where' || (file === '/bin/sh' && args[0] === '-lc')) { setImmediate(() => cb(found ? null : Object.assign(new Error('nf'), { code: 1 }), found ? `${FAKE}\n` : '')); return { pid: 0 }; }
+      if (file === '/bin/sh' && args[0] === '-lc') { setImmediate(() => cb(found ? null : Object.assign(new Error('nf'), { code: 1 }), found ? `${FAKE}\n` : '')); return { pid: 0 }; }
       return execFile(file, args, opts, (e, so) => cb(e, String(so ?? '')));
     },
     spawn: (f, a, o) => fakes.track(f, a, o, stop, () => entries()[0]?.pid)
@@ -172,6 +179,14 @@ function deps(mode, { found = true, extra = {} } = {}) {
   fakeLogs.push({ entries, seen: false });
   return { d, log, tmpDir, entries, parentGone };
 }
+test('LOOKUP-108: the fixture\'s lookup can only ever find the fake in the jail, never a claude on the real PATH', { skip: !WIN && 'the Windows PATH listing' }, async () => {
+  const on = deps('success');
+  assert.equal(await P.resolveCliAsync(on.d, 'claude'), FAKE, 'found: the fake, inside the jail');
+  const off = deps('success', { found: false });
+  off.d.exists = (p) => samePath(path.dirname(p), JAIL) && fs.existsSync(p);
+  assert.equal(await P.resolveCliAsync(off.d, 'claude'), null, 'not found: the jail is first on PATH and holds claude.cmd, and the rest of the real PATH is still there; the listing alone decides');
+});
+
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 /** MODEL-LIST-CENSUS-MASK-196: a fake left alive (a mutant) is stopped through its handle, and a stop that
  *  leaves one running is an error, raised only after the checks' own verdict (verdict()). */
@@ -373,7 +388,8 @@ async function thirdPartyChecks(R) {
   assert.equal(R.parseClaudeInitialize(reply(R.CLAUDE_REQUEST_ID, MODELS, { tokenSource: 'none', apiProvider: 'bedrock' })).signedIn, null, 'C13: a Bedrock account shape is "cannot tell", not signed out');
   for (const k of ['CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY']) {
     const { d } = scriptedDeps('win32', (c, req) => c.stdout.emit('data', reply(req.request_id, SIGNED_OUT_MODELS, { tokenSource: 'none', apiProvider: 'firstParty' })), { [k]: '1' });
-    d.exec = (file, args, opts, cb) => { setImmediate(() => cb(null, file === 'where' ? 'C:\\x\\claude.exe\r\n' : '')); return { pid: 1 }; };
+    d.env.PATH = 'C:\\x'; d.listDir = async () => [{ name: 'claude.exe', dir: false }];
+    d.exec = (file, args, opts, cb) => { setImmediate(() => cb(null, '')); return { pid: 1 }; };
     const r = await R.claudeAdapter(d, noKey, noFetch)();
     assert.equal(r.status, 'ok', `C12: ${k}=1 is never "not signed in" (${r.reason})`);
   }

@@ -449,7 +449,8 @@ test('lookupCommandAsync (POSIX): the fenced interactive login shell, rc-file ch
 test('resolveCliAsync is ONE function: providerModels re-exports the shared resolver (Jim\'s adapters unchanged)', async () => {
   const P = loadTs('src/main/providerModels.ts');
   assert.equal(P.resolveCliAsync, R.resolveCliAsync);
-  const { d } = fakeDeps('win32', () => 'C:\\x\\agy\r\nC:\\x\\agy.exe\r\n', ['C:\\x\\agy', 'C:\\x\\agy.exe']);
+  const { d } = fakeDeps('win32', () => '', ['C:\\x\\agy', 'C:\\x\\agy.exe'], { PATH: 'C:\\x' });
+  d.listDir = async () => [{ name: 'agy', dir: false }, { name: 'agy.exe', dir: false }];
   assert.equal(await R.resolveCliAsync(d, 'agy'), 'C:\\x\\agy.exe');
   assert.equal(await R.resolveCliAsync(d, 'Bad;Name'), null);
 });

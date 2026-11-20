@@ -97,10 +97,13 @@ function fakeExec(answers) {
   return { exec, calls };
 }
 const winEnv = { LOCALAPPDATA: 'C:\\L', APPDATA: 'C:\\R', ComSpec: 'C:\\W\\cmd.exe' };
+/** FLAKE-RIG-NODE-LOOKUP-UNDER-LOAD-108: where the CLI is, said through the PATH listing (the lookup
+ *  reads the PATH dirs in process; it used to be said through a fake where.exe). One PATH dir, its names. */
+const onPath = (dir, ...names) => ({ env: { ...winEnv, PATH: dir }, listDir: async (p) => (p === dir ? names.map((name) => ({ name, dir: false })) : []) });
 
-test('cli adapter: resolved ASYNC via where, run hidden + time-boxed; codex gets a large buffer', async () => {
-  const f = fakeExec({ where: (a) => ({ stdout: a[0] === 'codex' ? 'C:\\n\\codex\r\nC:\\n\\codex.cmd\r\n' : '' }), 'C:\\W\\cmd.exe': () => ({ stdout: CODEX_STDOUT }) });
-  const d = { platform: 'win32', env: winEnv, exec: f.exec, exists: (p) => p === 'C:\\n\\codex.cmd' || p === 'C:\\n\\codex' };
+test('cli adapter: resolved ASYNC from PATH (no where.exe), run hidden + time-boxed; codex gets a large buffer', async () => {
+  const f = fakeExec({ 'C:\\W\\cmd.exe': () => ({ stdout: CODEX_STDOUT }) });
+  const d = { platform: 'win32', ...onPath('C:\\n', 'codex', 'codex.cmd'), exec: f.exec, exists: (p) => p === 'C:\\n\\codex.cmd' || p === 'C:\\n\\codex' };
   const r = await P.cliAdapter(d, 'codex', ['debug', 'models'], P.parseCodexModels, 4 * 1024 * 1024)();
   assert.equal(r.status, 'ok'); assert.equal(r.models.length, 7);
   const run = f.calls.at(-1);
@@ -112,15 +115,15 @@ test('cli adapter: resolved ASYNC via where, run hidden + time-boxed; codex gets
 });
 
 test('cli adapter: not installed / failed (timeout, exit N) / unparsable, each with its reason', async () => {
-  const none = fakeExec({ where: () => ({ err: Object.assign(new Error('x'), { code: 1 }) }) });
-  assert.deepEqual(await P.cliAdapter({ platform: 'win32', env: winEnv, exec: none.exec, exists: () => false }, 'agy', ['models'], P.parseAgyModels)(), { status: 'not-installed', reason: 'agy not found', source: 'agy models' });
+  const none = fakeExec({});
+  assert.deepEqual(await P.cliAdapter({ platform: 'win32', ...onPath('C:\\n'), exec: none.exec, exists: () => false }, 'agy', ['models'], P.parseAgyModels)(), { status: 'not-installed', reason: 'agy not found', source: 'agy models' });
   for (const [answer, reason] of [[{ err: Object.assign(new Error('t'), { killed: true }) }, 'timeout'], [{ err: Object.assign(new Error('e'), { code: 3 }) }, 'exit 3'], [{ stdout: 'garbage' }, 'unparsable output']]) {
-    const f = fakeExec({ where: () => ({ stdout: 'C:\\L\\agy\\bin\\agy.exe' }), 'C:\\L\\agy\\bin\\agy.exe': () => answer });
-    const r = await P.cliAdapter({ platform: 'win32', env: winEnv, exec: f.exec, exists: () => true }, 'agy', ['models'], P.parseAgyModels)();
+    const f = fakeExec({ 'C:\\L\\agy\\bin\\agy.exe': () => answer });
+    const r = await P.cliAdapter({ platform: 'win32', ...onPath('C:\\L\\agy\\bin', 'agy.exe'), exec: f.exec, exists: () => true }, 'agy', ['models'], P.parseAgyModels)();
     assert.deepEqual([r.status, r.reason], ['failed', reason]);
   }
-  const bad = fakeExec({ where: () => ({ stdout: 'C:\\a&b\\agy.cmd' }) });
-  const r = await P.cliAdapter({ platform: 'win32', env: winEnv, exec: bad.exec, exists: () => true }, 'agy', ['models'], P.parseAgyModels)();
+  const bad = fakeExec({});
+  const r = await P.cliAdapter({ platform: 'win32', ...onPath('C:\\a&b', 'agy.cmd'), exec: bad.exec, exists: () => true }, 'agy', ['models'], P.parseAgyModels)();
   assert.deepEqual([r.status, r.reason], ['failed', 'unsafe-path']);
   assert.equal(bad.calls.filter((c) => c.file === 'C:\\W\\cmd.exe').length, 0, 'a metacharacter path never reaches cmd.exe');
 });
