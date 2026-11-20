@@ -361,4 +361,17 @@ module.exports = {
   MUTEX_IMPORTS,
   peImports,
   hasMutexImports,
+  // PTY-CONHOST-ORPHAN-OWNER-DEATH (option A): the OpenConsole pair every PTY runs on, from
+  // node-pty's third_party folder, staged into build/Release/conpty/ (tools/stage-node-pty-openconsole.cjs).
+  CONPTY_THIRD_PARTY_VERSION: '1.23.251008001',
+  OPENCONSOLE_SHA256: {
+    x64: {
+      'conpty.dll': '7c7430632052ff703540b68371ec43821820aa1335d8e11dfbcd9ff00e9daaed',
+      'OpenConsole.exe': 'd1fe7faa62f9e955e2ac2371f95d7e5513df4d496255097158f979c94782c5fc',
+    },
+    arm64: {
+      'conpty.dll': 'b6cca5f1081111f59e5255eec043d924ebd11a86d09986c0d121b680540b3380',
+      'OpenConsole.exe': 'b7763ba27e80d5e84f9e60d1368ec2ddb25dfd10283336c0c9f3f252d35cb2f8',
+    },
+  },
 };

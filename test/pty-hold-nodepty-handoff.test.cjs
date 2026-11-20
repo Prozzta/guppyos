@@ -431,6 +431,9 @@ if (!WIN) {
   const CHECKER = path.join(ROOT, 'tools', 'check-packaged-node-pty.cjs');
   const NPP = 'node_modules/node-pty';
   const conptyBin = fs.readFileSync(CONPTY_NODE);
+  // PTY-CONHOST-ORPHAN (option A): the staged OpenConsole pair the app ships beside conpty.node.
+  const OC_DIR = path.join(path.dirname(CONPTY_NODE), 'conpty');
+  const ocPair = { 'conpty.dll': fs.readFileSync(path.join(OC_DIR, 'conpty.dll')), 'OpenConsole.exe': fs.readFileSync(path.join(OC_DIR, 'OpenConsole.exe')) };
   const conptyWithout = (() => {
     const b = Buffer.from(conptyBin);
     b[b.indexOf(Buffer.from('DuplicateHandle\0', 'latin1'))] = 'X'.charCodeAt(0);
@@ -450,7 +453,7 @@ if (!WIN) {
     return Buffer.concat([head, json]);
   };
   /** extra: files on disk AND listed unpacked; diskOnly: on disk, not listed; asar(list): the list, a Buffer, or null for none. */
-  const packaged = ({ version = pins.NODE_PTY_VERSION, js = handoffJs, utils = builtUtils, worker = builtWorker, binary = conptyBin, record = sha(binary), marker = true, cc = null, extra = [], diskOnly = [], asar = (l) => l } = {}) => {
+  const packaged = ({ version = pins.NODE_PTY_VERSION, js = handoffJs, utils = builtUtils, worker = builtWorker, binary = conptyBin, record = sha(binary), marker = true, cc = null, oc = ocPair, extra = [], diskOnly = [], asar = (l) => l } = {}) => {
     const dir = tempDir('phnh-pkg-');
     const resources = path.join(dir, 'resources');
     const listed = [
@@ -461,6 +464,7 @@ if (!WIN) {
       [`${NPP}/build/Release/conpty.node`, binary],
       ...(marker ? [[`${NPP}/${pins.MARKER_FILE}`, JSON.stringify({ version: pins.NODE_PTY_VERSION, sourceSha256: pins.CONPTY_CC_BUILT_SHA256, files: { 'build/Release/conpty.node': { sha256: record } } })]] : []),
       ...(cc === null ? [] : [[`${NPP}/src/win/conpty.cc`, cc]]),
+      ...Object.entries(oc).filter(([, bytes]) => bytes !== null).map(([n, bytes]) => [`${NPP}/build/Release/conpty/${n}`, bytes]),
       ...extra
     ];
     for (const [rel, bytes] of [...listed, ...diskOnly]) {
@@ -479,7 +483,7 @@ if (!WIN) {
   const P = {
     good(mod) {
       const dir = packaged();
-      assert.deepEqual(mod.inspect(dir).checks.map((c) => c.ok), Array(10).fill(true), `a patched packaged app passes all 10: ${JSON.stringify(mod.inspect(dir).checks.filter((c) => !c.ok))}`);
+      assert.deepEqual(mod.inspect(dir).checks.map((c) => c.ok), Array(11).fill(true), `a patched packaged app passes all 11: ${JSON.stringify(mod.inspect(dir).checks.filter((c) => !c.ok))}`);
       assert.deepEqual(failing(mod, path.join(dir, 'resources')), [], 'the resources folder may be named instead');
       assert.deepEqual(failing(mod, packaged({ cc: builtCc })), [], 'the patched source may ship');
       assert.deepEqual(failing(mod, packaged({ extra: [[`${NPP}/prebuilds/darwin-arm64/pty.node`, stray]] })), [], 'a prebuilt binary of another platform is not the Windows fallback');
@@ -501,6 +505,17 @@ if (!WIN) {
       const noWorker = packaged({ asar: (l) => l.filter(([p]) => p !== `${NPP}/lib/worker/conoutSocketWorker.js`) });
       assert.deepEqual(failing(mod, noWorker), [7], 'an archive that does not list the worker fails');
       assert.match(whyOf(mod, noWorker, 7), /does not list node_modules\/node-pty\/lib\/worker\/conoutSocketWorker\.js/);
+      // PTY-CONHOST-ORPHAN (option A): every PTY starts on the bundled OpenConsole; without the pair none starts.
+      const noHost = packaged({ oc: { ...ocPair, 'OpenConsole.exe': null } });
+      assert.deepEqual(failing(mod, noHost), [7, 10], 'A PACKAGED APP WITHOUT OpenConsole.exe FAILS (on disk, and in the archive)');
+      assert.match(whyOf(mod, noHost, 10), /build\/Release\/conpty\/OpenConsole\.exe is missing: every PTY fails to start/);
+      assert.match(whyOf(mod, noHost, 7), /does not list node_modules\/node-pty\/build\/Release\/conpty\/OpenConsole\.exe/);
+      const otherHost = packaged({ oc: { ...ocPair, 'OpenConsole.exe': Buffer.concat([ocPair['OpenConsole.exe'], Buffer.from('x')]) } });
+      assert.deepEqual(failing(mod, otherHost), [10], 'AN OpenConsole THAT IS NOT THE PINNED BUILD FAILS');
+      assert.match(whyOf(mod, otherHost, 10), /OpenConsole\.exe [0-9a-f]{12}, not a pinned pair of one arch/);
+      const mixed = packaged({ oc: { ...ocPair, 'conpty.dll': Buffer.concat([ocPair['conpty.dll'], Buffer.from('x')]) } });
+      assert.deepEqual(failing(mod, mixed), [10], 'A conpty.dll THAT IS NOT THE PINNED BUILD FAILS, with the pinned OpenConsole.exe');
+      assert.deepEqual(failing(mod, packaged({ oc: { ...ocPair, 'conpty.dll': null } })), [7, 10], 'a packaged app without conpty.dll fails');
     },
     binary(mod) {
       const wrong = packaged({ record: '0'.repeat(64) });
@@ -542,12 +557,12 @@ if (!WIN) {
       const say = (dir) => { const lines = []; return [mod.report(dir, (l) => lines.push(l)), lines]; };
       const [ok, good] = say(packaged());
       assert.equal(ok, true);
-      assert.equal(good[good.length - 1], 'PACKAGED NODE-PTY OK (10 checks)');
+      assert.equal(good[good.length - 1], 'PACKAGED NODE-PTY OK (11 checks)');
       const [bad, lines] = say(packaged({ utils: pristineUtils }));
       assert.equal(bad, false, 'REPORT RETURNS FALSE WHEN A CHECK FAILS');
       assert.equal(lines[lines.length - 1], 'PACKAGED NODE-PTY FAILED');
       assert.ok(lines.includes('FAIL lib/utils.js loads built binaries only: it is the UNPATCHED 1.1.0 loader: it falls back to prebuilds/ silently'), lines.join('\n'));
-      assert.equal(lines.filter((l) => l.startsWith('OK   ')).length, 9);
+      assert.equal(lines.filter((l) => l.startsWith('OK   ')).length, 10);
     }
   };
   const checker = require(CHECKER);
@@ -561,7 +576,7 @@ if (!WIN) {
     const before = everyFile(good);
     const ok = cli('--packaged', good);
     assert.equal(ok.status, 0, ok.stdout + ok.stderr);
-    assert.match(ok.stdout, /PACKAGED NODE-PTY OK \(10 checks\)/);
+    assert.match(ok.stdout, /PACKAGED NODE-PTY OK \(11 checks\)/);
     assert.deepEqual(everyFile(good), before, 'the check writes nothing');
     const bad = cli('--packaged', packaged({ utils: pristineUtils, extra: [[`${NPP}/prebuilds/win32-x64/conpty.node`, stray]] }));
     assert.equal(bad.status, 1, 'AN UNPATCHED PACKAGED APP EXITS 1');
@@ -655,7 +670,10 @@ if (!WIN) {
     { name: 'P10 a prebuilt binary in the archive passes', edits: [[': prebuilt.length ? ', ': false ? ']], run: P.asar, dies: /A PREBUILT WINDOWS BINARY IN THE ARCHIVE FAILS/ },
     { name: 'P11 only conpty.node counts as prebuilt on disk', edits: [['WIN_PREBUILT.test(`/${p}`) || (p.endsWith', '(p.endsWith']], run: P.strays, dies: /A PREBUILT WINDOWS FILE ON DISK FAILS/ },
     { name: 'P12 any output worker passes', edits: [['workerSha === pins.WORKER_JS_QUIET_SHA256,', 'true,']], run: P.files, dies: /AN UNPATCHED OUTPUT WORKER FAILS THE PACKAGED CHECK/ },
-    { name: 'P13 the close-on-exit name is not looked for', edits: [['binarySha !== null && pins.hasCloseMarker(binary),', 'binarySha !== null,']], run: P.binary, dies: /A BINARY WITHOUT THE CLOSE ON EXIT FAILS THE PACKAGED CHECK/ }
+    { name: 'P13 the close-on-exit name is not looked for', edits: [['binarySha !== null && pins.hasCloseMarker(binary),', 'binarySha !== null,']], run: P.binary, dies: /A BINARY WITHOUT THE CLOSE ON EXIT FAILS THE PACKAGED CHECK/ },
+    { name: 'P14 any OpenConsole passes', edits: [['ships in build/Release/conpty`, !!ocArch,', 'ships in build/Release/conpty`, true,']], run: P.files, dies: /A PACKAGED APP WITHOUT OpenConsole\.exe FAILS/ },
+    { name: 'P15 only OpenConsole.exe is compared', edits: [['oc.every(([n, s]) => s === pins.OPENCONSOLE_SHA256[a][n])', "oc.every(([n, s]) => n !== 'OpenConsole.exe' || s === pins.OPENCONSOLE_SHA256[a][n])"]], run: P.files, dies: /A conpty\.dll THAT IS NOT THE PINNED BUILD FAILS/ },
+    { name: 'P16 the archive need not list the pair', edits: [['BUILT, ...OPENCONSOLE].filter', 'BUILT].filter']], run: P.files, dies: /A PACKAGED APP WITHOUT OpenConsole\.exe FAILS \(on disk, and in the archive\)/ }
   ];
   test('MUTANT CENSUS (packaged check, loader): every mutant applies once and dies at the assertion that names its guarantee', async (t) => {
     const source = fs.readFileSync(CHECKER, 'utf8');

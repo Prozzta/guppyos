@@ -855,7 +855,8 @@ test('PIN: against the REAL test directory discovery is root tests plus only fol
   // FLAKE-RIG-NODE-LOOKUP-UNDER-LOAD-108: + 1 (rig-node-lookup-inproc-108). 653 + 1 = 654 (root test/*.test.cjs 612).
   // FLAKE-RIG-NODE-LOOKUP-UNDER-LOAD-108: + 1 (lookup-path-search-108). 654 + 1 = 655 (root test/*.test.cjs 613).
   // PTY-CONHOST-LEAK-NATIVE: + 1 (pty-conhost-leak-native). 655 + 1 = 656 (root test/*.test.cjs 614).
-  assert.equal(files.length, 656,`the focused suite must retain its pre-fold file count, got ${files.length}`);
+  // PTY-CONHOST-ORPHAN-OWNER-DEATH: + 2 (pty-conhost-orphan-owner-death-108, pty-openconsole-da1-108). 656 + 2 = 658 (root test/*.test.cjs 616).
+  assert.equal(files.length, 658,`the focused suite must retain its pre-fold file count, got ${files.length}`);
   assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
   assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');
   assert.ok(files.includes(path.join('start-fixes-163', 'start-fixes-163-boot-submit.test.cjs')), 'the start-fixes feature folder is included');
