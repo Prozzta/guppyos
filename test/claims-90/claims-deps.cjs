@@ -14,7 +14,8 @@ function hiveTasksFor(L, hive) {
   const { HiveManager } = L('src/main/hive.ts');
   const hm = new HiveManager(() => path.dirname(hive));
   if (path.resolve(hm.root() ?? '').toLowerCase() !== path.resolve(hive).toLowerCase()) throw new Error(`HiveManager roots ${hm.root()}, not ${hive}`);
-  return { allTasks: () => hm.allTasks().tasks, dispose: () => hm.dispose() };
+  // dispose() closes the manager at once; its promise resolves when the reads it had open are done (await it before removing the hive).
+  return { allTasks: () => hm.allTasks().tasks, dispose: async () => { hm.dispose(); await hm.drainReads(); } };
 }
 
 /** index.ts ClaimStore taskStatus: a card's status from hive.allTasks(), the archive included. */

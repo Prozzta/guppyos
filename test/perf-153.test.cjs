@@ -102,7 +102,7 @@ async function settingsFor(brokerStub) {
   const hive = new HiveManager(() => home);
   if (brokerStub !== undefined) hive.setHookBroker(brokerStub);
   await hive.ensureAgent({ id: 'a1', name: 'A', provider: 'claude', cwd: home });
-  hive.dispose();
+  hive.dispose(); await hive.drainReads();
   return { home, settings: JSON.parse(fs.readFileSync(path.join(home, 'hive/agents/a1/settings.json'), 'utf8')) };
 }
 
@@ -179,7 +179,7 @@ test('R1 N1: claude-status.sh is never rewritten in place (other shells source i
     assert.ok(writes.some((p) => path.resolve(p) === path.resolve(ren[0][0])), 'the renamed file is the temp just written');
     assert.equal(fs.readFileSync(script, 'utf8'), CLAUDE_STATUS_SH);
     assert.deepEqual(fs.readdirSync(path.dirname(script)).filter((f) => f.endsWith('.tmp')), [], 'no temp left behind');
-    hive.dispose();
+    hive.dispose(); await hive.drainReads();
   } finally { fs.writeFileSync = w0; fs.renameSync = r0; }
 });
 
@@ -332,7 +332,7 @@ test('NO-GIT: a new hive, agents, mail (send + outbox routing), tasks, role, ren
     hive.recordModel('a1', 'claude-opus-5-5', undefined);
     hive.setArchived('b2', true);
     await new Promise((r) => setTimeout(r, 300));   // anything deferred would fire here
-    hive.dispose();
+    hive.dispose(); await hive.drainReads();
   });
   assert.deepEqual(calls, [], 'no git process of any kind');
   assert.equal(fs.existsSync(path.join(home, 'hive', '.git')), false, 'a new hive is not git-initialised');
@@ -354,7 +354,7 @@ test('NO-GIT: an EXISTING hive/.git is left exactly as it was (never deleted, ne
     const hive = new (NOGIT_HIVE())(() => home);
     await hive.ensureAgent({ id: 'a1', name: 'A', provider: 'claude', cwd: home });
     hive.send({ to: 'a1', act: 'inform', subject: 's', body: 'b' }, 'system');
-    hive.dispose();
+    hive.dispose(); await hive.drainReads();
   });
   assert.deepEqual(calls, []);
   assert.deepEqual(snap(), before, 'the .git tree and the hive .gitignore are untouched');
@@ -369,7 +369,7 @@ test('NO-GIT: no .gitignore is written into agent dirs any more; a user-edited o
     await hive.ensureAgent({ id: 'a1', name: 'A', provider: 'claude', cwd: home });
     assert.equal(fs.existsSync(path.join(home, 'hive', 'agents', 'a1', '.gitignore')), false, 'a new agent gets none');
     assert.equal(fs.readFileSync(path.join(idle, '.gitignore'), 'utf8'), 'mine\n', 'an existing one is untouched');
-  } finally { hive.dispose(); }
+  } finally { hive.dispose(); await hive.drainReads(); }
 });
 
 test('NO-GIT STATIC: no git anywhere in the hive layer; the committer is gone; quit no longer waits on a flush', () => {

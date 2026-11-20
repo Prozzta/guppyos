@@ -290,7 +290,7 @@ test('the per-agent settings file carries both bypass flags, with and without th
   const env = home(t);
   const harness = fs.mkdtempSync(path.join(env.h, 'harness-'));
   const hive = new HiveManager(() => harness);
-  t.after(() => hive.dispose());
+  t.after(async () => { hive.dispose(); await hive.drainReads(); });
   for (const url of [null, `http://127.0.0.1:60971/hook/andy-mtuk4y4x/${'a'.repeat(32)}`]) {
     const s = hive.hookSettings('C:/hive/bin/cth-hook.cjs', env.cwd, {}, undefined, url, 'andy-mtuk4y4x');
     assert.equal(s.skipDangerousModePermissionPrompt, true, `broker=${!!url}`);

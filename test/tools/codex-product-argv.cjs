@@ -76,7 +76,7 @@ async function productCodexSpawn(o) {
     BRAND.add(spec);
     return spec;
   } finally {
-    try { hive.dispose(); } catch { /* best-effort */ }
+    try { hive.dispose(); await hive.drainReads(); } catch { /* best-effort */ }
   }
 }
 

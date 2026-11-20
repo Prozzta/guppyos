@@ -124,6 +124,7 @@ async function server(t, limit) {
     if (ph === undefined) delete process.env.HOME; else process.env.HOME = ph;
     if (pu === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = pu;
     hive.dispose(); // closes its log, or the folder cannot be removed
+    await hive.drainReads(); // and the reads it had open are done
     await removeDir(home);
   });
   for (const id of ['a1', 'a2']) await hive.ensureAgent({ id, name: id, provider: 'codex', cwd: home });

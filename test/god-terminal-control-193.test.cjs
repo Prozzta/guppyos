@@ -794,7 +794,7 @@ test('env: HIVE_TERM_URL only in god\'s spawn env (Claude and Codex), never in C
   fs.mkdirSync(path.join(os.homedir(), '.codex'), { recursive: true });
   fs.writeFileSync(path.join(os.homedir(), '.codex', 'auth.json'), '{"x":1}');
   const hive = new HiveManager(() => path.join(home, 'harness'));
-  t.after(() => hive.dispose());
+  t.after(async () => { hive.dispose(); await hive.drainReads(); });
   let n = 0;
   hive.setHookBroker({
     urlFor: () => `http://127.0.0.1:43123/hook/${(n += 1).toString(16).padStart(32, '0')}`,

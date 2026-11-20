@@ -170,14 +170,14 @@ test('M16: fleet.json is written atomically (temp file, then rename): a reader n
   t.after(() => {
     if (realHome === undefined) delete process.env.HOME; else process.env.HOME = realHome;
     if (realProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = realProfile;
-    fs.rmSync(home, { recursive: true, force: true });
   });
   assert.equal(os.homedir(), home, 'HOME redirect failed - aborting before constructing any hive');
   const { HiveManager } = loadTs('src/main/hive.ts');
   const hiveHome = path.join(home, 'harness');
   fs.mkdirSync(path.join(hiveHome, 'hive'), { recursive: true });
   const hive = new HiveManager(() => hiveHome);
-  t.after(() => hive.dispose());
+  // The home is removed here, after the manager closed and its reads finished (not in the hook above, which runs first).
+  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   const fleetPath = path.join(hiveHome, 'hive', 'fleet.json');
   // UI-CRAWL (d41157ff): the publish is deferred off the caller's turn and goes through the async
   // temp+rename (fs/promises); the pin awaits the flush rather than reverting the deferral.

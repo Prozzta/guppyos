@@ -19,7 +19,12 @@ const prior = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
 process.env.HOME = JAIL; process.env.USERPROFILE = JAIL;
 assert.equal(os.homedir(), JAIL, 'HOME must be jailed before any product code loads');
 const STORES = [];
-test.after(() => {
+/** The app-side managers and the child-side readers (claims-deps) each world built; closed, and their reads done, before the jail goes. */
+const HIVES = [];
+const CHILDREN = [];
+test.after(async () => {
+  for (const h of HIVES) { h.dispose(); await h.drainReads(); }
+  for (const c of CHILDREN) await c.dispose();
   for (const s of STORES) s.close();
   for (const [k, v] of Object.entries(prior)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
   rmTree(JAIL);
@@ -67,11 +72,9 @@ async function fixture() {
   HIVES.push(app);
   assert.equal(app.root(), root);
   const child = hiveTasksFor(L, root);
-  HIVES.push(child);
+  CHILDREN.push(child);
   return { root, store, agents, app, child, ids: { old, cur } };
 }
-const HIVES = [];
-test.after(() => { for (const h of HIVES) h.dispose(); });
 const depsOf = (f) => claimsDepsFor(L, { hive: f.root, store: f.store, agents: f.agents, allTasks: f.child.allTasks });
 
 /** The oracle: index.ts's get closure body before the move (65bec666), over the same hive. */

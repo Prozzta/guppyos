@@ -147,7 +147,7 @@ test('M1 (kept): the index delete covers the WAL/SHM and retries a handle Window
 
 // ── one-time cleanup of what older builds generated ─────────────────────────
 
-test('pruneRetiredHiveFiles: removes the old mode file and each agent .gitignore that is EXACTLY the generated list (LF or CRLF); an edited one stays; runs from ensureHive', () => {
+test('pruneRetiredHiveFiles: removes the old mode file and each agent .gitignore that is EXACTLY the generated list (LF or CRLF); an edited one stays; runs from ensureHive', async () => {
   const home = dir('hive-');
   const root = path.join(home, 'hive');
   const put = (rel, body) => { const p = path.join(root, ...rel.split('/')); fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, body); return p; };
@@ -165,7 +165,7 @@ test('pruneRetiredHiveFiles: removes the old mode file and each agent .gitignore
     assert.equal(fs.readFileSync(mine, 'utf8'), RETIRED_AGENT_GITIGNORE + 'my-own-line\n', 'an edited one is the user\'s');
     assert.equal(fs.readFileSync(path.join(root, 'agents', 'a4', 'memory.md'), 'utf8'), 'm');
     h.pruneRetiredHiveFiles(root);   // idempotent
-  } finally { h.dispose(); }
+  } finally { h.dispose(); await h.drainReads(); }
   assert.equal(RETIRED_AGENT_GITIGNORE, 'settings.json\ncursor.json\ninbox/\noutbox/\n.codex/\n', 'the exact list 1.1.58 wrote');
   assert.match(between(HIVE, 'ensureHive(): void {', '\n  }\n'), /this\.pruneRetiredHiveFiles\(root\);/);
 });

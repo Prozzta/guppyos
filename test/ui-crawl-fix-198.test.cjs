@@ -72,7 +72,7 @@ async function floor(mod = H) {
     ]
   });
   const row = () => JSON.parse(fs.readFileSync(fleetPath, 'utf8')).agents.find((a) => a.id === 'jim-1');
-  const done = () => { try { hive.dispose(); } catch { /* best effort */ } rm(home); };
+  const done = async () => { try { hive.dispose(); await hive.drainReads(); } catch { /* best effort */ } rm(home); };
   return { home, hive, fleetPath, publish, row, done };
 }
 
@@ -120,7 +120,7 @@ const K = {
       assert.doesNotMatch(f.hive.rosterContext(), /ON HOLD/);
       await f.hive.fleetFlushed();
       assert.equal(f.row().onHold, false, 'AND SO IS THE RELEASE');
-    } finally { f.done(); }
+    } finally { await f.done(); }
   },
 
   /** M1: a rename, the same way. */
@@ -134,7 +134,7 @@ const K = {
       assert.equal(f.row().name, 'Jim', 'NO SYNC WRITE OF fleet.json IN THE RENAME TURN');
       await f.hive.fleetFlushed();
       assert.equal(f.row().name, 'Kevin', 'A RENAME IS PUBLISHED THROUGH THE ASYNC WRITER');
-    } finally { f.done(); }
+    } finally { await f.done(); }
   },
 
   /** M1: before anything is published there is nothing to patch: no file appears, nothing throws. */
@@ -147,7 +147,7 @@ const K = {
       assert.equal(f.hive.rosterContext(), null, 'NO ROSTER BEFORE THE FIRST PUBLISH');
       assert.equal(fs.existsSync(f.fleetPath), false, 'NO fleet.json IS CONJURED BY A HOLD');
       assert.equal(f.hive.registry().agents['jim-1'].onHold, true, 'the registry is the record');
-    } finally { f.done(); }
+    } finally { await f.done(); }
   },
 
   /** M1: the hold and rename paths hold no read-modify-write of fleet.json (source pin). */
@@ -173,7 +173,7 @@ const K = {
       f.hive.writeFleetSnapshot({ ts: 3, agents: [] });
       await f.hive.fleetFlushed();
       assert.equal(JSON.parse(fs.readFileSync(f.fleetPath, 'utf8')).ts, 3, 'AND FOR THE NEXT ONE');
-    } finally { f.done(); }
+    } finally { await f.done(); }
   },
 
   /** M2: a failed async write is logged, like the sync one; the counts still come back. */
@@ -315,7 +315,7 @@ const K = {
       assert.notEqual(after, jim);
       assert.deepEqual([after.onHold, after.name], [true, 'Kevin']);
       await f.hive.fleetFlushed();
-    } finally { f.done(); }
+    } finally { await f.done(); }
   },
 
   /** q: atomicWriteTextAsync's commit check: false withdraws the write, true publishes it. */

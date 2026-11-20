@@ -38,7 +38,7 @@ const { buildPtyEnv } = loadTs('src/main/ptyEnv.ts');
 async function hiveWith(t) {
   const harness = fs.mkdtempSync(path.join(FAKE_HOME, 'harness-'));
   const hive = new HiveManager(() => harness);
-  t.after(() => hive.dispose());
+  t.after(async () => { hive.dispose(); await hive.drainReads(); });
   await hive.ensureAgent({ id: 'god', name: 'Michael', provider: 'claude', cwd: FAKE_HOME, isGod: true });
   return hive;
 }

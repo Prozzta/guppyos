@@ -898,7 +898,7 @@ function sandbox(t) {
   fs.writeFileSync(path.join(home, '.codex', 'config.toml'), 'check_for_update_on_startup = true\nmodel = "gpt-x"\n');
   const { HiveManager } = loadTs('src/main/hive.ts');
   const hive = new HiveManager(() => path.join(home, 'harness'));
-  t.after(() => hive.dispose());
+  t.after(async () => { hive.dispose(); await hive.drainReads(); });
   return { home, hive };
 }
 

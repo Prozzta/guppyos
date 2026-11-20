@@ -530,7 +530,7 @@ test('wiring: the spawn sets HIVE_LEDGER_URL from this spawn\'s hook URL; dev bu
   assert.match(readSource('src/main/hive.ts'), /## The ledger command/);
 });
 
-test('writeLedgerCommand: bin/ledger holds only the ledger wrappers; memory\'s are unchanged', () => {
+test('writeLedgerCommand: bin/ledger holds only the ledger wrappers; memory\'s are unchanged', async () => {
   const { HiveManager } = loadTs('src/main/hive.ts');
   const home = tmp('bin-');
   const h = new HiveManager(() => home);
@@ -540,7 +540,7 @@ test('writeLedgerCommand: bin/ledger holds only the ledger wrappers; memory\'s a
   if (process.platform === 'win32') {
     assert.equal(fs.readFileSync(path.join(d, 'ledger.cmd'), 'utf8'), `@echo off\r\nset ELECTRON_RUN_AS_NODE=1\r\n"${process.execPath}" "C:\\app\\resources\\ledger-cli.cjs" %*\r\n`);
   }
-  h.dispose();
+  h.dispose(); await h.drainReads();
 });
 
 // ── C: the measure ──────────────────────────────────────────────────────────────────────────

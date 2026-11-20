@@ -280,14 +280,14 @@ test('main seeds a new floor with no agents and the floor docs, and leaves the e
   const oldHome = fs.mkdtempSync(path.join(os.tmpdir(), 'md-nfcs-old-'));
   const newHome = fs.mkdtempSync(path.join(os.tmpdir(), 'md-nfcs-new-'));
   const oldHive = new HiveManager(() => oldHome);
-  t.after(async () => { oldHive.dispose(); await oldHive.drainReads(); fs.rmSync(oldHome, { recursive: true, force: true }); fs.rmSync(newHome, { recursive: true, force: true }); });
+  t.after(async () => { oldHive.dispose(); await oldHive.drainReads(); fs.rmSync(oldHome, { recursive: true, force: true }); });
   oldHive.ensureHive();
   const oldReg = path.join(oldHive.root(), 'registry.json');
   fs.writeFileSync(oldReg, JSON.stringify({ godId: 'god-d', agents: { 'god-d': { id: 'god-d', cwd: oldHome }, jim: { id: 'jim', cwd: 'C:/PrzEdit' } } }, null, 2));
   const before = fs.readFileSync(oldReg);
 
   const newHive = new HiveManager(() => newHome);
-  t.after(() => newHive.dispose());
+  t.after(async () => { newHive.dispose(); await newHive.drainReads(); fs.rmSync(newHome, { recursive: true, force: true }); });
   newHive.ensureHive();
   const reg = JSON.parse(fs.readFileSync(path.join(newHive.root(), 'registry.json'), 'utf8'));
   assert.deepEqual(Object.keys(reg.agents ?? {}), [], 'no agent is copied in; the god is the first one the renderer spawns');

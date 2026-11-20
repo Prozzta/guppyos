@@ -788,7 +788,7 @@ async function main() {
     closing = true;
     try { await ptyManager.killAllAsync(3000); } catch { /* best effort */ }
     try { hookServer.stop(); } catch { /* best effort */ }
-    try { hive.stopRouter(); hive.stopAllProxyBridges(); hive.dispose(); } catch { /* best effort */ }
+    try { hive.stopRouter(); hive.stopAllProxyBridges(); hive.dispose(); await hive.drainReads(); } catch { /* best effort */ }
     try { rig.llm.srv.close(); } catch { /* best effort */ }
     process.exit(code);
   }

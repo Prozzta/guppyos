@@ -75,7 +75,7 @@ async function twoAgents(t, cwd) {
   await hive.ensureAgent({ id: 'god', name: 'Michael', provider: 'claude', cwd, isGod: true });
   await hive.ensureAgent({ id: 'jim', name: 'Jim', provider: 'claude', cwd });
   await hive.ensureAgent({ id: 'andy', name: 'Andy', provider: 'claude', cwd });
-  t.after(() => hive.dispose());
+  t.after(async () => { hive.dispose(); await hive.drainReads(); });
   return hive;
 }
 

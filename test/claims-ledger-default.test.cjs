@@ -17,7 +17,9 @@ const path = require('node:path');
 /** TEST-TEMP-HYGIENE: every temp entry this file makes, removed once at the end (the runner fails a leak). */
 const made = [];
 const tmp = (tag) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), `claims-ledger-default-${tag}-`)); made.push(d); return d; };
-test.after(() => { require('./load-ts.cjs').closeConfigWatchers(); for (const d of made.reverse()) fs.rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); });
+/** Every manager this file builds: closed, and its reads done, before its folder is removed. */
+const hives = [];
+test.after(async () => { for (const h of hives) { h.dispose(); await h.drainReads(); } require('./load-ts.cjs').closeConfigWatchers(); for (const d of made.reverse()) fs.rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); });
 const userData = tmp('cfg');
 const electron = require.resolve('electron');
 require.cache[electron] = { id: electron, filename: electron, loaded: true, exports: { app: { getPath: () => userData } } };
@@ -38,6 +40,7 @@ const levelOf = (root, agentId, saved = 'writer') => {
 const newHive = (project) => {
   const home = tmp('home');
   const hive = new HiveManager(() => home);
+  hives.push(hive);
   hive.setNewHiveSeed((root) => { seedFloorSources(root, project); });
   hive.ensureHive();
   return { hive, root: hive.root() };
@@ -102,6 +105,7 @@ test('(g) an existing hive is never re-seeded: ensureHive again, or a hand-writt
   fs.mkdirSync(path.join(home, 'hive'), { recursive: true });
   fs.writeFileSync(path.join(home, 'hive', SOURCES_CONFIG_FILE), JSON.stringify({ topLevel: [], include: {}, ledger: {} }));
   const h2 = new HiveManager(() => home);
+  hives.push(h2);
   h2.setNewHiveSeed((r) => { seedFloorSources(r, null); });
   h2.ensureHive();
   assert.equal(readSourcesConfig(h2.root()).ledgerDefault, undefined);

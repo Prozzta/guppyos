@@ -531,7 +531,7 @@ function inProcessFork(runWorker, deps, tap = null) {
     fs.writeFileSync(spec.serve.connectFile, JSON.stringify(connect, null, 1));
     while (!fs.existsSync(spec.serve.stopFile)) await new Promise((r) => setTimeout(r, 500));
     server.close();
-    hiveTasks.dispose();
+    await hiveTasks.dispose();
     await nativeMemory.shutdown().catch(() => {});
     // god ba807e: the index as the worker left it (shut down), so the runner can serve the preflight's to the items.
     emit({ summary: { ...verdict(), persistRisk: persistRisk.length,served: Object.keys(askers), ledgers, synced, worldCalls, status1: status1.json ?? null, index: indexDigest(nativeMemory.dbFile()), searches, memLog: logRows.filter((r) => /^native-memory/.test(String(r.kind ?? ''))) } });

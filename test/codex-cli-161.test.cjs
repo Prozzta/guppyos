@@ -95,7 +95,7 @@ function sandbox(t) {
   fs.mkdirSync(path.join(home, '.codex'), { recursive: true });
   fs.writeFileSync(path.join(home, '.codex', 'auth.json'), '{"x":1}');
   const hive = new HiveManager(() => path.join(home, 'harness'));
-  t.after(() => hive.dispose());
+  t.after(async () => { hive.dispose(); await hive.drainReads(); });
   return { home, hive };
 }
 

@@ -264,7 +264,7 @@ test('HOOK: at 2 slots a FULL from one agent denies another agent\'s build (the 
     if (pu === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = pu;
     // The hive keeps its log open until dispose, and may still be writing (ENOTEMPTY): removeDir
     // waits for it (TEST-TEMP-HYGIENE: a leftover fails the run).
-    if (hive) hive.dispose();
+    if (hive) { hive.dispose(); await hive.drainReads(); }
     await removeDir(home);
   });
   const { HiveManager } = loadTs('src/main/hive.ts');

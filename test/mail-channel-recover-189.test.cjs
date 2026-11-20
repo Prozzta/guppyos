@@ -60,7 +60,7 @@ async function world(t, m = mods(), home = fs.mkdtempSync(path.join(JAIL, 'floor
   const hive = new m.HiveManager(() => home, () => true);
   const w = { now: Date.now(), queue: [], reqs: [], diags: [] };
   let server = null;
-  t.after(() => { try { server?.stop(); } catch { /* noop */ } hive.dispose(); });
+  t.after(async () => { try { server?.stop(); } catch { /* noop */ } hive.dispose(); await hive.drainReads(); });
   await hive.ensureAgent({ id: 'god-1', name: 'Michael', provider: 'claude', cwd: home, isGod: true });
   await hive.ensureAgent({ id: 'cl-1', name: 'cl-1', provider: 'claude', cwd: home });
   const coordinator = new WorkerWakeWatchdog();
@@ -275,7 +275,7 @@ test('(b) the override survives an app restart (persisted), and the next spawn u
     // An app restart: a new HiveManager over the same hive reads the override back.
     const { HiveManager } = mods();
     const again = new HiveManager(() => w.home, () => true);
-    t.after(() => again.dispose());
+    t.after(async () => { again.dispose(); await again.drainReads(); });
     assert.equal(again.mail.channelOverride('cl-1')?.reason, reason, `${reason}: persisted across a restart`);
     await again.ensureAgent({ id: 'cl-1', name: 'cl-1', provider: 'claude', cwd: w.home });
     assert.equal(again.mail.channelOverride('cl-1'), null, `${reason}: undone at the spawn`);

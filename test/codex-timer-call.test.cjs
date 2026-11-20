@@ -34,7 +34,7 @@ async function pluginFlagKiller(t, Manager) {
   fs.mkdirSync(path.join(home, '.codex'), { recursive: true });
   fs.writeFileSync(path.join(home, '.codex', 'auth.json'), '{"token":"test"}');
   const hive = new Manager(() => path.join(home, 'hive'));
-  t.after(() => hive.dispose());
+  t.after(async () => { hive.dispose(); await hive.drainReads(); });
   const injection = await hive.ensureAgent({ id: 'timer', name: 'Timer', provider: 'codex', cwd: home }, {});
   const flag = injection.args.indexOf('features.plugins=false');
   assert.ok(flag > 0, 'CODEX-TIMER-CALL: every Codex spawn must disable curated plugins');

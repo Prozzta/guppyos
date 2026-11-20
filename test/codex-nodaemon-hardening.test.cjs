@@ -44,7 +44,7 @@ function sandbox(t) {
   fs.writeFileSync(path.join(home, '.codex', 'packages', 'standalone', 'KEEP'), 'the user install');
   fs.writeFileSync(path.join(home, '.codex', 'auth.json'), '{"x":1}');
   const hive = new HiveManager(() => path.join(home, 'harness'));
-  t.after(() => hive.dispose());
+  t.after(async () => { hive.dispose(); await hive.drainReads(); });
   const logRows = () => { try { return fs.readFileSync(path.join(home, 'harness', 'hive', 'log.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
   return { home, hive, logRows };
 }

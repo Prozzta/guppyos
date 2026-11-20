@@ -49,7 +49,7 @@ function promptHive(t, { maySpawn = false } = {}) {
   const home = fs.mkdtempSync(path.join(FAKE_HOME, 'fp-'));
   const hive = new HiveManager(() => home);
   hive.setOrchestratorMaySpawn(maySpawn);
-  t.after(() => hive.dispose());
+  t.after(async () => { hive.dispose(); await hive.drainReads(); });
   return hive;
 }
 const WORKER = { id: 'jim', name: 'Jim', provider: 'claude', cwd: 'C:/w' };
@@ -267,7 +267,7 @@ async function oneAgent(t) {
   const cwd = fs.mkdtempSync(path.join(FAKE_HOME, 'cwd-'));
   const hive = new HiveManager(() => harness);
   await hive.ensureAgent({ id: 'jim', name: 'Jim', provider: 'claude', cwd });
-  t.after(() => hive.dispose());
+  t.after(async () => { hive.dispose(); await hive.drainReads(); });
   const reg = () => JSON.parse(fs.readFileSync(path.join(hive.root(), 'registry.json'), 'utf8')).agents.jim;
   const log = () => fs.readFileSync(path.join(hive.root(), 'log.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
   return { hive, reg, log };

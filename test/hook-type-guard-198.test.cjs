@@ -263,18 +263,23 @@ function redirectedHome(t) {
   const realProfile = process.env.USERPROFILE;
   process.env.HOME = home;
   process.env.USERPROFILE = home;
-  t.after(() => {
+  t.after(async () => {
     if (realHome === undefined) delete process.env.HOME; else process.env.HOME = realHome;
     if (realProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = realProfile;
+    // The managers built in this home close and finish their reads before the folder goes.
+    for (const hive of HIVES_IN.get(home) ?? []) { hive.dispose(); await hive.drainReads(); }
+    HIVES_IN.delete(home);
     fs.rmSync(home, { recursive: true, force: true });
   });
   assert.equal(os.homedir(), home, 'home redirect failed: aborting before any hive object reads or writes a real home');
   return home;
 }
 const put = (p, text) => { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, text); };
+/** home -> the managers built in it; redirectedHome()'s hook closes them before it removes the home. */
+const HIVES_IN = new Map();
 function hiveIn(t, home, live = false) {
   const hive = live ? new HiveManager(() => home, undefined, {}, () => true) : new HiveManager(() => home);
-  t.after(() => hive.dispose());
+  HIVES_IN.set(home, [...(HIVES_IN.get(home) ?? []), hive]);
   const rows = [];
   hive.appendLog = (r) => { rows.push(r); };
   return { hive, rows };

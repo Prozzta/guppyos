@@ -98,7 +98,7 @@ test('(1) the registry keeps the id a new session replaced (previousSessionId)',
   assert.equal(hive.previousSession('god'), 'real-1');
   hive.recordSession('god', 'real-2');
   assert.equal(hive.previousSession('god'), 'real-1', 'an unchanged id does not shift the history');
-  hive.dispose(); // before the sandbox is removed
+  hive.dispose(); await hive.drainReads(); // before the sandbox is removed
 });
 
 test('(1) wiring: the beat gates the sample id; the spawn resumes the previous id and logs resume-miss', () => {

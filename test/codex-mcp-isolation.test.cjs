@@ -71,7 +71,7 @@ function sandbox(t, seed) {
   fs.writeFileSync(path.join(home, '.codex', 'config.toml'), text);
   const { HiveManager } = loadTs('src/main/hive.ts');
   const hive = new HiveManager(() => path.join(home, 'harness'));
-  t.after(() => hive.dispose());
+  t.after(async () => { hive.dispose(); await hive.drainReads(); });
   return { home, hive, seed: text };
 }
 

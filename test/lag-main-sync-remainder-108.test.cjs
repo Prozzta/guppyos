@@ -308,7 +308,7 @@ test('the async log tail answers as the synchronous one, rotated files included,
   fs.rmSync(live);
   assert.deepEqual(await hive.logTailAsync(10), hive.logTail(10), 'no live file: the rotated rows');
   const bare = new HiveManager(() => fs.mkdtempSync(path.join(JAIL, 'bare-')), () => false);
-  t.after(() => bare.dispose());
+  t.after(async () => { bare.dispose(); await bare.drainReads(); });
   assert.deepEqual(await bare.logTailAsync(10), [], 'no hive: no rows');
 });
 

@@ -465,7 +465,7 @@ test('CLI: app not running = exit 3 with one line of guidance; no endpoint env =
   assert.equal((await capture((io) => cli.main(['search', 'q'], { MUNDER_HIVE_ROOT: root }, io))).code, 3);
 });
 
-test('CLI on PATH (section 6): the generated wrappers run the command on Electron-as-Node, are rewritten only when changed, and nothing else stays in the dir', () => {
+test('CLI on PATH (section 6): the generated wrappers run the command on Electron-as-Node, are rewritten only when changed, and nothing else stays in the dir', async () => {
   const { HiveManager } = loadTs('src/main/hive.ts');
   const home = dir();
   const h = new HiveManager(() => home);
@@ -482,7 +482,7 @@ test('CLI on PATH (section 6): the generated wrappers run the command on Electro
   const m0 = fs.statSync(path.join(d, 'memory')).mtimeMs;
   h.writeMemoryCommand('C:\\app\\resources\\memory-cli.cjs');
   assert.equal(fs.statSync(path.join(d, 'memory')).mtimeMs, m0, 'unchanged content is not rewritten');
-  h.dispose();
+  h.dispose(); await h.drainReads();
 });
 
 // ── parity statistics (gate 4) ────────────────────────────────────────────
