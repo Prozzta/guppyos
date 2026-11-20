@@ -25,6 +25,9 @@ const os = require('node:os');
 const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
 const { tempDir, removeDir } = require('./tools/test-temp.cjs');
+// The fake TUI must be ON the pseudoconsole: a console-subsystem node.exe, never electron.exe (a GUI-subsystem
+// program ConPTY does not attach), so the Electron-as-Node leg runs the same child as the Node leg.
+const { consoleNode } = require('./tools/console-node.cjs');
 
 const JAIL = fs.mkdtempSync(path.join(os.tmpdir(), 'gtc-done-108-'));
 const realEnv = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
@@ -93,7 +96,7 @@ async function rig(provider) {
   const ptyId = `gtc-done-${provider}`;
   const agent = `gtc-${provider}`;
   const sink = { isDestroyed: () => false, send: () => {} };
-  const r = await pm.spawn({ id: ptyId, cwd: dir, command: process.execPath, args: [path.join(dir, 'tui.cjs'), byteLog, provider], cols: 100, rows: 30, env: {} }, sink);
+  const r = await pm.spawn({ id: ptyId, cwd: dir, command: consoleNode().file, args: [path.join(dir, 'tui.cjs'), byteLog, provider], cols: 100, rows: 30, env: {} }, sink);
   assert.ok(r.ok, `spawn: ${r.error}`);
   const rows = [];
   // The deps as src/main/index.ts builds them for the god-only term channel.
