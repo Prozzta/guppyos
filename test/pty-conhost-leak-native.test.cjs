@@ -52,7 +52,14 @@ const RAW_EARLY_FLAG = '--conhost-leak-raw-destroyed-early-manager';
 const EARLY = process.argv.includes(EARLY_FLAG) || process.argv.includes(RAW_EARLY_FLAG);
 const RAW = DISPOSED || process.argv.includes(RAW_FLAG) || process.argv.includes(RAW_EARLY_FLAG);
 const DESTROYED = RAW || EARLY || process.argv.includes(DESTROYED_FLAG);
-const UNREAD = DESTROYED || process.argv.includes(UNREAD_FLAG);
+// The node-pty-alone managers on the bundled console host (OpenConsole.exe through conpty.dll):
+// a second argument, given only where that host is staged next to the binaries.
+const DLL_FLAG = '--conhost-leak-bundled-host';
+const DLL = process.argv.includes(DLL_FLAG);
+// The unread (paused) terminal with node-pty alone: nothing but node-pty reports the exit.
+const RAW_UNREAD_FLAG = '--conhost-leak-raw-unread-manager';
+const RAW_UNREAD = process.argv.includes(RAW_UNREAD_FLAG);
+const UNREAD = DESTROYED || RAW_UNREAD || process.argv.includes(UNREAD_FLAG);
 const RESULT = 'UNREAD-RESULT ';
 const test = UNREAD ? () => {} : require('node:test');
 const assert = require('node:assert/strict');
@@ -67,6 +74,10 @@ const WIN = process.platform === 'win32';
 const HOSTS = new Set(['conhost.exe', 'openconsole.exe']);
 const LISTINGS = 12;   // completed process listings after the exit before "it stays" is the verdict
 const SETTLE = 8;      // completed listings between the socket's end and the word that lets the program stop
+const BUNDLED_HOST = path.join(__dirname, '..', 'node_modules', 'node-pty', 'build', 'Release', 'conpty', 'conpty.dll');
+// How a console session that is ended from outside ends its program, as the program's exit code:
+// STATUS_CONTROL_C_EXIT, or STATUS_DLL_INIT_FAILED for a program that had not come up yet.
+const SESSION_ENDED = [-1073741510, -1073741502];
 let seq = 0;
 
 /** pid -> name of the console hosts that are children of this process; `.threads` is this process's thread count. */
@@ -192,17 +203,38 @@ async function unreadManager() {
     const stop = path.join(dir, 'stop');
     fs.writeFileSync(program, UNREAD_PROGRAM);
     await fs.promises.stat(dir);       // the thread pool exists before the count is taken
-    const before = await hostChildren();
+    const rawOptions = { cols: 80, rows: 24, cwd: process.cwd(), useConptyDll: DLL };
+    let before = await hostChildren();
+    if (DESTROYED) {
+      // The thread baseline is taken AFTER one terminal has come and gone on the same path, so
+      // that what a process starts once (and keeps) is not counted against this terminal. It is
+      // the LOWEST count of SETTLE listings taken once that first terminal's host is gone: the
+      // lowest is the strictest baseline there is.
+      const first = before;
+      let warm;
+      if (RAW) warm = require('node-pty').spawn(node.file, ['-e', ''], rawOptions);
+      else { await m.spawn({ id: `${id}-first`, cwd: process.cwd(), command: node.file, args: ['-e', ''], cols: 80, rows: 24 }); warm = m.sessions.get(`${id}-first`).proc; }
+      warm.onData(() => {});
+      await new Promise((res) => warm.onExit(res));
+      const others = (now) => [...now].filter(([pid]) => !first.has(pid));
+      before = await hostChildren();
+      for (let k = 0; k < LISTINGS && others(before).length; k += 1) before = await hostChildren();
+      if (others(before).length) throw new Error(`the first terminal's host stays: ${JSON.stringify(others(before))}`);
+      let lowest = before.threads;
+      for (let k = 0; k < SETTLE; k += 1) { before = await hostChildren(); lowest = Math.min(lowest, before.threads); }
+      before.threads = lowest;
+    }
     let proc;
-    if (RAW) {
+    if (RAW || RAW_UNREAD) {
       // node-pty alone: no PtyManager, so nothing but node-pty itself ever ends the output worker.
-      proc = require('node-pty').spawn(node.file, [program, flag, written, stop], { cols: 80, rows: 24, cwd: process.cwd() });
+      proc = require('node-pty').spawn(node.file, [program, flag, written, stop], rawOptions);
     } else {
       out.spawn = await m.spawn({ id, cwd: process.cwd(), command: node.file, args: DESTROYED ? [program, flag, written, stop] : [program, flag, written], cols: 80, rows: 24 });
       proc = m.sessions.get(id).proc;
     }
     const firstOutput = new Promise((res) => proc.onData((d) => { out.read += d.length; res(); }));
     const exited = new Promise((res) => proc.onExit((e) => { out.events.push(e); res(e); }));
+    out.bundledHost = proc._agent._useConptyDll === true;
     out.hosts = [...(await hostChildren())].filter(([pid]) => !before.has(pid));
     if (DESTROYED) {
       // The terminal's exit event comes from the socket closing, at once and without a code. The
@@ -226,14 +258,25 @@ async function unreadManager() {
       for (let k = 0; k < SETTLE; k += 1) await hostChildren();
       out.workerEndedEarly = workerEnded;
       fs.writeFileSync(stop, '');
+      // The program ends itself and says so in its file, or it was ended from outside and is
+      // gone: every turn of this wait is one completed listing, and it ends with the program.
       const alive = () => { try { process.kill(proc.pid, 0); return true; } catch { return false; } };
       while (!fs.existsSync(written) && alive()) await hostChildren();
-      for (let k = 0; k < LISTINGS && proc._agent._exitCode === undefined; k += 1) await hostChildren();
+      for (let k = 0; k < LISTINGS && (proc._agent._exitCode === undefined || alive()); k += 1) await hostChildren();
       out.exit = { exitCode: proc._agent._exitCode };
+      out.programAlive = alive();
     } else {
       proc.pause();                    // nothing reads this terminal's output from here on
+      out.readAtPause = out.read;      // (the bundled host's own first bytes may have come by now)
       fs.writeFileSync(flag, '');      // and only now does the program print
-      out.exit = await exited;
+      // The program ends itself once its writes stand still. From then the terminal has LISTINGS
+      // completed listings to report the exit: a terminal that never does is a result (null),
+      // not a manager that waits for ever.
+      const alive = () => { try { process.kill(proc.pid, 0); return true; } catch { return false; } };
+      while (alive() && !out.events.length) await hostChildren();
+      for (let k = 0; k < LISTINGS && !out.events.length; k += 1) await hostChildren();
+      out.exit = out.events[0] || null;
+      out.nativeExit = proc._agent._exitCode;
     }
     out.written = fs.existsSync(written) ? Number(fs.readFileSync(written, 'utf8')) : null;   // null: it was ended from outside
     out.left = out.hosts;
@@ -255,7 +298,7 @@ if (UNREAD) unreadManager();
 
 /** Runs this file as a manager process; resolves with its result line, and `ended()` says how it ended, waiting LISTINGS listings at most. */
 async function managerRun(t, flag) {
-  const child = spawn(process.execPath, [__filename, flag], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+  const child = spawn(process.execPath, [__filename].concat(flag), { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
   t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill(); });
   let stdout = ''; let stderr = '';
   child.stderr.setEncoding('utf8').on('data', (d) => { stderr += d; });
@@ -273,14 +316,20 @@ async function managerRun(t, flag) {
   return { r, pid: child.pid, ended, stderr: () => stderr };
 }
 
-test('PTY-CONHOST-LEAK: a program that ends itself with its output unread: the exit is reported, the host goes, and the manager process ends by itself',
-  { skip: !WIN, timeout: 120_000 }, async (t) => {
-    const { r, pid, ended, stderr } = await managerRun(t, UNREAD_FLAG);
+async function unreadTerminal(t, flag) {
+    const { r, pid, ended, stderr } = await managerRun(t, flag);
     t.diagnostic(`PTY child: ${r.node}; the program had ${r.written} writes of 4097 bytes returned when it ended itself; the manager read ${r.read} bytes`);
     // The state: the program printed, nothing of it was read, and it ended ITSELF (process.kill of
     // its own pid ends a Windows process with code 1; the manager sent no kill).
     assert.ok(r.written > 0, 'the program printed before it ended');
-    assert.equal(r.read, 0, 'nothing of the output was read: the terminal was paused before the first write');
+    // The terminal was paused before the program's first write. The inbox host has written
+    // nothing by then; the bundled host has sent its own first bytes (fewer than one write of the
+    // program). Either way not one byte is read after the pause.
+    assert.equal(r.read, r.readAtPause, `nothing was read after the terminal was paused: ${r.readAtPause} bytes before, ${r.read} in all`);
+    assert.ok(r.readAtPause < 4097, `what was read before the pause is not the program's output: ${r.readAtPause} bytes, less than one of its writes`);
+    if (!r.bundledHost) assert.equal(r.read, 0, 'on the inbox host nothing at all was read');
+    assert.ok(r.exit, `THE EXIT IS NOT REPORTED: the program ended itself with its output unread (the native side has its exit code: ${r.nativeExit}), and ${LISTINGS} listings later the terminal has told nobody. `
+      + 'The terminal waits for the console host to close the output, and the host waits for somebody to read it');
     assert.deepEqual(r.exit && r.exit.exitCode, 1, `THE EXIT IS REPORTED, with the program's own end: ${JSON.stringify(r.exit)}`);
     assert.deepEqual(r.left, [], `THE CONSOLE HOST OUTLIVES ITS TERMINAL: the program ended itself with its output unread, and ${LISTINGS} listings after the exit was reported `
       + `${r.left.map(([p, name]) => `${name} pid ${p}`).join(', ')} is still a child of the manager process`);
@@ -288,7 +337,11 @@ test('PTY-CONHOST-LEAK: a program that ends itself with its output unread: the e
     assert.ok(end, `THE MANAGER PROCESS DOES NOT END: ${LISTINGS} listings after it reported its result (exit reported, host gone) pid ${pid} is still running. `
       + 'Nothing is left for it to do, so its exit thread is still inside the close and holds the exit callback (quit would wait on that thread)');
     assert.deepEqual(end, { code: 0, signal: null }, `the manager process ended by itself and cleanly:\n${stderr()}`);
-  });
+    return r;
+}
+
+test('PTY-CONHOST-LEAK: a program that ends itself with its output unread: the exit is reported, the host goes, and the manager process ends by itself',
+  { skip: !WIN, timeout: 120_000 }, (t) => unreadTerminal(t, UNREAD_FLAG));
 
 /** Ends a console host the manager process `parent` left behind: only a host, and only one whose recorded parent is that process. */
 function endLeftHost(pid, parent) {
@@ -302,12 +355,29 @@ async function destroyedSocket(t, flag, who) {
   t.after(async () => { for (const [host] of r.left || []) await endLeftHost(host, pid); });
   t.diagnostic(`PTY child: ${r.node}; the program had ${r.written} writes of 4097 bytes returned when it ended itself (on the manager's word, or when they stood still); `
     + `manager threads ${JSON.stringify(r.threads)}; output worker ended while the program printed: ${r.workerEndedEarly}`);
-  assert.ok(r.written > 0, `the program printed and ended itself: ${r.written}`);
+  // HOW THE PROGRAM ENDS is a fact of the path, and each path's own premise is required here.
+  // - The session stays (the inbox host; node-pty alone on either host): the program prints on,
+  //   is told to stop, and ends ITSELF with code 1 and its count of writes.
+  // - PtyManager on the bundled host: the terminal's exit event makes PtyManager release the
+  //   terminal, the release closes the console's input, and on this host that ends the session:
+  //   the host ends the program (no count is written) and then itself, and the output worker
+  //   ends with the console it read.
+  // Whichever it is, nothing is left: no program, no host, no thread, and the manager ends.
+  const sessionEnded = who === 'PtyManager' && r.bundledHost === true;
+  t.diagnostic(`path: ${r.bundledHost ? 'bundled host (conpty.dll)' : 'inbox host'}, ${who}; expected end of the program: ${sessionEnded ? 'by the session\'s end' : 'by itself'}; exit ${JSON.stringify(r.exit)}`);
+  assert.equal(typeof r.bundledHost, 'boolean', 'the manager said which console host it ran on');
   assert.ok(r.events.length >= 1, 'the terminal told the manager that it ended');
-  assert.deepEqual(r.exit, { exitCode: 1 }, `THE EXIT IS REPORTED by the native side, with the program's own end: ${JSON.stringify(r.exit)}`);
+  assert.equal(r.programAlive, false, `THE PROGRAM OUTLIVES ITS TERMINAL: pid of the program is still running ${LISTINGS} listings after its end was awaited`);
+  if (sessionEnded) {
+    assert.equal(r.written, null, `on this path the session's end ends the program before it is told to stop: it wrote no count, got ${r.written}`);
+    assert.ok(r.exit && SESSION_ENDED.includes(r.exit.exitCode), `THE EXIT IS REPORTED by the native side, with the session's end: ${JSON.stringify(r.exit)} (one of ${SESSION_ENDED.join(', ')})`);
+  } else {
+    assert.ok(r.written > 0, `the program printed and ended itself: ${r.written}`);
+    assert.deepEqual(r.exit, { exitCode: 1 }, `THE EXIT IS REPORTED by the native side, with the program's own end: ${JSON.stringify(r.exit)}`);
+  }
   assert.deepEqual(r.left, [], `THE CONSOLE HOST OUTLIVES ITS TERMINAL: the output socket was destroyed, the program printed ${r.written} writes and ended itself, and ${LISTINGS} listings later `
     + `${r.left.map(([p, name]) => `${name} pid ${p}`).join(', ')} is still a child of the manager process: the host is blocked writing output nobody reads, and the close waits on it`);
-  assert.equal(r.workerEndedEarly, false, `THE OUTPUT WORKER IS ENDED WHILE THE CONSOLE STILL WRITES: ${who} ended it within ${SETTLE} listings of the socket's end, while the program was printing; `
+  if (!sessionEnded) assert.equal(r.workerEndedEarly, false, `THE OUTPUT WORKER IS ENDED WHILE THE CONSOLE STILL WRITES: ${who} ended it within ${SETTLE} listings of the socket's end, while the program was printing; `
     + 'from then on nobody reads the console\'s output, and the host blocks in its write');
   assert.ok(typeof r.threads.before === 'number' && typeof r.threads.after === 'number', `the listing counted the manager's threads: ${JSON.stringify(r.threads)}`);
   assert.ok(r.threads.after <= r.threads.before, `THE TERMINAL LEAVES THREADS BEHIND: the manager had ${r.threads.before} threads before the terminal and ${r.threads.after} ${LISTINGS} listings after it ended `
@@ -316,6 +386,7 @@ async function destroyedSocket(t, flag, who) {
   assert.ok(end, `THE MANAGER PROCESS DOES NOT END: ${LISTINGS} listings after it reported its result (exit reported) pid ${pid} is still running. `
     + 'Nothing is left for it to do: the close of the pseudoconsole has not returned and holds the exit callback, on the thread a quit joins');
   assert.deepEqual(end, { code: 0, signal: null }, `the manager process ended by itself and cleanly:\n${stderr()}`);
+  return r;
 }
 
 test('PTY-CONHOST-LEAK: the same program with the terminal\'s output socket destroyed, through PtyManager: the exit is reported, the host goes, no thread stays, and the manager process ends by itself',
@@ -341,4 +412,27 @@ test('PTY-CONHOST-LEAK mutant: a manager that ends the output worker on the term
       assert.match(e.message, /THE OUTPUT WORKER IS ENDED WHILE THE CONSOLE STILL WRITES/, 'the mutant is refused for the reader it ends');
       return true;
     }, 'A WORKER ENDED BEFORE THE CLOSE RETURNED MUST BE REFUSED, and the check must say why');
+  });
+
+// node-pty alone on the bundled console host. These two run only where OpenConsole.exe and
+// conpty.dll are staged next to the binaries (the tree says so in the skip reason).
+const NO_BUNDLED_HOST = !WIN ? true : (fs.existsSync(BUNDLED_HOST) ? false : `the bundled console host is not staged in this tree (${path.relative(path.join(__dirname, '..'), BUNDLED_HOST)})`);
+// The bundled host reports an exit only by closing the output, and closes it only once it has
+// been read: node-pty alone, so the patched exit path is all there is to report it.
+test('PTY-CONHOST-LEAK: node-pty alone on the bundled console host, a program that ends itself with its output unread: the exit is reported, the host goes, and the manager process ends by itself',
+  { skip: NO_BUNDLED_HOST, timeout: 120_000 }, async (t) => {
+    const r = await unreadTerminal(t, [RAW_UNREAD_FLAG, DLL_FLAG]);
+    assert.equal(r.bundledHost, true, 'this cell ran on the bundled host');
+  });
+
+test('PTY-CONHOST-LEAK: node-pty alone on the bundled console host, the output socket destroyed while the program prints: the exit is reported, the host goes, no thread stays, and the manager process ends by itself',
+  { skip: NO_BUNDLED_HOST, timeout: 120_000 }, async (t) => {
+    const r = await destroyedSocket(t, [RAW_FLAG, DLL_FLAG], 'node-pty');
+    assert.equal(r.bundledHost, true, 'this cell ran on the bundled host');
+  });
+
+test('PTY-CONHOST-LEAK: node-pty alone on the bundled console host, the output socket destroyed before the program\'s first write: the exit is reported, the host goes, no thread stays, and the manager process ends by itself',
+  { skip: NO_BUNDLED_HOST, timeout: 120_000 }, async (t) => {
+    const r = await destroyedSocket(t, [RAW_EARLY_FLAG, DLL_FLAG], 'node-pty');
+    assert.equal(r.bundledHost, true, 'this cell ran on the bundled host');
   });
