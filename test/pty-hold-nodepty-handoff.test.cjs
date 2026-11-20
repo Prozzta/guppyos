@@ -144,28 +144,9 @@ test('holdRoot adopts a handoff, falls back to the open by pid, and says the fal
 test('an addon built before the handoff still holds by pid', () => F.oldAddon(freshId()));
 test("rootHandoff reads the handle node-pty kept, and nothing else", () => F.reader(freshId()));
 
-// ---------------------------------------------------------------------------------------------
-// watchKillSweep: which promise is "this kill's sweep". Plain logic, a recording terminal.
-// ---------------------------------------------------------------------------------------------
-test("watchKillSweep gives the list promise the kill asked for, and nothing when it asked for none", () => {
-  const { watchKillSweep } = loadTs(PTYF);
-  assert.equal(watchKillSweep({}).started(), null, 'no agent (another node-pty): nothing to wait for');
-  assert.equal(watchKillSweep({ _agent: {} }).started(), null, 'no list helper: nothing to wait for');
-  const list = Promise.resolve([1]);
-  const calls = [];
-  const agent = { _getConsoleProcessList(...a) { calls.push([this, a]); return list; } };
-  const quiet = watchKillSweep({ _agent: agent });
-  assert.equal(quiet.started(), null, 'A KILL THAT ASKED FOR NO LIST HAS NO SWEEP');
-  const w = watchKillSweep({ _agent: agent });
-  const got = agent._getConsoleProcessList('x');
-  assert.equal(got, list, "node-pty gets its own promise back, so its kills chain on it first");
-  assert.deepEqual(calls, [[agent, ['x']]], 'the helper is called once, as the agent, with its arguments');
-  assert.equal(w.started(), list, 'THE SWEEP IS THE PROMISE THE KILL ASKED FOR');
-  const sync = { _getConsoleProcessList: () => [1] };
-  const s = watchKillSweep({ _agent: sync });
-  assert.deepEqual(sync._getConsoleProcessList(), [1]);
-  assert.equal(s.started(), null, 'a helper that returns no promise has nothing to wait for');
-});
+// watchKillSweep (PTY-HOLD-NODEPTY-HANDOFF follow-up) is retired with PTY-CONHOST-ORPHAN option A: on
+// the bundled OpenConsole node-pty's kill lists no console processes and kills nothing by pid, so
+// there is no sweep to wait for. test/pty-kill-pid-identity.test.cjs pins that (mutant D1).
 
 const MUTANTS = [
   { file: IDF, name: 'A2 a refused handoff holds nothing', edits: [['  if (!adopted) {\n    try { handle = addon.procOpen(pid); } catch { return null; }\n  }\n', '  if (!adopted) return null;\n']],
@@ -886,55 +867,6 @@ if (!WIN) {
         if (raw && !closedByProduct) dispose(raw);
       }
     },
-    /** The product's close of a live terminal, with node-pty's by-pid sweep in the test's hands:
-     *  no helper is forked, the list arrives when the test says, and "kill each entry" is recorded. */
-    sweep: async (Pty) => {
-      const m = new Pty();
-      const owner = { isDestroyed: () => false, send: () => {} };
-      const order = [];
-      let arrive = () => {};
-      let raw = null;
-      let gone = null;
-      let up = null;
-      let closedByProduct = false;
-      nodePty.spawn = function spawn(...a) {
-        const proc = realPtySpawn.apply(this, a);
-        raw = proc;
-        gone = exitOf(proc);
-        let seen = '';
-        up = new Promise((resolve) => { const sub = proc.onData((d) => { seen += d; if (seen.includes('phnh-root-up')) { sub.dispose(); resolve(); } }); });
-        proc._agent._getConsoleProcessList = () => new Promise((resolve) => {
-          order.push('asked');
-          arrive = () => resolve({ forEach: () => { order.push('swept'); } });
-        });
-        return proc;
-      };
-      const turns = async () => { for (let i = 0; i < 3; i++) await new Promise((resolve) => setImmediate(resolve)); };
-      try {
-        const r = await m.spawn({ id: 'phnh-sweep', cwd: DIR, command: process.execPath, args: [path.join(DIR, 'idle.js')], cols: 80, rows: 24, env: {} }, owner);
-        assert.ok(r.ok, `spawn: ${r.error}`);
-        const session = m.sessions.get('phnh-sweep');
-        assert.ok(session && session.hold, 'the terminal holds its root');
-        const release = session.hold.release;
-        session.hold.release = () => { order.push('released'); return release(); };
-        await within(up, "the root's first output");
-        assert.ok(m.kill('phnh-sweep').ok, 'kill()');
-        closedByProduct = true;
-        // The close ends the root. Its exit is reported with the sweep still out.
-        await within(gone, 'the exit after the close');
-        await turns();
-        assert.deepEqual(order, ['asked'], "THE HOLD OUTLIVES NODE-PTY'S SWEEP: nothing releases it while the by-pid list is still out, not the kill's own end and not the root's exit");
-        assert.equal(session.hold.alive(), false, 'the root is dead, and its pid is still reserved by the hold');
-        arrive();
-        await turns();
-        assert.deepEqual(order, ['asked', 'swept', 'released'], 'THE HOLD IS RELEASED WHEN THE SWEEP HAS RUN: after the kills of the list, once');
-      } finally {
-        nodePty.spawn = realPtySpawn;
-        arrive();
-        if (gone && closedByProduct) await within(gone, 'the exit of the closed terminal');
-        if (raw && !closedByProduct) dispose(raw);
-      }
-    }
   };
 
   test('THE GAP, holdRoot: the root died before the hold and is held by its own handle', () => G.identity(freshId()));
@@ -949,16 +881,7 @@ if (!WIN) {
       run: (mod) => G.identity(mod), dies: /A ROOT THAT DIED BEFORE THE HOLD IS HELD BY ITS OWN HANDLE/ },
     { file: PTYF, name: 'A6 spawn does not pass the handoff (the code before this card)', edits: [['holdRoot(proc.pid, process.platform, rootHandoff(proc))', 'holdRoot(proc.pid, process.platform)']],
       run: (mod) => G.spawn(mod.PtyManager), dies: /THE GAP: a terminal whose root died before the hold still holds it/ },
-    { file: PTYF, name: "S1 node-pty's sweep is not a user of the hold (the code before this follow-up)", edits: [['    if (!pending) return;\n', '    return;\n']],
-      run: (mod) => G.sweep(mod.PtyManager), dies: /THE HOLD OUTLIVES NODE-PTY'S SWEEP/ },
-    { file: PTYF, name: 'S2 the sweep is counted, and dropped without waiting for it', edits: [['    pending.then(done, done);\n', '    done();\n']],
-      run: (mod) => G.sweep(mod.PtyManager), dies: /THE HOLD OUTLIVES NODE-PTY'S SWEEP/ },
-    { file: PTYF, name: "S3 the root's exit releases the hold whoever still uses it", edits: [['        if (!session.holdUsers) session.hold?.release();\n', '        session.hold?.release();\n']],
-      run: (mod) => G.sweep(mod.PtyManager), dies: /THE HOLD OUTLIVES NODE-PTY'S SWEEP/ },
-    { file: PTYF, name: 'S4 the hold is released when the list arrives, before the kills of it', edits: [['    try { s.proc.kill(); } catch { /* already gone */ }\n    // node-pty', '    const agent = (s.proc as any)._agent; const early = agent._getConsoleProcessList;\n    agent._getConsoleProcessList = () => { const p = early.call(agent); p.then(() => this.dropHold(s)); return p; };\n    try { s.proc.kill(); } catch { /* already gone */ }\n    // node-pty']],
-      run: (mod) => G.sweep(mod.PtyManager), dies: /THE HOLD IS RELEASED WHEN THE SWEEP HAS RUN/ }
   );
-  test("THE SWEEP, pty.ts: the hold is kept until node-pty's by-pid kill sweep has run", () => G.sweep(loadTs(PTYF).PtyManager));
 }
 
 test('MUTANT CENSUS: every mutant applies once and dies at the assertion that names its guarantee', async (t) => {
