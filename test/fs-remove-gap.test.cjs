@@ -17,8 +17,9 @@ require('./tools/own-job.cjs');
  * This file is the suite's share: RUNS runs of each of the three callers (safeRemoveTreeSync,
  * safeRemoveTree, the worktree reaper) under this Node and, on Windows, under the installed
  * Electron as Node, at 0 losses, and the old walk as the control. The control is the copy of the
- * e074a677 walk kept in the race file: with this planter it loses about once in 1,000 runs, so it
- * is run until it loses and the test fails if it does not.
+ * e074a677 walk kept in the race file, held for 1 ms after each check that found a real folder (why
+ * is in the race file, at HOLD_US): it loses within 100 runs, so it is run until it loses and the
+ * test fails if it does not.
  *
  * The statistical pin is the same race at a run count that would have caught 1 in 26,571
  * (`node test/fs-remove-gap-race.cjs pin <racers> <runs> <seconds>`); its numbers are on the card
@@ -48,6 +49,7 @@ function clean(res, runtime) {
     assert.equal(t.runs, RACERS * RUNS, `${impl}: every run was made`);
     assert.equal(t.losses, 0, `${impl}: THE VICTIM LOST FILES in ${t.losses} of ${t.runs} runs (first at ${t.firstLossAt})`);
     assert.ok(t.planted + t.swapped > t.runs / 10, `${impl}: the agent got its links in (${t.planted} planted, ${t.swapped} swapped in ${t.runs} runs)`);
+    assert.ok(t.landed > 0, `${impl}: no swap landed on a real folder of the tree in ${t.runs} runs (${t.swapped} swapped): this caller was not raced`);
     assert.ok(t.removed > 0, `${impl}: trees were removed`);
   }
 }
