@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 /**
  * QUIT-SWEEP-ELECTRON-SILENT-EXIT: a quit-sweep fixture that ends without a pid file must say HOW it ended.
  *
