@@ -103,3 +103,88 @@ test('a second manager over the same folder is closed by its own shutdown, not b
   assert.deepEqual(openUnder(home), [], 'nothing is open once both are shut down');
   deletes(home);
 });
+
+/**
+ * HIVE-DISPOSE-INFLIGHT-REARM: dispose() closes the authority watchers and the missed-watch timer,
+ * but an async roster read already open at that moment finishes afterwards and installs its result.
+ * That install used to put the watcher and the timer back on a disposed manager (measured: three
+ * floors of mail-channel-recover-189 kept a watcher this way and their delete failed under
+ * Electron). The read is held open with a gated fs.promises.readFile, so the order is forced.
+ */
+const turn = () => new Promise((r) => setImmediate(r));
+const disposed = (e) => e?.name === 'HiveDisposedError' && e.code === 'EHIVEDISPOSED';
+const watches = (home) => openUnder(home).filter((l) => l.startsWith('watch '));
+
+test('a roster read open at dispose() finishes without putting the watcher or the fallback timer back; reopen() allows both again', async (t) => {
+  const { home, hive } = await floor();
+  await shutDown(hive);
+  assert.deepEqual(openUnder(home), [], 'control: the floor starts with nothing open');
+
+  // Control: the same ask on a live manager arms both, so "none" below is a real observation.
+  const live = new HiveManager(() => home, () => true);
+  await live.mailObligationsAsync();
+  assert.ok(watches(home).length > 0, 'control: a live roster read arms an authority watcher');
+  await live.__revalidateAuthoritiesForTests();
+  await shutDown(live);
+  assert.deepEqual(openUnder(home), [], 'control: its shutdown closes them');
+
+  const cold = new HiveManager(() => home, () => true);
+  const registry = path.join(cold.root(), 'registry.json');
+  const real = fs.promises.readFile;
+  const g = { open: 0, gated: true, waiting: [], release() { this.gated = false; for (const go of this.waiting.splice(0)) go(); } };
+  fs.promises.readFile = async function gatedRosterRead(p, ...rest) {
+    if (path.resolve(String(p)) !== path.resolve(registry)) return real.call(fs.promises, p, ...rest);
+    g.open++;
+    try { if (g.gated) await new Promise((go) => { g.waiting.push(go); }); return await real.call(fs.promises, p, ...rest); } finally { g.open--; }
+  };
+  t.after(async () => { g.release(); fs.promises.readFile = real; cold.dispose(); await cold.drainReads(); });
+
+  const asked = cold.mailObligationsAsync().then(() => null, (e) => e);
+  for (let i = 0; i < 200 && g.open === 0; i++) await turn();
+  assert.equal(g.open, 1, 'the roster read is open and held');
+
+  cold.dispose();
+  g.release();
+  await cold.drainReads();
+  assert.ok(disposed(await asked), 'the ask that was in flight at dispose() rejects with HiveDisposedError');
+  assert.deepEqual(watches(home), [], 'the read that finished after dispose() put a watcher back');
+  await assert.rejects(cold.__revalidateAuthoritiesForTests(), /fallback is not armed/, 'the read that finished after dispose() put the fallback timer back');
+
+  // reopen() lifts it: the next authority read arms both again.
+  cold.reopen();
+  const tasks = path.join(cold.root(), 'tasks.json');
+  if (!fs.existsSync(tasks)) fs.writeFileSync(tasks, JSON.stringify({ tasks: [] }) + '\n');
+  cold.tasks();
+  assert.ok(watches(home).length > 0, 'after reopen() an authority read arms the watcher again');
+  await cold.__revalidateAuthoritiesForTests();
+  await shutDown(cold);
+  assert.deepEqual(openUnder(home), [], 'nothing is open after the last shutdown');
+  deletes(home);
+});
+
+test('a roster ask after dispose() rejects and does not read the roster synchronously instead', async (t) => {
+  const { home, hive } = await floor();
+  await shutDown(hive);
+  const cold = new HiveManager(() => home, () => true);
+  const registry = path.resolve(path.join(cold.root(), 'registry.json'));
+  const realRead = fs.readFileSync;
+  let syncReads = 0;
+  fs.readFileSync = function (p, ...rest) {
+    if (typeof p === 'string' && path.resolve(p) === registry) syncReads++;
+    return realRead.call(this, p, ...rest);
+  };
+  t.after(() => { fs.readFileSync = realRead; });
+
+  const live = new HiveManager(() => home, () => true);
+  live.mailObligations();
+  assert.ok(syncReads >= 1, 'control: a synchronous roster read is counted');
+  await shutDown(live);
+
+  cold.dispose();
+  syncReads = 0;
+  await assert.rejects(cold.mailObligationsAsync(), disposed, 'a roster ask after dispose() must reject with HiveDisposedError');
+  assert.equal(syncReads, 0, 'the ask fell back to a synchronous read of the roster in a folder being torn down');
+  await cold.drainReads();
+  assert.deepEqual(openUnder(home), [], 'and nothing was opened in the folder');
+  deletes(home);
+});

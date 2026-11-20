@@ -5309,7 +5309,12 @@ export class HiveManager {
       const p = join(root, 'registry.json');
       const c = this.authorityCache.get(p);
       const age = c ? this.authorityNow() - c.checkedAt : -1;
-      if (!c || age < 0 || age >= HiveManager.AUTHORITY_REVALIDATE_MS) await this.refreshAuthority(p);
+      if (!c || age < 0 || age >= HiveManager.AUTHORITY_REVALIDATE_MS) {
+        await this.refreshAuthority(p);
+        // HIVE-DISPOSE-INFLIGHT-REARM: the refresh swallows the refusal, and registry() below would
+        // then read the roster synchronously from a folder the caller is about to delete or copy.
+        if (this.readsRefused) throw new HiveDisposedError(p);
+      }
     }
     return this.registry();
   }
@@ -7379,6 +7384,9 @@ export class HiveManager {
     return run;
   }
   private watchAuthority(p: string): void {
+    // HIVE-DISPOSE-INFLIGHT-REARM: a read already open at dispose() finishes after it; its install
+    // must not put back the watcher dispose() closed. Nothing is armed until reopen().
+    if (this.readsRefused) return;
     const dir = dirname(p);
     if (this.authorityWatchers.has(dir)) return;
     try {
@@ -7413,6 +7421,8 @@ export class HiveManager {
   static readonly AUTHORITY_FALLBACK_MS = 2_000;
   /** Missed fs.watch events refresh these tiny authority caches off-main-thread. */
   private ensureAuthorityFallback(): void {
+    // HIVE-DISPOSE-INFLIGHT-REARM: as watchAuthority: dispose() cleared this timer, and it stays off.
+    if (this.readsRefused) return;
     if (this.authorityFallbackTimer) return;
     this.authorityFallbackTimer = setInterval(() => { void this.revalidateAuthoritiesAsync(); }, HiveManager.AUTHORITY_FALLBACK_MS);
     this.authorityFallbackTimer.unref?.();
