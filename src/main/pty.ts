@@ -183,14 +183,20 @@ let releaseExitedMissingSaid = false;
 
 /**
  * PTY-NATURAL-EXIT-NO-KILL-LEAK. Frees what node-pty 1.1.0 keeps for a Windows terminal whose
- * process is gone: the conout worker thread (node-pty frees it only from its kill, so a terminal
- * that ended by itself kept it) and the input socket (node-pty never destroys it, so a killed
- * terminal kept it too). One thread and one open pipe per terminal, for the life of the app.
+ * process is gone: the input socket (node-pty never destroys it, so every ended terminal kept
+ * one open pipe for the life of the app).
+ *
+ * It does NOT end the conout worker thread (PTY-CONHOST-LEAK-NATIVE). The console host may still
+ * be writing when the exit is reported, and it blocks for ever in a write nobody reads: the
+ * native close of the pseudoconsole then never returns, and the host and one thread stay. The
+ * main thread cannot see that close return. So the patched worker reads the console's output
+ * until the host has closed its end (throwing it away once its reader has gone), and then ends
+ * by itself: tools/node-pty-race-fix-pins.cjs, WORKER_JS_EDITS.
  *
  * Called from the terminal's exit, AFTER the exit was reported: by then the data pipe has closed
  * (that close is what emits the exit), so every byte is out. It names no process: node-pty's own
  * `_agent.kill()` would sweep the console process list of a pid that is gone and may be reused
- * (PTY-KILL-PID-IDENTITY), so this calls only the worker's dispose and the socket's destroy.
+ * (PTY-KILL-PID-IDENTITY), so this calls only the socket's destroy.
  * Safe to repeat. A terminal without these internals (another node-pty) is left alone, said once.
  */
 export function releaseExited(proc: pty.IPty, platform: NodeJS.Platform = process.platform): boolean {
@@ -200,7 +206,6 @@ export function releaseExited(proc: pty.IPty, platform: NodeJS.Platform = proces
   const input = agent?._inSocket;
   try {
     if (typeof conout?.dispose !== 'function' || typeof input?.destroy !== 'function') throw new Error('node-pty internals changed');
-    conout.dispose();
     if (!input.destroyed) input.destroy();
     return true;
   } catch (e) {

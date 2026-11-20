@@ -80,6 +80,14 @@ const WORKER_JS_EDITS = [
     '        guppyDataSockets.push(workerSocket);\n' +
     '        workerSocket.on(\'close\', function () {\n' +
     '            guppyDataSockets.splice(guppyDataSockets.indexOf(workerSocket), 1);\n' +
+    '            // GUPPY PTY-CONHOST-LEAK-NATIVE: the console still writes when its reader has gone.\n' +
+    '            // A pipe with no destination stops reading; the console host then blocks in its\n' +
+    '            // own write for ever, and the close of the pseudoconsole waits on the host. So\n' +
+    '            // with no reader left the output is read and thrown away.\n' +
+    '            if (guppyDataSockets.length === 0) {\n' +
+    '                conoutSocket.unpipe();\n' +
+    '                conoutSocket.resume();\n' +
+    '            }\n' +
     '        });\n' +
     '        workerSocket.on(\'error\', function (err) {\n' +
     '            conoutSocket.unpipe(workerSocket);\n' +
@@ -87,7 +95,29 @@ const WORKER_JS_EDITS = [
     '                throw err;\n' +
     '            }\n' +
     '        });\n' +
-    '        conoutSocket.pipe(workerSocket);\n']
+    '        conoutSocket.pipe(workerSocket);\n'],
+  ['the console pipe: its end is the worker\'s end',
+    '    server.listen(conout_1.getWorkerPipeName(conoutPipeName));\n',
+    '    // GUPPY PTY-CONHOST-LEAK-NATIVE: this worker reads until the console host has closed its\n' +
+    '    // end, and then ends by itself. Nothing ends it earlier: the main thread cannot see the\n' +
+    '    // close of the pseudoconsole return, and a worker ended before it leaves the host\n' +
+    '    // writing output nobody reads. It ends by listening no more, and only when a reader\n' +
+    '    // has been served and none is open: a reader that connects after the console has\n' +
+    '    // closed still finds the pipe (PTY-EARLY-CLOSE-EOF, PTY-LATE-READY-ENOENT).\n' +
+    '    var guppyReaders = 0;\n' +
+    '    var guppyHadReader = false;\n' +
+    '    var guppyEndWhenDone = function () {\n' +
+    '        if (conoutSocket.destroyed && guppyHadReader && guppyReaders === 0) {\n' +
+    '            server.close();\n' +
+    '        }\n' +
+    '    };\n' +
+    '    server.on(\'connection\', function (dataSocket) {\n' +
+    '        guppyHadReader = true;\n' +
+    '        guppyReaders++;\n' +
+    '        dataSocket.on(\'close\', function () { guppyReaders--; guppyEndWhenDone(); });\n' +
+    '    });\n' +
+    '    conoutSocket.on(\'close\', guppyEndWhenDone);\n' +
+    '    server.listen(conout_1.getWorkerPipeName(conoutPipeName));\n']
 ];
 
 // PTY-CONHOST-LEAK-NATIVE (tools/patch-node-pty-root-handle.cjs), applied on top of the handoff.
@@ -270,7 +300,7 @@ module.exports = {
   NODE_PTY_VERSION: '1.1.0',
   // lib/worker/conoutSocketWorker.js: from the same tarball, and with the error listeners.
   WORKER_JS_PRISTINE_SHA256: '3e4bac095ac3870c3248a7302f5d10217de625f30c32b7000fe48a34788e47ac',
-  WORKER_JS_QUIET_SHA256: 'c878b1b0ce5a301d3ad752a006221a4b5646dd073a5c914bc80b96daa87e4713',
+  WORKER_JS_QUIET_SHA256: '8e3c38cc4ff78d0f07a15d8f653953e2ad9d630e8afe15b2398dec2b0e637d4c',
   WORKER_JS_EDITS,
   CONPTY_CC_PRISTINE_SHA256: '52c893b689ab3210c0961e2a6aa805a82350003767b21069b164926b5becd4e2',
   CONPTY_CC_PATCHED_SHA256: 'a000a53daa90506662e4747c6585a403b93431d1fe46f99895aa6d58faaa9082',
