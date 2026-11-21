@@ -411,6 +411,48 @@ test('a route pass whose read of an AGED half-written outbox file was open at di
   deletes(home);
 });
 
+// HIVE-DISPOSE-COORD-STAT-LOG-108: the same reopen from another caller. coordinationFileTimes waits
+// a bounded time for its stats; when one is still open it logs 'coordination-stat-stuck'. With
+// dispose() landing during that wait, the row was written by a disposed manager, which reopens
+// hive/log.jsonl. The stat is held by a gate, so the order is forced; the 20 ms wait is the
+// product's own bound for this call, passed as its argument.
+test('a coordination beat whose stat was open at dispose() writes no coordination-stat-stuck row and leaves no file open', async (t) => {
+  const { home, hive } = await floor();
+  await shutDown(hive);
+  const real = fs.promises.stat;
+  const g = gate();
+  const cold = new HiveManager(() => home, () => true);
+  const held = path.resolve(path.join(cold.agentDir('andy-1'), 'memory.md'));
+  fs.promises.stat = function gatedCoordStat(p, ...rest) {
+    if (path.resolve(String(p)) !== held) return real.call(fs.promises, p, ...rest);
+    return g.through(() => real.call(fs.promises, p, ...rest));
+  };
+  t.after(async () => { g.release(); fs.promises.stat = real; cold.dispose(); await cold.drainReads(); });
+  const logFile = path.join(home, 'hive', 'log.jsonl');
+  const stuckRows = () => (fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : '').split('\n').filter((l) => l.includes('"coordination-stat-stuck"')).length;
+
+  // Control: on a live manager the same held stat does log the row (so the check below is not vacuous).
+  const live = new HiveManager(() => home, () => true);
+  t.after(async () => { live.dispose(); await live.drainReads(); });
+  const liveBeat = live.coordinationFileTimes(['andy-1'], 20);
+  await reached(g, 'the live beat\'s stat of memory.md');
+  await liveBeat;
+  assert.equal(stuckRows(), 1, 'control: a live manager logs the stuck stat');
+  live.stopLedgerGuard(); live.dispose();
+
+  const beat = cold.coordinationFileTimes(['andy-1'], 20);
+  for (let i = 0; g.open < 2; i++) { assert.ok(i < 1000, 'the cold beat\'s stat of memory.md is held too'); await turn(); }
+  cold.stopLedgerGuard(); cold.dispose();
+  assert.deepEqual(openUnder(home), [], 'dispose() closed everything while the stat was still open');
+  await beat;
+  assert.equal(stuckRows(), 1, 'the beat that finished after dispose() wrote a coordination-stat-stuck row to the log of a disposed manager');
+  assert.deepEqual(openUnder(home), [], 'and left a file open in the folder');
+  g.release();
+  await live.drainReads(); await cold.drainReads();
+  assert.deepEqual(openUnder(home), [], 'nothing is open once the stat has settled');
+  deletes(home);
+});
+
 /**
  * HIVE-DISPOSE-APPENDLOG-AFTER-DISPOSE-108, the whole defect (Jim's audit of the test above): a
  * route pass awaits file work at several places, and dispose() can land during any of them. When
@@ -756,6 +798,45 @@ test('a route pass held at its read of the delivery record across dispose() does
   const r = await rig.disposeWhileHeld(rig.hold('readFile', (p) => path.basename(p) === 'outbox-dedup.jsonl'), 'the route pass reading its delivery record');
   assert.equal(fs.existsSync(again), true, 'a disposed manager started a rename after dispose(): the repeat left outbox/ and its sender is never told');
   assert.deepEqual(r.after.inboxes, r.before.inboxes, 'a disposed manager delivered into an inbox');
+  rig.quiet(r);
+  deletes(rig.home);
+});
+
+/**
+ * Three stops that another stop further on used to cover, so no cell above fails without them.
+ * Each cell below names what its own stop prevents.
+ */
+test('a route pass whose read of an outbox file in an OLD spelling was open at dispose() writes no outbox-normalised row', async (t) => {
+  const rig = await passRig(t, { ...MAIL, act: 'reply' });   // 'reply' is rewritten to 'inform', and that is logged
+  const r = await rig.disposeWhileHeld(rig.hold('readFile', (p) => p === rig.file), 'the route pass reading the outbox file in the old spelling');
+  assert.equal(fs.existsSync(rig.file), true, 'the mail is still in outbox/, to be read again on the next start');
+  assert.deepEqual(r.after.inboxes, r.before.inboxes, 'a disposed manager delivered into an inbox');
+  rig.quiet(r);
+  deletes(rig.home);
+});
+
+test('a route pass held at its read of the delivery record across dispose() does not archive a file whose own delivery is on record', async (t) => {
+  const rig = await passRig(t, MAIL);
+  // Another manager delivers the mail and writes its record, but finds the file locked: it stays in
+  // outbox/ with its archive owed. Only that manager knew; the next one learns it from the record.
+  const lock = rig.hold('rename', (p) => p === rig.file, 'EBUSY');
+  lock.g.release(); lock.arm();
+  const first = new HiveManager(() => rig.home, () => true, { setTimeout: () => null });
+  try { await first.routeOnce([rig.outbox]); } finally { await shutDown(first); }
+  assert.equal(fs.existsSync(rig.file), true, 'control: the delivered file is still in outbox/, its archive owed');
+  const r = await rig.disposeWhileHeld(rig.hold('readFile', (p) => path.basename(p) === 'outbox-dedup.jsonl'), 'the route pass reading its delivery record');
+  assert.equal(fs.existsSync(rig.file), true, 'a disposed manager started a rename after dispose(): the file left outbox/');
+  assert.deepEqual(r.after.inboxes, r.before.inboxes, 'a disposed manager delivered into an inbox');
+  rig.quiet(r);
+  await rig.deliveredOnceAfterRestart();
+  deletes(rig.home);
+});
+
+test('a route pass stopped by dispose() inside its routing is not taken for a routing failure: nothing is prepared for a reject', async (t) => {
+  const rig = await passRig(t, MAIL);
+  const r = await rig.disposeWhileHeld(rig.hold('readFile', (p) => path.basename(p) === 'outbox-dedup.jsonl'), 'the route pass reading its delivery record');
+  assert.equal(fs.existsSync(path.join(rig.outbox, '.owed')), false, 'the stop was handled as a routing failure: a disposed manager made outbox/.owed/ for a reject notice');
+  assert.equal(fs.existsSync(rig.file), true, 'the mail is still in outbox/');
   rig.quiet(r);
   deletes(rig.home);
 });
