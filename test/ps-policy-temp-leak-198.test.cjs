@@ -140,12 +140,16 @@ test('SWEEP: dead pids\' guppy-pstemp folders are removed, live ones and other n
 
 /** Andy's probe: a test process (TEMP = jail) runs PowerShell through psEnv(..., { temp }), kills it the
  *  moment a policy file shows in the temp it gave it, and is then itself killed (no exit handler). */
-function killedOnFirstFile(jail, shared, temp, open = (pid) => procHold().procOpen(pid), signal) {
+function killedOnFirstFile(jail, shared, temp, open = (pid) => procHold().procOpen(pid), signal, stallMs = 0) {
   const inner = path.join(tmpRoot, 'killed-inner.cjs');
   fs.writeFileSync(inner, `
 const fs = require('fs'), { spawn } = require('child_process');
 const { psEnv } = require(${JSON.stringify(path.join(__dirname, 'tools', 'ps-env.cjs'))});
 const temp = process.argv[2] === 'on';
+// FLAKE-PS-POLICY-CONTROL-KILL-RACE-172: a late kill, modelled. The watcher's callback is held for this
+// long before it kills, as a starved event loop holds it; PowerShell deletes its policy files ~6 ms
+// after it made them.
+const stall = Number(process.argv[3]);
 const dir = psEnv(process.env, { temp }).TEMP;
 const c = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 20'], { env: psEnv(process.env, { temp }), windowsHide: true, stdio: 'ignore' });
 let killed = false;
@@ -153,12 +157,12 @@ let killed = false;
 // object is signalled only after its threads have ended and its handles are closed, so by then it holds
 // nothing in the folder the sweep removes (FLAKE-PS-POLICY-TEMP-LEAK-198-L164).
 const afterExit = (say) => { if (c.exitCode !== null || c.signalCode !== null) say(); else { c.kill(); c.once('exit', say); } };
-fs.watch(dir, (_e, f) => { if (!killed && /^__PSScriptPolicyTest_/.test(String(f))) { killed = true; afterExit(() => process.stdout.write('killed ' + f + '\\n')); } });
+fs.watch(dir, (_e, f) => { if (!killed && /^__PSScriptPolicyTest_/.test(String(f))) { killed = true; if (stall) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, stall); afterExit(() => process.stdout.write('killed ' + f + '\\n')); } });
 setTimeout(() => afterExit(() => process.stdout.write('timer\\n')), 30000);
 `);
   return new Promise((resolve, reject) => {
     const env = { ...process.env, TEMP: jail, TMP: jail, TMPDIR: jail, GUPPY_SHARED_TEMP: shared, PSModuleAnalysisCachePath: path.join(tmpRoot, 'modcache', 'ModuleAnalysisCache') };
-    const p = spawn(process.execPath, [inner, temp ? 'on' : 'off'], { env, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    const p = spawn(process.execPath, [inner, temp ? 'on' : 'off', String(stallMs)], { env, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
     // FLAKE-PS-POLICY-TEMP-LEAK-198-L164: the test process is held by handle from its spawn, BEFORE the
     // kill, until the caller has swept. While the hold is open Windows cannot give its pid to another
     // process, so the sweep's kill(pid, 0) answers for this process (exited: ESRCH), not a stranger.
@@ -231,6 +235,23 @@ test('KILLED: PowerShell killed on its first policy file, then its test process 
   } finally {
     procHold().procClose(fixed.hold);
   }
+});
+
+// FLAKE-PS-POLICY-CONTROL-KILL-RACE-172: the control's kill and PowerShell's own delete of its policy
+// files were not ordered. PowerShell makes the two files, checks them and deletes them within ~6 ms; the
+// kill is sent from a folder watcher's callback in another process. A callback that ran later than that
+// (a loaded machine) killed a PowerShell that had already deleted them, and the control found an empty
+// jail (two suite reds). Here the callback is held for KILL_STALL_MS, far past the delete, every time.
+const KILL_STALL_MS = 1_000;
+test('KILLED control: a kill that lands late still finds the policy file in the jail (stalled watcher modelled)', { skip: !WIN && 'Windows PowerShell only', timeout: 120_000 }, async (t) => {
+  const jail = path.join(tmpRoot, 'jail-late');
+  const shared = path.join(tmpRoot, 'shared-late');
+  fs.mkdirSync(jail);
+  fs.mkdirSync(shared);
+  const control = await killedOnFirstFile(jail, shared, false, undefined, t.signal, KILL_STALL_MS);
+  procHold().procClose(control.hold);
+  assert.match(control.out, /^killed __PSScriptPolicyTest_/, 'PS POLICY control: the PowerShell was killed on its first policy file');
+  assert.ok(fs.readdirSync(jail).some((f) => POLICY.test(f)), `PS POLICY control: without psEnv the killed PowerShell leaves its policy file in the jail, however late the kill (${fs.readdirSync(jail)})`);
 });
 
 // FLAKE-PS-POLICY-KILLED-CELL-HANG-108: the hold is opened after the test process is started. When it
