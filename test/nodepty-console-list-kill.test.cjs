@@ -1,5 +1,6 @@
 'use strict';
 require('./tools/own-job.cjs');
+require('./tools/mutant-runner-helper.cjs').gate(__filename);
 /**
  * NODEPTY-CONSOLE-LIST-KILL-SIBLINGS: closing a terminal must never end a process outside that
  * terminal's own tree.
