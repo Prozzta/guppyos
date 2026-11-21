@@ -123,20 +123,21 @@ test('an unattached PTY starts with no DA1 wait, the query never reaches the sin
  *  busy 1 s: 0 of 3, the launch was still held). */
 const BUSY_PAST_DA1_MS = 4_500;
 
-test('a write the console can no longer take is said, not thrown outside any caller (EAGAIN)', { skip: process.platform !== 'win32' }, async () => {
+/** One EAGAIN cell. `rootLivesMs` is how long the root stays after it starts: 0 is the empty script. */
+async function eagainCell(id, rootLivesMs) {
   const dir = tempDir('ocin-');
   const { PtyManager } = loadTs('src/main/pty.ts');
   const m = new PtyManager();
-  fs.writeFileSync(path.join(dir, 'gone.cjs'), '');
+  fs.writeFileSync(path.join(dir, 'gone.cjs'), rootLivesMs ? `setTimeout(() => {}, ${rootLivesMs});` : '');
   const thrown = [];
   const onUncaught = (e) => thrown.push(`${e && e.code} ${e && e.message}`);
   process.on('uncaughtException', onUncaught);
   const warn = console.warn; const said = [];
   console.warn = (...a) => { said.push(a.join(' ')); };
   let exited = false;
-  const sink = { isDestroyed: () => false, send: (ch) => { if (ch === 'pty:exit:ocin') exited = true; } };
+  const sink = { isDestroyed: () => false, send: (ch) => { if (ch === `pty:exit:${id}`) exited = true; } };
   try {
-    const r = await m.spawn({ id: 'ocin', cwd: dir, command: consoleNode().file, args: [path.join(dir, 'gone.cjs')], cols: 80, rows: 24, env: {} }, sink);
+    const r = await m.spawn({ id, cwd: dir, command: consoleNode().file, args: [path.join(dir, 'gone.cjs')], cols: 80, rows: 24, env: {} }, sink);
     assert.ok(r.ok, `spawn: ${r.error}`);
     // The answer goes out from the output handler, in the first turn after this block.
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, BUSY_PAST_DA1_MS);
@@ -145,14 +146,23 @@ test('a write the console can no longer take is said, not thrown outside any cal
     await new Promise((r2) => setImmediate(r2));
     assert.ok(exited, 'the terminal reported its exit');
     assert.deepEqual(thrown, [], 'NOTHING IS THROWN OUTSIDE A CALLER: the failed write meets the input pipe\'s error listener');
-    assert.ok(said.some((l) => /a write to terminal \d+ failed \(EAGAIN\)/.test(l)), `the failed write is said: ${JSON.stringify(said)}`);
+    assert.ok(said.some((l) => /a write to terminal \d+ failed \(EAGAIN\)/.test(l)), `THE FAILED WRITE IS SAID (the root stays ${rootLivesMs} ms): ${JSON.stringify(said)}`);
   } finally {
     process.off('uncaughtException', onUncaught);
     console.warn = warn;
     await m.killAllAsync(5_000);
     await removeDir(dir);
   }
-});
+}
+
+test('a write the console can no longer take is said, not thrown outside any caller (EAGAIN)', { skip: process.platform !== 'win32' }, () => eagainCell('ocin', 0));
+
+/** FLAKE-PTY-OPENCONSOLE-DA1-EAGAIN-SAID-108: the cell above needs the answer to be written AFTER the
+ *  root has gone. A root that is slow to start or to exit (a loaded bench; here, one that stays 3 s)
+ *  must not change the result: the write still comes after it has gone. */
+const SLOW_ROOT_LIVES_MS = 3_000;
+
+test('EAGAIN, slow root: the answer is still written after the root has gone, however long the root takes', { skip: process.platform !== 'win32' }, () => eagainCell('ocinslow', SLOW_ROOT_LIVES_MS));
 
 test('the input-pipe guard: one listener per terminal, said once; a node-pty without the socket is left alone', () => {
   const { guardInputErrors } = loadTs('src/main/pty.ts');
