@@ -51,14 +51,24 @@ function electronExe() {
  * @param opts.file the child program; opts.env its env; opts.onSpawn(proc) sees the terminal first
  * @param opts.prelude JS run in the child before its script (a test uses it to make a child that is
  *   on the PTY say it is not)
+ * @param opts.host Windows only. 'openconsole' (the default): the bundled OpenConsole, the host the
+ *   app runs every terminal on. 'inbox': the Windows inbox conhost, which the app no longer uses; a
+ *   test that asks for it says why.
  */
-function childBytes(input, { file = process.execPath, env = process.env, onSpawn, prelude = '' } = {}) {
+function childBytes(input, { file = process.execPath, env = process.env, onSpawn, prelude = '', host = 'openconsole' } = {}) {
   // An electron.exe without this key is a real app with a window: never start one from here.
   if (isElectronExe(file)) assert.equal(env.ELECTRON_RUN_AS_NODE, '1', `${file} runs as Node only (ELECTRON_RUN_AS_NODE=1 in its env)`);
+  assert.equal(host === 'openconsole' || host === 'inbox', true, `host is 'openconsole' or 'inbox', not ${JSON.stringify(host)}`);
+  const inbox = process.platform === 'win32' && host === 'inbox';
   return new Promise((resolve, reject) => {
     const proc = pty.spawn(file, ['-e', `${prelude}${CHILD}`], {
-      name: 'xterm-256color', cols: 120, rows: 24, cwd: process.cwd(), env
+      name: 'xterm-256color', cols: 120, rows: 24, cwd: process.cwd(), env,
+      // NODEPTY-CONSOLE-LIST-KILL-SIBLINGS: as the app spawns every terminal (PtyManager.spawn,
+      // PTY-CONHOST-ORPHAN option A). On the bundled OpenConsole node-pty's kill asks for no
+      // console list.
+      useConptyDll: process.platform === 'win32' && !inbox
     });
+    let childExited = false;
     // As the app does for every terminal (PtyManager.spawn): node-pty alone holds kill() back until
     // the terminal's first data chunk, and a child that never prints is then never killed.
     if (process.platform === 'win32') assert.equal(armEarlyKill(proc), true, 'armEarlyKill fits this node-pty');
@@ -75,6 +85,11 @@ function childBytes(input, { file = process.execPath, env = process.env, onSpawn
       if (ended) return;
       ended = true;
       clearTimeout(timer);
+      // NODEPTY-CONSOLE-LIST-KILL-SIBLINGS: on the inbox conhost node-pty's kill ends every process
+      // on the console of the child's pid. An electron.exe child is on THIS test file's console, the
+      // one the runner shares between its files: a child still alive here took the sibling files
+      // with it. So the child is ended by its pid first; a child that is gone has no console to list.
+      if (inbox && !childExited) { try { process.kill(proc.pid); } catch { /* gone already */ } }
       try { proc.kill(); } catch { /* child already exited */ }
       if (!workerGone) { error ? reject(error) : resolve(value); return; }
       // Settle only once the terminal is torn down: a kill that did not run fails HERE, by name,
@@ -100,6 +115,7 @@ function childBytes(input, { file = process.execPath, env = process.env, onSpawn
       if (!wrote && output.includes('READY')) { wrote = true; proc.write(input); }
     });
     proc.onExit(({ exitCode }) => {
+      childExited = true;
       if (!/BYTES:/.test(output)) finish(new Error(`PTY child exited ${exitCode}: ${output}`));
     });
   });

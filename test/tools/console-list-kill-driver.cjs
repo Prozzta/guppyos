@@ -31,8 +31,14 @@ const save = () => fs.writeFileSync(outFile, JSON.stringify(out, null, 1));
 
 const realKill = process.kill.bind(process);
 let named = [];
+/**
+ * The harness's own by-pid end of its child (pty-child.cjs finish(), inbox host) is REAL: it comes
+ * before node-pty's kill is entered and names the child only. From that kill on, all is recorded.
+ */
+let own = null;
 process.kill = function kill(pid, signal) {
   if (signal === 0) return realKill(pid, 0);
+  if (own && pid === own.root && !own.st.closed) { own.c.endedByPid = true; return realKill(pid, signal); }
   named.push(pid);
   return true;
 };
@@ -113,6 +119,7 @@ function consoleOf(pid) {
   };
 
   // ---- (a) the test harness: test/tools/pty-child.cjs childBytes ----
+  // On the inbox conhost, the one host where node-pty's kill asks for the console list.
   // `late` pushes the child's own 3 s exit out, so it is ALIVE when childBytes gives up at 5 s: what a
   // loaded machine does to a child that starts slowly.
   const late = 'const st = setTimeout; globalThis.setTimeout = (f) => st(f, 600000);';
@@ -124,22 +131,24 @@ function consoleOf(pid) {
     let root = null;
     try {
       await childBytes(Buffer.from('x'), {
-        file: electronExe(), env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, prelude: up(marker) + prelude,
+        file: electronExe(), env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, prelude: up(marker) + prelude, host: 'inbox',
         onSpawn: (proc) => {
           root = live = proc.pid;
+          own = { root, st, c };
           watch(proc, st, () => { c.upAtKill = fs.existsSync(marker); c.aliveAtKill = alive(root); });
         }
       });
       c.result = 'resolved';
     } catch (e) { c.result = String(e && e.message).slice(0, 160); }
     await record(c, root, st);
+    own = null;
   };
   await harness('harnessAlive', late);
   // Gone at once, as soon as it has run a line: the pin does not race the child's start against the 5 s.
   await harness('harnessGone', 'process.exit(2);');
 
   // ---- (b) the product: PtyManager ----
-  const product = async (key, { file, env, endsNothing, quit, recycled }) => {
+  const product = async (key, { file, env, endsNothing, recycled }) => {
     named = []; sweeps = 0; sweepEndsNothing = endsNothing;
     const c = out.cases[key] = {};
     save();
@@ -169,15 +178,35 @@ function consoleOf(pid) {
       s.proc._agent._innerPid = bystander;
       c.pidNow = s.proc.pid === s.proc._agent._innerPid ? role(s.proc.pid, root) : 'two numbers';
     }
-    if (quit) { c.result = 'quit'; void m.killAllAsync(); } else c.result = m.kill(key).ok ? 'ok' : 'kill refused';
+    const k = m.kill(key);
+    c.result = k.ok ? 'ok' : `kill refused: ${k.error}`;
     await record(c, root, st);
     sweepEndsNothing = false;
   };
   const gui = { file: electronExe(), env: { ELECTRON_RUN_AS_NODE: '1' } };
   const con = { file: consoleNode().file, env: {} };
-  await product('guiKill', { ...gui, endsNothing: false });
-  await product('guiKillSweepFailed', { ...gui, endsNothing: true });
-  await product('guiQuitSweepFailed', { ...gui, endsNothing: true, quit: true });
+  /**
+   * The mechanism only: whose console is a GUI-subsystem root on? No kill is measured. On the bundled
+   * OpenConsole such a terminal reports its exit while the root is still alive, so the session is
+   * gone before any kill could reach it (PTY-GUI-ROOT-EXIT-EARLY-UNTRACKED, not this card's).
+   */
+  const probe = async (key, { file, env }) => {
+    const c = out.cases[key] = {};
+    const marker = path.join(tmp, `${key}.up`);
+    const m = new PtyManager();
+    const r = await m.spawn({ id: key, cwd: tmp, command: file, args: ['-e', up(marker) + IDLE], cols: 80, rows: 24, env });
+    c.spawn = r.ok ? 'ok' : String(r.error);
+    if (!r.ok) { save(); return; }
+    const root = live = m.sessions.get(key).proc.pid;
+    for (let i = 0; i < 2400 && !fs.existsSync(marker); i++) await sleep(25);
+    c.up = fs.existsSync(marker);
+    c.consoleBefore = roles(await consoleOf(root), root);
+    save();
+    m.kill(key);
+    try { realKill(root); } catch { /* gone */ }
+    live = null;
+  };
+  await probe('guiProbe', gui);
   await product('consoleKillSweepFailed', { ...con, endsNothing: true });
   await product('consoleKill', { ...con, endsNothing: false });
   await product('recycledPid', { ...con, endsNothing: true, recycled: true });
