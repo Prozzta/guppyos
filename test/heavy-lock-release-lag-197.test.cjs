@@ -411,7 +411,9 @@ const LIVE_SKIP = process.platform !== 'win32' ? 'Windows only (Job Objects)' : 
 let helperExe = null;
 const helperDirs = [];
 // Removed once every test is done: a helper's serve process may still be exiting after its test.
-test.after(async () => { for (const d of helperDirs) await removeDir(d); });
+const postDisposeRequests = [];
+test.after(async () => { for (const d of helperDirs) await removeDir(d); for (const l of postDisposeRequests) process.stderr.write(`post-dispose request: ${l}
+`); });
 function helper(t, src) {
   if (!src && helperExe) return helperExe;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hlr197-'));
@@ -469,7 +471,7 @@ async function liveRelease(t, o) {
     // calls req() again and channel() starts a NEW `serve` that nothing closes: its stdin stays open, the file's
     // process stays up on it. So every channel opened is kept, and once the test is over a request gets a dead one.
     channel: (x) => {
-      if (over) return { request: async () => null, close() {}, onEvent() {} };
+      if (over) return { request: async (line) => { postDisposeRequests.push(String(line)); return null; }, close() {}, onEvent() {} };
       const c = (Cm.serveChannel ?? C.serveChannel)(x); opened.push(c); return c;
     },
     onJob: (e) => { if (e.state === 'held') lock.noteJob(e.agentId, e.callId, e.job); else lock.jobExited(e.agentId, e.callId, e.job); }
