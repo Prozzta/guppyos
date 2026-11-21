@@ -122,8 +122,10 @@ test('harness, inbox conhost: the by-pid end names the pid only while the hold o
   const gone = await kase('harnessHoldSaysGone');
   assert.equal(gone.holdTaken, true, 'childBytes took a hold on its child at the spawn');
   assert.equal(gone.holdAskedBeforeKill, false, 'the hold was asked and answered "exited" (the driver answers for it)');
-  assert.equal(gone.aliveAtKill, true, "control: the child itself was alive at node-pty's kill");
+  // The guarantee first: a by-pid end that should not have happened has ended the child by the time
+  // the control below samples it, so the control read first would name the harness, not the fault.
   assert.equal(gone.endedByPid, undefined, 'A PID IS NAMED ONLY WHILE IT IS HELD: the hold said the child had exited, and childBytes still ended that pid');
+  assert.equal(gone.aliveAtKill, true, "control: the child itself was alive at node-pty's kill");
   assert.equal(gone.holdReleasedAfterKill, true, "the hold was released, and only after node-pty's kill");
 });
 test('harness: a GUI-subsystem child that is gone when childBytes closes its terminal names nobody (pin)', async () => {
