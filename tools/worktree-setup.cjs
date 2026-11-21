@@ -13,6 +13,11 @@
  *   - a root-handle patched and rebuilt node-pty (tools/patch-node-pty-root-handle.cjs,
  *     postinstall): pty-hold-nodepty-handoff red in 10 tests on a junction into an older tree.
  *     Reported, never filled here: it needs the tree's own `npm ci`.
+ *   - the OpenConsole pair in node_modules/node-pty/build/Release/conpty/ (WORKTREE-SETUP-OPENCONSOLE-
+ *     STAGE-CHECK-108): a tree installed before PTY-CONHOST-ORPHAN-OWNER-DEATH has none, this tool
+ *     called it complete, and every real-PTY test failed 'Cannot find conpty.dll'. Checked byte for
+ *     byte against the pins, and filled by the tree's own tools/stage-node-pty-openconsole.cjs from
+ *     node-pty's third_party folder (pinned bytes only; never through a link into another tree).
  *   - the gitignored embedding model resources/models/<dir>/ (WORKTREE-SETUP-MODEL-108): the
  *     claims drill failed after 350 s on 'missing model (onnx/model.onnx)' in a tree this tool had
  *     called complete. Every file must match its SHA-256 in resources/models/native-memory-manifest.json
@@ -62,6 +67,8 @@ const NODE_PTY_BINARY = path.join(NODE_PTY, 'build', 'Release', 'conpty.node');
 // What a conpty.node built from the patched source carries: the handoff's import, and the name the
 // close on exit exports (CLOSE_MARKER in tools/node-pty-race-fix-pins.cjs).
 const NODE_PTY_BINARY_MARKS = ['DuplicateHandle', 'guppyClosesPseudoConsoleOnExit'];
+// WORKTREE-SETUP-OPENCONSOLE-STAGE-CHECK-108: the OpenConsole pair every PTY runs on (ORPHAN option A).
+const OPENCONSOLE_STAGE = 'tools/stage-node-pty-openconsole.cjs';
 const STAMP = '.worktree-setup.json';
 const MODEL_MANIFEST = 'resources/models/native-memory-manifest.json';
 const MODEL_FETCH = 'scripts/fetch-memory-model.cjs';
@@ -189,6 +196,51 @@ function nodePtyState(root, { platform = process.platform, spawnSyncFn = spawnSy
   return { ok: true };
 }
 
+/**
+ * WORKTREE-SETUP-OPENCONSOLE-STAGE-CHECK-108: is the pinned OpenConsole pair staged in this tree's
+ * node-pty (build/Release/conpty/)? conpty.cc loads conpty.dll from there, so without it every
+ * real-PTY test fails 'Cannot find conpty.dll'. A tree installed before ORPHAN has none, and the
+ * check said complete. The tree's own stage tool does the byte check against the pins; a base from
+ * before that tool has no gap.
+ */
+function openConsoleState(root, { platform = process.platform, env = process.env } = {}) {
+  const tool = path.join(root, OPENCONSOLE_STAGE);
+  const np = path.join(root, NODE_PTY);
+  if (platform !== 'win32' || !fs.existsSync(tool) || !fs.existsSync(np)) return { ok: true };
+  const shared = !resolvesInside(np, root);
+  const fix = shared
+    ? " (it resolves into another tree; a shared node_modules needs this tree's own npm ci)"
+    : ` (node tools/worktree-setup.cjs stages it with ${OPENCONSOLE_STAGE})`;
+  const S = require(tool);
+  const arch = S.targetArch(env);
+  if (!arch) return { ok: false, shared, problem: `no pinned OpenConsole for arch ${env.npm_config_arch || process.arch}` };
+  const bad = S.checkStaged(np, arch);
+  if (!bad.length) return { ok: true };
+  return { ok: false, shared, problem: `the OpenConsole pair is not staged, so real-PTY tests fail 'Cannot find conpty.dll': ${bad.join('; ')}${fix}` };
+}
+
+/**
+ * Stage the pair with the tree's own stage tool (it copies from node-pty's third_party folder only
+ * bytes that match the pins). Refuses, having written nothing, when any level of the target resolves
+ * out of the tree. A failed stage is logged and the gap stays: never a tree called complete.
+ */
+function fillOpenConsole(root, { env = process.env, log = console.log } = {}) {
+  const S = require(path.join(root, OPENCONSOLE_STAGE));
+  const np = path.join(root, NODE_PTY);
+  const target = S.stagedDir(np);
+  const levels = [path.join(root, 'node_modules'), np, path.join(np, 'build'), path.join(np, 'build', 'Release'), target];
+  const outside = levels.find((p) => (isLink(p) || fs.existsSync(p)) && !resolvesInside(p, root));
+  if (outside) { log(`[worktree-setup] openconsole: refusing to write ${target}: ${outside} resolves outside ${root}`); return false; }
+  try {
+    S.stage(np, S.targetArch(env));
+  } catch (e) {
+    log(`[worktree-setup] openconsole: staging failed: ${e.message}`);
+    return false;
+  }
+  log(`[worktree-setup] ${path.relative(root, target)}: OpenConsole pair staged from node-pty's third_party (pinned bytes)`);
+  return true;
+}
+
 /** The manifest's model section, or { error } when the tree's manifest cannot be used; null = no manifest. */
 function readModelManifest(root) {
   const p = path.join(root, MODEL_MANIFEST);
@@ -293,6 +345,8 @@ function inspect(root = REPO, { platform = process.platform, spawnSyncFn = spawn
   if (!x.ok) gaps.push({ id: 'xterm', problem: x.problem });
   const p = nodePtyState(root, { platform, spawnSyncFn });
   if (!p.ok) gaps.push({ id: 'node-pty', problem: p.problem });
+  const oc = openConsoleState(root, { platform });
+  if (!oc.ok) gaps.push({ id: 'openconsole', shared: oc.shared, problem: oc.problem });
   const mo = modelState(root);
   if (!mo.ok) gaps.push({ id: 'model', problem: mo.problem });
   return gaps;
@@ -363,6 +417,7 @@ function setup(root = REPO, { copyFrom, platform = process.platform, spawnSyncFn
   for (const gap of inspect(root, { platform, spawnSyncFn })) {
     if (gap.id === 'xterm') { if (fs.existsSync(path.join(root, ADDON))) localizeXterm(root, { spawnSyncFn, log }); continue; }
     if (gap.id === 'node-pty') continue; // report only: see nodePtyState
+    if (gap.id === 'openconsole') { if (!gap.shared) fillOpenConsole(root, { env, log }); else log(`[worktree-setup] openconsole: ${NODE_PTY} resolves into another tree; not staging (give this tree its own npm ci)`); continue; }
     if (gap.id === 'model') { fillModel(root, { copyFrom, env, releaseCache, spawnSyncFn, log }); continue; }
     fillNative(NATIVES.find((n) => n.id === gap.id), root, { copyFrom, spawnSyncFn, log });
   }
@@ -407,7 +462,7 @@ function preflight({ root = REPO, env = process.env, log = (l) => process.stderr
 /** The line run-tests.cjs repeats after its summary on an opted-out run. */
 function optOutLine(ids) { return `[test-runner] INCOMPLETE TREE (opt-out): ${ids.join(', ')}`; }
 
-module.exports = { NATIVES, ADDON, NODE_PTY, NODE_PTY_PATCH, NODE_PTY_BINARY, NODE_PTY_BINARY_MARKS, nodePtyState, MODEL_MANIFEST, MODEL_FETCH, modelState, modelSources, fillModel, modelLevelOutside, STAMP, buildStamp, inspect, optOutLine, sourcesDigest, readStamp, linksUnder, setup, preflight, teardown, localizeXterm, sameSources, sourceDigests, resolvesInside };
+module.exports = { NATIVES, ADDON, NODE_PTY, NODE_PTY_PATCH, NODE_PTY_BINARY, NODE_PTY_BINARY_MARKS, nodePtyState, OPENCONSOLE_STAGE, openConsoleState, fillOpenConsole, MODEL_MANIFEST, MODEL_FETCH, modelState, modelSources, fillModel, modelLevelOutside, STAMP, buildStamp, inspect, optOutLine, sourcesDigest, readStamp, linksUnder, setup, preflight, teardown, localizeXterm, sameSources, sourceDigests, resolvesInside };
 
 if (require.main === module) {
   const argv = process.argv.slice(2);

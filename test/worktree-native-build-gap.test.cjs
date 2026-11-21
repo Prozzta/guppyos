@@ -608,3 +608,97 @@ test('MODEL GAP: a model file that cannot be read (a directory: EISDIR) is a gap
   assert.equal(W.preflight({ root, env: {}, log: (l) => lines.push(l), inspectFn: boom }), 2, 'A CHECK THAT THROWS REFUSES CLEANLY (2), NOT A CRASH');
   assert.ok(lines.some((l) => /TREE CHECK FAILED: EBUSY/.test(l)), lines.join(' | '));
 });
+
+// WORKTREE-SETUP-OPENCONSOLE-STAGE-CHECK-108: since PTY-CONHOST-ORPHAN-OWNER-DEATH every PTY runs on
+// node-pty's OpenConsole (conpty.cc loads build/Release/conpty/conpty.dll). Postinstall stages the
+// pair (tools/stage-node-pty-openconsole.cjs), but a tree installed before ORPHAN has none, and
+// worktree-setup --check still said 'tree complete': every real-PTY test then went red on
+// 'Cannot find conpty.dll'. The pair is a gap, checked byte for byte against the pins; setup
+// stages it from node-pty's own third_party folder, or the gap stays with the reason.
+// literal paths, not the tool's exports, so these are red (not a TypeError) on a base without the check
+const OC_STAGE_REL = 'tools/stage-node-pty-openconsole.cjs';
+const OC_PINS_REL = 'tools/node-pty-race-fix-pins.cjs';
+const OC_ARCH = process.arch === 'arm64' ? 'arm64' : 'x64';
+const OC_SKIP = { skip: process.platform !== 'win32' && 'the OpenConsole pair is Windows-only' };
+function ocPins() { return require('../tools/node-pty-race-fix-pins.cjs'); }
+const ocStaged = (np) => path.join(np, 'build', 'Release', 'conpty');
+const ocThird = (np) => path.join(np, 'third_party', 'conpty', ocPins().CONPTY_THIRD_PARTY_VERSION, `win10-${OC_ARCH}`);
+/** A tree whose only possible gap is the OpenConsole pair: this tool, the real stage tool and pins,
+ *  and a node-pty with the real pinned pair in third_party (or other bytes), staged or not. */
+function ocTree(t, { third = 'pinned', staged = null, root = jail(t) } = {}) {
+  builtNatives(root);
+  addon(root, 'PATCHED');
+  for (const f of ['tools/worktree-setup.cjs', OC_STAGE_REL, OC_PINS_REL]) put(root, f, fs.readFileSync(path.join(REPO, f)));
+  const np = path.join(root, 'node_modules', 'node-pty');
+  for (const name of Object.keys(ocPins().OPENCONSOLE_SHA256[OC_ARCH])) {
+    const pinned = fs.readFileSync(path.join(ocThird(path.join(REPO, 'node_modules', 'node-pty')), name));
+    put(np, path.relative(np, path.join(ocThird(np), name)), third === 'pinned' ? pinned : `NOT THE PINNED ${name}`);
+    if (staged === 'pinned') put(np, path.relative(np, path.join(ocStaged(np), name)), pinned);
+    if (staged === 'other') put(np, path.relative(np, path.join(ocStaged(np), name)), `AN OLDER ${name}`);
+  }
+  return root;
+}
+const ocCli = (root, ...args) => require('node:child_process').spawnSync(process.execPath, [path.join(root, 'tools', 'worktree-setup.cjs'), ...args], { cwd: root, encoding: 'utf8', windowsHide: true, env: { ...process.env, npm_config_arch: '' } });
+const ocSha = (p) => (fs.existsSync(p) ? sha256(fs.readFileSync(p)) : null);
+
+test('OPENCONSOLE GAP: --check fails a tree whose node-pty has no staged pair (a tree installed before ORPHAN), or a staged pair that is not the pinned bytes', OC_SKIP, (t) => {
+  const bare = ocTree(t);
+  const r = ocCli(bare, '--check');
+  assert.equal(r.status, 1, `--CHECK PASSED A TREE WITHOUT THE OPENCONSOLE PAIR: real-PTY tests fail 'Cannot find conpty.dll' (${r.stdout}${r.stderr})`);
+  assert.match(r.stderr, /GAP openconsole: .*conpty\.dll is missing/, r.stderr);
+  assert.doesNotMatch(r.stderr, /GAP (fs-handle|heavyjob|xterm|node-pty|model)/, 'the fixture has no other gap');
+  assert.equal(ocSha(path.join(ocStaged(path.join(bare, 'node_modules', 'node-pty')), 'conpty.dll')), null, '--check stages nothing');
+
+  const old = ocTree(t, { staged: 'other' });
+  const r2 = ocCli(old, '--check');
+  assert.equal(r2.status, 1, 'A STAGED PAIR THAT IS NOT THE PINNED BYTES IS A GAP');
+  assert.match(r2.stderr, /GAP openconsole: .*not the pinned/, r2.stderr);
+
+  const good = ocTree(t, { staged: 'pinned' });
+  const r3 = ocCli(good, '--check');
+  assert.equal(r3.status, 0, `the pinned pair staged: complete (${r3.stderr})`);
+  assert.match(r3.stdout, /tree complete/);
+});
+
+test('OPENCONSOLE FILL: setup stages the pinned pair from node-pty\'s own third_party folder, then --check passes', OC_SKIP, (t) => {
+  const root = ocTree(t);
+  const r = ocCli(root);
+  assert.equal(r.status, 0, `SETUP DID NOT STAGE THE PAIR (${r.stdout}${r.stderr})`);
+  assert.match(r.stdout, /tree complete/);
+  const np = path.join(root, 'node_modules', 'node-pty');
+  for (const [name, want] of Object.entries(ocPins().OPENCONSOLE_SHA256[OC_ARCH])) assert.equal(ocSha(path.join(ocStaged(np), name)), want, `${name} staged with the pinned bytes`);
+  assert.equal(ocCli(root, '--check').status, 0, 'then the check passes');
+});
+
+test('OPENCONSOLE FILL: a third_party pair that is not the pinned bytes fails loudly: the gap stays (exit 1), the reason is named, nothing is staged', OC_SKIP, (t) => {
+  const root = ocTree(t, { third: 'other' });
+  const r = ocCli(root);
+  assert.equal(r.status, 1, `SETUP CALLED A TREE COMPLETE WITHOUT A PINNED PAIR (${r.stdout}${r.stderr})`);
+  assert.match(`${r.stdout}${r.stderr}`, /openconsole: staging failed: .*third_party.*not the pinned/, 'the stage error is printed');
+  assert.match(r.stderr, /GAP openconsole: /);
+  assert.equal(ocSha(path.join(ocStaged(path.join(root, 'node_modules', 'node-pty')), 'conpty.dll')), null, 'NOTHING UNPINNED IS STAGED');
+});
+
+test('OPENCONSOLE: a node_modules junctioned into another tree is refused: the gap names npm ci, and nothing is written into the shared tree', OC_SKIP, (t) => {
+  const shared = jail(t);
+  ocTree(t, { root: shared });
+  const root = jail(t);
+  builtNatives(root);
+  for (const f of ['tools/worktree-setup.cjs', OC_STAGE_REL, OC_PINS_REL, 'tools/patch-xterm-webgl-font.cjs']) put(root, f, fs.readFileSync(path.join(shared, f)));
+  fs.symlinkSync(path.join(shared, 'node_modules'), path.join(root, 'node_modules'), 'junction');
+  const r = ocCli(root);
+  assert.equal(r.status, 1, `${r.stdout}${r.stderr}`);
+  assert.match(r.stderr, /GAP openconsole: .*resolves into another tree.*npm ci/, r.stderr);
+  assert.equal(fs.existsSync(ocStaged(path.join(shared, 'node_modules', 'node-pty'))), false, 'THE SHARED NODE-PTY IS NOT WRITTEN');
+});
+
+test('OPENCONSOLE: no gap on a base from before the stage tool, with no node-pty folder, or off Windows', (t) => {
+  const root = ocTree(t);
+  assert.ok(W.inspect(root, { platform: 'linux', spawnSyncFn: fakeSpawn(root) }).every((g) => g.id !== 'openconsole'), 'off Windows: not this check');
+  fs.rmSync(path.join(root, OC_STAGE_REL));
+  assert.ok(W.inspect(root, { platform: 'win32', spawnSyncFn: fakeSpawn(root) }).every((g) => g.id !== 'openconsole'), 'a base from before ORPHAN has no stage tool and no gap');
+  const none = jail(t);
+  builtNatives(none);
+  put(none, OC_STAGE_REL, fs.readFileSync(path.join(REPO, OC_STAGE_REL)));
+  assert.ok(W.inspect(none, { platform: 'win32', spawnSyncFn: fakeSpawn(none) }).every((g) => g.id !== 'openconsole'), 'no node-pty folder: the xterm gap covers a tree with no node_modules');
+});
