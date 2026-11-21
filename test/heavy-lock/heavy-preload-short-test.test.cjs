@@ -26,6 +26,7 @@ const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
 const loadTs = require('../load-ts.cjs');
 const { readSource } = require('../read-source.cjs');
+const own = require('../tools/own-procs.cjs');
 
 const electron = require.resolve('electron');
 require.cache[electron] = { id: electron, filename: electron, loaded: true, exports: { Notification: class { show() {} static isSupported() { return false; } } } };
@@ -266,6 +267,7 @@ K.opaqueNpm = async (t, M = HJ, script = 'gate.sh') => {
   const b = await broker(t, M);
   b.lock.acquire('b', H, 'npm test', 'hb', false);
   const gate = start([BASH, script], b.url);
+  const gateBorn = Date.now();
   await waitFor(() => b.lock.queueSnapshot().waiters.some((w) => w.agentId === 'a'), 20_000, 'BASH GATE.SH RUNNING NPM CI QUEUES FOR THE SLOT');
   assert.equal(await within(gate.done, 10), 'timeout', 'BASH GATE.SH RUNNING NPM CI WAITS FOR THE SLOT');
   // FLAKE-HEAVY-PRELOAD-OPAQUE-NPM-CI-276-108: what the slot owes the queued npm ci is its lease once the
@@ -279,7 +281,8 @@ K.opaqueNpm = async (t, M = HJ, script = 'gate.sh') => {
   gate.done.then((x) => { closed = x; });
   const onLimit = () => {
     process.stderr.write(`[heavy-preload-short-test] the opaque npm ci cell hit its limit, ${closed ? 'process closed' : leased() ? 'lease given, process still running' : 'no lease yet'}: ${evidence()}\n`);
-    if (!closed) spawnSync('taskkill.exe', ['/PID', String(gate.child.pid), '/T', '/F'], { windowsHide: true });
+    // own-procs, not taskkill /T: that walks parent ids alone and can end a stranger (own-procs-pid-recycle PIN).
+    if (!closed) own.killOwnTree({ pid: gate.child.pid, bornMs: gateBorn });
   };
   t.signal.addEventListener('abort', onLimit, { once: true });
   b.lock.callDone('b', 'hb');
