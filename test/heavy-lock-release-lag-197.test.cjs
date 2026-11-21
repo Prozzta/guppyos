@@ -468,7 +468,11 @@ async function liveRelease(t, o) {
   let helperNo = 0;
   const traced = (x) => {
     const ch = Cm.serveChannel(x); const n = ++helperNo;
+    // `...ch` first: every other method of the product's channel (dead() of HEAVYCPU-SERVE-REQ-TIMEOUT-DROPS-ALL-JOBS-108, and
+    // any later one) passes through untouched, so the trace can never hide one from HeavyJobs. serveChannel's methods are
+    // closures, none reads `this`.
     return {
+      ...ch,
       // The product's OWN promise is returned, never a wrapping one: a wrapper settles some turns later, and that alone lets a
       // request land after dispose() and start a new helper (HEAVYJOBS-DISPOSE-RESPAWNS-SERVE-108; the test process then never ends).
       request: (line) => { helperTrace.push({ at: Date.now(), n, what: `> ${line}` }); const p = ch.request(line); void p.then((r) => { helperTrace.push({ at: Date.now(), n, what: `< ${line} = ${r === null ? 'null' : JSON.stringify(r).slice(0, 200)}` }); }); return p; },
