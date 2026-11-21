@@ -91,13 +91,15 @@ if (process.platform !== 'win32') {
   let readyDelay = 0;
   /** Called when the READY's delay is over, in the turn it is handled and before it is. */
   let onReadyDue = () => {};
+  /** A promise the due READY also waits for before it is handled (an event, not a time), or null. */
+  let readyGate = null;
   let onReadyHandled = () => {};
   const on0 = wt.Worker.prototype.on;
   wt.Worker.prototype.on = function (name, fn) {
     if (name !== 'message') return on0.call(this, name, fn);
     return on0.call(this, name, (msg) => {
       const run = () => { fn(msg); onReadyHandled(); };
-      const due = () => { onReadyDue(); run(); };
+      const due = () => { onReadyDue(); if (readyGate) readyGate.then(run); else run(); };
       if (readyDelay > 0) setTimeout(due, readyDelay); else due();
     });
   };
@@ -137,6 +139,7 @@ if (process.platform !== 'win32') {
   async function spawnSilent(delay) {
     readyDelay = delay;
     onReadyDue = () => {};
+    readyGate = null;
     const id = `late-${++seq}`;
     const r = await m.spawn({ id, cwd: JAIL, command: process.execPath, args: [ROOT], cols: 80, rows: 24, env: {} }, owner);
     assert.equal(r.ok, true, `spawn: ${r.error}`);
@@ -204,8 +207,24 @@ if (process.platform !== 'win32') {
     assert.deepEqual(thrown(), [], 'nothing thrown outside a caller');
   });
 
+  /**
+   * FLAKE-PTY-LATE-READY-EXIT-CODE-RACE-108. node-pty arms `_closeTimeout` inside its exit report
+   * (_$onProcessExit), so that timer's body never runs before the report. A cell that runs the body
+   * by hand in the READY's turn must keep that order: the READY is held until the report has landed.
+   * With a delay alone, a root slow to end under suite load reported after the hand-run body and its
+   * real code replaced the cell's (codes [1], not [41]).
+   */
+  function exitReported(s) {
+    const agent = s.proc._agent;
+    const report = agent._$onProcessExit;
+    return new Promise((res) => {
+      agent._$onProcessExit = function (...a) { const r = report.apply(this, a); res(); return r; };
+    });
+  }
+
   test('PTY-LATE-READY-EXIT-107: the agent\'s close timer runs in the turn the READY is handled: the exit is still reported, once', async () => {
     const s = await spawnSilent(EARLY_READY_MS);
+    readyGate = exitReported(s);
     const codes = [];
     s.proc.onExit((e) => { codes.push(e.exitCode); });
     s.proc.kill();
@@ -225,6 +244,7 @@ if (process.platform !== 'win32') {
     const agent = s.proc._agent;
     const codes = [];
     const order = [];
+    readyGate = exitReported(s);
     s.proc.onExit((e) => { codes.push(e.exitCode); });
     // The forced interleave: node-pty's exit report (native -> _$onProcessExit) is held until one
     // turn after the READY is due. That is a root slow to end under load, every time.
