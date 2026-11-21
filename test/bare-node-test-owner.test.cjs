@@ -223,8 +223,9 @@ async function observeProcess(p, observer, name, { hold = false, parent, doneMs 
   seen.pids.detachedBornMs = detached.created;
   seen.pids.cmdBornMs = cmd.created;
   let released = false;
+  const times = { observed: Date.now() }; // diagnostics only: a survivor's death window, read in the mutant cell's message
   const release = async () => {
-    if (!released) { released = true; seen.socket.write('release\n'); seen.socket.end(); }
+    if (!released) { released = true; times.released = Date.now(); seen.socket.write('release\n'); seen.socket.end(); }
     let doneTimer;
     const doneTimeout = new Promise((_, reject) => {
       doneTimer = setTimeout(() => {
@@ -241,9 +242,9 @@ async function observeProcess(p, observer, name, { hold = false, parent, doneMs 
         reject(err);
       }, doneMs);
     });
-    try { return await Promise.race([done, doneTimeout]); } finally { clearTimeout(doneTimer); }
+    try { const ended = await Promise.race([done, doneTimeout]); times.done = Date.now(); return ended; } finally { clearTimeout(doneTimer); }
   };
-  return { pids: seen.pids, stderr: () => errText, stdout: () => outText, exited: () => exit, release, done, hold };
+  return { pids: seen.pids, times, stderr: () => errText, stdout: () => outText, exited: () => exit, release, done, hold };
 }
 
 async function bareRun(dir, name, helperLine, { mode = 'FAIL', env: extra = {}, disconnect = true, doneMs } = {}) {
@@ -452,7 +453,7 @@ test('LIVE: mutants of own-job.cjs are caught: without a real join the detached 
       if (!now.detached) {
         const rowNow = own.lookupPids([r.pids.detached, r.pids.cmd, r.parent.pid]);
         const show = (pid) => { const x = rowNow.find((q) => q.pid === pid); return x ? `row present, created ${x.created}${x.created === (pid === r.pids.detached ? r.pids.detachedBornMs : pid === r.pids.cmd ? r.pids.cmdBornMs : r.parent.bornMs) ? ' (same process)' : ' (a DIFFERENT process: pid recycled)'}` : 'no row (gone)'; };
-        survivors.push(`${name}: detached ${r.pids.detached} observed alive at created ${r.pids.detachedBornMs}, now ${show(r.pids.detached)}; cmd ${show(r.pids.cmd)}; bare parent ${show(r.parent.pid)}; checked ${Date.now() - checkedFrom} ms after the run returned`);
+        survivors.push(`${name}: detached ${r.pids.detached} observed alive at created ${r.pids.detachedBornMs}, now ${show(r.pids.detached)}; cmd ${show(r.pids.cmd)}; bare parent ${show(r.parent.pid)}; re-checked ${Date.now() - checkedFrom} ms after the run returned; window, ms since the observation (alive): release written +${r.times.released - r.times.observed}, fixture done +${r.times.done - r.times.observed}, first lookup +${checkedFrom - r.times.observed}`);
       }
       sweep([now.detached, now.cmd, now.ping]);
     }
