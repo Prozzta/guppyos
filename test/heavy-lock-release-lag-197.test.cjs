@@ -327,7 +327,7 @@ async function liveRelease(t, o) {
   helperDirs.push(local);
   // TEST-BASH-PATH-197: Git Bash by path. A bare `bash` is found only when the suite was started
   // from a Git Bash shell; from PowerShell (a Codex agent) it was `spawn bash ENOENT`.
-  const sh = spawn(gitBash(), ['-c', `"${exe.replace(/\\/g, '/')}" join ${id} 0 0; ${o.body}`], { stdio: 'ignore', windowsHide: true, env: { ...process.env, LOCALAPPDATA: local } });
+  const sh = spawn(gitBash(), ['-c', `${o.joinDelay ? `sleep ${o.joinDelay}; ` : ''}"${exe.replace(/\\/g, '/')}" join ${id} 0 0; ${o.body}`], { stdio: 'ignore', windowsHide: true, env: { ...process.env, LOCALAPPDATA: local } });
   const t0 = Date.now();
   // A kill ends every process of the job (what stopping a background task does to its tree; a tree
   // kill from the Git Bash launcher alone misses the MSYS children, which then keep the job running).
@@ -542,6 +542,16 @@ test('the freed check fails a release while the kill of a member has not even be
   assert.doesNotThrow(() => assertFreed(rec(T + 7_400), 'x'), 'a release 500 ms after the last member ended is fine');
   assert.throws(() => assertFreed(rec(T + 100), 'x'), /NOT RELEASED BEFORE THE JOB EXITS.*pid 2/s, 'a release at the shell death, 6 s before the last kill was sent');
   assert.throws(() => assertFreed(rec(T + 6_000), 'x'), /NOT RELEASED BEFORE THE JOB EXITS/, 'a release while the last kill is still unsent');
+});
+
+// FLAKE-LAG197-KILL-NONE-LISTED-108: the kill used to fire 1.5 s after the spawn and list the job ONCE. Under suite
+// load Git Bash had not reached its `join` by then, the list was empty, nothing was killed, and the job ran its
+// 30 s out ("none listed"). o.joinDelay: the shell joins the job this many seconds after it started.
+test('LIVE: a shell that joins the job after the kill time is still killed once it has joined', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
+  const r = await liveRelease(t, { body: 'sleep 30', kill: 1_500, joinDelay: 3 });
+  t.diagnostic(`late join: ran ${r.runMs} ms, held ${r.heldMs} ms, freed ${r.lagMs} ms after the exit; shell exit code ${r.code}, signal ${r.signal}, ${r.kills.length} killed`);
+  assertKilled(r, 'late join');
+  assertFreed(r, 'late join');
 });
 
 test('the killed check fails a shell that ran out on its own, and one nothing was killed in', () => {
