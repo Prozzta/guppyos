@@ -691,7 +691,15 @@ test('LIVE: a killed job frees the slot when completion-port notices are absent'
 // first round has ended, by design. The assert used to hold every kill of the run to the first round's end,
 // so the straggler (startedAt 427 ms after the last kill of round 1 ended) failed it on a loaded machine.
 function assertKillsTogether(kills) {
-  for (const n of new Set(kills.map((k) => k.round))) {
+  // The rounds are the rig's list-kill-list loop: 1..N in a row, and a round starts only after the one before ended.
+  // Without this a rig that gave every kill its own round would make the check below vacuous.
+  const rounds = [...new Set(kills.map((k) => k.round))].sort((a, b) => a - b);
+  assert.deepEqual(rounds, rounds.map((_, i) => i + 1), `THE ROUNDS ARE 1..N: ${JSON.stringify(rounds)}`);
+  for (const n of rounds.slice(1)) {
+    const prevEnd = Math.max(...kills.filter((k) => k.round === n - 1).map((k) => k.endedAt));
+    assert.ok(kills.filter((k) => k.round === n).every((k) => k.startedAt >= prevEnd), `ROUND ${n} STARTS AFTER ROUND ${n - 1} ENDED: ${JSON.stringify(kills)}`);
+  }
+  for (const n of rounds) {
     const inRound = kills.filter((k) => k.round === n);
     const firstEnd = Math.min(...inRound.map((k) => k.endedAt));
     assert.ok(inRound.every((k) => k.startedAt <= firstEnd), `THE KILLS OF ROUND ${n} RUN TOGETHER, not one after another: ${JSON.stringify(inRound)}`);
@@ -706,6 +714,9 @@ test('the kills-together check: a straggler killed in the next round passes, kil
   assert.doesNotThrow(() => assertKillsTogether([...round1, late]));
   // one after another in ONE round: the second starts after the first has ended
   assert.throws(() => assertKillsTogether([{ pid: 1, round: 1, startedAt: T, endedAt: T + 100 }, { pid: 2, round: 1, startedAt: T + 150, endedAt: T + 300 }]), /ROUND 1 RUN TOGETHER/);
+  // a rig that gave every kill its own round would make the per-round check vacuous: the rounds must follow the loop
+  assert.throws(() => assertKillsTogether(round1.map((k, i) => ({ ...k, round: i + 1 }))), /ROUND 2 STARTS AFTER ROUND 1 ENDED/);
+  assert.throws(() => assertKillsTogether([{ ...round1[0], round: 2 }]), /THE ROUNDS ARE 1..N/);
   // the round-2 straggler is judged within its own round too
   assert.throws(() => assertKillsTogether([...round1, late, { pid: 9, round: 2, startedAt: T + 20_000, endedAt: T + 20_100 }]), /ROUND 2 RUN TOGETHER/);
 });
