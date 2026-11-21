@@ -1093,9 +1093,11 @@ export class HiveManager {
     }
     this.owedChecked.add(outbox);
   }
-  /** One outbox file, one mail id: the same on every pass over it, so a pass that runs again after a stop is dropped at admission. */
+  /** One outbox file, one mail id: the same on every pass over it, so a pass that runs again after a stop is dropped at admission.
+   *  The time is the file's CHANGE time, not its mtime: a sender can set mtime (a backdated file would sort before older mail,
+   *  and a file recreated with the same bytes and mtime would pass for the one already delivered); it cannot set the change time. */
   private outboxFileMailId(from: string, file: string, full: string, text: string): string | undefined {
-    try { return `${new Date(statSync(full).mtimeMs).toISOString().replace(/[:.]/g, '-')}-${createHash('sha256').update(JSON.stringify([from, file, text])).digest('hex').slice(0, 6)}`; } catch { return undefined; }
+    try { return `${new Date(statSync(full).ctimeMs).toISOString().replace(/[:.]/g, '-')}-${createHash('sha256').update(JSON.stringify([from, file, text])).digest('hex').slice(0, 6)}`; } catch { return undefined; }
   }
   setHookBroker(broker: HookBroker | null): void {
     this.hookBroker = broker;
