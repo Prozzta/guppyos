@@ -95,6 +95,24 @@ const K = {
     suite(M, `ls ${G} | xargs -n1 bash -c 'node --test "$0"'`, `${T} (written inline)`);
     suite(M, `run(){ node --test "$1"; }; export -f run; find test -name "*.test.cjs" -exec bash -c 'run "$0"' {} \\;`, `${T} (find -exec)`);
   },
+  escapes(M) {
+    // Jim MUST 1: `\\` is one escaped backslash, so the `;` after it separates (int held these too).
+    const T = 'AN ESCAPED BACKSLASH DOES NOT ESCAPE THE ; AFTER IT';
+    for (const [cmd, kind] of [
+      [String.raw`echo \\; npm test`, 'suite'],
+      [String.raw`echo a\\; npm test`, 'suite'],
+      [String.raw`echo \\\\; npm test`, 'suite'],
+      [String.raw`echo \\;npm test`, 'suite'],
+      [String.raw`echo x \\; node --test`, 'suite'],
+      [String.raw`printf '%s' \\; npm ci`, 'install'],
+      [String.raw`find . -name x -exec rm {} \\; npm test`, 'suite'],
+      [String.raw`echo \;; npm test`, 'suite'],
+    ]) {
+      const c = M.classifyCommand(cmd, 0, {});
+      assert.deepEqual({ heavy: c.heavy, kind: c.kind }, { heavy: true, kind }, `${T}: ${JSON.stringify(cmd)} is held as ${kind} (classed ${JSON.stringify(c)})`);
+    }
+    light(M, String.raw`echo \; npm test`, `${T}: but one backslash does (the ; is echo's argument)`);
+  },
   light(M) {
     const T = 'NOT WIDENED';
     light(M, `ls ${G} | xargs rm`, `${T}: xargs of a command that runs no test`);
@@ -118,6 +136,7 @@ test('FIND -EXEC ... \\;: a suite', () => K.findSemi(HJ));
 test('FIND: a second -exec after \\; stays on its find', () => K.secondExec(HJ));
 test('FIND -EXEC ... {} +: a suite', () => K.findPlus(HJ));
 test('XARGS BASH -C: through the FUNC-CALL inliner', () => K.xargsBash(HJ));
+test('ESCAPES: an escaped backslash does not escape the ; after it', () => K.escapes(HJ));
 test('NOT WIDENED: xargs / find -exec that run no test stay light', () => K.light(HJ));
 
 // ─── MUTANT CENSUS ──────────────────────────────────────────────────────────────────────────
@@ -131,6 +150,7 @@ function mutateText(rel, edits, tag) {
   }
   return text;
 }
+const SH_ESCAPE = String.raw`    if (d === 'sh' && c === '\\' && i + 1 < cmd.length && cmd[i + 1] !== '\n') { cur += c + cmd[i + 1]; i++; continue; }`;
 const MUTANTS = [
   { name: 'xargs runs nothing (int)',
     edits: [["  if (bin === 'xargs') {", '  if (false) {']],
@@ -143,13 +163,13 @@ const MUTANTS = [
     killer: 'findPlus', dies: /FIND -EXEC NODE --TEST \{\} \+ IS A SUITE: "find test -name \\"\*\.test\.cjs\\" -exec node --test \{\} \+" is heavy/ },
   { name: 'a node --test of the item is not named as the list',
     edits: [['      if (files.includes(LIST_ITEM)) return listSuite();\n', '']],
-    killer: 'xargsBash', dies: /XARGS BASH -C OVER A NODE --TEST FUNCTION IS A SUITE: .* is heavy/ },
+    killer: 'xargsBash', dies: /XARGS BASH -C OVER A NODE --TEST FUNCTION IS A SUITE: .*: the reason names the list/ },
   { name: 'a node --test the item never reaches is light',
     edits: [["  if (c.kind !== 'suite' && prog === 'node' && lead.includes('--test')) return listSuite();", '']],
     killer: 'unplaced', dies: /A NODE --TEST THE ITEM NEVER REACHES STILL RUNS ONCE PER ITEM: .* is heavy/ },
   { name: 'the replace string is not replaced (the item is appended)',
     edits: [['  return replace ? cmd.map((w) => w.split(replace!).join(LIST_ITEM)) : [...cmd, LIST_ITEM];', '  return [...cmd, LIST_ITEM];']],
-    killer: 'replace', dies: /THE REPLACE STRING IS THE ITEM \(in a bash -c body\): .* is heavy/ },
+    killer: 'replace', dies: /THE REPLACE STRING IS THE ITEM \(in a bash -c body\): .*: the reason names the list/ },
   { name: '-I takes no value (its R reads as the command)',
     edits: [["const XARGS_VALUE = 'adEILnPs';", "const XARGS_VALUE = 'adELnPs';"]],
     killer: 'replace', dies: /THE REPLACE STRING IS THE ITEM \(-I R\): .* is heavy/ },
@@ -166,8 +186,11 @@ const MUTANTS = [
     edits: [["      if (w === '+' && clause[clause.length - 1] === '{}') break;\n", '']],
     killer: 'findPlus', dies: /FIND -EXEC NODE --TEST \{\} \+ IS A SUITE \(after a \{\} \+ clause\): .* is heavy/ },
   { name: "sh's \\; separates segments again (int)",
-    edits: [["    if (d === 'sh' && c === '\\\\' && cmd[i + 1] === ';') { cur += '\\\\;'; i++; continue; }\n", '']],
+    edits: [[SH_ESCAPE + '\n', '']],
     killer: 'secondExec', dies: /A SECOND -EXEC AFTER \\; STAYS ON ITS FIND: .* is heavy/ },
+  { name: "only `\\;` is an escape (an escaped backslash escapes the ; after it: Jim MUST 1)",
+    edits: [[SH_ESCAPE, String.raw`    if (d === 'sh' && c === '\\' && cmd[i + 1] === ';') { cur += '\\;'; i++; continue; }`]],
+    killer: 'escapes', dies: /AN ESCAPED BACKSLASH DOES NOT ESCAPE THE ; AFTER IT: "echo \\\\\\\\; npm test" is held as suite/ },
   { name: "xargs's command keeps the outer segment (its bash -c body reads as computed)",
     edits: [['  return at < 0 ? undefined : rest.slice(at).trimStart();', '  return undefined;']],
     killer: 'xargsBash', dies: /XARGS BASH -C OVER A NODE --TEST FUNCTION IS A SUITE: .* is a suite/ },
