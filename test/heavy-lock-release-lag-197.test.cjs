@@ -462,8 +462,23 @@ async function liveRelease(t, o) {
   // false red, never a false green. null (never probed) fails by name in assertFreed.
   let shellRef = null; let shellAliveAtRelease = null;
   const lock = new HJ.HeavyJobLock({ limit: () => 1, log: (r) => { rows.push({ ...r, ts: Date.now() }); if (r.kind === 'heavy-lock' && r.action === 'release' && shellRef) { try { process.kill(shellRef.pid, 0); shellAliveAtRelease = true; } catch { shellAliveAtRelease = false; } } } });
+  // FLAKE-LAG197-SLOW-KILL-SLOT-NOT-FREED-108 (diagnostic only): every request to the serve helper, its reply and every
+  // notice it sends, with the time, for the "not freed" message. The channel is the product's own; each call passes straight through.
+  const helperTrace = [];
+  let helperNo = 0;
+  const traced = (x) => {
+    const ch = Cm.serveChannel(x); const n = ++helperNo;
+    return {
+      // The product's OWN promise is returned, never a wrapping one: a wrapper settles some turns later, and that alone lets a
+      // request land after dispose() and start a new helper (HEAVYJOBS-DISPOSE-RESPAWNS-SERVE-108; the test process then never ends).
+      request: (line) => { helperTrace.push({ at: Date.now(), n, what: `> ${line}` }); const p = ch.request(line); void p.then((r) => { helperTrace.push({ at: Date.now(), n, what: `< ${line} = ${r === null ? 'null' : JSON.stringify(r).slice(0, 200)}` }); }); return p; },
+      close: () => { helperTrace.push({ at: Date.now(), n, what: 'closed' }); ch.close(); },
+      onEvent: (fn) => ch.onEvent((e) => { helperTrace.push({ at: Date.now(), n, what: `event ${JSON.stringify(e)}` }); fn(e); })
+    };
+  };
   const jobs = new Cm.HeavyJobs({
     platform: 'win32', options: () => ({ background: false, half: false }), exe: () => exe, log: (r) => rows.push({ ...r, ts: Date.now() }),
+    ...(typeof Cm.serveChannel === 'function' ? { channel: traced } : {}),
     onJob: (e) => { if (e.state === 'held') lock.noteJob(e.agentId, e.callId, e.job); else lock.jobExited(e.agentId, e.callId, e.job); }
   });
   t.after(() => jobs.dispose());
@@ -527,15 +542,15 @@ async function liveRelease(t, o) {
         const ended = [];
         for (const pid of fresh) {
           seen.add(pid);
-          const k = { pid, round, startedAt: null, sentAt: null, endedAt: null };
+          const k = { pid, round, startedAt: null, sentAt: null, endedAt: null, code: null };   // code: the taskkill tool's own exit code (diagnostic only)
           kills.push(k);
           ended.push(new Promise((done) => {
             const end = () => { if (k.endedAt === null) k.endedAt = Date.now(); done(); };
             const go = () => {
               k.sentAt = Date.now();
               const tk = spawn('taskkill', ['/F', '/PID', String(pid)], { stdio: 'ignore', windowsHide: true });
-              tk.on('error', end);
-              tk.on('exit', end);
+              tk.on('error', (e) => { if (k.code === null) k.code = `error ${e.code || e.message}`; end(); });
+              tk.on('exit', (code) => { if (k.code === null) k.code = code; end(); });
             };
             // One kill, from its start to the tool's exit. o.slowKill: the kill tool takes this long
             // per process, as taskkill does on a loaded machine.
@@ -566,7 +581,11 @@ async function liveRelease(t, o) {
   const deadline = jobEndAt + 6_000;
   while (lock.snapshot().length && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
   const rel = rows.find((r) => r.kind === 'heavy-lock' && r.action === 'release');
-  return { lagMs: rel ? rel.ts - exitAt : null, relAt: rel ? rel.ts : null, lastSentAt: lastSent.at, lastSentPid: lastSent.pid, afterEndMs: rel ? rel.ts - jobEndAt : null, exitAt, jobEndAt, runMs: exitAt - t0, heldMs: rel ? rel.heldMs : null, reason: rel ? rel.reason : null, rows, shellAliveAtRelease, code: exit.code, signal: exit.signal, kills, shellPid: sh.pid, lists, t0 };
+  // Diagnostic only, and only for a slot that was not freed: who is still in the job. Read after `rel`, so the list's own
+  // time cannot turn a missing release into a found one; kept out of `lists`, which records the kill's lists.
+  let stillIn = null;
+  if (!rel) { stillIn = await listOnce(); lists.pop(); }
+  return { helperTrace, stillIn, lagMs: rel ? rel.ts - exitAt : null, relAt: rel ? rel.ts : null, lastSentAt: lastSent.at, lastSentPid: lastSent.pid, afterEndMs: rel ? rel.ts - jobEndAt : null, exitAt, jobEndAt, runMs: exitAt - t0, heldMs: rel ? rel.heldMs : null, reason: rel ? rel.reason : null, rows, shellAliveAtRelease, code: exit.code, signal: exit.signal, kills, shellPid: sh.pid, lists, t0 };
 }
 
 // What this process reads from a Git Bash shell that taskkill /F ended: exit code 1, no signal.
@@ -588,12 +607,25 @@ function listsText(r) {
 
 /** Every kill, from the shell's exit: pid, start, end (ms), so a red says which process was late. */
 function killsText(r) {
-  return r.kills.map((k) => `${k.pid}${k.pid === r.shellPid ? '(shell)' : ''}: ${k.startedAt === null ? '?' : k.startedAt - r.exitAt}${k.sentAt === null ? '' : `/sent ${k.sentAt - r.exitAt}`}..${k.endedAt === null ? '?' : k.endedAt - r.exitAt}`).join(', ');
+  return r.kills.map((k) => `${k.pid}${k.pid === r.shellPid ? '(shell)' : ''}: ${k.startedAt === null ? '?' : k.startedAt - r.exitAt}${k.sentAt === null ? '' : `/sent ${k.sentAt - r.exitAt}`}..${k.endedAt === null ? '?' : k.endedAt - r.exitAt}${k.code === undefined || k.code === null ? '' : ` taskkill exit ${k.code}`}`).join(', ');
+}
+
+/** FLAKE-LAG197-SLOW-KILL-SLOT-NOT-FREED-108: what a "not freed" red needs to name its cause. Times are ms from the shell's
+ *  exit. The job's members at the deadline (a member still alive: the kill did not end it, and the product is right to
+ *  hold the slot), every row the lock and HeavyJobs logged, and every request, reply and notice of the serve helper (a
+ *  reply of null, a "closed", or a second helper: HEAVYCPU-SERVE-REQ-TIMEOUT-DROPS-ALL-JOBS-108). */
+function notFreedText(r) {
+  const at = (ms) => ms - r.exitAt;
+  const s = r.stillIn;
+  const members = !s ? 'not listed' : s.error ? `list error ${s.error}` : `list exit ${s.code} in ${s.ms} ms, ${s.rows} rows [${s.pids.join(', ')}], ${s.unparsed} unparsed`;
+  const rows = (r.rows ?? []).map((x) => `${at(x.ts)} ${[x.kind, x.action, x.job, x.state, x.reason, x.by, x.what, x.error].filter((v) => v !== undefined && v !== null).join('/')}`).join(' | ');
+  const helper = (r.helperTrace ?? []).map((x) => `${at(x.at)} #${x.n} ${x.what}`).join(' | ');
+  return `; in the job at the deadline: ${members}; rows: ${rows || 'none'}; helper: ${helper || 'none recorded'}`;
 }
 
 function assertFreed(r, what) {
   const kills = r.kills.length ? `; kills (ms from the shell's exit) ${killsText(r)}; the job ended ${r.jobEndAt - r.exitAt} ms after the shell` : '';
-  assert.ok(r.afterEndMs !== null, `${what}: THE SLOT IS FREED WITHIN 2 S OF THE JOB'S EXIT (not freed 6 s after the job's last process ended${kills})`);
+  assert.ok(r.afterEndMs !== null, `${what}: THE SLOT IS FREED WITHIN 2 S OF THE JOB'S EXIT (not freed 6 s after the job's last process ended${kills}${r.afterEndMs !== null ? '' : notFreedText(r)})`);
   // FLAKE-LAG197-NOPORT-KILL-EARLY-RELEASE-108: one clock. The exit time this process saw (exitAt) is when its event loop got
   // the event, 300+ ms after the death under load, so lagMs < 0 was not an early release. The fact is sampled at the release row.
   assert.ok(r.shellAliveAtRelease === false, `${what}: THE SLOT IS NOT RELEASED BEFORE THE JOB EXITS (the shell was ${r.shellAliveAtRelease === true ? 'still alive' : 'not probed'} when the slot was released)`);
