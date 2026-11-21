@@ -39,9 +39,19 @@ const win = process.platform === 'win32';
 const winOnly = { skip: !win && 'Windows rename semantics' };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Handles opened under a scratch dir are closed here, awaited, before its rm. node:test runs t.after
+// hooks in registration order, so a reader's own t.after(close) ran AFTER the rm, and Electron's
+// rmSync fails ENOTEMPTY on a tree with an open handle (A2: the reader holds state.json itself).
+const closersOf = new Map();
 function scratch(t, tag) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), `guppy-asyncrename-${tag}-`));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const closers = [];
+  closersOf.set(dir, closers);
+  t.after(async () => {
+    for (const close of closers.reverse()) await close();
+    closersOf.delete(dir);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
   const target = path.join(dir, 'state.json');
   fs.writeFileSync(target, 'old');
   return { dir, target };
@@ -50,7 +60,7 @@ function scratch(t, tag) {
 /** Open `target` for reading and prove the handle blocks a plain rename over it. */
 async function heldReader(t, dir, target) {
   const reader = await fsp.open(target, 'r');
-  t.after(() => reader.close().catch(() => {}));
+  closersOf.get(dir).push(() => reader.close().catch(() => {}));
   const probe = path.join(dir, 'probe');
   fs.writeFileSync(probe, 'probe');
   assert.throws(() => fs.renameSync(probe, target), { code: 'EPERM' }, 'THE READER HOLDS THE TARGET: a plain rename over it is refused');
