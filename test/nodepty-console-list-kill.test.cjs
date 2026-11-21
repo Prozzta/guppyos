@@ -135,6 +135,21 @@ test('harness: a GUI-subsystem child that is gone when childBytes closes its ter
   assert.equal(c.closed, true, "node-pty's kill ran");
   assert.deepEqual(c.named, [], `a root that is gone has no console to list, and the kill named ${JSON.stringify(c.named)}`);
 });
+// The driver's own cleanup (not node-pty's kill, not the harness's): it used to end every root by its
+// number when a case was over, also a root dead for a second or more, whose number can be any
+// process's on the machine by then.
+test("the driver's own cleanup names a root only while its own hold says the root runs: no kill goes to the pid of a root that is gone", async () => {
+  const out = await driver();
+  for (const [key, c] of Object.entries(out.cases)) {
+    assert.equal((c.cleanupKills || []).includes('DEAD PID'), false,
+      `NO KILL IS SENT TO A DEAD ROOT'S PID: case ${key} sent one after the driver's hold said the root had exited (${JSON.stringify(c.cleanupKills)}, ${c.cleanup})`);
+    assert.notEqual(c.cleanup, 'no hold: no pid named', `control: the driver held the root of case ${key} (the hold addon is built)`);
+  }
+  const { harnessAlive, harnessHoldSaysGone, harnessGone } = out.cases;
+  assert.deepEqual(harnessHoldSaysGone.cleanupKills, ['held, running'], 'control: a root still running at the cleanup is ended, by pid, under the hold');
+  assert.equal(harnessAlive.cleanup, 'gone: no pid named', 'the root that childBytes ended is not named again');
+  assert.equal(harnessGone.cleanup, 'gone: no pid named', 'the root that exited by itself is not named');
+});
 
 // ---- the mechanism, probed directly ----
 test('a GUI-subsystem root on a terminal is on the console of the process that owns the terminal; a console root is not (control)', async () => {
