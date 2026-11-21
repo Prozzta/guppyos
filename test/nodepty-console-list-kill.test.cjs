@@ -135,8 +135,15 @@ test('harness, inbox conhost: the by-pid end names the pid only while the hold o
   // The guarantee first: a by-pid end that should not have happened has ended the child by the time
   // the control below samples it, so the control read first would name the harness, not the fault.
   assert.equal(gone.endedByPid, undefined, 'A PID IS NAMED ONLY WHILE IT IS HELD: the hold said the child had exited, and childBytes still ended that pid');
-  assert.equal(gone.aliveAtKill, true, "control: the child itself was alive at node-pty's kill");
-  assert.equal(gone.holdReleasedAfterKill, true, "the hold was released, and only after node-pty's kill");
+  // The child is in fact alive and on the owner's console, for good. The harness reads the console
+  // list of the pid before any close, so it no longer closes this terminal at all.
+  assert.deepEqual(gone.cleanupKills, ['held, running'], "control: the child itself was alive all along (the driver's own hold ended it after the case)");
+  assert.equal(gone.closed, false, "NO CLOSE WHILE THE CHILD IS ON THE OWNER'S CONSOLE: the console of the pid still listed the child, and node-pty's kill ran");
+  assert.deepEqual(gone.named, [], `no console list was taken by node-pty, so nothing was named (${JSON.stringify(gone.named)})`);
+  assert.match(gone.result, /^PTY teardown: the child has exited and the console of its pid still lists it/, 'the failure names the child that is still on its console');
+  assert.equal(gone.workerExited, true, 'the conout worker was ended by the harness: the test file can end');
+  assert.equal(gone.holdReleasedAfterKill, false, "the hold was released with no kill by node-pty before it (there was none)");
+  assert.equal(gone.holdReleasedAfterWorkerExit, true, 'the hold was released, and only after the refusal had ended the terminal\'s worker');
 });
 test('harness: a GUI-subsystem child that is gone when childBytes closes its terminal names nobody (pin)', async () => {
   const c = await kase('harnessGone');
