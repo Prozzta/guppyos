@@ -122,13 +122,18 @@ test('an unattached PTY starts with no DA1 wait, the query never reaches the sin
  *  that exits at once, writes the answer while the console is going away (measured: EAGAIN 5 of 5;
  *  busy 1 s: 0 of 3, the launch was still held). */
 const BUSY_PAST_DA1_MS = 4_500;
+/** Alive by the process itself (exit code still pending), synchronously. pty.ts holds the root's handle
+ *  until onExit, and onExit cannot run while this thread is blocked, so the pid cannot be reused meanwhile. */
+const pidAlive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { if (e.code === 'ESRCH') return false; throw e; } };
 
 /** One EAGAIN cell. `rootLivesMs` is how long the root stays after it starts: 0 is the empty script. */
 async function eagainCell(id, rootLivesMs) {
   const dir = tempDir('ocin-');
   const { PtyManager } = loadTs('src/main/pty.ts');
   const m = new PtyManager();
-  fs.writeFileSync(path.join(dir, 'gone.cjs'), rootLivesMs ? `setTimeout(() => {}, ${rootLivesMs});` : '');
+  const pidFile = path.join(dir, 'root.pid');
+  fs.writeFileSync(path.join(dir, 'gone.cjs'), `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));` + (rootLivesMs ? `setTimeout(() => {}, ${rootLivesMs});` : ''));
+  const readPid = () => { try { return Number(fs.readFileSync(pidFile, 'utf8')) || 0; } catch { return 0; } };
   const thrown = [];
   const onUncaught = (e) => thrown.push(`${e && e.code} ${e && e.message}`);
   process.on('uncaughtException', onUncaught);
@@ -141,10 +146,14 @@ async function eagainCell(id, rootLivesMs) {
     assert.ok(r.ok, `spawn: ${r.error}`);
     // The answer goes out from the output handler, in the first turn after this block.
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, BUSY_PAST_DA1_MS);
+    // CONTROL, still in the blocked turn: what the root was when the answer is about to be written.
+    const rootPid = readPid();
+    const rootAliveAtWrite = rootPid ? pidAlive(rootPid) : null;
     const t0 = Date.now();
     while (!exited && Date.now() - t0 < 10_000) await new Promise((r2) => setTimeout(r2, 50));
     await new Promise((r2) => setImmediate(r2));
     assert.ok(exited, 'the terminal reported its exit');
+    assert.equal(rootAliveAtWrite, false, `THE ROOT HAD STARTED AND GONE BEFORE THE ANSWER WAS WRITTEN (pid ${rootPid}; null = it had not started; the root stays ${rootLivesMs} ms; said ${JSON.stringify(said)})`);
     assert.deepEqual(thrown, [], 'NOTHING IS THROWN OUTSIDE A CALLER: the failed write meets the input pipe\'s error listener');
     assert.ok(said.some((l) => /a write to terminal \d+ failed \(EAGAIN\)/.test(l)), `THE FAILED WRITE IS SAID (the root stays ${rootLivesMs} ms): ${JSON.stringify(said)}`);
   } finally {
