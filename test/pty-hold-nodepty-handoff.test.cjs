@@ -735,7 +735,19 @@ if (!WIN) {
   const idHold = loadTs(IDF);
   const holds = [];
   const ptySpawn = nodePty.spawn;
+  // FLAKE-PTY-HOLD-NODEPTY-HANDOFF-TIMEOUT: Windows attaches no pseudoconsole to a GUI-subsystem
+  // program, so such a root's output never reaches the terminal and a cell that waits for it only
+  // times out. Under the Electron leg process.execPath is electron.exe, which is one (also when it
+  // runs as Node). Every root is read before it is spawned, so the red names the program.
+  const { peSubsystem } = require('./tools/console-node.cjs');
+  const subsystems = new Map();
+  const assertConsoleRoot = (file) => {
+    if (!subsystems.has(file)) subsystems.set(file, peSubsystem(file));
+    const sub = subsystems.get(file);
+    assert.equal(sub, 3, `THE ROOT OF A REAL TERMINAL IS A CONSOLE PROGRAM: ${file} has PE subsystem ${sub}${sub === 2 ? ' (GUI)' : ''}, not 3 (console). A PTY does not attach it: its output never arrives`);
+  };
   const realPtySpawn = function spawn(...a) {
+    assertConsoleRoot(a[0]);
     const proc = ptySpawn.apply(this, a);
     const hold = idHold.holdRoot(proc.pid, 'win32', idHold.rootHandoff(proc));
     assert.ok(hold, `the root is held by handle from node-pty's handoff. ${HINT}`);
