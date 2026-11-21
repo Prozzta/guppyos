@@ -6,7 +6,8 @@ const path = require('node:path');
 const allocated = new Set();
 
 function newMutantDir(label) {
-  if (!/^[a-z0-9-]+$/i.test(label)) throw new Error(`invalid mutant directory label: ${label}`);
+  // typeof first: a regex test turns undefined into 'undefined', and that passes.
+  if (typeof label !== 'string' || !/^[a-z0-9-]+$/i.test(label)) throw new Error(`invalid mutant directory label: ${label}`);
   const dir = fs.mkdtempSync(path.join(__dirname, `.mutants-${label}-`));
   allocated.add(path.resolve(dir));
   return dir;
