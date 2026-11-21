@@ -444,9 +444,16 @@ test('LIVE: mutants of own-job.cjs are caught: without a real join the detached 
       const mfile = path.join(dir, `own-job-m${i}.cjs`);
       fs.writeFileSync(mfile, mutated);
       const r = await bareRun(dir, `mutant${i}`, req(mfile), { env });
+      const checkedFrom = Date.now();
       const now = childRows(r.pids);
       leftovers.push(now.detached, now.cmd, now.ping);
-      if (!now.detached) survivors.push(name);
+      // The observer saw this node alive before the release and took its CIM creation time as the birth, so a missing
+      // row here means it DIED (or its pid was recycled) between the observation and this check. Say which, and how.
+      if (!now.detached) {
+        const rowNow = own.lookupPids([r.pids.detached, r.pids.cmd, r.parent.pid]);
+        const show = (pid) => { const x = rowNow.find((q) => q.pid === pid); return x ? `row present, created ${x.created}${x.created === (pid === r.pids.detached ? r.pids.detachedBornMs : pid === r.pids.cmd ? r.pids.cmdBornMs : r.parent.bornMs) ? ' (same process)' : ' (a DIFFERENT process: pid recycled)'}` : 'no row (gone)'; };
+        survivors.push(`${name}: detached ${r.pids.detached} observed alive at created ${r.pids.detachedBornMs}, now ${show(r.pids.detached)}; cmd ${show(r.pids.cmd)}; bare parent ${show(r.parent.pid)}; checked ${Date.now() - checkedFrom} ms after the run returned`);
+      }
       sweep([now.detached, now.cmd, now.ping]);
     }
     assert.deepEqual(survivors, [], 'every mutant is killed (its orphan is seen alive)');
