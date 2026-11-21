@@ -304,6 +304,9 @@ function segments(cmd: string, d: ShellDialect = 'sh'): string[] {
     // cmd's `^` escapes the next character (`^&` is a literal &, not a separator).
     if (d === 'cmd' && c === '^') { cur += c + (cmd[i + 1] ?? ''); i++; continue; }
     if (d === 'cmd' && c === ';') { cur += c; continue; }   // not a separator in cmd
+    // HEAVY-LOCK-XARGS-FIND-EXEC-LOOP-108: sh's `\;` is a literal `;` (find's -exec terminator), not a
+    // separator: `find t -exec a {} \; -exec node --test {} \;` cut the second -exec off its find.
+    if (d === 'sh' && c === '\\' && cmd[i + 1] === ';') { cur += '\\;'; i++; continue; }
     // HEAVY-CLASSIFIER-EDGES N2: an unquoted `#` at a word start comments out the rest of the line
     // (an apostrophe in a comment used to open a "quote" that swallowed the following lines).
     if (d === 'sh' && c === '#' && (i === 0 || /\s/.test(cmd[i - 1]))) { while (i + 1 < cmd.length && cmd[i + 1] !== '\n') i++; continue; }
@@ -1213,6 +1216,83 @@ function decodePsEncoded(value: string | undefined): string | null {
   return /[\0-\x08\x0e-\x1f�]/.test(code) ? null : code;
 }
 
+/** HEAVY-LOCK-XARGS-FIND-EXEC-LOOP-108: the word overList writes in for one item of an xargs / find
+ *  -exec list (a plain word, so a `bash -c '... "$0"'` positional and a function's `$1` take it). */
+const LIST_ITEM = '__HEAVY_LIST_ITEM__';
+function listSuite(): HeavyClass {
+  return { heavy: true, kind: 'suite', why: 'node --test once per item of a list the lock cannot count (xargs / find -exec; write the file names out to run it light)' };
+}
+/** GNU xargs: short options that take a value (attached or the next word); -e -i -l take one attached only. */
+const XARGS_VALUE = 'adEILnPs';
+const XARGS_LONG_VALUE = new Set(['arg-file', 'delimiter', 'max-args', 'max-chars', 'max-procs', 'process-slot-var']);
+/** The command xargs runs, with LIST_ITEM for its items: in place of the replace string (-I R, -i,
+ *  --replace), or appended. null when it names none (xargs runs echo). */
+function xargsCommand(args: string[]): string[] | null {
+  let replace: string | null = null;
+  let i = 0;
+  for (; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--') { i++; break; }
+    if (a.startsWith('--')) {
+      const m = /^--([a-z-]+)(?:=(.*))?$/s.exec(a);
+      if (m?.[1] === 'replace') replace = m[2] ?? '{}';
+      if (m && m[2] === undefined && XARGS_LONG_VALUE.has(m[1])) i++;
+      continue;
+    }
+    if (!/^-./.test(a)) break;
+    for (let j = 1; j < a.length; j++) {
+      const o = a[j];
+      if (XARGS_VALUE.includes(o)) { const v = j + 1 < a.length ? a.slice(j + 1) : (args[++i] ?? ''); if (o === 'I') replace = v; break; }
+      if (o === 'i') { replace = a.slice(j + 1) || '{}'; break; }
+      if (o === 'e' || o === 'l') break;
+    }
+  }
+  const cmd = args.slice(i);
+  if (!cmd.length) return null;
+  return replace ? cmd.map((w) => w.split(replace!).join(LIST_ITEM)) : [...cmd, LIST_ITEM];
+}
+/** Each `-exec` / `-execdir` / `-ok` / `-okdir` command of a find, `{}` written in as LIST_ITEM. It ends
+ *  at `;` (spelled `\;` or `';'`) or at `{} +`; one the line cuts short runs to the end of the words. */
+function findExecs(args: string[]): string[][] {
+  const out: string[][] = [];
+  for (let i = 0; i < args.length; i++) {
+    if (!/^-(?:exec|execdir|ok|okdir)$/.test(args[i])) continue;
+    const clause: string[] = [];
+    for (i++; i < args.length; i++) {
+      const w = args[i];
+      if (w === ';' || w === '\\;') break;
+      if (w === '+' && clause[clause.length - 1] === '{}') break;
+      clause.push(w);
+    }
+    out.push(clause.map((w) => w.split('{}').join(LIST_ITEM)));
+  }
+  return out;
+}
+const XARGS_WORD = /(?:^|\s)(?:\S*[/\\])?xargs(?:\.exe)?(?=\s|$)/;
+const FIND_EXEC_WORD = /\s-(?:exec|execdir|ok|okdir)(?=\s|$)/;
+/** The segment's text from the command after its n-th xargs / -exec word (a `bash -c '...'` there is
+ *  a single-quoted body: singleQuotedDashCBody reads ctx.segment), or undefined when it is not found. */
+function segmentFrom(segment: string | undefined, opener: RegExp, n: number, prog: string | undefined): string | undefined {
+  if (!segment || prog === undefined) return undefined;
+  const re = new RegExp(opener.source, 'g');
+  let m: RegExpExecArray | null = null;
+  for (let k = 0; k <= n; k++) { m = re.exec(segment); if (!m) return undefined; }
+  const rest = segment.slice(m!.index + m![0].length);
+  const at = rest.search(new RegExp(`(?:^|\\s)${prog.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=\\s|$)`));
+  return at < 0 ? undefined : rest.slice(at).trimStart();
+}
+/** xargs's / find -exec's command, run once per item: a `node --test` it reaches is a suite (its
+ *  file is LIST_ITEM), and so is one the item never reaches (`xargs -I{} node --test a.test.cjs`). */
+function overList(cmd: string[], depth: number, ctx: ClassifyCtx, what: string, segment: string | undefined): HeavyClass {
+  if (!cmd.length) return { heavy: false };
+  if (depth + 1 >= MAX_DEPTH) return capped(what);
+  const c = classifyWords(cmd, depth + 1, { ...ctx, segment });
+  const lead = leading(cmd);
+  const prog = (lead[0] ?? '').replace(/\\/g, '/').split('/').pop()!.toLowerCase().replace(/\.exe$/, '');
+  if (c.kind !== 'suite' && prog === 'node' && lead.includes('--test')) return listSuite();
+  return c;
+}
+
 function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): HeavyClass {
   const raw = leading(ws0);
   const hasUnclosed = raw.some((w) => w.startsWith('__HEAVY_UNCLOSED_QUOTE__'));
@@ -1361,6 +1441,24 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
     const body = (ctx.expandKnown ?? ((text: string) => text))(args.join(' '));
     if (ctx.dialect === 'sh' && /(?:\$|`)/.test(body)) return { heavy: true, kind: 'bench', why: 'eval (computed command the lock cannot read)', provisional: true };
     return nested(body, depth, { ...ctx, dialect: 'sh' }, 'eval');
+  }
+  // HEAVY-LOCK-XARGS-FIND-EXEC-LOOP-108: `ls test/*.test.cjs | xargs -n1 node --test` and `find test
+  // -name '*.test.cjs' -exec node --test {} \;` (or `{} +`) run their command once per item of a list
+  // the lock cannot count, exactly as a `for` loop over a glob does (loopPlan: a suite). Their command
+  // is classified with LIST_ITEM as the item, so a `node --test` it reaches (directly, through a
+  // `bash -c 'node --test "$0"'`, or an exported function that body calls) is a suite.
+  if (bin === 'xargs') {
+    const x = xargsCommand(args);
+    return x ? overList(x, depth, ctx, 'xargs', segmentFrom(ctx.segment, XARGS_WORD, 0, x[0])) : { heavy: false };
+  }
+  if (bin === 'find') {
+    let maybe: HeavyClass | null = null;
+    for (const [n, clause] of findExecs(args).entries()) {
+      const c = overList(clause, depth, ctx, 'find -exec', segmentFrom(ctx.segment, FIND_EXEC_WORD, n, clause[0]));
+      if (c.heavy && !c.provisional) return c;
+      if (c.heavy && !maybe) maybe = c;
+    }
+    return maybe ?? { heavy: false };
   }
   // HEAVY-LOCK-SHAPES-189 (god conv-cbab35, Dwight 18:18:34Z): a launcher runs its program, so the
   // program decides. `Start-Process -FilePath npm.cmd -ArgumentList 'test'` (and `saps`, PowerShell's
@@ -1514,6 +1612,8 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
         if (e === a) files.push(a); else files.push(...e.split(/\s+/).filter(Boolean));
       }
       if (!files.length) return { heavy: true, kind: 'suite', why: 'node --test (all)' };
+      // HEAVY-LOCK-XARGS-FIND-EXEC-LOOP-108: an item of xargs's / find -exec's list (overList).
+      if (files.includes(LIST_ITEM)) return listSuite();
       if (files.some((f) => /[*?]/.test(f))) return { heavy: true, kind: 'suite', why: 'node --test (a glob or a directory)' };
       if (files.length >= SUITE_MANY_FILES) return { heavy: true, kind: 'suite', why: `node --test (${files.length} files)` };
       // HEAVY-LOCK-LIVE-FILE-192 (b): a test file named through a variable is the file it names (the
