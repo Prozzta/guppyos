@@ -40,6 +40,7 @@ test.after(() => {
 
 const { HookServer } = loadTs('src/main/hooks.ts');
 const { agyOnewayCmd } = loadTs('src/main/hive.ts');
+const { AGY_RESET_TOLERANCE_MS } = loadTs('src/main/capacityNormalize.ts');
 const { CapacityRuntime } = loadTs('src/main/capacityRuntime.ts');
 const { CapacityStripPresenter } = loadTs('src/main/capacityStrip.ts');
 const { capacityDetailView } = loadTs('src/main/capacityDetail.ts');
@@ -54,10 +55,9 @@ const FIXTURE = path.join(__dirname, 'fixtures', 'agy-statusline-1.4.0.json');
 const SCOPED = 'gemini-argon-wtu-weekly';
 
 /** The fixture tick as it is sent now (see the header for the three changes). */
-function tickNow(scopedFraction) {
+function tickNow(scopedFraction, now = Date.now()) {
   const p = JSON.parse(fs.readFileSync(FIXTURE, 'utf8'));
   p.agent_state = 'idle';
-  const now = Date.now();
   for (const b of Object.values(p.quota)) {
     b.reset_time = new Date(Math.round((now + b.reset_in_seconds * 1000) / 1000) * 1000).toISOString().replace('.000Z', 'Z');
   }
@@ -169,4 +169,33 @@ test('the same path: the scoped bucket at zero makes the Gemini pool RESERVE_ONL
   assert.deepEqual(gem.numericallyExhaustedWindowIds, [SCOPED]);
   const coll = f.present();
   assert.deepEqual(validateCapacityStrip(coll), []);
+});
+
+/* FLAKE-AGY-QUOTA-TICK-WAIT. The tick crosses the pipe through two real process starts (cmd.exe,
+ * then findstr). Under suite load that took about 12 s once. The two cells below fix that order
+ * with no load and no wait: the tick is built as it was TRANSIT_MS ago, so it reaches the server
+ * that long after its reset times were stated. They are the two waits that went red in the suite. */
+const TRANSIT_MS = AGY_RESET_TOLERANCE_MS + 1_000;
+
+test('a slow pipe: the seeding tick and the real tick, each 6 s old when the server reads it, still reach the tracker', { skip: !WIN }, async (t) => {
+  const f = await floor(t);
+  const PG = poolKeyOf('antigravity', agyAccountScope(), 'gemini');
+  let r = await send(f.cmdFile, tickNow(0.965, Date.now() - TRANSIT_MS));
+  assert.equal(r.code, 0); assert.equal(r.out, '');
+  await until(() => f.ticks.length === 1, 'the seeding tick');
+  r = await send(f.cmdFile, tickNow(undefined, Date.now() - TRANSIT_MS));
+  assert.equal(r.code, 0);
+  await until(() => f.ticks.length === 2, 'the real tick');
+  assert.deepEqual(f.logs.filter((l) => l.kind === 'agy-statusline-drift'), [], 'no drift row');
+  const gem = f.runtime.tracker.pool(PG);
+  assert.ok(gem, 'the Gemini pool exists');
+  assert.equal(gem.windows[2].remainingPercent, 0.8722944 * 100);
+});
+
+test('a slow pipe: the tick with the scoped bucket at zero, 6 s old when the server reads it, still makes the pool RESERVE_ONLY', { skip: !WIN }, async (t) => {
+  const f = await floor(t);
+  const PG = poolKeyOf('antigravity', agyAccountScope(), 'gemini');
+  await send(f.cmdFile, tickNow(0, Date.now() - TRANSIT_MS));
+  await until(() => f.ticks.length === 1, 'the tick');
+  assert.equal(f.runtime.tracker.pool(PG).state, 'RESERVE_ONLY');
 });
