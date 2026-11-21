@@ -41,8 +41,12 @@ test('ONBINARY-DROP: win32 ConPTY preserves the high coordinate only via string 
   const { ptyBinaryInput } = loadTs('src/main/ptyBinaryInput.ts');
   const node = consoleNode();
   t.diagnostic(`PTY child: ${node.file} ${node.version} (from ${node.from})`);
-  assert.deepEqual(await childBytes(ptyBinaryInput(X10_HIGH_COLUMN, 'win32'), { file: node.file }), [0x20, 0xc2, 0x85, 0x21]);
-  assert.deepEqual(await childBytes(Buffer.from(X10_HIGH_COLUMN, 'latin1'), { file: node.file }), [0x20, 0x21],
+  // host 'inbox': these bytes are what the Windows inbox conhost delivers. The app runs on the bundled
+  // OpenConsole since PTY-CONHOST-ORPHAN-OWNER-DEATH, and there the child also reads the ESC [ M
+  // prefix. Whether that is right is PTY-X10-MOUSE-ESC-PREFIX-OPENCONSOLE's to rule: once it has,
+  // this cell moves to the default host with the bytes measured there.
+  assert.deepEqual(await childBytes(ptyBinaryInput(X10_HIGH_COLUMN, 'win32'), { file: node.file, host: 'inbox' }), [0x20, 0xc2, 0x85, 0x21]);
+  assert.deepEqual(await childBytes(Buffer.from(X10_HIGH_COLUMN, 'latin1'), { file: node.file, host: 'inbox' }), [0x20, 0x21],
     'the Buffer mutant loses 0x85 at ConPTY UTF-8 decoding');
 });
 
@@ -93,8 +97,11 @@ test('ONBINARY-DROP: consoleNode() rejects electron.exe and any GUI-subsystem ex
 test('ONBINARY-DROP: a PTY child that is not on the console fails by name and leaves no conout worker', { skip: process.platform !== 'win32' }, async () => {
   let worker;
   let exited;
+  // host 'inbox': on the bundled OpenConsole a terminal whose child is a GUI-subsystem program reports
+  // its exit, with no code, while that child is still alive (PTY-GUI-ROOT-EXIT-EARLY-UNTRACKED). Until
+  // that card has ruled what is right there, this cell stays on the host its two names were measured on.
   const run = childBytes(X10_HIGH_COLUMN, {
-    file: electronExe(), env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+    file: electronExe(), env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, host: 'inbox',
     onSpawn: (proc) => { worker = proc._agent._conoutSocketWorker._worker; exited = new Promise((res) => worker.once('exit', res)); }
   });
   try {
