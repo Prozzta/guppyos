@@ -666,7 +666,7 @@ const MUTANTS = [
 ];
 
 test('MUTANT CENSUS: every mutant applies once and dies at the assertion that names its guarantee', async (t) => {
-  const mutantDir = newMutantDir();
+  const mutantDir = newMutantDir('held178');
   try {
     for (const [i, m] of MUTANTS.entries()) {
       await t.test(`mutant: ${m.name}`, async () => {
@@ -690,8 +690,8 @@ function isTestChild(dir) {
 }
 
 test('MUTANT CENSUS: scratch directories are unique and cleanup is scoped', () => {
-  const first = newMutantDir();
-  const second = newMutantDir();
+  const first = newMutantDir('held178');
+  const second = newMutantDir('held178');
   const sentinel = path.join(first, 'must-survive-second-cleanup');
   let secondCleaned = false;
   try {
