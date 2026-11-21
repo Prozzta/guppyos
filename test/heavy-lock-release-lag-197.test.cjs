@@ -364,27 +364,40 @@ async function liveRelease(t, o) {
     setTimeout(async () => {
       let rec = await listOnce();
       while (!rec.error && !shellGone && !rec.pids.includes(sh.pid)) { await new Promise((r) => setTimeout(r, 100)); rec = await listOnce(); }
-      const pids = rec.pids;
-      if (!pids.length) killsOver();
-      for (const pid of pids) {
-        const k = { pid, startedAt: null, sentAt: null, endedAt: null };
-        kills.push(k);
-        const end = () => { if (k.endedAt === null) k.endedAt = Date.now(); if (kills.every((x) => x.endedAt !== null)) killsOver(); };
-        const go = () => {
-          k.sentAt = Date.now();
-          const tk = spawn('taskkill', ['/F', '/PID', String(pid)], { stdio: 'ignore', windowsHide: true });
-          tk.on('error', end);
-          tk.on('exit', end);
-        };
-        // One kill, from its start to the tool's exit. o.slowKill: the kill tool takes this long
-        // per process, as taskkill does on a loaded machine.
-        // o.slowOthers: every process but the shell's takes this long, so the shell dies first and the rest of
-        // the job after it (taskkill on a loaded machine, one process slower than another).
-        const delay = o.slowOthers && pid !== sh.pid ? o.slowOthers : (o.slowKill || 0);
-        // startedAt: scheduled; sentAt: the taskkill process was actually spawned (after the delay).
-        const kill = () => { k.startedAt = Date.now(); if (delay) setTimeout(go, delay); else go(); };
-        kill();
+      // A single list can miss a child that has not spawned yet (FLAKE-LAG197-KILL-NONE-LISTED-108, 2nd): after the
+      // kills have ended, list again and kill whatever is new, until a list shows nothing new (or fails).
+      const seen = new Set();
+      for (;;) {
+        const fresh = rec.pids.filter((p) => !seen.has(p));
+        if (!fresh.length) break;
+        const ended = [];
+        for (const pid of fresh) {
+          seen.add(pid);
+          const k = { pid, startedAt: null, sentAt: null, endedAt: null };
+          kills.push(k);
+          ended.push(new Promise((done) => {
+            const end = () => { if (k.endedAt === null) k.endedAt = Date.now(); done(); };
+            const go = () => {
+              k.sentAt = Date.now();
+              const tk = spawn('taskkill', ['/F', '/PID', String(pid)], { stdio: 'ignore', windowsHide: true });
+              tk.on('error', end);
+              tk.on('exit', end);
+            };
+            // One kill, from its start to the tool's exit. o.slowKill: the kill tool takes this long
+            // per process, as taskkill does on a loaded machine.
+            // o.slowOthers: every process but the shell's takes this long, so the shell dies first and the rest of
+            // the job after it (taskkill on a loaded machine, one process slower than another).
+            const delay = o.slowOthers && pid !== sh.pid ? o.slowOthers : (o.slowKill || 0);
+            // startedAt: scheduled; sentAt: the taskkill process was actually spawned (after the delay).
+            k.startedAt = Date.now();
+            if (delay) setTimeout(go, delay); else go();
+          }));
+        }
+        await Promise.all(ended);
+        rec = await listOnce();
+        if (rec.error) break;
       }
+      killsOver();
     }, o.kill);
   }
   const exit = await new Promise((r) => sh.on('exit', (code, signal) => r({ at: Date.now(), code, signal })));
