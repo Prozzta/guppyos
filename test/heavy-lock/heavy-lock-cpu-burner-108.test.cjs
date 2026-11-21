@@ -53,6 +53,9 @@ const BURNERS = [
   'node --eval "while(true){}"',
   "node --eval 'while (true) { Math.sqrt(2) }'",
   'node -e "while(1);"',
+  'node -e "while(1){}"',
+  // Jim 9904d3: the way-out scan reads tokens, so a string that says "break" is not a way out.
+  "node -e 'for(;;){ const s = \"break\"; }'",
   "node -e 'let x = 0; while (1) x++'",
   'node --eval="for(;;);"',
   "node -e='while(true){}'",
@@ -76,6 +79,10 @@ const K = {
   whileTrue(M) { for (const cmd of BURNERS.filter((c) => /while ?\((true|1)\)/.test(c))) bench(M, cmd, {}, 'AN ENDLESS WHILE(TRUE|1) IN NODE -E IS A BENCH'); },
   loops(M) { for (const cmd of LOOPS) bench(M, cmd, {}, 'A SHELL LOOP THAT BACKGROUNDS 4 OR MORE PROCESSES IS A BENCH'); },
   four(M) { bench(M, 'for i in 1 2 3 4; do yes > /dev/null & done', {}, 'FOUR BACKGROUNDED ROUNDS ARE ENOUGH'); },
+  // Jim 9904d3: a per-round wait counts one round's processes, and 4 at once in a round is still load.
+  waitRound(M) {
+    bench(M, 'while read f; do yes > /dev/null & yes > /dev/null & yes > /dev/null & yes > /dev/null & wait; done', {}, 'FOUR BACKGROUNDED IN ONE WAITED ROUND ARE LOAD');
+  },
   unbounded(M) {
     for (const cmd of ['while true; do yes > /dev/null & done', 'for f in *.bin; do gzip -9 "$f" & done']) bench(M, cmd, {}, 'AN UNBOUNDED LOOP THAT BACKGROUNDS IS A BENCH');
   },
@@ -117,6 +124,12 @@ const K = {
       "node -e \"console.log('for(;;){}')\"",
       'node -e "// while(true)"',
       'node -e "1"',
+      // Jim 9904d3: a loop that can leave, or that yields, is a poller or a retry, not a burner.
+      "node -e \"while(true){ if (require('fs').existsSync('f')) break; }\"",
+      'node -e "(async () => { for (;;) { await new Promise((r) => setTimeout(r, 500)); } })()"',
+      'node -e "for(;;){ if (Date.now() > 9e12) process.exit(0) }"',
+      // Jim 9904d3: a body that waits each round runs one round at a time.
+      'while read f; do gzip -9 "$f" & wait; done',
       'for i in 1 2 3; do yes > /dev/null & done; wait',
       'for f in a b c d e; do echo $f; done',
       'while true; do sleep 5; done',
@@ -131,7 +144,7 @@ const K = {
 
 test('NODE -E: an endless for(;;) loop is an exclusive bench', () => K.forever(HJ));
 test('NODE -E: an endless while(true) / while(1) loop is an exclusive bench', () => K.whileTrue(HJ));
-test('SHELL: a loop that backgrounds 4 or more processes is an exclusive bench', () => { K.loops(HJ); K.four(HJ); K.unbounded(HJ); });
+test('SHELL: a loop that backgrounds 4 or more processes is an exclusive bench', () => { K.loops(HJ); K.four(HJ); K.unbounded(HJ); K.waitRound(HJ); });
 test("SIGHTED: Sele's heredoc loadall.sh run in the same call", (t) => K.sele(HJ, dir(t)));
 test("SIGHTED: Creed's bash run.sh (32 spinners + 16 churners)", (t) => K.creed(HJ, dir(t)));
 test('SHELL: backgrounded churn loops with no node in them', (t) => K.churners(HJ, dir(t)));
@@ -153,10 +166,10 @@ const MUTANTS = [
     edits: [["    if (endlessLoop(prog.inline)) return { heavy: true, kind: 'bench', exclusive: true, why: 'node -e (an endless loop: a CPU burner)' };\n", '']],
     killer: 'forever', dies: /AN ENDLESS FOR\(;;\) IN NODE -E IS A BENCH/ },
   { name: 'for(;;) is not an endless loop',
-    edits: [["    if (ts[k].v === 'for' && v(k + 2) === ';' && v(k + 3) === ';' && v(k + 4) === ')') return true;\n", '']],
+    edits: [["    if (ts[k].v === 'for' && v(k + 2) === ';' && v(k + 3) === ';' && v(k + 4) === ')') close = k + 4;\n", '']],
     killer: 'forever', dies: /AN ENDLESS FOR\(;;\) IN NODE -E IS A BENCH/ },
   { name: 'while(true) / while(1) is not an endless loop',
-    edits: [["    if (ts[k].v === 'while' && (v(k + 2) === 'true' || v(k + 2) === '1') && v(k + 3) === ')') return true;\n", '']],
+    edits: [["    if (ts[k].v === 'while' && (v(k + 2) === 'true' || v(k + 2) === '1') && v(k + 3) === ')') close = k + 3;\n", '']],
     killer: 'whileTrue', dies: /AN ENDLESS WHILE\(TRUE\|1\) IN NODE -E IS A BENCH/ },
   { name: 'while(1) is not an endless loop',
     edits: [["(v(k + 2) === 'true' || v(k + 2) === '1')", "v(k + 2) === 'true'"]],
@@ -164,6 +177,15 @@ const MUTANTS = [
   { name: 'the endless-loop check reads text, not tokens (a string or comment counts)',
     edits: [['  const ts = jsTokens(code);\n  const v = ', '  if (/for\\s*\\(\\s*;\\s*;\\s*\\)|while\\s*\\(\\s*(true|1)\\s*\\)/.test(code)) return true;\n  const ts = jsTokens(code);\n  const v = ']],
     killer: 'light', dies: /NOT WIDENED: "node -e \\"console\.log\('for\(;;\)\{\}'\)\\"" stays light/ },
+  { name: 'a loop that can leave or yields is still endless (exemption ignored)',
+    edits: [['    if (close >= 0 && !loopLeaves(ts, close + 1)) return true;\n', '    if (close >= 0) return true;\n']],
+    killer: 'light', dies: /NOT WIDENED: "node -e \\"while\(true\)\{ if \(require\('fs'\)\.existsSync\('f'\)\) break; \}\\"" stays light/ },
+  { name: 'the per-round wait is ignored',
+    edits: [['    const n = waits ? bg : bg * rounds;\n', '    const n = bg * rounds;\n']],
+    killer: 'light', dies: /NOT WIDENED: "while read f; do gzip -9 \\"\$f\\" & wait; done" stays light/ },
+  { name: 'a per-round wait exempts the whole loop',
+    edits: [['    const n = waits ? bg : bg * rounds;\n', '    const n = waits ? 0 : bg * rounds;\n']],
+    killer: 'waitRound', dies: /FOUR BACKGROUNDED IN ONE WAITED ROUND ARE LOAD/ },
   { name: 'the background-loop rule is not applied',
     edits: [['  if (bgLoad) return bgLoad;\n', '']],
     killer: 'loops', dies: /A SHELL LOOP THAT BACKGROUNDS 4 OR MORE PROCESSES IS A BENCH/ },

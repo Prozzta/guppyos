@@ -780,14 +780,35 @@ function jsTokens(src: string): JsTok[] {
  * HEAVY-LOCK-SH-SCRIPT-NOT-DENIED-108: inline code with a loop that never ends on its own:
  * `for(;;)`, `while(true)`, `while(1)`. This is the CPU burner of a load script (`node -e "for(;;){}" &`).
  * The check reads tokens, so a string or a comment that names such a loop is not one.
+ * Jim 9904d3: a loop whose body can leave (`break`, `return`, `throw`, `process.exit`) or that
+ * yields the CPU (`await`, `yield`) is a poller or a retry, not a burner.
  */
 function endlessLoop(code: string): boolean {
   const ts = jsTokens(code);
   const v = (k: number): string => (ts[k] && ts[k].t !== 'str' ? ts[k].v : '');
   for (let k = 0; k < ts.length; k++) {
     if (ts[k].t !== 'id' || v(k + 1) !== '(') continue;
-    if (ts[k].v === 'for' && v(k + 2) === ';' && v(k + 3) === ';' && v(k + 4) === ')') return true;
-    if (ts[k].v === 'while' && (v(k + 2) === 'true' || v(k + 2) === '1') && v(k + 3) === ')') return true;
+    let close = -1;
+    if (ts[k].v === 'for' && v(k + 2) === ';' && v(k + 3) === ';' && v(k + 4) === ')') close = k + 4;
+    if (ts[k].v === 'while' && (v(k + 2) === 'true' || v(k + 2) === '1') && v(k + 3) === ')') close = k + 3;
+    if (close >= 0 && !loopLeaves(ts, close + 1)) return true;
+  }
+  return false;
+}
+
+/** The loop body at ts[b] (a `{...}` block to its matching `}`, else one statement to `;`) has a way out or a yield. */
+function loopLeaves(ts: JsTok[], b: number): boolean {
+  const v = (k: number): string => (ts[k] && ts[k].t !== 'str' ? ts[k].v : '');
+  const block = v(b) === '{';
+  let depth = 0;
+  for (let k = b; k < ts.length; k++) {
+    const w = v(k);
+    if (w === '{' || w === '(' || w === '[') depth++;
+    else if (w === '}' || w === ')' || w === ']') { if (--depth <= 0 && block) return false; }
+    else if (w === ';' && depth <= 0 && !block) return false;
+    if (ts[k].t !== 'id') continue;
+    if (['break', 'return', 'await', 'throw', 'yield'].includes(w)) return true;
+    if (w === 'process' && v(k + 1) === '.' && v(k + 2) === 'exit') return true;
   }
   return false;
 }
@@ -1882,6 +1903,8 @@ function loopPlan(segs: string[], ops: number[], d: ShellDialect, mult = 1): Arr
  * - a glob, a computed list, a C-style for, while or until: unbounded.
  * BG_LOOP_MIN or more backgrounded processes in all make an exclusive bench, whatever each one runs.
  * A loop that is itself backgrounded (`done &`) starts one process, so it does not count.
+ * Jim 9904d3: a body that `wait`s at the loop's own depth runs one round at a time, so only the
+ * processes of one round count.
  */
 const BG_LOOP_MIN = 4;
 function bgLoop(segs: string[], d: ShellDialect): HeavyClass | null {
@@ -1891,12 +1914,13 @@ function bgLoop(segs: string[], d: ShellDialect): HeavyClass | null {
   for (let si = 0; si < segs.length; si++) {
     const head = lead(segs[si]);
     if (!opens(head[0])) continue;
-    let depth = 1; let bg = 0;
+    let depth = 1; let bg = 0; let waits = false;
     for (let end = si + 1; end < segs.length; end++) {
       const w = lead(segs[end]);
       if (opens(w[0])) depth++;
       if (w[0] === 'done' && --depth === 0) break;
       if (/\s&$/.test(segs[end])) bg++;
+      else if (w[0] === 'wait' && depth === 1) waits = true;
     }
     if (!bg) continue;
     let rounds = Infinity;
@@ -1907,7 +1931,7 @@ function bgLoop(segs: string[], d: ShellDialect): HeavyClass | null {
         rounds += r ? Math.abs(Number(r[2]) - Number(r[1])) + 1 : /[*?[{$`]/.test(w) ? Infinity : 1;
       }
     }
-    const n = bg * rounds;
+    const n = waits ? bg : bg * rounds;
     if (n >= BG_LOOP_MIN) return { heavy: true, kind: 'bench', exclusive: true, why: `a shell loop that backgrounds ${n === Infinity ? 'an unbounded number of' : n} processes (a load generator)` };
   }
   return null;
