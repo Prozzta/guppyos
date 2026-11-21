@@ -178,6 +178,8 @@ fs.writeFileSync(path.join(FIX, 'two.test.cjs'), "require('node:test')('two', ()
 fs.writeFileSync(path.join(FIX, 'package.json'), JSON.stringify({ name: 'heavy-preload-fixture', version: '1.0.0' }));
 fs.writeFileSync(path.join(FIX, 'package-lock.json'), JSON.stringify({ name: 'heavy-preload-fixture', version: '1.0.0', lockfileVersion: 3, requires: true, packages: { '': { name: 'heavy-preload-fixture', version: '1.0.0' } } }));
 fs.writeFileSync(path.join(FIX, 'gate.sh'), 'npm ci --ignore-scripts --offline\n');
+// FLAKE-HEAVY-PRELOAD-OPAQUE-NPM-CI-276-108: the same gate, alive for 31 s after npm ci has run (a slow machine).
+fs.writeFileSync(path.join(FIX, 'slow-gate.sh'), 'npm ci --ignore-scripts --offline\nsleep 31\n');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const within = (p, ms) => Promise.race([p, new Promise((r) => setTimeout(() => r('timeout'), ms))]);
@@ -260,10 +262,10 @@ K.e2e = async (t, M = HJ) => {
 };
 test('E2E: through the real preload, a single file runs at once while another agent holds; a full suite waits, then runs', { timeout: 120_000 }, (t) => K.e2e(t));
 
-K.opaqueNpm = async (t, M = HJ) => {
+K.opaqueNpm = async (t, M = HJ, script = 'gate.sh') => {
   const b = await broker(t, M);
   b.lock.acquire('b', H, 'npm test', 'hb', false);
-  const gate = start([BASH, 'gate.sh'], b.url);
+  const gate = start([BASH, script], b.url);
   await waitFor(() => b.lock.queueSnapshot().waiters.some((w) => w.agentId === 'a'), 20_000, 'BASH GATE.SH RUNNING NPM CI QUEUES FOR THE SLOT');
   assert.equal(await within(gate.done, 10), 'timeout', 'BASH GATE.SH RUNNING NPM CI WAITS FOR THE SLOT');
   b.lock.callDone('b', 'hb');
@@ -274,6 +276,11 @@ K.opaqueNpm = async (t, M = HJ) => {
   assert.ok(fs.existsSync(NPM_CACHE), 'NPM WRITES ITS CACHE IN THE FOLDER THIS FILE REMOVES, not in the default under LOCALAPPDATA');
 };
 test('E2E: an opaque bash gate.sh cannot bypass the slot with npm ci', { timeout: 120_000 }, (t) => K.opaqueNpm(t));
+
+// FLAKE-HEAVY-PRELOAD-OPAQUE-NPM-CI-276-108 (Andy's 2082786c suite, Node leg: 'the queued npm ci completes
+// after release: timeout'). The cell is about the slot: the queued npm ci gets its lease once the holder
+// lets go. How long the processes then take to run and exit is the machine's load, not the lock.
+test('E2E: the opaque npm ci cell does not depend on how fast the gate process exits after its lease (a gate that stays alive 31 s)', { timeout: 120_000 }, (t) => K.opaqueNpm(t, HJ, 'slow-gate.sh'));
 
 test('MUTANT: the old first-non-option npm parse misses a prefix option value and aliases', () => {
   const source = fs.readFileSync(PRELOAD, 'utf8');
