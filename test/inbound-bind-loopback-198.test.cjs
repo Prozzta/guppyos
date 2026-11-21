@@ -17,6 +17,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const net = require('node:net');
 const loadTs = require('./load-ts.cjs');
+const { tempDir } = require('./tools/test-temp.cjs');
 
 const root = path.resolve(__dirname, '..');
 const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf8');
@@ -144,26 +145,38 @@ function publicListens(source) {
   return found;
 }
 
-test('CENSUS: no test passes 0.0.0.0, :: or no host to a real listen()', () => {
-  // Only files that load the guard may hold such a call: there it is refused or opened on loopback.
-  const GUARDED = ['test/inbound-bind-loopback-198.test.cjs'];
+/** The walk of the census: every source file under dir. */
+function censusFiles(dir) {
   const files = [];
-  const walk = (dir) => {
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+  const walk = (at) => {
+    for (const entry of fs.readdirSync(at, { withFileTypes: true })) {
       if (entry.name === 'node_modules') continue;
-      const full = path.join(dir, entry.name);
+      const full = path.join(at, entry.name);
       if (entry.isDirectory()) walk(full);
       else if (/\.(cjs|mjs|js|ts|tsx)$/.test(entry.name)) files.push(full);
     }
   };
-  walk(__dirname);
-  assert.ok(files.length > 800, `the walk saw the test tree (${files.length} files)`);
+  walk(dir);
+  return files;
+}
+
+/** The read of the census: the flagged listens of each file, by repo path, but for the guarded files. */
+function censusOffenders(files, guarded) {
   const offenders = {};
   for (const full of files) {
     const rel = path.relative(root, full).split(path.sep).join('/');
     const found = publicListens(fs.readFileSync(full, 'utf8'));
-    if (found.length && !GUARDED.includes(rel)) offenders[rel] = found;
+    if (found.length && !guarded.includes(rel)) offenders[rel] = found;
   }
+  return offenders;
+}
+
+test('CENSUS: no test passes 0.0.0.0, :: or no host to a real listen()', () => {
+  // Only files that load the guard may hold such a call: there it is refused or opened on loopback.
+  const GUARDED = ['test/inbound-bind-loopback-198.test.cjs'];
+  const files = censusFiles(__dirname);
+  assert.ok(files.length > 800, `the walk saw the test tree (${files.length} files)`);
+  const offenders = censusOffenders(files, GUARDED);
   assert.deepEqual(offenders, {}, 'a test listens beyond loopback, or in a shape this census cannot read');
   for (const rel of GUARDED) {
     const source = read(rel);
@@ -171,6 +184,30 @@ test('CENSUS: no test passes 0.0.0.0, :: or no host to a real listen()', () => {
     assert.match(source.split('\n').slice(0, 5).join('\n'), /require\('\.\/tools\/listen-loopback-guard\.cjs'\)/,
       `${rel}: loads the guard before any test code`);
   }
+});
+
+test('CENSUS: the mutant folder of another test file is not walked, so it can go between the walk and the read', () => {
+  // test/mutant-dir-helper.cjs gives a test file a folder test/.mutants-<label>-XXXXXX for copies of
+  // product source, removed when its mutants are done. Test files run side by side, so such a folder
+  // can be there at the walk and gone at the read. Here that order is fixed, in a tree of its own.
+  const dir = tempDir('census-');
+  fs.mkdirSync(path.join(dir, 'tools'));
+  fs.writeFileSync(path.join(dir, 'kept.test.cjs'), "server.listen(0, '127.0.0.1', r)\n");
+  fs.writeFileSync(path.join(dir, 'tools', 'deep.cjs'), "'use strict';\n");
+  const mutants = path.join(dir, '.mutants-held178-AbC123');
+  fs.mkdirSync(mutants);
+  fs.writeFileSync(path.join(mutants, 'm0.ts'), "server.listen(port, '0.0.0.0');\n");
+
+  const files = censusFiles(dir);
+  fs.rmSync(mutants, { recursive: true });           // the other test file is done with its mutants
+
+  let offenders;
+  try { offenders = censusOffenders(files, []); } catch (e) {
+    assert.fail(`THE CENSUS WALKS NO MUTANT FOLDER: it listed a file of ${path.basename(mutants)} and the folder was gone at the read: ${e.message}`);
+  }
+  assert.deepEqual(offenders, {}, 'the tree holds loopback listens only');
+  assert.deepEqual(files.map((full) => path.relative(dir, full).split(path.sep).join('/')).sort(), ['kept.test.cjs', 'tools/deep.cjs'],
+    'THE CENSUS WALKS NO MUTANT FOLDER: every other source file is listed, and none of the mutant folder');
 });
 
 test('MUTANT CENSUS: the listen census flags each public or unreadable shape', () => {
