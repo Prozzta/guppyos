@@ -277,7 +277,8 @@ let bystanderProc = null;
   };
   await harness('harnessAlive', late);
   // The same live child, but the hold answers "exited": the harness must then name no pid itself.
-  // (node-pty's kill then lists the console, which is only recorded here.)
+  // (The child stays on the owner's console for good, so a harness that reads the console list of
+  // the pid before it closes never closes this terminal.)
   await harness('harnessHoldSaysGone', late, { says: 'gone' });
   // Gone at once, as soon as it has run a line: the pin does not race the child's start against the 5 s.
   await harness('harnessGone', 'process.exit(2);');
