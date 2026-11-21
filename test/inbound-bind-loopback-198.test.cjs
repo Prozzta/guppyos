@@ -1,5 +1,6 @@
 'use strict';
 require('./tools/own-job.cjs');
+require('./tools/listen-loopback-guard.cjs');
 
 /* INBOUND-BIND-LOOPBACK-198: bind only loopback unless the operator explicitly
  * opts into LAN/router forwarding. These use private listen() on port 0, never
