@@ -41,9 +41,33 @@ let named = [];
  * before node-pty's kill is entered and names the child only. From that kill on, all is recorded.
  */
 let own = null;
+/**
+ * FLAKE-NODEPTY-CONSOLE-LIST-KILL-HARNESSALIVE-NOBODY: a kill by pid returns at once, and the child
+ * leaves its console only later. On a loaded machine "later" was after node-pty's list helper had
+ * attached. `own.slow` fixes that order with no load: the harness's kill is taken, and reaches the
+ * child only when node-pty's console list has answered, or after SLOW_KILL_MS if no list was asked
+ * for by then (a harness that waits for the exit asks for none while the child lives).
+ */
+const SLOW_KILL_MS = 2000;
+const LATE_AFTER_LIST = "late: after node-pty's console list had answered";
+const LATE_NO_LIST = `late: ${SLOW_KILL_MS} ms after it was sent, and node-pty had asked for no console list by then`;
+const deliverLate = (o, pid, signal) => {
+  const send = (when) => {
+    if (o.c.killDelivered) return;
+    o.c.killDelivered = when;
+    try { realKill(pid, signal); } catch { /* gone */ }
+  };
+  const timer = setTimeout(() => send(LATE_NO_LIST), SLOW_KILL_MS);
+  o.st.onSweep = (listed) => listed.then(() => {}, () => {}).then(() => { clearTimeout(timer); send(LATE_AFTER_LIST); });
+};
 process.kill = function kill(pid, signal) {
   if (signal === 0) return realKill(pid, 0);
-  if (own && pid === own.root && !own.st.closed) { own.c.endedByPid = true; return realKill(pid, signal); }
+  if (own && pid === own.root && !own.st.closed) {
+    own.c.endedByPid = true;
+    if (!own.slow) return realKill(pid, signal);
+    deliverLate(own, pid, signal);
+    return true;
+  }
   named.push(pid);
   return true;
 };
@@ -83,23 +107,31 @@ function consoleOf(pid) {
 
 /**
  * The harness's hold on its child (procIdentity holdRoot), seen from outside: was one taken, was it
- * asked before the kill, when was it released. `saysGone` answers alive() as false for one case: a
- * child that the hold says has exited. Off (null) outside the harness cases: the app's own holds
- * pass through untouched.
+ * asked before the kill, when was it released. Off (null) outside the harness cases: the app's own
+ * holds pass through untouched. `says` makes the hold answer for one case:
+ *   'gone'           alive() is false: a child that the hold says has exited.
+ *   'runs'           alive() is true for good: a child that never exits, whatever is sent to it.
+ *   'goneOnceEnded'  alive() is false from the harness's kill by pid on, while the child is in fact
+ *                    still on its console: an exit that the console has not yet taken note of.
+ *   'none'           no hold can be taken (no addon): holdRoot answers null.
+ * holdAskedBeforeKill is the FIRST answer, the one that decides whether the pid is named: a harness
+ * that then waits for the exit asks again, and those answers are not the decision.
  */
 let holdSeen = null;
 const ident = require('../load-ts.cjs')('src/main/procIdentity.ts');
 const realHoldRoot = ident.holdRoot;
 ident.holdRoot = function holdRoot(...a) {
-  const h = realHoldRoot.apply(this, a);
   const seen = holdSeen;
+  if (seen && seen.says === 'none') { seen.c.holdTaken = false; return null; }
+  const h = realHoldRoot.apply(this, a);
   if (!seen) return h;
   seen.c.holdTaken = Boolean(h);
   if (!h) return h;
   return {
     alive: () => {
-      const v = seen.saysGone ? false : h.alive();
-      if (!seen.st.closed) seen.c.holdAskedBeforeKill = v;
+      const v = seen.says === 'gone' ? false : seen.says === 'runs' ? true
+        : seen.says === 'goneOnceEnded' && seen.c.endedByPid ? false : h.alive();
+      if (!seen.st.closed && seen.c.holdAskedBeforeKill === undefined) seen.c.holdAskedBeforeKill = v;
       return v;
     },
     release: () => { if (seen.c.holdReleasedAfterKill === undefined) seen.c.holdReleasedAfterKill = seen.st.closed; h.release(); }
@@ -146,7 +178,9 @@ let bystanderProc = null;
    * the list is measured the same way: `closed` is the control, `swept` only says which path ran.
    */
   const record = async (c, root, st) => {
-    for (let i = 0; i < 800 && !st.closed; i++) await sleep(25);
+    // A harness that refused to close its terminal has said so, and no kill will come: not waited for.
+    const refused = /^PTY teardown: /.test(c.result || '') && !st.closed;
+    for (let i = 0; i < 800 && !st.closed && !refused; i++) await sleep(25);
     c.closed = st.closed;
     c.swept = Boolean(st.sweep);
     if (st.sweep) await st.sweep.catch(() => {});
@@ -166,7 +200,12 @@ let bystanderProc = null;
   const watch = (proc, st, atKill) => {
     const agent = proc._agent;
     const list = agent._getConsoleProcessList;
-    agent._getConsoleProcessList = function consoleProcessList(...a) { const p = list.apply(this, a); st.sweep = Promise.resolve(p); return p; };
+    agent._getConsoleProcessList = function consoleProcessList(...a) {
+      const p = list.apply(this, a);
+      st.sweep = Promise.resolve(p);
+      if (st.onSweep) st.onSweep(st.sweep);
+      return p;
+    };
     // The agent's kill, not the terminal's: the terminal defers its own until the terminal is ready.
     const kill = agent.kill;
     agent.kill = function agentKill(...a) { if (!st.closed) atKill(); st.closed = true; return kill.apply(this, a); };
@@ -177,21 +216,30 @@ let bystanderProc = null;
   // `late` pushes the child's own 3 s exit out, so it is ALIVE when childBytes gives up at 5 s: what a
   // loaded machine does to a child that starts slowly.
   const late = 'const st = setTimeout; globalThis.setTimeout = (f) => st(f, 600000);';
-  const harness = async (key, prelude, saysGone = false) => {
+  const harness = async (key, prelude, { says = null, slow = false } = {}) => {
     named = []; sweeps = 0; sweepEndsNothing = false;
     const c = out.cases[key] = {};
     const marker = path.join(tmp, `${key}.up`);
-    const st = { closed: false, sweep: null };
-    holdSeen = { c, st, saysGone };
+    const st = { closed: false, sweep: null, onSweep: null };
+    holdSeen = { c, st, says };
     let root = null;
     try {
       await childBytes(Buffer.from('x'), {
         file: electronExe(), env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, prelude: up(marker) + prelude, host: 'inbox',
         onSpawn: (proc) => {
           root = live = proc.pid;
-          own = { root, st, c };
+          own = { root, st, c, slow };
           holdOwn(proc);
-          watch(proc, st, () => { c.upAtKill = fs.existsSync(marker); c.aliveAtKill = alive(root); });
+          // The file can end only once this thread has: node-pty frees it from its kill, or the harness ends it.
+          proc._agent._conoutSocketWorker._worker.once('exit', () => { c.workerExited = true; });
+          watch(proc, st, () => {
+            c.upAtKill = fs.existsSync(marker);
+            c.aliveAtKill = alive(root);
+            // The driver's own hold, a second handle on the root: had the root exited when node-pty's
+            // kill was entered? (aliveAtKill asks the pid number, which a dying process still answers.)
+            const mine = holds.get(root);
+            if (mine) c.rootExitedAtClose = !mine.alive();
+          });
         }
       });
       c.result = 'resolved';
@@ -203,9 +251,18 @@ let bystanderProc = null;
   await harness('harnessAlive', late);
   // The same live child, but the hold answers "exited": the harness must then name no pid itself.
   // (node-pty's kill then lists the console, which is only recorded here.)
-  await harness('harnessHoldSaysGone', late, true);
+  await harness('harnessHoldSaysGone', late, { says: 'gone' });
   // Gone at once, as soon as it has run a line: the pin does not race the child's start against the 5 s.
   await harness('harnessGone', 'process.exit(2);');
+  // The live child again, and the harness's kill by pid takes effect late (see deliverLate).
+  await harness('harnessDiesSlowly', late, { slow: true });
+  // The same, and the hold says "exited" as soon as the kill is sent, while the child is still on
+  // the console: what a console that is slow to drop an exited process looks like to the harness.
+  await harness('harnessExitedStillOnConsole', late, { slow: true, says: 'goneOnceEnded' });
+  // The kill by pid is real, and the hold goes on saying the child runs.
+  await harness('harnessNeverExits', late, { says: 'runs' });
+  // Nothing can hold the child (no addon).
+  await harness('harnessNoHold', late, { says: 'none' });
 
   // ---- (b) the product: PtyManager ----
   const product = async (key, { file, env, endsNothing, recycled }) => {
