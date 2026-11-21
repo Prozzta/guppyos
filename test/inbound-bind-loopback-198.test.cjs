@@ -145,12 +145,15 @@ function publicListens(source) {
   return found;
 }
 
-/** The walk of the census: every source file under dir. */
+/** The walk of the census: every source file under dir. A mutant folder (test/mutant-dir-helper.cjs)
+ * is not walked: it holds copies of product source, and the test file that owns it, running side by
+ * side with this one, removes it at any moment. */
 function censusFiles(dir) {
   const files = [];
   const walk = (at) => {
     for (const entry of fs.readdirSync(at, { withFileTypes: true })) {
       if (entry.name === 'node_modules') continue;
+      if (entry.isDirectory() && entry.name.startsWith('.mutants-')) continue;
       const full = path.join(at, entry.name);
       if (entry.isDirectory()) walk(full);
       else if (/\.(cjs|mjs|js|ts|tsx)$/.test(entry.name)) files.push(full);
