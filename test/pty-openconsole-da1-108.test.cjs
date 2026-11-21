@@ -8,7 +8,7 @@ require('./tools/own-job.cjs');
  *   - a PTY with no renderer attached starts without the 3 s wait;
  *   - the renderer never sees the query, so it cannot answer a second time (a second answer reaches
  *     the child as typed input: measured, ESC[?62;4;22c arrived on its stdin).
- * And the install stages the pair (tools/stage-node-pty-openconsole.cjs) and checks it last.
+ * And the install stages the pair (tools/stage-node-pty-openconsole.cjs) and checks it among the closing checks.
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
