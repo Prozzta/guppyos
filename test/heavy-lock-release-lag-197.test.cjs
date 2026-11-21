@@ -456,6 +456,10 @@ async function liveRelease(t, o) {
   const Cm = o.C ?? C;
   const exe = o.exe ?? helper(t);
   const rows = [];
+  // The probe runs synchronously inside the lock's log callback for the release row. HeavyJobLock writes that row in the same
+  // turn as it frees the slot (src/main/heavyJob.ts release(): holders.delete then this.log, 3127-3129), so no await sits between
+  // the decision and the sample. process.kill(pid, 0) can say alive only for a pid reused after Node closed the child's handle: a
+  // false red, never a false green. null (never probed) fails by name in assertFreed.
   let shellRef = null; let shellAliveAtRelease = null;
   const lock = new HJ.HeavyJobLock({ limit: () => 1, log: (r) => { rows.push({ ...r, ts: Date.now() }); if (r.kind === 'heavy-lock' && r.action === 'release' && shellRef) { try { process.kill(shellRef.pid, 0); shellAliveAtRelease = true; } catch { shellAliveAtRelease = false; } } } });
   const jobs = new Cm.HeavyJobs({
@@ -475,6 +479,7 @@ async function liveRelease(t, o) {
   // from a Git Bash shell; from PowerShell (a Codex agent) it was `spawn bash ENOENT`.
   const sh = spawn(gitBash(), ['-c', `${o.joinDelay ? `sleep ${o.joinDelay}; ` : ''}"${exe.replace(/\\/g, '/')}" join ${id} 0 0; ${o.body}`], { stdio: 'ignore', windowsHide: true, env: { ...process.env, LOCALAPPDATA: local } });
   shellRef = sh;
+  if (o.releaseEarly) setTimeout(() => lock.jobExited(AGENT, 'call-1', id), o.releaseEarly); // test mutant: a product that frees the slot while the job runs
   const t0 = Date.now();
   // A kill ends every process of the job (what stopping a background task does to its tree; a tree
   // kill from the Git Bash launcher alone misses the MSYS children, which then keep the job running).
@@ -557,7 +562,7 @@ async function liveRelease(t, o) {
   await killsDone;
   const jobEndAt = Math.max(exitAt, ...kills.map((k) => k.endedAt ?? 0));
   // No process can die from a kill that has not been sent: the slot is not free before the last one was.
-  const lastSent = kills.reduce((m, k) => (k.sentAt !== null && k.sentAt > m.at ? { at: k.sentAt, pid: k.pid } : m), { at: exitAt, pid: null });
+  const lastSent = kills.reduce((m, k) => (k.sentAt !== null && k.sentAt > m.at ? { at: k.sentAt, pid: k.pid } : m), { at: 0, pid: null });   // seeded 0, not exitAt: exitAt is when this process SAW the exit (late under load), not a kill's send time
   const deadline = jobEndAt + 6_000;
   while (lock.snapshot().length && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
   const rel = rows.find((r) => r.kind === 'heavy-lock' && r.action === 'release');
@@ -589,7 +594,9 @@ function killsText(r) {
 function assertFreed(r, what) {
   const kills = r.kills.length ? `; kills (ms from the shell's exit) ${killsText(r)}; the job ended ${r.jobEndAt - r.exitAt} ms after the shell` : '';
   assert.ok(r.afterEndMs !== null, `${what}: THE SLOT IS FREED WITHIN 2 S OF THE JOB'S EXIT (not freed 6 s after the job's last process ended${kills})`);
-  assert.ok(r.lagMs >= 0, `${what}: THE SLOT IS NOT RELEASED BEFORE THE JOB EXITS (released ${-r.lagMs} ms before the shell's exit)`);
+  // FLAKE-LAG197-NOPORT-KILL-EARLY-RELEASE-108: one clock. The exit time this process saw (exitAt) is when its event loop got
+  // the event, 300+ ms after the death under load, so lagMs < 0 was not an early release. The fact is sampled at the release row.
+  assert.ok(r.shellAliveAtRelease === false, `${what}: THE SLOT IS NOT RELEASED BEFORE THE JOB EXITS (the shell was ${r.shellAliveAtRelease === true ? 'still alive' : 'not probed'} when the slot was released)`);
   assert.ok(r.relAt >= r.lastSentAt, `${what}: THE SLOT IS NOT RELEASED BEFORE THE JOB EXITS (released ${r.lastSentAt - r.relAt} ms before the kill of pid ${r.lastSentPid} was even sent${kills})`);
   assert.ok(r.afterEndMs < 2_000, `${what}: THE SLOT IS FREED WITHIN 2 S OF THE JOB'S EXIT (freed ${r.afterEndMs} ms after the job's end${kills})`);
   assert.equal(r.reason, 'job-exit');
@@ -689,13 +696,16 @@ test('LIVE: a killed job frees the slot when completion-port notices are absent'
   assertWatcherClosed(r, 'no-port kill');
 });
 
-// RED-BEFORE FLAKE-LAG197-NOPORT-KILL-EARLY-RELEASE-108: the product is right (the shell was dead at the release) and the
-// assert fires anyway when this process learns of the exit late. Expected to FAIL on this sha.
-test('RED-BEFORE: a late-seen exit is not an early release', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
+// FLAKE-LAG197-NOPORT-KILL-EARLY-RELEASE-108: the product is right (the shell was dead at the release) and a late-seen exit
+// is not an early release (red-before: this cell failed on the lagMs >= 0 check); a release with the shell alive still is.
+test('LIVE: a late-seen exit is not an early release, a release with the shell alive is', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
   const r = await liveRelease(t, { body: 'sleep 30', kill: 1_500, exe: helper(t, noPortNoticesHelperSource()), exitSeenDelay: 500 });
   t.diagnostic(`late-seen: freed ${r.lagMs} ms after the exit as seen; shell alive at the release: ${r.shellAliveAtRelease}`);
   assert.equal(r.shellAliveAtRelease, false, 'the shell was dead when the slot was released (the product is right)');
   assertFreed(r, 'late-seen exit');
+  const m = await liveRelease(t, { body: 'sleep 4', releaseEarly: 800 });
+  assert.equal(m.shellAliveAtRelease, true, 'the mutant released with the shell running');
+  assert.throws(() => assertFreed(m, 'mutant'), /THE SLOT IS NOT RELEASED BEFORE THE JOB EXITS \(the shell was still alive when the slot was released\)/);
 });
 
 // FLAKE-LAG-197-KILLS-RUN-TOGETHER-698-108: the kills run together WITHIN a round. A later list can find a
@@ -763,11 +773,14 @@ test('LIVE: a job whose other members are killed long after the shell is freed w
 // frees the slot at the shell's death while the 7 s-late members run: 100 ms after the shell, 6800 ms early.)
 test('the freed check fails a release while the kill of a member has not even been sent', () => {
   const T = 1_000_000;
-  const rec = (relAt, extra = {}) => ({ exitAt: T, jobEndAt: T + 6_900, relAt, lastSentAt: T + 6_400, lastSentPid: 2, lagMs: relAt - T, afterEndMs: relAt - (T + 6_900), reason: 'job-exit', shellPid: 1,
+  const rec = (relAt, extra = {}) => ({ exitAt: T, jobEndAt: T + 6_900, relAt, lastSentAt: T + 6_400, lastSentPid: 2, lagMs: relAt - T, afterEndMs: relAt - (T + 6_900), reason: 'job-exit', shellPid: 1, shellAliveAtRelease: false,
     kills: [{ pid: 1, startedAt: T - 600, sentAt: T - 600, endedAt: T }, { pid: 2, startedAt: T - 600, sentAt: T + 6_400, endedAt: T + 6_900 }], ...extra });
   assert.doesNotThrow(() => assertFreed(rec(T + 7_400), 'x'), 'a release 500 ms after the last member ended is fine');
   assert.throws(() => assertFreed(rec(T + 100), 'x'), /NOT RELEASED BEFORE THE JOB EXITS.*pid 2/s, 'a release at the shell death, 6 s before the last kill was sent');
   assert.throws(() => assertFreed(rec(T + 6_000), 'x'), /NOT RELEASED BEFORE THE JOB EXITS/, 'a release while the last kill is still unsent');
+  assert.throws(() => assertFreed(rec(T + 7_400, { shellAliveAtRelease: true }), 'x'), /the shell was still alive when the slot was released/, 'a release with the shell alive');
+  assert.throws(() => assertFreed(rec(T + 7_400, { shellAliveAtRelease: null }), 'x'), /not probed/, 'a release that was never probed');
+  assert.doesNotThrow(() => assertFreed(rec(T - 300, { lastSentAt: T - 900 }), 'x'), 'a release 300 ms before the exit AS SEEN is not early when the shell was dead (the late-seen exit)');
 });
 
 // FLAKE-LAG197-KILL-NONE-LISTED-108: the kill used to fire 1.5 s after the spawn and list the job ONCE. Under suite
