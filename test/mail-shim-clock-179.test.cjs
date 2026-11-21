@@ -47,6 +47,13 @@ const fs = require('node:fs');
 const pre = Number(process.env.SHIM_TEST_PRE_MS || 0), post = Number(process.env.SHIM_TEST_POST_MS || 0);
 const sentinel = process.env.SHIM_TEST_SENTINEL || '';
 const nap = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+// FLAKE-MAIL-SHIM-CLOCK-179-REQUEST-ARRIVED-108: mark on stderr how far this shim got ("T+<ms> <mark>"),
+// so a run whose request never arrives names where it ended. Marks only: nothing here waits or decides.
+const born = Date.now();
+const mark = (what) => { try { fs.writeSync(2, 'T+' + (Date.now() - born) + ' ' + what + '\\n'); } catch (_) { /* stderr is gone */ } };
+mark('preload');
+process.on('exit', (code) => mark('exit ' + code));
+process.stdin.on('end', () => mark('stdin-end'));
 const block = (ms) => { const until = Date.now() + ms; while (Date.now() < until) nap(Math.min(20, until - Date.now())); };
 // GATE-179 re-gate 2: "after" means after the reply is IN THE PIPE (the test writes the sentinel once
 // the server has ended its reply) and past the shim's 5 s give-up: no bet on how fast either side is.
@@ -57,23 +64,34 @@ const blockUntilReplyAndGiveUp = (armedAt) => {
 const orig = net.createConnection;
 net.createConnection = function (...a) {
   const armedAt = Date.now();
+  mark('connect');
   const cb = typeof a[a.length - 1] === 'function' ? a.pop() : null;
-  return orig.call(this, ...a, function () { block(pre); if (cb) cb.apply(this, arguments); if (sentinel) blockUntilReplyAndGiveUp(armedAt); else block(post); });
+  const socket = orig.call(this, ...a, function () { mark('connected'); block(pre); if (cb) cb.apply(this, arguments); mark('sent'); if (sentinel) blockUntilReplyAndGiveUp(armedAt); else block(post); });
+  socket.on('error', (e) => mark('connect-error ' + (e && e.code) + ' ' + (e && e.message)));
+  return socket;
 };
 `);
 
-/** Run a real shim (its source text) with the deschedule; resolves its stdout and run time. */
+/** Run a real shim (its source text) with the deschedule; resolves its stdout and run time, and how
+ * it ended: exit code, signal, stderr (the preload's marks and anything the runtime printed). */
 function runShim(source, args, env, stdin, { pre = 0, post = 0, sentinel = '' } = {}) {
   return new Promise((resolve) => {
     const file = path.join(JAIL, `shim-${Math.random().toString(36).slice(2)}.cjs`);
     fs.writeFileSync(file, source);
     const t0 = Date.now();
-    const ch = spawn(process.execPath, ['--require', PRELOAD, file, ...args], { env: nodeEnv({ ...process.env, ...env, SHIM_TEST_PRE_MS: String(pre), SHIM_TEST_POST_MS: String(post), SHIM_TEST_SENTINEL: sentinel }), stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
+    const ch = spawn(process.execPath, ['--require', PRELOAD, file, ...args], { env: nodeEnv({ ...process.env, ...env, SHIM_TEST_PRE_MS: String(pre), SHIM_TEST_POST_MS: String(post), SHIM_TEST_SENTINEL: sentinel }), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     let out = ''; ch.stdout.on('data', (d) => { out += d; });
+    let err = ''; ch.stderr.on('data', (d) => { err += d; });
     const guard = setTimeout(() => { try { ch.kill(); } catch { /* gone */ } }, 30_000);
-    ch.on('close', () => { clearTimeout(guard); resolve({ out, ms: Date.now() - t0 }); });
+    ch.on('close', (code, signal) => { clearTimeout(guard); resolve({ out, ms: Date.now() - t0, code, signal, err }); });
     ch.stdin.end(stdin);
   });
+}
+
+/** How a shim run ended, for an assert message: exit code, signal, run time, last mark, all of stderr. */
+function howItEnded(r) {
+  const marks = r.err.split(/\r?\n/).filter((line) => /^T\+\d+ /.test(line));
+  return `shim exit code ${r.code}, signal ${r.signal}, ran ${r.ms} ms, last mark "${marks.at(-1) ?? 'none'}", stderr: ${JSON.stringify(r.err)}`;
 }
 
 async function floor(t) {
@@ -391,7 +409,7 @@ for (const [name, src, args, input] of SHIMS) {
     await new Promise((res) => server.listen(sock, res));
     try {
       const r = await runShim(src(), args, { AGENT_ID: 'cx-1', HIVE_SOCK: sock, HIVE_HOOK_TOKEN: FAKE_TOKEN }, JSON.stringify(input), { pre: 3_000, sentinel });
-      assert.equal(got.length, 1, 'the request arrived');
+      assert.equal(got.length, 1, `the request arrived: ${got.length} !== 1 (${howItEnded(r)})`);
       assert.equal(got[0].hook_token, FAKE_TOKEN, 'PIPE-HOOK-NO-TOKEN-192: the shim sends its spawn\'s HIVE_HOOK_TOKEN');
       assert.ok(got[0].shim_elapsed_ms >= 3_000, `(1): shim_elapsed_ms ${got[0].shim_elapsed_ms} counts the 3 s before sending`);
       assert.ok(r.out.includes('CTX-REACHED-THE-CLI'), `(a): printed at the give-up (${r.ms} ms): ${JSON.stringify(r.out)}`);
