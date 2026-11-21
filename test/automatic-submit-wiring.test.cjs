@@ -1327,7 +1327,8 @@ test('TRIPWIRE, NOT THE GUARANTEE: a bare Enter is SPELLED in exactly one place 
 //   - a `write` taken as a value, or reached by a computed name, is refused outright;
 //   - ANY OTHER RECEIVER FAILS THE CENSUS, so a new writer has to be classified by a person.
 // Around it: node-pty is imported by exactly two files; the PTY manager is never aliased;
-// the raw process write exists once, inside a method whose signature REQUIRES an origin;
+// the raw process write of DATA exists once, inside a method whose signature REQUIRES an origin
+// (the only other raw write is the fixed start-up DA1 answer, pinned below);
 // the 'pty:write' channel has one sender and one handler; the owner writes at three named
 // points. The renderer's six `writePty` sites and the single PROGRAMMATIC producer are
 // pinned in test/input-provenance.test.cjs and are not repeated here.
@@ -1336,7 +1337,7 @@ test('TRIPWIRE, NOT THE GUARANTEE: a bare Enter is SPELLED in exactly one place 
 // non-PTY NAME (a variable called `stream` that is really the manager) is invisible to a
 // census of names. The no-alias and node-pty-importer checks are what stand in its way.
 const PTY_WRITERS = {
-  'src/main/pty.ts': { 's.proc': 1 },                       // THE raw write, inside write(id, data, origin)
+  'src/main/pty.ts': { 's.proc': 1, proc: 1 },              // THE raw write, inside write(id, data, origin) + PTY-CONHOST-ORPHAN: the spawn's onData answers OpenConsole's start-up DA1 query with the fixed DA1_ANSWER (a terminal-protocol reply to the console host, not agent input; only while handshakeChunks is armed, at most once per PTY: test/pty-openconsole-da1-108)
   'src/main/index.ts': { ptyManager: 4 },                   // the pty:write handler (renderer origin; PROGRAMMATIC and GOD refused) + god's term writer (origin GOD) + GTC M3: the message box's writer (origin HUMAN; app-window IPC only) + GTC M4: the wake sender's writer (origin PROGRAMMATIC)
   'src/main/messageBox.ts': { d: 2 },                       // GTC M3: the Human's text and its one Enter, via main's HUMAN-bound writer (the Human's own queue items only)
   'src/main/wakeSender.ts': { d: 2 },                       // GTC M4: a wake's text and its one Enter, via main's PROGRAMMATIC-bound writer (wakePath 'term')

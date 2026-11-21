@@ -28,6 +28,10 @@ const loadTs = require('./load-ts.cjs');
 const { readSource } = require('./read-source.cjs');
 const { tempDir } = require('./tools/test-temp.cjs');
 const { pidHolder } = require('./tools/pid-hold.cjs');
+// The PTY root is a CONSOLE node: on the Electron leg process.execPath is electron.exe (GUI
+// subsystem), which no pseudo-console attaches, so OpenConsole sees no client and closes at once
+// (the root's session is gone before its pid is read) and the inbox conhost never gets its output.
+const { consoleNode } = require('./tools/console-node.cjs');
 
 if (process.platform !== 'win32') {
   require('./tools/inert.cjs').announceInert('AGY-TEARDOWN tree sweep order', 'POSIX keeps SIGHUP plus the group sweep; the ConPTY order is Windows only');
@@ -136,7 +140,7 @@ async function run(Pty, end, { after, beforeLiveness } = {}) {
   const closes = { n: 0 };
   let rawClose = null;
   try {
-    const r = await m.spawn({ id, cwd: dir, command: process.execPath, args: [path.join(DIR, 'root.js'), dir], cols: 80, rows: 24, env: {} }, owner);
+    const r = await m.spawn({ id, cwd: dir, command: consoleNode().file, args: [path.join(DIR, 'root.js'), dir], cols: 80, rows: 24, env: {} }, owner);
     assert.ok(r.ok, `spawn: ${r.error}`);
     const rootProc = m.sessions.get(id).proc;
     const own = holdRoot(rootProc.pid, 'win32', rootHandoff(rootProc));
