@@ -338,38 +338,53 @@ async function liveRelease(t, o) {
   // Resolves when every kill has ended (or there was nothing to kill), so the caller reads whole records.
   let killsOver = () => {};
   const killsDone = o.kill ? new Promise((r) => { killsOver = r; }) : Promise.resolve();
+  // FLAKE-LAG197-KILL-NONE-LISTED-108: the kill waits on a FACT, not on 1.5 s of wall time. It used to list the
+  // job once at o.kill ms; under suite load Git Bash had not reached its `join` by then, the list was empty,
+  // nothing was killed and the job ran its 30 s out ("none listed"). Now it lists until the shell itself is among
+  // the members (it has joined), the shell has gone, or the list failed; every list is recorded for the diagnostic.
+  const lists = [];
+  let shellGone = false;
+  sh.on('exit', () => { shellGone = true; });
+  const listOnce = () => new Promise((resolve) => {
+    const rec = { at: Date.now(), ms: null, error: null, code: null, bytes: 0, rows: 0, unparsed: 0, pids: [] };
+    lists.push(rec);
+    let out = '';
+    const l = spawn(exe, ['list', id], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
+    l.stdout.on('data', (d) => { out += d; });
+    l.on('error', (e) => { rec.ms = Date.now() - rec.at; rec.error = e.code || String(e.message); resolve(rec); });
+    l.on('close', (code) => {
+      rec.ms = Date.now() - rec.at; rec.code = code; rec.bytes = out.length;
+      for (const line of out.split(/\r?\n/).filter(Boolean)) {
+        try { rec.pids.push(JSON.parse(line).pid); rec.rows++; } catch { rec.unparsed++; }
+      }
+      resolve(rec);
+    });
+  });
   if (o.kill) {
-    setTimeout(() => {
-      let out = '';
-      const l = spawn(exe, ['list', id], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
-      l.stdout.on('data', (d) => { out += d; });
-      l.on('error', () => { killsOver(); /* no list: no kill, and the cell's exit-code check says so */ });
-      l.on('close', () => {
-        const pids = [];
-        for (const line of out.split(/\r?\n/).filter(Boolean)) {
-          try { pids.push(JSON.parse(line).pid); } catch { /* not a row */ }
-        }
-        if (!pids.length) killsOver();
-        for (const pid of pids) {
-          const k = { pid, startedAt: null, sentAt: null, endedAt: null };
-          kills.push(k);
-          const end = () => { if (k.endedAt === null) k.endedAt = Date.now(); if (kills.every((x) => x.endedAt !== null)) killsOver(); };
-          const go = () => {
-            k.sentAt = Date.now();
-            const tk = spawn('taskkill', ['/F', '/PID', String(pid)], { stdio: 'ignore', windowsHide: true });
-            tk.on('error', end);
-            tk.on('exit', end);
-          };
-          // One kill, from its start to the tool's exit. o.slowKill: the kill tool takes this long
-          // per process, as taskkill does on a loaded machine.
-          // o.slowOthers: every process but the shell's takes this long, so the shell dies first and the rest of
-          // the job after it (taskkill on a loaded machine, one process slower than another).
-          const delay = o.slowOthers && pid !== sh.pid ? o.slowOthers : (o.slowKill || 0);
-          // startedAt: scheduled; sentAt: the taskkill process was actually spawned (after the delay).
-          const kill = () => { k.startedAt = Date.now(); if (delay) setTimeout(go, delay); else go(); };
-          kill();
-        }
-      });
+    setTimeout(async () => {
+      let rec = await listOnce();
+      while (!rec.error && !shellGone && !rec.pids.includes(sh.pid)) { await new Promise((r) => setTimeout(r, 100)); rec = await listOnce(); }
+      const pids = rec.pids;
+      if (!pids.length) killsOver();
+      for (const pid of pids) {
+        const k = { pid, startedAt: null, sentAt: null, endedAt: null };
+        kills.push(k);
+        const end = () => { if (k.endedAt === null) k.endedAt = Date.now(); if (kills.every((x) => x.endedAt !== null)) killsOver(); };
+        const go = () => {
+          k.sentAt = Date.now();
+          const tk = spawn('taskkill', ['/F', '/PID', String(pid)], { stdio: 'ignore', windowsHide: true });
+          tk.on('error', end);
+          tk.on('exit', end);
+        };
+        // One kill, from its start to the tool's exit. o.slowKill: the kill tool takes this long
+        // per process, as taskkill does on a loaded machine.
+        // o.slowOthers: every process but the shell's takes this long, so the shell dies first and the rest of
+        // the job after it (taskkill on a loaded machine, one process slower than another).
+        const delay = o.slowOthers && pid !== sh.pid ? o.slowOthers : (o.slowKill || 0);
+        // startedAt: scheduled; sentAt: the taskkill process was actually spawned (after the delay).
+        const kill = () => { k.startedAt = Date.now(); if (delay) setTimeout(go, delay); else go(); };
+        kill();
+      }
     }, o.kill);
   }
   const exit = await new Promise((r) => sh.on('exit', (code, signal) => r({ at: Date.now(), code, signal })));
@@ -383,7 +398,7 @@ async function liveRelease(t, o) {
   const deadline = jobEndAt + 6_000;
   while (lock.snapshot().length && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
   const rel = rows.find((r) => r.kind === 'heavy-lock' && r.action === 'release');
-  return { lagMs: rel ? rel.ts - exitAt : null, relAt: rel ? rel.ts : null, lastSentAt: lastSent.at, lastSentPid: lastSent.pid, afterEndMs: rel ? rel.ts - jobEndAt : null, exitAt, jobEndAt, runMs: exitAt - t0, heldMs: rel ? rel.heldMs : null, reason: rel ? rel.reason : null, rows, code: exit.code, signal: exit.signal, kills, shellPid: sh.pid };
+  return { lagMs: rel ? rel.ts - exitAt : null, relAt: rel ? rel.ts : null, lastSentAt: lastSent.at, lastSentPid: lastSent.pid, afterEndMs: rel ? rel.ts - jobEndAt : null, exitAt, jobEndAt, runMs: exitAt - t0, heldMs: rel ? rel.heldMs : null, reason: rel ? rel.reason : null, rows, code: exit.code, signal: exit.signal, kills, shellPid: sh.pid, lists, t0 };
 }
 
 // What this process reads from a Git Bash shell that taskkill /F ended: exit code 1, no signal.
@@ -393,9 +408,14 @@ const KILLED_EXIT = 1;
 
 /** The shell ended BECAUSE it was killed: the fact `runMs < 10 s` stood in for. */
 function assertKilled(r, what) {
-  assert.ok(r.kills.length > 0, `${what}: THE JOB LISTED ITS PROCESSES AND A KILL WAS SENT TO EACH (none listed)`);
+  assert.ok(r.kills.length > 0, `${what}: THE JOB LISTED ITS PROCESSES AND A KILL WAS SENT TO EACH (none listed; ${listsText(r)})`);
   assert.equal(r.signal, null, `${what}: the shell's exit carries no signal`);
   assert.equal(r.code, KILLED_EXIT, `${what}: THE KILL ENDED THE JOB (exit code ${r.code}; a killed shell reports ${KILLED_EXIT}, one that ran out on its own reports 0)`);
+}
+
+/** Every list of the job, from the spawn: when it ran, how long it took, and what came back. */
+function listsText(r) {
+  return (r.lists ?? []).map((l) => `@${l.at - r.t0}+${l.ms}ms ${l.error ? `error ${l.error}` : `exit ${l.code}, ${l.bytes} bytes, ${l.rows} rows, ${l.unparsed} unparsed`}`).join("; ");
 }
 
 /** Every kill, from the shell's exit: pid, start, end (ms), so a red says which process was late. */
