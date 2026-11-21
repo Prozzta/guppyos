@@ -54,6 +54,8 @@ K.funcs = (M = HJ) => {
   const c = M.classifyCommand;
   assert.equal(c('function f { npm test; }').kind, 'suite', 'A FUNCTION BODY IS CLASSIFIED WHERE IT IS DEFINED (function f)');
   assert.equal(c('f() { npm test; }; f').kind, 'suite', 'A FUNCTION BODY IS CLASSIFIED WHERE IT IS DEFINED (f())');
+  // HEAVY-LOCK-FUNC-CALL-LOOP-108: a call now runs its body too, so the uncalled form pins the definition.
+  assert.equal(c('f() { npm test; }').kind, 'suite', 'A FUNCTION BODY IS CLASSIFIED WHERE IT IS DEFINED (f()), uncalled');
   assert.equal(c('f () { npm ci; }').kind, 'install', 'A FUNCTION BODY IS CLASSIFIED WHERE IT IS DEFINED (f ())');
   assert.equal(c('function f() {\n  npm run build\n}\nf').kind, 'build', 'A FUNCTION BODY IS CLASSIFIED WHERE IT IS DEFINED (multi-line)');
   for (const cmd of ['function f { echo hi; }; f', 'f() { echo; }', 'echo function', 'function']) assert.equal(c(cmd).heavy, false, `a light function stays light: ${cmd}`);
@@ -111,7 +113,7 @@ const MUTANTS = [
   { name: 'the case head is the program again', edits: [["    else if (ws[i] === 'case' && ws[i + 2] === 'in') i += 3;\n", '']], killer: 'caseArms', dies: /A CASE ARM IS CLASSIFIED BY ITS PROGRAM \(on the head line\)/ },
   { name: 'an f() head is the program again', edits: [['CASE_ARM.test(ws[i]) || FUNC_HEAD.test(ws[i])) i++;', 'CASE_ARM.test(ws[i])) i++;']], killer: 'funcs', dies: /A FUNCTION BODY IS CLASSIFIED WHERE IT IS DEFINED \(f\(\)\)/ },
   { name: 'a `function f` head is the program again', edits: [["    else if (ws[i] === 'function' && ws[i + 1]) i += 2;\n", '']], killer: 'funcs', dies: /A FUNCTION BODY IS CLASSIFIED WHERE IT IS DEFINED \(function f\)/ },
-  { name: 'an `f ()` head is the program again', edits: [["    else if (ws[i + 1] === '()' && /^[A-Za-z_][\\w.:-]*$/.test(ws[i])) i += 2;\n", '']], killer: 'funcs', dies: /A FUNCTION BODY IS CLASSIFIED WHERE IT IS DEFINED \(f \(\)\)/ },
+  { name: 'an `f ()` head is the program again', edits: [["    else if ((ws[i + 1] === '()' || ws[i + 1] === '(){') && /^[A-Za-z_][\\w.:-]*$/.test(ws[i])) i += 2;\n", '']], killer: 'funcs', dies: /A FUNCTION BODY IS CLASSIFIED WHERE IT IS DEFINED \(f \(\)\)/ },
   { name: "a glued ) stays on the last word", edits: [["  return out.length && /^[^()'\"$`]+\\)+$/.test(last) ? [...out.slice(0, -1), last.replace(/\\)+$/, '')] : out;", '  return out;']], killer: 'subshell', dies: /A GLUED SUBSHELL \) IS NOT PART OF THE LAST WORD/ },
   { name: 'a glued ( stays on the first word', edits: [["  if (out.length && /^\\(+[^()'\"$`]+\\)*$/.test(out[0])) out = [out[0].replace(/^\\(+/, ''), ...out.slice(1)];\n", '']], killer: 'subshell', dies: /A GLUED SUBSHELL \) IS NOT PART OF THE LAST WORD \(one segment\)/ },
   { name: 'cmd strips keywords too', edits: [["  if (d === 'cmd') return ws;\n", '']], killer: 'cmdDialect', dies: /CMD KEEPS ITS FIRST WORD AS THE PROGRAM/ }

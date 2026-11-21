@@ -519,6 +519,10 @@ export interface ClassifyCtx {
    *  ($s in ...)` of this command loops over (lower-cased name), null when its list is not literal; for
    *  the `& $s` of its block, which CALLS each value. Absent = no loop. */
   psLoop?: ReadonlyMap<string, readonly string[] | null>;
+  /** HEAVY-LOCK-FUNC-CALL-LOOP-108, set by classifyCommand: the sh functions defined so far, for a
+   *  `$(...)` / backtick body (a subshell has them all) and a `bash -c` body or script (a child bash
+   *  has only the `export -f` ones). Absent = none. */
+  funcs?: ReadonlyMap<string, ShFunc>;
 }
 
 /**
@@ -683,7 +687,8 @@ function classifyScript(path: string, depth: number, ctx: ClassifyCtx, dialect: 
     const c = classifyNodeCode({ script: path, preloads: [], inline: null, stdin: false }, ctx, true);
     return c.heavy ? c : { heavy: false };
   }
-  const c = classifyCommand(text, depth + 1, { ...ctx, dialect });
+  // HEAVY-LOCK-FUNC-CALL-LOOP-108: a script runs in a child shell: only `export -f` functions reach it.
+  const c = classifyCommand(text, depth + 1, { ...ctx, dialect, funcs: ctx.shell === 'powershell' || dialect === 'cmd' ? undefined : exportedOnly(ctx.funcs) });
   return c.heavy ? { ...c, why: `${c.why ?? c.kind} (in ${path.replace(/\\/g, '/').split('/').pop()})` } : { heavy: false };
 }
 
@@ -1325,9 +1330,10 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
       if (ctx.dialect === 'sh' && singleQuotedDashCBody(ctx.segment, args[k])) {
         const filled = positional((ctx.expandKnown ?? ((text: string) => text))(args[from] ?? ''), args.slice(from + 1));
         if (filled === null) return { heavy: true, kind: 'bench', why: `${bin} ${args[k]} (positional arguments the lock cannot read)`, provisional: true };
-        return nested(filled, depth, { ...ctx, dialect: 'sh' }, `${bin} ${args[k]}`);
+        return nested(filled, depth, { ...ctx, dialect: 'sh', funcs: exportedOnly(ctx.funcs) }, `${bin} ${args[k]}`);
       }
-      return nested(body, depth, { ...ctx, dialect: bin === 'cmd' ? 'cmd' : 'sh' }, `${bin} ${args[k]}`);
+      // HEAVY-LOCK-FUNC-CALL-LOOP-108: a child bash sees only the `export -f` functions; cmd and PowerShell none.
+      return nested(body, depth, { ...ctx, dialect: bin === 'cmd' ? 'cmd' : 'sh', funcs: SH_BINS.has(bin) ? exportedOnly(ctx.funcs) : undefined }, `${bin} ${args[k]}`);
     }
     // HEAVY-LOCK-SHAPES-189: `powershell -File x.ps1` runs the script's text.
     if (/^(powershell|pwsh)$/.test(bin)) {
@@ -1338,7 +1344,7 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
         const code = decodePsEncoded(args[e + 1]);
         return code === null
           ? { heavy: true, kind: 'bench', why: `${bin} ${args[e]} (code the lock cannot decode)`, provisional: true }
-          : nested(code, depth, ctx, `${bin} ${args[e]}`);
+          : nested(code, depth, { ...ctx, funcs: undefined }, `${bin} ${args[e]}`);
       }
       const f = args.findIndex((a) => /^-(f|file)$/i.test(a));
       return f >= 0 && args[f + 1] ? classifyScript(args[f + 1], depth, { ...ctx, shell: 'powershell' }) : { heavy: false };
@@ -1610,10 +1616,15 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
   // with a body stripHeredocs found (the two scans agree); otherwise nothing is virtual (fail closed).
   const segs = segments(text, d);
   const ops = segs.map((g) => words(g.replace(/\s&$/, ''), d).filter((w) => HEREDOC_OP.test(w)).length);
-  const plan: Array<{ seg: string; op: number; looped?: boolean }> | HeavyClass = d === 'cmd' ? segs.map((seg, si) => ({ seg, op: ops[si] })) : loopPlan(segs, ops, d);
+  // HEAVY-LOCK-FUNC-CALL-LOOP-108: a call to a sh function this command defines (or that an outer
+  // shell passed in) is followed by the body it runs, so the loop rules see what the call runs.
+  const calls = d === 'cmd' ? { segs, ops, funcs: undefined } : expandCalls(segs, ops, d, ctx.funcs);
+  if (!('segs' in calls)) return calls;
+  if (calls.funcs) ctx = { ...ctx, funcs: calls.funcs };
+  const plan: Array<{ seg: string; op: number; looped?: boolean }> | HeavyClass = d === 'cmd' ? segs.map((seg, si) => ({ seg, op: ops[si] })) : loopPlan(calls.segs, calls.ops, d);
   if (!Array.isArray(plan)) return plan;
   // HEAVY-LOCK-SH-SCRIPT-NOT-DENIED-108: a loop that starts 4 or more background processes is load.
-  const bgLoad = d === 'sh' ? bgLoop(segs, d) : null;
+  const bgLoad = d === 'sh' ? bgLoop(calls.segs, d) : null;
   if (bgLoad) return bgLoad;
   // A null entry: a heredoc-made file that a later segment rewrote by other means (cp, mv, sed -i,
   // a `>` that is not a heredoc's), so its text at run time is unknown and it reads as unreadable
@@ -1802,7 +1813,8 @@ const HEREDOC_OP = /^\d*<<-?(?!<)/;
 /** A case arm's pattern (`a)`, `a|b)` after the pipe split, `*)`, `(a)`); not a `$(...)` word. */
 const CASE_ARM = /^\(?[^()$`'"]*\)$/;
 /** A function definition's head: `f()` as one word, or `f` then `()`. */
-const FUNC_HEAD = /^[A-Za-z_][\w.:-]*\(\)$/;
+// HEAVY-LOCK-FUNC-CALL-LOOP-108: also glued to its brace, `f(){` (`f(){ npm test; }` was light).
+const FUNC_HEAD = /^[A-Za-z_][\w.:-]*\(\)\{?$/;
 /**
  * HEAVY-LOCK-SHELL-KEYWORD-196: drop what opens a segment before its program: the shell keywords.
  * HEAVY-LOCK-GLOB-LOOP-196 (Jim 9a7378, god 531e28): also a `case WORD in` head, a case arm's
@@ -1819,7 +1831,7 @@ function stripKeywords(ws: string[], d: ShellDialect): string[] {
     if (SHELL_KEYWORDS.has(ws[i]) || CASE_ARM.test(ws[i]) || FUNC_HEAD.test(ws[i])) i++;
     else if (ws[i] === 'case' && ws[i + 2] === 'in') i += 3;
     else if (ws[i] === 'function' && ws[i + 1]) i += 2;
-    else if (ws[i + 1] === '()' && /^[A-Za-z_][\w.:-]*$/.test(ws[i])) i += 2;
+    else if ((ws[i + 1] === '()' || ws[i + 1] === '(){') && /^[A-Za-z_][\w.:-]*$/.test(ws[i])) i += 2;
     else break;
   }
   let out = i ? ws.slice(i) : ws;
@@ -1896,6 +1908,163 @@ function loopPlan(segs: string[], ops: number[], d: ShellDialect, mult = 1): Arr
 }
 
 /**
+ * HEAVY-LOCK-FUNC-CALL-LOOP-108 (Human OK, god b46379; design Jim 53c957): a call to a sh function
+ * runs its body, so `run(){ node --test "$1"; }; for f in test/*.test.cjs; do run "$f"; done` is the
+ * same serial suite as the loop written inline (it was light: the loop body held only `run "$f"`).
+ * expandCalls leaves every segment where it is (a definition's body is still classified where it is
+ * defined, called or not) and puts after each call the body that call runs, its positionals filled
+ * from the call's words, so loopPlan and bgLoop see what each round runs. A body is not inlined:
+ * - for a function defined with a `( )` body (a subshell function; rare), or when the call is behind
+ *   `env`, `timeout`, `nohup`, `exec` or `command` (those run a program, never a shell function);
+ * - for its heredoc segments (their text was classified at the definition).
+ * Definitions: `f() {`, `f(){`, `function f {`, `function f() {`, a `{` on the next line too.
+ * Calls resolve against the definitions in force at the OUTERMOST call site, also for a call made
+ * inside a body (Jim MUST: `outer(){ inner; }; inner(){ node --test "$1"; }; for ...; do outer; done`
+ * runs the inner defined by then), or else against the functions an outer shell passed in (ctx.funcs).
+ * A recursive call, FUNC_DEPTH nested calls or past PLAN_CAP inlined segments: a function that can
+ * reach node --test makes the command a suite (an unbounded run the lock cannot count), else it stays.
+ * A backgrounded call (`run "$f" &`) keeps its `&` and the body it runs has none: the call is one
+ * background process, as bgLoop counts it (Jim SHOULD 1: the same class as the inline `node ... &`).
+ */
+interface ShFunc { body: string[]; ops: number[]; exported: boolean }
+const FUNC_DEPTH = 8;
+const FUNC_NAME = '[A-Za-z_][\\w.:-]*';
+const FUNC_DEF = new RegExp(`^\\s*(?:function\\s+(${FUNC_NAME})(?:\\s*\\(\\))?|(${FUNC_NAME})\\s*\\(\\))\\s*([{(])?\\s*(.*)$`, 's');
+/** A body that shifts or resets its positionals: each of them may be any argument ($@ semantics; Jim SHOULD 2). */
+const SHIFTY = /(^|[\s;&|(){}])(?:shift|set\s+--)(?=\s|;|$)/;
+
+function funcDefs(segs: string[], ops: number[], d: ShellDialect): { defs: Array<{ name: string; start: number; end: number; fn: ShFunc }>; exported: Set<string> } {
+  const defs: Array<{ name: string; start: number; end: number; fn: ShFunc }> = [];
+  const exported = new Set<string>();
+  for (let si = 0; si < segs.length; si++) {
+    const ws = words(segs[si].replace(/\s&$/, ''), d);
+    // `export -f run`, `declare -fx run`, `typeset -xf run`: a child bash sees these.
+    const flags = ws.slice(1).filter((w) => w.startsWith('-')).join('');
+    if ((ws[0] === 'export' && flags.includes('f')) || ((ws[0] === 'declare' || ws[0] === 'typeset') && flags.includes('f') && flags.includes('x'))) {
+      for (const w of ws.slice(1)) if (!w.startsWith('-')) exported.add(w);
+    }
+    const m = FUNC_DEF.exec(segs[si]);
+    if (!m) continue;
+    const name = m[1] ?? m[2];
+    let brace = m[3]; let rest = m[4].trim(); let from = si + 1;
+    // `f()` then `{` on the next line.
+    if (!brace && !rest && /^\{(\s|$)/.test(segs[si + 1] ?? '')) { brace = '{'; rest = segs[si + 1].slice(1).trim(); from = si + 2; }
+    if (brace !== '{') continue;   // a `( )` body or no body: not inlined
+    const body: string[] = []; const bodyOps: number[] = [];
+    if (rest) { body.push(rest); bodyOps.push(ops[from - 1]); }
+    let depth = 1 + words(rest, d).filter((w) => w === '{' || /\(\)\{$/.test(w)).length;
+    let end = from;
+    for (; end < segs.length; end++) {
+      const w = words(segs[end].replace(/\s&$/, ''), d);
+      if (w[0] === '}' && --depth === 0) break;
+      depth += w.filter((x) => x === '{' || /\(\)\{$/.test(x)).length;
+      body.push(segs[end]); bodyOps.push(ops[end]);
+    }
+    defs.push({ name, start: si, end: end + 1, fn: { body, ops: bodyOps, exported: false } });
+    si = end;   // a def inside a body is the body's own (it is defined when the body runs)
+  }
+  for (const f of defs) f.fn.exported = exported.has(f.name);
+  return { defs, exported };
+}
+
+/** A segment that calls a shell function: its name and argument words, or null. Only VAR= prefixes
+ *  are skipped (env/timeout/nohup/exec/command run a program, not a function). */
+function callOf(seg: string, d: ShellDialect): { name: string; args: string[] } | null {
+  const ws = stripRedirects(stripKeywords(words(seg.replace(/\s&$/, ''), d), d));
+  let i = 0;
+  while (i < ws.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(ws[i])) i++;
+  return ws[i] !== undefined && new RegExp(`^${FUNC_NAME}$`).test(ws[i]) ? { name: ws[i], args: ws.slice(i + 1) } : null;
+}
+
+/** A body segment with $1-$9, ${N}, $@ and $* put in from the call's words (`shifty`: each one is all
+ *  of them). Not inside single quotes or after a backslash; $0 and $# stay. */
+function fillArgs(body: string, args: string[], shifty: boolean): string {
+  const a = args.map((w) => w.replace(/["'\\]/g, ''));   // the words as text, never a quote that re-opens
+  let out = ''; let q: string | null = null;
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i];
+    if (q === "'") { if (c === "'") q = null; out += c; continue; }   // single-quoted: as written
+    if (c === '\\') { out += c + (body[i + 1] ?? ''); i++; continue; }
+    if (c === "'" && !q) { q = c; out += c; continue; }
+    if (c === '"') { q = q ? null : c; out += c; continue; }
+    const m = c === '$' ? /^\$(?:\{(\d+|[@*])\}|([1-9@*]))/.exec(body.slice(i)) : null;
+    if (!m) { out += c; continue; }
+    const r = m[1] ?? m[2];
+    const all = q === '"' && (r === '@' || shifty) ? a.join('" "') : a.join(' ');
+    out += r === '@' || r === '*' || shifty ? all : a[Number(r) - 1] ?? '';
+    i += m[0].length - 1;
+  }
+  return out;
+}
+
+/** The command's segments with each call's body inserted after it (see above), the functions an inner
+ *  shell sees (all of them: a `$(...)` / backtick body; exportedOnly for a child bash), or a suite. */
+function expandCalls(segs: string[], ops: number[], d: ShellDialect, inherited?: ReadonlyMap<string, ShFunc>): { segs: string[]; ops: number[]; funcs?: ReadonlyMap<string, ShFunc> } | HeavyClass {
+  const { defs, exported } = funcDefs(segs, ops, d);
+  if (!defs.length && !inherited?.size) return { segs, ops, funcs: inherited };
+  const funcs = new Map<string, ShFunc>(inherited ?? []);
+  for (const f of defs) funcs.set(f.name, { ...f.fn, exported: f.fn.exported || (inherited?.get(f.name)?.exported ?? false) });
+  for (const n of exported) { const f = funcs.get(n); if (f && !f.exported) funcs.set(n, { ...f, exported: true }); }
+  // The definition of `name` in force at segment `at`: the last one before it, else the inherited one.
+  const lookup = (name: string, at: number): ShFunc | undefined => {
+    let best: ShFunc | undefined;
+    for (const f of defs) if (f.name === name && f.start < at) best = f.fn;
+    return best ?? inherited?.get(name);
+  };
+  const reaches = (name: string, at: number, seen = new Set<string>()): boolean => {
+    const fn = lookup(name, at);
+    if (!fn || seen.has(name)) return false;
+    seen.add(name);
+    return fn.body.some((s) => { if (NODE_TEST(s)) return true; const c = callOf(s, d); return !!c && reaches(c.name, at, seen); });
+  };
+  let budget = 0;
+  // The segments a call of `name` at outermost site `at` runs, or the suite class.
+  const inline = (name: string, fn: ShFunc, args: string[], at: number, stack: string[]): string[] | HeavyClass => {
+    // A self-call needs no guard of its own: it hits FUNC_DEPTH (or PLAN_CAP) with the same verdict.
+    if (stack.length >= FUNC_DEPTH || budget > PLAN_CAP) {
+      return reaches(name, at) ? { heavy: true, kind: 'suite', why: `a shell function ${name} that runs node --test ${stack.includes(name) ? 'calls itself' : 'through calls the lock cannot count'}` } : [];
+    }
+    const shifty = fn.body.some((s) => SHIFTY.test(s));
+    const res: string[] = [];
+    for (let k = 0; k < fn.body.length; k++) {
+      if (fn.ops[k] > 0) continue;
+      const seg = fillArgs(fn.body[k].replace(/\s&$/, ''), args, shifty);
+      res.push(seg); budget++;
+      const c = callOf(seg, d);
+      const inner = c && lookup(c.name, at);
+      if (!c || !inner) continue;
+      const r = inline(c.name, inner, c.args, at, [...stack, name]);
+      if (!Array.isArray(r)) return r;
+      res.push(...r);
+    }
+    return res;
+  };
+  const outSegs: string[] = []; const outOps: number[] = [];
+  let di = 0;
+  for (let si = 0; si < segs.length; si++) {
+    outSegs.push(segs[si]); outOps.push(ops[si]);
+    while (di < defs.length && defs[di].end <= si) di++;
+    if (di < defs.length && defs[di].start <= si) continue;   // inside a definition: not a call yet
+    const c = callOf(segs[si], d);
+    const fn = c && lookup(c.name, si);
+    if (!c || !fn) continue;
+    const r = inline(c.name, fn, c.args, si, []);
+    if (!Array.isArray(r)) return r;
+    for (const s of r) { outSegs.push(s); outOps.push(0); }
+  }
+  return { segs: outSegs, ops: outOps, funcs };
+}
+
+/** HEAVY-LOCK-FUNC-CALL-LOOP-108: the functions a child bash (`bash -c`, `bash script.sh`) sees: only
+ *  the `export -f` ones. NOTE: bash only. dash and POSIX sh never import functions, so passing them
+ *  to `sh -c` over-denies on a host whose sh is dash (Jim SHOULD 3); Git Bash's sh is bash. */
+function exportedOnly(funcs?: ReadonlyMap<string, ShFunc>): ReadonlyMap<string, ShFunc> | undefined {
+  if (!funcs) return undefined;
+  const out = new Map([...funcs].filter(([, f]) => f.exported));
+  return out.size ? out : undefined;
+}
+
+/**
  * HEAVY-LOCK-SH-SCRIPT-NOT-DENIED-108: a shell loop whose body backgrounds a process (`do x &`)
  * starts one process per round, and they all run at once. That makes it a load generator.
  * Its rounds:
@@ -1940,7 +2109,9 @@ function bgLoop(segs: string[], d: ShellDialect): HeavyClass | null {
 /** The number of segments loopPlan plans for `cmd` (sh), or -1 when it settles the command itself (exported for tests). */
 export function planSize(cmd: string): number {
   const segs = segments(stripHeredocs(cmd, []), 'sh');
-  const plan = loopPlan(segs, segs.map(() => 0), 'sh');
+  const calls = expandCalls(segs, segs.map(() => 0), 'sh');
+  if (!('segs' in calls)) return -1;
+  const plan = loopPlan(calls.segs, calls.ops, 'sh');
   return Array.isArray(plan) ? plan.length : -1;
 }
 export { PLAN_CAP };

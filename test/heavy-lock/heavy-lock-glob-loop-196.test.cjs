@@ -129,7 +129,7 @@ K.capSize = (M = HJ) => {
 test('the loop plan never passes PLAN_CAP segments', () => K.capSize());
 
 K.wiring = (src = readSource(HJF)) => {
-  assert.match(src, /const plan: Array<\{ seg: string; op: number; looped\?: boolean \}> \| HeavyClass = d === 'cmd' \? segs\.map\(\(seg, si\) => \(\{ seg, op: ops\[si\] \}\)\) : loopPlan\(segs, ops, d\);\n  if \(!Array\.isArray\(plan\)\) return plan;/, 'THE LOOP PLAN DECIDES BEFORE ANY SEGMENT');
+  assert.match(src, /const plan: Array<\{ seg: string; op: number; looped\?: boolean \}> \| HeavyClass = d === 'cmd' \? segs\.map\(\(seg, si\) => \(\{ seg, op: ops\[si\] \}\)\) : loopPlan\(calls\.segs, calls\.ops, d\);\n  if \(!Array\.isArray\(plan\)\) return plan;/, 'THE LOOP PLAN DECIDES BEFORE ANY SEGMENT');
 };
 test('wiring: classifyCommand plans loops before it classifies segments', () => K.wiring());
 

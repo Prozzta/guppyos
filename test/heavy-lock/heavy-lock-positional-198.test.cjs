@@ -163,7 +163,7 @@ function mutateText(rel, edits, tag) {
 }
 
 const MUTANTS = [
-  { name: 'the arguments are not put in', edits: [["        return nested(filled, depth, { ...ctx, dialect: 'sh' }, `${bin} ${args[k]}`);", "        if (filled !== '') return nested(body, depth, { ...ctx, dialect: 'sh' }, `${bin} ${args[k]}`);"]], killer: 'numbered', dies: /A \$1 IS THE FIRST WORD AFTER THE BODY \(bash\)/ },
+  { name: 'the arguments are not put in', edits: [["        return nested(filled, depth, { ...ctx, dialect: 'sh', funcs: exportedOnly(ctx.funcs) }, `${bin} ${args[k]}`);", "        if (filled !== '') return nested(body, depth, { ...ctx, dialect: 'sh', funcs: exportedOnly(ctx.funcs) }, `${bin} ${args[k]}`);"]], killer: 'numbered', dies: /A \$1 IS THE FIRST WORD AFTER THE BODY \(bash\)/ },
   { name: '$0 is not an argument', edits: [["lit(params[Number(r)] ?? '')", "lit(params[Number(r) || -1] ?? '')"]], killer: 'zero', dies: /A \$0 IS THE WORD RIGHT AFTER THE BODY/ },
   { name: 'arguments count from the body ($1 is _)', edits: [["lit(params[Number(r)] ?? '')", "lit(params[Number(r) - 1] ?? '')"]], killer: 'numbered', dies: /A \$1 IS THE FIRST WORD AFTER THE BODY/ },
   { name: '${N} is not read', edits: [['/^\\$(?:\\{([^}]*)\\}|(\\d|[@*]))/.exec', '/^\\$(?:(\\d|[@*]))/.exec']], killer: 'numbered', dies: /A \$\{1\} IS \$1/ },
