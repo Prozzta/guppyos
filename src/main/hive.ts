@@ -32,7 +32,7 @@ import { AppendFile, LOG_KEEP_ROTATED, filesInOrderAsync, rotatedFiles } from '.
 import { GOD_ADDRESSES, MailCardIndex, NO_CARD, indexEntries, indexLinkContext, isNoCard, linkMail, replyChainGap, resolveMailTo, TRUSTED_METHODS, type LinkContext, type MailLink } from './mailCards';
 import { atomicWriteJson as atomicWriteJsonFile, atomicWriteJsonAsync, atomicWriteTextAsync, readFileTracked } from './atomicJson';
 import { flushAppendsSync } from './writeBehind';
-import { removePathLinkSafeSync } from './linkSafeRemove';
+import { removePathLinkSafe, removePathLinkSafeSync } from './linkSafeRemove';
 import { ASK_BACKSTOP_MS, ASK_CLOSE_REASON_MAX, MailLedger, answeredByMessage, cardIdValue, freshMailId, isValidMailId, owesWork, replyTracked, staleObligations, supersededByMessage, type CardEvidence, type MailLedgerDoc, type ReleaseRun, type StaleObligation } from './mailLedger';
 import { mailObligationsView, type MailObligationsAgent } from './mailReaders';
 import { UNDELIVERED_DIR, dropUndeliveredItems, mailMigrationDone, markUndeliveredSeen, readUndeliveredReport, readUndeliveredReportAsync, restoreUndeliveredFiles, runMailMigration, setAsideUndelivered, type MailMigrationResult, type UndeliveredReport } from './mailMigration';
@@ -1042,8 +1042,9 @@ export class HiveManager {
   private async dropOwedNotice(owed: string | null): Promise<void> {
     if (owed === null) return;
     try {
-      // recursive: whatever sits at a record's name in the router's own folder goes, a folder too
-      await fsPromises.rm(owed, { force: true, recursive: true });
+      // whatever sits at a record's name in the router's own folder goes, a folder too; a link there
+      // is removed as a link and never followed (no recursive rm: test/recursive-rm-census.test.cjs)
+      await removePathLinkSafe(owed);
       this.stopIfDisposed();
     } catch (error) {
       if (error instanceof HiveDisposedError) throw error;

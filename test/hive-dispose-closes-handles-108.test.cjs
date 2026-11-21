@@ -1013,7 +1013,7 @@ test('a record in hive/outbox-owed/ that cannot be removed is logged, the pass g
   const record = path.join(o.routerOwed, 'andy-1', 'n.json.owed');
   fs.mkdirSync(path.dirname(record), { recursive: true });
   fs.writeFileSync(record, JSON.stringify({ kind: 'rejected', id: o.mailId('0d0e0f'), detail: 'unroutable: test', fp: o.fp(kept) }));
-  const lock = o.rig.hold('rm', (p) => p === record, 'EBUSY');
+  const lock = o.rig.hold('unlink', (p) => p === record, 'EBUSY');
   lock.g.release(); lock.arm();
   await o.routeBoth();
   assert.equal(o.rejectedNotices().length, 1, 'the owed notice was sent');
@@ -1029,7 +1029,7 @@ test('a record in hive/outbox-owed/ that cannot be removed is logged, the pass g
 
 /**
  * The awaits the owed records add to a route pass (make the folder, write a record, list the
- * folder, read a record, remove a record). Each is held across dispose(): the pass stops there,
+ * folder, read a record, look at a record, remove it). Each is held across dispose(): the pass stops there,
  * whether the held call lands or fails, and the next start ends where a run without the stop would.
  */
 const owedOf = (rig) => path.join(path.dirname(path.dirname(path.dirname(rig.outbox))), 'outbox-owed', 'god-1');
@@ -1131,7 +1131,7 @@ test('a route pass held at the removal of an owed record across dispose() reads 
   const a = plantOwed(rig, 'a.json', '0a0a0a');
   const b = plantOwed(rig, 'b.json', '0b0b0b');
   const reads = readsOf(rig, b.record);
-  const r = await rig.disposeWhileHeld(rig.hold('rm', (p) => p === a.record), 'the route pass removing a record whose notice it sent');
+  const r = await rig.disposeWhileHeld(rig.hold('unlink', (p) => p === a.record), 'the route pass removing a record whose notice it sent');
   assert.equal(reads(), 0, 'a disposed manager started the read of the next owed record');
   rig.quiet(r);
   await rig.noticeOnceAcrossStarts(b.subject);
@@ -1142,8 +1142,33 @@ test('a route pass held at the removal of an owed record across dispose() reads 
 test('a route pass held at the removal of an owed record across dispose() logs nothing when the removal FAILS, and no later start sends the notice again', async (t) => {
   const rig = await passRig(t, MAIL);
   const a = plantOwed(rig, 'a.json', '0a0a0a');
-  const r = await rig.disposeWhileHeld(rig.hold('rm', (p) => p === a.record, 'EBUSY'), 'the route pass removing a record whose notice it sent');
+  const r = await rig.disposeWhileHeld(rig.hold('unlink', (p) => p === a.record, 'EBUSY'), 'the route pass removing a record whose notice it sent');
   assert.equal(fs.existsSync(a.record), true, 'control: the record could not be removed and is still there');
+  rig.quiet(r);
+  await rig.noticeOnceAcrossStarts(a.subject);
+  assert.equal(fs.existsSync(a.record), false, 'and the record is gone after the next start');
+  deletes(rig.home);
+});
+
+// The remover looks at what the record is (lstat) before it removes it: that look is an await too.
+test('a route pass held at its look at an owed record it is about to remove, across dispose(), reads no further record when the look returns', async (t) => {
+  const rig = await passRig(t, MAIL);
+  const a = plantOwed(rig, 'a.json', '0a0a0a');
+  const b = plantOwed(rig, 'b.json', '0b0b0b');
+  const reads = readsOf(rig, b.record);
+  const r = await rig.disposeWhileHeld(rig.hold('lstat', (p) => p === a.record), 'the route pass looking at a record whose notice it sent');
+  assert.equal(reads(), 0, 'a disposed manager started the read of the next owed record');
+  rig.quiet(r);
+  await rig.noticeOnceAcrossStarts(b.subject);
+  await rig.noticeOnceAcrossStarts(a.subject);
+  deletes(rig.home);
+});
+
+test('a route pass held at its look at an owed record it is about to remove, across dispose(), logs nothing when the look FAILS, and no later start sends the notice again', async (t) => {
+  const rig = await passRig(t, MAIL);
+  const a = plantOwed(rig, 'a.json', '0a0a0a');
+  const r = await rig.disposeWhileHeld(rig.hold('lstat', (p) => p === a.record, 'EBUSY'), 'the route pass looking at a record whose notice it sent');
+  assert.equal(fs.existsSync(a.record), true, 'control: the record could not be looked at and is still there');
   rig.quiet(r);
   await rig.noticeOnceAcrossStarts(a.subject);
   assert.equal(fs.existsSync(a.record), false, 'and the record is gone after the next start');
