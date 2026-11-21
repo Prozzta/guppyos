@@ -118,10 +118,28 @@ test('an unattached PTY starts with no DA1 wait, the query never reaches the sin
   }
 });
 
-/** OpenConsole holds an unanswered DA1 for 3 s; a main thread busy longer than that, with a root
- *  that exits at once, writes the answer while the console is going away (measured: EAGAIN 5 of 5;
- *  busy 1 s: 0 of 3, the launch was still held). */
-const BUSY_PAST_DA1_MS = 4_500;
+/** OpenConsole holds an unanswered DA1 for 3 s, then starts the root. A main thread that stays busy
+ *  until the root has started AND gone writes the answer to a console that is going away: EAGAIN.
+ *  FLAKE-PTY-OPENCONSOLE-DA1-EAGAIN-SAID-108: the wait is on that event, never on a time. A fixed
+ *  4.5 s block left the root 1.5 s to start and go; on a loaded bench it was still there, took the
+ *  answer without error, and nothing was said. No time decides the result here: ROOT_HANG_MS only
+ *  ends a hang, as a failure that names which step never came. */
+const ROOT_HANG_MS = 60_000;
+const syncNap = (ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
+
+/** Blocks the calling thread until the root has written its pid and that pid is gone; returns the pid. */
+function blockUntilRootGone({ readPid, alive, nap = syncNap, now = Date.now, hangMs = ROOT_HANG_MS }) {
+  const t0 = now();
+  let pid = 0;
+  for (;;) {
+    if (!pid) pid = readPid();
+    if (pid && !alive(pid)) return pid;
+    if (now() - t0 >= hangMs) {
+      throw new Error(pid ? `HANG: THE ROOT NEVER EXITED (pid ${pid} still alive after ${hangMs} ms)` : `HANG: THE ROOT NEVER STARTED (no pid from it after ${hangMs} ms)`);
+    }
+    nap(20);
+  }
+}
 /** Alive by the process itself (exit code still pending), synchronously. pty.ts holds the root's handle
  *  until onExit, and onExit cannot run while this thread is blocked, so the pid cannot be reused meanwhile. */
 const pidAlive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { if (e.code === 'ESRCH') return false; throw e; } };
@@ -145,7 +163,7 @@ async function eagainCell(id, rootLivesMs) {
     const r = await m.spawn({ id, cwd: dir, command: consoleNode().file, args: [path.join(dir, 'gone.cjs')], cols: 80, rows: 24, env: {} }, sink);
     assert.ok(r.ok, `spawn: ${r.error}`);
     // The answer goes out from the output handler, in the first turn after this block.
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, BUSY_PAST_DA1_MS);
+    blockUntilRootGone({ readPid, alive: pidAlive });
     // CONTROL, still in the blocked turn: what the root was when the answer is about to be written.
     const rootPid = readPid();
     const rootAliveAtWrite = rootPid ? pidAlive(rootPid) : null;
@@ -172,6 +190,31 @@ test('a write the console can no longer take is said, not thrown outside any cal
 const SLOW_ROOT_LIVES_MS = 3_000;
 
 test('EAGAIN, slow root: the answer is still written after the root has gone, however long the root takes', { skip: process.platform !== 'win32' }, () => eagainCell('ocinslow', SLOW_ROOT_LIVES_MS));
+
+test('EAGAIN wait: it ends on the root\'s exit and on nothing else; a hang fails and names its step', () => {
+  // A fake clock that only the nap moves: no real time passes.
+  const world = (goneAtMs, pidAtMs) => {
+    let t = 0; let naps = 0;
+    return { now: () => t, nap: (ms) => { t += ms; naps++; }, readPid: () => (t >= pidAtMs ? 4242 : 0), alive: () => t < goneAtMs, naps: () => naps, t: () => t };
+  };
+  // the root starts at 3 s and goes at 3.1 s: the wait ends there
+  let w = world(3_100, 3_000);
+  assert.equal(blockUntilRootGone(w), 4242);
+  assert.equal(w.t(), 3_100);
+  // a root that takes 40 s to go (a loaded bench): the wait is still on it, well past any fixed block
+  w = world(40_000, 3_000);
+  assert.equal(blockUntilRootGone(w), 4242);
+  assert.equal(w.t(), 40_000, 'THE WAIT ENDS AT THE ROOT\'S EXIT, NOT AT A TIME');
+  // a pid that is already gone when first read
+  w = world(0, 0);
+  assert.equal(blockUntilRootGone(w), 4242);
+  assert.equal(w.naps(), 0);
+  // hangs fail, each with its own cause; they never return
+  assert.throws(() => blockUntilRootGone(world(Infinity, 3_000)), /HANG: THE ROOT NEVER EXITED \(pid 4242 still alive after 60000 ms\)/);
+  assert.throws(() => blockUntilRootGone(world(Infinity, Infinity)), /HANG: THE ROOT NEVER STARTED \(no pid from it after 60000 ms\)/);
+  // a liveness check that fails for another reason is not read as 'gone'
+  assert.throws(() => pidAlive(-7.5), (e) => e.code !== 'ESRCH');
+});
 
 test('the input-pipe guard: one listener per terminal, said once; a node-pty without the socket is left alone', () => {
   const { guardInputErrors } = loadTs('src/main/pty.ts');
