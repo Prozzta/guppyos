@@ -50,8 +50,10 @@ const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 
 /**
  * The processes on the console of `pid`, asked with node-pty's own list helper (a fork: a process has
- * one console). Nothing is ended. [] when the pid has no console to attach to; null when the helper
- * gave no answer, which proves nothing.
+ * one console). Nothing is ended. [] when the helper could not attach to a console of the pid: the
+ * helper as patched in this repo answers [] for any failure of its own list call, and a pid that has
+ * left its console is one of them (node-pty's own kill then names nobody either). null only when the
+ * helper ended without any message, which proves nothing.
  */
 function consoleOf(pid) {
   return new Promise((resolve) => {
@@ -64,13 +66,15 @@ function consoleOf(pid) {
 }
 
 /**
- * Resolves once a child that was ended by its pid is off its console: first its hold says it has
- * exited, then the console list of its pid no longer holds it. The second step is not the first
- * again: an exit signals the process handle, and the console drops the process from its list in its
- * own time. Both steps share one cap; at the cap it rejects with the step that did not come.
+ * Resolves once a child is off its console: first its hold says it has exited, then the console list
+ * of its pid no longer holds it. The second step is not the first again: an exit signals the process
+ * handle, and the console drops the process from its list in its own time. So it is asked for every
+ * child, also one that exited by itself (`byPid` false: the hold said so at once and no kill was
+ * sent). Both steps share one cap; at the cap it rejects with the step that did not come.
  */
-async function offConsole(pid, hold) {
+async function offConsole(pid, hold, byPid) {
   const end = Date.now() + TEARDOWN_CAP_MS;
+  const since = byPid ? 'after its kill by pid' : 'after its hold first said so';
   while (hold.alive()) {
     if (Date.now() >= end) throw new Error(`the child never exited after its kill by pid (its hold still says it runs, ${TEARDOWN_CAP_MS} ms on), so its terminal is not closed`);
     await sleep(25);
@@ -78,7 +82,7 @@ async function offConsole(pid, hold) {
   for (;;) {
     const list = await consoleOf(pid);
     if (list && !list.includes(pid)) return;
-    if (Date.now() >= end) throw new Error(`the child has exited and the console of its pid still lists it ${TEARDOWN_CAP_MS} ms after its kill by pid (${JSON.stringify(list)}), so its terminal is not closed`);
+    if (Date.now() >= end) throw new Error(`the child has exited and the console of its pid still lists it ${TEARDOWN_CAP_MS} ms ${since} (${JSON.stringify(list)}), so its terminal is not closed`);
     await sleep(25);
   }
 }
@@ -141,7 +145,8 @@ function childBytes(input, { file = process.execPath, env = process.env, onSpawn
       // NODEPTY-CONSOLE-LIST-KILL-SIBLINGS: on the inbox conhost node-pty's kill ends every process
       // on the console of the child's pid. An electron.exe child is on THIS test file's console, the
       // one the runner shares between its files: a child still alive here took the sibling files
-      // with it. So the child is ended by its pid first; a child that is gone has no console to list.
+      // with it. So the child is ended by its pid first, and the terminal is closed only once the
+      // console of that pid no longer lists the child.
       // The pid is named only while the hold says the child runs. With no hold nothing says whose
       // the pid is, and nothing can be waited on: no pid is named and no console is listed.
       if (!hold) {
@@ -149,11 +154,12 @@ function childBytes(input, { file = process.execPath, env = process.env, onSpawn
           + ' the close ends every process on the console of a pid, and nothing says that pid is still the child\'s', error);
         return;
       }
-      if (!hold.alive()) { close(error, value); return; }
-      try { process.kill(proc.pid); } catch { /* gone already */ }
+      const byPid = hold.alive();
+      if (byPid) { try { process.kill(proc.pid); } catch { /* gone already */ } }
       // FLAKE-NODEPTY-CONSOLE-LIST-KILL-HARNESSALIVE-NOBODY: that kill returns at once, and the child
-      // is on the owner's console until it has gone. The terminal is closed only after that.
-      offConsole(proc.pid, hold).then(() => close(error, value), (stuck) => refuse(stuck.message, error));
+      // is on the owner's console until it has gone. The terminal is closed only after that. A child
+      // that had exited by itself is waited off the console too: its exit alone does not say so.
+      offConsole(proc.pid, hold, byPid).then(() => close(error, value), (stuck) => refuse(stuck.message, error));
     }
     function close(error, value) {
       try { proc.kill(); } catch { /* child already exited */ }
