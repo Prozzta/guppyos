@@ -136,3 +136,65 @@ test("SIGHTED: Sele's heredoc loadall.sh run in the same call", (t) => K.sele(HJ
 test("SIGHTED: Creed's bash run.sh (32 spinners + 16 churners)", (t) => K.creed(HJ, dir(t)));
 test('SHELL: backgrounded churn loops with no node in them', (t) => K.churners(HJ, dir(t)));
 test('NOT WIDENED: code and loops that end, or start fewer than 4 processes, stay light', () => K.light(HJ));
+
+// ─── MUTANT CENSUS ──────────────────────────────────────────────────────────────────────────
+
+function mutateText(rel, edits, tag) {
+  let text = readSource(rel);
+  for (const [from, to] of edits) {
+    const hits = text.split(from).length - 1;
+    assert.equal(hits, 1, `mutant ${tag}: edit target must match EXACTLY ONCE, matched ${hits}: ${JSON.stringify(from.slice(0, 80))}`);
+    text = text.replace(from, () => to);
+  }
+  return text;
+}
+const MUTANTS = [
+  { name: 'node -e is not checked for an endless loop',
+    edits: [["    if (endlessLoop(prog.inline)) return { heavy: true, kind: 'bench', exclusive: true, why: 'node -e (an endless loop: a CPU burner)' };\n", '']],
+    killer: 'forever', dies: /AN ENDLESS FOR\(;;\) IN NODE -E IS A BENCH/ },
+  { name: 'for(;;) is not an endless loop',
+    edits: [["    if (ts[k].v === 'for' && v(k + 2) === ';' && v(k + 3) === ';' && v(k + 4) === ')') return true;\n", '']],
+    killer: 'forever', dies: /AN ENDLESS FOR\(;;\) IN NODE -E IS A BENCH/ },
+  { name: 'while(true) / while(1) is not an endless loop',
+    edits: [["    if (ts[k].v === 'while' && (v(k + 2) === 'true' || v(k + 2) === '1') && v(k + 3) === ')') return true;\n", '']],
+    killer: 'whileTrue', dies: /AN ENDLESS WHILE\(TRUE\|1\) IN NODE -E IS A BENCH/ },
+  { name: 'while(1) is not an endless loop',
+    edits: [["(v(k + 2) === 'true' || v(k + 2) === '1')", "v(k + 2) === 'true'"]],
+    killer: 'whileTrue', dies: /AN ENDLESS WHILE\(TRUE\|1\) IN NODE -E IS A BENCH: "node -e \\"while\(1\);\\""/ },
+  { name: 'the endless-loop check reads text, not tokens (a string or comment counts)',
+    edits: [['  const ts = jsTokens(code);\n  const v = ', '  if (/for\\s*\\(\\s*;\\s*;\\s*\\)|while\\s*\\(\\s*(true|1)\\s*\\)/.test(code)) return true;\n  const ts = jsTokens(code);\n  const v = ']],
+    killer: 'light', dies: /NOT WIDENED: "node -e \\"console\.log\('for\(;;\)\{\}'\)\\"" stays light/ },
+  { name: 'the background-loop rule is not applied',
+    edits: [['  if (bgLoad) return bgLoad;\n', '']],
+    killer: 'loops', dies: /A SHELL LOOP THAT BACKGROUNDS 4 OR MORE PROCESSES IS A BENCH/ },
+  { name: 'the threshold is 5, not 4',
+    edits: [['const BG_LOOP_MIN = 4;', 'const BG_LOOP_MIN = 5;']],
+    killer: 'four', dies: /FOUR BACKGROUNDED ROUNDS ARE ENOUGH/ },
+  { name: 'an unbounded loop counts as one round',
+    edits: [['    let rounds = Infinity;\n', '    let rounds = 1;\n']],
+    killer: 'unbounded', dies: /AN UNBOUNDED LOOP THAT BACKGROUNDS IS A BENCH/ },
+  { name: 'a {a..b} range counts as one round',
+    edits: [['rounds += r ? Math.abs(Number(r[2]) - Number(r[1])) + 1 :', 'rounds += r ? 1 :']],
+    killer: 'loops', dies: /A SHELL LOOP THAT BACKGROUNDS 4 OR MORE PROCESSES IS A BENCH: "for i in \{1\.\.32\}/ },
+  { name: "a subshell's ( hides the loop it opens (nested churn loops)",
+    edits: [[".map((w) => w.replace(/^\\(+/, ''))\n", '\n']],
+    killer: 'churners', dies: /A SCRIPT OF BACKGROUNDED CHURN LOOPS IS A BENCH/ },
+  { name: 'a backgrounded loop (done &) counts as backgrounding in it',
+    edits: [["      if (w[0] === 'done' && --depth === 0) break;\n      if (/\\s&$/.test(segs[end])) bg++;\n", "      if (/\\s&$/.test(segs[end])) bg++;\n      if (w[0] === 'done' && --depth === 0) break;\n"]],
+    killer: 'light', dies: /NOT WIDENED: "for i in 1 2 3 4; do echo \$i; done &" stays light/ },
+  { name: 'the background loop is classed shared, not a bench',
+    edits: [["return { heavy: true, kind: 'bench', exclusive: true, why: `a shell loop", "return { heavy: true, kind: 'test', why: `a shell loop"]],
+    killer: 'loops', dies: /A SHELL LOOP THAT BACKGROUNDS 4 OR MORE PROCESSES IS A BENCH: .* is a bench/ },
+];
+
+test('MUTANT CENSUS: every mutant applies once and dies at the assertion that names its guarantee', async (t) => {
+  for (const m of MUTANTS) {
+    await t.test(`mutant: ${m.name}`, (tt) => {
+      const M = loadTs.fromText(HJF, mutateText(HJF, m.edits, m.name));
+      assert.throws(() => K[m.killer](M, dir(tt)), (e) => {
+        assert.match(String(e && e.message), m.dies, `${m.name}: died for the wrong reason: ${e && e.message}`);
+        return true;
+      });
+    });
+  }
+});
