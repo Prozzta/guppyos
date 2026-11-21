@@ -89,13 +89,16 @@ if (process.platform !== 'win32') {
 } else {
   const wt = require('node:worker_threads');
   let readyDelay = 0;
+  /** Called when the READY's delay is over, in the turn it is handled and before it is. */
+  let onReadyDue = () => {};
   let onReadyHandled = () => {};
   const on0 = wt.Worker.prototype.on;
   wt.Worker.prototype.on = function (name, fn) {
     if (name !== 'message') return on0.call(this, name, fn);
     return on0.call(this, name, (msg) => {
       const run = () => { fn(msg); onReadyHandled(); };
-      if (readyDelay > 0) setTimeout(run, readyDelay); else run();
+      const due = () => { onReadyDue(); run(); };
+      if (readyDelay > 0) setTimeout(due, readyDelay); else due();
     });
   };
 
@@ -133,6 +136,7 @@ if (process.platform !== 'win32') {
   /** A real silent ConPTY, with what the scenarios watch: exits, connects, the worker's terminate and end. */
   async function spawnSilent(delay) {
     readyDelay = delay;
+    onReadyDue = () => {};
     const id = `late-${++seq}`;
     const r = await m.spawn({ id, cwd: JAIL, command: process.execPath, args: [ROOT], cols: 80, rows: 24, env: {} }, owner);
     assert.equal(r.ok, true, `spawn: ${r.error}`);
@@ -213,6 +217,31 @@ if (process.platform !== 'win32') {
     assert.equal(s.seen.connects, 1, 'the READY did start its connect');
     assert.equal(s.seen.exits, 1, `exactly one exit (${s.state()})`);
     assert.deepEqual(codes, [41], 'the exit carries the agent\'s exit code, read at the close');
+    assert.deepEqual(thrown(), [], 'nothing thrown outside a caller');
+  });
+
+  test('FLAKE-PTY-LATE-READY-EXIT-CODE-RACE-108: the root\'s exit report lands after the READY is due (forced): the close timer\'s body still runs after it', async () => {
+    const s = await spawnSilent(EARLY_READY_MS);
+    const agent = s.proc._agent;
+    const codes = [];
+    const order = [];
+    s.proc.onExit((e) => { codes.push(e.exitCode); });
+    // The forced interleave: node-pty's exit report (native -> _$onProcessExit) is held until one
+    // turn after the READY is due. That is a root slow to end under load, every time.
+    const report = agent._$onProcessExit;
+    let release;
+    const released = new Promise((res) => { release = res; });
+    agent._$onProcessExit = function (...a) { released.then(() => { order.push('exit report'); report.apply(this, a); }); };
+    onReadyDue = () => { setImmediate(release); };
+    s.proc.kill();
+    assert.equal(s.sock._handle, null, 'the lever holds: the kill ran before the connect');
+    s.readyHandled.then(() => { order.push('close timer body'); agent._exitCode = 41; agent._cleanUpProcess(); });
+    await withinAll({ 'the terminal exit': s.exited, 'the worker\'s end': s.workerEnded }, s, 'exit report after the READY is due');
+    await sleep(FLUSH_MS + 300);
+    assert.equal(s.seen.connects, 1, 'the READY did start its connect');
+    assert.equal(s.seen.exits, 1, `exactly one exit (${s.state()})`);
+    assert.deepEqual(codes, [41], 'the exit carries the agent\'s exit code, read at the close');
+    assert.deepEqual(order, ['exit report', 'close timer body'], 'node-pty arms its close timer in the exit report: the body never runs before the report');
     assert.deepEqual(thrown(), [], 'nothing thrown outside a caller');
   });
 
