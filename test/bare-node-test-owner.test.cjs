@@ -119,7 +119,7 @@ const test = require('node:test');
 const net = require('node:net');
 const { spawn } = require('node:child_process');
 test('spawns, then ${mode}', async () => {
-  const d = spawn(process.execPath, ['-e', "process.send({ type: 'ready', pid: process.pid, bornMs: Date.now() }); setInterval(() => {}, 1000)"], { detached: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'], windowsHide: true });
+  const d = spawn(process.execPath, ['-e', ${JSON.stringify(detachedScript(BORN_FROM_UPTIME, 0))}], { detached: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'], windowsHide: true });
   d.unref();
   const c = spawn('cmd.exe', ['/d', '/c', 'ping -n 90 127.0.0.1 > nul'], { stdio: 'ignore', windowsHide: true });
   c.unref();
@@ -144,6 +144,15 @@ function bareEnv(extra) {
 }
 // Under the Electron leg the node --test parent and the fixture subprocess are electron.exe, not node.exe.
 const isNodeExe = (row) => !!row && String(row.name).toLowerCase() === path.basename(process.execPath).toLowerCase();
+// The detached node's birth. It is taken from the node's own uptime (own-procs bornNow's rule), not from Date.now() when
+// the script's first line runs: node's boot sits between the process being created and that line, and under suite
+// load it can pass BIRTH_SLACK_MS, so a live node read as missing (the 'survives' sightings on :323).
+const BORN_FROM_UPTIME = 'Math.round(Date.now() - process.uptime() * 1000)';
+const BORN_FROM_SCRIPT_START = 'Date.now()';
+/** The detached fixture node: after `stallMs` of busy-waiting (boot lag stand-in) it reports pid + birth and stays up. */
+const detachedScript = (born, stallMs) => `const s = Date.now(); while (Date.now() - s < ${stallMs}); process.send({ type: 'ready', pid: process.pid, bornMs: ${born} }); setInterval(() => {}, 1000)`;
+/** |created - bornMs| of a pid, for a failure message (null when no row). */
+const gapOf = (pid, bornMs) => { const r = own.lookupPids([pid])[0]; return r ? Math.abs(r.created - bornMs) : null; };
 const rowOf = (pid, bornMs) => { const r = own.lookupPids([pid])[0]; return r && Math.abs(r.created - bornMs) <= own.BIRTH_SLACK_MS ? r : undefined; };
 const until = async (what, ok, ms = 30_000) => {
   const t0 = Date.now(); let last = null;
@@ -264,6 +273,21 @@ async function bareRun(dir, name, helperLine, { mode = 'FAIL', env: extra = {}, 
   assert.equal(ended.code, 1, `${name}: the bare test fails, as the fixture's test does`);
   return { ...result, stderr: result.stderr(), stdout: result.stdout() };
 }
+
+test('the detached fixture birth survives a slow boot: from uptime it is read as ours, from the script first line it is not (red-before for the survives sightings)', { skip: process.platform !== 'win32' ? 'Windows only' : false }, async () => {
+  const STALL_MS = own.BIRTH_SLACK_MS + 500;   // boot lag stand-in: more than the slack passes before the script reports
+  const probe = (born) => new Promise((resolve, reject) => {
+    const c = spawn(process.execPath, ['-e', detachedScript(born, STALL_MS)], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'], windowsHide: true });
+    const kill = () => { try { c.kill(); } catch { /* gone */ } };
+    const timer = setTimeout(() => { kill(); reject(new Error('the probe node never reported')); }, 60_000);
+    c.once('error', (e) => { clearTimeout(timer); reject(e); });
+    c.once('message', (m) => { clearTimeout(timer); const row = rowOf(m.pid, m.bornMs); const gap = gapOf(m.pid, m.bornMs); kill(); resolve({ row, gap }); });
+  });
+  const old = await probe(BORN_FROM_SCRIPT_START);
+  assert.equal(old.row, undefined, `the old birth (script first line) falls outside the slack after a ${STALL_MS} ms stall: gap ${old.gap} ms`);
+  const fixed = await probe(BORN_FROM_UPTIME);
+  assert.ok(fixed.row, `the uptime birth is inside the slack whatever the boot took: gap ${fixed.gap} ms`);
+});
 
 test('LIVE: the observer disconnect is required for a released failing fixture to exit', LIVE, async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bnto-'));
@@ -446,7 +470,7 @@ test('LIVE: mutants of own-job.cjs are caught: without a real join the detached 
       const r = await bareRun(dir, `mutant${i}`, req(mfile), { env });
       const now = childRows(r.pids);
       leftovers.push(now.detached, now.cmd, now.ping);
-      if (!now.detached) survivors.push(name);
+      if (!now.detached) survivors.push(`${name} (detached gap ${gapOf(r.pids.detached, r.pids.detachedBornMs)} ms, cmd gap ${gapOf(r.pids.cmd, r.pids.cmdBornMs)} ms, slack ${own.BIRTH_SLACK_MS})`);
       sweep([now.detached, now.cmd, now.ping]);
     }
     assert.deepEqual(survivors, [], 'every mutant is killed (its orphan is seen alive)');
