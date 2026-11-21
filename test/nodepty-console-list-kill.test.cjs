@@ -53,10 +53,13 @@ const DRIVER = path.join(__dirname, 'tools', 'console-list-kill-driver.cjs');
 const DRIVER_CAP_MS = 240000;
 
 let ran = null;
+/** The one folder of this file: tempDir removes it when the file ends. The driver's result and work files are in it. */
+let ownDir = null;
 /** One driver run for the whole file; every cell reads its own case from the result. */
 function driver() {
   if (ran) return ran;
-  const outFile = path.join(tempDir('clk-'), 'result.json');
+  ownDir = tempDir('clk-');
+  const outFile = path.join(ownDir, 'result.json');
   ran = new Promise((resolve, reject) => {
     // windowsHide: the child gets a NEW console with no window, so nothing of the suite is on it.
     const child = spawn(consoleNode().file, [DRIVER, outFile, String(process.pid)], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: nodeEnv(process.env) });
@@ -149,6 +152,16 @@ test("the driver's own cleanup names a root only while its own hold says the roo
   assert.deepEqual(harnessHoldSaysGone.cleanupKills, ['held, running'], 'control: a root still running at the cleanup is ended, by pid, under the hold');
   assert.equal(harnessAlive.cleanup, 'gone: no pid named', 'the root that childBytes ended is not named again');
   assert.equal(harnessGone.cleanup, 'gone: no pid named', 'the root that exited by itself is not named');
+});
+
+// The runner fails a run in which a test file leaves an entry in its temp folder. The driver is a
+// process of this file, so what it writes must be in the folder this file removes.
+test('the driver leaves nothing in the temp folder: its work files are in the one folder this file removes', async () => {
+  const out = await driver();
+  for (const key of Object.keys(out.cases)) {
+    assert.equal(fs.existsSync(path.join(ownDir, `${key}.up`)), true,
+      `THE DRIVER WORKS IN THE FOLDER THIS FILE REMOVES: the marker of case ${key} is not in ${ownDir} (it holds ${JSON.stringify(fs.readdirSync(ownDir))}), so the driver made a folder of its own that nobody removes`);
+  }
 });
 
 // ---- the mechanism, probed directly ----
