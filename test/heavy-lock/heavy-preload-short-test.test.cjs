@@ -203,7 +203,7 @@ function start(args, url) {
   let stderr = '';
   child.stderr.on('data', (d) => { stderr += d; });
   child.stdout.resume();
-  return { child, done: new Promise((resolve) => child.on('close', (code) => resolve({ code, stderr }))) };
+  return { child, stderr: () => stderr, done: new Promise((resolve) => child.on('close', (code) => resolve({ code, stderr }))) };
 }
 
 function npmKind(args, preload = PRELOAD) {
@@ -232,7 +232,7 @@ async function broker(t, M) {
   const s = new HookServer(hive, () => ({ send: () => {} }), () => ({}), control);
   const logs = [];
   // The harness is not a shell: the parent check is answered for it, as in heavy-lock-opaque-196 e2eNested.
-  const lock = new M.HeavyJobLock({ limit: () => 1, log: (r) => logs.push(r), notify: () => {}, parentImage: async () => 'bash.exe' });
+  const lock = new M.HeavyJobLock({ limit: () => 1, log: (r) => logs.push({ ...r, seenMs: Date.now() }), notify: () => {}, parentImage: async () => 'bash.exe' });
   s.setHeavyLock(lock);
   s.start();
   t.after(() => s.stop());
@@ -268,11 +268,28 @@ K.opaqueNpm = async (t, M = HJ, script = 'gate.sh') => {
   const gate = start([BASH, script], b.url);
   await waitFor(() => b.lock.queueSnapshot().waiters.some((w) => w.agentId === 'a'), 20_000, 'BASH GATE.SH RUNNING NPM CI QUEUES FOR THE SLOT');
   assert.equal(await within(gate.done, 10), 'timeout', 'BASH GATE.SH RUNNING NPM CI WAITS FOR THE SLOT');
+  // FLAKE-HEAVY-PRELOAD-OPAQUE-NPM-CI-276-108: what the slot owes the queued npm ci is its lease once the
+  // holder lets go, so the cell waits for that row (or for the process to end without one). It puts no clock
+  // of its own on npm's run: how long node and npm take to start and exit is the machine's load, and a
+  // 30 s bound on it went red in a loaded suite. A hang ends at the cell's own limit, with the evidence.
+  const released = Date.now();
+  const leased = () => b.logs.some((x) => x.action === 'lease' && x.agentId === 'a' && x.heavyKind === 'install');
+  const evidence = () => `lock rows (ms after the release): ${b.logs.map((x) => `${x.seenMs - released} ${x.action} ${x.agentId ?? ''}`).join(' | ')}; stderr: ${gate.stderr() || '(none)'}`;
+  let closed = null;
+  gate.done.then((x) => { closed = x; });
+  const onLimit = () => {
+    process.stderr.write(`[heavy-preload-short-test] the opaque npm ci cell hit its limit, ${closed ? 'process closed' : leased() ? 'lease given, process still running' : 'no lease yet'}: ${evidence()}\n`);
+    if (!closed) spawnSync('taskkill.exe', ['/PID', String(gate.child.pid), '/T', '/F'], { windowsHide: true });
+  };
+  t.signal.addEventListener('abort', onLimit, { once: true });
   b.lock.callDone('b', 'hb');
-  const r = await within(gate.done, 30_000);
-  assert.ok(r !== 'timeout' && r.code === 0, `the queued npm ci completes after release: ${r === 'timeout' ? r : r.stderr}`);
+  while (!leased() && !closed) await sleep(25);
+  assert.ok(leased(), `THE QUEUED NPM CI GETS ITS LEASE ONCE THE HOLDER LETS GO: process ended with code ${closed && closed.code}; ${evidence()}`);
+  const r = await gate.done;
+  t.signal.removeEventListener('abort', onLimit);
+  assert.equal(r.code, 0, `the queued npm ci completes after release: ${evidence()}`);
   assert.match(r.stderr, /\[guppy\] waiting for the heavy-job slot \(held by b/);
-  assert.ok(b.logs.some((x) => x.action === 'lease' && x.agentId === 'a' && x.heavyKind === 'install'), 'the npm CLI holds an install lease');
+  assert.equal(b.lock.snapshot().length, 0, 'its lease is released at exit');
   assert.ok(fs.existsSync(NPM_CACHE), 'NPM WRITES ITS CACHE IN THE FOLDER THIS FILE REMOVES, not in the default under LOCALAPPDATA');
 };
 test('E2E: an opaque bash gate.sh cannot bypass the slot with npm ci', { timeout: 120_000 }, (t) => K.opaqueNpm(t));
