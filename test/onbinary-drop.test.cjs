@@ -2,8 +2,8 @@
 require('./tools/own-job.cjs');
 
 // ONBINARY-DROP: legacy X10 uses xterm.onBinary.  The important boundary is
-// node-pty's real child, not merely a mocked proc.write: ConPTY consumes ESC[M
-// and interprets input as UTF-8, while POSIX PTYs preserve the raw bytes.
+// node-pty's real child, not merely a mocked proc.write: ConPTY
+// interprets input as UTF-8, while POSIX PTYs preserve the raw bytes.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const loadTs = require('./load-ts.cjs');
@@ -41,13 +41,12 @@ test('ONBINARY-DROP: win32 ConPTY preserves the high coordinate only via string 
   const { ptyBinaryInput } = loadTs('src/main/ptyBinaryInput.ts');
   const node = consoleNode();
   t.diagnostic(`PTY child: ${node.file} ${node.version} (from ${node.from})`);
-  // host 'inbox': these bytes are what the Windows inbox conhost delivers. The app runs on the bundled
-  // OpenConsole since PTY-CONHOST-ORPHAN-OWNER-DEATH, and there the child also reads the ESC [ M
-  // prefix. Whether that is right is PTY-X10-MOUSE-ESC-PREFIX-OPENCONSOLE's to rule: once it has,
-  // this cell moves to the default host with the bytes measured there.
-  assert.deepEqual(await childBytes(ptyBinaryInput(X10_HIGH_COLUMN, 'win32'), { file: node.file, host: 'inbox' }), [0x20, 0xc2, 0x85, 0x21]);
-  assert.deepEqual(await childBytes(Buffer.from(X10_HIGH_COLUMN, 'latin1'), { file: node.file, host: 'inbox' }), [0x20, 0x21],
-    'the Buffer mutant loses 0x85 at ConPTY UTF-8 decoding');
+  // PTY-X10-MOUSE-ESC-PREFIX-OPENCONSOLE: on the bundled OpenConsole, the host the app runs, the child
+  // reads the full report: ESC [ M, then the three bytes, the high one as UTF-8 (c2 85). The inbox
+  // conhost consumed the ESC [ M prefix.
+  assert.deepEqual(await childBytes(ptyBinaryInput(X10_HIGH_COLUMN, 'win32'), { file: node.file }), [0x1b, 0x5b, 0x4d, 0x20, 0xc2, 0x85, 0x21]);
+  assert.deepEqual(await childBytes(Buffer.from(X10_HIGH_COLUMN, 'latin1'), { file: node.file }), [0x1b, 0x5b, 0x4d, 0x20, 0xef, 0xbf, 0xbd, 0x21],
+    'the Buffer mutant loses 0x85 at ConPTY UTF-8 decoding: it arrives as U+FFFD');
 });
 
 test('ONBINARY-DROP: POSIX real PTY receives the raw X10 bytes', { skip: process.platform === 'win32' }, async (t) => {
