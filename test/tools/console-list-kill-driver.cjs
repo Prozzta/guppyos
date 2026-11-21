@@ -25,7 +25,6 @@
  * usage: node console-list-kill-driver.cjs <outfile> <pid of the test file>
  */
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { EventEmitter } = require('node:events');
@@ -132,7 +131,9 @@ let bystanderProc = null;
   const { childBytes, electronExe } = require('./pty-child.cjs');
   const { consoleNode } = require('./console-node.cjs');
   const { PtyManager } = require('../load-ts.cjs')('src/main/pty.ts');
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'clk-driver-'));
+  // The folder of the result file: the test file made it and removes it when it ends, after this
+  // process. The driver makes no folder of its own, so it leaves nothing in the temp folder.
+  const tmp = path.dirname(path.resolve(outFile));
   bystanderProc = realSpawn.call(cp, process.execPath, ['-e', IDLE], { stdio: 'inherit', env: nodeEnv(process.env) });
   const bystander = bystanderProc.pid;
   out.bystander = bystander;
