@@ -512,13 +512,15 @@ async function liveRelease(t, o) {
       // A single list can miss a child that has not spawned yet (FLAKE-LAG197-KILL-NONE-LISTED-108, 2nd): after the
       // kills have ended, list again and kill whatever is new, until a list shows nothing new (or fails).
       const seen = new Set();
+      let round = 0;
       for (;;) {
+        round += 1;
         const fresh = rec.pids.filter((p) => !seen.has(p));
         if (!fresh.length) break;
         const ended = [];
         for (const pid of fresh) {
           seen.add(pid);
-          const k = { pid, startedAt: null, sentAt: null, endedAt: null };
+          const k = { pid, round, startedAt: null, sentAt: null, endedAt: null };
           kills.push(k);
           ended.push(new Promise((done) => {
             const end = () => { if (k.endedAt === null) k.endedAt = Date.now(); done(); };
@@ -684,6 +686,30 @@ test('LIVE: a killed job frees the slot when completion-port notices are absent'
   assertWatcherClosed(r, 'no-port kill');
 });
 
+// FLAKE-LAG-197-KILLS-RUN-TOGETHER-698-108: the kills run together WITHIN a round. A later list can find a
+// member that had not spawned yet (KILL-NONE-LISTED, 2nd); that one is killed in the next round, after the
+// first round has ended, by design. The assert used to hold every kill of the run to the first round's end,
+// so the straggler (startedAt 427 ms after the last kill of round 1 ended) failed it on a loaded machine.
+function assertKillsTogether(kills) {
+  for (const n of new Set(kills.map((k) => k.round))) {
+    const inRound = kills.filter((k) => k.round === n);
+    const firstEnd = Math.min(...inRound.map((k) => k.endedAt));
+    assert.ok(inRound.every((k) => k.startedAt <= firstEnd), `THE KILLS OF ROUND ${n} RUN TOGETHER, not one after another: ${JSON.stringify(inRound)}`);
+  }
+}
+
+test('the kills-together check: a straggler killed in the next round passes, kills one after another in one round fail', () => {
+  const T = 1_000_000;
+  // the suite's red, verbatim shape: four kills scheduled in one ms, a fifth found by the next list
+  const round1 = [219032, 203320, 220840, 224900].map((pid, i) => ({ pid, round: 1, startedAt: T, sentAt: T + 6_000 + i, endedAt: T + 7_400 + i }));
+  const late = { pid: 214708, round: 2, startedAt: T + 7_900, sentAt: T + 13_900, endedAt: T + 14_400 };
+  assert.doesNotThrow(() => assertKillsTogether([...round1, late]));
+  // one after another in ONE round: the second starts after the first has ended
+  assert.throws(() => assertKillsTogether([{ pid: 1, round: 1, startedAt: T, endedAt: T + 100 }, { pid: 2, round: 1, startedAt: T + 150, endedAt: T + 300 }]), /ROUND 1 RUN TOGETHER/);
+  // the round-2 straggler is judged within its own round too
+  assert.throws(() => assertKillsTogether([...round1, late, { pid: 9, round: 2, startedAt: T + 20_000, endedAt: T + 20_100 }]), /ROUND 2 RUN TOGETHER/);
+});
+
 // FLAKE-LAG197-NOPORT-KILL-NOT-ENDED-108: under full-suite load the no-port kill "ran 10066 ms" and
 // was read as a job the kill did not end, although the slot was freed 640 ms after the exit. The
 // run time measured the kill TOOL (one taskkill after another, each blocking this process), not the
@@ -694,8 +720,7 @@ test('LIVE: a kill tool that is slow under load is not read as a job the kill di
   assertKilled(r, 'slow kill');
   // the kills run together: every one had started before the first one ended
   assert.ok(r.kills.every((k) => k.startedAt !== null && k.endedAt !== null), `EVERY KILL STARTED AND ENDED: ${JSON.stringify(r.kills)}`);
-  const firstEnd = Math.min(...r.kills.map((k) => k.endedAt));
-  assert.ok(r.kills.every((k) => k.startedAt <= firstEnd), `THE KILLS RUN TOGETHER, not one after another: ${JSON.stringify(r.kills)}`);
+  assertKillsTogether(r.kills);
   assertFreed(r, 'slow kill');
 });
 
