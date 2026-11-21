@@ -461,6 +461,13 @@ export const OUTBOX_DEDUP_LEGACY_FILE = 'outbox-dedup.json';
 export const OUTBOX_DEDUP_COMPACT_MIN_LINES = 64;
 /** A recorded delivery further than this in the future means the clock went back: it is dropped. */
 export const OUTBOX_DEDUP_CLOCK_SLACK_MS = 60_000;
+/** The notices a stopped pass still owes, one record per file, in `<hive root>/outbox-owed/<agent id>/`:
+ *  the router's own state beside outbox-dedup.jsonl, not in a folder an agent writes to. */
+export const OUTBOX_OWED_DIR = 'outbox-owed';
+/** What a record holds: the router's own fields. The notice is built from them again; no notice text is stored. */
+type OutboxOwedFields =
+  | { kind: 'rejected'; id: string; detail: string }
+  | { kind: 'duplicate'; id: string; kept: string; priorId: string; firstAt: string };
 /** Tests only: the router's clock for the duplicate window. */
 export const outboxDedupClock = { now: (): number => Date.now() };
 /** Same sender, to, act, in_reply_to, subject, body, requires_reply and needs_human: an exact repeat
@@ -983,36 +990,104 @@ export class HiveManager {
   reopen(): void { this.readsRefused = false; }
   private stopIfDisposed(): void { if (this.readsRefused) throw new HiveDisposedError('route pass'); }
   private readonly owedChecked = new Set<string>();
-  /** Written BEFORE the move that takes a file out of outbox/: the notice its sender is owed once the move has landed. */
-  private async writeOwedNotice(outbox: string, file: string, dest: string, notice: HiveMessage): Promise<string> {
-    const dir = join(outbox, '.owed');
-    await fsPromises.mkdir(dir, { recursive: true });
-    this.stopIfDisposed();
-    const owed = join(dir, `${file}.owed`);
-    await fsPromises.writeFile(owed, JSON.stringify({ dest, fp: this.outboxFingerprint(join(outbox, file)), notice }), 'utf8');
-    this.stopIfDisposed();
-    return owed;
+  /** The router's own folder of owed records for the agent that owns `outbox` (never inside agents/<id>/). */
+  private owedDir(outbox: string): string {
+    return join(dirname(dirname(dirname(outbox))), OUTBOX_OWED_DIR, basename(dirname(outbox)));
   }
-  private async dropOwedNotice(owed: string): Promise<void> {
-    await fsPromises.rm(owed, { force: true });
-    this.stopIfDisposed();
+  /** The notice a sender gets for a rejected outbox file. Always from 'system', always to the owner of the outbox. */
+  private rejectedNotice(to: string, file: string, detail: string, archived: boolean, id?: string): HiveMessage {
+    return this.normalize({
+      ...(id ? { id } : {}),
+      to,
+      act: 'inform',
+      subject: `[outbox rejected — ${detail}] ${file}`,
+      body: `The hive router rejected this outbox file: ${detail}. It${archived ? ' was archived' : ' could not be archived yet'} as bad-${file}; rewrite and resend it if it is still needed.`
+    }, 'system');
   }
-  /** Once per manager and outbox: a record left by a stopped pass. The move landed (the kept file is the recorded one): send its notice under the recorded id. */
+  /** The notice a sender gets for an exact repeat that was kept aside as outbox/.sent/<kept>. */
+  private duplicateNotice(to: string, file: string, priorId: string, firstAt: string, kept: string, id?: string): HiveMessage {
+    // Jim M1: never silent. Tell the sender, as a rejection does: an intended identical repeat
+    // must be resent with changed text, and "it vanished from outbox/" is answered at its source.
+    return this.normalize({
+      ...(id ? { id } : {}),
+      to,
+      act: 'inform',
+      in_reply_to: null,
+      subject: `[duplicate not delivered] ${file}`,
+      body: `The hive router did not deliver ${file}: it repeats ${priorId} (delivered ${firstAt}) exactly (same to, act, reply-to, subject and body, within ${OUTBOX_DEDUP_WINDOW_MS / 60_000} minutes). The first one WAS delivered: a file gone from outbox/ was delivered (it moves to outbox/.sent/). This repeat is kept as outbox/.sent/${kept}. To send it again on purpose, change its text.`
+    }, 'system');
+  }
+  /**
+   * Written BEFORE the move that takes a file out of outbox/: what the router needs to build the
+   * sender's notice again once the move has landed. A record that cannot be written is logged and
+   * the pass goes on (null): the notice is then owed by this manager alone, as before the records.
+   */
+  private async writeOwedNotice(outbox: string, file: string, fields: OutboxOwedFields): Promise<string | null> {
+    try {
+      const dir = this.owedDir(outbox);
+      await fsPromises.mkdir(dir, { recursive: true });
+      this.stopIfDisposed();
+      const owed = join(dir, `${file}.owed`);
+      await fsPromises.writeFile(owed, JSON.stringify({ ...fields, fp: this.outboxFingerprint(join(outbox, file)) }), 'utf8');
+      this.stopIfDisposed();
+      return owed;
+    } catch (error) {
+      if (error instanceof HiveDisposedError) throw error;
+      this.stopIfDisposed();
+      this.appendLog({ kind: 'outbox-owed-save-failed', from: basename(dirname(outbox)), file, error: String(error) });
+      return null;
+    }
+  }
+  /** Removes a record. A record that cannot be removed is logged and left: its notice, sent again under the same id, is dropped at admission. */
+  private async dropOwedNotice(owed: string | null): Promise<void> {
+    if (owed === null) return;
+    try {
+      // recursive: whatever sits at a record's name in the router's own folder goes, a folder too
+      await fsPromises.rm(owed, { force: true, recursive: true });
+      this.stopIfDisposed();
+    } catch (error) {
+      if (error instanceof HiveDisposedError) throw error;
+      this.stopIfDisposed();
+      this.appendLog({ kind: 'outbox-owed-drop-failed', file: basename(owed), error: String(error) });
+    }
+  }
+  /**
+   * The notice a record stands for, or null when the move it was written for did not land. Every
+   * field is checked, and the notice is built here: its sender is 'system', its recipient is the
+   * owner of the outbox, and the kept file is a plain name inside outbox/.sent/.
+   */
+  private async owedNoticeOf(id: string, outbox: string, name: string, owed: string): Promise<HiveMessage | null> {
+    if (!name.endsWith('.owed')) return null;
+    const file = name.slice(0, -'.owed'.length);
+    const rec = JSON.parse(await fsPromises.readFile(owed, 'utf8')) as Record<string, unknown> | null;
+    this.stopIfDisposed();
+    if (!rec || typeof rec !== 'object' || typeof rec.fp !== 'string' || typeof rec.id !== 'string' || !isValidMailId(rec.id)) return null;
+    const kept = rec.kind === 'rejected' ? `bad-${file}` : rec.kind === 'duplicate' ? rec.kept : null;
+    if (typeof kept !== 'string' || /[\\/]/.test(kept) || kept === '.' || kept === '..') return null;
+    if (this.outboxFingerprint(join(outbox, '.sent', kept)) !== rec.fp) return null;
+    if (rec.kind === 'rejected') return typeof rec.detail === 'string' ? this.rejectedNotice(id, file, rec.detail, true, rec.id) : null;
+    return typeof rec.priorId === 'string' && typeof rec.firstAt === 'string' ? this.duplicateNotice(id, file, rec.priorId, rec.firstAt, kept, rec.id) : null;
+  }
+  /** Once per manager and outbox: the records a stopped pass left. Where the move landed (the kept file is the recorded one) the notice is sent under its recorded id. No record can end the pass. */
   private async deliverOwedNotices(id: string, outbox: string): Promise<void> {
     if (this.owedChecked.has(outbox)) return;
+    const dir = this.owedDir(outbox);
     let names: string[] = [];
-    try { names = await fsPromises.readdir(join(outbox, '.owed')); } catch { names = []; }
+    try { names = await fsPromises.readdir(dir); } catch { names = []; }
     this.stopIfDisposed();
     for (const n of names) {
-      const owed = join(outbox, '.owed', n);
-      let rec: { dest: string; fp: string | null; notice: HiveMessage } | null = null;
-      try { rec = JSON.parse(await fsPromises.readFile(owed, 'utf8')); } catch { rec = null; }
-      this.stopIfDisposed();
-      if (rec && rec.fp !== null && this.outboxFingerprint(join(outbox, rec.dest)) === rec.fp) {
-        const notice = rec.notice;
-        const notified = await this.runRouteAsync(this.deliverSteps(notice, id));
-        this.emitMessage(notice, notified ? [id] : []);
-        this.appendLog({ kind: 'outbox-owed-notice', from: id, file: n, notified, noticeId: notice.id });
+      const owed = join(dir, n);
+      try {
+        const notice = await this.owedNoticeOf(id, outbox, n, owed);
+        if (notice) {
+          const notified = await this.runRouteAsync(this.deliverSteps(notice, id));
+          this.emitMessage(notice, notified ? [id] : []);
+          this.appendLog({ kind: 'outbox-owed-notice', from: id, file: n, notified, noticeId: notice.id });
+        }
+      } catch (error) {
+        if (error instanceof HiveDisposedError) throw error;
+        this.stopIfDisposed();
+        this.appendLog({ kind: 'outbox-owed-failed', from: id, file: n, error: String(error) });
       }
       await this.dropOwedNotice(owed);
     }
@@ -4156,8 +4231,8 @@ export class HiveManager {
     detail: string,
     error: unknown
   ): Promise<boolean> {
-    const owedNotice = this.normalize({ to: from, act: 'inform', subject: `[outbox rejected — ${detail}] ${file}`, body: `The hive router rejected this outbox file: ${detail}. It was archived as bad-${file}; rewrite and resend it if it is still needed.` }, 'system');
-    const owed = await this.writeOwedNotice(outbox, file, join('.sent', `bad-${file}`), owedNotice);
+    const owedNotice = this.rejectedNotice(from, file, detail, true);
+    const owed = await this.writeOwedNotice(outbox, file, { kind: 'rejected', id: owedNotice.id, detail });
     let archived = false;
     try {
       await fsPromises.rename(full, join(outbox, '.sent', `bad-${file}`));
@@ -4168,9 +4243,8 @@ export class HiveManager {
       this.stopIfDisposed();
       this.appendLog({ kind: 'outbox-reject-archive-failed', from, file, reason, detail, error: String(archiveError) });
     }
-    if (!archived) await this.dropOwedNotice(owed);
     const done = await this.runRouteAsync(this.rejectOutboxFileSteps(full, from, file, reason, detail, error, archived, archived ? owedNotice : undefined));
-    if (archived) await this.dropOwedNotice(owed);
+    await this.dropOwedNotice(owed);
     return done;
   }
   private *rejectOutboxFileSteps(
@@ -4183,12 +4257,7 @@ export class HiveManager {
     archived: boolean,
     given?: HiveMessage
   ): RouteSteps<boolean> {
-    const notice = given ?? this.normalize({
-      to: from,
-      act: 'inform',
-      subject: `[outbox rejected — ${detail}] ${file}`,
-      body: `The hive router rejected this outbox file: ${detail}. It${archived ? ' was archived' : ' could not be archived yet'} as bad-${file}; rewrite and resend it if it is still needed.`
-    }, 'system');
+    const notice = given ?? this.rejectedNotice(from, file, detail, archived);
     const notified = yield* this.deliverSteps(notice, from);
     this.emitMessage(notice, notified ? [from] : []);
     this.appendLog({ kind: 'outbox-rejected', from, file, reason, detail, error: String(error), notified, archived });
@@ -4508,21 +4577,13 @@ export class HiveManager {
             const keptName = `${f}.duplicate-${outboxDedupClock.now()}`;
             let kept: string | null = keptName;
             const firstAt = new Date(prior.ts).toISOString();
-            // Jim M1: never silent. Tell the sender, as a rejection does: an intended identical repeat
-            // must be resent with changed text, and "it vanished from outbox/" is answered at its source.
-            const notice = this.normalize({
-              to: id,
-              act: 'inform',
-              in_reply_to: null,
-              subject: `[duplicate not delivered] ${f}`,
-              body: `The hive router did not deliver ${f}: it repeats ${prior.id} (delivered ${firstAt}) exactly (same to, act, reply-to, subject and body, within ${OUTBOX_DEDUP_WINDOW_MS / 60_000} minutes). The first one WAS delivered: a file gone from outbox/ was delivered (it moves to outbox/.sent/). This repeat is kept as outbox/.sent/${kept ?? f}. To send it again on purpose, change its text.`
-            }, 'system');
-            const owed = await this.writeOwedNotice(outbox, f, join('.sent', keptName), notice);
+            const notice = this.duplicateNotice(id, f, prior.id, firstAt, keptName);
+            const owed = await this.writeOwedNotice(outbox, f, { kind: 'duplicate', id: notice.id, kept: keptName, priorId: prior.id, firstAt });
             kept = await this.archiveDuplicateOutbox(outbox, full, id, f, keptName);
-            if (kept === null) { await this.dropOwedNotice(owed); notice.body = notice.body.replace(`outbox/.sent/${keptName}`, `outbox/.sent/${f}`); }
+            if (kept === null) notice.body = notice.body.replace(`outbox/.sent/${keptName}`, `outbox/.sent/${f}`);
             const notified = await this.runRouteAsync(this.deliverSteps(notice, id));
             this.emitMessage(notice, notified ? [id] : []);
-            if (kept !== null) await this.dropOwedNotice(owed);
+            await this.dropOwedNotice(owed);
             this.appendLog({ kind: 'outbox-duplicate', from: id, to: msg.to, act: msg.act, file: f, firstId: prior.id, duplicateId: msg.id, firstAt, notified, noticeId: notice.id });
             continue;
           }
