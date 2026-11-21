@@ -574,6 +574,17 @@ test('LIVE: a shell that joins the job after the kill time is still killed once 
   assertFreed(r, 'late join');
 });
 
+// FLAKE-LAG197-KILL-NONE-LISTED-108 (2nd): a single list can miss a child that has not spawned yet. The body's
+// second command (`sleep 30`) starts 2 s in; the list at 1.5 s sees the shell and the first `sleep` only, and the
+// kill tool is slow (o.slowKill), so the shell is still alive, spawns the 30 s child, and only then is killed.
+// That child was never listed, so it kept the job (and the slot) for its 30 s ("not freed 6 s after").
+test('LIVE: a child that spawns after the job was listed is killed too', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
+  const r = await liveRelease(t, { body: 'sleep 2; sleep 30', kill: 1_500, slowKill: 3_000 });
+  t.diagnostic(`late child: ran ${r.runMs} ms, held ${r.heldMs} ms, freed ${r.lagMs} ms after the exit; shell exit code ${r.code}, signal ${r.signal}, ${r.kills.length} killed (${killsText(r)}); lists: ${listsText(r)}`);
+  assertKilled(r, 'late child');
+  assertFreed(r, 'late child');
+});
+
 test('the killed check fails a shell that ran out on its own, and one nothing was killed in', () => {
   const kills = [{ pid: 1, startedAt: 1, endedAt: 2 }];
   assert.doesNotThrow(() => assertKilled({ code: KILLED_EXIT, signal: null, kills }, 'x'));
