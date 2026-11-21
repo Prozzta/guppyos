@@ -91,7 +91,7 @@ test('PTY-CONHOST-ORPHAN: the console host of a PTY ends when its owner dies abr
     const hosts = childrenOf(rows, ownerRec).filter((r) => HOST_NAME.test(r.name));
     assert.equal(hosts.length, 1, `the owner has one console host while alive: ${JSON.stringify(childrenOf(rows, ownerRec))}`);
     const host = hosts[0];
-    const client = rows.find((r) => r.pid === st.root && r.ppid === ownerRec.pid);
+    const client = childrenOf(rows, ownerRec).find((r) => r.pid === st.root); // own-procs' birth-checked children
     assert.ok(client && /^cmd\.exe$/i.test(client.name), `the PTY root is the live cmd.exe client: ${JSON.stringify(client)}`);
     const clientTree = [client, ...treeOf(rows, client)];
     recs.push(host, ...clientTree);
