@@ -590,6 +590,7 @@ function mutatedText(file, edits, tag) {
 
 const KEEP_ON_NULL = '    if (!gone && ++this.unanswered < HEAVY_JOB_UNANSWERED_DEAD) return null;\n';
 const LOST_ROW = "    this.log({ action: 'lost', job: j.id, agentId: j.agentId, why });\n";
+const CHANNEL_GUARD = '    if (this.disposed) return null;\n';
 const MUTANTS = [
   // The defect itself, put back: one unanswered request closes the helper.
   { name: 'one unanswered request closes the helper (the job that ends)', edits: [[KEEP_ON_NULL, '']], killer: 'endsAfterUnanswered', dies: /A JOB THAT ENDED IS REPORTED EVEN AFTER ONE REQUEST WENT UNANSWERED/ },
@@ -604,7 +605,13 @@ const MUTANTS = [
   { name: "the confirm reads 'no job' as says nothing", edits: [["    if (this.noJob(r, j.id)) { this.lose(j, 'no-job'); return; }\n", '']], killer: 'noJob', dies: /A CONFIRM ANSWERED NO JOB LETS THE JOB GO/ },
   { name: "any 'no job' error drops the job asked about", edits: [['r.error === `no job ${id}`;', "String(r.error).startsWith('no job ');"]], killer: 'noJob', dies: /ONLY THE HELPER'S ANSWER ABOUT THIS JOB LETS IT GO/ },
   { name: 'an unanswered create is not followed by a close', edits: [['    if (r === null && ch !== null && this.ch === ch) void this.req(`close ${id}`);\n', '']], killer: 'nullCreate', dies: /AN UNANSWERED CREATE IS FOLLOWED BY A CLOSE OF THAT JOB/ },
-  { name: 'a create answered by a replaced helper is held', edits: [['    const held = r?.ok === true && ch !== null && this.ch === ch;', '    const held = r?.ok === true && ch !== null;']], killer: 'replacedCreate', dies: /A CREATE ANSWERED AFTER ITS HELPER WAS REPLACED IS NOT HELD/ }
+  { name: 'a create answered by a replaced helper is held', edits: [['    const held = r?.ok === true && ch !== null && this.ch === ch;', '    const held = r?.ok === true && ch !== null;']], killer: 'replacedCreate', dies: /A CREATE ANSWERED AFTER ITS HELPER WAS REPLACED IS NOT HELD/ },
+  // HEAVYJOBS-DISPOSE-RESPAWNS-SERVE-108. The defect itself, put back: channel() starts a helper after dispose.
+  { name: 'channel() starts a helper after dispose (poll in flight)', edits: [[CHANNEL_GUARD, '']], killer: 'disposePollInFlight', dies: /NO SERVE HELPER IS STARTED BY A POLL IN FLIGHT AT DISPOSE/ },
+  { name: 'channel() starts a helper after dispose (late notice)', edits: [[CHANNEL_GUARD, '']], killer: 'disposeThenNotice', dies: /NO SERVE HELPER IS STARTED BY AN EXIT NOTICE AFTER DISPOSE/ },
+  { name: 'channel() starts a helper after dispose (begin)', edits: [[CHANNEL_GUARD, '']], killer: 'disposeThenBegin', dies: /NO SERVE HELPER IS STARTED BY A BEGIN AFTER DISPOSE/ },
+  { name: 'dispose() does not set the flag', edits: [['dispose(): void { this.disposed = true; ', 'dispose(): void { ']], killer: 'disposePollInFlight', dies: /NO SERVE HELPER IS STARTED BY A POLL IN FLIGHT AT DISPOSE/ },
+  { name: 'arm() arms the poll timer after dispose', edits: [['    if (this.disposed || this.timer || !this.jobs.size) return;', '    if (this.timer || !this.jobs.size) return;']], killer: 'disposeThenArm', dies: /THE POLL TIMER IS NOT ARMED AGAIN AFTER DISPOSE/ }
 ];
 
 test('MUTANT CENSUS: every mutant applies once and dies at the assertion that names its guarantee', async (t) => {

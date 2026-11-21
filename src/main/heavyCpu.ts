@@ -202,6 +202,9 @@ export class HeavyJobs {
   /** Requests in a row the current helper did not answer. */
   private unanswered = 0;
   private timer: unknown = null;
+  /** HEAVYJOBS-DISPOSE-RESPAWNS-SERVE-108: set by dispose(). From then on no helper is started and
+   *  the poll timer is not armed, whatever is still in flight or arrives late. */
+  private disposed = false;
   private readonly now: () => number;
 
   constructor(private readonly d: HeavyJobsDeps) {
@@ -211,6 +214,7 @@ export class HeavyJobs {
   private log(row: Record<string, unknown>): void { try { this.d.log?.({ kind: 'heavy-cpu', ...row }); } catch { /* best effort */ } }
 
   private channel(): HeavyJobChannel | null {
+    if (this.disposed) return null;
     if (this.ch) return this.ch;
     const exe = this.d.exe();
     if (!exe) return null;
@@ -402,7 +406,7 @@ export class HeavyJobs {
   ids(): string[] { return [...this.jobs.keys()]; }
 
   private arm(): void {
-    if (this.timer || !this.jobs.size) return;
+    if (this.disposed || this.timer || !this.jobs.size) return;
     const si = this.d.setInterval ?? ((fn: () => void, ms: number) => { const t = setInterval(fn, ms); t.unref?.(); return t; });
     this.timer = si(() => { void this.poll(); }, HEAVY_JOB_POLL_MS);
   }
@@ -413,5 +417,5 @@ export class HeavyJobs {
     this.timer = null;
   }
 
-  dispose(): void { this.disarm(); for (const j of this.jobs.values()) this.cancelConfirm(j); this.ch?.close(); this.ch = null; }
+  dispose(): void { this.disposed = true; this.disarm(); for (const j of this.jobs.values()) this.cancelConfirm(j); this.ch?.close(); this.ch = null; }
 }
