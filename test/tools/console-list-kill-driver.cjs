@@ -16,6 +16,12 @@
  *   root       the terminal's own child.
  *   helper     node-pty's list helper (a fork of the driver, which lists itself).
  *
+ * THE DRIVER'S OWN CLEANUP NAMES NO DEAD PID: it ends a root by pid only while its own hold on that
+ * root (procIdentity holdRoot, taken at the spawn) says the root runs. A root that is gone is not
+ * named at all: its pid number may be another process's by then, anybody's on the machine. With no
+ * hold (no addon) no pid is named and the case says so. The bystander is ended through its child
+ * handle, never by number.
+ *
  * usage: node console-list-kill-driver.cjs <outfile> <pid of the test file>
  */
 const fs = require('node:fs');
@@ -101,13 +107,34 @@ ident.holdRoot = function holdRoot(...a) {
   };
 };
 
+/**
+ * The driver's own holds, one per root, taken with the real holdRoot (a duplicate of node-pty's
+ * handle: the harness's and the app's holds are not touched). Null where nothing can hold.
+ */
+const holds = new Map();
+const holdOwn = (proc) => { holds.set(proc.pid, realHoldRoot(proc.pid, process.platform, ident.rootHandoff(proc))); };
+/** The one place a cleanup kill is sent. What the hold says AT the kill is written down, apart from the guard. */
+const realEnd = (c, pid, hold) => {
+  c.cleanupKills = (c.cleanupKills || []).concat(hold.alive() ? 'held, running' : 'DEAD PID');
+  try { realKill(pid); } catch { /* gone */ }
+};
+/** Ends a root the driver started, only while the driver's hold says it runs. `keep`: more kills follow. */
+const endRoot = (c, root, keep = false) => {
+  const hold = holds.get(root);
+  if (!hold) { c.cleanup = 'no hold: no pid named'; return; }
+  if (hold.alive()) { realEnd(c, root, hold); c.cleanup = 'ended while held'; } else if (!c.cleanup) c.cleanup = 'gone: no pid named';
+  if (!keep) { hold.release(); holds.delete(root); }
+};
+let bystanderProc = null;
+
 (async () => {
   // After the wrap above: pty-child.cjs takes holdRoot from the module when it loads.
   const { childBytes, electronExe } = require('./pty-child.cjs');
   const { consoleNode } = require('./console-node.cjs');
   const { PtyManager } = require('../load-ts.cjs')('src/main/pty.ts');
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'clk-driver-'));
-  const bystander = realSpawn.call(cp, process.execPath, ['-e', IDLE], { stdio: 'inherit', env: nodeEnv(process.env) }).pid;
+  bystanderProc = realSpawn.call(cp, process.execPath, ['-e', IDLE], { stdio: 'inherit', env: nodeEnv(process.env) });
+  const bystander = bystanderProc.pid;
   out.bystander = bystander;
   const role = (pid, root) => (pid === process.pid ? 'driver' : pid === root ? 'root' : pid === bystander ? 'bystander'
     : pid === outerPid ? 'TEST FILE' : forks.includes(pid) ? 'helper' : `other(${pid})`);
@@ -130,8 +157,8 @@ ident.holdRoot = function holdRoot(...a) {
     // Control that does not depend on the clock: the kills were only recorded, so a root that was
     // alive at the kill still is. Whose console is it on now?
     c.consoleAfter = roles(await consoleOf(root), root);
+    endRoot(c, root);
     save();
-    try { realKill(root); } catch { /* gone */ }
     live = null;
   };
   /** `atKill` runs as node-pty's kill is entered, before anything is closed or listed. */
@@ -162,6 +189,7 @@ ident.holdRoot = function holdRoot(...a) {
         onSpawn: (proc) => {
           root = live = proc.pid;
           own = { root, st, c };
+          holdOwn(proc);
           watch(proc, st, () => { c.upAtKill = fs.existsSync(marker); c.aliveAtKill = alive(root); });
         }
       });
@@ -190,6 +218,7 @@ ident.holdRoot = function holdRoot(...a) {
     if (!r.ok) { save(); return; }
     const s = m.sessions.get(key);
     const root = live = s.proc.pid;
+    holdOwn(s.proc);
     c.hold = Boolean(s.hold);
     for (let i = 0; i < 2400 && !fs.existsSync(marker); i++) await sleep(25);
     c.up = fs.existsSync(marker);
@@ -203,7 +232,7 @@ ident.holdRoot = function holdRoot(...a) {
       // is another process's now, one that lives on another console (here: the bystander's).
       // A pid cannot be recycled to order, so the number node-pty holds is pointed at the stranger.
       if (s.hold) { s.hold.release(); s.hold = null; }
-      realKill(root);
+      endRoot(c, root, true);
       // node-pty keeps the number twice: the terminal's (what PtyManager reads) and the agent's (what its kill lists).
       s.proc._pid = bystander;
       s.proc._agent._innerPid = bystander;
@@ -229,12 +258,13 @@ ident.holdRoot = function holdRoot(...a) {
     c.spawn = r.ok ? 'ok' : String(r.error);
     if (!r.ok) { save(); return; }
     const root = live = m.sessions.get(key).proc.pid;
+    holdOwn(m.sessions.get(key).proc);
     for (let i = 0; i < 2400 && !fs.existsSync(marker); i++) await sleep(25);
     c.up = fs.existsSync(marker);
     c.consoleBefore = roles(await consoleOf(root), root);
-    save();
     m.kill(key);
-    try { realKill(root); } catch { /* gone */ }
+    endRoot(c, root);
+    save();
     live = null;
   };
   await probe('guiProbe', gui);
@@ -242,13 +272,15 @@ ident.holdRoot = function holdRoot(...a) {
   await product('consoleKill', { ...con, endsNothing: false });
   await product('recycledPid', { ...con, endsNothing: true, recycled: true });
 
-  try { realKill(bystander); } catch { /* gone */ }
+  bystanderProc.kill();
   out.done = true;
   save();
   process.exit(0);
 })().catch((e) => {
   out.failed = String((e && e.stack) || e);
+  // By handle and by hold only, as everywhere in this file: a pid number alone is never named.
+  try { if (bystanderProc) bystanderProc.kill(); } catch { /* gone */ }
+  try { if (live) endRoot(out.failedCleanup = {}, live); } catch { /* nothing to hold with */ }
   save();
-  for (const pid of [out.bystander, live]) { try { if (pid) realKill(pid); } catch { /* gone */ } }
   process.exit(1);
 });
