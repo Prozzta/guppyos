@@ -215,7 +215,6 @@ test('runTests runs real node --test under TAP: pass, fail and a hang give SURVI
   try {
     fs.writeFileSync(path.join(dir, 'pass.test.cjs'), "require('node:test')('fine', () => {});\n");
     fs.writeFileSync(path.join(dir, 'fail.test.cjs'), "require('node:test')('breaks here', () => { throw new Error('x'); });\n");
-    fs.writeFileSync(path.join(dir, 'hang.test.cjs'), `const fs = require('node:fs'); const { spawn } = require('node:child_process');\nconst survivor = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { cwd: process.cwd(), detached: true, stdio: 'ignore' }); survivor.unref();\nfs.writeFileSync(${JSON.stringify(hangPid)}, \`${'${survivor.pid}'} ${'${Date.now()}'}\`);\nrequire('node:test')('never ends', () => new Promise(() => setInterval(() => {}, 1000)));\n`);
     const p = runTests(dir, ['pass.test.cjs'], { timeout: 120_000 });
     assert.equal(verdict(p), 'SURVIVED', p.why ?? p.stdout);
     assert.equal(p.pass, 1);
@@ -224,20 +223,49 @@ test('runTests runs real node --test under TAP: pass, fail and a hang give SURVI
     assert.deepEqual(f.failed, ['breaks here']);
     assert.match(f.failures, /^not ok \d+ - breaks here/m);
     assert.match(f.failures, /error: 'x'/, 'the real failing YAML (assertion message) is in failures');
-    const h = runTests(dir, ['hang.test.cjs'], { timeout: 3_000 });
+    const h = hangRun(dir, hangPid);
     assert.equal(verdict(h), 'NO-RESULT', h.stdout);
     assert.ok(fs.existsSync(hangPid), 'the hung node --test worker recorded its owned pid');
     assert.throws(() => runTests(dir, ['pass.test.cjs'], { args: ['--test-reporter=spec'] }), /picks the reporter/);
   } finally {
-    if (fs.existsSync(hangPid)) {
-      const rec = own.readRec(hangPid, path.basename(process.execPath));
-      if (process.platform === 'win32') assert.ok(own.stillOurs(rec), 'the parentless fixture worker survives the timed-out test parent');
-      stopAndWaitForWorker(rec);
-      if (process.platform === 'win32') assert.equal(own.stillOurs(rec), null, 'fixture cleanup waited for the recorded worker to exit');
-    }
-    removeFixture(dir);
+    stopHangFixture(dir, hangPid);
   }
 });
+
+// FLAKE-MUTANT-RUNNERS-TAP-HUNG-WORKER-PID-108: the hang run's kill and the worker's pid record had no order.
+// The kill ran on a clock started at the runner's spawn; the record waits for the runner to start, ask for its
+// heavy lease and start the worker. Under suite load the start alone outlasts the clock (the fc2fc215 suite,
+// 02:29-02:57Z). The slow start is modelled here: a preload holds the RUNNER, not its worker, for SLOW_START_MS.
+const SLOW_START_MS = 4_000;
+test('HUNG-WORKER-PID: a runner that starts late still records the hung worker\'s owned pid (slow start modelled)', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mutant-runners-slow-'));
+  const hangPid = path.join(dir, 'hang.pid');
+  try {
+    const slow = path.join(dir, 'slow-start.cjs');
+    fs.writeFileSync(slow, `if (!process.env.NODE_TEST_CONTEXT) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${SLOW_START_MS});\n`);
+    const started = Date.now();
+    const h = hangRun(dir, hangPid, { args: ['--require', slow] });
+    assert.equal(verdict(h), 'NO-RESULT', h.stdout);
+    assert.ok(fs.existsSync(hangPid), `the hung node --test worker recorded its owned pid (the run ended after ${Date.now() - started} ms: ${h.why})`);
+  } finally {
+    stopHangFixture(dir, hangPid);
+  }
+});
+
+/** The hang run: a node --test worker starts a detached child, records its pid, then never ends. */
+function hangRun(dir, hangPid, { args = [] } = {}) {
+  fs.writeFileSync(path.join(dir, 'hang.test.cjs'), `const fs = require('node:fs'); const { spawn } = require('node:child_process');\nconst survivor = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { cwd: process.cwd(), detached: true, stdio: 'ignore' }); survivor.unref();\nfs.writeFileSync(${JSON.stringify(hangPid)}, \`${'${survivor.pid}'} ${'${Date.now()}'}\`);\nrequire('node:test')('never ends', () => new Promise(() => setInterval(() => {}, 1000)));\n`);
+  return runTests(dir, ['hang.test.cjs'], { timeout: 3_000, args });
+}
+function stopHangFixture(dir, hangPid) {
+  if (fs.existsSync(hangPid)) {
+    const rec = own.readRec(hangPid, path.basename(process.execPath));
+    if (process.platform === 'win32') assert.ok(own.stillOurs(rec), 'the parentless fixture worker survives the timed-out test parent');
+    stopAndWaitForWorker(rec);
+    if (process.platform === 'win32') assert.equal(own.stillOurs(rec), null, 'fixture cleanup waited for the recorded worker to exit');
+  }
+  removeFixture(dir);
+}
 
 test('fixture cleanup waits through a cwd-holder EPERM (MUTANT: one attempt fails loudly)', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mutant-runners-cwd-'));
