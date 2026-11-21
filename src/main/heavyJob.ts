@@ -776,6 +776,22 @@ function jsTokens(src: string): JsTok[] {
   return out;
 }
 
+/**
+ * HEAVY-LOCK-SH-SCRIPT-NOT-DENIED-108: inline code with a loop that never ends on its own:
+ * `for(;;)`, `while(true)`, `while(1)`. This is the CPU burner of a load script (`node -e "for(;;){}" &`).
+ * The check reads tokens, so a string or a comment that names such a loop is not one.
+ */
+function endlessLoop(code: string): boolean {
+  const ts = jsTokens(code);
+  const v = (k: number): string => (ts[k] && ts[k].t !== 'str' ? ts[k].v : '');
+  for (let k = 0; k < ts.length; k++) {
+    if (ts[k].t !== 'id' || v(k + 1) !== '(') continue;
+    if (ts[k].v === 'for' && v(k + 2) === ';' && v(k + 3) === ';' && v(k + 4) === ')') return true;
+    if (ts[k].v === 'while' && (v(k + 2) === 'true' || v(k + 2) === '1') && v(k + 3) === ')') return true;
+  }
+  return false;
+}
+
 /** `a/lib/../util.js` -> `a/util.js` (forward slashes; a leading `..` that cannot be removed stays). */
 function normPath(p: string): string {
   const out: string[] = [];
@@ -1023,6 +1039,8 @@ function classifyNodeCode(prog0: NodeProgram, ctx: ClassifyCtx, anyName = false,
   if (prog.inline !== null) {
     const s = scanJs(prog.inline);
     if (s.marker) return hit(s.marker, '-e');
+    // HEAVY-LOCK-SH-SCRIPT-NOT-DENIED-108: code that never ends on its own is a CPU burner.
+    if (endlessLoop(prog.inline)) return { heavy: true, kind: 'bench', exclusive: true, why: 'node -e (an endless loop: a CPU burner)' };
     const sp = spawnedHeavy(s.spawns, ctx);
     return sp ? hit(`spawns ${sp}`, '-e') : { heavy: false };
   }
@@ -1573,6 +1591,9 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
   const ops = segs.map((g) => words(g.replace(/\s&$/, ''), d).filter((w) => HEREDOC_OP.test(w)).length);
   const plan: Array<{ seg: string; op: number; looped?: boolean }> | HeavyClass = d === 'cmd' ? segs.map((seg, si) => ({ seg, op: ops[si] })) : loopPlan(segs, ops, d);
   if (!Array.isArray(plan)) return plan;
+  // HEAVY-LOCK-SH-SCRIPT-NOT-DENIED-108: a loop that starts 4 or more background processes is load.
+  const bgLoad = d === 'sh' ? bgLoop(segs, d) : null;
+  if (bgLoad) return bgLoad;
   // A null entry: a heredoc-made file that a later segment rewrote by other means (cp, mv, sed -i,
   // a `>` that is not a heredoc's), so its text at run time is unknown and it reads as unreadable
   // (S1). A file on disk edited that way is still read as it is now (HEAVY-LOCK-SHAPES-189).
@@ -1851,6 +1872,45 @@ function loopPlan(segs: string[], ops: number[], d: ShellDialect, mult = 1): Arr
     si = end - 1;   // the body is planned; `done` (if any) comes next
   }
   return out;
+}
+
+/**
+ * HEAVY-LOCK-SH-SCRIPT-NOT-DENIED-108: a shell loop whose body backgrounds a process (`do x &`)
+ * starts one process per round, and they all run at once. That makes it a load generator.
+ * Its rounds:
+ * - a literal list: one per word, or a `{a..b}` range's size;
+ * - a glob, a computed list, a C-style for, while or until: unbounded.
+ * BG_LOOP_MIN or more backgrounded processes in all make an exclusive bench, whatever each one runs.
+ * A loop that is itself backgrounded (`done &`) starts one process, so it does not count.
+ */
+const BG_LOOP_MIN = 4;
+function bgLoop(segs: string[], d: ShellDialect): HeavyClass | null {
+  const lead = (s: string): string[] => words(s.replace(/\s&$/, ''), d).map((w) => w.replace(/^\(+/, ''))
+    .filter((w) => w && !['do', 'then', 'else', 'elif', '!', '{'].includes(w));
+  const opens = (w: string | undefined): boolean => w === 'for' || w === 'while' || w === 'until';
+  for (let si = 0; si < segs.length; si++) {
+    const head = lead(segs[si]);
+    if (!opens(head[0])) continue;
+    let depth = 1; let bg = 0;
+    for (let end = si + 1; end < segs.length; end++) {
+      const w = lead(segs[end]);
+      if (opens(w[0])) depth++;
+      if (w[0] === 'done' && --depth === 0) break;
+      if (/\s&$/.test(segs[end])) bg++;
+    }
+    if (!bg) continue;
+    let rounds = Infinity;
+    if (head[0] === 'for' && head[2] === 'in' && /^[A-Za-z_][A-Za-z0-9_]*$/.test(head[1] ?? '')) {
+      rounds = 0;
+      for (const w of head.slice(3)) {
+        const r = /^\{(-?\d+)\.\.(-?\d+)\}$/.exec(w);
+        rounds += r ? Math.abs(Number(r[2]) - Number(r[1])) + 1 : /[*?[{$`]/.test(w) ? Infinity : 1;
+      }
+    }
+    const n = bg * rounds;
+    if (n >= BG_LOOP_MIN) return { heavy: true, kind: 'bench', exclusive: true, why: `a shell loop that backgrounds ${n === Infinity ? 'an unbounded number of' : n} processes (a load generator)` };
+  }
+  return null;
 }
 
 /** The number of segments loopPlan plans for `cmd` (sh), or -1 when it settles the command itself (exported for tests). */
