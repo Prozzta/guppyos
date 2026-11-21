@@ -25,6 +25,7 @@ const path = require('node:path');
 const pty = require('node-pty');
 const loadTs = require('../load-ts.cjs');
 const { armEarlyKill } = loadTs('src/main/pty.ts');
+const { holdRoot, rootHandoff } = loadTs('src/main/procIdentity.ts');
 
 /** From the kill to the conout worker's exit node-pty takes 1 s (its flush interval). */
 const TEARDOWN_CAP_MS = 8000;
@@ -69,6 +70,11 @@ function childBytes(input, { file = process.execPath, env = process.env, onSpawn
       useConptyDll: process.platform === 'win32' && !inbox
     });
     let childExited = false;
+    // Inbox path only: held in the same turn as the spawn, as the app holds every root
+    // (PTY-KILL-PID-IDENTITY). While it is held the pid is this child's and nobody else's. Null
+    // with no addon: the by-pid end then goes by node-pty's exit report, as the app falls back.
+    const hold = inbox ? holdRoot(proc.pid, process.platform, rootHandoff(proc)) : null;
+    const releaseHold = () => { if (hold) hold.release(); };
     // As the app does for every terminal (PtyManager.spawn): node-pty alone holds kill() back until
     // the terminal's first data chunk, and a child that never prints is then never killed.
     if (process.platform === 'win32') assert.equal(armEarlyKill(proc), true, 'armEarlyKill fits this node-pty');
@@ -89,9 +95,12 @@ function childBytes(input, { file = process.execPath, env = process.env, onSpawn
       // on the console of the child's pid. An electron.exe child is on THIS test file's console, the
       // one the runner shares between its files: a child still alive here took the sibling files
       // with it. So the child is ended by its pid first; a child that is gone has no console to list.
-      if (inbox && !childExited) { try { process.kill(proc.pid); } catch { /* gone already */ } }
+      // The pid is named only while the hold says the child runs.
+      if (inbox && (hold ? hold.alive() : !childExited)) { try { process.kill(proc.pid); } catch { /* gone already */ } }
       try { proc.kill(); } catch { /* child already exited */ }
-      if (!workerGone) { error ? reject(error) : resolve(value); return; }
+      // The hold goes after the last kill that names the pid: node-pty's kill lists the console
+      // from a helper it forks, so not before the teardown has settled.
+      if (!workerGone) { releaseHold(); error ? reject(error) : resolve(value); return; }
       // Settle only once the terminal is torn down: a kill that did not run fails HERE, by name,
       // instead of leaving a thread that keeps the test file from ending.
       let watchdog;
@@ -103,7 +112,7 @@ function childBytes(input, { file = process.execPath, env = process.env, onSpawn
       })]).then(
         () => { error ? reject(error) : resolve(value); },
         (stuck) => worker.terminate().then(() => reject(stuck))   // named red, and the file still ends
-      ).finally(() => clearTimeout(watchdog));
+      ).finally(() => { clearTimeout(watchdog); releaseHold(); });
     }
     proc.onData((data) => {
       output += data;

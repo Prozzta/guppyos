@@ -76,7 +76,33 @@ function consoleOf(pid) {
   });
 }
 
+/**
+ * The harness's hold on its child (procIdentity holdRoot), seen from outside: was one taken, was it
+ * asked before the kill, when was it released. `saysGone` answers alive() as false for one case: a
+ * child that the hold says has exited. Off (null) outside the harness cases: the app's own holds
+ * pass through untouched.
+ */
+let holdSeen = null;
+const ident = require('../load-ts.cjs')('src/main/procIdentity.ts');
+const realHoldRoot = ident.holdRoot;
+ident.holdRoot = function holdRoot(...a) {
+  const h = realHoldRoot.apply(this, a);
+  const seen = holdSeen;
+  if (!seen) return h;
+  seen.c.holdTaken = Boolean(h);
+  if (!h) return h;
+  return {
+    alive: () => {
+      const v = seen.saysGone ? false : h.alive();
+      if (!seen.st.closed) seen.c.holdAskedBeforeKill = v;
+      return v;
+    },
+    release: () => { if (seen.c.holdReleasedAfterKill === undefined) seen.c.holdReleasedAfterKill = seen.st.closed; h.release(); }
+  };
+};
+
 (async () => {
+  // After the wrap above: pty-child.cjs takes holdRoot from the module when it loads.
   const { childBytes, electronExe } = require('./pty-child.cjs');
   const { consoleNode } = require('./console-node.cjs');
   const { PtyManager } = require('../load-ts.cjs')('src/main/pty.ts');
@@ -123,11 +149,12 @@ function consoleOf(pid) {
   // `late` pushes the child's own 3 s exit out, so it is ALIVE when childBytes gives up at 5 s: what a
   // loaded machine does to a child that starts slowly.
   const late = 'const st = setTimeout; globalThis.setTimeout = (f) => st(f, 600000);';
-  const harness = async (key, prelude) => {
+  const harness = async (key, prelude, saysGone = false) => {
     named = []; sweeps = 0; sweepEndsNothing = false;
     const c = out.cases[key] = {};
     const marker = path.join(tmp, `${key}.up`);
     const st = { closed: false, sweep: null };
+    holdSeen = { c, st, saysGone };
     let root = null;
     try {
       await childBytes(Buffer.from('x'), {
@@ -142,8 +169,12 @@ function consoleOf(pid) {
     } catch (e) { c.result = String(e && e.message).slice(0, 160); }
     await record(c, root, st);
     own = null;
+    holdSeen = null;
   };
   await harness('harnessAlive', late);
+  // The same live child, but the hold answers "exited": the harness must then name no pid itself.
+  // (node-pty's kill then lists the console, which is only recorded here.)
+  await harness('harnessHoldSaysGone', late, true);
   // Gone at once, as soon as it has run a line: the pin does not race the child's start against the 5 s.
   await harness('harnessGone', 'process.exit(2);');
 
