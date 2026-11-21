@@ -739,7 +739,10 @@ if (!WIN) {
   // program, so such a root's output never reaches the terminal and a cell that waits for it only
   // times out. Under the Electron leg process.execPath is electron.exe, which is one (also when it
   // runs as Node). Every root is read before it is spawned, so the red names the program.
-  const { peSubsystem } = require('./tools/console-node.cjs');
+  const { consoleNode, peSubsystem } = require('./tools/console-node.cjs');
+  // The root of every real terminal here: a console-subsystem node.exe, found and checked by
+  // consoleNode() (this process on the Node leg; never an unchecked process.execPath).
+  const NODE = consoleNode().file;
   const subsystems = new Map();
   const assertConsoleRoot = (file) => {
     if (!subsystems.has(file)) subsystems.set(file, peSubsystem(file));
@@ -779,7 +782,7 @@ if (!WIN) {
   }
   /** A real terminal whose root exits at once; returns with the root dead and nothing told to JS. */
   function spawnDeadRoot() {
-    const proc = realPtySpawn(process.execPath, [path.join(DIR, 'gone.js')], { cols: 80, rows: 24, cwd: DIR, useConpty: true });
+    const proc = realPtySpawn(NODE, [path.join(DIR, 'gone.js')], { cols: 80, rows: 24, cwd: DIR, useConpty: true });
     // A root that printed nothing never makes its terminal "ready", and node-pty queues kill()
     // until then: the product's own arm makes dispose() below close it (PTY-EARLY-KILL-LEAK).
     assert.ok(armEarlyKill(proc, 'win32'), 'the terminal has the internals armEarlyKill needs');
@@ -817,7 +820,7 @@ if (!WIN) {
   });
 
   test('ADDON: only the handle node-pty handed over is adopted, and only for its own pid', async () => {
-    const proc = realPtySpawn(process.execPath, [path.join(DIR, 'idle.js')], { cols: 80, rows: 24, cwd: DIR, useConpty: true });
+    const proc = realPtySpawn(NODE, [path.join(DIR, 'idle.js')], { cols: 80, rows: 24, cwd: DIR, useConpty: true });
     const gone = exitOf(proc);
     try {
       let seen = '';
@@ -907,7 +910,7 @@ if (!WIN) {
         return proc;
       };
       try {
-        const r = await m.spawn({ id: 'phnh-gap', cwd: DIR, command: process.execPath, args: [path.join(DIR, 'gone.js')], cols: 80, rows: 24, env: {} }, owner);
+        const r = await m.spawn({ id: 'phnh-gap', cwd: DIR, command: NODE, args: [path.join(DIR, 'gone.js')], cols: 80, rows: 24, env: {} }, owner);
         assert.ok(r.ok, `spawn: ${r.error}`);
         assert.equal(made, 1, "the product spawned through node-pty's spawn (the fixture saw it)");
         const session = m.sessions.get('phnh-gap');
@@ -949,7 +952,7 @@ if (!WIN) {
       };
       const turns = async () => { for (let i = 0; i < 3; i++) await new Promise((resolve) => setImmediate(resolve)); };
       try {
-        const r = await m.spawn({ id: 'phnh-sweep', cwd: DIR, command: process.execPath, args: [path.join(DIR, 'idle.js')], cols: 80, rows: 24, env: {} }, owner);
+        const r = await m.spawn({ id: 'phnh-sweep', cwd: DIR, command: NODE, args: [path.join(DIR, 'idle.js')], cols: 80, rows: 24, env: {} }, owner);
         assert.ok(r.ok, `spawn: ${r.error}`);
         const session = m.sessions.get('phnh-sweep');
         assert.ok(session && session.hold, 'the terminal holds its root');
