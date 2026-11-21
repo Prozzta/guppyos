@@ -864,7 +864,8 @@ test('PIN: against the REAL test directory discovery is root tests plus only fol
   // HEAVY-LOCK-SH-SCRIPT-NOT-DENIED-108: + 1 (heavy-lock/heavy-lock-cpu-burner-108). 663 + 1 = 664 (root test/*.test.cjs 620).
   // NODEPTY-CONSOLE-LIST-KILL-SIBLINGS: + 1 (nodepty-console-list-kill). 664 + 1 = 665 (root test/*.test.cjs 621). Landed after HEAVY-LOCK-SH-SCRIPT-NOT-DENIED-108.
   // HEAVYCPU-SERVE-REQ-TIMEOUT-DROPS-ALL-JOBS-108: + 1 (heavycpu-serve-req-timeout-108). 665 + 1 = 666 (root test/*.test.cjs 622).
-  assert.equal(files.length, 666,`the focused suite must retain its pre-fold file count, got ${files.length}`);
+  // HEAVY-LOCK-FUNC-CALL-LOOP-108: + 1 (heavy-lock/heavy-lock-func-call-loop-108, a folded file). 666 + 1 = 667 (root test/*.test.cjs 622).
+  assert.equal(files.length, 667,`the focused suite must retain its pre-fold file count, got ${files.length}`);
   assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
   assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');
   assert.ok(files.includes(path.join('start-fixes-163', 'start-fixes-163-boot-submit.test.cjs')), 'the start-fixes feature folder is included');
