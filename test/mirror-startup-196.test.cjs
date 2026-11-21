@@ -160,30 +160,58 @@ test('CENSUS MUTANT: injected slice clock measures one parse, never capped-job d
 // to charge a non-CPU stall: wall time). The parse has no off-CPU path, so a stall inside a slice is the
 // thread waiting for a core, which is machine load, not mirror cost. Now the default clock is the
 // thread's own CPU: a waited slice costs (almost) nothing, a computing slice costs its CPU.
-test('MIRROR-GUARD-CPU-TIME: the default clock is the thread\'s CPU: a waited slice is not charged, a computing one is (wall-clock mutant)', () => {
-  assert.equal(typeof M.threadCpuMs, 'function', 'Node 24 / Electron 45 have process.threadCpuUsage');
+//
+// FLAKE-MIRROR-GUARD-CPU-TIME-COMPUTING-SLICE-108: the computing slice used to be sized on
+// process.threadCpuUsage, which on Windows is GetThreadTimes: a tick-sampled estimate (15.6 ms, charged
+// to whichever thread runs at the interrupt). Under load 151 "step ms" was between 127 and 188 ms of real
+// CPU (150 spins against 40 burners: min 127, p5 145, median 156, max 188), so the clock under test (the
+// cycle clock, which counts the cycles the thread really ran) read 115.4 against a 120 bar. The slice is
+// now sized on the clock under test, so it IS 121 ms of the CPU the assert judges (the product window
+// encloses the sizing window, so the reading cannot fall below it), and the step clock is kept only as an
+// independent cross-check that the clock under test is a CPU clock at the right scale: over the slice
+// the step reading must be within [0.6, 1.6] times the product reading. Measured step/true ratio
+// 156/188 = 0.83 to 156/127 = 1.23, widened by one 15.6 ms tick over 120 ms (0.13) is 0.70 to 1.36; the
+// band leaves room either side, and a clock at half scale reads a ratio of 2 and a double one 0.5.
+// The wall cap only bounds a clock that never moves (stuck at 0), which then fails the 120 assert
+// instead of hanging.
+function computingSliceRun(clock, capMs) {
   const calls = [];
   const word = new Int32Array(new SharedArrayBuffer(4));
   let mode = 'wait';
+  const step = () => { const u = process.threadCpuUsage(); return (u.user + u.system) / 1000; };
+  let stepMs = 0;
   const wb = { _innerWrite() {
     if (mode === 'wait') { Atomics.wait(word, 0, 0, 200); return; }
-    // A fixed amount of CPU, not of wall time, so a loaded machine cannot shorten it. It is sized on
-    // process.threadCpuUsage, deliberately not on the product's clock (a product clock stuck at 0 must
-    // fail here, not spin for ever). On Windows that sizing clock moves in 15.6 ms steps, so "120" of it
-    // is 120 give or take a step of real CPU (MIRROR-PARSE-ZERO-108: the cycle clock read 115.6). The
-    // slice therefore runs two steps past 120, and the assert below still asks for the full 120.
-    const cpu = () => { const u = process.threadCpuUsage(); return (u.user + u.system) / 1000; };
-    const end = cpu() + 120 + 2 * 15.625; while (cpu() < end) { /* compute */ }
+    const s0 = clock(); const st0 = step(); const w0 = performance.now();
+    while (clock() - s0 < 121 && performance.now() - w0 < capMs) { /* compute */ }
+    stepMs = step() - st0;
   } };
-  assert.equal(M.timeParse({ _core: { _writeBuffer: wb } }, (ms) => calls.push(ms)), true);
+  assert.equal(M.timeParse({ _core: { _writeBuffer: wb } }, (ms) => calls.push(ms), clock), true);
   wb._innerWrite();
   mode = 'spin';
   wb._innerWrite();
+  return { calls, stepMs };
+}
+function judgeComputingSlice({ calls, stepMs }) {
   assert.equal(calls.length, 2);
   // Windows' thread clock moves in 15.6 ms ticks: a 200 ms wait reads at most a tick or two, a wall
   // clock reads 200 or more. A slice that computes 120 ms of CPU reads at least that.
   assert.ok(calls[0] < 40, `A WAITED SLICE WAS CHARGED: ${calls[0]} ms of a 200 ms wait (wall clock?)`);
   assert.ok(calls[1] >= 120, `A COMPUTING SLICE WAS NOT CHARGED: ${calls[1]} ms of 120 ms CPU`);
+  const ratio = stepMs / calls[1];
+  assert.ok(ratio >= 0.6 && ratio <= 1.6, `THE CLOCK IS NOT AT CPU SCALE: the step clock read ${stepMs} ms against its ${calls[1]} ms (ratio ${ratio.toFixed(2)}, want 0.6 to 1.6)`);
+}
+test('MIRROR-GUARD-CPU-TIME: the default clock is the thread\'s CPU: a waited slice is not charged, a computing one is (wall-clock mutant)', () => {
+  assert.equal(typeof M.threadCpuMs, 'function', 'Node 24 / Electron 45 have process.threadCpuUsage');
+  judgeComputingSlice(computingSliceRun(M.threadCpuMs, 30000));
+});
+
+test('MIRROR-GUARD-CPU-TIME: the computing-slice judge goes red on a half-scale, a stuck and a wall clock', () => {
+  const real = M.threadCpuMs;
+  assert.equal(typeof real, 'function');
+  assert.throws(() => judgeComputingSlice(computingSliceRun(() => real() * 0.5, 30000)), /THE CLOCK IS NOT AT CPU SCALE/, 'a half-scale clock');
+  assert.throws(() => judgeComputingSlice(computingSliceRun(() => 0, 300)), /A COMPUTING SLICE WAS NOT CHARGED/, 'a clock stuck at 0 (and no hang)');
+  assert.throws(() => judgeComputingSlice(computingSliceRun(() => performance.now(), 30000)), /A WAITED SLICE WAS CHARGED/, 'a wall clock');
 });
 
 // Jim SHOULD (deb435f8): in Electron main, process.cpuUsage sums EVERY thread of the browser process
