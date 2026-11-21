@@ -51,6 +51,7 @@ let own = null;
 const SLOW_KILL_MS = 2000;
 const LATE_AFTER_LIST = "late: after node-pty's console list had answered";
 const LATE_NO_LIST = `late: ${SLOW_KILL_MS} ms after it was sent, and node-pty had asked for no console list by then`;
+const LEFT_LATE = `left its console ${SLOW_KILL_MS} ms after the harness first asked its hold (ended by the driver)`;
 const deliverLate = (o, pid, signal) => {
   const send = (when) => {
     if (o.c.killDelivered) return;
@@ -114,6 +115,7 @@ function consoleOf(pid) {
  *   'goneOnceEnded'  alive() is false from the harness's kill by pid on, while the child is in fact
  *                    still on its console: an exit that the console has not yet taken note of.
  *   'none'           no hold can be taken (no addon): holdRoot answers null.
+ * onFirstAsk, if set, runs once, at the first answer (see `leaves` at harness()).
  * holdAskedBeforeKill is the FIRST answer, the one that decides whether the pid is named: a harness
  * that then waits for the exit asks again, and those answers are not the decision.
  */
@@ -131,10 +133,20 @@ ident.holdRoot = function holdRoot(...a) {
     alive: () => {
       const v = seen.says === 'gone' ? false : seen.says === 'runs' ? true
         : seen.says === 'goneOnceEnded' && seen.c.endedByPid ? false : h.alive();
-      if (!seen.st.closed && seen.c.holdAskedBeforeKill === undefined) seen.c.holdAskedBeforeKill = v;
+      if (!seen.st.closed && seen.c.holdAskedBeforeKill === undefined) {
+        seen.c.holdAskedBeforeKill = v;
+        if (seen.onFirstAsk) seen.onFirstAsk();
+      }
       return v;
     },
-    release: () => { if (seen.c.holdReleasedAfterKill === undefined) seen.c.holdReleasedAfterKill = seen.st.closed; h.release(); }
+    release: () => {
+      if (seen.c.holdReleasedAfterKill === undefined) {
+        seen.c.holdReleasedAfterKill = seen.st.closed;
+        // The terminal's conout worker ends from node-pty's kill, or the harness ends it when it refuses the close.
+        seen.c.holdReleasedAfterWorkerExit = seen.c.workerExited === true;
+      }
+      h.release();
+    }
   };
 };
 
@@ -216,13 +228,28 @@ let bystanderProc = null;
   // `late` pushes the child's own 3 s exit out, so it is ALIVE when childBytes gives up at 5 s: what a
   // loaded machine does to a child that starts slowly.
   const late = 'const st = setTimeout; globalThis.setTimeout = (f) => st(f, 600000);';
-  const harness = async (key, prelude, { says = null, slow = false } = {}) => {
+  /**
+   * `leaves`: the child is on its console when the harness first asks its hold, and leaves it
+   * SLOW_KILL_MS later, with nothing sent by the harness: the driver ends it then, under its own
+   * hold. With says 'gone' that is a child that has exited by itself and that its console still
+   * lists for a while.
+   */
+  const harness = async (key, prelude, { says = null, slow = false, leaves = false } = {}) => {
     named = []; sweeps = 0; sweepEndsNothing = false;
     const c = out.cases[key] = {};
     const marker = path.join(tmp, `${key}.up`);
     const st = { closed: false, sweep: null, onSweep: null };
-    holdSeen = { c, st, says };
     let root = null;
+    const leaveLate = () => {
+      c.leavesArmed = true;
+      setTimeout(() => {
+        const mine = holds.get(root);
+        if (!mine || !mine.alive()) return;
+        c.leftConsole = LEFT_LATE;
+        try { realKill(root); } catch { /* gone */ }
+      }, SLOW_KILL_MS);
+    };
+    holdSeen = { c, st, says, onFirstAsk: leaves ? leaveLate : null };
     try {
       await childBytes(Buffer.from('x'), {
         file: electronExe(), env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, prelude: up(marker) + prelude, host: 'inbox',
@@ -259,6 +286,9 @@ let bystanderProc = null;
   // The same, and the hold says "exited" as soon as the kill is sent, while the child is still on
   // the console: what a console that is slow to drop an exited process looks like to the harness.
   await harness('harnessExitedStillOnConsole', late, { slow: true, says: 'goneOnceEnded' });
+  // No kill by pid at all: the hold says "exited" at the first ask (a child that ended by itself),
+  // and the child is on the console for 2 s more.
+  await harness('harnessExitedByItselfStillOnConsole', late, { says: 'gone', leaves: true });
   // The kill by pid is real, and the hold goes on saying the child runs.
   await harness('harnessNeverExits', late, { says: 'runs' });
   // Nothing can hold the child (no addon).
