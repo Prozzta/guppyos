@@ -51,8 +51,8 @@ const { consoleNode } = require('./tools/console-node.cjs');
 const DRIVER = path.join(__dirname, 'tools', 'console-list-kill-driver.cjs');
 /**
  * The driver's own work was about 15 s on a quiet machine (two 5 s give-ups, three Electron starts,
- * three console roots). The four late-exit cases add a 5 s give-up each, and one of them the
- * harness's whole 8 s teardown wait.
+ * three console roots). The five late-exit cases add a 5 s give-up each, and a harness that waits
+ * for its child to be off the console adds up to its 8 s teardown wait in a case.
  */
 const DRIVER_CAP_MS = 240000;
 
@@ -172,6 +172,20 @@ test('harness, inbox conhost: a child whose hold says "exited" while its console
   assert.equal(c.closed, true, "node-pty's kill ran");
   NOBODY(c, 'the hold said the child had exited, and the child was still on the console of its pid');
   assert.match(c.killDelivered, /node-pty had asked for no console list by then/, `no console list was asked for by node-pty while the child was on the console (${c.killDelivered})`);
+  assert.deepEqual(c.consoleAfter, [], `the child is gone after the close (its console holds ${JSON.stringify(c.consoleAfter)})`);
+});
+// The same window with no kill by pid before it: the child ended by itself, the hold says so at the
+// first ask, and the console of its pid lists it for 2 s more.
+test('harness, inbox conhost: a child that exited by itself and is still on its console is waited off the console before the close', async () => {
+  const c = await kase('harnessExitedByItselfStillOnConsole');
+  assert.match(c.result, /PTY child did not answer/, 'childBytes gave up at its 5 s');
+  assert.equal(c.holdAskedBeforeKill, false, 'control: the hold answered "exited" at the first ask (the driver answers for it)');
+  assert.equal(c.endedByPid, undefined, 'A PID IS NAMED ONLY WHILE IT IS HELD: the hold said the child had exited, and childBytes still ended that pid');
+  assert.equal(c.leavesArmed, true, 'control: the driver kept the child on the console past that first ask');
+  assert.equal(c.closed, true, "node-pty's kill ran");
+  NOBODY(c, 'the hold said at the first ask that the child had exited, and the child was still on the console of its pid');
+  assert.match(String(c.leftConsole), /^left its console 2000 ms after/, `control: the child left the console only when the driver ended it (${c.leftConsole})`);
+  assert.equal(c.rootExitedAtClose, true, "THE CLOSE WAITS UNTIL THE CHILD IS OFF THE CONSOLE: the child was still running when node-pty's kill was entered");
   assert.deepEqual(c.consoleAfter, [], `the child is gone after the close (its console holds ${JSON.stringify(c.consoleAfter)})`);
 });
 test('harness, inbox conhost: a child that never exits after the kill by pid fails by name, its terminal is not closed, and the file can still end', async () => {
