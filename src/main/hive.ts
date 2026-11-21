@@ -966,7 +966,7 @@ export class HiveManager {
       return [id, Math.max(0, ...await Promise.all([mtime(join(dir, 'outbox')), mtime(join(dir, 'outbox', '.sent')), mtime(join(dir, 'memory.md'))]))];
     }));
     clearTimeout(timer);
-    if (stuck.length && !this.coordinationStuck && root) {
+    if (stuck.length && !this.coordinationStuck && root && !this.readsRefused) {
       this.appendLog({ kind: 'coordination-stat-stuck', paths: stuck.length, first: stuck[0].slice(root.length + 1).split(win32.sep).join('/'), waitMs });
     }
     this.coordinationStuck = stuck.length > 0;
@@ -981,6 +981,47 @@ export class HiveManager {
   }
   /** Async reads are allowed again (the folder was kept after a dispose()). */
   reopen(): void { this.readsRefused = false; }
+  private stopIfDisposed(): void { if (this.readsRefused) throw new HiveDisposedError('route pass'); }
+  private readonly owedChecked = new Set<string>();
+  /** Written BEFORE the move that takes a file out of outbox/: the notice its sender is owed once the move has landed. */
+  private async writeOwedNotice(outbox: string, file: string, dest: string, notice: HiveMessage): Promise<string> {
+    const dir = join(outbox, '.owed');
+    await fsPromises.mkdir(dir, { recursive: true });
+    this.stopIfDisposed();
+    const owed = join(dir, `${file}.owed`);
+    await fsPromises.writeFile(owed, JSON.stringify({ dest, fp: this.outboxFingerprint(join(outbox, file)), notice }), 'utf8');
+    this.stopIfDisposed();
+    return owed;
+  }
+  private async dropOwedNotice(owed: string): Promise<void> {
+    await fsPromises.rm(owed, { force: true });
+    this.stopIfDisposed();
+  }
+  /** Once per manager and outbox: a record left by a stopped pass. The move landed (the kept file is the recorded one): send its notice under the recorded id. */
+  private async deliverOwedNotices(id: string, outbox: string): Promise<void> {
+    if (this.owedChecked.has(outbox)) return;
+    let names: string[] = [];
+    try { names = await fsPromises.readdir(join(outbox, '.owed')); } catch { names = []; }
+    this.stopIfDisposed();
+    for (const n of names) {
+      const owed = join(outbox, '.owed', n);
+      let rec: { dest: string; fp: string | null; notice: HiveMessage } | null = null;
+      try { rec = JSON.parse(await fsPromises.readFile(owed, 'utf8')); } catch { rec = null; }
+      this.stopIfDisposed();
+      if (rec && rec.fp !== null && this.outboxFingerprint(join(outbox, rec.dest)) === rec.fp) {
+        const notice = rec.notice;
+        const notified = await this.runRouteAsync(this.deliverSteps(notice, id));
+        this.emitMessage(notice, notified ? [id] : []);
+        this.appendLog({ kind: 'outbox-owed-notice', from: id, file: n, notified, noticeId: notice.id });
+      }
+      await this.dropOwedNotice(owed);
+    }
+    this.owedChecked.add(outbox);
+  }
+  /** One outbox file, one mail id: the same on every pass over it, so a pass that runs again after a stop is dropped at admission. */
+  private outboxFileMailId(from: string, file: string, full: string, text: string): string | undefined {
+    try { return `${new Date(statSync(full).mtimeMs).toISOString().replace(/[:.]/g, '-')}-${createHash('sha256').update(JSON.stringify([from, file, text])).digest('hex').slice(0, 6)}`; } catch { return undefined; }
+  }
   setHookBroker(broker: HookBroker | null): void {
     this.hookBroker = broker;
   }
@@ -3530,7 +3571,9 @@ export class HiveManager {
       const step = r.value;
       if ('exists' in step) {
         // existsSync's answer (true for anything at the path, false on any error), off main.
-        r = steps.next(await fsPromises.stat(step.exists).then(() => true, () => false));
+        const there = await fsPromises.stat(step.exists).then(() => true, () => false);
+        this.stopIfDisposed();
+        r = steps.next(there);
         continue;
       }
       let failed = false;
@@ -3538,6 +3581,7 @@ export class HiveManager {
       try {
         await atomicWriteJsonAsync(step.file, step.msg);
       } catch (e) { failed = true; err = e; } finally { this.invalidateAuthorityCache(step.file); }
+      this.stopIfDisposed();
       r = failed ? steps.throw(err) : steps.next();
     }
     return r.value;
@@ -4112,14 +4156,22 @@ export class HiveManager {
     detail: string,
     error: unknown
   ): Promise<boolean> {
+    const owedNotice = this.normalize({ to: from, act: 'inform', subject: `[outbox rejected — ${detail}] ${file}`, body: `The hive router rejected this outbox file: ${detail}. It was archived as bad-${file}; rewrite and resend it if it is still needed.` }, 'system');
+    const owed = await this.writeOwedNotice(outbox, file, join('.sent', `bad-${file}`), owedNotice);
     let archived = false;
     try {
       await fsPromises.rename(full, join(outbox, '.sent', `bad-${file}`));
+      this.stopIfDisposed();
       archived = true;
     } catch (archiveError) {
+      if (archiveError instanceof HiveDisposedError) throw archiveError;
+      this.stopIfDisposed();
       this.appendLog({ kind: 'outbox-reject-archive-failed', from, file, reason, detail, error: String(archiveError) });
     }
-    return this.runRouteAsync(this.rejectOutboxFileSteps(full, from, file, reason, detail, error, archived));
+    if (!archived) await this.dropOwedNotice(owed);
+    const done = await this.runRouteAsync(this.rejectOutboxFileSteps(full, from, file, reason, detail, error, archived, archived ? owedNotice : undefined));
+    if (archived) await this.dropOwedNotice(owed);
+    return done;
   }
   private *rejectOutboxFileSteps(
     full: string,
@@ -4128,9 +4180,10 @@ export class HiveManager {
     reason: 'parse-failed' | 'route-failed',
     detail: string,
     error: unknown,
-    archived: boolean
+    archived: boolean,
+    given?: HiveMessage
   ): RouteSteps<boolean> {
-    const notice = this.normalize({
+    const notice = given ?? this.normalize({
       to: from,
       act: 'inform',
       subject: `[outbox rejected — ${detail}] ${file}`,
@@ -4193,9 +4246,12 @@ export class HiveManager {
     const line = `${state.torn ? '\n' : ''}${JSON.stringify({ key, ...v })}\n`;
     try {
       await fsPromises.appendFile(join(root, OUTBOX_DEDUP_FILE), line, 'utf8');
+      this.stopIfDisposed();
       state.torn = false;
       state.lines++;
     } catch (error) {
+      if (error instanceof HiveDisposedError) throw error;
+      this.stopIfDisposed();
       this.appendLog({ kind: 'outbox-dedup-save-failed', error: String(error) });
     }
   }
@@ -4211,14 +4267,18 @@ export class HiveManager {
     const text = [...state.entries].map(([key, v]) => `${JSON.stringify({ key, ...v })}\n`).join('');
     try {
       await atomicWriteTextAsync(join(root, OUTBOX_DEDUP_FILE), text);
+      this.stopIfDisposed();
       state.lines = live;
       state.torn = false;
       if (state.legacy) {
         await fsPromises.rm(join(root, OUTBOX_DEDUP_LEGACY_FILE), { force: true });
+        this.stopIfDisposed();
         state.legacy = false;
       }
       this.appendLog({ kind: 'outbox-dedup-compacted', live });
     } catch (error) {
+      if (error instanceof HiveDisposedError) throw error;
+      this.stopIfDisposed();
       this.appendLog({ kind: 'outbox-dedup-save-failed', op: 'compact', error: String(error) });
     }
   }
@@ -4226,12 +4286,15 @@ export class HiveManager {
   /** An exact repeat is kept (renamed aside in .sent, not a .json there) and never delivered.
    *  Returns the kept name, or null when the rename is held.
    *  LAG-SYNC-FS-TAIL-108: off the main thread, awaited by the pass (as archiveDeliveredOutbox). */
-  private async archiveDuplicateOutbox(outbox: string, full: string, from: string, file: string): Promise<string | null> {
-    const kept = `${file}.duplicate-${outboxDedupClock.now()}`;
+  private async archiveDuplicateOutbox(outbox: string, full: string, from: string, file: string, keptName?: string): Promise<string | null> {
+    const kept = keptName ?? `${file}.duplicate-${outboxDedupClock.now()}`;
     try {
       await fsPromises.rename(full, join(outbox, '.sent', kept));
+      this.stopIfDisposed();
       return kept;
     } catch (error) {
+      if (error instanceof HiveDisposedError) throw error;
+      this.stopIfDisposed();
       // Held: the next scan retries only the archive (same as a delivered file whose archive failed).
       this.outboxDeliveredArchives.set(full, this.outboxFingerprint(full));
       this.noteOutboxArchiveFailure(full, from, file, error);
@@ -4258,10 +4321,13 @@ export class HiveManager {
       // LAG-SYNC-FS-TAIL-108: off the main thread (one rename held it for 540 ms). The pass awaits it, and
       // passes are single-flight, so no later pass sees the file before it is in .sent or held below.
       await fsPromises.rename(full, join(outbox, '.sent', file));
+      this.stopIfDisposed();
       this.outboxDeliveredArchives.delete(full);
       this.noteOutboxArchiveCleared(full, from, file);
       return true;
     } catch (error) {
+      if (error instanceof HiveDisposedError) throw error;
+      this.stopIfDisposed();
       this.outboxDeliveredArchives.set(full, this.outboxFingerprint(full));
       this.noteOutboxArchiveFailure(full, from, file, error);
       return false;
@@ -4319,7 +4385,9 @@ export class HiveManager {
       : [...(dirtyOutboxes ?? [])].map((outbox) => [basename(dirname(outbox)), outbox]);
     for (const [id, outbox] of outboxes) {
       let names: string[];
+      await this.deliverOwedNotices(id, outbox);
       try { names = await fsPromises.readdir(outbox); } catch { continue; }
+      this.stopIfDisposed();
       for (const f of names) {
         if (!f.endsWith('.json')) continue;
         const full = join(outbox, f);
@@ -4341,10 +4409,14 @@ export class HiveManager {
           this.outboxRejectNotices.delete(full);
         }
         let partial: Partial<HiveMessage>;
+        let outboxText = '';
         try {
-          partial = JSON.parse(await this.readTextAsync(full)) as Partial<HiveMessage>;
+          outboxText = await this.readTextAsync(full);
+          this.stopIfDisposed();
+          partial = JSON.parse(outboxText) as Partial<HiveMessage>;
         } catch (error) {
           if (error instanceof HiveDisposedError) throw error;
+          this.stopIfDisposed();
           // A non-atomic writer may still be streaming this file. Leave it in
           // place for subsequent polling passes; only a bounded failure becomes
           // a visible rejection.
@@ -4419,7 +4491,8 @@ export class HiveManager {
           if (partial.subject !== undefined && typeof partial.subject !== 'string') throw new Error('unroutable: subject must be a string');
           if (partial.body !== undefined && typeof partial.body !== 'string') throw new Error('unroutable: body must be a string');
           if (!partial.subject?.trim() && !partial.body?.trim()) throw new Error('unroutable: subject and body are both empty');
-          const msg = this.normalize(partial, id);
+          const fileId = partial.id === undefined || partial.id === null ? this.outboxFileMailId(id, f, full, outboxText) : undefined;
+          const msg = this.normalize(fileId ? { ...partial, id: fileId } : partial, id);
           msg.from = id; // sender is authoritative — the owning directory
           // HIVE-DUP-DONE-MAIL: an exact repeat within the window is archived, not delivered. The
           // key is taken before routeMessage, which may prefix the subject. A message whose sender
@@ -4427,10 +4500,13 @@ export class HiveManager {
           // same-id same-content resend (mail-dedup) and reassigns a colliding id; this check covers
           // the case §4.1 cannot see: no id, so every rewrite of the file got a fresh one.
           const dedup = await this.outboxDedupEntries(root);
+          this.stopIfDisposed();
           const key = outboxDedupKey(id, msg);
           const prior = partial.id === undefined || partial.id === null ? dedup.get(key) : undefined;
           if (prior) {
-            const kept = await this.archiveDuplicateOutbox(outbox, full, id, f);
+            if (prior.id === msg.id) { await this.archiveDeliveredOutbox(outbox, full, id, f); continue; }
+            const keptName = `${f}.duplicate-${outboxDedupClock.now()}`;
+            let kept: string | null = keptName;
             const firstAt = new Date(prior.ts).toISOString();
             // Jim M1: never silent. Tell the sender, as a rejection does: an intended identical repeat
             // must be resent with changed text, and "it vanished from outbox/" is answered at its source.
@@ -4441,8 +4517,12 @@ export class HiveManager {
               subject: `[duplicate not delivered] ${f}`,
               body: `The hive router did not deliver ${f}: it repeats ${prior.id} (delivered ${firstAt}) exactly (same to, act, reply-to, subject and body, within ${OUTBOX_DEDUP_WINDOW_MS / 60_000} minutes). The first one WAS delivered: a file gone from outbox/ was delivered (it moves to outbox/.sent/). This repeat is kept as outbox/.sent/${kept ?? f}. To send it again on purpose, change its text.`
             }, 'system');
+            const owed = await this.writeOwedNotice(outbox, f, join('.sent', keptName), notice);
+            kept = await this.archiveDuplicateOutbox(outbox, full, id, f, keptName);
+            if (kept === null) { await this.dropOwedNotice(owed); notice.body = notice.body.replace(`outbox/.sent/${keptName}`, `outbox/.sent/${f}`); }
             const notified = await this.runRouteAsync(this.deliverSteps(notice, id));
             this.emitMessage(notice, notified ? [id] : []);
+            if (kept !== null) await this.dropOwedNotice(owed);
             this.appendLog({ kind: 'outbox-duplicate', from: id, to: msg.to, act: msg.act, file: f, firstId: prior.id, duplicateId: msg.id, firstAt, notified, noticeId: notice.id });
             continue;
           }
@@ -4454,6 +4534,7 @@ export class HiveManager {
         } catch (error) {
           // A parsed payload that cannot route is terminal too: keep it visible,
           // rather than retrying it forever on every watcher hint and poll.
+          if (error instanceof HiveDisposedError) throw error;
           const reason = error instanceof Error ? error.message : String(error);
           rejected += Number(await this.rejectOutboxFile(outbox, full, id, f, 'route-failed', reason, error));
           continue;
