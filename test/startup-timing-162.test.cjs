@@ -415,7 +415,7 @@ test('(1) WIRING: armed in whenReady, window-ready on the main window, the memor
   assert.match(code('src/renderer/src/components/terminalPool.ts'), /entry\.term\.open\(entry\.host\);\s*entry\.opened = true;\s*noteTerminalOpen\(entry\.ptyId\);/, 'R1: terminal-open mark');
   // PTY-CONHOST-ORPHAN: the data handler first takes OpenConsole's start-up DA1 out of the stream,
   // then delivers; the spawn mark still follows the handler's wiring directly.
-  assert.match(pty, /proc\.onData\(\(data\) => \{[\s\S]*?this\.deliverData\(opts\.id, session, data\);\s*\}\);\s*if \(this\.startupHooks\) \{ try \{ this\.startupHook\(\)\?\.spawned\(opts\.id\); \} catch \{\s*\} \}/);
+  assert.match(pty, /proc\.onData\(\(data\) => \{[^}]*?const step = startupHandshake\(data\);[\s\S]*?if \(!step\.data\) return;\s*data = step\.data;\s*\}\s*this\.deliverData\(opts\.id, session, data\);\s*\}\);\s*if \(this\.startupHooks\) \{ try \{ this\.startupHook\(\)\?\.spawned\(opts\.id\); \} catch \{\s*\} \}/);
   assert.match(pty, /if \(h && !h\.recording\(\)\) this\.startupHooks = null;/, 'the hooks drop themselves when the recorder stops');
   const pool = code('src/renderer/src/components/terminalPool.ts');
   assert.match(pool, /const firstWrite = startupRedrawPending\(ptyId\);\s*term\.write\(chunk, \(\) => \{\s*if \(firstWrite\) noteFirstAgentRedraw\(ptyId\);/);
