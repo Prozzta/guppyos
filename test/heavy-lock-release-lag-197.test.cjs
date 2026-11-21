@@ -452,6 +452,21 @@ function goneOnOpenHelperSource(source = helperSource()) {
 
 /** One heavy call held by the real lock in a real job; `body` is the bash after the join line, or
  *  `kill` ends the shell's tree from outside. Resolves with the ms from the shell's exit to the release. */
+/** FLAKE-LAG197-SLOW-KILL-SLOT-NOT-FREED-108 (diagnostic only): the product's channel `ch`, with every request, reply,
+ *  notice and close written to `trace`. It must change nothing HeavyJobs can see (the TRACE cell holds both points):
+ *  - `...ch` first: every other method of the channel (dead() of HEAVYCPU-SERVE-REQ-TIMEOUT-DROPS-ALL-JOBS-108, and any later
+ *    one) passes through untouched. serveChannel's methods are closures, none reads `this`.
+ *  - request returns the product's OWN promise, never a wrapping one: a wrapper settles some turns later, and that alone lets
+ *    a request land after dispose() and start a new helper (HEAVYJOBS-DISPOSE-RESPAWNS-SERVE-108; the test process never ends). */
+function traceChannel(ch, n, trace) {
+  return {
+    ...ch,
+    request: (line) => { trace.push({ at: Date.now(), n, what: `> ${line}` }); const p = ch.request(line); void p.then((r) => { trace.push({ at: Date.now(), n, what: `< ${line} = ${r === null ? 'null' : JSON.stringify(r).slice(0, 200)}` }); }); return p; },
+    close: () => { trace.push({ at: Date.now(), n, what: 'closed' }); ch.close(); },
+    onEvent: (fn) => ch.onEvent((e) => { trace.push({ at: Date.now(), n, what: `event ${JSON.stringify(e)}` }); fn(e); })
+  };
+}
+
 async function liveRelease(t, o) {
   const Cm = o.C ?? C;
   const exe = o.exe ?? helper(t);
@@ -466,20 +481,7 @@ async function liveRelease(t, o) {
   // notice it sends, with the time, for the "not freed" message. The channel is the product's own; each call passes straight through.
   const helperTrace = [];
   let helperNo = 0;
-  const traced = (x) => {
-    const ch = Cm.serveChannel(x); const n = ++helperNo;
-    // `...ch` first: every other method of the product's channel (dead() of HEAVYCPU-SERVE-REQ-TIMEOUT-DROPS-ALL-JOBS-108, and
-    // any later one) passes through untouched, so the trace can never hide one from HeavyJobs. serveChannel's methods are
-    // closures, none reads `this`.
-    return {
-      ...ch,
-      // The product's OWN promise is returned, never a wrapping one: a wrapper settles some turns later, and that alone lets a
-      // request land after dispose() and start a new helper (HEAVYJOBS-DISPOSE-RESPAWNS-SERVE-108; the test process then never ends).
-      request: (line) => { helperTrace.push({ at: Date.now(), n, what: `> ${line}` }); const p = ch.request(line); void p.then((r) => { helperTrace.push({ at: Date.now(), n, what: `< ${line} = ${r === null ? 'null' : JSON.stringify(r).slice(0, 200)}` }); }); return p; },
-      close: () => { helperTrace.push({ at: Date.now(), n, what: 'closed' }); ch.close(); },
-      onEvent: (fn) => ch.onEvent((e) => { helperTrace.push({ at: Date.now(), n, what: `event ${JSON.stringify(e)}` }); fn(e); })
-    };
-  };
+  const traced = (x) => traceChannel(Cm.serveChannel(x), ++helperNo, helperTrace);
   const jobs = new Cm.HeavyJobs({
     platform: 'win32', options: () => ({ background: false, half: false }), exe: () => exe, log: (r) => rows.push({ ...r, ts: Date.now() }),
     ...(typeof Cm.serveChannel === 'function' ? { channel: traced } : {}),
@@ -901,6 +903,37 @@ test('LIVE: a job still running keeps the slot (a sequential command after the f
 const PF = 'C:\\Program Files';
 const STD = PF + '\\Git\\bin\\bash.exe';
 const only = (...files) => { const set = new Set(files.map((x) => x.toLowerCase())); return (p) => set.has(p.toLowerCase()); };
+
+// Jim cc2d96 / god cd0858: the trace is a diagnostic, so HeavyJobs must see the product's channel through it unchanged.
+test('TRACE: the traced channel keeps every method of the product channel and returns its own request promise', async () => {
+  const calls = [];
+  const reply = Promise.resolve({ ok: true });
+  let listener = null;
+  const product = {
+    request: (line) => { calls.push(`request ${line}`); return reply; },
+    close: () => { calls.push('close'); },
+    onEvent: (fn) => { listener = fn; },
+    dead: () => true,
+    later: () => 'a method added to the channel after this trace was written'
+  };
+  const trace = [];
+  const tr = traceChannel(product, 7, trace);
+  assert.deepEqual(Object.keys(tr).sort(), Object.keys(product).sort(), 'THE TRACED CHANNEL HAS EXACTLY THE PRODUCT CHANNEL\'S METHODS');
+  assert.equal(tr.dead, product.dead, 'dead() is the product\'s own function (a hidden dead() makes HeavyJobs wait 3 unanswered requests)');
+  assert.equal(tr.later, product.later, 'a method the trace does not know passes through untouched');
+  assert.equal(tr.request('list j'), reply, 'REQUEST RETURNS THE PRODUCT\'S OWN PROMISE (a wrapping promise settles later: a request can then land after dispose())');
+  await reply;
+  await Promise.resolve();
+  const seen = [];
+  tr.onEvent((e) => seen.push(e));
+  listener({ event: 'exited', id: 'j' });
+  tr.close();
+  assert.deepEqual(calls, ['request list j', 'close'], 'request and close reach the product channel once each');
+  assert.deepEqual(seen, [{ event: 'exited', id: 'j' }], 'a notice reaches the listener unchanged');
+  assert.deepEqual(trace.map((x) => `#${x.n} ${x.what}`), ['#7 > list j', '#7 < list j = {"ok":true}', '#7 event {"event":"exited","id":"j"}', '#7 closed'], 'request, reply, notice and close are all recorded');
+  // The real channel has the same shape the fake stands for: plain own methods, so the spread carries all of them.
+  assert.match(fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'heavyCpu.ts'), 'utf8'), /onEvent\(fn\) \{ onEvent = fn; \}/, 'serveChannel still returns an object literal of closures');
+});
 
 test('BASH: the LIVE tests take Git Bash by path, never a bare name from PATH', () => {
   const me = fs.readFileSync(__filename, 'utf8');
