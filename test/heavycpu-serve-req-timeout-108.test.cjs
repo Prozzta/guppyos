@@ -29,13 +29,24 @@ require('./tools/own-job.cjs');
  * closed. Nothing in the fake cells waits on wall time: the unanswered request is the null the real
  * channel resolves, and the confirm runs on a clock the test moves. The first two cells were the
  * red-before (51c8cd4e).
+ *
+ * HEAVYJOBS-DISPOSE-RESPAWNS-SERVE-108 (the DISPOSE cells): dispose() closed the helper and forgot
+ * it, but nothing said "disposed". Anything that asked the helper afterwards started a NEW one:
+ *   1. poll, confirmExit and begin await req() in loops; req() calls channel(); channel() starts a
+ *      helper whenever none is held.
+ *   2. So a poll in flight at dispose (its next job's list), an exit notice that lands after it, or
+ *      a begin after it each started a serve helper nobody closes. Its stdin pipe stays open: the
+ *      helper waits on it for good and the open pipe keeps the parent process alive.
+ *   3. A begin after dispose also held its job on that helper and armed the poll interval again.
+ * The fix: a disposed flag. Once set, channel() returns null (every request then answers null and
+ * nothing is started) and arm() does nothing.
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const { removeDir } = require('./tools/test-temp.cjs');
 const loadTs = require('./load-ts.cjs');
 
@@ -315,6 +326,69 @@ K.replacedCreate = async (Cm) => {
   assert.deepEqual(r.jobs.ids(), [], 'and not tracked');
 };
 
+// ─── DISPOSE: nothing is started once disposed (HEAVYJOBS-DISPOSE-RESPAWNS-SERVE-108) ────────
+
+/** A poll is asking about job A when dispose runs. Whatever A's answer is, the poll goes on to
+ *  job B, and that request must not start a helper. */
+K.disposePollInFlight = async (Cm) => {
+  const r = rig(Cm);
+  await r.jobs.begin('agent-a', { command: 'npm ci' }, false, 'call-a');
+  await r.jobs.begin('agent-b', { command: 'npm test' }, false, 'call-b');
+  assert.equal(r.jobs.ids().length, 2, 'both jobs are tracked');
+  const polling = r.jobs.poll();                            // `list A` is out
+  r.jobs.dispose();
+  await polling;
+  assert.equal(r.world.helpers[0].closed, true, 'dispose closed the helper');
+  assert.equal(r.world.helpers.length, 1, `NO SERVE HELPER IS STARTED BY A POLL IN FLIGHT AT DISPOSE (${r.world.helpers.length - 1} started after it; it was asked ${JSON.stringify(r.world.helpers[r.world.helpers.length - 1].reqs)})`);
+  assert.equal(r.poll.armed, 0, 'and no poll timer is left');
+};
+
+/** An exit notice the closed helper had already written lands after dispose: its confirm asks. */
+K.disposeThenNotice = async (Cm) => {
+  const r = rig(Cm);
+  await r.jobs.begin('agent-a', { command: 'npm ci' }, false, 'call-a');
+  const id = r.jobs.ids()[0];
+  r.world.rowsOf.set(id, [proc(r.clock, 9)]);
+  await r.jobs.poll();
+  const h = r.world.helpers[0];
+  r.jobs.dispose();
+  h.listener({ event: 'exit', job: id, msg: 7, pid: 9 });
+  await r.clock.tick(Cm.HEAVY_JOB_EXIT_CONFIRM_MS);
+  h.listener({ event: 'exit', job: id, msg: 4, pid: 0 });
+  await settle();
+  assert.equal(r.world.helpers.length, 1, `NO SERVE HELPER IS STARTED BY AN EXIT NOTICE AFTER DISPOSE (${r.world.helpers.length - 1} started after it)`);
+};
+
+/** A heavy call that begins after dispose: nothing is started, held or armed. */
+K.disposeThenBegin = async (Cm) => {
+  const r = rig(Cm);
+  r.jobs.dispose();
+  await r.jobs.begin('agent-a', { command: 'npm ci' }, false, 'call-a');
+  assert.equal(r.world.helpers.length, 0, `NO SERVE HELPER IS STARTED BY A BEGIN AFTER DISPOSE (${r.world.helpers.length} started)`);
+  assert.deepEqual(r.jobs.ids(), [], 'its job is not tracked');
+  assert.deepEqual(r.held(), [], 'and not told as held');
+  assert.equal(r.poll.armed, 0, 'and no poll timer is armed');
+};
+
+/** arm() itself. With channel() closed off no public call reaches arm() after dispose (a job is
+ *  held only by a live helper), so the private method is called directly: the pin holds whatever
+ *  a later change does to the held check. Jobs tracked at dispose stay in the map. */
+K.disposeThenArm = async (Cm) => {
+  const r = rig(Cm);
+  await r.jobs.begin('agent-a', { command: 'npm ci' }, false, 'call-a');
+  assert.equal(r.poll.armed, 1, 'a held job arms the poll timer');
+  r.jobs.dispose();
+  assert.equal(r.poll.armed, 0, 'dispose stops it');
+  assert.equal(r.jobs.ids().length, 1, 'the job is still in the map, so only the flag can stop arm()');
+  r.jobs.arm();
+  assert.equal(r.poll.armed, 0, 'THE POLL TIMER IS NOT ARMED AGAIN AFTER DISPOSE');
+};
+
+test('DISPOSE: a poll in flight at dispose starts no serve helper', () => K.disposePollInFlight(C));
+test('DISPOSE: an exit notice that lands after dispose starts no serve helper', () => K.disposeThenNotice(C));
+test('DISPOSE: a begin after dispose starts no serve helper, holds nothing and arms nothing', () => K.disposeThenBegin(C));
+test('DISPOSE: arm() does nothing once disposed', () => K.disposeThenArm(C));
+
 test('guarantee: a job whose list went unanswered once is still reported when it ends', () => K.endsAfterUnanswered(C));
 test('guarantee: one unanswered request does not lose the other running jobs', () => K.othersKept(C));
 test('a dead helper is replaced at once; its jobs are let go as lost and no exit is told', () => K.deadHelper(C));
@@ -388,6 +462,87 @@ test('the real channel: a reply that comes after its request was given up is not
   });
   assert.equal(gone, true, 'THE CHANNEL SAYS DEAD ONCE ITS HELPER HAS EXITED (not within 20 s of closing it)');
   assert.equal(await ch.request('late'), null, 'and answers null from then on');
+});
+
+// ─── DISPOSE with the real channel: the process can exit ─────────────────────────────────────
+
+// A stand-in helper that answers every line as an empty job and ends when its stdin ends.
+const DISPOSE_STUB = `
+const rl = require('node:readline').createInterface({ input: process.stdin });
+rl.on('line', () => { process.stdout.write('{"ok":true,"rows":[]}\\n'); });
+rl.on('close', () => process.exit(0));
+process.stdout.write('{"event":"ready"}\\n');
+`;
+
+// The process that owns the HeavyJobs. It counts every helper the product starts, disposes while a
+// poll is asking about the first of two jobs, says what it counted, and then does NOTHING more: it
+// ends by itself only if no pipe to a helper is left open. The first helper is started before the
+// jobs are made and has said it runs, so a slow start is not read as an unanswered create.
+const DISPOSE_CHILD = `
+const [loadTsPath, cpuFile] = process.argv.slice(2);
+const C = require(loadTsPath)(cpuFile);
+const say = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
+(async () => {
+  const first = C.serveChannel(process.execPath);
+  await new Promise((resolve) => first.onEvent((e) => { if (e.event === 'ready') resolve(); }));
+  say({ phase: 'ready' });
+  let starts = 0;
+  const jobs = new C.HeavyJobs({
+    platform: 'win32', options: () => ({ background: false, half: false }), exe: () => process.execPath,
+    channel: (exe) => (++starts === 1 ? first : C.serveChannel(exe))
+  });
+  await jobs.begin('agent-a', { command: 'npm ci' }, false, 'call-a');
+  await jobs.begin('agent-b', { command: 'npm test' }, false, 'call-b');
+  const tracked = jobs.ids().length;
+  const polling = jobs.poll();
+  jobs.dispose();
+  await polling;
+  say({ phase: 'disposed', tracked, starts });
+})();
+`;
+
+test('DISPOSE, real channel: a poll in flight at dispose starts no helper and the process ends by itself', { timeout: 180_000 }, async () => {
+  // serveChannel starts `<exe> serve`: the stand-in is this runtime running the script named
+  // `serve` in the folder the child is started in.
+  const dir = scratch();
+  fs.writeFileSync(path.join(dir, 'serve'), DISPOSE_STUB);
+  const script = path.join(dir, 'dispose-child.cjs');
+  fs.writeFileSync(script, DISPOSE_CHILD);
+  const child = spawn(process.execPath, [script, path.join(__dirname, 'load-ts.cjs'), CPU_FILE], { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+  let out = '', err = '', exit = null;
+  const said = [];
+  let onSaid = () => {};
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', (d) => {
+    out += d;
+    let i;
+    while ((i = out.indexOf('\n')) >= 0) { const line = out.slice(0, i); out = out.slice(i + 1); try { said.push(JSON.parse(line)); } catch { /* not ours */ } }
+    onSaid();
+  });
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', (d) => { err += d; });
+  const exited = new Promise((resolve) => child.on('exit', (code, signal) => { exit = { code, signal }; resolve(true); onSaid(); }));
+  const report = () => said.find((s) => s.phase === 'disposed');
+  try {
+    // The report, or the child ending without one. The watchdog only names a child that hangs
+    // before it reports (a machine that cannot start the stand-in); it decides nothing else.
+    const got = await new Promise((resolve) => {
+      const t = setTimeout(() => resolve('watchdog'), 90_000);
+      onSaid = () => { if (report() || exit) { clearTimeout(t); resolve('event'); } };
+      onSaid();
+    });
+    const rep = report();
+    assert.ok(rep, `the child did not report (${got}; it said ${JSON.stringify(said)}; exit ${JSON.stringify(exit)}; stderr: ${err.slice(-600)})`);
+    assert.equal(rep.tracked, 2, 'both jobs were held by the first helper before dispose (else the poll asks nothing)');
+    assert.equal(rep.starts, 1, `NO SERVE HELPER IS STARTED AFTER DISPOSE, REAL CHANNEL (the product started ${rep.starts - 1} more)`);
+    // Nothing is left for the child to do. It ends by itself unless a helper pipe is still open.
+    const ended = await Promise.race([exited, new Promise((resolve) => { const t = setTimeout(() => resolve(false), 60_000); exited.then(() => clearTimeout(t)); })]);
+    assert.equal(ended, true, 'THE PROCESS ENDS BY ITSELF AFTER DISPOSE (still running 60 s after its last line)');
+    assert.equal(exit.code, 0, `and ends clean (stderr: ${err.slice(-600)})`);
+  } finally {
+    // Ours only: a child that is still there is ended; its helpers end when their stdin closes.
+    if (!exit) { child.kill(); await exited; }
+  }
 });
 
 // ─── LIVE: the helper Guppy ships ────────────────────────────────────────────────────────────
