@@ -226,6 +226,7 @@ test('runTests runs real node --test under TAP: pass, fail and a hang give SURVI
     const h = hangRun(dir, hangPid);
     assert.equal(verdict(h), 'NO-RESULT', h.stdout);
     assert.ok(fs.existsSync(hangPid), `the hung node --test worker recorded its owned pid (${h.why})`);
+    assert.match(h.why, ENDED_BY_WORKER, 'the worker, not the watchdog, ended the run');
     assert.throws(() => runTests(dir, ['pass.test.cjs'], { args: ['--test-reporter=spec'] }), /picks the reporter/);
   } finally {
     stopHangFixture(dir, hangPid);
@@ -250,6 +251,7 @@ test('HUNG-WORKER-PID: a runner that starts late still records the hung worker\'
     const h = hangRun(dir, hangPid, { args: ['--require', slow] });
     assert.equal(verdict(h), 'NO-RESULT', h.stdout);
     assert.ok(fs.existsSync(hangPid), `the hung node --test worker recorded its owned pid (the run ended after ${Date.now() - started} ms: ${h.why})`);
+    assert.match(h.why, ENDED_BY_WORKER, 'the worker, not the watchdog, ended the run');
   } finally {
     stopHangFixture(dir, hangPid);
   }
@@ -275,10 +277,13 @@ test('HUNG-WORKER-PID: a runner that never returns is ended by the timeout: NO-R
 /**
  * The hang run: a node --test worker starts a detached child, records its pid, then ends its own RUNNER and
  * never ends itself. The record precedes the end of the run by program order in one process. The timeout is
- * the watchdog the pass and fail runs use; no assert depends on it firing.
+ * the watchdog the pass and fail runs use; no assert depends on it firing, and ENDED_BY_WORKER says it did not:
+ * the runner died with no TAP summary (TerminateProcess, exit 1) or by the worker's SIGKILL (a SIGTERM would let
+ * a POSIX runner cancel and report).
  */
+const ENDED_BY_WORKER = /^(no TAP summary \(exit 1\)|killed by SIGKILL)$/;
 function hangRun(dir, hangPid, { args = [] } = {}) {
-  fs.writeFileSync(path.join(dir, 'hang.test.cjs'), `const fs = require('node:fs'); const { spawn } = require('node:child_process');\nconst survivor = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { cwd: process.cwd(), detached: true, stdio: 'ignore' }); survivor.unref();\nfs.writeFileSync(${JSON.stringify(hangPid)}, \`${'${survivor.pid}'} ${'${Date.now()}'}\`);\nprocess.kill(process.ppid);\nrequire('node:test')('never ends', () => new Promise(() => setInterval(() => {}, 1000)));\n`);
+  fs.writeFileSync(path.join(dir, 'hang.test.cjs'), `const fs = require('node:fs'); const { spawn } = require('node:child_process');\nconst survivor = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { cwd: process.cwd(), detached: true, stdio: 'ignore' }); survivor.unref();\nfs.writeFileSync(${JSON.stringify(hangPid)}, \`${'${survivor.pid}'} ${'${Date.now()}'}\`);\nprocess.kill(process.ppid, 'SIGKILL');\nrequire('node:test')('never ends', () => new Promise(() => setInterval(() => {}, 1000)));\n`);
   return runTests(dir, ['hang.test.cjs'], { timeout: 120_000, args });
 }
 function stopHangFixture(dir, hangPid) {
