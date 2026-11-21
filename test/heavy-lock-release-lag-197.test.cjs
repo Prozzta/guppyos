@@ -456,7 +456,8 @@ async function liveRelease(t, o) {
   const Cm = o.C ?? C;
   const exe = o.exe ?? helper(t);
   const rows = [];
-  const lock = new HJ.HeavyJobLock({ limit: () => 1, log: (r) => rows.push({ ...r, ts: Date.now() }) });
+  let shellRef = null; let shellAliveAtRelease = null;
+  const lock = new HJ.HeavyJobLock({ limit: () => 1, log: (r) => { rows.push({ ...r, ts: Date.now() }); if (r.kind === 'heavy-lock' && r.action === 'release' && shellRef) { try { process.kill(shellRef.pid, 0); shellAliveAtRelease = true; } catch { shellAliveAtRelease = false; } } } });
   const jobs = new Cm.HeavyJobs({
     platform: 'win32', options: () => ({ background: false, half: false }), exe: () => exe, log: (r) => rows.push({ ...r, ts: Date.now() }),
     onJob: (e) => { if (e.state === 'held') lock.noteJob(e.agentId, e.callId, e.job); else lock.jobExited(e.agentId, e.callId, e.job); }
@@ -473,6 +474,7 @@ async function liveRelease(t, o) {
   // TEST-BASH-PATH-197: Git Bash by path. A bare `bash` is found only when the suite was started
   // from a Git Bash shell; from PowerShell (a Codex agent) it was `spawn bash ENOENT`.
   const sh = spawn(gitBash(), ['-c', `${o.joinDelay ? `sleep ${o.joinDelay}; ` : ''}"${exe.replace(/\\/g, '/')}" join ${id} 0 0; ${o.body}`], { stdio: 'ignore', windowsHide: true, env: { ...process.env, LOCALAPPDATA: local } });
+  shellRef = sh;
   const t0 = Date.now();
   // A kill ends every process of the job (what stopping a background task does to its tree; a tree
   // kill from the Git Bash launcher alone misses the MSYS children, which then keep the job running).
@@ -547,7 +549,8 @@ async function liveRelease(t, o) {
       killsOver();
     }, o.kill);
   }
-  const exit = await new Promise((r) => sh.on('exit', (code, signal) => r({ at: Date.now(), code, signal })));
+  // o.exitSeenDelay (red-before only): this process learns of the shell's exit that much later, as under a stalled loop.
+  const exit = await new Promise((r) => sh.on('exit', (code, signal) => setTimeout(() => r({ at: Date.now(), code, signal }), o.exitSeenDelay || 0)));
   const exitAt = exit.at;
   // FLAKE-LAG197-NOPORT-KILL-FREE-108: the job ends with its LAST process, and the kills run together, so
   // that can be well after the shell's exit. The 6 s window opens at the job's end, not the shell's.
@@ -558,7 +561,7 @@ async function liveRelease(t, o) {
   const deadline = jobEndAt + 6_000;
   while (lock.snapshot().length && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
   const rel = rows.find((r) => r.kind === 'heavy-lock' && r.action === 'release');
-  return { lagMs: rel ? rel.ts - exitAt : null, relAt: rel ? rel.ts : null, lastSentAt: lastSent.at, lastSentPid: lastSent.pid, afterEndMs: rel ? rel.ts - jobEndAt : null, exitAt, jobEndAt, runMs: exitAt - t0, heldMs: rel ? rel.heldMs : null, reason: rel ? rel.reason : null, rows, code: exit.code, signal: exit.signal, kills, shellPid: sh.pid, lists, t0 };
+  return { lagMs: rel ? rel.ts - exitAt : null, relAt: rel ? rel.ts : null, lastSentAt: lastSent.at, lastSentPid: lastSent.pid, afterEndMs: rel ? rel.ts - jobEndAt : null, exitAt, jobEndAt, runMs: exitAt - t0, heldMs: rel ? rel.heldMs : null, reason: rel ? rel.reason : null, rows, shellAliveAtRelease, code: exit.code, signal: exit.signal, kills, shellPid: sh.pid, lists, t0 };
 }
 
 // What this process reads from a Git Bash shell that taskkill /F ended: exit code 1, no signal.
@@ -684,6 +687,15 @@ test('LIVE: a killed job frees the slot when completion-port notices are absent'
   assertKilled(r, 'no-port kill');
   assertFreed(r, 'no-port kill');
   assertWatcherClosed(r, 'no-port kill');
+});
+
+// RED-BEFORE FLAKE-LAG197-NOPORT-KILL-EARLY-RELEASE-108: the product is right (the shell was dead at the release) and the
+// assert fires anyway when this process learns of the exit late. Expected to FAIL on this sha.
+test('RED-BEFORE: a late-seen exit is not an early release', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
+  const r = await liveRelease(t, { body: 'sleep 30', kill: 1_500, exe: helper(t, noPortNoticesHelperSource()), exitSeenDelay: 500 });
+  t.diagnostic(`late-seen: freed ${r.lagMs} ms after the exit as seen; shell alive at the release: ${r.shellAliveAtRelease}`);
+  assert.equal(r.shellAliveAtRelease, false, 'the shell was dead when the slot was released (the product is right)');
+  assertFreed(r, 'late-seen exit');
 });
 
 // FLAKE-LAG-197-KILLS-RUN-TOGETHER-698-108: the kills run together WITHIN a round. A later list can find a
