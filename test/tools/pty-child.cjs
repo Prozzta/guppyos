@@ -22,12 +22,16 @@
  */
 const assert = require('node:assert/strict');
 const path = require('node:path');
+const cp = require('node:child_process');
 const pty = require('node-pty');
 const loadTs = require('../load-ts.cjs');
 const { armEarlyKill } = loadTs('src/main/pty.ts');
 const { holdRoot, rootHandoff } = loadTs('src/main/procIdentity.ts');
 
-/** From the kill to the conout worker's exit node-pty takes 1 s (its flush interval). */
+/**
+ * From the kill to the conout worker's exit node-pty takes 1 s (its flush interval). On the inbox
+ * conhost the same cap is also given, before that kill, to the wait for a child ended by its pid.
+ */
 const TEARDOWN_CAP_MS = 8000;
 
 const CHILD = [
@@ -40,6 +44,43 @@ const CHILD = [
 /** electron.exe, by name or because this process is one. */
 function isElectronExe(file) {
   return /^electron(\.exe)?$/i.test(path.basename(file)) || (file === process.execPath && Boolean(process.versions.electron));
+}
+
+const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+
+/**
+ * The processes on the console of `pid`, asked with node-pty's own list helper (a fork: a process has
+ * one console). Nothing is ended. [] when the pid has no console to attach to; null when the helper
+ * gave no answer, which proves nothing.
+ */
+function consoleOf(pid) {
+  return new Promise((resolve) => {
+    const agent = cp.fork(require.resolve('node-pty/lib/conpty_console_list_agent'), [String(pid)]);
+    let got = null;
+    agent.on('message', (m) => { got = m.consoleProcessList; });
+    agent.on('exit', () => resolve(got));
+    agent.on('error', () => resolve(null));
+  });
+}
+
+/**
+ * Resolves once a child that was ended by its pid is off its console: first its hold says it has
+ * exited, then the console list of its pid no longer holds it. The second step is not the first
+ * again: an exit signals the process handle, and the console drops the process from its list in its
+ * own time. Both steps share one cap; at the cap it rejects with the step that did not come.
+ */
+async function offConsole(pid, hold) {
+  const end = Date.now() + TEARDOWN_CAP_MS;
+  while (hold.alive()) {
+    if (Date.now() >= end) throw new Error(`the child never exited after its kill by pid (its hold still says it runs, ${TEARDOWN_CAP_MS} ms on), so its terminal is not closed`);
+    await sleep(25);
+  }
+  for (;;) {
+    const list = await consoleOf(pid);
+    if (list && !list.includes(pid)) return;
+    if (Date.now() >= end) throw new Error(`the child has exited and the console of its pid still lists it ${TEARDOWN_CAP_MS} ms after its kill by pid (${JSON.stringify(list)}), so its terminal is not closed`);
+    await sleep(25);
+  }
 }
 
 /** The electron binary of this checkout (the running one under the Electron leg). */
@@ -69,10 +110,9 @@ function childBytes(input, { file = process.execPath, env = process.env, onSpawn
       // console list.
       useConptyDll: process.platform === 'win32' && !inbox
     });
-    let childExited = false;
     // Inbox path only: held in the same turn as the spawn, as the app holds every root
     // (PTY-KILL-PID-IDENTITY). While it is held the pid is this child's and nobody else's. Null
-    // with no addon: the by-pid end then goes by node-pty's exit report, as the app falls back.
+    // with no addon: finish() then names no pid and closes nothing, and fails by name.
     const hold = inbox ? holdRoot(proc.pid, process.platform, rootHandoff(proc)) : null;
     const releaseHold = () => { if (hold) hold.release(); };
     // As the app does for every terminal (PtyManager.spawn): node-pty alone holds kill() back until
@@ -87,16 +127,35 @@ function childBytes(input, { file = process.execPath, env = process.env, onSpawn
     let ended = false;
     let wrote = false;
     const timer = setTimeout(() => finish(new Error('PTY child did not answer')), 5000);
+    /** No close: the failure is named, and the worker is ended here so the test file can still end. */
+    const refuse = (why, error) => {
+      const named = new Error(`PTY teardown: ${why}${error ? `; after: ${error.message}` : ''}`);
+      const done = () => { releaseHold(); reject(named); };
+      worker.terminate().then(done, done);
+    };
     function finish(error, value) {
       if (ended) return;
       ended = true;
       clearTimeout(timer);
+      if (!inbox) { close(error, value); return; }
       // NODEPTY-CONSOLE-LIST-KILL-SIBLINGS: on the inbox conhost node-pty's kill ends every process
       // on the console of the child's pid. An electron.exe child is on THIS test file's console, the
       // one the runner shares between its files: a child still alive here took the sibling files
       // with it. So the child is ended by its pid first; a child that is gone has no console to list.
-      // The pid is named only while the hold says the child runs.
-      if (inbox && (hold ? hold.alive() : !childExited)) { try { process.kill(proc.pid); } catch { /* gone already */ } }
+      // The pid is named only while the hold says the child runs. With no hold nothing says whose
+      // the pid is, and nothing can be waited on: no pid is named and no console is listed.
+      if (!hold) {
+        refuse('no hold on the child (the procIdentity addon is not built), so its terminal on the inbox conhost is not closed:'
+          + ' the close ends every process on the console of a pid, and nothing says that pid is still the child\'s', error);
+        return;
+      }
+      if (!hold.alive()) { close(error, value); return; }
+      try { process.kill(proc.pid); } catch { /* gone already */ }
+      // FLAKE-NODEPTY-CONSOLE-LIST-KILL-HARNESSALIVE-NOBODY: that kill returns at once, and the child
+      // is on the owner's console until it has gone. The terminal is closed only after that.
+      offConsole(proc.pid, hold).then(() => close(error, value), (stuck) => refuse(stuck.message, error));
+    }
+    function close(error, value) {
       try { proc.kill(); } catch { /* child already exited */ }
       // The hold goes after the last kill that names the pid: node-pty's kill lists the console
       // from a helper it forks, so not before the teardown has settled.
@@ -124,7 +183,6 @@ function childBytes(input, { file = process.execPath, env = process.env, onSpawn
       if (!wrote && output.includes('READY')) { wrote = true; proc.write(input); }
     });
     proc.onExit(({ exitCode }) => {
-      childExited = true;
       if (!/BYTES:/.test(output)) finish(new Error(`PTY child exited ${exitCode}: ${output}`));
     });
   });
