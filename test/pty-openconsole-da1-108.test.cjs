@@ -150,7 +150,8 @@ async function eagainCell(id, rootLivesMs) {
   const { PtyManager } = loadTs('src/main/pty.ts');
   const m = new PtyManager();
   const pidFile = path.join(dir, 'root.pid');
-  fs.writeFileSync(path.join(dir, 'gone.cjs'), `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));` + (rootLivesMs ? `setTimeout(() => {}, ${rootLivesMs});` : ''));
+  // The root writes its pid under another name and renames it into place: readPid sees no file or the whole pid, never a part of one.
+  fs.writeFileSync(path.join(dir, 'gone.cjs'), `const fs = require('fs'); fs.writeFileSync(${JSON.stringify(`${pidFile}.tmp`)}, String(process.pid)); fs.renameSync(${JSON.stringify(`${pidFile}.tmp`)}, ${JSON.stringify(pidFile)});` + (rootLivesMs ? `setTimeout(() => {}, ${rootLivesMs});` : ''));
   const readPid = () => { try { return Number(fs.readFileSync(pidFile, 'utf8')) || 0; } catch { return 0; } };
   const thrown = [];
   const onUncaught = (e) => thrown.push(`${e && e.code} ${e && e.message}`);
