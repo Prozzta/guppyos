@@ -34,6 +34,9 @@ const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
 const { readSource } = require('./read-source.cjs');
 const { tempDir } = require('./tools/test-temp.cjs');
+// The PTY root is a CONSOLE node: on the Electron leg process.execPath is electron.exe (GUI), which
+// no pseudo-console attaches (D1, the inbox conhost, never got the root's first output).
+const { consoleNode } = require('./tools/console-node.cjs');
 
 const PTYF = 'src/main/pty.ts';
 const KILLF = 'src/main/procKill.ts';
@@ -253,7 +256,7 @@ if (!WIN) {
     let root = 0;
     let letReport = () => {};
     try {
-      const r = await m.spawn({ id, cwd: DIR, command: process.execPath, args: [path.join(DIR, 'root.js')], cols: 80, rows: 24, env: {} }, owner);
+      const r = await m.spawn({ id, cwd: DIR, command: consoleNode().file, args: [path.join(DIR, 'root.js')], cols: 80, rows: 24, env: {} }, owner);
       assert.ok(r.ok, `spawn: ${r.error}`);
       const session = m.sessions.get(id);
       const proc = session.proc;
@@ -287,7 +290,30 @@ if (!WIN) {
         if (holding) { pending = () => deliver(this, code); return undefined; }
         return deliver(this, code);
       };
-      letReport = () => { holding = false; const p = pending; pending = null; if (p) p(); };
+      // On the bundled OpenConsole (useConptyDll, PTY-CONHOST-ORPHAN option A) node-pty tells the
+      // product of the exit by a SECOND route: the host closes the output pipe once its last client
+      // has gone, and the socket's close emits 'exit' (windowsTerminal.js), whether or not the wait
+      // thread's report has run. Holding only the report left that close free: under load it landed
+      // before kill(), the product's onExit dropped the session, and kill() found "no pty" (suite
+      // -r8). So the window holds both, and the scenario can wait for the close to be held.
+      let pendingExit = null;
+      let onExitHeld = null;
+      const exitHeld = new Promise((resolve) => { onExitHeld = resolve; });
+      const emit = proc.emit;
+      proc.emit = function emitHeld(ev, ...a) {
+        if (ev === 'exit' && holding) {
+          // re-read the code at delivery, as node-pty would have had the close come after the report
+          pendingExit = () => emit.call(this, 'exit', this._agent.exitCode, ...a.slice(1));
+          onExitHeld();
+          return true;
+        }
+        return emit.call(this, ev, ...a);
+      };
+      letReport = () => {
+        holding = false;
+        const p = pending; pending = null; if (p) p();
+        const e = pendingExit; pendingExit = null; if (e) e();
+      };
       rawClose = proc.kill.bind(proc);
       proc.kill = (...a) => { closes += 1; onClose(); return rawClose(...a); };
       // node-pty's kill() on the inbox conhost asked for the root's console process list and killed
@@ -302,7 +328,7 @@ if (!WIN) {
       if (session.hold) { const release = session.hold.release; session.hold.release = () => { releases += 1; release(); }; }
       /** End the root for real. It is running, so the pid is its own. */
       const endRoot = () => { assert.equal(REAL.rootState(proc), 'running', 'the root is running when the scenario ends it'); realKill.call(process, root); };
-      return await scenario({ m, id, root, proc, session, dead, reported, exited, closed, endRoot, letReport, atReport: (h) => hooks.push(h), closes: () => closes, releases: () => releases, swept });
+      return await scenario({ m, id, root, proc, session, dead, exitHeld, reported, exited, closed, endRoot, letReport, atReport: (h) => hooks.push(h), closes: () => closes, releases: () => releases, swept });
     } finally {
       reused.delete(root); vacant.delete(root);
       answers = [];
@@ -318,12 +344,16 @@ if (!WIN) {
   const W = {
     /** (a) THE CARD. The root is dead, node-pty has closed its handle, the exit report has not run,
      *  and something is alive under the root's old pid. kill() arrives now. */
-    window: (Pty) => withTerminal(Pty, { holdBack: true }, async ({ m, id, root, proc, dead, closed, endRoot, letReport }) => {
+    window: (Pty) => withTerminal(Pty, { holdBack: true }, async ({ m, id, root, proc, dead, exitHeld, closed, endRoot, letReport }) => {
       endRoot();
       await within(dead, "node-pty's wait thread to see the root dead");
+      // the worst order, every run: the host's output close has come too (and is held back)
+      await within(exitHeld, "the host's output close (node-pty's 'exit', held back)");
       assert.equal(REAL.rootState(proc), 'running', "the window is real: the root is dead and node-pty's report still reads 'running'");
+      assert.ok(m.sessions.has(id), 'the window is real: the product has not been told of the exit by either route');
       reused.add(root);
-      assert.ok(m.kill(id).ok, 'kill()');
+      const killed = m.kill(id);
+      assert.ok(killed.ok, `kill(): ${killed.error}`);
       await within(closed, 'the ConPTY close');
       await turns(3);
       assert.equal(sweepsOf(root), 0, `IN THE WINDOW NO SWEEP NAMES THE PID: the root was dead, its exit not yet reported, another process alive under pid ${root}, and taskkill /T /F was pointed at it (${sweepsOf(root)} sweep(s))`);
@@ -351,9 +381,12 @@ if (!WIN) {
       assert.equal(closes(), 1, 'THE CONPTY IS STILL CLOSED ONCE by the quit');
     }),
     /** (c) Quit inside the window. */
-    quitWindow: (Pty) => withTerminal(Pty, { holdBack: true }, async ({ m, root, dead, endRoot, letReport }) => {
+    quitWindow: (Pty) => withTerminal(Pty, { holdBack: true }, async ({ m, id, root, dead, exitHeld, endRoot, letReport }) => {
       endRoot();
       await within(dead, "node-pty's wait thread to see the root dead");
+      await within(exitHeld, "the host's output close (node-pty's 'exit', held back)");
+      // else the quit finds no session and "names nothing" by never seeing the terminal
+      assert.ok(m.sessions.has(id), 'the window is real: the product has not been told of the exit by either route');
       reused.add(root);
       const quit = m.killAllAsync(2_000);
       letReport();
