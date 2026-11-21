@@ -109,7 +109,15 @@ export interface HeavyJobChannel {
   close(): void;
   /** HEAVY-LOCK-RELEASE-LAG-197: the helper's unsolicited lines ({"event": ...}), never a reply. */
   onEvent?(fn: (e: Record<string, unknown>) => void): void;
+  /** HEAVYCPU-SERVE-REQ-TIMEOUT-DROPS-ALL-JOBS-108: the helper behind this channel is gone (its
+   *  process ended or its pipe broke). A request that was only not answered in time does not set it. */
+  dead?(): boolean;
 }
+
+/** HEAVYCPU-SERVE-REQ-TIMEOUT-DROPS-ALL-JOBS-108: this many requests in a row with no answer from a
+ *  helper that still runs, and it is taken as wedged and replaced (any answer starts the count
+ *  again). One unanswered request closes nothing: the helper still holds every job. */
+export const HEAVY_JOB_UNANSWERED_DEAD = 3;
 
 /** The real channel: the helper's serve mode on stdin/stdout. Requests are answered in order. */
 export function serveChannel(exe: string): HeavyJobChannel {
@@ -148,7 +156,8 @@ export function serveChannel(exe: string): HeavyJobChannel {
       });
     },
     close() { try { child.stdin.end(); } catch { /* gone */ } },
-    onEvent(fn) { onEvent = fn; }
+    onEvent(fn) { onEvent = fn; },
+    dead() { return dead; }
   };
 }
 
@@ -181,6 +190,8 @@ interface TrackedJob {
   empty: boolean;
   /** A notice that landed while `empty` was set and was dropped: a list that keeps the job must judge it. */
   missed: boolean;
+  /** The helper that holds the job's handle: when that helper is replaced the job cannot be read again. */
+  ch: HeavyJobChannel;
 }
 
 /** The jobs Guppy made for heavy calls: created before the call, changed live, let go when done. */
@@ -188,6 +199,8 @@ export class HeavyJobs {
   private ch: HeavyJobChannel | null = null;
   private readonly jobs = new Map<string, TrackedJob>();
   private seq = 0;
+  /** Requests in a row the current helper did not answer. */
+  private unanswered = 0;
   private timer: unknown = null;
   private readonly now: () => number;
 
@@ -210,9 +223,39 @@ export class HeavyJobs {
     const ch = this.channel();
     if (!ch) return null;
     const r = await ch.request(line);
-    // A dead helper is started again on the next request.
-    if (r === null && this.ch === ch) { ch.close(); this.ch = null; }
-    return r;
+    if (this.ch !== ch) return r;   // replaced meanwhile: its jobs are already let go
+    if (r !== null) { this.unanswered = 0; return r; }
+    // HEAVYCPU-SERVE-REQ-TIMEOUT-DROPS-ALL-JOBS-108: no answer in time is not a dead helper. Closing
+    // the channel ends the helper and with it the handle of EVERY job it holds, so the helper is
+    // replaced only when it is gone, or wedged (HEAVY_JOB_UNANSWERED_DEAD in a row with no answer).
+    const gone = ch.dead?.() === true;
+    if (!gone && ++this.unanswered < HEAVY_JOB_UNANSWERED_DEAD) return null;
+    this.replace(ch, gone ? 'helper-dead' : 'helper-unanswered');
+    return null;
+  }
+
+  /** The helper is closed and started again on the next request. Its job handles went with it and a
+   *  new helper cannot read those jobs, so each is let go as lost. */
+  private replace(ch: HeavyJobChannel, why: string): void {
+    try { ch.close(); } catch { /* gone */ }
+    this.ch = null;
+    this.unanswered = 0;
+    for (const j of [...this.jobs.values()]) if (j.ch === ch) this.lose(j, why);
+  }
+
+  /** A job nobody can read any more is no longer tracked. Its exit is NOT told: processes of the
+   *  call may still run, and telling it frees the heavy slot at once. The lock's own watcher frees it. */
+  private lose(j: TrackedJob, why: string): void {
+    if (this.jobs.get(j.id) !== j) return;
+    this.cancelConfirm(j);
+    this.jobs.delete(j.id);
+    this.log({ action: 'lost', job: j.id, agentId: j.agentId, why });
+    if (!this.jobs.size) this.disarm();
+  }
+
+  /** The helper's own answer that it holds no job of this id (guppy-heavyjob.cs list/set/query). */
+  private noJob(r: Record<string, unknown> | null, id: string): boolean {
+    return r !== null && r.ok === false && r.error === `no job ${id}`;
   }
 
   /** A heavy call that is not wrapped because its agent asks its user before running commands
@@ -235,15 +278,20 @@ export class HeavyJobs {
     // 5000 means 50% of all logical processors. Under the legacy heavyJobsHalfCores affinity job
     // that equals the affinity ceiling, so the rate cap adds nothing there; with half-cores off it
     // bites against the full set. Keep the shipped half-machine rate unchanged.
+    const ch = this.channel();
     const r = await this.req(`create ${id} ${o.background ? 1 : 0} ${o.cap ? 1 : 0}`);
     // Not created: the join line still makes the job with these limits itself (the options hold);
     // only a later live change cannot reach it.
-    if (r?.ok === true) {
-      this.jobs.set(id, { id, agentId, startMs: start, idleScans: 0, started: false, callId, exited: false, confirm: null, noticeAt: null, empty: false, missed: false });
+    const held = r?.ok === true && ch !== null && this.ch === ch;   // not held when its helper was replaced meanwhile
+    // An unanswered create may still be carried out late by a helper that is kept: the job is not
+    // tracked, so its handle is dropped (best effort, not waited for).
+    if (r === null && ch !== null && this.ch === ch) void this.req(`close ${id}`);
+    if (held && ch) {
+      this.jobs.set(id, { id, agentId, startMs: start, idleScans: 0, started: false, callId, exited: false, confirm: null, noticeAt: null, empty: false, missed: false, ch });
       this.arm();
       if (callId) this.tell(agentId, callId, id, 'held');
     }
-    this.log({ action: 'wrap', agentId, job: id, background: o.background, cap: o.cap, rate: o.cap ? HEAVY_CPU_CAP_RATE : 0, held: r?.ok === true });
+    this.log({ action: 'wrap', agentId, job: id, background: o.background, cap: o.cap, rate: o.cap ? HEAVY_CPU_CAP_RATE : 0, held });
     return wrapped;
   }
 
@@ -262,8 +310,11 @@ export class HeavyJobs {
    *  Settings change still reaches it, until HEAVY_JOB_UNSTARTED_MS. */
   async poll(): Promise<void> {
     for (const j of [...this.jobs.values()]) {
+      if (this.jobs.get(j.id) !== j) continue;   // let go while an earlier job was asked about
       const r = await this.req(`list ${j.id}`);
-      if (!r || r.ok !== true || !Array.isArray(r.rows)) continue; // unknown: no miss counted
+      if (this.jobs.get(j.id) !== j) continue;   // lost with its helper
+      if (this.noJob(r, j.id)) { this.lose(j, 'no-job'); continue; }   // the helper holds no such job: it can never be read
+      if (!r || r.ok !== true || !Array.isArray(r.rows)) continue; // unanswered or failed: says nothing, no miss counted
       const rows = r.rows as HeavyJobRow[];
       if (rows.length) j.started = true;
       else if (!j.started) {
@@ -322,6 +373,8 @@ export class HeavyJobs {
   private async confirmExit(j: TrackedJob): Promise<void> {
     if (j.exited || this.jobs.get(j.id) !== j) return;
     const r = await this.req(`list ${j.id}`);
+    if (this.jobs.get(j.id) !== j) return;   // lost with its helper
+    if (this.noJob(r, j.id)) { this.lose(j, 'no-job'); return; }
     if (!r || r.ok !== true || !Array.isArray(r.rows)) { j.empty = false; if (j.missed) { j.missed = false; this.armConfirm(j); } return; }   // a failed list says nothing: later notices count again, and a notice dropped under the mark is judged
     if (j.confirm !== null || this.jobs.get(j.id) !== j) return;   // a newer notice re-armed it, or it was let go
     const left = this.own(j, r.rows as HeavyJobRow[]).length;
