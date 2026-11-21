@@ -31,7 +31,11 @@ function git(cwd, args, env = {}) {
   return execFileSync('git', args, { cwd, encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 'test', GIT_AUTHOR_EMAIL: 'test@example.com', GIT_COMMITTER_NAME: 'test', GIT_COMMITTER_EMAIL: 'test@example.com', ...env } }).trim();
 }
 
-test('async world snapshot confirms refs, flags missing refs and git changes, and ignores unknown/touch-only state', async (t) => {
+// FLAKE-CLAIMS-WORLD-SNAPSHOT-34-108: the cell's verdicts must not hang on the wall clock. Under
+// suite load the real git children can use up the product's 1.5 s snapshot deadline; then the
+// product rightly leaves the rest unknown (no flag), and the cell read that as '+ undefined -
+// [changed-since]'. The deadline itself is pinned on an injected clock in claims-w4-delivery.test.cjs.
+async function worldCell(t) {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'claims-world-'));
   t.after(() => rmTree(cwd));
   git(cwd, ['init', '-q']);
@@ -66,4 +70,29 @@ test('async world snapshot confirms refs, flags missing refs and git changes, an
   assert.equal(unknownView.flags.existing, undefined);
   assert.equal(unknownView.flags.missing, undefined);
   assert.equal(unknownView.flags.changed, undefined);
+}
+
+test('async world snapshot confirms refs, flags missing refs and git changes, and ignores unknown/touch-only state', async (t) => {
+  await worldCell(t);
+});
+
+test('FLAKE-34: the same cell holds when the wall clock jumps past the snapshot deadline right after the first git call (cat-file)', async (t) => {
+  // A loaded machine, made exact: the moment the cat-file child closes, Date.now() is 10 s later.
+  const cp = require('node:child_process');
+  const realSpawn = cp.spawn;
+  const realNow = Date.now;
+  let jumped = false;
+  let catFiles = 0;
+  cp.spawn = function (...a) {
+    const child = realSpawn.apply(this, a);
+    if (Array.isArray(a[1]) && a[1].includes('cat-file')) {
+      catFiles++;
+      child.on('close', () => { jumped = true; });
+    }
+    return child;
+  };
+  Date.now = () => realNow() + (jumped ? 10_000 : 0);
+  try { await worldCell(t); }
+  finally { cp.spawn = realSpawn; Date.now = realNow; }
+  assert.ok(catFiles >= 1, `the jump hook saw the cat-file child (${catFiles})`);
 });
