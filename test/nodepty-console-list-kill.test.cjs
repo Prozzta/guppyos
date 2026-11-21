@@ -49,7 +49,7 @@ if (process.platform !== 'win32') {
 const { consoleNode } = require('./tools/console-node.cjs');
 
 const DRIVER = path.join(__dirname, 'tools', 'console-list-kill-driver.cjs');
-/** The driver's own work is about 10 s on a quiet machine (one 5 s give-up, three Electron starts, three console roots). */
+/** The driver's own work is about 15 s on a quiet machine (two 5 s give-ups, three Electron starts, three console roots). */
 const DRIVER_CAP_MS = 240000;
 
 let ran = null;
@@ -113,6 +113,18 @@ test('harness, inbox conhost: a GUI-subsystem child still alive when childBytes 
   NOBODY(c, 'the child of childBytes was alive at the give-up');
   assert.equal(c.endedByPid, true, 'childBytes ended its child by pid before node-pty\'s kill');
   assert.deepEqual(c.consoleAfter, [], `the child is gone after the close (its console holds ${JSON.stringify(c.consoleAfter)})`);
+});
+test('harness, inbox conhost: the by-pid end names the pid only while the hold on the child says it runs, and the hold is released after the kill', async () => {
+  const c = await kase('harnessAlive');
+  assert.equal(c.holdTaken, true, 'childBytes took a hold on its child at the spawn (procIdentity holdRoot)');
+  assert.equal(c.holdAskedBeforeKill, true, "the hold was asked before node-pty's kill, and said the child runs");
+  assert.equal(c.holdReleasedAfterKill, true, "the hold was released, and only after node-pty's kill");
+  const gone = await kase('harnessHoldSaysGone');
+  assert.equal(gone.holdTaken, true, 'childBytes took a hold on its child at the spawn');
+  assert.equal(gone.holdAskedBeforeKill, false, 'the hold was asked and answered "exited" (the driver answers for it)');
+  assert.equal(gone.aliveAtKill, true, "control: the child itself was alive at node-pty's kill");
+  assert.equal(gone.endedByPid, undefined, 'A PID IS NAMED ONLY WHILE IT IS HELD: the hold said the child had exited, and childBytes still ended that pid');
+  assert.equal(gone.holdReleasedAfterKill, true, "the hold was released, and only after node-pty's kill");
 });
 test('harness: a GUI-subsystem child that is gone when childBytes closes its terminal names nobody (pin)', async () => {
   const c = await kase('harnessGone');
