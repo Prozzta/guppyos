@@ -170,7 +170,10 @@ test('replay: the live floor of 2026-10-03 (anonymised) closes only on evidence 
 async function floor(t) {
   const home = fs.mkdtempSync(path.join(JAIL, 'floor-'));
   const hive = new HiveManager(() => home, () => true);
-  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
+  // The ledger guard watches <home>/hive: stop it first, in this one hook, before the rm. node:test runs
+  // t.after hooks in registration order, so a later t.after(stopLedgerGuard) ran AFTER this rm, and
+  // Electron's rmSync fails ENOTEMPTY on a tree with a live watch handle.
+  t.after(async () => { hive.stopLedgerGuard(); hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true }); });
   await hive.ensureAgent({ id: 'god-1', name: 'Michael', provider: 'claude', cwd: home, isGod: true });
   await hive.ensureAgent({ id: 'andy-1', name: 'Andy', provider: 'claude', cwd: home });
   return { hive };
@@ -179,8 +182,7 @@ const inboxCount = (hive, id) => fs.readdirSync(path.join(hive.root(), 'agents',
 
 test('hive: auto-closes by card and by conversation, logs each reason, writes no mail, is idempotent', async (t) => {
   const { hive } = await floor(t);
-  hive.startLedgerGuard();
-  t.after(() => hive.stopLedgerGuard());
+  hive.startLedgerGuard(); // stopped by floor()'s after-hook, before its rm
   await hive.addTask({ id: 'SHIP-IT-1', title: 'ship', status: 'doing', dependsOn: [] });
   await hive.addTask({ id: 'DONE-BEFORE-1', title: 'old', status: 'done', dependsOn: [], doneAt: new Date(Date.now() - H).toISOString() });
   // C90-MAILCARD: an agent's message names its card (MISC-1, a neutral card); god's direct mail says card "none".
