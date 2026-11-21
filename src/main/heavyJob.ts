@@ -1913,7 +1913,10 @@ function loopPlan(segs: string[], ops: number[], d: ShellDialect, mult = 1): Arr
  * same serial suite as the loop written inline (it was light: the loop body held only `run "$f"`).
  * expandCalls leaves every segment where it is (a definition's body is still classified where it is
  * defined, called or not) and puts after each call the body that call runs, its positionals filled
- * from the call's words, so loopPlan and bgLoop see what each round runs. A body is not inlined:
+ * from the call's words, so loopPlan and bgLoop see what each round runs. A body keeps its own `&`
+ * unless the call (or one above it) is backgrounded, which already counts that process once (Jim
+ * MUST 1, 99238882: `w(){ sleep 100 & }; for i in 1 2 3 4; do w; done` is the inline bench). A body
+ * is not inlined:
  * - for a function defined with a `( )` body (a subshell function; rare), or when the call is behind
  *   `env`, `timeout`, `nohup`, `exec` or `command` (those run a program, never a shell function);
  * - for its heredoc segments (their text was classified at the definition).
@@ -1922,7 +1925,9 @@ function loopPlan(segs: string[], ops: number[], d: ShellDialect, mult = 1): Arr
  * inside a body (Jim MUST: `outer(){ inner; }; inner(){ node --test "$1"; }; for ...; do outer; done`
  * runs the inner defined by then), or else against the functions an outer shell passed in (ctx.funcs).
  * A recursive call, FUNC_DEPTH nested calls or past PLAN_CAP inlined segments: a function that can
- * reach node --test makes the command a suite (an unbounded run the lock cannot count), else it stays.
+ * reach node --test makes the command a suite (an unbounded run the lock cannot count); one that can
+ * background a process under a call that is not backgrounded is an exclusive bench (fail closed);
+ * else it stays.
  * A backgrounded call (`run "$f" &`) keeps its `&` and the body it runs has none: the call is one
  * background process, as bgLoop counts it (Jim SHOULD 1: the same class as the inline `node ... &`).
  */
@@ -2017,23 +2022,36 @@ function expandCalls(segs: string[], ops: number[], d: ShellDialect, inherited?:
     seen.add(name);
     return fn.body.some((s) => { if (NODE_TEST(s)) return true; const c = callOf(s, d); return !!c && reaches(c.name, at, seen); });
   };
+  // Jim MUST 1 (99238882): whether a call of `name` starts a background process of its own.
+  const backgrounds = (name: string, at: number, seen = new Set<string>()): boolean => {
+    const fn = lookup(name, at);
+    if (!fn || seen.has(name)) return false;
+    seen.add(name);
+    return fn.body.some((s) => { if (/\s&$/.test(s)) return true; const c = callOf(s, d); return !!c && backgrounds(c.name, at, seen); });
+  };
   let budget = 0;
-  // The segments a call of `name` at outermost site `at` runs, or the suite class.
-  const inline = (name: string, fn: ShFunc, args: string[], at: number, stack: string[]): string[] | HeavyClass => {
+  // The segments a call of `name` at outermost site `at` runs, or the suite class. `bg`: the call
+  // (or a call above it) is backgrounded, so that `&` already counts the process once and the body's
+  // own `&` is dropped; otherwise the body keeps its `&` and bgLoop counts it (Jim MUST 1).
+  const inline = (name: string, fn: ShFunc, args: string[], at: number, stack: string[], bg: boolean): string[] | HeavyClass => {
     // A self-call needs no guard of its own: it hits FUNC_DEPTH (or PLAN_CAP) with the same verdict.
     if (stack.length >= FUNC_DEPTH || budget > PLAN_CAP) {
-      return reaches(name, at) ? { heavy: true, kind: 'suite', why: `a shell function ${name} that runs node --test ${stack.includes(name) ? 'calls itself' : 'through calls the lock cannot count'}` } : [];
+      if (reaches(name, at)) return { heavy: true, kind: 'suite', why: `a shell function ${name} that runs node --test ${stack.includes(name) ? 'calls itself' : 'through calls the lock cannot count'}` };
+      // Fail closed: the background processes past the cap cannot be counted.
+      if (!bg && backgrounds(name, at)) return { heavy: true, kind: 'bench', exclusive: true, why: `a shell function ${name} that backgrounds processes through calls the lock cannot count` };
+      return [];
     }
     const shifty = fn.body.some((s) => SHIFTY.test(s));
     const res: string[] = [];
     for (let k = 0; k < fn.body.length; k++) {
       if (fn.ops[k] > 0) continue;
-      const seg = fillArgs(fn.body[k].replace(/\s&$/, ''), args, shifty);
+      const own = /\s&$/.test(fn.body[k]);
+      const seg = fillArgs(bg ? fn.body[k].replace(/\s&$/, '') : fn.body[k], args, shifty);
       res.push(seg); budget++;
       const c = callOf(seg, d);
       const inner = c && lookup(c.name, at);
       if (!c || !inner) continue;
-      const r = inline(c.name, inner, c.args, at, [...stack, name]);
+      const r = inline(c.name, inner, c.args, at, [...stack, name], bg || own);
       if (!Array.isArray(r)) return r;
       res.push(...r);
     }
@@ -2048,7 +2066,7 @@ function expandCalls(segs: string[], ops: number[], d: ShellDialect, inherited?:
     const c = callOf(segs[si], d);
     const fn = c && lookup(c.name, si);
     if (!c || !fn) continue;
-    const r = inline(c.name, fn, c.args, si, []);
+    const r = inline(c.name, fn, c.args, si, [], /\s&$/.test(segs[si]));
     if (!Array.isArray(r)) return r;
     for (const s of r) { outSegs.push(s); outOps.push(0); }
   }

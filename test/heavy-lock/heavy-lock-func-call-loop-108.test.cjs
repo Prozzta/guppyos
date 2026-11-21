@@ -115,6 +115,27 @@ const K = {
       pick(M.classifyCommand('for i in 1 2 3; do node --test a.test.cjs & done', 0, {})), `${T}: three backgrounded calls are not counted twice`);
     light(M, 'run(){ node --test a.test.cjs; }; for i in 1 2 3; do run & done', `${T}: three backgrounded calls`);
   },
+  bodyBg(M) {
+    // Jim MUST 1 (99238882): a body's own & is kept when the call is not backgrounded.
+    const T = 'A BODY THAT BACKGROUNDS IS CLASSED AS THE INLINE BACKGROUNDED LOOP';
+    const four = 'a.test.cjs b.test.cjs c.test.cjs d.test.cjs';
+    const w = same(M, 'w(){ sleep 100 & }; for i in 1 2 3 4; do w; done', 'for i in 1 2 3 4; do sleep 100 & done', T);
+    assert.equal(w.exclusive, true, `${T}: four backgrounding calls are an exclusive bench`);
+    same(M, `run(){ node --test "$1" & }; for f in ${four}; do run "$f"; done`, `for f in ${four}; do node --test "$f" & done`, `${T} (node --test)`);
+    // Fail closed past FUNC_DEPTH: a chain of ten calls whose last body backgrounds.
+    const chain = Array.from({ length: 9 }, (_, i) => `f${i}(){ f${i + 1}; }; `).join('') + 'f9(){ sleep 100 & }; ';
+    same(M, `${chain}for i in 1 2 3 4; do f0; done`, 'for i in 1 2 3 4; do sleep 100 & done', `${T} (PAST THE DEPTH CAP)`);
+  },
+  bodyBgOnce(M) {
+    const T = 'A BACKGROUNDED PROCESS IS COUNTED ONCE';
+    const three = (fnCmd, tag) => assert.deepEqual(pick(M.classifyCommand(fnCmd, 0, {})),
+      pick(M.classifyCommand('for i in 1 2 3; do sleep 100 & done', 0, {})), `${T}: ${tag} (${JSON.stringify(fnCmd)})`);
+    three('w(){ sleep 100 & }; for i in 1 2 3; do w & done', 'A BACKGROUNDED CALL OF A BACKGROUNDING BODY');
+    three('inner(){ sleep 100 & }; w(){ inner & }; for i in 1 2 3; do w; done', 'A NESTED BACKGROUNDED CALL OF A BACKGROUNDING BODY');
+    const chain = Array.from({ length: 9 }, (_, i) => `f${i}(){ f${i + 1}; }; `).join('') + 'f9(){ sleep 100 & }; ';
+    three(`${chain}for i in 1 2 3; do f0 & done`, 'A BACKGROUNDED CALL PAST THE DEPTH CAP');
+    light(M, 'w(){ sleep 100 & }; for i in 1 2 3; do w & done', `${T}: three backgrounded calls of a backgrounding body`);
+  },
   shift(M) {
     const T = 'A BODY WITH SHIFT OR SET -- PUTS ALL ARGUMENTS IN EVERY POSITIONAL';
     same(M, `run(){ shift; node --test "$1"; }; for f in ${G}; do run x "$f"; done`, `for f in ${G}; do node --test x "$f"; done`, T);
@@ -154,6 +175,8 @@ test('EXPORT -F: exported functions reach bash -c and a script', () => K.exporte
 test('EXPORT -F: a function that is not exported does not reach bash -c', () => K.bashOnlyExported(HJ));
 test('EXPORT -F: a function that is not exported does not reach a script', () => K.scriptOnlyExported(HJ));
 test('JIM SHOULD 1: a backgrounded call is classed as the inline backgrounded loop', () => K.background(HJ));
+test('JIM MUST 1: a body that backgrounds is classed as the inline backgrounded loop', () => K.bodyBg(HJ));
+test('JIM MUST 1: a backgrounded process is counted once', () => K.bodyBgOnce(HJ));
 test('JIM SHOULD 2: shift / set -- put all arguments in every positional', () => K.shift(HJ));
 test('RECURSION: a self-calling node --test function is a suite', () => K.recursion(HJ));
 test('NOT WIDENED: calls that run one file, or no test, stay light', () => K.light(HJ));
@@ -201,8 +224,23 @@ const MUTANTS = [
     edits: [[`    if (q === "'") { if (c === "'") q = null; out += c; continue; }   // single-quoted: as written\n`, '']],
     killer: 'light', dies: /A \$1 IN SINGLE QUOTES OF A BODY IS NOT FILLED/ },
   { name: 'a body that cannot be inlined is light even when it reaches node --test',
-    edits: [["return reaches(name, at) ? { heavy: true, kind: 'suite'", "return false ? { heavy: true, kind: 'suite'"]],
+    edits: [["if (reaches(name, at)) return { heavy: true, kind: 'suite'", "if (false) return { heavy: true, kind: 'suite'"]],
     killer: 'recursion', dies: /A SELF-CALLING NODE --TEST FUNCTION IS A SUITE/ },
+  { name: "a body's own & is stripped again (Jim MUST 1)",
+    edits: [["fillArgs(bg ? fn.body[k].replace(/\\s&$/, '') : fn.body[k], args, shifty)", "fillArgs(fn.body[k].replace(/\\s&$/, ''), args, shifty)"]],
+    killer: 'bodyBg', dies: /A BODY THAT BACKGROUNDS IS CLASSED AS THE INLINE BACKGROUNDED LOOP: "w\(\)\{ sleep 100 & \}/ },
+  { name: "a body's own & is kept under a backgrounded call (counted twice)",
+    edits: [["fillArgs(bg ? fn.body[k].replace(/\\s&$/, '') : fn.body[k], args, shifty)", 'fillArgs(fn.body[k], args, shifty)']],
+    killer: 'bodyBgOnce', dies: /A BACKGROUNDED PROCESS IS COUNTED ONCE: A BACKGROUNDED CALL OF A BACKGROUNDING BODY/ },
+  { name: "a nested call under a body's own & is not seen as backgrounded (counted twice)",
+    edits: [['inline(c.name, inner, c.args, at, [...stack, name], bg || own)', 'inline(c.name, inner, c.args, at, [...stack, name], bg)']],
+    killer: 'bodyBgOnce', dies: /A BACKGROUNDED PROCESS IS COUNTED ONCE: A NESTED BACKGROUNDED CALL OF A BACKGROUNDING BODY/ },
+  { name: 'past the depth cap, a backgrounding body is light (not fail-closed)',
+    edits: [['if (!bg && backgrounds(name, at)) return', 'if (false) return']],
+    killer: 'bodyBg', dies: /A BODY THAT BACKGROUNDS IS CLASSED AS THE INLINE BACKGROUNDED LOOP \(PAST THE DEPTH CAP\)/ },
+  { name: 'past the depth cap, a backgrounded call of a backgrounding body is counted twice',
+    edits: [['if (!bg && backgrounds(name, at)) return', 'if (backgrounds(name, at)) return']],
+    killer: 'bodyBgOnce', dies: /A BACKGROUNDED PROCESS IS COUNTED ONCE: A BACKGROUNDED CALL PAST THE DEPTH CAP/ },
 ];
 
 test('MUTANT CENSUS: every mutant applies once and dies at the assertion that names its guarantee', async (t) => {
