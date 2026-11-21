@@ -462,11 +462,19 @@ async function liveRelease(t, o) {
   // false red, never a false green. null (never probed) fails by name in assertFreed.
   let shellRef = null; let shellAliveAtRelease = null;
   const lock = new HJ.HeavyJobLock({ limit: () => 1, log: (r) => { rows.push({ ...r, ts: Date.now() }); if (r.kind === 'heavy-lock' && r.action === 'release' && shellRef) { try { process.kill(shellRef.pid, 0); shellAliveAtRelease = true; } catch { shellAliveAtRelease = false; } } } });
+  let over = false; const opened = [];
   const jobs = new Cm.HeavyJobs({
     platform: 'win32', options: () => ({ background: false, half: false }), exe: () => exe, log: (r) => rows.push({ ...r, ts: Date.now() }),
+    // ORPHAN-HEAVYJOB-SERVE-108: HeavyJobs.dispose() nulls its channel, but a poll or confirm still awaiting a reply
+    // calls req() again and channel() starts a NEW `serve` that nothing closes: its stdin stays open, the file's
+    // process stays up on it. So every channel opened is kept, and once the test is over a request gets a dead one.
+    channel: (x) => {
+      if (over) return { request: async () => null, close() {}, onEvent() {} };
+      const c = (Cm.serveChannel ?? C.serveChannel)(x); opened.push(c); return c;
+    },
     onJob: (e) => { if (e.state === 'held') lock.noteJob(e.agentId, e.callId, e.job); else lock.jobExited(e.agentId, e.callId, e.job); }
   });
-  t.after(() => jobs.dispose());
+  t.after(() => { over = true; jobs.dispose(); for (const c of opened) { try { c.close(); } catch { /* gone */ } } });
   assert.equal(lock.acquire(AGENT, BENCH, 'bash cut.sh', 'call-1', true).acquired, true);
   const wrapped = await jobs.begin(AGENT, { command: o.body }, false, 'call-1');
   assert.ok(wrapped, 'the call is wrapped');
