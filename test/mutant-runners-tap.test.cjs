@@ -225,7 +225,7 @@ test('runTests runs real node --test under TAP: pass, fail and a hang give SURVI
     assert.match(f.failures, /error: 'x'/, 'the real failing YAML (assertion message) is in failures');
     const h = hangRun(dir, hangPid);
     assert.equal(verdict(h), 'NO-RESULT', h.stdout);
-    assert.ok(fs.existsSync(hangPid), 'the hung node --test worker recorded its owned pid');
+    assert.ok(fs.existsSync(hangPid), `the hung node --test worker recorded its owned pid (${h.why})`);
     assert.throws(() => runTests(dir, ['pass.test.cjs'], { args: ['--test-reporter=spec'] }), /picks the reporter/);
   } finally {
     stopHangFixture(dir, hangPid);
@@ -236,6 +236,9 @@ test('runTests runs real node --test under TAP: pass, fail and a hang give SURVI
 // The kill ran on a clock started at the runner's spawn; the record waits for the runner to start, ask for its
 // heavy lease and start the worker. Under suite load the start alone outlasts the clock (the fc2fc215 suite,
 // 02:29-02:57Z). The slow start is modelled here: a preload holds the RUNNER, not its worker, for SLOW_START_MS.
+// The order now comes from the worker itself: it records the pid and THEN ends its runner (see hangRun), so
+// however late the runner starts, the record precedes the end of the run. The timeout path of runTests keeps
+// its own pin below, on a runner that never returns and so has no worker to race.
 const SLOW_START_MS = 4_000;
 test('HUNG-WORKER-PID: a runner that starts late still records the hung worker\'s owned pid (slow start modelled)', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mutant-runners-slow-'));
@@ -252,10 +255,31 @@ test('HUNG-WORKER-PID: a runner that starts late still records the hung worker\'
   }
 });
 
-/** The hang run: a node --test worker starts a detached child, records its pid, then never ends. */
+test('HUNG-WORKER-PID: a runner that never returns is ended by the timeout: NO-RESULT (ETIMEDOUT), no test file loaded', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mutant-runners-stuck-'));
+  try {
+    const stuck = path.join(dir, 'stuck-runner.cjs');
+    const loaded = path.join(dir, 'loaded.txt');
+    // the RUNNER blocks in its preload for ever, so it can never start a worker: nothing races the clock
+    fs.writeFileSync(stuck, 'if (!process.env.NODE_TEST_CONTEXT) for (;;) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);\n');
+    fs.writeFileSync(path.join(dir, 'never.test.cjs'), `require('node:fs').writeFileSync(${JSON.stringify(loaded)}, 'x');\nrequire('node:test')('fine', () => {});\n`);
+    const r = runTests(dir, ['never.test.cjs'], { timeout: 3_000, args: ['--require', stuck] });
+    assert.equal(verdict(r), 'NO-RESULT', r.stdout);
+    assert.equal(r.why, 'ETIMEDOUT');
+    assert.equal(fs.existsSync(loaded), false, 'the stuck runner never loaded a test file');
+  } finally {
+    removeFixture(dir);
+  }
+});
+
+/**
+ * The hang run: a node --test worker starts a detached child, records its pid, then ends its own RUNNER and
+ * never ends itself. The record precedes the end of the run by program order in one process. The timeout is
+ * the watchdog the pass and fail runs use; no assert depends on it firing.
+ */
 function hangRun(dir, hangPid, { args = [] } = {}) {
-  fs.writeFileSync(path.join(dir, 'hang.test.cjs'), `const fs = require('node:fs'); const { spawn } = require('node:child_process');\nconst survivor = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { cwd: process.cwd(), detached: true, stdio: 'ignore' }); survivor.unref();\nfs.writeFileSync(${JSON.stringify(hangPid)}, \`${'${survivor.pid}'} ${'${Date.now()}'}\`);\nrequire('node:test')('never ends', () => new Promise(() => setInterval(() => {}, 1000)));\n`);
-  return runTests(dir, ['hang.test.cjs'], { timeout: 3_000, args });
+  fs.writeFileSync(path.join(dir, 'hang.test.cjs'), `const fs = require('node:fs'); const { spawn } = require('node:child_process');\nconst survivor = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { cwd: process.cwd(), detached: true, stdio: 'ignore' }); survivor.unref();\nfs.writeFileSync(${JSON.stringify(hangPid)}, \`${'${survivor.pid}'} ${'${Date.now()}'}\`);\nprocess.kill(process.ppid);\nrequire('node:test')('never ends', () => new Promise(() => setInterval(() => {}, 1000)));\n`);
+  return runTests(dir, ['hang.test.cjs'], { timeout: 120_000, args });
 }
 function stopHangFixture(dir, hangPid) {
   if (fs.existsSync(hangPid)) {
