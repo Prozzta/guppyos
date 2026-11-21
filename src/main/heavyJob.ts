@@ -304,9 +304,11 @@ function segments(cmd: string, d: ShellDialect = 'sh'): string[] {
     // cmd's `^` escapes the next character (`^&` is a literal &, not a separator).
     if (d === 'cmd' && c === '^') { cur += c + (cmd[i + 1] ?? ''); i++; continue; }
     if (d === 'cmd' && c === ';') { cur += c; continue; }   // not a separator in cmd
-    // HEAVY-LOCK-XARGS-FIND-EXEC-LOOP-108: sh's `\;` is a literal `;` (find's -exec terminator), not a
-    // separator: `find t -exec a {} \; -exec node --test {} \;` cut the second -exec off its find.
-    if (d === 'sh' && c === '\\' && cmd[i + 1] === ';') { cur += '\\;'; i++; continue; }
+    // HEAVY-LOCK-XARGS-FIND-EXEC-LOOP-108: outside quotes sh's `\` takes the next character literally,
+    // so `\;` (find's -exec terminator) is no separator: `find t -exec a {} \; -exec node --test {} \;`
+    // cut the second -exec off its find. `\\` is one escaped backslash (Jim MUST 1: in `echo \\; npm
+    // test` the `;` separates). A `\` before a newline is left to the newline rule as before.
+    if (d === 'sh' && c === '\\' && i + 1 < cmd.length && cmd[i + 1] !== '\n') { cur += c + cmd[i + 1]; i++; continue; }
     // HEAVY-CLASSIFIER-EDGES N2: an unquoted `#` at a word start comments out the rest of the line
     // (an apostrophe in a comment used to open a "quote" that swallowed the following lines).
     if (d === 'sh' && c === '#' && (i === 0 || /\s/.test(cmd[i - 1]))) { while (i + 1 < cmd.length && cmd[i + 1] !== '\n') i++; continue; }
