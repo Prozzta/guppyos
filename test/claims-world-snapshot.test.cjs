@@ -57,7 +57,10 @@ async function worldCell(t) {
     { v: 1, id: 'touched', t: 'claim', kind: 'fact', text: 'd', at: since, wt: since, agent: 'a', mac: 'm', prev: '', source: 'self', refs: [{ type: 'file', value: 'touched.txt' }] },
   ];
   const state = { v: 1, agent: 'a', registryHash: '', ledgerHead: '', conflicts: [], claims: Object.fromEntries(claims.map(c => [c.id, { id: c.id, status: 'live', sightings: 1, firstAt: since, lastAt: since, pinned: false, reasons: [] }])) };
-  const snapshot = await buildClaimsWorldSnapshot(claims, state, cwd);
+  // A test clock that never moves: the shared deadline cannot run out under load, so the verdicts
+  // below are the git answers. The product's deadline/default stay as they are (deadlineMs is not set).
+  const clock = { now: () => 0 };
+  const snapshot = await buildClaimsWorldSnapshot(claims, state, cwd, clock);
   const world = { now: since, taskStatus: () => null, fileExists: p => fs.existsSync(path.join(cwd, p)), commitExists: sha => snapshot.commits.get(sha) ?? true, fileChangedSince: (p, at) => snapshot.changedFiles.get(`${p}\0${at}`) ?? false, cardOutcomes: {} };
   const view = worldView(state, claims, [], world);
   assert.equal(view.flags.existing, undefined);
@@ -65,7 +68,7 @@ async function worldCell(t) {
   assert.deepEqual(view.flags.changed, ['changed-since']);
   assert.equal(view.flags.touched, undefined);
 
-  const unknown = await buildClaimsWorldSnapshot(claims, state, path.join(cwd, 'not-a-repository'));
+  const unknown = await buildClaimsWorldSnapshot(claims, state, path.join(cwd, 'not-a-repository'), clock);
   const unknownView = worldView(state, claims, [], { ...world, commitExists: sha => unknown.commits.get(sha) ?? true, fileChangedSince: (p, at) => unknown.changedFiles.get(`${p}\0${at}`) ?? false });
   assert.equal(unknownView.flags.existing, undefined);
   assert.equal(unknownView.flags.missing, undefined);
