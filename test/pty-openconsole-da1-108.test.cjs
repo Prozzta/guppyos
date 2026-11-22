@@ -250,6 +250,8 @@ test('EAGAIN, slow root: the answer is still written after the root has gone, ho
  * stream's own error path (so the 'error' event is raised by Node, a tick after the write, as for a real
  * failed write). Not destroy(): a destroyed socket fails writes with no 'error' event at all. The root
  * stays alive throughout, so no exit is involved. INPUT_HANG_MS only ends a hang, as a named failure.
+ * NOT the "said once" pin: one failed write ends the stream, so only one 'error' is ever raised here and
+ * a guard that said every error would pass. "Once per terminal" is pinned by the input-pipe guard cell below.
  */
 const INPUT_HANG_MS = 60_000;
 
