@@ -473,7 +473,7 @@ test('fixture git: a failed call says git\'s exit status and stderr, not a bare 
   const r = mirrorRepo('mc-say');
   assert.throws(() => r.g('add', 'no-such-file.txt'), (e) => {
     assert.match(e.message, /^git add no-such-file\.txt failed: status 128, signal null, /);
-    assert.match(e.message, /\.git lock files none, stderr: fatal: pathspec 'no-such-file\.txt' did not match any files$/);
+    assert.match(e.message, /\.git lock files none, stderr: fatal: .*no-such-file\.txt/); // git's own wording, any locale
     return true;
   });
 });
