@@ -178,6 +178,15 @@ function answerWriteRecord(proc, isExited) {
     }
   };
   input.on('error', (e) => mark(`input pipe error ${e && (e.code ?? e.message)}`));
+  // A destroyed socket fails a later write with ERR_STREAM_DESTROYED to the write's callback and raises NO
+  // 'error', so pty.ts says nothing. node-pty's kill() destroys this socket: record who ends it and when.
+  const destroy = input.destroy.bind(input);
+  input.destroy = (...a) => { mark('input socket destroy() called'); return destroy(...a); };
+  input.on('close', () => mark('input socket closed'));
+  if (typeof proc.kill === 'function') {
+    const kill = proc.kill.bind(proc);
+    proc.kill = (...a) => { mark('proc.kill called'); return kill(...a); };
+  }
   return { events, mark };
 }
 
