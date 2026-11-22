@@ -37,13 +37,13 @@ const settle = async () => { for (let i = 0; i < 5; i++) await new Promise((r) =
 
 /** The lock with dwight's PTY root (pid 10) always listed and, while `s.running`, a process of his
  *  attributed to it (pid 11). The nohup'd suite is NOT in the listing under his root: s.running false
- *  is exactly what the watcher saw. `s.listing` replaces the whole listing. */
+ *  is exactly what the watcher saw. `s.listing` replaces the whole listing; `s.fail` makes it fail. */
 function lockRig(L) {
   let now = 1_000_000; const logs = [];
-  const s = { running: false, listing: null };
+  const s = { running: false, listing: null, fail: false };
   const root = { pid: 10, parentPid: 1, commandLine: 'bash', createdMs: 1 };
   const kid = { pid: 11, parentPid: 10, commandLine: 'bash suite.sh', createdMs: 1_000_100 };
-  const probe = async () => s.listing ?? (s.running ? [root, kid] : [root]);
+  const probe = async () => (s.fail ? null : s.listing ?? (s.running ? [root, kid] : [root]));
   const l = new L.HeavyJobLock({
     limit: () => 1, now: () => now, setTimer: () => ({}), clearTimer: () => {}, log: (r) => logs.push(r),
     notify: () => {}, notifyLapse: () => {}, alive: () => true,
@@ -155,6 +155,24 @@ K.ttl = async ({ L }) => {
 };
 test('C2: the TTL is renewed past HEAVY_TTL_MS only while the job is tracked; once it is lost the renewal stops', () => K.ttl(BASE));
 
+// Jim MUST ddba39: the listing fails (probe-failed) for more than 2 x HEAVY_TTL_MS while the job is tracked.
+K.blind = async ({ L }) => {
+  const x = lockRig(L);
+  x.l.acquire('dwight', H, 'nohup bash suite.sh &', 'c1', true);
+  x.l.noteJob('dwight', 'c1', 'job-1');
+  x.s.fail = true;
+  const n = Math.ceil(2 * L.HEAVY_TTL_MS / L.HEAVY_SCAN_MS) + 3;
+  for (let i = 0; i < n; i++) await x.scanAfter(L.HEAVY_SCAN_MS);
+  assert.deepEqual(x.held(), ['dwight'], 'A TRACKED JOB IS SIGHTED ON A FAILED LISTING: still held past 2 x HEAVY_TTL_MS');
+  assert.deepEqual(x.rows('release'), [], 'A TRACKED JOB IS SIGHTED ON A FAILED LISTING: no release');
+  assert.equal(x.rows('ttl-blind').length, 0, 'A TRACKED JOB IS SIGHTED ON A FAILED LISTING: no ttl-blind');
+  assert.equal(x.rows('ttl-renewed').length, 2, 'A TRACKED JOB IS SIGHTED ON A FAILED LISTING: the TTL renewed each hour');
+  assert.equal(x.rows('probe-failed').length, n, 'control: every listing failed (one probe-failed row per scan)');
+  x.l.jobExited('dwight', 'c1', 'job-1');
+  assert.deepEqual(x.rows('release').map((r) => r.reason), ['job-exit'], 'the job exit frees it');
+};
+test('C8: a listing that fails for 2 x HEAVY_TTL_MS: a tracked job is still a sighting (renewed each hour, no ttl-blind); its exit frees it', () => K.blind(BASE));
+
 K.exited = async ({ L }) => {
   const x = lockRig(L);
   x.l.acquire('dwight', H, 'bash suite.sh', 'c1', false);
@@ -256,12 +274,13 @@ function mutateText(rel, edits, tag) {
 }
 
 const SCAN_LINE = '      if (busy.has(h.agentId) || this.heldJobRunning(h)) { h.misses = 0; h.seenRunning = true; h.seenAt = t; continue; }';
+const PRE_LINE = '    for (const h of held) if (this.holders.has(h.agentId) && this.heldJobRunning(h)) { h.misses = 0; h.seenRunning = true; h.seenAt = tj; }\n';
 const MUTANTS = [
-  { name: 'M1: scan() reads only the listing (the bug)', file: HJF, edits: [[SCAN_LINE, '      if (busy.has(h.agentId)) { h.misses = 0; h.seenRunning = true; h.seenAt = t; continue; }']],
+  { name: 'M1: scan() reads only the listing (the bug)', file: HJF, edits: [[PRE_LINE, ''], [SCAN_LINE, '      if (busy.has(h.agentId)) { h.misses = 0; h.seenRunning = true; h.seenAt = t; continue; }']],
     killer: 'nohup', dies: /A HELD JOB THAT HAS NOT EXITED KEEPS THE SLOT/ },
   { name: 'M2: the helper counts exited jobs as running', file: HJF, edits: [['[...js.values()].some((exited) => !exited));\n  }', '[...js.values()].some((exited) => exited));\n  }']],
     killer: 'exited', dies: /AN EXITED JOB IS NOT RUNNING/ },
-  { name: 'M3: a held job keeps the slot but is not a sighting (seenAt unset)', file: HJF, edits: [[SCAN_LINE, '      if (busy.has(h.agentId)) { h.misses = 0; h.seenRunning = true; h.seenAt = t; continue; }\n      if (this.heldJobRunning(h)) { h.misses = 0; h.seenRunning = true; continue; }']],
+  { name: 'M3: a held job keeps the slot but is not a sighting (seenAt unset)', file: HJF, edits: [[PRE_LINE, PRE_LINE.replace(' h.seenAt = tj;', '')], [SCAN_LINE, '      if (busy.has(h.agentId)) { h.misses = 0; h.seenRunning = true; h.seenAt = t; continue; }\n      if (this.heldJobRunning(h)) { h.misses = 0; h.seenRunning = true; continue; }']],
     killer: 'ttl', dies: /A TRACKED JOB RENEWS THE TTL/ },
   { name: 'M4: releaseHeld stops using the helper', file: HJF, edits: [['    if (this.heldJobRunning(cur)) running = true;\n', '']],
     killer: 'agree', dies: /RELEASE AND SCAN AGREE: heavy release refuses/ },
@@ -271,6 +290,8 @@ const MUTANTS = [
     killer: 'tells', dies: /HEAVYJOBS EMITS onJob 'lost' ONCE, WITH WHY \(helper-dead\)/ },
   { name: 'M6: the lock ignores \'lost\'', file: HJF, edits: [['    if (!h || !js || js.get(job) !== false) return;\n    js.delete(job);', '    if (!h || !js || js.get(job) !== false) return;\n    return;']],
     killer: 'lost', dies: /THE LOCK DROPS THE LOST JOB, LOGGED \(helper-dead\)/ },
+  { name: 'M7: the held-job sighting only after the probe-failed return (2262d076)', file: HJF, edits: [[PRE_LINE, '']],
+    killer: 'blind', dies: /A TRACKED JOB IS SIGHTED ON A FAILED LISTING/ },
 ];
 
 test('MUTANT CENSUS: every mutant applies once and dies at the assertion that names its guarantee', async (t) => {
