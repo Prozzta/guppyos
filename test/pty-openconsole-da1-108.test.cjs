@@ -118,131 +118,6 @@ test('an unattached PTY starts with no DA1 wait, the query never reaches the sin
   }
 });
 
-/** OpenConsole holds an unanswered DA1 for 3 s, then starts the root. A main thread that stays busy
- *  until the root has started AND gone writes the answer to a console that is going away: EAGAIN.
- *  FLAKE-PTY-OPENCONSOLE-DA1-EAGAIN-SAID-108: the wait is on that event, never on a time. A fixed
- *  4.5 s block left the root 1.5 s to start and go; on a loaded bench it was still there, took the
- *  answer without error, and nothing was said. No time decides the result here: ROOT_HANG_MS only
- *  ends a hang, as a failure that names which step never came. */
-const ROOT_HANG_MS = 60_000;
-const syncNap = (ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
-
-/** Blocks the calling thread until the root has written its pid and that pid is gone; returns the pid. */
-function blockUntilRootGone({ readPid, alive, nap = syncNap, now = Date.now, hangMs = ROOT_HANG_MS }) {
-  const t0 = now();
-  let pid = 0;
-  for (;;) {
-    if (!pid) pid = readPid();
-    if (pid && !alive(pid)) return pid;
-    if (now() - t0 >= hangMs) {
-      throw new Error(pid ? `HANG: THE ROOT NEVER EXITED (pid ${pid} still alive after ${hangMs} ms)` : `HANG: THE ROOT NEVER STARTED (no pid from it after ${hangMs} ms)`);
-    }
-    nap(20);
-  }
-}
-/** Alive by the process itself (exit code still pending), synchronously. pty.ts holds the root's handle
- *  until onExit, and onExit cannot run while this thread is blocked, so the pid cannot be reused meanwhile. */
-const pidAlive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { if (e.code === 'ESRCH') return false; throw e; } };
-
-/**
- * RECORD of the answer write (a diagnostic: no assert reads it). The suite red of 2026-11-22 (511b2eb3,
- * Electron leg) had the root gone and nothing said, and could not tell "the answer was never written"
- * from "it was written and the console took it". Each event: what happened, the loop turn it was in
- * (events with the same number had no check phase between them), ms since the record began, and
- * whether the terminal's exit had been reported by then. The write gets a callback only to learn how
- * it ended; node-pty passes none, and the pipe's 'error' event is raised with or without one.
- */
-function answerWriteRecord(proc, isExited) {
-  const events = [];
-  const t0 = Date.now();
-  let turn = 0; let armed = false;
-  const mark = (what) => {
-    events.push({ what, turn, ms: Date.now() - t0, exited: isExited() });
-    if (!armed) { armed = true; setImmediate(() => { armed = false; turn += 1; }); }
-  };
-  const call = proc.write.bind(proc);
-  proc.write = (data) => { mark(`proc.write called (${JSON.stringify(data)})`); return call(data); };
-  const input = proc._agent && proc._agent._inSocket;
-  if (!input || typeof input.write !== 'function') { mark('NO INPUT SOCKET TO RECORD'); return { events, mark }; }
-  const write = input.write.bind(input);
-  input.write = (data, ...rest) => {
-    mark('input write attempted');
-    const done = (err) => mark(err ? `input write ended with ${err.code ?? err.message}` : 'input write ended: the console took it');
-    try {
-      const r = rest.length ? write(data, ...rest) : write(data, done);
-      mark(`input write returned ${r}`);
-      return r;
-    } catch (e) {
-      mark(`input write threw ${e && (e.code ?? e.message)}`);
-      throw e;
-    }
-  };
-  input.on('error', (e) => mark(`input pipe error ${e && (e.code ?? e.message)}`));
-  // A destroyed socket fails a later write with ERR_STREAM_DESTROYED to the write's callback and raises NO
-  // 'error', so pty.ts says nothing. node-pty's kill() destroys this socket: record who ends it and when.
-  const destroy = input.destroy.bind(input);
-  input.destroy = (...a) => { mark('input socket destroy() called'); return destroy(...a); };
-  input.on('close', () => mark('input socket closed'));
-  if (typeof proc.kill === 'function') {
-    const kill = proc.kill.bind(proc);
-    proc.kill = (...a) => { mark('proc.kill called'); return kill(...a); };
-  }
-  return { events, mark };
-}
-
-/** One EAGAIN cell. `rootLivesMs` is how long the root stays after it starts: 0 is the empty script. */
-async function eagainCell(t, id, rootLivesMs) {
-  const dir = tempDir('ocin-');
-  const { PtyManager } = loadTs('src/main/pty.ts');
-  const m = new PtyManager();
-  const pidFile = path.join(dir, 'root.pid');
-  // The root writes its pid under another name and renames it into place: readPid sees no file or the whole pid, never a part of one.
-  fs.writeFileSync(path.join(dir, 'gone.cjs'), `const fs = require('fs'); fs.writeFileSync(${JSON.stringify(`${pidFile}.tmp`)}, String(process.pid)); fs.renameSync(${JSON.stringify(`${pidFile}.tmp`)}, ${JSON.stringify(pidFile)});` + (rootLivesMs ? `setTimeout(() => {}, ${rootLivesMs});` : ''));
-  const readPid = () => { try { return Number(fs.readFileSync(pidFile, 'utf8')) || 0; } catch { return 0; } };
-  const thrown = [];
-  const onUncaught = (e) => thrown.push(`${e && e.code} ${e && e.message}`);
-  process.on('uncaughtException', onUncaught);
-  const warn = console.warn; const said = [];
-  console.warn = (...a) => { said.push(a.join(' ')); };
-  let exited = false;
-  let rec = { events: [], mark: () => {} };
-  const sink = { isDestroyed: () => false, send: (ch) => { if (ch === `pty:exit:${id}`) { exited = true; rec.mark('exit reported'); } } };
-  try {
-    const r = await m.spawn({ id, cwd: dir, command: consoleNode().file, args: [path.join(dir, 'gone.cjs')], cols: 80, rows: 24, env: {} }, sink);
-    assert.ok(r.ok, `spawn: ${r.error}`);
-    // The answer goes out from the output handler, in the first turn after this block.
-    rec = answerWriteRecord(m.sessions.get(id).proc, () => exited);   // same turn as the spawn's end: nothing has been answered yet
-    rec.mark(`block begins (handshake chunks left ${m.sessions.get(id).handshakeChunks}: 8 = no output seen yet, 0 = the handshake was over before this record)`);
-    blockUntilRootGone({ readPid, alive: pidAlive });
-    rec.mark('block ends: the root\'s pid is gone');
-    // CONTROL, still in the blocked turn: what the root was when the answer is about to be written.
-    const rootPid = readPid();
-    const rootAliveAtWrite = rootPid ? pidAlive(rootPid) : null;
-    const t0 = Date.now();
-    while (!exited && Date.now() - t0 < 10_000) await new Promise((r2) => setTimeout(r2, 50));
-    await new Promise((r2) => setImmediate(r2));
-    assert.ok(exited, 'the terminal reported its exit');
-    assert.equal(rootAliveAtWrite, false, `THE ROOT HAD STARTED AND GONE BEFORE THE ANSWER WAS WRITTEN (pid ${rootPid}; null = it had not started; the root stays ${rootLivesMs} ms; said ${JSON.stringify(said)})`);
-    assert.deepEqual(thrown, [], 'NOTHING IS THROWN OUTSIDE A CALLER: the failed write meets the input pipe\'s error listener');
-    assert.ok(said.some((l) => /a write to terminal \d+ failed \(EAGAIN\)/.test(l)), `THE FAILED WRITE IS SAID (the root stays ${rootLivesMs} ms): ${JSON.stringify(said)}; ANSWER WRITE RECORD ${JSON.stringify(rec.events)}`);
-  } finally {
-    t.diagnostic(`ANSWER WRITE RECORD (${id}) ${JSON.stringify(rec.events)}`);
-    process.off('uncaughtException', onUncaught);
-    console.warn = warn;
-    await m.killAllAsync(5_000);
-    await removeDir(dir);
-  }
-}
-
-test('a write the console can no longer take is said, not thrown outside any caller (EAGAIN)', { skip: process.platform !== 'win32' }, (t) => eagainCell(t, 'ocin', 0));
-
-/** FLAKE-PTY-OPENCONSOLE-DA1-EAGAIN-SAID-108: the cell above needs the answer to be written AFTER the
- *  root has gone. A root that is slow to start or to exit (a loaded bench; here, one that stays 3 s)
- *  must not change the result: the write still comes after it has gone. */
-const SLOW_ROOT_LIVES_MS = 3_000;
-
-test('EAGAIN, slow root: the answer is still written after the root has gone, however long the root takes', { skip: process.platform !== 'win32' }, (t) => eagainCell(t, 'ocinslow', SLOW_ROOT_LIVES_MS));
-
 /**
  * FLAKE-PTY-OPENCONSOLE-DA1-EAGAIN-SAID-108, the contract without the console's timing: a write to a
  * REAL terminal's input pipe that fails is said once and never thrown outside a caller. The failure is
@@ -252,6 +127,12 @@ test('EAGAIN, slow root: the answer is still written after the root has gone, ho
  * stays alive throughout, so no exit is involved. INPUT_HANG_MS only ends a hang, as a named failure.
  * NOT the "said once" pin: one failed write ends the stream, so only one 'error' is ever raised here and
  * a guard that said every error would pass. "Once per terminal" is pinned by the input-pipe guard cell below.
+ * MEASURED, NOT GATED (2026-11-22, idle bench): when the root has exited, the DA1 answer written in the
+ * next turn ended with EAGAIN and the pipe raised 'error' in 12 of 12 records (and 5 of 5 before that);
+ * the exit was reported about 55 ms later. Two real-console cells used to gate that and were dropped:
+ * "the root's pid is gone" does not order "the console takes no more input" (node-pty's conpty.cc closes
+ * the console from its own threads after the root exits), so under load the write was once taken and
+ * nothing was said. No trigger orders the two, so the fact is recorded here and not tested.
  */
 const INPUT_HANG_MS = 60_000;
 
@@ -294,31 +175,6 @@ test('a failed write on a real terminal\'s input pipe is said once, not thrown o
     await m.killAllAsync(5_000);
     await removeDir(dir);
   }
-});
-
-test('EAGAIN wait: it ends on the root\'s exit and on nothing else; a hang fails and names its step', () => {
-  // A fake clock that only the nap moves: no real time passes.
-  const world = (goneAtMs, pidAtMs) => {
-    let t = 0; let naps = 0;
-    return { now: () => t, nap: (ms) => { t += ms; naps++; }, readPid: () => (t >= pidAtMs ? 4242 : 0), alive: () => t < goneAtMs, naps: () => naps, t: () => t };
-  };
-  // the root starts at 3 s and goes at 3.1 s: the wait ends there
-  let w = world(3_100, 3_000);
-  assert.equal(blockUntilRootGone(w), 4242);
-  assert.equal(w.t(), 3_100);
-  // a root that takes 40 s to go (a loaded bench): the wait is still on it, well past any fixed block
-  w = world(40_000, 3_000);
-  assert.equal(blockUntilRootGone(w), 4242);
-  assert.equal(w.t(), 40_000, 'THE WAIT ENDS AT THE ROOT\'S EXIT, NOT AT A TIME');
-  // a pid that is already gone when first read
-  w = world(0, 0);
-  assert.equal(blockUntilRootGone(w), 4242);
-  assert.equal(w.naps(), 0);
-  // hangs fail, each with its own cause; they never return
-  assert.throws(() => blockUntilRootGone(world(Infinity, 3_000)), /HANG: THE ROOT NEVER EXITED \(pid 4242 still alive after 60000 ms\)/);
-  assert.throws(() => blockUntilRootGone(world(Infinity, Infinity)), /HANG: THE ROOT NEVER STARTED \(no pid from it after 60000 ms\)/);
-  // a liveness check that fails for another reason is not read as 'gone'
-  assert.throws(() => pidAlive(-7.5), (e) => e.code !== 'ESRCH');
 });
 
 test('the input-pipe guard: one listener per terminal, said once; a node-pty without the socket is left alone', () => {
