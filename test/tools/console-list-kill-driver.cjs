@@ -76,7 +76,39 @@ process.kill = function kill(pid, signal) {
 let live = null;
 const forks = [];
 const realFork = cp.fork;
-cp.fork = function fork(...a) { const c = realFork.apply(this, a); forks.push(c.pid); return c; };
+/**
+ * FLAKE-NODEPTY-CONSOLE-LIST-KILL-HARNESSALIVE-NOBODY: the console lists that the HARNESS asks for
+ * before its close (node-pty's own, asked inside its kill, are not touched: `st.closed` is set by
+ * then). Every answer is written down. A case can script the first asks, or all of them: the driver
+ * then starts console-list-stub.cjs in place of the helper, which answers as a helper does that
+ * could not list the console. No load and no clock: the answer is the seam.
+ *   first   the answers of asks 1..n ('fails', 'empty', 'strangers', 'silent'); later asks are real
+ *   always  the answer of every ask
+ *   answered(n, mode, message)  called when the helper of ask n has ended, before the harness reads it
+ */
+let listSeam = null;
+const STUB = path.join(__dirname, 'console-list-stub.cjs');
+// node-pty's helper (what the harness asked before the fix) and the harness's own (after it).
+const isListHelper = (file) => ['conpty_console_list_agent', 'console-list-helper'].includes(path.basename(String(file)).replace(/\.c?js$/, ''));
+cp.fork = function fork(...a) {
+  const seam = listSeam && !listSeam.st.closed && isListHelper(a[0]) ? listSeam : null;
+  let mode = null;
+  if (seam) {
+    seam.asked += 1;
+    mode = seam.first[seam.asked - 1] || seam.always || null;
+    if (mode) { a[0] = STUB; a[1] = [mode]; }
+  }
+  const c = realFork.apply(this, a);
+  forks.push(c.pid);
+  if (seam) {
+    const n = seam.asked;
+    let got = null;
+    c.on('message', (m) => { got = m; });
+    // Registered before the harness's own listener, so it runs first: the case acts on an answer before the harness reads it.
+    c.on('exit', () => seam.answered(n, mode, got));
+  }
+  return c;
+};
 // The tree sweep (taskkill) is real, or answered as one that ended nothing: failed, or cut at its cap.
 const realSpawn = cp.spawn;
 let sweepEndsNothing = false;
@@ -234,12 +266,47 @@ let bystanderProc = null;
    * hold. With says 'gone' that is a child that has exited by itself and that its console still
    * lists for a while.
    */
-  const harness = async (key, prelude, { says = null, slow = false, leaves = false } = {}) => {
+  const harness = async (key, prelude, { says = null, slow = false, leaves = false, lists = null } = {}) => {
     named = []; sweeps = 0; sweepEndsNothing = false;
     const c = out.cases[key] = {};
     const marker = path.join(tmp, `${key}.up`);
     const st = { closed: false, sweep: null, onSweep: null };
     let root = null;
+    /**
+     * `lists` (see listSeam): { first, always, thenLeaves }. With thenLeaves the child is on its
+     * console until the first answer that is not scripted has come (a real list, which holds it),
+     * and the driver ends it right then, under its own hold, before the harness reads that answer.
+     * So "was the terminal closed before the child was ended" has one right answer, whatever the load.
+     */
+    const script = lists || {};
+    const endAfterScript = () => {
+      const mine = holds.get(root);
+      c.closedBeforeDriverKill = st.closed;
+      if (!mine || !mine.alive()) { c.driverKill = `not sent: ${mine ? "the driver's own hold says the child has exited" : 'no hold'}`; return; }
+      c.driverKill = 'sent at the first list answer that was not scripted';
+      try { realKill(root); } catch { /* gone */ }
+    };
+    c.harnessLists = [];
+    c.harnessListsAsked = 0;
+    listSeam = {
+      st, asked: 0, first: script.first || [], always: script.always || null,
+      answered: (n, mode, m) => {
+        const list = m && Array.isArray(m.consoleProcessList) ? m.consoleProcessList : null;
+        const empty = m && 'error' in m ? 'EMPTY, and the call did not fail' : 'EMPTY, or a failure that the helper hides';
+        // What the harness is about to read. Booleans, not names: a scripted list holds pids of nobody.
+        const line = {
+          n, by: mode ? `the driver's stub: ${mode}` : 'the real helper',
+          answer: !m ? 'NO MESSAGE' : m.error ? `FAILED: ${m.error}` : list && list.length === 0 ? empty : list ? 'a list' : 'not a list',
+          owner: Boolean(list && list.includes(process.pid)), child: Boolean(list && list.includes(root))
+        };
+        c.harnessListsAsked = n;
+        if (c.harnessLists.length < 8) c.harnessLists.push(line);
+        c.lastHarnessList = line;
+        if (!mode && script.thenLeaves && c.driverKill === undefined) endAfterScript();
+      }
+    };
+    // FLAKE-NODEPTY-...: what the child's own list call said, where its prelude made one (see `freed`).
+    const freedFile = path.join(tmp, `${key}.freed`);
     const leaveLate = () => {
       c.leavesArmed = true;
       setTimeout(() => {
@@ -271,10 +338,25 @@ let bystanderProc = null;
       });
       c.result = 'resolved';
     } catch (e) { c.result = String(e && e.message).slice(0, 160); }
+    listSeam = null;
+    if (script.thenLeaves && c.driverKill === undefined) {
+      // The harness settled and never asked a list past the scripted ones: the child was never ended.
+      c.driverKill = 'not sent: the harness asked for no list after the scripted ones';
+      c.closedBeforeDriverKill = st.closed;
+    }
+    try { c.freed = fs.readFileSync(freedFile, 'utf8'); } catch { /* this case's child made no list call of its own */ }
     await record(c, root, st);
     own = null;
     holdSeen = null;
   };
+  /**
+   * A child that takes ITSELF off its console and goes on running: it makes the native list call on
+   * its own pid, which frees the console it is on and then cannot attach to a console of a process
+   * that has none. What the call said is written to <case>.freed. This is the order a process that
+   * is being ended goes through (off the console first, the exit signalled later), held for good.
+   */
+  const freed = (key) => `let said; try { require(${JSON.stringify(require.resolve('node-pty/lib/utils'))}).loadNativeModule('conpty_console_list').module.getConsoleProcessList(process.pid);`
+    + ` said = 'the call returned a list'; } catch (e) { said = String(e && e.message); } require('fs').writeFileSync(${JSON.stringify(path.join(tmp, `${key}.freed`))}, said);`;
   await harness('harnessAlive', late);
   // The same live child, but the hold answers "exited": the harness must then name no pid itself.
   // (The child stays on the owner's console for good, so a harness that reads the console list of
@@ -294,6 +376,18 @@ let bystanderProc = null;
   await harness('harnessNeverExits', late, { says: 'runs' });
   // Nothing can hold the child (no addon).
   await harness('harnessNoHold', late, { says: 'none' });
+  // FLAKE-NODEPTY-CONSOLE-LIST-KILL-HARNESSALIVE-NOBODY, the list the harness reads before its close.
+  // In each of these the hold says "exited" at the first ask, so no kill by pid is sent, and the
+  // child is alive and on the owner's console: only the list can say that it is.
+  // The first list call fails. A failed call says nothing about who is on the console.
+  await harness('harnessListFailsOnce', late, { says: 'gone', lists: { first: ['fails'], thenLeaves: true } });
+  // Three more answers that list nothing of the owner's console, one after the other.
+  await harness('harnessListSaysNothing', late, { says: 'gone', lists: { first: ['empty', 'strangers', 'silent'], thenLeaves: true } });
+  // The list call fails every time, and the child stays on the console for good.
+  await harness('harnessListAlwaysFails', late, { says: 'gone', lists: { always: 'fails' } });
+  // The child is alive and has taken itself off the console: a real list of the owner's console
+  // then lacks it, and the terminal can be closed while the child still runs.
+  await harness('harnessChildOffConsole', late + freed('harnessChildOffConsole'), { says: 'gone' });
 
   // ---- (b) the product: PtyManager ----
   const product = async (key, { file, env, endsNothing, recycled }) => {
