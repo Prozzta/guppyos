@@ -13,8 +13,9 @@ require('./tools/mutant-runner-helper.cjs').gate(__filename);
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
-const R = require('./tools/run-tests.cjs');
+const R =require('./tools/run-tests.cjs');
 
 const TEST_DIR = __dirname;
 
@@ -36,8 +37,16 @@ function expectedLine(rel) {
   return `require('${toTools.startsWith('.') ? toTools : './' + toTools}');`;
 }
 
-function perfFiles() {
-  return fs.readdirSync(TEST_DIR).filter((f) => f.endsWith(R.PERF_SUFFIX));
+/**
+ * The serial perf lane's files, relative to test/. OWN-JOB-GUARD-PERF-DIR-GAP-108: the lane is
+ * test/perf/*.perf.cjs (run-tests.cjs CLAIMS-PERF-LANE lists that folder with PERF_SUFFIX), and
+ * this used to list test/ itself, where no perf file lives: the GUARD below covered none of them,
+ * and two of the five had no job of their own. A missing or unreadable folder throws here, so the
+ * guard can never pass on a lane it did not read.
+ */
+const PERF_DIR = 'perf';
+function perfFiles(dir = path.join(TEST_DIR, PERF_DIR)) {
+  return fs.readdirSync(dir).filter((f) => f.endsWith(R.PERF_SUFFIX)).sort().map((f) => path.join(PERF_DIR, f));
 }
 
 test('firstStatement: skips a BOM, blank lines, line and block comments and the strict pragma', () => {
@@ -53,8 +62,27 @@ test('expectedLine: the relative path to tools/own-job.cjs from the file\'s fold
   assert.equal(expectedLine(path.join('start-fixes-163', 'c.test.cjs')), "require('../tools/own-job.cjs');");
 });
 
+test('perfFiles: lists the perf lane\'s own folder (test/perf), relative to test/, and nothing else', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'own-job-guard-perf-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  for (const f of ['b.perf.cjs', 'a.perf.cjs', 'c.test.cjs', 'notes.txt']) fs.writeFileSync(path.join(dir, f), '');
+  assert.deepEqual(perfFiles(dir), [path.join('perf', 'a.perf.cjs'), path.join('perf', 'b.perf.cjs')], 'only *.perf.cjs, sorted, under perf/');
+  assert.throws(() => perfFiles(path.join(dir, 'absent')), /ENOENT/, 'a missing perf folder is an error, not an empty list');
+
+  const real = perfFiles();
+  assert.ok(real.length > 0, 'the real perf lane is not empty (the runner refuses an empty one too)');
+  for (const rel of real) {
+    assert.equal(path.dirname(rel), 'perf', rel);
+    assert.ok(fs.statSync(path.join(TEST_DIR, rel)).isFile(), `${rel} is a file under test/`);
+    assert.equal(expectedLine(rel), "require('../tools/own-job.cjs');", `${rel}: the line is relative to test/perf`);
+  }
+  assert.deepEqual(fs.readdirSync(TEST_DIR).filter((f) => f.endsWith(R.PERF_SUFFIX)), [], 'no perf file sits in test/ itself, where neither the lane nor this list would find it');
+});
+
 test('GUARD: every discovered test file and every perf file requires tools/own-job.cjs as its first statement', () => {
-  const files = [...R.discoverTestFiles(TEST_DIR), ...perfFiles()];
+  const perf = perfFiles();
+  assert.ok(perf.length > 0, `the perf lane was listed (${perf.length} files)`);
+  const files = [...R.discoverTestFiles(TEST_DIR), ...perf];
   assert.ok(files.length > 400, `the real test directory was walked (${files.length} files)`);
   const missing = [];
   for (const rel of files) {
