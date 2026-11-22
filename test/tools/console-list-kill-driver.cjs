@@ -133,6 +133,15 @@ cp.spawn = function spawn(cmd, args, ...rest) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const alive = (pid) => { try { realKill(pid, 0); return true; } catch { return false; } };
 const IDLE = 'setInterval(() => {}, 1000);';
+/**
+ * The env of a harness terminal's child: the same in every case. ELECTRON_NO_ATTACH_CONSOLE is the
+ * key of the owner with no console (the test file sets it on that driver), and it stays the owner's.
+ */
+const childEnv = () => {
+  const env = { ...process.env, ELECTRON_RUN_AS_NODE: '1' };
+  delete env.ELECTRON_NO_ATTACH_CONSOLE;
+  return env;
+};
 const up = (marker) => `require('fs').writeFileSync(${JSON.stringify(marker)}, 'up');`;
 
 /** The console processes of `pid`, asked the way node-pty asks (its own helper), with no kill after. */
@@ -355,7 +364,7 @@ let bystanderProc = null;
     holdSeen = { c, st, says, onFirstAsk: leaves ? leaveLate : null };
     try {
       await childBytes(Buffer.from('x'), {
-        file: electronExe(), env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, prelude: up(marker) + prelude, host: 'inbox',
+        file: electronExe(), env: childEnv(), prelude: up(marker) + prelude, host: 'inbox',
         // What the harness itself found when it asked whether its owner has a console, as it gave it.
         onOwnerCheck: (answer) => { c.ownerConsole = answer; },
         onSpawn: (proc) => {
