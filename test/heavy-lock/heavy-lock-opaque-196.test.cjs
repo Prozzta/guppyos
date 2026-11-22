@@ -23,24 +23,22 @@ require('../tools/own-job.cjs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
-const { nodeEnv } = require('../tools/node-env.cjs');
 const http = require('node:http');
-const { spawn, spawnSync } = require('node:child_process');
+const { spawnSync } = require('node:child_process');
 const loadTs = require('../load-ts.cjs');
 const { readSource } = require('../read-source.cjs');
-const own = require('../tools/own-procs.cjs');
 const { gitBash } = require('../tools/git-bash.cjs');
 
-const electron = require.resolve('electron');
-require.cache[electron] = { id: electron, filename: electron, loaded: true, exports: { Notification: class { show() {} static isSupported() { return false; } } } };
+// The E2E plumbing (jail, fixtures, start, killTree, broker) and MUST C, shared with the serial perf
+// lane (HEAVY-LOCK-OPAQUE-196-MUSTC-REALPROBE-108). Required before hooks.ts: it stubs electron.
+const E2E = require('./opaque-196-e2e.cjs');
+const { JAIL, FIX, start, within, sleep, until, killTree, broker } = E2E;
 
 const REPO = path.resolve(__dirname, '..', '..');
 const HJF = 'src/main/heavyJob.ts';
 const HJ = loadTs(HJF);
 const ENV = loadTs('src/main/ptyEnv.ts');
-const { HookServer } = loadTs('src/main/hooks.ts');
 const PRELOAD = path.join(REPO, 'resources', 'heavy-preload.cjs');
 const H = { heavy: true, kind: 'suite' };
 const C0 = 1_000_000 - 5_000;   // a test process's creation time in the rigs
@@ -323,56 +321,6 @@ test('wiring: main sets the preload on every hive agent (main only), notes every
 
 // ─── end to end: real processes, the real preload, the real broker route ──────────────────────────
 
-const JAIL = fs.mkdtempSync(path.join(os.tmpdir(), 'hlo196-'));
-test.after(() => { try { fs.rmSync(JAIL, { recursive: true, force: true }); } catch { /* best effort */ } });
-const FIX = path.join(JAIL, 'fix');
-fs.mkdirSync(FIX, { recursive: true });
-const node = JSON.stringify(process.execPath);
-const leafSrc = "require('node:test')('leaf', () => {});\n";
-fs.writeFileSync(path.join(FIX, 'leaf.test.cjs'), leafSrc);
-fs.writeFileSync(path.join(FIX, 'wrapper.cjs'), `const r = require('node:child_process').spawnSync(process.execPath, ['--test', ${JSON.stringify(path.join(FIX, 'leaf.test.cjs'))}], { stdio: 'inherit' }); process.exit(r.status ?? 1);\n`);
-fs.writeFileSync(path.join(FIX, 'x.sh'), `"${process.execPath.replace(/\\/g, '/')}" --test "${path.join(FIX, 'leaf.test.cjs').replace(/\\/g, '/')}"\n`);
-fs.writeFileSync(path.join(FIX, 'outer.test.cjs'), `const test = require('node:test'); const assert = require('node:assert');
-test('outer spawns a nested node --test', () => {
-  const env = { ...process.env }; delete env.NODE_TEST_CONTEXT;
-  const r = require('node:child_process').spawnSync(process.execPath, ['--test', ${JSON.stringify(path.join(FIX, 'leaf.test.cjs'))}], { env, encoding: 'utf8', timeout: 20000 });
-  assert.equal(r.status, 0, r.stderr);
-});\n`);
-// LOAD-FLAKES-105: the crashed lease holder runs until it is killed. A fixed 20 s sleep ended on its
-// own under load (the setup and two process-table queries outlived it): it exited and released.
-// Bounded at 10 min (Jim SHOULD): far past any kill, and the still-running assert below catches an
-// early end; but if the kill's process snapshot fails, the file child cannot live on forever.
-fs.writeFileSync(path.join(FIX, 'sleeper.test.cjs'), "require('node:test')('sleeps until killed (10 min bound)', () => new Promise((r) => setTimeout(r, 10 * 60_000)));\n");
-
-function cleanEnv(extra) {
-  const env = { ...process.env };
-  for (const k of ['NODE_TEST_CONTEXT', 'NODE_OPTIONS', 'GUPPY_TEST_RUN', 'HIVE_LEDGER_URL']) delete env[k];
-  return nodeEnv({ ...env, ...extra });
-}
-function start(args, { url, agent = 'a', preload = PRELOAD, root = JAIL } = {}) {
-  const env = cleanEnv({ NODE_OPTIONS: `--require "${preload.replace(/\\/g, '/')}"`, HIVE_LEDGER_URL: url, HIVE_ROOT: root, AGENT_ID: agent });
-  const child = spawn(args[0], args.slice(1), { cwd: FIX, env, windowsHide: true });
-  const bornMs = Date.now();
-  let stderr = '';
-  child.stderr.on('data', (d) => { stderr += d; });
-  child.stdout.resume();
-  const done = new Promise((resolve) => child.on('close', (code) => resolve({ code, stderr })));
-  return { child, done, bornMs };
-}
-const within = (p, ms) => Promise.race([p, new Promise((r) => setTimeout(() => r('timeout'), ms))]);
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function until(cond, ms, what) {
-  const end = Date.now() + ms;
-  while (!cond()) { if (Date.now() > end) throw new Error(`timed out waiting for ${what}`); await sleep(50); }
-}
-/** Kill a start()ed child and its tree: on win32 only what own-procs proves is ours (no taskkill /T). */
-function killTree({ child, bornMs }, { rootFirst = false } = {}) {
-  // rootFirst: the root before its children (killVerified hands them deepest first). For a lease
-  // holder, so it is gone before its file child dies and cannot exit on its own and release.
-  if (process.platform === 'win32') own.killOwnTree({ pid: child.pid, bornMs }, rootFirst ? { kill: (rows) => own.stopIfSame(rows.slice().reverse()) } : {});
-  else try { process.kill(-child.pid, 'SIGKILL'); } catch { try { process.kill(child.pid, 'SIGKILL'); } catch { /* gone */ } }
-}
-
 /**
  * HEAVY-LOCK-OPAQUE-196-WINDOW-108: resolves once the run is parked in the queue, by its own doing:
  * one of agent 'a's processes was answered and has come back to ask again (only a 'wait' answer makes
@@ -406,25 +354,6 @@ function parked(lock, run, what) {
     if (won === 'hang') throw new Error(`AN OPAQUE ${what.toUpperCase()}'S TEST RUN WAITS FOR THE SLOT: after 60 s it has neither queued nor ended (${total} slot request(s) so far)`);
     throw new Error(`AN OPAQUE ${what.toUpperCase()}'S TEST RUN WAITS FOR THE SLOT: it ended (code ${won.code}) while b held the slot, ${total === 0 ? 'and it never asked for the slot' : `after ${total} slot request(s): it did not wait`}`);
   });
-}
-
-async function broker(t, M, deps = {}) {
-  const sock = process.platform === 'win32' ? `\\\\.\\pipe\\hlo196-${process.pid}-${Math.random().toString(36).slice(2)}` : path.join(fs.mkdtempSync(path.join(JAIL, 's-')), 's.sock');
-  const hive = {
-    sockPath: () => sock, codexHomeFor: () => null, recordSession: () => {}, appendLog: () => {},
-    registry: () => ({ agents: {} }), isGod: () => false, rosterContext: () => '', recordModel: () => {}, appendCostLedger: () => {},
-    toolOutputDir: (id) => path.join(JAIL, 'agents', id, 'tool-output')
-  };
-  const control = { shouldHalt: () => false, takeSteer: () => null, toolDecision: () => ({ deny: false }) };
-  const s = new HookServer(hive, () => ({ send: () => {} }), () => ({}), control);
-  const logs = []; const notes = [];
-  const lock = new M.HeavyJobLock({ limit: () => 1, log: (r) => logs.push(r), notify: (a) => notes.push(a), parentImage: M.processImage, ...deps });
-  s.setHeavyLock(lock);
-  s.start();
-  t.after(() => s.stop());
-  for (let i = 0; i < 200 && s.hookBrokerPort() === null; i++) await sleep(5);
-  const url = (a) => s.hookUrl(a).replace('/hook/', '/ledger/');
-  return { s, lock, logs, notes, url };
 }
 
 K.e2eOpaque = async (t, M = HJ, preload = PRELOAD) => {
@@ -505,33 +434,7 @@ K.e2eFailOpen = async (t, M = HJ, preload = PRELOAD) => {
 };
 test('E2E SHOULD 1: a broker the preload cannot reach fails open, with one hive row', { timeout: 60_000 }, (t) => K.e2eFailOpen(t));
 
-K.e2eCrashAndDeadWaiter = async (t, M = HJ, preload = PRELOAD) => {
-  if (process.platform !== 'win32') { t.skip('the process listing is Windows-only'); return; }
-  const b = await broker(t, M, { probe: () => M.probeProcesses(require('../tools/ps-env.cjs').psEnv()), roots: () => [] });
-  // A crashed lease holder: killed outright, so its exit handler never runs.
-  const run = start([process.execPath, '--test', 'sleeper.test.cjs'], { url: b.url('a'), preload });
-  t.after(() => { if (run.child.exitCode === null) try { killTree(run); } catch { /* gone */ } });   // it never ends on its own
-  await until(() => b.lock.snapshot().length === 1, 15_000, 'the lease');
-  // b's wrapper waits behind it; c is denied at PreToolUse and queued after b.
-  const wb = start([process.execPath, 'wrapper.cjs'], { url: b.url('b'), agent: 'b', preload });
-  await until(() => b.lock.queueSnapshot().waiters.some((w) => w.agentId === 'b'), 15_000, "b's wait");
-  assert.equal(b.lock.acquire('c', H, 'npm test', 'hc', false).allow, false);
-  killTree(wb);
-  // INT102-TEST-FOLLOWUPS (Jim, INT-1.1.102 MUST C): the lease holder (the node --test runner)
-  // dies BEFORE its file child. Killed after, it could see the child die and exit on its own, and
-  // its preload's release would log lease-end, not lease-gone.
-  assert.equal(run.child.exitCode, null, 'the lease holder is still running when it is killed (a crash, not an exit)');
-  killTree(run, { rootFirst: true });
-  await wb.done; await run.done;
-  const t0 = Date.now();
-  await b.lock.scan();
-  // Every assert names the lock's path, so a flake says which way the slot was freed.
-  const trail = () => `${JSON.stringify(b.logs.map((x) => [x.action, x.agentId, x.reason].filter(Boolean).join(':')))} notes=${JSON.stringify(b.notes)} scan+${Date.now() - t0}ms`;
-  await until(() => b.notes.includes('c'), 15_000, "c's notice").catch((e) => { throw new Error(`${e.message}: ${trail()}`); });
-  assert.ok(b.logs.some((x) => x.action === 'lease-gone' && x.agentId === 'a'), `A CRASHED TEST RUN'S LEASE IS FREED BY THE SCAN: ${trail()}`);
-  assert.ok(b.logs.some((x) => x.action === 'queue-dropped' && x.agentId === 'b' && x.reason === 'waiter-gone'), `A KILLED WAITING WRAPPER LEAVES THE QUEUE: ${trail()}`);
-  assert.deepEqual(b.notes, ['c'], `THE NEXT QUEUED AGENT GETS HEAVY SLOT FREE WITHIN ONE SCAN: ${trail()}`);
-};
+K.e2eCrashAndDeadWaiter = (t, M = HJ, preload = PRELOAD) => E2E.mustC(t, { M, preload, probe: 'recorder' });
 test('E2E MUST C: a killed lease holder and a waiting wrapper killed with taskkill /F leave the lock; the next agent gets HEAVY SLOT FREE in one scan', { timeout: 120_000 }, (t) => K.e2eCrashAndDeadWaiter(t));
 
 // ─── MUTANT CENSUS ──────────────────────────────────────────────────────────────────────────
