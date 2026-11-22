@@ -183,8 +183,10 @@ test('harness, inbox conhost: a child whose hold says "exited" while its console
 });
 // The same window with no kill by pid before it: the child ended by itself, the hold says so at the
 // first ask, and the console of its pid lists it for 2 s more.
-test('harness, inbox conhost: a child that exited by itself and is still on its console is waited off the console before the close', async () => {
+test('harness, inbox conhost: a child that exited by itself and is still on its console is waited off the console before the close', async (t) => {
   const c = await kase('harnessExitedByItselfStillOnConsole');
+  // MEASURING ONLY, green or red: every console list asked for in the case, its answer (a list, EMPTY or FAILED) and the times.
+  t.diagnostic(`trace of the case (ms since it began): ${JSON.stringify(c.trace)}`);
   assert.match(c.result, /PTY child did not answer/, 'childBytes gave up at its 5 s');
   assert.equal(c.holdAskedBeforeKill, false, 'control: the hold answered "exited" at the first ask (the driver answers for it)');
   assert.equal(c.endedByPid, undefined, 'A PID IS NAMED ONLY WHILE IT IS HELD: the hold said the child had exited, and childBytes still ended that pid');

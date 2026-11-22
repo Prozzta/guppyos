@@ -76,7 +76,44 @@ process.kill = function kill(pid, signal) {
 let live = null;
 const forks = [];
 const realFork = cp.fork;
-cp.fork = function fork(...a) { const c = realFork.apply(this, a); forks.push(c.pid); return c; };
+/**
+ * MEASURING ONLY (FLAKE-NODEPTY-CONSOLE-LIST-KILL-HARNESSALIVE-NOBODY): the case that is being
+ * measured, or null. While it is set, every console list asked for in this process (the harness's
+ * before its close, node-pty's own in its kill) is answered by console-list-probe.cjs, started in
+ * place of node-pty's helper: the same native call and the same `consoleProcessList`, and it also
+ * says whether that call FAILED, which node-pty's helper as patched hides behind []. Each ask and
+ * each answer is written down with its time. Nothing here changes what anybody is answered.
+ *   mark(what, more)  one line of the trace: ms since the case began, and what happened
+ *   name(pids)        the pids as roles
+ */
+let trace = null;
+const PROBE = path.join(__dirname, 'console-list-probe.cjs');
+const isListHelper = (file) => path.basename(String(file)).replace(/\.js$/, '') === 'conpty_console_list_agent';
+cp.fork = function fork(...a) {
+  const measured = trace && isListHelper(a[0]) ? trace : null;
+  if (measured) a[0] = PROBE;
+  const c = realFork.apply(this, a);
+  forks.push(c.pid);
+  if (measured) {
+    const who = measured.st.closed ? "node-pty's kill" : 'harness';
+    const n = measured.asked += 1;
+    let answered = false;
+    measured.mark('list asked', { who, n });
+    c.on('message', (m) => {
+      answered = true;
+      const list = Array.isArray(m.consoleProcessList) ? m.consoleProcessList : null;
+      measured.mark('list answer', {
+        who, n,
+        answer: m.error ? `FAILED: ${m.error}` : list && list.length === 0 ? 'EMPTY, and the call did not fail' : 'a list',
+        list: list ? measured.name(list) : String(m.consoleProcessList),
+        holdsRoot: Boolean(list && list.includes(measured.root()))
+      });
+    });
+    c.on('exit', (code, signal) => measured.mark('list helper ended', { who, n, code, signal, answered }));
+    c.on('error', (e) => measured.mark('list helper could not start', { who, n, error: String(e && e.message) }));
+  }
+  return c;
+};
 // The tree sweep (taskkill) is real, or answered as one that ended nothing: failed, or cut at its cap.
 const realSpawn = cp.spawn;
 let sweepEndsNothing = false;
@@ -234,19 +271,41 @@ let bystanderProc = null;
    * hold. With says 'gone' that is a child that has exited by itself and that its console still
    * lists for a while.
    */
-  const harness = async (key, prelude, { says = null, slow = false, leaves = false } = {}) => {
+  const harness = async (key, prelude, { says = null, slow = false, leaves = false, measure = false } = {}) => {
     named = []; sweeps = 0; sweepEndsNothing = false;
     const c = out.cases[key] = {};
     const marker = path.join(tmp, `${key}.up`);
     const st = { closed: false, sweep: null, onSweep: null };
     let root = null;
+    // MEASURING ONLY: see `trace` at the top. The times are ms since this case began.
+    const began = performance.now();
+    const mark = (what, more = {}) => { if (c.trace) c.trace.push({ at: Math.round((performance.now() - began) * 10) / 10, what, ...more }); };
+    if (measure) {
+      c.trace = [];
+      trace = { st, asked: 0, mark, root: () => root, name: (pids) => roles(pids, root) };
+    }
     const leaveLate = () => {
       c.leavesArmed = true;
+      mark("the harness's first ask of its hold (answered: exited)");
       setTimeout(() => {
         const mine = holds.get(root);
-        if (!mine || !mine.alive()) return;
+        if (!mine || !mine.alive()) {
+          mark("the driver's kill is NOT sent", { ownHold: mine ? 'says the root has exited' : 'none', closedAlready: st.closed });
+          return;
+        }
         c.leftConsole = LEFT_LATE;
+        // closedAlready true: node-pty's kill was entered BEFORE the root was ended, so the harness
+        // closed on a list answer it got while the root was running and nothing had been sent to it.
+        mark("the driver's kill is sent (its own hold says the root runs)", { closedAlready: st.closed });
         try { realKill(root); } catch { /* gone */ }
+        if (!c.trace) return;
+        // When does the root's process handle say "exited"? Asked every timer turn (1 ms asked for; Windows gives what it gives).
+        const poll = setInterval(() => {
+          if (mine.alive()) return;
+          clearInterval(poll);
+          mark("the driver's own hold first says the root has exited", { closedAlready: st.closed });
+        }, 1);
+        poll.unref();
       }, SLOW_KILL_MS);
     };
     holdSeen = { c, st, says, onFirstAsk: leaves ? leaveLate : null };
@@ -266,14 +325,18 @@ let bystanderProc = null;
             // kill was entered? (aliveAtKill asks the pid number, which a dying process still answers.)
             const mine = holds.get(root);
             if (mine) c.rootExitedAtClose = !mine.alive();
+            mark("node-pty's kill is entered", { rootExitedAtClose: c.rootExitedAtClose, aliveByPidNumber: c.aliveAtKill });
           });
         }
       });
       c.result = 'resolved';
     } catch (e) { c.result = String(e && e.message).slice(0, 160); }
+    mark('childBytes settled', { result: c.result });
     await record(c, root, st);
+    mark('the case is recorded', { named: c.named, consoleAfter: c.consoleAfter });
     own = null;
     holdSeen = null;
+    trace = null;
   };
   await harness('harnessAlive', late);
   // The same live child, but the hold answers "exited": the harness must then name no pid itself.
@@ -289,7 +352,7 @@ let bystanderProc = null;
   await harness('harnessExitedStillOnConsole', late, { slow: true, says: 'goneOnceEnded' });
   // No kill by pid at all: the hold says "exited" at the first ask (a child that ended by itself),
   // and the child is on the console for 2 s more.
-  await harness('harnessExitedByItselfStillOnConsole', late, { says: 'gone', leaves: true });
+  await harness('harnessExitedByItselfStillOnConsole', late, { says: 'gone', leaves: true, measure: true });
   // The kill by pid is real, and the hold goes on saying the child runs.
   await harness('harnessNeverExits', late, { says: 'runs' });
   // Nothing can hold the child (no addon).
