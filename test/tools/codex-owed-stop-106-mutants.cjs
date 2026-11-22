@@ -1,8 +1,8 @@
 'use strict';
 
 // CODEX-TURN-ENDS-EARLY: the hand-mutant census of the owed-work Stop-continue (P1) and the Codex
-// continuation cadence (P2), committed so the audit can re-run it. Each mutant damages ONE source
-// line at a unique anchor and must make test/codex-owed-stop-106.test.cjs fail AT ITS OWN NAMED
+// continuation cadence (P2), committed so the audit can re-run it. Each mutant damages ONE line
+// (a source line, or for T1 and T2 the guard cell's own clock seam) at a unique anchor and must make test/codex-owed-stop-106.test.cjs fail AT ITS OWN NAMED
 // TEST; a survivor, a kill elsewhere or a missing anchor fails the census. A heavy job (bench):
 // run it in a heavy slot.
 //   node test/tools/codex-owed-stop-106-mutants.cjs
@@ -55,8 +55,8 @@ const MUTANTS = [
   ['H9 a legacy-read Codex channel is asked', HOOKS, "    if (channel.mode !== 'inject') return null;\n    return os.decide", '    return os.decide', /not ok \d+ - P1 HookServer: a subagent Stop/],
   ['H8 the M4 mail block can be overridden', HOOKS, '      if (stopReason === null) {\n        try { stopReason = this.owedStopReason', '      if (true) {\n        try { stopReason = this.owedStopReason', /not ok \d+ - wiring:/],
   // The guard cell itself (FLAKE-CODEX-OWED-STOP-HUMAN-STAMP-EARLY): test-file mutants.
-  ['T1 the human stamp is taken once, before the rigs run', TEST, '    w.over = over(stopAt);', '    w.over = over(t0);', /not ok d+ - P1 HookServer: a legitimate wait or a human guard/],
-  ['T2 the rig decides on the wall clock, not its own', TEST, 'segmentTools, w.now(), Object.values', 'segmentTools, Date.now(), Object.values', /not ok d+ - P1 HookServer: a legitimate wait or a human guard/],
+  ['T1 the human stamp is taken once, before the rigs run', TEST, '    w.over = over(stopAt);', '    w.over = over(t0);', /not ok \d+ - P1 HookServer: a legitimate wait or a human guard/],
+  ['T2 the rig decides on the wall clock, not its own', TEST, 'segmentTools, w.now(), Object.values', 'segmentTools, Date.now(), Object.values', /not ok \d+ - P1 HookServer: a legitimate wait or a human guard/],
   // P2: the Codex cadence
   ['P1 no 5 min repeat', OWED, '(working(t) ? OWED_REPEAT_CODEX_MS : OWED_REPEAT_MS)', 'OWED_REPEAT_MS', /not ok \d+ - P2: a working Codex agent/],
   ['P2 Claude gets the fast cadence', OWED, "f.provider === 'codex' && tools > t.toolsAt", 'tools > t.toolsAt', /not ok \d+ - P2: Claude and AGY keep/],
