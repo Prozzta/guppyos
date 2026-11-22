@@ -49,28 +49,47 @@ function isElectronExe(file) {
 const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 
 /**
- * The processes on the console of `pid`, asked with node-pty's own list helper (a fork: a process has
- * one console). Nothing is ended. [] when the helper could not attach to a console of the pid: the
- * helper as patched in this repo answers [] for any failure of its own list call, and a pid that has
- * left its console is one of them (node-pty's own kill then names nobody either). null only when the
- * helper ended without any message, which proves nothing.
+ * Is `child` on the OWNER's console? The owner is this process, the one that runs childBytes and
+ * owns the terminal: the console that node-pty's list kill must not reach is this one. It is asked
+ * through this process's own pid (console-list-helper.cjs, a fork: a process has one console), so
+ * the answer does not depend on whether the child's pid can still be attached to.
+ *
+ * { listed, list } only for a list that proves it is the owner's: the call did not fail and the
+ * list holds the owner itself. Everything else is { why }: no answer, which says nothing about the
+ * child. A failed call, an empty list, a list without the owner and a helper that ended without a
+ * message are all "no answer". (The list of the CHILD's pid, taken with node-pty's own helper, was
+ * read here before: that helper answers [] for any failure, and [] was read as "the child is gone".)
+ *
+ * Not covered, and safe: a console-subsystem child on this host is on the pseudoconsole, never on
+ * the owner's console. The owner's list never holds it, so its terminal is closed as soon as its
+ * hold says it has exited, with no wait for the pseudoconsole to drop it. node-pty's list kill
+ * then reaches the pseudoconsole's processes only, which are the terminal's own.
  */
-function consoleOf(pid) {
+function onOwnerConsole(child) {
   return new Promise((resolve) => {
-    const agent = cp.fork(require.resolve('node-pty/lib/conpty_console_list_agent'), [String(pid)]);
+    const agent = cp.fork(path.join(__dirname, 'console-list-helper.cjs'), [String(process.pid)]);
     let got = null;
-    agent.on('message', (m) => { got = m.consoleProcessList; });
-    agent.on('exit', () => resolve(got));
-    agent.on('error', () => resolve(null));
+    agent.on('message', (m) => { got = m; });
+    agent.on('exit', () => resolve(ownerAnswer(got, child)));
+    agent.on('error', (e) => resolve({ why: `the list helper did not start (${e && e.message})` }));
   });
+}
+function ownerAnswer(m, child) {
+  if (!m) return { why: 'the list helper ended without a message' };
+  if (m.error) return { why: m.error };
+  const list = m.consoleProcessList;
+  if (!Array.isArray(list) || !list.includes(process.pid)) return { why: `the list does not hold the owner itself (${JSON.stringify(list)})` };
+  return { listed: list.includes(child), list };
 }
 
 /**
- * Resolves once a child is off its console: first its hold says it has exited, then the console list
- * of its pid no longer holds it. The second step is not the first again: an exit signals the process
- * handle, and the console drops the process from its list in its own time. So it is asked for every
- * child, also one that exited by itself (`byPid` false: the hold said so at once and no kill was
- * sent). Both steps share one cap; at the cap it rejects with the step that did not come.
+ * Resolves once a child is off the owner's console: first its hold says it has exited, then a list
+ * of the owner's console no longer holds it. The second step is not the first again: an exit
+ * signals the process handle, and the console drops the process from its list in its own time. So
+ * it is asked for every child, also one that exited by itself (`byPid` false: the hold said so at
+ * once and no kill was sent). Only a list that is the owner's counts (see onOwnerConsole): no answer
+ * is asked again. Both steps share one cap; at the cap it rejects with the step that did not come,
+ * and for a list that never came with the reason the last ask gave.
  */
 async function offConsole(pid, hold, byPid) {
   const end = Date.now() + TEARDOWN_CAP_MS;
@@ -80,9 +99,13 @@ async function offConsole(pid, hold, byPid) {
     await sleep(25);
   }
   for (;;) {
-    const list = await consoleOf(pid);
-    if (list && !list.includes(pid)) return;
-    if (Date.now() >= end) throw new Error(`the child has exited and the console of its pid still lists it ${TEARDOWN_CAP_MS} ms ${since} (${JSON.stringify(list)}), so its terminal is not closed`);
+    const got = await onOwnerConsole(pid);
+    if (got.listed === false) return;
+    if (Date.now() >= end) {
+      throw new Error(got.listed
+        ? `the child has exited and the console of its pid still lists it ${TEARDOWN_CAP_MS} ms ${since} (the owner's console: ${JSON.stringify(got.list)}), so its terminal is not closed`
+        : `the owner's own console could not be listed: ${got.why} (the child has exited, ${TEARDOWN_CAP_MS} ms ${since}), so its terminal is not closed`);
+    }
     await sleep(25);
   }
 }
@@ -145,8 +168,8 @@ function childBytes(input, { file = process.execPath, env = process.env, onSpawn
       // NODEPTY-CONSOLE-LIST-KILL-SIBLINGS: on the inbox conhost node-pty's kill ends every process
       // on the console of the child's pid. An electron.exe child is on THIS test file's console, the
       // one the runner shares between its files: a child still alive here took the sibling files
-      // with it. So the child is ended by its pid first, and the terminal is closed only once the
-      // console of that pid no longer lists the child.
+      // with it. So the child is ended by its pid first, and the terminal is closed only once a
+      // list of this process's own console no longer holds the child.
       // The pid is named only while the hold says the child runs. With no hold nothing says whose
       // the pid is, and nothing can be waited on: no pid is named and no console is listed.
       if (!hold) {
