@@ -116,7 +116,6 @@ async function externalWriteSeen(mods) {
 async function racyRewriteSeen(mods) {
   const x = setup(mods);
   await ledgers(x, ['andy']);
-  const a = x.anchorsOf(Date.now); // the real wall clock: the racy rule is live
   const text = fs.readFileSync(x.file, 'utf8');
   const head = JSON.parse(text).hives[Object.keys(JSON.parse(text).hives)[0]].andy.head;
   const forged = head.replace(/^./, head[0] === 'a' ? 'b' : 'a');
@@ -125,6 +124,9 @@ async function racyRewriteSeen(mods) {
   // (Jim, NTFS: 843 of 1999 consecutive writes). Pinned here, so the case is deterministic.
   const statSync = fs.statSync;
   const frozen = statSync(x.file);
+  // The wall clock sits 1 ms after the change the store keys on, max(mtime, ctime): inside the racy window
+  // however long the process was held up between the write above and the first read (the real clock was not).
+  const a = x.anchorsOf(() => Math.max(frozen.mtimeMs, frozen.ctimeMs) + 1);
   fs.statSync = function (p, ...rest) { return path.resolve(String(p)) === path.resolve(x.file) ? frozen : statSync.call(this, p, ...rest); };
   try {
     assert.equal(a.get(x.root, 'andy').head, head);
