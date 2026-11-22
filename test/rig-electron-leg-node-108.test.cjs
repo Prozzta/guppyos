@@ -86,6 +86,23 @@ test('RIG-ELECTRON-LEG-NOT-ISOLATED-108: a same-version dir holding a different 
   assert.throws(() => electronRig(), /rig: the node dir for the Electron leg's console node .* holds a different node(\.exe)?; not running a node the leg did not choose/);
 });
 
+test('RIG-ELECTRON-LEG-NOT-ISOLATED-108: (N1) a node-leg rig does not run a same-version node an Electron-leg rig seeded into the plain dir', (t) => {
+  const { root, shared, sandbox } = setup(t);
+  const binN = path.join(root, 'bin-node');
+  fs.mkdirSync(binN);
+  const nodeExe = path.join(binN, 'node.exe');
+  fs.writeFileSync(nodeExe, 'stand-in node.exe (the node leg)');
+  const plain = path.join(shared, `md-rig-node-${process.version}-node`);
+  fs.mkdirSync(plain, { recursive: true });
+  fs.writeFileSync(path.join(plain, 'node.exe'), 'seeded by an Electron-leg rig');
+  const s = sandbox();
+  const env = withExec(nodeExe, shared, () => isolation.rigEnv(s, process.env, { versions: { node: process.versions.node } }));
+  assert.ok(path.basename(env.RIG_NODE_DIR).startsWith(`${path.basename(plain)}-`), env.RIG_NODE_DIR);
+  assert.ok(sameId(path.join(env.RIG_NODE_DIR, 'node.exe'), nodeExe), 'the node leg runs its own execPath');
+  assert.equal(fs.readFileSync(path.join(plain, 'node.exe'), 'utf8'), 'seeded by an Electron-leg rig');
+  assert.equal(isolation.checkIsolation(env, s, { who: 'node leg, keyed dir' }), true);
+});
+
 test('RIG-ELECTRON-LEG-NOT-ISOLATED-108: teeth: electron.exe is never the rig node; no console node throws by name', (t) => {
   const { root, electron, electronRig } = setup(t);
   // (d) GUPPY_TEST_CONSOLE_NODE naming electron.exe fails by name
