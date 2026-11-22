@@ -279,7 +279,7 @@ K.e2e = async (t, M = HJ, opt = {}) => {
     if (!ended) own.killOwnTree({ pid: suite.child.pid, bornMs: suiteBorn });
   };
   t.signal.addEventListener('abort', onLimit, { once: true });
-  while (!queued() && !ended) await sleep(25);
+  while (!queued() && !ended && !t.signal.aborted) await sleep(25);
   t.signal.removeEventListener('abort', onLimit);
   assert.equal(await within(suite.done, 2_500), 'timeout', 'A FULL SUITE STILL WAITS FOR THE SLOT');
   assert.deepEqual(b.lock.queueSnapshot().waiters.map((w) => w.agentId), ['a']);
