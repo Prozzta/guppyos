@@ -328,7 +328,8 @@ test('resolvesInside sees through links; an @xterm junction out of the tree is r
   fs.symlinkSync(path.join(other, 'x'), path.join(root, 'x'), 'junction');
   assert.equal(W.resolvesInside(path.join(root, 'x'), root), false);
   assert.equal(W.resolvesInside(root, root), true);
-  fs.rmSync(path.join(root, 'x'));
+  // unlink, as the tool removes a link: Electron 45's rmSync takes a junction for a directory (EISDIR)
+  fs.unlinkSync(path.join(root, 'x'));
   fs.mkdirSync(path.join(root, 'node_modules'));
   fs.symlinkSync(path.join(other, 'x'), path.join(root, 'node_modules', '@xterm'), 'junction');
   fs.mkdirSync(path.join(other, 'x', 'addon-webgl', 'lib'), { recursive: true });
