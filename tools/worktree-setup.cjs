@@ -241,7 +241,18 @@ function fillOpenConsole(root, { env = process.env, log = console.log } = {}) {
   return true;
 }
 
-/** The manifest's model section, or { error } when the tree's manifest cannot be used; null = no manifest. */
+/** A manifest path that stays under its folder: '/'-separated plain names, with no empty, '.' or
+ *  '..' segment, no backslash and no drive or stream colon (so never absolute). */
+function plainRel(rel) {
+  return typeof rel === 'string' && rel !== '' && !/[\\:\0]/.test(rel) && rel.split('/').every((s) => s !== '' && s !== '.' && s !== '..');
+}
+
+/**
+ * The manifest's model section, or { error } when the tree's manifest cannot be used; null = no
+ * manifest. model.dir and every file key must be plain relative paths (Jim NIT on b1696d6d): the
+ * link check skips a level that does not exist yet, so a '..' would send the fetch out of the
+ * model folder.
+ */
 function readModelManifest(root) {
   const p = path.join(root, MODEL_MANIFEST);
   if (!fs.existsSync(p)) return null;
@@ -249,6 +260,9 @@ function readModelManifest(root) {
   try { j = JSON.parse(fs.readFileSync(p, 'utf8')); } catch (e) { return { error: `${MODEL_MANIFEST} is unreadable: ${e.message}` }; }
   const m = j && j.model;
   if (!m || typeof m.dir !== 'string' || !m.dir || !m.files || typeof m.files !== 'object' || !Object.keys(m.files).length) return { error: `${MODEL_MANIFEST} has no model.dir/model.files` };
+  if (!plainRel(m.dir)) return { error: `${MODEL_MANIFEST}: model.dir ${JSON.stringify(m.dir)} is not a plain relative path` };
+  const bad = Object.keys(m.files).find((rel) => !plainRel(rel));
+  if (bad !== undefined) return { error: `${MODEL_MANIFEST}: model.files key ${JSON.stringify(bad)} is not a plain relative path` };
   return { manifest: j, dir: m.dir };
 }
 
