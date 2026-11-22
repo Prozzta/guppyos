@@ -86,7 +86,8 @@ function noConsoleDriver() {
 function runDriver(file, env, name, more) {
   const outFile = path.join(ownDir, name);
   return new Promise((resolve, reject) => {
-    const child = spawn(file, [DRIVER, outFile, String(process.pid), ...more], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env });
+    // nodeEnv here too, at the spawn itself: both callers pass one already, and execpath-env-guard reads this line.
+    const child = spawn(file, [DRIVER, outFile, String(process.pid), ...more], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: nodeEnv(env) });
     let text = '';
     child.stdout.on('data', (d) => { text += d; });
     child.stderr.on('data', (d) => { text += d; });
