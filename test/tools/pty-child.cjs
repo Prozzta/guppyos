@@ -65,6 +65,13 @@ const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
  * the owner's console. The owner's list never holds it, so its terminal is closed as soon as its
  * hold says it has exited, with no wait for the pseudoconsole to drop it. node-pty's list kill
  * then reaches the pseudoconsole's processes only, which are the terminal's own.
+ *
+ * Not covered: a process the child started (a grandchild). The rule asks about the child's pid
+ * only, by its hold and by its place on the owner's list; nothing here waits for a grandchild or
+ * looks for one. The one that was measured (electron as node, started by the child) could be
+ * attached to through no console: a list asked through its pid gave 'AttachConsole failed'.
+ * Whether a grandchild can sit on the owner's console was not looked at. A pid on the owner's list
+ * that nobody knows is the sign to look.
  */
 function onOwnerConsole(child) {
   return new Promise((resolve) => {
