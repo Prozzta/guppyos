@@ -511,12 +511,16 @@ test('LIVE: a failed process lookup while observing ends the run at once and lea
     assert.equal(injected, true);
     // everything the failed run left must be GONE within 10 s (red-before: before the fix the server listened and the fixture waited for ever)
     await until('the abandoned run is gone', () => !kept.observer.listening()
-      && kept.p.exitCode !== null
+      && (kept.p.exitCode !== null || kept.p.signalCode !== null) // a killed child on win32 has signalCode SIGTERM, exitCode null
       && !realLookup([kept.parent.pid]).some((r) => Math.abs(r.created - kept.parent.created) <= own.BIRTH_SLACK_MS)
       && !Object.values(childRows(kept.pids)).some(Boolean), 10_000);
   } finally {
     own.lookupPids = realLookup;
-    try { if (kept.pids) sweep(Object.values(childRows(kept.pids))); } catch { /* best effort */ }
+    // END the run whatever the assertion said: under a regression (no abandon) the observer still listens and the
+    // bare parent waits for a release that never comes, which hung the whole file to the 30-minute watchdog
+    try { if (kept.observer) kept.observer.close(); } catch { /* closed */ }
+    try { if (kept.p && kept.p.exitCode === null && kept.p.signalCode === null) kept.p.kill(); } catch { /* exited */ }
+    try { if (kept.pids) sweep([...Object.values(childRows(kept.pids)), ...(kept.parent ? [kept.parent] : [])]); } catch { /* best effort */ }
     rmDir(dir);
   }
 });
