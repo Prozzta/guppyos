@@ -22,7 +22,14 @@
  * hold (no addon) no pid is named and the case says so. The bystander is ended through its child
  * handle, never by number.
  *
- * usage: node console-list-kill-driver.cjs <outfile> <pid of the test file>
+ * usage: node console-list-kill-driver.cjs <outfile> <pid of the test file> [owner-with-no-console]
+ *
+ * FLAKE-NODEPTY-CONSOLE-LIST-KILL-HARNESSALIVE-NOBODY, the third argument: the test starts a second
+ * driver as electron.exe run as Node, which has NO console (a GUI-subsystem program; that is the
+ * owner of onbinary-drop's terminal under the Electron leg). That driver runs one harness case,
+ * harnessOwnerNoConsole, and nothing else: with no console there is no bystander to share one.
+ * Every fork of such a driver is electron.exe again, so none of them gets a console or a window.
+ * What the driver is, it measures itself and writes to out.owner (see ownerFacts).
  */
 const fs = require('node:fs');
 const path = require('node:path');
@@ -31,6 +38,8 @@ const { EventEmitter } = require('node:events');
 const { nodeEnv } = require('./node-env.cjs');
 
 const [outFile, outerPid] = [process.argv[2], Number(process.argv[3])];
+const NO_CONSOLE = 'owner-with-no-console';
+const mode = process.argv[4] || null;
 const out = { driver: process.pid, cases: {} };
 const save = () => fs.writeFileSync(outFile, JSON.stringify(out, null, 1));
 
@@ -139,6 +148,27 @@ function consoleOf(pid) {
 }
 
 /**
+ * What this driver is, measured by itself with nothing of the harness in between: its program, what
+ * opening its own console device said ('opened', or the error code), and what the real list helper
+ * said of the console of the driver's own pid. A cell that is about an owner with a console, or
+ * with none, reads its control here.
+ */
+async function ownerFacts() {
+  let conout = 'opened';
+  try { fs.closeSync(fs.openSync('\\\\.\\CONOUT$', 'r+')); } catch (e) { conout = String(e && e.code); }
+  const ownList = await new Promise((resolve) => {
+    const agent = realFork.call(cp, path.join(__dirname, 'console-list-helper.cjs'), [String(process.pid)]);
+    forks.push(agent.pid);
+    let got = null;
+    agent.on('message', (m) => { got = m; });
+    agent.on('exit', () => resolve(!got ? 'no message' : got.error ? String(got.error)
+      : Array.isArray(got.consoleProcessList) && got.consoleProcessList.includes(process.pid) ? 'a list that holds the owner' : 'a list without the owner'));
+    agent.on('error', (e) => resolve(`the helper did not start (${e && e.message})`));
+  });
+  return { exe: path.basename(process.execPath), electron: process.versions.electron || null, conout, ownList };
+}
+
+/**
  * The harness's hold on its child (procIdentity holdRoot), seen from outside: was one taken, was it
  * asked before the kill, when was it released. Off (null) outside the harness cases: the app's own
  * holds pass through untouched. `says` makes the hold answer for one case:
@@ -210,8 +240,14 @@ let bystanderProc = null;
   // The folder of the result file: the test file made it and removes it when it ends, after this
   // process. The driver makes no folder of its own, so it leaves nothing in the temp folder.
   const tmp = path.dirname(path.resolve(outFile));
-  bystanderProc = realSpawn.call(cp, process.execPath, ['-e', IDLE], { stdio: 'inherit', env: nodeEnv(process.env) });
-  const bystander = bystanderProc.pid;
+  if (mode !== null && mode !== NO_CONSOLE) throw new Error(`the third argument is ${NO_CONSOLE} or nothing, not ${JSON.stringify(mode)}`);
+  // No visible window, ever: a console program (node.exe) with no console gives each of its forks a
+  // NEW console with a window, and node-pty forks its list helper with no windowsHide.
+  if (mode === NO_CONSOLE && !process.versions.electron) throw new Error(`${NO_CONSOLE} runs as electron.exe only (ELECTRON_RUN_AS_NODE=1): this is ${process.execPath}`);
+  out.owner = await ownerFacts();
+  // No bystander for an owner with no console: there is no console for the two to share.
+  bystanderProc = mode === NO_CONSOLE ? null : realSpawn.call(cp, process.execPath, ['-e', IDLE], { stdio: 'inherit', env: nodeEnv(process.env) });
+  const bystander = bystanderProc ? bystanderProc.pid : null;
   out.bystander = bystander;
   const role = (pid, root) => (pid === process.pid ? 'driver' : pid === root ? 'root' : pid === bystander ? 'bystander'
     : pid === outerPid ? 'TEST FILE' : forks.includes(pid) ? 'helper' : `other(${pid})`);
@@ -320,6 +356,8 @@ let bystanderProc = null;
     try {
       await childBytes(Buffer.from('x'), {
         file: electronExe(), env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, prelude: up(marker) + prelude, host: 'inbox',
+        // What the harness itself found when it asked whether its owner has a console, as it gave it.
+        onOwnerCheck: (answer) => { c.ownerConsole = answer; },
         onSpawn: (proc) => {
           root = live = proc.pid;
           own = { root, st, c, slow };
@@ -366,6 +404,15 @@ let bystanderProc = null;
     + ` said = 'the call returned a list'; } catch (e) { said = String(e && e.message); } require('fs').writeFileSync(${JSON.stringify(path.join(tmp, `${key}.freed`))}, said);`
     + ` process.stdout.write = process.stderr.write = () => true; process.stdin.on('error', () => {});`
     + ` setImmediate(() => require('fs').writeFileSync(${JSON.stringify(path.join(tmp, `${key}.past`))}, 'ran past the harness script'));`;
+  if (mode === NO_CONSOLE) {
+    // The owner has no console (out.owner says so). The child is alive when childBytes gives up, and
+    // the harness's kill by pid reaches it SLOW_KILL_MS late: a harness that closes without waiting
+    // for the exit closes while the child still runs, and rootExitedAtClose says so.
+    await harness('harnessOwnerNoConsole', late, { slow: true });
+    out.done = true;
+    save();
+    process.exit(0);
+  }
   await harness('harnessAlive', late);
   // The same live child, but the hold answers "exited": the harness must then name no pid itself.
   // (The child stays on the owner's console for good, so a harness that reads the console list of
