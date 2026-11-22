@@ -138,7 +138,7 @@ async function buildFloor() {
   };
   const diags = [];
   const outcomes = [];
-  const rig = { clock, diags, outcomes, llm, bootSeen: new Set(), afterBoot: new Map(), echoSeen: new Map(), stall: new Map(), interfere: new Map(), humanDirty: new Set(), humanAtStop: new Map(), capacityHold: false, owedWait: {}, owedStopSetting: undefined, quietHoldMin: 0, holdArchives: false, settleDelay: new Map(), heldProviderStatus: new Map() };
+  const rig = { clock, diags, outcomes, llm, bootSeen: new Set(), afterBoot: new Map(), echoSeen: new Map(), stall: new Map(), interfere: new Map(), humanDirty: new Set(), humanAtStop: new Map(), capacityHold: false, owedWait: {}, owedStopSetting: undefined, quietHoldMin: 0, holdArchives: false, settleDelay: new Map(), heldProviderStatus: new Map(), heldHook: new Map() };
 
   // index.ts:361 - the ONE hive; this sandbox's harness home is the "live" home of THIS instance,
   // so the per-provider global writers (AGY hooks.json, statusline) write into the jailed HOME.
@@ -405,6 +405,10 @@ async function buildFloor() {
       // thread), which is what makes a hook response late.
       const st = agentId ? rig.stall.get(agentId) : undefined;
       if (st && (!st.event || st.event === event)) { rig.stall.delete(agentId); const until = Date.now() + st.ms; while (Date.now() < until) { /* stalled main thread */ } }
+      // F11: the driver can hold main's RECEIPT of one named hook (a one-way AGY PostInvocation the
+      // shim has already sent) until it releases it: a late hook, with no timer.
+      const hh = agentId ? rig.heldHook.get(agentId) : undefined;
+      if (hh && hh.event === event) { hh.held.push([agentId, event, message, fullyIdle, turnId, source]); return; }
       inboxWake?.onHook(agentId, event, message, fullyIdle, turnId, source);
     },
     undefined,
@@ -727,6 +731,15 @@ async function main() {
     bootSeen: ({ id }) => { const p = f.ptyForAgent(id); return !!p && rig.bootSeen.has(p); },
     stallNextHook: ({ id, ms, event }) => { rig.stall.set(id, { ms, event }); return true; },
     holdProviderStatus: ({ id }) => { rig.heldProviderStatus.set(id, []); return true; },
+    holdHook: ({ id, event }) => { rig.heldHook.set(id, { event, held: [] }); return true; },
+    heldHooks: ({ id }) => rig.heldHook.get(id)?.held.length ?? 0,
+    releaseHook: ({ id }) => {
+      const hh = rig.heldHook.get(id);
+      rig.heldHook.delete(id);
+      const held = hh ? hh.held : [];
+      for (const a of held) inboxWake?.onHook(...a);
+      return { released: held.length };
+    },
     releaseProviderStatus: ({ id }) => {
       const held = rig.heldProviderStatus.get(id) || [];
       rig.heldProviderStatus.delete(id);

@@ -536,6 +536,36 @@ test('F11 pin: a held AGY idle tick leaves lifecycle active through the first be
   await waitFor(async () => (await rig.call('wakeState', { id: 'ag-1' })).lifecycle === 'idle', { what: 'deferred idle on the next beat' });
 });
 
+// MAIL-RIG-F11-IDLE-TIMEOUT-108, race A: AGY's PostInvocation is one-way, so the shim's exit is not
+// main's receipt. While main has not taken it the invocation is still open (invoking), and the ONE
+// post-grace beat the F11 test takes cannot apply the deferred idle; no later beat comes, so that
+// test's "lifecycle idle" wait times out. The hold makes the late receipt certain, with no timer.
+test('F11 race A: a PostInvocation main has not yet received keeps the epoch open through the one post-grace beat; once received, the next beat closes it', T, async (t) => {
+  const rig = await startRig(t);
+  await rig.setup([{ id: 'ag-1', flavour: 'agy', scenario: { manualTurns: true } }]);
+  await rig.call('holdHook', { id: 'ag-1', event: 'PostInvocation' });
+  const m = await rig.call('send', { to: 'ag-1', subject: 'f11-race-a', body: 'the PostInvocation is late' });
+  await rig.beat();
+  await waitFor(() => rig.contexts('ag-1').some((c) => c.ids.includes(m.id)), { what: 'surfaced at PreInvocation' });
+  await waitFor(async () => (await rig.entry('ag-1', m.id))?.state === 'surfaced', { what: 'confirmed by latency' });
+  // Race B is out of play here: the submit's settle is already in.
+  await waitFor(async () => (await rig.call('diags')).some((d) => d.stage === 'settle' && d.agentId === 'ag-1' && d.outcome === 'COMMITTED'), { what: 'host settle COMMITTED' });
+  await waitFor(async () => (await rig.call('heldHooks', { id: 'ag-1' })) >= 1, { what: 'the PostInvocation sent and held' });
+  const idleStatuses = async () => (await rig.call('diags')).filter((d) => d.stage === 'provider-status' && d.agentId === 'ag-1' && d.status === 'idle').length;
+  const idleBefore = await idleStatuses();
+  rig.cue('ag-1', { cue: 'statusline', state: 'idle' });
+  await waitFor(() => rig.transcript('ag-1').some((r) => r.kind === 'statusline' && r.installed), { what: 'statusline tick' });
+  await waitFor(async () => (await idleStatuses()) > idleBefore, { what: 'host receipt of this idle status tick' });
+  // Today's F11 sequence: advance past the grace, ONE beat.
+  await rig.call('advance', { ms: 10_000 });
+  await rig.beat();
+  assert.equal((await rig.call('wakeState', { id: 'ag-1' })).lifecycle, 'active', 'the one beat cannot close an epoch whose PostInvocation main has not received');
+  assert.equal((await rig.call('releaseHook', { id: 'ag-1' })).released, 1, 'the held PostInvocation is delivered once');
+  await waitFor(async () => (await rig.call('diags')).some((d) => d.stage === 'hook' && d.agentId === 'ag-1' && d.event === 'PostInvocation'), { what: 'host receipt of the PostInvocation' });
+  await rig.beat();
+  await waitFor(async () => (await rig.call('wakeState', { id: 'ag-1' })).lifecycle === 'idle', { what: 'deferred idle on the next beat' });
+});
+
 // ——————————————————————————————————————————————————————————————————————————— Q38
 
 test('Q38 (§11.18 #41) Codex: the UserPromptSubmit hook never arrives and the turn ends before the 15 s beat: the mail is re-offered at that Stop (mail-repend, unconfirmedStart:true)', T, async (t) => {
