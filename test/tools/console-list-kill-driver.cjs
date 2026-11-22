@@ -106,7 +106,9 @@ cp.fork = function fork(...a) {
         who, n,
         answer: m.error ? `FAILED: ${m.error}` : list && list.length === 0 ? 'EMPTY, and the call did not fail' : 'a list',
         list: list ? measured.name(list) : String(m.consoleProcessList),
-        holdsRoot: Boolean(list && list.includes(measured.root()))
+        holdsRoot: Boolean(list && list.includes(measured.root())),
+        // The native call itself, on the case's clock (`at` is only when the answer arrived here).
+        callFrom: measured.wall(m.t0), callTo: measured.wall(m.t1)
       });
     });
     c.on('exit', (code, signal) => measured.mark('list helper ended', { who, n, code, signal, answered }));
@@ -123,7 +125,11 @@ cp.fork = function fork(...a) {
           who, n,
           answer: m.error ? `FAILED: ${m.error}` : list && list.length === 0 ? 'EMPTY, and the call did not fail' : 'a list',
           list: list ? measured.name(list) : String(m.consoleProcessList),
-          holdsRoot: Boolean(list && list.includes(measured.root()))
+          holdsRoot: Boolean(list && list.includes(measured.root())),
+          // Control: only a list that holds the grandchild AND the driver is a list of the owner's
+          // console. false: this line says nothing about where the root is.
+          isOwnersConsole: Boolean(list && list.includes(grand) && list.includes(process.pid)),
+          callFrom: measured.wall(m.t0), callTo: measured.wall(m.t1)
         });
       });
       g.on('error', (e) => measured.mark('grandchild list helper could not start', { who, n, error: String(e && e.message) }));
@@ -131,7 +137,11 @@ cp.fork = function fork(...a) {
   }
   return c;
 };
-/** MEASURING ONLY: the pid of the measured root's grandchild (see GRAND), for the role names. */
+/**
+ * MEASURING ONLY: the pid of the measured root's grandchild (see GRAND), for the role names. Kept
+ * to the end of the run: the measured case ends only once that process has gone, and if that ever
+ * failed, a later case would name it 'grandchild' and not as a process nobody knows.
+ */
 let grandchild = null;
 // The tree sweep (taskkill) is real, or answered as one that ended nothing: failed, or cut at its cap.
 const realSpawn = cp.spawn;
@@ -150,7 +160,11 @@ const alive = (pid) => { try { realKill(pid, 0); return true; } catch { return f
 const IDLE = 'setInterval(() => {}, 1000);';
 const GRAND_STAYS_MS = 10000;
 const GRAND_CAP_MS = 60000;
-const GRAND = `process.stdin.resume(); process.stdin.on('end', () => setTimeout(() => process.exit(0), ${GRAND_STAYS_MS})); setTimeout(() => process.exit(0), ${GRAND_CAP_MS});`;
+const GRAND_LEFT_CAP_MS = 20000;
+const GRAND_LEFT = 'left by itself';
+/** It leaves when the driver's `leave` file is there; with no driver, GRAND_STAYS_MS after the root has gone, or at GRAND_CAP_MS. */
+const GRAND = (leave) => `process.stdin.resume(); process.stdin.on('end', () => setTimeout(() => process.exit(0), ${GRAND_STAYS_MS}));`
+  + ` setTimeout(() => process.exit(0), ${GRAND_CAP_MS}); setInterval(() => { if (require('fs').existsSync(${JSON.stringify(leave)})) process.exit(0); }, 50);`;
 const up = (marker) => `require('fs').writeFileSync(${JSON.stringify(marker)}, 'up');`;
 
 /** The console processes of `pid`, asked the way node-pty asks (its own helper), with no kill after. */
@@ -301,23 +315,30 @@ let bystanderProc = null;
     let root = null;
     // MEASURING ONLY: see `trace` at the top. The times are ms since this case began.
     const began = performance.now();
-    const mark = (what, more = {}) => { if (c.trace) c.trace.push({ at: Math.round((performance.now() - began) * 10) / 10, what, ...more }); };
+    const beganWall = Date.now();
+    const mark =(what, more = {}) => { if (c.trace) c.trace.push({ at: Math.round((performance.now() - began) * 10) / 10, what, ...more }); };
     /**
      * MEASURING ONLY: the root starts one child of its own that stays (GRAND), on the same console
      * (an electron.exe run as Node attaches to its parent's console), and writes its pid down. The
-     * driver names that pid only as an argument of the list helper: it is never sent a signal. It
-     * ends by itself: GRAND_STAYS_MS after the root has gone (its stdin, a pipe from the root, ends),
-     * or after GRAND_CAP_MS whatever happened.
+     * driver names that pid only as an argument of the list helper and of the liveness question
+     * (signal 0): it is never sent a signal. It ends by itself: when the driver's `leave` file is
+     * there (written once the case is recorded), or GRAND_STAYS_MS after the root has gone (its
+     * stdin, a pipe from the root, ends), or after GRAND_CAP_MS whatever happened. The case ends only
+     * once it has gone, so no later case finds it on the driver's console.
      */
     const grandFile = path.join(tmp, `${key}.grandchild`);
+    const grandLeave = path.join(tmp, `${key}.grandchild-leave`);
     const grandPid = () => {
       if (grandchild === null) { try { grandchild = Number(fs.readFileSync(grandFile, 'utf8')) || null; } catch { /* not written yet */ } }
       return grandchild;
     };
     if (measure) {
       c.trace = [];
-      trace = { st, asked: 0, mark, root: () => root, grandchild: grandPid, name: (pids) => { grandPid(); return roles(pids, root); } };
-      prelude = `const g = require('child_process').spawn(process.execPath, ['-e', ${JSON.stringify(GRAND)}], { stdio: ['pipe', 'ignore', 'ignore'] });`
+      trace = {
+        st, asked: 0, mark, root: () => root, grandchild: grandPid, name: (pids) => { grandPid(); return roles(pids, root); },
+        wall: (t) => (typeof t === 'number' ? t - beganWall : null)
+      };
+      prelude = `const g = require('child_process').spawn(process.execPath, ['-e', ${JSON.stringify(GRAND(grandLeave))}], { stdio: ['pipe', 'ignore', 'ignore'] });`
         + ` require('fs').writeFileSync(${JSON.stringify(grandFile)}, String(g.pid)); ${prelude}`;
     }
     const leaveLate = () => {
@@ -337,6 +358,12 @@ let bystanderProc = null;
         if (!c.trace) return;
         // When does the root's process handle say "exited"? Asked every timer turn (1 ms asked for; Windows gives what it gives).
         const poll = setInterval(() => {
+          // A released hold answers "not alive" too: that is not the root's exit, and it is said apart.
+          if (holds.get(root) !== mine) {
+            clearInterval(poll);
+            mark("the driver's own hold was released before it said the root had exited", { closedAlready: st.closed });
+            return;
+          }
           if (mine.alive()) return;
           clearInterval(poll);
           mark("the driver's own hold first says the root has exited", { closedAlready: st.closed });
@@ -373,7 +400,18 @@ let bystanderProc = null;
     own = null;
     holdSeen = null;
     trace = null;
-    grandchild = null;
+    if (measure) {
+      // The grandchild is asked to leave (a file, no signal) and the case waits until it has: the
+      // cases after this one must find the driver's console as it was before.
+      fs.writeFileSync(grandLeave, 'leave');
+      const grand = grandPid();
+      const from = performance.now();
+      while (grand && alive(grand) && performance.now() - from < GRAND_LEFT_CAP_MS) await sleep(25);
+      c.grandchild = !grand ? 'its pid was never written down' : alive(grand)
+        ? `the measured case's grandchild never left (${GRAND_LEFT_CAP_MS} ms after it was asked to)` : GRAND_LEFT;
+      mark('the grandchild: ' + c.grandchild, { waitedMs: Math.round(performance.now() - from) });
+      save();
+    }
   };
   await harness('harnessAlive', late);
   // The same live child, but the hold answers "exited": the harness must then name no pid itself.

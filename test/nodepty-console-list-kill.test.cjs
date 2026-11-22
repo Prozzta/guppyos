@@ -187,6 +187,7 @@ test('harness, inbox conhost: a child that exited by itself and is still on its 
   const c = await kase('harnessExitedByItselfStillOnConsole');
   // MEASURING ONLY, green or red: every console list asked for in the case, its answer (a list, EMPTY or FAILED) and the times.
   t.diagnostic(`trace of the case (ms since it began): ${JSON.stringify(c.trace)}`);
+  assert.equal(c.grandchild, 'left by itself', 'MEASURING ONLY, control: the process the measurement put on the console was gone before the next case began');
   assert.match(c.result, /PTY child did not answer/, 'childBytes gave up at its 5 s');
   assert.equal(c.holdAskedBeforeKill, false, 'control: the hold answered "exited" at the first ask (the driver answers for it)');
   assert.equal(c.endedByPid, undefined, 'A PID IS NAMED ONLY WHILE IT IS HELD: the hold said the child had exited, and childBytes still ended that pid');
