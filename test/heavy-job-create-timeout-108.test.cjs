@@ -273,7 +273,9 @@ const K = {
       const closes = R.chans[0].reqs.filter((q) => q.line.startsWith('close agent-'));
       assert.deepEqual(closes.map((q) => q.ms), [1, 2, 3].map(() => C.HEAVY_JOB_REQUEST_MS), `${transport}: each queued close waits the full 3 s`);
       assert.deepEqual(R.rows.filter((r) => r.action === 'wrap').slice(1).map((w) => w.held), [false, false, false]);
-      assert.deepEqual(R.told, []);
+      // The replace loses the job the answered call-1 holds (told once, why helper-unanswered); no cut create tells anything.
+      assert.deepEqual(R.told.map((e) => ({ agentId: e.agentId, callId: e.callId, state: e.state, why: e.why })),
+        [{ agentId: AGENT, callId: 'call-1', state: 'lost', why: 'helper-unanswered' }], `${transport}: only call-1's held job is lost at the replace (${JSON.stringify(R.told)})`);
     }
   },
   async w1(M) {

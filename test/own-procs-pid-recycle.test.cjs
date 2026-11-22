@@ -274,6 +274,8 @@ const PPID_ALLOW = {
   'layer-b-codex-argv.test.cjs': [/c\.ppid === x\.pid/],                              // a fake table
   // INT 1.1.103 (BARE-NODE-TEST-NO-OWNER): a listing narrowed by ParentProcessId, then own-procs' childrenOf (birth-checked)
   'bare-node-test-owner.test.cjs': [/own\.childrenOf\(own\.processTable\(`ParentProcessId = \$\{c\.pid\}`\), c\)/],
+  // HEAVY-JOB-CREATE-TIMEOUT-UNHELD-108 W8 LIVE: the same shape (a narrowed listing, then childrenOf against the looked-up child)
+  'heavy-job-create-timeout-108.test.cjs': [/childrenOf\(processTable\(`ParentProcessId=\$\{child\.pid\}`\), me\)/],
   // PTY-CONHOST-LEAK-NATIVE: the console hosts of one process, each with its CreationDate check on the same line
   // (no older than the parent itself; for a manager that has ended, no older than the time taken before it started)
   'pty-conhost-leak-native.test.cjs': [/ParentProcessId=\$\{process\.pid\}" \| Where-Object \{ \$_\.CreationDate -ge \$me\.CreationDate \}/,

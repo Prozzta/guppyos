@@ -242,7 +242,7 @@ const K = {
   wiring() {
     const hooks = read('src/main/hooks.ts');
     const index = read('src/main/index.ts');
-    assert.ok(hooks.includes('begin(wrap.agentId, wrap.toolInput, wrap.cmd, wrap.callId)'), 'THE WRAP CARRIES THE CALL ID TO THE JOB');
+    assert.ok(hooks.includes('begin(wrap.agentId, wrap.toolInput, wrap.cmd, wrap.callId, wrap.transport, wrap.arrivedMs)'), 'THE WRAP CARRIES THE CALL ID TO THE JOB');
     assert.ok(/this\.heavyWrap = \{[^}]*callId \}/.test(hooks), 'THE WRAP CARRIES THE CALL ID TO THE JOB (the PreToolUse call id)');
     assert.ok(index.includes("onJob: (e) => { if (e.state === 'held') heavyLock.noteJob(e.agentId, e.callId, e.job); else if (e.state === 'lost') heavyLock.jobLost(e.agentId, e.callId, e.job, e.why); else heavyLock.jobExited(e.agentId, e.callId, e.job); }"), 'MAIN TELLS THE LOCK EVERY HELD, LOST AND EXITED JOB');
   },

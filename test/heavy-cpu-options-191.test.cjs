@@ -144,7 +144,8 @@ test('HeavyJobs: the job is made with the options in force, then the call is rew
   const id = j.ids()[0];
   assert.deepEqual(f.sent, [`create ${id} 0 1`]);
   assert.equal(w.command, `guppy-heavyjob join ${id} 0 1; npm ci`);
-  assert.equal(logs[0].action, 'wrap');
+  // HEAVY-JOB-CREATE-TIMEOUT-UNHELD-108: the helper's first answer logs its helper-start row, then the wrap.
+  assert.deepEqual(logs.slice(0, 2).map((l) => l.action), ['helper-start', 'wrap']);
   // Elsewhere nothing is wrapped; without the helper nothing is wrapped.
   assert.equal(await new C.HeavyJobs({ platform: 'linux', options: () => opts.o, exe: () => 'x', channel: f.channel }).begin('a', { command: 'npm ci' }), null);
   assert.equal(await new C.HeavyJobs({ platform: 'win32', options: () => opts.o, exe: () => null, channel: f.channel }).begin('a', { command: 'npm ci' }), null);
