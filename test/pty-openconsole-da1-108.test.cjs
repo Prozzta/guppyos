@@ -128,11 +128,13 @@ test('an unattached PTY starts with no DA1 wait, the query never reaches the sin
  * NOT the "said once" pin: one failed write ends the stream, so only one 'error' is ever raised here and
  * a guard that said every error would pass. "Once per terminal" is pinned by the input-pipe guard cell below.
  * MEASURED, NOT GATED (2026-11-22, idle bench): when the root has exited, the DA1 answer written in the
- * next turn ended with EAGAIN and the pipe raised 'error' in 12 of 12 records (and 5 of 5 before that);
- * the exit was reported about 55 ms later. Two real-console cells used to gate that and were dropped:
- * "the root's pid is gone" does not order "the console takes no more input" (node-pty's conpty.cc closes
- * the console from its own threads after the root exits), so under load the write was once taken and
- * nothing was said. No trigger orders the two, so the fact is recorded here and not tested.
+ * next turn ended with EAGAIN and the pipe raised 'error' in 16 of 16 records (12 in six one-file runs
+ * at 4cd701d5, 4 in two at 506dfd1e; the earlier 5 of 5 is the one in guardInputErrors' comment in
+ * src/main/pty.ts); the exit was reported about 55 ms later. Two real-console cells used to gate that
+ * and were dropped: "the root's pid is gone" does not order "the console takes no more input" (node-pty's
+ * conpty.cc closes the console from its own threads after the root exits). Under suite load a cell was
+ * once red with the root gone and nothing said (before the record existed, so whether the write was
+ * taken is not known). No trigger orders the two, so the fact is recorded here and not tested.
  */
 const INPUT_HANG_MS = 60_000;
 
