@@ -111,9 +111,28 @@ cp.fork = function fork(...a) {
     });
     c.on('exit', (code, signal) => measured.mark('list helper ended', { who, n, code, signal, answered }));
     c.on('error', (e) => measured.mark('list helper could not start', { who, n, error: String(e && e.message) }));
+    // The same console, asked at the same ask through a pid that stays: the root's grandchild. A
+    // root that has left the console makes the ask through its own pid fail; this one still answers.
+    const grand = measured.grandchild();
+    if (grand) {
+      const g = realFork.call(cp, PROBE, [String(grand)]);
+      forks.push(g.pid);
+      g.on('message', (m) => {
+        const list = Array.isArray(m.consoleProcessList) ? m.consoleProcessList : null;
+        measured.mark('list answer THROUGH THE GRANDCHILD', {
+          who, n,
+          answer: m.error ? `FAILED: ${m.error}` : list && list.length === 0 ? 'EMPTY, and the call did not fail' : 'a list',
+          list: list ? measured.name(list) : String(m.consoleProcessList),
+          holdsRoot: Boolean(list && list.includes(measured.root()))
+        });
+      });
+      g.on('error', (e) => measured.mark('grandchild list helper could not start', { who, n, error: String(e && e.message) }));
+    } else measured.mark('no grandchild pid known at this ask', { who, n });
   }
   return c;
 };
+/** MEASURING ONLY: the pid of the measured root's grandchild (see GRAND), for the role names. */
+let grandchild = null;
 // The tree sweep (taskkill) is real, or answered as one that ended nothing: failed, or cut at its cap.
 const realSpawn = cp.spawn;
 let sweepEndsNothing = false;
@@ -129,6 +148,9 @@ cp.spawn = function spawn(cmd, args, ...rest) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const alive = (pid) => { try { realKill(pid, 0); return true; } catch { return false; } };
 const IDLE = 'setInterval(() => {}, 1000);';
+const GRAND_STAYS_MS = 10000;
+const GRAND_CAP_MS = 60000;
+const GRAND = `process.stdin.resume(); process.stdin.on('end', () => setTimeout(() => process.exit(0), ${GRAND_STAYS_MS})); setTimeout(() => process.exit(0), ${GRAND_CAP_MS});`;
 const up = (marker) => `require('fs').writeFileSync(${JSON.stringify(marker)}, 'up');`;
 
 /** The console processes of `pid`, asked the way node-pty asks (its own helper), with no kill after. */
@@ -219,7 +241,7 @@ let bystanderProc = null;
   const bystander = bystanderProc.pid;
   out.bystander = bystander;
   const role = (pid, root) => (pid === process.pid ? 'driver' : pid === root ? 'root' : pid === bystander ? 'bystander'
-    : pid === outerPid ? 'TEST FILE' : forks.includes(pid) ? 'helper' : `other(${pid})`);
+    : grandchild !== null && pid === grandchild ? 'grandchild' : pid === outerPid ? 'TEST FILE' : forks.includes(pid) ? 'helper' : `other(${pid})`);
   const roles = (pids, root) => pids.map((p) => role(p, root));
   /**
    * Waits for node-pty's kill, then for the console list if that kill asked for one (it asks inside
@@ -280,9 +302,23 @@ let bystanderProc = null;
     // MEASURING ONLY: see `trace` at the top. The times are ms since this case began.
     const began = performance.now();
     const mark = (what, more = {}) => { if (c.trace) c.trace.push({ at: Math.round((performance.now() - began) * 10) / 10, what, ...more }); };
+    /**
+     * MEASURING ONLY: the root starts one child of its own that stays (GRAND), on the same console
+     * (an electron.exe run as Node attaches to its parent's console), and writes its pid down. The
+     * driver names that pid only as an argument of the list helper: it is never sent a signal. It
+     * ends by itself: GRAND_STAYS_MS after the root has gone (its stdin, a pipe from the root, ends),
+     * or after GRAND_CAP_MS whatever happened.
+     */
+    const grandFile = path.join(tmp, `${key}.grandchild`);
+    const grandPid = () => {
+      if (grandchild === null) { try { grandchild = Number(fs.readFileSync(grandFile, 'utf8')) || null; } catch { /* not written yet */ } }
+      return grandchild;
+    };
     if (measure) {
       c.trace = [];
-      trace = { st, asked: 0, mark, root: () => root, name: (pids) => roles(pids, root) };
+      trace = { st, asked: 0, mark, root: () => root, grandchild: grandPid, name: (pids) => { grandPid(); return roles(pids, root); } };
+      prelude = `const g = require('child_process').spawn(process.execPath, ['-e', ${JSON.stringify(GRAND)}], { stdio: ['pipe', 'ignore', 'ignore'] });`
+        + ` require('fs').writeFileSync(${JSON.stringify(grandFile)}, String(g.pid)); ${prelude}`;
     }
     const leaveLate = () => {
       c.leavesArmed = true;
@@ -333,10 +369,11 @@ let bystanderProc = null;
     } catch (e) { c.result = String(e && e.message).slice(0, 160); }
     mark('childBytes settled', { result: c.result });
     await record(c, root, st);
-    mark('the case is recorded', { named: c.named, consoleAfter: c.consoleAfter });
+    mark('the case is recorded', { named: c.named, consoleAfter: c.consoleAfter, grandchildKnown: grandchild !== null });
     own = null;
     holdSeen = null;
     trace = null;
+    grandchild = null;
   };
   await harness('harnessAlive', late);
   // The same live child, but the hold answers "exited": the harness must then name no pid itself.
