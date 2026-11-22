@@ -580,6 +580,21 @@ test('F11 race A: a PostInvocation main has not yet received keeps the epoch ope
   await waitFor(async () => (await rig.call('wakeState', { id: 'ag-1' })).lifecycle === 'idle', { what: 'deferred idle on the next beat' });
 });
 
+// The guard's teeth: while main has not received the PostInvocation, awaitHostReceipts fails by
+// name instead of letting an F11 test take its one beat early; once received, it resolves.
+test('F11 receipts guard: awaitHostReceipts fails by name while the PostInvocation is held, and resolves once main receives it', T, async (t) => {
+  const rig = await startRig(t);
+  await rig.setup([{ id: 'ag-1', flavour: 'agy', scenario: { manualTurns: true } }]);
+  await rig.call('holdHook', { id: 'ag-1', event: 'PostInvocation' });
+  const m = await rig.call('send', { to: 'ag-1', subject: 'f11-guard', body: 'the PostInvocation is held' });
+  await rig.beat();
+  await waitFor(() => rig.contexts('ag-1').some((c) => c.ids.includes(m.id)), { what: 'surfaced at PreInvocation' });
+  await waitFor(async () => (await rig.call('heldHooks', { id: 'ag-1' })) >= 1, { what: 'the PostInvocation sent and held' });
+  await assert.rejects(awaitHostReceipts(rig, 'ag-1'), /waiting for host receipt of the PostInvocation for ag-1/, 'the guard names the missing receipt');
+  assert.equal((await rig.call('releaseHook', { id: 'ag-1' })).released, 1, 'the held PostInvocation is delivered once');
+  await awaitHostReceipts(rig, 'ag-1');
+});
+
 // ——————————————————————————————————————————————————————————————————————————— Q38
 
 test('Q38 (§11.18 #41) Codex: the UserPromptSubmit hook never arrives and the turn ends before the 15 s beat: the mail is re-offered at that Stop (mail-repend, unconfirmedStart:true)', T, async (t) => {
