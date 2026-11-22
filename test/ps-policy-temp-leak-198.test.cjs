@@ -425,7 +425,7 @@ const PK = {
     assert.equal(m.psEnv({ psmoduleanalysiscachepath: 'C:/x' }, { temp: false }).psmoduleanalysiscachepath, 'C:/x', 'PS POLICY PSMAC ENV: psEnv keeps an inherited key');
   },
 
-  /** Every test call of the product listing passes psEnv (heavy-job-lock MF4 LIVE, opaque-196 E2E). */
+  /** Every test call of the product listing passes psEnv (heavy-job-lock MF4 LIVE, opaque-196 E2E: its shared helper, HEAVY-LOCK-OPAQUE-196-MUSTC-REALPROBE-108). */
   census() {
     const files = [];
     const walk = (d) => {
@@ -444,7 +444,7 @@ const PK = {
       callers.push(path.relative(__dirname, f).split(path.sep).join('/'));
       for (const u of unguardedProbes(src)) bad.push(`${path.basename(f)}: ${u}`);
     }
-    assert.ok(callers.includes('heavy-job-lock.test.cjs') && callers.includes('heavy-lock/heavy-lock-opaque-196.test.cjs'), `the census sees the callers (${callers})`);
+    assert.ok(callers.includes('heavy-job-lock.test.cjs') && callers.includes('heavy-lock/opaque-196-e2e.cjs'), `the census sees the callers (${callers})`);
     assert.deepEqual(bad, [], 'PS POLICY PRODUCT CENSUS: every test call of probeProcesses passes psEnv');
   }
 };
@@ -492,7 +492,7 @@ const PS_MUTANTS = [
   { name: 'P7 a live pid keeps its folder however old', file: PS_ENV, from: '(alive(Number(m[1])) && !stale(n))', to: 'alive(Number(m[1]))', k: (src) => PK.sweepStale(psEnvCopy(src)) },
   { name: 'P8 the legacy name matches any guppy-ps folder', file: PS_ENV, from: 'const PS_LEGACY_RE = /^guppy-ps(?:temp|mac)-[^-]{6}$/;', to: 'const PS_LEGACY_RE = /^guppy-ps/;', k: (src) => PK.sweepStale(psEnvCopy(src)) },
   { name: 'P4 a test probes without psEnv', file: path.join(__dirname, 'heavy-job-lock.test.cjs'), from: "probeProcesses(require('./tools/ps-env.cjs').psEnv())", to: 'probeProcesses()', k: (src) => assert.equal(unguardedProbes(src).length, 1, 'PS POLICY PRODUCT CENSUS mutant: the census catches it'), census: true },
-  { name: 'P5 a test passes the bare listing as its probe', file: path.join(__dirname, 'heavy-lock', 'heavy-lock-opaque-196.test.cjs'), from: "probe: () => M.probeProcesses(require('../tools/ps-env.cjs').psEnv()),", to: 'probe: M.probeProcesses,', k: (src) => assert.equal(unguardedProbes(src).length, 1, 'PS POLICY PRODUCT CENSUS mutant: the census catches it'), census: true }
+  { name: 'P5 a test passes the bare listing as its probe', file: path.join(__dirname, 'heavy-lock', 'opaque-196-e2e.cjs'), from: "probe: () => M.probeProcesses(require('../tools/ps-env.cjs').psEnv()),", to: 'probe: M.probeProcesses,', k: (src) => assert.equal(unguardedProbes(src).length, 1, 'PS POLICY PRODUCT CENSUS mutant: the census catches it'), census: true }
 ];
 
 test('MUTANT CENSUS PS-POLICY-PRODUCT-TEMP: each mutant applies once and dies', { timeout: 300_000 }, async () => {
