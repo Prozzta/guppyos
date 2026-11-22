@@ -3650,6 +3650,11 @@ export class HeavyJobLock {
     try { procs = await this.d.probe(); } catch { procs = null; }
     this.sweepLeases(procs);
     if (!held.length || !this.d.roots) return;
+    // HEAVY-LOCK-NOHUP-DRIVER-UNREGISTERED-108, Jim MUST ddba39: a held job that has not exited is a
+    // sighting whatever the listing does, so it is taken BEFORE the probe-failed return: a blind stretch
+    // must not let ttl-blind free a running tracked suite. A failed listing still counts no miss.
+    const tj = this.now();
+    for (const h of held) if (this.holders.has(h.agentId) && this.heldJobRunning(h)) { h.misses = 0; h.seenRunning = true; h.seenAt = tj; }
     const probed = await this.heavyAgents({ procs });
     if (!probed) return;   // Jim MF4: unknown, not a miss
     const { busy, seen } = probed;
