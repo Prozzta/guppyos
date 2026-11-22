@@ -26,6 +26,18 @@ const acted = async (rig, agentId, id) => (await rig.entry(agentId, id))?.state 
 const actedRows = async (rig, id) => (await rig.rows('mail')).filter((r) => r.stage === 'acted' && (r.ids ?? []).includes(id));
 
 const beatUntil = (rig, fn, opts) => rig.beatUntil(fn, opts);
+// MAIL-RIG-F11-IDLE-TIMEOUT-108: an F11 test takes ONE post-grace beat, so main must already hold the
+// facts that beat reads. Wait for the host's own receipts (not the shim's one-way exits): the submit's
+// settle COMMITTED (a late one re-opens the epoch) and the PostInvocation after the last
+// PreInvocation (a late one keeps it invoking). Each wait fails by name if its receipt never comes.
+async function awaitHostReceipts(rig, id) {
+  await waitFor(async () => (await rig.call('diags')).some((d) => d.stage === 'settle' && d.agentId === id && d.outcome === 'COMMITTED'), { what: `host settle COMMITTED for ${id}` });
+  await waitFor(async () => {
+    const hooks = (await rig.call('diags')).filter((d) => d.stage === 'hook' && d.agentId === id);
+    const pre = hooks.map((d) => d.event).lastIndexOf('PreInvocation');
+    return pre >= 0 && hooks.slice(pre + 1).some((d) => d.event === 'PostInvocation');
+  }, { what: `host receipt of the PostInvocation for ${id}` });
+}
 
 // ——————————————————————————————————————————————————————————————————————————— the rig itself
 
@@ -486,6 +498,7 @@ test('F11 Stop never arrives (AGY false-active): the 30-minute stale-epoch back-
   await rig.beat();
   await waitFor(() => rig.contexts('ag-1').some((c) => c.ids.includes(m.id)), { what: 'surfaced at PreInvocation' });
   await waitFor(async () => (await rig.entry('ag-1', m.id))?.state === 'surfaced', { what: 'confirmed by latency' });
+  await awaitHostReceipts(rig, 'ag-1');
   // No Stop. AGY's statusline goes idle (the native idle the coordinator believes after its grace).
   const idleStatuses = async () => (await rig.call('diags')).filter((d) => d.stage === 'provider-status' && d.agentId === 'ag-1' && d.status === 'idle').length;
   const idleBefore = await idleStatuses();
@@ -522,6 +535,7 @@ test('F11 pin: a held AGY idle tick leaves lifecycle active through the first be
   await rig.beat();
   await waitFor(() => rig.contexts('ag-1').some((c) => c.ids.includes(m.id)), { what: 'surfaced at PreInvocation' });
   await waitFor(async () => (await rig.entry('ag-1', m.id))?.state === 'surfaced', { what: 'confirmed by latency' });
+  await awaitHostReceipts(rig, 'ag-1');
   await rig.call('holdProviderStatus', { id: 'ag-1' });
   const idleStatuses = async () => (await rig.call('diags')).filter((d) => d.stage === 'provider-status' && d.agentId === 'ag-1' && d.status === 'idle').length;
   const idleBefore = await idleStatuses();
