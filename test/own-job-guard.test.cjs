@@ -15,7 +15,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const R =require('./tools/run-tests.cjs');
+const R = require('./tools/run-tests.cjs');
 
 const TEST_DIR = __dirname;
 
