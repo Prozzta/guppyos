@@ -8974,6 +8974,11 @@ function bootstrapHiveServices(): void {
   // reply still belongs in the history.
   if ((readConfig().webhookTriggers ?? []).length > 0) startWebhookDoneObserver();
   hookServer.start();
+  // HEAVY-JOB-CREATE-TIMEOUT-UNHELD-108: start the heavy-job helper now, so its cold start is not paid
+  // inside the first heavy call's hook. Not awaited, and after start-up's own work (setImmediate).
+  // Not warmed while the hive is off (a fresh install before onboarding): this function returns
+  // above. Its reruns (onboarding, a home change) find it warmed already.
+  setImmediate(() => heavyJobs.warm());
   // AGY 1.1.48 - prepare Antigravity statusline capture. This TAKES nothing: the lease
   // on the user's global statusline is taken on the first AGY spawn and released when
   // the last AGY agent leaves. Startup only gives back a lease a dead run left behind.

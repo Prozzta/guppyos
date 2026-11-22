@@ -18,6 +18,7 @@
  * cannot forge that id's delivery evidence).
  */
 import { closeSync, fstatSync, openSync, readSync } from 'node:fs';
+import { MCP_HOOK_TIMEOUT_S } from './codexHookMcp';
 import type { AgentProvider } from '../shared/agentProvider';
 import type { MailChannelOverride, MailEntry, MailObligation } from './mailLedger';
 
@@ -97,6 +98,16 @@ export const MAIL_HTTP_HOOK_TIMEOUT_MS = 30_000;
 /** The command shims (HOOK_SHIM, AGY_HOOK_SHIM) give up after 5 s and print NOTHING, so on the
  *  pipe the provider-side budget is the shim's, not the provider's 30 s. */
 export const MAIL_PIPE_HOOK_TIMEOUT_MS = 5_000;
+/** HEAVY-JOB-CREATE-TIMEOUT-UNHELD-108: how long each hook client waits for its reply (ms). http is the
+ *  shipped Claude/AGY hook timeout (HOOK_HTTP_TIMEOUT_S, the same 30 s as MAIL_HTTP_HOOK_TIMEOUT_MS), mcp
+ *  the Codex MCP hook client, pipe the shim. 'pipe-oneway' waits for no reply and is not here. */
+export const HOOK_CLIENT_TIMEOUT_MS = { http: MAIL_HTTP_HOOK_TIMEOUT_MS, mcp: MCP_HOOK_TIMEOUT_S * 1000, pipe: MAIL_PIPE_HOOK_TIMEOUT_MS } as const;
+
+/** The wait of this transport's hook client; an unknown or missing transport gets the shortest (pipe). */
+export function hookClientTimeoutMs(transport: string | undefined): number {
+  return transport === 'http' ? HOOK_CLIENT_TIMEOUT_MS.http : transport === 'mcp' ? HOOK_CLIENT_TIMEOUT_MS.mcp : HOOK_CLIENT_TIMEOUT_MS.pipe;
+}
+
 /** §11.18 #9 (Q8 ruling): a response counts as delivered only when it is flushed before the
  *  transport timeout minus min(5 s, 50% of the timeout). */
 export function mailLatencyLimitFor(timeoutMs: number): number {
