@@ -62,11 +62,31 @@ let ownDir = null;
 /** One driver run for the whole file; every cell reads its own case from the result. */
 function driver() {
   if (ran) return ran;
-  ownDir = tempDir('clk-');
-  const outFile = path.join(ownDir, 'result.json');
-  ran = new Promise((resolve, reject) => {
-    // windowsHide: the child gets a NEW console with no window, so nothing of the suite is on it.
-    const child = spawn(consoleNode().file, [DRIVER, outFile, String(process.pid)], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: nodeEnv(process.env) });
+  ownDir = ownDir || tempDir('clk-');
+  // windowsHide: the child gets a NEW console with no window, so nothing of the suite is on it.
+  ran = runDriver(consoleNode().file, nodeEnv(process.env), 'result.json', []);
+  return ran;
+}
+let ranNoConsole = null;
+/**
+ * FLAKE-NODEPTY-CONSOLE-LIST-KILL-HARNESSALIVE-NOBODY: a second driver, for one case, that has NO
+ * console. It is electron.exe run as Node, the owner of onbinary-drop's terminal under the Electron
+ * leg: a GUI-subsystem program gets no console of its own, and ELECTRON_NO_ATTACH_CONSOLE keeps it
+ * off its parent's, so the result does not depend on who starts this file. Never a node.exe with no
+ * console: each of its forks would get a new console WITH a window (node-pty forks its list helper
+ * with no windowsHide). A fork of electron.exe is electron.exe, which gets none.
+ */
+function noConsoleDriver() {
+  if (ranNoConsole) return ranNoConsole;
+  ownDir = ownDir || tempDir('clk-');
+  const electron = process.versions.electron ? process.execPath : require('electron');
+  ranNoConsole = runDriver(electron, { ...nodeEnv(process.env), ELECTRON_RUN_AS_NODE: '1', ELECTRON_NO_ATTACH_CONSOLE: '1' }, 'result-no-console.json', ['owner-with-no-console']);
+  return ranNoConsole;
+}
+function runDriver(file, env, name, more) {
+  const outFile = path.join(ownDir, name);
+  return new Promise((resolve, reject) => {
+    const child = spawn(file, [DRIVER, outFile, String(process.pid), ...more], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env });
     let text = '';
     child.stdout.on('data', (d) => { text += d; });
     child.stderr.on('data', (d) => { text += d; });
@@ -80,7 +100,6 @@ function driver() {
       resolve(out);
     });
   });
-  return ran;
 }
 const kase = async (key) => {
   const c = (await driver()).cases[key];
@@ -258,10 +277,15 @@ test('harness, inbox conhost: a console list that fails every time fails by name
   const c = await kase('harnessListAlwaysFails');
   assert.equal(c.holdAskedBeforeKill, false, 'control: the hold answered "exited" at the first ask (the driver answers for it)');
   assert.equal(c.endedByPid, undefined, 'A PID IS NAMED ONLY WHILE IT IS HELD: the hold said the child had exited, and childBytes still ended that pid');
-  assert.deepEqual(scripted(c, 1), ["the driver's stub: fails -> FAILED: AttachConsole failed"], `control: the harness asked the list and the driver's stub answered (${JSON.stringify(c.harnessLists)})`);
-  assert.equal(c.lastHarnessList.by, "the driver's stub: fails", `control: every answer was the stub's, to the last (${JSON.stringify(c.lastHarnessList)})`);
+  // The owner HAS a console here, by its own measure: what fails is the list of it, and only that.
+  const owner = (await driver()).owner;
+  assert.equal(owner.conout, 'opened', `control: the driver opened its own console device (${JSON.stringify(owner)})`);
+  assert.equal(owner.ownList, 'a list that holds the owner', `control: the real helper listed the driver's own console (${JSON.stringify(owner)})`);
   assert.deepEqual(c.cleanupKills, ['held, running'], "control: the child itself was alive all along (the driver's own hold ended it after the case)");
   assert.equal(c.closed, false, "NO CLOSE WHILE NOTHING SAYS THE CHILD IS OFF THE OWNER'S CONSOLE: every list call failed, and node-pty's kill ran");
+  // After the guarantee: whether the harness asked the list at all is its own answer, not a part of the setup.
+  assert.deepEqual(scripted(c, 1), ["the driver's stub: fails -> FAILED: AttachConsole failed"], `control: the harness asked the list and the driver's stub answered (${JSON.stringify(c.harnessLists)})`);
+  assert.equal(c.lastHarnessList.by, "the driver's stub: fails", `control: every answer was the stub's, to the last (${JSON.stringify(c.lastHarnessList)})`);
   assert.deepEqual(c.named, [], `no console list was taken by node-pty, so nothing was named (${JSON.stringify(c.named)})`);
   assert.match(c.result, /^PTY teardown: the owner's own console could not be listed: AttachConsole failed/, 'the failure names the list that could not be taken, with the reason the call gave');
   assert.equal(c.workerExited, true, 'the conout worker was ended by the harness: the test file can end');
@@ -284,6 +308,30 @@ test('harness, inbox conhost: a child that is off the owner\'s console while it 
   assert.equal(c.rootExitedAtClose, false, "control: the child was still running when node-pty's kill was entered (the driver's own hold says so)");
   assert.deepEqual(c.cleanupKills, ['held, running'], "control: and it ran to the end of the case (the driver's own hold ended it)");
   NOBODY(c, 'the child was running and off the owner\'s console at the close');
+});
+// An owner with no console: electron.exe run as Node, the owner of onbinary-drop's terminal under
+// the Electron leg. No list of the owner's console can ever be taken there (the call fails every
+// time), so a harness that waits for one refuses every close at its cap. The harness asks first
+// whether the owner has a console at all, by a means of its own that is no list; with none, the
+// list step has nothing to wait for. The wait for the child's exit stays.
+test('harness, inbox conhost: an owner with no console waits for its child to exit and then closes, with no console list asked, and the close names nobody', async () => {
+  const out = await noConsoleDriver();
+  const c = out.cases.harnessOwnerNoConsole;
+  assert.ok(c, 'the driver ran case harnessOwnerNoConsole');
+  // Controls, measured by the driver itself and not through the harness.
+  assert.match(out.owner.exe, /^electron(\.exe)?$/i, `control: the driver is electron.exe run as Node (${JSON.stringify(out.owner)})`);
+  assert.equal(out.owner.conout, 'EBADF', `control: the driver could not open its own console device, it has none (${JSON.stringify(out.owner)})`);
+  assert.equal(out.owner.ownList, 'AttachConsole failed', `control: the real helper could not list the console of the driver's pid (${JSON.stringify(out.owner)})`);
+  assert.equal(c.holdAskedBeforeKill, true, 'control: the child was alive when childBytes gave up (its hold said so at the first ask)');
+  assert.equal(c.endedByPid, true, 'control: so the harness ended it by its pid, and the driver delivered that kill late');
+  assert.equal(c.closed, true, `AN OWNER WITH NO CONSOLE STILL CLOSES ITS TERMINAL: node-pty's kill ran (childBytes said: ${c.result}; the last owner list: ${JSON.stringify(c.lastHarnessList)})`);
+  assert.equal(c.rootExitedAtClose, true, "THE CLOSE CAME ONLY AFTER THE HOLD SAID THE CHILD HAD EXITED: the driver's own hold on the child, read as node-pty's kill was entered");
+  assert.equal(c.harnessListsAsked, 0, `NO LIST IS ASKED OF A CONSOLE THAT IS NOT THERE (${JSON.stringify(c.harnessLists)})`);
+  assert.deepEqual(c.ownerConsole, { console: 'none', code: 'EBADF' }, 'THE REASON IS RECORDED: what the harness itself found when it asked whether its owner has a console');
+  NOBODY(c, 'the owner had no console and the child had exited at the close');
+  // After the guarantees: how childBytes ended is the harness's own answer, not a part of the setup.
+  assert.match(c.result, /PTY child did not answer/, 'control: childBytes gave up at its 5 s');
+  assert.equal(JSON.stringify(c).includes('TEST FILE'), false, `the case reached the test file's own console: ${JSON.stringify(c)}`);
 });
 // The driver's own cleanup (not node-pty's kill, not the harness's): it used to end every root by its
 // number when a case was over, also a root dead for a second or more, whose number can be any
