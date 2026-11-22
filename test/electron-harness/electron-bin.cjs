@@ -97,6 +97,24 @@ function swiftShaderView(exe, mask = null, suppliedTmp) {
   return join(dir, name);
 }
 
+/**
+ * HARNESS-RUN-AS-NODE-ENV-LEAK-108: the env for a child that must start as a REAL Electron app.
+ *
+ * The suite's Electron leg runs every test file as 'ELECTRON_RUN_AS_NODE=1 electron.exe --test'.
+ * A harness child that inherits that key starts as plain Node: require('electron') has no 'app',
+ * and the main script dies at its first app call (isolate-paths.cjs, app.setPath) before any
+ * scenario runs. appEnv(env) returns a COPY of env without the key; the caller's object and
+ * process.env are left alone. It is the mirror of tools/node-env.cjs, which ADDS the key for a
+ * child that must run as Node. Wrap the WHOLE child env in it, so a caller's own keys cannot put
+ * the key back.
+ */
+const RUN_AS_NODE = 'ELECTRON_RUN_AS_NODE';
+function appEnv(env = process.env) {
+  const out = { ...env };
+  delete out[RUN_AS_NODE];
+  return out;
+}
+
 function harnessElectron(env = process.env) {
   const exe = require('electron');
   if (process.platform !== 'win32') return exe;
@@ -113,4 +131,4 @@ function harnessElectron(env = process.env) {
   return swiftShaderView(exe, mask);
 }
 
-module.exports = { harnessElectron, cappedHeavyJob, harnessCpuMask, halfCpuMask, swiftShaderMaskForHeavyJob, swiftShaderView };
+module.exports = { harnessElectron, appEnv, cappedHeavyJob, harnessCpuMask, halfCpuMask, swiftShaderMaskForHeavyJob, swiftShaderView };

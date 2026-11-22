@@ -28,7 +28,7 @@ function quit(mode) {
   const sandbox = createSandbox(`exitcrash-${mode}-`);
   return new Promise((resolve, reject) => {
     const child = spawn(electron, [join(__dirname, 'electron-harness', 'pty-quit-main.cjs'), '--sandbox', sandbox, '--mode', mode], {
-      cwd: join(__dirname, '..'), env: { ...process.env, MUNDER_DEV: '' }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true
+      cwd: join(__dirname, '..'), env: require('./electron-harness/electron-bin.cjs').appEnv({ ...process.env, MUNDER_DEV: '' }), stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true
     });
     let out = '';
     child.stdout.on('data', (d) => { out += d; });

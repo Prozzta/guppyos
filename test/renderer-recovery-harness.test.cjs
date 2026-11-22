@@ -22,7 +22,7 @@ function runRecovery() {
   const sandbox = createSandbox('rr164-');
   return new Promise((resolve, reject) => {
     const child = spawn(electron, [join(__dirname, 'electron-harness', 'recovery-main.cjs'), '--sandbox', sandbox], {
-      cwd: join(__dirname, '..'), env: { ...process.env, MUNDER_DEV: '' }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true
+      cwd: join(__dirname, '..'), env: require('./electron-harness/electron-bin.cjs').appEnv({ ...process.env, MUNDER_DEV: '' }), stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true
     });
     let out = ''; let err = '';
     child.stdout.on('data', (d) => { out += d; });
