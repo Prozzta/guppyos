@@ -244,7 +244,7 @@ const K = {
     const index = read('src/main/index.ts');
     assert.ok(hooks.includes('begin(wrap.agentId, wrap.toolInput, wrap.cmd, wrap.callId)'), 'THE WRAP CARRIES THE CALL ID TO THE JOB');
     assert.ok(/this\.heavyWrap = \{[^}]*callId \}/.test(hooks), 'THE WRAP CARRIES THE CALL ID TO THE JOB (the PreToolUse call id)');
-    assert.ok(index.includes("onJob: (e) => { if (e.state === 'held') heavyLock.noteJob(e.agentId, e.callId, e.job); else heavyLock.jobExited(e.agentId, e.callId, e.job); }"), 'MAIN TELLS THE LOCK EVERY HELD AND EXITED JOB');
+    assert.ok(index.includes("onJob: (e) => { if (e.state === 'held') heavyLock.noteJob(e.agentId, e.callId, e.job); else if (e.state === 'lost') heavyLock.jobLost(e.agentId, e.callId, e.job, e.why); else heavyLock.jobExited(e.agentId, e.callId, e.job); }"), 'MAIN TELLS THE LOCK EVERY HELD, LOST AND EXITED JOB');
   },
   helper() {
     const cs = read('resources/heavyjob/guppy-heavyjob.cs');
@@ -485,7 +485,7 @@ async function liveRelease(t, o) {
   const jobs = new Cm.HeavyJobs({
     platform: 'win32', options: () => ({ background: false, half: false }), exe: () => exe, log: (r) => rows.push({ ...r, ts: Date.now() }),
     ...(typeof Cm.serveChannel === 'function' ? { channel: traced } : {}),
-    onJob: (e) => { if (e.state === 'held') lock.noteJob(e.agentId, e.callId, e.job); else lock.jobExited(e.agentId, e.callId, e.job); }
+    onJob: (e) => { if (e.state === 'held') lock.noteJob(e.agentId, e.callId, e.job); else if (e.state === 'lost') lock.jobLost(e.agentId, e.callId, e.job, e.why); else lock.jobExited(e.agentId, e.callId, e.job); }
   });
   t.after(() => jobs.dispose());
   assert.equal(lock.acquire(AGENT, BENCH, 'bash cut.sh', 'call-1', true).acquired, true);

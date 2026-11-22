@@ -174,8 +174,11 @@ export interface HeavyJobsDeps {
   setTimeout?: (fn: () => void, ms: number) => unknown;
   clearTimeout?: (t: unknown) => void;
   /** HEAVY-LOCK-RELEASE-LAG-197: a job the helper holds was made for `callId` ('held'), and nothing of
-   *  that call is left in it any more ('exited', once per job). The heavy lock frees its slot on it. */
-  onJob?: (e: { agentId: string; callId: string; job: string; state: 'held' | 'exited' }) => void;
+   *  that call is left in it any more ('exited', once per job). The heavy lock frees its slot on it.
+   *  HEAVY-LOCK-NOHUP-DRIVER-UNREGISTERED-108: a held job Guppy stopped tracking before its exit was
+   *  seen ('lost', with why: helper-dead | helper-unanswered | no-job | never-started | dispose). The
+   *  lock stops counting it as running and falls back to its own process listing; no slot is freed. */
+  onJob?: (e: { agentId: string; callId: string; job: string; state: 'held' | 'exited' | 'lost'; why?: string }) => void;
 }
 
 interface TrackedJob {
@@ -255,6 +258,7 @@ export class HeavyJobs {
     this.jobs.delete(j.id);
     this.log({ action: 'lost', job: j.id, agentId: j.agentId, why });
     if (!this.jobs.size) this.disarm();
+    if (j.callId && !j.exited) this.tell(j.agentId, j.callId, j.id, 'lost', why);
   }
 
   /** The helper's own answer that it holds no job of this id (guppy-heavyjob.cs list/set/query). */
@@ -326,6 +330,7 @@ export class HeavyJobs {
         await this.req(`close ${j.id}`);
         this.jobs.delete(j.id);
         this.log({ action: 'never-started', job: j.id, agentId: j.agentId });
+        if (j.callId) this.tell(j.agentId, j.callId, j.id, 'lost', 'never-started');
         continue;
       }
       const own = this.own(j, rows);
@@ -398,8 +403,8 @@ export class HeavyJobs {
     if (j.callId) this.tell(j.agentId, j.callId, j.id, 'exited');
   }
 
-  private tell(agentId: string, callId: string, job: string, state: 'held' | 'exited'): void {
-    try { this.d.onJob?.({ agentId, callId, job, state }); } catch { /* the lock's own checks still run */ }
+  private tell(agentId: string, callId: string, job: string, state: 'held' | 'exited' | 'lost', why?: string): void {
+    try { this.d.onJob?.({ agentId, callId, job, state, ...(why ? { why } : {}) }); } catch { /* the lock's own checks still run */ }
   }
 
   /** The jobs being tracked (for tests and the live proof). */
@@ -417,5 +422,7 @@ export class HeavyJobs {
     this.timer = null;
   }
 
-  dispose(): void { this.disposed = true; this.disarm(); for (const j of this.jobs.values()) this.cancelConfirm(j); this.ch?.close(); this.ch = null; }
+  /** HEAVY-LOCK-NOHUP-DRIVER-UNREGISTERED-108: a held job tracked at dispose can no longer be seen to
+   *  exit, so the lock is told it is lost (the jobs stay in the map: only the flag stops arm()). */
+  dispose(): void { this.disposed = true; this.disarm(); for (const j of this.jobs.values()) { this.cancelConfirm(j); if (j.callId && !j.exited) this.tell(j.agentId, j.callId, j.id, 'lost', 'dispose'); } this.ch?.close(); this.ch = null; }
 }

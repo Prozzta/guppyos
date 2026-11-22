@@ -3414,7 +3414,7 @@ export class HeavyJobLock {
     const cur = this.holders.get(agentId);
     // Freed during the listing (its job ended, or the watcher saw it gone): nothing is held any more.
     if (!cur) return { state: 'unreserved', reserved: false, queued: false, next: null, held: { kind: was.kind, calls, pids: [], dropped: true, checked } };
-    if ([...cur.jobs.values()].some((js) => [...js.values()].some((exited) => !exited))) running = true;
+    if (this.heldJobRunning(cur)) running = true;
     const arrived = [...cur.calls].filter((c) => !calls.includes(c));
     const pids = [...cur.attributed.keys()].sort((a, b) => a - b);
     if (running || checked === 'failed' || checked === 'unseen' || arrived.length) {
@@ -3487,6 +3487,25 @@ export class HeavyJobLock {
     if (!h.windows.every((w) => this.callJobsExited(h, w.callId))) return;
     h.calls.clear();
     this.release(agentId, 'job-exit');
+  }
+
+  /** HEAVY-LOCK-NOHUP-DRIVER-UNREGISTERED-108: HeavyJobs stopped tracking the held job `job` of `callId`
+   *  before its exit was seen (its helper died or was replaced, the helper holds no such job, it never
+   *  started, or HeavyJobs was disposed). It no longer counts as running, and it is not an exit: no slot
+   *  is freed here. The holder falls back to the listing (misses, then 'process-exit') and the TTL. */
+  jobLost(agentId: string, callId: string, job: string, why = 'lost'): void {
+    const h = this.holders.get(agentId);
+    const js = h?.jobs.get(callId);
+    if (!h || !js || js.get(job) !== false) return;
+    js.delete(job);
+    if (!js.size) h.jobs.delete(callId);
+    this.log({ kind: 'heavy-lock', action: 'job-lost', agentId, heavyKind: h.kind, job, why, heldMs: this.now() - h.since });
+  }
+
+  /** HEAVY-LOCK-NOHUP-DRIVER-UNREGISTERED-108: a job Guppy holds for this holder has not exited (one
+   *  helper for scan() and releaseHeld). */
+  private heldJobRunning(h: HeavyHolder): boolean {
+    return [...h.jobs.values()].some((js) => [...js.values()].some((exited) => !exited));
   }
 
   /** Jim MUST 1: every window of `callId` had its own held job, and all of those jobs have exited. */
@@ -3637,7 +3656,11 @@ export class HeavyJobLock {
     const t = this.now();
     for (const h of held) {
       if (!this.holders.has(h.agentId)) continue;
-      if (busy.has(h.agentId)) { h.misses = 0; h.seenRunning = true; h.seenAt = t; continue; }
+      // HEAVY-LOCK-NOHUP-DRIVER-UNREGISTERED-108 (2026-11-21T22:55Z: a nohup'd suite ran unheld): a job
+      // Guppy holds for the holder that has not exited is running, whatever the listing shows (the
+      // nohup broke the parent chain to the PTY root, so no listed process is attributed). The same
+      // helper as releaseHeld's, so the two cannot drift. Its exit (jobExited) or loss (jobLost) ends it.
+      if (busy.has(h.agentId) || this.heldJobRunning(h)) { h.misses = 0; h.seenRunning = true; h.seenAt = t; continue; }
       if (!seen.has(h.agentId)) continue;   // its PTY root is not in the listing: unknown, not a miss
       h.seenRunning = false;
       if (t - h.touched < HEAVY_SCAN_MS) continue;
