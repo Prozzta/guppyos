@@ -60,7 +60,7 @@ let own = null;
 const SLOW_KILL_MS = 2000;
 const LATE_AFTER_LIST = "late: after node-pty's console list had answered";
 const LATE_NO_LIST = `late: ${SLOW_KILL_MS} ms after it was sent, and node-pty had asked for no console list by then`;
-const LEFT_LATE = `left its console ${SLOW_KILL_MS} ms after the harness first asked its hold (ended by the driver)`;
+const LEFT_LATE = `left its console ${SLOW_KILL_MS} ms after the harness first asked its hold (told by the driver to take itself off; it runs on)`;
 const deliverLate = (o, pid, signal) => {
   const send = (when) => {
     if (o.c.killDelivered) return;
@@ -307,9 +307,17 @@ let bystanderProc = null;
   const late = 'const st = setTimeout; globalThis.setTimeout = (f) => st(f, 600000);';
   /**
    * `leaves`: the child is on its console when the harness first asks its hold, and leaves it
-   * SLOW_KILL_MS later, with nothing sent by the harness: the driver ends it then, under its own
-   * hold. With says 'gone' that is a child that has exited by itself and that its console still
-   * lists for a while.
+   * SLOW_KILL_MS later, with nothing sent by the harness. With says 'gone' that is a child that has
+   * exited by itself and that its console still lists for a while.
+   *
+   * FLAKE-CLK-EXITED-BY-ITSELF-ROOTEXITED-RACE-108: the driver ended the child by pid at that point.
+   * A process that is being ended goes off its console first and its exit is signalled later, so a
+   * list of the harness could land between the two (seen 2026-11-22 under suite load: the close was
+   * right by the rule, and the driver's own hold still said the child ran). The driver now makes
+   * that order exact and holds it: it TELLS the child to leave (the file <case>.leave, see
+   * leavesWhenTold), the child takes itself off its console and runs on, and the driver ends it
+   * only after the case (record's endRoot). So the two events are apart in every run: the console
+   * leave comes before the close, the exit after it. `order` writes down what was seen at each.
    */
   const harness = async (key, prelude, { says = null, slow = false, leaves = false, lists = null } = {}) => {
     named = []; sweeps = 0; sweepEndsNothing = false;
@@ -347,6 +355,12 @@ let bystanderProc = null;
         c.harnessListsAsked = n;
         if (c.harnessLists.length < 8) c.harnessLists.push(line);
         c.lastHarnessList = line;
+        // `leaves` only: the first list of the owner's console that lacks the child, and what the
+        // driver's own hold said of the child's exit right then.
+        if (c.order && !c.order.firstListWithoutChild && line.answer === 'a list' && line.owner && !line.child) {
+          const mine = holds.get(root);
+          c.order.firstListWithoutChild = { ask: n, ms: Date.now() - c.order.t0, toldByThen: c.leftConsole !== undefined, exitSignalled: mine ? !mine.alive() : null };
+        }
         if (!mode && script.thenLeaves && c.driverKill === undefined) endAfterScript();
       }
     };
@@ -354,11 +368,16 @@ let bystanderProc = null;
     const freedFile = path.join(tmp, `${key}.freed`);
     const leaveLate = () => {
       c.leavesArmed = true;
+      // Times are written down for the reader of a red cell. No assert reads a time.
+      c.order = { t0: Date.now() };
       setTimeout(() => {
         const mine = holds.get(root);
         if (!mine || !mine.alive()) return;
+        // Was node-pty's kill entered while the child was still on the console? Read before the tell.
+        c.closedBeforeLeave = st.closed;
+        c.order.toldMs = Date.now() - c.order.t0;
         c.leftConsole = LEFT_LATE;
-        try { realKill(root); } catch { /* gone */ }
+        fs.writeFileSync(path.join(tmp, `${key}.leave`), 'leave');
       }, SLOW_KILL_MS);
     };
     holdSeen = { c, st, says, onFirstAsk: leaves ? leaveLate : null };
@@ -380,6 +399,7 @@ let bystanderProc = null;
             // kill was entered? (aliveAtKill asks the pid number, which a dying process still answers.)
             const mine = holds.get(root);
             if (mine) c.rootExitedAtClose = !mine.alive();
+            if (c.order) c.order.closeMs = Date.now() - c.order.t0;
           });
         }
       });
@@ -409,6 +429,13 @@ let bystanderProc = null;
    * stderr write nothing from then on. It answers by files only: <case>.freed, and <case>.past once
    * it has run past the harness's own script.
    */
+  /**
+   * The same, when the driver says so and not before: the child watches the case's folder and takes
+   * itself off its console once <case>.leave is there (see `leaves` at harness()). No clock in the
+   * child: the tell is the seam. Until then it is the plain `late` child, on the owner's console.
+   */
+  const leavesWhenTold = (key) => `{ const fs = require('fs'); let left = false; const leave = () => { if (left || !fs.existsSync(${JSON.stringify(path.join(tmp, `${key}.leave`))})) return; left = true; ${freed(key)} };`
+    + ` fs.watch(${JSON.stringify(tmp)}, leave); leave(); }`;
   const freed = (key) => `for (const s of [process.stdout, process.stderr]) s.on('error', () => {}); let said; try { require(${JSON.stringify(require.resolve('node-pty/lib/utils'))}).loadNativeModule('conpty_console_list').module.getConsoleProcessList(process.pid);`
     + ` said = 'the call returned a list'; } catch (e) { said = String(e && e.message); } require('fs').writeFileSync(${JSON.stringify(path.join(tmp, `${key}.freed`))}, said);`
     + ` process.stdout.write = process.stderr.write = () => true; process.stdin.on('error', () => {});`
@@ -435,8 +462,9 @@ let bystanderProc = null;
   // the console: what a console that is slow to drop an exited process looks like to the harness.
   await harness('harnessExitedStillOnConsole', late, { slow: true, says: 'goneOnceEnded' });
   // No kill by pid at all: the hold says "exited" at the first ask (a child that ended by itself),
-  // and the child is on the console for 2 s more.
-  await harness('harnessExitedByItselfStillOnConsole', late, { says: 'gone', leaves: true });
+  // and the child is on the console for 2 s more. Then it takes itself off the console, told by the
+  // driver, and runs on to the end of the case: off the console first, the exit later, in every run.
+  await harness('harnessExitedByItselfStillOnConsole', late + leavesWhenTold('harnessExitedByItselfStillOnConsole'), { says: 'gone', leaves: true });
   // The kill by pid is real, and the hold goes on saying the child runs.
   await harness('harnessNeverExits', late, { says: 'runs' });
   // Nothing can hold the child (no addon).
