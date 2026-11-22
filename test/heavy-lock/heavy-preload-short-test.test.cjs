@@ -264,6 +264,23 @@ K.e2e = async (t, M = HJ, opt = {}) => {
   assert.ok(b.logs.some((r) => r.action === 'lease-single' && r.agentId === 'a'), 'the single-file rule let it through');
   // A full run (node's own discovery: no files) in the same shown call still waits.
   const suite = start([process.execPath, '--test'], b.url);
+  const suiteBorn = Date.now();
+  // FLAKE-HEAVY-PRELOAD-SHORT-E2E-WAITER-SNAPSHOT-108: the child is in the queue only once its first request
+  // has reached the lock, and before that it starts node twice (itself, then the preload's helper). How long
+  // that takes is the machine's load. So the cell waits for the fact (queued, or the child has ended) and
+  // puts no clock of its own on it; the 2.5 s below then runs on a child that is queued. A child that never
+  // asks ends at the cell's own limit, with the evidence.
+  let ended = null;
+  suite.done.then((x) => { ended = x; });
+  const queued = () => b.lock.queueSnapshot().waiters.some((w) => w.agentId === 'a');
+  const onLimit = () => {
+    process.stderr.write(`[heavy-preload-short-test] the suite child was not queued at the cell's limit, ${ended ? `process ended with code ${ended.code}` : 'process still running'}: lock rows (ms after its start): ${b.logs.map((x) => `${x.seenMs - suiteBorn} ${x.action} ${x.agentId ?? ''}`).join(' | ')}; stderr: ${suite.stderr() || '(none)'}\n`);
+    // own-procs, not taskkill /T: that walks parent ids alone and can end a stranger (own-procs-pid-recycle PIN).
+    if (!ended) own.killOwnTree({ pid: suite.child.pid, bornMs: suiteBorn });
+  };
+  t.signal.addEventListener('abort', onLimit, { once: true });
+  while (!queued() && !ended) await sleep(25);
+  t.signal.removeEventListener('abort', onLimit);
   assert.equal(await within(suite.done, 2_500), 'timeout', 'A FULL SUITE STILL WAITS FOR THE SLOT');
   assert.deepEqual(b.lock.queueSnapshot().waiters.map((w) => w.agentId), ['a']);
   b.lock.callDone('b', 'hb');
