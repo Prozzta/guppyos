@@ -279,7 +279,7 @@ async function bareRun(dir, name, helperLine, { mode = 'FAIL', env: extra = {}, 
       const row = own.lookupPids([p.pid])[0];
       return isNodeExe(row) ? row : null;
     }, 30_000);
-    const watched = await observeProcess(p, observer, name, { hold: mode === 'HANG', parent, doneMs, onSeen: (x) => { seen = x; if (onSeen) onSeen({ pids: x.pids, parent, observer, p }); } });
+    const watched = await observeProcess(p, observer, name, { hold: mode === 'HANG', parent, doneMs, onSeen: (x) => { seen = x; if (onSeen) onSeen({ pids: x.pids, parent, observer, p, socket: x.socket }); } });
     assert.equal(watched.pids.connected, !disconnect, `${name}: the fixture reports its detached child's channel ${disconnect ? 'closed' : 'still open'}`);
     const result = { ...watched, parent: { pid: parent.pid, bornMs: parent.created } };
     if (mode === 'HANG') return result;
@@ -519,6 +519,7 @@ test('LIVE: a failed process lookup while observing ends the run at once and lea
     // END the run whatever the assertion said: under a regression (no abandon) the observer still listens and the
     // bare parent waits for a release that never comes, which hung the whole file to the 30-minute watchdog
     try { if (kept.observer) kept.observer.close(); } catch { /* closed */ }
+    try { if (kept.socket) kept.socket.destroy(); } catch { /* already gone */ }
     try { if (kept.p && kept.p.exitCode === null && kept.p.signalCode === null) kept.p.kill(); } catch { /* exited */ }
     try { if (kept.pids) sweep([...Object.values(childRows(kept.pids)), ...(kept.parent ? [kept.parent] : [])]); } catch { /* best effort */ }
     rmDir(dir);
