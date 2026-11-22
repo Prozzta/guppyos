@@ -285,7 +285,7 @@ test('F6 INTERFERED, then ALREADY_HANDLED / SEND_AGAIN: the ledger follows the t
 // NOT covered here: a look taken BEFORE the echo still RELEASES. That is the product's case, card
 // HELD-WAKE-ECHO-LAG-RELEASE. The wait before the last look guards load only (no cell holds it).
 const ECHO_RELEASE_MS = 800;   // the hold ends this long after the cue: a look not waiting for the echo runs first
-const g1 = (scenario, { held = false } = {}) => async (t) => {
+const g1 = (scenario, { echoHeld = false } = {}) => async (t) => {
   const rig = await startRig(t);
   await rig.setup([{ id: 'cl-a', flavour: 'claude', scenario }]);
   await rig.call('armInterfere', { id: 'cl-a', by: 'GOD' });
@@ -297,7 +297,7 @@ const g1 = (scenario, { held = false } = {}) => async (t) => {
   assert.ok(await rig.call('inhibition', { id: 'cl-a' }), 'the PTY is held');
   assert.equal(rig.prompts('cl-a').length, 0, 'no Enter on god\'s text');
   await sleep(1_700);   // HUMAN_QUIET_MS after god's key
-  if (held) {
+  if (echoHeld) {
     const pt = await rig.call('ptyTrace', { id: 'cl-a' });
     const inputs = rig.transcript('cl-a').filter((r) => r.kind === 'pty-input');
     assert.deepEqual([pt.echoSeen, inputs.length], [0, 0], "control: the hold kept god's keys off the screen past the quiet time (no echo at the host, no input read by the stub)");
@@ -338,7 +338,7 @@ const g1 = (scenario, { held = false } = {}) => async (t) => {
   assert.deepEqual(rows.map((r) => r.action), ['type', 'read', 'keys', 'send'], 'every god action is logged');
 };
 test('G1 god unsticks a held wake through term: INTERFERED by god, god clears and sends, the mail is acted once, the held look releases', T, g1({}));
-test("G1 echo held: the stub reads none of the keys until after the quiet time; the held look still waits for god's draft on the screen", T, g1({ echoHold: true }, { held: true }));
+test("G1 echo held: the stub reads none of the keys until after the quiet time; the held look still waits for god's draft on the screen", T, g1({ echoHold: true }, { echoHeld: true }));
 
 // ——————————————————————————————————————————————————————————————————————————— F7
 
