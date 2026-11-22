@@ -214,7 +214,6 @@ test('harness, inbox conhost: a child that exited by itself and is still on its 
   assert.equal(c.leavesArmed, true, 'control: the driver kept the child on the console past that first ask');
   assert.equal(c.closed, true, "node-pty's kill ran");
   NOBODY(c, 'the hold said at the first ask that the child had exited, and the child was still on the console of its pid');
-  assert.match(String(c.leftConsole), /^left its console 2000 ms after/, `control: the child left the console only when the driver ended it (${c.leftConsole})`);
   const o = c.order || {};
   const first = o.firstListWithoutChild;
   const order = `order: the child was told to leave its console at +${o.toldMs} ms (node-pty's kill entered by then: ${c.closedBeforeLeave})`
@@ -229,6 +228,8 @@ test('harness, inbox conhost: a child that exited by itself and is still on its 
   assert.deepEqual(last && [last.by, last.answer, last.owner, last.child], ['the real helper', 'a list', true, false],
     `THE CLOSE WAS DECIDED ON THE OWNER'S CONSOLE: the last list the harness read before its close was not the owner's console with the owner on it and without the child (${JSON.stringify(last)}; ${order})`);
   // Controls: the wait was a real one, and the two events were apart (off the console, and still running).
+  // How the driver's timer ended is an outcome, not a setup fact: it is read after the guarantees.
+  assert.match(String(c.leftConsole), /^left its console 2000 ms after/, `control: the child left the console only when the driver ended it (${c.leftConsole})`);
   const one = c.harnessLists[0];
   assert.deepEqual(one && [one.by, one.answer, one.owner, one.child], ['the real helper', 'a list', true, true],
     `control: the first list the harness read was the owner's console with the child on it (${JSON.stringify(one)})`);
