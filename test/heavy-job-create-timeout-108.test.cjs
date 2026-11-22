@@ -251,6 +251,31 @@ const K = {
       assert.equal(st[0].cause, 'deadline');
     }
   },
+  // Jim S1: on pipe and mcp every create is cut (2.5 s < 3 s), so a wedged helper is replaced only
+  // through the creates' queued closes, which wait the full 3 s and count. Nothing else replaces it.
+  async s1(M) {
+    for (const transport of ['pipe', 'mcp']) {
+      let n = 0;
+      const R = rig(M, { script: (line) => (line.startsWith('create ') && ++n === 1 ? { at: 1, r: { ok: true } } : { at: 1e9, r: { ok: true } }) });
+      await http(R.jobs, 1, R.clock);   // answered once: warm, then it wedges
+      R.told.length = 0;
+      for (let i = 2; i <= 4; i++) {
+        await R.jobs.begin(AGENT, { command: 'npm ci' }, false, `call-${i}`, transport, R.clock.t);
+        await flush();
+        const missed = i - 1;
+        const closes = R.chans[0].reqs.filter((q) => q.line.startsWith('close agent-'));
+        assert.equal(closes.length, missed, `${transport}: one queued close per cut create (${closes.length})`);
+        assert.equal(R.chans[0].closed, missed >= C.HEAVY_JOB_UNANSWERED_DEAD,
+          `A WEDGED HELPER ON ${transport.toUpperCase()} IS REPLACED AT ITS THIRD MISSED CLOSE, NOT BEFORE: no create counted (missed closes ${missed}, closed ${R.chans[0].closed}, close waits ${JSON.stringify(closes.map((q) => q.ms))})`);
+      }
+      const creates = R.chans[0].reqs.filter((q) => q.line.startsWith('create ')).slice(1);
+      assert.ok(creates.every((q) => q.ms < C.HEAVY_JOB_REQUEST_MS), `${transport}: every create is cut (${JSON.stringify(creates.map((q) => q.ms))})`);
+      const closes = R.chans[0].reqs.filter((q) => q.line.startsWith('close agent-'));
+      assert.deepEqual(closes.map((q) => q.ms), [1, 2, 3].map(() => C.HEAVY_JOB_REQUEST_MS), `${transport}: each queued close waits the full 3 s`);
+      assert.deepEqual(R.rows.filter((r) => r.action === 'wrap').slice(1).map((w) => w.held), [false, false, false]);
+      assert.deepEqual(R.told, []);
+    }
+  },
   async w1(M) {
     const R = rig(M);
     const ret = R.jobs.warm();
@@ -348,6 +373,7 @@ test('F8: an event line and a garbage line are no answer: the start budget holds
 test('F9: three cut creates in a row replace nothing', () => K.f9(C));
 test('F10: a one-way hook is not wrapped; no transport waits as pipe', () => K.f10(C));
 test('F11: no time left (past and exactly at the deadline): nothing is sent, logged early', () => K.f11(C));
+test('S1: a wedged helper on pipe or mcp is replaced at its third missed close; no cut create counts', () => K.s1(C));
 test('W1: warm() is fire-and-forget, one close of a job no one made, logs one helper-start warm', () => K.w1(C));
 test('W2: warm() does nothing without the helper or off Windows', () => K.w2(C));
 test('W3: warm() runs once, and not after a call started the helper', () => K.w3(C));
@@ -525,6 +551,7 @@ const MUTANTS = [
   { name: 'a cut create counts toward a replace', edits: [['    if (cut) return { r, cut, cold, ms };\n', '']], killer: 'f9', dies: /A CUT CREATE COUNTS TOWARD NO REPLACE/ },
   { name: 'a one-way hook is wrapped', edits: [["    if (transport === 'pipe-oneway') return null;\n", '']], killer: 'f10', dies: /A ONE-WAY HOOK IS NOT WRAPPED/ },
   { name: 'a create is sent with no time left', edits: [['    if (deadline - this.now() <= HEAVY_JOB_DEADLINE_FLOOR_MS) {', '    if (false) {']], killer: 'f11', dies: /NO TIME LEFT: NOTHING IS SENT/ },
+  { name: 'a cut create\'s queued close is a cut too', edits: [['void this.req(`close ${id}`);', 'void this.send(`close ${id}`, this.now());']], killer: 's1', dies: /A WEDGED HELPER ON PIPE IS REPLACED AT ITS THIRD MISSED CLOSE/ },
   { name: 'warm starts the helper but sends nothing', edits: [[WARM_SEND, '']], killer: 'w1', dies: /WARM SENDS ONE REQUEST/ },
   { name: 'warm runs again after its helper was replaced', edits: [[WARM_GUARD, WARM_GUARD.replace(' || this.warmed', '')]], killer: 'w5', dies: /WARM RUNS ONCE/ },
   { name: 'warm starts a helper after dispose', edits: [[WARM_GUARD, WARM_GUARD.replace(' || this.disposed', '')], ['    if (this.disposed) return null;\n    if (this.ch) return this.ch;', '    if (this.ch) return this.ch;']], killer: 'w4', dies: /NO HELPER IS STARTED BY A WARM AFTER DISPOSE/ },
