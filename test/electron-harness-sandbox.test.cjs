@@ -199,6 +199,17 @@ test('a test\'s own opts.env cannot put ELECTRON_RUN_AS_NODE back into the harne
   }
 });
 
+test('an IPC-order run still reports when this process has ELECTRON_RUN_AS_NODE=1 (run.cjs\'s second launcher)', async () => {
+  const root = privateRoot();
+  try {
+    const r = await withRunAsNodeSet(() => run.runIpcOrder({ phase1: 5, phase2: 5, phase3: 1, tempRoot: root }));
+    assert.equal(typeof r, 'object', 'the child ran the experiment as an Electron app and printed its result');
+    assert.notEqual(r, null);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 /** Files that take the harness binary's path but never start a child with it. */
 const TAKES_THE_PATH_ONLY = ['test/electron-fuses.test.cjs', 'test/electron-view-self-heal-198.test.cjs', 'test/tools/claims90-search.cjs'];
 /** What a launcher must show: appEnv (a real app), an explicit delete (a real app), or the key set to '1' (Node on purpose). */
@@ -223,7 +234,13 @@ test('THE TREE: every file that launches the harness Electron binary says whethe
   for (const exempt of TAKES_THE_PATH_ONLY) assert.ok(users.includes(exempt), `${exempt} no longer names harnessElectron: drop it from TAKES_THE_PATH_ONLY`);
   const launchers = users.filter((f) => f !== self && f !== definesIt && !TAKES_THE_PATH_ONLY.includes(f));
   assert.ok(launchers.includes('test/electron-harness/run.cjs') && launchers.length >= 5,`the walk found the launchers: ${launchers.join(', ')}`);
-  const silent = launchers.filter((f) => !SAYS_WHICH.test(readSource(f)));
+  // PER LAUNCH, not per file (Jim): run.cjs has two launchers, and one wrapped site must not
+  // cover for the other. Each harnessElectron( call must be matched by one statement of intent.
+  const count = (text, re) => (text.match(new RegExp(re.source, 'g')) || []).length;
+  const silent = launchers
+    .map((f) => ({ f, launches: count(readSource(f), /\bharnessElectron\(/), says: count(readSource(f), SAYS_WHICH) }))
+    .filter((x) => x.says < x.launches)
+    .map((x) => `${x.f}: ${x.launches} launch(es), ${x.says} say which`);
   assert.deepEqual(silent, [],
     'A LAUNCHER OF THE HARNESS ELECTRON BINARY THAT MAY HAND ITS CHILD ELECTRON_RUN_AS_NODE: under the Electron leg the child starts as plain Node and never reports. '
     + 'Wrap the child env in appEnv() (test/electron-harness/electron-bin.cjs), or set the key to \'1\' when Node is meant.');
