@@ -163,6 +163,9 @@ interface HookPayload {
    *  the transport it came over. Never trusted from the sender (overwritten). */
   seq?: number;
   transport?: HookTransport;
+  /** HEAVY-JOB-CREATE-TIMEOUT-UNHELD-108: when the hook arrived (epoch ms), stamped with the transport
+   *  (the pipe: when its first byte came, less the shim's own time). Never trusted from the sender. */
+  arrived_ms?: number;
   /** Codex PostToolUse over MCP: the tool's output, rebuilt from the rollout. */
   tool_response?: unknown;
   /** HOOK-BROKER P3: the rollout did not (yet) hold this tool hook's item, so tool_name /
@@ -610,7 +613,7 @@ export class HookServer {
         let res: unknown = {};
         let claims: MailClaim[] = [];
         void (async () => {
-          try { res = await this.handleWithClaimContext(this.stampArrival(payload, 'pipe')); claims = this.takeMailClaims(); } catch { res = {}; }
+          try { res = await this.handleWithClaimContext(this.stampArrival(payload, 'pipe', receivedAt - shimMs)); claims = this.takeMailClaims(); } catch { res = {}; }
           this.watchMailFlush(conn, claims, receivedAt - shimMs);
           if (payload.munder_part === 'briefing') this.watchBriefingFlush(conn, payload, res, receivedAt - shimMs);
           conn.end(JSON.stringify(res ?? {}));
@@ -1258,8 +1261,9 @@ export class HookServer {
 
   /** Stamp the arrival order and transport before handle() (never trusted from the body),
    *  and count it for the per-minute transport log. */
-  private stampArrival(p: HookPayload, transport: HookTransport): HookPayload {
+  private stampArrival(p: HookPayload, transport: HookTransport, arrivedMs: number = Date.now()): HookPayload {
     p.transport = transport;
+    p.arrived_ms = arrivedMs;
     const agentId = typeof p.agent_id === 'string' && p.agent_id ? p.agent_id : null;
     if (!agentId) { delete p.seq; return p; }
     const seq = (this.seqByAgent.get(agentId) ?? 0) + 1;
@@ -2146,7 +2150,7 @@ export class HookServer {
   setHeavyAutoApproves(fn: (agentId: string) => boolean): void { this.heavyAutoApproves = fn; }
   /** Set by handleHook for an allowed heavy PreToolUse; handleWithClaimContext makes the job and
    *  puts the rewritten command in the reply (making the job needs an await). */
-  private heavyWrap: { agentId: string; toolInput: unknown; transport: HookTransport | undefined; cmd: boolean; callId: string } | null = null;
+  private heavyWrap: { agentId: string; toolInput: unknown; transport: HookTransport | undefined; arrivedMs: number | null; cmd: boolean; callId: string } | null = null;
 
   /** The id that pairs a heavy call's PreToolUse with its PostToolUse: the provider's tool-use
    *  id when it sends one, else the command itself, without the join line the Pre reply put
@@ -2509,11 +2513,11 @@ export class HookServer {
    * permissionDecision 'allow' (its parser drops it otherwise; this hook already allowed the call); the
    * AGY shim turns it into AGY's own `overwrite`. A failure leaves the call as it was.
    */
-  private async withHeavyJob(out: unknown, wrap: { agentId: string; toolInput: unknown; transport: HookTransport | undefined; cmd: boolean; callId: string }): Promise<unknown> {
+  private async withHeavyJob(out: unknown, wrap: { agentId: string; toolInput: unknown; transport: HookTransport | undefined; arrivedMs: number | null; cmd: boolean; callId: string }): Promise<unknown> {
     const o = (out && typeof out === 'object' ? out : {}) as { hookSpecificOutput?: Record<string, unknown> };
     if (o.hookSpecificOutput?.permissionDecision === 'deny') return out;
     let updatedInput: Record<string, unknown> | null = null;
-    try { updatedInput = await this.heavyJobs!.begin(wrap.agentId, wrap.toolInput, wrap.cmd, wrap.callId); } catch { updatedInput = null; }
+    try { updatedInput = await this.heavyJobs!.begin(wrap.agentId, wrap.toolInput, wrap.cmd, wrap.callId, wrap.transport, wrap.arrivedMs); } catch { updatedInput = null; }
     if (!updatedInput) return out;
     return { ...o, hookSpecificOutput: { ...(o.hookSpecificOutput ?? {}), hookEventName: 'PreToolUse', ...(wrap.transport === 'mcp' ? { permissionDecision: 'allow' } : {}), updatedInput } };
   }
@@ -2881,7 +2885,7 @@ export class HookServer {
       let provider: string = allows ? 'codex' : 'claude';
       try { provider = this.mailChannel(agentId).provider ?? provider; if (provider === 'antigravity') allows = true; } catch { /* unknown: Claude's http */ }
       if (this.heavyJobs && cls.heavy && (own || p.payload_degraded !== true)) {
-        if (!allows || this.heavyAutoApproves(agentId)) this.heavyWrap = { agentId, toolInput, transport: p.transport, cmd: own !== undefined && p.hook_cmd_shell === true, callId };
+        if (!allows || this.heavyAutoApproves(agentId)) this.heavyWrap = { agentId, toolInput, transport: p.transport, arrivedMs: typeof p.arrived_ms === 'number' ? p.arrived_ms : null, cmd: own !== undefined && p.hook_cmd_shell === true, callId };
         else this.heavyJobs.skipAskFirst(agentId, provider);
       }
     }
