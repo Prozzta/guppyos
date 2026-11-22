@@ -345,6 +345,7 @@ let bystanderProc = null;
       c.closedBeforeDriverKill = st.closed;
     }
     try { c.freed = fs.readFileSync(freedFile, 'utf8'); } catch { /* this case's child made no list call of its own */ }
+    try { c.past = fs.readFileSync(path.join(tmp, `${key}.past`), 'utf8'); } catch { /* no such child, or it ended before that */ }
     await record(c, root, st);
     own = null;
     holdSeen = null;
@@ -354,9 +355,17 @@ let bystanderProc = null;
    * its own pid, which frees the console it is on and then cannot attach to a console of a process
    * that has none. What the call said is written to <case>.freed. This is the order a process that
    * is being ended goes through (off the console first, the exit signalled later), held for good.
+   *
+   * Measured (2026-11-22, both legs): with its console gone the child's std handles are dead, and the
+   * 'READY' write of the harness's child script threw EBADF from writeSync, uncaught: exit code 1 two
+   * ms after the call. A throw inside write() is not an 'error' event, so the child's stdout and
+   * stderr write nothing from then on. It answers by files only: <case>.freed, and <case>.past once
+   * it has run past the harness's own script.
    */
-  const freed = (key) => `let said; try { require(${JSON.stringify(require.resolve('node-pty/lib/utils'))}).loadNativeModule('conpty_console_list').module.getConsoleProcessList(process.pid);`
-    + ` said = 'the call returned a list'; } catch (e) { said = String(e && e.message); } require('fs').writeFileSync(${JSON.stringify(path.join(tmp, `${key}.freed`))}, said);`;
+  const freed = (key) => `for (const s of [process.stdout, process.stderr]) s.on('error', () => {}); let said; try { require(${JSON.stringify(require.resolve('node-pty/lib/utils'))}).loadNativeModule('conpty_console_list').module.getConsoleProcessList(process.pid);`
+    + ` said = 'the call returned a list'; } catch (e) { said = String(e && e.message); } require('fs').writeFileSync(${JSON.stringify(path.join(tmp, `${key}.freed`))}, said);`
+    + ` process.stdout.write = process.stderr.write = () => true; process.stdin.on('error', () => {});`
+    + ` setImmediate(() => require('fs').writeFileSync(${JSON.stringify(path.join(tmp, `${key}.past`))}, 'ran past the harness script'));`;
   await harness('harnessAlive', late);
   // The same live child, but the hold answers "exited": the harness must then name no pid itself.
   // (The child stays on the owner's console for good, so a harness that reads the console list of
@@ -381,8 +390,11 @@ let bystanderProc = null;
   // child is alive and on the owner's console: only the list can say that it is.
   // The first list call fails. A failed call says nothing about who is on the console.
   await harness('harnessListFailsOnce', late, { says: 'gone', lists: { first: ['fails'], thenLeaves: true } });
-  // Three more answers that list nothing of the owner's console, one after the other.
-  await harness('harnessListSaysNothing', late, { says: 'gone', lists: { first: ['empty', 'strangers', 'silent'], thenLeaves: true } });
+  // Three more answers that list nothing of the owner's console. One case each: a harness that closes
+  // on one of them ends its case there, and the other two must still be asked.
+  await harness('harnessListSaysEmpty', late, { says: 'gone', lists: { first: ['empty'], thenLeaves: true } });
+  await harness('harnessListSaysStrangers', late, { says: 'gone', lists: { first: ['strangers'], thenLeaves: true } });
+  await harness('harnessListSaysSilent', late, { says: 'gone', lists: { first: ['silent'], thenLeaves: true } });
   // The list call fails every time, and the child stays on the console for good.
   await harness('harnessListAlwaysFails', late, { says: 'gone', lists: { always: 'fails' } });
   // The child is alive and has taken itself off the console: a real list of the owner's console
