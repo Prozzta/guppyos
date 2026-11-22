@@ -59,7 +59,8 @@ test('RIG-NODE-DIR-SHARED-108: a node-leg rig still passes the isolation check a
   assert.equal(isolation.checkIsolation(env1, s1, { who: 'node leg before' }), true);
   // 2. an Electron-leg rig: same version, execPath electron.exe
   const s2 = sandbox(2);
-  const env2 = withExec(exes['electron.exe'], shared, () => isolation.rigEnv(s2, electronParent(), ELECTRON_LEG));
+  const parent2 = electronParent(); // before withExec: consoleNode() reads the real process.execPath
+  const env2 = withExec(exes['electron.exe'], shared, () => isolation.rigEnv(s2, parent2, ELECTRON_LEG));
   // 3. the next node-leg rig: its node dir must hold node only
   const s3 = sandbox(3);
   const env3 = withExec(exes['node.exe'], shared, () => isolation.rigEnv(s3, process.env, NODE_LEG));
@@ -75,7 +76,8 @@ test('RIG-NODE-DIR-SHARED-108: a node-leg rig still passes the isolation check a
 test('RIG-NODE-DIR-SHARED-108: the Electron leg first, then the node leg (a fresh floor): the node leg passes', (t) => {
   const { shared, exes, sandbox } = setup(t);
   const s1 = sandbox(1);
-  withExec(exes['electron.exe'], shared, () => isolation.rigEnv(s1, electronParent(), ELECTRON_LEG));
+  const parent1 = electronParent(); // before withExec: consoleNode() reads the real process.execPath
+  withExec(exes['electron.exe'], shared, () => isolation.rigEnv(s1, parent1, ELECTRON_LEG));
   const s2 = sandbox(2);
   const env = withExec(exes['node.exe'], shared, () => isolation.rigEnv(s2, process.env, NODE_LEG));
   assert.equal(isolation.checkIsolation(env, s2, { who: 'node leg' }), true);
