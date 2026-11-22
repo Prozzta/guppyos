@@ -383,8 +383,10 @@ test('LIVE Bash join keeps its marker for repeated, sibling and background self-
   { skip: process.platform !== 'win32' || !fs.existsSync(path.join(__dirname, '..', 'resources', 'heavyjob', 'bin', 'guppy-heavyjob.exe')) ? 'Windows helper not built' : false, timeout: 30_000 },
   async (t) => {
     const { spawn, spawnSync } = require('node:child_process');
-    // Step clock (diagnostic only, nothing asserts on it): each line is printed as its step ends,
-    // so a run that reaches the test timeout still shows the steps it finished.
+    // Step clock (diagnostic only, nothing asserts on it): each line is recorded as its step ends
+    // and printed with this test's report, so a run that reaches the test timeout still shows the
+    // steps finished before it (later steps are lost). The first step also holds the mkdtemp, and
+    // the first bash step's lap also holds the serve spawn and the create ask.
     const clockStart = performance.now(); let lap = clockStart;
     const step = (name, detail = '') => {
       const now = performance.now();
