@@ -242,6 +242,38 @@ class Rig {
     fs.appendFileSync(path.join(this.stubDir(agentId), 'control.jsonl'), `${JSON.stringify(cue)}\n`);
   }
 
+  /**
+   * MAIL-RIG-G1-NO-ECHO-108: hold until the rig SCREEN covers what the host wrote to this agent's
+   * PTY. The screen is the stub's composer as of the newest echo the host's stream has delivered
+   * (rig-host screenDraft), so a look taken before that echo reads the composer of BEFORE the keys
+   * (the empty one) as a valid reading. Two events, in order: the stub's newest composer entry
+   * satisfies `has(draft)` (it has read the keys), and the host has received that entry's echo.
+   * A wait on the events, never on the clock: a starved stub or a late echo is waited out, and a
+   * give-up names which of the two was missing, with the stub's input rows and their times.
+   */
+  async screenCovers(agentId, has, what) {
+    const state = async () => {
+      let comp = null;
+      try { comp = JSON.parse(fs.readFileSync(path.join(this.stubDir(agentId), 'composer.json'), 'utf8')); } catch { comp = null; }
+      const shown = comp && Array.isArray(comp.shown) ? comp.shown : [];
+      const newest = shown.reduce((a, s) => (!a || s.seq > a.seq ? s : a), null);
+      const pt = await this.call('ptyTrace', { id: agentId });
+      return { newest, echoSeen: pt.echoSeen, real: pt.real, lastOutputReal: pt.lastOutputReal };
+    };
+    return waitFor(async () => {
+      const s = await state();
+      return !!s.newest && has(s.newest.draft) && s.echoSeen >= s.newest.seq;
+    }, {
+      what: `${agentId}'s screen to cover ${what}`,
+      diag: async () => {
+        const s = await state();
+        const read = !!s.newest && has(s.newest.draft);
+        const inputs = this.transcript(agentId).filter((r) => r.kind === 'pty-input').map((r) => ({ t: r.t, data: r.data }));
+        return `${read ? 'the stub read the keys but its echo never reached the host' : 'the stub never read the keys'}: ${JSON.stringify(s)}; stub pty-input rows (${inputs.length}): ${JSON.stringify(inputs)}`;
+      },
+    });
+  }
+
   transcript(agentId) {
     let text = '';
     try { text = fs.readFileSync(path.join(this.stubDir(agentId), 'transcript.jsonl'), 'utf8'); } catch { return []; }
