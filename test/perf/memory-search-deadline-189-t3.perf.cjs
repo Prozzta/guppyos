@@ -1,4 +1,5 @@
 'use strict';
+require('../tools/own-job.cjs');
 /**
  * MEMORY-SEARCH-TIMEOUT-DURING-INDEX-189, T3 the reproduction (moved here from
  * test/memory-search-deadline-189.test.cjs): the real worker and client search DURING a claims sync
