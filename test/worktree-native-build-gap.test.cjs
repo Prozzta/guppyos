@@ -620,6 +620,7 @@ test('MODEL GAP: model.dir and every file key must be plain relative paths: \'..
   const root = modelTree(t);
   const good = Object.fromEntries(Object.entries(MODEL).map(([rel, text]) => [rel, sha256(text)]));
   const state = (dir, files) => { put(root, MANIFEST_REL, JSON.stringify({ model: { dir, files } })); return W.modelState(root); };
+  const before = fs.readdirSync(path.join(root, 'resources')); // the fixture's native folders and models
   for (const dir of ['..', '../x', 'a/../../x', '.', '/abs', 'C:/x', 'C:x', 'a\\b', '\\\\srv\\share', 'a//b', 'a/']) {
     const s = state(dir, good);
     assert.equal(s.ok, false, `model.dir ${JSON.stringify(dir)} IS REFUSED`);
@@ -630,7 +631,7 @@ test('MODEL GAP: model.dir and every file key must be plain relative paths: \'..
     assert.equal(s.ok, false, `file key ${JSON.stringify(key)} IS REFUSED`);
     assert.ok(s.problem.includes(`model.files key ${JSON.stringify(key)} is not a plain relative path`), s.problem);
   }
-  assert.deepEqual(fs.readdirSync(path.join(root, 'resources')), ['models'], 'nothing created by a check');
+  assert.deepEqual(fs.readdirSync(path.join(root, 'resources')), before, 'nothing created by a check');
   assert.deepEqual(fs.readdirSync(path.join(root, 'resources/models')), ['native-memory-manifest.json']);
   assert.match(state('mini', good).problem, /onnx\/model\.onnx: missing/, 'the plain manifest is still read (a model gap, not a path refusal)');
   assert.match(state('a.b/c..d', { ...good, '..x/y..': 'x' }).problem, /a\.b\/c\.\.d is not the manifest's model/, 'dots inside a name are not segments');
