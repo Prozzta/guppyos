@@ -549,6 +549,52 @@ test('archive: an archive pass and a revive no longer make the next reader read 
   assert.deepEqual(hive.allTasks().tasks.map((c) => c.id).sort(), ['L1', 'O1', 'O2']);
 });
 
+// FLAKE-LAG-SYNC-IO-107-AFTERHOOK-ENOTEMPTY-108: an archive write (a pass, a revive) starts a
+// re-read of the archive that nobody awaits (noteArchiveWrite: `void revalidateArchiveAsync`). It
+// reads through taskArchive's shared flight, not through the manager's counted reads, so
+// drainReads() does not wait for it, and __revalidateArchiveForTests() returns at once while it
+// runs. Under suite load it was still reading tasks-archive/*.jsonl when the after-hook deleted
+// the folder: ENOTEMPTY under Electron. Here that read is held open on a real file handle until
+// the manager's own drain has finished, so the teardown must wait for it by itself.
+test('teardown: closeThenDelete waits for the archive re-read a revive started before it deletes the folder', async () => {
+  const home = fs.mkdtempSync(path.join(JAIL, 'tasks-'));
+  const hive = new HiveManager(() => home);
+  hive.ensureHive();
+  fs.writeFileSync(path.join(hive.root(), 'tasks.json'), JSON.stringify({ tasks: [card('L1'), oldDone('O1')] }), 'utf8');
+  assert.deepEqual(await hive.archivePass(), ['O1']);
+  await hive.__revalidateArchiveForTests();
+  const events = [];
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  let held = null;
+  const realRead = fsp.readFile;
+  const realDrain = hive.drainReads.bind(hive);
+  fsp.readFile = function (p, ...rest) {
+    if (held || !/\.jsonl$/.test(String(p)) || !under(home, p)) return realRead.call(this, p, ...rest);
+    held = (async () => {
+      const fh = await fsp.open(p, 'r');
+      try { await gate; return await fh.readFile(...rest); } finally { await fh.close(); events.push('archive read closed'); }
+    })();
+    return held;
+  };
+  // The held read is let go only once the manager's own drain has resolved: a teardown that
+  // deletes right after drainReads() deletes with the archive file still open.
+  hive.drainReads = () => realDrain().then(() => { setImmediate(release); });
+  try {
+    assert.ok(await hive.patchTask('O1', { notes: 'back' }), 'the revive lands');
+    await until(() => held !== null, 'the re-read the revive started to open the archive file');
+    assert.deepEqual(events, [], 'the re-read is still open when the test body ends');
+    await closeThenDelete(home, hive, []);
+    events.push('folder deleted');
+  } finally {
+    release();
+    fsp.readFile = realRead;
+    if (held) await held.catch(() => undefined);
+  }
+  assert.deepEqual(events, ['archive read closed', 'folder deleted']);
+  assert.equal(fs.existsSync(home), false);
+});
+
 test('archive: landedCards answers as the whole-archive read back does (whole, torn, and a later-named file)', (t) => {
   const { hive } = tasksFloor(t, []);
   const root = hive.root();
