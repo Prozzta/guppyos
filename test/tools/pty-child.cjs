@@ -21,6 +21,7 @@
  * app's own teardown must go through PtyManager, not through this helper.
  */
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const pty = require('node-pty');
@@ -83,6 +84,29 @@ function ownerAnswer(m, child) {
 }
 
 /**
+ * Does the owner (this process) have a console at all? Asked of Windows directly: the owner opens
+ * its own console device and closes it again. No helper, no fork and no list, so this never reads
+ * a failed list as an answer.
+ *
+ * { console: 'none' } only for the one measured code, EBADF: what electron.exe run as Node gets,
+ * a GUI-subsystem program that was given no console (the owner of onbinary-drop's terminal under
+ * the Electron leg). The device opens, or fails with any other code: { console: 'has' }, and the
+ * list of the owner's console is required as before. Asked at each close, never kept: a process
+ * can get or lose its console while it runs.
+ *
+ * `io` is the opener (fs); a test gives its own.
+ */
+function ownerConsole(io = fs) {
+  let fd;
+  try { fd = io.openSync('\\\\.\\CONOUT$', 'r+'); } catch (e) {
+    const code = String(e && e.code);
+    return code === 'EBADF' ? { console: 'none', code } : { console: 'has', code };
+  }
+  io.closeSync(fd);
+  return { console: 'has' };
+}
+
+/**
  * Resolves once a child is off the owner's console: first its hold says it has exited, then a list
  * of the owner's console no longer holds it. The second step is not the first again: an exit
  * signals the process handle, and the console drops the process from its list in its own time. So
@@ -90,14 +114,23 @@ function ownerAnswer(m, child) {
  * once and no kill was sent). Only a list that is the owner's counts (see onOwnerConsole): no answer
  * is asked again. Both steps share one cap; at the cap it rejects with the step that did not come,
  * and for a list that never came with the reason the last ask gave.
+ *
+ * `owner` is what ownerConsole() said. With { console: 'none' } the first step stays and the second
+ * is left out: there is no owner's console for the child to be on, and no list of it can be taken
+ * (the call fails every time, which would refuse every close at the cap). Why that is safe: the
+ * child has exited by then, and node-pty's list helper is a fork of an owner with no console, so
+ * it fails before it can attach to anything and node-pty gets an empty list from it. What is not
+ * claimed: node-pty's own 5 s fallback names the child's pid when its helper does not answer, with
+ * or without a console; that path is node-pty's and is not waited for here.
  */
-async function offConsole(pid, hold, byPid) {
+async function offConsole(pid, hold, byPid, owner) {
   const end = Date.now() + TEARDOWN_CAP_MS;
   const since = byPid ? 'after its kill by pid' : 'after its hold first said so';
   while (hold.alive()) {
     if (Date.now() >= end) throw new Error(`the child never exited after its kill by pid (its hold still says it runs, ${TEARDOWN_CAP_MS} ms on), so its terminal is not closed`);
     await sleep(25);
   }
+  if (owner.console === 'none') return;
   for (;;) {
     const got = await onOwnerConsole(pid);
     if (got.listed === false) return;
@@ -123,8 +156,9 @@ function electronExe() {
  * @param opts.host Windows only. 'openconsole' (the default): the bundled OpenConsole, the host the
  *   app runs every terminal on. 'inbox': the Windows inbox conhost, which the app no longer uses; a
  *   test that asks for it says why.
+ * @param opts.onOwnerCheck inbox host only: called at the close with what ownerConsole() said
  */
-function childBytes(input, { file = process.execPath, env = process.env, onSpawn, prelude = '', host = 'openconsole' } = {}) {
+function childBytes(input, { file = process.execPath, env = process.env, onSpawn, prelude = '', host = 'openconsole', onOwnerCheck } = {}) {
   // An electron.exe without this key is a real app with a window: never start one from here.
   if (isElectronExe(file)) assert.equal(env.ELECTRON_RUN_AS_NODE, '1', `${file} runs as Node only (ELECTRON_RUN_AS_NODE=1 in its env)`);
   assert.equal(host === 'openconsole' || host === 'inbox', true, `host is 'openconsole' or 'inbox', not ${JSON.stringify(host)}`);
@@ -182,7 +216,10 @@ function childBytes(input, { file = process.execPath, env = process.env, onSpawn
       // FLAKE-NODEPTY-CONSOLE-LIST-KILL-HARNESSALIVE-NOBODY: that kill returns at once, and the child
       // is on the owner's console until it has gone. The terminal is closed only after that. A child
       // that had exited by itself is waited off the console too: its exit alone does not say so.
-      offConsole(proc.pid, hold, byPid).then(() => close(error, value), (stuck) => refuse(stuck.message, error));
+      // An owner with no console has no list to wait for (see ownerConsole): asked now, at this close.
+      const owner = ownerConsole();
+      if (onOwnerCheck) onOwnerCheck(owner);
+      offConsole(proc.pid, hold, byPid, owner).then(() => close(error, value), (stuck) => refuse(stuck.message, error));
     }
     function close(error, value) {
       try { proc.kill(); } catch { /* child already exited */ }
@@ -217,4 +254,4 @@ function childBytes(input, { file = process.execPath, env = process.env, onSpawn
   });
 }
 
-module.exports = { childBytes, electronExe, isElectronExe, CHILD };
+module.exports = { childBytes, electronExe, isElectronExe, ownerConsole, CHILD };
