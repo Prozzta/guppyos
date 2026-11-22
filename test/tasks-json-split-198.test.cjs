@@ -38,9 +38,16 @@ const iso = (ms) => new Date(ms).toISOString();
 const card = (id, extra = {}) => ({ id, title: `title ${id}`, status: 'todo', assignee: 'creed', priority: 'medium', ...extra });
 const old = (id, extra = {}) => card(id, { status: 'done', doneAt: iso(NOW - 72 * H), result: `[${iso(NOW - 72 * H)}] did ${id}`, ...extra });
 
-/** The rig's teardown: close the manager, wait for its reads, then delete the folder. */
+/**
+ * The rig's teardown: close the manager, wait for its reads, then delete the folder.
+ * drainReads() does not cover the archive re-read an archive write starts (it is not a counted
+ * read). taskArchive keeps one read per root and callers share it, so asking for the texts here
+ * joins an open re-read and returns once its files are closed.
+ */
 async function closeThenDelete(home, hive) {
   hive.dispose(); await hive.drainReads();
+  const root = hive.root();
+  if (root) await A.readArchiveTextsAsync(root).catch(() => null);
   fs.rmSync(home, { recursive: true, force: true, maxRetries: 5 });
 }
 
