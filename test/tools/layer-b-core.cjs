@@ -3177,7 +3177,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     }
     const mailStateHash = hashDir(path.join(s.hive, 'state', 'mail'));
     // 1.1.74 runs the STUB TUIs: its only job here is to read the hive (zero tokens).
-    const node = path.join(this.env.RIG_NODE_DIR, path.basename(process.execPath));
+    const node = path.join(this.env.RIG_NODE_DIR, isolation.nodeExeName());   // RIG-ELECTRON-LEG-NOT-ISOLATED-108
     const reg = readJsonStrict(path.join(s.hive, 'registry.json'));
     const stubCommands = {};
     for (const a of this.spec) {

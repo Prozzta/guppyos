@@ -8,12 +8,21 @@ require('./tools/own-job.cjs');
 // The test plants the Electron leg the way it really happens: same process.version, process.execPath
 // named electron.exe. Both executables are small stand-in files (only the names matter to the check),
 // and the shared temp root is this test's own temp dir (GUPPY_SHARED_TEMP), so nothing real is touched.
+// Since RIG-ELECTRON-LEG-NOT-ISOLATED-108 the Electron leg links a real console node (named by
+// GUPPY_TEST_CONSOLE_NODE here) as node.exe, never electron.exe; df85d45a pinned ['electron.exe'] there
+// without running the check on it.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const isolation = require('./mail-rig/isolation.cjs');
+const { consoleNode, KEY } = require('./tools/console-node.cjs');
+// RIG-ELECTRON-LEG-NOT-ISOLATED-108: each leg is modelled by its versions (the suite itself may run on
+// either leg). The Electron leg links a real console node (consoleNode), never electron.exe.
+const NODE_LEG = { versions: { node: process.versions.node } };
+const ELECTRON_LEG = { versions: { node: process.versions.node, electron: '45.0.0' } };
+const electronParent = () => ({ ...process.env, [KEY]: consoleNode().file });
 
 function withExec(exe, sharedRoot, fn) {
   const savedExec = process.execPath;
@@ -46,27 +55,29 @@ test('RIG-NODE-DIR-SHARED-108: a node-leg rig still passes the isolation check a
   const { shared, exes, sandbox } = setup(t);
   // 1. a node-leg rig (the dir with node.exe exists, as on the floor before the Electron leg ran)
   const s1 = sandbox(1);
-  const env1 = withExec(exes['node.exe'], shared, () => isolation.rigEnv(s1, process.env));
+  const env1 = withExec(exes['node.exe'], shared, () => isolation.rigEnv(s1, process.env, NODE_LEG));
   assert.equal(isolation.checkIsolation(env1, s1, { who: 'node leg before' }), true);
   // 2. an Electron-leg rig: same version, execPath electron.exe
   const s2 = sandbox(2);
-  const env2 = withExec(exes['electron.exe'], shared, () => isolation.rigEnv(s2, process.env));
+  const env2 = withExec(exes['electron.exe'], shared, () => isolation.rigEnv(s2, electronParent(), ELECTRON_LEG));
   // 3. the next node-leg rig: its node dir must hold node only
   const s3 = sandbox(3);
-  const env3 = withExec(exes['node.exe'], shared, () => isolation.rigEnv(s3, process.env));
+  const env3 = withExec(exes['node.exe'], shared, () => isolation.rigEnv(s3, process.env, NODE_LEG));
   assert.equal(isolation.checkIsolation(env3, s3, { who: 'node leg after the Electron leg' }), true);
   assert.deepEqual(fs.readdirSync(env3.RIG_NODE_DIR), ['node.exe']);
-  // the two legs got two dirs, and the Electron one holds only its own executable
+  // the Electron leg's console node is not the stand-in the node leg linked, so it got a dir of its own
+  // (never the other file), and that dir holds node only: the check passes on it too (the gap df85d45a left)
   assert.notEqual(path.resolve(env2.RIG_NODE_DIR).toLowerCase(), path.resolve(env3.RIG_NODE_DIR).toLowerCase());
-  assert.deepEqual(fs.readdirSync(env2.RIG_NODE_DIR), ['electron.exe']);
+  assert.deepEqual(fs.readdirSync(env2.RIG_NODE_DIR), ['node.exe']);
+  assert.equal(isolation.checkIsolation(env2, s2, { who: 'Electron leg' }), true);
 });
 
 test('RIG-NODE-DIR-SHARED-108: the Electron leg first, then the node leg (a fresh floor): the node leg passes', (t) => {
   const { shared, exes, sandbox } = setup(t);
   const s1 = sandbox(1);
-  withExec(exes['electron.exe'], shared, () => isolation.rigEnv(s1, process.env));
+  withExec(exes['electron.exe'], shared, () => isolation.rigEnv(s1, electronParent(), ELECTRON_LEG));
   const s2 = sandbox(2);
-  const env = withExec(exes['node.exe'], shared, () => isolation.rigEnv(s2, process.env));
+  const env = withExec(exes['node.exe'], shared, () => isolation.rigEnv(s2, process.env, NODE_LEG));
   assert.equal(isolation.checkIsolation(env, s2, { who: 'node leg' }), true);
   assert.deepEqual(fs.readdirSync(env.RIG_NODE_DIR), ['node.exe']);
 });
@@ -74,7 +85,7 @@ test('RIG-NODE-DIR-SHARED-108: the Electron leg first, then the node leg (a fres
 test('RIG-NODE-DIR-SHARED-108: the check itself is unchanged: a node dir holding electron.exe beside node.exe is still refused', (t) => {
   const { shared, exes, sandbox } = setup(t);
   const s1 = sandbox(1);
-  const env = withExec(exes['node.exe'], shared, () => isolation.rigEnv(s1, process.env));
+  const env = withExec(exes['node.exe'], shared, () => isolation.rigEnv(s1, process.env, NODE_LEG));
   fs.copyFileSync(exes['electron.exe'], path.join(env.RIG_NODE_DIR, 'electron.exe'));
   assert.throws(() => isolation.checkIsolation(env, s1, { who: 'planted' }), /the node dir holds more than node: .*electron\.exe, node\.exe/);
 });
