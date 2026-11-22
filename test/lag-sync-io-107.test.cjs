@@ -180,9 +180,18 @@ test('config integrity (async): concurrent polls share one flight, and a write d
  *  tree with a watcher or a file still open inside it, and every manager over `home` holds some:
  *  the ledger guard's watcher, the authority watchers, the kept-open log. After-hooks run in the
  *  order registered, so a manager a test builds later goes in `alsoOpen`, not in a hook of its own
- *  (that hook would run after this delete). */
+ *  (that hook would run after this delete).
+ *
+ *  One read is outside drainReads(): the archive re-read an archive write starts and nobody awaits
+ *  (noteArchiveWrite). It goes through taskArchive's flight for the root, one per root and shared,
+ *  so asking for the root's texts here joins a flight that is open and returns when it has closed
+ *  its files. stopLedgerGuard() has stopped the timer that could start another. */
 async function closeThenDelete(home, hive, alsoOpen) {
-  for (const m of [...alsoOpen, hive]) { m.stopLedgerGuard(); m.dispose(); await m.drainReads(); }
+  for (const m of [...alsoOpen, hive]) {
+    m.stopLedgerGuard(); m.dispose(); await m.drainReads();
+    const root = m.root();
+    if (root) await archive.readArchiveTextsAsync(root).catch(() => null);
+  }
   fs.rmSync(home, { recursive: true, force: true });
 }
 const card = (id, extra = {}) => ({ id, title: `card ${id}`, status: 'todo', tags: ['x'], ...extra });
