@@ -57,7 +57,10 @@ function systemDirs(env = process.env) {
  * On the Electron leg the dir (md-rig-node-<ver>-node) is the node leg's one when the versions match,
  * and the leg must run the node it chose: a dir already holding a DIFFERENT file of that version (another
  * install) is not reused; that node gets a dir keyed by its own real path as well. A keyed dir holding a
- * different file still (the install was replaced in place) throws by name. The node leg is unchanged.
+ * different file still (the install was replaced in place) throws by name. The node leg runs the same
+ * loop with its own execPath (Jim N1): an Electron-leg rig may have seeded the plain dir with its console
+ * node, and a node-leg rig must not run that file instead of its own. Where the node leg matched before,
+ * it gets the same dir as before.
  */
 const isElectron = (versions) => !!(versions && versions.electron);
 /** The name the rig's node has inside the node dir (layer-b-core joins it to RIG_NODE_DIR). */
@@ -72,7 +75,11 @@ function cachedConsoleNode(opts) {
   if (!consoleNodeCache.has(k)) consoleNodeCache.set(k, require('../tools/console-node.cjs').consoleNode(opts));
   return consoleNodeCache.get(k);
 }
-/** Same file: one hard link (dev + ino), or the copy fallback (size + mtime; CopyFile keeps mtime). */
+/**
+ * Same file: one hard link (dev + ino), or the copy fallback (size + mtime; CopyFile keeps mtime).
+ * The fallback also applies when both inos are real and differ, so two installs of one version unpacked
+ * from the same archive (same size and mtime) count as one file. They are byte-for-byte the same build.
+ */
 function sameFile(a, b) {
   const x = fs.statSync(a), y = fs.statSync(b);
   if (x.ino && x.ino === y.ino && x.dev === y.dev) return true;
@@ -88,14 +95,8 @@ function jailedNodeDir({ execPath = process.execPath, versions = process.version
   const shared = require('../tools/shared-temp.cjs').sharedTemp();
   const name = nodeExeName({ execPath, versions });
   const exeKey = path.basename(name, path.extname(name)).toLowerCase();
-  if (!isElectron(versions)) {
-    const dir = path.join(shared, `md-rig-node-${process.version}-${exeKey}`);
-    const exe = path.join(dir, name);
-    if (fs.existsSync(exe)) return dir;
-    linkInto(dir, exe, fs.realpathSync(execPath));
-    return dir;
-  }
-  const found = cachedConsoleNode({ env, execPath, versions });
+  const found = isElectron(versions) ? cachedConsoleNode({ env, execPath, versions }) : { file: execPath, version: process.version, from: 'this Node' };
+  const leg = isElectron(versions) ? "the Electron leg's console node" : "the node leg's node";
   const real = fs.realpathSync(found.file);
   const idKey = require('node:crypto').createHash('sha1').update(real.toLowerCase()).digest('hex').slice(0, 8);
   for (const dir of [path.join(shared, `md-rig-node-${found.version}-${exeKey}`), path.join(shared, `md-rig-node-${found.version}-${exeKey}-${idKey}`)]) {
@@ -103,7 +104,7 @@ function jailedNodeDir({ execPath = process.execPath, versions = process.version
     if (!fs.existsSync(exe)) linkInto(dir, exe, real);
     if (sameFile(exe, real)) return dir;
   }
-  throw new Error(`rig: the node dir for the Electron leg's console node ${real} (${found.from}) holds a different ${name}; not running a node the leg did not choose`);
+  throw new Error(`rig: the node dir for ${leg} ${real} (${found.from}) holds a different ${name}; not running a node the leg did not choose`);
 }
 
 /** The ENTIRE environment of the rig host (and so of everything under it). */

@@ -71,7 +71,7 @@
  *      - git: the shared .git (worktree metadata + the seam cherry-picks as dangling commits);
  *      - the 1.1.74 worktree %TEMP%\md-layerb-v1174 (source + a node_modules COPY): removed at the
  *        end, node_modules first, then git worktree remove WITHOUT --force (--keep-v1174 keeps it);
- *      - isolation.rigEnv: the jail dirs and the shared node-only dir %TEMP%\md-rig-node-<ver>-<exe>;
+ *      - isolation.rigEnv: the jail dirs and the shared node-only dir %TEMP%\md-rig-node-<ver>-<exe>[-<id>];
  *      - the app and the CLIs themselves: the sandbox (jail, devroot) only. The sandbox base is
  *        C:Dunder_workandy-scratchlb-jailmd-layerb-<stamp> (real step 1: codex refuses its
  *        helper binaries under %TEMP%), removed at the end and verified gone.
