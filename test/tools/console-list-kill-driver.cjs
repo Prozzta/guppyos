@@ -371,10 +371,11 @@ let bystanderProc = null;
       // Times are written down for the reader of a red cell. No assert reads a time.
       c.order = { t0: Date.now() };
       setTimeout(() => {
+        // Was node-pty's kill entered while the child was still on the console? Read before the tell, and
+        // before the early return: a close that came first may itself have ended the child.
+        c.closedBeforeLeave = st.closed;
         const mine = holds.get(root);
         if (!mine || !mine.alive()) return;
-        // Was node-pty's kill entered while the child was still on the console? Read before the tell.
-        c.closedBeforeLeave = st.closed;
         c.order.toldMs = Date.now() - c.order.t0;
         c.leftConsole = LEFT_LATE;
         fs.writeFileSync(path.join(tmp, `${key}.leave`), 'leave');
