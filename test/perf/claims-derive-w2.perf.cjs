@@ -1,4 +1,5 @@
 'use strict';
+require('../tools/own-job.cjs');
 /**
  * CLAIM-LEDGER W2 wall-clock gates, in the SERIAL PERF LANE (test/tools/run-tests.cjs runs every
  * test/perf/*.perf.cjs with --test-concurrency=1, after the parallel suite).
