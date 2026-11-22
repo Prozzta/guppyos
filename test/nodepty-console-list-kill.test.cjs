@@ -333,6 +333,34 @@ test('harness, inbox conhost: an owner with no console waits for its child to ex
   assert.match(c.result, /PTY child did not answer/, 'control: childBytes gave up at its 5 s');
   assert.equal(JSON.stringify(c).includes('TEST FILE'), false, `the case reached the test file's own console: ${JSON.stringify(c)}`);
 });
+// The check itself, with a given opener: nothing is opened, started or ended here.
+test('harness: the owner-console check reads only EBADF as "no console", closes the handle it opened, and asks again at each call', () => {
+  const { ownerConsole } = require('./tools/pty-child.cjs');
+  const fail = (code) => Object.assign(new Error(code), { code });
+  /** An opener that gives `answers` in turn: a number is the handle it opens, an Error is thrown. */
+  const opener = (...answers) => {
+    const calls = [];
+    return {
+      calls,
+      openSync: (file, flags) => { calls.push(['open', file, flags]); const a = answers.shift(); if (a instanceof Error) throw a; return a; },
+      closeSync: (fd) => { calls.push(['close', fd]); }
+    };
+  };
+  const opens = opener(41);
+  assert.deepEqual(ownerConsole(opens), { console: 'has' }, 'the console device opened: the owner has a console');
+  assert.deepEqual(opens.calls, [['open', '\\\\.\\CONOUT$', 'r+'], ['close', 41]], "THE CHECK CLOSES THE HANDLE IT OPENED, and it opened the owner's own console device");
+  const none = opener(fail('EBADF'));
+  assert.deepEqual(ownerConsole(none), { console: 'none', code: 'EBADF' }, 'EBADF: the owner has no console');
+  assert.deepEqual(none.calls, [['open', '\\\\.\\CONOUT$', 'r+']], 'nothing was opened, so nothing is closed');
+  for (const code of ['EACCES', 'ENOENT', 'EPERM']) {
+    assert.deepEqual(ownerConsole(opener(fail(code))), { console: 'has', code },
+      `ONLY EBADF MEANS "NO CONSOLE": ${code} says nothing of the kind, so the list of the owner's console is still required`);
+  }
+  const changes = opener(fail('EBADF'), 42);
+  assert.deepEqual([ownerConsole(changes), ownerConsole(changes)], [{ console: 'none', code: 'EBADF' }, { console: 'has' }],
+    'THE ANSWER IS NOT KEPT: asked twice, the opener was asked twice, and the second answer is its own');
+  assert.equal(changes.calls.filter((c) => c[0] === 'open').length, 2, 'two opens for two asks');
+});
 // The driver's own cleanup (not node-pty's kill, not the harness's): it used to end every root by its
 // number when a case was over, also a root dead for a second or more, whose number can be any
 // process's on the machine by then.
