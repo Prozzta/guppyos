@@ -28,6 +28,7 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const run = require('./electron-harness/run.cjs');
 const { readSource } = require('./read-source.cjs');
+const { nodeEnv } = require('./tools/node-env.cjs');
 
 const privateRoot = () => fs.mkdtempSync(path.join(os.tmpdir(), 'l0-leakcheck-'));
 
@@ -65,7 +66,7 @@ test('a child that refuses to run without --sandbox: the parent, and only the pa
 function holdDirectory(dir) {
   // The child SAYS when it is up, from inside the directory. Waiting for the `spawn` event
   // alone was not enough under a parallel full-suite run: the removal sometimes won the race.
-  const child = spawn(process.execPath, ['-e', "process.stdout.write(process.cwd()); setInterval(() => {}, 1000)"], { cwd: dir, stdio: ['ignore', 'pipe', 'ignore'] });
+  const child = spawn(process.execPath, ['-e', "process.stdout.write(process.cwd()); setInterval(() => {}, 1000)"], { cwd: dir, env: nodeEnv(), stdio: ['ignore', 'pipe', 'ignore'] });
   return new Promise((resolve, reject) => {
     child.once('error', reject);
     child.stdout.once('data', () => resolve(child));
