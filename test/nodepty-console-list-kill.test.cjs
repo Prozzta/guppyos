@@ -274,12 +274,13 @@ test('harness, inbox conhost: a child that is off the owner\'s console while it 
   // The child's own answers first (files, its console is gone): without both, nothing below is about a live child off the console.
   assert.equal(c.freed, 'AttachConsole failed', `control: the child's own list call freed its console and could attach to none (${c.freed})`);
   assert.equal(c.past, 'ran past the harness script', `control: the child ran on with its console gone (childBytes said: ${c.result})`);
-  assert.match(c.result, /PTY child did not answer/, 'childBytes gave up at its 5 s');
   assert.equal(c.endedByPid, undefined, 'control: no kill by pid was sent (the hold answered "exited", the driver answers for it)');
   const last = c.lastHarnessList;
   assert.deepEqual(last && [last.by, last.answer, last.owner, last.child], ['the real helper', 'a list', true, false],
     `THE CLOSE WAS DECIDED ON THE OWNER'S CONSOLE: the last list the harness read before its close was the owner's console, with the owner on it and without the child (${JSON.stringify(last)})`);
-  assert.equal(c.closed, true, "node-pty's kill ran");
+  assert.equal(c.closed, true, `THE CLOSE IS NOT HELD BACK BY A LIVE CHILD OFF THE CONSOLE: node-pty's kill ran (childBytes said: ${c.result})`);
+  // After the guarantees: how childBytes ended is the harness's own answer, not a part of the setup.
+  assert.match(c.result, /PTY child did not answer/, 'control: childBytes gave up at its 5 s');
   assert.equal(c.rootExitedAtClose, false, "control: the child was still running when node-pty's kill was entered (the driver's own hold says so)");
   assert.deepEqual(c.cleanupKills, ['held, running'], "control: and it ran to the end of the case (the driver's own hold ended it)");
   NOBODY(c, 'the child was running and off the owner\'s console at the close');
