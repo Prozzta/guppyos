@@ -194,11 +194,12 @@ async function openObserver() {
     env: { BNTO_OBSERVER: JSON.stringify({ port: server.address().port, token }) },
     ready,
     close: () => server.close(),
+    listening: () => server.listening,
     fail: rejectReady,
   };
 }
 
-async function observeProcess(p, observer, name, { hold = false, parent, doneMs = 180_000 } = {}) {
+async function observeProcess(p, observer, name, { hold = false, parent, doneMs = 180_000, onSeen } = {}) {
   let errText = ''; let outText = ''; let exit = null;
   p.stderr.setEncoding('utf8'); p.stderr.on('data', (d) => { errText += d; });
   p.stdout.setEncoding('utf8'); p.stdout.on('data', (d) => { outText += d; });
@@ -216,6 +217,7 @@ async function observeProcess(p, observer, name, { hold = false, parent, doneMs 
   });
   let seen;
   try { seen = await Promise.race([observer.ready, readyTimeout]); } finally { clearTimeout(readyTimer); }
+  if (onSeen) onSeen(seen); // the caller's cleanup knows the fixture's children from here on, whatever throws next
   const rows = own.lookupPids([seen.pids.detached, seen.pids.cmd]);
   const detached = rows.find((row) => row.pid === seen.pids.detached);
   const cmd = rows.find((row) => row.pid === seen.pids.cmd);
@@ -247,23 +249,48 @@ async function observeProcess(p, observer, name, { hold = false, parent, doneMs 
   return { pids: seen.pids, times, stderr: () => errText, stdout: () => outText, exited: () => exit, release, done, hold };
 }
 
-async function bareRun(dir, name, helperLine, { mode = 'FAIL', env: extra = {}, disconnect = true, doneMs } = {}) {
+/**
+ * FLAKE-BARE-OWNER-CIM-LOOKUP-TIMEOUT-108: a throw anywhere between the spawn and the end of the run (a failed
+ * process lookup at the first alive-check, an assert) used to leave the observer's server listening and the bare
+ * `node --test` child blocked on its release, which never came: the file's event loop stayed alive until the
+ * runner's 30-minute watchdog. Now ANY throw abandons the run first: observer closed, socket destroyed, the
+ * fixture's children and the bare parent killed (verified by pid + CreationDate where the lookup still works,
+ * and the child handle we hold otherwise), then the original error is rethrown unchanged.
+ */
+function abandonRun({ p, observer, seen, parent }) {
+  try { observer.close(); } catch { /* already closed */ }
+  try { if (seen && seen.socket) seen.socket.destroy(); } catch { /* already gone */ }
+  try {
+    const rows = seen ? Object.values(childRows(seen.pids)) : [];
+    sweep([...rows, parent].filter(Boolean));
+  } catch { /* the lookup may be what failed; the handle kill below needs no lookup */ }
+  try { if (p.exitCode === null) p.kill(); } catch { /* exited */ }
+}
+
+async function bareRun(dir, name, helperLine, { mode = 'FAIL', env: extra = {}, disconnect = true, doneMs, onSeen } = {}) {
   const file = path.join(dir, `${name}.test.cjs`);
   fs.writeFileSync(file, fixture(helperLine, mode, disconnect));
   const observer = await openObserver();
   const env = bareEnv({ ...observer.env, ...extra });
-  const p = spawn(process.execPath, ['--test', file], { cwd: os.tmpdir(), env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
-  const parent = await until('bare node parent', () => {
-    const row = own.lookupPids([p.pid])[0];
-    return isNodeExe(row) ? row : null;
-  }, 30_000);
-  const watched = await observeProcess(p, observer, name, { hold: mode === 'HANG', parent, doneMs });
-  assert.equal(watched.pids.connected, !disconnect, `${name}: the fixture reports its detached child's channel ${disconnect ? 'closed' : 'still open'}`);
-  const result = { ...watched, parent: { pid: parent.pid, bornMs: parent.created } };
-  if (mode === 'HANG') return result;
-  const ended = await result.release();
-  assert.equal(ended.code, 1, `${name}: the bare test fails, as the fixture's test does`);
-  return { ...result, stderr: result.stderr(), stdout: result.stdout() };
+  let p = null; let parent = null; let seen = null;
+  try {
+    p = spawn(process.execPath, ['--test', file], { cwd: os.tmpdir(), env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    parent = await until('bare node parent', () => {
+      const row = own.lookupPids([p.pid])[0];
+      return isNodeExe(row) ? row : null;
+    }, 30_000);
+    const watched = await observeProcess(p, observer, name, { hold: mode === 'HANG', parent, doneMs, onSeen: (x) => { seen = x; if (onSeen) onSeen({ pids: x.pids, parent, observer, p }); } });
+    assert.equal(watched.pids.connected, !disconnect, `${name}: the fixture reports its detached child's channel ${disconnect ? 'closed' : 'still open'}`);
+    const result = { ...watched, parent: { pid: parent.pid, bornMs: parent.created } };
+    if (mode === 'HANG') return result;
+    const ended = await result.release();
+    assert.equal(ended.code, 1, `${name}: the bare test fails, as the fixture's test does`);
+    return { ...result, stderr: result.stderr(), stdout: result.stdout() };
+  } catch (e) {
+    // HANG runs are returned to a caller that releases and kills them itself; only a throw reaches here
+    abandonRun({ p: p || { exitCode: 0, kill() {} }, observer, seen, parent });
+    throw e;
+  }
 }
 
 test('LIVE: the observer disconnect is required for a released failing fixture to exit', LIVE, async () => {
@@ -460,6 +487,36 @@ test('LIVE: mutants of own-job.cjs are caught: without a real join the detached 
     assert.deepEqual(survivors, [], 'every mutant is killed (its orphan is seen alive)');
   } finally {
     sweep(leftovers);
+    rmDir(dir);
+  }
+});
+
+test('LIVE: a failed process lookup while observing ends the run at once and leaves nothing running (FLAKE-BARE-OWNER-CIM-LOOKUP-TIMEOUT-108)', LIVE, async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bnto-'));
+  const realLookup = own.lookupPids;
+  const kept = {};
+  let injected = false;
+  // the FIRST alive-check after the observer saw the fixture (observeProcess: lookupPids([detached, cmd])) fails, as in e4ffb9a7's :436 red
+  own.lookupPids = (pids) => {
+    if (!injected && pids.length === 2 && kept.pids && pids[0] === kept.pids.detached) { injected = true; throw new Error('injected: the CIM lookup failed'); }
+    return realLookup(pids);
+  };
+  try {
+    let err = null;
+    await bareRun(dir, 'lookup-fails', req(HELPER), { onSeen: (x) => { Object.assign(kept, x); } }).then(
+      () => assert.fail('the injected lookup failure must surface'),
+      (e) => { err = e; },
+    );
+    assert.equal(err && err.message, 'injected: the CIM lookup failed', 'the ORIGINAL error is rethrown, unchanged');
+    assert.equal(injected, true);
+    // everything the failed run left must be GONE within 10 s (red-before: before the fix the server listened and the fixture waited for ever)
+    await until('the abandoned run is gone', () => !kept.observer.listening()
+      && kept.p.exitCode !== null
+      && !realLookup([kept.parent.pid]).some((r) => Math.abs(r.created - kept.parent.created) <= own.BIRTH_SLACK_MS)
+      && !Object.values(childRows(kept.pids)).some(Boolean), 10_000);
+  } finally {
+    own.lookupPids = realLookup;
+    try { if (kept.pids) sweep(Object.values(childRows(kept.pids))); } catch { /* best effort */ }
     rmDir(dir);
   }
 });
