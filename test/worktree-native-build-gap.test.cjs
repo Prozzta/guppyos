@@ -593,6 +593,48 @@ test('MODEL FILL: a deep link (mini/onnx as a junction into another tree) is ref
   assert.equal(W.modelLevelOutside(root, own, { model: { files: { 'tokenizer.json': 'x' } } }), null, 'a tree with no link at any level passes');
 });
 
+// WTREE-GAP-TEST-EISDIR-108 (Jim NIT on b1696d6d): modelLevelOutside skips a level that does not
+// exist yet, so a manifest path with '..' passed the link check and the fetch script wrote where
+// the path pointed. The manifest's own paths are refused before anything is checked or spawned.
+test('MODEL FILL: a manifest file key \'../../x\' is refused; the fetch never runs and nothing is created (Jim NIT on b1696d6d)', (t) => {
+  const root = modelTree(t);
+  const base = jail(t);
+  const cache = modelDir(path.join(base, 'a', 'b'));
+  put(base, 'x', 'ESCAPED'); // <cache>/../../x: the source verifies, so only the path check can refuse
+  const files = Object.fromEntries(Object.entries({ ...MODEL, '../../x': 'ESCAPED' }).map(([rel, text]) => [rel, sha256(text)]));
+  put(root, MANIFEST_REL, JSON.stringify({ model: { dir: 'mini', source: 'https://invalid.example/never', files } }));
+  const escaped = path.join(root, 'resources', 'x'); // resources/models/mini/../../x
+  const calls = [];
+  const lines = [];
+  const left = modelSetup(root, noNetSpawn(t, root, calls), { env: { MUNDER_MODEL_CACHE: cache }, log: (l) => lines.push(l) });
+  assert.equal(fs.existsSync(escaped), false, 'NOTHING IS CREATED OUTSIDE THE MODEL FOLDER');
+  assert.deepEqual(calls, [], 'the fetch script never runs');
+  assert.deepEqual(left.map((g) => g.id), ['model'], 'A MANIFEST THAT NAMES A PATH OUT OF THE MODEL FOLDER IS A GAP');
+  assert.match(left[0].problem, /native-memory-manifest\.json: model\.files key "\.\.\/\.\.\/x" is not a plain relative path/);
+  assert.ok(lines.some((l) => /model: .*"\.\.\/\.\.\/x" is not a plain relative path.*nothing to fill/.test(l)), lines.join(' | '));
+  assert.equal(fs.existsSync(path.join(root, 'resources/models/mini')), false, 'and the model folder is not started');
+});
+
+test('MODEL GAP: model.dir and every file key must be plain relative paths: \'..\', \'.\', absolute, drive, backslash and empty segments are refused', (t) => {
+  const root = modelTree(t);
+  const good = Object.fromEntries(Object.entries(MODEL).map(([rel, text]) => [rel, sha256(text)]));
+  const state = (dir, files) => { put(root, MANIFEST_REL, JSON.stringify({ model: { dir, files } })); return W.modelState(root); };
+  for (const dir of ['..', '../x', 'a/../../x', '.', '/abs', 'C:/x', 'C:x', 'a\\b', '\\\\srv\\share', 'a//b', 'a/']) {
+    const s = state(dir, good);
+    assert.equal(s.ok, false, `model.dir ${JSON.stringify(dir)} IS REFUSED`);
+    assert.ok(s.problem.includes(`model.dir ${JSON.stringify(dir)} is not a plain relative path`), s.problem);
+  }
+  for (const key of ['../x', '../../x', 'onnx/../../../x', './x', '/abs', 'C:/x', 'C:x', 'onnx\\..\\..\\x', '\\\\srv\\share\\x', 'onnx//x', 'onnx/', '']) {
+    const s = state('mini', { ...good, [key]: 'x' });
+    assert.equal(s.ok, false, `file key ${JSON.stringify(key)} IS REFUSED`);
+    assert.ok(s.problem.includes(`model.files key ${JSON.stringify(key)} is not a plain relative path`), s.problem);
+  }
+  assert.deepEqual(fs.readdirSync(path.join(root, 'resources')), ['models'], 'nothing created by a check');
+  assert.deepEqual(fs.readdirSync(path.join(root, 'resources/models')), ['native-memory-manifest.json']);
+  assert.match(state('mini', good).problem, /onnx\/model\.onnx: missing/, 'the plain manifest is still read (a model gap, not a path refusal)');
+  assert.match(state('a.b/c..d', { ...good, '..x/y..': 'x' }).problem, /a\.b\/c\.\.d is not the manifest's model/, 'dots inside a name are not segments');
+});
+
 test('MODEL GAP: a model file that cannot be read (a directory: EISDIR) is a gap, not a throw; a throwing check makes the preflight exit 2', (t) => {
   const root = modelTree(t);
   const own = path.join(root, 'resources/models/mini');
