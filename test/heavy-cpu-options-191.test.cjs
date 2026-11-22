@@ -381,8 +381,16 @@ const CSC =path.join(process.env.WINDIR || 'C:\\Windows', 'Microsoft.NET', 'Fram
 
 test('LIVE Bash join keeps its marker for repeated, sibling and background self-queries without LOCALAPPDATA residue (B1)',
   { skip: process.platform !== 'win32' || !fs.existsSync(path.join(__dirname, '..', 'resources', 'heavyjob', 'bin', 'guppy-heavyjob.exe')) ? 'Windows helper not built' : false, timeout: 30_000 },
-  async () => {
+  async (t) => {
     const { spawn, spawnSync } = require('node:child_process');
+    // Step clock (diagnostic only, nothing asserts on it): each line is printed as its step ends,
+    // so a run that reaches the test timeout still shows the steps it finished.
+    const clockStart = performance.now(); let lap = clockStart;
+    const step = (name, detail = '') => {
+      const now = performance.now();
+      t.diagnostic(`B1 step ${name}: ${Math.round(now - lap)} ms (at ${Math.round(now - clockStart)} ms)${detail}`);
+      lap = now;
+    };
     const exe = path.join(__dirname, '..', 'resources', 'heavyjob', 'bin', 'guppy-heavyjob.exe');
     const bash = path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Git', 'bin', 'bash.exe');
     if (!fs.existsSync(bash)) return;
@@ -390,6 +398,7 @@ test('LIVE Bash join keeps its marker for repeated, sibling and background self-
     const markerJail = fs.mkdtempSync(path.join(os.tmpdir(), 'hcpu-markers-'));
     const env = { ...process.env, LOCALAPPDATA: markerJail };
     const knownLocal = spawnSync('powershell.exe', ['-NoProfile', '-Command', '[Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)'], { encoding: 'utf8', env: require('./tools/ps-env.cjs').psEnv(process.env), windowsHide: true }).stdout.trim();
+    step('powershell known-folder read');
     const knownRoot = path.join(knownLocal, 'Munder Difflin', 'Guppy', 'heavyjob-markers');
     const quote = (s) => `'${s.replace(/'/g, "'\\\"'\\\"'")}'`;
     const expected = { background: false, cap: true, rate: 5000, affinity: null };
@@ -410,7 +419,16 @@ test('LIVE Bash join keeps its marker for repeated, sibling and background self-
       const name = `${id}-${count}`;
       assert.deepEqual(await ask(`create ${name} 0 1`), { ok: true });
       try {
-        const r = spawnSync(bash, ['-lc', `${quote(exe)} join ${name} 0 1; ${line}`], { encoding: 'utf8', windowsHide: true, env });
+        // The three stamps go to stderr from a bash builtin (no extra process) and the line's own
+        // exit status is passed on, so stdout and the status the asserts read are unchanged.
+        const stamp = 'echo "T $EPOCHREALTIME" >&2';
+        const spawned = Date.now();
+        const r = spawnSync(bash, ['-lc', `${stamp}; ${quote(exe)} join ${name} 0 1; ${stamp}; ${line}; s=$?; ${stamp}; exit $s`], { encoding: 'utf8', windowsHide: true, env });
+        const returned = Date.now();
+        const at = (String(r.stderr).match(/^T [\d.,]+/gm) || []).map((s) => Math.round(Number(s.slice(2).replace(',', '.')) * 1000));
+        step(`bash line with ${count} self-queries`, at.length === 3
+          ? `: spawn to shell ready ${at[0] - spawned} ms, join ${at[1] - at[0]} ms, queries ${at[2] - at[1]} ms, shell exit ${returned - at[2]} ms`
+          : `: ${at.length} of 3 stamps read`);
         assert.equal(r.status, 0, r.stderr);
         const rows = r.stdout.trim().split(/\r?\n/).filter(Boolean).map(JSON.parse);
         assert.equal(rows.length, count, r.stdout);
@@ -450,11 +468,15 @@ test('LIVE Bash join keeps its marker for repeated, sibling and background self-
        try {
          const queryFile = path.join(process.env.TEMP || os.tmpdir(), `${capName}.json`);
           capped = heldShell(capName, true, queryFile); await waitReady(capped);
+          step('capped held shell: spawn to READY (shell start + join)');
           assert.ok(fs.existsSync(markerRoot), 'the held native helper writes markers inside this file\'s jailed LocalAppData');
          const unrelated = JSON.parse(spawnSync(exe, ['self-query'], { encoding: 'utf8', windowsHide: true, env }).stdout.trim());
+         step('unrelated self-query (one helper process, no shell)');
          assert.equal(unrelated.cap, false, 'an unrelated process cannot take another shell\'s capped marker');
          uncapped = heldShell(uncappedName, false, false); await waitReady(uncapped);
+         step('uncapped held shell: spawn to READY (shell start + join)');
          await waitExit(capped);
+         step('capped shell exit (the rest of its sleep 1 + one self-query)');
          const row = JSON.parse(fs.readFileSync(queryFile, 'utf8'));
          fs.rmSync(queryFile, { force: true });
          assert.deepEqual(row, expected, 'a capped caller ignores a newer live uncapped marker');
@@ -462,13 +484,17 @@ test('LIVE Bash join keeps its marker for repeated, sibling and background self-
          if (capped && capped.exitCode === null) capped.kill();
          if (uncapped && uncapped.exitCode === null) uncapped.kill();
          await Promise.all([capped, uncapped].filter(Boolean).map(waitExit));
+         step('held shells killed and exited');
          assert.deepEqual(await ask(`close ${capName}`), { ok: true });
          assert.deepEqual(await ask(`close ${uncappedName}`), { ok: true });
+         step('close both held jobs');
        }
      } finally {
        try { serve.stdin.end(); } catch { /* gone */ }
        if (serve.exitCode === null) await new Promise((resolve) => serve.once('exit', resolve));
+       step('serve exit');
        fs.rmSync(markerJail, { recursive: true, force: true });
+       step('marker jail removed');
      }
     // Do not snapshot/diff another user's shared marker folder: only this test's identifiers matter.
     const forbidden = [id, capName, uncappedName, capped?.pid, uncapped?.pid].filter(Boolean).map(String);
