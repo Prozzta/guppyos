@@ -203,7 +203,10 @@ test('harness, inbox conhost: a child whose hold says "exited" while its console
 });
 // The same window with no kill by pid before it: the child ended by itself, the hold says so at the
 // first ask, and the console of its pid lists it for 2 s more.
-test('harness, inbox conhost: a child that exited by itself and is still on its console is waited off the console before the close', async () => {
+// FLAKE-CLK-EXITED-BY-ITSELF-ROOTEXITED-RACE-108: the rule is the console leave, not the exit. The
+// driver holds the two apart (the child takes itself off the console when told, and runs on to the
+// end of the case), and the cell prints the order it saw in every run.
+test('harness, inbox conhost: a child that exited by itself and is still on its console is waited off the console before the close', async (t) => {
   const c = await kase('harnessExitedByItselfStillOnConsole');
   assert.match(c.result, /PTY child did not answer/, 'childBytes gave up at its 5 s');
   assert.equal(c.holdAskedBeforeKill, false, 'control: the hold answered "exited" at the first ask (the driver answers for it)');
@@ -212,7 +215,29 @@ test('harness, inbox conhost: a child that exited by itself and is still on its 
   assert.equal(c.closed, true, "node-pty's kill ran");
   NOBODY(c, 'the hold said at the first ask that the child had exited, and the child was still on the console of its pid');
   assert.match(String(c.leftConsole), /^left its console 2000 ms after/, `control: the child left the console only when the driver ended it (${c.leftConsole})`);
-  assert.equal(c.rootExitedAtClose, true, "THE CLOSE WAITS UNTIL THE CHILD IS OFF THE CONSOLE: the child was still running when node-pty's kill was entered");
+  const o = c.order || {};
+  const first = o.firstListWithoutChild;
+  const order = `order: the child was told to leave its console at +${o.toldMs} ms (node-pty's kill entered by then: ${c.closedBeforeLeave})`
+    + `; first list of the owner's console without the child: ${first ? `ask ${first.ask} at +${first.ms} ms (told by then: ${first.toldByThen}; the child's exit signalled: ${first.exitSignalled})` : 'none'}`
+    + `; node-pty's kill entered at +${o.closeMs} ms (the child's exit signalled: ${c.rootExitedAtClose})`
+    + `; the child's exit: ${JSON.stringify(c.cleanupKills)} at the driver's cleanup after the case`;
+  t.diagnostic(order);
+  // The two guarantees first, so that a red cell names the fault and not a control.
+  assert.equal(c.closedBeforeLeave, false,
+    `THE CLOSE WAITS UNTIL THE CHILD IS OFF THE CONSOLE: node-pty's kill was entered while the child was still on the owner's console (${order})`);
+  const last = c.lastHarnessList;
+  assert.deepEqual(last && [last.by, last.answer, last.owner, last.child], ['the real helper', 'a list', true, false],
+    `THE CLOSE WAS DECIDED ON THE OWNER'S CONSOLE: the last list the harness read before its close was not the owner's console with the owner on it and without the child (${JSON.stringify(last)}; ${order})`);
+  // Controls: the wait was a real one, and the two events were apart (off the console, and still running).
+  const one = c.harnessLists[0];
+  assert.deepEqual(one && [one.by, one.answer, one.owner, one.child], ['the real helper', 'a list', true, true],
+    `control: the first list the harness read was the owner's console with the child on it (${JSON.stringify(one)})`);
+  assert.deepEqual(first && [first.toldByThen, first.exitSignalled], [true, false],
+    `control: the first list without the child came after the tell, while the child still ran (${order})`);
+  assert.equal(c.freed, 'AttachConsole failed', `control: the child's own list call freed its console and could attach to none (${c.freed})`);
+  assert.equal(c.past, 'ran past the harness script', `control: the child ran on with its console gone (childBytes said: ${c.result})`);
+  assert.equal(c.rootExitedAtClose, false, `control: the child was still running when node-pty's kill was entered, so this cell is about the console leave and not the exit (${order})`);
+  assert.deepEqual(c.cleanupKills, ['held, running'], "control: and it ran to the end of the case (the driver's own hold ended it)");
   assert.deepEqual(c.consoleAfter, [], `the child is gone after the close (its console holds ${JSON.stringify(c.consoleAfter)})`);
 });
 test('harness, inbox conhost: a child that never exits after the kill by pid fails by name, its terminal is not closed, and the file can still end', async () => {
