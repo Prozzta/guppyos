@@ -441,7 +441,10 @@ test('the head-anchor store inside the racy window: a repeat ask re-reads, a sam
   const ud = path.join(JAIL, 'anchors-racy');
   fs.mkdirSync(ud, { recursive: true });
   const file = path.join(ud, HEAD_ANCHOR_FILE);
-  const a = new FileHeadAnchorStore(file, () => fs.statSync(file).mtimeMs + 1); // the wall clock stays inside the window
+  // The clock follows what the store compares against: max(mtime, ctime). The publish is a tmp write then a rename,
+  // and the rename moves ctime, so a clock built from mtime alone falls outside the window when the rename is slow.
+  const insideWindow = () => { const st = fs.statSync(file); return Math.max(st.mtimeMs, st.ctimeMs) + 1; };
+  const a = new FileHeadAnchorStore(file, insideWindow); // the wall clock stays inside the window
   a.set('C:/h', 'andy', { head: 'a'.repeat(64), lastId: 'c-000000000001' });
   const c = countReads([file], () => { for (let i = 0; i < 5; i++) a.get('C:/h', 'andy'); });
   assert.equal(c.c, 5, `inside the racy window every ask reads the file (${c.c} reads for 5 asks)`);
