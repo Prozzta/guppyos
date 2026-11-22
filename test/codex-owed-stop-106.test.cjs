@@ -281,18 +281,30 @@ test('P1 HookServer: a tool-free segment goes through, after a block too', async
 test('P1 HookServer: a legitimate wait or a human guard lets the Stop through', async (t) => {
   // FLAKE-CODEX-OWED-STOP-HUMAN-STAMP-EARLY: each rig's Stop is decided SLOW_RIG_MS later on the
   // rig's own clock (w.now), so a slow rig is here on every run, whatever the machine's load.
+  // Each case builds its facts from that Stop's own time. A stamp taken once before the loop was
+  // over the 1500 ms guard by the third rig whenever the first two were slow (the red).
   const SLOW_RIG_MS = 2_000;
   const t0 = Date.now();
   let at = t0;
-  for (const over of [{ heavyHolder: true }, { promptBlock: 'draft' }, { lastHumanInputAt: t0 }]) {
+  const cases = [
+    ['heavy-holder', () => ({ heavyHolder: true })],
+    ['draft', () => ({ promptBlock: 'draft' })],
+    ['human-input', (stopAt) => ({ lastHumanInputAt: stopAt - 1_499 })],
+    // Control: a key just past the guard holds nothing back. It proves the rig's clock decides.
+    [null, (stopAt) => ({ lastHumanInputAt: stopAt - 1_500 })]
+  ];
+  for (const [why, over] of cases) {
     const w = await rig(t, 'codex');
-    w.over = over;
     await turnWithRequest(w);
     w.tool();
     at = Math.max(at, Date.now()) + SLOW_RIG_MS;
     const stopAt = at;
     w.now = () => stopAt;
-    assert.notEqual(w.fire('Stop')?.decision, 'block', JSON.stringify(over));
+    w.over = over(stopAt);
+    const res = w.fire('Stop');
+    if (why === null) { assert.equal(res?.decision, 'block', 'a key 1500 ms before the Stop is past the guard'); continue; }
+    assert.notEqual(res?.decision, 'block', why);
+    assert.equal(w.rows.at(-1).why, why);
   }
 });
 
