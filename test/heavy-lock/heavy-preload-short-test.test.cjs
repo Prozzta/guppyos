@@ -222,7 +222,7 @@ K.npmCommand = (preload = PRELOAD) => {
   assert.equal(npmKind(['run', 'install'], preload), null, 'npm run install is not confused with the install command');
 };
 test('npm CLI options and npm aliases still take an install lease, without treating a run-script name as a command', () => K.npmCommand());
-async function broker(t, M) {
+async function broker(t, M, opt = {}) {
   const sock = process.platform === 'win32' ? `\\\\.\\pipe\\hpst-${process.pid}-${Math.random().toString(36).slice(2)}` : path.join(fs.mkdtempSync(path.join(JAIL, 's-')), 's.sock');
   const hive = {
     sockPath: () => sock, codexHomeFor: () => null, recordSession: () => {}, appendLog: () => {},
@@ -234,6 +234,17 @@ async function broker(t, M) {
   const logs = [];
   // The harness is not a shell: the parent check is answered for it, as in heavy-lock-opaque-196 e2eNested.
   const lock = new M.HeavyJobLock({ limit: () => 1, log: (r) => logs.push({ ...r, seenMs: Date.now() }), notify: () => {}, parentImage: async () => 'bash.exe' });
+  // FLAKE-HEAVY-PRELOAD-SHORT-E2E-WAITER-SNAPSHOT-108: a loaded machine, made on purpose. The first suite
+  // request reaches the lock late (a child under load starts node twice before it can ask). The wait is in
+  // this harness, in front of the real lease(); the product code is as shipped.
+  if (opt.holdSuiteRequestMs) {
+    const lease = lock.lease.bind(lock);
+    let held = false;
+    lock.lease = async (agentId, r, gone) => {
+      if (!held && r && r.op === 'acquire' && r.suite === true) { held = true; await sleep(opt.holdSuiteRequestMs); }
+      return lease(agentId, r, gone);
+    };
+  }
   s.setHeavyLock(lock);
   s.start();
   t.after(() => s.stop());
@@ -241,8 +252,8 @@ async function broker(t, M) {
   return { lock, logs, url: s.hookUrl('a').replace('/hook/', '/ledger/') };
 }
 
-K.e2e = async (t, M = HJ) => {
-  const b = await broker(t, M);
+K.e2e = async (t, M = HJ, opt = {}) => {
+  const b = await broker(t, M, opt);
   b.lock.acquire('b', H, 'npm test', 'hb', false);
   b.lock.noteCall('a', 'c1', 'N=$(command -v node); timeout -k 5 60 "$N" --test leaf.test.cjs');
   const t0 = Date.now();
@@ -262,6 +273,11 @@ K.e2e = async (t, M = HJ) => {
   assert.equal(b.lock.snapshot().length, 0, 'its lease is released at exit');
 };
 test('E2E: through the real preload, a single file runs at once while another agent holds; a full suite waits, then runs', { timeout: 120_000 }, (t) => K.e2e(t));
+// FLAKE-HEAVY-PRELOAD-SHORT-E2E-WAITER-SNAPSHOT-108 (Andy's 4e58a1cd bench, Node leg: the queue was [] where
+// ['a'] was expected). Under suite load the suite child's first request had not reached the lock when the
+// cell's 2.5 s was over, so "still waits" held for a child that had not asked yet and the queue was empty.
+// Here that request is held back for longer than the 2.5 s: the cell must judge the child once it is queued.
+test('E2E: a suite child whose first request reaches the lock late is judged once it is queued, not before (FLAKE-HEAVY-PRELOAD-SHORT-E2E-WAITER-SNAPSHOT-108)', { timeout: 120_000 }, (t) => K.e2e(t, HJ, { holdSuiteRequestMs: 4_000 }));
 
 K.opaqueNpm = async (t, M = HJ, script = 'gate.sh') => {
   const b = await broker(t, M);
