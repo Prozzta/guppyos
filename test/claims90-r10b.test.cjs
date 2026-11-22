@@ -277,11 +277,10 @@ test('must 6: an id (or its leading form) written straight before its own @sha i
 });
 
 test('must 6 git: DerivedGit.refCommit gives a branch\'s sha, origin\'s copy first, and null for no such ref', async () => {
-  const { execFileSync } = require('node:child_process');
   const G = loadTs('src/main/claims/derivedGit.ts');
   const repo = path.join(JAIL, 'repo-m6');
   fs.mkdirSync(repo, { recursive: true });
-  const g = (...a) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false', ...a], { cwd: repo, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+  const g = (...a) => fixtureGit(repo, a, { stdin: 'ignore' });
   g('init', '-q', '-b', 'main');
   const shas = [];
   for (const n of ['one', 'two']) { fs.writeFileSync(path.join(repo, 'f.txt'), n); g('add', 'f.txt'); g('commit', '-q', '-m', n); shas.push(g('rev-parse', 'HEAD')); }
@@ -358,10 +357,7 @@ test('re-gate must B: a stranger counts as a card only with a 2+ letter word and
   assert.equal(r.facts.length, 0, 'a dotted version end counts');
 });
 
-const gitIn = (repo) => {
-  const { execFileSync } = require('node:child_process');
-  return (args, input) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false', ...args], { cwd: repo, encoding: 'utf8', input, stdio: ['pipe', 'pipe', 'ignore'] }).trim();
-};
+const gitIn = (repo) => (args, input) => fixtureGit(repo, args, { input });
 
 test('re-gate must A git: DerivedGit.branchesContaining names the guppy branches whose preferred tip (origin first) reaches a commit; null when git cannot say', async () => {
   const G = loadTs('src/main/claims/derivedGit.ts');
@@ -443,12 +439,28 @@ test('re-gate must A: the pairing check asks git once per distinct sha (110 card
 
 /** A MIRROR-shaped repo (Jim 439873: the jail is a mirror clone, refs/heads only, no remotes) with helpers. */
 const { execFileSync } = require('node:child_process');
+/**
+ * git for the fixture repos. FLAKE-CLAIMS90-R10B-MIRROR-GIT-ADD-108: these calls dropped git's stderr, so a
+ * red under suite load said only "Command failed: git ... add f.txt". A failure now says git's exit status,
+ * signal, spawn error code, how long the call took, the lock files left in .git, and what git wrote.
+ */
+function fixtureGit(repo, args, { stdin = 'pipe', ...opts } = {}) {
+  const t0 = Date.now();
+  try {
+    return execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false', ...args], { cwd: repo, encoding: 'utf8', ...opts, stdio: [stdin, 'pipe', 'pipe'] }).trim();
+  } catch (e) {
+    let locks;
+    try { locks = fs.readdirSync(path.join(repo, '.git')).filter((n) => n.endsWith('.lock')).join(',') || 'none'; } catch (x) { locks = `unread (${x.code})`; }
+    e.message = `git ${args.join(' ')} failed: status ${e.status}, signal ${e.signal}, code ${e.code}, after ${Date.now() - t0} ms, .git lock files ${locks}, stderr: ${String(e.stderr || '').trim() || '(none)'}`;
+    throw e;
+  }
+}
 let tick = 1700000000;
 function mirrorRepo(name) {
   const repo = path.join(JAIL, name);
   fs.mkdirSync(repo, { recursive: true });
   let n = 0;
-  const g = (...args) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false', ...args], { cwd: repo, encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_DATE: `${tick} +0000`, GIT_COMMITTER_DATE: `${tick++} +0000` }, stdio: ['pipe', 'pipe', 'ignore'] }).trim();
+  const g = (...args) => fixtureGit(repo, args, { env: { ...process.env, GIT_AUTHOR_DATE: `${tick} +0000`, GIT_COMMITTER_DATE: `${tick++} +0000` } });
   const commit = (msg, file = `src/main/f${n++}.ts`) => { fs.mkdirSync(path.dirname(path.join(repo, file)), { recursive: true }); fs.writeFileSync(path.join(repo, file), `${msg} ${tick}`); g('add', file); g('commit', '-q', '-m', msg); return g('rev-parse', 'HEAD'); };
   const on = (b, from) => g('switch', '-q', '-C', b, from);
   const merge = (b, msg) => { g('merge', '-q', '--no-ff', '-m', msg, b); return g('rev-parse', 'HEAD'); };
@@ -457,6 +469,14 @@ function mirrorRepo(name) {
   g('init', '-q', '-b', 'main'); commit('base', 'f.txt');
   return { repo, g, commit, on, merge, later };
 }
+test('fixture git: a failed call says git\'s exit status and stderr, not a bare "Command failed"', () => {
+  const r = mirrorRepo('mc-say');
+  assert.throws(() => r.g('add', 'no-such-file.txt'), (e) => {
+    assert.match(e.message, /^git add no-such-file\.txt failed: status 128, signal null, /);
+    assert.match(e.message, /\.git lock files none, stderr: fatal: pathspec 'no-such-file\.txt' did not match any files$/);
+    return true;
+  });
+});
 const LATER = ['LATER-A-1', 'LATER-B-2', 'LATER-C-3'];
 const s8 = (x) => x.slice(0, 8);
 const runReal = async (G, r, cards, ml, parent) => F.doneMailFacts([ml], cards, new G.DerivedGit(r.repo), { subjectOf: (id) => (parent && id === parent.id ? parent.subject : undefined) });
