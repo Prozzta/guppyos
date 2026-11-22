@@ -243,6 +243,57 @@ const SLOW_ROOT_LIVES_MS = 3_000;
 
 test('EAGAIN, slow root: the answer is still written after the root has gone, however long the root takes', { skip: process.platform !== 'win32' }, (t) => eagainCell(t, 'ocinslow', SLOW_ROOT_LIVES_MS));
 
+/**
+ * FLAKE-PTY-OPENCONSOLE-DA1-EAGAIN-SAID-108, the contract without the console's timing: a write to a
+ * REAL terminal's input pipe that fails is said once and never thrown outside a caller. The failure is
+ * certain, not raced: this terminal's input socket is made to end every write with EAGAIN, through the
+ * stream's own error path (so the 'error' event is raised by Node, a tick after the write, as for a real
+ * failed write). Not destroy(): a destroyed socket fails writes with no 'error' event at all. The root
+ * stays alive throughout, so no exit is involved. INPUT_HANG_MS only ends a hang, as a named failure.
+ */
+const INPUT_HANG_MS = 60_000;
+
+test('a failed write on a real terminal\'s input pipe is said once, not thrown outside any caller (injected EAGAIN)', { skip: process.platform !== 'win32' }, async () => {
+  const dir = tempDir('ocinj-');
+  const { PtyManager } = loadTs('src/main/pty.ts');
+  const m = new PtyManager();
+  fs.writeFileSync(path.join(dir, 'stay.cjs'), 'setInterval(() => {}, 1000);');
+  const thrown = [];
+  const onUncaught = (e) => thrown.push(`${e && e.code} ${e && e.message}`);
+  process.on('uncaughtException', onUncaught);
+  const warn = console.warn; const said = [];
+  console.warn = (...a) => { said.push(a.join(' ')); };
+  const sink = { isDestroyed: () => false, send: () => {} };
+  let hang;
+  try {
+    const r = await m.spawn({ id: 'ocinj', cwd: dir, command: consoleNode().file, args: [path.join(dir, 'stay.cjs')], cols: 80, rows: 24, env: {} }, sink);
+    assert.ok(r.ok, `spawn: ${r.error}`);
+    const proc = m.sessions.get('ocinj').proc;
+    const input = proc._agent && proc._agent._inSocket;
+    assert.ok(input && typeof input._write === 'function', 'this node-pty has the agent\'s input socket');
+    let failed = 0;
+    const fail = (cb) => { failed += 1; cb(Object.assign(new Error('write EAGAIN'), { code: 'EAGAIN', syscall: 'write' })); };
+    input._write = (_data, _enc, cb) => fail(cb);
+    input._writev = (_chunks, cb) => fail(cb);
+    // The stream ends itself after a failed write. Its close is the event to wait on; an 'error' listener
+    // of this cell's own would hide the very thing under test.
+    const closed = new Promise((res) => input.once('close', res));
+    const hung = new Promise((_res, rej) => { hang = setTimeout(() => rej(new Error(failed ? `HANG: THE INPUT SOCKET NEVER CLOSED after ${failed} failed write(s) (${INPUT_HANG_MS} ms)` : `HANG: NO WRITE REACHED THE INPUT SOCKET (${INPUT_HANG_MS} ms)`)), INPUT_HANG_MS); });
+    assert.deepEqual(m.write('ocinj', 'x', 'PROGRAMMATIC'), { ok: true }, 'the caller\'s write returns: the failure comes later, outside it');
+    await Promise.race([closed, hung]);
+    await new Promise((r2) => setImmediate(r2));
+    assert.ok(failed >= 1, 'the write reached the input socket and was failed there');
+    assert.deepEqual(thrown, [], 'NOTHING IS THROWN OUTSIDE A CALLER: the failed write meets the input pipe\'s error listener');
+    assert.deepEqual(said.filter((l) => /a write to terminal/.test(l)), [`[pty] a write to terminal ${proc.pid} failed (EAGAIN): its console is gone or going; the input is dropped`], `THE FAILED WRITE IS SAID, ONCE: ${JSON.stringify(said)}`);
+  } finally {
+    clearTimeout(hang);
+    process.off('uncaughtException', onUncaught);
+    console.warn = warn;
+    await m.killAllAsync(5_000);
+    await removeDir(dir);
+  }
+});
+
 test('EAGAIN wait: it ends on the root\'s exit and on nothing else; a hang fails and names its step', () => {
   // A fake clock that only the nap moves: no real time passes.
   const world = (goneAtMs, pidAtMs) => {
