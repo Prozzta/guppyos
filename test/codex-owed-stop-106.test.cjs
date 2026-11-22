@@ -208,14 +208,14 @@ async function rig(t, provider) {
   const reg = hive.registry.bind(hive);
   hive.registry = () => { const r0 = reg(); const r = { ...r0, agents: { ...r0.agents } }; r.agents[A] = { ...r.agents[A], provider }; return r; };
   const control = { takeSteer: () => null, shouldHalt: () => false, toolDecision: () => ({ deny: false }) };
-  const w = { calls: [], rows: [], mailBlocks: 0, over: {} };
+  const w = { calls: [], rows: [], mailBlocks: 0, over: {}, now: () => Date.now() };
   server = new HookServer(hive, () => null, () => ({ notifications: false }), control, undefined, () => null, () => {});
   server.setMailCoordination({ lifecycleActive: () => true, wakeIds: () => [], onEpochClosed: () => {}, onMailBlock: () => { w.mailBlocks++; } });
   const owed = new S.OwedStopContinue(0);
   server.setOwedStop({
     decide: (agentId, prov, segmentTools) => {
       w.calls.push({ agentId, prov, segmentTools });
-      const d = owed.decide(agentId, prov, undefined, segmentTools, Date.now(), Object.values(hive.mail.ledger(agentId).entries), () => clear(w.over));
+      const d = owed.decide(agentId, prov, undefined, segmentTools, w.now(), Object.values(hive.mail.ledger(agentId).entries), () => clear(w.over));
       if (d.row) w.rows.push(d.row);
       return d.reason;
     }
@@ -279,11 +279,19 @@ test('P1 HookServer: a tool-free segment goes through, after a block too', async
 });
 
 test('P1 HookServer: a legitimate wait or a human guard lets the Stop through', async (t) => {
-  for (const over of [{ heavyHolder: true }, { promptBlock: 'draft' }, { lastHumanInputAt: Date.now() }]) {
+  // FLAKE-CODEX-OWED-STOP-HUMAN-STAMP-EARLY: each rig's Stop is decided SLOW_RIG_MS later on the
+  // rig's own clock (w.now), so a slow rig is here on every run, whatever the machine's load.
+  const SLOW_RIG_MS = 2_000;
+  const t0 = Date.now();
+  let at = t0;
+  for (const over of [{ heavyHolder: true }, { promptBlock: 'draft' }, { lastHumanInputAt: t0 }]) {
     const w = await rig(t, 'codex');
     w.over = over;
     await turnWithRequest(w);
     w.tool();
+    at = Math.max(at, Date.now()) + SLOW_RIG_MS;
+    const stopAt = at;
+    w.now = () => stopAt;
     assert.notEqual(w.fire('Stop')?.decision, 'block', JSON.stringify(over));
   }
 });
