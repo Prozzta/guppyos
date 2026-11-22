@@ -75,10 +75,16 @@ async function until(cond, ms, what) {
   while (!cond()) { if (Date.now() > end) throw new Error(`timed out waiting for ${what}`); await sleep(50); }
 }
 /** Kill a start()ed child and its tree: on win32 only what own-procs proves is ours (no taskkill /T). */
-function killTree({ child, bornMs }, { rootFirst = false } = {}) {
+function killTree({ child, bornMs }, { rootFirst = false, table } = {}) {
   // rootFirst: the root before its children (killVerified hands them deepest first). For a lease
   // holder, so it is gone before its file child dies and cannot exit on its own and release.
-  if (process.platform === 'win32') own.killOwnTree({ pid: child.pid, bornMs }, rootFirst ? { kill: (rows) => own.stopIfSame(rows.slice().reverse()) } : {});
+  // table: a process listing to reuse (MUSTC-RECORDER-CELL-COST-108: each listing is a PowerShell
+  // start, seconds on a loaded box); unset, killOwnTree takes its own. Each kill still re-checks
+  // its targets with a fresh lookup and again in the PowerShell that stops them.
+  if (process.platform === 'win32') {
+    const opts = rootFirst ? { kill: (rows) => own.stopIfSame(rows.slice().reverse()) } : {};
+    own.killOwnTree({ pid: child.pid, bornMs }, table ? { ...opts, table } : opts);
+  }
   else try { process.kill(-child.pid, 'SIGKILL'); } catch { try { process.kill(child.pid, 'SIGKILL'); } catch { /* gone */ } }
 }
 
@@ -148,13 +154,18 @@ async function mustC(t, { M = HJ, preload = PRELOAD, probe = 'recorder' } = {}) 
   step('b queued');
   assert.equal(b.lock.acquire('c', H, 'npm test', 'hc', false).allow, false);
   step('c denied');
-  killTree(wb);
+  // ONE process listing for both kills (MUSTC-RECORDER-CELL-COST-108, Jim 6c9a93): the two trees
+  // are disjoint, and taken here both are listed while both still run, as each was before.
+  const rows = own.processTable();
+  const listing = () => rows;
+  step('process listing (shared by both kills)');
+  killTree(wb, { table: listing });
   step('killTree(b wrapper)');
   // INT102-TEST-FOLLOWUPS (Jim, INT-1.1.102 MUST C): the lease holder (the node --test runner)
   // dies BEFORE its file child. Killed after, it could see the child die and exit on its own, and
   // its preload's release would log lease-end, not lease-gone.
   assert.equal(run.child.exitCode, null, 'the lease holder is still running when it is killed (a crash, not an exit)');
-  killTree(run, { rootFirst: true });
+  killTree(run, { rootFirst: true, table: listing });
   step('killTree(a lease holder, rootFirst)');
   await wb.done;
   step('b wrapper closed');
