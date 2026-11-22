@@ -26,6 +26,7 @@
  * their normal affinity. The app itself never runs in a heavy job.
  */
 import { spawn } from 'node:child_process';
+import { hookClientTimeoutMs, mailLatencyLimitFor } from './mailSurface';
 import { autoModeFlagForProvider, type AgentProvider } from '../shared/agentProvider';
 
 /** JobObjectCpuRateControlInformation uses one-hundredths of one percent. */
@@ -41,6 +42,12 @@ export const HEAVY_JOB_UNSTARTED_MS = 30 * 60_000;
 export const HEAVY_JOB_POLL_MS = 15_000;
 /** One request to the helper: past this it is treated as failed. */
 export const HEAVY_JOB_REQUEST_MS = 3_000;
+/** HEAVY-JOB-CREATE-TIMEOUT-UNHELD-108: a new helper (the .NET start, cold on a loaded machine) may
+ *  take this long to give its first answer. Until it has answered once, a request on it waits until
+ *  this long after it was spawned, and never less than HEAVY_JOB_REQUEST_MS. */
+export const HEAVY_JOB_START_MS = 12_000;
+/** A begin whose hook client has this much of its wait left, or less, sends no create. */
+export const HEAVY_JOB_DEADLINE_FLOOR_MS = 0;
 /** HEAVY-LOCK-RELEASE-LAG-197: after the helper's last exit notice for a job, this long passes before
  *  the one check that may call the job over (a shell that outlives its call starts its next process
  *  right after the join line exits; a new process inside this window keeps the job running). */
@@ -105,7 +112,8 @@ export interface HeavyJobRow { pid: number; name: string; priorityClass: number;
 
 /** One line-oriented channel to `guppy-heavyjob serve` (injectable for tests). */
 export interface HeavyJobChannel {
-  request(line: string): Promise<Record<string, unknown> | null>;
+  /** `ms`: how long to wait for the answer (default HEAVY_JOB_REQUEST_MS). */
+  request(line: string, ms?: number): Promise<Record<string, unknown> | null>;
   close(): void;
   /** HEAVY-LOCK-RELEASE-LAG-197: the helper's unsolicited lines ({"event": ...}), never a reply. */
   onEvent?(fn: (e: Record<string, unknown>) => void): void;
@@ -120,8 +128,8 @@ export interface HeavyJobChannel {
 export const HEAVY_JOB_UNANSWERED_DEAD = 3;
 
 /** The real channel: the helper's serve mode on stdin/stdout. Requests are answered in order. */
-export function serveChannel(exe: string): HeavyJobChannel {
-  const child = spawn(exe, ['serve'], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
+export function serveChannel(exe: string, spawnFn: typeof spawn = spawn): HeavyJobChannel {
+  const child = spawnFn(exe, ['serve'], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
   const queue: Array<(r: Record<string, unknown> | null) => void> = [];
   let onEvent: ((e: Record<string, unknown>) => void) | null = null;
   let buf = '';
@@ -145,11 +153,11 @@ export function serveChannel(exe: string): HeavyJobChannel {
     }
   });
   return {
-    request(line: string) {
+    request(line: string, ms: number = HEAVY_JOB_REQUEST_MS) {
       if (dead) return Promise.resolve(null);
       return new Promise((resolve) => {
         let settled = false;
-        const t = setTimeout(() => { if (!settled) { settled = true; resolve(null); } }, HEAVY_JOB_REQUEST_MS);
+        const t = setTimeout(() => { if (!settled) { settled = true; resolve(null); } }, ms);
         t.unref?.();
         queue.push((r) => { if (!settled) { settled = true; clearTimeout(t); resolve(r); } });
         try { child.stdin.write(line + '\n'); } catch { fail(); }
@@ -206,6 +214,15 @@ export class HeavyJobs {
    *  the poll timer is not armed, whatever is still in flight or arrives late. */
   private disposed = false;
   private readonly now: () => number;
+  /** HEAVY-JOB-CREATE-TIMEOUT-UNHELD-108: when the current helper was spawned; whether it has given a
+   *  parsed answer yet (an event line or a garbage line is none); whether warm() started it; whether
+   *  its one helper-start row is logged. Each new helper starts them again. */
+  private chSpawnAt = 0;
+  private answered = false;
+  private chWarm = false;
+  private chLogged = false;
+  /** warm() runs once. */
+  private warmed = false;
 
   constructor(private readonly d: HeavyJobsDeps) {
     this.now = d.now ?? Date.now;
@@ -219,23 +236,53 @@ export class HeavyJobs {
     const exe = this.d.exe();
     if (!exe) return null;
     this.ch = (this.d.channel ?? serveChannel)(exe);
+    this.chSpawnAt = this.now();
+    this.answered = false;
+    this.chWarm = false;
+    this.chLogged = false;
     this.ch.onEvent?.((e) => this.onEvent(e));
     return this.ch;
   }
 
   private async req(line: string): Promise<Record<string, unknown> | null> {
+    return (await this.send(line, null)).r;
+  }
+
+  /** HEAVY-JOB-CREATE-TIMEOUT-UNHELD-108: the wait for an answer on the current helper. Until its first
+   *  answer it is the start budget, counted from its spawn (a request queued behind a slow start gets
+   *  only what is left of it), and never less than HEAVY_JOB_REQUEST_MS. */
+  private budget(): number {
+    if (this.answered) return HEAVY_JOB_REQUEST_MS;
+    return Math.max(this.chSpawnAt + HEAVY_JOB_START_MS - this.now(), HEAVY_JOB_REQUEST_MS);
+  }
+
+  /** One request. `deadline` (epoch ms, or null): the hook client stops waiting then, so the request
+   *  waits no longer. `cut`: no answer because of that deadline: the helper missed nothing, so it
+   *  counts toward no replace. `cold`: sent before the helper's first answer. */
+  private async send(line: string, deadline: number | null): Promise<{ r: Record<string, unknown> | null; cut: boolean; cold: boolean; ms: number }> {
     const ch = this.channel();
-    if (!ch) return null;
-    const r = await ch.request(line);
-    if (this.ch !== ch) return r;   // replaced meanwhile: its jobs are already let go
-    if (r !== null) { this.unanswered = 0; return r; }
+    if (!ch) return { r: null, cut: false, cold: false, ms: 0 };
+    const cold = !this.answered;
+    const full = this.budget();
+    const wait = deadline === null ? full : Math.max(0, Math.min(full, deadline - this.now()));
+    const t0 = this.now();
+    const r = await ch.request(line, wait);
+    const ms = this.now() - t0;
+    if (this.ch !== ch) return { r, cut: false, cold, ms };   // replaced meanwhile: its jobs are already let go
+    const gone = ch.dead?.() === true;
+    const cut = r === null && !gone && wait < full;
+    if (!this.chLogged && !cut) {
+      this.chLogged = true;
+      this.log({ action: 'helper-start', ok: r !== null, ms: this.now() - this.chSpawnAt, warm: this.chWarm });
+    }
+    if (r !== null) { this.unanswered = 0; this.answered = true; return { r, cut, cold, ms }; }
+    if (cut) return { r, cut, cold, ms };
     // HEAVYCPU-SERVE-REQ-TIMEOUT-DROPS-ALL-JOBS-108: no answer in time is not a dead helper. Closing
     // the channel ends the helper and with it the handle of EVERY job it holds, so the helper is
     // replaced only when it is gone, or wedged (HEAVY_JOB_UNANSWERED_DEAD in a row with no answer).
-    const gone = ch.dead?.() === true;
-    if (!gone && ++this.unanswered < HEAVY_JOB_UNANSWERED_DEAD) return null;
+    if (!gone && ++this.unanswered < HEAVY_JOB_UNANSWERED_DEAD) return { r, cut, cold, ms };
     this.replace(ch, gone ? 'helper-dead' : 'helper-unanswered');
-    return null;
+    return { r, cut, cold, ms };
   }
 
   /** The helper is closed and started again on the next request. Its job handles went with it and a
@@ -272,8 +319,10 @@ export class HeavyJobs {
   /** A heavy call is about to run: its job is created with the limits in force now, and the tool
    *  input to run instead is returned (null: leave the call as it is). `cmd`: the call is known to
    *  run in Windows cmd. */
-  async begin(agentId: string, toolInput: unknown, cmd = false, callId: string | null = null): Promise<Record<string, unknown> | null> {
+  async begin(agentId: string, toolInput: unknown, cmd = false, callId: string | null = null, transport?: string, arrivedMs: number | null = null): Promise<Record<string, unknown> | null> {
     if (this.d.platform !== 'win32' || !this.d.exe()) return null;
+    // HEAVY-JOB-CREATE-TIMEOUT-UNHELD-108: a one-way hook gets no reply, so nothing it is told can wrap it.
+    if (transport === 'pipe-oneway') return null;
     const o = this.d.options();
     const start = this.now();
     const id = heavyJobId(agentId, ++this.seq, start);
@@ -282,8 +331,19 @@ export class HeavyJobs {
     // 5000 means 50% of all logical processors. Under the legacy heavyJobsHalfCores affinity job
     // that equals the affinity ceiling, so the rate cap adds nothing there; with half-cores off it
     // bites against the full set. Keep the shipped half-machine rate unchanged.
+    // HEAVY-JOB-CREATE-TIMEOUT-UNHELD-108: the hook client waits for its reply only so long (its own
+    // timeout, less the same margin as the mail latency limit), from when the hook arrived. A create
+    // answered after that is of no use: the call runs unwrapped, so it waits no longer. None left:
+    // nothing is sent.
+    const deadline = (arrivedMs ?? start) + mailLatencyLimitFor(hookClientTimeoutMs(transport));
+    if (deadline - this.now() <= HEAVY_JOB_DEADLINE_FLOOR_MS) {
+      this.log({ action: 'start-timeout', agentId, job: id, cause: 'deadline', ms: 0, transport: transport ?? null, early: true });
+      return null;
+    }
     const ch = this.channel();
-    const r = await this.req(`create ${id} ${o.background ? 1 : 0} ${o.cap ? 1 : 0}`);
+    const s = await this.send(`create ${id} ${o.background ? 1 : 0} ${o.cap ? 1 : 0}`, deadline);
+    const r = s.r;
+    if (r === null && (s.cut || s.cold)) this.log({ action: 'start-timeout', agentId, job: id, cause: s.cut ? 'deadline' : 'start', ms: s.ms, transport: transport ?? null });
     // Not created: the join line still makes the job with these limits itself (the options hold);
     // only a later live change cannot reach it.
     const held = r?.ok === true && ch !== null && this.ch === ch;   // not held when its helper was replaced meanwhile
@@ -297,6 +357,19 @@ export class HeavyJobs {
     }
     this.log({ action: 'wrap', agentId, job: id, background: o.background, cap: o.cap, rate: o.cap ? HEAVY_CPU_CAP_RATE : 0, held });
     return wrapped;
+  }
+
+  /** HEAVY-JOB-CREATE-TIMEOUT-UNHELD-108: start the helper before the first heavy call needs it, so its
+   *  cold start is not paid inside a hook's wait. Once, fire-and-forget (never awaited): it sends a
+   *  close of a job no one made, whose answer only proves the helper is up. A miss counts like any
+   *  other unanswered request. Nothing on another platform, without the helper, after dispose(), or
+   *  when a helper is already running. */
+  warm(): void {
+    if (this.d.platform !== 'win32' || this.disposed || this.warmed || this.ch !== null || !this.d.exe()) return;
+    this.warmed = true;
+    if (!this.channel()) return;
+    this.chWarm = true;
+    void this.send('close guppy-warm', null).then(() => undefined, () => undefined);
   }
 
   /** Settings changed: every running job gets the options now in force. */

@@ -588,15 +588,16 @@ function mutatedText(file, edits, tag) {
   return text;
 }
 
-const KEEP_ON_NULL = '    if (!gone && ++this.unanswered < HEAVY_JOB_UNANSWERED_DEAD) return null;\n';
+// HEAVY-JOB-CREATE-TIMEOUT-UNHELD-108: req() is send(line, null).r; the same lines now return send's result.
+const KEEP_ON_NULL = '    if (!gone && ++this.unanswered < HEAVY_JOB_UNANSWERED_DEAD) return { r, cut, cold, ms };\n';
 const LOST_ROW = "    this.log({ action: 'lost', job: j.id, agentId: j.agentId, why });\n";
 const CHANNEL_GUARD = '    if (this.disposed) return null;\n';
 const MUTANTS = [
   // The defect itself, put back: one unanswered request closes the helper.
   { name: 'one unanswered request closes the helper (the job that ends)', edits: [[KEEP_ON_NULL, '']], killer: 'endsAfterUnanswered', dies: /A JOB THAT ENDED IS REPORTED EVEN AFTER ONE REQUEST WENT UNANSWERED/ },
   { name: 'one unanswered request closes the helper (the other jobs)', edits: [[KEEP_ON_NULL, '']], killer: 'othersKept', dies: /ANOTHER JOB'S EXIT IS REPORTED AFTER A REQUEST ABOUT A DIFFERENT JOB WENT UNANSWERED/ },
-  { name: 'K is never reached: a wedged helper is kept for good', edits: [['++this.unanswered < HEAVY_JOB_UNANSWERED_DEAD) return null;', '++this.unanswered < Infinity) return null;']], killer: 'wedged', dies: /A HELPER THAT LEAVES K REQUESTS IN A ROW UNANSWERED IS REPLACED/ },
-  { name: 'an answer does not start the count again', edits: [['    if (r !== null) { this.unanswered = 0; return r; }', '    if (r !== null) return r;']], killer: 'wedged', dies: /ANY ANSWER STARTS THE COUNT AGAIN/ },
+  { name: 'K is never reached: a wedged helper is kept for good', edits: [['++this.unanswered < HEAVY_JOB_UNANSWERED_DEAD) return { r, cut, cold, ms };', '++this.unanswered < Infinity) return { r, cut, cold, ms };']], killer: 'wedged', dies: /A HELPER THAT LEAVES K REQUESTS IN A ROW UNANSWERED IS REPLACED/ },
+  { name: 'an answer does not start the count again', edits: [['    if (r !== null) { this.unanswered = 0; this.answered = true; return { r, cut, cold, ms }; }', '    if (r !== null) { this.answered = true; return { r, cut, cold, ms }; }']], killer: 'wedged', dies: /ANY ANSWER STARTS THE COUNT AGAIN/ },
   { name: 'a dead helper is counted like a slow one', edits: [['    const gone = ch.dead?.() === true;', '    const gone = false;']], killer: 'deadHelper', dies: /A DEAD HELPER IS REPLACED AT ONCE/ },
   { name: 'the jobs of a replaced helper stay tracked', edits: [['    for (const j of [...this.jobs.values()]) if (j.ch === ch) this.lose(j, why);\n', '']], killer: 'deadHelper', dies: /THE JOBS OF A DEAD HELPER ARE LET GO/ },
   { name: 'a lost job is told as exited', edits: [[LOST_ROW, LOST_ROW + "    if (j.callId) this.tell(j.agentId, j.callId, j.id, 'exited');\n"]], killer: 'deadHelper', dies: /A JOB LOST WITH ITS HELPER IS NOT TOLD AS EXITED/ },
