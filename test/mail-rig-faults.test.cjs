@@ -276,9 +276,14 @@ test('F6 INTERFERED, then ALREADY_HANDLED / SEND_AGAIN: the ledger follows the t
 // over a staged wake holds it INTERFERED like a person's; god then reads, clears and sends through
 // `term` (origin GOD, no screen gate, no admission); the turn god started acts the mail; the held
 // look sees only god's keys since the hold, releases the claim, and nothing is typed twice.
-test('G1 god unsticks a held wake through term: INTERFERED by god, god clears and sends, the mail is acted once, the held look releases', T, async (t) => {
+// MAIL-RIG-G1-NO-ECHO-108: each held look is taken only once the rig screen COVERS god's keys
+// (Rig.screenCovers: the stub read them and the host received that echo). The interference verdict
+// is host counters alone, so before this the first look ran 1.7 s after god's key whether or not
+// the stub had echoed anything: under load it read the composer of before the keys (empty) and
+// RELEASED. The second cell holds the stub's first echoes past that 1.7 s on purpose.
+const g1 = (scenario) => async (t) => {
   const rig = await startRig(t);
-  await rig.setup([{ id: 'cl-a', flavour: 'claude', scenario: {} }]);
+  await rig.setup([{ id: 'cl-a', flavour: 'claude', scenario }]);
   await rig.call('armInterfere', { id: 'cl-a', by: 'GOD' });
   const m = await rig.call('send', { to: 'cl-a', subject: 'g1', body: 'stuck behind god' });
   await rig.beat();
@@ -288,6 +293,7 @@ test('G1 god unsticks a held wake through term: INTERFERED by god, god clears an
   assert.ok(await rig.call('inhibition', { id: 'cl-a' }), 'the PTY is held');
   assert.equal(rig.prompts('cl-a').length, 0, 'no Enter on god\'s text');
   await sleep(1_700);   // HUMAN_QUIET_MS after god's key
+  await rig.screenCovers('cl-a', (d) => d.includes(' and god'), "god's typed text");
   const look0 = await rig.call('recheckHeld', { id: 'cl-a' });
   // MAIL-RIG-G1-STALE-MIRROR-108 (b): the reading this look trusted. echoSeen is the newest echo the
   // host received; the stub's composer-write-* rows show whether composer.json was behind it (a write
@@ -308,6 +314,7 @@ test('G1 god unsticks a held wake through term: INTERFERED by god, god clears an
   await waitFor(() => acted(rig, 'cl-a', m.id), { what: "god's turn acts the mail" });
 
   await sleep(1_700);   // HUMAN_QUIET_MS after god's last key
+  await rig.screenCovers('cl-a', (d) => d === '' && rig.prompts('cl-a').length === 1, "god's cleared and sent line");
   const look = await rig.call('recheckHeld', { id: 'cl-a' });
   assert.ok(['RELEASED', 'SUBMITTED'].includes(look.kind), `only god's keys since the hold: the look releases it (got ${JSON.stringify(look)}; ${await screenWhy()})`);
   assert.equal(await rig.call('inhibition', { id: 'cl-a' }), null, 'the hold is gone');
@@ -319,7 +326,9 @@ test('G1 god unsticks a held wake through term: INTERFERED by god, god clears an
   assert.equal(forged.status, 403, 'a non-god caller is refused');
   const rows = (await rig.rows('term')).filter((r) => r.by === 'god-rig');
   assert.deepEqual(rows.map((r) => r.action), ['type', 'read', 'keys', 'send'], 'every god action is logged');
-});
+};
+test('G1 god unsticks a held wake through term: INTERFERED by god, god clears and sends, the mail is acted once, the held look releases', T, g1({}));
+test("G1 echo held: the stub's first two input chunks are processed 2.5 s late (past the quiet time); the held look still waits for god's draft on the screen", T, g1({ echoLagMs: 2_500, echoLagChunks: 2 }));
 
 // ——————————————————————————————————————————————————————————————————————————— F7
 
